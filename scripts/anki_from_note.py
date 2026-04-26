@@ -32,6 +32,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -50,9 +51,9 @@ DEFAULT_VAULT_ROOT = Path(r"C:\obsidian")
 DEFAULT_ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 
 DEFAULT_DECK = "Obsidian::未分类"
-DEFAULT_BASIC_MODEL = "Basic"
-DEFAULT_REVERSE_MODEL = "Basic (and reversed card)"
-DEFAULT_CLOZE_MODEL = "Cloze"
+DEFAULT_BASIC_MODEL = "Obsidian-basic"
+DEFAULT_REVERSE_MODEL = "Obsidian-basic-reversed"
+DEFAULT_CLOZE_MODEL = "Obsidian-cloze"
 VALID_CARD_TYPES = {"basic", "cloze", "reverse", "problem"}
 
 EXPECTED_JSON = {
@@ -261,9 +262,16 @@ def anki_request(anki_url: str, action: str, params: dict[str, Any] | None = Non
     return result.get("result")
 
 
+def open_anki() -> None:
+    try:
+        subprocess.Popen("start Anki", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
 def wait_for_anki(anki_url: str, wait_seconds: int) -> int:
     deadline = time.time() + wait_seconds
-    printed = False
+    anki_launched = False
     while True:
         try:
             version = anki_request(anki_url, "version", timeout=5)
@@ -275,22 +283,30 @@ def wait_for_anki(anki_url: str, wait_seconds: int) -> int:
                     f"未检测到 AnkiConnect：{e}\n"
                     "请打开 Anki，并确认 AnkiConnect 插件已启用。"
                 ) from e
-            if not printed:
-                print("等待 AnkiConnect 可用，请确认 Anki 已打开...")
-                printed = True
-            time.sleep(2)
+            if not anki_launched:
+                print("AnkiConnect 未响应，尝试启动 Anki...")
+                open_anki()
+                anki_launched = True
+            else:
+                print("等待 AnkiConnect 上线...")
+            time.sleep(3)
 
 
 # ── 卡片 JSON 处理 ───────────────────────────────────────────────────────────
 
+def normalize_json_quotes(text: str) -> str:
+    """把中文弯引号替换为 JSON 兼容的直引号。"""
+    return text.replace("“", '"').replace("”", '"')
+
+
 def load_cards_payload(args: argparse.Namespace) -> dict[str, Any]:
     if args.cards_json:
         path = Path(args.cards_json).expanduser()
-        return json.loads(read_text(path))
+        return json.loads(normalize_json_quotes(read_text(path)))
     if args.cards:
-        return json.loads(args.cards)
+        return json.loads(normalize_json_quotes(args.cards))
     if args.cards_stdin:
-        return json.loads(sys.stdin.read())
+        return json.loads(normalize_json_quotes(sys.stdin.read()))
     if args.no_cards_reason:
         return {"should_create_cards": False, "reason": args.no_cards_reason, "cards": []}
     raise ValueError("同步时需要 --cards-json、--cards、--cards-stdin 或 --no-cards-reason")
@@ -393,7 +409,7 @@ def build_anki_note(
         extra = html_text(card["back"])
         fields = {
             "Text": html_text(card["text"]),
-            "Back Extra": (extra + footer) if extra else footer,
+            "Extra": (extra + footer) if extra else footer,
         }
     else:
         model_name = args.reverse_model if card_type == "reverse" else args.basic_model
