@@ -5,7 +5,7 @@
 提取每个区域的文本内容，并将其插入到对应链接的正下方。
 
 标注格式为 HTML 注释（<!-- 原文 ... -->），阅读模式不显示，源码模式可见。
-已提取的链接会被跳过（检测到紧跟的 <!-- 或 > [!quote] 块时）。
+已提取的链接会被跳过（检测到后方紧邻的 <!-- 或 > [!quote] 块时，可隔空行）。
 
 用法：
   python annotate_note.py --note <笔记路径>
@@ -52,6 +52,13 @@ def build_callout(text):
     return f"<!-- 原文\n{text}\n-->"
 
 
+def next_nonblank_line(lines, start):
+    for i in range(start, len(lines)):
+        if lines[i].strip():
+            return lines[i]
+    return ""
+
+
 def process_note(note_path, dry_run=False):
     with open(note_path, encoding="utf-8") as f:
         lines = f.readlines()
@@ -65,8 +72,8 @@ def process_note(note_path, dry_run=False):
         match = PDF_LINK_RE.search(line)
 
         if match:
-            # 检查下一行是否已经是 callout（避免重复插入）
-            next_line = lines[i + 1] if i + 1 < len(lines) else ""
+            # 检查后方是否已经是 callout（允许中间有空行，避免重复插入）
+            next_line = next_nonblank_line(lines, i + 1)
             if ALREADY_ANNOTATED_RE.match(next_line):
                 new_lines.append(line)
                 i += 1
@@ -83,9 +90,8 @@ def process_note(note_path, dry_run=False):
                 print(f"OK（{len(text)} 字符）")
                 callout = build_callout(text)
                 new_lines.append(line)
-                # 链接后没有空行时补一个空行
-                if not line.rstrip().endswith("\n") or line.strip():
-                    new_lines.append(callout + "\n")
+                new_lines.append("\n")
+                new_lines.append(callout + "\n\n")
                 changed += 1
         else:
             new_lines.append(line)
@@ -119,7 +125,7 @@ def migrate_callouts(note_path, dry_run=False):
         stripped = []
         for line in lines[1:]:
             stripped.append(re.sub(r'^>\s?', '', line))
-        return "<!-- 原文\n" + "\n".join(stripped) + "\n-->\n"
+        return "\n<!-- 原文\n" + "\n".join(stripped) + "\n-->\n\n"
 
     # 匹配 > [!quote] 原文 开头、到下一个非 > 行（或文件末尾）之间的块
     new_content, count = re.subn(

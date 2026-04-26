@@ -26,6 +26,11 @@
 - [[文件名]] — 关联原因（不超过20字）
 ```
 
+写入时使用：
+```powershell
+python scripts/connect_note.py --note <笔记路径> --link "文件名|关联原因"
+```
+
 ## 注意事项
 - 文件名**不需要**写 `.md` 扩展名
 - 路径中有空格不需要转义，Obsidian 自动解析
