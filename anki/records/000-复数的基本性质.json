@@ -1,0 +1,76 @@
+{
+  "source_note": "000-复数的基本性质.md",
+  "source_link": "[[000-复数的基本性质]]",
+  "source_url": "obsidian://open?vault=obsidian&file=000-%E5%A4%8D%E6%95%B0%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%80%A7%E8%B4%A8",
+  "generated_at": "2026-04-26T23:57:53+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "复数定义和运算规则是标量域的基础，乘法定义和除法的几何意义需要主动回忆。",
+  "warnings": [],
+  "cards": [
+    {
+      "local_id": "20260426235753-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "复数的正式定义是什么？",
+      "back": "一个复数是有序对 (a, b)，其中 a, b ∈ ℝ，记作 a + bi。全体复数构成集合 ℂ。",
+      "text": "",
+      "reason": "核心定义，复数作为有序对的本质常被忽略",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1777215473166,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260426235753-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "复数乘法 (a+bi)(c+di) 的结果是什么？",
+      "back": "(ac - bd) + (ad + bc)i",
+      "text": "",
+      "reason": "核心运算，定义本身暗含 i² = -1",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1777215473231,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260426235753-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "复数 z = a+bi 的加法逆元是什么？",
+      "back": "-z = -a - bi，满足 z + (-z) = 0。",
+      "text": "",
+      "reason": "运算基础，与向量空间加法逆元公理对应",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1777215473296,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260426235753-004",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "复数除法的几何意义是什么？",
+      "back": "将被除数做除数旋转的逆旋转（消除角度），再抵消除数的伸缩（除以模），得到商。",
+      "text": "",
+      "reason": "笔记给出了直观解释，适合主动回忆以加深理解",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1777215473356,
+      "status": "synced"
+    }
+  ]
+}

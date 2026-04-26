@@ -15,7 +15,6 @@
 | `/connect` | 在知识索引中查找关联笔记，在原文末尾插入 Obsidian 链接 |
 | `/pdf-mark` | 提取 PDF 指定页面和像素区域的内容（文字层或 OCR） |
 | `/anki` | 对指定笔记或目录生成 Anki 卡片：agent 判断制卡，脚本同步到 Anki |
-| `/perf` | 游戏性能分析：启动 Afterburner → 采集 → 相关性分析 → 低帧诊断 |
 
 ## 关键文件
 - `index/knowledge-index.md` — 分层知识索引主文件（各科目条目数汇总）
