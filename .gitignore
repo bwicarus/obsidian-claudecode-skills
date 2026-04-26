@@ -1,0 +1,7 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude Code 本地配置（机器特定，不提交）
+.claude/settings.local.json
