@@ -36,6 +36,7 @@
 - `references/index-format.md` / `vault-structure.md` / `obsidian-syntax.md`
 - `references/anki-selection-rules.md` / `anki-card-format.md`
 - `references/pdf-annotation-format.md`
+- `references/ipad-remote-qa.md` — iPad 远程截图问答操作指南（链路、快捷指令、URL 模板、排错）
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
 
 **脚本**
@@ -78,8 +79,8 @@
 | `auth.py` | device-link OAuth：浏览器登录 → loopback callback → token 自动配置 |
 | `api_client.py` | 服务端 HTTP（`/api/upload/<dataset>` 等），bearer token |
 | `uploader.py` | `upload_dataset(client, dir, "dashboard"|"history")`，白名单 JSON+图片，**不传 HTML/JS/CSS** |
-| `cmd_server_thread.py` | 9090 端口 HTTP server（取代旧 cmd_server.exe），iPad 快捷指令 POST `/run/newnote` 触发 register |
-| `qa_browser.py` | 整合自 `launchers/截图问答.py`，浏览器跑本地 QA |
+| `cmd_server_thread.py` | 9090 端口 HTTP server。路由：`/list`、`/run/<cmd>`（iPad 触发 register/upload）、`/qa`（iPad 截图注入，转发到 qa_browser daemon `/api/inject-image`）|
+| `qa_browser.py` | 截图问答。两种入口：(a) 本机 ctrl+shift+q `launch()` 临时启动；(b) `start_server_daemon()` 常驻 0.0.0.0:9091 让 iPad 通过 Tailscale 直连完整对话页（cfg `qa_remote_daemon` 控制）|
 | `runner.py` | `run_script(path, ..., python_exe)` subprocess 跑主项目脚本，所有 subprocess 自动 CREATE_NO_WINDOW |
 | `paths.py` | 数据目录抽象：`app_dir()` 读 `BWICARUS_APP_DIR` / pointer / 默认；`derive_paths(project_root)` 从主项目根派生所有子路径 |
 | `watcher.py` | watchdog 监听 vault，防抖+冷却后触发 register |
@@ -99,7 +100,7 @@
 | Anki | exe_path / connect_url / ping / 启动 Anki |
 | 笔记登记 | vault_path / 立即运行登记 / 刷新并上传网页 / 登记后自动上传开关 / 每日定时 / vault watcher |
 | 任务监视 | 悬浮窗位置 / 鼠标穿透 / 远程触发（cmd_server 端口+密钥） |
-| 截图问答 | 习题/错题子目录 / 浏览器路径 / 快捷键 |
+| 截图问答 | 习题/错题子目录 / 浏览器路径 / 快捷键 / 远程访问 + 子开关「iPad 远程截图问答」(常驻 daemon :9091) |
 | 高级 | 主项目根目录 + 7 个派生路径（默认从根派生，可单独覆盖）|
 
 **与主项目 scripts 的关系**
@@ -122,9 +123,42 @@
 | `/dashboard/` / `/history/` / `/private/` | 用户的私有目录，缺失文件回落到 `dashboard_template/` / `history_template/` |
 | `/api/upload/<dataset>` | 客户端 POST 上传（bearer token），admin 用户上传的 HTML/CSS/JS 自动同步到 template |
 | `/auth/device-link` | 客户端登录回调：登录后跳到 loopback `http://127.0.0.1:PORT/auth-cb?token=...` |
-| `/qa/` / `/qa/update` | 旧 relay endpoint，截图问答历史展示 |
+| ~~`/qa/` / `/qa/update`~~ | 已废弃。nginx `/qa` 反代 2026-05-11 删，路由保留但外部不可达。iPad 截图问答改走客户端本机 daemon（见下节）|
 
 数据：`/root/webapp/data/users/<username>/{dashboard,history,private}/` + `/root/webapp/data/{dashboard_template,history_template}/`
+
+## iPad 远程截图问答
+
+iPad 通过 Tailscale 直接访问本机 qa_browser daemon —— **跟本地按 `ctrl+shift+q` 看到的页面 100% 一致**（同一份 HTML、同一组 API、同一个进程内的 state / SQLite / vault 访问）。**不经过 bwicarus.space 公网服务端**。
+
+**架构**：
+
+```
+iPad 拍照 → POST cmd_server :9090/qa?key=<API_KEY>  body 含 base64 截图
+              ↓
+           cmd_server 转发到 daemon /api/inject-image
+              ↓
+           qa_browser daemon (0.0.0.0:9091) 解码（含 HEIC→PNG）→ 写文件 → 注入 state → session.reset()
+
+iPad 浏览器 → http://<Tailscale-IP>:9091   完整 qa_browser HTML + 所有 /api/*
+              （拿到截图、输入问题、Markdown + MathJax 渲染、保存到 vault、历史侧栏、AI 后端切换等全部功能）
+```
+
+**开关**（GUI 截图问答 Tab）：
+
+```
+远程访问 [✓] 允许局域网其他设备访问对话窗（监听 0.0.0.0）
+            [✓] └─ iPad 远程截图问答（常驻 daemon :9091，cmd_server :9090 /qa 注入截图）
+```
+
+cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关关 → 子开关自动 disable。
+
+**iPad 端配置**：见 `references/ipad-remote-qa.md`。要点：
+- 拍照前快捷指令加「转换图像 → JPEG」（HEIC 也行，daemon 自动转 PNG，但 JPEG 体积更小）
+- API key 在 `%LOCALAPPDATA%\bwicarus-client\cmd_server_key.txt`
+- 浏览器 URL：`http://<Tailscale-IP>:9091`（直连 daemon，不经 cmd_server）
+
+**state 共享隐患**：本机按 `ctrl+shift+q` 启的临时 server 跟 daemon **共用** 模块级 `state` 字典。同时操作会串扰（截图覆盖、session 混合）。单人多端通常不撞，遇到问题先各自结束当前会话再开新的。
 
 ## 电源 / 屏幕守护
 
