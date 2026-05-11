@@ -19,8 +19,16 @@
 - `color` — 高亮颜色（不影响提取）
 
 **方式二：批量处理整篇笔记**
-提供笔记路径，脚本扫描所有 PDF 链接，在每个链接下方插入 `> [!quote] 原文` 块。
-已处理过的链接（下方已有 callout）会自动跳过。
+提供笔记路径，脚本扫描所有 PDF 链接，在每个链接下方插入 HTML 注释块：
+```
+![[file.pdf#page=N&rect=...]]
+
+<!-- 原文
+提取的文字内容
+-->
+
+```
+已处理过的链接（下方已有 `<!-- 原文` 块）自动跳过。
 
 ## 执行步骤
 
@@ -31,8 +39,8 @@
 ### 批量模式
 1. 先用 `--dry-run` 预览，确认后再写入：
    ```
-   python C:\obsidian\claude\scripts\annotate_note.py --note "<笔记路径>" --dry-run
-   python C:\obsidian\claude\scripts\annotate_note.py --note "<笔记路径>"
+   C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe C:\claude\scripts\annotate_note.py --note "<笔记路径>" --dry-run
+   C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe C:\claude\scripts\annotate_note.py --note "<笔记路径>"
    ```
 2. 脚本输出每个链接的提取状态和字符数
 3. 写入后告知用户处理了几个链接

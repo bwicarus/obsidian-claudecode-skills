@@ -1,0 +1,808 @@
+{
+  "generated_at": "2026-05-11T18:22:25+09:00",
+  "notes": [
+    {
+      "name": "010-导数的定义",
+      "subject": "数学",
+      "keywords": [
+        "dt趋近于零",
+        "导数",
+        "最佳近似",
+        "牛顿多项式展开",
+        "瞬时变化率",
+        "高阶无穷小"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E5%AF%BC%E6%95%B0%E7%9A%84%E5%AE%9A%E4%B9%89",
+      "anki_total": 4,
+      "anki_new": 4,
+      "anki_learning": 0,
+      "anki_review": 0,
+      "anki_relearning": 0,
+      "retention": 0.0,
+      "priority": 0.3936,
+      "activation": 0.6274,
+      "importance": 0.6274,
+      "weakness": 1.0
+    },
+    {
+      "name": "010-泰勒级数",
+      "subject": "数学",
+      "keywords": [
+        "e^x展开",
+        "多项式逼近",
+        "导数",
+        "局部近似",
+        "泰勒多项式",
+        "泰勒级数"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
+      "anki_total": 5,
+      "anki_new": 5,
+      "anki_learning": 0,
+      "anki_review": 0,
+      "anki_relearning": 0,
+      "retention": 0.0,
+      "priority": 0.3936,
+      "activation": 0.6274,
+      "importance": 0.6274,
+      "weakness": 1.0
+    },
+    {
+      "name": "000-Fn",
+      "subject": "数学",
+      "keywords": [
+        "F^n",
+        "加法逆元",
+        "向量加法",
+        "坐标",
+        "标量乘法",
+        "零向量"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn",
+      "anki_total": 8,
+      "anki_new": 3,
+      "anki_learning": 0,
+      "anki_review": 5,
+      "anki_relearning": 0,
+      "retention": 0.6114,
+      "priority": 0.3886,
+      "activation": 1.0,
+      "importance": 1.0,
+      "weakness": 0.3886
+    },
+    {
+      "name": "000-子空间",
+      "subject": "数学",
+      "keywords": [
+        "加法封闭",
+        "加法恒等元",
+        "向量空间",
+        "子空间",
+        "子空间的和",
+        "标量乘法封闭"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%AD%90%E7%A9%BA%E9%97%B4",
+      "anki_total": 3,
+      "anki_new": 3,
+      "anki_learning": 0,
+      "anki_review": 0,
+      "anki_relearning": 0,
+      "retention": 0.0,
+      "priority": 0.3511,
+      "activation": 0.5925,
+      "importance": 0.5925,
+      "weakness": 1.0
+    },
+    {
+      "name": "000-向量空间",
+      "subject": "数学",
+      "keywords": [
+        "分配性质",
+        "加法",
+        "加法恒等元",
+        "加法逆元",
+        "向量空间",
+        "唯一性",
+        "标量乘法"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%90%91%E9%87%8F%E7%A9%BA%E9%97%B4",
+      "anki_total": 6,
+      "anki_new": 1,
+      "anki_learning": 0,
+      "anki_review": 5,
+      "anki_relearning": 0,
+      "retention": 0.8187,
+      "priority": 0.1358,
+      "activation": 0.8654,
+      "importance": 0.8654,
+      "weakness": 0.1813
+    },
+    {
+      "name": "000-线性无关",
+      "subject": "数学",
+      "keywords": [
+        "向量组",
+        "标量系数",
+        "空向量组",
+        "线性无关",
+        "零向量"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E7%BA%BF%E6%80%A7%E6%97%A0%E5%85%B3",
+      "anki_total": 2,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 2,
+      "anki_relearning": 0,
+      "retention": 0.9454,
+      "priority": 0.0288,
+      "activation": 0.7259,
+      "importance": 0.7259,
+      "weakness": 0.0546
+    },
+    {
+      "name": "000-线性组合",
+      "subject": "数学",
+      "keywords": [
+        "向量组",
+        "子空间",
+        "张成空间",
+        "有限维向量空间",
+        "线性组合"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BA%BF%E6%80%A7%E7%BB%84%E5%90%88",
+      "anki_total": 10,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 9,
+      "anki_relearning": 0,
+      "retention": 0.9811,
+      "priority": 0.0138,
+      "activation": 0.8542,
+      "importance": 0.8542,
+      "weakness": 0.0189
+    },
+    {
+      "name": "000-直和",
+      "subject": "数学",
+      "keywords": [
+        "交集",
+        "唯一表示",
+        "子空间",
+        "直和",
+        "零向量"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%9B%B4%E5%92%8C",
+      "anki_total": 3,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 3,
+      "anki_relearning": 0,
+      "retention": 0.9767,
+      "priority": 0.0121,
+      "activation": 0.7195,
+      "importance": 0.7195,
+      "weakness": 0.0233
+    },
+    {
+      "name": "010-链式法则",
+      "subject": "数学",
+      "keywords": [
+        "乘法法则",
+        "加法法则",
+        "复合函数",
+        "导数",
+        "微小变化量",
+        "链式法则"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=010-%E9%93%BE%E5%BC%8F%E6%B3%95%E5%88%99",
+      "anki_total": 4,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 4,
+      "anki_relearning": 0,
+      "retention": 0.9844,
+      "priority": 0.0096,
+      "activation": 0.7846,
+      "importance": 0.7846,
+      "weakness": 0.0156
+    },
+    {
+      "name": "010-指数函数求导",
+      "subject": "数学",
+      "keywords": [
+        "导数定义",
+        "指数函数求导",
+        "欧拉数e",
+        "自然对数",
+        "链式法则"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%8C%87%E6%95%B0%E5%87%BD%E6%95%B0%E6%B1%82%E5%AF%BC",
+      "anki_total": 5,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 5,
+      "anki_relearning": 0,
+      "retention": 0.9822,
+      "priority": 0.007,
+      "activation": 0.6274,
+      "importance": 0.6274,
+      "weakness": 0.0178
+    },
+    {
+      "name": "000-复数的基本性质",
+      "subject": "数学",
+      "keywords": [
+        "复数",
+        "复数定义",
+        "复数运算",
+        "复数除法",
+        "极坐标",
+        "欧拉公式"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%A4%8D%E6%95%B0%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%80%A7%E8%B4%A8",
+      "anki_total": 4,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 4,
+      "anki_relearning": 0,
+      "retention": 0.9799,
+      "priority": 0.0054,
+      "activation": 0.5159,
+      "importance": 0.5159,
+      "weakness": 0.0201
+    },
+    {
+      "name": "000-组的定义",
+      "subject": "数学",
+      "keywords": [
+        "有序元素",
+        "相等性",
+        "组",
+        "重复元素",
+        "长度",
+        "集合"
+      ],
+      "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BB%84%E7%9A%84%E5%AE%9A%E4%B9%89",
+      "anki_total": 5,
+      "anki_new": 0,
+      "anki_learning": 0,
+      "anki_review": 4,
+      "anki_relearning": 0,
+      "retention": 0.977,
+      "priority": 0.0051,
+      "activation": 0.471,
+      "importance": 0.471,
+      "weakness": 0.023
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "000-Fn",
+        "subject": "数学",
+        "priority": 0.3886,
+        "weakness": 0.3886,
+        "retention": 0.6114,
+        "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn",
+        "has_cards": true
+      },
+      {
+        "id": "000-组的定义",
+        "subject": "数学",
+        "priority": 0.0051,
+        "weakness": 0.023,
+        "retention": 0.977,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BB%84%E7%9A%84%E5%AE%9A%E4%B9%89",
+        "has_cards": true
+      },
+      {
+        "id": "000-向量空间",
+        "subject": "数学",
+        "priority": 0.1358,
+        "weakness": 0.1813,
+        "retention": 0.8187,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%90%91%E9%87%8F%E7%A9%BA%E9%97%B4",
+        "has_cards": true
+      },
+      {
+        "id": "000-复数的基本性质",
+        "subject": "数学",
+        "priority": 0.0054,
+        "weakness": 0.0201,
+        "retention": 0.9799,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%A4%8D%E6%95%B0%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%80%A7%E8%B4%A8",
+        "has_cards": true
+      },
+      {
+        "id": "000-子空间",
+        "subject": "数学",
+        "priority": 0.3511,
+        "weakness": 1.0,
+        "retention": 0.0,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%AD%90%E7%A9%BA%E9%97%B4",
+        "has_cards": true
+      },
+      {
+        "id": "000-直和",
+        "subject": "数学",
+        "priority": 0.0121,
+        "weakness": 0.0233,
+        "retention": 0.9767,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%9B%B4%E5%92%8C",
+        "has_cards": true
+      },
+      {
+        "id": "000-线性组合",
+        "subject": "数学",
+        "priority": 0.0138,
+        "weakness": 0.0189,
+        "retention": 0.9811,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BA%BF%E6%80%A7%E7%BB%84%E5%90%88",
+        "has_cards": true
+      },
+      {
+        "id": "000-线性无关",
+        "subject": "数学",
+        "priority": 0.0288,
+        "weakness": 0.0546,
+        "retention": 0.9454,
+        "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E7%BA%BF%E6%80%A7%E6%97%A0%E5%85%B3",
+        "has_cards": true
+      },
+      {
+        "id": "010-泰勒级数",
+        "subject": "数学",
+        "priority": 0.3936,
+        "weakness": 1.0,
+        "retention": 0.0,
+        "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
+        "has_cards": true
+      },
+      {
+        "id": "010-指数函数求导",
+        "subject": "数学",
+        "priority": 0.007,
+        "weakness": 0.0178,
+        "retention": 0.9822,
+        "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%8C%87%E6%95%B0%E5%87%BD%E6%95%B0%E6%B1%82%E5%AF%BC",
+        "has_cards": true
+      },
+      {
+        "id": "010-链式法则",
+        "subject": "数学",
+        "priority": 0.0096,
+        "weakness": 0.0156,
+        "retention": 0.9844,
+        "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=010-%E9%93%BE%E5%BC%8F%E6%B3%95%E5%88%99",
+        "has_cards": true
+      },
+      {
+        "id": "010-导数的定义",
+        "subject": "数学",
+        "priority": 0.3936,
+        "weakness": 1.0,
+        "retention": 0.0,
+        "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E5%AF%BC%E6%95%B0%E7%9A%84%E5%AE%9A%E4%B9%89",
+        "has_cards": true
+      }
+    ],
+    "edges": [
+      {
+        "source": "000-Fn",
+        "target": "000-向量空间",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-直和",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-线性无关",
+        "weight": 1.0
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-子空间",
+        "weight": 1.0
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-直和",
+        "weight": 1.0
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-线性组合",
+        "weight": 1.0
+      },
+      {
+        "source": "000-直和",
+        "target": "000-线性组合",
+        "weight": 1.0
+      },
+      {
+        "source": "000-直和",
+        "target": "000-线性无关",
+        "weight": 1.0
+      },
+      {
+        "source": "000-线性无关",
+        "target": "000-线性组合",
+        "weight": 1.0
+      },
+      {
+        "source": "010-泰勒级数",
+        "target": "010-链式法则",
+        "weight": 1.0
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-泰勒级数",
+        "weight": 1.0
+      },
+      {
+        "source": "010-指数函数求导",
+        "target": "010-链式法则",
+        "weight": 1.0
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-链式法则",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-子空间",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-线性组合",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-复数的基本性质",
+        "weight": 1.0
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-组的定义",
+        "weight": 1.0
+      },
+      {
+        "source": "000-线性无关",
+        "target": "000-组的定义",
+        "weight": 1.0
+      },
+      {
+        "source": "000-线性组合",
+        "target": "000-组的定义",
+        "weight": 1.0
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-线性无关",
+        "weight": 1.0
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-线性组合",
+        "weight": 1.0
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-直和",
+        "weight": 1.0
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-复数的基本性质",
+        "weight": 1.0
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "010-链式法则",
+        "weight": 1.0
+      },
+      {
+        "source": "010-指数函数求导",
+        "target": "010-泰勒级数",
+        "weight": 1.0
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-指数函数求导",
+        "weight": 1.0
+      }
+    ]
+  },
+  "keywords": [
+    [
+      "导数",
+      1.2413
+    ],
+    [
+      "标量乘法",
+      0.9025
+    ],
+    [
+      "加法逆元",
+      0.9025
+    ],
+    [
+      "加法恒等元",
+      0.838
+    ],
+    [
+      "向量空间",
+      0.838
+    ],
+    [
+      "牛顿多项式展开",
+      0.7872
+    ],
+    [
+      "高阶无穷小",
+      0.7872
+    ],
+    [
+      "瞬时变化率",
+      0.7872
+    ],
+    [
+      "最佳近似",
+      0.7872
+    ],
+    [
+      "dt趋近于零",
+      0.7872
+    ],
+    [
+      "局部近似",
+      0.7872
+    ],
+    [
+      "e^x展开",
+      0.7872
+    ],
+    [
+      "泰勒级数",
+      0.7872
+    ],
+    [
+      "多项式逼近",
+      0.7872
+    ],
+    [
+      "泰勒多项式",
+      0.7872
+    ],
+    [
+      "向量加法",
+      0.7772
+    ],
+    [
+      "坐标",
+      0.7772
+    ],
+    [
+      "F^n",
+      0.7772
+    ],
+    [
+      "标量乘法封闭",
+      0.7022
+    ],
+    [
+      "加法封闭",
+      0.7022
+    ],
+    [
+      "子空间的和",
+      0.7022
+    ],
+    [
+      "零向量",
+      0.6691
+    ],
+    [
+      "子空间",
+      0.5873
+    ],
+    [
+      "分配性质",
+      0.2716
+    ],
+    [
+      "唯一性",
+      0.2716
+    ],
+    [
+      "加法",
+      0.2716
+    ],
+    [
+      "向量组",
+      0.0733
+    ],
+    [
+      "空向量组",
+      0.0576
+    ],
+    [
+      "标量系数",
+      0.0576
+    ],
+    [
+      "线性无关",
+      0.0576
+    ],
+    [
+      "链式法则",
+      0.0286
+    ],
+    [
+      "线性组合",
+      0.0276
+    ],
+    [
+      "张成空间",
+      0.0276
+    ],
+    [
+      "有限维向量空间",
+      0.0276
+    ],
+    [
+      "唯一表示",
+      0.0242
+    ],
+    [
+      "直和",
+      0.0242
+    ],
+    [
+      "交集",
+      0.0242
+    ],
+    [
+      "复合函数",
+      0.0192
+    ],
+    [
+      "加法法则",
+      0.0192
+    ],
+    [
+      "乘法法则",
+      0.0192
+    ],
+    [
+      "微小变化量",
+      0.0192
+    ],
+    [
+      "指数函数求导",
+      0.014
+    ],
+    [
+      "自然对数",
+      0.014
+    ],
+    [
+      "导数定义",
+      0.014
+    ],
+    [
+      "欧拉数e",
+      0.014
+    ],
+    [
+      "欧拉公式",
+      0.0108
+    ],
+    [
+      "复数除法",
+      0.0108
+    ],
+    [
+      "复数运算",
+      0.0108
+    ],
+    [
+      "复数定义",
+      0.0108
+    ],
+    [
+      "极坐标",
+      0.0108
+    ],
+    [
+      "复数",
+      0.0108
+    ],
+    [
+      "重复元素",
+      0.0102
+    ],
+    [
+      "长度",
+      0.0102
+    ],
+    [
+      "集合",
+      0.0102
+    ],
+    [
+      "相等性",
+      0.0102
+    ],
+    [
+      "组",
+      0.0102
+    ],
+    [
+      "有序元素",
+      0.0102
+    ]
+  ],
+  "last_run": {
+    "updated_at": "2026-05-07T18:40:42.2060756+09:00",
+    "status": "ok",
+    "kind": "daily_anki_status",
+    "started_at": "2026-05-07T18:35:42.2009063+09:00",
+    "steps": [
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "启动应用",
+        "duration_s": 305
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "登记新笔记",
+        "duration_s": 2
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "更新 Anki 状态",
+        "duration_s": 12
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "计算复习优先级",
+        "duration_s": 3
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "重建必复习牌组",
+        "duration_s": 8
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "清理孤儿",
+        "duration_s": 1
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "导出仪表板",
+        "duration_s": 1
+      },
+      {
+        "rc": 0,
+        "status": "ok",
+        "name": "推送仪表板",
+        "duration_s": 4
+      }
+    ]
+  }
+}

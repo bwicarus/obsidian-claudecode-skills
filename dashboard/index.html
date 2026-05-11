@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>学习仪表板</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-cloud@1/build/d3.layout.cloud.js"></script>
+  <style>
+    :root {
+      --glass-bg:     rgba(255,255,255,0.08);
+      --glass-border: rgba(255,255,255,0.14);
+      --text:         rgba(255,255,255,0.92);
+      --muted:        rgba(255,255,255,0.45);
+      --new:          #94a3b8;
+      --learning:     #fbbf24;
+      --review:       #34d399;
+      --relearning:   #f87171;
+      --activation:   #60a5fa;
+      --weakness:     #fb923c;
+    --ok:           #34d399;
+    --fail:         #f87171;
+      --importance:   #a78bfa;
+      --drawer-w:     min(540px, 48vw);
+      --drawer-ease:  cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      height: 100vh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: var(--text);
+      padding: 10px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      background:
+        radial-gradient(ellipse at 15% 15%, rgba(99,102,241,0.28) 0%, transparent 55%),
+        radial-gradient(ellipse at 85% 80%, rgba(139,92,246,0.22) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 50%, rgba(15,52,96,0.6)   0%, transparent 80%),
+        linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #0d1b3e 100%);
+      background-attachment: fixed;
+      transition: padding-right 0.4s var(--drawer-ease);
+    }
+    /* 非悬浮（默认）模式：打开时主版面右内边距腾出抽屉宽度，相当于把内容挤回原"两栏"尺寸 */
+    body.drawer-open { padding-right: calc(var(--drawer-w) + 14px); }
+    /* 悬浮模式：抽屉盖在内容上，主版面不变 */
+    body.drawer-open.drawer-floating { padding-right: 14px; }
+
+    /* ── Filters ── */
+    .filters { flex-shrink: 0; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 8px; }
+    .filter-btn {
+      padding: 5px 16px; border-radius: 20px; font-size: 13px; cursor: pointer;
+      background: var(--glass-bg); border: 1px solid var(--glass-border);
+      color: var(--text); transition: all 0.2s;
+    }
+    .filter-btn:hover  { background: rgba(255,255,255,0.13); }
+    .filter-btn.active { background: rgba(165,180,252,0.25); border-color: #a5b4fc; color: #e0e7ff; }
+
+    /* ── Panel stack（上下排列）── */
+    .panel-stack {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .panel {
+      flex: 0 0 52px;
+      width: 100%;
+      overflow: hidden;
+      position: relative;
+      border-radius: 18px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      box-shadow: 0 6px 28px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08);
+      transition:
+        flex-grow 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+        flex-basis 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+        box-shadow 0.4s ease,
+        opacity    0.3s ease;
+      cursor: pointer;
+    }
+
+    /* 自然堆叠 z-index */
+    .panel:nth-child(1) { z-index: 1; }
+    .panel:nth-child(2) { z-index: 2; }
+    .panel:nth-child(3) { z-index: 3; }
+    .panel:nth-child(4) { z-index: 4; }
+    .panel:nth-child(5) { z-index: 5; }
+    .panel:nth-child(6) { z-index: 6; }
+
+    /* 非激活面板暗化 */
+    .panel-stack:has(.panel.active) .panel:not(.active) {
+      opacity: 0.55;
+    }
+
+    .panel.active {
+      flex-grow: 1;
+      box-shadow: 0 18px 56px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18);
+      z-index: 20;
+      cursor: default;
+      opacity: 1 !important;
+    }
+
+    /* ── Tab strip（横排在折叠态顶部）── */
+    .panel-tab {
+      position: absolute;
+      left: 0; right: 0; top: 0;
+      height: 52px;
+      display: flex; flex-direction: row;
+      align-items: center; justify-content: flex-start;
+      gap: 12px;
+      padding: 0 20px;
+      pointer-events: none;
+      user-select: none;
+    }
+    .tab-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .tab-title {
+      writing-mode: horizontal-tb;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: rgba(255,255,255,0.55);
+      white-space: nowrap;
+    }
+
+    /* ── Panel body ── */
+    .panel-body {
+      position: absolute;
+      left: 0; top: 52px; right: 0; bottom: 0;
+      padding: 6px 18px 18px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease 0.3s;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .panel.active .panel-body {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .panel-body-title {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 14px;
+    }
+
+    .ng-graph {
+      flex: 1; position: relative;
+      min-width: 0; min-height: 0;
+      display: flex; flex-direction: column;
+    }
+    .note-list {
+      max-height: calc(100% - 30px);
+      overflow-y: auto;
+      padding-right: 8px;
+    }
+    .note-list::-webkit-scrollbar { width: 6px; }
+    .note-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+
+    /* D3 graph */
+    #graphSvg {
+      flex: 1; width: 100%; min-height: 320px;
+      border-radius: 10px;
+      background: rgba(0,0,0,0.15); cursor: grab; display: block;
+    }
+    #graphSvg:active { cursor: grabbing; }
+    .graph-link { stroke: rgba(255,255,255,0.12); }
+    .graph-link.explicit { stroke: rgba(255,255,255,0.3); stroke-width: 1.5; }
+    .graph-node.highlighted circle {
+      stroke: #fde047 !important;
+      stroke-width: 3.5 !important;
+      filter: drop-shadow(0 0 14px rgba(253,224,71,0.85));
+    }
+    .graph-node.highlighted text {
+      fill: #fde047 !important;
+      font-weight: 700;
+    }
+    .graph-node.kw-highlight circle {
+      stroke: #facc15;
+      stroke-width: 2.4;
+      filter: drop-shadow(0 0 8px rgba(250,204,21,0.6));
+    }
+    .graph-node.kw-highlight text {
+      fill: #fde68a;
+      font-weight: 700;
+    }
+    .graph-link.kw-highlight {
+      stroke: #facc15 !important;
+      stroke-width: 2.2 !important;
+      stroke-opacity: 0.9 !important;
+    }
+    #graphSvg.kw-active .graph-node:not(.kw-highlight) circle,
+    #graphSvg.kw-active .graph-node:not(.kw-highlight) text {
+      opacity: 0.22;
+      transition: opacity 0.2s;
+    }
+    #graphSvg.kw-active .graph-link:not(.kw-highlight) {
+      opacity: 0.12;
+      transition: opacity 0.2s;
+    }
+
+    /* Graph settings button + drawer */
+    .graph-settings-btn {
+      position: absolute; top: 8px; right: 8px; z-index: 12;
+      width: 34px; height: 34px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--glass-border);
+      color: rgba(255,255,255,0.65);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s, transform 0.4s;
+    }
+    .graph-settings-btn:hover { background: rgba(255,255,255,0.16); color: var(--text); }
+    .graph-settings-btn.active { background: rgba(165,180,252,0.25); color: #c7d2fe; transform: rotate(60deg); }
+    .graph-search-btn {
+      position: absolute; top: 50px; right: 8px; z-index: 12;
+      width: 34px; height: 34px; border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--glass-border);
+      color: rgba(255,255,255,0.65);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .graph-search-btn:hover { background: rgba(255,255,255,0.16); color: var(--text); }
+    .graph-search-btn.active {
+      background: rgba(251,146,60,0.28); color: #fdba74;
+      border-color: rgba(251,146,60,0.55);
+      box-shadow: 0 0 0 1px rgba(251,146,60,0.25);
+    }
+    /* 节点在反向搜索模式下的提示 */
+    #graphSvg.reverse-mode .graph-node circle { cursor: crosshair; }
+    .graph-settings-drawer {
+      position: absolute; top: 0; right: 0; bottom: 0;
+      width: 240px; z-index: 11;
+      background: rgba(15,12,41,0.94);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-left: 1px solid var(--glass-border);
+      border-radius: 0 10px 10px 0;
+      padding: 56px 16px 18px;
+      transform: translateX(110%);
+      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
+      overflow-y: auto;
+    }
+    .graph-settings-drawer.open { transform: translateX(0); }
+    .setting-title { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; gap: 10px;
+      font-size: 13px; color: var(--text);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      cursor: pointer;
+    }
+    .setting-row:last-child { border-bottom: none; }
+    .setting-row.column { flex-direction: column; align-items: stretch; gap: 6px; }
+    .setting-row small { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .setting-row input[type="range"] { width: 100%; accent-color: #a5b4fc; }
+    .setting-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #a5b4fc; }
+
+    /* Note list */
+    .note-list { display: flex; flex-direction: column; gap: 6px; }
+    .note-row {
+      display: flex; align-items: center; padding: 10px 12px; gap: 10px;
+      border-radius: 10px; cursor: pointer;
+      background: rgba(255,255,255,0.025);
+      border: 1px solid rgba(255,255,255,0.05);
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .note-row:hover {
+      background: rgba(255,255,255,0.08);
+      border-color: rgba(255,255,255,0.18);
+    }
+    .note-row.selected {
+      background: rgba(165,180,252,0.15);
+      border-color: rgba(165,180,252,0.55);
+      box-shadow: 0 0 0 1px rgba(165,180,252,0.25), 0 4px 16px rgba(0,0,0,0.3);
+    }
+    .note-rank { font-size: 11px; color: var(--muted); font-weight: 600; min-width: 26px; flex-shrink: 0; }
+    .note-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+    .note-name {
+      font-size: 15px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .note-subj {
+      font-size: 9px; padding: 2px 7px; border-radius: 4px;
+      align-self: flex-start; font-weight: 600; letter-spacing: 0.04em;
+      border: 1px solid currentColor;
+    }
+    .note-score {
+      font-size: 18px; font-weight: 700;
+      min-width: 44px; text-align: right; flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
+    }
+    .note-score-pct { font-size: 11px; font-weight: 500; opacity: 0.55; margin-left: 1px; }
+    .note-link-btn {
+      flex-shrink: 0;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .note-link-btn:hover { background: rgba(165,180,252,0.2); color: #c7d2fe; border-color: rgba(165,180,252,0.4); }
+
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+    .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+    .legend-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    #tooltip {
+      position: fixed; background: rgba(15,12,41,0.92); backdrop-filter: blur(8px);
+      border: 1px solid var(--glass-border); color: var(--text); padding: 6px 12px;
+      border-radius: 8px; font-size: 12px; pointer-events: none;
+      opacity: 0; transition: opacity 0.1s; z-index: 200; white-space: nowrap;
+    }
+
+    /* ── Keyword popover ── */
+    #kwPopover {
+      position: fixed; z-index: 300;
+      background: rgba(15,12,41,0.96); backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border); border-radius: 12px;
+      padding: 12px 14px; min-width: 180px; max-width: 260px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      display: none;
+    }
+    #kwPopover.visible { display: block; }
+    .kw-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+    .kw-note-row {
+      display: flex; align-items: center; gap: 7px;
+      padding: 5px 4px; border-radius: 6px; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .kw-note-row:hover { background: rgba(255,255,255,0.08); }
+    .kw-note-name { flex: 1; font-size: 12px; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kw-priority-bar { width: 36px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+    .kw-priority-fill { height: 100%; border-radius: 2px; background: var(--activation); }
+    .kw-score { font-size: 10px; color: var(--muted); width: 28px; text-align: right; flex-shrink: 0; }
+
+    /* ── Graph drawer (frosted glass, slides from right) ── */
+    .graph-drawer {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: var(--drawer-w);
+      z-index: 100;
+      display: flex; flex-direction: column;
+      padding: 18px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.04) 100%),
+        linear-gradient(135deg, rgba(15,12,41,0.22), rgba(26,26,62,0.18));
+      backdrop-filter: blur(var(--drawer-blur, 16px)) saturate(150%) brightness(1.04);
+      -webkit-backdrop-filter: blur(var(--drawer-blur, 16px)) saturate(150%) brightness(1.04);
+      border-left: 1px solid rgba(255,255,255,0.20);
+      box-shadow:
+        -14px 0 48px rgba(0,0,0,0.40),
+        inset 1px 0 0 rgba(255,255,255,0.16),
+        inset 0 1px 0 rgba(255,255,255,0.08);
+      transform: translateX(102%);
+      transition: transform 0.4s var(--drawer-ease);
+      touch-action: pan-y;  /* 允许竖向滚动；横向手势我们自己处理 */
+    }
+    /* SVG turbulence 颗粒：模拟真实磨砂表面的微粒散射 */
+    .graph-drawer::before {
+      content: '';
+      position: absolute; inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      opacity: 0.35;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    .graph-drawer > * { position: relative; z-index: 1; }
+    .graph-drawer.open { transform: translateX(0); }
+    .graph-drawer-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; flex-shrink: 0;
+    }
+    .graph-drawer-title {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .graph-drawer-close {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--glass-border);
+      color: rgba(255,255,255,0.65);
+      width: 30px; height: 30px;
+      border-radius: 8px; cursor: pointer;
+      font-size: 20px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .graph-drawer-close:hover { background: rgba(255,255,255,0.16); color: var(--text); }
+    .graph-drawer .ng-graph { flex: 1; min-height: 0; }
+
+    .graph-drawer-toggle {
+      position: fixed;
+      top: 50%; right: 0;
+      transform: translateY(-50%);
+      z-index: 110;
+      width: 18px; height: 96px;
+      padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: rgba(255,255,255,0.82);
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
+        rgba(99,102,241,0.16);
+      backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
+      -webkit-backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-right: none;
+      border-radius: 14px 0 0 14px;
+      box-shadow: inset 1px 0 0 rgba(255,255,255,0.16);
+      cursor: ew-resize;
+      touch-action: none;  /* 我们自己处理横向手势 */
+      transition: right 0.4s var(--drawer-ease), background 0.15s, color 0.15s;
+    }
+    .graph-drawer-toggle:hover {
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.14), rgba(255,255,255,0.06)),
+        rgba(99,102,241,0.26);
+      color: #fff;
+    }
+    .graph-drawer-toggle .grip {
+      width: 3px; height: 38px;
+      background: currentColor;
+      border-radius: 2px;
+      opacity: 0.85;
+    }
+    body.drawer-open .graph-drawer-toggle { right: var(--drawer-w); }
+
+    /* 长按把手调整抽屉宽度时：禁用所有相关过渡，让宽度跟手实时响应 */
+    body.drawer-resizing,
+    body.drawer-resizing .graph-drawer,
+    body.drawer-resizing .graph-drawer-toggle { transition: none !important; }
+    body.drawer-resizing { cursor: ew-resize; user-select: none; }
+    body.drawer-resizing .graph-drawer-toggle {
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.20), rgba(255,255,255,0.08)),
+        rgba(99,102,241,0.36);
+      color: #fff;
+      border-color: rgba(165,180,252,0.7);
+    }
+    body.drawer-resizing .graph-drawer-toggle .grip { opacity: 1; }
+
+  </style>
+  <style>
+    .last-run-banner {
+      max-width: 1200px; margin: 12px auto; padding: 8px 16px;
+      border-radius: 8px; font-size: 13px; display: flex;
+      gap: 12px; align-items: center; flex-wrap: wrap;
+    }
+    .last-run-banner.ok      { background: rgba(52,211,153,0.10); color: #d1fae5; border: 1px solid rgba(52,211,153,0.4); }
+    .last-run-banner.failed  { background: rgba(248,113,113,0.10); color: #fee2e2; border: 1px solid rgba(248,113,113,0.4); }
+    .last-run-banner.running { background: rgba(96,165,250,0.10);  color: #dbeafe; border: 1px solid rgba(96,165,250,0.4); }
+    .last-run-banner .icon { font-size: 16px; }
+    .last-run-banner .step-pill {
+      padding: 2px 8px; border-radius: 999px; font-size: 11px;
+      background: rgba(255,255,255,0.08);
+    }
+    .last-run-banner .step-pill.ok     { color: var(--ok); }
+    .last-run-banner .step-pill.failed { color: var(--fail); }
+    .last-run-banner .close-btn {
+      margin-left: auto; background: transparent; border: none; cursor: pointer;
+      color: inherit; opacity: 0.55; font-size: 16px; line-height: 1;
+      padding: 2px 6px; border-radius: 4px; transition: opacity 0.15s, background 0.15s;
+    }
+    .last-run-banner .close-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }
+  </style>
+</head>
+<body>
+
+<div id="tooltip"></div>
+<div id="kwPopover"></div>
+
+<div id="lastRunBanner" class="last-run-banner"></div>
+
+<div class="filters" id="filters">
+  <button class="filter-btn active" data-subject="all">全部</button>
+</div>
+
+<!-- ═══ Panel Stack ═══ -->
+<div class="panel-stack">
+
+  <!-- 1. 词云 -->
+  <div class="panel" data-panel="cloud">
+    <div class="panel-tab">
+      <div class="tab-dot" style="background:#67e8f9"></div>
+      <span class="tab-title">词云</span>
+    </div>
+    <div class="panel-body">
+      <div class="panel-body-title">关键词云</div>
+      <div id="wordcloudContainer" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 4px;padding:8px 0;"></div>
+    </div>
+  </div>
+
+  <!-- 2. 笔记列表 -->
+  <div class="panel" data-panel="notes">
+    <div class="panel-tab">
+      <div class="tab-dot" style="background:#a5b4fc"></div>
+      <span class="tab-title">笔记</span>
+    </div>
+    <div class="panel-body">
+      <div class="panel-body-title">复习优先级</div>
+      <div class="note-list" id="noteList"></div>
+    </div>
+  </div>
+
+</div><!-- end panel-stack -->
+
+<!-- ═══ 图谱抽屉（右侧滑出，磨砂玻璃半透明）═══ -->
+<button class="graph-drawer-toggle" id="graphDrawerToggle" type="button" aria-label="切换图谱抽屉" title="拖动或点击：图谱抽屉"><span class="grip"></span></button>
+
+<aside class="graph-drawer" id="graphDrawer">
+  <header class="graph-drawer-header">
+    <div class="graph-drawer-title">关系图谱</div>
+    <button class="graph-drawer-close" id="graphDrawerClose" type="button" aria-label="关闭图谱" title="关闭">×</button>
+  </header>
+  <section class="ng-graph">
+    <button class="graph-settings-btn" id="graphSettingsBtn" title="图谱设置" aria-label="图谱设置">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+      </svg>
+    </button>
+    <button class="graph-search-btn" id="graphSearchBtn"
+            title="反向搜索：开启后点节点 → 左侧只显示该节点关联的内容（再点齿轮下方按钮关闭）"
+            aria-label="反向搜索">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="7"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+    </button>
+    <aside class="graph-settings-drawer" id="graphSettingsDrawer">
+      <div class="setting-title">图谱设置</div>
+      <label class="setting-row">
+        <span>悬浮模式（不挤压版面）</span>
+        <input type="checkbox" id="setFloating">
+      </label>
+      <label class="setting-row">
+        <span>点击后自动展开图谱</span>
+        <input type="checkbox" id="setAutoOpenDrawer" checked>
+      </label>
+      <label class="setting-row" style="padding-left:18px;border-left:2px solid rgba(255,255,255,0.06)">
+        <span style="font-size:12px;color:var(--muted)">└ 再次点击同一目标时收回</span>
+        <input type="checkbox" id="setAutoCloseOnRepeat" checked>
+      </label>
+      <label class="setting-row">
+        <span>点击高亮自动居中</span>
+        <input type="checkbox" id="setAutoFocus" checked>
+      </label>
+      <label class="setting-row column">
+        <span>背景模糊 <small id="setDrawerBlurVal">16</small></span>
+        <input type="range" id="setDrawerBlur" min="0" max="40" step="1" value="16">
+      </label>
+      <label class="setting-row column">
+        <span>抽屉宽度 <small id="setDrawerWidthVal">540</small> px <small style="opacity:0.6;font-weight:400">（或长按把手拖动）</small></span>
+        <input type="range" id="setDrawerWidth" min="280" max="1100" step="10" value="540">
+      </label>
+      <label class="setting-row">
+        <span>显示节点标签</span>
+        <input type="checkbox" id="setShowLabels" checked>
+      </label>
+      <label class="setting-row">
+        <span>仅显示有卡片节点</span>
+        <input type="checkbox" id="setOnlyCards">
+      </label>
+      <label class="setting-row column">
+        <span>连接距离 <small id="setLinkDistVal">120</small></span>
+        <input type="range" id="setLinkDist" min="60" max="240" step="10" value="120">
+      </label>
+      <label class="setting-row column">
+        <span>排斥强度 <small id="setChargeVal">280</small></span>
+        <input type="range" id="setCharge" min="80" max="600" step="20" value="280">
+      </label>
+      <label class="setting-row">
+        <span>万有引力（按分数取质量）</span>
+        <input type="checkbox" id="setGravity">
+      </label>
+      <label class="setting-row column">
+        <span>引力常数 G <small id="setGravityStrengthVal">15000</small></span>
+        <input type="range" id="setGravityStrength" min="0" max="100000" step="1000" value="15000">
+      </label>
+      <label class="setting-row column">
+        <span>边权阈值 <small id="setEdgeMinVal">0.0</small></span>
+        <input type="range" id="setEdgeMin" min="0" max="2" step="0.1" value="0">
+      </label>
+      <label class="setting-row column">
+        <span>尺寸缩放 <small id="setSizeScaleVal">9</small></span>
+        <input type="range" id="setSizeScale" min="0" max="30" step="1" value="9">
+      </label>
+    </aside>
+    <svg id="graphSvg"></svg>
+    <div class="legend" id="graphLegend"></div>
+  </section>
+</aside>
+
+<script>
+let allNotes=[], allGraph={nodes:[],edges:[]}, allKeywords=[];
+let currentNotes=[], currentGraph={nodes:[],edges:[]}, currentKeywords=[];
+let lazyTimer=null;
+let kwIndex={};  // keyword → [{name, obsidian_url, subject, priority}]
+let highlightedNoteId = null;
+let highlightedKeywordNotes = new Set();
+let drawerRendered = false;
+let lastClickedKey = null;  // 'kw:<keyword>' 或 'note:<name>'，用于"再次点击收回"判断
+let reverseSearchOn = false;        // 反向搜索模式开关
+let reverseSearchNoteId = null;     // 当前选中的节点 id（在反向模式下点击节点设此值）
+const drawer = document.getElementById('graphDrawer');
+const drawerToggle = document.getElementById('graphDrawerToggle');
+const drawerCloseBtn = document.getElementById('graphDrawerClose');
+
+// 图谱当前 zoom 行为引用（renderGraph 中赋值，focusGraphOn 中使用）
+let zoomBehavior = null;
+let graphSvgSel = null;
+let graphNodesRef = [];
+let graphViewSize = { W: 0, H: 0 };
+const graphSettings = {
+  showLabels:       true,
+  onlyCards:        false,
+  linkDistance:     120,
+  charge:           280,   // 用正值，d3 取负
+  minEdgeWeight:    0,
+  sizeScale:        9,     // r = 9 + priority * sizeScale
+  gravityEnabled:   false,
+  gravityStrength:  15000,  // 牛顿万有引力 F = G * m1 * m2 / r² 中的 G
+  floating:         false, // 抽屉打开时是否悬浮（true=盖在内容上；false=挤压主版面）
+  autoFocus:        true,  // 点击高亮时是否自动平移图谱视图到目标
+  autoOpenDrawer:   true,  // 点击词云/笔记时是否自动滑出图谱抽屉
+  autoCloseOnRepeat: true, // 再次点击同一目标时收回抽屉（仅在 autoOpenDrawer 启用时生效）
+  drawerBlur:       16,    // 抽屉背景磨砂模糊度（px）
+  drawerWidth:      540,   // 抽屉宽度 px（仍受 80vw 上限保护，长按把手可拖动调整）
+};
+
+function applyDrawerBlur() {
+  document.documentElement.style.setProperty('--drawer-blur', graphSettings.drawerBlur + 'px');
+}
+
+function applyDrawerWidth() {
+  const w = graphSettings.drawerWidth;
+  if (w && w > 0) {
+    document.documentElement.style.setProperty('--drawer-w', `min(${w}px, 80vw)`);
+  } else {
+    document.documentElement.style.removeProperty('--drawer-w');
+  }
+}
+
+function buildKwIndex(notes) {
+  kwIndex={};
+  notes.forEach(n=>{
+    (n.keywords||[]).forEach(kw=>{
+      if(!kwIndex[kw]) kwIndex[kw]=[];
+      kwIndex[kw].push(n);
+    });
+  });
+  Object.values(kwIndex).forEach(arr=>arr.sort((a,b)=>b.priority-a.priority));
+}
+
+const kwPopover=document.getElementById('kwPopover');
+function showKwPopover(kw, x, y) {
+  // 子选项：同一关键词再点一次 → 收起抽屉 + 清高亮 + 关弹窗
+  if (graphSettings.autoOpenDrawer && graphSettings.autoCloseOnRepeat
+      && lastClickedKey === 'kw:' + kw && drawer.classList.contains('open')) {
+    closeDrawer();
+    clearKeywordHighlight();
+    hideKwPopover();
+    return;
+  }
+  lastClickedKey = 'kw:' + kw;
+  const notes=kwIndex[kw]||[];
+  const rows=notes.map(n=>`
+    <div class="kw-note-row" data-url="${n.obsidian_url}">
+      <span class="kw-note-name">${n.name}</span>
+      <div class="kw-priority-bar"><div class="kw-priority-fill" style="width:${(n.priority*100).toFixed(0)}%"></div></div>
+      <span class="kw-score">${(n.priority*100).toFixed(0)}%</span>
+    </div>`).join('');
+  kwPopover.innerHTML=`<div class="kw-title">${kw}</div>${rows||'<span style="font-size:12px;color:var(--muted)">无关联笔记</span>'}`;
+  kwPopover.querySelectorAll('.kw-note-row').forEach(row=>{
+    row.addEventListener('click',()=>{ openNote(row.dataset.url); hideKwPopover(); });
+  });
+  // 在图谱中高亮关联笔记 + 它们之间的连线（设置允许时滑出图谱抽屉）
+  highlightKeywordInGraph(notes.map(n=>n.name));
+  if (graphSettings.autoOpenDrawer) openDrawer();
+  // 位置：防止超出视口右边/底部
+  kwPopover.classList.add('visible');
+  const pw=kwPopover.offsetWidth, ph=kwPopover.offsetHeight;
+  kwPopover.style.left=Math.min(x+8, window.innerWidth-pw-12)+'px';
+  kwPopover.style.top =Math.min(y+8, window.innerHeight-ph-12)+'px';
+}
+function hideKwPopover(){ kwPopover.classList.remove('visible'); }
+document.addEventListener('click', e=>{ if(!kwPopover.contains(e.target)) hideKwPopover(); });
+
+const SUBJECT_COLORS={'数学':'#818cf8','物理':'#38bdf8','计算机科学':'#34d399','英语':'#fbbf24','日语':'#f87171'};
+const subjectColor = s => SUBJECT_COLORS[s]||'#9ca3af';
+const openNote = url => { const a=document.createElement('a'); a.href=url; a.click(); };
+
+/* Panel activation: mouseenter switches active panel; stays open on leave */
+const allPanels = document.querySelectorAll('.panel');
+
+function setActive(panel) {
+  allPanels.forEach(p => p.classList.remove('active'));
+  panel.classList.add('active');
+}
+
+allPanels.forEach(panel => panel.addEventListener('mouseenter', () => setActive(panel)));
+
+/* Default: notes panel open on load */
+setActive(document.querySelector('[data-panel="notes"]') || allPanels[0]);
+
+/* ── Data loading ── */
+async function loadData() {
+  try {
+    const data = await (await fetch('dashboard.json')).json();
+    allNotes    = data.notes    || [];
+    allGraph    = data.graph    || {nodes:[],edges:[]};
+    allKeywords = data.keywords || [];
+    renderLastRun(data.last_run);
+    buildKwIndex(allNotes);
+    buildFilters(allNotes);
+    renderAll(allNotes, allGraph, allKeywords);
+  } catch(e) {
+    document.querySelector('.header .meta').textContent = '数据加载失败：'+e.message;
+  }
+}
+
+function buildFilters(notes) {
+  const subjects=[...new Set(notes.map(n=>n.subject).filter(Boolean))].sort();
+  const c=document.getElementById('filters');
+  subjects.forEach(s=>{
+    const b=document.createElement('button');
+    b.className='filter-btn'; b.dataset.subject=s; b.textContent=s; c.appendChild(b);
+  });
+  c.addEventListener('click', e=>{
+    const btn=e.target.closest('.filter-btn'); if(!btn) return;
+    document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    const sub=btn.dataset.subject;
+    const fn = sub==='all' ? allNotes : allNotes.filter(n=>n.subject===sub);
+    const nodeSet=new Set(allGraph.nodes.filter(n=>sub==='all'||n.subject===sub).map(n=>n.id));
+    const fg={
+      nodes:allGraph.nodes.filter(n=>sub==='all'||n.subject===sub),
+      edges:allGraph.edges.filter(e=>nodeSet.has(e.source)||nodeSet.has(e.target)),
+    };
+    renderAll(fn, fg, allKeywords);
+  });
+}
+
+const LAST_RUN_DISMISS_KEY = 'lastRunBanner.dismissedStartedAt';
+function renderLastRun(lastRun) {
+  const el = document.getElementById('lastRunBanner');
+  if (!el) return;
+  if (!lastRun) { el.style.display='none'; return; }
+  const startedAt = lastRun.started_at || '';
+  if (startedAt && localStorage.getItem(LAST_RUN_DISMISS_KEY) === startedAt) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
+  const status = lastRun.status || 'running';
+  el.className = 'last-run-banner ' + status;
+  const ts = (lastRun.updated_at || lastRun.started_at || '').replace('T',' ').slice(0,16);
+  const icon = status==='ok' ? '✓' : status==='failed' ? '✗' : '⟳';
+  const label = status==='ok' ? '全部完成' : status==='failed' ? '有失败步骤' : '运行中';
+  const stepPills = (lastRun.steps||[]).map(s =>
+    `<span class="step-pill ${s.status}">${s.name} ${s.status==='ok'?'✓':'✗'}${s.duration_s?` ${s.duration_s}s`:''}</span>`
+  ).join('');
+  el.innerHTML = `<span class="icon">${icon}</span><b>上次自动任务: ${label}</b><span style="opacity:0.6">${ts}</span>${stepPills}<button class="close-btn" type="button" aria-label="关闭通知" title="关闭">×</button>`;
+  const closeBtn = el.querySelector('.close-btn');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      if (startedAt) localStorage.setItem(LAST_RUN_DISMISS_KEY, startedAt);
+      el.style.display = 'none';
+    });
+  }
+}
+
+function applyReverseFilter() {
+  // 反向模式下，左侧只显示和 reverseSearchNoteId 关联的内容
+  if (!reverseSearchOn || !reverseSearchNoteId) {
+    // 关闭或未选 → 渲染完整列表
+    renderNoteList(currentNotes);
+    renderWordCloud(currentKeywords);
+    return;
+  }
+  const targetId = reverseSearchNoteId;
+  // 笔记列表：只这一条
+  const targetNote = (currentNotes || []).find(n => n.name === targetId);
+  renderNoteList(targetNote ? [targetNote] : []);
+  // 词云：只显示该 note 的 keywords
+  if (targetNote && Array.isArray(targetNote.keywords) && targetNote.keywords.length) {
+    const kws = targetNote.keywords;
+    const fakeKwArr = kws.map((k, i) => [k, kws.length - i]);
+    renderWordCloud(fakeKwArr);
+  } else {
+    renderWordCloud([]);
+  }
+}
+
+function setReverseSearchMode(on) {
+  reverseSearchOn = !!on;
+  document.getElementById('graphSearchBtn').classList.toggle('active', reverseSearchOn);
+  d3.select('#graphSvg').classed('reverse-mode', reverseSearchOn);
+  if (!reverseSearchOn) {
+    reverseSearchNoteId = null;
+    applyReverseFilter();   // 还原完整列表
+    clearKeywordHighlight();
+  }
+}
+
+function renderAll(notes, graph, keywords) {
+  currentNotes=notes; currentGraph=graph; currentKeywords=keywords;
+  renderNoteList(notes);
+  renderWordCloud(keywords);
+  // 图谱在抽屉打开时即时渲染；关闭则懒等下次开屉
+  if (drawer.classList.contains('open')) {
+    renderGraph(graph);
+    drawerRendered = true;
+  } else {
+    drawerRendered = false;
+  }
+}
+
+function renderGraph(graphData) {
+  const svgEl=document.getElementById('graphSvg');
+  const svg=d3.select(svgEl); svg.selectAll('*').remove();
+  svg.classed('kw-active', highlightedKeywordNotes.size > 0);
+  const W=svgEl.clientWidth||800, H=svgEl.clientHeight||450;
+  const tip=document.getElementById('tooltip');
+
+  // 应用设置过滤
+  const filteredNodes = (graphSettings.onlyCards
+    ? graphData.nodes.filter(n => n.has_cards)
+    : graphData.nodes
+  ).map(d => ({...d}));
+  const idSet = new Set(filteredNodes.map(n => n.id));
+  const filteredEdges = graphData.edges
+    .filter(e => idSet.has(e.source) && idSet.has(e.target) && (e.weight||0) >= graphSettings.minEdgeWeight)
+    .map(d => ({...d}));
+
+  if(!filteredNodes.length){
+    svg.append('text').attr('x',W/2).attr('y',H/2).attr('text-anchor','middle')
+      .attr('fill','rgba(255,255,255,0.3)').attr('font-size','14').text('暂无图谱数据');
+    return;
+  }
+  const nodeById=Object.fromEntries(filteredNodes.map(n=>[n.id,n]));
+  const links=filteredEdges.filter(e=>nodeById[e.source]&&nodeById[e.target]);
+
+  const zoom = d3.zoom().scaleExtent([0.2,4]).on('zoom',e=>g.attr('transform',e.transform));
+  svg.call(zoom);
+  const g=svg.append('g');
+
+  const sim=d3.forceSimulation(filteredNodes)
+    .force('link',d3.forceLink(links).id(d=>d.id).distance(graphSettings.linkDistance))
+    .force('charge',d3.forceManyBody().strength(-graphSettings.charge))
+    .force('center',d3.forceCenter(W/2,H/2))
+    .force('collide',d3.forceCollide(30))
+    .force('gravity', makeGravityForce());
+
+  g.append('g').selectAll('line').data(links).join('line')
+    .attr('class',d=>'graph-link'+(d.weight>=1?' explicit':''))
+    .attr('stroke-width',d=>0.8+d.weight*0.7)
+    .classed('kw-highlight', d => {
+      const sId = (d.source && d.source.id) || d.source;
+      const tId = (d.target && d.target.id) || d.target;
+      return highlightedKeywordNotes.has(sId) && highlightedKeywordNotes.has(tId);
+    });
+
+  const node=g.append('g').selectAll('g').data(filteredNodes).join('g')
+    .attr('class','graph-node')
+    .attr('data-note-id',d=>d.id)
+    .classed('highlighted', d => d.id === highlightedNoteId)
+    .classed('kw-highlight', d => highlightedKeywordNotes.has(d.id))
+    .call(d3.drag()
+      .on('start',(e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x;d.fy=d.y; })
+      .on('drag', (e,d)=>{ d.fx=e.x;d.fy=e.y; })
+      .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null;d.fy=null; })
+    );
+
+  node.append('circle')
+    .attr('r',d=>9+d.priority*graphSettings.sizeScale)
+    .attr('fill',d=>{ const c=subjectColor(d.subject); return d.has_cards?c+'cc':c+'33'; })
+    .attr('stroke',d=>d.weakness>0.3?'#f87171':subjectColor(d.subject)+'88')
+    .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=`${d.id}　优先级 ${(d.priority*100).toFixed(0)}%`; })
+    .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
+    .on('mouseout',()=>{ tip.style.opacity='0'; })
+    .on('click',(e,d)=>{
+      e.stopPropagation();
+      if (reverseSearchOn) {
+        // 反向搜索：点节点 → 左侧只显示与该节点关联的内容
+        reverseSearchNoteId = d.id;
+        applyReverseFilter();
+        // 顺便在图谱中高亮该节点（视觉反馈）
+        highlightKeywordInGraph(new Set([d.id]));
+      } else {
+        openNote(d.obsidian_url);
+      }
+    });
+
+  node.append('text').attr('dy',d=>16+d.priority*graphSettings.sizeScale).attr('text-anchor','middle')
+    .text(d=>d.id.length>12?d.id.slice(0,12)+'…':d.id)
+    .attr('fill','rgba(255,255,255,0.8)').attr('font-size','11')
+    .style('display', graphSettings.showLabels ? null : 'none');
+
+  sim.on('tick',()=>{
+    g.selectAll('line')
+      .attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('transform',d=>`translate(${d.x},${d.y})`);
+  });
+
+  const legend=document.getElementById('graphLegend');
+  legend.innerHTML='';
+  [...new Set(filteredNodes.map(n=>n.subject).filter(Boolean))].sort().forEach(s=>{
+    legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:${subjectColor(s)}"></div>${s}</div>`;
+  });
+
+  // 暴露 zoom / 节点引用 / 视口尺寸给 focusGraphOn 使用
+  zoomBehavior = zoom;
+  graphSvgSel = svg;
+  graphNodesRef = filteredNodes;
+  graphViewSize = { W, H };
+
+  // 渲染后若已有高亮（如词云已选），等 simulation 稍稳后自动居中
+  if (highlightedKeywordNotes.size > 0 || highlightedNoteId) {
+    setTimeout(() => {
+      if (highlightedKeywordNotes.size > 0) focusGraphOn(highlightedKeywordNotes);
+      else if (highlightedNoteId) focusGraphOn([highlightedNoteId]);
+    }, 600);
+  }
+}
+
+// 将图谱视图平滑移动到指定节点集合的中心，并按数量自动缩放
+function focusGraphOn(nodeIdsLike) {
+  if (!graphSettings.autoFocus) return;
+  if (!zoomBehavior || !graphSvgSel || !graphNodesRef.length) return;
+  const set = nodeIdsLike instanceof Set ? nodeIdsLike : new Set(nodeIdsLike);
+  const targets = graphNodesRef.filter(n => set.has(n.id) && Number.isFinite(n.x) && Number.isFinite(n.y));
+  if (!targets.length) return;
+
+  const { W, H } = graphViewSize;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  targets.forEach(n => {
+    if (n.x < minX) minX = n.x;
+    if (n.x > maxX) maxX = n.x;
+    if (n.y < minY) minY = n.y;
+    if (n.y > maxY) maxY = n.y;
+  });
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const bw = Math.max(1, maxX - minX);
+  const bh = Math.max(1, maxY - minY);
+
+  // 让目标 bbox 占视口约 65%；padding 给节点半径和标签留余地
+  const padding = 90;
+  const sx = (W - padding*2) / bw;
+  const sy = (H - padding*2) / bh;
+  let scale;
+  if (targets.length === 1) {
+    scale = 1.4;  // 单节点：稍微放大
+  } else {
+    scale = Math.min(sx, sy);
+    // 数量越多越缩小（让画面更"包容"），并夹在合理区间
+    scale = Math.max(0.45, Math.min(2.2, scale));
+  }
+
+  const tx = W/2 - cx * scale;
+  const ty = H/2 - cy * scale;
+
+  graphSvgSel.transition()
+    .duration(750)
+    .ease(d3.easeCubicInOut)
+    .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+}
+
+// 牛顿万有引力：F = G * m1 * m2 / r²，质量取自 priority。
+// 每对节点都对彼此施加沿连线方向的吸引加速度。
+function makeGravityForce() {
+  let nodes;
+  function force(alpha) {
+    if (!graphSettings.gravityEnabled) return;
+    const G = graphSettings.gravityStrength;
+    if (G <= 0) return;
+    const N = nodes.length;
+    for (let i = 0; i < N; i++) {
+      const a = nodes[i];
+      const m1 = a.priority || 0;
+      if (m1 === 0) continue;
+      for (let j = i + 1; j < N; j++) {
+        const b = nodes[j];
+        const m2 = b.priority || 0;
+        if (m2 === 0) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const r2 = Math.max(dx*dx + dy*dy, 100);  // 防 0 距离爆炸
+        const r  = Math.sqrt(r2);
+        const F  = G * m1 * m2 / r2;
+        const fx = F * dx / r * alpha;
+        const fy = F * dy / r * alpha;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      }
+    }
+  }
+  force.initialize = n => { nodes = n; };
+  return force;
+}
+
+function highlightNoteInGraph(noteId) {
+  highlightedNoteId = noteId;
+  clearKeywordHighlight();  // 单笔记聚焦覆盖关键词集合
+  d3.select('#graphSvg').selectAll('.graph-node')
+    .classed('highlighted', d => d.id === noteId);
+  document.querySelectorAll('.note-row').forEach(r => {
+    r.classList.toggle('selected', r.dataset.noteId === noteId);
+  });
+  focusGraphOn([noteId]);
+}
+
+function highlightKeywordInGraph(noteNames) {
+  highlightedKeywordNotes = new Set(noteNames);
+  const svg = d3.select('#graphSvg');
+  svg.classed('kw-active', highlightedKeywordNotes.size > 0);
+  svg.selectAll('.graph-node')
+    .classed('kw-highlight', d => highlightedKeywordNotes.has(d.id));
+  svg.selectAll('.graph-link').classed('kw-highlight', d => {
+    const sId = (d.source && d.source.id) || d.source;
+    const tId = (d.target && d.target.id) || d.target;
+    return highlightedKeywordNotes.has(sId) && highlightedKeywordNotes.has(tId);
+  });
+  focusGraphOn(highlightedKeywordNotes);
+}
+
+function clearKeywordHighlight() {
+  if (highlightedKeywordNotes.size === 0) return;
+  highlightedKeywordNotes = new Set();
+  const svg = d3.select('#graphSvg');
+  svg.classed('kw-active', false);
+  svg.selectAll('.graph-node').classed('kw-highlight', false);
+  svg.selectAll('.graph-link').classed('kw-highlight', false);
+}
+
+function openDrawer() {
+  if (drawer.classList.contains('open')) return;
+  drawer.classList.add('open');
+  document.body.classList.add('drawer-open');
+  document.body.classList.toggle('drawer-floating', !!graphSettings.floating);
+  // 抽屉宽度变化后图谱容器尺寸也变了，需要重新渲染（不论是否首次）
+  clearTimeout(lazyTimer);
+  lazyTimer = setTimeout(() => {
+    requestAnimationFrame(() => {
+      renderGraph(currentGraph);
+      drawerRendered = true;
+    });
+  }, 420);
+}
+
+function closeDrawer() {
+  drawer.classList.remove('open');
+  document.body.classList.remove('drawer-open');
+  lastClickedKey = null;  // 关闭后重置：下次点同一目标当作首次展开
+}
+
+function applyLabelVisibility() {
+  d3.select('#graphSvg').selectAll('.graph-node text')
+    .style('display', graphSettings.showLabels ? null : 'none');
+}
+
+function applyNodeSizes() {
+  d3.select('#graphSvg').selectAll('.graph-node circle')
+    .attr('r', d => 9 + d.priority * graphSettings.sizeScale);
+  d3.select('#graphSvg').selectAll('.graph-node text')
+    .attr('dy', d => 16 + d.priority * graphSettings.sizeScale);
+}
+
+const SETTINGS_KEY = 'dashboard.graphSettings.v1';
+const SETTINGS_URL = '/dashboard/graph-settings.json'; // 仅用于首次访问从服务器迁移一次
+
+function reflectSettingsToUI() {
+  document.getElementById('setFloating').checked     = graphSettings.floating;
+  if (document.body.classList.contains('drawer-open')) {
+    document.body.classList.toggle('drawer-floating', graphSettings.floating);
+  }
+  document.getElementById('setAutoOpenDrawer').checked = graphSettings.autoOpenDrawer;
+  document.getElementById('setAutoCloseOnRepeat').checked = graphSettings.autoCloseOnRepeat;
+  document.getElementById('setAutoFocus').checked    = graphSettings.autoFocus;
+  document.getElementById('setDrawerBlur').value     = graphSettings.drawerBlur;
+  document.getElementById('setDrawerBlurVal').textContent = graphSettings.drawerBlur;
+  document.getElementById('setDrawerWidth').value    = graphSettings.drawerWidth;
+  document.getElementById('setDrawerWidthVal').textContent = graphSettings.drawerWidth;
+  applyDrawerBlur();
+  applyDrawerWidth();
+  document.getElementById('setShowLabels').checked   = graphSettings.showLabels;
+  document.getElementById('setOnlyCards').checked    = graphSettings.onlyCards;
+  document.getElementById('setLinkDist').value       = graphSettings.linkDistance;
+  document.getElementById('setLinkDistVal').textContent = graphSettings.linkDistance;
+  document.getElementById('setCharge').value         = graphSettings.charge;
+  document.getElementById('setChargeVal').textContent = graphSettings.charge;
+  document.getElementById('setGravity').checked      = graphSettings.gravityEnabled;
+  document.getElementById('setGravityStrength').value = graphSettings.gravityStrength;
+  document.getElementById('setGravityStrengthVal').textContent = graphSettings.gravityStrength;
+  document.getElementById('setEdgeMin').value        = graphSettings.minEdgeWeight;
+  document.getElementById('setEdgeMinVal').textContent = graphSettings.minEdgeWeight.toFixed(1);
+  document.getElementById('setSizeScale').value      = graphSettings.sizeScale;
+  document.getElementById('setSizeScaleVal').textContent = graphSettings.sizeScale;
+}
+
+async function loadGraphSettings() {
+  // 优先：本地 (按浏览器/设备隔离)
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data && typeof data === 'object') {
+        Object.assign(graphSettings, data);
+        reflectSettingsToUI();
+        return;
+      }
+    }
+  } catch (_) { /* 解析失败：当作没有 */ }
+
+  // 兜底：本地空时，从服务器拉一次作为初始默认值并写入本地（一次性迁移）
+  try {
+    const r = await fetch(SETTINGS_URL, {cache:'no-store'});
+    if (r.ok) {
+      const data = await r.json();
+      if (data && typeof data === 'object') {
+        Object.assign(graphSettings, data);
+        reflectSettingsToUI();
+        try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(graphSettings)); } catch (_) {}
+      }
+    }
+  } catch (_) { /* 静默：保持默认值 */ }
+}
+
+let saveTimer = null;
+function saveGraphSettings() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(graphSettings));
+    } catch (_) { /* 配额满或隐私模式：静默 */ }
+  }, 500);
+}
+
+function wireGraphSettings() {
+  const gear   = document.getElementById('graphSettingsBtn');
+  const drawer = document.getElementById('graphSettingsDrawer');
+  gear.addEventListener('click', e => {
+    e.stopPropagation();
+    const opening = !drawer.classList.contains('open');
+    drawer.classList.toggle('open', opening);
+    gear.classList.toggle('active', opening);
+  });
+  document.addEventListener('click', e => {
+    if (!drawer.contains(e.target) && !gear.contains(e.target)) {
+      drawer.classList.remove('open');
+      gear.classList.remove('active');
+    }
+  });
+
+  document.getElementById('setFloating').addEventListener('change', e => {
+    graphSettings.floating = e.target.checked;
+    if (document.body.classList.contains('drawer-open')) {
+      document.body.classList.toggle('drawer-floating', graphSettings.floating);
+      // 主版面尺寸变化后，图谱容器尺寸也变 → 重渲
+      clearTimeout(lazyTimer);
+      lazyTimer = setTimeout(() => requestAnimationFrame(() => renderGraph(currentGraph)), 420);
+    }
+    saveGraphSettings();
+  });
+  document.getElementById('setAutoOpenDrawer').addEventListener('change', e => {
+    graphSettings.autoOpenDrawer = e.target.checked;
+    saveGraphSettings();
+  });
+  document.getElementById('setAutoCloseOnRepeat').addEventListener('change', e => {
+    graphSettings.autoCloseOnRepeat = e.target.checked;
+    saveGraphSettings();
+  });
+  document.getElementById('setAutoFocus').addEventListener('change', e => {
+    graphSettings.autoFocus = e.target.checked;
+    saveGraphSettings();
+  });
+  const blurInput = document.getElementById('setDrawerBlur');
+  const blurVal   = document.getElementById('setDrawerBlurVal');
+  blurInput.addEventListener('input', e => {
+    graphSettings.drawerBlur = +e.target.value;
+    blurVal.textContent      = e.target.value;
+    applyDrawerBlur();
+  });
+  blurInput.addEventListener('change', () => saveGraphSettings());
+
+  const widthInput = document.getElementById('setDrawerWidth');
+  const widthVal   = document.getElementById('setDrawerWidthVal');
+  widthInput.addEventListener('input', e => {
+    graphSettings.drawerWidth = +e.target.value;
+    widthVal.textContent      = e.target.value;
+    applyDrawerWidth();
+  });
+  widthInput.addEventListener('change', () => {
+    saveGraphSettings();
+    // 宽度变化后图谱容器尺寸也变 → 重渲让节点排布回中
+    if (drawer.classList.contains('open')) {
+      clearTimeout(lazyTimer);
+      lazyTimer = setTimeout(() => requestAnimationFrame(() => renderGraph(currentGraph)), 100);
+    }
+  });
+  document.getElementById('setShowLabels').addEventListener('change', e => {
+    graphSettings.showLabels = e.target.checked;
+    applyLabelVisibility();
+    saveGraphSettings();
+  });
+  document.getElementById('setOnlyCards').addEventListener('change', e => {
+    graphSettings.onlyCards = e.target.checked;
+    renderGraph(currentGraph);
+    saveGraphSettings();
+  });
+  document.getElementById('setGravity').addEventListener('change', e => {
+    graphSettings.gravityEnabled = e.target.checked;
+    renderGraph(currentGraph);  // 重启 simulation 使新力立即生效
+    saveGraphSettings();
+  });
+  // change 事件触发图谱重渲染（重启 simulation）
+  const reRenderSliders = [
+    ['setLinkDist',         'setLinkDistVal',         'linkDistance',    v => v],
+    ['setCharge',           'setChargeVal',           'charge',          v => v],
+    ['setGravityStrength',  'setGravityStrengthVal',  'gravityStrength', v => v],
+    ['setEdgeMin',          'setEdgeMinVal',          'minEdgeWeight',   v => v.toFixed(1)],
+  ];
+  reRenderSliders.forEach(([inputId, valueId, key, fmt]) => {
+    const input = document.getElementById(inputId);
+    const valEl = document.getElementById(valueId);
+    input.addEventListener('input', e => {
+      graphSettings[key] = +e.target.value;
+      valEl.textContent  = fmt(+e.target.value);
+    });
+    input.addEventListener('change', () => {
+      renderGraph(currentGraph);
+      saveGraphSettings();
+    });
+  });
+
+  // 尺寸缩放：实时应用，不打断 simulation
+  const sizeInput = document.getElementById('setSizeScale');
+  const sizeVal   = document.getElementById('setSizeScaleVal');
+  sizeInput.addEventListener('input', e => {
+    graphSettings.sizeScale = +e.target.value;
+    sizeVal.textContent     = e.target.value;
+    applyNodeSizes();
+  });
+  sizeInput.addEventListener('change', () => saveGraphSettings());
+}
+
+function renderWordCloud(keywords) {
+  const container=document.getElementById('wordcloudContainer');
+  container.innerHTML='';
+  if(!keywords.length){ container.innerHTML='<span style="color:var(--muted);font-size:13px">暂无关键词</span>'; return; }
+  const W=520, H=400;
+  const colors=['#a5b4fc','#67e8f9','#6ee7b7','#fde68a','#fca5a5','#c4b5fd'];
+  const maxW=keywords[0][1];
+  const ROTATIONS=[-90,-45,0,0,0,0,45,90];
+  const words=keywords.map(([text,weight],i)=>({
+    text, weight,
+    size: Math.round(11+Math.pow(weight/maxW,2)*46),
+    color: colors[i%colors.length],
+    opacity: +(0.55+0.45*(weight/maxW)).toFixed(2),
+  }));
+  d3.layout.cloud()
+    .size([W,H])
+    .words(words)
+    .padding(5)
+    .rotate(()=>ROTATIONS[Math.floor(Math.random()*ROTATIONS.length)])
+    .font('system-ui')
+    .fontSize(d=>d.size)
+    .on('end', placed=>{
+      const svg=d3.select(container).append('svg')
+        .attr('viewBox',`0 0 ${W} ${H}`)
+        .style('width','100%').style('height','auto').style('display','block');
+      svg.append('g')
+        .attr('transform',`translate(${W/2},${H/2})`)
+        .selectAll('text').data(placed).join('text')
+        .style('font-size',d=>d.size+'px')
+        .style('font-family','system-ui,sans-serif')
+        .style('font-weight',d=>d.size>28?'700':'400')
+        .style('fill',d=>d.color)
+        .style('opacity',d=>d.opacity)
+        .style('cursor','pointer')
+        .attr('text-anchor','middle')
+        .attr('transform',d=>`translate(${d.x},${d.y})rotate(${d.rotate})`)
+        .text(d=>d.text)
+        .on('click',(e,d)=>{ e.stopPropagation(); showKwPopover(d.text,e.clientX,e.clientY); })
+        .on('mouseenter',function(){ d3.select(this).style('opacity',1); })
+        .on('mouseleave',function(e,d){ d3.select(this).style('opacity',d.opacity); });
+    })
+    .start();
+}
+
+const LINK_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>';
+
+function renderNoteList(notes) {
+  const sorted=[...notes].sort((a,b)=>b.priority-a.priority);
+  const c=document.getElementById('noteList');
+  c.innerHTML='';
+  if(!sorted.length){ c.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">暂无数据</div>'; return; }
+  sorted.forEach((note,i)=>{
+    const row=document.createElement('div');
+    row.className='note-row';
+    row.dataset.noteId = note.name;
+    if (note.name === highlightedNoteId) row.classList.add('selected');
+    const pct=(note.priority||0)*100;
+    const color=subjectColor(note.subject);
+    const scoreOpacity=(0.5+0.5*Math.min(1,note.priority||0)).toFixed(2);
+    row.innerHTML=`
+      <span class="note-rank">#${i+1}</span>
+      <div class="note-meta">
+        <div class="note-name">${note.name}</div>
+        ${note.subject?`<span class="note-subj" style="color:${color};background:${color}1a">${note.subject}</span>`:''}
+      </div>
+      <span class="note-score" style="color:rgba(255,255,255,${scoreOpacity})">${pct.toFixed(0)}<span class="note-score-pct">%</span></span>
+      <button class="note-link-btn" type="button" aria-label="在 Obsidian 中打开" title="在 Obsidian 中打开">${LINK_ICON_SVG}</button>`;
+    row.title=`激活 ${((note.activation||0)*100).toFixed(0)}%\n中心 ${((note.importance||0)*100).toFixed(0)}%\n薄弱 ${((note.weakness||0)*100).toFixed(0)}%`;
+    row.addEventListener('click', e => {
+      if (e.target.closest('.note-link-btn')) return;  // 让按钮自己的 handler 处理
+      // 子选项：同一笔记再点一次 → 收起抽屉 + 清选中
+      if (graphSettings.autoOpenDrawer && graphSettings.autoCloseOnRepeat
+          && lastClickedKey === 'note:' + note.name && drawer.classList.contains('open')) {
+        closeDrawer();
+        highlightedNoteId = null;
+        document.querySelectorAll('.note-row').forEach(r => r.classList.remove('selected'));
+        d3.select('#graphSvg').selectAll('.graph-node').classed('highlighted', false);
+        return;
+      }
+      lastClickedKey = 'note:' + note.name;
+      highlightNoteInGraph(note.name);
+      if (graphSettings.autoOpenDrawer) openDrawer();
+    });
+    row.querySelector('.note-link-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      openNote(note.obsidian_url);
+    });
+    c.appendChild(row);
+  });
+}
+
+function wireDrawer() {
+  let suppressNextClick = false;
+  drawerToggle.addEventListener('click', () => {
+    if (suppressNextClick) { suppressNextClick = false; return; }
+    if (drawer.classList.contains('open')) closeDrawer();
+    else openDrawer();
+  });
+  drawerCloseBtn.addEventListener('click', () => {
+    closeDrawer();
+    clearKeywordHighlight();
+  });
+
+  // ── 触屏 / 鼠标手势 ──
+  // 把手 / drawer header / 屏幕右边缘 上按下后横向拖动 → 实时跟手 → 释放按距离与速度决定开关
+  // 在把手上长按 ≥450ms 进入 resize 模式：拖动调整抽屉宽度
+  let dragId = null;
+  let startX = 0;
+  let startTime = 0;
+  let startWasOpen = false;
+  let dragStarted = false;
+  let longPressTimer = null;
+  let resizeMode = false;
+  let resizeStartX = 0;
+  let resizeStartW = 0;
+  const EDGE_PX = 28;
+  const TRIGGER_RATIO = 0.28;
+  const VELOCITY_PX_MS = 0.55;
+  const LONG_PRESS_MS = 450;
+  const MIN_WIDTH = 280;
+  const drawerW = () => drawer.offsetWidth || 480;
+
+  function shouldStartDrag(e) {
+    const inHandle = !!e.target.closest('.graph-drawer-toggle');
+    const inHeader = !!e.target.closest('.graph-drawer-header');
+    const isOpen = drawer.classList.contains('open');
+    const onEdge = !isOpen && (window.innerWidth - e.clientX) <= EDGE_PX;
+    return inHandle || inHeader || onEdge;
+  }
+
+  function clearLongPress() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+
+  function enterResizeMode(originX) {
+    resizeMode = true;
+    resizeStartX = originX;
+    resizeStartW = drawer.offsetWidth;
+    document.body.classList.add('drawer-resizing');
+    if (navigator.vibrate) navigator.vibrate(15);
+  }
+
+  document.addEventListener('pointerdown', e => {
+    if (dragId !== null) return;
+    if (e.button !== undefined && e.button !== 0) return;
+    if (!shouldStartDrag(e)) return;
+    dragId = e.pointerId;
+    startX = e.clientX;
+    startTime = performance.now();
+    startWasOpen = drawer.classList.contains('open');
+    dragStarted = false;
+    drawer.style.transition = 'none';
+
+    // 把手 + 抽屉打开 → 启动长按检测，触发后进入 resize 模式
+    const inHandle = !!e.target.closest('.graph-drawer-toggle');
+    if (inHandle && startWasOpen) {
+      clearLongPress();
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null;
+        if (dragId === e.pointerId && !dragStarted) enterResizeMode(e.clientX);
+      }, LONG_PRESS_MS);
+    }
+  });
+
+  document.addEventListener('pointermove', e => {
+    if (e.pointerId !== dragId) return;
+    const dx = e.clientX - startX;
+
+    // resize 模式：实时改宽度（向左拖更宽，向右拖更窄）
+    if (resizeMode) {
+      const maxW = Math.min(window.innerWidth * 0.8, 1100);
+      const newW = Math.round(Math.max(MIN_WIDTH, Math.min(maxW, resizeStartW - (e.clientX - resizeStartX))));
+      graphSettings.drawerWidth = newW;
+      applyDrawerWidth();
+      const widthVal = document.getElementById('setDrawerWidthVal');
+      const widthInput = document.getElementById('setDrawerWidth');
+      if (widthVal)   widthVal.textContent = newW;
+      if (widthInput) widthInput.value     = newW;
+      return;
+    }
+
+    // 普通开关手势：移动 > 4px 后开始跟手；同时取消长按定时器
+    if (!dragStarted) {
+      if (Math.abs(dx) < 4) return;
+      dragStarted = true;
+      clearLongPress();
+    }
+    const w = drawerW();
+    let translate;
+    if (startWasOpen) {
+      translate = Math.max(0, Math.min(w * 1.04, dx));
+    } else {
+      translate = Math.max(0, Math.min(w * 1.04, w + dx));
+    }
+    drawer.style.transform = `translateX(${translate}px)`;
+  });
+
+  function endDrag(e) {
+    if (e.pointerId !== dragId) return;
+    clearLongPress();
+
+    if (resizeMode) {
+      resizeMode = false;
+      document.body.classList.remove('drawer-resizing');
+      drawer.style.transition = '';
+      drawer.style.transform = '';
+      saveGraphSettings();
+      // 宽度变化后图谱容器尺寸也变 → 重渲
+      if (drawer.classList.contains('open')) {
+        clearTimeout(lazyTimer);
+        lazyTimer = setTimeout(() => requestAnimationFrame(() => renderGraph(currentGraph)), 100);
+      }
+      suppressNextClick = true;
+      dragId = null;
+      return;
+    }
+
+    drawer.style.transition = '';
+    drawer.style.transform = '';
+    if (!dragStarted) { dragId = null; return; }
+    const dx = e.clientX - startX;
+    const dt = Math.max(1, performance.now() - startTime);
+    const v = dx / dt;
+    const w = drawerW();
+    if (startWasOpen) {
+      if (dx > w * TRIGGER_RATIO || v > VELOCITY_PX_MS) closeDrawer();
+    } else {
+      if (-dx > w * TRIGGER_RATIO || v < -VELOCITY_PX_MS) openDrawer();
+    }
+    suppressNextClick = true;
+    dragId = null;
+  }
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
+}
+
+(async () => {
+  applyDrawerBlur();   // 默认值先生效，避免远端设置加载前的闪烁
+  applyDrawerWidth();
+  wireDrawer();
+  wireGraphSettings();
+  document.getElementById('graphSearchBtn').addEventListener('click', () => {
+    setReverseSearchMode(!reverseSearchOn);
+  });
+  await loadGraphSettings();
+  loadData();
+})();
+</script>
+</body>
+</html>
