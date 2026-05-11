@@ -5,3 +5,21 @@ __pycache__/
 
 # Claude Code 本地配置（机器特定，不提交）
 .claude/settings.local.json
+.claude/settings.json
+.claude/worktrees/
+
+# PyInstaller 构建产物
+_client/build/
+_client/dist/
+launchers/build/
+launchers/dist/
+*.spec.bak
+
+# 运行时状态、日志、备份、临时文件
+state/
+temp/
+
+# Python 虚拟环境
+.venv/
+venv/
+env/

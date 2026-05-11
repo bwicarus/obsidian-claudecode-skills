@@ -1,0 +1,89 @@
+{
+  "source_note": "010-泰勒级数.md",
+  "source_link": "[[010-泰勒级数]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
+  "generated_at": "2026-05-07T13:05:15+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记包含泰勒级数的核心公式记忆入口，尤其是 e^x 的 Maclaurin 展开可直接用于回忆一般泰勒级数形式；其余本质、推导和几何理解主要用于理解，不适合制卡。",
+  "warnings": [],
+  "section_hashes": {
+    "泰勒多项式本质": "c006447086a37fba",
+    "泰勒多项式的推导": "eff8abdfd8064761",
+    "e^x的泰勒多项式": "df7f3dc0cde3567a",
+    "泰勒多项式的几何理解": "93ab0b5a2665a3fc",
+    "泰勒级数": "f9555249017cf900",
+    "相关笔记": "7026d1dc63995d58",
+    "": "c4ce38117c8e6a4b"
+  },
+  "cards": [
+    {
+      "local_id": "20260506175523-001",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "泰勒多项式与泰勒级数有什么区别？",
+      "back": "泰勒多项式是有限项，得到的值是近似值；泰勒级数是无限项，在收敛范围内精确等于原函数。",
+      "text": "",
+      "reason": "核心定义区分，解题时需要明确多项式是近似而级数在收敛域内是精确的",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778057746087,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130515-001",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "这是泰勒级数最常用的记忆模板，e^x 的所有阶导数在 0 处都等于 1。",
+      "text": "\\(e^x\\) 在 \\(x=0\\) 处的泰勒级数为 {{c1::\\(1+x+\\frac{x^2}{2!}+\\frac{x^3}{3!}+\\cdots\\)}}。",
+      "reason": "核心公式记忆入口，笔记中明确提到可用它记住泰勒级数公式。",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778126715500,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130515-002",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "系数来自函数在展开点处的各阶导数。",
+      "text": "函数 \\(f(x)\\) 在 \\(x=a\\) 附近的泰勒展开一般形式为 {{c1::\\(f(a)+f'(a)(x-a)+\\frac{f''(a)}{2!}(x-a)^2+\\cdots\\)}}。",
+      "reason": "核心公式，解题时需要主动回忆并直接代入使用。",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778126715562,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-09T02:00:42+09:00",
+    "total": 3,
+    "new": 0,
+    "learning": 0,
+    "review": 3,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.9876347939698616,
+    "retention_min": 0.986970092318718
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-09T02:00:42+09:00",
+    "score": 0.0034,
+    "activation": 0.5234,
+    "importance": 0.5234,
+    "weakness": 0.0124,
+    "formula": "(1-R) * activation * importance"
+  }
+}

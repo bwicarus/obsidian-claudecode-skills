@@ -12,13 +12,15 @@ PDF 区域内容提取脚本
 输出前缀：
   TEXT:<内容>   — 从文字层提取
   OCR:<内容>    — Tesseract OCR 识别
-  VISION:<内容> — Claude Haiku 视觉分析（OCR 质量不足时）
+  VISION:<内容> — AI 视觉分析（OCR 质量不足时，按设置使用 Codex CLI 或 Claude API）
 """
 
 import argparse
 import os
 import re
 import sys
+from pathlib import Path
+import ai_client
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
@@ -141,7 +143,6 @@ def find_pdf_in_vault(filename):
         return direct
     target = os.path.basename(filename)
     for root, dirs, files in os.walk(VAULT_ROOT):
-        dirs[:] = [d for d in dirs if d != "claude"]
         if target in files:
             return os.path.join(root, target)
     raise FileNotFoundError(f"在 vault 中找不到文件：{filename}")
@@ -179,20 +180,37 @@ def extract_via_ocr(page, rect, corrections, dpi=150):
     return fix_chars(pytesseract.image_to_string(img, lang="chi_sim+eng+jpn").strip(), corrections)
 
 
-def extract_via_claude(page, rect, corrections, dpi=150):
-    import base64, io, fitz, anthropic
-    mat = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), clip=rect)
-    img_b64 = base64.standard_b64encode(mat.tobytes("png")).decode()
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-            {"type": "text", "text": "请提取并输出图片中的所有文字内容，保持原有排版结构。只输出文字，不要添加任何解释。"},
-        ]}],
-    )
-    return fix_chars(response.content[0].text.strip(), corrections)
+def extract_via_vision(page, rect, corrections, dpi=150):
+    """AI 视觉提取（OCR 兜底）：Claude API 或 Codex CLI，按共享设置切换。"""
+    import io, fitz
+    mat    = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), clip=rect)
+    prompt = "请提取并输出图片中的所有文字内容，保持原有排版结构。只输出文字，不要添加任何解释。"
+    s      = ai_client.load_settings()
+    model  = s.get("model", "")
+
+    def try_claude():
+        import base64, anthropic
+        img_b64 = base64.standard_b64encode(mat.tobytes("png")).decode()
+        resp = anthropic.Anthropic().messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=1024,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                {"type": "text",  "text": prompt},
+            ]}],
+        )
+        return resp.content[0].text.strip()
+
+    def try_codex():
+        tmp = ai_client.TEMP_DIR / f"pdf_vision_{os.getpid()}.png"
+        ai_client.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            tmp.write_bytes(mat.tobytes("png"))
+            return ai_client.codex_raw(prompt, image_path=str(tmp), model=model)
+        finally:
+            try: tmp.unlink(missing_ok=True)
+            except Exception: pass
+
+    return fix_chars(ai_client.route(s["backend"], try_claude, try_codex), corrections)
 
 
 # ── 主程序 ───────────────────────────────────────────────────────────────────
@@ -256,7 +274,7 @@ def main():
         pass
 
     try:
-        text = extract_via_claude(fitz_page, rect, corrections, dpi=args.dpi)
+        text = extract_via_vision(fitz_page, rect, corrections, dpi=args.dpi)
         print(f"VISION:{text}")
     except Exception as e:
         print(f"ERROR: 所有提取方式均失败：{e}", file=sys.stderr)

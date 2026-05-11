@@ -1,0 +1,67 @@
+{
+  "source_note": "010-导数的定义.md",
+  "source_link": "[[010-导数的定义]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E5%AF%BC%E6%95%B0%E7%9A%84%E5%AE%9A%E4%B9%89",
+  "generated_at": "2026-05-11T00:51:23+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记包含导数概念的核心理解要点：导数的本质是变化率的最佳线性近似，以及 dt 趋于零时多项式展开各项的处理逻辑。这些是后续学习微积分时需要主动回忆的关键直觉，符合核心定义和易混概念的制卡标准。",
+  "warnings": [],
+  "section_hashes": {
+    "导数的概念": "927740d30bc393a7"
+  },
+  "cards": [
+    {
+      "local_id": "20260511005123-001",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "导数测量的究竟是什么？为什么不是瞬时变化率？",
+      "back": "导数测量的是变化率的最佳线性近似，而不是瞬时变化率。因为瞬时变化率的概念本身存在矛盾（瞬时意味着时间间隔为零，无法定义变化率）。",
+      "text": "",
+      "reason": "核心概念辨析，澄清对导数本质的常见误解，属于易混概念。",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数"
+      ],
+      "anki_note_id": 1778428284071,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260511005123-002",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "用牛顿多项式展开后：常数项相减抵消；一次 dt 项除以 dt 后留下有限常数；二次及以上 dt 项除以 dt 后仍含 dt，趋于零被忽略。",
+      "text": "求导时用多项式展开，dt 趋于 0 后：不含 dt 的项 {{c1::被减去抵消}}；含一次 dt 的项除以 dt 变为 {{c2::常数}}；含两次以上 dt 的项除以 dt 后 {{c3::仍趋于 0 可被忽略}}。",
+      "reason": "导数定义计算的标准处理流程，是解题入口必须主动回忆。",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数"
+      ],
+      "anki_note_id": 1778428284133,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 4,
+    "new": 4,
+    "learning": 0,
+    "review": 0,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.0,
+    "retention_min": 0.0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.3936,
+    "activation": 0.6274,
+    "importance": 0.6274,
+    "weakness": 1.0,
+    "formula": "(1-R) * activation * importance"
+  }
+}

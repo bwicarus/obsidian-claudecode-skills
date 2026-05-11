@@ -1,0 +1,58 @@
+"""
+pending_notes.py — 找出需要被 /登记新笔记 处理的笔记
+
+扫描范围：vault 根目录下符合 [0-9A-Fa-f]{3}-*.md 命名规则的文件
+输出：
+  新笔记   — 从未登记过，且 mtime 晚于上次运行时间
+  已修改   — 登记过但内容哈希已变化
+"""
+import re
+import sys
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+sys.path.insert(0, str(Path(__file__).parent))
+import note_state
+
+VAULT_ROOT = Path("C:/obsidian")
+SKILL = "summarize"
+NOTE_PATTERN = re.compile(r"^[0-9A-Fa-f]{3}-.+\.md$")
+
+
+def main():
+    last_scan = note_state.get_last_scan("登记新笔记")
+
+    new_notes = []
+    modified_notes = []
+
+    for md_file in sorted(VAULT_ROOT.glob("**/*.md")):
+        if not NOTE_PATTERN.match(md_file.name):
+            continue
+
+        if note_state.has_record(md_file, SKILL):
+            if not note_state.is_unchanged(md_file, SKILL):
+                modified_notes.append(md_file)
+        else:
+            if last_scan is None or md_file.stat().st_mtime > last_scan.timestamp():
+                new_notes.append(md_file)
+
+    _print_section("新笔记", new_notes)
+    _print_section("已修改", modified_notes)
+
+    total = len(new_notes) + len(modified_notes)
+    print(f"\n共需处理 {total} 篇")
+    if last_scan:
+        print(f"（上次登记：{last_scan.strftime('%Y-%m-%d %H:%M:%S')}）")
+    else:
+        print("（尚无登记记录，显示所有符合命名规则的笔记）")
+
+
+def _print_section(title: str, files: list) -> None:
+    print(f"\n{title}（{len(files)} 篇）")
+    for f in files:
+        print(f"  {f.name}")
+
+
+if __name__ == "__main__":
+    main()

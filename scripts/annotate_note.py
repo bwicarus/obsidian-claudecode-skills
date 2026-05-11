@@ -34,7 +34,8 @@ def extract_region(link):
     """调用 pdf_extract.py 提取链接对应区域，返回文本（不含前缀）。"""
     result = subprocess.run(
         [PYTHON, EXTRACT_SCRIPT, "--link", link],
-        capture_output=True, text=True, encoding="utf-8"
+        capture_output=True, text=True, encoding="utf-8",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     output = result.stdout.strip()
     if not output or result.returncode != 0:

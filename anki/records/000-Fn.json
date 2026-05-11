@@ -1,12 +1,19 @@
 {
   "source_note": "000-Fn.md",
   "source_link": "[[000-Fn]]",
-  "source_url": "obsidian://open?vault=obsidian&file=000-Fn",
-  "generated_at": "2026-04-26T23:57:36+09:00",
+  "generated_at": "2026-05-07T16:36:02+09:00",
   "generator": "agent",
   "status": "synced",
-  "reason": "Fn 的定义及其运算是线性代数的基础实例，各运算定义需要主动回忆。",
+  "reason": "该节只是 Obsidian Tasks 查询代码块，用于显示待办任务，不包含需要长期主动回忆的知识点。",
   "warnings": [],
+  "section_hashes": {
+    "": "d1311748820c3f93",
+    "1 $F^n$中元素是[[000-组的定义|组]]": "3c08aaacea0d3666",
+    "2 $F^n$中的加法": "c58a6a8f6584e6bb",
+    "3 $F^n$中的性质": "a61eb02443261173",
+    "4，其它定义": "77c8ec0504d6cdec",
+    "相关笔记": "a5dda25014555f80"
+  },
   "cards": [
     {
       "local_id": "20260426235736-001",
@@ -87,6 +94,78 @@
       ],
       "anki_note_id": 1777215456898,
       "status": "synced"
+    },
+    {
+      "local_id": "20260430134501-001",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "\\(F^n\\) 中的零向量记作 {{c1::\\(0 = (0, \\ldots, 0)\\)}}，是长度为 \\(n\\) 且所有坐标均为 \\(0\\) 的组。",
+      "reason": "零向量的精确定义是向量空间公理的基础",
+      "tags": [
+        "数学",
+        "线性代数",
+        "F^n",
+        "零向量"
+      ],
+      "anki_note_id": 1777524328873,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260430134501-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "\\(F^n\\) 中向量 \\(x = (x_1, \\ldots, x_n)\\) 的加法逆元 \\(-x\\) 是什么？",
+      "back": "\\(-x = (-x_1, \\ldots, -x_n)\\)，满足 \\(x + (-x) = 0\\)。",
+      "text": "",
+      "reason": "加法逆元是向量空间公理之一，需要主动回忆其坐标形式",
+      "tags": [
+        "数学",
+        "线性代数",
+        "F^n",
+        "加法逆元"
+      ],
+      "anki_note_id": 1777524331919,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260430134501-003",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "\\(F^n\\) 中标量乘法定义为：\\(\\lambda (x_1, \\ldots, x_n) = {{c1::(\\lambda x_1, \\ldots, \\lambda x_n)}}\\)，其中 \\(\\lambda \\in F\\)。",
+      "reason": "标量乘法的坐标定义是F^n运算结构的核心",
+      "tags": [
+        "数学",
+        "线性代数",
+        "F^n",
+        "标量乘法"
+      ],
+      "anki_note_id": 1777524331977,
+      "status": "synced"
     }
-  ]
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:23+09:00",
+    "total": 8,
+    "new": 3,
+    "learning": 0,
+    "review": 5,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.6113764253074464,
+    "retention_min": 0.0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.3886,
+    "activation": 1.0,
+    "importance": 1.0,
+    "weakness": 0.3886,
+    "formula": "(1-R) * activation * importance"
+  },
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn"
 }

@@ -1,0 +1,122 @@
+{
+  "source_note": "资源/books/微积分/010-指数函数求导.md",
+  "source_link": "[[010-指数函数求导]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%8C%87%E6%95%B0%E5%87%BD%E6%95%B0%E6%B1%82%E5%AF%BC",
+  "generated_at": "2026-05-07T13:06:23+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记包含指数函数求导的核心公式和常用改写入口，属于解题时需要直接调用的公式与方法；推导思路本身不制卡。",
+  "warnings": [],
+  "section_hashes": {
+    "求导思路": "470c66572ab22fd7",
+    "相关笔记": "8e1e66bd5c6fbd0f",
+    "": "5b2b3acbcea77723"
+  },
+  "cards": [
+    {
+      "local_id": "20260505134416-001",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "\\(e^x\\) 的导数是什么？",
+      "back": "\\((e^x)' = e^x\\)，即 \\(e^x\\) 的导数等于自身。",
+      "text": "",
+      "reason": "核心公式，微积分中反复使用的基本求导结果",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "指数函数"
+      ],
+      "anki_note_id": 1777956271993,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260505134416-002",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "一般指数函数 \\(a^x\\)（\\(a > 0\\)）的导数公式是什么？",
+      "back": "\\((a^x)' = a^x \\ln a\\)\n\n推导方法：将 \\(a^x = e^{x \\ln a}\\)，再用链式法则求导。",
+      "text": "",
+      "reason": "常用公式，由 e^x 求导和链式法则推导而来",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "指数函数"
+      ],
+      "anki_note_id": 1777956272033,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260505134416-003",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "推导指数函数导数时，为什么 \\(e\\) 是特殊的底数？",
+      "back": "从导数定义出发，\\(\\lim_{h \\to 0} \\frac{a^h - 1}{h}\\) 是一个依赖于 \\(a\\) 的常数；当该常数恰好等于 1 时，\\(a = e\\)，因此 \\((e^x)' = e^x\\)。",
+      "text": "",
+      "reason": "理解 e 的特殊性是推导指数函数导数的关键",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "欧拉数"
+      ],
+      "anki_note_id": 1777956272092,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130623-001",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "其中 \\(a>0\\) 且 \\(a\\neq 1\\)；可先写成 \\(a^t=e^{\\ln(a)t}\\)，再用链式法则。",
+      "text": "指数函数的导数公式是 {{c1::\\(\\frac{d}{dt}a^t=\\ln(a)a^t\\)}}。",
+      "reason": "核心公式，解指数函数求导题时需要直接调用。",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "指数函数"
+      ],
+      "anki_note_id": 1778126784050,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130623-002",
+      "type": "problem",
+      "deck": "数学::微积分",
+      "front": "对一般指数函数 a^t 求导时，常用的改写入口是什么？",
+      "back": "把 \\(a^t\\) 改写为 \\(e^{\\ln(a)t}\\)，再使用链式法则求导。",
+      "text": "",
+      "reason": "常用解题模板，看到一般指数函数求导时需要立即想到。",
+      "tags": [
+        "数学",
+        "微积分",
+        "链式法则",
+        "指数函数"
+      ],
+      "anki_note_id": 1778126784112,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 5,
+    "new": 0,
+    "learning": 0,
+    "review": 5,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.9821642843397445,
+    "retention_min": 0.9625384664206017
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.007,
+    "activation": 0.6274,
+    "importance": 0.6274,
+    "weakness": 0.0178,
+    "formula": "(1-R) * activation * importance"
+  }
+}

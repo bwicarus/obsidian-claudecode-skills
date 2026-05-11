@@ -18,11 +18,15 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
+
+import note_state
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-INDEX_DIR   = r"C:\obsidian\claude\index"
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+INDEX_DIR   = str(PROJECT_DIR / "index")
 MASTER_FILE = os.path.join(INDEX_DIR, "knowledge-index.md")
 
 # 科目文件中某个分支的条目数超过此值时，自动拆分为独立文件
@@ -43,14 +47,39 @@ def branch_is_split(subject, branch):
     return os.path.exists(branch_file(subject, branch))
 
 
-# ── 读取模式 ─────────────────────────────────────────────────��────────────────
+# ── Excalidraw 检测 ───────────────────────────────────────────────────────────
+
+def is_excalidraw(path) -> bool:
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read(512)
+        return "excalidraw-plugin:" in text
+    except OSError:
+        return False
+
+
+def find_excalidraw_image(path) -> str | None:
+    from pathlib import Path as _Path
+    p = _Path(path)
+    for ext in [".png", ".svg"]:
+        img = p.with_suffix(ext)
+        if img.exists():
+            return str(img)
+    return None
+
+
+# ── 读取模式 ──────────────────────────────────────────────────────────────────
 
 def clean_note(path):
+    if is_excalidraw(path):
+        img = find_excalidraw_image(path)
+        return f"TYPE: excalidraw\nPNG: {img or 'none'}"
     with open(path, encoding="utf-8") as f:
         text = f.read()
     text = re.sub(r'^---\s*\n.*?\n---\s*\n', '', text, flags=re.DOTALL)
     text = re.sub(r'> \[!tip\].*?```\s*\n', '', text, flags=re.DOTALL)
-    text = re.sub(r'!\[\[.+?\.pdf[^\]]*\]\]\n?', '', text)
+    text = re.sub(r'!\[\[.+?\]\]\n?', '', text)
+    text = re.sub(r'\n*---\n## 相关笔记\n.*', '', text, flags=re.DOTALL)
     text = re.sub(r'^> \[!.*?\].*\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'^> ', '', text, flags=re.MULTILINE)
     text = re.sub(r'- \[.\] ', '', text)
@@ -276,6 +305,7 @@ def write_to_index(note_path, keywords, summary, category):
         check_and_split(subject, branch)
 
     update_master_index()
+    note_state.mark_processed(Path(note_path), "summarize")
     print(f"OK: {action} [[{note_name}]] → {subject}/{branch}")
 
 

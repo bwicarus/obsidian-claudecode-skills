@@ -1,12 +1,17 @@
 {
   "source_note": "000-组的定义.md",
   "source_link": "[[000-组的定义]]",
-  "source_url": "obsidian://open?vault=obsidian&file=000-%E7%BB%84%E7%9A%84%E5%AE%9A%E4%B9%89",
-  "generated_at": "2026-04-26T23:58:20+09:00",
+  "generated_at": "2026-05-11T18:09:54+09:00",
   "generator": "agent",
   "status": "synced",
-  "reason": "「组」是 Fn 等后续概念的基础，与集合的区别是核心易混点。",
+  "reason": "待处理节仅包含 Obsidian Tasks 插件的查询代码块，用于在笔记中展示任务列表，不含任何需要主动回忆的知识点。",
   "warnings": [],
+  "section_hashes": {
+    "": "3a7f49bcaea64e77",
+    "定义": "fb595bc61ea6ea04",
+    "组与集合区别": "0cdeeb44cc8ada0a",
+    "相关笔记": "a575089618979746"
+  },
   "cards": [
     {
       "local_id": "20260426235820-001",
@@ -55,6 +60,43 @@
       ],
       "anki_note_id": 1777215500348,
       "status": "synced"
+    },
+    {
+      "local_id": "20260430134902-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "组（list）与集合（set）在顺序和重复方面有何本质区别？",
+      "back": "组中顺序重要且重复有含义（(3,5)≠(5,3)，(4,4)≠(4,4,4)）；集合中顺序和重复均无关紧要（{3,5}={5,3}，{4,4}={4}）。",
+      "text": "",
+      "reason": "易混概念，是理解F^n元素（组）与集合区别的基础",
+      "tags": [
+        "数学",
+        "线性代数",
+        "组",
+        "集合"
+      ],
+      "anki_note_id": 1777524548761,
+      "status": "synced"
     }
-  ]
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 5,
+    "new": 0,
+    "learning": 0,
+    "review": 4,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 1,
+    "retention_avg": 0.9770300636155712,
+    "retention_min": 0.946122793005
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.0051,
+    "activation": 0.471,
+    "importance": 0.471,
+    "weakness": 0.023,
+    "formula": "(1-R) * activation * importance"
+  }
 }

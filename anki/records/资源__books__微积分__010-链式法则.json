@@ -1,0 +1,107 @@
+{
+  "source_note": "资源/books/微积分/010-链式法则.md",
+  "source_link": "[[010-链式法则]]",
+  "generated_at": "2026-05-11T18:19:11+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记内容仅为一个 3b1b 微积分课程的 B 站视频链接，属于资料索引/外部资源指引，不包含需要长期记忆的核心定义、定理、公式或方法入口，不满足必要性测试。",
+  "warnings": [],
+  "section_hashes": {
+    "": "cf13a32d402dcd90",
+    "链式法则": "6170f071e9ba3cdc",
+    "其他运算": "b90df872393346d8",
+    "乘法法则": "d0c7420609a388be",
+    "相关笔记": "dc6e3a05c3b25a86",
+    "(visual)": "af10ac70310470d3"
+  },
+  "cards": [
+    {
+      "local_id": "20260505134555-001",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "链式法则（chain rule）的公式是什么？",
+      "back": "\\[\\frac{d}{dx} g(h(x)) = \\frac{dg}{dh} \\cdot \\frac{dh}{dx}\\]\n\n即外层函数对中间变量的导数，乘以内层函数对 \\(x\\) 的导数。",
+      "text": "",
+      "reason": "核心公式，复合函数求导的基本法则",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "链式法则"
+      ],
+      "anki_note_id": 1777956355438,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260505134555-002",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "使用链式法则求 \\(\\sin(x^2)\\) 的导数。",
+      "back": "\\[\\frac{d}{dx}\\sin(x^2) = \\cos(x^2) \\cdot 2x\\]\n\n外层 \\(\\sin(h)\\) 导数为 \\(\\cos(h)\\)，内层 \\(h = x^2\\) 导数为 \\(2x\\)。",
+      "text": "",
+      "reason": "链式法则的典型应用例，帮助巩固公式",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "链式法则"
+      ],
+      "anki_note_id": 1777956355498,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260505134555-003",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "",
+      "text": "加法法则：\\(\\frac{d}{dx}(g(x)+h(x)) = {{c1::\\frac{dg}{dx} + \\frac{dh}{dx}}}\\)",
+      "reason": "基本求导法则，需要准确回忆",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "加法法则"
+      ],
+      "anki_note_id": 1777956355566,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260505134555-004",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "可用面积可视化理解：乘积看作矩形面积，边长微小变化产生两个薄矩形。",
+      "text": "乘法法则（Product rule）：\\(d(f \\cdot g) = {{c1::f \\cdot dg + g \\cdot df}}\\)",
+      "reason": "核心公式，乘积求导时反复使用",
+      "tags": [
+        "数学",
+        "微积分",
+        "导数",
+        "乘法法则"
+      ],
+      "anki_note_id": 1777956355624,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 4,
+    "new": 0,
+    "learning": 0,
+    "review": 4,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.9843615177708778,
+    "retention_min": 0.9809638991383103
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.0096,
+    "activation": 0.7846,
+    "importance": 0.7846,
+    "weakness": 0.0156,
+    "formula": "(1-R) * activation * importance"
+  }
+}

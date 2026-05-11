@@ -1,0 +1,120 @@
+{
+  "source_note": "资源/books/微积分/010-泰勒级数.md",
+  "source_link": "[[010-泰勒级数]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
+  "generated_at": "2026-05-11T00:52:24+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记包含泰勒多项式的核心思想、构造方法以及 e^x 的标准展开式，这些是微积分中需要主动回忆的核心公式与方法入口，符合制卡标准；几何理解和推导过程属于理解性内容，不制卡。",
+  "warnings": [],
+  "section_hashes": {
+    "": "0f8cc141ddebb236",
+    "泰勒多项式本质": "cc89e9bef516e9af",
+    "泰勒多项式的推导": "7a1b2dc4b14157ce",
+    "e^x的泰勒多项式": "b83f8f968babe933",
+    "泰勒多项式的几何理解": "63e7d56953e08a47",
+    "泰勒级数": "f9555249017cf900"
+  },
+  "cards": [
+    {
+      "local_id": "20260511005224-001",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "泰勒多项式的核心思想是什么？",
+      "back": "把函数在某一点处的各阶导数信息，转换为该点附近函数值的近似信息。",
+      "text": "",
+      "reason": "核心定义/思想，是理解和应用泰勒展开的入口",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778428345042,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260511005224-002",
+      "type": "problem",
+      "deck": "数学::微积分",
+      "front": "如何构造函数 f(x) 在 x=a 处的 n 次泰勒多项式系数？",
+      "back": "令多项式在 x=a 处的函数值、一阶导数、二阶导数……n 阶导数依次等于 f(x) 在 a 处的对应各阶导数值，由此解出各项系数 a_k = f^{(k)}(a) / k!。",
+      "text": "",
+      "reason": "解题模板：见到泰勒多项式构造问题立刻应想到的方法入口",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778428345105,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260511005224-003",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "",
+      "text": "f(x) 在 x=a 处的泰勒多项式第 k 项系数为 {{c1::\\(\\dfrac{f^{(k)}(a)}{k!}\\)}}。",
+      "reason": "公式：可直接代入使用的核心系数公式",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778428345166,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260511005224-004",
+      "type": "cloze",
+      "deck": "数学::微积分",
+      "front": "",
+      "back": "因为 e^x 的各阶导数在 0 处都等于 1，所以系数全为 1/k!。",
+      "text": "\\(e^x\\) 在 0 处的泰勒级数为 {{c1::\\(1 + \\dfrac{x}{1!} + \\dfrac{x^2}{2!} + \\dfrac{x^3}{3!} + \\cdots\\)}}。",
+      "reason": "公式：常用泰勒展开，需要直接记忆以便代入使用",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778428345227,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260511005224-005",
+      "type": "basic",
+      "deck": "数学::微积分",
+      "front": "泰勒多项式与泰勒级数的区别是什么？",
+      "back": "有限次数项时称为泰勒多项式，得到的是近似值；项数为无穷时称为泰勒级数，在收敛范围内可等于原函数。",
+      "text": "",
+      "reason": "易混概念辨析：多项式（有限项、近似）与级数（无穷项、收敛即相等）",
+      "tags": [
+        "数学",
+        "微积分",
+        "泰勒级数"
+      ],
+      "anki_note_id": 1778428345288,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 5,
+    "new": 5,
+    "learning": 0,
+    "review": 0,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.0,
+    "retention_min": 0.0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.3936,
+    "activation": 0.6274,
+    "importance": 0.6274,
+    "weakness": 1.0,
+    "formula": "(1-R) * activation * importance"
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "source_note": "资源/books/000-LADR/000-线性组合.md",
+  "source_link": "[[000-线性组合]]",
+  "generated_at": "2026-05-11T18:18:51+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "本次待处理节为文件首部空名节（仅包含 YAML frontmatter 与笔记标题，无正文知识点）。四个正文小节（线性组合 / 张成空间 / 张成空间是子空间 / 有限维向量空间）此前已制卡（frontmatter 显示 anki_total: 10），且本次未列入 pending_sections，无需重复制卡。",
+  "warnings": [],
+  "section_hashes": {
+    "线性组合": "fa49cd1eac661690",
+    "相关笔记": "03ae479f83eb3889",
+    "张成空间": "5314f314041cf669",
+    "": "356f7e174641b771",
+    "张成空间是子空间": "c58303bc351f72e6",
+    "有限维向量空间": "d889bd5a00f56f17"
+  },
+  "cards": [
+    {
+      "local_id": "20260503203654-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "向量组 \\(b_1, \\ldots, b_n\\) 在向量空间 \\(V\\) 中的线性组合是什么？",
+      "back": "形如 \\(P_1 b_1 + \\cdots + P_n b_n\\) 的向量，其中 \\(P_1, \\ldots, P_n \\in \\mathbb{F}\\)。",
+      "text": "",
+      "reason": "核心定义，线性代数的基础操作",
+      "tags": [
+        "数学",
+        "线性代数",
+        "线性组合"
+      ],
+      "anki_note_id": 1777808247505,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260503203654-002",
+      "type": "reverse",
+      "deck": "数学::线性代数",
+      "front": "linear combination",
+      "back": "线性组合",
+      "text": "",
+      "reason": "术语互译，阅读英文教材时需要快速识别",
+      "tags": [
+        "数学",
+        "线性代数",
+        "术语"
+      ],
+      "anki_note_id": 1777808247581,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260503205531-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "向量空间 \\(V\\) 中向量组 \\(b_1, \\ldots, b_N\\) 的线性组合（linear combination）是什么？",
+      "back": "形如 \\(P_1 b_1 + \\cdots + P_N b_N\\) 的向量，其中 \\(P_1, \\ldots, P_N \\in \\mathbb{F}\\)。",
+      "text": "",
+      "reason": "线性组合是线性代数最基础的操作概念，需要主动回忆其精确定义",
+      "tags": [
+        "数学",
+        "线性代数",
+        "线性组合"
+      ],
+      "anki_note_id": 1777809331374,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260503205531-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "向量组 \\(b_1, \\ldots, b_N\\) 的张成空间 \\(\\operatorname{span}(b_1, \\ldots, b_N)\\) 的定义是什么？",
+      "back": "\\(\\operatorname{span}(b_1, \\ldots, b_N) = \\{P_1 b_1 + \\cdots + P_N b_N : P_1, \\ldots, P_N \\in \\mathbb{F}\\}\\)，即该向量组所有线性组合构成的集合。",
+      "text": "",
+      "reason": "张成空间是核心定义，后续子空间、基底、列空间等概念均依赖于此",
+      "tags": [
+        "数学",
+        "线性代数",
+        "张成空间",
+        "span"
+      ],
+      "anki_note_id": 1777809331494,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260503205531-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "空向量组（ ）的张成空间是什么？",
+      "back": "\\(\\{0\\}\\)",
+      "text": "",
+      "reason": "易忽略的边界情况，影响对张成空间定义完整性的理解",
+      "tags": [
+        "数学",
+        "线性代数",
+        "张成空间",
+        "边界情况"
+      ],
+      "anki_note_id": 1777809331585,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130551-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "向量组 b_1,...,b_N 的张成空间 span(b_1,...,b_N) 是什么?",
+      "back": "它是所有线性组合 p_1b_1+...+p_Nb_N 构成的集合, 其中 p_1,...,p_N 属于标量域 F。即 span(b_1,...,b_N)={p_1b_1+...+p_Nb_N: p_1,...,p_N in F}。",
+      "text": "",
+      "reason": "核心定义, 后续使用张成、有限维、基等概念时需要精确回忆。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "张成空间"
+      ],
+      "anki_note_id": 1778126751397,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130551-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "空向量组的张成空间定义为什么?",
+      "back": "空向量组 () 的张成空间定义为 {0}。",
+      "text": "",
+      "reason": "特殊定义, 不能靠一般线性组合公式直接猜出, 后续处理零空间或空生成集时需要记住。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "张成空间"
+      ],
+      "anki_note_id": 1778126751490,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130551-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "span(b_1,...,b_N) 与包含 b_1,...,b_N 的子空间之间有什么最小性关系?",
+      "back": "span(b_1,...,b_N) 是包含 b_1,...,b_N 的最小子空间; 任何包含这些向量的子空间都必然包含它们的所有线性组合, 因而包含 span(b_1,...,b_N)。",
+      "text": "",
+      "reason": "常用判定性事实, 证明子空间包含关系和生成空间时会直接使用。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "张成空间",
+        "子空间"
+      ],
+      "anki_note_id": 1778126751551,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260507130551-004",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "什么是有限维向量空间?",
+      "back": "如果一个向量空间可以由其中某个有限向量组张成, 则称它是有限维向量空间。",
+      "text": "",
+      "reason": "核心定义, 后续学习维数、基、线性无关等概念时必须能主动回忆。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "有限维"
+      ],
+      "anki_note_id": 1778126751613,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-11T18:22:24+09:00",
+    "total": 10,
+    "new": 0,
+    "learning": 0,
+    "review": 9,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 1,
+    "retention_avg": 0.9811163560032725,
+    "retention_min": 0.9710982928740651
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-11T18:22:24+09:00",
+    "score": 0.0138,
+    "activation": 0.8542,
+    "importance": 0.8542,
+    "weakness": 0.0189,
+    "formula": "(1-R) * activation * importance"
+  }
+}

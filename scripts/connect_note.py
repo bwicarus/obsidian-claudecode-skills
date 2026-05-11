@@ -13,12 +13,17 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
+
+import note_state
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 SECTION_TITLE = "相关笔记"
 MAX_REASON_LEN = 20
+
+_LINK_LINE_RE = re.compile(r"-\s+\[\[([^\]]+)\]\]\s*[—–-]?\s*(.*)")
 
 
 def normalize_note_name(value):
@@ -88,7 +93,48 @@ def find_related_section(lines):
     return block_start, end
 
 
-def update_note(content, items):
+def parse_existing_items(text):
+    """从文本中解析「相关笔记」节的现有条目，返回 [(name, reason)]。"""
+    heading_re = re.compile(rf"\n##\s+{re.escape(SECTION_TITLE)}\s*\n")
+    m = heading_re.search(text)
+    if not m:
+        return []
+    section = text[m.end():]
+    next_h = re.search(r"\n#{1,2}\s+", section)
+    if next_h:
+        section = section[:next_h.start()]
+    entries = []
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("-"):
+            continue
+        em = _LINK_LINE_RE.match(s)
+        if em:
+            name = em.group(1).strip()
+            if name.lower().endswith(".md"):
+                name = name[:-3]
+            entries.append((name, em.group(2).strip()))
+    return entries
+
+
+def update_note(content, items, mode="merge"):
+    """将 items 写入「相关笔记」节。
+
+    mode='merge'   ：与已有条目合并去重（保留旧链接，新条目排在前）
+    mode='replace' ：完全替换已有条目
+    """
+    if mode == "merge":
+        existing = parse_existing_items(content)
+        seen = set()
+        merged = []
+        for name, reason in list(items) + existing:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append((name, reason))
+        items = merged
+
     lines = content.splitlines(keepends=True)
     section = build_section(items)
     start, end = find_related_section(lines)
@@ -154,6 +200,7 @@ def main():
     with open(args.note, "w", encoding="utf-8") as f:
         f.write(new_content)
 
+    note_state.mark_processed(Path(args.note), "connect")
     print(f"OK: {action} {len(items)} 条相关笔记 → {args.note}")
 
 
