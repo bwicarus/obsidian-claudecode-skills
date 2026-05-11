@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · bwicarus.space</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #f0f2f5; font-family: system-ui, -apple-system, sans-serif;
+    }
+    .card {
+      background: #fff; border-radius: 14px; padding: 40px 36px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08); width: 100%; max-width: 360px;
+    }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+    .sub { font-size: 13px; color: #6b7280; margin-bottom: 28px; }
+    label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: #374151; }
+    input {
+      width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 14px; margin-bottom: 16px; outline: none; transition: border 0.15s;
+    }
+    input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    button {
+      width: 100%; padding: 11px; background: #1a1a1a; color: #fff; border: none;
+      border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: #333; }
+    .error {
+      background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+      border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 16px;
+    }
+    .footer { text-align: center; margin-top: 18px; font-size: 13px; color: #6b7280; }
+    .footer a { color: #6366f1; text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>bwicarus.space</h1>
+    <p class="sub">私人区域，请先登录</p>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post">
+      <label>用户名</label>
+      <input type="text" name="username" autocomplete="username" autofocus>
+      <label>密码</label>
+      <input type="password" name="password" autocomplete="current-password">
+      <button type="submit">登录</button>
+    </form>
+    <div class="footer">收到邀请码？<a href="/register">用邀请码注册</a></div>
+  </div>
+</body>
+</html>

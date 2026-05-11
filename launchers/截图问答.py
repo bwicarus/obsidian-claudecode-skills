@@ -1,0 +1,1571 @@
+#!/usr/bin/env python3
+"""
+截图问答器：静默截图 → 浏览器对话（Markdown + 数学公式）→ 习题笔记（双向链接）
+依赖：pip install Pillow
+"""
+
+import sys, io, os, time, hashlib, ctypes, subprocess, threading, json, base64, socket, webbrowser, shutil, re, sqlite3
+sys.path.insert(0, r"C:\claude\scripts")
+import ai_client
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from datetime import datetime
+from pathlib import Path
+from PIL import Image, ImageGrab
+
+_CHROME_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+]
+CHROME_EXE = next((p for p in _CHROME_CANDIDATES if Path(p).exists()), None)
+
+# ─── 配置 ──────────────────────────────────────────────────────────────────────
+
+CLAUDE = (
+    r"C:\Users\bwica\AppData\Local\Microsoft\WinGet\Packages"
+    r"\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"
+)
+PYTHON = r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe"
+HIST_SERVER = r"root@31.220.31.30:/root/webapp/data/history/"
+PROJECT       = r"C:\claude"
+VAULT         = Path(r"C:\obsidian")
+HISTORY_DIR   = Path(r"C:\claude\history")
+INDEX_DIR     = Path(r"C:\claude\index")
+EXERCISES_DIR = VAULT / "习题"
+WRONG_DIR     = VAULT / "错题"
+ASSETS_DIR    = EXERCISES_DIR / "assets"
+TEMP_DIR      = Path(r"C:\claude\temp")
+
+# 历史存储：AppData\Local\截图问答\
+_localappdata  = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+STORE_DIR      = Path(_localappdata) / "截图问答"
+DB_PATH        = STORE_DIR / "history.db"
+HIST_IMG_DIR   = STORE_DIR / "images"
+QBTN_FILE = STORE_DIR / "quick_btns.json"
+
+_DEFAULT_QBTNS = ["解题思路是什么？", "这道题考察哪些知识点？", "请逐步详细解释", "有没有类似的题型？"]
+
+def load_qbtns():
+    if QBTN_FILE.exists():
+        try: return json.loads(QBTN_FILE.read_text(encoding="utf-8"))
+        except Exception: pass
+    return _DEFAULT_QBTNS[:]
+
+def save_qbtns(btns):
+    QBTN_FILE.write_text(json.dumps(btns, ensure_ascii=False), encoding="utf-8")
+
+POLL_INTERVAL      = 0.2
+SCREENSHOT_TIMEOUT = 60
+
+# ─── 全局状态 ──────────────────────────────────────────────────────────────────
+
+_SESSION_PROMPT = (
+    "你是一个截图问答助手。根据随附截图和对话历史回答用户问题。"
+    "只回答问题本身，不要修改文件，不要运行命令，不要描述你的系统环境。"
+)
+
+state = {
+    "img_b64":   None,
+    "img_fname": None,
+    "temp_path": None,
+    "done":      threading.Event(),
+    "session":   ai_client.AISession(_SESSION_PROMPT),
+}
+
+# ─── 数据库 ────────────────────────────────────────────────────────────────────
+
+def init_db():
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+    HIST_IMG_DIR.mkdir(exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id          TEXT PRIMARY KEY,
+                timestamp   TEXT NOT NULL,
+                img_fname   TEXT,
+                note        TEXT,
+                messages    TEXT,
+                record_type TEXT DEFAULT 'normal'
+            )
+        """)
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN record_type TEXT DEFAULT 'normal'")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN related_cards TEXT DEFAULT '[]'")
+        except Exception:
+            pass
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# AI 给出的相关度排序 → rank score（位置 1-4）
+RELEVANCE_RANK_SCORES = [1.0, 0.7, 0.5, 0.3]
+
+
+def _read_frontmatter(note_name: str) -> str | None:
+    note_path = VAULT / f"{note_name}.md"
+    if not note_path.exists():
+        return None
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    m = re.match(r'^---\s*\n(.*?)\n---', text, re.DOTALL)
+    return m.group(1) if m else None
+
+
+def get_mastery(note_name: str):
+    """从 frontmatter 读取掌握度（0-100），无数据返回 None。展示用。"""
+    fm = _read_frontmatter(note_name)
+    if fm is None:
+        return None
+    def get_int(key):
+        km = re.search(rf'^{key}\s*:\s*(\d+)', fm, re.MULTILINE)
+        return int(km.group(1)) if km else 0
+    total = get_int("anki_total")
+    if total == 0:
+        return None
+    return round((get_int("anki_review") + get_int("anki_learning") * 0.5) / total * 100)
+
+
+def get_weakness(note_name: str) -> float:
+    """1 - retention_avg（FSRS 留存率）。无 retention 数据时退化为 (relearning+new)/total。"""
+    fm = _read_frontmatter(note_name)
+    if fm is None:
+        return 0.5
+    rm = re.search(r'^anki_retention\s*:\s*([\d.]+)', fm, re.MULTILINE)
+    if rm:
+        try:
+            return max(0.0, min(1.0, 1.0 - float(rm.group(1))))
+        except ValueError:
+            pass
+    def get_int(key):
+        km = re.search(rf'^{key}\s*:\s*(\d+)', fm, re.MULTILINE)
+        return int(km.group(1)) if km else 0
+    total = get_int("anki_total")
+    if total == 0:
+        return 0.5
+    return (get_int("anki_relearning") + get_int("anki_new")) / total
+
+
+def compute_proximity(match: str, candidate: str, index_notes: dict) -> float:
+    """笔记图谱距离的轻量近似：关键词 Jaccard ∪ 显式 [[link]] 双向检测。
+
+    - 同笔记返回 1.0
+    - match 笔记中含 [[candidate]] 链接，返回 1.0
+    - 否则返回关键词 Jaccard
+    """
+    if not match or match == candidate:
+        return 1.0
+
+    def _kw(name):
+        raw = index_notes.get(name, {}).get("keywords", "")
+        return frozenset(k.strip() for k in raw.split(",") if k.strip())
+
+    a, b = _kw(match), _kw(candidate)
+    jacc = len(a & b) / len(a | b) if (a or b) else 0.0
+
+    match_path = VAULT / f"{match}.md"
+    if match_path.exists():
+        try:
+            txt = match_path.read_text(encoding="utf-8", errors="replace")
+            if f"[[{candidate}]]" in txt or f"[[{candidate}|" in txt:
+                return 1.0
+        except Exception:
+            pass
+    return jacc
+
+
+def find_related_cards(note_names: list, match: str = "") -> list:
+    """对每个候选笔记融合三个信号：
+        relevance(AI 排序 rank score) × weakness(1 - 留存率) × proximity(图距离)
+    最终按 score 降序返回。"""
+    index_notes = load_index_notes()
+    cards = []
+    for rank_idx, name in enumerate(note_names):
+        rel  = RELEVANCE_RANK_SCORES[rank_idx] if rank_idx < len(RELEVANCE_RANK_SCORES) else 0.2
+        wk   = get_weakness(name)
+        prox = compute_proximity(match, name, index_notes) if match else 0.5
+        score = rel * wk * prox
+        cards.append({
+            "note":      name,
+            "mastery":   get_mastery(name),
+            "weakness":  round(wk, 3),
+            "proximity": round(prox, 3),
+            "relevance": rel,
+            "score":     round(score, 4),
+        })
+    cards.sort(key=lambda c: -c["score"])
+    return cards
+
+
+def load_index_notes() -> dict:
+    """解析所有索引文件，返回 {笔记名: {"keywords": str, "summary": str}}。"""
+    notes = {}
+    for idx in sorted(f for f in INDEX_DIR.glob("**/*.md") if f.name != "knowledge-index.md"):
+        try:
+            text = idx.read_text(encoding="utf-8")
+            for m in re.finditer(r'\[\[([^\]]+)\]\]\s*`([^`]*)`\s*[—\-]+\s*(.+)', text):
+                name = m.group(1).strip()
+                notes[name] = {
+                    "keywords": m.group(2).strip(),
+                    "summary":  m.group(3).strip()[:60],
+                }
+        except Exception:
+            pass
+    return notes
+
+
+# ─── 工具函数 ──────────────────────────────────────────────────────────────────
+
+def msgbox(msg):
+    ctypes.windll.user32.MessageBoxW(0, msg, "截图问答器", 0x10)
+
+def get_clipboard_image():
+    img = ImageGrab.grabclipboard()
+    return img if isinstance(img, Image.Image) else None
+
+def get_clipboard_hash():
+    img = get_clipboard_image()
+    if img is None:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return hashlib.md5(buf.getvalue()).hexdigest()
+
+def trigger_snip_tool():
+    KEYEVENTF_KEYUP = 0x0002
+    u32 = ctypes.windll.user32
+    for vk in [0x5B, 0x10, 0x53]:
+        u32.keybd_event(vk, 0, 0, 0)
+    time.sleep(0.05)
+    for vk in [0x53, 0x10, 0x5B]:
+        u32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+def wait_for_screenshot(initial_hash):
+    deadline = time.time() + SCREENSHOT_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(POLL_INTERVAL)
+        h = get_clipboard_hash()
+        if h and h != initial_hash:
+            return get_clipboard_image()
+    return None
+
+def find_free_port():
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+# ─── 后台推送到网站 ───────────────────────────────────────────────────────────────
+
+def push_to_website(img_fname: str):
+    """保存后台线程：导出 history.json，SCP 新图片 + JSON 到服务器"""
+    try:
+        subprocess.run(
+            [PYTHON, str(Path(PROJECT) / "scripts" / "export_history.py")],
+            cwd=PROJECT, capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        # 推送 index.html + history.json
+        scp_files = [
+            str(HISTORY_DIR / "index.html"),
+            str(HISTORY_DIR / "history.json"),
+        ]
+        # 推送本次新截图（如果已被导出脚本复制过去）
+        exported_img = HISTORY_DIR / "images" / img_fname
+        if exported_img.exists():
+            scp_files.append(str(exported_img))
+        subprocess.run(
+            ["scp"] + scp_files + [HIST_SERVER],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+# ─── 分类 + 保存（script化）─────────────────────────────────────────────────────
+
+def classify_conversation() -> dict:
+    anki_notes  = sorted(p.stem for p in Path(r"C:\claude\anki\records").glob("000-*.json"))
+    index_files = sorted(f for f in INDEX_DIR.glob("*.md") if f.name != "knowledge-index.md")
+    valid_names = {f.stem for f in index_files}
+    notes_list  = "、".join(sorted(valid_names))
+    anki_list   = "、".join(anki_notes[:60])
+    msgs_text   = "\n".join(
+        f"{'用户' if m['role'] == 'user' else 'Claude'}：{m['text'][:300]}"
+        for m in state["session"].messages
+    )
+    prompt = (
+        "根据以下对话完成三个任务：\n"
+        "1. 从科目索引列表中选出最相关的一个，返回名称；若无返回空字符串\n"
+        "2. 判断是否属于错题（用户做错了题、分析了错误解法等）\n"
+        "3. 若是错题，从笔记列表中找出与错误原因最相关的 2-4 篇（按相关度降序）；不是错题返回空数组\n\n"
+        f"科目索引列表：{notes_list}\n"
+        f"笔记列表：{anki_list}\n\n"
+        f"对话：\n{msgs_text}\n\n"
+        "只输出 JSON（related 必须是数组）：\n"
+        '{"match": "科目名或空字符串", "wrong": true或false, "related": ["笔记名1"]}'
+    )
+    raw    = ai_client.ask(prompt)
+    parsed = None
+    start, end = raw.find('{'), raw.rfind('}')
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(raw[start:end + 1])
+        except Exception:
+            pass
+    if not parsed:
+        return {"match": "", "wrong": False, "related": []}
+    if parsed.get("match") not in valid_names:
+        parsed["match"] = ""
+    if not isinstance(parsed.get("related"), list):
+        parsed["related"] = []
+    anki_set = set(anki_notes)
+    parsed["related"] = [n for n in parsed["related"] if n in anki_set][:4]
+    return parsed
+
+
+def do_save(match: str, is_wrong: bool, related_cards: list = None) -> str:
+    ts        = datetime.now().strftime("%Y-%m-%d %H:%M")
+    img_fname = state["img_fname"]
+    fallback  = f"未分类-{datetime.now().strftime('%Y%m%d')}"
+
+    has_prefix = bool(match and re.match(r'^[0-9A-Fa-f]{3}-', match))
+    note_name  = match if match else fallback
+    ex_prefix  = "错题" if is_wrong else "习题"
+    save_dir   = WRONG_DIR if is_wrong else EXERCISES_DIR
+    section    = "错题本" if is_wrong else "习题本"
+    exfile     = save_dir / f"{ex_prefix}-{note_name}.md"
+
+    # 构建问答正文
+    qa_parts, msgs, i = [], state["session"].messages, 0
+    while i < len(msgs):
+        if msgs[i]["role"] == "user":
+            q = msgs[i]["text"]
+            if i + 1 < len(msgs) and msgs[i + 1]["role"] == "assistant":
+                a = msgs[i + 1]["text"]; i += 2
+            else:
+                a = ""; i += 1
+            qa_parts.append(f"**问**：{q}\n\n**答**：\n\n{a}")
+        else:
+            i += 1
+    content = f"\n# {ts}\n\n![[{img_fname}]]\n\n" + "\n\n".join(qa_parts) + "\n"
+    if is_wrong and related_cards:
+        lines = [
+            f"- [[{c['note']}]]{'（掌握 ' + str(c['mastery']) + '%）' if c.get('mastery') is not None else ''}"
+            for c in related_cards
+        ]
+        content += "\n**相关知识薄弱点**\n\n" + "\n".join(lines) + "\n"
+
+    # 复制截图
+    save_dir.mkdir(parents=True, exist_ok=True)
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ASSETS_DIR / img_fname
+    if not dest.exists() and state["temp_path"] and Path(state["temp_path"]).exists():
+        shutil.copy2(state["temp_path"], dest)
+
+    # 写入习题/错题文件
+    if exfile.exists():
+        existing = exfile.read_text(encoding="utf-8")
+        exfile.write_text(existing.rstrip() + "\n\n---\n" + content, encoding="utf-8")
+    else:
+        header = f"相关知识点：[[{match}]]\n" if has_prefix else ""
+        exfile.write_text(header + content, encoding="utf-8")
+
+    # 更新原笔记反向链接
+    if has_prefix:
+        orig = VAULT / f"{match}.md"
+        link = f"[[{ex_prefix}-{note_name}]]"
+        if orig.exists():
+            text = orig.read_text(encoding="utf-8")
+            if f"## {section}" not in text:
+                orig.write_text(
+                    text.rstrip() + f"\n\n## {section}\n\n- {link}\n", encoding="utf-8"
+                )
+            elif link not in text:
+                lines = text.splitlines()
+                in_sec, ins = False, len(lines)
+                for j, ln in enumerate(lines):
+                    if ln.strip() == f"## {section}":
+                        in_sec = True
+                    elif in_sec and re.match(r'^##\s', ln):
+                        ins = j; break
+                lines.insert(ins, f"- {link}")
+                orig.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return f"已保存({'错题' if is_wrong else '普通'}) → {exfile}"
+
+# ─── 归档对话 ──────────────────────────────────────────────────────────────────
+
+def archive_conversation(note_result: str, record_type: str = "normal", related_cards: list = None):
+    HIST_IMG_DIR.mkdir(parents=True, exist_ok=True)
+    hist_id   = datetime.now().strftime("%Y%m%d-%H%M%S")
+    img_fname = state["img_fname"]
+    src       = Path(state["temp_path"])
+    dst       = HIST_IMG_DIR / img_fname
+    if src.exists() and not dst.exists():
+        shutil.copy2(src, dst)
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO conversations "
+            "(id, timestamp, img_fname, note, messages, record_type, related_cards) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (hist_id,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             img_fname,
+             note_result,
+             json.dumps(state["session"].messages, ensure_ascii=False),
+             record_type,
+             json.dumps(related_cards or [], ensure_ascii=False))
+        )
+
+# ─── HTML 页面 ─────────────────────────────────────────────────────────────────
+
+HTML = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>截图问答</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dvh;display:flex;flex-direction:column;overflow:hidden;font-size:14px}
+#header{background:#fff;border-bottom:1px solid #ddd;padding:8px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+#header h1{font-size:15px;font-weight:600;color:#111}
+#note-tag{font-size:12px;color:#0078d4;background:#e8f0fe;padding:2px 8px;border-radius:10px;display:none}
+#history-btn{margin-left:auto;background:none;border:1px solid #ccc;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;color:#555;transition:all .15s}
+#history-btn:hover{background:#f5f5f5}
+#history-btn.active{background:#e8f0fe;border-color:#0078d4;color:#0078d4}
+#shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;flex-shrink:0;overflow:hidden;transition:max-height .25s ease;max-height:180px;cursor:pointer;display:flex;align-items:center}
+#shot-area.expanded{max-height:60vh}
+#shot-wrap{display:contents}
+#shot-wrap img{max-height:160px;max-width:100%;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain}
+#shot-area.expanded #shot-wrap img{max-height:calc(60vh - 20px)}
+#quick-bar{background:#fff;border-top:1px solid #eee;padding:5px 10px 5px 12px;flex-shrink:0;display:flex;align-items:center;gap:5px;overflow-x:auto;min-height:36px;scrollbar-width:thin}
+#quick-bar::-webkit-scrollbar{height:3px}#quick-bar::-webkit-scrollbar-thumb{background:#ddd;border-radius:3px}
+#quick-btns{display:flex;gap:5px;align-items:center;flex-shrink:0}
+.qbtn-row{display:flex;align-items:center;gap:1px;flex-shrink:0}
+.qbtn{background:#f0f4ff;border:1px solid #cce0ff;border-radius:14px;padding:3px 11px;font-size:12px;color:#0057b8;cursor:pointer;white-space:nowrap;transition:all .15s;line-height:1.6}
+.qbtn:hover{background:#dbeafe;border-color:#0078d4;color:#005fa3}
+.qbtn-actions{display:none;gap:1px;align-items:center}
+.qbtn-row:hover .qbtn-actions{display:flex}
+.qedit-btn{background:none;border:none;color:#bbb;cursor:pointer;font-size:10px;padding:2px 3px;line-height:1;transition:color .15s;border-radius:3px}
+.qedit-btn:hover{color:#0078d4;background:#e8f0fe}
+.qbtn-input{border:1px solid #0078d4;border-radius:14px;padding:2px 10px;font-size:12px;outline:none;font-family:inherit;min-width:60px;max-width:160px;line-height:1.6}
+.qadd-btn{background:none;border:1px dashed #ccc;border-radius:14px;padding:3px 9px;font-size:12px;color:#bbb;cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.qadd-btn:hover{border-color:#0078d4;color:#0078d4}
+#chat{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.msg-row{display:flex;flex-direction:column}
+.msg-row.user{align-items:flex-end}
+.msg-row.assistant{align-items:flex-start}
+.bubble-controls{display:none;gap:4px;margin-bottom:3px}
+.msg-row:hover .bubble-controls{display:flex}
+.ctrl-btn{background:none;border:1px solid #ddd;border-radius:4px;padding:1px 8px;font-size:11px;cursor:pointer;color:#999;line-height:1.7}
+.ctrl-btn:hover{background:#f0f0f0;color:#444;border-color:#bbb}
+.bubble{max-width:88%;padding:10px 14px;border-radius:12px;line-height:1.75;word-break:break-word}
+.bubble.user{background:#0078d4;color:#fff;border-radius:12px 12px 2px 12px}
+.bubble.assistant{background:#fff;border:1px solid #e0e0e0;color:#1a1a1a;border-radius:12px 12px 12px 2px}
+.bubble.deleted{background:#e8e8e8!important;color:#b0b0b0!important;border-color:#ddd!important}
+.bubble.deleted .md,.bubble.deleted .md *{color:#b0b0b0!important}
+.hist-divider{display:flex;align-items:center;gap:8px;font-size:11px;color:#bbb;padding:2px 0}
+.hist-divider-line{flex:1;height:1px;background:#e8e8e8}
+.hist-continue-hint{text-align:center;font-size:12px;color:#0078d4;padding:6px 0}
+.md p{margin:.35em 0}.md p:first-child{margin-top:0}.md p:last-child{margin-bottom:0}
+.md h1,.md h2,.md h3,.md h4{margin:.6em 0 .25em;font-weight:600;font-size:1em}
+.md h1{font-size:1.1em}.md h2{font-size:1.05em}
+.md ul,.md ol{padding-left:1.5em;margin:.35em 0}.md li{margin:.15em 0}
+.md pre{background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;padding:8px 12px;overflow-x:auto;margin:.4em 0;font-size:.87em}
+.md code{font-family:'Cascadia Code',Consolas,monospace;font-size:.87em;background:#f0f0f0;padding:1px 4px;border-radius:3px}
+.md pre code{background:none;padding:0;font-size:inherit}
+.md blockquote{border-left:3px solid #0078d4;padding-left:10px;color:#555;margin:.4em 0}
+.md strong{font-weight:600}.md em{font-style:italic}
+.md table{border-collapse:collapse;margin:.4em 0;font-size:.9em}
+.md td,.md th{border:1px solid #d0d0d0;padding:4px 10px}.md th{background:#f6f8fa;font-weight:600}
+.md hr{border:none;border-top:1px solid #e0e0e0;margin:.6em 0}
+.typing{color:#aaa;font-style:italic}
+#bottom{background:#fff;border-top:1px solid #ddd;padding:10px 16px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0;flex-wrap:wrap}
+#bottom-btns{display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+#input{flex:1;min-width:160px;border:1px solid #ccc;border-radius:8px;padding:8px 12px;font-size:14px;resize:none;height:58px;font-family:inherit;outline:none;line-height:1.5;transition:border-color .15s}
+#input:focus{border-color:#0078d4;box-shadow:0 0 0 2px #e3f0fd}
+#input.search-mode{border-color:#7060cc;box-shadow:0 0 0 2px #e8e4ff}
+.qbtn-fixed{background:#f0f0ff;border:1px solid #bbb8ee;border-radius:14px;padding:3px 11px;font-size:12px;color:#4040bb;cursor:pointer;white-space:nowrap;transition:all .18s;line-height:1.6;flex-shrink:0}
+.qbtn-fixed:hover{background:#e4e4ff;border-color:#8080dd}
+.qbtn-fixed.active{background:#e0d8ff;border-color:#6050cc;color:#2020aa;font-weight:500}
+.btn{border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:opacity .15s}
+.btn:hover:not(:disabled){opacity:.85}.btn:disabled{opacity:.45;cursor:default}
+#send-btn{background:#0078d4;color:#fff}
+#save-btn{background:#107c41;color:#fff}
+#wrong-btn{background:#c0392b;color:#fff}
+#discard-btn{background:#6c757d;color:#fff}
+#status{font-size:12px;color:#666;padding:2px 16px;flex-shrink:0;min-height:18px}
+/* 粘贴图片预览 */
+#paste-row{display:none;background:#fff;border-top:1px solid #eee;padding:6px 16px 4px;align-items:center;gap:8px;flex-shrink:0}
+#paste-row.has-img{display:flex}
+#paste-thumb{max-height:56px;max-width:100px;border-radius:4px;border:1px solid #ddd;object-fit:contain}
+#paste-hint{font-size:11px;color:#aaa;flex:1}
+#paste-clear{background:none;border:1px solid #e0e0e0;border-radius:4px;color:#aaa;cursor:pointer;font-size:11px;padding:2px 7px;line-height:1.6;transition:all .15s}
+#paste-clear:hover{color:#e74c3c;border-color:#e74c3c}
+/* 历史抽屉 */
+#hist-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.15);z-index:99}
+#hist-backdrop.open{display:block}
+#hist-sidebar{position:fixed;top:0;right:0;bottom:0;width:330px;background:#fff;box-shadow:-2px 0 20px rgba(0,0,0,.12);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .22s ease;z-index:100}
+#hist-sidebar.open{transform:translateX(0)}
+#hist-head{padding:12px 14px;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+#hist-head-title{font-weight:600;font-size:13px;color:#222}
+#hist-close{background:none;border:none;font-size:17px;cursor:pointer;color:#bbb;line-height:1;padding:2px 4px}
+#hist-close:hover{color:#555}
+#hist-list{flex:1;overflow-y:auto}
+.hist-entry{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #f5f5f5;cursor:pointer;transition:background .12s}
+.hist-entry:hover{background:#f5f8ff}
+.hist-entry:last-child{border-bottom:none}
+.hist-thumb{width:58px;height:44px;object-fit:cover;border-radius:4px;border:1px solid #e8e8e8;flex-shrink:0;background:#f0f0f0}
+.hist-thumb-blank{width:58px;height:44px;border-radius:4px;background:#f5f5f5;flex-shrink:0}
+.hist-meta{flex:1;min-width:0}
+.hist-ts{font-size:11px;color:#bbb;margin-bottom:2px}
+.hist-note{font-size:12px;color:#444;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
+.hist-count{font-size:11px;color:#ccc;margin-top:2px}
+.hist-del{background:none;border:none;font-size:15px;cursor:pointer;color:#ddd;flex-shrink:0;padding:4px;line-height:1;transition:color .15s}
+.hist-del:hover{color:#e74c3c}
+#hist-empty{padding:40px 16px;text-align:center;color:#ccc;font-size:13px}
+.hist-entry.wrong{border-left:3px solid #e74c3c}
+.hist-wrong-badge{font-size:10px;background:#fde8e8;color:#c0392b;border-radius:3px;padding:1px 5px;margin-left:5px;font-weight:600;vertical-align:middle;flex-shrink:0}
+.hist-chips{display:flex;flex-wrap:wrap;gap:3px;margin-top:4px}
+.hist-chip{font-size:10px;background:#fff3e0;border:1px solid #ffb74d;border-radius:8px;padding:1px 6px;color:#e65100;white-space:nowrap;user-select:none;touch-action:none;cursor:default;transition:background .15s}
+.hist-chip.pressing{background:#ffcc80}
+/* AI 设置弹窗 */
+#settings-btn{background:none;border:1px solid #ccc;border-radius:6px;padding:3px 8px;font-size:14px;cursor:pointer;color:#555;transition:all .15s}
+#settings-btn:hover{background:#f5f5f5;color:#333}
+#sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
+#sett-overlay.open{display:block}
+#sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:380px;width:90%}
+#sett-modal.open{display:block}
+#sett-head{padding:14px 16px 10px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eee}
+#sett-head span{font-weight:600;font-size:14px}
+#sett-close{background:none;border:none;font-size:16px;cursor:pointer;color:#bbb;padding:2px 4px;line-height:1}
+#sett-close:hover{color:#555}
+#sett-body{padding:14px 16px;display:flex;flex-direction:column;gap:7px}
+#sett-body label{font-size:12px;color:#666;font-weight:500;margin-top:4px}
+#sett-body label:first-child{margin-top:0}
+#sett-body select,#sett-body input[type=text]{border:1px solid #ddd;border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s;width:100%}
+#sett-body select:focus,#sett-body input:focus{border-color:#0078d4}
+#sett-hint{font-size:11px;color:#aaa;margin-top:-2px}
+#sett-foot{padding:10px 16px 14px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #eee}
+#sett-foot button{border:none;border-radius:7px;padding:7px 16px;font-size:13px;font-weight:500;cursor:pointer;transition:opacity .15s}
+#sett-save{background:#0078d4;color:#fff}
+#sett-cancel{background:#f5f5f5;color:#555}
+#sett-foot button:hover{opacity:.85}
+@media(max-width:540px){
+  #input{flex-basis:100%;height:48px;font-size:13px}
+  #bottom-btns{width:100%;justify-content:flex-end}
+  .btn{padding:7px 10px;font-size:12px}
+  #shot-area{max-height:120px}
+  #shot-area.expanded{max-height:45vh}
+  #quick-bar{padding:4px 8px}
+  #header{padding:6px 12px}
+  #header h1{font-size:14px}
+  #chat{padding:10px 12px}
+}
+@media(min-width:900px){
+  #shot-wrap img{max-height:none;height:100%}
+}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>截图问答</h1>
+  <span id="note-tag"></span>
+  <button id="history-btn" onclick="openSidebar()">历史记录</button>
+  <button id="settings-btn" onclick="openSettings()" title="AI 设置">⚙</button>
+</div>
+<div id="shot-area">
+  <div id="shot-wrap" title="点击展开/收起截图">
+    <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
+  </div>
+</div>
+<div id="chat"></div>
+<div id="status"></div>
+<div id="quick-bar">
+  <button class="qbtn-fixed" id="search-btn" onclick="toggleSearch()" title="搜索当前对话相关知识点">🔍 关联知识</button>
+  <div id="quick-btns"></div>
+  <button class="qadd-btn" onclick="addQBtn()">＋</button>
+</div>
+<div id="paste-row">
+  <img id="paste-thumb" src="" alt="">
+  <span id="paste-hint">图片已附加，将随下条消息发送</span>
+  <button id="paste-clear" onclick="clearPaste()">✕ 清除</button>
+</div>
+<div id="bottom">
+  <textarea id="input" placeholder="输入问题… （Enter 发送，Shift+Enter 换行；粘贴图片可附图提问）"></textarea>
+  <div id="bottom-btns">
+    <button class="btn" id="send-btn" onclick="send()">发送</button>
+    <button class="btn" id="save-btn" onclick="save()">保存笔记</button>
+    <button class="btn" id="discard-btn" onclick="discard()">放弃</button>
+  </div>
+</div>
+
+<div id="sett-overlay" onclick="closeSettings()"></div>
+<div id="sett-modal">
+  <div id="sett-head">
+    <span>AI 设置</span>
+    <button id="sett-close" onclick="closeSettings()">✕</button>
+  </div>
+  <div id="sett-body">
+    <label for="s-backend">AI 后端</label>
+    <select id="s-backend">
+      <option value="auto-claude">🔄 自动（优先 Claude）</option>
+      <option value="auto-codex">🔄 自动（优先 Codex）</option>
+      <option value="claude">Claude CLI</option>
+      <option value="codex">Codex CLI（OpenAI）</option>
+    </select>
+    <label for="s-model">模型（可选，仅 Codex 有效）</label>
+    <input type="text" id="s-model" list="s-model-opts" placeholder="留空使用默认模型">
+    <datalist id="s-model-opts">
+      <option value="gpt-5.5"></option>
+      <option value="gpt-5.4"></option>
+      <option value="gpt-5.4-mini"></option>
+      <option value="gpt-5.3-codex"></option>
+    </datalist>
+    <p id="sett-hint">自动模式：首选 AI 限流时自动切换至另一个</p>
+  </div>
+  <div id="sett-foot">
+    <button id="sett-cancel" onclick="closeSettings()">取消</button>
+    <button id="sett-save" onclick="saveSettings()">保存</button>
+  </div>
+</div>
+
+<div id="hist-backdrop" onclick="closeSidebar()"></div>
+<div id="hist-sidebar">
+  <div id="hist-head">
+    <span id="hist-head-title">历史记录</span>
+    <button id="hist-close" onclick="closeSidebar()">✕</button>
+  </div>
+  <div id="hist-list"><div id="hist-empty">加载中…</div></div>
+</div>
+
+<script>
+window.MathJax = {
+  tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']],processEscapes:true},
+  options:{skipHtmlTags:['script','noscript','style','textarea','pre']},
+  startup:{typeset:false},
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async id="MathJax-script"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script>
+if (window.marked && marked.use) {
+  marked.use({ breaks: true, gfm: true });
+} else {
+  console.warn('marked.js 未加载，将使用纯文本兜底渲染');
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderMd(text) {
+  if (!window.marked || !marked.parse) {
+    return escapeHtml(text).replace(/\n/g, '<br>');
+  }
+  try {
+    const saved = [];
+    const ph = m => { saved.push(m); return '\x02M' + (saved.length-1) + '\x02'; };
+    let s = text
+      .replace(/\$\$[\s\S]*?\$\$/g, ph).replace(/\\\[[\s\S]*?\\\]/g, ph)
+      .replace(/\\\([\s\S]*?\\\)/g, ph)
+      .replace(/(?<!\$)\$(?!\$)[^\n$]*?\$(?!\$)/g, ph);
+    s = marked.parse(s);
+    return s.replace(/\x02M(\d+)\x02/g, (_, i) => saved[+i]);
+  } catch (e) {
+    console.warn('renderMd 失败，回退到纯文本', e);
+    return escapeHtml(text).replace(/\n/g, '<br>');
+  }
+}
+
+// MathJax 可能因 async 加载尚未就绪；最多轮询 20×200ms = 4s 后放弃。
+function typeset(el, retries) {
+  if (retries === undefined) retries = 20;
+  if (window.MathJax && typeof MathJax.typesetPromise === 'function') {
+    return MathJax.typesetPromise([el]).catch(e => console.warn('MathJax typeset 失败', e));
+  }
+  if (retries > 0) setTimeout(() => typeset(el, retries - 1), 200);
+}
+
+const chat   = document.getElementById('chat');
+const input  = document.getElementById('input');
+const status = document.getElementById('status');
+let sending  = false;
+let pendingHistory  = null;   // 加载历史后，首条消息携带上下文
+let currentShotSrc  = '';     // 当前会话截图 base64
+let pastedImgB64    = null;   // 粘贴的图片 base64（不含 data URL 前缀）
+let searchMode      = false;  // 关联知识搜索模式
+
+function pollScreenshot() {
+  fetch('api/screenshot').then(r => r.json()).then(d => {
+    if (d.data) {
+      currentShotSrc = 'data:image/png;base64,' + d.data;
+      document.getElementById('shot').src = currentShotSrc;
+      document.getElementById('shot').alt = '截图';
+    } else {
+      document.getElementById('shot').alt = '等待截图注入…';
+      setTimeout(pollScreenshot, 3000);
+    }
+  }).catch(() => setTimeout(pollScreenshot, 5000));
+}
+pollScreenshot();
+
+// ─── 粘贴图片 ────────────────────────────────────────────────────────────────
+
+document.addEventListener('paste', e => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const src = ev.target.result;
+        pastedImgB64 = src.split(',')[1];
+        document.getElementById('paste-thumb').src = src;
+        document.getElementById('paste-row').classList.add('has-img');
+        input.focus();
+      };
+      reader.readAsDataURL(blob);
+      break;
+    }
+  }
+});
+
+function clearPaste() {
+  pastedImgB64 = null;
+  document.getElementById('paste-thumb').src = '';
+  document.getElementById('paste-row').classList.remove('has-img');
+}
+
+function toggleSearch() {
+  searchMode = !searchMode;
+  document.getElementById('search-btn').classList.toggle('active', searchMode);
+  input.classList.toggle('search-mode', searchMode);
+  if (searchMode) input.focus();
+}
+
+function deactivateSearch() {
+  searchMode = false;
+  document.getElementById('search-btn').classList.remove('active');
+  input.classList.remove('search-mode');
+}
+document.getElementById('shot-wrap').addEventListener('click', () => {
+  document.getElementById('shot-area').classList.toggle('expanded');
+});
+
+// ─── 快捷提问按钮 ─────────────────────────────────────────────────────────────
+
+async function fetchQBtns() {
+  try { return (await fetch('api/qbtns').then(r => r.json())).btns || []; }
+  catch(_) { return []; }
+}
+
+async function persistQBtns(arr) {
+  try { await fetch('api/qbtns', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({btns:arr})}); }
+  catch(_) {}
+}
+
+async function renderQBtns() {
+  const container = document.getElementById('quick-btns');
+  const btns = await fetchQBtns();
+  container.innerHTML = '';
+  btns.forEach((text, i) => {
+    const row = document.createElement('div');
+    row.className = 'qbtn-row';
+    const btn = document.createElement('button');
+    btn.className = 'qbtn';
+    btn.textContent = text;
+    btn.onclick = () => fillQuick(text);
+    const acts = document.createElement('div');
+    acts.className = 'qbtn-actions';
+    acts.innerHTML =
+      `<button class="qedit-btn" title="编辑" onclick="editQBtn(${i},event)">✎</button>` +
+      `<button class="qedit-btn" title="删除" onclick="deleteQBtn(${i},event)">✕</button>`;
+    row.appendChild(btn);
+    row.appendChild(acts);
+    container.appendChild(row);
+  });
+}
+
+function fillQuick(text) {
+  input.value = text;
+  input.focus();
+}
+
+async function editQBtn(i, ev) {
+  if (ev) ev.stopPropagation();
+  const btns = await fetchQBtns();
+  const container = document.getElementById('quick-btns');
+  const row = container.children[i];
+  if (!row) return;
+  row.innerHTML = '';
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'qbtn-input';
+  inp.value = btns[i] || '';
+  const ok = document.createElement('button');
+  ok.className = 'qedit-btn'; ok.title = '确认'; ok.textContent = '✓';
+  ok.onclick = e => { e.stopPropagation(); confirmEditQBtn(i); };
+  row.appendChild(inp); row.appendChild(ok);
+  inp.focus(); inp.select();
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmEditQBtn(i); }
+    if (e.key === 'Escape') renderQBtns();
+  });
+}
+
+async function confirmEditQBtn(i) {
+  const container = document.getElementById('quick-btns');
+  const row = container.children[i];
+  if (!row) return;
+  const inp = row.querySelector('.qbtn-input');
+  const newText = inp ? inp.value.trim() : '';
+  const btns = await fetchQBtns();
+  if (newText) btns[i] = newText;
+  await persistQBtns(btns);
+  await renderQBtns();
+}
+
+async function deleteQBtn(i, ev) {
+  if (ev) ev.stopPropagation();
+  const btns = await fetchQBtns();
+  btns.splice(i, 1);
+  await persistQBtns(btns);
+  await renderQBtns();
+}
+
+async function addQBtn() {
+  const btns = await fetchQBtns();
+  btns.push('新问题');
+  await persistQBtns(btns);
+  await renderQBtns();
+  setTimeout(() => editQBtn(btns.length - 1), 30);
+}
+
+renderQBtns();
+
+function addMsg(role, html, isHtml, imgSrc) {
+  const row = document.createElement('div');
+  row.className = 'msg-row ' + role;
+  const ctrl = document.createElement('div');
+  ctrl.className = 'bubble-controls';
+  ctrl.innerHTML = '<button class="ctrl-btn" onclick="delMsg(this)">删除</button>'
+                 + '<button class="ctrl-btn" onclick="resMsg(this)">恢复</button>';
+  const d = document.createElement('div');
+  d.className = 'bubble ' + role;
+  if (role === 'assistant') {
+    const c = document.createElement('div');
+    c.className = 'md';
+    c.innerHTML = isHtml ? html : renderMd(html);
+    d.appendChild(c);
+  } else {
+    d.textContent = html;
+    if (imgSrc) {
+      const img = document.createElement('img');
+      img.src = imgSrc;
+      img.style.cssText = 'max-height:80px;max-width:180px;border-radius:4px;border:1px solid rgba(255,255,255,.3);display:block;margin-top:6px;object-fit:contain';
+      d.appendChild(img);
+    }
+  }
+  row.appendChild(ctrl);
+  row.appendChild(d);
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  if (role === 'assistant') typeset(d);
+  return d;
+}
+
+function delMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.add('deleted'); }
+function resMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.remove('deleted'); }
+
+function setAllBtns(disabled) {
+  ['send-btn','save-btn','discard-btn'].forEach(id => document.getElementById(id).disabled = disabled);
+}
+
+async function send() {
+  const text = input.value.trim();
+  if ((!text && !searchMode) || sending) return;
+  input.value = '';
+
+  // ── 关联知识搜索模式 ──────────────────────────────────────────────────────
+  if (searchMode) {
+    const label = text || '搜索当前内容相关知识点';
+    deactivateSearch();
+    addMsg('user', label);
+    sending = true; setAllBtns(true);
+    const typing = addMsg('assistant', '<span class="typing">搜索中…</span>', true);
+    status.textContent = '';
+    try {
+      const r = await fetch('api/search-related', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query: text}),
+      });
+      const d = await r.json();
+      typing.remove();
+      addMsg('assistant', d.response);
+    } catch(e) {
+      typing.querySelector('.typing').textContent = '搜索失败：' + e.message;
+      typing.querySelector('.typing').style.color = '#c00';
+    }
+    sending = false; setAllBtns(false); input.focus();
+    return;
+  }
+
+  // ── 普通对话 ──────────────────────────────────────────────────────────────
+  const imgSrc = pastedImgB64 ? document.getElementById('paste-thumb').src : null;
+  addMsg('user', text, false, imgSrc);
+  const imgB64 = pastedImgB64;
+  if (pastedImgB64) clearPaste();
+  sending = true;
+  setAllBtns(true);
+  const typing = addMsg('assistant', '<span class="typing">思考中…</span>', true);
+  status.textContent = '';
+
+  const reqBody = { message: text };
+  if (pendingHistory) { reqBody.history = pendingHistory; pendingHistory = null; }
+  if (imgB64) reqBody.image_b64 = imgB64;
+
+  try {
+    const r = await fetch('api/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(reqBody),
+    });
+    const d = await r.json();
+    typing.remove();
+    addMsg('assistant', d.response);
+    if (d.note) {
+      const tag = document.getElementById('note-tag');
+      tag.textContent = d.note; tag.style.display = 'inline';
+    }
+  } catch(e) {
+    typing.querySelector('.typing').textContent = '错误：' + e.message;
+    typing.querySelector('.typing').style.color = '#c00';
+  }
+  sending = false;
+  setAllBtns(false);
+  input.focus();
+}
+
+async function save() {
+  if (sending) return;
+  const saveBtn = document.getElementById('save-btn');
+  setAllBtns(true); saveBtn.textContent = '保存中…';
+  status.textContent = '正在整理对话并写入笔记…';
+  try {
+    const r = await fetch('api/save', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+    });
+    const d = await r.json();
+    status.textContent = '✓ ' + d.result;
+    saveBtn.textContent = '已保存 ✓'; saveBtn.style.background = '#666';
+    addMsg('assistant', '📝 ' + d.result);
+    setTimeout(() => window.close(), 2000);
+  } catch(e) {
+    status.textContent = '保存失败：' + e.message;
+    setAllBtns(false); saveBtn.textContent = '保存笔记';
+  }
+}
+
+async function discard() {
+  setAllBtns(true);
+  try { await fetch('api/discard', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); } catch(_){}
+  document.body.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:10px;color:#888">'
+    + '<p style="font-size:15px">本次对话已放弃</p><p style="font-size:13px">可以关闭此标签页</p></div>';
+  window.close();
+}
+
+// ─── 历史抽屉 ─────────────────────────────────────────────────────────────────
+
+async function openSidebar() {
+  document.getElementById('hist-backdrop').classList.add('open');
+  document.getElementById('hist-sidebar').classList.add('open');
+  document.getElementById('history-btn').classList.add('active');
+  await loadHistoryList();
+}
+
+function closeSidebar() {
+  document.getElementById('hist-backdrop').classList.remove('open');
+  document.getElementById('hist-sidebar').classList.remove('open');
+  document.getElementById('history-btn').classList.remove('active');
+  input.focus();
+}
+
+async function loadHistoryList() {
+  const list  = document.getElementById('hist-list');
+  const title = document.getElementById('hist-head-title');
+  list.innerHTML = '<div id="hist-empty">加载中…</div>';
+  try {
+    const d = await fetch('api/history').then(r => r.json());
+    const n = d.entries.length;
+    title.textContent = n ? `历史记录（${n} 条）` : '历史记录';
+    if (!n) { list.innerHTML = '<div id="hist-empty">暂无历史记录</div>'; return; }
+
+    list.innerHTML = '';
+    d.entries.forEach(e => {
+      const el = document.createElement('div');
+      const isWrong = e.record_type === 'wrong';
+      el.className = 'hist-entry' + (isWrong ? ' wrong' : '');
+      el.dataset.id = e.id;
+      const thumb = e.img_fname
+        ? `<img class="hist-thumb" src="api/image/${e.img_fname}" onerror="this.className='hist-thumb-blank'">`
+        : `<div class="hist-thumb-blank"></div>`;
+      const noteShort = e.note
+        .replace(/^已保存\(错题\) → .*?\\/, '').replace(/^已保存\(错题\) → /, '')
+        .replace(/^已保存 → .*?\\/, '').replace(/^已保存 → /, '');
+      const badge = isWrong ? '<span class="hist-wrong-badge">错题</span>' : '';
+      let chipsHtml = '';
+      if (isWrong && e.related_cards && e.related_cards.length) {
+        chipsHtml = '<div class="hist-chips">' + e.related_cards.map(c => {
+          const short = c.note.replace(/^[0-9A-Fa-f]{3}-/, '');
+          const pct   = c.mastery != null ? ' ' + c.mastery + '%' : '';
+          const noteAttr = c.note.replace(/"/g, '&quot;');
+          return `<span class="hist-chip" data-id="${e.id}" data-note="${noteAttr}"` +
+                 ` onmousedown="chipPressStart(event,this)" onmouseup="chipPressEnd(event)" onmouseleave="chipPressEnd(event)"` +
+                 ` ontouchstart="chipPressStart(event,this)" ontouchend="chipPressEnd(event)">${short}${pct}</span>`;
+        }).join('') + '</div>';
+      }
+      el.innerHTML = `
+        ${thumb}
+        <div class="hist-meta">
+          <div class="hist-ts">${e.timestamp}${badge}</div>
+          <div class="hist-note" title="${e.note}">${noteShort || e.note || '（未保存）'}</div>
+          <div class="hist-count">${e.msg_count} 条消息</div>
+          ${chipsHtml}
+        </div>
+        <button class="hist-del" title="删除">✕</button>
+      `;
+      el.querySelector('.hist-del').addEventListener('click', ev => {
+        ev.stopPropagation();
+        deleteHistory(e.id, el);
+      });
+      el.addEventListener('click', () => loadConversation(e.id, e.timestamp, e.img_fname));
+      list.appendChild(el);
+    });
+  } catch(e) {
+    list.innerHTML = `<div id="hist-empty" style="color:#c00">加载失败：${e.message}</div>`;
+  }
+}
+
+async function deleteHistory(id, el) {
+  el.style.opacity = '0.4';
+  try {
+    const d = await fetch('api/history/delete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id }),
+    }).then(r => r.json());
+    if (d.ok) {
+      el.remove();
+      const list  = document.getElementById('hist-list');
+      const title = document.getElementById('hist-head-title');
+      const n = list.querySelectorAll('.hist-entry').length;
+      if (!n) { list.innerHTML = '<div id="hist-empty">暂无历史记录</div>'; title.textContent = '历史记录'; }
+      else title.textContent = `历史记录（${n} 条）`;
+    } else {
+      el.style.opacity = '';
+    }
+  } catch(_) { el.style.opacity = ''; }
+}
+
+async function loadConversation(id, timestamp, imgFname) {
+  closeSidebar();
+
+  let data;
+  try {
+    data = await fetch('api/history/' + id).then(r => r.json());
+    if (data.error) throw new Error(data.error);
+  } catch(e) { status.textContent = '加载失败：' + e.message; return; }
+
+  // 重置后端会话
+  await fetch('api/reset', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+
+  // 切换顶部截图为历史截图
+  if (imgFname) document.getElementById('shot').src = 'api/image/' + imgFname;
+
+  // 清空并渲染历史消息
+  chat.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'hist-divider';
+  div.innerHTML = `<div class="hist-divider-line"></div><span>${timestamp}</span><div class="hist-divider-line"></div>`;
+  chat.appendChild(div);
+
+  for (const m of data.messages || []) addMsg(m.role, m.text);
+
+  const hint = document.createElement('div');
+  hint.className = 'hist-continue-hint';
+  hint.textContent = '─ 输入问题可继续此对话 ─';
+  chat.appendChild(hint);
+  chat.scrollTop = chat.scrollHeight;
+
+  pendingHistory = data.messages || [];
+  input.focus();
+}
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.focus();
+
+// ─── AI 设置 ──────────────────────────────────────────────────────────────────
+
+async function openSettings() {
+  try {
+    const s = await fetch('api/settings').then(r => r.json());
+    document.getElementById('s-backend').value   = s.backend   || 'auto';
+    document.getElementById('s-model').value     = s.model     || '';
+  } catch(_) {}
+  document.getElementById('sett-overlay').classList.add('open');
+  document.getElementById('sett-modal').classList.add('open');
+}
+
+function closeSettings() {
+  document.getElementById('sett-overlay').classList.remove('open');
+  document.getElementById('sett-modal').classList.remove('open');
+  input.focus();
+}
+
+async function saveSettings() {
+  const backend   = document.getElementById('s-backend').value;
+  const model     = document.getElementById('s-model').value.trim();
+
+  try {
+    await fetch('api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({backend, model}),
+    });
+    status.textContent = `AI 后端已设置：${backend}${model ? ' / ' + model : ''}`;
+  } catch(_) {}
+  closeSettings();
+}
+
+// ─── 知识关联芯片（长按删除）───────────────────────────────────────────────────
+
+let _chipTimer = null;
+let _chipEl    = null;
+
+function chipPressStart(ev, el) {
+  ev.stopPropagation();
+  _chipEl = el;
+  el.classList.add('pressing');
+  _chipTimer = setTimeout(async () => {
+    el.classList.remove('pressing');
+    _chipEl = null;
+    const id = el.dataset.id, note = el.dataset.note;
+    el.style.opacity = '0.3';
+    try {
+      await fetch('api/history/cards/update', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id, note}),
+      });
+      const wrap = el.parentElement;
+      el.remove();
+      if (wrap && !wrap.querySelector('.hist-chip')) wrap.remove();
+    } catch(_) { el.style.opacity = ''; }
+  }, 600);
+}
+
+function chipPressEnd(ev) {
+  if (ev) ev.stopPropagation();
+  if (_chipTimer) { clearTimeout(_chipTimer); _chipTimer = null; }
+  if (_chipEl) { _chipEl.classList.remove('pressing'); _chipEl = null; }
+}
+</script>
+</body>
+</html>"""
+
+# ─── HTTP 服务器 ────────────────────────────────────────────────────────────────
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_): pass
+
+    def send_json(self, data, code=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/":
+            body = HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path == "/api/screenshot":
+            self.send_json({"data": state["img_b64"]})
+
+        elif self.path == "/api/settings":
+            self.send_json(ai_client.load_settings())
+
+        elif self.path == "/api/qbtns":
+            self.send_json({"btns": load_qbtns()})
+
+        elif self.path == "/api/history":
+            with db() as conn:
+                rows = conn.execute(
+                    "SELECT id, timestamp, img_fname, note, messages, record_type, related_cards "
+                    "FROM conversations ORDER BY timestamp DESC"
+                ).fetchall()
+            entries = []
+            for r in rows:
+                msgs = json.loads(r["messages"] or "[]")
+                entries.append({
+                    "id":            r["id"],
+                    "timestamp":     r["timestamp"],
+                    "img_fname":     r["img_fname"] or "",
+                    "note":          r["note"] or "",
+                    "msg_count":     len(msgs),
+                    "record_type":   r["record_type"] or "normal",
+                    "related_cards": json.loads(r["related_cards"] or "[]"),
+                })
+            self.send_json({"entries": entries})
+
+        elif self.path.startswith("/api/image/"):
+            fname = self.path[len("/api/image/"):].split("?")[0]
+            if re.match(r'^[A-Za-z0-9._-]+$', fname):
+                img_path = HIST_IMG_DIR / fname
+                if img_path.exists():
+                    data = img_path.read_bytes()
+                    ext = img_path.suffix.lower()
+                    ct  = "image/png" if ext == ".png" else "image/jpeg"
+                    self.send_response(200)
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_response(404); self.end_headers()
+            else:
+                self.send_response(400); self.end_headers()
+
+        elif self.path.startswith("/api/history/"):
+            hid = self.path[len("/api/history/"):].split("?")[0]
+            if re.match(r'^[A-Za-z0-9_-]+$', hid):
+                with db() as conn:
+                    row = conn.execute(
+                        "SELECT id, timestamp, img_fname, note, messages, related_cards "
+                        "FROM conversations WHERE id=?", (hid,)
+                    ).fetchone()
+                if row:
+                    self.send_json({
+                        "id":            row["id"],
+                        "timestamp":     row["timestamp"],
+                        "img_fname":     row["img_fname"] or "",
+                        "note":          row["note"] or "",
+                        "messages":      json.loads(row["messages"] or "[]"),
+                        "related_cards": json.loads(row["related_cards"] or "[]"),
+                    })
+                else:
+                    self.send_json({"error": "not found"}, 404)
+            else:
+                self.send_json({"error": "invalid id"}, 400)
+
+        else:
+            self.send_response(404); self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body   = json.loads(self.rfile.read(length) or b"{}")
+
+        if self.path == "/api/chat":
+            msg     = body.get("message", "").strip()
+            history = body.get("history")
+            img_b64 = body.get("image_b64")
+            session = state["session"]
+
+            if history and session._first and not session.messages:
+                session.messages = list(history)
+                img = None                          # 续聊历史时不传当前截图
+            else:
+                img = str(state["temp_path"]) if state.get("temp_path") else None
+
+            paste_tmp = None
+            if img_b64:
+                try:
+                    paste_tmp = TEMP_DIR / f"paste-{datetime.now().strftime('%Y%m%d%H%M%S%f')}.png"
+                    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+                    raw_bytes = base64.b64decode(img_b64)
+                    try:
+                        import pillow_heif
+                        pillow_heif.register_heif_opener()
+                    except ImportError:
+                        pass
+                    try:
+                        img_obj = Image.open(io.BytesIO(raw_bytes))
+                        buf = io.BytesIO()
+                        img_obj.convert("RGB").save(buf, format="PNG")
+                        paste_tmp.write_bytes(buf.getvalue())
+                    except Exception:
+                        paste_tmp.write_bytes(raw_bytes)
+                    img = str(paste_tmp)
+                except Exception:
+                    paste_tmp = None
+
+            resp = session.send(msg, image_path=img)
+
+            if paste_tmp:
+                try: paste_tmp.unlink(missing_ok=True)
+                except Exception: pass
+
+            self.send_json({"response": resp})
+
+        elif self.path == "/api/inject-image":
+            # 远程截图注入：接收 base64，重置会话
+            img_b64 = body.get("image_b64", "")
+            if img_b64:
+                try:
+                    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+                    ts        = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    img_fname = f"remote-{ts}.png"
+                    temp_path = TEMP_DIR / img_fname
+                    raw_bytes = base64.b64decode(img_b64)
+                    # 统一转为 PNG（兼容 HEIC / JPEG / WebP 等 iPad 格式）
+                    try:
+                        import pillow_heif
+                        pillow_heif.register_heif_opener()
+                    except ImportError:
+                        pass
+                    try:
+                        img_obj = Image.open(io.BytesIO(raw_bytes))
+                        buf = io.BytesIO()
+                        img_obj.convert("RGB").save(buf, format="PNG")
+                        temp_path.write_bytes(buf.getvalue())
+                    except Exception:
+                        temp_path.write_bytes(raw_bytes)
+                    state.update({
+                        "img_b64":   img_b64,
+                        "img_fname": img_fname,
+                        "temp_path": temp_path,
+                    })
+                    state["session"].reset()
+                    print(f"[remote-qa] 收到新截图 {img_fname}")
+                    self.send_json({"ok": True})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+            else:
+                self.send_json({"ok": False, "error": "no image_b64"})
+
+        elif self.path == "/api/save":
+            try:
+                cls      = classify_conversation()
+                match    = cls.get("match", "")
+                is_wrong = bool(cls.get("wrong", False))
+                related  = find_related_cards(cls.get("related", []), match) if is_wrong else []
+                result   = do_save(match, is_wrong, related)
+                archive_conversation(result, "wrong" if is_wrong else "normal", related)
+                threading.Thread(
+                    target=push_to_website,
+                    args=(state["img_fname"],),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                result = f"保存失败：{e}"
+            self.send_json({"result": result})
+            if not state.get("_server_mode"):
+                state["done"].set()
+            else:
+                # server 模式：保存后重置会话继续服务
+                state["session"].reset()
+                state.update({"img_b64": None, "img_fname": None, "temp_path": None})
+
+        elif self.path == "/api/discard":
+            self.send_json({"ok": True})
+            if not state.get("_server_mode"):
+                state["done"].set()
+            else:
+                state["session"].reset()
+                state.update({"img_b64": None, "img_fname": None, "temp_path": None})
+
+        elif self.path == "/api/settings":
+            self.send_json(ai_client.save_settings(body))
+
+        elif self.path == "/api/qbtns":
+            btns = body.get("btns", [])
+            if isinstance(btns, list):
+                save_qbtns(btns)
+                self.send_json({"ok": True})
+            else:
+                self.send_json({"ok": False})
+
+        elif self.path == "/api/reset":
+            state["session"].reset()
+            self.send_json({"ok": True})
+
+        elif self.path == "/api/history/delete":
+            hid = body.get("id", "")
+            if re.match(r'^[A-Za-z0-9_-]+$', hid):
+                with db() as conn:
+                    row = conn.execute("SELECT img_fname FROM conversations WHERE id=?", (hid,)).fetchone()
+                    conn.execute("DELETE FROM conversations WHERE id=?", (hid,))
+                if row and row["img_fname"]:
+                    img = HIST_IMG_DIR / row["img_fname"]
+                    if img.exists():
+                        img.unlink()
+                self.send_json({"ok": True})
+            else:
+                self.send_json({"ok": False, "error": "invalid id"})
+
+        elif self.path == "/api/search-related":
+            query = body.get("query", "").strip()
+            notes_map = load_index_notes()
+            if not notes_map:
+                self.send_json({"response": "（索引为空，无法搜索关联知识）"})
+                return
+
+            notes_text = "\n".join(
+                f"- {n}: {info['keywords']} — {info['summary']}"
+                for n, info in list(notes_map.items())[:80]
+            )
+            msgs_ctx = "\n".join(
+                f"{'用户' if m['role'] == 'user' else 'Claude'}：{m['text'][:200]}"
+                for m in state["session"].messages[-6:]
+            )
+            if not msgs_ctx.strip() and not query:
+                self.send_json({"response": "（请先进行对话，或在输入框补充搜索关键词）"})
+                return
+            if query:
+                msgs_ctx += f"\n\n补充说明：{query}"
+
+            prompt = (
+                "根据以下对话内容，从知识库中找出最相关的 3-6 篇笔记，并说明每篇的关联原因（15 字以内）。\n\n"
+                f"对话内容：\n{msgs_ctx}\n\n"
+                f"知识库笔记：\n{notes_text}\n\n"
+                "只输出 JSON 数组：\n"
+                '[{"note": "笔记名", "reason": "关联原因"}, ...]'
+            )
+            raw     = ai_client.ask(prompt)
+            related = []
+            s, e    = raw.find('['), raw.rfind(']')
+            if s != -1 and e > s:
+                try:
+                    related = json.loads(raw[s:e + 1])
+                except Exception:
+                    pass
+
+            if not related:
+                resp_text = "未找到明显关联的知识点。"
+            else:
+                lines = ["**关联知识点**\n"]
+                for item in related:
+                    note   = item.get("note", "")
+                    reason = item.get("reason", "")
+                    if not note:
+                        continue
+                    mastery = get_mastery(note)
+                    m_str   = f"  掌握 {mastery}%" if mastery is not None else ""
+                    lines.append(f"- [[{note}]] — {reason}{m_str}")
+                resp_text = "\n".join(lines)
+
+            user_q  = query if query else "搜索当前内容相关知识点"
+            session = state["session"]
+            session.messages.append({"role": "user",      "text": f"[关联搜索] {user_q}"})
+            session.messages.append({"role": "assistant", "text": resp_text})
+            session._first = False
+            self.send_json({"response": resp_text})
+
+        elif self.path == "/api/history/cards/update":
+            hid  = body.get("id", "")
+            note = body.get("note", "")
+            if re.match(r'^[A-Za-z0-9_-]+$', hid) and note:
+                with db() as conn:
+                    row = conn.execute("SELECT related_cards FROM conversations WHERE id=?", (hid,)).fetchone()
+                    if row:
+                        cards = json.loads(row["related_cards"] or "[]")
+                        cards = [c for c in cards if c.get("note") != note]
+                        conn.execute("UPDATE conversations SET related_cards=? WHERE id=?",
+                                     (json.dumps(cards, ensure_ascii=False), hid))
+                self.send_json({"ok": True})
+            else:
+                self.send_json({"ok": False})
+
+        else:
+            self.send_response(404); self.end_headers()
+
+# ─── 主流程 ────────────────────────────────────────────────────────────────────
+
+def main():
+    init_db()
+
+    initial_hash = get_clipboard_hash()
+    time.sleep(0.3)
+    trigger_snip_tool()
+
+    image = wait_for_screenshot(initial_hash)
+    if image is None:
+        msgbox(f"超时（{SCREENSHOT_TIMEOUT}s）：未检测到新截图，程序退出。")
+        sys.exit(1)
+
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    ts        = datetime.now().strftime("%Y%m%d-%H%M%S")
+    img_fname = f"screenshot-{ts}.png"
+    temp_path = TEMP_DIR / img_fname
+    image.save(temp_path)
+
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    state.update({
+        "img_b64":   base64.b64encode(buf.getvalue()).decode(),
+        "img_fname": img_fname,
+        "temp_path": temp_path,
+    })
+
+    port   = find_free_port()
+    server = ThreadedHTTPServer(("localhost", port), Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    url = f"http://localhost:{port}"
+    if CHROME_EXE:
+        subprocess.Popen([CHROME_EXE, f"--app={url}", "--window-size=920,720"])
+    else:
+        webbrowser.open(url)
+
+    state["done"].wait(timeout=1800)
+    time.sleep(1.5)
+    server.shutdown()
+    server.server_close()
+    t.join(timeout=3)
+
+
+def server_mode():
+    """持久化服务器模式：固定 5001 端口，通过 /api/inject-image 接收远程截图。"""
+    init_db()
+    state.update({"img_b64": None, "img_fname": None, "temp_path": None,
+                  "_server_mode": True})
+    port   = 5001
+    server = ThreadedHTTPServer(("127.0.0.1", port), Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    print(f"[remote-qa] 服务器已启动 http://127.0.0.1:{port}")
+    print(f"[remote-qa] 等待 iPad 截图注入...")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\n[remote-qa] 已停止")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--server":
+        server_mode()
+    else:
+        main()

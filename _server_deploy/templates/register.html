@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>注册 · bwicarus.space</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #f0f2f5; font-family: system-ui, -apple-system, sans-serif;
+    }
+    .card {
+      background: #fff; border-radius: 14px; padding: 40px 36px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08); width: 100%; max-width: 380px;
+    }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+    .sub { font-size: 13px; color: #6b7280; margin-bottom: 22px; }
+    .invite { font-size: 12px; color: #4f46e5; background: #eef2ff;
+              padding: 8px 12px; border-radius: 8px; margin-bottom: 18px; }
+    label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: #374151; }
+    label small { font-weight: 400; color: #9ca3af; }
+    input {
+      width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 14px; margin-bottom: 14px; outline: none; transition: border 0.15s;
+    }
+    input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    button {
+      width: 100%; padding: 11px; background: #1a1a1a; color: #fff; border: none;
+      border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: #333; }
+    .error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+             border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 16px; }
+    .footer { text-align: center; margin-top: 18px; font-size: 13px; color: #6b7280; }
+    .footer a { color: #6366f1; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>注册账户</h1>
+    <p class="sub">bwicarus.space</p>
+    {% if not invite_valid %}
+      <div class="error">邀请码无效或已使用，请联系管理员获取新的邀请链接</div>
+      <div class="footer"><a href="/login">已有账户？登录</a></div>
+    {% else %}
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <div class="invite">邀请码 ✓ 已验证</div>
+      <form method="post">
+        <input type="hidden" name="token" value="{{ token }}">
+        <label>用户名 <small>字母 / 数字 / _ / -，2–32 位</small></label>
+        <input type="text" name="username" autofocus required minlength="2" maxlength="32" pattern="[A-Za-z0-9_\-]+">
+        <label>密码 <small>至少 6 位</small></label>
+        <input type="password" name="password" required minlength="6">
+        <label>再次输入密码</label>
+        <input type="password" name="password2" required minlength="6">
+        <button type="submit">注册并登录</button>
+      </form>
+      <div class="footer"><a href="/login">已有账户？登录</a></div>
+    {% endif %}
+  </div>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>授权客户端 · bwicarus.space</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+           background: #f0f2f5; font-family: system-ui, -apple-system, sans-serif;
+           padding: 40px 20px; color: #1f2937; }
+    .card { background: #fff; border-radius: 14px; padding: 36px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.08); max-width: 460px; width: 100%; }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 14px; }
+    p  { font-size: 14px; line-height: 1.6; color: #374151; margin-bottom: 12px; }
+    .label { display: inline-block; background: #eef2ff; color: #3730a3;
+             padding: 3px 10px; border-radius: 6px; font-weight: 600;
+             font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+    .meta { font-size: 12px; color: #6b7280; margin-top: 6px; }
+    .actions { display: flex; gap: 10px; margin-top: 22px; }
+    button { flex: 1; padding: 11px 18px; border: none; border-radius: 8px;
+             font-size: 14px; font-weight: 600; cursor: pointer;
+             transition: background 0.15s; }
+    button.primary { background: #6366f1; color: #fff; }
+    button.primary:hover { background: #4f46e5; }
+    button.danger  { background: #f3f4f6; color: #374151; }
+    button.danger:hover { background: #e5e7eb; }
+    .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+           padding: 10px 12px; border-radius: 8px; font-size: 13px; margin: 12px 0; }
+    .ok  { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;
+           padding: 12px; border-radius: 8px; font-size: 13px; margin: 14px 0; }
+    a { color: #6366f1; text-decoration: none; font-weight: 600; }
+    a:hover { text-decoration: underline; }
+    code { font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+           color: #6b7280; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% if error %}
+      <h1>授权请求无效</h1>
+      <div class="err">{{ error }}</div>
+      <p>请回到客户端重新点「登录」按钮。</p>
+      <p class="meta">cb={{ cb_url }}</p>
+
+    {% elif approved %}
+      <h1>已授权 ✓</h1>
+      <div class="ok">已为客户端「<b>{{ label }}</b>」生成 token，正在送回客户端...</div>
+      <p>客户端在几秒内会自动完成配置。如果没反应可以关闭此页。</p>
+      <p class="meta">如果浏览器提示"无法连接"，是正常的 —— 客户端已收到。</p>
+      <script>
+        // 自动跳到 loopback callback；失败也不要紧（客户端可能监听结束）
+        setTimeout(() => { window.location.href = {{ redirect_to|tojson }}; }, 400);
+      </script>
+
+    {% elif denied %}
+      <h1>已拒绝</h1>
+      <p>你拒绝了客户端「{{ label }}」的授权请求，不会创建任何 token。</p>
+      <p><a href="/profile/">返回个人页</a></p>
+      <script>
+        setTimeout(() => { window.location.href = {{ redirect_to|tojson }}; }, 400);
+      </script>
+
+    {% else %}
+      <h1>授权客户端访问</h1>
+      <p>客户端 <span class="label">{{ label }}</span> 请求接入你的账号 <b>{{ user.username }}</b>。</p>
+      <p>授权后会生成一个新的 API token 自动配置到该客户端，
+         token 仅有上传 dashboard / history / private 数据的权限，不能登录网页或改密码。</p>
+      <form method="POST">
+        <input type="hidden" name="cb" value="{{ cb_url }}">
+        <input type="hidden" name="state" value="{{ state }}">
+        <input type="hidden" name="label" value="{{ label }}">
+        <div class="actions">
+          <button type="submit" name="action" value="deny" class="danger">拒绝</button>
+          <button type="submit" name="action" value="approve" class="primary">允许并连接</button>
+        </div>
+      </form>
+      <p class="meta" style="margin-top:14px">
+        若不是你本人在客户端发起此请求，请点拒绝。
+      </p>
+    {% endif %}
+  </div>
+</body>
+</html>

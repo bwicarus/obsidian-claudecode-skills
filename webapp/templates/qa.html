@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>截图问答</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       background: #f5f5f5; min-height: 100vh; padding: 20px; }
+.container { max-width: 800px; margin: 0 auto; }
+h1 { font-size: 20px; font-weight: 600; color: #333; margin-bottom: 4px; }
+.meta { font-size: 12px; color: #999; margin-bottom: 20px; }
+.empty { text-align: center; color: #bbb; margin-top: 120px; font-size: 16px; }
+
+.card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+        margin-bottom: 16px; overflow: hidden; }
+.card-head { padding: 12px 16px; font-size: 12px; font-weight: 600;
+             text-transform: uppercase; letter-spacing: .5px; }
+.card-body { padding: 16px; }
+
+.q-card .card-head { background: #f0f4ff; color: #5c6bc0; }
+.a-card .card-head { background: #f0fff4; color: #2e7d32; }
+
+.screenshot { width: 100%; border-radius: 8px; display: block;
+              cursor: zoom-in; }
+.question-text { font-size: 15px; color: #333; line-height: 1.6; margin-top: 10px; }
+.answer { font-size: 15px; color: #222; line-height: 1.7; }
+.answer p { margin-bottom: .8em; }
+.answer p:last-child { margin-bottom: 0; }
+.answer pre { background: #f5f5f5; padding: 10px 14px; border-radius: 6px;
+              overflow-x: auto; font-size: 13px; margin: .6em 0; }
+.answer code { font-family: "Menlo", "Consolas", monospace; font-size: 13px;
+               background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+.answer pre code { background: none; padding: 0; }
+
+#overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85);
+           z-index: 100; align-items: center; justify-content: center; cursor: zoom-out; }
+#overlay.show { display: flex; }
+#overlay img { max-width: 95vw; max-height: 95vh; border-radius: 6px; }
+
+.refresh { margin-top: 12px; text-align: center; }
+.refresh a { font-size: 13px; color: #999; text-decoration: none; }
+.refresh a:hover { color: #5c6bc0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>截图问答</h1>
+
+  {% if data %}
+  <p class="meta">{{ data.timestamp[:16].replace('T', ' ') }} · 来自 iPad</p>
+
+  <div class="card q-card">
+    <div class="card-head">问题</div>
+    <div class="card-body">
+      {% if data.image_b64 %}
+      <img class="screenshot" src="data:image/png;base64,{{ data.image_b64 }}"
+           alt="截图" onclick="openOverlay(this.src)">
+      {% endif %}
+      {% if data.question %}
+      <p class="question-text">{{ data.question }}</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card a-card">
+    <div class="card-head">AI 回复</div>
+    <div class="card-body">
+      <div class="answer" id="answer-body"></div>
+    </div>
+  </div>
+
+  <div class="refresh"><a href="javascript:location.reload()">↻ 刷新</a></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <script>
+  marked.use({ breaks: true, gfm: true });
+  document.getElementById('answer-body').innerHTML =
+    marked.parse({{ data.answer | tojson }});
+  </script>
+
+  {% else %}
+  <p class="empty">暂无内容<br><small>从 iPad 发送截图后会显示在这里</small></p>
+  {% endif %}
+</div>
+
+<div id="overlay"><img id="overlay-img" src="" alt=""></div>
+<script>
+function openOverlay(src) {
+  document.getElementById('overlay-img').src = src;
+  document.getElementById('overlay').classList.add('show');
+}
+document.getElementById('overlay').onclick = function() {
+  this.classList.remove('show');
+};
+</script>
+</body>
+</html>

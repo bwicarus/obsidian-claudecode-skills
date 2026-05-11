@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理 · bwicarus.space</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #f0f2f5; font-family: system-ui, -apple-system, sans-serif;
+           padding: 40px 20px; color: #1f2937; }
+    .container { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+    .card { background: #fff; border-radius: 14px; padding: 28px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    h2 { font-size: 15px; font-weight: 700; margin-bottom: 14px;
+         text-transform: uppercase; letter-spacing: 0.06em; color: #374151; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+    th { color: #6b7280; font-weight: 600; font-size: 11px;
+         text-transform: uppercase; letter-spacing: 0.05em; }
+    code { font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+           background: #f3f4f6; padding: 3px 7px; border-radius: 4px; word-break: break-all; }
+    button { padding: 6px 14px; background: #1a1a1a; color: #fff; border: none;
+             border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+             transition: background 0.15s; }
+    button:hover { background: #333; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    label { display: block; font-size: 13px; font-weight: 500; margin: 0 0 6px; }
+    input { width: 100%; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 8px;
+            font-size: 13px; outline: none; transition: border 0.15s; }
+    input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    .invite-form { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 18px; flex-wrap: wrap; }
+    .invite-form > div { flex: 1; min-width: 160px; }
+    .row-actions form { display: inline; margin: 0; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+    .badge.admin  { background: #fce7f3; color: #be185d; }
+    .badge.user   { background: #e0e7ff; color: #3730a3; }
+    .badge.used   { background: #fef3c7; color: #92400e; }
+    .badge.active { background: #d1fae5; color: #065f46; }
+    .copy-btn { padding: 4px 10px; font-size: 11px; background: #e5e7eb; color: #1f2937;
+                border: none; border-radius: 4px; cursor: pointer; margin-left: 6px; }
+    .copy-btn:hover { background: #d1d5db; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>管理后台</h1>
+    </div>
+
+    <div class="card">
+      <h2>邀请码</h2>
+      <form method="post" action="/admin/invites" class="invite-form">
+        <div>
+          <label>备注（可选）</label>
+          <input type="text" name="note" placeholder="例：给小王">
+        </div>
+        <div style="max-width:160px">
+          <label>有效天数</label>
+          <input type="number" name="expires_days" placeholder="留空 = 永久" min="1" max="365">
+        </div>
+        <button type="submit">生成邀请码</button>
+      </form>
+
+      <table>
+        <thead>
+          <tr><th>邀请链接</th><th>备注</th><th>状态</th><th>过期</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for inv in invites %}
+          <tr>
+            <td>
+              <code id="inv-{{ inv.token }}">{{ request.host_url }}register?token={{ inv.token }}</code>
+              <button class="copy-btn" type="button" onclick="copyText('inv-{{ inv.token }}')">复制</button>
+            </td>
+            <td>{{ inv.note or '—' }}</td>
+            <td>
+              {% if inv.used_by %}
+                <span class="badge used">已被 {{ inv.user }} 使用</span>
+              {% else %}
+                <span class="badge active">可用</span>
+              {% endif %}
+            </td>
+            <td style="font-size:12px;color:#6b7280">{{ inv.expires_at or '永久' }}</td>
+            <td class="row-actions" style="text-align:right">
+              <form method="post" action="/admin/invites/{{ inv.token }}/delete">
+                <button type="submit" class="danger" onclick="return confirm('确定删除？')">删除</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" style="color:#9ca3af;text-align:center;padding:20px">尚无邀请码</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>用户列表</h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>用户名</th><th>角色</th><th>注册时间</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for u in users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td>{{ u.username }}</td>
+            <td><span class="badge {% if u.role == 'admin' %}admin{% else %}user{% endif %}">{{ u.role }}</span></td>
+            <td style="font-size:12px;color:#6b7280">{{ u.created_at }}</td>
+            <td class="row-actions" style="text-align:right">
+              {% if u.role != 'admin' %}
+              <form method="post" action="/admin/users/{{ u.id }}/delete">
+                <button type="submit" class="danger" onclick="return confirm('删除该用户？数据会一并丢失！')">删除</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+function copyText(elId) {
+  const text = document.getElementById(elId).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    const old = btn.textContent;
+    btn.textContent = '已复制 ✓';
+    setTimeout(() => btn.textContent = old, 1200);
+  });
+}
+</script>
+</body>
+</html>

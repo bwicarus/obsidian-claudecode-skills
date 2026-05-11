@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ user.username }} · 个人页</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; background: #f0f2f5; font-family: system-ui, -apple-system, sans-serif;
+           padding: 40px 20px; color: #1f2937; }
+    .container { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+    .card { background: #fff; border-radius: 14px; padding: 28px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    h2 { font-size: 15px; font-weight: 700; margin-bottom: 14px;
+         text-transform: uppercase; letter-spacing: 0.06em; color: #374151; }
+    .meta { font-size: 13px; color: #6b7280; }
+    label { display: block; font-size: 13px; font-weight: 500; margin: 12px 0 6px; }
+    input { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px;
+            font-size: 14px; outline: none; transition: border 0.15s; }
+    input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    button { padding: 9px 18px; background: #1a1a1a; color: #fff; border: none;
+             border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+             transition: background 0.15s; }
+    button:hover { background: #333; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    .actions { display: flex; gap: 10px; margin-top: 14px; }
+    .msg { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+    .msg.ok  { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .msg.err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+    .token-row { display: flex; align-items: center; gap: 10px;
+                 padding: 12px 0; border-bottom: 1px solid #f3f4f6; font-size: 13px; }
+    .token-row:last-child { border-bottom: none; }
+    .token-new { background: #eef2ff; border: 1px solid #a5b4fc; padding: 10px 12px;
+                 border-radius: 8px; margin-top: 12px;
+                 display: flex; align-items: center; gap: 10px; }
+    .token-new code { flex: 1; min-width: 0; word-break: break-all;
+                      font-family: ui-monospace, Menlo, monospace;
+                      font-size: 12px; color: #3730a3; background: transparent; padding: 0; }
+    .copy-token-btn { flex-shrink: 0; padding: 6px 14px;
+                      background: #6366f1; color: #fff; border: none; border-radius: 6px;
+                      font-size: 12px; font-weight: 600; cursor: pointer;
+                      transition: background 0.15s; }
+    .copy-token-btn:hover { background: #4f46e5; }
+    .token-value {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px; color: #3730a3;
+      background: #f5f5fa; padding: 4px 8px; border-radius: 4px;
+      flex: 1; min-width: 0; word-break: break-all;
+      cursor: text;
+    }
+    .token-value.masked { letter-spacing: 1px; color: #6366f1; }
+    .token-mini-btn {
+      flex-shrink: 0; padding: 4px 10px; font-size: 11px;
+      background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+      border-radius: 5px; font-weight: 600; cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .token-mini-btn:hover { background: #c7d2fe; }
+    .token-mini-btn.ok { background: #dcfce7; border-color: #86efac; color: #166534; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
+             background: #fce7f3; color: #be185d; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>{{ user.username }}{% if user.role == 'admin' %}<span class="badge">admin</span>{% endif %}</h1>
+      <div class="meta">注册时间 {{ user.created_at }}</div>
+    </div>
+
+    <div class="card">
+      <h2>修改密码</h2>
+      <form id="pwForm">
+        <label>原密码</label>
+        <input type="password" name="old_password" required>
+        <label>新密码（至少 6 位）</label>
+        <input type="password" name="new_password" required minlength="6">
+        <label>再次输入新密码</label>
+        <input type="password" name="new_password2" required minlength="6">
+        <div class="actions"><button type="submit">保存</button></div>
+        <div id="pwMsg"></div>
+      </form>
+    </div>
+
+    <div class="card" id="downloadCard">
+      <h2>Windows 客户端</h2>
+      <p class="meta" style="margin-bottom:14px">
+        下载 → 双击运行 → 客户端会自动打开浏览器跳到此站，登录确认后即建立连接，token 自动配置无需手动复制。
+      </p>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <a href="/static/client/bwicarus-client.exe"
+           style="display:inline-block; padding:10px 18px; background:#1a1a1a; color:#fff;
+                  border-radius:8px; font-size:13px; font-weight:600; text-decoration:none">
+          ⬇ 下载 bwicarus-client.exe
+        </a>
+        <span class="meta">单文件，约 25 MB；首次运行后会自动从服务器拉最新功能模块</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>API token</h2>
+      <p class="meta" style="margin-bottom:14px">
+        客户端用 token 推数据到 /api/upload/&lt;dashboard|history|private&gt;。token 默认掩码显示，可点「显示/复制」随时取用。
+      </p>
+      {% for t in tokens %}
+      <div class="token-row" style="flex-wrap:wrap; gap:8px">
+        <div style="flex:1; min-width:0">
+          <div style="font-weight:600">{{ t.label or '（无标签）' }}</div>
+          <div style="font-size:11px;color:#9ca3af">
+            创建 {{ t.created_at }}
+            {% if t.last_used_at %} · 上次使用 {{ t.last_used_at }}{% else %} · 未使用{% endif %}
+          </div>
+        </div>
+        <form method="post" action="/api/tokens/{{ t.id }}" style="margin:0">
+          <button type="submit" class="danger" onclick="return confirm('撤销后该 token 立即失效，确认？')">撤销</button>
+        </form>
+        <div style="flex-basis:100%; display:flex; align-items:center; gap:8px">
+          <code class="token-value masked"
+                data-token="{{ t.token }}"
+                data-masked="••••••••{{ t.token[-6:] }}">••••••••{{ t.token[-6:] }}</code>
+          <button type="button" class="token-mini-btn"
+                  data-action="reveal" data-target="prev">显示</button>
+          <button type="button" class="token-mini-btn"
+                  data-action="copy" data-target="prev">复制</button>
+        </div>
+      </div>
+      {% else %}
+      <p class="meta">还没有 token</p>
+      {% endfor %}
+
+      <form id="tokenForm" style="margin-top:18px">
+        <label>新 token 标签 <small style="font-weight:400;color:#9ca3af">可选，方便辨认设备</small></label>
+        <input type="text" name="label" placeholder="例：我的笔记本" maxlength="80">
+        <div class="actions"><button type="submit">生成 token</button></div>
+        <div id="tokenMsg"></div>
+      </form>
+    </div>
+  </div>
+
+<script>
+document.getElementById('pwForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const r = await fetch('/api/change-password', { method: 'POST', body: fd });
+  const j = await r.json();
+  const msg = document.getElementById('pwMsg');
+  if (j.ok) {
+    msg.className = 'msg ok';
+    msg.textContent = '密码已更新';
+    e.target.reset();
+  } else {
+    msg.className = 'msg err';
+    msg.textContent = j.error || '更新失败';
+  }
+});
+
+// 已存在 token 行：显示/隐藏、复制
+document.querySelectorAll('.token-mini-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    // 找到同一行内紧邻的 .token-value
+    const wrap = btn.closest('div');
+    const codeEl = wrap.querySelector('.token-value');
+    if (!codeEl) return;
+    const action = btn.dataset.action;
+    const full   = codeEl.dataset.token;
+    const masked = codeEl.dataset.masked;
+    if (action === 'reveal') {
+      const isMasked = codeEl.classList.contains('masked');
+      if (isMasked) {
+        codeEl.textContent = full;
+        codeEl.classList.remove('masked');
+        btn.textContent = '隐藏';
+      } else {
+        codeEl.textContent = masked;
+        codeEl.classList.add('masked');
+        btn.textContent = '显示';
+      }
+    } else if (action === 'copy') {
+      navigator.clipboard.writeText(full).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '已复制 ✓';
+        btn.classList.add('ok');
+        setTimeout(() => {
+          btn.textContent = orig;
+          btn.classList.remove('ok');
+        }, 1500);
+      }).catch(() => {
+        btn.textContent = '复制失败';
+        setTimeout(() => { btn.textContent = '复制'; }, 1500);
+      });
+    }
+  });
+});
+
+document.getElementById('tokenForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const r = await fetch('/api/tokens', { method: 'POST', body: fd });
+  const j = await r.json();
+  const msg = document.getElementById('tokenMsg');
+  if (j.ok) {
+    msg.className = 'token-new';
+    msg.innerHTML = '';
+    const codeEl = document.createElement('code');
+    codeEl.textContent = j.token;
+    const btnEl = document.createElement('button');
+    btnEl.type = 'button';
+    btnEl.className = 'copy-token-btn';
+    btnEl.textContent = '复制';
+    btnEl.addEventListener('click', () => {
+      navigator.clipboard.writeText(j.token).then(() => {
+        btnEl.textContent = '已复制 ✓';
+        setTimeout(() => { btnEl.textContent = '复制'; }, 1500);
+      }).catch(() => {
+        btnEl.textContent = '复制失败';
+      });
+    });
+    msg.appendChild(codeEl);
+    msg.appendChild(btnEl);
+    e.target.reset();
+    setTimeout(() => location.reload(), 20000);
+  } else {
+    msg.className = 'msg err';
+    msg.textContent = j.error || '生成失败';
+  }
+});
+</script>
+</body>
+</html>
