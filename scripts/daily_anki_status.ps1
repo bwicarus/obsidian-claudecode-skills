@@ -1,4 +1,4 @@
-# 每日自动化任务：登记新笔记 → 更新 Anki 状态 → 复习优先级 → 推送仪表板
+﻿# 每日自动化任务：登记新笔记 → 更新 Anki 状态 → 复习优先级 → 推送仪表板
 # 每步状态写到 state/last_run.json，dashboard 会展示。
 
 $PYTHON      = "C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe"
@@ -55,6 +55,36 @@ function Step {
     }
 }
 
+function Test-AnkiConnect {
+    try {
+        $null = Invoke-RestMethod -Uri http://127.0.0.1:8765 -Method POST `
+            -Body '{"action":"version","version":6}' `
+            -ContentType 'application/json' -TimeoutSec 3
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-AnkiConnect {
+    param([int]$TimeoutSec = 180)
+    if (Test-AnkiConnect) { return $true }
+    Write-Host "  ! AnkiConnect 不可达，杀 anki 进程并重启..." -ForegroundColor Yellow
+    Get-Process -Name "anki" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Process $ANKI
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 3
+        if (Test-AnkiConnect) { return $true }
+    }
+    return $false
+}
+
+# 立刻写一次 last_run.json，后续早期崩了也能从这里看到开始时间
+Update-RunLog "running"
+
 # ── State 滚动备份（不入 last_run.json，太碎）──
 $BackupDir = "C:\claude\state\backup"
 New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
@@ -67,18 +97,16 @@ if (-not (Test-Path $RecordsArchive)) {
 Get-ChildItem "$BackupDir\note-states-*.json"  | Sort-Object Name -Descending | Select-Object -Skip 7 | Remove-Item -ErrorAction SilentlyContinue
 Get-ChildItem "$BackupDir\anki-records-*.zip"  | Sort-Object Name -Descending | Select-Object -Skip 7 | Remove-Item -ErrorAction SilentlyContinue
 
-Update-RunLog "running"
-
-# Step 0: 确保 Obsidian Sync daemon 在跑 + 启动 Anki(AnkiConnect 需要 GUI)
+# Step 0: 确保 Obsidian Sync daemon 在跑 + AnkiConnect 上线(僵尸进程会被杀重启)
 Step "启动应用" {
     $daemon = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
               Where-Object { $_.CommandLine -match 'obsidian-headless' }
     if (-not $daemon) {
         Start-ScheduledTask -TaskName 'Obsidian Headless Sync' -ErrorAction SilentlyContinue
     }
-    if (-not (Get-Process -Name "anki" -ErrorAction SilentlyContinue)) { Start-Process $ANKI }
-    # daemon 拉起后几秒就能首跑;Anki 启动 + AnkiConnect 上线大概 30-60 秒
-    Start-Sleep -Seconds 90
+    if (-not (Ensure-AnkiConnect -TimeoutSec 180)) {
+        throw "AnkiConnect 在 180s 内未上线(已尝试杀进程+重启 Anki)"
+    }
 }
 
 # Step 1: 登记新笔记
