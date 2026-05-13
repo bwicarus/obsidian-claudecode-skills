@@ -292,6 +292,17 @@ class MainWindow:
         ctk.CTkButton(row, text="ping AnkiConnect", command=self._ping_anki, width=160).pack(side="left", padx=(140, 8))
         ctk.CTkButton(row, text="启动 Anki", command=self._launch_anki, width=120, fg_color="gray30").pack(side="left")
 
+        self._anki_auto_restart_var = ctk.BooleanVar(
+            value=bool(anki_cfg.get("auto_restart", False)))
+        restart_row = ctk.CTkFrame(tab, fg_color="transparent")
+        restart_row.pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkLabel(restart_row, text="", width=140).pack(side="left")
+        ctk.CTkCheckBox(
+            restart_row,
+            text="AnkiConnect 不可达时自动杀进程并重启 Anki（防僵尸进程卡死调度）",
+            variable=self._anki_auto_restart_var,
+        ).pack(side="left", anchor="w")
+
     def _build_tab_qa(self, tab) -> None:
         ctk.CTkLabel(
             tab,
@@ -1056,6 +1067,11 @@ class MainWindow:
         if self._sched_wake_anki_var is not None:
             sched["wake_anki"] = bool(self._sched_wake_anki_var.get())
         cfg["scheduled_register"] = sched
+        # anki.auto_restart checkbox
+        if hasattr(self, "_anki_auto_restart_var") and self._anki_auto_restart_var is not None:
+            anki = dict(cfg.get("anki") or {})
+            anki["auto_restart"] = bool(self._anki_auto_restart_var.get())
+            cfg["anki"] = anki
         # floating 位置 + 鼠标穿透
         floating = dict(cfg.get("floating") or {})
         if self._floating_pos_var is not None:
@@ -1119,9 +1135,20 @@ class MainWindow:
         def script(name: str) -> str:
             return str(Path(scripts_dir) / name)
 
+        # ── 0. 确保 AnkiConnect 可用（按 cfg.anki.auto_restart 决定要不要杀僵尸+重启） ──
+        anki_cfg = cfg.get("anki") or {}
+        anki_url = anki_cfg.get("connect_url", "http://localhost:8765")
+        anki_exe = anki_cfg.get("exe_path", "")
+        auto_restart = bool(anki_cfg.get("auto_restart", False))
+        self._log("▶ 0/6 检查 AnkiConnect")
+        ok, msg = AnkiClient(anki_url).ensure_alive(anki_exe, force_restart=auto_restart)
+        self._log(("✓ " if ok else "✗ ") + msg)
+        if not ok:
+            self._log("AnkiConnect 不可用，整个流程中止。开启「自动重启」开关或手动启动 Anki 后重试。")
+            return
+        wait = "0"  # 上一步已确认在线，anki_status.py 不需要再等
+
         # ── 1. 更新 Anki 学习状态 ──
-        anki_url = (cfg.get("anki") or {}).get("connect_url", "http://localhost:8765")
-        wait = "0" if AnkiClient(anki_url).ping()[0] else "120"
         self._log("▶ 1/6 更新 Anki 学习状态")
         self._run_subscript(
             script("anki_status.py"),
@@ -1552,18 +1579,19 @@ class MainWindow:
         self.root.after(30000, self._poll_sched_status)
 
     def _sched_trigger(self) -> None:
-        """scheduler 在子线程调到这里：可选先唤醒 Anki，再走 _run_register。"""
+        """scheduler 在子线程调到这里：先确保 AnkiConnect 可用，再走 _run_register。
+
+        wake_anki=True 时调 ensure_alive(force_restart=True)：无论首次启动还是僵尸进程
+        都能处理，ping 通则立即返回；不通则杀进程 + 启动 + 轮询上线。
+        """
         cfg = self._gather_cfg()
+        anki_cfg = cfg.get("anki") or {}
         sched_cfg = cfg.get("scheduled_register") or {}
         if sched_cfg.get("wake_anki"):
-            anki_path = (cfg.get("anki") or {}).get("exe_path", "")
-            if anki_path:
-                from runner import open_program
-                ok, msg = open_program(anki_path)
-                self._log(("✓ " if ok else "✗ ") + f"启动 Anki：{msg}")
-                # 给 Anki 起来 + AnkiConnect 加载的时间
-                import time as _t
-                _t.sleep(15)
+            anki_url = anki_cfg.get("connect_url", "http://localhost:8765")
+            anki_exe = anki_cfg.get("exe_path", "")
+            ok, msg = AnkiClient(anki_url).ensure_alive(anki_exe, force_restart=True)
+            self._log(("✓ " if ok else "✗ ") + f"AnkiConnect 检查：{msg}")
         # 切回主线程触发 register
         self.root.after(0, self._run_register)
 
