@@ -97,19 +97,35 @@
 |---|---|
 | 基础 | server_url / api_token / 测试连接 / 一键登录 / 跑配置向导 / 数据目录显示 / 开机自启 |
 | AI | 后端下拉 + settings（动态字段，secret 字段带 [粘贴][复制] 按钮） |
-| Anki | exe_path / connect_url / ping / 启动 Anki |
-| 笔记登记 | vault_path / 立即运行登记 / 刷新并上传网页 / 登记后自动上传开关 / 每日定时 / vault watcher |
+| Anki | exe_path / connect_url / ping / 启动 Anki / **AnkiConnect 不可达时自动重启** 开关 (`cfg.anki.auto_restart`) |
+| 笔记登记 | vault_path / 立即运行登记 / **立即跑完整定时任务** / 刷新并上传网页 / 登记后自动上传开关 / 每日定时 + **完成后上传网页**子开关 / vault watcher |
 | 任务监视 | 悬浮窗位置 / 鼠标穿透 / 远程触发（cmd_server 端口+密钥） |
 | 截图问答 | 习题/错题子目录 / 浏览器路径 / 快捷键 / 远程访问 + 子开关「iPad 远程截图问答」(常驻 daemon :9091) |
 | 高级 | 主项目根目录 + 7 个派生路径（默认从根派生，可单独覆盖）|
 
 **与主项目 scripts 的关系**
 
-客户端**调用**主项目脚本，不复制其逻辑。`register_notes.py` / `anki_status.py` / `review_priority.py` / `export_dashboard.py` / `export_history.py` 是主项目脚本，客户端通过 subprocess 调它们：
+客户端**调用**主项目脚本，不复制其逻辑。主项目脚本（`register_notes.py` / `anki_status.py` / `review_priority.py` / `build_review_deck.py` / `cleanup_orphans.py` / `export_dashboard.py` / `export_history.py`）通过 subprocess 调用。
 
-- 「立即运行登记新笔记」→ `register_notes.py`
-- 「刷新并上传网页」→ `anki_status → review_priority → export_dashboard` 三步串跑 + 上传 dashboard.json，然后 `export_history` + 上传 history.json
-- 默认登记后**不**自动上传（用户开关 `auto_upload_after_register` 默认 False，避免登记慢半小时）
+**三个按钮职责清晰分开（0.9.32+）**：
+
+| 按钮 / 触发 | 流程 | 含必复习计算？|
+|---|---|---|
+| 「立即运行登记新笔记」 | `register_notes.py` 单步 | 否 |
+| 「刷新并上传网页」 | anki_status → review_priority → export_dashboard → upload dashboard → export_history → upload history | 否（只读 Anki）|
+| **「立即跑完整定时任务」** / **凌晨定时** | ensure_alive → register → anki_status → review_priority → **build_review_deck** → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync | **是** |
+
+**完整 daily 流程**由 `gui.py::_full_daily_pipeline` 实现，等价主项目 `daily_anki_status.ps1`。凌晨定时和「立即跑完整定时任务」按钮共用，仅 `force_restart` 入参不同：
+- 凌晨：`force_restart = cfg.scheduled_register.wake_anki`（默认 True）
+- 手动按钮：`force_restart = cfg.anki.auto_restart`（默认 False）
+
+**关键 cfg 开关**：
+- `auto_upload_after_register`（默认 False）— 「立即登记」结束后是否自动接「刷新并上传网页」
+- `scheduled_register.upload_after`（默认 False）— 凌晨 / 「立即跑完整定时任务」结束后是否 upload dashboard + history
+- `scheduled_register.wake_anki`（默认 True）— 凌晨触发时是否 force_restart Anki（杀僵尸 + 重启 + 轮询 ≤180s）
+- `anki.auto_restart`（默认 False）— AnkiConnect 不可达时手动按钮场景是否自动 force_restart Anki
+
+watcher 触发只调 `_run_register`（register 单步），**不**跑完整 daily。
 
 **服务端**
 
@@ -200,11 +216,23 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 - Anki 制卡默认不修改原 md；同步结果写入 `anki/records/`
 
 ## 自动化任务
-- 「Obsidian Anki 每日状态更新」每天 04:00 运行（`scripts/daily_anki_status.ps1`）
-- 「Obsidian Headless Sync」登录时启动 sync daemon,持续后台运行
-- 每日任务执行顺序：
-  1. 确保 Obsidian Sync daemon 在跑(`Start-ScheduledTask`),启动 Anki(AnkiConnect 需要 GUI),等 90 秒
-  2. **登记新笔记**（`register_notes.py`）：PDF 标注 / 图片标注 / 索引 / 关联 / Anki 制卡
-  3. 更新 Anki 状态（`anki_status.py --all`）：写回 frontmatter 和 records
-  4. 计算复习优先级（`review_priority.py`）：写回 frontmatter 和 records
-  5. 推送仪表板（`export_dashboard.py` + scp）
+
+**两套独立的"每日 04:00 任务"，逻辑等价但运行环境不同**：
+
+| 任务 | 运行环境 | 实现 |
+|---|---|---|
+| Windows 计划任务「Obsidian Anki 每日状态更新」 | 主项目本机 PowerShell | `scripts/daily_anki_status.ps1` |
+| bwicarus-client 凌晨定时（0.9.32+） | 客户端进程 | `_client/core/gui.py::_full_daily_pipeline` |
+
+两边都跑：`ensure_alive → register_notes → anki_status → review_priority → build_review_deck → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync`。
+
+**Step 0 ensure_alive 行为**：
+- ping AnkiConnect `/version` — 通则直接进入下一步
+- 不通 + `force_restart=True` → `taskkill /F anki.exe` → 启动 Anki → 轮询上线 ≤ 180s
+- 主项目 ps1 用 `Ensure-AnkiConnect` 函数（force_restart 始终 True），客户端用 `AnkiClient.ensure_alive`
+
+**「Obsidian Headless Sync」**：登录时启动 sync daemon，持续后台运行（不在 daily 流程内）。
+
+**state 备份**（仅主项目 ps1 做）：每天备份 `state/note-states.json` 和 `anki/records/` 到 `state/backup/`，保留 7 天。
+
+**注意**：daily_anki_status.ps1 必须保持 **UTF-8 with BOM**（Windows PowerShell 5.1 调 `-File X.ps1` 默认按 GBK 解码无 BOM 中文 → "字符串缺少终止符"）。Edit / Write 修改后立刻补 BOM。
