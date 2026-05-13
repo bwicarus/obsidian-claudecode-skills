@@ -147,6 +147,17 @@ Step "推送仪表板" {
     scp "$DASHBOARD\index.html" "$DASHBOARD\dashboard.json" "root@31.220.31.30:/root/webapp/data/dashboard/"
 }
 
+# Step 8: AnkiWeb 同步（把今天所有写入推到云端，含 iPad/手机端可见）
+Step "AnkiWeb 同步" {
+    try {
+        $null = Invoke-RestMethod -Uri http://127.0.0.1:8765 -Method POST `
+            -Body '{"action":"sync","version":6}' `
+            -ContentType 'application/json' -TimeoutSec 120
+    } catch {
+        throw "AnkiConnect sync 调用失败: $($_.Exception.Message)"
+    }
+}
+
 # ── 总结 ──
 $failed = $Global:Steps | Where-Object { $_.status -ne "ok" }
 $finalStatus = if ($failed.Count -gt 0) { "failed" } else { "ok" }
