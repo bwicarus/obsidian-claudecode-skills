@@ -682,7 +682,7 @@ class MainWindow:
         sched_row.pack(fill="x", padx=4, pady=4)
         self._sched_enabled_var = ctk.BooleanVar(value=bool(sched_cfg.get("enabled", False)))
         ctk.CTkCheckBox(
-            sched_row, text="每日定时自动登记笔记 + 上传 dashboard",
+            sched_row, text="每日定时自动跑完整任务（register + 必复习计算 + 仪表板）",
             variable=self._sched_enabled_var, command=self._on_sched_toggle,
         ).pack(side="left")
 
@@ -699,6 +699,26 @@ class MainWindow:
             time_row, text="触发前启动 Anki（让 AnkiConnect 可用）",
             variable=self._sched_wake_anki_var,
         ).pack(side="left", padx=(12, 0))
+
+        upload_after_row = ctk.CTkFrame(tab, fg_color="transparent")
+        upload_after_row.pack(fill="x", padx=4, pady=(0, 4))
+        ctk.CTkLabel(upload_after_row, text="", width=140).pack(side="left")
+        self._sched_upload_after_var = ctk.BooleanVar(
+            value=bool(sched_cfg.get("upload_after", False)))
+        ctk.CTkCheckBox(
+            upload_after_row,
+            text="完成后上传网页（dashboard + history 推到服务器）",
+            variable=self._sched_upload_after_var,
+        ).pack(side="left", padx=(8, 0))
+
+        manual_row = ctk.CTkFrame(tab, fg_color="transparent")
+        manual_row.pack(fill="x", padx=4, pady=(4, 4))
+        ctk.CTkLabel(manual_row, text="", width=140).pack(side="left")
+        ctk.CTkButton(
+            manual_row, text="立即跑完整定时任务（含必复习计算）",
+            command=lambda: self._run_full_daily(manual=True),
+            width=260,
+        ).pack(side="left", padx=(8, 0))
 
         status_row = ctk.CTkFrame(tab, fg_color="transparent")
         status_row.pack(fill="x", padx=4, pady=4)
@@ -1066,6 +1086,8 @@ class MainWindow:
             sched["enabled"] = bool(self._sched_enabled_var.get())
         if self._sched_wake_anki_var is not None:
             sched["wake_anki"] = bool(self._sched_wake_anki_var.get())
+        if hasattr(self, "_sched_upload_after_var") and self._sched_upload_after_var is not None:
+            sched["upload_after"] = bool(self._sched_upload_after_var.get())
         cfg["scheduled_register"] = sched
         # anki.auto_restart checkbox
         if hasattr(self, "_anki_auto_restart_var") and self._anki_auto_restart_var is not None:
@@ -1287,6 +1309,119 @@ class MainWindow:
                 self._register_running = False
 
         self._run_async(task)
+
+    def _run_full_daily(self, *, manual: bool) -> None:
+        """触发完整 daily 流程（等价主项目 daily_anki_status.ps1）。
+
+        - manual=True 来自「立即跑完整定时任务」按钮，force_restart=cfg.anki.auto_restart
+        - manual=False 来自 scheduler 凌晨触发，force_restart=cfg.scheduled_register.wake_anki
+        """
+        if self._register_running:
+            self._log("⊘ 笔记登记正在运行，跳过本次完整定时任务")
+            return
+        cfg = self._gather_cfg()
+        sched_cfg = cfg.get("scheduled_register") or {}
+        anki_cfg = cfg.get("anki") or {}
+        upload = bool(sched_cfg.get("upload_after", False))
+        if manual:
+            force_restart = bool(anki_cfg.get("auto_restart", False))
+        else:
+            force_restart = bool(sched_cfg.get("wake_anki", True))
+        self._save_cfg()
+        self._run_async(lambda: self._full_daily_pipeline(
+            cfg, upload=upload, force_restart=force_restart))
+
+    def _full_daily_pipeline(self, cfg: dict, *, upload: bool, force_restart: bool) -> None:
+        """ensure_alive → register → anki_status → review_priority →
+        build_review_deck → cleanup_orphans → export_dashboard →
+        (可选) upload dashboard + history → AnkiWeb sync。"""
+        py_exe = cfg.get("python_path") or None
+        scripts_dir = (cfg.get("scripts_dir") or "C:/claude/scripts").strip()
+        register_script = (cfg.get("register_script") or "").strip() or \
+            str(Path(scripts_dir) / "register_notes.py")
+
+        def script(name: str) -> str:
+            return str(Path(scripts_dir) / name)
+
+        anki_cfg = cfg.get("anki") or {}
+        anki_url = anki_cfg.get("connect_url", "http://localhost:8765")
+        anki_exe = anki_cfg.get("exe_path", "")
+
+        self._log("▶ 0/8 检查 AnkiConnect")
+        ok, msg = AnkiClient(anki_url).ensure_alive(anki_exe, force_restart=force_restart)
+        self._log(("✓ " if ok else "✗ ") + msg)
+        if not ok:
+            self._log("✗ AnkiConnect 不可用，完整定时任务中止")
+            return
+
+        env = {
+            "BWICARUS_SERVER":  cfg.get("server_url", ""),
+            "BWICARUS_TOKEN":   cfg.get("api_token", ""),
+            "BWICARUS_VAULT":   cfg.get("vault_path", ""),
+            "BWICARUS_AI_BACKEND": cfg.get("ai_backend", ""),
+        }
+        self._register_running = True
+        try:
+            if self._watcher:
+                self._watcher.set_busy(True)
+
+            self._log("▶ 1/8 登记新笔记")
+            if not Path(register_script).exists():
+                self._log(f"⊘ 找不到 {register_script}")
+            else:
+                for line in run_script(register_script, extra_env=env, python_exe=py_exe):
+                    self._log(line)
+
+            self._log("▶ 2/8 更新 Anki 学习状态")
+            self._run_subscript(script("anki_status.py"),
+                ["--all", "--write-frontmatter", "--write-record", "--wait-seconds", "0"], py_exe)
+
+            self._log("▶ 3/8 计算复习优先级")
+            self._run_subscript(script("review_priority.py"),
+                ["--write-frontmatter", "--write-record"], py_exe)
+
+            self._log("▶ 4/8 重建必复习牌组（必复习计算）")
+            self._run_subscript(script("build_review_deck.py"), [], py_exe)
+
+            self._log("▶ 5/8 清理孤儿")
+            self._run_subscript(script("cleanup_orphans.py"), ["--apply"], py_exe)
+
+            self._log("▶ 6/8 生成 dashboard.json")
+            self._run_subscript(script("export_dashboard.py"), [], py_exe)
+
+            if upload:
+                url, token = cfg.get("server_url"), cfg.get("api_token")
+                if url and token:
+                    client = ApiClient(url.rstrip("/"), token)
+                    dash_dir = (cfg.get("dashboard_dir") or "").strip()
+                    hist_dir = (cfg.get("history_dir") or "").strip()
+                    self._log("▶ 7/8 上传 dashboard")
+                    if dash_dir:
+                        for evt in upload_dataset(client, Path(dash_dir), "dashboard"):
+                            self._log(evt)
+                    else:
+                        self._log("⊘ 未配置 dashboard 目录，跳过")
+                    self._log("▶ 7b/8 导出 + 上传 history")
+                    self._run_subscript(script("export_history.py"), [], py_exe)
+                    if hist_dir:
+                        for evt in upload_dataset(client, Path(hist_dir), "history"):
+                            self._log(evt)
+                    else:
+                        self._log("⊘ 未配置 history 目录，跳过")
+                else:
+                    self._log("⊘ 缺少 server_url/api_token，跳过上传")
+            else:
+                self._log("⊘ 「完成后上传网页」未启用，跳过上传")
+
+            self._log("▶ 8/8 AnkiWeb 同步")
+            ok2, msg2 = AnkiClient(anki_url).sync()
+            self._log(("✓ " if ok2 else "✗ ") + msg2)
+
+            self._log("✓ 完整定时任务 done")
+        finally:
+            if self._watcher:
+                self._watcher.set_busy(False)
+            self._register_running = False
 
     # ── 配置向导 ───────────────────────────────────────────
     def _launch_wizard(self) -> None:
@@ -1579,21 +1714,12 @@ class MainWindow:
         self.root.after(30000, self._poll_sched_status)
 
     def _sched_trigger(self) -> None:
-        """scheduler 在子线程调到这里：先确保 AnkiConnect 可用，再走 _run_register。
+        """scheduler 凌晨触发 → 跑完整 daily 流程（含必复习计算）。
 
-        wake_anki=True 时调 ensure_alive(force_restart=True)：无论首次启动还是僵尸进程
-        都能处理，ping 通则立即返回；不通则杀进程 + 启动 + 轮询上线。
+        AnkiConnect 健康检查由 _full_daily_pipeline 内部处理（force_restart 由
+        cfg.scheduled_register.wake_anki 决定）。
         """
-        cfg = self._gather_cfg()
-        anki_cfg = cfg.get("anki") or {}
-        sched_cfg = cfg.get("scheduled_register") or {}
-        if sched_cfg.get("wake_anki"):
-            anki_url = anki_cfg.get("connect_url", "http://localhost:8765")
-            anki_exe = anki_cfg.get("exe_path", "")
-            ok, msg = AnkiClient(anki_url).ensure_alive(anki_exe, force_restart=True)
-            self._log(("✓ " if ok else "✗ ") + f"AnkiConnect 检查：{msg}")
-        # 切回主线程触发 register
-        self.root.after(0, self._run_register)
+        self.root.after(0, lambda: self._run_full_daily(manual=False))
 
     # ── 全局热键 ───────────────────────────────────────────
     def _init_hotkey(self) -> None:

@@ -10,7 +10,7 @@ launcher 调用 main(config_path)。core 负责：
 """
 from __future__ import annotations
 
-CORE_VERSION = "0.9.31"
+CORE_VERSION = "0.9.32"
 
 import json
 import sys
