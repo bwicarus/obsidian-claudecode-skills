@@ -214,7 +214,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 - `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`
 - `_server_deploy/templates/control.html` → 部署到 `/root/webapp/templates/control.html`
 - `_server_deploy/static/nav.js` → 部署到 `/var/www/html/static/nav.js`（全站通用左侧导航 + per-user 链接持久化）
-- `nginx` 加 `location /control { proxy_pass http://127.0.0.1:5000; ... }`（在 nginx 配置里，不在 git）
+- `_server_deploy/nginx/bwicarus.conf` → 部署到 `/etc/nginx/sites-enabled/default`（含 `/control`、`/auth`、`/api` 等所有 location 块）。改完 `nginx -t && systemctl reload nginx`
 
 **跨平台改动**（让脚本可在 Windows + Linux 跑）：
 - `config.py` AI_SETTINGS_FILE 加 env 优先
