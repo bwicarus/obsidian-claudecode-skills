@@ -5,276 +5,351 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>控制面板 · bwicarus.space</title>
   <style>
+    :root {
+      --glass-bg:     rgba(255,255,255,0.08);
+      --glass-bg-2:   rgba(255,255,255,0.06);
+      --glass-border: rgba(255,255,255,0.14);
+      --glass-hover:  rgba(255,255,255,0.13);
+      --text:         rgba(255,255,255,0.92);
+      --muted:        rgba(255,255,255,0.55);
+      --dim:          rgba(255,255,255,0.35);
+      --indigo:       #a5b4fc;
+      --indigo-bg:    rgba(165,180,252,0.25);
+      --violet:       #c4b5fd;
+      --emerald:      #34d399;
+      --emerald-bg:   rgba(52,211,153,0.15);
+      --amber:        #fbbf24;
+      --amber-bg:     rgba(251,191,36,0.15);
+      --rose:         #f87171;
+      --rose-bg:      rgba(248,113,113,0.15);
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100vh; }
     body {
-      min-height: 100vh; background: #f0f2f5;
       font-family: system-ui, -apple-system, sans-serif;
-      color: #1f2937;
-      display: flex;
+      color: var(--text);
+      padding: 20px 24px 32px;
+      background:
+        radial-gradient(ellipse at 15% 15%, rgba(99,102,241,0.28) 0%, transparent 55%),
+        radial-gradient(ellipse at 85% 80%, rgba(139,92,246,0.22) 0%, transparent 55%),
+        radial-gradient(ellipse at 50% 50%, rgba(15,52,96,0.6)   0%, transparent 80%),
+        linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #0d1b3e 100%);
+      background-attachment: fixed;
     }
-
-    /* ── 左侧导航 ── */
-    .sidebar {
-      width: 220px; flex-shrink: 0;
-      background: #fff;
-      box-shadow: 2px 0 12px rgba(0,0,0,0.04);
-      position: sticky; top: 0;
-      height: 100vh;
-      padding: 28px 16px;
-      display: flex; flex-direction: column; gap: 4px;
-      overflow-y: auto;
-    }
-    .sidebar-title {
-      font-size: 14px; font-weight: 700;
-      color: #1f2937; padding: 4px 10px 18px;
-      letter-spacing: 0.02em;
-    }
-    .sidebar-title small { display: block; font-size: 11px; color: #9ca3af; font-weight: 500; margin-top: 2px; letter-spacing: 0; }
-    .sidebar a {
-      padding: 9px 12px; border-radius: 8px;
-      color: #6b7280; text-decoration: none;
-      font-size: 13.5px; font-weight: 500;
-      transition: background 0.12s, color 0.12s;
-      display: flex; align-items: center; gap: 9px;
-    }
-    .sidebar a .ico { font-size: 14px; width: 18px; text-align: center; }
-    .sidebar a:hover { background: #f5f5fa; color: #1a1a1a; }
-    .sidebar a.current { background: #eef2ff; color: #4f46e5; font-weight: 700; }
-    .sidebar .divider { height: 1px; background: #f3f4f6; margin: 12px 4px; }
-    .sidebar .live-status {
-      margin-top: auto; padding: 10px 12px;
-      font-size: 11px; color: #9ca3af;
-      display: flex; align-items: center; gap: 6px;
-    }
-    .pulse { display: inline-block; width: 7px; height: 7px; background: #10b981; border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+    a { color: inherit; text-decoration: none; }
 
     .container {
-      flex: 1; min-width: 0;
-      max-width: 900px;
-      padding: 40px 32px;
-      display: flex; flex-direction: column; gap: 20px;
+      max-width: 920px; margin: 0 auto;
+      display: flex; flex-direction: column; gap: 14px;
     }
 
-    @media (max-width: 720px) {
-      body { flex-direction: column; }
-      .sidebar { width: 100%; height: auto; position: relative; padding: 16px 14px; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
-      .sidebar-title { width: 100%; padding: 0 0 10px; }
-      .sidebar .divider { display: none; }
-      .sidebar .live-status { margin-top: 0; margin-left: auto; padding: 4px 8px; }
-      .container { padding: 20px 14px; }
+    /* ── 顶部导航条（毛玻璃） ── */
+    .topnav {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      box-shadow: 0 6px 28px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .topnav a {
+      padding: 7px 16px; border-radius: 10px;
+      font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+      color: var(--muted);
+      transition: background 0.18s, color 0.18s;
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .topnav a:hover { background: var(--glass-hover); color: var(--text); }
+    .topnav a.current { background: var(--indigo-bg); color: #e0e7ff; }
+    .topnav .nav-tail {
+      margin-left: auto; padding-right: 8px;
+      font-size: 11px; color: var(--dim);
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .pulse {
+      display: inline-block; width: 7px; height: 7px;
+      background: var(--emerald); border-radius: 50%;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+    /* ── 玻璃面板 ── */
+    .panel {
+      position: relative;
+      border-radius: 18px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      box-shadow: 0 6px 28px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08);
+      padding: 22px 26px;
     }
 
-    /* ── 卡片 ── */
-    .card {
-      background: #fff; border-radius: 14px; padding: 28px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    /* ── 标题 / 副标 ── */
+    h1 {
+      font-size: 24px; font-weight: 700;
+      letter-spacing: 0.01em;
+      background: linear-gradient(135deg, #e0e7ff 0%, #c4b5fd 100%);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
     }
-    h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
     h2 {
-      font-size: 15px; font-weight: 700; margin-bottom: 14px;
-      text-transform: uppercase; letter-spacing: 0.06em; color: #374151;
-      display: flex; justify-content: space-between; align-items: center;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 14px;
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
     }
-    h2 .h2-meta { font-size: 11px; font-weight: 500; color: #9ca3af; text-transform: none; letter-spacing: 0; }
-    h3 { font-size: 13px; font-weight: 600; color: #6b7280; margin: 14px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .meta { font-size: 13px; color: #6b7280; }
+    h3 {
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--dim); margin: 14px 0 8px;
+    }
+    .meta { font-size: 12px; color: var(--muted); }
 
     /* ── 状态行 ── */
     .status-row {
-      display: flex; align-items: center; gap: 12px; padding: 8px 0;
-      border-bottom: 1px solid #f3f4f6; font-size: 13px;
+      display: flex; align-items: center; gap: 12px;
+      padding: 9px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 13px;
     }
     .status-row:last-child { border-bottom: none; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-    .dot.ok { background: #10b981; }
-    .dot.warn { background: #f59e0b; }
-    .dot.bad { background: #ef4444; }
-    .status-name { font-weight: 600; min-width: 140px; color: #1f2937; }
-    .status-value { color: #6b7280; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-
-    /* ── 按钮 ── */
-    button {
-      padding: 9px 18px; background: #1a1a1a; color: #fff; border: none;
-      border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
-      transition: background 0.15s;
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px currentColor; }
+    .dot.ok { background: var(--emerald); color: var(--emerald); }
+    .dot.warn { background: var(--amber); color: var(--amber); }
+    .dot.bad { background: var(--rose); color: var(--rose); }
+    .status-name { font-weight: 600; min-width: 140px; color: var(--text); }
+    .status-value {
+      color: var(--muted); flex: 1;
+      font-family: ui-monospace, Menlo, monospace; font-size: 12px;
     }
-    button:hover { background: #333; }
-    button.secondary { background: #6b7280; }
-    button.secondary:hover { background: #4b5563; }
-    button.danger { background: #ef4444; }
-    button.danger:hover { background: #dc2626; }
-    button.primary { background: #6366f1; }
-    button.primary:hover { background: #4f46e5; }
-    button.small { padding: 4px 12px; font-size: 11px; }
 
-    .action-row { padding: 10px 0; border-bottom: 1px solid #f3f4f6; display: flex; align-items: center; gap: 12px; }
+    /* ── 按钮（毛玻璃） ── */
+    button {
+      padding: 8px 16px;
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      color: var(--text);
+      border-radius: 10px;
+      font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: all 0.18s;
+      backdrop-filter: blur(8px);
+      font-family: inherit;
+    }
+    button:hover { background: var(--glass-hover); border-color: rgba(255,255,255,0.22); }
+    button.primary {
+      background: var(--indigo-bg); border-color: var(--indigo);
+      color: #e0e7ff;
+    }
+    button.primary:hover { background: rgba(165,180,252,0.4); }
+    button.danger {
+      background: var(--rose-bg); border-color: var(--rose);
+      color: #fecaca;
+    }
+    button.danger:hover { background: rgba(248,113,113,0.3); }
+    button.small { padding: 4px 12px; font-size: 11px; border-radius: 6px; }
+
+    .action-row {
+      padding: 11px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    }
     .action-row:last-child { border-bottom: none; }
-    .action-desc { font-size: 12px; color: #6b7280; flex: 1; }
+    .action-desc { font-size: 12px; color: var(--muted); flex: 1; min-width: 200px; }
 
     /* ── Badge ── */
     .badge {
-      font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
-      background: #fce7f3; color: #be185d;
+      font-size: 10px; padding: 3px 9px; border-radius: 999px;
+      font-weight: 700; letter-spacing: 0.06em;
+      background: var(--glass-bg); border: 1px solid var(--glass-border);
+      color: var(--muted);
     }
-    .badge.claude { background: #fef3c7; color: #92400e; }
-    .badge.codex { background: #d1fae5; color: #065f46; }
-    .badge.running { background: #fef3c7; color: #92400e; }
-    .badge.ok { background: #f0fdf4; color: #166534; }
-    .badge.failed { background: #fef2f2; color: #b91c1c; }
+    .badge.claude { background: var(--amber-bg); color: var(--amber); border-color: rgba(251,191,36,0.4); }
+    .badge.codex { background: var(--emerald-bg); color: var(--emerald); border-color: rgba(52,211,153,0.4); }
+    .badge.running { background: var(--amber-bg); color: var(--amber); border-color: rgba(251,191,36,0.4); }
+    .badge.ok { background: var(--emerald-bg); color: var(--emerald); border-color: rgba(52,211,153,0.4); }
+    .badge.failed { background: var(--rose-bg); color: var(--rose); border-color: rgba(248,113,113,0.4); }
 
-    /* ── 日志/步骤 ── */
+    /* ── Log / 步骤 ── */
     .log {
-      background: #1e1e1e; color: #ddd;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.85);
       font-family: ui-monospace, Menlo, monospace;
-      padding: 12px 14px; border-radius: 8px;
-      white-space: pre-wrap; max-height: 360px; overflow-y: auto;
-      font-size: 12px; line-height: 1.5;
+      padding: 12px 14px; border-radius: 10px;
+      white-space: pre-wrap; max-height: 380px; overflow-y: auto;
+      font-size: 12px; line-height: 1.55;
     }
+    .log::-webkit-scrollbar { width: 6px; }
+    .log::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
     .step { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
-    .step.ok { color: #6ee7b7; }
-    .step.failed { color: #fca5a5; }
-    .step.running { color: #fbbf24; background: rgba(251, 191, 36, .15); padding: 4px 8px; border-radius: 4px; margin: 1px 0; }
+    .step.ok { color: var(--emerald); }
+    .step.failed { color: var(--rose); }
+    .step.running {
+      color: var(--amber);
+      background: var(--amber-bg);
+      padding: 5px 10px; border-radius: 6px; margin: 2px 0;
+      border: 1px solid rgba(251,191,36,0.25);
+    }
     .spinner {
       display: inline-block; width: 9px; height: 9px;
-      border: 2px solid #fbbf24; border-top-color: transparent;
+      border: 2px solid var(--amber); border-top-color: transparent;
       border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── 设置面板 ── */
+    /* ── 折叠面板 ── */
     details summary {
-      cursor: pointer; font-size: 15px; font-weight: 700;
-      color: #374151; padding: 6px 0;
-      text-transform: uppercase; letter-spacing: 0.06em;
-      list-style: none;
+      cursor: pointer; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--muted); padding: 4px 0;
+      list-style: none; transition: color 0.15s;
     }
-    details summary::before { content: "▸ "; transition: transform 0.15s; display: inline-block; }
+    details summary:hover { color: var(--text); }
+    details summary::-webkit-details-marker { display: none; }
+    details summary::before { content: "▸ "; transition: transform 0.15s; display: inline-block; margin-right: 4px; }
     details[open] summary::before { transform: rotate(90deg); }
+
+    /* ── 设置 ── */
     .cfg-row {
-      display: flex; align-items: center; gap: 10px; padding: 8px 0;
-      font-size: 13px; color: #1f2937; cursor: pointer;
+      display: flex; align-items: center; gap: 12px; padding: 8px 0;
+      font-size: 13px; color: var(--text); cursor: pointer;
     }
-    .cfg-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #6366f1; cursor: pointer; }
+    .cfg-row input[type="checkbox"] {
+      width: 16px; height: 16px;
+      accent-color: var(--indigo);
+      cursor: pointer;
+    }
     .cfg-row input[type="text"] {
-      padding: 5px 10px; border: 1px solid #d1d5db; border-radius: 6px;
-      font-size: 13px; outline: none; transition: border 0.15s; width: 9em;
+      padding: 6px 12px;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--glass-border);
+      color: var(--text);
+      border-radius: 7px;
+      font-size: 13px; outline: none;
+      transition: border 0.15s, background 0.15s;
+      font-family: inherit;
+      width: 9em;
     }
-    .cfg-row input[type="text"]:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+    .cfg-row input[type="text"]:focus {
+      border-color: var(--indigo);
+      background: rgba(0,0,0,0.4);
+    }
     .config-section {
-      padding: 10px 0; border-bottom: 1px solid #f3f4f6;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
     .config-section:last-of-type { border-bottom: none; }
-    .config-section h3 { margin-top: 0; }
 
     /* ── Toast ── */
     .toast {
-      position: fixed; top: 20px; right: 20px;
-      background: #1a1a1a; color: white;
-      padding: 10px 16px; border-radius: 8px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-      opacity: 0; transform: translateY(-8px);
+      position: fixed; top: 24px; right: 24px;
+      background: rgba(15,12,41,0.92);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--glass-border);
+      color: var(--text);
+      padding: 11px 18px; border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      opacity: 0; transform: translateY(-10px);
       transition: opacity 0.25s, transform 0.25s;
-      max-width: 360px; font-size: 13px; z-index: 999;
+      max-width: 380px; font-size: 13px; z-index: 999;
     }
     .toast.show { opacity: 1; transform: translateY(0); }
-    .toast.success { background: #10b981; }
-    .toast.error { background: #ef4444; }
+    .toast.success { background: rgba(52,211,153,0.85); color: #052e16; border-color: rgba(52,211,153,0.6); }
+    .toast.error { background: rgba(248,113,113,0.85); color: #450a0a; border-color: rgba(248,113,113,0.6); }
 
-    /* ── 提示文字 ── */
-    .hint {
-      background: #eef2ff; border: 1px solid #c7d2fe;
-      padding: 10px 14px; border-radius: 8px;
-      font-size: 12px; color: #3730a3; margin-top: 14px;
+    code {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px; padding: 1px 6px;
+      background: rgba(0,0,0,0.3); border-radius: 4px;
+      color: var(--violet);
     }
-    .hint code {
-      background: rgba(255,255,255,0.7); padding: 1px 5px;
-      border-radius: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+
+    @media (max-width: 720px) {
+      body { padding: 14px 12px 24px; }
+      .topnav { flex-wrap: wrap; gap: 4px; }
+      .topnav .nav-tail { width: 100%; padding: 4px 8px 0; }
+      .panel { padding: 18px 16px; }
     }
   </style>
 </head>
 <body>
-
-<!-- 左侧导航 -->
-<nav class="sidebar">
-  <div class="sidebar-title">
-    bwicarus.space
-    <small>个人学习中心</small>
-  </div>
-  <a href="/dashboard/"><span class="ico">📊</span>仪表板</a>
-  <a href="/history/"><span class="ico">🗂️</span>复习历史</a>
-  <a href="/control/" class="current"><span class="ico">🎛️</span>控制面板</a>
-  <div class="divider"></div>
-  <a href="/profile/"><span class="ico">👤</span>个人页</a>
-  <a href="/logout"><span class="ico">⎋</span>登出</a>
-  <div class="live-status">
-    <span class="pulse"></span>
-    <span>实时刷新中</span>
-  </div>
-</nav>
-
 <div class="container">
 
-  <!-- 标题卡 -->
-  <div class="card">
+  <!-- 顶部导航 -->
+  <nav class="topnav">
+    <a href="/dashboard/">📊 仪表板</a>
+    <a href="/history/">🗂️ 复习历史</a>
+    <a href="/control/" class="current">🎛️ 控制面板</a>
+    <a href="/profile/">👤 个人页</a>
+    <a href="/logout">⎋ 登出</a>
+    <div class="nav-tail">
+      <span class="pulse"></span>
+      <span id="last-refresh">实时刷新</span>
+    </div>
+  </nav>
+
+  <!-- 标题 -->
+  <div class="panel">
     <h1>控制面板</h1>
-    <div class="meta">代替 Windows 客户端的网页控制中心 · <span id="last-refresh">…</span></div>
+    <div class="meta">替代 Windows 客户端的网页控制中心 · bwicarus-3 · CST</div>
   </div>
 
   <!-- 系统状态 -->
-  <div class="card">
-    <h2>系统状态 <button class="secondary small" onclick="refreshStatus()">刷新</button></h2>
+  <div class="panel">
+    <h2>系统状态 <button class="small" onclick="refreshStatus()">刷新</button></h2>
     <div id="status">加载中…</div>
   </div>
 
   <!-- 触发操作 -->
-  <div class="card">
+  <div class="panel">
     <h2>触发操作</h2>
     <div class="action-row">
-      <button onclick="trigger('daily')">立即跑完整 Daily</button>
+      <button class="primary" onclick="trigger('daily')">立即跑完整 Daily</button>
       <span class="action-desc">register + anki_status + review + 必复习计算 + cleanup + dashboard + AnkiWeb sync</span>
     </div>
     <div class="action-row">
-      <button class="primary" onclick="trigger('register')">立即登记新笔记</button>
+      <button onclick="trigger('register')">立即登记新笔记</button>
       <span class="action-desc">只跑 register_notes（不含必复习计算）</span>
     </div>
     <div class="action-row">
-      <button class="primary" onclick="trigger('ankiweb-sync')">AnkiWeb 同步</button>
+      <button onclick="trigger('ankiweb-sync')">AnkiWeb 同步</button>
       <span class="action-desc">触发 AnkiConnect sync action</span>
     </div>
     <div class="action-row">
-      <button class="secondary" onclick="confirmTrigger('anki-restart', '重启 Anki？AnkiConnect 暂时不可用 20s 左右。')">重启 Anki</button>
+      <button class="danger" onclick="confirmTrigger('anki-restart', '重启 Anki？AnkiConnect 暂时不可用 20s 左右。')">重启 Anki</button>
       <span class="action-desc">systemctl restart anki-headless</span>
     </div>
   </div>
 
   <!-- AI 后端 -->
-  <div class="card">
+  <div class="panel">
     <h2>AI 后端 <span id="ai-current" class="badge">…</span></h2>
     <div class="action-row">
       <button class="primary" onclick="switchAI('claude')">切到 Claude</button>
       <button class="primary" onclick="switchAI('gpt')">切到 Codex (GPT)</button>
-      <span class="action-desc">写入 <code style="font-family:ui-monospace,monospace;">state/ai-settings.json</code>，无需重启服务</span>
+      <span class="action-desc">写入 <code>state/ai-settings.json</code>，无需重启服务</span>
     </div>
   </div>
 
   <!-- Daily 最后运行 -->
-  <div class="card">
+  <div class="panel">
     <h2>Daily 最后运行 <span id="daily-status-badge" class="badge"></span></h2>
     <div id="last-run">加载中…</div>
   </div>
 
-  <!-- 触发日志（折叠）-->
-  <div class="card">
+  <!-- 触发日志 -->
+  <div class="panel">
     <details id="trigger-log-details">
       <summary>触发日志</summary>
-      <p class="meta" style="margin: 8px 0 12px;">webapp_trigger.log 末 80 行 — 触发后自动展开 + 实时滚动</p>
+      <p class="meta" style="margin: 8px 0 12px;">webapp_trigger.log 末 80 行 · 触发后自动展开 + 实时滚动</p>
       <div id="trigger-log" class="log">加载中…</div>
     </details>
   </div>
 
-  <!-- 设置（折叠）-->
-  <div class="card">
+  <!-- 设置 -->
+  <div class="panel">
     <details id="config-details">
       <summary>设置</summary>
       <p class="meta" style="margin: 8px 0 12px;">同步自 Windows 客户端 EXE 的所有开关</p>
@@ -324,7 +399,7 @@
       </div>
 
       <p style="margin-top: 18px;">
-        <button onclick="saveConfig()">保存设置</button>
+        <button class="primary" onclick="saveConfig()">保存设置</button>
         <span class="action-desc" style="margin-left: 10px;">vault 路径 / qa_remote_daemon 改动会重启 qa-server</span>
       </p>
     </details>
@@ -403,16 +478,14 @@ async function refreshStatus() {
         <p class="meta" style="margin-bottom: 10px;">开始 ${lr.started_at} · 更新 ${lr.updated_at}</p>
         <div class="log">${steps || '(暂无步骤数据)'}</div>`;
 
-      if (lr.status === 'running') {
-        _fastPollUntil = Date.now() + 60000;
-      }
+      if (lr.status === 'running') _fastPollUntil = Date.now() + 60000;
     } else {
       dailyBadge.textContent = '';
       dailyBadge.className = 'badge';
       document.getElementById('last-run').innerHTML = '<p class="meta">(还未跑过 daily)</p>';
     }
 
-    document.getElementById('last-refresh').textContent = '上次刷新 ' + new Date().toLocaleTimeString();
+    document.getElementById('last-refresh').textContent = '刷新 ' + new Date().toLocaleTimeString();
   } catch (e) {
     console.error('refresh:', e);
   }
@@ -427,9 +500,7 @@ async function refreshTriggerLog() {
     const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
     el.textContent = text || '(空)';
     if (wasAtBottom) el.scrollTop = el.scrollHeight;
-  } catch (e) {
-    console.error('trigger-log:', e);
-  }
+  } catch (e) { console.error('trigger-log:', e); }
 }
 
 async function trigger(action) {
@@ -460,12 +531,9 @@ async function switchAI(target) {
     const data = await r.json();
     showToast(data.msg, data.ok ? 'success' : 'error');
     refreshStatus();
-  } catch (e) {
-    showToast('切换失败: ' + e, 'error');
-  }
+  } catch (e) { showToast('切换失败: ' + e, 'error'); }
 }
 
-// ── 设置 ──────────────────────────────────────────────────────
 function getByPath(obj, path) {
   return path.split('.').reduce((o, k) => (o ? o[k] : undefined), obj);
 }
