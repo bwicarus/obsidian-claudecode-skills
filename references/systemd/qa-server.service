@@ -16,6 +16,8 @@ ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|
 # Claude CLI 拒绝 root 用 --dangerously-skip-permissions（"cannot be used with root/sudo"），
 # 服务器侧每次启动从 _client/core/ai_backends.py 把这个 flag 去掉
 ExecStartPre=/bin/sed -i 's|"--dangerously-skip-permissions",\s*||g' /root/claude/_client/core/ai_backends.py
+# 没 --dangerously-skip-permissions 后，Read tool 默认询问；用 --allowedTools 显式白名单让它直接读图
+ExecStartPre=/bin/sed -i 's|"--output-format", "text", "-p"|"--allowedTools", "Read", "--output-format", "text", "-p"|g' /root/claude/_client/core/ai_backends.py
 ExecStart=/usr/bin/python3 /root/claude/_server_deploy/qa_server.py
 Restart=on-failure
 RestartSec=10
