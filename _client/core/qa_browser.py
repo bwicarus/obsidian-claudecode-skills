@@ -118,9 +118,13 @@ TEMP_DIR      = _CLIENT_HOME / "qa-temp"      # 客户端本地：截图临时
 
 
 def _detect_vault() -> Path | None:
-    """vault 路径自动探测：扫常见 Obsidian 位置。"""
+    """vault 路径自动探测：env OBSIDIAN_VAULT 优先；否则扫常见 Obsidian 位置。"""
     home = Path.home()
-    candidates = [
+    env_vault = os.environ.get("OBSIDIAN_VAULT")
+    candidates = []
+    if env_vault:
+        candidates.append(Path(env_vault))
+    candidates += [
         Path(r"C:\obsidian"),
         home / "Documents" / "Obsidian Vault",
         home / "Documents" / "obsidian",

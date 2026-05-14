@@ -12,6 +12,7 @@ backfill_back_links.py — 一次性脚本：扫描所有已有「相关笔记�
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import register_notes  # noqa: E402
 
-VAULT = Path(r"C:\obsidian")
+VAULT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 PATTERN = re.compile(r"^[0-9A-Fa-f]{3}-.+\.md$")
 
 

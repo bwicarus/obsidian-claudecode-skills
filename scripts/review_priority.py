@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 import time
@@ -35,7 +36,7 @@ from typing import Any, NamedTuple
 sys.stdout.reconfigure(encoding="utf-8")
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-VAULT_ROOT   = Path(r"C:\obsidian")
+VAULT_ROOT   = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 INDEX_DIR    = PROJECT_DIR / "index"
 RECORDS_DIR  = PROJECT_DIR / "anki" / "records"
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 RECORDS_DIR = PROJECT_DIR / "anki" / "records"
 INDEX_DIR   = PROJECT_DIR / "index"
-VAULT_ROOT  = Path(r"C:\obsidian")
+VAULT_ROOT  = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 OUTPUT_PATH = PROJECT_DIR / "dashboard" / "dashboard.json"
 
 _ENTRY_RE = re.compile(r"-\s+\[\[([^\]]+)\]\]\s+`([^`]*)`\s+—\s+(.+)")

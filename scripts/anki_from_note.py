@@ -50,7 +50,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 REFERENCES_DIR = PROJECT_DIR / "references"
 DEFAULT_RECORDS_DIR = PROJECT_DIR / "anki" / "records"
-DEFAULT_VAULT_ROOT = Path(r"C:\obsidian")
+DEFAULT_VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 DEFAULT_VAULT_NAME = "Obsidian Vault"
 DEFAULT_ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 
@@ -334,7 +334,7 @@ def anki_request(anki_url: str, action: str, params: dict[str, Any] | None = Non
     return result.get("result")
 
 
-_ANKI_LOG = Path(r"C:\claude\state\logs\anki_launch.log")
+_ANKI_LOG = PROJECT_DIR / "state" / "logs" / "anki_launch.log"
 
 
 def _anki_log(msg: str) -> None:

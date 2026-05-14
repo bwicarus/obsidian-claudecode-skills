@@ -23,8 +23,9 @@ def strip_wrapped(text: str) -> str:
         text = p.sub('', text)
     return text
 
+PROJECT_DIR = os.environ.get("CLAUDE_PROJECT") or str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 bad = []
-for p in glob.glob(r'C:\claude\anki\records\*.json'):
+for p in glob.glob(os.path.join(PROJECT_DIR, 'anki', 'records', '*.json')):
     try:
         rec = json.loads(open(p, encoding='utf-8').read())
     except Exception:

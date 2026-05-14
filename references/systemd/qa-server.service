@@ -14,10 +14,9 @@ WorkingDirectory=/root/claude
 ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|https://bwicarus.space/static/qa/mathjax.js|g" /root/claude/_client/core/qa_browser.py
 ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|https://bwicarus.space/static/qa/marked.js|g" /root/claude/_client/core/qa_browser.py
 # Claude CLI 拒绝 root 用 --dangerously-skip-permissions（"cannot be used with root/sudo"），
-# 服务器侧每次启动从 _client/core/ai_backends.py 把这个 flag 去掉
-ExecStartPre=/bin/sed -i 's|"--dangerously-skip-permissions",\s*||g' /root/claude/_client/core/ai_backends.py
-# 没 --dangerously-skip-permissions 后，Read tool 默认询问；用 --allowedTools 显式白名单让它直接读图
-ExecStartPre=/bin/sed -i 's|"--output-format", "text", "-p"|"--allowedTools", "Read", "--output-format", "text", "-p"|g' /root/claude/_client/core/ai_backends.py
+# 直接替换成 --allowedTools Read（让它能读注入的图片但其它工具走默认询问/拒绝）。
+# 单次替换保证幂等：替换后字串里没有 --dangerously-skip-permissions，sed 再跑也是 no-op。
+ExecStartPre=/bin/sed -i 's|"--dangerously-skip-permissions"|"--allowedTools", "Read"|g' /root/claude/_client/core/ai_backends.py
 ExecStart=/usr/bin/python3 /root/claude/_server_deploy/qa_server.py
 Restart=on-failure
 RestartSec=10

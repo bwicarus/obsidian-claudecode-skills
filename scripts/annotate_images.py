@@ -12,6 +12,7 @@ annotate_images.py — 图片标注的预处理和写回工具（配合 Claude C
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ try:
 except Exception:
     pass
 
-VAULT_ROOT = Path(r"C:\obsidian")
+VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 # 两种图片语法都识别：
 #   1. Obsidian wikilink:  ![[file.png]]
 #   2. 标准 markdown:      ![alt](path/to/file.png)   或 ![](file.png)

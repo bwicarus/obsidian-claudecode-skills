@@ -999,10 +999,15 @@ class MainWindow:
             pass
 
     def _guess_vault(self) -> str:
-        """猜一个 Obsidian vault 路径让用户首次启动看到默认值。找不到则空。"""
+        """猜一个 Obsidian vault 路径让用户首次启动看到默认值。env OBSIDIAN_VAULT 优先；找不到则空。"""
+        import os
         from pathlib import Path
         home = Path.home()
-        candidates = [
+        env_vault = os.environ.get("OBSIDIAN_VAULT")
+        candidates = []
+        if env_vault:
+            candidates.append(Path(env_vault))
+        candidates += [
             Path(r"C:\obsidian"),
             home / "Documents" / "Obsidian Vault",
             home / "Documents" / "obsidian",

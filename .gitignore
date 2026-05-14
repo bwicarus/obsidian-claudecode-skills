@@ -23,3 +23,7 @@ temp/
 .venv/
 venv/
 env/
+
+# 环境变量（机器特定路径 + 不应入仓的配置）
+.env
+.env.local

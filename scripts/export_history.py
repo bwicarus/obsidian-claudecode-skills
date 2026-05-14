@@ -8,7 +8,8 @@ _localappdata = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Lo
 STORE_DIR    = Path(_localappdata) / "截图问答"
 DB_PATH      = STORE_DIR / "history.db"
 HIST_IMG_DIR = STORE_DIR / "images"
-OUTPUT_DIR   = Path(r"C:\claude\history")
+PROJECT_DIR  = Path(os.environ.get("CLAUDE_PROJECT", Path(__file__).resolve().parents[1]))
+OUTPUT_DIR   = PROJECT_DIR / "history"
 
 
 def export():

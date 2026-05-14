@@ -25,7 +25,7 @@ import ai_client
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-VAULT_ROOT = r"C:\obsidian"
+VAULT_ROOT = os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian")
 
 # 缓存每个 PDF 的字符修正表
 _CORRECTION_CACHE = {}

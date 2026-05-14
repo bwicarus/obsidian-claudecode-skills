@@ -55,9 +55,10 @@ def state_path(name: str) -> Path:
 
 # ── 用户数据：两个根目录派生其余 ──────────────────────────────────────────
 # 主项目根（含 scripts / dashboard / history / state / index / anki 等子目录）
-DEFAULT_PROJECT_ROOT = r"C:\claude"
-# Obsidian vault 根（用户笔记目录）
-COMMON_VAULT_GUESSES = [
+DEFAULT_PROJECT_ROOT = os.environ.get("CLAUDE_PROJECT", r"C:\claude")
+# Obsidian vault 根（用户笔记目录）。env 优先，让服务器/Linux 上跑时直接命中。
+_VAULT_ENV = os.environ.get("OBSIDIAN_VAULT")
+COMMON_VAULT_GUESSES = ([_VAULT_ENV] if _VAULT_ENV else []) + [
     r"C:\obsidian",
     str(Path.home() / "Documents" / "Obsidian Vault"),
     str(Path.home() / "Obsidian"),

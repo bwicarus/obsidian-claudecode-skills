@@ -48,7 +48,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_RECORDS_DIR = PROJECT_DIR / "anki" / "records"
-DEFAULT_VAULT_ROOT = Path(r"C:\obsidian")
+DEFAULT_VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 DEFAULT_ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 
 EMPTY_COUNTS: dict[str, Any] = {
