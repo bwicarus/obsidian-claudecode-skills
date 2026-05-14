@@ -209,12 +209,12 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
 
-**控制面板源码**：
+**控制面板源码**（全部在 git，部署 = 纯 cp）：
+- `_server_deploy/app.py` → 部署到 `/root/webapp/app.py`（含 `/api/nav-links` 路由、`register_control` 导入、`/control` 进 `PROTECTED_PREFIXES` / `NAV_INJECT_PREFIXES`）
 - `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`
 - `_server_deploy/templates/control.html` → 部署到 `/root/webapp/templates/control.html`
-- `app.py` 末尾（在 `if __name__ == "__main__":` 之前）加 `from control import register_control; register_control(app)`
-- `nginx` 加 `location /control { proxy_pass http://127.0.0.1:5000; ... }`
-- `PROTECTED_PREFIXES` 加 `/control`
+- `_server_deploy/static/nav.js` → 部署到 `/var/www/html/static/nav.js`（全站通用左侧导航 + per-user 链接持久化）
+- `nginx` 加 `location /control { proxy_pass http://127.0.0.1:5000; ... }`（在 nginx 配置里，不在 git）
 
 **跨平台改动**（让脚本可在 Windows + Linux 跑）：
 - `config.py` AI_SETTINGS_FILE 加 env 优先

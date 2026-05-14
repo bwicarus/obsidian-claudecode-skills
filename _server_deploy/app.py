@@ -96,7 +96,7 @@ with app.app_context():
 
 # ─────────────────────────── 通用左侧导航 (auto-inject) ───────────────────────────
 
-NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa")
+NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control")
 
 @app.after_request
 def inject_nav(response):
@@ -160,7 +160,7 @@ def user_dir(username, dataset=""):
         base = base / dataset
     return base
 
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control")
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request
@@ -370,6 +370,41 @@ def graph_settings():
         except (json.JSONDecodeError, OSError):
             pass
     return jsonify({})
+
+
+# ─── 通用左侧导航的自定义链接（per-user 持久化）───
+# 前端 nav.js 用，替代原 localStorage 存储。
+@app.route("/api/nav-links", methods=["GET", "POST"])
+def nav_links():
+    user = current_user()
+    if not user:
+        abort(401)
+    f = user_dir(user["username"]) / "nav-links.json"
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True)
+        if not isinstance(data, list):
+            abort(400)
+        # 只接受 {label, url} 形式条目，过滤掉空值
+        clean = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            url   = str(item.get("url",   "")).strip()
+            if label and url:
+                clean.append({"label": label, "url": url})
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        return jsonify({"ok": True, "links": clean})
+    if f.exists():
+        try:
+            arr = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(arr, list):
+                return jsonify(arr)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return jsonify([])
+
 
 # ─────────────────────────── 个人页 + 改密码 + token 管理 ───────────────────────────
 
@@ -666,6 +701,11 @@ def qa_update():
     return jsonify({"ok": True})
 
 
+
+
+# 控制面板 (替代 Windows 客户端 EXE)
+from control import register_control
+register_control(app)
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000)
