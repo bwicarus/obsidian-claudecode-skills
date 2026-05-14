@@ -21,6 +21,7 @@ from flask import jsonify, render_template, request
 CLAUDE_DIR = Path("/root/claude")
 LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
 AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
+SERVER_CONFIG = CLAUDE_DIR / "state" / "server-config.json"
 PYTHON = "/usr/bin/python3"
 ANKI_URL = "http://127.0.0.1:8765"
 
@@ -116,9 +117,58 @@ def register_control(app):
             "anki_headless": get_systemd_status("anki-headless"),
             "xvfb_99": get_systemd_status("xvfb-99"),
             "obsidian_sync": get_systemd_status("obsidian-sync"),
+            "qa_server": get_systemd_status("qa-server"),
+            "tailscaled": get_systemd_status("tailscaled"),
             "ai_backend": get_ai_backend(),
             "last_run": get_last_run(),
         })
+
+    @app.route("/control/api/config", methods=["GET", "POST"])
+    def control_config():
+        """GET 返回 server-config.json；POST 写入 + 重启 qa-server 让新 cfg 生效。"""
+        if request.method == "GET":
+            if not SERVER_CONFIG.exists():
+                return jsonify({})
+            try:
+                return jsonify(json.loads(SERVER_CONFIG.read_text(encoding="utf-8")))
+            except Exception as e:
+                return jsonify({"_error": str(e)})
+
+        # POST: 深度合并请求 JSON 到现有 config
+        new_cfg = request.get_json(silent=True) or {}
+        if not isinstance(new_cfg, dict):
+            return jsonify({"ok": False, "msg": "需要 JSON 对象"}), 400
+
+        # 加载现有 + deep merge
+        existing = {}
+        if SERVER_CONFIG.exists():
+            try:
+                existing = json.loads(SERVER_CONFIG.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        def deep_merge(a, b):
+            out = dict(a)
+            for k, v in b.items():
+                if isinstance(v, dict) and isinstance(out.get(k), dict):
+                    out[k] = deep_merge(out[k], v)
+                else:
+                    out[k] = v
+            return out
+
+        merged = deep_merge(existing, new_cfg)
+        SERVER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        SERVER_CONFIG.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        # 重启 qa-server 让新 cfg 生效（qa_browser daemon 每次请求都重新 get_cfg() 其实不需要重启，
+        # 但是 qa_remote_daemon 控制 bind 行为，所以保险起见重启）
+        if "qa_remote_daemon" in new_cfg or "qa_vault_path" in new_cfg:
+            subprocess.run(["systemctl", "restart", "qa-server"], check=False)
+
+        return jsonify({"ok": True, "msg": "配置已保存", "config": merged})
 
     @app.route("/control/api/trigger-log")
     def control_trigger_log():

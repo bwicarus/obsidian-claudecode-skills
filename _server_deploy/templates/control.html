@@ -47,6 +47,10 @@
   .timestamp { color: #9ca3af; font-size: .8em; }
   details summary { cursor: pointer; font-weight: 600; color: #4b5563; padding: .3em 0; }
   details[open] summary { margin-bottom: .5em; }
+  .cfg-row { display: block; padding: .3em 0; cursor: pointer; }
+  .cfg-row input[type="checkbox"] { margin-right: .5em; vertical-align: middle; }
+  .config-section { padding: .5em 0; border-bottom: 1px solid #f3f4f6; }
+  .config-section:last-of-type { border-bottom: none; }
 </style>
 </head>
 <body>
@@ -91,6 +95,37 @@
 <div class="card">
   <h2>Daily 最后运行 <span id="daily-status-badge" class="badge"></span></h2>
   <div id="last-run">加载中…</div>
+</div>
+
+<div class="card">
+  <details id="config-details">
+    <summary>⚙️ 设置（同步自 Windows 客户端开关）</summary>
+    <div style="margin-top: 1em;">
+      <div class="config-section">
+        <h3 style="font-size: .95em; margin: .5em 0;">Anki</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="anki.auto_restart"> AnkiConnect 不可达时自动重启 anki-headless（防僵尸进程卡死）</label>
+      </div>
+      <div class="config-section">
+        <h3 style="font-size: .95em; margin: .5em 0;">笔记登记</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="auto_upload_after_register"> 登记完成后自动「刷新并上传网页」</label>
+      </div>
+      <div class="config-section">
+        <h3 style="font-size: .95em; margin: .5em 0;">凌晨定时（systemd bwicarus-daily.timer）</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.wake_anki"> 触发前确保 Anki 可用（ensure_alive）</label>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.upload_after"> 完成后部署 dashboard 到 webapp（默认 True，因为服务器就是 webapp）</label>
+      </div>
+      <div class="config-section">
+        <h3 style="font-size: .95em; margin: .5em 0;">iPad 截图问答</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="qa_remote_daemon"> iPad 远程截图问答（qa_browser daemon 监听 0.0.0.0:9091）</label>
+        <label class="cfg-row" style="margin-left: 1.4em; font-size: .9em; color: #6b7280;">习题子目录：<input type="text" data-cfg-path="qa_exercises_subdir" style="width: 8em; padding: .2em; margin-left: .5em;"></label>
+        <label class="cfg-row" style="margin-left: 1.4em; font-size: .9em; color: #6b7280;">错题子目录：<input type="text" data-cfg-path="qa_wrong_subdir" style="width: 8em; padding: .2em; margin-left: .5em;"></label>
+      </div>
+      <p style="margin-top: 1em;">
+        <button class="success" onclick="saveConfig()">💾 保存设置</button>
+        <small>保存后某些设置（vault 路径 / qa_remote_daemon）会重启 qa-server.service。</small>
+      </p>
+    </div>
+  </details>
 </div>
 
 <div class="card">
@@ -140,6 +175,12 @@ async function refreshStatus() {
       <div class="status-row"><span class="dot ${data.obsidian_sync==='active'?'ok':'bad'}"></span>
         <span class="status-name">obsidian-sync</span>
         <span class="status-value">${data.obsidian_sync}</span></div>
+      <div class="status-row"><span class="dot ${data.qa_server==='active'?'ok':'bad'}"></span>
+        <span class="status-name">qa-server</span>
+        <span class="status-value">${data.qa_server || 'n/a'} (iPad 截图问答 daemon)</span></div>
+      <div class="status-row"><span class="dot ${data.tailscaled==='active'?'ok':'warn'}"></span>
+        <span class="status-name">tailscaled</span>
+        <span class="status-value">${data.tailscaled || 'n/a'}</span></div>
     `;
     const aiBadge = document.getElementById('ai-current');
     aiBadge.textContent = data.ai_backend;
@@ -238,6 +279,63 @@ function tick() {
   const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
   setTimeout(tick, interval);
 }
+
+// ── 设置面板 ────────────────────────────────────────────────────────────
+function getByPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o ? o[k] : undefined), obj);
+}
+function setByPath(obj, path, value) {
+  const parts = path.split('.');
+  const last = parts.pop();
+  const target = parts.reduce((o, k) => {
+    if (!o[k]) o[k] = {};
+    return o[k];
+  }, obj);
+  target[last] = value;
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/control/api/config');
+    const cfg = await r.json();
+    document.querySelectorAll('[data-cfg-path]').forEach(el => {
+      const path = el.dataset.cfgPath;
+      const val = getByPath(cfg, path);
+      if (el.type === 'checkbox') {
+        el.checked = !!val;
+      } else {
+        el.value = val ?? '';
+      }
+    });
+  } catch (e) {
+    console.error('loadConfig:', e);
+  }
+}
+
+async function saveConfig() {
+  const cfg = {};
+  document.querySelectorAll('[data-cfg-path]').forEach(el => {
+    const path = el.dataset.cfgPath;
+    const val = el.type === 'checkbox' ? el.checked : el.value;
+    setByPath(cfg, path, val);
+  });
+  try {
+    const r = await fetch('/control/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(cfg),
+    });
+    const data = await r.json();
+    showToast(data.msg || '已保存', data.ok ? 'success' : 'error');
+  } catch (e) {
+    showToast('保存失败: ' + e, 'error');
+  }
+}
+
+// 首次打开设置面板时拉一次配置
+document.getElementById('config-details').addEventListener('toggle', (e) => {
+  if (e.target.open) loadConfig();
+});
 
 tick();
 </script>

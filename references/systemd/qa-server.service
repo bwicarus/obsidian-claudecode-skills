@@ -1,0 +1,19 @@
+[Unit]
+Description=iPad 截图问答 daemon + cmd_server (服务器侧)
+After=anki-headless.service network-online.target
+Wants=anki-headless.service
+
+[Service]
+Type=simple
+EnvironmentFile=/root/claude/.env
+Environment=BWICARUS_APP_DIR=/root/claude/state/qa-server-data
+WorkingDirectory=/root/claude
+ExecStart=/usr/bin/python3 /root/claude/_server_deploy/qa_server.py
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
