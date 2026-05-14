@@ -16,12 +16,21 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "active_tasks.json"
+
+# 当 stdout 被重定向到非 TTY（例如 control 面板用 subprocess.Popen 把脚本输出导向 log 文件）时，
+# 把 Handle 的 update / log / set_summary 同步 print 出来，方便从日志看运行过程。
+# 交互式 TTY（用户 ssh 直接跑）下保持安静，仍由进度窗口 / 监视窗口展示。
+try:
+    _MIRROR_TO_STDOUT = not sys.stdout.isatty()
+except (ValueError, AttributeError):
+    _MIRROR_TO_STDOUT = False
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -183,15 +192,21 @@ def track(name: str, detail: str = ""):
     class Handle:
         def update(self, msg: str) -> None:
             update(tid, msg)
+            if _MIRROR_TO_STDOUT:
+                print(f"▶ {msg}", flush=True)
 
         def set_progress(self, current: int, total: int) -> None:
             set_progress(tid, current, total)
 
         def log(self, msg: str) -> None:
             log(tid, msg)
+            if _MIRROR_TO_STDOUT:
+                print(msg, flush=True)
 
         def set_summary(self, summary: str) -> None:
             set_summary(tid, summary)
+            if _MIRROR_TO_STDOUT:
+                print(f"✓ {summary}", flush=True)
 
     try:
         yield Handle()

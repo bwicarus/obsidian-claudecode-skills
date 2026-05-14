@@ -68,7 +68,15 @@ OBSIDIAN_SYNC_WAIT = 15  # 拉起 daemon 后给一点首跑时间
 def is_obsidian_sync_daemon_running() -> bool:
     """检查 obsidian-headless 的 node 进程是否在跑。"""
     if os.name != "nt":
-        return False
+        # Linux 服务器侧：obsidian-sync 是 systemd 服务，看 service 状态
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "obsidian-sync.service"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.stdout.strip() == "active"
+        except Exception:
+            return False
     try:
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
