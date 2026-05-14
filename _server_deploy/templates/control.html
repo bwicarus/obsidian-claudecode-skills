@@ -21,8 +21,7 @@
       --amber-bg:     rgba(251,191,36,0.15);
       --rose:         #f87171;
       --rose-bg:      rgba(248,113,113,0.15);
-      --sidebar-w:    210px;
-      --sidebar-collapsed-w: 56px;
+      --drawer-w:     min(280px, 80vw);
       --drawer-ease:  cubic-bezier(0.4, 0, 0.2, 1);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,104 +35,139 @@
         radial-gradient(ellipse at 50% 50%, rgba(15,52,96,0.6)   0%, transparent 80%),
         linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #0d1b3e 100%);
       background-attachment: fixed;
-      display: flex;
+      padding: 10px 14px 14px;
+      display: flex; flex-direction: column;
+      transition: padding-left 0.4s var(--drawer-ease);
     }
+    body.sidebar-open:not(.sidebar-floating) { padding-left: calc(var(--drawer-w) + 14px); }
     a { color: inherit; text-decoration: none; }
 
-    /* ── 左侧导航（用 dashboard graph-drawer-toggle 的玻璃质感） ── */
-    .sidebar {
-      width: var(--sidebar-w); flex-shrink: 0;
-      height: 100vh; padding: 14px 12px;
+    /* ════════ 左侧抽屉（照搬 dashboard graph-drawer，镜像左右）════════ */
+    .left-drawer {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: var(--drawer-w);
+      z-index: 100;
+      display: flex; flex-direction: column;
+      padding: 18px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.04) 100%),
+        linear-gradient(135deg, rgba(15,12,41,0.22), rgba(26,26,62,0.18));
+      backdrop-filter: blur(16px) saturate(150%) brightness(1.04);
+      -webkit-backdrop-filter: blur(16px) saturate(150%) brightness(1.04);
+      border-right: 1px solid rgba(255,255,255,0.20);
+      box-shadow:
+        14px 0 48px rgba(0,0,0,0.40),
+        inset -1px 0 0 rgba(255,255,255,0.16),
+        inset 0 1px 0 rgba(255,255,255,0.08);
+      transform: translateX(-102%);
+      transition: transform 0.4s var(--drawer-ease);
+    }
+    /* SVG turbulence 颗粒：跟 graph-drawer 同款磨砂表面 */
+    .left-drawer::before {
+      content: '';
+      position: absolute; inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      opacity: 0.35;
+      mix-blend-mode: overlay;
+      background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    .left-drawer > * { position: relative; z-index: 1; }
+    .left-drawer.open { transform: translateX(0); }
+
+    .left-drawer-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; flex-shrink: 0;
+    }
+    .left-drawer-title {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .left-drawer-close {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--glass-border);
+      color: rgba(255,255,255,0.65);
+      width: 30px; height: 30px;
+      border-radius: 8px; cursor: pointer;
+      font-size: 20px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .left-drawer-close:hover { background: rgba(255,255,255,0.16); color: var(--text); }
+
+    /* 左侧把手 toggle —— 照搬 graph-drawer-toggle，镜像到左边 */
+    .left-drawer-toggle {
+      position: fixed;
+      top: 50%; left: 0;
+      transform: translateY(-50%);
+      z-index: 110;
+      width: 18px; height: 96px;
+      padding: 0; border: none;
+      display: flex; align-items: center; justify-content: center;
+      color: rgba(255,255,255,0.82);
       background:
         linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
         rgba(99,102,241,0.16);
       backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
       -webkit-backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
-      border-right: 1px solid rgba(255,255,255,0.22);
-      box-shadow: inset -1px 0 0 rgba(255,255,255,0.16);
-      display: flex; flex-direction: column; gap: 3px;
-      overflow-y: auto; overflow-x: hidden;
-      transition: width 0.4s var(--drawer-ease), padding 0.4s var(--drawer-ease);
-    }
-    .sidebar-head {
-      display: flex; align-items: center; gap: 8px;
-      padding: 4px 4px 12px;
-    }
-    /* 折叠把手按钮 —— 完全照搬 graph-drawer-toggle 的 grip 风格 */
-    .sidebar-toggle {
-      flex-shrink: 0;
-      width: 26px; height: 44px;
-      display: inline-flex; align-items: center; justify-content: center;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
-        rgba(99,102,241,0.16);
-      backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
       border: 1px solid rgba(255,255,255,0.22);
-      color: rgba(255,255,255,0.85);
-      border-radius: 8px;
+      border-left: none;
+      border-radius: 0 14px 14px 0;
+      box-shadow: inset -1px 0 0 rgba(255,255,255,0.16);
       cursor: pointer;
-      transition: background 0.15s, color 0.15s, border 0.15s;
-      padding: 0;
+      transition: left 0.4s var(--drawer-ease), background 0.15s, color 0.15s;
     }
-    .sidebar-toggle:hover {
+    .left-drawer-toggle:hover {
       background:
-        linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06)),
-        rgba(99,102,241,0.28);
-      border-color: rgba(165,180,252,0.5);
+        linear-gradient(135deg, rgba(255,255,255,0.14), rgba(255,255,255,0.06)),
+        rgba(99,102,241,0.26);
+      color: #fff;
     }
-    .sidebar-toggle .grip {
-      display: block; width: 3px; height: 22px;
-      background: currentColor; border-radius: 2px; opacity: 0.85;
+    .left-drawer-toggle .grip {
+      width: 3px; height: 38px;
+      background: currentColor;
+      border-radius: 2px;
+      opacity: 0.85;
     }
-    .sidebar-title {
-      flex: 1; min-width: 0;
-      font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
-      background: linear-gradient(135deg, #e0e7ff 0%, #c4b5fd 100%);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
+    body.sidebar-open .left-drawer-toggle { left: var(--drawer-w); }
+
+    /* 抽屉内部：链接列表 + 工具按钮 */
+    .nav-links { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; padding-right: 4px; }
+    .nav-links::-webkit-scrollbar { width: 6px; }
+    .nav-links::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+    .nav-link {
+      padding: 9px 12px; border-radius: 10px;
+      font-size: 13px; font-weight: 600;
+      color: var(--muted);
+      transition: background 0.18s, color 0.18s;
+      display: flex; align-items: center; gap: 10px;
       white-space: nowrap; overflow: hidden;
     }
-    .sidebar-title small {
-      display: block; margin-top: 2px;
-      font-size: 9px; font-weight: 700; letter-spacing: 0.14em;
-      text-transform: uppercase; color: var(--dim);
-      -webkit-text-fill-color: var(--dim);
+    .nav-link .ico { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
+    .nav-link:hover { background: var(--glass-hover); color: var(--text); }
+    .nav-link.current { background: var(--indigo-bg); color: #e0e7ff; border: 1px solid rgba(165,180,252,0.35); }
+    .nav-divider { height: 1px; background: rgba(255,255,255,0.08); margin: 10px 6px; flex-shrink: 0; }
+    .nav-tools {
+      padding-top: 10px; margin-top: 6px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
     }
-    .sidebar a.link, .sidebar button.link {
+    .nav-tools button {
       width: 100%; text-align: left;
       padding: 8px 12px; border-radius: 10px;
-      font-size: 12.5px; font-weight: 600;
-      color: var(--muted);
-      background: transparent; border: none;
-      transition: background 0.18s, color 0.18s, padding 0.3s;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--glass-border);
+      color: var(--muted); font-size: 12px;
+      cursor: pointer; transition: background 0.15s, color 0.15s;
+      font-family: inherit;
       display: flex; align-items: center; gap: 9px;
-      white-space: nowrap; overflow: hidden;
-      cursor: pointer; font-family: inherit;
     }
-    .sidebar a.link .ico, .sidebar button.link .ico {
-      font-size: 14px; width: 20px; text-align: center; flex-shrink: 0;
-    }
-    .sidebar a.link:hover, .sidebar button.link:hover { background: var(--glass-hover); color: var(--text); }
-    .sidebar a.link.current { background: var(--indigo-bg); color: #e0e7ff; border: 1px solid rgba(165,180,252,0.35); }
-    .sidebar .divider { height: 1px; background: rgba(255,255,255,0.08); margin: 8px 6px; flex-shrink: 0; }
-    .sidebar .live-status {
-      margin-top: auto; padding: 8px 12px;
-      font-size: 10px; color: var(--dim);
+    .nav-tools button:hover { background: var(--glass-hover); color: var(--text); }
+    .nav-status {
+      padding: 8px 12px; font-size: 10px; color: var(--dim);
       display: flex; align-items: center; gap: 7px;
-      white-space: nowrap; overflow: hidden;
     }
-
-    /* 折叠态 */
-    .sidebar.collapsed { width: var(--sidebar-collapsed-w); padding: 14px 6px; }
-    .sidebar.collapsed .sidebar-title,
-    .sidebar.collapsed .link-text,
-    .sidebar.collapsed .live-text { display: none; }
-    .sidebar.collapsed .sidebar-head { justify-content: center; padding-bottom: 16px; }
-    .sidebar.collapsed a.link, .sidebar.collapsed button.link { justify-content: center; padding: 9px 6px; }
-    .sidebar.collapsed a.link .ico, .sidebar.collapsed button.link .ico { width: auto; }
-    .sidebar.collapsed .live-status { justify-content: center; padding: 8px 0; }
-    .sidebar.collapsed .divider { margin: 8px 12px; }
-
     .pulse {
       display: inline-block; width: 6px; height: 6px;
       background: var(--emerald); border-radius: 50%;
@@ -141,17 +175,11 @@
     }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 
-    /* ── 主内容 ── */
-    .main {
-      flex: 1; min-width: 0;
-      height: 100vh;
-      padding: 10px 14px 14px;
-      display: flex; flex-direction: column;
-    }
+    /* ════════ 主内容（panel-stack，跟 dashboard 同款）════════ */
     .top-bar {
       flex-shrink: 0;
       display: flex; align-items: center; gap: 12px;
-      padding: 6px 8px 10px;
+      padding: 0 8px 10px 40px;
     }
     .top-bar h1 {
       font-size: 18px; font-weight: 700; letter-spacing: 0.01em;
@@ -161,7 +189,6 @@
     }
     .top-bar .meta { font-size: 11px; color: var(--dim); margin-left: auto; }
 
-    /* ── Panel stack ── */
     .panel-stack {
       flex: 1; min-height: 0;
       display: flex; flex-direction: column;
@@ -210,14 +237,9 @@
     .panel-body::-webkit-scrollbar { width: 6px; }
     .panel-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
 
-    h3 {
-      font-size: 11px; font-weight: 700;
-      letter-spacing: 0.1em; text-transform: uppercase;
-      color: var(--dim); margin: 14px 0 8px;
-    }
+    h3 { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin: 14px 0 8px; }
     h3:first-child { margin-top: 4px; }
     .meta { font-size: 12px; color: var(--muted); }
-
     .status-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 13px; }
     .status-row:last-child { border-bottom: none; }
     .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px currentColor; }
@@ -227,23 +249,12 @@
     .status-name { font-weight: 600; min-width: 140px; color: var(--text); }
     .status-value { color: var(--muted); flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 
-    button.btn {
-      padding: 7px 14px;
-      background: var(--glass-bg);
-      border: 1px solid var(--glass-border);
-      color: var(--text); border-radius: 9px;
-      font-size: 12.5px; font-weight: 600;
-      cursor: pointer; transition: all 0.18s;
-      backdrop-filter: blur(8px);
-      font-family: inherit;
-    }
+    button.btn { padding: 7px 14px; background: var(--glass-bg); border: 1px solid var(--glass-border); color: var(--text); border-radius: 9px; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: all 0.18s; backdrop-filter: blur(8px); font-family: inherit; }
     button.btn:hover { background: var(--glass-hover); border-color: rgba(255,255,255,0.22); }
     button.btn.primary { background: var(--indigo-bg); border-color: var(--indigo); color: #e0e7ff; }
     button.btn.primary:hover { background: rgba(165,180,252,0.4); }
     button.btn.danger { background: var(--rose-bg); border-color: var(--rose); color: #fecaca; }
     button.btn.danger:hover { background: rgba(248,113,113,0.3); }
-    button.btn.tiny { padding: 3px 10px; font-size: 10px; border-radius: 6px; }
-
     .action-row { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     .action-row:last-child { border-bottom: none; }
     .action-desc { font-size: 11px; color: var(--muted); flex: 1; min-width: 200px; }
@@ -276,258 +287,195 @@
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.success { background: rgba(52,211,153,0.9); color: #052e16; border-color: rgba(52,211,153,0.6); }
     .toast.error { background: rgba(248,113,113,0.9); color: #450a0a; border-color: rgba(248,113,113,0.6); }
-
     code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 1px 6px; background: rgba(0,0,0,0.3); border-radius: 4px; color: var(--violet); }
 
-    /* ── 链接编辑：右侧滑出抽屉（照搬 graph-settings-drawer 风格） ── */
+    /* ════════ 链接编辑：嵌套右侧子抽屉（仿 graph-settings-drawer）════════ */
     .link-editor {
       position: fixed; top: 0; right: 0; bottom: 0;
-      width: 420px; max-width: 92vw;
+      width: 400px; max-width: 92vw;
       background: rgba(15,12,41,0.94);
       backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
       border-left: 1px solid var(--glass-border);
       transform: translateX(110%);
       transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
-      z-index: 1000;
+      z-index: 200;
       padding: 22px 22px 18px;
       overflow-y: auto;
       display: flex; flex-direction: column;
       box-shadow: -18px 0 56px rgba(0,0,0,0.55);
     }
     .link-editor.open { transform: translateX(0); }
-    .link-editor-backdrop {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.4);
-      opacity: 0; pointer-events: none;
-      transition: opacity 0.28s;
-      z-index: 999;
-    }
-    .link-editor-backdrop.open { opacity: 1; pointer-events: auto; }
-    .link-editor-head {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 6px; flex-shrink: 0;
-    }
-    .link-editor-title {
-      font-size: 13px; font-weight: 700;
-      letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--muted);
-    }
-    .link-editor-close {
-      width: 32px; height: 32px;
-      background: transparent; border: none;
-      color: var(--muted); font-size: 22px; line-height: 1;
-      border-radius: 8px; cursor: pointer;
-      transition: background 0.15s, color 0.15s;
-    }
+    .link-editor-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-shrink: 0; }
+    .link-editor-title { font-size: 13px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+    .link-editor-close { width: 32px; height: 32px; background: transparent; border: none; color: var(--muted); font-size: 22px; line-height: 1; border-radius: 8px; cursor: pointer; transition: background 0.15s, color 0.15s; }
     .link-editor-close:hover { background: var(--glass-hover); color: var(--text); }
-    .link-editor-hint {
-      font-size: 11px; color: var(--dim);
-      padding-bottom: 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      margin-bottom: 8px;
-    }
-    /* link-item 用 setting-row column 风格 */
-    .link-item {
-      padding: 10px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      display: flex; flex-direction: column; gap: 6px;
-      font-size: 13px;
-    }
+    .link-editor-hint { font-size: 11px; color: var(--dim); padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 8px; }
+    .link-item { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
     .link-item:last-of-type { border-bottom: none; }
     .link-item-row { display: flex; gap: 6px; align-items: center; }
-    .link-item input {
-      padding: 5px 10px;
-      background: rgba(0,0,0,0.25);
-      border: 1px solid var(--glass-border);
-      color: var(--text); border-radius: 7px;
-      font-size: 12.5px; outline: none;
-      font-family: inherit;
-      transition: border 0.15s, background 0.15s;
-    }
+    .link-item input { padding: 5px 10px; background: rgba(0,0,0,0.25); border: 1px solid var(--glass-border); color: var(--text); border-radius: 7px; font-size: 12.5px; outline: none; font-family: inherit; transition: border 0.15s, background 0.15s; }
     .link-item input:focus { border-color: var(--indigo); background: rgba(0,0,0,0.4); }
     .link-item input.ico-col { width: 48px; text-align: center; }
-    .link-item input.label-col { flex: 0 0 120px; }
+    .link-item input.label-col { flex: 0 0 110px; }
     .link-item input.href-col { flex: 1; min-width: 0; }
-    .link-item .row-btn {
-      width: 26px; height: 26px;
-      display: inline-flex; align-items: center; justify-content: center;
-      background: transparent; border: 1px solid var(--glass-border);
-      color: var(--muted); border-radius: 7px;
-      font-size: 12px; cursor: pointer; flex-shrink: 0;
-      transition: background 0.15s, color 0.15s, border 0.15s;
-    }
+    .link-item .row-btn { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--glass-border); color: var(--muted); border-radius: 7px; font-size: 12px; cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s, border 0.15s; }
     .link-item .row-btn:hover { background: var(--glass-hover); color: var(--text); }
     .link-item .row-btn.del:hover { background: var(--rose-bg); border-color: var(--rose); color: var(--rose); }
-    .link-editor-actions {
-      display: flex; gap: 8px; justify-content: flex-end;
-      margin-top: auto; padding-top: 14px; flex-wrap: wrap;
-      border-top: 1px solid rgba(255,255,255,0.06);
-    }
+    .link-editor-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: auto; padding-top: 14px; flex-wrap: wrap; border-top: 1px solid rgba(255,255,255,0.06); }
 
     @media (max-width: 720px) {
-      html, body { height: auto; overflow: visible; }
-      body { flex-direction: column; }
-      .sidebar { width: 100%; height: auto; position: relative; flex-direction: row; flex-wrap: wrap; padding: 10px 8px; border-right: none; border-bottom: 1px solid var(--glass-border); }
-      .sidebar.collapsed { width: 100%; padding: 10px 8px; }
-      .sidebar.collapsed .sidebar-title, .sidebar.collapsed .link-text, .sidebar.collapsed .live-text { display: block; }
-      .sidebar-head { width: 100%; padding: 4px 10px 8px; }
-      .sidebar .divider { display: none; }
-      .sidebar .live-status { margin: 0 0 0 auto; padding: 4px 10px; }
-      .sidebar a.link, .sidebar button.link { width: auto; padding: 5px 10px; font-size: 12px; }
-      .main { height: auto; padding: 12px; }
-      .panel-stack { gap: 8px; }
+      .top-bar { padding-left: 40px; }
       .panel { flex: 0 0 auto; min-height: 52px; }
       .panel.active { min-height: 60vh; }
+      body.sidebar-open:not(.sidebar-floating) { padding-left: 14px; }
     }
   </style>
 </head>
 <body>
 
-<!-- 左侧导航 -->
-<nav class="sidebar" id="sidebar">
-  <div class="sidebar-head">
-    <button class="sidebar-toggle" id="sidebar-toggle" type="button" title="折叠/展开侧栏" aria-label="折叠或展开侧栏">
-      <span class="grip"></span>
-    </button>
-    <div class="sidebar-title">
-      bwicarus.space
-      <small>个人学习中心</small>
-    </div>
+<!-- 左侧把手 toggle -->
+<button class="left-drawer-toggle" id="drawer-toggle" type="button" aria-label="切换导航抽屉" title="点击展开/收起导航">
+  <span class="grip"></span>
+</button>
+
+<!-- 左侧导航抽屉 -->
+<aside class="left-drawer" id="left-drawer">
+  <header class="left-drawer-header">
+    <div class="left-drawer-title">bwicarus.space</div>
+    <button class="left-drawer-close" id="drawer-close" aria-label="关闭">×</button>
+  </header>
+  <div class="nav-links" id="sidebar-links"></div>
+  <div class="nav-tools">
+    <button onclick="openLinkEditor()" title="编辑导航链接"><span style="font-size:14px;">✎</span> 编辑链接</button>
+    <label class="cfg-row" style="padding: 6px 4px; font-size: 11px; color: var(--muted);">
+      <input type="checkbox" id="floating-toggle"> 悬浮模式（不挤压主内容）
+    </label>
   </div>
-  <!-- 链接由 JS 动态渲染 -->
-  <div id="sidebar-links"></div>
-  <div class="divider"></div>
-  <button class="link" onclick="openLinkEditor()" title="编辑导航链接">
-    <span class="ico">✎</span><span class="link-text">编辑链接</span>
-  </button>
-  <div class="live-status">
+  <div class="nav-status">
     <span class="pulse"></span>
-    <span class="live-text" id="last-refresh">实时刷新</span>
+    <span id="last-refresh">实时刷新</span>
   </div>
-</nav>
+</aside>
 
 <!-- 主内容 -->
-<main class="main">
-  <div class="top-bar">
-    <h1>控制面板</h1>
-    <div class="meta" id="header-meta">bwicarus-3 · 替代 Windows EXE</div>
+<div class="top-bar">
+  <h1>控制面板</h1>
+  <div class="meta" id="header-meta">bwicarus-3 · 替代 Windows EXE</div>
+</div>
+
+<div class="panel-stack">
+  <div class="panel active" data-panel="status">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#34d399; background:#34d399"></div>
+      <span class="tab-title">系统状态</span>
+      <span class="tab-meta" id="status-tab-meta"></span>
+    </div>
+    <div class="panel-body"><div id="status">加载中…</div></div>
   </div>
 
-  <div class="panel-stack">
-    <div class="panel active" data-panel="status">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#34d399; background:#34d399"></div>
-        <span class="tab-title">系统状态</span>
-        <span class="tab-meta" id="status-tab-meta"></span>
-      </div>
-      <div class="panel-body"><div id="status">加载中…</div></div>
+  <div class="panel" data-panel="trigger">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#a5b4fc; background:#a5b4fc"></div>
+      <span class="tab-title">触发操作</span>
     </div>
-
-    <div class="panel" data-panel="trigger">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#a5b4fc; background:#a5b4fc"></div>
-        <span class="tab-title">触发操作</span>
+    <div class="panel-body">
+      <div class="action-row">
+        <button class="btn primary" onclick="trigger('daily', event)">立即跑完整 Daily</button>
+        <span class="action-desc">register + anki_status + review + 必复习计算 + cleanup + dashboard + AnkiWeb sync</span>
       </div>
-      <div class="panel-body">
-        <div class="action-row">
-          <button class="btn primary" onclick="trigger('daily', event)">立即跑完整 Daily</button>
-          <span class="action-desc">register + anki_status + review + 必复习计算 + cleanup + dashboard + AnkiWeb sync</span>
-        </div>
-        <div class="action-row">
-          <button class="btn" onclick="trigger('register', event)">立即登记新笔记</button>
-          <span class="action-desc">只跑 register_notes（不含必复习计算）</span>
-        </div>
-        <div class="action-row">
-          <button class="btn" onclick="trigger('ankiweb-sync', event)">AnkiWeb 同步</button>
-          <span class="action-desc">触发 AnkiConnect sync action</span>
-        </div>
-        <div class="action-row">
-          <button class="btn danger" onclick="confirmTrigger('anki-restart', '重启 Anki？AnkiConnect 暂时不可用 20s 左右。', event)">重启 Anki</button>
-          <span class="action-desc">systemctl restart anki-headless</span>
-        </div>
+      <div class="action-row">
+        <button class="btn" onclick="trigger('register', event)">立即登记新笔记</button>
+        <span class="action-desc">只跑 register_notes（不含必复习计算）</span>
       </div>
-    </div>
-
-    <div class="panel" data-panel="ai">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#fbbf24; background:#fbbf24"></div>
-        <span class="tab-title">AI 后端</span>
-        <span class="tab-meta" id="ai-tab-meta"></span>
+      <div class="action-row">
+        <button class="btn" onclick="trigger('ankiweb-sync', event)">AnkiWeb 同步</button>
+        <span class="action-desc">触发 AnkiConnect sync action</span>
       </div>
-      <div class="panel-body">
-        <p class="meta" style="margin-bottom:14px;">当前: <span id="ai-current" class="badge">…</span></p>
-        <div class="action-row">
-          <button class="btn primary" onclick="switchAI('claude', event)">切到 Claude</button>
-          <button class="btn primary" onclick="switchAI('gpt', event)">切到 Codex (GPT)</button>
-          <span class="action-desc">写入 <code>state/ai-settings.json</code>，无需重启服务</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel" data-panel="daily">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#c4b5fd; background:#c4b5fd"></div>
-        <span class="tab-title">Daily 进度</span>
-        <span class="tab-meta"><span id="daily-status-badge" class="badge"></span></span>
-      </div>
-      <div class="panel-body"><div id="last-run">加载中…</div></div>
-    </div>
-
-    <div class="panel" data-panel="log">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#60a5fa; background:#60a5fa"></div>
-        <span class="tab-title">触发日志</span>
-        <span class="tab-meta">webapp_trigger.log</span>
-      </div>
-      <div class="panel-body" style="display:flex; flex-direction:column;">
-        <p class="meta" style="margin-bottom: 10px;">末 80 行 · 触发后自动展开 + 实时滚动</p>
-        <div id="trigger-log" class="log" style="flex:1;">加载中…</div>
-      </div>
-    </div>
-
-    <div class="panel" data-panel="config">
-      <div class="panel-tab">
-        <div class="tab-dot" style="color:#fb923c; background:#fb923c"></div>
-        <span class="tab-title">设置</span>
-        <span class="tab-meta">同步自 Windows EXE</span>
-      </div>
-      <div class="panel-body">
-        <div class="config-section">
-          <h3>Anki</h3>
-          <label class="cfg-row"><input type="checkbox" data-cfg-path="anki.auto_restart"> AnkiConnect 不可达时自动重启 anki-headless</label>
-        </div>
-        <div class="config-section">
-          <h3>笔记登记</h3>
-          <label class="cfg-row"><input type="checkbox" data-cfg-path="auto_upload_after_register"> 登记完成后自动「刷新并上传网页」</label>
-        </div>
-        <div class="config-section">
-          <h3>凌晨定时</h3>
-          <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.wake_anki"> 触发前确保 Anki 可用</label>
-          <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.upload_after"> 完成后部署 dashboard</label>
-        </div>
-        <div class="config-section">
-          <h3>iPad 截图问答</h3>
-          <label class="cfg-row"><input type="checkbox" data-cfg-path="qa_remote_daemon"> 启用 iPad 远程截图问答</label>
-          <label class="cfg-row">习题子目录 <input type="text" data-cfg-path="qa_exercises_subdir"></label>
-          <label class="cfg-row">错题子目录 <input type="text" data-cfg-path="qa_wrong_subdir"></label>
-        </div>
-        <p style="margin-top: 16px;">
-          <button class="btn primary" onclick="saveConfig(event)">保存设置</button>
-          <span class="action-desc" style="margin-left: 10px;">某些设置改动会重启 qa-server</span>
-        </p>
+      <div class="action-row">
+        <button class="btn danger" onclick="confirmTrigger('anki-restart', '重启 Anki？AnkiConnect 暂时不可用 20s 左右。', event)">重启 Anki</button>
+        <span class="action-desc">systemctl restart anki-headless</span>
       </div>
     </div>
   </div>
-</main>
 
-<!-- 链接编辑：右侧滑出抽屉 -->
-<div class="link-editor-backdrop" id="link-modal-bg" onclick="closeLinkEditor()"></div>
+  <div class="panel" data-panel="ai">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#fbbf24; background:#fbbf24"></div>
+      <span class="tab-title">AI 后端</span>
+      <span class="tab-meta" id="ai-tab-meta"></span>
+    </div>
+    <div class="panel-body">
+      <p class="meta" style="margin-bottom:14px;">当前: <span id="ai-current" class="badge">…</span></p>
+      <div class="action-row">
+        <button class="btn primary" onclick="switchAI('claude', event)">切到 Claude</button>
+        <button class="btn primary" onclick="switchAI('gpt', event)">切到 Codex (GPT)</button>
+        <span class="action-desc">写入 <code>state/ai-settings.json</code>，无需重启服务</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" data-panel="daily">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#c4b5fd; background:#c4b5fd"></div>
+      <span class="tab-title">Daily 进度</span>
+      <span class="tab-meta"><span id="daily-status-badge" class="badge"></span></span>
+    </div>
+    <div class="panel-body"><div id="last-run">加载中…</div></div>
+  </div>
+
+  <div class="panel" data-panel="log">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#60a5fa; background:#60a5fa"></div>
+      <span class="tab-title">触发日志</span>
+      <span class="tab-meta">webapp_trigger.log</span>
+    </div>
+    <div class="panel-body" style="display:flex; flex-direction:column;">
+      <p class="meta" style="margin-bottom: 10px;">末 80 行 · 触发后自动展开 + 实时滚动</p>
+      <div id="trigger-log" class="log" style="flex:1;">加载中…</div>
+    </div>
+  </div>
+
+  <div class="panel" data-panel="config">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#fb923c; background:#fb923c"></div>
+      <span class="tab-title">设置</span>
+      <span class="tab-meta">同步自 Windows EXE</span>
+    </div>
+    <div class="panel-body">
+      <div class="config-section">
+        <h3>Anki</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="anki.auto_restart"> AnkiConnect 不可达时自动重启 anki-headless</label>
+      </div>
+      <div class="config-section">
+        <h3>笔记登记</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="auto_upload_after_register"> 登记完成后自动「刷新并上传网页」</label>
+      </div>
+      <div class="config-section">
+        <h3>凌晨定时</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.wake_anki"> 触发前确保 Anki 可用</label>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.upload_after"> 完成后部署 dashboard</label>
+      </div>
+      <div class="config-section">
+        <h3>iPad 截图问答</h3>
+        <label class="cfg-row"><input type="checkbox" data-cfg-path="qa_remote_daemon"> 启用 iPad 远程截图问答</label>
+        <label class="cfg-row">习题子目录 <input type="text" data-cfg-path="qa_exercises_subdir"></label>
+        <label class="cfg-row">错题子目录 <input type="text" data-cfg-path="qa_wrong_subdir"></label>
+      </div>
+      <p style="margin-top: 16px;">
+        <button class="btn primary" onclick="saveConfig(event)">保存设置</button>
+        <span class="action-desc" style="margin-left: 10px;">某些设置改动会重启 qa-server</span>
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- 链接编辑：嵌套右侧子抽屉 -->
 <aside class="link-editor" id="link-modal">
   <div class="link-editor-head">
     <div class="link-editor-title">编辑导航链接</div>
     <button class="link-editor-close" onclick="closeLinkEditor()" aria-label="关闭">×</button>
   </div>
-  <div class="link-editor-hint">每行：emoji / 标签 / URL · ↑↓ 排序 · ✕ 删除 · 改完点保存</div>
+  <div class="link-editor-hint">每行：emoji / 标签 / URL · ↑↓ 排序 · ✕ 删除</div>
   <div id="link-rows"></div>
   <button class="btn" style="margin-top: 10px;" onclick="addLinkRow()">+ 加一个</button>
   <div class="link-editor-actions">
@@ -547,35 +495,58 @@ const DEFAULT_LINKS = [
   {icon: "👤", label: "个人页",   href: "/profile/"},
   {icon: "⎋",  label: "登出",     href: "/logout"},
 ];
-
-// ── Sidebar 渲染 ──────────────────────────────────────────────
 let _currentLinks = DEFAULT_LINKS.slice();
 
+// ── 抽屉开关 ──────────────────────────────────────────────
+const drawer = document.getElementById('left-drawer');
+const toggleBtn = document.getElementById('drawer-toggle');
+const closeBtn = document.getElementById('drawer-close');
+const floatingChk = document.getElementById('floating-toggle');
+
+function openDrawer() {
+  drawer.classList.add('open');
+  document.body.classList.add('sidebar-open');
+}
+function closeDrawer() {
+  drawer.classList.remove('open');
+  document.body.classList.remove('sidebar-open');
+}
+toggleBtn.addEventListener('click', () => {
+  drawer.classList.contains('open') ? closeDrawer() : openDrawer();
+});
+closeBtn.addEventListener('click', closeDrawer);
+
+// 悬浮模式：打开抽屉时主内容不被挤
+floatingChk.addEventListener('change', () => {
+  document.body.classList.toggle('sidebar-floating', floatingChk.checked);
+  try { localStorage.setItem('sidebarFloating', floatingChk.checked); } catch(e){}
+});
+try {
+  if (localStorage.getItem('sidebarFloating') === 'true') {
+    floatingChk.checked = true;
+    document.body.classList.add('sidebar-floating');
+  }
+  if (localStorage.getItem('sidebarOpen') === 'true') openDrawer();
+} catch(e){}
+// 记忆开关状态
+new MutationObserver(() => {
+  try { localStorage.setItem('sidebarOpen', drawer.classList.contains('open')); } catch(e){}
+}).observe(drawer, {attributes: true, attributeFilter: ['class']});
+
+// ── 渲染链接 ──────────────────────────────────────────────
 function renderSidebarLinks() {
   const container = document.getElementById('sidebar-links');
   const curPath = location.pathname.replace(/\/$/, '');
   container.innerHTML = _currentLinks.map(l => {
     const isCur = l.href.replace(/\/$/, '') === curPath;
-    return `<a class="link${isCur ? ' current' : ''}" href="${l.href}">
+    return `<a class="nav-link${isCur ? ' current' : ''}" href="${l.href}">
       <span class="ico">${l.icon || '·'}</span>
-      <span class="link-text">${l.label}</span>
+      <span>${l.label}</span>
     </a>`;
   }).join('');
 }
 
-// ── Sidebar 折叠 ──────────────────────────────────────────────
-document.getElementById('sidebar-toggle').addEventListener('click', () => {
-  const sb = document.getElementById('sidebar');
-  sb.classList.toggle('collapsed');
-  try { localStorage.setItem('sidebarCollapsed', sb.classList.contains('collapsed')); } catch(e){}
-});
-try {
-  if (localStorage.getItem('sidebarCollapsed') === 'true') {
-    document.getElementById('sidebar').classList.add('collapsed');
-  }
-} catch(e){}
-
-// ── 链接编辑 modal ────────────────────────────────────────────
+// ── 链接编辑 ──────────────────────────────────────────────
 function rowHTML(link) {
   return `<div class="link-item">
     <div class="link-item-row">
@@ -591,11 +562,9 @@ function rowHTML(link) {
 function openLinkEditor() {
   document.getElementById('link-rows').innerHTML = _currentLinks.map(rowHTML).join('');
   document.getElementById('link-modal').classList.add('open');
-  document.getElementById('link-modal-bg').classList.add('open');
 }
 function closeLinkEditor() {
   document.getElementById('link-modal').classList.remove('open');
-  document.getElementById('link-modal-bg').classList.remove('open');
 }
 function addLinkRow() {
   const div = document.createElement('div');
@@ -618,8 +587,7 @@ async function saveLinks() {
   const links = readLinks();
   try {
     const r = await fetch('/control/api/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({sidebar_links: links}),
     });
     const data = await r.json();
@@ -628,23 +596,21 @@ async function saveLinks() {
       renderSidebarLinks();
       closeLinkEditor();
       showToast('链接已保存', 'success');
-    } else {
-      showToast(data.msg || '保存失败', 'error');
-    }
+    } else { showToast(data.msg || '保存失败', 'error'); }
   } catch (e) { showToast('保存失败: ' + e, 'error'); }
 }
 function resetLinks() {
   if (!confirm('恢复默认 5 个链接？')) return;
   document.getElementById('link-rows').innerHTML = DEFAULT_LINKS.map(rowHTML).join('');
 }
-// ESC 关闭抽屉
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && document.getElementById('link-modal').classList.contains('open')) {
-    closeLinkEditor();
+  if (e.key === 'Escape') {
+    if (document.getElementById('link-modal').classList.contains('open')) closeLinkEditor();
+    else if (drawer.classList.contains('open')) closeDrawer();
   }
 });
 
-// ── Panel 折叠/展开 ───────────────────────────────────────────
+// ── Panel 折叠/展开（dashboard 同款）──────────────────────
 const panels = document.querySelectorAll('.panel');
 panels.forEach(p => {
   p.addEventListener('click', e => {
@@ -655,10 +621,9 @@ panels.forEach(p => {
   });
 });
 
-// ── 状态/触发逻辑 ─────────────────────────────────────────────
+// ── 状态/触发 ──────────────────────────────────────────────
 let _fastPollUntil = 0;
 const NORMAL_INTERVAL = 1500, FAST_INTERVAL = 500;
-
 function showToast(msg, type) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -672,21 +637,15 @@ function fmtElapsed(startISO) {
   if (diff < 3600) return Math.floor(diff/60) + 'm ' + (diff%60) + 's';
   return Math.floor(diff/3600) + 'h ' + Math.floor((diff%3600)/60) + 'm';
 }
-
 async function refreshStatus() {
   try {
     const r = await fetch('/control/api/status');
     const data = await r.json();
     const ankiOk = data.ankiconnect_version === 6;
-
     function svc(name, val, extra) {
       const dot = (val === 'active' || (name === 'AnkiConnect' && ankiOk)) ? 'ok' :
                   ((val === 'inactive' || val == null) ? 'bad' : 'warn');
-      return `<div class="status-row">
-        <span class="dot ${dot}"></span>
-        <span class="status-name">${name}</span>
-        <span class="status-value">${extra || val || 'n/a'}</span>
-      </div>`;
+      return `<div class="status-row"><span class="dot ${dot}"></span><span class="status-name">${name}</span><span class="status-value">${extra || val || 'n/a'}</span></div>`;
     }
     document.getElementById('status').innerHTML =
       svc('AnkiConnect', ankiOk ? 'active' : 'bad', ankiOk ? `v${data.ankiconnect_version} @ :8765` : '离线') +
@@ -695,40 +654,32 @@ async function refreshStatus() {
       svc('obsidian-sync', data.obsidian_sync) +
       svc('qa-server', data.qa_server, (data.qa_server || 'n/a') + ' (iPad 截图问答 daemon)') +
       svc('tailscaled', data.tailscaled);
-
     const allOk = ankiOk && ['anki_headless','xvfb_99','obsidian_sync','qa_server'].every(k => data[k] === 'active');
     document.getElementById('status-tab-meta').textContent = allOk ? '全部正常' : '有问题';
     document.getElementById('status-tab-meta').style.color = allOk ? 'var(--emerald)' : 'var(--amber)';
-
     const aiBadge = document.getElementById('ai-current');
     aiBadge.textContent = data.ai_backend;
     aiBadge.className = 'badge ' + (data.ai_backend.includes('codex') ? 'codex' : 'claude');
     document.getElementById('ai-tab-meta').textContent = data.ai_backend;
-
     const dailyBadge = document.getElementById('daily-status-badge');
     if (data.last_run) {
       const lr = data.last_run;
       dailyBadge.textContent = lr.status;
       dailyBadge.className = 'badge ' + lr.status;
       const steps = (lr.steps || []).map(s => {
-        const icon = s.status === 'ok' ? '✓' : s.status === 'failed' ? '✗' :
-                     s.status === 'running' ? '<span class="spinner"></span>' : '▶';
-        const elapsed = s.status === 'running' ? ` (${fmtElapsed(s.started_at)} 已用)` :
-                        (s.duration_s !== null ? ` (${s.duration_s}s)` : '');
+        const icon = s.status === 'ok' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? '<span class="spinner"></span>' : '▶';
+        const elapsed = s.status === 'running' ? ` (${fmtElapsed(s.started_at)} 已用)` : (s.duration_s !== null ? ` (${s.duration_s}s)` : '');
         const err = s.error ? ' — ' + s.error : '';
         return `<div class="step ${s.status}">${icon} ${s.name}: ${s.status}${elapsed}${err}</div>`;
       }).join('\n');
-      document.getElementById('last-run').innerHTML = `
-        <p class="meta" style="margin-bottom: 10px;">开始 ${lr.started_at} · 更新 ${lr.updated_at}</p>
-        <div class="log" style="max-height: 100%;">${steps || '(暂无步骤数据)'}</div>`;
+      document.getElementById('last-run').innerHTML = `<p class="meta" style="margin-bottom:10px;">开始 ${lr.started_at} · 更新 ${lr.updated_at}</p><div class="log" style="max-height:100%;">${steps || '(暂无步骤数据)'}</div>`;
       if (lr.status === 'running') _fastPollUntil = Date.now() + 60000;
     } else {
-      dailyBadge.textContent = '';
-      dailyBadge.className = 'badge';
+      dailyBadge.textContent = ''; dailyBadge.className = 'badge';
       document.getElementById('last-run').innerHTML = '<p class="meta">(还未跑过 daily)</p>';
     }
     document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
-  } catch (e) { console.error('refresh:', e); }
+  } catch (e) {}
 }
 async function refreshTriggerLog() {
   try {
@@ -753,17 +704,11 @@ async function trigger(action, e) {
     refreshStatus(); refreshTriggerLog();
   } catch (err) { showToast('触发失败: ' + err, 'error'); }
 }
-function confirmTrigger(action, msg, e) {
-  if (e) e.stopPropagation();
-  if (confirm(msg)) trigger(action, null);
-}
+function confirmTrigger(action, msg, e) { if (e) e.stopPropagation(); if (confirm(msg)) trigger(action, null); }
 async function switchAI(target, e) {
   if (e) e.stopPropagation();
   try {
-    const r = await fetch('/control/api/trigger/switch-ai', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({target}),
-    });
+    const r = await fetch('/control/api/trigger/switch-ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({target}) });
     const data = await r.json();
     showToast(data.msg, data.ok ? 'success' : 'error');
     refreshStatus();
@@ -784,7 +729,6 @@ async function loadConfig() {
       if (el.type === 'checkbox') el.checked = !!val;
       else el.value = val ?? '';
     });
-    // sidebar_links 也从这里读
     if (Array.isArray(cfg.sidebar_links) && cfg.sidebar_links.length) {
       _currentLinks = cfg.sidebar_links;
       renderSidebarLinks();
@@ -799,28 +743,19 @@ async function saveConfig(e) {
     setByPath(cfg, el.dataset.cfgPath, val);
   });
   try {
-    const r = await fetch('/control/api/config', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(cfg),
-    });
+    const r = await fetch('/control/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg) });
     const data = await r.json();
     showToast(data.msg || '已保存', data.ok ? 'success' : 'error');
   } catch (err) { showToast('保存失败: ' + err, 'error'); }
 }
-document.querySelector('[data-panel="config"]').addEventListener('click', () => {
-  setTimeout(loadConfig, 300);
-}, {once: true});
-
+document.querySelector('[data-panel="config"]').addEventListener('click', () => { setTimeout(loadConfig, 300); }, {once: true});
 function tick() {
   refreshStatus();
   if (document.querySelector('[data-panel="log"]').classList.contains('active')) refreshTriggerLog();
   const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
   setTimeout(tick, interval);
 }
-
-// 启动：先拉 config（取自定义 links），渲染 sidebar，再开始轮询
 loadConfig().then(() => { renderSidebarLinks(); tick(); });
-// 兜底：如果 loadConfig 没返回，至少先用默认 links 渲染一次
 renderSidebarLinks();
 </script>
 </body>
