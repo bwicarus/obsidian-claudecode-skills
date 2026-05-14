@@ -86,7 +86,22 @@ def ensure_anki() -> bool:
 
 def step(name: str, func) -> bool:
     start = datetime.datetime.now().astimezone()
-    print(f"▶ {name} {start.strftime('%H:%M:%S')}...")
+    print(f"▶ {name} {start.strftime('%H:%M:%S')}...", flush=True)
+
+    # 步骤开始时立刻写 running 状态，让前端 last_run.json 轮询能看到"正在跑"
+    STEPS.append(
+        {
+            "name": name,
+            "status": "running",
+            "rc": None,
+            "error": None,
+            "started_at": start.isoformat(timespec="seconds"),
+            "ended_at": None,
+            "duration_s": None,
+        }
+    )
+    write_run("running")
+
     rc = 0
     err: str | None = None
     try:
@@ -96,23 +111,23 @@ def step(name: str, func) -> bool:
     except Exception as e:
         rc = -1
         err = str(e)
+
     end = datetime.datetime.now().astimezone()
     duration = int((end - start).total_seconds())
     status = "ok" if rc == 0 and not err else "failed"
-    STEPS.append(
+    # 更新刚刚 append 的 running 记录
+    STEPS[-1].update(
         {
-            "name": name,
             "status": status,
             "rc": rc,
             "error": err,
-            "started_at": start.isoformat(timespec="seconds"),
             "ended_at": end.isoformat(timespec="seconds"),
             "duration_s": duration,
         }
     )
     write_run("running")
     suffix = f" {err}" if err else ""
-    print(f"  {'✓' if status == 'ok' else '✗'} {status} ({duration}s){suffix}")
+    print(f"  {'✓' if status == 'ok' else '✗'} {status} ({duration}s){suffix}", flush=True)
     return status == "ok"
 
 

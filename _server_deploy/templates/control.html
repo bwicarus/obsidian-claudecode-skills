@@ -28,10 +28,12 @@
   .action-row { margin-bottom: .8em; }
   .action-desc { color: #6b7280; font-size: .85em; margin-left: .5em; }
   .log { background: #1e1e1e; color: #ddd; font-family: ui-monospace, monospace; padding: .9em 1em; border-radius: 6px; white-space: pre-wrap; max-height: 360px; overflow-y: auto; font-size: 12px; line-height: 1.5; }
-  .step { padding: .1em 0; }
+  .step { padding: .15em 0; display: flex; align-items: center; gap: .5em; }
   .step.ok { color: #10b981; }
   .step.failed { color: #ef4444; }
-  .step.running { color: #fbbf24; }
+  .step.running { color: #fbbf24; background: rgba(251, 191, 36, .12); padding: .25em .5em; border-radius: 4px; }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #fbbf24; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .toast { position: fixed; top: 20px; right: 20px; background: #1f2937; color: white; padding: .8em 1.2em; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.15); opacity: 0; transition: opacity .3s; max-width: 360px; z-index: 999; }
   .toast.show { opacity: 1; }
   .toast.success { background: #10b981; }
@@ -40,14 +42,19 @@
   .badge { display: inline-block; padding: .15em .6em; border-radius: 4px; background: #e5e7eb; color: #1f2937; font-size: .85em; font-weight: 600; }
   .badge.claude { background: #fef3c7; color: #92400e; }
   .badge.codex { background: #d1fae5; color: #065f46; }
+  .pulse { display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; margin-right: 4px; vertical-align: middle; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+  .timestamp { color: #9ca3af; font-size: .8em; }
+  details summary { cursor: pointer; font-weight: 600; color: #4b5563; padding: .3em 0; }
+  details[open] summary { margin-bottom: .5em; }
 </style>
 </head>
 <body>
 <h1>🎛️ 控制面板</h1>
-<p class="subtitle">替代 Windows 客户端的网页控制中心。所有功能在服务器上运行。</p>
+<p class="subtitle">替代 Windows 客户端的网页控制中心。<span class="pulse" id="live-indicator"></span><small>实时刷新中</small></p>
 
 <div class="card">
-  <h2>系统状态 <button class="secondary" onclick="refreshStatus()" style="font-size:12px; padding:.3em .8em">刷新</button></h2>
+  <h2>系统状态 <small id="last-refresh" style="font-weight: normal; font-size: 11px;"></small></h2>
   <div id="status">加载中…</div>
 </div>
 
@@ -82,18 +89,37 @@
 </div>
 
 <div class="card">
-  <h2>Daily 最后运行</h2>
+  <h2>Daily 最后运行 <span id="daily-status-badge" class="badge"></span></h2>
   <div id="last-run">加载中…</div>
+</div>
+
+<div class="card">
+  <details id="trigger-log-details">
+    <summary>📋 触发日志 (webapp_trigger.log 末 80 行)</summary>
+    <div id="trigger-log" class="log" style="margin-top: .5em;">加载中…</div>
+  </details>
 </div>
 
 <div id="toast" class="toast"></div>
 
 <script>
+let _fastPollUntil = 0;  // 触发后开启快速轮询的截止时间
+const NORMAL_INTERVAL = 1500;  // 1.5s 正常轮询
+const FAST_INTERVAL = 500;     // 0.5s 快速轮询（触发后 30s）
+
 function showToast(msg, type) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = 'toast show ' + (type || '');
   setTimeout(() => { t.className = 'toast'; }, 3500);
+}
+
+function fmtElapsed(startISO) {
+  const start = new Date(startISO);
+  const diff = Math.floor((Date.now() - start.getTime()) / 1000);
+  if (diff < 60) return diff + 's';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ' + (diff%60) + 's';
+  return Math.floor(diff/3600) + 'h ' + Math.floor((diff%3600)/60) + 'm';
 }
 
 async function refreshStatus() {
@@ -119,19 +145,52 @@ async function refreshStatus() {
     aiBadge.textContent = data.ai_backend;
     aiBadge.className = 'badge ' + (data.ai_backend.includes('codex')?'codex':'claude');
 
+    const dailyBadge = document.getElementById('daily-status-badge');
     if (data.last_run) {
       const lr = data.last_run;
-      const steps = (lr.steps || []).map(s =>
-        `<div class="step ${s.status}">${s.status==='ok'?'✓':(s.status==='failed'?'✗':'▶')} ${s.name}: ${s.status} (${s.duration_s}s)${s.error?' '+s.error:''}</div>`
-      ).join('\n');
+      const isRunning = lr.status === 'running';
+      dailyBadge.textContent = lr.status;
+      dailyBadge.style.background = isRunning ? '#fef3c7' : (lr.status === 'ok' ? '#d1fae5' : '#fee2e2');
+      dailyBadge.style.color = isRunning ? '#92400e' : (lr.status === 'ok' ? '#065f46' : '#991b1b');
+
+      const steps = (lr.steps || []).map(s => {
+        const icon = s.status === 'ok' ? '✓' : (s.status === 'failed' ? '✗' : (s.status === 'running' ? '<span class="spinner"></span>' : '▶'));
+        const elapsed = s.status === 'running' ? ` (${fmtElapsed(s.started_at)} 已用)` : (s.duration_s !== null ? ` (${s.duration_s}s)` : '');
+        const err = s.error ? ' — ' + s.error : '';
+        return `<div class="step ${s.status}">${icon} ${s.name}: ${s.status}${elapsed}${err}</div>`;
+      }).join('\n');
+
       document.getElementById('last-run').innerHTML = `
-        <p><small>开始: ${lr.started_at} · 更新: ${lr.updated_at} · 状态: <strong>${lr.status}</strong></small></p>
+        <p class="timestamp">开始 ${lr.started_at} · 更新 ${lr.updated_at}</p>
         <div class="log">${steps || '(暂无步骤数据)'}</div>`;
+
+      // daily 在跑期间自动开启快速轮询
+      if (isRunning) {
+        _fastPollUntil = Date.now() + 60000;  // 持续快速轮询
+      }
     } else {
+      dailyBadge.textContent = '';
       document.getElementById('last-run').textContent = '(还未跑过 daily)';
     }
+
+    document.getElementById('last-refresh').textContent = '上次刷新: ' + new Date().toLocaleTimeString();
   } catch (e) {
-    showToast('刷新失败: ' + e, 'error');
+    // 静默：不打扰用户
+    console.error('刷新失败:', e);
+  }
+}
+
+async function refreshTriggerLog() {
+  try {
+    const r = await fetch('/control/api/trigger-log?lines=80');
+    const data = await r.json();
+    const text = (data.lines || []).join('\n');
+    const el = document.getElementById('trigger-log');
+    const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = text || '(空)';
+    if (wasAtBottom) el.scrollTop = el.scrollHeight;
+  } catch (e) {
+    console.error('trigger-log 刷新失败:', e);
   }
 }
 
@@ -140,7 +199,13 @@ async function trigger(action) {
     const r = await fetch(`/control/api/trigger/${action}`, {method: 'POST'});
     const data = await r.json();
     showToast(data.msg, data.ok ? 'success' : 'error');
-    setTimeout(refreshStatus, 1500);
+    // 触发后立即开启快速轮询模式 30s
+    _fastPollUntil = Date.now() + 30000;
+    // 展开触发日志面板
+    document.getElementById('trigger-log-details').open = true;
+    // 立即刷新一次
+    refreshStatus();
+    refreshTriggerLog();
   } catch (e) {
     showToast('触发失败: ' + e, 'error');
   }
@@ -165,8 +230,16 @@ async function switchAI(target) {
   }
 }
 
-refreshStatus();
-setInterval(refreshStatus, 5000);
+function tick() {
+  refreshStatus();
+  if (document.getElementById('trigger-log-details').open) {
+    refreshTriggerLog();
+  }
+  const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
+  setTimeout(tick, interval);
+}
+
+tick();
 </script>
 </body>
 </html>

@@ -120,6 +120,26 @@ def register_control(app):
             "last_run": get_last_run(),
         })
 
+    @app.route("/control/api/trigger-log")
+    def control_trigger_log():
+        """返回 webapp_trigger.log 末 N 行（追踪 trigger 子进程的实时输出）。"""
+        log_file = CLAUDE_DIR / "state" / "logs" / "webapp_trigger.log"
+        lines = int(request.args.get("lines", 80))
+        if not log_file.exists():
+            return jsonify({"lines": [], "size": 0})
+        try:
+            with log_file.open("rb") as f:
+                # 读末尾 ~64KB（足够拿到 80 行）
+                f.seek(0, 2)
+                size = f.tell()
+                read_bytes = min(size, 65536)
+                f.seek(size - read_bytes)
+                data = f.read().decode("utf-8", errors="replace")
+            log_lines = data.splitlines()[-lines:]
+            return jsonify({"lines": log_lines, "size": size})
+        except Exception as e:
+            return jsonify({"lines": [f"读 log 失败: {e}"], "size": 0})
+
     @app.route("/control/api/trigger/<action>", methods=["POST"])
     def control_trigger(action):
         if action == "register":
