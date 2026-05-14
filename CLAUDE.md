@@ -38,7 +38,11 @@
 - `references/pdf-annotation-format.md`
 - `references/ipad-remote-qa.md` — iPad 远程截图问答操作指南（链路、快捷指令、URL 模板、排错）
 - `references/linux-server-migration.md` — 2026-05-14 服务器迁移完整指南（systemd 服务、路径、踩坑速查）
-- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（xvfb-99 / anki-headless / obsidian-sync / bwicarus-daily.service|timer）
+- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.service|timer）
+- `references/server-side-claude-code.md` — 在服务器侧用 Claude Code 继续这个项目（tmux 会话、memory 同步、跨机器切换）
+- `references/client-exe-development.md` — bwicarus-client.exe 开发指南（launcher + core 架构、build_core.py、deploy_core.sh、版本号管理、跟 webapp 控制面板的职责对照）
+- `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）
+- `references/ipad-switch-to-server.md` — iPad 快捷指令切换到服务器的完整步骤
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
 
 **脚本**
