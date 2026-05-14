@@ -5,22 +5,23 @@ ai_client.py — 统一 AI 调用模块
 提供一次性查询（ask）和多轮对话（AISession）两种接口。
 """
 
-import json, os, subprocess, tempfile, threading
+import json, os, subprocess, sys, tempfile, threading
 from pathlib import Path
 
-# ── 路径常量 ──────────────────────────────────────────────────────────────────
+# ── 路径常量（跨平台，复用 config.py 的 env-aware 路径） ────────────────────────
 
-CLAUDE = (
-    r"C:\Users\bwica\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe"
+sys.path.insert(0, str(Path(__file__).parent))
+from config import (  # noqa: E402
+    CLAUDE_CLI as CLAUDE,
+    CODEX_CLI as CODEX,
+    PROJECT_DIR,
+    TEMP_DIR,
+    AI_SETTINGS_FILE as SETTINGS_FILE,
 )
-CODEX    = os.environ.get("APP_CODEX", r"C:\Users\bwica\AppData\Roaming\npm\codex.cmd")
-PROJECT  = r"C:\claude"
-TEMP_DIR = Path(r"C:\claude\temp")
 
-_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-STORE_DIR     = Path(_LOCALAPPDATA) / "截图问答"
-SETTINGS_FILE = STORE_DIR / "settings.json"
+PROJECT   = str(PROJECT_DIR)
+STORE_DIR = SETTINGS_FILE.parent
+WINDOWS   = sys.platform == "win32"
 
 DEFAULT_SETTINGS = {"backend": "auto-claude", "model": ""}
 _VALID_BACKENDS  = frozenset(("auto-claude", "auto-codex", "claude", "codex"))
@@ -52,11 +53,15 @@ def save_settings(data: dict) -> dict:
 # ── 底层调用 ──────────────────────────────────────────────────────────────────
 
 def _run_hidden(cmd, **kwargs):
-    si = subprocess.STARTUPINFO()
-    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    si.wShowWindow = 0
-    flags = kwargs.pop("creationflags", 0) | subprocess.CREATE_NO_WINDOW
-    return subprocess.run(cmd, startupinfo=si, creationflags=flags, **kwargs)
+    """Windows：隐藏窗口跑子进程；Linux：直接跑（不需要隐藏）。"""
+    if WINDOWS:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        flags = kwargs.pop("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        return subprocess.run(cmd, startupinfo=si, creationflags=flags, **kwargs)
+    kwargs.pop("creationflags", None)  # Linux 不支持
+    return subprocess.run(cmd, **kwargs)
 
 
 # ── AI 调用日志 ────────────────────────────────────────────────────────────────

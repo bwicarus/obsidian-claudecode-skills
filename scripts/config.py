@@ -62,7 +62,10 @@ OBSIDIAN_EXE = r"C:\Users\bwica\AppData\Local\Programs\Obsidian\Obsidian.com"
 # ── AI 设置 ─────────────────────────────────────────────────────────────────
 
 _LOCALAPPDATA = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-AI_SETTINGS_FILE = Path(_LOCALAPPDATA) / "截图问答" / "settings.json"
+AI_SETTINGS_FILE = Path(os.environ.get(
+    "AI_SETTINGS_FILE",
+    str(Path(_LOCALAPPDATA) / "截图问答" / "settings.json"),
+))
 
 # ── 网络 ────────────────────────────────────────────────────────────────────
 
