@@ -108,9 +108,17 @@ _claude_lock = threading.Lock()
 
 
 def claude_raw(prompt: str, first: bool = False) -> str:
-    """调用 Claude CLI；first=True 开新会话，False 使用 --continue 续写。"""
+    """调用 Claude CLI；first=True 开新会话，False 使用 --continue 续写。
+
+    Windows 加 --dangerously-skip-permissions 跳过本机交互式权限确认。
+    Linux/root 下 Claude CLI 拒绝该 flag（"cannot be used with root/sudo"），
+    所以仅 Windows 加；服务器 root 走默认模式，简单 prompt 不会触发权限提示。
+    """
     with _claude_lock:
-        cmd = [CLAUDE, "--dangerously-skip-permissions", "--output-format", "text"]
+        cmd = [CLAUDE]
+        if WINDOWS:
+            cmd += ["--dangerously-skip-permissions"]
+        cmd += ["--output-format", "text"]
         if not first:
             cmd.append("--continue")
         cmd += ["-p", prompt]
