@@ -9,22 +9,61 @@
     body {
       min-height: 100vh; background: #f0f2f5;
       font-family: system-ui, -apple-system, sans-serif;
-      padding: 40px 20px; color: #1f2937;
+      color: #1f2937;
+      display: flex;
     }
-    .container { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
 
-    /* ── 顶部导航 ── */
-    .nav {
-      background: #fff; border-radius: 14px; padding: 10px 18px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
-      display: flex; align-items: center; gap: 18px; font-size: 13px;
+    /* ── 左侧导航 ── */
+    .sidebar {
+      width: 220px; flex-shrink: 0;
+      background: #fff;
+      box-shadow: 2px 0 12px rgba(0,0,0,0.04);
+      position: sticky; top: 0;
+      height: 100vh;
+      padding: 28px 16px;
+      display: flex; flex-direction: column; gap: 4px;
+      overflow-y: auto;
     }
-    .nav a { color: #6b7280; text-decoration: none; font-weight: 500; padding: 4px 0; transition: color 0.15s; }
-    .nav a:hover { color: #1a1a1a; }
-    .nav a.current { color: #1a1a1a; font-weight: 700; }
-    .nav-spacer { margin-left: auto; font-size: 11px; color: #9ca3af; display: flex; align-items: center; gap: 6px; }
+    .sidebar-title {
+      font-size: 14px; font-weight: 700;
+      color: #1f2937; padding: 4px 10px 18px;
+      letter-spacing: 0.02em;
+    }
+    .sidebar-title small { display: block; font-size: 11px; color: #9ca3af; font-weight: 500; margin-top: 2px; letter-spacing: 0; }
+    .sidebar a {
+      padding: 9px 12px; border-radius: 8px;
+      color: #6b7280; text-decoration: none;
+      font-size: 13.5px; font-weight: 500;
+      transition: background 0.12s, color 0.12s;
+      display: flex; align-items: center; gap: 9px;
+    }
+    .sidebar a .ico { font-size: 14px; width: 18px; text-align: center; }
+    .sidebar a:hover { background: #f5f5fa; color: #1a1a1a; }
+    .sidebar a.current { background: #eef2ff; color: #4f46e5; font-weight: 700; }
+    .sidebar .divider { height: 1px; background: #f3f4f6; margin: 12px 4px; }
+    .sidebar .live-status {
+      margin-top: auto; padding: 10px 12px;
+      font-size: 11px; color: #9ca3af;
+      display: flex; align-items: center; gap: 6px;
+    }
     .pulse { display: inline-block; width: 7px; height: 7px; background: #10b981; border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+    .container {
+      flex: 1; min-width: 0;
+      max-width: 900px;
+      padding: 40px 32px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+
+    @media (max-width: 720px) {
+      body { flex-direction: column; }
+      .sidebar { width: 100%; height: auto; position: relative; padding: 16px 14px; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
+      .sidebar-title { width: 100%; padding: 0 0 10px; }
+      .sidebar .divider { display: none; }
+      .sidebar .live-status { margin-top: 0; margin-left: auto; padding: 4px 8px; }
+      .container { padding: 20px 14px; }
+    }
 
     /* ── 卡片 ── */
     .card {
@@ -155,19 +194,26 @@
   </style>
 </head>
 <body>
-<div class="container">
 
-  <!-- 顶部导航 -->
-  <div class="nav">
-    <a href="/dashboard/">仪表板</a>
-    <a href="/history/">复习历史</a>
-    <a href="/control/" class="current">控制面板</a>
-    <a href="/profile/">个人页</a>
-    <div class="nav-spacer">
-      <span class="pulse" id="live-indicator"></span>
-      <span id="live-text">实时刷新中</span>
-    </div>
+<!-- 左侧导航 -->
+<nav class="sidebar">
+  <div class="sidebar-title">
+    bwicarus.space
+    <small>个人学习中心</small>
   </div>
+  <a href="/dashboard/"><span class="ico">📊</span>仪表板</a>
+  <a href="/history/"><span class="ico">🗂️</span>复习历史</a>
+  <a href="/control/" class="current"><span class="ico">🎛️</span>控制面板</a>
+  <div class="divider"></div>
+  <a href="/profile/"><span class="ico">👤</span>个人页</a>
+  <a href="/logout"><span class="ico">⎋</span>登出</a>
+  <div class="live-status">
+    <span class="pulse"></span>
+    <span>实时刷新中</span>
+  </div>
+</nav>
+
+<div class="container">
 
   <!-- 标题卡 -->
   <div class="card">
