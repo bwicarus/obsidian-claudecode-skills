@@ -32,13 +32,15 @@ import connect_note
 import note_state
 import summarize_note
 
+from platform_utils import WINDOWS, NO_WINDOW_KW  # noqa: E402
+
 PROJECT_DIR  = config.PROJECT_DIR
 VAULT_ROOT   = config.VAULT_ROOT
 NOTE_PATTERN = config.NOTE_PATTERN
 PYTHON       = config.PYTHON
 TEMP_DIR     = config.TEMP_DIR
 PROMPTS_DIR  = config.PROMPTS_DIR
-_NO_WINDOW   = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_NO_WINDOW   = NO_WINDOW_KW.get("creationflags", 0)  # legacy alias，保留以减少下方改动
 
 
 @functools.lru_cache(maxsize=16)
@@ -96,8 +98,16 @@ def is_obsidian_sync_daemon_running() -> bool:
 
 
 def ensure_obsidian_synced(handle: Any, wait_seconds: int = OBSIDIAN_SYNC_WAIT) -> bool:
-    """daemon 没跑就启动计划任务,等几秒让首跑同步完。返回是否触发了等待。"""
+    """daemon 没跑就启动计划任务,等几秒让首跑同步完。返回是否触发了等待。
+
+    Linux 服务器侧由 systemd `obsidian-sync.service` 管理，is_obsidian_sync_daemon_running
+    走 systemctl is-active 检查。daemon inactive 时我们**不**尝试 systemctl start
+    (webapp 进程未必有 root)，留给 systemd 自己处理或运维介入 — 直接 return False。
+    """
     if is_obsidian_sync_daemon_running():
+        return False
+    if not WINDOWS:
+        handle.update("Obsidian Sync daemon 未运行（systemd），跳过唤醒")
         return False
     handle.update("Obsidian Sync daemon 未运行,启动计划任务")
     try:
