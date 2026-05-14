@@ -14,8 +14,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).parent))
 import note_state
+from config import VAULT_ROOT
 
-VAULT_ROOT = Path("C:/obsidian")
 SKILL = "summarize"
 NOTE_PATTERN = re.compile(r"^[0-9A-Fa-f]{3}-.+\.md$")
 
