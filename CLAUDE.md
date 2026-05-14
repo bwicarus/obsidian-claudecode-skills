@@ -37,6 +37,8 @@
 - `references/anki-selection-rules.md` / `anki-card-format.md`
 - `references/pdf-annotation-format.md`
 - `references/ipad-remote-qa.md` — iPad 远程截图问答操作指南（链路、快捷指令、URL 模板、排错）
+- `references/linux-server-migration.md` — 2026-05-14 服务器迁移完整指南（systemd 服务、路径、踩坑速查）
+- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（xvfb-99 / anki-headless / obsidian-sync / bwicarus-daily.service|timer）
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
 
 **脚本**
@@ -176,6 +178,41 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 **state 共享隐患**：本机按 `ctrl+shift+q` 启的临时 server 跟 daemon **共用** 模块级 `state` 字典。同时操作会串扰（截图覆盖、session 混合）。单人多端通常不撞，遇到问题先各自结束当前会话再开新的。
 
+## 服务器侧自动化（bwicarus.space Linux）
+
+2026-05-14 起整套工作流也跑在 `bwicarus.space` 服务器上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**长期目标是关掉 Windows**，所有功能由服务器 + web 控制面板代替。完整指南见 [`references/linux-server-migration.md`](references/linux-server-migration.md)。
+
+**关键设施**：
+
+| 项 | 路径 | 说明 |
+|---|---|---|
+| 主项目 | `/root/claude/` | git clone 自 GitHub，跟本机 `C:\claude\` 同步 |
+| Vault | `/root/obsidian/` | obsidian-headless sync 拉，1175 笔记 |
+| Anki | `/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` | aqt 25.2.7 + Xvfb 跑 GUI，5634 卡 |
+| 环境变量 | `/root/claude/.env` + `/etc/profile.d/claude.sh` | `CLAUDE_PROJECT` / `OBSIDIAN_VAULT` / `APP_PYTHON` / `APP_CLAUDE` / `APP_CODEX` / `ANKI_CONNECT_URL` / `AI_SETTINGS_FILE` |
+| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99.service` + `anki-headless.service` + `obsidian-sync.service` + `bwicarus-daily.service` + `bwicarus-daily.timer` (04:00) |
+| **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE，触发 register / daily / 切 AI 后端 / 重启 Anki，需登录 |
+
+**控制面板源码**：
+- `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`
+- `_server_deploy/templates/control.html` → 部署到 `/root/webapp/templates/control.html`
+- `app.py` 末尾（在 `if __name__ == "__main__":` 之前）加 `from control import register_control; register_control(app)`
+- `nginx` 加 `location /control { proxy_pass http://127.0.0.1:5000; ... }`
+- `PROTECTED_PREFIXES` 加 `/control`
+
+**跨平台改动**（让脚本可在 Windows + Linux 跑）：
+- `config.py` AI_SETTINGS_FILE 加 env 优先
+- `ai_client.py` 改 import config，`_run_hidden` 跨平台，Linux 上 Claude CLI 不加 `--dangerously-skip-permissions`（root 禁用）
+- `service_switch.py` 加 `WINDOWS = sys.platform == "win32"` 守卫
+- `pending_notes.py` 路径从硬编码改 `from config import VAULT_ROOT`
+- `scripts/daily_anki_status.py`（新增 Linux 版 daily 编排）
+
+**Anki 25 headless 关键坑**（见 reference）：
+- 必须 `QTWEBENGINE_DISABLE_SANDBOX=1` + `QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox`（root 用户）
+- profile 自动创建有 i18n backend 依赖问题，用 Python `ProfileManager._loadMeta + create("User 1")` 绕开
+- obsidian-headless 必须 Node 22+（全局 `WebSocket` API）+ `npm rebuild better-sqlite3`
+- 二进制名是 `ob`，子命令是 `sync-setup`（不是 `init`）
+
 ## 电源 / 屏幕守护
 
 主项目客户端**不再**处理睡眠/屏幕策略——这事归独立项目 `C:\autoscreen\`（详见其 README）。
@@ -217,12 +254,13 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 
 ## 自动化任务
 
-**两套独立的"每日 04:00 任务"，逻辑等价但运行环境不同**：
+**三套等价的"每日 04:00 任务"**（同一逻辑，三个运行环境）：
 
 | 任务 | 运行环境 | 实现 |
 |---|---|---|
 | Windows 计划任务「Obsidian Anki 每日状态更新」 | 主项目本机 PowerShell | `scripts/daily_anki_status.ps1` |
 | bwicarus-client 凌晨定时（0.9.32+） | 客户端进程 | `_client/core/gui.py::_full_daily_pipeline` |
+| **服务器 systemd timer `bwicarus-daily.timer`**（2026-05-14+） | bwicarus.space VPS | `scripts/daily_anki_status.py` (Linux) |
 
 两边都跑：`ensure_alive → register_notes → anki_status → review_priority → build_review_deck → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync`。
 

@@ -1,0 +1,134 @@
+# Linux 服务器迁移指南（2026-05-14）
+
+把整套 Windows 工作流（vault + Anki + 笔记登记 + 仪表板）搬到 `bwicarus.space` 服务器，目标：Windows 可以关机，所有功能由服务器和 web 控制面板代替。
+
+## 服务器现状
+
+- Ubuntu 22.04.5 / 1 vCPU / 3.8GB RAM / 39GB 可用磁盘
+- 已跑：nginx + Flask webapp (:5000) + OpenVPN Access Server + Anki + obsidian-headless
+- 时区：Asia/Shanghai (CST，比本机 JST 早 1h)
+
+## 关键路径
+
+| 路径 | 内容 |
+|---|---|
+| `/root/claude/` | 主项目（git clone 自 GitHub），等同本机 `C:\claude\` |
+| `/root/obsidian/` | vault（obsidian-headless 同步），等同本机 `C:\obsidian\` |
+| `/opt/anki-venv/` | Anki Python venv（605MB），含 aqt 25.2.7 + PyQt6 + better-sqlite3 |
+| `/usr/lib/node_modules/obsidian-headless/` | obsidian-headless 0.0.8 npm 全局包 |
+| `/root/claude/.env` | 项目环境变量（systemd EnvironmentFile） |
+| `/etc/profile.d/claude.sh` | 同 .env，给交互式 shell 用 |
+| `/root/.local/share/Anki2/User 1/` | Anki profile + collection.anki2（16MB，5634 卡）|
+| `/root/.claude/.credentials.json` | Claude CLI token（已登录） |
+| `/root/.codex/auth.json` | Codex CLI token（已登录） |
+| `/root/state/...` | 旧的（已迁到 `/root/claude/state/`） |
+
+## 环境变量（`.env`）
+
+```
+CLAUDE_PROJECT=/root/claude
+OBSIDIAN_VAULT=/root/obsidian
+APP_PYTHON=/usr/bin/python3
+APP_PYTHONW=/usr/bin/python3
+APP_CLAUDE=/usr/bin/claude
+APP_CODEX=/usr/bin/codex
+ANKI_CONNECT_URL=http://127.0.0.1:8765
+AI_SETTINGS_FILE=/root/claude/state/ai-settings.json
+```
+
+## systemd services
+
+| Unit | 干啥 |
+|---|---|
+| `xvfb-99.service` | 启 Xvfb :99（Anki GUI 的虚拟显示） |
+| `anki-headless.service` | 启 Anki + AnkiConnect 8765（依赖 xvfb-99） |
+| `obsidian-sync.service` | `ob sync --continuous` 持续同步 vault |
+| `bwicarus-daily.service` | 一次性跑 daily 流程（`scripts/daily_anki_status.py`） |
+| `bwicarus-daily.timer` | 每天 04:00 触发 daily.service（含 missed-run 补跑） |
+
+所有 unit 文件源码在 `references/systemd/`。`systemctl enable` 后开机自启。
+
+## webapp 控制面板
+
+URL：`https://bwicarus.space/control/`（需登录）
+
+API：
+- `GET /control/api/status` → AnkiConnect / 服务状态 / AI backend / last_run.json
+- `POST /control/api/trigger/<action>` → register / daily / anki-restart / ankiweb-sync / switch-ai
+
+实现：`/root/webapp/control.py` + `templates/control.html`，由 `app.py` 末尾 `register_control(app)` 注册路由。
+
+## 踩坑速查
+
+### Anki 25 在 Linux headless 上的关键坑
+
+1. **`-l en -p "User 1"` 不会自动创建 profile**（Anki 25 行为变了）。要先用 Python 建：
+   ```python
+   from aqt.profiles import ProfileManager
+   pm = ProfileManager(base="/root/.local/share/Anki2")
+   pm._loadMeta()  # 不调 setupMeta（会触发 _ensureProfile + tr i18n 抛 NoneType）
+   pm.create("User 1")  # SQL only，安全
+   ```
+   ⚠️ `pm.profiles()` 内部也调 `_ensureProfile`！要用 `pm.db.execute("SELECT name FROM profiles WHERE name != '_global'")`。
+
+2. **`Running as root without --no-sandbox is not supported`** —— QtWebEngine 拒绝 root 启动。两个 env 缺一不可：
+   ```
+   QTWEBENGINE_DISABLE_SANDBOX=1
+   QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox
+   ```
+
+3. **AnkiWeb full download** API：`col.full_download` 已废弃，改用：
+   ```python
+   col.close_for_full_sync()
+   col.full_upload_or_download(auth=auth, server_usn=0, upload=False)
+   ```
+   `result.required=3` 表示 FULL_DOWNLOAD（不是 FULL_SYNC=2）。还要更新 `auth.endpoint = result.new_endpoint`。
+
+4. **AnkiConnect 插件**直接 `git clone https://github.com/FooSoft/anki-connect.git` + 拷贝 `plugin/*` 到 `/root/.local/share/Anki2/addons21/2055492159/`。
+
+### obsidian-headless 在 Linux 上的坑
+
+1. **二进制是 `ob`**，不是 `obsidian-headless`。子命令：`login` / `logout` / `sync-list-remote` / `sync-list-local` / `sync-create-remote` / **`sync-setup`** / `sync` / `sync-config` 等。**不是 `init`**！
+2. **prebuild better-sqlite3 跟 Node 版本不匹配**：obsidian-headless 0.0.8 用全局 `WebSocket`（Node 21+），但 prebuild binary 给 Node 22 (`NODE_MODULE_VERSION 127`)。
+   - 服务器装了系统 Node 20 + nvm Node 22。系统 Node 20 缺 WebSocket 启动崩。
+   - 解决：用 nvm Node 22 跑 `npm rebuild better-sqlite3`（在 obsidian-headless 包目录）+ 改 cli.js shebang 写死 `/root/.nvm/versions/node/v22.13.1/bin/node`。
+3. **`ob sync`（不带 `--continuous`）单次同步就退出**，第一次可能没拉完所有内容。要重跑或者直接用 `--continuous`。
+
+### Claude CLI / Codex CLI 在 root 上的坑
+
+1. **Claude CLI 拒绝 root 用 `--dangerously-skip-permissions`**：`cannot be used with root/sudo privileges for security reasons`。
+   - 修复：`ai_client.py::claude_raw` 在 Linux 上不加这个 flag（用默认权限模式，简单 prompt 不会触发提示）。
+2. **`codex exec "prompt"` 必须在 git repo 内跑**，否则要 `--skip-git-repo-check`。`stdin` 要 `</dev/null` 否则触发"读 stdin 补充输入"模式卡住。
+
+### ssh 长命令 + 后台进程的坑
+
+1. `ssh server '...'` 内启动 background 进程后 ssh **不会立即返回**，会等 stdin/stdout fd。
+2. 解决：写 shell 脚本到本机 → `scp` 上去 → `ssh server 'bash /tmp/script.sh'`。或者 `setsid` / `systemd-run` 让进程完全 detach。
+3. 一次 ssh 跑大量命令时，输出经常被截断。把关键输出存 `/tmp/log` 然后 `tail -c 1500` 比 `head` 更稳。
+
+## 跨平台代码改动总览
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/config.py` | `AI_SETTINGS_FILE` 支持 `AI_SETTINGS_FILE` env 优先 |
+| `scripts/ai_client.py` | 用 config 模块代替 Windows 硬编码；`_run_hidden` 跨平台；Linux 上 Claude 不加 `--dangerously-skip-permissions` |
+| `scripts/service_switch.py` | 加 `WINDOWS = sys.platform == "win32"` 守卫，Linux 上只跑切换逻辑（PowerShell / SSH tunnel / 服务管理跳过） |
+| `scripts/pending_notes.py` | 路径从硬编码改用 `config.VAULT_ROOT` |
+| `scripts/daily_anki_status.py` | **新增**，Linux 版 daily 编排（等价 ps1） |
+
+## 现状（2026-05-14）
+
+- ✅ 所有 systemd service 跑通：xvfb-99 / anki-headless / obsidian-sync / bwicarus-daily.timer
+- ✅ AnkiConnect 在 :8765 监听，version 6
+- ✅ Vault 完整同步：1175 笔记 / 175 图片 / 18 PDF / 1.4GB
+- ✅ Anki collection 完整：5634 卡片 / 3258 笔记 / 33 个 deck
+- ✅ Claude CLI + Codex CLI 都可调用
+- ✅ webapp /control/ 控制面板上线
+- ✅ Daily timer 设定 04:00 (Asia/Shanghai)
+
+## Windows 端怎么办
+
+服务器功能确认稳定 1-2 周后：
+- 可以关掉 Windows 客户端 / 关掉 Windows 计划任务
+- iPad 接入 endpoint 改为服务器（具体 nginx 反代或 Tailscale 后续配）
+- 本机做"备份角色"或者完全退役

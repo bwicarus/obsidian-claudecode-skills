@@ -1,0 +1,16 @@
+[Unit]
+Description=Obsidian Sync daemon (obsidian-headless ob sync --continuous)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/claude/.env
+WorkingDirectory=/root/obsidian
+ExecStart=/usr/bin/ob sync --path /root/obsidian --continuous
+Restart=on-failure
+RestartSec=30
+User=root
+
+[Install]
+WantedBy=multi-user.target

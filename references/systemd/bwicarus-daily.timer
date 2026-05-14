@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Anki/Vault automation at 04:00 (Asia/Shanghai)
+Requires=bwicarus-daily.service
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=bwicarus-daily.service
+
+[Install]
+WantedBy=timers.target

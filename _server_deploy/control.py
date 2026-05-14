@@ -1,0 +1,159 @@
+"""控制面板（替代 Windows 客户端 EXE）
+
+部署位置：/root/webapp/control.py
+注册：app.py 末尾 `from control import register_control; register_control(app)`
+      （必须在 `if __name__ == "__main__":` 之前）
+
+提供 /control/ 网页 + /control/api/* 后台 API。
+鉴权由 app.py 的 @before_request require_login_global 处理
+（PROTECTED_PREFIXES 必须含 "/control"）。
+
+源码在 git 仓库 _server_deploy/control.py，部署时 scp 到 /root/webapp/。
+"""
+import json
+import os
+import subprocess
+import urllib.request
+from pathlib import Path
+
+from flask import jsonify, render_template, request
+
+CLAUDE_DIR = Path("/root/claude")
+LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
+AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
+PYTHON = "/usr/bin/python3"
+ANKI_URL = "http://127.0.0.1:8765"
+
+
+def load_claude_env() -> dict:
+    """合并 os.environ 和 /root/claude/.env"""
+    env = os.environ.copy()
+    env_file = CLAUDE_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    return env
+
+
+def get_systemd_status(unit: str) -> str:
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=3,
+        )
+        return r.stdout.strip() or "unknown"
+    except Exception as e:
+        return f"err:{e}"
+
+
+def ankiconnect_version():
+    body = json.dumps({"action": "version", "version": 6}).encode()
+    try:
+        req = urllib.request.Request(
+            ANKI_URL, data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read())
+            return data.get("result")
+    except Exception:
+        return None
+
+
+def get_ai_backend() -> str:
+    if not AI_SETTINGS.exists():
+        return "auto-claude"
+    try:
+        data = json.loads(AI_SETTINGS.read_text(encoding="utf-8"))
+        return data.get("backend", "auto-claude")
+    except Exception:
+        return "auto-claude"
+
+
+def get_last_run():
+    if not LAST_RUN.exists():
+        return None
+    try:
+        return json.loads(LAST_RUN.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _trigger_script(script: str, args=None) -> None:
+    """异步 spawn 一个 script，立即返回。"""
+    args = args or []
+    log_dir = CLAUDE_DIR / "state" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "webapp_trigger.log"
+    with log_file.open("a", encoding="utf-8") as logf:
+        from datetime import datetime
+        logf.write(f"\n=== [{datetime.now().isoformat(timespec='seconds')}] {script} {args} ===\n")
+        logf.flush()
+        subprocess.Popen(
+            [PYTHON, str(CLAUDE_DIR / "scripts" / script), *args],
+            cwd=str(CLAUDE_DIR),
+            env=load_claude_env(),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+
+def register_control(app):
+    """注册 control 相关路由到 Flask app。"""
+
+    @app.route("/control/")
+    def control_home():
+        return render_template("control.html")
+
+    @app.route("/control/api/status")
+    def control_status():
+        return jsonify({
+            "ankiconnect_version": ankiconnect_version(),
+            "anki_headless": get_systemd_status("anki-headless"),
+            "xvfb_99": get_systemd_status("xvfb-99"),
+            "obsidian_sync": get_systemd_status("obsidian-sync"),
+            "ai_backend": get_ai_backend(),
+            "last_run": get_last_run(),
+        })
+
+    @app.route("/control/api/trigger/<action>", methods=["POST"])
+    def control_trigger(action):
+        if action == "register":
+            _trigger_script("register_notes.py")
+            return jsonify({"ok": True, "msg": "register_notes 已启动（后台跑，日志在 state/logs/webapp_trigger.log）"})
+        elif action == "daily":
+            _trigger_script("daily_anki_status.py")
+            return jsonify({"ok": True, "msg": "daily 流程已启动（看 state/last_run.json 实时进度）"})
+        elif action == "anki-restart":
+            subprocess.run(["systemctl", "restart", "anki-headless"], check=False)
+            return jsonify({"ok": True, "msg": "anki-headless 已重启（等 20s AnkiConnect 上线）"})
+        elif action == "ankiweb-sync":
+            body = json.dumps({"action": "sync", "version": 6}).encode()
+            try:
+                req = urllib.request.Request(
+                    ANKI_URL, data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    data = json.loads(r.read())
+                    if data.get("error"):
+                        return jsonify({"ok": False, "msg": f"sync 失败: {data['error']}"})
+                    return jsonify({"ok": True, "msg": "AnkiWeb 同步已触发"})
+            except Exception as e:
+                return jsonify({"ok": False, "msg": f"sync 异常: {e}"})
+        elif action == "switch-ai":
+            data = request.get_json(silent=True) or {}
+            target = data.get("target", "claude")
+            if target not in ("claude", "gpt"):
+                return jsonify({"ok": False, "msg": "target 必须是 claude 或 gpt"}), 400
+            r = subprocess.run(
+                [PYTHON, str(CLAUDE_DIR / "scripts" / "service_switch.py"), "switch", target],
+                capture_output=True, text=True, env=load_claude_env(), timeout=10,
+            )
+            return jsonify({"ok": r.returncode == 0, "msg": (r.stdout or r.stderr).strip()})
+        else:
+            return jsonify({"ok": False, "msg": f"未知 action: {action}"}), 400

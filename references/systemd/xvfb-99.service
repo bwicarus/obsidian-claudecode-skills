@@ -1,0 +1,14 @@
+[Unit]
+Description=Xvfb virtual display on :99 (for Anki headless GUI)
+After=network.target
+Before=anki-headless.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1024x768x24
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

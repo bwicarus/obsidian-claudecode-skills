@@ -1,0 +1,20 @@
+[Unit]
+Description=Anki Desktop (headless via Xvfb) with AnkiConnect on :8765
+After=xvfb-99.service network-online.target
+Requires=xvfb-99.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/root/claude/.env
+Environment=DISPLAY=:99
+Environment=QTWEBENGINE_DISABLE_SANDBOX=1
+Environment=QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox
+ExecStartPre=/bin/sleep 3
+ExecStart=/opt/anki-venv/bin/anki -p User\x201 -l en
+Restart=on-failure
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target

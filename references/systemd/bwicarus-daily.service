@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily Anki/Vault automation (register + anki_status + review + build_review_deck + sync)
+After=anki-headless.service obsidian-sync.service network-online.target
+Wants=anki-headless.service obsidian-sync.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/claude/.env
+WorkingDirectory=/root/claude
+ExecStart=/usr/bin/python3 /root/claude/scripts/daily_anki_status.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target
