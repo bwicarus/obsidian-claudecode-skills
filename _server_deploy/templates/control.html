@@ -23,6 +23,7 @@
       --rose-bg:      rgba(248,113,113,0.15);
       --sidebar-w:    210px;
       --sidebar-collapsed-w: 56px;
+      --drawer-ease:  cubic-bezier(0.4, 0, 0.2, 1);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100vh; overflow: hidden; }
@@ -39,32 +40,51 @@
     }
     a { color: inherit; text-decoration: none; }
 
-    /* ── 左侧导航 ── */
+    /* ── 左侧导航（用 dashboard graph-drawer-toggle 的玻璃质感） ── */
     .sidebar {
       width: var(--sidebar-w); flex-shrink: 0;
       height: 100vh; padding: 14px 12px;
-      background: var(--glass-bg);
-      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-      border-right: 1px solid var(--glass-border);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
+        rgba(99,102,241,0.16);
+      backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
+      -webkit-backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
+      border-right: 1px solid rgba(255,255,255,0.22);
+      box-shadow: inset -1px 0 0 rgba(255,255,255,0.16);
       display: flex; flex-direction: column; gap: 3px;
       overflow-y: auto; overflow-x: hidden;
-      transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding 0.3s ease;
+      transition: width 0.4s var(--drawer-ease), padding 0.4s var(--drawer-ease);
     }
     .sidebar-head {
-      display: flex; align-items: center; gap: 6px;
+      display: flex; align-items: center; gap: 8px;
       padding: 4px 4px 12px;
     }
+    /* 折叠把手按钮 —— 完全照搬 graph-drawer-toggle 的 grip 风格 */
     .sidebar-toggle {
       flex-shrink: 0;
-      width: 32px; height: 32px;
+      width: 26px; height: 44px;
       display: inline-flex; align-items: center; justify-content: center;
-      background: transparent; border: none;
-      color: var(--muted); font-size: 18px;
-      border-radius: 8px; cursor: pointer;
-      transition: background 0.15s, color 0.15s;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
+        rgba(99,102,241,0.16);
+      backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
+      border: 1px solid rgba(255,255,255,0.22);
+      color: rgba(255,255,255,0.85);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border 0.15s;
+      padding: 0;
     }
-    .sidebar-toggle:hover { background: var(--glass-hover); color: var(--text); }
+    .sidebar-toggle:hover {
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.06)),
+        rgba(99,102,241,0.28);
+      border-color: rgba(165,180,252,0.5);
+    }
+    .sidebar-toggle .grip {
+      display: block; width: 3px; height: 22px;
+      background: currentColor; border-radius: 2px; opacity: 0.85;
+    }
     .sidebar-title {
       flex: 1; min-width: 0;
       font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
@@ -259,59 +279,89 @@
 
     code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 1px 6px; background: rgba(0,0,0,0.3); border-radius: 4px; color: var(--violet); }
 
-    /* ── 链接编辑模态 ── */
-    .modal-overlay {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.6);
-      backdrop-filter: blur(8px);
-      display: none; align-items: center; justify-content: center;
+    /* ── 链接编辑：右侧滑出抽屉（照搬 graph-settings-drawer 风格） ── */
+    .link-editor {
+      position: fixed; top: 0; right: 0; bottom: 0;
+      width: 420px; max-width: 92vw;
+      background: rgba(15,12,41,0.94);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border-left: 1px solid var(--glass-border);
+      transform: translateX(110%);
+      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
       z-index: 1000;
+      padding: 22px 22px 18px;
+      overflow-y: auto;
+      display: flex; flex-direction: column;
+      box-shadow: -18px 0 56px rgba(0,0,0,0.55);
     }
-    .modal-overlay.open { display: flex; }
-    .modal-card {
-      width: 90%; max-width: 560px;
-      max-height: 86vh; overflow-y: auto;
-      background: var(--glass-bg);
-      backdrop-filter: blur(40px); -webkit-backdrop-filter: blur(40px);
-      border: 1px solid var(--glass-border);
-      border-radius: 18px; padding: 24px 26px;
-      box-shadow: 0 18px 56px rgba(0,0,0,0.6);
+    .link-editor.open { transform: translateX(0); }
+    .link-editor-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.4);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.28s;
+      z-index: 999;
     }
-    .modal-card h2 {
+    .link-editor-backdrop.open { opacity: 1; pointer-events: auto; }
+    .link-editor-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 6px; flex-shrink: 0;
+    }
+    .link-editor-title {
       font-size: 13px; font-weight: 700;
       letter-spacing: 0.14em; text-transform: uppercase;
-      color: var(--muted); margin-bottom: 16px;
+      color: var(--muted);
     }
-    .link-row {
-      display: flex; gap: 8px; align-items: center;
-      padding: 6px 0;
+    .link-editor-close {
+      width: 32px; height: 32px;
+      background: transparent; border: none;
+      color: var(--muted); font-size: 22px; line-height: 1;
+      border-radius: 8px; cursor: pointer;
+      transition: background 0.15s, color 0.15s;
     }
-    .link-row input {
-      padding: 6px 10px;
+    .link-editor-close:hover { background: var(--glass-hover); color: var(--text); }
+    .link-editor-hint {
+      font-size: 11px; color: var(--dim);
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      margin-bottom: 8px;
+    }
+    /* link-item 用 setting-row column 风格 */
+    .link-item {
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex; flex-direction: column; gap: 6px;
+      font-size: 13px;
+    }
+    .link-item:last-of-type { border-bottom: none; }
+    .link-item-row { display: flex; gap: 6px; align-items: center; }
+    .link-item input {
+      padding: 5px 10px;
       background: rgba(0,0,0,0.25);
       border: 1px solid var(--glass-border);
       color: var(--text); border-radius: 7px;
       font-size: 12.5px; outline: none;
       font-family: inherit;
-      transition: border 0.15s;
+      transition: border 0.15s, background 0.15s;
     }
-    .link-row input:focus { border-color: var(--indigo); }
-    .link-row input.ico-col { width: 50px; text-align: center; }
-    .link-row input.label-col { width: 110px; }
-    .link-row input.href-col { flex: 1; min-width: 0; }
-    .link-row .row-btn {
-      width: 28px; height: 28px;
+    .link-item input:focus { border-color: var(--indigo); background: rgba(0,0,0,0.4); }
+    .link-item input.ico-col { width: 48px; text-align: center; }
+    .link-item input.label-col { flex: 0 0 120px; }
+    .link-item input.href-col { flex: 1; min-width: 0; }
+    .link-item .row-btn {
+      width: 26px; height: 26px;
       display: inline-flex; align-items: center; justify-content: center;
       background: transparent; border: 1px solid var(--glass-border);
       color: var(--muted); border-radius: 7px;
-      font-size: 13px; cursor: pointer; flex-shrink: 0;
-      transition: background 0.15s, color 0.15s;
+      font-size: 12px; cursor: pointer; flex-shrink: 0;
+      transition: background 0.15s, color 0.15s, border 0.15s;
     }
-    .link-row .row-btn:hover { background: var(--glass-hover); color: var(--text); }
-    .link-row .row-btn.del:hover { background: var(--rose-bg); border-color: var(--rose); color: var(--rose); }
-    .modal-actions {
-      display: flex; gap: 10px; justify-content: flex-end;
-      margin-top: 18px;
+    .link-item .row-btn:hover { background: var(--glass-hover); color: var(--text); }
+    .link-item .row-btn.del:hover { background: var(--rose-bg); border-color: var(--rose); color: var(--rose); }
+    .link-editor-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: auto; padding-top: 14px; flex-wrap: wrap;
+      border-top: 1px solid rgba(255,255,255,0.06);
     }
 
     @media (max-width: 720px) {
@@ -336,7 +386,9 @@
 <!-- 左侧导航 -->
 <nav class="sidebar" id="sidebar">
   <div class="sidebar-head">
-    <button class="sidebar-toggle" id="sidebar-toggle" title="折叠/展开侧栏">☰</button>
+    <button class="sidebar-toggle" id="sidebar-toggle" type="button" title="折叠/展开侧栏" aria-label="折叠或展开侧栏">
+      <span class="grip"></span>
+    </button>
     <div class="sidebar-title">
       bwicarus.space
       <small>个人学习中心</small>
@@ -468,20 +520,22 @@
   </div>
 </main>
 
-<!-- 链接编辑模态 -->
-<div class="modal-overlay" id="link-modal">
-  <div class="modal-card">
-    <h2>编辑导航链接</h2>
-    <p class="meta" style="margin-bottom:16px;">每行：emoji / 标签 / URL。↑↓ 排序，⊕ 加新行，✕ 删除。</p>
-    <div id="link-rows"></div>
-    <button class="btn" style="margin-top: 10px;" onclick="addLinkRow()">+ 加一个</button>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeLinkEditor()">取消</button>
-      <button class="btn" onclick="resetLinks()">恢复默认</button>
-      <button class="btn primary" onclick="saveLinks()">保存</button>
-    </div>
+<!-- 链接编辑：右侧滑出抽屉 -->
+<div class="link-editor-backdrop" id="link-modal-bg" onclick="closeLinkEditor()"></div>
+<aside class="link-editor" id="link-modal">
+  <div class="link-editor-head">
+    <div class="link-editor-title">编辑导航链接</div>
+    <button class="link-editor-close" onclick="closeLinkEditor()" aria-label="关闭">×</button>
   </div>
-</div>
+  <div class="link-editor-hint">每行：emoji / 标签 / URL · ↑↓ 排序 · ✕ 删除 · 改完点保存</div>
+  <div id="link-rows"></div>
+  <button class="btn" style="margin-top: 10px;" onclick="addLinkRow()">+ 加一个</button>
+  <div class="link-editor-actions">
+    <button class="btn" onclick="resetLinks()">恢复默认</button>
+    <button class="btn" onclick="closeLinkEditor()">取消</button>
+    <button class="btn primary" onclick="saveLinks()">保存</button>
+  </div>
+</aside>
 
 <div id="toast" class="toast"></div>
 
@@ -523,21 +577,25 @@ try {
 
 // ── 链接编辑 modal ────────────────────────────────────────────
 function rowHTML(link) {
-  return `<div class="link-row">
-    <input class="ico-col" placeholder="📊" value="${(link.icon||'').replace(/"/g,'&quot;')}">
-    <input class="label-col" placeholder="标签" value="${(link.label||'').replace(/"/g,'&quot;')}">
+  return `<div class="link-item">
+    <div class="link-item-row">
+      <input class="ico-col" placeholder="📊" value="${(link.icon||'').replace(/"/g,'&quot;')}">
+      <input class="label-col" placeholder="标签" value="${(link.label||'').replace(/"/g,'&quot;')}">
+      <button class="row-btn" title="上移" onclick="moveLinkRow(this, -1)">↑</button>
+      <button class="row-btn" title="下移" onclick="moveLinkRow(this, 1)">↓</button>
+      <button class="row-btn del" title="删除" onclick="this.closest('.link-item').remove()">✕</button>
+    </div>
     <input class="href-col" placeholder="/path 或 https://…" value="${(link.href||'').replace(/"/g,'&quot;')}">
-    <button class="row-btn" title="上移" onclick="moveLinkRow(this, -1)">↑</button>
-    <button class="row-btn" title="下移" onclick="moveLinkRow(this, 1)">↓</button>
-    <button class="row-btn del" title="删除" onclick="this.closest('.link-row').remove()">✕</button>
   </div>`;
 }
 function openLinkEditor() {
   document.getElementById('link-rows').innerHTML = _currentLinks.map(rowHTML).join('');
   document.getElementById('link-modal').classList.add('open');
+  document.getElementById('link-modal-bg').classList.add('open');
 }
 function closeLinkEditor() {
   document.getElementById('link-modal').classList.remove('open');
+  document.getElementById('link-modal-bg').classList.remove('open');
 }
 function addLinkRow() {
   const div = document.createElement('div');
@@ -545,12 +603,12 @@ function addLinkRow() {
   document.getElementById('link-rows').appendChild(div.firstChild);
 }
 function moveLinkRow(btn, dir) {
-  const row = btn.closest('.link-row');
+  const row = btn.closest('.link-item');
   const sib = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
   if (sib) row.parentNode.insertBefore(dir < 0 ? row : sib, dir < 0 ? sib : row);
 }
 function readLinks() {
-  return Array.from(document.querySelectorAll('#link-rows .link-row')).map(r => ({
+  return Array.from(document.querySelectorAll('#link-rows .link-item')).map(r => ({
     icon: r.querySelector('.ico-col').value.trim(),
     label: r.querySelector('.label-col').value.trim(),
     href: r.querySelector('.href-col').value.trim(),
@@ -579,8 +637,11 @@ function resetLinks() {
   if (!confirm('恢复默认 5 个链接？')) return;
   document.getElementById('link-rows').innerHTML = DEFAULT_LINKS.map(rowHTML).join('');
 }
-document.getElementById('link-modal').addEventListener('click', e => {
-  if (e.target.id === 'link-modal') closeLinkEditor();
+// ESC 关闭抽屉
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('link-modal').classList.contains('open')) {
+    closeLinkEditor();
+  }
 });
 
 // ── Panel 折叠/展开 ───────────────────────────────────────────
