@@ -21,8 +21,6 @@
       --amber-bg:     rgba(251,191,36,0.15);
       --rose:         #f87171;
       --rose-bg:      rgba(248,113,113,0.15);
-      --drawer-w:     min(280px, 80vw);
-      --drawer-ease:  cubic-bezier(0.4, 0, 0.2, 1);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
@@ -41,149 +39,14 @@
       background-attachment: fixed;
       padding: 10px 14px 14px;
       display: flex; flex-direction: column;
-      transition: padding-left 0.4s var(--drawer-ease);
     }
-    body.sidebar-open:not(.sidebar-floating) { padding-left: calc(var(--drawer-w) + 14px); }
     a { color: inherit; text-decoration: none; }
-
-    /* ════════ 左侧抽屉（照搬 dashboard graph-drawer，镜像左右）════════ */
-    .left-drawer {
-      position: fixed;
-      top: 0; left: 0; bottom: 0;
-      width: var(--drawer-w);
-      z-index: 100;
-      display: flex; flex-direction: column;
-      padding: 18px;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.04) 100%),
-        linear-gradient(135deg, rgba(15,12,41,0.22), rgba(26,26,62,0.18));
-      backdrop-filter: blur(16px) saturate(150%) brightness(1.04);
-      -webkit-backdrop-filter: blur(16px) saturate(150%) brightness(1.04);
-      border-right: 1px solid rgba(255,255,255,0.20);
-      box-shadow:
-        14px 0 48px rgba(0,0,0,0.40),
-        inset -1px 0 0 rgba(255,255,255,0.16),
-        inset 0 1px 0 rgba(255,255,255,0.08);
-      transform: translateX(-102%);
-      transition: transform 0.4s var(--drawer-ease);
-    }
-    /* SVG turbulence 颗粒：跟 graph-drawer 同款磨砂表面 */
-    .left-drawer::before {
-      content: '';
-      position: absolute; inset: 0;
-      pointer-events: none;
-      border-radius: inherit;
-      opacity: 0.35;
-      mix-blend-mode: overlay;
-      background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    }
-    .left-drawer > * { position: relative; z-index: 1; }
-    .left-drawer.open { transform: translateX(0); }
-
-    .left-drawer-header {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 12px; flex-shrink: 0;
-    }
-    .left-drawer-title {
-      font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
-      text-transform: uppercase; color: var(--muted);
-    }
-    .left-drawer-close {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid var(--glass-border);
-      color: rgba(255,255,255,0.65);
-      width: 30px; height: 30px;
-      border-radius: 8px; cursor: pointer;
-      font-size: 20px; line-height: 1;
-      display: flex; align-items: center; justify-content: center;
-      transition: background 0.15s, color 0.15s;
-    }
-    .left-drawer-close:hover { background: rgba(255,255,255,0.16); color: var(--text); }
-
-    /* 左侧把手 toggle —— 照搬 graph-drawer-toggle，镜像到左边 */
-    .left-drawer-toggle {
-      position: fixed;
-      top: 50%; left: 0;
-      transform: translateY(-50%);
-      z-index: 110;
-      width: 18px; height: 96px;
-      padding: 0; border: none;
-      display: flex; align-items: center; justify-content: center;
-      color: rgba(255,255,255,0.82);
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
-        rgba(99,102,241,0.16);
-      backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
-      -webkit-backdrop-filter: blur(12px) saturate(150%) brightness(1.04);
-      border: 1px solid rgba(255,255,255,0.22);
-      border-left: none;
-      border-radius: 0 14px 14px 0;
-      box-shadow: inset -1px 0 0 rgba(255,255,255,0.16);
-      cursor: pointer;
-      transition: left 0.4s var(--drawer-ease), background 0.15s, color 0.15s;
-    }
-    .left-drawer-toggle:hover {
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.14), rgba(255,255,255,0.06)),
-        rgba(99,102,241,0.26);
-      color: #fff;
-    }
-    .left-drawer-toggle .grip {
-      width: 3px; height: 38px;
-      background: currentColor;
-      border-radius: 2px;
-      opacity: 0.85;
-    }
-    body.sidebar-open .left-drawer-toggle { left: var(--drawer-w); }
-
-    /* 抽屉内部：链接列表 + 工具按钮 */
-    .nav-links { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; padding-right: 4px; }
-    .nav-links::-webkit-scrollbar { width: 6px; }
-    .nav-links::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-    .nav-link {
-      padding: 9px 12px; border-radius: 10px;
-      font-size: 13px; font-weight: 600;
-      color: var(--muted);
-      transition: background 0.18s, color 0.18s;
-      display: flex; align-items: center; gap: 10px;
-      white-space: nowrap; overflow: hidden;
-    }
-    .nav-link .ico { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
-    .nav-link:hover { background: var(--glass-hover); color: var(--text); }
-    .nav-link.current { background: var(--indigo-bg); color: #e0e7ff; border: 1px solid rgba(165,180,252,0.35); }
-    .nav-divider { height: 1px; background: rgba(255,255,255,0.08); margin: 10px 6px; flex-shrink: 0; }
-    .nav-tools {
-      padding-top: 10px; margin-top: 6px;
-      border-top: 1px solid rgba(255,255,255,0.08);
-      display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
-    }
-    .nav-tools button {
-      width: 100%; text-align: left;
-      padding: 8px 12px; border-radius: 10px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid var(--glass-border);
-      color: var(--muted); font-size: 12px;
-      cursor: pointer; transition: background 0.15s, color 0.15s;
-      font-family: inherit;
-      display: flex; align-items: center; gap: 9px;
-    }
-    .nav-tools button:hover { background: var(--glass-hover); color: var(--text); }
-    .nav-status {
-      padding: 8px 12px; font-size: 10px; color: var(--dim);
-      display: flex; align-items: center; gap: 7px;
-    }
-    .pulse {
-      display: inline-block; width: 6px; height: 6px;
-      background: var(--emerald); border-radius: 50%;
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 
     /* ════════ 主内容（panel-stack，跟 dashboard 同款）════════ */
     .top-bar {
       flex-shrink: 0;
       display: flex; align-items: center; gap: 12px;
-      padding: 0 8px 10px 40px;
+      padding: 0 8px 10px 56px;
     }
     .top-bar h1 {
       font-size: 18px; font-weight: 700; letter-spacing: 0.01em;
@@ -301,73 +164,15 @@
     .toast.error { background: rgba(248,113,113,0.9); color: #450a0a; border-color: rgba(248,113,113,0.6); }
     code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 1px 6px; background: rgba(0,0,0,0.3); border-radius: 4px; color: var(--violet); }
 
-    /* ════════ 链接编辑：嵌套右侧子抽屉（仿 graph-settings-drawer）════════ */
-    .link-editor {
-      position: fixed; top: 0; right: 0; bottom: 0;
-      width: 400px; max-width: 92vw;
-      background: rgba(15,12,41,0.94);
-      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-      border-left: 1px solid var(--glass-border);
-      transform: translateX(110%);
-      transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
-      z-index: 200;
-      padding: 22px 22px 18px;
-      overflow-y: auto;
-      display: flex; flex-direction: column;
-      box-shadow: -18px 0 56px rgba(0,0,0,0.55);
-    }
-    .link-editor.open { transform: translateX(0); }
-    .link-editor-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-shrink: 0; }
-    .link-editor-title { font-size: 13px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
-    .link-editor-close { width: 32px; height: 32px; background: transparent; border: none; color: var(--muted); font-size: 22px; line-height: 1; border-radius: 8px; cursor: pointer; transition: background 0.15s, color 0.15s; }
-    .link-editor-close:hover { background: var(--glass-hover); color: var(--text); }
-    .link-editor-hint { font-size: 11px; color: var(--dim); padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 8px; }
-    .link-item { padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
-    .link-item:last-of-type { border-bottom: none; }
-    .link-item-row { display: flex; gap: 6px; align-items: center; }
-    .link-item input { padding: 5px 10px; background: rgba(0,0,0,0.25); border: 1px solid var(--glass-border); color: var(--text); border-radius: 7px; font-size: 12.5px; outline: none; font-family: inherit; transition: border 0.15s, background 0.15s; }
-    .link-item input:focus { border-color: var(--indigo); background: rgba(0,0,0,0.4); }
-    .link-item input.ico-col { width: 48px; text-align: center; }
-    .link-item input.label-col { flex: 0 0 110px; }
-    .link-item input.href-col { flex: 1; min-width: 0; }
-    .link-item .row-btn { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--glass-border); color: var(--muted); border-radius: 7px; font-size: 12px; cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s, border 0.15s; }
-    .link-item .row-btn:hover { background: var(--glass-hover); color: var(--text); }
-    .link-item .row-btn.del:hover { background: var(--rose-bg); border-color: var(--rose); color: var(--rose); }
-    .link-editor-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: auto; padding-top: 14px; flex-wrap: wrap; border-top: 1px solid rgba(255,255,255,0.06); }
 
     @media (max-width: 720px) {
-      .top-bar { padding-left: 40px; }
+      .top-bar { padding-left: 56px; }
       .panel { flex: 0 0 auto; min-height: 52px; }
       .panel.active { min-height: 60vh; }
-      body.sidebar-open:not(.sidebar-floating) { padding-left: 14px; }
     }
   </style>
 </head>
 <body>
-
-<!-- 左侧把手 toggle -->
-<button class="left-drawer-toggle" id="drawer-toggle" type="button" aria-label="切换导航抽屉" title="点击展开/收起导航">
-  <span class="grip"></span>
-</button>
-
-<!-- 左侧导航抽屉 -->
-<aside class="left-drawer" id="left-drawer">
-  <header class="left-drawer-header">
-    <div class="left-drawer-title">bwicarus.space</div>
-    <button class="left-drawer-close" id="drawer-close" aria-label="关闭">×</button>
-  </header>
-  <div class="nav-links" id="sidebar-links"></div>
-  <div class="nav-tools">
-    <button onclick="openLinkEditor()" title="编辑导航链接"><span style="font-size:14px;">✎</span> 编辑链接</button>
-    <label class="cfg-row" style="padding: 6px 4px; font-size: 11px; color: var(--muted);">
-      <input type="checkbox" id="floating-toggle"> 悬浮模式（不挤压主内容）
-    </label>
-  </div>
-  <div class="nav-status">
-    <span class="pulse"></span>
-    <span id="last-refresh">实时刷新</span>
-  </div>
-</aside>
 
 <!-- 主内容 -->
 <div class="top-bar">
@@ -474,147 +279,9 @@
 
 </div>
 
-<!-- 链接编辑：嵌套右侧子抽屉 -->
-<aside class="link-editor" id="link-modal">
-  <div class="link-editor-head">
-    <div class="link-editor-title">编辑导航链接</div>
-    <button class="link-editor-close" onclick="closeLinkEditor()" aria-label="关闭">×</button>
-  </div>
-  <div class="link-editor-hint">每行：emoji / 标签 / URL · ↑↓ 排序 · ✕ 删除</div>
-  <div id="link-rows"></div>
-  <button class="btn" style="margin-top: 10px;" onclick="addLinkRow()">+ 加一个</button>
-  <div class="link-editor-actions">
-    <button class="btn" onclick="resetLinks()">恢复默认</button>
-    <button class="btn" onclick="closeLinkEditor()">取消</button>
-    <button class="btn primary" onclick="saveLinks()">保存</button>
-  </div>
-</aside>
-
 <div id="toast" class="toast"></div>
 
 <script>
-const DEFAULT_LINKS = [
-  {icon: "📊", label: "仪表板",   href: "/dashboard/"},
-  {icon: "🗂️", label: "复习历史", href: "/history/"},
-  {icon: "🎛️", label: "控制面板", href: "/control/"},
-  {icon: "👤", label: "个人页",   href: "/profile/"},
-  {icon: "⎋",  label: "登出",     href: "/logout"},
-];
-let _currentLinks = DEFAULT_LINKS.slice();
-
-// ── 抽屉开关 ──────────────────────────────────────────────
-const drawer = document.getElementById('left-drawer');
-const toggleBtn = document.getElementById('drawer-toggle');
-const closeBtn = document.getElementById('drawer-close');
-const floatingChk = document.getElementById('floating-toggle');
-
-function openDrawer() {
-  drawer.classList.add('open');
-  document.body.classList.add('sidebar-open');
-}
-function closeDrawer() {
-  drawer.classList.remove('open');
-  document.body.classList.remove('sidebar-open');
-}
-toggleBtn.addEventListener('click', () => {
-  drawer.classList.contains('open') ? closeDrawer() : openDrawer();
-});
-closeBtn.addEventListener('click', closeDrawer);
-
-// 悬浮模式：打开抽屉时主内容不被挤
-floatingChk.addEventListener('change', () => {
-  document.body.classList.toggle('sidebar-floating', floatingChk.checked);
-  try { localStorage.setItem('sidebarFloating', floatingChk.checked); } catch(e){}
-});
-try {
-  if (localStorage.getItem('sidebarFloating') === 'true') {
-    floatingChk.checked = true;
-    document.body.classList.add('sidebar-floating');
-  }
-  if (localStorage.getItem('sidebarOpen') === 'true') openDrawer();
-} catch(e){}
-// 记忆开关状态
-new MutationObserver(() => {
-  try { localStorage.setItem('sidebarOpen', drawer.classList.contains('open')); } catch(e){}
-}).observe(drawer, {attributes: true, attributeFilter: ['class']});
-
-// ── 渲染链接 ──────────────────────────────────────────────
-function renderSidebarLinks() {
-  const container = document.getElementById('sidebar-links');
-  const curPath = location.pathname.replace(/\/$/, '');
-  container.innerHTML = _currentLinks.map(l => {
-    const isCur = l.href.replace(/\/$/, '') === curPath;
-    return `<a class="nav-link${isCur ? ' current' : ''}" href="${l.href}">
-      <span class="ico">${l.icon || '·'}</span>
-      <span>${l.label}</span>
-    </a>`;
-  }).join('');
-}
-
-// ── 链接编辑 ──────────────────────────────────────────────
-function rowHTML(link) {
-  return `<div class="link-item">
-    <div class="link-item-row">
-      <input class="ico-col" placeholder="📊" value="${(link.icon||'').replace(/"/g,'&quot;')}">
-      <input class="label-col" placeholder="标签" value="${(link.label||'').replace(/"/g,'&quot;')}">
-      <button class="row-btn" title="上移" onclick="moveLinkRow(this, -1)">↑</button>
-      <button class="row-btn" title="下移" onclick="moveLinkRow(this, 1)">↓</button>
-      <button class="row-btn del" title="删除" onclick="this.closest('.link-item').remove()">✕</button>
-    </div>
-    <input class="href-col" placeholder="/path 或 https://…" value="${(link.href||'').replace(/"/g,'&quot;')}">
-  </div>`;
-}
-function openLinkEditor() {
-  document.getElementById('link-rows').innerHTML = _currentLinks.map(rowHTML).join('');
-  document.getElementById('link-modal').classList.add('open');
-}
-function closeLinkEditor() {
-  document.getElementById('link-modal').classList.remove('open');
-}
-function addLinkRow() {
-  const div = document.createElement('div');
-  div.innerHTML = rowHTML({icon: '', label: '', href: ''});
-  document.getElementById('link-rows').appendChild(div.firstChild);
-}
-function moveLinkRow(btn, dir) {
-  const row = btn.closest('.link-item');
-  const sib = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
-  if (sib) row.parentNode.insertBefore(dir < 0 ? row : sib, dir < 0 ? sib : row);
-}
-function readLinks() {
-  return Array.from(document.querySelectorAll('#link-rows .link-item')).map(r => ({
-    icon: r.querySelector('.ico-col').value.trim(),
-    label: r.querySelector('.label-col').value.trim(),
-    href: r.querySelector('.href-col').value.trim(),
-  })).filter(l => l.label && l.href);
-}
-async function saveLinks() {
-  const links = readLinks();
-  try {
-    const r = await fetch('/control/api/config', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({sidebar_links: links}),
-    });
-    const data = await r.json();
-    if (data.ok) {
-      _currentLinks = links;
-      renderSidebarLinks();
-      closeLinkEditor();
-      showToast('链接已保存', 'success');
-    } else { showToast(data.msg || '保存失败', 'error'); }
-  } catch (e) { showToast('保存失败: ' + e, 'error'); }
-}
-function resetLinks() {
-  if (!confirm('恢复默认 5 个链接？')) return;
-  document.getElementById('link-rows').innerHTML = DEFAULT_LINKS.map(rowHTML).join('');
-}
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    if (document.getElementById('link-modal').classList.contains('open')) closeLinkEditor();
-    else if (drawer.classList.contains('open')) closeDrawer();
-  }
-});
-
 // ── Panel 折叠/展开（dashboard 同款）──────────────────────
 const panels = document.querySelectorAll('.panel');
 panels.forEach(p => {
@@ -734,10 +401,6 @@ async function loadConfig() {
       if (el.type === 'checkbox') el.checked = !!val;
       else el.value = val ?? '';
     });
-    if (Array.isArray(cfg.sidebar_links) && cfg.sidebar_links.length) {
-      _currentLinks = cfg.sidebar_links;
-      renderSidebarLinks();
-    }
   } catch (e) {}
 }
 async function saveConfig(e) {
@@ -761,8 +424,7 @@ function tick() {
   const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
   setTimeout(tick, interval);
 }
-loadConfig().then(() => { renderSidebarLinks(); tick(); });
-renderSidebarLinks();
+loadConfig().then(() => { tick(); });
 </script>
 </body>
 </html>

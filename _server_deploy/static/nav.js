@@ -114,9 +114,12 @@
     { label: '仪表板', url: '/dashboard/' },
     { label: '问答历史', url: '/history/' }
   ];
-  var LS_KEY = 'site.navLinks.v1';
+  var LS_KEY = 'site.navLinks.v1';     // 离线/迁移缓存
+  var API    = '/api/nav-links';
 
-  function loadLinks() {
+  // 链接现在持久化到服务器（per-user），localStorage 只作离线 fallback +
+  // 旧用户首次访问时的一次性迁移源。
+  function readCache() {
     try {
       var raw = localStorage.getItem(LS_KEY);
       if (raw) {
@@ -124,10 +127,41 @@
         if (Array.isArray(arr)) return arr;
       }
     } catch (_) {}
-    return DEFAULT_LINKS.slice();
+    return null;
   }
-  function saveLinks(arr) {
+  function writeCache(arr) {
     try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch (_) {}
+  }
+
+  function loadLinks() {
+    return readCache() || DEFAULT_LINKS.slice();
+  }
+
+  function fetchLinks(onUpdate) {
+    fetch(API, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (arr) {
+        if (!Array.isArray(arr)) return;
+        if (arr.length === 0) {
+          // 服务端为空：若本地有旧 localStorage 数据，迁移到服务器；否则保持默认
+          var cached = readCache();
+          if (cached && cached.length) saveLinks(cached);
+          return;
+        }
+        writeCache(arr);
+        if (typeof onUpdate === 'function') onUpdate(arr);
+      })
+      .catch(function () { /* 离线时静默 fallback 到缓存 */ });
+  }
+
+  function saveLinks(arr) {
+    writeCache(arr);
+    fetch(API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(arr)
+    }).catch(function () { /* 离线时只保留 cache */ });
   }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -292,6 +326,8 @@
     });
 
     renderLinks();
+    // 启动时异步拉服务端 per-user 链接，到了就重渲染
+    fetchLinks(function () { if (!editing) renderLinks(); });
   }
 
   if (document.readyState === 'loading') {
