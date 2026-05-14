@@ -8,6 +8,11 @@ Type=simple
 EnvironmentFile=/root/claude/.env
 Environment=BWICARUS_APP_DIR=/root/claude/state/qa-server-data
 WorkingDirectory=/root/claude
+# qa_browser 模板默认引 jsdelivr CDN，iPad 网络可能慢/不通。
+# 每次启动重新 patch 成本机 nginx 服务的副本（git pull 覆盖原文件也无影响）。
+# 副本位置: /var/www/html/static/qa/{mathjax,marked}.js
+ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|https://bwicarus.space/static/qa/mathjax.js|g" /root/claude/_client/core/qa_browser.py
+ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|https://bwicarus.space/static/qa/marked.js|g" /root/claude/_client/core/qa_browser.py
 ExecStart=/usr/bin/python3 /root/claude/_server_deploy/qa_server.py
 Restart=on-failure
 RestartSec=10
