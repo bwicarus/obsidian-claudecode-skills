@@ -19,7 +19,8 @@ import sys
 import time
 from pathlib import Path
 
-CLAUDE_DIR = Path("/root/claude")
+CLAUDE_DIR    = Path(os.environ.get("CLAUDE_PROJECT", "/root/claude"))
+OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/root/obsidian"))
 
 # 让客户端 module 可 import
 sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
@@ -32,9 +33,9 @@ SERVER_CONFIG = CLAUDE_DIR / "state" / "server-config.json"
 
 # 服务器端默认配置（首次启动会写到 server-config.json，之后用户改那个文件就行）
 DEFAULT_CONFIG: dict = {
-    "qa_vault_path": "/root/obsidian",
-    "qa_index_dir": "/root/claude/index",
-    "qa_anki_records_dir": "/root/claude/anki/records",
+    "qa_vault_path": str(OBSIDIAN_ROOT),
+    "qa_index_dir": str(CLAUDE_DIR / "index"),
+    "qa_anki_records_dir": str(CLAUDE_DIR / "anki" / "records"),
     "qa_exercises_subdir": "习题",
     "qa_wrong_subdir": "错题",
     "qa_remote_daemon": True,        # iPad 远程截图问答总开关

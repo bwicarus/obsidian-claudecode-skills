@@ -19,7 +19,7 @@ from pathlib import Path
 
 from flask import jsonify, render_template, request
 
-CLAUDE_DIR = Path("/root/claude")
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/root/claude"))
 
 # scripts/ 加入路径，让 config_schema 等业务模块能 import
 sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
@@ -28,8 +28,8 @@ import task_tracker  # noqa: E402
 LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
 AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
 SERVER_CONFIG = CLAUDE_DIR / "state" / "server-config.json"
-PYTHON = "/usr/bin/python3"
-ANKI_URL = "http://127.0.0.1:8765"
+PYTHON = os.environ.get("APP_PYTHON", "/usr/bin/python3")
+ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 
 
 def load_claude_env() -> dict:
