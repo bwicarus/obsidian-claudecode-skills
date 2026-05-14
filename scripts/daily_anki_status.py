@@ -30,7 +30,9 @@ from pathlib import Path
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/root/claude"))
 PYTHON = os.environ.get("APP_PYTHON", "/usr/bin/python3")
 ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
-WEBAPP_DASHBOARD = Path("/root/webapp/data/dashboard")
+WEBAPP_DASHBOARD = Path(os.environ.get(
+    "WEBAPP_DASHBOARD_DIR", "/root/webapp/data/dashboard"
+))
 LAST_RUN = PROJECT_DIR / "state" / "last_run.json"
 BACKUP_DIR = PROJECT_DIR / "state" / "backup"
 
