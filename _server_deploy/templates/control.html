@@ -28,45 +28,67 @@
     body {
       font-family: system-ui, -apple-system, sans-serif;
       color: var(--text);
-      padding: 20px 24px 32px;
       background:
         radial-gradient(ellipse at 15% 15%, rgba(99,102,241,0.28) 0%, transparent 55%),
         radial-gradient(ellipse at 85% 80%, rgba(139,92,246,0.22) 0%, transparent 55%),
         radial-gradient(ellipse at 50% 50%, rgba(15,52,96,0.6)   0%, transparent 80%),
         linear-gradient(135deg, #0f0c29 0%, #1a1a3e 50%, #0d1b3e 100%);
       background-attachment: fixed;
+      display: flex;
     }
     a { color: inherit; text-decoration: none; }
 
+    /* ── 左侧导航栏（毛玻璃，sticky 满高） ── */
+    .sidebar {
+      width: 220px; flex-shrink: 0;
+      position: sticky; top: 0;
+      height: 100vh;
+      padding: 22px 14px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border-right: 1px solid var(--glass-border);
+      box-shadow: 0 6px 28px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
+      display: flex; flex-direction: column; gap: 3px;
+      overflow-y: auto;
+    }
+    .sidebar-title {
+      padding: 6px 12px 16px;
+      font-size: 14px; font-weight: 700; letter-spacing: 0.04em;
+      background: linear-gradient(135deg, #e0e7ff 0%, #c4b5fd 100%);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .sidebar-title small {
+      display: block; margin-top: 3px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--dim);
+      -webkit-text-fill-color: var(--dim);
+    }
+    .sidebar a {
+      padding: 9px 14px; border-radius: 10px;
+      font-size: 13px; font-weight: 600;
+      color: var(--muted);
+      transition: background 0.18s, color 0.18s;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .sidebar a .ico { font-size: 14px; width: 18px; text-align: center; flex-shrink: 0; }
+    .sidebar a:hover { background: var(--glass-hover); color: var(--text); }
+    .sidebar a.current { background: var(--indigo-bg); color: #e0e7ff; border: 1px solid rgba(165,180,252,0.35); }
+    .sidebar .divider { height: 1px; background: rgba(255,255,255,0.08); margin: 10px 6px; }
+    .sidebar .live-status {
+      margin-top: auto; padding: 10px 14px;
+      font-size: 11px; color: var(--dim);
+      display: flex; align-items: center; gap: 7px;
+    }
+
     .container {
-      max-width: 920px; margin: 0 auto;
+      flex: 1; min-width: 0;
+      max-width: 920px;
+      padding: 24px 28px 40px;
       display: flex; flex-direction: column; gap: 14px;
     }
 
-    /* ── 顶部导航条（毛玻璃） ── */
-    .topnav {
-      display: flex; align-items: center; gap: 6px;
-      padding: 8px;
-      background: var(--glass-bg);
-      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-      border: 1px solid var(--glass-border);
-      border-radius: 16px;
-      box-shadow: 0 6px 28px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06);
-    }
-    .topnav a {
-      padding: 7px 16px; border-radius: 10px;
-      font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
-      color: var(--muted);
-      transition: background 0.18s, color 0.18s;
-      display: inline-flex; align-items: center; gap: 7px;
-    }
-    .topnav a:hover { background: var(--glass-hover); color: var(--text); }
-    .topnav a.current { background: var(--indigo-bg); color: #e0e7ff; }
-    .topnav .nav-tail {
-      margin-left: auto; padding-right: 8px;
-      font-size: 11px; color: var(--dim);
-      display: inline-flex; align-items: center; gap: 6px;
-    }
     .pulse {
       display: inline-block; width: 7px; height: 7px;
       background: var(--emerald); border-radius: 50%;
@@ -267,28 +289,43 @@
     }
 
     @media (max-width: 720px) {
-      body { padding: 14px 12px 24px; }
-      .topnav { flex-wrap: wrap; gap: 4px; }
-      .topnav .nav-tail { width: 100%; padding: 4px 8px 0; }
+      body { flex-direction: column; }
+      .sidebar {
+        width: 100%; height: auto; position: relative;
+        flex-direction: row; flex-wrap: wrap;
+        padding: 12px 10px; border-right: none;
+        border-bottom: 1px solid var(--glass-border);
+      }
+      .sidebar-title { width: 100%; padding: 4px 10px 8px; }
+      .sidebar .divider { display: none; }
+      .sidebar .live-status { margin-top: 0; margin-left: auto; padding: 6px 10px; }
+      .sidebar a { padding: 6px 12px; font-size: 12px; }
+      .container { padding: 16px 12px 28px; }
       .panel { padding: 18px 16px; }
     }
   </style>
 </head>
 <body>
-<div class="container">
 
-  <!-- 顶部导航 -->
-  <nav class="topnav">
-    <a href="/dashboard/">📊 仪表板</a>
-    <a href="/history/">🗂️ 复习历史</a>
-    <a href="/control/" class="current">🎛️ 控制面板</a>
-    <a href="/profile/">👤 个人页</a>
-    <a href="/logout">⎋ 登出</a>
-    <div class="nav-tail">
-      <span class="pulse"></span>
-      <span id="last-refresh">实时刷新</span>
-    </div>
-  </nav>
+<!-- 左侧导航 -->
+<nav class="sidebar">
+  <div class="sidebar-title">
+    bwicarus.space
+    <small>个人学习中心</small>
+  </div>
+  <a href="/dashboard/"><span class="ico">📊</span>仪表板</a>
+  <a href="/history/"><span class="ico">🗂️</span>复习历史</a>
+  <a href="/control/" class="current"><span class="ico">🎛️</span>控制面板</a>
+  <div class="divider"></div>
+  <a href="/profile/"><span class="ico">👤</span>个人页</a>
+  <a href="/logout"><span class="ico">⎋</span>登出</a>
+  <div class="live-status">
+    <span class="pulse"></span>
+    <span id="last-refresh">实时刷新</span>
+  </div>
+</nav>
+
+<div class="container">
 
   <!-- 标题 -->
   <div class="panel">
