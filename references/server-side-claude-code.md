@@ -125,3 +125,64 @@ journalctl -u anki-headless -n 30 --no-pager
 3. iPad 快捷指令切到 Tailscale 服务器 IP（见 `references/ipad-switch-to-server.md`）
 4. 关掉 bwicarus-client.exe
 5. Windows 端可以下机 / 关机
+
+## 永久删除 Windows 端前的 checklist（2026-05-15）
+
+服务器侧已经独立 + 跨机器同步 OK 的：
+
+| 维度 | 服务器侧已有 | Windows 删了之后 |
+|---|---|---|
+| 代码（git tracked） | `/root/claude/` git clone | ✅ 不丢，GitHub 是 source of truth |
+| Vault | `/root/obsidian/` (obsidian-headless sync) | ✅ Obsidian Sync 云端是权威 |
+| Anki collection | `/root/.local/share/Anki2/User 1/collection.anki2` | ✅ AnkiWeb 是权威 |
+| Claude / Codex CLI token | `/root/.claude/.credentials.json` + `/root/.codex/auth.json` | ✅ 已 scp，独立的（独立 device 记录） |
+| AnkiConnect plugin | `/root/.local/share/Anki2/addons21/2055492159/` | ✅ git clone 自 FooSoft repo |
+| Memory（auto memory） | `/root/.claude/projects/root--claude/memory/` (13 files) | ✅ 删 Windows 前手动 `scp -r` 同步过来即可 |
+| systemd 服务 + Daily timer | 跑着 | ✅ |
+| 控制面板 + qa-server | 跑着 | ✅ |
+
+**删 Windows 前必须补**的：
+
+| # | gap | 怎么修 |
+|---|---|---|
+| 1 | 服务器**不能 git push** | 服务器生成 SSH key（`/root/.ssh/id_ed25519`）+ 用户去 GitHub Settings/Keys 加为 **Deploy Key**（勾 "Allow write access"）+ `git remote set-url origin git@github.com:...`；改完后服务器侧 `git push` 直接走 SSH，不用 token |
+| 2 | 服务器**只信 Windows 的 SSH key** | 用户如果还能 SSH 进服务器（用任何客户端、密码、或其他 key）就 OK；不放心可以 `ssh-copy-id` 多加几个 pubkey 到 `/root/.ssh/authorized_keys` |
+| 3 | Windows 端 Anki / Obsidian 未同步的本地改动 | Windows 关机前手动 sync 一次（确保 AnkiWeb / Obsidian Sync 拿到所有最新数据） |
+| 4 | Windows 客户端 `config.json` 的 GUI 偏好 | 服务器 `state/server-config.json` 是独立的；打开 `/control/` 「设置」面板检查所有开关跟 Windows 一致 |
+
+可以**丢**的（不影响项目）：
+- Windows 客户端 `bwicarus-client.exe` 本身（用户可以从 `/profile/` 重新下载）
+- Windows 上的 Tailscale 设备记录（tailscale admin 后台会看到 offline，不影响功能）
+- Windows 上的 SSH client config / git credential helper（其他设备能 SSH 就行）
+- Windows Claude Code session jsonl（聊天回顾用，跟项目继续无关）
+
+## 服务器侧 git push 配置流程（一次性，2026-05-15 完成）
+
+```bash
+# 1. 服务器生成 SSH key
+ssh root@bwicarus.space
+ssh-keygen -t ed25519 -C "bwicarus-server-deploy" -f /root/.ssh/id_ed25519 -N "" -q
+
+# 2. 加 github.com 到 known_hosts（避免首次 ssh 弹 prompt）
+ssh-keyscan -H github.com >> /root/.ssh/known_hosts
+chmod 600 /root/.ssh/known_hosts /root/.ssh/id_ed25519
+
+# 3. 输出 pubkey
+cat /root/.ssh/id_ed25519.pub
+# 复制这一行
+
+# 4. 用户在浏览器：
+# https://github.com/<owner>/<repo>/settings/keys/new
+# Title: bwicarus-server
+# Key: 粘 pubkey
+# ✅ Allow write access
+# 点 Add deploy key
+
+# 5. 改 git remote 从 HTTPS 到 SSH
+cd /root/claude
+git remote set-url origin git@github.com:bwicarus/obsidian-claudecode-skills.git
+
+# 6. 测试
+git push --dry-run origin main
+# 应该输出 "Everything up-to-date"
+```
