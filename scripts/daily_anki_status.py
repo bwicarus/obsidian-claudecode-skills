@@ -140,6 +140,23 @@ def run_py(script: str, args: list[str] | None = None) -> int:
     return r.returncode
 
 
+def run_smoke_tests() -> int:
+    """跑 tests/ 下的 smoke tests。任何一个 fail → 返回非零 → step 标记 failed。
+
+    daily timer 在已知坏环境（路由名打错、部署没同步、关键脚本崩了）下继续
+    跑后续 6 步 ankibase modifying 操作风险高，所以 main() 会在这步 fail
+    时 early-return 不动 Anki。
+    """
+    tests_dir = PROJECT_DIR / "tests"
+    if not tests_dir.exists():
+        return 0       # 测试目录不在，跳过（向后兼容）
+    r = subprocess.run(
+        [PYTHON, "-m", "unittest", "discover", "tests"],
+        cwd=str(PROJECT_DIR),
+    )
+    return r.returncode
+
+
 def deploy_dashboard() -> int:
     WEBAPP_DASHBOARD.mkdir(parents=True, exist_ok=True)
     for fn in ["dashboard.json", "index.html"]:
@@ -179,6 +196,15 @@ def main() -> int:
     print(f"=== Linux daily 编排开始 {RUN_START.strftime('%Y-%m-%d %H:%M:%S')} ===")
     write_run("running")
     rotate_backups()
+
+    # Step -1: smoke tests 守门。fail 立即 abort，不动 Anki / vault / dashboard。
+    if not step("smoke tests", run_smoke_tests):
+        write_run("failed")
+        print(
+            "✗ smoke tests 失败，abort daily（不跑后续 ankibase modifying 步骤）",
+            flush=True,
+        )
+        return 1
 
     step("确保 AnkiConnect", lambda: 0 if ensure_anki() else -1)
     step("登记新笔记", lambda: run_py("register_notes.py"))
