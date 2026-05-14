@@ -182,11 +182,28 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 **state 共享隐患**：本机按 `ctrl+shift+q` 启的临时 server 跟 daemon **共用** 模块级 `state` 字典。同时操作会串扰（截图覆盖、session 混合）。单人多端通常不撞，遇到问题先各自结束当前会话再开新的。
 
-## 服务器侧自动化（bwicarus.space Linux）
+## 服务器侧自动化（多实例：VPS + Raspberry Pi）
 
-2026-05-14 起整套工作流也跑在 `bwicarus.space` 服务器上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**长期目标是关掉 Windows**，所有功能由服务器 + web 控制面板代替。完整指南见 [`references/linux-server-migration.md`](references/linux-server-migration.md)。**在服务器侧继续这个项目**见 [`references/server-side-claude-code.md`](references/server-side-claude-code.md)（推荐 `tmux` + `cd /root/claude && claude` 模式）。
+2026-05-14 起整套工作流跑在 `bwicarus.space` VPS 上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**2026-05-15** 又 mirror 到 Raspberry Pi 5（Debian 13，8GB / NVMe，hostname `bwicarus`）作为完全独立的备份实例。两边 **功能 1:1 对等**，git 仓库 + AnkiWeb + Obsidian Sync 是共享 source of truth。
 
-**服务器 Tailscale 接入**：服务器加入了用户的 tailnet（hostname `bwicarus-3`），IP 用 `ssh root@bwicarus.space 'tailscale ip -4'` 查（当前 `100.110.193.39`）。iPad 通过 Tailscale 私网访问 qa_browser / cmd_server，**不走公网**。OpenVPN Access Server 在 :914/:943 跟 Tailscale 共存（之前确认过不冲突）。
+| 实例 | hostname | 公网 | Tailscale IP | 角色 |
+|---|---|---|---|---|
+| VPS | `bwicarus-3` | `bwicarus.space` ✅ | `100.110.193.39` | 公网入口 + 多用户 webapp |
+| Pi 5 | `bwicarus` | ❌ Tailscale only | `100.101.15.57` | 自有数据中心，私网入口 |
+
+**长期目标**：关 Windows EXE 客户端 → 工作主体迁服务器 / Pi → 在 SSH + tmux + Claude Code 模式下用。
+
+**实例文档**：
+- VPS 完整指南：[`references/linux-server-migration.md`](references/linux-server-migration.md)
+- Pi 完整部署：[`references/raspberry-pi-deployment.md`](references/raspberry-pi-deployment.md)
+- SSH + Claude Code 接续工作流：[`references/server-side-claude-code.md`](references/server-side-claude-code.md)
+- SSH 客户端 Snippets：[`references/pi-snippets.md`](references/pi-snippets.md)
+
+**Tailscale 接入**：两台机器都在 tailnet。MagicDNS hostname：
+- VPS：`bwicarus-3.taile44d0c.ts.net`
+- Pi： `bwicarus.taile44d0c.ts.net`
+
+两边都通过 **Tailscale HTTPS Cert**（Let's Encrypt 真证书）签 SSL，浏览器无警告。iPad 通过 Tailscale 私网访问 qa_browser / cmd_server，**不走公网**。OpenVPN Access Server 在 :914/:943 跟 Tailscale 共存（之前确认过不冲突）。
 
 **iPad 端口入口（Tailscale 内）**：
 

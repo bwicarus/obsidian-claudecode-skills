@@ -1,34 +1,84 @@
 # 在服务器侧继续这个项目（Claude Code Linux）
 
-2026-05-14 起整套工作流已迁到 `bwicarus.space` 服务器。这份指南教你（或下一个 session 的 Claude Code）**从 Windows 切换到服务器**继续协作。
+2026-05-14 起整套工作流已迁到 `bwicarus.space` 服务器；**2026-05-15** 又
+mirror 到 Raspberry Pi 5 作为完全独立的备份实例。这份指南教你（或下一个
+session 的 Claude Code）**从 Windows / 任意机器 切换到任一 Linux 实例**继续协作。
 
-## 服务器端已就绪的一切
+Pi 部署细节见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 
-- 项目代码：`/root/claude/` （git clone 自 GitHub）
-- Vault：`/root/obsidian/` （obsidian-headless 持续同步）
-- Anki：`/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` + AnkiConnect :8765
-- Claude CLI：`/usr/bin/claude` v2.1.141+（已登录，token 在 `/root/.claude/.credentials.json`）
-- Codex CLI：`/usr/bin/codex` v0.130+（已登录，token 在 `/root/.codex/auth.json`）
-- Python 3.10 / Node 22.13.1 (nvm) + 系统 Node 20.20.2
-- `/root/claude/.env` 含所有路径环境变量
+## 两个 Linux 实例已就绪的一切
+
+| 项 | VPS (`bwicarus.space`) | Pi (`bwicarus.taile44d0c.ts.net`) |
+|---|---|---|
+| 项目代码 | `/root/claude/` | `/home/bwicarus/claude/` |
+| Vault | `/root/obsidian/` (1175 md) | `/home/bwicarus/obsidian/` (1175 md) |
+| Anki | `/root/.local/share/Anki2/User 1/` | `/home/bwicarus/.local/share/Anki2/User 1/` |
+| Anki venv | `/opt/anki-venv/` | `/opt/anki-venv/`（同位置） |
+| Claude CLI | `/usr/bin/claude` v2.1.141+ | 同左 |
+| Codex CLI | `/usr/bin/codex` v0.130+ | 同左 |
+| OAuth 凭据 | `/root/.claude/.credentials.json` | `/home/bwicarus/.claude/.credentials.json` |
+| Python / Node | 3.10 / 22 (nvm) | 3.13 / 22 (NodeSource) |
+| 项目 .env | `/root/claude/.env` | `/home/bwicarus/claude/.env` |
+| 用户 | `root` | `bwicarus`（NOPASSWD sudo） |
+| MagicDNS | `bwicarus-3.taile44d0c.ts.net` | `bwicarus.taile44d0c.ts.net` |
+
+memory（跨会话）路径不同（cwd 决定 project key）：
+
+| 实例 | memory 目录（双横杠）| jsonl transcripts（单横杠）|
+|---|---|---|
+| VPS | `/root/.claude/projects/root--claude/memory/` | `.../-root-claude/*.jsonl` |
+| Pi | `/home/bwicarus/.claude/projects/home-bwicarus--claude/memory/` | `.../-home-bwicarus-claude/*.jsonl` |
 
 ## 切换工作流的两种方式
 
 ### A. 长任务（推荐）—— tmux + Claude Code
 
+VPS：
 ```bash
 ssh root@bwicarus.space
-tmux new -s claude       # 或者 tmux attach -t claude 复用已有
+tmux new -A -s claude    # -A：没就建，有就 attach（不会撞 duplicate）
 cd /root/claude
-claude                   # 进入交互模式
+claude                   # 进入交互模式（Remote Control 默认开启，iPad App 可见）
 # 工作中如果要离开：Ctrl+B 然后 D（脱离 tmux，会话保留）
 # 回来：ssh + tmux attach -t claude
 ```
 
+Pi：
+```bash
+ssh bwicarus@100.101.15.57        # 或 bwicarus@bwicarus.taile44d0c.ts.net
+tmux new -A -s claude
+cd ~/claude
+claude
+```
+
 好处：
-- 断网 / 退出 SSH，Claude Code 会话保留在服务器
+- 断网 / 退出 SSH，Claude Code 会话保留在 Linux
 - 下次回来直接接着用
-- 不依赖你 Windows 在线
+- 不依赖你 Windows / 本地机器在线
+- Tailscale 内网随时随地接入
+
+### A2. 接续旧 session（jsonl 同步过来后）
+
+把 VPS 的 session 同步到 Pi 之后，Pi 上 `claude --resume` 能列出 / 接续。
+
+```bash
+# 在 VPS 上 rsync 当前 session 给 Pi
+SESSION=<session-id>     # 从 echo $CLAUDE_CODE_SESSION_ID 拿
+rsync -avz /root/.claude/projects/-root-claude/${SESSION}.jsonl \
+  bwicarus@100.101.15.57:.claude/projects/-home-bwicarus-claude/
+rsync -avz /root/.claude/projects/-root-claude/${SESSION}/ \
+  bwicarus@100.101.15.57:.claude/projects/-home-bwicarus-claude/${SESSION}/
+rsync -avz /root/.claude/tasks/${SESSION}/ \
+  bwicarus@100.101.15.57:.claude/tasks/${SESSION}/
+
+# Pi 上接续
+ssh bwicarus@100.101.15.57
+cd ~/claude
+claude --resume <session-id>
+```
+
+**重要**：避免**两边同时活跃**。jsonl 会从 resume 点分叉，下次同步就有冲突。
+单边工作，确认要切换时先 `/exit` 一边，再 rsync 最新到另一边。
 
 ### B. 一次性查询 —— 单次 prompt
 

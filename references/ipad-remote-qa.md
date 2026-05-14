@@ -30,14 +30,21 @@ GUI 截图问答 Tab：
 ✓ qa-daemon: http://<本机IP>:9091  (iPad 远程问答；Tailscale 设备直连此 URL)
 ```
 
-## 找几个必需信息
+## 找几个必需信息（按实例分）
 
-| 信息 | 位置 |
-|---|---|
-| Tailscale IP（本机）| `tailscale ip -4`，或 Windows `ipconfig` 找 100.x.x.x |
-| cmd_server API key | `%LOCALAPPDATA%\bwicarus-client\cmd_server_key.txt`（或旧位置 `%LOCALAPPDATA%\截图问答\cmd_server_key.txt`）|
-| daemon 端口 | 9091 |
-| cmd_server 端口 | 9090（配置在 cfg `cmd_server.port`） |
+服务器 / Pi 都跑 qa-server，**两边端口一样（9090/9091）**，但 host 和 key 不同。
+**最简办法**：登录任一实例的控制面板 → 设置 → **「iPad 远程触发」** section，
+每行已经拼好完整 URL（含 key），点复制按钮即可。
+
+手动拿 host + key 的对照：
+
+| 信息 | VPS | Pi | Windows 客户端（旧路径，迁移期间还在）|
+|---|---|---|---|
+| Tailscale hostname | `bwicarus-3.taile44d0c.ts.net` | `bwicarus.taile44d0c.ts.net` | `bwicarus-2.taile44d0c.ts.net` 等 |
+| Tailscale IP | `100.110.193.39` | `100.101.15.57` | 装 Tailscale 客户端时分配 |
+| API key 文件 | `/root/claude/state/qa-server-data/cmd_server_key.txt` | `/home/bwicarus/claude/state/qa-server-data/cmd_server_key.txt` | `%LOCALAPPDATA%\bwicarus-client\cmd_server_key.txt` |
+| qa daemon 端口 | 9091 | 9091 | 9091 |
+| cmd_server 端口 | 9090 | 9090 | 9090 |
 
 ## iOS 快捷指令配置（推荐流程）
 
@@ -46,17 +53,19 @@ GUI 截图问答 Tab：
 2. 「转换图像」→ 格式：JPEG，质量 80
 3. 「编码 Base64」（输出文本）
 4. 「获取 URL 内容」
-   - URL: http://100.99.9.124:9090/qa?key=<把 key 粘在这>
+   - URL: http://<TS-HOST>:9090/qa?key=<API-KEY>
    - 方法: POST
    - 请求体: JSON
      {"image_b64": <上一步的 Base64 文本>}
    - 头部: Content-Type: application/json
 5. 「打开 URL」
-   - URL: http://100.99.9.124:9091
+   - URL: http://<TS-HOST>:9091
    - （这一步让 Safari 自动跳转到 qa_browser 完整页面，看到刚才推上去的截图）
 ```
 
-替换 IP 为你实际的 Tailscale IP。
+`<TS-HOST>` / `<API-KEY>` 直接从控制面板「iPad 远程触发」复制完整 URL，
+按 `?key=` 切开（前半给 URL 字段，整段也可以直接用，iPad 快捷指令支持
+带 query string 的 URL）。
 
 ## 排错速查
 
