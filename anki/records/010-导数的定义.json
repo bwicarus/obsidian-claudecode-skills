@@ -57,10 +57,10 @@
     "retention_min": 0.0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-11T18:22:24+09:00",
-    "score": 0.3936,
-    "activation": 0.6274,
-    "importance": 0.6274,
+    "computed_at": "2026-05-14T15:25:31+08:00",
+    "score": 0.4272,
+    "activation": 0.6536,
+    "importance": 0.6536,
     "weakness": 1.0,
     "formula": "(1-R) * activation * importance"
   }

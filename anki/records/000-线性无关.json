@@ -110,5 +110,13 @@
       "anki_note_id": 1778491841251,
       "status": "synced"
     }
-  ]
+  ],
+  "priority_snapshot": {
+    "computed_at": "2026-05-14T15:25:31+08:00",
+    "score": 0.2728,
+    "activation": 0.7386,
+    "importance": 0.7386,
+    "weakness": 0.5,
+    "formula": "(1-R) * activation * importance"
+  }
 }
