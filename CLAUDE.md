@@ -180,7 +180,17 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 ## 服务器侧自动化（bwicarus.space Linux）
 
-2026-05-14 起整套工作流也跑在 `bwicarus.space` 服务器上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**长期目标是关掉 Windows**，所有功能由服务器 + web 控制面板代替。完整指南见 [`references/linux-server-migration.md`](references/linux-server-migration.md)。
+2026-05-14 起整套工作流也跑在 `bwicarus.space` 服务器上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**长期目标是关掉 Windows**，所有功能由服务器 + web 控制面板代替。完整指南见 [`references/linux-server-migration.md`](references/linux-server-migration.md)。**在服务器侧继续这个项目**见 [`references/server-side-claude-code.md`](references/server-side-claude-code.md)（推荐 `tmux` + `cd /root/claude && claude` 模式）。
+
+**服务器 Tailscale 接入**：服务器加入了用户的 tailnet（hostname `bwicarus-3`），IP 用 `ssh root@bwicarus.space 'tailscale ip -4'` 查（当前 `100.110.193.39`）。iPad 通过 Tailscale 私网访问 qa_browser / cmd_server，**不走公网**。OpenVPN Access Server 在 :914/:943 跟 Tailscale 共存（之前确认过不冲突）。
+
+**iPad 端口入口（Tailscale 内）**：
+
+| 用途 | 端点 |
+|---|---|
+| 浏览器看截图问答页面 | `http://<Tailscale-IP>:9091/` |
+| POST 截图注入 | `http://<Tailscale-IP>:9090/qa?key=<KEY>`（key 在 `/root/claude/state/qa-server-data/cmd_server_key.txt`） |
+| 触发 register / daily / ankiweb-sync | `http://<Tailscale-IP>:9090/run/<cmd>?key=<KEY>` |
 
 **关键设施**：
 
@@ -190,8 +200,10 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | Vault | `/root/obsidian/` | obsidian-headless sync 拉，1175 笔记 |
 | Anki | `/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` | aqt 25.2.7 + Xvfb 跑 GUI，5634 卡 |
 | 环境变量 | `/root/claude/.env` + `/etc/profile.d/claude.sh` | `CLAUDE_PROJECT` / `OBSIDIAN_VAULT` / `APP_PYTHON` / `APP_CLAUDE` / `APP_CODEX` / `ANKI_CONNECT_URL` / `AI_SETTINGS_FILE` |
-| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99.service` + `anki-headless.service` + `obsidian-sync.service` + `bwicarus-daily.service` + `bwicarus-daily.timer` (04:00) |
-| **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE，触发 register / daily / 切 AI 后端 / 重启 Anki，需登录 |
+| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` |
+| **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
+| **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
+| **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
 
 **控制面板源码**：
 - `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`

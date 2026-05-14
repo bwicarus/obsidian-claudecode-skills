@@ -130,5 +130,60 @@ API：
 
 服务器功能确认稳定 1-2 周后：
 - 可以关掉 Windows 客户端 / 关掉 Windows 计划任务
-- iPad 接入 endpoint 改为服务器（具体 nginx 反代或 Tailscale 后续配）
+- iPad 接入 endpoint 改为服务器（已通过 Tailscale 完成，见 `ipad-switch-to-server.md`）
 - 本机做"备份角色"或者完全退役
+
+## 2026-05-14 晚期补充：iPad / 控制面板完整上线
+
+### Tailscale 接入
+- 服务器加入 tailnet（`tailscale up --authkey=...` 一次性，hostname `bwicarus-3`）
+- 当前 IP：`100.110.193.39`（用 `tailscale ip -4` 查）
+- 跟现有 OpenVPN Access Server 不冲突（端口/interface/网段都错开）
+
+### iPad 截图问答 daemon 上线
+- `_server_deploy/qa_server.py` 入口 + `qa-server.service` systemd unit
+- 复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`
+- 监听 `0.0.0.0:9091` (qa_browser daemon，iPad 直连)
+- 监听 `0.0.0.0:9090` (cmd_server，iPad POST 注入截图 + 触发命令)
+- API key: `/root/claude/state/qa-server-data/cmd_server_key.txt`
+- BWICARUS_APP_DIR env 让客户端 `paths.py` 找对路径
+
+### qa-server.service 必须的 sed patch（ExecStartPre，每次重启自动跑）
+```
+sed -i "s|cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|bwicarus.space/static/qa/mathjax.js|g" qa_browser.py
+sed -i "s|cdn.jsdelivr.net/npm/marked@9/marked.min.js|bwicarus.space/static/qa/marked.js|g" qa_browser.py
+sed -i 's|"--dangerously-skip-permissions",\s*||g' ai_backends.py
+sed -i 's|"--output-format", "text", "-p"|"--allowedTools", "Read", "--output-format", "text", "-p"|g' ai_backends.py
+```
+3 个原因：
+1. iPad 在中国访问 jsdelivr CDN 慢/被墙 → 本机 host MathJax + marked
+2. Claude CLI 在 root 下拒绝 `--dangerously-skip-permissions`
+3. 去掉 flag 后 Read tool 默认询问被拒 → 加 `--allowedTools Read` 显式白名单
+
+### Web 控制面板（`/control/`）
+- 完整复刻 dashboard 视觉风格（深紫渐变背景 + 毛玻璃 panel + indigo/violet 强调）
+- 3-panel 布局（用户最后决定）：
+  1. **状态** = 系统状态 + Daily 进度
+  2. **操作** = 触发操作 + 触发日志（实时滚动）
+  3. **设置** = AI 后端切换 + Anki/笔记登记/凌晨定时/iPad 截图问答 所有开关
+- panel 折叠/展开动画完全跟 dashboard 同款（flex-grow + cubic-bezier 0.4s + opacity 暗化）
+- 左侧 drawer 完全照搬 dashboard `.graph-drawer` 镜像（含 SVG turbulence noise 颗粒）：
+  - 默认关闭，左侧把手 grip 18×96 玻璃条
+  - 点把手或 ESC 切换 `translateX(-102%) ↔ 0`
+  - 悬浮模式 checkbox 决定挤压主内容 vs 浮在上面
+  - 抽屉内含可编辑的导航链接列表（`server-config.json::sidebar_links`）+ 编辑按钮
+  - 编辑链接 → 右侧嵌套子抽屉（仿 graph-settings-drawer）增删改/排序
+- 配置写到 `/root/claude/state/server-config.json`（sidebar_links + anki.auto_restart + auto_upload_after_register + scheduled_register.{wake_anki,upload_after} + qa_remote_daemon + qa_exercises_subdir + qa_wrong_subdir）
+
+### iPad Safari 适配
+- `html, body { height: 100dvh }`（动态视口）避免 100vh 把底部 panel 推出视野
+- `.panel-stack { overflow-y: auto }` 兜底滚动
+
+### 完整 daily 流程验证
+- Daily 任务自动跑过完整 9 步（含 register 全 vault 6 分钟、anki_status、review_priority、build_review_deck 重建 62 张必复习卡、cleanup、export_dashboard、部署、AnkiWeb sync）
+- `state/last_run.json` 实时记录每步进度，控制面板"状态"panel 实时显示
+
+### 在服务器侧继续这个项目
+见独立 reference [`server-side-claude-code.md`](server-side-claude-code.md)。
+- 在服务器 ssh + tmux + claude 模式
+- memory 通过 `scp -r ~/.claude/projects/C--claude/memory/ root@...:/root/.claude/projects/root--claude/` 同步
