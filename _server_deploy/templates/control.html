@@ -193,7 +193,10 @@
       flex: 1; min-height: 0;
       display: flex; flex-direction: column;
       gap: 8px; align-items: stretch;
+      overflow-y: auto;
     }
+    .panel-stack::-webkit-scrollbar { width: 4px; }
+    .panel-stack::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
     .panel {
       flex: 0 0 52px;
       width: 100%; overflow: hidden;
@@ -223,6 +226,9 @@
       gap: 12px; padding: 0 22px;
       pointer-events: none; user-select: none;
     }
+    .panel:not(.active) { cursor: pointer; }
+    .panel:not(.active):hover { box-shadow: 0 6px 28px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.18); }
+    .panel:not(.active):hover .tab-title { color: var(--text); }
     .tab-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px currentColor; }
     .tab-title { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
     .tab-meta { margin-left: auto; font-size: 11px; color: var(--dim); letter-spacing: 0.04em; }
