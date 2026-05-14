@@ -13,12 +13,17 @@
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
 from flask import jsonify, render_template, request
 
 CLAUDE_DIR = Path("/root/claude")
+
+# scripts/ 加入路径，让 config_schema 等业务模块能 import
+sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+from config_schema import validate_partial  # noqa: E402
 LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
 AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
 SERVER_CONFIG = CLAUDE_DIR / "state" / "server-config.json"
@@ -134,10 +139,13 @@ def register_control(app):
             except Exception as e:
                 return jsonify({"_error": str(e)})
 
-        # POST: 深度合并请求 JSON 到现有 config
-        new_cfg = request.get_json(silent=True) or {}
-        if not isinstance(new_cfg, dict):
+        # POST: schema 校验过滤后深度合并请求 JSON 到现有 config
+        raw = request.get_json(silent=True) or {}
+        if not isinstance(raw, dict):
             return jsonify({"ok": False, "msg": "需要 JSON 对象"}), 400
+
+        # 过滤未声明字段 + 类型不匹配的字段（拼错字段名不再静默生效）
+        new_cfg, errors = validate_partial(raw)
 
         # 加载现有 + deep merge
         existing = {}
@@ -168,7 +176,15 @@ def register_control(app):
         if "qa_remote_daemon" in new_cfg or "qa_vault_path" in new_cfg:
             subprocess.run(["systemctl", "restart", "qa-server"], check=False)
 
-        return jsonify({"ok": True, "msg": "配置已保存", "config": merged})
+        msg = "配置已保存"
+        if errors:
+            msg += f"（{len(errors)} 个字段被拒）"
+        return jsonify({
+            "ok":      True,
+            "msg":     msg,
+            "config":  merged,
+            "errors":  errors,   # 前端可选展示
+        })
 
     @app.route("/control/api/trigger-log")
     def control_trigger_log():
