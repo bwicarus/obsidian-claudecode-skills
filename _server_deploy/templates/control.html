@@ -25,7 +25,11 @@
       --drawer-ease:  cubic-bezier(0.4, 0, 0.2, 1);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100vh; overflow: hidden; }
+    html, body {
+      height: 100vh;     /* fallback */
+      height: 100dvh;    /* iOS Safari 动态视口（不含地址栏） */
+      overflow: hidden;
+    }
     body {
       font-family: system-ui, -apple-system, sans-serif;
       color: var(--text);
@@ -199,6 +203,7 @@
     .panel-stack::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
     .panel {
       flex: 0 0 52px;
+      min-height: 52px;    /* 防止 flex 容器空间不够时被压扁到看不见 */
       width: 100%; overflow: hidden;
       position: relative; border-radius: 18px;
       background: var(--glass-bg);
@@ -216,6 +221,7 @@
     .panel-stack:has(.panel.active) .panel:not(.active) { opacity: 0.55; }
     .panel.active {
       flex-grow: 1;
+      min-height: 320px;   /* 保证 active panel 有合理高度 */
       box-shadow: 0 18px 56px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18);
       z-index: 20; cursor: default; opacity: 1 !important;
     }
