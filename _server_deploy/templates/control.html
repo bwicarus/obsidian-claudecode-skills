@@ -255,25 +255,8 @@
           <span class="action-desc">写入 <code>state/ai-settings.json</code>，无需重启服务</span>
         </div>
       </div>
-      <div class="config-section">
-        <h3>Anki</h3>
-        <label class="cfg-row"><input type="checkbox" data-cfg-path="anki.auto_restart"> AnkiConnect 不可达时自动重启 anki-headless</label>
-      </div>
-      <div class="config-section">
-        <h3>笔记登记</h3>
-        <label class="cfg-row"><input type="checkbox" data-cfg-path="auto_upload_after_register"> 登记完成后自动「刷新并上传网页」</label>
-      </div>
-      <div class="config-section">
-        <h3>凌晨定时</h3>
-        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.wake_anki"> 触发前确保 Anki 可用</label>
-        <label class="cfg-row"><input type="checkbox" data-cfg-path="scheduled_register.upload_after"> 完成后部署 dashboard</label>
-      </div>
-      <div class="config-section">
-        <h3>iPad 截图问答</h3>
-        <label class="cfg-row"><input type="checkbox" data-cfg-path="qa_remote_daemon"> 启用 iPad 远程截图问答</label>
-        <label class="cfg-row">习题子目录 <input type="text" data-cfg-path="qa_exercises_subdir"></label>
-        <label class="cfg-row">错题子目录 <input type="text" data-cfg-path="qa_wrong_subdir"></label>
-      </div>
+      <!-- 字段从 /control/api/config/schema 反射生成（消除前端跟 config_schema.py 双写）-->
+      <div id="cfg-fields">加载中…</div>
       <p style="margin-top: 16px;">
         <button class="btn primary" onclick="saveConfig(event)">保存设置</button>
         <span class="action-desc" style="margin-left: 10px;">某些设置改动会重启 qa-server</span>
@@ -424,7 +407,54 @@ function setByPath(obj, path, value) {
   const target = parts.reduce((o, k) => { if (!o[k]) o[k] = {}; return o[k]; }, obj);
   target[last] = value;
 }
+// 渲染设置字段：fetch schema → 按 group 分组生成 <div class="config-section">
+// 用 escape 防 label / group 注入 HTML。
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
+async function renderCfgFields() {
+  let fields;
+  try {
+    const r = await fetch('/control/api/config/schema');
+    fields = await r.json();
+  } catch (e) {
+    document.getElementById('cfg-fields').innerHTML =
+      '<p class="meta">加载 schema 失败</p>';
+    return;
+  }
+  if (!Array.isArray(fields) || fields.length === 0) {
+    document.getElementById('cfg-fields').innerHTML =
+      '<p class="meta">(无可配置字段)</p>';
+    return;
+  }
+  // 按 group 分桶（保持 fields 顺序，让 schema 顺序决定 group 顺序）
+  const groups = [];
+  const idx = {};
+  fields.forEach(f => {
+    if (!(f.group in idx)) { idx[f.group] = groups.length; groups.push({name: f.group, items: []}); }
+    groups[idx[f.group]].items.push(f);
+  });
+  const sections = groups.map(g => {
+    const rows = g.items.map(f => {
+      const label = escapeHtml(f.label);
+      const path  = escapeHtml(f.path);
+      if (f.type === 'bool') {
+        return `<label class="cfg-row"><input type="checkbox" data-cfg-path="${path}"> ${label}</label>`;
+      }
+      // 默认 str
+      return `<label class="cfg-row">${label} <input type="text" data-cfg-path="${path}"></label>`;
+    }).join('\n');
+    return `<div class="config-section"><h3>${escapeHtml(g.name)}</h3>${rows}</div>`;
+  }).join('\n');
+  document.getElementById('cfg-fields').innerHTML = sections;
+}
 async function loadConfig() {
+  // 字段还没渲染先渲染（首次进 panel 才会调）
+  if (!document.querySelector('#cfg-fields [data-cfg-path]')) {
+    await renderCfgFields();
+  }
   try {
     const r = await fetch('/control/api/config');
     const cfg = await r.json();

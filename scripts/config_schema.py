@@ -44,6 +44,59 @@ SCHEMA: dict[str, type] = {
 }
 
 
+# UI 元数据：控制面板「设置」panel 显示的字段（顺序 = 渲染顺序，group = 分组）。
+# 不在这里的 SCHEMA 字段仍然走校验（例如 AI 后端 cli command），只是不在 UI 显示。
+FIELD_META: dict[str, dict] = {
+    "anki.auto_restart": {
+        "group": "Anki",
+        "label": "AnkiConnect 不可达时自动重启 anki-headless",
+    },
+    "auto_upload_after_register": {
+        "group": "笔记登记",
+        "label": "登记完成后自动「刷新并上传网页」",
+    },
+    "scheduled_register.wake_anki": {
+        "group": "凌晨定时",
+        "label": "触发前确保 Anki 可用",
+    },
+    "scheduled_register.upload_after": {
+        "group": "凌晨定时",
+        "label": "完成后部署 dashboard",
+    },
+    "qa_remote_daemon": {
+        "group": "iPad 截图问答",
+        "label": "启用 iPad 远程截图问答",
+    },
+    "qa_exercises_subdir": {
+        "group": "iPad 截图问答",
+        "label": "习题子目录",
+    },
+    "qa_wrong_subdir": {
+        "group": "iPad 截图问答",
+        "label": "错题子目录",
+    },
+}
+
+
+def schema_for_ui() -> list[dict]:
+    """给前端渲染设置 panel 用：每条 {path, type, group, label}。
+
+    顺序遵循 FIELD_META，type 来自 SCHEMA（bool → checkbox / str → text input）。
+    """
+    out: list[dict] = []
+    for path, meta in FIELD_META.items():
+        if path not in SCHEMA:
+            # 防 drift：FIELD_META 配了但 SCHEMA 没声明的字段直接跳过
+            continue
+        out.append({
+            "path":  path,
+            "type":  SCHEMA[path].__name__,    # 'bool' / 'str'
+            "group": meta["group"],
+            "label": meta["label"],
+        })
+    return out
+
+
 def _flatten(d: dict, prefix: str = "") -> dict:
     """嵌套 dict 拍扁成 dot-path → value（非 dict 的叶子）。"""
     out: dict = {}

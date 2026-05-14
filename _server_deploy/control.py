@@ -23,7 +23,7 @@ CLAUDE_DIR = Path("/root/claude")
 
 # scripts/ 加入路径，让 config_schema 等业务模块能 import
 sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-from config_schema import validate_partial  # noqa: E402
+from config_schema import validate_partial, schema_for_ui  # noqa: E402
 import task_tracker  # noqa: E402
 LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
 AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
@@ -129,6 +129,12 @@ def register_control(app):
             "last_run": get_last_run(),
             "active_tasks": task_tracker.read_snapshot(),
         })
+
+    @app.route("/control/api/config/schema")
+    def control_config_schema():
+        """前端按这个 schema 动态渲染设置 panel 字段，避免硬编码 cfg-path 跟
+        scripts/config_schema.py 双写。"""
+        return jsonify(schema_for_ui())
 
     @app.route("/control/api/config", methods=["GET", "POST"])
     def control_config():
