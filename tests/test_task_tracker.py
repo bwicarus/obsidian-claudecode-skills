@@ -72,5 +72,45 @@ class TaskTrackerStateFileTest(unittest.TestCase):
                          "track() 退出后应清理 active 条目")
 
 
+class IsPidAliveTest(unittest.TestCase):
+    """跨平台 PID 探测：Linux/macOS 走 os.kill(pid, 0)。回归会让 control 面板
+    显示永远 stale 的"运行中任务"。"""
+
+    def setUp(self) -> None:
+        for mod in list(sys.modules):
+            if mod == "task_tracker":
+                del sys.modules[mod]
+        import task_tracker
+        self.tt = task_tracker
+
+    def test_self_pid_is_alive(self) -> None:
+        self.assertTrue(self.tt._is_pid_alive(os.getpid()))
+
+    def test_invalid_pid_is_dead(self) -> None:
+        self.assertFalse(self.tt._is_pid_alive(0))
+        self.assertFalse(self.tt._is_pid_alive(-1))
+        # 一个几乎不会存在的高位 PID
+        self.assertFalse(self.tt._is_pid_alive(999_999))
+
+
+class ReadSnapshotTest(unittest.TestCase):
+    """read_snapshot() 给 webapp 用：只读，不竞争写。"""
+
+    def setUp(self) -> None:
+        for mod in list(sys.modules):
+            if mod == "task_tracker":
+                del sys.modules[mod]
+        import task_tracker
+        self.tt = task_tracker
+
+    def test_returns_tasks_and_completed_keys(self) -> None:
+        snap = self.tt.read_snapshot()
+        self.assertIsInstance(snap, dict)
+        self.assertIn("tasks",     snap)
+        self.assertIn("completed", snap)
+        self.assertIsInstance(snap["tasks"],     list)
+        self.assertIsInstance(snap["completed"], list)
+
+
 if __name__ == "__main__":
     unittest.main()

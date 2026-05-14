@@ -195,6 +195,10 @@
         <div id="status">加载中…</div>
       </div>
       <div class="config-section" style="margin-top: 14px;">
+        <h3 style="display:flex; align-items:center; gap:8px;">运行中任务 <span id="active-tasks-count" class="badge"></span></h3>
+        <div id="active-tasks">加载中…</div>
+      </div>
+      <div class="config-section" style="margin-top: 14px;">
         <h3 style="display:flex; align-items:center; gap:8px;">Daily 进度 <span id="daily-status-badge" class="badge"></span></h3>
         <div id="last-run">加载中…</div>
       </div>
@@ -329,6 +333,34 @@ async function refreshStatus() {
     const allOk = ankiOk && ['anki_headless','xvfb_99','obsidian_sync','qa_server'].every(k => data[k] === 'active');
     document.getElementById('status-tab-meta').textContent = allOk ? '全部正常' : '有问题';
     document.getElementById('status-tab-meta').style.color = allOk ? 'var(--emerald)' : 'var(--amber)';
+    // 运行中任务
+    const at = data.active_tasks || {tasks: [], completed: []};
+    const activeCount = at.tasks.length;
+    const completedCount = at.completed.length;
+    const countBadge = document.getElementById('active-tasks-count');
+    if (activeCount > 0) {
+      countBadge.textContent = activeCount + ' 跑'; countBadge.className = 'badge running';
+      _fastPollUntil = Date.now() + 10000;  // 有活跃任务时加速轮询
+    } else if (completedCount > 0) {
+      countBadge.textContent = completedCount + ' 刚完成'; countBadge.className = 'badge ok';
+    } else {
+      countBadge.textContent = '空闲'; countBadge.className = 'badge';
+    }
+    const renderTask = (t, kind) => {
+      const icon = kind === 'running' ? '<span class="spinner"></span>' : '✓';
+      const elapsed = kind === 'running'
+        ? ` (${fmtElapsed(new Date(t.started_at * 1000).toISOString())} 已用)`
+        : (t.duration_s != null ? ` (${t.duration_s}s)` : '');
+      const detail = t.detail ? ` — ${t.detail}` : '';
+      const summary = t.summary ? ` · ${t.summary}` : '';
+      return `<div class="step ${kind}">${icon} ${t.name}${detail}${summary}${elapsed}</div>`;
+    };
+    const tasksHtml = [
+      ...at.tasks.map(t => renderTask(t, 'running')),
+      ...at.completed.slice().reverse().map(t => renderTask(t, 'ok')),
+    ].join('\n');
+    document.getElementById('active-tasks').innerHTML =
+      tasksHtml || '<p class="meta">(无活跃任务)</p>';
     const aiBadge = document.getElementById('ai-current');
     aiBadge.textContent = data.ai_backend;
     aiBadge.className = 'badge ' + (data.ai_backend.includes('codex') ? 'codex' : 'claude');

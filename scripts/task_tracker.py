@@ -36,6 +36,17 @@ except (ValueError, AttributeError):
 def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform != "win32":
+        # POSIX: signal 0 不发任何信号，只 probe 进程是否存在。
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False               # 进程不存在
+        except PermissionError:
+            return True                # 进程存在但我们没权限发信号 — 仍是活的
+        except OSError:
+            return False
     try:
         import ctypes
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -61,6 +72,18 @@ def cleanup_stale() -> list[dict]:
     tasks = [t for t in _load() if _is_pid_alive(int(t.get("pid", 0) or 0))]
     _save(tasks)
     return tasks
+
+
+def read_snapshot() -> dict:
+    """只读快照：返回 {"tasks": [...], "completed": [...]}，过滤死 PID 但不写文件。
+
+    给 webapp 控制面板用。避免在多个进程（脚本 + webapp）同时写 active_tasks.json
+    导致的 race（脚本写完成后 webapp 又写回旧的活跃列表，丢失完成事件）。
+    """
+    full = _load_full()
+    live_tasks = [t for t in full["tasks"]
+                  if _is_pid_alive(int(t.get("pid", 0) or 0))]
+    return {"tasks": live_tasks, "completed": full["completed"]}
 
 
 def _load_full() -> dict:

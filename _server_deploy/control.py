@@ -24,6 +24,7 @@ CLAUDE_DIR = Path("/root/claude")
 # scripts/ 加入路径，让 config_schema 等业务模块能 import
 sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
 from config_schema import validate_partial  # noqa: E402
+import task_tracker  # noqa: E402
 LAST_RUN = CLAUDE_DIR / "state" / "last_run.json"
 AI_SETTINGS = CLAUDE_DIR / "state" / "ai-settings.json"
 SERVER_CONFIG = CLAUDE_DIR / "state" / "server-config.json"
@@ -126,6 +127,7 @@ def register_control(app):
             "tailscaled": get_systemd_status("tailscaled"),
             "ai_backend": get_ai_backend(),
             "last_run": get_last_run(),
+            "active_tasks": task_tracker.read_snapshot(),
         })
 
     @app.route("/control/api/config", methods=["GET", "POST"])
