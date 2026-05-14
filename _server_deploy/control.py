@@ -136,6 +136,38 @@ def register_control(app):
         scripts/config_schema.py 双写。"""
         return jsonify(schema_for_ui())
 
+    @app.route("/control/api/ipad-config")
+    def control_ipad_config():
+        """返回 iPad 快捷指令需要的 host + cmd_server API key + 可触发命令清单。
+        前端把这些拼成完整 URL 模板供用户复制到快捷指令的「获取 URL 内容」动作。"""
+        key_file = CLAUDE_DIR / "state" / "qa-server-data" / "cmd_server_key.txt"
+        api_key = key_file.read_text().strip() if key_file.exists() else ""
+
+        # 优先用 Tailscale DNS 名（跨设备稳定），fallback 到请求 Host
+        ts_dns = ""
+        try:
+            r = subprocess.run(
+                ["tailscale", "status", "--json"],
+                capture_output=True, text=True, timeout=3,
+            )
+            d = json.loads(r.stdout)
+            ts_dns = (d.get("Self") or {}).get("DNSName", "").rstrip(".")
+        except Exception:
+            pass
+
+        return jsonify({
+            "host":     ts_dns or (request.host or "").split(":")[0],
+            "port_cmd": 9090,    # cmd_server (/run, /qa, /list)
+            "port_qa":  9091,    # qa_browser daemon（截图问答对话页）
+            "api_key":  api_key,
+            "commands": [
+                {"name": "register",     "desc": "登记新笔记（单步，不含必复习）"},
+                {"name": "daily",        "desc": "完整 daily pipeline（10 步）"},
+                {"name": "upload",       "desc": "刷新并上传仪表盘"},
+                {"name": "ankiweb-sync", "desc": "触发 AnkiWeb 同步"},
+            ],
+        })
+
     @app.route("/control/api/config", methods=["GET", "POST"])
     def control_config():
         """GET 返回 server-config.json；POST 写入 + 重启 qa-server 让新 cfg 生效。"""
