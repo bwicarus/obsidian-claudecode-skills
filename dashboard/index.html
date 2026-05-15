@@ -711,6 +711,22 @@ function masteryColor(m, hasCards){
   const h=mm*140;                       // hue 0红→140绿
   return `hsl(${h.toFixed(0)},62%,52%)`;
 }
+
+// 当前图的 wdeg / edge-weight 极值（每次 renderGraph 重算），helper 用它做
+// 「按本图 min~max 归一化 + 幂函数增强对比」——数据再集中也强制拉满量程。
+let _wdegDom=[0,1], _ewDom=[0,1];
+function nodeR(d){
+  const [a,b]=_wdegDom, base=9, span=graphSettings.sizeScale*3.5;
+  if(b<=a) return base+span*0.45;
+  const t=Math.max(0,Math.min(1,((d.wdeg||0)-a)/(b-a)));
+  return base + span*Math.pow(t, 0.7);   // 0.7<1：低值也撑开，整体差异更明显
+}
+function edgeW(d){
+  const [a,b]=_ewDom;
+  if(b<=a) return 2.5;
+  const t=Math.max(0,Math.min(1,((d.weight||0)-a)/(b-a)));
+  return 0.5 + 7.5*Math.pow(t, 1.7);     // 1.7>1：强边猛然变粗，弱边压细
+}
 const openNote = url => { const a=document.createElement('a'); a.href=url; a.click(); };
 
 /* Panel activation: mouseenter switches active panel; stays open on leave */
@@ -864,6 +880,14 @@ function renderGraph(graphData) {
   const nodeById=Object.fromEntries(filteredNodes.map(n=>[n.id,n]));
   const links=filteredEdges.filter(e=>nodeById[e.source]&&nodeById[e.target]);
 
+  // 按本图实际极值设归一化 domain（nodeR/edgeW 用），数据集中也拉满量程
+  {
+    const wd=filteredNodes.map(n=>n.wdeg||0);
+    const ew=links.map(e=>e.weight||0);
+    _wdegDom=[Math.min(...wd,0), Math.max(...wd,1)];
+    _ewDom=[Math.min(...ew,0), Math.max(...ew,1)];
+  }
+
   const zoom = d3.zoom().scaleExtent([0.2,4]).on('zoom',e=>g.attr('transform',e.transform));
   svg.call(zoom);
   const g=svg.append('g');
@@ -877,7 +901,7 @@ function renderGraph(graphData) {
 
   g.append('g').selectAll('line').data(links).join('line')
     .attr('class',d=>'graph-link link-'+(d.kind||'kw'))
-    .attr('stroke-width',d=>0.6+(d.weight||0)*1.8)
+    .attr('stroke-width',d=>edgeW(d))
     .classed('kw-highlight', d => {
       const sId = (d.source && d.source.id) || d.source;
       const tId = (d.target && d.target.id) || d.target;
@@ -906,7 +930,7 @@ function renderGraph(graphData) {
     );
 
   node.append('circle')
-    .attr('r',d=>6+Math.sqrt(d.wdeg||0)*graphSettings.sizeScale*0.6)
+    .attr('r',d=>nodeR(d))
     .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
     .attr('fill-opacity',d=>d.has_cards?0.85:0.35)
     .attr('stroke',d=>subjectColor(d.subject))
@@ -928,7 +952,7 @@ function renderGraph(graphData) {
       }
     });
 
-  node.append('text').attr('dy',d=>13+Math.sqrt(d.wdeg||0)*graphSettings.sizeScale*0.6).attr('text-anchor','middle')
+  node.append('text').attr('dy',d=>nodeR(d)+7).attr('text-anchor','middle')
     .text(d=>d.id.length>12?d.id.slice(0,12)+'…':d.id)
     .attr('fill','rgba(255,255,255,0.8)').attr('font-size','11')
     .style('display', graphSettings.showLabels ? null : 'none');
@@ -1104,9 +1128,9 @@ function applyLabelVisibility() {
 
 function applyNodeSizes() {
   d3.select('#graphSvg').selectAll('.graph-node circle')
-    .attr('r', d => 6 + Math.sqrt(d.wdeg||0) * graphSettings.sizeScale * 0.6);
+    .attr('r', d => nodeR(d));
   d3.select('#graphSvg').selectAll('.graph-node text')
-    .attr('dy', d => 13 + Math.sqrt(d.wdeg||0) * graphSettings.sizeScale * 0.6);
+    .attr('dy', d => nodeR(d) + 7);
 }
 
 const SETTINGS_KEY = 'dashboard.graphSettings.v1';
