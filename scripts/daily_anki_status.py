@@ -30,8 +30,11 @@ from pathlib import Path
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/root/claude"))
 PYTHON = os.environ.get("APP_PYTHON", "/usr/bin/python3")
 ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+# webapp /dashboard/ 走 _serve_user：读 data/users/<u>/dashboard/ →
+# fallback data/dashboard_template/。所以 deploy 目标必须是 users 私有目录，
+# 不是 data/dashboard（那目录没人读，曾导致仪表盘一直显示旧快照）。
 WEBAPP_DASHBOARD = Path(os.environ.get(
-    "WEBAPP_DASHBOARD_DIR", "/root/webapp/data/dashboard"
+    "WEBAPP_DASHBOARD_DIR", "/root/webapp/data/users/bwicarus/dashboard"
 ))
 LAST_RUN = PROJECT_DIR / "state" / "last_run.json"
 BACKUP_DIR = PROJECT_DIR / "state" / "backup"

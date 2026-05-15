@@ -149,7 +149,7 @@ PASSWORD_HASH=$(ssh $VPS 'grep PASSWORD_HASH /root/webapp/.env | cut -d= -f2-')
 RELAY_KEY=$(openssl rand -hex 16)
 WEBAPP_DATA=/home/bwicarus/webapp/data
 CLAUDE_PROJECT=/home/bwicarus/claude
-WEBAPP_DASHBOARD_DIR=/home/bwicarus/webapp/data/dashboard
+WEBAPP_DASHBOARD_DIR=/home/bwicarus/webapp/data/users/bwicarus/dashboard
 EOF
 chmod 600 ~/webapp/.env
 
