@@ -209,6 +209,10 @@ def main() -> int:
         return 1
 
     step("确保 AnkiConnect", lambda: 0 if ensure_anki() else -1)
+    # 读 Anki 数据前先从 AnkiWeb 拉最新（手机 AnkiDroid 等其它设备的复习记录），
+    # 否则 anki_status / review_priority 算的是本地陈旧数据。
+    # sync 失败不阻断（离线 / AnkiWeb 临时挂时仍按本地数据继续，总比不跑好）。
+    step("AnkiWeb 同步（拉最新）", sync_ankiweb)
     step("登记新笔记", lambda: run_py("register_notes.py"))
     step(
         "更新 Anki 状态",
