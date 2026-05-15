@@ -146,7 +146,20 @@ def build_graph(
             "kind": kind,
         })
 
-    nodes = [{"id": n} for n in names]
+    # weighted degree：每个节点相连边 weight 之和 + 连接数。
+    # 前端节点面积 ∝ wdeg（r = base + k·√wdeg，面积视觉线性）。
+    wdeg: dict[str, float] = {n: 0.0 for n in names}
+    deg:  dict[str, int] = {n: 0 for n in names}
+    for e in edge_list:
+        wdeg[e["source"]] = wdeg.get(e["source"], 0.0) + e["weight"]
+        wdeg[e["target"]] = wdeg.get(e["target"], 0.0) + e["weight"]
+        deg[e["source"]] = deg.get(e["source"], 0) + 1
+        deg[e["target"]] = deg.get(e["target"], 0) + 1
+
+    nodes = [
+        {"id": n, "wdeg": round(wdeg.get(n, 0.0), 3), "degree": deg.get(n, 0)}
+        for n in names
+    ]
     return nodes, edge_list
 
 

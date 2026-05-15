@@ -906,13 +906,13 @@ function renderGraph(graphData) {
     );
 
   node.append('circle')
-    .attr('r',d=>9+(d.importance||0)*graphSettings.sizeScale)
+    .attr('r',d=>6+Math.sqrt(d.wdeg||0)*graphSettings.sizeScale*0.6)
     .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
     .attr('fill-opacity',d=>d.has_cards?0.85:0.35)
     .attr('stroke',d=>subjectColor(d.subject))
     .attr('stroke-width',1.5)
     .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
-      `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 重要 ${((d.importance||0)*100).toFixed(0)}% · 优先 ${(d.priority*100).toFixed(0)}%`; })
+      `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 关联 ${d.degree||0} 个(强度 ${(d.wdeg||0).toFixed(1)}) · 优先 ${(d.priority*100).toFixed(0)}%`; })
     .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
     .on('mouseout',()=>{ tip.style.opacity='0'; })
     .on('click',(e,d)=>{
@@ -928,7 +928,7 @@ function renderGraph(graphData) {
       }
     });
 
-  node.append('text').attr('dy',d=>16+(d.importance||0)*graphSettings.sizeScale).attr('text-anchor','middle')
+  node.append('text').attr('dy',d=>13+Math.sqrt(d.wdeg||0)*graphSettings.sizeScale*0.6).attr('text-anchor','middle')
     .text(d=>d.id.length>12?d.id.slice(0,12)+'…':d.id)
     .attr('fill','rgba(255,255,255,0.8)').attr('font-size','11')
     .style('display', graphSettings.showLabels ? null : 'none');
@@ -1104,9 +1104,9 @@ function applyLabelVisibility() {
 
 function applyNodeSizes() {
   d3.select('#graphSvg').selectAll('.graph-node circle')
-    .attr('r', d => 9 + (d.importance||0) * graphSettings.sizeScale);
+    .attr('r', d => 6 + Math.sqrt(d.wdeg||0) * graphSettings.sizeScale * 0.6);
   d3.select('#graphSvg').selectAll('.graph-node text')
-    .attr('dy', d => 16 + (d.importance||0) * graphSettings.sizeScale);
+    .attr('dy', d => 13 + Math.sqrt(d.wdeg||0) * graphSettings.sizeScale * 0.6);
 }
 
 const SETTINGS_KEY = 'dashboard.graphSettings.v1';
