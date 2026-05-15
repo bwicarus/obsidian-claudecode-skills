@@ -905,9 +905,11 @@ function renderGraph(graphData) {
     const c = masteryColor(d.mastery, true);
     const rg = defs.append('radialGradient')
       .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
-    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',0.5);
-    rg.append('stop').attr('offset','30%') .attr('stop-color',c).attr('stop-opacity',0.28);
-    rg.append('stop').attr('offset','65%') .attr('stop-color',c).attr('stop-opacity',0.1);
+    // 环形发散：中心透明(露磨砂背景) → core 边缘(≈53%)最亮 → 向外渐隐
+    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',0);
+    rg.append('stop').attr('offset','35%') .attr('stop-color',c).attr('stop-opacity',0.05);
+    rg.append('stop').attr('offset','53%') .attr('stop-color',c).attr('stop-opacity',0.42);
+    rg.append('stop').attr('offset','75%') .attr('stop-color',c).attr('stop-opacity',0.13);
     rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
   });
 
@@ -953,14 +955,14 @@ function renderGraph(graphData) {
   // ① 辉光层：径向渐变 fill，边缘 alpha 归 0 自然渐隐融入背景（无 blur）
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*1.25)
+    .attr('r',d=>nodeR(d)*1.9)
     .attr('fill',d=>d.has_cards?`url(#glow-${d._gi})`:'none');
   // ② 灯管本体
   node.append('circle')
     .attr('class','node-core')
     .attr('r',d=>nodeR(d))
-    .attr('fill',d=>subjectColor(d.subject))
-    .attr('fill-opacity',d=>d.has_cards?0.16:0.06)
+    .attr('fill','rgba(255,255,255,0.05)')
+    .attr('fill-opacity',d=>d.has_cards?1:0.5)
     .attr('stroke',d=>masteryColor(d.mastery, d.has_cards))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
