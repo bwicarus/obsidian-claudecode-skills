@@ -285,6 +285,59 @@ def db():
     return conn
 
 
+def _export_history_to_webapp() -> None:
+    """同步 SQLite 历史到 webapp 的 history 文件目录，让 /history/ 页面立刻看到。
+
+    服务端实例（VPS / Pi）qa-server 跑这个；Windows 客户端时代由 export_history.py
+    + uploader.upload_dataset("history") 走 HTTP 上传 —— 本机部署直接写文件更省事。
+
+    通过 env `WEBAPP_HISTORY_DIR` 配置目标目录；未设则 no-op（保持向后兼容）。
+    异常静默吞掉（save 主流程不应被同步失败拖累）。
+    """
+    dest_raw = os.environ.get("WEBAPP_HISTORY_DIR", "")
+    if not dest_raw:
+        return
+    try:
+        dest = Path(dest_raw)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "images").mkdir(exist_ok=True)
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id, timestamp, img_fname, note, messages, record_type, related_cards "
+                "FROM conversations ORDER BY timestamp DESC"
+            ).fetchall()
+        entries = []
+        stats = {"total": 0, "normal": 0, "wrong": 0}
+        for r in rows:
+            msgs = json.loads(r["messages"] or "[]")
+            rtype = r["record_type"] or "normal"
+            entries.append({
+                "id":            r["id"],
+                "timestamp":     r["timestamp"],
+                "img_fname":     r["img_fname"] or "",
+                "note":          r["note"] or "",
+                "msg_count":     len(msgs),
+                "record_type":   rtype,
+                "messages":      msgs,
+                "related_cards": json.loads(r["related_cards"] or "[]"),
+            })
+            stats["total"] += 1
+            stats[rtype] = stats.get(rtype, 0) + 1
+            if r["img_fname"]:
+                src = HIST_IMG_DIR / r["img_fname"]
+                dst = dest / "images" / r["img_fname"]
+                if src.exists() and not dst.exists():
+                    try: shutil.copy2(src, dst)
+                    except Exception: pass
+        (dest / "history.json").write_text(
+            json.dumps({"entries": entries, "stats": stats},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[qa-server] export history → webapp 失败：{e}", flush=True)
+
+
 # AI 给出的相关度排序 → rank score（位置 1-4）
 RELEVANCE_RANK_SCORES = [1.0, 0.7, 0.5, 0.3]
 
@@ -1675,6 +1728,7 @@ class Handler(BaseHTTPRequestHandler):
                 ).start()
             except Exception as e:
                 result = f"保存失败：{e}"
+            _export_history_to_webapp()  # 服务端实例：让 webapp /history/ 立刻看到新条目
             self.send_json({"result": result})
             if not state.get("_server_mode"):
                 state["done"].set()
@@ -1716,6 +1770,7 @@ class Handler(BaseHTTPRequestHandler):
                     img = HIST_IMG_DIR / row["img_fname"]
                     if img.exists():
                         img.unlink()
+                _export_history_to_webapp()
                 self.send_json({"ok": True})
             else:
                 self.send_json({"ok": False, "error": "invalid id"})
@@ -1789,6 +1844,7 @@ class Handler(BaseHTTPRequestHandler):
                         cards = [c for c in cards if c.get("note") != note]
                         conn.execute("UPDATE conversations SET related_cards=? WHERE id=?",
                                      (json.dumps(cards, ensure_ascii=False), hid))
+                _export_history_to_webapp()
                 self.send_json({"ok": True})
             else:
                 self.send_json({"ok": False})
