@@ -176,19 +176,26 @@
     .graph-link.link-explicit { stroke: rgba(165,180,252,0.55); }
     .graph-link.link-both     { stroke: rgba(165,180,252,0.85); }
     .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
+    /* 选中节点：内部提亮 + 由内到外多层发光（!important 压过普通节点的 inline 微弱辉光）*/
     .graph-node.highlighted circle {
       stroke: #fde047 !important;
-      stroke-width: 3.5 !important;
-      filter: drop-shadow(0 0 14px rgba(253,224,71,0.85));
+      stroke-width: 3 !important;
+      fill: #fde047 !important;
+      fill-opacity: 0.45 !important;
+      filter: drop-shadow(0 0 2px #fde047)
+              drop-shadow(0 0 7px #fde047)
+              drop-shadow(0 0 16px rgba(253,224,71,0.9)) !important;
     }
     .graph-node.highlighted text {
       fill: #fde047 !important;
       font-weight: 700;
     }
     .graph-node.kw-highlight circle {
-      stroke: #facc15;
-      stroke-width: 2.4;
-      filter: drop-shadow(0 0 8px rgba(250,204,21,0.6));
+      stroke: #facc15 !important;
+      stroke-width: 2.6 !important;
+      fill-opacity: 0.3 !important;
+      filter: drop-shadow(0 0 3px #facc15)
+              drop-shadow(0 0 9px rgba(250,204,21,0.7)) !important;
     }
     .graph-node.kw-highlight text {
       fill: #fde68a;
@@ -937,8 +944,8 @@ function renderGraph(graphData) {
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
     .style('filter',d=>d.has_cards
-      ? `drop-shadow(0 0 6px ${masteryColor(d.mastery,true)}) drop-shadow(0 0 2px ${masteryColor(d.mastery,true)})`
-      : 'none')
+      ? `drop-shadow(0 0 4px ${masteryColor(d.mastery,true)})`
+      : `drop-shadow(0 0 2px ${masteryColor(d.mastery,false)})`)
     .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
       `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 关联 ${d.degree||0} 个(强度 ${(d.wdeg||0).toFixed(1)}) · 优先 ${(d.priority*100).toFixed(0)}%`; })
     .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
