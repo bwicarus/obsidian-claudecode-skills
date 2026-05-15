@@ -44,6 +44,15 @@ class BackendAdapter(ABC):
         """
         ...
 
+    def chat_stream(self, messages: list[dict], image: bytes | None = None):
+        """流式对话：yield 一连串 text chunk（拼起来 = 完整回复）。
+        默认 fallback：调阻塞 chat() 然后 yield 一个 chunk。子类覆盖以实现真 streaming。
+        GeneratorExit（调用方提前 close generator，例如客户端断开）时应清理子进程 / 连接。
+        """
+        text = self.chat(messages, image=image)
+        if text:
+            yield text
+
 
 # ── 工具：消息序列 → 单串 prompt（CLI backend 用） ──
 def _flatten_messages(messages: list[dict], image_path: str | None = None) -> str:
@@ -136,7 +145,7 @@ class ClaudeCli(CliBackend):
         image_path = _spool_image(image) if image else None
         try:
             prompt = _flatten_messages(messages, image_path=image_path)
-            full = [cmd, "--dangerously-skip-permissions",
+            full = [cmd, "--allowedTools", "Read",
                     "--output-format", "text", "-p", prompt]
             r = _run_hidden(full, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=180)
@@ -146,6 +155,70 @@ class ClaudeCli(CliBackend):
                 raise RuntimeError(err[:300] or f"claude_cli 返回空（exit {r.returncode}）")
             return out
         finally:
+            if image_path:
+                try: Path(image_path).unlink(missing_ok=True)
+                except Exception: pass
+
+    def chat_stream(self, messages: list[dict], image: bytes | None = None):
+        cmd = self._command()
+        image_path = _spool_image(image) if image else None
+        prompt = _flatten_messages(messages, image_path=image_path)
+        full = [cmd, "--allowedTools", "Read",
+                "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages", "-p", prompt]
+        popen_kw = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+        }
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            popen_kw["startupinfo"] = si
+            popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(full, **popen_kw)
+        emitted_any = False
+        try:
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") != "stream_event":
+                    continue
+                event = ev.get("event") or {}
+                if event.get("type") != "content_block_delta":
+                    continue
+                delta = event.get("delta") or {}
+                if delta.get("type") != "text_delta":
+                    continue
+                txt = delta.get("text") or ""
+                if txt:
+                    emitted_any = True
+                    yield txt
+            rc = proc.wait()
+            if rc != 0 and not emitted_any:
+                err = (proc.stderr.read() or "").strip()[:300]
+                raise RuntimeError(err or f"claude_cli exit {rc}")
+        except GeneratorExit:
+            # 客户端中途断开
+            try: proc.terminate(); proc.wait(timeout=2)
+            except Exception:
+                try: proc.kill()
+                except Exception: pass
+            raise
+        finally:
+            try: proc.stdout.close()
+            except Exception: pass
+            try: proc.stderr.close()
+            except Exception: pass
             if image_path:
                 try: Path(image_path).unlink(missing_ok=True)
                 except Exception: pass
@@ -316,6 +389,73 @@ class ClaudeApi(BackendAdapter):
             raise RuntimeError(f"意外响应：{str(res)[:200]}")
         return text
 
+    def chat_stream(self, messages: list[dict], image: bytes | None = None):
+        key = (self.settings.get("api_key") or "").strip()
+        model = (self.settings.get("model") or "claude-opus-4-7").strip()
+        if not key:
+            raise RuntimeError("未配置 api_key")
+
+        system_text = ""
+        rest: list[dict] = []
+        for m in messages:
+            if m.get("role") == "system":
+                system_text = (system_text + "\n\n" + (m.get("content") or "")).strip()
+            else:
+                rest.append(m)
+        api_messages = _attach_image_anthropic(rest, image) if image else \
+                       [{"role": m["role"], "content": m.get("content", "")} for m in rest]
+        body = {
+            "model": model,
+            "max_tokens": int(self.settings.get("max_tokens") or 4096),
+            "messages": api_messages,
+            "stream": True,
+        }
+        if system_text:
+            body["system"] = system_text
+
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=data,
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:400]
+            raise RuntimeError(f"HTTP {e.code}: {err}") from e
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    return
+                try:
+                    ev = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "content_block_delta":
+                    delta = ev.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        txt = delta.get("text") or ""
+                        if txt:
+                            yield txt
+        except GeneratorExit:
+            try: resp.close()
+            except Exception: pass
+            raise
+        finally:
+            try: resp.close()
+            except Exception: pass
+
 
 class OpenAiApi(BackendAdapter):
     name = "openai_api"
@@ -372,6 +512,59 @@ class OpenAiApi(BackendAdapter):
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(f"意外响应：{str(res)[:200]}")
 
+    def chat_stream(self, messages: list[dict], image: bytes | None = None):
+        key = (self.settings.get("api_key") or "").strip()
+        base = (self.settings.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+        model = (self.settings.get("model") or "gpt-5").strip()
+        if not key:
+            raise RuntimeError("未配置 api_key")
+
+        api_messages = _attach_image_openai(messages, image) if image else \
+                       [{"role": m["role"], "content": m.get("content", "")} for m in messages]
+        body = {"model": model, "messages": api_messages, "stream": True}
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:400]
+            raise RuntimeError(f"HTTP {e.code}: {err}") from e
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    return
+                try:
+                    ev = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = ev.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content
+        except GeneratorExit:
+            try: resp.close()
+            except Exception: pass
+            raise
+        finally:
+            try: resp.close()
+            except Exception: pass
+
 
 class Ollama(BackendAdapter):
     name = "ollama"
@@ -414,6 +607,51 @@ class Ollama(BackendAdapter):
         if not content:
             raise RuntimeError(f"意外响应：{str(res)[:200]}")
         return content
+
+    def chat_stream(self, messages: list[dict], image: bytes | None = None):
+        base = (self.settings.get("base_url") or "http://localhost:11434").rstrip("/")
+        model = (self.settings.get("model") or "llama3.1").strip()
+
+        api_messages = []
+        for i, m in enumerate(messages):
+            msg = {"role": m["role"], "content": m.get("content", "")}
+            if image and i == len(messages) - 1 and m.get("role") == "user":
+                msg["images"] = [base64.b64encode(image).decode("ascii")]
+            api_messages.append(msg)
+
+        body = {"model": model, "messages": api_messages, "stream": True}
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base}/api/chat", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=180)
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")[:400]
+            raise RuntimeError(f"HTTP {e.code}: {err}") from e
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = ev.get("message") or {}
+                content = msg.get("content")
+                if content:
+                    yield content
+                if ev.get("done"):
+                    return
+        except GeneratorExit:
+            try: resp.close()
+            except Exception: pass
+            raise
+        finally:
+            try: resp.close()
+            except Exception: pass
 
 
 # ── 注册表 ─────────────────────────────────────────────────────────

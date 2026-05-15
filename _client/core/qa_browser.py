@@ -73,6 +73,46 @@ class _AdapterSession:
         self.messages.append({"role": "assistant", "text": reply})
         return reply
 
+    def send_stream(self, message: str, image_path: str = None):
+        """流式版 send：yield text chunks。结束（含 cancel / error）后把已生成内容
+        commit 到 self.messages，保证历史跟显示一致。"""
+        cfg = _GET_CFG()
+        backend_name = cfg.get("ai_backend", "claude_cli")
+        settings = (cfg.get("ai") or {}).get(backend_name, {})
+        ad = make_backend(backend_name, settings)
+
+        msgs = [{"role": "system", "content": self.system_prompt}]
+        for m in self.messages:
+            role = m.get("role", "user")
+            if role not in ("user", "assistant"):
+                role = "user"
+            msgs.append({"role": role, "content": m.get("text", "")})
+        msgs.append({"role": "user", "content": message})
+
+        image_bytes = None
+        if image_path and Path(image_path).exists():
+            try:
+                image_bytes = Path(image_path).read_bytes()
+            except Exception:
+                pass
+
+        chunks: list[str] = []
+        gen = ad.chat_stream(msgs, image=image_bytes)
+        try:
+            for chunk in gen:
+                if chunk:
+                    chunks.append(chunk)
+                    yield chunk
+        finally:
+            # 关掉底层 generator（触发其 GeneratorExit → 子进程清理）
+            try: gen.close()
+            except Exception: pass
+            # commit：即使被 cancel，已 yield 出去的部分写进历史
+            final = "".join(chunks)
+            if final or message:
+                self.messages.append({"role": "user", "text": message})
+                self.messages.append({"role": "assistant", "text": final})
+
 
 # 让原文件中所有 `ai_client.xxx` 引用走我们的 wrapper
 class _AiClientShim:
@@ -792,8 +832,8 @@ window.MathJax = {
   startup:{typeset:false},
 };
 </script>
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async id="MathJax-script"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script src="http://bwicarus.taile44d0c.ts.net/static/qa/mathjax.js" async id="MathJax-script"></script>
+<script src="http://bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
 <script>
 if (window.marked && marked.use) {
   marked.use({ breaks: true, gfm: true });
@@ -841,6 +881,7 @@ let pendingHistory  = null;   // 加载历史后，首条消息携带上下文
 let currentShotSrc  = '';     // 当前会话截图 base64
 let pastedImgB64    = null;   // 粘贴的图片 base64（不含 data URL 前缀）
 let searchMode      = false;  // 关联知识搜索模式
+let currentAbort    = null;   // SSE 流式 AbortController；sending 时点 send 按钮中止
 
 function pollScreenshot() {
   fetch('api/screenshot').then(r => r.json()).then(d => {
@@ -1029,12 +1070,29 @@ function delMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classLis
 function resMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.remove('deleted'); }
 
 function setAllBtns(disabled) {
-  ['send-btn','save-btn','discard-btn'].forEach(id => document.getElementById(id).disabled = disabled);
+  // sending 期间 send 按钮变「中止」（不 disable），其它按钮 disable
+  const sendBtn = document.getElementById('send-btn');
+  document.getElementById('save-btn').disabled = disabled;
+  document.getElementById('discard-btn').disabled = disabled;
+  if (disabled && currentAbort) {
+    sendBtn.textContent = '中止';
+    sendBtn.disabled = false;
+    sendBtn.dataset.mode = 'abort';
+  } else {
+    sendBtn.textContent = '发送';
+    sendBtn.disabled = disabled;
+    sendBtn.dataset.mode = 'send';
+  }
 }
 
 async function send() {
+  // sending 模式下 send 按钮 = 中止按钮
+  if (sending) {
+    if (currentAbort) { try { currentAbort.abort(); } catch(_){} }
+    return;
+  }
   const text = input.value.trim();
-  if ((!text && !searchMode) || sending) return;
+  if (!text && !searchMode) return;
   input.value = '';
 
   // ── 关联知识搜索模式 ──────────────────────────────────────────────────────
@@ -1061,12 +1119,13 @@ async function send() {
     return;
   }
 
-  // ── 普通对话 ──────────────────────────────────────────────────────────────
+  // ── 普通对话（SSE 流式） ──────────────────────────────────────────────────
   const imgSrc = pastedImgB64 ? document.getElementById('paste-thumb').src : null;
   addMsg('user', text, false, imgSrc);
   const imgB64 = pastedImgB64;
   if (pastedImgB64) clearPaste();
   sending = true;
+  currentAbort = new AbortController();   // 在 setAllBtns 前创建，让按钮显示「中止」
   setAllBtns(true);
   const typing = addMsg('assistant', '<span class="typing">思考中…</span>', true);
   status.textContent = '';
@@ -1075,21 +1134,89 @@ async function send() {
   if (pendingHistory) { reqBody.history = pendingHistory; pendingHistory = null; }
   if (imgB64) reqBody.image_b64 = imgB64;
 
+  // 准备 streaming 状态
+  const mdEl = typing.querySelector('.md');
+  let accumulated = '';
+  let lastRender = 0;
+  const RENDER_MS = 120;     // 节流：每 120ms 重渲染一次（marked + MathJax）
+  let renderQueued = false;
+  function renderNow() {
+    mdEl.innerHTML = renderMd(accumulated || ' ');
+    chat.scrollTop = chat.scrollHeight;
+    typeset(mdEl);
+    lastRender = Date.now();
+    renderQueued = false;
+  }
+  function maybeRender() {
+    const now = Date.now();
+    if (now - lastRender >= RENDER_MS) { renderNow(); }
+    else if (!renderQueued) {
+      renderQueued = true;
+      setTimeout(renderNow, RENDER_MS - (now - lastRender));
+    }
+  }
+
   try {
     const r = await fetch('api/chat', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept':       'text/event-stream',
+      },
       body: JSON.stringify(reqBody),
+      signal: currentAbort.signal,
     });
-    const d = await r.json();
-    typing.remove();
-    addMsg('assistant', d.response);
-    if (d.note) {
-      const tag = document.getElementById('note-tag');
-      tag.textContent = d.note; tag.style.display = 'inline';
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let streamErr = null;
+    let firstChunk = true;
+    outer: while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of block.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          try {
+            const event = JSON.parse(data);
+            if (event.error) { streamErr = event.error; }
+            else if (event.done) { break outer; }
+            else if (event.text) {
+              if (firstChunk) {
+                // 第一个 chunk 到了，清掉 "思考中..." placeholder
+                mdEl.innerHTML = '';
+                firstChunk = false;
+              }
+              accumulated += event.text;
+              maybeRender();
+            }
+          } catch (_) {}
+        }
+      }
     }
-  } catch(e) {
-    typing.querySelector('.typing').textContent = '错误：' + e.message;
-    typing.querySelector('.typing').style.color = '#c00';
+    renderNow();   // 流结束，做最后一次完整渲染
+    if (streamErr) {
+      const err = document.createElement('div');
+      err.style.cssText = 'color:#c00;margin-top:6px;font-size:13px';
+      err.textContent = '⚠️ ' + streamErr;
+      mdEl.appendChild(err);
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      accumulated += '\n\n_[已中止]_';
+    } else {
+      accumulated += '\n\n_[错误：' + e.message + ']_';
+    }
+    renderNow();
+  } finally {
+    currentAbort = null;
   }
   sending = false;
   setAllBtns(false);
@@ -1429,6 +1556,7 @@ class Handler(BaseHTTPRequestHandler):
             history = body.get("history")
             img_b64 = body.get("image_b64")
             session = state["session"]
+            stream_mode = "text/event-stream" in (self.headers.get("Accept") or "")
 
             if history and session._first and not session.messages:
                 session.messages = list(history)
@@ -1458,13 +1586,43 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     paste_tmp = None
 
-            resp = session.send(msg, image_path=img)
+            try:
+                if stream_mode:
+                    # SSE：边产生边推
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("X-Accel-Buffering", "no")  # 防 nginx buffer
+                    self.send_header("Connection", "keep-alive")
+                    self.end_headers()
 
-            if paste_tmp:
-                try: paste_tmp.unlink(missing_ok=True)
-                except Exception: pass
+                    def _send_event(obj: dict) -> bool:
+                        """写一个 SSE event。客户端断开返回 False。"""
+                        try:
+                            line = "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+                            self.wfile.write(line.encode("utf-8"))
+                            self.wfile.flush()
+                            return True
+                        except (BrokenPipeError, ConnectionResetError):
+                            return False
 
-            self.send_json({"response": resp})
+                    gen = session.send_stream(msg, image_path=img)
+                    try:
+                        for chunk in gen:
+                            if not _send_event({"text": chunk}):
+                                gen.close()
+                                return
+                    except Exception as e:
+                        _send_event({"error": str(e)})
+                    _send_event({"done": True})
+                else:
+                    # 兼容旧 JSON 模式
+                    resp = session.send(msg, image_path=img)
+                    self.send_json({"response": resp})
+            finally:
+                if paste_tmp:
+                    try: paste_tmp.unlink(missing_ok=True)
+                    except Exception: pass
 
         elif self.path == "/api/inject-image":
             # 远程截图注入：接收 base64，重置会话
