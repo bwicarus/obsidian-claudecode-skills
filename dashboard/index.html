@@ -176,26 +176,29 @@
     .graph-link.link-explicit { stroke: rgba(165,180,252,0.55); }
     .graph-link.link-both     { stroke: rgba(165,180,252,0.85); }
     .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
-    /* 选中节点：内部提亮 + 由内到外多层发光（!important 压过普通节点的 inline 微弱辉光）*/
-    .graph-node.highlighted circle {
+    /* 灯管透毛玻璃辉光：node-glow 是节点下方大半径强模糊光斑，node-core 是灯管本体 */
+    .node-glow { pointer-events: none; transition: opacity .25s, filter .25s; }
+    .node-core { transition: fill-opacity .2s; }
+    /* 选中：光斑爆亮放大 + 灯管本体内部点亮（从内往外发光感） */
+    .graph-node.highlighted .node-glow {
+      opacity: 1 !important;
+      filter: blur(16px) brightness(1.6) !important;
+    }
+    .graph-node.highlighted .node-core {
       stroke: #fde047 !important;
       stroke-width: 3 !important;
       fill: #fde047 !important;
-      fill-opacity: 0.45 !important;
-      filter: drop-shadow(0 0 2px #fde047)
-              drop-shadow(0 0 7px #fde047)
-              drop-shadow(0 0 16px rgba(253,224,71,0.9)) !important;
+      fill-opacity: 0.55 !important;
     }
-    .graph-node.highlighted text {
-      fill: #fde047 !important;
-      font-weight: 700;
+    .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
+    .graph-node.kw-highlight .node-glow {
+      opacity: 0.85 !important;
+      filter: blur(13px) brightness(1.35) !important;
     }
-    .graph-node.kw-highlight circle {
+    .graph-node.kw-highlight .node-core {
       stroke: #facc15 !important;
-      stroke-width: 2.6 !important;
-      fill-opacity: 0.3 !important;
-      filter: drop-shadow(0 0 3px #facc15)
-              drop-shadow(0 0 9px rgba(250,204,21,0.7)) !important;
+      stroke-width: 2.4 !important;
+      fill-opacity: 0.35 !important;
     }
     .graph-node.kw-highlight text {
       fill: #fde68a;
@@ -936,16 +939,22 @@ function renderGraph(graphData) {
       .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null;d.fy=null; })
     );
 
+  // ① 辉光层：大半径 + 强 CSS blur = 灯管透过磨砂玻璃扩散的光
   node.append('circle')
+    .attr('class','node-glow')
+    .attr('r',d=>nodeR(d)*2.0)
+    .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
+    .attr('opacity',d=>d.has_cards?0.5:0.14)
+    .style('filter',d=>`blur(${(d.has_cards?nodeR(d)*0.5:6).toFixed(0)}px)`);
+  // ② 灯管本体
+  node.append('circle')
+    .attr('class','node-core')
     .attr('r',d=>nodeR(d))
     .attr('fill',d=>subjectColor(d.subject))
     .attr('fill-opacity',d=>d.has_cards?0.16:0.06)
     .attr('stroke',d=>masteryColor(d.mastery, d.has_cards))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
-    .style('filter',d=>d.has_cards
-      ? `drop-shadow(0 0 4px ${masteryColor(d.mastery,true)})`
-      : `drop-shadow(0 0 2px ${masteryColor(d.mastery,false)})`)
     .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
       `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 关联 ${d.degree||0} 个(强度 ${(d.wdeg||0).toFixed(1)}) · 优先 ${(d.priority*100).toFixed(0)}%`; })
     .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
