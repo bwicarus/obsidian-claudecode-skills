@@ -178,7 +178,10 @@
     .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
     /* node-glow=径向渐变光晕(边缘渐隐融背景)，node-core=灯管本体。
        选中靠 core 点亮 + 整组放大让光晕自然变大，不动 glow 本身。 */
-    .node-glow { pointer-events: none; }
+    /* transform-box: fill-box 必须有：否则 transform-origin:center 在 SVG
+       默认 view-box 坐标系下指的是整个画布中心，highlighted 的 scale 会把
+       glow 围绕画布中心缩放→平移到错误位置，脱离节点漂在背景上 */
+    .node-glow { pointer-events: none; transform-box: fill-box; transform-origin: center; }
     .node-core { transition: fill-opacity .2s, stroke-width .2s; }
     .graph-node.highlighted { transform-box: fill-box; }
     .graph-node.highlighted .node-glow { transform: scale(1.4); transform-origin: center; }
@@ -189,11 +192,14 @@
       fill-opacity: 0.55 !important;
     }
     .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
-    .graph-node.kw-highlight .node-glow { transform: scale(1.25); transform-origin: center; }
+    /* 关联节点：core 玻璃满显 + 黄环加粗，节点本体清晰；
+       glow 不放大且减淡，只做衬托——否则孤立的关联节点 core 隐形、
+       glow 抢戏，就成了背景上漂浮的诡异光环 */
+    .graph-node.kw-highlight .node-glow { transform: none; opacity: 0.4; }
     .graph-node.kw-highlight .node-core {
       stroke: #facc15 !important;
-      stroke-width: 2.4 !important;
-      fill-opacity: 0.35 !important;
+      stroke-width: 2.8 !important;
+      fill-opacity: 1 !important;
     }
     .graph-node.kw-highlight text {
       fill: #fde68a;
