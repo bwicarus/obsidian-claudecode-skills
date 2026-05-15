@@ -328,7 +328,6 @@ def _export_history_to_webapp() -> None:
     try:
         dest = Path(dest_raw)
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / "images").mkdir(exist_ok=True)
         with db() as conn:
             rows = conn.execute(
                 "SELECT id, timestamp, img_fname, note, messages, record_type, related_cards "
@@ -336,6 +335,7 @@ def _export_history_to_webapp() -> None:
             ).fetchall()
         entries = []
         stats = {"total": 0, "normal": 0, "wrong": 0}
+        kept_imgs: set[str] = set()
         for r in rows:
             msgs = json.loads(r["messages"] or "[]")
             rtype = r["record_type"] or "normal"
@@ -351,9 +351,14 @@ def _export_history_to_webapp() -> None:
             })
             stats["total"] += 1
             stats[rtype] = stats.get(rtype, 0) + 1
-            if r["img_fname"]:
-                src = HIST_IMG_DIR / r["img_fname"]
-                dst = dest / "images" / r["img_fname"]
+            fname = r["img_fname"]
+            if fname:
+                kept_imgs.add(fname)
+                src = HIST_IMG_DIR / fname
+                # 历史页 <img src="${entry.img_fname}"> 是相对路径，浏览器解析为
+                # /history/<fname>，所以图片放 dest 根（跟 VPS Windows-客户端
+                # 时代布局一致）。
+                dst = dest / fname
                 if src.exists() and not dst.exists():
                     try: shutil.copy2(src, dst)
                     except Exception: pass
@@ -362,6 +367,12 @@ def _export_history_to_webapp() -> None:
                        ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # 清理 dest 里 db 不再有的图片（保留 .json / .html / .css / .js / 子目录）
+        for p in dest.iterdir():
+            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+                if p.name not in kept_imgs:
+                    try: p.unlink()
+                    except Exception: pass
     except Exception as e:
         print(f"[qa-server] export history → webapp 失败：{e}", flush=True)
 
@@ -1790,18 +1801,54 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/history/delete":
             hid = body.get("id", "")
-            if re.match(r'^[A-Za-z0-9_-]+$', hid):
-                with db() as conn:
-                    row = conn.execute("SELECT img_fname FROM conversations WHERE id=?", (hid,)).fetchone()
-                    conn.execute("DELETE FROM conversations WHERE id=?", (hid,))
-                if row and row["img_fname"]:
-                    img = HIST_IMG_DIR / row["img_fname"]
-                    if img.exists():
-                        img.unlink()
-                _export_history_to_webapp()
-                self.send_json({"ok": True})
-            else:
+            # 默认连 Obsidian 笔记也清掉；调用方传 keep_note=true 时仅删数据库 + 截图。
+            keep_note = bool(body.get("keep_note"))
+            cleanup_results: list[str] = []
+            if not re.match(r'^[A-Za-z0-9_-]+$', hid):
                 self.send_json({"ok": False, "error": "invalid id"})
+            else:
+                with db() as conn:
+                    row = conn.execute(
+                        "SELECT img_fname, note FROM conversations WHERE id=?", (hid,)
+                    ).fetchone()
+                    conn.execute("DELETE FROM conversations WHERE id=?", (hid,))
+                if row:
+                    # 1. 截图文件
+                    if row["img_fname"]:
+                        img = HIST_IMG_DIR / row["img_fname"]
+                        if img.exists():
+                            try: img.unlink(); cleanup_results.append(f"截图 {img.name}")
+                            except Exception as e: cleanup_results.append(f"截图删除失败: {e}")
+                    # 2. Obsidian 笔记（除非 keep_note）
+                    if not keep_note and row["note"]:
+                        # note 字段格式：「已保存(普通) → /path/to/note.md」或
+                        #               「已保存(错题) → C:\path\to\note.md」
+                        m = re.search(r'→\s*([^\n]+\.md)', row["note"])
+                        if m:
+                            note_path_raw = m.group(1).strip()
+                            note_path = Path(note_path_raw)
+                            # Windows 路径在 Linux 上不可达；只删本机上存在的
+                            if note_path.exists() and note_path.is_file():
+                                try:
+                                    note_path.unlink()
+                                    cleanup_results.append(f"笔记 {note_path.name}")
+                                except Exception as e:
+                                    cleanup_results.append(f"笔记删除失败: {e}")
+                            elif VAULT is not None:
+                                # 备选：在 vault 习题/错题 目录下按文件名查找（兼容跨平台路径）
+                                fname = note_path.name
+                                for sub in [EXERCISES_DIR, WRONG_DIR]:
+                                    if sub is None: continue
+                                    candidate = sub / fname
+                                    if candidate.exists():
+                                        try:
+                                            candidate.unlink()
+                                            cleanup_results.append(f"笔记 {candidate.name}")
+                                        except Exception as e:
+                                            cleanup_results.append(f"笔记删除失败: {e}")
+                                        break
+                _export_history_to_webapp()
+                self.send_json({"ok": True, "cleaned": cleanup_results})
 
         elif self.path == "/api/search-related":
             query = body.get("query", "").strip()

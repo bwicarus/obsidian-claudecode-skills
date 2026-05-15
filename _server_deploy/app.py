@@ -5,6 +5,8 @@ import shutil
 import secrets
 import sqlite3
 import datetime
+import urllib.request
+import urllib.error
 from pathlib import Path
 from functools import wraps
 from flask import (
@@ -370,6 +372,37 @@ def graph_settings():
         except (json.JSONDecodeError, OSError):
             pass
     return jsonify({})
+
+
+# ─── 截图问答历史删除（webapp 加鉴权层 + proxy 到 qa-server）───
+@app.route("/api/qa-history/<hid>/delete", methods=["POST"])
+@login_required
+def qa_history_delete(hid):
+    """删一条截图问答历史。webapp cookie 鉴权后 proxy 到本机 qa-server
+    daemon (:9091)。qa-server 那边做 SQLite 清理 + 删截图 + 删 Obsidian 笔记
+    + 触发 _export_history_to_webapp 把变化同步回 webapp data。
+
+    body 透传给 qa-server（可选 keep_note=true 只清 db + 截图，保留 .md）。
+    """
+    import re as _re
+    if not _re.match(r'^[A-Za-z0-9_-]+$', hid):
+        return jsonify({"ok": False, "error": "invalid id"}), 400
+    raw = request.get_json(silent=True) or {}
+    payload = {"id": hid, "keep_note": bool(raw.get("keep_note"))}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:9091/api/history/delete",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return jsonify(json.loads(r.read()))
+    except urllib.error.URLError as e:
+        return jsonify({"ok": False, "error": f"qa-server 不可达: {e}"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ─── 通用左侧导航的自定义链接（per-user 持久化）───

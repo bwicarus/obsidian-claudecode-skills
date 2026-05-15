@@ -192,6 +192,10 @@
     .conv-row.wrong { border-left: 3px solid #f87171; }
     .conv-row.normal { border-left: 3px solid #60a5fa; }
     .conv-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+    .conv-del-btn { margin-left: auto; background: transparent; border: 1px solid rgba(248,113,113,0.4); color: #f87171; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; transition: background 0.15s, color 0.15s; opacity: 0; }
+    .conv-row:hover .conv-del-btn { opacity: 1; }
+    .conv-del-btn:hover { background: rgba(248,113,113,0.2); color: #fecaca; }
+    .conv-del-btn:disabled { opacity: 0.4; cursor: wait; }
     .conv-time { font-variant-numeric: tabular-nums; }
     .conv-tag {
       font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
@@ -1072,6 +1076,7 @@ function renderConversationList() {
             <span class="conv-time">${fmtTs(entry.timestamp)}</span>
             <span class="conv-tag ${rt}">${rt === 'wrong' ? '错题' : '普通'}</span>
             ${entry.msg_count ? `<span style="opacity:0.6">· ${entry.msg_count} 条</span>` : ''}
+            <button class="conv-del-btn" type="button" title="删除此对话 + 对应 Obsidian 笔记">删除</button>
           </div>
           ${main ? `<div class="conv-note">📌 ${escapeHtml(main)}</div>` : ''}
           <div class="conv-prev">${escapeHtml(entryPreview(entry))}</div>
@@ -1086,6 +1091,38 @@ function renderConversationList() {
       thumbEl.addEventListener('click', (e) => {
         e.stopPropagation();
         showImgLightbox(thumbEl.src);
+      });
+    }
+    // 删除按钮：confirm 后 POST /api/qa-history/<id>/delete
+    const delBtn = row.querySelector('.conv-del-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm('确认删除？\n\n本操作会同时清除：\n• 数据库记录\n• 截图文件\n• 对应的 Obsidian 笔记（如果存在）\n\n此操作不可撤销。')) return;
+        delBtn.disabled = true;
+        const orig = delBtn.textContent;
+        delBtn.textContent = '删除中…';
+        try {
+          const r = await fetch(`/api/qa-history/${encodeURIComponent(entry.id)}/delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({}),
+          });
+          const d = await r.json();
+          if (d.ok) {
+            row.style.opacity = '0';
+            row.style.transition = 'opacity 0.25s';
+            setTimeout(() => location.reload(), 280);
+          } else {
+            alert('删除失败：' + (d.error || '未知错误'));
+            delBtn.disabled = false;
+            delBtn.textContent = orig;
+          }
+        } catch (err) {
+          alert('删除失败：' + err.message);
+          delBtn.disabled = false;
+          delBtn.textContent = orig;
+        }
       });
     }
     row.addEventListener('click', () => {
