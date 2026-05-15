@@ -153,8 +153,7 @@ WRONG_DIR     = None              # vault/<qa_wrong_subdir>，默认 "错题"
 ASSETS_DIR    = None              # vault/习题/assets
 INDEX_DIR     = None              # 可空：知识索引目录（笔记 frontmatter 摘要 .md）
 ANKI_RECORDS_DIR = None           # 可空：anki/records/*.json（用于错题分类时附 anki 列表）
-HISTORY_DIR   = _CLIENT_HOME / "qa-history"   # 客户端本地：截图历史
-TEMP_DIR      = _CLIENT_HOME / "qa-temp"      # 客户端本地：截图临时
+TEMP_DIR      = _CLIENT_HOME / "qa-temp"      # 客户端本地：截图临时（_init_paths 里改用 STORE_DIR）
 
 
 def _detect_vault() -> Path | None:
@@ -195,7 +194,7 @@ def _resolve_subpath(vault: Path, value: str | None, default_subdir: str) -> Pat
 
 def _init_paths(cfg: dict) -> None:
     """从 client cfg 初始化路径。launch() 入口处调用。"""
-    global VAULT, EXERCISES_DIR, WRONG_DIR, ASSETS_DIR, INDEX_DIR, ANKI_RECORDS_DIR, HISTORY_DIR, TEMP_DIR
+    global VAULT, EXERCISES_DIR, WRONG_DIR, ASSETS_DIR, INDEX_DIR, ANKI_RECORDS_DIR, TEMP_DIR
 
     raw_vault = (cfg.get("qa_vault_path") or cfg.get("vault_path") or "").strip()
     vault_path = Path(raw_vault) if raw_vault else _detect_vault()
@@ -213,17 +212,46 @@ def _init_paths(cfg: dict) -> None:
     raw_anki = (cfg.get("qa_anki_records_dir") or "").strip()
     ANKI_RECORDS_DIR = Path(raw_anki) if raw_anki else None
 
-    HISTORY_DIR = _CLIENT_HOME / "qa-history"
-    TEMP_DIR    = _CLIENT_HOME / "qa-temp"
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    # TEMP_DIR 跟 STORE_DIR 同根（paths.app_dir() 或 fallback），落在 qa-temp/
+    TEMP_DIR = STORE_DIR / "qa-temp"
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# 历史存储：AppData\Local\截图问答\
-_localappdata  = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-STORE_DIR      = Path(_localappdata) / "截图问答"
+# 历史存储：客户端走 paths.app_dir()（Windows 是 %LOCALAPPDATA%\bwicarus-client\，
+# 服务端实例由 systemd 设 BWICARUS_APP_DIR 指向 state/qa-server-data/）。
+# 旧位置 %LOCALAPPDATA%\截图问答\ 保留 fallback，首次启动时自动迁移。
+try:
+    from paths import app_dir as _app_dir  # type: ignore
+    STORE_DIR = _app_dir()
+except Exception:
+    _localappdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    STORE_DIR = Path(_localappdata) / "bwicarus-client"
+    STORE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 一次性迁移旧路径数据（Windows %LOCALAPPDATA%\截图问答\ 或 Pi 上同样 fallback 出来的目录）
+_legacy_dirs = [
+    Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "截图问答",
+]
+for _legacy in _legacy_dirs:
+    if _legacy.exists() and _legacy.resolve() != STORE_DIR.resolve():
+        try:
+            (STORE_DIR / "images").mkdir(parents=True, exist_ok=True)
+            for src in _legacy.iterdir():
+                dst = STORE_DIR / src.name
+                if dst.exists():
+                    continue
+                if src.is_dir():
+                    import shutil as _sh
+                    _sh.copytree(src, dst)
+                else:
+                    src.replace(dst)
+            print(f"[qa-server] 迁移旧数据 {_legacy} → {STORE_DIR}", flush=True)
+        except Exception as _e:
+            print(f"[qa-server] 迁移旧 STORE_DIR 失败：{_e}", flush=True)
+        break
+
 DB_PATH        = STORE_DIR / "history.db"
 HIST_IMG_DIR   = STORE_DIR / "images"
-QBTN_FILE = STORE_DIR / "quick_btns.json"
+QBTN_FILE      = STORE_DIR / "quick_btns.json"
 
 _DEFAULT_QBTNS = ["解题思路是什么？", "这道题考察哪些知识点？", "请逐步详细解释", "有没有类似的题型？"]
 
