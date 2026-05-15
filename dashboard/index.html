@@ -204,9 +204,15 @@
       stroke-width: 2.2 !important;
       stroke-opacity: 0.9 !important;
     }
-    #graphSvg.kw-active .graph-node:not(.kw-highlight) circle,
+    #graphSvg.kw-active .graph-node:not(.kw-highlight) .node-core,
     #graphSvg.kw-active .graph-node:not(.kw-highlight) text {
       opacity: 0.22;
+      transition: opacity 0.2s;
+    }
+    /* 淡化节点的辉光直接归零：否则大半径光环 ×0.22 仍可见，
+       core/标签淡到看不见时看起来像背景上漂浮一个孤立光圈 */
+    #graphSvg.kw-active .graph-node:not(.kw-highlight) .node-glow {
+      opacity: 0;
       transition: opacity 0.2s;
     }
     #graphSvg.kw-active .graph-link:not(.kw-highlight) {
@@ -273,6 +279,11 @@
     .setting-row small { color: var(--muted); font-size: 11px; font-weight: 500; }
     .setting-row input[type="range"] { width: 100%; accent-color: #a5b4fc; }
     .setting-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #a5b4fc; }
+    .setting-row input[type="color"] { width: 36px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,0.2); border-radius: 5px; background: none; cursor: pointer; }
+    .subj-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; vertical-align: middle; box-shadow: 0 0 4px currentColor; }
+    .subj-reset { background: rgba(255,255,255,0.08); color: var(--muted); border: none; border-radius: 4px; width: 22px; height: 22px; cursor: pointer; font-size: 13px; line-height: 1; }
+    .subj-reset:hover:not(:disabled) { background: rgba(255,255,255,0.18); color: var(--text); }
+    .subj-reset:disabled { opacity: 0.28; cursor: default; }
 
     /* Note list */
     .note-list { display: flex; flex-direction: column; gap: 6px; }
@@ -606,6 +617,8 @@
         <span>尺寸缩放 <small id="setSizeScaleVal">9</small></span>
         <input type="range" id="setSizeScale" min="0" max="30" step="1" value="9">
       </label>
+      <div class="setting-title" style="margin-top:16px">学科颜色</div>
+      <div id="subjectColorList"></div>
     </aside>
     <svg id="graphSvg"></svg>
     <div class="legend" id="graphLegend"></div>
@@ -647,6 +660,7 @@ const graphSettings = {
   autoCloseOnRepeat: true, // 再次点击同一目标时收回抽屉（仅在 autoOpenDrawer 启用时生效）
   drawerBlur:       16,    // 抽屉背景磨砂模糊度（px）
   drawerWidth:      540,   // 抽屉宽度 px（仍受 80vw 上限保护，长按把手可拖动调整）
+  subjectColors:    {},    // 学科颜色覆盖 {学科:'#hex'}；空=用 SUBJECT_COLORS_DEFAULT
 };
 
 function applyDrawerBlur() {
@@ -707,8 +721,11 @@ function showKwPopover(kw, x, y) {
 function hideKwPopover(){ kwPopover.classList.remove('visible'); }
 document.addEventListener('click', e=>{ if(!kwPopover.contains(e.target)) hideKwPopover(); });
 
-const SUBJECT_COLORS={'数学':'#818cf8','物理':'#38bdf8','计算机科学':'#34d399','英语':'#fbbf24','日语':'#f87171'};
-const subjectColor = s => SUBJECT_COLORS[s]||'#9ca3af';
+const SUBJECT_COLORS_DEFAULT={'数学':'#818cf8','物理':'#38bdf8','计算机科学':'#34d399','英语':'#fbbf24','日语':'#f87171'};
+// 用户在「图谱设置 → 学科颜色」里改的覆盖项存在 graphSettings.subjectColors，
+// 随 SETTINGS_KEY 一起持久化；没覆盖的回退到默认；都没有则灰。
+const subjectColor = s => (graphSettings.subjectColors && graphSettings.subjectColors[s])
+  || SUBJECT_COLORS_DEFAULT[s] || '#9ca3af';
 // 掌握度配色：0(没掌握)红 → 0.5 橙黄 → 1(掌握好)青绿；无卡/无数据 灰
 function masteryColor(m, hasCards){
   if(!hasCards || m==null) return '#6b7280';
@@ -858,6 +875,7 @@ function renderAll(notes, graph, keywords) {
   } else {
     drawerRendered = false;
   }
+  renderSubjectColorEditor();
 }
 
 function renderGraph(graphData) {
@@ -1250,6 +1268,54 @@ function saveGraphSettings() {
   }, 500);
 }
 
+// 「图谱设置 → 学科颜色」编辑器：列出数据里出现的所有学科，
+// 每个一行 取色器 + 恢复默认。改动写 graphSettings.subjectColors，
+// saveGraphSettings 持久化到 localStorage，重渲图谱(连带 legend/glass 渐变)。
+function renderSubjectColorEditor() {
+  const box = document.getElementById('subjectColorList');
+  if (!box) return;
+  const src = (allGraph && allGraph.nodes && allGraph.nodes.length)
+    ? allGraph.nodes : (currentGraph.nodes || []);
+  const subs = [...new Set(src.map(n => n.subject).filter(Boolean))].sort();
+  if (!subs.length) {
+    box.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:6px 2px">（暂无学科数据）</div>';
+    return;
+  }
+  box.innerHTML = '';
+  subs.forEach(s => {
+    const cur = subjectColor(s);
+    const custom = !!(graphSettings.subjectColors && graphSettings.subjectColors[s]);
+    const row = document.createElement('label');
+    row.className = 'setting-row';
+    row.innerHTML =
+      `<span><span class="subj-swatch" style="color:${cur};background:${cur}"></span>${s}</span>`
+      + `<span style="display:flex;align-items:center;gap:8px">`
+      + `<input type="color" value="${cur}" data-subj="${s}">`
+      + `<button type="button" class="subj-reset" data-subj="${s}" title="恢复默认"${custom ? '' : ' disabled'}>↺</button>`
+      + `</span>`;
+    box.appendChild(row);
+  });
+  box.querySelectorAll('input[type=color]').forEach(inp => {
+    inp.addEventListener('change', e => {
+      if (!graphSettings.subjectColors) graphSettings.subjectColors = {};
+      graphSettings.subjectColors[e.target.dataset.subj] = e.target.value;
+      saveGraphSettings();
+      renderGraph(currentGraph);
+      renderSubjectColorEditor();
+    });
+  });
+  box.querySelectorAll('.subj-reset').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      const s = e.currentTarget.dataset.subj;
+      if (graphSettings.subjectColors) delete graphSettings.subjectColors[s];
+      saveGraphSettings();
+      renderGraph(currentGraph);
+      renderSubjectColorEditor();
+    });
+  });
+}
+
 function wireGraphSettings() {
   const gear   = document.getElementById('graphSettingsBtn');
   const drawer = document.getElementById('graphSettingsDrawer');
@@ -1258,6 +1324,7 @@ function wireGraphSettings() {
     const opening = !drawer.classList.contains('open');
     drawer.classList.toggle('open', opening);
     gear.classList.toggle('active', opening);
+    if (opening) renderSubjectColorEditor();
   });
   document.addEventListener('click', e => {
     if (!drawer.contains(e.target) && !gear.contains(e.target)) {
