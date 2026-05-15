@@ -181,8 +181,7 @@
     .node-core { transition: fill-opacity .2s; }
     /* 选中：光斑爆亮放大 + 灯管本体内部点亮（从内往外发光感） */
     .graph-node.highlighted .node-glow {
-      opacity: 1 !important;
-      filter: blur(16px) brightness(1.6) !important;
+      opacity: 0.5 !important;
     }
     .graph-node.highlighted .node-core {
       stroke: #fde047 !important;
@@ -192,8 +191,7 @@
     }
     .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
     .graph-node.kw-highlight .node-glow {
-      opacity: 0.85 !important;
-      filter: blur(13px) brightness(1.35) !important;
+      opacity: 0.38 !important;
     }
     .graph-node.kw-highlight .node-core {
       stroke: #facc15 !important;
@@ -939,13 +937,13 @@ function renderGraph(graphData) {
       .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null;d.fy=null; })
     );
 
-  // ① 辉光层：大半径 + 强 CSS blur = 灯管透过磨砂玻璃扩散的光
+  // ① 辉光层：适中半径 + 极强模糊 + 低透明 = 微弱融入背景的漫射光
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*2.0)
+    .attr('r',d=>nodeR(d)*1.15)
     .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
-    .attr('opacity',d=>d.has_cards?0.5:0.14)
-    .style('filter',d=>`blur(${(d.has_cards?nodeR(d)*0.5:6).toFixed(0)}px)`);
+    .attr('opacity',d=>d.has_cards?0.22:0.05)
+    .style('filter',d=>`blur(${(nodeR(d)*0.95).toFixed(0)}px)`);
   // ② 灯管本体
   node.append('circle')
     .attr('class','node-core')
