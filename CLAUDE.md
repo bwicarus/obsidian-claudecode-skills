@@ -86,7 +86,7 @@
 | `api_client.py` | 服务端 HTTP（`/api/upload/<dataset>` 等），bearer token |
 | `uploader.py` | `upload_dataset(client, dir, "dashboard"|"history")`，白名单 JSON+图片，**不传 HTML/JS/CSS** |
 | `cmd_server_thread.py` | 9090 端口 HTTP server。路由：`/list`、`/run/<cmd>`（iPad 触发 register/upload）、`/qa`（iPad 截图注入，转发到 qa_browser daemon `/api/inject-image`）|
-| `qa_browser.py` | 截图问答。两种入口：(a) 本机 ctrl+shift+q `launch()` 临时启动；(b) `start_server_daemon()` 常驻 0.0.0.0:9091 让 iPad 通过 Tailscale 直连完整对话页（cfg `qa_remote_daemon` 控制）|
+| `qa_browser.py` | 截图问答。两种入口：(a) 本机 ctrl+shift+q `launch()` 临时启动；(b) `start_server_daemon()` 常驻 0.0.0.0:9091 让 iPad 通过 Tailscale 直连完整对话页（cfg `qa_remote_daemon` 控制）。`/api/chat` 支持 **SSE 流式**（`Accept: text/event-stream`，前端边接边渲染 + 节流 + 中止），旧 JSON 模式保留兼容。`/api/history/delete` 级联清理：SQLite + 截图 + **Obsidian 笔记**（解析 note 字段路径）+ 触发 `_export_history_to_webapp`。数据目录走 `paths.app_dir()`（服务端实例 = `state/qa-server-data/`，env `WEBAPP_HISTORY_DIR` 配了就把历史导出到 webapp `/history/`）|
 | `runner.py` | `run_script(path, ..., python_exe)` subprocess 跑主项目脚本，所有 subprocess 自动 CREATE_NO_WINDOW |
 | `paths.py` | 数据目录抽象：`app_dir()` 读 `BWICARUS_APP_DIR` / pointer / 默认；`derive_paths(project_root)` 从主项目根派生所有子路径 |
 | `watcher.py` | watchdog 监听 vault，防抖+冷却后触发 register |

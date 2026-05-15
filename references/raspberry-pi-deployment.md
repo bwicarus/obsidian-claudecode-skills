@@ -222,23 +222,43 @@ rsync -avz $VPS:/root/webapp/data/users/bwicarus/ ~/webapp/data/users/bwicarus/
 
 ### 阶段 9：Claude / Codex 凭据 + auto memory
 
-```bash
-mkdir -p ~/.claude/projects/home-bwicarus--claude/memory
-scp $VPS:/root/.claude/.credentials.json ~/.claude/
-scp $VPS:/root/.claude.json ~/
-scp $VPS:/root/.claude/settings.json ~/.claude/
-rsync -avz $VPS:/root/.claude/projects/root--claude/memory/ ~/.claude/projects/home-bwicarus--claude/memory/
+> ⚠️ **不要 scp `.credentials.json`！** OAuth refresh token 是 single-use：
+> 两台机器共享同一份 credentials，谁先 refresh 谁就作废另一台的 token，
+> 另一台下次启动报 `401 Invalid authentication credentials` /
+> `Remote Control failed to connect: /login`（2026-05-15 实际踩过这个坑）。
+>
+> **每台机器必须各自独立 OAuth 一次。** 只有 settings / memory / codex 配置
+> 可以 scp（无副作用）。
 
-mkdir -p ~/.codex
-scp $VPS:/root/.codex/auth.json ~/.codex/
+```bash
+# 1. 各自独立 Claude 登录（device-flow OAuth）
+cd ~/claude && claude
+# 进 TUI 后 /login，浏览器开它给的 claude.com/cai/oauth/... URL，
+# Authorize 后把 callback 的 code#state 粘回 terminal
+
+# 2. 这些可以 scp（无副作用）：
+scp $VPS:/root/.claude/settings.json ~/.claude/
+scp $VPS:/root/.claude.json ~/                    # 账户元数据，含订阅信息
+mkdir -p ~/.claude/projects/home-bwicarus--claude/memory
+rsync -avz $VPS:/root/.claude/projects/root--claude/memory/ \
+  ~/.claude/projects/home-bwicarus--claude/memory/
+
+# 3. Codex CLI 同理——auth.json 也建议各自 codex login；
+#    config.toml 可以 scp
 scp $VPS:/root/.codex/config.toml ~/.codex/
 
 # 验证
-claude --print "ping"    # 应该回 "pong"，证明 OAuth 完整
+claude --print "ping"    # 回 "pong" 证明 OAuth 独立可用
 codex --version
 ```
 
-> **重要**：Pi 上 cwd 是 `/home/bwicarus/claude`，所以 memory 目录是 `projects/home-bwicarus--claude/memory/`（双横杠），不是 `-home-bwicarus-claude/`（单横杠用于 transcript jsonl）。
+> **重要 1**：Pi 上 cwd 是 `/home/bwicarus/claude`，所以 memory 目录是
+> `projects/home-bwicarus--claude/memory/`（双横杠），不是
+> `-home-bwicarus-claude/`（单横杠用于 transcript jsonl）。
+>
+> **重要 2**：scp `.claude.json` 后第一次启动 claude 仍可能要 `/login`
+> （因为没 credentials）——这是预期，跑一次 OAuth 即可。`.claude.json` 只是
+> 账户元数据缓存，不含可用 token。
 
 ### 阶段 10：systemd + 跑首次 daily
 

@@ -78,6 +78,31 @@ GUI 截图问答 Tab：
 | 浏览器开 :9091 显示截图但下方"等待截图注入" | session 没 reset，pollScreenshot 命中旧的 None | 在网页里点重置 / 刷新 |
 | iPad 连 :9091 timeout | 防火墙挡 0.0.0.0 监听 / Tailscale 没连 | Windows 防火墙允许 9091 入站 + 确认 Tailscale 已连 |
 
+## 流式回复 + 历史删除（2026-05-15+）
+
+**SSE 流式**：`/api/chat` 检测 `Accept: text/event-stream` 走流式分支，
+回复一段段出（前端 `fetch` + `ReadableStream` 边接边渲染，markdown/MathJax
+节流 120ms 重渲染）。sending 时「发送」按钮变「中止」，点了 abort fetch →
+后端 `BrokenPipe` → `gen.close()` → 杀 AI 子进程 / 关 HTTP 连接，不烧 token。
+5 个 backend：claude_cli / claude_api / openai_api / ollama 真流式，
+codex_cli 走 fallback（一次性单 chunk）。旧 JSON 模式（无 Accept 头）保留兼容。
+
+**历史删除**：webapp `/history/` 每条对话 hover 出红色「删除」按钮 →
+自定义 confirm modal（列三项清理范围 + 「以后不再提醒」localStorage 开关）→
+`POST /api/qa-history/<id>/delete`（webapp cookie 鉴权）→ proxy 到 qa-server
+`:9091/api/history/delete` → 级联清：
+1. SQLite `conversations` 行
+2. `state/qa-server-data/images/<fname>` 截图
+3. **对应 Obsidian 笔记**（解析 note 字段 `→ /path.md`，Windows 路径
+   fallback 到 vault 习题/错题目录按文件名找）
+4. 触发 `_export_history_to_webapp` 同步 webapp data
+body 可传 `keep_note:true` 只清 db+截图保留 .md（暂未在 UI 暴露）。
+
+**数据目录**：qa history.db / 截图 / qa-temp 不再在 `~/AppData/Local/截图问答/`
+（Windows 风格 fallback），改走 `paths.app_dir()`：服务端实例由 systemd
+`BWICARUS_APP_DIR` 指到 `state/qa-server-data/`；Windows 客户端走
+`%LOCALAPPDATA%\bwicarus-client\`。模块加载时自动迁移旧路径数据。
+
 ## 与本地按 `ctrl+shift+q` 的关系
 
 **两个入口共用同一份 daemon + 同一份 state**：
