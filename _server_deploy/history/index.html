@@ -196,6 +196,41 @@
     .conv-row:hover .conv-del-btn { opacity: 1; }
     .conv-del-btn:hover { background: rgba(248,113,113,0.2); color: #fecaca; }
     .conv-del-btn:disabled { opacity: 0.4; cursor: wait; }
+
+    /* 删除确认 modal */
+    .del-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      display: none; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    .del-modal-backdrop.open { display: flex; }
+    .del-modal {
+      max-width: 420px; width: 90%;
+      background: linear-gradient(135deg, rgba(30,30,50,0.96), rgba(20,20,40,0.96));
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 14px; padding: 22px 24px;
+      color: rgba(255,255,255,0.92);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+    }
+    .del-modal h3 { margin: 0 0 10px; font-size: 15px; color: #fca5a5; }
+    .del-modal p { margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: rgba(255,255,255,0.82); }
+    .del-modal ul { margin: 0 0 14px; padding-left: 22px; font-size: 12.5px; color: rgba(255,255,255,0.72); line-height: 1.7; }
+    .del-modal-check {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: rgba(255,255,255,0.55);
+      margin: 6px 0 14px; cursor: pointer; user-select: none;
+    }
+    .del-modal-check input { accent-color: #f87171; cursor: pointer; }
+    .del-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+    .del-modal button {
+      padding: 7px 16px; font-size: 13px; border-radius: 8px;
+      cursor: pointer; border: 1px solid transparent; font-family: inherit;
+    }
+    .del-modal .btn-cancel { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.16); color: rgba(255,255,255,0.85); }
+    .del-modal .btn-cancel:hover { background: rgba(255,255,255,0.14); }
+    .del-modal .btn-confirm { background: rgba(248,113,113,0.85); color: #1c0606; font-weight: 700; }
+    .del-modal .btn-confirm:hover { background: #f87171; }
     .conv-time { font-variant-numeric: tabular-nums; }
     .conv-tag {
       font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
@@ -689,6 +724,27 @@
 
 <div id="lastRunBanner" class="last-run-banner"></div>
 
+<!-- 删除确认 modal -->
+<div class="del-modal-backdrop" id="del-modal-backdrop">
+  <div class="del-modal" role="dialog" aria-modal="true">
+    <h3>删除确认</h3>
+    <p>本操作会同时清除：</p>
+    <ul>
+      <li>数据库记录</li>
+      <li>截图文件</li>
+      <li>对应的 Obsidian 笔记（如果存在）</li>
+    </ul>
+    <p style="color:#fca5a5">此操作不可撤销。</p>
+    <label class="del-modal-check">
+      <input type="checkbox" id="del-modal-skip-next"> 以后不再提醒（本浏览器）
+    </label>
+    <div class="del-modal-actions">
+      <button class="btn-cancel" id="del-modal-cancel" type="button">取消</button>
+      <button class="btn-confirm" id="del-modal-confirm" type="button">删除</button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══ Panel Stack ═══ -->
 <div class="panel-stack">
 
@@ -1038,6 +1094,77 @@ function setReverseSearchMode(on) {
   }
 }
 
+// ── 删除：自定义 confirm modal（含「不再提醒」localStorage 跳过）+ POST 后端 ──
+const DEL_SKIP_KEY = 'qa-delete-skip-confirm';
+
+function confirmDelete(entryId) {
+  return new Promise(resolve => {
+    if (localStorage.getItem(DEL_SKIP_KEY) === '1') {
+      resolve(true);
+      return;
+    }
+    const bd = document.getElementById('del-modal-backdrop');
+    const skip = document.getElementById('del-modal-skip-next');
+    const ok = document.getElementById('del-modal-confirm');
+    const cancel = document.getElementById('del-modal-cancel');
+    skip.checked = false;
+    bd.classList.add('open');
+    function close(result) {
+      bd.classList.remove('open');
+      ok.removeEventListener('click', onOk);
+      cancel.removeEventListener('click', onCancel);
+      bd.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+    function onOk() {
+      if (skip.checked) {
+        try { localStorage.setItem(DEL_SKIP_KEY, '1'); } catch (_) {}
+      }
+      close(true);
+    }
+    function onCancel() { close(false); }
+    function onBackdrop(e) { if (e.target === bd) close(false); }
+    function onKey(e) {
+      if (e.key === 'Escape') close(false);
+      else if (e.key === 'Enter') onOk();
+    }
+    ok.addEventListener('click', onOk);
+    cancel.addEventListener('click', onCancel);
+    bd.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    cancel.focus();
+  });
+}
+
+async function doDelete(row, delBtn, entryId) {
+  delBtn.disabled = true;
+  const orig = delBtn.textContent;
+  delBtn.textContent = '删除中…';
+  try {
+    const r = await fetch(`/api/qa-history/${encodeURIComponent(entryId)}/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      row.style.opacity = '0';
+      row.style.transition = 'opacity 0.25s';
+      setTimeout(() => location.reload(), 280);
+    } else {
+      alert('删除失败：' + (d.error || '未知错误'));
+      delBtn.disabled = false;
+      delBtn.textContent = orig;
+    }
+  } catch (err) {
+    alert('删除失败：' + err.message);
+    delBtn.disabled = false;
+    delBtn.textContent = orig;
+  }
+}
+
+
 function renderConversationList() {
   const c = document.getElementById('convList');
   c.innerHTML = '';
@@ -1093,36 +1220,15 @@ function renderConversationList() {
         showImgLightbox(thumbEl.src);
       });
     }
-    // 删除按钮：confirm 后 POST /api/qa-history/<id>/delete
+    // 删除按钮：自定义 modal（含「不再提醒」）后 POST /api/qa-history/<id>/delete
     const delBtn = row.querySelector('.conv-del-btn');
     if (delBtn) {
-      delBtn.addEventListener('click', async (e) => {
+      delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!confirm('确认删除？\n\n本操作会同时清除：\n• 数据库记录\n• 截图文件\n• 对应的 Obsidian 笔记（如果存在）\n\n此操作不可撤销。')) return;
-        delBtn.disabled = true;
-        const orig = delBtn.textContent;
-        delBtn.textContent = '删除中…';
-        try {
-          const r = await fetch(`/api/qa-history/${encodeURIComponent(entry.id)}/delete`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({}),
-          });
-          const d = await r.json();
-          if (d.ok) {
-            row.style.opacity = '0';
-            row.style.transition = 'opacity 0.25s';
-            setTimeout(() => location.reload(), 280);
-          } else {
-            alert('删除失败：' + (d.error || '未知错误'));
-            delBtn.disabled = false;
-            delBtn.textContent = orig;
-          }
-        } catch (err) {
-          alert('删除失败：' + err.message);
-          delBtn.disabled = false;
-          delBtn.textContent = orig;
-        }
+        confirmDelete(entry.id).then(go => {
+          if (!go) return;
+          doDelete(row, delBtn, entry.id);
+        });
       });
     }
     row.addEventListener('click', () => {
