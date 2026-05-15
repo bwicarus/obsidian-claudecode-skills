@@ -4,9 +4,10 @@
 最终评分：priority = (1 - M) × activation × importance
 
   M           — Anki 平均掌握度（来自 anki_status 写入的 mastery_avg）。
-                在 retention(R=0.9^(t/interval)) 基础上再乘长期稳定度：
-                interval 成熟度 × lapses 遗忘惩罚(0.7^lapses) × ease 难度。
-                比单纯 retention 更能区分「真掌握」和「反复遗忘」。
+                retention 基础上再乘长期稳定度。FSRS 启用时用真实
+                stability(S 天) / difficulty(D 1-10)；SM-2 时退回估算
+                (interval 成熟度 × 0.7^lapses × ease 难度)。比单纯
+                retention 更能区分「真掌握」和「反复看但没掌握」。
                 旧 record 无 mastery 时退化到 retention_avg。
   activation  — Personalized PageRank，种子为各笔记的近期编辑权重
                 （指数衰减，半衰期 7 天），表示与当前学习焦点的图距离

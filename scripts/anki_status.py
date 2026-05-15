@@ -87,13 +87,20 @@ def card_retrievability(card: dict, now_ms: int) -> float | None:
 
 # ── 掌握度 (mastery) ─────────────────────────────────────────────────────────
 # retention 只反映"现在还记不记得"，不区分「复习 1 次就记住」和「复习 20 次还
-# 在反复遗忘」。mastery 在 retention 上再乘一个长期稳定度，纳入：
-#   maturity      interval 越长 = 进入长期记忆（90 天封顶）
-#   lapse_factor  每次遗忘(lapse)掌握度打 0.7 折（反复遗忘 = 没真正掌握）
-#   ease_norm     Anki ease factor 低 = 这张卡对你偏难
+# 在反复遗忘」。mastery 在 retention 上再乘一个长期稳定度。
+#
+# FSRS 启用后（collection.anki2 的 cards.data 含 {"s","d","decay"}）：
+#   maturity  = min(S / 180, 1)    S=FSRS stability(天)，真实长期记忆强度
+#   d_norm    = (10 - D) / 9       D=FSRS difficulty(1-10)，Anki 官方难度
+# 拿不到 FSRS（SM-2 / Windows 旧 collection / 读取失败）时退回估算：
+#   maturity  = min(interval/90, 1)
+#   lapse_factor = 0.7 ** lapses
+#   ease_norm = ease factor 归一
 # new=0 / learning=0.25 / relearning=0.15（刚遗忘，掌握度最低）。
 
-def card_mastery(card: dict, now_ms: int) -> float | None:
+def card_mastery(
+    card: dict, now_ms: int, fsrs_mem: dict[int, dict] | None = None
+) -> float | None:
     queue = card.get("queue", 0)
     if queue == -1:  # suspended — 不参与平均
         return None
@@ -110,13 +117,23 @@ def card_mastery(card: dict, now_ms: int) -> float | None:
     days_since = max(0.0, (now_ms / 1000 - mod_s) / 86_400)
     retention = 0.9 ** (days_since / interval)
 
-    maturity = min(interval / 90.0, 1.0)
-    lapses = max(card.get("lapses", 0), 0)
-    lapse_factor = 0.7 ** lapses
-    factor = card.get("factor") or 2500          # ease ×1000；默认 2500
-    ease_norm = 0.5 + 0.5 * max(0.0, min(1.0, (factor - 1300) / 1200.0))
+    fm = (fsrs_mem or {}).get(card.get("cardId") or card.get("id"))
+    if fm and fm.get("s") and fm.get("d"):
+        # FSRS 真实 stability / difficulty
+        S = max(float(fm["s"]), 0.01)
+        D = min(max(float(fm["d"]), 1.0), 10.0)
+        maturity = min(S / 180.0, 1.0)
+        d_norm = (10.0 - D) / 9.0          # D=1→1.0(易) D=10→0.0(难)
+        stability = maturity * (0.3 + 0.7 * d_norm)
+    else:
+        # 退回 SM-2 估算
+        maturity = min(interval / 90.0, 1.0)
+        lapses = max(card.get("lapses", 0), 0)
+        lapse_factor = 0.7 ** lapses
+        factor = card.get("factor") or 2500
+        ease_norm = 0.5 + 0.5 * max(0.0, min(1.0, (factor - 1300) / 1200.0))
+        stability = maturity * lapse_factor * ease_norm
 
-    stability = maturity * lapse_factor * ease_norm
     mastery = retention * (0.4 + 0.6 * stability)
     return max(0.0, min(1.0, mastery))
 
@@ -224,6 +241,57 @@ def collect_anki_note_ids(record: dict) -> list[int]:
     ]
 
 
+# ── FSRS memory state（直读 collection.anki2 cards.data）──────────────────────
+# AnkiConnect cardsInfo 不暴露 FSRS 字段，但 collection 的 cards.data 列存
+# {"s":stability,"d":difficulty,"decay":...}。用 immutable 模式读（Anki 在跑
+# 也安全）。拿不到（SM-2 / 路径未知 / 读失败）返回 {}，card_mastery 自动退回估算。
+
+def _anki_collection_path(anki_url: str) -> Path | None:
+    env = os.environ.get("ANKI_COLLECTION")
+    if env and Path(env).exists():
+        return Path(env)
+    try:
+        media = anki_request(anki_url, "getMediaDirPath", timeout=5)
+        if media:
+            cand = Path(media).parent / "collection.anki2"
+            if cand.exists():
+                return cand
+    except RuntimeError:
+        pass
+    return None
+
+
+def fsrs_memory_map(anki_url: str, card_ids: list[int]) -> dict[int, dict]:
+    if not card_ids:
+        return {}
+    col = _anki_collection_path(anki_url)
+    if col is None:
+        return {}
+    out: dict[int, dict] = {}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{col}?immutable=1", uri=True)
+        # 分批 IN 查询，避免 SQL 变量上限
+        for i in range(0, len(card_ids), 900):
+            batch = card_ids[i:i + 900]
+            ph = ",".join("?" * len(batch))
+            for cid, data in conn.execute(
+                f"SELECT id, data FROM cards WHERE id IN ({ph})", batch
+            ):
+                if not data or data in ("{}", ""):
+                    continue
+                try:
+                    d = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if "s" in d and "d" in d:
+                    out[int(cid)] = d
+        conn.close()
+    except Exception:
+        return {}
+    return out
+
+
 # ── 状态查询 ─────────────────────────────────────────────────────────────────
 
 def classify_card(info: dict) -> str:
@@ -246,6 +314,8 @@ def query_counts(anki_url: str, note_ids: list[int]) -> dict[str, Any]:
     counts: dict[str, Any] = dict(EMPTY_COUNTS)
     counts["total"] = len(cards_info)
 
+    fsrs_mem = fsrs_memory_map(anki_url, card_ids)
+
     now_ms = int(time.time() * 1000)
     retentions: list[float] = []
     masteries: list[float] = []
@@ -256,7 +326,7 @@ def query_counts(anki_url: str, note_ids: list[int]) -> dict[str, Any]:
         r = card_retrievability(card, now_ms)
         if r is not None:
             retentions.append(r)
-        m = card_mastery(card, now_ms)
+        m = card_mastery(card, now_ms, fsrs_mem)
         if m is not None:
             masteries.append(m)
         counts["reps_total"] += max(card.get("reps", 0), 0)
