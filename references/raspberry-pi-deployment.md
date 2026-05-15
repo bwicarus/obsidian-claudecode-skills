@@ -168,6 +168,18 @@ EOF
 
 7 个 systemd unit 写在 [systemd/](systemd/)，Pi 版用 `User=bwicarus` + `/home/bwicarus/` 路径。
 
+`qa-server.service` 在 Pi 上还需要额外两个 env：
+
+```
+Environment=BWICARUS_APP_DIR=/home/bwicarus/claude/state/qa-server-data
+Environment=WEBAPP_HISTORY_DIR=/home/bwicarus/webapp/data/users/bwicarus/history
+```
+
+`WEBAPP_HISTORY_DIR` 触发 `qa_browser._export_history_to_webapp()`：截图问答保存后
+自动把 SQLite 内容导出 `history.json` + 拷贝截图到 webapp data 目录，让
+`https://<host>/history/` 立刻看到新条目。未设时（Windows 客户端时代）走
+旧 `scripts/export_history.py` + HTTP 上传流程。
+
 ### 阶段 6：nginx 反代 + Tailscale HTTPS
 
 需要先在 Tailscale admin console 启用 **HTTPS Certificates** + **MagicDNS**。
