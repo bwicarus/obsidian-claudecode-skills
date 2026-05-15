@@ -170,8 +170,12 @@
       background: rgba(0,0,0,0.15); cursor: grab; display: block;
     }
     #graphSvg:active { cursor: grabbing; }
+    /* 边类型：kw=关键词相似(淡虚线) explicit=手动链接(亮实线) both=两者皆有(最亮) */
     .graph-link { stroke: rgba(255,255,255,0.12); }
-    .graph-link.explicit { stroke: rgba(255,255,255,0.3); stroke-width: 1.5; }
+    .graph-link.link-kw       { stroke: rgba(255,255,255,0.14); stroke-dasharray: 3 3; }
+    .graph-link.link-explicit { stroke: rgba(165,180,252,0.55); }
+    .graph-link.link-both     { stroke: rgba(165,180,252,0.85); }
+    .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
     .graph-node.highlighted circle {
       stroke: #fde047 !important;
       stroke-width: 3.5 !important;
@@ -700,6 +704,13 @@ document.addEventListener('click', e=>{ if(!kwPopover.contains(e.target)) hideKw
 
 const SUBJECT_COLORS={'数学':'#818cf8','物理':'#38bdf8','计算机科学':'#34d399','英语':'#fbbf24','日语':'#f87171'};
 const subjectColor = s => SUBJECT_COLORS[s]||'#9ca3af';
+// 掌握度配色：0(没掌握)红 → 0.5 橙黄 → 1(掌握好)青绿；无卡/无数据 灰
+function masteryColor(m, hasCards){
+  if(!hasCards || m==null) return '#6b7280';
+  const mm=Math.max(0,Math.min(1,m));
+  const h=mm*140;                       // hue 0红→140绿
+  return `hsl(${h.toFixed(0)},62%,52%)`;
+}
 const openNote = url => { const a=document.createElement('a'); a.href=url; a.click(); };
 
 /* Panel activation: mouseenter switches active panel; stays open on leave */
@@ -865,13 +876,23 @@ function renderGraph(graphData) {
     .force('gravity', makeGravityForce());
 
   g.append('g').selectAll('line').data(links).join('line')
-    .attr('class',d=>'graph-link'+(d.weight>=1?' explicit':''))
-    .attr('stroke-width',d=>0.8+d.weight*0.7)
+    .attr('class',d=>'graph-link link-'+(d.kind||'kw'))
+    .attr('stroke-width',d=>0.6+(d.weight||0)*1.8)
     .classed('kw-highlight', d => {
       const sId = (d.source && d.source.id) || d.source;
       const tId = (d.target && d.target.id) || d.target;
       return highlightedKeywordNotes.has(sId) && highlightedKeywordNotes.has(tId);
-    });
+    })
+    .on('mouseover',(e,d)=>{
+      const sId=(d.source&&d.source.id)||d.source, tId=(d.target&&d.target.id)||d.target;
+      const bits=[];
+      if(d.link_count) bits.push(`互链 ${d.link_count} 次`);
+      if(d.kw_shared)  bits.push(`共享 ${d.kw_shared} 个关键词`);
+      tip.style.opacity='1';
+      tip.textContent=`${sId} ↔ ${tId}　${bits.join('，')||'关联'}　(强度 ${(d.weight||0).toFixed(2)})`;
+    })
+    .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
+    .on('mouseout',()=>{ tip.style.opacity='0'; });
 
   const node=g.append('g').selectAll('g').data(filteredNodes).join('g')
     .attr('class','graph-node')
@@ -885,10 +906,13 @@ function renderGraph(graphData) {
     );
 
   node.append('circle')
-    .attr('r',d=>9+d.priority*graphSettings.sizeScale)
-    .attr('fill',d=>{ const c=subjectColor(d.subject); return d.has_cards?c+'cc':c+'33'; })
-    .attr('stroke',d=>d.weakness>0.3?'#f87171':subjectColor(d.subject)+'88')
-    .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=`${d.id}　优先级 ${(d.priority*100).toFixed(0)}%`; })
+    .attr('r',d=>9+(d.importance||0)*graphSettings.sizeScale)
+    .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
+    .attr('fill-opacity',d=>d.has_cards?0.85:0.35)
+    .attr('stroke',d=>subjectColor(d.subject))
+    .attr('stroke-width',1.5)
+    .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
+      `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 重要 ${((d.importance||0)*100).toFixed(0)}% · 优先 ${(d.priority*100).toFixed(0)}%`; })
     .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
     .on('mouseout',()=>{ tip.style.opacity='0'; })
     .on('click',(e,d)=>{
@@ -904,7 +928,7 @@ function renderGraph(graphData) {
       }
     });
 
-  node.append('text').attr('dy',d=>16+d.priority*graphSettings.sizeScale).attr('text-anchor','middle')
+  node.append('text').attr('dy',d=>16+(d.importance||0)*graphSettings.sizeScale).attr('text-anchor','middle')
     .text(d=>d.id.length>12?d.id.slice(0,12)+'…':d.id)
     .attr('fill','rgba(255,255,255,0.8)').attr('font-size','11')
     .style('display', graphSettings.showLabels ? null : 'none');
@@ -918,8 +942,14 @@ function renderGraph(graphData) {
 
   const legend=document.getElementById('graphLegend');
   legend.innerHTML='';
+  // 掌握度色阶（节点填充）
+  const grad=`linear-gradient(90deg,${masteryColor(0,1)},${masteryColor(0.5,1)},${masteryColor(1,1)})`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="width:34px;border-radius:3px;background:${grad}"></div>掌握度 低→高</div>`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:none;border:2px dashed rgba(255,255,255,0.5)"></div>关键词相似</div>`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:rgba(165,180,252,0.8)"></div>手动链接(越粗越强)</div>`;
+  // 学科（节点描边色）
   [...new Set(filteredNodes.map(n=>n.subject).filter(Boolean))].sort().forEach(s=>{
-    legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:${subjectColor(s)}"></div>${s}</div>`;
+    legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:none;border:2px solid ${subjectColor(s)}"></div>${s}</div>`;
   });
 
   // 暴露 zoom / 节点引用 / 视口尺寸给 focusGraphOn 使用
@@ -1074,9 +1104,9 @@ function applyLabelVisibility() {
 
 function applyNodeSizes() {
   d3.select('#graphSvg').selectAll('.graph-node circle')
-    .attr('r', d => 9 + d.priority * graphSettings.sizeScale);
+    .attr('r', d => 9 + (d.importance||0) * graphSettings.sizeScale);
   d3.select('#graphSvg').selectAll('.graph-node text')
-    .attr('dy', d => 16 + d.priority * graphSettings.sizeScale);
+    .attr('dy', d => 16 + (d.importance||0) * graphSettings.sizeScale);
 }
 
 const SETTINGS_KEY = 'dashboard.graphSettings.v1';

@@ -166,29 +166,58 @@ def has_cards(record: dict | None) -> bool:
 # ── グラフ & アクティベーション ───────────────────────────────────────────────
 
 def build_adjacency(notes: list[NoteInfo]) -> dict[str, dict[str, float]]:
-    """构建邻接表 {name: {neighbor: max_weight}}。"""
+    """构建邻接表 {name: {neighbor: weight}}。
+
+    边权重（跟 export_dashboard.build_graph 必须一致，否则图谱粗细跟优先级
+    算法脱节）：
+      jaccard 边     w = jaccard(0~1)
+      显式链接 n 条   w = 1.0 + log2(1+n)   多链接 = 强关联，对数防爆炸
+      双向互链       × 1.2                  A↔B 互指 = 真·强关联
+      同对取 max
+    显式链接条数纳入 → 链接多的笔记在 PageRank 里传播更多 activation/
+    importance，复习优先级会偏向强关联知识簇（设计如此）。
+    """
+    import math
     name_set = {n.name for n in notes}
     adj: dict[str, dict[str, float]] = {n.name: {} for n in notes}
 
-    def add_edge(a: str, b: str, w: float) -> None:
-        adj[a][b] = max(adj[a].get(b, 0.0), w)
-        adj[b][a] = max(adj[b].get(a, 0.0), w)
+    def k(a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a < b else (b, a)
 
-    # ① 关键词 Jaccard 边
+    jac: dict[tuple[str, str], float] = {}
+    fwd: dict[tuple[str, str], int] = {}
+    rev: dict[tuple[str, str], int] = {}
+
     for i, a in enumerate(notes):
         for b in notes[i + 1:]:
             w = jaccard(a.keywords, b.keywords)
             if w > 0:
-                add_edge(a.name, b.name, w)
+                jac[k(a.name, b.name)] = w
 
-    # ② 显式 [[link]] 边（权重 1.0）
     for note in notes:
         if note.note_path is None:
             continue
         for target in parse_links(note.note_path):
             target = target.strip()
             if target in name_set and target != note.name:
-                add_edge(note.name, target, 1.0)
+                kk = k(note.name, target)
+                if (note.name, target) == kk:
+                    fwd[kk] = fwd.get(kk, 0) + 1
+                else:
+                    rev[kk] = rev.get(kk, 0) + 1
+
+    for kk in set(jac) | set(fwd) | set(rev):
+        a, b = kk
+        nf, nr = fwd.get(kk, 0), rev.get(kk, 0)
+        n_links = nf + nr
+        w_exp = 0.0
+        if n_links > 0:
+            w_exp = 1.0 + math.log2(1 + n_links)
+            if nf > 0 and nr > 0:
+                w_exp *= 1.2
+        w = max(jac.get(kk, 0.0), w_exp)
+        adj[a][b] = w
+        adj[b][a] = w
 
     return adj
 

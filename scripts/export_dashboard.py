@@ -86,35 +86,67 @@ def build_graph(
 ) -> tuple[list[dict], list[dict]]:
     name_set = set(names)
 
-    # 边：去重保留最大权重
-    edges: dict[tuple[str, str], float] = {}
+    # 边权重公式（跟 review_priority.build_adjacency 必须一致）：
+    #   jaccard 边     w = jaccard(0~1)
+    #   显式链接 n 条   w = 1.0 + log2(1+n)   1→1.0 3→2.0 7→3.0
+    #   双向互链       × 1.2
+    #   同对取 max（显式通常压过 jaccard）
+    # 额外记 kw_shared / link_count / kind 供前端 hover + 样式区分。
+    kw_shared: dict[tuple[str, str], int] = {}
+    jac_w:     dict[tuple[str, str], float] = {}
+    fwd:       dict[tuple[str, str], int] = {}
+    rev:       dict[tuple[str, str], int] = {}
 
-    def add_edge(a: str, b: str, w: float) -> None:
-        key = (min(a, b), max(a, b))
-        edges[key] = max(edges.get(key, 0.0), w)
+    def key(a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a < b else (b, a)
 
-    # Jaccard 边
     for i, a in enumerate(names):
         kws_a = index_data.get(a, (frozenset(), ""))[0]
         for b in names[i + 1:]:
             kws_b = index_data.get(b, (frozenset(), ""))[0]
+            inter = len(kws_a & kws_b)
+            if inter == 0:
+                continue
             w = jaccard(kws_a, kws_b)
             if w > 0:
-                add_edge(a, b, round(w, 3))
+                k = key(a, b)
+                jac_w[k] = round(w, 3)
+                kw_shared[k] = inter
 
-    # 显式 [[link]] 边
     for name, path in note_paths.items():
         if path is None:
             continue
         for target in parse_links(path):
             if target in name_set and target != name:
-                add_edge(name, target, 1.0)
+                k = key(name, target)
+                if (name, target) == k:
+                    fwd[k] = fwd.get(k, 0) + 1
+                else:
+                    rev[k] = rev.get(k, 0) + 1
+
+    import math
+    edge_list = []
+    for k in set(jac_w) | set(fwd) | set(rev):
+        s, t = k
+        nf, nr = fwd.get(k, 0), rev.get(k, 0)
+        n_links = nf + nr
+        w_explicit = 0.0
+        if n_links > 0:
+            w_explicit = 1.0 + math.log2(1 + n_links)
+            if nf > 0 and nr > 0:
+                w_explicit *= 1.2
+        w = max(jac_w.get(k, 0.0), w_explicit)
+        kind = ("both" if (n_links and k in jac_w)
+                else "explicit" if n_links else "kw")
+        edge_list.append({
+            "source": s, "target": t,
+            "weight": round(w, 3),
+            "link_count": n_links,
+            "kw_shared": kw_shared.get(k, 0),
+            "kind": kind,
+        })
 
     nodes = [{"id": n} for n in names]
-    edge_list = [
-        {"source": s, "target": t, "weight": w}
-        for (s, t), w in edges.items()
-    ]
     return nodes, edge_list
 
 
@@ -195,6 +227,9 @@ def main() -> None:
             "anki_review":     snap.get("review",      0),
             "anki_relearning": snap.get("relearning",  0),
             "retention":       round(snap.get("retention_avg", 0.0), 4),
+            "mastery":         round(snap.get("mastery_avg",   0.0), 4),
+            "reps_total":      snap.get("reps_total",   0),
+            "lapses_total":    snap.get("lapses_total", 0),
             "priority":   round(priority.get("score",      0), 4),
             "activation": round(priority.get("activation", 0), 4),
             "importance": round(priority.get("importance", 0), 4),
@@ -218,6 +253,8 @@ def main() -> None:
         node["priority"]     = n.get("priority", 0)
         node["weakness"]     = n.get("weakness", 0)
         node["retention"]    = n.get("retention", 0)
+        node["mastery"]      = n.get("mastery", 0)
+        node["importance"]   = n.get("importance", 0)
         node["obsidian_url"] = n.get("obsidian_url") or obsidian_url(node["id"])
         node["has_cards"]    = node["id"] in notes_by_name
 
