@@ -901,6 +901,14 @@ function renderGraph(graphData) {
   const defs = svg.append('defs');
   filteredNodes.forEach((d,i)=>{
     d._gi = i;
+    // 有色玻璃 core：学科色半透明渐变，中心略聚色 → 边缘更透露出磨砂背景。
+    // 颜色只标学科，掌握度交给 mastery 圆环 + 向外光晕。所有节点都建（含无卡）。
+    const sc = subjectColor(d.subject);
+    const gg = defs.append('radialGradient')
+      .attr('id','glass-'+i).attr('cx','42%').attr('cy','38%').attr('r','62%');
+    gg.append('stop').attr('offset','0%')  .attr('stop-color',sc).attr('stop-opacity',0.40);
+    gg.append('stop').attr('offset','55%') .attr('stop-color',sc).attr('stop-opacity',0.22);
+    gg.append('stop').attr('offset','100%').attr('stop-color',sc).attr('stop-opacity',0.09);
     if(!d.has_cards) return;
     const c = masteryColor(d.mastery, true);
     const rg = defs.append('radialGradient')
@@ -961,8 +969,8 @@ function renderGraph(graphData) {
   node.append('circle')
     .attr('class','node-core')
     .attr('r',d=>nodeR(d))
-    .attr('fill','rgba(255,255,255,0.05)')
-    .attr('fill-opacity',d=>d.has_cards?1:0.5)
+    .attr('fill',d=>`url(#glass-${d._gi})`)
+    .attr('fill-opacity',d=>d.has_cards?1:0.55)
     .attr('stroke',d=>masteryColor(d.mastery, d.has_cards))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
