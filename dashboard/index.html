@@ -953,7 +953,7 @@ function renderGraph(graphData) {
   // ① 辉光层：径向渐变 fill，边缘 alpha 归 0 自然渐隐融入背景（无 blur）
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*2.6)
+    .attr('r',d=>nodeR(d)*1.25)
     .attr('fill',d=>d.has_cards?`url(#glow-${d._gi})`:'none');
   // ② 灯管本体
   node.append('circle')
