@@ -732,13 +732,6 @@ const SUBJECT_COLORS_DEFAULT={'数学':'#818cf8','物理':'#38bdf8','计算机�
 // 随 SETTINGS_KEY 一起持久化；没覆盖的回退到默认；都没有则灰。
 const subjectColor = s => (graphSettings.subjectColors && graphSettings.subjectColors[s])
   || SUBJECT_COLORS_DEFAULT[s] || '#9ca3af';
-// 掌握度配色：0(没掌握)红 → 0.5 橙黄 → 1(掌握好)青绿；无卡/无数据 灰
-function masteryColor(m, hasCards){
-  if(!hasCards || m==null) return '#6b7280';
-  const mm=Math.max(0,Math.min(1,m));
-  const h=mm*140;                       // hue 0红→140绿
-  return `hsl(${h.toFixed(0)},62%,52%)`;
-}
 
 // 当前图的 wdeg / edge-weight 极值（每次 renderGraph 重算），helper 用它做
 // 「按本图 min~max 归一化 + 幂函数增强对比」——数据再集中也强制拉满量程。
@@ -934,14 +927,18 @@ function renderGraph(graphData) {
     gg.append('stop').attr('offset','55%') .attr('stop-color',sc).attr('stop-opacity',0.22);
     gg.append('stop').attr('offset','100%').attr('stop-color',sc).attr('stop-opacity',0.09);
     if(!d.has_cards) return;
-    const c = masteryColor(d.mastery, true);
+    // 光环颜色 = 学科（跟 core/描边统一色系，颜色不再标掌握度）；
+    // 掌握度 → 光环整体亮度：mastery 低=亮(待复习醒目)，高=暗淡近乎消失。
+    const c = subjectColor(d.subject);
+    const m = Math.max(0, Math.min(1, d.mastery==null ? 0.5 : d.mastery));
+    const lum = 0.06 + 0.94 * (1 - m);   // m=0→1.0 最亮, m=1→0.06 几乎无
     const rg = defs.append('radialGradient')
       .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
     // 环形发散：中心透明(露磨砂背景) → core 边缘(≈53%)最亮 → 向外渐隐
     rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',0);
-    rg.append('stop').attr('offset','35%') .attr('stop-color',c).attr('stop-opacity',0.05);
-    rg.append('stop').attr('offset','53%') .attr('stop-color',c).attr('stop-opacity',0.42);
-    rg.append('stop').attr('offset','75%') .attr('stop-color',c).attr('stop-opacity',0.13);
+    rg.append('stop').attr('offset','35%') .attr('stop-color',c).attr('stop-opacity',+(0.05*lum).toFixed(4));
+    rg.append('stop').attr('offset','53%') .attr('stop-color',c).attr('stop-opacity',+(0.46*lum).toFixed(4));
+    rg.append('stop').attr('offset','75%') .attr('stop-color',c).attr('stop-opacity',+(0.14*lum).toFixed(4));
     rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
   });
 
@@ -995,7 +992,7 @@ function renderGraph(graphData) {
     .attr('r',d=>nodeR(d))
     .attr('fill',d=>`url(#glass-${d._gi})`)
     .attr('fill-opacity',d=>d.has_cards?1:0.55)
-    .attr('stroke',d=>masteryColor(d.mastery, d.has_cards))
+    .attr('stroke',d=>subjectColor(d.subject))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
     .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
@@ -1037,9 +1034,9 @@ function renderGraph(graphData) {
 
   const legend=document.getElementById('graphLegend');
   legend.innerHTML='';
-  // 掌握度色阶（节点描边光环）
-  const grad=`linear-gradient(90deg,${masteryColor(0,1)},${masteryColor(0.5,1)},${masteryColor(1,1)})`;
-  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:none;border:3px solid transparent;border-image:${grad} 1"></div>掌握度环 低→高</div>`;
+  // 颜色=学科；掌握度 → 光环亮度（亮=待复习，暗淡=已掌握）
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:50%;background:rgba(226,232,240,0.16);box-shadow:0 0 6px 2px rgba(226,232,240,0.75)"></div>光环亮 = 待复习</div>`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:50%;background:rgba(226,232,240,0.10)"></div>光环暗 = 已掌握</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:none;border:2px dashed rgba(255,255,255,0.5)"></div>关键词相似</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:rgba(165,180,252,0.8)"></div>手动链接(越粗越强)</div>`;
   // 学科（节点淡填充色）
