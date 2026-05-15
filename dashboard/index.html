@@ -918,27 +918,20 @@ function renderGraph(graphData) {
   const defs = svg.append('defs');
   filteredNodes.forEach((d,i)=>{
     d._gi = i;
-    // 有色玻璃 core：学科色半透明渐变，中心略聚色 → 边缘更透露出磨砂背景。
-    // 颜色只标学科，掌握度交给 mastery 圆环 + 向外光晕。所有节点都建（含无卡）。
-    const sc = subjectColor(d.subject);
-    const gg = defs.append('radialGradient')
-      .attr('id','glass-'+i).attr('cx','42%').attr('cy','38%').attr('r','62%');
-    gg.append('stop').attr('offset','0%')  .attr('stop-color',sc).attr('stop-opacity',0.40);
-    gg.append('stop').attr('offset','55%') .attr('stop-color',sc).attr('stop-opacity',0.22);
-    gg.append('stop').attr('offset','100%').attr('stop-color',sc).attr('stop-opacity',0.09);
     if(!d.has_cards) return;
-    // 光环颜色 = 学科（跟 core/描边统一色系，颜色不再标掌握度）；
-    // 掌握度 → 光环整体亮度：mastery 低=亮(待复习醒目)，高=暗淡近乎消失。
+    // 光环颜色 = 学科（跟描边统一色系）；掌握度 → 光环整体亮度：
+    // mastery 低=亮(待复习醒目)，高=暗淡近乎消失(已掌握不打扰)。
     const c = subjectColor(d.subject);
     const m = Math.max(0, Math.min(1, d.mastery==null ? 0.5 : d.mastery));
     const lum = 0.06 + 0.94 * (1 - m);   // m=0→1.0 最亮, m=1→0.06 几乎无
     const rg = defs.append('radialGradient')
       .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
-    // 环形发散：中心透明(露磨砂背景) → core 边缘(≈53%)最亮 → 向外渐隐
-    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',0);
-    rg.append('stop').attr('offset','35%') .attr('stop-color',c).attr('stop-opacity',+(0.05*lum).toFixed(4));
-    rg.append('stop').attr('offset','53%') .attr('stop-color',c).attr('stop-opacity',+(0.46*lum).toFixed(4));
-    rg.append('stop').attr('offset','75%') .attr('stop-color',c).attr('stop-opacity',+(0.14*lum).toFixed(4));
+    // 空心圈：光带骑在描边线(≈71% = core半径/glow半径 1/1.4)上，
+    // 向圈内、圈外两侧渐隐；中心留极淡微光让磨砂背景透出。
+    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',+(0.04*lum).toFixed(4));
+    rg.append('stop').attr('offset','45%') .attr('stop-color',c).attr('stop-opacity',+(0.13*lum).toFixed(4));
+    rg.append('stop').attr('offset','71%') .attr('stop-color',c).attr('stop-opacity',+(0.50*lum).toFixed(4));
+    rg.append('stop').attr('offset','87%') .attr('stop-color',c).attr('stop-opacity',+(0.16*lum).toFixed(4));
     rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
   });
 
@@ -984,14 +977,13 @@ function renderGraph(graphData) {
   // ① 辉光层：径向渐变 fill，边缘 alpha 归 0 自然渐隐融入背景（无 blur）
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*1.9)
+    .attr('r',d=>nodeR(d)*1.4)
     .attr('fill',d=>d.has_cards?`url(#glow-${d._gi})`:'none');
   // ② 灯管本体
   node.append('circle')
     .attr('class','node-core')
     .attr('r',d=>nodeR(d))
-    .attr('fill',d=>`url(#glass-${d._gi})`)
-    .attr('fill-opacity',d=>d.has_cards?1:0.55)
+    .attr('fill','none')
     .attr('stroke',d=>subjectColor(d.subject))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
