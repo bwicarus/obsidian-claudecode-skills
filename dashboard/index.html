@@ -931,11 +931,11 @@ function renderGraph(graphData) {
 
   node.append('circle')
     .attr('r',d=>nodeR(d))
-    .attr('fill',d=>subjectColor(d.subject))
-    .attr('fill-opacity',d=>d.has_cards?0.16:0.06)
-    .attr('stroke',d=>masteryColor(d.mastery, d.has_cards))
-    .attr('stroke-width',d=>d.has_cards?2.8:1.4)
-    .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
+    .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
+    .attr('fill-opacity',d=>d.has_cards?0.82:0.28)
+    .attr('stroke',d=>subjectColor(d.subject))
+    .attr('stroke-width',1.6)
+    .attr('stroke-opacity',d=>d.has_cards?0.85:0.4)
     .style('filter',d=>d.has_cards
       ? `drop-shadow(0 0 6px ${masteryColor(d.mastery,true)}) drop-shadow(0 0 2px ${masteryColor(d.mastery,true)})`
       : 'none')
@@ -978,14 +978,14 @@ function renderGraph(graphData) {
 
   const legend=document.getElementById('graphLegend');
   legend.innerHTML='';
-  // 掌握度色阶（节点描边光环）
+  // 掌握度色阶（节点填充）
   const grad=`linear-gradient(90deg,${masteryColor(0,1)},${masteryColor(0.5,1)},${masteryColor(1,1)})`;
-  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:none;border:3px solid transparent;border-image:${grad} 1"></div>掌握度环 低→高</div>`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="width:34px;border-radius:3px;background:${grad}"></div>掌握度 低→高</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:none;border:2px dashed rgba(255,255,255,0.5)"></div>关键词相似</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:rgba(165,180,252,0.8)"></div>手动链接(越粗越强)</div>`;
-  // 学科（节点淡填充色）
+  // 学科（节点描边色）
   [...new Set(filteredNodes.map(n=>n.subject).filter(Boolean))].sort().forEach(s=>{
-    legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:${subjectColor(s)};opacity:0.45"></div>${s}</div>`;
+    legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:none;border:2px solid ${subjectColor(s)}"></div>${s}</div>`;
   });
 
   // 暴露 zoom / 节点引用 / 视口尺寸给 focusGraphOn 使用
