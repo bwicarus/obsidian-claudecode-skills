@@ -55,6 +55,10 @@ EMPTY_COUNTS: dict[str, Any] = {
     "total": 0, "new": 0, "learning": 0, "review": 0,
     "relearning": 0, "suspended": 0, "buried": 0,
     "retention_avg": 0.0, "retention_min": 0.0,
+    # 掌握度：在 retention 基础上纳入 interval 成熟度 / lapses 遗忘惩罚 / ease 难度
+    "mastery_avg": 0.0, "mastery_min": 0.0,
+    # 累计复习投入信号
+    "reps_total": 0, "lapses_total": 0,
 }
 
 
@@ -79,6 +83,42 @@ def card_retrievability(card: dict, now_ms: int) -> float | None:
     mod_s = card.get("mod", now_ms // 1000)
     days_since = max(0.0, (now_ms / 1000 - mod_s) / 86_400)
     return 0.9 ** (days_since / interval)
+
+
+# ── 掌握度 (mastery) ─────────────────────────────────────────────────────────
+# retention 只反映"现在还记不记得"，不区分「复习 1 次就记住」和「复习 20 次还
+# 在反复遗忘」。mastery 在 retention 上再乘一个长期稳定度，纳入：
+#   maturity      interval 越长 = 进入长期记忆（90 天封顶）
+#   lapse_factor  每次遗忘(lapse)掌握度打 0.7 折（反复遗忘 = 没真正掌握）
+#   ease_norm     Anki ease factor 低 = 这张卡对你偏难
+# new=0 / learning=0.25 / relearning=0.15（刚遗忘，掌握度最低）。
+
+def card_mastery(card: dict, now_ms: int) -> float | None:
+    queue = card.get("queue", 0)
+    if queue == -1:  # suspended — 不参与平均
+        return None
+    type_ = card.get("type", 0)
+    if type_ == 0:  # new
+        return 0.0
+    if type_ == 1:  # learning
+        return 0.25
+    if type_ == 3:  # relearning
+        return 0.15
+    # type_ == 2: review
+    interval = max(card.get("interval", 1), 1)
+    mod_s = card.get("mod", now_ms // 1000)
+    days_since = max(0.0, (now_ms / 1000 - mod_s) / 86_400)
+    retention = 0.9 ** (days_since / interval)
+
+    maturity = min(interval / 90.0, 1.0)
+    lapses = max(card.get("lapses", 0), 0)
+    lapse_factor = 0.7 ** lapses
+    factor = card.get("factor") or 2500          # ease ×1000；默认 2500
+    ease_norm = 0.5 + 0.5 * max(0.0, min(1.0, (factor - 1300) / 1200.0))
+
+    stability = maturity * lapse_factor * ease_norm
+    mastery = retention * (0.4 + 0.6 * stability)
+    return max(0.0, min(1.0, mastery))
 
 
 # ── AnkiConnect ──────────────────────────────────────────────────────────────
@@ -208,6 +248,7 @@ def query_counts(anki_url: str, note_ids: list[int]) -> dict[str, Any]:
 
     now_ms = int(time.time() * 1000)
     retentions: list[float] = []
+    masteries: list[float] = []
     for card in cards_info:
         status = classify_card(card)
         if status in counts:
@@ -215,10 +256,18 @@ def query_counts(anki_url: str, note_ids: list[int]) -> dict[str, Any]:
         r = card_retrievability(card, now_ms)
         if r is not None:
             retentions.append(r)
+        m = card_mastery(card, now_ms)
+        if m is not None:
+            masteries.append(m)
+        counts["reps_total"] += max(card.get("reps", 0), 0)
+        counts["lapses_total"] += max(card.get("lapses", 0), 0)
 
     if retentions:
         counts["retention_avg"] = sum(retentions) / len(retentions)
         counts["retention_min"] = min(retentions)
+    if masteries:
+        counts["mastery_avg"] = sum(masteries) / len(masteries)
+        counts["mastery_min"] = min(masteries)
     return counts
 
 
@@ -229,7 +278,7 @@ _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _ANKI_FM_KEYS = (
     "anki_total", "anki_new", "anki_learning",
     "anki_review", "anki_relearning", "anki_suspended",
-    "anki_retention", "anki_checked",
+    "anki_retention", "anki_mastery", "anki_checked",
 )
 
 
@@ -242,6 +291,7 @@ def _build_fm_kv(counts: dict[str, Any]) -> dict[str, Any]:
         "anki_relearning": counts["relearning"],
         "anki_suspended": counts["suspended"],
         "anki_retention": round(counts.get("retention_avg", 0.0), 3),
+        "anki_mastery":   round(counts.get("mastery_avg", 0.0), 3),
         "anki_checked":   dt.date.today().isoformat(),
     }
 

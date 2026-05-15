@@ -1,10 +1,13 @@
 """
-知识图谱复习优先级计算脚本（PageRank + FSRS retrievability 版）。
+知识图谱复习优先级计算脚本（PageRank + Anki 掌握度版）。
 
-最终评分：priority = (1 - R) × activation × importance
+最终评分：priority = (1 - M) × activation × importance
 
-  R           — Anki 平均留存率（来自 anki_status 写入的 retention_avg），
-                FSRS/Ebbinghaus 风格：R = 0.9^(t/interval)，越低越需要复习
+  M           — Anki 平均掌握度（来自 anki_status 写入的 mastery_avg）。
+                在 retention(R=0.9^(t/interval)) 基础上再乘长期稳定度：
+                interval 成熟度 × lapses 遗忘惩罚(0.7^lapses) × ease 难度。
+                比单纯 retention 更能区分「真掌握」和「反复遗忘」。
+                旧 record 无 mastery 时退化到 retention_avg。
   activation  — Personalized PageRank，种子为各笔记的近期编辑权重
                 （指数衰减，半衰期 7 天），表示与当前学习焦点的图距离
   importance  — 标准 PageRank（均匀种子），表示节点在知识图谱中的中心性
@@ -129,16 +132,20 @@ def mtime_seed(note_path: Path | None, half_life_days: float = 7.0) -> float:
 
 
 def weakness_score(record: dict | None) -> float:
-    """1 - retention_avg（FSRS 留存率）。
+    """薄弱度 = 1 - 掌握度，越高越该复习。
 
-    新版 anki_status 写入 status_snapshot.retention_avg。
-    旧 record 无该字段时退化为 (relearning + new) / total。
+    优先用 status_snapshot.mastery_avg（纳入 interval 成熟度 / lapses 遗忘
+    惩罚 / ease 难度，比单纯 retention 更能区分「真掌握」和「反复遗忘」）。
+    旧 record 无 mastery 时退化到 retention_avg，再退化到 (relearning+new)/total。
     """
     if record is None or record.get("status") == "no_cards":
         return 0.0
     snap = record.get("status_snapshot")
     if not snap:
         return 0.5
+
+    if snap.get("mastery_avg") is not None and "mastery_avg" in snap:
+        return max(0.0, min(1.0, 1.0 - snap["mastery_avg"]))
 
     if "retention_avg" in snap:
         return max(0.0, min(1.0, 1.0 - snap["retention_avg"]))
@@ -303,7 +310,7 @@ def write_priority_record(
         "activation":  round(activation, 4),
         "importance":  round(importance, 4),
         "weakness":    round(weakness, 4),
-        "formula":     "(1-R) * activation * importance",
+        "formula":     "(1-M) * activation * importance",
     }
     record["priority_snapshot"] = snapshot
     if dry_run:
@@ -448,7 +455,7 @@ def main() -> None:
     jaccard_only   = edge_count - explicit
 
     today = dt.date.today().isoformat()
-    print(f"\n今日复习优先列表  {today}  公式: (1-R) × activation × importance")
+    print(f"\n今日复习优先列表  {today}  公式: (1-M) × activation × importance  (M=掌握度)")
     print("─" * 80)
     if not top:
         print("  （没有符合条件的笔记）")
