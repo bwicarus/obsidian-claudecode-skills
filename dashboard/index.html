@@ -176,13 +176,12 @@
     .graph-link.link-explicit { stroke: rgba(165,180,252,0.55); }
     .graph-link.link-both     { stroke: rgba(165,180,252,0.85); }
     .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
-    /* 灯管透毛玻璃辉光：node-glow 是节点下方大半径强模糊光斑，node-core 是灯管本体 */
-    .node-glow { pointer-events: none; transition: opacity .25s, filter .25s; }
-    .node-core { transition: fill-opacity .2s; }
-    /* 选中：光斑爆亮放大 + 灯管本体内部点亮（从内往外发光感） */
-    .graph-node.highlighted .node-glow {
-      opacity: 0.5 !important;
-    }
+    /* node-glow=径向渐变光晕(边缘渐隐融背景)，node-core=灯管本体。
+       选中靠 core 点亮 + 整组放大让光晕自然变大，不动 glow 本身。 */
+    .node-glow { pointer-events: none; }
+    .node-core { transition: fill-opacity .2s, stroke-width .2s; }
+    .graph-node.highlighted { transform-box: fill-box; }
+    .graph-node.highlighted .node-glow { transform: scale(1.4); transform-origin: center; }
     .graph-node.highlighted .node-core {
       stroke: #fde047 !important;
       stroke-width: 3 !important;
@@ -190,9 +189,7 @@
       fill-opacity: 0.55 !important;
     }
     .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
-    .graph-node.kw-highlight .node-glow {
-      opacity: 0.38 !important;
-    }
+    .graph-node.kw-highlight .node-glow { transform: scale(1.25); transform-origin: center; }
     .graph-node.kw-highlight .node-core {
       stroke: #facc15 !important;
       stroke-width: 2.4 !important;
@@ -898,6 +895,22 @@ function renderGraph(graphData) {
 
   const zoom = d3.zoom().scaleExtent([0.2,4]).on('zoom',e=>g.attr('transform',e.transform));
   svg.call(zoom);
+
+  // 每个有卡节点一个 radialGradient：中心 mastery 色 → 边缘 alpha 归 0，
+  // 真·光晕，连续渐隐没有任何边界，自然融入磨砂背景。
+  const defs = svg.append('defs');
+  filteredNodes.forEach((d,i)=>{
+    d._gi = i;
+    if(!d.has_cards) return;
+    const c = masteryColor(d.mastery, true);
+    const rg = defs.append('radialGradient')
+      .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
+    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',0.5);
+    rg.append('stop').attr('offset','30%') .attr('stop-color',c).attr('stop-opacity',0.28);
+    rg.append('stop').attr('offset','65%') .attr('stop-color',c).attr('stop-opacity',0.1);
+    rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
+  });
+
   const g=svg.append('g');
 
   const sim=d3.forceSimulation(filteredNodes)
@@ -937,13 +950,11 @@ function renderGraph(graphData) {
       .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null;d.fy=null; })
     );
 
-  // ① 辉光层：适中半径 + 极强模糊 + 低透明 = 微弱融入背景的漫射光
+  // ① 辉光层：径向渐变 fill，边缘 alpha 归 0 自然渐隐融入背景（无 blur）
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*1.15)
-    .attr('fill',d=>masteryColor(d.mastery, d.has_cards))
-    .attr('opacity',d=>d.has_cards?0.22:0.05)
-    .style('filter',d=>`blur(${(nodeR(d)*0.95).toFixed(0)}px)`);
+    .attr('r',d=>nodeR(d)*2.6)
+    .attr('fill',d=>d.has_cards?`url(#glow-${d._gi})`:'none');
   // ② 灯管本体
   node.append('circle')
     .attr('class','node-core')
