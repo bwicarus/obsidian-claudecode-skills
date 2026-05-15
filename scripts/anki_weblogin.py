@@ -63,12 +63,32 @@ def main() -> int:
     from anki import sync_pb2
 
     print(f"collection: {COLLECTION}")
-    email = input("AnkiWeb 邮箱: ").strip()
-    if not email:
-        die("邮箱为空")
-    password = getpass.getpass("AnkiWeb 密码（不回显）: ")
-    if not password:
-        die("密码为空")
+
+    # 凭据来源优先级：环境变量 > 交互输入。
+    # 注意：Claude Code 的 `!` 前缀 / 管道执行没有 TTY，input()/getpass() 会
+    # 立刻 EOF。这种情况下要么 (a) 在真正的 SSH 终端里直接跑本脚本，要么
+    # (b) 用环境变量传（仅限你自己的私密终端，别让密码进共享日志）。
+    email = (os.environ.get("ANKIWEB_USER") or "").strip()
+    password = os.environ.get("ANKIWEB_PASS") or ""
+
+    if not email or not password:
+        if not sys.stdin.isatty():
+            die(
+                "没有 TTY 且未设环境变量，无法读凭据。两种跑法：\n"
+                "  1) 在【真正的 SSH 终端】里直接跑（不要用 Claude 的 ! 前缀）：\n"
+                "       cd ~/claude && /opt/anki-venv/bin/python3 scripts/anki_weblogin.py\n"
+                "  2) 私密终端里用环境变量（密码别进共享记录）：\n"
+                "       ANKIWEB_USER=you@x.com ANKIWEB_PASS=... \\\n"
+                "         /opt/anki-venv/bin/python3 scripts/anki_weblogin.py"
+            )
+        if not email:
+            email = input("AnkiWeb 邮箱: ").strip()
+        if not email:
+            die("邮箱为空")
+        if not password:
+            password = getpass.getpass("AnkiWeb 密码（不回显）: ")
+        if not password:
+            die("密码为空")
 
     col = Collection(str(COLLECTION))
 
