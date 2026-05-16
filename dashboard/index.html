@@ -948,11 +948,16 @@ function renderGraph(graphData) {
     const pk = 100 / K;
     const rg = defs.append('radialGradient')
       .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
-    rg.append('stop').attr('offset','0%').attr('stop-color',c).attr('stop-opacity',+(0.04*lum).toFixed(4));
-    rg.append('stop').attr('offset',(pk*0.63).toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.13*lum).toFixed(4));
-    rg.append('stop').attr('offset',pk.toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.50*lum).toFixed(4));
-    rg.append('stop').attr('offset',(pk+(100-pk)*0.55).toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.16*lum).toFixed(4));
-    rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
+    // 软辉光：内侧缓升 → 描边(pk)处达峰(0.36，比原 0.50 低更柔) →
+    // 外侧多档凸衰减极缓趋 0，stop 密集消除 radialGradient 带状硬边，
+    // 自然融进磨砂背景。
+    const out = 100 - pk;
+    [[0,0.03],[pk*0.42,0.07],[pk*0.7,0.16],[pk*0.88,0.28],[pk,0.36],
+     [pk+out*0.12,0.30],[pk+out*0.26,0.21],[pk+out*0.42,0.13],
+     [pk+out*0.60,0.07],[pk+out*0.80,0.025],[100,0]].forEach(([o,a])=>{
+      rg.append('stop').attr('offset',o.toFixed(1)+'%')
+        .attr('stop-color',c).attr('stop-opacity',+(a*lum).toFixed(4));
+    });
   });
 
   const g=svg.append('g');
