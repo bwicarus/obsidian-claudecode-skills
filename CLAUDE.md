@@ -52,7 +52,7 @@
 - `scripts/pending_notes.py` — 扫描待登记笔记（新增/已修改，命名规则 `[0-9A-Fa-f]{3}-*.md`）
 - `scripts/anki_from_note.py` / `anki_status.py` / `daily_anki_status.ps1`
 - `scripts/review_priority.py` — 知识图谱复习优先级（激活扩散 + Anki 薄弱度）
-- `scripts/refresh_weak_cards.py` — 薄弱卡分级：L1 AI 重写问法（原地 updateNoteFields，不破坏 FSRS）；L2 改写后仍 lapse→AI 拆/删卡（破坏性，`--apply-escalation` 才执行）。dry-run 默认 + 冷却期 + 回滚备份(record `_refresh.history`) + LaTeX 校验。凌晨由 server-config `weak_card_refresh.enabled` 控制
+- `scripts/refresh_weak_cards.py` — 卡片 AI 维护，`--task` 多模式共用一套管道（原地 updateNoteFields 不破坏 FSRS + 冷却 + 回滚 record `_refresh.history` + 裸文本 LaTeX 校验 + dry-run 默认）：`weak` 薄弱卡 L1 重写问法/L2 拆删；`antimodel` 已掌握卡换角度重问防只记问法；`quality` 全量低质(答案过长/多知识点/指代不清)启发式预筛→AI 评分原地优化或建议拆。凌晨由 server-config `weak_card_refresh`/`card_antimodel`/`card_quality` 各自 enabled 控制
 - `scripts/note_state.py` — 笔记内容哈希 + 失败追踪（连续失败 ≥3 次自动跳过）
 - `scripts/backfill_back_links.py` — 一次性脚本，给存量笔记补全反向链接
 
@@ -225,7 +225,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` |
 | **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
-| **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.{enabled,auto_escalate,min_lapses,limit,cooldown_days,escalate_lapses}、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
+| **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
 
 **控制面板源码**（全部在 git，部署 = 纯 cp）：
 - `_server_deploy/app.py` → 部署到 `/root/webapp/app.py`（含 `/api/nav-links` 路由、`register_control` 导入、`/control` 进 `PROTECTED_PREFIXES` / `NAV_INJECT_PREFIXES`）
@@ -296,7 +296,7 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 | bwicarus-client 凌晨定时（0.9.32+） | 客户端进程 | `_client/core/gui.py::_full_daily_pipeline` |
 | **服务器 systemd timer `bwicarus-daily.timer`**（2026-05-14+） | bwicarus.space VPS | `scripts/daily_anki_status.py` (Linux) |
 
-两边都跑：`ensure_alive → register_notes → anki_status → review_priority → 薄弱卡AI改写(server-config 开关控制) → build_review_deck → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync`。
+两边都跑：`ensure_alive → register_notes → anki_status → review_priority → 薄弱卡改写/已掌握换问法/质量体检(三个 server-config 开关各自控制) → build_review_deck → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync`。
 
 **Step 0 ensure_alive 行为**：
 - ping AnkiConnect `/version` — 通则直接进入下一步

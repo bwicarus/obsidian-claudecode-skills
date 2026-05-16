@@ -66,6 +66,20 @@ DEFAULT_CONFIG: dict = {
         "cooldown_days":   "30",
         "escalate_lapses": "2",
     },
+    "card_antimodel": {
+        "enabled":            False,
+        "min_stability_days": "60",
+        "min_reps":           "5",
+        "limit":              "5",
+        "cooldown_days":      "90",   # 已掌握别太勤换
+    },
+    "card_quality": {
+        "enabled":      False,
+        "auto_split":   False,        # AI 判该拆时是否凌晨自动拆（破坏性）
+        "max_back_len": "280",
+        "limit":        "5",
+        "cooldown_days": "45",
+    },
 }
 
 

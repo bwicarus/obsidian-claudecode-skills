@@ -50,6 +50,20 @@ SCHEMA: dict[str, type] = {
     "weak_card_refresh.limit":           str,
     "weak_card_refresh.cooldown_days":   str,
     "weak_card_refresh.escalate_lapses": str,
+
+    # 已掌握卡换问法（防模式记忆）
+    "card_antimodel.enabled":            bool,
+    "card_antimodel.min_stability_days": str,
+    "card_antimodel.min_reps":           str,
+    "card_antimodel.limit":              str,
+    "card_antimodel.cooldown_days":      str,
+
+    # 卡片质量体检
+    "card_quality.enabled":              bool,
+    "card_quality.auto_split":           bool,
+    "card_quality.max_back_len":         str,
+    "card_quality.limit":                str,
+    "card_quality.cooldown_days":        str,
 }
 
 
@@ -95,6 +109,46 @@ FIELD_META: dict[str, dict] = {
     "weak_card_refresh.auto_escalate": {
         "group": "薄弱卡改写",
         "label": "凌晨自动执行拆/删（L2，破坏性！不勾则只在日志给建议、需手动确认）",
+    },
+    "card_antimodel.enabled": {
+        "group": "已掌握卡换问法",
+        "label": "启用：对已掌握(久经复习)的卡 AI 换角度重问，防只记问法不懂（原地，语义不变）",
+    },
+    "card_antimodel.min_stability_days": {
+        "group": "已掌握卡换问法",
+        "label": "FSRS stability 阈值天（≥此值算已稳固，默认 60）",
+    },
+    "card_antimodel.min_reps": {
+        "group": "已掌握卡换问法",
+        "label": "最少复习次数（reps ≥ 此值才换，默认 5）",
+    },
+    "card_antimodel.limit": {
+        "group": "已掌握卡换问法",
+        "label": "每晚最多处理张数（默认 5）",
+    },
+    "card_antimodel.cooldown_days": {
+        "group": "已掌握卡换问法",
+        "label": "换问法后冷却天数（已掌握别太勤换，默认 90）",
+    },
+    "card_quality.enabled": {
+        "group": "卡片质量体检",
+        "label": "启用：全量扫低质卡（答案过长/多知识点/指代不清）AI 评分后原地优化",
+    },
+    "card_quality.max_back_len": {
+        "group": "卡片质量体检",
+        "label": "答案长度阈值（超过此字数预筛为「过长」候选，默认 280）",
+    },
+    "card_quality.limit": {
+        "group": "卡片质量体检",
+        "label": "每晚最多处理张数（默认 5）",
+    },
+    "card_quality.cooldown_days": {
+        "group": "卡片质量体检",
+        "label": "优化后冷却天数（默认 45）",
+    },
+    "card_quality.auto_split": {
+        "group": "卡片质量体检",
+        "label": "AI 判定「该拆」时凌晨自动拆（破坏性！不勾则只建议）",
     },
     "qa_remote_daemon": {
         "group": "iPad 截图问答",

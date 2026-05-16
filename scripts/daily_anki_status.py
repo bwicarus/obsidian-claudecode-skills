@@ -160,23 +160,40 @@ def _cfg_int(v, default: int) -> int:
         return default
 
 
-def refresh_weak_cards_step() -> int:
-    """读 server-config.weak_card_refresh：未启用跳过；启用则 L1 自动改写
-    （--apply），auto_escalate 勾选才加 --apply-escalation 执行 L2 拆/删。"""
-    wc = server_cfg().get("weak_card_refresh") or {}
-    if not wc.get("enabled"):
-        print("  weak_card_refresh 未启用，跳过")
+def _refresh_step(cfg_key: str, task: str, build_args) -> int:
+    """通用：读 server-config[cfg_key]，未启用跳过；启用则
+    refresh_weak_cards.py --task <task> --apply + 各自参数。"""
+    c = server_cfg().get(cfg_key) or {}
+    if not c.get("enabled"):
+        print(f"  {cfg_key} 未启用，跳过")
         return 0
-    args = [
-        "--apply",
-        "--limit", str(_cfg_int(wc.get("limit"), 5)),
-        "--min-lapses", str(_cfg_int(wc.get("min_lapses"), 3)),
-        "--cooldown-days", str(_cfg_int(wc.get("cooldown_days"), 30)),
-        "--escalate-lapses", str(_cfg_int(wc.get("escalate_lapses"), 2)),
-    ]
-    if wc.get("auto_escalate"):
-        args.append("--apply-escalation")
+    args = ["--task", task, "--apply",
+            "--limit", str(_cfg_int(c.get("limit"), 5)),
+            "--cooldown-days", str(_cfg_int(c.get("cooldown_days"), 30))]
+    args += build_args(c)
     return run_py("refresh_weak_cards.py", args)
+
+
+def step_weak() -> int:
+    return _refresh_step(
+        "weak_card_refresh", "weak", lambda c:
+        ["--min-lapses", str(_cfg_int(c.get("min_lapses"), 3)),
+         "--escalate-lapses", str(_cfg_int(c.get("escalate_lapses"), 2))]
+        + (["--apply-escalation"] if c.get("auto_escalate") else []))
+
+
+def step_antimodel() -> int:
+    return _refresh_step(
+        "card_antimodel", "antimodel", lambda c:
+        ["--min-stability-days", str(_cfg_int(c.get("min_stability_days"), 60)),
+         "--min-reps", str(_cfg_int(c.get("min_reps"), 5))])
+
+
+def step_quality() -> int:
+    return _refresh_step(
+        "card_quality", "quality", lambda c:
+        ["--max-back-len", str(_cfg_int(c.get("max_back_len"), 280))]
+        + (["--apply-escalation"] if c.get("auto_split") else []))
 
 
 def run_smoke_tests() -> int:
@@ -262,7 +279,9 @@ def main() -> int:
         "计算复习优先级",
         lambda: run_py("review_priority.py", ["--write-frontmatter", "--write-record"]),
     )
-    step("薄弱卡 AI 改写", refresh_weak_cards_step)
+    step("薄弱卡 AI 改写", step_weak)
+    step("已掌握卡换问法", step_antimodel)
+    step("卡片质量体检", step_quality)
     step("重建必复习牌组", lambda: run_py("build_review_deck.py"))
     step("清理孤儿", lambda: run_py("cleanup_orphans.py", ["--apply"]))
     step("导出仪表板", lambda: run_py("export_dashboard.py"))

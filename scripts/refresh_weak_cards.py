@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""refresh_weak_cards.py — 薄弱卡分级处理（leech / 高 lapses / 低 mastery）。
+"""refresh_weak_cards.py — 卡片 AI 维护，多 task 共用一套管道。
 
-分级（状态存 record 每卡 _refresh）：
-  L1  未处理或改写后暂稳：AI 重写问法（语义/答案不变），原地
-      updateNoteFields —— note id 不变，FSRS 调度数据(S/D/ivl/due/
-      reps/lapses)完全不动，不破坏 FSRS、复习进度全保留。
-  L2  已改写 ≥1 次仍持续 lapse：AI 判定「拆成多张」或「删除」。
-      破坏性(删旧建新会丢调度)，默认只出建议，--apply-escalation 才执行。
+--task weak       薄弱卡(leech/高lapses/低mastery)：L1 AI 重写问法；
+                  L2 改写后仍 lapse → 拆/删(破坏性,--apply-escalation)
+--task antimodel  已掌握卡(高 stability/长 ivl/reps 多/lapses 低)久未换：
+                  AI 换问法防"记住问法而非懂"(语义/答案不变,原地)
+--task quality    全量低质卡(答案过长/多知识点/指代不清)：AI 评分→
+                  原地优化 or 建议拆(拆破坏性,--apply-escalation)
 
-防护：改写前备份原 fields 进 _refresh.history(可回滚)；改写后跑
-裸文本 LaTeX 校验，不合格拒绝写入；每卡冷却期；每次限量。
+共用：updateNoteFields 原地改(note id 不变, FSRS 调度全保留)、
+record 每卡 _refresh 状态 + 冷却(任一 task 改过都进冷却防互相打架)、
+改前备份原 fields 可回滚、AI 输出裸文本 LaTeX 校验 gate、限量、
+dry-run 默认。
 
 用法：
-  dry-run（默认，调 AI 出预览但不写）：
-    python scripts/refresh_weak_cards.py --limit 5
-  执行 L1 改写：
-    python scripts/refresh_weak_cards.py --limit 5 --apply
-  额外执行 L2 拆/删：
-    python scripts/refresh_weak_cards.py --apply --apply-escalation
-  只看筛选不调 AI：
-    python scripts/refresh_weak_cards.py --no-ai
+  python scripts/refresh_weak_cards.py --task weak --limit 5            # dry-run
+  python scripts/refresh_weak_cards.py --task weak --apply
+  python scripts/refresh_weak_cards.py --task weak --apply --apply-escalation
+  python scripts/refresh_weak_cards.py --task antimodel --apply
+  python scripts/refresh_weak_cards.py --task quality --apply [--apply-escalation]
+  python scripts/refresh_weak_cards.py --task weak --no-ai             # 只筛选
 """
 from __future__ import annotations
 
@@ -46,7 +46,6 @@ RECORDS_DIR = PROJECT_DIR / "anki" / "records"
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 
-# 裸文本数学特征（命中且无 \( \[ → AI 又生成了裸文本，拒绝写入）
 _BARE_MATH = [
     re.compile(r"[A-Za-z]_[A-Za-z0-9{]"),
     re.compile(r"[A-Za-z0-9}]\^[A-Za-z0-9{]"),
@@ -64,12 +63,23 @@ def has_bare_math(s: str) -> bool:
     return any(p.search(s) for p in _BARE_MATH)
 
 
+def latex_ok(fields: list[str]) -> bool:
+    return not any(has_bare_math(f or "") for f in fields)
+
+
 def strip_fence(s: str) -> str:
     s = s.strip()
     if s.startswith("```"):
         s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
         s = re.sub(r"\n?```$", "", s)
     return s.strip()
+
+
+def parse_json(raw: str) -> dict | None:
+    try:
+        return json.loads(strip_fence(raw))
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def now_iso() -> str:
@@ -87,7 +97,6 @@ def load_records() -> list[tuple[Path, dict]]:
 
 
 def index_cards(records: list[tuple[Path, dict]]) -> dict[int, dict]:
-    """anki_note_id -> {recfile, rec, card, source_note, source_link, source_url}"""
     idx = {}
     for fn, rec in records:
         for c in rec.get("cards") or []:
@@ -102,91 +111,125 @@ def index_cards(records: list[tuple[Path, dict]]) -> dict[int, dict]:
     return idx
 
 
-def collect_weak(idx: dict[int, dict], min_lapses: int) -> list[dict]:
+def gather_card_stats(idx: dict[int, dict]) -> list[dict]:
+    """每 note 一条：idx 信息 + tags/lapses/reps/ivl/mastery/stability。
+    三个 collect_* 共用，只取一次 Anki 数据。"""
     note_ids = list(idx.keys())
     if not note_ids:
         return []
     notes = anki_request(ANKI_URL, "notesInfo", {"notes": note_ids}) or []
-    # 该版本 notesInfo 不返回 noteId，按请求顺序对应
     all_cids: list[int] = []
     note_cids: dict[int, list[int]] = {}
-    note_meta: dict[int, dict] = {}
+    note_tags: dict[int, list] = {}
     for nid, n in zip(note_ids, notes):
         if not n:
             continue
         cids = n.get("cards", []) or []
         note_cids[nid] = cids
-        note_meta[nid] = {"tags": n.get("tags", []), "fields": n.get("fields", {})}
+        note_tags[nid] = n.get("tags", [])
         all_cids += cids
     if not all_cids:
         return []
-    cinfo = {c["cardId"]: c for c in (anki_request(ANKI_URL, "cardsInfo", {"cards": all_cids}) or [])}
+    cinfo = {c["cardId"]: c for c in
+             (anki_request(ANKI_URL, "cardsInfo", {"cards": all_cids}) or [])}
     fmem = fsrs_memory_map(ANKI_URL, all_cids)
     now_ms = int(time.time() * 1000)
 
-    weak = []
+    stats = []
     for nid, cids in note_cids.items():
-        meta = note_meta[nid]
-        tags = meta["tags"]
         lapses = max((cinfo.get(ci, {}).get("lapses", 0) for ci in cids), default=0)
         reps = max((cinfo.get(ci, {}).get("reps", 0) for ci in cids), default=0)
-        masts = []
+        ivl = max((cinfo.get(ci, {}).get("interval", 0) for ci in cids), default=0)
+        masts, stabs = [], []
         for ci in cids:
             if ci in cinfo:
                 m = card_mastery(cinfo[ci], now_ms, fmem)
                 if m is not None:
                     masts.append(m)
-        mastery = min(masts) if masts else 1.0
-        is_leech = "leech" in tags
-        weak_by = []
-        if is_leech:
-            weak_by.append("leech")
-        if lapses >= min_lapses:
-            weak_by.append(f"lapses={lapses}")
-        if mastery < 0.35 and reps >= 4:
-            weak_by.append(f"mastery={mastery:.2f}")
-        if not weak_by:
-            continue
-        info = idx[nid]
-        weak.append({
-            **info, "note_id": nid, "lapses": lapses, "reps": reps,
-            "mastery": mastery, "weak_by": weak_by,
+                fm = fmem.get(ci) or {}
+                if fm.get("s"):
+                    stabs.append(fm["s"])
+        stats.append({
+            **idx[nid], "note_id": nid, "tags": note_tags.get(nid, []),
+            "lapses": lapses, "reps": reps, "ivl": ivl,
+            "mastery": min(masts) if masts else 1.0,
+            "stability": max(stabs) if stabs else 0.0,
         })
-    # 越弱越优先
-    weak.sort(key=lambda w: (-w["lapses"], w["mastery"]))
-    return weak
+    return stats
 
 
-def stage_of(card: dict, lapses: int, cooldown_days: int, escalate_lapses: int) -> str:
-    """返回 'skip' | 'L1' | 'L2'。"""
+def collect_weak(stats: list[dict], min_lapses: int) -> list[dict]:
+    out = []
+    for s in stats:
+        why = []
+        if "leech" in s["tags"]:
+            why.append("leech")
+        if s["lapses"] >= min_lapses:
+            why.append(f"lapses={s['lapses']}")
+        if s["mastery"] < 0.35 and s["reps"] >= 4:
+            why.append(f"mastery={s['mastery']:.2f}")
+        if why:
+            out.append({**s, "why": why})
+    out.sort(key=lambda w: (-w["lapses"], w["mastery"]))
+    return out
+
+
+def collect_antimodel(stats: list[dict], min_stab: int, min_reps: int) -> list[dict]:
+    out = []
+    for s in stats:
+        if s["lapses"] > 1 or s["reps"] < min_reps:
+            continue
+        stable = (s["stability"] >= min_stab) or (s["stability"] == 0 and s["ivl"] >= 21)
+        if not stable:
+            continue
+        out.append({**s, "why": [f"stab={s['stability']:.0f}d/ivl={s['ivl']}d/reps={s['reps']}"]})
+    out.sort(key=lambda w: -w["stability"])
+    return out
+
+
+def collect_quality(stats: list[dict], max_back_len: int) -> list[dict]:
+    """启发式预筛低质候选（最终由 AI 判定），减少 AI 调用量。"""
+    out = []
+    for s in stats:
+        c = s["card"]
+        body = (c.get("back") or c.get("text") or "")
+        front = c.get("front") or ""
+        flags = []
+        if len(body) > max_back_len:
+            flags.append(f"过长{len(body)}")
+        if c.get("type") != "cloze":
+            seg = body.count("\n") + body.count("；") + len(re.findall(r"(?m)^\s*\d+[\.、]", body))
+            if seg >= 3:
+                flags.append("多知识点")
+        if 0 < len(front) < 14 and re.match(r"^(它|这|该|其|此)", front):
+            flags.append("指代不清")
+        if flags:
+            out.append({**s, "why": flags})
+    return out
+
+
+def in_cooldown(card: dict, days: int) -> bool:
     rf = card.get("_refresh") or {}
-    last_ts = rf.get("last_ts")
-    if last_ts:
-        try:
-            age = (dt.datetime.now().astimezone()
-                   - dt.datetime.fromisoformat(last_ts)).days
-        except ValueError:
-            age = 999
-        if age < cooldown_days:
-            return "skip"  # 冷却中，给它时间按新问法重新稳定
-    count = rf.get("count", 0)
-    lapses_at = rf.get("lapses_at", 0)
-    if count >= 1:
-        # 改写后又新增 lapse 达阈值 → 升级 L2；否则还在恢复中，跳过
-        if lapses - lapses_at >= escalate_lapses:
+    ts = rf.get("last_ts")
+    if not ts:
+        return False
+    try:
+        age = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(ts)).days
+    except ValueError:
+        return False
+    return age < days
+
+
+def stage_weak(card: dict, lapses: int, cooldown: int, esc: int) -> str:
+    """weak 专用 L1/L2 分级。"""
+    if in_cooldown(card, cooldown):
+        return "skip"
+    rf = card.get("_refresh") or {}
+    if rf.get("count", 0) >= 1:
+        if lapses - rf.get("lapses_at", 0) >= esc:
             return "L2"
         return "skip"
     return "L1"
-
-
-def build_note_ctx(source_note: str, max_chars: int = 3500) -> str:
-    p = (VAULT_ROOT / source_note)
-    try:
-        txt = p.read_text(encoding="utf-8")
-    except OSError:
-        return "(来源笔记不可读)"
-    cleaned, _ = clean_note(txt, max_chars)
-    return cleaned
 
 
 REFS = None
@@ -199,61 +242,81 @@ def fmt_ref() -> str:
     return REFS.get("format", "")
 
 
-def prompt_rewrite(card: dict, lapses: int, note_ctx: str) -> str:
-    ct = card["type"]
-    if ct == "cloze":
-        fld = '仅 "text"（含 {{c1::...}} 挖空），"front"/"back" 留空'
-    else:
-        fld = '"front" 和 "back"，"text" 留空'
+def build_note_ctx(source_note: str, max_chars: int = 3500) -> str:
+    try:
+        txt = (VAULT_ROOT / source_note).read_text(encoding="utf-8")
+    except OSError:
+        return "(来源笔记不可读)"
+    cleaned, _ = clean_note(txt, max_chars)
+    return cleaned
+
+
+def _fld_spec(ct: str) -> str:
+    return ('仅 "text"（含 {{c1::...}} 挖空），"front"/"back" 留空'
+            if ct == "cloze" else '"front" 和 "back"，"text" 留空')
+
+
+def _orig(card: dict) -> str:
+    return (f"原卡：\nfront: {card.get('front','')}\n"
+            f"back: {card.get('back','')}\ntext: {card.get('text','')}")
+
+
+def prompt_rewrite(card, lapses, ctx) -> str:
     return f"""这张 Anki 卡用户反复记不住（已失败 {lapses} 次 / leech）。请在**绝对不改变所测知识点和答案正确性**的前提下，重写问法：让问题更聚焦、换一个角度或表述，降低对固定字面的机械记忆。
 
 硬性要求：
 - 知识点与答案语义严格不变，只改表达方式，不得改对错。
-- 所有数学符号必须用 \\(...\\) 行内或 \\[...\\] 块级包裹，禁止任何裸写（下标 b_1、上标 e^x、函数名 span、省略号、集合记号都要包）。
-- 只输出 JSON，无其它文字：{{"diagnosis":"为何难记的一句话判断","front":"...","back":"...","text":"..."}}
-- 本卡类型 {ct}，须填 {fld}。
+- 所有数学符号必须用 \\(...\\) 行内或 \\[...\\] 块级包裹，禁止任何裸写。
+- 只输出 JSON：{{"diagnosis":"为何难记的一句话","front":"...","back":"...","text":"..."}}
+- 本卡类型 {card['type']}，须填 {_fld_spec(card['type'])}。
 
-原卡：
-front: {card.get('front','')}
-back: {card.get('back','')}
-text: {card.get('text','')}
+{_orig(card)}
 
-来源笔记（供你对照知识点，勿照搬）：
-{note_ctx}
+来源笔记（对照知识点，勿照搬）：
+{ctx}
 
 LaTeX / 卡片规范：
 {fmt_ref()}"""
 
 
-def prompt_escalate(card: dict, lapses: int, delta: int, note_ctx: str) -> str:
-    return f"""这张卡已被改写 {card['_refresh']['count']} 次，用户仍持续记不住（改写后又失败 {delta} 次）。说明单卡承载过重或知识点本身需要处理。二选一给出方案：
-- "split"：拆成 2-4 张更小的卡，每张只测一个最小知识点
-- "delete"：这张卡不值得保留（过碎/过宽/不适合卡片化）
+def prompt_antimodel(card, ctx) -> str:
+    return f"""这张卡用户已经掌握得很好且复习多次——风险是只记住了「这个问法→这个答案」的模式，而非真正理解。请换一个角度/场景重新提问来检验真理解，**所测知识点与答案正确性绝对不变**，只换问法切入点（如改成应用情境、反向追问、给条件反求等）。
 
-只输出 JSON：{{"action":"split"|"delete","reason":"理由","cards":[{{"type":"basic","front":"...","back":"...","text":""}}]}}
-delete 时 cards 为 []。数学一律 \\(...\\) 包裹，禁止裸写。
+硬性要求：
+- 知识点与正确答案语义严格不变，难度相当，不得改对错、不得加新知识点。
+- 数学一律 \\(...\\) / \\[...\\] 包裹，禁止裸写。
+- 只输出 JSON：{{"angle":"换了什么角度的一句话","front":"...","back":"...","text":"..."}}
+- 本卡类型 {card['type']}，须填 {_fld_spec(card['type'])}。
 
-原卡：
-front: {card.get('front','')}
-back: {card.get('back','')}
-text: {card.get('text','')}
+{_orig(card)}
 
 来源笔记：
-{note_ctx}
+{ctx}
 
 规范：
 {fmt_ref()}"""
 
 
-def parse_json(raw: str) -> dict | None:
-    try:
-        return json.loads(strip_fence(raw))
-    except (json.JSONDecodeError, ValueError):
-        return None
+def prompt_quality(card, flags, ctx) -> str:
+    return f"""审查这张 Anki 卡的质量。预筛疑点：{flags}。判断并三选一：
+- "ok"：质量没问题，无需改（cards/fields 留空）
+- "rewrite"：原地优化（答案太长就精简到要点、问题指代不清就补明确主语、表述歧义就改清楚），**知识点与答案正确性不变**
+- "split"：一张塞了多个知识点，应拆成 2-4 张各测一个最小点
 
+只输出 JSON：
+- ok:      {{"action":"ok","reason":"..."}}
+- rewrite: {{"action":"rewrite","reason":"...","front":"...","back":"...","text":"..."}}（类型 {card['type']}，填 {_fld_spec(card['type'])}）
+- split:   {{"action":"split","reason":"...","cards":[{{"type":"basic","front":"...","back":"...","text":""}}]}}
 
-def latex_ok(fields: list[str]) -> bool:
-    return not any(has_bare_math(f or "") for f in fields)
+数学一律 \\(...\\) 包裹，禁止裸写。不要为了改而改，没问题就 ok。
+
+{_orig(card)}
+
+来源笔记：
+{ctx}
+
+规范：
+{fmt_ref()}"""
 
 
 def build_anki_fields(card: dict, info: dict) -> dict:
@@ -272,136 +335,218 @@ def write_rec(fn: Path, rec: dict) -> None:
                   encoding="utf-8")
 
 
+def apply_rewrite(w: dict, new: dict, stage: str) -> None:
+    """共用：备份原 fields → 写回 card → updateNoteFields → record。"""
+    card = w["card"]
+    rf = card.setdefault("_refresh", {"count": 0, "history": []})
+    rf["history"].append({"ts": now_iso(), "stage": stage,
+                          "front": card.get("front", ""),
+                          "back": card.get("back", ""),
+                          "text": card.get("text", "")})
+    for k in ("front", "back", "text"):
+        card[k] = new.get(k, card.get(k, ""))
+    anki_request(ANKI_URL, "updateNoteFields",
+                 {"note": {"id": w["note_id"],
+                           "fields": build_anki_fields(card, w)}}, timeout=20)
+    rf["count"] = rf.get("count", 0) + 1
+    rf["last_ts"] = now_iso()
+    rf["lapses_at"] = w["lapses"]
+    rf["stage"] = stage
+    write_rec(w["recfile"], w["rec"])
+    print(f"  ✓ {stage} note {w['note_id']}（_refresh#{rf['count']}），record 回写")
+
+
+def do_split(w: dict, subs: list[dict], origin: str) -> None:
+    card = w["card"]
+    if not subs or not latex_ok([f for sc in subs for f in
+                                 (sc.get("front", ""), sc.get("back", ""),
+                                  sc.get("text", ""))]):
+        print("  ✗ 拆分子卡为空或含裸文本，放弃")
+        return
+    base = card["local_id"].rsplit("-", 1)[0]
+    for i, sc in enumerate(subs, 1):
+        nc = {"local_id": f"{base}-s{i:02d}", "type": sc.get("type", "basic"),
+              "deck": card.get("deck", ""), "front": sc.get("front", ""),
+              "back": sc.get("back", ""), "text": sc.get("text", ""),
+              "reason": f"{origin}拆分自 {card['local_id']}",
+              "tags": card.get("tags", []), "status": "synced"}
+        note = {"deckName": nc["deck"],
+                "modelName": "Obsidian-cloze" if nc["type"] == "cloze"
+                else "Obsidian-basic",
+                "fields": build_anki_fields(nc, w),
+                "tags": ["obsidian", "ai_generated", *nc["tags"]]}
+        try:
+            nc["anki_note_id"] = anki_request(ANKI_URL, "addNote",
+                                              {"note": note}, timeout=20)
+            w["rec"]["cards"].append(nc)
+            print(f"  ✓ 新子卡 {nc['local_id']} → {nc['anki_note_id']}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ✗ 子卡 {nc['local_id']} 失败: {e}")
+    anki_request(ANKI_URL, "deleteNotes", {"notes": [w["note_id"]]})
+    w["rec"]["cards"] = [c for c in w["rec"]["cards"]
+                         if c.get("local_id") != card["local_id"]]
+    write_rec(w["recfile"], w["rec"])
+    print(f"  ✓ 拆分完成，原 note {w['note_id']} 已删")
+
+
+def do_delete(w: dict) -> None:
+    card = w["card"]
+    anki_request(ANKI_URL, "deleteNotes", {"notes": [w["note_id"]]})
+    w["rec"]["cards"] = [c for c in w["rec"]["cards"]
+                         if c.get("local_id") != card["local_id"]]
+    write_rec(w["recfile"], w["rec"])
+    print(f"  ✓ 已删除 note {w['note_id']} + record 移除")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--apply", action="store_true", help="执行 L1 改写")
+    ap.add_argument("--task", choices=["weak", "antimodel", "quality"],
+                    default="weak")
+    ap.add_argument("--apply", action="store_true")
     ap.add_argument("--apply-escalation", action="store_true",
-                    help="额外执行 L2 拆/删（破坏性）")
-    ap.add_argument("--no-ai", action="store_true", help="只筛选不调 AI")
+                    help="执行破坏性 L2/拆卡")
+    ap.add_argument("--no-ai", action="store_true")
     ap.add_argument("--limit", type=int, default=5)
-    ap.add_argument("--min-lapses", type=int, default=3)
     ap.add_argument("--cooldown-days", type=int, default=30)
-    ap.add_argument("--escalate-lapses", type=int, default=2,
-                    help="改写后再 lapse 多少次升级 L2")
+    # weak
+    ap.add_argument("--min-lapses", type=int, default=3)
+    ap.add_argument("--escalate-lapses", type=int, default=2)
+    # antimodel
+    ap.add_argument("--min-stability-days", type=int, default=60)
+    ap.add_argument("--min-reps", type=int, default=5)
+    # quality
+    ap.add_argument("--max-back-len", type=int, default=280)
     args = ap.parse_args()
 
-    records = load_records()
-    idx = index_cards(records)
-    weak = collect_weak(idx, args.min_lapses)
-    print(f"薄弱卡 {len(weak)} 张（min_lapses={args.min_lapses}）")
-    if not weak:
+    stats = gather_card_stats(index_cards(load_records()))
+    if args.task == "weak":
+        items = collect_weak(stats, args.min_lapses)
+    elif args.task == "antimodel":
+        items = collect_antimodel(stats, args.min_stability_days, args.min_reps)
+    else:
+        items = collect_quality(stats, args.max_back_len)
+    print(f"[{args.task}] 候选 {len(items)} 张")
+    if not items:
         return 0
 
     picked = 0
-    for w in weak:
+    for w in items:
         if picked >= args.limit:
             break
         card = w["card"]
-        st = stage_of(card, w["lapses"], args.cooldown_days, args.escalate_lapses)
-        tag = "/".join(w["weak_by"])
-        head = f"[{w['source_note']}] {card['local_id']} ({tag}) → {st}"
+        why = "/".join(w["why"])
+
+        if args.task == "weak":
+            st = stage_weak(card, w["lapses"], args.cooldown_days,
+                            args.escalate_lapses)
+        else:
+            st = "skip" if in_cooldown(card, args.cooldown_days) else "DO"
         if st == "skip":
             continue
         picked += 1
-        print(f"\n━━ {head} ━━")
+        print(f"\n━━ [{w['source_note']}] {card['local_id']} ({why}) "
+              f"{args.task}:{st} ━━")
         if args.no_ai:
             continue
-        note_ctx = build_note_ctx(w["source_note"])
+        ctx = build_note_ctx(w["source_note"])
 
-        if st == "L1":
-            resp = ai_client.ask(prompt_rewrite(card, w["lapses"], note_ctx))
-            j = parse_json(resp)
+        # ── weak L1 / antimodel / quality-rewrite：原地改写 ──
+        if args.task == "weak" and st == "L1":
+            j = parse_json(ai_client.ask(prompt_rewrite(card, w["lapses"], ctx)))
             if not j:
-                print("  ✗ AI 返回非 JSON，跳过")
-                continue
+                print("  ✗ AI 非 JSON"); continue
             new = {k: (j.get(k) or "").strip() for k in ("front", "back", "text")}
-            if not latex_ok([new["front"], new["back"], new["text"]]):
-                print("  ✗ 新内容含裸文本数学，拒绝写入")
-                continue
+            if not latex_ok(list(new.values())):
+                print("  ✗ 含裸文本数学，拒绝"); continue
             print(f"  诊断: {j.get('diagnosis','')}")
             for k in ("front", "back", "text"):
                 if card.get(k) or new[k]:
                     print(f"  {k}: {card.get(k,'')!r}\n      → {new[k]!r}")
             if args.apply:
-                rf = card.setdefault("_refresh", {"count": 0, "history": []})
-                rf["history"].append({"ts": now_iso(), "stage": "L1",
-                                       "front": card.get("front", ""),
-                                       "back": card.get("back", ""),
-                                       "text": card.get("text", "")})
-                for k in ("front", "back", "text"):
-                    card[k] = new[k]
-                anki_request(ANKI_URL, "updateNoteFields",
-                             {"note": {"id": w["note_id"],
-                                       "fields": build_anki_fields(card, w)}},
-                             timeout=20)
-                rf["count"] = rf.get("count", 0) + 1
-                rf["last_ts"] = now_iso()
-                rf["lapses_at"] = w["lapses"]
-                rf["stage"] = "rewritten"
-                write_rec(w["recfile"], w["rec"])
-                print(f"  ✓ 已改写 note {w['note_id']}（第 {rf['count']} 次），record 回写")
+                apply_rewrite(w, new, "L1")
 
-        elif st == "L2":
-            delta = w["lapses"] - (card.get("_refresh", {}).get("lapses_at", 0))
-            resp = ai_client.ask(prompt_escalate(card, w["lapses"], delta, note_ctx))
-            j = parse_json(resp)
+        elif args.task == "antimodel":
+            j = parse_json(ai_client.ask(prompt_antimodel(card, ctx)))
             if not j:
-                print("  ✗ AI 返回非 JSON，跳过")
+                print("  ✗ AI 非 JSON"); continue
+            new = {k: (j.get(k) or "").strip() for k in ("front", "back", "text")}
+            if not latex_ok(list(new.values())):
+                print("  ✗ 含裸文本数学，拒绝"); continue
+            print(f"  换角度: {j.get('angle','')}")
+            for k in ("front", "back", "text"):
+                if card.get(k) or new[k]:
+                    print(f"  {k}: {card.get(k,'')!r}\n      → {new[k]!r}")
+            if args.apply:
+                apply_rewrite(w, new, "antimodel")
+
+        elif args.task == "quality":
+            j = parse_json(ai_client.ask(prompt_quality(card, w["why"], ctx)))
+            if not j:
+                print("  ✗ AI 非 JSON"); continue
+            act = j.get("action")
+            print(f"  质量判定: {act} — {j.get('reason','')}")
+            if act == "ok":
                 continue
+            if act == "rewrite":
+                new = {k: (j.get(k) or "").strip()
+                       for k in ("front", "back", "text")}
+                if not latex_ok(list(new.values())):
+                    print("  ✗ 含裸文本数学，拒绝"); continue
+                for k in ("front", "back", "text"):
+                    if card.get(k) or new[k]:
+                        print(f"  {k}: {card.get(k,'')!r}\n      → {new[k]!r}")
+                if args.apply:
+                    apply_rewrite(w, new, "quality")
+            elif act == "split":
+                for sc in j.get("cards", []):
+                    print(f"    子卡: {sc.get('front','')!r} / {sc.get('back','')!r}")
+                if not args.apply_escalation:
+                    print("  （拆卡破坏性，未加 --apply-escalation，仅建议）")
+                elif args.apply:
+                    do_split(w, j.get("cards", []), "质量")
+
+        # ── weak L2：拆/删（破坏性）──
+        elif args.task == "weak" and st == "L2":
+            delta = w["lapses"] - (card.get("_refresh", {}).get("lapses_at", 0))
+            j = parse_json(ai_client.ask(prompt_escalate(card, w["lapses"],
+                                                         delta, ctx)))
+            if not j:
+                print("  ✗ AI 非 JSON"); continue
             act = j.get("action")
             print(f"  升级判定: {act} — {j.get('reason','')}")
             if act == "split":
                 for sc in j.get("cards", []):
                     print(f"    子卡: {sc.get('front','')!r} / {sc.get('back','')!r}")
             if not args.apply_escalation:
-                print("  （L2 破坏性，未加 --apply-escalation，仅建议不执行）")
+                print("  （L2 破坏性，未加 --apply-escalation，仅建议）")
                 continue
-            # 执行升级（破坏性）
-            if act == "delete":
-                anki_request(ANKI_URL, "deleteNotes", {"notes": [w["note_id"]]})
-                w["rec"]["cards"] = [c for c in w["rec"]["cards"]
-                                     if c.get("local_id") != card["local_id"]]
-                write_rec(w["recfile"], w["rec"])
-                print(f"  ✓ 已删除 note {w['note_id']} + record 移除")
-            elif act == "split":
-                subs = j.get("cards", [])
-                if not subs or not latex_ok(
-                        [f for sc in subs for f in (sc.get("front", ""),
-                         sc.get("back", ""), sc.get("text", ""))]):
-                    print("  ✗ 拆分子卡为空或含裸文本，放弃")
-                    continue
-                base = card["local_id"].rsplit("-", 1)[0]
-                for i, sc in enumerate(subs, 1):
-                    nc = {"local_id": f"{base}-s{i:02d}",
-                          "type": sc.get("type", "basic"),
-                          "deck": card.get("deck", ""),
-                          "front": sc.get("front", ""), "back": sc.get("back", ""),
-                          "text": sc.get("text", ""),
-                          "reason": f"L2拆分自 {card['local_id']}",
-                          "tags": card.get("tags", []), "status": "synced"}
-                    note = {"deckName": nc["deck"],
-                            "modelName": "Obsidian-cloze" if nc["type"] == "cloze"
-                            else "Obsidian-basic",
-                            "fields": build_anki_fields(nc, w),
-                            "tags": ["obsidian", "ai_generated", *nc["tags"]]}
-                    try:
-                        nc["anki_note_id"] = anki_request(
-                            ANKI_URL, "addNote", {"note": note}, timeout=20)
-                        w["rec"]["cards"].append(nc)
-                        print(f"  ✓ 新子卡 {nc['local_id']} → {nc['anki_note_id']}")
-                    except Exception as e:  # noqa: BLE001
-                        print(f"  ✗ 子卡 {nc['local_id']} 失败: {e}")
-                anki_request(ANKI_URL, "deleteNotes", {"notes": [w["note_id"]]})
-                w["rec"]["cards"] = [c for c in w["rec"]["cards"]
-                                     if c.get("local_id") != card["local_id"]]
-                write_rec(w["recfile"], w["rec"])
-                print(f"  ✓ 拆分完成，原 note {w['note_id']} 已删")
+            if args.apply and act == "delete":
+                do_delete(w)
+            elif args.apply and act == "split":
+                do_split(w, j.get("cards", []), "L2")
 
-    mode = ("APPLY" + ("+ESCALATION" if args.apply_escalation else "")
+    mode = ("APPLY" + ("+ESC" if args.apply_escalation else "")
             if args.apply else "DRY-RUN")
-    print(f"\n处理 {picked} 张（{mode}）"
-          + ("" if args.apply else "  —— 加 --apply 执行 L1 改写"))
+    print(f"\n[{args.task}] 处理 {picked} 张（{mode}）"
+          + ("" if args.apply else "  —— 加 --apply 执行"))
     return 0
+
+
+def prompt_escalate(card, lapses, delta, ctx) -> str:
+    return f"""这张卡已被改写 {card.get('_refresh',{}).get('count',0)} 次，用户仍持续记不住（改写后又失败 {delta} 次）。二选一：
+- "split"：拆成 2-4 张更小的卡，每张只测一个最小知识点
+- "delete"：不值得保留（过碎/过宽/不适合卡片化）
+
+只输出 JSON：{{"action":"split"|"delete","reason":"理由","cards":[{{"type":"basic","front":"...","back":"...","text":""}}]}}
+delete 时 cards 为 []。数学一律 \\(...\\) 包裹。
+
+{_orig(card)}
+
+来源笔记：
+{ctx}
+
+规范：
+{fmt_ref()}"""
 
 
 if __name__ == "__main__":
