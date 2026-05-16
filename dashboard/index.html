@@ -348,15 +348,27 @@
     .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
     .legend-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
+    .kw-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .kw-search-wrap { display: flex; align-items: center; gap: 5px; }
     .kw-search {
-      width: 100%; box-sizing: border-box; margin: 2px 0 10px;
-      background: rgba(255,255,255,0.06); color: var(--text);
-      border: 1px solid var(--glass-border); border-radius: 8px;
-      padding: 7px 12px; font-size: 13px; outline: none;
-      transition: border-color .15s, background .15s;
+      box-sizing: border-box; width: 168px; max-width: 0; opacity: 0;
+      padding: 0; margin: 0; font-size: 13px; outline: none;
+      color: var(--text); background: rgba(255,255,255,0.06);
+      border: 1px solid transparent; border-radius: 7px;
+      transition: max-width .22s ease, opacity .18s, padding .22s, border-color .15s, background .15s;
     }
-    .kw-search::placeholder { color: var(--muted); }
-    .kw-search:focus { border-color: #a5b4fc; background: rgba(165,180,252,0.10); }
+    .kw-search-wrap.open .kw-search { max-width: 168px; opacity: 1; padding: 6px 10px; border-color: var(--glass-border); }
+    .kw-search-wrap.open .kw-search:focus { border-color: #a5b4fc; background: rgba(165,180,252,0.10); }
+    .kw-search::placeholder { color: var(--muted); text-transform: none; }
+    .kw-search-btn {
+      display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; padding: 0; flex-shrink: 0;
+      color: var(--muted); background: rgba(255,255,255,0.07);
+      border: 1px solid var(--glass-border); border-radius: 7px; cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .kw-search-btn:hover { background: rgba(255,255,255,0.14); color: var(--text); }
+    .kw-search-wrap.open .kw-search-btn { background: rgba(165,180,252,0.22); color: #c7d2fe; }
 
     #tooltip {
       position: fixed; background: rgba(15,12,41,0.92); backdrop-filter: blur(8px);
@@ -538,8 +550,15 @@
       <span class="tab-title">词云</span>
     </div>
     <div class="panel-body">
-      <div class="panel-body-title">关键词云</div>
-      <input id="kwSearch" class="kw-search" type="search" placeholder="搜索关键词，回车定位…" autocomplete="off">
+      <div class="panel-body-title kw-title-row">
+        <span>关键词云</span>
+        <span class="kw-search-wrap">
+          <input id="kwSearch" class="kw-search" type="search" placeholder="搜索关键词，回车定位…" autocomplete="off">
+          <button id="kwSearchBtn" class="kw-search-btn" type="button" aria-label="搜索关键词" title="搜索关键词">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+          </button>
+        </span>
+      </div>
       <div id="wordcloudContainer" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 4px;padding:8px 0;"></div>
     </div>
   </div>
@@ -1523,7 +1542,16 @@ function renderWordCloud(keywords) {
   if(_ks && !_ks._wired){
     _ks._wired=true;
     _ks.addEventListener('input',()=>{ _kwQuery=_ks.value.trim().toLowerCase(); applyKwSearch(); });
+    const _wrap=_ks.closest('.kw-search-wrap');
+    const _btn=document.getElementById('kwSearchBtn');
+    const _collapse=clear=>{ if(clear){ _ks.value=''; _kwQuery=''; applyKwSearch(); } if(_wrap) _wrap.classList.remove('open'); };
+    if(_btn) _btn.addEventListener('click',()=>{
+      if(_wrap.classList.contains('open')) _collapse(true);
+      else { _wrap.classList.add('open'); _ks.focus(); }
+    });
+    _ks.addEventListener('blur',()=>{ if(!_ks.value.trim()) _collapse(false); });
     _ks.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){ _collapse(true); _ks.blur(); return; }
       if(e.key!=='Enter') return;
       const q=_ks.value.trim().toLowerCase(); if(!q) return;
       let hit=null,el=null;
