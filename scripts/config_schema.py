@@ -61,7 +61,11 @@ SCHEMA: dict[str, type] = {
     # 卡片质量体检
     "card_quality.enabled":              bool,
     "card_quality.auto_split":           bool,
+    "card_quality.relative_threshold":   bool,
     "card_quality.max_back_len":         str,
+    "card_quality.hard_again_ratio":     str,
+    "card_quality.min_reviews":          str,
+    "card_quality.sample_per_run":       str,
     "card_quality.limit":                str,
     "card_quality.cooldown_days":        str,
 }
@@ -134,9 +138,25 @@ FIELD_META: dict[str, dict] = {
         "group": "卡片质量体检",
         "label": "启用：全量扫低质卡（答案过长/多知识点/指代不清）AI 评分后原地优化",
     },
+    "card_quality.relative_threshold": {
+        "group": "卡片质量体检",
+        "label": "过长阈值用同类型卡 P85 相对值（关掉则用下面绝对字数）",
+    },
     "card_quality.max_back_len": {
         "group": "卡片质量体检",
-        "label": "答案长度阈值（超过此字数预筛为「过长」候选，默认 280）",
+        "label": "答案绝对长度阈值（相对模式下作下限保护，默认 280）",
+    },
+    "card_quality.hard_again_ratio": {
+        "group": "卡片质量体检",
+        "label": "again+hard 占比超此值算「难用」候选（行为信号，默认 0.4）",
+    },
+    "card_quality.min_reviews": {
+        "group": "卡片质量体检",
+        "label": "行为信号至少需多少次复习才采信（默认 4）",
+    },
+    "card_quality.sample_per_run": {
+        "group": "卡片质量体检",
+        "label": "每晚额外随机抽几张绕过启发式（盲区安全网，默认 3，0=关）",
     },
     "card_quality.limit": {
         "group": "卡片质量体检",

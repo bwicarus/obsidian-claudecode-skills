@@ -192,7 +192,11 @@ def step_antimodel() -> int:
 def step_quality() -> int:
     return _refresh_step(
         "card_quality", "quality", lambda c:
-        ["--max-back-len", str(_cfg_int(c.get("max_back_len"), 280))]
+        ["--max-back-len", str(_cfg_int(c.get("max_back_len"), 280)),
+         "--hard-again-ratio", str(c.get("hard_again_ratio") or "0.4"),
+         "--min-reviews", str(_cfg_int(c.get("min_reviews"), 4)),
+         "--sample-per-run", str(_cfg_int(c.get("sample_per_run"), 3))]
+        + ([] if c.get("relative_threshold", True) else ["--abs-threshold"])
         + (["--apply-escalation"] if c.get("auto_split") else []))
 
 

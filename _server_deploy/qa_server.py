@@ -74,11 +74,15 @@ DEFAULT_CONFIG: dict = {
         "cooldown_days":      "90",   # 已掌握别太勤换
     },
     "card_quality": {
-        "enabled":      False,
-        "auto_split":   False,        # AI 判该拆时是否凌晨自动拆（破坏性）
-        "max_back_len": "280",
-        "limit":        "5",
-        "cooldown_days": "45",
+        "enabled":            False,
+        "auto_split":         False,  # AI 判该拆时是否凌晨自动拆（破坏性）
+        "relative_threshold": True,   # 过长阈值用同 type P85 相对值
+        "max_back_len":       "280",
+        "hard_again_ratio":   "0.4",
+        "min_reviews":        "4",
+        "sample_per_run":     "3",
+        "limit":              "5",
+        "cooldown_days":      "45",
     },
 }
 

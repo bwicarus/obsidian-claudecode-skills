@@ -294,12 +294,23 @@ def main() -> None:
         except (json.JSONDecodeError, OSError):
             last_run = None
 
+    # 卡片质量体检报告（refresh_weak_cards --task quality 写）
+    quality_health = None
+    qr_file = PROJECT_DIR / "state" / "quality_report.json"
+    if qr_file.exists():
+        try:
+            qh = json.loads(qr_file.read_text(encoding="utf-8"))
+            quality_health = (qh.get("history") or [])[-14:]
+        except (json.JSONDecodeError, OSError):
+            quality_health = None
+
     output = {
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "notes":    notes_out,
         "graph":    {"nodes": graph_nodes, "edges": graph_edges},
         "keywords": keywords,
         "last_run": last_run,
+        "quality_health": quality_health,
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

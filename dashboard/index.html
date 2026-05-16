@@ -535,6 +535,7 @@
 <div id="kwPopover"></div>
 
 <div id="lastRunBanner" class="last-run-banner"></div>
+<div id="qualityHealth" class="last-run-banner"></div>
 
 <div class="filters" id="filters">
   <button class="filter-btn active" data-subject="all">全部</button>
@@ -806,6 +807,7 @@ async function loadData() {
     allGraph    = data.graph    || {nodes:[],edges:[]};
     allKeywords = data.keywords || [];
     renderLastRun(data.last_run);
+    renderQualityHealth(data.quality_health);
     buildKwIndex(allNotes);
     buildFilters(allNotes);
     renderAll(allNotes, allGraph, allKeywords);
@@ -837,6 +839,24 @@ function buildFilters(notes) {
 }
 
 const LAST_RUN_DISMISS_KEY = 'lastRunBanner.dismissedStartedAt';
+function renderQualityHealth(qh) {
+  const el = document.getElementById('qualityHealth');
+  if (!el) return;
+  if (!qh || !qh.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.className = 'last-run-banner running';
+  const last = qh[qh.length - 1];
+  const bf = Object.entries(last.by_flag || {}).map(([k, v]) =>
+    `<span class="step-pill">${k}×${v}</span>`).join('');
+  const trend = qh.slice(-8).map(h => {
+    const ch = (h.rewrite || 0) + (h.split || 0);
+    return `<span class="step-pill ${ch ? 'failed' : 'ok'}">${(h.date || '').slice(5)} 改${h.rewrite || 0}拆${h.split || 0}</span>`;
+  }).join('');
+  el.innerHTML = `<span class="icon">◍</span><b>卡片体检</b>`
+    + `<span style="opacity:0.7">最新 ${last.date || ''}：体检 ${last.processed || 0} · ok ${last.ok || 0} · 改 ${last.rewrite || 0} · 拆 ${last.split || 0}</span>`
+    + bf + `<span style="opacity:0.5">｜近期</span>` + trend;
+}
+
 function renderLastRun(lastRun) {
   const el = document.getElementById('lastRunBanner');
   if (!el) return;

@@ -52,7 +52,7 @@
 - `scripts/pending_notes.py` — 扫描待登记笔记（新增/已修改，命名规则 `[0-9A-Fa-f]{3}-*.md`）
 - `scripts/anki_from_note.py` / `anki_status.py` / `daily_anki_status.ps1`
 - `scripts/review_priority.py` — 知识图谱复习优先级（激活扩散 + Anki 薄弱度）
-- `scripts/refresh_weak_cards.py` — 卡片 AI 维护，`--task` 多模式共用一套管道（原地 updateNoteFields 不破坏 FSRS + 冷却 + 回滚 record `_refresh.history` + 裸文本 LaTeX 校验 + dry-run 默认）：`weak` 薄弱卡 L1 重写问法/L2 拆删；`antimodel` 已掌握卡换角度重问防只记问法；`quality` 全量低质(答案过长/多知识点/指代不清)启发式预筛→AI 评分原地优化或建议拆。凌晨由 server-config `weak_card_refresh`/`card_antimodel`/`card_quality` 各自 enabled 控制
+- `scripts/refresh_weak_cards.py` — 卡片 AI 维护，`--task` 多模式共用一套管道（原地 updateNoteFields 不破坏 FSRS + 冷却 + 回滚 record `_refresh.history` + 裸文本 LaTeX 校验 + dry-run 默认）：`weak` 薄弱卡 L1 重写问法/L2 拆删；`antimodel` 已掌握卡换角度重问防只记问法；`quality` 低质卡：静态启发式(答案过长/多知识点/指代不清) + 行为信号(again+hard 占比、答题耗时，来自 getReviewsOfCards) 扩召回 + 同 type P85 相对阈值 + 每晚随机采样兜底盲区 → AI 评分原地优化或建议拆，写 `state/quality_report.json`(ok/改/拆 + by_flag 趋势)上仪表盘。凌晨由 server-config `weak_card_refresh`/`card_antimodel`/`card_quality` 各自 enabled 控制
 - `scripts/note_state.py` — 笔记内容哈希 + 失败追踪（连续失败 ≥3 次自动跳过）
 - `scripts/backfill_back_links.py` — 一次性脚本，给存量笔记补全反向链接
 
@@ -271,6 +271,7 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 - `anki/records/*.json` — Anki 制卡记录（含 `section_hashes`：各节内容哈希，用于增量制卡）
 - `state/note-states.json` — 各 skill 最后处理的内容哈希 + 失败追踪（`failure_count` / `last_error`）
 - `state/active_tasks.json` — 任务追踪（task_tracker 写，任务监视读）
+- `state/quality_report.json` — 卡片质量体检历史（refresh_weak_cards --task quality 写，export_dashboard 读 → 仪表盘「卡片体检」面板）
 - `state/logs/ai_calls.log` — AI 调用日志（5MB 滚动）
 - `state/backup/` — 每日 `daily_anki_status.ps1` 自动备份 7 天的 note-states 和 anki-records
 

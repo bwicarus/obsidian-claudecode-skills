@@ -28,6 +28,7 @@ import datetime as dt
 import glob
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -45,6 +46,7 @@ import ai_client  # noqa: E402
 RECORDS_DIR = PROJECT_DIR / "anki" / "records"
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+QUALITY_REPORT = PROJECT_DIR / "state" / "quality_report.json"
 
 _BARE_MATH = [
     re.compile(r"[A-Za-z]_[A-Za-z0-9{]"),
@@ -133,6 +135,11 @@ def gather_card_stats(idx: dict[int, dict]) -> list[dict]:
     cinfo = {c["cardId"]: c for c in
              (anki_request(ANKI_URL, "cardsInfo", {"cards": all_cids}) or [])}
     fmem = fsrs_memory_map(ANKI_URL, all_cids)
+    # 复习行为：ease 1=again 2=hard 3=good 4=easy；time=毫秒答题耗时。
+    # type 3=cram(临时演练)不计入。中位数抗挂机异常。
+    rev_raw = anki_request(ANKI_URL, "getReviewsOfCards",
+                           {"cards": all_cids}) or {}
+    revmap = {int(k): v for k, v in rev_raw.items()}
     now_ms = int(time.time() * 1000)
 
     stats = []
@@ -149,11 +156,20 @@ def gather_card_stats(idx: dict[int, dict]) -> list[dict]:
                 fm = fmem.get(ci) or {}
                 if fm.get("s"):
                     stabs.append(fm["s"])
+        revs = [r for ci in cids for r in revmap.get(ci, [])
+                if r.get("type") != 3]
+        rc = len(revs)
+        ha = sum(1 for r in revs if r.get("ease") in (1, 2))
+        times = sorted(r["time"] for r in revs if r.get("time", 0) > 0)
+        med_t = times[len(times) // 2] if times else 0
         stats.append({
             **idx[nid], "note_id": nid, "tags": note_tags.get(nid, []),
             "lapses": lapses, "reps": reps, "ivl": ivl,
             "mastery": min(masts) if masts else 1.0,
             "stability": max(stabs) if stabs else 0.0,
+            "review_count": rc,
+            "hard_again_ratio": (ha / rc) if rc else 0.0,
+            "med_time_ms": med_t,
         })
     return stats
 
@@ -187,24 +203,63 @@ def collect_antimodel(stats: list[dict], min_stab: int, min_reps: int) -> list[d
     return out
 
 
-def collect_quality(stats: list[dict], max_back_len: int) -> list[dict]:
-    """启发式预筛低质候选（最终由 AI 判定），减少 AI 调用量。"""
-    out = []
+def _pct(lst: list, p: float):
+    if not lst:
+        return None
+    x = sorted(lst)
+    return x[min(len(x) - 1, int(p * len(x)))]
+
+
+def collect_quality(stats: list[dict], max_back_len: int, hard_ratio: float,
+                    min_rev: int, relative: bool, sample_n: int) -> list[dict]:
+    """启发式 + 行为信号预筛 → AI 终裁。相对阈值按同 type P85；
+    另随机采样 sample_n 张绕过启发式作盲区安全网。"""
+    def body_of(s):
+        c = s["card"]
+        return c.get("back") or c.get("text") or ""
+
+    # 按 type 基线：body 长度 P85（相对阈值）、med_time 中位（耗时基线）
+    blens: dict = {}
+    btimes: dict = {}
+    for s in stats:
+        t = s["card"].get("type", "basic")
+        blens.setdefault(t, []).append(len(body_of(s)))
+        if s.get("med_time_ms", 0) > 0:
+            btimes.setdefault(t, []).append(s["med_time_ms"])
+    p85 = {t: _pct(v, 0.85) for t, v in blens.items()}
+    tmed = {t: _pct(v, 0.5) for t, v in btimes.items()}
+
+    cand, pool = [], []
     for s in stats:
         c = s["card"]
-        body = (c.get("back") or c.get("text") or "")
-        front = c.get("front") or ""
+        t = c.get("type", "basic")
+        body, front = body_of(s), (c.get("front") or "")
+        if relative and p85.get(t):
+            long_thr = max(p85[t], int(max_back_len * 0.6))
+        else:
+            long_thr = max_back_len
         flags = []
-        if len(body) > max_back_len:
-            flags.append(f"过长{len(body)}")
-        if c.get("type") != "cloze":
-            seg = body.count("\n") + body.count("；") + len(re.findall(r"(?m)^\s*\d+[\.、]", body))
+        if len(body) > long_thr:
+            flags.append(f"过长{len(body)}>{long_thr}")
+        if t != "cloze":
+            seg = (body.count("\n") + body.count("；")
+                   + len(re.findall(r"(?m)^\s*\d+[\.、]", body)))
             if seg >= 3:
                 flags.append("多知识点")
         if 0 < len(front) < 14 and re.match(r"^(它|这|该|其|此)", front):
             flags.append("指代不清")
-        if flags:
-            out.append({**s, "why": flags})
+        if (s.get("review_count", 0) >= min_rev
+                and s.get("hard_again_ratio", 0) > hard_ratio):
+            flags.append(f"难用{s['hard_again_ratio']*100:.0f}%")
+        if (tmed.get(t) and s.get("review_count", 0) >= min_rev
+                and s.get("med_time_ms", 0) > 2 * tmed[t]):
+            flags.append(f"耗时{s['med_time_ms']//1000}s")
+        (cand if flags else pool).append((s, flags))
+
+    out = [{**s, "why": f} for s, f in cand]
+    if sample_n > 0 and pool:
+        for s, _ in random.sample(pool, min(sample_n, len(pool))):
+            out.append({**s, "why": ["采样体检"]})
     return out
 
 
@@ -335,6 +390,24 @@ def write_rec(fn: Path, rec: dict) -> None:
                   encoding="utf-8")
 
 
+def write_quality_report(qstat: dict, processed: int, mode: str) -> None:
+    try:
+        rep = json.loads(QUALITY_REPORT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        rep = {"history": []}
+    rep.setdefault("history", []).append({
+        "date": dt.date.today().isoformat(), "ts": now_iso(),
+        "mode": mode, "processed": processed,
+        "ok": qstat["ok"], "rewrite": qstat["rewrite"],
+        "split": qstat["split"], "by_flag": qstat["by_flag"],
+    })
+    rep["history"] = rep["history"][-60:]
+    QUALITY_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    QUALITY_REPORT.write_text(
+        json.dumps(rep, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"  ✎ 质量报告 → {QUALITY_REPORT.name}")
+
+
 def apply_rewrite(w: dict, new: dict, stage: str) -> None:
     """共用：备份原 fields → 写回 card → updateNoteFields → record。"""
     card = w["card"]
@@ -416,6 +489,14 @@ def main() -> int:
     ap.add_argument("--min-reps", type=int, default=5)
     # quality
     ap.add_argument("--max-back-len", type=int, default=280)
+    ap.add_argument("--hard-again-ratio", type=float, default=0.4,
+                    help="again+hard 占比超此值算难用")
+    ap.add_argument("--min-reviews", type=int, default=4,
+                    help="行为信号至少需多少次复习才可信")
+    ap.add_argument("--abs-threshold", action="store_true",
+                    help="用绝对 max_back_len（默认按同 type P85 相对）")
+    ap.add_argument("--sample-per-run", type=int, default=3,
+                    help="每次额外随机抽几张绕过启发式（盲区安全网）")
     args = ap.parse_args()
 
     stats = gather_card_stats(index_cards(load_records()))
@@ -424,12 +505,15 @@ def main() -> int:
     elif args.task == "antimodel":
         items = collect_antimodel(stats, args.min_stability_days, args.min_reps)
     else:
-        items = collect_quality(stats, args.max_back_len)
+        items = collect_quality(stats, args.max_back_len,
+                                args.hard_again_ratio, args.min_reviews,
+                                not args.abs_threshold, args.sample_per_run)
     print(f"[{args.task}] 候选 {len(items)} 张")
     if not items:
         return 0
 
     picked = 0
+    qstat = {"ok": 0, "rewrite": 0, "split": 0, "by_flag": {}}
     for w in items:
         if picked >= args.limit:
             break
@@ -484,6 +568,12 @@ def main() -> int:
             if not j:
                 print("  ✗ AI 非 JSON"); continue
             act = j.get("action")
+            for fl in w["why"]:
+                m = re.match(r"[^\d%>]+", fl)
+                cat = m.group().strip() if m else fl
+                qstat["by_flag"][cat] = qstat["by_flag"].get(cat, 0) + 1
+            if act in ("ok", "rewrite", "split"):
+                qstat[act] += 1
             print(f"  质量判定: {act} — {j.get('reason','')}")
             if act == "ok":
                 continue
@@ -529,6 +619,8 @@ def main() -> int:
             if args.apply else "DRY-RUN")
     print(f"\n[{args.task}] 处理 {picked} 张（{mode}）"
           + ("" if args.apply else "  —— 加 --apply 执行"))
+    if args.task == "quality":
+        write_quality_report(qstat, picked, mode)
     return 0
 
 
