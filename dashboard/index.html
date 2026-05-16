@@ -348,6 +348,16 @@
     .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
     .legend-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
+    .kw-search {
+      width: 100%; box-sizing: border-box; margin: 2px 0 10px;
+      background: rgba(255,255,255,0.06); color: var(--text);
+      border: 1px solid var(--glass-border); border-radius: 8px;
+      padding: 7px 12px; font-size: 13px; outline: none;
+      transition: border-color .15s, background .15s;
+    }
+    .kw-search::placeholder { color: var(--muted); }
+    .kw-search:focus { border-color: #a5b4fc; background: rgba(165,180,252,0.10); }
+
     #tooltip {
       position: fixed; background: rgba(15,12,41,0.92); backdrop-filter: blur(8px);
       border: 1px solid var(--glass-border); color: var(--text); padding: 6px 12px;
@@ -529,6 +539,7 @@
     </div>
     <div class="panel-body">
       <div class="panel-body-title">关键词云</div>
+      <input id="kwSearch" class="kw-search" type="search" placeholder="搜索关键词，回车定位…" autocomplete="off">
       <div id="wordcloudContainer" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 4px;padding:8px 0;"></div>
     </div>
   </div>
@@ -1497,8 +1508,32 @@ function wireGraphSettings() {
   sizeInput.addEventListener('change', () => saveGraphSettings());
 }
 
+let _kwQuery='';
+// 搜索过滤：匹配的词满亮加粗，其余压暗(不移除,保持布局)；空查询恢复原样
+function applyKwSearch(){
+  const q=_kwQuery;
+  d3.select('#wordcloudContainer').selectAll('text')
+    .style('opacity',d=>!q?d.opacity:(d.text.toLowerCase().includes(q)?1:0.06))
+    .style('font-weight',d=>(q&&d.text.toLowerCase().includes(q))?700:(d.size>28?700:400));
+}
+
 function renderWordCloud(keywords) {
   const container=document.getElementById('wordcloudContainer');
+  const _ks=document.getElementById('kwSearch');
+  if(_ks && !_ks._wired){
+    _ks._wired=true;
+    _ks.addEventListener('input',()=>{ _kwQuery=_ks.value.trim().toLowerCase(); applyKwSearch(); });
+    _ks.addEventListener('keydown',e=>{
+      if(e.key!=='Enter') return;
+      const q=_ks.value.trim().toLowerCase(); if(!q) return;
+      let hit=null,el=null;
+      d3.select('#wordcloudContainer').selectAll('text').each(function(dd){
+        if(!hit && dd.text.toLowerCase().includes(q)){ hit=dd; el=this; }
+      });
+      if(hit&&el){ const r=el.getBoundingClientRect();
+        showKwPopover(hit.text, r.left+r.width/2, r.top+r.height/2); }
+    });
+  }
   container.innerHTML='';
   if(!keywords.length){ container.innerHTML='<span style="color:var(--muted);font-size:13px">暂无关键词</span>'; return; }
   const W=520, H=400;
@@ -1537,6 +1572,7 @@ function renderWordCloud(keywords) {
         .on('click',(e,d)=>{ e.stopPropagation(); showKwPopover(d.text,e.clientX,e.clientY); })
         .on('mouseenter',function(){ d3.select(this).style('opacity',1); })
         .on('mouseleave',function(e,d){ d3.select(this).style('opacity',d.opacity); });
+      if(_kwQuery) applyKwSearch();
     })
     .start();
 }
