@@ -86,12 +86,13 @@ def build_graph(
 ) -> tuple[list[dict], list[dict]]:
     name_set = set(names)
 
-    # 边权重公式（跟 review_priority.build_adjacency 必须一致）：
-    #   jaccard 边     w = jaccard(0~1)
-    #   显式链接 n 条   w = 1.0 + log2(1+n)   1→1.0 3→2.0 7→3.0
-    #   双向互链       × 1.2
-    #   同对取 max（显式通常压过 jaccard）
-    # 额外记 kw_shared / link_count / kind 供前端 hover + 样式区分。
+    # 边权重（跟 review_priority.build_adjacency 必须一致）：
+    #   w = log2(1 + eff_kw) × (0.6 + 0.4 × jaccard)
+    #   eff_kw = 共享关键词数；无共享但有显式链接时兜底 = 1
+    # 旧公式靠显式链接数，但 /connect 去重 + 反向补全后 n_links 几乎
+    # 恒为 2，w 退化成常数 ~3.10 毫无区分度。改由「共享多少关键词」
+    # 主导强度，显式链接只保证「被判定相关」的边不消失。
+    # link_count / kw_shared / kind 仍记，供前端 hover + 样式区分。
     kw_shared: dict[tuple[str, str], int] = {}
     jac_w:     dict[tuple[str, str], float] = {}
     fwd:       dict[tuple[str, str], int] = {}
@@ -130,19 +131,17 @@ def build_graph(
         s, t = k
         nf, nr = fwd.get(k, 0), rev.get(k, 0)
         n_links = nf + nr
-        w_explicit = 0.0
-        if n_links > 0:
-            w_explicit = 1.0 + math.log2(1 + n_links)
-            if nf > 0 and nr > 0:
-                w_explicit *= 1.2
-        w = max(jac_w.get(k, 0.0), w_explicit)
+        inter = kw_shared.get(k, 0)
+        jac   = jac_w.get(k, 0.0)
+        eff_kw = inter if inter > 0 else (1 if n_links > 0 else 0)
+        w = math.log2(1 + eff_kw) * (0.6 + 0.4 * jac)
         kind = ("both" if (n_links and k in jac_w)
                 else "explicit" if n_links else "kw")
         edge_list.append({
             "source": s, "target": t,
             "weight": round(w, 3),
             "link_count": n_links,
-            "kw_shared": kw_shared.get(k, 0),
+            "kw_shared": inter,
             "kind": kind,
         })
 

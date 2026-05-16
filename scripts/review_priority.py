@@ -170,12 +170,11 @@ def build_adjacency(notes: list[NoteInfo]) -> dict[str, dict[str, float]]:
 
     边权重（跟 export_dashboard.build_graph 必须一致，否则图谱粗细跟优先级
     算法脱节）：
-      jaccard 边     w = jaccard(0~1)
-      显式链接 n 条   w = 1.0 + log2(1+n)   多链接 = 强关联，对数防爆炸
-      双向互链       × 1.2                  A↔B 互指 = 真·强关联
-      同对取 max
-    显式链接条数纳入 → 链接多的笔记在 PageRank 里传播更多 activation/
-    importance，复习优先级会偏向强关联知识簇（设计如此）。
+      w = log2(1 + eff_kw) × (0.6 + 0.4 × jaccard)
+      eff_kw = 共享关键词数；无共享但有显式链接时兜底 = 1
+    旧公式靠显式链接数，但 /connect 去重 + 反向补全后 n_links 几乎恒为
+    2，退化成常数无区分度。改由「共享多少关键词」主导：共享越多 →
+    PageRank 传播越强，复习优先级偏向真正知识点密集相连的簇。
     """
     import math
     name_set = {n.name for n in notes}
@@ -184,15 +183,21 @@ def build_adjacency(notes: list[NoteInfo]) -> dict[str, dict[str, float]]:
     def k(a: str, b: str) -> tuple[str, str]:
         return (a, b) if a < b else (b, a)
 
-    jac: dict[tuple[str, str], float] = {}
+    jac:   dict[tuple[str, str], float] = {}
+    inter: dict[tuple[str, str], int]   = {}
     fwd: dict[tuple[str, str], int] = {}
     rev: dict[tuple[str, str], int] = {}
 
     for i, a in enumerate(notes):
         for b in notes[i + 1:]:
+            ni = len(a.keywords & b.keywords)
+            if ni == 0:
+                continue
             w = jaccard(a.keywords, b.keywords)
             if w > 0:
-                jac[k(a.name, b.name)] = w
+                kk = k(a.name, b.name)
+                jac[kk]   = w
+                inter[kk] = ni
 
     for note in notes:
         if note.note_path is None:
@@ -210,12 +215,10 @@ def build_adjacency(notes: list[NoteInfo]) -> dict[str, dict[str, float]]:
         a, b = kk
         nf, nr = fwd.get(kk, 0), rev.get(kk, 0)
         n_links = nf + nr
-        w_exp = 0.0
-        if n_links > 0:
-            w_exp = 1.0 + math.log2(1 + n_links)
-            if nf > 0 and nr > 0:
-                w_exp *= 1.2
-        w = max(jac.get(kk, 0.0), w_exp)
+        ni = inter.get(kk, 0)
+        jv = jac.get(kk, 0.0)
+        eff_kw = ni if ni > 0 else (1 if n_links > 0 else 0)
+        w = math.log2(1 + eff_kw) * (0.6 + 0.4 * jv)
         adj[a][b] = w
         adj[b][a] = w
 
