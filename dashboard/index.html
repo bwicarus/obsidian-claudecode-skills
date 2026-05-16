@@ -177,6 +177,8 @@
     .graph-link.link-explicit { stroke: #a5b4fc; }
     .graph-link.link-both     { stroke: #a5b4fc; }
     .graph-link.explicit      { stroke: #a5b4fc; }  /* 旧 class 兼容 */
+    /* 选中节点的连线临时 bloom：filter 由 JS 按线亮度设(越亮范围越广) */
+    .graph-link.incident-bloom { stroke-opacity: 0.95 !important; }
     /* node-glow=径向渐变光晕(边缘渐隐融背景)，node-core=灯管本体。
        选中靠 core 点亮 + 整组放大让光晕自然变大，不动 glow 本身。 */
     /* transform-box: fill-box 必须有：否则 transform-origin:center 在 SVG
@@ -187,7 +189,7 @@
        无填充时圆盘内部不接收指针事件，只剩极细描边能点→拖不动/点不中 */
     .node-core { pointer-events: all; transition: fill-opacity .2s, stroke-width .2s; }
     .graph-node.highlighted { transform-box: fill-box; }
-    .graph-node.highlighted .node-glow { transform: scale(1.4); transform-origin: center; }
+    .graph-node.highlighted .node-glow { transform: scale(1.6); transform-origin: center; }
     /* 选中节点：内部保持空心、描边维持学科色(圆环颜色)，
        不再黄实心填充；选中强调靠描边加粗 + 光环放大(下一条) + 黄标签 */
     .graph-node.highlighted .node-core {
@@ -939,14 +941,17 @@ function renderGraph(graphData) {
     const c = subjectColor(d.subject);
     const pct = _rankPct[d.id] ?? 0.5;
     const lum = 0.10 + 0.90 * (1 - pct);
+    // 越亮(待复习,pct小) → 光晕范围越广：K=glow 半径倍数；
+    // 光带峰始终骑在描边(=100/K%)，K 大则向外发散空间大。
+    const K = 1.15 + 0.95 * (1 - pct);   // pct0→2.10最广  pct1→1.15贴圈
+    d._glowK = K;
+    const pk = 100 / K;
     const rg = defs.append('radialGradient')
       .attr('id','glow-'+i).attr('cx','50%').attr('cy','50%').attr('r','50%');
-    // 空心圈：光带骑在描边线(≈71% = core半径/glow半径 1/1.4)上，
-    // 向圈内、圈外两侧渐隐；中心留极淡微光让磨砂背景透出。
-    rg.append('stop').attr('offset','0%')  .attr('stop-color',c).attr('stop-opacity',+(0.04*lum).toFixed(4));
-    rg.append('stop').attr('offset','45%') .attr('stop-color',c).attr('stop-opacity',+(0.13*lum).toFixed(4));
-    rg.append('stop').attr('offset','71%') .attr('stop-color',c).attr('stop-opacity',+(0.50*lum).toFixed(4));
-    rg.append('stop').attr('offset','87%') .attr('stop-color',c).attr('stop-opacity',+(0.16*lum).toFixed(4));
+    rg.append('stop').attr('offset','0%').attr('stop-color',c).attr('stop-opacity',+(0.04*lum).toFixed(4));
+    rg.append('stop').attr('offset',(pk*0.63).toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.13*lum).toFixed(4));
+    rg.append('stop').attr('offset',pk.toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.50*lum).toFixed(4));
+    rg.append('stop').attr('offset',(pk+(100-pk)*0.55).toFixed(1)+'%').attr('stop-color',c).attr('stop-opacity',+(0.16*lum).toFixed(4));
     rg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
   });
 
@@ -968,8 +973,8 @@ function renderGraph(graphData) {
       const a=_rankPct[(d.source&&d.source.id)||d.source];
       const b=_rankPct[(d.target&&d.target.id)||d.target];
       const v=[a,b].filter(x=>x!=null);
-      if(!v.length) return 0.16;
-      return +(0.08+0.62*(1-Math.min(...v))).toFixed(3);
+      d._ea = v.length ? +(0.08+0.62*(1-Math.min(...v))).toFixed(3) : 0.16;
+      return d._ea;
     })
     .classed('kw-highlight', d => {
       const sId = (d.source && d.source.id) || d.source;
@@ -1001,7 +1006,7 @@ function renderGraph(graphData) {
   // ① 辉光层：径向渐变 fill，边缘 alpha 归 0 自然渐隐融入背景（无 blur）
   node.append('circle')
     .attr('class','node-glow')
-    .attr('r',d=>nodeR(d)*1.4)
+    .attr('r',d=>nodeR(d)*(d._glowK||1.3))
     .attr('fill',d=>d.has_cards?`url(#glow-${d._gi})`:'none');
   // ② 灯管本体
   node.append('circle')
@@ -1069,6 +1074,7 @@ function renderGraph(graphData) {
   graphViewSize = { W, H };
 
   // 渲染后若已有高亮（如词云已选），等 simulation 稍稳后自动居中
+  if (highlightedNoteId) applyIncidentBloom(highlightedNoteId);  // 重渲后恢复 bloom
   if (highlightedKeywordNotes.size > 0 || highlightedNoteId) {
     setTimeout(() => {
       if (highlightedKeywordNotes.size > 0) focusGraphOn(highlightedKeywordNotes);
@@ -1152,6 +1158,22 @@ function makeGravityForce() {
   return force;
 }
 
+// 选中节点的所有连接线临时 bloom；noteId=null 清除全部。
+// drop-shadow blur 随该线亮度 d._ea(=两端掌握度)——越亮(待复习)范围越广。
+function applyIncidentBloom(noteId) {
+  d3.select('#graphSvg').selectAll('.graph-link').each(function(d){
+    const sId=(d.source&&d.source.id)||d.source, tId=(d.target&&d.target.id)||d.target;
+    if (noteId && (sId===noteId || tId===noteId)) {
+      const a = d._ea ?? 0.3;
+      this.style.filter = `drop-shadow(0 0 ${(2+11*a).toFixed(1)}px #a5b4fc)`;
+      this.classList.add('incident-bloom');
+    } else {
+      this.style.filter = '';
+      this.classList.remove('incident-bloom');
+    }
+  });
+}
+
 function highlightNoteInGraph(noteId) {
   highlightedNoteId = noteId;
   clearKeywordHighlight();  // 单笔记聚焦覆盖关键词集合
@@ -1160,6 +1182,7 @@ function highlightNoteInGraph(noteId) {
   document.querySelectorAll('.note-row').forEach(r => {
     r.classList.toggle('selected', r.dataset.noteId === noteId);
   });
+  applyIncidentBloom(noteId);
   focusGraphOn([noteId]);
 }
 
@@ -1523,6 +1546,7 @@ function renderNoteList(notes) {
         highlightedNoteId = null;
         document.querySelectorAll('.note-row').forEach(r => r.classList.remove('selected'));
         d3.select('#graphSvg').selectAll('.graph-node').classed('highlighted', false);
+        applyIncidentBloom(null);
         return;
       }
       lastClickedKey = 'note:' + note.name;
