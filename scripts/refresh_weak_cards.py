@@ -161,7 +161,9 @@ def gather_card_stats(idx: dict[int, dict]) -> list[dict]:
         rc = len(revs)
         ha = sum(1 for r in revs if r.get("ease") in (1, 2))
         times = sorted(r["time"] for r in revs if r.get("time", 0) > 0)
-        med_t = times[len(times) // 2] if times else 0
+        # P30 而非中位：发呆只会拉高 time 不会拉低，取低分位更接近
+        # "没走神时的真实耗时"，比中位更抗高频发呆。
+        p30_t = times[int(0.30 * len(times))] if times else 0
         stats.append({
             **idx[nid], "note_id": nid, "tags": note_tags.get(nid, []),
             "lapses": lapses, "reps": reps, "ivl": ivl,
@@ -169,7 +171,7 @@ def gather_card_stats(idx: dict[int, dict]) -> list[dict]:
             "stability": max(stabs) if stabs else 0.0,
             "review_count": rc,
             "hard_again_ratio": (ha / rc) if rc else 0.0,
-            "med_time_ms": med_t,
+            "p30_time_ms": p30_t,
         })
     return stats
 
@@ -224,8 +226,8 @@ def collect_quality(stats: list[dict], max_back_len: int, hard_ratio: float,
     for s in stats:
         t = s["card"].get("type", "basic")
         blens.setdefault(t, []).append(len(body_of(s)))
-        if s.get("med_time_ms", 0) > 0:
-            btimes.setdefault(t, []).append(s["med_time_ms"])
+        if s.get("p30_time_ms", 0) > 0:
+            btimes.setdefault(t, []).append(s["p30_time_ms"])
     p85 = {t: _pct(v, 0.85) for t, v in blens.items()}
     tmed = {t: _pct(v, 0.5) for t, v in btimes.items()}
 
@@ -252,8 +254,8 @@ def collect_quality(stats: list[dict], max_back_len: int, hard_ratio: float,
                 and s.get("hard_again_ratio", 0) > hard_ratio):
             flags.append(f"难用{s['hard_again_ratio']*100:.0f}%")
         if (tmed.get(t) and s.get("review_count", 0) >= min_rev
-                and s.get("med_time_ms", 0) > 2 * tmed[t]):
-            flags.append(f"耗时{s['med_time_ms']//1000}s")
+                and s.get("p30_time_ms", 0) > 2 * tmed[t]):
+            flags.append(f"耗时{s['p30_time_ms']//1000}s")
         (cand if flags else pool).append((s, flags))
 
     out = [{**s, "why": f} for s, f in cand]
