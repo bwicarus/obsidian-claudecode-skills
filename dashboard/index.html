@@ -191,6 +191,7 @@
        不再黄实心填充；选中强调靠描边加粗 + 光环放大(下一条) + 黄标签 */
     .graph-node.highlighted .node-core {
       stroke-width: 3.4 !important;
+      fill-opacity: 0.5 !important;
     }
     .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
     /* 关联节点：core 玻璃满显 + 黄环加粗，节点本体清晰；
@@ -200,7 +201,7 @@
     .graph-node.kw-highlight .node-core {
       stroke: #facc15 !important;
       stroke-width: 2.8 !important;
-      fill-opacity: 1 !important;
+      fill-opacity: 0.2 !important;
     }
     .graph-node.kw-highlight text {
       fill: #fde68a;
@@ -996,7 +997,8 @@ function renderGraph(graphData) {
   node.append('circle')
     .attr('class','node-core')
     .attr('r',d=>nodeR(d))
-    .attr('fill','none')
+    .attr('fill',d=>subjectColor(d.subject))
+    .attr('fill-opacity',0)
     .attr('stroke',d=>subjectColor(d.subject))
     .attr('stroke-width',d=>d.has_cards?2.8:1.4)
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
