@@ -182,7 +182,9 @@
        默认 view-box 坐标系下指的是整个画布中心，highlighted 的 scale 会把
        glow 围绕画布中心缩放→平移到错误位置，脱离节点漂在背景上 */
     .node-glow { pointer-events: none; transform-box: fill-box; transform-origin: center; }
-    .node-core { transition: fill-opacity .2s, stroke-width .2s; }
+    /* pointer-events: all 必须有：core 是 fill:none 空心圈，SVG 默认
+       无填充时圆盘内部不接收指针事件，只剩极细描边能点→拖不动/点不中 */
+    .node-core { pointer-events: all; transition: fill-opacity .2s, stroke-width .2s; }
     .graph-node.highlighted { transform-box: fill-box; }
     .graph-node.highlighted .node-glow { transform: scale(1.4); transform-origin: center; }
     .graph-node.highlighted .node-core {
