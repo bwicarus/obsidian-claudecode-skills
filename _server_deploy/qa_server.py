@@ -58,6 +58,14 @@ DEFAULT_CONFIG: dict = {
         "wake_anki":    True,
         "upload_after": True,
     },
+    "weak_card_refresh": {
+        "enabled":         False,   # 默认关，控制面板勾选才凌晨跑
+        "auto_escalate":   False,   # L2 拆/删默认不自动（破坏性）
+        "min_lapses":      "3",
+        "limit":           "5",
+        "cooldown_days":   "30",
+        "escalate_lapses": "2",
+    },
 }
 
 

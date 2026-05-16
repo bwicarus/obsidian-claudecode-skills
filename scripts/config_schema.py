@@ -41,6 +41,15 @@ SCHEMA: dict[str, type] = {
     "scheduled_register.time":         str,
     "scheduled_register.wake_anki":    bool,
     "scheduled_register.upload_after": bool,
+
+    # 薄弱卡 AI 改写（凌晨）。数字项用 str：控制面板非 bool 字段是
+    # text input，提交即字符串；daily 端 int() 容错转换。
+    "weak_card_refresh.enabled":         bool,
+    "weak_card_refresh.auto_escalate":   bool,
+    "weak_card_refresh.min_lapses":      str,
+    "weak_card_refresh.limit":           str,
+    "weak_card_refresh.cooldown_days":   str,
+    "weak_card_refresh.escalate_lapses": str,
 }
 
 
@@ -62,6 +71,30 @@ FIELD_META: dict[str, dict] = {
     "scheduled_register.upload_after": {
         "group": "凌晨定时",
         "label": "完成后部署 dashboard",
+    },
+    "weak_card_refresh.enabled": {
+        "group": "薄弱卡改写",
+        "label": "启用：凌晨对 leech/反复记不住的卡 AI 重写问法（原地改，不破坏 FSRS）",
+    },
+    "weak_card_refresh.min_lapses": {
+        "group": "薄弱卡改写",
+        "label": "失败次数阈值（lapses ≥ 此值算待改写，默认 3）",
+    },
+    "weak_card_refresh.limit": {
+        "group": "薄弱卡改写",
+        "label": "每晚最多处理张数（默认 5）",
+    },
+    "weak_card_refresh.cooldown_days": {
+        "group": "薄弱卡改写",
+        "label": "改写后冷却天数（期间不再动，让 FSRS 重新稳定，默认 30）",
+    },
+    "weak_card_refresh.escalate_lapses": {
+        "group": "薄弱卡改写",
+        "label": "改写后再失败几次→升级拆卡/删卡（默认 2）",
+    },
+    "weak_card_refresh.auto_escalate": {
+        "group": "薄弱卡改写",
+        "label": "凌晨自动执行拆/删（L2，破坏性！不勾则只在日志给建议、需手动确认）",
     },
     "qa_remote_daemon": {
         "group": "iPad 截图问答",

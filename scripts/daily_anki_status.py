@@ -145,6 +145,40 @@ def run_py(script: str, args: list[str] | None = None) -> int:
     return r.returncode
 
 
+def server_cfg() -> dict:
+    p = PROJECT_DIR / "state" / "server-config.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _cfg_int(v, default: int) -> int:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def refresh_weak_cards_step() -> int:
+    """读 server-config.weak_card_refresh：未启用跳过；启用则 L1 自动改写
+    （--apply），auto_escalate 勾选才加 --apply-escalation 执行 L2 拆/删。"""
+    wc = server_cfg().get("weak_card_refresh") or {}
+    if not wc.get("enabled"):
+        print("  weak_card_refresh 未启用，跳过")
+        return 0
+    args = [
+        "--apply",
+        "--limit", str(_cfg_int(wc.get("limit"), 5)),
+        "--min-lapses", str(_cfg_int(wc.get("min_lapses"), 3)),
+        "--cooldown-days", str(_cfg_int(wc.get("cooldown_days"), 30)),
+        "--escalate-lapses", str(_cfg_int(wc.get("escalate_lapses"), 2)),
+    ]
+    if wc.get("auto_escalate"):
+        args.append("--apply-escalation")
+    return run_py("refresh_weak_cards.py", args)
+
+
 def run_smoke_tests() -> int:
     """跑 tests/ 下的 smoke tests。任何一个 fail → 返回非零 → step 标记 failed。
 
@@ -228,6 +262,7 @@ def main() -> int:
         "计算复习优先级",
         lambda: run_py("review_priority.py", ["--write-frontmatter", "--write-record"]),
     )
+    step("薄弱卡 AI 改写", refresh_weak_cards_step)
     step("重建必复习牌组", lambda: run_py("build_review_deck.py"))
     step("清理孤儿", lambda: run_py("cleanup_orphans.py", ["--apply"]))
     step("导出仪表板", lambda: run_py("export_dashboard.py"))
