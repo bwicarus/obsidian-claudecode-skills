@@ -170,12 +170,13 @@
       background: rgba(0,0,0,0.15); cursor: grab; display: block;
     }
     #graphSvg:active { cursor: grabbing; }
-    /* 边类型：kw=关键词相似(淡虚线) explicit=手动链接(亮实线) both=两者皆有(最亮) */
-    .graph-link { stroke: rgba(255,255,255,0.12); }
-    .graph-link.link-kw       { stroke: rgba(255,255,255,0.14); stroke-dasharray: 3 3; }
-    .graph-link.link-explicit { stroke: rgba(165,180,252,0.55); }
-    .graph-link.link-both     { stroke: rgba(165,180,252,0.85); }
-    .graph-link.explicit      { stroke: rgba(255,255,255,0.3); }  /* 旧 class 兼容 */
+    /* 边类型只用虚实+色相区分；强弱靠粗细，透明度靠 stroke-opacity
+       (JS 按两端掌握度排名设：至少一端待复习→亮，两端都掌握好→淡) */
+    .graph-link { stroke: #8b93c4; }
+    .graph-link.link-kw       { stroke-dasharray: 3 3; }
+    .graph-link.link-explicit { stroke: #a5b4fc; }
+    .graph-link.link-both     { stroke: #a5b4fc; }
+    .graph-link.explicit      { stroke: #a5b4fc; }  /* 旧 class 兼容 */
     /* node-glow=径向渐变光晕(边缘渐隐融背景)，node-core=灯管本体。
        选中靠 core 点亮 + 整组放大让光晕自然变大，不动 glow 本身。 */
     /* transform-box: fill-box 必须有：否则 transform-origin:center 在 SVG
@@ -961,6 +962,15 @@ function renderGraph(graphData) {
   g.append('g').selectAll('line').data(links).join('line')
     .attr('class',d=>'graph-link link-'+(d.kind||'kw'))
     .attr('stroke-width',d=>edgeW(d))
+    // 透明度 = 两端掌握度较差者（跟节点光环同一套相对排名 _rankPct）：
+    // 至少一端待复习→线亮，两端都掌握好→线淡(下限 .08 不断结构)。
+    .style('stroke-opacity',d=>{
+      const a=_rankPct[(d.source&&d.source.id)||d.source];
+      const b=_rankPct[(d.target&&d.target.id)||d.target];
+      const v=[a,b].filter(x=>x!=null);
+      if(!v.length) return 0.16;
+      return +(0.08+0.62*(1-Math.min(...v))).toFixed(3);
+    })
     .classed('kw-highlight', d => {
       const sId = (d.source && d.source.id) || d.source;
       const tId = (d.target && d.target.id) || d.target;
@@ -1046,6 +1056,7 @@ function renderGraph(graphData) {
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:50%;background:rgba(226,232,240,0.10)"></div>光环暗 = 已掌握</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:none;border:2px dashed rgba(255,255,255,0.5)"></div>关键词相似</div>`;
   legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:rgba(165,180,252,0.8)"></div>手动链接(越粗越强)</div>`;
+  legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="border-radius:3px;background:linear-gradient(90deg,rgba(165,180,252,0.85),rgba(165,180,252,0.12))"></div>连线亮→暗 = 两端待复习→已掌握</div>`;
   // 学科（节点淡填充色）
   [...new Set(filteredNodes.map(n=>n.subject).filter(Boolean))].sort().forEach(s=>{
     legend.innerHTML+=`<div class="legend-item"><div class="legend-dot" style="background:${subjectColor(s)};opacity:0.45"></div>${s}</div>`;
