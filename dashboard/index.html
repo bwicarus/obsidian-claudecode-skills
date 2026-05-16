@@ -1023,16 +1023,10 @@ function renderGraph(graphData) {
 
   sim.on('tick',()=>{
     g.selectAll('line')
-      // 端点缩进到节点圆周（+2px 间隙），线不再穿过节点
-      .each(function(d){
-        const dx=d.target.x-d.source.x, dy=d.target.y-d.source.y;
-        const L=Math.hypot(dx,dy)||1, ux=dx/L, uy=dy/L;
-        const rs=nodeR(d.source)+2, rt=nodeR(d.target)+2;
-        this.setAttribute('x1', d.source.x+ux*rs);
-        this.setAttribute('y1', d.source.y+uy*rs);
-        this.setAttribute('x2', d.target.x-ux*rt);
-        this.setAttribute('y2', d.target.y-uy*rt);
-      });
+      // 节点是空心圈：线直连两端圆心，穿过圈内可见（不再缩进到圆周外，
+      // 否则空心圈内那段线被裁掉，看起来"圈内连线隐形"）
+      .attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
     node.attr('transform',d=>`translate(${d.x},${d.y})`);
   });
 
