@@ -187,11 +187,10 @@
     .node-core { pointer-events: all; transition: fill-opacity .2s, stroke-width .2s; }
     .graph-node.highlighted { transform-box: fill-box; }
     .graph-node.highlighted .node-glow { transform: scale(1.4); transform-origin: center; }
+    /* 选中节点：内部保持空心、描边维持学科色(圆环颜色)，
+       不再黄实心填充；选中强调靠描边加粗 + 光环放大(下一条) + 黄标签 */
     .graph-node.highlighted .node-core {
-      stroke: #fde047 !important;
-      stroke-width: 3 !important;
-      fill: #fde047 !important;
-      fill-opacity: 0.55 !important;
+      stroke-width: 3.4 !important;
     }
     .graph-node.highlighted text { fill: #fde047 !important; font-weight: 700; }
     /* 关联节点：core 玻璃满显 + 黄环加粗，节点本体清晰；
