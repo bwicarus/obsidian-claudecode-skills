@@ -1166,13 +1166,21 @@ function makeGravityForce() {
 // 选中节点的所有连接线临时 bloom；noteId=null 清除全部。
 // drop-shadow blur 随该线亮度 d._ea(=两端掌握度)——越亮(待复习)范围越广。
 function applyIncidentBloom(noteId) {
+  // 连线全部染成选中节点的学科色，bloom 同色——视觉上"这些线属于它"
+  let col = '#a5b4fc';
+  if (noteId) {
+    const n = (currentGraph.nodes||[]).find(x=>x.id===noteId);
+    if (n && n.subject) col = subjectColor(n.subject);
+  }
   d3.select('#graphSvg').selectAll('.graph-link').each(function(d){
     const sId=(d.source&&d.source.id)||d.source, tId=(d.target&&d.target.id)||d.target;
     if (noteId && (sId===noteId || tId===noteId)) {
       const a = d._ea ?? 0.3;
-      this.style.filter = `drop-shadow(0 0 ${(2+11*a).toFixed(1)}px #a5b4fc)`;
+      this.style.stroke = col;
+      this.style.filter = `drop-shadow(0 0 ${(2+11*a).toFixed(1)}px ${col})`;
       this.classList.add('incident-bloom');
     } else {
+      this.style.stroke = '';
       this.style.filter = '';
       this.classList.remove('incident-bloom');
     }
