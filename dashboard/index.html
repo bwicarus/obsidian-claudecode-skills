@@ -882,6 +882,20 @@ function renderAll(notes, graph, keywords) {
   renderSubjectColorEditor();
 }
 
+// tooltip 定位：默认在鼠标右下；右/下放不下就翻向左/上并 clamp 进视口，
+// 否则 fixed + nowrap 的长详情框会超出屏幕被裁看不到。
+function placeTip(e){
+  const tip=document.getElementById('tooltip');
+  if(!tip) return;
+  const pad=12, tw=tip.offsetWidth, th=tip.offsetHeight;
+  let x=e.clientX+14, y=e.clientY-32;
+  if(x+tw+pad > window.innerWidth) x=e.clientX-tw-14;
+  if(x<pad) x=pad;
+  if(y<pad) y=pad;
+  if(y+th+pad > window.innerHeight) y=window.innerHeight-th-pad;
+  tip.style.left=x+'px'; tip.style.top=y+'px';
+}
+
 function renderGraph(graphData) {
   const svgEl=document.getElementById('graphSvg');
   const svg=d3.select(svgEl); svg.selectAll('*').remove();
@@ -995,7 +1009,7 @@ function renderGraph(graphData) {
       tip.style.opacity='1';
       tip.textContent=`${sId} ↔ ${tId}　${bits.join('，')||'关联'}　(强度 ${(d.weight||0).toFixed(2)})`;
     })
-    .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
+    .on('mousemove',e=>placeTip(e))
     .on('mouseout',()=>{ tip.style.opacity='0'; });
 
   const node=g.append('g').selectAll('g').data(filteredNodes).join('g')
@@ -1025,7 +1039,7 @@ function renderGraph(graphData) {
     .attr('stroke-opacity',d=>d.has_cards?0.95:0.5)
     .on('mouseover',(e,d)=>{ tip.style.opacity='1'; tip.textContent=
       `${d.id}　掌握 ${((d.mastery||0)*100).toFixed(0)}% · 关联 ${d.degree||0} 个(强度 ${(d.wdeg||0).toFixed(1)}) · 优先 ${(d.priority*100).toFixed(0)}%`; })
-    .on('mousemove',e=>{ tip.style.left=(e.clientX+14)+'px'; tip.style.top=(e.clientY-32)+'px'; })
+    .on('mousemove',e=>placeTip(e))
     .on('mouseout',()=>{ tip.style.opacity='0'; })
     .on('click',(e,d)=>{
       e.stopPropagation();
