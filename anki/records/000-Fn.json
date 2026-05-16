@@ -19,8 +19,8 @@
       "local_id": "20260426235736-001",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "Fn 的定义是什么？",
-      "back": "F 上全体长度为 n 的组所构成的集合：Fn = {(x1,...,xn) : 对 j=1,...,n 有 xj ∈ F}。",
+      "front": "\\(F^n\\) 的定义是什么？",
+      "back": "\\(F\\) 上全体长度为 \\(n\\) 的组所构成的集合：\\(F^n = \\{(x_1,\\dots,x_n) : x_j \\in F,\\ j=1,\\dots,n\\}\\)。",
       "text": "",
       "reason": "核心定义，线性代数具体向量空间的出发点",
       "tags": [
@@ -35,8 +35,8 @@
       "local_id": "20260426235736-002",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "Fn 中加法如何定义？",
-      "back": "(x1,...,xn) + (y1,...,yn) = (x1+y1,...,xn+yn)，即对应坐标分别相加。",
+      "front": "\\(F^n\\) 中加法如何定义？",
+      "back": "\\((x_1,\\dots,x_n) + (y_1,\\dots,y_n) = (x_1+y_1,\\dots,x_n+y_n)\\)，即对应坐标分别相加。",
       "text": "",
       "reason": "运算定义，需要与向量空间公理对应",
       "tags": [
@@ -51,8 +51,8 @@
       "local_id": "20260426235736-003",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "Fn 中标量乘法如何定义？",
-      "back": "λ(x1,...,xn) = (λx1,...,λxn)，即标量 λ ∈ F 与每个坐标分别相乘。",
+      "front": "\\(F^n\\) 中标量乘法如何定义？",
+      "back": "\\(\\lambda(x_1,\\dots,x_n) = (\\lambda x_1,\\dots,\\lambda x_n)\\)，即标量 \\(\\lambda \\in F\\) 与每个坐标分别相乘。",
       "text": "",
       "reason": "运算定义，需要与向量空间公理对应",
       "tags": [
@@ -67,8 +67,8 @@
       "local_id": "20260426235736-004",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "Fn 中元素 x 的加法逆元 -x 是什么？",
-      "back": "若 x = (x1,...,xn)，则 -x = (-x1,...,-xn)，满足 x + (-x) = 0。",
+      "front": "\\(F^n\\) 中元素 \\(x\\) 的加法逆元 \\(-x\\) 是什么？",
+      "back": "若 \\(x = (x_1,\\dots,x_n)\\)，则 \\(-x = (-x_1,\\dots,-x_n)\\)，满足 \\(x + (-x) = 0\\)。",
       "text": "",
       "reason": "加法逆元的具体形式，连接向量空间公理与具体定义",
       "tags": [
@@ -83,8 +83,8 @@
       "local_id": "20260426235736-005",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "Fn 中记号 0 表示什么？",
-      "back": "长度为 n 且所有坐标均为 0 的组：0 = (0,...,0)，即加法恒等元。",
+      "front": "\\(F^n\\) 中记号 \\(0\\) 表示什么？",
+      "back": "长度为 \\(n\\) 且所有坐标均为 \\(0\\) 的组：\\(0 = (0,\\dots,0)\\)，即加法恒等元。",
       "text": "",
       "reason": "容易与标量 0 混淆，值得单独记忆",
       "tags": [
@@ -148,24 +148,28 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:23+09:00",
+    "checked_at": "2026-05-16T04:00:25+09:00",
     "total": 8,
-    "new": 3,
+    "new": 0,
     "learning": 0,
-    "review": 5,
+    "review": 8,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.6113764253074464,
-    "retention_min": 0.0
+    "retention_avg": 0.9940403507816468,
+    "retention_min": 0.9859890677086554,
+    "mastery_avg": 0.40800348663833985,
+    "mastery_min": 0.39768535890210166,
+    "reps_total": 25,
+    "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T15:25:31+08:00",
-    "score": 0.1591,
-    "activation": 0.6399,
-    "importance": 0.6399,
-    "weakness": 0.3886,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.592,
+    "activation": 1.0,
+    "importance": 1.0,
+    "weakness": 0.592,
+    "formula": "(1-M) * activation * importance"
   },
   "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn"
 }

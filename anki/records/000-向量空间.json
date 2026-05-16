@@ -51,7 +51,7 @@
       "type": "basic",
       "deck": "数学::线性代数",
       "front": "集合 V 上的「加法」和「标量乘法」各是什么函数？",
-      "back": "加法：(u, v) ↦ u+v，结果仍在 V 中。\n标量乘法：(λ, v) ↦ λv，λ ∈ F，结果仍在 V 中。",
+      "back": "加法：\\((u, v) \\mapsto u+v\\)，结果仍在 \\(V\\) 中。\n标量乘法：\\((\\lambda, v) \\mapsto \\lambda v\\)，\\(\\lambda \\in F\\)，结果仍在 \\(V\\) 中。",
       "text": "",
       "reason": "形式化定义容易被跳过，有必要明确两者的函数本质",
       "tags": [
@@ -128,23 +128,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:23+09:00",
+    "checked_at": "2026-05-16T04:00:25+09:00",
     "total": 6,
-    "new": 1,
+    "new": 0,
     "learning": 0,
-    "review": 5,
+    "review": 6,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.8187003172200901,
-    "retention_min": 0.0
+    "retention_avg": 0.998601038812299,
+    "retention_min": 0.9964786891635246,
+    "mastery_avg": 0.412888112733845,
+    "mastery_min": 0.4030882372575408,
+    "reps_total": 27,
+    "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T15:36:54+08:00",
-    "score": 0.0318,
-    "activation": 0.3893,
-    "importance": 0.4499,
-    "weakness": 0.1813,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.5871,
+    "activation": 1.0,
+    "importance": 1.0,
+    "weakness": 0.5871,
+    "formula": "(1-M) * activation * importance"
   }
 }

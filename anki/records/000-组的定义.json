@@ -66,7 +66,7 @@
       "type": "basic",
       "deck": "数学::线性代数",
       "front": "组（list）与集合（set）在顺序和重复方面有何本质区别？",
-      "back": "组中顺序重要且重复有含义（(3,5)≠(5,3)，(4,4)≠(4,4,4)）；集合中顺序和重复均无关紧要（{3,5}={5,3}，{4,4}={4}）。",
+      "back": "组中顺序重要且重复有含义（\\((3,5)\\neq(5,3)\\)，\\((4,4)\\neq(4,4,4)\\)）；集合中顺序和重复均无关紧要（\\(\\{3,5\\}=\\{5,3\\}\\)，\\(\\{4,4\\}=\\{4\\}\\)）。",
       "text": "",
       "reason": "易混概念，是理解F^n元素（组）与集合区别的基础",
       "tags": [
@@ -80,23 +80,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 5,
     "new": 0,
     "learning": 0,
-    "review": 4,
+    "review": 5,
     "relearning": 0,
     "suspended": 0,
-    "buried": 1,
-    "retention_avg": 0.9770300636155712,
-    "retention_min": 0.946122793005
+    "buried": 0,
+    "retention_avg": 0.9951511008067891,
+    "retention_min": 0.9859886192268085,
+    "mastery_avg": 0.4183897575811776,
+    "mastery_min": 0.40596119863895014,
+    "reps_total": 16,
+    "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T17:20:49+08:00",
-    "score": 0.0031,
-    "activation": 0.3692,
-    "importance": 0.3712,
-    "weakness": 0.023,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.3231,
+    "activation": 0.7453,
+    "importance": 0.7453,
+    "weakness": 0.5816,
+    "formula": "(1-M) * activation * importance"
   }
 }

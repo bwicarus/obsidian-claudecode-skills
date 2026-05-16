@@ -20,7 +20,7 @@
       "type": "basic",
       "deck": "数学::线性代数",
       "front": "子空间的和（sum of subspaces）是如何定义的？",
-      "back": "设 V₁, ..., Vₙ 是 V 的子空间，其和为所有可能的元素之和构成的集合：\nV₁ + ... + Vₙ = {b₁ + ... + bₙ : b₁ ∈ V₁, ..., bₙ ∈ Vₙ}",
+      "back": "设 \\(V_1,\\dots,V_n\\) 是 \\(V\\) 的子空间，其和为所有可能的元素之和构成的集合：\n\\[V_1 + \\dots + V_n = \\{\\,b_1 + \\dots + b_n : b_1 \\in V_1,\\dots,b_n \\in V_n\\,\\}\\]",
       "text": "",
       "reason": "核心定义，后续直和等概念的基础",
       "tags": [
@@ -35,8 +35,8 @@
       "local_id": "20260429174223-002",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "子空间的和 V₁ + ... + Vₙ 是 V 的子空间吗？为什么？",
-      "back": "是。验证三条子空间条件：\n1. 取各 Vₖ 中的 0 相加，得 0 ∈ 和\n2. 加法封闭：两个和的逐项相加仍在各 Vₖ 中\n3. 标量乘法封闭：标量可分配到每个分量",
+      "front": "子空间的和 \\(V_1 + \\dots + V_n\\) 是 \\(V\\) 的子空间吗？为什么？",
+      "back": "是。验证三条子空间条件：\n1. 取各 \\(V_k\\) 中的 \\(0\\) 相加，得 \\(0\\) 属于该和\n2. 加法封闭：两个和的逐项相加仍在各 \\(V_k\\) 中\n3. 标量乘法封闭：标量可分配到每个分量",
       "text": "",
       "reason": "判定子空间的方法在【子空间的和】上的应用，强化三条条件的使用",
       "tags": [
@@ -51,8 +51,8 @@
       "local_id": "20260429174223-003",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "子空间的和 V₁ + ... + Vₙ 与包含所有 Vₖ 的子空间之间是什么关系？",
-      "back": "V₁ + ... + Vₙ 是包含 V₁, ..., Vₙ 的最小子空间。\n（类比集合论：子空间的和 ↔ 子集的并集）",
+      "front": "子空间的和 \\(V_1 + \\dots + V_n\\) 与包含所有 \\(V_k\\) 的子空间之间是什么关系？",
+      "back": "\\(V_1 + \\dots + V_n\\) 是包含 \\(V_1,\\dots,V_n\\) 的最小子空间。\n（类比集合论：子空间的和 对应 子集的并集）",
       "text": "",
       "reason": "核心定理，说明子空间的和的最优性，并帮助建立与集合论的类比",
       "tags": [
@@ -65,7 +65,7 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 3,
     "new": 3,
     "learning": 0,
@@ -74,14 +74,18 @@
     "suspended": 0,
     "buried": 0,
     "retention_avg": 0.0,
-    "retention_min": 0.0
+    "retention_min": 0.0,
+    "mastery_avg": 0.0,
+    "mastery_min": 0.0,
+    "reps_total": 0,
+    "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T15:25:31+08:00",
-    "score": 0.4094,
-    "activation": 0.6399,
-    "importance": 0.6399,
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.538,
+    "activation": 0.7335,
+    "importance": 0.7335,
     "weakness": 1.0,
-    "formula": "(1-R) * activation * importance"
+    "formula": "(1-M) * activation * importance"
   }
 }

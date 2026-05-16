@@ -101,8 +101,8 @@
       "local_id": "20260507130551-001",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "向量组 b_1,...,b_N 的张成空间 span(b_1,...,b_N) 是什么?",
-      "back": "它是所有线性组合 p_1b_1+...+p_Nb_N 构成的集合, 其中 p_1,...,p_N 属于标量域 F。即 span(b_1,...,b_N)={p_1b_1+...+p_Nb_N: p_1,...,p_N in F}。",
+      "front": "向量组 \\(b_1,\\dots,b_N\\) 的张成空间 \\(\\operatorname{span}(b_1,\\dots,b_N)\\) 是什么？",
+      "back": "它是所有线性组合 \\(p_1 b_1+\\dots+p_N b_N\\) 构成的集合，其中 \\(p_1,\\dots,p_N\\) 属于标量域 \\(F\\)。即 \\(\\operatorname{span}(b_1,\\dots,b_N)=\\{\\,p_1 b_1+\\dots+p_N b_N : p_1,\\dots,p_N \\in F\\,\\}\\)。",
       "text": "",
       "reason": "核心定义, 后续使用张成、有限维、基等概念时需要精确回忆。",
       "tags": [
@@ -133,8 +133,8 @@
       "local_id": "20260507130551-003",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "span(b_1,...,b_N) 与包含 b_1,...,b_N 的子空间之间有什么最小性关系?",
-      "back": "span(b_1,...,b_N) 是包含 b_1,...,b_N 的最小子空间; 任何包含这些向量的子空间都必然包含它们的所有线性组合, 因而包含 span(b_1,...,b_N)。",
+      "front": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 与包含 \\(b_1,\\dots,b_N\\) 的子空间之间有什么最小性关系？",
+      "back": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 是包含 \\(b_1,\\dots,b_N\\) 的最小子空间；任何包含这些向量的子空间都必然包含它们的所有线性组合，因而包含 \\(\\operatorname{span}(b_1,\\dots,b_N)\\)。",
       "text": "",
       "reason": "常用判定性事实, 证明子空间包含关系和生成空间时会直接使用。",
       "tags": [
@@ -164,23 +164,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 10,
     "new": 0,
     "learning": 0,
     "review": 9,
-    "relearning": 0,
+    "relearning": 1,
     "suspended": 0,
-    "buried": 1,
-    "retention_avg": 0.9811163560032725,
-    "retention_min": 0.9710982928740651
+    "buried": 0,
+    "retention_avg": 0.9264901103866932,
+    "retention_min": 0.3,
+    "mastery_avg": 0.3847337534256149,
+    "mastery_min": 0.15,
+    "reps_total": 38,
+    "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T17:20:49+08:00",
-    "score": 0.0046,
-    "activation": 0.5126,
-    "importance": 0.4779,
-    "weakness": 0.0189,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.4579,
+    "activation": 0.8627,
+    "importance": 0.8627,
+    "weakness": 0.6153,
+    "formula": "(1-M) * activation * importance"
   }
 }

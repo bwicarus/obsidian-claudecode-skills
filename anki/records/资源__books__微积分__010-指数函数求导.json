@@ -85,7 +85,7 @@
       "local_id": "20260507130623-002",
       "type": "problem",
       "deck": "数学::微积分",
-      "front": "对一般指数函数 a^t 求导时，常用的改写入口是什么？",
+      "front": "对一般指数函数 \\(a^t\\) 求导时，常用的改写入口是什么？",
       "back": "把 \\(a^t\\) 改写为 \\(e^{\\ln(a)t}\\)，再使用链式法则求导。",
       "text": "",
       "reason": "常用解题模板，看到一般指数函数求导时需要立即想到。",
@@ -100,7 +100,7 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 5,
     "new": 0,
     "learning": 0,
@@ -108,15 +108,19 @@
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9821642843397445,
-    "retention_min": 0.9625384664206017
+    "retention_avg": 0.9969484097554726,
+    "retention_min": 0.9929694140884199,
+    "mastery_avg": 0.4102325635536193,
+    "mastery_min": 0.40439462280961685,
+    "reps_total": 21,
+    "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T17:20:49+08:00",
-    "score": 0.0015,
-    "activation": 0.2099,
-    "importance": 0.3968,
-    "weakness": 0.0178,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.3244,
+    "activation": 0.7416,
+    "importance": 0.7416,
+    "weakness": 0.5898,
+    "formula": "(1-M) * activation * importance"
   }
 }

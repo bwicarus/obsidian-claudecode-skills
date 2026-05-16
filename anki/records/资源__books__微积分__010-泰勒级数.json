@@ -36,8 +36,8 @@
       "local_id": "20260511005224-002",
       "type": "problem",
       "deck": "数学::微积分",
-      "front": "如何构造函数 f(x) 在 x=a 处的 n 次泰勒多项式系数？",
-      "back": "令多项式在 x=a 处的函数值、一阶导数、二阶导数……n 阶导数依次等于 f(x) 在 a 处的对应各阶导数值，由此解出各项系数 a_k = f^{(k)}(a) / k!。",
+      "front": "如何构造函数 \\(f(x)\\) 在 \\(x=a\\) 处的 \\(n\\) 次泰勒多项式系数？",
+      "back": "令多项式在 \\(x=a\\) 处的函数值、一阶导数、二阶导数……\\(n\\) 阶导数依次等于 \\(f(x)\\) 在 \\(a\\) 处的对应各阶导数值，由此解出各项系数 \\(a_k = \\dfrac{f^{(k)}(a)}{k!}\\)。",
       "text": "",
       "reason": "解题模板：见到泰勒多项式构造问题立刻应想到的方法入口",
       "tags": [
@@ -69,7 +69,7 @@
       "type": "cloze",
       "deck": "数学::微积分",
       "front": "",
-      "back": "因为 e^x 的各阶导数在 0 处都等于 1，所以系数全为 1/k!。",
+      "back": "因为 \\(e^x\\) 的各阶导数在 \\(0\\) 处都等于 \\(1\\)，所以系数全为 \\(\\dfrac{1}{k!}\\)。",
       "text": "\\(e^x\\) 在 0 处的泰勒级数为 {{c1::\\(1 + \\dfrac{x}{1!} + \\dfrac{x^2}{2!} + \\dfrac{x^3}{3!} + \\cdots\\)}}。",
       "reason": "公式：常用泰勒展开，需要直接记忆以便代入使用",
       "tags": [
@@ -98,23 +98,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 5,
-    "new": 5,
-    "learning": 0,
-    "review": 0,
+    "new": 0,
+    "learning": 3,
+    "review": 1,
     "relearning": 0,
-    "suspended": 0,
+    "suspended": 1,
     "buried": 0,
-    "retention_avg": 0.0,
-    "retention_min": 0.0
+    "retention_avg": 0.5464970417844407,
+    "retention_min": 0.4,
+    "mastery_avg": 0.28690857358197464,
+    "mastery_min": 0.25,
+    "reps_total": 11,
+    "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T17:20:49+08:00",
-    "score": 0.0821,
-    "activation": 0.2085,
-    "importance": 0.394,
-    "weakness": 1.0,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.3922,
+    "activation": 0.7416,
+    "importance": 0.7416,
+    "weakness": 0.7131,
+    "formula": "(1-M) * activation * importance"
   }
 }

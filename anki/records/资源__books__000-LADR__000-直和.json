@@ -19,7 +19,7 @@
       "type": "basic",
       "deck": "数学::线性代数",
       "front": "什么是子空间的直和（direct sum）？",
-      "back": "若 V₁ + ··· + Vₙ 中每个元素都能唯一地写成 v₁ + ··· + vₙ（vₖ ∈ Vₖ）的形式，则称该和为直和，记作 V₁ ⊕ ··· ⊕ Vₙ。",
+      "back": "若 \\(V_1 + \\dots + V_n\\) 中每个元素都能唯一地写成 \\(v_1 + \\dots + v_n\\)（\\(v_k \\in V_k\\)）的形式，则称该和为直和，记作 \\(V_1 \\oplus \\dots \\oplus V_n\\)。",
       "text": "",
       "reason": "直和的核心定义，后续所有直和相关定理的基础",
       "tags": [
@@ -35,8 +35,8 @@
       "local_id": "20260430164155-002",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "V₁ + ··· + Vₙ 是直和的等价条件是什么？",
-      "back": "用 v₁ + ··· + vₙ（vₖ ∈ Vₖ）表示 0 的唯一方式是将每个 vₖ 取 0。",
+      "front": "\\(V_1 + \\dots + V_n\\) 是直和的等价条件是什么？",
+      "back": "用 \\(v_1 + \\dots + v_n\\)（\\(v_k \\in V_k\\)）表示 \\(0\\) 的唯一方式是将每个 \\(v_k\\) 取 \\(0\\)。",
       "text": "",
       "reason": "判断直和的核心等价条件（定理 1.45），常用于证明",
       "tags": [
@@ -52,8 +52,8 @@
       "local_id": "20260430164155-003",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "两个子空间 U 和 W 的和 U + W 是直和的充要条件是什么？",
-      "back": "U + W 是直和 ⟺ U ∩ W = {0}。",
+      "front": "两个子空间 \\(U\\) 和 \\(W\\) 的和 \\(U + W\\) 是直和的充要条件是什么？",
+      "back": "\\(U + W\\) 是直和 \\(\\iff U \\cap W = \\{0\\}\\)。",
       "text": "",
       "reason": "两子空间情形的简洁充要条件（定理 1.46），实际应用中最常用",
       "tags": [
@@ -67,7 +67,7 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-11T18:22:24+09:00",
+    "checked_at": "2026-05-16T04:00:26+09:00",
     "total": 3,
     "new": 0,
     "learning": 0,
@@ -75,15 +75,19 @@
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9766987514671192,
-    "retention_min": 0.9616430388436671
+    "retention_avg": 0.9981595472773344,
+    "retention_min": 0.9976509883010907,
+    "mastery_avg": 0.4079459575546908,
+    "mastery_min": 0.4012172243377117,
+    "reps_total": 18,
+    "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-14T17:20:49+08:00",
-    "score": 0.0057,
-    "activation": 0.5126,
-    "importance": 0.4779,
-    "weakness": 0.0233,
-    "formula": "(1-R) * activation * importance"
+    "computed_at": "2026-05-16T04:00:26+09:00",
+    "score": 0.3185,
+    "activation": 0.7335,
+    "importance": 0.7335,
+    "weakness": 0.5921,
+    "formula": "(1-M) * activation * importance"
   }
 }
