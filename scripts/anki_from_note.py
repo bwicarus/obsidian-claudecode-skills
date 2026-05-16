@@ -233,8 +233,22 @@ def sanitize_tag(tag: str) -> str:
     return tag.strip("_")
 
 
+_MATH_RE = re.compile(r"\\\(.*?\\\)|\\\[.*?\\\]", re.S)
+
+
 def html_text(text: str) -> str:
-    return html.escape(text.strip()).replace("\n", "<br>")
+    """转 HTML：普通文本 escape + 换行→<br>；LaTeX 区段 \\(...\\) \\[...\\]
+    原样保留——否则其中的 < > & " 被 html.escape 转义，MathJax 渲染失败
+    （不等式、矩阵 & 列分隔、\\text 里的引号等全会坏）。"""
+    text = text.strip()
+    out: list[str] = []
+    last = 0
+    for m in _MATH_RE.finditer(text):
+        out.append(html.escape(text[last:m.start()]).replace("\n", "<br>"))
+        out.append(m.group(0))            # LaTeX 原样交给 MathJax
+        last = m.end()
+    out.append(html.escape(text[last:]).replace("\n", "<br>"))
+    return "".join(out)
 
 
 # ── 文件收集与 reference ─────────────────────────────────────────────────────
