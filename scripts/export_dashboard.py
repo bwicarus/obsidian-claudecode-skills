@@ -29,6 +29,19 @@ INDEX_DIR   = PROJECT_DIR / "index"
 VAULT_ROOT  = Path(os.environ.get("OBSIDIAN_VAULT", r"C:\obsidian"))
 OUTPUT_PATH = PROJECT_DIR / "dashboard" / "dashboard.json"
 
+# 拼音搜索：pypinyin 装在项目本地 vendor/（不污染系统 Python）。
+# 装失败则降级——拼音留空，前端仍可中文模糊匹配。
+sys.path.insert(0, str(PROJECT_DIR / "vendor"))
+try:
+    from pypinyin import lazy_pinyin, Style as _PyStyle
+    def _py(s: str) -> str:
+        return "".join(lazy_pinyin(s)).lower()
+    def _init(s: str) -> str:
+        return "".join(lazy_pinyin(s, style=_PyStyle.FIRST_LETTER)).lower()
+except Exception:
+    def _py(s: str) -> str: return ""
+    def _init(s: str) -> str: return ""
+
 _ENTRY_RE = re.compile(r"-\s+\[\[([^\]]+)\]\]\s+`([^`]*)`\s+—\s+(.+)")
 _LINK_RE  = re.compile(r"\[\[([^\]#|]+)")
 VAULT_NAME = "Obsidian Vault"
@@ -201,7 +214,7 @@ def build_keyword_cloud(
         else:
             idf_norm = math.log(n_total / n_containing) / max_idf
         weight = priority_sum * (1.0 + idf_norm)
-        result.append([kw, round(weight, 4)])
+        result.append([kw, round(weight, 4), _py(kw), _init(kw)])
 
     return sorted(result, key=lambda x: -x[1])
 

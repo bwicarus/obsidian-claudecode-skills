@@ -1528,12 +1528,21 @@ function wireGraphSettings() {
 }
 
 let _kwQuery='';
+// 模糊子序列匹配：q 的字符按序出现在 hay 即命中(忽略大小写)。
+function _fz(hay,q){
+  if(!hay) return false;
+  hay=hay.toLowerCase(); let i=0;
+  for(const ch of q){ i=hay.indexOf(ch,i); if(i<0) return false; i++; }
+  return true;
+}
+// 中文走 text，拼音走 py(全拼)/init(首字母)——任一模糊命中即匹配。
+function kwMatch(d,q){ return _fz(d.text,q)||_fz(d.py,q)||_fz(d.init,q); }
 // 搜索过滤：匹配的词满亮加粗，其余压暗(不移除,保持布局)；空查询恢复原样
 function applyKwSearch(){
   const q=_kwQuery;
   d3.select('#wordcloudContainer').selectAll('text')
-    .style('opacity',d=>!q?d.opacity:(d.text.toLowerCase().includes(q)?1:0.06))
-    .style('font-weight',d=>(q&&d.text.toLowerCase().includes(q))?700:(d.size>28?700:400));
+    .style('opacity',d=>!q?d.opacity:(kwMatch(d,q)?1:0.06))
+    .style('font-weight',d=>(q&&kwMatch(d,q))?700:(d.size>28?700:400));
 }
 
 function renderWordCloud(keywords) {
@@ -1556,7 +1565,7 @@ function renderWordCloud(keywords) {
       const q=_ks.value.trim().toLowerCase(); if(!q) return;
       let hit=null,el=null;
       d3.select('#wordcloudContainer').selectAll('text').each(function(dd){
-        if(!hit && dd.text.toLowerCase().includes(q)){ hit=dd; el=this; }
+        if(!hit && kwMatch(dd,q)){ hit=dd; el=this; }
       });
       if(hit&&el){ const r=el.getBoundingClientRect();
         showKwPopover(hit.text, r.left+r.width/2, r.top+r.height/2); }
@@ -1568,8 +1577,8 @@ function renderWordCloud(keywords) {
   const colors=['#a5b4fc','#67e8f9','#6ee7b7','#fde68a','#fca5a5','#c4b5fd'];
   const maxW=keywords[0][1];
   const ROTATIONS=[-90,-45,0,0,0,0,45,90];
-  const words=keywords.map(([text,weight],i)=>({
-    text, weight,
+  const words=keywords.map(([text,weight,py,init],i)=>({
+    text, weight, py:py||'', init:init||'',
     size: Math.round(11+Math.pow(weight/maxW,2)*46),
     color: colors[i%colors.length],
     opacity: +(0.55+0.45*(weight/maxW)).toFixed(2),
