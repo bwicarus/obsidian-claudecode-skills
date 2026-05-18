@@ -68,6 +68,9 @@
     <div class="card">
       <h1>{{ user.username }}{% if user.role == 'admin' %}<span class="badge">admin</span>{% endif %}</h1>
       <div class="meta">注册时间 {{ user.created_at }}</div>
+      <div class="actions">
+        <button onclick="if(confirm('退出当前账号、回登录页？'))location.href='/logout'">切换用户</button>
+      </div>
     </div>
 
     <div class="card">
