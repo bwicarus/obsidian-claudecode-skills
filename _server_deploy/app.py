@@ -186,6 +186,14 @@ def require_login_global():
 
 # ─────────────────────────── Auth ───────────────────────────
 
+@app.route("/")
+def index():
+    # 主页即登录入口：已登录直接进个人仪表板，未登录显示登录界面
+    if session.get("logged_in"):
+        return redirect("/dashboard/")
+    return redirect(url_for("login"))
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None

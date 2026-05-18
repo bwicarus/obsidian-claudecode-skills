@@ -232,7 +232,8 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 - `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`
 - `_server_deploy/templates/control.html` → 部署到 `/root/webapp/templates/control.html`
 - `_server_deploy/static/nav.js` → 部署到 `/var/www/html/static/nav.js`（全站通用左侧导航 + per-user 链接持久化）
-- `_server_deploy/nginx/bwicarus.conf` → 部署到 `/etc/nginx/sites-enabled/default`（含 `/control`、`/auth`、`/api` 等所有 location 块）。改完 `nginx -t && systemctl reload nginx`
+- `_server_deploy/nginx/bwicarus.conf` → **仅 VPS** 部署到 `/etc/nginx/sites-enabled/default`（含 `/`、`/control`、`/auth`、`/api` 等所有 location 块）。改完 `nginx -t && systemctl restart nginx`（注意：新增 location 块 `reload` 可能不完全生效，要 `restart`）
+  - ⚠️ **Pi 实例 nginx 配置独立**：`/etc/nginx/sites-available/bwicarus`（Tailscale HTTPS Cert + 80/443 两 server 块，server_name 是 ts.net），**结构与 git 这份 VPS 版完全不同，绝不可 cp 覆盖**（会冲掉 Tailscale 证书配置全站挂）。Pi 改 nginx 只能手工 patch 该文件对应 server 块，git 这份只代表 VPS
 
 **跨平台改动**（让脚本可在 Windows + Linux 跑）：
 - `config.py` AI_SETTINGS_FILE 加 env 优先
