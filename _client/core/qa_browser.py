@@ -784,10 +784,12 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
         note_path.write_text(new_content, encoding="utf-8")
     except Exception as ex:
         return {"ok": False, "error": f"写笔记失败：{ex}"}
-    # 哈希覆盖：让「登记新笔记」忽略此次更新
+    # 哈希覆盖：让「登记新笔记」忽略此次更新。
+    # 只标记 note_state 真实跟踪的 skill（pending_notes 闸门是 summarize；
+    # register 还跟踪 connect/anki）。不存在 img/pdf skill，别写脏条目。
     try:
         import note_state  # scripts/ 已在 sys.path（qa_server 注入）
-        for sk in ("summarize", "connect", "anki", "img", "pdf"):
+        for sk in ("summarize", "connect", "anki"):
             try:
                 note_state.mark_processed(note_path, sk)
             except Exception:
