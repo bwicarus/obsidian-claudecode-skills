@@ -2494,12 +2494,13 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             jid = (parse_qs(urlparse(self.path).query).get("job") or [""])[0]
             job = _card_jobs.get(jid)
-            if not job:
-                self.send_json({"status": "unknown"}, 404)
-            else:
-                self.send_json(job)
-                if job.get("status") == "done":
-                    _card_jobs.pop(jid, None)   # 取走结果后清理
+            # 不 pop：done 的 job 保留 30 分钟，让弱网下「done 响应丢了」的轮询能重取，
+            # 避免 job 被删后轮询一直 404 → 前端「暂时取不到结果」。懒清理过期项。
+            now = time.time()
+            for k, v in list(_card_jobs.items()):
+                if v.get("status") == "done" and now - v.get("_t", now) > 1800:
+                    _card_jobs.pop(k, None)
+            self.send_json(job if job else {"status": "unknown"}, 200 if job else 404)
 
         else:
             self.send_response(404); self.end_headers()
@@ -2650,7 +2651,7 @@ class Handler(BaseHTTPRequestHandler):
                             out["note"] = _card_update_note(local_id, pairs)
                     except Exception as e:
                         out = {"ok": False, "error": str(e)}
-                    _card_jobs[job_id] = {"status": "done", "result": out}
+                    _card_jobs[job_id] = {"status": "done", "result": out, "_t": time.time()}
                 threading.Thread(target=_run, daemon=True).start()
                 self.send_json({"ok": True, "job_id": job_id})
 
