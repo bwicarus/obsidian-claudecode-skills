@@ -1340,7 +1340,7 @@ window.MathJax = {
   startup:{typeset:false},
 };
 </script>
-<script src="http://bwicarus.taile44d0c.ts.net/static/qa/mathjax.js" async id="MathJax-script"></script>
+<script src="http://bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1" async id="MathJax-script"></script>
 <script src="http://bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
 <script>
 if (window.marked && marked.use) {
