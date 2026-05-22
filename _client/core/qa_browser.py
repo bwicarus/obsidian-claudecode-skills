@@ -1095,11 +1095,18 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .card-act-btn.upd-all:hover{background:#d8f5e3}
 .card-act-btn:disabled{opacity:.5;cursor:default}
 /* 每条 AI 回复的 有用/无用 切换框 */
-.reply-fb{display:inline-flex;align-items:center;gap:6px;margin-top:5px;font-size:11px}
-.reply-fb .fb-tog{cursor:pointer;user-select:none;padding:2px 9px;border:1px solid #e0e0e0;border-radius:10px;color:#999;background:#fff;transition:all .15s}
-.reply-fb .fb-tog:hover{border-color:#bbb}
-.reply-fb .fb-tog.useful.on{background:#e8f5ec;border-color:#52b06e;color:#1a6330;font-weight:600}
-.reply-fb .fb-tog.useless.on{background:#f3f4f6;border-color:#aaa;color:#666;font-weight:600}
+/* 选择有用内容的「+」按钮：整条回复一个 + 每个标题行一个，级联选中 */
+.pick-btn{flex-shrink:0;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #cbd5e1;border-radius:50%;background:#fff;color:#94a3b8;font-size:14px;cursor:pointer;user-select:none;transition:all .12s;padding:0}
+.pick-btn:hover{border-color:#0078d4;color:#0078d4}
+.pick-btn.on{background:#0078d4;border-color:#0078d4;color:#fff;font-weight:700}
+/* 整条回复的 + ：浮在 AI 气泡右上角 */
+.reply-pick-all{position:absolute;top:6px;right:6px;z-index:2}
+.bubble.assistant{position:relative}
+.bubble.assistant.picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:#f5faff}
+/* 标题行的 + ：贴右侧 */
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{position:relative;padding-right:26px}
+.md .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}
+.md .hsec-picked{background:#eef6ff;border-radius:4px;box-shadow:-4px 0 0 #cfe6ff}
 /* 更新结果/进度面板 */
 #card-result{display:none;padding:10px 16px;border-top:1px solid #eee;background:#fafbfc;font-size:13px;line-height:1.6;max-height:38vh;overflow:auto}
 #card-result .cr-close{float:right;background:none;border:none;font-size:15px;color:#bbb;cursor:pointer;line-height:1}
@@ -1294,14 +1301,43 @@ function showCardResult(html) {
   typeset(el);
 }
 
-// 收集所有标记「有用」的 AI 回复及其对应的用户问题（Q&A 对）
+// 取标题自身文本（去掉 + 按钮）
+function headingOwnText(h) {
+  const clone = h.cloneNode(true);
+  const b = clone.querySelector('.head-pick'); if (b) b.remove();
+  return clone.textContent.trim();
+}
+// 收集某条回复里被选中的标题段落（标题行 + 其后到下个标题前的内容）
+function collectSelectedSections(md) {
+  const parts = [];
+  md.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(h => {
+    const btn = h.querySelector('.head-pick');
+    if (!btn || !btn.classList.contains('on')) return;
+    let txt = '#'.repeat(headLevel(h)) + ' ' + headingOwnText(h);
+    let sib = h.nextElementSibling;
+    while (sib && !/^H[1-6]$/.test(sib.tagName)) {
+      const t = (sib.textContent || '').trim();
+      if (t) txt += '\n' + t;
+      sib = sib.nextElementSibling;
+    }
+    parts.push(txt.trim());
+  });
+  return parts.join('\n\n');
+}
+// 收集所有「有用」内容及其对应的用户问题（Q&A 对）：
+//   整条 + 选中 → 整条回复；否则 → 选中的标题段落
 function collectUsefulPairs() {
   const pairs = [];
   document.querySelectorAll('#chat .msg-row.assistant').forEach(row => {
-    const tog = row.querySelector('.fb-tog.useful.on');
-    if (!tog) return;
     const md = row.querySelector('.md');
-    const answer = md && (md.dataset.raw || md.textContent || '').trim();
+    if (!md) return;
+    const allOn = !!row.querySelector('.reply-pick-all.on');
+    let answer = '';
+    if (allOn) {
+      answer = (md.dataset.raw || md.textContent || '').trim();
+    } else {
+      answer = collectSelectedSections(md);
+    }
     if (!answer) return;
     // 往前找最近的一条 user 消息作为问题
     let q = '';
@@ -1573,31 +1609,60 @@ function addMsg(role, html, isHtml, imgSrc) {
   }
   row.appendChild(ctrl);
   row.appendChild(d);
-  // 卡片模式：每条 AI 回复加「有用 / 无用」两个互斥切换框
+  // 卡片模式：AI 气泡右上角放「整条回复」的 + 按钮；标题行的 + 在渲染后补
   if (role === 'assistant' && cardCtx) {
-    const fb = document.createElement('div');
-    fb.className = 'reply-fb';
-    const useful  = document.createElement('span');
-    useful.className = 'fb-tog useful';  useful.textContent = '👍 有用';
-    const useless = document.createElement('span');
-    useless.className = 'fb-tog useless'; useless.textContent = '👎 无用';
-    useful.onclick = () => {
-      const on = useful.classList.toggle('on');
-      if (on) useless.classList.remove('on');
+    const allBtn = document.createElement('button');
+    allBtn.className = 'pick-btn reply-pick-all';
+    allBtn.textContent = '+';
+    allBtn.title = '选中整条回复用于改进';
+    allBtn.onclick = () => {
+      const on = allBtn.classList.toggle('on');
+      d.classList.toggle('picked-all', on);
       refreshUpdateButtons();
     };
-    useless.onclick = () => {
-      const on = useless.classList.toggle('on');
-      if (on) useful.classList.remove('on');
-      refreshUpdateButtons();
-    };
-    fb.appendChild(useful); fb.appendChild(useless);
-    row.appendChild(fb);
+    d.appendChild(allBtn);
+    if (!isHtml) addHeadingPickers(d.querySelector('.md'));
   }
   chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
   if (role === 'assistant') typeset(d);
   return d;
+}
+
+// 给一段渲染好的 markdown 里每个标题行补「+」按钮（卡片模式）
+function addHeadingPickers(md) {
+  if (!md || !cardCtx) return;
+  const heads = md.querySelectorAll('h1,h2,h3,h4,h5,h6');
+  heads.forEach(h => {
+    if (h.querySelector('.head-pick')) return;   // 防重复
+    const btn = document.createElement('button');
+    btn.className = 'pick-btn head-pick';
+    btn.textContent = '+';
+    btn.contentEditable = 'false';
+    btn.onclick = (e) => { e.stopPropagation(); toggleHeadingPick(h, md); };
+    h.appendChild(btn);
+  });
+}
+
+// 标题级联选择：选中大标题时，其下所有更深层小标题一起选/取消
+function headLevel(h) { return parseInt(h.tagName.slice(1), 10); }
+function toggleHeadingPick(h, md) {
+  const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  const i = heads.indexOf(h);
+  const lvl = headLevel(h);
+  const newOn = !h.querySelector('.head-pick').classList.contains('on');
+  setHeadPick(h, newOn);
+  // 级联到后续更深层标题，遇到同级或更高级标题停止
+  for (let j = i + 1; j < heads.length; j++) {
+    if (headLevel(heads[j]) <= lvl) break;
+    setHeadPick(heads[j], newOn);
+  }
+  refreshUpdateButtons();
+}
+function setHeadPick(h, on) {
+  const btn = h.querySelector('.head-pick');
+  if (btn) btn.classList.toggle('on', on);
+  h.classList.toggle('hsec-picked', on);
 }
 
 function delMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.add('deleted'); }
@@ -1740,7 +1805,8 @@ async function send() {
       }
     }
     renderNow();   // 流结束，做最后一次完整渲染
-    mdEl.dataset.raw = accumulated;   // 存原始文本供「采用」收集
+    mdEl.dataset.raw = accumulated;   // 存原始文本供「整条选中」收集
+    if (cardCtx) addHeadingPickers(mdEl);   // 卡片模式：给标题行补 + 按钮
     if (streamErr) {
       const err = document.createElement('div');
       err.style.cssText = 'color:#c00;margin-top:6px;font-size:13px';
