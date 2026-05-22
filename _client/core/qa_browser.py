@@ -735,8 +735,17 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
         rec_file.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as ex:
         return {"ok": False, "error": f"写 records 失败：{ex}"}
-    summary = f"生成 {len(created)} 张新卡，" + ("已删除原卡" if deleted else "保留原卡")
-    return {"ok": True, "summary": summary, "created": created, "deleted": deleted}
+    # 改完触发一次 AnkiWeb 同步，让新卡/删除即时推到其它设备（失败不阻断）
+    synced = False
+    try:
+        _anki_request("sync", timeout=120)
+        synced = True
+    except Exception:
+        pass
+    summary = (f"生成 {len(created)} 张新卡，" + ("已删除原卡" if deleted else "保留原卡")
+               + ("，已同步 AnkiWeb" if synced else "，AnkiWeb 同步失败（稍后凌晨会同步）"))
+    return {"ok": True, "summary": summary, "created": created,
+            "deleted": deleted, "synced": synced}
 
 
 def _card_update_note(local_id: str, pairs: list) -> dict:
