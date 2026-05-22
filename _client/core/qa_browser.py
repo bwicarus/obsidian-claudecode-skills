@@ -1007,6 +1007,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 #card-edit-cancel{background:#f5f5f5;color:#555;border:1px solid #ddd;border-radius:7px;padding:7px 14px;font-size:13px;cursor:pointer}
 #card-edit-cancel:hover{background:#ececec}
 #card-action-msg{font-size:12px;padding:4px 0;min-height:18px}
+.reply-pick{display:inline-flex;align-items:center;gap:5px;margin-top:5px;font-size:11px;color:#888;cursor:pointer;user-select:none;padding:2px 8px;border:1px solid #e0e0e0;border-radius:10px;transition:all .15s}
+.reply-pick:hover{border-color:#0078d4;color:#0078d4}
+.reply-pick input{cursor:pointer;margin:0}
+.reply-pick.picked{background:#e8f0fe;border-color:#0078d4;color:#0057b8;font-weight:500}
 #sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
 #sett-overlay.open{display:block}
 #sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:380px;width:90%}
@@ -1280,8 +1284,38 @@ function sendCardFeedback(localId, rating, btn) {
     btn.classList.add('active');
     closeCardEdit();
     if (rating === 'improve') {
-      // 展开编辑区
+      // 有勾选的 AI 回复 → 让 AI 据此改写，填入编辑框；否则手动编辑
+      const picked = collectPickedReplies();
       openCardEdit();
+      if (picked.length) {
+        setActionMsg('正在根据勾选的 ' + picked.length + ' 条回复改写卡片…', '#888');
+        const submitBtn = document.getElementById('card-edit-submit');
+        submitBtn.disabled = true;
+        fetch('api/card-improve-suggest', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({local_id: localId, selected: picked,
+                                 front: cardCtx.front, back: cardCtx.back, text: cardCtx.text,
+                                 type: cardCtx.type}),
+        }).then(r => r.json()).then(j => {
+          submitBtn.disabled = false;
+          if (j.ok) {
+            if (cardCtx.type === 'cloze') {
+              if (j.text !== undefined) document.getElementById('edit-text').value = j.text;
+            } else {
+              if (j.front !== undefined) document.getElementById('edit-front').value = j.front;
+              if (j.back  !== undefined) document.getElementById('edit-back').value  = j.back;
+            }
+            setActionMsg('✓ AI 已生成改进，请检查后提交', '#1a6330');
+          } else {
+            setActionMsg('✗ ' + (j.error || 'AI 改写失败，可手动编辑'), '#b91c1c');
+          }
+        }).catch(() => {
+          submitBtn.disabled = false;
+          setActionMsg('✗ AI 改写请求失败，可手动编辑', '#b91c1c');
+        });
+      } else {
+        setActionMsg('提示：可先勾选有用的 AI 回复，再点「需改」让 AI 据此改写；或直接手动编辑', '#888');
+      }
     } else {
       // good / delete → 直接调 Anki
       const editArea = document.getElementById('card-edit');
@@ -1501,6 +1535,7 @@ function addMsg(role, html, isHtml, imgSrc) {
     const c = document.createElement('div');
     c.className = 'md';
     c.innerHTML = isHtml ? html : renderMd(html);
+    if (!isHtml) c.dataset.raw = html;   // 存原始文本供「采用」收集
     d.appendChild(c);
   } else {
     d.textContent = html;
@@ -1513,10 +1548,32 @@ function addMsg(role, html, isHtml, imgSrc) {
   }
   row.appendChild(ctrl);
   row.appendChild(d);
+  // 卡片模式：AI 回复加「采用」勾选框，勾中的回复用于改进卡片
+  if (role === 'assistant' && cardCtx) {
+    const pick = document.createElement('label');
+    pick.className = 'reply-pick';
+    pick.innerHTML = '<input type="checkbox"> 采用这条改进卡片';
+    pick.querySelector('input').addEventListener('change', function() {
+      pick.classList.toggle('picked', this.checked);
+    });
+    row.appendChild(pick);
+  }
   chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
   if (role === 'assistant') typeset(d);
   return d;
+}
+
+// 收集所有被「采用」勾选的 AI 回复原始文本
+function collectPickedReplies() {
+  const out = [];
+  document.querySelectorAll('#chat .reply-pick input:checked').forEach(cb => {
+    const row = cb.closest('.msg-row');
+    const md = row && row.querySelector('.md');
+    const txt = md && (md.dataset.raw || md.textContent || '').trim();
+    if (txt) out.push(txt);
+  });
+  return out;
 }
 
 function delMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.add('deleted'); }
@@ -1659,6 +1716,7 @@ async function send() {
       }
     }
     renderNow();   // 流结束，做最后一次完整渲染
+    mdEl.dataset.raw = accumulated;   // 存原始文本供「采用」收集
     if (streamErr) {
       const err = document.createElement('div');
       err.style.cssText = 'color:#c00;margin-top:6px;font-size:13px';
@@ -2168,6 +2226,45 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result)
             else:
                 self.send_json({"ok": False, "error": "invalid params"}, 400)
+
+        elif self.path == "/api/card-improve-suggest":
+            # 用「采用」勾选的 AI 回复 + 当前卡片，让 AI 生成改进的 front/back/text
+            selected = body.get("selected") or []
+            is_cloze = body.get("type") == "cloze"
+            cur_front = (body.get("front") or "").strip()
+            cur_back  = (body.get("back") or "").strip()
+            cur_text  = (body.get("text") or "").strip()
+            if not selected:
+                self.send_json({"ok": False, "error": "未勾选任何回复"}, 400)
+            else:
+                refs = "\n\n".join(f"[参考{i+1}]\n{s}" for i, s in enumerate(selected))
+                if is_cloze:
+                    cur = f"挖空文本(Text)：{cur_text}\n补充(Extra)：{cur_back}"
+                    fmt = '{"text": "改进后的挖空文本，须含 {{c1::...}}", "back": "改进后的补充说明"}'
+                else:
+                    cur = f"正面(问)：{cur_front}\n背面(答)：{cur_back}"
+                    fmt = '{"front": "改进后的问题", "back": "改进后的答案"}'
+                prompt = (
+                    "下面是一张 Anki 记忆卡片，以及我在复习时与 AI 讨论中标记为有用的若干回复。"
+                    "请参考这些回复改进这张卡片，使其更准确、清晰、易记。"
+                    "保持卡片简洁，数学公式用 LaTeX（行内 \\\\( \\\\)，行间 \\\\[ \\\\]）。\n\n"
+                    f"=== 当前卡片 ===\n{cur}\n\n=== 有用的讨论回复 ===\n{refs}\n\n"
+                    f"只输出 JSON，不要其它文字：\n{fmt}"
+                )
+                try:
+                    raw = ai_client.ask(prompt)
+                    s, e = raw.find('{'), raw.rfind('}')
+                    parsed = json.loads(raw[s:e+1]) if (s != -1 and e > s) else {}
+                    out = {"ok": True}
+                    if is_cloze:
+                        out["text"] = parsed.get("text", cur_text)
+                        out["back"] = parsed.get("back", cur_back)
+                    else:
+                        out["front"] = parsed.get("front", cur_front)
+                        out["back"]  = parsed.get("back", cur_back)
+                    self.send_json(out)
+                except Exception as e:
+                    self.send_json({"ok": False, "error": f"AI 改写失败：{e}"})
 
         elif self.path == "/api/save":
             try:
