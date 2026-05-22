@@ -2592,13 +2592,21 @@ class Handler(BaseHTTPRequestHandler):
                 img = str(state["temp_path"]) if state.get("temp_path") else None
 
             # 卡片模式：会话首条消息时把卡片两面拼进 msg，让 AI 知道在讨论哪张卡
+            # 卡片模式：要求 AI 用 Markdown 小标题给多知识点分层，便于按要点挑选（+ 按钮）
+            _FMT_HINT = ("（回答时若涉及多个知识点或分多步，请用 Markdown 小标题"
+                         "（## / ###）给每个要点分层，每个标题下写该点的内容；"
+                         "单一要点的简短回答不必加标题。）")
             if card_ctx and not session.messages:
                 blk = ["以下是我正在复习的一张 Anki 记忆卡片，请基于它回答我接下来的问题。"]
                 if card_ctx.get("front"): blk.append(f"【卡片正面（问）】\n{card_ctx['front']}")
                 if card_ctx.get("text"):  blk.append(f"【卡片内容】\n{card_ctx['text']}")
                 if card_ctx.get("back"):  blk.append(f"【卡片背面（答）】\n{card_ctx['back']}")
+                blk.append(_FMT_HINT)
                 blk.append(f"———\n我的问题：{msg}" if msg else "———\n请先帮我讲解这张卡片的核心内容。")
                 msg = "\n\n".join(blk)
+            elif card_ctx:
+                # 后续消息附简短提醒，避免长对话里 AI 忘记分层格式
+                msg = f"{msg}\n\n{_FMT_HINT}"
 
             paste_tmp = None
             if img_b64:
