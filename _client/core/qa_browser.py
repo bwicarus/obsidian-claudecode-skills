@@ -153,6 +153,7 @@ WRONG_DIR     = None              # vault/<qa_wrong_subdir>，默认 "错题"
 ASSETS_DIR    = None              # vault/习题/assets
 INDEX_DIR     = None              # 可空：知识索引目录（笔记 frontmatter 摘要 .md）
 ANKI_RECORDS_DIR = None           # 可空：anki/records/*.json（用于错题分类时附 anki 列表）
+ANKI_URL         = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
 TEMP_DIR      = _CLIENT_HOME / "qa-temp"      # 客户端本地：截图临时（_init_paths 里改用 STORE_DIR）
 
 
@@ -194,7 +195,7 @@ def _resolve_subpath(vault: Path, value: str | None, default_subdir: str) -> Pat
 
 def _init_paths(cfg: dict) -> None:
     """从 client cfg 初始化路径。launch() 入口处调用。"""
-    global VAULT, EXERCISES_DIR, WRONG_DIR, ASSETS_DIR, INDEX_DIR, ANKI_RECORDS_DIR, TEMP_DIR
+    global VAULT, EXERCISES_DIR, WRONG_DIR, ASSETS_DIR, INDEX_DIR, ANKI_RECORDS_DIR, ANKI_URL, TEMP_DIR
 
     raw_vault = (cfg.get("qa_vault_path") or cfg.get("vault_path") or "").strip()
     vault_path = Path(raw_vault) if raw_vault else _detect_vault()
@@ -211,6 +212,10 @@ def _init_paths(cfg: dict) -> None:
 
     raw_anki = (cfg.get("qa_anki_records_dir") or "").strip()
     ANKI_RECORDS_DIR = Path(raw_anki) if raw_anki else None
+
+    raw_anki_url = (cfg.get("anki_connect_url") or "").strip()
+    if raw_anki_url:
+        ANKI_URL = raw_anki_url
 
     # TEMP_DIR 跟 STORE_DIR 同根（paths.app_dir() 或 fallback），落在 qa-temp/
     TEMP_DIR = STORE_DIR / "qa-temp"
@@ -251,7 +256,8 @@ for _legacy in _legacy_dirs:
 
 DB_PATH        = STORE_DIR / "history.db"
 HIST_IMG_DIR   = STORE_DIR / "images"
-QBTN_FILE      = STORE_DIR / "quick_btns.json"
+QBTN_FILE           = STORE_DIR / "quick_btns.json"
+CARD_FEEDBACK_FILE  = STORE_DIR / "card_feedback.json"
 
 _DEFAULT_QBTNS = ["解题思路是什么？", "这道题考察哪些知识点？", "请逐步详细解释", "有没有类似的题型？"]
 
@@ -480,6 +486,145 @@ def _find_card_context(local_id: str):
                     "source_url": rec.get("source_url", ""),
                 }
     return None
+
+
+def _save_card_feedback(local_id: str, rating: str, comment: str = "") -> bool:
+    """Persist card feedback {local_id, rating, comment, timestamp} to CARD_FEEDBACK_FILE."""
+    try:
+        feedback: list = []
+        if CARD_FEEDBACK_FILE.exists():
+            try:
+                feedback = json.loads(CARD_FEEDBACK_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        for entry in feedback:
+            if entry.get("local_id") == local_id:
+                entry.update({"rating": rating, "comment": comment,
+                               "updated_at": datetime.now().isoformat()})
+                break
+        else:
+            feedback.append({"local_id": local_id, "rating": rating, "comment": comment,
+                              "created_at": datetime.now().isoformat()})
+        CARD_FEEDBACK_FILE.write_text(
+            json.dumps(feedback, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _anki_request(action: str, params: dict | None = None, timeout: int = 10):
+    """Thin AnkiConnect HTTP wrapper. Raises RuntimeError on Anki-level error."""
+    import urllib.request as _req
+    payload = json.dumps({"action": action, "version": 6,
+                          "params": params or {}}).encode()
+    req = _req.Request(ANKI_URL, data=payload,
+                       headers={"Content-Type": "application/json"})
+    with _req.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read())
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+    return data.get("result")
+
+
+def _apply_card_action(local_id: str, action: str, fields: dict | None = None) -> dict:
+    """Execute an Anki action for the given card.
+
+    action: "good" | "delete" | "improve"
+    fields: for "improve" — {"Front": ..., "Back": ..., "Text": ...} (any subset)
+    """
+    ctx = _find_card_context(local_id)
+    if not ctx:
+        return {"ok": False, "error": "card not found in records"}
+    note_id = ctx.get("anki_note_id")
+    if not note_id:
+        return {"ok": False, "error": "no anki_note_id"}
+
+    try:
+        if action == "delete":
+            _anki_request("deleteNotes", {"notes": [note_id]})
+            return {"ok": True, "action": "delete", "note_id": note_id}
+
+        elif action == "good":
+            _anki_request("addTags", {"notes": [note_id], "tags": "qa_good"})
+            return {"ok": True, "action": "good", "note_id": note_id}
+
+        elif action == "improve":
+            if not fields:
+                return {"ok": False, "error": "fields required for improve"}
+            # Filter to non-empty fields only
+            upd = {k: v for k, v in fields.items() if v is not None}
+            if not upd:
+                return {"ok": False, "error": "no fields to update"}
+            _anki_request("updateNoteFields", {"note": {"id": note_id, "fields": upd}})
+            # Persist updated content back to anki records + 哈希覆盖（Stage 4）
+            hash_overridden = False
+            if ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists():
+                for fn in ANKI_RECORDS_DIR.glob("*.json"):
+                    try:
+                        rec = json.loads(fn.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    changed = False
+                    for c in rec.get("cards") or []:
+                        if c.get("local_id") == local_id:
+                            if "Front" in upd: c["front"] = upd["Front"]
+                            if "Back"  in upd: c["back"]  = upd["Back"]
+                            if "Text"  in upd: c["text"]  = upd["Text"]
+                            c["_qa_improved"] = datetime.now().isoformat()
+                            changed = True
+                    if changed:
+                        # Stage 4：重算源笔记当前 section_hashes，写回 records 防止重复制卡
+                        source_note = rec.get("source_note", "")
+                        if source_note and VAULT:
+                            note_path = (VAULT / source_note
+                                         if not Path(source_note).is_absolute()
+                                         else Path(source_note))
+                            if note_path.exists():
+                                try:
+                                    raw = note_path.read_text(encoding="utf-8")
+                                    # 剥 frontmatter
+                                    raw = re.sub(r'\A---\s*\n.*?\n---\s*\n?', '', raw,
+                                                 count=1, flags=re.DOTALL)
+                                    # 按标题切节（镜像 anki_from_note.split_sections）
+                                    _SKIP_HDR = {"相关笔记"}
+                                    secs: list[tuple[str, str]] = []
+                                    cur_h, cur_lines = "", []
+                                    for line in raw.splitlines(keepends=True):
+                                        m2 = re.match(r'^#{1,6}\s+(.+)', line)
+                                        if m2:
+                                            content2 = "".join(cur_lines)
+                                            if cur_h or content2.strip():
+                                                secs.append((cur_h, content2))
+                                            cur_h, cur_lines = m2.group(1).strip(), []
+                                        else:
+                                            cur_lines.append(line)
+                                    content2 = "".join(cur_lines)
+                                    if cur_h or content2.strip():
+                                        secs.append((cur_h, content2))
+                                    # 覆盖 section_hashes（不影响已跳过的节的哈希）
+                                    import hashlib as _hl
+                                    existing_sh = rec.get("section_hashes", {})
+                                    for sh, sc in secs:
+                                        if sh in _SKIP_HDR:
+                                            continue
+                                        existing_sh[sh] = _hl.sha256(
+                                            sc.strip().encode("utf-8")
+                                        ).hexdigest()[:16]
+                                    rec["section_hashes"] = existing_sh
+                                    hash_overridden = True
+                                except Exception:
+                                    pass
+                        fn.write_text(json.dumps(rec, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+                        break
+            return {"ok": True, "action": "improve", "note_id": note_id,
+                    "updated": list(upd), "hash_overridden": hash_overridden}
+
+        else:
+            return {"ok": False, "error": f"unknown action: {action}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def find_related_cards(note_names: list, match: str = "") -> list:
@@ -833,6 +978,22 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 /* AI 设置弹窗 */
 #settings-btn{background:none;border:1px solid #ccc;border-radius:6px;padding:3px 8px;font-size:14px;cursor:pointer;color:#555;transition:all .15s}
 #settings-btn:hover{background:#f5f5f5;color:#333}
+.card-fb-btn{border:1px solid #ccc;border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;background:none;color:#555;transition:all .15s;white-space:nowrap}
+.card-fb-btn:hover{background:#f5f5f5}
+.card-fb-btn.fb-good.active{background:#d4edda;border-color:#52b06e;color:#1a6330;font-weight:600}
+.card-fb-btn.fb-improve.active{background:#fff3cd;border-color:#d4a017;color:#7a5900;font-weight:600}
+.card-fb-btn.fb-delete.active{background:#fde8e8;border-color:#e07070;color:#b91c1c;font-weight:600}
+#card-edit{display:none;padding:10px 16px;border-top:1px solid #eee;background:#fafbfc;font-size:13px}
+#card-edit label{display:block;font-size:11px;font-weight:600;color:#555;margin:8px 0 3px}
+#card-edit label:first-child{margin-top:0}
+#card-edit textarea{width:100%;border:1px solid #ddd;border-radius:6px;padding:7px 9px;font-size:13px;font-family:inherit;resize:vertical;outline:none;min-height:60px;transition:border-color .15s}
+#card-edit textarea:focus{border-color:#0078d4}
+#card-edit-actions{display:flex;gap:8px;margin-top:10px}
+#card-edit-submit{background:#0078d4;color:#fff;border:none;border-radius:7px;padding:7px 16px;font-size:13px;font-weight:500;cursor:pointer}
+#card-edit-submit:hover{opacity:.88}
+#card-edit-cancel{background:#f5f5f5;color:#555;border:1px solid #ddd;border-radius:7px;padding:7px 14px;font-size:13px;cursor:pointer}
+#card-edit-cancel:hover{background:#ececec}
+#card-action-msg{font-size:12px;padding:4px 0;min-height:18px}
 #sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
 #sett-overlay.open{display:block}
 #sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:380px;width:90%}
@@ -878,6 +1039,19 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 </div>
 <div id="shot-area">
   <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
+  <div id="card-edit">
+    <div id="card-action-msg"></div>
+    <label id="lbl-front">问（Front）</label>
+    <textarea id="edit-front" rows="3"></textarea>
+    <label id="lbl-back">答（Back）</label>
+    <textarea id="edit-back" rows="3"></textarea>
+    <label id="lbl-text" style="display:none">挖空文本（Text）</label>
+    <textarea id="edit-text" rows="2" style="display:none"></textarea>
+    <div id="card-edit-actions">
+      <button id="card-edit-submit" onclick="submitCardEdit()">提交到 Anki</button>
+      <button id="card-edit-cancel" onclick="closeCardEdit()">取消</button>
+    </div>
+  </div>
   <div id="shot-wrap" title="点击展开/收起截图">
     <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
   </div>
@@ -1014,6 +1188,104 @@ function pollScreenshot() {
 }
 // 卡片模式：URL ?card=<local_id> → 反查卡片两面显示在截图位，附原笔记按钮
 let cardCtx = null;
+
+function setActionMsg(msg, color) {
+  const el = document.getElementById('card-action-msg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = color || '#555';
+}
+
+function applyCardAction(localId, action, fields) {
+  return fetch('api/card-action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({local_id: localId, action: action, fields: fields || null})
+  }).then(r => r.json());
+}
+
+function openCardEdit() {
+  if (!cardCtx) return;
+  const isCloze = cardCtx.type === 'cloze';
+  document.getElementById('lbl-front').style.display = isCloze ? 'none' : '';
+  document.getElementById('edit-front').style.display = isCloze ? 'none' : '';
+  document.getElementById('lbl-back').style.display = isCloze ? 'none' : '';
+  document.getElementById('edit-back').style.display = isCloze ? 'none' : '';
+  document.getElementById('lbl-text').style.display  = isCloze ? '' : 'none';
+  document.getElementById('edit-text').style.display  = isCloze ? '' : 'none';
+  document.getElementById('edit-front').value = cardCtx.front || '';
+  document.getElementById('edit-back').value  = cardCtx.back  || '';
+  document.getElementById('edit-text').value  = cardCtx.text  || '';
+  document.getElementById('card-edit').style.display = '';
+  setActionMsg('');
+}
+
+function closeCardEdit() {
+  document.getElementById('card-edit').style.display = 'none';
+}
+
+function submitCardEdit() {
+  if (!cardCtx) return;
+  const isCloze = cardCtx.type === 'cloze';
+  const fields = isCloze
+    ? {Text: document.getElementById('edit-text').value}
+    : {Front: document.getElementById('edit-front').value,
+       Back:  document.getElementById('edit-back').value};
+  const submitBtn = document.getElementById('card-edit-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '提交中…';
+  applyCardAction(cardCtx.local_id, 'improve', fields).then(j => {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '提交到 Anki';
+    if (j.ok) {
+      setActionMsg('✓ Anki 已更新', '#1a6330');
+      closeCardEdit();
+      // 同步更新本地 cardCtx
+      if (fields.Front !== undefined) cardCtx.front = fields.Front;
+      if (fields.Back  !== undefined) cardCtx.back  = fields.Back;
+      if (fields.Text  !== undefined) cardCtx.text  = fields.Text;
+    } else {
+      setActionMsg('✗ ' + (j.error || '更新失败'), '#b91c1c');
+    }
+  }).catch(e => {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '提交到 Anki';
+    setActionMsg('✗ 网络错误', '#b91c1c');
+  });
+}
+
+function sendCardFeedback(localId, rating, btn) {
+  if (rating === 'delete' && !confirm('从 Anki 删除该卡片，不可撤销，确认？')) return;
+  // 先保存反馈记录
+  fetch('api/card-feedback', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({local_id: localId, rating: rating})
+  }).then(r => r.json()).then(j => {
+    if (!j.ok) return;
+    document.querySelectorAll('.card-fb-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    closeCardEdit();
+    if (rating === 'improve') {
+      // 展开编辑区
+      openCardEdit();
+    } else {
+      // good / delete → 直接调 Anki
+      const editArea = document.getElementById('card-edit');
+      editArea.style.display = '';
+      setActionMsg(rating === 'delete' ? '正在从 Anki 删除…' : '正在标记 Anki…', '#888');
+      applyCardAction(localId, rating).then(j2 => {
+        if (j2.ok) {
+          setActionMsg(rating === 'delete' ? '✓ 已从 Anki 删除' : '✓ 已标记 qa_good', '#1a6330');
+          editArea.style.display = '';
+        } else {
+          setActionMsg('✗ ' + (j2.error || 'Anki 操作失败'), '#b91c1c');
+        }
+      }).catch(() => setActionMsg('✗ 无法连接 AnkiConnect', '#b91c1c'));
+    }
+  }).catch(() => {});
+}
+
 function loadCardContext(cid) {
   fetch('api/card-context?card=' + encodeURIComponent(cid))
     .then(r => r.ok ? r.json() : Promise.reject())
@@ -1028,12 +1300,37 @@ function loadCardContext(cid) {
       face.style.display = '';
       document.getElementById('shot-wrap').style.display = 'none';
       typeset(face);
+      const acts = document.getElementById('card-actions');
       if (c.source_url) {
         const a = document.createElement('button');
         a.textContent = '打开原笔记';
+        a.style.cssText = 'border:1px solid #ccc;border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer;background:none;color:#555;white-space:nowrap';
         a.onclick = () => { location.href = c.source_url; };
-        document.getElementById('card-actions').appendChild(a);
+        acts.appendChild(a);
       }
+      // 三个反馈按钮
+      const fbBtns = [
+        {label: '👍 好用', rating: 'good',    cls: 'fb-good'},
+        {label: '✎ 需改',  rating: 'improve', cls: 'fb-improve'},
+        {label: '🗑 删除', rating: 'delete',  cls: 'fb-delete'},
+      ];
+      fbBtns.forEach(({label, rating, cls}) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.className = 'card-fb-btn ' + cls;
+        btn.onclick = () => sendCardFeedback(c.local_id, rating, btn);
+        acts.appendChild(btn);
+      });
+      // 恢复已存反馈状态
+      fetch('api/card-feedback?card=' + encodeURIComponent(cid))
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (j && j.rating) {
+            const map = {good: 'fb-good', improve: 'fb-improve', delete: 'fb-delete'};
+            const cls = map[j.rating];
+            if (cls) acts.querySelector('.' + cls)?.classList.add('active');
+          }
+        }).catch(() => {});
     })
     .catch(() => pollScreenshot());
 }
@@ -1693,6 +1990,21 @@ class Handler(BaseHTTPRequestHandler):
             ctx = _find_card_context(cid)
             self.send_json(ctx or {"error": "not found"}, 200 if ctx else 404)
 
+        elif self.path.startswith("/api/card-feedback"):
+            from urllib.parse import urlparse, parse_qs
+            cid = (parse_qs(urlparse(self.path).query).get("card") or [""])[0]
+            if not cid:
+                self.send_json({"error": "missing card"}, 400)
+            else:
+                fb_list: list = []
+                if CARD_FEEDBACK_FILE.exists():
+                    try:
+                        fb_list = json.loads(CARD_FEEDBACK_FILE.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                entry = next((e for e in fb_list if e.get("local_id") == cid), None)
+                self.send_json(entry or {"local_id": cid}, 200)
+
         else:
             self.send_response(404); self.end_headers()
 
@@ -1808,6 +2120,26 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": str(e)})
             else:
                 self.send_json({"ok": False, "error": "no image_b64"})
+
+        elif self.path == "/api/card-feedback":
+            local_id = body.get("local_id", "").strip()
+            rating   = body.get("rating", "").strip()
+            comment  = body.get("comment", "").strip()
+            if local_id and rating in ("good", "improve", "delete"):
+                ok = _save_card_feedback(local_id, rating, comment)
+                self.send_json({"ok": ok})
+            else:
+                self.send_json({"ok": False, "error": "invalid params"}, 400)
+
+        elif self.path == "/api/card-action":
+            local_id = body.get("local_id", "").strip()
+            action   = body.get("action", "").strip()
+            fields   = body.get("fields")  # optional dict for "improve"
+            if local_id and action in ("good", "improve", "delete"):
+                result = _apply_card_action(local_id, action, fields)
+                self.send_json(result)
+            else:
+                self.send_json({"ok": False, "error": "invalid params"}, 400)
 
         elif self.path == "/api/save":
             try:
