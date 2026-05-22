@@ -1000,6 +1000,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 #history-btn.active{background:#e8f0fe;border-color:#0078d4;color:#0078d4}
 #shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;flex-shrink:0;overflow:hidden;transition:max-height .25s ease;max-height:180px;cursor:pointer;display:flex;align-items:center}
 #shot-area.expanded{max-height:60vh}
+/* 对话下拉时自动收起截图/卡片区，腾出版面；滚回顶部再展开 */
+#shot-area.shrunk{max-height:0!important;padding-top:0!important;padding-bottom:0!important;border-bottom-color:transparent;opacity:0}
 #shot-wrap{display:contents}
 #shot-wrap img{max-height:160px;max-width:100%;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain}
 #shot-area.expanded #shot-wrap img{max-height:calc(60vh - 20px)}
@@ -1504,6 +1506,17 @@ function deactivateSearch() {
 document.getElementById('shot-wrap').addEventListener('click', () => {
   document.getElementById('shot-area').classList.toggle('expanded');
 });
+
+// 对话下拉 → 自动收起截图/卡片区（带滞回，防抖动）；滚回顶部恢复
+(function () {
+  const chatEl = document.getElementById('chat');
+  const shotArea = document.getElementById('shot-area');
+  if (!chatEl || !shotArea) return;
+  chatEl.addEventListener('scroll', () => {
+    if (chatEl.scrollTop > 60) shotArea.classList.add('shrunk');
+    else if (chatEl.scrollTop < 12) shotArea.classList.remove('shrunk');
+  }, {passive: true});
+})();
 
 // ─── 快捷提问按钮 ─────────────────────────────────────────────────────────────
 
