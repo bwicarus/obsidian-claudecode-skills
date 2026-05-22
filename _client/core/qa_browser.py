@@ -459,6 +459,29 @@ def compute_proximity(match: str, candidate: str, index_notes: dict) -> float:
     return jacc
 
 
+def _find_card_context(local_id: str):
+    """QA 页 ?card=<local_id> 反查：从 anki records 取卡片两面 + 来源。"""
+    if not local_id or not (ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists()):
+        return None
+    for fn in ANKI_RECORDS_DIR.glob("*.json"):
+        try:
+            rec = json.loads(fn.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for c in rec.get("cards") or []:
+            if c.get("local_id") == local_id:
+                return {
+                    "local_id": local_id, "type": c.get("type"),
+                    "front": c.get("front", ""), "back": c.get("back", ""),
+                    "text": c.get("text", ""),
+                    "anki_note_id": c.get("anki_note_id"),
+                    "source_note": rec.get("source_note", ""),
+                    "source_link": rec.get("source_link", ""),
+                    "source_url": rec.get("source_url", ""),
+                }
+    return None
+
+
 def find_related_cards(note_names: list, match: str = "") -> list:
     """对每个候选笔记融合三个信号：
         relevance(AI 排序 rank score) × weakness(1 - 留存率) × proximity(图距离)
@@ -850,9 +873,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
   <h1>截图问答</h1>
   <span id="note-tag"></span>
   <button id="history-btn" onclick="openSidebar()">历史记录</button>
+  <span id="card-actions"></span>
   <button id="settings-btn" onclick="openSettings()" title="AI 设置">⚙</button>
 </div>
 <div id="shot-area">
+  <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
   <div id="shot-wrap" title="点击展开/收起截图">
     <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
   </div>
@@ -987,7 +1012,33 @@ function pollScreenshot() {
     }
   }).catch(() => setTimeout(pollScreenshot, 5000));
 }
-pollScreenshot();
+// 卡片模式：URL ?card=<local_id> → 反查卡片两面显示在截图位，附原笔记按钮
+let cardCtx = null;
+function loadCardContext(cid) {
+  fetch('api/card-context?card=' + encodeURIComponent(cid))
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(c => {
+      cardCtx = c;
+      const face = document.getElementById('card-face');
+      const parts = [];
+      if (c.front) parts.push('<div><b>问</b><br>' + renderMd(c.front) + '</div>');
+      if (c.text)  parts.push('<div>' + renderMd(c.text) + '</div>');
+      if (c.back)  parts.push('<div style="margin-top:8px"><b>答</b><br>' + renderMd(c.back) + '</div>');
+      face.innerHTML = parts.join('<hr style="border:none;border-top:1px solid #eee;margin:10px 0">');
+      face.style.display = '';
+      document.getElementById('shot-wrap').style.display = 'none';
+      typeset(face);
+      if (c.source_url) {
+        const a = document.createElement('button');
+        a.textContent = '打开原笔记';
+        a.onclick = () => { location.href = c.source_url; };
+        document.getElementById('card-actions').appendChild(a);
+      }
+    })
+    .catch(() => pollScreenshot());
+}
+const _cardId = new URLSearchParams(location.search).get('card');
+if (_cardId) loadCardContext(_cardId); else pollScreenshot();
 
 // ─── 粘贴图片 ────────────────────────────────────────────────────────────────
 
@@ -1635,6 +1686,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "not found"}, 404)
             else:
                 self.send_json({"error": "invalid id"}, 400)
+
+        elif self.path.startswith("/api/card-context"):
+            from urllib.parse import urlparse, parse_qs
+            cid = (parse_qs(urlparse(self.path).query).get("card") or [""])[0]
+            ctx = _find_card_context(cid)
+            self.send_json(ctx or {"error": "not found"}, 200 if ctx else 404)
 
         else:
             self.send_response(404); self.end_headers()

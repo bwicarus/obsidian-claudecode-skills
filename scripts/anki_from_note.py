@@ -559,6 +559,9 @@ def source_footer(source_link: str, source_url: str, reason: str, local_id: str)
         f"原因：{html.escape(reason)}",
         f"Local ID：{html.escape(local_id)}",
     ]
+    qa = os.environ.get("QA_PUBLIC_URL", "").rstrip("/")
+    if qa:
+        lines.append(f'<a href="{qa}/?card={local_id}">问 AI / 改进这张卡</a>')
     return '<hr><div style="font-size:0.85em;color:#666;">' + "<br>".join(lines) + "</div>"
 
 
