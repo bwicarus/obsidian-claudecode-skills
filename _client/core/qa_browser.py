@@ -475,14 +475,25 @@ def _find_card_context(local_id: str):
             continue
         for c in rec.get("cards") or []:
             if c.get("local_id") == local_id:
+                source_note = rec.get("source_note", "")
+                source_url  = rec.get("source_url", "")
+                # source_url 为空时用 source_note 重建 obsidian:// 链接（同卡片 footer 那个）
+                if not source_url and source_note:
+                    import urllib.parse as _up
+                    fp = source_note.replace("\\", "/")
+                    if fp.lower().endswith(".md"):
+                        fp = fp[:-3]
+                    source_url = ("obsidian://open?vault="
+                                  + _up.quote("Obsidian Vault", safe="")
+                                  + "&file=" + _up.quote(fp, safe=""))
                 return {
                     "local_id": local_id, "type": c.get("type"),
                     "front": c.get("front", ""), "back": c.get("back", ""),
                     "text": c.get("text", ""),
                     "anki_note_id": c.get("anki_note_id"),
-                    "source_note": rec.get("source_note", ""),
+                    "source_note": source_note,
                     "source_link": rec.get("source_link", ""),
-                    "source_url": rec.get("source_url", ""),
+                    "source_url": source_url,
                 }
     return None
 
@@ -1095,20 +1106,22 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .card-act-btn.upd-all:hover{background:#d8f5e3}
 .card-act-btn:disabled{opacity:.5;cursor:default}
 /* 每条 AI 回复的 有用/无用 切换框 */
-/* 选择有用内容的「+」按钮：整条回复一个 + 每个标题行一个，级联选中 */
+/* 子标题行的「+」按钮：圆形，点击变蓝选中，级联 */
 .pick-btn{flex-shrink:0;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #cbd5e1;border-radius:50%;background:#fff;color:#94a3b8;font-size:14px;cursor:pointer;user-select:none;transition:all .12s;padding:0}
 .pick-btn:hover{border-color:#0078d4;color:#0078d4}
 .pick-btn.on{background:#0078d4;border-color:#0078d4;color:#fff;font-weight:700}
-/* 整条回复的 + ：浮在 AI 气泡右上角 */
-.reply-pick-all{position:absolute;top:6px;right:6px;z-index:2}
-.bubble.assistant{position:relative}
+/* 「选用整条回答」开关：在气泡外侧，与子标题 + 区分 */
+.reply-pick-all{align-self:flex-start;margin-top:4px;font-size:11px;color:#64748b;background:#fff;border:1px dashed #cbd5e1;border-radius:12px;padding:2px 12px;cursor:pointer;user-select:none;transition:all .12s}
+.reply-pick-all:hover{border-color:#0078d4;color:#0078d4}
+.reply-pick-all.on{background:#0078d4;border-color:#0078d4;border-style:solid;color:#fff;font-weight:600}
 .bubble.assistant.picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:#f5faff}
-/* 标题行的 + ：贴右侧 */
-.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{position:relative;padding-right:26px}
+/* 子标题行的 + ：贴右侧 */
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{position:relative}
+.md h1.has-pick,.md h2.has-pick,.md h3.has-pick,.md h4.has-pick,.md h5.has-pick,.md h6.has-pick{padding-right:26px}
 .md .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}
 .md .hsec-picked{background:#eef6ff;border-radius:4px;box-shadow:-4px 0 0 #cfe6ff}
 /* 更新结果/进度面板 */
-#card-result{display:none;padding:10px 16px;border-top:1px solid #eee;background:#fafbfc;font-size:13px;line-height:1.6;max-height:38vh;overflow:auto}
+#card-result{display:none;flex-shrink:0;padding:10px 16px;border-top:1px solid #eee;border-bottom:1px solid #eee;background:#fff8e6;font-size:13px;line-height:1.6;max-height:38vh;overflow:auto}
 #card-result .cr-close{float:right;background:none;border:none;font-size:15px;color:#bbb;cursor:pointer;line-height:1}
 #sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
 #sett-overlay.open{display:block}
@@ -1155,11 +1168,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 </div>
 <div id="shot-area">
   <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
-  <div id="card-result"></div>
   <div id="shot-wrap" title="点击展开/收起截图">
     <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
   </div>
 </div>
+<div id="card-result"></div>
 <div id="chat"></div>
 <div id="status"></div>
 <div id="quick-bar">
@@ -1609,18 +1622,19 @@ function addMsg(role, html, isHtml, imgSrc) {
   }
   row.appendChild(ctrl);
   row.appendChild(d);
-  // 卡片模式：AI 气泡右上角放「整条回复」的 + 按钮；标题行的 + 在渲染后补
+  // 卡片模式：气泡外侧放「选用整条回答」开关；子标题行的 + 在渲染后补
   if (role === 'assistant' && cardCtx) {
     const allBtn = document.createElement('button');
-    allBtn.className = 'pick-btn reply-pick-all';
-    allBtn.textContent = '+';
-    allBtn.title = '选中整条回复用于改进';
+    allBtn.className = 'reply-pick-all';
+    allBtn.textContent = '＋ 选用整条回答';
+    allBtn.title = '把整条回答用于改进卡片/笔记';
     allBtn.onclick = () => {
       const on = allBtn.classList.toggle('on');
+      allBtn.textContent = on ? '✓ 已选整条回答' : '＋ 选用整条回答';
       d.classList.toggle('picked-all', on);
       refreshUpdateButtons();
     };
-    d.appendChild(allBtn);
+    row.appendChild(allBtn);   // 在气泡外侧（msg-row 内、bubble 之后）
     if (!isHtml) addHeadingPickers(d.querySelector('.md'));
   }
   chat.appendChild(row);
@@ -1629,12 +1643,17 @@ function addMsg(role, html, isHtml, imgSrc) {
   return d;
 }
 
-// 给一段渲染好的 markdown 里每个标题行补「+」按钮（卡片模式）
+// 给一段渲染好的 markdown 里「子标题」行补「+」按钮（卡片模式）。
+// 最高级标题=整条回答，由气泡外侧的「选用整条回答」开关代表，不再给 +。
 function addHeadingPickers(md) {
   if (!md || !cardCtx) return;
-  const heads = md.querySelectorAll('h1,h2,h3,h4,h5,h6');
+  const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  if (!heads.length) return;
+  const minLvl = Math.min(...heads.map(headLevel));
   heads.forEach(h => {
-    if (h.querySelector('.head-pick')) return;   // 防重复
+    if (headLevel(h) <= minLvl) return;       // 跳过最高级标题
+    if (h.querySelector('.head-pick')) return;
+    h.classList.add('has-pick');
     const btn = document.createElement('button');
     btn.className = 'pick-btn head-pick';
     btn.textContent = '+';
