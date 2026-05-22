@@ -695,6 +695,12 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
 
     source_link = rec.get("source_link", "")
     source_url  = rec.get("source_url", "")
+    if not source_url and rec.get("source_note"):   # 重建 obsidian 链接，避免空 href
+        import urllib.parse as _up
+        _fp = rec["source_note"].replace("\\", "/")
+        if _fp.lower().endswith(".md"): _fp = _fp[:-3]
+        source_url = ("obsidian://open?vault=" + _up.quote("Obsidian Vault", safe="")
+                      + "&file=" + _up.quote(_fp, safe=""))
     deck = orig.get("deck", "Obsidian::未分类")
     MODELS = {"basic": "Obsidian-basic", "reverse": "Obsidian-basic-reversed",
               "cloze": "Obsidian-cloze"}
