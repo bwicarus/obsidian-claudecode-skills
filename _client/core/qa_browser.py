@@ -1066,8 +1066,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 /* 截图/卡片区现在在滚动容器 #chat 内，跟随内容自然上移划走 */
 #shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;overflow:hidden;max-height:180px;cursor:pointer;display:flex;align-items:center}
 #shot-area.expanded{max-height:60vh}
-/* 划走后顶部 sticky 的小行，点击滚回顶部展开 */
-#shot-peek{display:none;position:sticky;top:0;z-index:5;background:#eef4ff;border-bottom:1px solid #cfe0ff;color:#0057b8;font-size:12px;text-align:center;padding:4px 16px;cursor:pointer;user-select:none}
+/* 划走后顶部的小行：绝对浮层（不占滚动流，显隐不推动截图区→不抖动），点击滚回展开 */
+#shot-peek{display:none;position:absolute;top:0;left:0;right:0;z-index:5;background:#eef4ff;border-bottom:1px solid #cfe0ff;color:#0057b8;font-size:12px;text-align:center;padding:4px 16px;cursor:pointer;user-select:none}
 #shot-peek:hover{background:#e0ecff}
 #shot-wrap{display:contents}
 #shot-wrap img{max-height:160px;max-width:100%;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain}
@@ -1085,6 +1085,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .qbtn-input{border:1px solid #0078d4;border-radius:14px;padding:2px 10px;font-size:12px;outline:none;font-family:inherit;min-width:60px;max-width:160px;line-height:1.6}
 .qadd-btn{background:none;border:1px dashed #ccc;border-radius:14px;padding:3px 9px;font-size:12px;color:#bbb;cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
 .qadd-btn:hover{border-color:#0078d4;color:#0078d4}
+#chat-wrap{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
 #chat{flex:1;overflow-y:auto;display:block}
 #msgs{display:flex;flex-direction:column;gap:10px;padding:14px 16px}
 .msg-row{display:flex;flex-direction:column}
@@ -1239,15 +1240,17 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
   <span id="card-actions"></span>
   <button id="settings-btn" onclick="openSettings()" title="设置">⚙</button>
 </div>
-<div id="chat">
+<div id="chat-wrap">
   <div id="shot-peek" onclick="revealShot()">▾ 展开截图</div>
-  <div id="shot-area">
-    <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
-    <div id="shot-wrap" title="点击展开/收起截图">
-      <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
+  <div id="chat">
+    <div id="shot-area">
+      <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
+      <div id="shot-wrap" title="点击展开/收起截图">
+        <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
+      </div>
     </div>
+    <div id="msgs"></div>
   </div>
-  <div id="msgs"></div>
 </div>
 <div id="card-result"></div>
 <div id="status"></div>
