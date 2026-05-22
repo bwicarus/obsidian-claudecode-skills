@@ -9,10 +9,14 @@
   "section_hashes": {
     "定义": "d051620c5a484fcc",
     "检验子空间的方法": "e20b8154453f63e4",
-    "子空间的和": "a2d30c3a374f1d37",
+    "子空间的和": "ba02578a1b982392",
     "相关笔记": "e6c0888b79879760",
-    "": "d9a2f1b5c14e66cc",
-    "习题本": "56e30872d4cc52f3"
+    "": "45c8bcdc4d9295b5",
+    "习题本": "56e30872d4cc52f3",
+    "「最小子空间」的两层含义": "8b08836d67fed485",
+    "为什么是「最小」的": "0ba343acc49cea69",
+    "关于「类似集合的并集」这个类比": "35fa4b23e85c6888",
+    "和本身是子空间": "2e7974e6871dbd87"
   },
   "cards": [
     {
@@ -65,27 +69,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-16T04:00:26+09:00",
+    "checked_at": "2026-05-22T04:00:31+09:00",
     "total": 3,
-    "new": 3,
-    "learning": 0,
-    "review": 0,
+    "new": 1,
+    "learning": 1,
+    "review": 1,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.0,
+    "retention_avg": 0.45971456911815195,
     "retention_min": 0.0,
-    "mastery_avg": 0.0,
+    "mastery_avg": 0.21649336100056416,
     "mastery_min": 0.0,
-    "reps_total": 0,
+    "reps_total": 2,
     "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-16T04:00:26+09:00",
-    "score": 0.538,
-    "activation": 0.7335,
-    "importance": 0.7335,
-    "weakness": 1.0,
+    "computed_at": "2026-05-22T04:00:32+09:00",
+    "score": 0.3183,
+    "activation": 0.6373,
+    "importance": 0.6373,
+    "weakness": 0.7835,
     "formula": "(1-M) * activation * importance"
   }
 }

@@ -9,8 +9,8 @@
   "section_hashes": {
     "线性组合": "fa49cd1eac661690",
     "相关笔记": "03ae479f83eb3889",
-    "张成空间": "5314f314041cf669",
-    "": "356f7e174641b771",
+    "张成空间": "c98491ce9ee0b733",
+    "": "7005bce9fcea370a",
     "张成空间是子空间": "c58303bc351f72e6",
     "有限维向量空间": "d889bd5a00f56f17"
   },
@@ -161,30 +161,94 @@
       ],
       "anki_note_id": 1778126751613,
       "status": "synced"
+    },
+    {
+      "local_id": "20260522224150-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "空向量组（即不含任何向量的向量组 ()）的张成空间 \\(\\operatorname{span}()\\) 定义为什么？",
+      "back": "\\[\\operatorname{span}()=\\{0\\}\\]即只含零向量的集合。",
+      "text": "",
+      "reason": "保留原卡核心定义，把'空向量组'明确为'不含任何向量'，并用行间 LaTeX 规范写法呈现 span()={0}。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779457310171,
+      "status": "synced",
+      "_qa_from": "20260507130551-002",
+      "_qa_created": "2026-05-22T22:41:50.178139"
+    },
+    {
+      "local_id": "20260522224150-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "为什么把空向量组的张成空间定义为 \\(\\{0\\}\\)（从线性组合的本质看）？",
+      "back": "张成空间是所有线性组合 \\(a_1v_1+\\cdots+a_mv_m\\) 的集合。空向量组对应一个**空和（empty sum）**，按通行约定空和等于加法单位元 \\(0\\)（没有任何项可加，结果就是 \\(0\\)）。因此唯一能写出的线性组合就是 \\(0\\)，于是 \\(\\operatorname{span}()=\\{0\\}\\)。",
+      "text": "",
+      "reason": "把问答中'空和=0'这一本质理由独立成卡，解释定义的来由而非只记结论。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779457310197,
+      "status": "synced",
+      "_qa_from": "20260507130551-002",
+      "_qa_created": "2026-05-22T22:41:50.200272"
+    },
+    {
+      "local_id": "20260522224150-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "为什么不能把空向量组的张成空间定义为空集 \\(\\varnothing\\)？",
+      "back": "因为任何向量组的张成空间都应当是一个**子空间**，而子空间必须包含 \\(0\\)、不能为空集。若定义成 \\(\\varnothing\\)，它就不是子空间，许多定理都要额外加'非空'的例外。定义成 \\(\\{0\\}\\) 后，它恰是**最小的子空间**，'张成空间总是子空间'这条规律无任何例外。",
+      "text": "",
+      "reason": "把问答的第二个理由（保持'张成空间必为子空间'无例外）单独成卡，强调与空集对比，便于记忆动机。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779457310226,
+      "status": "synced",
+      "_qa_from": "20260507130551-002",
+      "_qa_created": "2026-05-22T22:41:50.228790"
+    },
+    {
+      "local_id": "20260522224150-004",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "空向量组的张成空间 \\(\\operatorname{span}()=\\){{c1::\\(\\{0\\}\\)}}，因为它对应一个{{c2::空和（empty sum）}}且其值约定为加法单位元 \\(0\\)；这样定义也保证了它是{{c3::最小的子空间}}，使'张成空间总是子空间'无例外。",
+      "reason": "用一张 cloze 把'结论 + 两条理由'整合，做主动回忆的综合检验。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779457310249,
+      "status": "synced",
+      "_qa_from": "20260507130551-002",
+      "_qa_created": "2026-05-22T22:41:50.251698"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-16T04:00:26+09:00",
+    "checked_at": "2026-05-22T04:00:31+09:00",
     "total": 10,
     "new": 0,
     "learning": 0,
-    "review": 9,
-    "relearning": 1,
+    "review": 10,
+    "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9264901103866932,
-    "retention_min": 0.3,
-    "mastery_avg": 0.3847337534256149,
-    "mastery_min": 0.15,
-    "reps_total": 38,
+    "retention_avg": 0.9678399161591237,
+    "retention_min": 0.8999781939299946,
+    "mastery_avg": 0.39807315853634373,
+    "mastery_min": 0.36103165143420346,
+    "reps_total": 40,
     "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-16T04:00:26+09:00",
-    "score": 0.4579,
-    "activation": 0.8627,
-    "importance": 0.8627,
-    "weakness": 0.6153,
+    "computed_at": "2026-05-22T04:00:32+09:00",
+    "score": 0.4108,
+    "activation": 0.8261,
+    "importance": 0.8261,
+    "weakness": 0.6019,
     "formula": "(1-M) * activation * importance"
   }
 }

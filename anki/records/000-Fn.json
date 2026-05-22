@@ -1,14 +1,15 @@
 {
   "source_note": "000-Fn.md",
   "source_link": "[[000-Fn]]",
-  "generated_at": "2026-05-07T16:36:02+09:00",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn",
+  "generated_at": "2026-05-22T04:00:29+09:00",
   "generator": "agent",
   "status": "synced",
-  "reason": "该节只是 Obsidian Tasks 查询代码块，用于显示待办任务，不包含需要长期主动回忆的知识点。",
+  "reason": "这篇笔记给出了 \\(F^n\\) 的精确定义和坐标的术语，属于线性代数中需要精确复述的核心定义，未来在描述向量空间、子空间、线性映射时会反复用到，记不起来会卡住。值得制 1-2 张定义卡。",
   "warnings": [],
   "section_hashes": {
-    "": "d1311748820c3f93",
-    "1 $F^n$中元素是[[000-组的定义|组]]": "3c08aaacea0d3666",
+    "": "7bee1a63febe1fc5",
+    "1 $F^n$中元素是[[000-组的定义|组]]": "28f3ba652d248d42",
     "2 $F^n$中的加法": "c58a6a8f6584e6bb",
     "3 $F^n$中的性质": "a61eb02443261173",
     "4，其它定义": "77c8ec0504d6cdec",
@@ -145,31 +146,62 @@
       ],
       "anki_note_id": 1777524331977,
       "status": "synced"
+    },
+    {
+      "local_id": "20260522040029-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "线性代数中 \\(F^n\\) 的定义是什么？",
+      "back": "\\(F^n\\) 是全体由 \\(F\\) 中元素构成的 \\(n\\) 元组所组成的集合：\\[F^n=\\{(x_1,\\dots,x_n):x_k\\in F,\\ k=1,\\dots,n\\}.\\]",
+      "text": "",
+      "reason": "核心定义，未来描述向量空间与坐标时直接使用，需要精确复述。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779390029419,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260522040029-002",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "强调坐标的下标从 \\(1\\) 到 \\(n\\)，对应 \\(n\\) 元组中的位置。",
+      "text": "对于 \\((x_1,\\dots,x_n)\\in F^n\\) 和 \\(k\\in\\{1,\\dots,n\\}\\)，称 \\(x_k\\) 为 \\((x_1,\\dots,x_n)\\) 的{{c1::第 \\(k\\) 个坐标}}。",
+      "reason": "坐标(coordinate)是后续讨论中频繁使用的术语，需要主动回忆其含义。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779390029470,
+      "status": "synced"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-16T04:00:25+09:00",
-    "total": 8,
-    "new": 0,
+    "checked_at": "2026-05-22T04:00:31+09:00",
+    "total": 10,
+    "new": 2,
     "learning": 0,
     "review": 8,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9940403507816468,
-    "retention_min": 0.9859890677086554,
-    "mastery_avg": 0.40800348663833985,
-    "mastery_min": 0.39768535890210166,
+    "retention_avg": 0.7657942442990981,
+    "retention_min": 0.0,
+    "mastery_avg": 0.31448853175622615,
+    "mastery_min": 0.0,
     "reps_total": 25,
     "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-16T04:00:26+09:00",
-    "score": 0.592,
-    "activation": 1.0,
-    "importance": 1.0,
-    "weakness": 0.592,
+    "computed_at": "2026-05-22T04:00:32+09:00",
+    "score": 0.6777,
+    "activation": 0.9943,
+    "importance": 0.9943,
+    "weakness": 0.6855,
     "formula": "(1-M) * activation * importance"
-  },
-  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn"
+  }
 }
