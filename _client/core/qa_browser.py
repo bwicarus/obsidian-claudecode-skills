@@ -1420,7 +1420,7 @@ let cardCtx = null;
 function showCardResult(html) {
   const el = document.getElementById('card-result');
   el.innerHTML = '<button class="cr-close" onclick="document.getElementById(\'card-result\').style.display=\'none\'">✕</button>' + html;
-  el.style.display = '';
+  el.style.display = 'block';   // 不能用 ''（会回退到 CSS 的 display:none）
   typeset(el);
 }
 
