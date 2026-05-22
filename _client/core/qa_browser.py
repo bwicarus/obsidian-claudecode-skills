@@ -1356,8 +1356,8 @@ window.MathJax = {
   startup:{typeset:false},
 };
 </script>
-<script src="http://bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1" async id="MathJax-script"></script>
-<script src="http://bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1" async id="MathJax-script"></script>
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
 <script>
 if (window.marked && marked.use) {
   marked.use({ breaks: true, gfm: true });
@@ -1859,7 +1859,11 @@ let _recog = null, _recogOn = false, _recogBase = '';
 function toggleMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const btn = document.getElementById('mic-btn');
-  if (!SR) { status.textContent = '此浏览器不支持语音输入'; return; }
+  if (!window.isSecureContext) {
+    status.textContent = '⚠️ 语音输入需 HTTPS（当前 http，浏览器禁用麦克风）。可先用 iPad 键盘上的听写麦克风代替。';
+    return;
+  }
+  if (!SR) { status.textContent = '此浏览器不支持语音输入（试试 iPad 键盘的听写麦克风）'; return; }
   if (_recogOn) { try { _recog.stop(); } catch(_){} return; }
   _recog = new SR();
   _recog.lang = 'zh-CN';
