@@ -800,6 +800,12 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
     if new_content.startswith("```"):
         new_content = re.sub(r'^```[a-zA-Z]*\n', '', new_content)
         new_content = re.sub(r'\n```\s*$', '', new_content)
+    # AI 有时无视指令在正文前加一段说明（"…以下为修改后的完整笔记："）。
+    # 若原文以 frontmatter 开头，截掉第一个 '---' 之前的任何前言，保证笔记结构正确。
+    if original.lstrip().startswith("---"):
+        idx = new_content.find("---")
+        if idx > 0:
+            new_content = new_content[idx:]
     if not new_content or len(new_content) < len(original) * 0.5:
         return {"ok": False, "error": "AI 返回内容异常（过短），已放弃写入"}
     try:
