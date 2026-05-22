@@ -720,7 +720,9 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
                 "tags": ["qa_improved"], "anki_note_id": nid, "status": "synced",
                 "_qa_from": local_id, "_qa_created": datetime.now().isoformat(),
             })
-            created.append(new_lid)
+            created.append({"local_id": new_lid, "type": ctype,
+                            "front": card.get("front", ""), "back": card.get("back", ""),
+                            "text": card.get("text", ""), "anki_note_id": nid})
     except Exception as ex:
         return {"ok": False, "error": f"创建卡片失败：{ex}"}
 
@@ -822,6 +824,30 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
         except Exception:
             pass
     return {"ok": True, "summary": f"笔记已更新（{note_path.name}），哈希已覆盖防重复登记"}
+
+
+def _card_delete(local_id: str) -> dict:
+    """删除一张（QA 生成的）卡片：从 Anki 删 note + 从 records 移除 + 同步。"""
+    rec_file, rec, card = _find_record_for_card(local_id)
+    if not card:
+        return {"ok": False, "error": "卡片不在 records 中"}
+    nid = card.get("anki_note_id")
+    try:
+        if nid:
+            _anki_request("deleteNotes", {"notes": [nid]})
+    except Exception as ex:
+        return {"ok": False, "error": f"Anki 删除失败：{ex}"}
+    rec["cards"] = [c for c in rec.get("cards", []) if c.get("local_id") != local_id]
+    try:
+        rec_file.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as ex:
+        return {"ok": False, "error": f"写 records 失败：{ex}"}
+    synced = False
+    try:
+        _anki_request("sync", timeout=120); synced = True
+    except Exception:
+        pass
+    return {"ok": True, "synced": synced}
 
 
 def find_related_cards(note_names: list, match: str = "") -> list:
@@ -1213,6 +1239,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 /* 更新结果/进度面板 */
 #card-result{display:none;flex-shrink:0;padding:10px 16px;border-top:1px solid #eee;border-bottom:1px solid #eee;background:#fff8e6;font-size:13px;line-height:1.6;max-height:38vh;overflow:auto}
 #card-result .cr-close{float:right;background:none;border:none;font-size:15px;color:#bbb;cursor:pointer;line-height:1}
+.newcard{border:1px solid #e2e8f0;border-radius:6px;margin-top:6px;background:#fff}
+.newcard-head{display:flex;align-items:center;justify-content:space-between;padding:5px 9px}
+.newcard-toggle{cursor:pointer;color:#0057b8;font-size:12px;font-weight:500;user-select:none;flex:1}
+.newcard-del{background:#fde8e8;color:#b91c1c;border:1px solid #f0b4b4;border-radius:5px;font-size:11px;padding:2px 9px;cursor:pointer}
+.newcard-del:hover{background:#f9d0d0}
+.newcard-del:disabled{opacity:.5}
+.newcard-body{padding:0 10px 9px;font-size:13px;line-height:1.6;border-top:1px solid #f0f0f0}
 #sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
 #sett-overlay.open{display:block}
 #sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:380px;width:90%}
@@ -1505,13 +1538,29 @@ function refreshUpdateButtons() {
 }
 
 const UPD_LABELS = {note: '更新到笔记', anki: '根据此修改 Anki', all: '全部更新'};
+let _newCards = [];   // 暂存本次生成的新卡，供预览渲染
 function renderUpdResult(res) {
   if (!res || res.ok === false) { showCardResult('✗ ' + ((res && res.error) || '失败')); return; }
   let html = '';
+  _newCards = [];
   if (res.anki) {
-    html += res.anki.ok
-      ? '<div><b>✓ Anki：</b>' + (res.anki.summary || '已更新') + '</div>'
-      : '<div style="color:#b91c1c"><b>✗ Anki：</b>' + (res.anki.error || '失败') + '</div>';
+    if (res.anki.ok) {
+      html += '<div><b>✓ Anki：</b>' + (res.anki.summary || '已更新') + '</div>';
+      const cards = res.anki.created || [];
+      if (cards.length && typeof cards[0] === 'object') {
+        _newCards = cards;
+        html += '<div style="margin-top:4px;color:#666;font-size:12px">新卡（点标题预览，可删除）：</div>';
+        cards.forEach((c, i) => {
+          html += '<div class="newcard" data-idx="' + i + '" data-lid="' + c.local_id + '">'
+            + '<div class="newcard-head">'
+            + '<span class="newcard-toggle" onclick="toggleNewcard(this)">▸ 新卡 ' + (i + 1) + '（' + (c.type || 'basic') + '）</span>'
+            + '<button class="newcard-del" onclick="deleteNewcard(this)">删除</button>'
+            + '</div><div class="newcard-body" style="display:none"></div></div>';
+        });
+      }
+    } else {
+      html += '<div style="color:#b91c1c"><b>✗ Anki：</b>' + (res.anki.error || '失败') + '</div>';
+    }
   }
   if (res.note) {
     html += res.note.ok
@@ -1519,6 +1568,43 @@ function renderUpdResult(res) {
       : '<div style="margin-top:6px;color:#b91c1c"><b>✗ 笔记：</b>' + (res.note.error || '失败') + '</div>';
   }
   showCardResult(html || '完成');
+}
+function toggleNewcard(span) {
+  const card = span.closest('.newcard');
+  const body = card.querySelector('.newcard-body');
+  const opening = body.style.display === 'none';
+  if (opening && !body.dataset.filled) {
+    const c = _newCards[+card.dataset.idx] || {};
+    let h;
+    if (c.type === 'cloze') {
+      h = '<b>挖空</b><br>' + renderMd(c.text || '') + (c.back ? '<hr><b>补充</b><br>' + renderMd(c.back) : '');
+    } else {
+      h = '<b>问</b><br>' + renderMd(c.front || '') + '<hr><b>答</b><br>' + renderMd(c.back || '');
+    }
+    body.innerHTML = h; body.dataset.filled = '1'; typeset(body);
+  }
+  body.style.display = opening ? 'block' : 'none';
+  span.textContent = (opening ? '▾' : '▸') + span.textContent.slice(1);
+}
+function deleteNewcard(btn) {
+  const card = btn.closest('.newcard');
+  const lid = card.dataset.lid;
+  if (!confirm('从 Anki 删除这张新卡？不可撤销。')) return;
+  btn.disabled = true; btn.textContent = '删除中…';
+  fetch('api/card-delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({local_id: lid}),
+  }).then(r => r.json()).then(j => {
+    if (j.ok) {
+      card.style.opacity = '.45';
+      card.querySelector('.newcard-head').innerHTML =
+        '<span style="color:#b91c1c;font-size:12px">已删除' + (j.synced ? '（已同步）' : '') + '</span>';
+      const b = card.querySelector('.newcard-body'); if (b) b.style.display = 'none';
+    } else {
+      btn.disabled = false; btn.textContent = '删除';
+      alert('删除失败：' + (j.error || ''));
+    }
+  }).catch(e => { btn.disabled = false; btn.textContent = '删除'; alert('删除失败：' + e.message); });
 }
 function pollCardJob(jobId, allBtns, tries) {
   tries = tries || 0;
@@ -2567,6 +2653,13 @@ class Handler(BaseHTTPRequestHandler):
                     _card_jobs[job_id] = {"status": "done", "result": out}
                 threading.Thread(target=_run, daemon=True).start()
                 self.send_json({"ok": True, "job_id": job_id})
+
+        elif self.path == "/api/card-delete":
+            lid = (body.get("local_id") or "").strip()
+            if not lid:
+                self.send_json({"ok": False, "error": "missing local_id"}, 400)
+            else:
+                self.send_json(_card_delete(lid))
 
         elif self.path == "/api/save":
             try:
