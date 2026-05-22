@@ -1385,6 +1385,12 @@ const chat   = document.getElementById('chat');   // 滚动容器
 const msgs   = document.getElementById('msgs');    // 消息容器（清空只清这里，不动截图区）
 const input  = document.getElementById('input');
 const status = document.getElementById('status');
+// 自动跟随到底：仅当用户本就在底部附近才跟随；往上翻阅时不打扰
+let autoStick = true;
+chat.addEventListener('scroll', () => {
+  autoStick = (chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 80;
+}, {passive: true});
+function stickBottom() { if (autoStick) chat.scrollTop = chat.scrollHeight; }
 let sending  = false;
 let pendingHistory  = null;   // 加载历史后，首条消息携带上下文
 let currentShotSrc  = '';     // 当前会话截图 base64
@@ -1756,7 +1762,7 @@ function addMsg(role, html, isHtml, imgSrc) {
     if (!isHtml) addHeadingPickers(d.querySelector('.md'));
   }
   msgs.appendChild(row);
-  chat.scrollTop = chat.scrollHeight;
+  stickBottom();
   if (role === 'assistant') typeset(d);
   return d;
 }
@@ -1863,6 +1869,7 @@ async function send() {
 
   // ── 普通对话（SSE 流式） ──────────────────────────────────────────────────
   const imgSrc = pastedImgB64 ? document.getElementById('paste-thumb').src : null;
+  autoStick = true;   // 用户主动发消息：先贴底，之后若上翻则停止跟随
   addMsg('user', text, false, imgSrc);
   const imgB64 = pastedImgB64;
   if (pastedImgB64) clearPaste();
@@ -1888,7 +1895,7 @@ async function send() {
   let renderQueued = false;
   function renderNow() {
     mdEl.innerHTML = renderMd(accumulated || ' ');
-    chat.scrollTop = chat.scrollHeight;
+    stickBottom();   // 仅当用户在底部附近才跟随；往上翻阅时不打扰
     typeset(mdEl);
     lastRender = Date.now();
     renderQueued = false;
