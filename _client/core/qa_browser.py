@@ -530,6 +530,55 @@ def _qa_setting(dotted: str, default=None):
     return cur
 
 
+def _server_config_path() -> "Path | None":
+    proj = os.environ.get("CLAUDE_PROJECT", "")
+    return (Path(proj) / "state" / "server-config.json") if proj else None
+
+
+def _load_ai_settings_for_ui() -> dict:
+    """给 ⚙ 弹窗回显：当前 backend + 各 CLI 后端的 model/effort/command。"""
+    cfg = _GET_CFG() or {}
+    ai = cfg.get("ai") or {}
+    claude = ai.get("claude_cli") or {}
+    codex  = ai.get("codex_cli") or {}
+    return {
+        "backend": cfg.get("ai_backend", "claude_cli"),
+        "claude": {"model": claude.get("model", ""), "effort": claude.get("effort", "")},
+        "codex":  {"model": codex.get("model", "")},
+    }
+
+
+def _save_ai_settings_from_ui(body: dict) -> dict:
+    """服务器模式：把 ⚙ 弹窗的 AI 设置写回 server-config.json。"""
+    cfg_path = _server_config_path()
+    if not cfg_path:
+        return {"ok": False, "error": "无 server-config 路径"}
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    except Exception:
+        cfg = {}
+    backend = (body.get("backend") or "").strip()
+    if backend in ("claude_cli", "codex_cli", "claude_api", "openai_api", "ollama"):
+        cfg["ai_backend"] = backend
+    ai = cfg.setdefault("ai", {})
+    cl = body.get("claude") or {}
+    if isinstance(cl, dict):
+        c = ai.setdefault("claude_cli", {})
+        c["model"]  = (cl.get("model") or "").strip()
+        eff = (cl.get("effort") or "").strip().lower()
+        c["effort"] = eff if eff in ("low", "medium", "high", "xhigh", "max") else ""
+    cx = body.get("codex") or {}
+    if isinstance(cx, dict):
+        c = ai.setdefault("codex_cli", {})
+        c["model"] = (cx.get("model") or "").strip()
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, **_load_ai_settings_for_ui()}
+
+
 def _footer_html(local_id: str, source_link: str, source_url: str, reason: str) -> str:
     """重建卡片 footer（来源/原因/Local ID/QA 链接），镜像 anki_from_note.source_footer。"""
     import html as _html
@@ -1204,21 +1253,39 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
   </div>
   <div id="sett-body">
     <label for="s-backend">AI 后端</label>
-    <select id="s-backend">
-      <option value="auto-claude">🔄 自动（优先 Claude）</option>
-      <option value="auto-codex">🔄 自动（优先 Codex）</option>
-      <option value="claude">Claude CLI</option>
-      <option value="codex">Codex CLI（OpenAI）</option>
+    <select id="s-backend" onchange="updateSettFields()">
+      <option value="claude_cli">Claude CLI</option>
+      <option value="codex_cli">Codex CLI（OpenAI）</option>
     </select>
-    <label for="s-model">模型（可选，仅 Codex 有效）</label>
-    <input type="text" id="s-model" list="s-model-opts" placeholder="留空使用默认模型">
-    <datalist id="s-model-opts">
-      <option value="gpt-5.5"></option>
-      <option value="gpt-5.4"></option>
-      <option value="gpt-5.4-mini"></option>
-      <option value="gpt-5.3-codex"></option>
-    </datalist>
-    <p id="sett-hint">自动模式：首选 AI 限流时自动切换至另一个</p>
+    <div id="s-claude-fields">
+      <label for="s-claude-model">Claude 模型（留空＝默认）</label>
+      <input type="text" id="s-claude-model" list="s-claude-models" placeholder="opus / sonnet / claude-opus-4-7">
+      <datalist id="s-claude-models">
+        <option value="opus"></option>
+        <option value="sonnet"></option>
+        <option value="haiku"></option>
+      </datalist>
+      <label for="s-claude-effort">思考深度 effort（留空＝默认）</label>
+      <select id="s-claude-effort">
+        <option value="">默认</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
+      </select>
+    </div>
+    <div id="s-codex-fields">
+      <label for="s-codex-model">Codex 模型（留空＝默认）</label>
+      <input type="text" id="s-codex-model" list="s-codex-models" placeholder="留空使用默认模型">
+      <datalist id="s-codex-models">
+        <option value="gpt-5.5"></option>
+        <option value="gpt-5.4"></option>
+        <option value="gpt-5.4-mini"></option>
+        <option value="gpt-5.3-codex"></option>
+      </datalist>
+    </div>
+    <p id="sett-hint">设置即时生效（保存后下条消息起用新模型/思考深度）</p>
   </div>
   <div id="sett-foot">
     <button id="sett-cancel" onclick="closeSettings()">取消</button>
@@ -2022,12 +2089,21 @@ input.focus();
 
 // ─── AI 设置 ──────────────────────────────────────────────────────────────────
 
+function updateSettFields() {
+  const b = document.getElementById('s-backend').value;
+  document.getElementById('s-claude-fields').style.display = (b === 'claude_cli') ? '' : 'none';
+  document.getElementById('s-codex-fields').style.display  = (b === 'codex_cli')  ? '' : 'none';
+}
+
 async function openSettings() {
   try {
     const s = await fetch('api/settings').then(r => r.json());
-    document.getElementById('s-backend').value   = s.backend   || 'auto';
-    document.getElementById('s-model').value     = s.model     || '';
+    document.getElementById('s-backend').value      = s.backend || 'claude_cli';
+    document.getElementById('s-claude-model').value  = (s.claude && s.claude.model)  || '';
+    document.getElementById('s-claude-effort').value = (s.claude && s.claude.effort) || '';
+    document.getElementById('s-codex-model').value   = (s.codex  && s.codex.model)   || '';
   } catch(_) {}
+  updateSettFields();
   document.getElementById('sett-overlay').classList.add('open');
   document.getElementById('sett-modal').classList.add('open');
 }
@@ -2039,17 +2115,30 @@ function closeSettings() {
 }
 
 async function saveSettings() {
-  const backend   = document.getElementById('s-backend').value;
-  const model     = document.getElementById('s-model').value.trim();
-
+  const backend = document.getElementById('s-backend').value;
+  const payload = {
+    backend,
+    claude: {
+      model:  document.getElementById('s-claude-model').value.trim(),
+      effort: document.getElementById('s-claude-effort').value,
+    },
+    codex: {
+      model: document.getElementById('s-codex-model').value.trim(),
+    },
+  };
   try {
-    await fetch('api/settings', {
+    const r = await fetch('api/settings', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({backend, model}),
+      body: JSON.stringify(payload),
     });
-    status.textContent = `AI 后端已设置：${backend}${model ? ' / ' + model : ''}`;
-  } catch(_) {}
+    const j = await r.json();
+    if (j.ok === false) { status.textContent = '保存失败：' + (j.error || ''); return; }
+    const cl = backend === 'claude_cli'
+      ? `${payload.claude.model || '默认模型'}${payload.claude.effort ? ' / ' + payload.claude.effort : ''}`
+      : (payload.codex.model || '默认模型');
+    status.textContent = `AI 设置已保存：${backend} · ${cl}`;
+  } catch(_) { status.textContent = '保存失败'; }
   closeSettings();
 }
 
@@ -2117,7 +2206,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"data": state["img_b64"]})
 
         elif self.path == "/api/settings":
-            self.send_json(ai_client.load_settings())
+            # 服务器模式：从 server-config 回显完整 AI 设置；客户端模式退回旧 shim
+            if state.get("_server_mode"):
+                self.send_json(_load_ai_settings_for_ui())
+            else:
+                self.send_json(ai_client.load_settings())
 
         elif self.path == "/api/qbtns":
             self.send_json({"btns": load_qbtns()})
@@ -2365,7 +2458,11 @@ class Handler(BaseHTTPRequestHandler):
                 state.update({"img_b64": None, "img_fname": None, "temp_path": None})
 
         elif self.path == "/api/settings":
-            self.send_json(ai_client.save_settings(body))
+            # 服务器模式：写回 server-config.json（get_cfg 每次重读，即时生效）
+            if state.get("_server_mode"):
+                self.send_json(_save_ai_settings_from_ui(body))
+            else:
+                self.send_json(ai_client.save_settings(body))
 
         elif self.path == "/api/qbtns":
             btns = body.get("btns", [])
