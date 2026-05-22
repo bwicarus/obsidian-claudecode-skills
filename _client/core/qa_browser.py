@@ -1590,15 +1590,30 @@ document.getElementById('shot-wrap').addEventListener('click', () => {
   document.getElementById('shot-area').classList.toggle('expanded');
 });
 
-// 对话下拉 → 自动收起截图/卡片区（带滞回，防抖动）；滚回顶部恢复
+// 对话下拉 → 自动收起截图/卡片区，滚回顶部恢复。
+// 防抽搐：① 只有「收起后仍有滚动空间」才收（否则内容变短→scrollTop 夹回顶→又展开→横跳）
+//         ② 切换后锁定一段时间（≈过渡时长），动画期间不重新判定
 (function () {
   const chatEl = document.getElementById('chat');
   const shotArea = document.getElementById('shot-area');
   if (!chatEl || !shotArea) return;
-  chatEl.addEventListener('scroll', () => {
-    if (chatEl.scrollTop > 60) shotArea.classList.add('shrunk');
-    else if (chatEl.scrollTop < 12) shotArea.classList.remove('shrunk');
-  }, {passive: true});
+  let lock = false;
+  function evaluate() {
+    if (lock) return;
+    const collapsed = shotArea.classList.contains('shrunk');
+    if (!collapsed) {
+      // 收起会让 chat 增高 shotArea.offsetHeight；预判收起后还剩多少可滚
+      const roomAfter = chatEl.scrollHeight - chatEl.clientHeight - shotArea.offsetHeight;
+      if (chatEl.scrollTop > 80 && roomAfter > 40) {
+        shotArea.classList.add('shrunk');
+        lock = true; setTimeout(() => { lock = false; }, 280);
+      }
+    } else if (chatEl.scrollTop < 6) {
+      shotArea.classList.remove('shrunk');
+      lock = true; setTimeout(() => { lock = false; }, 280);
+    }
+  }
+  chatEl.addEventListener('scroll', () => { requestAnimationFrame(evaluate); }, {passive: true});
 })();
 
 // ─── 快捷提问按钮 ─────────────────────────────────────────────────────────────
