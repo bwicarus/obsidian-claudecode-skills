@@ -77,6 +77,35 @@ GUI 截图问答 Tab：
 | 浏览器开 :9091 看到截图但发送消息无回复 | AI 后端配错 / Claude CLI 未登录 | GUI AI Tab 检查后端、ping 测试 |
 | 浏览器开 :9091 显示截图但下方"等待截图注入" | session 没 reset，pollScreenshot 命中旧的 None | 在网页里点重置 / 刷新 |
 | iPad 连 :9091 timeout | 防火墙挡 0.0.0.0 监听 / Tailscale 没连 | Windows 防火墙允许 9091 入站 + 确认 Tailscale 已连 |
+| 数学公式里出现方框套圆圈（豆腐块） | 自托管 MathJax 用了 CHTML 版但缺字体文件 | `static/qa/mathjax.js` 换成 SVG 版（见下「自托管前端资源」）|
+
+## 自托管前端资源（MathJax / marked）—— 必须用 SVG 版 MathJax
+
+QA 页的 MathJax / marked 不走 jsdelivr CDN（公网/隐私考虑），由 nginx 从
+`/var/www/html/static/qa/` 提供（VPS 同名路径）。systemd `qa-server` 的
+ExecStartPre 用 sed 把源码里的 jsdelivr URL 替换成
+`bwicarus.taile44d0c.ts.net/static/qa/mathjax.js`（git pull 覆盖后重启自动重打）。
+
+**坑（2026-05-22 踩过）**：`mathjax.js` 不能用 **CHTML** 版（`tex-chtml.js`）。
+CHTML 渲染特殊字形（如 `\underbrace` 的横花括号 `⏟`）要从
+`static/qa/output/chtml/fonts/woff-v2/` 加载字体文件——服务器上只放了
+`mathjax.js`、没放字体目录，于是这些字形显示成**方框套圆圈（豆腐块/tofu）**。
+普通字母数字靠浏览器后备字体凑合显示，所以"大部分公式正常、个别字符是豆腐"。
+
+**正解**：用 **SVG** 版（`tex-svg.js`）。它把所有字形路径内嵌在 JS 里，
+零外部字体依赖，永不豆腐。下载替换即可（文件名仍叫 mathjax.js，配置不用改，
+渲染器由加载的 bundle 决定）：
+
+```bash
+cd /var/www/html/static/qa
+sudo cp mathjax.js mathjax.chtml.js.bak       # 备份
+sudo curl -so mathjax.js https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js
+# ETag/last-modified 变了，浏览器普通刷新即可拿到新版，无需 qa-server 重启
+```
+
+> `static/qa/mathjax.js` 是手放的静态文件、不在 git，git pull 不会覆盖它，
+> 但**重新部署/换机时记得放 SVG 版**，别又抓成 CHTML。客户端（Windows）走
+> jsdelivr CDN 的 CHTML 版没问题（CDN 自带字体），只有自托管缺字体才豆腐。
 
 ## 流式回复 + 历史删除（2026-05-15+）
 
