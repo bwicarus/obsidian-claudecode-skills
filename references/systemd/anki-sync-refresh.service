@@ -1,0 +1,12 @@
+[Unit]
+Description=Anki sync + dashboard refresh when review data changes
+After=anki-headless.service network-online.target
+Wants=anki-headless.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/home/bwicarus/claude/.env
+WorkingDirectory=/home/bwicarus/claude
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/anki_sync_refresh.py
+User=bwicarus
+TimeoutStartSec=600
