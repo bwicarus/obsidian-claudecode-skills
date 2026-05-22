@@ -1586,6 +1586,10 @@ async function send() {
   const reqBody = { message: text };
   if (pendingHistory) { reqBody.history = pendingHistory; pendingHistory = null; }
   if (imgB64) reqBody.image_b64 = imgB64;
+  // 卡片模式：把卡片两面作为上下文随请求发给后端（后端只在会话首条注入）
+  if (cardCtx) reqBody.card_context = {
+    type: cardCtx.type, front: cardCtx.front, back: cardCtx.back, text: cardCtx.text,
+  };
 
   // 准备 streaming 状态
   const mdEl = typing.querySelector('.md');
@@ -2030,6 +2034,7 @@ class Handler(BaseHTTPRequestHandler):
             msg     = body.get("message", "").strip()
             history = body.get("history")
             img_b64 = body.get("image_b64")
+            card_ctx = body.get("card_context")
             session = state["session"]
             stream_mode = "text/event-stream" in (self.headers.get("Accept") or "")
 
@@ -2038,6 +2043,15 @@ class Handler(BaseHTTPRequestHandler):
                 img = None                          # 续聊历史时不传当前截图
             else:
                 img = str(state["temp_path"]) if state.get("temp_path") else None
+
+            # 卡片模式：会话首条消息时把卡片两面拼进 msg，让 AI 知道在讨论哪张卡
+            if card_ctx and not session.messages:
+                blk = ["以下是我正在复习的一张 Anki 记忆卡片，请基于它回答我接下来的问题。"]
+                if card_ctx.get("front"): blk.append(f"【卡片正面（问）】\n{card_ctx['front']}")
+                if card_ctx.get("text"):  blk.append(f"【卡片内容】\n{card_ctx['text']}")
+                if card_ctx.get("back"):  blk.append(f"【卡片背面（答）】\n{card_ctx['back']}")
+                blk.append(f"———\n我的问题：{msg}" if msg else "———\n请先帮我讲解这张卡片的核心内容。")
+                msg = "\n\n".join(blk)
 
             paste_tmp = None
             if img_b64:
