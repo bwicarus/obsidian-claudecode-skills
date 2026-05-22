@@ -1063,7 +1063,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 #history-btn{margin-left:auto;background:none;border:1px solid #ccc;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;color:#555;transition:all .15s}
 #history-btn:hover{background:#f5f5f5}
 #history-btn.active{background:#e8f0fe;border-color:#0078d4;color:#0078d4}
-#shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;flex-shrink:0;overflow:hidden;transition:max-height .25s ease;max-height:180px;cursor:pointer;display:flex;align-items:center}
+#shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;flex-shrink:0;overflow:hidden;max-height:180px;cursor:pointer;display:flex;align-items:center}
 #shot-area.expanded{max-height:60vh}
 /* 对话下拉时自动收起截图/卡片区，腾出版面；滚回顶部再展开 */
 #shot-area.shrunk{max-height:0!important;padding-top:0!important;padding-bottom:0!important;border-bottom-color:transparent;opacity:0}
@@ -1599,30 +1599,20 @@ document.getElementById('shot-wrap').addEventListener('click', () => {
   document.getElementById('shot-area').classList.toggle('expanded');
 });
 
-// 对话下拉 → 自动收起截图/卡片区，滚回顶部恢复。
-// 防抽搐：① 只有「收起后仍有滚动空间」才收（否则内容变短→scrollTop 夹回顶→又展开→横跳）
-//         ② 切换后锁定一段时间（≈过渡时长），动画期间不重新判定
+// 对话下拉 → 直接收起截图/卡片区（无动画），滚回顶部恢复。
+// 防回弹：只有「收起后仍有滚动空间」才收，否则内容变短→scrollTop 夹回顶→又展开→闪
 (function () {
   const chatEl = document.getElementById('chat');
   const shotArea = document.getElementById('shot-area');
   if (!chatEl || !shotArea) return;
-  let lock = false;
-  function evaluate() {
-    if (lock) return;
-    const collapsed = shotArea.classList.contains('shrunk');
-    if (!collapsed) {
-      // 收起会让 chat 增高 shotArea.offsetHeight；预判收起后还剩多少可滚
+  chatEl.addEventListener('scroll', () => {
+    if (shotArea.classList.contains('shrunk')) {
+      if (chatEl.scrollTop < 6) shotArea.classList.remove('shrunk');
+    } else {
       const roomAfter = chatEl.scrollHeight - chatEl.clientHeight - shotArea.offsetHeight;
-      if (chatEl.scrollTop > 80 && roomAfter > 40) {
-        shotArea.classList.add('shrunk');
-        lock = true; setTimeout(() => { lock = false; }, 280);
-      }
-    } else if (chatEl.scrollTop < 6) {
-      shotArea.classList.remove('shrunk');
-      lock = true; setTimeout(() => { lock = false; }, 280);
+      if (chatEl.scrollTop > 80 && roomAfter > 40) shotArea.classList.add('shrunk');
     }
-  }
-  chatEl.addEventListener('scroll', () => { requestAnimationFrame(evaluate); }, {passive: true});
+  }, {passive: true});
 })();
 
 // ─── 快捷提问按钮 ─────────────────────────────────────────────────────────────
