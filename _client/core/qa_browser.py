@@ -1136,6 +1136,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .btn{border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;transition:opacity .15s}
 .btn:hover:not(:disabled){opacity:.85}.btn:disabled{opacity:.45;cursor:default}
 #send-btn{background:#0078d4;color:#fff}
+#mic-btn{background:#eee;color:#444;font-size:15px;padding:8px 12px}
+#mic-btn.listening{background:#e74c3c;color:#fff;animation:micpulse 1s infinite}
+@keyframes micpulse{0%,100%{opacity:1}50%{opacity:.55}}
 #save-btn{background:#107c41;color:#fff}
 #wrong-btn{background:#c0392b;color:#fff}
 #discard-btn{background:#6c757d;color:#fff}
@@ -1276,6 +1279,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 <div id="bottom">
   <textarea id="input" placeholder="输入问题… （Enter 发送，Shift+Enter 换行；粘贴图片可附图提问）"></textarea>
   <div id="bottom-btns">
+    <button class="btn" id="mic-btn" onclick="toggleMic()" title="语音输入">🎤</button>
     <button class="btn" id="send-btn" onclick="send()">发送</button>
     <button class="btn" id="save-btn" onclick="save()">保存笔记</button>
     <button class="btn" id="discard-btn" onclick="discard()">放弃</button>
@@ -1779,15 +1783,20 @@ function addMsg(role, html, isHtml, imgSrc) {
   return d;
 }
 
-// 给一段渲染好的 markdown 里「子标题」行补「+」按钮（卡片模式）。
-// 最高级标题=整条回答，由气泡外侧的「选用整条回答」开关代表，不再给 +。
+// 给渲染好的 markdown 里的标题行补「+」按钮（卡片模式）。
+// 仅当「单个最高级标题且它是全文第一个元素（即覆盖全文）」时，才跳过那个标题
+// （由气泡外侧「选用整条回答」开关代劳）；其余情况（多个同级标题 / 标题前有内容）
+// 所有标题都给 +，避免单层级标题时一个加号都没有。
 function addHeadingPickers(md) {
   if (!md || !cardCtx) return;
   const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
   if (!heads.length) return;
   const minLvl = Math.min(...heads.map(headLevel));
+  const topHeads = heads.filter(h => headLevel(h) === minLvl);
+  // 单个最高级标题 + 它是 md 第一个元素 → 它覆盖全文，等价整条按钮，跳过它的 +
+  const singleTopCoversAll = topHeads.length === 1 && md.firstElementChild === topHeads[0];
   heads.forEach(h => {
-    if (headLevel(h) <= minLvl) return;       // 跳过最高级标题
+    if (singleTopCoversAll && h === topHeads[0]) return;
     if (h.querySelector('.head-pick')) return;
     h.classList.add('has-pick');
     const btn = document.createElement('button');
@@ -1843,6 +1852,29 @@ function setAllBtns(disabled) {
     sendBtn.disabled = disabled;
     sendBtn.dataset.mode = 'send';
   }
+}
+
+// ─── 语音输入（Web Speech API，iPad Safari 支持 webkitSpeechRecognition）──────
+let _recog = null, _recogOn = false, _recogBase = '';
+function toggleMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const btn = document.getElementById('mic-btn');
+  if (!SR) { status.textContent = '此浏览器不支持语音输入'; return; }
+  if (_recogOn) { try { _recog.stop(); } catch(_){} return; }
+  _recog = new SR();
+  _recog.lang = 'zh-CN';
+  _recog.interimResults = true;
+  _recog.continuous = true;
+  _recogBase = input.value;   // 在已有文本后追加
+  _recog.onstart = () => { _recogOn = true; btn.classList.add('listening'); status.textContent = '🎤 聆听中…再次点击停止'; };
+  _recog.onerror = (e) => { status.textContent = '语音输入出错：' + (e.error || ''); };
+  _recog.onend = () => { _recogOn = false; btn.classList.remove('listening'); status.textContent = ''; input.focus(); };
+  _recog.onresult = (ev) => {
+    let txt = '';
+    for (let i = 0; i < ev.results.length; i++) txt += ev.results[i][0].transcript;
+    input.value = (_recogBase ? _recogBase + ' ' : '') + txt;
+  };
+  try { _recog.start(); } catch(_) { status.textContent = '无法启动语音输入'; }
 }
 
 async function send() {
