@@ -545,6 +545,7 @@ def _load_ai_settings_for_ui() -> dict:
         "backend": cfg.get("ai_backend", "claude_cli"),
         "claude": {"model": claude.get("model", ""), "effort": claude.get("effort", "")},
         "codex":  {"model": codex.get("model", "")},
+        "delete_original": bool((cfg.get("card_qa") or {}).get("delete_original", False)),
     }
 
 
@@ -571,6 +572,8 @@ def _save_ai_settings_from_ui(body: dict) -> dict:
     if isinstance(cx, dict):
         c = ai.setdefault("codex_cli", {})
         c["model"] = (cx.get("model") or "").strip()
+    if "delete_original" in body:
+        cfg.setdefault("card_qa", {})["delete_original"] = bool(body.get("delete_original"))
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1231,7 +1234,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
   <span id="note-tag"></span>
   <button id="history-btn" onclick="openSidebar()">历史记录</button>
   <span id="card-actions"></span>
-  <button id="settings-btn" onclick="openSettings()" title="AI 设置">⚙</button>
+  <button id="settings-btn" onclick="openSettings()" title="设置">⚙</button>
 </div>
 <div id="shot-area">
   <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
@@ -1264,7 +1267,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 <div id="sett-overlay" onclick="closeSettings()"></div>
 <div id="sett-modal">
   <div id="sett-head">
-    <span>AI 设置</span>
+    <span>设置</span>
     <button id="sett-close" onclick="closeSettings()">✕</button>
   </div>
   <div id="sett-body">
@@ -1302,6 +1305,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
       </datalist>
     </div>
     <p id="sett-hint">设置即时生效（保存后下条消息起用新模型/思考深度）</p>
+    <hr style="border:none;border-top:1px solid #eee;margin:6px 0">
+    <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer;margin-top:0">
+      <input type="checkbox" id="s-delete-original" style="width:auto;margin:0">
+      「根据此修改 Anki」时删除原卡片
+    </label>
+    <p id="sett-hint">不勾＝保留原卡（默认，不丢 FSRS 复习历史）；勾选＝生成新卡后删除原卡</p>
   </div>
   <div id="sett-foot">
     <button id="sett-cancel" onclick="closeSettings()">取消</button>
@@ -2139,6 +2148,7 @@ async function openSettings() {
     document.getElementById('s-claude-model').value  = (s.claude && s.claude.model)  || '';
     document.getElementById('s-claude-effort').value = (s.claude && s.claude.effort) || '';
     document.getElementById('s-codex-model').value   = (s.codex  && s.codex.model)   || '';
+    document.getElementById('s-delete-original').checked = !!s.delete_original;
   } catch(_) {}
   updateSettFields();
   document.getElementById('sett-overlay').classList.add('open');
@@ -2162,6 +2172,7 @@ async function saveSettings() {
     codex: {
       model: document.getElementById('s-codex-model').value.trim(),
     },
+    delete_original: document.getElementById('s-delete-original').checked,
   };
   try {
     const r = await fetch('api/settings', {
