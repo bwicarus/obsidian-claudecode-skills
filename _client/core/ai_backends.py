@@ -140,12 +140,23 @@ class ClaudeCli(CliBackend):
     name = "claude_cli"
     default_command = "claude"
 
+    def _model_effort_flags(self) -> list[str]:
+        """从 settings 取 model / effort（思考深度），拼成 claude CLI flags。"""
+        flags: list[str] = []
+        model = (self.settings.get("model") or "").strip()
+        if model:
+            flags += ["--model", model]
+        effort = (self.settings.get("effort") or "").strip().lower()
+        if effort in ("low", "medium", "high", "xhigh", "max"):
+            flags += ["--effort", effort]
+        return flags
+
     def chat(self, messages: list[dict], image: bytes | None = None) -> str:
         cmd = self._command()
         image_path = _spool_image(image) if image else None
         try:
             prompt = _flatten_messages(messages, image_path=image_path)
-            full = [cmd, "--allowedTools", "Read",
+            full = [cmd, "--allowedTools", "Read", *self._model_effort_flags(),
                     "--output-format", "text", "-p", prompt]
             r = _run_hidden(full, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=180)
@@ -163,7 +174,7 @@ class ClaudeCli(CliBackend):
         cmd = self._command()
         image_path = _spool_image(image) if image else None
         prompt = _flatten_messages(messages, image_path=image_path)
-        full = [cmd, "--allowedTools", "Read",
+        full = [cmd, "--allowedTools", "Read", *self._model_effort_flags(),
                 "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages", "-p", prompt]
         popen_kw = {

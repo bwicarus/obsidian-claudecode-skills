@@ -23,6 +23,8 @@ SCHEMA: dict[str, type] = {
     # AI 后端
     "ai_backend":                      str,
     "ai.claude_cli.command":           str,
+    "ai.claude_cli.model":             str,
+    "ai.claude_cli.effort":            str,
     "ai.codex_cli.command":            str,
     "ai.ollama.api_key":               str,
     "ai.ollama.model":                 str,
@@ -77,6 +79,14 @@ SCHEMA: dict[str, type] = {
 # UI 元数据：控制面板「设置」panel 显示的字段（顺序 = 渲染顺序，group = 分组）。
 # 不在这里的 SCHEMA 字段仍然走校验（例如 AI 后端 cli command），只是不在 UI 显示。
 FIELD_META: dict[str, dict] = {
+    "ai.claude_cli.model": {
+        "group": "AI 后端（Claude CLI）",
+        "label": "模型（留空=默认；可填 opus / sonnet / 或完整模型名如 claude-opus-4-7）",
+    },
+    "ai.claude_cli.effort": {
+        "group": "AI 后端（Claude CLI）",
+        "label": "思考深度 effort（留空=默认；low / medium / high / xhigh / max）",
+    },
     "anki.auto_restart": {
         "group": "Anki",
         "label": "AnkiConnect 不可达时自动重启 anki-headless",
