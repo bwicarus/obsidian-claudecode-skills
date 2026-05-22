@@ -752,13 +752,24 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
         original = note_path.read_text(encoding="utf-8")
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
+    is_cloze = ctx.get("type") == "cloze"
+    if is_cloze:
+        card_desc = f"挖空文本：{ctx.get('text','')}\n补充：{ctx.get('back','')}"
+    else:
+        card_desc = f"正面（问）：{ctx.get('front','')}\n背面（答）：{ctx.get('back','')}"
     prompt = (
-        "下面是我的一篇 Obsidian 笔记的完整内容，以及我复习相关卡片时与 AI 的有效问答。"
-        "请根据这些问答丰富或修正笔记正文，使其更完整准确。要求："
-        "①保留 frontmatter（开头 --- 之间的部分）和「相关笔记」节原样不动；"
-        "②只在正文相应位置补充/修正；③保持 Obsidian Markdown 语法，数学公式用 $...$ 或 $$...$$；"
-        "④输出修改后的完整笔记内容，不要加任何说明或代码围栏。\n\n"
-        f"=== 当前笔记 ===\n{original}\n\n=== 有效问答 ===\n{_pairs_text(pairs)}"
+        "下面有四部分信息：①我的一篇 Obsidian 笔记的完整内容；②由这篇笔记生成、"
+        "我正在复习的 Anki 卡片；③我复习时问的问题；④我标记为有用的 AI 回答。\n\n"
+        "请综合这四部分，自行判断【应该在笔记的哪一段补充或修正】以及【补充/修正什么内容】，"
+        "对笔记做有机的丰富——不要把有用回答原样粘贴进去，而要结合笔记已有结构、上下文和"
+        "卡片所考察的知识点，把新的理解自然融入最相关的位置：可在已有段落补一两句、可在"
+        "合适处新增小节、可修正不准确的表述。补充应与原文风格连贯，避免重复已有内容。\n"
+        "要求：①保留 frontmatter（开头 --- 之间）和「相关笔记」节原样不动；"
+        "②保持 Obsidian Markdown 语法，数学公式用 $...$ 或 $$...$$；"
+        "③输出修改后的完整笔记内容，不要加任何说明或代码围栏。\n\n"
+        f"=== ① 当前笔记 ===\n{original}\n\n"
+        f"=== ② 正在复习的 Anki 卡片 ===\n{card_desc}\n\n"
+        f"=== ③问的问题 + ④有用的回答 ===\n{_pairs_text(pairs)}"
     )
     try:
         new_content = ai_client.ask(prompt).strip()
@@ -1170,7 +1181,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .md h1,.md h2,.md h3,.md h4,.md h5,.md h6{position:relative}
 .md h1.has-pick,.md h2.has-pick,.md h3.has-pick,.md h4.has-pick,.md h5.has-pick,.md h6.has-pick{padding-right:26px}
 .md .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}
-.md .hsec-picked{background:#eef6ff;border-radius:4px;box-shadow:-4px 0 0 #cfe6ff}
+/* 选中标题段：标题行 + 其内容段落连续高亮，左侧蓝条 */
+.md .hsec-picked,.md .hsec-picked-body{background:#eef6ff;box-shadow:-6px 0 0 #cfe6ff}
+.md .hsec-picked{border-top-left-radius:4px;border-top-right-radius:4px;padding-top:2px}
+.md .hsec-picked-body:last-child{border-bottom-left-radius:4px;border-bottom-right-radius:4px;padding-bottom:2px}
 /* 更新结果/进度面板 */
 #card-result{display:none;flex-shrink:0;padding:10px 16px;border-top:1px solid #eee;border-bottom:1px solid #eee;background:#fff8e6;font-size:13px;line-height:1.6;max-height:38vh;overflow:auto}
 #card-result .cr-close{float:right;background:none;border:none;font-size:15px;color:#bbb;cursor:pointer;line-height:1}
@@ -1762,6 +1776,12 @@ function setHeadPick(h, on) {
   const btn = h.querySelector('.head-pick');
   if (btn) btn.classList.toggle('on', on);
   h.classList.toggle('hsec-picked', on);
+  // 整段高亮：标题行 + 其后到下个标题前的所有内容元素
+  let sib = h.nextElementSibling;
+  while (sib && !/^H[1-6]$/.test(sib.tagName)) {
+    sib.classList.toggle('hsec-picked-body', on);
+    sib = sib.nextElementSibling;
+  }
 }
 
 function delMsg(btn) { btn.closest('.msg-row').querySelector('.bubble').classList.add('deleted'); }
