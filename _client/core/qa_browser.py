@@ -1921,7 +1921,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/":
+        # 根路径（含带查询串如 /?card=<id> 的卡片模式）都返回主页面 HTML
+        if self.path == "/" or self.path.startswith("/?"):
             body = HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
