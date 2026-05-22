@@ -1063,10 +1063,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 #history-btn{margin-left:auto;background:none;border:1px solid #ccc;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;color:#555;transition:all .15s}
 #history-btn:hover{background:#f5f5f5}
 #history-btn.active{background:#e8f0fe;border-color:#0078d4;color:#0078d4}
-#shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;flex-shrink:0;overflow:hidden;max-height:180px;cursor:pointer;display:flex;align-items:center}
+/* 截图/卡片区现在在滚动容器 #chat 内，跟随内容自然上移划走 */
+#shot-area{background:#fafafa;border-bottom:1px solid #ddd;padding:8px 16px;overflow:hidden;max-height:180px;cursor:pointer;display:flex;align-items:center}
 #shot-area.expanded{max-height:60vh}
-/* 对话下拉时自动收起截图/卡片区，腾出版面；滚回顶部再展开 */
-#shot-area.shrunk{max-height:0!important;padding-top:0!important;padding-bottom:0!important;border-bottom-color:transparent;opacity:0}
+/* 划走后顶部 sticky 的小行，点击滚回顶部展开 */
+#shot-peek{display:none;position:sticky;top:0;z-index:5;background:#eef4ff;border-bottom:1px solid #cfe0ff;color:#0057b8;font-size:12px;text-align:center;padding:4px 16px;cursor:pointer;user-select:none}
+#shot-peek:hover{background:#e0ecff}
 #shot-wrap{display:contents}
 #shot-wrap img{max-height:160px;max-width:100%;border-radius:6px;border:1px solid #ddd;display:block;object-fit:contain}
 #shot-area.expanded #shot-wrap img{max-height:calc(60vh - 20px)}
@@ -1083,7 +1085,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .qbtn-input{border:1px solid #0078d4;border-radius:14px;padding:2px 10px;font-size:12px;outline:none;font-family:inherit;min-width:60px;max-width:160px;line-height:1.6}
 .qadd-btn{background:none;border:1px dashed #ccc;border-radius:14px;padding:3px 9px;font-size:12px;color:#bbb;cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
 .qadd-btn:hover{border-color:#0078d4;color:#0078d4}
-#chat{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+#chat{flex:1;overflow-y:auto;display:block}
+#msgs{display:flex;flex-direction:column;gap:10px;padding:14px 16px}
 .msg-row{display:flex;flex-direction:column}
 .msg-row.user{align-items:flex-end}
 .msg-row.assistant{align-items:flex-start}
@@ -1236,14 +1239,17 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
   <span id="card-actions"></span>
   <button id="settings-btn" onclick="openSettings()" title="设置">⚙</button>
 </div>
-<div id="shot-area">
-  <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
-  <div id="shot-wrap" title="点击展开/收起截图">
-    <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
+<div id="chat">
+  <div id="shot-peek" onclick="revealShot()">▾ 展开截图</div>
+  <div id="shot-area">
+    <div id="card-face" style="display:none;padding:14px 16px;font-size:14px;line-height:1.6;overflow:auto"></div>
+    <div id="shot-wrap" title="点击展开/收起截图">
+      <img id="shot" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="等待截图…">
+    </div>
   </div>
+  <div id="msgs"></div>
 </div>
 <div id="card-result"></div>
-<div id="chat"></div>
 <div id="status"></div>
 <div id="quick-bar">
   <button class="qbtn-fixed" id="search-btn" onclick="toggleSearch()" title="搜索当前对话相关知识点">🔍 关联知识</button>
@@ -1375,7 +1381,8 @@ function typeset(el, retries) {
   if (retries > 0) setTimeout(() => typeset(el, retries - 1), 200);
 }
 
-const chat   = document.getElementById('chat');
+const chat   = document.getElementById('chat');   // 滚动容器
+const msgs   = document.getElementById('msgs');    // 消息容器（清空只清这里，不动截图区）
 const input  = document.getElementById('input');
 const status = document.getElementById('status');
 let sending  = false;
@@ -1517,6 +1524,7 @@ function loadCardContext(cid) {
       if (c.back)  parts.push('<div style="margin-top:8px"><b>答</b><br>' + renderMd(c.back) + '</div>');
       face.innerHTML = parts.join('<hr style="border:none;border-top:1px solid #eee;margin:10px 0">');
       face.style.display = '';
+      document.getElementById('shot-peek').textContent = '▾ 展开卡片';
       document.getElementById('shot-wrap').style.display = 'none';
       typeset(face);
       const acts = document.getElementById('card-actions');
@@ -1599,20 +1607,20 @@ document.getElementById('shot-wrap').addEventListener('click', () => {
   document.getElementById('shot-area').classList.toggle('expanded');
 });
 
-// 对话下拉 → 直接收起截图/卡片区（无动画），滚回顶部恢复。
-// 防回弹：只有「收起后仍有滚动空间」才收，否则内容变短→scrollTop 夹回顶→又展开→闪
+// 截图区在滚动容器内自然上移划走；划出视野后顶部 sticky 小行出现，点击滚回展开。
+function revealShot() {
+  chat.scrollTo({top: 0, behavior: 'smooth'});
+}
 (function () {
-  const chatEl = document.getElementById('chat');
   const shotArea = document.getElementById('shot-area');
-  if (!chatEl || !shotArea) return;
-  chatEl.addEventListener('scroll', () => {
-    if (shotArea.classList.contains('shrunk')) {
-      if (chatEl.scrollTop < 6) shotArea.classList.remove('shrunk');
-    } else {
-      const roomAfter = chatEl.scrollHeight - chatEl.clientHeight - shotArea.offsetHeight;
-      if (chatEl.scrollTop > 80 && roomAfter > 40) shotArea.classList.add('shrunk');
-    }
-  }, {passive: true});
+  const peek = document.getElementById('shot-peek');
+  if (!shotArea || !peek || !('IntersectionObserver' in window)) return;
+  const io = new IntersectionObserver((entries) => {
+    // 截图区基本离开视野 → 显示小行；回到视野 → 隐藏
+    const e = entries[0];
+    peek.style.display = e.isIntersecting ? 'none' : 'block';
+  }, {root: chat, threshold: 0.01});
+  io.observe(shotArea);
 })();
 
 // ─── 快捷提问按钮 ─────────────────────────────────────────────────────────────
@@ -1747,7 +1755,7 @@ function addMsg(role, html, isHtml, imgSrc) {
     row.appendChild(allBtn);   // 在气泡外侧（msg-row 内、bubble 之后）
     if (!isHtml) addHeadingPickers(d.querySelector('.md'));
   }
-  chat.appendChild(row);
+  msgs.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
   if (role === 'assistant') typeset(d);
   return d;
@@ -2099,19 +2107,19 @@ async function loadConversation(id, timestamp, imgFname) {
   // 切换顶部截图为历史截图
   if (imgFname) document.getElementById('shot').src = 'api/image/' + imgFname;
 
-  // 清空并渲染历史消息
-  chat.innerHTML = '';
+  // 清空并渲染历史消息（只清消息容器，截图区保留）
+  msgs.innerHTML = '';
   const div = document.createElement('div');
   div.className = 'hist-divider';
   div.innerHTML = `<div class="hist-divider-line"></div><span>${timestamp}</span><div class="hist-divider-line"></div>`;
-  chat.appendChild(div);
+  msgs.appendChild(div);
 
   for (const m of data.messages || []) addMsg(m.role, m.text);
 
   const hint = document.createElement('div');
   hint.className = 'hist-continue-hint';
   hint.textContent = '─ 输入问题可继续此对话 ─';
-  chat.appendChild(hint);
+  msgs.appendChild(hint);
   chat.scrollTop = chat.scrollHeight;
 
   pendingHistory = data.messages || [];
