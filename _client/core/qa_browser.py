@@ -499,7 +499,51 @@ def _find_card_context(local_id: str):
                     "source_link": rec.get("source_link", ""),
                     "source_url": source_url,
                 }
-    return None
+    # records 没有 → 直接查 Anki（覆盖未被 records 跟踪的游离卡），否则 QA 页空白
+    return _card_context_from_anki(local_id)
+
+
+def _card_context_from_anki(local_id: str):
+    """records 查不到时，按 footer 里的 Local ID 从 Anki 直接取卡两面 + 来源。"""
+    import html as _html
+    _FOOTER = '<hr><div style="font-size:0.85em;color:#666;">'
+    try:
+        nids = _anki_request("findNotes", {"query": f'"{local_id}"'})
+        if not nids:
+            return None
+        info = (_anki_request("notesInfo", {"notes": nids[:1]}) or [None])[0]
+        if not info or "fields" not in info:
+            return None
+        fields = info["fields"]
+        def _strip(v):
+            i = v.find(_FOOTER);
+            return (v[:i] if i != -1 else v).strip()
+        is_cloze = "Text" in fields and "Front" not in fields
+        if is_cloze:
+            front, back, text = "", _strip(fields.get("Extra", {}).get("value", "")), \
+                                _strip(fields.get("Text", {}).get("value", ""))
+            footer_src = fields.get("Extra", {}).get("value", "")
+        else:
+            front, back, text = _strip(fields.get("Front", {}).get("value", "")), \
+                                _strip(fields.get("Back", {}).get("value", "")), ""
+            footer_src = fields.get("Back", {}).get("value", "")
+        m   = re.search(r'来源：<a href="([^"]*)"', footer_src)
+        src_url = _html.unescape(m.group(1)) if m else ""
+        m2  = re.search(r'\[\[([^\]]+)\]\]', footer_src)
+        src_link = f"[[{m2.group(1)}]]" if m2 else ""
+        src_note = ""
+        mm = re.search(r'file=([^&"]+)', src_url)
+        if mm:
+            import urllib.parse as _up
+            src_note = _up.unquote(mm.group(1)) + ".md"
+        return {
+            "local_id": local_id, "type": "cloze" if is_cloze else "basic",
+            "front": front, "back": back, "text": text,
+            "anki_note_id": nids[0], "source_note": src_note,
+            "source_link": src_link, "source_url": src_url,
+        }
+    except Exception:
+        return None
 
 
 def _anki_request(action: str, params: dict | None = None, timeout: int = 10):
