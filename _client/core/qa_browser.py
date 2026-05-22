@@ -556,7 +556,22 @@ def _apply_card_action(local_id: str, action: str, fields: dict | None = None) -
             upd = {k: v for k, v in fields.items() if v is not None}
             if not upd:
                 return {"ok": False, "error": "no fields to update"}
-            _anki_request("updateNoteFields", {"note": {"id": note_id, "fields": upd}})
+            # 保留原 footer（来源/原因/Local ID/QA 链接）：读当前字段，
+            # 把 footer（<hr><div...> 起）追加到新正文之后，再写回 Anki。
+            # upd 本身保持「裸正文」，供 records JSON 存储。
+            _FOOTER_MARKER = '<hr><div style="font-size:0.85em;color:#666;">'
+            anki_fields = dict(upd)
+            try:
+                cur_info = _anki_request("notesInfo", {"notes": [note_id]})
+                cur_fields = (cur_info[0].get("fields") or {}) if cur_info else {}
+                for fname, new_val in list(anki_fields.items()):
+                    old_val = (cur_fields.get(fname) or {}).get("value", "")
+                    idx = old_val.find(_FOOTER_MARKER)
+                    if idx != -1:
+                        anki_fields[fname] = new_val + old_val[idx:]
+            except Exception:
+                pass  # 拿不到旧字段时退回直接覆盖（至少内容正确）
+            _anki_request("updateNoteFields", {"note": {"id": note_id, "fields": anki_fields}})
             # Persist updated content back to anki records + 哈希覆盖（Stage 4）
             hash_overridden = False
             if ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists():
@@ -582,11 +597,9 @@ def _apply_card_action(local_id: str, action: str, fields: dict | None = None) -
                                          else Path(source_note))
                             if note_path.exists():
                                 try:
+                                    # 镜像 anki_from_note.split_sections：直接对原始全文切节，
+                                    # 不剥 frontmatter（否则 "" 节哈希与制卡脚本不一致，覆盖失效）
                                     raw = note_path.read_text(encoding="utf-8")
-                                    # 剥 frontmatter
-                                    raw = re.sub(r'\A---\s*\n.*?\n---\s*\n?', '', raw,
-                                                 count=1, flags=re.DOTALL)
-                                    # 按标题切节（镜像 anki_from_note.split_sections）
                                     _SKIP_HDR = {"相关笔记"}
                                     secs: list[tuple[str, str]] = []
                                     cur_h, cur_lines = "", []
