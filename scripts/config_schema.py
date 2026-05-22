@@ -68,6 +68,9 @@ SCHEMA: dict[str, type] = {
     "card_quality.sample_per_run":       str,
     "card_quality.limit":                str,
     "card_quality.cooldown_days":        str,
+
+    # 卡片 QA 改进（从 Anki 卡片「问 AI / 改进这张卡」链接进入截图问答页的改卡流程）
+    "card_qa.delete_original":           bool,
 }
 
 
@@ -181,6 +184,10 @@ FIELD_META: dict[str, dict] = {
     "qa_wrong_subdir": {
         "group": "iPad 截图问答",
         "label": "错题子目录",
+    },
+    "card_qa.delete_original": {
+        "group": "卡片 QA 改进",
+        "label": "「根据此修改 Anki」生成新卡后删除原卡（不勾＝保留原卡，默认；保留可不丢 FSRS 历史）",
     },
 }
 
