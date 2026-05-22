@@ -79,6 +79,35 @@ GUI 截图问答 Tab：
 | iPad 连 :9091 timeout | 防火墙挡 0.0.0.0 监听 / Tailscale 没连 | Windows 防火墙允许 9091 入站 + 确认 Tailscale 已连 |
 | 数学公式里出现方框套圆圈（豆腐块） | 自托管 MathJax 用了 CHTML 版但缺字体文件 | `static/qa/mathjax.js` 换成 SVG 版（见下「自托管前端资源」）|
 
+## HTTPS 访问（语音输入前提 + 去掉「不安全」警告）—— 2026-05-22
+
+QA daemon 自身只监听 **HTTP** `:9091`。但浏览器的 **Web Speech API（语音输入麦克风）
+要求安全上下文（HTTPS）**，HTTP 下直接禁用，所以麦克风按钮在 `http://...:9091` 下"按了没反应"。
+
+**解法**：经 nginx 的 HTTPS（Tailscale 证书，443）反代 QA daemon。
+
+- **Pi nginx**（`/etc/nginx/sites-available/bwicarus`，**手工维护、不在 git**）443 server 块加：
+  ```nginx
+  location /qa/ {
+      proxy_pass http://127.0.0.1:9091/;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header Connection "";
+      proxy_buffering off;          # SSE 流式必需
+      proxy_read_timeout 3600s;
+      client_max_body_size 50m;     # 截图/粘贴图
+  }
+  ```
+  访问入口：`https://bwicarus.taile44d0c.ts.net/qa/`（页面相对 API 路径自动走 `/qa/api/...`）。
+- **混合内容坑**：HTTPS 页面不能加载 `http://` 脚本。qa_browser.py 里 mathjax/marked 的
+  URL 改成**协议相对** `//bwicarus.taile44d0c.ts.net/static/qa/...`，HTTP:9091 与 HTTPS 两种访问都不报混合内容。
+- **卡片 QA 链接**：`.env` 的 `QA_PUBLIC_URL` 从 `http://...:9091` 改成
+  `https://bwicarus.taile44d0c.ts.net/qa`（`.env` 被 gitignore，**换机/重部署要手动改**）。
+  改后存量卡片用 AnkiConnect 批量替换 footer 里的旧链接（findNotes `"问 AI / 改进这张卡"`
+  → updateNoteFields 把 `http://...:9091/?card=` 换成 `https://.../qa/?card=` → sync）。
+- `:9091` 直连仍可用（只是无语音、有「不安全」警告）；iPad 浏览器书签/快捷指令改用 HTTPS 入口即可。
+
 ## 自托管前端资源（MathJax / marked）—— 必须用 SVG 版 MathJax
 
 QA 页的 MathJax / marked 不走 jsdelivr CDN（公网/隐私考虑），由 nginx 从
