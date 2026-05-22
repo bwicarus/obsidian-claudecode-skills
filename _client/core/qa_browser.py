@@ -287,6 +287,10 @@ state = {
     "session":   ai_client.AISession(_SESSION_PROMPT),
 }
 
+# 卡片更新后台任务：job_id -> {"status": "running"|"done", "result": {...}}
+# 改成后台跑 + 前端轮询，移动端连接断了也不丢结果、不重复制卡
+_card_jobs: dict = {}
+
 # ─── 数据库 ────────────────────────────────────────────────────────────────────
 
 def init_db():
@@ -1500,37 +1504,52 @@ function refreshUpdateButtons() {
   });
 }
 
+const UPD_LABELS = {note: '更新到笔记', anki: '根据此修改 Anki', all: '全部更新'};
+function renderUpdResult(res) {
+  if (!res || res.ok === false) { showCardResult('✗ ' + ((res && res.error) || '失败')); return; }
+  let html = '';
+  if (res.anki) {
+    html += res.anki.ok
+      ? '<div><b>✓ Anki：</b>' + (res.anki.summary || '已更新') + '</div>'
+      : '<div style="color:#b91c1c"><b>✗ Anki：</b>' + (res.anki.error || '失败') + '</div>';
+  }
+  if (res.note) {
+    html += res.note.ok
+      ? '<div style="margin-top:6px"><b>✓ 笔记：</b>' + (res.note.summary || '已更新') + '</div>'
+      : '<div style="margin-top:6px;color:#b91c1c"><b>✗ 笔记：</b>' + (res.note.error || '失败') + '</div>';
+  }
+  showCardResult(html || '完成');
+}
+function pollCardJob(jobId, allBtns, tries) {
+  tries = tries || 0;
+  fetch('api/card-update-status?job=' + encodeURIComponent(jobId))
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(j => {
+      if (j.status === 'running') { setTimeout(() => pollCardJob(jobId, allBtns, 0), 2000); return; }
+      allBtns.forEach(b => b.disabled = false);
+      renderUpdResult(j.result);
+    })
+    .catch(() => {
+      // 轮询暂时失败（锁屏/网络抖动）→ 多试几次再放弃；任务仍在后台跑
+      if (tries < 40) { setTimeout(() => pollCardJob(jobId, allBtns, tries + 1), 3000); }
+      else { allBtns.forEach(b => b.disabled = false); showCardResult('⚠️ 暂时取不到结果，但任务已在后台执行，请稍后刷新页面 / 查看 Anki'); }
+    });
+}
 function runCardUpdate(target, btn) {
   const pairs = collectUsefulPairs();
   if (!pairs.length) { showCardResult('请先在 AI 回复下方勾选「有用」的回答。'); return; }
-  const labels = {note: '更新到笔记', anki: '根据此修改 Anki', all: '全部更新'};
-  if (target === 'anki' || target === 'all') {
-    // 提示删/留原卡由控制面板设置决定
-  }
   const allBtns = document.querySelectorAll('#card-actions .upd-group button');
   allBtns.forEach(b => b.disabled = true);
-  showCardResult('正在执行「' + labels[target] + '」，将纳入 ' + pairs.length + ' 条有用回答…');
+  showCardResult('正在后台执行「' + UPD_LABELS[target] + '」，纳入 ' + pairs.length + ' 条有用回答…（可耐心等待，锁屏也不影响）');
   fetch('api/card-update', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({local_id: cardCtx.local_id, target: target, pairs: pairs}),
   }).then(r => r.json()).then(j => {
-    allBtns.forEach(b => b.disabled = false);
-    if (!j.ok) { showCardResult('✗ ' + (j.error || '失败')); return; }
-    let html = '';
-    if (j.anki) {
-      html += j.anki.ok
-        ? '<div><b>✓ Anki：</b>' + (j.anki.summary || '已更新') + '</div>'
-        : '<div style="color:#b91c1c"><b>✗ Anki：</b>' + (j.anki.error || '失败') + '</div>';
-    }
-    if (j.note) {
-      html += j.note.ok
-        ? '<div style="margin-top:6px"><b>✓ 笔记：</b>' + (j.note.summary || '已更新') + '</div>'
-        : '<div style="margin-top:6px;color:#b91c1c"><b>✗ 笔记：</b>' + (j.note.error || '失败') + '</div>';
-    }
-    showCardResult(html || '完成');
+    if (j.job_id) { pollCardJob(j.job_id, allBtns, 0); }
+    else { allBtns.forEach(b => b.disabled = false); renderUpdResult(j); }   // 兼容旧式同步返回
   }).catch(e => {
     allBtns.forEach(b => b.disabled = false);
-    showCardResult('✗ 请求失败：' + e.message);
+    showCardResult('✗ 发起失败：' + e.message);
   });
 }
 
@@ -2288,11 +2307,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 客户端已断开（移动端锁屏/切后台），结果送不回，静默忽略
 
     def do_GET(self):
         # 根路径（含带查询串如 /?card=<id> 的卡片模式）都返回主页面 HTML
@@ -2381,6 +2403,17 @@ class Handler(BaseHTTPRequestHandler):
             cid = (parse_qs(urlparse(self.path).query).get("card") or [""])[0]
             ctx = _find_card_context(cid)
             self.send_json(ctx or {"error": "not found"}, 200 if ctx else 404)
+
+        elif self.path.startswith("/api/card-update-status"):
+            from urllib.parse import urlparse, parse_qs
+            jid = (parse_qs(urlparse(self.path).query).get("job") or [""])[0]
+            job = _card_jobs.get(jid)
+            if not job:
+                self.send_json({"status": "unknown"}, 404)
+            else:
+                self.send_json(job)
+                if job.get("status") == "done":
+                    _card_jobs.pop(jid, None)   # 取走结果后清理
 
         else:
             self.send_response(404); self.end_headers()
@@ -2518,13 +2551,22 @@ class Handler(BaseHTTPRequestHandler):
             elif not pairs:
                 self.send_json({"ok": False, "error": "没有标记为有用的回答"}, 400)
             else:
-                out = {"ok": True}
-                if target in ("anki", "all"):
-                    out["anki"] = _card_update_anki(local_id, pairs)
-                if target in ("note", "all"):
-                    out["note"] = _card_update_note(local_id, pairs)
-                # 任一子任务失败不算整体失败，前端分别展示
-                self.send_json(out)
+                # 后台跑（AI 调用慢，移动端连接易断）；立即返回 job_id 供前端轮询
+                import uuid
+                job_id = uuid.uuid4().hex[:12]
+                _card_jobs[job_id] = {"status": "running"}
+                def _run(job_id=job_id, local_id=local_id, target=target, pairs=pairs):
+                    out = {"ok": True}
+                    try:
+                        if target in ("anki", "all"):
+                            out["anki"] = _card_update_anki(local_id, pairs)
+                        if target in ("note", "all"):
+                            out["note"] = _card_update_note(local_id, pairs)
+                    except Exception as e:
+                        out = {"ok": False, "error": str(e)}
+                    _card_jobs[job_id] = {"status": "done", "result": out}
+                threading.Thread(target=_run, daemon=True).start()
+                self.send_json({"ok": True, "job_id": job_id})
 
         elif self.path == "/api/save":
             try:
