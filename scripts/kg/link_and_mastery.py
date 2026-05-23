@@ -270,14 +270,16 @@ def main() -> int:
         prs = prereqs_of.get(cur, [])
         prereqs_clear = (not prs) or all(
             state_map.get(p, "locked") in open_set for p in prs)
+        m = n.get("mastery")
+        has_mastery = (m is not None and m > 0)
         if not prereqs_clear:
-            state_map[cur] = "locked"
+            state_map[cur] = "locked"            # 前置链没通：未解锁
+        elif m is not None and m >= MASTERED_THRESHOLD:
+            state_map[cur] = "mastered"          # 真掌握
+        elif has_mastery:
+            state_map[cur] = "unlockable"        # 前置通 + 自己也学过 → 可学
         else:
-            m = n.get("mastery")
-            if m is not None and m >= MASTERED_THRESHOLD:
-                state_map[cur] = "mastered"
-            else:
-                state_map[cur] = "unlockable"
+            state_map[cur] = "locked"            # 前置通了但自己还没碰过 → 未解锁
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
