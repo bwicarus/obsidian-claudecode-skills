@@ -183,15 +183,17 @@ def main() -> int:
     l1_list = [n for n in kg["nodes"] if n["level"] == 1]
     print(f"骨架：L0 {len(l0_by_id)} 章 + L1 {len(l1_list)} 节")
 
-    # 断点续传：若 out 已存在，加载已扫的 L2 节点，跳过其父 L1
+    # 断点续传：若 out 已存在，加载已扫的 L2 节点 + 保留已有 edges（防 rescan 丢边）
     done_l1: set[str] = set()
     if out.exists():
         try:
             prev = json.loads(out.read_text(encoding="utf-8"))
             old_l2 = [n for n in prev.get("nodes", []) if n.get("level") == 2]
             kg["nodes"].extend(old_l2)
+            # 保留已有 edges（rescan 只动 nodes，不应丢边）
+            kg["edges"] = prev.get("edges", [])
             done_l1 = set(n["parent_id"] for n in old_l2)
-            print(f"续跑：加载 {len(old_l2)} 个已扫 L2 节点，跳过已扫 L1 {len(done_l1)} 个")
+            print(f"续跑：加载 {len(old_l2)} 个已扫 L2 节点 + {len(kg['edges'])} 条已有边，跳过已扫 L1 {len(done_l1)} 个")
         except Exception as ex:
             print(f"加载已存 KG 失败，全量扫：{ex}")
 
