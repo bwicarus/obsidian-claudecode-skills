@@ -556,6 +556,16 @@ function render(){
       curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
     }
   }
+  // 折叠的 locked 章节节点位置=屏外，把它们和相关边从渲染集中剔除
+  // （避免出现"指向屏幕左侧的孤儿边"）
+  const offScreen = new Set();
+  for(const id in positions){
+    if(positions[id].x < -1000) offScreen.add(id);
+  }
+  if(offScreen.size){
+    nodes = nodes.filter(n => !offScreen.has(n.id));
+    edges = edges.filter(e => !offScreen.has(e.from) && !offScreen.has(e.to));
+  }
   const svgW=Math.max(W, cols*(blockW+gapX));
   const svgH=Math.max(wrap.clientHeight-40, curY+40);
   svg.attr("width",svgW).attr("height",svgH);
