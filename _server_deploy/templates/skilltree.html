@@ -73,7 +73,13 @@ svg.canvas{display:block}
 .tile rect.mastery-bar{display:none}
 /* 章带不用大矩形背景，改成屏幕两侧 4px 竖色线 + 左侧章名贴边 */
 rect.chap-side{rx:2;ry:2;pointer-events:none}
-text.chap-band-label{font-weight:700;letter-spacing:.4px;pointer-events:none;user-select:none;opacity:.78}
+text.chap-band-label{
+  font-weight:800;
+  letter-spacing:3px;
+  pointer-events:none;
+  user-select:none;
+  filter:drop-shadow(0 0 5px currentColor) drop-shadow(0 2px 4px rgba(0,0,0,.65));
+}
 /* 未开放章节折叠条 */
 g.locked-bar{cursor:pointer}
 g.locked-bar rect.locked-bar-rect{fill:#171c28;stroke:#262d3c;stroke-width:1}
@@ -600,16 +606,20 @@ function render(){
     .attr("y",b=>b.y).attr("height",b=>b.h)
     .attr("fill",b=>b.color)
     .style("opacity",0.85);
-  // 章名标签：所有视图都显示（chapBands 为空时自然无标签）
+  // 章名标签：竖排紧贴左侧色线，加粗 + 发光阴影
   const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
   labSel.exit().transition().duration(220).style("opacity",0).remove();
   const labEnter = labSel.enter().append("text").attr("class","chap-band-label")
     .style("opacity",0);
   labEnter.merge(labSel).transition().duration(380)
-    .attr("x",16).attr("y",b=>b.y+14)
-    .attr("font-size",11).attr("fill",b=>b.color)
+    .attr("x", 16)                          // 紧贴左侧色线（色线 x=6,width=4）
+    .attr("y", b=>b.y + b.h/2)              // 章带垂直中央
+    .attr("text-anchor","middle")
+    .attr("font-size", 15)
+    .attr("fill", b=>b.color)
+    .attr("transform", b=>`rotate(-90, 16, ${b.y + b.h/2})`)
     .text(b=>(b.label?b.label+" ":"")+b.name)
-    .style("opacity",1);
+    .style("opacity", 1);
 
   // 未开放章节折叠条（仅 home 视图有）
   const showBar = (current.kind==="home") && window.__lockedBarRect;
