@@ -304,6 +304,15 @@ def main() -> None:
         except (json.JSONDecodeError, OSError):
             quality_health = None
 
+    # KG 准确性审计（audit_kg.py 写）
+    kg_audit = None
+    ka_file = PROJECT_DIR / "state" / "kg_audit.json"
+    if ka_file.exists():
+        try:
+            kg_audit = json.loads(ka_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            kg_audit = None
+
     output = {
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "notes":    notes_out,
@@ -311,6 +320,7 @@ def main() -> None:
         "keywords": keywords,
         "last_run": last_run,
         "quality_health": quality_health,
+        "kg_audit": kg_audit,
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

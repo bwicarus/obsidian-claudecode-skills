@@ -576,6 +576,18 @@
     </div>
   </div>
 
+  <!-- 3. KG 准确性审计 -->
+  <div class="panel" data-panel="kg-audit">
+    <div class="panel-tab">
+      <div class="tab-dot" style="background:#f59e0b"></div>
+      <span class="tab-title">KG 审计</span>
+    </div>
+    <div class="panel-body">
+      <div class="panel-body-title" id="kgAuditTitle">技能树准确性 — 待 review</div>
+      <div id="kgAuditBody" style="font-size:13px;line-height:1.6;color:#cfd6e6"></div>
+    </div>
+  </div>
+
 </div><!-- end panel-stack -->
 
 <!-- ═══ 图谱抽屉（右侧滑出，磨砂玻璃半透明）═══ -->
@@ -808,6 +820,7 @@ async function loadData() {
     allKeywords = data.keywords || [];
     renderLastRun(data.last_run);
     renderQualityHealth(data.quality_health);
+    renderKgAudit(data.kg_audit);
     buildKwIndex(allNotes);
     buildFilters(allNotes);
     renderAll(allNotes, allGraph, allKeywords);
@@ -855,6 +868,43 @@ function renderQualityHealth(qh) {
   el.innerHTML = `<span class="icon">◍</span><b>卡片体检</b>`
     + `<span style="opacity:0.7">最新 ${last.date || ''}：体检 ${last.processed || 0} · ok ${last.ok || 0} · 改 ${last.rewrite || 0} · 拆 ${last.split || 0}</span>`
     + bf + `<span style="opacity:0.5">｜近期</span>` + trend;
+}
+
+function renderKgAudit(ka) {
+  const body = document.getElementById('kgAuditBody');
+  const title = document.getElementById('kgAuditTitle');
+  if (!body) return;
+  if (!ka || !ka.issues) {
+    body.innerHTML = '<div style="opacity:0.6">无 audit 数据（dashboard 任务尚未跑过 audit_kg）</div>';
+    return;
+  }
+  const s = ka.summary || {};
+  const total = (s.heuristic_edge_gaps || 0) + (s.monotonicity_violations || 0) + (s.ai_audit_flagged || 0);
+  title.textContent = `技能树准确性 — 共 ${total} 个待 review`;
+  const sec = (lbl, items, renderItem) => {
+    if (!items || !items.length) return `<div style="opacity:0.5;margin:6px 0">${lbl}：✓ 无</div>`;
+    return `<details style="margin:8px 0"><summary style="cursor:pointer;color:#f59e0b">${lbl}（${items.length}）</summary>`
+      + `<div style="margin:6px 0 6px 14px">${items.map(renderItem).join('')}</div></details>`;
+  };
+  const kgLink = ka.kg_book ? `<a href="/skilltree/${ka.kg_book}/" target="_blank" style="color:#7dc4ff">→ 打开技能树</a>` : '';
+  body.innerHTML =
+    `<div style="opacity:0.7;font-size:11px;margin-bottom:8px">生成于 ${ka.generated_at || '?'} · ${ka.kg_file || ''} ${kgLink}</div>` +
+    sec('启发式问题', ka.issues.heuristic_edge_gaps, x =>
+      `<div style="padding:5px 0;border-bottom:1px dashed #2a3550">
+         <span class="step-pill" style="margin-right:6px">${x.kind || '?'}</span>
+         <b>${x.name || '?'}</b>
+         <div style="opacity:0.7;font-size:11px;margin-top:2px">${x.reason || ''}</div>
+       </div>`) +
+    sec('单调性反例', ka.issues.monotonicity_violations, x =>
+      `<div style="padding:5px 0;border-bottom:1px dashed #2a3550">
+         <b>${x.from_name}</b> → <b>${x.to_name}</b>
+         <div style="opacity:0.7;font-size:11px">${x.reason || ''}</div>
+       </div>`) +
+    sec('AI 抽样审稿', ka.issues.ai_audit_flagged, x =>
+      `<div style="padding:5px 0;border-bottom:1px dashed #2a3550">
+         <b>${x.numeric_label || ''} ${x.name || '?'}</b>
+         <div style="opacity:0.7;font-size:11px">${(x.issues || []).join(' · ') || x.suggestion || ''}</div>
+       </div>`);
 }
 
 function renderLastRun(lastRun) {
