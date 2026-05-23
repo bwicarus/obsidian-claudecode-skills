@@ -29,12 +29,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
 RECORDS_DIR = config.RECORDS_DIR
-# 四态阈值：解锁阈值（开始学的门槛）和掌握阈值（金色徽章）分开
-# 阈值取 0.4 贴合实际：当前 mastery 公式下，刷过几遍的复习卡 mastery 在 0.40-0.50；
-# 0.4 让"刚开始复习的章节"就能传递解锁性，0.8 仍保留作严格的掌握徽章。
-UNLOCK_THRESHOLD = 0.4       # 前置 mastery 全 >= 0.4 → 节点 unlockable
-MASTERED_THRESHOLD = 0.8     # 前置 mastery 全 >= 0.8 且自身 >= 0.8 → mastered
-PREVIEW_THRESHOLD = 0.3      # ≥1 个前置 mastery >= 0.3 → previewable（可瞟）
+# 四态分桶（按自身 mastery，不做 DAG 传递；前置链信息在详情面板里看）：
+#   mastered     mastery >= 0.8       金色，真正掌握
+#   unlockable   mastery >= 0.4       黄色，正在认真学
+#   previewable  0 < mastery < 0.4    浅灰，刚起步
+#   locked       mastery == None / 0  深灰，还没碰过
+# 这种纯桶分类避免了"刷得多的章节因低 mastery 反而被链式 lock"的反直觉。
+MASTERED_THRESHOLD = 0.8
+UNLOCK_THRESHOLD = 0.4
+PREVIEW_FLOOR = 0.0          # > 这个值进 previewable，否则 locked
 
 
 def _norm(s: str) -> str:
@@ -185,7 +188,8 @@ def main() -> int:
         ms = []
         for k in kids:
             if k["level"] == 2:
-                if k.get("has_cards") and k.get("mastery") is not None:
+                # 只要 L2 mastery 不是 None 就纳入（继承自父 L1 record 也算）
+                if k.get("mastery") is not None:
                     ms.append(k["mastery"])
             else:
                 v = agg(k)
@@ -195,85 +199,24 @@ def main() -> int:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)  # 可能 None
 
-    # 3) 四态：locked / previewable / unlockable / mastered
-    #    - mastered      = 所有前置 mastered & 自身 mastery ≥ MASTERED_THRESHOLD
-    #    - unlockable    = 所有前置 mastery ≥ UNLOCK_THRESHOLD（"可以开始学"）
-    #    - previewable   = ≥1 个前置 mastery ≥ PREVIEW_THRESHOLD（可瞟简介）
-    #    - locked        = 其它（暂不该碰）
-    # 起点（indeg=0 的 L2）默认 unlockable。
-    edges = kg.get("edges", [])
-    prereqs_to = defaultdict(list)
-    indeg = defaultdict(int); g = defaultdict(list)
-    for e in edges:
-        if e.get("kind") == "prereq":
-            prereqs_to[e["to"]].append(e["from"])
-            g[e["from"]].append(e["to"]); indeg[e["to"]] += 1
+    # 3) 状态分桶（纯按 mastery 数值，不做 DAG 传递）
+    def bucket(m):
+        if m is None or m <= 0:           return "locked"
+        if m >= MASTERED_THRESHOLD:        return "mastered"
+        if m >= UNLOCK_THRESHOLD:          return "unlockable"
+        return "previewable"
 
-    # 拿前置 mastery 列表来判定，所以需要先有所有 L2 的 mastery。已在上方完成。
-    # 规则：mastery=None（无卡）的前置 = "中性"（不阻塞解锁，也不传递 mastered）。
-    def classify_l2(nid: str) -> str:
-        n = id2[nid]
-        prs = prereqs_to[nid]
-        self_m = n.get("mastery")  # 可能 None
-        # 自身 mastered 必须 mastery 真的 ≥ 0.8（None 不算）
-        self_is_mastered = (self_m is not None and self_m >= MASTERED_THRESHOLD)
-        if not prs:
-            return "mastered" if self_is_mastered else "unlockable"
-        # 把前置 mastery 分成"有数据"和"无数据"两组
-        data_ms = [id2[p].get("mastery") for p in prs if p in id2]
-        with_data = [m for m in data_ms if m is not None]
-        # 无数据前置全部跳过（中性）；有数据前置走阈值
-        if not with_data:
-            # 所有前置都无数据 → 不阻塞，按自身定
-            return "mastered" if self_is_mastered else "unlockable"
-        all_mast   = all(m >= MASTERED_THRESHOLD for m in with_data)
-        all_unlock = all(m >= UNLOCK_THRESHOLD for m in with_data)
-        any_prev   = any(m >= PREVIEW_THRESHOLD for m in with_data)
-        if all_mast and self_is_mastered:
-            return "mastered"
-        if all_unlock:
-            return "unlockable"
-        if any_prev:
-            return "previewable"
-        return "locked"
-
-    # 拓扑序处理（防止环里出错；这里用 BFS 顺序保证前置已分类）
-    queue = [n["id"] for n in nodes if n["level"] == 2 and indeg[n["id"]] == 0]
-    indeg_copy = dict(indeg)
-    state_map: dict[str, str] = {}
-    while queue:
-        cur = queue.pop(0)
-        state_map[cur] = classify_l2(cur)
-        for v in g[cur]:
-            indeg_copy[v] -= 1
-            if indeg_copy[v] == 0:
-                queue.append(v)
-    # 落到节点字段；并保留旧的 unlocked / mastered 兼容字段（unlocked = unlockable | mastered）
     for n in nodes:
         if n["level"] == 2:
-            st = state_map.get(n["id"], "unlockable")
-            n["state"] = st
-            n["unlocked"] = st in ("unlockable", "mastered")
-            n["mastered"] = st == "mastered"
-
-    # L1/L0 聚合：state 取"子孙最弱的那个"（保守显示）
-    STATE_ORDER = {"locked": 0, "previewable": 1, "unlockable": 2, "mastered": 3}
-    def agg_state(node):
-        kids = children.get(node["id"], [])
-        if not kids:
-            return node.get("state", "unlockable")
-        worst = "mastered"
-        for k in kids:
-            s = k.get("state") if k["level"] == 2 else agg_state(k)
-            if STATE_ORDER.get(s, 0) < STATE_ORDER.get(worst, 0):
-                worst = s
-        return worst
+            n["state"] = bucket(n.get("mastery"))
+            n["unlocked"] = n["state"] in ("unlockable", "mastered")
+            n["mastered"] = n["state"] == "mastered"
+    # L0/L1 聚合：mastery 已是子孙均值，直接走同一分桶
     for n in nodes:
         if n["level"] in (0, 1):
-            s = agg_state(n)
-            n["state"] = s
-            n["unlocked"] = s in ("unlockable", "mastered")
-            n["mastered"] = s == "mastered"
+            n["state"] = bucket(n.get("mastery"))
+            n["unlocked"] = n["state"] in ("unlockable", "mastered")
+            n["mastered"] = n["state"] == "mastered"
 
     if not args.in_place:
         print("（dry-run，未写回；加 --in-place 应用）")
