@@ -68,11 +68,8 @@ svg.canvas{display:block}
 .edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
 .tile.filter-out{opacity:.18}
-/* 顶部 chap-bar 在 focus 模式下隐藏（章带 layout 已表达章节）；
-   home/chapter/section 视图保留色条标识章节 */
-.tile rect.chap-bar{stroke:none}
-.focus-mode .tile rect.chap-bar{display:none}
-/* mastery 状态不再画底部色条 */
+/* 章节用位置（章带+侧色线）编码，节点不再叠章色条 */
+.tile rect.chap-bar{display:none}
 .tile rect.mastery-bar{display:none}
 /* 章带不用大矩形背景，改成屏幕两侧 4px 竖色线 + 左侧章名贴边 */
 rect.chap-side{rx:2;ry:2;pointer-events:none}
