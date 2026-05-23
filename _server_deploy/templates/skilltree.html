@@ -511,7 +511,13 @@ function render(){
   computeChainSets(focusedId);
   // CSS 切换：focus 模式时 svg root 加 class .focus-mode
   svg.node().parentNode.classList.toggle("focus-mode", isFocusMode);
-  const W = wrap.clientWidth - 40;
+  // 同步 wrap padding-right（详情面板挤压宽度）
+  updateWrapPadding();
+  // W = wrap 可视区减去实际 padding（详情面板挤压时 padding-right=380）
+  const cs = getComputedStyle(wrap);
+  const padL = parseFloat(cs.paddingLeft)  || 20;
+  const padR = parseFloat(cs.paddingRight) || 20;
+  const W = Math.max(280, wrap.clientWidth - padL - padR);
   const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
   const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
   const gapX = Math.max(14, Math.floor(blockW * 0.18));
