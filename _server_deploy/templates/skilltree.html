@@ -711,7 +711,6 @@ function render(){
   edgeSel.exit().transition().duration(280).style("opacity",0).remove();
   const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
     .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
-    .attr("marker-end",e=>`url(#arr-${edgeBaseClass(e)})`)
     .style("opacity",0);
   edgeSel.merge(edgeEnter).transition().duration(380)
     .attr("d",e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
