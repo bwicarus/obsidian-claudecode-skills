@@ -36,8 +36,14 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", (s or "").lower())
 
 
+def _stem_core(stem: str) -> str:
+    """剥前缀：'000-向量空间' → '向量空间'；'资源/books/000-LADR/000-直和' → '直和'。"""
+    stem = stem.rsplit("/", 1)[-1]
+    return re.sub(r"^[0-9]+[\-_]", "", stem)
+
+
 def load_records() -> tuple[list[dict], dict[str, dict]]:
-    """records: 所有 record 文件内容；by_source_stem: stem → record。"""
+    """records: 所有 record 文件内容；by_stem: 多键索引（norm 全stem + norm core）→ record。"""
     recs = []
     by_stem: dict[str, dict] = {}
     for f in sorted(RECORDS_DIR.glob("*.json")):
@@ -49,21 +55,31 @@ def load_records() -> tuple[list[dict], dict[str, dict]]:
         sn = d.get("source_note", "")
         if sn.lower().endswith(".md"):
             sn = sn[:-3]
-        by_stem[_norm(sn.rsplit("/", 1)[-1])] = d
+        # 索引两个键：完整 stem 和 去前缀的 core
+        full = sn.rsplit("/", 1)[-1]
+        by_stem[_norm(full)] = d
+        by_stem[_norm(_stem_core(full))] = d
     return recs, by_stem
 
 
 def link_l1(node: dict, by_stem: dict[str, dict]) -> dict | None:
-    """L1 → record 笔记（按 name 模糊匹配 stem）。"""
-    keys = [_norm(node["name"]), _norm(node.get("section_label", "") + node["name"])]
-    for k in keys:
-        if k in by_stem:
-            return by_stem[k]
-    # 包含匹配：record stem 含节点 name
-    for stem, rec in by_stem.items():
-        if _norm(node["name"]) and _norm(node["name"]) in stem:
-            return rec
-    return None
+    """L1 → record 笔记。先精确，再双向 contains。"""
+    name_n = _norm(node["name"])
+    if not name_n:
+        return None
+    # 精确
+    if name_n in by_stem:
+        return by_stem[name_n]
+    # 双向 contains：要求 stem core 与 name 至少 3 字重叠，防"基"→"复数的基本性质"误匹配
+    best = None; best_overlap = 0
+    for k, rec in by_stem.items():
+        if not k or len(k) < 3 or len(name_n) < 3: continue
+        ov = 0
+        if k in name_n:  ov = len(k)
+        elif name_n in k: ov = len(name_n)
+        if ov >= 3 and ov > best_overlap:
+            best, best_overlap = rec, ov
+    return best
 
 
 def link_l2(node: dict, parent_rec: dict | None, recs: list[dict]) -> list[str]:
@@ -113,6 +129,11 @@ def main() -> int:
     rec_by_sn = {r.get("source_note", ""): r for r in recs}
     print(f"加载 records: {len(recs)} 篇")
 
+    # 先清空旧关联，确保重跑时不残留上一版的匹配
+    for n in nodes:
+        n.pop("note_ref", None); n.pop("card_refs", None)
+        n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
+        n.pop("has_cards", None)
     # 1) 关联：L1 → 笔记，L2 → 卡（继承父 L1 的 record）
     linked_l1 = linked_l2 = 0
     for n in nodes:
