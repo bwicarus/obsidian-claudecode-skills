@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ book }} · 技能树</title>
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f1419;color:#e6e6e6;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
+#bar{background:#1a1f29;border-bottom:1px solid #2a3140;padding:8px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+#bar h1{font-size:14px;font-weight:600}
+#crumbs{display:flex;align-items:center;gap:6px;font-size:13px;color:#9aa4b2}
+#crumbs a{color:#5eaaff;text-decoration:none;cursor:pointer}
+#legend{margin-left:auto;display:flex;gap:14px;font-size:11px;color:#9aa4b2}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+#viz{flex:1;position:relative;overflow:hidden;background:radial-gradient(circle at center,#1a2030 0%,#0f1419 70%)}
+svg{width:100%;height:100%;cursor:grab}
+svg:active{cursor:grabbing}
+.node circle{stroke-width:2;cursor:pointer;transition:filter .15s}
+.node circle:hover{filter:brightness(1.3) drop-shadow(0 0 8px currentColor)}
+.node text{fill:#e6e6e6;font-size:11px;text-anchor:middle;pointer-events:none;user-select:none;text-shadow:0 0 4px #000,0 0 2px #000}
+.edge{fill:none;stroke:#3a4658;stroke-width:1.5;marker-end:url(#arrow)}
+#detail{position:absolute;right:0;top:0;bottom:0;width:340px;background:#161b24;border-left:1px solid #2a3140;padding:16px 18px;overflow-y:auto;transform:translateX(100%);transition:transform .2s ease;font-size:13px;line-height:1.6}
+#detail.open{transform:translateX(0)}
+#detail h2{font-size:15px;margin-bottom:6px}
+#detail .lbl{color:#9aa4b2;font-size:11px;margin-top:10px;text-transform:uppercase;letter-spacing:.05em}
+#detail .v{margin-top:2px}
+#detail-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#9aa4b2;font-size:18px;cursor:pointer}
+#detail .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;margin-right:6px}
+.b-mast{background:#16432a;color:#7be096}
+.b-unl{background:#4a3a0d;color:#ffd877}
+.b-lock{background:#2a2f3b;color:#7a8497}
+.b-type{background:#1c2c45;color:#7eb2ff}
+#detail .prereqs li{margin:4px 0;padding:6px 8px;background:#0f141d;border-radius:5px;cursor:pointer}
+#detail .prereqs li:hover{background:#1a2030}
+</style></head>
+<body>
+<div id="bar">
+  <h1>{{ book }}</h1>
+  <div id="crumbs"><a data-level="0">全书</a></div>
+  <div id="legend">
+    <span><span class="dot" style="background:#7be096"></span>已掌握</span>
+    <span><span class="dot" style="background:#ffd877"></span>已解锁</span>
+    <span><span class="dot" style="background:#6b7280"></span>未解锁</span>
+  </div>
+</div>
+<div id="viz">
+  <svg><defs>
+    <marker id="arrow" viewBox="0 -5 10 10" refX="14" refY="0" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,-5L10,0L0,5" fill="#5a6b80"/>
+    </marker>
+  </defs></svg>
+  <aside id="detail">
+    <button id="detail-close" onclick="closeDetail()">✕</button>
+    <h2 id="d-name">—</h2>
+    <div><span id="d-badges"></span></div>
+    <div class="lbl">编号 / 类型</div><div class="v" id="d-label">—</div>
+    <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
+    <div class="lbl">页码</div><div class="v" id="d-pages">—</div>
+    <div class="lbl">所属</div><div class="v" id="d-path">—</div>
+    <div class="lbl">关联</div><div class="v" id="d-link">—</div>
+    <div class="lbl">前置（解锁条件）</div><ul class="prereqs" id="d-prereqs"></ul>
+    <div class="lbl">后续（解锁这个之后会开放）</div><ul class="prereqs" id="d-unlocks"></ul>
+  </aside>
+</div>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const BOOK="{{ book }}";
+let KG=null, currentLevel=0, currentParent=null, sim=null;
+const svg=d3.select("svg"), W=()=>svg.node().clientWidth, H=()=>svg.node().clientHeight;
+const g=svg.append("g");
+svg.call(d3.zoom().scaleExtent([0.3,4]).on("zoom",ev=>g.attr("transform",ev.transform)));
+const COLORS={mastered:"#7be096",unlocked:"#ffd877",locked:"#6b7280"};
+function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
+
+fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{KG=d;render()});
+
+function visibleNodes(){
+  // 当前视图：currentLevel 的节点；若 currentParent 指定，只看其子树
+  return KG.nodes.filter(n=>{
+    if(n.level!==currentLevel) return false;
+    if(!currentParent) return true;
+    // 是否在 currentParent 的子树里：parent_id 递推
+    let cur=n;
+    while(cur && cur.parent_id){
+      if(cur.parent_id===currentParent) return true;
+      cur=KG.nodes.find(x=>x.id===cur.parent_id);
+    }
+    return false;
+  });
+}
+function visibleEdges(visIds){
+  // 边：当前层级 + 把不在视图里的端点提升到祖先
+  const id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  function liftTo(id){
+    let cur=id2[id];
+    while(cur && cur.level>currentLevel) cur=id2[cur.parent_id];
+    return cur&&cur.level===currentLevel?cur.id:null;
+  }
+  const E=new Map();
+  for(const e of KG.edges){
+    if(e.kind!=="prereq") continue;
+    const a=liftTo(e.from), b=liftTo(e.to);
+    if(!a||!b||a===b) continue;
+    if(!visIds.has(a)||!visIds.has(b)) continue;
+    const k=a+"→"+b; if(!E.has(k)) E.set(k,{from:a,to:b,count:0});
+    E.get(k).count++;
+  }
+  return [...E.values()];
+}
+function render(){
+  g.selectAll("*").remove();
+  if(!KG) return;
+  const nodes=visibleNodes().map(n=>({...n}));
+  const ids=new Set(nodes.map(n=>n.id));
+  const edges=visibleEdges(ids).map(e=>({...e,source:e.from,target:e.to}));
+  if(!nodes.length){g.append("text").attr("x",W()/2).attr("y",H()/2).attr("text-anchor","middle").attr("fill","#666").text("（此层无节点）"); return}
+  // 按拓扑深度分层（y 坐标），同层水平铺开（x 坐标）
+  const depth={}; const inEdges={};
+  for(const n of nodes) inEdges[n.id]=[];
+  for(const e of edges) inEdges[e.target].push(e.source);
+  let changed=true; for(const n of nodes) depth[n.id]=0;
+  while(changed){changed=false; for(const n of nodes){const d=inEdges[n.id].length?Math.max(...inEdges[n.id].map(s=>depth[s]+1)):0; if(d!==depth[n.id]){depth[n.id]=d;changed=true}}}
+  const maxD=Math.max(...Object.values(depth),0);
+  const byDepth={}; for(const n of nodes){(byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n)}
+  const padY=80, layerH=Math.max(120,(H()-2*padY)/Math.max(maxD,1));
+  for(const d in byDepth){
+    const row=byDepth[d]; const cw=W()/(row.length+1);
+    row.forEach((n,i)=>{n.x=cw*(i+1); n.y=padY+d*layerH; n.fx=null; n.fy=n.y});
+  }
+  const link=g.selectAll(".edge").data(edges).enter().append("path").attr("class","edge");
+  const node=g.selectAll(".node").data(nodes).enter().append("g").attr("class","node");
+  node.append("circle")
+    .attr("r",d=>d.level===0?22:d.level===1?16:12)
+    .attr("fill",d=>COLORS[stateOf(d)]).attr("stroke",d=>d3.color(COLORS[stateOf(d)]).darker(1.2))
+    .on("click",(_,d)=>nodeClick(d));
+  node.append("text").attr("dy",d=>d.level===0?36:d.level===1?28:22)
+    .text(d=>d.name.length>14?d.name.slice(0,13)+"…":d.name);
+  // 简单 force 微调避免 x 重叠
+  sim&&sim.stop();
+  sim=d3.forceSimulation(nodes)
+    .force("y",d3.forceY(d=>d.y).strength(1))
+    .force("x",d3.forceX(d=>d.x).strength(0.3))
+    .force("coll",d3.forceCollide(d=>(d.level===0?30:d.level===1?22:18)))
+    .force("link",d3.forceLink(edges).id(d=>d.id).distance(80).strength(0.2))
+    .on("tick",tick).alpha(0.5).alphaDecay(0.1);
+  function tick(){
+    link.attr("d",d=>{const dx=d.target.x-d.source.x,dy=d.target.y-d.source.y;return`M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`});
+    node.attr("transform",d=>`translate(${d.x},${d.y})`);
+  }
+  // 面包屑
+  updateCrumbs();
+}
+function updateCrumbs(){
+  const crumbs=document.getElementById("crumbs"); crumbs.innerHTML="";
+  const path=[{level:0,name:"全书",parent:null}];
+  if(currentParent){
+    const id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+    let cur=id2[currentParent]; const chain=[];
+    while(cur){chain.unshift(cur); cur=id2[cur.parent_id]}
+    for(const n of chain) path.push({level:n.level+1,name:n.name,parent:n.id,nodeLevel:n.level});
+  }
+  path.forEach((p,i)=>{
+    if(i) crumbs.appendChild(Object.assign(document.createElement("span"),{textContent:" › "}));
+    const a=document.createElement("a"); a.textContent=p.name;
+    a.onclick=()=>{if(i===0){currentLevel=0;currentParent=null}else{currentLevel=p.nodeLevel;currentParent=p.parent} render()};
+    crumbs.appendChild(a);
+  });
+}
+function nodeClick(n){
+  if(n.level<2){
+    // 钻取到子层
+    currentLevel=n.level+1; currentParent=n.id; render();
+  }
+  showDetail(n);
+}
+function showDetail(n){
+  document.getElementById("detail").classList.add("open");
+  document.getElementById("d-name").textContent=n.name;
+  const badges=[];
+  badges.push(`<span class="badge ${n.mastered?'b-mast':n.unlocked?'b-unl':'b-lock'}">${n.mastered?"已掌握":n.unlocked?"已解锁":"未解锁"}</span>`);
+  if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
+  document.getElementById("d-badges").innerHTML=badges.join("");
+  document.getElementById("d-label").textContent=n.numeric_label||"—";
+  document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
+  document.getElementById("d-pages").textContent=(n.pages||[]).join(", ")||"—";
+  // 路径
+  const id2=Object.fromEntries(KG.nodes.map(x=>[x.id,x]));
+  const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
+  document.getElementById("d-path").textContent=chain.length?chain.join(" › "):"—";
+  // 关联
+  const link=[];
+  if(n.note_ref) link.push(`📝 ${n.note_ref}`);
+  if(n.card_refs&&n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张卡`);
+  document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
+  // 前置/后续
+  const ed=KG.edges||[];
+  const ul1=document.getElementById("d-prereqs"); ul1.innerHTML="";
+  for(const e of ed) if(e.kind==="prereq"&&e.to===n.id){
+    const p=id2[e.from]; if(!p) continue;
+    const li=document.createElement("li"); li.textContent=`← ${p.name}${e.evidence?'（'+e.evidence+'）':''}`;
+    li.onclick=()=>{currentLevel=p.level;currentParent=p.parent_id;render();setTimeout(()=>showDetail(p),300)};
+    ul1.appendChild(li);
+  }
+  if(!ul1.children.length){const li=document.createElement("li"); li.style.cursor="default"; li.textContent="（无）"; ul1.appendChild(li)}
+  const ul2=document.getElementById("d-unlocks"); ul2.innerHTML="";
+  for(const e of ed) if(e.kind==="prereq"&&e.from===n.id){
+    const t=id2[e.to]; if(!t) continue;
+    const li=document.createElement("li"); li.textContent=`→ ${t.name}`;
+    li.onclick=()=>{currentLevel=t.level;currentParent=t.parent_id;render();setTimeout(()=>showDetail(t),300)};
+    ul2.appendChild(li);
+  }
+  if(!ul2.children.length){const li=document.createElement("li"); li.style.cursor="default"; li.textContent="（无）"; ul2.appendChild(li)}
+}
+function closeDetail(){document.getElementById("detail").classList.remove("open")}
+window.addEventListener("resize",()=>{if(KG) render()});
+</script></body></html>

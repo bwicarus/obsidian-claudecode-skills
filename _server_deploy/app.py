@@ -748,5 +748,9 @@ def qa_update():
 from control import register_control
 register_control(app)
 
+# 知识图谱（技能树）
+from skilltree import register_skilltree
+register_skilltree(app)
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000)
