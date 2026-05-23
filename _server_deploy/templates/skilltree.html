@@ -6,63 +6,77 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a0e1a;color:#e6e6f0;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
-#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:10px 18px;display:flex;align-items:center;gap:14px;flex-shrink:0;z-index:10}
+#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:9px 18px;display:flex;align-items:center;gap:14px;flex-shrink:0;z-index:10}
 #bar h1{font-size:14px;font-weight:700;letter-spacing:.05em;color:#9ec3ff}
-#crumbs{display:flex;align-items:center;gap:6px;font-size:13px;color:#8a9bb4}
-#crumbs a{color:#7dc4ff;text-decoration:none;cursor:pointer;font-weight:500;padding:2px 6px;border-radius:4px}
-#crumbs a:hover{background:#1a2540}
+#bar .meta{font-size:12px;color:#8a9bb4}
+#bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
+#bar button:hover{background:#27345a}
 #legend{margin-left:auto;display:flex;gap:14px;font-size:11px;color:#8a9bb4}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;box-shadow:0 0 8px currentColor}
 #viz{flex:1;position:relative;overflow:hidden;background-color:#0a0e1a;background-image:
   radial-gradient(ellipse at center,rgba(40,60,120,.18) 0%,transparent 60%),
-  linear-gradient(rgba(60,80,140,.06) 1px,transparent 1px),
-  linear-gradient(90deg,rgba(60,80,140,.06) 1px,transparent 1px);
+  linear-gradient(rgba(60,80,140,.05) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(60,80,140,.05) 1px,transparent 1px);
   background-size:100% 100%, 40px 40px, 40px 40px}
 svg{width:100%;height:100%;cursor:grab;display:block}
 svg:active{cursor:grabbing}
-/* 节点瓦片 */
-.tile{cursor:pointer}
-.tile rect{transition:filter .15s, stroke-width .15s}
-.tile:hover rect{filter:brightness(1.25)}
-.tile text.tname{font-size:12px;font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
-.tile text.tlabel{font-size:10px;fill:#8a9bb4;text-anchor:middle;pointer-events:none;user-select:none}
-.tile.mastered rect{stroke:#34d399;stroke-width:2.5;fill:#0d2a1f;filter:drop-shadow(0 0 10px #34d39988)}
+/* 节点 */
+.tile{cursor:pointer;transition:opacity .25s}
+.tile rect{transition:filter .15s, stroke-width .15s, stroke .15s}
+.tile:hover rect{filter:brightness(1.4)}
+.tile text.tname{font-size:11px;font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
+.tile text.tlabel{font-size:9px;fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
+/* 状态色（基础） */
+.tile.mastered rect{stroke:#34d399;stroke-width:2;fill:#0d2a1f;filter:drop-shadow(0 0 6px #34d39966)}
 .tile.mastered{color:#7be096}
-.tile.unlocked rect{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 8px #fbbf2466)}
+.tile.unlocked rect{stroke:#fbbf24;stroke-width:1.8;fill:#241a08;filter:drop-shadow(0 0 5px #fbbf2455)}
 .tile.unlocked{color:#fcd383}
-.tile.locked rect{stroke:#4a5568;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
+.tile.locked rect{stroke:#4a5568;stroke-width:1.3;fill:#141926;stroke-dasharray:3 3}
 .tile.locked{color:#6b7488}
-.tile.l0 rect{rx:12;ry:12}
-.tile.l1 rect{rx:9;ry:9}
-.tile.l2 rect{rx:7;ry:7}
-.tile.selected rect{stroke:#7dc4ff !important;stroke-width:3 !important;filter:drop-shadow(0 0 14px #7dc4ffaa)}
+/* 聚焦/淡出 */
+.tile.dim{opacity:.12}
+.tile.dim text{display:none}                  /* 远的不必显示文字，节省渲染 */
+.tile.dim rect{filter:none;stroke-dasharray:none}
+.tile.hi.unlocked rect{stroke-width:2.5;filter:drop-shadow(0 0 14px #fbbf24cc)}
+.tile.hi.mastered rect{stroke-width:3;filter:drop-shadow(0 0 16px #34d399dd)}
+.tile.hi.locked rect{stroke:#9aa4b2;stroke-width:1.8;stroke-dasharray:5 3;filter:drop-shadow(0 0 8px #9aa4b266)}
+.tile.hi.locked{color:#b4becf}
+.tile.focus rect{stroke:#7dc4ff !important;stroke-width:4 !important;fill:#0c1a30 !important;filter:drop-shadow(0 0 22px #7dc4ffcc) !important;stroke-dasharray:none !important}
+.tile.focus{color:#cfe6ff}
 /* 边 */
-.edge{fill:none;stroke-linecap:round}
-.edge.mast{stroke:#34d39988;stroke-width:2}
-.edge.unl{stroke:#fbbf2466;stroke-width:1.8}
-.edge.lock{stroke:#4a5568;stroke-width:1.4;stroke-dasharray:4 4}
+.edge{fill:none;stroke-linecap:round;transition:opacity .25s, stroke .15s}
+.edge.mast{stroke:#34d39955;stroke-width:1.5}
+.edge.unl{stroke:#fbbf2445;stroke-width:1.3}
+.edge.lock{stroke:#3a4658;stroke-width:1.1;stroke-dasharray:3 4}
+.edge.dim{opacity:.04}
+.edge.hi.mast{stroke:#34d399ee;stroke-width:2.5}
+.edge.hi.unl{stroke:#fbbf24ee;stroke-width:2.3}
+.edge.hi.lock{stroke:#9aa4b2cc;stroke-width:2;stroke-dasharray:4 3}
 /* detail */
 #detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.65;z-index:5}
 #detail.open{transform:translateX(0);box-shadow:-12px 0 32px rgba(0,0,0,.5)}
 #detail h2{font-size:16px;margin-bottom:8px;color:#e6e6f0}
 #detail .lbl{color:#8a9bb4;font-size:10px;margin-top:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
-#detail .v{margin-top:3px;color:#cfd6e6}
+#detail .v{margin-top:3px;color:#cfd6e6;word-break:break-all}
+#detail a{color:#7dc4ff;text-decoration:none}
+#detail a:hover{text-decoration:underline}
 #detail-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#8a9bb4;font-size:18px;cursor:pointer;line-height:1}
-#detail-close:hover{color:#fff}
 .badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;margin-right:6px;font-weight:600}
 .b-mast{background:#10412a;color:#7be096;box-shadow:inset 0 0 0 1px #34d399}
 .b-unl{background:#3a2a08;color:#fcd383;box-shadow:inset 0 0 0 1px #fbbf24}
 .b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
-#detail .prereqs{margin-top:4px}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
-.empty-hint{text-align:center;padding:60px 20px;color:#5a6680;font-size:13px}
+#hint{position:absolute;left:18px;bottom:14px;background:rgba(13,19,34,.85);border:1px solid #2a3550;padding:8px 12px;border-radius:8px;font-size:11px;color:#9aa4b2;backdrop-filter:blur(4px)}
+#hint kbd{background:#1a2540;border:1px solid #2a3550;padding:1px 5px;border-radius:3px;color:#cfe6ff;font-size:10px}
 </style></head>
 <body>
 <div id="bar">
   <h1>{{ book }} · 技能树</h1>
-  <div id="crumbs"><a data-level="0">全书</a></div>
+  <span class="meta" id="meta">加载中…</span>
+  <button onclick="resetView()" title="缩放至全图">⊡ 全图</button>
+  <button onclick="clearFocus()" title="清除聚焦">⊙ 清除</button>
   <div id="legend">
     <span><span class="dot" style="background:#34d399;color:#34d399"></span>已掌握</span>
     <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>已解锁</span>
@@ -71,15 +85,12 @@ svg:active{cursor:grabbing}
 </div>
 <div id="viz">
   <svg><defs>
-    <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0,-4L9,0L0,4" fill="#34d399"/>
-    </marker>
-    <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0,-4L9,0L0,4" fill="#fbbf24"/>
-    </marker>
-    <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,-4L9,0L0,4" fill="#5a6680"/>
-    </marker>
+    <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
+    <marker id="arr-mast-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
+    <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
+    <marker id="arr-unl-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
+    <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,-4L9,0L0,4" fill="#4a5568"/></marker>
+    <marker id="arr-lock-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#9aa4b2"/></marker>
   </defs></svg>
   <aside id="detail">
     <button id="detail-close" onclick="closeDetail()">✕</button>
@@ -89,184 +100,181 @@ svg:active{cursor:grabbing}
     <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
     <div class="lbl">页码 · 路径</div><div class="v" id="d-path">—</div>
     <div class="lbl">关联</div><div class="v" id="d-link">—</div>
-    <div class="lbl">前置（解锁条件）</div><ul class="prereqs" id="d-prereqs"></ul>
+    <div class="lbl">前置链（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
     <div class="lbl">后续（解锁后开放）</div><ul class="prereqs" id="d-unlocks"></ul>
   </aside>
+  <div id="hint">点节点聚焦前置链 · 滚轮缩放 · 拖拽平移 · <kbd>⊡</kbd> 重置 · <kbd>⊙</kbd> 取消聚焦</div>
 </div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const BOOK="{{ book }}";
-let KG=null, currentLevel=0, currentParent=null, selectedId=null;
+let KG=null, id2=null, l2=[], edgesL2=[], depthOf={};
+const VAULT="Obsidian Vault";
+const NW=120, NH=38, GX=18, GY=78, PADX=80, PADY=80;
+const FOCUS_HOPS=3;       // 聚焦时框选 N 层前置作缩放范围
 const svg=d3.select("svg"), W=()=>svg.node().clientWidth, H=()=>svg.node().clientHeight;
 const g=svg.append("g");
-const zoom=d3.zoom().scaleExtent([0.25,3]).on("zoom",ev=>g.attr("transform",ev.transform));
+const zoom=d3.zoom().scaleExtent([0.08,4]).on("zoom",ev=>g.attr("transform",ev.transform));
 svg.call(zoom);
 
-const NODE_W={0:140,1:120,2:130}, NODE_H={0:54,1:46,2:42};
-const GAP_X=24, GAP_Y=86;
+let focusId=null;
 
-fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{KG=d;render();fitView()});
+fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
+  KG=d;
+  id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  l2=KG.nodes.filter(n=>n.level===2);
+  edgesL2=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
+  computeLayout();
+  renderAll();
+  resetView();
+  document.getElementById("meta").textContent=
+    `${l2.length} 知识点 · ${edgesL2.length} 前置 · ${KG.nodes.filter(n=>n.level===0).length} 章`;
+});
 
 function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
+function chapOf(n){let c=n;while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}return null}
 
-function visibleNodes(){
-  return KG.nodes.filter(n=>{
-    if(n.level!==currentLevel) return false;
-    if(!currentParent) return true;
-    let cur=n;
-    while(cur&&cur.parent_id){
-      if(cur.parent_id===currentParent) return true;
-      cur=KG.nodes.find(x=>x.id===cur.parent_id);
-    }
-    return false;
-  });
-}
-function visibleEdges(visIds){
-  const id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
-  function liftTo(id){
-    let cur=id2[id];
-    while(cur&&cur.level>currentLevel) cur=id2[cur.parent_id];
-    return cur&&cur.level===currentLevel?cur.id:null;
-  }
-  const E=new Map();
-  for(const e of KG.edges||[]){
-    if(e.kind!=="prereq") continue;
-    const a=liftTo(e.from), b=liftTo(e.to);
-    if(!a||!b||a===b) continue;
-    if(!visIds.has(a)||!visIds.has(b)) continue;
-    const k=a+"→"+b; if(!E.has(k)) E.set(k,{from:a,to:b});
-  }
-  return [...E.values()];
-}
-
-// 分层布局（top-down）：BFS 拓扑层级 → y；同层均匀分布 → x。无边时网格回退。
-function layout(nodes, edges){
-  const id2=Object.fromEntries(nodes.map(n=>[n.id,n]));
-  const inEdges={}; for(const n of nodes) inEdges[n.id]=[];
-  for(const e of edges) if(id2[e.from]&&id2[e.to]) inEdges[e.to].push(e.from);
-  // 计算层级（最长路径长度 from source）
-  const depth={}; for(const n of nodes) depth[n.id]=0;
-  let changed=true, iter=0;
-  while(changed&&iter++<nodes.length+2){
-    changed=false;
-    for(const n of nodes){
-      const d=inEdges[n.id].length?Math.max(...inEdges[n.id].map(s=>(depth[s]??0)+1)):0;
-      if(d!==depth[n.id]){depth[n.id]=d;changed=true}
+// === 全局布局：最长路径 depth → y（翻转，深度大在顶）；按章分块在同层内 ===
+function computeLayout(){
+  const inEdges={}; for(const n of l2) inEdges[n.id]=[];
+  for(const e of edgesL2) inEdges[e.to].push(e.from);
+  for(const n of l2) depthOf[n.id]=0;
+  let ch=true, iter=0;
+  while(ch && iter++<l2.length+2){
+    ch=false;
+    for(const n of l2){
+      const d=inEdges[n.id].length?Math.max(...inEdges[n.id].map(s=>(depthOf[s]??0)+1)):0;
+      if(d!==depthOf[n.id]){depthOf[n.id]=d;ch=true}
     }
   }
-  // 无边时：所有 depth=0，回退网格
-  const maxD=Math.max(...Object.values(depth),0);
-  const padX=60, padY=48;
-  if(maxD===0){
-    const cols=Math.max(1, Math.min(8, Math.ceil(Math.sqrt(nodes.length*1.6))));
-    const cw=NODE_W[currentLevel]+GAP_X;
-    const ch=NODE_H[currentLevel]+GAP_Y*0.5;
-    nodes.forEach((n,i)=>{
-      n.x=padX + (i%cols)*cw + cw/2;
-      n.y=padY + Math.floor(i/cols)*ch + ch/2;
+  const maxD=Math.max(...Object.values(depthOf),0);
+  const byDepth={};
+  for(const n of l2)(byDepth[depthOf[n.id]]=byDepth[depthOf[n.id]]||[]).push(n);
+  for(const d in byDepth){
+    // 同深度内：按章序 + 章内按 numeric_label
+    byDepth[d].sort((a,b)=>{
+      const ca=chapOf(a)||"", cb=chapOf(b)||"";
+      return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"");
     });
-  }else{
-    // 同层按出现顺序排；y 翻转：maxD 在顶（已习得目标），depth 0 在底（基础前置）
-    const byDepth={};
-    nodes.sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"")||a.name.localeCompare(b.name));
-    for(const n of nodes){(byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n)}
-    for(const d in byDepth){
-      const row=byDepth[d];
-      const totalW=row.length*(NODE_W[currentLevel]+GAP_X)-GAP_X;
-      const x0=Math.max(padX, (W()-totalW)/2);
-      row.forEach((n,i)=>{
-        n.x=x0+i*(NODE_W[currentLevel]+GAP_X)+NODE_W[currentLevel]/2;
-        n.y=padY+(maxD-(+d))*GAP_Y+NODE_H[currentLevel]/2;
-      });
-    }
+    byDepth[d].forEach((n,i)=>{
+      n.x=PADX + i*(NW+GX) + NW/2;
+      n.y=PADY + (maxD-(+d))*GY + NH/2;
+    });
   }
 }
 
-function edgeClass(edge,id2){
-  const f=id2[edge.from], t=id2[edge.to];
-  if(!f||!t) return "lock";
-  if(f.mastered) return "mast";
-  if(f.unlocked) return "unl";
-  return "lock";
-}
-
-function bezierPath(s,t,lvl){
-  // 自下而上：源（前置）在底 → 从其顶部出；目标（推出来的）在顶 → 从其底部入
-  // 箭头朝上（marker orient auto 跟随路径方向）
-  const x1=s.x, y1=s.y-NODE_H[lvl]/2;
-  const x2=t.x, y2=t.y+NODE_H[lvl]/2;
+function bezier(s,t){
+  // 自下而上：源（前置）下→ 目标（后继）上；从源顶部出，到目标底部入
+  const x1=s.x, y1=s.y-NH/2, x2=t.x, y2=t.y+NH/2;
   const my=(y1+y2)/2;
   return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
 }
+function edgeStateClass(e){
+  const f=id2[e.from];
+  return f?.mastered ? "mast" : (f?.unlocked ? "unl" : "lock");
+}
 
-function render(){
+// === 渲染（一次性全量）===
+function renderAll(){
   g.selectAll("*").remove();
-  if(!KG){return}
-  const nodes=visibleNodes().map(n=>({...n}));
-  if(!nodes.length){
-    g.append("foreignObject").attr("x",W()/2-160).attr("y",H()/2-30).attr("width",320).attr("height",60)
-      .append("xhtml:div").attr("class","empty-hint").html("此层暂无节点<br><small>（扫描进行中或本节无原子知识点）</small>");
-    return;
-  }
-  const ids=new Set(nodes.map(n=>n.id));
-  const edges=visibleEdges(ids);
-  layout(nodes,edges);
-  const id2=Object.fromEntries(nodes.map(n=>[n.id,n]));
-  // 边
-  g.selectAll(".edge").data(edges).enter().append("path")
-    .attr("class",e=>"edge "+edgeClass(e,id2))
-    .attr("d",e=>bezierPath(id2[e.from],id2[e.to],currentLevel))
-    .attr("marker-end",e=>"url(#arr-"+edgeClass(e,id2)+")");
-  // 节点瓦片
-  const w=NODE_W[currentLevel], h=NODE_H[currentLevel];
-  const tile=g.selectAll(".tile").data(nodes).enter().append("g")
-    .attr("class",d=>`tile l${d.level} ${stateOf(d)}${d.id===selectedId?" selected":""}`)
-    .attr("transform",d=>`translate(${d.x-w/2},${d.y-h/2})`)
-    .on("click",(_,d)=>tileClick(d));
-  tile.append("rect").attr("width",w).attr("height",h);
-  tile.append("text").attr("class","tname").attr("x",w/2).attr("y",h/2-2).text(d=>{
-    const n=d.name.length>11?d.name.slice(0,11)+"…":d.name;
-    return n;
-  });
-  tile.append("text").attr("class","tlabel").attr("x",w/2).attr("y",h/2+13)
-    .text(d=>{
-      if(d.level===0) return d.chapter_label||"";
-      if(d.level===1) return d.section_label||"";
-      return d.numeric_label||d.type||"";
-    });
-  updateCrumbs();
+  g.selectAll(".edge").data(edgesL2).enter().append("path")
+    .attr("class",e=>"edge "+edgeStateClass(e))
+    .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
+    .attr("d",e=>bezier(id2[e.from],id2[e.to]))
+    .attr("marker-end",e=>`url(#arr-${edgeStateClass(e)})`);
+  const tile=g.selectAll(".tile").data(l2).enter().append("g")
+    .attr("class",d=>`tile l2 ${stateOf(d)}`)
+    .attr("data-id",d=>d.id)
+    .attr("transform",d=>`translate(${d.x-NW/2},${d.y-NH/2})`)
+    .on("click",(_,d)=>focusOn(d.id));
+  tile.append("rect").attr("width",NW).attr("height",NH).attr("rx",7).attr("ry",7);
+  tile.append("text").attr("class","tname").attr("x",NW/2).attr("y",NH/2-2)
+    .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
+  tile.append("text").attr("class","tlabel").attr("x",NW/2).attr("y",NH/2+12)
+    .text(d=>d.numeric_label||d.type||"");
 }
-function fitView(){
-  // 居中重置缩放（首次或层切换）
-  svg.call(zoom.transform, d3.zoomIdentity);
-}
-function updateCrumbs(){
-  const crumbs=document.getElementById("crumbs"); crumbs.innerHTML="";
-  const path=[{level:0,name:"全书",parent:null}];
-  if(currentParent){
-    const id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
-    let cur=id2[currentParent]; const chain=[];
-    while(cur){chain.unshift(cur); cur=id2[cur.parent_id]}
-    for(const n of chain) path.push({level:n.level+1,name:n.name,parent:n.id,nodeLevel:n.level});
+
+// === 聚焦：高亮所有传递前置 + 缩放到 N 层 ===
+function ancestorsTransitive(rootId){
+  const out=new Set([rootId]);
+  const stack=[rootId];
+  while(stack.length){
+    const cur=stack.pop();
+    for(const e of edgesL2){
+      if(e.to===cur && !out.has(e.from)){out.add(e.from); stack.push(e.from)}
+    }
   }
-  path.forEach((p,i)=>{
-    if(i) crumbs.appendChild(Object.assign(document.createElement("span"),{textContent:" › "}));
-    const a=document.createElement("a"); a.textContent=p.name;
-    a.onclick=()=>{if(i===0){currentLevel=0;currentParent=null;selectedId=null}else{currentLevel=p.nodeLevel;currentParent=p.parent;selectedId=null} render(); fitView()};
-    crumbs.appendChild(a);
-  });
+  return out;
 }
-function tileClick(n){
-  selectedId=n.id;
-  if(n.level<2){
-    currentLevel=n.level+1; currentParent=n.id;
-    render(); fitView();
-  }else{
-    render();   // 重绘以高亮 selected
+function ancestorsKHops(rootId, K){
+  const out=new Set([rootId]);
+  let frontier=new Set([rootId]);
+  for(let h=0;h<K;h++){
+    const nxt=new Set();
+    for(const e of edgesL2){
+      if(frontier.has(e.to) && !out.has(e.from)){out.add(e.from); nxt.add(e.from)}
+    }
+    if(!nxt.size) break;
+    frontier=nxt;
   }
-  showDetail(n);
+  return out;
+}
+function focusOn(id){
+  focusId=id;
+  const allAnc=ancestorsTransitive(id);
+  const nearAnc=ancestorsKHops(id, FOCUS_HOPS);  // 用于缩放范围
+  // 标记
+  g.selectAll(".tile").classed("dim",true).classed("hi",false).classed("focus",false);
+  g.selectAll(".edge").classed("dim",true).classed("hi",false);
+  for(const aid of allAnc){
+    d3.select(`.tile[data-id="${cssEsc(aid)}"]`).classed("dim",false).classed("hi",true);
+  }
+  d3.select(`.tile[data-id="${cssEsc(id)}"]`).classed("dim",false).classed("focus",true).classed("hi",false);
+  for(const e of edgesL2){
+    if(allAnc.has(e.from) && allAnc.has(e.to)){
+      d3.select(`.edge[data-from="${cssEsc(e.from)}"][data-to="${cssEsc(e.to)}"]`)
+        .classed("dim",false).classed("hi",true);
+    }
+  }
+  // 缩放到近 N 层
+  const focusNodes=[...nearAnc].map(a=>id2[a]).filter(Boolean);
+  zoomToFit(focusNodes, 0.82);
+  // detail
+  showDetail(id2[id]);
+}
+function clearFocus(){
+  focusId=null;
+  g.selectAll(".tile").classed("dim",false).classed("hi",false).classed("focus",false);
+  g.selectAll(".edge").classed("dim",false).classed("hi",false);
+  closeDetail();
+}
+function resetView(){
+  if(!l2.length)return;
+  zoomToFit(l2, 0.92);
+}
+function zoomToFit(nodes, padFactor){
+  if(!nodes.length) return;
+  const xs=nodes.map(n=>n.x), ys=nodes.map(n=>n.y);
+  const minX=Math.min(...xs)-NW/2-30, maxX=Math.max(...xs)+NW/2+30;
+  const minY=Math.min(...ys)-NH/2-30, maxY=Math.max(...ys)+NH/2+30;
+  const dx=maxX-minX, dy=maxY-minY;
+  const wv=W()-380; const hv=H();   // 留出 detail 面板 360+padding
+  const k=Math.min(wv/dx, hv/dy) * (padFactor||0.85);
+  const tx=wv/2 - k*(minX+dx/2);
+  const ty=hv/2 - k*(minY+dy/2);
+  svg.transition().duration(750)
+    .call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(Math.max(0.08, Math.min(2.5, k))));
+}
+function cssEsc(s){return (s||"").replace(/([.\\:#\[\]@\!])/g,'\\$1')}
+
+// === detail ===
+function obsidianUrl(noteRef){
+  if(!noteRef) return "";
+  let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
+  return "obsidian://open?vault="+encodeURIComponent(VAULT)+"&file="+encodeURIComponent(p);
 }
 function showDetail(n){
+  if(!n) return;
   document.getElementById("detail").classList.add("open");
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
@@ -276,35 +284,43 @@ function showDetail(n){
   if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
   if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
   document.getElementById("d-badges").innerHTML=badges.join("");
-  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(x=>x).join(" · ") || "—";
+  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ")||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
-  const id2=Object.fromEntries(KG.nodes.map(x=>[x.id,x]));
+  // 路径
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pageStr=(n.pages||[]).join(", ")||"—";
   document.getElementById("d-path").innerHTML=`p.${pageStr}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
+  // 关联
   const link=[];
-  if(n.note_ref) link.push(`📝 ${n.note_ref}`);
-  if(n.card_refs&&n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张卡`);
+  if(n.note_ref){
+    const u=obsidianUrl(n.note_ref);
+    link.push(`<a href="${u}">📝 ${n.note_ref}</a>`);
+  }
+  if(n.card_refs && n.card_refs.length){
+    link.push(`🎴 ${n.card_refs.length} 张 Anki 卡（local_ids: ${n.card_refs.join(", ").slice(0,80)}${n.card_refs.join(", ").length>80?"…":""}）`);
+  }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
-  const ed=KG.edges||[];
-  function fillList(elId, edges, dir){
+  // 前置/后续
+  function fillList(elId, dir){
     const ul=document.getElementById(elId); ul.innerHTML="";
     let count=0;
-    for(const e of edges) if(e.kind==="prereq"&&e[dir==="prereq"?"to":"from"]===n.id){
+    for(const e of edgesL2) if(e[dir==="prereq"?"to":"from"]===n.id){
       const other=id2[e[dir==="prereq"?"from":"to"]]; if(!other) continue;
       const li=document.createElement("li");
       const arrow=dir==="prereq"?"←":"→";
-      const stOther=stateOf(other);
-      const stEmoji={mastered:"🟢",unlocked:"🟡",locked:"⚫"}[stOther];
+      const stO=stateOf(other);
+      const stEmoji={mastered:"🟢",unlocked:"🟡",locked:"⚫"}[stO];
       li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
-      li.onclick=()=>{currentLevel=other.level;currentParent=other.parent_id;selectedId=other.id;render();fitView();setTimeout(()=>showDetail(other),250)};
+      li.onclick=()=>focusOn(other.id);
       ul.appendChild(li); count++;
     }
     if(!count){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（无）"; ul.appendChild(li)}
   }
-  fillList("d-prereqs", ed, "prereq");
-  fillList("d-unlocks", ed, "unlock");
+  fillList("d-prereqs","prereq");
+  fillList("d-unlocks","unlock");
 }
 function closeDetail(){document.getElementById("detail").classList.remove("open")}
-window.addEventListener("resize",()=>{if(KG) render()});
+// 快捷键：Esc 取消聚焦
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") clearFocus() });
+window.addEventListener("resize",()=>{ if(focusId) focusOn(focusId); else resetView() });
 </script></body></html>
