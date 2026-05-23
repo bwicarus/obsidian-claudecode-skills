@@ -1067,7 +1067,13 @@ function showDetail(n){
     : "—";
   document.getElementById("d-path").innerHTML=`${pageHTML}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
   const link=[];
-  if(n.note_ref) link.push(`<a href="${obsidianUrl(n.note_ref)}">📝 ${n.note_ref}</a>`);
+  // containing_notes 数组：可能有多篇笔记都讲到该知识点
+  const notes = (n.containing_notes && n.containing_notes.length)
+    ? n.containing_notes
+    : (n.note_ref ? [n.note_ref] : []);
+  for(const nt of notes){
+    link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
+  }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){

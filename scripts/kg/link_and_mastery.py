@@ -137,16 +137,16 @@ def main() -> int:
     rec_by_sn = {r.get("source_note", ""): r for r in recs}
     print(f"加载 records: {len(recs)} 篇")
 
-    # 先清空 mastery 相关字段（每次重算），但保留 AI verified 的 note_ref
-    # （link_with_ai.py 写过的 note_ref + note_ref_ai_verified 不动）
+    # 先清空 mastery 相关字段（每次重算），但保留 AI verified 的 containing_notes
+    # （link_with_ai.py 写过的 containing_notes + note_ref + note_ref_ai_verified 不动）
     for n in nodes:
         n.pop("card_refs", None)
         n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
         n.pop("has_cards", None); n.pop("state", None)
         n.pop("mastery_self", None); n.pop("mastery_inferred", None)
         if not n.get("note_ref_ai_verified"):
-            # 没经过 AI 关联的节点：清掉旧 note_ref 重新用模糊匹配（fallback）
             n.pop("note_ref", None)
+            n.pop("containing_notes", None)
     # 1) 关联：优先用 AI verified 的 note_ref；其它用旧模糊匹配作 fallback
     ai_verified_l1 = sum(1 for n in nodes if n["level"]==1 and n.get("note_ref_ai_verified"))
     ai_verified_l2 = sum(1 for n in nodes if n["level"]==2 and n.get("note_ref_ai_verified"))
@@ -160,14 +160,18 @@ def main() -> int:
                 linked_l1 += 1
     for n in nodes:
         if n["level"] != 2: continue
-        # AI verified 的 L2：直接用自己的 note_ref（不用父继承）
-        if n.get("note_ref_ai_verified") and n.get("note_ref"):
-            rec = rec_by_sn.get(n["note_ref"])
-            n["card_refs"] = link_l2(n, rec, recs) if rec else []
+        # AI verified 的 L2：用 containing_notes 数组里的所有笔记
+        if n.get("note_ref_ai_verified") and n.get("containing_notes"):
+            cards_union = []
+            for nt in n["containing_notes"]:
+                rec = rec_by_sn.get(nt)
+                if rec:
+                    cards_union.extend(link_l2(n, rec, recs))
+            n["card_refs"] = list(set(cards_union))
             if n["card_refs"]:
                 linked_l2 += 1
             continue
-        # 否则回退到"父 L1 的 note_ref 继承"
+        # 否则回退到"父 L1 的 note_ref 继承"（旧模糊匹配 path）
         parent = id2.get(n["parent_id"])
         parent_rec = None
         if parent and parent.get("note_ref"):
@@ -180,15 +184,23 @@ def main() -> int:
           f"(AI verified {ai_verified_l1})，L2→卡片: {linked_l2}/{sum(1 for n in nodes if n['level']==2)} "
           f"(AI verified {ai_verified_l2})")
 
-    # 2) 掌握度：L2 叶子先算，再向上聚合
-    # 用 L2 父 record 的 mastery_avg 给所有挂在该 record 上的 L2 同一个值（粗近似）
+    # 2) 掌握度：L2 节点用 containing_notes 里所有 record mastery 取 max
+    # （任一笔记里掌握 = 该节点已掌握；保守用 max 比 mean 更合直觉）
     # 没卡的节点 mastery 留 None（"无数据"，与 0.0 区分；状态判定时不阻塞）
     for n in nodes:
-        if n["level"] == 2:
-            rec = rec_by_sn.get(n.get("note_ref", ""))
-            m = card_mastery({}, rec) if rec else None
-            n["mastery"] = m  # 可能是 None
-            n["has_cards"] = bool(n.get("card_refs"))
+        if n["level"] != 2: continue
+        notes = n.get("containing_notes")
+        if not notes and n.get("note_ref"):
+            notes = [n["note_ref"]]  # 兼容旧字段
+        ms = []
+        if notes:
+            for nt in notes:
+                rec = rec_by_sn.get(nt)
+                if rec:
+                    mv = card_mastery({}, rec)
+                    if mv is not None: ms.append(mv)
+        n["mastery"] = max(ms) if ms else None
+        n["has_cards"] = bool(n.get("card_refs"))
     # 聚合 L1/L0：子节点 mastery 均值（只算有 has_cards 的 L2；其它跳过）
     children = defaultdict(list)
     for n in nodes:

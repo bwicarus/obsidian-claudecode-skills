@@ -206,49 +206,60 @@ def main() -> int:
             print(f"  [{done}/{len(notes)}] {p.name:<40} → {len(covered)} 个节点  ({reason[:30]})",
                   flush=True)
 
-    # 写 KG: 每个 L2 节点的 note_ref / verified；构造反向映射
-    node_to_note: dict[str, str] = {}   # node_id -> source_note 相对路径
+    # 写 KG: 每个 L2 节点维护 containing_notes 列表（可能多篇笔记包含同一知识点）
+    # 反向映射 node_id -> [note_rel_path, ...]
+    node_to_notes: dict[str, list[str]] = defaultdict(list)
     for note_path, (covered, _) in results.items():
-        rel = note_path.relative_to(VAULT_ROOT).as_posix() if VAULT_ROOT in note_path.parents else note_path.name
+        try:
+            rel = note_path.relative_to(VAULT_ROOT).as_posix()
+        except ValueError:
+            rel = note_path.name
         for nid in covered:
-            # 一个节点可能被多个笔记 cover，优先保留先到的（按记录排序）
-            node_to_note.setdefault(nid, rel)
+            if rel not in node_to_notes[nid]:
+                node_to_notes[nid].append(rel)
 
     id2 = {n["id"]: n for n in kg["nodes"]}
-    # L2 关联
+    # L2 关联：containing_notes 数组 + note_ref 兼容字段（首项）
     n_linked = 0
     for n in kg["nodes"]:
         if n["level"] != 2: continue
-        if n["id"] in node_to_note:
-            n["note_ref"] = node_to_note[n["id"]]
+        notes = node_to_notes.get(n["id"], [])
+        if notes:
+            n["containing_notes"] = sorted(notes)
+            n["note_ref"] = notes[0]
             n["note_ref_ai_verified"] = True
             n_linked += 1
         else:
-            # 未被 AI 覆盖：明确清空 note_ref（防止旧模糊匹配残留）
+            n["containing_notes"] = []
             n["note_ref"] = ""
             n["note_ref_ai_verified"] = False
 
-    # L1 关联：用子 L2 的 note_ref 多数票
-    l1_vote: dict[str, Counter] = defaultdict(Counter)
+    # L1 关联：所有子 L2 的 containing_notes 取 union
+    l1_notes: dict[str, set[str]] = defaultdict(set)
     for n in kg["nodes"]:
-        if n["level"] == 2 and n.get("note_ref_ai_verified") and n.get("parent_id"):
-            l1_vote[n["parent_id"]][n["note_ref"]] += 1
+        if n["level"] == 2 and n.get("containing_notes") and n.get("parent_id"):
+            for nt in n["containing_notes"]:
+                l1_notes[n["parent_id"]].add(nt)
     n_l1_linked = 0
     for n in kg["nodes"]:
         if n["level"] != 1: continue
-        votes = l1_vote.get(n["id"])
-        if votes:
-            top, count = votes.most_common(1)[0]
-            n["note_ref"] = top
+        nts = sorted(l1_notes.get(n["id"], set()))
+        if nts:
+            n["containing_notes"] = nts
+            n["note_ref"] = nts[0]
             n["note_ref_ai_verified"] = True
             n_l1_linked += 1
         else:
+            n["containing_notes"] = []
             n["note_ref"] = ""
             n["note_ref_ai_verified"] = False
 
     print(f"\nAI 关联结果:")
-    print(f"  L2: {n_linked}/{sum(1 for n in kg['nodes'] if n['level']==2)} 个节点关联到笔记")
-    print(f"  L1: {n_l1_linked}/{sum(1 for n in kg['nodes'] if n['level']==1)} 个节点关联到笔记（多数票）")
+    n2 = sum(1 for n in kg['nodes'] if n['level']==2)
+    n1 = sum(1 for n in kg['nodes'] if n['level']==1)
+    multi = sum(1 for n in kg['nodes'] if n['level']==2 and len(n.get('containing_notes', []))>1)
+    print(f"  L2: {n_linked}/{n2} 关联（其中 {multi} 个节点同时在多篇笔记）")
+    print(f"  L1: {n_l1_linked}/{n1} 关联（union 子节点的笔记集合）")
 
     if not args.in_place:
         print("\n（dry-run，未写回；加 --in-place 应用）")
