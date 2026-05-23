@@ -173,9 +173,8 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
   <span class="meta" id="meta">加载中…</span>
   <div id="legend">
     <span><span class="dot" style="background:#34d399;color:#34d399"></span>已掌握</span>
-    <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>可学</span>
-    <span><span class="dot" style="background:#5b6889;color:#5b6889"></span>可瞟</span>
-    <span><span class="dot" style="background:#4a5468;color:#4a5468"></span>未开放</span>
+    <span><span class="dot" style="background:#60a5fa;color:#60a5fa"></span>可学</span>
+    <span><span class="dot" style="background:#4a5468;color:#4a5468"></span>未解锁</span>
   </div>
 </div>
 <div id="viz">
@@ -402,8 +401,9 @@ function chapOf(node){
   let c=node; while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}
   return node.level===0?node.id:null;
 }
-// 四态：mastered / unlockable / previewable / locked。读 n.state，旧字段兼容回退。
+// 三态：mastered / unlockable / locked。previewable 旧数据归并到 locked。
 function stateOf(n){
+  if(n.state === "previewable") return "locked";   // 兼容旧数据：可瞟 → 未解锁
   if(n.state) return n.state;
   if(n.mastered) return "mastered";
   if(n.unlocked) return "unlockable";
@@ -1057,8 +1057,8 @@ function showDetail(n){
   }
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
-  const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", previewable:"… 可瞟", locked:"🔒 未开放"}[st];
-  const sBadge={mastered:"b-mast", unlockable:"b-unl", previewable:"b-prev", locked:"b-lock"}[st];
+  const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", locked:"🔒 未解锁"}[st] || "🔒 未解锁";
+  const sBadge={mastered:"b-mast", unlockable:"b-unl", locked:"b-lock"}[st] || "b-lock";
   const badges=[`<span class="badge ${sBadge}">${sLabel}</span>`];
   if(n.level<2){
     badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
@@ -1132,7 +1132,7 @@ function showDetail(n){
       const li=document.createElement("li");
       const arrow=dir==="prereq"?"←":"→";
       const stO=stateOf(other);
-      const stEmoji={mastered:"🟢", unlockable:"🟡", previewable:"⚪", locked:"⚫"}[stO] || "·";
+      const stEmoji={mastered:"🟢", unlockable:"🟡", locked:"⚫"}[stO] || "⚫";
       li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${editMode?` <button onclick="event.stopPropagation();delEdge('${dir==='prereq'?other.id:n.id}','${dir==='prereq'?n.id:other.id}')" style="float:right;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer">删</button>`:""}${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
       li.onclick=()=>{pushView({kind:"focus",id:other.id})};
       ul.appendChild(li); count++;

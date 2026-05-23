@@ -29,15 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
 RECORDS_DIR = config.RECORDS_DIR
-# 四态分桶（按自身 mastery，不做 DAG 传递；前置链信息在详情面板里看）：
-#   mastered     mastery >= 0.8       金色，真正掌握
-#   unlockable   mastery >= 0.4       黄色，正在认真学
-#   previewable  0 < mastery < 0.4    浅灰，刚起步
-#   locked       mastery == None / 0  深灰，还没碰过
-# 这种纯桶分类避免了"刷得多的章节因低 mastery 反而被链式 lock"的反直觉。
+# 三态系统：
+#   mastered    mastery >= 0.8           真正掌握
+#   unlockable  前置链通 + 自己已开始学   可学（含推断掌握）
+#   locked      其它                     未解锁
+# previewable 在视觉上意义不大（"可瞟"导致界面噪音），全部归入 locked
 MASTERED_THRESHOLD = 0.8
 UNLOCK_THRESHOLD = 0.4
-PREVIEW_FLOOR = 0.0          # > 这个值进 previewable，否则 locked
 
 
 def _norm(s: str) -> str:
@@ -247,19 +245,18 @@ def main() -> int:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)
 
-    # 3) 状态计算（DAG 传递 + 自身 mastery 综合）
+    # 3) 状态计算（三态 DAG）
     # 规则：
-    #   自己有 mastery → 按 mastery 数值分桶
-    #   自己无 mastery → 看 prereq 链：
-    #     - 无 prereq（起点）→ unlockable
-    #     - 所有 prereq state ∈ {unlockable, mastered} → unlockable（链通了，可开始学）
-    #     - 至少一个 prereq state ∈ {unlockable, mastered} → previewable（部分开放，可瞟）
-    #     - 全部 prereq locked → locked（链还没通）
+    #   自己有 mastery >= 0.8         → mastered
+    #   自己有 mastery >= 0.4          → unlockable
+    #   自己有 mastery < 0.4           → locked（刚起步不算开放）
+    #   自己无 mastery + 所有 prereq 开放 → unlockable
+    #   其它                            → locked
     def bucket_by_mastery(m):
-        if m is None or m <= 0:           return None    # 无数据，靠 DAG 传递
+        if m is None or m <= 0:           return None
         if m >= MASTERED_THRESHOLD:        return "mastered"
         if m >= UNLOCK_THRESHOLD:          return "unlockable"
-        return "previewable"
+        return "locked"
 
     # 构造 prereq 邻接（只对 L2）
     edges_kg = kg.get("edges", [])
@@ -287,12 +284,8 @@ def main() -> int:
                 state_map[cur] = "unlockable"   # 起点无前置 → 开放
             else:
                 pr_states = [state_map.get(p, "locked") for p in prs]
-                if all(s in open_set for s in pr_states):
-                    state_map[cur] = "unlockable"
-                elif any(s in open_set for s in pr_states):
-                    state_map[cur] = "previewable"
-                else:
-                    state_map[cur] = "locked"
+                # 三态：所有前置开放 → unlockable，否则 locked
+                state_map[cur] = "unlockable" if all(s in open_set for s in pr_states) else "locked"
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
@@ -305,8 +298,8 @@ def main() -> int:
             n["unlocked"] = st in open_set
             n["mastered"] = st == "mastered"
 
-    # L0/L1 聚合：取子孙 L2 的"最强"状态（mastered > unlockable > previewable > locked）
-    STATE_ORDER = {"locked":0, "previewable":1, "unlockable":2, "mastered":3}
+    # L0/L1 聚合：取子孙 L2 的最强状态
+    STATE_ORDER = {"locked":0, "unlockable":1, "mastered":2}
     def agg_state(node):
         kids = children.get(node["id"], [])
         if not kids: return "locked"
