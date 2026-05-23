@@ -270,19 +270,21 @@ def main() -> int:
         prs = prereqs_of.get(cur, [])
         prereqs_clear = (not prs) or all(
             state_map.get(p, "locked") in open_set for p in prs)
-        m = n.get("mastery")
+        # 三态规则（贴用户直觉）：
+        #   前置链没通             → locked
+        #   有 AI verified 的笔记  → mastered（"建了笔记+刷卡 = 已学过"）
+        #   推断掌握（反向传递）   → mastered（"学了后续 ⇒ 必懂前置"）
+        #   前置链通但自己没碰     → unlockable（"可以开始学"）
+        has_own_notes = bool(n.get("note_ref_ai_verified") and n.get("containing_notes"))
         inferred = n.get("mastery_inferred", False)
-        has_mastery = (m is not None and m > 0)
         if not prereqs_clear:
-            state_map[cur] = "locked"           # 前置链没通：未解锁
-        elif inferred:
-            state_map[cur] = "mastered"         # 推断掌握 = 掌握（学了后续 ⇒ 必懂前置）
-        elif m is not None and m >= MASTERED_THRESHOLD:
+            state_map[cur] = "locked"
+        elif has_own_notes:
             state_map[cur] = "mastered"
-        elif has_mastery:
-            state_map[cur] = "unlockable"
+        elif inferred:
+            state_map[cur] = "mastered"
         else:
-            state_map[cur] = "locked"           # 前置通但自己还没碰过
+            state_map[cur] = "unlockable"
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
