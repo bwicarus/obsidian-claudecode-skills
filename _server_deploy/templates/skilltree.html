@@ -32,6 +32,7 @@ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a
 svg.canvas{display:block}
 /* 节点 */
 .tile{cursor:pointer}
+.tile.tile-hidden{display:none}
 .tile rect.tbox{transition:filter .15s, stroke-width .15s}
 .tile:hover rect.tbox{filter:brightness(1.4)}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
@@ -68,11 +69,17 @@ svg.canvas{display:block}
    home/chapter/section 视图保留色条标识章节 */
 .tile rect.chap-bar{stroke:none}
 .focus-mode .tile rect.chap-bar{display:none}
-/* mastery 状态不再画底部色条（用户建议：边框+底色已足以表达）*/
+/* mastery 状态不再画底部色条 */
 .tile rect.mastery-bar{display:none}
-/* 章带背景（focus 模式） */
-rect.chap-band{stroke-width:1.2;rx:10;ry:10;pointer-events:none}
-text.chap-band-label{font-weight:700;letter-spacing:.4px;pointer-events:none;user-select:none}
+/* 章带不用大矩形背景，改成屏幕两侧 4px 竖色线 + 左侧章名贴边 */
+rect.chap-side{rx:2;ry:2;pointer-events:none}
+text.chap-band-label{font-weight:700;letter-spacing:.4px;pointer-events:none;user-select:none;opacity:.78}
+/* 未开放章节折叠条 */
+g.locked-bar{cursor:pointer}
+g.locked-bar rect.locked-bar-rect{fill:#171c28;stroke:#262d3c;stroke-width:1}
+g.locked-bar:hover rect.locked-bar-rect{fill:#1d2334;stroke:#3a4456}
+g.locked-bar text.locked-bar-label{fill:#6f7888;font-size:12px;letter-spacing:.5px;pointer-events:none;user-select:none}
+g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 /* 边 */
 .edge{fill:none;stroke-linecap:round}
 .edge.mast{stroke:#34d399aa}
@@ -230,6 +237,7 @@ let chapterColor={};                   // L0 id → HSL color
 let descendants={};                    // L2 id → 传递后继数（决定边粗）
 let current={kind:"home"};
 let backDepth=0;   // 已通过 pushState 推入的层数；用来决定 ◀ 是否可用
+let showLockedSection=false;  // home 视图：未开放章节是否展开
 let editMode=false;
 
 const wrap=document.getElementById("canvas-wrap");
@@ -461,102 +469,181 @@ function render(){
   const d=depthByLevel[level];
   const cols=Math.max(1, Math.floor(W/(blockW+gapX)));
   const positions={};
-  let chapBands=[];   // focus 模式才填充
+  let chapBands=[];   // 屏幕两侧色线 + 章名
   let curY;
 
   if(isFocusMode){
-    // ====== focus 模式：横向章带 layout ======
-    // 按章分组 nodes
-    const chapL2={};
-    for(const n of nodes){
-      const ch=chapOf(n) || "_other";
-      (chapL2[ch]=chapL2[ch]||[]).push(n);
-    }
-    // 按 KG 章节顺序遍历
-    curY=24;
-    const bandPadX=14, bandPadY=14, labelH=22;
-    for(const ch of nodesByLevel[0]){
-      const chNodes=chapL2[ch.id] || [];
-      if(!chNodes.length) continue;
-      // 章内按 depth 倒序排（深的在顶）
-      const byDepth={};
-      for(const n of chNodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
-      // 同 depth 内按 numeric_label / name 排序
-      for(const dp in byDepth){
-        byDepth[dp].sort((a,b)=>
-          (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name));
+    // ====== focus 模式：链外节点不渲染，chain 集合居中重新组图 ======
+    const chainSet = new Set([focusedId, ...chainAncestors, ...chainDescendants]);
+    nodes = nodes.filter(n => chainSet.has(n.id));
+    edges = edges.filter(e => chainSet.has(e.from) && chainSet.has(e.to));
+    // 算 chain 内深度：focus=0，ancestor=负（在底），descendant=正（在顶）
+    const cd={}; cd[focusedId]=0;
+    let q=[focusedId];
+    while(q.length){
+      const cur=q.shift();
+      for(const e of edgesByLevel[2]){
+        if(e.to===cur && chainAncestors.has(e.from) && !(e.from in cd)){ cd[e.from]=cd[cur]-1; q.push(e.from); }
       }
-      const bandStartY = curY;
-      let bandInnerY = curY + labelH + bandPadY;
-      const depths = Object.keys(byDepth).map(Number).sort((a,b)=>b-a);
-      for(const dp of depths){
-        const row=byDepth[dp];
-        const subRows=Math.ceil(row.length/cols);
-        const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
-        const xStart=Math.max(bandPadX+20,(W-wTotal)/2);
-        row.forEach((n,i)=>{
-          const sr=Math.floor(i/cols), col=i%cols;
-          positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2,
-                           y:bandInnerY+sr*(blockH+gapY*0.4)+blockH/2};
-        });
-        bandInnerY += subRows*(blockH+gapY*0.4) + gapY*0.25;
+    }
+    q=[focusedId];
+    while(q.length){
+      const cur=q.shift();
+      for(const e of edgesByLevel[2]){
+        if(e.from===cur && chainDescendants.has(e.to) && !(e.to in cd)){ cd[e.to]=cd[cur]+1; q.push(e.to); }
       }
-      const bandH = bandInnerY - bandStartY + bandPadY - gapY*0.25;
-      chapBands.push({id:ch.id, name:ch.name, label:ch.chapter_label,
-                      y:bandStartY, h:bandH, color:chapterColor[ch.id]});
-      curY = bandStartY + bandH + gapY*0.6;   // 章间 gap
     }
-  } else {
-    // ====== 其它视图：按 depth 分行（原逻辑）======
-    const visibleDepths=[...new Set(nodes.map(n=>d[n.id]||0))];
-    const maxD=visibleDepths.length?Math.max(...visibleDepths):0;
-    const byDepth={};
-    for(const n of nodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
-    for(const dp in byDepth){
-      byDepth[dp].sort((a,b)=>{
-        const ca=chapOf(a)||"", cb=chapOf(b)||"";
-        return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name);
-      });
-    }
-    curY=20;
-    for(let dp=maxD; dp>=0; dp--){
-      const row=byDepth[dp]||[];
-      if(!row.length) continue;
+    // 按 chain depth 分行（从大到小，顶部=descendant，底部=ancestor）
+    const byCd={};
+    for(const n of nodes){ const dp=cd[n.id]??0; (byCd[dp]=byCd[dp]||[]).push(n); }
+    const depths = Object.keys(byCd).map(Number).sort((a,b)=>b-a);
+    curY=40;
+    for(const dp of depths){
+      const row = byCd[dp];
+      row.sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name));
       const subRows=Math.ceil(row.length/cols);
       const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
       const xStart=Math.max(20,(W-wTotal)/2);
       row.forEach((n,i)=>{
         const sr=Math.floor(i/cols), col=i%cols;
-        positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+        positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2,
+                         y:curY+sr*(blockH+gapY*0.45)+blockH/2};
       });
-      curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
+      curY += subRows*(blockH+gapY*0.45) + gapY*0.5;
+    }
+    chapBands=[];   // focus 模式不显示章带（chain 是单一焦点视图）
+  } else {
+    // ====== 其它视图：按章节分横向带 + 按 depth 排 ======
+    const chapL2={};
+    for(const n of nodes){
+      const ch=chapOf(n) || "_other";
+      (chapL2[ch]=chapL2[ch]||[]).push(n);
+    }
+    curY=24;
+    const bandPadY=14, labelH=22;
+    // 如果当前视图只覆盖单一章（chapter/section），不需要章带
+    const oneChap = (current.kind==="chapter" || current.kind==="section");
+    if(oneChap){
+      // 按 depth 分行（原逻辑）
+      const visibleDepths=[...new Set(nodes.map(n=>d[n.id]||0))];
+      const maxD=visibleDepths.length?Math.max(...visibleDepths):0;
+      const byDepth={};
+      for(const n of nodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
+      for(const dp in byDepth){
+        byDepth[dp].sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name));
+      }
+      curY=20;
+      for(let dp=maxD; dp>=0; dp--){
+        const row=byDepth[dp]||[];
+        if(!row.length) continue;
+        const subRows=Math.ceil(row.length/cols);
+        const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
+        const xStart=Math.max(20,(W-wTotal)/2);
+        row.forEach((n,i)=>{
+          const sr=Math.floor(i/cols), col=i%cols;
+          positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+        });
+        curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
+      }
+    } else {
+      // ====== home：9 个 L0，按"已开放/未开放"分组 ======
+      // 未开放章节折叠到底部灰条，点击展开
+      const activeNodes = nodes.filter(n => stateOf(n) !== "locked");
+      const lockedNodes = nodes.filter(n => stateOf(n) === "locked");
+      // 活跃节点平铺
+      curY=20;
+      const cols2=Math.max(1, Math.floor(W/(blockW+gapX)));
+      const wTotalA=Math.min(activeNodes.length,cols2)*(blockW+gapX)-gapX;
+      const xStartA=Math.max(20,(W-wTotalA)/2);
+      activeNodes.forEach((n,i)=>{
+        const sr=Math.floor(i/cols2), col=i%cols2;
+        positions[n.id]={x:xStartA+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+      });
+      const subRowsA=Math.ceil(activeNodes.length/cols2);
+      curY += subRowsA*(blockH+gapY*0.4) + gapY*0.4;
+      // 灰条放底部（locked 章节展开/折叠开关）
+      if(lockedNodes.length){
+        const barH=36;
+        window.__lockedBarRect={y:curY, h:barH, count:lockedNodes.length};
+        curY += barH + gapY*0.3;
+        if(showLockedSection){
+          // 展开：locked 节点用更暗淡的尺寸排在灰条下方
+          const wTotalL=Math.min(lockedNodes.length,cols2)*(blockW+gapX)-gapX;
+          const xStartL=Math.max(20,(W-wTotalL)/2);
+          lockedNodes.forEach((n,i)=>{
+            const sr=Math.floor(i/cols2), col=i%cols2;
+            positions[n.id]={x:xStartL+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+          });
+          const subRowsL=Math.ceil(lockedNodes.length/cols2);
+          curY += subRowsL*(blockH+gapY*0.4) + gapY*0.5;
+        } else {
+          // 折叠：locked 节点位置塞到 bar 中（不显示，data binding 仍存在但 opacity 0）
+          lockedNodes.forEach(n => {
+            positions[n.id]={x:-9999, y:window.__lockedBarRect.y+barH/2};  // 屏外
+          });
+        }
+      } else {
+        window.__lockedBarRect=null;
+      }
     }
   }
   const svgW=Math.max(W, cols*(blockW+gapX));
   const svgH=Math.max(wrap.clientHeight-40, curY+40);
   svg.attr("width",svgW).attr("height",svgH);
 
-  // 章带背景（仅 focus 模式）
-  const bandSel = root.selectAll("rect.chap-band").data(chapBands, b=>b.id);
-  bandSel.exit().transition().duration(220).style("opacity",0).remove();
-  const bandEnter = bandSel.enter().insert("rect",":first-child").attr("class","chap-band")
+  // 章带：屏幕两侧 4px 竖色线 + 左侧贴边章名（仅章带视图）
+  // 删除旧 chap-band 矩形元素（如果存在）
+  root.selectAll("rect.chap-band").remove();
+  // 左侧色线
+  const sideLSel = root.selectAll("rect.chap-side-l").data(chapBands, b=>b.id);
+  sideLSel.exit().transition().duration(220).style("opacity",0).remove();
+  const sideLEnter = sideLSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-l")
     .style("opacity",0);
-  bandEnter.merge(bandSel).transition().duration(380)
-    .attr("x",10).attr("width",W-20)
+  sideLEnter.merge(sideLSel).transition().duration(380)
+    .attr("x",6).attr("width",4)
     .attr("y",b=>b.y).attr("height",b=>b.h)
-    .attr("fill",b=>b.color+"14")        // 8% 透明度
-    .attr("stroke",b=>b.color+"55")
-    .style("opacity",1);
-  // 章带名标签
+    .attr("fill",b=>b.color)
+    .style("opacity",0.85);
+  // 右侧色线
+  const sideRSel = root.selectAll("rect.chap-side-r").data(chapBands, b=>b.id);
+  sideRSel.exit().transition().duration(220).style("opacity",0).remove();
+  const sideREnter = sideRSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-r")
+    .style("opacity",0);
+  sideREnter.merge(sideRSel).transition().duration(380)
+    .attr("x",svgW-10).attr("width",4)
+    .attr("y",b=>b.y).attr("height",b=>b.h)
+    .attr("fill",b=>b.color)
+    .style("opacity",0.85);
+  // 章名标签：左侧色线右侧贴边
   const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
   labSel.exit().transition().duration(220).style("opacity",0).remove();
   const labEnter = labSel.enter().append("text").attr("class","chap-band-label")
     .style("opacity",0);
   labEnter.merge(labSel).transition().duration(380)
-    .attr("x",24).attr("y",b=>b.y+22)
-    .attr("font-size",14).attr("fill",b=>b.color)
+    .attr("x",16).attr("y",b=>b.y+14)
+    .attr("font-size",11).attr("fill",b=>b.color)
     .text(b=>(b.label?b.label+" ":"")+b.name)
     .style("opacity",1);
+
+  // 未开放章节折叠条（仅 home 视图有）
+  const showBar = (current.kind==="home") && window.__lockedBarRect;
+  const barData = showBar ? [window.__lockedBarRect] : [];
+  const barSel = root.selectAll("g.locked-bar").data(barData);
+  barSel.exit().transition().duration(220).style("opacity",0).remove();
+  const barEnter = barSel.enter().append("g").attr("class","locked-bar")
+    .style("opacity",0)
+    .on("click", ()=>{ showLockedSection = !showLockedSection; render(); });
+  barEnter.append("rect").attr("class","locked-bar-rect")
+    .attr("x",20).attr("rx",8).attr("ry",8);
+  barEnter.append("text").attr("class","locked-bar-label")
+    .attr("text-anchor","middle").attr("dominant-baseline","middle");
+  const barAll = barEnter.merge(barSel);
+  barAll.transition().duration(380).style("opacity",1);
+  barAll.select("rect.locked-bar-rect")
+    .attr("y", b=>b.y).attr("width", W-40).attr("height", b=>b.h);
+  barAll.select("text.locked-bar-label")
+    .attr("x", W/2).attr("y", b=>b.y+b.h/2)
+    .text(b=>`${showLockedSection?"▾":"▸"}  ${b.count} 章未开放（${showLockedSection?"点击折叠":"点击展开"}）`);
 
   // 边（key by from→to）
   const edgeKey=e=>e.from+"→"+e.to;
@@ -640,7 +727,8 @@ function render(){
 }
 function tileClass(d, focusedId){
   const role = chainRoleNode(d, focusedId);
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}`;
+  const inLockedFolded = (current.kind==="home" && stateOf(d)==="locked" && !showLockedSection);
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inLockedFolded?' tile-hidden':''}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
@@ -893,7 +981,11 @@ async function delEdge(a,b){
   if(!confirm(`删除边 ${id2[a]?.name} → ${id2[b]?.name}？`)) return;
   await editPost("delete_edge",{from:a, to:b});
 }
-function closeDetail(){document.getElementById("detail").classList.remove("open")}
+function closeDetail(){
+  document.getElementById("detail").classList.remove("open");
+  // focus 模式时关闭 = 退出 focus（回到上一视图，所有方块都回来）
+  if(current.kind==="focus") goBack();
+}
 
 // ============================================================
 // settings modal
