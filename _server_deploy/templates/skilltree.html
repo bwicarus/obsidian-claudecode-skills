@@ -166,7 +166,7 @@ function layout(nodes, edges){
       n.y=padY + Math.floor(i/cols)*ch + ch/2;
     });
   }else{
-    // 同层按出现顺序排
+    // 同层按出现顺序排；y 翻转：maxD 在顶（已习得目标），depth 0 在底（基础前置）
     const byDepth={};
     nodes.sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"")||a.name.localeCompare(b.name));
     for(const n of nodes){(byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n)}
@@ -176,7 +176,7 @@ function layout(nodes, edges){
       const x0=Math.max(padX, (W()-totalW)/2);
       row.forEach((n,i)=>{
         n.x=x0+i*(NODE_W[currentLevel]+GAP_X)+NODE_W[currentLevel]/2;
-        n.y=padY+(+d)*GAP_Y+NODE_H[currentLevel]/2;
+        n.y=padY+(maxD-(+d))*GAP_Y+NODE_H[currentLevel]/2;
       });
     }
   }
@@ -191,8 +191,10 @@ function edgeClass(edge,id2){
 }
 
 function bezierPath(s,t,lvl){
-  const x1=s.x, y1=s.y+NODE_H[lvl]/2;
-  const x2=t.x, y2=t.y-NODE_H[lvl]/2;
+  // 自下而上：源（前置）在底 → 从其顶部出；目标（推出来的）在顶 → 从其底部入
+  // 箭头朝上（marker orient auto 跟随路径方向）
+  const x1=s.x, y1=s.y-NODE_H[lvl]/2;
+  const x2=t.x, y2=t.y+NODE_H[lvl]/2;
   const my=(y1+y2)/2;
   return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
 }
