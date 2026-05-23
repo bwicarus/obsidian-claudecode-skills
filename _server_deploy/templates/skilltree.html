@@ -194,7 +194,19 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
       <input type="range" id="sett-ratio" min="5" max="30" step="1">
       <div class="preview-strip"><span id="sett-bar"></span></div>
     </div>
-    <p style="font-size:11px;color:#8a9bb4;line-height:1.5">所有方块固定按此比例渲染，超出页面则滚动。</p>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="sett-zoom" style="width:16px;height:16px;cursor:pointer">
+        <span>启用双指缩放（Ctrl+滚轮 或 触屏双指）</span>
+      </label>
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="sett-fit" style="width:16px;height:16px;cursor:pointer">
+        <span>宽自适应（详情面板打开时画布按剩余宽度重排）</span>
+      </label>
+    </div>
+    <p style="font-size:11px;color:#8a9bb4;line-height:1.5">方块固定按上方比例渲染；缩放只影响视图大小不改 layout；宽自适应让画布跟着详情面板挤压重新排版。</p>
     <div class="foot">
       <button onclick="closeSettings()">取消</button>
       <button class="primary" onclick="applySettings()">应用</button>
@@ -228,11 +240,14 @@ const BOOK="{{ book }}";
 const VAULT="Obsidian Vault";
 const SETT_KEY="skilltree_settings_"+BOOK;
 function loadSettings(){
-  try{ return Object.assign({blockRatio:0.12}, JSON.parse(localStorage.getItem(SETT_KEY)||"{}")); }
-  catch(_){ return {blockRatio:0.12}; }
+  const defaults={blockRatio:0.12, enableZoom:false, fitToWidth:true};
+  try{ return Object.assign(defaults, JSON.parse(localStorage.getItem(SETT_KEY)||"{}")); }
+  catch(_){ return defaults; }
 }
 function saveSettings(s){ try{ localStorage.setItem(SETT_KEY, JSON.stringify(s)); }catch(_){} }
 let settings=loadSettings();
+let canvasZoom=1;          // 当前缩放倍率（仅 enableZoom 时生效）
+let baseSvgW=0, baseSvgH=0; // layout 后的原始尺寸，applyZoom 时乘倍率
 
 let KG=null, id2={};
 let nodesByLevel={0:[],1:[],2:[]};
@@ -267,8 +282,33 @@ fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   current=decodeView(h);
   history.replaceState({view:current, depth:0}, "", location.pathname+(h?"#"+h:""));
   backDepth=0;
+  updateWrapPadding();
   updateNav(); render();
 });
+
+// 缩放：Ctrl+滚轮（桌面） + 双指（触屏）
+wrap.addEventListener("wheel", e=>{
+  if(!settings.enableZoom || !e.ctrlKey) return;
+  e.preventDefault();
+  const delta = -e.deltaY * 0.0015;
+  canvasZoom = Math.max(0.4, Math.min(2.5, canvasZoom * (1+delta)));
+  applyZoomState();
+}, { passive:false });
+let _touchStartDist=0, _touchStartZoom=1;
+wrap.addEventListener("touchstart", e=>{
+  if(!settings.enableZoom || e.touches.length!==2) return;
+  _touchStartDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+  _touchStartZoom = canvasZoom;
+}, { passive:true });
+wrap.addEventListener("touchmove", e=>{
+  if(!settings.enableZoom || e.touches.length!==2) return;
+  e.preventDefault();
+  const dist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+  if(_touchStartDist>0){
+    canvasZoom = Math.max(0.4, Math.min(2.5, _touchStartZoom * (dist/_touchStartDist)));
+    applyZoomState();
+  }
+}, { passive:false });
 
 // 浏览器后退/前进
 window.addEventListener("popstate",ev=>{
@@ -580,7 +620,10 @@ function render(){
   }
   const svgW=Math.max(W, cols*(blockW+gapX));
   const svgH=Math.max(wrap.clientHeight-40, curY+40);
-  svg.attr("width",svgW).attr("height",svgH);
+  baseSvgW=svgW; baseSvgH=svgH;
+  svg.attr("width",svgW*canvasZoom).attr("height",svgH*canvasZoom);
+  if(settings.enableZoom) root.attr("transform", `scale(${canvasZoom})`);
+  else root.attr("transform", null);
 
   // 章带：屏幕两侧 4px 竖色线 + 左侧贴边章名（章名所在段色线断开）
   root.selectAll("rect.chap-band").remove();
@@ -930,7 +973,13 @@ function obsidianPdfUrl(page){
 }
 function showDetail(n){
   if(!n) return;
+  const wasOpen = document.getElementById("detail").classList.contains("open");
   document.getElementById("detail").classList.add("open");
+  if(!wasOpen && settings.fitToWidth){
+    updateWrapPadding();
+    // 详情面板新打开：等过渡完成后 re-layout 适应新宽度
+    setTimeout(()=>render(), 230);
+  }
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
   const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", previewable:"… 可瞟", locked:"🔒 未开放"}[st];
@@ -995,7 +1044,12 @@ async function delEdge(a,b){
   await editPost("delete_edge",{from:a, to:b});
 }
 function closeDetail(){
+  const wasOpen = document.getElementById("detail").classList.contains("open");
   document.getElementById("detail").classList.remove("open");
+  if(wasOpen && settings.fitToWidth){
+    updateWrapPadding();
+    setTimeout(()=>render(), 230);
+  }
   // focus 模式时关闭 = 退出 focus（回到上一视图，所有方块都回来）
   if(current.kind==="focus") goBack();
 }
@@ -1007,6 +1061,8 @@ function openSettings(){
   document.getElementById("sett-mask").classList.add("open");
   const inp=document.getElementById("sett-ratio");
   inp.value=Math.round(settings.blockRatio*100);
+  document.getElementById("sett-zoom").checked = !!settings.enableZoom;
+  document.getElementById("sett-fit").checked = !!settings.fitToWidth;
   updateSettPreview();
   inp.oninput=updateSettPreview;
 }
@@ -1017,8 +1073,30 @@ function updateSettPreview(){
 }
 function applySettings(){
   const v=+document.getElementById("sett-ratio").value;
-  settings.blockRatio=v/100; saveSettings(settings);
-  closeSettings(); render();
+  settings.blockRatio=v/100;
+  settings.enableZoom = document.getElementById("sett-zoom").checked;
+  settings.fitToWidth = document.getElementById("sett-fit").checked;
+  saveSettings(settings);
+  closeSettings();
+  applyZoomState();
+  render();
+}
+// 缩放只调 svg 尺寸 + root transform scale，不重 layout
+function applyZoomState(){
+  if(!settings.enableZoom) canvasZoom=1;
+  if(baseSvgW && baseSvgH){
+    svg.attr("width", baseSvgW*canvasZoom).attr("height", baseSvgH*canvasZoom);
+    root.attr("transform", `scale(${canvasZoom})`);
+  }
+}
+// wrap 容器右 padding 根据详情面板是否打开 + fitToWidth 设置切换
+function updateWrapPadding(){
+  const detailOpen = document.getElementById("detail").classList.contains("open");
+  if(settings.fitToWidth){
+    wrap.style.paddingRight = detailOpen ? "380px" : "20px";
+  } else {
+    wrap.style.paddingRight = "380px";
+  }
 }
 function closeSettings(){document.getElementById("sett-mask").classList.remove("open")}
 
