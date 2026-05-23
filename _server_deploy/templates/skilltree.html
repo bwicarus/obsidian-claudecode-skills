@@ -452,7 +452,7 @@ function chainRoleEdge(e, focusId){
 // 渲染（带过渡动画）
 // ============================================================
 function render(){
-  const {nodes, edges, level}=nodesForView();
+  let {nodes, edges, level}=nodesForView();
   // focus 模式预计算 chain 角色集合
   const focusedId = current.kind==="focus"?current.id:null;
   const isFocusMode = !!focusedId;
