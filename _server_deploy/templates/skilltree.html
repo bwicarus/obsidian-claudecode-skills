@@ -1123,7 +1123,7 @@ function showDetail(n){
       const li=document.createElement("li");
       const arrow=dir==="prereq"?"←":"→";
       const stO=stateOf(other);
-      const stEmoji={mastered:"🟢",unlocked:"🟡",locked:"⚫"}[stO];
+      const stEmoji={mastered:"🟢", unlockable:"🟡", previewable:"⚪", locked:"⚫"}[stO] || "·";
       li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${editMode?` <button onclick="event.stopPropagation();delEdge('${dir==='prereq'?other.id:n.id}','${dir==='prereq'?n.id:other.id}')" style="float:right;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer">删</button>`:""}${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
       li.onclick=()=>{pushView({kind:"focus",id:other.id})};
       ul.appendChild(li); count++;

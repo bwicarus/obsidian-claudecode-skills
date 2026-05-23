@@ -247,23 +247,79 @@ def main() -> int:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)
 
-    # 3) 状态分桶（纯按 mastery 数值，不做 DAG 传递）
-    def bucket(m):
-        if m is None or m <= 0:           return "locked"
+    # 3) 状态计算（DAG 传递 + 自身 mastery 综合）
+    # 规则：
+    #   自己有 mastery → 按 mastery 数值分桶
+    #   自己无 mastery → 看 prereq 链：
+    #     - 无 prereq（起点）→ unlockable
+    #     - 所有 prereq state ∈ {unlockable, mastered} → unlockable（链通了，可开始学）
+    #     - 至少一个 prereq state ∈ {unlockable, mastered} → previewable（部分开放，可瞟）
+    #     - 全部 prereq locked → locked（链还没通）
+    def bucket_by_mastery(m):
+        if m is None or m <= 0:           return None    # 无数据，靠 DAG 传递
         if m >= MASTERED_THRESHOLD:        return "mastered"
         if m >= UNLOCK_THRESHOLD:          return "unlockable"
         return "previewable"
 
+    # 构造 prereq 邻接（只对 L2）
+    edges_kg = kg.get("edges", [])
+    prereqs_of = defaultdict(list)
+    indeg = defaultdict(int); succ = defaultdict(list)
+    for e in edges_kg:
+        if e.get("kind") == "prereq":
+            prereqs_of[e["to"]].append(e["from"])
+            succ[e["from"]].append(e["to"])
+            indeg[e["to"]] += 1
+    # 拓扑序处理 L2
+    open_set = {"unlockable", "mastered"}
+    queue_l2 = [n["id"] for n in nodes if n["level"]==2 and indeg[n["id"]]==0]
+    remaining = dict(indeg)
+    state_map: dict[str, str] = {}
+    while queue_l2:
+        cur = queue_l2.pop(0)
+        n = id2[cur]
+        m_state = bucket_by_mastery(n.get("mastery"))
+        if m_state is not None:
+            state_map[cur] = m_state
+        else:
+            prs = prereqs_of.get(cur, [])
+            if not prs:
+                state_map[cur] = "unlockable"   # 起点无前置 → 开放
+            else:
+                pr_states = [state_map.get(p, "locked") for p in prs]
+                if all(s in open_set for s in pr_states):
+                    state_map[cur] = "unlockable"
+                elif any(s in open_set for s in pr_states):
+                    state_map[cur] = "previewable"
+                else:
+                    state_map[cur] = "locked"
+        for v in succ[cur]:
+            remaining[v] -= 1
+            if remaining[v] == 0:
+                queue_l2.append(v)
+    # 落到 L2 节点字段
     for n in nodes:
         if n["level"] == 2:
-            n["state"] = bucket(n.get("mastery"))
-            n["unlocked"] = n["state"] in ("unlockable", "mastered")
-            n["mastered"] = n["state"] == "mastered"
-    # L0/L1 聚合：mastery 已是子孙均值，直接走同一分桶
+            st = state_map.get(n["id"], "locked")
+            n["state"] = st
+            n["unlocked"] = st in open_set
+            n["mastered"] = st == "mastered"
+
+    # L0/L1 聚合：取子孙 L2 的"最强"状态（mastered > unlockable > previewable > locked）
+    STATE_ORDER = {"locked":0, "previewable":1, "unlockable":2, "mastered":3}
+    def agg_state(node):
+        kids = children.get(node["id"], [])
+        if not kids: return "locked"
+        best = "locked"
+        for k in kids:
+            s = k.get("state") if k["level"]==2 else agg_state(k)
+            if STATE_ORDER.get(s,0) > STATE_ORDER.get(best,0):
+                best = s
+        return best
     for n in nodes:
         if n["level"] in (0, 1):
-            n["state"] = bucket(n.get("mastery"))
-            n["unlocked"] = n["state"] in ("unlockable", "mastered")
+            n["state"] = agg_state(n)
+            n["unlocked"] = n["state"] in open_set
             n["mastered"] = n["state"] == "mastered"
 
     if not args.in_place:
