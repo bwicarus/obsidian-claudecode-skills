@@ -180,6 +180,18 @@ def main() -> int:
     l1_list = [n for n in kg["nodes"] if n["level"] == 1]
     print(f"骨架：L0 {len(l0_by_id)} 章 + L1 {len(l1_list)} 节")
 
+    # 断点续传：若 out 已存在，加载已扫的 L2 节点，跳过其父 L1
+    done_l1: set[str] = set()
+    if out.exists():
+        try:
+            prev = json.loads(out.read_text(encoding="utf-8"))
+            old_l2 = [n for n in prev.get("nodes", []) if n.get("level") == 2]
+            kg["nodes"].extend(old_l2)
+            done_l1 = set(n["parent_id"] for n in old_l2)
+            print(f"续跑：加载 {len(old_l2)} 个已扫 L2 节点，跳过已扫 L1 {len(done_l1)} 个")
+        except Exception as ex:
+            print(f"加载已存 KG 失败，全量扫：{ex}")
+
     if args.dry_run:
         out.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"dry-run 完成 → {out}")
@@ -191,6 +203,8 @@ def main() -> int:
         l1_list = [n for n in l1_list if not (n["pages"][1] < pg_lo or n["pages"][0] > pg_hi)]
     if args.limit:
         l1_list = l1_list[:args.limit]
+    # 跳过已扫
+    l1_list = [n for n in l1_list if n["id"] not in done_l1]
     print(f"本次处理 L1 节数: {len(l1_list)}")
 
     backend = make_backend("claude_cli", {
@@ -236,8 +250,10 @@ def main() -> int:
         kg["nodes"].extend(sec_l2.values())
         total_l2 += len(sec_l2)
         elapsed = time.time() - t_start
+        # 增量写：每完成一节立刻落盘，可在 webapp 实时看到部分技能树
+        out.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  [{li}/{len(l1_list)}] {l1['section_label']} {l1['name']}: "
-              f"{len(sec_l2)} 个 L2（累计 {total_l2}，{elapsed:.0f}s）", flush=True)
+              f"{len(sec_l2)} 个 L2（累计 {total_l2}，{elapsed:.0f}s, 已写盘）", flush=True)
 
     out.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"✓ 输出 → {out}（共 {len(kg['nodes'])} 节点）")
