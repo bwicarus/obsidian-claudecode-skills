@@ -145,6 +145,35 @@ def run_py(script: str, args: list[str] | None = None) -> int:
     return r.returncode
 
 
+def run_kg_link_mastery() -> int:
+    """对 knowledge_graph/*.json 每个 KG：
+    1. AI 关联笔记到节点（贵但精准，覆盖之前的模糊字符串匹配）
+    2. 算 mastery + state + 反向传递（无 AI 快速）
+    AI 关联失败时仍跑 mastery（fallback 用模糊匹配）。
+    """
+    kg_dir = PROJECT_DIR / "knowledge_graph"
+    if not kg_dir.exists():
+        print("  无 knowledge_graph 目录，跳过"); return 0
+    kg_files = [f for f in sorted(kg_dir.glob("*.json")) if not f.name.endswith(".bak.json")]
+    if not kg_files:
+        print("  无 KG 文件，跳过"); return 0
+    rc = 0
+    for kg in kg_files:
+        print(f"  KG: {kg.name}")
+        # 1) AI 关联（失败不阻断，继续走 mastery）
+        r1 = run_py("kg/link_with_ai.py", [
+            "--kg", str(kg), "--model", "sonnet", "--effort", "medium",
+            "--workers", "4", "--in-place",
+        ])
+        if r1 != 0:
+            print(f"    AI 关联失败 (rc={r1})，仍跑 link_and_mastery")
+        # 2) mastery + state（必跑）
+        r2 = run_py("kg/link_and_mastery.py", ["--kg", str(kg), "--in-place"])
+        if r2 != 0:
+            print(f"    link_and_mastery 失败 (rc={r2})"); rc = r2
+    return rc
+
+
 def server_cfg() -> dict:
     p = PROJECT_DIR / "state" / "server-config.json"
     try:
@@ -288,6 +317,8 @@ def main() -> int:
     step("卡片质量体检", step_quality)
     step("重建必复习牌组", lambda: run_py("build_review_deck.py"))
     step("清理孤儿", lambda: run_py("cleanup_orphans.py", ["--apply"]))
+    # 知识图谱：先 AI 关联（精准）+ 再算 mastery / state（每个 KG 文件一次）
+    step("KG 关联+掌握度", run_kg_link_mastery)
     step("导出仪表板", lambda: run_py("export_dashboard.py"))
     step("部署仪表板", deploy_dashboard)
     step("AnkiWeb 同步", sync_ankiweb)

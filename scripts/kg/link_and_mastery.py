@@ -137,36 +137,48 @@ def main() -> int:
     rec_by_sn = {r.get("source_note", ""): r for r in recs}
     print(f"加载 records: {len(recs)} 篇")
 
-    # 先清空旧关联，确保重跑时不残留上一版的匹配
+    # 先清空 mastery 相关字段（每次重算），但保留 AI verified 的 note_ref
+    # （link_with_ai.py 写过的 note_ref + note_ref_ai_verified 不动）
     for n in nodes:
-        n.pop("note_ref", None); n.pop("card_refs", None)
+        n.pop("card_refs", None)
         n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
         n.pop("has_cards", None); n.pop("state", None)
         n.pop("mastery_self", None); n.pop("mastery_inferred", None)
-    # 1) 关联：L1 → 笔记，L2 → 卡（继承父 L1 的 record）
-    linked_l1 = linked_l2 = 0
+        if not n.get("note_ref_ai_verified"):
+            # 没经过 AI 关联的节点：清掉旧 note_ref 重新用模糊匹配（fallback）
+            n.pop("note_ref", None)
+    # 1) 关联：优先用 AI verified 的 note_ref；其它用旧模糊匹配作 fallback
+    ai_verified_l1 = sum(1 for n in nodes if n["level"]==1 and n.get("note_ref_ai_verified"))
+    ai_verified_l2 = sum(1 for n in nodes if n["level"]==2 and n.get("note_ref_ai_verified"))
+    linked_l1 = ai_verified_l1
+    linked_l2 = 0
     for n in nodes:
-        if n["level"] == 1:
+        if n["level"] == 1 and not n.get("note_ref_ai_verified"):
             r = link_l1(n, by_stem)
             if r:
                 n["note_ref"] = r.get("source_note", "")
-                n["_record"] = id(r)   # 临时
                 linked_l1 += 1
     for n in nodes:
-        if n["level"] == 2:
-            parent = id2.get(n["parent_id"])
-            parent_rec = None
-            if parent and parent.get("note_ref"):
-                parent_rec = rec_by_sn.get(parent["note_ref"])
-            n["note_ref"] = parent.get("note_ref", "") if parent else ""
-            n["card_refs"] = link_l2(n, parent_rec, recs) if parent_rec else []
+        if n["level"] != 2: continue
+        # AI verified 的 L2：直接用自己的 note_ref（不用父继承）
+        if n.get("note_ref_ai_verified") and n.get("note_ref"):
+            rec = rec_by_sn.get(n["note_ref"])
+            n["card_refs"] = link_l2(n, rec, recs) if rec else []
             if n["card_refs"]:
                 linked_l2 += 1
-    # 清理临时字段
-    for n in nodes:
-        n.pop("_record", None)
-    print(f"关联 L1→笔记: {linked_l1}/{sum(1 for n in nodes if n['level']==1)}，"
-          f"L2→卡片: {linked_l2}/{sum(1 for n in nodes if n['level']==2)}")
+            continue
+        # 否则回退到"父 L1 的 note_ref 继承"
+        parent = id2.get(n["parent_id"])
+        parent_rec = None
+        if parent and parent.get("note_ref"):
+            parent_rec = rec_by_sn.get(parent["note_ref"])
+        n["note_ref"] = parent.get("note_ref", "") if parent else ""
+        n["card_refs"] = link_l2(n, parent_rec, recs) if parent_rec else []
+        if n["card_refs"]:
+            linked_l2 += 1
+    print(f"关联 L1→笔记: {linked_l1}/{sum(1 for n in nodes if n['level']==1)} "
+          f"(AI verified {ai_verified_l1})，L2→卡片: {linked_l2}/{sum(1 for n in nodes if n['level']==2)} "
+          f"(AI verified {ai_verified_l2})")
 
     # 2) 掌握度：L2 叶子先算，再向上聚合
     # 用 L2 父 record 的 mastery_avg 给所有挂在该 record 上的 L2 同一个值（粗近似）
