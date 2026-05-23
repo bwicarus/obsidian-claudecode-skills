@@ -73,6 +73,8 @@ svg.canvas{display:block}
 .b-prev{background:#1a2235;color:#9aa9c3;box-shadow:inset 0 0 0 1px #5b6889}
 .b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
+.page-link{display:inline-block;padding:2px 8px;margin:2px 2px 2px 0;background:#1a2540;color:#9ec3ff;border:1px solid #2c3e6a;border-radius:4px;text-decoration:none;font-size:11px;font-family:monospace}
+.page-link:hover{background:#2c3e6a;color:#cfe6ff;border-color:#3b6db5}
 .b-chap{font-size:10px;padding:2px 8px}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
@@ -698,8 +700,11 @@ function showDetail(n){
   document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ") || (n.level===0?n.chapter_label:n.section_label)||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
-  const pageStr=(n.pages||[]).join(", ")||"—";
-  document.getElementById("d-path").innerHTML=`p.${pageStr}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
+  const pages=n.pages||[];
+  const pageHTML = pages.length
+    ? pages.map(pg => `<a href="/skilltree/${BOOK}/pdf#page=${pg}" target="_blank" class="page-link" title="新标签页打开 PDF 第 ${pg} 页">p.${pg}</a>`).join(" · ")
+    : "—";
+  document.getElementById("d-path").innerHTML=`${pageHTML}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
   const link=[];
   if(n.note_ref) link.push(`<a href="${obsidianUrl(n.note_ref)}">📝 ${n.note_ref}</a>`);
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);

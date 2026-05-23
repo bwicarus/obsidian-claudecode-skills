@@ -13,7 +13,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from flask import abort, jsonify, render_template, request
+from flask import abort, jsonify, render_template, request, send_file
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 KG_DIR = CLAUDE_DIR / "knowledge_graph"
@@ -187,6 +187,27 @@ def register_skilltree(app):
         if not kg:
             abort(404)
         return jsonify(kg)
+
+    @app.route("/skilltree/<book>/pdf")
+    def skilltree_pdf(book):
+        """流式返回 KG 关联的 PDF；浏览器原生 PDF viewer 支持 #page=N 锚点。"""
+        p, kg = _load_kg(book)
+        if not kg:
+            abort(404)
+        pdf_path = kg.get("pdf")
+        if not pdf_path:
+            abort(404)
+        pdf = Path(pdf_path)
+        if not pdf.exists() or not pdf.is_file():
+            abort(404)
+        # 防 path traversal：只允许 KG 显式声明的那个 PDF
+        try:
+            return send_file(str(pdf), mimetype="application/pdf",
+                             as_attachment=False,
+                             download_name=pdf.name,
+                             max_age=86400)
+        except Exception:
+            abort(500)
 
     @app.route("/skilltree/<book>/api/edit", methods=["POST"])
     def skilltree_edit(book):
