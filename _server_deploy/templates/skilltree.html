@@ -41,22 +41,22 @@ svg.canvas{display:block}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
-/* mastery 四态：边框+底色组合表达，无发光。位置已编码章节，状态不抢戏。*/
-.tile.mastered rect.tbox{stroke:#2d8a6d;stroke-width:1.5;fill:#0e2118}
+/* mastery 四态：边框颜色清晰可见，无发光。让状态一眼可辨。*/
+.tile.mastered rect.tbox{stroke:#34d399;stroke-width:1.8;fill:#0e2118}
 .tile.mastered{color:#7be096}
-.tile.unlockable rect.tbox{stroke:#4a5a78;stroke-width:1.5;fill:#161e30}
-.tile.unlockable{color:#cfd9ec}
-.tile.previewable rect.tbox{stroke:#2e3648;stroke-width:1.2;fill:#141926}
-.tile.previewable{color:#8a96ad}
-.tile.locked rect.tbox{stroke:#1f2532;stroke-width:1;fill:#0c1018;stroke-dasharray:3 3}
-.tile.locked{color:#4f5868}
-.tile.locked text.tname{opacity:.5}
+.tile.unlockable rect.tbox{stroke:#60a5fa;stroke-width:1.8;fill:#0e1a2e}
+.tile.unlockable{color:#a8cdff}
+.tile.previewable rect.tbox{stroke:#7889a3;stroke-width:1.5;fill:#141a28}
+.tile.previewable{color:#9aa9c3}
+.tile.locked rect.tbox{stroke:#3a4456;stroke-width:1.2;fill:#0e131e;stroke-dasharray:3 3}
+.tile.locked{color:#6f7888}
+.tile.locked text.tname{opacity:.65}
 .tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
 /* === Factorio davemcw chain mode：focus 视图节点链路高亮 === */
 .tile.chain-fade{opacity:.13;transition:opacity .25s}
-.tile.chain-anc rect.tbox{stroke:#60a5fa !important;stroke-width:2.6 !important;fill:#0d1a2e !important;filter:drop-shadow(0 0 10px #60a5fa88) !important;stroke-dasharray:none !important}
-.tile.chain-anc{color:#a8cdff}
+.tile.chain-anc rect.tbox{stroke:#a5c8ff !important;stroke-width:3.5 !important;fill:#0a1530 !important;filter:drop-shadow(0 0 14px #60a5faaa) !important;stroke-dasharray:none !important}
+.tile.chain-anc{color:#d0e1ff}
 .tile.chain-desc rect.tbox{stroke:#c084fc !important;stroke-width:2.6 !important;fill:#1c1233 !important;filter:drop-shadow(0 0 10px #c084fc88) !important;stroke-dasharray:none !important}
 .tile.chain-desc{color:#dcc5ff}
 .tile.chain-self{opacity:1}
