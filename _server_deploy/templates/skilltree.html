@@ -583,29 +583,45 @@ function render(){
   const svgH=Math.max(wrap.clientHeight-40, curY+40);
   svg.attr("width",svgW).attr("height",svgH);
 
-  // 章带：屏幕两侧 4px 竖色线 + 左侧贴边章名（仅章带视图）
-  // 删除旧 chap-band 矩形元素（如果存在）
+  // 章带：屏幕两侧 4px 竖色线 + 左侧贴边章名（章名所在段色线断开）
   root.selectAll("rect.chap-band").remove();
-  // 左侧色线
-  const sideLSel = root.selectAll("rect.chap-side-l").data(chapBands, b=>b.id);
+  // 把每个章带的左侧色线拆成「字上方」「字下方」两段（字所在的中段断开）
+  const labelCharH = 18;   // 每字旋转后占的纵向高度（含字距，跟 font-size 15 + letter-spacing 3 对齐）
+  const labelPad = 6;
+  const sideLSegments = chapBands.flatMap(b => {
+    const txt = (b.label?b.label+" ":"") + b.name;
+    const textH = Math.min(b.h - 16, txt.length * labelCharH);
+    const yMid = b.y + b.h/2;
+    const gapTop = yMid - textH/2 - labelPad;
+    const gapBot = yMid + textH/2 + labelPad;
+    return [
+      { id: b.id+"-l-top", y: b.y, h: Math.max(0, gapTop - b.y), color: b.color },
+      { id: b.id+"-l-bot", y: gapBot, h: Math.max(0, b.y + b.h - gapBot), color: b.color },
+    ].filter(s => s.h > 1);
+  });
+  // 右侧不影响文字，整条色线
+  const sideRSegments = chapBands.map(b => ({id: b.id+"-r", y: b.y, h: b.h, color: b.color}));
+
+  // 左侧分段色线
+  const sideLSel = root.selectAll("rect.chap-side-l").data(sideLSegments, s=>s.id);
   sideLSel.exit().transition().duration(220).style("opacity",0).remove();
   const sideLEnter = sideLSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-l")
     .style("opacity",0);
   sideLEnter.merge(sideLSel).transition().duration(380)
     .attr("x",6).attr("width",4)
-    .attr("y",b=>b.y).attr("height",b=>b.h)
-    .attr("fill",b=>b.color)
-    .style("opacity",0.85);
+    .attr("y",s=>s.y).attr("height",s=>s.h)
+    .attr("fill",s=>s.color)
+    .style("opacity",0.9);
   // 右侧色线
-  const sideRSel = root.selectAll("rect.chap-side-r").data(chapBands, b=>b.id);
+  const sideRSel = root.selectAll("rect.chap-side-r").data(sideRSegments, s=>s.id);
   sideRSel.exit().transition().duration(220).style("opacity",0).remove();
   const sideREnter = sideRSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-r")
     .style("opacity",0);
   sideREnter.merge(sideRSel).transition().duration(380)
     .attr("x",svgW-10).attr("width",4)
-    .attr("y",b=>b.y).attr("height",b=>b.h)
-    .attr("fill",b=>b.color)
-    .style("opacity",0.85);
+    .attr("y",s=>s.y).attr("height",s=>s.h)
+    .attr("fill",s=>s.color)
+    .style("opacity",0.9);
   // 章名标签：竖排紧贴左侧色线，加粗 + 发光阴影
   const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
   labSel.exit().transition().duration(220).style("opacity",0).remove();
