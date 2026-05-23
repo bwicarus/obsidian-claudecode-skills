@@ -353,9 +353,16 @@ function decodeView(s){
 function sameView(a,b){ return a && b && a.kind===b.kind && a.id===b.id; }
 function pushView(v){
   if(sameView(v,current)){ render(); return; }   // 同视图不入栈，避免"按 ◀ 没反应"
-  current=v; backDepth++;
+  // focus → focus 是切换焦点（同一面板换内容），不入栈
+  const isFocusSwap = (current.kind==="focus" && v.kind==="focus");
+  current=v;
+  if(isFocusSwap){
+    history.replaceState({view:current, depth:backDepth}, "", "#"+encodeView(current));
+  } else {
+    backDepth++;
+    history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
+  }
   updateNav(); render();
-  history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
 }
 function goBack(){
   if(backDepth>0){ history.back(); return; }   // 浏览器有我们推入的栈 → 弹一帧
