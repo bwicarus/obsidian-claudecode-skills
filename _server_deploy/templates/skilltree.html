@@ -493,23 +493,22 @@ function ancestorsTransitive(rootId){
   }
   return out;
 }
-function descendantsTransitive(rootId){
-  const out=new Set([rootId]); const stack=[rootId];
-  while(stack.length){
-    const cur=stack.pop();
-    for(const e of edgesByLevel[2]){
-      if(e.from===cur && !out.has(e.to)){out.add(e.to); stack.push(e.to)}
-    }
+function directSuccessors(rootId){
+  // 只一跳：节点本身能立即解锁的后续技能（前置边 from=rootId 的 to 集合）
+  const out = new Set();
+  for(const e of edgesByLevel[2]){
+    if(e.from === rootId) out.add(e.to);
   }
   return out;
 }
-// focus 模式的 chain 角色集合
+// focus 模式的 chain 角色集合：
+//   ancestors 递归全部（学懂这个需要懂的全部上游）
+//   descendants 只直接后续（学懂后能立即开始的下一步技能，符合解锁语义）
 let chainAncestors=new Set(), chainDescendants=new Set();
 function computeChainSets(focusId){
   chainAncestors = focusId ? ancestorsTransitive(focusId) : new Set();
-  chainDescendants = focusId ? descendantsTransitive(focusId) : new Set();
-  // ancestorsTransitive / descendantsTransitive 都把 focusId 自己也加进去了，移除
-  if(focusId){ chainAncestors.delete(focusId); chainDescendants.delete(focusId); }
+  chainDescendants = focusId ? directSuccessors(focusId) : new Set();
+  if(focusId){ chainAncestors.delete(focusId); }   // direct successors 本就不含 focus
 }
 function chainRoleNode(n, focusId){
   if(!focusId) return "";
