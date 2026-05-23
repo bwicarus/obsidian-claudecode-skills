@@ -49,6 +49,19 @@ svg.canvas{display:block}
 .tile.locked text.tname{opacity:.55}
 .tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
+/* === Factorio davemcw chain mode：focus 视图节点链路高亮 === */
+.tile.chain-fade{opacity:.13;transition:opacity .25s}
+.tile.chain-anc rect.tbox{stroke:#60a5fa !important;stroke-width:2.6 !important;fill:#0d1a2e !important;filter:drop-shadow(0 0 10px #60a5fa88) !important;stroke-dasharray:none !important}
+.tile.chain-anc{color:#a8cdff}
+.tile.chain-desc rect.tbox{stroke:#c084fc !important;stroke-width:2.6 !important;fill:#1c1233 !important;filter:drop-shadow(0 0 10px #c084fc88) !important;stroke-dasharray:none !important}
+.tile.chain-desc{color:#dcc5ff}
+.tile.chain-self{opacity:1}
+.tile.chain-self rect.tbox{stroke:#fde047 !important;stroke-width:5 !important;fill:#231a08 !important;filter:drop-shadow(0 0 28px #fde047cc) !important}
+.tile.chain-self{color:#fef3c7}
+/* 边：上游链蓝、下游链紫、无关淡化 */
+.edge.chain-edge-fade{opacity:.08 !important;transition:opacity .25s}
+.edge.chain-edge-anc{stroke:#60a5fa !important;opacity:.95 !important;stroke-dasharray:none !important}
+.edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
 .tile.filter-out{opacity:.18}
 .tile rect.chap-bar{stroke:none}     /* 章色条 */
@@ -369,10 +382,9 @@ function nodesForView(){
     return {nodes:subs, edges:edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to)), level:2};
   }
   if(current.kind==="focus"){
-    const all=ancestorsTransitive(current.id);
-    const subs=[...all].map(i=>id2[i]).filter(Boolean);
-    const ids=new Set(subs.map(n=>n.id));
-    return {nodes:subs, edges:edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to)), level:2};
+    // Factorio davemcw 风：focus 模式渲染全部 L2 + 全部边，在 render 时给
+    // chain 节点/边加 class，无关节点淡化。"全景里看链路"。
+    return {nodes:nodesByLevel[2].slice(), edges:edgesByLevel[2].slice(), level:2};
   }
   return {nodes:[], edges:[], level:0};
 }
@@ -386,12 +398,49 @@ function ancestorsTransitive(rootId){
   }
   return out;
 }
+function descendantsTransitive(rootId){
+  const out=new Set([rootId]); const stack=[rootId];
+  while(stack.length){
+    const cur=stack.pop();
+    for(const e of edgesByLevel[2]){
+      if(e.from===cur && !out.has(e.to)){out.add(e.to); stack.push(e.to)}
+    }
+  }
+  return out;
+}
+// focus 模式的 chain 角色集合
+let chainAncestors=new Set(), chainDescendants=new Set();
+function computeChainSets(focusId){
+  chainAncestors = focusId ? ancestorsTransitive(focusId) : new Set();
+  chainDescendants = focusId ? descendantsTransitive(focusId) : new Set();
+  // ancestorsTransitive / descendantsTransitive 都把 focusId 自己也加进去了，移除
+  if(focusId){ chainAncestors.delete(focusId); chainDescendants.delete(focusId); }
+}
+function chainRoleNode(n, focusId){
+  if(!focusId) return "";
+  if(n.id===focusId) return "self";
+  if(chainAncestors.has(n.id)) return "anc";
+  if(chainDescendants.has(n.id)) return "desc";
+  return "fade";
+}
+function chainRoleEdge(e, focusId){
+  if(!focusId) return "";
+  const f=e.from, t=e.to;
+  // 边在 ancestor 链上 = from 在 ancestor 集合 且 to 是 focus 或在 ancestor 集合
+  if((f===focusId || chainAncestors.has(f)) && (t===focusId || chainAncestors.has(t))) return "anc";
+  // 边在 descendant 链上 = from 是 focus 或在 descendant 集合 且 to 在 descendant 集合
+  if((f===focusId || chainDescendants.has(f)) && (t===focusId || chainDescendants.has(t))) return "desc";
+  return "fade";
+}
 
 // ============================================================
 // 渲染（带过渡动画）
 // ============================================================
 function render(){
   const {nodes, edges, level}=nodesForView();
+  // focus 模式预计算 chain 角色集合
+  const focusedId = current.kind==="focus"?current.id:null;
+  computeChainSets(focusedId);
   const W = wrap.clientWidth - 40;
   const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
   const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
@@ -437,7 +486,7 @@ function render(){
   edgeSel.exit().transition().duration(280).style("opacity",0).remove();
   const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
     .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
-    .attr("marker-end",e=>`url(#arr-${edgeClass(e)})`)
+    .attr("marker-end",e=>`url(#arr-${edgeBaseClass(e)})`)
     .style("opacity",0);
   edgeSel.merge(edgeEnter).transition().duration(380)
     .attr("d",e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
@@ -448,7 +497,6 @@ function render(){
     .style("opacity",1);
 
   // 节点（key by id），动画 transform
-  const focusedId = current.kind==="focus"?current.id:null;
   const tileSel=root.selectAll("g.tile").data(nodes, d=>d.id);
   tileSel.exit().transition().duration(220).style("opacity",0).remove();
   const tileEnter=tileSel.enter().append("g")
@@ -509,12 +557,20 @@ function render(){
   applySearchHighlight();
 }
 function tileClass(d, focusedId){
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}`;
+  const role = chainRoleNode(d, focusedId);
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}`;
 }
-function edgeClass(e){
+function edgeBaseClass(e){
+  // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
   const f=id2[e.from]; if(!f) return "lock";
   const s=stateOf(f);
   return s==="mastered"?"mast":(s==="unlockable"?"unl":(s==="previewable"?"prev":"lock"));
+}
+function edgeClass(e){
+  const base = edgeBaseClass(e);
+  const focusedId = current.kind==="focus"?current.id:null;
+  const role = chainRoleEdge(e, focusedId);
+  return role ? `${base} chain-edge-${role}` : base;
 }
 function edgeWidthFor(e){
   // 边权重 = 源节点的后继数（更基础的前置=更粗）
