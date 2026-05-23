@@ -59,6 +59,10 @@ svg.canvas{display:block}
 .tile.chain-anc{color:#d0e1ff}
 .tile.chain-desc rect.tbox{stroke:#c084fc !important;stroke-width:2.6 !important;fill:#1c1233 !important;filter:drop-shadow(0 0 10px #c084fc88) !important;stroke-dasharray:none !important}
 .tile.chain-desc{color:#dcc5ff}
+/* 直接后续但未解锁：显示但灰色虚线（区别于紫色高亮 + 区别于 fade 隐形）*/
+.tile.chain-desc-locked{opacity:.55}
+.tile.chain-desc-locked rect.tbox{stroke:#5a6478 !important;stroke-width:1.5 !important;fill:#141926 !important;stroke-dasharray:4 3 !important;filter:none !important}
+.tile.chain-desc-locked{color:#8a96ad}
 .tile.chain-self{opacity:1}
 .tile.chain-self rect.tbox{stroke:#fde047 !important;stroke-width:5 !important;fill:#231a08 !important;filter:drop-shadow(0 0 28px #fde047cc) !important}
 .tile.chain-self{color:#fef3c7}
@@ -66,6 +70,7 @@ svg.canvas{display:block}
 .edge.chain-edge-fade{opacity:.08 !important;transition:opacity .25s}
 .edge.chain-edge-anc{stroke:#60a5fa !important;opacity:.95 !important;stroke-dasharray:none !important}
 .edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
+.edge.chain-edge-desc-locked{stroke:#5a6478 !important;opacity:.6 !important;stroke-dasharray:4 3 !important}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
 .tile.filter-out{opacity:.18}
 /* 章节用位置（章带+侧色线）编码，节点不再叠章色条 */
@@ -514,16 +519,20 @@ function chainRoleNode(n, focusId){
   if(!focusId) return "";
   if(n.id===focusId) return "self";
   if(chainAncestors.has(n.id)) return "anc";
-  if(chainDescendants.has(n.id)) return "desc";
+  if(chainDescendants.has(n.id)){
+    // 直接后续：locked 显示但灰色（还没解锁但能看到），其它紫色高亮
+    return stateOf(n) === "locked" ? "desc-locked" : "desc";
+  }
   return "fade";
 }
 function chainRoleEdge(e, focusId){
   if(!focusId) return "";
   const f=e.from, t=e.to;
-  // 边在 ancestor 链上 = from 在 ancestor 集合 且 to 是 focus 或在 ancestor 集合
   if((f===focusId || chainAncestors.has(f)) && (t===focusId || chainAncestors.has(t))) return "anc";
-  // 边在 descendant 链上 = from 是 focus 或在 descendant 集合 且 to 在 descendant 集合
-  if((f===focusId || chainDescendants.has(f)) && (t===focusId || chainDescendants.has(t))) return "desc";
+  if(f===focusId && chainDescendants.has(t)){
+    // 焦点 → direct successor 边：根据 successor 是否解锁决定颜色
+    return stateOf(id2[t]) === "locked" ? "desc-locked" : "desc";
+  }
   return "fade";
 }
 
