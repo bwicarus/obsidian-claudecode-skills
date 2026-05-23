@@ -6,54 +6,45 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a0e1a;color:#e6e6f0;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
-#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:9px 18px;display:flex;align-items:center;gap:14px;flex-shrink:0;z-index:10}
+#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:9px 18px;display:flex;align-items:center;gap:10px;flex-shrink:0;z-index:10}
 #bar h1{font-size:14px;font-weight:700;letter-spacing:.05em;color:#9ec3ff}
 #bar .meta{font-size:12px;color:#8a9bb4}
-#bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
+#bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 #bar button:hover{background:#27345a}
-#lvl{font-size:11px;color:#7dc4ff;background:#0e2042;border:1px solid #244470;padding:3px 9px;border-radius:10px;font-weight:600}
+#bar button:disabled{opacity:.4;cursor:default}
+#crumb{font-size:13px;color:#cfe6ff;font-weight:500;padding-left:6px}
+#crumb .sep{color:#5a6680;margin:0 6px}
 #legend{margin-left:auto;display:flex;gap:14px;font-size:11px;color:#8a9bb4}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;box-shadow:0 0 8px currentColor}
 #viz{flex:1;position:relative;overflow:hidden;background-color:#0a0e1a;background-image:
-  radial-gradient(ellipse at center,rgba(40,60,120,.18) 0%,transparent 60%),
+  radial-gradient(ellipse at center,rgba(40,60,120,.16) 0%,transparent 60%),
   linear-gradient(rgba(60,80,140,.05) 1px,transparent 1px),
   linear-gradient(90deg,rgba(60,80,140,.05) 1px,transparent 1px);
   background-size:100% 100%, 40px 40px, 40px 40px}
-svg{width:100%;height:100%;cursor:grab;display:block}
-svg:active{cursor:grabbing}
+#canvas-wrap{position:absolute;inset:0;overflow:auto;padding:20px}
+#canvas-wrap::-webkit-scrollbar{width:10px;height:10px}
+#canvas-wrap::-webkit-scrollbar-thumb{background:#2a3550;border-radius:5px}
+svg.canvas{display:block}
 /* 节点 */
-.tile{cursor:pointer;transition:opacity .25s}
-.tile rect{transition:filter .15s, stroke-width .15s, stroke .15s}
+.tile{cursor:pointer}
+.tile rect{transition:filter .15s, stroke-width .15s}
 .tile:hover rect{filter:brightness(1.4)}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
-/* 状态色 */
-.tile.mastered rect{stroke:#34d399;stroke-width:2;fill:#0d2a1f;filter:drop-shadow(0 0 6px #34d39966)}
+.tile.mastered rect{stroke:#34d399;stroke-width:2.2;fill:#0d2a1f;filter:drop-shadow(0 0 8px #34d39977)}
 .tile.mastered{color:#7be096}
-.tile.unlocked rect{stroke:#fbbf24;stroke-width:1.8;fill:#241a08;filter:drop-shadow(0 0 5px #fbbf2455)}
+.tile.unlocked rect{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
 .tile.unlocked{color:#fcd383}
-.tile.locked rect{stroke:#4a5568;stroke-width:1.3;fill:#141926;stroke-dasharray:3 3}
-.tile.locked{color:#6b7488}
-/* 聚焦/淡出 */
-.tile.dim{opacity:.13}
-.tile.dim text{display:none}
-.tile.dim rect{filter:none;stroke-dasharray:none}
-.tile.hi.unlocked rect{stroke-width:2.5;filter:drop-shadow(0 0 14px #fbbf24cc)}
-.tile.hi.mastered rect{stroke-width:3;filter:drop-shadow(0 0 16px #34d399dd)}
-.tile.hi.locked rect{stroke:#9aa4b2;stroke-width:1.8;stroke-dasharray:5 3;filter:drop-shadow(0 0 8px #9aa4b266)}
-.tile.hi.locked{color:#b4becf}
-.tile.focus rect{stroke:#7dc4ff !important;stroke-width:4 !important;fill:#0c1a30 !important;filter:drop-shadow(0 0 22px #7dc4ffcc) !important;stroke-dasharray:none !important}
+.tile.locked rect{stroke:#6a7488;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
+.tile.locked{color:#7a8497}
+.tile.focus rect{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc)}
 .tile.focus{color:#cfe6ff}
 /* 边 */
-.edge{fill:none;stroke-linecap:round;transition:opacity .25s, stroke .15s}
-.edge.mast{stroke:#34d39955;stroke-width:1.5}
-.edge.unl{stroke:#fbbf2445;stroke-width:1.3}
-.edge.lock{stroke:#3a4658;stroke-width:1.1;stroke-dasharray:3 4}
-.edge.dim{opacity:.04}
-.edge.hi.mast{stroke:#34d399ee;stroke-width:2.5}
-.edge.hi.unl{stroke:#fbbf24ee;stroke-width:2.3}
-.edge.hi.lock{stroke:#9aa4b2cc;stroke-width:2;stroke-dasharray:4 3}
+.edge{fill:none;stroke-linecap:round}
+.edge.mast{stroke:#34d399aa;stroke-width:2}
+.edge.unl{stroke:#fbbf24aa;stroke-width:1.8}
+.edge.lock{stroke:#5a6680cc;stroke-width:1.4;stroke-dasharray:4 3}
 /* detail */
 #detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.65;z-index:5}
 #detail.open{transform:translateX(0);box-shadow:-12px 0 32px rgba(0,0,0,.5)}
@@ -70,16 +61,28 @@ svg:active{cursor:grabbing}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
-#hint{position:absolute;left:18px;bottom:14px;background:rgba(13,19,34,.85);border:1px solid #2a3550;padding:8px 12px;border-radius:8px;font-size:11px;color:#9aa4b2;backdrop-filter:blur(4px)}
-#hint kbd{background:#1a2540;border:1px solid #2a3550;padding:1px 5px;border-radius:3px;color:#cfe6ff;font-size:10px}
+/* settings modal */
+#sett-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:20}
+#sett-mask.open{display:flex}
+#sett-panel{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:22px 24px;width:360px;max-width:90vw}
+#sett-panel h3{font-size:15px;margin-bottom:14px;color:#9ec3ff}
+#sett-panel label{display:block;font-size:12px;color:#9aa4b2;margin-bottom:6px}
+#sett-panel input[type=range]{width:100%;margin:6px 0}
+#sett-panel .preview-strip{height:6px;background:#1a2540;border-radius:3px;margin-top:8px;position:relative}
+#sett-panel .preview-strip span{position:absolute;top:0;left:0;height:100%;background:#7dc4ff;border-radius:3px}
+#sett-panel .row{margin:14px 0}
+#sett-panel .val{color:#cfe6ff;font-weight:600;font-size:13px;margin-left:6px}
+#sett-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+#sett-foot button{padding:7px 16px;border-radius:6px;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;cursor:pointer;font-size:13px}
+#sett-foot .primary{background:#244470;border-color:#3b6db5;color:#fff}
 </style></head>
 <body>
 <div id="bar">
   <h1>{{ book }} · 技能树</h1>
-  <span id="lvl">L0 章</span>
+  <button id="back-btn" onclick="goBack()" title="返回上一级">◀ 后退</button>
+  <span id="crumb">全部章</span>
   <span class="meta" id="meta">加载中…</span>
-  <button onclick="resetView()" title="缩放至全图">⊡ 全图</button>
-  <button onclick="clearFocus()" title="清除聚焦">⊙ 清除</button>
+  <button onclick="openSettings()">⚙ 设置</button>
   <div id="legend">
     <span><span class="dot" style="background:#34d399;color:#34d399"></span>已掌握</span>
     <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>已解锁</span>
@@ -87,11 +90,13 @@ svg:active{cursor:grabbing}
   </div>
 </div>
 <div id="viz">
-  <svg><defs>
-    <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
-    <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
-    <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,-4L9,0L0,4" fill="#4a5568"/></marker>
-  </defs></svg>
+  <div id="canvas-wrap">
+    <svg class="canvas"><defs>
+      <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
+      <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
+      <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#5a6680"/></marker>
+    </defs></svg>
+  </div>
   <aside id="detail">
     <button id="detail-close" onclick="closeDetail()">✕</button>
     <h2 id="d-name">—</h2>
@@ -100,226 +105,129 @@ svg:active{cursor:grabbing}
     <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
     <div class="lbl">页码 · 路径</div><div class="v" id="d-path">—</div>
     <div class="lbl">关联</div><div class="v" id="d-link">—</div>
-    <div class="lbl">前置链（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
-    <div class="lbl">后续（解锁后开放）</div><ul class="prereqs" id="d-unlocks"></ul>
+    <div class="lbl">前置（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
+    <div class="lbl">后续</div><ul class="prereqs" id="d-unlocks"></ul>
   </aside>
-  <div id="hint">缩放即切层（远→章 → 节 → 知识点）· 点节点聚焦/钻取 · <kbd>⊡</kbd> 全图 · <kbd>Esc</kbd> 取消</div>
 </div>
+
+<!-- 设置弹窗 -->
+<div id="sett-mask" onclick="if(event.target===this) closeSettings()">
+  <div id="sett-panel">
+    <h3>显示设置</h3>
+    <div class="row">
+      <label>方块宽度（占页面宽的比例）<span class="val" id="sett-val">12%</span></label>
+      <input type="range" id="sett-ratio" min="5" max="30" step="1">
+      <div class="preview-strip"><span id="sett-bar"></span></div>
+    </div>
+    <p style="font-size:11px;color:#8a9bb4;line-height:1.5;margin-top:8px">
+      比例越大，单个方块越突出，能同屏显示的方块越少；反之亦然。<br>
+      不再有缩放交互——所有方块固定按这个比例渲染，超出页面则滚动。
+    </p>
+    <div id="sett-foot">
+      <button onclick="closeSettings()">取消</button>
+      <button class="primary" onclick="applySettings()">应用</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const BOOK="{{ book }}";
 const VAULT="Obsidian Vault";
-// LOD 阈值（k = zoom scale）
-const K_L0_L1=0.35, K_L1_L2=0.85, HYST=0.05;
-const FOCUS_HOPS=3;
 
-let KG=null, id2=null;
+// 设置（localStorage 持久化）
+const SETT_KEY="skilltree_settings_"+BOOK;
+function loadSettings(){
+  try{ return Object.assign({blockRatio:0.12}, JSON.parse(localStorage.getItem(SETT_KEY)||"{}")); }
+  catch(_){ return {blockRatio:0.12}; }
+}
+function saveSettings(s){ try{ localStorage.setItem(SETT_KEY, JSON.stringify(s)); }catch(_){} }
+let settings=loadSettings();
+
+let KG=null, id2={};
 let nodesByLevel={0:[],1:[],2:[]};
 let edgesByLevel={0:[],1:[],2:[]};
-let depthL2={};
-let currentLevel=0, focusId=null;
-let rendering=false;
-
-const svg=d3.select("svg"), W=()=>svg.node().clientWidth, H=()=>svg.node().clientHeight;
-const g=svg.append("g");
-const zoom=d3.zoom().scaleExtent([0.05,4]).on("zoom",onZoom);
-svg.call(zoom);
+let viewStack=[];           // 历史
+let current={kind:"home"};  // {kind:"home"|"chapter"|"section"|"focus", id?}
 
 fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   KG=d; id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
   for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
-  computeAllLayouts();
+  buildAggregatedEdges();
   document.getElementById("meta").textContent=
-    `${KG.nodes.filter(n=>n.level===0).length} 章 · ${KG.nodes.filter(n=>n.level===1).length} 节 · ${KG.nodes.filter(n=>n.level===2).length} 知识点`;
-  renderLevel(0);
-  resetView();
+    `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点`;
+  render();
 });
 
 function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
-
-// =========================================================================
-// 全局布局：L2 用最长路径 depth；L1/L0 用子节点 centroid
-// =========================================================================
-const NW={0:200,1:148,2:118}, NH={0:62,1:44,2:34};
-function computeAllLayouts(){
-  const l2=nodesByLevel[2];
-  const inE={}; for(const n of l2) inE[n.id]=[];
-  const l2edges=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
-  for(const e of l2edges) inE[e.to].push(e.from);
-  for(const n of l2) depthL2[n.id]=0;
-  let ch=true, it=0;
-  while(ch&&it++<l2.length+2){
-    ch=false;
-    for(const n of l2){
-      const d=inE[n.id].length?Math.max(...inE[n.id].map(s=>(depthL2[s]??0)+1)):0;
-      if(d!==depthL2[n.id]){depthL2[n.id]=d;ch=true}
+function ancestorAtLevel(nid,lv){let c=id2[nid];while(c&&c.level>lv)c=id2[c.parent_id];return c&&c.level===lv?c.id:null}
+function buildAggregatedEdges(){
+  edgesByLevel[2]=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
+  for(const lv of [1,0]){
+    const seen=new Set(); const out=[];
+    for(const e of edgesByLevel[2]){
+      const a=ancestorAtLevel(e.from,lv), b=ancestorAtLevel(e.to,lv);
+      if(!a||!b||a===b) continue;
+      const k=a+"→"+b; if(seen.has(k)) continue; seen.add(k);
+      out.push({from:a,to:b,kind:"prereq",level:lv});
     }
+    edgesByLevel[lv]=out;
   }
-  const maxD=Math.max(...Object.values(depthL2),0);
-  const byDepth={}; for(const n of l2)(byDepth[depthL2[n.id]]=byDepth[depthL2[n.id]]||[]).push(n);
-  const chapOf=n=>{let c=n;while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}return ""};
-  const PADX=80, PADY=80, GAP_X=18, GAP_Y=78;
-  for(const d in byDepth){
-    byDepth[d].sort((a,b)=>(chapOf(a).localeCompare(chapOf(b)))||(a.numeric_label||"").localeCompare(b.numeric_label||""));
-    byDepth[d].forEach((n,i)=>{
-      n.x=PADX+i*(NW[2]+GAP_X)+NW[2]/2;
-      n.y=PADY+(maxD-(+d))*GAP_Y+NH[2]/2;
-    });
-  }
-  // L1 = centroid(自己的 L2 子) ；fallback: 同 L0 兄弟之间的页码顺序
-  for(const n1 of nodesByLevel[1]){
-    const kids=l2.filter(x=>x.parent_id===n1.id && x.x!=null);
-    if(kids.length){
-      n1.x=kids.reduce((a,b)=>a+b.x,0)/kids.length;
-      n1.y=kids.reduce((a,b)=>a+b.y,0)/kids.length;
-    }
-  }
-  // 无 L2 子的 L1（如本节没抽到知识点）→ 放父 L0 附近，按节序排
-  for(const n0 of nodesByLevel[0]){
-    const sibs=nodesByLevel[1].filter(x=>x.parent_id===n0.id);
-    const empty=sibs.filter(x=>x.x==null);
-    if(empty.length){
-      const placed=sibs.filter(x=>x.x!=null);
-      let baseX=placed.length?placed.reduce((a,b)=>a+b.x,0)/placed.length:PADX+nodesByLevel[0].indexOf(n0)*600;
-      let baseY=placed.length?placed.reduce((a,b)=>a+b.y,0)/placed.length:PADY+200;
-      empty.sort((a,b)=>(a.section_label||"").localeCompare(b.section_label||""));
-      empty.forEach((n,i)=>{n.x=baseX+(i-empty.length/2)*(NW[1]+22);n.y=baseY});
-    }
-  }
-  // L0 = centroid(L1 children)
-  for(const n0 of nodesByLevel[0]){
-    const kids=nodesByLevel[1].filter(x=>x.parent_id===n0.id && x.x!=null);
-    if(kids.length){
-      n0.x=kids.reduce((a,b)=>a+b.x,0)/kids.length;
-      n0.y=kids.reduce((a,b)=>a+b.y,0)/kids.length;
-    }else{
-      n0.x=PADX+nodesByLevel[0].indexOf(n0)*600; n0.y=PADY+200;
-    }
-  }
-  // 聚合 edges
-  edgesByLevel[2]=l2edges;
-  edgesByLevel[1]=aggregateUp(l2edges, 1);
-  edgesByLevel[0]=aggregateUp(l2edges, 0);
-}
-function ancestorAtLevel(nodeId, lv){
-  let cur=id2[nodeId];
-  while(cur && cur.level>lv) cur=id2[cur.parent_id];
-  return cur && cur.level===lv ? cur.id : null;
-}
-function aggregateUp(l2edges, lv){
-  const seen=new Set(); const out=[];
-  for(const e of l2edges){
-    const a=ancestorAtLevel(e.from, lv), b=ancestorAtLevel(e.to, lv);
-    if(!a||!b||a===b) continue;
-    const k=a+"→"+b; if(seen.has(k)) continue; seen.add(k);
-    // 边状态 = 源节点状态（聚合后取较好状态？这里直接用源的 mastered/unlocked）
-    out.push({from:a,to:b,kind:"prereq",level:lv});
-  }
-  return out;
 }
 
-// =========================================================================
-// 渲染：按当前 level
-// =========================================================================
-function bezier(s,t,lv){
-  const x1=s.x, y1=s.y-NH[lv]/2, x2=t.x, y2=t.y+NH[lv]/2;
-  const my=(y1+y2)/2;
-  return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
-}
-function edgeStateClass(e){
-  const f=id2[e.from];
-  return f?.mastered ? "mast" : (f?.unlocked ? "unl" : "lock");
-}
-function cssEsc(s){return (s||"").replace(/([.\\:#\[\]@\!])/g,'\\$1')}
-function childCountAtL2(node){
-  // 数该节点（L0/L1）下挂多少 L2
-  if(node.level===2) return 0;
-  let n=0;
-  for(const x of nodesByLevel[2]){
-    let cur=x; while(cur && cur.parent_id){
-      if(cur.parent_id===node.id){n++; break}
-      cur=id2[cur.parent_id];
-    }
+// ============================================================
+// 后退 / 导航
+// ============================================================
+function pushView(v){ viewStack.push(current); current=v; updateNav(); render(); }
+function goBack(){ if(viewStack.length){ current=viewStack.pop(); updateNav(); render(); } }
+function updateNav(){
+  document.getElementById("back-btn").disabled = viewStack.length===0;
+  const c=current;
+  let label="全部章";
+  if(c.kind==="chapter"){
+    label=`章：${id2[c.id]?.name||c.id}`;
+  }else if(c.kind==="section"){
+    const sec=id2[c.id]; const chap=sec?id2[sec.parent_id]:null;
+    label=`${chap?chap.name+' › ':''}${sec?sec.name:c.id}`;
+  }else if(c.kind==="focus"){
+    label=`聚焦：${id2[c.id]?.name||c.id}`;
   }
-  return n;
-}
-function renderLevel(lv){
-  if(rendering) return;
-  rendering=true;
-  currentLevel=lv;
-  document.getElementById("lvl").textContent=`L${lv} ${lv===0?'章':lv===1?'节':'知识点'}`;
-  g.selectAll("*").remove();
-  const nodes=nodesByLevel[lv].filter(n=>n.x!=null);
-  const edges=edgesByLevel[lv];
-  // 边
-  g.selectAll(".edge").data(edges).enter().append("path")
-    .attr("class",e=>"edge "+edgeStateClass(e))
-    .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
-    .attr("d",e=>{const s=id2[e.from],t=id2[e.to];return s&&t?bezier(s,t,lv):""})
-    .attr("marker-end",e=>`url(#arr-${edgeStateClass(e)})`);
-  // 节点
-  const w=NW[lv], h=NH[lv];
-  const tile=g.selectAll(".tile").data(nodes).enter().append("g")
-    .attr("class",d=>`tile l${lv} ${stateOf(d)}`)
-    .attr("data-id",d=>d.id)
-    .attr("transform",d=>`translate(${d.x-w/2},${d.y-h/2})`)
-    .on("click",(_,d)=>nodeClick(d));
-  tile.append("rect").attr("width",w).attr("height",h).attr("rx",lv===0?12:lv===1?9:7).attr("ry",lv===0?12:lv===1?9:7);
-  // 文字
-  if(lv===0){
-    tile.append("text").attr("class","tname").attr("font-size",14).attr("x",w/2).attr("y",h/2-6).text(d=>d.name);
-    tile.append("text").attr("class","tsub").attr("font-size",10).attr("x",w/2).attr("y",h/2+10).text(d=>d.chapter_label||"");
-    tile.append("text").attr("class","tcount").attr("font-size",10).attr("x",w/2).attr("y",h/2+22).text(d=>`${childCountAtL2(d)} 知识点`);
-  }else if(lv===1){
-    tile.append("text").attr("class","tname").attr("font-size",12).attr("x",w/2).attr("y",h/2-2)
-      .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
-    tile.append("text").attr("class","tsub").attr("font-size",9).attr("x",w/2).attr("y",h/2+11)
-      .text(d=>`${d.section_label||""} · ${childCountAtL2(d)} 知识点`);
-  }else{
-    tile.append("text").attr("class","tname").attr("font-size",11).attr("x",w/2).attr("y",h/2-2)
-      .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
-    tile.append("text").attr("class","tsub").attr("font-size",9).attr("x",w/2).attr("y",h/2+10)
-      .text(d=>d.numeric_label||d.type||"");
-  }
-  reapplyHighlight();
-  rendering=false;
+  document.getElementById("crumb").textContent=label;
 }
 
-// =========================================================================
-// 缩放联动 LOD（带滞回）
-// =========================================================================
-function onZoom(ev){
-  g.attr("transform",ev.transform);
-  const k=ev.transform.k;
-  let want=currentLevel;
-  if(currentLevel===0){
-    if(k > K_L0_L1+HYST) want=1;
-  }else if(currentLevel===1){
-    if(k < K_L0_L1-HYST) want=0;
-    else if(k > K_L1_L2+HYST) want=2;
-  }else{
-    if(k < K_L1_L2-HYST) want=1;
+// ============================================================
+// 视图 → 节点 + 边
+// ============================================================
+function nodesForView(){
+  if(current.kind==="home"){
+    return {nodes: nodesByLevel[0].slice(), edges: edgesByLevel[0].slice(), level:0};
   }
-  if(want!==currentLevel) renderLevel(want);
-}
-
-// =========================================================================
-// 点击：L0/L1 钻取（动画缩放到目标层）；L2 聚焦
-// =========================================================================
-function nodeClick(n){
-  if(n.level<2){
-    // 钻取：缩放使其 L1 / L2 子节点正好填屏
-    const kids = nodesByLevel[n.level+1].filter(x=>x.parent_id===n.id && x.x!=null);
-    if(!kids.length){showDetail(n); return}
-    zoomToFit(kids, 0.78);
-    setTimeout(()=>showDetail(n),200);
-  }else{
-    focusOn(n.id);
+  if(current.kind==="chapter"){
+    // 章下所有 L1 节
+    const subs=nodesByLevel[1].filter(n=>n.parent_id===current.id);
+    const ids=new Set(subs.map(n=>n.id));
+    const edges=edgesByLevel[1].filter(e=>ids.has(e.from)&&ids.has(e.to));
+    return {nodes:subs, edges, level:1};
   }
+  if(current.kind==="section"){
+    // 节下所有 L2 + 节内的 L2 边
+    const subs=nodesByLevel[2].filter(n=>n.parent_id===current.id);
+    const ids=new Set(subs.map(n=>n.id));
+    const edges=edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to));
+    return {nodes:subs, edges, level:2};
+  }
+  if(current.kind==="focus"){
+    // 该 L2 + 所有传递前置
+    const all=ancestorsTransitive(current.id);
+    const subs=[...all].map(i=>id2[i]).filter(Boolean);
+    const ids=new Set(subs.map(n=>n.id));
+    const edges=edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to));
+    return {nodes:subs, edges, level:2};
+  }
+  return {nodes:[], edges:[], level:0};
 }
 function ancestorsTransitive(rootId){
-  const out=new Set([rootId]);
-  const stack=[rootId];
+  const out=new Set([rootId]); const stack=[rootId];
   while(stack.length){
     const cur=stack.pop();
     for(const e of edgesByLevel[2]){
@@ -328,82 +236,143 @@ function ancestorsTransitive(rootId){
   }
   return out;
 }
-function ancestorsKHops(rootId, K){
-  const out=new Set([rootId]);
-  let fr=new Set([rootId]);
-  for(let h=0;h<K;h++){
-    const nx=new Set();
-    for(const e of edgesByLevel[2]){
-      if(fr.has(e.to) && !out.has(e.from)){out.add(e.from); nx.add(e.from)}
-    }
-    if(!nx.size) break;
-    fr=nx;
-  }
-  return out;
-}
-function focusOn(id){
-  focusId=id;
-  const allAnc=ancestorsTransitive(id);
-  const nearAnc=ancestorsKHops(id, FOCUS_HOPS);
-  // 强制切到 L2（聚焦只在 L2 有意义）
-  if(currentLevel!==2){
-    const target=[...nearAnc].map(a=>id2[a]).filter(Boolean);
-    zoomToFit(target, 0.82);   // 缩放会触发 onZoom → renderLevel(2)，然后下面再 reapplyHighlight
-    setTimeout(()=>{reapplyHighlight(); showDetail(id2[id])}, 800);
+
+// ============================================================
+// 渲染（HTML+SVG）
+// ============================================================
+function render(){
+  const wrap=document.getElementById("canvas-wrap");
+  const svg=d3.select("svg.canvas");
+  svg.selectAll("g.layer").remove();
+  const layer=svg.append("g").attr("class","layer");
+  const {nodes, edges, level}=nodesForView();
+  if(!nodes.length){
+    svg.attr("width", wrap.clientWidth).attr("height", wrap.clientHeight-40);
+    layer.append("text").attr("x",wrap.clientWidth/2).attr("y",60)
+      .attr("text-anchor","middle").attr("fill","#5a6680").attr("font-size",14).text("此视图无节点");
     return;
   }
-  reapplyHighlight();
-  zoomToFit([...nearAnc].map(a=>id2[a]).filter(Boolean), 0.82);
-  showDetail(id2[id]);
-}
-function reapplyHighlight(){
-  if(focusId==null || currentLevel!==2){
-    g.selectAll(".tile").classed("dim",false).classed("hi",false).classed("focus",false);
-    g.selectAll(".edge").classed("dim",false).classed("hi",false);
-    return;
-  }
-  const allAnc=ancestorsTransitive(focusId);
-  g.selectAll(".tile").classed("dim",true).classed("hi",false).classed("focus",false);
-  g.selectAll(".edge").classed("dim",true).classed("hi",false);
-  for(const aid of allAnc){
-    d3.select(`.tile[data-id="${cssEsc(aid)}"]`).classed("dim",false).classed("hi",true);
-  }
-  d3.select(`.tile[data-id="${cssEsc(focusId)}"]`).classed("focus",true).classed("hi",false);
-  for(const e of edgesByLevel[2]){
-    if(allAnc.has(e.from) && allAnc.has(e.to)){
-      d3.select(`.edge[data-from="${cssEsc(e.from)}"][data-to="${cssEsc(e.to)}"]`)
-        .classed("dim",false).classed("hi",true);
+  // 方块尺寸（按比例 × 页面宽）
+  const W = wrap.clientWidth - 380 - 40;   // 去掉 detail 面板 + padding
+  const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
+  const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
+  const gapX = Math.max(14, Math.floor(blockW * 0.18));
+  const gapY = Math.max(36, Math.floor(blockH * 1.6));
+  // 布局：分层 DAG（按 depth，max 在顶）
+  const inE={}; for(const n of nodes) inE[n.id]=[];
+  for(const e of edges) if(inE[e.to]) inE[e.to].push(e.from);
+  const depth={}; for(const n of nodes) depth[n.id]=0;
+  let ch=true, it=0;
+  while(ch && it++<nodes.length+2){
+    ch=false;
+    for(const n of nodes){
+      const d=inE[n.id].length?Math.max(...inE[n.id].map(s=>(depth[s]??0)+1)):0;
+      if(d!==depth[n.id]){depth[n.id]=d;ch=true}
     }
   }
-}
-function clearFocus(){
-  focusId=null;
-  reapplyHighlight();
-  closeDetail();
-}
-function resetView(){
-  const nodes=nodesByLevel[currentLevel].filter(n=>n.x!=null);
-  if(!nodes.length) return;
-  zoomToFit(nodes, 0.92);
-}
-function zoomToFit(nodes, padFactor){
-  if(!nodes.length) return;
-  const xs=nodes.map(n=>n.x), ys=nodes.map(n=>n.y);
-  const dx=Math.max(...xs)-Math.min(...xs) || NW[currentLevel]*2;
-  const dy=Math.max(...ys)-Math.min(...ys) || NH[currentLevel]*2;
-  const minX=Math.min(...xs), minY=Math.min(...ys);
-  const wv=W()-380, hv=H();
-  const k=Math.min(wv/(dx+NW[currentLevel]*2), hv/(dy+NH[currentLevel]*4)) * (padFactor||0.85);
-  const kc=Math.max(0.05, Math.min(2.5, k));
-  const tx=wv/2 - kc*(minX+dx/2);
-  const ty=hv/2 - kc*(minY+dy/2);
-  svg.transition().duration(750)
-    .call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(kc));
+  const maxD=Math.max(...Object.values(depth),0);
+  const byDepth={};
+  for(const n of nodes)(byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n);
+  // 排序：按 numeric_label / name
+  for(const d in byDepth){
+    byDepth[d].sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"")||a.name.localeCompare(b.name));
+  }
+  // 计算每层 wrap：超出 W 自动换行
+  const cols=Math.max(1, Math.floor((W) / (blockW+gapX)));
+  const positions={};
+  let maxRowY=0;
+  let y=20;
+  for(let d=maxD; d>=0; d--){
+    const row=byDepth[d]||[];
+    const subRows=Math.ceil(row.length/cols)||1;
+    const totalW = Math.min(row.length, cols)*(blockW+gapX) - gapX;
+    const xStart = Math.max(20, (W-totalW)/2);
+    row.forEach((n,i)=>{
+      const sr=Math.floor(i/cols);
+      const col=i%cols;
+      positions[n.id]={
+        x: xStart + col*(blockW+gapX) + blockW/2,
+        y: y + sr*(blockH+gapY*0.5) + blockH/2,
+      };
+    });
+    y += subRows*(blockH+gapY*0.5) + gapY*0.5;
+    maxRowY = Math.max(maxRowY, y);
+  }
+  // SVG 尺寸 = 内容尺寸（容器自适应滚动）
+  const svgW = Math.max(W, cols*(blockW+gapX));
+  const svgH = Math.max(wrap.clientHeight-40, maxRowY+40);
+  svg.attr("width", svgW).attr("height", svgH);
+
+  // 边
+  layer.selectAll(".edge").data(edges).enter().append("path")
+    .attr("class",e=>"edge "+edgeClass(e))
+    .attr("d",e=>{
+      const s=positions[e.from], t=positions[e.to];
+      if(!s||!t) return "";
+      const y1=s.y-blockH/2, y2=t.y+blockH/2, my=(y1+y2)/2;
+      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;
+    })
+    .attr("marker-end",e=>`url(#arr-${edgeClass(e)})`);
+
+  // 节点
+  const focusedId = current.kind==="focus" ? current.id : null;
+  const tile=layer.selectAll(".tile").data(nodes).enter().append("g")
+    .attr("class",d=>`tile ${stateOf(d)}${d.id===focusedId?' focus':''}`)
+    .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
+    .on("click",(_,d)=>nodeClick(d));
+  tile.append("rect").attr("width",blockW).attr("height",blockH)
+    .attr("rx", level===0?12:level===1?9:7).attr("ry",level===0?12:level===1?9:7);
+  const fontMain = Math.max(10, Math.floor(blockW*0.10));
+  const fontSub  = Math.max(9,  Math.floor(blockW*0.075));
+  if(level===0){
+    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-6).text(d=>d.name);
+    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+10).text(d=>d.chapter_label||"");
+    tile.append("text").attr("class","tcount").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+10+fontSub+2).text(d=>`${countL2Under(d)} 知识点`);
+  }else if(level===1){
+    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-2).text(d=>truncate(d.name, blockW, fontMain));
+    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub+4).text(d=>`${d.section_label||""} · ${countL2Under(d)}`);
+  }else{
+    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-2).text(d=>truncate(d.name, blockW, fontMain));
+    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub+4).text(d=>d.numeric_label||d.type||"");
+  }
+  // 自动滚动到聚焦节点
+  if(focusedId){
+    const p=positions[focusedId];
+    if(p){
+      wrap.scrollTo({left: Math.max(0, p.x - wrap.clientWidth/2), top: Math.max(0, p.y - wrap.clientHeight/2), behavior:"smooth"});
+    }
+    showDetail(id2[focusedId]);
+  }
 }
 
-// =========================================================================
+function truncate(s, w, fontSize){
+  // 粗估：CSS px / 字符 ≈ fontSize (中文)
+  const maxChars = Math.max(4, Math.floor((w-12) / (fontSize*0.95)));
+  return s.length>maxChars ? s.slice(0,maxChars-1)+"…" : s;
+}
+function countL2Under(node){
+  if(node.level===2) return 0;
+  let n=0;
+  for(const x of nodesByLevel[2]){
+    let c=x;
+    while(c && c.parent_id){
+      if(c.parent_id===node.id){n++;break}
+      c=id2[c.parent_id];
+    }
+  }
+  return n;
+}
+function edgeClass(e){const f=id2[e.from];return f?.mastered?"mast":(f?.unlocked?"unl":"lock")}
+
+function nodeClick(n){
+  if(n.level===0) pushView({kind:"chapter", id:n.id});
+  else if(n.level===1) pushView({kind:"section", id:n.id});
+  else pushView({kind:"focus", id:n.id});
+}
+
+// ============================================================
 // detail
-// =========================================================================
+// ============================================================
 function obsidianUrl(noteRef){
   if(!noteRef) return "";
   let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
@@ -419,7 +388,7 @@ function showDetail(n){
   const badges=[`<span class="badge ${sBadge}">${sLabel}</span>`];
   if(n.level<2){
     badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
-    badges.push(`<span class="badge b-type">${childCountAtL2(n)} 知识点</span>`);
+    badges.push(`<span class="badge b-type">${countL2Under(n)} 知识点</span>`);
   }else{
     if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
     if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
@@ -432,15 +401,12 @@ function showDetail(n){
   const pageStr=(n.pages||[]).join(", ")||"—";
   document.getElementById("d-path").innerHTML=`p.${pageStr}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
   const link=[];
-  if(n.note_ref){ link.push(`<a href="${obsidianUrl(n.note_ref)}">📝 ${n.note_ref}</a>`); }
-  if(n.card_refs && n.card_refs.length){
-    link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
-  }
+  if(n.note_ref) link.push(`<a href="${obsidianUrl(n.note_ref)}">📝 ${n.note_ref}</a>`);
+  if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
-  // 前置/后续 — 仅 L2 有
   function fillList(elId, dir){
     const ul=document.getElementById(elId); ul.innerHTML="";
-    if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合视图：钻入到知识点层级才能看）"; ul.appendChild(li); return}
+    if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合层：点该方块进入知识点视图后可见前置链）"; ul.appendChild(li); return}
     let count=0;
     for(const e of edgesByLevel[2]) if(e[dir==="prereq"?"to":"from"]===n.id){
       const other=id2[e[dir==="prereq"?"from":"to"]]; if(!other) continue;
@@ -449,7 +415,7 @@ function showDetail(n){
       const stO=stateOf(other);
       const stEmoji={mastered:"🟢",unlocked:"🟡",locked:"⚫"}[stO];
       li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
-      li.onclick=()=>focusOn(other.id);
+      li.onclick=()=>{pushView({kind:"focus", id:other.id})};
       ul.appendChild(li); count++;
     }
     if(!count){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（无）"; ul.appendChild(li)}
@@ -458,9 +424,39 @@ function showDetail(n){
   fillList("d-unlocks","unlock");
 }
 function closeDetail(){document.getElementById("detail").classList.remove("open")}
-document.addEventListener("keydown",e=>{ if(e.key==="Escape") clearFocus() });
-window.addEventListener("resize",()=>{
-  if(focusId) focusOn(focusId);
-  else resetView();
+
+// ============================================================
+// settings
+// ============================================================
+function openSettings(){
+  document.getElementById("sett-mask").classList.add("open");
+  const inp=document.getElementById("sett-ratio");
+  inp.value=Math.round(settings.blockRatio*100);
+  updateSettPreview();
+  inp.oninput=updateSettPreview;
+}
+function updateSettPreview(){
+  const v=+document.getElementById("sett-ratio").value;
+  document.getElementById("sett-val").textContent=v+"%";
+  document.getElementById("sett-bar").style.width=(v/30*100)+"%";
+}
+function applySettings(){
+  const v=+document.getElementById("sett-ratio").value;
+  settings.blockRatio=v/100;
+  saveSettings(settings);
+  closeSettings();
+  render();
+}
+function closeSettings(){document.getElementById("sett-mask").classList.remove("open")}
+
+// 快捷键
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){
+    if(document.getElementById("sett-mask").classList.contains("open")) closeSettings();
+    else goBack();
+  }
+  if(e.key==="Backspace" && !["INPUT","TEXTAREA"].includes(document.activeElement.tagName)) goBack();
 });
+window.addEventListener("resize",()=>render());
+updateNav();
 </script></body></html>
