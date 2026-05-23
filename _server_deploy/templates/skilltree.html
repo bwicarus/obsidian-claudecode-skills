@@ -461,10 +461,15 @@ function render(){
   // CSS 切换：focus 模式时 svg root 加 class .focus-mode
   svg.node().parentNode.classList.toggle("focus-mode", isFocusMode);
   const W = wrap.clientWidth - 40;
-  const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
-  const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
-  const gapX = Math.max(14, Math.floor(blockW * 0.18));
-  const gapY = Math.max(46, Math.floor(blockH * 1.7));
+  let blockW = Math.max(70, Math.floor(W * settings.blockRatio));
+  let blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
+  let gapX = Math.max(14, Math.floor(blockW * 0.18));
+  let gapY = Math.max(46, Math.floor(blockH * 1.7));
+  // home 视图：9 章纵向叠放，每章一行 → 块要宽
+  if(current.kind==="home"){
+    blockW = Math.min(Math.floor(W*0.6), 520);
+    blockH = Math.floor(blockW * 0.22);
+  }
 
   const d=depthByLevel[level];
   const cols=Math.max(1, Math.floor(W/(blockW+gapX)));
@@ -546,41 +551,32 @@ function render(){
         curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
       }
     } else {
-      // ====== home：9 个 L0，按"已开放/未开放"分组 ======
-      // 未开放章节折叠到底部灰条，点击展开
+      // ====== home：9 个 L0 章节按位置纵向叠放（第 1 章最上，第 9 章最下）======
+      // 每章一行：左右两侧贴边色线 + 中间章节块
+      // locked 章节默认折叠到底部灰条，点开后纵向追加在灰条之后
       const activeNodes = nodes.filter(n => stateOf(n) !== "locked");
       const lockedNodes = nodes.filter(n => stateOf(n) === "locked");
-      // 活跃节点平铺
-      curY=20;
-      const cols2=Math.max(1, Math.floor(W/(blockW+gapX)));
-      const wTotalA=Math.min(activeNodes.length,cols2)*(blockW+gapX)-gapX;
-      const xStartA=Math.max(20,(W-wTotalA)/2);
-      activeNodes.forEach((n,i)=>{
-        const sr=Math.floor(i/cols2), col=i%cols2;
-        positions[n.id]={x:xStartA+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
-      });
-      const subRowsA=Math.ceil(activeNodes.length/cols2);
-      curY += subRowsA*(blockH+gapY*0.4) + gapY*0.4;
-      // 灰条放底部（locked 章节展开/折叠开关）
+      const xC = W/2;
+      const rowH = blockH + 14;  // 每章占的纵向空间
+      curY = 24;
+      function placeChapter(n){
+        positions[n.id] = { x:xC, y:curY + blockH/2 };
+        chapBands.push({
+          id:n.id, y:curY - 6, h:blockH + 12,
+          color:chapterColor[n.id],
+          name:n.name, label:n.chapter_label||""
+        });
+        curY += rowH;
+      }
+      activeNodes.forEach(placeChapter);
       if(lockedNodes.length){
         const barH=36;
-        window.__lockedBarRect={y:curY, h:barH, count:lockedNodes.length};
-        curY += barH + gapY*0.3;
+        window.__lockedBarRect={y:curY+4, h:barH, count:lockedNodes.length};
+        curY += barH + 18;
         if(showLockedSection){
-          // 展开：locked 节点用更暗淡的尺寸排在灰条下方
-          const wTotalL=Math.min(lockedNodes.length,cols2)*(blockW+gapX)-gapX;
-          const xStartL=Math.max(20,(W-wTotalL)/2);
-          lockedNodes.forEach((n,i)=>{
-            const sr=Math.floor(i/cols2), col=i%cols2;
-            positions[n.id]={x:xStartL+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
-          });
-          const subRowsL=Math.ceil(lockedNodes.length/cols2);
-          curY += subRowsL*(blockH+gapY*0.4) + gapY*0.5;
+          lockedNodes.forEach(placeChapter);
         } else {
-          // 折叠：locked 节点位置塞到 bar 中（不显示，data binding 仍存在但 opacity 0）
-          lockedNodes.forEach(n => {
-            positions[n.id]={x:-9999, y:window.__lockedBarRect.y+barH/2};  // 屏外
-          });
+          lockedNodes.forEach(n => { positions[n.id]={x:-9999, y:0}; });
         }
       } else {
         window.__lockedBarRect=null;
@@ -614,8 +610,9 @@ function render(){
     .attr("y",b=>b.y).attr("height",b=>b.h)
     .attr("fill",b=>b.color)
     .style("opacity",0.85);
-  // 章名标签：左侧色线右侧贴边
-  const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
+  // 章名标签：home 视图节点本身已显示章名，不重复标
+  const labelData = (current.kind==="home") ? [] : chapBands;
+  const labSel = root.selectAll("text.chap-band-label").data(labelData, b=>b.id);
   labSel.exit().transition().duration(220).style("opacity",0).remove();
   const labEnter = labSel.enter().append("text").attr("class","chap-band-label")
     .style("opacity",0);
