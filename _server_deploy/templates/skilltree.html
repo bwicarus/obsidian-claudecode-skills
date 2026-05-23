@@ -1037,10 +1037,11 @@ function obsidianPdfUrl(page){
   // KG.pdf_vault_path 由服务端 data.json 派生（PDF 在 vault 内时）
   const vp = KG && KG.pdf_vault_path;
   if(!vp) return null;
-  // 注意：file 整体 encode，#page=N 是 fragment 不 encode；Obsidian 内置 PDF.js 读这个 hash
+  // Obsidian 解析 file 参数时，跟 wikilink [[X.pdf#page=N]] 同语义：
+  // 把 "#page=N" 拼在 file 末尾，整体 encodeURIComponent（# 变 %23、= 变 %3D）。
+  // 之前直接用 URL hash "#page=N" 会被浏览器吞掉，Obsidian 收不到。
   return "obsidian://open?vault="+encodeURIComponent(VAULT)
-       + "&file="+encodeURIComponent(vp)
-       + "#page="+page;
+       + "&file="+encodeURIComponent(vp + "#page=" + page);
 }
 function showDetail(n){
   if(!n) return;
