@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
-from lib.claude_quota import can_run_more, util_5h  # noqa: E402
+from lib.claude_quota import can_run_more, can_run_aggressive, util_5h  # noqa: E402
 sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
 from ai_backends import make_backend  # noqa: E402
 
@@ -282,15 +282,18 @@ def main() -> int:
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out", default=str(STATE_DIR / "kg_audit.json"))
-    # Budget-gated 激进模式：实时查 quota，跑到 5h util 上限自动停
+    # Budget-gated 激进模式：实时查 quota + 时间感知，保证 target 时刻满血
     ap.add_argument("--budget-loop", action="store_true",
-                    help="循环跑直到 quota 用完（凌晨用，激进消耗夜间空闲额度）")
-    ap.add_argument("--budget-target-5h", type=float, default=80.0,
-                    help="5h 窗口 utilization 上限（默认 80，留 20 buffer 早起用）")
-    ap.add_argument("--budget-target-7d", type=float, default=90.0,
-                    help="7d 窗口 utilization 上限（默认 90）")
-    ap.add_argument("--budget-max-batches", type=int, default=20,
-                    help="budget-loop 模式下最多跑几批（硬上限防意外，默认 20 批 × 20 节点 = 400）")
+                    help="循环跑直到 quota 触限或安全 cutoff（凌晨用，激进消耗夜间空闲额度）")
+    ap.add_argument("--target-hour", type=int, default=9,
+                    help="目标满血时刻小时（默认 9，即早 9:00）")
+    ap.add_argument("--target-min", type=int, default=0)
+    ap.add_argument("--buffer-min", type=int, default=30,
+                    help="安全 cutoff 前的 buffer 分钟（默认 30）")
+    ap.add_argument("--budget-target-7d", type=float, default=88.0,
+                    help="7d 窗口 utilization 上限（默认 88，保护周窗口不爆）")
+    ap.add_argument("--budget-max-batches", type=int, default=30,
+                    help="budget-loop 硬上限批数（防意外，默认 30 批 × 20 节点 = 600）")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -346,12 +349,17 @@ def main() -> int:
             return True
 
         if args.budget_loop:
-            # 激进模式：循环跑直到 quota 用完或达批数上限
-            print(f"[B] BUDGET-LOOP 模式：跑到 5h≥{args.budget_target_5h:.0f}% 或 7d≥{args.budget_target_7d:.0f}% 停")
-            print(f"    硬上限：{args.budget_max_batches} 批 × {args.ai_sample_size} 节点 = "
-                  f"{args.budget_max_batches * args.ai_sample_size} 节点")
+            # 时间感知激进模式：保证 target_hour:target_min 时 5h 窗口自然清零
+            print(f"[B] BUDGET-LOOP 时间感知模式")
+            print(f"    目标满血时刻：{args.target_hour:02d}:{args.target_min:02d}")
+            print(f"    安全 cutoff：5h - {args.buffer_min}min buffer = "
+                  f"{args.target_hour - 5}:{args.target_min:02d}（左右）后停跑")
+            print(f"    7d 触限阈值：{args.budget_target_7d:.0f}%")
+            print(f"    硬上限：{args.budget_max_batches} 批 × {args.ai_sample_size} 节点")
             for batch_i in range(args.budget_max_batches):
-                ok, reason = can_run_more(args.budget_target_5h, args.budget_target_7d)
+                ok, reason = can_run_aggressive(
+                    target_hour=args.target_hour, target_min=args.target_min,
+                    buffer_min=args.buffer_min, target_7d_util=args.budget_target_7d)
                 if not ok:
                     print(f"  [批 {batch_i+1}] STOP - {reason}")
                     break

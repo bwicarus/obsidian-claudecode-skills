@@ -171,12 +171,12 @@ def run_kg_link_mastery() -> int:
         r2 = run_py("kg/link_and_mastery.py", ["--kg", str(kg), "--in-place"])
         if r2 != 0:
             print(f"    link_and_mastery 失败 (rc={r2})"); rc = r2
-        # 3) KG 准确性审计（凌晨用 budget-loop 激进模式：跑到 5h util 80% 自停）
+        # 3) KG 准确性审计（凌晨 budget-loop 时间感知模式：早 9:00 - 5h - 30min 自停）
         r3 = run_py("kg/audit_kg.py", [
             "--kg", str(kg), "--ai-sample-size", "20",
             "--model", "sonnet", "--effort", "medium", "--workers", "4",
             "--budget-loop",
-            "--budget-target-5h", "80",
+            "--target-hour", "9", "--target-min", "0", "--buffer-min", "30",
             "--budget-target-7d", "88",
             "--budget-max-batches", "30",
         ])

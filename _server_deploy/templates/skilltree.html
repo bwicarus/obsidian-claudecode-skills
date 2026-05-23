@@ -92,26 +92,44 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 .edge.unl{stroke:#fbbf24aa}
 .edge.prev{stroke:#7283a5aa;stroke-dasharray:5 4}
 .edge.lock{stroke:#3e4a64aa;stroke-dasharray:4 3;opacity:.6}
-/* detail */
-#detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.6;z-index:5}
+/* detail：整面板按 mastery 状态着色（背景渐变 + 顶部色带 + 左边框）*/
+#detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:4px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease,border-left-color .25s,background .25s;font-size:13px;line-height:1.6;z-index:5;position:relative}
 #detail.open{transform:translateX(0);box-shadow:-12px 0 32px rgba(0,0,0,.5)}
-#detail h2{font-size:16px;margin-bottom:8px;color:#e6e6f0}
-#detail .lbl{color:#8a9bb4;font-size:10px;margin-top:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
-#detail .v{margin-top:3px;color:#cfd6e6;word-break:break-all}
+/* 顶部色带（伪元素，宽度撑满，高度 6px）*/
+#detail::before{content:"";position:absolute;top:0;left:0;right:0;height:6px;background:#2a3550;transition:background .25s}
+/* 4 种 mastery 状态主题 */
+#detail.theme-mastered{border-left-color:#34d399;background:linear-gradient(180deg,#0e2a1d 0%,#0a0e1a 35%)}
+#detail.theme-mastered::before{background:#34d399}
+#detail.theme-unlockable{border-left-color:#60a5fa;background:linear-gradient(180deg,#0e1f33 0%,#0a0e1a 35%)}
+#detail.theme-unlockable::before{background:#60a5fa}
+#detail.theme-previewable{border-left-color:#7889a3;background:linear-gradient(180deg,#161c2a 0%,#0a0e1a 35%)}
+#detail.theme-previewable::before{background:#7889a3}
+#detail.theme-locked{border-left-color:#3a4456;background:linear-gradient(180deg,#0e131e 0%,#0a0e1a 35%)}
+#detail.theme-locked::before{background:#3a4456}
+
+#detail h2{font-size:17px;margin-bottom:10px;color:#e6e6f0;margin-top:6px}
+#detail .lbl{color:#8a9bb4;font-size:10px;margin-top:14px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+#detail .v{margin-top:4px;color:#cfd6e6;word-break:break-all}
 #detail a{color:#7dc4ff;text-decoration:none}
 #detail a:hover{text-decoration:underline}
-#detail-close{position:absolute;top:12px;right:14px;background:none;border:none;color:#8a9bb4;font-size:18px;cursor:pointer;line-height:1}
-.badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;margin-right:6px;font-weight:600}
-.b-mast{background:#10412a;color:#7be096;box-shadow:inset 0 0 0 1px #34d399}
-.b-unl{background:#3a2a08;color:#fcd383;box-shadow:inset 0 0 0 1px #fbbf24}
-.b-prev{background:#1a2235;color:#9aa9c3;box-shadow:inset 0 0 0 1px #5b6889}
-.b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
+#detail-close{position:absolute;top:14px;right:14px;background:rgba(0,0,0,0.35);border:1px solid #2a3550;width:32px;height:32px;border-radius:50%;color:#cfd6e6;font-size:18px;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
+#detail-close:hover{background:#1f2740;border-color:#5b6889;color:#fff}
+
+.badge{display:inline-block;padding:5px 12px;border-radius:14px;font-size:12px;margin-right:6px;margin-bottom:4px;font-weight:700}
+.b-mast{background:#10412a;color:#7be096;box-shadow:inset 0 0 0 1.5px #34d399}
+.b-unl{background:#0e2342;color:#a8cdff;box-shadow:inset 0 0 0 1.5px #60a5fa}
+.b-prev{background:#1a2235;color:#b8c4d8;box-shadow:inset 0 0 0 1.5px #7889a3}
+.b-lock{background:#1f2530;color:#8a9bb4;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
-.page-pair{display:inline-flex;align-items:center;gap:1px;margin:2px 4px 2px 0}
-.page-link{display:inline-block;padding:2px 7px;background:#1a2540;color:#9ec3ff;border:1px solid #2c3e6a;border-right:none;border-radius:4px 0 0 4px;text-decoration:none;font-size:11px;font-family:monospace}
-.page-link:hover{background:#2c3e6a;color:#cfe6ff;border-color:#3b6db5}
-.page-link-web{display:inline-block;padding:2px 5px;background:#172033;color:#8a9bb4;border:1px solid #2c3e6a;border-radius:0 4px 4px 0;text-decoration:none;font-size:10px;line-height:1}
-.page-link-web:hover{background:#2c3e6a;color:#e6e6f0;border-color:#3b6db5}
+
+/* 页码 chip 放大：触屏友好，最小点击区 36×28 */
+.page-pair{display:inline-flex;align-items:center;gap:1px;margin:4px 6px 4px 0;vertical-align:middle}
+.page-link{display:inline-flex;align-items:center;min-height:30px;padding:5px 14px;background:#1a2540;color:#a8cdff;border:1.5px solid #3b6db5;border-right:none;border-radius:8px 0 0 8px;text-decoration:none;font-size:14px;font-family:monospace;font-weight:600;letter-spacing:0.3px}
+.page-link:hover{background:#2c3e6a;color:#cfe6ff;border-color:#60a5fa}
+.page-link:active{background:#1f3055}
+.page-link-web{display:inline-flex;align-items:center;min-height:30px;padding:5px 10px;background:#172033;color:#9aa9c3;border:1.5px solid #3b6db5;border-radius:0 8px 8px 0;text-decoration:none;font-size:14px;line-height:1}
+.page-link-web:hover{background:#2c3e6a;color:#fff;border-color:#60a5fa}
+.page-link-web:active{background:#1f3055}
 .b-chap{font-size:10px;padding:2px 8px}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
@@ -1018,8 +1036,12 @@ function obsidianPdfUrl(page){
 }
 function showDetail(n){
   if(!n) return;
-  const wasOpen = document.getElementById("detail").classList.contains("open");
-  document.getElementById("detail").classList.add("open");
+  const dt = document.getElementById("detail");
+  const wasOpen = dt.classList.contains("open");
+  dt.classList.add("open");
+  // 整面板按 mastery 状态主题色（顶部色带 + 左边框 + 背景渐变）
+  dt.classList.remove("theme-mastered","theme-unlockable","theme-previewable","theme-locked");
+  dt.classList.add("theme-" + stateOf(n));
   if(!wasOpen && settings.fitToWidth){
     updateWrapPadding();
     // 详情面板新打开：等过渡完成后 re-layout 适应新宽度
