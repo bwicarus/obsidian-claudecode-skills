@@ -39,10 +39,14 @@ svg.canvas{display:block}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
 .tile.mastered rect.tbox{stroke:#34d399;stroke-width:2.2;fill:#0d2a1f;filter:drop-shadow(0 0 8px #34d39977)}
 .tile.mastered{color:#7be096}
-.tile.unlocked rect.tbox{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
-.tile.unlocked{color:#fcd383}
-.tile.locked rect.tbox{stroke:#6a7488;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
-.tile.locked{color:#7a8497}
+.tile.unlockable rect.tbox{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
+.tile.unlockable{color:#fcd383}
+.tile.previewable rect.tbox{stroke:#5b6889;stroke-width:1.5;fill:#1a2235;stroke-dasharray:none;opacity:.62}
+.tile.previewable{color:#9aa9c3}
+.tile.previewable text.tname{font-weight:500}
+.tile.locked rect.tbox{stroke:#4a5468;stroke-width:1.2;fill:#0e131e;stroke-dasharray:4 3;opacity:.85}
+.tile.locked{color:#5a6478}
+.tile.locked text.tname{opacity:.55}
 .tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
@@ -52,7 +56,8 @@ svg.canvas{display:block}
 .edge{fill:none;stroke-linecap:round}
 .edge.mast{stroke:#34d399aa}
 .edge.unl{stroke:#fbbf24aa}
-.edge.lock{stroke:#5a6680cc;stroke-dasharray:4 3}
+.edge.prev{stroke:#7283a5aa;stroke-dasharray:5 4}
+.edge.lock{stroke:#3e4a64aa;stroke-dasharray:4 3;opacity:.6}
 /* detail */
 #detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.6;z-index:5}
 #detail.open{transform:translateX(0);box-shadow:-12px 0 32px rgba(0,0,0,.5)}
@@ -65,6 +70,7 @@ svg.canvas{display:block}
 .badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;margin-right:6px;font-weight:600}
 .b-mast{background:#10412a;color:#7be096;box-shadow:inset 0 0 0 1px #34d399}
 .b-unl{background:#3a2a08;color:#fcd383;box-shadow:inset 0 0 0 1px #fbbf24}
+.b-prev{background:#1a2235;color:#9aa9c3;box-shadow:inset 0 0 0 1px #5b6889}
 .b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
 .b-chap{font-size:10px;padding:2px 8px}
@@ -105,8 +111,9 @@ svg.canvas{display:block}
   <span class="meta" id="meta">加载中…</span>
   <div id="legend">
     <span><span class="dot" style="background:#34d399;color:#34d399"></span>已掌握</span>
-    <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>已解锁</span>
-    <span><span class="dot" style="background:#4a5568;color:#4a5568"></span>未解锁</span>
+    <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>可学</span>
+    <span><span class="dot" style="background:#5b6889;color:#5b6889"></span>可瞟</span>
+    <span><span class="dot" style="background:#4a5468;color:#4a5468"></span>未开放</span>
   </div>
 </div>
 <div id="viz">
@@ -114,7 +121,8 @@ svg.canvas{display:block}
     <svg class="canvas"><defs>
       <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
       <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
-      <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#5a6680"/></marker>
+      <marker id="arr-prev" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#7283a5"/></marker>
+      <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#3e4a64"/></marker>
     </defs></svg>
   </div>
   <aside id="detail">
@@ -282,7 +290,13 @@ function chapOf(node){
   let c=node; while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}
   return node.level===0?node.id:null;
 }
-function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
+// 四态：mastered / unlockable / previewable / locked。读 n.state，旧字段兼容回退。
+function stateOf(n){
+  if(n.state) return n.state;
+  if(n.mastered) return "mastered";
+  if(n.unlocked) return "unlockable";
+  return "locked";
+}
 
 // ============================================================
 // URL hash 同步
@@ -492,7 +506,11 @@ function render(){
 function tileClass(d, focusedId){
   return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}`;
 }
-function edgeClass(e){const f=id2[e.from];return f?.mastered?"mast":(f?.unlocked?"unl":"lock")}
+function edgeClass(e){
+  const f=id2[e.from]; if(!f) return "lock";
+  const s=stateOf(f);
+  return s==="mastered"?"mast":(s==="unlockable"?"unl":(s==="previewable"?"prev":"lock"));
+}
 function edgeWidthFor(e){
   // 边权重 = 源节点的后继数（更基础的前置=更粗）
   if(current.kind==="home"||current.kind==="chapter"){
@@ -552,22 +570,26 @@ function applySearchHighlight(){
 }
 
 // ============================================================
-// 推荐：解锁未掌握 + 后继多
+// 推荐：unlockable 优先（可以开始学），按"解锁后继数"排序
 // ============================================================
 function openRecommend(){
-  const recs=nodesByLevel[2]
-    .filter(n=>n.unlocked && !n.mastered)
+  const unlk=nodesByLevel[2].filter(n=>stateOf(n)==="unlockable");
+  const prev=nodesByLevel[2].filter(n=>stateOf(n)==="previewable");
+  const recs=[...unlk, ...prev]
     .sort((a,b)=>(descendants[b.id]||0)-(descendants[a.id]||0))
-    .slice(0,8);
+    .slice(0,10);
   const list=document.getElementById("reco-list");
-  if(!recs.length){ list.innerHTML='<p style="color:#8a9bb4">暂无已解锁未掌握的节点（可能 Anki 数据还没关联好）</p>'; }
+  if(!recs.length){ list.innerHTML='<p style="color:#8a9bb4">暂无可解锁节点（可能 Anki 数据还没关联好）</p>'; }
   else{
     list.innerHTML=recs.map(n=>{
       const sec=id2[n.parent_id], chap=sec?id2[sec.parent_id]:null;
       const lbl=n.numeric_label?`[${n.numeric_label}] `:"";
       const path=`${chap?chap.name+' › ':''}${sec?sec.name:''}`;
+      const st=stateOf(n);
+      const tagColor=st==="unlockable"?"#fbbf24":"#9aa9c3";
+      const tagText=st==="unlockable"?"可学":"可瞟";
       return `<div class="reco-item" onclick="document.getElementById('reco-mask').classList.remove('open'); pushView({kind:'focus',id:'${n.id}'})">
-        <div class="top"><span>${lbl}<b>${n.name}</b></span><span style="color:#fbbf24">解锁 ${descendants[n.id]||0} 后继</span></div>
+        <div class="top"><span><span style="color:${tagColor};margin-right:6px">[${tagText}]</span>${lbl}<b>${n.name}</b></span><span style="color:#fbbf24">解锁 ${descendants[n.id]||0} 后继</span></div>
         <div class="sub">${path}</div>
       </div>`;
     }).join("");
@@ -658,8 +680,8 @@ function showDetail(n){
   document.getElementById("detail").classList.add("open");
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
-  const sLabel={mastered:"已掌握",unlocked:"已解锁",locked:"未解锁"}[st];
-  const sBadge={mastered:"b-mast",unlocked:"b-unl",locked:"b-lock"}[st];
+  const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", previewable:"… 可瞟", locked:"🔒 未开放"}[st];
+  const sBadge={mastered:"b-mast", unlockable:"b-unl", previewable:"b-prev", locked:"b-lock"}[st];
   const badges=[`<span class="badge ${sBadge}">${sLabel}</span>`];
   if(n.level<2){
     badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
@@ -667,6 +689,7 @@ function showDetail(n){
   }else{
     if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
     if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
+    else badges.push(`<span class="badge b-type" style="opacity:.6">无卡片数据</span>`);
     badges.push(`<span class="badge b-type">解锁 ${descendants[n.id]||0} 后继</span>`);
   }
   const chap=chapOf(n);

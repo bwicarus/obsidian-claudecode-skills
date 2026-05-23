@@ -29,7 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 
 RECORDS_DIR = config.RECORDS_DIR
-MASTERED_THRESHOLD = 0.8
+# 四态阈值：解锁阈值（开始学的门槛）和掌握阈值（金色徽章）分开
+# 阈值取 0.4 贴合实际：当前 mastery 公式下，刷过几遍的复习卡 mastery 在 0.40-0.50；
+# 0.4 让"刚开始复习的章节"就能传递解锁性，0.8 仍保留作严格的掌握徽章。
+UNLOCK_THRESHOLD = 0.4       # 前置 mastery 全 >= 0.4 → 节点 unlockable
+MASTERED_THRESHOLD = 0.8     # 前置 mastery 全 >= 0.8 且自身 >= 0.8 → mastered
+PREVIEW_THRESHOLD = 0.3      # ≥1 个前置 mastery >= 0.3 → previewable（可瞟）
 
 
 def _norm(s: str) -> str:
@@ -133,7 +138,7 @@ def main() -> int:
     for n in nodes:
         n.pop("note_ref", None); n.pop("card_refs", None)
         n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
-        n.pop("has_cards", None)
+        n.pop("has_cards", None); n.pop("state", None)
     # 1) 关联：L1 → 笔记，L2 → 卡（继承父 L1 的 record）
     linked_l1 = linked_l2 = 0
     for n in nodes:
@@ -161,13 +166,14 @@ def main() -> int:
 
     # 2) 掌握度：L2 叶子先算，再向上聚合
     # 用 L2 父 record 的 mastery_avg 给所有挂在该 record 上的 L2 同一个值（粗近似）
+    # 没卡的节点 mastery 留 None（"无数据"，与 0.0 区分；状态判定时不阻塞）
     for n in nodes:
         if n["level"] == 2:
             rec = rec_by_sn.get(n.get("note_ref", ""))
             m = card_mastery({}, rec) if rec else None
-            n["mastery"] = m if m is not None else 0.0
+            n["mastery"] = m  # 可能是 None
             n["has_cards"] = bool(n.get("card_refs"))
-    # 聚合 L1/L0：子节点 mastery 均值（只算有 has_cards 的 L2）
+    # 聚合 L1/L0：子节点 mastery 均值（只算有 has_cards 的 L2；其它跳过）
     children = defaultdict(list)
     for n in nodes:
         if n.get("parent_id"):
@@ -179,67 +185,95 @@ def main() -> int:
         ms = []
         for k in kids:
             if k["level"] == 2:
-                if k.get("has_cards"): ms.append(k["mastery"])
+                if k.get("has_cards") and k.get("mastery") is not None:
+                    ms.append(k["mastery"])
             else:
                 v = agg(k)
                 if v is not None: ms.append(v)
         return sum(ms) / len(ms) if ms else None
     for n in nodes:
         if n["level"] in (0, 1):
-            v = agg(n)
-            n["mastery"] = v if v is not None else 0.0
+            n["mastery"] = agg(n)  # 可能 None
 
-    # 3) 解锁态：所有 prereq.from 已 mastered 才 unlocked；mastered ⇔ mastery ≥ 阈值 且 unlocked
+    # 3) 四态：locked / previewable / unlockable / mastered
+    #    - mastered      = 所有前置 mastered & 自身 mastery ≥ MASTERED_THRESHOLD
+    #    - unlockable    = 所有前置 mastery ≥ UNLOCK_THRESHOLD（"可以开始学"）
+    #    - previewable   = ≥1 个前置 mastery ≥ PREVIEW_THRESHOLD（可瞟简介）
+    #    - locked        = 其它（暂不该碰）
+    # 起点（indeg=0 的 L2）默认 unlockable。
     edges = kg.get("edges", [])
     prereqs_to = defaultdict(list)
-    for e in edges:
-        if e.get("kind") == "prereq":
-            prereqs_to[e["to"]].append(e["from"])
-    # 拓扑顺序计算
     indeg = defaultdict(int); g = defaultdict(list)
     for e in edges:
         if e.get("kind") == "prereq":
+            prereqs_to[e["to"]].append(e["from"])
             g[e["from"]].append(e["to"]); indeg[e["to"]] += 1
-    # 起点：indeg 0 的 L2
-    queue = [n["id"] for n in nodes if n["level"] == 2 and indeg[n["id"]] == 0]
-    state: dict[str, dict] = {}
-    for nid in queue:
+
+    # 拿前置 mastery 列表来判定，所以需要先有所有 L2 的 mastery。已在上方完成。
+    # 规则：mastery=None（无卡）的前置 = "中性"（不阻塞解锁，也不传递 mastered）。
+    def classify_l2(nid: str) -> str:
         n = id2[nid]
-        state[nid] = {"unlocked": True,
-                      "mastered": n["mastery"] >= MASTERED_THRESHOLD}
+        prs = prereqs_to[nid]
+        self_m = n.get("mastery")  # 可能 None
+        # 自身 mastered 必须 mastery 真的 ≥ 0.8（None 不算）
+        self_is_mastered = (self_m is not None and self_m >= MASTERED_THRESHOLD)
+        if not prs:
+            return "mastered" if self_is_mastered else "unlockable"
+        # 把前置 mastery 分成"有数据"和"无数据"两组
+        data_ms = [id2[p].get("mastery") for p in prs if p in id2]
+        with_data = [m for m in data_ms if m is not None]
+        # 无数据前置全部跳过（中性）；有数据前置走阈值
+        if not with_data:
+            # 所有前置都无数据 → 不阻塞，按自身定
+            return "mastered" if self_is_mastered else "unlockable"
+        all_mast   = all(m >= MASTERED_THRESHOLD for m in with_data)
+        all_unlock = all(m >= UNLOCK_THRESHOLD for m in with_data)
+        any_prev   = any(m >= PREVIEW_THRESHOLD for m in with_data)
+        if all_mast and self_is_mastered:
+            return "mastered"
+        if all_unlock:
+            return "unlockable"
+        if any_prev:
+            return "previewable"
+        return "locked"
+
+    # 拓扑序处理（防止环里出错；这里用 BFS 顺序保证前置已分类）
+    queue = [n["id"] for n in nodes if n["level"] == 2 and indeg[n["id"]] == 0]
+    indeg_copy = dict(indeg)
+    state_map: dict[str, str] = {}
     while queue:
         cur = queue.pop(0)
+        state_map[cur] = classify_l2(cur)
         for v in g[cur]:
-            indeg[v] -= 1
-            if indeg[v] == 0:
-                prs = prereqs_to[v]
-                all_mast = all(state.get(p, {}).get("mastered") for p in prs)
-                n = id2[v]
-                state[v] = {"unlocked": all_mast,
-                            "mastered": all_mast and n["mastery"] >= MASTERED_THRESHOLD}
+            indeg_copy[v] -= 1
+            if indeg_copy[v] == 0:
                 queue.append(v)
+    # 落到节点字段；并保留旧的 unlocked / mastered 兼容字段（unlocked = unlockable | mastered）
     for n in nodes:
         if n["level"] == 2:
-            st = state.get(n["id"], {"unlocked": True, "mastered": n["mastery"] >= MASTERED_THRESHOLD})
-            n["unlocked"] = st["unlocked"]; n["mastered"] = st["mastered"]
-    # L1/L0 聚合解锁/掌握：所有 L2 子孙 unlocked → 该节点 unlocked；mastered 同理
+            st = state_map.get(n["id"], "unlockable")
+            n["state"] = st
+            n["unlocked"] = st in ("unlockable", "mastered")
+            n["mastered"] = st == "mastered"
+
+    # L1/L0 聚合：state 取"子孙最弱的那个"（保守显示）
+    STATE_ORDER = {"locked": 0, "previewable": 1, "unlockable": 2, "mastered": 3}
     def agg_state(node):
         kids = children.get(node["id"], [])
         if not kids:
-            return True, node.get("mastered", False)
-        u_all, m_all = True, True
+            return node.get("state", "unlockable")
+        worst = "mastered"
         for k in kids:
-            if k["level"] == 2:
-                u_all &= k.get("unlocked", True)
-                m_all &= k.get("mastered", False)
-            else:
-                u, m = agg_state(k)
-                u_all &= u; m_all &= m
-        return u_all, m_all
+            s = k.get("state") if k["level"] == 2 else agg_state(k)
+            if STATE_ORDER.get(s, 0) < STATE_ORDER.get(worst, 0):
+                worst = s
+        return worst
     for n in nodes:
         if n["level"] in (0, 1):
-            u, m = agg_state(n)
-            n["unlocked"] = u; n["mastered"] = m
+            s = agg_state(n)
+            n["state"] = s
+            n["unlocked"] = s in ("unlockable", "mastered")
+            n["mastered"] = s == "mastered"
 
     if not args.in_place:
         print("（dry-run，未写回；加 --in-place 应用）")
