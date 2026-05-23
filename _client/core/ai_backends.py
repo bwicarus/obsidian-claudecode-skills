@@ -159,7 +159,8 @@ class ClaudeCli(CliBackend):
             full = [cmd, "--allowedTools", "Read", *self._model_effort_flags(),
                     "--output-format", "text", "-p", prompt]
             r = _run_hidden(full, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=180)
+                            encoding="utf-8", errors="replace",
+                            timeout=int(self.settings.get("timeout", 180)))
             out = (r.stdout or "").strip()
             if not out:
                 err = (r.stderr or "").strip()

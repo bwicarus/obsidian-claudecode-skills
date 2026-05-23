@@ -79,6 +79,7 @@ def main() -> int:
 
     backend = make_backend("claude_cli", {
         "command": "/usr/bin/claude", "model": args.model, "effort": args.effort,
+        "timeout": 900,   # 全量合并对 opus 是大 prompt（~30KB），需 10+ 分钟
     })
     prompt = _PROMPT.format(book=kg.get("book", "?"), n=len(l2), listing=listing)
     print(f"调 AI 找合并组（{args.model}/{args.effort}）…")

@@ -25,6 +25,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -80,6 +81,7 @@ def main() -> int:
     ap.add_argument("--max-prereqs", type=int, default=3)
     ap.add_argument("--in-place", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个 L2（试水）")
+    ap.add_argument("--workers", type=int, default=4, help="并行 AI 调用数")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -96,29 +98,25 @@ def main() -> int:
 
     backend = make_backend("claude_cli", {
         "command": "/usr/bin/claude", "model": args.model, "effort": args.effort,
+        "timeout": 300,
     })
 
     book = kg.get("book", "?")
-    new_edges: list[dict] = []
-    for i, k in enumerate(l2_target, 1):
-        # 候选 = 在 k 之前出现的 L2
+
+    def _make_prompt(k):
         candidates = [n for n in l2 if (page_of(n), label_key(n.get("numeric_label",""))) <
                       (page_of(k), label_key(k.get("numeric_label","")))]
         if not candidates:
-            continue
-        cand_lines = []
-        for c in candidates:
-            cand_lines.append(f"{c['id']}|{c.get('numeric_label','')}|{c['parent_id']}|"
-                              f"{c['name']}|{c.get('summary','')[:40]}")
-        # 防过长：候选 > 80 个时只保留同章 + 最近 50 个
+            return None, []
+        cand_lines = [f"{c['id']}|{c.get('numeric_label','')}|{c['parent_id']}|"
+                      f"{c['name']}|{c.get('summary','')[:40]}" for c in candidates]
         if len(cand_lines) > 80:
             same_chap = [c for c in candidates
                          if id2.get(c["parent_id"], {}).get("parent_id") ==
                             id2.get(k["parent_id"], {}).get("parent_id")]
             recent = candidates[-50:]
             keep_ids = set(c["id"] for c in same_chap) | set(c["id"] for c in recent)
-            cand_lines = [c["id"] + "|" + line.split("|", 1)[1]
-                          for c, line in zip(candidates, cand_lines)
+            cand_lines = [line for c, line in zip(candidates, cand_lines)
                           if c["id"] in keep_ids]
         prompt = _PROMPT.format(
             book=book, maxp=args.max_prereqs,
@@ -127,11 +125,16 @@ def main() -> int:
             k_section=id2.get(k["parent_id"], {}).get("name", ""),
             candidates="\n".join(cand_lines),
         )
+        return prompt, candidates
+
+    def _process(k):
+        prompt, candidates = _make_prompt(k)
+        if not prompt:
+            return k, [], None
         try:
             raw = backend.chat([{"role": "user", "content": prompt}]).strip()
         except Exception as ex:
-            print(f"  [{i}/{len(l2_target)}] {k['name']}: AI 失败 {ex}", flush=True)
-            continue
+            return k, [], ex
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
             raw = re.sub(r"\n```\s*$", "", raw)
@@ -140,24 +143,35 @@ def main() -> int:
             data = json.loads(raw[s:e + 1]) if (s != -1 and e > s) else {}
         except Exception:
             data = {}
-        prereqs = (data.get("prereqs") or [])[:args.max_prereqs]
-        kept = 0
-        for p in prereqs:
-            fid = (p.get("from") or "").strip()
-            if fid not in id2 or fid == k["id"]:
+        return k, (data.get("prereqs") or [])[:args.max_prereqs], None
+
+    new_edges: list[dict] = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futs = {pool.submit(_process, k): k for k in l2_target}
+        for fut in as_completed(futs):
+            done += 1
+            k, prereqs, err = fut.result()
+            if err is not None:
+                print(f"  [{done}/{len(l2_target)}] {k['name']}: AI 失败 {err}", flush=True)
                 continue
-            from_n = id2[fid]
-            if from_n["level"] != 2:
-                continue
-            # 顺序约束（DAG by order）
-            if (page_of(from_n), label_key(from_n.get("numeric_label",""))) >= \
-               (page_of(k), label_key(k.get("numeric_label",""))):
-                continue
-            new_edges.append({"from": fid, "to": k["id"], "kind": "prereq",
-                              "level": 2, "evidence": p.get("reason", "")})
-            kept += 1
-        print(f"  [{i}/{len(l2_target)}] {k.get('numeric_label','?'):8s} {k['name']:24s} "
-              f"→ {kept} 条前置", flush=True)
+            kept = 0
+            for p in prereqs:
+                fid = (p.get("from") or "").strip()
+                if fid not in id2 or fid == k["id"]:
+                    continue
+                from_n = id2[fid]
+                if from_n["level"] != 2:
+                    continue
+                if (page_of(from_n), label_key(from_n.get("numeric_label",""))) >= \
+                   (page_of(k), label_key(k.get("numeric_label",""))):
+                    continue
+                new_edges.append({"from": fid, "to": k["id"], "kind": "prereq",
+                                  "level": 2, "evidence": p.get("reason", "")})
+                kept += 1
+            if done % 20 == 0 or done == len(l2_target):
+                print(f"  [{done}/{len(l2_target)}] {k.get('numeric_label','?'):8s} "
+                      f"{k['name'][:18]:18s} → {kept} 前置（累计边 {len(new_edges)}）", flush=True)
 
     # 环检测：拓扑排序，环边记号
     indeg = defaultdict(int); g = defaultdict(list)

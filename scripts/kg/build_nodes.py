@@ -35,6 +35,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -166,6 +167,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个 L1 section（试水）")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--effort", default="medium")
+    ap.add_argument("--workers", type=int, default=4, help="并行 AI 调用数（默认 4）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -215,16 +217,29 @@ def main() -> int:
     for li, l1 in enumerate(l1_list, 1):
         l0 = l0_by_id[l1["parent_id"]]
         ps, pe = l1["pages"]
-        sec_l2: dict[str, dict] = {}   # name → node（节内去重）
-        for pg in range(ps, pe + 1):
-            png = render_page_png(doc, pg - 1, args.book)
+        sec_l2: dict[str, dict] = {}   # numeric_label → node（节内去重）
+        # 渲染所有页（串行，fitz 不保证线程安全，但快）
+        pngs = {pg: render_page_png(doc, pg - 1, args.book) for pg in range(ps, pe + 1)}
+        # AI 调用并行（ClaudeCli 每次 spawn 子进程，subprocess 间互不影响）
+        def _work(pg, png=None):
+            png = png if png is not None else pngs[pg]
             try:
-                items = extract_l2_from_page(
-                    backend, png, book_full=book_full, l0=l0, l1=l1, page_1based=pg)
+                return pg, extract_l2_from_page(
+                    backend, png, book_full=book_full, l0=l0, l1=l1, page_1based=pg), None
             except Exception as ex:
-                print(f"  page {pg}: AI 失败 {ex}", flush=True)
-                continue
-            for it in items:
+                return pg, None, ex
+        page_results: dict[int, list] = {}
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futs = [pool.submit(_work, pg) for pg in pngs]
+            for fut in as_completed(futs):
+                pg, items, err = fut.result()
+                if err is not None or items is None:
+                    print(f"  page {pg}: AI 失败 {err}", flush=True)
+                    continue
+                page_results[pg] = items
+        # 按页号顺序合并（保证 numeric_label 排序稳定）
+        for pg in sorted(page_results):
+            for it in page_results[pg]:
                 if not isinstance(it, dict) or not it.get("name"):
                     continue
                 lbl = (it.get("numeric_label") or "").strip()
