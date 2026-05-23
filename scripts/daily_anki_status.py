@@ -147,9 +147,9 @@ def run_py(script: str, args: list[str] | None = None) -> int:
 
 def run_kg_link_mastery() -> int:
     """对 knowledge_graph/*.json 每个 KG：
-    1. AI 关联笔记到节点（贵但精准，覆盖之前的模糊字符串匹配）
-    2. 算 mastery + state + 反向传递（无 AI 快速）
-    AI 关联失败时仍跑 mastery（fallback 用模糊匹配）。
+    1. AI 关联（增量，只跑最近 7 天动过的笔记）
+    2. mastery + state + 反向传递（无 AI）
+    3. KG 准确性审计（C 启发式 + D 单调性 + B AI 抽样 20 节点）
     """
     kg_dir = PROJECT_DIR / "knowledge_graph"
     if not kg_dir.exists():
@@ -160,17 +160,24 @@ def run_kg_link_mastery() -> int:
     rc = 0
     for kg in kg_files:
         print(f"  KG: {kg.name}")
-        # 1) AI 关联（失败不阻断，继续走 mastery）
+        # 1) AI 关联增量（--since-days 7：只跑近 7 天动过的笔记）
         r1 = run_py("kg/link_with_ai.py", [
             "--kg", str(kg), "--model", "sonnet", "--effort", "medium",
-            "--workers", "4", "--in-place",
+            "--workers", "4", "--since-days", "7", "--in-place",
         ])
         if r1 != 0:
-            print(f"    AI 关联失败 (rc={r1})，仍跑 link_and_mastery")
-        # 2) mastery + state（必跑）
+            print(f"    AI 关联失败 (rc={r1})，仍跑后续")
+        # 2) mastery + state
         r2 = run_py("kg/link_and_mastery.py", ["--kg", str(kg), "--in-place"])
         if r2 != 0:
             print(f"    link_and_mastery 失败 (rc={r2})"); rc = r2
+        # 3) KG 准确性审计
+        r3 = run_py("kg/audit_kg.py", [
+            "--kg", str(kg), "--ai-sample-size", "20",
+            "--model", "sonnet", "--effort", "medium", "--workers", "4",
+        ])
+        if r3 != 0:
+            print(f"    audit_kg 失败 (rc={r3})")
     return rc
 
 

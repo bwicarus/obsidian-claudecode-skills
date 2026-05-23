@@ -264,6 +264,11 @@ let editMode=false;
 const wrap=document.getElementById("canvas-wrap");
 const svg=d3.select("svg.canvas");
 const root=svg.append("g").attr("class","root");
+// 分层渲染：边永远在节点下面（DOM 顺序 = SVG z-order，先加入的在下）
+root.append("g").attr("class","layer-bands");   // 章带 + 侧色线 + 章名（最底）
+root.append("g").attr("class","layer-edges");   // 连接线
+root.append("g").attr("class","layer-tiles");   // 节点（最上，永远盖在边上）
+root.append("g").attr("class","layer-overlay"); // locked 折叠条等覆盖层
 
 // ============================================================
 // 加载 + 准备
@@ -662,6 +667,10 @@ function render(){
 
   // 章带：屏幕两侧 4px 竖色线 + 左侧贴边章名（章名所在段色线断开）
   root.selectAll("rect.chap-band").remove();
+  const bandsG = root.select("g.layer-bands");
+  const edgesG = root.select("g.layer-edges");
+  const tilesG = root.select("g.layer-tiles");
+  const overlayG = root.select("g.layer-overlay");
   // 把每个章带的左侧色线拆成「字上方」「字下方」两段（字所在的中段断开）
   const labelCharH = 18;   // 每字旋转后占的纵向高度（含字距，跟 font-size 15 + letter-spacing 3 对齐）
   const labelPad = 6;
@@ -680,7 +689,7 @@ function render(){
   const sideRSegments = chapBands.map(b => ({id: b.id+"-r", y: b.y, h: b.h, color: b.color}));
 
   // 左侧分段色线
-  const sideLSel = root.selectAll("rect.chap-side-l").data(sideLSegments, s=>s.id);
+  const sideLSel = bandsG.selectAll("rect.chap-side-l").data(sideLSegments, s=>s.id);
   sideLSel.exit().transition().duration(220).style("opacity",0).remove();
   const sideLEnter = sideLSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-l")
     .style("opacity",0);
@@ -690,7 +699,7 @@ function render(){
     .attr("fill",s=>s.color)
     .style("opacity",0.9);
   // 右侧色线
-  const sideRSel = root.selectAll("rect.chap-side-r").data(sideRSegments, s=>s.id);
+  const sideRSel = bandsG.selectAll("rect.chap-side-r").data(sideRSegments, s=>s.id);
   sideRSel.exit().transition().duration(220).style("opacity",0).remove();
   const sideREnter = sideRSel.enter().insert("rect",":first-child").attr("class","chap-side chap-side-r")
     .style("opacity",0);
@@ -700,7 +709,7 @@ function render(){
     .attr("fill",s=>s.color)
     .style("opacity",0.9);
   // 章名标签：竖排紧贴左侧色线，加粗 + 发光阴影
-  const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
+  const labSel = bandsG.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
   labSel.exit().transition().duration(220).style("opacity",0).remove();
   const labEnter = labSel.enter().append("text").attr("class","chap-band-label")
     .style("opacity",0);
@@ -717,7 +726,7 @@ function render(){
   // 未开放章节折叠条（仅 home 视图有）
   const showBar = (current.kind==="home") && window.__lockedBarRect;
   const barData = showBar ? [window.__lockedBarRect] : [];
-  const barSel = root.selectAll("g.locked-bar").data(barData);
+  const barSel = overlayG.selectAll("g.locked-bar").data(barData);
   barSel.exit().transition().duration(220).style("opacity",0).remove();
   const barEnter = barSel.enter().append("g").attr("class","locked-bar")
     .style("opacity",0)
@@ -736,7 +745,7 @@ function render(){
 
   // 边（key by from→to）
   const edgeKey=e=>e.from+"→"+e.to;
-  const edgeSel=root.selectAll("path.edge").data(edges, edgeKey);
+  const edgeSel=edgesG.selectAll("path.edge").data(edges, edgeKey);
   edgeSel.exit().transition().duration(280).style("opacity",0).remove();
   const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
     .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
@@ -750,7 +759,7 @@ function render(){
     .style("opacity",1);
 
   // 节点（key by id），动画 transform
-  const tileSel=root.selectAll("g.tile").data(nodes, d=>d.id);
+  const tileSel=tilesG.selectAll("g.tile").data(nodes, d=>d.id);
   tileSel.exit().transition().duration(220).style("opacity",0).remove();
   const tileEnter=tileSel.enter().append("g")
     .attr("class",d=>tileClass(d,focusedId))

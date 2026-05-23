@@ -172,6 +172,8 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--in-place", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 篇（试水）")
+    ap.add_argument("--since-days", type=int, default=0,
+                    help="只对最近 N 天 mtime 改过的笔记跑（增量；默认 0=全跑）")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -183,12 +185,25 @@ def main() -> int:
     book = kg.get("book", "?")
     print(f"KG: {kg_path.name}  book={book}  L2 节点={len(l2_nodes)}")
 
-    notes = collect_relevant_notes()
+    all_notes = collect_relevant_notes()
+    notes = all_notes
+    # 增量模式：只对最近 N 天 mtime 改过的笔记跑
+    if args.since_days > 0:
+        import time
+        cutoff = time.time() - args.since_days * 86400
+        notes = [p for p in all_notes if p.stat().st_mtime >= cutoff]
+        print(f"增量模式 --since-days {args.since_days}：{len(notes)}/{len(all_notes)} 篇笔记被选中")
     if args.limit:
         notes = notes[:args.limit]
     print(f"待判定笔记数: {len(notes)}")
     if not notes:
-        print("无笔记可处理"); return 0
+        # 没要处理的笔记 → 仍要根据已有 _note_to_covered_l2 重建 containing_notes
+        if args.in_place:
+            print("无新笔记，但仍重建 containing_notes（从持久化字典）")
+            _rebuild_from_persistent(kg, kg_path)
+        else:
+            print("无新笔记可处理")
+        return 0
 
     candidates_listing = build_candidates_listing(l2_nodes)
     print(f"候选列表 {len(candidates_listing)} 字")
@@ -212,60 +227,25 @@ def main() -> int:
             print(f"  [{done}/{len(notes)}] {p.name:<40} → {len(covered)} 个节点  ({reason[:30]})",
                   flush=True)
 
-    # 写 KG: 每个 L2 节点维护 containing_notes 列表（可能多篇笔记包含同一知识点）
-    # 反向映射 node_id -> [note_rel_path, ...]
-    node_to_notes: dict[str, list[str]] = defaultdict(list)
+    # ===== 增量合并：更新 KG 顶层持久化字典 _note_to_covered_l2 =====
+    persistent: dict[str, list[str]] = kg.get("_note_to_covered_l2", {}) or {}
     for note_path, (covered, _) in results.items():
         try:
             rel = note_path.relative_to(VAULT_ROOT).as_posix()
         except ValueError:
             rel = note_path.name
-        for nid in covered:
-            if rel not in node_to_notes[nid]:
-                node_to_notes[nid].append(rel)
+        persistent[rel] = sorted(set(covered))
+    kg["_note_to_covered_l2"] = persistent
 
-    id2 = {n["id"]: n for n in kg["nodes"]}
-    # L2 关联：containing_notes 数组 + note_ref 兼容字段（首项）
-    n_linked = 0
-    for n in kg["nodes"]:
-        if n["level"] != 2: continue
-        notes = node_to_notes.get(n["id"], [])
-        if notes:
-            n["containing_notes"] = sorted(notes)
-            n["note_ref"] = notes[0]
-            n["note_ref_ai_verified"] = True
-            n_linked += 1
-        else:
-            n["containing_notes"] = []
-            n["note_ref"] = ""
-            n["note_ref_ai_verified"] = False
-
-    # L1 关联：所有子 L2 的 containing_notes 取 union
-    l1_notes: dict[str, set[str]] = defaultdict(set)
-    for n in kg["nodes"]:
-        if n["level"] == 2 and n.get("containing_notes") and n.get("parent_id"):
-            for nt in n["containing_notes"]:
-                l1_notes[n["parent_id"]].add(nt)
-    n_l1_linked = 0
-    for n in kg["nodes"]:
-        if n["level"] != 1: continue
-        nts = sorted(l1_notes.get(n["id"], set()))
-        if nts:
-            n["containing_notes"] = nts
-            n["note_ref"] = nts[0]
-            n["note_ref_ai_verified"] = True
-            n_l1_linked += 1
-        else:
-            n["containing_notes"] = []
-            n["note_ref"] = ""
-            n["note_ref_ai_verified"] = False
-
-    print(f"\nAI 关联结果:")
+    # 从持久化字典重建节点 containing_notes
+    n_linked, n_l1_linked = _rebuild_node_fields_from_persistent(kg)
     n2 = sum(1 for n in kg['nodes'] if n['level']==2)
     n1 = sum(1 for n in kg['nodes'] if n['level']==1)
     multi = sum(1 for n in kg['nodes'] if n['level']==2 and len(n.get('containing_notes', []))>1)
+    print(f"\nAI 关联结果（含历史持久化数据）:")
     print(f"  L2: {n_linked}/{n2} 关联（其中 {multi} 个节点同时在多篇笔记）")
     print(f"  L1: {n_l1_linked}/{n1} 关联（union 子节点的笔记集合）")
+    print(f"  持久化字典含 {len(persistent)} 篇笔记的关联")
 
     if not args.in_place:
         print("\n（dry-run，未写回；加 --in-place 应用）")
@@ -273,6 +253,56 @@ def main() -> int:
     kg_path.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"✓ 已写回 {kg_path}")
     return 0
+
+
+def _rebuild_node_fields_from_persistent(kg: dict) -> tuple[int, int]:
+    """从 kg._note_to_covered_l2 字典重建每个节点的 containing_notes 字段。
+    返回 (l2_linked, l1_linked) 计数。"""
+    persistent = kg.get("_note_to_covered_l2", {}) or {}
+    # 反向构造 node_id -> [note_path, ...]
+    node_to_notes: dict[str, list[str]] = defaultdict(list)
+    for note_rel, covered_ids in persistent.items():
+        for nid in covered_ids:
+            if note_rel not in node_to_notes[nid]:
+                node_to_notes[nid].append(note_rel)
+    n_l2 = 0
+    for n in kg["nodes"]:
+        if n["level"] != 2: continue
+        notes = sorted(node_to_notes.get(n["id"], []))
+        if notes:
+            n["containing_notes"] = notes
+            n["note_ref"] = notes[0]
+            n["note_ref_ai_verified"] = True
+            n_l2 += 1
+        else:
+            n["containing_notes"] = []
+            n["note_ref"] = ""
+            n["note_ref_ai_verified"] = False
+    # L1 = union 子 L2 的 containing_notes
+    l1_notes: dict[str, set[str]] = defaultdict(set)
+    for n in kg["nodes"]:
+        if n["level"] == 2 and n.get("containing_notes") and n.get("parent_id"):
+            for nt in n["containing_notes"]:
+                l1_notes[n["parent_id"]].add(nt)
+    n_l1 = 0
+    for n in kg["nodes"]:
+        if n["level"] != 1: continue
+        nts = sorted(l1_notes.get(n["id"], set()))
+        if nts:
+            n["containing_notes"] = nts; n["note_ref"] = nts[0]
+            n["note_ref_ai_verified"] = True; n_l1 += 1
+        else:
+            n["containing_notes"] = []; n["note_ref"] = ""
+            n["note_ref_ai_verified"] = False
+    return n_l2, n_l1
+
+
+def _rebuild_from_persistent(kg: dict, kg_path: Path) -> None:
+    """无新笔记可处理时的纯 rebuild path（不调 AI）。"""
+    n_l2, n_l1 = _rebuild_node_fields_from_persistent(kg)
+    print(f"  从持久化字典重建：L2 {n_l2} 关联，L1 {n_l1} 关联")
+    kg_path.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"✓ 已写回 {kg_path}")
 
 
 if __name__ == "__main__":
