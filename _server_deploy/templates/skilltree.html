@@ -1034,7 +1034,15 @@ function showDetail(n){
     badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
     badges.push(`<span class="badge b-type">${countL2Under(n)} 知识点</span>`);
   }else{
-    if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
+    // L2 type 中文化：definition→定义、theorem→定理、proposition→命题、
+    // corollary→推论、lemma→引理、example→例子
+    const typeZh = {definition:'📖 定义', theorem:'📐 定理', proposition:'🔹 命题',
+                    corollary:'⤴ 推论', lemma:'🔸 引理', example:'🔬 例子'};
+    if(n.type){
+      const lbl = typeZh[n.type] || n.type;
+      badges.push(`<span class="badge b-type">${lbl}</span>`);
+    }
+    if(n.numeric_label) badges.push(`<span class="badge b-type">编号 ${n.numeric_label}</span>`);
     if(typeof n.mastery==="number"){
       const tag = n.mastery_inferred ? "↓推断掌握" : "掌握";
       const tooltip = n.mastery_inferred

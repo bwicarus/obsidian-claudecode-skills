@@ -44,6 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+from lib.claude_quota import can_run_more, util_5h  # noqa: E402
 sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
 from ai_backends import make_backend  # noqa: E402
 
@@ -274,12 +275,22 @@ def select_audit_sample(kg: dict, audited_ids: set[str], n: int) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kg", required=True)
-    ap.add_argument("--ai-sample-size", type=int, default=20)
+    ap.add_argument("--ai-sample-size", type=int, default=20,
+                    help="每批 AI 抽样大小（默认 20）")
     ap.add_argument("--ai-skip", action="store_true", help="跳过 AI 审稿（开发调试）")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out", default=str(STATE_DIR / "kg_audit.json"))
+    # Budget-gated 激进模式：实时查 quota，跑到 5h util 上限自动停
+    ap.add_argument("--budget-loop", action="store_true",
+                    help="循环跑直到 quota 用完（凌晨用，激进消耗夜间空闲额度）")
+    ap.add_argument("--budget-target-5h", type=float, default=80.0,
+                    help="5h 窗口 utilization 上限（默认 80，留 20 buffer 早起用）")
+    ap.add_argument("--budget-target-7d", type=float, default=90.0,
+                    help="7d 窗口 utilization 上限（默认 90）")
+    ap.add_argument("--budget-max-batches", type=int, default=20,
+                    help="budget-loop 模式下最多跑几批（硬上限防意外，默认 20 批 × 20 节点 = 400）")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -306,29 +317,51 @@ def main() -> int:
     ai_flagged: list[dict] = []
     audited_ids_now = set(prev_audited_ids)
     if not args.ai_skip:
-        sample = select_audit_sample(kg, prev_audited_ids, args.ai_sample_size)
-        # 如果 prev 已经审过全部，重新开始时清空
         l2_total = sum(1 for n in kg["nodes"] if n["level"]==2)
+        # 已完成全图 → 清空进度重审
         if len(prev_audited_ids) >= l2_total:
             print(f"[B] 已完成全图轮转（{l2_total} 节点），清空 ai_audited_node_ids 重新开始")
             audited_ids_now = set()
-        print(f"[B] AI 抽样 {len(sample)} 节点（累计已审 {len(audited_ids_now)}/{l2_total}）")
         backend = make_backend("claude_cli", {
             "command": "/usr/bin/claude", "model": args.model,
             "effort": args.effort, "timeout": 300,
         })
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futs = {pool.submit(audit_one_node, backend, kg, n): n for n in sample}
-            for fut in as_completed(futs):
-                res = fut.result()
-                audited_ids_now.add(res["node_id"])
-                if res.get("_error"):
-                    print(f"  ✗ {res['name'][:30]}: {res['_error']}")
-                    continue
-                if not res.get("ok", True):
-                    ai_flagged.append(res)
-                    print(f"  ⚠ {res['numeric_label']:8} {res['name'][:30]}: "
-                          f"{(res.get('issues') or ['(无具体说明)'])[0][:50]}")
+
+        def run_one_batch():
+            sample = select_audit_sample(kg, audited_ids_now, args.ai_sample_size)
+            if not sample:
+                return False
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futs = {pool.submit(audit_one_node, backend, kg, n): n for n in sample}
+                for fut in as_completed(futs):
+                    res = fut.result()
+                    audited_ids_now.add(res["node_id"])
+                    if res.get("_error"):
+                        print(f"  ✗ {res['name'][:30]}: {res['_error']}")
+                        continue
+                    if not res.get("ok", True):
+                        ai_flagged.append(res)
+                        print(f"  ⚠ {res['numeric_label']:8} {res['name'][:30]}: "
+                              f"{(res.get('issues') or ['(无具体说明)'])[0][:50]}")
+            return True
+
+        if args.budget_loop:
+            # 激进模式：循环跑直到 quota 用完或达批数上限
+            print(f"[B] BUDGET-LOOP 模式：跑到 5h≥{args.budget_target_5h:.0f}% 或 7d≥{args.budget_target_7d:.0f}% 停")
+            print(f"    硬上限：{args.budget_max_batches} 批 × {args.ai_sample_size} 节点 = "
+                  f"{args.budget_max_batches * args.ai_sample_size} 节点")
+            for batch_i in range(args.budget_max_batches):
+                ok, reason = can_run_more(args.budget_target_5h, args.budget_target_7d)
+                if not ok:
+                    print(f"  [批 {batch_i+1}] STOP - {reason}")
+                    break
+                print(f"  [批 {batch_i+1}/{args.budget_max_batches}] {reason}, 累计 {len(audited_ids_now)}/{l2_total}")
+                if not run_one_batch():
+                    print("  无更多节点可审，停"); break
+        else:
+            # 单批模式：跑一批就停
+            print(f"[B] AI 抽样 {args.ai_sample_size} 节点（累计已审 {len(audited_ids_now)}/{l2_total}）")
+            run_one_batch()
 
     # 写 audit JSON
     audit_data = {
