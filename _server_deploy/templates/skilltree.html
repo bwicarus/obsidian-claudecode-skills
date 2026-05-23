@@ -32,7 +32,6 @@ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a
 svg.canvas{display:block}
 /* 节点 */
 .tile{cursor:pointer}
-.tile.tile-hidden{display:none}
 .tile rect.tbox{transition:filter .15s, stroke-width .15s}
 .tile:hover rect.tbox{filter:brightness(1.4)}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
@@ -739,8 +738,10 @@ function render(){
 }
 function tileClass(d, focusedId){
   const role = chainRoleNode(d, focusedId);
-  const inLockedFolded = (current.kind==="home" && stateOf(d)==="locked" && !showLockedSection);
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inLockedFolded?' tile-hidden':''}`;
+  // 注：locked 章节里的 L2 节点已在 layout 末尾被 offScreen filter 剔除，
+  // 不会到达这里。L2 自身 state===locked（mastery=None/0）不该 hidden，
+  // 只是状态色更暗——它仍然可见。
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
