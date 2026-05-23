@@ -1007,14 +1007,24 @@ function showDetail(n){
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pages=n.pages||[];
-  // 每页 chip：主链接走 obsidian://（点 chip 主体），小🌐 子按钮回退浏览器 PDF
-  const pageHTML = pages.length
-    ? pages.map(pg => {
-        const obs = obsidianPdfUrl(pg);
-        const web = `/skilltree/${BOOK}/pdf#page=${pg}`;
+  // 连续页码合并：[288,289,298] → [[288,289],[298]] → "p.288-289" "p.298"
+  const sorted = [...pages].sort((a,b)=>a-b);
+  const groups = [];
+  for(const p of sorted){
+    const last = groups[groups.length-1];
+    if(last && p === last[last.length-1] + 1) last.push(p);
+    else groups.push([p]);
+  }
+  const pageHTML = groups.length
+    ? groups.map(g => {
+        const startPg = g[0], endPg = g[g.length-1];
+        const label = g.length===1 ? `p.${startPg}` : `p.${startPg}-${endPg}`;
+        const titleSuffix = g.length===1 ? `第 ${startPg} 页` : `第 ${startPg}-${endPg} 页`;
+        const obs = obsidianPdfUrl(startPg);
+        const web = `/skilltree/${BOOK}/pdf#page=${startPg}`;
         const main = obs
-          ? `<a href="${obs}" class="page-link" title="在 Obsidian 中打开 PDF 第 ${pg} 页">p.${pg}</a>`
-          : `<a href="${web}" target="_blank" class="page-link" title="浏览器打开 PDF 第 ${pg} 页">p.${pg}</a>`;
+          ? `<a href="${obs}" class="page-link" title="在 Obsidian 中打开 PDF ${titleSuffix}">${label}</a>`
+          : `<a href="${web}" target="_blank" class="page-link" title="浏览器打开 PDF ${titleSuffix}">${label}</a>`;
         const fallback = `<a href="${web}" target="_blank" class="page-link-web" title="改用浏览器打开（远程/无 Obsidian 时）"
                             onclick="event.stopPropagation()">🌐</a>`;
         return `<span class="page-pair">${main}${obs?fallback:""}</span>`;
