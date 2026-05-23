@@ -245,20 +245,13 @@ def main() -> int:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)
 
-    # 3) 状态计算（三态 DAG）
-    # 规则：
-    #   自己有 mastery >= 0.8         → mastered
-    #   自己有 mastery >= 0.4          → unlockable
-    #   自己有 mastery < 0.4           → locked（刚起步不算开放）
-    #   自己无 mastery + 所有 prereq 开放 → unlockable
-    #   其它                            → locked
-    def bucket_by_mastery(m):
-        if m is None or m <= 0:           return None
-        if m >= MASTERED_THRESHOLD:        return "mastered"
-        if m >= UNLOCK_THRESHOLD:          return "unlockable"
-        return "locked"
-
-    # 构造 prereq 邻接（只对 L2）
+    # 3) 状态计算（三态 DAG，前置严格）
+    # 规则（"可学"必须前置全满足）：
+    #   prereq 链未通 → locked（不管自己 mastery 多高）
+    #   prereq 链通 + 自己 mastery >= 0.8 → mastered
+    #   prereq 链通 + 否则 → unlockable
+    # 起点（无前置）默认 prereq 链通。反向传递已确保"已学节点的所有 ancestor"
+    # 有继承 mastery，再加上 DAG 前向计算就保证 ancestor 也 unlockable。
     edges_kg = kg.get("edges", [])
     prereqs_of = defaultdict(list)
     indeg = defaultdict(int); succ = defaultdict(list)
@@ -267,7 +260,6 @@ def main() -> int:
             prereqs_of[e["to"]].append(e["from"])
             succ[e["from"]].append(e["to"])
             indeg[e["to"]] += 1
-    # 拓扑序处理 L2
     open_set = {"unlockable", "mastered"}
     queue_l2 = [n["id"] for n in nodes if n["level"]==2 and indeg[n["id"]]==0]
     remaining = dict(indeg)
@@ -275,17 +267,17 @@ def main() -> int:
     while queue_l2:
         cur = queue_l2.pop(0)
         n = id2[cur]
-        m_state = bucket_by_mastery(n.get("mastery"))
-        if m_state is not None:
-            state_map[cur] = m_state
+        prs = prereqs_of.get(cur, [])
+        prereqs_clear = (not prs) or all(
+            state_map.get(p, "locked") in open_set for p in prs)
+        if not prereqs_clear:
+            state_map[cur] = "locked"
         else:
-            prs = prereqs_of.get(cur, [])
-            if not prs:
-                state_map[cur] = "unlockable"   # 起点无前置 → 开放
+            m = n.get("mastery")
+            if m is not None and m >= MASTERED_THRESHOLD:
+                state_map[cur] = "mastered"
             else:
-                pr_states = [state_map.get(p, "locked") for p in prs]
-                # 三态：所有前置开放 → unlockable，否则 locked
-                state_map[cur] = "unlockable" if all(s in open_set for s in pr_states) else "locked"
+                state_map[cur] = "unlockable"
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
