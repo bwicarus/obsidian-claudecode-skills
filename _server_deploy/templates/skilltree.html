@@ -6,47 +6,55 @@
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a0e1a;color:#e6e6f0;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
-#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:9px 18px;display:flex;align-items:center;gap:10px;flex-shrink:0;z-index:10}
-#bar h1{font-size:14px;font-weight:700;letter-spacing:.05em;color:#9ec3ff}
-#bar .meta{font-size:12px;color:#8a9bb4}
-#bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+#bar{background:linear-gradient(180deg,#141a2b,#0e1320);border-bottom:1px solid #2a3550;padding:9px 14px;display:flex;align-items:center;gap:8px;flex-shrink:0;z-index:10;flex-wrap:wrap}
+#bar h1{font-size:14px;font-weight:700;letter-spacing:.04em;color:#9ec3ff;margin-right:6px}
+#bar .meta{font-size:11px;color:#8a9bb4}
+#bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 #bar button:hover{background:#27345a}
 #bar button:disabled{opacity:.4;cursor:default}
-#crumb{font-size:13px;color:#cfe6ff;font-weight:500;padding-left:6px}
-#crumb .sep{color:#5a6680;margin:0 6px}
-#legend{margin-left:auto;display:flex;gap:14px;font-size:11px;color:#8a9bb4}
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;box-shadow:0 0 8px currentColor}
+#bar button.danger{background:#4a1a1a;border-color:#7a2828;color:#ffb4b4}
+#bar button.danger:hover{background:#5e2424}
+#bar button.on{background:#244470;border-color:#3b6db5;color:#fff}
+#crumb{font-size:12px;color:#cfe6ff;font-weight:500;padding:0 4px}
+#crumb .sep{color:#5a6680;margin:0 4px}
+#search{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:5px 10px;font-size:12px;width:180px;outline:none}
+#search:focus{border-color:#3b6db5}
+#legend{margin-left:auto;display:flex;gap:12px;font-size:10px;color:#8a9bb4}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;vertical-align:middle;box-shadow:0 0 6px currentColor}
 #viz{flex:1;position:relative;overflow:hidden;background-color:#0a0e1a;background-image:
   radial-gradient(ellipse at center,rgba(40,60,120,.16) 0%,transparent 60%),
   linear-gradient(rgba(60,80,140,.05) 1px,transparent 1px),
   linear-gradient(90deg,rgba(60,80,140,.05) 1px,transparent 1px);
   background-size:100% 100%, 40px 40px, 40px 40px}
-#canvas-wrap{position:absolute;inset:0;overflow:auto;padding:20px}
+#canvas-wrap{position:absolute;inset:0;overflow:auto;padding:20px;padding-right:380px}
 #canvas-wrap::-webkit-scrollbar{width:10px;height:10px}
 #canvas-wrap::-webkit-scrollbar-thumb{background:#2a3550;border-radius:5px}
 svg.canvas{display:block}
 /* 节点 */
 .tile{cursor:pointer}
-.tile rect{transition:filter .15s, stroke-width .15s}
-.tile:hover rect{filter:brightness(1.4)}
+.tile rect.tbox{transition:filter .15s, stroke-width .15s}
+.tile:hover rect.tbox{filter:brightness(1.4)}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
-.tile.mastered rect{stroke:#34d399;stroke-width:2.2;fill:#0d2a1f;filter:drop-shadow(0 0 8px #34d39977)}
+.tile.mastered rect.tbox{stroke:#34d399;stroke-width:2.2;fill:#0d2a1f;filter:drop-shadow(0 0 8px #34d39977)}
 .tile.mastered{color:#7be096}
-.tile.unlocked rect{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
+.tile.unlocked rect.tbox{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
 .tile.unlocked{color:#fcd383}
-.tile.locked rect{stroke:#6a7488;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
+.tile.locked rect.tbox{stroke:#6a7488;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
 .tile.locked{color:#7a8497}
-.tile.focus rect{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc)}
+.tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
+.tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
+.tile.filter-out{opacity:.18}
+.tile rect.chap-bar{stroke:none}     /* 章色条 */
 /* 边 */
 .edge{fill:none;stroke-linecap:round}
-.edge.mast{stroke:#34d399aa;stroke-width:2}
-.edge.unl{stroke:#fbbf24aa;stroke-width:1.8}
-.edge.lock{stroke:#5a6680cc;stroke-width:1.4;stroke-dasharray:4 3}
+.edge.mast{stroke:#34d399aa}
+.edge.unl{stroke:#fbbf24aa}
+.edge.lock{stroke:#5a6680cc;stroke-dasharray:4 3}
 /* detail */
-#detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.65;z-index:5}
+#detail{position:absolute;right:0;top:0;bottom:0;width:360px;background:linear-gradient(180deg,#10162a,#0a0e1a);border-left:1px solid #2a3550;padding:18px 20px 24px;overflow-y:auto;transform:translateX(100%);transition:transform .22s ease;font-size:13px;line-height:1.6;z-index:5}
 #detail.open{transform:translateX(0);box-shadow:-12px 0 32px rgba(0,0,0,.5)}
 #detail h2{font-size:16px;margin-bottom:8px;color:#e6e6f0}
 #detail .lbl{color:#8a9bb4;font-size:10px;margin-top:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
@@ -59,30 +67,42 @@ svg.canvas{display:block}
 .b-unl{background:#3a2a08;color:#fcd383;box-shadow:inset 0 0 0 1px #fbbf24}
 .b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
+.b-chap{font-size:10px;padding:2px 8px}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
-/* settings modal */
-#sett-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:20}
-#sett-mask.open{display:flex}
-#sett-panel{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:22px 24px;width:360px;max-width:90vw}
-#sett-panel h3{font-size:15px;margin-bottom:14px;color:#9ec3ff}
-#sett-panel label{display:block;font-size:12px;color:#9aa4b2;margin-bottom:6px}
-#sett-panel input[type=range]{width:100%;margin:6px 0}
-#sett-panel .preview-strip{height:6px;background:#1a2540;border-radius:3px;margin-top:8px;position:relative}
-#sett-panel .preview-strip span{position:absolute;top:0;left:0;height:100%;background:#7dc4ff;border-radius:3px}
-#sett-panel .row{margin:14px 0}
-#sett-panel .val{color:#cfe6ff;font-weight:600;font-size:13px;margin-left:6px}
-#sett-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
-#sett-foot button{padding:7px 16px;border-radius:6px;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;cursor:pointer;font-size:13px}
-#sett-foot .primary{background:#244470;border-color:#3b6db5;color:#fff}
+/* modals */
+.mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:20}
+.mask.open{display:flex}
+.modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:20px 22px;width:420px;max-width:90vw;max-height:80vh;overflow-y:auto}
+.modal h3{font-size:15px;margin-bottom:12px;color:#9ec3ff}
+.modal label{display:block;font-size:11px;color:#9aa4b2;margin-bottom:4px;margin-top:8px}
+.modal input[type=text],.modal textarea,.modal select{width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;font-family:inherit;outline:none}
+.modal input[type=range]{width:100%;margin:6px 0}
+.modal textarea{resize:vertical;min-height:60px}
+.modal .row{margin:10px 0}
+.modal .preview-strip{height:6px;background:#1a2540;border-radius:3px;margin-top:8px;position:relative}
+.modal .preview-strip span{position:absolute;top:0;left:0;height:100%;background:#7dc4ff;border-radius:3px}
+.modal .val{color:#cfe6ff;font-weight:600;font-size:13px;margin-left:6px}
+.foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.foot button{padding:7px 16px;border-radius:6px;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;cursor:pointer;font-size:13px}
+.foot .primary{background:#244470;border-color:#3b6db5;color:#fff}
+.foot .danger{background:#4a1a1a;border-color:#7a2828;color:#ffb4b4}
+.reco-item{padding:9px 11px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;margin-bottom:6px;cursor:pointer;font-size:12px}
+.reco-item:hover{background:#162045;border-color:#3b6db5}
+.reco-item .top{display:flex;justify-content:space-between;color:#cfe6ff}
+.reco-item .sub{color:#8a9bb4;font-size:11px;margin-top:3px}
 </style></head>
 <body>
 <div id="bar">
   <h1>{{ book }} · 技能树</h1>
-  <button id="back-btn" onclick="goBack()" title="返回上一级">◀ 后退</button>
+  <button id="back-btn" onclick="goBack()" title="返回上一级（Esc/Backspace）">◀</button>
   <span id="crumb">全部章</span>
-  <span class="meta" id="meta">加载中…</span>
+  <input id="search" type="text" placeholder="🔍 搜索节点（Enter 跳转）"
+         oninput="onSearchInput(event)" onkeydown="if(event.key==='Enter') onSearchEnter()">
+  <button onclick="openRecommend()" title="🎯 下一步该学什么">🎯 推荐</button>
+  <button id="edit-toggle" onclick="toggleEditMode()" title="编辑模式（点节点改前置/删节点/合并）">✏️ 编辑</button>
   <button onclick="openSettings()">⚙ 设置</button>
+  <span class="meta" id="meta">加载中…</span>
   <div id="legend">
     <span><span class="dot" style="background:#34d399;color:#34d399"></span>已掌握</span>
     <span><span class="dot" style="background:#fbbf24;color:#fbbf24"></span>已解锁</span>
@@ -107,26 +127,52 @@ svg.canvas{display:block}
     <div class="lbl">关联</div><div class="v" id="d-link">—</div>
     <div class="lbl">前置（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
     <div class="lbl">后续</div><ul class="prereqs" id="d-unlocks"></ul>
+    <div id="edit-actions" style="display:none;margin-top:14px;border-top:1px solid #2a3550;padding-top:12px">
+      <div class="lbl">编辑动作</div>
+      <button class="foot" style="display:block;width:100%;margin-top:6px;padding:7px 0;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;cursor:pointer" onclick="editAddPrereqDlg()">＋ 添加前置</button>
+      <button class="foot" style="display:block;width:100%;margin-top:6px;padding:7px 0;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;cursor:pointer" onclick="editMergeDlg()">⇆ 合并到其它节点</button>
+      <button class="foot" style="display:block;width:100%;margin-top:6px;padding:7px 0;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:6px;cursor:pointer" onclick="editDeleteNode()">🗑 删除此节点</button>
+      <div class="lbl" style="margin-top:14px">编辑描述</div>
+      <textarea id="edit-summary" rows="3" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:12px;font-family:inherit"></textarea>
+      <button onclick="editSaveSummary()" style="margin-top:6px;padding:6px 14px;background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;cursor:pointer;font-size:12px">保存描述</button>
+    </div>
   </aside>
 </div>
 
-<!-- 设置弹窗 -->
-<div id="sett-mask" onclick="if(event.target===this) closeSettings()">
-  <div id="sett-panel">
+<!-- 设置 -->
+<div id="sett-mask" class="mask" onclick="if(event.target===this) closeSettings()">
+  <div class="modal">
     <h3>显示设置</h3>
     <div class="row">
       <label>方块宽度（占页面宽的比例）<span class="val" id="sett-val">12%</span></label>
       <input type="range" id="sett-ratio" min="5" max="30" step="1">
       <div class="preview-strip"><span id="sett-bar"></span></div>
     </div>
-    <p style="font-size:11px;color:#8a9bb4;line-height:1.5;margin-top:8px">
-      比例越大，单个方块越突出，能同屏显示的方块越少；反之亦然。<br>
-      不再有缩放交互——所有方块固定按这个比例渲染，超出页面则滚动。
-    </p>
-    <div id="sett-foot">
+    <p style="font-size:11px;color:#8a9bb4;line-height:1.5">所有方块固定按此比例渲染，超出页面则滚动。</p>
+    <div class="foot">
       <button onclick="closeSettings()">取消</button>
       <button class="primary" onclick="applySettings()">应用</button>
     </div>
+  </div>
+</div>
+
+<!-- 推荐 -->
+<div id="reco-mask" class="mask" onclick="if(event.target===this) closeRecommend()">
+  <div class="modal">
+    <h3>🎯 下一步该学什么</h3>
+    <p style="font-size:11px;color:#8a9bb4;margin-bottom:10px">已解锁但还没掌握的知识点，按"开启下游最多"排序——优先攻克这些能解锁最多后续内容。</p>
+    <div id="reco-list"></div>
+    <div class="foot"><button onclick="closeRecommend()">关闭</button></div>
+  </div>
+</div>
+
+<!-- 编辑：选目标节点 -->
+<div id="pick-mask" class="mask" onclick="if(event.target===this) closePick()">
+  <div class="modal">
+    <h3 id="pick-title">选择目标节点</h3>
+    <input id="pick-q" type="text" placeholder="🔍 搜索（name / 编号 / summary）" oninput="renderPickList()">
+    <div id="pick-list" style="max-height:50vh;overflow-y:auto;margin-top:10px"></div>
+    <div class="foot"><button onclick="closePick()">取消</button></div>
   </div>
 </div>
 
@@ -134,8 +180,6 @@ svg.canvas{display:block}
 <script>
 const BOOK="{{ book }}";
 const VAULT="Obsidian Vault";
-
-// 设置（localStorage 持久化）
 const SETT_KEY="skilltree_settings_"+BOOK;
 function loadSettings(){
   try{ return Object.assign({blockRatio:0.12}, JSON.parse(localStorage.getItem(SETT_KEY)||"{}")); }
@@ -147,19 +191,35 @@ let settings=loadSettings();
 let KG=null, id2={};
 let nodesByLevel={0:[],1:[],2:[]};
 let edgesByLevel={0:[],1:[],2:[]};
-let viewStack=[];           // 历史
-let current={kind:"home"};  // {kind:"home"|"chapter"|"section"|"focus", id?}
+let depthByLevel={0:{},1:{},2:{}};   // 全局每层 depth（同节点跨视图同一 y）
+let chapterColor={};                   // L0 id → HSL color
+let descendants={};                    // L2 id → 传递后继数（决定边粗）
+let viewStack=[], current={kind:"home"};
+let editMode=false;
 
+const wrap=document.getElementById("canvas-wrap");
+const svg=d3.select("svg.canvas");
+const root=svg.append("g").attr("class","root");
+
+// ============================================================
+// 加载 + 准备
+// ============================================================
 fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   KG=d; id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  nodesByLevel={0:[],1:[],2:[]};
   for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
   buildAggregatedEdges();
+  computeGlobalDepth();
+  computeChapterColors();
+  computeDescendants();
   document.getElementById("meta").textContent=
-    `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点`;
-  render();
+    `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点 · ${edgesByLevel[2].length} 边`;
+  // 从 URL hash 恢复
+  if(!restoreFromHash()) render();
 });
 
-function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
+window.addEventListener("hashchange",()=>{ restoreFromHash(); });
+
 function ancestorAtLevel(nid,lv){let c=id2[nid];while(c&&c.level>lv)c=id2[c.parent_id];return c&&c.level===lv?c.id:null}
 function buildAggregatedEdges(){
   edgesByLevel[2]=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
@@ -174,18 +234,83 @@ function buildAggregatedEdges(){
     edgesByLevel[lv]=out;
   }
 }
+function computeGlobalDepth(){
+  for(const lv of [0,1,2]){
+    const nodes=nodesByLevel[lv]; const edges=edgesByLevel[lv];
+    const inE={}; for(const n of nodes) inE[n.id]=[];
+    for(const e of edges) if(inE[e.to]) inE[e.to].push(e.from);
+    const d={}; for(const n of nodes) d[n.id]=0;
+    let ch=true,it=0;
+    while(ch&&it++<nodes.length+2){
+      ch=false;
+      for(const n of nodes){
+        const v=inE[n.id].length?Math.max(...inE[n.id].map(s=>(d[s]??0)+1)):0;
+        if(v!==d[n.id]){d[n.id]=v;ch=true}
+      }
+    }
+    depthByLevel[lv]=d;
+  }
+}
+function computeChapterColors(){
+  const l0=nodesByLevel[0];
+  l0.forEach((n,i)=>{
+    const h=Math.round((i/Math.max(1,l0.length))*360);
+    chapterColor[n.id]=`hsl(${h},60%,55%)`;
+  });
+}
+function computeDescendants(){
+  // L2 id → 传递后继数（含自己）
+  const adj={}; for(const e of edgesByLevel[2]){(adj[e.from]=adj[e.from]||[]).push(e.to)}
+  for(const n of nodesByLevel[2]){
+    const seen=new Set([n.id]); const stack=[n.id];
+    while(stack.length){const c=stack.pop(); for(const x of (adj[c]||[])){if(!seen.has(x)){seen.add(x);stack.push(x)}}}
+    descendants[n.id]=seen.size-1;
+  }
+}
+function chapOf(node){
+  let c=node; while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}
+  return node.level===0?node.id:null;
+}
+function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
 
 // ============================================================
-// 后退 / 导航
+// URL hash 同步
 // ============================================================
-function pushView(v){ viewStack.push(current); current=v; updateNav(); render(); }
-function goBack(){ if(viewStack.length){ current=viewStack.pop(); updateNav(); render(); } }
+function encodeView(v){
+  if(v.kind==="home") return "";
+  return v.kind+":"+v.id;
+}
+function decodeView(s){
+  if(!s) return {kind:"home"};
+  const [k,...rest]=s.split(":"); const id=rest.join(":");
+  if(["chapter","section","focus"].includes(k) && id2[id]) return {kind:k, id};
+  return {kind:"home"};
+}
+function syncHash(){
+  const enc=encodeView(current);
+  const target = enc ? ("#"+enc) : "";
+  if(location.hash !== target){
+    history.replaceState(null,"",location.pathname+target);
+  }
+}
+function restoreFromHash(){
+  if(!KG) return false;
+  const h=location.hash.startsWith("#")?location.hash.slice(1):"";
+  const v=decodeView(h);
+  current=v; updateNav(); render();
+  return true;
+}
+
+// ============================================================
+// 导航
+// ============================================================
+function pushView(v){ viewStack.push(current); current=v; updateNav(); render(); syncHash(); }
+function goBack(){ if(viewStack.length){ current=viewStack.pop(); updateNav(); render(); syncHash(); } }
 function updateNav(){
   document.getElementById("back-btn").disabled = viewStack.length===0;
-  const c=current;
-  let label="全部章";
+  const c=current; let label="全部章";
   if(c.kind==="chapter"){
-    label=`章：${id2[c.id]?.name||c.id}`;
+    const n=id2[c.id]; label=`章：${n?.name||c.id}`;
   }else if(c.kind==="section"){
     const sec=id2[c.id]; const chap=sec?id2[sec.parent_id]:null;
     label=`${chap?chap.name+' › ':''}${sec?sec.name:c.id}`;
@@ -199,30 +324,23 @@ function updateNav(){
 // 视图 → 节点 + 边
 // ============================================================
 function nodesForView(){
-  if(current.kind==="home"){
-    return {nodes: nodesByLevel[0].slice(), edges: edgesByLevel[0].slice(), level:0};
-  }
+  if(current.kind==="home")
+    return {nodes:nodesByLevel[0].slice(), edges:edgesByLevel[0].slice(), level:0};
   if(current.kind==="chapter"){
-    // 章下所有 L1 节
     const subs=nodesByLevel[1].filter(n=>n.parent_id===current.id);
     const ids=new Set(subs.map(n=>n.id));
-    const edges=edgesByLevel[1].filter(e=>ids.has(e.from)&&ids.has(e.to));
-    return {nodes:subs, edges, level:1};
+    return {nodes:subs, edges:edgesByLevel[1].filter(e=>ids.has(e.from)&&ids.has(e.to)), level:1};
   }
   if(current.kind==="section"){
-    // 节下所有 L2 + 节内的 L2 边
     const subs=nodesByLevel[2].filter(n=>n.parent_id===current.id);
     const ids=new Set(subs.map(n=>n.id));
-    const edges=edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to));
-    return {nodes:subs, edges, level:2};
+    return {nodes:subs, edges:edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to)), level:2};
   }
   if(current.kind==="focus"){
-    // 该 L2 + 所有传递前置
     const all=ancestorsTransitive(current.id);
     const subs=[...all].map(i=>id2[i]).filter(Boolean);
     const ids=new Set(subs.map(n=>n.id));
-    const edges=edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to));
-    return {nodes:subs, edges, level:2};
+    return {nodes:subs, edges:edgesByLevel[2].filter(e=>ids.has(e.from)&&ids.has(e.to)), level:2};
   }
   return {nodes:[], edges:[], level:0};
 }
@@ -238,136 +356,280 @@ function ancestorsTransitive(rootId){
 }
 
 // ============================================================
-// 渲染（HTML+SVG）
+// 渲染（带过渡动画）
 // ============================================================
 function render(){
-  const wrap=document.getElementById("canvas-wrap");
-  const svg=d3.select("svg.canvas");
-  svg.selectAll("g.layer").remove();
-  const layer=svg.append("g").attr("class","layer");
   const {nodes, edges, level}=nodesForView();
-  if(!nodes.length){
-    svg.attr("width", wrap.clientWidth).attr("height", wrap.clientHeight-40);
-    layer.append("text").attr("x",wrap.clientWidth/2).attr("y",60)
-      .attr("text-anchor","middle").attr("fill","#5a6680").attr("font-size",14).text("此视图无节点");
-    return;
-  }
-  // 方块尺寸（按比例 × 页面宽）
-  const W = wrap.clientWidth - 380 - 40;   // 去掉 detail 面板 + padding
+  const W = wrap.clientWidth - 40;
   const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
   const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
   const gapX = Math.max(14, Math.floor(blockW * 0.18));
-  const gapY = Math.max(36, Math.floor(blockH * 1.6));
-  // 布局：分层 DAG（按 depth，max 在顶）
-  const inE={}; for(const n of nodes) inE[n.id]=[];
-  for(const e of edges) if(inE[e.to]) inE[e.to].push(e.from);
-  const depth={}; for(const n of nodes) depth[n.id]=0;
-  let ch=true, it=0;
-  while(ch && it++<nodes.length+2){
-    ch=false;
-    for(const n of nodes){
-      const d=inE[n.id].length?Math.max(...inE[n.id].map(s=>(depth[s]??0)+1)):0;
-      if(d!==depth[n.id]){depth[n.id]=d;ch=true}
-    }
-  }
-  const maxD=Math.max(...Object.values(depth),0);
+  const gapY = Math.max(46, Math.floor(blockH * 1.7));
+
+  // 全局 depth 给 y（同节点跨视图 y 不变）
+  const d=depthByLevel[level];
+  const visibleDepths=[...new Set(nodes.map(n=>d[n.id]||0))];
+  const maxD=visibleDepths.length?Math.max(...visibleDepths):0;
+  // y by global depth：用相对偏移让本视图最深的那一行在顶
   const byDepth={};
-  for(const n of nodes)(byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n);
-  // 排序：按 numeric_label / name
-  for(const d in byDepth){
-    byDepth[d].sort((a,b)=>(a.numeric_label||"").localeCompare(b.numeric_label||"")||a.name.localeCompare(b.name));
-  }
-  // 计算每层 wrap：超出 W 自动换行
-  const cols=Math.max(1, Math.floor((W) / (blockW+gapX)));
-  const positions={};
-  let maxRowY=0;
-  let y=20;
-  for(let d=maxD; d>=0; d--){
-    const row=byDepth[d]||[];
-    const subRows=Math.ceil(row.length/cols)||1;
-    const totalW = Math.min(row.length, cols)*(blockW+gapX) - gapX;
-    const xStart = Math.max(20, (W-totalW)/2);
-    row.forEach((n,i)=>{
-      const sr=Math.floor(i/cols);
-      const col=i%cols;
-      positions[n.id]={
-        x: xStart + col*(blockW+gapX) + blockW/2,
-        y: y + sr*(blockH+gapY*0.5) + blockH/2,
-      };
+  for(const n of nodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
+  for(const dp in byDepth){
+    byDepth[dp].sort((a,b)=>{
+      const ca=chapOf(a)||"", cb=chapOf(b)||"";
+      return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name);
     });
-    y += subRows*(blockH+gapY*0.5) + gapY*0.5;
-    maxRowY = Math.max(maxRowY, y);
   }
-  // SVG 尺寸 = 内容尺寸（容器自适应滚动）
-  const svgW = Math.max(W, cols*(blockW+gapX));
-  const svgH = Math.max(wrap.clientHeight-40, maxRowY+40);
-  svg.attr("width", svgW).attr("height", svgH);
+  const cols=Math.max(1, Math.floor(W/(blockW+gapX)));
+  const positions={};
+  let curY=20;
+  // 按 depth 倒序（深的在顶）
+  for(let dp=maxD; dp>=0; dp--){
+    const row=byDepth[dp]||[];
+    if(!row.length) continue;
+    const subRows=Math.ceil(row.length/cols);
+    const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
+    const xStart=Math.max(20,(W-wTotal)/2);
+    row.forEach((n,i)=>{
+      const sr=Math.floor(i/cols), col=i%cols;
+      positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+    });
+    curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
+  }
+  const svgW=Math.max(W, cols*(blockW+gapX));
+  const svgH=Math.max(wrap.clientHeight-40, curY+40);
+  svg.attr("width",svgW).attr("height",svgH);
 
-  // 边
-  layer.selectAll(".edge").data(edges).enter().append("path")
-    .attr("class",e=>"edge "+edgeClass(e))
-    .attr("d",e=>{
-      const s=positions[e.from], t=positions[e.to];
-      if(!s||!t) return "";
+  // 边（key by from→to）
+  const edgeKey=e=>e.from+"→"+e.to;
+  const edgeSel=root.selectAll("path.edge").data(edges, edgeKey);
+  edgeSel.exit().transition().duration(280).style("opacity",0).remove();
+  const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
+    .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
+    .attr("marker-end",e=>`url(#arr-${edgeClass(e)})`)
+    .style("opacity",0);
+  edgeSel.merge(edgeEnter).transition().duration(380)
+    .attr("d",e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
       const y1=s.y-blockH/2, y2=t.y+blockH/2, my=(y1+y2)/2;
-      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;
-    })
-    .attr("marker-end",e=>`url(#arr-${edgeClass(e)})`);
+      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;})
+    .attr("class",e=>"edge "+edgeClass(e))
+    .attr("stroke-width",e=>edgeWidthFor(e))
+    .style("opacity",1);
 
-  // 节点
-  const focusedId = current.kind==="focus" ? current.id : null;
-  const tile=layer.selectAll(".tile").data(nodes).enter().append("g")
-    .attr("class",d=>`tile ${stateOf(d)}${d.id===focusedId?' focus':''}`)
+  // 节点（key by id），动画 transform
+  const focusedId = current.kind==="focus"?current.id:null;
+  const tileSel=root.selectAll("g.tile").data(nodes, d=>d.id);
+  tileSel.exit().transition().duration(220).style("opacity",0).remove();
+  const tileEnter=tileSel.enter().append("g")
+    .attr("class",d=>tileClass(d,focusedId))
+    .attr("data-id",d=>d.id)
     .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
+    .style("opacity",0)
     .on("click",(_,d)=>nodeClick(d));
-  tile.append("rect").attr("width",blockW).attr("height",blockH)
-    .attr("rx", level===0?12:level===1?9:7).attr("ry",level===0?12:level===1?9:7);
-  const fontMain = Math.max(10, Math.floor(blockW*0.10));
-  const fontSub  = Math.max(9,  Math.floor(blockW*0.075));
-  if(level===0){
-    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-6).text(d=>d.name);
-    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+10).text(d=>d.chapter_label||"");
-    tile.append("text").attr("class","tcount").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+10+fontSub+2).text(d=>`${countL2Under(d)} 知识点`);
-  }else if(level===1){
-    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-2).text(d=>truncate(d.name, blockW, fontMain));
-    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub+4).text(d=>`${d.section_label||""} · ${countL2Under(d)}`);
-  }else{
-    tile.append("text").attr("class","tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-2).text(d=>truncate(d.name, blockW, fontMain));
-    tile.append("text").attr("class","tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub+4).text(d=>d.numeric_label||d.type||"");
-  }
-  // 自动滚动到聚焦节点
+  // 内容（仅 enter 时创建结构；update 时只更新文字/位置）
+  tileEnter.append("rect").attr("class","tbox").attr("width",blockW).attr("height",blockH)
+    .attr("rx",level===0?12:level===1?9:7).attr("ry",level===0?12:level===1?9:7);
+  tileEnter.append("rect").attr("class","chap-bar").attr("x",0).attr("y",0).attr("height",4)
+    .attr("width",blockW).attr("rx",2).attr("ry",2);
+  tileEnter.append("title");  // hover 完整名
+  tileEnter.append("text").attr("class","tname");
+  tileEnter.append("text").attr("class","tsub");
+  tileEnter.append("text").attr("class","tcount");
+
+  // 更新所有节点（含 enter）：先合并再设置内容
+  const tileAll=tileEnter.merge(tileSel);
+  tileAll.attr("class",d=>tileClass(d,focusedId));
+  // 章色条
+  tileAll.select("rect.tbox").attr("width",blockW).attr("height",blockH);
+  tileAll.select("rect.chap-bar")
+    .attr("width",blockW)
+    .attr("fill",d=>{const c=chapOf(d); return c?chapterColor[c]:"#3b6db5"});
+  // tooltip
+  tileAll.select("title").text(d=>{
+    const sum=(d.summary||"").replace(/\$\$?[^$]+\$\$?/g,"…");
+    return `${d.name}\n${d.numeric_label?'['+d.numeric_label+'] ':''}${sum}`;
+  });
+  // 字号
+  const fontMain=Math.max(10, Math.floor(blockW*0.10));
+  const fontSub =Math.max(9 , Math.floor(blockW*0.075));
+  tileAll.select("text.tname").attr("font-size",fontMain).attr("x",blockW/2).attr("y",blockH/2-(level===0?6:2))
+    .text(d=>truncate(d.name,blockW,fontMain));
+  tileAll.select("text.tsub").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub+(level===0?4:4))
+    .text(d=>{
+      if(d.level===0) return d.chapter_label||"";
+      if(d.level===1) return `${d.section_label||""} · ${countL2Under(d)}`;
+      return d.numeric_label||d.type||"";
+    });
+  tileAll.select("text.tcount").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub*2+8)
+    .text(d=>d.level===0?`${countL2Under(d)} 知识点`:"");
+
+  // 位置过渡（update 时滑动）
+  tileAll.transition().duration(420)
+    .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
+    .style("opacity",1);
+
+  // 滚动到焦点
   if(focusedId){
     const p=positions[focusedId];
-    if(p){
-      wrap.scrollTo({left: Math.max(0, p.x - wrap.clientWidth/2), top: Math.max(0, p.y - wrap.clientHeight/2), behavior:"smooth"});
-    }
+    if(p) wrap.scrollTo({left:Math.max(0,p.x-wrap.clientWidth/2), top:Math.max(0,p.y-wrap.clientHeight/2), behavior:"smooth"});
     showDetail(id2[focusedId]);
   }
+  // 搜索高亮
+  applySearchHighlight();
 }
-
-function truncate(s, w, fontSize){
-  // 粗估：CSS px / 字符 ≈ fontSize (中文)
-  const maxChars = Math.max(4, Math.floor((w-12) / (fontSize*0.95)));
+function tileClass(d, focusedId){
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}`;
+}
+function edgeClass(e){const f=id2[e.from];return f?.mastered?"mast":(f?.unlocked?"unl":"lock")}
+function edgeWidthFor(e){
+  // 边权重 = 源节点的后继数（更基础的前置=更粗）
+  if(current.kind==="home"||current.kind==="chapter"){
+    // 聚合视图：用源的子代 L2 后继数之和的粗估
+    return 1.5;
+  }
+  const d=descendants[e.from]||0;
+  return 1.2 + Math.min(3.5, Math.log2(1+d)*0.7);
+}
+function truncate(s,w,fontSize){
+  const maxChars=Math.max(4, Math.floor((w-12)/(fontSize*0.95)));
   return s.length>maxChars ? s.slice(0,maxChars-1)+"…" : s;
 }
 function countL2Under(node){
   if(node.level===2) return 0;
   let n=0;
   for(const x of nodesByLevel[2]){
-    let c=x;
-    while(c && c.parent_id){
-      if(c.parent_id===node.id){n++;break}
-      c=id2[c.parent_id];
-    }
+    let c=x; while(c&&c.parent_id){if(c.parent_id===node.id){n++;break} c=id2[c.parent_id]}
   }
   return n;
 }
-function edgeClass(e){const f=id2[e.from];return f?.mastered?"mast":(f?.unlocked?"unl":"lock")}
-
 function nodeClick(n){
+  if(editMode){ showDetail(n); return; }   // 编辑模式：只显详情面板（含编辑按钮）
   if(n.level===0) pushView({kind:"chapter", id:n.id});
   else if(n.level===1) pushView({kind:"section", id:n.id});
   else pushView({kind:"focus", id:n.id});
+}
+
+// ============================================================
+// 搜索
+// ============================================================
+function onSearchInput(ev){
+  applySearchHighlight();
+}
+function onSearchEnter(){
+  const q=document.getElementById("search").value.trim().toLowerCase();
+  if(!q) return;
+  const hit=KG.nodes.find(n=>matchNode(n,q));
+  if(hit){
+    if(hit.level===0) pushView({kind:"chapter",id:hit.id});
+    else if(hit.level===1) pushView({kind:"section",id:hit.id});
+    else pushView({kind:"focus",id:hit.id});
+    document.getElementById("search").blur();
+  }
+}
+function matchNode(n,q){
+  const s=(n.name+" "+(n.numeric_label||"")+" "+(n.summary||"")).toLowerCase();
+  return s.includes(q);
+}
+function applySearchHighlight(){
+  const q=document.getElementById("search").value.trim().toLowerCase();
+  root.selectAll(".tile").classed("filter-out",false).classed("search-hit",false);
+  if(!q) return;
+  root.selectAll(".tile").classed("filter-out",true);
+  root.selectAll(".tile").filter(d=>matchNode(d,q))
+    .classed("filter-out",false).classed("search-hit",true);
+}
+
+// ============================================================
+// 推荐：解锁未掌握 + 后继多
+// ============================================================
+function openRecommend(){
+  const recs=nodesByLevel[2]
+    .filter(n=>n.unlocked && !n.mastered)
+    .sort((a,b)=>(descendants[b.id]||0)-(descendants[a.id]||0))
+    .slice(0,8);
+  const list=document.getElementById("reco-list");
+  if(!recs.length){ list.innerHTML='<p style="color:#8a9bb4">暂无已解锁未掌握的节点（可能 Anki 数据还没关联好）</p>'; }
+  else{
+    list.innerHTML=recs.map(n=>{
+      const sec=id2[n.parent_id], chap=sec?id2[sec.parent_id]:null;
+      const lbl=n.numeric_label?`[${n.numeric_label}] `:"";
+      const path=`${chap?chap.name+' › ':''}${sec?sec.name:''}`;
+      return `<div class="reco-item" onclick="document.getElementById('reco-mask').classList.remove('open'); pushView({kind:'focus',id:'${n.id}'})">
+        <div class="top"><span>${lbl}<b>${n.name}</b></span><span style="color:#fbbf24">解锁 ${descendants[n.id]||0} 后继</span></div>
+        <div class="sub">${path}</div>
+      </div>`;
+    }).join("");
+  }
+  document.getElementById("reco-mask").classList.add("open");
+}
+function closeRecommend(){document.getElementById("reco-mask").classList.remove("open")}
+
+// ============================================================
+// 编辑模式
+// ============================================================
+function toggleEditMode(){
+  editMode=!editMode;
+  document.getElementById("edit-toggle").classList.toggle("on", editMode);
+  document.getElementById("edit-toggle").textContent = editMode?"✏️ 编辑中":"✏️ 编辑";
+  document.getElementById("edit-actions").style.display = editMode?"block":"none";
+}
+let editingNode=null;
+function showEditPanel(n){
+  editingNode=n;
+  document.getElementById("edit-summary").value = n.summary||"";
+  document.getElementById("edit-actions").style.display = editMode?"block":"none";
+}
+async function editPost(op, payload){
+  const r=await fetch(`/skilltree/${BOOK}/api/edit`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(Object.assign({op},payload))
+  });
+  const j=await r.json();
+  if(!j.ok){ alert("失败："+(j.error||j.info||"未知")); return false; }
+  // 重新拉数据
+  const d=await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+  KG=d; id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  nodesByLevel={0:[],1:[],2:[]};
+  for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+  buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
+  // 当前 view 节点可能消失（删除/合并），自动后退到 home 如失效
+  if(current.id && !id2[current.id]){ current={kind:"home"}; viewStack.length=0; updateNav(); }
+  render();
+  return true;
+}
+async function editDeleteNode(){
+  if(!editingNode) return;
+  if(!confirm(`删除节点「${editingNode.name}」？相关边也会一并删除。不可撤销。`)) return;
+  await editPost("delete_node",{id:editingNode.id});
+}
+async function editSaveSummary(){
+  if(!editingNode) return;
+  const v=document.getElementById("edit-summary").value;
+  await editPost("update_summary",{id:editingNode.id, summary:v});
+}
+let pickMode=null;   // "addPrereq" | "merge"
+function editAddPrereqDlg(){ if(!editingNode||editingNode.level!==2)return alert("仅 L2 节点可编辑前置"); pickMode="addPrereq"; document.getElementById("pick-title").textContent=`为「${editingNode.name}」添加前置`; document.getElementById("pick-q").value=""; renderPickList(); document.getElementById("pick-mask").classList.add("open"); }
+function editMergeDlg(){ if(!editingNode)return; pickMode="merge"; document.getElementById("pick-title").textContent=`把「${editingNode.name}」合并到…`; document.getElementById("pick-q").value=""; renderPickList(); document.getElementById("pick-mask").classList.add("open"); }
+function closePick(){document.getElementById("pick-mask").classList.remove("open")}
+function renderPickList(){
+  const q=document.getElementById("pick-q").value.trim().toLowerCase();
+  let candidates=nodesByLevel[editingNode.level].filter(n=>n.id!==editingNode.id);
+  if(q) candidates=candidates.filter(n=>matchNode(n,q));
+  candidates=candidates.slice(0,80);
+  const list=document.getElementById("pick-list");
+  list.innerHTML=candidates.map(n=>{
+    const lbl=n.numeric_label?`[${n.numeric_label}] `:"";
+    return `<div class="reco-item" onclick="pickConfirm('${n.id}')">${lbl}<b>${n.name}</b><div class="sub">${n.summary||""}</div></div>`;
+  }).join("") || '<p style="color:#8a9bb4">无匹配</p>';
+}
+async function pickConfirm(targetId){
+  closePick();
+  if(!editingNode||!id2[targetId]) return;
+  if(pickMode==="addPrereq"){
+    await editPost("add_edge",{from:targetId, to:editingNode.id, evidence:"手动添加"});
+  }else if(pickMode==="merge"){
+    if(!confirm(`合并「${editingNode.name}」到「${id2[targetId].name}」？「${editingNode.name}」将被删除。`)) return;
+    await editPost("merge",{canonical:targetId, drop:[editingNode.id]});
+  }
 }
 
 // ============================================================
@@ -392,10 +654,12 @@ function showDetail(n){
   }else{
     if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
     if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
+    badges.push(`<span class="badge b-type">解锁 ${descendants[n.id]||0} 后继</span>`);
   }
+  const chap=chapOf(n);
+  if(chap) badges.push(`<span class="badge b-chap" style="background:${chapterColor[chap]}33;color:${chapterColor[chap]};box-shadow:inset 0 0 0 1px ${chapterColor[chap]}">${id2[chap]?.name||""}</span>`);
   document.getElementById("d-badges").innerHTML=badges.join("");
-  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ")
-    || (n.level===0?n.chapter_label:n.section_label)||"—";
+  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ") || (n.level===0?n.chapter_label:n.section_label)||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pageStr=(n.pages||[]).join(", ")||"—";
@@ -406,7 +670,7 @@ function showDetail(n){
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){
     const ul=document.getElementById(elId); ul.innerHTML="";
-    if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合层：点该方块进入知识点视图后可见前置链）"; ul.appendChild(li); return}
+    if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合层：进入知识点视图后可见）"; ul.appendChild(li); return}
     let count=0;
     for(const e of edgesByLevel[2]) if(e[dir==="prereq"?"to":"from"]===n.id){
       const other=id2[e[dir==="prereq"?"from":"to"]]; if(!other) continue;
@@ -414,19 +678,24 @@ function showDetail(n){
       const arrow=dir==="prereq"?"←":"→";
       const stO=stateOf(other);
       const stEmoji={mastered:"🟢",unlocked:"🟡",locked:"⚫"}[stO];
-      li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
-      li.onclick=()=>{pushView({kind:"focus", id:other.id})};
+      li.innerHTML=`${stEmoji} ${arrow} <b>${other.name}</b>${editMode?` <button onclick="event.stopPropagation();delEdge('${dir==='prereq'?other.id:n.id}','${dir==='prereq'?n.id:other.id}')" style="float:right;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer">删</button>`:""}${e.evidence?'<br><small style="color:#6b7488">'+e.evidence+'</small>':''}`;
+      li.onclick=()=>{pushView({kind:"focus",id:other.id})};
       ul.appendChild(li); count++;
     }
     if(!count){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（无）"; ul.appendChild(li)}
   }
   fillList("d-prereqs","prereq");
   fillList("d-unlocks","unlock");
+  showEditPanel(n);
+}
+async function delEdge(a,b){
+  if(!confirm(`删除边 ${id2[a]?.name} → ${id2[b]?.name}？`)) return;
+  await editPost("delete_edge",{from:a, to:b});
 }
 function closeDetail(){document.getElementById("detail").classList.remove("open")}
 
 // ============================================================
-// settings
+// settings modal
 // ============================================================
 function openSettings(){
   document.getElementById("sett-mask").classList.add("open");
@@ -442,20 +711,21 @@ function updateSettPreview(){
 }
 function applySettings(){
   const v=+document.getElementById("sett-ratio").value;
-  settings.blockRatio=v/100;
-  saveSettings(settings);
-  closeSettings();
-  render();
+  settings.blockRatio=v/100; saveSettings(settings);
+  closeSettings(); render();
 }
 function closeSettings(){document.getElementById("sett-mask").classList.remove("open")}
 
 // 快捷键
 document.addEventListener("keydown",e=>{
+  if(document.activeElement && ["INPUT","TEXTAREA"].includes(document.activeElement.tagName)) return;
   if(e.key==="Escape"){
-    if(document.getElementById("sett-mask").classList.contains("open")) closeSettings();
-    else goBack();
+    if(document.querySelector(".mask.open")){
+      document.querySelectorAll(".mask.open").forEach(m=>m.classList.remove("open"));
+    } else goBack();
   }
-  if(e.key==="Backspace" && !["INPUT","TEXTAREA"].includes(document.activeElement.tagName)) goBack();
+  if(e.key==="Backspace") goBack();
+  if(e.key==="/"){ e.preventDefault(); document.getElementById("search").focus(); }
 });
 window.addEventListener("resize",()=>render());
 updateNav();

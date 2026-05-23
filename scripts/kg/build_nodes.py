@@ -168,6 +168,7 @@ def main() -> int:
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--workers", type=int, default=4, help="并行 AI 调用数（默认 4）")
+    ap.add_argument("--rescan-pages", default="", help="只重扫指定页（逗号分隔，如 97,103,171）。需 --kg-output 已存在")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -205,8 +206,19 @@ def main() -> int:
         l1_list = [n for n in l1_list if not (n["pages"][1] < pg_lo or n["pages"][0] > pg_hi)]
     if args.limit:
         l1_list = l1_list[:args.limit]
-    # 跳过已扫
-    l1_list = [n for n in l1_list if n["id"] not in done_l1]
+    # --rescan-pages：只重扫指定页（用已扫 L1 的 page range 找到所属节，但只处理那几页）
+    rescan_pages = set()
+    if args.rescan_pages:
+        rescan_pages = set(int(x) for x in args.rescan_pages.split(",") if x.strip())
+        # 强制 OVERRIDE done_l1：被重扫页所属的 L1 节即便已扫也需要再跑（只跑那几页）
+        l1_list = [n for n in nodes if n.get("level")==1] if False else l1_list
+        # 重新计算：以原 l1_list（含已扫）为基础，但仅保留含 rescan 页的节
+        all_l1 = [n for n in kg["nodes"] if n.get("level") == 1]
+        l1_list = [n for n in all_l1 if any(p in rescan_pages for p in range(n["pages"][0], n["pages"][1]+1))]
+        print(f"--rescan-pages 模式：仅重跑 {sorted(rescan_pages)}，覆盖 {len(l1_list)} 个 L1 节")
+    else:
+        # 跳过已扫
+        l1_list = [n for n in l1_list if n["id"] not in done_l1]
     print(f"本次处理 L1 节数: {len(l1_list)}")
 
     backend = make_backend("claude_cli", {
@@ -219,7 +231,9 @@ def main() -> int:
         ps, pe = l1["pages"]
         sec_l2: dict[str, dict] = {}   # numeric_label → node（节内去重）
         # 渲染所有页（串行，fitz 不保证线程安全，但快）
-        pngs = {pg: render_page_png(doc, pg - 1, args.book) for pg in range(ps, pe + 1)}
+        page_range = (sorted(p for p in range(ps, pe + 1) if p in rescan_pages)
+                      if rescan_pages else list(range(ps, pe + 1)))
+        pngs = {pg: render_page_png(doc, pg - 1, args.book) for pg in page_range}
         # AI 调用并行（ClaudeCli 每次 spawn 子进程，subprocess 间互不影响）
         def _work(pg, png=None):
             png = png if png is not None else pngs[pg]
@@ -262,10 +276,25 @@ def main() -> int:
                 else:
                     if pg not in node["pages"]:
                         node["pages"].append(pg)
-        kg["nodes"].extend(sec_l2.values())
-        total_l2 += len(sec_l2)
+        # rescan 模式：将新结果与已存的 L2 合并到 kg["nodes"]（按 numeric_label 去重）
+        if rescan_pages:
+            existing = {n.get("numeric_label",""): n for n in kg["nodes"]
+                        if n.get("level")==2 and n.get("parent_id")==l1["id"]
+                        and n.get("numeric_label","")}
+            for k, new in sec_l2.items():
+                if new.get("numeric_label","") in existing:
+                    # 合并 pages 到已有节点
+                    cur = existing[new["numeric_label"]]
+                    cur.setdefault("pages", []).extend(p for p in new.get("pages",[])
+                                                       if p not in cur.get("pages",[]))
+                else:
+                    kg["nodes"].append(new)
+            total_l2 += len(sec_l2)
+        else:
+            kg["nodes"].extend(sec_l2.values())
+            total_l2 += len(sec_l2)
         elapsed = time.time() - t_start
-        # 增量写：每完成一节立刻落盘，可在 webapp 实时看到部分技能树
+        # 增量写：每完成一节立刻落盘
         out.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  [{li}/{len(l1_list)}] {l1['section_label']} {l1['name']}: "
               f"{len(sec_l2)} 个 L2（累计 {total_l2}，{elapsed:.0f}s, 已写盘）", flush=True)
