@@ -11,6 +11,7 @@ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a
 #bar .meta{font-size:12px;color:#8a9bb4}
 #bar button{background:#1a2540;color:#9ec3ff;border:1px solid #2a3550;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer}
 #bar button:hover{background:#27345a}
+#lvl{font-size:11px;color:#7dc4ff;background:#0e2042;border:1px solid #244470;padding:3px 9px;border-radius:10px;font-weight:600}
 #legend{margin-left:auto;display:flex;gap:14px;font-size:11px;color:#8a9bb4}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;box-shadow:0 0 8px currentColor}
 #viz{flex:1;position:relative;overflow:hidden;background-color:#0a0e1a;background-image:
@@ -24,9 +25,10 @@ svg:active{cursor:grabbing}
 .tile{cursor:pointer;transition:opacity .25s}
 .tile rect{transition:filter .15s, stroke-width .15s, stroke .15s}
 .tile:hover rect{filter:brightness(1.4)}
-.tile text.tname{font-size:11px;font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
-.tile text.tlabel{font-size:9px;fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
-/* 状态色（基础） */
+.tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
+.tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
+.tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
+/* 状态色 */
 .tile.mastered rect{stroke:#34d399;stroke-width:2;fill:#0d2a1f;filter:drop-shadow(0 0 6px #34d39966)}
 .tile.mastered{color:#7be096}
 .tile.unlocked rect{stroke:#fbbf24;stroke-width:1.8;fill:#241a08;filter:drop-shadow(0 0 5px #fbbf2455)}
@@ -34,8 +36,8 @@ svg:active{cursor:grabbing}
 .tile.locked rect{stroke:#4a5568;stroke-width:1.3;fill:#141926;stroke-dasharray:3 3}
 .tile.locked{color:#6b7488}
 /* 聚焦/淡出 */
-.tile.dim{opacity:.12}
-.tile.dim text{display:none}                  /* 远的不必显示文字，节省渲染 */
+.tile.dim{opacity:.13}
+.tile.dim text{display:none}
 .tile.dim rect{filter:none;stroke-dasharray:none}
 .tile.hi.unlocked rect{stroke-width:2.5;filter:drop-shadow(0 0 14px #fbbf24cc)}
 .tile.hi.mastered rect{stroke-width:3;filter:drop-shadow(0 0 16px #34d399dd)}
@@ -74,6 +76,7 @@ svg:active{cursor:grabbing}
 <body>
 <div id="bar">
   <h1>{{ book }} · 技能树</h1>
+  <span id="lvl">L0 章</span>
   <span class="meta" id="meta">加载中…</span>
   <button onclick="resetView()" title="缩放至全图">⊡ 全图</button>
   <button onclick="clearFocus()" title="清除聚焦">⊙ 清除</button>
@@ -86,11 +89,8 @@ svg:active{cursor:grabbing}
 <div id="viz">
   <svg><defs>
     <marker id="arr-mast" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
-    <marker id="arr-mast-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,-4L9,0L0,4" fill="#34d399"/></marker>
     <marker id="arr-unl" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
-    <marker id="arr-unl-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,-4L9,0L0,4" fill="#fbbf24"/></marker>
     <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,-4L9,0L0,4" fill="#4a5568"/></marker>
-    <marker id="arr-lock-hi" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-4L9,0L0,4" fill="#9aa4b2"/></marker>
   </defs></svg>
   <aside id="detail">
     <button id="detail-close" onclick="closeDetail()">✕</button>
@@ -103,69 +103,126 @@ svg:active{cursor:grabbing}
     <div class="lbl">前置链（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
     <div class="lbl">后续（解锁后开放）</div><ul class="prereqs" id="d-unlocks"></ul>
   </aside>
-  <div id="hint">点节点聚焦前置链 · 滚轮缩放 · 拖拽平移 · <kbd>⊡</kbd> 重置 · <kbd>⊙</kbd> 取消聚焦</div>
+  <div id="hint">缩放即切层（远→章 → 节 → 知识点）· 点节点聚焦/钻取 · <kbd>⊡</kbd> 全图 · <kbd>Esc</kbd> 取消</div>
 </div>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const BOOK="{{ book }}";
-let KG=null, id2=null, l2=[], edgesL2=[], depthOf={};
 const VAULT="Obsidian Vault";
-const NW=120, NH=38, GX=18, GY=78, PADX=80, PADY=80;
-const FOCUS_HOPS=3;       // 聚焦时框选 N 层前置作缩放范围
+// LOD 阈值（k = zoom scale）
+const K_L0_L1=0.35, K_L1_L2=0.85, HYST=0.05;
+const FOCUS_HOPS=3;
+
+let KG=null, id2=null;
+let nodesByLevel={0:[],1:[],2:[]};
+let edgesByLevel={0:[],1:[],2:[]};
+let depthL2={};
+let currentLevel=0, focusId=null;
+let rendering=false;
+
 const svg=d3.select("svg"), W=()=>svg.node().clientWidth, H=()=>svg.node().clientHeight;
 const g=svg.append("g");
-const zoom=d3.zoom().scaleExtent([0.08,4]).on("zoom",ev=>g.attr("transform",ev.transform));
+const zoom=d3.zoom().scaleExtent([0.05,4]).on("zoom",onZoom);
 svg.call(zoom);
 
-let focusId=null;
-
 fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
-  KG=d;
-  id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
-  l2=KG.nodes.filter(n=>n.level===2);
-  edgesL2=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
-  computeLayout();
-  renderAll();
-  resetView();
+  KG=d; id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+  computeAllLayouts();
   document.getElementById("meta").textContent=
-    `${l2.length} 知识点 · ${edgesL2.length} 前置 · ${KG.nodes.filter(n=>n.level===0).length} 章`;
+    `${KG.nodes.filter(n=>n.level===0).length} 章 · ${KG.nodes.filter(n=>n.level===1).length} 节 · ${KG.nodes.filter(n=>n.level===2).length} 知识点`;
+  renderLevel(0);
+  resetView();
 });
 
 function stateOf(n){return n.mastered?"mastered":(n.unlocked?"unlocked":"locked")}
-function chapOf(n){let c=n;while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}return null}
 
-// === 全局布局：最长路径 depth → y（翻转，深度大在顶）；按章分块在同层内 ===
-function computeLayout(){
-  const inEdges={}; for(const n of l2) inEdges[n.id]=[];
-  for(const e of edgesL2) inEdges[e.to].push(e.from);
-  for(const n of l2) depthOf[n.id]=0;
-  let ch=true, iter=0;
-  while(ch && iter++<l2.length+2){
+// =========================================================================
+// 全局布局：L2 用最长路径 depth；L1/L0 用子节点 centroid
+// =========================================================================
+const NW={0:200,1:148,2:118}, NH={0:62,1:44,2:34};
+function computeAllLayouts(){
+  const l2=nodesByLevel[2];
+  const inE={}; for(const n of l2) inE[n.id]=[];
+  const l2edges=(KG.edges||[]).filter(e=>e.kind==="prereq"&&id2[e.from]?.level===2&&id2[e.to]?.level===2);
+  for(const e of l2edges) inE[e.to].push(e.from);
+  for(const n of l2) depthL2[n.id]=0;
+  let ch=true, it=0;
+  while(ch&&it++<l2.length+2){
     ch=false;
     for(const n of l2){
-      const d=inEdges[n.id].length?Math.max(...inEdges[n.id].map(s=>(depthOf[s]??0)+1)):0;
-      if(d!==depthOf[n.id]){depthOf[n.id]=d;ch=true}
+      const d=inE[n.id].length?Math.max(...inE[n.id].map(s=>(depthL2[s]??0)+1)):0;
+      if(d!==depthL2[n.id]){depthL2[n.id]=d;ch=true}
     }
   }
-  const maxD=Math.max(...Object.values(depthOf),0);
-  const byDepth={};
-  for(const n of l2)(byDepth[depthOf[n.id]]=byDepth[depthOf[n.id]]||[]).push(n);
+  const maxD=Math.max(...Object.values(depthL2),0);
+  const byDepth={}; for(const n of l2)(byDepth[depthL2[n.id]]=byDepth[depthL2[n.id]]||[]).push(n);
+  const chapOf=n=>{let c=n;while(c&&c.parent_id){if(id2[c.parent_id]?.level===0)return c.parent_id;c=id2[c.parent_id]}return ""};
+  const PADX=80, PADY=80, GAP_X=18, GAP_Y=78;
   for(const d in byDepth){
-    // 同深度内：按章序 + 章内按 numeric_label
-    byDepth[d].sort((a,b)=>{
-      const ca=chapOf(a)||"", cb=chapOf(b)||"";
-      return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"");
-    });
+    byDepth[d].sort((a,b)=>(chapOf(a).localeCompare(chapOf(b)))||(a.numeric_label||"").localeCompare(b.numeric_label||""));
     byDepth[d].forEach((n,i)=>{
-      n.x=PADX + i*(NW+GX) + NW/2;
-      n.y=PADY + (maxD-(+d))*GY + NH/2;
+      n.x=PADX+i*(NW[2]+GAP_X)+NW[2]/2;
+      n.y=PADY+(maxD-(+d))*GAP_Y+NH[2]/2;
     });
   }
+  // L1 = centroid(自己的 L2 子) ；fallback: 同 L0 兄弟之间的页码顺序
+  for(const n1 of nodesByLevel[1]){
+    const kids=l2.filter(x=>x.parent_id===n1.id && x.x!=null);
+    if(kids.length){
+      n1.x=kids.reduce((a,b)=>a+b.x,0)/kids.length;
+      n1.y=kids.reduce((a,b)=>a+b.y,0)/kids.length;
+    }
+  }
+  // 无 L2 子的 L1（如本节没抽到知识点）→ 放父 L0 附近，按节序排
+  for(const n0 of nodesByLevel[0]){
+    const sibs=nodesByLevel[1].filter(x=>x.parent_id===n0.id);
+    const empty=sibs.filter(x=>x.x==null);
+    if(empty.length){
+      const placed=sibs.filter(x=>x.x!=null);
+      let baseX=placed.length?placed.reduce((a,b)=>a+b.x,0)/placed.length:PADX+nodesByLevel[0].indexOf(n0)*600;
+      let baseY=placed.length?placed.reduce((a,b)=>a+b.y,0)/placed.length:PADY+200;
+      empty.sort((a,b)=>(a.section_label||"").localeCompare(b.section_label||""));
+      empty.forEach((n,i)=>{n.x=baseX+(i-empty.length/2)*(NW[1]+22);n.y=baseY});
+    }
+  }
+  // L0 = centroid(L1 children)
+  for(const n0 of nodesByLevel[0]){
+    const kids=nodesByLevel[1].filter(x=>x.parent_id===n0.id && x.x!=null);
+    if(kids.length){
+      n0.x=kids.reduce((a,b)=>a+b.x,0)/kids.length;
+      n0.y=kids.reduce((a,b)=>a+b.y,0)/kids.length;
+    }else{
+      n0.x=PADX+nodesByLevel[0].indexOf(n0)*600; n0.y=PADY+200;
+    }
+  }
+  // 聚合 edges
+  edgesByLevel[2]=l2edges;
+  edgesByLevel[1]=aggregateUp(l2edges, 1);
+  edgesByLevel[0]=aggregateUp(l2edges, 0);
+}
+function ancestorAtLevel(nodeId, lv){
+  let cur=id2[nodeId];
+  while(cur && cur.level>lv) cur=id2[cur.parent_id];
+  return cur && cur.level===lv ? cur.id : null;
+}
+function aggregateUp(l2edges, lv){
+  const seen=new Set(); const out=[];
+  for(const e of l2edges){
+    const a=ancestorAtLevel(e.from, lv), b=ancestorAtLevel(e.to, lv);
+    if(!a||!b||a===b) continue;
+    const k=a+"→"+b; if(seen.has(k)) continue; seen.add(k);
+    // 边状态 = 源节点状态（聚合后取较好状态？这里直接用源的 mastered/unlocked）
+    out.push({from:a,to:b,kind:"prereq",level:lv});
+  }
+  return out;
 }
 
-function bezier(s,t){
-  // 自下而上：源（前置）下→ 目标（后继）上；从源顶部出，到目标底部入
-  const x1=s.x, y1=s.y-NH/2, x2=t.x, y2=t.y+NH/2;
+// =========================================================================
+// 渲染：按当前 level
+// =========================================================================
+function bezier(s,t,lv){
+  const x1=s.x, y1=s.y-NH[lv]/2, x2=t.x, y2=t.y+NH[lv]/2;
   const my=(y1+y2)/2;
   return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
 }
@@ -173,34 +230,99 @@ function edgeStateClass(e){
   const f=id2[e.from];
   return f?.mastered ? "mast" : (f?.unlocked ? "unl" : "lock");
 }
-
-// === 渲染（一次性全量）===
-function renderAll(){
+function cssEsc(s){return (s||"").replace(/([.\\:#\[\]@\!])/g,'\\$1')}
+function childCountAtL2(node){
+  // 数该节点（L0/L1）下挂多少 L2
+  if(node.level===2) return 0;
+  let n=0;
+  for(const x of nodesByLevel[2]){
+    let cur=x; while(cur && cur.parent_id){
+      if(cur.parent_id===node.id){n++; break}
+      cur=id2[cur.parent_id];
+    }
+  }
+  return n;
+}
+function renderLevel(lv){
+  if(rendering) return;
+  rendering=true;
+  currentLevel=lv;
+  document.getElementById("lvl").textContent=`L${lv} ${lv===0?'章':lv===1?'节':'知识点'}`;
   g.selectAll("*").remove();
-  g.selectAll(".edge").data(edgesL2).enter().append("path")
+  const nodes=nodesByLevel[lv].filter(n=>n.x!=null);
+  const edges=edgesByLevel[lv];
+  // 边
+  g.selectAll(".edge").data(edges).enter().append("path")
     .attr("class",e=>"edge "+edgeStateClass(e))
     .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
-    .attr("d",e=>bezier(id2[e.from],id2[e.to]))
+    .attr("d",e=>{const s=id2[e.from],t=id2[e.to];return s&&t?bezier(s,t,lv):""})
     .attr("marker-end",e=>`url(#arr-${edgeStateClass(e)})`);
-  const tile=g.selectAll(".tile").data(l2).enter().append("g")
-    .attr("class",d=>`tile l2 ${stateOf(d)}`)
+  // 节点
+  const w=NW[lv], h=NH[lv];
+  const tile=g.selectAll(".tile").data(nodes).enter().append("g")
+    .attr("class",d=>`tile l${lv} ${stateOf(d)}`)
     .attr("data-id",d=>d.id)
-    .attr("transform",d=>`translate(${d.x-NW/2},${d.y-NH/2})`)
-    .on("click",(_,d)=>focusOn(d.id));
-  tile.append("rect").attr("width",NW).attr("height",NH).attr("rx",7).attr("ry",7);
-  tile.append("text").attr("class","tname").attr("x",NW/2).attr("y",NH/2-2)
-    .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
-  tile.append("text").attr("class","tlabel").attr("x",NW/2).attr("y",NH/2+12)
-    .text(d=>d.numeric_label||d.type||"");
+    .attr("transform",d=>`translate(${d.x-w/2},${d.y-h/2})`)
+    .on("click",(_,d)=>nodeClick(d));
+  tile.append("rect").attr("width",w).attr("height",h).attr("rx",lv===0?12:lv===1?9:7).attr("ry",lv===0?12:lv===1?9:7);
+  // 文字
+  if(lv===0){
+    tile.append("text").attr("class","tname").attr("font-size",14).attr("x",w/2).attr("y",h/2-6).text(d=>d.name);
+    tile.append("text").attr("class","tsub").attr("font-size",10).attr("x",w/2).attr("y",h/2+10).text(d=>d.chapter_label||"");
+    tile.append("text").attr("class","tcount").attr("font-size",10).attr("x",w/2).attr("y",h/2+22).text(d=>`${childCountAtL2(d)} 知识点`);
+  }else if(lv===1){
+    tile.append("text").attr("class","tname").attr("font-size",12).attr("x",w/2).attr("y",h/2-2)
+      .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
+    tile.append("text").attr("class","tsub").attr("font-size",9).attr("x",w/2).attr("y",h/2+11)
+      .text(d=>`${d.section_label||""} · ${childCountAtL2(d)} 知识点`);
+  }else{
+    tile.append("text").attr("class","tname").attr("font-size",11).attr("x",w/2).attr("y",h/2-2)
+      .text(d=>{const n=d.name; return n.length>11?n.slice(0,11)+"…":n});
+    tile.append("text").attr("class","tsub").attr("font-size",9).attr("x",w/2).attr("y",h/2+10)
+      .text(d=>d.numeric_label||d.type||"");
+  }
+  reapplyHighlight();
+  rendering=false;
 }
 
-// === 聚焦：高亮所有传递前置 + 缩放到 N 层 ===
+// =========================================================================
+// 缩放联动 LOD（带滞回）
+// =========================================================================
+function onZoom(ev){
+  g.attr("transform",ev.transform);
+  const k=ev.transform.k;
+  let want=currentLevel;
+  if(currentLevel===0){
+    if(k > K_L0_L1+HYST) want=1;
+  }else if(currentLevel===1){
+    if(k < K_L0_L1-HYST) want=0;
+    else if(k > K_L1_L2+HYST) want=2;
+  }else{
+    if(k < K_L1_L2-HYST) want=1;
+  }
+  if(want!==currentLevel) renderLevel(want);
+}
+
+// =========================================================================
+// 点击：L0/L1 钻取（动画缩放到目标层）；L2 聚焦
+// =========================================================================
+function nodeClick(n){
+  if(n.level<2){
+    // 钻取：缩放使其 L1 / L2 子节点正好填屏
+    const kids = nodesByLevel[n.level+1].filter(x=>x.parent_id===n.id && x.x!=null);
+    if(!kids.length){showDetail(n); return}
+    zoomToFit(kids, 0.78);
+    setTimeout(()=>showDetail(n),200);
+  }else{
+    focusOn(n.id);
+  }
+}
 function ancestorsTransitive(rootId){
   const out=new Set([rootId]);
   const stack=[rootId];
   while(stack.length){
     const cur=stack.pop();
-    for(const e of edgesL2){
+    for(const e of edgesByLevel[2]){
       if(e.to===cur && !out.has(e.from)){out.add(e.from); stack.push(e.from)}
     }
   }
@@ -208,66 +330,80 @@ function ancestorsTransitive(rootId){
 }
 function ancestorsKHops(rootId, K){
   const out=new Set([rootId]);
-  let frontier=new Set([rootId]);
+  let fr=new Set([rootId]);
   for(let h=0;h<K;h++){
-    const nxt=new Set();
-    for(const e of edgesL2){
-      if(frontier.has(e.to) && !out.has(e.from)){out.add(e.from); nxt.add(e.from)}
+    const nx=new Set();
+    for(const e of edgesByLevel[2]){
+      if(fr.has(e.to) && !out.has(e.from)){out.add(e.from); nx.add(e.from)}
     }
-    if(!nxt.size) break;
-    frontier=nxt;
+    if(!nx.size) break;
+    fr=nx;
   }
   return out;
 }
 function focusOn(id){
   focusId=id;
   const allAnc=ancestorsTransitive(id);
-  const nearAnc=ancestorsKHops(id, FOCUS_HOPS);  // 用于缩放范围
-  // 标记
+  const nearAnc=ancestorsKHops(id, FOCUS_HOPS);
+  // 强制切到 L2（聚焦只在 L2 有意义）
+  if(currentLevel!==2){
+    const target=[...nearAnc].map(a=>id2[a]).filter(Boolean);
+    zoomToFit(target, 0.82);   // 缩放会触发 onZoom → renderLevel(2)，然后下面再 reapplyHighlight
+    setTimeout(()=>{reapplyHighlight(); showDetail(id2[id])}, 800);
+    return;
+  }
+  reapplyHighlight();
+  zoomToFit([...nearAnc].map(a=>id2[a]).filter(Boolean), 0.82);
+  showDetail(id2[id]);
+}
+function reapplyHighlight(){
+  if(focusId==null || currentLevel!==2){
+    g.selectAll(".tile").classed("dim",false).classed("hi",false).classed("focus",false);
+    g.selectAll(".edge").classed("dim",false).classed("hi",false);
+    return;
+  }
+  const allAnc=ancestorsTransitive(focusId);
   g.selectAll(".tile").classed("dim",true).classed("hi",false).classed("focus",false);
   g.selectAll(".edge").classed("dim",true).classed("hi",false);
   for(const aid of allAnc){
     d3.select(`.tile[data-id="${cssEsc(aid)}"]`).classed("dim",false).classed("hi",true);
   }
-  d3.select(`.tile[data-id="${cssEsc(id)}"]`).classed("dim",false).classed("focus",true).classed("hi",false);
-  for(const e of edgesL2){
+  d3.select(`.tile[data-id="${cssEsc(focusId)}"]`).classed("focus",true).classed("hi",false);
+  for(const e of edgesByLevel[2]){
     if(allAnc.has(e.from) && allAnc.has(e.to)){
       d3.select(`.edge[data-from="${cssEsc(e.from)}"][data-to="${cssEsc(e.to)}"]`)
         .classed("dim",false).classed("hi",true);
     }
   }
-  // 缩放到近 N 层
-  const focusNodes=[...nearAnc].map(a=>id2[a]).filter(Boolean);
-  zoomToFit(focusNodes, 0.82);
-  // detail
-  showDetail(id2[id]);
 }
 function clearFocus(){
   focusId=null;
-  g.selectAll(".tile").classed("dim",false).classed("hi",false).classed("focus",false);
-  g.selectAll(".edge").classed("dim",false).classed("hi",false);
+  reapplyHighlight();
   closeDetail();
 }
 function resetView(){
-  if(!l2.length)return;
-  zoomToFit(l2, 0.92);
+  const nodes=nodesByLevel[currentLevel].filter(n=>n.x!=null);
+  if(!nodes.length) return;
+  zoomToFit(nodes, 0.92);
 }
 function zoomToFit(nodes, padFactor){
   if(!nodes.length) return;
   const xs=nodes.map(n=>n.x), ys=nodes.map(n=>n.y);
-  const minX=Math.min(...xs)-NW/2-30, maxX=Math.max(...xs)+NW/2+30;
-  const minY=Math.min(...ys)-NH/2-30, maxY=Math.max(...ys)+NH/2+30;
-  const dx=maxX-minX, dy=maxY-minY;
-  const wv=W()-380; const hv=H();   // 留出 detail 面板 360+padding
-  const k=Math.min(wv/dx, hv/dy) * (padFactor||0.85);
-  const tx=wv/2 - k*(minX+dx/2);
-  const ty=hv/2 - k*(minY+dy/2);
+  const dx=Math.max(...xs)-Math.min(...xs) || NW[currentLevel]*2;
+  const dy=Math.max(...ys)-Math.min(...ys) || NH[currentLevel]*2;
+  const minX=Math.min(...xs), minY=Math.min(...ys);
+  const wv=W()-380, hv=H();
+  const k=Math.min(wv/(dx+NW[currentLevel]*2), hv/(dy+NH[currentLevel]*4)) * (padFactor||0.85);
+  const kc=Math.max(0.05, Math.min(2.5, k));
+  const tx=wv/2 - kc*(minX+dx/2);
+  const ty=hv/2 - kc*(minY+dy/2);
   svg.transition().duration(750)
-    .call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(Math.max(0.08, Math.min(2.5, k))));
+    .call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(kc));
 }
-function cssEsc(s){return (s||"").replace(/([.\\:#\[\]@\!])/g,'\\$1')}
 
-// === detail ===
+// =========================================================================
+// detail
+// =========================================================================
 function obsidianUrl(noteRef){
   if(!noteRef) return "";
   let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
@@ -281,30 +417,32 @@ function showDetail(n){
   const sLabel={mastered:"已掌握",unlocked:"已解锁",locked:"未解锁"}[st];
   const sBadge={mastered:"b-mast",unlocked:"b-unl",locked:"b-lock"}[st];
   const badges=[`<span class="badge ${sBadge}">${sLabel}</span>`];
-  if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
-  if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
+  if(n.level<2){
+    badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
+    badges.push(`<span class="badge b-type">${childCountAtL2(n)} 知识点</span>`);
+  }else{
+    if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
+    if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
+  }
   document.getElementById("d-badges").innerHTML=badges.join("");
-  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ")||"—";
+  document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ")
+    || (n.level===0?n.chapter_label:n.section_label)||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
-  // 路径
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pageStr=(n.pages||[]).join(", ")||"—";
   document.getElementById("d-path").innerHTML=`p.${pageStr}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
-  // 关联
   const link=[];
-  if(n.note_ref){
-    const u=obsidianUrl(n.note_ref);
-    link.push(`<a href="${u}">📝 ${n.note_ref}</a>`);
-  }
+  if(n.note_ref){ link.push(`<a href="${obsidianUrl(n.note_ref)}">📝 ${n.note_ref}</a>`); }
   if(n.card_refs && n.card_refs.length){
-    link.push(`🎴 ${n.card_refs.length} 张 Anki 卡（local_ids: ${n.card_refs.join(", ").slice(0,80)}${n.card_refs.join(", ").length>80?"…":""}）`);
+    link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
   }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
-  // 前置/后续
+  // 前置/后续 — 仅 L2 有
   function fillList(elId, dir){
     const ul=document.getElementById(elId); ul.innerHTML="";
+    if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合视图：钻入到知识点层级才能看）"; ul.appendChild(li); return}
     let count=0;
-    for(const e of edgesL2) if(e[dir==="prereq"?"to":"from"]===n.id){
+    for(const e of edgesByLevel[2]) if(e[dir==="prereq"?"to":"from"]===n.id){
       const other=id2[e[dir==="prereq"?"from":"to"]]; if(!other) continue;
       const li=document.createElement("li");
       const arrow=dir==="prereq"?"←":"→";
@@ -320,7 +458,9 @@ function showDetail(n){
   fillList("d-unlocks","unlock");
 }
 function closeDetail(){document.getElementById("detail").classList.remove("open")}
-// 快捷键：Esc 取消聚焦
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") clearFocus() });
-window.addEventListener("resize",()=>{ if(focusId) focusOn(focusId); else resetView() });
+window.addEventListener("resize",()=>{
+  if(focusId) focusOn(focusId);
+  else resetView();
+});
 </script></body></html>
