@@ -24,6 +24,7 @@
 | `/anki` | 对指定笔记或目录生成 Anki 卡片：agent 判断制卡，脚本同步到 Anki |
 | `/website` | 管理个人网站 bwicarus.space：部署页面、更新仪表板、nginx 配置 |
 | `/openai-cli-chat` | Codex CLI 多轮对话实现模板：`codex_call()` + `--image` 附图 + 应用层历史拼接 |
+| `/claude-quota` | 查 Claude Code 实时额度（5h/7d/Sonnet 使用率 + extra credits），零 token 消耗 |
 
 ## 关键文件
 
