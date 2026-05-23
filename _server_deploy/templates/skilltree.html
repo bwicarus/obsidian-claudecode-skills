@@ -32,6 +32,10 @@ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a
 svg.canvas{display:block}
 /* 节点 */
 .tile{cursor:pointer}
+/* 推断掌握（mastery 由后续节点反向传递）：节点边框叠加双层虚线 + 右上角小标记 ↓ */
+.tile.inferred rect.tbox{stroke-dasharray:5 2 1 2}
+.tile.inferred text.inferred-mark{display:block}
+.tile text.inferred-mark{display:none;font-size:10px;font-weight:700;fill:currentColor;opacity:.62;pointer-events:none;user-select:none}
 .tile rect.tbox{transition:filter .15s, stroke-width .15s}
 .tile:hover rect.tbox{filter:brightness(1.4)}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
@@ -740,6 +744,7 @@ function render(){
   tileEnter.append("text").attr("class","tname");
   tileEnter.append("text").attr("class","tsub");
   tileEnter.append("text").attr("class","tcount");
+  tileEnter.append("text").attr("class","inferred-mark").text("↓");
 
   // 更新所有节点（含 enter）：先合并再设置内容
   const tileAll=tileEnter.merge(tileSel);
@@ -769,6 +774,9 @@ function render(){
     });
   tileAll.select("text.tcount").attr("font-size",fontSub).attr("x",blockW/2).attr("y",blockH/2+fontSub*2+8)
     .text(d=>d.level===0?`${countL2Under(d)} 知识点`:"");
+  // 推断掌握标记：右上角小 ↓（暗示 mastery 来自下方/后续）
+  tileAll.select("text.inferred-mark")
+    .attr("x", blockW-8).attr("y", 12);
 
   // 位置过渡（update 时滑动）
   tileAll.transition().duration(420)
@@ -786,10 +794,8 @@ function render(){
 }
 function tileClass(d, focusedId){
   const role = chainRoleNode(d, focusedId);
-  // 注：locked 章节里的 L2 节点已在 layout 末尾被 offScreen filter 剔除，
-  // 不会到达这里。L2 自身 state===locked（mastery=None/0）不该 hidden，
-  // 只是状态色更暗——它仍然可见。
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}`;
+  const inferred = d.mastery_inferred ? ' inferred' : '';
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
@@ -995,8 +1001,13 @@ function showDetail(n){
     badges.push(`<span class="badge b-type">${countL2Under(n)} 知识点</span>`);
   }else{
     if(n.type) badges.push(`<span class="badge b-type">${n.type}</span>`);
-    if(typeof n.mastery==="number") badges.push(`<span class="badge b-type">掌握 ${(n.mastery*100).toFixed(0)}%</span>`);
-    else badges.push(`<span class="badge b-type" style="opacity:.6">无卡片数据</span>`);
+    if(typeof n.mastery==="number"){
+      const tag = n.mastery_inferred ? "↓推断掌握" : "掌握";
+      const tooltip = n.mastery_inferred
+        ? `自身无卡片数据，由后续节点 mastery 反向推断（你能学后续 = 必然懂前置）。自身原值：${n.mastery_self==null?"无":(n.mastery_self*100).toFixed(0)+"%"}`
+        : "";
+      badges.push(`<span class="badge b-type" title="${tooltip}">${tag} ${(n.mastery*100).toFixed(0)}%</span>`);
+    } else badges.push(`<span class="badge b-type" style="opacity:.6">无卡片数据</span>`);
     badges.push(`<span class="badge b-type">解锁 ${descendants[n.id]||0} 后继</span>`);
   }
   const chap=chapOf(n);

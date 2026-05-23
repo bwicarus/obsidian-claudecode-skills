@@ -142,6 +142,7 @@ def main() -> int:
         n.pop("note_ref", None); n.pop("card_refs", None)
         n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
         n.pop("has_cards", None); n.pop("state", None)
+        n.pop("mastery_self", None); n.pop("mastery_inferred", None)
     # 1) 关联：L1 → 笔记，L2 → 卡（继承父 L1 的 record）
     linked_l1 = linked_l2 = 0
     for n in nodes:
@@ -198,6 +199,45 @@ def main() -> int:
     for n in nodes:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)  # 可能 None
+
+    # 2.5) 反向传递：L2 节点的有效 mastery = max(自身, 所有 descendant 的 mastery)
+    # 逻辑：能掌握高级知识点说明已掌握其所有前置 → 把前置 mastery 拉到至少跟最强后继齐
+    # 保留 mastery_self 字段记录原始值，加 mastery_inferred 标记被推断掌握的节点
+    edges_kg = kg.get("edges", [])
+    fwd = defaultdict(list)  # from -> [to]
+    for e in edges_kg:
+        if e.get("kind") == "prereq":
+            fwd[e["from"]].append(e["to"])
+    # 拓扑序（自顶向下找所有 descendant 的最大 mastery）—— 反向 BFS 累计
+    def all_descendants(nid):
+        seen = set(); stack = [nid]
+        while stack:
+            cur = stack.pop()
+            for v in fwd.get(cur, []):
+                if v not in seen:
+                    seen.add(v); stack.append(v)
+        return seen
+    for n in nodes:
+        if n["level"] != 2: continue
+        n["mastery_self"] = n.get("mastery")
+        descs = all_descendants(n["id"])
+        desc_ms = [id2[d].get("mastery") for d in descs
+                   if d in id2 and id2[d].get("mastery") is not None]
+        if not desc_ms:
+            n["mastery_inferred"] = False
+            continue
+        max_desc = max(desc_ms)
+        self_m = n.get("mastery")
+        if max_desc is not None and (self_m is None or max_desc > self_m):
+            n["mastery"] = max_desc
+            n["mastery_inferred"] = True
+        else:
+            n["mastery_inferred"] = False
+    # L0/L1 mastery 已经是 L2 均值，但 L2 反向传递后 L2 mastery 变了，
+    # 重新跑 agg 让 L0/L1 反映新的 L2 mastery
+    for n in nodes:
+        if n["level"] in (0, 1):
+            n["mastery"] = agg(n)
 
     # 3) 状态分桶（纯按 mastery 数值，不做 DAG 传递）
     def bucket(m):
