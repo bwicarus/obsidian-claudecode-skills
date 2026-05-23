@@ -310,10 +310,17 @@ function pushView(v){
   history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
 }
 function goBack(){
-  if(backDepth>0) history.back();   // 交给浏览器，popstate 会回调 render
+  if(backDepth>0){ history.back(); return; }   // 浏览器有我们推入的栈 → 弹一帧
+  if(current.kind!=="home"){
+    // 深链/刷新场景：浏览器栈空但不在 home。回 home 并用 replaceState 同步 URL。
+    current={kind:"home"};
+    history.replaceState({view:current, depth:0}, "", location.pathname);
+    updateNav(); render();
+  }
 }
 function updateNav(){
-  document.getElementById("back-btn").disabled = backDepth===0;
+  // ◀ 仅当已经在 home 且浏览器栈也空时才 disabled
+  document.getElementById("back-btn").disabled = (backDepth===0 && current.kind==="home");
   const c=current; let label="全部章";
   if(c.kind==="chapter"){
     const n=id2[c.id]; label=`章：${n?.name||c.id}`;
@@ -598,7 +605,7 @@ async function editPost(op, payload){
   for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
   buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
   // 当前 view 节点可能消失（删除/合并），自动后退到 home 如失效
-  if(current.id && !id2[current.id]){ current={kind:"home"}; viewStack.length=0; updateNav(); }
+  if(current.id && !id2[current.id]){ current={kind:"home"}; backDepth=0; updateNav(); }
   render();
   return true;
 }
