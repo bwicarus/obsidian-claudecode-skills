@@ -137,52 +137,36 @@ def main() -> int:
     rec_by_sn = {r.get("source_note", ""): r for r in recs}
     print(f"加载 records: {len(recs)} 篇")
 
-    # 先清空 mastery 相关字段（每次重算），但保留 AI verified 的 containing_notes
-    # （link_with_ai.py 写过的 containing_notes + note_ref + note_ref_ai_verified 不动）
+    # 每次重算：清掉 mastery 字段；containing_notes 完全交给 link_with_ai.py
+    # 未被 AI verified 的节点 = 没数据，不做模糊匹配 fallback（避免"商空间的维数"
+    # 因为父 L1 name 含"向量空间"被字符串匹配到"000-向量空间.md"的连锁误判）
     for n in nodes:
         n.pop("card_refs", None)
         n.pop("mastery", None); n.pop("unlocked", None); n.pop("mastered", None)
         n.pop("has_cards", None); n.pop("state", None)
         n.pop("mastery_self", None); n.pop("mastery_inferred", None)
         if not n.get("note_ref_ai_verified"):
-            n.pop("note_ref", None)
-            n.pop("containing_notes", None)
-    # 1) 关联：优先用 AI verified 的 note_ref；其它用旧模糊匹配作 fallback
-    ai_verified_l1 = sum(1 for n in nodes if n["level"]==1 and n.get("note_ref_ai_verified"))
-    ai_verified_l2 = sum(1 for n in nodes if n["level"]==2 and n.get("note_ref_ai_verified"))
-    linked_l1 = ai_verified_l1
+            n["note_ref"] = ""
+            n["containing_notes"] = []
+    # 关联：只用 AI verified 的 containing_notes，没就是没（locked）
+    linked_l1 = sum(1 for n in nodes if n["level"]==1 and n.get("note_ref_ai_verified"))
     linked_l2 = 0
     for n in nodes:
-        if n["level"] == 1 and not n.get("note_ref_ai_verified"):
-            r = link_l1(n, by_stem)
-            if r:
-                n["note_ref"] = r.get("source_note", "")
-                linked_l1 += 1
-    for n in nodes:
         if n["level"] != 2: continue
-        # AI verified 的 L2：用 containing_notes 数组里的所有笔记
-        if n.get("note_ref_ai_verified") and n.get("containing_notes"):
-            cards_union = []
-            for nt in n["containing_notes"]:
-                rec = rec_by_sn.get(nt)
-                if rec:
-                    cards_union.extend(link_l2(n, rec, recs))
-            n["card_refs"] = list(set(cards_union))
-            if n["card_refs"]:
-                linked_l2 += 1
+        notes = n.get("containing_notes") or []
+        if not notes:
+            n["card_refs"] = []
             continue
-        # 否则回退到"父 L1 的 note_ref 继承"（旧模糊匹配 path）
-        parent = id2.get(n["parent_id"])
-        parent_rec = None
-        if parent and parent.get("note_ref"):
-            parent_rec = rec_by_sn.get(parent["note_ref"])
-        n["note_ref"] = parent.get("note_ref", "") if parent else ""
-        n["card_refs"] = link_l2(n, parent_rec, recs) if parent_rec else []
+        cards_union = []
+        for nt in notes:
+            rec = rec_by_sn.get(nt)
+            if rec:
+                cards_union.extend(link_l2(n, rec, recs))
+        n["card_refs"] = list(set(cards_union))
         if n["card_refs"]:
             linked_l2 += 1
-    print(f"关联 L1→笔记: {linked_l1}/{sum(1 for n in nodes if n['level']==1)} "
-          f"(AI verified {ai_verified_l1})，L2→卡片: {linked_l2}/{sum(1 for n in nodes if n['level']==2)} "
-          f"(AI verified {ai_verified_l2})")
+    print(f"关联 L1→笔记: {linked_l1}/{sum(1 for n in nodes if n['level']==1)}，"
+          f"L2→卡片: {linked_l2}/{sum(1 for n in nodes if n['level']==2)}（全部 AI verified）")
 
     # 2) 掌握度：L2 节点用 containing_notes 里所有 record mastery 取 max
     # （任一笔记里掌握 = 该节点已掌握；保守用 max 比 mean 更合直觉）
