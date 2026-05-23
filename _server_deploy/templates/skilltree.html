@@ -285,6 +285,10 @@ fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   backDepth=0;
   updateWrapPadding();
   updateNav(); render();
+  // 章节倒序后第 1 章在底；初始滚到最下端，先看到基础概念
+  requestAnimationFrame(() => {
+    setTimeout(() => { wrap.scrollTop = wrap.scrollHeight; }, 50);
+  });
 });
 
 // 缩放：Ctrl+滚轮（桌面） + 双指（触屏）
@@ -531,16 +535,22 @@ function render(){
   let curY;
 
   // ====== home / focus 共用：全部 L2 按章节带上下叠放（Factorio davemcw 风）======
-  // focus 模式只是在 render 末尾给 chain 节点加 class 凸显，位置 1:1 跟 home 一致
+  // 章节顺序：第 9 章在顶，第 1 章在底（基础在底、高级在顶）；页面初始滚到底
+  // focus 模式：chain 无关行折叠不占空间（保留 chain 内节点透明度对比）
   if(current.kind==="home" || current.kind==="focus"){
-    const activeChaps = nodesByLevel[0].filter(ch => stateOf(ch) !== "locked");
-    const lockedChaps = nodesByLevel[0].filter(ch => stateOf(ch) === "locked");
+    // 章节倒序：最后一章在顶
+    const activeChaps = nodesByLevel[0].filter(ch => stateOf(ch) !== "locked").slice().reverse();
+    const lockedChaps = nodesByLevel[0].filter(ch => stateOf(ch) === "locked").slice().reverse();
     // 按章分组 L2
     const chapL2={};
     for(const n of nodes){
       const ch=chapOf(n); if(!ch) continue;
       (chapL2[ch]=chapL2[ch]||[]).push(n);
     }
+    // focus 模式：chain 集合（self + ancestor + descendant），用来判断行是否有相关节点
+    const chainSet = isFocusMode
+      ? new Set([focusedId, ...chainAncestors, ...chainDescendants])
+      : null;
     curY=24;
     const labelH=22, bandPadY=10;
     function placeBand(ch){
@@ -553,11 +563,28 @@ function render(){
           (a.numeric_label||"").localeCompare(b.numeric_label||"") ||
           a.name.localeCompare(b.name));
       }
+      // focus 模式：整章都无 chain 节点 → 整章带跳过
+      if(isFocusMode){
+        const anyInChain = chNodes.some(n => chainSet.has(n.id));
+        if(!anyInChain){
+          chNodes.forEach(n => { positions[n.id]={x:-9999, y:0}; });
+          return;
+        }
+      }
       const bandStartY = curY;
       let bandInnerY = curY + labelH + bandPadY;
       const depths = Object.keys(byDepth).map(Number).sort((a,b)=>b-a);
+      let placedAny = false;
       for(const dp of depths){
         const row=byDepth[dp];
+        // focus 模式：本行没有 chain 节点 → 折叠（节点屏外）
+        if(isFocusMode){
+          const rowHasChain = row.some(n => chainSet.has(n.id));
+          if(!rowHasChain){
+            row.forEach(n => { positions[n.id]={x:-9999, y:0}; });
+            continue;
+          }
+        }
         const subRows=Math.ceil(row.length/cols);
         const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
         const xStart=Math.max(40,(W-wTotal)/2);
@@ -567,14 +594,16 @@ function render(){
                            y:bandInnerY+sr*(blockH+gapY*0.4)+blockH/2};
         });
         bandInnerY += subRows*(blockH+gapY*0.4) + gapY*0.22;
+        placedAny = true;
       }
+      if(!placedAny) return;   // 整章无行被画（不该发生但保险）
       const bandH = bandInnerY - bandStartY + bandPadY - gapY*0.22;
       chapBands.push({id:ch.id, name:ch.name, label:ch.chapter_label,
                       y:bandStartY, h:bandH, color:chapterColor[ch.id]});
       curY = bandStartY + bandH + gapY*0.45;
     }
     activeChaps.forEach(placeBand);
-    // locked 章节折叠条
+    // locked 章节折叠条（放在所有 active 章下方，最底部）
     if(lockedChaps.length){
       const barH=36;
       window.__lockedBarRect={y:curY+4, h:barH, count:lockedChaps.length};
@@ -582,7 +611,6 @@ function render(){
       if(showLockedSection){
         lockedChaps.forEach(placeBand);
       } else {
-        // locked 章节的 L2 节点全部塞到屏外
         for(const ch of lockedChaps){
           const ns = chapL2[ch.id]||[];
           ns.forEach(n => { positions[n.id]={x:-9999, y:0}; });
