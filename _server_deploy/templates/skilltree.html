@@ -73,8 +73,11 @@ svg.canvas{display:block}
 .b-prev{background:#1a2235;color:#9aa9c3;box-shadow:inset 0 0 0 1px #5b6889}
 .b-lock{background:#1f2530;color:#7a8497;box-shadow:inset 0 0 0 1px #4a5568}
 .b-type{background:#142540;color:#9ec3ff;box-shadow:inset 0 0 0 1px #3b6db5}
-.page-link{display:inline-block;padding:2px 8px;margin:2px 2px 2px 0;background:#1a2540;color:#9ec3ff;border:1px solid #2c3e6a;border-radius:4px;text-decoration:none;font-size:11px;font-family:monospace}
+.page-pair{display:inline-flex;align-items:center;gap:1px;margin:2px 4px 2px 0}
+.page-link{display:inline-block;padding:2px 7px;background:#1a2540;color:#9ec3ff;border:1px solid #2c3e6a;border-right:none;border-radius:4px 0 0 4px;text-decoration:none;font-size:11px;font-family:monospace}
 .page-link:hover{background:#2c3e6a;color:#cfe6ff;border-color:#3b6db5}
+.page-link-web{display:inline-block;padding:2px 5px;background:#172033;color:#8a9bb4;border:1px solid #2c3e6a;border-radius:0 4px 4px 0;text-decoration:none;font-size:10px;line-height:1}
+.page-link-web:hover{background:#2c3e6a;color:#e6e6f0;border-color:#3b6db5}
 .b-chap{font-size:10px;padding:2px 8px}
 #detail .prereqs li{margin:5px 0;padding:7px 10px;background:#0d1322;border:1px solid #1f2740;border-radius:6px;cursor:pointer;list-style:none;font-size:12px}
 #detail .prereqs li:hover{background:#162045;border-color:#3b6db5}
@@ -677,6 +680,15 @@ function obsidianUrl(noteRef){
   let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
   return "obsidian://open?vault="+encodeURIComponent(VAULT)+"&file="+encodeURIComponent(p);
 }
+function obsidianPdfUrl(page){
+  // KG.pdf_vault_path 由服务端 data.json 派生（PDF 在 vault 内时）
+  const vp = KG && KG.pdf_vault_path;
+  if(!vp) return null;
+  // 注意：file 整体 encode，#page=N 是 fragment 不 encode；Obsidian 内置 PDF.js 读这个 hash
+  return "obsidian://open?vault="+encodeURIComponent(VAULT)
+       + "&file="+encodeURIComponent(vp)
+       + "#page="+page;
+}
 function showDetail(n){
   if(!n) return;
   document.getElementById("detail").classList.add("open");
@@ -701,8 +713,18 @@ function showDetail(n){
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pages=n.pages||[];
+  // 每页 chip：主链接走 obsidian://（点 chip 主体），小🌐 子按钮回退浏览器 PDF
   const pageHTML = pages.length
-    ? pages.map(pg => `<a href="/skilltree/${BOOK}/pdf#page=${pg}" target="_blank" class="page-link" title="新标签页打开 PDF 第 ${pg} 页">p.${pg}</a>`).join(" · ")
+    ? pages.map(pg => {
+        const obs = obsidianPdfUrl(pg);
+        const web = `/skilltree/${BOOK}/pdf#page=${pg}`;
+        const main = obs
+          ? `<a href="${obs}" class="page-link" title="在 Obsidian 中打开 PDF 第 ${pg} 页">p.${pg}</a>`
+          : `<a href="${web}" target="_blank" class="page-link" title="浏览器打开 PDF 第 ${pg} 页">p.${pg}</a>`;
+        const fallback = `<a href="${web}" target="_blank" class="page-link-web" title="改用浏览器打开（远程/无 Obsidian 时）"
+                            onclick="event.stopPropagation()">🌐</a>`;
+        return `<span class="page-pair">${main}${obs?fallback:""}</span>`;
+      }).join(" ")
     : "—";
   document.getElementById("d-path").innerHTML=`${pageHTML}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;
   const link=[];

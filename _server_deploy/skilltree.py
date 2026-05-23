@@ -186,6 +186,15 @@ def register_skilltree(app):
         p, kg = _load_kg(book)
         if not kg:
             abort(404)
+        # 派生 PDF 的 vault 相对路径（给前端构 obsidian:// 链接）
+        pdf_abs = kg.get("pdf")
+        if pdf_abs:
+            vault_root = os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian")
+            try:
+                rel = Path(pdf_abs).resolve().relative_to(Path(vault_root).resolve())
+                kg["pdf_vault_path"] = str(rel).replace("\\", "/")
+            except (ValueError, OSError):
+                pass  # PDF 不在 vault 内则忽略
         return jsonify(kg)
 
     @app.route("/skilltree/<book>/pdf")
