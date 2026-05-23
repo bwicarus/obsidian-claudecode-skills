@@ -37,16 +37,18 @@ svg.canvas{display:block}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
-.tile.mastered rect.tbox{stroke:#34d399;stroke-width:2.2;fill:#0d2a1f;filter:drop-shadow(0 0 8px #34d39977)}
+/* mastery 四态：弱化所有发光，统一冷灰描边，差异只在底色 + 文字色；
+   主视觉位让给 chain mode 的黄/蓝/紫高亮（focus 模式）。
+   mastery 强度改由底部 chap-bar 旁的进度条体现。*/
+.tile.mastered rect.tbox{stroke:#3a4456;stroke-width:1.2;fill:#0e1f18}
 .tile.mastered{color:#7be096}
-.tile.unlockable rect.tbox{stroke:#fbbf24;stroke-width:2;fill:#241a08;filter:drop-shadow(0 0 6px #fbbf2466)}
-.tile.unlockable{color:#fcd383}
-.tile.previewable rect.tbox{stroke:#5b6889;stroke-width:1.5;fill:#1a2235;stroke-dasharray:none;opacity:.62}
-.tile.previewable{color:#9aa9c3}
-.tile.previewable text.tname{font-weight:500}
-.tile.locked rect.tbox{stroke:#4a5468;stroke-width:1.2;fill:#0e131e;stroke-dasharray:4 3;opacity:.85}
+.tile.unlockable rect.tbox{stroke:#3a4456;stroke-width:1.2;fill:#161c2a}
+.tile.unlockable{color:#d8c6a4}
+.tile.previewable rect.tbox{stroke:#2e3648;stroke-width:1.2;fill:#141926}
+.tile.previewable{color:#8a96ad}
+.tile.locked rect.tbox{stroke:#272d3c;stroke-width:1;fill:#0e131e;stroke-dasharray:3 3}
 .tile.locked{color:#5a6478}
-.tile.locked text.tname{opacity:.55}
+.tile.locked text.tname{opacity:.6}
 .tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
 /* === Factorio davemcw chain mode：focus 视图节点链路高亮 === */
@@ -64,7 +66,12 @@ svg.canvas{display:block}
 .edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
 .tile.filter-out{opacity:.18}
-.tile rect.chap-bar{stroke:none}     /* 章色条 */
+.tile rect.chap-bar{stroke:none}     /* 顶部 章色条 */
+.tile rect.mastery-bar{stroke:none}  /* 底部 mastery 色条 */
+.tile.mastered rect.mastery-bar{fill:#34d399}
+.tile.unlockable rect.mastery-bar{fill:#d8c6a4}
+.tile.previewable rect.mastery-bar{fill:#5b6889}
+.tile.locked rect.mastery-bar{display:none}
 /* 边 */
 .edge{fill:none;stroke-linecap:round}
 .edge.mast{stroke:#34d399aa}
@@ -510,6 +517,8 @@ function render(){
     .attr("rx",level===0?12:level===1?9:7).attr("ry",level===0?12:level===1?9:7);
   tileEnter.append("rect").attr("class","chap-bar").attr("x",0).attr("y",0).attr("height",4)
     .attr("width",blockW).attr("rx",2).attr("ry",2);
+  tileEnter.append("rect").attr("class","mastery-bar").attr("x",0).attr("height",3)
+    .attr("rx",1.5).attr("ry",1.5);
   tileEnter.append("title");  // hover 完整名
   tileEnter.append("text").attr("class","tname");
   tileEnter.append("text").attr("class","tsub");
@@ -523,6 +532,8 @@ function render(){
   tileAll.select("rect.chap-bar")
     .attr("width",blockW)
     .attr("fill",d=>{const c=chapOf(d); return c?chapterColor[c]:"#3b6db5"});
+  tileAll.select("rect.mastery-bar")
+    .attr("width",blockW).attr("y",blockH-3);
   // tooltip
   tileAll.select("title").text(d=>{
     const sum=(d.summary||"").replace(/\$\$?[^$]+\$\$?/g,"…");
