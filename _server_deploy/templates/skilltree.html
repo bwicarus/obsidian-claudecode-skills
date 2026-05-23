@@ -194,7 +194,8 @@ let edgesByLevel={0:[],1:[],2:[]};
 let depthByLevel={0:{},1:{},2:{}};   // 全局每层 depth（同节点跨视图同一 y）
 let chapterColor={};                   // L0 id → HSL color
 let descendants={};                    // L2 id → 传递后继数（决定边粗）
-let viewStack=[], current={kind:"home"};
+let current={kind:"home"};
+let backDepth=0;   // 已通过 pushState 推入的层数；用来决定 ◀ 是否可用
 let editMode=false;
 
 const wrap=document.getElementById("canvas-wrap");
@@ -214,11 +215,21 @@ fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   computeDescendants();
   document.getElementById("meta").textContent=
     `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点 · ${edgesByLevel[2].length} 边`;
-  // 从 URL hash 恢复
-  if(!restoreFromHash()) render();
+  // 从 URL hash 恢复初始视图，并 replaceState 作为"根状态"（防 ◀ 退出站点）
+  const h=location.hash.startsWith("#")?location.hash.slice(1):"";
+  current=decodeView(h);
+  history.replaceState({view:current, depth:0}, "", location.pathname+(h?"#"+h:""));
+  backDepth=0;
+  updateNav(); render();
 });
 
-window.addEventListener("hashchange",()=>{ restoreFromHash(); });
+// 浏览器后退/前进
+window.addEventListener("popstate",ev=>{
+  const st=ev.state||{};
+  current = st.view || decodeView((location.hash||"").replace(/^#/,""));
+  backDepth = typeof st.depth==="number" ? st.depth : 0;
+  updateNav(); render();
+});
 
 function ancestorAtLevel(nid,lv){let c=id2[nid];while(c&&c.level>lv)c=id2[c.parent_id];return c&&c.level===lv?c.id:null}
 function buildAggregatedEdges(){
@@ -286,28 +297,23 @@ function decodeView(s){
   if(["chapter","section","focus"].includes(k) && id2[id]) return {kind:k, id};
   return {kind:"home"};
 }
-function syncHash(){
-  const enc=encodeView(current);
-  const target = enc ? ("#"+enc) : "";
-  if(location.hash !== target){
-    history.replaceState(null,"",location.pathname+target);
-  }
-}
-function restoreFromHash(){
-  if(!KG) return false;
-  const h=location.hash.startsWith("#")?location.hash.slice(1):"";
-  const v=decodeView(h);
-  current=v; updateNav(); render();
-  return true;
-}
+// （syncHash / restoreFromHash 已被 pushState / popstate 取代）
 
 // ============================================================
-// 导航
+// 导航（用浏览器 history 管栈，避免自维护栈跟 hash 不同步）
 // ============================================================
-function pushView(v){ viewStack.push(current); current=v; updateNav(); render(); syncHash(); }
-function goBack(){ if(viewStack.length){ current=viewStack.pop(); updateNav(); render(); syncHash(); } }
+function sameView(a,b){ return a && b && a.kind===b.kind && a.id===b.id; }
+function pushView(v){
+  if(sameView(v,current)){ render(); return; }   // 同视图不入栈，避免"按 ◀ 没反应"
+  current=v; backDepth++;
+  updateNav(); render();
+  history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
+}
+function goBack(){
+  if(backDepth>0) history.back();   // 交给浏览器，popstate 会回调 render
+}
 function updateNav(){
-  document.getElementById("back-btn").disabled = viewStack.length===0;
+  document.getElementById("back-btn").disabled = backDepth===0;
   const c=current; let label="全部章";
   if(c.kind==="chapter"){
     const n=id2[c.id]; label=`章：${n?.name||c.id}`;
