@@ -82,6 +82,10 @@ def main() -> int:
     ap.add_argument("--in-place", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个 L2（试水）")
     ap.add_argument("--workers", type=int, default=4, help="并行 AI 调用数")
+    ap.add_argument("--only-from-page", type=int, default=0,
+                    help="只对 first_page >= N 的 L2 节点重新抽边；其它节点保留现有边（用于补跑后几章）")
+    ap.add_argument("--keep-early-chapters", type=int, default=3,
+                    help="候选裁剪时强制保留前 N 章的所有 L2（基础概念，跨章前置高发区）")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -93,8 +97,22 @@ def main() -> int:
     l2.sort(key=lambda n: (page_of(n), label_key(n.get("numeric_label", ""))))
     if args.limit:
         l2_target = l2[:args.limit]
+    elif args.only_from_page > 0:
+        l2_target = [n for n in l2 if page_of(n) >= args.only_from_page]
+        print(f"补跑模式：first_page >= {args.only_from_page} 的 L2 共 {len(l2_target)} 个")
     else:
         l2_target = l2
+
+    # 前 N 章的所有 L2 节点 id（用于候选裁剪强制保留）
+    chap_l0_ids = [n["id"] for n in nodes if n["level"] == 0]  # 已按 nodes 中出现顺序
+    early_chap_ids = set(chap_l0_ids[:args.keep_early_chapters])
+    early_l2_ids = set()
+    for c in l2:
+        l1 = id2.get(c.get("parent_id"))
+        if l1 and l1.get("parent_id") in early_chap_ids:
+            early_l2_ids.add(c["id"])
+    if early_l2_ids:
+        print(f"候选裁剪保留前 {args.keep_early_chapters} 章 L2 共 {len(early_l2_ids)} 个")
 
     backend = make_backend("claude_cli", {
         "command": "/usr/bin/claude", "model": args.model, "effort": args.effort,
@@ -115,7 +133,10 @@ def main() -> int:
                          if id2.get(c["parent_id"], {}).get("parent_id") ==
                             id2.get(k["parent_id"], {}).get("parent_id")]
             recent = candidates[-50:]
-            keep_ids = set(c["id"] for c in same_chap) | set(c["id"] for c in recent)
+            # 关键修复：强制保留前 keep_early_chapters 章节点（基础概念全保留）
+            keep_ids = (set(c["id"] for c in same_chap)
+                        | set(c["id"] for c in recent)
+                        | (early_l2_ids & set(c["id"] for c in candidates)))
             cand_lines = [line for c, line in zip(candidates, cand_lines)
                           if c["id"] in keep_ids]
         prompt = _PROMPT.format(
@@ -190,6 +211,20 @@ def main() -> int:
         bad = [e for e in new_edges if e["from"] in cyc_nodes and e["to"] in cyc_nodes]
         new_edges = [e for e in new_edges if e not in bad]
         print(f"⚠ 检测到环，剔除 {len(bad)} 条边")
+
+    # 补跑模式：合并新边与旧边（旧边里 to 节点不在 l2_target 的保留；to 在 target 的丢弃换新）
+    if args.only_from_page > 0:
+        target_ids = set(n["id"] for n in l2_target)
+        old_edges = kg.get("edges", [])
+        keep_old = [e for e in old_edges if e.get("to") not in target_ids]
+        # 去重：(from, to, kind)
+        seen = set(); merged = []
+        for e in keep_old + new_edges:
+            k = (e.get("from"), e.get("to"), e.get("kind"))
+            if k in seen: continue
+            seen.add(k); merged.append(e)
+        print(f"补跑合并：保留旧边 {len(keep_old)} + 新边 {len(new_edges)} → 去重 {len(merged)}")
+        new_edges = merged
 
     print(f"前置边总数：{len(new_edges)}")
     if not args.in_place:
