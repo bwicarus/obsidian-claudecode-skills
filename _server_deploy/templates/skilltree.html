@@ -37,18 +37,16 @@ svg.canvas{display:block}
 .tile text.tname{font-weight:600;fill:currentColor;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tsub{fill:#7a8497;text-anchor:middle;pointer-events:none;user-select:none}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
-/* mastery 四态：弱化所有发光，统一冷灰描边，差异只在底色 + 文字色；
-   主视觉位让给 chain mode 的黄/蓝/紫高亮（focus 模式）。
-   mastery 强度改由底部 chap-bar 旁的进度条体现。*/
-.tile.mastered rect.tbox{stroke:#3a4456;stroke-width:1.2;fill:#0e1f18}
+/* mastery 四态：边框+底色组合表达，无发光。位置已编码章节，状态不抢戏。*/
+.tile.mastered rect.tbox{stroke:#2d8a6d;stroke-width:1.5;fill:#0e2118}
 .tile.mastered{color:#7be096}
-.tile.unlockable rect.tbox{stroke:#3a4456;stroke-width:1.2;fill:#161c2a}
-.tile.unlockable{color:#d8c6a4}
+.tile.unlockable rect.tbox{stroke:#4a5a78;stroke-width:1.5;fill:#161e30}
+.tile.unlockable{color:#cfd9ec}
 .tile.previewable rect.tbox{stroke:#2e3648;stroke-width:1.2;fill:#141926}
 .tile.previewable{color:#8a96ad}
-.tile.locked rect.tbox{stroke:#272d3c;stroke-width:1;fill:#0e131e;stroke-dasharray:3 3}
-.tile.locked{color:#5a6478}
-.tile.locked text.tname{opacity:.6}
+.tile.locked rect.tbox{stroke:#1f2532;stroke-width:1;fill:#0c1018;stroke-dasharray:3 3}
+.tile.locked{color:#4f5868}
+.tile.locked text.tname{opacity:.5}
 .tile.focus rect.tbox{stroke:#7dc4ff;stroke-width:4;fill:#0c1a30;filter:drop-shadow(0 0 22px #7dc4ffcc);stroke-dasharray:none}
 .tile.focus{color:#cfe6ff}
 /* === Factorio davemcw chain mode：focus 视图节点链路高亮 === */
@@ -66,12 +64,15 @@ svg.canvas{display:block}
 .edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
 .tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
 .tile.filter-out{opacity:.18}
-.tile rect.chap-bar{stroke:none}     /* 顶部 章色条 */
-.tile rect.mastery-bar{stroke:none}  /* 底部 mastery 色条 */
-.tile.mastered rect.mastery-bar{fill:#34d399}
-.tile.unlockable rect.mastery-bar{fill:#d8c6a4}
-.tile.previewable rect.mastery-bar{fill:#5b6889}
-.tile.locked rect.mastery-bar{display:none}
+/* 顶部 chap-bar 在 focus 模式下隐藏（章带 layout 已表达章节）；
+   home/chapter/section 视图保留色条标识章节 */
+.tile rect.chap-bar{stroke:none}
+.focus-mode .tile rect.chap-bar{display:none}
+/* mastery 状态不再画底部色条（用户建议：边框+底色已足以表达）*/
+.tile rect.mastery-bar{display:none}
+/* 章带背景（focus 模式） */
+rect.chap-band{stroke-width:1.2;rx:10;ry:10;pointer-events:none}
+text.chap-band-label{font-weight:700;letter-spacing:.4px;pointer-events:none;user-select:none}
 /* 边 */
 .edge{fill:none;stroke-linecap:round}
 .edge.mast{stroke:#34d399aa}
@@ -447,45 +448,115 @@ function render(){
   const {nodes, edges, level}=nodesForView();
   // focus 模式预计算 chain 角色集合
   const focusedId = current.kind==="focus"?current.id:null;
+  const isFocusMode = !!focusedId;
   computeChainSets(focusedId);
+  // CSS 切换：focus 模式时 svg root 加 class .focus-mode
+  svg.node().parentNode.classList.toggle("focus-mode", isFocusMode);
   const W = wrap.clientWidth - 40;
   const blockW = Math.max(70, Math.floor(W * settings.blockRatio));
   const blockH = Math.max(34, Math.floor(blockW * (level===0?0.45:level===1?0.36:0.32)));
   const gapX = Math.max(14, Math.floor(blockW * 0.18));
   const gapY = Math.max(46, Math.floor(blockH * 1.7));
 
-  // 全局 depth 给 y（同节点跨视图 y 不变）
   const d=depthByLevel[level];
-  const visibleDepths=[...new Set(nodes.map(n=>d[n.id]||0))];
-  const maxD=visibleDepths.length?Math.max(...visibleDepths):0;
-  // y by global depth：用相对偏移让本视图最深的那一行在顶
-  const byDepth={};
-  for(const n of nodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
-  for(const dp in byDepth){
-    byDepth[dp].sort((a,b)=>{
-      const ca=chapOf(a)||"", cb=chapOf(b)||"";
-      return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name);
-    });
-  }
   const cols=Math.max(1, Math.floor(W/(blockW+gapX)));
   const positions={};
-  let curY=20;
-  // 按 depth 倒序（深的在顶）
-  for(let dp=maxD; dp>=0; dp--){
-    const row=byDepth[dp]||[];
-    if(!row.length) continue;
-    const subRows=Math.ceil(row.length/cols);
-    const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
-    const xStart=Math.max(20,(W-wTotal)/2);
-    row.forEach((n,i)=>{
-      const sr=Math.floor(i/cols), col=i%cols;
-      positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
-    });
-    curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
+  let chapBands=[];   // focus 模式才填充
+  let curY;
+
+  if(isFocusMode){
+    // ====== focus 模式：横向章带 layout ======
+    // 按章分组 nodes
+    const chapL2={};
+    for(const n of nodes){
+      const ch=chapOf(n) || "_other";
+      (chapL2[ch]=chapL2[ch]||[]).push(n);
+    }
+    // 按 KG 章节顺序遍历
+    curY=24;
+    const bandPadX=14, bandPadY=14, labelH=22;
+    for(const ch of nodesByLevel[0]){
+      const chNodes=chapL2[ch.id] || [];
+      if(!chNodes.length) continue;
+      // 章内按 depth 倒序排（深的在顶）
+      const byDepth={};
+      for(const n of chNodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
+      // 同 depth 内按 numeric_label / name 排序
+      for(const dp in byDepth){
+        byDepth[dp].sort((a,b)=>
+          (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name));
+      }
+      const bandStartY = curY;
+      let bandInnerY = curY + labelH + bandPadY;
+      const depths = Object.keys(byDepth).map(Number).sort((a,b)=>b-a);
+      for(const dp of depths){
+        const row=byDepth[dp];
+        const subRows=Math.ceil(row.length/cols);
+        const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
+        const xStart=Math.max(bandPadX+20,(W-wTotal)/2);
+        row.forEach((n,i)=>{
+          const sr=Math.floor(i/cols), col=i%cols;
+          positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2,
+                           y:bandInnerY+sr*(blockH+gapY*0.4)+blockH/2};
+        });
+        bandInnerY += subRows*(blockH+gapY*0.4) + gapY*0.25;
+      }
+      const bandH = bandInnerY - bandStartY + bandPadY - gapY*0.25;
+      chapBands.push({id:ch.id, name:ch.name, label:ch.chapter_label,
+                      y:bandStartY, h:bandH, color:chapterColor[ch.id]});
+      curY = bandStartY + bandH + gapY*0.6;   // 章间 gap
+    }
+  } else {
+    // ====== 其它视图：按 depth 分行（原逻辑）======
+    const visibleDepths=[...new Set(nodes.map(n=>d[n.id]||0))];
+    const maxD=visibleDepths.length?Math.max(...visibleDepths):0;
+    const byDepth={};
+    for(const n of nodes)(byDepth[d[n.id]||0]=byDepth[d[n.id]||0]||[]).push(n);
+    for(const dp in byDepth){
+      byDepth[dp].sort((a,b)=>{
+        const ca=chapOf(a)||"", cb=chapOf(b)||"";
+        return ca.localeCompare(cb) || (a.numeric_label||"").localeCompare(b.numeric_label||"") || a.name.localeCompare(b.name);
+      });
+    }
+    curY=20;
+    for(let dp=maxD; dp>=0; dp--){
+      const row=byDepth[dp]||[];
+      if(!row.length) continue;
+      const subRows=Math.ceil(row.length/cols);
+      const wTotal=Math.min(row.length,cols)*(blockW+gapX)-gapX;
+      const xStart=Math.max(20,(W-wTotal)/2);
+      row.forEach((n,i)=>{
+        const sr=Math.floor(i/cols), col=i%cols;
+        positions[n.id]={x:xStart+col*(blockW+gapX)+blockW/2, y:curY+sr*(blockH+gapY*0.4)+blockH/2};
+      });
+      curY += subRows*(blockH+gapY*0.4) + gapY*0.5;
+    }
   }
   const svgW=Math.max(W, cols*(blockW+gapX));
   const svgH=Math.max(wrap.clientHeight-40, curY+40);
   svg.attr("width",svgW).attr("height",svgH);
+
+  // 章带背景（仅 focus 模式）
+  const bandSel = root.selectAll("rect.chap-band").data(chapBands, b=>b.id);
+  bandSel.exit().transition().duration(220).style("opacity",0).remove();
+  const bandEnter = bandSel.enter().insert("rect",":first-child").attr("class","chap-band")
+    .style("opacity",0);
+  bandEnter.merge(bandSel).transition().duration(380)
+    .attr("x",10).attr("width",W-20)
+    .attr("y",b=>b.y).attr("height",b=>b.h)
+    .attr("fill",b=>b.color+"14")        // 8% 透明度
+    .attr("stroke",b=>b.color+"55")
+    .style("opacity",1);
+  // 章带名标签
+  const labSel = root.selectAll("text.chap-band-label").data(chapBands, b=>b.id);
+  labSel.exit().transition().duration(220).style("opacity",0).remove();
+  const labEnter = labSel.enter().append("text").attr("class","chap-band-label")
+    .style("opacity",0);
+  labEnter.merge(labSel).transition().duration(380)
+    .attr("x",24).attr("y",b=>b.y+22)
+    .attr("font-size",14).attr("fill",b=>b.color)
+    .text(b=>(b.label?b.label+" ":"")+b.name)
+    .style("opacity",1);
 
   // 边（key by from→to）
   const edgeKey=e=>e.from+"→"+e.to;
