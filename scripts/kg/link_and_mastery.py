@@ -260,7 +260,7 @@ def main() -> int:
             prereqs_of[e["to"]].append(e["from"])
             succ[e["from"]].append(e["to"])
             indeg[e["to"]] += 1
-    open_set = {"unlockable", "mastered"}
+    open_set = {"unlockable", "mastered"}      # 兼容旧 unlocked 字段输出
     queue_l2 = [n["id"] for n in nodes if n["level"]==2 and indeg[n["id"]]==0]
     remaining = dict(indeg)
     state_map: dict[str, str] = {}
@@ -268,23 +268,22 @@ def main() -> int:
         cur = queue_l2.pop(0)
         n = id2[cur]
         prs = prereqs_of.get(cur, [])
-        prereqs_clear = (not prs) or all(
-            state_map.get(p, "locked") in open_set for p in prs)
-        # 三态规则（贴用户直觉）：
-        #   前置链没通             → locked
-        #   有 AI verified 的笔记  → mastered（"建了笔记+刷卡 = 已学过"）
-        #   推断掌握（反向传递）   → mastered（"学了后续 ⇒ 必懂前置"）
-        #   前置链通但自己没碰     → unlockable（"可以开始学"）
+        # 严格语义：前置必须全部 mastered，节点才能 unlockable
+        # 仅 unlockable 的前置不算"通"——你都还没掌握，怎么能让下游可学
+        prereqs_all_mastered = (not prs) or all(
+            state_map.get(p) == "mastered" for p in prs)
         has_own_notes = bool(n.get("note_ref_ai_verified") and n.get("containing_notes"))
         inferred = n.get("mastery_inferred", False)
-        if not prereqs_clear:
-            state_map[cur] = "locked"
-        elif has_own_notes:
+        # 三态规则：
+        #   自己学过笔记 OR 推断掌握  → mastered（不管前置如何，反映你实际学过）
+        #   前置全 mastered + 自己没碰 → unlockable（前置链全通，可以开始学）
+        #   其它                        → locked
+        if has_own_notes or inferred:
             state_map[cur] = "mastered"
-        elif inferred:
-            state_map[cur] = "mastered"
-        else:
+        elif prereqs_all_mastered:
             state_map[cur] = "unlockable"
+        else:
+            state_map[cur] = "locked"
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
