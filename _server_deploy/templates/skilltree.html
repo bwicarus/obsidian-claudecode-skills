@@ -176,7 +176,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
   <span id="crumb">全部章</span>
   <input id="search" type="text" placeholder="🔍 搜索节点（Enter 跳转）"
          oninput="onSearchInput(event)" onkeydown="if(event.key==='Enter') onSearchEnter()">
-  <button onclick="openRecommend()" title="🎯 下一步该学什么">🎯 推荐</button>
+  <button onclick="openRecommend()" title="今日学习计划：下一步 / 瓶颈 / 章节进度">🎯 学习计划</button>
   <button id="edit-toggle" onclick="toggleEditMode()" title="编辑模式（点节点改前置/删节点/合并）">✏️ 编辑</button>
   <button onclick="openSettings()">⚙ 设置</button>
   <span class="meta" id="meta">加载中…</span>
@@ -992,32 +992,75 @@ function applySearchHighlight(){
 }
 
 // ============================================================
-// 推荐：unlockable 节点 按教材页码升序——"教材里下一个该学的"
+// 🎯 学习计划：今日复习 + 下一步新节点 + 瓶颈 + 本章进度
 // ============================================================
 function openRecommend(){
   const firstPage = n => (n.pages && n.pages.length) ? n.pages[0] : 999999;
-  const recs = nodesByLevel[2]
-    .filter(n => stateOf(n) === "unlockable")
-    .sort((a, b) => firstPage(a) - firstPage(b))
-    .slice(0, 12);
-  const list=document.getElementById("reco-list");
-  if(!recs.length){
-    list.innerHTML = '<p style="color:#8a9bb4">暂无可解锁节点（建笔记/刷卡后会出现）</p>';
-  }else{
-    list.innerHTML = recs.map(n=>{
-      const sec  = id2[n.parent_id], chap = sec ? id2[sec.parent_id] : null;
-      const lbl  = n.numeric_label ? `[${n.numeric_label}] ` : "";
-      const path = `${chap?chap.name+' › ':''}${sec?sec.name:''}`;
-      const pg   = (n.pages || []).length ? `p.${n.pages[0]}` : "—";
-      return `<div class="reco-item" onclick="document.getElementById('reco-mask').classList.remove('open'); pushView({kind:'focus',id:'${n.id}'})">
+  const all = nodesByLevel[2];
+  const mastered = all.filter(n => stateOf(n) === "mastered");
+  const unlockable = all.filter(n => stateOf(n) === "unlockable");
+  const locked = all.filter(n => stateOf(n) === "locked");
+  // 下一步：按页码升序的 unlockable 前 6 个
+  const nextNew = [...unlockable].sort((a,b) => firstPage(a) - firstPage(b)).slice(0, 6);
+  // 瓶颈：bottleneck_score 最高的 5 个
+  const bottlenecks = [...all].filter(n => (n.bottleneck_score || 0) >= 2)
+    .sort((a,b) => (b.bottleneck_score||0) - (a.bottleneck_score||0)).slice(0, 5);
+  // 本章进度：按章统计
+  const chapStats = nodesByLevel[0].map(ch => {
+    const inChap = all.filter(n => chapOf(n) === ch.id);
+    return {
+      ch, total: inChap.length,
+      mast: inChap.filter(n => stateOf(n) === "mastered").length,
+      unl:  inChap.filter(n => stateOf(n) === "unlockable").length,
+    };
+  }).filter(c => c.mast > 0 || c.unl > 0);
+
+  const list = document.getElementById("reco-list");
+  const renderNode = (n, tagText, tagColor) => {
+    const sec  = id2[n.parent_id], chap = sec ? id2[sec.parent_id] : null;
+    const lbl  = n.numeric_label ? `[${n.numeric_label}] ` : "";
+    const path = `${chap?chap.name+' › ':''}${sec?sec.name:''}`;
+    const pg   = (n.pages || []).length ? `p.${n.pages[0]}` : "—";
+    const score = n.bottleneck_score ? ` 💎×${n.bottleneck_score}` : "";
+    return `<div class="reco-item" onclick="document.getElementById('reco-mask').classList.remove('open'); pushView({kind:'focus',id:'${n.id}'})">
         <div class="top">
-          <span>${lbl}<b>${n.name}</b></span>
+          <span><span style="color:${tagColor};margin-right:6px;font-size:10px">[${tagText}]</span>${lbl}<b>${n.name}</b>${score}</span>
           <span style="color:#60a5fa;font-family:monospace">${pg}</span>
         </div>
         <div class="sub">${path}</div>
       </div>`;
-    }).join("");
-  }
+  };
+  const sec = (lbl, items, renderItem, emptyMsg) => {
+    if(!items || !items.length){
+      return `<div style="margin:10px 0 6px"><b style="color:#e6e6f0">${lbl}</b><div style="opacity:0.5;font-size:11px;margin-top:4px">${emptyMsg||'（无）'}</div></div>`;
+    }
+    return `<div style="margin:10px 0 6px"><b style="color:#e6e6f0">${lbl}</b></div>${items.map(renderItem).join("")}`;
+  };
+  // 概览顶部条
+  const total = all.length;
+  const pctMast = total ? Math.round(mastered.length/total*100) : 0;
+  const overview = `<div style="display:flex;gap:14px;font-size:12px;color:#cfd6e6;margin-bottom:8px;padding:8px 10px;background:#0d1322;border-radius:6px">
+    <span>🟢 已掌握 <b style="color:#7be096">${mastered.length}</b></span>
+    <span>🟡 可学 <b style="color:#a8cdff">${unlockable.length}</b></span>
+    <span>⚫ 未解锁 <b style="color:#6f7888">${locked.length}</b></span>
+    <span style="margin-left:auto">总进度 <b style="color:#fbbf24">${pctMast}%</b></span>
+  </div>`;
+  const chapHtml = chapStats.slice(0, 5).map(c => {
+    const pct = c.total ? Math.round(c.mast / c.total * 100) : 0;
+    const barW = Math.max(2, pct);
+    return `<div style="margin:4px 0;font-size:11px;color:#cfd6e6">
+      <div style="display:flex;justify-content:space-between"><span>${c.ch.name}</span>
+        <span style="color:#8a9bb4">${c.mast}/${c.total} · ${pct}%</span></div>
+      <div style="height:4px;background:#1a2030;border-radius:2px;margin-top:2px;overflow:hidden">
+        <div style="height:100%;width:${barW}%;background:linear-gradient(90deg,#34d399,#60a5fa)"></div>
+      </div></div>`;
+  }).join("");
+  list.innerHTML = overview
+    + sec("📍 下一步（按教材页码）", nextNew, n => renderNode(n, "可学", "#a8cdff"),
+          "暂无可学节点——建笔记/刷卡来开启新节点")
+    + sec("💎 瓶颈节点（攻克可大量解锁）", bottlenecks, n => renderNode(n, stateOf(n) === "unlockable" ? "可学" : "未解锁", stateOf(n) === "unlockable" ? "#a8cdff" : "#6f7888"),
+          "目前没有显著瓶颈")
+    + (chapStats.length ? `<div style="margin:10px 0 4px"><b style="color:#e6e6f0">📊 章节进度</b></div>${chapHtml}` : "");
   document.getElementById("reco-mask").classList.add("open");
 }
 function closeRecommend(){document.getElementById("reco-mask").classList.remove("open")}
@@ -1098,6 +1141,54 @@ function obsidianUrl(noteRef){
   if(!noteRef) return "";
   let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
   return "obsidian://open?vault="+encodeURIComponent(VAULT)+"&file="+encodeURIComponent(p);
+}
+function newNoteUrl(n){
+  // 调用 obsidian://new 协议创建带模板内容的笔记
+  // 用 KG 节点 numeric_label 作文件名前缀 + name；放 vault 根目录让 register_notes 自动捡到
+  const safe = (n.name || "新节点").replace(/[\\/:*?"<>|]/g, "");
+  const numLabel = n.numeric_label || "";
+  // 文件名规则：[3 位 hex]-{name}.md（满足项目 register_notes 命名）
+  // 简化：用时间戳作 hex；用户可后续重命名。
+  const hexId = Math.floor(Math.random() * 0xfff).toString(16).padStart(3, "0").toUpperCase();
+  const fileName = `${hexId}-${safe}`;
+  const book = KG && KG.book ? KG.book : "教材";
+  const typeZh = {definition:'定义', theorem:'定理', proposition:'命题',
+                  corollary:'推论', lemma:'引理', example:'例子'};
+  const tyz = typeZh[n.type] || n.type || "";
+  const sec = id2[n.parent_id], chap = sec ? id2[sec.parent_id] : null;
+  const path = `${chap?chap.name:''} › ${sec?sec.name:''}`;
+  const pages = (n.pages || []).join(", ");
+  const content = `---
+subject: 数学
+type: ${tyz}
+source: ${book} ${numLabel}
+pages: ${pages}
+chapter: ${chap?chap.name:''}
+section: ${sec?sec.name:''}
+kg_node_id: ${n.id}
+---
+
+# ${n.name}
+
+${tyz?'**类型**：' + tyz + '\\n':''}**编号**：${numLabel}
+**所在**：${path}
+**页码**：${pages}
+
+## 定义
+
+${n.summary || ''}
+
+## 性质 / 证明
+
+（待补充）
+
+## 例子
+
+（待补充）
+`;
+  return "obsidian://new?vault=" + encodeURIComponent(VAULT)
+       + "&file=" + encodeURIComponent(fileName)
+       + "&content=" + encodeURIComponent(content);
 }
 function obsidianPdfUrl(page){
   // KG.pdf_vault_path 由服务端 data.json 派生（PDF 在 vault 内时）
@@ -1188,6 +1279,10 @@ function showDetail(n){
     link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
   }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
+  // 没有笔记时给"📝 建此节点笔记"按钮（点了走 obsidian://new 协议带模板内容）
+  if(n.level === 2 && !notes.length){
+    link.push(`<a href="${newNoteUrl(n)}" class="page-link" style="display:inline-block;margin-top:4px">📝 建此节点笔记</a>`);
+  }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){
     const ul=document.getElementById(elId); ul.innerHTML="";
