@@ -928,26 +928,28 @@ function applySearchHighlight(){
 }
 
 // ============================================================
-// 推荐：unlockable 优先（可以开始学），按"解锁后继数"排序
+// 推荐：unlockable 节点 按教材页码升序——"教材里下一个该学的"
 // ============================================================
 function openRecommend(){
-  const unlk=nodesByLevel[2].filter(n=>stateOf(n)==="unlockable");
-  const prev=nodesByLevel[2].filter(n=>stateOf(n)==="previewable");
-  const recs=[...unlk, ...prev]
-    .sort((a,b)=>(descendants[b.id]||0)-(descendants[a.id]||0))
-    .slice(0,10);
+  const firstPage = n => (n.pages && n.pages.length) ? n.pages[0] : 999999;
+  const recs = nodesByLevel[2]
+    .filter(n => stateOf(n) === "unlockable")
+    .sort((a, b) => firstPage(a) - firstPage(b))
+    .slice(0, 12);
   const list=document.getElementById("reco-list");
-  if(!recs.length){ list.innerHTML='<p style="color:#8a9bb4">暂无可解锁节点（可能 Anki 数据还没关联好）</p>'; }
-  else{
-    list.innerHTML=recs.map(n=>{
-      const sec=id2[n.parent_id], chap=sec?id2[sec.parent_id]:null;
-      const lbl=n.numeric_label?`[${n.numeric_label}] `:"";
-      const path=`${chap?chap.name+' › ':''}${sec?sec.name:''}`;
-      const st=stateOf(n);
-      const tagColor=st==="unlockable"?"#fbbf24":"#9aa9c3";
-      const tagText=st==="unlockable"?"可学":"可瞟";
+  if(!recs.length){
+    list.innerHTML = '<p style="color:#8a9bb4">暂无可解锁节点（建笔记/刷卡后会出现）</p>';
+  }else{
+    list.innerHTML = recs.map(n=>{
+      const sec  = id2[n.parent_id], chap = sec ? id2[sec.parent_id] : null;
+      const lbl  = n.numeric_label ? `[${n.numeric_label}] ` : "";
+      const path = `${chap?chap.name+' › ':''}${sec?sec.name:''}`;
+      const pg   = (n.pages || []).length ? `p.${n.pages[0]}` : "—";
       return `<div class="reco-item" onclick="document.getElementById('reco-mask').classList.remove('open'); pushView({kind:'focus',id:'${n.id}'})">
-        <div class="top"><span><span style="color:${tagColor};margin-right:6px">[${tagText}]</span>${lbl}<b>${n.name}</b></span><span style="color:#fbbf24">解锁 ${descendants[n.id]||0} 后继</span></div>
+        <div class="top">
+          <span>${lbl}<b>${n.name}</b></span>
+          <span style="color:#60a5fa;font-family:monospace">${pg}</span>
+        </div>
         <div class="sub">${path}</div>
       </div>`;
     }).join("");
