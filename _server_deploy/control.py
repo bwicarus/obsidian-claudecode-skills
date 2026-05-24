@@ -226,6 +226,45 @@ def register_control(app):
             "errors":  errors,   # 前端可选展示
         })
 
+    @app.route("/control/api/quota-log")
+    def control_quota_log():
+        """返回 state/quota_log.json 最近 N 条；?limit=80&ai_only=true 过滤。"""
+        limit = int(request.args.get("limit", 80))
+        ai_only = request.args.get("ai_only", "").lower() in ("1", "true", "yes")
+        p = CLAUDE_DIR / "state" / "quota_log.json"
+        if not p.exists():
+            return jsonify({"entries": [], "count": 0, "total": 0})
+        try:
+            log = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as ex:
+            return jsonify({"entries": [], "error": str(ex), "total": 0})
+        entries = log.get("entries") or []
+        total = len(entries)
+        if ai_only:
+            entries = [e for e in entries if e.get("ai_intensive")]
+        entries = entries[-limit:][::-1]
+        return jsonify({"entries": entries, "count": len(entries), "total": total})
+
+    @app.route("/control/api/quota-now")
+    def control_quota_now():
+        """实时查 Claude 额度（轻量代理）。"""
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+            from lib.claude_quota import fetch_quota
+            q = fetch_quota(cache_ttl=15)
+            return jsonify({
+                "ok": True,
+                "five_hour":        (q.get("five_hour")        or {}).get("utilization"),
+                "seven_day":        (q.get("seven_day")        or {}).get("utilization"),
+                "seven_day_sonnet": (q.get("seven_day_sonnet") or {}).get("utilization"),
+                "seven_day_opus":   (q.get("seven_day_opus")   or {}).get("utilization"),
+                "five_hour_resets_at": (q.get("five_hour") or {}).get("resets_at"),
+                "seven_day_resets_at": (q.get("seven_day") or {}).get("resets_at"),
+            })
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
     @app.route("/control/api/trigger-log")
     def control_trigger_log():
         """返回 webapp_trigger.log 末 N 行（追踪 trigger 子进程的实时输出）。"""

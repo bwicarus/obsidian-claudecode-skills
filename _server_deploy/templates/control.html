@@ -287,12 +287,36 @@
     </div>
     <div class="panel-body">
       <div class="config-section">
+        <h3 style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <span>Claude 额度</span>
+          <span id="quota-now-display" class="meta" style="font-size:11px">查询中…</span>
+          <button class="btn" onclick="openQuotaLog()" style="font-size:11px;padding:4px 10px;margin-left:auto">📊 额度消耗日志</button>
+        </h3>
+        <p class="meta" style="font-size:11px;line-height:1.5">夜间 daily 流程的每个 step 都记录 quota 差值，可查"哪个 step 烧了多少 token"。</p>
+      </div>
+      <div class="config-section">
         <h3>已登记书本</h3>
         <div id="books-list">加载中…</div>
       </div>
     </div>
   </div>
 
+</div>
+
+<!-- 额度消耗日志 modal -->
+<div id="quota-log-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center">
+  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:20px;width:min(900px,92vw);max-height:84vh;display:flex;flex-direction:column">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0">Claude 额度消耗日志</h3>
+      <div style="display:flex;gap:10px;align-items:center">
+        <label style="font-size:12px;color:#8a9bb4;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="quota-log-ai-only" checked onchange="loadQuotaLog()"> 仅显示 AI 消耗
+        </label>
+        <button class="btn" onclick="closeQuotaLog()" style="font-size:12px;padding:4px 10px">关闭</button>
+      </div>
+    </div>
+    <div id="quota-log-body" style="overflow:auto;flex:1;font-size:12px;font-family:monospace">加载中…</div>
+  </div>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -579,8 +603,73 @@ document.querySelector('[data-panel="config"]').addEventListener('click', () => 
   setTimeout(() => { loadConfig(); renderIPadCmds(); }, 300);
 }, {once: true});
 document.querySelector('[data-panel="skilltree"]').addEventListener('click', () => {
-  setTimeout(loadBooks, 300);
+  setTimeout(() => { loadBooks(); refreshQuotaNow(); }, 300);
 }, {once: true});
+
+async function refreshQuotaNow(){
+  const el = document.getElementById("quota-now-display");
+  if(!el) return;
+  try{
+    const r = await fetch("/control/api/quota-now");
+    const d = await r.json();
+    if(!d.ok){ el.textContent = "查询失败：" + (d.error || ""); return; }
+    const fh = (d.five_hour ?? 0).toFixed(0);
+    const sd = (d.seven_day ?? 0).toFixed(0);
+    const ss = (d.seven_day_sonnet ?? 0).toFixed(0);
+    const so = (d.seven_day_opus ?? 0);
+    const opText = so == null ? "" : ` · Opus ${(+so).toFixed(0)}%`;
+    const max = Math.max(+fh, +sd, +ss, +(so||0));
+    const color = max >= 80 ? "#dc2626" : max >= 60 ? "#fbbf24" : "#34d399";
+    el.innerHTML = `<span style="color:${color};font-family:monospace">5h ${fh}% · 7d ${sd}% · Sonnet ${ss}%${opText}</span>`;
+  }catch(ex){
+    el.textContent = "查询失败：" + ex.message;
+  }
+}
+
+async function openQuotaLog(){
+  document.getElementById("quota-log-mask").style.display = "flex";
+  loadQuotaLog();
+}
+function closeQuotaLog(){
+  document.getElementById("quota-log-mask").style.display = "none";
+}
+async function loadQuotaLog(){
+  const body = document.getElementById("quota-log-body");
+  body.textContent = "加载中…";
+  const aiOnly = document.getElementById("quota-log-ai-only").checked;
+  try{
+    const r = await fetch(`/control/api/quota-log?limit=150&ai_only=${aiOnly}`);
+    const d = await r.json();
+    if(!d.entries || !d.entries.length){
+      body.innerHTML = '<p class="meta">还没有 quota 日志（下一次 daily 跑会开始记录）</p>'; return;
+    }
+    const header = `<div style="display:grid;grid-template-columns:140px 1fr 70px 90px 90px 90px;gap:8px;padding:6px 8px;background:#0a0e1a;font-weight:700;color:#7dd3fc;border-bottom:1px solid #2a3550">
+      <span>时间</span><span>step</span><span>耗时</span><span>Δ5h</span><span>Δ7d</span><span>ΔSonnet</span>
+    </div>`;
+    const rows = d.entries.map(e => {
+      const dt = new Date(e.ts).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});
+      const dur = e.duration_s ? `${e.duration_s}s` : "-";
+      const ds = e.delta || {};
+      const fmt = (v) => {
+        if(v == null) return "-";
+        const sign = v > 0 ? "+" : "";
+        const col = v >= 1 ? "#fbbf24" : v >= 0.1 ? "#cbd5e1" : "#475569";
+        return `<span style="color:${col}">${sign}${v.toFixed(1)}%</span>`;
+      };
+      return `<div style="display:grid;grid-template-columns:140px 1fr 70px 90px 90px 90px;gap:8px;padding:6px 8px;border-bottom:1px solid #1f2740${e.ai_intensive ? ";background:#0e1a2e" : ""}">
+        <span style="color:#8a9bb4">${dt}</span>
+        <span>${e.step}</span>
+        <span style="color:#8a9bb4">${dur}</span>
+        <span>${fmt(ds.five_hour)}</span>
+        <span>${fmt(ds.seven_day)}</span>
+        <span>${fmt(ds.seven_day_sonnet)}</span>
+      </div>`;
+    }).join("");
+    body.innerHTML = header + rows + `<p class="meta" style="margin-top:10px">显示 ${d.count}/${d.total} 条</p>`;
+  }catch(ex){
+    body.innerHTML = '<p class="meta">加载失败: ' + ex.message + '</p>';
+  }
+}
 
 async function loadBooks(){
   const el = document.getElementById("books-list");

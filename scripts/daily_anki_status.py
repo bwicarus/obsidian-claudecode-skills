@@ -89,9 +89,56 @@ def ensure_anki() -> bool:
     return False
 
 
+def _quota_snapshot() -> dict | None:
+    """查 5h / 7d / sonnet / opus utilization。失败返 None（不阻断 step）。"""
+    try:
+        sys.path.insert(0, str(PROJECT_DIR / "scripts"))
+        from lib.claude_quota import fetch_quota
+        q = fetch_quota(cache_ttl=2)
+        return {
+            "five_hour":        (q.get("five_hour")        or {}).get("utilization", 0) or 0,
+            "seven_day":        (q.get("seven_day")        or {}).get("utilization", 0) or 0,
+            "seven_day_sonnet": (q.get("seven_day_sonnet") or {}).get("utilization", 0) or 0,
+            "seven_day_opus":   (q.get("seven_day_opus")   or {}).get("utilization", 0) or 0,
+        }
+    except Exception:
+        return None
+
+
+def _append_quota_log(step_name: str, before: dict | None, after: dict | None,
+                       duration_s: int) -> None:
+    """每个 step 跑完追加一条日志到 state/quota_log.json。"""
+    if before is None or after is None:
+        return
+    delta = {k: round(after[k] - before[k], 2) for k in before}
+    # 只对有实际 AI 调用的 step 记（delta 任一字段 ≥ 0.5%）；其它写一行轻量
+    has_consumption = any(abs(v) >= 0.5 for v in delta.values())
+    log_file = PROJECT_DIR / "state" / "quota_log.json"
+    log = {"entries": []}
+    if log_file.exists():
+        try: log = json.loads(log_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError): pass
+    entries = log.setdefault("entries", [])
+    entries.append({
+        "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "step": step_name,
+        "duration_s": duration_s,
+        "before": before, "after": after, "delta": delta,
+        "ai_intensive": has_consumption,
+    })
+    # 保留最近 500 条
+    if len(entries) > 500:
+        log["entries"] = entries[-500:]
+    try:
+        log_file.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def step(name: str, func) -> bool:
     start = datetime.datetime.now().astimezone()
     print(f"▶ {name} {start.strftime('%H:%M:%S')}...", flush=True)
+    quota_before = _quota_snapshot()
 
     # 步骤开始时立刻写 running 状态，让前端 last_run.json 轮询能看到"正在跑"
     STEPS.append(
@@ -120,6 +167,8 @@ def step(name: str, func) -> bool:
     end = datetime.datetime.now().astimezone()
     duration = int((end - start).total_seconds())
     status = "ok" if rc == 0 and not err else "failed"
+    quota_after = _quota_snapshot()
+    _append_quota_log(name, quota_before, quota_after, duration)
     # 更新刚刚 append 的 running 记录
     STEPS[-1].update(
         {
@@ -132,7 +181,14 @@ def step(name: str, func) -> bool:
     )
     write_run("running")
     suffix = f" {err}" if err else ""
-    print(f"  {'✓' if status == 'ok' else '✗'} {status} ({duration}s){suffix}", flush=True)
+    # 打印 quota delta（如果有显著消耗）
+    quota_msg = ""
+    if quota_before and quota_after:
+        delta_sonnet = quota_after["seven_day_sonnet"] - quota_before["seven_day_sonnet"]
+        delta_opus = quota_after["seven_day_opus"] - quota_before["seven_day_opus"]
+        if abs(delta_sonnet) >= 0.5 or abs(delta_opus) >= 0.5:
+            quota_msg = f"  [quota Δsonnet {delta_sonnet:+.1f}% Δopus {delta_opus:+.1f}%]"
+    print(f"  {'✓' if status == 'ok' else '✗'} {status} ({duration}s){quota_msg}{suffix}", flush=True)
     return status == "ok"
 
 
