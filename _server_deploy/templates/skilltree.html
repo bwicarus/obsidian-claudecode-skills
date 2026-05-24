@@ -1149,6 +1149,40 @@ function _randHex3(){
 }
 function _safeFileName(s){ return (s||"新节点").replace(/[\\/:*?"<>|]/g, ""); }
 
+async function createNote(nodeId){
+  const btn = document.getElementById("btn-create-note");
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ 正在读 PDF 并生成笔记..."; btn.style.opacity = ".6"; }
+  try{
+    const r = await fetch(`/skilltree/${BOOK}/api/build-note`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({node_id: nodeId})
+    });
+    const d = await r.json();
+    if(!d.ok){
+      alert("创建失败: " + (d.error || "未知错误"));
+      if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; }
+      return;
+    }
+    alert(`✓ 笔记已创建：${d.note_path}\n含 ${d.covered_node_ids.length} 个知识点的 PDF 嵌入区域。\n打开 Obsidian 编辑。`);
+    // 重新加载 KG 数据
+    const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+    KG = newD;
+    id2 = Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+    nodesByLevel={0:[],1:[],2:[]};
+    for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+    buildAggregatedEdges();
+    computeGlobalDepth();
+    computeChapterColors();
+    computeDescendants();
+    render();
+    showDetail(id2[nodeId]);
+  }catch(ex){
+    alert("创建失败: " + ex.message);
+    if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; }
+  }
+}
+
 function newNodeNoteUrl(n){
   // 单 L2 节点笔记
   const numLabel = n.numeric_label || "";
@@ -1279,13 +1313,20 @@ function showDetail(n){
       badges.push(`<span class="badge b-type">${lbl}</span>`);
     }
     if(n.numeric_label) badges.push(`<span class="badge b-type">编号 ${n.numeric_label}</span>`);
-    if(typeof n.mastery==="number"){
-      const tag = n.mastery_inferred ? "↓推断掌握" : "掌握";
-      const tooltip = n.mastery_inferred
-        ? `自身无卡片数据，由后续节点 mastery 反向推断（你能学后续 = 必然懂前置）。自身原值：${n.mastery_self==null?"无":(n.mastery_self*100).toFixed(0)+"%"}`
-        : "";
-      badges.push(`<span class="badge b-type" title="${tooltip}">${tag} ${(n.mastery*100).toFixed(0)}%</span>`);
-    } else badges.push(`<span class="badge b-type" style="opacity:.6">无卡片数据</span>`);
+    // ⭐ 五级掌握度：X/5 显眼大徽章
+    const lvl = typeof n.mastery_level === "number" ? n.mastery_level : 0;
+    const lvlColor = lvl >= 4 ? "#34d399" : lvl >= 2 ? "#60a5fa" : lvl === 1 ? "#fbbf24" : "#6f7888";
+    const lvlBg    = lvl >= 4 ? "#0e2118" : lvl >= 2 ? "#0e1a2e" : lvl === 1 ? "#241a08" : "#1f2530";
+    const lvlTip   = lvl === 0 ? "未开始" : lvl === 1 ? "刚解锁，未达掌握门槛（≥2/5 才作为前置）"
+                   : lvl === 2 ? "已掌握（达 2/5 门槛，可作前置开放后续）"
+                   : lvl >= 4 ? "深度掌握" : "中等掌握";
+    badges.push(`<span class="badge" title="${lvlTip}" style="background:${lvlBg};color:${lvlColor};box-shadow:inset 0 0 0 1.5px ${lvlColor};font-size:13px;padding:5px 12px">⭐ ${lvl}/5</span>`);
+    if(n.mastery_inferred){
+      badges.push(`<span class="badge b-type" title="推断掌握：由后续节点反向传递">↓推断</span>`);
+    }
+    if(typeof n.mastery==="number" && !n.mastery_inferred){
+      badges.push(`<span class="badge b-type" style="opacity:.7">Anki ${(n.mastery*100).toFixed(0)}%</span>`);
+    }
     badges.push(`<span class="badge b-type">解锁 ${descendants[n.id]||0} 后继</span>`);
   }
   const chap=chapOf(n);
@@ -1328,16 +1369,13 @@ function showDetail(n){
     link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
   }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
-  // 没有笔记时给「建笔记」按钮：L2 给两个粒度（单节点 / 整节合集），L1 只给整节
-  if(!notes.length){
-    if(n.level === 2){
-      link.push(`<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
-        <a href="${newNodeNoteUrl(n)}" class="page-link" style="display:inline-block">📝 单节点笔记（仅此节点）</a>
-        <a href="${newSectionNoteUrl(n)}" class="page-link" style="display:inline-block">📚 整节笔记（涵盖该节所有知识点）</a>
-      </div>`);
-    } else if(n.level === 1){
-      link.push(`<a href="${newSectionNoteUrl(n)}" class="page-link" style="display:inline-block;margin-top:4px">📚 建此节笔记（涵盖 ${countL2Under(n)} 个知识点）</a>`);
-    }
+  // 没有笔记时给「📝 创建笔记」按钮（服务端读 PDF 提取相关内容生成）
+  if(!notes.length && (n.level === 1 || n.level === 2)){
+    const cnt = n.level === 1 ? `（涵盖 ${countL2Under(n)} 个知识点）` : "";
+    link.push(`<button id="btn-create-note" onclick="createNote('${n.id}')"
+      style="margin-top:8px;padding:8px 14px;background:#1a2540;color:#a8cdff;
+      border:1.5px solid #3b6db5;border-radius:8px;cursor:pointer;font-size:13px;
+      font-weight:600;width:100%;text-align:left">📝 从 PDF 创建笔记 ${cnt}</button>`);
   }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){

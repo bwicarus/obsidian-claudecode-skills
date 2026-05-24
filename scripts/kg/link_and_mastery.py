@@ -260,39 +260,67 @@ def main() -> int:
             prereqs_of[e["to"]].append(e["from"])
             succ[e["from"]].append(e["to"])
             indeg[e["to"]] += 1
-    open_set = {"unlockable", "mastered"}      # 兼容旧 unlocked 字段输出
+    # 五级掌握度 mastery_level：
+    #   0 = 没碰过 / 前置链未通
+    #   1 = 已建笔记但还没刷卡/复习不到位（"刚解锁"，不算掌握）
+    #   2 = 达到掌握门槛（"已掌握"，可作前置开放后续）
+    #   3 = 中等掌握
+    #   4 = 较好掌握
+    #   5 = 完全掌握
+    # 推断掌握（mastery_inferred）默认 2（达门槛）
+    def compute_level(node, m, has_own_notes, inferred):
+        if inferred:
+            return 2
+        if not has_own_notes:
+            return 0
+        # 有笔记：按 mastery 数值分级
+        if m is None or m <= 0:  return 1   # 笔记建了但还没刷卡
+        if m >= 0.85:             return 5
+        if m >= 0.65:             return 4
+        if m >= 0.45:             return 3
+        if m >= 0.20:             return 2
+        return 1   # 有卡但 mastery 极低
+
     queue_l2 = [n["id"] for n in nodes if n["level"]==2 and indeg[n["id"]]==0]
     remaining = dict(indeg)
     state_map: dict[str, str] = {}
+    level_map: dict[str, int] = {}
     while queue_l2:
         cur = queue_l2.pop(0)
         n = id2[cur]
         prs = prereqs_of.get(cur, [])
-        # 严格语义：前置必须全部 mastered，节点才能 unlockable
-        # 仅 unlockable 的前置不算"通"——你都还没掌握，怎么能让下游可学
-        prereqs_all_mastered = (not prs) or all(
-            state_map.get(p) == "mastered" for p in prs)
+        # 前置严格：必须所有前置 level >= 2（"已掌握"）才解锁后续
+        # 注意：之前模式只检查 state==mastered，新规改用 level >= 2 等价但更精确
+        prereqs_clear = (not prs) or all(
+            level_map.get(p, 0) >= 2 for p in prs)
         has_own_notes = bool(n.get("note_ref_ai_verified") and n.get("containing_notes"))
         inferred = n.get("mastery_inferred", False)
-        # 三态规则：
-        #   自己学过笔记 OR 推断掌握  → mastered（不管前置如何，反映你实际学过）
-        #   前置全 mastered + 自己没碰 → unlockable（前置链全通，可以开始学）
-        #   其它                        → locked
-        if has_own_notes or inferred:
-            state_map[cur] = "mastered"
-        elif prereqs_all_mastered:
-            state_map[cur] = "unlockable"
+        m = n.get("mastery")
+        # 自身 level 跟前置无关——反映自己掌握程度
+        level = compute_level(n, m, has_own_notes, inferred)
+        # state 由 level + 前置链综合决定（前端三态）
+        if level >= 2:
+            state = "mastered"
+        elif level == 1:
+            state = "unlockable"     # 刚建笔记，可学但未达门槛
+        elif prereqs_clear:
+            state = "unlockable"     # 前置通但自己没碰
         else:
-            state_map[cur] = "locked"
+            state = "locked"
+        level_map[cur] = level
+        state_map[cur] = state
         for v in succ[cur]:
             remaining[v] -= 1
             if remaining[v] == 0:
                 queue_l2.append(v)
     # 落到 L2 节点字段
+    open_set = {"unlockable", "mastered"}
     for n in nodes:
         if n["level"] == 2:
             st = state_map.get(n["id"], "locked")
+            lvl = level_map.get(n["id"], 0)
             n["state"] = st
+            n["mastery_level"] = lvl
             n["unlocked"] = st in open_set
             n["mastered"] = st == "mastered"
 
