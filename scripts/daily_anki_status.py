@@ -183,6 +183,16 @@ def run_kg_link_mastery() -> int:
         ])
         if r3 != 0:
             print(f"    audit_kg 失败 (rc={r3})")
+        # 4) 滚动重扫 PDF（夜间深度扫描书本，每晚 30 页轮转）
+        r4 = run_py("kg/rescan_rolling.py", [
+            "--kg", str(kg),
+            "--pages-per-night", "30",
+            "--workers", "4", "--model", "sonnet", "--effort", "medium",
+            "--target-hour", "9", "--target-min", "0", "--buffer-min", "30",
+            "--auto-apply-safe",
+        ])
+        if r4 != 0:
+            print(f"    rescan_rolling 失败 (rc={r4})")
     return rc
 
 
