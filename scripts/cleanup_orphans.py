@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
+import note_state
 
 ANKI_URL = config.ANKI_CONNECT_URL
 
@@ -86,6 +87,169 @@ def remove_index_orphans(orphans: list[tuple[Path, int, str, str]]) -> int:
             removed += 1
         idx.write_text("".join(lines), encoding="utf-8")
     return removed
+
+
+# ── B0. 重命名检测：用内容哈希识别"删+加"实际是 rename ────────────────────────
+
+def detect_renames(orphans: list[tuple[Path, str, list[int]]]) -> list[dict]:
+    """对每个 orphan record，看 vault 里是否有相同内容哈希的新笔记。
+
+    返回 [{record_path, old_source_note, new_source_note}]。
+    匹配规则：用 note_state 的旧 hash（current 或 legacy 算法），跟 vault 里
+    所有"已存在但不在已有 record 中"的笔记的实时 hash 比对。
+    """
+    if not orphans:
+        return []
+    # 1. 收集每个 orphan 的旧 hash
+    states = note_state._load()
+    old_hashes = {}   # source_note → hash
+    for rf, sn, _ in orphans:
+        # note_state key 是绝对路径
+        full = (config.VAULT_ROOT / sn).as_posix() \
+               if not Path(sn).is_absolute() else sn
+        h = states.get(full, {}).get("summarize", {}).get("hash")
+        if h:
+            old_hashes[sn] = h
+
+    if not old_hashes:
+        return []
+    # 2. 收集 vault 里"现存但无对应 record"的笔记 + 实时 hash
+    NOTE_PAT = re.compile(r"^[0-9A-Fa-f]{3}-")
+    existing_records = set()
+    for rf in config.RECORDS_DIR.glob("*.json"):
+        try:
+            rec = json.loads(rf.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        sn = rec.get("source_note", "")
+        if sn:
+            existing_records.add(sn)
+    new_files = {}   # hash → relative source_note path
+    for md in config.VAULT_ROOT.rglob("*.md"):
+        if not NOTE_PAT.match(md.name):
+            continue
+        try:
+            rel = md.resolve().relative_to(config.VAULT_ROOT.resolve()).as_posix()
+        except ValueError:
+            continue
+        if rel in existing_records:
+            continue
+        try:
+            h = note_state._file_hash(md)
+            h2 = note_state._file_hash_legacy(md)
+        except Exception:
+            continue
+        # 一个 hash 可能对应多个文件（极少），保留第一个
+        new_files.setdefault(h, rel)
+        new_files.setdefault(h2, rel)
+    # 3. 匹配
+    renames = []
+    for rf, old_sn, _ in orphans:
+        old_h = old_hashes.get(old_sn)
+        if not old_h:
+            continue
+        new_rel = new_files.get(old_h)
+        if new_rel and new_rel != old_sn:
+            renames.append({
+                "record_path": rf,
+                "old_source_note": old_sn,
+                "new_source_note": new_rel,
+            })
+    return renames
+
+
+def apply_renames(renames: list[dict]) -> int:
+    """应用重命名：改 record source_note + 移 record 文件 +
+    更新 note-states key + 更新 KG _note_to_covered_l2 + 改索引条目 +
+    改别的笔记里的 [[old]] → [[new]]。Anki 卡片**不动**（仍指向同 nid）。
+    返回成功 rename 的笔记数。"""
+    if not renames:
+        return 0
+    states = note_state._load()
+    states_changed = False
+    done = 0
+    for rn in renames:
+        rf: Path = rn["record_path"]
+        old_sn = rn["old_source_note"]
+        new_sn = rn["new_source_note"]
+        # 1. 改 record 内 source_note
+        try:
+            rec = json.loads(rf.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  rename 读 record 失败 {rf.name}: {e}", file=sys.stderr)
+            continue
+        rec["source_note"] = new_sn
+        rec["renamed_from"] = rec.get("renamed_from", []) + [{
+            "from": old_sn,
+            "at": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds"),
+        }]
+        # 2. 物理 rename record 文件
+        try:
+            # 复用 anki_status.safe_record_stem 逻辑（简化版）
+            new_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "__",
+                              new_sn[:-3] if new_sn.lower().endswith(".md") else new_sn)
+            new_stem = re.sub(r"__+", "__", new_stem).strip(" ._") or "note"
+            new_rf = rf.parent / f"{new_stem}.json"
+            if new_rf != rf and new_rf.exists():
+                print(f"  rename 目标 record 已存在跳过：{new_rf.name}", file=sys.stderr)
+                continue
+            rf.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8")
+            if new_rf != rf:
+                rf.rename(new_rf)
+        except OSError as e:
+            print(f"  rename record 失败 {rf.name}: {e}", file=sys.stderr); continue
+        # 3. 更新 note-states key（绝对路径）
+        old_full = (config.VAULT_ROOT / old_sn).as_posix()
+        new_full = (config.VAULT_ROOT / new_sn).as_posix()
+        if old_full in states:
+            states[new_full] = states.pop(old_full)
+            states_changed = True
+        # 4. 更新 KG _note_to_covered_l2 key（所有 KG 文件扫一遍）
+        kg_dir = config.PROJECT_DIR / "knowledge_graph"
+        for kg_f in kg_dir.glob("*.json"):
+            if kg_f.name.endswith(".bak.json"): continue
+            try:
+                kg = json.loads(kg_f.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            persistent = kg.get("_note_to_covered_l2") or {}
+            if old_sn in persistent:
+                persistent[new_sn] = persistent.pop(old_sn)
+                kg["_note_to_covered_l2"] = persistent
+                # 重建节点 containing_notes 简单做法：替换 path
+                for n in kg.get("nodes", []):
+                    cn = n.get("containing_notes") or []
+                    if old_sn in cn:
+                        n["containing_notes"] = sorted(set(
+                            new_sn if x == old_sn else x for x in cn))
+                        n["note_ref"] = (n["containing_notes"] or [""])[0]
+                tmp = kg_f.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(kg, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                tmp.replace(kg_f)
+        # 5. 改索引条目 [[old]] → [[new]]（仅文件名 stem）
+        old_stem = Path(old_sn).stem
+        new_stem_link = Path(new_sn).stem
+        for idx in sorted(config.INDEX_DIR.rglob("*.md")):
+            try: txt = idx.read_text(encoding="utf-8")
+            except OSError: continue
+            new_txt = txt.replace(f"[[{old_stem}]]", f"[[{new_stem_link}]]")
+            if new_txt != txt:
+                idx.write_text(new_txt, encoding="utf-8")
+        # 6. 改别的笔记里的 [[old]] → [[new]]
+        for md in config.VAULT_ROOT.rglob("*.md"):
+            if md.name == Path(new_sn).name: continue
+            try: txt = md.read_text(encoding="utf-8")
+            except OSError: continue
+            if f"[[{old_stem}]]" in txt:
+                md.write_text(txt.replace(
+                    f"[[{old_stem}]]", f"[[{new_stem_link}]]"), encoding="utf-8")
+        done += 1
+        print(f"  ✓ rename {old_sn} → {new_sn}")
+    if states_changed:
+        note_state._save(states)
+    return done
 
 
 # ── B. Anki record 孤儿 ──────────────────────────────────────────────────────
@@ -269,6 +433,18 @@ def main() -> int:
     print(f"[B] 卡片记录孤儿：{len(b)} 条")
     for rf, sn, nids in b:
         print(f"  {rf.name}  (source_note={sn}, {len(nids)} 张卡)")
+    # B0. 在 suspend 之前先做重命名识别：内容 hash 匹配 → rename 而非 orphan
+    renames = detect_renames(b)
+    if renames:
+        print(f"[B0] 重命名识别：{len(renames)} 篇")
+        for rn in renames:
+            print(f"  {rn['old_source_note']} → {rn['new_source_note']}")
+    if apply and renames:
+        n_renamed = apply_renames(renames)
+        print(f"  → 已重命名 {n_renamed} 个 record（卡片保留不 suspend）")
+        # 已重命名的从 orphans 列表里移除，不再 suspend
+        renamed_paths = {rn["record_path"] for rn in renames}
+        b = [(rf, sn, nids) for (rf, sn, nids) in b if rf not in renamed_paths]
     if apply and b and not args.no_anki:
         try:
             anki_request("version", timeout=5)
