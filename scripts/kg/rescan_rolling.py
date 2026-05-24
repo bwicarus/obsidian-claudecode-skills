@@ -49,19 +49,18 @@ def save_progress(d: dict) -> None:
     PROGRESS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
-    """智能选页：聚焦学习前沿。返回离散页列表（≤ n）。
+def select_next_pages(kg: dict, prog: dict, n: int, cooldown_days: int = 14) -> list[int]:
+    """智能选页：聚焦学习前沿，扫过的页有冷却期。返回离散页列表（≤ n）。
 
     优先级（高→低）：
       1. unlockable / mastered 节点但**无 containing_notes** 的 pages
-         （用户当前 / 紧接要学的，且还没建笔记 → 最值得扫描确认）
       2. mastered 节点的直接 successors（一跳后续，没笔记的）
       3. mastered 节点的两跳 successors
       4. 当前最深 mastered 章节的下一章节里的节点
 
     跳过：
       - 节点已有 containing_notes（笔记已存在 = 内容已验证）
-      - 最近扫过的页（rescan_progress.recently_scanned_pages）
+      - 在冷却期内的页（rescan_progress.page_cooldown[page] < cooldown_days）
     """
     from collections import defaultdict
     id2 = {n["id"]: n for n in kg["nodes"]}
@@ -72,7 +71,19 @@ def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
             succ[e["from"]].add(e["to"])
 
     def has_notes(n): return bool(n.get("containing_notes"))
-    recent = set(prog.get("recently_scanned_pages") or [])
+    # 冷却：扫过的页带时间戳，冷却期内不重扫
+    now = datetime.now()
+    cooldown: dict = prog.get("page_cooldown") or {}
+    def in_cooldown(page: int) -> bool:
+        ts = cooldown.get(str(page))
+        if not ts: return False
+        try:
+            scanned_at = datetime.fromisoformat(ts)
+            return (now - scanned_at).total_seconds() < cooldown_days * 86400
+        except Exception:
+            return False
+    # 兼容旧字段
+    legacy_recent = set(prog.get("recently_scanned_pages") or [])
 
     candidates: list[tuple[int, int]] = []   # [(priority, page)]
     # === 1. unlockable / mastered 无笔记 ===
@@ -127,13 +138,17 @@ def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
             for p in (nd.get("pages") or []):
                 candidates.append((4, p))
 
-    # 排序 + 去重 + 减去最近扫过 + 取 N 页
+    # 排序 + 去重 + 跳过冷却期内的页 + 取 N 页
     candidates.sort(key=lambda x: (x[0], x[1]))
-    seen, out = set(), []
+    seen, out, skipped_cooldown = set(), [], 0
     for prio, pg in candidates:
-        if pg in recent or pg in seen: continue
+        if pg in seen: continue
+        if in_cooldown(pg) or pg in legacy_recent:
+            skipped_cooldown += 1; continue
         seen.add(pg); out.append(pg)
         if len(out) >= n: break
+    if skipped_cooldown:
+        print(f"  跳过冷却期内 {skipped_cooldown} 页（冷却 {cooldown_days} 天）")
     print(f"  候选页（按学习前沿排序前 {len(out)} 页）: {out}")
     return sorted(out)
 
@@ -280,6 +295,8 @@ def main() -> int:
     ap.add_argument("--target-min", type=int, default=0)
     ap.add_argument("--buffer-min", type=int, default=30)
     ap.add_argument("--auto-apply-safe", action="store_true")
+    ap.add_argument("--cooldown-days", type=int, default=14,
+                    help="扫过的页冷却 N 天（默认 14）不重扫，避免每晚重复同一前沿")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -294,7 +311,7 @@ def main() -> int:
         return 0
 
     prog = load_progress()
-    pages = select_next_pages(kg, prog, args.pages_per_night)
+    pages = select_next_pages(kg, prog, args.pages_per_night, args.cooldown_days)
     if not pages:
         print("无可扫页面（前沿全部已建笔记或已扫过）")
         return 0
@@ -351,15 +368,27 @@ def main() -> int:
     audit_file.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n✓ 写 audit: {audit_file}")
 
-    # 更新进度：累计 recently_scanned，最多保留最近 200 页（避免无限增长）
-    recent = list(prog.get("recently_scanned_pages") or [])
-    recent.extend(pages)
-    if len(recent) > 200:
-        recent = recent[-200:]
-    prog["recently_scanned_pages"] = recent
-    prog["last_run"] = datetime.now().isoformat(timespec="seconds")
+    # 更新进度：每页写时间戳，过期的自动失效（用 cooldown_days 判定）
+    cooldown = prog.get("page_cooldown") or {}
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    for p in pages:
+        cooldown[str(p)] = now_iso
+    # 清理过期的（超 cooldown_days × 2 远）避免无限增长
+    cutoff_secs = args.cooldown_days * 2 * 86400
+    now_dt = datetime.now()
+    for k in list(cooldown.keys()):
+        try:
+            if (now_dt - datetime.fromisoformat(cooldown[k])).total_seconds() > cutoff_secs:
+                del cooldown[k]
+        except Exception:
+            del cooldown[k]
+    prog["page_cooldown"] = cooldown
+    prog["last_run"] = now_iso
+    # 清掉旧 legacy 字段
+    prog.pop("recently_scanned_pages", None)
+    prog.pop("last_scanned_end", None)
     save_progress(prog)
-    print(f"✓ 进度更新：累计最近扫 {len(recent)} 页")
+    print(f"✓ 进度更新：page_cooldown 含 {len(cooldown)} 条（冷却 {args.cooldown_days} 天）")
     return 0
 
 
