@@ -1422,8 +1422,10 @@ function showDetail(n){
     link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
   }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
-  // 没有笔记时给「📝 创建笔记」按钮（服务端读 PDF 提取相关内容生成）
-  if(!notes.length && (n.level === 1 || n.level === 2)){
+  // 仅 unlockable / mastered 节点才允许建笔记（locked 表示前置链没通，
+  // 不能跳过前置直接建）。
+  const _st = stateOf(n);
+  if(!notes.length && (n.level === 1 || n.level === 2) && _st !== "locked"){
     const cnt = n.level === 1 ? `（涵盖 ${countL2Under(n)} 个知识点）` : "";
     link.push(`<button id="btn-create-note" onclick="createNote('${n.id}')"
       style="margin-top:8px;padding:8px 14px;background:#1a2540;color:#a8cdff;

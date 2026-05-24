@@ -175,13 +175,14 @@ def _build_note_for_node(kg, node, pdf_abs_path: Path):
                     rect_str = ",".join(map(str, bbox))
                     sec_parts.append(f"![[{pdf_name}#page={pg}&rect={rect_str}&color=yellow]]")
                     embedded = True
-                    # 文本层节录（前 400 字）作 fallback 描述
-                    raw = "\n".join(b["text"] for b in blocks)
-                    if raw.strip():
+                    # 用 annotate_note 兼容格式（<!-- 原文 ... --> HTML 注释），
+                    # 避免 register_notes 流程下次跑时 annotate_note 重复追加
+                    raw = "\n".join(b["text"] for b in blocks).strip()
+                    if raw:
                         sec_parts.append("")
-                        sec_parts.append(f"> {raw[:400].replace(chr(10), chr(10)+'> ')}")
+                        sec_parts.append(f"<!-- 原文\n{raw}\n-->")
                     continue
-            # fallback：无 block 匹配，嵌整页
+            # fallback：无 block 匹配，嵌整页（仍是兼容格式，注释为空）
             sec_parts.append(f"![[{pdf_name}#page={pg}]]")
             embedded = True
         if not embedded:
