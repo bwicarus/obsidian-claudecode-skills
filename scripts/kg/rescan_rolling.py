@@ -51,8 +51,8 @@ def save_progress(d: dict) -> None:
 
 def select_next_pages(kg: dict, prog: dict, n: int,
                        stable_threshold: int = 3,
-                       max_stable_days: int = 90) -> list[int]:
-    """智能选页：稳定度判定 + 学习前沿优先。返回离散页列表（≤ n）。
+                       max_stable_days: int = 90) -> tuple[list[int], list[int]]:
+    """智能选页：稳定度判定 + 学习前沿优先。返回 (normal_pages, deep_rescan_pages)。
 
     优先级（高→低）：
       1. unlockable / mastered 节点但**无 containing_notes** 的 pages
@@ -62,8 +62,10 @@ def select_next_pages(kg: dict, prog: dict, n: int,
 
     跳过：
       - 节点已有 containing_notes（笔记已存在 = 内容已验证）
-      - stable=true 的页（连续 stable_threshold 次扫描无变化）
-      - **例外**：stable 但超 max_stable_days 没扫过 → 强制扫一次防 KG 漂移
+      - stable=true 且未超 max_stable_days 的页（已稳定且不需复查）
+
+    deep_rescan_pages（独立返回，主流程用更强模型扫）：
+      - stable=true 但超 max_stable_days 没扫过的页 → 强制深度复查
     """
     from collections import defaultdict
     id2 = {n["id"]: n for n in kg["nodes"]}
@@ -77,19 +79,21 @@ def select_next_pages(kg: dict, prog: dict, n: int,
     now = datetime.now()
     history: dict = prog.get("page_history") or {}
 
-    def is_stable(page: int) -> bool:
+    def stability(page: int) -> str:
+        """返回 'unstable' / 'stable_recent' / 'stable_overdue'"""
         h = history.get(str(page)) or {}
-        if not h.get("stable"): return False
-        # 稳定但超 max_stable_days 没扫 → 强制重扫一次
+        if not h.get("stable"):
+            return "unstable"
         scans = h.get("scans") or []
-        if not scans: return False
+        if not scans:
+            return "unstable"
         try:
             last_at = datetime.fromisoformat(scans[-1]["at"])
             if (now - last_at).total_seconds() > max_stable_days * 86400:
-                return False
+                return "stable_overdue"
         except Exception:
-            return False
-        return True
+            return "stable_overdue"
+        return "stable_recent"
 
     candidates: list[tuple[int, int]] = []   # [(priority, page)]
     # === 1. unlockable / mastered 无笔记 ===
@@ -144,19 +148,26 @@ def select_next_pages(kg: dict, prog: dict, n: int,
             for p in (nd.get("pages") or []):
                 candidates.append((4, p))
 
-    # 排序 + 去重 + 跳过稳定页 + 取 N 页
+    # 排序 + 去重 + 三态分组（normal / deep_rescan / 跳过 stable_recent）
     candidates.sort(key=lambda x: (x[0], x[1]))
-    seen, out, skipped_stable = set(), [], 0
+    seen, normal_out, deep_out, skipped_stable = set(), [], [], 0
     for prio, pg in candidates:
         if pg in seen: continue
-        if is_stable(pg):
+        st = stability(pg)
+        if st == "stable_recent":
             skipped_stable += 1; continue
-        seen.add(pg); out.append(pg)
-        if len(out) >= n: break
+        seen.add(pg)
+        if st == "stable_overdue":
+            deep_out.append(pg)
+        else:
+            normal_out.append(pg)
+        if len(normal_out) + len(deep_out) >= n: break
     if skipped_stable:
-        print(f"  跳过稳定页 {skipped_stable} 个（连续 ≥{stable_threshold} 次无变化）")
-    print(f"  候选页（按学习前沿排序前 {len(out)} 页）: {out}")
-    return sorted(out)
+        print(f"  跳过稳定页 {skipped_stable} 个（连续 ≥{stable_threshold} 次无变化且 ≤{max_stable_days} 天）")
+    if deep_out:
+        print(f"  深度复查页 {len(deep_out)} 个（stable 但超 {max_stable_days} 天没扫，用更强模型）: {deep_out}")
+    print(f"  正常扫描页 {len(normal_out)} 个: {normal_out}")
+    return (sorted(normal_out), sorted(deep_out))
 
 
 def record_scan_outcome(prog: dict, page: int, had_changes: bool,
@@ -334,7 +345,12 @@ def main() -> int:
     ap.add_argument("--stable-threshold", type=int, default=3,
                     help="连续 N 次扫描无变化判定稳定（默认 3）")
     ap.add_argument("--max-stable-days", type=int, default=90,
-                    help="稳定页超 N 天没扫则强制重扫一次（默认 90）")
+                    help="稳定页超 N 天没扫则强制深度复查（默认 90）")
+    # 深度复查用更强模型 + 更深思考
+    ap.add_argument("--deep-model", default="opus",
+                    help="深度复查的 AI 模型（默认 opus，比常规 sonnet 更强）")
+    ap.add_argument("--deep-effort", default="high",
+                    help="深度复查的思考深度（默认 high）")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -349,26 +365,50 @@ def main() -> int:
         return 0
 
     prog = load_progress()
-    pages = select_next_pages(kg, prog, args.pages_per_night,
-                               args.stable_threshold, args.max_stable_days)
-    if not pages:
-        print("无可扫页面（前沿全部已建笔记或已扫过）")
+    normal_pages, deep_pages = select_next_pages(
+        kg, prog, args.pages_per_night,
+        args.stable_threshold, args.max_stable_days)
+    if not normal_pages and not deep_pages:
+        print("无可扫页面（前沿全部已建笔记或已稳定）")
         return 0
-    ranges = pages_to_ranges(pages)
-    print(f"=== 学习前沿重扫 {len(pages)} 页 → {len(ranges)} 段 ===")
-    for s, e in ranges:
-        print(f"  range {s}-{e}")
 
-    shadow_path = run_build_nodes_shadow_ranges(kg, kg_path, ranges,
-                                                 args.workers, args.model, args.effort)
-    if not shadow_path:
-        print("build_nodes 子集扫描全部失败"); return 1
-    try:
-        shadow_kg = json.loads(shadow_path.read_text(encoding="utf-8"))
-    except Exception as ex:
-        print(f"读 shadow 失败: {ex}"); return 1
+    # 跑两组：正常用默认 model/effort，深度复查用更强模型
+    shadow_kgs = []
+    if normal_pages:
+        ranges = pages_to_ranges(normal_pages)
+        print(f"\n=== [常规] 扫 {len(normal_pages)} 页 → {len(ranges)} 段，"
+              f"model={args.model} effort={args.effort} ===")
+        for s, e in ranges:
+            print(f"  range {s}-{e}")
+        sp = run_build_nodes_shadow_ranges(kg, kg_path, ranges,
+                                            args.workers, args.model, args.effort)
+        if sp:
+            try: shadow_kgs.append(json.loads(sp.read_text(encoding="utf-8")))
+            except Exception: pass
+
+    if deep_pages:
+        ranges = pages_to_ranges(deep_pages)
+        print(f"\n=== [深度复查] 扫 {len(deep_pages)} 页 → {len(ranges)} 段，"
+              f"model={args.deep_model} effort={args.deep_effort} ===")
+        for s, e in ranges:
+            print(f"  range {s}-{e}")
+        sp = run_build_nodes_shadow_ranges(kg, kg_path, ranges,
+                                            args.workers, args.deep_model, args.deep_effort)
+        if sp:
+            try: shadow_kgs.append(json.loads(sp.read_text(encoding="utf-8")))
+            except Exception: pass
+
+    if not shadow_kgs:
+        print("所有 build_nodes 子集扫描失败"); return 1
+
+    # 合并 shadow 节点
+    all_shadow_nodes = []
+    for sk in shadow_kgs:
+        all_shadow_nodes.extend(sk.get("nodes") or [])
+    shadow_kg = {"nodes": all_shadow_nodes, "edges": []}
 
     # 比对
+    pages = sorted(set(normal_pages + deep_pages))
     scan_pages_set = set(pages)
     diffs = diff_nodes(kg, shadow_kg, scan_pages_set)
     n_safe = len(diffs["safe_changes"]); n_risky = len(diffs["risky_changes"])
