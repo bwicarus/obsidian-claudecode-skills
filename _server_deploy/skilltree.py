@@ -112,11 +112,17 @@ def _find_node_blocks_in_page(page, numeric_label, max_blocks=8):
         out.append(items[j])
     return out
 
-def _union_bbox(boxes):
-    """合并多个 (x0, y0, x1, y1) → 外包矩形。坐标取整。"""
+def _union_bbox(boxes, page_height=None):
+    """合并多个 fitz bbox (x0, y0, x1, y1) → 外包矩形。
+    fitz 用 top-down（y0=顶）；Obsidian PDF rect 用 PDF user space bottom-up
+    （y0=底）。如果传 page_height，自动翻转 y → bottom-up 坐标。"""
     if not boxes: return None
     xs0 = min(b[0] for b in boxes); ys0 = min(b[1] for b in boxes)
     xs1 = max(b[2] for b in boxes); ys1 = max(b[3] for b in boxes)
+    if page_height is not None:
+        # fitz y0_top, y1_bottom (y 向下增长)
+        # → obsidian y0_user = page_h - y1_fitz, y1_user = page_h - y0_fitz
+        return [int(xs0), int(page_height - ys1), int(xs1), int(page_height - ys0)]
     return [int(xs0), int(ys0), int(xs1), int(ys1)]
 
 def _build_note_for_node(kg, node, pdf_abs_path: Path):
@@ -162,7 +168,9 @@ def _build_note_for_node(kg, node, pdf_abs_path: Path):
             page = doc[pg - 1]
             blocks = _find_node_blocks_in_page(page, numeric_label)
             if blocks:
-                bbox = _union_bbox([b["bbox"] for b in blocks if b.get("bbox")])
+                # 传 page.rect.height 把 fitz top-down y 翻转成 obsidian 用的 bottom-up
+                bbox = _union_bbox([b["bbox"] for b in blocks if b.get("bbox")],
+                                    page_height=page.rect.height)
                 if bbox:
                     rect_str = ",".join(map(str, bbox))
                     sec_parts.append(f"![[{pdf_name}#page={pg}&rect={rect_str}&color=yellow]]")
