@@ -35,6 +35,11 @@ svg.canvas{display:block}
 /* 瓶颈节点角标 💎（bottleneck_score >= 阈值时显示）*/
 .tile text.bottleneck-mark{display:none;font-size:12px;pointer-events:none;user-select:none}
 .tile.is-bottleneck text.bottleneck-mark{display:block}
+/* 等级角标 X/5：仅 state != locked 的节点显示，颜色按等级 */
+.tile text.level-mark{display:none;font-size:10px;font-weight:700;pointer-events:none;user-select:none;font-family:monospace}
+.tile.unlockable text.level-mark, .tile.mastered text.level-mark{display:block}
+.tile.unlockable text.level-mark{fill:#fbbf24}   /* 0/5 或 1/5 黄 */
+.tile.mastered text.level-mark{fill:#34d399}    /* 2/5+ 绿 */
 /* hover/长按 tooltip */
 #node-tooltip{position:fixed;display:none;z-index:30;background:#0d1322;border:1.5px solid #3b6db5;border-radius:8px;padding:10px 12px;max-width:340px;font-size:13px;line-height:1.5;color:#cfd6e6;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
 #node-tooltip.show{display:block}
@@ -822,6 +827,7 @@ function render(){
   tileEnter.append("text").attr("class","tcount");
   tileEnter.append("text").attr("class","inferred-mark").text("↓");
   tileEnter.append("text").attr("class","bottleneck-mark").text("💎");
+  tileEnter.append("text").attr("class","level-mark");
 
   // 更新所有节点（含 enter）：先合并再设置内容
   const tileAll=tileEnter.merge(tileSel);
@@ -857,6 +863,11 @@ function render(){
   // 瓶颈标记：左上角 💎
   tileAll.select("text.bottleneck-mark")
     .attr("x", 8).attr("y", 14);
+  // 等级 X/5：右下角（仅 L2，state != locked 时 CSS 控制显示）
+  tileAll.select("text.level-mark")
+    .attr("x", blockW-6).attr("y", blockH-6)
+    .attr("text-anchor", "end")
+    .text(d => (d.level === 2 && typeof d.mastery_level === "number") ? `${d.mastery_level}/5` : "");
 
   // 位置过渡（update 时滑动）
   tileAll.transition().duration(420)
