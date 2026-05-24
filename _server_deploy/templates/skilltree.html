@@ -1142,19 +1142,19 @@ function obsidianUrl(noteRef){
   let p=noteRef.replace(/\\/g,"/"); if(p.toLowerCase().endsWith(".md")) p=p.slice(0,-3);
   return "obsidian://open?vault="+encodeURIComponent(VAULT)+"&file="+encodeURIComponent(p);
 }
-function newNoteUrl(n){
-  // 调用 obsidian://new 协议创建带模板内容的笔记
-  // 用 KG 节点 numeric_label 作文件名前缀 + name；放 vault 根目录让 register_notes 自动捡到
-  const safe = (n.name || "新节点").replace(/[\\/:*?"<>|]/g, "");
+const TYPE_ZH = {definition:'定义', theorem:'定理', proposition:'命题',
+                 corollary:'推论', lemma:'引理', example:'例子'};
+function _randHex3(){
+  return Math.floor(Math.random()*0xfff).toString(16).padStart(3,"0").toUpperCase();
+}
+function _safeFileName(s){ return (s||"新节点").replace(/[\\/:*?"<>|]/g, ""); }
+
+function newNodeNoteUrl(n){
+  // 单 L2 节点笔记
   const numLabel = n.numeric_label || "";
-  // 文件名规则：[3 位 hex]-{name}.md（满足项目 register_notes 命名）
-  // 简化：用时间戳作 hex；用户可后续重命名。
-  const hexId = Math.floor(Math.random() * 0xfff).toString(16).padStart(3, "0").toUpperCase();
-  const fileName = `${hexId}-${safe}`;
+  const fileName = `${_randHex3()}-${_safeFileName(n.name)}`;
   const book = KG && KG.book ? KG.book : "教材";
-  const typeZh = {definition:'定义', theorem:'定理', proposition:'命题',
-                  corollary:'推论', lemma:'引理', example:'例子'};
-  const tyz = typeZh[n.type] || n.type || "";
+  const tyz = TYPE_ZH[n.type] || n.type || "";
   const sec = id2[n.parent_id], chap = sec ? id2[sec.parent_id] : null;
   const path = `${chap?chap.name:''} › ${sec?sec.name:''}`;
   const pages = (n.pages || []).join(", ");
@@ -1165,14 +1165,12 @@ source: ${book} ${numLabel}
 pages: ${pages}
 chapter: ${chap?chap.name:''}
 section: ${sec?sec.name:''}
-kg_node_id: ${n.id}
+kg_node_ids: [${n.id}]
 ---
 
 # ${n.name}
 
-${tyz?'**类型**：' + tyz + '\\n':''}**编号**：${numLabel}
-**所在**：${path}
-**页码**：${pages}
+${tyz?'**类型**：' + tyz + '\n':''}**编号**：${numLabel}  **所在**：${path}  **页码**：${pages}
 
 ## 定义
 
@@ -1185,6 +1183,57 @@ ${n.summary || ''}
 ## 例子
 
 （待补充）
+`;
+  return "obsidian://new?vault=" + encodeURIComponent(VAULT)
+       + "&file=" + encodeURIComponent(fileName)
+       + "&content=" + encodeURIComponent(content);
+}
+
+function newSectionNoteUrl(sectionNode){
+  // 整节笔记：涵盖 sectionNode（L1）下的所有 L2 节点
+  // sectionNode 可以是 L1，或 L2（取其父 L1）
+  const sec = sectionNode.level === 1 ? sectionNode : id2[sectionNode.parent_id];
+  if(!sec || sec.level !== 1) return "";
+  const chap = id2[sec.parent_id];
+  const l2s = nodesByLevel[2].filter(n => n.parent_id === sec.id)
+    .sort((a,b) => {
+      const pa = (a.pages||[])[0] || 99999;
+      const pb = (b.pages||[])[0] || 99999;
+      return pa - pb;
+    });
+  const fileName = `${_randHex3()}-${_safeFileName(sec.name)}`;
+  const book = KG && KG.book ? KG.book : "教材";
+  const allPages = [...new Set(l2s.flatMap(n => n.pages || []))].sort((a,b)=>a-b);
+  const idList = l2s.map(n => n.id).join(", ");
+  const sections = l2s.map(n => {
+    const tyz = TYPE_ZH[n.type] || n.type || "";
+    const pg = (n.pages || []).join(", ");
+    return `## ${n.numeric_label || ""} ${n.name}${tyz?` *[${tyz}]*`:""}
+
+${pg?`> p.${pg}\n`:""}
+${n.summary || '（待展开）'}
+
+`;
+  }).join("");
+  const content = `---
+subject: 数学
+source: ${book} ${sec.section_label || sec.id.split('.').pop()}
+pages: ${allPages.join(", ")}
+chapter: ${chap?chap.name:''}
+section: ${sec.name}
+kg_section_id: ${sec.id}
+kg_node_ids: [${idList}]
+---
+
+# ${sec.name}
+
+**所在章节**：${chap?chap.name:''} › ${sec.name}
+**页码范围**：p.${allPages[0]||"?"} - p.${allPages[allPages.length-1]||"?"}
+**含 ${l2s.length} 个知识点**
+
+---
+
+${sections}
 `;
   return "obsidian://new?vault=" + encodeURIComponent(VAULT)
        + "&file=" + encodeURIComponent(fileName)
@@ -1279,9 +1328,16 @@ function showDetail(n){
     link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
   }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
-  // 没有笔记时给"📝 建此节点笔记"按钮（点了走 obsidian://new 协议带模板内容）
-  if(n.level === 2 && !notes.length){
-    link.push(`<a href="${newNoteUrl(n)}" class="page-link" style="display:inline-block;margin-top:4px">📝 建此节点笔记</a>`);
+  // 没有笔记时给「建笔记」按钮：L2 给两个粒度（单节点 / 整节合集），L1 只给整节
+  if(!notes.length){
+    if(n.level === 2){
+      link.push(`<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
+        <a href="${newNodeNoteUrl(n)}" class="page-link" style="display:inline-block">📝 单节点笔记（仅此节点）</a>
+        <a href="${newSectionNoteUrl(n)}" class="page-link" style="display:inline-block">📚 整节笔记（涵盖该节所有知识点）</a>
+      </div>`);
+    } else if(n.level === 1){
+      link.push(`<a href="${newSectionNoteUrl(n)}" class="page-link" style="display:inline-block;margin-top:4px">📚 建此节笔记（涵盖 ${countL2Under(n)} 个知识点）</a>`);
+    }
   }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){
