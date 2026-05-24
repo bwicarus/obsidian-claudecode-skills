@@ -244,7 +244,13 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
         <span>宽自适应（详情面板打开时画布按剩余宽度重排）</span>
       </label>
     </div>
-    <p style="font-size:11px;color:#8a9bb4;line-height:1.5">方块固定按上方比例渲染；缩放只影响视图大小不改 layout；宽自适应让画布跟着详情面板挤压重新排版。</p>
+    <div class="row">
+      <label style="display:block;margin-bottom:6px;color:#cfd6e6">📔 新笔记前缀（本书所有「从 PDF 创建笔记」生成的文件名前缀）</label>
+      <input type="text" id="sett-note-prefix" placeholder="例如 000-"
+             style="background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;
+             border-radius:6px;padding:6px 10px;width:200px;font-family:monospace;font-size:13px">
+    </div>
+    <p style="font-size:11px;color:#8a9bb4;line-height:1.5">方块固定按上方比例渲染；缩放只影响视图大小不改 layout；宽自适应让画布跟着详情面板挤压重新排版；笔记前缀决定新建笔记的文件名（如 "000-" 让所有笔记前缀统一）。</p>
     <div class="foot">
       <button onclick="closeSettings()">取消</button>
       <button class="primary" onclick="applySettings()">应用</button>
@@ -1433,6 +1439,8 @@ function openSettings(){
   inp.value=Math.round(settings.blockRatio*100);
   document.getElementById("sett-zoom").checked = !!settings.enableZoom;
   document.getElementById("sett-fit").checked = !!settings.fitToWidth;
+  // KG 元数据：note_prefix 从 KG 顶层读
+  document.getElementById("sett-note-prefix").value = (KG && KG.note_prefix) || "";
   updateSettPreview();
   inp.oninput=updateSettPreview;
 }
@@ -1441,12 +1449,29 @@ function updateSettPreview(){
   document.getElementById("sett-val").textContent=v+"%";
   document.getElementById("sett-bar").style.width=(v/30*100)+"%";
 }
-function applySettings(){
+async function applySettings(){
   const v=+document.getElementById("sett-ratio").value;
   settings.blockRatio=v/100;
   settings.enableZoom = document.getElementById("sett-zoom").checked;
   settings.fitToWidth = document.getElementById("sett-fit").checked;
   saveSettings(settings);
+  // note_prefix 是 KG 元数据，保存到服务端
+  const newPrefix = document.getElementById("sett-note-prefix").value.trim();
+  if(newPrefix !== ((KG && KG.note_prefix) || "")){
+    try{
+      const r = await fetch(`/skilltree/${BOOK}/api/edit`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({op:"set_meta", key:"note_prefix", value:newPrefix})
+      });
+      const d = await r.json();
+      if(d.ok){
+        if(KG) KG.note_prefix = newPrefix;
+      } else {
+        alert("保存笔记前缀失败: " + (d.error || d.info));
+      }
+    }catch(ex){ alert("保存笔记前缀失败: " + ex.message); }
+  }
   closeSettings();
   applyZoomState();
   render();

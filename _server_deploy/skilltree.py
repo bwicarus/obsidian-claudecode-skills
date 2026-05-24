@@ -216,13 +216,14 @@ def _build_note_for_node(kg, node, pdf_abs_path: Path):
     ]
     content = "\n".join(fm_lines) + "\n".join(sections_md) + "\n## 我的笔记\n\n（待补充）\n"
 
-    # 写文件
+    # 写文件：用 KG 顶层 note_prefix（如 "000-"），同名冲突时追加 "-2"/"-3"
     safe = _safe_filename(title_node["name"])
-    fname = f"{_rand_hex3()}-{safe}.md"
+    prefix = (kg.get("note_prefix") or "").strip()
+    fname = f"{prefix}{safe}.md"
     out_path = vault_root / fname
-    n_try = 0
-    while out_path.exists() and n_try < 10:
-        fname = f"{_rand_hex3()}-{safe}.md"
+    n_try = 2
+    while out_path.exists() and n_try < 100:
+        fname = f"{prefix}{safe}-{n_try}.md"
         out_path = vault_root / fname
         n_try += 1
     out_path.write_text(content, encoding="utf-8")
@@ -330,6 +331,15 @@ def _apply_edit(kg, op, payload):
             return False, "node not found"
         id2[nid]["summary"] = (payload.get("summary") or "").strip()
         return True, "summary updated"
+    if op == "set_meta":
+        # 改 KG 顶层元数据。允许 note_prefix 等少量字段。
+        ALLOWED = {"note_prefix"}
+        key = payload.get("key", "")
+        val = payload.get("value", "")
+        if key not in ALLOWED:
+            return False, f"unknown meta key: {key}"
+        kg[key] = val
+        return True, f"set {key} = {val!r}"
     return False, f"unknown op: {op}"
 
 
