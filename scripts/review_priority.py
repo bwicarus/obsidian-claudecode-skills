@@ -139,7 +139,7 @@ def weakness_score(record: dict | None) -> float:
     惩罚 / ease 难度，比单纯 retention 更能区分「真掌握」和「反复遗忘」）。
     旧 record 无 mastery 时退化到 retention_avg，再退化到 (relearning+new)/total。
     """
-    if record is None or record.get("status") == "no_cards":
+    if record is None or record.get("status") in ("no_cards", "orphan"):
         return 0.0
     snap = record.get("status_snapshot")
     if not snap:
@@ -158,7 +158,7 @@ def weakness_score(record: dict | None) -> float:
 
 
 def has_cards(record: dict | None) -> bool:
-    if record is None or record.get("status") == "no_cards":
+    if record is None or record.get("status") in ("no_cards", "orphan"):
         return False
     return bool(record.get("cards"))
 

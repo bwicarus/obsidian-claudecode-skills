@@ -236,7 +236,8 @@ def main() -> None:
     # 有卡笔记 → 主列表
     notes_out = []
     for name, rec in records.items():
-        if rec.get("status") == "no_cards" or not rec.get("cards"):
+        # 跳过：无卡片 / 孤儿（cleanup_orphans 标的，source_note 已删除）
+        if rec.get("status") in ("no_cards", "orphan") or not rec.get("cards"):
             continue
         snap     = rec.get("status_snapshot", {})
         priority = rec.get("priority_snapshot", {})

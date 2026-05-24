@@ -92,9 +92,13 @@ def load_records() -> list[tuple[Path, dict]]:
     out = []
     for fn in sorted(glob.glob(str(RECORDS_DIR / "*.json"))):
         try:
-            out.append((Path(fn), json.loads(Path(fn).read_text(encoding="utf-8"))))
+            rec = json.loads(Path(fn).read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            pass
+            continue
+        # 跳过孤儿 record（source_note 已删，卡片已 suspend）
+        if rec.get("status") in ("no_cards", "orphan"):
+            continue
+        out.append((Path(fn), rec))
     return out
 
 

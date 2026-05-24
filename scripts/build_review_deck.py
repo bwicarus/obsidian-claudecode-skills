@@ -166,7 +166,7 @@ def collect_project_nids_and_priority(top_n: int) -> tuple[set[int], list[int], 
             continue
         all_nids.update(nids)
 
-        if rec.get("status") == "no_cards":
+        if rec.get("status") in ("no_cards", "orphan"):
             continue
         priority = float(rec.get("priority_snapshot", {}).get("score", 0) or 0)
         if priority <= 0:
