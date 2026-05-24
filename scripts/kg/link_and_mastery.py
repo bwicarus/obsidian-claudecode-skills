@@ -296,6 +296,24 @@ def main() -> int:
             n["unlocked"] = st in open_set
             n["mastered"] = st == "mastered"
 
+    # 4) 瓶颈节点评分（💎）：每个 non-mastered 节点 → 假设它 mastered，
+    # 看它的直接 successors 中有多少 currently locked 节点会立即变 unlockable
+    # （即除该 candidate 外所有其它 prereq 都已 mastered）
+    mastered_set = {nid for nid, st in state_map.items() if st == "mastered"}
+    for n in nodes:
+        if n["level"] != 2: continue
+        if state_map.get(n["id"]) == "mastered":
+            n["bottleneck_score"] = 0
+            continue
+        score = 0
+        for v in succ.get(n["id"], []):
+            if state_map.get(v) != "locked": continue
+            # v 的其它 prereqs（除 n.id 外）是否都已 mastered
+            other_prs = [p for p in prereqs_of.get(v, []) if p != n["id"]]
+            if all(state_map.get(p) == "mastered" for p in other_prs):
+                score += 1
+        n["bottleneck_score"] = score
+
     # L0/L1 聚合：取子孙 L2 的最强状态
     STATE_ORDER = {"locked":0, "unlockable":1, "mastered":2}
     def agg_state(node):
