@@ -185,6 +185,24 @@ def main() -> int:
     book = kg.get("book", "?")
     print(f"KG: {kg_path.name}  book={book}  L2 节点={len(l2_nodes)}")
 
+    # Step 0: Prune 悬空关联——删除 vault 里已经不存在的笔记的关联
+    persistent = kg.get("_note_to_covered_l2", {}) or {}
+    pruned = []
+    for path in list(persistent.keys()):
+        if not (VAULT_ROOT / path).exists():
+            del persistent[path]
+            pruned.append(path)
+    if pruned:
+        print(f"Prune: 删除 {len(pruned)} 篇已不存在的笔记关联")
+        for p in pruned[:5]:
+            print(f"  · {p}")
+        if len(pruned) > 5:
+            print(f"  ... 共 {len(pruned)} 篇")
+        kg["_note_to_covered_l2"] = persistent
+        # 立刻重建节点字段，确保 prune 生效
+        if args.in_place:
+            _rebuild_node_fields_from_persistent(kg)
+
     all_notes = collect_relevant_notes()
     notes = all_notes
     # 增量模式：只对最近 N 天 mtime 改过的笔记跑

@@ -393,6 +393,66 @@ def register_skilltree(app):
         except Exception:
             abort(500)
 
+    @app.route("/skilltree/<book>/api/prune-notes", methods=["POST"])
+    def skilltree_prune_notes(book):
+        """清理 KG 里悬空笔记关联（笔记文件已从 vault 删除）。
+        重建每个节点的 containing_notes，更新 KG 后触发 mastery 重算。"""
+        p, kg = _load_kg(book)
+        if not kg:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        vault_root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+        with _edit_lock:
+            _, kg = _load_kg(book)
+            if not kg:
+                return jsonify({"ok": False, "error": "kg reload failed"}), 500
+            persistent = kg.get("_note_to_covered_l2", {}) or {}
+            pruned = []
+            for path in list(persistent.keys()):
+                if not (vault_root / path).exists():
+                    del persistent[path]
+                    pruned.append(path)
+            if pruned:
+                kg["_note_to_covered_l2"] = persistent
+                # 重建每个 L2 节点的 containing_notes
+                from collections import defaultdict as _dd
+                node_to_notes: dict = _dd(list)
+                for note_rel, covered_ids in persistent.items():
+                    for nid in covered_ids:
+                        if note_rel not in node_to_notes[nid]:
+                            node_to_notes[nid].append(note_rel)
+                id2 = {n["id"]: n for n in kg["nodes"]}
+                for n in kg["nodes"]:
+                    if n["level"] != 2: continue
+                    notes = sorted(node_to_notes.get(n["id"], []))
+                    if notes:
+                        n["containing_notes"] = notes
+                        n["note_ref"] = notes[0]
+                        n["note_ref_ai_verified"] = True
+                    else:
+                        n["containing_notes"] = []
+                        n["note_ref"] = ""
+                        n["note_ref_ai_verified"] = False
+                # L1 也按 union 重建
+                l1_notes: dict = _dd(set)
+                for n in kg["nodes"]:
+                    if n["level"]==2 and n.get("containing_notes") and n.get("parent_id"):
+                        for nt in n["containing_notes"]:
+                            l1_notes[n["parent_id"]].add(nt)
+                for n in kg["nodes"]:
+                    if n["level"] != 1: continue
+                    nts = sorted(l1_notes.get(n["id"], set()))
+                    if nts:
+                        n["containing_notes"] = nts
+                        n["note_ref"] = nts[0]
+                        n["note_ref_ai_verified"] = True
+                    else:
+                        n["containing_notes"] = []
+                        n["note_ref"] = ""
+                        n["note_ref_ai_verified"] = False
+                _save_kg(p, kg)
+                _trigger_mastery_recompute(p)
+        return jsonify({"ok": True, "pruned": len(pruned), "examples": pruned[:5]})
+
     @app.route("/skilltree/<book>/api/build-note", methods=["POST"])
     def skilltree_build_note(book):
         """根据 KG 节点的 pages 从 PDF 提取相关内容，生成笔记。

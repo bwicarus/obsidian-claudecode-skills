@@ -251,6 +251,10 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
              border-radius:6px;padding:6px 10px;width:200px;font-family:monospace;font-size:13px">
     </div>
     <p style="font-size:11px;color:#8a9bb4;line-height:1.5">方块固定按上方比例渲染；缩放只影响视图大小不改 layout；宽自适应让画布跟着详情面板挤压重新排版；笔记前缀决定新建笔记的文件名（如 "000-" 让所有笔记前缀统一）。</p>
+    <div class="row" style="border-top:1px solid #2a3550;padding-top:10px;margin-top:10px">
+      <button id="btn-prune-notes" onclick="pruneNotes()" style="background:#3a1f1f;color:#ffb4b4;border:1px solid #7a2828;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer">🗑 清理悬空笔记关联</button>
+      <span style="font-size:11px;color:#6f7888;margin-left:8px">扫描 vault 删除已不存在的笔记关联（删笔记后用）</span>
+    </div>
     <div class="foot">
       <button onclick="closeSettings()">取消</button>
       <button class="primary" onclick="applySettings()">应用</button>
@@ -1165,6 +1169,38 @@ function _randHex3(){
   return Math.floor(Math.random()*0xfff).toString(16).padStart(3,"0").toUpperCase();
 }
 function _safeFileName(s){ return (s||"新节点").replace(/[\\/:*?"<>|]/g, ""); }
+
+async function pruneNotes(){
+  const btn = document.getElementById("btn-prune-notes");
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ 扫描中..."; }
+  try{
+    const r = await fetch(`/skilltree/${BOOK}/api/prune-notes`, {method:"POST"});
+    const d = await r.json();
+    if(!d.ok){
+      alert("清理失败: " + (d.error || "未知")); return;
+    }
+    if(d.pruned === 0){
+      alert("✓ 没有悬空笔记关联，KG 状态干净。");
+    } else {
+      alert(`✓ 已清理 ${d.pruned} 个悬空关联：\n${(d.examples||[]).join("\n")}`);
+      // 重载 KG
+      const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+      KG = newD;
+      id2 = Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+      nodesByLevel={0:[],1:[],2:[]};
+      for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+      buildAggregatedEdges();
+      computeGlobalDepth();
+      computeChapterColors();
+      computeDescendants();
+      render();
+    }
+  }catch(ex){
+    alert("清理失败: " + ex.message);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = "🗑 清理悬空笔记关联"; }
+  }
+}
 
 async function createNote(nodeId){
   const btn = document.getElementById("btn-create-note");
