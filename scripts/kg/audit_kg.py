@@ -153,6 +153,45 @@ def monotonicity_violations(kg: dict, tol: float = 0.05) -> list[dict]:
 # B: AI 抽样审稿
 # ---------------------------------------------------------------------------
 
+_DEEP_AUDIT_PROMPT = """你是教材《{book}》知识图谱的资深审稿人，要做最严格的节点审查。
+
+【节点元数据】
+id: {nid}
+编号: {label}
+名称: {name}
+类型: {type}
+摘要: {summary}
+所在节: {parent}
+页码: {pages}
+
+【PDF 该 page(s) 实际内容】
+————
+{pdf_text}
+————
+
+【该节兄弟节点】（同 L1 父下其它 L2）
+{siblings}
+
+请严格判断（一律返回 JSON，不要别的文字）：
+1) PDF 内容里是否真的有「{name}」这个**特定对象**的明确定义/陈述/性质？
+2) 节点 name/summary/numeric_label 是否准确？
+3) 若 PDF 里 "{label}" 是例子/图注/无关内容（AI 误识别）→ action=delete
+4) 若跟某兄弟节点是同一概念 → action=merge + target_id
+5) 若 summary 不准但节点真实存在 → action=fix_summary + new_summary
+6) 若 pages 错（PDF 这页没有此节点，应该在别页）→ action=fix_pages + new_pages（int 数组）
+7) 都没问题 → action=ok
+
+输出 JSON：
+{{
+  "action": "ok" | "merge" | "delete" | "fix_summary" | "fix_pages",
+  "target_id": "<merge 时给>",
+  "new_summary": "<fix_summary 时给>",
+  "new_pages": [<int>, ...],
+  "reason": "<30 字内判定依据>"
+}}
+"""
+
+
 _AUDIT_PROMPT = """你是教材《{book}》知识图谱的审稿人。这是一个原子知识点节点的元数据，
 请审查它的描述、关联笔记和前置链是否准确/合理。
 
@@ -257,6 +296,57 @@ def audit_one_node(backend, kg: dict, node: dict) -> dict:
     return data
 
 
+def audit_deep_one_node(backend, kg: dict, node: dict, pdf_cache: dict) -> dict:
+    """深度审计：含 PDF 实际内容；判定 ok/merge/delete/fix_summary/fix_pages。"""
+    id2 = {n["id"]: n for n in kg["nodes"]}
+    parent = id2.get(node.get("parent_id"))
+    siblings = [n for n in kg["nodes"]
+                if n["level"] == 2 and n.get("parent_id") == node.get("parent_id")
+                and n["id"] != node["id"]]
+    sib_text = "\n".join(
+        f"  {s['id']} | {s.get('numeric_label','')} | {s['name']} | {(s.get('summary','') or '')[:50]}"
+        for s in siblings[:30]
+    ) or "  （无）"
+    # PDF 内容（带缓存避免重复 open）
+    pages = node.get("pages") or []
+    pdf_text = ""
+    if pages and pdf_cache.get("doc"):
+        doc = pdf_cache["doc"]
+        parts = []
+        for pg in pages[:3]:   # 最多 3 页
+            if 1 <= pg <= len(doc):
+                parts.append(f"=== PDF page {pg} ===\n" + doc[pg-1].get_text()[:3000])
+        pdf_text = "\n\n".join(parts) or "（无 PDF 内容）"
+    else:
+        pdf_text = "（KG 无 PDF 路径或页码缺失）"
+
+    prompt = _DEEP_AUDIT_PROMPT.format(
+        book=kg.get("book", "?"), nid=node["id"],
+        label=node.get("numeric_label", ""), name=node["name"],
+        type=node.get("type", ""), summary=node.get("summary", ""),
+        parent=parent["name"] if parent else "?",
+        pages=", ".join(map(str, pages)) or "?",
+        pdf_text=pdf_text, siblings=sib_text,
+    )
+    try:
+        raw = backend.chat([{"role": "user", "content": prompt}]).strip()
+    except Exception as ex:
+        return {"node_id": node["id"], "name": node["name"], "_error": str(ex)}
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+        raw = re.sub(r"\n```\s*$", "", raw)
+    s, e = raw.find("{"), raw.rfind("}")
+    if s == -1 or e <= s:
+        return {"node_id": node["id"], "name": node["name"], "_error": "无 JSON"}
+    try:
+        data = json.loads(raw[s:e+1])
+    except Exception as ex:
+        return {"node_id": node["id"], "name": node["name"], "_error": f"JSON: {ex}"}
+    data["node_id"] = node["id"]; data["name"] = node["name"]
+    data["numeric_label"] = node.get("numeric_label", "")
+    return data
+
+
 def select_audit_sample(kg: dict, audited_ids: set[str], n: int) -> list[dict]:
     """从未审过的 L2 节点里抽 n 个，全审完后清空进度循环重审。"""
     l2 = [n for n in kg["nodes"] if n["level"] == 2]
@@ -294,6 +384,11 @@ def main() -> int:
                     help="7d 窗口 utilization 上限（默认 88，保护周窗口不爆）")
     ap.add_argument("--budget-max-batches", type=int, default=30,
                     help="budget-loop 硬上限批数（防意外，默认 30 批 × 20 节点 = 600）")
+    # 深度审计：含 PDF 内容验证 + 自动 apply safe ops（fix_summary）
+    ap.add_argument("--deep", action="store_true",
+                    help="深度模式：每节点跑 PDF 内容验证，能输出 fix_summary/fix_pages/merge/delete 建议")
+    ap.add_argument("--auto-apply-safe", action="store_true",
+                    help="深度模式下自动 apply safe ops（fix_summary）；risky ops 仍写入 audit 待 review")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -319,6 +414,7 @@ def main() -> int:
     # B
     ai_flagged: list[dict] = []
     audited_ids_now = set(prev_audited_ids)
+    auto_applied: list[dict] = []     # 深度模式 safe ops 自动应用记录
     if not args.ai_skip:
         l2_total = sum(1 for n in kg["nodes"] if n["level"]==2)
         # 已完成全图 → 清空进度重审
@@ -330,22 +426,55 @@ def main() -> int:
             "effort": args.effort, "timeout": 300,
         })
 
+        # 深度模式：加载 PDF
+        pdf_cache = {}
+        if args.deep:
+            pdf_path = kg.get("pdf")
+            if pdf_path and Path(pdf_path).exists():
+                try:
+                    import fitz
+                    pdf_cache["doc"] = fitz.open(pdf_path)
+                    print(f"[DEEP] 加载 PDF: {pdf_path}（{len(pdf_cache['doc'])} 页）")
+                except Exception as ex:
+                    print(f"[DEEP] PDF 加载失败: {ex}")
+
         def run_one_batch():
             sample = select_audit_sample(kg, audited_ids_now, args.ai_sample_size)
             if not sample:
                 return False
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                futs = {pool.submit(audit_one_node, backend, kg, n): n for n in sample}
+                if args.deep:
+                    futs = {pool.submit(audit_deep_one_node, backend, kg, n, pdf_cache): n for n in sample}
+                else:
+                    futs = {pool.submit(audit_one_node, backend, kg, n): n for n in sample}
                 for fut in as_completed(futs):
                     res = fut.result()
                     audited_ids_now.add(res["node_id"])
                     if res.get("_error"):
                         print(f"  ✗ {res['name'][:30]}: {res['_error']}")
                         continue
-                    if not res.get("ok", True):
-                        ai_flagged.append(res)
-                        print(f"  ⚠ {res['numeric_label']:8} {res['name'][:30]}: "
-                              f"{(res.get('issues') or ['(无具体说明)'])[0][:50]}")
+                    if args.deep:
+                        action = res.get("action", "ok")
+                        if action == "ok":
+                            continue
+                        # safe op: fix_summary - 可自动 apply
+                        if action == "fix_summary" and args.auto_apply_safe and res.get("new_summary"):
+                            for n in kg["nodes"]:
+                                if n["id"] == res["node_id"]:
+                                    n["summary"] = res["new_summary"]
+                                    break
+                            auto_applied.append({"action": "fix_summary", **res})
+                            print(f"  ✓ fix_summary {res['numeric_label']:8} {res['name'][:25]}: 已 apply")
+                        else:
+                            # risky ops (merge/delete/fix_pages) 仅记录待 review
+                            ai_flagged.append(res)
+                            print(f"  ⚠ {action:14} {res['numeric_label']:8} {res['name'][:25]}: "
+                                  f"{res.get('reason','')[:40]}")
+                    else:
+                        if not res.get("ok", True):
+                            ai_flagged.append(res)
+                            print(f"  ⚠ {res['numeric_label']:8} {res['name'][:30]}: "
+                                  f"{(res.get('issues') or ['(无具体说明)'])[0][:50]}")
             return True
 
         if args.budget_loop:
@@ -371,6 +500,11 @@ def main() -> int:
             print(f"[B] AI 抽样 {args.ai_sample_size} 节点（累计已审 {len(audited_ids_now)}/{l2_total}）")
             run_one_batch()
 
+    # 深度模式 auto_apply 有改动 → 写回 KG
+    if args.deep and auto_applied:
+        kg_path.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n[DEEP] 已 auto-apply {len(auto_applied)} 个 safe ops 到 KG")
+
     # 写 audit JSON
     audit_data = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -379,12 +513,14 @@ def main() -> int:
             "heuristic_edge_gaps": len(edge_gaps),
             "monotonicity_violations": len(mono),
             "ai_audit_flagged": len(ai_flagged),
+            "auto_applied": len(auto_applied),
         },
         "issues": {
             "heuristic_edge_gaps": edge_gaps,
             "monotonicity_violations": mono,
             "ai_audit_flagged": ai_flagged,
         },
+        "auto_applied": auto_applied,
         "audit_progress": {
             "ai_audited_node_ids": sorted(audited_ids_now),
             "last_run": datetime.now().isoformat(timespec="seconds"),
@@ -392,7 +528,7 @@ def main() -> int:
     }
     out_path.write_text(json.dumps(audit_data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n✓ 写 audit: {out_path}")
-    print(f"  总问题数: C={len(edge_gaps)} D={len(mono)} B={len(ai_flagged)}")
+    print(f"  总问题数: C={len(edge_gaps)} D={len(mono)} B={len(ai_flagged)} auto-applied={len(auto_applied)}")
     return 0
 
 

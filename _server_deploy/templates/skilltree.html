@@ -1204,7 +1204,7 @@ async function pruneNotes(){
 
 async function createNote(nodeId){
   const btn = document.getElementById("btn-create-note");
-  if(btn){ btn.disabled = true; btn.textContent = "⏳ 正在读 PDF 并生成笔记..."; btn.style.opacity = ".6"; }
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ AI 验证节点 + 生成笔记..."; btn.style.opacity = ".6"; }
   try{
     const r = await fetch(`/skilltree/${BOOK}/api/build-note`, {
       method: "POST",
@@ -1212,6 +1212,28 @@ async function createNote(nodeId){
       body: JSON.stringify({node_id: nodeId})
     });
     const d = await r.json();
+    if(!d.ok && d.auto_action === "deleted"){
+      alert(`🗑 ${d.message}`);
+      const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+      KG = newD; id2 = Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+      nodesByLevel={0:[],1:[],2:[]};
+      for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+      buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
+      closeDetail(); render();
+      return;
+    }
+    if(!d.ok && d.auto_action === "merged"){
+      alert(`🔀 ${d.message}`);
+      const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+      KG = newD; id2 = Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+      nodesByLevel={0:[],1:[],2:[]};
+      for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+      buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
+      render();
+      // 跳到合并目标节点
+      if(d.target_id && id2[d.target_id]) pushView({kind:"focus", id:d.target_id});
+      return;
+    }
     if(!d.ok){
       alert("创建失败: " + (d.error || "未知错误"));
       if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; }

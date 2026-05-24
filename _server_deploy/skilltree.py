@@ -65,6 +65,82 @@ def _save_kg(p, kg):
 _edit_lock = threading.Lock()
 
 
+# ─── AI 验证：节点是否真实/描述准确 + 自动 merge/delete 决策 ─────────────────
+def _ai_verify_node(kg: dict, node: dict, raw_pdf_text: str) -> dict:
+    """让 AI 看节点元数据 + PDF 实际内容 + 兄弟节点，决定 ok/merge/delete。
+    返回 {action, target_id?, reason}。失败时返回 {action:'ok'}（不阻断）。"""
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
+        from ai_backends import make_backend
+    except Exception:
+        return {"action": "ok", "reason": "ai_backends unavailable"}
+    id2 = {n["id"]: n for n in kg["nodes"]}
+    parent = id2.get(node.get("parent_id"))
+    siblings = [n for n in kg["nodes"]
+                if n["level"] == 2 and n.get("parent_id") == node.get("parent_id")
+                and n["id"] != node["id"]]
+    sib_text = "\n".join(
+        f"  {s['id']} | {s.get('numeric_label','')} | {s['name']} | {(s.get('summary','') or '')[:50]}"
+        for s in siblings[:40]
+    ) or "  （无）"
+
+    prompt = f"""你正在审查《{kg.get('book','?')}》知识图谱中的一个节点。判断它是否真实/准确。
+
+【候选节点】
+id: {node['id']}
+编号: {node.get('numeric_label','')}
+名称: {node['name']}
+类型: {node.get('type','')}
+摘要: {node.get('summary','')}
+所在节: {parent.get('name') if parent else '?'}
+
+【PDF 该 page 实际内容】
+————
+{raw_pdf_text[:2500]}
+————
+
+【该节兄弟节点】
+{sib_text}
+
+请严格判断（一律返回 JSON）：
+
+1) PDF 内容里是否真的有「{node['name']}」这个**特定对象**的明确定义/陈述？
+2) 节点的 name/summary 跟 PDF 对得上吗？
+3) 如果 PDF 里 "{node.get('numeric_label')}" 是例子或别的不相关内容（AI 误识别）→ action=delete
+4) 如果讲的跟某个兄弟节点是同一概念 → action=merge + 给该兄弟的 id
+5) 都没问题 → action=ok
+
+输出严格 JSON（不要别的文字）：
+{{
+  "action": "ok" | "merge" | "delete",
+  "target_id": "<merge 时给兄弟 id>",
+  "reason": "<30 字内判定依据>"
+}}
+"""
+    try:
+        backend = make_backend("claude_cli", {
+            "command": "/usr/bin/claude", "model": "sonnet",
+            "effort": "medium", "timeout": 120,
+        })
+        raw = backend.chat([{"role": "user", "content": prompt}]).strip()
+    except Exception as ex:
+        return {"action": "ok", "reason": f"ai 调用失败: {ex}"}
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+        raw = re.sub(r"\n```\s*$", "", raw)
+    s, e = raw.find("{"), raw.rfind("}")
+    if s == -1 or e <= s:
+        return {"action": "ok", "reason": "无 JSON"}
+    try:
+        data = json.loads(raw[s:e+1])
+    except Exception:
+        return {"action": "ok", "reason": "JSON 解析失败"}
+    if data.get("action") not in ("ok", "merge", "delete"):
+        return {"action": "ok", "reason": "unknown action"}
+    return data
+# ───────────────────────────────────────────────────────────────────────
+
+
 # ─── PDF→笔记 辅助函数 ────────────────────────────────────────────────────
 TYPE_ZH = {"definition":"定义", "theorem":"定理", "proposition":"命题",
            "corollary":"推论", "lemma":"引理", "example":"例子"}
@@ -476,6 +552,55 @@ def register_skilltree(app):
         pdf_path = kg.get("pdf")
         if not pdf_path or not Path(pdf_path).exists():
             return jsonify({"ok": False, "error": "pdf 缺失"}), 400
+
+        # ===== AI 验证（仅 L2，L1 整节笔记不验证因为节点本身没具体定义）=====
+        if node["level"] == 2:
+            try:
+                import fitz
+                doc = fitz.open(pdf_path)
+                page_texts = []
+                for pg in (node.get("pages") or []):
+                    if 1 <= pg <= len(doc):
+                        page_texts.append(doc[pg-1].get_text())
+                doc.close()
+                raw_pdf = "\n---\n".join(page_texts) if page_texts else ""
+            except Exception:
+                raw_pdf = ""
+            if raw_pdf:
+                verify = _ai_verify_node(kg, node, raw_pdf)
+                action = verify.get("action")
+                reason = verify.get("reason", "")
+                if action == "delete":
+                    # AI 判断 KG 节点是误识别 → 自动删除
+                    with _edit_lock:
+                        _, kg2 = _load_kg(book)
+                        if kg2:
+                            ok, info = _apply_edit(kg2, "delete_node", {"id": node_id})
+                            if ok:
+                                _save_kg(p, kg2); _trigger_mastery_recompute(p)
+                    return jsonify({
+                        "ok": False, "auto_action": "deleted",
+                        "reason": reason,
+                        "message": f"AI 判定节点是 KG 误识别，已删除：{reason}",
+                    })
+                if action == "merge":
+                    target_id = verify.get("target_id", "")
+                    target = next((n for n in kg["nodes"] if n["id"] == target_id), None)
+                    if target_id and target:
+                        with _edit_lock:
+                            _, kg2 = _load_kg(book)
+                            if kg2:
+                                ok, info = _apply_edit(kg2, "merge",
+                                    {"canonical": target_id, "drop": [node_id]})
+                                if ok:
+                                    _save_kg(p, kg2); _trigger_mastery_recompute(p)
+                        return jsonify({
+                            "ok": False, "auto_action": "merged",
+                            "target_id": target_id, "target_name": target["name"],
+                            "reason": reason,
+                            "message": f"AI 判定该节点是「{target['name']}」的重复，已合并：{reason}",
+                        })
+                # action=ok 继续走正常 build-note
 
         try:
             new_path, covered_ids = _build_note_for_node(kg, node, Path(pdf_path))
