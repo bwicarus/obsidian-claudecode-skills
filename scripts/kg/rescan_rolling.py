@@ -76,14 +76,14 @@ def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
 
     candidates: list[tuple[int, int]] = []   # [(priority, page)]
     # === 1. unlockable / mastered 无笔记 ===
-    for n in kg["nodes"]:
-        if n["level"] != 2: continue
-        if n.get("state") in ("unlockable", "mastered") and not has_notes(n):
-            for p in (n.get("pages") or []):
+    for nd in kg["nodes"]:
+        if nd["level"] != 2: continue
+        if nd.get("state") in ("unlockable", "mastered") and not has_notes(nd):
+            for p in (nd.get("pages") or []):
                 candidates.append((1, p))
     # === 2/3. mastered 节点的一跳 / 两跳后继 ===
-    mastered_ids = {n["id"] for n in kg["nodes"]
-                    if n["level"] == 2 and n.get("state") == "mastered"}
+    mastered_ids = {nd["id"] for nd in kg["nodes"]
+                    if nd["level"] == 2 and nd.get("state") == "mastered"}
     one_hop = set()
     for mid in mastered_ids:
         one_hop.update(succ.get(mid, ()))
@@ -93,14 +93,14 @@ def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
         two_hop.update(succ.get(did, ()))
     two_hop -= mastered_ids; two_hop -= one_hop
     for nid in one_hop:
-        n = id2.get(nid)
-        if not n or has_notes(n): continue
-        for p in (n.get("pages") or []):
+        nd = id2.get(nid)
+        if not nd or has_notes(nd): continue
+        for p in (nd.get("pages") or []):
             candidates.append((2, p))
     for nid in two_hop:
-        n = id2.get(nid)
-        if not n or has_notes(n): continue
-        for p in (n.get("pages") or []):
+        nd = id2.get(nid)
+        if not nd or has_notes(nd): continue
+        for p in (nd.get("pages") or []):
             candidates.append((3, p))
     # === 4. 最深 mastered 章节的下一章节 ===
     def chap_of(node):
@@ -120,11 +120,11 @@ def select_next_pages(kg: dict, prog: dict, n: int) -> list[int]:
             deepest_idx = max(deepest_idx, i)
     if 0 <= deepest_idx < len(chap_order) - 1:
         next_chap_id = chap_order[deepest_idx + 1]
-        for n in kg["nodes"]:
-            if n["level"] != 2: continue
-            if chap_of(n) != next_chap_id: continue
-            if has_notes(n): continue
-            for p in (n.get("pages") or []):
+        for nd in kg["nodes"]:
+            if nd["level"] != 2: continue
+            if chap_of(nd) != next_chap_id: continue
+            if has_notes(nd): continue
+            for p in (nd.get("pages") or []):
                 candidates.append((4, p))
 
     # 排序 + 去重 + 减去最近扫过 + 取 N 页
