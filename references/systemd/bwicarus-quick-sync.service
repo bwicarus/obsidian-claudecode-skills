@@ -1,0 +1,17 @@
+[Unit]
+Description=Vault quick sync (cleanup + KG prune, no AI / no Anki)
+After=obsidian-sync.service network-online.target
+Wants=obsidian-sync.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/home/bwicarus/claude/.env
+WorkingDirectory=/home/bwicarus/claude
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/quick_sync.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+User=bwicarus
+
+[Install]
+WantedBy=multi-user.target

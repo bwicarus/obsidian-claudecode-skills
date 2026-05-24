@@ -1,0 +1,11 @@
+[Unit]
+Description=Run vault quick sync every 15 minutes
+Requires=bwicarus-quick-sync.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=bwicarus-quick-sync.service
+
+[Install]
+WantedBy=timers.target
