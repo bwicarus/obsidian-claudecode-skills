@@ -409,14 +409,14 @@ def _apply_edit(kg, op, payload):
         id2[nid]["summary"] = (payload.get("summary") or "").strip()
         return True, "summary updated"
     if op == "set_meta":
-        # 改 KG 顶层元数据。允许 note_prefix 等少量字段。
-        ALLOWED = {"note_prefix"}
+        # 改 KG 顶层元数据。允许的字段白名单（含 scan_config 嵌套支持）。
+        ALLOWED = {"note_prefix", "title", "scan_config"}
         key = payload.get("key", "")
-        val = payload.get("value", "")
+        val = payload.get("value")
         if key not in ALLOWED:
             return False, f"unknown meta key: {key}"
         kg[key] = val
-        return True, f"set {key} = {val!r}"
+        return True, f"set {key}"
     return False, f"unknown op: {op}"
 
 
@@ -425,6 +425,76 @@ def register_skilltree(app):
     @app.route("/skilltree/")
     def skilltree_index():
         return render_template("skilltree_index.html", books=list_books())
+
+    @app.route("/skilltree/api/books-meta")
+    def skilltree_books_meta():
+        """返回所有书的元数据（控制面板技能树 tab 用）。"""
+        out = []
+        if not KG_DIR.exists():
+            return jsonify(out)
+        for f in sorted(KG_DIR.glob("*.json")):
+            if f.name.endswith(".bak.json"): continue
+            try:
+                kg = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            l2 = [n for n in kg.get("nodes", []) if n.get("level") == 2]
+            mastered = sum(1 for n in l2 if n.get("state") == "mastered")
+            pdf_path = kg.get("pdf", "")
+            pdf_exists = bool(pdf_path) and Path(pdf_path).exists()
+            scan_cfg = kg.get("scan_config") or {}
+            out.append({
+                "id": kg.get("book") or f.stem,
+                "title": kg.get("title") or kg.get("book") or f.stem,
+                "kg_file": f.name,
+                "pdf_path": pdf_path,
+                "pdf_exists": pdf_exists,
+                "note_prefix": kg.get("note_prefix") or "",
+                "node_count": len(kg.get("nodes", [])),
+                "l2_count": len(l2),
+                "mastered_count": mastered,
+                "edge_count": len(kg.get("edges", [])),
+                "scan_config": {
+                    "pages_per_night":  scan_cfg.get("pages_per_night", 30),
+                    "stable_threshold": scan_cfg.get("stable_threshold", 3),
+                    "max_stable_days":  scan_cfg.get("max_stable_days", 90),
+                    "deep_model":       scan_cfg.get("deep_model", "opus"),
+                    "deep_effort":      scan_cfg.get("deep_effort", "high"),
+                    "enabled":          scan_cfg.get("enabled", True),
+                },
+            })
+        return jsonify(out)
+
+    @app.route("/skilltree/<book>/api/delete", methods=["POST"])
+    def skilltree_delete_book(book):
+        """删除一本书：KG json 移到归档 + 可选删 PDF。"""
+        try:
+            body = request.get_json(force=True) or {}
+        except Exception:
+            body = {}
+        delete_pdf = bool(body.get("delete_pdf"))
+        p = _kg_path(book)
+        if not p:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        archive_dir = KG_DIR / "_archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archived = archive_dir / f"{p.stem}.{ts}.json.bak"
+        # 同时归档 progress / audit 状态相关
+        try:
+            kg = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            kg = None
+        pdf_path = (kg or {}).get("pdf", "") if kg else ""
+        p.rename(archived)
+        msg = f"KG 已归档至 {archived.name}"
+        if delete_pdf and pdf_path and Path(pdf_path).exists():
+            try:
+                Path(pdf_path).unlink()
+                msg += f"；PDF 已删除"
+            except Exception as ex:
+                msg += f"；PDF 删除失败: {ex}"
+        return jsonify({"ok": True, "info": msg, "archived": archived.name})
 
     @app.route("/skilltree/<book>/")
     def skilltree_view(book):

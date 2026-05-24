@@ -358,6 +358,19 @@ def main() -> int:
     if not kg.get("pdf"):
         print("KG 无 pdf 字段，跳过"); return 0
 
+    # 优先用 KG.scan_config 覆盖命令行默认值
+    cfg = kg.get("scan_config") or {}
+    if not cfg.get("enabled", True):
+        print(f"KG {kg.get('book', '?')} scan_config.enabled=False，跳过")
+        return 0
+    pages_per_night    = int(cfg.get("pages_per_night",   args.pages_per_night))
+    stable_threshold   = int(cfg.get("stable_threshold",  args.stable_threshold))
+    max_stable_days    = int(cfg.get("max_stable_days",   args.max_stable_days))
+    deep_model         = cfg.get("deep_model",            args.deep_model)
+    deep_effort        = cfg.get("deep_effort",           args.deep_effort)
+    print(f"参数：pages_per_night={pages_per_night} stable_threshold={stable_threshold} "
+          f"max_stable_days={max_stable_days} deep_model={deep_model} deep_effort={deep_effort}")
+
     # 时间感知：过 cutoff 直接跳
     ok, reason, _ = time_to_safe_cutoff(args.target_hour, args.target_min, args.buffer_min)
     if not ok:
@@ -366,8 +379,8 @@ def main() -> int:
 
     prog = load_progress()
     normal_pages, deep_pages = select_next_pages(
-        kg, prog, args.pages_per_night,
-        args.stable_threshold, args.max_stable_days)
+        kg, prog, pages_per_night,
+        stable_threshold, max_stable_days)
     if not normal_pages and not deep_pages:
         print("无可扫页面（前沿全部已建笔记或已稳定）")
         return 0
@@ -389,11 +402,11 @@ def main() -> int:
     if deep_pages:
         ranges = pages_to_ranges(deep_pages)
         print(f"\n=== [深度复查] 扫 {len(deep_pages)} 页 → {len(ranges)} 段，"
-              f"model={args.deep_model} effort={args.deep_effort} ===")
+              f"model={deep_model} effort={deep_effort} ===")
         for s, e in ranges:
             print(f"  range {s}-{e}")
         sp = run_build_nodes_shadow_ranges(kg, kg_path, ranges,
-                                            args.workers, args.deep_model, args.deep_effort)
+                                            args.workers, deep_model, deep_effort)
         if sp:
             try: shadow_kgs.append(json.loads(sp.read_text(encoding="utf-8")))
             except Exception: pass
@@ -468,7 +481,7 @@ def main() -> int:
                            p in (id2[ch["node_id"]].get("pages") or []))]
             summary = f"{len(related)} 个变化：" + ", ".join(c.get("kind","") for c in related[:3])
         record_scan_outcome(prog, p, had_changes,
-                             args.stable_threshold, change_summary=summary)
+                             stable_threshold, change_summary=summary)
     prog["last_run"] = datetime.now().isoformat(timespec="seconds")
     # 清掉旧 legacy 字段
     prog.pop("recently_scanned_pages", None)
