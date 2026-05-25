@@ -135,6 +135,43 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 #detail.theme-locked{border-left-color:#3a4456;background:linear-gradient(180deg,#0e131e 0%,#0a0e1a 35%)}
 #detail.theme-locked::before{background:#3a4456}
 
+/* ============ focus 叠加面板（左侧拉出，显示焦点节点的上下游 chain map） ============ */
+#focus-panel{
+  position:absolute;left:0;top:0;bottom:0;
+  width:calc(100% - 360px);
+  background:linear-gradient(180deg,#0d1322 0%,#0a0e1a 100%);
+  border-right:4px solid #2a3550;
+  transform:translateX(-105%);
+  transition:transform .25s ease;
+  z-index:4;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+#focus-panel.open{transform:translateX(0)}
+#focus-panel-close{position:absolute;top:14px;right:14px;background:rgba(0,0,0,.35);border:1px solid #2a3550;width:32px;height:32px;border-radius:50%;color:#cfd6e6;font-size:18px;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center;z-index:1}
+#focus-panel-close:hover{background:#1f2740;border-color:#5b6889;color:#fff}
+#focus-panel-title{padding:18px 60px 12px 24px;color:#cfe6ff;font-weight:700;font-size:17px;border-bottom:1px solid #1f2740;flex:0 0 auto}
+#focus-svg-wrap{flex:1;overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start}
+#focus-svg{display:block}
+/* focus-panel 内方块 */
+g.fp-tile{cursor:pointer}
+g.fp-tile rect.tbox{stroke-width:2;fill:#0e1a2e}
+g.fp-tile.fp-focused rect.tbox{stroke:#fde047;stroke-width:4;fill:#231a08}
+g.fp-tile.fp-focused{color:#fef3c7}
+g.fp-tile.fp-anc rect.tbox{stroke:#60a5fa;stroke-width:2.5;fill:#0a1530}
+g.fp-tile.fp-anc{color:#d0e1ff}
+g.fp-tile.fp-desc rect.tbox{stroke:#c084fc;stroke-width:2.5;fill:#1c1233}
+g.fp-tile.fp-desc{color:#dcc5ff}
+g.fp-tile.fp-desc-locked rect.tbox{stroke:#5a6478;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
+g.fp-tile.fp-desc-locked{color:#8a96ad}
+g.fp-tile:hover rect.tbox{filter:brightness(1.3)}
+g.fp-tile text.tname{font-weight:600;text-anchor:middle;pointer-events:none;user-select:none;fill:currentColor}
+g.fp-tile text.tsub{text-anchor:middle;pointer-events:none;user-select:none;fill:#7a8497}
+path.fp-edge{fill:none;stroke-linecap:round;stroke-width:1.8}
+path.fp-edge.fp-anc-edge{stroke:#60a5fa;opacity:.85}
+path.fp-edge.fp-desc-edge{stroke:#c084fc;opacity:.85}
+path.fp-edge.fp-desc-locked-edge{stroke:#5a6478;opacity:.6;stroke-dasharray:4 3}
+
 #detail h2{font-size:17px;margin-bottom:10px;color:#e6e6f0;margin-top:6px}
 #detail .lbl{color:#8a9bb4;font-size:10px;margin-top:14px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
 #detail .v{margin-top:4px;color:#cfd6e6;word-break:break-all}
@@ -210,6 +247,11 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
       <marker id="arr-lock" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L9,0L0,4" fill="#3e4a64"/></marker>
     </defs></svg>
   </div>
+  <aside id="focus-panel">
+    <button id="focus-panel-close" onclick="closeFocusPanel()">✕</button>
+    <div id="focus-panel-title">—</div>
+    <div id="focus-svg-wrap"><svg id="focus-svg"></svg></div>
+  </aside>
   <aside id="detail">
     <button id="detail-close" onclick="closeDetail()">✕</button>
     <h2 id="d-name">—</h2>
@@ -385,8 +427,16 @@ wrap.addEventListener("touchmove", e=>{
 // 浏览器后退/前进
 window.addEventListener("popstate",ev=>{
   const st=ev.state||{};
-  current = st.view || decodeView((location.hash||"").replace(/^#/,""));
+  let nextView = st.view || decodeView((location.hash||"").replace(/^#/,""));
   backDepth = typeof st.depth==="number" ? st.depth : 0;
+  // url hash 直链 focus 的兼容：用叠加面板而非视图切换
+  if(nextView && nextView.kind === "focus"){
+    current = {kind:"home"};
+    updateNav();
+    if(id2[nextView.id]) openFocusPanel(nextView.id);
+    return;
+  }
+  current = nextView;
   updateNav(); renderAnim();
 });
 
@@ -470,16 +520,12 @@ function decodeView(s){
 // ============================================================
 function sameView(a,b){ return a && b && a.kind===b.kind && a.id===b.id; }
 function pushView(v){
-  if(sameView(v,current)){ render(); return; }   // 同视图不入栈，避免"按 ◀ 没反应"
-  // focus → focus 是切换焦点（同一面板换内容），不入栈
-  const isFocusSwap = (current.kind==="focus" && v.kind==="focus");
+  // focus 视图改成叠加面板（home 始终底层不重排，链路在左侧面板内独立绘制）
+  if(v.kind === "focus"){ openFocusPanel(v.id); return; }
+  if(sameView(v,current)){ render(); return; }   // 同视图不入栈
   current=v;
-  if(isFocusSwap){
-    history.replaceState({view:current, depth:backDepth}, "", "#"+encodeView(current));
-  } else {
-    backDepth++;
-    history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
-  }
+  backDepth++;
+  history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
   updateNav(); renderAnim();
 }
 function goBack(){
@@ -1600,35 +1646,187 @@ async function delEdge(a,b){
   await editPost("delete_edge",{from:a, to:b});
 }
 let detailNodeId = null;
+let focusPanelId = null;
 function closeDetail(){
-  const targetId = detailNodeId;
-  const wasFocus = (current.kind==="focus");
-  // 记下目标方块当前 SVG 位置 + viewport 位置，用于退出 focus 后让方块在屏幕上"不动"
-  const oldPos = (wasFocus && targetId && wrap.__positions) ? wrap.__positions[targetId] : null;
-  const oldSL = wrap.scrollLeft;
-  const oldST = wrap.scrollTop;
   document.getElementById("detail").classList.remove("open");
   detailNodeId = null;
-  if(wasFocus) goBack();   // 触发 popstate → renderAnim()，节点 d3 transition 380ms 到新位置
-  if(!wasFocus || !oldPos) return;
-  // viewport 跟着节点同步平移 380ms（缓动），方块屏幕坐标全程几乎不变
-  requestAnimationFrame(()=>{
-    const newPos = wrap.__positions && wrap.__positions[targetId];
-    if(!newPos) return;
-    const targetSL = Math.max(0, oldSL + (newPos.x - oldPos.x));
-    const targetST = Math.max(0, oldST + (newPos.y - oldPos.y));
-    if(targetSL === oldSL && targetST === oldST) return;
-    const dur = 380;
-    const t0 = performance.now();
-    (function step(now){
-      const t = Math.min(1, (now - t0) / dur);
-      // easeInOutQuad（跟 d3 默认 cubic-ease 接近）
-      const e = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
-      wrap.scrollLeft = oldSL + (targetSL - oldSL) * e;
-      wrap.scrollTop  = oldST + (targetST - oldST) * e;
-      if(t < 1) requestAnimationFrame(step);
-    })(performance.now());
+  // 如果左侧 focus 面板也开着（典型用法是一起开），一并关掉
+  const fp = document.getElementById("focus-panel");
+  if(fp && fp.classList.contains("open")){
+    fp.classList.remove("open");
+    focusPanelId = null;
+    clearChainHighlightOnHome();
+  }
+}
+
+// ============================================================
+// focus 叠加面板：home 永远在底层不重排，焦点链路在左侧覆盖面板内独立绘制
+// ============================================================
+function openFocusPanel(nodeId){
+  const n = id2[nodeId];
+  if(!n) return;
+  focusPanelId = nodeId;
+  document.getElementById("focus-panel").classList.add("open");
+  document.getElementById("focus-panel-title").textContent =
+    (n.numeric_label ? "["+n.numeric_label+"] " : "") + n.name;
+  renderFocusPanel(nodeId);
+  applyChainHighlightOnHome(nodeId);   // home 应用 chain class（不重排）
+  showDetail(n);                       // 同步打开右侧 detail
+}
+
+function closeFocusPanel(){
+  document.getElementById("focus-panel").classList.remove("open");
+  document.getElementById("detail").classList.remove("open");
+  focusPanelId = null;
+  detailNodeId = null;
+  clearChainHighlightOnHome();
+}
+
+// home 上仅切换 class（不重排，不触发 transition），让用户在背景里也能看到链路
+function applyChainHighlightOnHome(focusId){
+  computeChainSets(focusId);
+  if(typeof tilesG === "undefined") return;
+  tilesG.selectAll("g.tile").each(function(d){
+    this.setAttribute("class", tileClass(d, focusId));
   });
+  edgesG.selectAll("path.edge").each(function(e){
+    this.setAttribute("class", "edge " + edgeClass(e));
+  });
+  svg.node().parentNode.classList.add("focus-mode");
+}
+function clearChainHighlightOnHome(){
+  computeChainSets(null);
+  if(typeof tilesG === "undefined") return;
+  tilesG.selectAll("g.tile").each(function(d){
+    this.setAttribute("class", tileClass(d, null));
+  });
+  edgesG.selectAll("path.edge").each(function(e){
+    this.setAttribute("class", "edge " + edgeClass(e));
+  });
+  svg.node().parentNode.classList.remove("focus-mode");
+}
+
+// 在左侧面板内绘制 chain map：祖先（多层）+ 焦点 + 直接后继，按 depth 行列布局
+function renderFocusPanel(focusId){
+  const fSvgD3 = d3.select("#focus-svg");
+  fSvgD3.selectAll("*").remove();
+  const focused = id2[focusId];
+  if(!focused) return;
+
+  // 用全局的 ancestorsTransitive / directSuccessors（已存在）
+  // 按 depth 分层（BFS 从焦点向 prereq 方向）
+  const ancByLayer = new Map();
+  const seen = new Set([focusId]);
+  let queue = [{id: focusId, depth: 0}];
+  while(queue.length){
+    const {id, depth} = queue.shift();
+    if(depth > 0){
+      if(!ancByLayer.has(depth)) ancByLayer.set(depth, []);
+      ancByLayer.get(depth).push(id);
+    }
+    for(const e of edgesByLevel[2]){
+      if(e.to === id && !seen.has(e.from)){
+        seen.add(e.from);
+        queue.push({id: e.from, depth: depth + 1});
+      }
+    }
+  }
+  const succs = [];
+  for(const e of edgesByLevel[2]){
+    if(e.from === focusId) succs.push(e.to);
+  }
+
+  const maxAncDepth = ancByLayer.size === 0 ? 0 : Math.max(...ancByLayer.keys());
+  const rows = [];
+  for(let d = maxAncDepth; d >= 1; d--){
+    rows.push((ancByLayer.get(d) || []).slice());
+  }
+  rows.push([focusId]);
+  if(succs.length) rows.push(succs);
+
+  // 布局
+  const blockW = 150, blockH = 60, gapX = 18, gapY = 38;
+  const fp = document.getElementById("focus-panel");
+  const wrapEl = document.getElementById("focus-svg-wrap");
+  const availW = (wrapEl.clientWidth || fp.clientWidth || 900) - 32;
+  let maxRowCount = Math.max(...rows.map(r=>r.length));
+  // 如果某行节点太多撑不下，等比缩放 blockW（最小 100）
+  let bW = blockW;
+  const fitW = (n) => n*bW + (n-1)*gapX;
+  if(maxRowCount > 0 && fitW(maxRowCount) > availW){
+    bW = Math.max(100, Math.floor((availW - (maxRowCount-1)*gapX) / maxRowCount));
+  }
+
+  const positions = {};
+  const totalW = Math.max(...rows.map(r=>fitW(r.length))) || bW;
+  rows.forEach((row, rowIdx) => {
+    const rowW = row.length * bW + (row.length - 1) * gapX;
+    const xStart = (totalW - rowW) / 2;
+    const y = rowIdx * (blockH + gapY) + blockH/2;
+    row.forEach((nid, i) => {
+      positions[nid] = { x: xStart + i * (bW + gapX) + bW/2, y };
+    });
+  });
+  const totalH = rows.length * blockH + (rows.length - 1) * gapY;
+  fSvgD3.attr("width", totalW + 16).attr("height", totalH + 16);
+
+  const tilesGFp = fSvgD3.append("g").attr("class","fp-tiles");
+  const edgesGFp = fSvgD3.append("g").attr("class","fp-edges").lower();   // 先画边，后画节点
+
+  // 节点
+  const allIds = Object.keys(positions);
+  const ancSet = new Set();
+  ancByLayer.forEach(arr => arr.forEach(id => ancSet.add(id)));
+  const succSet = new Set(succs);
+  function fpTileClass(nid){
+    if(nid === focusId) return "fp-tile fp-focused";
+    if(ancSet.has(nid)) return "fp-tile fp-anc";
+    if(succSet.has(nid)){
+      return "fp-tile " + (stateOf(id2[nid])==="locked" ? "fp-desc-locked" : "fp-desc");
+    }
+    return "fp-tile";
+  }
+
+  const tileSel = tilesGFp.selectAll("g.fp-tile").data(allIds, d=>d);
+  const tileEnter = tileSel.enter().append("g")
+    .attr("class", fpTileClass)
+    .attr("data-id", d => d)
+    .attr("transform", d => { const p=positions[d]; return `translate(${p.x-bW/2},${p.y-blockH/2})`; })
+    .on("click", (_, d) => { if(d !== focusId) openFocusPanel(d); });
+  tileEnter.append("rect").attr("class","tbox")
+    .attr("width", bW).attr("height", blockH).attr("rx", 8).attr("ry", 8);
+  tileEnter.append("text").attr("class","tname")
+    .attr("x", bW/2).attr("y", blockH/2 - 2)
+    .attr("font-size", 13)
+    .text(d => truncate(id2[d].name, bW, 13));
+  tileEnter.append("text").attr("class","tsub")
+    .attr("x", bW/2).attr("y", blockH/2 + 14)
+    .attr("font-size", 10)
+    .text(d => id2[d].numeric_label || "");
+  tileEnter.append("title").text(d => {
+    const nd = id2[d];
+    return `${nd.name}${nd.numeric_label?' ['+nd.numeric_label+']':''}\n${nd.summary||''}`.slice(0, 200);
+  });
+
+  // 边：只画 chain 节点之间的边
+  const idSet = new Set(allIds);
+  const chainEdges = edgesByLevel[2].filter(e => idSet.has(e.from) && idSet.has(e.to));
+  function fpEdgeClass(e){
+    if(e.from === focusId && succSet.has(e.to)){
+      return "fp-edge " + (stateOf(id2[e.to])==="locked" ? "fp-desc-locked-edge" : "fp-desc-edge");
+    }
+    if(e.to === focusId || ancSet.has(e.to)) return "fp-edge fp-anc-edge";
+    return "fp-edge fp-anc-edge";
+  }
+  edgesGFp.selectAll("path.fp-edge").data(chainEdges, e=>e.from+"→"+e.to)
+    .enter().append("path")
+    .attr("class", fpEdgeClass)
+    .attr("d", e => {
+      const s = positions[e.from], t = positions[e.to];
+      if(!s || !t) return "";
+      const y1 = s.y - blockH/2, y2 = t.y + blockH/2, my = (y1+y2)/2;
+      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;
+    });
 }
 
 // ============================================================
@@ -1704,9 +1902,14 @@ document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){
     if(document.querySelector(".mask.open")){
       document.querySelectorAll(".mask.open").forEach(m=>m.classList.remove("open"));
+    } else if(document.getElementById("focus-panel").classList.contains("open")){
+      closeFocusPanel();
     } else goBack();
   }
-  if(e.key==="Backspace") goBack();
+  if(e.key==="Backspace"){
+    if(document.getElementById("focus-panel").classList.contains("open")) closeFocusPanel();
+    else goBack();
+  }
   if(e.key==="/"){ e.preventDefault(); document.getElementById("search").focus(); }
 });
 // resize 节流：拖窗口连续触发时只在停止后跑一次 render
