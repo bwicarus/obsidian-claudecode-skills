@@ -76,23 +76,23 @@ svg.canvas{display:block}
 .tile.focus{color:#cfe6ff}
 /* === Factorio davemcw chain mode：focus 视图节点链路高亮 === */
 .tile.chain-fade{opacity:.13;transition:opacity .25s}
-.tile.chain-anc rect.tbox{stroke:#a5c8ff !important;stroke-width:3.5 !important;fill:#0a1530 !important;filter:drop-shadow(0 0 14px #60a5faaa) !important;stroke-dasharray:none !important}
+.tile.chain-anc rect.tbox{stroke:#a5c8ff !important;stroke-width:3.5 !important;fill:#0a1530 !important;stroke-dasharray:none !important}
 .tile.chain-anc{color:#d0e1ff}
-.tile.chain-desc rect.tbox{stroke:#c084fc !important;stroke-width:2.6 !important;fill:#1c1233 !important;filter:drop-shadow(0 0 10px #c084fc88) !important;stroke-dasharray:none !important}
+.tile.chain-desc rect.tbox{stroke:#c084fc !important;stroke-width:2.6 !important;fill:#1c1233 !important;stroke-dasharray:none !important}
 .tile.chain-desc{color:#dcc5ff}
 /* 直接后续但未解锁：显示但灰色虚线（区别于紫色高亮 + 区别于 fade 隐形）*/
 .tile.chain-desc-locked{opacity:.55}
 .tile.chain-desc-locked rect.tbox{stroke:#5a6478 !important;stroke-width:1.5 !important;fill:#141926 !important;stroke-dasharray:4 3 !important;filter:none !important}
 .tile.chain-desc-locked{color:#8a96ad}
 .tile.chain-self{opacity:1}
-.tile.chain-self rect.tbox{stroke:#fde047 !important;stroke-width:5 !important;fill:#231a08 !important;filter:drop-shadow(0 0 28px #fde047cc) !important}
+.tile.chain-self rect.tbox{stroke:#fde047 !important;stroke-width:5 !important;fill:#231a08 !important}
 .tile.chain-self{color:#fef3c7}
 /* 边：上游链蓝、下游链紫、无关淡化 */
 .edge.chain-edge-fade{opacity:.08 !important;transition:opacity .25s}
 .edge.chain-edge-anc{stroke:#60a5fa !important;opacity:.95 !important;stroke-dasharray:none !important}
 .edge.chain-edge-desc{stroke:#c084fc !important;opacity:.95 !important;stroke-dasharray:none !important}
 .edge.chain-edge-desc-locked{stroke:#5a6478 !important;opacity:.6 !important;stroke-dasharray:4 3 !important}
-.tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important;filter:drop-shadow(0 0 12px #ff79c6cc) !important}
+.tile.search-hit rect.tbox{stroke:#ff79c6 !important;stroke-width:3 !important}
 .tile.filter-out{opacity:.18}
 /* 章节用位置（章带+侧色线）编码，节点不再叠章色条 */
 .tile rect.chap-bar{display:none}
@@ -104,7 +104,9 @@ text.chap-band-label{
   letter-spacing:3px;
   pointer-events:none;
   user-select:none;
-  filter:drop-shadow(0 0 5px currentColor) drop-shadow(0 2px 4px rgba(0,0,0,.65));
+  paint-order:stroke;
+  stroke:rgba(0,0,0,.55);
+  stroke-width:3px;
 }
 /* 未开放章节折叠条 */
 g.locked-bar{cursor:pointer}
@@ -548,11 +550,16 @@ function directSuccessors(rootId){
 //   ancestors 递归全部（学懂这个需要懂的全部上游）
 //   descendants 只直接后续（学懂后能立即开始的下一步技能，符合解锁语义）
 let chainAncestors=new Set(), chainDescendants=new Set();
+let _chainCacheFocusId = "__init__";
 function computeChainSets(focusId){
+  // 同 focus 复用结果（每次 render 都跑，但只有切 focus 才真算）
+  if(_chainCacheFocusId === focusId) return;
   chainAncestors = focusId ? ancestorsTransitive(focusId) : new Set();
   chainDescendants = focusId ? directSuccessors(focusId) : new Set();
   if(focusId){ chainAncestors.delete(focusId); }   // direct successors 本就不含 focus
+  _chainCacheFocusId = focusId;
 }
+function invalidateChainCache(){ _chainCacheFocusId = "__init__"; }
 function chainRoleNode(n, focusId){
   if(!focusId) return "";
   if(n.id===focusId) return "self";
@@ -808,29 +815,26 @@ function render(){
     .attr("x", W/2).attr("y", b=>b.y+b.h/2)
     .text(b=>`${showLockedSection?"▾":"▸"}  ${b.count} 章未开放（${showLockedSection?"点击折叠":"点击展开"}）`);
 
-  // 边（key by from→to）
+  // 边（key by from→to）—— 无 transition，瞬间重排（避免 800 条边补间动画卡顿）
   const edgeKey=e=>e.from+"→"+e.to;
   const edgeSel=edgesG.selectAll("path.edge").data(edges, edgeKey);
-  edgeSel.exit().transition().duration(280).style("opacity",0).remove();
+  edgeSel.exit().remove();
   const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
-    .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
-    .style("opacity",0);
-  edgeSel.merge(edgeEnter).transition().duration(380)
+    .attr("data-from",e=>e.from).attr("data-to",e=>e.to);
+  edgeSel.merge(edgeEnter)
     .attr("d",e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
       const y1=s.y-blockH/2, y2=t.y+blockH/2, my=(y1+y2)/2;
       return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;})
     .attr("class",e=>"edge "+edgeClass(e))
-    .attr("stroke-width",e=>edgeWidthFor(e))
-    .style("opacity",1);
+    .attr("stroke-width",e=>edgeWidthFor(e));
 
-  // 节点（key by id），动画 transform
+  // 节点（key by id）—— 无 transition，瞬间定位
   const tileSel=tilesG.selectAll("g.tile").data(nodes, d=>d.id);
-  tileSel.exit().transition().duration(220).style("opacity",0).remove();
+  tileSel.exit().remove();
   const tileEnter=tileSel.enter().append("g")
     .attr("class",d=>tileClass(d,focusedId))
     .attr("data-id",d=>d.id)
     .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
-    .style("opacity",0)
     .on("click",(_,d)=>nodeClick(d))
     .on("mouseenter",(ev,d)=>scheduleTooltip(ev,d))
     .on("mouseleave",hideTooltip)
@@ -897,17 +901,26 @@ function render(){
   tileAll.select("text.trash-mark")
     .attr("x", 6).attr("y", blockH-6);
 
-  // 位置过渡（update 时滑动）
-  tileAll.transition().duration(420)
-    .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
-    .style("opacity",1);
+  // 位置：直接 attr 写入（无 transition，避免每节点 420ms 补间）
+  tileAll.attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`});
 
   // 滚动到焦点
   if(focusedId){
     const p=positions[focusedId];
-    if(p) wrap.scrollTo({left:Math.max(0,p.x-wrap.clientWidth/2), top:Math.max(0,p.y-wrap.clientHeight/2), behavior:"smooth"});
+    // 不做 smooth scroll —— 让用户自己决定视野；chain mode 高亮已经足以提示焦点位置。
+    // 如果焦点节点不在视野内（用户从远处点），瞬间跳转避免动画眼花。
+    if(p){
+      const inViewX = p.x >= wrap.scrollLeft && p.x <= wrap.scrollLeft + wrap.clientWidth;
+      const inViewY = p.y >= wrap.scrollTop  && p.y <= wrap.scrollTop  + wrap.clientHeight;
+      if(!inViewX || !inViewY){
+        wrap.scrollLeft = Math.max(0, p.x - wrap.clientWidth/2);
+        wrap.scrollTop  = Math.max(0, p.y - wrap.clientHeight/2);
+      }
+    }
     showDetail(id2[focusedId]);
   }
+  // 把当前 positions 暴露出去，供 closeDetail 等需要"以节点为视野中心"的逻辑使用
+  wrap.__positions = positions;
   // 搜索高亮
   applySearchHighlight();
 }
@@ -1434,17 +1447,14 @@ function obsidianPdfUrl(page){
 }
 function showDetail(n){
   if(!n) return;
+  detailNodeId = n.id;
   const dt = document.getElementById("detail");
-  const wasOpen = dt.classList.contains("open");
   dt.classList.add("open");
   // 整面板按 mastery 状态主题色（顶部色带 + 左边框 + 背景渐变）
   dt.classList.remove("theme-mastered","theme-unlockable","theme-previewable","theme-locked");
   dt.classList.add("theme-" + stateOf(n));
-  if(!wasOpen && settings.fitToWidth){
-    updateWrapPadding();
-    // 详情面板新打开：等过渡完成后 re-layout 适应新宽度
-    setTimeout(()=>render(), 230);
-  }
+  // detail 打开/关闭不再触发全图 re-render（避免每次重排 800 边 + 355 节点）；
+  // fitToWidth 设置只在窗口 resize 时生效。detail 浮在右侧 360px 上方可接受。
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
   const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", locked:"🔒 未解锁"}[st] || "🔒 未解锁";
@@ -1573,21 +1583,21 @@ async function delEdge(a,b){
   if(!confirm(`删除边 ${id2[a]?.name} → ${id2[b]?.name}？`)) return;
   await editPost("delete_edge",{from:a, to:b});
 }
+let detailNodeId = null;
 function closeDetail(){
-  const wasOpen = document.getElementById("detail").classList.contains("open");
+  const targetId = detailNodeId;
   document.getElementById("detail").classList.remove("open");
-  if(wasOpen && settings.fitToWidth){
-    updateWrapPadding();
-    setTimeout(()=>render(), 230);
-  }
-  // focus 模式时关闭 = 退出 focus（回到整体视图）
-  if(current.kind==="focus"){
-    goBack();
-    // 等 popstate + render 完成后滚到整体图的底部（第 1 章在底，符合"基础在底"逻辑）
-    setTimeout(() => {
-      wrap.scrollTo({left: 0, top: wrap.scrollHeight, behavior: "smooth"});
-    }, 280);
-  }
+  detailNodeId = null;
+  // focus 模式时关闭 = 退出 focus（回到整体视图；popstate → render）
+  const wasFocus = (current.kind==="focus");
+  if(wasFocus) goBack();
+  // 关闭后以刚才打开的方块为视野中心（focus → 整体需等 popstate render 完）
+  setTimeout(()=>{
+    const p = wrap.__positions && wrap.__positions[targetId];
+    if(!p) return;
+    wrap.scrollLeft = Math.max(0, p.x - wrap.clientWidth/2);
+    wrap.scrollTop  = Math.max(0, p.y - wrap.clientHeight/2);
+  }, wasFocus ? 50 : 0);
 }
 
 // ============================================================
@@ -1668,6 +1678,11 @@ document.addEventListener("keydown",e=>{
   if(e.key==="Backspace") goBack();
   if(e.key==="/"){ e.preventDefault(); document.getElementById("search").focus(); }
 });
-window.addEventListener("resize",()=>render());
+// resize 节流：拖窗口连续触发时只在停止后跑一次 render
+let _resizeT=null;
+window.addEventListener("resize",()=>{
+  clearTimeout(_resizeT);
+  _resizeT=setTimeout(()=>render(), 200);
+});
 updateNav();
 </script></body></html>
