@@ -269,6 +269,10 @@ def main() -> int:
     #   5 = 完全掌握
     # 推断掌握（mastery_inferred）默认 2（达门槛）
     def compute_level(node, m, has_own_notes, inferred):
+        # 节点在回收站（containing_notes 中含"回收站"）→ 固定 level=2 不阻塞下游
+        notes = node.get("containing_notes") or []
+        if any("回收站" in nt for nt in notes):
+            return 2
         if inferred:
             return 2
         if not has_own_notes:

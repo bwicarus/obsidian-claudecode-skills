@@ -65,6 +65,166 @@ def _save_kg(p, kg):
 _edit_lock = threading.Lock()
 
 
+# ─── 回收站：trivial 节点收纳，按章节分册 ───────────────────────────────────────
+TRASH_MAX_NODES_PER_FILE = 50   # 单回收站笔记最多容纳节点数（超后开新册同章节）
+
+def _chap_num_from_label(label: str) -> str:
+    """从 numeric_label '1.21' 取章号 '1'；无法解析返 'misc'。"""
+    if not label: return "misc"
+    m = re.match(r"^(\d+)\.", label)
+    return m.group(1) if m else "misc"
+
+def _trash_file_for(kg: dict, chap_num: str) -> tuple[str, Path]:
+    """选这一章的回收站笔记：找现有 {prefix}回收站-{chap}*.md，没满就用，满了开新册。
+    返回 (vault 相对路径, 绝对路径)。"""
+    vault_root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+    prefix = (kg.get("note_prefix") or "").strip()
+    base = f"{prefix}回收站-{chap_num}"
+    # 找现有册
+    persistent = kg.get("_note_to_covered_l2") or {}
+    candidates = []
+    for rel in persistent.keys():
+        stem = Path(rel).stem
+        if stem == base or stem.startswith(base + "-"):
+            n_count = len(persistent.get(rel) or [])
+            candidates.append((rel, n_count))
+    candidates.sort(key=lambda x: x[0])
+    for rel, n in candidates:
+        if n < TRASH_MAX_NODES_PER_FILE:
+            return rel, vault_root / rel
+    # 开新册：base.md / base-2.md / base-3.md...
+    n_try = len(candidates) + 1
+    while True:
+        rel = f"{base}.md" if n_try == 1 else f"{base}-{n_try}.md"
+        full = vault_root / rel
+        if not full.exists() and rel not in persistent:
+            return rel, full
+        n_try += 1
+
+def _slugify_anchor(label: str, name: str) -> str:
+    """Obsidian heading anchor：'1.21 向量、点' → '#1.21 向量、点'（保留原标题，
+    Obsidian 直接用 markdown heading 文本作 anchor）。"""
+    return f"{label} {name}".strip()
+
+def _archive_node_to_trash(kg: dict, node: dict, pdf_abs_path: Path) -> str:
+    """把节点 PDF 提取内容 append 到对应章节的回收站笔记。返回 vault 相对路径。"""
+    import fitz
+    chap_num = _chap_num_from_label(node.get("numeric_label", ""))
+    trash_rel, trash_abs = _trash_file_for(kg, chap_num)
+    # 提取 PDF 段
+    pdf_name = pdf_abs_path.name
+    doc = fitz.open(str(pdf_abs_path))
+    sec_parts = [f"\n## {node.get('numeric_label','?')} {node['name']}"]
+    tyz = TYPE_ZH.get(node.get("type"), node.get("type") or "")
+    if tyz: sec_parts.append(f"*[{tyz}]*")
+    sec_parts.append("")
+    pages = node.get("pages") or []
+    for pg in pages:
+        if pg < 1 or pg > len(doc): continue
+        page = doc[pg - 1]
+        blocks = _find_node_blocks_in_page(page, node.get("numeric_label", ""))
+        if blocks:
+            bbox = _union_bbox([b["bbox"] for b in blocks if b.get("bbox")],
+                                page_height=page.rect.height)
+            if bbox:
+                rect_str = ",".join(map(str, bbox))
+                sec_parts.append(f"![[{pdf_name}#page={pg}&rect={rect_str}&color=yellow]]")
+                raw = "\n".join(b["text"] for b in blocks).strip()
+                if raw:
+                    sec_parts.append("")
+                    sec_parts.append(f"<!-- 原文\n{raw}\n-->")
+                continue
+        sec_parts.append(f"![[{pdf_name}#page={pg}]]")
+    if node.get("summary"):
+        sec_parts.append("")
+        sec_parts.append(f"**摘要**：{node['summary']}")
+    sec_parts.append(f"\n<!-- kg_node_id: {node['id']} -->\n")
+    doc.close()
+
+    # 文件不存在 → 新建带 frontmatter；存在 → append
+    if not trash_abs.exists():
+        book = kg.get("book", "?")
+        chap_node = next((n for n in kg["nodes"]
+                          if n.get("level")==0 and _chap_num_from_label(n.get("chapter_label","").replace("第","").replace("章","").strip()) == chap_num), None)
+        chap_name = chap_node.get("name", f"第{chap_num}章") if chap_node else f"第{chap_num}章"
+        header = f"""---
+subject: 数学
+source: {book} 第 {chap_num} 章 回收站
+chapter: {chap_name}
+kg_trash: true
+anki_max_per_section: 1
+---
+
+# 第 {chap_num} 章 · 回收站
+
+_收纳过于简单的记号、术语、单句定义等。AI 制卡限 1 张/节点。_
+
+"""
+        trash_abs.write_text(header + "\n".join(sec_parts), encoding="utf-8")
+    else:
+        with trash_abs.open("a", encoding="utf-8") as f:
+            f.write("\n".join(sec_parts))
+    return trash_rel
+
+def _restore_node_from_trash(kg: dict, node: dict) -> tuple[str, str]:
+    """从回收站笔记移除该节点的段，新建独立笔记。返回 (new_path, old_trash_path)。"""
+    vault_root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+    notes = node.get("containing_notes") or []
+    trash_rel = next((nt for nt in notes if "回收站" in nt), "")
+    if not trash_rel:
+        raise RuntimeError("节点不在任何回收站笔记")
+    trash_abs = vault_root / trash_rel
+    if not trash_abs.exists():
+        raise RuntimeError(f"回收站笔记不存在：{trash_rel}")
+    txt = trash_abs.read_text(encoding="utf-8")
+    # 找该节点对应的段：用 <!-- kg_node_id: X --> 锚定
+    marker = f"<!-- kg_node_id: {node['id']} -->"
+    if marker not in txt:
+        raise RuntimeError(f"回收站笔记未找到节点段（{marker}）")
+    # 段 = 从上一个 ## 标题开始，到下一个 ## 或文件末尾
+    idx_marker = txt.index(marker)
+    # 往前找最近的 \n##
+    h_start = txt.rfind("\n## ", 0, idx_marker)
+    if h_start == -1:
+        raise RuntimeError("无法定位段起始")
+    # 往后找下一个 \n## 或 EOF
+    h_end = txt.find("\n## ", idx_marker)
+    if h_end == -1:
+        h_end = len(txt)
+    section_text = txt[h_start + 1: h_end].rstrip()  # 去掉前导换行
+    # 从回收站删除这段
+    new_trash_txt = (txt[:h_start] + txt[h_end:]).rstrip() + "\n"
+    trash_abs.write_text(new_trash_txt, encoding="utf-8")
+
+    # 新建独立笔记
+    prefix = (kg.get("note_prefix") or "").strip()
+    safe = _safe_filename(node["name"])
+    new_rel = f"{prefix}{safe}.md"
+    new_abs = vault_root / new_rel
+    n_try = 2
+    while new_abs.exists() and n_try < 100:
+        new_rel = f"{prefix}{safe}-{n_try}.md"
+        new_abs = vault_root / new_rel
+        n_try += 1
+    book = kg.get("book", "?")
+    pages = node.get("pages") or []
+    header = f"""---
+subject: 数学
+source: {book} {node.get('numeric_label','')}
+pages: {', '.join(map(str, pages))}
+kg_node_ids: [{node['id']}]
+---
+
+# {node.get('numeric_label','')} {node['name']}
+
+"""
+    # section_text 是 "## 1.21 向量、点 ..."，去掉 ## 标题（用上方 # 替代）
+    body = re.sub(r"^##\s+[^\n]*\n", "", section_text)
+    new_abs.write_text(header + body + "\n\n## 我的笔记\n\n（待补充）\n", encoding="utf-8")
+    return new_rel, trash_rel
+# ───────────────────────────────────────────────────────────────────────
+
+
 # ─── AI 验证：节点是否真实/描述准确 + 自动 merge/delete 决策 ─────────────────
 def _ai_verify_node(kg: dict, node: dict, raw_pdf_text: str) -> dict:
     """让 AI 看节点元数据 + PDF 实际内容 + 兄弟节点，决定 ok/merge/delete。
@@ -539,6 +699,93 @@ def register_skilltree(app):
                              max_age=86400)
         except Exception:
             abort(500)
+
+    @app.route("/skilltree/<book>/api/archive-node", methods=["POST"])
+    def skilltree_archive_node(book):
+        """把节点 PDF 内容 append 到回收站笔记（按章分册）；containing_notes
+        指向该回收站笔记 → link_and_mastery 自动 level=2/5（不阻塞下游）。"""
+        p, kg = _load_kg(book)
+        if not kg:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        try:
+            body = request.get_json(force=True) or {}
+        except Exception:
+            body = {}
+        node_id = body.get("node_id") or ""
+        node = next((n for n in kg["nodes"] if n["id"] == node_id), None)
+        if not node or node.get("level") != 2:
+            return jsonify({"ok": False, "error": "node not found / not L2"}), 404
+        pdf_path = kg.get("pdf")
+        if not pdf_path or not Path(pdf_path).exists():
+            return jsonify({"ok": False, "error": "pdf 缺失"}), 400
+        try:
+            trash_path = _archive_node_to_trash(kg, node, Path(pdf_path))
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"archive 失败: {ex}"}), 500
+        with _edit_lock:
+            _, kg2 = _load_kg(book)
+            if not kg2:
+                return jsonify({"ok": False, "error": "kg reload failed"}), 500
+            persistent = kg2.setdefault("_note_to_covered_l2", {})
+            persistent.setdefault(trash_path, [])
+            if node_id not in persistent[trash_path]:
+                persistent[trash_path].append(node_id)
+            # 更新节点
+            for n in kg2["nodes"]:
+                if n["id"] == node_id:
+                    cn = sorted(set((n.get("containing_notes") or []) + [trash_path]))
+                    n["containing_notes"] = cn
+                    n["note_ref"] = cn[0]
+                    n["note_ref_ai_verified"] = True
+                    break
+            _save_kg(p, kg2)
+            _trigger_mastery_recompute(p)
+        return jsonify({"ok": True, "trash_path": trash_path,
+                         "message": f"已收入回收站：{trash_path}"})
+
+    @app.route("/skilltree/<book>/api/restore-node", methods=["POST"])
+    def skilltree_restore_node(book):
+        """从回收站笔记移除该节点段，新建独立笔记（不调 AI，纯文件操作）。"""
+        p, kg = _load_kg(book)
+        if not kg:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        try:
+            body = request.get_json(force=True) or {}
+        except Exception:
+            body = {}
+        node_id = body.get("node_id") or ""
+        node = next((n for n in kg["nodes"] if n["id"] == node_id), None)
+        if not node:
+            return jsonify({"ok": False, "error": "node not found"}), 404
+        try:
+            new_path, removed_from = _restore_node_from_trash(kg, node)
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"restore 失败: {ex}"}), 500
+        with _edit_lock:
+            _, kg2 = _load_kg(book)
+            if not kg2:
+                return jsonify({"ok": False, "error": "kg reload failed"}), 500
+            persistent = kg2.setdefault("_note_to_covered_l2", {})
+            # 旧回收站笔记里删该 node
+            if removed_from in persistent and node_id in persistent[removed_from]:
+                persistent[removed_from].remove(node_id)
+            if new_path:
+                persistent.setdefault(new_path, [])
+                if node_id not in persistent[new_path]:
+                    persistent[new_path].append(node_id)
+            for n in kg2["nodes"]:
+                if n["id"] == node_id:
+                    cn = [c for c in (n.get("containing_notes") or []) if c != removed_from]
+                    if new_path and new_path not in cn:
+                        cn.append(new_path)
+                    n["containing_notes"] = sorted(cn)
+                    n["note_ref"] = n["containing_notes"][0] if n["containing_notes"] else ""
+                    n["note_ref_ai_verified"] = bool(n["containing_notes"])
+                    break
+            _save_kg(p, kg2)
+            _trigger_mastery_recompute(p)
+        return jsonify({"ok": True, "new_path": new_path, "removed_from": removed_from,
+                         "message": f"已还原为独立笔记：{new_path}"})
 
     @app.route("/skilltree/<book>/api/prune-notes", methods=["POST"])
     def skilltree_prune_notes(book):

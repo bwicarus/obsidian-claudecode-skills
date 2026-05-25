@@ -40,6 +40,9 @@ svg.canvas{display:block}
 .tile.unlockable text.level-mark, .tile.mastered text.level-mark{display:block}
 .tile.unlockable text.level-mark{fill:#fbbf24}   /* 0/5 或 1/5 黄 */
 .tile.mastered text.level-mark{fill:#34d399}    /* 2/5+ 绿 */
+/* 回收站角标 🗑：containing_notes 含"回收站"的节点显示 */
+.tile text.trash-mark{display:none;font-size:11px;pointer-events:none;user-select:none}
+.tile.in-trash text.trash-mark{display:block}
 /* hover/长按 tooltip */
 #node-tooltip{position:fixed;display:none;z-index:30;background:#0d1322;border:1.5px solid #3b6db5;border-radius:8px;padding:10px 12px;max-width:340px;font-size:13px;line-height:1.5;color:#cfd6e6;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
 #node-tooltip.show{display:block}
@@ -838,6 +841,7 @@ function render(){
   tileEnter.append("text").attr("class","inferred-mark").text("↓");
   tileEnter.append("text").attr("class","bottleneck-mark").text("💎");
   tileEnter.append("text").attr("class","level-mark");
+  tileEnter.append("text").attr("class","trash-mark").text("🗑");
 
   // 更新所有节点（含 enter）：先合并再设置内容
   const tileAll=tileEnter.merge(tileSel);
@@ -878,6 +882,9 @@ function render(){
     .attr("x", blockW-6).attr("y", blockH-6)
     .attr("text-anchor", "end")
     .text(d => (d.level === 2 && typeof d.mastery_level === "number") ? `${d.mastery_level}/5` : "");
+  // 回收站 🗑：左下角
+  tileAll.select("text.trash-mark")
+    .attr("x", 6).attr("y", blockH-6);
 
   // 位置过渡（update 时滑动）
   tileAll.transition().duration(420)
@@ -938,9 +945,10 @@ function hideTooltip(){
 function tileClass(d, focusedId){
   const role = chainRoleNode(d, focusedId);
   const inferred = d.mastery_inferred ? ' inferred' : '';
-  // 瓶颈：score >= 2 算高价值（解锁 ≥2 个 locked 后续）
   const bottleneck = (d.bottleneck_score || 0) >= 2 ? ' is-bottleneck' : '';
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}`;
+  // 回收站：containing_notes 含"回收站" → 显示 🗑 角标
+  const inTrash = (d.containing_notes || []).some(nt => nt.includes("回收站")) ? ' in-trash' : '';
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
@@ -1169,6 +1177,60 @@ function _randHex3(){
   return Math.floor(Math.random()*0xfff).toString(16).padStart(3,"0").toUpperCase();
 }
 function _safeFileName(s){ return (s||"新节点").replace(/[\\/:*?"<>|]/g, ""); }
+
+async function archiveNode(nodeId){
+  const btn = document.getElementById("btn-archive-node");
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ 收入回收站..."; }
+  try{
+    const r = await fetch(`/skilltree/${BOOK}/api/archive-node`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({node_id: nodeId})
+    });
+    const d = await r.json();
+    if(!d.ok){
+      alert("收入回收站失败：" + (d.error || "未知"));
+      if(btn){ btn.disabled = false; btn.textContent = "🗑 收入回收站"; }
+      return;
+    }
+    alert(`✓ ${d.message}`);
+    await reloadKG();
+    showDetail(id2[nodeId]);
+  }catch(ex){
+    alert("失败：" + ex.message);
+    if(btn){ btn.disabled = false; btn.textContent = "🗑 收入回收站"; }
+  }
+}
+async function restoreNode(nodeId){
+  const btn = document.getElementById("btn-restore-node");
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ 还原中..."; }
+  try{
+    const r = await fetch(`/skilltree/${BOOK}/api/restore-node`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({node_id: nodeId})
+    });
+    const d = await r.json();
+    if(!d.ok){
+      alert("还原失败：" + (d.error || "未知"));
+      if(btn){ btn.disabled = false; btn.textContent = "📤 从回收站还原"; }
+      return;
+    }
+    alert(`✓ ${d.message}`);
+    await reloadKG();
+    showDetail(id2[nodeId]);
+  }catch(ex){
+    alert("失败：" + ex.message);
+    if(btn){ btn.disabled = false; btn.textContent = "📤 从回收站还原"; }
+  }
+}
+async function reloadKG(){
+  const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+  KG = newD;
+  id2 = Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  nodesByLevel={0:[],1:[],2:[]};
+  for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+  buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
+  render();
+}
 
 async function pruneNotes(){
   const btn = document.getElementById("btn-prune-notes");
@@ -1444,15 +1506,30 @@ function showDetail(n){
     link.push(`<a href="${obsidianUrl(nt)}">📝 ${nt}</a>`);
   }
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
-  // 仅 unlockable / mastered 节点才允许建笔记（locked 表示前置链没通，
-  // 不能跳过前置直接建）。
+  // 判断该节点是否已在回收站（containing_notes 含"回收站"）
+  const inTrash = notes.some(nt => nt.includes("回收站"));
   const _st = stateOf(n);
   if(!notes.length && (n.level === 1 || n.level === 2) && _st !== "locked"){
+    // 没有任何笔记 → 显示「创建笔记」+「收入回收站」（仅 L2）
     const cnt = n.level === 1 ? `（涵盖 ${countL2Under(n)} 个知识点）` : "";
-    link.push(`<button id="btn-create-note" onclick="createNote('${n.id}')"
-      style="margin-top:8px;padding:8px 14px;background:#1a2540;color:#a8cdff;
-      border:1.5px solid #3b6db5;border-radius:8px;cursor:pointer;font-size:13px;
-      font-weight:600;width:100%;text-align:left">📝 从 PDF 创建笔记 ${cnt}</button>`);
+    link.push(`<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+      <button id="btn-create-note" onclick="createNote('${n.id}')"
+        style="padding:8px 14px;background:#1a2540;color:#a8cdff;border:1.5px solid #3b6db5;
+        border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;text-align:left">
+        📝 从 PDF 创建笔记 ${cnt}
+      </button>
+      ${n.level === 2 ? `<button id="btn-archive-node" onclick="archiveNode('${n.id}')"
+        style="padding:6px 14px;background:#1f2530;color:#b8c4d8;border:1px solid #4a5568;
+        border-radius:8px;cursor:pointer;font-size:12px;text-align:left">
+        🗑 收入回收站（过简单/记号类，不再阻塞下游）
+      </button>` : ""}
+    </div>`);
+  } else if(inTrash && n.level === 2){
+    // 节点已在回收站 → 显示「还原」按钮
+    link.push(`<button id="btn-restore-node" onclick="restoreNode('${n.id}')"
+      style="margin-top:8px;padding:8px 14px;background:#2a1f1f;color:#fbbf24;
+      border:1.5px solid #92400e;border-radius:8px;cursor:pointer;font-size:12px;
+      width:100%;text-align:left">📤 从回收站还原（新建独立笔记）</button>`);
   }
   document.getElementById("d-link").innerHTML=link.join("<br>")||"—";
   function fillList(elId, dir){
