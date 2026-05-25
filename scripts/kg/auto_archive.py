@@ -122,11 +122,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kg", required=True)
     ap.add_argument("--apply", action="store_true",
-                    help="实际收入回收站（默认 dry-run，只列候选）")
+                    help="（不推荐）直接归档；默认只标 _archive_suggestions 让用户手动决定")
     ap.add_argument("--limit", type=int, default=0,
                     help="单次最多归档 N 个（防意外大批操作）")
     ap.add_argument("--legacy", action="store_true",
                     help="用旧字面规则（type=method/记号/数学符号），仅 LADR 等中文教材")
+    ap.add_argument("--suggest", action="store_true", default=True,
+                    help="（默认）把候选写到 KG._archive_suggestions，前端按钮高亮提示用户")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -152,8 +154,16 @@ def main() -> int:
     if len(candidates) > 30:
         print(f"  ... 共 {len(candidates)} 个")
 
+    # 默认行为：写 KG._archive_suggestions（让前端按钮高亮提示），不实际归档
     if not args.apply:
-        print("\n（dry-run，加 --apply 实际归档）")
+        if candidates:
+            kg["_archive_suggestions"] = sorted(set([n["id"] for n, _ in candidates]))
+        else:
+            kg["_archive_suggestions"] = []
+        kg_path.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n✓ 已写 {len(kg.get('_archive_suggestions', []))} 个建议到 KG._archive_suggestions")
+        print("   前端节点的 🗑 按钮会高亮提示，用户手动按下才执行")
+        print("   （如真要批量执行，加 --apply 但建议手动）")
         return 0
 
     # 实际归档：调服务端端点

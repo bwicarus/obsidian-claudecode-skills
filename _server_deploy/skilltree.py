@@ -730,7 +730,6 @@ def register_skilltree(app):
             persistent.setdefault(trash_path, [])
             if node_id not in persistent[trash_path]:
                 persistent[trash_path].append(node_id)
-            # 更新节点
             for n in kg2["nodes"]:
                 if n["id"] == node_id:
                     cn = sorted(set((n.get("containing_notes") or []) + [trash_path]))
@@ -738,6 +737,10 @@ def register_skilltree(app):
                     n["note_ref"] = cn[0]
                     n["note_ref_ai_verified"] = True
                     break
+            # 用户手动归档后，从 suggestions 移除该 id
+            sugg = kg2.get("_archive_suggestions") or []
+            if node_id in sugg:
+                kg2["_archive_suggestions"] = [x for x in sugg if x != node_id]
             _save_kg(p, kg2)
             _trigger_mastery_recompute(p)
         return jsonify({"ok": True, "trash_path": trash_path,

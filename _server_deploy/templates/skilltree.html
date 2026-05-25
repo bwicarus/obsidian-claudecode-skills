@@ -43,6 +43,10 @@ svg.canvas{display:block}
 /* 回收站角标 🗑：containing_notes 含"回收站"的节点显示 */
 .tile text.trash-mark{display:none;font-size:11px;pointer-events:none;user-select:none}
 .tile.in-trash text.trash-mark{display:block}
+/* 建议归档：节点边缘金色虚线提示（区别于 in-trash 已归档）*/
+.tile.archive-suggested rect.tbox{stroke-dasharray:3 3 !important;stroke:#fbbf24 !important;opacity:.85}
+.tile.archive-suggested text.trash-suggest-mark{display:block}
+.tile text.trash-suggest-mark{display:none;font-size:10px;fill:#fbbf24;pointer-events:none;user-select:none}
 /* hover/长按 tooltip */
 #node-tooltip{position:fixed;display:none;z-index:30;background:#0d1322;border:1.5px solid #3b6db5;border-radius:8px;padding:10px 12px;max-width:340px;font-size:13px;line-height:1.5;color:#cfd6e6;box-shadow:0 8px 24px rgba(0,0,0,.6);pointer-events:none}
 #node-tooltip.show{display:block}
@@ -946,9 +950,10 @@ function tileClass(d, focusedId){
   const role = chainRoleNode(d, focusedId);
   const inferred = d.mastery_inferred ? ' inferred' : '';
   const bottleneck = (d.bottleneck_score || 0) >= 2 ? ' is-bottleneck' : '';
-  // 回收站：containing_notes 含"回收站" → 显示 🗑 角标
   const inTrash = (d.containing_notes || []).some(nt => nt.includes("回收站")) ? ' in-trash' : '';
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}`;
+  // 建议归档（未归档但被规则标记）—— 节点边缘金色虚线
+  const suggested = (!inTrash && (KG && KG._archive_suggestions || []).includes(d.id)) ? ' archive-suggested' : '';
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}${suggested}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
@@ -1508,21 +1513,25 @@ function showDetail(n){
   if(n.card_refs && n.card_refs.length) link.push(`🎴 ${n.card_refs.length} 张 Anki 卡`);
   // 判断该节点是否已在回收站（containing_notes 含"回收站"）
   const inTrash = notes.some(nt => nt.includes("回收站"));
+  // AI/规则建议该节点归档？
+  const suggested = (KG && KG._archive_suggestions || []).includes(n.id);
   const _st = stateOf(n);
   if(!notes.length && (n.level === 1 || n.level === 2) && _st !== "locked"){
-    // 没有任何笔记 → 显示「创建笔记」+「收入回收站」（仅 L2）
     const cnt = n.level === 1 ? `（涵盖 ${countL2Under(n)} 个知识点）` : "";
+    // 归档按钮：被建议时金色高亮
+    const archBtnStyle = suggested
+      ? "padding:8px 14px;background:#3a2a08;color:#fbbf24;border:2px solid #fbbf24;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;text-align:left;box-shadow:0 0 12px #fbbf2466"
+      : "padding:6px 14px;background:#1f2530;color:#b8c4d8;border:1px solid #4a5568;border-radius:8px;cursor:pointer;font-size:12px;text-align:left";
+    const archBtnText = suggested
+      ? "🗑 收入回收站（建议：过简单/被附近内容覆盖）"
+      : "🗑 收入回收站（过简单/记号类，不再阻塞下游）";
     link.push(`<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
       <button id="btn-create-note" onclick="createNote('${n.id}')"
         style="padding:8px 14px;background:#1a2540;color:#a8cdff;border:1.5px solid #3b6db5;
         border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;text-align:left">
         📝 从 PDF 创建笔记 ${cnt}
       </button>
-      ${n.level === 2 ? `<button id="btn-archive-node" onclick="archiveNode('${n.id}')"
-        style="padding:6px 14px;background:#1f2530;color:#b8c4d8;border:1px solid #4a5568;
-        border-radius:8px;cursor:pointer;font-size:12px;text-align:left">
-        🗑 收入回收站（过简单/记号类，不再阻塞下游）
-      </button>` : ""}
+      ${n.level === 2 ? `<button id="btn-archive-node" onclick="archiveNode('${n.id}')" style="${archBtnStyle}">${archBtnText}</button>` : ""}
     </div>`);
   } else if(inTrash && n.level === 2){
     // 节点已在回收站 → 显示「还原」按钮
