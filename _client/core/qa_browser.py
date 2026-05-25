@@ -277,6 +277,10 @@ SCREENSHOT_TIMEOUT = 60
 _SESSION_PROMPT = (
     "你是一个截图问答助手。根据随附截图和对话历史回答用户问题。"
     "只回答问题本身，不要修改文件，不要运行命令，不要描述你的系统环境。"
+    "**数学公式严格用 Markdown 数学语法**：行内公式 $...$，行间公式 $$...$$；"
+    "**不要**用反引号 ` 包裹数学表达式（这样在前端会被当成代码块灰底显示而非公式），"
+    "也不要用 \\(...\\) 或 \\[...\\]。"
+    "例如：要写 $F^S$ 而不是 `F^S`，要写 $a_1, \\ldots, a_n$ 而不是 `a_1,...,a_n`。"
 )
 
 state = {
@@ -2308,7 +2312,7 @@ async function send() {
     }
     renderNow();   // 流结束，做最后一次完整渲染
     mdEl.dataset.raw = accumulated;   // 存原始文本供「整条选中」收集
-    if (cardCtx) addHeadingPickers(mdEl);   // 卡片模式：给标题行补 + 按钮
+    addHeadingPickers(mdEl);   // 给标题行补 + 按钮（cardCtx → 改卡片/笔记；非 cardCtx → 创建新笔记）
     if (streamErr) {
       const err = document.createElement('div');
       err.style.cssText = 'color:#c00;margin-top:6px;font-size:13px';
