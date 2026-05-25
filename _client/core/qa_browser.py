@@ -1376,9 +1376,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .reply-pick-all:hover{border-color:#0078d4;color:#0078d4}
 .reply-pick-all.on{background:#0078d4;border-color:#0078d4;border-style:solid;color:#fff;font-weight:600}
 .bubble.assistant.picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:#f5faff}
-/* 子标题行的 + ：贴右侧 */
-.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{position:relative}
-.md h1.has-pick,.md h2.has-pick,.md h3.has-pick,.md h4.has-pick,.md h5.has-pick,.md h6.has-pick{padding-right:26px}
+/* 子标题行的 + ：贴右侧（真标题 + 假标题=粗体段落） */
+.md h1,.md h2,.md h3,.md h4,.md h5,.md h6,.md p.fake-head,.md li.fake-head{position:relative}
+.md h1.has-pick,.md h2.has-pick,.md h3.has-pick,.md h4.has-pick,.md h5.has-pick,.md h6.has-pick,
+.md p.fake-head.has-pick,.md li.fake-head.has-pick{padding-right:26px}
 .md .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}
 /* 选中标题段：标题行 + 其内容段落连续高亮，左侧蓝条 */
 .md .hsec-picked,.md .hsec-picked-body{background:#eef6ff;box-shadow:-6px 0 0 #cfe6ff}
@@ -1631,12 +1632,21 @@ function headingOwnText(h) {
 // 收集某条回复里被选中的标题段落（标题行 + 其后到下个标题前的内容）
 function collectSelectedSections(md) {
   const parts = [];
-  md.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach(h => {
+  // 真标题 + 假标题（粗体段落代标题）都参与收集
+  md.querySelectorAll('h1,h2,h3,h4,h5,h6,p.fake-head,li.fake-head').forEach(h => {
     const btn = h.querySelector('.head-pick');
     if (!btn || !btn.classList.contains('on')) return;
-    let txt = '#'.repeat(headLevel(h)) + ' ' + headingOwnText(h);
+    let txt;
+    if (/^H[1-6]$/.test(h.tagName)) {
+      txt = '#'.repeat(headLevel(h)) + ' ' + headingOwnText(h);
+    } else {
+      // 假标题：直接取文本（不加 # 前缀，避免乱）
+      txt = (h.textContent || '').trim();
+      // 去掉 + 按钮文本（"+"）
+      txt = txt.replace(/\+\s*$/, '').trim();
+    }
     let sib = h.nextElementSibling;
-    while (sib && !/^H[1-6]$/.test(sib.tagName)) {
+    while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
       const t = (sib.textContent || '').trim();
       if (t) txt += '\n' + t;
       sib = sib.nextElementSibling;
@@ -2097,14 +2107,33 @@ function addMsg(role, html, isHtml, imgSrc) {
 // 所有标题都给 +，避免单层级标题时一个加号都没有。
 function addHeadingPickers(md) {
   if (!md) return;
-  const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  const realHeads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  // 假标题：<p> 或 <li> 里只含一个 <strong> 且 strong 占绝大部分文本 —— AI 经常用粗体段落代替 ## 标题
+  const fakeHeads = [];
+  md.querySelectorAll('p, li').forEach(el => {
+    if (el.closest('h1,h2,h3,h4,h5,h6')) return;
+    const strongs = el.querySelectorAll('strong');
+    if (strongs.length !== 1) return;
+    const ptext = (el.textContent || '').trim();
+    const stext = (strongs[0].textContent || '').trim();
+    if (ptext.length >= 3 && stext.length >= 2 && stext.length / ptext.length >= 0.85) {
+      el.classList.add('fake-head');
+      fakeHeads.push(el);
+    }
+  });
+  const heads = [...realHeads, ...fakeHeads];
   if (!heads.length) return;
-  const minLvl = Math.min(...heads.map(headLevel));
-  const topHeads = heads.filter(h => headLevel(h) === minLvl);
-  // 单个最高级标题 + 它是 md 第一个元素 → 它覆盖全文，等价整条按钮，跳过它的 +
-  const singleTopCoversAll = topHeads.length === 1 && md.firstElementChild === topHeads[0];
+  // 单个最高级真标题 + 它是 md 第一个元素 → 它覆盖全文，等价整条按钮，跳过它的 +
+  let singleTopCoversAll = false, singleTop = null;
+  if (realHeads.length) {
+    const minLvl = Math.min(...realHeads.map(headLevel));
+    const topHeads = realHeads.filter(h => headLevel(h) === minLvl);
+    if (topHeads.length === 1 && md.firstElementChild === topHeads[0]) {
+      singleTopCoversAll = true; singleTop = topHeads[0];
+    }
+  }
   heads.forEach(h => {
-    if (singleTopCoversAll && h === topHeads[0]) return;
+    if (singleTopCoversAll && h === singleTop) return;
     if (h.querySelector('.head-pick')) return;
     h.classList.add('has-pick');
     const btn = document.createElement('button');
@@ -2116,18 +2145,23 @@ function addHeadingPickers(md) {
   });
 }
 
-// 标题级联选择：选中大标题时，其下所有更深层小标题一起选/取消
+// 标题级联选择：真标题（H1-H6）按级别级联；假标题（粗体段落）只选自己 + 后续段落到下一个标题
 function headLevel(h) { return parseInt(h.tagName.slice(1), 10); }
+function isFakeHead(h) { return h.classList && h.classList.contains('fake-head'); }
 function toggleHeadingPick(h, md) {
-  const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
-  const i = heads.indexOf(h);
-  const lvl = headLevel(h);
   const newOn = !h.querySelector('.head-pick').classList.contains('on');
-  setHeadPick(h, newOn);
-  // 级联到后续更深层标题，遇到同级或更高级标题停止
-  for (let j = i + 1; j < heads.length; j++) {
-    if (headLevel(heads[j]) <= lvl) break;
-    setHeadPick(heads[j], newOn);
+  if (!isFakeHead(h) && /^H[1-6]$/.test(h.tagName)) {
+    const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+    const i = heads.indexOf(h);
+    const lvl = headLevel(h);
+    setHeadPick(h, newOn);
+    for (let j = i + 1; j < heads.length; j++) {
+      if (headLevel(heads[j]) <= lvl) break;
+      setHeadPick(heads[j], newOn);
+    }
+  } else {
+    // 假标题：只选自己一段
+    setHeadPick(h, newOn);
   }
   refreshUpdateButtons();
 }
@@ -2135,9 +2169,9 @@ function setHeadPick(h, on) {
   const btn = h.querySelector('.head-pick');
   if (btn) btn.classList.toggle('on', on);
   h.classList.toggle('hsec-picked', on);
-  // 整段高亮：标题行 + 其后到下个标题前的所有内容元素
+  // 整段高亮：标题行 + 其后到下个标题（真或假）前的所有内容元素
   let sib = h.nextElementSibling;
-  while (sib && !/^H[1-6]$/.test(sib.tagName)) {
+  while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
     sib.classList.toggle('hsec-picked-body', on);
     sib = sib.nextElementSibling;
   }
