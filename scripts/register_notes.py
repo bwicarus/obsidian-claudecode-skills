@@ -484,7 +484,7 @@ def process_note(
 ) -> dict[str, Any]:
     prefix = f"[{idx}/{total}] {note_path.stem}"
     result: dict[str, Any] = {
-        "name": note_path.name, "pdf": 0, "images": 0,
+        "name": note_path.name, "note": str(note_path), "pdf": 0, "images": 0,
         "index": "", "links": 0, "back_links": 0, "anki": "", "time": 0,
     }
     start = time.time()
@@ -795,37 +795,94 @@ def _find_book_for_note(note_path: Path) -> Path | None:
 
 
 def update_kg_for_processed(processed_notes: list[Path]) -> None:
-    """按 note_prefix 反查 KG，对涉及的每本书跑 link_with_ai + link_and_mastery。"""
+    """按 note_prefix 反查 KG，对涉及的每本书跑 link_with_ai + link_and_mastery。
+
+    可观测性增强（2026-05-26）：
+    - subprocess 用 `-u`（unbuffered）+ flush print 防 log 截断
+    - 跑完校验 _note_to_covered_l2 是否含 processed 笔记，缺漏写到
+      state/pending_kg_sync.json 供 daily 兜底重跑
+    """
+    import json as _json
     if not processed_notes:
+        print("[update_kg] processed_notes 空，跳过", flush=True)
         return
     from collections import defaultdict as _dd
     affected = _dd(list)
+    unmatched = []
     for np in processed_notes:
         kg_f = _find_book_for_note(np)
         if kg_f:
             affected[kg_f].append(np)
+        else:
+            unmatched.append(np.name)
+    if unmatched:
+        print(f"[update_kg] {len(unmatched)} 篇笔记没匹配到任何 KG note_prefix："
+              f"{unmatched[:5]}{'...' if len(unmatched)>5 else ''}", flush=True)
     if not affected:
-        print("\n（无笔记对应任何已登记的书本 note_prefix，跳过 KG 同步）")
+        print("[update_kg] 无笔记对应任何已登记书本，跳过", flush=True)
         return
     py = sys.executable
+    pending_failures: list[str] = []   # 没成功关联的笔记，写到 pending_kg_sync.json
     for kg_f, notes in affected.items():
-        print(f"\n=== 同步 KG：{kg_f.name}（{len(notes)} 篇笔记触发）===")
-        # 1) AI 重判这些笔记包含哪些节点
+        print(f"\n=== 同步 KG：{kg_f.name}（{len(notes)} 篇笔记触发）===", flush=True)
+        for n in notes:
+            print(f"  · {n.name}", flush=True)
+        # 1) AI 重判这些笔记包含哪些节点（-u 强制 unbuffered 输出）
         r1 = subprocess.run([
-            py, str(config.PROJECT_DIR / "scripts" / "kg" / "link_with_ai.py"),
+            py, "-u",
+            str(config.PROJECT_DIR / "scripts" / "kg" / "link_with_ai.py"),
             "--kg", str(kg_f),
-            "--since-days", "1",   # 最近 24h 改过的（含 register 处理的）
+            "--since-days", "1",
             "--in-place",
         ], cwd=str(config.PROJECT_DIR))
         if r1.returncode != 0:
-            print(f"  link_with_ai 失败 (rc={r1.returncode})")
+            print(f"  link_with_ai 失败 (rc={r1.returncode})，将记入 pending 待 daily 重试", flush=True)
+            pending_failures.extend(str(n) for n in notes)
+            continue
         # 2) 重算 mastery / state / level
         r2 = subprocess.run([
-            py, str(config.PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
+            py, "-u",
+            str(config.PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
             "--kg", str(kg_f), "--in-place",
         ], cwd=str(config.PROJECT_DIR))
         if r2.returncode != 0:
-            print(f"  link_and_mastery 失败 (rc={r2.returncode})")
+            print(f"  link_and_mastery 失败 (rc={r2.returncode})，将记入 pending", flush=True)
+            pending_failures.extend(str(n) for n in notes)
+            continue
+        # 3) 校验：刚关联的笔记是否真的写入 KG._note_to_covered_l2
+        try:
+            kg_data = _json.loads(kg_f.read_text(encoding="utf-8"))
+            n2c = kg_data.get("_note_to_covered_l2", {}) or {}
+            for n in notes:
+                rel = None
+                try:
+                    rel = n.relative_to(config.VAULT_ROOT).as_posix()
+                except ValueError:
+                    rel = n.name
+                # 检查 absolute / relative / name 任一形式是否在 dict 里
+                hit = rel in n2c or n.name in n2c or str(n) in n2c
+                if not hit:
+                    print(f"  ⚠ 校验：{n.name} 未出现在 KG._note_to_covered_l2 "
+                          f"(AI 判定无对应节点 or 调用失败)", flush=True)
+                    pending_failures.append(str(n))
+        except Exception as ex:
+            print(f"  校验时读 KG 失败：{ex}", flush=True)
+    # 写 pending（供 daily 流程或下次 register 重试）
+    pending_file = config.PROJECT_DIR / "state" / "pending_kg_sync.json"
+    try:
+        existing = []
+        if pending_file.exists():
+            existing = _json.loads(pending_file.read_text(encoding="utf-8")) or []
+        # 去重 + append；保留 unmatched（虽然无 KG 匹配，但下次也许有新 KG）
+        combined = sorted(set(existing) | set(pending_failures))
+        pending_file.parent.mkdir(parents=True, exist_ok=True)
+        pending_file.write_text(_json.dumps(combined, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        if pending_failures:
+            print(f"[update_kg] 已把 {len(pending_failures)} 篇未同步笔记写入 "
+                  f"{pending_file.name}", flush=True)
+    except Exception as ex:
+        print(f"[update_kg] 写 pending_kg_sync.json 失败：{ex}", flush=True)
 
 
 def main():
@@ -862,9 +919,28 @@ def main():
     for r in results:
         _print_result(r)
     if args.update_kg:
-        processed = [Path(r["note"]) for r in results
-                     if isinstance(r, dict) and r.get("note") and r.get("status") != "skip"]
-        update_kg_for_processed(processed)
+        # bug 修复（2026-05-26）：旧逻辑用 r.get("note") 过滤，但 process_note 的 result
+        # 字典只有 "name" 没 "note" → processed 永远为空 → update_kg 永远静默跳过。
+        # 现在 result 里已加 "note" 字段，并显式打印分支以便排查。
+        processed = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            if r.get("status") == "skip":
+                continue
+            note = r.get("note") or r.get("name")
+            if not note:
+                continue
+            p = Path(note)
+            if not p.is_absolute():
+                # 仅 r.get("name") 给的是文件名时，拼上 VAULT_ROOT
+                p = config.VAULT_ROOT / p
+            processed.append(p)
+        print(f"\n[update_kg] 待同步笔记 {len(processed)} 篇", flush=True)
+        if processed:
+            update_kg_for_processed(processed)
+        else:
+            print("[update_kg] 无待同步笔记，跳过", flush=True)
 
 
 if __name__ == "__main__":

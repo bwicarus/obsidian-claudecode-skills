@@ -207,12 +207,33 @@ def run_kg_link_mastery() -> int:
     2. mastery + state + 反向传递（无 AI）
     3. KG 准确性审计（C 启发式 + D 单调性 + B AI 抽样 20 节点）
     """
+    import json as _json
     kg_dir = PROJECT_DIR / "knowledge_graph"
     if not kg_dir.exists():
         print("  无 knowledge_graph 目录，跳过"); return 0
     kg_files = [f for f in sorted(kg_dir.glob("*.json")) if not f.name.endswith(".bak.json")]
     if not kg_files:
         print("  无 KG 文件，跳过"); return 0
+    # 兜底：消化 register 留下的 pending_kg_sync.json（没成功关联或被 bug 跳过的笔记）
+    pending_file = PROJECT_DIR / "state" / "pending_kg_sync.json"
+    pending_paths: list = []
+    if pending_file.exists():
+        try:
+            pending_paths = _json.loads(pending_file.read_text(encoding="utf-8")) or []
+        except Exception as ex:
+            print(f"  读 pending_kg_sync.json 失败：{ex}")
+    if pending_paths:
+        # touch 这些笔记的 mtime，让 link_with_ai --since-days 7 把它们重新纳入
+        import time as _time
+        now = _time.time()
+        touched = 0
+        for p in pending_paths:
+            try:
+                Path(p).touch(exist_ok=True)
+                touched += 1
+            except Exception:
+                pass
+        print(f"  消化 pending_kg_sync.json：touch {touched}/{len(pending_paths)} 篇笔记 mtime（强制纳入本次同步）")
     rc = 0
     for kg in kg_files:
         print(f"  KG: {kg.name}")
@@ -249,6 +270,13 @@ def run_kg_link_mastery() -> int:
         ])
         if r4 != 0:
             print(f"    rescan_rolling 失败 (rc={r4})")
+    # 清空 pending_kg_sync.json（已经被本次 link_with_ai 通过 touch 触发）
+    if pending_paths and pending_file.exists() and rc == 0:
+        try:
+            pending_file.write_text("[]", encoding="utf-8")
+            print(f"  已清空 pending_kg_sync.json（消化 {len(pending_paths)} 篇）")
+        except Exception as ex:
+            print(f"  清空 pending_kg_sync.json 失败：{ex}")
     return rc
 
 
