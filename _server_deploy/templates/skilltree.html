@@ -371,16 +371,27 @@ fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   computeDescendants();
   document.getElementById("meta").textContent=
     `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点 · ${edgesByLevel[2].length} 边`;
-  // 从 URL hash 恢复初始视图，并 replaceState 作为"根状态"（防 ◀ 退出站点）
+  // 从 URL hash 恢复初始视图；focus hash 忽略（用户希望进页面默认 home）
   const h=location.hash.startsWith("#")?location.hash.slice(1):"";
-  current=decodeView(h);
-  history.replaceState({view:current, depth:0}, "", location.pathname+(h?"#"+h:""));
+  let initialView = decodeView(h);
+  if(initialView.kind === "focus") initialView = {kind: "home"};
+  current = initialView;
+  history.replaceState({view:current, depth:0}, "", location.pathname);
   backDepth=0;
   updateWrapPadding();
   updateNav(); render();
-  // 章节倒序后第 1 章在底；初始滚到最下端，先看到基础概念
+  // 初始视野：定位到"最近正在学习"的方块；找不到则滚到最下端（基础在底）
   requestAnimationFrame(() => {
-    setTimeout(() => { wrap.scrollTop = wrap.scrollHeight; }, 50);
+    setTimeout(() => {
+      const rid = findRecentLearningNode();
+      if(rid && wrap.__positions && wrap.__positions[rid]){
+        const p = wrap.__positions[rid];
+        wrap.scrollLeft = Math.max(0, p.x - wrap.clientWidth/2);
+        wrap.scrollTop  = Math.max(0, p.y - wrap.clientHeight/2);
+      } else {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }, 50);
   });
 });
 
@@ -1657,12 +1668,39 @@ function openFocusPanel(nodeId){
   const n = id2[nodeId];
   if(!n) return;
   focusPanelId = nodeId;
+  // 记录"最近学习"的节点，下次打开技能树定位到这里
+  try{ localStorage.setItem("skilltree-last-visited-" + BOOK, nodeId); }catch(_){}
   document.getElementById("focus-panel").classList.add("open");
   document.getElementById("focus-panel-title").textContent =
     (n.numeric_label ? "["+n.numeric_label+"] " : "") + n.name;
   renderFocusPanel(nodeId);
   applyChainHighlightOnHome(nodeId);   // home 应用 chain class（不重排）
   showDetail(n);                       // 同步打开右侧 detail
+}
+
+// 找"最近正在学习"的节点：优先 localStorage（上次 focus 的）；
+// 次选 mastery_level 1-4（在学）最浅 depth；再次选 unlockable 最浅 depth。
+function findRecentLearningNode(){
+  try{
+    const last = localStorage.getItem("skilltree-last-visited-" + BOOK);
+    if(last && id2[last]) return last;
+  }catch(_){}
+  const dp = depthByLevel[2] || {};
+  // 1) 在学但未掌握满（mastery 1-4）
+  const inProgress = (nodesByLevel[2]||[]).filter(n =>
+    typeof n.mastery_level === "number" && n.mastery_level >= 1 && n.mastery_level < 5
+  );
+  if(inProgress.length){
+    inProgress.sort((a,b) => (dp[a.id]||0) - (dp[b.id]||0));
+    return inProgress[0].id;
+  }
+  // 2) 已解锁但还没碰
+  const unl = (nodesByLevel[2]||[]).filter(n => stateOf(n) === "unlockable");
+  if(unl.length){
+    unl.sort((a,b) => (dp[a.id]||0) - (dp[b.id]||0));
+    return unl[0].id;
+  }
+  return null;
 }
 
 function closeFocusPanel(){
