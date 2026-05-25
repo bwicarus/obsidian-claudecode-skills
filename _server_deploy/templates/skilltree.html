@@ -1697,64 +1697,162 @@ function clearChainHighlightOnHome(){
   svg.node().parentNode.classList.remove("focus-mode");
 }
 
-// 面板内绘制 = 克隆 home SVG + 应用 chain class（同 home 布局，节点位置完全一致）
-let _fpCloneSvg = null;
+// 面板内独立绘制：原 focus 视图的紧凑布局（只画 chain 节点 + 它们所在的章带，
+// 整章/整行无 chain 节点就消失）
+function _fpInvalidateClone(){ /* 旧 clone 已弃用，保留空壳避免 render 末尾报错 */ }
 
-function _fpEnsureClone(){
-  if(_fpCloneSvg && _fpCloneSvg.parentNode) return _fpCloneSvg;
-  const homeSvg = document.querySelector("#canvas-wrap > svg.canvas");
-  if(!homeSvg) return null;
-  _fpCloneSvg = homeSvg.cloneNode(true);
-  _fpCloneSvg.removeAttribute("id");
-  // 给 clone 内每个 tile 重新绑 click（cloneNode 不复制 d3 事件）
-  _fpCloneSvg.querySelectorAll("g.tile").forEach(g => {
-    const nid = g.getAttribute("data-id");
-    g.style.cursor = "pointer";
-    g.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      if(!nid) return;
-      if(nid === focusPanelId){ showDetail(id2[nid]); return; }
-      openFocusPanel(nid);
-    });
-  });
-  const wrapDiv = document.getElementById("focus-svg-wrap");
-  wrapDiv.innerHTML = "";
-  wrapDiv.appendChild(_fpCloneSvg);
-  return _fpCloneSvg;
-}
+function renderFocusPanel(focusId){
+  const focused = id2[focusId];
+  if(!focused) return;
 
-function _fpInvalidateClone(){ _fpCloneSvg = null; }
-
-function _fpApplyChain(focusId){
-  if(!_fpCloneSvg) return;
   computeChainSets(focusId);
-  _fpCloneSvg.querySelectorAll("g.tile").forEach(g => {
-    const nid = g.getAttribute("data-id");
-    const n = id2[nid];
-    if(n) g.setAttribute("class", tileClass(n, focusId));
-  });
-  _fpCloneSvg.querySelectorAll("path.edge").forEach(p => {
-    const from = p.getAttribute("data-from");
-    const to = p.getAttribute("data-to");
-    if(from && to) p.setAttribute("class", "edge " + edgeClass({from, to}));
-  });
-  document.getElementById("focus-svg-wrap").classList.add("focus-mode");
-}
+  const chainSet = new Set([focusId, ...chainAncestors, ...chainDescendants]);
 
-function _fpScrollToNode(nodeId){
+  // 收集每章里属于 chain 的 L2 节点
+  const chapL2 = {};
+  for(const nid of chainSet){
+    const n = id2[nid];
+    if(!n || n.level !== 2) continue;
+    const ch = ancestorAtLevel(nid, 0);
+    if(!ch) continue;
+    (chapL2[ch] = chapL2[ch] || []).push(n);
+  }
+
+  // 章节排序（跟 home 一致：按 depthByLevel[0] 升序），UI 上反序（基础在底）
+  const dpCh = depthByLevel[0] || {};
+  const allChapIds = (nodesByLevel[0] || []).map(c => c.id);
+  const ordered = allChapIds.filter(id => chapL2[id]);
+  ordered.sort((a, b) => (dpCh[a]||0) - (dpCh[b]||0));
+  ordered.reverse();
+
+  // 布局参数
+  const blockW = 130, blockH = 54, gapX = 14, gapY = 22;
+  const labelH = 26, bandPadY = 10;
   const wrapDiv = document.getElementById("focus-svg-wrap");
-  const p = wrap.__positions && wrap.__positions[nodeId];
-  if(!p) return;
+  const availW = (wrapDiv.clientWidth || 800) - 40;
+  const cols = Math.max(2, Math.floor((availW + gapX) / (blockW + gapX)));
+
+  let curY = 8;
+  const positions = {};
+  const chapBandsLayout = [];
+
+  for(const chId of ordered){
+    const chNodes = chapL2[chId];
+    const byDepth = {};
+    const dMap = depthByLevel[2] || {};
+    for(const n of chNodes){
+      const dp = dMap[n.id] || 0;
+      (byDepth[dp] = byDepth[dp] || []).push(n);
+    }
+    const depths = Object.keys(byDepth).map(Number).sort((a, b) => b - a);
+
+    const bandStartY = curY;
+    let bandInnerY = curY + labelH + bandPadY;
+
+    for(const dp of depths){
+      const row = byDepth[dp].sort((a, b) =>
+        (a.numeric_label || "").localeCompare(b.numeric_label || "") ||
+        a.name.localeCompare(b.name));
+      const subRows = Math.ceil(row.length / cols);
+      const wTotal = Math.min(row.length, cols) * (blockW + gapX) - gapX;
+      const xStart = Math.max(20, (availW - wTotal) / 2 + 20);
+      row.forEach((n, i) => {
+        const sr = Math.floor(i / cols);
+        const col = i % cols;
+        positions[n.id] = {
+          x: xStart + col * (blockW + gapX) + blockW/2,
+          y: bandInnerY + sr * (blockH + gapY*0.4) + blockH/2
+        };
+      });
+      bandInnerY += subRows * (blockH + gapY*0.4) + gapY*0.22;
+    }
+    const bandH = bandInnerY - bandStartY + bandPadY - gapY*0.22;
+    chapBandsLayout.push({
+      id: chId,
+      name: id2[chId].name,
+      label: id2[chId].chapter_label,
+      y: bandStartY, h: bandH,
+      color: chapterColor[chId] || "#3b6db5"
+    });
+    curY = bandStartY + bandH + gapY*0.5;
+  }
+
+  const totalH = curY + 16;
+  const totalW = availW + 40;
+
+  // 渲染 SVG
+  wrapDiv.innerHTML = "";
+  const svgEl = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svgEl.setAttribute("class", "canvas focus-mode");
+  svgEl.setAttribute("width", totalW);
+  svgEl.setAttribute("height", totalH);
+  svgEl.style.display = "block";
+  wrapDiv.appendChild(svgEl);
+  const sel = d3.select(svgEl);
+
+  // 章带：左右色线 + 标签
+  const bandsG = sel.append("g").attr("class","bands");
+  for(const b of chapBandsLayout){
+    bandsG.append("rect").attr("class","chap-side")
+      .attr("x", 4).attr("y", b.y+4).attr("width", 4).attr("height", Math.max(8, b.h-8))
+      .attr("fill", b.color);
+    bandsG.append("rect").attr("class","chap-side")
+      .attr("x", totalW-8).attr("y", b.y+4).attr("width", 4).attr("height", Math.max(8, b.h-8))
+      .attr("fill", b.color);
+    bandsG.append("text").attr("class","chap-band-label")
+      .attr("x", 18).attr("y", b.y + 20)
+      .attr("font-size", 13).attr("fill", b.color)
+      .text((b.label ? b.label + " " : "") + b.name);
+  }
+
+  // 边（只画 chain 节点间的边）
+  const edgesG2 = sel.append("g").attr("class","edges");
+  const chainEdges = edgesByLevel[2].filter(e => positions[e.from] && positions[e.to]);
+  edgesG2.selectAll("path.edge").data(chainEdges, e => e.from+"→"+e.to)
+    .enter().append("path")
+    .attr("class", e => "edge " + edgeClass(e))
+    .attr("d", e => {
+      const s = positions[e.from], t = positions[e.to];
+      const y1 = s.y - blockH/2, y2 = t.y + blockH/2, my = (y1+y2)/2;
+      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;
+    })
+    .attr("stroke-width", e => edgeWidthFor(e));
+
+  // 节点
+  const tilesG2 = sel.append("g").attr("class","tiles");
+  const nodeArr = Object.keys(positions).map(id => id2[id]);
+  const tileEnter = tilesG2.selectAll("g.tile").data(nodeArr, d => d.id)
+    .enter().append("g")
+    .attr("class", d => tileClass(d, focusId))
+    .attr("data-id", d => d.id)
+    .attr("transform", d => {
+      const p = positions[d.id];
+      return `translate(${p.x - blockW/2},${p.y - blockH/2})`;
+    })
+    .style("cursor","pointer")
+    .on("click", (_, d) => {
+      if(d.id === focusPanelId){ showDetail(d); return; }
+      openFocusPanel(d.id);
+    });
+  tileEnter.append("rect").attr("class","tbox")
+    .attr("width", blockW).attr("height", blockH).attr("rx", 7).attr("ry", 7);
+  const fontMain = 12, fontSub = 10;
+  tileEnter.append("text").attr("class","tname")
+    .attr("x", blockW/2).attr("y", blockH/2 - 2).attr("font-size", fontMain)
+    .text(d => truncate(d.name, blockW, fontMain));
+  tileEnter.append("text").attr("class","tsub")
+    .attr("x", blockW/2).attr("y", blockH/2 + 13).attr("font-size", fontSub)
+    .text(d => d.numeric_label || d.type || "");
+  tileEnter.append("title").text(d =>
+    `${d.name}${d.numeric_label?' ['+d.numeric_label+']':''}\n${(d.summary||'').slice(0,200)}`);
+
+  // 滚动焦点居中
   requestAnimationFrame(() => {
+    const p = positions[focusId];
+    if(!p) return;
     wrapDiv.scrollLeft = Math.max(0, p.x - wrapDiv.clientWidth/2);
     wrapDiv.scrollTop  = Math.max(0, p.y - wrapDiv.clientHeight/2);
   });
-}
-
-function renderFocusPanel(focusId){
-  _fpEnsureClone();
-  _fpApplyChain(focusId);
-  _fpScrollToNode(focusId);
 }
 
 // ============================================================
