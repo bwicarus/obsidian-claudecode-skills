@@ -387,7 +387,7 @@ window.addEventListener("popstate",ev=>{
   const st=ev.state||{};
   current = st.view || decodeView((location.hash||"").replace(/^#/,""));
   backDepth = typeof st.depth==="number" ? st.depth : 0;
-  updateNav(); render();
+  updateNav(); renderAnim();
 });
 
 function ancestorAtLevel(nid,lv){let c=id2[nid];while(c&&c.level>lv)c=id2[c.parent_id];return c&&c.level===lv?c.id:null}
@@ -480,7 +480,7 @@ function pushView(v){
     backDepth++;
     history.pushState({view:current, depth:backDepth}, "", "#"+encodeView(current));
   }
-  updateNav(); render();
+  updateNav(); renderAnim();
 }
 function goBack(){
   if(backDepth>0){ history.back(); return; }   // 浏览器有我们推入的栈 → 弹一帧
@@ -488,7 +488,7 @@ function goBack(){
     // 深链/刷新场景：浏览器栈空但不在 home。回 home 并用 replaceState 同步 URL。
     current={kind:"home"};
     history.replaceState({view:current, depth:0}, "", location.pathname);
-    updateNav(); render();
+    updateNav(); renderAnim();
   }
 }
 function updateNav(){
@@ -584,7 +584,13 @@ function chainRoleEdge(e, focusId){
 // ============================================================
 // 渲染（带过渡动画）
 // ============================================================
+// 视图切换 / 编辑数据时设 _renderAnim=true，让节点位置过渡平滑（不会"瞬移"）；
+// resize / 初始化 / detail 等普通重 render 不触发动画，保持响应迅速。
+let _renderAnim = false;
+function renderAnim(){ _renderAnim = true; render(); }
 function render(){
+  const anim = _renderAnim;
+  _renderAnim = false;
   let {nodes, edges, level}=nodesForView();
   // focus 模式预计算 chain 角色集合
   const focusedId = current.kind==="focus"?current.id:null;
@@ -802,7 +808,7 @@ function render(){
   barSel.exit().transition().duration(220).style("opacity",0).remove();
   const barEnter = barSel.enter().append("g").attr("class","locked-bar")
     .style("opacity",0)
-    .on("click", ()=>{ showLockedSection = !showLockedSection; render(); });
+    .on("click", ()=>{ showLockedSection = !showLockedSection; renderAnim(); });
   barEnter.append("rect").attr("class","locked-bar-rect")
     .attr("x",20).attr("rx",8).attr("ry",8);
   barEnter.append("text").attr("class","locked-bar-label")
@@ -815,26 +821,34 @@ function render(){
     .attr("x", W/2).attr("y", b=>b.y+b.h/2)
     .text(b=>`${showLockedSection?"▾":"▸"}  ${b.count} 章未开放（${showLockedSection?"点击折叠":"点击展开"}）`);
 
-  // 边（key by from→to）—— 无 transition，瞬间重排（避免 800 条边补间动画卡顿）
+  // 边（key by from→to）—— 视图切换时 transition 平滑过渡，普通 render 瞬间重排
   const edgeKey=e=>e.from+"→"+e.to;
+  const edgeClassFn=e=>"edge "+edgeClass(e);
+  const edgePathFn=e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
+    const y1=s.y-blockH/2, y2=t.y+blockH/2, my=(y1+y2)/2;
+    return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;};
   const edgeSel=edgesG.selectAll("path.edge").data(edges, edgeKey);
-  edgeSel.exit().remove();
-  const edgeEnter=edgeSel.enter().append("path").attr("class",e=>"edge "+edgeClass(e))
-    .attr("data-from",e=>e.from).attr("data-to",e=>e.to);
-  edgeSel.merge(edgeEnter)
-    .attr("d",e=>{const s=positions[e.from],t=positions[e.to];if(!s||!t) return "";
-      const y1=s.y-blockH/2, y2=t.y+blockH/2, my=(y1+y2)/2;
-      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;})
-    .attr("class",e=>"edge "+edgeClass(e))
-    .attr("stroke-width",e=>edgeWidthFor(e));
+  if(anim) edgeSel.exit().transition().duration(220).style("opacity",0).remove();
+  else edgeSel.exit().remove();
+  const edgeEnter=edgeSel.enter().append("path").attr("class",edgeClassFn)
+    .attr("data-from",e=>e.from).attr("data-to",e=>e.to)
+    .style("opacity", anim ? 0 : 1);
+  const edgeMerged=edgeSel.merge(edgeEnter);
+  edgeMerged.attr("class",edgeClassFn);   // class 立即应用（影响 chain/locked 颜色）
+  const edgeApply = anim ? edgeMerged.transition().duration(360) : edgeMerged;
+  edgeApply.attr("d",edgePathFn)
+    .attr("stroke-width",e=>edgeWidthFor(e))
+    .style("opacity",1);
 
-  // 节点（key by id）—— 无 transition，瞬间定位
+  // 节点（key by id）—— 视图切换时 transition 平滑过渡（位置 + opacity），普通 render 瞬间
   const tileSel=tilesG.selectAll("g.tile").data(nodes, d=>d.id);
-  tileSel.exit().remove();
+  if(anim) tileSel.exit().transition().duration(220).style("opacity",0).remove();
+  else tileSel.exit().remove();
   const tileEnter=tileSel.enter().append("g")
     .attr("class",d=>tileClass(d,focusedId))
     .attr("data-id",d=>d.id)
     .attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
+    .style("opacity", anim ? 0 : 1)
     .on("click",(_,d)=>nodeClick(d))
     .on("mouseenter",(ev,d)=>scheduleTooltip(ev,d))
     .on("mouseleave",hideTooltip)
@@ -901,8 +915,10 @@ function render(){
   tileAll.select("text.trash-mark")
     .attr("x", 6).attr("y", blockH-6);
 
-  // 位置：直接 attr 写入（无 transition，避免每节点 420ms 补间）
-  tileAll.attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`});
+  // 位置 + opacity：anim 时 transition 平滑过渡（视图切换专用），普通 render 立即 attr
+  const tileApply = anim ? tileAll.transition().duration(380) : tileAll;
+  tileApply.attr("transform",d=>{const p=positions[d.id]; return `translate(${p.x-blockW/2},${p.y-blockH/2})`})
+    .style("opacity",1);
 
   // 滚动到焦点
   if(focusedId){
@@ -1307,7 +1323,7 @@ async function createNote(nodeId){
       nodesByLevel={0:[],1:[],2:[]};
       for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
       buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
-      closeDetail(); render();
+      closeDetail(); renderAnim();
       return;
     }
     if(!d.ok && d.auto_action === "merged"){
@@ -1646,7 +1662,7 @@ async function applySettings(){
   }
   closeSettings();
   applyZoomState();
-  render();
+  renderAnim();
 }
 // 缩放只调 svg 尺寸 + root transform scale，不重 layout
 function applyZoomState(){
