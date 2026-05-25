@@ -252,6 +252,12 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
       </label>
     </div>
     <div class="row">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="sett-tooltip" style="width:16px;height:16px;cursor:pointer">
+        <span>悬停节点弹出预览浮窗</span>
+      </label>
+    </div>
+    <div class="row">
       <label style="display:block;margin-bottom:6px;color:#cfd6e6">📔 新笔记前缀（本书所有「从 PDF 创建笔记」生成的文件名前缀）</label>
       <input type="text" id="sett-note-prefix" placeholder="例如 000-"
              style="background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;
@@ -295,7 +301,7 @@ const BOOK="{{ book }}";
 const VAULT="Obsidian Vault";
 const SETT_KEY="skilltree_settings_"+BOOK;
 function loadSettings(){
-  const defaults={blockRatio:0.12, enableZoom:false, fitToWidth:true};
+  const defaults={blockRatio:0.12, enableZoom:false, fitToWidth:true, nodeTooltip:true};
   try{ return Object.assign(defaults, JSON.parse(localStorage.getItem(SETT_KEY)||"{}")); }
   catch(_){ return defaults; }
 }
@@ -665,8 +671,8 @@ function render(){
                       y:bandStartY, h:bandH, color:chapterColor[ch.id]});
       curY = bandStartY + bandH + gapY*0.45;
     }
-    activeChaps.forEach(placeBand);
-    // locked 章节折叠条（放在所有 active 章下方，最底部）
+    // locked 章节折叠条放在最上面（倒序下：高级章节在顶，所以"未开放"章节是最高级
+    // 的几章，逻辑上也该在最顶）
     if(lockedChaps.length){
       const barH=36;
       window.__lockedBarRect={y:curY+4, h:barH, count:lockedChaps.length};
@@ -682,6 +688,7 @@ function render(){
     } else {
       window.__lockedBarRect=null;
     }
+    activeChaps.forEach(placeBand);
   } else {
     // ====== chapter / section 中间视图：按 depth 分行 ======
     const byDepth={};
@@ -909,6 +916,7 @@ function render(){
 // ============================================================
 let _ttTimer = null;
 function scheduleTooltip(ev, d, delay){
+  if(!settings.nodeTooltip) return;  // 设置里关掉就不弹
   if(_ttTimer) clearTimeout(_ttTimer);
   delay = delay || 500;
   _ttTimer = setTimeout(()=>showTooltip(ev, d), delay);
@@ -1572,8 +1580,14 @@ function closeDetail(){
     updateWrapPadding();
     setTimeout(()=>render(), 230);
   }
-  // focus 模式时关闭 = 退出 focus（回到上一视图，所有方块都回来）
-  if(current.kind==="focus") goBack();
+  // focus 模式时关闭 = 退出 focus（回到整体视图）
+  if(current.kind==="focus"){
+    goBack();
+    // 等 popstate + render 完成后滚到整体图的底部（第 1 章在底，符合"基础在底"逻辑）
+    setTimeout(() => {
+      wrap.scrollTo({left: 0, top: wrap.scrollHeight, behavior: "smooth"});
+    }, 280);
+  }
 }
 
 // ============================================================
@@ -1585,6 +1599,7 @@ function openSettings(){
   inp.value=Math.round(settings.blockRatio*100);
   document.getElementById("sett-zoom").checked = !!settings.enableZoom;
   document.getElementById("sett-fit").checked = !!settings.fitToWidth;
+  document.getElementById("sett-tooltip").checked = !!settings.nodeTooltip;
   // KG 元数据：note_prefix 从 KG 顶层读
   document.getElementById("sett-note-prefix").value = (KG && KG.note_prefix) || "";
   updateSettPreview();
@@ -1600,6 +1615,7 @@ async function applySettings(){
   settings.blockRatio=v/100;
   settings.enableZoom = document.getElementById("sett-zoom").checked;
   settings.fitToWidth = document.getElementById("sett-fit").checked;
+  settings.nodeTooltip = document.getElementById("sett-tooltip").checked;
   saveSettings(settings);
   // note_prefix 是 KG 元数据，保存到服务端
   const newPrefix = document.getElementById("sett-note-prefix").value.trim();
