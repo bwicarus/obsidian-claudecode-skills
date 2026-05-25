@@ -22,32 +22,99 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa
 
 
-def is_trivial_mechanical(node: dict) -> tuple[bool, str]:
-    """返回 (是否 trivial, 触发规则名)。保守规则——只抓真正的「记号/术语」。
+def is_trivial_contextual(node: dict, kg: dict) -> tuple[bool, str]:
+    """基于「学习进度地形」判定：通用规则不依赖书籍词汇。
 
-    单核心概念（如「基」「张成」「内积」「单射」）一律不归——名字短不代表过简单。
+    候选条件（全部满足才标记）：
+      1. 节点本身没笔记
+      2. 同章 L2 兄弟里：附近 ±2 页有 mastered 比例 ≥ 50%
+      3. 同章 L2 兄弟里：后续页（>本节 page）有 ≥ 1 个 mastered
+      4. 节点自身 summary 短（≤ 35 字，作弱信号防核心概念被误判）
+
+    解释：你已经学完了附近和后面的内容，但**没碰**这个节点——说明这是顺带的
+    术语/记号 / 已被你的笔记隐含覆盖。
     """
-    name  = (node.get("name") or "").strip()
+    notes = node.get("containing_notes") or []
+    if notes:
+        return False, "already_has_notes"
+    label = (node.get("numeric_label") or "").strip()
+    pages = node.get("pages") or []
+    if not label or not pages:
+        return False, ""
+    main_page = pages[0]
+
+    id2 = {n["id"]: n for n in kg["nodes"]}
+    def chap_of_id(nid):
+        cur = id2.get(nid)
+        while cur and cur.get("parent_id"):
+            par = id2.get(cur["parent_id"])
+            if par and par.get("level") == 0:
+                return par["id"]
+            cur = par
+        return None
+
+    my_chap = chap_of_id(node["id"])
+    if not my_chap:
+        return False, ""
+    siblings = [n for n in kg["nodes"]
+                if n["level"] == 2 and chap_of_id(n["id"]) == my_chap and n["id"] != node["id"]]
+    if not siblings:
+        return False, ""
+
+    # 附近 ±2 页（按 page）
+    nearby = [s for s in siblings
+              if (s.get("pages") or [-99])[0] in range(main_page - 2, main_page + 3)]
+    nearby_mastered = sum(1 for s in nearby if s.get("state") == "mastered")
+    cond_nearby_ok = len(nearby) >= 2 and nearby_mastered / max(len(nearby), 1) >= 0.5
+
+    # 后续（page > main_page）
+    later = [s for s in siblings if (s.get("pages") or [-99])[0] > main_page]
+    later_mastered = sum(1 for s in later if s.get("state") == "mastered")
+    cond_later_ok = later_mastered >= 1
+
+    # 自身内容短（弱信号）
+    summary = (node.get("summary") or "").strip()
+    name = (node.get("name") or "").strip()
+    cond_self_short = len(summary) <= 30
+    # 进一步：name 短（≤ 6 字）或含数学符号/"记号"——避免误判核心长名概念
+    has_math_sym = any(c in name for c in ["−", "→", "·", "⊕", "⊗", "⟨", "⟩", "‖"])
+    cond_name_trivial = len(name) <= 6 or "记号" in name or has_math_sym
+
+    # 排除节内首节点（通常是核心定义）
+    sec_id = node.get("parent_id", "")
+    sec_siblings = [n for n in kg["nodes"]
+                    if n["level"] == 2 and n.get("parent_id") == sec_id]
+    sec_siblings.sort(key=lambda x: x.get("numeric_label", ""))
+    is_first_in_section = sec_siblings and sec_siblings[0]["id"] == node["id"]
+    if is_first_in_section:
+        return False, "first_node_in_section_likely_core"
+
+    if cond_nearby_ok and cond_later_ok and cond_self_short and cond_name_trivial:
+        return True, (f"附近 mastered {nearby_mastered}/{len(nearby)} + 后续 mastered "
+                       f"{later_mastered} + summary {len(summary)} 字 + name 短/含符号")
+    return False, ""
+
+
+# 旧字面规则保留作 backward 兼容（auto_archive --legacy 调用）
+def is_trivial_mechanical_legacy(node: dict) -> tuple[bool, str]:
+    """LADR 字面规则——只对中文教材的"记号/术语"敏感，不通用。"""
+    name = (node.get("name") or "").strip()
     summary = (node.get("summary") or "").strip()
     type_ = (node.get("type") or "").strip()
-
-    # 规则 1：type == "method"（build_nodes 标的"记号/方法"类）
     if type_ == "method":
-        return True, "rule_1_type_method"
-    # 规则 2：name 含"记号"字样（明确标识为记号定义）
+        return True, "legacy_type_method"
     if "记号" in name:
-        return True, "rule_2_name_has_jihao"
-    # 规则 3：name 含数学符号且长度 ≤ 6（如 "−v、w−v"、"𝑎0"、"0V"）
+        return True, "legacy_name_jihao"
     has_math_sym = any(c in name for c in ["−", "→", "·", "⊕", "⊗", "⟨", "⟩", "‖"])
     if has_math_sym and len(name) <= 6:
-        return True, "rule_3_math_symbol_short"
-    # 规则 4：summary 含"记号"或"约定"等元词（教材级元描述）
-    if any(kw in summary for kw in ["记号约定", "本书中表示", "本节中表示", "本书中我们用"]):
-        return True, "rule_4_summary_meta"
-    # 规则 5：name 是单字母 + 数字（如"V"、"0"、"F^n"中的"F"）
-    import re as _re
-    if _re.match(r"^[A-Za-z𝑎-𝑧][\^\d]*$", name) and len(name) <= 4:
-        return True, "rule_5_single_letter"
+        return True, "legacy_math_short"
+    return False, ""
+
+
+# 默认判定 = contextual
+def is_trivial_mechanical(node: dict, kg: dict = None) -> tuple[bool, str]:
+    if kg is not None:
+        return is_trivial_contextual(node, kg)
     return False, ""
 
 
@@ -58,6 +125,8 @@ def main() -> int:
                     help="实际收入回收站（默认 dry-run，只列候选）")
     ap.add_argument("--limit", type=int, default=0,
                     help="单次最多归档 N 个（防意外大批操作）")
+    ap.add_argument("--legacy", action="store_true",
+                    help="用旧字面规则（type=method/记号/数学符号），仅 LADR 等中文教材")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -66,13 +135,14 @@ def main() -> int:
     candidates = []
     for n in kg["nodes"]:
         if n["level"] != 2: continue
-        # 已经在回收站的跳过
         if any("回收站" in nt for nt in (n.get("containing_notes") or [])):
             continue
-        # 已有非回收站笔记的跳过（用户已经收为独立笔记）
         if (n.get("containing_notes") or []):
             continue
-        ok, rule = is_trivial_mechanical(n)
+        if args.legacy:
+            ok, rule = is_trivial_mechanical_legacy(n)
+        else:
+            ok, rule = is_trivial_contextual(n, kg)
         if ok:
             candidates.append((n, rule))
 
