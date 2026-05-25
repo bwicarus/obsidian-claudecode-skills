@@ -290,9 +290,15 @@ def main() -> int:
         n = id2[cur]
         prs = prereqs_of.get(cur, [])
         # 前置严格：必须所有前置 level >= 2（"已掌握"）才解锁后续
-        # 注意：之前模式只检查 state==mastered，新规改用 level >= 2 等价但更精确
         prereqs_clear = (not prs) or all(
             level_map.get(p, 0) >= 2 for p in prs)
+        # 例外：非第 1 章节点无显式 prereq → 视为 KG 数据缺失（不是真起点），
+        # 不能自动算"前置满足"。否则"广义特征向量 8.9 无 prereq"会错误显示可学。
+        # 真起点仅限第 1 章的 L2（教材开头的基础定义）。
+        if not prs:
+            label = (n.get("numeric_label") or "").strip()
+            if label and not label.startswith("1."):
+                prereqs_clear = False
         has_own_notes = bool(n.get("note_ref_ai_verified") and n.get("containing_notes"))
         inferred = n.get("mastery_inferred", False)
         m = n.get("mastery")
