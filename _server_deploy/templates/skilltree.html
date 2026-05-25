@@ -150,27 +150,11 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 #focus-panel.open{transform:translateX(0)}
 #focus-panel-close{position:absolute;top:14px;right:14px;background:rgba(0,0,0,.35);border:1px solid #2a3550;width:32px;height:32px;border-radius:50%;color:#cfd6e6;font-size:18px;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center;z-index:1}
 #focus-panel-close:hover{background:#1f2740;border-color:#5b6889;color:#fff}
-#focus-panel-title{padding:18px 60px 12px 24px;color:#cfe6ff;font-weight:700;font-size:17px;border-bottom:1px solid #1f2740;flex:0 0 auto}
-#focus-svg-wrap{flex:1;overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start}
-#focus-svg{display:block}
-/* focus-panel 内方块 */
-g.fp-tile{cursor:pointer}
-g.fp-tile rect.tbox{stroke-width:2;fill:#0e1a2e}
-g.fp-tile.fp-focused rect.tbox{stroke:#fde047;stroke-width:4;fill:#231a08}
-g.fp-tile.fp-focused{color:#fef3c7}
-g.fp-tile.fp-anc rect.tbox{stroke:#60a5fa;stroke-width:2.5;fill:#0a1530}
-g.fp-tile.fp-anc{color:#d0e1ff}
-g.fp-tile.fp-desc rect.tbox{stroke:#c084fc;stroke-width:2.5;fill:#1c1233}
-g.fp-tile.fp-desc{color:#dcc5ff}
-g.fp-tile.fp-desc-locked rect.tbox{stroke:#5a6478;stroke-width:1.5;fill:#141926;stroke-dasharray:4 3}
-g.fp-tile.fp-desc-locked{color:#8a96ad}
-g.fp-tile:hover rect.tbox{filter:brightness(1.3)}
-g.fp-tile text.tname{font-weight:600;text-anchor:middle;pointer-events:none;user-select:none;fill:currentColor}
-g.fp-tile text.tsub{text-anchor:middle;pointer-events:none;user-select:none;fill:#7a8497}
-path.fp-edge{fill:none;stroke-linecap:round;stroke-width:1.8}
-path.fp-edge.fp-anc-edge{stroke:#60a5fa;opacity:.85}
-path.fp-edge.fp-desc-edge{stroke:#c084fc;opacity:.85}
-path.fp-edge.fp-desc-locked-edge{stroke:#5a6478;opacity:.6;stroke-dasharray:4 3}
+#focus-panel-title{padding:14px 60px 10px 24px;color:#cfe6ff;font-weight:700;font-size:17px;border-bottom:1px solid #1f2740;flex:0 0 auto}
+#focus-svg-wrap{flex:1;overflow:auto;background:#0a0e1a;position:relative}
+/* clone 的 svg 默认带 home 的 .focus-mode 配色：链节点亮、非链节点淡 */
+#focus-svg-wrap > svg.canvas{display:block}
+#focus-svg-wrap.focus-mode g.tile.chain-fade{opacity:.13}
 
 #detail h2{font-size:17px;margin-bottom:10px;color:#e6e6f0;margin-top:6px}
 #detail .lbl{color:#8a9bb4;font-size:10px;margin-top:14px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
@@ -250,7 +234,7 @@ path.fp-edge.fp-desc-locked-edge{stroke:#5a6478;opacity:.6;stroke-dasharray:4 3}
   <aside id="focus-panel">
     <button id="focus-panel-close" onclick="closeFocusPanel()">✕</button>
     <div id="focus-panel-title">—</div>
-    <div id="focus-svg-wrap"><svg id="focus-svg"></svg></div>
+    <div id="focus-svg-wrap"></div>
   </aside>
   <aside id="detail">
     <button id="detail-close" onclick="closeDetail()">✕</button>
@@ -985,6 +969,13 @@ function render(){
   wrap.__positions = positions;
   // 搜索高亮
   applySearchHighlight();
+  // home 重 render → focus 面板的 clone 失效；如面板开着，重 clone + 重新应用 chain
+  _fpInvalidateClone();
+  if(focusPanelId){
+    _fpEnsureClone();
+    _fpApplyChain(focusPanelId);
+    _fpScrollToNode(focusPanelId);
+  }
 }
 // ============================================================
 // hover / 长按 tooltip
@@ -1706,127 +1697,64 @@ function clearChainHighlightOnHome(){
   svg.node().parentNode.classList.remove("focus-mode");
 }
 
-// 在左侧面板内绘制 chain map：祖先（多层）+ 焦点 + 直接后继，按 depth 行列布局
+// 面板内绘制 = 克隆 home SVG + 应用 chain class（同 home 布局，节点位置完全一致）
+let _fpCloneSvg = null;
+
+function _fpEnsureClone(){
+  if(_fpCloneSvg && _fpCloneSvg.parentNode) return _fpCloneSvg;
+  const homeSvg = document.querySelector("#canvas-wrap > svg.canvas");
+  if(!homeSvg) return null;
+  _fpCloneSvg = homeSvg.cloneNode(true);
+  _fpCloneSvg.removeAttribute("id");
+  // 给 clone 内每个 tile 重新绑 click（cloneNode 不复制 d3 事件）
+  _fpCloneSvg.querySelectorAll("g.tile").forEach(g => {
+    const nid = g.getAttribute("data-id");
+    g.style.cursor = "pointer";
+    g.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if(!nid) return;
+      if(nid === focusPanelId){ showDetail(id2[nid]); return; }
+      openFocusPanel(nid);
+    });
+  });
+  const wrapDiv = document.getElementById("focus-svg-wrap");
+  wrapDiv.innerHTML = "";
+  wrapDiv.appendChild(_fpCloneSvg);
+  return _fpCloneSvg;
+}
+
+function _fpInvalidateClone(){ _fpCloneSvg = null; }
+
+function _fpApplyChain(focusId){
+  if(!_fpCloneSvg) return;
+  computeChainSets(focusId);
+  _fpCloneSvg.querySelectorAll("g.tile").forEach(g => {
+    const nid = g.getAttribute("data-id");
+    const n = id2[nid];
+    if(n) g.setAttribute("class", tileClass(n, focusId));
+  });
+  _fpCloneSvg.querySelectorAll("path.edge").forEach(p => {
+    const from = p.getAttribute("data-from");
+    const to = p.getAttribute("data-to");
+    if(from && to) p.setAttribute("class", "edge " + edgeClass({from, to}));
+  });
+  document.getElementById("focus-svg-wrap").classList.add("focus-mode");
+}
+
+function _fpScrollToNode(nodeId){
+  const wrapDiv = document.getElementById("focus-svg-wrap");
+  const p = wrap.__positions && wrap.__positions[nodeId];
+  if(!p) return;
+  requestAnimationFrame(() => {
+    wrapDiv.scrollLeft = Math.max(0, p.x - wrapDiv.clientWidth/2);
+    wrapDiv.scrollTop  = Math.max(0, p.y - wrapDiv.clientHeight/2);
+  });
+}
+
 function renderFocusPanel(focusId){
-  const fSvgD3 = d3.select("#focus-svg");
-  fSvgD3.selectAll("*").remove();
-  const focused = id2[focusId];
-  if(!focused) return;
-
-  // 用全局的 ancestorsTransitive / directSuccessors（已存在）
-  // 按 depth 分层（BFS 从焦点向 prereq 方向）
-  const ancByLayer = new Map();
-  const seen = new Set([focusId]);
-  let queue = [{id: focusId, depth: 0}];
-  while(queue.length){
-    const {id, depth} = queue.shift();
-    if(depth > 0){
-      if(!ancByLayer.has(depth)) ancByLayer.set(depth, []);
-      ancByLayer.get(depth).push(id);
-    }
-    for(const e of edgesByLevel[2]){
-      if(e.to === id && !seen.has(e.from)){
-        seen.add(e.from);
-        queue.push({id: e.from, depth: depth + 1});
-      }
-    }
-  }
-  const succs = [];
-  for(const e of edgesByLevel[2]){
-    if(e.from === focusId) succs.push(e.to);
-  }
-
-  const maxAncDepth = ancByLayer.size === 0 ? 0 : Math.max(...ancByLayer.keys());
-  const rows = [];
-  for(let d = maxAncDepth; d >= 1; d--){
-    rows.push((ancByLayer.get(d) || []).slice());
-  }
-  rows.push([focusId]);
-  if(succs.length) rows.push(succs);
-
-  // 布局
-  const blockW = 150, blockH = 60, gapX = 18, gapY = 38;
-  const fp = document.getElementById("focus-panel");
-  const wrapEl = document.getElementById("focus-svg-wrap");
-  const availW = (wrapEl.clientWidth || fp.clientWidth || 900) - 32;
-  let maxRowCount = Math.max(...rows.map(r=>r.length));
-  // 如果某行节点太多撑不下，等比缩放 blockW（最小 100）
-  let bW = blockW;
-  const fitW = (n) => n*bW + (n-1)*gapX;
-  if(maxRowCount > 0 && fitW(maxRowCount) > availW){
-    bW = Math.max(100, Math.floor((availW - (maxRowCount-1)*gapX) / maxRowCount));
-  }
-
-  const positions = {};
-  const totalW = Math.max(...rows.map(r=>fitW(r.length))) || bW;
-  rows.forEach((row, rowIdx) => {
-    const rowW = row.length * bW + (row.length - 1) * gapX;
-    const xStart = (totalW - rowW) / 2;
-    const y = rowIdx * (blockH + gapY) + blockH/2;
-    row.forEach((nid, i) => {
-      positions[nid] = { x: xStart + i * (bW + gapX) + bW/2, y };
-    });
-  });
-  const totalH = rows.length * blockH + (rows.length - 1) * gapY;
-  fSvgD3.attr("width", totalW + 16).attr("height", totalH + 16);
-
-  const tilesGFp = fSvgD3.append("g").attr("class","fp-tiles");
-  const edgesGFp = fSvgD3.append("g").attr("class","fp-edges").lower();   // 先画边，后画节点
-
-  // 节点
-  const allIds = Object.keys(positions);
-  const ancSet = new Set();
-  ancByLayer.forEach(arr => arr.forEach(id => ancSet.add(id)));
-  const succSet = new Set(succs);
-  function fpTileClass(nid){
-    if(nid === focusId) return "fp-tile fp-focused";
-    if(ancSet.has(nid)) return "fp-tile fp-anc";
-    if(succSet.has(nid)){
-      return "fp-tile " + (stateOf(id2[nid])==="locked" ? "fp-desc-locked" : "fp-desc");
-    }
-    return "fp-tile";
-  }
-
-  const tileSel = tilesGFp.selectAll("g.fp-tile").data(allIds, d=>d);
-  const tileEnter = tileSel.enter().append("g")
-    .attr("class", fpTileClass)
-    .attr("data-id", d => d)
-    .attr("transform", d => { const p=positions[d]; return `translate(${p.x-bW/2},${p.y-blockH/2})`; })
-    .on("click", (_, d) => { if(d !== focusId) openFocusPanel(d); });
-  tileEnter.append("rect").attr("class","tbox")
-    .attr("width", bW).attr("height", blockH).attr("rx", 8).attr("ry", 8);
-  tileEnter.append("text").attr("class","tname")
-    .attr("x", bW/2).attr("y", blockH/2 - 2)
-    .attr("font-size", 13)
-    .text(d => truncate(id2[d].name, bW, 13));
-  tileEnter.append("text").attr("class","tsub")
-    .attr("x", bW/2).attr("y", blockH/2 + 14)
-    .attr("font-size", 10)
-    .text(d => id2[d].numeric_label || "");
-  tileEnter.append("title").text(d => {
-    const nd = id2[d];
-    return `${nd.name}${nd.numeric_label?' ['+nd.numeric_label+']':''}\n${nd.summary||''}`.slice(0, 200);
-  });
-
-  // 边：只画 chain 节点之间的边
-  const idSet = new Set(allIds);
-  const chainEdges = edgesByLevel[2].filter(e => idSet.has(e.from) && idSet.has(e.to));
-  function fpEdgeClass(e){
-    if(e.from === focusId && succSet.has(e.to)){
-      return "fp-edge " + (stateOf(id2[e.to])==="locked" ? "fp-desc-locked-edge" : "fp-desc-edge");
-    }
-    if(e.to === focusId || ancSet.has(e.to)) return "fp-edge fp-anc-edge";
-    return "fp-edge fp-anc-edge";
-  }
-  edgesGFp.selectAll("path.fp-edge").data(chainEdges, e=>e.from+"→"+e.to)
-    .enter().append("path")
-    .attr("class", fpEdgeClass)
-    .attr("d", e => {
-      const s = positions[e.from], t = positions[e.to];
-      if(!s || !t) return "";
-      const y1 = s.y - blockH/2, y2 = t.y + blockH/2, my = (y1+y2)/2;
-      return `M${s.x},${y1} C${s.x},${my} ${t.x},${my} ${t.x},${y2}`;
-    });
+  _fpEnsureClone();
+  _fpApplyChain(focusId);
+  _fpScrollToNode(focusId);
 }
 
 // ============================================================
