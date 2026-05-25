@@ -113,6 +113,13 @@ def build_skeleton_from_toc(doc, book_id: str, pdf_path: str) -> dict:
 _EXTRACT_PROMPT = """你正在为教材建立知识图谱。书：《{book_full}》
 当前位置：{chapter_label}「{chapter_name}」→ 第 {section_label} 节「{section_name}」→ 第 {page} 页
 
+【PDF 该页文字层】
+————
+{page_text}
+————
+
+（同时附 page 图像作参考，若文字层乱码以图像为准。）
+
 **严格只抽**这一页里**教材正式编号的**条目（标题里就带编号那种）：
 - 定义（编号如 1.4 / 2.13 / "Definition 1.10"）
 - 定理 / 命题 / 推论 / 引理（编号同上）
@@ -129,18 +136,22 @@ _EXTRACT_PROMPT = """你正在为教材建立知识图谱。书：《{book_full}
 - summary: 不超过 30 字的一句话本质描述
 - numeric_label: **必须填**教材完整编号（如 "1.41" / "2.A.13"）；**无编号的条目不要列入**
 
+⚠ 关键：name 必须**精确**对应文字层里编号所在行的实际名字（如文字层是
+"1.26 加法恒等元唯一"，name 就填"加法恒等元唯一"，不能凭印象编名）。
+
 输出严格 JSON 数组，无任何额外文字、说明或代码围栏。本页无符合条件的条目输出 []。
 例：[{{"type":"definition","name":"直和","summary":"和中每元素唯一表示","numeric_label":"1.41"}}]
 """
 
 
 def extract_l2_from_page(backend, page_png: bytes, *, book_full: str, l0: dict, l1: dict,
-                        page_1based: int) -> list[dict]:
+                        page_1based: int, page_text: str = "") -> list[dict]:
     prompt = _EXTRACT_PROMPT.format(
         book_full=book_full,
         chapter_label=l0.get("chapter_label", ""), chapter_name=l0["name"],
         section_label=l1.get("section_label", ""), section_name=l1["name"],
         page=page_1based,
+        page_text=(page_text[:3500] if page_text else "（无文字层，仅靠图像识别）"),
     )
     raw = backend.chat([{"role": "user", "content": prompt}], image=page_png)
     raw = raw.strip()
@@ -236,12 +247,15 @@ def main() -> int:
         page_range = (sorted(p for p in range(ps, pe + 1) if p in rescan_pages)
                       if rescan_pages else list(range(ps, pe + 1)))
         pngs = {pg: render_page_png(doc, pg - 1, args.book) for pg in page_range}
+        # 同时提取文字层（让 AI 优先看精确文本，图像作 fallback / 视觉参考）
+        page_texts = {pg: doc[pg - 1].get_text() for pg in page_range}
         # AI 调用并行（ClaudeCli 每次 spawn 子进程，subprocess 间互不影响）
         def _work(pg, png=None):
             png = png if png is not None else pngs[pg]
             try:
                 return pg, extract_l2_from_page(
-                    backend, png, book_full=book_full, l0=l0, l1=l1, page_1based=pg), None
+                    backend, png, book_full=book_full, l0=l0, l1=l1,
+                    page_1based=pg, page_text=page_texts.get(pg, "")), None
             except Exception as ex:
                 return pg, None, ex
         page_results: dict[int, list] = {}
