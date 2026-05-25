@@ -775,6 +775,59 @@ def _print_result(r: dict[str, Any]) -> None:
     )
 
 
+def _find_book_for_note(note_path: Path) -> Path | None:
+    """根据笔记名前缀反查对应 KG 文件（按 KG.note_prefix 最长匹配）。"""
+    kg_dir = config.PROJECT_DIR / "knowledge_graph"
+    if not kg_dir.exists():
+        return None
+    rel_name = note_path.name
+    best, best_len = None, 0
+    for kg_f in kg_dir.glob("*.json"):
+        if kg_f.name.endswith(".bak.json"): continue
+        try:
+            kg = json.loads(kg_f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        pref = kg.get("note_prefix", "")
+        if pref and rel_name.startswith(pref) and len(pref) > best_len:
+            best, best_len = kg_f, len(pref)
+    return best
+
+
+def update_kg_for_processed(processed_notes: list[Path]) -> None:
+    """按 note_prefix 反查 KG，对涉及的每本书跑 link_with_ai + link_and_mastery。"""
+    if not processed_notes:
+        return
+    from collections import defaultdict as _dd
+    affected = _dd(list)
+    for np in processed_notes:
+        kg_f = _find_book_for_note(np)
+        if kg_f:
+            affected[kg_f].append(np)
+    if not affected:
+        print("\n（无笔记对应任何已登记的书本 note_prefix，跳过 KG 同步）")
+        return
+    py = sys.executable
+    for kg_f, notes in affected.items():
+        print(f"\n=== 同步 KG：{kg_f.name}（{len(notes)} 篇笔记触发）===")
+        # 1) AI 重判这些笔记包含哪些节点
+        r1 = subprocess.run([
+            py, str(config.PROJECT_DIR / "scripts" / "kg" / "link_with_ai.py"),
+            "--kg", str(kg_f),
+            "--since-days", "1",   # 最近 24h 改过的（含 register 处理的）
+            "--in-place",
+        ], cwd=str(config.PROJECT_DIR))
+        if r1.returncode != 0:
+            print(f"  link_with_ai 失败 (rc={r1.returncode})")
+        # 2) 重算 mastery / state / level
+        r2 = subprocess.run([
+            py, str(config.PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
+            "--kg", str(kg_f), "--in-place",
+        ], cwd=str(config.PROJECT_DIR))
+        if r2.returncode != 0:
+            print(f"  link_and_mastery 失败 (rc={r2.returncode})")
+
+
 def main():
     import argparse
     import task_tracker
@@ -786,6 +839,10 @@ def main():
         default="all",
         help="只运行某一步骤；默认 all（完整流程）",
     )
+    p.add_argument("--update-kg", action="store_true", default=True,
+                   help="跑完后按 note_prefix 同步对应 KG（默认 True）")
+    p.add_argument("--no-update-kg", dest="update_kg", action="store_false",
+                   help="跳过 KG 同步（daily 流程用，因为后面有独立 KG step）")
     args = p.parse_args()
 
     if args.note:
@@ -796,12 +853,18 @@ def main():
         with task_tracker.track(f"register_notes:{args.only}") as h:
             r = run_step(note_path, args.only, h)
         _print_result(r)
+        if args.update_kg:
+            update_kg_for_processed([note_path])
         return
 
     with task_tracker.track("登记新笔记") as h:
         results = run(h)
     for r in results:
         _print_result(r)
+    if args.update_kg:
+        processed = [Path(r["note"]) for r in results
+                     if isinstance(r, dict) and r.get("note") and r.get("status") != "skip"]
+        update_kg_for_processed(processed)
 
 
 if __name__ == "__main__":
