@@ -1602,18 +1602,33 @@ async function delEdge(a,b){
 let detailNodeId = null;
 function closeDetail(){
   const targetId = detailNodeId;
+  const wasFocus = (current.kind==="focus");
+  // 记下目标方块当前 SVG 位置 + viewport 位置，用于退出 focus 后让方块在屏幕上"不动"
+  const oldPos = (wasFocus && targetId && wrap.__positions) ? wrap.__positions[targetId] : null;
+  const oldSL = wrap.scrollLeft;
+  const oldST = wrap.scrollTop;
   document.getElementById("detail").classList.remove("open");
   detailNodeId = null;
-  // focus 模式时关闭 = 退出 focus（回到整体视图；popstate → render）
-  const wasFocus = (current.kind==="focus");
-  if(wasFocus) goBack();
-  // 关闭后以刚才打开的方块为视野中心（focus → 整体需等 popstate render 完）
-  setTimeout(()=>{
-    const p = wrap.__positions && wrap.__positions[targetId];
-    if(!p) return;
-    wrap.scrollLeft = Math.max(0, p.x - wrap.clientWidth/2);
-    wrap.scrollTop  = Math.max(0, p.y - wrap.clientHeight/2);
-  }, wasFocus ? 50 : 0);
+  if(wasFocus) goBack();   // 触发 popstate → renderAnim()，节点 d3 transition 380ms 到新位置
+  if(!wasFocus || !oldPos) return;
+  // viewport 跟着节点同步平移 380ms（缓动），方块屏幕坐标全程几乎不变
+  requestAnimationFrame(()=>{
+    const newPos = wrap.__positions && wrap.__positions[targetId];
+    if(!newPos) return;
+    const targetSL = Math.max(0, oldSL + (newPos.x - oldPos.x));
+    const targetST = Math.max(0, oldST + (newPos.y - oldPos.y));
+    if(targetSL === oldSL && targetST === oldST) return;
+    const dur = 380;
+    const t0 = performance.now();
+    (function step(now){
+      const t = Math.min(1, (now - t0) / dur);
+      // easeInOutQuad（跟 d3 默认 cubic-ease 接近）
+      const e = t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+      wrap.scrollLeft = oldSL + (targetSL - oldSL) * e;
+      wrap.scrollTop  = oldST + (targetST - oldST) * e;
+      if(t < 1) requestAnimationFrame(step);
+    })(performance.now());
+  });
 }
 
 // ============================================================
