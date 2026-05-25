@@ -894,6 +894,82 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
     return {"ok": True, "summary": f"笔记已更新（{note_path.name}），哈希已覆盖防重复登记"}
 
 
+def _sanitize_note_name(name: str) -> str:
+    """清理用户输入的笔记名（去非法字符、长度限制）。"""
+    name = (name or "").strip().strip(".")
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
+    return name[:120] or "untitled"
+
+
+def _create_note_from_qa(name: str, pairs: list, image_b64) -> dict:
+    """从 QA 选中的问答 + 当前截图，让 AI 整理成 Markdown，写到 vault 根目录。
+    - 不触发 register（命名不带 [0-9A-Fa-f]{3}- 前缀，避开 pending_notes 闸门）
+    - 同名追加 -1/-2/…
+    - 截图保存到 vault/attachments，笔记顶部加 ![[...]] 引用
+    返回 {ok, note_path (vault 相对路径), obsidian_url}
+    """
+    if not VAULT:
+        return {"ok": False, "error": "VAULT 未配置"}
+    safe_stem = _sanitize_note_name(name)
+    fname = safe_stem + ".md"
+    note_path = VAULT / fname
+    if note_path.exists():
+        for i in range(1, 200):
+            cand = VAULT / f"{safe_stem}-{i}.md"
+            if not cand.exists():
+                note_path = cand; break
+    # AI 整理 pairs → Markdown
+    prompt = (
+        "请把以下从截图问答中收集到的关键内容整理成一篇结构清晰的 Obsidian Markdown 学习笔记。\n"
+        f"笔记主题：{name}\n\n"
+        "整理要求：\n"
+        "1. 去掉对话冗余（如“我来回答你”之类），保留实质知识点。\n"
+        "2. 用 `## 标题` 分小节；若只有一两个知识点，可以不用标题直接铺开。\n"
+        "3. 数学公式严格用 $...$ 或 $$...$$（Obsidian 支持）；不要 \\(...\\) 或 \\[...\\]。\n"
+        "4. 不要添加用户没问的引申内容、额外例子、自己的发挥。\n"
+        "5. 直接输出 Markdown 正文，**第一行就是笔记内容**；不加代码围栏、不加前言说明。\n\n"
+        f"=== 选中内容（问答对） ===\n{_pairs_text(pairs)}"
+    )
+    try:
+        content = ai_client.ask(prompt).strip()
+    except Exception as ex:
+        return {"ok": False, "error": f"AI 整理失败：{ex}"}
+    if content.startswith("```"):
+        content = re.sub(r'^```[a-zA-Z]*\n', '', content)
+        content = re.sub(r'\n```\s*$', '', content)
+    if not content:
+        return {"ok": False, "error": "AI 返回内容为空"}
+    final_content = content
+    # 处理截图：保存到 vault/attachments，笔记顶部加引用
+    if image_b64:
+        try:
+            b64 = image_b64.split(",", 1)[-1] if "," in image_b64 else image_b64
+            img_bytes = base64.b64decode(b64)
+            img_dir = VAULT / "attachments"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            img_path = img_dir / (note_path.stem + ".png")
+            i = 1
+            while img_path.exists():
+                img_path = img_dir / f"{note_path.stem}-{i}.png"; i += 1
+            img_path.write_bytes(img_bytes)
+            final_content = f"![[attachments/{img_path.name}]]\n\n" + final_content
+        except Exception:
+            pass   # 截图保存失败不致命，仍然写笔记
+    try:
+        note_path.write_text(final_content, encoding="utf-8")
+    except Exception as ex:
+        return {"ok": False, "error": f"写文件失败：{ex}"}
+    rel = note_path.relative_to(VAULT).as_posix()
+    rel_no_ext = rel[:-3] if rel.endswith(".md") else rel
+    import urllib.parse as _up
+    vault_name = os.environ.get("OBSIDIAN_VAULT_NAME", "Obsidian Vault")
+    obsidian_url = (
+        f"obsidian://open?vault={_up.quote(vault_name, safe='')}"
+        f"&file={_up.quote(rel_no_ext, safe='/')}"
+    )
+    return {"ok": True, "note_path": rel, "obsidian_url": obsidian_url}
+
+
 def _card_delete(local_id: str) -> dict:
     """删除一张（QA 生成的）卡片：从 Anki 删 note + 从 records 移除 + 同步。"""
     rec_file, rec, card = _find_record_for_card(local_id)
@@ -1596,13 +1672,17 @@ function collectUsefulPairs() {
   return pairs;
 }
 
-// 根据当前是否有「有用」回复，显示/隐藏三个更新按钮
+// 根据当前是否有「有用」回复，显示/隐藏右上角按钮
 function refreshUpdateButtons() {
-  if (!cardCtx) return;
   const has = collectUsefulPairs().length > 0;
-  document.querySelectorAll('#card-actions .upd-group').forEach(g => {
-    g.style.display = has ? '' : 'none';
-  });
+  if (cardCtx) {
+    document.querySelectorAll('#card-actions .upd-group').forEach(g => {
+      g.style.display = has ? '' : 'none';
+    });
+  } else {
+    const btn = document.getElementById('create-note-btn');
+    if (btn) btn.style.display = has ? '' : 'none';
+  }
 }
 
 const UPD_LABELS = {note: '更新到笔记', anki: '根据此修改 Anki', all: '全部更新'};
@@ -1753,7 +1833,58 @@ function loadCardContext(cid) {
     .catch(() => pollScreenshot());
 }
 const _cardId = new URLSearchParams(location.search).get('card');
-if (_cardId) loadCardContext(_cardId); else pollScreenshot();
+if (_cardId) loadCardContext(_cardId); else { pollScreenshot(); setupCreateNoteButton(); }
+
+// 非 cardCtx 模式：在 header #card-actions 加「📝 创建新笔记」按钮，用户勾选内容后显示
+function setupCreateNoteButton() {
+  const acts = document.getElementById('card-actions');
+  if (!acts || document.getElementById('create-note-btn')) return;
+  const btn = document.createElement('button');
+  btn.id = 'create-note-btn';
+  btn.className = 'card-act-btn';
+  btn.textContent = '📝 创建新笔记';
+  btn.title = '把勾选的回答内容用 AI 整理 + 当前截图 写到一篇新笔记';
+  btn.style.display = 'none';
+  btn.style.marginLeft = '6px';
+  btn.onclick = runCreateNote;
+  acts.appendChild(btn);
+}
+
+function runCreateNote() {
+  const pairs = collectUsefulPairs();
+  if (!pairs.length) { showCardResult('请先在 AI 回复下方勾选「有用」的部分（标题旁的 + 或 ＋ 选用整条回答）。'); return; }
+  const name = prompt('请输入笔记名（不含 .md）：', '');
+  if (name === null) return;
+  const trimmed = (name || '').trim();
+  if (!trimmed) { showCardResult('未输入笔记名，已取消。'); return; }
+  const btn = document.getElementById('create-note-btn');
+  btn.disabled = true; btn.textContent = '⏳ AI 整理中…';
+  showCardResult('正在用 AI 整理选中内容并写入新笔记…（10-30s，锁屏也不影响）');
+  // 取当前截图 base64（如果有真截图，不是占位 gif）
+  const shotImg = document.getElementById('shot');
+  let img_b64 = null;
+  if (shotImg && shotImg.src && shotImg.src.startsWith('data:image/') && !shotImg.src.startsWith('data:image/gif')) {
+    img_b64 = shotImg.src;
+  }
+  fetch('api/create-note', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: trimmed, pairs: pairs, image_b64: img_b64}),
+  }).then(r => r.json()).then(j => {
+    btn.disabled = false; btn.textContent = '📝 创建新笔记';
+    if (j.ok) {
+      const safePath = (j.note_path || '').replace(/'/g, "\\'");
+      const safeUrl = (j.obsidian_url || '').replace(/'/g, "\\'");
+      const html = '<div><b>✓ 笔记已创建：</b>' + (j.note_path || '') + '</div>' +
+        '<button class="card-act-btn" onclick="location.href=\'' + safeUrl + '\'" style="margin-top:8px">📂 在 Obsidian 中打开</button>';
+      showCardResult(html);
+    } else {
+      showCardResult('✗ 创建失败：' + (j.error || '未知'));
+    }
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = '📝 创建新笔记';
+    showCardResult('✗ 请求失败：' + e.message);
+  });
+}
 
 // ─── 粘贴图片 ────────────────────────────────────────────────────────────────
 
@@ -1935,12 +2066,12 @@ function addMsg(role, html, isHtml, imgSrc) {
   }
   row.appendChild(ctrl);
   row.appendChild(d);
-  // 卡片模式：气泡外侧放「选用整条回答」开关；子标题行的 + 在渲染后补
-  if (role === 'assistant' && cardCtx) {
+  // 所有 AI 回答都加「选用整条回答」开关 + 子标题 +（cardCtx 用于改卡片/笔记，非 cardCtx 用于创建新笔记）
+  if (role === 'assistant') {
     const allBtn = document.createElement('button');
     allBtn.className = 'reply-pick-all';
     allBtn.textContent = '＋ 选用整条回答';
-    allBtn.title = '把整条回答用于改进卡片/笔记';
+    allBtn.title = cardCtx ? '把整条回答用于改进卡片/笔记' : '把整条回答用于创建新笔记';
     allBtn.onclick = () => {
       const on = allBtn.classList.toggle('on');
       allBtn.textContent = on ? '✓ 已选整条回答' : '＋ 选用整条回答';
@@ -1961,7 +2092,7 @@ function addMsg(role, html, isHtml, imgSrc) {
 // （由气泡外侧「选用整条回答」开关代劳）；其余情况（多个同级标题 / 标题前有内容）
 // 所有标题都给 +，避免单层级标题时一个加号都没有。
 function addHeadingPickers(md) {
-  if (!md || !cardCtx) return;
+  if (!md) return;
   const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
   if (!heads.length) return;
   const minLvl = Math.min(...heads.map(headLevel));
@@ -2730,6 +2861,22 @@ class Handler(BaseHTTPRequestHandler):
                     _card_jobs[job_id] = {"status": "done", "result": out, "_t": time.time()}
                 threading.Thread(target=_run, daemon=True).start()
                 self.send_json({"ok": True, "job_id": job_id})
+
+        elif self.path == "/api/create-note":
+            # 非 cardCtx 模式：把选中问答 + 截图 用 AI 整理写到一篇新笔记
+            name = (body.get("name") or "").strip()
+            pairs = body.get("pairs") or []
+            img_b64 = body.get("image_b64")
+            if not name:
+                self.send_json({"ok": False, "error": "缺少笔记名"}, 400)
+            elif not pairs:
+                self.send_json({"ok": False, "error": "没有标记为有用的回答"}, 400)
+            else:
+                try:
+                    out = _create_note_from_qa(name, pairs, img_b64)
+                    self.send_json(out)
+                except Exception as ex:
+                    self.send_json({"ok": False, "error": str(ex)}, 500)
 
         elif self.path == "/api/card-delete":
             lid = (body.get("local_id") or "").strip()
