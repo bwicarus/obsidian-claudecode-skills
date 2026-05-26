@@ -479,6 +479,28 @@ function _caretAtPoint(x, y) {
   return null;
 }
 
+// 把 textNode 的 offset 扩展到词边界（英文按 \w 扩展，CJK 按字粒度不变）
+function _expandToWordBoundary(node, offset, direction) {
+  if (!node || node.nodeType !== 3) return offset;
+  const text = node.textContent || '';
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);   // 仅扩展英文/数字（CJK 按字符）
+  if (direction === 'start') {
+    // 向左扩：如果当前位置在英文词内部，回退到词首
+    let i = offset;
+    if (i > 0 && i <= text.length && isWord(text[i - 1])) {
+      while (i > 0 && isWord(text[i - 1])) i--;
+    }
+    return i;
+  } else {
+    // 向右扩：如果当前位置在英文词内部，前进到词尾
+    let i = offset;
+    if (i < text.length && isWord(text[i])) {
+      while (i < text.length && isWord(text[i])) i++;
+    }
+    return i;
+  }
+}
+
 // 用 (start, end) 两个 caret 设 selection、画 overlay、浮工具栏
 function _applyRangeFromCarets(startC, endC, textLayerDiv) {
   if (!startC || !endC || !startC.node || !endC.node) return false;
@@ -492,10 +514,13 @@ function _applyRangeFromCarets(startC, endC, textLayerDiv) {
     const pos = s.node.compareDocumentPosition(e.node);
     if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) [s, e] = [e, s];
   }
+  // 自动对齐词边界：起点向左、终点向右
+  const startOffset = _expandToWordBoundary(s.node, s.offset, 'start');
+  const endOffset   = _expandToWordBoundary(e.node, e.offset, 'end');
   const range = document.createRange();
   try {
-    range.setStart(s.node, s.offset);
-    range.setEnd(e.node, e.offset);
+    range.setStart(s.node, startOffset);
+    range.setEnd(e.node, endOffset);
   } catch (_) { return false; }
   if (range.collapsed) return false;
   const sel = window.getSelection();
@@ -565,14 +590,11 @@ function bindTextLayerClick(textLayerDiv) {
   // 起始：mousedown / touchstart
   const onStart = (x, y, target) => {
     const span = target?.closest && target.closest('span');
-    if (!span || !textLayerDiv.contains(span)) { _dragStart = null; return; }
-    _dragStart = {
-      x, y,
-      caret: _caretAtPoint(x, y),
-      span,
-      time: Date.now(),
-    };
+    if (!span || !textLayerDiv.contains(span)) { _dragStart = null; window.dlog?.('START:miss span'); return; }
+    const caret = _caretAtPoint(x, y);
+    _dragStart = { x, y, caret, span, time: Date.now() };
     _dragMoved = false;
+    window.dlog?.('START x=' + Math.round(x) + ' y=' + Math.round(y) + ' caret=' + (caret ? (caret.node?.nodeName + '@' + caret.offset) : 'null'));
   };
 
   // 移动：mousemove / touchmove —— 实时更新选区
@@ -581,7 +603,10 @@ function bindTextLayerClick(textLayerDiv) {
     const dx = Math.abs(x - _dragStart.x);
     const dy = Math.abs(y - _dragStart.y);
     if (dx + dy < 8) return;
-    _dragMoved = true;
+    if (!_dragMoved) {
+      _dragMoved = true;
+      window.dlog?.('MOVE started, dx+dy=' + (dx+dy));
+    }
     // touchmove 时 preventDefault 阻止页面滚动（让拖选生效）
     if (ev && ev.cancelable) ev.preventDefault();
     // RAF 节流
@@ -590,7 +615,8 @@ function bindTextLayerClick(textLayerDiv) {
       _dragMoveRaf = null;
       if (!_dragStart) return;
       const endC = _caretAtPoint(x, y);
-      if (endC) _applyRangeFromCarets(_dragStart.caret, endC, textLayerDiv);
+      const ok = endC && _applyRangeFromCarets(_dragStart.caret, endC, textLayerDiv);
+      if (!ok) window.dlog?.('MOVE caret/apply fail @ ' + Math.round(x)+','+Math.round(y) + ' endNode=' + (endC?.node?.nodeName || 'null'));
     });
   };
 
