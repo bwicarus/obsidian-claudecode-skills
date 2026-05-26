@@ -16,12 +16,11 @@ import json
 import os
 import sys
 import urllib.parse
-from functools import wraps
 from pathlib import Path
 
 from flask import (
-    Blueprint, abort, current_app, jsonify, render_template, request,
-    send_file, session,
+    Blueprint, abort, jsonify, render_template, request,
+    send_file,
 )
 
 # AI 后端复用 _client/core 的 ai_backends + scripts/ai_client
@@ -31,16 +30,6 @@ CLAUDE_DIR    = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 
 bp = Blueprint("pdf_reader", __name__, url_prefix="/pdf")
-
-
-def _login_required(view):
-    """简化版（控制面板风格）：session 里 user 才能进。"""
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if not session.get("user"):
-            return abort(401)
-        return view(*args, **kwargs)
-    return wrapped
 
 
 def _safe_vault_path(rel: str) -> Path | None:
@@ -149,14 +138,12 @@ def _ai_call(prompt: str) -> str:
 # ─── 路由 ─────────────────────────────────────────────────────────────────
 
 @bp.route("/")
-@_login_required
 def pdf_index():
     pdfs = _list_vault_pdfs()
     return render_template("pdf_index.html", pdfs=pdfs)
 
 
 @bp.route("/view")
-@_login_required
 def pdf_view():
     rel = request.args.get("file", "")
     page = int(request.args.get("page", "1") or "1")
@@ -173,7 +160,6 @@ def pdf_view():
 
 
 @bp.route("/file/<path:rel>")
-@_login_required
 def pdf_file(rel):
     abs_path = _safe_vault_path(rel)
     if not abs_path:
@@ -182,7 +168,6 @@ def pdf_file(rel):
 
 
 @bp.route("/api/page-nodes")
-@_login_required
 def pdf_api_page_nodes():
     rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
@@ -192,7 +177,6 @@ def pdf_api_page_nodes():
 
 
 @bp.route("/api/translate", methods=["POST"])
-@_login_required
 def pdf_api_translate():
     body = request.get_json(silent=True) or {}
     text = (body.get("text") or "").strip()
@@ -215,7 +199,6 @@ def pdf_api_translate():
 
 
 @bp.route("/api/to-note", methods=["POST"])
-@_login_required
 def pdf_api_to_note():
     """从选中文本创建笔记。AI 不整理（用户已选），但会加 PDF 来源行（文件名 + 页码 + 嵌入式 PDF rect）。"""
     body = request.get_json(silent=True) or {}
@@ -257,7 +240,6 @@ def pdf_api_to_note():
 
 
 @bp.route("/api/upload", methods=["POST"])
-@_login_required
 def pdf_api_upload():
     """上传 PDF 到 vault 子目录。multipart form：file + target_dir（默认 资源/uploads/）。"""
     f = request.files.get("file")
@@ -302,7 +284,6 @@ def _sanitize_filename(s: str) -> str:
 
 
 @bp.route("/api/explain", methods=["POST"])
-@_login_required
 def pdf_api_explain():
     body = request.get_json(silent=True) or {}
     text = (body.get("text") or "").strip()
