@@ -19,11 +19,16 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .page-wrap{position:relative;display:inline-block}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
 .textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;
-  /* 禁用 native 拖选（位置对不齐），改为点击 → 整行/段自动选中 */
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
-  -webkit-tap-highlight-color:rgba(96,165,250,.15)}
+  -webkit-tap-highlight-color:rgba(96,165,250,.15);
+  /* 关键：禁用字距/连字/字偶距，让 spans 宽度计算稳定（防 iOS Safari 偏移）*/
+  font-feature-settings:"kern" 0,"liga" 0,"clig" 0;
+  font-variant-ligatures:none;
+  font-kerning:none}
 .textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:pointer;transform-origin:0% 0%;
-  -webkit-user-select:none;user-select:none}
+  -webkit-user-select:none;user-select:none;
+  font-feature-settings:"kern" 0,"liga" 0,"clig" 0;
+  font-kerning:none}
 .textLayer span.markedContent{top:0;height:0}
 .textLayer br{-webkit-user-select:none;user-select:none}
 /* native selection 设透明 —— 视觉高亮交给手绘 overlay（避免 textLayer 对齐误差 */
@@ -232,6 +237,33 @@ async function renderPage(num) {
   });
   await tl.render();
 
+  // 把 textContent.items 的 PDF 坐标 → viewport 坐标缓存到 page-wrap
+  // 用于精确画高亮（跟 canvas 渲染用同一坐标源，避免 spans 物理位置偏移）
+  const itemBoxes = textContent.items.map(item => {
+    if (!item.transform) return null;
+    const [a, b, c, d, e, f] = item.transform;
+    // viewport.convertToViewportPoint(x, y) 把 PDF 坐标（左下为原点，y 向上）
+    // 转成 viewport 坐标（左上为原点，y 向下）。返回 [x, y]
+    const [vx, vy] = viewport.convertToViewportPoint(e, f);
+    const fontH = Math.abs(d) * viewport.scale;   // 字体高度 ≈ |transform.d| * scale
+    const w = (item.width || 0) * viewport.scale;
+    return {
+      x: vx,
+      y: vy - fontH,    // baseline 转成 top
+      w: w,
+      h: fontH || (item.height || 0) * viewport.scale,
+      str: item.str || '',
+    };
+  });
+  wrap.__itemBoxes = itemBoxes;
+  wrap.__textLayerDiv = textLayerDiv;
+  // textLayer 内 span 在 itemBoxes 里的 index：按 DOM 顺序 1:1
+  wrap.__getSpanIndex = (span) => {
+    const spans = textLayerDiv.querySelectorAll('span');
+    for (let i = 0; i < spans.length; i++) if (spans[i] === span) return i;
+    return -1;
+  };
+
   // 绑点击 → 选中整行 / 双击 → 扩段。避开 textLayer 对齐问题（不依赖 native drag-select）
   bindTextLayerClick(textLayerDiv);
 
@@ -341,7 +373,6 @@ function _spansInParagraph(targetSpan, textLayerDiv) {
 function _selectSpans(spans) {
   if (!spans.length) return;
   const range = document.createRange();
-  // 找 span 内的 text node 起止
   const firstTxt = spans[0].firstChild;
   const lastTxt  = spans[spans.length - 1].firstChild;
   if (!firstTxt || !lastTxt) return;
@@ -350,10 +381,28 @@ function _selectSpans(spans) {
   const sel = window.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
-  // 用 spans 自己的 rects 画 overlay（不靠 Range.getClientRects，更稳）
-  paintSelectionFromSpans(spans);
-  // 同步 lastSelText + 浮工具栏
   lastSelText = spans.map(s => s.textContent || '').join('').trim();
+  // overlay：用 itemBoxes（跟 canvas 渲染对齐）
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  let pw = spans[0].parentElement;
+  while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
+  if (pw) _paintWithItemBoxes(pw, range);
+  // 工具栏位置：用 overlay 内最后一个高亮 div 的位置
+  if (pw) {
+    const ov = pw.querySelector('.sel-overlay');
+    const lastHl = ov?.lastElementChild;
+    if (lastHl) {
+      const pwRect = pw.getBoundingClientRect();
+      const mainEl = document.getElementById('main');
+      const mainRect = mainEl.getBoundingClientRect();
+      const left = pwRect.left - mainRect.left + mainEl.scrollLeft + parseFloat(lastHl.style.left);
+      const top  = pwRect.top  - mainRect.top  + mainEl.scrollTop  + parseFloat(lastHl.style.top) + parseFloat(lastHl.style.height) + 6;
+      toolbar.style.left = Math.max(8, left) + 'px';
+      toolbar.style.top  = top + 'px';
+      toolbar.classList.add('open');
+      return;
+    }
+  }
   const rect = range.getBoundingClientRect();
   const mainEl = document.getElementById('main');
   const mainRect = mainEl.getBoundingClientRect();
@@ -429,6 +478,40 @@ function _wordBoundsAt(text, offset) {
   return {start: lo, end: hi};
 }
 
+// 用 itemBoxes（PDF.js 原始坐标）画选中高亮，跟 canvas 渲染对齐
+function _paintWithItemBoxes(pw, range) {
+  const ov = pw.querySelector('.sel-overlay');
+  if (!ov) return;
+  ov.innerHTML = '';
+  if (!pw.__itemBoxes || !pw.__getSpanIndex) return;
+  // 从 range 找 start/end span 在 textLayer 中的 index
+  const startSpan = (range.startContainer.nodeType === 3) ? range.startContainer.parentElement : range.startContainer;
+  const endSpan   = (range.endContainer.nodeType === 3) ? range.endContainer.parentElement : range.endContainer;
+  let sIdx = pw.__getSpanIndex(startSpan);
+  let eIdx = pw.__getSpanIndex(endSpan);
+  if (sIdx < 0 || eIdx < 0) return;
+  if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
+  const startOff = (range.startContainer.nodeType === 3) ? range.startOffset : 0;
+  const endOff   = (range.endContainer.nodeType === 3) ? range.endOffset   : ((endSpan.textContent || '').length);
+  for (let i = sIdx; i <= eIdx; i++) {
+    const box = pw.__itemBoxes[i];
+    if (!box || !box.str) continue;
+    const slen = box.str.length;
+    if (!slen) continue;
+    const cs = (i === sIdx) ? Math.min(startOff, slen) : 0;
+    const ce = (i === eIdx) ? Math.min(endOff, slen) : slen;
+    if (ce <= cs) continue;
+    const charW = box.w / slen;
+    const div = document.createElement('div');
+    div.className = 'hl';
+    div.style.left   = (box.x + cs * charW) + 'px';
+    div.style.top    = box.y + 'px';
+    div.style.width  = ((ce - cs) * charW) + 'px';
+    div.style.height = box.h + 'px';
+    ov.appendChild(div);
+  }
+}
+
 // 选中 span 内的子串 [start, end)，画 overlay，浮工具栏
 function _selectSpanRange(span, start, end) {
   const node = span.firstChild;
@@ -440,24 +523,29 @@ function _selectSpanRange(span, start, end) {
   sel.removeAllRanges();
   sel.addRange(range);
   lastSelText = (node.textContent || '').slice(start, end);
-  // overlay：用 range.getClientRects()（span 内子串的真实矩形）
+  // overlay：用 itemBoxes（PDF.js 原始坐标）
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
   let pw = span.parentElement;
   while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
-  if (pw) {
-    const ov = pw.querySelector('.sel-overlay');
-    const pwRect = pw.getBoundingClientRect();
-    for (const r of range.getClientRects()) {
-      if (!r.width || !r.height) continue;
-      const div = document.createElement('div');
-      div.className = 'hl';
-      div.style.left   = (r.left - pwRect.left) + 'px';
-      div.style.top    = (r.top  - pwRect.top)  + 'px';
-      div.style.width  = r.width  + 'px';
-      div.style.height = r.height + 'px';
-      ov.appendChild(div);
+  if (pw) _paintWithItemBoxes(pw, range);
+  // 工具栏：item box 算位置（跟 overlay 同坐标系，对齐 PDF）
+  if (pw && pw.__itemBoxes && pw.__getSpanIndex) {
+    const idx = pw.__getSpanIndex(span);
+    const box = idx >= 0 ? pw.__itemBoxes[idx] : null;
+    if (box) {
+      const pwRect = pw.getBoundingClientRect();
+      const mainEl = document.getElementById('main');
+      const mainRect = mainEl.getBoundingClientRect();
+      const charW = box.w / Math.max(1, box.str.length);
+      const left = pwRect.left - mainRect.left + mainEl.scrollLeft + box.x + (start * charW);
+      const top  = pwRect.top  - mainRect.top  + mainEl.scrollTop  + box.y + box.h + 6;
+      toolbar.style.left = Math.max(8, left) + 'px';
+      toolbar.style.top  = top + 'px';
+      toolbar.classList.add('open');
+      return;
     }
   }
+  // fallback：用 range rect
   const rect = range.getBoundingClientRect();
   const mainEl = document.getElementById('main');
   const mainRect = mainEl.getBoundingClientRect();
@@ -528,25 +616,11 @@ function _applyRangeFromCarets(startC, endC, textLayerDiv) {
   sel.addRange(range);
   lastSelText = range.toString();
   if (!lastSelText.trim()) { toolbar.classList.remove('open'); return false; }
-  // overlay：用 range.getClientRects()（跨 spans 也准）
+  // overlay：用 PDF.js itemBoxes（PDF 原始坐标，跟 canvas 渲染同源，最准）
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
-  // 找 range 起点所在的 page-wrap（暂只画当前页）
   let pw = (s.node.nodeType === 3 ? s.node.parentElement : s.node);
   while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
-  if (pw) {
-    const ov = pw.querySelector('.sel-overlay');
-    const pwRect = pw.getBoundingClientRect();
-    for (const r of range.getClientRects()) {
-      if (!r.width || !r.height) continue;
-      const div = document.createElement('div');
-      div.className = 'hl';
-      div.style.left   = (r.left - pwRect.left) + 'px';
-      div.style.top    = (r.top  - pwRect.top)  + 'px';
-      div.style.width  = r.width  + 'px';
-      div.style.height = r.height + 'px';
-      ov.appendChild(div);
-    }
-  }
+  if (pw) _paintWithItemBoxes(pw, range);
   const rect = range.getBoundingClientRect();
   const mainEl = document.getElementById('main');
   const mainRect = mainEl.getBoundingClientRect();
