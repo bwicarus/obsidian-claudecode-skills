@@ -28,6 +28,8 @@ sonnet 200K 上下文够。失败的笔记跳过（不影响其它）。
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import re
 import sys
@@ -245,9 +247,91 @@ def main() -> int:
             print(f"  [{done}/{len(notes)}] {p.name:<40} → {len(covered)} 个节点  ({reason[:30]})",
                   flush=True)
 
+    # ===== 解锁规则过滤 =====
+    # 对每个新关联 (note, node)，校验：
+    #   - node.state != "locked"          → 允许
+    #   - node.state == "locked" 但前置 mastered ≥ 50%  → 允许
+    #   - 否则 → 拒绝（记 _rejected_links 带 note_hash 防重试）
+    # 笔记内容 hash 与拒绝记录里的相同 → 同笔记不允许再次尝试同节点
+    id2_local = {n["id"]: n for n in kg["nodes"]}
+    prereqs_of: dict[str, list[str]] = defaultdict(list)
+    for e in kg.get("edges", []):
+        if e.get("kind") == "prereq" and id2_local.get(e["to"], {}).get("level") == 2:
+            prereqs_of[e["to"]].append(e["from"])
+    rejected_links: dict = kg.get("_rejected_links", {}) or {}
+    accepted_count = 0
+    new_reject_count = 0
+    skipped_by_hash_count = 0
+    filtered_results: dict[Path, list[str]] = {}
+    for note_path, (covered, _) in results.items():
+        try:
+            rel = note_path.relative_to(VAULT_ROOT).as_posix()
+        except ValueError:
+            rel = note_path.name
+        # 计算笔记当前 hash（基于清洗后内容）
+        try:
+            note_clean = read_note_clean(note_path)
+        except Exception:
+            note_clean = ""
+        note_hash = hashlib.sha1(note_clean.encode("utf-8")).hexdigest()[:16]
+        existing_rejects = rejected_links.get(rel, {}) or {}
+        kept: list[str] = []
+        for nid in covered:
+            n = id2_local.get(nid)
+            if not n:
+                continue
+            # 同 hash 已被拒绝 → 跳过（不允许再次尝试同节点）
+            rj = existing_rejects.get(nid)
+            if rj and rj.get("note_hash") == note_hash:
+                skipped_by_hash_count += 1
+                continue
+            # 规则判定
+            state = n.get("state", "locked")
+            if state in ("mastered", "unlockable"):
+                kept.append(nid); accepted_count += 1
+                # 笔记内容变了（之前 hash 不同）→ 旧拒绝记录作废
+                if rj: existing_rejects.pop(nid, None)
+                continue
+            # locked → 看前置 mastered 比例（level >= 2 算 mastered）
+            prs = prereqs_of.get(nid, [])
+            if not prs:
+                reason = "node locked + 无前置数据"
+                cleared, total, ratio = 0, 0, 0.0
+            else:
+                cleared = sum(1 for p in prs
+                              if (id2_local.get(p, {}).get("mastery_level", 0) or 0) >= 2)
+                total = len(prs)
+                ratio = cleared / total
+            if total > 0 and ratio >= 0.5:
+                kept.append(nid); accepted_count += 1
+                if rj: existing_rejects.pop(nid, None)
+            else:
+                # 拒绝：写入 _rejected_links
+                existing_rejects[nid] = {
+                    "note_hash": note_hash,
+                    "reason": f"node locked + 前置解锁 {cleared}/{total}={ratio:.0%}" if total else "node locked + 无前置数据",
+                    "rejected_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+                new_reject_count += 1
+        if existing_rejects:
+            rejected_links[rel] = existing_rejects
+        elif rel in rejected_links:
+            del rejected_links[rel]
+        filtered_results[note_path] = kept
+    kg["_rejected_links"] = rejected_links
+    print(f"\n解锁规则过滤：通过 {accepted_count} / 拒绝 {new_reject_count} / "
+          f"按 hash 跳过 {skipped_by_hash_count}", flush=True)
+    if new_reject_count and new_reject_count <= 20:
+        # 列前 20 条拒绝详情
+        for note_rel, ids in rejected_links.items():
+            for nid, info in ids.items():
+                n = id2_local.get(nid, {})
+                print(f"  ✗ {note_rel} ↛ [{n.get('numeric_label','?')}] "
+                      f"{n.get('name','?')}：{info['reason']}", flush=True)
+
     # ===== 增量合并：更新 KG 顶层持久化字典 _note_to_covered_l2 =====
     persistent: dict[str, list[str]] = kg.get("_note_to_covered_l2", {}) or {}
-    for note_path, (covered, _) in results.items():
+    for note_path, covered in filtered_results.items():
         try:
             rel = note_path.relative_to(VAULT_ROOT).as_posix()
         except ValueError:
