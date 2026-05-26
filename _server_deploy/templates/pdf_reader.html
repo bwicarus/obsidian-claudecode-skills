@@ -466,8 +466,78 @@ function _selectSpanRange(span, start, end) {
   toolbar.classList.add('open');
 }
 
+// 拿点击/触摸位置对应的 (node, offset)，可跨 span
+function _caretAtPoint(x, y) {
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (p && p.offsetNode) return {node: p.offsetNode, offset: p.offset};
+  }
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r) return {node: r.startContainer, offset: r.startOffset};
+  }
+  return null;
+}
+
+// 用 (start, end) 两个 caret 设 selection、画 overlay、浮工具栏
+function _applyRangeFromCarets(startC, endC, textLayerDiv) {
+  if (!startC || !endC || !startC.node || !endC.node) return false;
+  // 限定都在 textLayer 内
+  if (!textLayerDiv.contains(startC.node) || !textLayerDiv.contains(endC.node)) return false;
+  // 方向修正
+  let s = startC, e = endC;
+  if (s.node === e.node) {
+    if (s.offset > e.offset) [s, e] = [e, s];
+  } else {
+    const pos = s.node.compareDocumentPosition(e.node);
+    if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) [s, e] = [e, s];
+  }
+  const range = document.createRange();
+  try {
+    range.setStart(s.node, s.offset);
+    range.setEnd(e.node, e.offset);
+  } catch (_) { return false; }
+  if (range.collapsed) return false;
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  lastSelText = range.toString();
+  if (!lastSelText.trim()) { toolbar.classList.remove('open'); return false; }
+  // overlay：用 range.getClientRects()（跨 spans 也准）
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  // 找 range 起点所在的 page-wrap（暂只画当前页）
+  let pw = (s.node.nodeType === 3 ? s.node.parentElement : s.node);
+  while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
+  if (pw) {
+    const ov = pw.querySelector('.sel-overlay');
+    const pwRect = pw.getBoundingClientRect();
+    for (const r of range.getClientRects()) {
+      if (!r.width || !r.height) continue;
+      const div = document.createElement('div');
+      div.className = 'hl';
+      div.style.left   = (r.left - pwRect.left) + 'px';
+      div.style.top    = (r.top  - pwRect.top)  + 'px';
+      div.style.width  = r.width  + 'px';
+      div.style.height = r.height + 'px';
+      ov.appendChild(div);
+    }
+  }
+  const rect = range.getBoundingClientRect();
+  const mainEl = document.getElementById('main');
+  const mainRect = mainEl.getBoundingClientRect();
+  toolbar.style.left = Math.max(8, rect.left - mainRect.left + mainEl.scrollLeft) + 'px';
+  toolbar.style.top  = (rect.bottom - mainRect.top + mainEl.scrollTop + 6) + 'px';
+  toolbar.classList.add('open');
+  return true;
+}
+
+let _dragStart = null;     // {x, y, caret, span, time}
+let _dragMoved = false;
+let _dragMoveRaf = null;
+
 function bindTextLayerClick(textLayerDiv) {
-  const handle = (span, clientX, clientY) => {
+  // 单击/双击/三击逻辑（移动距离 < 8px 走这里）
+  const handleClick = (span, clientX, clientY) => {
     if (!span || !textLayerDiv.contains(span) || !span.firstChild) return;
     const now = Date.now();
     if (_lastClickSpan === span && now - _lastClickTime < 380) {
@@ -478,14 +548,12 @@ function bindTextLayerClick(textLayerDiv) {
     }
     _lastClickTime = now;
     if (_clickCount === 1) {
-      // 单击：选词（用 caret API 拿字符 offset → 词边界扩展）
       const offset = _spanOffsetFromPoint(span, clientX, clientY);
       const text = span.textContent || '';
       if (offset !== null) {
         const wb = _wordBoundsAt(text, offset);
         if (wb) { _selectSpanRange(span, wb.start, wb.end); return; }
       }
-      // fallback：caret API 不可用 / 点在空白 → 选整个 span
       _selectSpans([span]);
     } else if (_clickCount === 2) {
       _selectSpans(_spansInSameLine(span, textLayerDiv));
@@ -493,22 +561,88 @@ function bindTextLayerClick(textLayerDiv) {
       _selectSpans(_spansInParagraph(span, textLayerDiv));
     }
   };
-  textLayerDiv.addEventListener('click', (e) => {
-    const span = e.target.closest && e.target.closest('span');
-    if (!span) return;
-    e.preventDefault(); e.stopPropagation();
-    handle(span, e.clientX, e.clientY);
+
+  // 起始：mousedown / touchstart
+  const onStart = (x, y, target) => {
+    const span = target?.closest && target.closest('span');
+    if (!span || !textLayerDiv.contains(span)) { _dragStart = null; return; }
+    _dragStart = {
+      x, y,
+      caret: _caretAtPoint(x, y),
+      span,
+      time: Date.now(),
+    };
+    _dragMoved = false;
+  };
+
+  // 移动：mousemove / touchmove —— 实时更新选区
+  const onMove = (x, y, ev) => {
+    if (!_dragStart) return;
+    const dx = Math.abs(x - _dragStart.x);
+    const dy = Math.abs(y - _dragStart.y);
+    if (dx + dy < 8) return;
+    _dragMoved = true;
+    // touchmove 时 preventDefault 阻止页面滚动（让拖选生效）
+    if (ev && ev.cancelable) ev.preventDefault();
+    // RAF 节流
+    if (_dragMoveRaf) return;
+    _dragMoveRaf = requestAnimationFrame(() => {
+      _dragMoveRaf = null;
+      if (!_dragStart) return;
+      const endC = _caretAtPoint(x, y);
+      if (endC) _applyRangeFromCarets(_dragStart.caret, endC, textLayerDiv);
+    });
+  };
+
+  // 结束：mouseup / touchend
+  const onEnd = (x, y, target) => {
+    if (!_dragStart) return;
+    const start = _dragStart;
+    _dragStart = null;
+    if (_dragMoved) {
+      // 拖选：用结束位置 caret + 起始 caret 画范围
+      const endC = _caretAtPoint(x, y);
+      if (endC) _applyRangeFromCarets(start.caret, endC, textLayerDiv);
+    } else {
+      // 单击：走单/双/三击逻辑
+      handleClick(start.span, x, y);
+    }
+  };
+
+  // 鼠标
+  textLayerDiv.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    onStart(e.clientX, e.clientY, e.target);
   });
-  textLayerDiv.addEventListener('touchend', (e) => {
-    if (e.touches.length) return;
-    const t = e.changedTouches[0];
-    if (!t) return;
-    const el = document.elementFromPoint(t.clientX, t.clientY);
-    const span = el && el.closest && el.closest('span');
-    if (!span) return;
+  document.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY, null));
+  document.addEventListener('mouseup', (e) => {
+    if (!_dragStart) return;
     e.preventDefault();
-    handle(span, t.clientX, t.clientY);
+    onEnd(e.clientX, e.clientY, e.target);
   });
+
+  // 触屏
+  textLayerDiv.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { _dragStart = null; return; }
+    const t = e.touches[0];
+    onStart(t.clientX, t.clientY, e.target);
+  }, {passive: true});
+  textLayerDiv.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    onMove(t.clientX, t.clientY, e);
+  }, {passive: false});   // 必须 passive:false 才能 preventDefault 阻滚动
+  textLayerDiv.addEventListener('touchend', (e) => {
+    if (!_dragStart) return;
+    const t = e.changedTouches[0];
+    if (!t) { _dragStart = null; return; }
+    e.preventDefault();
+    onEnd(t.clientX, t.clientY, e.target);
+  });
+  textLayerDiv.addEventListener('touchcancel', () => { _dragStart = null; });
+
+  // 屏蔽 textLayer 内的 click 默认行为（避免双击/三击逻辑被 mouseup 已处理后又跑一遍）
+  textLayerDiv.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
 }
 
 function paintSelectionOverlay() {
