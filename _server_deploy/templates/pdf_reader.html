@@ -385,40 +385,129 @@ function paintSelectionFromSpans(spans) {
   }
 }
 
+// 点击坐标 → span 内字符 offset（用 caret API，兼容新/旧浏览器）
+function _spanOffsetFromPoint(span, x, y) {
+  const node = span.firstChild;
+  if (!node || node.nodeType !== 3) return null;
+  // 新 API (Firefox / Chrome 128+)
+  if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(x, y);
+    if (pos && pos.offsetNode === node) return pos.offset;
+  }
+  // 旧 API (Safari / 老 Chrome)
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r && r.startContainer === node) return r.startOffset;
+  }
+  return null;
+}
+
+// 从 offset 向左/右扩展到词边界
+function _wordBoundsAt(text, offset) {
+  if (!text) return null;
+  // 中日韩字符 / 字母数字下划线 / 部分常用符号算 "词字符"
+  const isWord = (c) => /[\w一-鿿぀-ヿ㐀-䶿가-힯]/.test(c);
+  let lo = Math.max(0, Math.min(offset, text.length));
+  let hi = lo;
+  // 点击点不在 word 字符上 → 偏左一格再判
+  if (lo < text.length && !isWord(text[lo])) {
+    if (lo > 0 && isWord(text[lo - 1])) lo--;
+    else return null;   // 点在标点/空白
+  }
+  while (lo > 0 && isWord(text[lo - 1])) lo--;
+  hi = Math.max(hi, offset);
+  while (hi < text.length && isWord(text[hi])) hi++;
+  if (hi <= lo) return null;
+  // 中文逐字选中（每字一"词"）：如果是 CJK 范围，缩小到点击的那一个字
+  const cjk = (c) => /[一-鿿㐀-䶿]/.test(c);
+  if (offset < text.length && cjk(text[offset])) {
+    return {start: offset, end: offset + 1};
+  }
+  if (offset > 0 && cjk(text[offset - 1])) {
+    return {start: offset - 1, end: offset};
+  }
+  return {start: lo, end: hi};
+}
+
+// 选中 span 内的子串 [start, end)，画 overlay，浮工具栏
+function _selectSpanRange(span, start, end) {
+  const node = span.firstChild;
+  if (!node) return;
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, Math.min(end, (node.textContent || '').length));
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  lastSelText = (node.textContent || '').slice(start, end);
+  // overlay：用 range.getClientRects()（span 内子串的真实矩形）
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  let pw = span.parentElement;
+  while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
+  if (pw) {
+    const ov = pw.querySelector('.sel-overlay');
+    const pwRect = pw.getBoundingClientRect();
+    for (const r of range.getClientRects()) {
+      if (!r.width || !r.height) continue;
+      const div = document.createElement('div');
+      div.className = 'hl';
+      div.style.left   = (r.left - pwRect.left) + 'px';
+      div.style.top    = (r.top  - pwRect.top)  + 'px';
+      div.style.width  = r.width  + 'px';
+      div.style.height = r.height + 'px';
+      ov.appendChild(div);
+    }
+  }
+  const rect = range.getBoundingClientRect();
+  const mainEl = document.getElementById('main');
+  const mainRect = mainEl.getBoundingClientRect();
+  toolbar.style.left = Math.max(8, rect.left - mainRect.left + mainEl.scrollLeft) + 'px';
+  toolbar.style.top  = (rect.bottom - mainRect.top + mainEl.scrollTop + 6) + 'px';
+  toolbar.classList.add('open');
+}
+
 function bindTextLayerClick(textLayerDiv) {
-  const handler = (e) => {
-    const span = e.target.closest('span');
+  const handle = (span, clientX, clientY) => {
     if (!span || !textLayerDiv.contains(span) || !span.firstChild) return;
-    e.preventDefault(); e.stopPropagation();
     const now = Date.now();
-    // 连续点同一 span 在 380ms 内 → 升级粒度（单词→行→段→回单词）
     if (_lastClickSpan === span && now - _lastClickTime < 380) {
-      _clickCount = (_clickCount % 3) + 1;   // 1→2→3→1
+      _clickCount = (_clickCount % 3) + 1;
     } else {
       _clickCount = 1;
       _lastClickSpan = span;
     }
     _lastClickTime = now;
-    let spans;
     if (_clickCount === 1) {
-      spans = [span];                                       // 单击：选当前 span
+      // 单击：选词（用 caret API 拿字符 offset → 词边界扩展）
+      const offset = _spanOffsetFromPoint(span, clientX, clientY);
+      const text = span.textContent || '';
+      if (offset !== null) {
+        const wb = _wordBoundsAt(text, offset);
+        if (wb) { _selectSpanRange(span, wb.start, wb.end); return; }
+      }
+      // fallback：caret API 不可用 / 点在空白 → 选整个 span
+      _selectSpans([span]);
     } else if (_clickCount === 2) {
-      spans = _spansInSameLine(span, textLayerDiv);         // 双击：整行
+      _selectSpans(_spansInSameLine(span, textLayerDiv));
     } else {
-      spans = _spansInParagraph(span, textLayerDiv);        // 三击：整段
+      _selectSpans(_spansInParagraph(span, textLayerDiv));
     }
-    _selectSpans(spans);
   };
-  textLayerDiv.addEventListener('click', handler);
-  // iPad 上 click 有 300ms 延迟，touchend 立即响应
+  textLayerDiv.addEventListener('click', (e) => {
+    const span = e.target.closest && e.target.closest('span');
+    if (!span) return;
+    e.preventDefault(); e.stopPropagation();
+    handle(span, e.clientX, e.clientY);
+  });
   textLayerDiv.addEventListener('touchend', (e) => {
-    if (e.touches.length) return;   // 多指不处理
+    if (e.touches.length) return;
     const t = e.changedTouches[0];
     if (!t) return;
     const el = document.elementFromPoint(t.clientX, t.clientY);
-    if (el && el.closest && el.closest('span')) {
-      handler({target: el, preventDefault: () => e.preventDefault(), stopPropagation: () => {}});
-    }
+    const span = el && el.closest && el.closest('span');
+    if (!span) return;
+    e.preventDefault();
+    handle(span, t.clientX, t.clientY);
   });
 }
 
