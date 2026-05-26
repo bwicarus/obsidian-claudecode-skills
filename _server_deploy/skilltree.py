@@ -308,10 +308,6 @@ TYPE_ZH = {"definition":"定义", "theorem":"定理", "proposition":"命题",
 def _safe_filename(s):
     return re.sub(r'[\\/:*?"<>|]', '', s or "新节点")[:50]
 
-def _rand_hex3():
-    import random
-    return f"{random.randint(0, 0xfff):03X}"
-
 def _find_node_blocks_in_page(page, numeric_label, max_blocks=8):
     """在 PDF page 里找含 numeric_label 的 text blocks + 后续相关 block。
     返回 [{text, bbox}, ...]。pymupdf 坐标系跟 obsidian 一致。"""
