@@ -191,29 +191,36 @@ async function renderPage(num) {
   const wrap = document.createElement('div');
   wrap.className = 'page-wrap';
   const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  canvas.style.width = viewport.width + 'px';
-  canvas.style.height = viewport.height + 'px';
+  // PDF.js v4 推荐：canvas backing store = viewport * devicePixelRatio（retina 清晰）
+  // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）
+  const outputScale = window.devicePixelRatio || 1;
+  const cw = Math.floor(viewport.width);
+  const ch = Math.floor(viewport.height);
+  canvas.width  = Math.floor(viewport.width  * outputScale);
+  canvas.height = Math.floor(viewport.height * outputScale);
+  canvas.style.width  = cw + 'px';
+  canvas.style.height = ch + 'px';
   wrap.appendChild(canvas);
   const textLayerDiv = document.createElement('div');
   textLayerDiv.className = 'textLayer';
-  textLayerDiv.style.width = viewport.width + 'px';
-  textLayerDiv.style.height = viewport.height + 'px';
-  // PDF.js v4 TextLayer 需要这个 CSS variable 来计算 spans 缩放
+  textLayerDiv.style.width  = cw + 'px';
+  textLayerDiv.style.height = ch + 'px';
   textLayerDiv.style.setProperty('--scale-factor', viewport.scale);
+  // PDF.js v4 还可能用 --total-scale-factor 算 spans（含 dpr），保险一起设
+  textLayerDiv.style.setProperty('--total-scale-factor', viewport.scale);
   wrap.appendChild(textLayerDiv);
-  // 手绘选中高亮 overlay
+  // 手绘选中高亮 overlay（同 CSS 尺寸，对齐 canvas + textLayer）
   const selOverlay = document.createElement('div');
   selOverlay.className = 'sel-overlay';
-  selOverlay.style.width = viewport.width + 'px';
-  selOverlay.style.height = viewport.height + 'px';
+  selOverlay.style.width  = cw + 'px';
+  selOverlay.style.height = ch + 'px';
   wrap.appendChild(selOverlay);
   container.appendChild(wrap);
 
-  // 渲染 canvas
+  // 渲染 canvas（用 transform 把 viewport 坐标 scale 到 backing store）
   const ctx = canvas.getContext('2d');
-  await page.render({canvasContext: ctx, viewport}).promise;
+  const renderTransform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+  await page.render({canvasContext: ctx, viewport, transform: renderTransform}).promise;
 
   // 渲染 text layer（让用户选中文本）
   const textContent = await page.getTextContent();
