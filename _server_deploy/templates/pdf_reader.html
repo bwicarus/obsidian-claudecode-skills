@@ -7,14 +7,14 @@
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
-#app{display:grid;grid-template-columns:1fr 320px;grid-template-rows:48px 1fr;height:100vh}
-#header{grid-column:1/3;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px}
+#app{display:flex;flex-direction:column;height:100vh}
+#header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px}
 #header h1{font-size:14px;margin:0;color:#cfe6ff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
 #header button:hover{background:#2c3e6a;border-color:#3b6db5}
 #header input[type=number]{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:4px 8px;width:60px;font-size:12px}
 
-#main{overflow:auto;background:#0a0e1a;padding:20px;text-align:center;position:relative}
+#main{flex:1;overflow:auto;background:#0a0e1a;padding:20px;text-align:center;position:relative}
 #main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4);max-width:100%;height:auto}
 .page-wrap{position:relative;display:inline-block}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
@@ -41,7 +41,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
-#sidebar{background:#10162a;border-left:1px solid #2a3550;overflow-y:auto;padding:14px}
+/* 侧栏抽屉：默认收起，点 header 按钮滑出 */
+#sidebar{position:fixed;top:48px;right:0;bottom:0;width:320px;background:#10162a;border-left:1px solid #2a3550;overflow-y:auto;padding:14px;transform:translateX(100%);transition:transform .22s ease;z-index:10;box-shadow:-8px 0 24px rgba(0,0,0,.4)}
+#sidebar.open{transform:translateX(0)}
+#sidebar-close{position:absolute;top:8px;right:8px;background:transparent;border:none;color:#8a9bb4;font-size:18px;cursor:pointer;padding:4px 8px;border-radius:4px}
+#sidebar-close:hover{background:#1a2540;color:#fff}
 #sidebar h2{font-size:13px;color:#8a9bb4;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px;font-weight:600}
 .kg-node{background:#0d1322;border:1px solid #1f2740;border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font-size:12px}
 .kg-node:hover{background:#162045;border-color:#3b6db5}
@@ -75,8 +79,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #result-modal .loading{color:#8a9bb4;font-style:italic}
 
 @media (max-width:900px){
-  #app{grid-template-columns:1fr;grid-template-rows:48px 1fr auto}
-  #sidebar{max-height:30vh;border-left:none;border-top:1px solid #2a3550}
+  #sidebar{width:85vw}
 }
 </style>
 </head>
@@ -85,12 +88,14 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   <div id="header">
     <button onclick="location.href='/pdf/'">📚 文件</button>
     <h1>{{ file_name }}</h1>
-    <button onclick="changePage(-1)">◀</button>
+    <button id="mode-toggle" onclick="toggleReadMode()" title="切换 单页 / 连续滚动">📄 单页</button>
+    <button onclick="changePage(-1)" title="上一页">◀</button>
     <input type="number" id="page-input" value="{{ page }}" min="1" onchange="goToPage(this.value)">
     <span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span>
-    <button onclick="changePage(1)">▶</button>
+    <button onclick="changePage(1)" title="下一页">▶</button>
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
+    <button onclick="toggleSidebar()" title="对应知识点">📋 知识点</button>
   </div>
   <div id="main">
     <div id="page-container"></div>
@@ -104,11 +109,12 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
       </div>
     </div>
   </div>
-  <aside id="sidebar">
-    <h2>当前页对应知识点</h2>
-    <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
-  </aside>
 </div>
+<aside id="sidebar">
+  <button id="sidebar-close" onclick="toggleSidebar()" title="关闭">✕</button>
+  <h2>当前页对应知识点</h2>
+  <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
+</aside>
 
 <div id="result-mask" onclick="if(event.target===this) closeResult()">
   <div id="result-modal">
@@ -168,6 +174,8 @@ window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = {{ page }};
 let scale = 1.4;
+let readMode = localStorage.getItem('pdf-read-mode') || 'single';   // 'single' | 'continuous'
+let _contIO = null;   // IntersectionObserver for 连续模式
 
 async function loadPdf() {
   try {
@@ -184,7 +192,13 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
-    renderPage(currentPage);
+    // 更新模式按钮文字
+    document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+    if (readMode === 'continuous') {
+      await setupContinuousMode();
+    } else {
+      renderPage(currentPage);
+    }
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
     document.getElementById('page-container').innerHTML =
@@ -197,13 +211,26 @@ async function renderPage(num) {
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
   currentPage = num;
   document.getElementById('page-input').value = num;
+  if (readMode === 'continuous') {
+    // 连续模式：滚到对应页占位 + 触发 IntersectionObserver 渲染
+    const ph = document.querySelector(`[data-page-num="${num}"]`);
+    if (ph) ph.scrollIntoView({block: 'start', behavior: 'auto'});
+    return;
+  }
+  await _renderPageInto(num, document.getElementById('page-container'), true);
+}
+
+async function _renderPageInto(num, wrap) {
+  if (!pdfDoc) return;
+  if (wrap.dataset.loaded === '1') return;
   const page = await pdfDoc.getPage(num);
   const viewport = page.getViewport({scale});
-
-  const container = document.getElementById('page-container');
-  container.innerHTML = '';
-  const wrap = document.createElement('div');
-  wrap.className = 'page-wrap';
+  // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset
+  wrap.innerHTML = '';
+  wrap.style.width = ''; wrap.style.height = '';
+  wrap.style.background = ''; wrap.style.color = '';
+  wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
+  wrap.dataset.pageNum = num;
   const canvas = document.createElement('canvas');
   // PDF.js v4 推荐：canvas backing store = viewport * devicePixelRatio（retina 清晰）
   // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）
@@ -229,7 +256,6 @@ async function renderPage(num) {
   selOverlay.style.width  = cw + 'px';
   selOverlay.style.height = ch + 'px';
   wrap.appendChild(selOverlay);
-  container.appendChild(wrap);
 
   // 渲染 canvas（用 transform 把 viewport 坐标 scale 到 backing store）
   const ctx = canvas.getContext('2d');
@@ -303,14 +329,15 @@ async function renderPage(num) {
 
   // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
   loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
+  wrap.dataset.loaded = '1';
 
-  // 同步 URL（不刷新页面）
-  const u = new URL(location.href);
-  u.searchParams.set('page', num);
-  history.replaceState(null, '', u);
-
-  // 拉当前页对应的 KG 节点
-  loadPageNodes(num);
+  // 同步 URL + 拉 KG 节点：只在单页模式做
+  if (readMode === 'single') {
+    const u = new URL(location.href);
+    u.searchParams.set('page', num);
+    history.replaceState(null, '', u);
+    loadPageNodes(num);
+  }
 }
 
 async function loadPageNodes(num) {
@@ -336,7 +363,96 @@ async function loadPageNodes(num) {
 
 window.changePage = (delta) => renderPage(currentPage + delta);
 window.goToPage = (n) => renderPage(n);
-window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + delta)); renderPage(currentPage); };
+window.zoomChange = async (delta) => {
+  scale = Math.max(0.6, Math.min(3.0, scale + delta));
+  if (readMode === 'continuous') await setupContinuousMode();
+  else renderPage(currentPage);
+};
+window.toggleSidebar = () => document.getElementById('sidebar').classList.toggle('open');
+window.toggleReadMode = async () => {
+  readMode = readMode === 'single' ? 'continuous' : 'single';
+  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
+  document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+  if (readMode === 'continuous') await setupContinuousMode();
+  else renderPage(currentPage);
+};
+
+// 连续模式：所有页占位 + IntersectionObserver 懒加载
+async function setupContinuousMode() {
+  const container = document.getElementById('page-container');
+  container.innerHTML = '';
+  if (_contIO) { _contIO.disconnect(); _contIO = null; }
+  // 拿所有页的 viewport 算占位 size（并发 fetch）
+  const pageInfos = await Promise.all(Array.from({length: pdfDoc.numPages}, async (_, i) => {
+    const page = await pdfDoc.getPage(i + 1);
+    const v = page.getViewport({scale});
+    return {num: i + 1, w: Math.floor(v.width), h: Math.floor(v.height)};
+  }));
+  for (const info of pageInfos) {
+    const ph = document.createElement('div');
+    ph.className = 'page-wrap';
+    ph.dataset.pageNum = info.num;
+    ph.dataset.loaded = '0';
+    ph.style.width  = info.w + 'px';
+    ph.style.height = info.h + 'px';
+    ph.style.background = '#fff';
+    ph.style.color = '#888';
+    ph.style.display = 'flex';
+    ph.style.alignItems = 'center';
+    ph.style.justifyContent = 'center';
+    ph.style.margin = '0 auto 12px';
+    ph.textContent = '… 第 ' + info.num + ' 页';
+    container.appendChild(ph);
+  }
+  // IntersectionObserver：可见 ±500px 渲染；离开 ±2000px 释放（节内存）
+  _contIO = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting && e.target.dataset.loaded === '0') {
+        const num = parseInt(e.target.dataset.pageNum);
+        _renderPageInto(num, e.target);
+      }
+    });
+  }, {rootMargin: '500px', root: document.getElementById('main')});
+  container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
+  // 监听滚动同步 currentPage（跟踪可见页用于"上一页 / 下一页"按钮）
+  const mainEl = document.getElementById('main');
+  mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
+  // 滚到 currentPage
+  const target = document.querySelector(`[data-page-num="${currentPage}"]`);
+  if (target) {
+    setTimeout(() => target.scrollIntoView({block: 'start', behavior: 'auto'}), 50);
+  }
+}
+
+let _scrollTimer = null;
+function _onContinuousScroll() {
+  if (_scrollTimer) return;
+  _scrollTimer = setTimeout(() => {
+    _scrollTimer = null;
+    const mainEl = document.getElementById('main');
+    const mainTop = mainEl.getBoundingClientRect().top;
+    const viewportH = mainEl.clientHeight;
+    // 找视口中线穿过的页面
+    const center = mainTop + viewportH / 2;
+    const wraps = document.querySelectorAll('#page-container .page-wrap');
+    for (const w of wraps) {
+      const r = w.getBoundingClientRect();
+      if (r.top <= center && r.bottom >= center) {
+        const num = parseInt(w.dataset.pageNum);
+        if (num !== currentPage) {
+          currentPage = num;
+          document.getElementById('page-input').value = num;
+          // 同步 URL + 拉 KG 节点
+          const u = new URL(location.href);
+          u.searchParams.set('page', num);
+          history.replaceState(null, '', u);
+          loadPageNodes(num);
+        }
+        break;
+      }
+    }
+  }, 200);
+}
 
 // 选中浮出工具栏 —— 跨桌面（mouseup）+ 触屏（touchend）+ 通用（selectionchange）
 const toolbar = document.getElementById('sel-toolbar');
