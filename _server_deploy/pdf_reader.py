@@ -238,6 +238,40 @@ def pdf_api_page_nodes():
     return jsonify({"nodes": _find_kg_nodes_for_page(rel, page)})
 
 
+_DICT_DB_PATH = CLAUDE_DIR / "data" / "ecdict.db"
+
+@bp.route("/api/dict")
+def pdf_api_dict():
+    """ECDICT 离线英汉字典查询。GET ?word=X → {ok, word, phonetic, translation, definition}"""
+    word = (request.args.get("word") or "").strip().lower()
+    if not word or len(word) > 50:
+        return jsonify({"ok": False, "error": "invalid word"}), 400
+    if not _DICT_DB_PATH.exists():
+        return jsonify({"ok": False, "error": "dict db missing"}), 500
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{_DICT_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT word, phonetic, translation, definition, exchange FROM stardict WHERE word = ? COLLATE NOCASE LIMIT 1", (word,))
+        row = cur.fetchone()
+        # 没命中：查 exchange 表（屈折形态 → 原型）
+        if not row:
+            cur.execute("SELECT word, phonetic, translation, definition, exchange FROM stardict WHERE exchange LIKE ? LIMIT 1",
+                        (f"%0:{word}%",))
+            row = cur.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"ok": False, "error": "not found"})
+        return jsonify({
+            "ok": True,
+            "word": row[0], "phonetic": row[1] or "",
+            "translation": row[2] or "", "definition": row[3] or "",
+            "exchange": row[4] or "",
+        })
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
 @bp.route("/api/translate", methods=["POST"])
 def pdf_api_translate():
     body = request.get_json(silent=True) or {}

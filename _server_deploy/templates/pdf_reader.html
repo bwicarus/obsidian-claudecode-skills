@@ -1258,9 +1258,31 @@ async function aiCall(path, body, label) {
   }
 }
 
-window.onTranslate = () => {
+window.onTranslate = async () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');
+  const text = lastSelText.trim();
+  // 单词（英文字母、长度 ≤ 30、无空格）→ 查 ECDICT 离线字典（秒查，不耗 AI 额度）
+  const isWord = text.length <= 30 && /^[A-Za-z][A-Za-z\-']*$/.test(text);
+  if (isWord) {
+    try {
+      const r = await fetch('/pdf/api/dict?word=' + encodeURIComponent(text.toLowerCase()));
+      const d = await r.json();
+      if (d.ok) {
+        let html = '';
+        if (d.phonetic) html += `<div style="color:#7a8497;font-style:italic;font-size:13px">/ ${d.phonetic} /</div>`;
+        if (d.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${d.translation.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`;
+        if (d.definition && d.definition.trim() && d.definition.trim() !== (d.translation||'').trim()) {
+          html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px;line-height:1.6"><b>EN：</b><span style="white-space:pre-wrap">${d.definition.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span></div>`;
+        }
+        if (d.exchange) html += `<div style="margin-top:8px;color:#5a6680;font-size:11px;font-family:monospace">${d.exchange}</div>`;
+        openResult('📖 字典: ' + d.word, text, html);
+        return;
+      }
+      // 字典没命中 → 回落 AI
+    } catch (_) {}
+  }
+  // 长文本 / 字典没命中 → AI 翻译
   aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
 };
 window.onExplain = () => {
