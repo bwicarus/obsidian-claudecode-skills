@@ -113,13 +113,12 @@ def _find_kg_nodes_for_page(file_rel: str, page: int) -> list[dict]:
     return out
 
 
-def _ai_call(prompt: str) -> str:
-    """复用 qa_server 的 AI 后端（read server-config，跑当前激活的 backend）。"""
+def _ai_call(prompt: str, override_model: str = "", override_effort: str = "") -> str:
+    """复用 qa_server 的 AI 后端 + 可选 per-request model/effort 覆盖（PDF reader 设置面板用）。"""
     sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
     from ai_backends import make_backend  # type: ignore
     sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
 
-    # 复用 qa_server.get_cfg（读 server-config.json）
     sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
     try:
         from qa_server import get_cfg
@@ -127,7 +126,10 @@ def _ai_call(prompt: str) -> str:
     except Exception:
         cfg = {"ai_backend": "claude_cli", "ai": {"claude_cli": {"command": "/usr/bin/claude"}}}
     backend_name = cfg.get("ai_backend", "claude_cli")
-    settings = (cfg.get("ai") or {}).get(backend_name, {})
+    settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
+    # 覆盖
+    if override_model:  settings["model"] = override_model
+    if override_effort: settings["effort"] = override_effort
     ad = make_backend(backend_name, settings)
     return ad.chat([
         {"role": "system", "content": "你是一个学习辅助助手。回答简洁、准确。数学公式用 $...$ 或 $$...$$，不要用反引号包数学。"},
@@ -287,8 +289,10 @@ def pdf_api_translate():
         f"数学公式（$...$）保留原样不翻译。\n\n"
         f"原文：\n{text}"
     )
+    model = (body.get("model") or "").strip()
+    effort = (body.get("effort") or "").strip()
     try:
-        out = _ai_call(prompt).strip()
+        out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "translation": out})
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI 翻译失败：{ex}"}), 500
@@ -415,8 +419,10 @@ def pdf_api_explain():
     if ctx:
         prompt += f"=== 上下文 ===\n{ctx[:3000]}\n\n"
     prompt += f"=== 待解释 ===\n{text}"
+    model = (body.get("model") or "").strip()
+    effort = (body.get("effort") or "").strip()
     try:
-        out = _ai_call(prompt).strip()
+        out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "explanation": out})
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI 解释失败：{ex}"}), 500

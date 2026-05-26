@@ -97,6 +97,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
     <button onclick="toggleSidebar()" title="对应知识点">📋 知识点</button>
+    <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <div id="main">
     <div id="page-container"></div>
@@ -116,6 +117,37 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   <h2>当前页对应知识点</h2>
   <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
 </aside>
+
+<!-- AI 设置 modal -->
+<div id="settings-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:250" onclick="if(event.target===this) closeSettings()">
+  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:420px;max-width:92vw">
+    <h3 style="margin:0 0 14px;font-size:15px;color:#cfe6ff">⚙️ AI 设置</h3>
+    <div style="font-size:11px;color:#8a9bb4;margin-bottom:14px;line-height:1.6">
+      仅本浏览器生效（不影响服务端 default 配置）。空白 = 用服务端默认。
+    </div>
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">模型 (model)</label>
+    <select id="set-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
+      <option value="">默认（跟随服务端）</option>
+      <option value="haiku">claude haiku（最快、最便宜）</option>
+      <option value="sonnet">claude sonnet（平衡）</option>
+      <option value="opus">claude opus（最强）</option>
+      <option value="gpt-5">gpt-5（OpenAI）</option>
+      <option value="gpt-5.5">gpt-5.5（OpenAI 更强）</option>
+    </select>
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">思考深度 (effort)</label>
+    <select id="set-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
+      <option value="">默认</option>
+      <option value="low">low（快）</option>
+      <option value="medium">medium（中）</option>
+      <option value="high">high（深）</option>
+      <option value="max">max（最深、最慢）</option>
+    </select>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeSettings()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>
+      <button onclick="saveSettings()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>
+    </div>
+  </div>
+</div>
 
 <div id="result-mask" onclick="if(event.target===this) closeResult()">
   <div id="result-modal">
@@ -1433,7 +1465,32 @@ function md(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
 
+// AI 设置（per-browser localStorage，不动 server-config）
+function _getAiOverrides() {
+  try { return JSON.parse(localStorage.getItem('pdf-ai-overrides') || '{}'); }
+  catch (_) { return {}; }
+}
+window.openSettings = () => {
+  const ov = _getAiOverrides();
+  document.getElementById('set-model').value = ov.model || '';
+  document.getElementById('set-effort').value = ov.effort || '';
+  document.getElementById('settings-mask').style.display = 'flex';
+};
+window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
+window.saveSettings = () => {
+  const ov = {
+    model:  document.getElementById('set-model').value,
+    effort: document.getElementById('set-effort').value,
+  };
+  try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
+  closeSettings();
+};
+
 async function aiCall(path, body, label) {
+  // 自动附加 AI override（model / effort）
+  const ov = _getAiOverrides();
+  if (ov.model)  body.model  = ov.model;
+  if (ov.effort) body.effort = ov.effort;
   openResult(label, lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
   try {
     const r = await fetch(path, {
