@@ -642,7 +642,7 @@ function _bindCharLayer(cl, pw) {
 
   cl.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    e.preventDefault();
+    e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
     const p = ptToLocal(e.clientX, e.clientY);
     onStart(p.x, p.y);
   });
@@ -658,19 +658,21 @@ function _bindCharLayer(cl, pw) {
   });
   cl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; return; }
+    e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
     onStart(p.x, p.y);
   }, {passive: true});
   cl.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 1 || _dragStartCharIdx == null) return;
+    e.stopPropagation();
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
     onMove(p.x, p.y, e);
   }, {passive: false});
   cl.addEventListener('touchend', (e) => {
     if (_dragStartCharIdx == null) return;
-    e.preventDefault();
+    e.preventDefault(); e.stopPropagation();
     const t = e.changedTouches[0];
     if (!t) return;
     const p = ptToLocal(t.clientX, t.clientY);
@@ -1189,18 +1191,29 @@ function scheduleCheck(delay) {
 document.addEventListener('mouseup', () => scheduleCheck(20));
 document.addEventListener('touchend', () => scheduleCheck(250));   // iPad 长按完释放
 document.addEventListener('selectionchange', () => scheduleCheck(200));
-// 点 toolbar 外 + 没选中文本 → 关
+// 点 toolbar 外 + 既无 native selection 也无 char-layer 选中 + 不在 char-layer 上 → 关 toolbar
+function _shouldCloseToolbar(target) {
+  if (toolbar.contains(target)) return false;            // 点在 toolbar 内
+  if (target?.closest?.('.char-layer')) return false;    // 点在 char-layer 上（char-layer 自己处理）
+  const t = (window.getSelection().toString() || '').trim();
+  if (t) return false;
+  if (lastSelText && lastSelText.trim()) return false;   // char-layer 选中状态
+  return true;
+}
 document.addEventListener('mousedown', (e) => {
-  if (!toolbar.contains(e.target)) {
-    const t = (window.getSelection().toString() || '').trim();
-    if (!t) { toolbar.classList.remove('open'); lastSelText = '';
-     _updateSelPreview(''); }
+  if (_shouldCloseToolbar(e.target)) {
+    toolbar.classList.remove('open');
+    document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+    lastSelText = '';
+    _updateSelPreview('');
   }
 });
 document.addEventListener('touchstart', (e) => {
-  if (!toolbar.contains(e.target)) {
-    const t = (window.getSelection().toString() || '').trim();
-    if (!t) { toolbar.classList.remove('open'); }
+  if (_shouldCloseToolbar(e.target)) {
+    toolbar.classList.remove('open');
+    document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+    lastSelText = '';
+    _updateSelPreview('');
   }
 }, {passive: true});
 
