@@ -150,13 +150,18 @@ def pdf_view():
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
-    return render_template(
+    from flask import make_response
+    resp = make_response(render_template(
         "pdf_reader.html",
         file_rel=rel,
         file_name=Path(rel).name,
         page=page,
         pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}",
-    )
+    ))
+    # HTML 还在快速迭代，强制每次拿新版（避免浏览器缓存旧 JS 报语法错）
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @bp.route("/file/<path:rel>")
