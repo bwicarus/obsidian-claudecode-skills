@@ -273,8 +273,8 @@ window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + del
 const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
 let _selTimer = null;
-// ──────── 点击 → 选中整行 / 双击 → 扩段 ────────
-let _lastClickSpan = null, _lastClickTime = 0;
+// ──────── 点击 → 单词(span) / 双击 → 整行 / 三击 → 整段 ────────
+let _lastClickSpan = null, _lastClickTime = 0, _clickCount = 0;
 
 function _spansInSameLine(targetSpan, textLayerDiv) {
   // 同一行 = Y 中心相差 < 半行高
@@ -391,10 +391,22 @@ function bindTextLayerClick(textLayerDiv) {
     if (!span || !textLayerDiv.contains(span) || !span.firstChild) return;
     e.preventDefault(); e.stopPropagation();
     const now = Date.now();
-    const isDouble = (_lastClickSpan === span && now - _lastClickTime < 380);
+    // 连续点同一 span 在 380ms 内 → 升级粒度（单词→行→段→回单词）
+    if (_lastClickSpan === span && now - _lastClickTime < 380) {
+      _clickCount = (_clickCount % 3) + 1;   // 1→2→3→1
+    } else {
+      _clickCount = 1;
+      _lastClickSpan = span;
+    }
     _lastClickTime = now;
-    _lastClickSpan = span;
-    const spans = isDouble ? _spansInParagraph(span, textLayerDiv) : _spansInSameLine(span, textLayerDiv);
+    let spans;
+    if (_clickCount === 1) {
+      spans = [span];                                       // 单击：选当前 span
+    } else if (_clickCount === 2) {
+      spans = _spansInSameLine(span, textLayerDiv);         // 双击：整行
+    } else {
+      spans = _spansInParagraph(span, textLayerDiv);        // 三击：整段
+    }
     _selectSpans(spans);
   };
   textLayerDiv.addEventListener('click', handler);
