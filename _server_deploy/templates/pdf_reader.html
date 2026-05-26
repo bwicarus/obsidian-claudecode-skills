@@ -952,8 +952,9 @@ function _applyRangeFromCarets(startC, endC, textLayerDiv) {
   return true;
 }
 
-let _dragStart = null;     // {x, y, caret, span, time}
-let _dragMoved = false;
+// 旧 textLayer 拖选状态（已被 char-layer 取代，保留声明避免引用报错）
+let _dragStart = null;
+let _legacyDragMoved = false;
 let _dragMoveRaf = null;
 
 function bindTextLayerClick(textLayerDiv) {
@@ -989,7 +990,7 @@ function bindTextLayerClick(textLayerDiv) {
     if (!span || !textLayerDiv.contains(span)) { _dragStart = null; window.dlog?.('START:miss span'); return; }
     const caret = _caretAtPoint(x, y);
     _dragStart = { x, y, caret, span, time: Date.now() };
-    _dragMoved = false;
+    _legacyDragMoved = false;
     window.dlog?.('START x=' + Math.round(x) + ' y=' + Math.round(y) + ' caret=' + (caret ? (caret.node?.nodeName + '@' + caret.offset) : 'null'));
   };
 
@@ -999,8 +1000,8 @@ function bindTextLayerClick(textLayerDiv) {
     const dx = Math.abs(x - _dragStart.x);
     const dy = Math.abs(y - _dragStart.y);
     if (dx + dy < 8) return;
-    if (!_dragMoved) {
-      _dragMoved = true;
+    if (!_legacyDragMoved) {
+      _legacyDragMoved = true;
       window.dlog?.('MOVE started, dx+dy=' + (dx+dy));
     }
     // touchmove 时 preventDefault 阻止页面滚动（让拖选生效）
@@ -1021,7 +1022,7 @@ function bindTextLayerClick(textLayerDiv) {
     if (!_dragStart) return;
     const start = _dragStart;
     _dragStart = null;
-    if (_dragMoved) {
+    if (_legacyDragMoved) {
       // 拖选：用结束位置 caret + 起始 caret 画范围
       const endC = _caretAtPoint(x, y);
       if (endC) _applyRangeFromCarets(start.caret, endC, textLayerDiv);
