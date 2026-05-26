@@ -720,13 +720,24 @@ function _bindCharLayer(cl, pw) {
     return {x: clientX - r.left, y: clientY - r.top};
   };
 
+  // 严格 bbox 命中（落在 char 实际矩形内才开始拖选；空白处保持 null 不拦截默认滚动）
+  const _findCharStrict = (x, y) => {
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      if (x >= c.left && x <= c.left + c.width &&
+          y >= c.top  && y <= c.top  + c.height) return i;
+    }
+    return -1;
+  };
   const onStart = (x, y) => {
-    const idx = _findCharAt(pw.__charBoxes, x, y);
-    if (idx < 0) { _dragStartCharIdx = null; return; }
+    const idx = _findCharStrict(x, y);
+    if (idx < 0) { _dragStartCharIdx = null; return false; }   // 空白 → 让默认滚动生效
     _dragStartCharIdx = idx;
     _dragStartXY = {x, y};
     _dragMoved = false;
     _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
+    return true;
   };
 
   const onMove = (x, y, ev) => {
