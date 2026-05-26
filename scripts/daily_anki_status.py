@@ -255,7 +255,8 @@ def run_kg_link_mastery() -> int:
             "--deep", "--auto-apply-safe",
             "--budget-loop",
             "--target-hour", "9", "--target-min", "0", "--buffer-min", "30",
-            "--budget-target-7d", "88",
+            # 2026-05-26 调低：原 88（昨晚一夜 7d 涨 +7%，过高）→ 60（更保守）
+            "--budget-target-7d", "60",
             "--budget-max-batches", "30",
         ])
         if r3 != 0:
