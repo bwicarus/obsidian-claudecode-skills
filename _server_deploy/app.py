@@ -98,7 +98,7 @@ with app.app_context():
 
 # ─────────────────────────── 通用左侧导航 (auto-inject) ───────────────────────────
 
-NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control")
+NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf")
 
 @app.after_request
 def inject_nav(response):
@@ -162,7 +162,7 @@ def user_dir(username, dataset=""):
         base = base / dataset
     return base
 
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf")
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request
@@ -751,6 +751,10 @@ register_control(app)
 # 知识图谱（技能树）
 from skilltree import register_skilltree
 register_skilltree(app)
+
+# 网页 PDF 阅读器
+from pdf_reader import register_pdf_reader
+register_pdf_reader(app)
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000)

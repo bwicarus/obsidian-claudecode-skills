@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ file_name }} · PDF 阅读器</title>
+<script src="/static/qa/marked.js"></script>
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js" async></script>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+#app{display:grid;grid-template-columns:1fr 320px;grid-template-rows:48px 1fr;height:100vh}
+#header{grid-column:1/3;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px}
+#header h1{font-size:14px;margin:0;color:#cfe6ff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
+#header button:hover{background:#2c3e6a;border-color:#3b6db5}
+#header input[type=number]{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:4px 8px;width:60px;font-size:12px}
+
+#main{overflow:auto;background:#0a0e1a;padding:20px;text-align:center;position:relative}
+#main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4);max-width:100%;height:auto}
+.page-wrap{position:relative;display:inline-block}
+.text-layer{position:absolute;top:0;left:0;width:100%;height:100%;line-height:1;opacity:.25;pointer-events:auto;color:transparent;user-select:text}
+.text-layer span,.text-layer br{position:absolute;color:transparent;white-space:pre;cursor:text;transform-origin:0% 0%;user-select:text}
+.text-layer ::selection{background:#3b6db5;color:transparent}
+
+#sidebar{background:#10162a;border-left:1px solid #2a3550;overflow-y:auto;padding:14px}
+#sidebar h2{font-size:13px;color:#8a9bb4;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px;font-weight:600}
+.kg-node{background:#0d1322;border:1px solid #1f2740;border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font-size:12px}
+.kg-node:hover{background:#162045;border-color:#3b6db5}
+.kg-node .lbl{font-weight:600;color:#cfe6ff}
+.kg-node .sum{color:#8a9bb4;font-size:11px;margin-top:3px;line-height:1.5}
+.kg-node.mastered{border-left:3px solid #34d399}
+.kg-node.unlockable{border-left:3px solid #60a5fa}
+.kg-node.locked{border-left:3px solid #3a4456;opacity:.7}
+
+/* 选中工具栏：跟随选区浮出 */
+#sel-toolbar{position:absolute;display:none;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:4px;gap:4px;z-index:99;box-shadow:0 6px 16px rgba(0,0,0,0.6)}
+#sel-toolbar.open{display:flex}
+#sel-toolbar button{background:transparent;border:none;color:#cfe6ff;cursor:pointer;padding:6px 10px;border-radius:4px;font-size:12px;white-space:nowrap}
+#sel-toolbar button:hover{background:#2c3e6a;color:#fff}
+
+/* 结果浮层 */
+#result-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}
+#result-mask.open{display:flex}
+#result-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:640px;max-width:92vw;max-height:80vh;overflow-y:auto;line-height:1.7}
+#result-modal h3{margin:0 0 10px;font-size:15px;color:#cfe6ff}
+#result-modal .src{color:#8a9bb4;font-size:12px;border-left:3px solid #3b6db5;padding:8px 12px;margin-bottom:14px;background:#0d1322;border-radius:0 6px 6px 0;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
+#result-modal .content{font-size:13px;color:#e6e6f0}
+#result-modal .content p{margin:6px 0}
+#result-modal .content code{background:#0d1322;padding:2px 5px;border-radius:3px}
+#result-modal .actions{margin-top:14px;text-align:right}
+#result-modal .actions button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;margin-left:6px}
+#result-modal .actions button:hover{background:#2c3e6a;border-color:#3b6db5}
+#result-modal .loading{color:#8a9bb4;font-style:italic}
+
+@media (max-width:900px){
+  #app{grid-template-columns:1fr;grid-template-rows:48px 1fr auto}
+  #sidebar{max-height:30vh;border-left:none;border-top:1px solid #2a3550}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <button onclick="location.href='/pdf/'">📚 文件</button>
+    <h1>{{ file_name }}</h1>
+    <button onclick="changePage(-1)">◀</button>
+    <input type="number" id="page-input" value="{{ page }}" min="1" onchange="goToPage(this.value)">
+    <span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span>
+    <button onclick="changePage(1)">▶</button>
+    <button onclick="zoomChange(0.1)">＋</button>
+    <button onclick="zoomChange(-0.1)">－</button>
+  </div>
+  <div id="main">
+    <div id="page-container"></div>
+    <div id="sel-toolbar">
+      <button onclick="onTranslate()">🌐 翻译</button>
+      <button onclick="onExplain()">💡 解释</button>
+      <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
+      <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
+    </div>
+  </div>
+  <aside id="sidebar">
+    <h2>当前页对应知识点</h2>
+    <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
+  </aside>
+</div>
+
+<div id="result-mask" onclick="if(event.target===this) closeResult()">
+  <div id="result-modal">
+    <h3 id="result-title">结果</h3>
+    <div class="src" id="result-src"></div>
+    <div class="content" id="result-content"></div>
+    <div class="actions">
+      <button onclick="closeResult()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as pdfjsLib from '/static/pdfjs/pdf.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs';
+
+const PDF_URL = {{ pdf_url|tojson }};
+const FILE_REL = {{ file_rel|tojson }};
+let pdfDoc = null;
+let currentPage = {{ page }};
+let scale = 1.4;
+
+async function loadPdf() {
+  try {
+    pdfDoc = await pdfjsLib.getDocument({
+      url: PDF_URL,
+      cMapUrl: '/static/pdfjs/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: '/static/pdfjs/standard_fonts/',
+    }).promise;
+    document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
+    renderPage(currentPage);
+  } catch (e) {
+    document.getElementById('page-container').innerHTML =
+      '<div style="color:#c00;padding:20px">加载 PDF 失败：' + e.message + '</div>';
+  }
+}
+
+async function renderPage(num) {
+  if (!pdfDoc) return;
+  num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
+  currentPage = num;
+  document.getElementById('page-input').value = num;
+  const page = await pdfDoc.getPage(num);
+  const viewport = page.getViewport({scale});
+
+  const container = document.getElementById('page-container');
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'page-wrap';
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width = viewport.width + 'px';
+  canvas.style.height = viewport.height + 'px';
+  wrap.appendChild(canvas);
+  const textLayerDiv = document.createElement('div');
+  textLayerDiv.className = 'text-layer';
+  textLayerDiv.style.width = viewport.width + 'px';
+  textLayerDiv.style.height = viewport.height + 'px';
+  wrap.appendChild(textLayerDiv);
+  container.appendChild(wrap);
+
+  // 渲染 canvas
+  const ctx = canvas.getContext('2d');
+  await page.render({canvasContext: ctx, viewport}).promise;
+
+  // 渲染 text layer（让用户选中文本）
+  const textContent = await page.getTextContent();
+  const tl = new pdfjsLib.TextLayer({
+    textContentSource: textContent,
+    container: textLayerDiv,
+    viewport,
+  });
+  await tl.render();
+
+  // 同步 URL（不刷新页面）
+  const u = new URL(location.href);
+  u.searchParams.set('page', num);
+  history.replaceState(null, '', u);
+
+  // 拉当前页对应的 KG 节点
+  loadPageNodes(num);
+}
+
+async function loadPageNodes(num) {
+  try {
+    const r = await fetch(`/pdf/api/page-nodes?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
+    const d = await r.json();
+    const list = d.nodes || [];
+    const c = document.getElementById('kg-nodes');
+    if (!list.length) {
+      c.innerHTML = '<div style="color:#5a6680;font-size:12px">该页无 KG 节点（可能这本书没扫过/或本页不是知识点页）</div>';
+      return;
+    }
+    c.innerHTML = list.map(n =>
+      `<div class="kg-node ${n.state}" onclick="window.open('/skilltree/${encodeURIComponent(n.book)}/#${encodeURIComponent('f.'+n.id)}','_blank')">
+        <div class="lbl">[${n.numeric_label}] ${n.name}</div>
+        <div class="sum">${n.summary}</div>
+      </div>`
+    ).join('');
+  } catch (e) {
+    document.getElementById('kg-nodes').innerHTML = '<div style="color:#c00;font-size:12px">加载失败</div>';
+  }
+}
+
+window.changePage = (delta) => renderPage(currentPage + delta);
+window.goToPage = (n) => renderPage(n);
+window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + delta)); renderPage(currentPage); };
+
+// 选中浮出工具栏
+const toolbar = document.getElementById('sel-toolbar');
+let lastSelText = '';
+document.addEventListener('mouseup', () => {
+  setTimeout(() => {
+    const sel = window.getSelection();
+    const txt = (sel.toString() || '').trim();
+    if (!txt || txt.length < 2) { toolbar.classList.remove('open'); lastSelText = ''; return; }
+    lastSelText = txt;
+    const rng = sel.getRangeAt(0);
+    const rect = rng.getBoundingClientRect();
+    if (!rect.width) return;
+    const mainEl = document.getElementById('main');
+    const mainRect = mainEl.getBoundingClientRect();
+    toolbar.style.left = (rect.left - mainRect.left + mainEl.scrollLeft) + 'px';
+    toolbar.style.top  = (rect.bottom - mainRect.top + mainEl.scrollTop + 4) + 'px';
+    toolbar.classList.add('open');
+  }, 10);
+});
+document.addEventListener('mousedown', (e) => {
+  if (!toolbar.contains(e.target)) toolbar.classList.remove('open');
+});
+
+// 结果 modal
+function openResult(title, src, contentHtml) {
+  document.getElementById('result-title').textContent = title;
+  document.getElementById('result-src').textContent = src;
+  document.getElementById('result-content').innerHTML = contentHtml;
+  document.getElementById('result-mask').classList.add('open');
+  if (window.MathJax && MathJax.typesetPromise) {
+    MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
+  }
+}
+window.closeResult = () => document.getElementById('result-mask').classList.remove('open');
+
+function md(s) {
+  if (window.marked && marked.parse) {
+    try { return marked.parse(s); } catch(_) {}
+  }
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+async function aiCall(path, body, label) {
+  openResult(label, lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
+  try {
+    const r = await fetch(path, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const text = d.translation || d.explanation || JSON.stringify(d);
+      document.getElementById('result-content').innerHTML = md(text);
+      if (window.MathJax && MathJax.typesetPromise) {
+        MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
+      }
+    } else {
+      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+  }
+}
+
+window.onTranslate = () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
+};
+window.onExplain = () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  aiCall('/pdf/api/explain', {text: lastSelText}, '💡 AI 解释');
+};
+window.onToQA = () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  // 通过 URL hash 把选中文本带给 QA browser daemon（同 Tailscale 主机的 :9091）
+  // qa_browser HTML 加载时会读 hash 里的 q= 填到输入框
+  const qaUrl = `${location.protocol}//${location.hostname}:9091/#q=` + encodeURIComponent(lastSelText.slice(0, 4000));
+  window.open(qaUrl, '_blank');
+};
+window.onToNote = async () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  const name = prompt('请输入笔记名（不含 .md）：', '');
+  if (name === null) return;
+  const trimmed = (name || '').trim();
+  if (!trimmed) return;
+  openResult('📝 创建笔记', lastSelText, '<div class="loading">⏳ 正在写入…</div>');
+  try {
+    const r = await fetch('/pdf/api/to-note', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: lastSelText, name: trimmed, file: FILE_REL, page: currentPage}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      const safeUrl = (d.obsidian_url || '').replace(/'/g,"\\'");
+      document.getElementById('result-content').innerHTML =
+        '<div>✓ 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
+        '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
+    } else {
+      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+  }
+};
+
+// 键盘快捷键
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); changePage(1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); changePage(-1); }
+  else if (e.key === 'Escape') { closeResult(); toolbar.classList.remove('open'); }
+});
+
+loadPdf();
+</script>
+</body></html>

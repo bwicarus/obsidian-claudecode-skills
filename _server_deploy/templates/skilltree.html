@@ -1575,12 +1575,20 @@ function showDetail(n){
         const titleSuffix = g.length===1 ? `第 ${startPg} 页` : `第 ${startPg}-${endPg} 页`;
         const obs = obsidianPdfUrl(startPg);
         const web = `/skilltree/${BOOK}/pdf#page=${startPg}`;
+        // 新增：跳网页 PDF 阅读器（带选中/翻译/解释工具栏）
+        const reader = (KG && KG.pdf_vault_path)
+          ? `/pdf/view?file=${encodeURIComponent(KG.pdf_vault_path)}&page=${startPg}`
+          : null;
         const main = obs
           ? `<a href="${obs}" class="page-link" title="在 Obsidian 中打开 PDF ${titleSuffix}">${label}</a>`
           : `<a href="${web}" target="_blank" class="page-link" title="浏览器打开 PDF ${titleSuffix}">${label}</a>`;
-        const fallback = `<a href="${web}" target="_blank" class="page-link-web" title="改用浏览器打开（远程/无 Obsidian 时）"
-                            onclick="event.stopPropagation()">🌐</a>`;
-        return `<span class="page-pair">${main}${obs?fallback:""}</span>`;
+        const readerBtn = reader
+          ? `<a href="${reader}" target="_blank" class="page-link-web" title="在网页阅读器打开（选中可翻译/解释/加笔记）"
+               onclick="event.stopPropagation()">📖</a>`
+          : "";
+        const fallback = obs ? `<a href="${web}" target="_blank" class="page-link-web" title="改用浏览器打开（远程/无 Obsidian 时）"
+                            onclick="event.stopPropagation()">🌐</a>` : "";
+        return `<span class="page-pair">${main}${readerBtn}${fallback}</span>`;
       }).join(" ")
     : "—";
   document.getElementById("d-path").innerHTML=`${pageHTML}<br><small style="color:#6b7488">${chain.join(" › ")||"（顶层）"}</small>`;

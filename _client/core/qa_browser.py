@@ -1634,6 +1634,19 @@ const chat   = document.getElementById('chat');   // 滚动容器
 const msgs   = document.getElementById('msgs');    // 消息容器（清空只清这里，不动截图区）
 const input  = document.getElementById('input');
 const status = document.getElementById('status');
+// URL hash 注入：#q=<text> 让外部页面（如 PDF 阅读器）把选中文本带过来填到输入框
+(function () {
+  const h = (location.hash || '').replace(/^#/, '');
+  if (!h) return;
+  const params = new URLSearchParams(h);
+  const q = params.get('q');
+  if (q) {
+    input.value = q;
+    // 清掉 hash，避免刷新重复注入
+    history.replaceState(null, '', location.pathname + location.search);
+    input.focus();
+  }
+})();
 // 自动跟随到底：仅当用户本就在底部附近才跟随；往上翻阅时不打扰
 let autoStick = true;
 chat.addEventListener('scroll', () => {
