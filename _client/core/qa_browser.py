@@ -707,6 +707,58 @@ def _pairs_text(pairs: list) -> str:
     )
 
 
+# ── _card_update_note 的两套 prompt（详细 / 精炼）────────────────────────
+# 共享前置：连贯化处理（间断选中场景）
+_NOTE_PROMPT_HEAD = (
+    "背景逻辑：我在复习一张由这篇笔记生成的 Anki 卡片(②)、对照笔记(①)时，"
+    "有个地方没看懂，于是问了问题(③)；AI 回答里我**主动勾选为有用**的部分(④)"
+    "就是我认为应该补到笔记里的内容。\n\n"
+    "任务：把 ④ 补到笔记 ① 的对应位置（与 ③ 困惑最相关处）。\n\n"
+    "**重要：连贯化处理**\n"
+    "④ 可能是**间断选中**的（跨多个标题段、跳过中间部分、来自多轮问答）。AI 在写入笔记时"
+    "**必须**把这些片段重新组织成前后通顺的文字：\n"
+    "- 必要时补**一两个过渡句**让段落衔接自然（『此外』、『与此相关』、『另一方面』、"
+    "『再考虑』等）——但**不引入 ④ 没有的新事实**\n"
+    "- 同一概念的不同侧面可以用 `### 子标题` 分组（如 `### 定义` `### 例子`）\n"
+    "- 间断处不要留 markdown 空标题、孤立 list 项、半句话\n\n"
+    "**严格约束**：\n"
+)
+
+# 详细模式：默认，全保留 ④
+_NOTE_PROMPT_VERBOSE = _NOTE_PROMPT_HEAD + (
+    "1. **④ 是我手动勾选的，默认完整保留，不要再代我筛选『关键点』/『精华』**。\n"
+    "   - ④ 里有几个段落/例子/推导步骤/对照表 → 笔记新增也保留几个段落/例子/推导步骤/对照表\n"
+    "   - 只允许删除明显与主题无关的对话冗余（『好的我来回答』、『希望对你有帮助』之类）\n"
+    "   - **不得**为『精炼/简洁』而合并段落、压缩例子、跳过推导步骤、删减细节\n"
+    "2. **不得添加 ④ 中没有的事实/类比/例子/引申**（过渡词除外，见上）。\n"
+    "3. ②③ 仅用于定位（判断 ④ 补到哪一节、怎么衔接），**不作为内容来源**。\n"
+    "4. 信息严格来自 ④、不增不改其义；连贯化只补过渡词不补事实。\n"
+    "5. 如果笔记 ① 已简略提到 ④ 涉及的概念：**不要替换或合并**，把 ④ 的展开作为"
+    "子节（`### ...`）追加在那段下方。新增小节比 inline 几句话更好（避免信息丢失）。\n"
+    "6. 保留 frontmatter（开头 --- 之间）和「相关笔记」节原样不动；"
+    "保持 Obsidian Markdown，数学公式用 $...$ 或 $$...$$。\n"
+    "7. 直接输出修改后的完整笔记内容，**第一行就是笔记原本的开头（--- 或正文）**，"
+    "不要写任何说明、前言或代码围栏。\n\n"
+    "**自检**：写完后默念一遍——④ 里的每个段落/例子/推导都保留了吗？"
+    "如果有删，是因为它们是真无关的对话冗余，还是因为『太长可以精炼』？后者错。\n\n"
+)
+
+# 精炼模式：允许提炼合并，但核心信息不丢
+_NOTE_PROMPT_CONCISE = _NOTE_PROMPT_HEAD + (
+    "1. ④ 是参考素材，**允许提炼合并**：把多个相似段落浓缩为一段、把多个例子合成最有代表性的一两个。\n"
+    "   但**核心信息不丢**：每个独立知识点至少有一句话承载；公式/定义/结论必须保留原貌。\n"
+    "2. **不得添加 ④ 中没有的事实/类比/例子/引申**（过渡词除外，见上）。\n"
+    "3. ②③ 仅用于定位（判断 ④ 补到哪一节、怎么衔接），**不作为内容来源**。\n"
+    "4. 措辞可调整以紧凑、更连贯；事实必须来自 ④。\n"
+    "5. 如果笔记 ① 已简略提到 ④ 涉及的概念，可以**改写原段落使其更准确**，"
+    "或追加为子节（视哪种更连贯）。\n"
+    "6. 保留 frontmatter（开头 --- 之间）和「相关笔记」节原样不动；"
+    "保持 Obsidian Markdown，数学公式用 $...$ 或 $$...$$。\n"
+    "7. 直接输出修改后的完整笔记内容，**第一行就是笔记原本的开头（--- 或正文）**，"
+    "不要写任何说明、前言或代码围栏。\n\n"
+)
+
+
 def _card_update_anki(local_id: str, pairs: list) -> dict:
     """据有效问答让 AI 生成一或多张新卡代替原卡。删/留原卡由 server-config 决定（默认保留）。"""
     rec_file, rec, orig = _find_record_for_card(local_id)
@@ -813,8 +865,9 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
             "deleted": deleted, "synced": synced}
 
 
-def _card_update_note(local_id: str, pairs: list) -> dict:
-    """让 AI 据有效问答丰富/修改源笔记 → 写回 → 哈希覆盖（summarize/connect/anki + records）。"""
+def _card_update_note(local_id: str, pairs: list, verbosity: str = "verbose") -> dict:
+    """让 AI 据有效问答丰富/修改源笔记 → 写回 → 哈希覆盖（summarize/connect/anki + records）。
+    verbosity: "verbose"（默认，全保留 ④）/ "concise"（允许提炼合并，核心信息不丢）。"""
     ctx = _find_card_context(local_id)
     if not ctx:
         return {"ok": False, "error": "卡片不在 records 中"}
@@ -834,30 +887,13 @@ def _card_update_note(local_id: str, pairs: list) -> dict:
         card_desc = f"挖空文本：{ctx.get('text','')}\n补充：{ctx.get('back','')}"
     else:
         card_desc = f"正面（问）：{ctx.get('front','')}\n背面（答）：{ctx.get('back','')}"
+    head_prompt = _NOTE_PROMPT_CONCISE if verbosity == "concise" else _NOTE_PROMPT_VERBOSE
+    pairs_label = "应完整保留" if verbosity != "concise" else "可适度提炼合并，核心信息不丢"
     prompt = (
-        "背景逻辑：我在复习一张由这篇笔记生成的 Anki 卡片(②)、对照笔记(①)时，"
-        "有个地方没看懂，于是问了问题(③)；AI 回答里我**主动勾选为有用**的部分(④)"
-        "就是我认为应该补到笔记里的内容。\n\n"
-        "任务：把 ④ 补到笔记 ① 的对应位置（与 ③ 困惑最相关处）。\n"
-        "**严格约束**：\n"
-        "1. **④ 是我手动勾选的，默认完整保留，不要再代我筛选『关键点』/『精华』**。\n"
-        "   - ④ 里有几个段落/例子/推导步骤/对照表 → 笔记新增也保留几个段落/例子/推导步骤/对照表\n"
-        "   - 只允许删除明显与主题无关的对话冗余（『好的我来回答』、『希望对你有帮助』之类）\n"
-        "   - **不得**为『精炼/简洁』而合并段落、压缩例子、跳过推导步骤、删减细节\n"
-        "2. **不得添加 ④ 中没有的内容**：④ 没有的类比、例子、引申、对比、发挥——一律不加。\n"
-        "3. ②③ 仅用于定位（判断 ④ 补到哪一节、怎么衔接），**不作为内容来源**。\n"
-        "4. 措辞可微调以连贯，但信息严格来自 ④、不增不改其义。\n"
-        "5. 如果笔记 ① 已经简略提到 ④ 涉及的概念：**不要替换或合并**，把 ④ 的展开作为"
-        "子节（`### ...`）追加在那段下方。新增小节比 inline 几句话更好（避免信息丢失）。\n"
-        "6. 保留 frontmatter（开头 --- 之间）和「相关笔记」节原样不动；"
-        "保持 Obsidian Markdown，数学公式用 $...$ 或 $$...$$。\n"
-        "7. 直接输出修改后的完整笔记内容，**第一行就是笔记原本的开头（--- 或正文）**，"
-        "不要写任何说明、前言或代码围栏。\n\n"
-        "**自检：写完后默念一遍**——④ 里的每个段落/例子/推导我都保留了吗？"
-        "如果有删，是因为它们是真无关的对话冗余，还是因为我觉得『太长可以精炼』？后者错。\n\n"
-        f"=== ① 当前笔记 ===\n{original}\n\n"
-        f"=== ② 正在复习的 Anki 卡片（仅用于定位，不作内容来源）===\n{card_desc}\n\n"
-        f"=== ③ 我问的问题 + ④ 我勾选的有用回答（**应完整保留**）===\n{_pairs_text(pairs)}"
+        head_prompt
+        + f"=== ① 当前笔记 ===\n{original}\n\n"
+        + f"=== ② 正在复习的 Anki 卡片（仅用于定位，不作内容来源）===\n{card_desc}\n\n"
+        + f"=== ③ 我问的问题 + ④ 我勾选的有用回答（**{pairs_label}**）===\n{_pairs_text(pairs)}"
     )
     try:
         new_content = ai_client.ask(prompt).strip()
@@ -1797,15 +1833,20 @@ function pollCardJob(jobId, allBtns, tries) {
       else { allBtns.forEach(b => b.disabled = false); showCardResult('⚠️ 暂时取不到结果，但任务已在后台执行，请稍后刷新页面 / 查看 Anki'); }
     });
 }
+let noteVerbosity = 'verbose';   // 笔记改写模式：'verbose'（详细，默认）/ 'concise'（精炼）
 function runCardUpdate(target, btn) {
   const pairs = collectUsefulPairs();
   if (!pairs.length) { showCardResult('请先在 AI 回复下方勾选「有用」的回答。'); return; }
   const allBtns = document.querySelectorAll('#card-actions .upd-group button');
   allBtns.forEach(b => b.disabled = true);
-  showCardResult('正在后台执行「' + UPD_LABELS[target] + '」，纳入 ' + pairs.length + ' 条有用回答…（可耐心等待，锁屏也不影响）');
+  const verbLabel = (target === 'anki') ? '' : (noteVerbosity === 'verbose' ? '【详细】' : '【精炼】');
+  showCardResult('正在后台执行「' + UPD_LABELS[target] + verbLabel + '」，纳入 ' + pairs.length + ' 条有用回答…（可耐心等待，锁屏也不影响）');
   fetch('api/card-update', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({local_id: cardCtx.local_id, target: target, pairs: pairs}),
+    body: JSON.stringify({
+      local_id: cardCtx.local_id, target: target, pairs: pairs,
+      verbosity: noteVerbosity,
+    }),
   }).then(r => r.json()).then(j => {
     if (j.job_id) { pollCardJob(j.job_id, allBtns, 0); }
     else { allBtns.forEach(b => b.disabled = false); renderUpdResult(j); }   // 兼容旧式同步返回
@@ -1845,6 +1886,23 @@ function loadCardContext(cid) {
       group.className = 'upd-group';
       group.style.display = 'none';
       group.style.cssText += ';display:none;gap:6px';
+      // verbosity toggle（影响"更新到笔记"和"全部更新"，不影响"修改 Anki"）
+      const verbBtn = document.createElement('button');
+      verbBtn.id = 'verb-toggle';
+      verbBtn.className = 'card-act-btn';
+      verbBtn.style.marginLeft = '6px';
+      const renderVerb = () => {
+        verbBtn.textContent = noteVerbosity === 'verbose' ? '📝 详细' : '✂️ 精炼';
+        verbBtn.title = noteVerbosity === 'verbose'
+          ? '更新到笔记/全部更新：保留 ④ 全部内容 + 仅连贯化（间断选中也通顺）。点击切到精炼'
+          : '更新到笔记/全部更新：允许提炼合并（核心信息不丢）+ 连贯化。点击切到详细';
+      };
+      renderVerb();
+      verbBtn.onclick = () => {
+        noteVerbosity = noteVerbosity === 'verbose' ? 'concise' : 'verbose';
+        renderVerb();
+      };
+      group.appendChild(verbBtn);
       [
         {t: 'note', label: '更新到笔记', cls: 'card-act-btn upd'},
         {t: 'anki', label: '根据此修改 Anki', cls: 'card-act-btn upd'},
@@ -2889,9 +2947,13 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/card-update":
             # target: note | anki | all。pairs: [{question, answer}, ...]（标记有用的问答）
-            local_id = (body.get("local_id") or "").strip()
-            target   = (body.get("target") or "").strip()
-            pairs    = body.get("pairs") or []
+            # verbosity: "verbose"（默认）/ "concise"，影响笔记改写的详细程度
+            local_id  = (body.get("local_id") or "").strip()
+            target    = (body.get("target") or "").strip()
+            pairs     = body.get("pairs") or []
+            verbosity = (body.get("verbosity") or "verbose").strip()
+            if verbosity not in ("verbose", "concise"):
+                verbosity = "verbose"
             if not local_id or target not in ("note", "anki", "all"):
                 self.send_json({"ok": False, "error": "invalid params"}, 400)
             elif not pairs:
@@ -2901,13 +2963,13 @@ class Handler(BaseHTTPRequestHandler):
                 import uuid
                 job_id = uuid.uuid4().hex[:12]
                 _card_jobs[job_id] = {"status": "running"}
-                def _run(job_id=job_id, local_id=local_id, target=target, pairs=pairs):
+                def _run(job_id=job_id, local_id=local_id, target=target, pairs=pairs, verbosity=verbosity):
                     out = {"ok": True}
                     try:
                         if target in ("anki", "all"):
                             out["anki"] = _card_update_anki(local_id, pairs)
                         if target in ("note", "all"):
-                            out["note"] = _card_update_note(local_id, pairs)
+                            out["note"] = _card_update_note(local_id, pairs, verbosity)
                     except Exception as e:
                         out = {"ok": False, "error": str(e)}
                     _card_jobs[job_id] = {"status": "done", "result": out, "_t": time.time()}
