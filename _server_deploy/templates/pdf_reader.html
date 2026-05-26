@@ -142,6 +142,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
       <option value="high">high（深）</option>
       <option value="max">max（最深、最慢）</option>
     </select>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）
+    </label>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="closeSettings()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>
       <button onclick="saveSettings()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>
@@ -1474,6 +1477,7 @@ window.openSettings = () => {
   const ov = _getAiOverrides();
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';
+  document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
   document.getElementById('settings-mask').style.display = 'flex';
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
@@ -1483,8 +1487,21 @@ window.saveSettings = () => {
     effort: document.getElementById('set-effort').value,
   };
   try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
+  const dbg = document.getElementById('set-debug').checked;
+  try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
+  _applyDebugVisibility();
   closeSettings();
 };
+function _applyDebugVisibility() {
+  const el = document.getElementById('debug-log');
+  if (!el) return;
+  el.style.display = (localStorage.getItem('pdf-debug') === '1') ? '' : 'none';
+}
+// 启动时按 localStorage 设 debug 显示（默认隐藏）
+if (localStorage.getItem('pdf-debug') !== '1') {
+  document.addEventListener('DOMContentLoaded', _applyDebugVisibility);
+  setTimeout(_applyDebugVisibility, 0);
+}
 
 async function aiCall(path, body, label) {
   // 自动附加 AI override（model / effort）
@@ -1563,13 +1580,38 @@ window.onExplain = () => {
   }
   aiCall('/pdf/api/explain', {text: lastSelText, context}, '💡 AI 解释');
 };
-window.onToQA = () => {
+window.onToQA = async () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');
-  // 通过 URL hash 把选中文本带给 QA browser daemon（同 Tailscale 主机的 :9091）
-  // qa_browser HTML 加载时会读 hash 里的 q= 填到输入框
-  const qaUrl = `${location.protocol}//${location.hostname}:9091/#q=` + encodeURIComponent(lastSelText.slice(0, 4000));
-  window.open(qaUrl, '_blank');
+  // 同 origin in-page 对话（避开 https → http :9091 mixed content 拦截）
+  const question = prompt('针对选中内容你想问 AI 什么？（如：解释里面的术语 / 这步推导为何成立 / 给一个例子）');
+  if (!question || !question.trim()) return;
+  // 复用 /api/explain 后端：text=问题，context=选中内容
+  openResult('💬 问 AI', '问：' + question + '\n\n（基于选中：' + lastSelText.slice(0, 100) +
+             (lastSelText.length > 100 ? '…' : '') + '）',
+             '<div class="loading">⏳ AI 处理中…</div>');
+  try {
+    const ov = _getAiOverrides();
+    const r = await fetch('/pdf/api/explain', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        text: question,
+        context: '用户选中的教材片段：\n' + lastSelText.slice(0, 3000),
+        model: ov.model || '', effort: ov.effort || '',
+      }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('result-content').innerHTML = md(d.explanation);
+      if (window.MathJax && MathJax.typesetPromise) {
+        MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
+      }
+    } else {
+      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+    }
+  } catch (e) {
+    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+  }
 };
 window.onToNote = async () => {
   if (!lastSelText) return;
