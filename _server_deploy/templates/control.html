@@ -295,11 +295,65 @@
         <p class="meta" style="font-size:11px;line-height:1.5">夜间 daily 流程的每个 step 都记录 quota 差值，可查"哪个 step 烧了多少 token"。</p>
       </div>
       <div class="config-section">
-        <h3>已登记书本</h3>
+        <h3 style="display:flex;align-items:center;gap:14px">
+          <span>已登记书本</span>
+          <button class="btn" onclick="openNewBookDialog()" style="font-size:11px;padding:4px 10px;margin-left:auto">➕ 新建书本</button>
+        </h3>
         <div id="books-list">加载中…</div>
       </div>
     </div>
   </div>
+
+<!-- 新建书本 modal -->
+<div id="new-book-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center" onclick="if(event.target===this) closeNewBookDialog()">
+  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:20px;width:min(640px,92vw);max-height:90vh;overflow:auto">
+    <h3 style="margin:0 0 12px">➕ 新建书本</h3>
+    <p class="meta" style="font-size:11px;line-height:1.6;margin-bottom:14px">
+      流程：扫描 PDF 抽节点 (build_nodes) → 抽依赖边 (extract_edges)。<br>
+      ⚠️ 一本 300 页教材约消耗 5–15% 的 7d 额度，<b>建议先用 --pages 试水 20 页看效果再全跑</b>。
+    </p>
+    <div style="display:grid;gap:10px">
+      <label class="lbl">书本 ID（短标识，英文，如 LADR / CALC）
+        <input type="text" id="nb-book-id" placeholder="MYBOOK" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+      </label>
+      <label class="lbl">书名（显示用，可中文）
+        <input type="text" id="nb-title" placeholder="我的教材" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+      </label>
+      <label class="lbl">笔记前缀（如 LADR=000-, 微积分=010-）
+        <input type="text" id="nb-prefix" placeholder="002-" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+      </label>
+      <label class="lbl">PDF 文件（vault 相对路径）
+        <select id="nb-pdf-select" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+          <option value="">加载中…</option>
+        </select>
+      </label>
+      <label class="lbl">页范围（建议先试水：1-20；全书留空）
+        <input type="text" id="nb-pages" placeholder="如 1-20 或留空跑全书" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+      </label>
+      <div style="display:flex;gap:10px">
+        <label class="lbl" style="flex:1">模型
+          <select id="nb-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+            <option value="sonnet">sonnet (推荐)</option>
+            <option value="opus">opus (更准但贵)</option>
+            <option value="haiku">haiku (便宜)</option>
+          </select>
+        </label>
+        <label class="lbl" style="flex:1">思考深度
+          <select id="nb-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+            <option value="medium" selected>medium</option>
+            <option value="low">low</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="nb-status" style="margin-top:14px;padding:10px;background:#0d1322;border-radius:6px;font-family:monospace;font-size:11px;color:#7be096;display:none;white-space:pre-wrap;max-height:200px;overflow:auto"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" onclick="closeNewBookDialog()" style="font-size:13px">取消</button>
+      <button class="btn" id="nb-go-btn" onclick="startNewBookBuild()" style="background:#244470;color:#fff;font-size:13px">🚀 开始扫描</button>
+    </div>
+  </div>
+</div>
 
 </div>
 
@@ -668,6 +722,78 @@ async function loadQuotaLog(){
     body.innerHTML = header + rows + `<p class="meta" style="margin-top:10px">显示 ${d.count}/${d.total} 条</p>`;
   }catch(ex){
     body.innerHTML = '<p class="meta">加载失败: ' + ex.message + '</p>';
+  }
+}
+
+// ──── 新建书本 ────
+async function openNewBookDialog() {
+  document.getElementById('new-book-mask').style.display = 'flex';
+  document.getElementById('nb-status').style.display = 'none';
+  document.getElementById('nb-status').textContent = '';
+  document.getElementById('nb-go-btn').disabled = false;
+  // 拉 vault PDF 列表
+  try {
+    const r = await fetch('/pdf/api/list-pdfs');
+    const d = await r.json();
+    const sel = document.getElementById('nb-pdf-select');
+    if (d.ok) {
+      sel.innerHTML = '<option value="">— 选择 PDF —</option>' +
+        d.pdfs.map(p => `<option value="${p.rel}">${p.name} (${p.dir})</option>`).join('');
+    } else {
+      sel.innerHTML = '<option value="">加载失败：' + (d.error||'?') + '</option>';
+    }
+  } catch (e) {
+    document.getElementById('nb-pdf-select').innerHTML = '<option value="">网络失败</option>';
+  }
+}
+function closeNewBookDialog() { document.getElementById('new-book-mask').style.display = 'none'; }
+async function startNewBookBuild() {
+  const bookId = document.getElementById('nb-book-id').value.trim();
+  const title  = document.getElementById('nb-title').value.trim();
+  const prefix = document.getElementById('nb-prefix').value.trim();
+  const pdfRel = document.getElementById('nb-pdf-select').value;
+  const pages  = document.getElementById('nb-pages').value.trim();
+  const model  = document.getElementById('nb-model').value;
+  const effort = document.getElementById('nb-effort').value;
+  if (!bookId || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(bookId)) {
+    alert('book_id 必须以字母开头，只含字母/数字/-/_'); return;
+  }
+  if (!pdfRel) { alert('请选 PDF 文件'); return; }
+  const statusEl = document.getElementById('nb-status');
+  const btn = document.getElementById('nb-go-btn');
+  btn.disabled = true;
+  statusEl.style.display = 'block';
+  statusEl.textContent = '⏳ 启动 build_nodes…\n';
+  try {
+    const r = await fetch('/control/api/kg-build', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        book_id: bookId, title, note_prefix: prefix,
+        pdf: pdfRel, pages, model, effort,
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) { statusEl.textContent += '❌ ' + (d.error||'失败') + '\n'; btn.disabled = false; return; }
+    statusEl.textContent += `✓ job 启动 (id=${d.job_id})\n日志：${d.log_file}\n\n`;
+    // 轮询日志
+    const pollLog = async () => {
+      const lr = await fetch('/control/api/kg-build-log?job=' + d.job_id);
+      const ld = await lr.json();
+      statusEl.textContent = `Job ${d.job_id}\n──────\n` + (ld.log || '...');
+      statusEl.scrollTop = statusEl.scrollHeight;
+      if (ld.status === 'running') setTimeout(pollLog, 3000);
+      else {
+        btn.disabled = false;
+        if (ld.status === 'done') {
+          statusEl.textContent += '\n\n✅ 完成！书本已加入列表。';
+          loadBooks();   // 刷新书本列表
+        }
+      }
+    };
+    pollLog();
+  } catch (e) {
+    statusEl.textContent += '❌ ' + e.message + '\n';
+    btn.disabled = false;
   }
 }
 

@@ -322,3 +322,95 @@ def register_control(app):
             return jsonify({"ok": r.returncode == 0, "msg": (r.stdout or r.stderr).strip()})
         else:
             return jsonify({"ok": False, "msg": f"未知 action: {action}"}), 400
+
+    # ──── 新建书本：spawn build_nodes + extract_edges 后台串行 ────
+    _kg_build_jobs = {}   # job_id → {status, log_file, proc}
+
+    @app.route("/control/api/kg-build", methods=["POST"])
+    def control_kg_build():
+        body = request.get_json(silent=True) or {}
+        book_id = (body.get("book_id") or "").strip()
+        title   = (body.get("title") or "").strip() or book_id
+        prefix  = (body.get("note_prefix") or "").strip()
+        pdf_rel = (body.get("pdf") or "").strip()
+        pages   = (body.get("pages") or "").strip()
+        model   = (body.get("model") or "sonnet").strip()
+        effort  = (body.get("effort") or "medium").strip()
+        if not book_id or not pdf_rel:
+            return jsonify({"ok": False, "error": "缺 book_id / pdf"}), 400
+        import re as _re
+        if not _re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", book_id):
+            return jsonify({"ok": False, "error": "book_id 格式非法"}), 400
+        kg_path = CLAUDE_DIR / "knowledge_graph" / f"{book_id}.json"
+        if kg_path.exists():
+            return jsonify({"ok": False, "error": f"{book_id}.json 已存在"}), 400
+        vault_root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+        pdf_abs = (vault_root / pdf_rel.lstrip("/")).resolve()
+        try:
+            pdf_abs.relative_to(vault_root.resolve())
+        except ValueError:
+            return jsonify({"ok": False, "error": "PDF 路径越界"}), 400
+        if not pdf_abs.exists():
+            return jsonify({"ok": False, "error": "PDF 不存在"}), 400
+        import uuid, time
+        job_id = uuid.uuid4().hex[:8]
+        log_dir = CLAUDE_DIR / "state" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"kg_build_{book_id}_{job_id}.log"
+
+        def _run():
+            env = load_claude_env()
+            with log_file.open("w", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] === build {book_id} ===\n"); f.flush()
+                # Step 1: build_nodes
+                args = [PYTHON, "-u", str(CLAUDE_DIR / "scripts" / "kg" / "build_nodes.py"),
+                        "--pdf", str(pdf_abs), "--book", book_id,
+                        "--model", model, "--effort", effort]
+                if pages: args += ["--pages", pages]
+                f.write(f"[{time.strftime('%H:%M:%S')}] ▶ build_nodes {' '.join(args[2:])}\n"); f.flush()
+                rc1 = subprocess.run(args, cwd=str(CLAUDE_DIR), env=env,
+                                     stdout=f, stderr=subprocess.STDOUT).returncode
+                f.write(f"\n[{time.strftime('%H:%M:%S')}] build_nodes rc={rc1}\n"); f.flush()
+                if rc1 == 0 and kg_path.exists():
+                    # Step 2: 写 note_prefix / title
+                    try:
+                        kg = json.loads(kg_path.read_text(encoding="utf-8"))
+                        if prefix: kg["note_prefix"] = prefix
+                        if title and title != book_id: kg["title"] = title
+                        kg_path.write_text(json.dumps(kg, ensure_ascii=False, indent=2), encoding="utf-8")
+                        f.write(f"[{time.strftime('%H:%M:%S')}] ✓ 写 note_prefix={prefix} title={title}\n"); f.flush()
+                    except Exception as e:
+                        f.write(f"[{time.strftime('%H:%M:%S')}] ⚠ meta 写入失败: {e}\n"); f.flush()
+                    # Step 3: extract_edges
+                    args2 = [PYTHON, "-u", str(CLAUDE_DIR / "scripts" / "kg" / "extract_edges.py"),
+                             "--kg", str(kg_path), "--in-place"]
+                    f.write(f"\n[{time.strftime('%H:%M:%S')}] ▶ extract_edges\n"); f.flush()
+                    rc2 = subprocess.run(args2, cwd=str(CLAUDE_DIR), env=env,
+                                         stdout=f, stderr=subprocess.STDOUT).returncode
+                    f.write(f"\n[{time.strftime('%H:%M:%S')}] extract_edges rc={rc2}\n"); f.flush()
+                    _kg_build_jobs[job_id]["status"] = "done" if (rc1 == 0 and rc2 == 0) else "failed"
+                else:
+                    _kg_build_jobs[job_id]["status"] = "failed"
+                f.write(f"\n[{time.strftime('%H:%M:%S')}] === 结束 ({_kg_build_jobs[job_id]['status']}) ===\n")
+
+        _kg_build_jobs[job_id] = {"status": "running", "log_file": str(log_file)}
+        import threading
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"ok": True, "job_id": job_id, "log_file": log_file.name})
+
+    @app.route("/control/api/kg-build-log")
+    def control_kg_build_log():
+        job_id = request.args.get("job", "").strip()
+        job = _kg_build_jobs.get(job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "unknown job", "status": "unknown", "log": ""})
+        log = ""
+        try:
+            p = Path(job["log_file"])
+            if p.exists():
+                log = p.read_text(encoding="utf-8", errors="replace")
+                if len(log) > 16384:
+                    log = log[-16384:]   # 末尾 16KB 够看
+        except Exception as e:
+            log = f"读 log 失败: {e}"
+        return jsonify({"ok": True, "status": job["status"], "log": log})

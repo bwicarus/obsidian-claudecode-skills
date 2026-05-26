@@ -174,6 +174,12 @@ def pdf_file(rel):
     return send_file(str(abs_path), mimetype="application/pdf")
 
 
+@bp.route("/api/list-pdfs")
+def pdf_api_list_pdfs():
+    """vault 里所有 PDF 的列表（控制面板新建书本下拉用）。"""
+    return jsonify({"ok": True, "pdfs": _list_vault_pdfs()})
+
+
 @bp.route("/api/page-chars")
 def pdf_api_page_chars():
     """提取该页所有字符的精确 bbox（PDF 坐标）。
