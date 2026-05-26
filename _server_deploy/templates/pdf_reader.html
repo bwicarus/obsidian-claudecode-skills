@@ -361,7 +361,13 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
-  }));
+  })).sort((a, b) => {
+    // 按 reading order 排序：先按行（Y），同行按 X
+    const lineDelta = Math.abs(a.top - b.top);
+    const ref = Math.min(a.height, b.height) || 1;
+    if (lineDelta > ref * 0.5) return a.top - b.top;
+    return a.left - b.left;
+  });
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）
@@ -410,16 +416,30 @@ function _selByCharRange(pw, sIdx, eIdx) {
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
   if (sIdx < 0 || eIdx >= chars.length) return;
-  // 拼出选中文本（同行内字符之间不加空格；跨行加换行）
+  // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
+  // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
-  let lastTop = -1;
+  let lastChar = null;
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
-    if (lastTop >= 0 && Math.abs(c.top - lastTop) > c.height * 0.6) text += '\n';
-    text += c.c;
-    lastTop = c.top;
+    if (lastChar) {
+      const dy = Math.abs(c.top - lastChar.top);
+      if (dy > c.height * 0.5) {
+        text += '\n';
+      } else {
+        // 同行：按 X gap 判断要不要加空格
+        const gap = c.left - (lastChar.left + lastChar.width);
+        const ref = Math.min(c.height, lastChar.height);
+        if (gap > ref * 0.3 && !lastChar.sp && !c.sp) text += ' ';
+      }
+    }
+    // 真实空格 char 直接保留；其它 char 写入
+    text += c.sp ? ' ' : c.c;
+    lastChar = c;
   }
-  lastSelText = text.trim();
+  // 压缩多余空格 / trim
+  text = text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
+  lastSelText = text;
   _updateSelPreview(lastSelText);
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
