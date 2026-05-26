@@ -50,8 +50,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .kg-node.locked{border-left:3px solid #3a4456;opacity:.7}
 
 /* 选中工具栏：跟随选区浮出 */
-#sel-toolbar{position:absolute;display:none;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:4px;gap:4px;z-index:99;box-shadow:0 6px 16px rgba(0,0,0,0.6)}
+#sel-toolbar{position:absolute;display:none;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:6px;gap:6px;z-index:99;box-shadow:0 6px 16px rgba(0,0,0,0.6);flex-direction:column;max-width:480px}
 #sel-toolbar.open{display:flex}
+#sel-toolbar .preview{color:#a8cdff;font-size:11px;line-height:1.5;background:rgba(0,0,0,.3);border-radius:4px;padding:5px 9px;max-height:54px;overflow:hidden;word-break:break-word;border-left:2px solid #60a5fa}
+#sel-toolbar .preview .len{color:#7a8497;font-size:10px;margin-left:6px}
+#sel-toolbar .btns{display:flex;gap:4px;flex-wrap:wrap}
 #sel-toolbar button{background:transparent;border:none;color:#cfe6ff;cursor:pointer;padding:6px 10px;border-radius:4px;font-size:12px;white-space:nowrap}
 #sel-toolbar button:hover{background:#2c3e6a;color:#fff}
 
@@ -90,10 +93,13 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   <div id="main">
     <div id="page-container"></div>
     <div id="sel-toolbar">
-      <button onclick="onTranslate()">🌐 翻译</button>
-      <button onclick="onExplain()">💡 解释</button>
-      <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
-      <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
+      <div class="preview" id="sel-preview">—</div>
+      <div class="btns">
+        <button onclick="onTranslate()">🌐 翻译</button>
+        <button onclick="onExplain()">💡 解释</button>
+        <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
+        <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
+      </div>
     </div>
   </div>
   <aside id="sidebar">
@@ -304,6 +310,7 @@ window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + del
 // 选中浮出工具栏 —— 跨桌面（mouseup）+ 触屏（touchend）+ 通用（selectionchange）
 const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
+     _updateSelPreview('');
 let _selTimer = null;
 // ──────── 点击 → 单词(span) / 双击 → 整行 / 三击 → 整段 ────────
 let _lastClickSpan = null, _lastClickTime = 0, _clickCount = 0;
@@ -382,6 +389,7 @@ function _selectSpans(spans) {
   sel.removeAllRanges();
   sel.addRange(range);
   lastSelText = spans.map(s => s.textContent || '').join('').trim();
+  _updateSelPreview(lastSelText);
   // overlay：用 itemBoxes（跟 canvas 渲染对齐）
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
   let pw = spans[0].parentElement;
@@ -523,6 +531,7 @@ function _selectSpanRange(span, start, end) {
   sel.removeAllRanges();
   sel.addRange(range);
   lastSelText = (node.textContent || '').slice(start, end);
+  _updateSelPreview(lastSelText);
   // overlay：用 itemBoxes（PDF.js 原始坐标）
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
   let pw = span.parentElement;
@@ -552,6 +561,20 @@ function _selectSpanRange(span, start, end) {
   toolbar.style.left = Math.max(8, rect.left - mainRect.left + mainEl.scrollLeft) + 'px';
   toolbar.style.top  = (rect.bottom - mainRect.top + mainEl.scrollTop + 6) + 'px';
   toolbar.classList.add('open');
+}
+
+// 更新工具栏内 preview 文本（让用户 verify 选中内容；视觉高亮可能跟 canvas 错位时这是 ground truth）
+function _updateSelPreview(text) {
+  const el = document.getElementById('sel-preview');
+  if (!el) return;
+  text = (text || '').trim();
+  if (!text) { el.textContent = '—'; return; }
+  const max = 120;
+  const display = text.length > max
+    ? text.slice(0, 60) + ' … ' + text.slice(-40)
+    : text;
+  el.innerHTML = '<b>已选：</b>' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
+                 '<span class="len">（' + text.length + ' 字）</span>';
 }
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
@@ -615,6 +638,7 @@ function _applyRangeFromCarets(startC, endC, textLayerDiv) {
   sel.removeAllRanges();
   sel.addRange(range);
   lastSelText = range.toString();
+  _updateSelPreview(lastSelText);
   if (!lastSelText.trim()) { toolbar.classList.remove('open'); return false; }
   // overlay：用 PDF.js itemBoxes（PDF 原始坐标，跟 canvas 渲染同源，最准）
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
@@ -782,6 +806,7 @@ function checkSelection() {
     return;
   }
   lastSelText = txt;
+    _updateSelPreview(lastSelText);
   try {
     const rng = sel.getRangeAt(0);
     const rect = rng.getBoundingClientRect();
@@ -804,7 +829,8 @@ document.addEventListener('selectionchange', () => scheduleCheck(200));
 document.addEventListener('mousedown', (e) => {
   if (!toolbar.contains(e.target)) {
     const t = (window.getSelection().toString() || '').trim();
-    if (!t) { toolbar.classList.remove('open'); lastSelText = ''; }
+    if (!t) { toolbar.classList.remove('open'); lastSelText = '';
+     _updateSelPreview(''); }
   }
 });
 document.addEventListener('touchstart', (e) => {
