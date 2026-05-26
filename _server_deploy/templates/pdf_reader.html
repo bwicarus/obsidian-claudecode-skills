@@ -33,9 +33,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer br{-webkit-user-select:none;user-select:none}
 /* native selection 设透明 —— 视觉高亮交给手绘 overlay（避免 textLayer 对齐误差 */
 .textLayer ::selection{background:transparent!important;color:transparent}
-/* 选中范围叠层（PDF.js 字符级位置不可靠，只显示涉及的 textDiv 段；精确选中以工具栏 preview 为准）*/
+/* 选中高亮叠层：用 PyMuPDF 提取的 char-level bbox 画，跟 canvas 渲染精确对齐 */
 .sel-overlay{position:absolute;inset:0;pointer-events:none;z-index:3}
-.sel-overlay .hl{position:absolute;background:rgba(96,165,250,.18);border:1px dashed rgba(96,165,250,.55);border-radius:2px}
+.sel-overlay .hl{position:absolute;background:rgba(59,109,181,.42);border-radius:2px;mix-blend-mode:multiply}
+/* char layer：透明覆盖 PDF，接管所有选中事件（绕开 PDF.js textLayer 字符位置误差）*/
+.char-layer{position:absolute;inset:0;z-index:4;cursor:text;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
@@ -296,8 +298,11 @@ async function renderPage(num) {
     window.dlog?.('  delta: dx='+dx.toFixed(1)+' dy='+dy.toFixed(1));
   }
 
-  // 绑点击 → 选中整行 / 双击 → 扩段。避开 textLayer 对齐问题（不依赖 native drag-select）
-  bindTextLayerClick(textLayerDiv);
+  // 关掉 textLayer 的点击交互（保留它仅用作 PDF.js 自身字体度量；选中事件由 char-layer 接管）
+  textLayerDiv.style.pointerEvents = 'none';
+
+  // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
+  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
 
   // 同步 URL（不刷新页面）
   const u = new URL(location.href);
@@ -338,8 +343,279 @@ const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
      _updateSelPreview('');
 let _selTimer = null;
-// ──────── 点击 → 单词(span) / 双击 → 整行 / 三击 → 整段 ────────
-let _lastClickSpan = null, _lastClickTime = 0, _clickCount = 0;
+// ──────── char-layer：PyMuPDF char-level bbox 驱动的精确选中 ────────
+
+let _charSel = null;   // {pw, startIdx, endIdx, dragging}
+
+async function loadCharsAndBindLayer(num, wrap, viewport) {
+  const r = await fetch(`/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
+  const d = await r.json();
+  if (!d.ok) { window.dlog?.('chars api fail: ' + (d.error || '?'), '#ff6b6b'); return; }
+  const scale = viewport.scale;
+  const pageH = d.page_h;
+  // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
+  const charBoxes = d.chars.map(ch => ({
+    c: ch.c,
+    left:   ch.x0 * scale,
+    top:    (pageH - ch.y1) * scale,
+    width:  (ch.x1 - ch.x0) * scale,
+    height: (ch.y1 - ch.y0) * scale,
+  }));
+  wrap.__charBoxes = charBoxes;
+  window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
+  // 创建 char-layer（透明覆盖整个 page-wrap）
+  const cl = document.createElement('div');
+  cl.className = 'char-layer';
+  wrap.appendChild(cl);
+  wrap.__charLayer = cl;
+  _bindCharLayer(cl, wrap);
+}
+
+// 找点击位置最近的 char index
+function _findCharAt(charBoxes, x, y) {
+  // 先尝试落在某 char bbox 内
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    if (x >= c.left && x <= c.left + c.width && y >= c.top && y <= c.top + c.height) {
+      return i;
+    }
+  }
+  // 落不到任何 char → 找同 Y 行内最近的（按行优先 + 行内 X 距离）
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    // 行匹配：y 在 char Y 范围内或附近
+    const yIn = (y >= c.top - 2 && y <= c.top + c.height + 2);
+    if (yIn) {
+      const dx = (x < c.left) ? (c.left - x) : (x > c.left + c.width) ? (x - c.left - c.width) : 0;
+      if (dx < bestD) { bestD = dx; best = i; }
+    }
+  }
+  if (best >= 0) return best;
+  // 还找不到 → 用整体 Manhattan 距离
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    const cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+    const d = Math.abs(x - cx) + Math.abs(y - cy) * 3;   // y 偏差权重高（不跨行）
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+function _selByCharRange(pw, sIdx, eIdx) {
+  if (!pw || !pw.__charBoxes) return;
+  if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
+  const chars = pw.__charBoxes;
+  if (sIdx < 0 || eIdx >= chars.length) return;
+  // 拼出选中文本（同行内字符之间不加空格；跨行加换行）
+  let text = '';
+  let lastTop = -1;
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (lastTop >= 0 && Math.abs(c.top - lastTop) > c.height * 0.6) text += '\n';
+    text += c.c;
+    lastTop = c.top;
+  }
+  lastSelText = text.trim();
+  _updateSelPreview(lastSelText);
+  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  // 高亮：合并同行 chars 成一个矩形（连续 X，同 Y 范围）
+  const ov = pw.querySelector('.sel-overlay');
+  if (ov) {
+    ov.innerHTML = '';
+    let cur = null;
+    for (let i = sIdx; i <= eIdx; i++) {
+      const c = chars[i];
+      if (cur && Math.abs(c.top - cur.top) <= c.height * 0.4 && c.left >= cur.left + cur.width - 2) {
+        // 同一行 + 紧邻 → 扩展当前矩形
+        cur.width = (c.left + c.width) - cur.left;
+        cur.height = Math.max(cur.height, c.height);
+      } else {
+        if (cur) {
+          const div = document.createElement('div');
+          div.className = 'hl';
+          div.style.left = cur.left + 'px';
+          div.style.top = cur.top + 'px';
+          div.style.width = cur.width + 'px';
+          div.style.height = cur.height + 'px';
+          ov.appendChild(div);
+        }
+        cur = {left: c.left, top: c.top, width: c.width, height: c.height};
+      }
+    }
+    if (cur) {
+      const div = document.createElement('div');
+      div.className = 'hl';
+      div.style.left = cur.left + 'px';
+      div.style.top = cur.top + 'px';
+      div.style.width = cur.width + 'px';
+      div.style.height = cur.height + 'px';
+      ov.appendChild(div);
+    }
+  }
+  // 工具栏位置：选区底部
+  const pwRect = pw.getBoundingClientRect();
+  const mainEl = document.getElementById('main');
+  const mainRect = mainEl.getBoundingClientRect();
+  const lastChar = chars[eIdx];
+  toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
+  toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + lastChar.top + lastChar.height + 6) + 'px';
+  toolbar.classList.add('open');
+}
+
+// 按 char 扩展到词边界（英文 \w / CJK 逐字）
+function _wordExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK  = (c) => /[一-鿿㐀-䶿]/.test(c);
+  const c = chars[idx].c;
+  if (isCJK(c)) return {start: idx, end: idx};
+  if (!isWord(c)) return {start: idx, end: idx};
+  // 向左扩
+  let s = idx;
+  while (s > 0 && isWord(chars[s - 1].c) &&
+         Math.abs(chars[s - 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
+    s--;
+  }
+  // 向右扩
+  let e = idx;
+  while (e < chars.length - 1 && isWord(chars[e + 1].c) &&
+         Math.abs(chars[e + 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
+    e++;
+  }
+  return {start: s, end: e};
+}
+
+// 同行扩展（双击）
+function _lineExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const refTop = chars[idx].top;
+  const refH = chars[idx].height;
+  let s = idx, e = idx;
+  while (s > 0 && Math.abs(chars[s - 1].top - refTop) <= refH * 0.4) s--;
+  while (e < chars.length - 1 && Math.abs(chars[e + 1].top - refTop) <= refH * 0.4) e++;
+  return {start: s, end: e};
+}
+
+// 段扩展（三击）：连续行 + 行间距 < 2.2× 行高
+function _paragraphExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const refH = chars[idx].height;
+  let s = idx, e = idx;
+  let curTop = chars[idx].top;
+  // 向左/上
+  while (s > 0) {
+    const t = chars[s - 1].top;
+    if (Math.abs(t - curTop) > refH * 2.2) break;
+    s--;
+    if (Math.abs(t - curTop) > refH * 0.4) curTop = t;
+  }
+  curTop = chars[idx].top;
+  while (e < chars.length - 1) {
+    const t = chars[e + 1].top;
+    if (Math.abs(t - curTop) > refH * 2.2) break;
+    e++;
+    if (Math.abs(t - curTop) > refH * 0.4) curTop = t;
+  }
+  return {start: s, end: e};
+}
+
+let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null;
+let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
+
+function _bindCharLayer(cl, pw) {
+  const ptToLocal = (clientX, clientY) => {
+    const r = cl.getBoundingClientRect();
+    return {x: clientX - r.left, y: clientY - r.top};
+  };
+
+  const onStart = (x, y) => {
+    const idx = _findCharAt(pw.__charBoxes, x, y);
+    if (idx < 0) { _dragStartCharIdx = null; return; }
+    _dragStartCharIdx = idx;
+    _dragStartXY = {x, y};
+    _dragMoved = false;
+    _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
+  };
+
+  const onMove = (x, y, ev) => {
+    if (_dragStartCharIdx == null) return;
+    if (!_dragStartXY) return;
+    const dx = Math.abs(x - _dragStartXY.x), dy = Math.abs(y - _dragStartXY.y);
+    if (dx + dy < 8) return;
+    _dragMoved = true;
+    if (ev && ev.cancelable) ev.preventDefault();
+    const idx = _findCharAt(pw.__charBoxes, x, y);
+    if (idx < 0) return;
+    _selByCharRange(pw, _dragStartCharIdx, idx);
+  };
+
+  const onEnd = (x, y) => {
+    if (_dragStartCharIdx == null) return;
+    const startIdx = _dragStartCharIdx;
+    _dragStartCharIdx = null;
+    if (_dragMoved) {
+      const idx = _findCharAt(pw.__charBoxes, x, y);
+      if (idx >= 0) _selByCharRange(pw, startIdx, idx);
+    } else {
+      // 单/双/三击
+      const now = Date.now();
+      if (_lastClickCharIdx === startIdx && now - _lastClickTime < 380) {
+        _clickCount = (_clickCount % 3) + 1;
+      } else {
+        _clickCount = 1;
+        _lastClickCharIdx = startIdx;
+      }
+      _lastClickTime = now;
+      let bounds = null;
+      if (_clickCount === 1) bounds = _wordExpandFromChar(pw.__charBoxes, startIdx);
+      else if (_clickCount === 2) bounds = _lineExpandFromChar(pw.__charBoxes, startIdx);
+      else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
+      if (bounds) _selByCharRange(pw, bounds.start, bounds.end);
+    }
+  };
+
+  cl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const p = ptToLocal(e.clientX, e.clientY);
+    onStart(p.x, p.y);
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (_dragStartCharIdx == null) return;
+    const p = ptToLocal(e.clientX, e.clientY);
+    onMove(p.x, p.y, null);
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (_dragStartCharIdx == null) return;
+    const p = ptToLocal(e.clientX, e.clientY);
+    onEnd(p.x, p.y);
+  });
+  cl.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { _dragStartCharIdx = null; return; }
+    const t = e.touches[0];
+    const p = ptToLocal(t.clientX, t.clientY);
+    onStart(p.x, p.y);
+  }, {passive: true});
+  cl.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 1 || _dragStartCharIdx == null) return;
+    const t = e.touches[0];
+    const p = ptToLocal(t.clientX, t.clientY);
+    onMove(p.x, p.y, e);
+  }, {passive: false});
+  cl.addEventListener('touchend', (e) => {
+    if (_dragStartCharIdx == null) return;
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const p = ptToLocal(t.clientX, t.clientY);
+    onEnd(p.x, p.y);
+  });
+  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; });
+}
+
+// ──────── 旧 textLayer 事件机制（保留备用，但 char-layer 接管后不会触发）────────
+let _lastClickSpan = null, _legacyClickTime = 0, _legacyClickCount = 0;
 
 function _spansInSameLine(targetSpan, textLayerDiv) {
   // 同一行 = Y 中心相差 < 半行高
@@ -595,9 +871,8 @@ function _updateSelPreview(text) {
     ? text.slice(0, 60) + ' … ' + text.slice(-40)
     : text;
   // 提示用户：虚线框是 textDiv 段范围（粗略），实际选中以下面文字为准
-  el.innerHTML = '<b>✓ 实际选中</b>（虚线框是涉及段范围，不必精确对齐）：<br>'
-               + '<span style="color:#cfe6ff">' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>'
-               + '<span class="len">（' + text.length + ' 字）</span>';
+  el.innerHTML = '<b>已选：</b>' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
+                 '<span class="len">（' + text.length + ' 字）</span>';
 }
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
