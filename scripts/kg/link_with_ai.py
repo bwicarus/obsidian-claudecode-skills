@@ -280,39 +280,43 @@ def main() -> int:
             n = id2_local.get(nid)
             if not n:
                 continue
-            # 同 hash 已被拒绝 → 跳过（不允许再次尝试同节点）
             rj = existing_rejects.get(nid)
-            if rj and rj.get("note_hash") == note_hash:
-                skipped_by_hash_count += 1
-                continue
-            # 规则判定
+            # 规则判定（每次都重新评估，因为节点的 state / 前置 mastered 可能已经变化）
             state = n.get("state", "locked")
+            allow = False
+            reason = ""
             if state in ("mastered", "unlockable"):
-                kept.append(nid); accepted_count += 1
-                # 笔记内容变了（之前 hash 不同）→ 旧拒绝记录作废
-                if rj: existing_rejects.pop(nid, None)
-                continue
-            # locked → 看前置 mastered 比例（level >= 2 算 mastered）
-            prs = prereqs_of.get(nid, [])
-            if not prs:
-                reason = "node locked + 无前置数据"
-                cleared, total, ratio = 0, 0, 0.0
+                allow = True
             else:
-                cleared = sum(1 for p in prs
-                              if (id2_local.get(p, {}).get("mastery_level", 0) or 0) >= 2)
-                total = len(prs)
-                ratio = cleared / total
-            if total > 0 and ratio >= 0.5:
+                prs = prereqs_of.get(nid, [])
+                if not prs:
+                    reason = "node locked + 无前置数据"
+                else:
+                    cleared = sum(1 for p in prs
+                                  if (id2_local.get(p, {}).get("mastery_level", 0) or 0) >= 2)
+                    total = len(prs)
+                    ratio = cleared / total
+                    if ratio >= 0.5:
+                        allow = True
+                    else:
+                        reason = f"node locked + 前置解锁 {cleared}/{total}={ratio:.0%}"
+            if allow:
                 kept.append(nid); accepted_count += 1
+                # 规则通过 → 清除旧拒绝记录
                 if rj: existing_rejects.pop(nid, None)
             else:
-                # 拒绝：写入 _rejected_links
+                # 规则不通过：检查幂等（同 hash 不再消耗 AI 跑下次；但当前轮的 covered
+                # 已经是 AI 出的结果——我们只是不写入。下次跑 AI 时同 hash 可跳过提示
+                # AI 不要再列入）。所以这里直接拒绝并更新记录。
+                if rj and rj.get("note_hash") == note_hash:
+                    skipped_by_hash_count += 1   # 同 hash 之前已记，不算新拒绝
+                else:
+                    new_reject_count += 1
                 existing_rejects[nid] = {
                     "note_hash": note_hash,
-                    "reason": f"node locked + 前置解锁 {cleared}/{total}={ratio:.0%}" if total else "node locked + 无前置数据",
+                    "reason": reason,
                     "rejected_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
-                new_reject_count += 1
         if existing_rejects:
             rejected_links[rel] = existing_rejects
         elif rel in rejected_links:
