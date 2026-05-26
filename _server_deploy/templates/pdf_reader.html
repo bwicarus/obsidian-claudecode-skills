@@ -420,11 +420,35 @@ function _findCharAt(charBoxes, x, y) {
   return best;
 }
 
+function _expandToWordStart(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  if (!isWord(chars[idx].c)) return idx;
+  while (idx > 0 && isWord(chars[idx - 1].c) &&
+         Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
+    idx--;
+  }
+  return idx;
+}
+function _expandToWordEnd(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  if (!isWord(chars[idx].c)) return idx;
+  while (idx < chars.length - 1 && isWord(chars[idx + 1].c) &&
+         Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
+    idx++;
+  }
+  return idx;
+}
+
 function _selByCharRange(pw, sIdx, eIdx) {
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
   if (sIdx < 0 || eIdx >= chars.length) return;
+  // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
+  sIdx = _expandToWordStart(chars, sIdx);
+  eIdx = _expandToWordEnd(chars, eIdx);
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
