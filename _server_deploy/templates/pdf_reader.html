@@ -25,7 +25,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   -webkit-user-select:text;user-select:text}
 .textLayer span.markedContent{top:0;height:0}
 .textLayer br{-webkit-user-select:none;user-select:none}
-.textLayer ::selection{background:rgba(59,109,181,.45)!important;color:transparent}
+/* native selection 设透明 —— 视觉高亮交给手绘 overlay（避免 textLayer 对齐误差 */
+.textLayer ::selection{background:transparent!important;color:transparent}
+/* 选中高亮叠层（手绘矩形，绝对位置跟 page-wrap 对齐）*/
+.sel-overlay{position:absolute;inset:0;pointer-events:none;z-index:3}
+.sel-overlay .hl{position:absolute;background:rgba(59,109,181,.42);border-radius:2px;mix-blend-mode:multiply}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
@@ -199,6 +203,12 @@ async function renderPage(num) {
   // PDF.js v4 TextLayer 需要这个 CSS variable 来计算 spans 缩放
   textLayerDiv.style.setProperty('--scale-factor', viewport.scale);
   wrap.appendChild(textLayerDiv);
+  // 手绘选中高亮 overlay
+  const selOverlay = document.createElement('div');
+  selOverlay.className = 'sel-overlay';
+  selOverlay.style.width = viewport.width + 'px';
+  selOverlay.style.height = viewport.height + 'px';
+  wrap.appendChild(selOverlay);
   container.appendChild(wrap);
 
   // 渲染 canvas
@@ -252,11 +262,40 @@ window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + del
 const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
 let _selTimer = null;
+function paintSelectionOverlay() {
+  // 清空所有 page-wrap 内的 sel-overlay 高亮
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  const rng = sel.getRangeAt(0);
+  if (rng.collapsed) return;
+  // 拿到选区在 textLayer 内的所有矩形（多行选中会有多个）
+  const rects = rng.getClientRects();
+  if (!rects.length) return;
+  // 找到选区起点所在的 page-wrap（多页选中暂只画当前页）
+  let pw = rng.startContainer.parentElement;
+  while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
+  if (!pw) return;
+  const ov = pw.querySelector('.sel-overlay');
+  if (!ov) return;
+  const pwRect = pw.getBoundingClientRect();
+  for (const r of rects) {
+    if (!r.width || !r.height) continue;
+    const div = document.createElement('div');
+    div.className = 'hl';
+    div.style.left   = (r.left - pwRect.left) + 'px';
+    div.style.top    = (r.top  - pwRect.top)  + 'px';
+    div.style.width  = r.width  + 'px';
+    div.style.height = r.height + 'px';
+    ov.appendChild(div);
+  }
+}
+
 function checkSelection() {
+  paintSelectionOverlay();
   const sel = window.getSelection();
   const txt = (sel.toString() || '').trim();
   if (!txt || txt.length < 2) {
-    // 不立即关：iPad 长按出选择手柄、点工具栏按钮前不要消失
     return;
   }
   lastSelText = txt;
