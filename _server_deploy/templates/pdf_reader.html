@@ -354,12 +354,12 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   const scale = viewport.scale;
   const pageH = d.page_h;
   // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
-  // 不再 sort：PyMuPDF rawdict 的 chars 已按 PDF 内容流顺序（通常就是 reading order）
-  // 之前 sort 把 subscript/superscript 误判为不同行 → 顺序乱
+  // 关键修正：PyMuPDF rawdict 的 bbox 已经是 image coordinate (y 向下, 原点左上)
+  // 之前误做 (pageH - y1) y 翻转 → 上下颠倒，整个 chars overlay 错位
   const charBoxes = d.chars.map(ch => ({
     c: ch.c,
     left:   ch.x0 * scale,
-    top:    (pageH - ch.y1) * scale,
+    top:    ch.y0 * scale,    // 直接用 y0，不翻转
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
