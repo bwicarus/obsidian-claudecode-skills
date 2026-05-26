@@ -206,12 +206,14 @@ def pdf_api_page_chars():
                         if not bbox or len(bbox) != 4:
                             continue
                         c = ch.get("c", "")
-                        if not c or c.isspace():
+                        if not c:
                             continue
+                        # 保留空格（拼接选中文本时需要），但用 sp 标记免得占点击命中
                         chars.append({
                             "c": c,
                             "x0": round(bbox[0], 2), "y0": round(bbox[1], 2),
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
+                            "sp": 1 if c.isspace() else 0,
                         })
         return jsonify({
             "ok": True,

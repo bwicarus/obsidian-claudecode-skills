@@ -360,6 +360,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     top:    (pageH - ch.y1) * scale,
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
+    sp: !!ch.sp,
   }));
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
@@ -371,20 +372,21 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   _bindCharLayer(cl, wrap);
 }
 
-// 找点击位置最近的 char index
+// 找点击位置最近的非空格 char index
 function _findCharAt(charBoxes, x, y) {
-  // 先尝试落在某 char bbox 内
+  // 先尝试落在某 char bbox 内（优先 non-space）
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
+    if (c.sp) continue;
     if (x >= c.left && x <= c.left + c.width && y >= c.top && y <= c.top + c.height) {
       return i;
     }
   }
-  // 落不到任何 char → 找同 Y 行内最近的（按行优先 + 行内 X 距离）
   let best = -1, bestD = Infinity;
+  // 同行内 X 距离最近的 non-space
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
-    // 行匹配：y 在 char Y 范围内或附近
+    if (c.sp) continue;
     const yIn = (y >= c.top - 2 && y <= c.top + c.height + 2);
     if (yIn) {
       const dx = (x < c.left) ? (c.left - x) : (x > c.left + c.width) ? (x - c.left - c.width) : 0;
@@ -392,11 +394,12 @@ function _findCharAt(charBoxes, x, y) {
     }
   }
   if (best >= 0) return best;
-  // 还找不到 → 用整体 Manhattan 距离
+  // 整体 Manhattan 距离兜底
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
+    if (c.sp) continue;
     const cx = c.left + c.width / 2, cy = c.top + c.height / 2;
-    const d = Math.abs(x - cx) + Math.abs(y - cy) * 3;   // y 偏差权重高（不跨行）
+    const d = Math.abs(x - cx) + Math.abs(y - cy) * 3;
     if (d < bestD) { bestD = d; best = i; }
   }
   return best;
@@ -419,17 +422,25 @@ function _selByCharRange(pw, sIdx, eIdx) {
   lastSelText = text.trim();
   _updateSelPreview(lastSelText);
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
-  // 高亮：合并同行 chars 成一个矩形（连续 X，同 Y 范围）
+  // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
     ov.innerHTML = '';
     let cur = null;
     for (let i = sIdx; i <= eIdx; i++) {
       const c = chars[i];
-      if (cur && Math.abs(c.top - cur.top) <= c.height * 0.4 && c.left >= cur.left + cur.width - 2) {
-        // 同一行 + 紧邻 → 扩展当前矩形
-        cur.width = (c.left + c.width) - cur.left;
-        cur.height = Math.max(cur.height, c.height);
+      // 空格如果 bbox 缺失，用前一字符的位置 + 估算 width
+      let cleft = c.left, ctop = c.top, cw = c.width, ch = c.height;
+      if (c.sp && (!cw || cw < 0.5) && i > sIdx) {
+        const prev = chars[i - 1];
+        cleft = prev.left + prev.width;
+        ctop = prev.top;
+        ch = prev.height;
+        cw = ch * 0.3;   // 估算空格宽度
+      }
+      if (cur && Math.abs(ctop - cur.top) <= ch * 0.4 && cleft <= cur.left + cur.width + ch * 0.5) {
+        cur.width = Math.max(cur.left + cur.width, cleft + cw) - cur.left;
+        cur.height = Math.max(cur.height, ch);
       } else {
         if (cur) {
           const div = document.createElement('div');
@@ -440,7 +451,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
           div.style.height = cur.height + 'px';
           ov.appendChild(div);
         }
-        cur = {left: c.left, top: c.top, width: c.width, height: c.height};
+        cur = {left: cleft, top: ctop, width: cw, height: ch};
       }
     }
     if (cur) {
@@ -463,7 +474,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
   toolbar.classList.add('open');
 }
 
-// 按 char 扩展到词边界（英文 \w / CJK 逐字）
+// 按 char 扩展到词边界（英文 \w / CJK 逐字）。空格视作非词字符
 function _wordExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
@@ -471,13 +482,11 @@ function _wordExpandFromChar(chars, idx) {
   const c = chars[idx].c;
   if (isCJK(c)) return {start: idx, end: idx};
   if (!isWord(c)) return {start: idx, end: idx};
-  // 向左扩
   let s = idx;
   while (s > 0 && isWord(chars[s - 1].c) &&
          Math.abs(chars[s - 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
     s--;
   }
-  // 向右扩
   let e = idx;
   while (e < chars.length - 1 && isWord(chars[e + 1].c) &&
          Math.abs(chars[e + 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
@@ -486,7 +495,7 @@ function _wordExpandFromChar(chars, idx) {
   return {start: s, end: e};
 }
 
-// 同行扩展（双击）
+// 同行扩展（双击）—— 含空格
 function _lineExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const refTop = chars[idx].top;
@@ -494,6 +503,9 @@ function _lineExpandFromChar(chars, idx) {
   let s = idx, e = idx;
   while (s > 0 && Math.abs(chars[s - 1].top - refTop) <= refH * 0.4) s--;
   while (e < chars.length - 1 && Math.abs(chars[e + 1].top - refTop) <= refH * 0.4) e++;
+  // 去掉两端空格
+  while (s < e && chars[s].sp) s++;
+  while (e > s && chars[e].sp) e--;
   return {start: s, end: e};
 }
 
