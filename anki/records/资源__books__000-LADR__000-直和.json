@@ -7,11 +7,11 @@
   "reason": "待处理节为首个标题前的空前言部分，仅包含 frontmatter，无可制卡的实质内容。三个正文节（直和定义、直和的条件、两个子空间的和是直和的判定）已在历史记录中处理（frontmatter 显示 anki_total: 3）。",
   "warnings": [],
   "section_hashes": {
-    "直和-子空间的和的特殊情况": "1982ae0a5d824851",
+    "直和-子空间的和的特殊情况": "3239ffb807cce76c",
     "直和的条件": "38d00b62169e53df",
-    "两个子空间的和是直和的判定": "21faf48210cd70a0",
+    "两个子空间的和是直和的判定": "3f1e4bc0b90d5585",
     "相关笔记": "61d4131bc21b8799",
-    "": "7433761b3af7c9e3"
+    "": "c5514cc6338b33d5"
   },
   "cards": [
     {
@@ -118,30 +118,62 @@
       "anki_note_id": 1778698863501,
       "status": "synced",
       "_reconciled": "2026-05-23"
+    },
+    {
+      "local_id": "20260523015759-001",
+      "type": "basic",
+      "deck": "必复习::今日",
+      "front": "设 \\(V_1,\\dots,V_N\\) 是 \\(V\\) 的子空间。和 \\(V_1+\\cdots+V_N\\) 在什么条件下称为**直和**？符号怎么记？",
+      "back": "当其中每个元素都能以 \\(b_1+\\cdots+b_N\\)（各 \\(b_k\\in V_k\\)）的形式**唯一**表示时，称为直和，记作 \\(V_1\\oplus\\cdots\\oplus V_N\\)。",
+      "text": "",
+      "reason": "保留原卡核心——直和的定义与记号，确保替换后基础知识点不丢。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779469079070,
+      "status": "synced",
+      "_qa_from": "20260514040102-001",
+      "_qa_created": "2026-05-23T01:57:59.075911"
+    },
+    {
+      "local_id": "20260523015759-003",
+      "type": "basic",
+      "deck": "必复习::今日",
+      "front": "若 \\(V=V_1\\oplus\\cdots\\oplus V_N\\)（直和），它的维数有什么简洁公式？比普通的和省去了什么？",
+      "back": "维数直接相加：\\[\\dim V=\\dim V_1+\\cdots+\\dim V_N.\\] 没有修正项。普通的和则要用 \\(\\dim(U+W)=\\dim U+\\dim W-\\dim(U\\cap W)\\)，多一个交集 \\(U\\cap W\\) 的修正项。",
+      "text": "",
+      "reason": "针对同一困惑，补入有效回答第 2 点：直和维数直接相加，对比普通和省去交集修正项。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779469079128,
+      "status": "synced",
+      "_qa_from": "20260514040102-001",
+      "_qa_created": "2026-05-23T01:57:59.130524"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-22T04:00:31+09:00",
-    "total": 3,
+    "checked_at": "2026-05-26T04:00:02+09:00",
+    "total": 8,
     "new": 0,
-    "learning": 0,
-    "review": 3,
+    "learning": 1,
+    "review": 7,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9863398047565898,
-    "retention_min": 0.9825892409207527,
-    "mastery_avg": 0.40312773263277735,
-    "mastery_min": 0.3951599632830159,
-    "reps_total": 18,
+    "retention_avg": 0.9227961974700905,
+    "retention_min": 0.4,
+    "mastery_avg": 0.39411174090714846,
+    "mastery_min": 0.25,
+    "reps_total": 37,
     "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-22T04:00:32+09:00",
-    "score": 0.3088,
-    "activation": 0.7193,
-    "importance": 0.7193,
-    "weakness": 0.5969,
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.1632,
+    "activation": 0.519,
+    "importance": 0.519,
+    "weakness": 0.6059,
     "formula": "(1-M) * activation * importance"
   }
 }

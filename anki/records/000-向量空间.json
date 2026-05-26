@@ -1,14 +1,15 @@
 {
   "source_note": "000-向量空间.md",
   "source_link": "[[000-向量空间]]",
-  "generated_at": "2026-05-11T18:17:55+09:00",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%90%91%E9%87%8F%E7%A9%BA%E9%97%B4",
+  "generated_at": "2026-05-25T13:32:16+09:00",
   "generator": "agent",
-  "status": "synced",
-  "reason": "该节仅为 Obsidian Tasks 插件的查询代码块，用于展示笔记内未完成任务，不包含任何需要长期记忆的知识点。",
+  "status": "partial_failed",
+  "reason": "本节给出向量空间的正式定义，包含加法、标量乘法以及八条公理，是后续所有线性代数内容的根基，需要精确复述。同时强调了'满足封闭性的集合不一定是向量空间'这一易混点，值得制卡。",
   "warnings": [],
   "section_hashes": {
-    "": "b5e6fc8dc5548b6b",
-    "基本定义": "5daa5810c7bc2854",
+    "": "6176d9f951edc006",
+    "基本定义": "ced489049b9e8c02",
     "加法恒等元，加法逆元的唯一性": "b3d4cdce52479cd9",
     "其他论证": "22c71cf6b1ec0349",
     "相关笔记": "db9b6c09e8d67c48"
@@ -125,30 +126,175 @@
       ],
       "anki_note_id": 1778490528387,
       "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "集合 \\(V\\) 上的加法（addition）定义是什么？",
+      "back": "集合 \\(V\\) 上的加法是一个函数，它将每一对 \\(a, b \\in V\\) 对应到一个元素 \\(a + b \\in V\\)。",
+      "text": "",
+      "reason": "核心定义，需精确复述加法作为函数的形式定义。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683536895,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-002",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "集合 \\(V\\) 上的标量乘法（scalar multiplication）定义是什么？",
+      "back": "集合 \\(V\\) 上的标量乘法是一个函数，它将每个 \\(\\lambda \\in \\mathbf{F}\\) 和每个 \\(b \\in V\\) 对应到一个元素 \\(\\lambda b \\in V\\)。",
+      "text": "",
+      "reason": "核心定义，与加法配对构成向量空间运算基础。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683536945,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "向量空间（vector space）的正式定义是什么？",
+      "back": "一个向量空间是一个集合 \\(V\\)，其上定义了加法与标量乘法，并满足以下性质：可交换性、可结合性、加法恒等元、加法逆元、乘法恒等元、分配性质。",
+      "text": "",
+      "reason": "向量空间是核心定义，必须精确复述。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": null,
+      "status": "failed",
+      "error": "cannot create note because it is a duplicate"
+    },
+    {
+      "local_id": "20260525133216-004",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "可结合性同时包含 \\((a+b)+c = a+(b+c)\\) 与 \\((\\lambda\\mu)b = \\lambda(\\mu b)\\)；分配性质包含 \\(\\lambda(a+b) = \\lambda a + \\lambda b\\) 与 \\((\\lambda+\\mu)b = \\lambda b + \\mu b\\)。",
+      "text": "向量空间的八条公理：{{c1::可交换性}}、{{c2::可结合性}}、{{c3::加法恒等元}}、{{c4::加法逆元}}、{{c5::乘法恒等元}}、{{c6::分配性质}}。",
+      "reason": "向量空间公理列表是必须主动回忆的核心条件，挖空考查能否完整列出。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537044,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-005",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "向量空间的加法恒等元公理：存在 \\({{c1::0 \\in V}}\\)，使得对所有 \\(b \\in V\\) 都有 \\({{c2::b + 0 = b}}\\)。",
+      "reason": "加法恒等元是判定向量空间时必查的条件。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537095,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-006",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "向量空间的加法逆元公理：对于每个 \\(b \\in V\\)，都存在 \\({{c1::c \\in V}}\\) 使得 \\({{c2::b + c = 0}}\\)。",
+      "reason": "加法逆元是判定向量空间时必查的条件。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537144,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-007",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "注意 \\(1\\) 是域 \\(\\mathbf{F}\\) 的乘法单位元。",
+      "text": "向量空间的乘法恒等元公理：对所有 \\(b \\in V\\)，都有 \\({{c1::1 \\cdot b = b}}\\)。",
+      "reason": "乘法恒等元是易遗漏的公理，需主动回忆。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537195,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-008",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "一个集合 \\(V\\) 配上加法与标量乘法，只要这两个运算封闭（即对加法、数乘封闭），是否就一定是向量空间？",
+      "back": "不一定。封闭性只是先决条件；还必须满足可交换性、可结合性、加法恒等元、加法逆元、乘法恒等元和分配性质这八条公理，才能称为向量空间。",
+      "text": "",
+      "reason": "笔记中明确标记的易混点：把封闭性等同于向量空间是常见错误。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537270,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525133216-009",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "在向量空间的语境中，向量（vector）和点（point）分别指什么？",
+      "back": "向量空间的元素被称作向量或点；二者在向量空间中是同一个对象的不同称呼。",
+      "text": "",
+      "reason": "术语定义，避免将'点'与'向量'误解为不同对象。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779683537319,
+      "status": "synced"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-22T04:00:31+09:00",
-    "total": 6,
-    "new": 0,
+    "checked_at": "2026-05-26T04:00:02+09:00",
+    "total": 21,
+    "new": 15,
     "learning": 0,
     "review": 6,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.989620655012936,
-    "retention_min": 0.973998003377544,
-    "mastery_avg": 0.4091919908182373,
-    "mastery_min": 0.39815192900046725,
-    "reps_total": 27,
+    "retention_avg": 0.2854173369500769,
+    "retention_min": 0.0,
+    "mastery_avg": 0.12000948267567603,
+    "mastery_min": 0.0,
+    "reps_total": 30,
     "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-22T04:00:32+09:00",
-    "score": 0.5908,
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.88,
     "activation": 1.0,
     "importance": 1.0,
-    "weakness": 0.5908,
+    "weakness": 0.88,
     "formula": "(1-M) * activation * importance"
   }
 }

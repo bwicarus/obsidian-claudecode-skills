@@ -1,0 +1,91 @@
+{
+  "source_note": "000-F^s.md",
+  "source_link": "[[000-F^s]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-F%5Es",
+  "generated_at": "2026-05-26T00:17:16+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记包含向量的代数本质定义和 F^S 函数空间运算的精确定义，这些是后续线性代数学习中需要随时调用的核心定义，值得制卡。其余内容属于理解性铺垫，不制卡。",
+  "warnings": [],
+  "section_hashes": {
+    "": "1d99ff77176a907d",
+    "向量的本质不是\"箭头\"": "15b16c6ffb58049a",
+    "把\"向量\"换成中性的\"东西\"": "257f0679784c8cf2",
+    "为什么这么定义:行为相同 ⇒ 工具通用": "48169b2087c31733",
+    "$F^S$ 在做什么": "15f17854d176f788"
+  },
+  "cards": [
+    {
+      "local_id": "20260526001716-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "从代数行为看，数学上什么样的对象被称作\"向量\"？",
+      "back": "任何能做加法、能做数乘，并满足相应规则（如交换律、结合律等）的对象。它的具体形状（箭头、数组、多项式、函数、图片等）无关紧要。",
+      "text": "",
+      "reason": "核心定义：抓住\"向量\"在抽象线性代数中的本质，不被几何直观束缚。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "向量空间"
+      ],
+      "anki_note_id": 1779722237046,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260526001716-002",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "\\(F^S\\) 是从集合 \\(S\\) 到域 \\(F\\) 的所有函数构成的集合，运算定义为逐点加法与逐点数乘。",
+      "text": "函数空间 \\(F^S\\) 上的运算：加法 \\((f+g)(x) = {{c1::f(x)+g(x)}}\\)；数乘 \\((\\lambda f)(x) = {{c2::\\lambda f(x)}}\\)。",
+      "reason": "F^S 的加法与数乘定义是后续证明 F^S 是向量空间的直接工具，需要精确回忆，不能模糊。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "函数空间"
+      ],
+      "anki_note_id": 1779722237098,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260526001716-003",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "\\(F^S\\) 作为集合，其元素是什么？",
+      "back": "从集合 \\(S\\) 到域 \\(F\\) 的所有函数。",
+      "text": "",
+      "reason": "符号 F^S 的精确含义是阅读教材时反复需要识别的，必须能立即说出。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "函数空间"
+      ],
+      "anki_note_id": 1779722237145,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-26T04:00:01+09:00",
+    "total": 4,
+    "new": 4,
+    "learning": 0,
+    "review": 0,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.0,
+    "retention_min": 0.0,
+    "mastery_avg": 0.0,
+    "mastery_min": 0.0,
+    "reps_total": 0,
+    "lapses_total": 0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.2713,
+    "activation": 0.5209,
+    "importance": 0.5209,
+    "weakness": 1.0,
+    "formula": "(1-M) * activation * importance"
+  }
+}

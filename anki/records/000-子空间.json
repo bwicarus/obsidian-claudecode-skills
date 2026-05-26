@@ -1,10 +1,11 @@
 {
   "source_note": "000-子空间.md",
   "source_link": "[[000-子空间]]",
-  "generated_at": "2026-05-11T18:09:41+09:00",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%AD%90%E7%A9%BA%E9%97%B4",
+  "generated_at": "2026-05-23T04:00:36+09:00",
   "generator": "agent",
   "status": "synced",
-  "reason": "本次 pending 仅为无名节（\"\"），其内容是分隔线之间的过渡性补充句「这里实际上最关键的是证明了子空间的和还是子空间这一点」以及习题本/相关笔记链接区。这些是对已制卡定理的口语化强调与导航链接，不构成独立的核心定义、判定条件或公式，且其要点（和是子空间）已被现有第二张卡覆盖。按必要性测试：未来记不起这句强调话语，靠原文阅读即可，不会卡住解题或证明，因此不应制卡。",
+  "reason": "本节主体是「V_1+…+V_n 是最小子空间」的证明推导，属于理解即可、可现场重演的内容，不宜整段制卡。但其中「最小」的两层判定结构是一个通用证明模板——遇到「证明某对象是包含某族的最小子空间」时必须立刻想到要验证哪两件事，符合解题模板的制卡标准，制 1 张。",
   "warnings": [],
   "section_hashes": {
     "定义": "d051620c5a484fcc",
@@ -14,7 +15,7 @@
     "": "45c8bcdc4d9295b5",
     "习题本": "56e30872d4cc52f3",
     "「最小子空间」的两层含义": "8b08836d67fed485",
-    "为什么是「最小」的": "0ba343acc49cea69",
+    "为什么是「最小」的": "f416e7e8e2654825",
     "关于「类似集合的并集」这个类比": "35fa4b23e85c6888",
     "和本身是子空间": "2e7974e6871dbd87"
   },
@@ -66,30 +67,47 @@
       ],
       "anki_note_id": 1777452154919,
       "status": "synced"
+    },
+    {
+      "local_id": "20260523040036-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "要证明 \\(V_1+\\dots+V_n\\) 是包含 \\(V_1,\\dots,V_n\\) 的最小子空间，需要分别验证哪两件事？",
+      "back": "1. 它是候选者之一：\\(V_1+\\dots+V_n\\) 本身是子空间，且包含每个 \\(V_k\\)（因为 \\(v\\in V_k\\) 可写成 \\(0+\\dots+v+\\dots+0\\)）。\n2. 它被任意候选者包含：设 \\(W\\) 是任意包含所有 \\(V_k\\) 的子空间，则 \\(V_1+\\dots+V_n\\subseteq W\\)。\n两者都成立，它就是最小的。",
+      "text": "",
+      "reason": "解题模板：证明某对象是包含某族的最小子空间，必须想到「自身是候选者 + 被所有候选者包含」这两层验证，不可现场凑出",
+      "tags": [
+        "数学",
+        "线性代数",
+        "子空间",
+        "证明方法"
+      ],
+      "anki_note_id": 1779476436420,
+      "status": "synced"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-22T04:00:31+09:00",
-    "total": 3,
-    "new": 1,
+    "checked_at": "2026-05-26T04:00:02+09:00",
+    "total": 4,
+    "new": 0,
     "learning": 1,
-    "review": 1,
-    "relearning": 0,
+    "review": 2,
+    "relearning": 1,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.45971456911815195,
-    "retention_min": 0.0,
-    "mastery_avg": 0.21649336100056416,
-    "mastery_min": 0.0,
-    "reps_total": 2,
-    "lapses_total": 0
+    "retention_avg": 0.6741633860157665,
+    "retention_min": 0.3,
+    "mastery_avg": 0.30723932817043526,
+    "mastery_min": 0.15,
+    "reps_total": 18,
+    "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-22T04:00:32+09:00",
-    "score": 0.3183,
-    "activation": 0.6373,
-    "importance": 0.6373,
-    "weakness": 0.7835,
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.2413,
+    "activation": 0.5902,
+    "importance": 0.5902,
+    "weakness": 0.6928,
     "formula": "(1-M) * activation * importance"
   }
 }

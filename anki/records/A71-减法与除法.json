@@ -1,0 +1,58 @@
+{
+  "source_note": "A71-减法与除法.md",
+  "source_link": "[[A71-减法与除法]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=A71-%E5%87%8F%E6%B3%95%E4%B8%8E%E9%99%A4%E6%B3%95",
+  "generated_at": "2026-05-25T01:01:24+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记给出复数减法与除法的精确定义（基于加法/乘法逆元），属于核心定义，未来在表达和证明中需要精确复述，符合制卡标准。但内容较少，只生成最少必要的卡片。",
+  "warnings": [],
+  "section_hashes": {
+    "": "a2b36a9aff33cf61",
+    "1.5 减法与除法": "3f4904765beb3fb0",
+    "我的笔记": "e008eb687b594e7b"
+  },
+  "cards": [
+    {
+      "local_id": "20260525010124-001",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "复数减法通过加法逆元定义，除法通过乘法逆元定义。",
+      "text": "设 \\(T,U\\in\\mathbb{C}\\)：\\(-T\\) 定义为 \\(T\\) 的 {{c1::加法逆元}}，即满足 \\(T+(-T)=0\\) 的唯一复数；\\(1/T\\)（\\(T\\neq 0\\)）定义为 \\(T\\) 的 {{c2::乘法逆元}}。",
+      "reason": "复数减法与除法的核心定义，需精确复述符号 \\(-T\\) 与 \\(1/T\\) 对应的逆元含义。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数",
+        "定义"
+      ],
+      "anki_note_id": 1779638485069,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-26T04:00:02+09:00",
+    "total": 2,
+    "new": 2,
+    "learning": 0,
+    "review": 0,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.0,
+    "retention_min": 0.0,
+    "mastery_avg": 0.0,
+    "mastery_min": 0.0,
+    "reps_total": 0,
+    "lapses_total": 0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.2692,
+    "activation": 0.5188,
+    "importance": 0.5188,
+    "weakness": 1.0,
+    "formula": "(1-M) * activation * importance"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "source_note": "000-减法与除法.md",
+  "source_link": "[[000-减法与除法]]",
+  "source_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%87%8F%E6%B3%95%E4%B8%8E%E9%99%A4%E6%B3%95",
+  "generated_at": "2026-05-25T01:01:00+09:00",
+  "generator": "agent",
+  "status": "synced",
+  "reason": "笔记是《线性代数应该这样学》1.5 节关于复数减法和除法的定义，属于核心定义，值得制作少量卡片以巩固减法/除法的形式定义（基于加法/乘法逆元）。",
+  "warnings": [],
+  "section_hashes": {
+    "": "a2b36a9aff33cf61",
+    "1.5 减法与除法": "78458c826d5b70f3",
+    "我的笔记": "e008eb687b594e7b"
+  },
+  "cards": [
+    {
+      "local_id": "20260525010100-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "在复数中，\\(-T\\) 是如何定义的？",
+      "back": "\\(-T\\) 是 \\(T\\) 的加法逆元，即唯一满足 \\(T+(-T)=0\\) 的复数。",
+      "text": "",
+      "reason": "核心定义：复数减法依赖加法逆元的定义。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1779638460894,
+      "status": "synced"
+    },
+    {
+      "local_id": "20260525010100-002",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "复数的减法基于加法逆元，除法基于乘法逆元。",
+      "text": "设 \\(T,U\\in\\mathbb{C}\\)：减法 \\(U-T\\) 定义为 \\(U+\\){{c1::\\((-T)\\)}}，除法 \\(U/T\\)（\\(T\\neq 0\\)）定义为 \\(U\\cdot\\){{c2::\\(1/T\\)}}。",
+      "reason": "易混点：减法/除法都被定义为与逆元的运算，挖空强化对偶结构。",
+      "tags": [
+        "数学",
+        "线性代数",
+        "复数"
+      ],
+      "anki_note_id": 1779638460945,
+      "status": "synced"
+    }
+  ],
+  "status_snapshot": {
+    "checked_at": "2026-05-26T04:00:01+09:00",
+    "total": 3,
+    "new": 3,
+    "learning": 0,
+    "review": 0,
+    "relearning": 0,
+    "suspended": 0,
+    "buried": 0,
+    "retention_avg": 0.0,
+    "retention_min": 0.0,
+    "mastery_avg": 0.0,
+    "mastery_min": 0.0,
+    "reps_total": 0,
+    "lapses_total": 0
+  },
+  "priority_snapshot": {
+    "computed_at": "2026-05-26T04:00:02+09:00",
+    "score": 0.3457,
+    "activation": 0.588,
+    "importance": 0.5879,
+    "weakness": 1.0,
+    "formula": "(1-M) * activation * importance"
+  }
+}
