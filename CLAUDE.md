@@ -45,6 +45,8 @@
 - `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）
 - `references/ipad-switch-to-server.md` — iPad 快捷指令切换到服务器的完整步骤
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
+- `references/skill-tree-system.md` — 技能树/知识图谱（KG）完整系统：KG 结构、关联校验规则（_rejected_links）、UI 叠加面板架构、register 同步链路、回收站机制
+- `references/qa-browser-features.md` — 截图问答（QA Browser）功能详解：两种模式（普通 / cardCtx）、加号选中（真/假标题）、创建新笔记 `/api/create-note`、Anki 卡片 AI 改进、SSE 流式
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）
@@ -184,6 +186,11 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 **state 共享隐患**：本机按 `ctrl+shift+q` 启的临时 server 跟 daemon **共用** 模块级 `state` 字典。同时操作会串扰（截图覆盖、session 混合）。单人多端通常不撞，遇到问题先各自结束当前会话再开新的。
 
+**QA browser 两种模式 + 各自功能**（完整说明见 [`references/qa-browser-features.md`](references/qa-browser-features.md)）：
+- **普通模式**（默认）：每个 AI 回答下方有 `＋ 选用整条回答` + 子标题旁 `+`（真标题级联 / 粗体段落假标题单段）。勾选任意 → 右上角 `📝 创建新笔记`：prompt 输笔记名 → AI 整理选中问答 + 截图 → `<VAULT>/<name>.md`（不带前缀，避开 register） + `attachments/<name>.png` → 返回 obsidian:// URL
+- **cardCtx 模式**（`?card=<local_id>` 进入，Anki 卡复习链接）：同样的 + 选中，但右上角是「更新到笔记 / 修改 Anki / 全部」，AI 改写源笔记或生成新卡替代旧卡（async job 防移动端断连丢结果）
+- system prompt 强调 `数学公式严格用 $...$，禁止反引号包裹数学`（避免 ` ` 包数学被 markdown 当 inline code 灰底显示）
+
 ## 服务器侧自动化（多实例：VPS + Raspberry Pi）
 
 2026-05-14 起整套工作流跑在 `bwicarus.space` VPS 上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**2026-05-15** 又 mirror 到 Raspberry Pi 5（Debian 13，8GB / NVMe，hostname `bwicarus`）作为完全独立的备份实例。两边 **功能 1:1 对等**，git 仓库 + AnkiWeb + Obsidian Sync 是共享 source of truth。
@@ -227,6 +234,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
+| **技能树 / KG** | `https://bwicarus.space/skilltree/<book>/` | 知识图谱可视化页。home 整体永远底层，左侧 focus 叠加面板（紧凑章带，仅 chain 节点）+ 右侧 detail，进页面定位 localStorage 最近学习节点。完整架构 + 关联校验规则（_rejected_links）+ 回收站 见 [`references/skill-tree-system.md`](references/skill-tree-system.md) |
 
 **控制面板源码**（全部在 git，部署 = 纯 cp）：
 - `_server_deploy/app.py` → 部署到 `/root/webapp/app.py`（含 `/api/nav-links` 路由、`register_control` 导入、`/control` 进 `PROTECTED_PREFIXES` / `NAV_INJECT_PREFIXES`）
@@ -311,3 +319,18 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 **state 备份**（仅主项目 ps1 做）：每天备份 `state/note-states.json` 和 `anki/records/` 到 `state/backup/`，保留 7 天。
 
 **注意**：daily_anki_status.ps1 必须保持 **UTF-8 with BOM**（Windows PowerShell 5.1 调 `-File X.ps1` 默认按 GBK 解码无 BOM 中文 → "字符串缺少终止符"）。Edit / Write 修改后立刻补 BOM。
+
+### 2026-05-26 register / KG / daily 调整
+
+**register_notes.py 修复**（详见 [`references/skill-tree-system.md`](references/skill-tree-system.md)）：
+- 根因：`process_note` 返回字典缺 `"note"` 字段 → main() 用 `r.get("note")` 过滤永远为空 → `update_kg_for_processed` 静默跳过 → KG 同步从来没真跑过
+- 修复：result 加 `"note": str(note_path)`；main 兼容 fallback；subprocess 用 `python -u`；所有 print `flush=True`
+- 自动补救：跑完校验 `KG._note_to_covered_l2` 是否含 processed 笔记，缺漏写 `state/pending_kg_sync.json`；`daily_anki_status.py::run_kg_link_mastery` 启动时读取 + `touch` 笔记 mtime 强制纳入本次 `link_with_ai --since-days 7`，跑完清空
+
+**link_with_ai 关联校验规则**（防笔记跳着关联到深层 locked 节点）：
+- AI 判定后对每个 (note, node) 校验：node `unlockable/mastered` → ✅；node `locked` 且前置 ≥ 50% mastered → ✅；否则 ❌ 写入 `KG._rejected_links`
+- 幂等：每次都重新评估规则（节点 state 变了自动放行），笔记 hash 没变只刷拒绝时间戳不计入新拒绝数
+
+**audit_kg 7d 配额上限**：daily 内 `--budget-target-7d` 从 88 → 60（控制夜间消耗）
+
+**额度日志**：`state/quota_log.json` 记 daily 各步前后 quota 快照；控制面板「额度消耗日志」按钮 + modal 可查

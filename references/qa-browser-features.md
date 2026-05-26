@@ -1,0 +1,116 @@
+# 截图问答（QA Browser）功能详解
+
+源码：`_client/core/qa_browser.py`（HTML/JS 内嵌字符串）。
+入口：本机 `ctrl+shift+q`（临时进程）或服务器 systemd `qa-server.service`（常驻 :9091 + :9090）。
+iPad 用法见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
+
+## 两种模式
+
+| 模式 | 触发 | 用途 |
+|---|---|---|
+| **普通模式** | 默认进入；URL 无 `?card=` | 临时问答，可选择把 AI 回答整理成新笔记 |
+| **cardCtx 模式** | URL `?card=<local_id>`（Anki 卡片复习时点链接进入） | 用 AI 回答改进卡片或源笔记 |
+
+## AI 回复 + 选中机制
+
+每个 AI 回答（assistant 气泡）下方自动加：
+
+1. **`＋ 选用整条回答`**（气泡外侧）—— 把整条回答作为有用内容
+2. **`+` 圆按钮**（每个标题旁）—— 单段选中
+
+### 标题识别（2026-05-26 扩展）
+
+- **真标题**：`<h1>~<h6>` —— 级联选择（点大标题，旗下小标题一起选）
+- **假标题**：`<p>` / `<li>` 里只含一个 `<strong>` 且 strong 文本占 ≥85% 段落内容 —— 单段选中
+  - 原因：AI 经常用 `**1. xxx**` 粗体段落代替 `## xxx` 当节标题
+  - 处理：addHeadingPickers 给假标题加 `fake-head` class + `+` 按钮
+
+### 选中后的去向
+
+- 整条 ✓ + 选中 → 取整条回答（`md.dataset.raw`）
+- 只勾标题 + 选段 → 取 `collectSelectedSections(md)`，按选中标题/假标题段拼接
+
+## 普通模式：创建新笔记（2026-05-26 加）
+
+任何 AI 回答勾选后，header 区出现 **`📝 创建新笔记`** 按钮：
+
+```
+用户 prompt 输入笔记名（如 "F^S 向量空间的本质"）
+        ↓
+POST /api/create-note  body={name, pairs, image_b64}
+        ↓
+_create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
+  ├─ 清理 name → vault/<name>.md（同名追加 -1/-2）
+  ├─ AI 整理 pairs → 结构化 Markdown
+  │   prompt 要求：去对话冗余、## 标题、$...$ 数学、不发挥
+  ├─ 保存截图到 vault/attachments/<name>.png（如果有），笔记顶部加 ![[]]
+  └─ 写文件 → 返回 obsidian://open?vault=...&file=...
+        ↓
+前端弹出："✓ 笔记已创建" + "📂 在 Obsidian 中打开" 按钮
+```
+
+**关键**：笔记**不带 `[0-9A-Fa-f]{3}-` 前缀** → 不被 `pending_notes.py` 扫到 → **不触发 register**。算"草稿型"笔记，用户可以后续重命名加前缀让其进入正式流程。
+
+## cardCtx 模式：改进 Anki 卡 / 源笔记
+
+参数：`/?card=<local_id>` → `loadCardContext()` 拉卡片两面 + 显示在截图位置。
+
+勾选有用回答后，header 出现三个按钮：
+- **更新到笔记**：`_card_update_note(local_id, pairs)` → AI 改写源笔记，写回 + 哈希覆盖（防重复登记）
+- **根据此修改 Anki**：`_card_update_anki(local_id, pairs)` → AI 生成新卡替代原卡（删/留旧卡由 server-config 控制）
+- **全部更新**：两个都跑
+
+异步实现：后端立即返回 `job_id`，前端轮询 `/api/card-job/<job_id>` 拿结果（移动端连接断了不丢）。
+
+## AI 后端 + System Prompt
+
+`_AdapterSession`（`ai_client.py` 内）每次 send 重新读 `ai_settings.json`，支持切 backend 不重启。
+
+`_SESSION_PROMPT`（2026-05-26 强化）：
+```
+你是一个截图问答助手。根据随附截图和对话历史回答用户问题。
+只回答问题本身，不要修改文件，不要运行命令，不要描述你的系统环境。
+**数学公式严格用 Markdown 数学语法**：行内公式 $...$，行间公式 $$...$$；
+**不要**用反引号 ` 包裹数学表达式（前端会被当 inline code 灰底显示而非渲染公式），
+也不要用 \(...\) 或 \[...\]。
+例如：要写 $F^S$ 而不是 `F^S`，要写 $a_1, \ldots, a_n$ 而不是 `a_1,...,a_n`。
+```
+
+## SSE 流式
+
+`/api/chat` 当 `Accept: text/event-stream` 时启用 SSE：
+- 后端 `ad.chat_stream(msgs)` 逐 chunk yield
+- 前端节流渲染（每 120ms re-marked + MathJax 一次）
+- 流结束后跑 `addHeadingPickers(mdEl)` 给标题补 `+` 按钮（无 cardCtx 检查；2026-05-26 修复，之前漏判会让创建笔记按钮拿不到 pairs）
+
+## 数据存储
+
+- `BWICARUS_APP_DIR/qa.sqlite` —— 历史对话（QA session）
+- `BWICARUS_APP_DIR/screenshots/` —— 截图 PNG
+- 服务器实例：`/home/bwicarus/claude/state/qa-server-data/`
+- 历史导出：`WEBAPP_HISTORY_DIR=/home/bwicarus/webapp/data/users/bwicarus/history/`（用户 dashboard 能看历史）
+
+## 关键路由（do_POST in qa_browser.py）
+
+| 路径 | 用途 |
+|---|---|
+| `/api/chat` | 主对话（SSE 流式 + 旧 JSON 兼容） |
+| `/api/inject-image` | iPad 远程注入截图 |
+| `/api/card-context` | 拿卡片两面（cardCtx 模式初始化） |
+| `/api/card-update` | 卡片改进（async job） |
+| `/api/card-delete` | 删卡 |
+| `/api/create-note` | **普通模式：创建新笔记**（2026-05-26 加） |
+| `/api/save` / `/api/discard` | 保存对话到 vault / 弃稿 |
+| `/api/reset` | 清空 session |
+| `/api/history/*` | 历史侧边栏 |
+| `/api/search-related` | 「关联知识」按钮：搜 KG 关联节点 |
+
+## iPad 远程入口
+
+```
+浏览器看页面：     http://<Tailscale-IP>:9091/
+POST 截图注入：    http://<Tailscale-IP>:9090/qa?key=<KEY>
+触发 register / daily：  http://<Tailscale-IP>:9090/run/<cmd>?key=<KEY>
+```
+
+详见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
