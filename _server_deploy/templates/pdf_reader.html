@@ -244,18 +244,18 @@ async function renderPage(num) {
   await tl.render();
 
   // 把 textContent.items 的 PDF 坐标 → viewport 坐标缓存到 page-wrap
-  // 用于精确画高亮（跟 canvas 渲染用同一坐标源，避免 spans 物理位置偏移）
-  const itemBoxes = textContent.items.map(item => {
+  // **关键**：用 PDF.js 暴露的 tl.textDivs（1:1 对应 textContent.items 中文本项）
+  // 避免 querySelectorAll('span') 包含 markedContent 嵌套 spans 导致 index 错位
+  const textItems = textContent.items.filter(it => it.str !== undefined);
+  const itemBoxes = textItems.map(item => {
     if (!item.transform) return null;
     const [a, b, c, d, e, f] = item.transform;
-    // viewport.convertToViewportPoint(x, y) 把 PDF 坐标（左下为原点，y 向上）
-    // 转成 viewport 坐标（左上为原点，y 向下）。返回 [x, y]
     const [vx, vy] = viewport.convertToViewportPoint(e, f);
-    const fontH = Math.abs(d) * viewport.scale;   // 字体高度 ≈ |transform.d| * scale
+    const fontH = Math.abs(d) * viewport.scale;
     const w = (item.width || 0) * viewport.scale;
     return {
       x: vx,
-      y: vy - fontH,    // baseline 转成 top
+      y: vy - fontH,
       w: w,
       h: fontH || (item.height || 0) * viewport.scale,
       str: item.str || '',
@@ -263,12 +263,30 @@ async function renderPage(num) {
   });
   wrap.__itemBoxes = itemBoxes;
   wrap.__textLayerDiv = textLayerDiv;
-  // textLayer 内 span 在 itemBoxes 里的 index：按 DOM 顺序 1:1
+  // 用 PDF.js 的 textDivs 数组（按 items 顺序，1:1 对应 itemBoxes）
+  const textDivs = (tl.textDivs && tl.textDivs.length) ? tl.textDivs : [];
+  wrap.__textDivs = textDivs;
+  // 向上找到属于 textDivs 数组的祖先 span（textDiv 可能嵌套 markedContent 子 span）
   wrap.__getSpanIndex = (span) => {
-    const spans = textLayerDiv.querySelectorAll('span');
-    for (let i = 0; i < spans.length; i++) if (spans[i] === span) return i;
+    let cur = span;
+    while (cur && cur !== textLayerDiv) {
+      const idx = textDivs.indexOf(cur);
+      if (idx >= 0) return idx;
+      cur = cur.parentElement;
+    }
     return -1;
   };
+  // textDiv 可能不是直接 textContent 容器（marked content 嵌套），找它里面的 text node
+  wrap.__getTextNode = (textDivIdx) => {
+    const div = textDivs[textDivIdx];
+    if (!div) return null;
+    // 优先 firstChild（普通 text span）
+    if (div.firstChild?.nodeType === 3) return div.firstChild;
+    // 否则递归找第一个 text node
+    const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT, null);
+    return walker.nextNode();
+  };
+  window.dlog?.('page rendered: items=' + textItems.length + ' textDivs=' + textDivs.length);
 
   // 绑点击 → 选中整行 / 双击 → 扩段。避开 textLayer 对齐问题（不依赖 native drag-select）
   bindTextLayerClick(textLayerDiv);
