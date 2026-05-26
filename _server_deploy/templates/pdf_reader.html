@@ -193,7 +193,12 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
-    // 更新模式按钮文字
+    // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
+    const page1 = await pdfDoc.getPage(1);
+    const v0 = page1.getViewport({scale: 1});
+    const mainW = document.getElementById('main').clientWidth - 40;
+    scale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
+    window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
     if (readMode === 'continuous') {
       await setupContinuousMode();
@@ -731,8 +736,23 @@ function _bindCharLayer(cl, pw) {
     return -1;
   };
   const onStart = (x, y) => {
+    // 诊断：每次按下输出 char-layer rect + 点击位置
+    if (!window._loggedRect) {
+      const r = cl.getBoundingClientRect();
+      window.dlog?.(`cl rect: l=${r.left.toFixed(0)} t=${r.top.toFixed(0)} w=${r.width.toFixed(0)} h=${r.height.toFixed(0)}`);
+      window._loggedRect = true;
+    }
+    window.dlog?.(`tap local: x=${x.toFixed(0)} y=${y.toFixed(0)}`);
     const idx = _findCharStrict(x, y);
-    if (idx < 0) { _dragStartCharIdx = null; return false; }   // 空白 → 让默认滚动生效
+    if (idx < 0) {
+      _dragStartCharIdx = null;
+      // 点空白 → 关 toolbar + 清选区（用户期望取消选中状态）
+      toolbar.classList.remove('open');
+      lastSelText = '';
+      _updateSelPreview('');
+      document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+      return false;
+    }
     _dragStartCharIdx = idx;
     _dragStartXY = {x, y};
     _dragMoved = false;
