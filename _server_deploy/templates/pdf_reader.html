@@ -7,8 +7,9 @@
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
-#app{display:flex;flex-direction:column;height:100vh}
-#header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px}
+/* 用 dvh 避开 iOS Safari 100vh 包含 toolbar 高度让 header 挤出可视区的 bug */
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+#header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px;flex-wrap:wrap;overflow-x:auto}
 #header h1{font-size:14px;margin:0;color:#cfe6ff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
 #header button:hover{background:#2c3e6a;border-color:#3b6db5}
@@ -475,11 +476,20 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   const charBoxes = d.chars.map(ch => ({
     c: ch.c,
     left:   ch.x0 * scale,
-    top:    ch.y0 * scale,    // 直接用 y0，不翻转
+    top:    ch.y0 * scale,
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
   }));
+  // sort 让 idx 顺序 = visual reading order：用 baseline (top + height) + 宽松阈值
+  // ref 用 max height 避开 subscript/superscript（小字符）误判到不同行
+  charBoxes.sort((a, b) => {
+    const aBase = a.top + a.height;
+    const bBase = b.top + b.height;
+    const ref = Math.max(a.height, b.height) || 1;
+    if (Math.abs(aBase - bBase) > ref * 0.8) return aBase - bBase;
+    return a.left - b.left;
+  });
   // 调试模式（URL 加 ?dbg=1）：显示 char bbox + 内容，验证 PyMuPDF 提取跟 PDF 视觉是否对齐
   if (new URLSearchParams(location.search).get('dbg') === '1') {
     const dbgLayer = document.createElement('div');
