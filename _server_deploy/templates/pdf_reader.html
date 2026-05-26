@@ -488,9 +488,9 @@ function _selByCharRange(pw, sIdx, eIdx) {
   const pwRect = pw.getBoundingClientRect();
   const mainEl = document.getElementById('main');
   const mainRect = mainEl.getBoundingClientRect();
-  const lastChar = chars[eIdx];
+  const endChar = chars[eIdx];
   toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
-  toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + lastChar.top + lastChar.height + 6) + 'px';
+  toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
   toolbar.classList.add('open');
 }
 
