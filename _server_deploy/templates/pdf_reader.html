@@ -33,9 +33,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer br{-webkit-user-select:none;user-select:none}
 /* native selection 设透明 —— 视觉高亮交给手绘 overlay（避免 textLayer 对齐误差 */
 .textLayer ::selection{background:transparent!important;color:transparent}
-/* 选中高亮叠层（手绘矩形，绝对位置跟 page-wrap 对齐）*/
+/* 选中范围叠层（PDF.js 字符级位置不可靠，只显示涉及的 textDiv 段；精确选中以工具栏 preview 为准）*/
 .sel-overlay{position:absolute;inset:0;pointer-events:none;z-index:3}
-.sel-overlay .hl{position:absolute;background:rgba(59,109,181,.42);border-radius:2px;mix-blend-mode:multiply}
+.sel-overlay .hl{position:absolute;background:rgba(96,165,250,.18);border:1px dashed rgba(96,165,250,.55);border-radius:2px}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
@@ -512,22 +512,32 @@ function _wordBoundsAt(text, offset) {
   return {start: lo, end: hi};
 }
 
-// 用 Range.getClientRects() 画高亮：跟 textDivs 物理位置 1:1，避开 charW 平均估算误差
-// 诊断显示 textDivs 跟 canvas 仅偏 ~3px，可接受；charW 平均估算长 item 内累积可偏 10+px，太差
+// 高亮整段 textDivs 范围（不画字符级范围 — PDF.js 集成限制让字符级位置不准）
+// 用户精确选中的内容看工具栏 preview，这里只显示"涉及哪些 textDiv 段"
 function _paintWithItemBoxes(pw, range) {
   const ov = pw.querySelector('.sel-overlay');
   if (!ov) return;
   ov.innerHTML = '';
+  if (!pw.__textDivs || !pw.__getSpanIndex) return;
+  const startSpan = (range.startContainer.nodeType === 3) ? range.startContainer.parentElement : range.startContainer;
+  const endSpan   = (range.endContainer.nodeType === 3) ? range.endContainer.parentElement : range.endContainer;
+  let sIdx = pw.__getSpanIndex(startSpan);
+  let eIdx = pw.__getSpanIndex(endSpan);
+  if (sIdx < 0 || eIdx < 0) return;
+  if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const pwRect = pw.getBoundingClientRect();
-  for (const r of range.getClientRects()) {
+  for (let i = sIdx; i <= eIdx; i++) {
+    const td = pw.__textDivs[i];
+    if (!td) continue;
+    const r = td.getBoundingClientRect();
     if (!r.width || !r.height) continue;
-    const div = document.createElement('div');
-    div.className = 'hl';
-    div.style.left   = (r.left - pwRect.left) + 'px';
-    div.style.top    = (r.top  - pwRect.top)  + 'px';
-    div.style.width  = r.width  + 'px';
-    div.style.height = r.height + 'px';
-    ov.appendChild(div);
+    const hl = document.createElement('div');
+    hl.className = 'hl';
+    hl.style.left   = (r.left - pwRect.left) + 'px';
+    hl.style.top    = (r.top  - pwRect.top)  + 'px';
+    hl.style.width  = r.width  + 'px';
+    hl.style.height = r.height + 'px';
+    ov.appendChild(hl);
   }
 }
 
@@ -584,8 +594,10 @@ function _updateSelPreview(text) {
   const display = text.length > max
     ? text.slice(0, 60) + ' … ' + text.slice(-40)
     : text;
-  el.innerHTML = '<b>已选：</b>' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
-                 '<span class="len">（' + text.length + ' 字）</span>';
+  // 提示用户：虚线框是 textDiv 段范围（粗略），实际选中以下面文字为准
+  el.innerHTML = '<b>✓ 实际选中</b>（虚线框是涉及段范围，不必精确对齐）：<br>'
+               + '<span style="color:#cfe6ff">' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>'
+               + '<span class="len">（' + text.length + ' 字）</span>';
 }
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
