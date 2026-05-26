@@ -171,3 +171,200 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
   ```
 - daily 自动跑：`bwicarus-daily.timer` (01:00) → `daily_anki_status.py::run_kg_link_mastery` (link_with_ai → link_and_mastery → audit_kg → rescan_rolling)
 - audit_kg 预算上限 `--budget-target-7d 60`（2026-05-26 从 88 调低）防一晚消耗过大
+
+---
+
+## 踩坑笔记（gotchas）
+
+**重要：这些坑会反复回来咬你，必读。**
+
+### `_note_to_covered_l2` 是覆盖不是 union
+
+`link_with_ai.py:248-279`：每次 AI 跑完，对处理的笔记 `persistent[rel] = sorted(set(covered))` **直接覆盖**，不是 union。后果：
+
+- 手动编辑 KG 给某节点加 `containing_notes`，下次 link_with_ai 重新处理该笔记会**清空**手动添加的关联
+- 防御：用解锁规则过滤（已加 `_rejected_links`）+ 必要时改节点本身的 name/summary 让 AI 不再漏判（而不是手动加 containing_notes）
+
+### 手动跑 KG 脚本必须先 source .env
+
+`scripts/config.py:20` 默认 fallback：
+```python
+PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT", r"C:\claude"))
+```
+
+服务器侧手动跑 `link_with_ai.py` / `link_and_mastery.py` / `audit_kg.py` 等，shell 必须先：
+```bash
+cd /home/bwicarus/claude
+set -a; source .env; set +a
+```
+
+否则 `config.PROJECT_DIR = C:\claude`（Windows fallback），脚本会报 `ModuleNotFoundError: No module named 'ai_backends'`（因为它从 `config.PROJECT_DIR / "_client" / "core"` 加 sys.path）。
+
+systemd 服务（qa-server / bwicarus-daily）有 `EnvironmentFile=...env`，跑这些不用手动 source。
+
+### subprocess 输出 buffer 陷阱
+
+`subprocess.Popen(cmd, stdout=log_file)` 时，Python 子进程的 stdout 是 **block-buffered**（不是 line-buffered）。如果子进程 print 但不 flush 就退出，最后 4KB 输出可能丢。
+
+**症状**：log 戛然而止（比如 register log "Anki:不制卡 | 20s" 之后什么都没有），但下一步函数明明被调用了。
+
+**修法**：
+- 子进程命令前加 `-u`：`subprocess.run([py, "-u", "scripts/..."])` 强制 unbuffered
+- 关键 print 加 `flush=True`：`print(..., flush=True)`
+
+这就是 2026-05-26 修复 register 同步 bug 的核心可观测性增强。
+
+### 服务器有两套 nginx 配置
+
+- **VPS** `/etc/nginx/sites-enabled/default`：跟 git 里 `_server_deploy/nginx/bwicarus.conf` 一致，可 cp 部署
+- **Pi** `/etc/nginx/sites-available/bwicarus`：Tailscale HTTPS Cert + 80/443 两 server 块，**与 git 版结构完全不同**。**绝不可 cp 覆盖**（会冲掉 Tailscale 证书配置 → 全站挂）。Pi 改 nginx 只能手 patch
+
+### `_render_anim` 标志位的生命周期
+
+`_renderAnim` 默认 false，只有 `renderAnim()` 函数会先置 true 然后 `render()` 内开头**立刻读取并 reset**。所以：
+- 永远不会"连续两次 render 都带动画"——一次性消耗
+- 手动调 `render()`（不经过 `renderAnim`）必定瞬间渲染
+- `_renderAnim=true` 会影响 d3 的 `.exit()`/`enter`/`merge` 是否套 `.transition()`
+
+---
+
+## renderAnim 调用点对照
+
+| 触发 | 文件:行 | 用途 |
+|---|---|---|
+| popstate（浏览器后退/前进） | skilltree.html `addEventListener("popstate", ...)` | 视图切换平滑 |
+| pushView 新视图 | `function pushView(v)` | 进章节/小节视图 |
+| goBack 到 home | `function goBack()` | 退回整体视图 |
+| 折叠条点击 | locked-bar `.on("click", ... renderAnim())` | 章节折叠/展开 |
+| 设置面板保存 | `closeSettings(); applyZoomState(); renderAnim()` | fitToWidth toggle 等触发重排 |
+| 编辑数据后（删节点关详情） | `closeDetail(); renderAnim()` | 数据变更后视觉过渡 |
+
+**不**用 renderAnim 的：
+- 初始 load（首屏不带 fade-in，免眼花）
+- 普通 render（fitToWidth padding 已变但视图未切换）
+- resize debounce 后的 render（性能优先）
+- 数据 reload 后（buildAggregatedEdges 等）的 render
+
+---
+
+## focus 面板内部布局算法
+
+`renderFocusPanel(focusId)` 在 `_server_deploy/templates/skilltree.html` 内：
+
+1. **章节筛选**：用 `computeChainSets(focusId)` 拿 ancestors/descendants，并集为 `chainSet`；遍历所有 L2 节点找 `ancestorAtLevel(nid, 0)`（章 id）属于 `chainSet`
+2. **章节排序**：用全局 `depthByLevel[0]` 按 globalDepth 升序排，再 reverse（基础在底，跟 home 一致）
+3. **章内分行**：每章里 chain 的 L2 节点按 `depthByLevel[2][n.id]` 分组，行按 depth 倒序排（远祖先在上）
+4. **行内排序**：同一行节点按 `numeric_label` 字典序，再按 `name`
+5. **行内列布局**：`cols = max(2, floor((availW + gapX) / (blockW + gapX)))`，行内节点居中
+6. **章带**：左右各 4px 色线 + 左侧章名标签
+7. **边**：只画两端都在 positions 里的 chain 边（chain class 自动从 `tileClass(d, focusId)` 算）
+
+**布局参数**（小号紧凑）：`blockW=130 blockH=54 gapX=14 gapY=22 labelH=26 bandPadY=10`
+
+**与 home 的区别**：
+- home 显示所有 L2 + 全部章带；focus 面板只显示 chain 节点 + 它们所在的章带
+- 整章无 chain → 不出现；某章某行无 chain → 该行不占空间（紧凑下移）
+
+---
+
+## CSS class 速查（skilltree.html）
+
+| class | 触发 | 视觉效果 |
+|---|---|---|
+| `.tile.mastered` | mastery_level ≥ 2 | 绿框 `#34d399` + 深绿底 |
+| `.tile.unlockable` | level ≥ 1 或前置全 mastered | 蓝框 `#60a5fa` + 深蓝底 |
+| `.tile.locked` | 前置未满足 | 灰虚线框 |
+| `.tile.previewable` (旧) | (兼容字段) | 等同 locked |
+| `.tile.focus` | tileClass(d, focusedId) 时 d.id===focusedId | 黄边框 + drop-shadow（保留一处发光）|
+| `.tile.chain-anc/desc/desc-locked/self/fade` | focus 模式应用 chain 角色 | 链路高亮（蓝/紫/虚线/黄/淡化）|
+| `.tile.inferred` | mastery_inferred=true | 边框 stroke-dasharray + ↓ 角标 |
+| `.tile.search-hit` | applySearchHighlight 匹配 | 粉框 |
+| `.tile.has-pick`（QA 用）| addHeadingPickers 加 | 仅占位 padding |
+| `g.locked-bar` | home 视图未开放章节 | 折叠条，点击展开/折叠 |
+| `path.edge.mast/unl/prev/lock` | edgeClass(e) 输出 | 边颜色按目标节点 state |
+| `path.edge.chain-edge-anc/desc/desc-locked/fade` | focus 模式 | 链路边高亮 |
+| `#detail.theme-{mastered,unlockable,locked,previewable}` | showDetail 应用 stateOf(n) | 面板配色 + 顶部色带 |
+
+---
+
+## 全局变量速查
+
+| 变量 | 类型 | 作用 |
+|---|---|---|
+| `current` | `{kind: "home"\|"chapter"\|"section", id?}` | 当前视图状态 |
+| `focusPanelId` | string \| null | focus 面板是否打开 + 显示哪个节点 |
+| `detailNodeId` | string \| null | detail 面板当前节点 id |
+| `_renderAnim` | bool | render 是否带 transition（一次性，render 内自动 reset） |
+| `chainAncestors / chainDescendants` | Set | computeChainSets 的结果（focus 链路）|
+| `_chainCacheFocusId` | string | chain cache，避免同 focus 重复计算 |
+| `wrap.__positions` | object | render 末尾暴露的 `{node_id: {x, y}}`，供 closeDetail 等外部用 |
+| `positions`（render 内局部） | object | render 内当前布局的节点坐标 |
+| `depthByLevel` | `{0: {}, 1: {}, 2: {}}` | 每层节点 depth map（computeGlobalDepth 写入）|
+| `chapterColor` | `{chap_id: hex}` | computeChapterColors 算出 |
+| `id2` | `{node_id: node}` | 节点 id → 对象的 lookup |
+| `nodesByLevel[0/1/2]` | `[node, ...]` | 按 level 分组的节点列表 |
+| `edgesByLevel[0/1/2]` | `[edge, ...]` | 聚合后的 edges |
+
+---
+
+## 架构决策记录（ADR）
+
+### ADR-1：home 永远在底层，focus 改叠加面板
+
+**问题**：原 focus 视图是切 `current.kind="focus"` 然后 `render()` 整图重排，节点位置都变，detail 打开/关闭也重排 → 用户操作时视觉混乱。
+
+**决策**（2026-05-26）：home 整体视图始终渲染、永远不重排；focus 用左侧叠加面板（自己的 SVG）显示紧凑 chain map；detail 右侧叠加。
+
+**代价**：focus 面板的 SVG 是独立一份，焦点节点切换时面板内全部重渲染（但只有 chain 节点 ~< 50 个，开销远小于全图）。
+
+**好处**：home 永久缓存位置；detail 开关零代价；视觉稳定。
+
+### ADR-2：解锁规则过滤放在 link_with_ai
+
+**问题**：AI 容易把笔记关联到尚未学到的深层节点（笔记内容偶尔提及但用户实际没学），导致技能树前进度虚高。
+
+**决策**（2026-05-26）：在 link_with_ai 跑完 AI 后，用**当前**（即上一轮 link_and_mastery 算的）节点 state 做过滤；拒绝写入 `_rejected_links`。
+
+**为什么不放在 link_and_mastery**：link_and_mastery 是无 AI 的纯计算，需要从 `_note_to_covered_l2` 读已确认的关联；如果它再 filter 一次会导致语义混乱（哪个是真的关联）。
+
+**为什么用上一轮 state**：daily 内 state_map 冻结，一致性比实时性重要。如果允许动态更新 state，本轮内笔记 A → 节点 B 通过让 B 变 unlockable，再判定笔记 C → 节点 C（依赖 B），形成隐式依赖序，难以调试。**下次 daily 跑会自然 propagate。**
+
+### ADR-3：pending_kg_sync.json 用 touch mtime 兜底
+
+**问题**：register 同步 KG bug 偶尔触发（subprocess buffer / AI 失败），如何让 daily 兜底重做。
+
+**备选方案**：
+- A. 给 link_with_ai 加 `--include-notes <path1,path2>` 参数：精准但需要改 link_with_ai 命令行接口
+- B. 把 pending 笔记的 mtime touch 到当前时间：复用现有 `--since-days N` 路径，零侵入
+
+**决策**：选 B。代价是 touch 文件可能让 `pending_notes.py` 误以为是新笔记（但 pending_notes 用 content hash 判断不是 mtime，所以没影响）。
+
+**实现**：`daily_anki_status.py::run_kg_link_mastery` 开头读 `state/pending_kg_sync.json`，对每个 path `Path(p).touch(exist_ok=True)`；跑完 link_with_ai 后清空 pending。
+
+### ADR-4：QA 创建笔记不带 `[0-9A-Fa-f]{3}-` 前缀
+
+**问题**：用户从 QA 截图问答中"创建新笔记"，是否要触发完整 register 流程（PDF 标注 / 摘要 / 制卡 / KG 同步）？
+
+**决策**（2026-05-26）：不触发。笔记名直接用用户输入（清理非法字符），**不加 `[0-9A-Fa-f]{3}-` 前缀**，自动避开 `pending_notes.py` 的扫描规则。这是"草稿型"笔记，用户后续可以手动重命名（加前缀）让其进入正式流程。
+
+**代价**：草稿笔记可能堆积。用户自负责清理/合并/重命名。
+
+---
+
+## 反向链接 propagate_back_links 与 register 的关系
+
+`scripts/register_notes.py::process_note` 流程：
+
+```
+PDF 标注 → 图片标注 → AI 分析 → 写入索引 → 查找关联 →
+写入正向链接 → propagate_back_links（反向传播）→ Anki 制卡
+```
+
+- **查找关联**：`ai_find_related` 用 AI 找该笔记关联的其它笔记（基于 index 内容）
+- **写入正向链接**：在当前笔记末尾追加 `[[相关笔记]]`
+- **反向传播**：`propagate_back_links(source_path)` 遍历刚写入的 link 列表，在每个目标笔记的"相关笔记"节追加 `[[source]]`（互相可见）
+- **跟 KG 的关系**：完全独立。KG 关联（`_note_to_covered_l2`）跟笔记内的"相关笔记"链接是两套机制：
+  - 笔记内链接：用户语义层的"这两个概念有关"
+  - KG 关联：技能解锁层的"这篇笔记覆盖了哪个原子知识点"
+
+`backfill_back_links.py` 是一次性脚本，给存量笔记补全反向链接（不在 daily 流程内）。

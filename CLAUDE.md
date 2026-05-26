@@ -45,8 +45,9 @@
 - `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）
 - `references/ipad-switch-to-server.md` — iPad 快捷指令切换到服务器的完整步骤
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
-- `references/skill-tree-system.md` — 技能树/知识图谱（KG）完整系统：KG 结构、关联校验规则（_rejected_links）、UI 叠加面板架构、register 同步链路、回收站机制
-- `references/qa-browser-features.md` — 截图问答（QA Browser）功能详解：两种模式（普通 / cardCtx）、加号选中（真/假标题）、创建新笔记 `/api/create-note`、Anki 卡片 AI 改进、SSE 流式
+- `references/skill-tree-system.md` — 技能树/知识图谱（KG）完整系统：KG 结构、关联校验规则（_rejected_links）、UI 叠加面板架构、register 同步链路、回收站机制、**踩坑笔记（覆盖语义/source .env/subprocess buffer/两套 nginx）、renderAnim 调用点、面板布局算法、CSS class 速查、全局变量速查、ADR 架构决策、反向链接 propagate_back_links**
+- `references/qa-browser-features.md` — 截图问答（QA Browser）功能详解：两种模式（普通 / cardCtx）、加号选中（真/假标题）、创建新笔记 `/api/create-note`、Anki 卡片 AI 改进、SSE 流式、**SQLite schema + 删除级联、快捷功能、MathJax 节流、AI 后端 adapter、控制面板交互**
+- `references/server-config-schema.md` — `state/server-config.json` 字段完整对照（qa_* / ai_* / anki.* / scheduled_register / weak_card_refresh / card_antimodel / card_quality / card_qa）+ 字段流转图 + 修改方法
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）

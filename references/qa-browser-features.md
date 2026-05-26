@@ -114,3 +114,117 @@ POST 截图注入：    http://<Tailscale-IP>:9090/qa?key=<KEY>
 ```
 
 详见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
+
+---
+
+## 数据存储详解
+
+### SQLite schema（`<APP_DIR>/qa.sqlite`）
+
+```sql
+CREATE TABLE history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,           -- ISO 时间
+  title TEXT NOT NULL,                -- 用户问题的首句作摘要
+  messages_json TEXT NOT NULL,        -- 整条对话 [{role,text,image?}, ...]
+  image_filename TEXT,                -- 关联截图（在 HIST_IMG_DIR）
+  note TEXT,                          -- 保存到 vault 时的笔记路径（相对 VAULT）
+  card_id TEXT                        -- cardCtx 模式下的 anki local_id
+);
+```
+
+### 截图文件
+
+存 `<APP_DIR>/screenshots/<sha1>.png`，文件名是图片二进制 sha1（去重）。
+
+### 历史侧边栏（删除级联）
+
+GUI：`/history-btn` 按钮 → 滑出 sidebar 列出最近条目。每条带「打开 / 删除」。
+
+**删除是级联的**：`POST /api/history/delete` 内部 `_delete_history(hid)`：
+1. SQLite `DELETE FROM history WHERE id=?`
+2. 截图文件 `HIST_IMG_DIR/<file>.png` unlink（如果 ref count=0）
+3. **Obsidian 笔记**：如果 entry 有 `note` 字段（保存到 vault 的笔记），`vault/<note>` 也 unlink
+4. 触发 `_export_history_to_webapp()` 同步到 webapp `WEBAPP_HISTORY_DIR`
+
+**踩坑**：早期版本不级联 → 删历史后留下孤儿截图 + 孤儿笔记。现在 daemon 启动会扫一次。
+
+---
+
+## 快捷功能
+
+### 粘贴图片
+
+`document.addEventListener('paste', ...)`：捕获 clipboard 图片项 → 转 base64 → 缩略图显示在 `#paste-row`。下条消息发送时随 `image_b64` 一起 POST 到 `/api/chat`。
+
+### 关联知识搜索（`🔍 关联知识`）
+
+`/api/search-related` (POST)：
+1. 从当前对话取最近 user message 作 query
+2. 调 `find_related_cards(note_names, match=query)`：从 anki records 找最相近的卡
+3. 返回 markdown 渲染的卡片列表 + obsidian:// 链接
+
+### 快捷按钮（`quick-bar`）
+
+底部一排自定义按钮（`<api/qbtns>` 增删改）。每个按钮带文本，点击后填到输入框（不自动发送）。常用问句模板（如"解题思路是什么？"、"详细解释"等）。
+
+### 全局快捷键
+
+| 键 | 行为 |
+|---|---|
+| `Enter` | 发送 |
+| `Shift+Enter` | 换行 |
+| `Ctrl+Shift+Q`（本机，hotkey.py） | 启临时 QA browser（截图问答） |
+
+---
+
+## 数学公式渲染节流
+
+SSE 流式时每 chunk 到达都会更新 innerHTML，**MathJax 重新 typeset 比 markdown 慢得多**，所以加节流：
+
+```js
+const RENDER_MS = 120;   // 每 120ms 重渲染一次
+function maybeRender() {
+  const now = Date.now();
+  if (now - lastRender >= RENDER_MS) { renderNow(); }
+  else if (!renderQueued) {
+    renderQueued = true;
+    setTimeout(renderNow, RENDER_MS - (now - lastRender));
+  }
+}
+```
+
+`renderNow()` 流程：`mdEl.innerHTML = renderMd(accumulated)` → `stickBottom()` → `typeset(mdEl)`（调 `MathJax.typesetPromise([mdEl])`）。
+
+**renderMd** 用 marked.js + 数学占位符技巧：先把 `$...$` / `$$...$$` / `\[\]` / `\(\)` 替换成 `\x02M<N>\x02` 占位符（避免 marked 把 `_` `*` 当 markdown），跑 marked，再 restore 占位符。
+
+---
+
+## AI 后端 adapter
+
+`_AdapterSession` 包装 `make_backend(backend_name, settings)`：
+
+| backend_name | 实现 | 特点 |
+|---|---|---|
+| `claude_cli` | 调 `/usr/bin/claude` CLI（subprocess） | 服务器侧默认；Linux 上 sed patch 移除 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（防 AI 乱改文件）|
+| `codex_cli` | 调 `/usr/bin/codex` CLI | OpenAI 的本地 CLI |
+| `claude_api` | Anthropic API direct（不经 CLI） | 需 API key |
+| `openai_api` | OpenAI API direct | 需 API key |
+| `ollama` | 本机 ollama HTTP | 离线 |
+
+切换 backend：改 `state/server-config.json::ai_backend` 字段（控制面板可改）。`_AdapterSession.send()` 每次都重新读 cfg，无需重启 qa-server。
+
+---
+
+## 控制面板交互
+
+`https://bwicarus.space/control/` 里 QA 相关开关（写入 `server-config.json`）：
+
+| 字段 | 含义 |
+|---|---|
+| `qa_remote_access` | 父开关：允许局域网/Tailscale 访问 daemon (0.0.0.0:9091) |
+| `qa_remote_daemon` | 子开关：常驻 daemon（关掉则只在本机 `ctrl+shift+q` 临时启）|
+| `qa_exercises_subdir` / `qa_wrong_subdir` | "保存到 vault" 时的目标子目录（习题 / 错题）|
+| `ai_backend` + `ai.{backend}.*` | AI 后端选择 + 参数 |
+
+完整字段参考 [`references/server-config-schema.md`](server-config-schema.md)。
