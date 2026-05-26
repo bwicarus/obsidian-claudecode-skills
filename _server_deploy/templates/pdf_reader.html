@@ -18,11 +18,12 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4);max-width:100%;height:auto}
 .page-wrap{position:relative;display:inline-block}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
-.textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;caret-color:CanvasText;z-index:2;pointer-events:auto;
-  /* iPad/触屏：显式允许选中（默认 auto 在 iOS Safari 等于 none for spans）*/
-  -webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
-.textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%;
-  -webkit-user-select:text;user-select:text}
+.textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;
+  /* 禁用 native 拖选（位置对不齐），改为点击 → 整行/段自动选中 */
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  -webkit-tap-highlight-color:rgba(96,165,250,.15)}
+.textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:pointer;transform-origin:0% 0%;
+  -webkit-user-select:none;user-select:none}
 .textLayer span.markedContent{top:0;height:0}
 .textLayer br{-webkit-user-select:none;user-select:none}
 /* native selection 设透明 —— 视觉高亮交给手绘 overlay（避免 textLayer 对齐误差 */
@@ -231,6 +232,9 @@ async function renderPage(num) {
   });
   await tl.render();
 
+  // 绑点击 → 选中整行 / 双击 → 扩段。避开 textLayer 对齐问题（不依赖 native drag-select）
+  bindTextLayerClick(textLayerDiv);
+
   // 同步 URL（不刷新页面）
   const u = new URL(location.href);
   u.searchParams.set('page', num);
@@ -269,6 +273,143 @@ window.zoomChange = (delta) => { scale = Math.max(0.6, Math.min(3.0, scale + del
 const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
 let _selTimer = null;
+// ──────── 点击 → 选中整行 / 双击 → 扩段 ────────
+let _lastClickSpan = null, _lastClickTime = 0;
+
+function _spansInSameLine(targetSpan, textLayerDiv) {
+  // 同一行 = Y 中心相差 < 半行高
+  const tRect = targetSpan.getBoundingClientRect();
+  if (!tRect.height) return [targetSpan];
+  const tMid = tRect.top + tRect.height / 2;
+  const tol  = tRect.height * 0.5;
+  const out = [];
+  textLayerDiv.querySelectorAll('span').forEach(s => {
+    if (!s.firstChild) return;   // 跳过 marked-content / endOfContent
+    const r = s.getBoundingClientRect();
+    if (!r.height) return;
+    if (Math.abs((r.top + r.height/2) - tMid) <= tol) out.push(s);
+  });
+  out.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+  return out.length ? out : [targetSpan];
+}
+
+function _spansInParagraph(targetSpan, textLayerDiv) {
+  // 段落 = 当前行向上下扩展直到行间距明显变大 / 没有 spans
+  const allSpans = Array.from(textLayerDiv.querySelectorAll('span'))
+    .filter(s => s.firstChild && s.getBoundingClientRect().height);
+  if (!allSpans.length) return [targetSpan];
+  // 按 Y 排序
+  const items = allSpans.map(s => {
+    const r = s.getBoundingClientRect();
+    return {span: s, top: r.top, bot: r.bottom, mid: r.top + r.height/2, h: r.height};
+  }).sort((a, b) => a.top - b.top);
+  // 分行（Y 中心相近合并）
+  const lines = [];
+  for (const it of items) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(it.mid - last.midAvg) <= it.h * 0.5) {
+      last.items.push(it);
+      last.midAvg = (last.midAvg * (last.items.length - 1) + it.mid) / last.items.length;
+    } else {
+      lines.push({items: [it], midAvg: it.mid, h: it.h});
+    }
+  }
+  // 找 targetSpan 所在行
+  let idx = lines.findIndex(L => L.items.some(it => it.span === targetSpan));
+  if (idx < 0) return [targetSpan];
+  // 向上/下扩展：行间距 < 2.2x avg lineHeight 算同一段
+  const avgH = lines[idx].h;
+  let lo = idx, hi = idx;
+  while (lo > 0) {
+    const gap = lines[lo].midAvg - lines[lo-1].midAvg;
+    if (gap > avgH * 2.2) break;
+    lo--;
+  }
+  while (hi < lines.length - 1) {
+    const gap = lines[hi+1].midAvg - lines[hi].midAvg;
+    if (gap > avgH * 2.2) break;
+    hi++;
+  }
+  const out = [];
+  for (let i = lo; i <= hi; i++) {
+    lines[i].items.sort((a, b) => a.span.getBoundingClientRect().left - b.span.getBoundingClientRect().left);
+    out.push(...lines[i].items.map(it => it.span));
+  }
+  return out;
+}
+
+function _selectSpans(spans) {
+  if (!spans.length) return;
+  const range = document.createRange();
+  // 找 span 内的 text node 起止
+  const firstTxt = spans[0].firstChild;
+  const lastTxt  = spans[spans.length - 1].firstChild;
+  if (!firstTxt || !lastTxt) return;
+  range.setStart(firstTxt, 0);
+  range.setEnd(lastTxt, (lastTxt.textContent || '').length);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  // 用 spans 自己的 rects 画 overlay（不靠 Range.getClientRects，更稳）
+  paintSelectionFromSpans(spans);
+  // 同步 lastSelText + 浮工具栏
+  lastSelText = spans.map(s => s.textContent || '').join('').trim();
+  const rect = range.getBoundingClientRect();
+  const mainEl = document.getElementById('main');
+  const mainRect = mainEl.getBoundingClientRect();
+  toolbar.style.left = Math.max(8, rect.left - mainRect.left + mainEl.scrollLeft) + 'px';
+  toolbar.style.top  = (rect.bottom - mainRect.top + mainEl.scrollTop + 6) + 'px';
+  toolbar.classList.add('open');
+}
+
+function paintSelectionFromSpans(spans) {
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  if (!spans.length) return;
+  // 找 spans 所在的 page-wrap
+  let pw = spans[0].parentElement;
+  while (pw && !pw.classList?.contains('page-wrap')) pw = pw.parentElement;
+  if (!pw) return;
+  const ov = pw.querySelector('.sel-overlay');
+  if (!ov) return;
+  const pwRect = pw.getBoundingClientRect();
+  for (const s of spans) {
+    const r = s.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const div = document.createElement('div');
+    div.className = 'hl';
+    div.style.left   = (r.left - pwRect.left) + 'px';
+    div.style.top    = (r.top  - pwRect.top)  + 'px';
+    div.style.width  = r.width  + 'px';
+    div.style.height = r.height + 'px';
+    ov.appendChild(div);
+  }
+}
+
+function bindTextLayerClick(textLayerDiv) {
+  const handler = (e) => {
+    const span = e.target.closest('span');
+    if (!span || !textLayerDiv.contains(span) || !span.firstChild) return;
+    e.preventDefault(); e.stopPropagation();
+    const now = Date.now();
+    const isDouble = (_lastClickSpan === span && now - _lastClickTime < 380);
+    _lastClickTime = now;
+    _lastClickSpan = span;
+    const spans = isDouble ? _spansInParagraph(span, textLayerDiv) : _spansInSameLine(span, textLayerDiv);
+    _selectSpans(spans);
+  };
+  textLayerDiv.addEventListener('click', handler);
+  // iPad 上 click 有 300ms 延迟，touchend 立即响应
+  textLayerDiv.addEventListener('touchend', (e) => {
+    if (e.touches.length) return;   // 多指不处理
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const el = document.elementFromPoint(t.clientX, t.clientY);
+    if (el && el.closest && el.closest('span')) {
+      handler({target: el, preventDefault: () => e.preventDefault(), stopPropagation: () => {}});
+    }
+  });
+}
+
 function paintSelectionOverlay() {
   // 清空所有 page-wrap 内的 sel-overlay 高亮
   document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
