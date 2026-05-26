@@ -354,6 +354,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   const scale = viewport.scale;
   const pageH = d.page_h;
   // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
+  // 不再 sort：PyMuPDF rawdict 的 chars 已按 PDF 内容流顺序（通常就是 reading order）
+  // 之前 sort 把 subscript/superscript 误判为不同行 → 顺序乱
   const charBoxes = d.chars.map(ch => ({
     c: ch.c,
     left:   ch.x0 * scale,
@@ -361,13 +363,20 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
-  })).sort((a, b) => {
-    // 按 reading order 排序：先按行（Y），同行按 X
-    const lineDelta = Math.abs(a.top - b.top);
-    const ref = Math.min(a.height, b.height) || 1;
-    if (lineDelta > ref * 0.5) return a.top - b.top;
-    return a.left - b.left;
-  });
+  }));
+  // 调试模式（URL 加 ?dbg=1）：显示 char bbox + 内容，验证 PyMuPDF 提取跟 PDF 视觉是否对齐
+  if (new URLSearchParams(location.search).get('dbg') === '1') {
+    const dbgLayer = document.createElement('div');
+    dbgLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5';
+    charBoxes.forEach((c, i) => {
+      const d = document.createElement('div');
+      d.style.cssText = `position:absolute;left:${c.left}px;top:${c.top}px;width:${c.width}px;height:${c.height}px;border:1px solid rgba(255,0,0,.4);font-size:9px;color:rgba(255,0,0,.8);line-height:${c.height}px;text-align:center;font-family:monospace`;
+      d.textContent = c.sp ? '·' : c.c;
+      d.title = `idx=${i} c=${JSON.stringify(c.c)}`;
+      dbgLayer.appendChild(d);
+    });
+    wrap.appendChild(dbgLayer);
+  }
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）
