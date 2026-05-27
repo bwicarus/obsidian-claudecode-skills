@@ -137,13 +137,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .hl-layer .hl-saved:hover{opacity:.78}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
 
-/* toolbar 内的高亮色板：互斥激活态（外框） + 独立「🖌 标记」按钮 */
-#hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px}
-#hl-color-picker .lbl{font-size:11px;color:#7a8497;margin-right:2px}
-#hl-color-picker .mark-btn{background:transparent;border:1.5px solid #5b6a85;color:#7a8497;border-radius:4px;padding:4px 12px;font-size:11px;cursor:not-allowed;margin-right:6px;transition:all .15s;font-family:inherit}
-#hl-color-picker .mark-btn.enabled{cursor:pointer;color:#fff}
-#hl-color-picker .mark-btn.enabled:hover{filter:brightness(1.15)}
-#hl-color-picker .swatch{width:22px;height:22px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
+/* toolbar 内的高亮色板：只有色圆点，点 = 立刻标记 + 互斥激活外框 */
+#hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 2px 0}
+#hl-color-picker .swatch{width:24px;height:24px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
 #hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
 
@@ -1658,9 +1654,10 @@ function renderHighlightsOnPage(pw, pageNum) {
   if (!layer) {
     layer = document.createElement('div');
     layer.className = 'hl-layer';
-    const cl = pw.querySelector('.char-layer');
-    if (cl) pw.insertBefore(layer, cl); else pw.appendChild(layer);
   }
+  // 永远把 hl-layer append 到最后，让它在 DOM 顺序上晚于 char-layer
+  // （配合 z-index:5 双保险）→ hl-saved 在最上层接收点击
+  pw.appendChild(layer);
   layer.innerHTML = '';
   const list = _hlByPage[pageNum] || [];
   const canvas = pw.querySelector('canvas');
@@ -1683,12 +1680,17 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.style.height = ((y1 - y0) * sy) + 'px';
       div.style.background = h.color;
       div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
-      // 拦截 mousedown/touchstart 避免 char-layer 启动拖选；只允许 click 触发 popover
-      div.addEventListener('mousedown',  (e) => { e.stopPropagation(); });
-      div.addEventListener('mouseup',    (e) => { e.stopPropagation(); });
-      div.addEventListener('touchstart', (e) => { e.stopPropagation(); }, {passive:true});
-      div.addEventListener('touchend',   (e) => { e.stopPropagation(); }, {passive:true});
-      div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); });
+      // 用 capture phase 拦事件，确保不被 char-layer 拖选逻辑捕获
+      const stop = (e) => { e.stopPropagation(); };
+      div.addEventListener('mousedown',  stop, true);
+      div.addEventListener('mouseup',    stop, true);
+      div.addEventListener('touchstart', stop, {passive:true, capture:true});
+      div.addEventListener('touchend',   stop, {passive:true, capture:true});
+      div.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.dlog?.('hl-saved click → openHlPopover id=' + h.id);
+        openHlPopover(h, div, pw);
+      }, true);
       layer.appendChild(div);
     }
   }
@@ -1757,47 +1759,35 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
 // 当前激活颜色（互斥单选；持久化）。空 = 没激活 → 「🖌 标记」按钮禁用
 let _activeHlColor = localStorage.getItem('pdf-hl-active') || '';
 
-// 工具栏色板：[🖌 标记 按钮] [○ ○ ○ ○]
+// 工具栏色板：只有 [○ ○ ○ ○]；点色 = 立刻标记 + 互斥激活外框（记最近用过的色）
 function renderHlPicker() {
   const c = document.getElementById('hl-color-picker');
   if (!c) return;
-  c.innerHTML = '<span class="lbl">🖌</span>';
-  // 标记按钮
-  const mb = document.createElement('button');
-  mb.className = 'mark-btn' + (_activeHlColor ? ' enabled' : '');
-  mb.textContent = '标记';
-  mb.type = 'button';
-  mb.title = _activeHlColor ? ('用 ' + _activeHlColor + ' 标记选中文字') : '请先点击下方一个颜色激活';
-  if (_activeHlColor) {
-    mb.style.borderColor = _activeHlColor;
-    mb.style.background = _activeHlColor + 'cc';   // ~80% alpha
-  } else {
-    mb.style.borderColor = '';
-    mb.style.background = '';
-  }
-  mb.onclick = (e) => { e.stopPropagation(); onMarkBtn(); };
-  c.appendChild(mb);
-  // 色板：互斥激活态
+  c.innerHTML = '';
   for (const col of getHlColors()) {
     const sw = document.createElement('div');
     sw.className = 'swatch' + (col === _activeHlColor ? ' active' : '');
     sw.style.background = col;
-    sw.title = (col === _activeHlColor) ? '已激活（再点取消）' : '激活此色';
-    sw.onclick = (e) => { e.stopPropagation(); _toggleActiveColor(col); };
+    sw.title = '用此色标记';
+    sw.onclick = (e) => { e.stopPropagation(); onPickColor(col); };
     c.appendChild(sw);
   }
 }
-function _toggleActiveColor(col) {
-  _activeHlColor = (_activeHlColor === col) ? '' : col;
-  try { localStorage.setItem('pdf-hl-active', _activeHlColor); } catch (_) {}
+async function onPickColor(col) {
+  // 互斥激活：再点同色 = 取消激活；点其他色 = 切到该色（同时立刻标记）
+  if (col === _activeHlColor) {
+    _activeHlColor = '';
+    try { localStorage.setItem('pdf-hl-active', ''); } catch(_) {}
+    renderHlPicker();
+    return;
+  }
+  _activeHlColor = col;
+  try { localStorage.setItem('pdf-hl-active', col); } catch(_) {}
   renderHlPicker();
-}
-async function onMarkBtn() {
-  if (!_activeHlColor) { _toast('请先点一个颜色激活'); return; }
-  if (!_charSel) { _toast('请先在 PDF 上选中文字'); return; }
+  if (!_charSel) { _toast('已选定颜色（先选中文字）'); return; }
   await saveHighlight({
     pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx,
-    color: _activeHlColor, kind: 'note',
+    color: col, kind: 'note',
   });
   _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
   _charSel = null;
@@ -1840,6 +1830,7 @@ window.closeHlPopover = closeHlPopover;
 function openHlPopover(h, anchorDiv, pw) {
   _popoverHL = h;
   const pop = document.getElementById('hl-popover');
+  window.dlog?.('openHlPopover: pop=' + (pop ? 'OK' : 'MISSING'));
   if (!pop) return;
   const colorsHtml = getHlColors().map(c =>
     `<span class="swatch${c===h.color?' cur':''}" data-c="${escHtml(c)}" style="background:${escHtml(c)}"></span>`
