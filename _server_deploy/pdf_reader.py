@@ -454,6 +454,66 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
     return marks
 
 
+@bp.route("/api/page-vocab-marks")
+def pdf_api_page_vocab_marks():
+    """轻量路由：仅返回该页 vocab_marks（不返回 chars）。
+    用户查词后用来立刻刷新下划线，不需要重传整页 chars。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz
+    except ImportError:
+        return jsonify({"ok": False, "error": "PyMuPDF missing"}), 500
+    doc = None
+    try:
+        doc = fitz.open(str(abs_path))
+        if page > len(doc):
+            return jsonify({"ok": False, "error": "page out of range"}), 400
+        p = doc[page - 1]
+        raw = p.get_text("rawdict")
+        chars = []
+        for b in raw.get("blocks", []):
+            if b.get("type") != 0: continue
+            for ln in b.get("lines", []):
+                for sp in ln.get("spans", []):
+                    for ch in sp.get("chars", []):
+                        bb = ch.get("bbox")
+                        if not bb: continue
+                        c = ch.get("c", "")
+                        if not c: continue
+                        chars.append({
+                            "c": c, "x0": round(bb[0],2), "y0": round(bb[1],2),
+                            "x1": round(bb[2],2), "y1": round(bb[3],2),
+                            "sp": 1 if c.isspace() else 0,
+                        })
+        # 强制刷新 vocab_index（防 vocab note 刚写完缓存还旧）
+        try:
+            import sys as _sys
+            vp = CLAUDE_DIR / "scripts" / "vocab"
+            if str(vp) not in _sys.path:
+                _sys.path.insert(0, str(vp))
+            import vocab_index   # type: ignore
+            vocab_index.index(force_reload=True)
+        except Exception:
+            pass
+        marks = _build_vocab_marks(chars)
+        return jsonify({
+            "ok": True,
+            "vocab_marks": marks,
+            "page_w": p.rect.width,
+            "page_h": p.rect.height,
+        })
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    finally:
+        if doc:
+            try: doc.close()
+            except Exception: pass
+
+
 @bp.route("/api/page-nodes")
 def pdf_api_page_nodes():
     rel = request.args.get("file", "")

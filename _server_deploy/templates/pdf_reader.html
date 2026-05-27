@@ -785,6 +785,24 @@ function _vocabUnderlineEnabled() {
   return v === null ? true : (v === '1');
 }
 
+// 查完一个词后，刷新所有已渲染页的下划线（让新查的词立刻出现下划线）
+async function refreshVocabUnderlinesForAllPages() {
+  if (!_vocabUnderlineEnabled() || !pdfDoc) return;
+  const wraps = document.querySelectorAll('.page-wrap[data-loaded="1"]');
+  for (const pw of wraps) {
+    const pn = parseInt(pw.dataset.pageNum || '0', 10);
+    if (!pn) continue;
+    try {
+      const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
+      const d = await r.json();
+      if (!d.ok) continue;
+      pw.__vocabMarks = d.vocab_marks || [];
+      renderVocabUnderlines(pw, pw.__vocabMarks);
+    } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
+  }
+}
+window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
+
 // 找点击位置最近的非空格 char index
 function _findCharAt(charBoxes, x, y) {
   // 先尝试落在某 char bbox 内（优先 non-space）
@@ -2065,6 +2083,8 @@ async function dictStream(word, ctx) {
       } else if (evt === 'done') {
         state.vocab_note = payload.vocab_note || '';
         renderState();
+        // 1.5s 后刷新下划线：等后台 vocab note 写完 + paragraph_exposure 跑完
+        setTimeout(() => { refreshVocabUnderlinesForAllPages(); }, 1500);
       } else if (evt === 'error') {
         if (!gotEcdict) return false;   // ECDICT 都没拿到 → 让 AI 回落
       }
