@@ -152,9 +152,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn-l:hover{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:0 0 0 1px var(--sent-fill,rgba(245,158,11,.3))}
 .vocab-sentence-btn-l.active{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:inset -4px -4px 0 0 currentColor}
 
-/* 句子翻译覆盖层：实色白底（看清中文）+ 左侧粗色边 + 细色边框 */
-.vocab-sentence-overlay{position:absolute;background:#ffffff;color:#111;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 currentColor,inset -1px 0 0 currentColor,inset 0 -1px 0 currentColor,inset 0 1px 0 currentColor;color:#d97706}
-.vocab-sentence-overlay:hover{background:#fff8e1}
+/* 句子翻译覆盖层：黑字 + 白底 + 同色 hatch 排线（跟原句框统一风格）+ 左侧粗色边 */
+.vocab-sentence-overlay{position:absolute;background-color:#ffffff;background-image:var(--sent-hatch);color:#111 !important;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 var(--sent-stroke,#d97706),inset -1px 0 0 var(--sent-stroke,#d97706),inset 0 -1px 0 var(--sent-stroke,#d97706),inset 0 1px 0 var(--sent-stroke,#d97706)}
+.vocab-sentence-overlay:hover{background-color:#fff8e1}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
@@ -1057,7 +1057,12 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   ov.className = 'vocab-sentence-overlay';
   ov.dataset.active = '1';
   ov.dataset.sentText = s.text;
-  if (s.__stroke) ov.style.color = s.__stroke;
+  // 沿用句子颜色：左 4px 实色 stroke + hatch 排线（跟原句框相同的素描风格）
+  if (s.__stroke) {
+    ov.style.setProperty('--sent-stroke', s.__stroke);
+    ov.style.setProperty('--sent-hatch',
+      `repeating-linear-gradient(135deg, ${s.__stroke}33 0 1.2px, transparent 1.2px 4px)`);
+  }
   if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
   ov.style.left = (bx0 * sx - PAD_L) + 'px';
   ov.style.top = (by0 * sy) + 'px';
