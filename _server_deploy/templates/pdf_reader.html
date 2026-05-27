@@ -107,15 +107,21 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-modal h3{margin:0 0 12px;font-size:15px;color:#cfe6ff;display:flex;align-items:center;gap:10px}
 #draft-modal h3 .clear-all{margin-left:auto;font-size:11px;color:#7a8497;background:transparent;border:1px solid #2a3550;border-radius:4px;padding:3px 8px;cursor:pointer}
 #draft-list{flex:1;overflow-y:auto;margin:0 -6px;padding:0 6px}
-.draft-item{display:flex;gap:10px;align-items:flex-start;padding:10px 8px;border-bottom:1px solid #1f2740;cursor:pointer;transition:background .15s;position:relative;overflow:hidden}
+/* 草稿项 wrap：clip 删除栏的高度动画 */
+.draft-item-wrap{border-bottom:1px solid #1f2740;overflow:hidden}
+.draft-item{display:flex;gap:10px;align-items:flex-start;padding:10px 8px;cursor:pointer;transition:background .15s,transform .12s;position:relative;will-change:transform}
 .draft-item:hover{background:#0d1322}
-.draft-item .sel-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;margin-top:2px;transition:all .15s}
-.draft-item.selected .sel-circle{background:#34d399;border-color:#34d399;box-shadow:inset 0 0 0 3px #10162a}
 .draft-item .body{flex:1;min-width:0}
 .draft-item .src{color:#7a8497;font-size:10px;margin-bottom:3px}
-.draft-item .text{color:#cfe6ff;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden;text-overflow:ellipsis}
-.draft-item .del-btn{flex-shrink:0;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;align-self:center}
-.draft-item .del-btn:hover{background:#5a2424}
+.draft-item .text{color:#cfe6ff;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden}
+.draft-item .text.full{max-height:none}
+.draft-item .sel-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;margin-top:2px;transition:all .15s;touch-action:pan-y;align-self:center}
+.draft-item .sel-circle:hover{border-color:#60a5fa}
+.draft-item.selected .sel-circle{background:#34d399;border-color:#34d399;box-shadow:inset 0 0 0 3px #10162a}
+.draft-item-wrap.swiped .draft-item .sel-circle{border-color:#7a2828}
+.draft-item-del-row{display:block;width:100%;background:#7a2828;color:#fff;border:none;border-top:1px solid #4a1a1a;font-size:12px;cursor:pointer;max-height:0;overflow:hidden;opacity:0;transition:max-height .18s,opacity .18s,padding .18s;padding:0 8px}
+.draft-item-wrap.swiped .draft-item-del-row{max-height:40px;opacity:1;padding:8px}
+.draft-item-wrap.swiped .draft-item-del-row:hover{background:#9a3232}
 .draft-empty{text-align:center;color:#5a6680;padding:40px 20px;font-size:13px}
 #draft-actions{margin-top:14px;padding-top:14px;border-top:1px solid #2a3550;display:flex;gap:8px;flex-wrap:wrap}
 #draft-actions button{flex:1;min-width:0;background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:9px 12px;font-size:12px;cursor:pointer;transition:background .15s}
@@ -124,17 +130,22 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-actions button.primary:hover{background:#2c5188}
 #draft-actions button:disabled{opacity:.5;cursor:not-allowed}
 
-/* 已保存高亮层（在 char-layer 之下，能透过 char-layer 接收点击） */
-.hl-layer{position:absolute;inset:0;z-index:3;pointer-events:none}
+/* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
+   hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
+.hl-layer{position:absolute;inset:0;z-index:5;pointer-events:none}
 .hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:.55;transition:opacity .12s}
 .hl-layer .hl-saved:hover{opacity:.78}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
 
-/* toolbar 内的高亮色板 */
+/* toolbar 内的高亮色板：互斥激活态（外框） + 独立「🖌 标记」按钮 */
 #hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px}
 #hl-color-picker .lbl{font-size:11px;color:#7a8497;margin-right:2px}
-#hl-color-picker .swatch{width:22px;height:22px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s}
+#hl-color-picker .mark-btn{background:transparent;border:1.5px solid #5b6a85;color:#7a8497;border-radius:4px;padding:4px 12px;font-size:11px;cursor:not-allowed;margin-right:6px;transition:all .15s;font-family:inherit}
+#hl-color-picker .mark-btn.enabled{cursor:pointer;color:#fff}
+#hl-color-picker .mark-btn.enabled:hover{filter:brightness(1.15)}
+#hl-color-picker .swatch{width:22px;height:22px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
+#hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
 
 /* 高亮 popover：点击已存在的高亮弹出 */
 #hl-popover{position:absolute;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:10px 12px;z-index:150;display:none;box-shadow:0 6px 16px rgba(0,0,0,.6);min-width:280px;max-width:360px}
@@ -1671,8 +1682,12 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.style.height = ((y1 - y0) * sy) + 'px';
       div.style.background = h.color;
       div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
-      div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); });
+      // 拦截 mousedown/touchstart 避免 char-layer 启动拖选；只允许 click 触发 popover
+      div.addEventListener('mousedown',  (e) => { e.stopPropagation(); });
+      div.addEventListener('mouseup',    (e) => { e.stopPropagation(); });
       div.addEventListener('touchstart', (e) => { e.stopPropagation(); }, {passive:true});
+      div.addEventListener('touchend',   (e) => { e.stopPropagation(); }, {passive:true});
+      div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); });
       layer.appendChild(div);
     }
   }
@@ -1738,28 +1753,51 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
   }
 }
 
-// 工具栏的色板（点击颜色 = 立刻保存）
+// 当前激活颜色（互斥单选；持久化）。空 = 没激活 → 「🖌 标记」按钮禁用
+let _activeHlColor = localStorage.getItem('pdf-hl-active') || '';
+
+// 工具栏色板：[🖌 标记 按钮] [○ ○ ○ ○]
 function renderHlPicker() {
   const c = document.getElementById('hl-color-picker');
   if (!c) return;
-  // 清掉旧 swatch（保留 .lbl）
-  c.querySelectorAll('.swatch').forEach(s => s.remove());
+  c.innerHTML = '<span class="lbl">🖌</span>';
+  // 标记按钮
+  const mb = document.createElement('button');
+  mb.className = 'mark-btn' + (_activeHlColor ? ' enabled' : '');
+  mb.textContent = '标记';
+  mb.type = 'button';
+  mb.title = _activeHlColor ? ('用 ' + _activeHlColor + ' 标记选中文字') : '请先点击下方一个颜色激活';
+  if (_activeHlColor) {
+    mb.style.borderColor = _activeHlColor;
+    mb.style.background = _activeHlColor + 'cc';   // ~80% alpha
+  } else {
+    mb.style.borderColor = '';
+    mb.style.background = '';
+  }
+  mb.onclick = (e) => { e.stopPropagation(); onMarkBtn(); };
+  c.appendChild(mb);
+  // 色板：互斥激活态
   for (const col of getHlColors()) {
     const sw = document.createElement('div');
-    sw.className = 'swatch';
+    sw.className = 'swatch' + (col === _activeHlColor ? ' active' : '');
     sw.style.background = col;
-    sw.title = '用 ' + col + ' 标记';
-    sw.onclick = async (e) => { e.stopPropagation(); await onHighlightSel(col); };
+    sw.title = (col === _activeHlColor) ? '已激活（再点取消）' : '激活此色';
+    sw.onclick = (e) => { e.stopPropagation(); _toggleActiveColor(col); };
     c.appendChild(sw);
   }
 }
-async function onHighlightSel(color) {
-  if (!_charSel) return;
+function _toggleActiveColor(col) {
+  _activeHlColor = (_activeHlColor === col) ? '' : col;
+  try { localStorage.setItem('pdf-hl-active', _activeHlColor); } catch (_) {}
+  renderHlPicker();
+}
+async function onMarkBtn() {
+  if (!_activeHlColor) { _toast('请先点一个颜色激活'); return; }
+  if (!_charSel) { _toast('请先在 PDF 上选中文字'); return; }
   await saveHighlight({
     pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx,
-    color, kind: 'note',
+    color: _activeHlColor, kind: 'note',
   });
-  // 清选中 + 关闭 toolbar
   _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
   _charSel = null;
   lastSelText = '';
@@ -1779,9 +1817,10 @@ async function markFromResult() {
   clone.querySelectorAll('.head-pick,.reply-pick-all-result,.pick-btn').forEach(b => b.remove());
   const body = (clone.dataset.raw || clone.textContent || '').trim();
   const cs = _resultContext.charSel;
+  const useColor = _activeHlColor || _lastHlColor || (getHlColors()[0] || '#fff59d');
   const h = await saveHighlight({
     pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx,
-    color: _lastHlColor,
+    color: useColor,
     kind: _resultContext.kind || 'note',
     sentence: _resultContext.sentence || '',
     body,
@@ -2216,20 +2255,106 @@ window.openDraftModal = () => {
   if (!_drafts.length) {
     list.innerHTML = '<div class="draft-empty">还没有勾选任何段落。<br>在 AI 回答里点 + 按钮收集段落。</div>';
   } else {
-    list.innerHTML = _drafts.map((d, i) => `
-      <div class="draft-item ${d.selected ? 'selected' : ''}" data-id="${d.id}">
-        <div class="sel-circle" onclick="toggleDraftSel('${d.id}')" title="${d.selected?'取消':'选中'}"></div>
-        <div class="body" onclick="expandDraft('${d.id}')">
-          <div class="src">${(d.source||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')} · ${new Date(d.time).toLocaleString().slice(5,16)}</div>
-          <div class="text" id="dt-${d.id}">${d.text.slice(0, 200).replace(/&/g,'&amp;').replace(/</g,'&lt;')}${d.text.length>200?'…':''}</div>
+    list.innerHTML = _drafts.map((d) => `
+      <div class="draft-item-wrap" data-id="${d.id}">
+        <div class="draft-item ${d.selected ? 'selected' : ''}">
+          <div class="body">
+            <div class="src">${(d.source||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')} · ${new Date(d.time).toLocaleString().slice(5,16)}</div>
+            <div class="text" id="dt-${d.id}">${d.text.slice(0, 200).replace(/&/g,'&amp;').replace(/</g,'&lt;')}${d.text.length>200?'…':''}</div>
+          </div>
+          <div class="sel-circle" title="${d.selected?'已选（点击取消）':'未选（点击勾选）'}"></div>
         </div>
-        <button class="del-btn" onclick="deleteDraft('${d.id}')">删除</button>
+        <button class="draft-item-del-row" type="button">🗑 删除</button>
       </div>
     `).join('');
+    // 绑定每条 draft 的交互
+    list.querySelectorAll('.draft-item-wrap').forEach(w => _bindDraftItem(w));
   }
   document.getElementById('draft-mask').classList.add('open');
 };
 window.closeDraftModal = () => document.getElementById('draft-mask').classList.remove('open');
+
+// 草稿项交互：圆圈右侧（单击=切换 selected）；body 单击=展开；触屏左滑 / 鼠标 body 拖 = 下方滑出删除栏
+function _bindDraftItem(wrap) {
+  const id = wrap.dataset.id;
+  const item = wrap.querySelector('.draft-item');
+  const body = wrap.querySelector('.body');
+  const circle = wrap.querySelector('.sel-circle');
+  const delBtn = wrap.querySelector('.draft-item-del-row');
+  if (!item || !circle) return;
+  const reveal = () => { wrap.classList.add('swiped'); item.style.transform = ''; };
+  const reset  = () => { wrap.classList.remove('swiped'); item.style.transform = ''; };
+
+  delBtn.onclick = (e) => { e.stopPropagation(); deleteDraft(id); };
+
+  // 圆圈单击 = 切换 selected（如果当前 swiped 态先复位）
+  circle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (wrap.classList.contains('swiped')) { reset(); return; }
+    toggleDraftSel(id);
+  });
+
+  // 触屏：item 整体左滑揭示删除
+  let sx = 0, sy = 0, dx = 0, dy = 0, swiping = false, axis = '';
+  item.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = dy = 0; swiping = true; axis = '';
+  }, {passive: true});
+  item.addEventListener('touchmove', (e) => {
+    if (!swiping) return;
+    const t = e.touches[0];
+    dx = t.clientX - sx; dy = t.clientY - sy;
+    if (!axis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+      axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+    if (axis === 'x') {
+      if (dx < 0) item.style.transform = `translateX(${Math.max(dx,-80)}px)`;
+      else if (wrap.classList.contains('swiped')) item.style.transform = `translateX(${Math.min(dx,30)}px)`;
+    }
+  }, {passive: true});
+  item.addEventListener('touchend', () => {
+    swiping = false;
+    if (axis === 'x') {
+      if (dx < -40) reveal();
+      else if (dx > 30 || !wrap.classList.contains('swiped')) reset();
+    }
+    dx = dy = 0; axis = '';
+  });
+
+  // 鼠标：在 body 区域水平拖 → swipe；纯点击 = 展开
+  let md = false, mx = 0, mdx = 0, dragged = false;
+  body.addEventListener('mousedown', (e) => {
+    md = true; mx = e.clientX; mdx = 0; dragged = false;
+  });
+  const onMove = (e) => {
+    if (!md) return;
+    mdx = e.clientX - mx;
+    if (Math.abs(mdx) > 4) dragged = true;
+    if (mdx < 0) item.style.transform = `translateX(${Math.max(mdx,-80)}px)`;
+    else if (wrap.classList.contains('swiped')) item.style.transform = `translateX(${Math.min(mdx,30)}px)`;
+  };
+  const onUp = () => {
+    if (!md) return;
+    md = false;
+    if (dragged) {
+      if (mdx < -40) reveal();
+      else if (mdx > 30 || !wrap.classList.contains('swiped')) reset();
+    }
+    mdx = 0;
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+
+  // body 单击 = 展开/收起；处于 swiped 态则先复位
+  body.addEventListener('click', (e) => {
+    if (dragged) { dragged = false; e.stopPropagation(); return; }
+    if (wrap.classList.contains('swiped')) { reset(); return; }
+    expandDraft(id);
+  });
+
+  // 清理 listener：modal 关闭时调用（openDraftModal 重新渲染会重复绑定，需要清旧）
+  // 这里粗暴依赖每次 openDraftModal 重写 innerHTML（旧 listener 随 DOM 销毁自动 GC，
+  // document.mousemove/mouseup 还在但闭包引用的 wrap/md 状态已脱离 DOM，无副作用）
+}
 window.toggleDraftSel = (id) => {
   const d = _drafts.find(x => x.id === id);
   if (!d) return;
