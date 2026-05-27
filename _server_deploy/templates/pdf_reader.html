@@ -136,6 +136,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:.55;transition:opacity .12s}
 .hl-layer .hl-saved:hover{opacity:.78}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
+/* 仅备注（无色）：透明背景 + 虚线边框提示"这里有备注但无颜色高亮" */
+.hl-layer .hl-saved.no-color{background:transparent !important;mix-blend-mode:normal;opacity:1;border:1px dashed rgba(150,170,200,.55)}
+.hl-layer .hl-saved.no-color:hover{border-color:#60a5fa;background:rgba(96,165,250,.08) !important}
 
 /* toolbar 内的高亮色板：只有色圆点，点 = 立刻标记 + 互斥激活外框 */
 #hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 2px 0}
@@ -1672,13 +1675,17 @@ function renderHighlightsOnPage(pw, pageNum) {
     for (const r of (h.rects || [])) {
       const [x0, y0, x1, y1] = r;
       const div = document.createElement('div');
-      div.className = 'hl-saved' + (h.note || h.body ? ' has-note' : '');
+      const hasColor = !!(h.color && h.color.trim());
+      const hasNote  = !!((h.note||'').trim() || (h.body||'').trim() || (h.sentence||'').trim());
+      div.className = 'hl-saved'
+        + (hasNote ? ' has-note' : '')
+        + (hasColor ? '' : ' no-color');
       div.dataset.id = h.id;
       div.style.left = (x0 * sx) + 'px';
       div.style.top = (y0 * sy) + 'px';
       div.style.width = ((x1 - x0) * sx) + 'px';
       div.style.height = ((y1 - y0) * sy) + 'px';
-      div.style.background = h.color;
+      if (hasColor) div.style.background = h.color;
       div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
       // 用 capture phase 拦事件，确保不被 char-layer 拖选逻辑捕获
       const stop = (e) => { e.stopPropagation(); };
@@ -1860,21 +1867,36 @@ function openHlPopover(h, anchorDiv, pw) {
   // 预览块：点击展开 / 收起；右侧圆圈左滑（或整体触屏左滑）→ 下方滑出删除栏
   const wrapEl = pop.querySelector('.hl-snip-wrap');
   if (wrapEl) _attachSnipBehavior(wrapEl, () => _hlDelete(h, pw));
-  // 颜色 swatch
+  // 颜色 swatch：点 = 立即切换颜色（PATCH 后端 + 重渲染）
+  //   - 点已是 .cur 的色 → 取消高亮颜色
+  //       · 没备注（note/body/sentence 都空）→ 直接删除该高亮
+  //       · 有备注 → 保留高亮（color 设空）+ 视觉变"仅备注"虚框样式
+  //   - 点别的色 → 立即切到该色
   pop.querySelectorAll('.row .swatch').forEach(sw => {
-    sw.onclick = (e) => {
+    sw.onclick = async (e) => {
       e.stopPropagation();
+      if (sw.classList.contains('cur')) {
+        const hasNote = (h.note || '').trim() || (h.body || '').trim() || (h.sentence || '').trim();
+        if (!hasNote) {
+          await _hlDelete(h, pw);
+        } else {
+          await _hlUpdate(h, pw, {color: ''});
+          closeHlPopover();
+          _toast('已取消颜色（备注保留）');
+        }
+        return;
+      }
+      // 切换到新色：立即 PATCH，不用等 [保存]
+      const newColor = sw.dataset.c;
       pop.querySelectorAll('.row .swatch').forEach(s => s.classList.remove('cur'));
       sw.classList.add('cur');
-      h._pendingColor = sw.dataset.c;
+      await _hlUpdate(h, pw, {color: newColor});
     };
   });
+  // [保存] 只更新 note 文字（颜色由色板点击立即生效）
   pop.querySelector('[data-act=save]').onclick = async (e) => {
     e.stopPropagation();
-    await _hlUpdate(h, pw, {
-      color: h._pendingColor || h.color,
-      note: document.getElementById('hl-note').value,
-    });
+    await _hlUpdate(h, pw, { note: document.getElementById('hl-note').value });
     closeHlPopover();
   };
   // 删除入口现在统一在 .hl-snip-del-row（左滑揭示）；底部不再有 [data-act=del] 按钮

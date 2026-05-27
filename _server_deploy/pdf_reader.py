@@ -733,7 +733,9 @@ def pdf_api_highlights_update():
     if not found:
         return jsonify({"ok": False, "error": "not found"}), 404
     if "color" in data:
-        found["color"] = (data.get("color") or "").strip() or found["color"]
+        # 允许空字符串：表示"取消颜色但保留备注"
+        v = data.get("color")
+        found["color"] = (v.strip() if isinstance(v, str) else "")
     if "note" in data:
         found["note"] = (data.get("note") or "").strip()[:2000]
     if "sentence" in data:
