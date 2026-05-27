@@ -1036,20 +1036,19 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
     bx0 = Math.min(bx0, r[0]); by0 = Math.min(by0, r[1]);
     bx1 = Math.max(bx1, r[2]); by1 = Math.max(by1, r[3]);
   }
-  // clip-path：每个 rect 一个 subpath（相对 overlay 左上角的坐标）
-  // 视觉上只在原字符位置可见，跨行间空白透明（原 PDF 内容可见）
+  // 左侧留 8px 边距：overlay box 向左扩 8px，clip-path 内 x 也 +8 偏移，
+  // padding-left:8px 让文字往右挤 8px → 文字位置仍对齐原字符 + 视觉上左边有空隙
+  const PAD_L = 8;
   const subpaths = rects.map(r => {
-    const x  = ((r[0] - bx0) * sx).toFixed(2);
+    const x  = ((r[0] - bx0) * sx + PAD_L).toFixed(2);
     const y  = ((r[1] - by0) * sy).toFixed(2);
-    const x2 = ((r[2] - bx0) * sx).toFixed(2);
+    const x2 = ((r[2] - bx0) * sx + PAD_L).toFixed(2);
     const y2 = ((r[3] - by0) * sy).toFixed(2);
     return `M${x} ${y}L${x2} ${y}L${x2} ${y2}L${x} ${y2}Z`;
   }).join(' ');
 
   const rectH = (rects[0][3] - rects[0][1]) * sy;
   const fontPx = Math.max(9, Math.round(rectH * 0.78));
-  // line-height = 实际行间距（rect[1].y0 - rect[0].y0）让中文 wrap 后行对齐原 rect 行 y
-  // 单行时 = rect 高度
   let lineHeightPx = rectH;
   if (rects.length >= 2) lineHeightPx = (rects[1][1] - rects[0][1]) * sy;
 
@@ -1057,18 +1056,18 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   ov.className = 'vocab-sentence-overlay';
   ov.dataset.active = '1';
   ov.dataset.sentText = s.text;
-  // 沿用句子颜色（renderVocabSentences 内缓存）
   if (s.__stroke) ov.style.color = s.__stroke;
   if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
-  ov.style.left = (bx0 * sx) + 'px';
+  ov.style.left = (bx0 * sx - PAD_L) + 'px';
   ov.style.top = (by0 * sy) + 'px';
-  ov.style.width = ((bx1 - bx0) * sx) + 'px';
+  ov.style.width = ((bx1 - bx0) * sx + PAD_L) + 'px';
   ov.style.height = ((by1 - by0) * sy) + 'px';
   ov.style.clipPath = `path('${subpaths}')`;
   ov.style.webkitClipPath = `path('${subpaths}')`;
   ov.style.fontSize = fontPx + 'px';
   ov.style.lineHeight = lineHeightPx + 'px';
-  // 首字符跟原句开头对齐（如果第一行 rect 不在 bounding box 最左）
+  ov.style.paddingLeft = PAD_L + 'px';
+  // 首字符跟原句开头对齐
   const firstIndent = (rects[0][0] - bx0) * sx;
   if (firstIndent > 1) ov.style.textIndent = firstIndent + 'px';
   ov.textContent = zh;
