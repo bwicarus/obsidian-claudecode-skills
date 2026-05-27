@@ -142,11 +142,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
-/* 多生词句子框（L 形：左 4px 实色竖线贯穿，其余边虚线；多行 rect 上下贴合无间隙）*/
-.vocab-sentence-box{position:absolute;border-top:1.4px dashed currentColor;border-right:1.4px dashed currentColor;border-bottom:1.4px dashed currentColor;border-left:4px solid currentColor;border-radius:0 3px 3px 0;pointer-events:none;box-sizing:border-box;transition:all .12s;color:rgba(0,0,0,.4);opacity:.75}
-.vocab-sentence-box.mid{border-top:none;border-bottom:none}      /* 中间行去上下虚线，让左竖线连贯 */
-.vocab-sentence-box.has-prev{border-top:none}                     /* 不是首行 → 去上边 */
-.vocab-sentence-box.has-next{border-bottom:none}                  /* 不是末行 → 去下边 */
+/* 多生词句子框：每行独立矩形（左右都不跨行）；句首行左 4px 实线，其它行四边均细虚线 */
+.vocab-sentence-box{position:absolute;border:1.4px dashed currentColor;border-radius:3px;pointer-events:none;box-sizing:border-box;transition:all .12s;color:rgba(0,0,0,.4);opacity:.75}
+.vocab-sentence-box.first{border-left:4px solid currentColor;border-radius:0 3px 3px 0}
 .vocab-sentence-box.highlight{opacity:1;background:var(--sent-fill,rgba(245,158,11,.10))}
 .vocab-sentence-btn{position:absolute;width:20px;height:20px;border-radius:50%;background:currentColor;border:1.5px solid rgba(0,0,0,.25);color:#f59e0b;font-size:10px;font-weight:700;cursor:pointer;pointer-events:auto;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;padding:0;line-height:1;transition:transform .12s,box-shadow .12s}
 .vocab-sentence-btn::before{content:'🌐';filter:drop-shadow(0 0 1px rgba(0,0,0,.4))}
@@ -941,22 +939,14 @@ function renderVocabSentences(pw, sentences) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
       const box = document.createElement('div');
-      box.className = 'vocab-sentence-box';
-      if (ri > 0) box.classList.add('has-prev');                 // 不是首行 → 去上边
-      if (ri < rects.length - 1) box.classList.add('has-next');  // 不是末行 → 去下边 + 扩展高度
+      box.className = 'vocab-sentence-box' + (ri === 0 ? ' first' : '');
       box.dataset.sid = sid;
       box.style.color = stroke;
       box.style.setProperty('--sent-fill', fill);
       box.style.left = (x0 * sx - 2) + 'px';
       box.style.top = (y0 * sy - 1) + 'px';
       box.style.width = ((x1 - x0) * sx + 4) + 'px';
-      // 中间行（has-next）的高度扩展到下一行 y0，消除行间空白 → 左 4px 竖线连贯
-      if (ri < rects.length - 1) {
-        const nextY0 = rects[ri + 1][1] * sy;
-        box.style.height = (nextY0 - y0 * sy + 1) + 'px';
-      } else {
-        box.style.height = ((y1 - y0) * sy + 2) + 'px';
-      }
+      box.style.height = ((y1 - y0) * sy + 2) + 'px';
       layer.appendChild(box);
     }
     if (!rects.length) continue;
