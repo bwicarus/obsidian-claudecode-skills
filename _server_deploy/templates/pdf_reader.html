@@ -960,11 +960,15 @@ function renderVocabSentences(pw, sentences) {
       btn.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
       btn.style.color = stroke;
       btn.style.setProperty('--sent-fill', fill);
-      // content-box：width/height = 字符内容尺寸；padding 扩 hot zone
-      btn.style.left = (lc[0] * sx - 2) + 'px';
+      // 加宽：把 L 形扩展到字符宽度 × 3（向左延伸），更易点击
+      const charW = (lc[2] - lc[0]) * sx;
+      const charH = (lc[3] - lc[1]) * sy;
+      const wantW = Math.max(charW * 3, 24);   // 至少 24px 宽
+      const extraLeft = wantW - charW;
+      btn.style.left = (lc[0] * sx - extraLeft - 2) + 'px';
       btn.style.top = (lc[1] * sy - 2) + 'px';
-      btn.style.width = ((lc[2] - lc[0]) * sx) + 'px';
-      btn.style.height = ((lc[3] - lc[1]) * sy) + 'px';
+      btn.style.width = wantW + 'px';
+      btn.style.height = charH + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         toggleSentenceOverlay(layer, s, btn, sx, sy);
