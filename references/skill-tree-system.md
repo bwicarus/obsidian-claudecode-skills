@@ -144,6 +144,36 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
 控制面板技能树 tab：`https://bwicarus.space/control/` → "技能树" panel
 - 书本列表 / 编辑 (title, note_prefix, scan_config) / 删除
 - 额度消耗日志按钮 + modal（读 `state/quota_log.json`）
+- **新建书本**按钮 → 弹 modal（见下）
+
+### 新建书本 web UI（2026-05-25）
+
+控制面板「技能树」panel 顶部「＋ 新建书本」按钮 → 弹 modal `openNewBookDialog()`：
+
+```
+┌─ 新建书本 ──────────────────────────────┐
+│ Book ID (英文/数字)：    [000-LADR]      │
+│ Title (中文显示)：       [LADR 4e 中译]  │
+│ Note 前缀：             [资源/books/000-LADR/]
+│ PDF 路径（vault 内）：   [资源/books/000-LADR/000-LADR4eChinese.pdf]
+│ TOC 页范围：             [3-9]            │
+│ 内容页范围：             [10-580]         │
+│ → [开始构建] [取消]                       │
+└──────────────────────────────────────────┘
+```
+
+后端 `POST /control/api/kg-build`：
+1. 生成 `nodes/<book>/meta.yml`
+2. 在后台线程 spawn `build_nodes.py` → 写各章节点 yml
+3. 完成后 spawn `extract_edges.py` → 推导 prereq 关系
+4. 返回 `{job_id}`；前端轮询 `/control/api/kg-build-log?job_id=` 滚动显示日志（stdout + stderr）
+
+job 状态在内存 dict 里（webapp restart 丢失，但 KG 文件已落盘所以不影响最终结果）。
+
+`build_nodes.py` 关键改动：**文字层 + 图像双输入**（2026-05-21 `df4e525`）：
+- 旧版只给 AI 喂 PDF 文字层 → 数学符号、公式、上下标常被识别错（如 V₁ → V1，定理编号错位）
+- 新版同时喂 **PDF 渲染图像 + 文字层**：AI 拿图当 ground truth，文字层只做候选辅助
+- 修了大量"编号识别错位"bug（如本来是定理 5.2.3 被识别成 5.23）
 
 ## 回收站机制
 
@@ -319,7 +349,46 @@ systemd 服务（qa-server / bwicarus-daily）有 `EnvironmentFile=...env`，跑
 
 **好处**：home 永久缓存位置；detail 开关零代价；视觉稳定。
 
-### ADR-2：解锁规则过滤放在 link_with_ai
+### ADR-2.5：关闭详情/退出 focus 时 viewport 跟随节点（不跳）
+
+**问题**：原行为关闭 detail 面板后整图重排，用户视野的"当前节点"位置可能跳变，迷失。
+
+**决策**（2026-05-26 `64cfcc1` / `77002ee`）：关闭详情 / 退出 focus 时：
+1. 先算关闭后目标节点在新布局里的坐标（render 末尾暴露 `wrap.__positions`）
+2. 跟 d3 transition 同步平移 viewport，让目标节点屏幕坐标**不动**
+3. transition 时长 380ms（跟 renderAnim 一致）
+
+实现：`closeDetail()` 末尾读旧 `screenPos`，render 完后 `d3.zoomTransform` 调整让 `screenPos` 不变。
+
+### ADR-2.7：三处 UX 微调（2026-05-26 `f30de63`）
+
+| 微调 | 做了什么 | 为啥 |
+|---|---|---|
+| 关闭详情滚到底 | closeDetail 后让页面滚到最下（chain 末端常在底部）| 用户改完节点想看下一步关联在哪 |
+| 折叠条放最上 | `g.locked-bar` 永远 render 在最后（z-order 最高，盖住节点边）| 之前被某些 edge 盖住点不到 |
+| Tooltip 设置开关 | 设置面板加"显示 tooltip" 复选框 + localStorage 持久化 | 老用户不需要 tooltip 想关掉 |
+
+### ADR-2.8：A71-减法与除法 历史孤儿清理（2026-05-26 `f64910d`）
+
+**问题**：vault 出现一个 `A71-减法与除法.md`（不符合 000- 命名规则），是早期 `_rand_hex3()` 在 `scripts/anki_from_note.py` 里给笔记起名的遗留，已经 dead code。
+
+**决策**：手动重命名为 `000-减法与除法.md`；删 `_rand_hex3` 函数；该笔记已重新 register 进 KG。
+
+**经验**：vault 内不符合 `[0-9A-Fa-f]{3}-*.md` 模式的文件 → pending_notes 直接跳过，长期积累成孤儿。register / KG 关联都不会主动发现。
+
+### ADR-2.9：build_nodes 文字层 + 图像双输入（2026-05-21 `df4e525`）
+
+**问题**：PDF 文字层 OCR 偶尔识别错位（如定理 5.2.3 → 5.23），AI 直接拿错的文字会生成错号节点。
+
+**决策**：`build_nodes.py` 现在喂给 AI **PDF 渲染图像（rasterize 后的 PNG）+ 文字层** 双输入：
+- 图像作 ground truth，让 AI "看见" 真实排版（上下标、公式、定理编号视觉对齐）
+- 文字层作辅助候选（避免 OCR 错误）
+
+实现：`page.get_pixmap(matrix=fitz.Matrix(2,2))` 渲染高清 PNG → base64 → 传给 vision-capable AI 后端（claude / gpt-4o vision）。
+
+**坑**：vision token 是文本 token ~10x 单价；只在首次构建跑（不进 daily 流程）。
+
+### ADR-3：解锁规则过滤放在 link_with_ai
 
 **问题**：AI 容易把笔记关联到尚未学到的深层节点（笔记内容偶尔提及但用户实际没学），导致技能树前进度虚高。
 

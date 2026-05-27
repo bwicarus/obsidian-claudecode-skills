@@ -56,11 +56,34 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 参数：`/?card=<local_id>` → `loadCardContext()` 拉卡片两面 + 显示在截图位置。
 
 勾选有用回答后，header 出现三个按钮：
-- **更新到笔记**：`_card_update_note(local_id, pairs)` → AI 改写源笔记，写回 + 哈希覆盖（防重复登记）
+- **更新到笔记**：`_card_update_note(local_id, pairs, mode='detailed'|'concise')` → AI 改写源笔记
 - **根据此修改 Anki**：`_card_update_anki(local_id, pairs)` → AI 生成新卡替代原卡（删/留旧卡由 server-config 控制）
 - **全部更新**：两个都跑
 
 异步实现：后端立即返回 `job_id`，前端轮询 `/api/card-job/<job_id>` 拿结果（移动端连接断了不丢）。
+
+### 笔记改写两种模式（2026-05-27）
+
+「更新到笔记」前先弹小选择：
+
+| 模式 | 行为 | 适用 |
+|---|---|---|
+| **详细**（默认） | 默认保留 ④ 全部原文 + 在合适位置追加 / 改写 QA 内容；prompt 强调"有判断力"——允许重组顺序、合并相似段、连贯化跨段衔接（应对用户选了**间断**段落）；不强制逐字照搬 | 原笔记内容多、QA 是详细解析 |
+| **精炼** | 允许大幅删减，提炼核心；同样有判断力可改写但不损失关键信息 | 原笔记太啰嗦想压缩 |
+
+两种模式共用 `_card_update_note`，传 `mode` 参数。返回里加"保留率"百分比（新内容 / 旧内容长度比）让用户验证 AI 没过度精炼。
+
+**prompt 进化历史**（按时间）：
+1. 初版：要求 AI 严格保留所有原文 → 用户反馈"过度精炼"
+2. v2：默认保留全部 + 把 QA 信息追加到合适位置 → 仍偶尔大改
+3. **v3（当前）**：「有判断力」prompt——不强制 verbatim，但**信息完整性是硬性要求**；明确允许：
+   - 重组顺序（QA 选段可能不按原文流）
+   - 合并相似/重复段
+   - 连贯化跨段衔接（用户选的是间断段，AI 要补衔接句）
+   - 详细模式下：不能删原文段，只能改写
+   - 精炼模式：能删但要标注"已精简"位置
+
+写回前哈希覆盖（`state/note-states.json` 的 hash 更新），防止下次 register 把新内容当"已修改"重新跑 summarize/connect 流程。
 
 ## AI 后端 + System Prompt
 
