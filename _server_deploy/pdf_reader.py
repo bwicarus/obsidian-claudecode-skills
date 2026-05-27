@@ -570,8 +570,6 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
         c = ch.get("c", "")
         # 处理 pending period：根据当前字符决定上一个 . 是否真切句
         if pending_period:
-            # 切句条件：当前是空白 / 大写字母 / 中文 / 其它非小写字母数字
-            # 不切（5.2.3 小数 / e.g. 缩写）：当前是小写字母或数字
             is_continuation = (
                 (not ch.get("sp"))
                 and len(c) == 1
@@ -581,14 +579,25 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
                 _flush_word()
                 _flush_sentence()
             pending_period = False
-        # 跨行检测
+        # 跨行检测：行间距 > 1.5× 行高 → 段落分界（新句）
         if prev and not prev.get("sp") and not ch.get("sp"):
             prev_h = max(0.1, prev["y1"] - prev["y0"])
-            if abs(ch["y0"] - prev["y0"]) > prev_h * 0.5:
+            line_gap = ch["y0"] - prev["y0"]
+            if line_gap > prev_h * 1.5:
+                # 大段落间距 → 切句
+                _flush_word()
+                _flush_sentence()
+            elif abs(line_gap) > prev_h * 0.5:
+                # 普通跨行：拼词处理
                 if cur_word_letters and cur_word_letters[-1] == "-":
                     cur_word_letters.pop()
                 else:
                     _flush_word()
+        # 列表标记 → 切句（每个列表项独立句）
+        if c in "•▪▶◆●○◇":
+            _flush_word()
+            _flush_sentence()
+            cur_chars.append(ch); prev = ch; continue
         if ch.get("sp"):
             _flush_word()
             cur_chars.append(ch); prev = ch; continue
