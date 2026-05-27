@@ -131,6 +131,14 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-actions button.primary:hover{background:#2c5188}
 #draft-actions button:disabled{opacity:.5;cursor:not-allowed}
 
+/* vocab 下划线层：在 char-layer 之下（z-index 1），仅装饰不拦事件 */
+.vocab-layer{position:absolute;inset:0;z-index:2;pointer-events:none}
+.vocab-underline{position:absolute;pointer-events:none;border-radius:1px}
+.vocab-underline.m-new   {height:2.5px;background:#f59e0b}                    /* 新词：橙 */
+.vocab-underline.m-seen  {height:2px;  background:#facc15;opacity:.85}       /* 见过：黄 */
+.vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
+.vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
+
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
 .hl-layer{position:absolute;inset:0;z-index:5;pointer-events:none}
@@ -256,6 +264,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     </select>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
     </label>
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
     <div id="set-hl-colors" class="set-hl-row"></div>
@@ -708,6 +719,53 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   _bindCharLayer(cl, wrap);
   // 已保存高亮：渲染到该页
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
+  // 单词下划线（mastery 着色）；后端 page-chars 已返回 vocab_marks
+  try { renderVocabUnderlines(wrap, d.vocab_marks || []); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+}
+
+function renderVocabUnderlines(pw, marks) {
+  if (!_vocabUnderlineEnabled()) return;
+  if (!marks || !marks.length) return;
+  const chars = pw.__charBoxes;
+  if (!chars || !chars.length) return;
+  let layer = pw.querySelector('.vocab-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'vocab-layer';
+    pw.appendChild(layer);
+  }
+  layer.innerHTML = '';
+  for (const m of marks) {
+    if (m.start < 0 || m.end >= chars.length || m.start > m.end) continue;
+    // 一个词可能跨行（rare），按行分段画
+    let segStart = m.start, segTop = chars[m.start].top;
+    for (let i = m.start; i <= m.end; i++) {
+      const c = chars[i];
+      const newLine = Math.abs(c.top - segTop) > c.height * 0.5;
+      if (newLine) {
+        _drawUnderlineSeg(layer, chars, segStart, i - 1, m.label_slug);
+        segStart = i; segTop = c.top;
+      }
+    }
+    _drawUnderlineSeg(layer, chars, segStart, m.end, m.label_slug);
+  }
+}
+function _drawUnderlineSeg(layer, chars, s, e, slug) {
+  if (s > e) return;
+  const left = chars[s].left;
+  const right = chars[e].left + chars[e].width;
+  const top = chars[s].top + chars[s].height + 0.5;
+  const div = document.createElement('div');
+  div.className = 'vocab-underline m-' + slug;
+  div.style.left = left + 'px';
+  div.style.top = top + 'px';
+  div.style.width = (right - left) + 'px';
+  layer.appendChild(div);
+}
+function _vocabUnderlineEnabled() {
+  // localStorage 默认开
+  const v = localStorage.getItem('pdf-vocab-underline');
+  return v === null ? true : (v === '1');
 }
 
 // 找点击位置最近的非空格 char index
@@ -2491,6 +2549,8 @@ window.openSettings = () => {
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
+  const vu = localStorage.getItem('pdf-vocab-underline');
+  document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
 };
@@ -2503,8 +2563,12 @@ window.saveSettings = () => {
   try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
   const dbg = document.getElementById('set-debug').checked;
   try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
+  const vu = document.getElementById('set-vocab-underline').checked;
+  try { localStorage.setItem('pdf-vocab-underline', vu ? '1' : '0'); } catch (_) {}
   _applyDebugVisibility();
   closeSettings();
+  // 切换下划线开关后立刻重渲染当前页
+  if (pdfDoc) renderPage(currentPage);
 };
 function _applyDebugVisibility() {
   const el = document.getElementById('debug-log');

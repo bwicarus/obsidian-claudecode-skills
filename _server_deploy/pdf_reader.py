@@ -255,11 +255,14 @@ def pdf_api_page_chars():
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
                             "sp": 1 if c.isspace() else 0,
                         })
+        # 生成 vocab_marks：扫 chars 识别英文词 → 查 vocab index → 标记
+        vocab_marks = _build_vocab_marks(chars)
         return jsonify({
             "ok": True,
             "chars": chars,
             "page_w": p.rect.width,
             "page_h": p.rect.height,
+            "vocab_marks": vocab_marks,
         })
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
@@ -267,6 +270,53 @@ def pdf_api_page_chars():
         if doc:
             try: doc.close()
             except Exception: pass
+
+
+def _build_vocab_marks(chars: list[dict]) -> list[dict]:
+    """扫 chars，识别每个英文词；命中 vocab index 的标记下划线信息。"""
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        import vocab_index  # type: ignore
+    except Exception:
+        return []
+    idx = vocab_index.index()
+    if not idx:
+        return []
+    # 词分割：连续 isalpha/' 的 chars 算一个词；空格/标点切断
+    marks: list[dict] = []
+    cur_start = None
+    cur_letters: list[str] = []
+    def _flush(end_idx: int):
+        nonlocal cur_start, cur_letters
+        if cur_start is None or not cur_letters:
+            cur_start = None; cur_letters = []
+            return
+        word = "".join(cur_letters).lower()
+        info = idx.get(word)
+        if info and info.get("label_slug"):
+            marks.append({
+                "start": cur_start, "end": end_idx,
+                "word": word, "lemma": info["lemma"],
+                "mastery": round(info["mastery"], 3),
+                "label_slug": info["label_slug"],
+            })
+        cur_start = None; cur_letters = []
+    for i, ch in enumerate(chars):
+        c = ch.get("c", "")
+        if ch.get("sp"):
+            _flush(i - 1)
+            continue
+        if c.isalpha() or c in "'-":
+            if cur_start is None: cur_start = i
+            cur_letters.append(c)
+        else:
+            _flush(i - 1)
+    if cur_letters:
+        _flush(len(chars) - 1)
+    return marks
 
 
 @bp.route("/api/page-nodes")

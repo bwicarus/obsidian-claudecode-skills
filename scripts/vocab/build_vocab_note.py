@@ -304,6 +304,31 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         out.append(entry["etymology"])
         out.append("")
 
+    # 📍 全文暴露位置（vault 内所有出现该词的 PDF 页，来自 state/vocab-exposure.json）
+    try:
+        exp_path = PROJECT_ROOT / "state" / "vocab-exposure.json"
+        if exp_path.exists():
+            exp_db = json.loads(exp_path.read_text("utf-8"))
+            entry_exp = exp_db.get(lemma.lower(), {})
+            pages = entry_exp.get("pages", []) if isinstance(entry_exp, dict) else []
+            if pages:
+                out.append(f"## 📍 全文出现 ({len(pages)} 处)")
+                # 按 PDF 分组
+                by_pdf: dict[str, list[int]] = {}
+                for pg in pages:
+                    by_pdf.setdefault(pg["pdf"], []).append(pg["page"])
+                for pdf_rel, page_list in list(by_pdf.items())[:8]:
+                    pages_sorted = sorted(set(page_list))
+                    bookname = Path(pdf_rel).name
+                    links = []
+                    for pn in pages_sorted[:15]:
+                        links.append(f"[p.{pn}]({_webapp_url_for_pdf(pdf_rel, pn)})")
+                    more = "" if len(pages_sorted) <= 15 else f" ...+{len(pages_sorted)-15}"
+                    out.append(f"- `{bookname}` ({len(pages_sorted)} 页): {' · '.join(links)}{more}")
+                out.append("")
+    except Exception:
+        pass
+
     # 文中出现
     if sources:
         out.append("## 📝 文中出现")
