@@ -1877,10 +1877,7 @@ function openHlPopover(h, anchorDiv, pw) {
     });
     closeHlPopover();
   };
-  pop.querySelector('[data-act=del]').onclick = async (e) => {
-    e.stopPropagation();
-    await _hlDelete(h, pw);
-  };
+  // 删除入口现在统一在 .hl-snip-del-row（左滑揭示）；底部不再有 [data-act=del] 按钮
   // 定位：高亮元素下方（贴齐左边，跟 main 滚动）
   const r = anchorDiv.getBoundingClientRect();
   pop.style.left = (r.left + window.scrollX) + 'px';
