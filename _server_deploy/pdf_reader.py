@@ -280,36 +280,141 @@ def pdf_api_page_nodes():
 
 _DICT_DB_PATH = CLAUDE_DIR / "data" / "ecdict.db"
 
+# vocab 系统脚本（按需懒加载）
+def _vocab_modules():
+    try:
+        import sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in sys.path:
+            sys.path.insert(0, str(vp))
+        import dict_sources, build_vocab_note   # type: ignore
+        return dict_sources, build_vocab_note
+    except Exception as ex:
+        sys.stderr.write(f"vocab modules load fail: {ex}\n")
+        return None, None
+
+
+def _append_lookup_log(word: str, lemma: str, pdf_rel: str, page: int, context: str = ""):
+    """追加查词日志到 state/vocab-lookups.jsonl（每次 dict API 调用都写一行）。"""
+    import time as _t
+    log_path = CLAUDE_DIR / "state" / "vocab-lookups.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({
+        "word": word, "lemma": lemma,
+        "pdf": pdf_rel, "page": page,
+        "context": context[:200] if context else "",
+        "ts": int(_t.time()),
+    }, ensure_ascii=False)
+    try:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _trigger_vocab_note_async(word: str, pdf_rel: str, page: int, context: str = ""):
+    """后台线程跑 build_vocab_note，不阻塞 dict API 响应。"""
+    import threading
+    def _run():
+        try:
+            _, bvn = _vocab_modules()
+            if bvn is None:
+                return
+            bvn.update_word_note(
+                word,
+                add_source={"pdf": pdf_rel, "page": page, "context": context} if pdf_rel else None,
+                online=True,
+                download_audio=True,
+            )
+        except Exception as ex:
+            sys.stderr.write(f"vocab note bg fail for {word!r}: {ex}\n")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @bp.route("/api/dict")
 def pdf_api_dict():
-    """ECDICT 离线英汉字典查询。GET ?word=X → {ok, word, phonetic, translation, definition}"""
-    word = (request.args.get("word") or "").strip().lower()
+    """字典查询（三源融合：ECDICT + Free Dict + MW Learner）。
+
+    GET ?word=X [&file=&page=&context=]
+    file/page/context 用来记录"在哪本 PDF 的哪页查的"，写入 lookup 日志 + vocab 笔记。
+    返回前端用的精简结构：phonetic/translation/definition/audio/examples + 三源 hit。
+    """
+    word_raw = (request.args.get("word") or "").strip()
+    word = word_raw.lower()
     if not word or len(word) > 50:
         return jsonify({"ok": False, "error": "invalid word"}), 400
-    if not _DICT_DB_PATH.exists():
-        return jsonify({"ok": False, "error": "dict db missing"}), 500
-    import sqlite3
+    pdf_rel = (request.args.get("file") or "").strip()
     try:
-        conn = sqlite3.connect(f"file:{_DICT_DB_PATH}?mode=ro", uri=True)
-        cur = conn.cursor()
-        cur.execute("SELECT word, phonetic, translation, definition, exchange FROM stardict WHERE word = ? COLLATE NOCASE LIMIT 1", (word,))
-        row = cur.fetchone()
-        # 没命中：查 exchange 表（屈折形态 → 原型）
-        if not row:
-            cur.execute("SELECT word, phonetic, translation, definition, exchange FROM stardict WHERE exchange LIKE ? LIMIT 1",
-                        (f"%0:{word}%",))
+        page = int(request.args.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    context = (request.args.get("context") or "").strip()[:500]
+
+    ds, _ = _vocab_modules()
+    if ds is None:
+        # fallback：只 ECDICT
+        if not _DICT_DB_PATH.exists():
+            return jsonify({"ok": False, "error": "dict db missing"}), 500
+        import sqlite3 as _sq
+        try:
+            conn = _sq.connect(f"file:{_DICT_DB_PATH}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("SELECT word, phonetic, translation, definition, exchange FROM stardict WHERE word = ? COLLATE NOCASE LIMIT 1", (word,))
             row = cur.fetchone()
-        conn.close()
-        if not row:
-            return jsonify({"ok": False, "error": "not found"})
-        return jsonify({
-            "ok": True,
-            "word": row[0], "phonetic": row[1] or "",
-            "translation": row[2] or "", "definition": row[3] or "",
-            "exchange": row[4] or "",
-        })
+            conn.close()
+            if not row:
+                return jsonify({"ok": False, "error": "not found"})
+            return jsonify({"ok": True, "word": row[0], "phonetic": row[1] or "",
+                            "translation": row[2] or "", "definition": row[3] or "", "exchange": row[4] or ""})
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
+    # 主路径：三源融合
+    try:
+        entry = ds.compose_entry(word, online=True)
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
+    if not entry:
+        return jsonify({"ok": False, "error": "not found"})
+
+    lemma = entry.get("lemma") or word
+    # 副作用：日志 + 异步生成 vocab 笔记
+    _append_lookup_log(word, lemma, pdf_rel, page, context)
+    if pdf_rel and page > 0:
+        _trigger_vocab_note_async(word, pdf_rel, page, context)
+    else:
+        _trigger_vocab_note_async(word, "", 0, "")
+
+    # 前端精简结构（保留旧字段兼容）
+    zh_lines = []
+    for d in entry["definitions"]:
+        if d.get("zh"):
+            pos = d.get("pos") or ""
+            zh_lines.append((f"{pos} " if pos else "") + d["zh"])
+    en_lines = []
+    for d in entry["definitions"]:
+        if d.get("en") and d.get("source") in ("ecdict_en", "wiktionary", "mw"):
+            pos = d.get("pos") or ""
+            en_lines.append((f"{pos} " if pos else "") + d["en"])
+    return jsonify({
+        "ok": True,
+        "word": lemma,
+        "lemma": lemma,
+        "forms": entry.get("forms", []),
+        "phonetic": entry["phonetics"]["us"] or entry["phonetics"]["uk"],
+        "phonetic_us": entry["phonetics"]["us"],
+        "phonetic_uk": entry["phonetics"]["uk"],
+        "audio_us": entry["audio"]["us"],
+        "audio_uk": entry["audio"]["uk"],
+        "translation": "\n".join(zh_lines[:8]),
+        "definition":  "\n".join(en_lines[:6]),
+        "examples": entry.get("examples", [])[:6],
+        "synonyms": entry.get("synonyms", [])[:8],
+        "antonyms": entry.get("antonyms", [])[:8],
+        "freq_bnc": entry["freq"]["bnc"],
+        "sources_hit": entry["sources_hit"],
+        "vocab_note": f"资源/vocab/{lemma[0]}/{lemma}.md" if lemma else "",
+    })
 
 
 @bp.route("/api/translate", methods=["POST"])

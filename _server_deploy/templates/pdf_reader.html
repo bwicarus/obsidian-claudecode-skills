@@ -2593,21 +2593,53 @@ window.onTranslate = async () => {
   } : null;
   toolbar.classList.remove('open');
   const text = lastSelText.trim();
-  // 单词（英文字母、长度 ≤ 30、无空格）→ 查 ECDICT 离线字典（秒查，不耗 AI 额度）
+  // 单词（英文字母、长度 ≤ 30、无空格）→ 字典三源融合（ECDICT + Free Dict + MW）+ 自动入 vocab
   const isWord = text.length <= 30 && /^[A-Za-z][A-Za-z\-']*$/.test(text);
   if (isWord) {
     try {
-      const r = await fetch('/pdf/api/dict?word=' + encodeURIComponent(text.toLowerCase()));
+      // 上下文：尝试取选中所在句（供 vocab.md 的"文中出现"用）
+      let ctx = '';
+      if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+        const chars = _charSel.pw.__charBoxes;
+        const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+        if (ctxRange) ctx = _charsRangeToText(chars, ctxRange.start, ctxRange.end).slice(0, 400);
+      }
+      const params = new URLSearchParams({
+        word: text.toLowerCase(),
+        file: FILE_REL || '',
+        page: String(currentPage || 0),
+        context: ctx,
+      });
+      const r = await fetch('/pdf/api/dict?' + params.toString());
       const d = await r.json();
       if (d.ok) {
+        const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
         let html = '';
-        if (d.phonetic) html += `<div style="color:#7a8497;font-style:italic;font-size:13px">/ ${d.phonetic} /</div>`;
-        if (d.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${d.translation.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`;
-        if (d.definition && d.definition.trim() && d.definition.trim() !== (d.translation||'').trim()) {
-          html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px;line-height:1.6"><b>EN：</b><span style="white-space:pre-wrap">${d.definition.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span></div>`;
+        // 头部：音标 + 音频按钮 + 词频 + lemma 提示
+        const headBits = [];
+        if (d.phonetic_us) headBits.push(`<span style="font-style:italic">US ${esc(d.phonetic_us)}</span>`);
+        if (d.phonetic_uk) headBits.push(`<span style="font-style:italic">UK ${esc(d.phonetic_uk)}</span>`);
+        if (d.freq_bnc) headBits.push(`<span style="color:#5a6680;font-size:11px">BNC #${d.freq_bnc}</span>`);
+        if (d.audio_us) headBits.push(`<button onclick="new Audio('${esc(d.audio_us)}').play()" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+        html += `<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">${headBits.join(' · ')}</div>`;
+        if (d.lemma && d.lemma !== text.toLowerCase()) {
+          html += `<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>${esc(d.lemma)}</code>${d.forms?.length ? '（'+d.forms.map(esc).join('/')+'）' : ''}</div>`;
         }
-        if (d.exchange) html += `<div style="margin-top:8px;color:#5a6680;font-size:11px;font-family:monospace">${d.exchange}</div>`;
-        openResult('📖 字典: ' + d.word, text, html);
+        if (d.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${esc(d.translation)}</div>`;
+        if (d.definition && d.definition.trim() && d.definition.trim() !== (d.translation||'').trim()) {
+          html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px;line-height:1.6"><b>EN：</b><span style="white-space:pre-wrap">${esc(d.definition)}</span></div>`;
+        }
+        if (d.examples?.length) {
+          html += `<div style="margin-top:10px;color:#cfe6ff;font-size:12px"><b style="color:#7a8497">例句：</b><ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">${d.examples.slice(0,4).map(e => '<li>'+esc(e)+'</li>').join('')}</ul></div>`;
+        }
+        const meta = [];
+        if (d.synonyms?.length) meta.push('同 ' + d.synonyms.slice(0,5).map(esc).join(', '));
+        if (d.antonyms?.length) meta.push('反 ' + d.antonyms.slice(0,5).map(esc).join(', '));
+        if (meta.length) html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
+        if (d.sources_hit?.length) {
+          html += `<div style="margin-top:8px;color:#5a6680;font-size:10px">源：${d.sources_hit.join(' + ')}${d.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(d.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</div>`;
+        }
+        openResult('📖 ' + d.word, text, html);
         return;
       }
       // 字典没命中 → 回落 AI
