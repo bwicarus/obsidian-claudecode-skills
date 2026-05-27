@@ -408,7 +408,9 @@ def pdf_api_page_chars():
 
 
 def _build_vocab_marks(chars: list[dict]) -> list[dict]:
-    """扫 chars，识别每个英文词；命中 vocab index 的标记下划线信息。"""
+    """扫 chars 识别英文词；命中 vocab index 的标记下划线。
+    返回 marks 用 **PDF pt 坐标 rects**（跟 hl-saved 一样），不依赖 char idx，
+    跟前端 chars sort 与否无关。掌握的词 (label_slug='mastered') 跳过。"""
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
     if str(vp) not in sys.path:
@@ -420,37 +422,51 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
     idx = vocab_index.index()
     if not idx:
         return []
-    # 词分割：连续 isalpha/' 的 chars 算一个词；空格/标点切断
     marks: list[dict] = []
-    cur_start = None
     cur_letters: list[str] = []
-    def _flush(end_idx: int):
-        nonlocal cur_start, cur_letters
-        if cur_start is None or not cur_letters:
-            cur_start = None; cur_letters = []
-            return
+    cur_chars: list[dict] = []
+
+    def _flush():
+        if not cur_letters or not cur_chars:
+            cur_letters.clear(); cur_chars.clear(); return
         word = "".join(cur_letters).lower()
         info = idx.get(word)
-        if info and info.get("label_slug"):
-            marks.append({
-                "start": cur_start, "end": end_idx,
-                "word": word, "lemma": info["lemma"],
-                "mastery": round(info["mastery"], 3),
-                "label_slug": info["label_slug"],
-            })
-        cur_start = None; cur_letters = []
-    for i, ch in enumerate(chars):
+        cur_letters.clear()
+        chars_snap = cur_chars[:]
+        cur_chars.clear()
+        if not info or not info.get("label_slug"):
+            return
+        if info["label_slug"] == "mastered":
+            return   # 掌握的不画
+        # 合并同行 chars 成 rect 列表（pt 坐标）
+        rects: list[list[float]] = []
+        cur_rect = None
+        for c in chars_snap:
+            lineH = c["y1"] - c["y0"]
+            if cur_rect and abs(c["y0"] - cur_rect[1]) <= lineH * 0.5:
+                cur_rect[2] = max(cur_rect[2], c["x1"])
+                cur_rect[1] = min(cur_rect[1], c["y0"])
+                cur_rect[3] = max(cur_rect[3], c["y1"])
+            else:
+                if cur_rect: rects.append([round(x,2) for x in cur_rect])
+                cur_rect = [c["x0"], c["y0"], c["x1"], c["y1"]]
+        if cur_rect: rects.append([round(x,2) for x in cur_rect])
+        marks.append({
+            "word": word, "lemma": info["lemma"],
+            "mastery": round(info["mastery"], 3),
+            "label_slug": info["label_slug"],
+            "rects": rects,
+        })
+
+    for ch in chars:
         c = ch.get("c", "")
         if ch.get("sp"):
-            _flush(i - 1)
-            continue
+            _flush(); continue
         if c.isalpha() or c in "'-":
-            if cur_start is None: cur_start = i
-            cur_letters.append(c)
+            cur_letters.append(c); cur_chars.append(ch)
         else:
-            _flush(i - 1)
-    if cur_letters:
-        _flush(len(chars) - 1)
+            _flush()
+    _flush()
     return marks
 
 

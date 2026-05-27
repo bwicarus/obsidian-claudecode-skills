@@ -727,11 +727,17 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
 }
 
-// 查 char idx 是否在某 vocab mark 内；返回 mark 或 null
+// 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
 function _findVocabMarkAt(pw, charIdx) {
-  if (!pw || !pw.__vocabMarks) return null;
+  if (!pw || !pw.__vocabMarks || !pw.__charBoxes) return null;
+  const c = pw.__charBoxes[charIdx];
+  if (!c || c._x0 === undefined) return null;
+  const cx = (c._x0 + c._x1) / 2;
+  const cy = (c._y0 + c._y1) / 2;
   for (const m of pw.__vocabMarks) {
-    if (charIdx >= m.start && charIdx <= m.end) return m;
+    for (const r of (m.rects || [])) {
+      if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) return m;
+    }
   }
   return null;
 }
@@ -742,42 +748,35 @@ function _clickTranslateEnabled() {
 
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
-  if (!marks || !marks.length) return;
-  const chars = pw.__charBoxes;
-  if (!chars || !chars.length) return;
+  // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
-  if (!layer) {
+  if (!layer && marks && marks.length) {
     layer = document.createElement('div');
     layer.className = 'vocab-layer';
     pw.appendChild(layer);
   }
+  if (!layer) return;
   layer.innerHTML = '';
+  if (!marks || !marks.length) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth;
+  const cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW;
+  const pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt;
+  const sy = cssH / pageHPt;
   for (const m of marks) {
-    if (m.start < 0 || m.end >= chars.length || m.start > m.end) continue;
-    // 一个词可能跨行（rare），按行分段画
-    let segStart = m.start, segTop = chars[m.start].top;
-    for (let i = m.start; i <= m.end; i++) {
-      const c = chars[i];
-      const newLine = Math.abs(c.top - segTop) > c.height * 0.5;
-      if (newLine) {
-        _drawUnderlineSeg(layer, chars, segStart, i - 1, m.label_slug);
-        segStart = i; segTop = c.top;
-      }
+    for (const r of (m.rects || [])) {
+      const x0 = r[0], y0 = r[1], x1 = r[2], y1 = r[3];
+      const div = document.createElement('div');
+      div.className = 'vocab-underline m-' + m.label_slug;
+      div.style.left = (x0 * sx) + 'px';
+      div.style.top = (y1 * sy + 1) + 'px';   // 字底 + 1px
+      div.style.width = ((x1 - x0) * sx) + 'px';
+      layer.appendChild(div);
     }
-    _drawUnderlineSeg(layer, chars, segStart, m.end, m.label_slug);
   }
-}
-function _drawUnderlineSeg(layer, chars, s, e, slug) {
-  if (s > e) return;
-  const left = chars[s].left;
-  const right = chars[e].left + chars[e].width;
-  const top = chars[s].top + chars[s].height + 0.5;
-  const div = document.createElement('div');
-  div.className = 'vocab-underline m-' + slug;
-  div.style.left = left + 'px';
-  div.style.top = top + 'px';
-  div.style.width = (right - left) + 'px';
-  layer.appendChild(div);
 }
 function _vocabUnderlineEnabled() {
   // localStorage 默认开
@@ -1939,6 +1938,13 @@ async function dictStream(word, ctx) {
   });
   // 立刻 openResult 占位，避免空等
   openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
+  setTimeout(() => {
+    window.dlog?.('refreshVocabUnderlines (timer) for ' + word);
+    refreshVocabUnderlinesForAllPages();
+  }, 1800);
+  // 3.5s 再刷一次（等 paragraph_exposure 完成）
+  setTimeout(() => { refreshVocabUnderlinesForAllPages(); }, 3500);
   const contentEl = document.getElementById('result-content');
   const state = {
     word, lemma: word, forms: [],
