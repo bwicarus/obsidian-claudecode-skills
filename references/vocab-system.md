@@ -307,6 +307,19 @@ python3 scripts/vocab/build_vocab_note.py constructed
 **bug 修复历史**：
 - 试 `Saladict Word` 模板报 "cannot create note because it is empty"（即使所有字段非空）。原因未深查；改用 `Obsidian-cloze`（Text 含 `{{c1::}}` 即满足 cloze 检测）
 
+### 查询冷却期（2026-05-27 加）
+
+**问题**：用户刚查过一个词，后续段落里又见到该词时被 paragraph_exposure 加 +0.03 → mastery 立刻反弹回升，违反"刚查 = 还没掌握"的直觉。
+
+**修复**：`server-config.json` 新字段 `vocab.lookup_cooldown_hours` 默认 24。
+- frontmatter 加 `last_lookup_ts: <unix>` 字段（int）
+- `_bump_mastery(lemma, delta)` 内先调 `_in_cooldown(fm_text)`
+- 冷却期内 + `delta > 0` → 直接 return `(old, old)` 不写盘
+- `delta < 0`（Anki again/hard / 再次查询）总是允许
+- cooldown_hours = 0 关闭机制
+
+冷却检查优先 `last_lookup_ts`（unix int 秒级），fallback `last_lookup`（YYYY-MM-DD 日级）。
+
 ### 新 mastery 模型（2026-05-27 重新设计，覆盖原阶段 B）
 
 **核心语义**：默认满分，事件驱动下降。

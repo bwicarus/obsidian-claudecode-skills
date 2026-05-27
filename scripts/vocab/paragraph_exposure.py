@@ -20,8 +20,43 @@ VAULT_ROOT   = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 sys.path.insert(0, str(Path(__file__).parent))
 import vocab_index  # noqa: E402
 
+CFG_PATH = PROJECT_ROOT / "state" / "server-config.json"
+
 # 每次"暴露但未查"加的 mastery 量
 EXPOSURE_DELTA = 0.03
+
+
+def _cooldown_hours() -> float:
+    try:
+        cfg = json.loads(CFG_PATH.read_text("utf-8"))
+        return float(cfg.get("vocab", {}).get("lookup_cooldown_hours", 24))
+    except Exception:
+        return 24.0
+
+
+def _in_cooldown(fm_text: str) -> bool:
+    """检查 frontmatter 是否处于查询冷却期（last_lookup_ts < cooldown 小时内）。"""
+    cooldown = _cooldown_hours()
+    if cooldown <= 0:
+        return False
+    # 优先 last_lookup_ts (Unix int)，fallback last_lookup (YYYY-MM-DD)
+    m = re.search(r"^last_lookup_ts:\s*(\d+)\s*$", fm_text, flags=re.M)
+    if m:
+        try:
+            hours = (time.time() - int(m.group(1))) / 3600.0
+            return hours < cooldown
+        except (ValueError, TypeError):
+            pass
+    d = re.search(r"^last_lookup:\s*(.*)$", fm_text, flags=re.M)
+    if d:
+        try:
+            import datetime as _dt
+            last = _dt.datetime.strptime(d.group(1).strip(), "%Y-%m-%d")
+            hours = (_dt.datetime.now() - last).total_seconds() / 3600.0
+            return hours < cooldown
+        except ValueError:
+            return False
+    return False
 
 
 def _safe_pdf(rel: str) -> Path | None:
@@ -153,6 +188,7 @@ def _sentence_start_before(chars: list[dict], anchor_idx: int, para_start: int) 
 
 def _bump_mastery(lemma: str, delta: float) -> tuple[float, float] | None:
     """改 vocab .md 的 frontmatter.mastery，clamp 0~1。
+    冷却期内（last_lookup_ts < N 小时）拒绝 delta > 0（只跌不涨）。
     返回 (old, new) 或 None（笔记不存在/失败）。"""
     info = vocab_index.index().get(lemma.lower())
     if not info or not info.get("path"):
@@ -175,6 +211,9 @@ def _bump_mastery(lemma: str, delta: float) -> tuple[float, float] | None:
         old = float(m.group(1).strip() or 0.0)
     except ValueError:
         old = 0.0
+    # 冷却期检查：只拦截上涨
+    if delta > 0 and _in_cooldown(fm_text):
+        return (old, old)
     new = max(0.0, min(1.0, old + delta))
     if abs(new - old) < 0.001:
         return (old, new)

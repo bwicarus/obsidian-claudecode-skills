@@ -199,6 +199,7 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         "audio_uk": fm_extra.get("audio_uk", ""),
         "first_seen": fm_extra.get("first_seen", _dt.date.today().isoformat()),
         "last_lookup": fm_extra.get("last_lookup", _dt.date.today().isoformat()),
+        "last_lookup_ts": fm_extra.get("last_lookup_ts", 0),
         "lookup_count": fm_extra.get("lookup_count", 1),
         "exposure_count": fm_extra.get("exposure_count", 0),
         "mastery": fm_extra.get("mastery", 0.0),
@@ -420,6 +421,7 @@ def update_word_note(
     fm_extra = {
         "first_seen": old_fm.get("first_seen") or _dt.date.today().isoformat(),
         "last_lookup": _dt.date.today().isoformat(),
+        "last_lookup_ts": int(time.time()) if new_source else int(old_fm.get("last_lookup_ts", 0) or 0),
         "lookup_count": int(old_fm.get("lookup_count", 0) or 0) + (1 if new_source else 0),
         "exposure_count": int(old_fm.get("exposure_count", 0) or 0),
         "mastery": cur_mastery,
