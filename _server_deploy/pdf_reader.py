@@ -409,6 +409,7 @@ def pdf_api_dict():
         "translation": "\n".join(zh_lines[:8]),
         "definition":  "\n".join(en_lines[:6]),
         "examples": entry.get("examples", [])[:6],
+        "examples_zh": entry.get("examples_zh", {}),
         "synonyms": entry.get("synonyms", [])[:8],
         "antonyms": entry.get("antonyms", [])[:8],
         "freq_bnc": entry["freq"]["bnc"],
@@ -869,6 +870,33 @@ def pdf_api_highlights_delete():
         return jsonify({"ok": False, "error": "not found"}), 404
     _hl_save(rel, db)
     return jsonify({"ok": True})
+
+
+# ─── vocab Anki 一键加卡 ────────────────────────────────────────────────────
+
+@bp.route("/api/vocab-anki", methods=["POST"])
+def pdf_api_vocab_anki():
+    """根据 vocab 笔记 + 三源字典数据生成 Anki 卡（不调 AI），加到 deck 'Vocab'。
+    body: {word: <lemma 或 inflected>}
+    返回: {ok, action: created|updated, note_id}
+    """
+    data = request.get_json(silent=True) or {}
+    word = (data.get("word") or "").strip().lower()
+    if not word or len(word) > 50:
+        return jsonify({"ok": False, "error": "invalid word"}), 400
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        import anki_from_word    # type: ignore
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"load anki_from_word failed: {ex}"}), 500
+    try:
+        result = anki_from_word.make_card(word)
+        return jsonify(result)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
 
 
 def register_pdf_reader(app):

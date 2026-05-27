@@ -1829,6 +1829,23 @@ async function markFromResult() {
 }
 window.markFromResult = markFromResult;
 
+// 字典 modal「🎴 加入 Anki」按钮：POST /pdf/api/vocab-anki
+window.addVocabAnki = async (lemma) => {
+  if (!lemma) return;
+  _toast('🎴 正在加 Anki…');
+  try {
+    const r = await fetch('/pdf/api/vocab-anki', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({word: lemma}),
+    });
+    const d = await r.json();
+    if (d.ok) _toast(d.action === 'created' ? '✅ Anki 卡已创建' : '✅ Anki 卡已更新');
+    else _toast('❌ ' + (d.error || '失败'));
+  } catch (e) {
+    _toast('❌ 网络错误：' + e.message);
+  }
+};
+
 // 点击已存在的高亮 → popover（预览块 + 颜色 + 备注 + 删除）
 let _popoverHL = null;
 function closeHlPopover() {
@@ -2630,8 +2647,17 @@ window.onTranslate = async () => {
           html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px;line-height:1.6"><b>EN：</b><span style="white-space:pre-wrap">${esc(d.definition)}</span></div>`;
         }
         if (d.examples?.length) {
-          html += `<div style="margin-top:10px;color:#cfe6ff;font-size:12px"><b style="color:#7a8497">例句：</b><ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">${d.examples.slice(0,4).map(e => '<li>'+esc(e)+'</li>').join('')}</ul></div>`;
+          const zhMap = d.examples_zh || {};
+          const exHtml = d.examples.slice(0,4).map(e => {
+            const zh = zhMap[e];
+            return '<li>' + esc(e) + (zh ? '<br><span style="color:#7a8497;font-size:11px">🇨🇳 ' + esc(zh) + '</span>' : '') + '</li>';
+          }).join('');
+          html += `<div style="margin-top:10px;color:#cfe6ff;font-size:12px"><b style="color:#7a8497">例句：</b><ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">${exHtml}</ul></div>`;
         }
+        // 字典 modal 底部：一键 Anki 按钮
+        html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;gap:8px">
+          <button onclick="addVocabAnki('${esc(d.lemma||d.word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>
+        </div>`;
         const meta = [];
         if (d.synonyms?.length) meta.push('同 ' + d.synonyms.slice(0,5).map(esc).join(', '));
         if (d.antonyms?.length) meta.push('反 ' + d.antonyms.slice(0,5).map(esc).join(', '));

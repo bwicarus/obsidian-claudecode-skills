@@ -244,13 +244,22 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
             out.append(f"- **{pos}** {d['zh']}" if pos else f"- {d['zh']}")
         out.append("")
 
+    zh_for = entry.get("examples_zh", {}) or {}
+    def _ex_block(ex_list, indent="  "):
+        lines = []
+        for ex in ex_list:
+            lines.append(f"{indent}> {ex}")
+            zh = zh_for.get(ex)
+            if zh:
+                lines.append(f"{indent}> 🇨🇳 {zh}")
+        return lines
+
     if mw_defs:
         out.append("## 📚 Merriam-Webster Learner's")
         for d in mw_defs:
             pos = d.get("pos") or ""
             out.append(f"- **{pos}** {d['en']}" if pos else f"- {d['en']}")
-            for ex in d.get("examples", [])[:2]:
-                out.append(f"  > {ex}")
+            out.extend(_ex_block(d.get("examples", [])[:2]))
         out.append("")
 
     if wi_defs:
@@ -258,8 +267,7 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         for d in wi_defs[:6]:
             pos = d.get("pos") or ""
             out.append(f"- **{pos}** {d['en']}" if pos else f"- {d['en']}")
-            for ex in d.get("examples", [])[:1]:
-                out.append(f"  > {ex}")
+            out.extend(_ex_block(d.get("examples", [])[:1]))
         out.append("")
 
     if ec_en_defs and not mw_defs and not wi_defs:
@@ -277,6 +285,9 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         out.append("## 💬 更多例句")
         for ex in extra_examples[:8]:
             out.append(f"> {ex}")
+            zh = zh_for.get(ex)
+            if zh:
+                out.append(f"> 🇨🇳 {zh}")
         out.append("")
 
     # 同义反义

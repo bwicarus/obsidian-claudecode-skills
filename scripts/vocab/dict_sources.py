@@ -451,6 +451,18 @@ def compose_entry(word: str, *, online: bool = True) -> dict:
         k = re.sub(r"\W+", "", ex.lower())[:60]
         if k and k not in seen:
             seen.add(k); examples.append(ex)
+    examples = examples[:20]
+
+    # 例句中文翻译（前 N 条，缓存避免重复 API；离线模式跳过）
+    examples_zh: dict[str, str] = {}
+    if online:
+        try:
+            from translate import translate as _tr   # 同包
+            for ex in examples[:8]:
+                t = _tr(ex)
+                if t: examples_zh[ex] = t
+        except Exception:
+            pass
 
     return {
         "word": word, "lemma": lemma, "forms": forms,
@@ -459,7 +471,8 @@ def compose_entry(word: str, *, online: bool = True) -> dict:
         "pos": pos_list,
         "freq": {"bnc": (ec or {}).get("bnc", 0), "coc": (ec or {}).get("frq", 0)},
         "definitions": definitions,
-        "examples": examples[:20],
+        "examples": examples,
+        "examples_zh": examples_zh,
         "synonyms": fd.get("synonyms") or [],
         "antonyms": fd.get("antonyms") or [],
         "etymology": fd.get("etymology") or "",
