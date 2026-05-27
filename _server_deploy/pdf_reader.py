@@ -113,12 +113,11 @@ def _find_kg_nodes_for_page(file_rel: str, page: int) -> list[dict]:
     return out
 
 
-def _ai_call(prompt: str, override_model: str = "", override_effort: str = "") -> str:
-    """复用 qa_server 的 AI 后端 + 可选 per-request model/effort 覆盖（PDF reader 设置面板用）。"""
+def _ai_backend(override_model: str = "", override_effort: str = ""):
+    """初始化 AI backend + 可选 model/effort 覆盖。返回 (backend, msgs_head)"""
     sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
     from ai_backends import make_backend  # type: ignore
     sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-
     sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
     try:
         from qa_server import get_cfg
@@ -127,14 +126,47 @@ def _ai_call(prompt: str, override_model: str = "", override_effort: str = "") -
         cfg = {"ai_backend": "claude_cli", "ai": {"claude_cli": {"command": "/usr/bin/claude"}}}
     backend_name = cfg.get("ai_backend", "claude_cli")
     settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
-    # 覆盖
     if override_model:  settings["model"] = override_model
     if override_effort: settings["effort"] = override_effort
     ad = make_backend(backend_name, settings)
-    return ad.chat([
-        {"role": "system", "content": "你是一个学习辅助助手。回答简洁、准确。数学公式用 $...$ 或 $$...$$，不要用反引号包数学。"},
-        {"role": "user", "content": prompt},
-    ])
+    sys_msg = {"role": "system", "content": "你是一个学习辅助助手。回答简洁、准确。数学公式用 $...$ 或 $$...$$，不要用反引号包数学。"}
+    return ad, sys_msg
+
+
+def _ai_call(prompt: str, override_model: str = "", override_effort: str = "") -> str:
+    """同步调用 AI，返回完整字符串。"""
+    ad, sys_msg = _ai_backend(override_model, override_effort)
+    return ad.chat([sys_msg, {"role": "user", "content": prompt}])
+
+
+def _ai_call_stream(prompt: str, override_model: str = "", override_effort: str = ""):
+    """流式调用 AI，yield text chunks。"""
+    ad, sys_msg = _ai_backend(override_model, override_effort)
+    msgs = [sys_msg, {"role": "user", "content": prompt}]
+    if hasattr(ad, "chat_stream"):
+        gen = ad.chat_stream(msgs)
+        try:
+            for chunk in gen:
+                if chunk:
+                    yield chunk
+        finally:
+            try: gen.close()
+            except Exception: pass
+    else:
+        # 后端不支持流式 → 一次性 yield
+        yield ad.chat(msgs)
+
+
+def _sse_stream(prompt, model, effort):
+    """SSE generator：把 AI chunks 包成 SSE event 流。"""
+    import json as _json
+    try:
+        yield "event: start\ndata: {}\n\n"
+        for chunk in _ai_call_stream(prompt, model, effort):
+            yield f"data: {_json.dumps({'text': chunk})}\n\n"
+        yield "event: done\ndata: {}\n\n"
+    except Exception as e:
+        yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
 
 
 # ─── 路由 ─────────────────────────────────────────────────────────────────
@@ -297,6 +329,11 @@ def pdf_api_translate():
     )
     model = (body.get("model") or "").strip()
     effort = (body.get("effort") or "").strip()
+    if "text/event-stream" in (request.headers.get("Accept") or ""):
+        from flask import Response, stream_with_context
+        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     try:
         out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "translation": out})
@@ -427,6 +464,11 @@ def pdf_api_explain():
     prompt += f"=== 待解释 ===\n{text}"
     model = (body.get("model") or "").strip()
     effort = (body.get("effort") or "").strip()
+    if "text/event-stream" in (request.headers.get("Accept") or ""):
+        from flask import Response, stream_with_context
+        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     try:
         out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "explanation": out})

@@ -1504,28 +1504,85 @@ if (localStorage.getItem('pdf-debug') !== '1') {
 }
 
 async function aiCall(path, body, label) {
-  // 自动附加 AI override（model / effort）
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
   openResult(label, lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
+  const contentEl = document.getElementById('result-content');
   try {
     const r = await fetch(path, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
       body: JSON.stringify(body),
     });
-    const d = await r.json();
-    if (d.ok) {
-      const text = d.translation || d.explanation || JSON.stringify(d);
-      document.getElementById('result-content').innerHTML = md(text);
-      if (window.MathJax && MathJax.typesetPromise) {
-        MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('event-stream')) {
+      // SSE 流式：边收边渲染（marked + MathJax 节流 120ms）
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '', accumulated = '', lastRender = 0;
+      let renderQueued = false;
+      const renderNow = () => {
+        contentEl.innerHTML = md(accumulated || ' ');
+        if (window.MathJax && MathJax.typesetPromise) {
+          MathJax.typesetPromise([contentEl]).catch(()=>{});
+        }
+        lastRender = Date.now();
+        renderQueued = false;
+      };
+      const maybeRender = () => {
+        const now = Date.now();
+        if (now - lastRender >= 120) renderNow();
+        else if (!renderQueued) {
+          renderQueued = true;
+          setTimeout(renderNow, 120 - (now - lastRender));
+        }
+      };
+      let errored = null;
+      outer: while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          let isError = false, dataLine = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) {
+              if (line.includes('error')) isError = true;
+            } else if (line.startsWith('data:')) {
+              dataLine = line.slice(5).trim();
+            }
+          }
+          if (!dataLine) continue;
+          try {
+            const obj = JSON.parse(dataLine);
+            if (isError) { errored = obj.error || '错误'; break outer; }
+            if (obj.text) { accumulated += obj.text; maybeRender(); }
+          } catch (_) {}
+        }
+      }
+      renderNow();
+      if (errored) {
+        contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + errored + '</div>';
       }
     } else {
-      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+      // 非 SSE 兼容（旧路径）
+      const d = await r.json();
+      if (d.ok) {
+        const text = d.translation || d.explanation || JSON.stringify(d);
+        contentEl.innerHTML = md(text);
+        if (window.MathJax && MathJax.typesetPromise) {
+          MathJax.typesetPromise([contentEl]).catch(()=>{});
+        }
+      } else {
+        contentEl.innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
+      }
     }
   } catch (e) {
-    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
 }
 
@@ -1580,38 +1637,20 @@ window.onExplain = () => {
   }
   aiCall('/pdf/api/explain', {text: lastSelText, context}, '💡 AI 解释');
 };
-window.onToQA = async () => {
+window.onToQA = () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');
-  // 同 origin in-page 对话（避开 https → http :9091 mixed content 拦截）
   const question = prompt('针对选中内容你想问 AI 什么？（如：解释里面的术语 / 这步推导为何成立 / 给一个例子）');
   if (!question || !question.trim()) return;
-  // 复用 /api/explain 后端：text=问题，context=选中内容
-  openResult('💬 问 AI', '问：' + question + '\n\n（基于选中：' + lastSelText.slice(0, 100) +
-             (lastSelText.length > 100 ? '…' : '') + '）',
-             '<div class="loading">⏳ AI 处理中…</div>');
-  try {
-    const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/explain', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        text: question,
-        context: '用户选中的教材片段：\n' + lastSelText.slice(0, 3000),
-        model: ov.model || '', effort: ov.effort || '',
-      }),
-    });
-    const d = await r.json();
-    if (d.ok) {
-      document.getElementById('result-content').innerHTML = md(d.explanation);
-      if (window.MathJax && MathJax.typesetPromise) {
-        MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
-      }
-    } else {
-      document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
-    }
-  } catch (e) {
-    document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
-  }
+  // 复用 aiCall → SSE 流式 + Markdown/MathJax 渲染
+  const oldSel = lastSelText;
+  lastSelText = '问：' + question + '\n\n（基于选中：' + oldSel.slice(0, 100) +
+                (oldSel.length > 100 ? '…' : '') + '）';
+  aiCall('/pdf/api/explain', {
+    text: question,
+    context: '用户选中的教材片段：\n' + oldSel.slice(0, 3000),
+  }, '💬 问 AI');
+  setTimeout(() => { lastSelText = oldSel; }, 200);
 };
 window.onToNote = async () => {
   if (!lastSelText) return;
