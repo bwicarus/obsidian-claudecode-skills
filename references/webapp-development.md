@@ -72,13 +72,31 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/control/api/trigger/<action>` | POST | 触发 register/daily/anki-restart/ankiweb-sync/switch-ai |
 | `/control/api/trigger-log` | GET | webapp_trigger.log 末 N 行 |
 | `/control/api/config` | GET/POST | 读写 server-config.json |
+| `/control/api/kg-build` | POST | 新建书本（spawn build_nodes.py + extract_edges.py 后台任务） |
+| `/control/api/kg-build-log` | GET | 新建书本 job 日志 |
+| `/skilltree/<book>/` | GET | KG 可视化页（见 skill-tree-system.md） |
+| `/pdf/` | GET | PDF 阅读器入口（PDF 列表） |
+| `/pdf/view` | GET | PDF 阅读器主页 |
+| `/pdf/file/<rel>` | GET | PDF 二进制 |
+| `/pdf/api/page-chars` | GET | PyMuPDF char-level bbox（驱动 char-layer 选中）|
+| `/pdf/api/page-nodes` | GET | 该页对应的 KG 节点 |
+| `/pdf/api/dict` | GET | ECDICT 离线字典查询 |
+| `/pdf/api/translate` | POST | AI 翻译（SSE 或 JSON） |
+| `/pdf/api/explain` | POST | AI 解释（SSE 流式 + 自动上下文）|
+| `/pdf/api/to-note` | POST | 选中 → vault 笔记 |
+| `/pdf/api/upload` | POST | 上传 PDF 到 vault |
+| `/pdf/api/list-pdfs` | GET | PDF 列表 JSON |
+| `/pdf/api/snippets-to` | POST | 草稿 → 笔记 / Anki / 两者 |
+| `/pdf/api/highlights` | GET/POST/PATCH/DELETE | 高亮 sidecar JSON 增删改查 |
 | ~~`/qa/`~~ | — | **已废弃** 2026-05-11；iPad 现走 Tailscale 直连 qa-server :9091，不经 webapp |
+
+详细 PDF reader 文档（含选中机制、高亮编辑、踩坑 17 条）：[`pdf-reader.md`](pdf-reader.md)
 
 ## 鉴权机制
 
 ```python
 # /root/webapp/app.py
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/skilltree")
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request

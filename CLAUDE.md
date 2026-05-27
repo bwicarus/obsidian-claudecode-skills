@@ -48,6 +48,7 @@
 - `references/skill-tree-system.md` — 技能树/知识图谱（KG）完整系统：KG 结构、关联校验规则（_rejected_links）、UI 叠加面板架构、register 同步链路、回收站机制、**踩坑笔记（覆盖语义/source .env/subprocess buffer/两套 nginx）、renderAnim 调用点、面板布局算法、CSS class 速查、全局变量速查、ADR 架构决策、反向链接 propagate_back_links**
 - `references/qa-browser-features.md` — 截图问答（QA Browser）功能详解：两种模式（普通 / cardCtx）、加号选中（真/假标题）、创建新笔记 `/api/create-note`、Anki 卡片 AI 改进、SSE 流式、**SQLite schema + 删除级联、快捷功能、MathJax 节流、AI 后端 adapter、控制面板交互**
 - `references/server-config-schema.md` — `state/server-config.json` 字段完整对照（qa_* / ai_* / anki.* / scheduled_register / weak_card_refresh / card_antimodel / card_quality / card_qa）+ 字段流转图 + 修改方法
+- `references/pdf-reader.md` — 网页 PDF 阅读器完整文档：路由清单（page-chars/translate/explain/dict/highlights CRUD/snippets-to）、char-layer 选中机制（PyMuPDF rawdict）、**高亮编辑系统**（sidecar JSON、4 字段 color/sentence/body/note、no-color 虚框模式、popover 小框规则）、AI 草稿系统、**iOS Mail 风格 swipe-to-delete**（双处实现 + 三个关键 CSS 点）、设置面板、**踩坑总结 17 条**（y 翻转、thenn 空格、popover z-index、TypeError、visibility 隐藏、PATCH 空 color 等）
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）
@@ -236,6 +237,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
 | **技能树 / KG** | `https://bwicarus.space/skilltree/<book>/` | 知识图谱可视化页。home 整体永远底层，左侧 focus 叠加面板（紧凑章带，仅 chain 节点）+ 右侧 detail，进页面定位 localStorage 最近学习节点。完整架构 + 关联校验规则（_rejected_links）+ 回收站 见 [`references/skill-tree-system.md`](references/skill-tree-system.md) |
+| **PDF 阅读器** | `https://bwicarus.space/pdf/` | 网页 PDF 阅读器：PDF.js v4 + PyMuPDF char-bbox 选中（绕开 textLayer 偏移）+ AI 翻译/解释/问 AI（SSE 流式 + Markdown + MathJax）+ ECDICT 离线字典（单词秒查不耗 AI）+ **高亮编辑**（sidecar JSON、4 色板互斥激活态、点 cur 色取消颜色保留备注、popover 备注小框单行省略点击展开、iOS Mail 左滑右侧露出 🗑 删除）+ 草稿系统（AI 回答 + 选段 → 笔记/Anki）+ 设置面板（model/effort/debug/颜色管理）+ 右侧抽屉知识点关联。完整文档 + 17 条踩坑见 [`references/pdf-reader.md`](references/pdf-reader.md) |
 
 **控制面板源码**（全部在 git，部署 = 纯 cp）：
 - `_server_deploy/app.py` → 部署到 `/root/webapp/app.py`（含 `/api/nav-links` 路由、`register_control` 导入、`/control` 进 `PROTECTED_PREFIXES` / `NAV_INJECT_PREFIXES`）
