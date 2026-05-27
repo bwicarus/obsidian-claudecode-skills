@@ -142,10 +142,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
-/* 极简：默认无虚线框；只在第一行 rect 画左 4 实线（句首标识）+ 句末 L 按钮（句尾标识） */
-.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s}
+/* 句子框：素描排线（135° 斜细线）+ 句首左 4px 实线 + 句末 L 按钮 */
+.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-image:var(--sent-hatch);background-color:transparent}
 .vocab-sentence-box.first{border-left:4px solid currentColor}
-.vocab-sentence-box.highlight{background:var(--sent-fill,rgba(245,158,11,.08))}
+.vocab-sentence-box.highlight{background-color:var(--sent-fill,rgba(245,158,11,.08))}
 
 /* 句末按钮：包裹最后一个字符的 L 形（右边 + 下边加粗）*/
 .vocab-sentence-btn-l{position:absolute;background:transparent;border:none;border-right:4px solid currentColor;border-bottom:4px solid currentColor;padding:2px 4px 2px 2px;cursor:pointer;pointer-events:auto;box-sizing:content-box;transition:background .12s,box-shadow .12s}
@@ -936,8 +936,8 @@ function renderVocabSentences(pw, sentences) {
     const rects = s.rects || [];
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
-    // 只画句首 rect 的 4px 左实线；其它行不画 box（极简）
-    // hover 状态：所有行需要可显示淡背景 → 为每行建透明 box 但 .first 才画左线
+    // hatch 排线 (135° 斜细线，1px 实 + 4px 空)；颜色 = stroke + alpha 0.18
+    const hatch = `repeating-linear-gradient(135deg, ${stroke}2e 0 1px, transparent 1px 5px)`;
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
@@ -946,6 +946,7 @@ function renderVocabSentences(pw, sentences) {
       box.dataset.sid = sid;
       box.style.color = stroke;
       box.style.setProperty('--sent-fill', fill);
+      box.style.setProperty('--sent-hatch', hatch);
       box.style.left = (x0 * sx - 2) + 'px';
       box.style.top = (y0 * sy - 1) + 'px';
       box.style.width = ((x1 - x0) * sx + 4) + 'px';
