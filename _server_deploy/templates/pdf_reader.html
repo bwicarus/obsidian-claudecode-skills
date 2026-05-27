@@ -142,10 +142,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
-/* 多生词句子框：每行独立矩形；句首左 4 实线，其它四边细虚线 */
-.vocab-sentence-box{position:absolute;border:1.4px dashed currentColor;border-radius:3px;pointer-events:none;box-sizing:border-box;transition:all .12s;color:rgba(0,0,0,.4);opacity:.75}
-.vocab-sentence-box.first{border-left:4px solid currentColor;border-radius:0 3px 3px 0}
-.vocab-sentence-box.highlight{opacity:1;background:var(--sent-fill,rgba(245,158,11,.10))}
+/* 极简：默认无虚线框；只在第一行 rect 画左 4 实线（句首标识）+ 句末 L 按钮（句尾标识） */
+.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s}
+.vocab-sentence-box.first{border-left:4px solid currentColor}
+.vocab-sentence-box.highlight{background:var(--sent-fill,rgba(245,158,11,.08))}
 
 /* 句末按钮：包裹最后一个字符的 L 形（右边 + 下边加粗）*/
 .vocab-sentence-btn-l{position:absolute;background:transparent;border:none;border-right:4px solid currentColor;border-bottom:4px solid currentColor;padding:2px 4px 2px 2px;cursor:pointer;pointer-events:auto;box-sizing:content-box;transition:background .12s,box-shadow .12s}
@@ -936,6 +936,8 @@ function renderVocabSentences(pw, sentences) {
     const rects = s.rects || [];
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
+    // 只画句首 rect 的 4px 左实线；其它行不画 box（极简）
+    // hover 状态：所有行需要可显示淡背景 → 为每行建透明 box 但 .first 才画左线
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
