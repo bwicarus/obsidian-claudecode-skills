@@ -142,8 +142,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
-/* 句子框：素描排线（135° 斜细线）+ 句首左 4px 实线 + 句末 L 按钮 */
-.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-image:var(--sent-hatch);background-color:transparent}
+/* 句子框：素描排线 + mix-blend-mode 让颜色叠到字下方（白底显色，字像素不被遮）*/
+.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-image:var(--sent-hatch);background-color:transparent;mix-blend-mode:multiply}
 .vocab-sentence-box.first{border-left:4px solid currentColor}
 .vocab-sentence-box.highlight{background-color:var(--sent-fill,rgba(245,158,11,.08))}
 
@@ -152,8 +152,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn-l:hover{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:0 0 0 1px var(--sent-fill,rgba(245,158,11,.3))}
 .vocab-sentence-btn-l.active{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:inset -4px -4px 0 0 currentColor}
 
-/* 句子翻译覆盖层：黑字 + 白底 + 同色 hatch 排线（跟原句框统一风格）+ 左侧粗色边 */
-.vocab-sentence-overlay{position:absolute;background-color:#ffffff;background-image:var(--sent-hatch);color:#111 !important;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 var(--sent-stroke,#d97706),inset -1px 0 0 var(--sent-stroke,#d97706),inset 0 -1px 0 var(--sent-stroke,#d97706),inset 0 1px 0 var(--sent-stroke,#d97706)}
+/* 翻译覆盖层：白底 + 黑字；hatch 用 ::after 伪元素 mix-blend-mode 在字下方显色 */
+.vocab-sentence-overlay{position:absolute;background-color:#ffffff;color:#111 !important;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 var(--sent-stroke,#d97706),inset -1px 0 0 var(--sent-stroke,#d97706),inset 0 -1px 0 var(--sent-stroke,#d97706),inset 0 1px 0 var(--sent-stroke,#d97706)}
+.vocab-sentence-overlay::after{content:'';position:absolute;inset:0;background-image:var(--sent-hatch);mix-blend-mode:multiply;pointer-events:none}
 .vocab-sentence-overlay:hover{background-color:#fff8e1}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
