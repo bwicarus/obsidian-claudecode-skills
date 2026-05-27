@@ -268,6 +268,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
     </label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
+    </label>
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
     <div id="set-hl-colors" class="set-hl-row"></div>
     <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
@@ -720,7 +723,21 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   // 已保存高亮：渲染到该页
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
   // 单词下划线（mastery 着色）；后端 page-chars 已返回 vocab_marks
-  try { renderVocabUnderlines(wrap, d.vocab_marks || []); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+  wrap.__vocabMarks = d.vocab_marks || [];
+  try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+}
+
+// 查 char idx 是否在某 vocab mark 内；返回 mark 或 null
+function _findVocabMarkAt(pw, charIdx) {
+  if (!pw || !pw.__vocabMarks) return null;
+  for (const m of pw.__vocabMarks) {
+    if (charIdx >= m.start && charIdx <= m.end) return m;
+  }
+  return null;
+}
+function _clickTranslateEnabled() {
+  const v = localStorage.getItem('pdf-click-translate-unmastered');
+  return v === null ? true : (v === '1');
 }
 
 function renderVocabUnderlines(pw, marks) {
@@ -1083,7 +1100,17 @@ function _bindCharLayer(cl, pw) {
       if (_clickCount === 1) bounds = _wordExpandFromChar(pw.__charBoxes, startIdx);
       else if (_clickCount === 2) bounds = _lineExpandFromChar(pw.__charBoxes, startIdx);
       else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
-      if (bounds) _selByCharRange(pw, bounds.start, bounds.end);
+      if (bounds) {
+        _selByCharRange(pw, bounds.start, bounds.end);
+        // 单击命中未掌握生词 → 直接弹翻译（不需要再点工具栏）
+        if (_clickCount === 1 && _clickTranslateEnabled()) {
+          const mark = _findVocabMarkAt(pw, startIdx);
+          if (mark && mark.label_slug && mark.label_slug !== 'mastered') {
+            // 用 setTimeout 让 _selByCharRange 的工具栏先放好，再触发翻译（关掉它）
+            setTimeout(() => { try { window.onTranslate(); } catch(_){} }, 30);
+          }
+        }
+      }
     }
   };
 
@@ -2551,6 +2578,8 @@ window.openSettings = () => {
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
   const vu = localStorage.getItem('pdf-vocab-underline');
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
+  const ct = localStorage.getItem('pdf-click-translate-unmastered');
+  document.getElementById('set-click-translate').checked = (ct === null) ? true : (ct === '1');
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
 };
@@ -2565,6 +2594,8 @@ window.saveSettings = () => {
   try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
   const vu = document.getElementById('set-vocab-underline').checked;
   try { localStorage.setItem('pdf-vocab-underline', vu ? '1' : '0'); } catch (_) {}
+  const ct = document.getElementById('set-click-translate').checked;
+  try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
   _applyDebugVisibility();
   closeSettings();
   // 切换下划线开关后立刻重渲染当前页

@@ -381,6 +381,26 @@ def _trigger_vocab_note_async(word: str, pdf_rel: str, page: int, context: str =
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _trigger_paragraph_exposure_async(pdf_rel: str, page: int, lemma: str):
+    """段落扫描：用户查某词时，扫该词所在段落 + 当前句子之前的所有词，
+    凡是已查过的词（在 vocab_index）+ 在阅读路径上 → mastery 加点。"""
+    import threading
+    def _run():
+        try:
+            import sys
+            vp = CLAUDE_DIR / "scripts" / "vocab"
+            if str(vp) not in sys.path:
+                sys.path.insert(0, str(vp))
+            # 让 vocab note 先写完才扫（避免新创建的词没在 vocab_index 里）
+            import time as _t
+            _t.sleep(1.5)
+            import paragraph_exposure  # type: ignore
+            paragraph_exposure.process_lookup(pdf_rel, page, lemma)
+        except Exception as ex:
+            sys.stderr.write(f"paragraph exposure fail: {ex}\n")
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @bp.route("/api/dict")
 def pdf_api_dict():
     """字典查询（三源融合：ECDICT + Free Dict + MW Learner）。
@@ -428,10 +448,11 @@ def pdf_api_dict():
         return jsonify({"ok": False, "error": "not found"})
 
     lemma = entry.get("lemma") or word
-    # 副作用：日志 + 异步生成 vocab 笔记
+    # 副作用：日志 + 异步生成 vocab 笔记 + 段落扫描（用户读过但没查的词加 mastery）
     _append_lookup_log(word, lemma, pdf_rel, page, context)
     if pdf_rel and page > 0:
         _trigger_vocab_note_async(word, pdf_rel, page, context)
+        _trigger_paragraph_exposure_async(pdf_rel, page, lemma)
     else:
         _trigger_vocab_note_async(word, "", 0, "")
 

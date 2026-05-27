@@ -100,7 +100,13 @@ def index(*, force_reload: bool = False) -> dict[str, dict]:
 
 
 def _slug_from_label(label: str) -> str:
-    return {"新词": "new", "见过": "seen", "熟": "known", "掌握": "mastered"}.get(label, "")
+    return {
+        "新词": "new", "完全不会": "new",
+        "学习中": "learning",
+        "见过": "seen",
+        "熟": "known",
+        "掌握": "mastered",
+    }.get(label, "new")   # 缺省按 new 处理（确保下划线渲染）
 
 
 if __name__ == "__main__":

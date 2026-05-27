@@ -408,14 +408,23 @@ def update_word_note(
         if _download_audio(entry["audio"]["uk"], out_uk):
             audio_uk_local = f"资源/vocab/_audio/{fname_uk}"
 
+    # mastery 模型（新）：用户主动查 = 不会，所以新建/再次查 → 重置 0.0
+    # 默认 1.0 是"未查过的词"隐式状态，不会进入 vocab dir
+    cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
+    # 用 paragraph_exposure 的 LABELS_NEW 保持一致
+    try:
+        from paragraph_exposure import _label_for as _label_fn
+        lbl, slug = _label_fn(cur_mastery)
+    except Exception:
+        lbl, slug = "完全不会", "new"
     fm_extra = {
         "first_seen": old_fm.get("first_seen") or _dt.date.today().isoformat(),
         "last_lookup": _dt.date.today().isoformat(),
         "lookup_count": int(old_fm.get("lookup_count", 0) or 0) + (1 if new_source else 0),
         "exposure_count": int(old_fm.get("exposure_count", 0) or 0),
-        "mastery": float(old_fm.get("mastery", 0.0) or 0.0),
-        "mastery_label": old_fm.get("mastery_label", "新词"),
-        "mastery_label_slug": "new",
+        "mastery": cur_mastery,
+        "mastery_label": lbl,
+        "mastery_label_slug": slug,
         "anki_card_id": old_fm.get("anki_card_id", ""),
         "audio_us": audio_us_local,
         "audio_uk": audio_uk_local,
