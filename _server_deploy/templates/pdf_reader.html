@@ -936,8 +936,8 @@ function renderVocabSentences(pw, sentences) {
     const rects = s.rects || [];
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
-    // hatch 排线 (135° 斜细线，1px 实 + 4px 空)；颜色 = stroke + alpha 0.18
-    const hatch = `repeating-linear-gradient(135deg, ${stroke}2e 0 1px, transparent 1px 5px)`;
+    // hatch 排线 (135° 斜细线)；颜色 = stroke + alpha ≈ 0.55；间距 4px 更密
+    const hatch = `repeating-linear-gradient(135deg, ${stroke}88 0 1.2px, transparent 1.2px 4px)`;
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
