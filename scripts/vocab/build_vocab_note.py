@@ -75,7 +75,9 @@ def _load_existing(path: Path) -> tuple[dict, str]:
                 fm = {}
     user_notes = ""
     if _USER_NOTES_MARKER in body:
-        user_notes = body.split(_USER_NOTES_MARKER, 1)[1]
+        # 用 rsplit 取最后一次出现之后的内容（防止说明文本里曾经字面出现 marker
+        # 导致每次重写都把旧 marker 当成用户备注保留 → 雪崩重复）
+        user_notes = body.rsplit(_USER_NOTES_MARKER, 1)[-1]
     return fm, user_notes
 
 
@@ -304,44 +306,20 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         out.append(entry["etymology"])
         out.append("")
 
-    # 📍 全文暴露位置（vault 内所有出现该词的 PDF 页，来自 state/vocab-exposure.json）
-    try:
-        exp_path = PROJECT_ROOT / "state" / "vocab-exposure.json"
-        if exp_path.exists():
-            exp_db = json.loads(exp_path.read_text("utf-8"))
-            entry_exp = exp_db.get(lemma.lower(), {})
-            pages = entry_exp.get("pages", []) if isinstance(entry_exp, dict) else []
-            if pages:
-                out.append(f"## 📍 全文出现 ({len(pages)} 处)")
-                # 按 PDF 分组
-                by_pdf: dict[str, list[int]] = {}
-                for pg in pages:
-                    by_pdf.setdefault(pg["pdf"], []).append(pg["page"])
-                for pdf_rel, page_list in list(by_pdf.items())[:8]:
-                    pages_sorted = sorted(set(page_list))
-                    bookname = Path(pdf_rel).name
-                    links = []
-                    for pn in pages_sorted[:15]:
-                        links.append(f"[p.{pn}]({_webapp_url_for_pdf(pdf_rel, pn)})")
-                    more = "" if len(pages_sorted) <= 15 else f" ...+{len(pages_sorted)-15}"
-                    out.append(f"- `{bookname}` ({len(pages_sorted)} 页): {' · '.join(links)}{more}")
-                out.append("")
-    except Exception:
-        pass
-
-    # 文中出现
+    # 文中出现（仅用户实际查过的地方 + 所在整个句子）
+    # 全文 exposure 数据保留在 state/vocab-exposure.json 仅用于 mastery 算法，不渲染到 .md
     if sources:
         out.append("## 📝 文中出现")
         for s in sources:
             if s.get("pdf"):
                 pdf_rel = s["pdf"]
                 page = int(s.get("page", 1))
-                ctx = (s.get("context") or "").strip().replace("\n", " ")
-                if len(ctx) > 200:
-                    ctx = ctx[:200] + "…"
+                ctx = (s.get("context") or "").strip()
+                # 整个句子保留（_expandSentenceFromRange 算的就是句子边界），仅多行折成单行
+                ctx_one = re.sub(r"\s+", " ", ctx)
                 out.append(f"### `{Path(pdf_rel).name}` · p.{page}")
-                if ctx:
-                    out.append(f"> {ctx}")
+                if ctx_one:
+                    out.append(f"> {ctx_one}")
                 out.append(f"- [在 PDF 阅读器打开 →]({_webapp_url_for_pdf(pdf_rel, page)})")
                 out.append(f"- [在 Obsidian 打开 →]({_obsidian_url_for_pdf(pdf_rel, page)})")
                 if s.get("ts"):
@@ -355,7 +333,7 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
                 out.append("")
 
     out.append("## 💭 个人备注")
-    out.append("（在 `" + _USER_NOTES_MARKER + "` 之下写，不会被脚本覆盖）")
+    out.append("（请在下面分隔线之后写，脚本不会覆盖）")
     out.append("")
     out.append(_USER_NOTES_MARKER)
     if user_notes.strip():
