@@ -8,7 +8,12 @@
 - **不用 AI**：所有词条信息从权威字典直接来，不靠 AI 编释义
 - **三源融合**：ECDICT（离线，中文 + 词频）+ Free Dictionary（在线，例句 + 音频备份）+ Merriam-Webster Learner's（在线，高质量学习者例句 + 美音音频）
 - **派生词聚合**：用 ECDICT exchange 表把 `constructs/constructed/constructing` 归到 `construct` 同一 `.md`
-- **掌握度多信号**：Anki state + 查词次数 + 暴露但未查 + 时间衰减
+- **掌握度模型（重新设计 2026-05-27）**：
+  - **默认 1.0 = 已掌握**（未查过的词隐式满分，不进 vocab dir）
+  - 用户主动查 W → W.mastery 重置 0.0（"完全不会"）
+  - 段落扫描：查 W 触发本地扫描，前文段落内已查过的词 +0.03（"读过没查 = 多一点证据它会"）
+  - Anki review 反馈：again -0.15 / hard -0.05 / good +0.05 / easy +0.15
+  - 双向：mastery ≥ 0.95 → AnkiConnect suspend；< 0.85 → unsuspend
 - **保留用户备注**：脚本只更新 `<!-- USER NOTES BELOW -->` 之上内容
 
 ## 2. 文件位置
@@ -302,7 +307,47 @@ python3 scripts/vocab/build_vocab_note.py constructed
 **bug 修复历史**：
 - 试 `Saladict Word` 模板报 "cannot create note because it is empty"（即使所有字段非空）。原因未深查；改用 `Obsidian-cloze`（Text 含 `{{c1::}}` 即满足 cloze 检测）
 
-### 阶段 B：mastery 算法
+### 新 mastery 模型（2026-05-27 重新设计，覆盖原阶段 B）
+
+**核心语义**：默认满分，事件驱动下降。
+
+| 标签 | 阈值 | slug |
+|---|---|---|
+| 完全不会 | mastery < 0.10 | new |
+| 学习中 | < 0.40 | learning |
+| 见过 | < 0.70 | seen |
+| 熟 | < 0.90 | known |
+| 掌握 | ≥ 0.90 | mastered |
+
+**事件类型**：
+
+1. **查询事件**（用户在 PDF reader 选词查字典）：
+   - W 创建/更新 vocab.md → mastery 强制 0.0
+   - `paragraph_exposure.process_lookup(pdf, page, lemma)`：扫该页 chars 找 W 第一次出现位置 → 算所在段落（`_paragraph_bounds` 2.2× 行高判段）→ 找当前句子起点（向左到 `.!?`）→ 段落起 ~ 当前句起之间的所有词 → 命中 vocab_index 的 +0.03 mastery
+   - 同段落同 lemma 只加一次（去重）
+
+2. **Anki review 事件**（cron / 手动）：
+   - `anki_sync.sync_from_anki(days=7)` 拉 `getReviewsOfCards` 近 N 天
+   - 按 ease 累加 delta：`EASE_TO_DELTA = {1: -0.15, 2: -0.05, 3: 0.05, 4: 0.15}`
+   - 写回 mastery，clamp 0~1
+
+3. **mastery → Anki 反向**：
+   - `anki_sync.sync_to_anki()`：
+     - mastery ≥ 0.95 → `suspend` Anki 卡（停止复习负担）
+     - mastery < 0.85 + 处于 suspended → `unsuspend`
+     - 0.85~0.95 维持现状（防抖）
+
+**触发链路**：
+- PDF reader `/api/dict` 同步追加 lookup-log + 异步 `_trigger_vocab_note_async`（先生成 md）+ 异步 `_trigger_paragraph_exposure_async`（sleep 1.5s 等 md 写完再扫，避免新建词没在 vocab_index）
+- daily（可选接入）：`anki_sync.py --days 7` 把过去一周 Anki review 反馈到 mastery，再反向 suspend
+
+**`_bump_mastery(lemma, delta)`** 核心写回函数：
+1. 用 `vocab_index` 找 `.md` 路径
+2. 解析 frontmatter `mastery` 旧值
+3. clamp `old + delta` 到 [0, 1]
+4. 写回 + 同步 `mastery_label` + 加 `last_exposure: YYYY-MM-DD`
+
+### 旧 mastery 算法（已废弃但代码保留 `compute_mastery.py`）
 
 `scripts/vocab/compute_mastery.py`：扫所有 vocab/*.md 重算 mastery 写回 frontmatter。
 
@@ -348,7 +393,13 @@ if user_mark == "unknown": score -= 0.50
 3. `cardsInfo` → 每个 card 的 queue/factor/reps/lapses
 4. 按 note id 聚合
 
-### 阶段 C：PDF 下划线高亮
+### 阶段 C：PDF 下划线高亮 + 单击直翻
+
+**单击未掌握词 → 直接弹翻译**（2026-05-27 加）：
+- 设置面板：`[点击未掌握单词直接显示翻译]` 复选框（默认开）
+- localStorage `pdf-click-translate-unmastered`
+- 实现：char-layer onEnd 单击分支内，`_clickCount === 1` 命中 vocab mark 且 `label_slug != mastered` → `setTimeout(onTranslate, 30)`（让 selByCharRange 先布工具栏，translate 关掉它弹字典）
+- 三击/双击保持原行为（选行 / 选段）；选中范围跨多词不触发自动翻译
 
 后端 `/api/page-chars` 新增 `vocab_marks: [{start,end,word,lemma,mastery,label_slug}]`：
 1. 扫该页 chars 识别英文词边界（连续 `isalpha`/`'-`）
