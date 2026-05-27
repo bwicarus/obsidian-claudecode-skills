@@ -148,9 +148,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn:hover{transform:scale(1.12);background:#fbbf24}
 .vocab-sentence-btn.active{background:#34d399;border-color:#10b981}
 
-/* 句子翻译覆盖层：每行一个独立 overlay，按原字符宽度刚好覆盖 */
-.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;line-height:1;padding:0 2px;box-sizing:border-box;cursor:pointer;pointer-events:auto;overflow:hidden;white-space:nowrap;font-family:inherit;display:flex;align-items:center;letter-spacing:-.02em}
-.vocab-sentence-overlay.first{box-shadow:inset 2px 0 0 #f59e0b}
+/* 句子翻译覆盖层：单 overlay 显示完整中文，clip-path 限制只在原 rect 区域可见 */
+.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-all;font-family:inherit;letter-spacing:0}
 .vocab-sentence-overlay:hover{background:#fff7d6}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
@@ -999,59 +998,62 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   if (!rects.length) return;
   const zh = s.zh || '';
   if (!zh) return;
-  // 多行：按各 rect 宽度比例分配中文字符
-  const totalW = rects.reduce((sum, r) => sum + (r[2] - r[0]), 0);
-  let cursor = 0;
-  for (let i = 0; i < rects.length; i++) {
-    const r = rects[i];
-    const w = r[2] - r[0], h = r[3] - r[1];
-    let segLen;
-    if (i === rects.length - 1) {
-      segLen = zh.length - cursor;   // 最后一段拿剩下全部
-    } else {
-      const ratio = w / totalW;
-      segLen = Math.max(1, Math.round(ratio * zh.length));
-      if (cursor + segLen > zh.length) segLen = zh.length - cursor;
-    }
-    const seg = zh.substr(cursor, segLen);
-    cursor += segLen;
-    if (!seg) continue;
-    _makeSentenceOverlayDiv(layer, r[0]*sx, r[1]*sy, w*sx, h*sy, seg, btn, i === 0, s.text);
+  // union bounding box
+  let bx0 = rects[0][0], by0 = rects[0][1], bx1 = rects[0][2], by1 = rects[0][3];
+  for (const r of rects) {
+    bx0 = Math.min(bx0, r[0]); by0 = Math.min(by0, r[1]);
+    bx1 = Math.max(bx1, r[2]); by1 = Math.max(by1, r[3]);
   }
-  btn.classList.add('active');
-}
+  // clip-path：所有 rect subpath 拼成可见区域（相对 overlay 左上角的坐标）
+  const subpaths = rects.map(r => {
+    const x  = ((r[0] - bx0) * sx).toFixed(2);
+    const y  = ((r[1] - by0) * sy).toFixed(2);
+    const x2 = ((r[2] - bx0) * sx).toFixed(2);
+    const y2 = ((r[3] - by0) * sy).toFixed(2);
+    return `M${x} ${y}L${x2} ${y}L${x2} ${y2}L${x} ${y2}Z`;
+  }).join(' ');
 
-function _makeSentenceOverlayDiv(layer, x, y, w, h, text, btn, isFirst, sentText) {
+  // 字号 + 行高：让中文 wrap 后每行 y 跟原 rect[i].y0 对齐
+  const rectH = (rects[0][3] - rects[0][1]) * sy;
+  const fontPx = Math.max(9, Math.round(rectH * 0.78));
+  // line-height = 实际行间距（rect[1].y0 - rect[0].y0）；单行时 = rect 高度
+  let lineHeightPx = rectH;
+  if (rects.length >= 2) lineHeightPx = (rects[1][1] - rects[0][1]) * sy;
+
   const ov = document.createElement('div');
-  ov.className = 'vocab-sentence-overlay' + (isFirst ? ' first' : '');
+  ov.className = 'vocab-sentence-overlay';
   ov.dataset.active = '1';
-  ov.dataset.sentText = sentText;
-  ov.style.left = x + 'px';
-  ov.style.top = y + 'px';
-  ov.style.width = w + 'px';
-  ov.style.height = h + 'px';
-  // 字号：使得文本 fit 进 w；先按 h*0.78 设，太宽 letter-spacing 缩
-  const fontPx = Math.max(9, Math.round(h * 0.76));
+  ov.dataset.sentText = s.text;
+  ov.style.left = (bx0 * sx) + 'px';
+  ov.style.top = (by0 * sy) + 'px';
+  ov.style.width = ((bx1 - bx0) * sx) + 'px';
+  ov.style.height = ((by1 - by0) * sy) + 'px';
+  ov.style.clipPath = `path('${subpaths}')`;
+  ov.style.webkitClipPath = `path('${subpaths}')`;
   ov.style.fontSize = fontPx + 'px';
-  ov.textContent = text;
+  ov.style.lineHeight = lineHeightPx + 'px';
+  // 第一行 rect 可能不在 bounding box 最左（首字符缩进或非首行更宽）
+  // 让首字符跟原句第一字符对齐
+  const firstIndent = (rects[0][0] - bx0) * sx;
+  if (firstIndent > 0) ov.style.textIndent = firstIndent + 'px';
+  ov.textContent = zh;
   ov.addEventListener('click', (e) => {
     e.stopPropagation();
-    // 关掉同句的所有 overlay
-    layer.querySelectorAll(`.vocab-sentence-overlay[data-sent-text="${CSS.escape(sentText)}"]`)
-      .forEach(el => el.remove());
+    ov.remove();
     btn.classList.remove('active');
   });
   ov.addEventListener('mousedown', (e) => e.stopPropagation());
   ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
   layer.appendChild(ov);
-  // 字号自适应：如果中文文本超宽，缩字号
+  // 字号自适应：若中文太长被 clip 切掉（scrollHeight > height）→ 缩字号
   requestAnimationFrame(() => {
     let fs = fontPx;
-    while (ov.scrollWidth > ov.clientWidth + 2 && fs > 8) {
+    while (ov.scrollHeight > ov.clientHeight + 2 && fs > 8) {
       fs -= 0.5;
       ov.style.fontSize = fs + 'px';
     }
   });
+  btn.classList.add('active');
 }
 
 // 翻译 popover
