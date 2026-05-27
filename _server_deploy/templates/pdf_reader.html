@@ -960,10 +960,10 @@ function renderVocabSentences(pw, sentences) {
       btn.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
       btn.style.color = stroke;
       btn.style.setProperty('--sent-fill', fill);
-      // 加宽：把 L 形扩展到字符宽度 × 3（向左延伸），更易点击
+      // 加宽：L 形左缘向左延伸（更易点击）
       const charW = (lc[2] - lc[0]) * sx;
       const charH = (lc[3] - lc[1]) * sy;
-      const wantW = Math.max(charW * 3, 24);   // 至少 24px 宽
+      const wantW = Math.max(charW * 6, 48);   // 至少 48px 宽（约 5-6 个字符）
       const extraLeft = wantW - charW;
       btn.style.left = (lc[0] * sx - extraLeft - 2) + 'px';
       btn.style.top = (lc[1] * sy - 2) + 'px';
