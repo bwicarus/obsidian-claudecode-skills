@@ -149,7 +149,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn.active{background:#34d399;border-color:#10b981}
 
 /* 句子翻译覆盖层：单块完整中文 + clip-path 切出原 rect 形状（跨行间空白透明）*/
-.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden}
+.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left}
 .vocab-sentence-overlay:hover{background:#fff7d6}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
