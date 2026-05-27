@@ -416,14 +416,15 @@ function _maybeRestoreLastPos() {
 }
 function _restoreScrollAfterRender() {
   if (!_pendingScrollY) return;
-  // 连续模式：等占位/真渲染布局完成后再 scroll
   const main = document.getElementById('main');
   if (!main) return;
-  const apply = () => { main.scrollTop = _pendingScrollY; _pendingScrollY = 0; };
-  // 多 try 确保布局生效（占位高度估算需要等 fitToWidth 完）
+  const target = _pendingScrollY;
+  // 多次 apply 直到稳定（连续模式占位高度逐步算准 / 真渲染替换占位时高度可能变）
+  const apply = () => { main.scrollTop = target; };
   setTimeout(apply, 100);
   setTimeout(apply, 400);
   setTimeout(apply, 1000);
+  setTimeout(() => { _pendingScrollY = 0; }, 1100);   // 最后一次后清空（避免重复 apply 干扰用户主动滚动）
 }
 function _attachScrollSaver() {
   const main = document.getElementById('main');
@@ -466,10 +467,10 @@ async function loadPdf() {
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
     if (readMode === 'continuous') {
       await setupContinuousMode();
-      _restoreScrollAfterRender();   // 连续模式：恢复 scrollY
     } else {
       await renderPage(currentPage);
     }
+    _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
@@ -695,10 +696,13 @@ async function setupContinuousMode() {
   // 监听滚动同步 currentPage（跟踪可见页用于"上一页 / 下一页"按钮）
   const mainEl = document.getElementById('main');
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
-  // 滚到 currentPage
-  const target = document.querySelector(`[data-page-num="${currentPage}"]`);
-  if (target) {
-    setTimeout(() => target.scrollIntoView({block: 'start', behavior: 'auto'}), 50);
+  // 滚到 currentPage — 但若有 _pendingScrollY（从位置记忆恢复中）就跳过，
+  // 交给 _restoreScrollAfterRender 设精确 scrollY，避免被 scrollIntoView 覆盖到页首
+  if (!_pendingScrollY) {
+    const target = document.querySelector(`[data-page-num="${currentPage}"]`);
+    if (target) {
+      setTimeout(() => target.scrollIntoView({block: 'start', behavior: 'auto'}), 50);
+    }
   }
 }
 
