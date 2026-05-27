@@ -124,6 +124,51 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-actions button.primary:hover{background:#2c5188}
 #draft-actions button:disabled{opacity:.5;cursor:not-allowed}
 
+/* 已保存高亮层（在 char-layer 之下，能透过 char-layer 接收点击） */
+.hl-layer{position:absolute;inset:0;z-index:3;pointer-events:none}
+.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:.55;transition:opacity .12s}
+.hl-layer .hl-saved:hover{opacity:.78}
+.hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
+
+/* toolbar 内的高亮色板 */
+#hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px}
+#hl-color-picker .lbl{font-size:11px;color:#7a8497;margin-right:2px}
+#hl-color-picker .swatch{width:22px;height:22px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s}
+#hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
+
+/* 高亮 popover：点击已存在的高亮弹出 */
+#hl-popover{position:absolute;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:10px 12px;z-index:150;display:none;box-shadow:0 6px 16px rgba(0,0,0,.6);min-width:280px;max-width:360px}
+#hl-popover.open{display:block}
+#hl-popover .row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+#hl-popover .row-lbl{font-size:11px;color:#7a8497;margin-right:2px}
+#hl-popover .swatch{width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0}
+#hl-popover .swatch.cur{border-color:#fff;box-shadow:0 0 0 2px #0078d4}
+#hl-popover textarea{width:100%;box-sizing:border-box;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical;min-height:48px;margin-bottom:8px;line-height:1.5}
+/* 高亮 popover 内的预览块（选中/所在句/解释 三行省略 + 点击展开 + 触屏左滑） */
+#hl-popover .hl-snip{background:rgba(0,0,0,.32);border-left:2px solid #60a5fa;border-radius:0 4px 4px 0;padding:6px 10px;margin-bottom:10px;cursor:pointer;will-change:transform}
+#hl-popover .hl-snip:hover{background:rgba(0,0,0,.42)}
+#hl-popover .hl-snip-row{font-size:11px;line-height:1.5;color:#cfe6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+#hl-popover .hl-snip-row:last-child{margin-bottom:0}
+#hl-popover .hl-snip-row.text{color:#cfe6ff}
+#hl-popover .hl-snip-row.sentence{color:#a8cdff}
+#hl-popover .hl-snip-row.body{color:#cfe6ff}
+#hl-popover .hl-snip-row .row-lbl{color:#7a8497;font-size:10px;margin-right:6px;font-weight:600;letter-spacing:.04em}
+#hl-popover .hl-snip.expanded .hl-snip-row{white-space:pre-wrap;overflow:visible;text-overflow:initial;word-break:break-word}
+#hl-popover .actions{display:flex;gap:6px;justify-content:flex-end}
+#hl-popover button{background:transparent;border:1px solid #3b6db5;color:#cfe6ff;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer}
+#hl-popover button:hover{background:#2c3e6a}
+#hl-popover button.del{border-color:#7a2828;color:#ffb4b4}
+#hl-popover button.del:hover{background:#4a1a1a}
+#hl-popover button.primary{background:#244470;border-color:#3b6db5;color:#fff}
+#hl-popover button.primary:hover{background:#2c5188}
+
+/* 设置 modal：高亮颜色管理 */
+.set-hl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+.set-hl-row .swatch-w{position:relative;display:inline-block}
+.set-hl-row .swatch{width:28px;height:28px;border-radius:50%;border:2px solid #2a3550;cursor:default;display:block}
+.set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}
+.set-hl-row .del:hover{background:#9a3232}
+
 @media (max-width:900px){
   #sidebar{width:85vw}
 }
@@ -154,6 +199,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
         <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
         <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
       </div>
+      <div id="hl-color-picker"><span class="lbl">🖌</span></div>
     </div>
   </div>
 </div>
@@ -190,6 +236,13 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）
     </label>
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
+    <div id="set-hl-colors" class="set-hl-row"></div>
+    <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
+      <input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">
+      <button onclick="addHlColor()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">＋ 添加</button>
+      <button onclick="resetHlColors()" style="background:transparent;border:1px solid #2a3550;color:#7a8497;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">恢复默认</button>
+    </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button onclick="closeSettings()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>
       <button onclick="saveSettings()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>
@@ -203,10 +256,14 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <div class="src" id="result-src"></div>
     <div class="content" id="result-content"></div>
     <div class="actions">
+      <button id="result-mark-btn" onclick="markFromResult()" title="给原始选中加 PDF 高亮（用上次颜色 + 把当前回答存到备注）" style="background:#244470;color:#fff;border-color:#3b6db5">🖌 标记到 PDF</button>
       <button onclick="closeResult()">关闭</button>
     </div>
   </div>
 </div>
+
+<!-- 高亮 popover：点击已存在的高亮弹出 -->
+<div id="hl-popover" onclick="event.stopPropagation()"></div>
 
 <!-- 草稿 badge：永远在右下角；选中 snippets ≥ 1 时显示 -->
 <div id="draft-badge" onclick="openDraftModal()" title="已选段落">
@@ -304,6 +361,9 @@ async function loadPdf() {
     scale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+    // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
+    loadAllHighlights();
+    renderHlPicker();
     if (readMode === 'continuous') {
       await setupContinuousMode();
     } else {
@@ -589,7 +649,12 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     width:  (ch.x1 - ch.x0) * scale,
     height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
+    // raw PDF 坐标（pt）— 用于持久化高亮 rects（不随 zoom 变）
+    _x0: ch.x0, _y0: ch.y0, _x1: ch.x1, _y1: ch.y1,
   }));
+  wrap.__pageWPt = d.page_w;
+  wrap.__pageHPt = d.page_h;
+  wrap.__viewportScale = scale;
   // sort 让 idx 顺序 = visual reading order：用 baseline (top + height) + 宽松阈值
   // ref 用 max height 避开 subscript/superscript（小字符）误判到不同行
   charBoxes.sort((a, b) => {
@@ -620,6 +685,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   wrap.appendChild(cl);
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
+  // 已保存高亮：渲染到该页
+  try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
 }
 
 // 找点击位置最近的非空格 char index
@@ -1518,6 +1585,409 @@ document.addEventListener('touchstart', (e) => {
   }
 }, {passive: true});
 
+// ─────────── PDF 高亮：sidecar JSON 持久化 + 渲染 + popover ───────────
+const DEFAULT_HL_COLORS = ['#fff59d','#a7f3d0','#a3d4ff','#fda4af'];
+function getHlColors() {
+  try {
+    const arr = JSON.parse(localStorage.getItem('pdf-hl-colors') || 'null');
+    return (Array.isArray(arr) && arr.length) ? arr : DEFAULT_HL_COLORS;
+  } catch { return DEFAULT_HL_COLORS; }
+}
+function saveHlColors(arr) {
+  localStorage.setItem('pdf-hl-colors', JSON.stringify(arr));
+}
+let _lastHlColor = localStorage.getItem('pdf-hl-last-color') || DEFAULT_HL_COLORS[0];
+let _allHighlights = [];
+let _hlByPage = {};
+let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
+
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _toast(msg) {
+  let t = document.getElementById('hl-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'hl-toast';
+    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.display = 'none'; }, 1800);
+}
+
+async function loadAllHighlights() {
+  try {
+    const r = await fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL));
+    const d = await r.json();
+    if (!d.ok) return;
+    _allHighlights = d.highlights || [];
+    _hlByPage = {};
+    for (const h of _allHighlights) (_hlByPage[h.page] ||= []).push(h);
+    document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(pw => {
+      const n = parseInt(pw.dataset.pageNum || '0');
+      if (n) renderHighlightsOnPage(pw, n);
+    });
+    window.dlog?.('高亮已加载：' + _allHighlights.length + ' 条');
+  } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff6b6b'); }
+}
+
+function renderHighlightsOnPage(pw, pageNum) {
+  if (!pw) return;
+  let layer = pw.querySelector('.hl-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'hl-layer';
+    const cl = pw.querySelector('.char-layer');
+    if (cl) pw.insertBefore(layer, cl); else pw.appendChild(layer);
+  }
+  layer.innerHTML = '';
+  const list = _hlByPage[pageNum] || [];
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth;
+  const cssH = canvas?.clientHeight || pw.clientHeight;
+  if (!cssW || !cssH) return;
+  for (const h of list) {
+    const pw_pt = h.page_w || pw.__pageWPt || cssW;
+    const ph_pt = h.page_h || pw.__pageHPt || cssH;
+    const sx = cssW / pw_pt;
+    const sy = cssH / ph_pt;
+    for (const r of (h.rects || [])) {
+      const [x0, y0, x1, y1] = r;
+      const div = document.createElement('div');
+      div.className = 'hl-saved' + (h.note || h.body ? ' has-note' : '');
+      div.dataset.id = h.id;
+      div.style.left = (x0 * sx) + 'px';
+      div.style.top = (y0 * sy) + 'px';
+      div.style.width = ((x1 - x0) * sx) + 'px';
+      div.style.height = ((y1 - y0) * sy) + 'px';
+      div.style.background = h.color;
+      div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
+      div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); });
+      div.addEventListener('touchstart', (e) => { e.stopPropagation(); }, {passive:true});
+      layer.appendChild(div);
+    }
+  }
+}
+
+// 把 chars[s..e] 合并成连续 PDF pt rects（同行合并）
+function _charsRangeToRects(chars, sIdx, eIdx) {
+  if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
+  const rects = [];
+  let cur = null;
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (c.sp && (!c.width || c.width < 0.5)) {
+      if (cur && c._x1 > cur.x1) cur.x1 = c._x1;
+      continue;
+    }
+    const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
+    const lineH = y1 - y0;
+    if (cur &&
+        Math.abs(y0 - cur.y0) <= Math.max(2, (cur.y1 - cur.y0) * 0.5) &&
+        x0 <= cur.x1 + Math.max(2, lineH * 0.6)) {
+      cur.x1 = Math.max(cur.x1, x1);
+      cur.y0 = Math.min(cur.y0, y0);
+      cur.y1 = Math.max(cur.y1, y1);
+    } else {
+      if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
+      cur = {x0, y0, x1, y1};
+    }
+  }
+  if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
+  return rects;
+}
+
+async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note=''}) {
+  if (!pw || !pw.__charBoxes) { alert('请先在 PDF 上选中再标记'); return null; }
+  const chars = pw.__charBoxes;
+  if (sIdx < 0 || eIdx >= chars.length) return null;
+  const rects = _charsRangeToRects(chars, sIdx, eIdx);
+  if (!rects.length) return null;
+  const pageNum = parseInt(pw.dataset.pageNum || '0');
+  const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx));
+  const payload = {
+    file: FILE_REL, page: pageNum, rects, color, text,
+    kind, sentence, body, note,
+    page_w: pw.__pageWPt, page_h: pw.__pageHPt,
+  };
+  try {
+    const r = await fetch('/pdf/api/highlights', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('保存高亮失败：' + (d.error || '?')); return null; }
+    _allHighlights.push(d.highlight);
+    (_hlByPage[pageNum] ||= []).push(d.highlight);
+    renderHighlightsOnPage(pw, pageNum);
+    _lastHlColor = color;
+    localStorage.setItem('pdf-hl-last-color', color);
+    return d.highlight;
+  } catch (e) {
+    alert('保存高亮异常：' + e.message);
+    return null;
+  }
+}
+
+// 工具栏的色板（点击颜色 = 立刻保存）
+function renderHlPicker() {
+  const c = document.getElementById('hl-color-picker');
+  if (!c) return;
+  // 清掉旧 swatch（保留 .lbl）
+  c.querySelectorAll('.swatch').forEach(s => s.remove());
+  for (const col of getHlColors()) {
+    const sw = document.createElement('div');
+    sw.className = 'swatch';
+    sw.style.background = col;
+    sw.title = '用 ' + col + ' 标记';
+    sw.onclick = async (e) => { e.stopPropagation(); await onHighlightSel(col); };
+    c.appendChild(sw);
+  }
+}
+async function onHighlightSel(color) {
+  if (!_charSel) return;
+  await saveHighlight({
+    pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx,
+    color, kind: 'note',
+  });
+  // 清选中 + 关闭 toolbar
+  _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
+  _charSel = null;
+  lastSelText = '';
+  _updateSelPreview('');
+  toolbar.classList.remove('open');
+  _toast('已标记 🖌');
+}
+
+// 从 result-modal「🖌 标记到 PDF」入口：基于 _resultContext 保存
+async function markFromResult() {
+  if (!_resultContext || !_resultContext.charSel) {
+    alert('找不到原始 PDF 选中位置（先在 PDF 上选中再翻译/解释，再点这里）');
+    return;
+  }
+  const md = document.getElementById('result-content');
+  const clone = md.cloneNode(true);
+  clone.querySelectorAll('.head-pick,.reply-pick-all-result,.pick-btn').forEach(b => b.remove());
+  const body = (clone.dataset.raw || clone.textContent || '').trim();
+  const cs = _resultContext.charSel;
+  const h = await saveHighlight({
+    pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx,
+    color: _lastHlColor,
+    kind: _resultContext.kind || 'note',
+    sentence: _resultContext.sentence || '',
+    body,
+  });
+  if (h) { closeResult(); _toast('已加标记 🖌'); }
+}
+window.markFromResult = markFromResult;
+
+// 点击已存在的高亮 → popover（预览块 + 颜色 + 备注 + 删除）
+let _popoverHL = null;
+function closeHlPopover() {
+  _popoverHL = null;
+  document.getElementById('hl-popover')?.classList.remove('open');
+}
+window.closeHlPopover = closeHlPopover;
+function openHlPopover(h, anchorDiv, pw) {
+  _popoverHL = h;
+  const pop = document.getElementById('hl-popover');
+  if (!pop) return;
+  const colorsHtml = getHlColors().map(c =>
+    `<span class="swatch${c===h.color?' cur':''}" data-c="${escHtml(c)}" style="background:${escHtml(c)}"></span>`
+  ).join('');
+  const kindLbl = h.kind === 'translate' ? '🌐 翻译'
+                : h.kind === 'explain'   ? '💡 解释'
+                : '📝 备注';
+  pop.innerHTML = `
+    <div class="hl-snip" data-id="${escHtml(h.id)}">
+      ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl">📌 选中</span>${escHtml(h.text)}</div>` : ''}
+      ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl">📖 所在句</span>${escHtml(h.sentence)}</div>` : ''}
+      ${h.body ? `<div class="hl-snip-row body"><span class="row-lbl">${kindLbl}</span>${escHtml(h.body)}</div>` : ''}
+      ${(!h.text && !h.sentence && !h.body) ? `<div class="hl-snip-row text" style="color:#7a8497">（无文字内容）</div>` : ''}
+    </div>
+    <div class="row"><span class="row-lbl">🎨 颜色</span>${colorsHtml}</div>
+    <textarea id="hl-note" placeholder="自定义备注（可空）">${escHtml(h.note || '')}</textarea>
+    <div class="actions">
+      <button class="del" data-act="del">🗑 删除</button>
+      <button data-act="save" class="primary">保存</button>
+    </div>
+  `;
+  // 预览块：点击展开 / 收起 + 触屏左滑揭示删除
+  const snip = pop.querySelector('.hl-snip');
+  if (snip) _attachSnipBehavior(snip, () => _hlDelete(h, pw));
+  // 颜色 swatch
+  pop.querySelectorAll('.row .swatch').forEach(sw => {
+    sw.onclick = (e) => {
+      e.stopPropagation();
+      pop.querySelectorAll('.row .swatch').forEach(s => s.classList.remove('cur'));
+      sw.classList.add('cur');
+      h._pendingColor = sw.dataset.c;
+    };
+  });
+  pop.querySelector('[data-act=save]').onclick = async (e) => {
+    e.stopPropagation();
+    await _hlUpdate(h, pw, {
+      color: h._pendingColor || h.color,
+      note: document.getElementById('hl-note').value,
+    });
+    closeHlPopover();
+  };
+  pop.querySelector('[data-act=del]').onclick = async (e) => {
+    e.stopPropagation();
+    await _hlDelete(h, pw);
+  };
+  // 定位：高亮元素下方（贴齐左边，跟 main 滚动）
+  const r = anchorDiv.getBoundingClientRect();
+  pop.style.left = (r.left + window.scrollX) + 'px';
+  pop.style.top  = (r.bottom + window.scrollY + 6) + 'px';
+  pop.classList.add('open');
+  // 防止 popover 跑出视口右侧
+  requestAnimationFrame(() => {
+    const pr = pop.getBoundingClientRect();
+    if (pr.right > window.innerWidth - 8) {
+      pop.style.left = Math.max(8, window.innerWidth - pr.width - 8) + 'px';
+    }
+  });
+}
+
+async function _hlUpdate(h, pw, patch) {
+  try {
+    const r = await fetch('/pdf/api/highlights', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({file: FILE_REL, id: h.id, ...patch}),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('保存失败：' + (d.error || '?')); return; }
+    Object.assign(h, d.highlight);
+    renderHighlightsOnPage(pw, h.page);
+    _toast('已保存');
+  } catch (e) { alert('保存异常：' + e.message); }
+}
+async function _hlDelete(h, pw) {
+  if (!confirm('删除这条高亮？')) return;
+  try {
+    const r = await fetch('/pdf/api/highlights', {
+      method: 'DELETE', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({file: FILE_REL, id: h.id}),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert('删除失败：' + (d.error || '?')); return; }
+    _allHighlights = _allHighlights.filter(x => x.id !== h.id);
+    _hlByPage[h.page] = (_hlByPage[h.page] || []).filter(x => x.id !== h.id);
+    renderHighlightsOnPage(pw, h.page);
+    closeHlPopover();
+    _toast('已删除');
+  } catch (e) { alert('删除异常：' + e.message); }
+}
+
+// 预览块的交互：单击 = 展开/收起；触屏左滑 = 显示删除按钮
+function _attachSnipBehavior(node, onDel) {
+  // 整体可滑动 wrapper（让 transform 仅作用 node 本身，删除按钮固定在 popover 上）
+  node.style.position = 'relative';
+  node.style.transition = 'transform .15s';
+  // 创建删除按钮（左滑显示，绝对定位在右端）
+  const del = document.createElement('button');
+  del.textContent = '🗑 删除';
+  del.style.cssText = 'position:absolute;right:6px;top:50%;transform:translate(110%,-50%);background:#7a2828;color:#fff;border:1px solid #4a1a1a;border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;z-index:2;transition:transform .15s,opacity .15s;opacity:0';
+  node.parentElement.style.position = 'relative';
+  node.parentElement.style.overflow = 'visible';
+  node.parentElement.insertBefore(del, node.nextSibling);
+  del.onclick = (e) => { e.stopPropagation(); onDel(); };
+
+  const reveal = () => {
+    node.style.transform = 'translateX(-70px)';
+    del.style.transform = 'translate(0,-50%)';
+    del.style.opacity = '1';
+    node.dataset.swiped = '1';
+  };
+  const reset = () => {
+    node.style.transform = '';
+    del.style.transform = 'translate(110%,-50%)';
+    del.style.opacity = '0';
+    delete node.dataset.swiped;
+  };
+  let sx = 0, dx = 0, swiping = false;
+  node.addEventListener('touchstart', (e) => {
+    sx = e.touches[0].clientX; dx = 0; swiping = true;
+  }, {passive: true});
+  node.addEventListener('touchmove', (e) => {
+    if (!swiping) return;
+    dx = e.touches[0].clientX - sx;
+    if (dx < -3) {
+      node.style.transform = `translateX(${Math.max(dx,-100)}px)`;
+    } else if (dx > 3 && node.dataset.swiped) {
+      reset();
+    }
+  }, {passive: true});
+  node.addEventListener('touchend', () => {
+    swiping = false;
+    if (dx < -40) reveal();
+    else if (!node.dataset.swiped) reset();
+    dx = 0;
+  });
+  // 单击：展开/收起 全文（除非处于 swipe 揭示态——这时单击复位）
+  node.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    if (node.dataset.swiped) { reset(); return; }
+    node.classList.toggle('expanded');
+  });
+}
+
+// 设置 modal 里的颜色管理
+function renderHlColorSetting() {
+  const c = document.getElementById('set-hl-colors');
+  if (!c) return;
+  c.innerHTML = '';
+  for (const col of getHlColors()) {
+    const w = document.createElement('div');
+    w.className = 'swatch-w';
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = col;
+    w.appendChild(sw);
+    const del = document.createElement('button');
+    del.className = 'del';
+    del.textContent = '×';
+    del.title = '删除';
+    del.onclick = () => {
+      const cur = getHlColors().filter(x => x !== col);
+      saveHlColors(cur.length ? cur : DEFAULT_HL_COLORS);
+      renderHlPicker();
+      renderHlColorSetting();
+    };
+    w.appendChild(del);
+    c.appendChild(w);
+  }
+}
+window.addHlColor = () => {
+  const v = (document.getElementById('set-hl-new')?.value || '').trim();
+  if (!/^#[0-9a-fA-F]{3,8}$/.test(v)) { alert('颜色格式应为 #rrggbb'); return; }
+  const arr = getHlColors();
+  if (arr.includes(v)) return;
+  arr.push(v);
+  saveHlColors(arr);
+  renderHlPicker();
+  renderHlColorSetting();
+};
+window.resetHlColors = () => {
+  saveHlColors(DEFAULT_HL_COLORS);
+  renderHlPicker();
+  renderHlColorSetting();
+};
+
+// 全局：点 popover 外 / hl-saved 外 → 关 popover
+document.addEventListener('click', (e) => {
+  if (!_popoverHL) return;
+  if (e.target.closest?.('#hl-popover')) return;
+  if (e.target.closest?.('.hl-saved')) return;
+  closeHlPopover();
+}, true);
+
+// 缩放/重渲染后重新贴高亮（zoom 变了 css px 也变了）
+const _origRenderPageInto = null;  // 仅占位
+// 在 _renderPageInto 里 loadCharsAndBindLayer 内部已经调用了 renderHighlightsOnPage
+
 // 结果 modal
 function openResult(title, src, contentHtml) {
   document.getElementById('result-title').textContent = title;
@@ -1824,6 +2294,7 @@ window.openSettings = () => {
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
+  renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
@@ -1935,6 +2406,11 @@ async function aiCall(path, body, label) {
 
 window.onTranslate = async () => {
   if (!lastSelText) return;
+  // 记录原始选中位置 + kind，让 result-modal 的「🖌 标记到 PDF」按钮可用
+  _resultContext = _charSel ? {
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    text: lastSelText, sentence: '', kind: 'translate',
+  } : null;
   toolbar.classList.remove('open');
   const text = lastSelText.trim();
   // 单词（英文字母、长度 ≤ 30、无空格）→ 查 ECDICT 离线字典（秒查，不耗 AI 额度）
@@ -1982,6 +2458,11 @@ window.onExplain = () => {
       context = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
     }
   }
+  // 记录原始选中 + 上下文句，供 result-modal「🖌 标记到 PDF」用
+  _resultContext = _charSel ? {
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    text: lastSelText, sentence: context, kind: 'explain',
+  } : null;
   aiCall('/pdf/api/explain', {text: lastSelText, context}, '💡 AI 解释');
 };
 window.onToQA = () => {

@@ -620,5 +620,149 @@ def pdf_api_snippets_to():
     return jsonify(out)
 
 
+# ─── 高亮（sidecar JSON 存 state/pdf-highlights/<sha1>.json）───────────────────
+
+_HL_DIR = CLAUDE_DIR / "state" / "pdf-highlights"
+_HL_LOCK_TIMEOUT = 5  # 秒，简单文件锁
+
+def _hl_path(rel: str) -> Path:
+    import hashlib
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+    _HL_DIR.mkdir(parents=True, exist_ok=True)
+    return _HL_DIR / f"{sha}.json"
+
+def _hl_load(rel: str) -> dict:
+    p = _hl_path(rel)
+    if not p.exists():
+        return {"pdf_rel": rel, "highlights": []}
+    try:
+        data = json.loads(p.read_text("utf-8"))
+        if not isinstance(data.get("highlights"), list):
+            data["highlights"] = []
+        data["pdf_rel"] = rel
+        return data
+    except Exception:
+        return {"pdf_rel": rel, "highlights": []}
+
+def _hl_save(rel: str, data: dict):
+    p = _hl_path(rel)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(p)
+
+
+@bp.route("/api/highlights", methods=["GET"])
+def pdf_api_highlights_list():
+    """GET ?file=<rel> → {ok, highlights:[{id,page,rects,color,text,note,time}, ...]}"""
+    rel = request.args.get("file", "")
+    if not rel or _safe_vault_path(rel) is None:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    return jsonify({"ok": True, **_hl_load(rel)})
+
+
+@bp.route("/api/highlights", methods=["POST"])
+def pdf_api_highlights_create():
+    """POST {file, page, rects:[[x0,y0,x1,y1],...], color, text, note?, page_w?, page_h?}
+    rects 用 PDF 坐标（pt，跟 page-chars 同坐标系）。返回 {ok, id}。"""
+    import time as _t
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    if not rel or _safe_vault_path(rel) is None:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    page = int(data.get("page") or 0)
+    rects = data.get("rects") or []
+    color = (data.get("color") or "#fff59d").strip()
+    text = (data.get("text") or "").strip()
+    note = (data.get("note") or "").strip()
+    kind = (data.get("kind") or "note").strip()
+    sentence = (data.get("sentence") or "").strip()
+    body = (data.get("body") or "").strip()
+    if page < 1 or not rects:
+        return jsonify({"ok": False, "error": "missing page/rects"}), 400
+    # 规范化 rects
+    norm = []
+    for r in rects:
+        if not isinstance(r, list) or len(r) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+        except (TypeError, ValueError):
+            continue
+        if x1 < x0: x0, x1 = x1, x0
+        if y1 < y0: y0, y1 = y1, y0
+        norm.append([round(x0,2), round(y0,2), round(x1,2), round(y1,2)])
+    if not norm:
+        return jsonify({"ok": False, "error": "no valid rects"}), 400
+    obj = {
+        "id": "h_" + os.urandom(6).hex(),
+        "page": page,
+        "rects": norm,
+        "color": color,
+        "text": text[:2000],
+        "note": note[:2000],
+        "kind": kind if kind in ("note","translate","explain") else "note",
+        "sentence": sentence[:2000],
+        "body": body[:8000],
+        "time": int(_t.time()),
+    }
+    pw, ph = data.get("page_w"), data.get("page_h")
+    if pw and ph:
+        try:
+            obj["page_w"] = float(pw); obj["page_h"] = float(ph)
+        except (TypeError, ValueError): pass
+    db = _hl_load(rel)
+    db["highlights"].append(obj)
+    _hl_save(rel, db)
+    return jsonify({"ok": True, "id": obj["id"], "highlight": obj})
+
+
+@bp.route("/api/highlights", methods=["PATCH"])
+def pdf_api_highlights_update():
+    """PATCH {file, id, color?, note?} → {ok}"""
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    hid = (data.get("id") or "").strip()
+    if not rel or _safe_vault_path(rel) is None or not hid:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    db = _hl_load(rel)
+    found = None
+    for h in db["highlights"]:
+        if h.get("id") == hid:
+            found = h
+            break
+    if not found:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    if "color" in data:
+        found["color"] = (data.get("color") or "").strip() or found["color"]
+    if "note" in data:
+        found["note"] = (data.get("note") or "").strip()[:2000]
+    if "sentence" in data:
+        found["sentence"] = (data.get("sentence") or "").strip()[:2000]
+    if "body" in data:
+        found["body"] = (data.get("body") or "").strip()[:8000]
+    _hl_save(rel, db)
+    return jsonify({"ok": True, "highlight": found})
+
+
+@bp.route("/api/highlights", methods=["DELETE"])
+def pdf_api_highlights_delete():
+    """DELETE {file, id} → {ok}"""
+    data = request.get_json(silent=True) or {}
+    if not data:
+        # 也支持 ?file=&id=
+        data = {"file": request.args.get("file",""), "id": request.args.get("id","")}
+    rel = (data.get("file") or "").strip()
+    hid = (data.get("id") or "").strip()
+    if not rel or _safe_vault_path(rel) is None or not hid:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    db = _hl_load(rel)
+    before = len(db["highlights"])
+    db["highlights"] = [h for h in db["highlights"] if h.get("id") != hid]
+    if len(db["highlights"]) == before:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    _hl_save(rel, db)
+    return jsonify({"ok": True})
+
+
 def register_pdf_reader(app):
     app.register_blueprint(bp)
