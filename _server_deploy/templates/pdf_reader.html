@@ -152,9 +152,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn:hover{transform:scale(1.3);box-shadow:0 0 0 3px var(--sent-fill,rgba(245,158,11,.4)),0 2px 6px rgba(0,0,0,.5)}
 .vocab-sentence-btn.active{box-shadow:inset 0 0 0 2px #1a1a1a,0 1px 4px rgba(0,0,0,.4)}
 
-/* 句子翻译覆盖层：单块完整中文 + clip-path + 颜色跟按钮同 */
-.vocab-sentence-overlay{position:absolute;background:var(--sent-fill,#fef3c7);color:#111;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 currentColor,inset -1px 0 0 currentColor,inset 0 -1px 0 currentColor,inset 0 1px 0 currentColor;color:#d97706}
-.vocab-sentence-overlay:hover{filter:brightness(.95)}
+/* 句子翻译覆盖层：实色白底（看清中文）+ 左侧粗色边 + 细色边框 */
+.vocab-sentence-overlay{position:absolute;background:#ffffff;color:#111;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 currentColor,inset -1px 0 0 currentColor,inset 0 -1px 0 currentColor,inset 0 1px 0 currentColor;color:#d97706}
+.vocab-sentence-overlay:hover{background:#fff8e1}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
@@ -951,8 +951,7 @@ function renderVocabSentences(pw, sentences) {
       layer.appendChild(box);
     }
     if (!rects.length) continue;
-    // 按钮放在最后一行 rect 的句末右侧 +4px（紧贴句末）
-    const rLast = rects[rects.length - 1];
+    // 按钮放在句首左侧外（紧贴粗色左边）—— 不挡下一句开头
     const r0 = rects[0];
     const btn = document.createElement('button');
     btn.className = 'vocab-sentence-btn';
@@ -961,13 +960,11 @@ function renderVocabSentences(pw, sentences) {
     btn.dataset.sid = sid;
     btn.style.color = stroke;     // currentColor → background
     btn.style.setProperty('--sent-fill', fill);
-    let leftPx = rLast[2] * sx + 4;
-    const maxLeft = cssW - 22;
-    if (leftPx > maxLeft) leftPx = maxLeft;
-    // top 跟最后一行 rect 对齐（不是第一行）
-    const lineH = (rLast[3] - rLast[1]) * sy;
+    const lineH = (r0[3] - r0[1]) * sy;
+    let leftPx = r0[0] * sx - 24;   // 默认句首左外 24px
+    if (leftPx < 2) leftPx = r0[0] * sx + 2;   // 不够空间 → 退到句首内 2px（盖一两字）
     btn.style.left = leftPx + 'px';
-    btn.style.top = (rLast[1] * sy + lineH / 2 - 10) + 'px';   // 垂直居中
+    btn.style.top = (r0[1] * sy + lineH / 2 - 10) + 'px';   // 跟句首行垂直居中
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleSentenceOverlay(layer, s, btn, sx, sy);
@@ -2282,6 +2279,7 @@ async function dictStream(word, ctx) {
   const params = new URLSearchParams({
     word, file: FILE_REL || '', page: String(currentPage || 0), context: ctx || '',
   });
+  window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等
   openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
