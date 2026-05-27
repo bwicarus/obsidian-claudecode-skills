@@ -79,6 +79,51 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #result-modal .actions button:hover{background:#2c3e6a;border-color:#3b6db5}
 #result-modal .loading{color:#8a9bb4;font-style:italic}
 
+/* AI 回答里的加号选中按钮（同 QA browser 风格） */
+#result-content h1,#result-content h2,#result-content h3,#result-content h4,#result-content h5,#result-content h6{position:relative}
+#result-content h1.has-pick,#result-content h2.has-pick,#result-content h3.has-pick,#result-content h4.has-pick,#result-content h5.has-pick,#result-content h6.has-pick,#result-content p.fake-head.has-pick,#result-content li.fake-head.has-pick{padding-right:30px}
+.pick-btn{flex-shrink:0;width:20px;height:20px;line-height:18px;text-align:center;border:1.5px solid #5b6a85;border-radius:50%;background:transparent;color:#a8cdff;font-size:14px;cursor:pointer;user-select:none;transition:all .12s;padding:0;font-family:inherit}
+.pick-btn:hover{border-color:#60a5fa;color:#60a5fa}
+.pick-btn.on{background:#0078d4;border-color:#0078d4;color:#fff;font-weight:700}
+#result-content .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}
+.reply-pick-all{align-self:flex-start;margin-top:8px;font-size:11px;color:#a8cdff;background:transparent;border:1px dashed #5b6a85;border-radius:12px;padding:3px 12px;cursor:pointer;user-select:none;transition:all .12s}
+.reply-pick-all:hover{border-color:#60a5fa;color:#60a5fa}
+.reply-pick-all.on{background:#0078d4;border-color:#0078d4;border-style:solid;color:#fff;font-weight:600}
+#result-content .hsec-picked,#result-content .hsec-picked-body{background:rgba(96,165,250,.08);box-shadow:-3px 0 0 #60a5fa}
+#result-content .hsec-picked{border-top-left-radius:4px;border-top-right-radius:4px;padding-top:2px}
+#result-content .picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:rgba(96,165,250,.06);border-radius:6px;padding:4px}
+
+/* 右下角草稿 badge（已选 snippets 数量） */
+#draft-badge{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;background:#244470;border:2px solid #3b6db5;color:#fff;font-size:18px;font-weight:700;cursor:pointer;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;user-select:none}
+#draft-badge.show{display:flex}
+#draft-badge:hover{background:#2c5188;border-color:#60a5fa}
+#draft-badge .count{font-size:13px;font-weight:600;line-height:1}
+#draft-badge .icon{font-size:18px;line-height:1}
+
+/* 草稿列表 modal */
+#draft-mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:300}
+#draft-mask.open{display:flex}
+#draft-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:min(640px,92vw);max-height:84vh;display:flex;flex-direction:column}
+#draft-modal h3{margin:0 0 12px;font-size:15px;color:#cfe6ff;display:flex;align-items:center;gap:10px}
+#draft-modal h3 .clear-all{margin-left:auto;font-size:11px;color:#7a8497;background:transparent;border:1px solid #2a3550;border-radius:4px;padding:3px 8px;cursor:pointer}
+#draft-list{flex:1;overflow-y:auto;margin:0 -6px;padding:0 6px}
+.draft-item{display:flex;gap:10px;align-items:flex-start;padding:10px 8px;border-bottom:1px solid #1f2740;cursor:pointer;transition:background .15s;position:relative;overflow:hidden}
+.draft-item:hover{background:#0d1322}
+.draft-item .sel-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;margin-top:2px;transition:all .15s}
+.draft-item.selected .sel-circle{background:#34d399;border-color:#34d399;box-shadow:inset 0 0 0 3px #10162a}
+.draft-item .body{flex:1;min-width:0}
+.draft-item .src{color:#7a8497;font-size:10px;margin-bottom:3px}
+.draft-item .text{color:#cfe6ff;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden;text-overflow:ellipsis}
+.draft-item .del-btn{flex-shrink:0;background:#4a1a1a;border:1px solid #7a2828;color:#ffb4b4;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;align-self:center}
+.draft-item .del-btn:hover{background:#5a2424}
+.draft-empty{text-align:center;color:#5a6680;padding:40px 20px;font-size:13px}
+#draft-actions{margin-top:14px;padding-top:14px;border-top:1px solid #2a3550;display:flex;gap:8px;flex-wrap:wrap}
+#draft-actions button{flex:1;min-width:0;background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:9px 12px;font-size:12px;cursor:pointer;transition:background .15s}
+#draft-actions button:hover{background:#2c3e6a}
+#draft-actions button.primary{background:#244470;color:#fff;border-color:#3b6db5}
+#draft-actions button.primary:hover{background:#2c5188}
+#draft-actions button:disabled{opacity:.5;cursor:not-allowed}
+
 @media (max-width:900px){
   #sidebar{width:85vw}
 }
@@ -159,6 +204,30 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <div class="content" id="result-content"></div>
     <div class="actions">
       <button onclick="closeResult()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 草稿 badge：永远在右下角；选中 snippets ≥ 1 时显示 -->
+<div id="draft-badge" onclick="openDraftModal()" title="已选段落">
+  <div style="display:flex;flex-direction:column;align-items:center;line-height:1.1">
+    <span class="icon">📋</span>
+    <span class="count" id="draft-count">0</span>
+  </div>
+</div>
+
+<!-- 草稿列表 modal -->
+<div id="draft-mask" onclick="if(event.target===this) closeDraftModal()">
+  <div id="draft-modal">
+    <h3>
+      <span>📋 已选段落 <span id="draft-modal-count" style="color:#7a8497;font-size:12px;font-weight:400"></span></span>
+      <button class="clear-all" onclick="clearAllDrafts()">全部清空</button>
+    </h3>
+    <div id="draft-list">…</div>
+    <div id="draft-actions">
+      <button class="primary" onclick="createNoteFromDrafts()">📝 创建笔记</button>
+      <button onclick="createAnkiFromDrafts()">🎴 创建 Anki</button>
+      <button onclick="createBothFromDrafts()">📚 笔记 + Anki</button>
     </div>
   </div>
 </div>
@@ -1454,12 +1523,240 @@ function openResult(title, src, contentHtml) {
   document.getElementById('result-title').textContent = title;
   document.getElementById('result-src').textContent = src;
   document.getElementById('result-content').innerHTML = contentHtml;
+  document.getElementById('result-content').dataset.title = title;
+  document.getElementById('result-content').dataset.src = src;
   document.getElementById('result-mask').classList.add('open');
   if (window.MathJax && MathJax.typesetPromise) {
     MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
   }
 }
 window.closeResult = () => document.getElementById('result-mask').classList.remove('open');
+
+// ──────── AI 回答里的加号选中（同 QA browser 风格） ────────
+function _headLevel(h) { return parseInt(h.tagName.slice(1), 10); }
+function _isFakeHead(h) { return h.classList && h.classList.contains('fake-head'); }
+function addResultPickers() {
+  const md = document.getElementById('result-content');
+  if (!md) return;
+  const realHeads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+  // 粗体段落假标题（AI 常用 **标题** 而非 ## 标题）
+  const fakeHeads = [];
+  md.querySelectorAll('p, li').forEach(el => {
+    if (el.closest('h1,h2,h3,h4,h5,h6')) return;
+    const strongs = el.querySelectorAll('strong');
+    if (strongs.length !== 1) return;
+    const t = (el.textContent || '').trim();
+    const st = (strongs[0].textContent || '').trim();
+    if (t.length >= 3 && st.length >= 2 && st.length / t.length >= 0.85) {
+      el.classList.add('fake-head');
+      fakeHeads.push(el);
+    }
+  });
+  const heads = [...realHeads, ...fakeHeads];
+  if (!heads.length) return;
+  let singleTopCovers = false, singleTop = null;
+  if (realHeads.length) {
+    const minLvl = Math.min(...realHeads.map(_headLevel));
+    const tops = realHeads.filter(h => _headLevel(h) === minLvl);
+    if (tops.length === 1 && md.firstElementChild === tops[0]) {
+      singleTopCovers = true; singleTop = tops[0];
+    }
+  }
+  heads.forEach(h => {
+    if (singleTopCovers && h === singleTop) return;
+    if (h.querySelector('.head-pick')) return;
+    h.classList.add('has-pick');
+    const btn = document.createElement('button');
+    btn.className = 'pick-btn head-pick';
+    btn.textContent = '+';
+    btn.onclick = (e) => { e.stopPropagation(); _toggleResultPick(h, md); };
+    h.appendChild(btn);
+  });
+}
+function _toggleResultPick(h, md) {
+  const newOn = !h.querySelector('.head-pick').classList.contains('on');
+  if (!_isFakeHead(h) && /^H[1-6]$/.test(h.tagName)) {
+    const heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+    const i = heads.indexOf(h);
+    const lvl = _headLevel(h);
+    _setResultPick(h, newOn);
+    for (let j = i + 1; j < heads.length; j++) {
+      if (_headLevel(heads[j]) <= lvl) break;
+      _setResultPick(heads[j], newOn);
+    }
+  } else {
+    _setResultPick(h, newOn);
+  }
+  _collectAndPersistResultSelection();
+}
+function _setResultPick(h, on) {
+  const btn = h.querySelector('.head-pick');
+  if (btn) btn.classList.toggle('on', on);
+  h.classList.toggle('hsec-picked', on);
+  let sib = h.nextElementSibling;
+  while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
+    sib.classList.toggle('hsec-picked-body', on);
+    sib = sib.nextElementSibling;
+  }
+}
+function _collectSelectedSectionTexts() {
+  const md = document.getElementById('result-content');
+  if (!md) return [];
+  const parts = [];
+  md.querySelectorAll('h1,h2,h3,h4,h5,h6,p.fake-head,li.fake-head').forEach(h => {
+    const btn = h.querySelector('.head-pick');
+    if (!btn || !btn.classList.contains('on')) return;
+    let txt;
+    if (/^H[1-6]$/.test(h.tagName)) {
+      txt = '#'.repeat(_headLevel(h)) + ' ' + (h.textContent || '').replace(/\+\s*$/, '').trim();
+    } else {
+      txt = (h.textContent || '').replace(/\+\s*$/, '').trim();
+    }
+    let sib = h.nextElementSibling;
+    while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
+      const t = (sib.textContent || '').trim();
+      if (t) txt += '\n' + t;
+      sib = sib.nextElementSibling;
+    }
+    parts.push(txt.trim());
+  });
+  return parts;
+}
+function _collectAndPersistResultSelection() {
+  // 收集当前 modal 内已选段，去重 push 到 _drafts
+  const texts = _collectSelectedSectionTexts();
+  const title = document.getElementById('result-content').dataset.title || '';
+  const src = document.getElementById('result-content').dataset.src || '';
+  for (const t of texts) {
+    if (!t) continue;
+    if (!_drafts.some(d => d.text === t)) {
+      _drafts.push({id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2,6), text: t, source: title, src: src, time: Date.now(), selected: true});
+    }
+  }
+  _persistDrafts();
+  _updateDraftBadge();
+}
+
+// ──────── 草稿列表（多个 AI 回答的勾选段累积） ────────
+let _drafts = [];
+try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch (_) {}
+function _persistDrafts() {
+  try { localStorage.setItem('pdf-drafts', JSON.stringify(_drafts)); } catch (_) {}
+}
+function _updateDraftBadge() {
+  const b = document.getElementById('draft-badge');
+  document.getElementById('draft-count').textContent = _drafts.length;
+  b.classList.toggle('show', _drafts.length > 0);
+}
+window.openDraftModal = () => {
+  const list = document.getElementById('draft-list');
+  const cnt = document.getElementById('draft-modal-count');
+  cnt.textContent = `（共 ${_drafts.length} 段，已选 ${_drafts.filter(d => d.selected).length}）`;
+  if (!_drafts.length) {
+    list.innerHTML = '<div class="draft-empty">还没有勾选任何段落。<br>在 AI 回答里点 + 按钮收集段落。</div>';
+  } else {
+    list.innerHTML = _drafts.map((d, i) => `
+      <div class="draft-item ${d.selected ? 'selected' : ''}" data-id="${d.id}">
+        <div class="sel-circle" onclick="toggleDraftSel('${d.id}')" title="${d.selected?'取消':'选中'}"></div>
+        <div class="body" onclick="expandDraft('${d.id}')">
+          <div class="src">${(d.source||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')} · ${new Date(d.time).toLocaleString().slice(5,16)}</div>
+          <div class="text" id="dt-${d.id}">${d.text.slice(0, 200).replace(/&/g,'&amp;').replace(/</g,'&lt;')}${d.text.length>200?'…':''}</div>
+        </div>
+        <button class="del-btn" onclick="deleteDraft('${d.id}')">删除</button>
+      </div>
+    `).join('');
+  }
+  document.getElementById('draft-mask').classList.add('open');
+};
+window.closeDraftModal = () => document.getElementById('draft-mask').classList.remove('open');
+window.toggleDraftSel = (id) => {
+  const d = _drafts.find(x => x.id === id);
+  if (!d) return;
+  d.selected = !d.selected;
+  _persistDrafts();
+  openDraftModal();
+};
+window.expandDraft = (id) => {
+  const el = document.getElementById('dt-' + id);
+  const d = _drafts.find(x => x.id === id);
+  if (!el || !d) return;
+  // 切换全文/截断显示
+  if (el.dataset.full === '1') {
+    el.textContent = d.text.slice(0, 200) + (d.text.length > 200 ? '…' : '');
+    el.dataset.full = '0';
+    el.style.maxHeight = '80px';
+  } else {
+    el.textContent = d.text;
+    el.dataset.full = '1';
+    el.style.maxHeight = 'none';
+  }
+};
+window.deleteDraft = (id) => {
+  _drafts = _drafts.filter(d => d.id !== id);
+  _persistDrafts();
+  _updateDraftBadge();
+  openDraftModal();
+};
+window.clearAllDrafts = () => {
+  if (!confirm('清空所有 ' + _drafts.length + ' 段已选内容？')) return;
+  _drafts = [];
+  _persistDrafts();
+  _updateDraftBadge();
+  closeDraftModal();
+};
+
+async function _doCreate(makeNote, makeAnki) {
+  const picked = _drafts.filter(d => d.selected);
+  if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
+  let noteName = '';
+  if (makeNote) {
+    noteName = prompt('请输入笔记名（不含 .md）：', '');
+    if (noteName === null) return;
+    noteName = (noteName || '').trim();
+    if (!noteName) { alert('未输入笔记名'); return; }
+  }
+  const btns = document.querySelectorAll('#draft-actions button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const ov = _getAiOverrides();
+    const r = await fetch('/pdf/api/snippets-to', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        snippets: picked.map(d => ({text: d.text, source: d.source})),
+        make_note: makeNote, make_anki: makeAnki,
+        note_name: noteName,
+        model: ov.model || '', effort: ov.effort || '',
+      }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      let msg = '✓ 完成\n';
+      if (d.note_path) msg += '笔记：' + d.note_path + '\n';
+      if (d.anki_added) msg += `Anki：${d.anki_added} 张卡片`;
+      alert(msg);
+      if (d.note_path && d.obsidian_url) {
+        if (confirm('在 Obsidian 中打开笔记？')) location.href = d.obsidian_url;
+      }
+      // 创建成功后从草稿移除已用段
+      _drafts = _drafts.filter(x => !x.selected);
+      _persistDrafts();
+      _updateDraftBadge();
+      closeDraftModal();
+    } else {
+      alert('✗ 失败：' + (d.error || '未知'));
+    }
+  } catch (e) {
+    alert('✗ 请求失败：' + e.message);
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+window.createNoteFromDrafts = () => _doCreate(true, false);
+window.createAnkiFromDrafts = () => _doCreate(false, true);
+window.createBothFromDrafts = () => _doCreate(true, true);
+
+// 启动时刷新 badge
+setTimeout(_updateDraftBadge, 200);
 
 function md(s) {
   if (window.marked && marked.parse) {
@@ -1568,8 +1865,8 @@ async function aiCall(path, body, label) {
       if (errored) {
         contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + errored + '</div>';
       }
+      addResultPickers();   // SSE 完成后给标题加 +
     } else {
-      // 非 SSE 兼容（旧路径）
       const d = await r.json();
       if (d.ok) {
         const text = d.translation || d.explanation || JSON.stringify(d);
@@ -1577,6 +1874,7 @@ async function aiCall(path, body, label) {
         if (window.MathJax && MathJax.typesetPromise) {
           MathJax.typesetPromise([contentEl]).catch(()=>{});
         }
+        addResultPickers();
       } else {
         contentEl.innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
       }

@@ -476,5 +476,149 @@ def pdf_api_explain():
         return jsonify({"ok": False, "error": f"AI 解释失败：{ex}"}), 500
 
 
+@bp.route("/api/snippets-to", methods=["POST"])
+def pdf_api_snippets_to():
+    """从用户在 AI 回答里勾选的段落 → 创建笔记 / Anki 卡 / 两者。
+
+    body: {
+      snippets: [{text, source}],
+      make_note: bool, make_anki: bool,
+      note_name: str（make_note 时必填）,
+      model, effort
+    }
+    """
+    body = request.get_json(silent=True) or {}
+    snippets = body.get("snippets") or []
+    make_note = bool(body.get("make_note"))
+    make_anki = bool(body.get("make_anki"))
+    note_name = (body.get("note_name") or "").strip()
+    if not snippets:
+        return jsonify({"ok": False, "error": "无选中段落"}), 400
+    if not (make_note or make_anki):
+        return jsonify({"ok": False, "error": "至少选一个动作"}), 400
+    if make_note and not note_name:
+        return jsonify({"ok": False, "error": "笔记名不能为空"}), 400
+    out = {"ok": True}
+    # ── 创建笔记 ──
+    if make_note:
+        if not OBSIDIAN_ROOT:
+            return jsonify({"ok": False, "error": "VAULT 未配置"}), 500
+        safe = _sanitize_filename(note_name)
+        if not safe.endswith(".md"):
+            safe += ".md"
+        note_path = OBSIDIAN_ROOT / safe
+        if note_path.exists():
+            stem = safe[:-3]
+            for i in range(1, 200):
+                cand = OBSIDIAN_ROOT / f"{stem}-{i}.md"
+                if not cand.exists():
+                    note_path = cand; break
+        # AI 整理多段 snippets → 结构化 Markdown
+        snippets_text = "\n\n".join([
+            f"### 段 {i+1}（来自：{s.get('source','?')}）\n{s.get('text','')}"
+            for i, s in enumerate(snippets)
+        ])
+        prompt = (
+            f"请把以下从 AI 回答中收集到的多段内容整理成一篇结构化的 Obsidian Markdown 学习笔记。\n"
+            f"笔记主题：{note_name}\n\n"
+            "整理要求：\n"
+            "1. 各段按主题归类（同主题合并，不同主题用 ## 分节）\n"
+            "2. 保留所有实质内容，可改写让连贯但不丢信息\n"
+            "3. 数学公式用 $...$ 或 $$...$$，不要反引号包数学\n"
+            "4. 直接输出 Markdown 正文，不要前言/代码围栏\n\n"
+            f"=== 收集内容 ===\n{snippets_text}"
+        )
+        try:
+            content = _ai_call(prompt, body.get("model") or "", body.get("effort") or "").strip()
+            if content.startswith("```"):
+                import re as _re
+                content = _re.sub(r'^```[a-zA-Z]*\n', '', content)
+                content = _re.sub(r'\n```\s*$', '', content)
+            note_path.write_text(content, encoding="utf-8")
+            rel = note_path.relative_to(OBSIDIAN_ROOT).as_posix()
+            import urllib.parse as _up
+            vault_name = os.environ.get("OBSIDIAN_VAULT_NAME", "Obsidian Vault")
+            out["note_path"] = rel
+            out["obsidian_url"] = (
+                f"obsidian://open?vault={_up.quote(vault_name, safe='')}"
+                f"&file={_up.quote(rel[:-3] if rel.endswith('.md') else rel, safe='/')}"
+            )
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"笔记创建失败：{ex}"}), 500
+    # ── 创建 Anki 卡 ──
+    if make_anki:
+        try:
+            sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
+            from ai_backends import make_backend  # type: ignore
+            sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+            sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
+            from qa_server import get_cfg
+            cfg = get_cfg()
+            # AI 把 snippets 转 Anki 卡片 JSON
+            snippets_text = "\n\n".join([
+                f"段 {i+1}：{s.get('text','')}"
+                for i, s in enumerate(snippets)
+            ])
+            prompt = (
+                "请把以下学习内容转成 Anki 卡片（问答型 basic 或挖空型 cloze）。\n"
+                "输出严格 JSON，无任何额外文字：\n"
+                '{"cards": [{"type": "basic", "front": "...", "back": "..."}, '
+                '{"type": "cloze", "text": "...{{c1::挖空内容}}..."}, ...]}\n'
+                "要求：\n"
+                "1. 每个独立知识点 1 张卡，不要堆叠\n"
+                "2. front/back 简洁；cloze 一句一空（用 {{c1::xxx}} 不要 {{c1::xxx::hint}}）\n"
+                "3. 数学公式 $...$ 或 $$...$$\n\n"
+                f"=== 学习内容 ===\n{snippets_text}"
+            )
+            backend_name = cfg.get("ai_backend", "claude_cli")
+            settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
+            if body.get("model"):  settings["model"] = body["model"]
+            if body.get("effort"): settings["effort"] = body["effort"]
+            ad = make_backend(backend_name, settings)
+            raw = ad.chat([
+                {"role": "system", "content": "你是 Anki 卡片生成器，严格只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ])
+            # 提取 JSON
+            s_idx = raw.find("{"); e_idx = raw.rfind("}")
+            cards_data = json.loads(raw[s_idx:e_idx+1]) if s_idx >= 0 else {"cards": []}
+            cards = cards_data.get("cards") or []
+            # 通过 AnkiConnect 加入 Anki（deck 用 "QA"）
+            import urllib.request
+            ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+            added = 0
+            for c in cards:
+                ctype = (c.get("type") or "basic").lower()
+                if ctype == "cloze":
+                    fields = {"Text": c.get("text", ""), "Back Extra": ""}
+                    model = "Cloze"
+                else:
+                    fields = {"Front": c.get("front", ""), "Back": c.get("back", "")}
+                    model = "Basic"
+                req = json.dumps({
+                    "action": "addNote", "version": 6,
+                    "params": {"note": {
+                        "deckName": "QA",
+                        "modelName": model,
+                        "fields": fields,
+                        "tags": ["pdf-snippets"],
+                    }}
+                }).encode()
+                try:
+                    with urllib.request.urlopen(
+                        urllib.request.Request(ANKI_URL, data=req,
+                                                headers={"Content-Type":"application/json"}),
+                        timeout=10) as r:
+                        resp = json.loads(r.read())
+                        if not resp.get("error"):
+                            added += 1
+                except Exception:
+                    pass
+            out["anki_added"] = added
+        except Exception as ex:
+            out["anki_error"] = str(ex)
+    return jsonify(out)
+
+
 def register_pdf_reader(app):
     app.register_blueprint(bp)
