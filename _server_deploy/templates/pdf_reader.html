@@ -161,8 +161,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer
    mix-blend-mode:multiply → 颜色叠在字底，字像素不被糊 → 可高 opacity */
 .hl-layer{position:absolute;inset:0;z-index:5;pointer-events:none}
-.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:1;filter:saturate(1.05);transition:filter .12s}
-.hl-layer .hl-saved:hover{filter:saturate(1.2) brightness(.96)}
+.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;opacity:.45;transition:opacity .12s}
+.hl-layer .hl-saved:hover{opacity:.65}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
 /* 仅备注（无色）：透明背景 + 虚线边框提示"这里有备注但无颜色高亮" */
 .hl-layer .hl-saved.no-color{background:transparent !important;mix-blend-mode:normal;opacity:1;border:1px dashed rgba(150,170,200,.55)}
