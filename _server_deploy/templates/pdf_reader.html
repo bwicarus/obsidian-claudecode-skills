@@ -148,8 +148,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn:hover{transform:scale(1.12);background:#fbbf24}
 .vocab-sentence-btn.active{background:#34d399;border-color:#10b981}
 
-/* 句子翻译覆盖层：单 overlay 显示完整中文，clip-path 限制只在原 rect 区域可见 */
-.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-all;font-family:inherit;letter-spacing:0}
+/* 句子翻译覆盖层：单块覆盖整段，中文自然 wrap */
+.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;line-height:1.2;padding:0 2px;border-left:2px solid #f59e0b;overflow:hidden}
 .vocab-sentence-overlay:hover{background:#fff7d6}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
@@ -998,28 +998,14 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   if (!rects.length) return;
   const zh = s.zh || '';
   if (!zh) return;
-  // union bounding box
+  // union bounding box（盖住整段）
   let bx0 = rects[0][0], by0 = rects[0][1], bx1 = rects[0][2], by1 = rects[0][3];
   for (const r of rects) {
     bx0 = Math.min(bx0, r[0]); by0 = Math.min(by0, r[1]);
     bx1 = Math.max(bx1, r[2]); by1 = Math.max(by1, r[3]);
   }
-  // clip-path：所有 rect subpath 拼成可见区域（相对 overlay 左上角的坐标）
-  const subpaths = rects.map(r => {
-    const x  = ((r[0] - bx0) * sx).toFixed(2);
-    const y  = ((r[1] - by0) * sy).toFixed(2);
-    const x2 = ((r[2] - bx0) * sx).toFixed(2);
-    const y2 = ((r[3] - by0) * sy).toFixed(2);
-    return `M${x} ${y}L${x2} ${y}L${x2} ${y2}L${x} ${y2}Z`;
-  }).join(' ');
-
-  // 字号 + 行高：让中文 wrap 后每行 y 跟原 rect[i].y0 对齐
   const rectH = (rects[0][3] - rects[0][1]) * sy;
   const fontPx = Math.max(9, Math.round(rectH * 0.78));
-  // line-height = 实际行间距（rect[1].y0 - rect[0].y0）；单行时 = rect 高度
-  let lineHeightPx = rectH;
-  if (rects.length >= 2) lineHeightPx = (rects[1][1] - rects[0][1]) * sy;
-
   const ov = document.createElement('div');
   ov.className = 'vocab-sentence-overlay';
   ov.dataset.active = '1';
@@ -1028,14 +1014,7 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   ov.style.top = (by0 * sy) + 'px';
   ov.style.width = ((bx1 - bx0) * sx) + 'px';
   ov.style.height = ((by1 - by0) * sy) + 'px';
-  ov.style.clipPath = `path('${subpaths}')`;
-  ov.style.webkitClipPath = `path('${subpaths}')`;
   ov.style.fontSize = fontPx + 'px';
-  ov.style.lineHeight = lineHeightPx + 'px';
-  // 第一行 rect 可能不在 bounding box 最左（首字符缩进或非首行更宽）
-  // 让首字符跟原句第一字符对齐
-  const firstIndent = (rects[0][0] - bx0) * sx;
-  if (firstIndent > 0) ov.style.textIndent = firstIndent + 'px';
   ov.textContent = zh;
   ov.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1045,7 +1024,7 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   ov.addEventListener('mousedown', (e) => e.stopPropagation());
   ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
   layer.appendChild(ov);
-  // 字号自适应：若中文太长被 clip 切掉（scrollHeight > height）→ 缩字号
+  // 中文超出 box（scrollHeight > height）→ 缩字号到 fit
   requestAnimationFrame(() => {
     let fs = fontPx;
     while (ov.scrollHeight > ov.clientHeight + 2 && fs > 8) {
