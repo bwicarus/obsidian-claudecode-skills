@@ -565,9 +565,23 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
         cur_lemmas = set()
 
     prev = None
+    pending_period = False   # 上一字符是 .，需要看下一字符决定切不切
     for ch in chars:
         c = ch.get("c", "")
-        # 跨行检测（同 _build_vocab_marks）
+        # 处理 pending period：根据当前字符决定上一个 . 是否真切句
+        if pending_period:
+            # 切句条件：当前是空白 / 大写字母 / 中文 / 其它非小写字母数字
+            # 不切（5.2.3 小数 / e.g. 缩写）：当前是小写字母或数字
+            is_continuation = (
+                (not ch.get("sp"))
+                and len(c) == 1
+                and (c.isdigit() or (c.isalpha() and c.islower()))
+            )
+            if not is_continuation:
+                _flush_word()
+                _flush_sentence()
+            pending_period = False
+        # 跨行检测
         if prev and not prev.get("sp") and not ch.get("sp"):
             prev_h = max(0.1, prev["y1"] - prev["y0"])
             if abs(ch["y0"] - prev["y0"]) > prev_h * 0.5:
@@ -587,10 +601,7 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
         if c == ".":
             _flush_word()
             cur_chars.append(ch)
-            # 防 5.2.3 / 0.1 这种数字之间的点 → 只在前后非数字 + 末尾或下一字符是空格时切句
-            prev_c = prev["c"] if prev else ""
-            if (not prev_c.isdigit()):
-                _flush_sentence()
+            pending_period = True   # 推迟切句决策到下一字符
             prev = ch; continue
         if c.isalpha() or c in "'-":
             cur_word_letters.append(c)
@@ -599,6 +610,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
         cur_chars.append(ch)
         prev = ch
     _flush_word()
+    # 文件末尾：如果有 pending period 也切
+    if pending_period:
+        _flush_sentence()
+        pending_period = False
     _flush_sentence()
     # 加 NBSP（避免极短句子无法被 hit）：按文本长度过滤
     sentences = [s for s in sentences if len(s.get("text", "")) >= 12]
