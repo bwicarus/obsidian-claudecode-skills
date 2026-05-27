@@ -1538,6 +1538,12 @@ function _isFakeHead(h) { return h.classList && h.classList.contains('fake-head'
 function addResultPickers() {
   const md = document.getElementById('result-content');
   if (!md) return;
+  // 先清掉旧的（流式过程中会被多次 marked.parse 覆盖）
+  md.querySelectorAll('.head-pick').forEach(b => b.remove());
+  md.querySelectorAll('.has-pick').forEach(el => el.classList.remove('has-pick'));
+  const existingAll = document.querySelector('.reply-pick-all-result');
+  if (existingAll) existingAll.remove();
+
   const realHeads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
   // 粗体段落假标题（AI 常用 **标题** 而非 ## 标题）
   const fakeHeads = [];
@@ -1553,6 +1559,43 @@ function addResultPickers() {
     }
   });
   const heads = [...realHeads, ...fakeHeads];
+
+  // 在内容顶部加 "✚ 选用整条回答" 按钮（fallback：找不到标题时唯一可勾选；
+  // 找到标题时仍提供，让用户一键全选）
+  const all = document.createElement('button');
+  all.className = 'reply-pick-all reply-pick-all-result';
+  all.textContent = heads.length ? '＋ 选用整条回答' : '＋ 选用此回答（无标题分段）';
+  all.onclick = () => {
+    const on = all.classList.toggle('on');
+    all.textContent = on ? '✓ 已选整条回答' : (heads.length ? '＋ 选用整条回答' : '＋ 选用此回答（无标题分段）');
+    md.classList.toggle('picked-all', on);
+    if (on) {
+      // 加入草稿（整条内容作为一段）
+      const fullText = (md.dataset.raw || md.textContent || '').trim();
+      if (fullText && !_drafts.some(d => d.text === fullText)) {
+        _drafts.push({
+          id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+          text: fullText,
+          source: md.dataset.title || '',
+          src: md.dataset.src || '',
+          time: Date.now(),
+          selected: true,
+        });
+        _persistDrafts();
+        _updateDraftBadge();
+      }
+    } else {
+      // 取消整选：从草稿移除该整条
+      const fullText = (md.dataset.raw || md.textContent || '').trim();
+      _drafts = _drafts.filter(d => d.text !== fullText);
+      _persistDrafts();
+      _updateDraftBadge();
+    }
+  };
+  // 存 raw text 让"整条选中"能拿到原文
+  md.dataset.raw = md.textContent || '';
+  md.insertBefore(all, md.firstChild);
+
   if (!heads.length) return;
   let singleTopCovers = false, singleTop = null;
   if (realHeads.length) {
