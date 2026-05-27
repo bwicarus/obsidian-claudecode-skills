@@ -390,14 +390,16 @@ def pdf_api_page_chars():
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
                             "sp": 1 if c.isspace() else 0,
                         })
-        # 生成 vocab_marks：扫 chars 识别英文词 → 查 vocab index → 标记
+        # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
+        sentences = _build_unmastered_sentences(chars, threshold=2)
         return jsonify({
             "ok": True,
             "chars": chars,
             "page_w": p.rect.width,
             "page_h": p.rect.height,
             "vocab_marks": vocab_marks,
+            "vocab_sentences": sentences,
         })
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
@@ -482,6 +484,117 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
     return marks
 
 
+def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[dict]:
+    """识别含 ≥ threshold 个未掌握 lemma 的句子。
+    返回 [{text, rects:[[x0,y0,x1,y1],...], lemmas:[...]}]
+    句子边界 = . ! ? 。！？ 或段落结束（行间距大）。
+    """
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        import vocab_index   # type: ignore
+    except Exception:
+        return []
+    idx = vocab_index.index()
+    if not idx:
+        return []
+    # 未掌握的 forms 映射到 lemma
+    form_to_lemma_unmastered = {
+        form: info["lemma"]
+        for form, info in idx.items()
+        if info.get("label_slug") and info["label_slug"] != "mastered"
+    }
+
+    sentences: list[dict] = []
+    cur_chars: list[dict] = []
+    cur_lemmas: set[str] = set()
+    cur_word_letters: list[str] = []
+
+    def _flush_word():
+        nonlocal cur_word_letters
+        if cur_word_letters:
+            w = "".join(cur_word_letters).lower()
+            if w in form_to_lemma_unmastered:
+                cur_lemmas.add(form_to_lemma_unmastered[w])
+        cur_word_letters = []
+
+    def _sentence_rects(sent_chars: list[dict]) -> list[list[float]]:
+        rects = []
+        cur_rect = None
+        for c in sent_chars:
+            if c.get("sp") and (not cur_rect):
+                continue
+            x0, y0, x1, y1 = c["x0"], c["y0"], c["x1"], c["y1"]
+            lineH = y1 - y0
+            if cur_rect and abs(y0 - cur_rect[1]) <= lineH * 0.5:
+                cur_rect[2] = max(cur_rect[2], x1)
+                cur_rect[1] = min(cur_rect[1], y0)
+                cur_rect[3] = max(cur_rect[3], y1)
+            else:
+                if cur_rect:
+                    rects.append([round(x, 2) for x in cur_rect])
+                if c.get("sp"):
+                    continue
+                cur_rect = [x0, y0, x1, y1]
+        if cur_rect:
+            rects.append([round(x, 2) for x in cur_rect])
+        return rects
+
+    def _flush_sentence():
+        nonlocal cur_chars, cur_lemmas
+        if cur_chars and len(cur_lemmas) >= threshold:
+            text = "".join(c["c"] for c in cur_chars).strip()
+            text = re.sub(r"\s+", " ", text)[:500] if text else ""
+            rects = _sentence_rects(cur_chars)
+            sentences.append({
+                "text": text, "rects": rects,
+                "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
+            })
+        cur_chars = []
+        cur_lemmas = set()
+
+    prev = None
+    for ch in chars:
+        c = ch.get("c", "")
+        # 跨行检测（同 _build_vocab_marks）
+        if prev and not prev.get("sp") and not ch.get("sp"):
+            prev_h = max(0.1, prev["y1"] - prev["y0"])
+            if abs(ch["y0"] - prev["y0"]) > prev_h * 0.5:
+                if cur_word_letters and cur_word_letters[-1] == "-":
+                    cur_word_letters.pop()
+                else:
+                    _flush_word()
+        if ch.get("sp"):
+            _flush_word()
+            cur_chars.append(ch); prev = ch; continue
+        # 句末标点
+        if c in "!?。！？":
+            _flush_word()
+            cur_chars.append(ch)
+            _flush_sentence()
+            prev = ch; continue
+        if c == ".":
+            _flush_word()
+            cur_chars.append(ch)
+            # 防 5.2.3 / 0.1 这种数字之间的点 → 只在前后非数字 + 末尾或下一字符是空格时切句
+            prev_c = prev["c"] if prev else ""
+            if (not prev_c.isdigit()):
+                _flush_sentence()
+            prev = ch; continue
+        if c.isalpha() or c in "'-":
+            cur_word_letters.append(c)
+        else:
+            _flush_word()
+        cur_chars.append(ch)
+        prev = ch
+    _flush_word()
+    _flush_sentence()
+    # 加 NBSP（避免极短句子无法被 hit）：按文本长度过滤
+    return [s for s in sentences if len(s.get("text", "")) >= 12]
+
+
 @bp.route("/api/page-vocab-marks")
 def pdf_api_page_vocab_marks():
     """轻量路由：仅返回该页 vocab_marks（不返回 chars）。
@@ -528,9 +641,11 @@ def pdf_api_page_vocab_marks():
         except Exception:
             pass
         marks = _build_vocab_marks(chars)
+        sentences = _build_unmastered_sentences(chars, threshold=2)
         return jsonify({
             "ok": True,
             "vocab_marks": marks,
+            "vocab_sentences": sentences,
             "page_w": p.rect.width,
             "page_h": p.rect.height,
         })
@@ -1180,6 +1295,31 @@ def pdf_api_highlights_delete():
         return jsonify({"ok": False, "error": "not found"}), 404
     _hl_save(rel, db)
     return jsonify({"ok": True})
+
+
+# ─── 整句翻译（用 MyMemory，不耗 AI）───────────────────────────────────────
+
+@bp.route("/api/translate-sentence", methods=["POST"])
+def pdf_api_translate_sentence():
+    """body: {text} → {ok, zh, source}
+    用 scripts/vocab/translate.translate 路径（DeepL 有 key 用 / 没 key MyMemory）。
+    比 /api/translate 快（不调 AI），适合句子翻译按钮。"""
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text or len(text) > 2000:
+        return jsonify({"ok": False, "error": "no text / too long"}), 400
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        from translate import translate as _tr  # type: ignore
+        zh = _tr(text)
+        if zh:
+            return jsonify({"ok": True, "zh": zh})
+        return jsonify({"ok": False, "error": "translation failed (no result)"})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
 
 
 # ─── vocab Anki 一键加卡 ────────────────────────────────────────────────────

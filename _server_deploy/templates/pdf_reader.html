@@ -141,6 +141,20 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
+/* 多生词句子虚线框 + 侧边翻译按钮 */
+.vocab-sentence-box{position:absolute;border:1.4px dashed rgba(245,158,11,.5);border-radius:3px;pointer-events:none;box-sizing:border-box}
+.vocab-sentence-btn{position:absolute;width:22px;height:22px;border-radius:50%;background:#f59e0b;border:1.5px solid #d97706;color:#1a1a1a;font-size:11px;font-weight:700;cursor:pointer;pointer-events:auto;box-shadow:0 1px 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;padding:0;line-height:1;transition:transform .12s,background .12s}
+.vocab-sentence-btn:hover{transform:scale(1.12);background:#fbbf24}
+
+/* 句子翻译 popover */
+#sent-popover{position:absolute;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:10px 28px 10px 10px;z-index:140;display:none;box-shadow:0 6px 16px rgba(0,0,0,.6);max-width:420px;min-width:200px;font-size:12px;line-height:1.55}
+#sent-popover.open{display:block}
+#sent-popover .sent-close{position:absolute;top:4px;right:4px;background:transparent;border:none;color:#7a8497;cursor:pointer;font-size:16px;padding:0 6px;line-height:1}
+#sent-popover .sent-close:hover{color:#fff}
+#sent-popover .sent-en{color:#a8cdff;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #2a3550;word-break:break-word}
+#sent-popover .sent-zh{color:#cfe6ff;word-break:break-word}
+#sent-popover .sent-zh.loading{color:#8a9bb4;font-style:italic}
+
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
 .hl-layer{position:absolute;inset:0;z-index:5;pointer-events:none}
@@ -804,7 +818,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
   // 单词下划线（mastery 着色）；后端 page-chars 已返回 vocab_marks
   wrap.__vocabMarks = d.vocab_marks || [];
+  wrap.__vocabSentences = d.vocab_sentences || [];
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+  try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
 }
 
 // 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
@@ -876,10 +892,132 @@ async function refreshVocabUnderlinesForAllPages() {
       const d = await r.json();
       if (!d.ok) continue;
       pw.__vocabMarks = d.vocab_marks || [];
+      pw.__vocabSentences = d.vocab_sentences || [];
       renderVocabUnderlines(pw, pw.__vocabMarks);
+      renderVocabSentences(pw, pw.__vocabSentences);
     } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
   }
 }
+
+// 渲染多生词句子的虚线框 + 侧边翻译按钮
+function renderVocabSentences(pw, sentences) {
+  if (!_vocabUnderlineEnabled()) return;
+  let layer = pw.querySelector('.vocab-layer');
+  if (!layer && sentences && sentences.length) {
+    layer = document.createElement('div');
+    layer.className = 'vocab-layer';
+    pw.appendChild(layer);
+  }
+  if (!layer) return;
+  // 清旧句子元素（保留下划线 .vocab-underline）
+  layer.querySelectorAll('.vocab-sentence-box, .vocab-sentence-btn').forEach(el => el.remove());
+  if (!sentences || !sentences.length) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth;
+  const cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW;
+  const pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt;
+  const sy = cssH / pageHPt;
+  for (const s of sentences) {
+    const rects = s.rects || [];
+    // 多行虚线框
+    for (const r of rects) {
+      const [x0, y0, x1, y1] = r;
+      const box = document.createElement('div');
+      box.className = 'vocab-sentence-box';
+      box.style.left = (x0 * sx - 2) + 'px';
+      box.style.top = (y0 * sy - 1) + 'px';
+      box.style.width = ((x1 - x0) * sx + 4) + 'px';
+      box.style.height = ((y1 - y0) * sy + 2) + 'px';
+      layer.appendChild(box);
+    }
+    // 第一行末尾的翻译按钮
+    if (rects.length) {
+      const r0 = rects[0];
+      const btn = document.createElement('button');
+      btn.className = 'vocab-sentence-btn';
+      btn.type = 'button';
+      btn.textContent = '🌐';
+      btn.title = `翻译整句（含 ${s.count} 个未掌握词）`;
+      // 放在第一行右端外侧 4px；超出 page-wrap 右端就退到第一行内右端
+      let leftPx = r0[2] * sx + 6;
+      const maxLeft = cssW - 24;
+      if (leftPx > maxLeft) leftPx = maxLeft;
+      btn.style.left = leftPx + 'px';
+      btn.style.top = (r0[1] * sy - 2) + 'px';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showSentenceTranslation(s.text, btn);
+      });
+      btn.addEventListener('mousedown', (e) => e.stopPropagation());
+      btn.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+      layer.appendChild(btn);
+    }
+  }
+}
+
+// 翻译 popover
+function _ensureSentPopover() {
+  let pop = document.getElementById('sent-popover');
+  if (pop) return pop;
+  pop = document.createElement('div');
+  pop.id = 'sent-popover';
+  pop.innerHTML = `
+    <button class="sent-close" type="button" onclick="closeSentPopover()">×</button>
+    <div class="sent-en"></div>
+    <div class="sent-zh"></div>`;
+  document.body.appendChild(pop);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#sent-popover') && !e.target.closest('.vocab-sentence-btn')) {
+      closeSentPopover();
+    }
+  }, true);
+  return pop;
+}
+window.closeSentPopover = () => {
+  document.getElementById('sent-popover')?.classList.remove('open');
+};
+
+async function showSentenceTranslation(text, anchorBtn) {
+  const pop = _ensureSentPopover();
+  pop.querySelector('.sent-en').textContent = text;
+  const zhEl = pop.querySelector('.sent-zh');
+  zhEl.textContent = '⏳ 翻译中…';
+  zhEl.className = 'sent-zh loading';
+  // 定位：按钮右侧；不够空间放下方
+  const r = anchorBtn.getBoundingClientRect();
+  pop.style.left = (r.right + window.scrollX + 6) + 'px';
+  pop.style.top = (r.top + window.scrollY - 4) + 'px';
+  pop.classList.add('open');
+  requestAnimationFrame(() => {
+    const pr = pop.getBoundingClientRect();
+    if (pr.right > window.innerWidth - 8) {
+      // 放下方
+      pop.style.left = Math.max(8, r.left + window.scrollX - pr.width / 2) + 'px';
+      pop.style.top = (r.bottom + window.scrollY + 6) + 'px';
+    }
+  });
+  try {
+    const r2 = await fetch('/pdf/api/translate-sentence', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text}),
+    });
+    const d = await r2.json();
+    if (d.ok && d.zh) {
+      zhEl.textContent = '🇨🇳 ' + d.zh;
+      zhEl.className = 'sent-zh';
+    } else {
+      zhEl.textContent = '翻译失败：' + (d.error || '?');
+      zhEl.className = 'sent-zh';
+    }
+  } catch (e) {
+    zhEl.textContent = '网络错误：' + e.message;
+    zhEl.className = 'sent-zh';
+  }
+}
+window.showSentenceTranslation = showSentenceTranslation;
 window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
 
 // 找点击位置最近的非空格 char index
