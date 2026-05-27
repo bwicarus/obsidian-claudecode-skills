@@ -1045,14 +1045,7 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   ov.addEventListener('mousedown', (e) => e.stopPropagation());
   ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
   layer.appendChild(ov);
-  // 中文太长 → 缩字号到 fit
-  requestAnimationFrame(() => {
-    let fs = fontPx;
-    while (ov.scrollHeight > ov.clientHeight + 2 && fs > 8) {
-      fs -= 0.5;
-      ov.style.fontSize = fs + 'px';
-    }
-  });
+  // 字号固定（跟原文一致），不自适应。中文太长则被 clip-path 截掉不显示
   btn.classList.add('active');
 }
 
