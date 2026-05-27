@@ -157,6 +157,141 @@ def _ai_call_stream(prompt: str, override_model: str = "", override_effort: str 
         yield ad.chat(msgs)
 
 
+def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str = ""):
+    """字典查询 SSE：分阶段输出，让前端能立刻看到 ECDICT 结果，慢源后续追加。
+
+    event 序列：
+      ecdict   → {phonetic, translation_zh, definition_en, lemma, forms, freq, pos}
+      free     → {phon_us, phon_uk, audio_us, audio_uk, definitions_en[], examples[], synonyms, antonyms, etymology}
+      mw       → {phon_us, audio_us, definitions_en[], examples[], pos[]}
+      translate → {examples_zh: {en: zh, ...}}  (例句中文，可能多次 yield 增量)
+      done     → {vocab_note}
+    """
+    import json as _json
+    import time as _t
+
+    ds, bvn = _vocab_modules()
+    if ds is None:
+        yield f"event: error\ndata: {_json.dumps({'error': 'vocab modules not loaded'})}\n\n"
+        return
+
+    word = (word or "").strip().lower()
+    if not word:
+        yield f"event: error\ndata: {_json.dumps({'error': 'invalid word'})}\n\n"
+        return
+
+    try:
+        yield f"event: start\ndata: {_json.dumps({'word': word})}\n\n"
+
+        # 1. ECDICT（本地，~10ms）
+        ec = ds.lookup_ecdict(word)
+        if not ec:
+            yield f"event: error\ndata: {_json.dumps({'error': 'not found in any source'})}\n\n"
+            return
+        lemma = ec["lemma"]
+        forms = ec["forms"]
+        # 解析 ec 的中文 / 英文释义
+        zh_defs = []
+        en_defs = []
+        for d in ds._ec_definitions(ec):
+            if d.get("zh"):
+                pos = d.get("pos") or ""
+                zh_defs.append((f"{pos} " if pos else "") + d["zh"])
+            elif d.get("en"):
+                pos = d.get("pos") or ""
+                en_defs.append((f"{pos} " if pos else "") + d["en"])
+        ec_payload = {
+            "word": word, "lemma": lemma, "forms": forms,
+            "phonetic": "/" + ec.get("phonetic", "") + "/" if ec.get("phonetic") else "",
+            "translation": "\n".join(zh_defs[:8]),
+            "definition": "\n".join(en_defs[:6]),
+            "freq_bnc": ec.get("bnc", 0),
+            "freq_coc": ec.get("frq", 0),
+        }
+        yield f"event: ecdict\ndata: {_json.dumps(ec_payload, ensure_ascii=False)}\n\n"
+
+        # 同步追加 lookup-log + 异步触发笔记生成 + 段落扫描（不阻塞响应）
+        try:
+            _append_lookup_log(word, lemma, pdf_rel, page, context)
+            if pdf_rel and page > 0:
+                _trigger_vocab_note_async(word, pdf_rel, page, context)
+                _trigger_paragraph_exposure_async(pdf_rel, page, lemma)
+            else:
+                _trigger_vocab_note_async(word, "", 0, "")
+        except Exception:
+            pass
+
+        # 2. Free Dictionary（在线 ~500ms，有缓存秒命中）
+        try:
+            fd_raw = ds.lookup_free_dict(lemma)
+            fd = ds._free_dict_unpack(fd_raw)
+            fd_payload = {
+                "phon_us": fd.get("phon_us", ""), "phon_uk": fd.get("phon_uk", ""),
+                "audio_us": fd.get("audio_us", ""), "audio_uk": fd.get("audio_uk", ""),
+                "definitions_en": [
+                    {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
+                    for d in (fd.get("definitions") or [])[:6]
+                ],
+                "examples": fd.get("examples", [])[:10],
+                "synonyms": fd.get("synonyms", [])[:10],
+                "antonyms": fd.get("antonyms", [])[:10],
+                "etymology": fd.get("etymology", ""),
+            }
+            yield f"event: free\ndata: {_json.dumps(fd_payload, ensure_ascii=False)}\n\n"
+        except Exception as ex:
+            yield f"event: warn\ndata: {_json.dumps({'source': 'free_dict', 'error': str(ex)})}\n\n"
+
+        # 3. MW Learner（在线 ~500ms）
+        try:
+            mw_raw = ds.lookup_mw_learner(lemma)
+            mw = ds._mw_unpack(mw_raw, lemma=lemma)
+            mw_payload = {
+                "phon_us": mw.get("phon_us", ""),
+                "audio_us": ds._mw_audio_url(mw.get("audio_path", "")) if mw.get("audio_path") else "",
+                "definitions_en": [
+                    {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
+                    for d in (mw.get("definitions") or [])
+                ],
+                "examples": mw.get("examples", [])[:15],
+                "pos": mw.get("pos", []),
+            }
+            yield f"event: mw\ndata: {_json.dumps(mw_payload, ensure_ascii=False)}\n\n"
+        except Exception as ex:
+            yield f"event: warn\ndata: {_json.dumps({'source': 'mw', 'error': str(ex)})}\n\n"
+
+        # 4. 例句翻译（每翻 1 句 yield 1 次，让用户看到逐步进度）
+        try:
+            from translate import translate as _tr
+            # 收集所有可翻译例句：MW + Free Dict + ECDICT 例句池（前 8 条）
+            all_examples = []
+            seen = set()
+            for d_list in [
+                mw_payload.get("definitions_en", []) if 'mw_payload' in locals() else [],
+                fd_payload.get("definitions_en", []) if 'fd_payload' in locals() else [],
+            ]:
+                for d in d_list:
+                    for ex in (d.get("examples") or [])[:2]:
+                        k = ex.lower()[:60]
+                        if k and k not in seen:
+                            seen.add(k); all_examples.append(ex)
+            for ex in (fd_payload.get("examples", []) if 'fd_payload' in locals() else [])[:5]:
+                k = ex.lower()[:60]
+                if k and k not in seen:
+                    seen.add(k); all_examples.append(ex)
+            for ex in all_examples[:8]:
+                zh = _tr(ex)
+                if zh:
+                    yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': zh}, ensure_ascii=False)}\n\n"
+        except Exception as ex:
+            yield f"event: warn\ndata: {_json.dumps({'source': 'translate', 'error': str(ex)})}\n\n"
+
+        # 5. done
+        vocab_note = f"资源/vocab/{lemma[0]}/{lemma}.md" if lemma else ""
+        yield f"event: done\ndata: {_json.dumps({'vocab_note': vocab_note}, ensure_ascii=False)}\n\n"
+    except Exception as e:
+        yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
+
+
 def _sse_stream(prompt, model, effort):
     """SSE generator：把 AI chunks 包成 SSE event 流。"""
     import json as _json
@@ -407,8 +542,24 @@ def pdf_api_dict():
 
     GET ?word=X [&file=&page=&context=]
     file/page/context 用来记录"在哪本 PDF 的哪页查的"，写入 lookup 日志 + vocab 笔记。
-    返回前端用的精简结构：phonetic/translation/definition/audio/examples + 三源 hit。
+
+    Accept: text/event-stream → SSE 分段（ECDICT 先到 → free → mw → translate → done）
+    否则 → 一次性返回完整 JSON（保留兼容）
     """
+    # SSE 分支：让前端能立刻看到 ECDICT 中文释义，慢源后续追加
+    if "text/event-stream" in (request.headers.get("Accept") or ""):
+        from flask import Response, stream_with_context
+        word_arg = (request.args.get("word") or "").strip()
+        pdf_rel  = (request.args.get("file") or "").strip()
+        try: page = int(request.args.get("page") or 0)
+        except (TypeError, ValueError): page = 0
+        context = (request.args.get("context") or "").strip()[:500]
+        return Response(
+            stream_with_context(_dict_sse_stream(word_arg, pdf_rel, page, context)),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     word_raw = (request.args.get("word") or "").strip()
     word = word_raw.lower()
     if not word or len(word) > 50:

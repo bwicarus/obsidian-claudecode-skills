@@ -1914,6 +1914,166 @@ async function markFromResult() {
 }
 window.markFromResult = markFromResult;
 
+// ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
+async function dictStream(word, ctx) {
+  const params = new URLSearchParams({
+    word, file: FILE_REL || '', page: String(currentPage || 0), context: ctx || '',
+  });
+  // 立刻 openResult 占位，避免空等
+  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  const contentEl = document.getElementById('result-content');
+  const state = {
+    word, lemma: word, forms: [],
+    phon_us: '', phon_uk: '', audio_us: '', audio_uk: '',
+    freq_bnc: 0, translation: '', definition: '',
+    fd_defs: [], mw_defs: [], examples: new Set(), examples_zh: {},
+    synonyms: [], antonyms: [],
+    sources_hit: [], vocab_note: '',
+  };
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const renderState = () => {
+    const s = state;
+    let html = '';
+    const head = [];
+    if (s.phon_us) head.push(`<span style="font-style:italic">US ${esc(s.phon_us)}</span>`);
+    if (s.phon_uk) head.push(`<span style="font-style:italic">UK ${esc(s.phon_uk)}</span>`);
+    if (s.freq_bnc) head.push(`<span style="color:#5a6680;font-size:11px">BNC #${s.freq_bnc}</span>`);
+    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+    html += `<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">${head.join(' · ')}</div>`;
+    if (s.lemma && s.lemma !== word) {
+      html += `<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
+    }
+    if (s.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${esc(s.translation)}</div>`;
+    // MW + Free Dict 例句（合并）
+    const allDefs = [];
+    if (s.mw_defs.length) allDefs.push({label: '📚 MW', defs: s.mw_defs});
+    if (s.fd_defs.length) allDefs.push({label: '🌐 Wiktionary', defs: s.fd_defs});
+    for (const grp of allDefs) {
+      html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px"><b style="color:#7a8497">${esc(grp.label)}</b>`;
+      html += `<ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">`;
+      for (const d of grp.defs.slice(0, 6)) {
+        html += `<li>${d.pos ? '<b>'+esc(d.pos)+'</b> ' : ''}${esc(d.en)}`;
+        for (const ex of (d.examples||[]).slice(0, 2)) {
+          const zh = state.examples_zh[ex];
+          html += `<br><span style="color:#7a8497;font-size:11px">▸ ${esc(ex)}${zh ? '<br>　🇨🇳 ' + esc(zh) : ''}</span>`;
+        }
+        html += `</li>`;
+      }
+      html += `</ul></div>`;
+    }
+    // 同义反义
+    if (s.synonyms.length || s.antonyms.length) {
+      const meta = [];
+      if (s.synonyms.length) meta.push('同 ' + s.synonyms.slice(0,5).map(esc).join(', '));
+      if (s.antonyms.length) meta.push('反 ' + s.antonyms.slice(0,5).map(esc).join(', '));
+      html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
+    }
+    // 底部：Anki 按钮 + 源
+    html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>`;
+    if (s.sources_hit.length) {
+      html += `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`;
+    } else {
+      html += `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`;
+    }
+    html += `</div>`;
+    contentEl.innerHTML = html;
+  };
+
+  let r;
+  try {
+    r = await fetch('/pdf/api/dict?' + params.toString(), {
+      headers: {'Accept': 'text/event-stream'},
+    });
+  } catch (e) { return false; }
+  if (!r.ok) return false;
+  const ct = r.headers.get('content-type') || '';
+  if (!ct.includes('event-stream')) {
+    // 后端非 SSE 模式：fall back 一次性渲染（兼容旧路径，理论不会走这里）
+    const d = await r.json().catch(() => ({}));
+    if (!d.ok) return false;
+    Object.assign(state, {
+      lemma: d.lemma, forms: d.forms||[],
+      phon_us: d.phonetic_us, phon_uk: d.phonetic_uk,
+      audio_us: d.audio_us, audio_uk: d.audio_uk,
+      freq_bnc: d.freq_bnc, translation: d.translation,
+      synonyms: d.synonyms||[], antonyms: d.antonyms||[],
+      sources_hit: d.sources_hit||[], vocab_note: d.vocab_note||'',
+    });
+    renderState();
+    return true;
+  }
+  // SSE 模式：边读边渲染
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', gotEcdict = false;
+  let renderQueued = false, lastRender = 0;
+  const scheduleRender = () => {
+    const now = Date.now();
+    if (now - lastRender >= 80) { renderState(); lastRender = now; return; }
+    if (renderQueued) return;
+    renderQueued = true;
+    setTimeout(() => { renderQueued = false; renderState(); lastRender = Date.now(); }, 80 - (now - lastRender));
+  };
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, {stream: true});
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let evt = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) evt = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      let payload = {};
+      try { payload = JSON.parse(data || '{}'); } catch(_) {}
+      if (evt === 'ecdict') {
+        gotEcdict = true;
+        Object.assign(state, {
+          lemma: payload.lemma, forms: payload.forms || [],
+          phon_us: payload.phonetic || '',
+          freq_bnc: payload.freq_bnc || 0,
+          translation: payload.translation || '',
+          definition: payload.definition || '',
+          sources_hit: ['ecdict'],
+        });
+        scheduleRender();
+      } else if (evt === 'free') {
+        if (payload.phon_us) state.phon_us = payload.phon_us;
+        if (payload.phon_uk) state.phon_uk = payload.phon_uk;
+        if (payload.audio_us && !state.audio_us) state.audio_us = payload.audio_us;
+        if (payload.audio_uk && !state.audio_uk) state.audio_uk = payload.audio_uk;
+        state.fd_defs = payload.definitions_en || [];
+        state.synonyms = payload.synonyms || [];
+        state.antonyms = payload.antonyms || [];
+        if (!state.sources_hit.includes('free_dict')) state.sources_hit.push('free_dict');
+        scheduleRender();
+      } else if (evt === 'mw') {
+        if (payload.phon_us) state.phon_us = payload.phon_us;
+        if (payload.audio_us) state.audio_us = payload.audio_us;
+        state.mw_defs = payload.definitions_en || [];
+        if (!state.sources_hit.includes('mw')) state.sources_hit.push('mw');
+        scheduleRender();
+      } else if (evt === 'translate') {
+        if (payload.en && payload.zh) {
+          state.examples_zh[payload.en] = payload.zh;
+          scheduleRender();
+        }
+      } else if (evt === 'done') {
+        state.vocab_note = payload.vocab_note || '';
+        renderState();
+      } else if (evt === 'error') {
+        if (!gotEcdict) return false;   // ECDICT 都没拿到 → 让 AI 回落
+      }
+    }
+  }
+  return gotEcdict;
+}
+window.dictStream = dictStream;
+
 // 字典 modal「🎴 加入 Anki」按钮：POST /pdf/api/vocab-anki
 window.addVocabAnki = async (lemma) => {
   if (!lemma) return;
@@ -2705,66 +2865,20 @@ window.onTranslate = async () => {
   } : null;
   toolbar.classList.remove('open');
   const text = lastSelText.trim();
-  // 单词（英文字母、长度 ≤ 30、无空格）→ 字典三源融合（ECDICT + Free Dict + MW）+ 自动入 vocab
+  // 单词（英文字母、长度 ≤ 30、无空格）→ 字典三源 SSE 流式（ECDICT 先到 → 自动入 vocab）
   const isWord = text.length <= 30 && /^[A-Za-z][A-Za-z\-']*$/.test(text);
   if (isWord) {
     try {
-      // 上下文：尝试取选中所在句（供 vocab.md 的"文中出现"用）
       let ctx = '';
       if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
         const chars = _charSel.pw.__charBoxes;
         const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
         if (ctxRange) ctx = _charsRangeToText(chars, ctxRange.start, ctxRange.end).slice(0, 400);
       }
-      const params = new URLSearchParams({
-        word: text.toLowerCase(),
-        file: FILE_REL || '',
-        page: String(currentPage || 0),
-        context: ctx,
-      });
-      const r = await fetch('/pdf/api/dict?' + params.toString());
-      const d = await r.json();
-      if (d.ok) {
-        const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-        let html = '';
-        // 头部：音标 + 音频按钮 + 词频 + lemma 提示
-        const headBits = [];
-        if (d.phonetic_us) headBits.push(`<span style="font-style:italic">US ${esc(d.phonetic_us)}</span>`);
-        if (d.phonetic_uk) headBits.push(`<span style="font-style:italic">UK ${esc(d.phonetic_uk)}</span>`);
-        if (d.freq_bnc) headBits.push(`<span style="color:#5a6680;font-size:11px">BNC #${d.freq_bnc}</span>`);
-        if (d.audio_us) headBits.push(`<button onclick="new Audio('${esc(d.audio_us)}').play()" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
-        html += `<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">${headBits.join(' · ')}</div>`;
-        if (d.lemma && d.lemma !== text.toLowerCase()) {
-          html += `<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>${esc(d.lemma)}</code>${d.forms?.length ? '（'+d.forms.map(esc).join('/')+'）' : ''}</div>`;
-        }
-        if (d.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${esc(d.translation)}</div>`;
-        if (d.definition && d.definition.trim() && d.definition.trim() !== (d.translation||'').trim()) {
-          html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px;line-height:1.6"><b>EN：</b><span style="white-space:pre-wrap">${esc(d.definition)}</span></div>`;
-        }
-        if (d.examples?.length) {
-          const zhMap = d.examples_zh || {};
-          const exHtml = d.examples.slice(0,4).map(e => {
-            const zh = zhMap[e];
-            return '<li>' + esc(e) + (zh ? '<br><span style="color:#7a8497;font-size:11px">🇨🇳 ' + esc(zh) + '</span>' : '') + '</li>';
-          }).join('');
-          html += `<div style="margin-top:10px;color:#cfe6ff;font-size:12px"><b style="color:#7a8497">例句：</b><ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">${exHtml}</ul></div>`;
-        }
-        // 字典 modal 底部：一键 Anki 按钮
-        html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;gap:8px">
-          <button onclick="addVocabAnki('${esc(d.lemma||d.word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>
-        </div>`;
-        const meta = [];
-        if (d.synonyms?.length) meta.push('同 ' + d.synonyms.slice(0,5).map(esc).join(', '));
-        if (d.antonyms?.length) meta.push('反 ' + d.antonyms.slice(0,5).map(esc).join(', '));
-        if (meta.length) html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
-        if (d.sources_hit?.length) {
-          html += `<div style="margin-top:8px;color:#5a6680;font-size:10px">源：${d.sources_hit.join(' + ')}${d.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(d.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</div>`;
-        }
-        openResult('📖 ' + d.word, text, html);
-        return;
-      }
+      const ok = await dictStream(text.toLowerCase(), ctx);
+      if (ok) return;
       // 字典没命中 → 回落 AI
-    } catch (_) {}
+    } catch (e) { window.dlog?.('dict stream err: ' + e.message, '#ff6b6b'); }
   }
   // 长文本 / 字典没命中 → AI 翻译
   aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
