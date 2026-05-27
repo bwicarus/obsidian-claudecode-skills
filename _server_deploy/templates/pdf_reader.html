@@ -148,10 +148,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-btn:hover{transform:scale(1.12);background:#fbbf24}
 .vocab-sentence-btn.active{background:#34d399;border-color:#10b981}
 
-/* 句子翻译覆盖层：盖在原句上方显示中文 */
-.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;line-height:1.25;padding:1px 4px;border-radius:2px;box-shadow:0 0 0 1px rgba(245,158,11,.5);box-sizing:border-box;cursor:pointer;pointer-events:auto;overflow:hidden;word-break:break-word;font-family:inherit;display:flex;align-items:center}
-.vocab-sentence-overlay:hover{box-shadow:0 0 0 1.5px #f59e0b,0 2px 6px rgba(0,0,0,.2)}
-.vocab-sentence-overlay::before{content:'🇨🇳 ';margin-right:2px;font-size:.85em}
+/* 句子翻译覆盖层：每行一个独立 overlay，按原字符宽度刚好覆盖 */
+.vocab-sentence-overlay{position:absolute;background:#fff;color:#1a1a1a;line-height:1;padding:0 2px;box-sizing:border-box;cursor:pointer;pointer-events:auto;overflow:hidden;white-space:nowrap;font-family:inherit;display:flex;align-items:center;letter-spacing:-.02em}
+.vocab-sentence-overlay.first{box-shadow:inset 2px 0 0 #f59e0b}
+.vocab-sentence-overlay:hover{background:#fff7d6}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
    hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
@@ -997,35 +997,61 @@ function toggleSentenceOverlay(layer, s, btn, sx, sy) {
 function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   const rects = s.rects || [];
   if (!rects.length) return;
-  // 算 bounding box 合并所有 rects
-  let bx0 = rects[0][0], by0 = rects[0][1], bx1 = rects[0][2], by1 = rects[0][3];
-  for (const r of rects) {
-    bx0 = Math.min(bx0, r[0]); by0 = Math.min(by0, r[1]);
-    bx1 = Math.max(bx1, r[2]); by1 = Math.max(by1, r[3]);
+  const zh = s.zh || '';
+  if (!zh) return;
+  // 多行：按各 rect 宽度比例分配中文字符
+  const totalW = rects.reduce((sum, r) => sum + (r[2] - r[0]), 0);
+  let cursor = 0;
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const w = r[2] - r[0], h = r[3] - r[1];
+    let segLen;
+    if (i === rects.length - 1) {
+      segLen = zh.length - cursor;   // 最后一段拿剩下全部
+    } else {
+      const ratio = w / totalW;
+      segLen = Math.max(1, Math.round(ratio * zh.length));
+      if (cursor + segLen > zh.length) segLen = zh.length - cursor;
+    }
+    const seg = zh.substr(cursor, segLen);
+    cursor += segLen;
+    if (!seg) continue;
+    _makeSentenceOverlayDiv(layer, r[0]*sx, r[1]*sy, w*sx, h*sy, seg, btn, i === 0, s.text);
   }
-  // 单 rect 句子用单行字号；多 rect（跨行）按 chars 高度算
-  const lineH_pt = rects[0][3] - rects[0][1];
-  const fontPx = Math.max(10, Math.round(lineH_pt * sy * 0.78));
+  btn.classList.add('active');
+}
+
+function _makeSentenceOverlayDiv(layer, x, y, w, h, text, btn, isFirst, sentText) {
   const ov = document.createElement('div');
-  ov.className = 'vocab-sentence-overlay';
+  ov.className = 'vocab-sentence-overlay' + (isFirst ? ' first' : '');
   ov.dataset.active = '1';
-  ov.dataset.sentText = s.text;
-  ov.style.left = (bx0 * sx) + 'px';
-  ov.style.top = (by0 * sy) + 'px';
-  ov.style.width = ((bx1 - bx0) * sx) + 'px';
-  // 高度允许略超原句（中文可能需要更多行）
-  ov.style.minHeight = ((by1 - by0) * sy) + 'px';
+  ov.dataset.sentText = sentText;
+  ov.style.left = x + 'px';
+  ov.style.top = y + 'px';
+  ov.style.width = w + 'px';
+  ov.style.height = h + 'px';
+  // 字号：使得文本 fit 进 w；先按 h*0.78 设，太宽 letter-spacing 缩
+  const fontPx = Math.max(9, Math.round(h * 0.76));
   ov.style.fontSize = fontPx + 'px';
-  ov.textContent = s.zh;
+  ov.textContent = text;
   ov.addEventListener('click', (e) => {
     e.stopPropagation();
-    ov.remove();
+    // 关掉同句的所有 overlay
+    layer.querySelectorAll(`.vocab-sentence-overlay[data-sent-text="${CSS.escape(sentText)}"]`)
+      .forEach(el => el.remove());
     btn.classList.remove('active');
   });
   ov.addEventListener('mousedown', (e) => e.stopPropagation());
   ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
   layer.appendChild(ov);
-  btn.classList.add('active');
+  // 字号自适应：如果中文文本超宽，缩字号
+  requestAnimationFrame(() => {
+    let fs = fontPx;
+    while (ov.scrollWidth > ov.clientWidth + 2 && fs > 8) {
+      fs -= 0.5;
+      ov.style.fontSize = fs + 'px';
+    }
+  });
 }
 
 // 翻译 popover
