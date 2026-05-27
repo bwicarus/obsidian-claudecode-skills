@@ -107,9 +107,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-modal h3{margin:0 0 12px;font-size:15px;color:#cfe6ff;display:flex;align-items:center;gap:10px}
 #draft-modal h3 .clear-all{margin-left:auto;font-size:11px;color:#7a8497;background:transparent;border:1px solid #2a3550;border-radius:4px;padding:3px 8px;cursor:pointer}
 #draft-list{flex:1;overflow-y:auto;margin:0 -6px;padding:0 6px}
-/* 草稿项 wrap：clip 删除栏的高度动画 */
-.draft-item-wrap{border-bottom:1px solid #1f2740;overflow:hidden}
-.draft-item{display:flex;gap:10px;align-items:flex-start;padding:10px 8px;cursor:pointer;transition:background .15s,transform .12s;position:relative;will-change:transform}
+/* 草稿项 wrap：右侧后方删除图标，左滑 item 露出 */
+.draft-item-wrap{position:relative;border-bottom:1px solid #1f2740;overflow:hidden}
+.draft-item{position:relative;z-index:2;background:#10162a;display:flex;gap:10px;align-items:flex-start;padding:10px 8px;cursor:pointer;transition:transform .15s,background .15s;will-change:transform}
 .draft-item:hover{background:#0d1322}
 .draft-item .body{flex:1;min-width:0}
 .draft-item .src{color:#7a8497;font-size:10px;margin-bottom:3px}
@@ -119,9 +119,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .draft-item .sel-circle:hover{border-color:#60a5fa}
 .draft-item.selected .sel-circle{background:#34d399;border-color:#34d399;box-shadow:inset 0 0 0 3px #10162a}
 .draft-item-wrap.swiped .draft-item .sel-circle{border-color:#7a2828}
-.draft-item-del-row{display:block;width:100%;background:#7a2828;color:#fff;border:none;border-top:1px solid #4a1a1a;font-size:12px;cursor:pointer;max-height:0;overflow:hidden;opacity:0;transition:max-height .18s,opacity .18s,padding .18s;padding:0 8px}
-.draft-item-wrap.swiped .draft-item-del-row{max-height:40px;opacity:1;padding:8px}
-.draft-item-wrap.swiped .draft-item-del-row:hover{background:#9a3232}
+.draft-item-del-row{position:absolute;right:0;top:0;bottom:0;width:72px;background:#7a2828;color:#fff;border:none;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1}
+.draft-item-del-row:hover{background:#9a3232}
+.draft-item-wrap.swiped .draft-item{transform:translateX(-72px)}
 .draft-empty{text-align:center;color:#5a6680;padding:40px 20px;font-size:13px}
 #draft-actions{margin-top:14px;padding-top:14px;border-top:1px solid #2a3550;display:flex;gap:8px;flex-wrap:wrap}
 #draft-actions button{flex:1;min-width:0;background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:9px 12px;font-size:12px;cursor:pointer;transition:background .15s}
@@ -156,8 +156,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #hl-popover .swatch.cur{border-color:#fff;box-shadow:0 0 0 2px #0078d4}
 #hl-popover textarea{width:100%;box-sizing:border-box;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical;min-height:48px;margin-bottom:8px;line-height:1.5}
 /* 高亮 popover 内的预览块（选中/所在句/解释 三行省略 + 点击展开 + 触屏左滑） */
-#hl-popover .hl-snip-wrap{margin-bottom:10px;overflow:hidden;border-radius:0 4px 4px 0}
-#hl-popover .hl-snip{display:flex;align-items:flex-start;gap:8px;background:rgba(0,0,0,.32);border-left:2px solid #60a5fa;padding:6px 10px;cursor:pointer;transition:transform .12s;will-change:transform;position:relative}
+#hl-popover .hl-snip-wrap{position:relative;margin-bottom:10px;overflow:hidden;border-radius:0 4px 4px 0}
+#hl-popover .hl-snip{position:relative;z-index:2;background:#1a2540;display:flex;align-items:flex-start;gap:8px;border-left:2px solid #60a5fa;padding:6px 10px;cursor:pointer;transition:transform .15s;will-change:transform}
 #hl-popover .hl-snip:hover{background:rgba(0,0,0,.42)}
 #hl-popover .hl-snip-content{flex:1;min-width:0}
 #hl-popover .hl-snip-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;align-self:center;cursor:grab;transition:border-color .12s;touch-action:pan-y}
@@ -170,9 +170,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #hl-popover .hl-snip-row.body{color:#cfe6ff}
 #hl-popover .hl-snip-row .row-lbl{color:#7a8497;font-size:10px;margin-right:6px;font-weight:600;letter-spacing:.04em}
 #hl-popover .hl-snip-content.expanded .hl-snip-row{white-space:pre-wrap;overflow:visible;text-overflow:initial;word-break:break-word}
-#hl-popover .hl-snip-del-row{display:block;width:100%;background:#7a2828;color:#fff;border:none;border-top:1px solid #4a1a1a;padding:8px;font-size:12px;cursor:pointer;max-height:0;overflow:hidden;opacity:0;transition:max-height .18s,opacity .18s,padding .18s;padding-top:0;padding-bottom:0}
-#hl-popover .hl-snip-wrap.swiped .hl-snip-del-row{max-height:40px;opacity:1;padding-top:8px;padding-bottom:8px}
-#hl-popover .hl-snip-wrap.swiped .hl-snip-del-row:hover{background:#9a3232}
+/* 右侧后方的删除按钮：始终存在，被 hl-snip 盖住；swiped 时 snip 左移露出 */
+#hl-popover .hl-snip-del-row{position:absolute;right:0;top:0;bottom:0;width:72px;background:#7a2828;color:#fff;border:none;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;border-radius:0 4px 4px 0}
+#hl-popover .hl-snip-del-row:hover{background:#9a3232}
+#hl-popover .hl-snip-wrap.swiped .hl-snip{transform:translateX(-72px)}
 #hl-popover .actions{display:flex;gap:6px;justify-content:flex-end}
 #hl-popover button{background:transparent;border:1px solid #3b6db5;color:#cfe6ff;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer}
 #hl-popover button:hover{background:#2c3e6a}
@@ -1857,7 +1858,7 @@ function openHlPopover(h, anchorDiv, pw) {
         </div>
         <div class="hl-snip-circle" title="按住左滑显示删除"></div>
       </div>
-      <button class="hl-snip-del-row" type="button">🗑 删除高亮</button>
+      <button class="hl-snip-del-row" type="button" title="删除高亮">🗑</button>
     </div>
     <div class="row"><span class="row-lbl">🎨 颜色</span>${colorsHtml}</div>
     <textarea id="hl-note" placeholder="自定义备注（可空）">${escHtml(h.note || '')}</textarea>
@@ -2264,7 +2265,7 @@ window.openDraftModal = () => {
           </div>
           <div class="sel-circle" title="${d.selected?'已选（点击取消）':'未选（点击勾选）'}"></div>
         </div>
-        <button class="draft-item-del-row" type="button">🗑 删除</button>
+        <button class="draft-item-del-row" type="button" title="删除">🗑</button>
       </div>
     `).join('');
     // 绑定每条 draft 的交互
