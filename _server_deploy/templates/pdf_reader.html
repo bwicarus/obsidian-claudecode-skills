@@ -145,15 +145,23 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #hl-popover .swatch.cur{border-color:#fff;box-shadow:0 0 0 2px #0078d4}
 #hl-popover textarea{width:100%;box-sizing:border-box;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical;min-height:48px;margin-bottom:8px;line-height:1.5}
 /* 高亮 popover 内的预览块（选中/所在句/解释 三行省略 + 点击展开 + 触屏左滑） */
-#hl-popover .hl-snip{background:rgba(0,0,0,.32);border-left:2px solid #60a5fa;border-radius:0 4px 4px 0;padding:6px 10px;margin-bottom:10px;cursor:pointer;will-change:transform}
+#hl-popover .hl-snip-wrap{margin-bottom:10px;overflow:hidden;border-radius:0 4px 4px 0}
+#hl-popover .hl-snip{display:flex;align-items:flex-start;gap:8px;background:rgba(0,0,0,.32);border-left:2px solid #60a5fa;padding:6px 10px;cursor:pointer;transition:transform .12s;will-change:transform;position:relative}
 #hl-popover .hl-snip:hover{background:rgba(0,0,0,.42)}
+#hl-popover .hl-snip-content{flex:1;min-width:0}
+#hl-popover .hl-snip-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;align-self:center;cursor:grab;transition:border-color .12s;touch-action:pan-y}
+#hl-popover .hl-snip-circle:hover{border-color:#60a5fa}
+#hl-popover .hl-snip-wrap.swiped .hl-snip-circle{border-color:#7a2828}
 #hl-popover .hl-snip-row{font-size:11px;line-height:1.5;color:#cfe6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
 #hl-popover .hl-snip-row:last-child{margin-bottom:0}
 #hl-popover .hl-snip-row.text{color:#cfe6ff}
 #hl-popover .hl-snip-row.sentence{color:#a8cdff}
 #hl-popover .hl-snip-row.body{color:#cfe6ff}
 #hl-popover .hl-snip-row .row-lbl{color:#7a8497;font-size:10px;margin-right:6px;font-weight:600;letter-spacing:.04em}
-#hl-popover .hl-snip.expanded .hl-snip-row{white-space:pre-wrap;overflow:visible;text-overflow:initial;word-break:break-word}
+#hl-popover .hl-snip-content.expanded .hl-snip-row{white-space:pre-wrap;overflow:visible;text-overflow:initial;word-break:break-word}
+#hl-popover .hl-snip-del-row{display:block;width:100%;background:#7a2828;color:#fff;border:none;border-top:1px solid #4a1a1a;padding:8px;font-size:12px;cursor:pointer;max-height:0;overflow:hidden;opacity:0;transition:max-height .18s,opacity .18s,padding .18s;padding-top:0;padding-bottom:0}
+#hl-popover .hl-snip-wrap.swiped .hl-snip-del-row{max-height:40px;opacity:1;padding-top:8px;padding-bottom:8px}
+#hl-popover .hl-snip-wrap.swiped .hl-snip-del-row:hover{background:#9a3232}
 #hl-popover .actions{display:flex;gap:6px;justify-content:flex-end}
 #hl-popover button{background:transparent;border:1px solid #3b6db5;color:#cfe6ff;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer}
 #hl-popover button:hover{background:#2c3e6a}
@@ -1800,22 +1808,27 @@ function openHlPopover(h, anchorDiv, pw) {
                 : h.kind === 'explain'   ? '💡 解释'
                 : '📝 备注';
   pop.innerHTML = `
-    <div class="hl-snip" data-id="${escHtml(h.id)}">
-      ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl">📌 选中</span>${escHtml(h.text)}</div>` : ''}
-      ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl">📖 所在句</span>${escHtml(h.sentence)}</div>` : ''}
-      ${h.body ? `<div class="hl-snip-row body"><span class="row-lbl">${kindLbl}</span>${escHtml(h.body)}</div>` : ''}
-      ${(!h.text && !h.sentence && !h.body) ? `<div class="hl-snip-row text" style="color:#7a8497">（无文字内容）</div>` : ''}
+    <div class="hl-snip-wrap" data-id="${escHtml(h.id)}">
+      <div class="hl-snip">
+        <div class="hl-snip-content">
+          ${h.text ? `<div class="hl-snip-row text"><span class="row-lbl">📌 选中</span>${escHtml(h.text)}</div>` : ''}
+          ${h.sentence ? `<div class="hl-snip-row sentence"><span class="row-lbl">📖 所在句</span>${escHtml(h.sentence)}</div>` : ''}
+          ${h.body ? `<div class="hl-snip-row body"><span class="row-lbl">${kindLbl}</span>${escHtml(h.body)}</div>` : ''}
+          ${(!h.text && !h.sentence && !h.body) ? `<div class="hl-snip-row text" style="color:#7a8497">（无文字内容）</div>` : ''}
+        </div>
+        <div class="hl-snip-circle" title="按住左滑显示删除"></div>
+      </div>
+      <button class="hl-snip-del-row" type="button">🗑 删除高亮</button>
     </div>
     <div class="row"><span class="row-lbl">🎨 颜色</span>${colorsHtml}</div>
     <textarea id="hl-note" placeholder="自定义备注（可空）">${escHtml(h.note || '')}</textarea>
     <div class="actions">
-      <button class="del" data-act="del">🗑 删除</button>
       <button data-act="save" class="primary">保存</button>
     </div>
   `;
-  // 预览块：点击展开 / 收起 + 触屏左滑揭示删除
-  const snip = pop.querySelector('.hl-snip');
-  if (snip) _attachSnipBehavior(snip, () => _hlDelete(h, pw));
+  // 预览块：点击展开 / 收起；右侧圆圈左滑（或整体触屏左滑）→ 下方滑出删除栏
+  const wrapEl = pop.querySelector('.hl-snip-wrap');
+  if (wrapEl) _attachSnipBehavior(wrapEl, () => _hlDelete(h, pw));
   // 颜色 swatch
   pop.querySelectorAll('.row .swatch').forEach(sw => {
     sw.onclick = (e) => {
@@ -1881,57 +1894,86 @@ async function _hlDelete(h, pw) {
   } catch (e) { alert('删除异常：' + e.message); }
 }
 
-// 预览块的交互：单击 = 展开/收起；触屏左滑 = 显示删除按钮
-function _attachSnipBehavior(node, onDel) {
-  // 整体可滑动 wrapper（让 transform 仅作用 node 本身，删除按钮固定在 popover 上）
-  node.style.position = 'relative';
-  node.style.transition = 'transform .15s';
-  // 创建删除按钮（左滑显示，绝对定位在右端）
-  const del = document.createElement('button');
-  del.textContent = '🗑 删除';
-  del.style.cssText = 'position:absolute;right:6px;top:50%;transform:translate(110%,-50%);background:#7a2828;color:#fff;border:1px solid #4a1a1a;border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;z-index:2;transition:transform .15s,opacity .15s;opacity:0';
-  node.parentElement.style.position = 'relative';
-  node.parentElement.style.overflow = 'visible';
-  node.parentElement.insertBefore(del, node.nextSibling);
+// 预览块的交互：
+//   - 单击文字内容 → 展开/收起全文
+//   - 右侧圆圈左滑（或整体触屏左滑） → 下方滑出删除栏（.swiped）
+//   - 再点圆圈 / 任意位置（除按钮）→ 复位
+function _attachSnipBehavior(wrap, onDel) {
+  const snip = wrap.querySelector('.hl-snip');
+  const content = wrap.querySelector('.hl-snip-content');
+  const circle = wrap.querySelector('.hl-snip-circle');
+  const del = wrap.querySelector('.hl-snip-del-row');
+  if (!snip || !del) return;
   del.onclick = (e) => { e.stopPropagation(); onDel(); };
 
-  const reveal = () => {
-    node.style.transform = 'translateX(-70px)';
-    del.style.transform = 'translate(0,-50%)';
-    del.style.opacity = '1';
-    node.dataset.swiped = '1';
+  const reveal = () => { wrap.classList.add('swiped'); snip.style.transform = ''; };
+  const reset  = () => { wrap.classList.remove('swiped'); snip.style.transform = ''; };
+
+  // 触屏 swipe（整体 snip）
+  let sx = 0, sy = 0, dx = 0, dy = 0, swiping = false, axis = '';
+  const onTouchStart = (e) => {
+    const t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = dy = 0; swiping = true; axis = '';
   };
-  const reset = () => {
-    node.style.transform = '';
-    del.style.transform = 'translate(110%,-50%)';
-    del.style.opacity = '0';
-    delete node.dataset.swiped;
-  };
-  let sx = 0, dx = 0, swiping = false;
-  node.addEventListener('touchstart', (e) => {
-    sx = e.touches[0].clientX; dx = 0; swiping = true;
-  }, {passive: true});
-  node.addEventListener('touchmove', (e) => {
+  const onTouchMove = (e) => {
     if (!swiping) return;
-    dx = e.touches[0].clientX - sx;
-    if (dx < -3) {
-      node.style.transform = `translateX(${Math.max(dx,-100)}px)`;
-    } else if (dx > 3 && node.dataset.swiped) {
-      reset();
+    const t = e.touches[0];
+    dx = t.clientX - sx; dy = t.clientY - sy;
+    if (!axis) {
+      if (Math.abs(dx) > 6 || Math.abs(dy) > 6) axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
     }
-  }, {passive: true});
-  node.addEventListener('touchend', () => {
+    if (axis === 'x') {
+      if (dx < 0) snip.style.transform = `translateX(${Math.max(dx,-80)}px)`;
+      else if (wrap.classList.contains('swiped')) snip.style.transform = `translateX(${Math.min(dx,30)}px)`;
+    }
+  };
+  const onTouchEnd = () => {
     swiping = false;
-    if (dx < -40) reveal();
-    else if (!node.dataset.swiped) reset();
-    dx = 0;
-  });
-  // 单击：展开/收起 全文（除非处于 swipe 揭示态——这时单击复位）
-  node.addEventListener('click', (e) => {
-    if (e.target.closest('button')) return;
-    if (node.dataset.swiped) { reset(); return; }
-    node.classList.toggle('expanded');
-  });
+    if (axis === 'x') {
+      if (dx < -40) reveal();
+      else if (dx > 30 || !wrap.classList.contains('swiped')) reset();
+      else reveal();   // 已 swipe 态、小位移 → 维持
+    }
+    dx = dy = 0; axis = '';
+  };
+  snip.addEventListener('touchstart', onTouchStart, {passive:true});
+  snip.addEventListener('touchmove',  onTouchMove,  {passive:true});
+  snip.addEventListener('touchend',   onTouchEnd);
+
+  // 鼠标 swipe（按住圆圈拖动；其他位置点击 = 展开/收起）
+  if (circle) {
+    let md = false, mx = 0, mdx = 0;
+    circle.addEventListener('mousedown', (e) => {
+      md = true; mx = e.clientX; mdx = 0; e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!md) return;
+      mdx = e.clientX - mx;
+      if (mdx < 0) snip.style.transform = `translateX(${Math.max(mdx,-80)}px)`;
+      else if (wrap.classList.contains('swiped')) snip.style.transform = `translateX(${Math.min(mdx,30)}px)`;
+    });
+    document.addEventListener('mouseup', () => {
+      if (!md) return;
+      md = false;
+      if (mdx < -40) reveal();
+      else if (mdx > 30 || !wrap.classList.contains('swiped')) reset();
+      mdx = 0;
+    });
+    // 圆圈单击（无 drag）= 切换 swiped
+    circle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (wrap.classList.contains('swiped')) reset(); else reveal();
+    });
+  }
+
+  // 单击 content → 展开/收起全文
+  if (content) {
+    content.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      // swipe 态时，点击不展开，先复位
+      if (wrap.classList.contains('swiped')) { reset(); return; }
+      content.classList.toggle('expanded');
+    });
+  }
 }
 
 // 设置 modal 里的颜色管理
