@@ -73,10 +73,11 @@ def _scan_chars(pdf_path: Path, page_num: int) -> list[dict]:
 
 
 def _words_with_positions(chars: list[dict]) -> list[dict]:
-    """从 chars 流识别词。返回 [{start_idx, end_idx, word_lower}]."""
+    """从 chars 流识别词。返回 [{start_idx, end_idx, word_lower}].
+    跨行检测：PyMuPDF rawdict 行尾不插空格 → 手动断词（避免 'beenpresented' bug）。"""
     out = []
     cur_start = None
-    cur_letters = []
+    cur_letters: list[str] = []
     def _flush(end_idx):
         nonlocal cur_start, cur_letters
         if cur_start is None or not cur_letters:
@@ -84,15 +85,25 @@ def _words_with_positions(chars: list[dict]) -> list[dict]:
         w = "".join(cur_letters).lower()
         out.append({"start": cur_start, "end": end_idx, "word": w})
         cur_start = None; cur_letters = []
+    prev = None
     for i, c in enumerate(chars):
         ch = c["c"]
+        # 跨行 flush
+        if prev and not prev.get("sp") and not c["sp"]:
+            prev_h = max(0.1, prev["y1"] - prev["y0"])
+            if abs(c["y0"] - prev["y0"]) > prev_h * 0.5:
+                if cur_letters and cur_letters[-1] == "-":
+                    cur_letters.pop()
+                else:
+                    _flush(i - 1)
         if c["sp"]:
-            _flush(i - 1); continue
+            _flush(i - 1); prev = c; continue
         if ch.isalpha() or ch in "'-":
             if cur_start is None: cur_start = i
             cur_letters.append(ch)
         else:
             _flush(i - 1)
+        prev = c
     if cur_letters:
         _flush(len(chars) - 1)
     return out

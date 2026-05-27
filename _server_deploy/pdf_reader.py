@@ -458,14 +458,26 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
             "rects": rects,
         })
 
+    prev: dict | None = None
     for ch in chars:
         c = ch.get("c", "")
+        # 跨行检测：PyMuPDF rawdict 在行尾不插空格，要手动断词（避免 "been\npresented" → "beenpresented"）
+        if prev and not prev.get("sp") and not ch.get("sp"):
+            prev_h = max(0.1, prev["y1"] - prev["y0"])
+            if abs(ch["y0"] - prev["y0"]) > prev_h * 0.5:
+                # 跨行：如果上一个字符是 hyphen → 行尾连字符 "pre-\nsented"，去 hyphen 继续拼
+                if cur_letters and cur_letters[-1] == "-":
+                    cur_letters.pop()
+                    if cur_chars: cur_chars.pop()
+                else:
+                    _flush()
         if ch.get("sp"):
-            _flush(); continue
+            _flush(); prev = ch; continue
         if c.isalpha() or c in "'-":
             cur_letters.append(c); cur_chars.append(ch)
         else:
             _flush()
+        prev = ch
     _flush()
     return marks
 
