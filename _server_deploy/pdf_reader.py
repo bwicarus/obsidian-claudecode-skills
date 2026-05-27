@@ -393,7 +393,7 @@ def pdf_api_page_chars():
                         })
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
-        sentences = _build_unmastered_sentences(chars, threshold=2)
+        sentences = _build_unmastered_sentences(chars)
         return jsonify({
             "ok": True,
             "chars": chars,
@@ -485,10 +485,12 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
     return marks
 
 
-def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[dict]:
-    """识别含 ≥ threshold 个未掌握 lemma 的句子。
-    返回 [{text, rects:[[x0,y0,x1,y1],...], lemmas:[...]}]
-    句子边界 = . ! ? 。！？ 或段落结束（行间距大）。
+def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10) -> list[dict]:
+    """识别需要标注的句子。判定条件：
+      - 至少 threshold 个未掌握 lemma（默认 3）
+      - 句子总词数 > min_words - 1（默认 10，即 ≥ 10 词）
+    返回 [{text, rects, lemmas, count, total_words, last_char}]
+    句子边界 = . ! ? 。！？ / 列表标记 • / 段落分界（行间距 > 1.5× 行高）
     """
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
@@ -512,13 +514,17 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
     cur_chars: list[dict] = []
     cur_lemmas: set[str] = set()
     cur_word_letters: list[str] = []
+    cur_total_words: int = 0
 
     def _flush_word():
-        nonlocal cur_word_letters
+        nonlocal cur_word_letters, cur_total_words
         if cur_word_letters:
             w = "".join(cur_word_letters).lower()
             if w in form_to_lemma_unmastered:
                 cur_lemmas.add(form_to_lemma_unmastered[w])
+            # 计数实际单词（不限英文）
+            if len(w) >= 2 or w.isalpha():
+                cur_total_words += 1
         cur_word_letters = []
 
     def _sentence_rects(sent_chars: list[dict]) -> list[list[float]]:
@@ -544,12 +550,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
         return rects
 
     def _flush_sentence():
-        nonlocal cur_chars, cur_lemmas
-        if cur_chars and len(cur_lemmas) >= threshold:
+        nonlocal cur_chars, cur_lemmas, cur_total_words
+        # 双条件：未掌握词 ≥ threshold 且 总词数 ≥ min_words
+        if cur_chars and len(cur_lemmas) >= threshold and cur_total_words >= min_words:
             text = "".join(c["c"] for c in cur_chars).strip()
             text = re.sub(r"\s+", " ", text)[:500] if text else ""
             rects = _sentence_rects(cur_chars)
-            # 最后一个非空白字符的 bbox（用于画 L 形翻译按钮包裹该字符）
             last_char = None
             for c in reversed(cur_chars):
                 if not c.get("sp"):
@@ -559,10 +565,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
             sentences.append({
                 "text": text, "rects": rects,
                 "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
+                "total_words": cur_total_words,
                 "last_char": last_char,
             })
         cur_chars = []
         cur_lemmas = set()
+        cur_total_words = 0
 
     prev = None
     pending_period = False   # 上一字符是 .，需要看下一字符决定切不切
@@ -691,7 +699,7 @@ def pdf_api_page_vocab_marks():
         except Exception:
             pass
         marks = _build_vocab_marks(chars)
-        sentences = _build_unmastered_sentences(chars, threshold=2)
+        sentences = _build_unmastered_sentences(chars)
         return jsonify({
             "ok": True,
             "vocab_marks": marks,
