@@ -36,7 +36,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer ::selection{background:transparent!important;color:transparent}
 /* 选中高亮叠层：用 PyMuPDF 提取的 char-level bbox 画，跟 canvas 渲染精确对齐 */
 .sel-overlay{position:absolute;inset:0;pointer-events:none;z-index:3}
-.sel-overlay .hl{position:absolute;background:rgba(59,109,181,.42);border-radius:2px;mix-blend-mode:multiply}
+.sel-overlay .hl{position:absolute;background:rgba(59,109,181,.65);border-radius:2px;mix-blend-mode:multiply}
 /* char layer：透明覆盖 PDF，接管所有选中事件（绕开 PDF.js textLayer 字符位置误差）*/
 .char-layer{position:absolute;inset:0;z-index:4;cursor:text;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
@@ -158,10 +158,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-sentence-overlay:hover{background-color:#fff8e1}
 
 /* 已保存高亮层：z-index 5 高于 char-layer(4)，让 hl-saved 能收到点击；
-   hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer */
+   hl-layer 本体 pointer-events:none 让空白处事件透传到 char-layer
+   mix-blend-mode:multiply → 颜色叠在字底，字像素不被糊 → 可高 opacity */
 .hl-layer{position:absolute;inset:0;z-index:5;pointer-events:none}
-.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:.55;transition:opacity .12s}
-.hl-layer .hl-saved:hover{opacity:.78}
+.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;opacity:.85;transition:opacity .12s}
+.hl-layer .hl-saved:hover{opacity:1}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
 /* 仅备注（无色）：透明背景 + 虚线边框提示"这里有备注但无颜色高亮" */
 .hl-layer .hl-saved.no-color{background:transparent !important;mix-blend-mode:normal;opacity:1;border:1px dashed rgba(150,170,200,.55)}
