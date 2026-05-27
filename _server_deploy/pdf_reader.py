@@ -593,7 +593,24 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
     _flush_word()
     _flush_sentence()
     # 加 NBSP（避免极短句子无法被 hit）：按文本长度过滤
-    return [s for s in sentences if len(s.get("text", "")) >= 12]
+    sentences = [s for s in sentences if len(s.get("text", "")) >= 12]
+    # 预翻译：cache 命中秒返回；未命中调 MyMemory ~300ms/句（同步在这里阻塞）
+    # 第一次访问该页慢一点，但后续命中 cache 一次就秒了
+    try:
+        import sys as _sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in _sys.path:
+            _sys.path.insert(0, str(vp))
+        from translate import translate as _tr   # type: ignore
+        for s in sentences:
+            t = s.get("text") or ""
+            if t:
+                zh = _tr(t)
+                if zh:
+                    s["zh"] = zh
+    except Exception:
+        pass
+    return sentences
 
 
 @bp.route("/api/page-vocab-marks")

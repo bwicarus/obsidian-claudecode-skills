@@ -133,8 +133,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #draft-actions button.primary:hover{background:#2c5188}
 #draft-actions button:disabled{opacity:.5;cursor:not-allowed}
 
-/* vocab 下划线层：在 char-layer 之下（z-index 1），仅装饰不拦事件 */
-.vocab-layer{position:absolute;inset:0;z-index:2;pointer-events:none}
+/* vocab 下划线层：z-index 6 高于 char-layer(4) / hl-layer(5)，让句子按钮可点；
+   layer 本体 pointer-events:none 不拦 char-layer 拖选；只有 .vocab-sentence-btn auto */
+.vocab-layer{position:absolute;inset:0;z-index:6;pointer-events:none}
 .vocab-underline{position:absolute;pointer-events:none;border-radius:1px}
 .vocab-underline.m-new   {height:2.5px;background:#f59e0b}                    /* 新词：橙 */
 .vocab-underline.m-seen  {height:2px;  background:#facc15;opacity:.85}       /* 见过：黄 */
@@ -949,7 +950,7 @@ function renderVocabSentences(pw, sentences) {
       btn.style.top = (r0[1] * sy - 2) + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        showSentenceTranslation(s.text, btn);
+        showSentenceTranslation(s.text, btn, s.zh || '');
       });
       btn.addEventListener('mousedown', (e) => e.stopPropagation());
       btn.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
@@ -980,13 +981,11 @@ window.closeSentPopover = () => {
   document.getElementById('sent-popover')?.classList.remove('open');
 };
 
-async function showSentenceTranslation(text, anchorBtn) {
+async function showSentenceTranslation(text, anchorBtn, preZh) {
   const pop = _ensureSentPopover();
   pop.querySelector('.sent-en').textContent = text;
   const zhEl = pop.querySelector('.sent-zh');
-  zhEl.textContent = '⏳ 翻译中…';
-  zhEl.className = 'sent-zh loading';
-  // 定位：按钮右侧；不够空间放下方
+  // 定位
   const r = anchorBtn.getBoundingClientRect();
   pop.style.left = (r.right + window.scrollX + 6) + 'px';
   pop.style.top = (r.top + window.scrollY - 4) + 'px';
@@ -994,11 +993,19 @@ async function showSentenceTranslation(text, anchorBtn) {
   requestAnimationFrame(() => {
     const pr = pop.getBoundingClientRect();
     if (pr.right > window.innerWidth - 8) {
-      // 放下方
       pop.style.left = Math.max(8, r.left + window.scrollX - pr.width / 2) + 'px';
       pop.style.top = (r.bottom + window.scrollY + 6) + 'px';
     }
   });
+  // 已有预翻译 → 立即显示
+  if (preZh) {
+    zhEl.textContent = '🇨🇳 ' + preZh;
+    zhEl.className = 'sent-zh';
+    return;
+  }
+  // fallback：现场调
+  zhEl.textContent = '⏳ 翻译中…';
+  zhEl.className = 'sent-zh loading';
   try {
     const r2 = await fetch('/pdf/api/translate-sentence', {
       method: 'POST', headers: {'Content-Type':'application/json'},
