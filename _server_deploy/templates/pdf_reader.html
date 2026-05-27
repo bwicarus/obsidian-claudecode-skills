@@ -68,14 +68,16 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 /* 结果浮层 */
 #result-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}
 #result-mask.open{display:flex}
-#result-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:640px;max-width:92vw;max-height:80vh;overflow-y:auto;line-height:1.7}
-#result-modal h3{margin:0 0 10px;font-size:15px;color:#cfe6ff}
-#result-modal .src{color:#8a9bb4;font-size:12px;border-left:3px solid #3b6db5;padding:8px 12px;margin-bottom:14px;background:#0d1322;border-radius:0 6px 6px 0;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
-#result-modal .content{font-size:13px;color:#e6e6f0}
+#result-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:640px;max-width:92vw;height:80vh;max-height:80vh;display:flex;flex-direction:column;line-height:1.7;position:relative}
+#result-modal h3{margin:0 0 10px;font-size:15px;color:#cfe6ff;flex-shrink:0;padding-right:36px}
+#result-modal .src{color:#8a9bb4;font-size:12px;border-left:3px solid #3b6db5;padding:8px 12px;margin-bottom:14px;background:#0d1322;border-radius:0 6px 6px 0;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto;flex-shrink:0}
+#result-modal .content{font-size:13px;color:#e6e6f0;flex:1 1 auto;overflow-y:auto;min-height:0;padding-right:4px}
 #result-modal .content p{margin:6px 0}
 #result-modal .content code{background:#0d1322;padding:2px 5px;border-radius:3px}
-#result-modal .actions{margin-top:14px;text-align:right}
-#result-modal .actions button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;margin-left:6px}
+#result-modal .actions{flex-shrink:0;margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;align-items:center}
+#result-modal .actions #vocab-actions{display:none;flex:1;align-items:center;gap:8px;flex-wrap:wrap}
+#result-modal .actions #vocab-actions.show{display:flex}
+#result-modal .actions button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px}
 #result-modal .actions button:hover{background:#2c3e6a;border-color:#3b6db5}
 #result-modal .loading{color:#8a9bb4;font-style:italic}
 
@@ -291,6 +293,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <div class="src" id="result-src"></div>
     <div class="content" id="result-content"></div>
     <div class="actions">
+      <div id="vocab-actions"></div>
       <button id="result-mark-btn" onclick="markFromResult()" title="给原始选中加 PDF 高亮（用上次颜色 + 把当前回答存到备注）" style="background:#244470;color:#fff;border-color:#3b6db5">🖌 标记到 PDF</button>
       <button onclick="closeResult()">关闭</button>
     </div>
@@ -2069,16 +2072,17 @@ async function dictStream(word, ctx) {
       if (s.antonyms.length) meta.push('反 ' + s.antonyms.slice(0,5).map(esc).join(', '));
       html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
     }
-    // 底部：Anki 按钮 + 源
-    html += `<div style="margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>`;
-    if (s.sources_hit.length) {
-      html += `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`;
-    } else {
-      html += `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`;
-    }
-    html += `</div>`;
     contentEl.innerHTML = html;
+    // 底部 actions：搬到 #vocab-actions（脱离内容滚动区，始终可见）
+    const va = document.getElementById('vocab-actions');
+    if (va) {
+      va.className = 'show';
+      va.innerHTML =
+        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
+        (s.sources_hit.length
+          ? `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
+          : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
+    }
   };
 
   let r;
@@ -2452,8 +2456,12 @@ function openResult(title, src, contentHtml) {
   document.getElementById('result-title').textContent = title;
   document.getElementById('result-src').textContent = src;
   document.getElementById('result-content').innerHTML = contentHtml;
+  document.getElementById('result-content').scrollTop = 0;   // 新结果回到顶部
   document.getElementById('result-content').dataset.title = title;
   document.getElementById('result-content').dataset.src = src;
+  // 清掉上次 vocab-actions（翻译/解释/AI 调用不需要它）
+  const va = document.getElementById('vocab-actions');
+  if (va) { va.className = ''; va.innerHTML = ''; }
   document.getElementById('result-mask').classList.add('open');
   if (window.MathJax && MathJax.typesetPromise) {
     MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
