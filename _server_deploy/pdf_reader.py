@@ -549,9 +549,17 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 2) -> list[d
             text = "".join(c["c"] for c in cur_chars).strip()
             text = re.sub(r"\s+", " ", text)[:500] if text else ""
             rects = _sentence_rects(cur_chars)
+            # 最后一个非空白字符的 bbox（用于画 L 形翻译按钮包裹该字符）
+            last_char = None
+            for c in reversed(cur_chars):
+                if not c.get("sp"):
+                    last_char = [round(c["x0"], 2), round(c["y0"], 2),
+                                 round(c["x1"], 2), round(c["y1"], 2)]
+                    break
             sentences.append({
                 "text": text, "rects": rects,
                 "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
+                "last_char": last_char,
             })
         cur_chars = []
         cur_lemmas = set()

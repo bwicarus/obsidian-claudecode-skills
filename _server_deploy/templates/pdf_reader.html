@@ -142,14 +142,15 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .vocab-underline.m-known {height:1.5px;background:#a3e635;opacity:.65}       /* 熟：淡绿 */
 .vocab-underline.m-mastered {display:none}                                    /* 掌握：不画 */
 
-/* 多生词句子框：每行独立矩形；句首左 4px 实线、句末右+下 4px 实线（充当按钮）*/
+/* 多生词句子框：每行独立矩形；句首左 4 实线，其它四边细虚线 */
 .vocab-sentence-box{position:absolute;border:1.4px dashed currentColor;border-radius:3px;pointer-events:none;box-sizing:border-box;transition:all .12s;color:rgba(0,0,0,.4);opacity:.75}
 .vocab-sentence-box.first{border-left:4px solid currentColor;border-radius:0 3px 3px 0}
-.vocab-sentence-box.last{border-right:4px solid currentColor;border-bottom:4px solid currentColor;border-radius:3px 0 0 3px;cursor:pointer;pointer-events:auto}
-.vocab-sentence-box.first.last{border-radius:0}   /* 单行句子：左+右下都是实线，无圆角 */
-.vocab-sentence-box.last:hover{opacity:1;background:var(--sent-fill,rgba(245,158,11,.10))}
-.vocab-sentence-box.last.active{background:var(--sent-fill,rgba(245,158,11,.10));opacity:1}
 .vocab-sentence-box.highlight{opacity:1;background:var(--sent-fill,rgba(245,158,11,.10))}
+
+/* 句末按钮：包裹最后一个字符的 L 形（右边 + 下边加粗）*/
+.vocab-sentence-btn-l{position:absolute;background:transparent;border:none;border-right:4px solid currentColor;border-bottom:4px solid currentColor;padding:2px 4px 2px 2px;cursor:pointer;pointer-events:auto;box-sizing:content-box;transition:background .12s,box-shadow .12s}
+.vocab-sentence-btn-l:hover{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:0 0 0 1px var(--sent-fill,rgba(245,158,11,.3))}
+.vocab-sentence-btn-l.active{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:inset -4px -4px 0 0 currentColor}
 
 /* 句子翻译覆盖层：实色白底（看清中文）+ 左侧粗色边 + 细色边框 */
 .vocab-sentence-overlay{position:absolute;background:#ffffff;color:#111;box-sizing:border-box;cursor:pointer;pointer-events:auto;white-space:normal;word-break:break-word;font-family:inherit;overflow:hidden;text-align:left;font-weight:500;box-shadow:inset 4px 0 0 currentColor,inset -1px 0 0 currentColor,inset 0 -1px 0 currentColor,inset 0 1px 0 currentColor;color:#d97706}
@@ -935,14 +936,11 @@ function renderVocabSentences(pw, sentences) {
     const rects = s.rects || [];
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
-    let lastBox = null;
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
-      const isFirst = (ri === 0);
-      const isLast = (ri === rects.length - 1);
       const box = document.createElement('div');
-      box.className = 'vocab-sentence-box' + (isFirst ? ' first' : '') + (isLast ? ' last' : '');
+      box.className = 'vocab-sentence-box' + (ri === 0 ? ' first' : '');
       box.dataset.sid = sid;
       box.style.color = stroke;
       box.style.setProperty('--sent-fill', fill);
@@ -950,25 +948,36 @@ function renderVocabSentences(pw, sentences) {
       box.style.top = (y0 * sy - 1) + 'px';
       box.style.width = ((x1 - x0) * sx + 4) + 'px';
       box.style.height = ((y1 - y0) * sy + 2) + 'px';
-      if (isLast) {
-        // 最后一行 = "按钮"（右下两边加粗）
-        box.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
-        box.addEventListener('click', (e) => {
-          e.stopPropagation();
-          toggleSentenceOverlay(layer, s, box, sx, sy);
-        });
-        // 阻止 char-layer 在最后一行 box 范围内启动拖选
-        box.addEventListener('mousedown', (e) => e.stopPropagation());
-        box.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
-        box.addEventListener('mouseenter', () => {
-          layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"]`).forEach(b => b.classList.add('highlight'));
-        });
-        box.addEventListener('mouseleave', () => {
-          layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"].highlight`).forEach(b => b.classList.remove('highlight'));
-        });
-        lastBox = box;
-      }
       layer.appendChild(box);
+    }
+    // L 形按钮：包裹最后一个字符（border-right + border-bottom 4px）
+    const lc = s.last_char;
+    if (lc) {
+      const btn = document.createElement('button');
+      btn.className = 'vocab-sentence-btn-l';
+      btn.type = 'button';
+      btn.dataset.sid = sid;
+      btn.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
+      btn.style.color = stroke;
+      btn.style.setProperty('--sent-fill', fill);
+      // content-box：width/height = 字符内容尺寸；padding 扩 hot zone
+      btn.style.left = (lc[0] * sx - 2) + 'px';
+      btn.style.top = (lc[1] * sy - 2) + 'px';
+      btn.style.width = ((lc[2] - lc[0]) * sx) + 'px';
+      btn.style.height = ((lc[3] - lc[1]) * sy) + 'px';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleSentenceOverlay(layer, s, btn, sx, sy);
+      });
+      btn.addEventListener('mousedown', (e) => e.stopPropagation());
+      btn.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+      btn.addEventListener('mouseenter', () => {
+        layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"]`).forEach(b => b.classList.add('highlight'));
+      });
+      btn.addEventListener('mouseleave', () => {
+        layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"].highlight`).forEach(b => b.classList.remove('highlight'));
+      });
+      layer.appendChild(btn);
     }
   }
 }
@@ -984,7 +993,7 @@ function toggleSentenceOverlay(layer, s, btn, sx, sy) {
   }
   // 关掉其它句子的 overlay（一次只显示一个）
   layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
-  layer.querySelectorAll('.vocab-sentence-box.last.active').forEach(b => b.classList.remove('active'));
+  layer.querySelectorAll('.vocab-sentence-btn-l.active').forEach(b => b.classList.remove('active'));
 
   const zh = s.zh || '';
   if (!zh) {
