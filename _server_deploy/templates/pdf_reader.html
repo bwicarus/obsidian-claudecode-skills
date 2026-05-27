@@ -951,20 +951,22 @@ function renderVocabSentences(pw, sentences) {
       layer.appendChild(box);
     }
     if (!rects.length) continue;
-    // 按钮放在句首左侧外（紧贴粗色左边）—— 不挡下一句开头
-    const r0 = rects[0];
+    // 按钮放在句尾行的左侧外（紧贴句子最后一行的左边）
+    // 视觉上句子常是 L 形（最后一行从页左 margin 起，到中间结束）→ 按钮放在 L 凸角
+    // 不挡下一句开头（下一句在最后一行末尾右边），不盖上一句末尾
+    const rLast = rects[rects.length - 1];
     const btn = document.createElement('button');
     btn.className = 'vocab-sentence-btn';
     btn.type = 'button';
     btn.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
     btn.dataset.sid = sid;
-    btn.style.color = stroke;     // currentColor → background
+    btn.style.color = stroke;
     btn.style.setProperty('--sent-fill', fill);
-    const lineH = (r0[3] - r0[1]) * sy;
-    let leftPx = r0[0] * sx - 24;   // 默认句首左外 24px
-    if (leftPx < 2) leftPx = r0[0] * sx + 2;   // 不够空间 → 退到句首内 2px（盖一两字）
+    const lineH = (rLast[3] - rLast[1]) * sy;
+    let leftPx = rLast[0] * sx - 24;   // 句尾行 x0 左外 24px
+    if (leftPx < 2) leftPx = rLast[0] * sx + 2;   // 不够空间 → 退到句尾行内
     btn.style.left = leftPx + 'px';
-    btn.style.top = (r0[1] * sy + lineH / 2 - 10) + 'px';   // 跟句首行垂直居中
+    btn.style.top = (rLast[1] * sy + lineH / 2 - 10) + 'px';   // 跟句尾行垂直居中
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleSentenceOverlay(layer, s, btn, sx, sy);
