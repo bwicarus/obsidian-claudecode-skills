@@ -2063,9 +2063,64 @@ def pdf_api_vocab_add_anki():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+# ── 语法分析历史：按 PDF 分文件持久保存（state/grammar-history/<sha>.json）──
+_GRAMMAR_HISTORY_DIR = CLAUDE_DIR / "state" / "grammar-history"
+
+
+def _grammar_hist_path(file_rel: str) -> Path:
+    import hashlib
+    h = hashlib.sha1((file_rel or "_").encode("utf-8")).hexdigest()[:16]
+    return _GRAMMAR_HISTORY_DIR / f"{h}.json"
+
+
+def _grammar_hist_load(file_rel: str) -> dict:
+    p = _grammar_hist_path(file_rel)
+    if p.exists():
+        try:
+            return json.loads(p.read_text("utf-8"))
+        except Exception:
+            pass
+    return {"pdf": file_rel, "items": []}
+
+
+def _grammar_hist_write(file_rel: str, data: dict):
+    _GRAMMAR_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    _grammar_hist_path(file_rel).write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+
+
+@bp.route("/api/grammar-history", methods=["GET"])
+def pdf_api_grammar_history():
+    """返回某 PDF 的语法分析历史（按时间倒序，新的在前）。"""
+    file = (request.args.get("file") or "").strip()
+    hist = _grammar_hist_load(file)
+    items = sorted(hist.get("items", []), key=lambda x: x.get("ts", 0), reverse=True)
+    return jsonify({"ok": True, "items": items})
+
+
+@bp.route("/api/grammar-history-save", methods=["POST"])
+def pdf_api_grammar_history_save():
+    """保存一条语法分析结果到该 PDF 的历史（同句去重更新，限 200 条）。"""
+    import time
+    data = request.get_json(silent=True) or {}
+    file = (data.get("file") or "").strip()
+    item = data.get("item") or {}
+    sentence = (item.get("sentence") or "").strip()
+    if not file or not sentence:
+        return jsonify({"ok": False, "error": "no file/sentence"}), 400
+    text = item.get("text") or ""
+    hist = _grammar_hist_load(file)
+    hist["items"] = [x for x in hist.get("items", [])
+                     if not (x.get("sentence") == sentence and (x.get("text") or "") == text)]
+    item["ts"] = int(time.time())
+    hist["items"].append(item)
+    hist["items"] = hist["items"][-200:]
+    _grammar_hist_write(file, hist)
+    return jsonify({"ok": True, "total": len(hist["items"])})
+
+
 @bp.route("/api/grammar-forget", methods=["POST"])
 def pdf_api_grammar_forget():
-    """删除某句的语法分析缓存（删卡时调），下次分析同句从头生成。"""
+    """删除某句的语法分析缓存 + 历史（删卡时调），下次分析同句从头生成。"""
     import hashlib
     data = request.get_json(silent=True) or {}
     sentence = (data.get("sentence") or "").strip()
@@ -2087,6 +2142,16 @@ def pdf_api_grammar_forget():
             p.unlink(); removed = 1
         except Exception:
             pass
+    # 从历史删
+    try:
+        hist = _grammar_hist_load(rel)
+        before = len(hist.get("items", []))
+        hist["items"] = [x for x in hist.get("items", [])
+                         if not (x.get("sentence") == sentence and (x.get("text") or "") == text)]
+        if len(hist["items"]) != before:
+            _grammar_hist_write(rel, hist)
+    except Exception:
+        pass
     return jsonify({"ok": True, "removed": removed})
 
 

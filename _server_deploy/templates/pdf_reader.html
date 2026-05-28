@@ -825,7 +825,7 @@ async function loadPageNodes(num) {
   } catch (e) {
     document.getElementById('kg-nodes').innerHTML = '<div style="color:#c00;font-size:12px">加载失败</div>';
   }
-  _refreshVocabIfPage?.();   // 翻页时若单词本在「本页」scope，同步刷新
+  window._refreshVocabIfPage?.();   // 翻页时若单词本在「本页」scope，同步刷新
 }
 
 window.changePage = async (delta) => {
@@ -857,7 +857,45 @@ window.switchSideTab = (pane) => {
   const clr = document.getElementById('side-clear');
   if (clr) clr.style.display = (pane === 'grammar') ? '' : 'none';
   if (pane === 'vocab' && !_vocabLoaded) loadVocabList();   // 首次进单词本自动载
+  if (pane === 'grammar' && !_grammarHistLoaded) loadGrammarHistory();   // 首次进语法载历史
 };
+// 语法分析历史：按书本持久，新旧倒序（最新在上）
+let _grammarHistLoaded = false;
+window.loadGrammarHistory = async () => {
+  _grammarHistLoaded = true;
+  try {
+    const r = await fetch('/pdf/api/grammar-history?file=' + encodeURIComponent(FILE_REL || ''));
+    const d = await r.json();
+    const items = d.items || [];   // 后端已按 ts 倒序（新在前）
+    for (const it of items) _addHistoryBlock(it);   // append → 新的在最上
+  } catch (e) { window.dlog?.('grammar history load fail: ' + e.message); }
+};
+function _addHistoryBlock(item) {
+  const body = document.getElementById('grammar-panel-body');
+  if (!body) return;
+  const sentence = item.sentence || '', text = item.text || '';
+  const block = document.createElement('div');
+  block.className = 'grammar-block';   // 历史卡默认折叠
+  block.dataset.src = sentence; block.dataset.text = text;
+  const summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
+  block.innerHTML =
+    `<div class="gb-header">
+       <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
+       <span class="gb-caret">▶</span>
+     </div>
+     <div class="gb-trans"></div>
+     <div class="gb-content"></div>`;
+  block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
+  block.querySelector('.gb-del').addEventListener('click', (e) => {
+    e.stopPropagation();
+    fetch('/pdf/api/grammar-forget', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sentence: block.dataset.src || '', text: block.dataset.text || '', file: FILE_REL, enabled_books: _grammarEnabledBooks})}).catch(() => {});
+    block.remove();
+  });
+  body.appendChild(block);
+  _fillGrammarBlock(block, item, sentence);   // item 无 engine → 直接渲染翻译+语法点+依存图(不流式)
+}
 // 「📒 单词本」按钮入口（顶栏没放按钮，但保留以备调用）
 window.toggleVocab = () => {
   const p = document.getElementById('grammar-panel');
@@ -895,10 +933,10 @@ window.loadVocabList = async (scope) => {
     listEl.innerHTML = '<div style="color:#ef4444;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
   }
 };
-function _refreshVocabIfPage() {
+window._refreshVocabIfPage = function() {
   const pane = document.getElementById('side-pane-vocab');
   if (pane && pane.classList.contains('active') && _vocabScope === 'page') loadVocabList();
-}
+};
 function _masteryColor(m) {
   if (m >= 0.8) return '#22c55e';
   if (m >= 0.5) return '#eab308';
@@ -2845,9 +2883,23 @@ async function _streamGrammar(block, sentence, text) {
     const pm = acc.match(/\[\[POINTS\]\]([\s\S]*?)(\[\[\/POINTS\]\]|$)/);
     _setBlockPoints(block, pm ? pm[1].trim() : '[]');
   }
+  // 分析完成 → 保存到该 PDF 的历史（按书本持久化）
+  try {
+    const sp = block.__spacy || {};
+    fetch('/pdf/api/grammar-history-save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, item: {
+        sentence, text,
+        sentence_zh: block.__zh || '',
+        tokens: sp.tokens || [], deps: sp.deps || [], clauses: sp.clauses || [],
+        analyses: block.__points || [],
+      }}),
+    }).catch(() => {});
+  } catch (e) {}
 }
 function _setBlockTrans(block, zh) {
   // 只填常驻翻译行；标题保持原文不动
+  block.__zh = zh;
   const el = block.querySelector('.gb-trans');
   if (el) { el.classList.remove('gb-pending'); el.textContent = '🌐 ' + zh; }
 }
@@ -2860,6 +2912,7 @@ function _setBlockPoints(block, jsonStr) {
   if (!wrap) return;
   let arr = [];
   try { arr = JSON.parse(jsonStr) || []; } catch { arr = []; }
+  block.__points = arr;   // 存下来供历史保存
   if (!arr.length) { wrap.remove(); return; }   // 没语法点就移除占位
   wrap.classList.remove('gb-pending');
   wrap.innerHTML = arr.map(a => `
@@ -2943,7 +2996,7 @@ function _addLoadingBlock(id, sentence, text) {
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
     e.stopPropagation();
-    // 真删除：清后端语法分析缓存，下次同句从头生成
+    // 真删除：清后端语法分析缓存 + 历史，下次同句从头生成
     fetch('/pdf/api/grammar-forget', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -2953,6 +3006,8 @@ function _addLoadingBlock(id, sentence, text) {
     }).catch(() => {});
     block.remove();
   });
+  // 移除同句旧卡（历史已渲染过的同句，避免重复）
+  body.querySelectorAll('.grammar-block').forEach(b => { if (b !== block && b.dataset.src === sentence) b.remove(); });
   body.insertBefore(block, body.firstChild);   // 最新在最上
   body.scrollTop = 0;
   return block;
@@ -2972,6 +3027,7 @@ function _fillGrammarBlock(block, d, sentence) {
     _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
   }
+  block.__spacy = {tokens, deps, clauses: d.clauses || []};   // 存依存数据供历史保存
   const isSpacy = d.engine === 'spacy';   // spaCy 路径：翻译/语法点稍后由 SSE 流式填
   // 标题永远是原文（不被翻译覆盖）；翻译填到 header 外的常驻 gb-trans 行（折叠也可见）
   const transEl = block.querySelector('.gb-trans');
