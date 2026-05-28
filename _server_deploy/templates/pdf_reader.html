@@ -376,6 +376,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
     <div id="sel-toolbar">
       <div class="preview" id="sel-preview">—</div>
       <div class="btns">
+        <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
         <button onclick="onTranslate()">🌐 翻译</button>
         <button onclick="onExplain()">💡 解释</button>
         <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
@@ -4464,6 +4465,33 @@ async function aiCall(path, body, label) {
     contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
 }
+
+// 复制选中文本（char-layer 自定义选中，浏览器原生 selection 是空的）
+window.onCopySel = async () => {
+  const t = (lastSelText || '').trim();
+  if (!t) { _toast?.('没有选中内容'); return; }
+  try {
+    await navigator.clipboard.writeText(t);
+    _toast?.('已复制');
+  } catch (e) {
+    // 回退：临时 textarea + execCommand（http / 无权限场景）
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+      _toast?.('已复制');
+    } catch (e2) { _toast?.('复制失败'); }
+  }
+};
+// Ctrl/Cmd+C：char-layer 有选中时，把选中文本写进剪贴板（绕过空的原生 selection）
+document.addEventListener('copy', (e) => {
+  const t = (lastSelText || '').trim();
+  if (!t || !(window.getSelection && String(window.getSelection()).length === 0)) return;
+  // 仅当原生 selection 为空(说明是 char-layer 选中)时接管
+  e.clipboardData.setData('text/plain', t);
+  e.preventDefault();
+});
 
 window.onTranslate = async () => {
   if (!lastSelText) return;
