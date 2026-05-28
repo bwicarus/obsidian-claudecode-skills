@@ -2665,14 +2665,25 @@ function _setupGrammarScrollLink() {
   body.addEventListener('scroll', () => sync(body, main), {passive: true});
 }
 
-// 句子在 #main 滚动坐标系里的 y（block.top 用同一坐标）
+// 句子在 #main 滚动坐标系里的 y → 换算成 block 在 spacer 里的 top
+// 关键补偿：#main 视口顶 与 grammar-panel-body 视口顶 不一样高
+//   (#main 紧贴页面 header；右侧 body 还在面板标题栏下方)
+//   两边 scrollTop 相等时，加这个差值才能让 block 与原句精确对齐
+function _grammarTopAdjust() {
+  const main = document.getElementById('main');
+  const body = document.getElementById('grammar-panel-body');
+  if (!main || !body) return 0;
+  // block 视口位置 = bodyTop + block.top - scroll；句子 = mainTop + Y - scroll
+  // 令二者相等 → block.top = Y + (mainTop - bodyTop)
+  return main.getBoundingClientRect().top - body.getBoundingClientRect().top;
+}
 function _blockTopFor(pageNum, topRatio) {
   const pw = document.querySelector(`.page-wrap[data-page-num="${pageNum}"]`);
   const container = document.getElementById('page-container');
   if (!pw || !container) return 0;
   let y = pw.offsetTop + (topRatio || 0) * pw.offsetHeight;
   if (container.offsetParent) y += container.offsetTop;
-  return y;
+  return y + _grammarTopAdjust();
 }
 function _refreshSpacerHeight() {
   const spacer = document.getElementById('grammar-panel-spacer');
