@@ -1317,7 +1317,8 @@ function _vocabUnderlineEnabled() {
 // 查完一个词后，刷新所有已渲染页的下划线（让新查的词立刻出现下划线）
 async function refreshVocabUnderlinesForAllPages() {
   if (!_vocabUnderlineEnabled() || !pdfDoc) return;
-  const wraps = document.querySelectorAll('.page-wrap[data-loaded="1"]');
+  // 单页模式当前页是 #page-container 自身(无 .page-wrap class)，故按 data-loaded+page-num 选，覆盖两种模式
+  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
   for (const pw of wraps) {
     const pn = parseInt(pw.dataset.pageNum || '0', 10);
     if (!pn) continue;
