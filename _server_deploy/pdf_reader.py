@@ -1712,6 +1712,16 @@ def _spacy_grammar(sentence: str) -> dict | None:
         for c in clauses:
             for tk in c.get("tokens", []):
                 tk["zh"] = _zh(tk.get("text", ""))
+        # 嵌套子句树的节点也补中文（占位节点 ref 不补），供可展开弧线图点词看翻译
+        def _fill_tree_zh(node):
+            if not node:
+                return
+            for nd in node.get("nodes", []):
+                if nd.get("ref") is None:
+                    nd["zh"] = _zh(nd.get("text", ""))
+            for ch in node.get("children", []):
+                _fill_tree_zh(ch)
+        _fill_tree_zh(clause_tree)
     except Exception:
         pass
     # 整句翻译 + 语法点讲解交给 AI 流式（/api/grammar-stream，翻译标志先出）
