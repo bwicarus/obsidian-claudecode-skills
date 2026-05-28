@@ -72,7 +72,62 @@ def parse(text: str) -> dict:
         "tokens": tokens, "deps": deps,
         "clauses": _split_clauses(doc),
         "components": _split_components(doc),
+        "clause_tree": _clause_tree(doc),
     }
+
+
+def _clause_tree(doc):
+    """嵌套子句树（供可逐级展开的弧线图）：
+    每层 = {label, nodes:[{text,pos,ref?}], deps:[{head,child,label}], children:[子层]}。
+    本层只含直属本子句的词；子从句收成一个占位节点 ⟨从句类型⟩(pos='clause', ref=子层下标)，
+    点占位即可展开那一层的弧线。"""
+    root = None
+    for t in doc:
+        if t.dep_ == "ROOT":
+            root = t
+            break
+    if root is None:
+        return None
+
+    def nearest(t):   # 向上第一个子句根(含 ROOT)，返回 token.i（spaCy Token 不能用 is 比较）
+        cur, hops = t, 0
+        while hops < 300:
+            if cur.i == root.i or cur.dep_ in _CLAUSE_BOUNDARY:
+                return cur.i
+            if cur.head.i == cur.i:
+                return cur.i
+            cur = cur.head
+            hops += 1
+        return cur.i
+
+    def build(head, label):
+        # 直属子从句根：head 子树里 dep∈从句 且 其 head 仍属本层
+        subs = [t for t in head.subtree
+                if t.i != head.i and t.dep_ in _CLAUSE_BOUNDARY and nearest(t.head) == head.i]
+        # 本层自有词（不进入任何子从句）
+        own = [t for t in head.subtree if nearest(t) == head.i and not (t.is_space or t.is_punct)]
+        seq = [(t.i, "tok", t) for t in own] + [(s.i, "sub", s) for s in subs]
+        seq.sort(key=lambda x: x[0])
+        nodes, idxmap, children = [], {}, []
+        for gi, kind, tok in seq:
+            idxmap[gi] = len(nodes)
+            if kind == "tok":
+                nodes.append({"text": tok.text, "pos": UPOS.get(tok.pos_, tok.pos_.lower())})
+            else:
+                clab = _CLAUSE_DEP.get(tok.dep_, "从句")
+                ci = len(children)
+                children.append(build(tok, clab))
+                nodes.append({"text": "⟨" + clab + "⟩", "pos": "clause", "ref": ci})
+        deps = []
+        for gi, kind, tok in seq:
+            if tok.i == head.i:
+                continue
+            h = tok.head
+            if h.i in idxmap and tok.i in idxmap and h.i != tok.i:
+                deps.append({"head": idxmap[h.i], "child": idxmap[tok.i], "label": DEP.get(tok.dep_, tok.dep_)})
+        return {"label": label, "nodes": nodes, "deps": deps, "children": children}
+
+    return build(root, "主句")
 
 
 # 依存标签 → 中文句子成分名（成分分块用）

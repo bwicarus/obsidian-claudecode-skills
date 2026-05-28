@@ -158,6 +158,11 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .dep-arrow{fill:#5a6e94}
 .dep-label{font-size:9px;fill:#7dd3fc;font-weight:600}
 .dep-tip{position:fixed;z-index:30;background:#1a2540;border:1px solid #3b6db5;border-radius:6px;padding:5px 9px;font-size:11px;color:#e6e6f0;pointer-events:none;max-width:220px;box-shadow:0 4px 14px rgba(0,0,0,.5);display:none}
+/* 可展开弧线树：每层一段，子从句缩进 */
+.dep-tree .dep-tscroll{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
+.dep-tree .dep-tchildren{}
+.dep-tree .dep-tsub{margin:4px 0 8px 14px;border-left:1px dashed #2a3550;padding-left:9px}
+.dep-token.dep-ph .dep-word{text-decoration:underline dotted}
 
 /* 跟踪语法点列表（图例已去掉，词本身着色 + 词下中文词性标足够）*/
 .gb-analyses{border-top:1px solid #1c2740;padding:2px 0}
@@ -2922,7 +2927,7 @@ async function _streamGrammar(block, sentence, text) {
         sentence, text,
         sentence_zh: block.__zh || '',
         tokens: sp.tokens || [], deps: sp.deps || [], clauses: sp.clauses || [],
-        components: sp.components || [],
+        components: sp.components || [], clause_tree: sp.clause_tree || null,
         analyses: block.__points || [],
       }}),
     }).catch(() => {});
@@ -3059,7 +3064,7 @@ function _fillGrammarBlock(block, d, sentence) {
     _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
   }
-  block.__spacy = {tokens, deps, clauses: d.clauses || [], components};   // 存供历史保存
+  block.__spacy = {tokens, deps, clauses: d.clauses || [], components, clause_tree: d.clause_tree};   // 存供历史保存
   const isSpacy = d.engine === 'spacy';   // spaCy 路径：翻译/语法点稍后由 SSE 流式填
   // 标题永远是原文（不被翻译覆盖）；翻译填到 header 外的常驻 gb-trans 行（折叠也可见）
   const transEl = block.querySelector('.gb-trans');
@@ -3134,7 +3139,11 @@ function _renderStructInto(diag, wrap, sp) {
     diag.appendChild(_renderSkeleton(comps)); wrap?.classList.add('dgram-open');
   } else if (_grammarViewMode === 'components' && comps.length) {
     diag.appendChild(_renderComponents(comps)); wrap?.classList.add('dgram-open');
+  } else if (sp.clause_tree) {
+    // 可逐级展开的弧线：主句弧线 + 占位节点点开看从句弧线
+    diag.appendChild(_renderDepTree(sp.clause_tree));
   } else if (toks.length) {
+    // 旧数据(无 clause_tree)回退：整句单图 / 从句平铺分段
     if (clauses.length > 1) {
       for (const c of clauses) {
         if (!(c.tokens || []).length) continue;
@@ -3280,7 +3289,7 @@ function _renderComponents(comps) {
 }
 
 // ── displaCy 依存图：弧线在词上方、词性着色、词性中文标在词下（无 components 时回退）──
-function _renderDepSvg(tokens, deps) {
+function _renderDepSvg(tokens, deps, onNodeClick) {
   const NS = 'http://www.w3.org/2000/svg';
   const PAD_X = 18, GAP = 40, FONT = 16, POS_GAP = 18;   // 词距/字号加大，更舒展不挤
   const ARC_BASE = 24, ARC_STEP = 19;
@@ -3327,26 +3336,32 @@ function _renderDepSvg(tokens, deps) {
   }
   for (let i=0;i<tokens.length;i++){
     const t = tokens[i];
+    const isClause = (t.pos === 'clause') || (t.ref != null);   // 子从句占位节点
+    const col = isClause ? '#7dd3fc' : _posColor(t.pos);
     const g = document.createElementNS(NS,'g');
-    g.setAttribute('class','dep-token');
+    g.setAttribute('class', 'dep-token' + (isClause ? ' dep-ph' : ''));
     const bw = widths[i] + 8;
     const bg = document.createElementNS(NS,'rect');
     bg.setAttribute('x', cx[i]-bw/2); bg.setAttribute('y', wordBaseY-FONT);
     bg.setAttribute('width', bw); bg.setAttribute('height', FONT+5);
-    bg.setAttribute('rx',4); bg.setAttribute('fill', _posColor(t.pos)); bg.setAttribute('opacity','0.16');
+    bg.setAttribute('rx',4); bg.setAttribute('fill', col); bg.setAttribute('opacity', isClause ? '0.22' : '0.16');
+    if (isClause) { bg.setAttribute('stroke', col); bg.setAttribute('stroke-dasharray','3 2'); bg.setAttribute('stroke-width','1'); }
     g.appendChild(bg);
     const w = document.createElementNS(NS,'text');
     w.setAttribute('x', cx[i]); w.setAttribute('y', wordBaseY-2);
     w.setAttribute('text-anchor','middle'); w.setAttribute('class','dep-word');
-    w.setAttribute('fill', _posColor(t.pos));
+    w.setAttribute('fill', col);
     w.textContent = t.text || '';
     g.appendChild(w);
     const p = document.createElementNS(NS,'text');
     p.setAttribute('x', cx[i]); p.setAttribute('y', wordBaseY+POS_GAP-2);
     p.setAttribute('text-anchor','middle'); p.setAttribute('class','dep-pos');
-    p.textContent = POS_LABEL[(t.pos||'').toLowerCase()] || t.pos || '';
+    p.textContent = isClause ? '点开▾' : (POS_LABEL[(t.pos||'').toLowerCase()] || t.pos || '');
     g.appendChild(p);
-    if (t.zh) {
+    if (isClause && onNodeClick) {
+      g.style.cursor = 'pointer';
+      g.addEventListener('click', ev => { ev.stopPropagation(); onNodeClick(i, g); });
+    } else if (t.zh) {
       const tip = `${t.text}　${t.zh}`;
       g.addEventListener('mouseenter', ev => _showDepTip(ev, tip));
       g.addEventListener('mousemove', _moveDepTip);
@@ -3356,6 +3371,47 @@ function _renderDepSvg(tokens, deps) {
     svg.appendChild(g);
   }
   return svg;
+}
+
+// 可逐级展开的弧线树：主句弧线图 + 占位节点点开展开子从句弧线（递归）
+function _renderDepTree(tree) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dep-tree';
+  const renderClause = (clause, container) => {
+    const seg = document.createElement('div');
+    seg.className = 'dep-tlevel';
+    const childBox = document.createElement('div');
+    childBox.className = 'dep-tchildren';
+    const svg = _renderDepSvg(clause.nodes || [], clause.deps || [], (i) => {
+      const node = (clause.nodes || [])[i];
+      if (!node || node.ref == null) return;
+      const exist = childBox.querySelector(`:scope > [data-ref="${node.ref}"]`);
+      if (exist) { exist.remove(); return; }   // 再点收起
+      const sub = document.createElement('div');
+      sub.dataset.ref = node.ref;
+      sub.className = 'dep-tsub';
+      const lbl = document.createElement('div');
+      lbl.className = 'dep-clause-label';
+      lbl.textContent = (clause.children[node.ref] || {}).label || '从句';
+      sub.appendChild(lbl);
+      renderClause(clause.children[node.ref], sub);
+      childBox.appendChild(sub);
+    });
+    // 图比容器宽时横向滚
+    const sc = document.createElement('div');
+    sc.className = 'dep-tscroll';
+    sc.appendChild(svg);
+    sc.addEventListener('wheel', (e) => {
+      if (sc.scrollWidth <= sc.clientWidth) return;
+      sc.scrollLeft += (Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX);
+      e.preventDefault();
+    }, {passive: false});
+    seg.appendChild(sc);
+    seg.appendChild(childBox);
+    container.appendChild(seg);
+  };
+  renderClause(tree, wrap);
+  return wrap;
 }
 
 let _depTipEl = null;

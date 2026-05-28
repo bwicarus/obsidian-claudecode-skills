@@ -1678,6 +1678,7 @@ def _spacy_grammar(sentence: str) -> dict | None:
     deps = parsed.get("deps") or []
     clauses = parsed.get("clauses") or []
     components = parsed.get("components") or []
+    clause_tree = parsed.get("clause_tree")
     if not tokens:
         return None
     # ECDICT 补每个词的简明中文义（离线、毫秒级）；主 tokens + 各子句 tokens 共用一份缓存
@@ -1715,7 +1716,7 @@ def _spacy_grammar(sentence: str) -> dict | None:
         pass
     # 整句翻译 + 语法点讲解交给 AI 流式（/api/grammar-stream，翻译标志先出）
     # 这里只出词性 + 依存 + 子句切分，秒级零 AI
-    return {"tokens": tokens, "deps": deps, "clauses": clauses, "components": components, "sentence_zh": ""}
+    return {"tokens": tokens, "deps": deps, "clauses": clauses, "components": components, "clause_tree": clause_tree, "sentence_zh": ""}
 
 
 @bp.route("/api/grammar-analyze", methods=["POST"])
@@ -1760,6 +1761,7 @@ def pdf_api_grammar_analyze():
                 "deps":        sp.get("deps", []),
                 "clauses":     sp.get("clauses", []),   # 长句按从句切段
                 "components":  sp.get("components", []), # 句子成分分块
+                "clause_tree": sp.get("clause_tree"),    # 嵌套子句树(可展开弧线)
                 "analyses":    [],   # 语法点匹配暂不在 spaCy 路径做（后续可加规则）
                 "engine":      "spacy",
             }
