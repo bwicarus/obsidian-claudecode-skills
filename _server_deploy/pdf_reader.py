@@ -574,13 +574,22 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                     last_char = [round(c["x0"], 2), round(c["y0"], 2),
                                  round(c["x1"], 2), round(c["y1"], 2)]
                     break
-            sentences.append({
-                "text": text, "rects": rects,
-                "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
-                "total_words": cur_total_words,
-                "first_char": first_char,
-                "last_char": last_char,
-            })
+            # 竖排文字（旋转排版的书页边注释）：整句 bbox 高 > 宽*1.6 → 跳过
+            # （横排句子哪怕 2-3 行，行宽通常仍 > 行高叠加；竖排是一长列，高远大于宽）
+            nsp = [c for c in cur_chars if not c.get("sp")]
+            vertical = False
+            if nsp:
+                bw = max(c["x1"] for c in nsp) - min(c["x0"] for c in nsp)
+                bh = max(c["y1"] for c in nsp) - min(c["y0"] for c in nsp)
+                vertical = bh > bw * 1.6
+            if not vertical:
+                sentences.append({
+                    "text": text, "rects": rects,
+                    "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
+                    "total_words": cur_total_words,
+                    "first_char": first_char,
+                    "last_char": last_char,
+                })
         cur_chars = []
         cur_lemmas = set()
         cur_total_words = 0
