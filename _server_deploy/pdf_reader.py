@@ -1950,6 +1950,9 @@ def pdf_api_vocab_list():
     返回按 mastery 升序（最该复习的在前）的词条。"""
     file = (request.args.get("file") or "").strip()
     scope = (request.args.get("scope") or "book").strip()
+    page = 0
+    try: page = int(request.args.get("page") or 0)
+    except Exception: page = 0
     vroot = OBSIDIAN_ROOT / "资源" / "vocab"
     if not vroot.exists():
         return jsonify({"ok": True, "items": [], "scope": scope})
@@ -1968,10 +1971,11 @@ def pdf_api_vocab_list():
         exposure = json.loads((CLAUDE_DIR / "state" / "vocab-exposure.json").read_text("utf-8"))
     except Exception:
         pass
-    # book scope：本 PDF 查过的 lemma
+    # book(本书) / page(本页) scope：从查词日志 + 反向索引筛 lemma
     target = set(notes.keys())
-    if scope == "book" and file:
+    if scope in ("book", "page") and file:
         book = set()
+        match_page = (scope == "page")
         log = CLAUDE_DIR / "state" / "vocab-lookups.jsonl"
         if log.exists():
             for line in log.read_text("utf-8").splitlines():
@@ -1979,14 +1983,14 @@ def pdf_api_vocab_list():
                     j = json.loads(line)
                 except Exception:
                     continue
-                if j.get("pdf") == file and j.get("lemma"):
+                if j.get("pdf") == file and j.get("lemma") and (not match_page or j.get("page") == page):
                     book.add(j["lemma"].strip().lower())
-        # 也并入「反向索引里在本书出现 + 有笔记」的词
+        # 也并入「反向索引里在本书/本页出现 + 有笔记」的词
         for lem, ex in exposure.items():
             ll = lem.strip().lower()
             if ll in notes:
                 for pg in (ex.get("pages") or []):
-                    if pg.get("pdf") == file:
+                    if pg.get("pdf") == file and (not match_page or pg.get("page") == page):
                         book.add(ll); break
         target = book & set(notes.keys())
     items = []

@@ -378,6 +378,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
   </div>
   <div id="side-pane-vocab" class="side-pane" data-pane="vocab">
     <div id="vocab-scope-row">
+      <button data-scope="page" onclick="loadVocabList('page')">本页</button>
       <button class="active" data-scope="book" onclick="loadVocabList('book')">本书</button>
       <button data-scope="all" onclick="loadVocabList('all')">全部</button>
       <span class="vocab-count" id="vocab-count"></span>
@@ -824,6 +825,7 @@ async function loadPageNodes(num) {
   } catch (e) {
     document.getElementById('kg-nodes').innerHTML = '<div style="color:#c00;font-size:12px">加载失败</div>';
   }
+  _refreshVocabIfPage?.();   // 翻页时若单词本在「本页」scope，同步刷新
 }
 
 window.changePage = async (delta) => {
@@ -876,13 +878,15 @@ window.loadVocabList = async (scope) => {
   listEl.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">加载中…</div>';
   if (cntEl) cntEl.textContent = '';
   try {
-    const r = await fetch('/pdf/api/vocab-list?file=' + encodeURIComponent(FILE_REL || '') + '&scope=' + _vocabScope);
+    let url = '/pdf/api/vocab-list?file=' + encodeURIComponent(FILE_REL || '') + '&scope=' + _vocabScope;
+    if (_vocabScope === 'page') url += '&page=' + (currentPage || 0);
+    const r = await fetch(url);
     const d = await r.json();
     const items = d.items || [];
     if (cntEl) cntEl.textContent = items.length ? (items.length + ' 词') : '';
     if (!items.length) {
-      listEl.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">' +
-        (_vocabScope === 'book' ? '这本书还没查过单词' : '单词库为空') + '</div>';
+      const empty = {page: '本页没查过单词', book: '这本书还没查过单词', all: '单词库为空'}[_vocabScope] || '没有单词';
+      listEl.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">' + empty + '</div>';
       return;
     }
     listEl.innerHTML = '';
@@ -891,6 +895,10 @@ window.loadVocabList = async (scope) => {
     listEl.innerHTML = '<div style="color:#ef4444;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
   }
 };
+function _refreshVocabIfPage() {
+  const pane = document.getElementById('side-pane-vocab');
+  if (pane && pane.classList.contains('active') && _vocabScope === 'page') loadVocabList();
+}
 function _masteryColor(m) {
   if (m >= 0.8) return '#22c55e';
   if (m >= 0.5) return '#eab308';
