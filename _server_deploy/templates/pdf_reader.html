@@ -2435,11 +2435,12 @@ async function renderGrammarTrackList() {
   }
   wrap.innerHTML = html;
 }
-function _onGrammarBookToggle() {
+window._onGrammarBookToggle = function() {
   const books = Array.from(document.querySelectorAll('#set-grammar-list input[type=checkbox]:checked'))
     .map(cb => cb.value);
+  window.dlog?.('grammar book toggle → ' + books.join(','));
   saveGrammarEnabledBooks(books);
-}
+};
 
 // 选中工具栏的「📊 分析」按钮
 window.onGrammarAnalyze = async () => {

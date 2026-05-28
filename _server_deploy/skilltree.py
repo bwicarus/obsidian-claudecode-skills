@@ -602,6 +602,7 @@ def register_skilltree(app):
             out.append({
                 "id": kg.get("book") or f.stem,
                 "title": kg.get("title") or kg.get("book") or f.stem,
+                "kind": kg.get("kind") or "",
                 "kg_file": f.name,
                 "pdf_path": pdf_path,
                 "pdf_exists": pdf_exists,

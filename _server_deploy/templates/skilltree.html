@@ -206,7 +206,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 </style></head>
 <body>
 <div id="bar">
-  <h1>{{ book }} · 技能树</h1>
+  <h1 onclick="openBookSwitcher()" title="点击切换技能树" style="cursor:pointer">{{ book }} · 技能树 <span style="font-size:11px;color:#8a9bb4">▾</span></h1>
   <button id="back-btn" onclick="goBack()" title="返回上一级（Esc/Backspace）">◀</button>
   <span id="crumb">全部章</span>
   <input id="search" type="text" placeholder="🔍 搜索节点（Enter 跳转）"
@@ -222,6 +222,19 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
   </div>
 </div>
 <div id="node-tooltip"></div>
+
+<!-- 技能树切换 modal -->
+<div id="book-switcher-mask" onclick="if(event.target===this) closeBookSwitcher()" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:250">
+  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:480px;max-width:92vw;max-height:80vh;overflow-y:auto">
+    <h3 style="margin:0 0 14px;font-size:15px;color:#cfe6ff">📚 切换技能树</h3>
+    <div id="book-switcher-list">
+      <div style="color:#7a8497">加载中…</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+      <button onclick="closeBookSwitcher()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">关闭</button>
+    </div>
+  </div>
+</div>
 <div id="viz">
   <div id="canvas-wrap">
     <svg class="canvas"><defs>
@@ -1229,6 +1242,42 @@ function _updateTrackBtn(n) {
     btn.style.color = "#cfe6ff";
   }
 }
+async function openBookSwitcher() {
+  document.getElementById('book-switcher-mask').style.display = 'flex';
+  const list = document.getElementById('book-switcher-list');
+  list.innerHTML = '<div style="color:#7a8497">加载中…</div>';
+  try {
+    const r = await fetch('/skilltree/api/books-meta');
+    const d = await r.json();
+    const books = (d.books || d || []);
+    if (!Array.isArray(books) || !books.length) {
+      list.innerHTML = '<div style="color:#7a8497">没有其它技能树</div>';
+      return;
+    }
+    list.innerHTML = books.map(b => {
+      const id = b.id || b.book || b.file;
+      const title = b.title || id;
+      const isCurrent = (id === BOOK);
+      const meta = [];
+      if (b.node_count) meta.push(b.node_count + ' 节点');
+      if (b.l2_count) meta.push(b.l2_count + ' 知识点');
+      if (b.mastered_count) meta.push(b.mastered_count + ' 已掌握');
+      if (b.kind) meta.push('🏷 ' + b.kind);
+      return `<a href="/skilltree/${encodeURIComponent(id)}/" style="display:flex;align-items:center;gap:10px;padding:10px 12px;text-decoration:none;color:#cfe6ff;border-bottom:1px solid #1f2740;${isCurrent?'background:#1a2540':''}">
+        <span style="flex:1;min-width:0">
+          <div style="font-size:14px;font-weight:${isCurrent?'600':'normal'}">${title.replace(/</g,'&lt;')} ${isCurrent ? '<span style="color:#34d399;font-size:11px">· 当前</span>' : ''}</div>
+          ${meta.length ? `<div style="font-size:11px;color:#7a8497;margin-top:2px">${meta.join(' · ')}</div>` : ''}
+        </span>
+        <span style="color:#60a5fa;font-size:11px">→</span>
+      </a>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div style="color:#ef4444">加载失败：' + e.message + '</div>';
+  }
+}
+window.openBookSwitcher = openBookSwitcher;
+window.closeBookSwitcher = () => { document.getElementById('book-switcher-mask').style.display = 'none'; };
+
 async function toggleNodeTracked() {
   if (!detailNodeId) return;
   try {
