@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "title": "英语语法节点（demo，后续可换权威书的 KG 替代）",
+  "nodes": [
+    {
+      "id": "tense-past-simple",
+      "name": "一般过去时 (Past Simple)",
+      "category": "时态",
+      "summary": "动词过去式表示过去某时间发生且已结束的动作或状态。规则动词 +ed；不规则动词需记忆。常配时间状语：yesterday / last week / in 2020 / ago。",
+      "keywords": ["过去", "did", "was", "were", "yesterday", "ago"]
+    },
+    {
+      "id": "tense-past-perfect",
+      "name": "过去完成时 (Past Perfect)",
+      "category": "时态",
+      "summary": "had + 过去分词。表示过去某时间或动作之前已完成的动作（'过去的过去'）。常跟一般过去时对比使用：先发生的用过去完成，后发生的用一般过去。",
+      "keywords": ["had", "before", "after", "by the time", "already"]
+    },
+    {
+      "id": "tense-present-perfect",
+      "name": "现在完成时 (Present Perfect)",
+      "category": "时态",
+      "summary": "have/has + 过去分词。表示过去发生但跟现在有联系的动作（已完成 / 经验 / 持续到现在）。注意跟一般过去时区别：完成时不指明具体过去时间。",
+      "keywords": ["have", "has", "since", "for", "ever", "never", "already", "yet"]
+    },
+    {
+      "id": "tense-future-will-going-to",
+      "name": "将来时 will vs going to",
+      "category": "时态",
+      "summary": "will 表示临时决定 / 预测 / 承诺；be going to 表示已决定的计划 / 有迹象的预测。",
+      "keywords": ["will", "going to", "shall"]
+    },
+    {
+      "id": "tense-present-continuous",
+      "name": "现在进行时 (Present Continuous)",
+      "category": "时态",
+      "summary": "am/is/are + Ving。表示当下正在发生 / 这段时间持续的动作 / 已安排的近期未来。",
+      "keywords": ["am", "is", "are", "now", "currently", "at the moment"]
+    },
+    {
+      "id": "clause-relative-which-that",
+      "name": "定语从句 which / that",
+      "category": "从句",
+      "summary": "用 which / that 引导修饰先行词的从句。限定性从句用 that 或 which；非限定（带逗号）只能用 which。先行词指物时这两个常互换。",
+      "keywords": ["which", "that", ","]
+    },
+    {
+      "id": "clause-relative-who-whom",
+      "name": "定语从句 who / whom",
+      "category": "从句",
+      "summary": "who 引导指人定语从句作主语；whom 作宾语（口语 who 也常作宾）。所有格用 whose。",
+      "keywords": ["who", "whom", "whose"]
+    },
+    {
+      "id": "clause-noun-that",
+      "name": "名词从句 that-clause",
+      "category": "从句",
+      "summary": "that 引导名词从句作主 / 宾 / 表 / 同位语。宾语从句中 that 常可省略。",
+      "keywords": ["that", "say", "think", "believe", "know"]
+    },
+    {
+      "id": "clause-adverbial-because",
+      "name": "状语从句 because / since / as",
+      "category": "从句",
+      "summary": "三者都引导原因状语。because 强调最直接的因；since/as 表已知或不重要的原因。",
+      "keywords": ["because", "since", "as", "for"]
+    },
+    {
+      "id": "clause-conditional-if",
+      "name": "条件句 if (Type 1/2/3)",
+      "category": "从句",
+      "summary": "Type 1（真实可能）：If + 一般现在, will + 原形。Type 2（与现在事实相反）：If + 一般过去, would + 原形。Type 3（与过去相反）：If + 过去完成, would have + 过去分词。",
+      "keywords": ["if", "unless", "would", "had"]
+    },
+    {
+      "id": "article-a-an",
+      "name": "不定冠词 a / an",
+      "category": "冠词",
+      "summary": "a 用于辅音音素开头的可数名词单数前；an 用于元音音素开头。注意按读音不按字母（an hour / a university）。表示泛指、首次提及、'某一个'。",
+      "keywords": ["a", "an"]
+    },
+    {
+      "id": "article-the",
+      "name": "定冠词 the",
+      "category": "冠词",
+      "summary": "the 表示特指 / 已知 / 唯一存在 / 最高级 / 序数词前 / 江河海洋等地理名词。可数 + 不可数都能用。",
+      "keywords": ["the"]
+    },
+    {
+      "id": "modal-can-could",
+      "name": "情态动词 can / could",
+      "category": "情态动词",
+      "summary": "can 表示能力 / 允许 / 可能（现在）；could 表示过去能力 / 委婉请求 / 更小可能 / 假设。",
+      "keywords": ["can", "could", "be able to"]
+    },
+    {
+      "id": "modal-must-have-to",
+      "name": "情态动词 must / have to",
+      "category": "情态动词",
+      "summary": "must 表说话人主观的必须 / 强推断；have to 表客观必须（外部规定）。否定 must not = 禁止；don't have to = 不必。",
+      "keywords": ["must", "have to", "have got to", "needn't"]
+    },
+    {
+      "id": "modal-should-ought-to",
+      "name": "情态动词 should / ought to",
+      "category": "情态动词",
+      "summary": "should / ought to 表建议 / 应该 / 期望发生。should 更常用。后接 have + 过去分词表过去应做而未做。",
+      "keywords": ["should", "ought to", "had better"]
+    },
+    {
+      "id": "passive-voice",
+      "name": "被动语态 (Passive Voice)",
+      "category": "语态",
+      "summary": "be + 过去分词。把动作的承受者放在主语位置，强调动作或其结果。by + 施动者可省。",
+      "keywords": ["be", "been", "being", "by"]
+    },
+    {
+      "id": "subjunctive-wish",
+      "name": "虚拟语气 wish",
+      "category": "语气",
+      "summary": "I wish + 一般过去 → 与现在相反；I wish + 过去完成 → 与过去相反；I wish + would → 希望将来改变。",
+      "keywords": ["wish", "if only", "would rather"]
+    },
+    {
+      "id": "gerund-vs-infinitive",
+      "name": "动名词 vs 不定式",
+      "category": "非谓语",
+      "summary": "动词 + 动名词 (-ing) 或 + 不定式 (to V) 的搭配规则。enjoy/finish/avoid + 动名词；want/decide/promise + 不定式。stop doing / stop to do 含义不同。",
+      "keywords": ["to", "ing", "enjoy", "finish", "want", "decide"]
+    },
+    {
+      "id": "participle-clause",
+      "name": "分词作状语",
+      "category": "非谓语",
+      "summary": "现在分词 (-ing) 表主动 / 进行；过去分词 (-ed/-en) 表被动 / 完成。作状语时主语跟主句一致。Having + 过去分词表已完成。",
+      "keywords": ["ing", "ed", "having", "being"]
+    },
+    {
+      "id": "comparative-superlative",
+      "name": "比较级 / 最高级",
+      "category": "形容词 / 副词",
+      "summary": "短 adj + er / + est；长 adj 用 more / most。不规则：good/better/best, bad/worse/worst, far/farther/farthest。as ... as 表同等比较。",
+      "keywords": ["er", "est", "more", "most", "as", "than"]
+    },
+    {
+      "id": "preposition-of-time",
+      "name": "时间介词 at / on / in",
+      "category": "介词",
+      "summary": "at + 时刻（at 5pm）/ 特定时点；on + 日期 / 星期；in + 月 / 年 / 季 / 上下午。",
+      "keywords": ["at", "on", "in"]
+    },
+    {
+      "id": "preposition-of-place",
+      "name": "地点介词 at / on / in",
+      "category": "介词",
+      "summary": "at + 具体地点（at the door）；on + 表面接触（on the wall）；in + 内部空间（in the box）。",
+      "keywords": ["at", "on", "in", "into", "onto"]
+    },
+    {
+      "id": "indirect-speech",
+      "name": "间接引语 (Reported Speech)",
+      "category": "句法",
+      "summary": "把直接引语转间接：时态后移一格、人称变化、时间地点指示词变化（this → that, now → then, today → that day）。",
+      "keywords": ["said", "told", "asked", "that", "if", "whether"]
+    },
+    {
+      "id": "inversion",
+      "name": "倒装",
+      "category": "句法",
+      "summary": "部分倒装（助动词 + 主语）由否定副词开头引发：never / hardly / not only / no sooner ... than。完全倒装由地点 / 方向状语开头。",
+      "keywords": ["never", "hardly", "no sooner", "not only", "here", "there"]
+    },
+    {
+      "id": "subject-verb-agreement",
+      "name": "主谓一致",
+      "category": "句法",
+      "summary": "单复数主谓一致规则：集合名词（family/team）单复数兼可；either/neither/each + 单数；none + 单 or 复都行；with/along with 不影响主语数。",
+      "keywords": ["is", "are", "was", "were", "either", "neither", "each", "every"]
+    }
+  ]
+}

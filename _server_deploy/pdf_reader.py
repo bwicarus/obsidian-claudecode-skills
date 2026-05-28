@@ -1452,7 +1452,7 @@ def pdf_api_vocab_anki():
 
 # ─── 英语语法分析 ─────────────────────────────────────────────────────────
 
-_GRAMMAR_NODES_PATH = CLAUDE_DIR / "state" / "grammar-nodes.json"
+_GRAMMAR_NODES_PATH = CLAUDE_DIR / "_server_deploy" / "grammar-nodes.json"
 _GRAMMAR_TRACKED_DIR = CLAUDE_DIR / "state" / "grammar-tracked"
 _GRAMMAR_CACHE_DIR   = CLAUDE_DIR / "state" / "grammar-cache"
 
