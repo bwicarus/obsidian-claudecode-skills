@@ -1768,8 +1768,9 @@ function _expandToWordStart(chars, idx) {
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx > 0 && isWord(chars[idx - 1].c) &&
-         Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
-    idx--;
+         Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[idx].left - (chars[idx - 1].left + chars[idx - 1].width)) <= chars[idx].height * 0.8) {
+    idx--;   // 大水平间隙(>0.8字高)=跨排版块(如 Unit 编号↔标题)，不并入同一词
   }
   return idx;
 }
@@ -1778,8 +1779,9 @@ function _expandToWordEnd(chars, idx) {
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx < chars.length - 1 && isWord(chars[idx + 1].c) &&
-         Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
-    idx++;
+         Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[idx + 1].left - (chars[idx].left + chars[idx].width)) <= chars[idx].height * 0.8) {
+    idx++;   // 大水平间隙=跨排版块，不并入同一词
   }
   return idx;
 }
@@ -1881,13 +1883,15 @@ function _wordExpandFromChar(chars, idx) {
   if (!isWord(c)) return {start: idx, end: idx};
   let s = idx;
   while (s > 0 && isWord(chars[s - 1].c) &&
-         Math.abs(chars[s - 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
-    s--;
+         Math.abs(chars[s - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[s].left - (chars[s - 1].left + chars[s - 1].width)) <= chars[idx].height * 0.8) {
+    s--;   // 大水平间隙=跨排版块(如 Unit 编号↔标题)，不并入同一词
   }
   let e = idx;
   while (e < chars.length - 1 && isWord(chars[e + 1].c) &&
-         Math.abs(chars[e + 1].top - chars[idx].top) <= chars[idx].height * 0.5) {
-    e++;
+         Math.abs(chars[e + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[e + 1].left - (chars[e].left + chars[e].width)) <= chars[idx].height * 0.8) {
+    e++;   // 大水平间隙=跨排版块，不并入同一词
   }
   return {start: s, end: e};
 }
