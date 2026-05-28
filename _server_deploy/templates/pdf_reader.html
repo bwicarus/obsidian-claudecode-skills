@@ -1314,6 +1314,36 @@ function _vocabUnderlineEnabled() {
   return v === null ? true : (v === '1');
 }
 
+// 乐观下划线：查词 ECDICT 秒回 lemma+forms 后，立刻在所在页把这些词形画上下划线(橙=new)，
+// 不等后台笔记生成 + refresh。后续真实 refresh 会用真实 mastery 颜色覆盖。
+function _markVocabOptimistic(pw, lemma, forms) {
+  if (!_vocabUnderlineEnabled() || !pw || !pw.__charBoxes) return;
+  const fset = new Set([lemma, ...(forms || [])].filter(Boolean).map(f => String(f).toLowerCase()));
+  if (!fset.size) return;
+  let layer = pw.querySelector('.vocab-layer');
+  if (!layer) { layer = document.createElement('div'); layer.className = 'vocab-layer'; pw.appendChild(layer); }
+  const chars = pw.__charBoxes;
+  let i = 0;
+  while (i < chars.length) {
+    const c = chars[i];
+    if (c.sp || !/[A-Za-z]/.test(c.c || '')) { i++; continue; }
+    let j = i, word = '';
+    while (j < chars.length && !chars[j].sp && /[A-Za-z'’\-]/.test(chars[j].c || '')) { word += chars[j].c; j++; }
+    if (fset.has(word.toLowerCase())) {
+      const a = chars[i], b = chars[j - 1];
+      if (a.left != null && a.top != null) {
+        const div = document.createElement('div');
+        div.className = 'vocab-underline m-new';
+        div.style.left = a.left + 'px';
+        div.style.top = (a.top + a.height + 1) + 'px';
+        div.style.width = Math.max(4, (b.left + b.width - a.left)) + 'px';
+        layer.appendChild(div);
+      }
+    }
+    i = j;
+  }
+}
+
 // 查完一个词后，刷新所有已渲染页的下划线（让新查的词立刻出现下划线）
 async function refreshVocabUnderlinesForAllPages() {
   if (!_vocabUnderlineEnabled() || !pdfDoc) return;
@@ -3438,6 +3468,7 @@ async function dictStream(word, ctx) {
   window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等
   openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  const _optPw = _charSel?.pw;   // 乐观下划线目标页（查词时所在页）
   // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
   setTimeout(() => {
     window.dlog?.('refreshVocabUnderlines (timer) for ' + word);
@@ -3566,6 +3597,7 @@ async function dictStream(word, ctx) {
           sources_hit: ['ecdict'],
         });
         scheduleRender();
+        _markVocabOptimistic(_optPw, payload.lemma, payload.forms || []);   // 立即标下划线，不等笔记
       } else if (evt === 'free') {
         if (payload.phon_us) state.phon_us = payload.phon_us;
         if (payload.phon_uk) state.phon_uk = payload.phon_uk;
