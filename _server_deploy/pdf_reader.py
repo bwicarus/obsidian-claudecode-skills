@@ -1604,7 +1604,8 @@ def pdf_api_grammar_analyze():
         return jsonify({"ok": False, "error": "no tracked level-2 nodes in enabled KGs (toggle 跟踪 in skilltree page)"}), 400
 
     tracked_ids = [n["id"] for n in tracked_nodes]
-    cache_key = hashlib.sha1((text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")).hexdigest()[:20]
+    node_by_id = {n["id"]: n for n in tracked_nodes}
+    cache_key = hashlib.sha1((sentence + "||" + text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")).hexdigest()[:20]
     _GRAMMAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_p = _GRAMMAR_CACHE_DIR / f"{cache_key}.json"
     if cache_p.exists():
@@ -1618,7 +1619,7 @@ def pdf_api_grammar_analyze():
         f"- [{n['id']}] **{n['name']}** ({n.get('book','')}): {n.get('summary','')}"
         for n in tracked_nodes
     )
-    prompt = f"""你是英语语法分析助手。请分析下面这个英文句子涉及到的语法点（仅限"跟踪的语法点"列表里）。
+    prompt = f"""你是英语语法分析助手。请同时给出整句翻译、关键词词性，以及句中涉及的跟踪语法点。
 
 【跟踪的语法点】
 {nodes_block}
@@ -1630,14 +1631,21 @@ def pdf_api_grammar_analyze():
 {text}
 
 【任务】
-1. 整体分析这一句，找出其中存在的跟踪语法点（不要仅限于选中片段；但用户选了某片段说明那里他可能不懂，对该处稍详细一点）
-2. 每个语法点输出：节点 id（用 [id] 表示）/ 句子中的语法实例短语 / 简明解释（针对该句的具体用法）/ 1-2 个相似例句
-3. 如果句子中没有任何跟踪点 → 输出 `{{"analyses": []}}`
+1. 整句翻译为自然中文（sentence_zh）。
+2. 列出句中 5–12 个对理解最关键的词或固定搭配（key_tokens），每个给出：原文 token / 在句中实际担任的词性（pos，用 n/v/adj/adv/prep/conj/pron/det/aux/phrase 等简写）/ 在该句中的简明中文释义。
+3. 整体分析这一句涉及到的跟踪语法点（仅限上面列表，不要凭空增加）。用户选了某片段说明那里他可能不懂，对该处稍详细一点；但 analyses 不要仅限于选中片段。每个语法点输出：node_id / 句子中的语法实例短语 / 针对该句的简明解释 / 1-2 个相似例句。
+4. 如果该句没有任何跟踪点 → analyses 为 []，但 sentence_zh / key_tokens 仍必须给出。
 
-【输出 JSON 格式（仅输出 JSON 不要其它解释）】
-{{"analyses": [
-  {{"node_id": "<id>", "phrase": "<句子中的语法实例>", "explanation": "<简明解释>", "examples": ["...", "..."]}}
-]}}
+【输出 JSON 格式（仅输出 JSON，不要别的）】
+{{
+  "sentence_zh": "<整句中文翻译>",
+  "key_tokens": [
+    {{"token": "<原文 token>", "pos": "<词性简写>", "zh": "<在该句中的简明中文释义>"}}
+  ],
+  "analyses": [
+    {{"node_id": "<id>", "phrase": "<句子中的语法实例>", "explanation": "<简明解释>", "examples": ["...", "..."]}}
+  ]
+}}
 """
     model = (data.get("model") or "haiku").strip()
     effort = (data.get("effort") or "low").strip()
@@ -1645,24 +1653,33 @@ def pdf_api_grammar_analyze():
         zh = _ai_call(prompt, override_model=model, override_effort=effort)
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI call failed: {ex}"}), 500
-    # 解析 JSON
+    # 解析 JSON（AI 可能裹在 ```json 或夹解释文字里）
     import re as _re
     j = None
-    m = _re.search(r"\{.*\"analyses\".*\}", zh, _re.S)
+    # 优先匹配整段 JSON 对象
+    m = _re.search(r"\{[\s\S]*\}", zh)
     if m:
         try:
             j = json.loads(m.group(0))
         except Exception:
-            pass
+            # AI 偶尔吐 ```json...``` 包裹，剥一层再试
+            cleaned = _re.sub(r"^```(?:json)?|```$", "", m.group(0).strip(), flags=_re.M).strip()
+            try:
+                j = json.loads(cleaned)
+            except Exception:
+                pass
     if not j:
-        # 抓不到 JSON：直接返回原文
-        return jsonify({"ok": True, "analyses": [], "raw": zh[:1000]})
+        return jsonify({"ok": True, "sentence_zh": "", "key_tokens": [], "analyses": [], "raw": zh[:1500]})
     # 补节点名
     for a in (j.get("analyses") or []):
         nid = a.get("node_id")
         if nid in node_by_id:
             a["node_name"] = node_by_id[nid]["name"]
-    out = {"analyses": j.get("analyses") or []}
+    out = {
+        "sentence_zh": j.get("sentence_zh") or "",
+        "key_tokens":  j.get("key_tokens") or [],
+        "analyses":    j.get("analyses") or [],
+    }
     cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
     return jsonify({"ok": True, **out})
 

@@ -64,6 +64,14 @@ body.grammar-open #main{padding-right:calc(min(35vw,480px) + 12px)}
 .grammar-entry.focus{border-left-color:#fbbf24;background:#1f1a08}
 .grammar-entry.focus.expanded{box-shadow:0 4px 14px rgba(251,191,36,.3)}
 .grammar-entry-loading{position:absolute;color:#7a8497;font-style:italic;font-size:11px}
+.grammar-entry-trans{border-left-color:#7dd3fc}
+.grammar-entry-trans.focus{border-left-color:#7dd3fc;background:#0d1322}
+.grammar-entry .e-sentence-zh{color:#cfe6ff !important;font-family:inherit !important;font-size:11px !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grammar-entry.expanded .e-sentence-zh{display:none}
+.grammar-entry .e-tokens{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
+.grammar-entry .e-tokens .tok{display:inline-block;padding:2px 6px;background:#1a2540;border-radius:4px;font-size:10px;color:#cfe6ff;line-height:1.3;white-space:nowrap}
+.grammar-entry .e-tokens .tok b{color:#fbbf24;font-weight:600;margin-right:3px}
+.grammar-entry .e-tokens .tok i{color:#7a8497;font-style:normal;margin-right:3px;font-family:monospace;font-size:9px}
 
 @media (max-width:900px){
   #grammar-panel{width:80vw}
@@ -759,6 +767,65 @@ window.toggleReadMode = async () => {
   if (readMode === 'continuous') await setupContinuousMode();
   else renderPage(currentPage);
 };
+
+// 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
+let _refitDebounce = null, _refitBusy = false, _lastFitWidth = 0;
+function _scheduleRefit(force) {
+  if (_refitDebounce) clearTimeout(_refitDebounce);
+  _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
+}
+async function _refitToWidth(force) {
+  if (_refitBusy || !pdfDoc) return;
+  const main = document.getElementById('main');
+  const mainW = main.clientWidth - 40;
+  if (mainW <= 0) return;
+  if (!force && Math.abs(mainW - _lastFitWidth) < 30) return;
+  _refitBusy = true;
+  try {
+    const page1 = await pdfDoc.getPage(1);
+    const v0 = page1.getViewport({scale: 1});
+    const newScale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
+    if (Math.abs(newScale - scale) < 0.01 && !force) return;
+    // 保存当前滚动相对位置（按 page-container 高度比例）
+    const container = document.getElementById('page-container');
+    const ratio = container && container.offsetHeight
+      ? main.scrollTop / Math.max(1, container.offsetHeight)
+      : 0;
+    scale = newScale;
+    _lastFitWidth = mainW;
+    if (readMode === 'continuous') {
+      await setupContinuousMode();
+    } else {
+      // 单页模式：清 loaded 标记重 render
+      const wrap = container.querySelector('.page-wrap') || container;
+      wrap.dataset.loaded = '0';
+      await renderPage(currentPage);
+    }
+    // 按比例恢复滚动
+    requestAnimationFrame(() => {
+      if (container && container.offsetHeight) {
+        main.scrollTop = Math.floor(ratio * container.offsetHeight);
+      }
+      _refreshGrammarSpacerHeight?.();
+      _repositionGrammarEntries?.();
+    });
+  } finally {
+    _refitBusy = false;
+  }
+}
+
+// 监视 #main 宽度（窗口缩放、panel 打开 / 关闭、横竖屏）
+function _setupResizeWatcher() {
+  const main = document.getElementById('main');
+  if (!main || main.dataset.resizeWatch === '1') return;
+  main.dataset.resizeWatch = '1';
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => _scheduleRefit(false)).observe(main);
+  } else {
+    window.addEventListener('resize', () => _scheduleRefit(false));
+  }
+}
+window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
@@ -2507,17 +2574,30 @@ window.onGrammarAnalyze = async () => {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
     });
+    if (!r.ok) {
+      _removeGrammarLoadingEntry(entryId);
+      let msg = `HTTP ${r.status}`;
+      try { const err = await r.json(); if (err?.error) msg = err.error; } catch {}
+      _toast?.('分析失败：' + msg);
+      return;
+    }
     const d = await r.json();
     _removeGrammarLoadingEntry(entryId);
     if (!d.ok) { _toast?.('分析失败：' + (d.error||'?')); return; }
-    const analyses = d.analyses || [];
-    if (!analyses.length) { _toast?.('该句没有匹配的跟踪语法点'); return; }
-    _addGrammarEntries(analyses, pw, pageNum, sentenceBbox, sentence);
+    _addGrammarEntries(d, pw, pageNum, sentenceBbox, sentence);
   } catch (e) {
     _removeGrammarLoadingEntry(entryId);
     _toast?.('网络错误：' + e.message);
   }
 };
+
+function _sentRatioOf(pw, sentBbox) {
+  if (!pw || !pw.offsetHeight) return null;
+  return {
+    topRatio: sentBbox.top / pw.offsetHeight,
+    heightRatio: sentBbox.height / pw.offsetHeight,
+  };
+}
 
 function _charsBbox(chars, sIdx, eIdx) {
   let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
@@ -2601,49 +2681,114 @@ function _removeGrammarLoadingEntry(id) {
 
 let _grammarEntries = [];   // {id, pageNum, sentBbox, analyses, el, pw}
 
-function _addGrammarEntries(analyses, pw, pageNum, sentBbox, sentence) {
+function _addGrammarEntries(payload, pw, pageNum, sentBbox, sentence) {
   const body = document.getElementById('grammar-panel-body');
   const spacer = document.getElementById('grammar-panel-spacer');
   if (!body || !spacer) return;
   _refreshGrammarSpacerHeight();
   const baseY = _absYInMain(pw, sentBbox.top);
   const lineH = Math.max(20, sentBbox.height);
-  let offset = 0;
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const sentence_zh = payload.sentence_zh || '';
+  const key_tokens  = payload.key_tokens  || [];
+  const analyses    = payload.analyses    || [];
+
+  // 第 1 条永远是「整句翻译 + 词性」对齐到句子首行
+  if (sentence_zh || key_tokens.length) {
+    const div = document.createElement('div');
+    div.className = 'grammar-entry grammar-entry-trans focus';
+    div.style.top = baseY + 'px';
+    div.style.height = lineH + 'px';
+    const tokensHtml = key_tokens.length
+      ? `<div class="e-tokens">${key_tokens.map(t => `<span class="tok"><b>${esc(t.token||'')}</b> <i>${esc(t.pos||'')}</i> ${esc(t.zh||'')}</span>`).join('')}</div>`
+      : '';
+    div.innerHTML = `
+      <div class="e-head">🌐 整句翻译</div>
+      <div class="e-phrase e-sentence-zh">${esc(sentence_zh)}</div>
+      <div class="e-explain">${esc(sentence_zh)}${tokensHtml}</div>
+    `;
+    div.addEventListener('click', e => { e.stopPropagation(); _toggleEntry(div); });
+    spacer.appendChild(div);
+    _grammarEntries.push({pageNum, sentBbox, sentRatio: _sentRatioOf(pw, sentBbox), el: div, pw});
+  }
+
+  let offset = lineH + 4;
   for (const a of analyses) {
     const div = document.createElement('div');
     div.className = 'grammar-entry focus';
     div.style.top = (baseY + offset) + 'px';
-    div.style.height = lineH + 'px';   // 折叠态 = 一行行高
-    const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    div.style.height = lineH + 'px';
     div.innerHTML = `
       <div class="e-head">📊 ${esc(a.node_name || a.node_id || '')}</div>
       <div class="e-phrase">📍 ${esc(a.phrase || '')}</div>
       <div class="e-explain">${esc(a.explanation || '')}</div>
       ${(a.examples||[]).length ? `<div class="e-examples">例：<ul style="margin:4px 0 0 16px;padding:0">${(a.examples||[]).map(e=>'<li>'+esc(e)+'</li>').join('')}</ul></div>` : ''}
     `;
-    div.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const wasExpanded = div.classList.contains('expanded');
-      // 同句的其它条目（focus 状态）一起折叠
-      document.querySelectorAll('.grammar-entry.expanded').forEach(x => {
-        if (x !== div) x.classList.remove('expanded');
-      });
-      div.classList.toggle('expanded', !wasExpanded);
-    });
+    div.addEventListener('click', e => { e.stopPropagation(); _toggleEntry(div); });
     spacer.appendChild(div);
-    offset += lineH + 4;   // 多条堆叠下去
-    _grammarEntries.push({pageNum, sentBbox, el: div, pw});
+    offset += lineH + 4;
+    _grammarEntries.push({pageNum, sentBbox, sentRatio: _sentRatioOf(pw, sentBbox), el: div, pw});
   }
-  // 自动展开第一条（焦点态）
-  const first = spacer.querySelectorAll('.grammar-entry.focus');
-  if (first.length) first[first.length - 1].classList.add('expanded');
-  // 5 秒后自动去掉 focus 标识（变成普通已分析项），保持展开状态
+
+  if (!sentence_zh && !key_tokens.length && !analyses.length) {
+    _toast?.('未返回任何结果');
+    return;
+  }
+
+  // 自动展开第一条（焦点态）— 通常是整句翻译
+  const focusList = spacer.querySelectorAll('.grammar-entry.focus');
+  if (focusList.length) focusList[0].classList.add('expanded');
   setTimeout(() => {
     spacer.querySelectorAll('.grammar-entry.focus').forEach(x => x.classList.remove('focus'));
   }, 5000);
-  // 滚动到该条目
   const main = document.getElementById('main');
   body.scrollTop = main.scrollTop;
+}
+
+function _toggleEntry(div) {
+  const wasExpanded = div.classList.contains('expanded');
+  document.querySelectorAll('.grammar-entry.expanded').forEach(x => {
+    if (x !== div) x.classList.remove('expanded');
+  });
+  div.classList.toggle('expanded', !wasExpanded);
+}
+
+// PDF 重新 render（scale 改变）后，把分析卡的 y 重新算一次
+function _repositionGrammarEntries() {
+  if (!_grammarEntries || !_grammarEntries.length) return;
+  // 同句的多条 entry 按 baseY + i * (lineH+4) 堆叠
+  // 用 first occurrence per pw+sentBbox 作为 baseY 重算
+  const groups = new Map();
+  for (const ge of _grammarEntries) {
+    if (!ge.el || !ge.el.isConnected) continue;
+    // 旧 pw 可能已被替换（重 render 后 page-wrap DOM 重建）→ 用 pageNum 找新 pw
+    let pw = ge.pw;
+    if (!pw || !pw.isConnected) {
+      pw = document.querySelector(`.page-wrap[data-page-num="${ge.pageNum}"]`);
+      if (!pw) continue;
+      ge.pw = pw;
+    }
+    // sentBbox 是 PDF pt 坐标系下的吗？不，看 _charsBbox 它读的是 chars 的 css 坐标
+    // (在原 scale 下的 px 值)。要跟新 scale 配合，应当除以旧 scale 再乘新 scale。
+    // 但我们没保存"分析时的 scale"。简单办法：保存 sentBbox 时存 ratio = top / pwHeight。
+    // 这里用 storeBbox 的相对比例做重定位（如果存在）。
+    let cssTop = ge.sentBbox.top;
+    let cssH = ge.sentBbox.height;
+    if (ge.sentRatio && pw.offsetHeight) {
+      cssTop = ge.sentRatio.topRatio * pw.offsetHeight;
+      cssH = Math.max(20, ge.sentRatio.heightRatio * pw.offsetHeight);
+    }
+    const key = ge.pageNum + ':' + Math.round(cssTop);
+    let g = groups.get(key);
+    if (!g) {
+      g = {baseY: _absYInMain(pw, cssTop), lineH: cssH, idx: 0};
+      groups.set(key, g);
+    }
+    ge.el.style.top = (g.baseY + g.idx * (g.lineH + 4)) + 'px';
+    ge.el.style.height = g.lineH + 'px';
+    g.idx++;
+  }
+  _refreshGrammarSpacerHeight?.();
 }
 
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
