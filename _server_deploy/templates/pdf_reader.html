@@ -42,6 +42,33 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
+/* 右侧语法分析抽屉：跟 PDF 主滚动同步，每条分析按句子 y 定位 */
+#grammar-panel{position:fixed;top:48px;right:0;bottom:0;width:35vw;max-width:480px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:8;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
+#grammar-panel.open{display:flex}
+body.grammar-open #main{padding-right:calc(min(35vw,480px) + 12px)}
+#grammar-panel-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #2a3550}
+#grammar-panel-header h2{margin:0;font-size:13px;color:#cfe6ff;font-weight:600}
+#grammar-panel-header button{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:2px 8px}
+#grammar-panel-header button:hover{color:#fff}
+#grammar-panel-body{flex:1 1 auto;overflow:hidden scroll;position:relative;scrollbar-width:none}
+#grammar-panel-body::-webkit-scrollbar{display:none}
+#grammar-panel-spacer{position:relative;width:100%}
+.grammar-entry{position:absolute;left:8px;right:8px;background:#0d1322;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:4px 8px;cursor:pointer;overflow:hidden;transition:height .2s,background .15s;font-size:11px;line-height:1.3;color:#cfe6ff;box-sizing:border-box}
+.grammar-entry:hover{background:#162045}
+.grammar-entry .e-head{display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:#a8cdff}
+.grammar-entry .e-phrase{color:#facc15;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.grammar-entry .e-explain{display:none;color:#cfe6ff;font-size:11px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid #2a3550;white-space:normal}
+.grammar-entry .e-examples{display:none;margin-top:4px;font-size:10px;color:#7a8497;line-height:1.5}
+.grammar-entry.expanded{height:auto !important;z-index:2;box-shadow:0 4px 14px rgba(0,0,0,.5);background:#162045}
+.grammar-entry.expanded .e-explain,.grammar-entry.expanded .e-examples{display:block}
+.grammar-entry.focus{border-left-color:#fbbf24;background:#1f1a08}
+.grammar-entry.focus.expanded{box-shadow:0 4px 14px rgba(251,191,36,.3)}
+.grammar-entry-loading{position:absolute;color:#7a8497;font-style:italic;font-size:11px}
+
+@media (max-width:900px){
+  #grammar-panel{width:80vw}
+}
+
 /* 侧栏抽屉：默认收起，点 header 按钮滑出 */
 #sidebar{position:fixed;top:48px;right:0;bottom:0;width:320px;background:#10162a;border-left:1px solid #2a3550;overflow-y:auto;padding:14px;transform:translateX(100%);transition:transform .22s ease;z-index:10;box-shadow:-8px 0 24px rgba(0,0,0,.4)}
 #sidebar.open{transform:translateX(0)}
@@ -263,6 +290,18 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   <button id="sidebar-close" onclick="toggleSidebar()" title="关闭">✕</button>
   <h2>当前页对应知识点</h2>
   <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
+</aside>
+
+<!-- 右侧语法分析抽屉：每条分析按所在句子的 y 坐标定位（跟 PDF 滚动同步）-->
+<aside id="grammar-panel">
+  <div id="grammar-panel-header">
+    <h2>📊 语法分析</h2>
+    <button onclick="closeGrammarPanel()" title="关闭">✕</button>
+  </div>
+  <div id="grammar-panel-body">
+    <div id="grammar-panel-spacer"></div>
+    <!-- 分析卡片绝对定位插这里 -->
+  </div>
 </aside>
 
 <!-- AI 设置 modal -->
@@ -2442,55 +2481,170 @@ window._onGrammarBookToggle = function() {
   saveGrammarEnabledBooks(books);
 };
 
-// 选中工具栏的「📊 分析」按钮
+// 选中工具栏的「📊 分析」按钮 → 分析所在完整句子，结果放右侧抽屉行对齐
 window.onGrammarAnalyze = async () => {
   if (!lastSelText) return;
   if (!_grammarEnabledBooks.length) { _toast?.('请在 PDF 设置中启用至少一个语法 KG'); return; }
   if (!_grammarHasTracked) { _toast?.('已启用的 KG 中没有节点被跟踪，去技能树详情面板点「👁 跟踪」'); return; }
-  const text = lastSelText.trim();
-  if (text.length < 3) { _toast?.('选中片段太短'); return; }
-  // 拿所在句子作为上下文
-  let sentence = text;
-  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
-    const chars = _charSel.pw.__charBoxes;
-    const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
-    if (ctxRange) sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
-  }
+  if (!_charSel || !_charSel.pw || !_charSel.pw.__charBoxes) { _toast?.('找不到选中位置'); return; }
+  const pw = _charSel.pw;
+  const chars = pw.__charBoxes;
+  const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+  if (!ctxRange) { _toast?.('无法识别完整句子'); return; }
+  const sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
+  if (sentence.length < 6) { _toast?.('句子太短'); return; }
+  const text = lastSelText.trim();   // 用户选中的子串（焦点）
+  const pageNum = parseInt(pw.dataset.pageNum || '0', 10);
+  // 算句子 bbox（用 chars 的物理 css 坐标，跟 PDF reader 用同坐标系）
+  const sentenceBbox = _charsBbox(chars, ctxRange.start, ctxRange.end);
   toolbar.classList.remove('open');
-  openResult('📊 语法分析', text, '<div class="loading">⏳ AI 分析中…</div>');
+  // 立刻在右侧抽屉占位
+  openGrammarPanel();
+  const entryId = 'ge_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  _addGrammarLoadingEntry(entryId, pw, pageNum, sentenceBbox);
   try {
     const r = await fetch('/pdf/api/grammar-analyze', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
     });
     const d = await r.json();
-    if (!d.ok) {
-      document.getElementById('result-content').innerHTML =
-        `<div style="color:#ef4444">分析失败：${(d.error||'?').replace(/</g,'&lt;')}</div>`;
-      return;
-    }
+    _removeGrammarLoadingEntry(entryId);
+    if (!d.ok) { _toast?.('分析失败：' + (d.error||'?')); return; }
     const analyses = d.analyses || [];
-    if (!analyses.length) {
-      document.getElementById('result-content').innerHTML =
-        `<div style="color:#7a8497">在选中片段中未找到跟踪的语法点。</div>` +
-        (d.raw ? `<details style="margin-top:10px;color:#5a6680;font-size:11px"><summary>AI 原始返回</summary><pre style="white-space:pre-wrap">${d.raw.replace(/</g,'&lt;')}</pre></details>` : '');
-      return;
-    }
-    let html = (d.from_cache ? '<div style="color:#5a6680;font-size:10px;margin-bottom:8px">📦 缓存命中</div>' : '');
-    for (const a of analyses) {
-      html += `<div style="margin-bottom:14px;padding:10px;border:1px solid #2a3550;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;background:#0d1322">
-        <div style="color:#a8cdff;font-size:13px;font-weight:600;margin-bottom:4px">${(a.node_name||a.node_id||'').replace(/</g,'&lt;')}</div>
-        ${a.phrase ? `<div style="color:#facc15;font-size:12px;margin-bottom:4px">📍 <code>${(a.phrase||'').replace(/</g,'&lt;')}</code></div>` : ''}
-        <div style="color:#cfe6ff;font-size:12px;line-height:1.6">${(a.explanation||'').replace(/</g,'&lt;')}</div>
-        ${(a.examples||[]).length ? `<div style="margin-top:6px;font-size:11px;color:#7a8497">例：<ul style="margin:4px 0 0 18px;padding:0">${(a.examples||[]).map(e=>'<li>'+e.replace(/</g,'&lt;')+'</li>').join('')}</ul></div>` : ''}
-      </div>`;
-    }
-    document.getElementById('result-content').innerHTML = html;
+    if (!analyses.length) { _toast?.('该句没有匹配的跟踪语法点'); return; }
+    _addGrammarEntries(analyses, pw, pageNum, sentenceBbox, sentence);
   } catch (e) {
-    document.getElementById('result-content').innerHTML =
-      `<div style="color:#ef4444">网络错误：${e.message}</div>`;
+    _removeGrammarLoadingEntry(entryId);
+    _toast?.('网络错误：' + e.message);
   }
 };
+
+function _charsBbox(chars, sIdx, eIdx) {
+  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (!c || c.sp) continue;
+    if (c.left < x0) x0 = c.left;
+    if (c.top < y0) y0 = c.top;
+    if (c.left + c.width > x1) x1 = c.left + c.width;
+    if (c.top + c.height > y1) y1 = c.top + c.height;
+  }
+  return {left: x0, top: y0, right: x1, bottom: y1, height: y1 - y0};
+}
+
+function _absYInMain(pw, cssTopInPw) {
+  // pw.offsetTop 是相对其 offsetParent（一般是 #page-container）
+  // 我们要它在 #main scroll 容器内的绝对 y
+  const container = document.getElementById('page-container');
+  let y = pw.offsetTop + cssTopInPw;
+  // container 自己有 offsetTop（相对 #main）也要算
+  if (container && container.offsetParent) {
+    y += container.offsetTop;
+  }
+  return y;
+}
+
+function openGrammarPanel() {
+  const p = document.getElementById('grammar-panel');
+  if (!p) return;
+  if (!p.classList.contains('open')) {
+    p.classList.add('open');
+    document.body.classList.add('grammar-open');
+    _setupGrammarPanelSync();
+  }
+  _refreshGrammarSpacerHeight();
+}
+window.closeGrammarPanel = () => {
+  document.getElementById('grammar-panel')?.classList.remove('open');
+  document.body.classList.remove('grammar-open');
+};
+
+let _grammarScrollSyncBound = false;
+function _setupGrammarPanelSync() {
+  if (_grammarScrollSyncBound) return;
+  _grammarScrollSyncBound = true;
+  const main = document.getElementById('main');
+  const body = document.getElementById('grammar-panel-body');
+  if (!main || !body) return;
+  // PDF 滚动 → 抽屉 scrollTop 同步（不反向，避免循环）
+  main.addEventListener('scroll', () => {
+    body.scrollTop = main.scrollTop;
+  }, {passive: true});
+}
+function _refreshGrammarSpacerHeight() {
+  const main = document.getElementById('main');
+  const spacer = document.getElementById('grammar-panel-spacer');
+  const container = document.getElementById('page-container');
+  if (!main || !spacer || !container) return;
+  // spacer 高度 = page-container 在 main 内的总高 + 上边距
+  spacer.style.height = (container.offsetTop + container.offsetHeight + 200) + 'px';
+}
+
+function _addGrammarLoadingEntry(id, pw, pageNum, sentBbox) {
+  const body = document.getElementById('grammar-panel-body');
+  const spacer = document.getElementById('grammar-panel-spacer');
+  if (!body || !spacer) return;
+  _refreshGrammarSpacerHeight();
+  const y = _absYInMain(pw, sentBbox.top);
+  const div = document.createElement('div');
+  div.className = 'grammar-entry-loading';
+  div.id = id;
+  div.style.top = y + 'px';
+  div.textContent = '⏳ 分析中…';
+  spacer.appendChild(div);
+  // 同步抽屉 scrollTop 到当前 main scrollTop
+  body.scrollTop = document.getElementById('main').scrollTop;
+}
+function _removeGrammarLoadingEntry(id) {
+  document.getElementById(id)?.remove();
+}
+
+let _grammarEntries = [];   // {id, pageNum, sentBbox, analyses, el, pw}
+
+function _addGrammarEntries(analyses, pw, pageNum, sentBbox, sentence) {
+  const body = document.getElementById('grammar-panel-body');
+  const spacer = document.getElementById('grammar-panel-spacer');
+  if (!body || !spacer) return;
+  _refreshGrammarSpacerHeight();
+  const baseY = _absYInMain(pw, sentBbox.top);
+  const lineH = Math.max(20, sentBbox.height);
+  let offset = 0;
+  for (const a of analyses) {
+    const div = document.createElement('div');
+    div.className = 'grammar-entry focus';
+    div.style.top = (baseY + offset) + 'px';
+    div.style.height = lineH + 'px';   // 折叠态 = 一行行高
+    const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+    div.innerHTML = `
+      <div class="e-head">📊 ${esc(a.node_name || a.node_id || '')}</div>
+      <div class="e-phrase">📍 ${esc(a.phrase || '')}</div>
+      <div class="e-explain">${esc(a.explanation || '')}</div>
+      ${(a.examples||[]).length ? `<div class="e-examples">例：<ul style="margin:4px 0 0 16px;padding:0">${(a.examples||[]).map(e=>'<li>'+esc(e)+'</li>').join('')}</ul></div>` : ''}
+    `;
+    div.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wasExpanded = div.classList.contains('expanded');
+      // 同句的其它条目（focus 状态）一起折叠
+      document.querySelectorAll('.grammar-entry.expanded').forEach(x => {
+        if (x !== div) x.classList.remove('expanded');
+      });
+      div.classList.toggle('expanded', !wasExpanded);
+    });
+    spacer.appendChild(div);
+    offset += lineH + 4;   // 多条堆叠下去
+    _grammarEntries.push({pageNum, sentBbox, el: div, pw});
+  }
+  // 自动展开第一条（焦点态）
+  const first = spacer.querySelectorAll('.grammar-entry.focus');
+  if (first.length) first[first.length - 1].classList.add('expanded');
+  // 5 秒后自动去掉 focus 标识（变成普通已分析项），保持展开状态
+  setTimeout(() => {
+    spacer.querySelectorAll('.grammar-entry.focus').forEach(x => x.classList.remove('focus'));
+  }, 5000);
+  // 滚动到该条目
+  const main = document.getElementById('main');
+  body.scrollTop = main.scrollTop;
+}
 
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
