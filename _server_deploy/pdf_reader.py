@@ -2063,5 +2063,32 @@ def pdf_api_vocab_add_anki():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+@bp.route("/api/grammar-forget", methods=["POST"])
+def pdf_api_grammar_forget():
+    """删除某句的语法分析缓存（删卡时调），下次分析同句从头生成。"""
+    import hashlib
+    data = request.get_json(silent=True) or {}
+    sentence = (data.get("sentence") or "").strip()
+    text = (data.get("text") or "").strip()
+    rel = (data.get("file") or "").strip()
+    if not sentence:
+        return jsonify({"ok": True, "removed": 0})
+    enabled_books = data.get("enabled_books") or _load_grammar_enabled(rel)
+    tracked_nodes = _collect_grammar_tracked_nodes(enabled_books) if enabled_books else []
+    tracked_ids = [n["id"] for n in tracked_nodes]
+    # 跟 grammar-analyze 完全一致的 cache_key 算法
+    cache_key = hashlib.sha1(
+        (sentence + "||" + text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")
+    ).hexdigest()[:20]
+    removed = 0
+    p = _GRAMMAR_CACHE_DIR / f"{cache_key}.json"
+    if p.exists():
+        try:
+            p.unlink(); removed = 1
+        except Exception:
+            pass
+    return jsonify({"ok": True, "removed": removed})
+
+
 def register_pdf_reader(app):
     app.register_blueprint(bp)

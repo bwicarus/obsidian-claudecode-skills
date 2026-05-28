@@ -2774,7 +2774,7 @@ window.onGrammarAnalyze = async () => {
   openGrammarPanel();
   switchSideTab('grammar');   // 分析时切到语法 tab
   const blockId = 'gb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-  const block = _addLoadingBlock(blockId, sentence);
+  const block = _addLoadingBlock(blockId, sentence, text);
   try {
     const r = await fetch('/pdf/api/grammar-analyze', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2924,23 +2924,35 @@ function _posColor(p){ return POS_COLORS[(p||'').toLowerCase()] || '#64748b'; }
 function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 // ── 分析块：标题栏（可点击折叠/展开）+ 内容区；流式堆叠，最新插到最上 ──
-function _addLoadingBlock(id, sentence) {
+function _addLoadingBlock(id, sentence, text) {
   const body = document.getElementById('grammar-panel-body');
   const block = document.createElement('div');
   block.className = 'grammar-block focus open';   // loading 时默认展开看进度
   block.id = id;
   const summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
-  block.dataset.src = sentence;   // 原文，标题永远显示它
+  block.dataset.src = sentence;          // 原文，标题永远显示它
+  block.dataset.text = text || '';       // 用户选中的焦点子串（删卡清缓存要用）
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
-       <span class="gb-del" title="删除这条">🗑</span>
+       <span class="gb-del" title="删除这条（同句下次重新分析）">🗑</span>
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-trans gb-pending">🌐 翻译中…</div>
      <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
-  block.querySelector('.gb-del').addEventListener('click', (e) => { e.stopPropagation(); block.remove(); });
+  block.querySelector('.gb-del').addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 真删除：清后端语法分析缓存，下次同句从头生成
+    fetch('/pdf/api/grammar-forget', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        sentence: block.dataset.src || '', text: block.dataset.text || '',
+        file: FILE_REL, enabled_books: _grammarEnabledBooks,
+      }),
+    }).catch(() => {});
+    block.remove();
+  });
   body.insertBefore(block, body.firstChild);   // 最新在最上
   body.scrollTop = 0;
   return block;
