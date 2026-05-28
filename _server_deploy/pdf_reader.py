@@ -780,6 +780,67 @@ def _append_lookup_log(word: str, lemma: str, pdf_rel: str, page: int, context: 
         pass
 
 
+def _auto_anki_cfg() -> tuple[int, int]:
+    """(阈值, 冷却小时)。server-config dict.auto_anki_lookups(默认3,0=关) / auto_anki_cooldown_h(默认24)。"""
+    try:
+        cfg = json.loads((CLAUDE_DIR / "state" / "server-config.json").read_text("utf-8"))
+        d = cfg.get("dict") or {}
+        return int(d.get("auto_anki_lookups", 3)), int(d.get("auto_anki_cooldown_h", 24))
+    except Exception:
+        return 3, 24
+
+
+def _effective_lookup_count(lemma: str, cooldown_h: int = 24) -> int:
+    """「有效遇到次数」：从查词日志算去重后的 (pdf, page, 冷却窗口) 组合数。
+    - 同一位置(pdf+page) + 同一冷却窗口内反复查 → 只算 1 次
+    - 换页/换书，或隔了冷却时间再遇到 → +1
+    真实含义 = 在多少个「不同场合」遇到这词还要查。"""
+    log = CLAUDE_DIR / "state" / "vocab-lookups.jsonl"
+    if not log.exists():
+        return 0
+    cd = max(1, cooldown_h * 3600)
+    seen = set()
+    try:
+        for line in log.read_text("utf-8").splitlines():
+            try:
+                j = json.loads(line)
+            except Exception:
+                continue
+            if j.get("lemma") != lemma:
+                continue
+            seen.add((j.get("pdf", ""), j.get("page", 0), int(j.get("ts", 0)) // cd))
+    except Exception:
+        return 0
+    return len(seen)
+
+
+def _maybe_auto_anki(word: str):
+    """多场合遇到同一词后自动加卡：有效遇到次数 ≥ 阈值 且 笔记无 anki_card_id → make_card。"""
+    try:
+        th, cooldown_h = _auto_anki_cfg()
+        if th <= 0:
+            return
+        vp = str(CLAUDE_DIR / "scripts" / "vocab")
+        if vp not in sys.path:
+            sys.path.insert(0, vp)
+        import dict_sources, anki_from_word  # type: ignore
+        ec = dict_sources.lookup_ecdict(word)
+        lemma = (ec or {}).get("lemma") or word
+        path = anki_from_word._word_path(lemma)
+        if not path.exists():
+            return
+        fm = _vocab_read_fm(path)
+        if fm.get("anki_card_id"):   # 已有卡，跳过
+            return
+        eff = _effective_lookup_count(lemma, cooldown_h)
+        if eff < th:
+            return
+        anki_from_word.make_card(lemma)
+        sys.stderr.write(f"auto-anki: created card for {lemma!r} (有效遇到 {eff}≥{th})\n")
+    except Exception as ex:
+        sys.stderr.write(f"auto-anki fail {word!r}: {ex}\n")
+
+
 def _trigger_vocab_note_async(word: str, pdf_rel: str, page: int, context: str = ""):
     """后台线程跑 build_vocab_note，不阻塞 dict API 响应。"""
     import threading
@@ -794,6 +855,8 @@ def _trigger_vocab_note_async(word: str, pdf_rel: str, page: int, context: str =
                 online=True,
                 download_audio=True,
             )
+            # 笔记写完(lookup_count 已 +1) → 检查是否达阈值自动加卡
+            _maybe_auto_anki(word)
         except Exception as ex:
             sys.stderr.write(f"vocab note bg fail for {word!r}: {ex}\n")
     threading.Thread(target=_run, daemon=True).start()
