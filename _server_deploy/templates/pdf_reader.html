@@ -3201,6 +3201,7 @@ function _renderTree(comps) {
     row.innerHTML = `<span class="ct-label" style="background:${col}">${_esc(c.label || '')}</span>`;
     row.appendChild(txt);
     node.appendChild(row);
+    const isClause = (c.label || '').includes('从句');
     if (kids.length) {
       const car = document.createElement('span');
       car.className = 'ct-caret'; car.textContent = '▸';   // 默认折叠
@@ -3208,6 +3209,13 @@ function _renderTree(comps) {
       const box = document.createElement('div');
       box.className = 'ct-children';
       box.style.display = 'none';
+      // 从句类节点：展开后把从句谓语(自有核心)作为「谓语」子项，与主/宾/状平级
+      if (isClause && (c.text || '').trim()) {
+        const pred = document.createElement('div');
+        pred.className = 'ctree-node';
+        pred.innerHTML = `<div class="ct-row"><span class="ct-label" style="background:${_compColor('谓语')}">谓语</span><span class="ct-text">${_esc(c.text)}</span></div>`;
+        box.appendChild(pred);
+      }
       kids.forEach(k => box.appendChild(build(k)));
       node.appendChild(box);
       const toggle = (e) => {
@@ -3215,8 +3223,9 @@ function _renderTree(comps) {
         const open = box.style.display === 'none';
         box.style.display = open ? '' : 'none';
         car.textContent = open ? '▾' : '▸';
-        txt.textContent = open ? (c.text || '') : fullText(idx);   // 展开看核心，折叠看整体
-        txt.classList.toggle('ct-core', open);
+        // 从句类展开后自身只留标签(谓语已挪进子)；短语类展开看核心
+        txt.textContent = open ? (isClause ? '' : (c.text || '')) : fullText(idx);
+        txt.classList.toggle('ct-core', open && !isClause);
       };
       car.addEventListener('click', toggle);
       txt.style.cursor = 'pointer';
