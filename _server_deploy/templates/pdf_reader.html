@@ -137,6 +137,13 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .sk-mod{display:inline-block;font-size:11px;border:1px dashed currentColor;border-radius:5px;padding:0 6px;margin:0 2px;cursor:pointer;opacity:.85;vertical-align:middle;white-space:normal}
 .sk-mod:hover{opacity:1;background:rgba(255,255,255,.06)}
 .sk-mod.open{border-style:solid}
+/* 成分树（融合）：成分块 + 层次缩进 + 折叠 */
+.ctree{font-size:13px;padding:2px 0}
+.ctree .ct-row{display:flex;align-items:baseline;gap:6px;padding:3px 0}
+.ctree .ct-label{flex:0 0 auto;font-size:9px;font-weight:600;color:#0d1322;border-radius:4px;padding:1px 6px}
+.ctree .ct-text{color:#e6e6f0;line-height:1.45}
+.ctree .ct-caret{flex:0 0 auto;margin-left:auto;color:#7a8497;font-size:10px;cursor:pointer;padding:0 4px;user-select:none}
+.ctree .ct-children{margin-left:13px;border-left:1px dashed #2a3550;padding-left:9px}
 
 /* displaCy 词 / 词性标签 / 弧线 */
 .dep-token{cursor:pointer}
@@ -439,6 +446,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
     <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
     <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">
+      <option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>
       <option value="components">成分分块（主谓宾定状从句彩色块）</option>
       <option value="skeleton">主干+修饰折叠（骨架先行，修饰点开）</option>
       <option value="deps">依存关系图（displaCy 弧线 + 从句切段）</option>
@@ -3091,7 +3099,7 @@ function _fillGrammarBlock(block, d, sentence) {
 // 长句结构显示模式：'components' 成分分块 / 'deps' 依存弧线图
 let _grammarViewMode = localStorage.getItem('pdf-grammar-view') || 'components';
 window.setGrammarView = (mode) => {
-  _grammarViewMode = ['deps', 'skeleton', 'components'].includes(mode) ? mode : 'components';
+  _grammarViewMode = ['deps', 'skeleton', 'components', 'tree'].includes(mode) ? mode : 'components';
   try { localStorage.setItem('pdf-grammar-view', _grammarViewMode); } catch (_) {}
   // 立即用新模式重渲染已显示的所有语法卡的结构区
   document.querySelectorAll('#grammar-panel-body .grammar-block').forEach(b => {
@@ -3104,7 +3112,9 @@ window.setGrammarView = (mode) => {
 function _renderStructInto(diag, wrap, sp) {
   diag.innerHTML = '';
   const comps = sp.components || [], toks = sp.tokens || [], deps = sp.deps || [], clauses = sp.clauses || [];
-  if (_grammarViewMode === 'skeleton' && comps.length) {
+  if (_grammarViewMode === 'tree' && comps.length) {
+    diag.appendChild(_renderTree(comps)); wrap?.classList.add('dgram-open');
+  } else if (_grammarViewMode === 'skeleton' && comps.length) {
     diag.appendChild(_renderSkeleton(comps)); wrap?.classList.add('dgram-open');
   } else if (_grammarViewMode === 'components' && comps.length) {
     diag.appendChild(_renderComponents(comps)); wrap?.classList.add('dgram-open');
@@ -3158,6 +3168,45 @@ function _renderSkeleton(comps) {
     }
     wrap.appendChild(document.createTextNode(' '));
   }
+  return wrap;
+}
+
+// ── 成分树（融合）：成分名+色 + 层次缩进(修饰挂在被修饰成分下) + 可折叠 ──
+function _renderTree(comps) {
+  const children = {};
+  comps.forEach((c, i) => {
+    const p = (c.parent == null ? -1 : c.parent);
+    (children[p] = children[p] || []).push(i);
+  });
+  const build = (idx) => {
+    const c = comps[idx], col = _compColor(c.label || '');
+    const node = document.createElement('div');
+    node.className = 'ctree-node';
+    const kids = children[idx] || [];
+    const row = document.createElement('div');
+    row.className = 'ct-row';
+    row.innerHTML = `<span class="ct-label" style="background:${col}">${_esc(c.label || '')}</span><span class="ct-text">${_esc(c.text || '')}</span>`;
+    node.appendChild(row);
+    if (kids.length) {
+      const car = document.createElement('span');
+      car.className = 'ct-caret'; car.textContent = '▾';
+      row.appendChild(car);
+      const box = document.createElement('div');
+      box.className = 'ct-children';
+      kids.forEach(k => box.appendChild(build(k)));
+      node.appendChild(box);
+      car.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const hidden = box.style.display === 'none';
+        box.style.display = hidden ? '' : 'none';
+        car.textContent = hidden ? '▾' : '▸';
+      });
+    }
+    return node;
+  };
+  const wrap = document.createElement('div');
+  wrap.className = 'ctree';
+  (children[-1] || []).forEach(i => wrap.appendChild(build(i)));
   return wrap;
 }
 

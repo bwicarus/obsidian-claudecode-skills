@@ -131,16 +131,28 @@ def _split_components(doc) -> list:
         if o is not None:
             groups.setdefault(o, []).append(t.i)
 
-    comps = []
+    items = []
     for hi, idxs in groups.items():
         idxs = sorted(idxs)
-        label = boundaries[hi]
         seg = doc[idxs[0]: idxs[-1] + 1]
         text = seg.text.strip()
-        if text and any(ch.isalnum() for ch in text):
-            comps.append({"label": label, "text": text, "start": idxs[0]})
-    comps.sort(key=lambda c: c["start"])
-    return comps
+        if not (text and any(ch.isalnum() for ch in text)):
+            continue
+        items.append({"hi": hi, "label": boundaries[hi], "text": text, "start": idxs[0]})
+    items.sort(key=lambda c: c["start"])
+    # 挂靠关系：每个成分修饰的上层成分（parent 序号，-1=顶层）。
+    # 句子级成分(主谓宾，挂 ROOT)都算顶层平级；从句内成分 / 定语从句 缩进在其宿主下。
+    bt = {c["hi"]: i for i, c in enumerate(items)}   # boundary token i → 成分序号
+    out = []
+    for c in items:
+        hi = c["hi"]
+        if hi == root.i:
+            parent = -1
+        else:
+            ph = owner(doc[hi].head)
+            parent = -1 if (ph is None or ph == root.i) else bt.get(ph, -1)
+        out.append({"label": c["label"], "text": c["text"], "parent": parent})
+    return out
 
 
 # 子句根的依存标签 → 中文从句名（长句按这些切段，每段单独画小图）
