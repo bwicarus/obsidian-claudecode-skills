@@ -117,6 +117,10 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .gb-diagram-wrap{border-top:1px solid #1c2740}
 .gb-diagram-toggle{display:flex;align-items:center;gap:6px;padding:9px 12px;cursor:pointer;font-size:11px;color:#9fb4d4;user-select:none}
 .gb-diagram-toggle:hover{background:#141d33}
+.gb-diagram-toggle .gv-switch{display:inline-flex;gap:2px;margin-left:8px}
+.gb-diagram-toggle .gv-switch button{background:#0d1322;border:1px solid #2a3550;color:#7a8497;font-size:10px;border-radius:4px;padding:1px 6px;cursor:pointer;line-height:1.5}
+.gb-diagram-toggle .gv-switch button:hover{color:#cfe6ff;border-color:#3b6db5}
+.gb-diagram-toggle .gv-switch button.active{background:#1a2540;color:#7dd3fc;border-color:#3b6db5;font-weight:600}
 .gb-diagram-toggle .dg-caret{margin-left:auto;color:#7a8497;font-size:10px;transition:transform .15s}
 .gb-diagram-wrap.dgram-open .gb-diagram-toggle .dg-caret{transform:rotate(90deg)}
 .grammar-block .gb-diagram{display:none;overflow-x:auto;overflow-y:hidden;padding:6px 10px 12px;-webkit-overflow-scrolling:touch}
@@ -3072,8 +3076,9 @@ function _fillGrammarBlock(block, d, sentence) {
   }
   // 句子成分分块（主谓宾定状从句彩色块）；无 components 时回退依存图
   const hasStruct = components.length || tokens.length;
+  const gvHtml = GV_MODES.map(([m, l]) => `<button type="button" data-gv="${m}" class="${m === _grammarViewMode ? 'active' : ''}">${l}</button>`).join('');
   const diagramHtml = hasStruct
-    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构<span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
+    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构<span class="gv-switch">${gvHtml}</span><span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
     : '';
   // 语法点区：AI 路径直接渲染；spaCy 路径先占位等 SSE
   const anaHtml = analyses.length
@@ -3091,6 +3096,11 @@ function _fillGrammarBlock(block, d, sentence) {
     const diag = content.querySelector('.gb-diagram');
     _renderStructInto(diag, wrap, {tokens, deps, clauses: d.clauses || [], components});
     content.querySelector('.gb-diagram-toggle').addEventListener('click', () => wrap.classList.toggle('dgram-open'));
+    // 标题栏内的模式切换按钮（树/块/干/弧），点击切全局模式、不触发折叠
+    content.querySelectorAll('.gv-switch button').forEach(btn => btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setGrammarView(btn.dataset.gv);
+    }));
   }
   content.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
   // 刚分析的块保持展开 + 高亮 5s，之后取消高亮（仍保持用户的展开/折叠状态）
@@ -3098,6 +3108,7 @@ function _fillGrammarBlock(block, d, sentence) {
 }
 
 // 长句结构显示模式：'components' 成分分块 / 'deps' 依存弧线图
+const GV_MODES = [['tree', '树'], ['components', '块'], ['skeleton', '主干'], ['deps', '弧线']];
 let _grammarViewMode = localStorage.getItem('pdf-grammar-view') || 'components';
 window.setGrammarView = (mode) => {
   _grammarViewMode = ['deps', 'skeleton', 'components', 'tree'].includes(mode) ? mode : 'components';
@@ -3108,6 +3119,10 @@ window.setGrammarView = (mode) => {
     const diag = b.querySelector('.gb-diagram'), wrap = b.querySelector('.gb-diagram-wrap');
     if (diag) _renderStructInto(diag, wrap, b.__spacy);
   });
+  // 同步所有卡标题栏的模式按钮高亮 + 设置面板下拉
+  document.querySelectorAll('.gv-switch button').forEach(b => b.classList.toggle('active', b.dataset.gv === _grammarViewMode));
+  const sel = document.getElementById('set-grammar-view');
+  if (sel) sel.value = _grammarViewMode;
 };
 // 统一结构渲染：按 _grammarViewMode 选 成分分块 / 主干折叠 / 依存图
 function _renderStructInto(diag, wrap, sp) {
