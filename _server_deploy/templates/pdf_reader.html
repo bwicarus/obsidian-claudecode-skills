@@ -1375,6 +1375,39 @@ const SENT_COLORS = [
   ['#0891b2', 'rgba(20,184,166,.18)'],   // 青
 ];
 
+// vocab 句子 L 按钮：既能点击翻译整句，也能从其上转发拖选（绕开 pointer-events:auto 挡选中的问题）。
+// mousedown/touch 时把坐标转发给所在页 char-layer 的拖选 API；命中字符则标记 _fromLBtn，
+// 单击(无拖)由 click handler 翻译、onEnd 跳过查词；拖动则正常 char 选中、click 被 _dragMoved 拦下。
+function _bindSentBtnDrag(btnEl, layer) {
+  const getApi = () => {
+    const pw = btnEl.closest('[data-page-num]') || layer.parentElement;
+    return pw && pw.__charDrag;
+  };
+  btnEl.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+    const api = getApi(); if (!api) return;
+    const p = api.ptToLocal(e.clientX, e.clientY);
+    if (api.onStart(p.x, p.y)) _fromLBtn = true;
+  });
+  btnEl.addEventListener('touchstart', (e) => {
+    e.stopPropagation();
+    const api = getApi(); if (!api || e.touches.length !== 1) return;
+    const t = e.touches[0]; const p = api.ptToLocal(t.clientX, t.clientY);
+    if (api.onStart(p.x, p.y)) _fromLBtn = true;
+  }, {passive: true});
+  btnEl.addEventListener('touchmove', (e) => {
+    const api = getApi(); if (!api || e.touches.length !== 1) return;
+    const t = e.touches[0]; const p = api.ptToLocal(t.clientX, t.clientY);
+    api.onMove(p.x, p.y, e);
+  }, {passive: false});
+  btnEl.addEventListener('touchend', (e) => {
+    const api = getApi(); if (!api) return;
+    const t = e.changedTouches[0]; if (!t) return;
+    const p = api.ptToLocal(t.clientX, t.clientY);
+    api.onEnd(p.x, p.y);
+  });
+}
+
 function renderVocabSentences(pw, sentences) {
   if (!_vocabUnderlineEnabled()) return;
   let layer = pw.querySelector('.vocab-layer');
@@ -1439,10 +1472,10 @@ function renderVocabSentences(pw, sentences) {
       btn0.style.height = charH0 + 'px';
       btn0.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (_dragMoved) return;   // 刚从 L 按钮拖选 → 不触发整句翻译
         toggleSentenceOverlay(layer, s, btn0, sx, sy);
       });
-      btn0.addEventListener('mousedown', (e) => e.stopPropagation());
-      btn0.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+      _bindSentBtnDrag(btn0, layer);
       btn0.addEventListener('mouseenter', () => {
         layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"]`).forEach(b => b.classList.add('highlight'));
       });
@@ -1472,10 +1505,10 @@ function renderVocabSentences(pw, sentences) {
       btn.style.height = charH + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (_dragMoved) return;   // 刚从 L 按钮拖选 → 不触发整句翻译
         toggleSentenceOverlay(layer, s, btn, sx, sy);
       });
-      btn.addEventListener('mousedown', (e) => e.stopPropagation());
-      btn.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+      _bindSentBtnDrag(btn, layer);
       btn.addEventListener('mouseenter', () => {
         layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"]`).forEach(b => b.classList.add('highlight'));
       });
@@ -1895,7 +1928,7 @@ function _paragraphExpandFromChar(chars, idx) {
   return {start: s, end: e};
 }
 
-let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null;
+let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 
 function _bindCharLayer(cl, pw) {
@@ -1915,6 +1948,7 @@ function _bindCharLayer(cl, pw) {
     return -1;
   };
   const onStart = (x, y) => {
+    _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
     // 诊断：每次按下输出 char-layer rect + 点击位置
     if (!window._loggedRect) {
       const r = cl.getBoundingClientRect();
@@ -1936,6 +1970,8 @@ function _bindCharLayer(cl, pw) {
     _dragStartXY = {x, y};
     _dragMoved = false;
     _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
+    // 拖选期间禁用 vocab-layer 拦截：否则拖到/松手在 L 按钮(pointer-events:auto)上会丢 move/up → 卡住/全选
+    const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = 'none';
     return true;
   };
 
@@ -1953,11 +1989,15 @@ function _bindCharLayer(cl, pw) {
 
   const onEnd = (x, y) => {
     if (_dragStartCharIdx == null) return;
+    const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';  // 恢复 L 按钮可点
     const startIdx = _dragStartCharIdx;
     _dragStartCharIdx = null;
     if (_dragMoved) {
       const idx = _findCharAt(pw.__charBoxes, x, y);
       if (idx >= 0) _selByCharRange(pw, startIdx, idx);
+    } else if (_fromLBtn) {
+      // 从 L 按钮起点且没拖动 = 单击 L 按钮 → 交给 L 按钮 click 处理整句翻译，这里不查词
+      _fromLBtn = false;
     } else {
       // 单/双/三击
       const now = Date.now();
@@ -2025,6 +2065,8 @@ function _bindCharLayer(cl, pw) {
     onEnd(p.x, p.y);
   });
   cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; });
+  // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
+  pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
 }
 
 // ──────── 旧 textLayer 事件机制（保留备用，但 char-layer 接管后不会触发）────────
