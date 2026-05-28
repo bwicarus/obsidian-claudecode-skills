@@ -1604,32 +1604,45 @@ def _spacy_grammar(sentence: str) -> dict | None:
         return None
     tokens = parsed.get("tokens") or []
     deps = parsed.get("deps") or []
+    clauses = parsed.get("clauses") or []
     if not tokens:
         return None
-    # ECDICT 补每个词的简明中文义（离线、毫秒级）
+    # ECDICT 补每个词的简明中文义（离线、毫秒级）；主 tokens + 各子句 tokens 共用一份缓存
     try:
         vp = str(CLAUDE_DIR / "scripts" / "vocab")
         if vp not in sys.path:
             sys.path.insert(0, vp)
         import dict_sources  # type: ignore
-        for tk in tokens:
-            w = (tk.get("text") or "").strip()
+        _zh_cache: dict[str, str] = {}
+        def _zh(w: str) -> str:
+            w = (w or "").strip()
             if not w or not w[0].isalpha():
-                continue
+                return ""
+            key = w.lower()
+            if key in _zh_cache:
+                return _zh_cache[key]
+            z = ""
             try:
                 ec = dict_sources.lookup_ecdict(w)
                 if ec:
                     for d in dict_sources._ec_definitions(ec):
                         if d.get("zh"):
-                            tk["zh"] = d["zh"][:30]
+                            z = d["zh"][:30]
                             break
             except Exception:
                 pass
+            _zh_cache[key] = z
+            return z
+        for tk in tokens:
+            tk["zh"] = _zh(tk.get("text", ""))
+        for c in clauses:
+            for tk in c.get("tokens", []):
+                tk["zh"] = _zh(tk.get("text", ""))
     except Exception:
         pass
     # 整句翻译 + 语法点讲解交给 AI 流式（/api/grammar-stream，翻译标志先出）
-    # 这里只出词性 + 依存，秒级零 AI
-    return {"tokens": tokens, "deps": deps, "sentence_zh": ""}
+    # 这里只出词性 + 依存 + 子句切分，秒级零 AI
+    return {"tokens": tokens, "deps": deps, "clauses": clauses, "sentence_zh": ""}
 
 
 @bp.route("/api/grammar-analyze", methods=["POST"])
@@ -1672,6 +1685,7 @@ def pdf_api_grammar_analyze():
                 "sentence_zh": sp.get("sentence_zh", ""),
                 "tokens":      sp.get("tokens", []),
                 "deps":        sp.get("deps", []),
+                "clauses":     sp.get("clauses", []),   # 长句按从句切段
                 "analyses":    [],   # 语法点匹配暂不在 spaCy 路径做（后续可加规则）
                 "engine":      "spacy",
             }

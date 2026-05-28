@@ -56,7 +56,7 @@ def _load():
 def parse(text: str) -> dict:
     text = (text or "").strip()
     if not text:
-        return {"tokens": [], "deps": []}
+        return {"tokens": [], "deps": [], "clauses": []}
     nlp = _load()
     doc = nlp(text)
     tokens = [{"text": t.text, "pos": UPOS.get(t.pos_, t.pos_.lower())} for t in doc]
@@ -68,7 +68,66 @@ def parse(text: str) -> dict:
             "head": t.head.i, "child": t.i,
             "label": DEP.get(t.dep_, t.dep_),
         })
-    return {"tokens": tokens, "deps": deps}
+    return {"tokens": tokens, "deps": deps, "clauses": _split_clauses(doc)}
+
+
+# 子句根的依存标签 → 中文从句名（长句按这些切段，每段单独画小图）
+_CLAUSE_DEP = {
+    "relcl": "定语从句", "advcl": "状语从句", "ccomp": "宾语从句", "xcomp": "补语从句",
+    "acl": "修饰从句", "csubj": "主语从句", "csubjpass": "被动主语从句", "pcomp": "介词从句",
+}
+
+
+def _split_clauses(doc) -> list:
+    """按依存树把句子切成子句段：每个子句根(ROOT/relcl/advcl/...)管辖一段。
+    每个 token 归属于最近的「子句根祖先」，从而把嵌套从句从主句里挖出来。
+    返回 [{label, tokens:[{text,pos}], deps:[{head,child,label}](段内局部 index)}]。"""
+    roots = {}   # token.i -> 中文标签
+    for t in doc:
+        if t.dep_ == "ROOT":
+            roots[t.i] = "主句"
+        elif t.dep_ in _CLAUSE_DEP:
+            roots[t.i] = _CLAUSE_DEP[t.dep_]
+        elif t.dep_ == "conj" and t.pos_ in ("VERB", "AUX") and t.head.pos_ in ("VERB", "AUX"):
+            roots[t.i] = "并列分句"
+
+    def owner(t):
+        cur, hops = t, 0
+        while hops < 200:
+            if cur.i in roots:
+                return cur.i
+            if cur.head.i == cur.i:
+                return None
+            cur = cur.head
+            hops += 1
+        return None
+
+    groups = {}   # root.i -> [token.i]
+    for t in doc:
+        o = owner(t)
+        if o is not None:
+            groups.setdefault(o, []).append(t.i)
+
+    items = sorted(
+        ({"root": ri, "label": roots[ri], "idx": sorted(idxs)} for ri, idxs in groups.items()),
+        key=lambda c: c["idx"][0],
+    )
+    clauses = []
+    for c in items:
+        idx = c["idx"]
+        if not idx:
+            continue
+        pos_map = {gi: li for li, gi in enumerate(idx)}
+        toks = [{"text": doc[gi].text, "pos": UPOS.get(doc[gi].pos_, doc[gi].pos_.lower())} for gi in idx]
+        dps = []
+        for gi in idx:
+            t = doc[gi]
+            if t.dep_ == "ROOT" or t.head.i == t.i:
+                continue
+            if t.head.i in pos_map and t.i in pos_map:   # 只保留段内边
+                dps.append({"head": pos_map[t.head.i], "child": pos_map[t.i], "label": DEP.get(t.dep_, t.dep_)})
+        clauses.append({"label": c["label"], "tokens": toks, "deps": dps})
+    return clauses
 
 
 def main():
@@ -76,7 +135,7 @@ def main():
     try:
         out = parse(text)
     except Exception as ex:
-        print(json.dumps({"error": str(ex), "tokens": [], "deps": []}, ensure_ascii=False))
+        print(json.dumps({"error": str(ex), "tokens": [], "deps": [], "clauses": []}, ensure_ascii=False))
         sys.exit(1)
     print(json.dumps(out, ensure_ascii=False))
 
