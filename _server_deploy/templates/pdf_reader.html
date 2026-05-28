@@ -3351,32 +3351,51 @@ window.openSettings = () => {
   document.getElementById('settings-mask').style.display = 'flex';
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
-window.saveSettings = () => {
-  const ov = {
-    model:  document.getElementById('set-model').value,
-    effort: document.getElementById('set-effort').value,
-  };
-  try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
-  const dbg = document.getElementById('set-debug').checked;
-  try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
-  const vu = document.getElementById('set-vocab-underline').checked;
-  try { localStorage.setItem('pdf-vocab-underline', vu ? '1' : '0'); } catch (_) {}
-  const ct = document.getElementById('set-click-translate').checked;
-  try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
-  // 句子翻译配置 POST 到服务端
-  fetch('/pdf/api/translate-config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      backend: document.getElementById('set-sent-backend').value,
-      model: document.getElementById('set-sent-model').value,
-      effort: document.getElementById('set-sent-effort').value,
-    }),
-  }).catch(()=>{});
-  _applyDebugVisibility();
-  closeSettings();
-  // 切换下划线开关后立刻重渲染当前页
-  if (pdfDoc) renderPage(currentPage);
+window.saveSettings = async () => {
+  window.dlog?.('saveSettings 开始');
+  try {
+    const ov = {
+      model:  document.getElementById('set-model')?.value || '',
+      effort: document.getElementById('set-effort')?.value || '',
+    };
+    try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
+    const dbg = document.getElementById('set-debug')?.checked || false;
+    try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
+    const vu = document.getElementById('set-vocab-underline')?.checked;
+    if (vu !== undefined) {
+      try { localStorage.setItem('pdf-vocab-underline', vu ? '1' : '0'); } catch (_) {}
+    }
+    const ct = document.getElementById('set-click-translate')?.checked;
+    if (ct !== undefined) {
+      try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
+    }
+    // 句子翻译配置 POST 到服务端
+    const sb = document.getElementById('set-sent-backend');
+    const sm = document.getElementById('set-sent-model');
+    const se = document.getElementById('set-sent-effort');
+    if (sb && sm && se) {
+      try {
+        const r = await fetch('/pdf/api/translate-config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({backend: sb.value, model: sm.value, effort: se.value}),
+        });
+        const d = await r.json();
+        window.dlog?.('translate-config POST: ' + (d.ok ? 'OK' : 'FAIL ' + (d.error||'?')));
+        if (!d.ok) _toast?.('句子翻译设置保存失败：' + (d.error||'?'));
+      } catch (e) {
+        window.dlog?.('translate-config POST exception: ' + e.message, '#ff6b6b');
+        _toast?.('句子翻译设置保存失败：' + e.message);
+      }
+    }
+    _applyDebugVisibility();
+    closeSettings();
+    if (pdfDoc) renderPage(currentPage);
+    window.dlog?.('saveSettings 完成');
+  } catch (ex) {
+    window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff6b6b');
+    _toast?.('设置保存出错：' + ex.message);
+  }
 };
 function _applyDebugVisibility() {
   const el = document.getElementById('debug-log');
