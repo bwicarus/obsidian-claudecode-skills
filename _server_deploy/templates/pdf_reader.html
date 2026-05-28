@@ -595,8 +595,9 @@ async function loadPdf() {
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const mainW = document.getElementById('main').clientWidth - 40;
+    const mainW = _mainContentWidth();
     scale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
+    _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
@@ -797,6 +798,12 @@ window.toggleReadMode = async () => {
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
 let _refitDebounce = null, _refitBusy = false, _lastFitWidth = 0;
+// #main 真实可用内容宽度（clientWidth 含 padding，开侧栏加 padding-right 后必须减掉真实 padding）
+function _mainContentWidth() {
+  const m = document.getElementById('main');
+  const cs = getComputedStyle(m);
+  return m.clientWidth - (parseFloat(cs.paddingLeft)||0) - (parseFloat(cs.paddingRight)||0);
+}
 function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
@@ -804,7 +811,7 @@ function _scheduleRefit(force) {
 async function _refitToWidth(force) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
-  const mainW = main.clientWidth - 40;
+  const mainW = _mainContentWidth();
   if (mainW <= 0) return;
   if (!force && Math.abs(mainW - _lastFitWidth) < 30) return;
   _refitBusy = true;
