@@ -4331,6 +4331,44 @@ window.clearAllDrafts = () => {
   closeDraftModal();
 };
 
+// ── 后台任务进度条（右下角堆叠）：AI 创建笔记/Anki 不阻塞阅读器 ──
+let _bgJobSeq = 0;
+function _ensureBgJobsEl() {
+  let c = document.getElementById('bg-jobs');
+  if (!c) {
+    c = document.createElement('div'); c.id = 'bg-jobs';
+    c.style.cssText = 'position:fixed;right:18px;bottom:80px;display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
+    document.body.appendChild(c);
+  }
+  return c;
+}
+function _startBgJob(text) {
+  const id = 'bgj' + (++_bgJobSeq);
+  const el = document.createElement('div'); el.id = id;
+  el.style.cssText = 'background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
+  el.textContent = '⏳ ' + text;
+  _ensureBgJobsEl().appendChild(el);
+  return id;
+}
+function _finishBgJob(id, text, openUrl) {
+  const el = document.getElementById(id); if (!el) return;
+  el.style.borderColor = '#34d399'; el.style.color = '#34d399';
+  el.textContent = '✓ ' + text + (openUrl ? ' · 点击打开' : '');
+  if (openUrl) { el.style.cursor = 'pointer'; el.onclick = () => { location.href = openUrl; }; }
+  setTimeout(() => { el.style.transition = 'opacity .4s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, openUrl ? 8000 : 4500);
+}
+function _failBgJob(id, text, restore) {
+  const el = document.getElementById(id); if (!el) return;
+  el.style.borderColor = '#f87171'; el.style.color = '#f87171'; el.style.cursor = 'pointer';
+  el.textContent = '✗ ' + text + ' · 点关闭';
+  el.onclick = () => el.remove();
+  // 失败 → 把段落放回草稿，方便重试
+  if (restore && restore.length) {
+    for (const d of restore) { if (!_drafts.some(x => x.text === d.text)) { d.selected = true; _drafts.push(d); } }
+    _persistDrafts(); _updateDraftBadge();
+  }
+}
+
 async function _doCreate(makeNote, makeAnki) {
   const picked = _drafts.filter(d => d.selected);
   if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
@@ -4341,14 +4379,18 @@ async function _doCreate(makeNote, makeAnki) {
     noteName = (noteName || '').trim();
     if (!noteName) { alert('未输入笔记名'); return; }
   }
-  const btns = document.querySelectorAll('#draft-actions button');
-  btns.forEach(b => b.disabled = true);
+  // 立即关 modal + 乐观移除已选段（失败再放回），任务丢后台跑，不挡着阅读器
+  const used = picked.slice();
+  _drafts = _drafts.filter(x => !x.selected);
+  _persistDrafts(); _updateDraftBadge(); closeDraftModal();
+  const label = (makeNote && makeAnki) ? '笔记+Anki' : (makeNote ? '笔记' : 'Anki');
+  const jobId = _startBgJob('创建' + label + '中…（' + used.length + ' 段）');
   try {
     const ov = _getAiOverrides();
     const r = await fetch('/pdf/api/snippets-to', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        snippets: picked.map(d => ({text: d.text, source: d.source})),
+        snippets: used.map(d => ({text: d.text, source: d.source})),
         make_note: makeNote, make_anki: makeAnki,
         note_name: noteName,
         model: ov.model || '', effort: ov.effort || '',
@@ -4356,25 +4398,15 @@ async function _doCreate(makeNote, makeAnki) {
     });
     const d = await r.json();
     if (d.ok) {
-      let msg = '✓ 完成\n';
-      if (d.note_path) msg += '笔记：' + d.note_path + '\n';
-      if (d.anki_added) msg += `Anki：${d.anki_added} 张卡片`;
-      alert(msg);
-      if (d.note_path && d.obsidian_url) {
-        if (confirm('在 Obsidian 中打开笔记？')) location.href = d.obsidian_url;
-      }
-      // 创建成功后从草稿移除已用段
-      _drafts = _drafts.filter(x => !x.selected);
-      _persistDrafts();
-      _updateDraftBadge();
-      closeDraftModal();
+      const parts = [];
+      if (d.note_path) parts.push('笔记已建');
+      if (d.anki_added) parts.push('Anki ' + d.anki_added + ' 张');
+      _finishBgJob(jobId, parts.join(' · ') || '完成', d.obsidian_url || '');
     } else {
-      alert('✗ 失败：' + (d.error || '未知'));
+      _failBgJob(jobId, (d.error || '失败'), used);
     }
   } catch (e) {
-    alert('✗ 请求失败：' + e.message);
-  } finally {
-    btns.forEach(b => b.disabled = false);
+    _failBgJob(jobId, e.message, used);
   }
 }
 window.createNoteFromDrafts = () => _doCreate(true, false);
