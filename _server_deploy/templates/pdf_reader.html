@@ -625,7 +625,9 @@ async function _renderPageInto(num, wrap) {
   canvas.width  = Math.floor(viewport.width  * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
   canvas.style.width  = cw + 'px';
-  canvas.style.height = ch + 'px';
+  // 高度用 auto：容器变窄(max-width:100%)时让宽高等比缩，避免纵向拉伸
+  // backing store 宽高比已由 canvas.width/height 属性锁定
+  canvas.style.height = 'auto';
   wrap.appendChild(canvas);
   const textLayerDiv = document.createElement('div');
   textLayerDiv.className = 'textLayer';
