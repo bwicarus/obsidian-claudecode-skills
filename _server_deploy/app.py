@@ -757,4 +757,5 @@ from pdf_reader import register_pdf_reader
 register_pdf_reader(app)
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000)
+    # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
+    app.run(host="127.0.0.1", port=5000, threaded=True)
