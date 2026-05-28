@@ -2675,10 +2675,9 @@ async function _streamGrammar(block, sentence, text) {
   }
 }
 function _setBlockTrans(block, zh) {
+  // 只填常驻翻译行；标题保持原文不动
   const el = block.querySelector('.gb-trans');
   if (el) { el.classList.remove('gb-pending'); el.textContent = '🌐 ' + zh; }
-  const titleEl = block.querySelector('.gb-title');
-  if (titleEl && zh) titleEl.textContent = zh;
 }
 function _setBlockTransFail(block) {
   const el = block.querySelector('.gb-trans');
@@ -2704,7 +2703,7 @@ function _setBlockPoints(block, jsonStr) {
     const badge = document.createElement('span');
     badge.className = 'gb-badge';
     badge.textContent = '语法点 ' + arr.length;
-    headEl.insertBefore(badge, headEl.querySelector('.gb-caret'));
+    headEl.insertBefore(badge, headEl.querySelector('.gb-del'));
   }
 }
 
@@ -2757,13 +2756,15 @@ function _addLoadingBlock(id, sentence) {
   block.className = 'grammar-block focus open';   // loading 时默认展开看进度
   block.id = id;
   const summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
+  block.dataset.src = sentence;   // 原文，标题永远显示它
   block.innerHTML =
     `<div class="gb-header">
-       <span class="gb-title">${_esc(summary)}</span>
+       <span class="gb-title" title="${_esc(sentence)}">${_esc(summary)}</span>
        <span class="gb-del" title="删除这条">🗑</span>
        <span class="gb-caret">▶</span>
      </div>
-     <div class="gb-content"><div class="gb-loading">⏳ 分析中…</div></div>`;
+     <div class="gb-trans gb-pending">🌐 翻译中…</div>
+     <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => { e.stopPropagation(); block.remove(); });
   body.insertBefore(block, body.firstChild);   // 最新在最上
@@ -2786,20 +2787,19 @@ function _fillGrammarBlock(block, d, sentence) {
     return;
   }
   const isSpacy = d.engine === 'spacy';   // spaCy 路径：翻译/语法点稍后由 SSE 流式填
-  // 标题栏：折叠时显示整句翻译（最有用），没翻译就用原句；语法点数量做角标
-  const titleEl = block.querySelector('.gb-title');
-  if (titleEl) titleEl.textContent = sentence_zh || sentence.slice(0,60);
+  // 标题永远是原文（不被翻译覆盖）；翻译填到 header 外的常驻 gb-trans 行（折叠也可见）
+  const transEl = block.querySelector('.gb-trans');
+  if (transEl) {
+    if (sentence_zh) { transEl.classList.remove('gb-pending'); transEl.textContent = '🌐 ' + sentence_zh; }
+    else if (!isSpacy) { transEl.remove(); }   // AI 兜底路径但无翻译 → 移除占位；spaCy 保持「翻译中」等 SSE
+  }
   const headEl = block.querySelector('.gb-header');
   if (headEl && analyses.length && !headEl.querySelector('.gb-badge')) {
     const badge = document.createElement('span');
     badge.className = 'gb-badge';
     badge.textContent = '语法点 ' + analyses.length;
-    headEl.insertBefore(badge, headEl.querySelector('.gb-caret'));
+    headEl.insertBefore(badge, headEl.querySelector('.gb-del'));
   }
-  // 翻译区：有现成翻译就显示；spaCy 路径先占位「翻译中…」等 SSE
-  const transHtml = sentence_zh
-    ? `<div class="gb-trans">🌐 ${_esc(sentence_zh)}</div>`
-    : (isSpacy ? `<div class="gb-trans gb-pending">🌐 翻译中…</div>` : '');
   // 依存图收进二级折叠区（默认收起，不占地方）；去掉了词性图例（词已着色+词下中文标）
   const diagramHtml = tokens.length
     ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构图<span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
@@ -2814,7 +2814,7 @@ function _fillGrammarBlock(block, d, sentence) {
         </div>`).join('')}</div>`
     : (isSpacy ? `<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>` : '');
   const content = block.querySelector('.gb-content');
-  content.innerHTML = transHtml + diagramHtml + anaHtml;
+  content.innerHTML = diagramHtml + anaHtml;
   if (tokens.length) {
     const wrap = content.querySelector('.gb-diagram-wrap');
     const diag = content.querySelector('.gb-diagram');
