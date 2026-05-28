@@ -53,13 +53,21 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 #grammar-panel-header button:hover{color:#fff}
 #grammar-panel-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:10px}
 
-/* 一次分析 = 一个块 */
-.grammar-block{margin-bottom:14px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
+/* 一次分析 = 一个可折叠的框 */
+.grammar-block{margin-bottom:10px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
 .grammar-block.focus{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.3)}
+.grammar-block .gb-header{display:flex;align-items:center;gap:7px;padding:9px 10px;cursor:pointer;user-select:none}
+.grammar-block .gb-header:hover{background:#141d33}
+.grammar-block .gb-header .gb-title{flex:1;min-width:0;font-size:12px;color:#cfe6ff;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grammar-block .gb-header .gb-badge{flex:0 0 auto;font-size:9px;color:#7dd3fc;background:#16243f;border-radius:8px;padding:1px 7px}
+.grammar-block .gb-header .gb-caret{flex:0 0 auto;color:#7a8497;font-size:11px;transition:transform .15s}
+.grammar-block.open .gb-header .gb-caret{transform:rotate(90deg)}
+.grammar-block .gb-content{display:none;border-top:1px solid #1c2740}
+.grammar-block.open .gb-content{display:block}
 .grammar-block .gb-trans{padding:6px 10px;font-size:11px;color:#9fb4d4;border-bottom:1px solid #1c2740;line-height:1.4}
 .grammar-block .gb-diagram{overflow-x:auto;overflow-y:hidden;padding:4px 8px 8px;-webkit-overflow-scrolling:touch}
 .grammar-block .gb-diagram svg{display:block}
-.grammar-block .gb-loading{padding:18px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
+.grammar-block .gb-loading{padding:14px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
 
 /* displaCy 词 / 词性标签 / 弧线 */
 .dep-token{cursor:pointer}
@@ -2655,21 +2663,29 @@ const POS_LABEL = {
 function _posColor(p){ return POS_COLORS[(p||'').toLowerCase()] || '#64748b'; }
 function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ── 分析块：loading / error / 填充 ──
+// ── 分析块：标题栏（可点击折叠/展开）+ 内容区 ──
 function _addLoadingBlock(id, sentence, pageNum, topRatio) {
   const body = document.getElementById('grammar-panel-body');
   const block = document.createElement('div');
-  block.className = 'grammar-block focus';
+  block.className = 'grammar-block focus open';   // loading 时默认展开看进度
   block.id = id;
   if (pageNum) { block.dataset.pageNum = pageNum; block.dataset.topRatio = topRatio || 0; }
-  block.innerHTML = `<div class="gb-loading">⏳ 正在分析：<br>${_esc(sentence.slice(0,90))}${sentence.length>90?'…':''}</div>`;
+  const summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
+  block.innerHTML =
+    `<div class="gb-header">
+       <span class="gb-title">${_esc(summary)}</span>
+       <span class="gb-caret">▶</span>
+     </div>
+     <div class="gb-content"><div class="gb-loading">⏳ 分析中…</div></div>`;
+  block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   body.insertBefore(block, body.firstChild);   // 最新在最上
   body.scrollTop = 0;
   return block;
 }
 function _fillBlockError(block, msg) {
   if (!block) return;
-  block.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
+  const content = block.querySelector('.gb-content') || block;
+  content.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
 }
 function _fillGrammarBlock(block, d, sentence) {
   if (!block) return;
@@ -2680,6 +2696,16 @@ function _fillGrammarBlock(block, d, sentence) {
   if (!tokens.length && !sentence_zh && !analyses.length) {
     _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
+  }
+  // 标题栏：折叠时显示整句翻译（最有用），没翻译就用原句；语法点数量做角标
+  const titleEl = block.querySelector('.gb-title');
+  if (titleEl) titleEl.textContent = sentence_zh || sentence.slice(0,60);
+  const headEl = block.querySelector('.gb-header');
+  if (headEl && analyses.length && !headEl.querySelector('.gb-badge')) {
+    const badge = document.createElement('span');
+    badge.className = 'gb-badge';
+    badge.textContent = '语法点 ' + analyses.length;
+    headEl.insertBefore(badge, headEl.querySelector('.gb-caret'));
   }
   const usedPos = [...new Set(tokens.map(t=>(t.pos||'').toLowerCase()).filter(Boolean))];
   const legendHtml = usedPos.length
@@ -2693,10 +2719,11 @@ function _fillGrammarBlock(block, d, sentence) {
           <div class="a-body">${_esc(a.explanation||'')}${(a.examples||[]).length?`<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>`:''}</div>
         </div>`).join('')}</div>`
     : '';
-  block.innerHTML =
+  const content = block.querySelector('.gb-content');
+  content.innerHTML =
     (sentence_zh ? `<div class="gb-trans">🌐 ${_esc(sentence_zh)}</div>` : '') +
     `<div class="gb-diagram"></div>` + legendHtml + anaHtml;
-  const diag = block.querySelector('.gb-diagram');
+  const diag = content.querySelector('.gb-diagram');
   if (tokens.length) {
     diag.appendChild(_renderDepSvg(tokens, deps));
     // 桌面：在图上滚轮 → 横向移动（仅当图比容器宽，不抢页面垂直滚动）
@@ -2707,7 +2734,8 @@ function _fillGrammarBlock(block, d, sentence) {
       e.preventDefault();
     }, {passive: false});
   }
-  block.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
+  content.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
+  // 刚分析的块保持展开 + 高亮 5s，之后取消高亮（仍保持用户的展开/折叠状态）
   setTimeout(() => block.classList.remove('focus'), 5000);
 }
 
