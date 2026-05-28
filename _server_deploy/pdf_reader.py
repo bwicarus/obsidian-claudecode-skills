@@ -1619,10 +1619,7 @@ def pdf_api_grammar_analyze():
         f"- [{n['id']}] **{n['name']}** ({n.get('book','')}): {n.get('summary','')}"
         for n in tracked_nodes
     )
-    prompt = f"""你是英语语法分析助手。请同时给出整句翻译、关键词词性，以及句中涉及的跟踪语法点。
-
-【跟踪的语法点】
-{nodes_block}
+    prompt = f"""你是英语句子结构分析助手。请对下面这句做依存句法分析，输出可用于画依存关系图的结构化数据。
 
 【待分析句子】
 {sentence}
@@ -1630,21 +1627,28 @@ def pdf_api_grammar_analyze():
 【用户特别关注的片段（句子内的子串）】
 {text}
 
-【任务】
-1. 整句翻译为自然中文（sentence_zh）。
-2. 列出句中 5–12 个对理解最关键的词或固定搭配（key_tokens），每个给出：原文 token / 在句中实际担任的词性（pos，用 n/v/adj/adv/prep/conj/pron/det/aux/phrase 等简写）/ 在该句中的简明中文释义。
-3. 整体分析这一句涉及到的跟踪语法点（仅限上面列表，不要凭空增加）。用户选了某片段说明那里他可能不懂，对该处稍详细一点；但 analyses 不要仅限于选中片段。每个语法点输出：node_id / 句子中的语法实例短语 / 针对该句的简明解释 / 1-2 个相似例句。
-4. 如果该句没有任何跟踪点 → analyses 为 []，但 sentence_zh / key_tokens 仍必须给出。
+【跟踪的语法点】
+{nodes_block}
 
-【输出 JSON 格式（仅输出 JSON，不要别的）】
+【任务】
+1. sentence_zh：整句自然中文翻译。
+2. tokens：把句子按词切分（标点也算一个 token），**严格保持原句顺序**。每个词给：
+   - text：原文 token（跟原句一致，含大小写）
+   - pos：词性，**只能用这些小写英文之一**：noun, verb, adj, adv, pron, prep, det, conj, aux, num, punct, part, intj
+   - zh：该词在本句中的简明中文义（标点或虚词可留空字符串）
+3. deps：依存关系弧的数组。每条 {{"head": <int>, "child": <int>, "label": "<中文关系名>"}}：
+   - head / child 都是 tokens 数组下标（0-based 整数）。head 是支配词，child 是从属词。
+   - label 用简短中文：主语 / 宾语 / 间接宾语 / 定语 / 状语 / 介词宾语 / 介词 / 系动词 / 并列 / 连词 / 补语 / 限定 / 同位 / 主句谓语标记 等。
+   - 整句的核心（一般是主要动词）作为根，不必为它列入边。
+   - 不要画自环，head ≠ child。
+4. analyses：句中命中的跟踪语法点（仅限上面列表，不要凭空加）。每条 {{node_id, phrase, explanation, examples}}。没有命中则 []。
+
+【输出 JSON（仅输出 JSON，不要任何额外文字）】
 {{
   "sentence_zh": "<整句中文翻译>",
-  "key_tokens": [
-    {{"token": "<原文 token>", "pos": "<词性简写>", "zh": "<在该句中的简明中文释义>"}}
-  ],
-  "analyses": [
-    {{"node_id": "<id>", "phrase": "<句子中的语法实例>", "explanation": "<简明解释>", "examples": ["...", "..."]}}
-  ]
+  "tokens": [{{"text": "The", "pos": "det", "zh": "（定冠词）"}}, {{"text": "cat", "pos": "noun", "zh": "猫"}}],
+  "deps": [{{"head": 1, "child": 0, "label": "限定"}}],
+  "analyses": [{{"node_id": "<id>", "phrase": "<语法实例>", "explanation": "<简明解释>", "examples": ["..."]}}]
 }}
 """
     model = (data.get("model") or "haiku").strip()
@@ -1669,15 +1673,34 @@ def pdf_api_grammar_analyze():
             except Exception:
                 pass
     if not j:
-        return jsonify({"ok": True, "sentence_zh": "", "key_tokens": [], "analyses": [], "raw": zh[:1500]})
+        return jsonify({"ok": True, "sentence_zh": "", "tokens": [], "deps": [], "analyses": [], "raw": zh[:1500]})
     # 补节点名
     for a in (j.get("analyses") or []):
         nid = a.get("node_id")
         if nid in node_by_id:
             a["node_name"] = node_by_id[nid]["name"]
+    # 清洗 tokens / deps：保证 index 合法、无自环
+    tokens = []
+    for t in (j.get("tokens") or []):
+        if isinstance(t, dict) and t.get("text") is not None:
+            tokens.append({
+                "text": str(t.get("text", "")),
+                "pos":  str(t.get("pos", "")).lower(),
+                "zh":   str(t.get("zh", "")),
+            })
+    n = len(tokens)
+    deps = []
+    for d in (j.get("deps") or []):
+        try:
+            h, c = int(d.get("head")), int(d.get("child"))
+        except Exception:
+            continue
+        if 0 <= h < n and 0 <= c < n and h != c:
+            deps.append({"head": h, "child": c, "label": str(d.get("label", ""))})
     out = {
         "sentence_zh": j.get("sentence_zh") or "",
-        "key_tokens":  j.get("key_tokens") or [],
+        "tokens":      tokens,
+        "deps":        deps,
         "analyses":    j.get("analyses") or [],
     }
     cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")

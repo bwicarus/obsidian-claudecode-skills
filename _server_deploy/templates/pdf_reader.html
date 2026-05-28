@@ -16,7 +16,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #header input[type=number]{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:4px 8px;width:60px;font-size:12px}
 
 #main{flex:1;overflow:auto;background:#0a0e1a;padding:20px;text-align:center;position:relative}
-#main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4);max-width:100%;height:auto}
+/* canvas 用 inline 固定 cw×ch（精确比例，绝不被 CSS 缩放）；宽度自适应靠重算 scale 重 render，overlay 同坐标系永不错位 */
+#main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4)}
 .page-wrap{position:relative;display:inline-block}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
 .textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;
@@ -42,39 +43,52 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 
-/* 右侧语法分析抽屉：跟 PDF 主滚动同步，每条分析按句子 y 定位 */
-#grammar-panel{position:fixed;top:48px;right:0;bottom:0;width:35vw;max-width:480px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:8;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
+/* 右侧语法分析抽屉：流式堆叠的依存句法图（displaCy 风格） */
+#grammar-panel{position:fixed;top:48px;right:0;bottom:0;width:38vw;max-width:560px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:8;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
 #grammar-panel.open{display:flex}
-body.grammar-open #main{padding-right:calc(min(35vw,480px) + 12px)}
+body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 #grammar-panel-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #2a3550}
 #grammar-panel-header h2{margin:0;font-size:13px;color:#cfe6ff;font-weight:600}
 #grammar-panel-header button{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:2px 8px}
 #grammar-panel-header button:hover{color:#fff}
-#grammar-panel-body{flex:1 1 auto;overflow:hidden scroll;position:relative;scrollbar-width:none}
-#grammar-panel-body::-webkit-scrollbar{display:none}
-#grammar-panel-spacer{position:relative;width:100%}
-.grammar-entry{position:absolute;left:8px;right:8px;background:#0d1322;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:4px 8px;cursor:pointer;overflow:hidden;transition:height .2s,background .15s;font-size:11px;line-height:1.3;color:#cfe6ff;box-sizing:border-box}
-.grammar-entry:hover{background:#162045}
-.grammar-entry .e-head{display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:#a8cdff}
-.grammar-entry .e-phrase{color:#facc15;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
-.grammar-entry .e-explain{display:none;color:#cfe6ff;font-size:11px;line-height:1.5;margin-top:6px;padding-top:6px;border-top:1px solid #2a3550;white-space:normal}
-.grammar-entry .e-examples{display:none;margin-top:4px;font-size:10px;color:#7a8497;line-height:1.5}
-.grammar-entry.expanded{height:auto !important;z-index:2;box-shadow:0 4px 14px rgba(0,0,0,.5);background:#162045}
-.grammar-entry.expanded .e-explain,.grammar-entry.expanded .e-examples{display:block}
-.grammar-entry.focus{border-left-color:#fbbf24;background:#1f1a08}
-.grammar-entry.focus.expanded{box-shadow:0 4px 14px rgba(251,191,36,.3)}
-.grammar-entry-loading{position:absolute;color:#7a8497;font-style:italic;font-size:11px}
-.grammar-entry-trans{border-left-color:#7dd3fc}
-.grammar-entry-trans.focus{border-left-color:#7dd3fc;background:#0d1322}
-.grammar-entry .e-sentence-zh{color:#cfe6ff !important;font-family:inherit !important;font-size:11px !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.grammar-entry.expanded .e-sentence-zh{display:none}
-.grammar-entry .e-tokens{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
-.grammar-entry .e-tokens .tok{display:inline-block;padding:2px 6px;background:#1a2540;border-radius:4px;font-size:10px;color:#cfe6ff;line-height:1.3;white-space:nowrap}
-.grammar-entry .e-tokens .tok b{color:#fbbf24;font-weight:600;margin-right:3px}
-.grammar-entry .e-tokens .tok i{color:#7a8497;font-style:normal;margin-right:3px;font-family:monospace;font-size:9px}
+#grammar-panel-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:10px}
+
+/* 一次分析 = 一个块 */
+.grammar-block{margin-bottom:14px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
+.grammar-block.focus{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.3)}
+.grammar-block .gb-trans{padding:6px 10px;font-size:11px;color:#9fb4d4;border-bottom:1px solid #1c2740;line-height:1.4}
+.grammar-block .gb-diagram{overflow-x:auto;overflow-y:hidden;padding:4px 8px 8px;-webkit-overflow-scrolling:touch}
+.grammar-block .gb-diagram svg{display:block}
+.grammar-block .gb-loading{padding:18px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
+
+/* displaCy 词 / 词性标签 / 弧线 */
+.dep-token{cursor:pointer}
+.dep-word{font-size:15px;font-weight:600}
+.dep-pos{font-size:9px;font-family:monospace;fill:#8a9bb4}
+.dep-wordbg{rx:4;opacity:.9}
+.dep-arc{fill:none;stroke:#5a6e94;stroke-width:1.5}
+.dep-arc.hot{stroke:#fbbf24;stroke-width:2}
+.dep-arrow{fill:#5a6e94}
+.dep-arrow.hot{fill:#fbbf24}
+.dep-label{font-size:9px;fill:#7dd3fc;font-weight:600}
+.dep-tip{position:fixed;z-index:30;background:#1a2540;border:1px solid #3b6db5;border-radius:6px;padding:5px 9px;font-size:11px;color:#e6e6f0;pointer-events:none;max-width:220px;box-shadow:0 4px 14px rgba(0,0,0,.5);display:none}
+
+/* 词性配色图例 + 跟踪语法点列表 */
+.gb-legend{padding:4px 10px 8px;display:flex;flex-wrap:wrap;gap:5px;font-size:9px}
+.gb-legend .lg{display:inline-flex;align-items:center;gap:3px;color:#8a9bb4}
+.gb-legend .lg .sw{width:9px;height:9px;border-radius:2px;display:inline-block}
+.gb-analyses{border-top:1px solid #1c2740;padding:4px 0}
+.gb-ana{padding:6px 10px;border-bottom:1px solid #141c30;cursor:pointer}
+.gb-ana:last-child{border-bottom:none}
+.gb-ana .a-head{font-size:12px;font-weight:600;color:#a8cdff}
+.gb-ana .a-phrase{font-size:10px;color:#facc15;font-family:monospace;margin-top:2px}
+.gb-ana .a-body{display:none;font-size:11px;color:#cfe6ff;line-height:1.5;margin-top:5px}
+.gb-ana.open .a-body{display:block}
+.gb-ana .a-ex{margin:4px 0 0 16px;padding:0;font-size:10px;color:#7a8497}
 
 @media (max-width:900px){
-  #grammar-panel{width:80vw}
+  #grammar-panel{width:88vw;max-width:none}
+  body.grammar-open #main{padding-right:12px}
 }
 
 /* 侧栏抽屉：默认收起，点 header 按钮滑出 */
@@ -307,10 +321,10 @@ body.grammar-open #main{padding-right:calc(min(35vw,480px) + 12px)}
     <button onclick="closeGrammarPanel()" title="关闭">✕</button>
   </div>
   <div id="grammar-panel-body">
-    <div id="grammar-panel-spacer"></div>
-    <!-- 分析卡片绝对定位插这里 -->
+    <!-- 分析块流式插这里 -->
   </div>
 </aside>
+<div id="dep-tip" class="dep-tip"></div>
 
 <!-- AI 设置 modal -->
 <div id="settings-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:250" onclick="if(event.target===this) closeSettings()">
@@ -625,9 +639,7 @@ async function _renderPageInto(num, wrap) {
   canvas.width  = Math.floor(viewport.width  * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
   canvas.style.width  = cw + 'px';
-  // 高度用 auto：容器变窄(max-width:100%)时让宽高等比缩，避免纵向拉伸
-  // backing store 宽高比已由 canvas.width/height 属性锁定
-  canvas.style.height = 'auto';
+  canvas.style.height = ch + 'px';
   wrap.appendChild(canvas);
   const textLayerDiv = document.createElement('div');
   textLayerDiv.className = 'textLayer';
@@ -808,8 +820,6 @@ async function _refitToWidth(force) {
       if (container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
-      _refreshGrammarSpacerHeight?.();
-      _repositionGrammarEntries?.();
     });
   } finally {
     _refitBusy = false;
@@ -2550,7 +2560,7 @@ window._onGrammarBookToggle = function() {
   saveGrammarEnabledBooks(books);
 };
 
-// 选中工具栏的「📊 分析」按钮 → 分析所在完整句子，结果放右侧抽屉行对齐
+// 选中工具栏的「📊 分析」按钮 → 分析所在完整句子，结果放右侧抽屉
 window.onGrammarAnalyze = async () => {
   if (!lastSelText) return;
   if (!_grammarEnabledBooks.length) { _toast?.('请在 PDF 设置中启用至少一个语法 KG'); return; }
@@ -2563,235 +2573,254 @@ window.onGrammarAnalyze = async () => {
   const sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
   if (sentence.length < 6) { _toast?.('句子太短'); return; }
   const text = lastSelText.trim();   // 用户选中的子串（焦点）
+  // 记住句子在该页的纵向位置（比例），供侧栏↔PDF 行对应滚动
+  let sTop = Infinity;
+  for (let i = ctxRange.start; i <= ctxRange.end; i++) {
+    const c = chars[i]; if (!c || c.sp) continue;
+    if (c.top < sTop) sTop = c.top;
+  }
   const pageNum = parseInt(pw.dataset.pageNum || '0', 10);
-  // 算句子 bbox（用 chars 的物理 css 坐标，跟 PDF reader 用同坐标系）
-  const sentenceBbox = _charsBbox(chars, ctxRange.start, ctxRange.end);
+  const topRatio = (pw.offsetHeight && sTop !== Infinity) ? sTop / pw.offsetHeight : 0;
   toolbar.classList.remove('open');
-  // 立刻在右侧抽屉占位
   openGrammarPanel();
-  const entryId = 'ge_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-  _addGrammarLoadingEntry(entryId, pw, pageNum, sentenceBbox);
+  const blockId = 'gb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const block = _addLoadingBlock(blockId, sentence, pageNum, topRatio);
   try {
     const r = await fetch('/pdf/api/grammar-analyze', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
     });
     if (!r.ok) {
-      _removeGrammarLoadingEntry(entryId);
       let msg = `HTTP ${r.status}`;
       try { const err = await r.json(); if (err?.error) msg = err.error; } catch {}
-      _toast?.('分析失败：' + msg);
+      _fillBlockError(block, msg);
       return;
     }
     const d = await r.json();
-    _removeGrammarLoadingEntry(entryId);
-    if (!d.ok) { _toast?.('分析失败：' + (d.error||'?')); return; }
-    _addGrammarEntries(d, pw, pageNum, sentenceBbox, sentence);
+    if (!d.ok) { _fillBlockError(block, d.error || '?'); return; }
+    _fillGrammarBlock(block, d, sentence);
   } catch (e) {
-    _removeGrammarLoadingEntry(entryId);
-    _toast?.('网络错误：' + e.message);
+    _fillBlockError(block, e.message);
   }
 };
 
-function _sentRatioOf(pw, sentBbox) {
-  if (!pw || !pw.offsetHeight) return null;
-  return {
-    topRatio: sentBbox.top / pw.offsetHeight,
-    heightRatio: sentBbox.height / pw.offsetHeight,
-  };
-}
-
-function _charsBbox(chars, sIdx, eIdx) {
-  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
-  for (let i = sIdx; i <= eIdx; i++) {
-    const c = chars[i];
-    if (!c || c.sp) continue;
-    if (c.left < x0) x0 = c.left;
-    if (c.top < y0) y0 = c.top;
-    if (c.left + c.width > x1) x1 = c.left + c.width;
-    if (c.top + c.height > y1) y1 = c.top + c.height;
-  }
-  return {left: x0, top: y0, right: x1, bottom: y1, height: y1 - y0};
-}
-
-function _absYInMain(pw, cssTopInPw) {
-  // pw.offsetTop 是相对其 offsetParent（一般是 #page-container）
-  // 我们要它在 #main scroll 容器内的绝对 y
-  const container = document.getElementById('page-container');
-  let y = pw.offsetTop + cssTopInPw;
-  // container 自己有 offsetTop（相对 #main）也要算
-  if (container && container.offsetParent) {
-    y += container.offsetTop;
-  }
-  return y;
-}
-
+// ── 抽屉开关 ──
 function openGrammarPanel() {
   const p = document.getElementById('grammar-panel');
   if (!p) return;
   if (!p.classList.contains('open')) {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
-    _setupGrammarPanelSync();
+    _setupGrammarScrollLink();
   }
-  _refreshGrammarSpacerHeight();
 }
 window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
+  _hideDepTip();
 };
 
-let _grammarScrollSyncBound = false;
-function _setupGrammarPanelSync() {
-  if (_grammarScrollSyncBound) return;
-  _grammarScrollSyncBound = true;
-  const main = document.getElementById('main');
+// ── 侧栏滚动 → PDF 滚到对应句子（保证左右行对应；单向，不反向避免循环）──
+function _setupGrammarScrollLink() {
   const body = document.getElementById('grammar-panel-body');
-  if (!main || !body) return;
-  // PDF 滚动 → 抽屉 scrollTop 同步（不反向，避免循环）
-  main.addEventListener('scroll', () => {
-    body.scrollTop = main.scrollTop;
+  if (!body || body.dataset.linkBound === '1') return;
+  body.dataset.linkBound = '1';
+  let t = null;
+  body.addEventListener('scroll', () => {
+    if (t) return;
+    t = setTimeout(() => { t = null; _syncPdfToTopBlock(); }, 110);
   }, {passive: true});
 }
-function _refreshGrammarSpacerHeight() {
+function _syncPdfToTopBlock() {
+  const body = document.getElementById('grammar-panel-body');
+  if (!body) return;
+  const blocks = [...body.querySelectorAll('.grammar-block[data-page-num]')];
+  if (!blocks.length) return;
+  const bodyTop = body.getBoundingClientRect().top;
+  // 视口顶部所在（或最接近）的块
+  let target = blocks[0];
+  for (const b of blocks) {
+    const r = b.getBoundingClientRect();
+    if (r.bottom - bodyTop > 8) { target = b; break; }
+  }
+  _scrollPdfToBlock(target, true);
+}
+function _scrollPdfToBlock(block, smooth) {
+  if (!block) return;
+  const pageNum = parseInt(block.dataset.pageNum || '0', 10);
+  const ratio = parseFloat(block.dataset.topRatio || '0');
+  if (!pageNum) return;
+  const pw = document.querySelector(`.page-wrap[data-page-num="${pageNum}"]`);
   const main = document.getElementById('main');
-  const spacer = document.getElementById('grammar-panel-spacer');
   const container = document.getElementById('page-container');
-  if (!main || !spacer || !container) return;
-  // spacer 高度 = page-container 在 main 内的总高 + 上边距
-  spacer.style.height = (container.offsetTop + container.offsetHeight + 200) + 'px';
+  if (!pw || !main) return;
+  let y = pw.offsetTop + ratio * pw.offsetHeight;
+  if (container && container.offsetParent) y += container.offsetTop;
+  main.scrollTo({top: Math.max(0, y - 56), behavior: smooth ? 'smooth' : 'auto'});
 }
 
-function _addGrammarLoadingEntry(id, pw, pageNum, sentBbox) {
+// ── POS 配色 + 中文短标签（displaCy 风格）──
+const POS_COLORS = {
+  noun:'#3b82f6', verb:'#ef4444', adj:'#22c55e', adv:'#a855f7',
+  pron:'#ec4899', prep:'#06b6d4', det:'#64748b', conj:'#eab308',
+  aux:'#f97316', num:'#14b8a6', part:'#8b5cf6', intj:'#f43f5e', punct:'#475569',
+};
+const POS_LABEL = {
+  noun:'名', verb:'动', adj:'形', adv:'副', pron:'代', prep:'介',
+  det:'限', conj:'连', aux:'助', num:'数', part:'小品', intj:'叹', punct:'标',
+};
+function _posColor(p){ return POS_COLORS[(p||'').toLowerCase()] || '#64748b'; }
+function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── 分析块：loading / error / 填充 ──
+function _addLoadingBlock(id, sentence, pageNum, topRatio) {
   const body = document.getElementById('grammar-panel-body');
-  const spacer = document.getElementById('grammar-panel-spacer');
-  if (!body || !spacer) return;
-  _refreshGrammarSpacerHeight();
-  const y = _absYInMain(pw, sentBbox.top);
-  const div = document.createElement('div');
-  div.className = 'grammar-entry-loading';
-  div.id = id;
-  div.style.top = y + 'px';
-  div.textContent = '⏳ 分析中…';
-  spacer.appendChild(div);
-  // 同步抽屉 scrollTop 到当前 main scrollTop
-  body.scrollTop = document.getElementById('main').scrollTop;
+  const block = document.createElement('div');
+  block.className = 'grammar-block focus';
+  block.id = id;
+  if (pageNum) { block.dataset.pageNum = pageNum; block.dataset.topRatio = topRatio || 0; }
+  block.innerHTML = `<div class="gb-loading">⏳ 正在分析：<br>${_esc(sentence.slice(0,90))}${sentence.length>90?'…':''}</div>`;
+  body.insertBefore(block, body.firstChild);   // 最新在最上
+  body.scrollTop = 0;
+  return block;
 }
-function _removeGrammarLoadingEntry(id) {
-  document.getElementById(id)?.remove();
+function _fillBlockError(block, msg) {
+  if (!block) return;
+  block.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
 }
-
-let _grammarEntries = [];   // {id, pageNum, sentBbox, analyses, el, pw}
-
-function _addGrammarEntries(payload, pw, pageNum, sentBbox, sentence) {
-  const body = document.getElementById('grammar-panel-body');
-  const spacer = document.getElementById('grammar-panel-spacer');
-  if (!body || !spacer) return;
-  _refreshGrammarSpacerHeight();
-  const baseY = _absYInMain(pw, sentBbox.top);
-  const lineH = Math.max(20, sentBbox.height);
-  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
-  const sentence_zh = payload.sentence_zh || '';
-  const key_tokens  = payload.key_tokens  || [];
-  const analyses    = payload.analyses    || [];
-
-  // 第 1 条永远是「整句翻译 + 词性」对齐到句子首行
-  if (sentence_zh || key_tokens.length) {
-    const div = document.createElement('div');
-    div.className = 'grammar-entry grammar-entry-trans focus';
-    div.style.top = baseY + 'px';
-    div.style.height = lineH + 'px';
-    const tokensHtml = key_tokens.length
-      ? `<div class="e-tokens">${key_tokens.map(t => `<span class="tok"><b>${esc(t.token||'')}</b> <i>${esc(t.pos||'')}</i> ${esc(t.zh||'')}</span>`).join('')}</div>`
-      : '';
-    div.innerHTML = `
-      <div class="e-head">🌐 整句翻译</div>
-      <div class="e-phrase e-sentence-zh">${esc(sentence_zh)}</div>
-      <div class="e-explain">${esc(sentence_zh)}${tokensHtml}</div>
-    `;
-    div.addEventListener('click', e => { e.stopPropagation(); _toggleEntry(div); });
-    spacer.appendChild(div);
-    _grammarEntries.push({pageNum, sentBbox, sentRatio: _sentRatioOf(pw, sentBbox), el: div, pw});
-  }
-
-  let offset = lineH + 4;
-  for (const a of analyses) {
-    const div = document.createElement('div');
-    div.className = 'grammar-entry focus';
-    div.style.top = (baseY + offset) + 'px';
-    div.style.height = lineH + 'px';
-    div.innerHTML = `
-      <div class="e-head">📊 ${esc(a.node_name || a.node_id || '')}</div>
-      <div class="e-phrase">📍 ${esc(a.phrase || '')}</div>
-      <div class="e-explain">${esc(a.explanation || '')}</div>
-      ${(a.examples||[]).length ? `<div class="e-examples">例：<ul style="margin:4px 0 0 16px;padding:0">${(a.examples||[]).map(e=>'<li>'+esc(e)+'</li>').join('')}</ul></div>` : ''}
-    `;
-    div.addEventListener('click', e => { e.stopPropagation(); _toggleEntry(div); });
-    spacer.appendChild(div);
-    offset += lineH + 4;
-    _grammarEntries.push({pageNum, sentBbox, sentRatio: _sentRatioOf(pw, sentBbox), el: div, pw});
-  }
-
-  if (!sentence_zh && !key_tokens.length && !analyses.length) {
-    _toast?.('未返回任何结果');
+function _fillGrammarBlock(block, d, sentence) {
+  if (!block) return;
+  const tokens = d.tokens || [];
+  const deps = d.deps || [];
+  const sentence_zh = d.sentence_zh || '';
+  const analyses = d.analyses || [];
+  if (!tokens.length && !sentence_zh && !analyses.length) {
+    _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
   }
-
-  // 自动展开第一条（焦点态）— 通常是整句翻译
-  const focusList = spacer.querySelectorAll('.grammar-entry.focus');
-  if (focusList.length) focusList[0].classList.add('expanded');
-  setTimeout(() => {
-    spacer.querySelectorAll('.grammar-entry.focus').forEach(x => x.classList.remove('focus'));
-  }, 5000);
-  const main = document.getElementById('main');
-  body.scrollTop = main.scrollTop;
-}
-
-function _toggleEntry(div) {
-  const wasExpanded = div.classList.contains('expanded');
-  document.querySelectorAll('.grammar-entry.expanded').forEach(x => {
-    if (x !== div) x.classList.remove('expanded');
-  });
-  div.classList.toggle('expanded', !wasExpanded);
-}
-
-// PDF 重新 render（scale 改变）后，把分析卡的 y 重新算一次
-function _repositionGrammarEntries() {
-  if (!_grammarEntries || !_grammarEntries.length) return;
-  // 同句的多条 entry 按 baseY + i * (lineH+4) 堆叠
-  // 用 first occurrence per pw+sentBbox 作为 baseY 重算
-  const groups = new Map();
-  for (const ge of _grammarEntries) {
-    if (!ge.el || !ge.el.isConnected) continue;
-    // 旧 pw 可能已被替换（重 render 后 page-wrap DOM 重建）→ 用 pageNum 找新 pw
-    let pw = ge.pw;
-    if (!pw || !pw.isConnected) {
-      pw = document.querySelector(`.page-wrap[data-page-num="${ge.pageNum}"]`);
-      if (!pw) continue;
-      ge.pw = pw;
-    }
-    // sentBbox 是 PDF pt 坐标系下的吗？不，看 _charsBbox 它读的是 chars 的 css 坐标
-    // (在原 scale 下的 px 值)。要跟新 scale 配合，应当除以旧 scale 再乘新 scale。
-    // 但我们没保存"分析时的 scale"。简单办法：保存 sentBbox 时存 ratio = top / pwHeight。
-    // 这里用 storeBbox 的相对比例做重定位（如果存在）。
-    let cssTop = ge.sentBbox.top;
-    let cssH = ge.sentBbox.height;
-    if (ge.sentRatio && pw.offsetHeight) {
-      cssTop = ge.sentRatio.topRatio * pw.offsetHeight;
-      cssH = Math.max(20, ge.sentRatio.heightRatio * pw.offsetHeight);
-    }
-    const key = ge.pageNum + ':' + Math.round(cssTop);
-    let g = groups.get(key);
-    if (!g) {
-      g = {baseY: _absYInMain(pw, cssTop), lineH: cssH, idx: 0};
-      groups.set(key, g);
-    }
-    ge.el.style.top = (g.baseY + g.idx * (g.lineH + 4)) + 'px';
-    ge.el.style.height = g.lineH + 'px';
-    g.idx++;
+  const usedPos = [...new Set(tokens.map(t=>(t.pos||'').toLowerCase()).filter(Boolean))];
+  const legendHtml = usedPos.length
+    ? `<div class="gb-legend">${usedPos.map(p=>`<span class="lg"><span class="sw" style="background:${_posColor(p)}"></span>${POS_LABEL[p]||p}</span>`).join('')}</div>`
+    : '';
+  const anaHtml = analyses.length
+    ? `<div class="gb-analyses">${analyses.map((a,i)=>`
+        <div class="gb-ana" data-i="${i}">
+          <div class="a-head">📊 ${_esc(a.node_name||a.node_id||'')}</div>
+          ${a.phrase?`<div class="a-phrase">📍 ${_esc(a.phrase)}</div>`:''}
+          <div class="a-body">${_esc(a.explanation||'')}${(a.examples||[]).length?`<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>`:''}</div>
+        </div>`).join('')}</div>`
+    : '';
+  block.innerHTML =
+    (sentence_zh ? `<div class="gb-trans">🌐 ${_esc(sentence_zh)}</div>` : '') +
+    `<div class="gb-diagram"></div>` + legendHtml + anaHtml;
+  const diag = block.querySelector('.gb-diagram');
+  if (tokens.length) {
+    diag.appendChild(_renderDepSvg(tokens, deps));
+    // 桌面：在图上滚轮 → 横向移动（仅当图比容器宽，不抢页面垂直滚动）
+    diag.addEventListener('wheel', (e) => {
+      if (diag.scrollWidth <= diag.clientWidth) return;
+      const dy = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      diag.scrollLeft += dy;
+      e.preventDefault();
+    }, {passive: false});
   }
-  _refreshGrammarSpacerHeight?.();
+  block.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
+  setTimeout(() => block.classList.remove('focus'), 5000);
 }
+
+// ── displaCy 依存图：弧线在词上方、词性着色、词性中文标在词下 ──
+function _renderDepSvg(tokens, deps) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const PAD_X = 16, GAP = 28, FONT = 15, POS_GAP = 16;
+  const ARC_BASE = 20, ARC_STEP = 15;
+  // 量词宽
+  const meas = document.createElement('canvas').getContext('2d');
+  meas.font = `600 ${FONT}px -apple-system,system-ui,sans-serif`;
+  const widths = tokens.map(t => Math.max(meas.measureText(t.text||'').width, 12));
+  // 词中心 x
+  const cx = []; let x = PAD_X;
+  for (let i=0;i<tokens.length;i++){ cx.push(x + widths[i]/2); x += widths[i] + GAP; }
+  const totalW = Math.max(x - GAP + PAD_X, 60);
+  // 弧线按跨度排序（短弧靠下）
+  const arcs = deps.map(dp => ({...dp, span: Math.abs(dp.head - dp.child)})).sort((a,b)=>a.span-b.span);
+  const maxSpan = arcs.length ? Math.max(...arcs.map(a=>a.span)) : 1;
+  const wordBaseY = ARC_BASE + maxSpan*ARC_STEP + 26;
+  const svgH = wordBaseY + POS_GAP + 8;
+  const svg = document.createElementNS(NS,'svg');
+  svg.setAttribute('width', totalW);
+  svg.setAttribute('height', svgH);
+  svg.setAttribute('viewBox', `0 0 ${totalW} ${svgH}`);
+  const arcBottomY = wordBaseY - FONT - 4;   // 弧线落脚（词上边）
+  for (const a of arcs) {
+    const x1 = cx[a.head], x2 = cx[a.child];
+    const dir = x2 > x1 ? 1 : -1;
+    const top = arcBottomY - (ARC_BASE + a.span*ARC_STEP);
+    const sx = x1 + dir*3, ex = x2 - dir*3;
+    const path = document.createElementNS(NS,'path');
+    path.setAttribute('d', `M ${sx} ${arcBottomY} C ${sx} ${top}, ${ex} ${top}, ${ex} ${arcBottomY}`);
+    path.setAttribute('class','dep-arc');
+    svg.appendChild(path);
+    // 箭头指向 child（ex 端）
+    const arrow = document.createElementNS(NS,'path');
+    arrow.setAttribute('d', `M ${ex-3} ${arcBottomY-5} L ${ex+3} ${arcBottomY-5} L ${ex} ${arcBottomY} Z`);
+    arrow.setAttribute('class','dep-arrow');
+    svg.appendChild(arrow);
+    // 关系标签
+    if (a.label) {
+      const lbl = document.createElementNS(NS,'text');
+      lbl.setAttribute('x',(sx+ex)/2); lbl.setAttribute('y', top-2);
+      lbl.setAttribute('text-anchor','middle'); lbl.setAttribute('class','dep-label');
+      lbl.textContent = a.label;
+      svg.appendChild(lbl);
+    }
+  }
+  for (let i=0;i<tokens.length;i++){
+    const t = tokens[i];
+    const g = document.createElementNS(NS,'g');
+    g.setAttribute('class','dep-token');
+    const bw = widths[i] + 8;
+    const bg = document.createElementNS(NS,'rect');
+    bg.setAttribute('x', cx[i]-bw/2); bg.setAttribute('y', wordBaseY-FONT);
+    bg.setAttribute('width', bw); bg.setAttribute('height', FONT+5);
+    bg.setAttribute('rx',4); bg.setAttribute('fill', _posColor(t.pos)); bg.setAttribute('opacity','0.16');
+    g.appendChild(bg);
+    const w = document.createElementNS(NS,'text');
+    w.setAttribute('x', cx[i]); w.setAttribute('y', wordBaseY-2);
+    w.setAttribute('text-anchor','middle'); w.setAttribute('class','dep-word');
+    w.setAttribute('fill', _posColor(t.pos));
+    w.textContent = t.text || '';
+    g.appendChild(w);
+    const p = document.createElementNS(NS,'text');
+    p.setAttribute('x', cx[i]); p.setAttribute('y', wordBaseY+POS_GAP-2);
+    p.setAttribute('text-anchor','middle'); p.setAttribute('class','dep-pos');
+    p.textContent = POS_LABEL[(t.pos||'').toLowerCase()] || t.pos || '';
+    g.appendChild(p);
+    if (t.zh) {
+      const tip = `${t.text}　${t.zh}`;
+      g.addEventListener('mouseenter', ev => _showDepTip(ev, tip));
+      g.addEventListener('mousemove', _moveDepTip);
+      g.addEventListener('mouseleave', _hideDepTip);
+      g.addEventListener('click', ev => { _showDepTip(ev, tip); setTimeout(_hideDepTip, 2600); });
+    }
+    svg.appendChild(g);
+  }
+  return svg;
+}
+
+let _depTipEl = null;
+function _showDepTip(ev, text){
+  _depTipEl = _depTipEl || document.getElementById('dep-tip');
+  if (!_depTipEl) return;
+  _depTipEl.textContent = text;
+  _depTipEl.style.display = 'block';
+  _moveDepTip(ev);
+}
+function _moveDepTip(ev){
+  if (!_depTipEl) return;
+  _depTipEl.style.left = ((ev.clientX||0)+12) + 'px';
+  _depTipEl.style.top  = ((ev.clientY||0)+14) + 'px';
+}
+function _hideDepTip(){ if (_depTipEl) _depTipEl.style.display='none'; }
 
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
