@@ -144,6 +144,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .ctree .ct-text{color:#e6e6f0;line-height:1.45}
 .ctree .ct-caret{flex:0 0 auto;margin-left:auto;color:#7a8497;font-size:10px;cursor:pointer;padding:0 4px;user-select:none}
 .ctree .ct-children{margin-left:13px;border-left:1px dashed #2a3550;padding-left:9px}
+.ctree .ct-text.ct-core{color:#9fb4d4}   /* 展开态：核心词淡化，与折叠整句区分 */
 
 /* displaCy 词 / 词性标签 / 弧线 */
 .dep-token{cursor:pointer}
@@ -3171,36 +3172,55 @@ function _renderSkeleton(comps) {
   return wrap;
 }
 
-// ── 成分树（融合）：成分名+色 + 层次缩进(修饰挂在被修饰成分下) + 可折叠 ──
+// ── 成分树（融合）：折叠看整句、点开逐级展开成分细节 ──
+//   折叠态：显示该成分的「整体文本」(自己+所有后代按位置拼) + 成分标签
+//   展开态：显示「自有核心」+ 缩进的下级成分(各自又可再展开)
 function _renderTree(comps) {
   const children = {};
   comps.forEach((c, i) => {
     const p = (c.parent == null ? -1 : c.parent);
     (children[p] = children[p] || []).push(i);
   });
+  const fullText = (idx) => {   // idx 及其所有后代的自有文本，按出现位置拼成整句片段
+    const acc = [];
+    const collect = (i) => { acc.push(comps[i]); (children[i] || []).forEach(collect); };
+    collect(idx);
+    acc.sort((a, b) => (a.start || 0) - (b.start || 0));
+    return acc.map(c => c.text || '').join(' ');
+  };
   const build = (idx) => {
     const c = comps[idx], col = _compColor(c.label || '');
+    const kids = children[idx] || [];
     const node = document.createElement('div');
     node.className = 'ctree-node';
-    const kids = children[idx] || [];
     const row = document.createElement('div');
     row.className = 'ct-row';
-    row.innerHTML = `<span class="ct-label" style="background:${col}">${_esc(c.label || '')}</span><span class="ct-text">${_esc(c.text || '')}</span>`;
+    const txt = document.createElement('span');
+    txt.className = 'ct-text';
+    txt.textContent = kids.length ? fullText(idx) : (c.text || '');   // 有子→折叠显示整体
+    row.innerHTML = `<span class="ct-label" style="background:${col}">${_esc(c.label || '')}</span>`;
+    row.appendChild(txt);
     node.appendChild(row);
     if (kids.length) {
       const car = document.createElement('span');
-      car.className = 'ct-caret'; car.textContent = '▾';
+      car.className = 'ct-caret'; car.textContent = '▸';   // 默认折叠
       row.appendChild(car);
       const box = document.createElement('div');
       box.className = 'ct-children';
+      box.style.display = 'none';
       kids.forEach(k => box.appendChild(build(k)));
       node.appendChild(box);
-      car.addEventListener('click', (e) => {
+      const toggle = (e) => {
         e.stopPropagation();
-        const hidden = box.style.display === 'none';
-        box.style.display = hidden ? '' : 'none';
-        car.textContent = hidden ? '▾' : '▸';
-      });
+        const open = box.style.display === 'none';
+        box.style.display = open ? '' : 'none';
+        car.textContent = open ? '▾' : '▸';
+        txt.textContent = open ? (c.text || '') : fullText(idx);   // 展开看核心，折叠看整体
+        txt.classList.toggle('ct-core', open);
+      };
+      car.addEventListener('click', toggle);
+      txt.style.cursor = 'pointer';
+      txt.addEventListener('click', toggle);
     }
     return node;
   };

@@ -103,13 +103,16 @@ def _split_components(doc) -> list:
             break
     if root is None:
         return []
-    GLUE = ("aux", "auxpass", "aux:pass", "cop", "neg", "prt", "punct", "case")
+    # 成分根（任意层级都算，支持逐级展开）：主谓宾定状从句等实义成分；
+    # 附属(det/amod/aux/cop/case/compound/poss/nummod)归核心短语、不单列，避免过碎
+    MAJOR = {
+        "nsubj", "nsubjpass", "csubj", "csubjpass", "dobj", "obj", "iobj", "dative", "pobj",
+        "attr", "acomp", "oprd", "ccomp", "xcomp", "advcl", "relcl", "acl",
+        "advmod", "npadvmod", "prep", "agent", "obl", "conj", "appos", "parataxis", "expl",
+    }
     boundaries = {root.i: "谓语"}
-    for ch in root.children:                      # root 的直接成分（主/宾/状/表/…）
-        if ch.dep_ not in GLUE:
-            boundaries.setdefault(ch.i, _COMPONENT.get(ch.dep_, ch.dep_))
-    for t in doc:                                 # 所有从句根，从宿主成分里挖出来单列
-        if t.dep_ in _CLAUSE_BOUNDARY:
+    for t in doc:
+        if t.i != root.i and t.dep_ in MAJOR:
             boundaries[t.i] = _COMPONENT.get(t.dep_, t.dep_)
 
     def owner(t):
@@ -134,8 +137,8 @@ def _split_components(doc) -> list:
     items = []
     for hi, idxs in groups.items():
         idxs = sorted(idxs)
-        seg = doc[idxs[0]: idxs[-1] + 1]
-        text = seg.text.strip()
+        # 自有 token 拼接（不含被挖出的下级成分），各级文本不重复
+        text = " ".join(doc[i].text for i in idxs).strip()
         if not (text and any(ch.isalnum() for ch in text)):
             continue
         items.append({"hi": hi, "label": boundaries[hi], "text": text, "start": idxs[0]})
@@ -151,7 +154,7 @@ def _split_components(doc) -> list:
         else:
             ph = owner(doc[hi].head)
             parent = -1 if (ph is None or ph == root.i) else bt.get(ph, -1)
-        out.append({"label": c["label"], "text": c["text"], "parent": parent})
+        out.append({"label": c["label"], "text": c["text"], "parent": parent, "start": c["start"]})
     return out
 
 
