@@ -1450,5 +1450,153 @@ def pdf_api_vocab_anki():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+# ─── 英语语法分析 ─────────────────────────────────────────────────────────
+
+_GRAMMAR_NODES_PATH = CLAUDE_DIR / "state" / "grammar-nodes.json"
+_GRAMMAR_TRACKED_DIR = CLAUDE_DIR / "state" / "grammar-tracked"
+_GRAMMAR_CACHE_DIR   = CLAUDE_DIR / "state" / "grammar-cache"
+
+
+def _grammar_nodes() -> list[dict]:
+    try:
+        data = json.loads(_GRAMMAR_NODES_PATH.read_text("utf-8"))
+        return data.get("nodes") or []
+    except Exception:
+        return []
+
+
+def _tracked_path(file_rel: str) -> Path:
+    import hashlib
+    sha = hashlib.sha1(file_rel.encode("utf-8")).hexdigest()[:16]
+    _GRAMMAR_TRACKED_DIR.mkdir(parents=True, exist_ok=True)
+    return _GRAMMAR_TRACKED_DIR / f"{sha}.json"
+
+
+def _tracked_get(file_rel: str) -> list[str]:
+    p = _tracked_path(file_rel)
+    if not p.exists(): return []
+    try:
+        return list(json.loads(p.read_text("utf-8")).get("tracked", []))
+    except Exception:
+        return []
+
+
+def _tracked_set(file_rel: str, tracked: list[str]):
+    p = _tracked_path(file_rel)
+    p.write_text(json.dumps({"pdf_rel": file_rel, "tracked": tracked},
+                            ensure_ascii=False, indent=2), "utf-8")
+
+
+@bp.route("/api/grammar-nodes", methods=["GET"])
+def pdf_api_grammar_nodes():
+    """所有可跟踪的语法节点 list。"""
+    return jsonify({"ok": True, "nodes": _grammar_nodes()})
+
+
+@bp.route("/api/grammar-tracked", methods=["GET", "POST"])
+def pdf_api_grammar_tracked():
+    """读 / 写某 PDF 的跟踪节点集。
+    GET ?file=<rel> → {ok, tracked}
+    POST {file, tracked} → {ok}"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        if not rel: return jsonify({"ok": False, "error": "no file"}), 400
+        return jsonify({"ok": True, "tracked": _tracked_get(rel)})
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    tracked = data.get("tracked") or []
+    if not rel or not isinstance(tracked, list):
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    _tracked_set(rel, [str(t) for t in tracked])
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/grammar-analyze", methods=["POST"])
+def pdf_api_grammar_analyze():
+    """AI 分析选中句段相对 tracked 语法节点。
+    body: {text, sentence?, file, tracked_ids?, model?, effort?}
+    返回 {ok, analyses: [{node_id, node_name, point, explanation, examples}]}
+    缓存：state/grammar-cache/<sha1(text + sorted(ids))>.json
+    """
+    import hashlib
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    sentence = (data.get("sentence") or text).strip()
+    rel = (data.get("file") or "").strip()
+    if not text or len(text) > 2000:
+        return jsonify({"ok": False, "error": "no text / too long"}), 400
+    tracked_ids = data.get("tracked_ids") or _tracked_get(rel)
+    if not tracked_ids:
+        return jsonify({"ok": False, "error": "no tracked grammar nodes; set tracking first"}), 400
+    all_nodes = _grammar_nodes()
+    node_by_id = {n["id"]: n for n in all_nodes}
+    tracked_nodes = [node_by_id[i] for i in tracked_ids if i in node_by_id]
+    if not tracked_nodes:
+        return jsonify({"ok": False, "error": "tracked ids not in grammar-nodes.json"}), 400
+
+    # 缓存 key：text + 排序的 tracked id 列表
+    cache_key = hashlib.sha1((text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")).hexdigest()[:20]
+    _GRAMMAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_p = _GRAMMAR_CACHE_DIR / f"{cache_key}.json"
+    if cache_p.exists():
+        try:
+            return jsonify({"ok": True, "from_cache": True, **json.loads(cache_p.read_text("utf-8"))})
+        except Exception:
+            pass
+
+    # 构 prompt
+    nodes_block = "\n".join(
+        f"- [{n['id']}] **{n['name']}** ({n.get('category','')}): {n.get('summary','')}"
+        for n in tracked_nodes
+    )
+    prompt = f"""你是英语语法分析助手。用户选中下面这句英文，请分析它涉及到的语法点（仅限'跟踪的语法点'列表里）。
+
+【跟踪的语法点】
+{nodes_block}
+
+【用户选中片段】
+{text}
+
+【原句上下文（如适用）】
+{sentence}
+
+【任务】
+1. 仅在选中片段中存在跟踪的语法点时输出该点（不要泛泛输出全部）
+2. 每个点输出：节点 id（用 [id] 表示）/ 在选中片段中的具体定位短语 / 简要解释 / 1-2 个相似例句
+3. 如果选中片段中没有任何跟踪点 → 输出 `{{"analyses": []}}`
+
+【输出 JSON 格式（仅输出 JSON 不要其它解释）】
+{{"analyses": [
+  {{"node_id": "<id>", "phrase": "<在选中片段中的语法实例>", "explanation": "<简明解释>", "examples": ["...", "..."]}}
+]}}
+"""
+    model = (data.get("model") or "haiku").strip()
+    effort = (data.get("effort") or "low").strip()
+    try:
+        zh = _ai_call(prompt, override_model=model, override_effort=effort)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"AI call failed: {ex}"}), 500
+    # 解析 JSON
+    import re as _re
+    j = None
+    m = _re.search(r"\{.*\"analyses\".*\}", zh, _re.S)
+    if m:
+        try:
+            j = json.loads(m.group(0))
+        except Exception:
+            pass
+    if not j:
+        # 抓不到 JSON：直接返回原文
+        return jsonify({"ok": True, "analyses": [], "raw": zh[:1000]})
+    # 补节点名
+    for a in (j.get("analyses") or []):
+        nid = a.get("node_id")
+        if nid in node_by_id:
+            a["node_name"] = node_by_id[nid]["name"]
+    out = {"analyses": j.get("analyses") or []}
+    cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
+    return jsonify({"ok": True, **out})
+
+
 def register_pdf_reader(app):
     app.register_blueprint(bp)

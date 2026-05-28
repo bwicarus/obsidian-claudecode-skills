@@ -253,6 +253,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
         <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
       </div>
       <div id="hl-color-picker"><span class="lbl">🖌</span></div>
+      <div id="grammar-btn-row" style="display:none">
+        <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段">📊 语法分析</button>
+      </div>
     </div>
   </div>
 </div>
@@ -320,6 +323,14 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
         <option value="max">max</option>
       </select>
     </div>
+    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+    <label style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#8a9bb4;margin-bottom:6px">
+      📊 语法跟踪节点（仅此 PDF）<button onclick="_toggleAllGrammar(true)" style="background:transparent;border:none;color:#60a5fa;font-size:11px;cursor:pointer">全选</button><button onclick="_toggleAllGrammar(false)" style="background:transparent;border:none;color:#7a8497;font-size:11px;cursor:pointer">清空</button>
+    </label>
+    <div id="set-grammar-list" style="max-height:200px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;margin-bottom:14px;font-size:12px">
+      <div style="color:#7a8497">加载中…</div>
+    </div>
+    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
     <div id="set-hl-colors" class="set-hl-row"></div>
     <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
@@ -514,6 +525,7 @@ async function loadPdf() {
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
     loadAllHighlights();
     renderHlPicker();
+    loadGrammarTracked();   // 拉该 PDF 的语法跟踪节点（影响工具栏按钮显示）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
     if (readMode === 'continuous') {
       await setupContinuousMode();
@@ -1348,6 +1360,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
   text = text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
   lastSelText = text;
   _updateSelPreview(lastSelText);
+  if (typeof _updateGrammarBtnVisibility === 'function') _updateGrammarBtnVisibility();
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');
@@ -2350,6 +2363,126 @@ async function markFromResult() {
 }
 window.markFromResult = markFromResult;
 
+// ─── 语法跟踪 + 分析 ─────────────────────────────────────────────────
+let _grammarNodes = null;       // [{id,name,category,summary,keywords}]
+let _grammarTracked = [];        // 当前 PDF 跟踪的 node ids
+
+async function loadGrammarNodes() {
+  if (_grammarNodes !== null) return _grammarNodes;
+  try {
+    const r = await fetch('/pdf/api/grammar-nodes');
+    const d = await r.json();
+    _grammarNodes = d.nodes || [];
+  } catch (e) { _grammarNodes = []; }
+  return _grammarNodes;
+}
+async function loadGrammarTracked() {
+  try {
+    const r = await fetch('/pdf/api/grammar-tracked?file=' + encodeURIComponent(FILE_REL));
+    const d = await r.json();
+    _grammarTracked = d.tracked || [];
+  } catch (e) { _grammarTracked = []; }
+  _updateGrammarBtnVisibility();
+  return _grammarTracked;
+}
+async function saveGrammarTracked(ids) {
+  _grammarTracked = ids;
+  try {
+    await fetch('/pdf/api/grammar-tracked', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, tracked: ids}),
+    });
+  } catch (e) {}
+  _updateGrammarBtnVisibility();
+}
+function _updateGrammarBtnVisibility() {
+  const row = document.getElementById('grammar-btn-row');
+  if (!row) return;
+  row.style.display = (_grammarTracked.length > 0 && lastSelText) ? '' : 'none';
+}
+async function renderGrammarTrackList() {
+  const wrap = document.getElementById('set-grammar-list');
+  if (!wrap) return;
+  const [nodes] = await Promise.all([loadGrammarNodes(), loadGrammarTracked()]);
+  const trackedSet = new Set(_grammarTracked);
+  // 按 category 分组
+  const byCat = {};
+  for (const n of nodes) {
+    const c = n.category || '其它';
+    (byCat[c] ||= []).push(n);
+  }
+  let html = '';
+  for (const cat of Object.keys(byCat)) {
+    html += `<div style="color:#7a8497;font-size:11px;margin:6px 0 4px;font-weight:600">${cat}</div>`;
+    for (const n of byCat[cat]) {
+      const checked = trackedSet.has(n.id) ? 'checked' : '';
+      html += `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;color:#cfe6ff;border-radius:3px" title="${(n.summary||'').replace(/"/g,'&quot;')}">
+        <input type="checkbox" value="${n.id}" ${checked} onchange="_onGrammarToggle()" style="margin:0">
+        <span style="font-size:12px">${n.name}</span>
+      </label>`;
+    }
+  }
+  wrap.innerHTML = html;
+}
+function _onGrammarToggle() {
+  const ids = Array.from(document.querySelectorAll('#set-grammar-list input[type=checkbox]:checked'))
+    .map(cb => cb.value);
+  saveGrammarTracked(ids);
+}
+window._toggleAllGrammar = (on) => {
+  document.querySelectorAll('#set-grammar-list input[type=checkbox]').forEach(cb => cb.checked = on);
+  _onGrammarToggle();
+};
+
+// 选中工具栏的「📊 分析」按钮
+window.onGrammarAnalyze = async () => {
+  if (!lastSelText) return;
+  if (!_grammarTracked.length) { _toast?.('请先在设置 → 语法跟踪 勾选要分析的语法点'); return; }
+  const text = lastSelText.trim();
+  if (text.length < 3) { _toast?.('选中片段太短'); return; }
+  // 拿所在句子作为上下文
+  let sentence = text;
+  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+    const chars = _charSel.pw.__charBoxes;
+    const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+    if (ctxRange) sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
+  }
+  toolbar.classList.remove('open');
+  openResult('📊 语法分析', text, '<div class="loading">⏳ AI 分析中…</div>');
+  try {
+    const r = await fetch('/pdf/api/grammar-analyze', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, sentence, file: FILE_REL, tracked_ids: _grammarTracked}),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      document.getElementById('result-content').innerHTML =
+        `<div style="color:#ef4444">分析失败：${(d.error||'?').replace(/</g,'&lt;')}</div>`;
+      return;
+    }
+    const analyses = d.analyses || [];
+    if (!analyses.length) {
+      document.getElementById('result-content').innerHTML =
+        `<div style="color:#7a8497">在选中片段中未找到跟踪的语法点。</div>` +
+        (d.raw ? `<details style="margin-top:10px;color:#5a6680;font-size:11px"><summary>AI 原始返回</summary><pre style="white-space:pre-wrap">${d.raw.replace(/</g,'&lt;')}</pre></details>` : '');
+      return;
+    }
+    let html = (d.from_cache ? '<div style="color:#5a6680;font-size:10px;margin-bottom:8px">📦 缓存命中</div>' : '');
+    for (const a of analyses) {
+      html += `<div style="margin-bottom:14px;padding:10px;border:1px solid #2a3550;border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;background:#0d1322">
+        <div style="color:#a8cdff;font-size:13px;font-weight:600;margin-bottom:4px">${(a.node_name||a.node_id||'').replace(/</g,'&lt;')}</div>
+        ${a.phrase ? `<div style="color:#facc15;font-size:12px;margin-bottom:4px">📍 <code>${(a.phrase||'').replace(/</g,'&lt;')}</code></div>` : ''}
+        <div style="color:#cfe6ff;font-size:12px;line-height:1.6">${(a.explanation||'').replace(/</g,'&lt;')}</div>
+        ${(a.examples||[]).length ? `<div style="margin-top:6px;font-size:11px;color:#7a8497">例：<ul style="margin:4px 0 0 18px;padding:0">${(a.examples||[]).map(e=>'<li>'+e.replace(/</g,'&lt;')+'</li>').join('')}</ul></div>` : ''}
+      </div>`;
+    }
+    document.getElementById('result-content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('result-content').innerHTML =
+      `<div style="color:#ef4444">网络错误：${e.message}</div>`;
+  }
+};
+
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
   const params = new URLSearchParams({
@@ -3193,6 +3326,7 @@ window.openSettings = () => {
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
+  renderGrammarTrackList();   // 拉语法跟踪节点列表
   // 拉句子翻译配置
   fetch('/pdf/api/translate-config').then(r => r.json()).then(d => {
     if (!d.ok) return;
