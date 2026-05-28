@@ -2680,6 +2680,7 @@ let _lastHlColor = localStorage.getItem('pdf-hl-last-color') || DEFAULT_HL_COLOR
 let _allHighlights = [];
 let _hlByPage = {};
 let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
+let _resultReqId = 0;        // 结果框请求序号：每开一次新框 +1，异步回调写入前比对，过期(被新任务覆盖)就丢弃
 
 function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function _toast(msg) {
@@ -3601,6 +3602,7 @@ async function dictStream(word, ctx) {
   // 立刻 openResult 占位，避免空等
   openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const _optPw = _charSel?.pw;   // 乐观下划线目标页（查词时所在页）
+  const myReq = _resultReqId;    // 本次查词的请求序号；被新结果框作废后，后到的 SSE 渲染一律丢弃
   // 无论 SSE / JSON / 失败：1.8s 后无条件触发一次下划线刷新（vocab note 写盘耗时）
   setTimeout(() => {
     window.dlog?.('refreshVocabUnderlines (timer) for ' + word);
@@ -3697,6 +3699,7 @@ async function dictStream(word, ctx) {
   let buf = '', gotEcdict = false;
   let renderQueued = false, lastRender = 0;
   const scheduleRender = () => {
+    if (myReq !== _resultReqId) return;   // 已被新结果框(解释/翻译)作废 → 不再写回，防延迟结果覆盖
     const now = Date.now();
     if (now - lastRender >= 80) { renderState(); lastRender = now; return; }
     if (renderQueued) return;
@@ -4037,6 +4040,7 @@ const _origRenderPageInto = null;  // 仅占位
 
 // 结果 modal
 function openResult(title, src, contentHtml) {
+  _resultReqId++;   // 新结果框 → 作废所有进行中的旧异步任务（查词/翻译/解释），它们的延迟回调将被丢弃
   document.getElementById('result-title').textContent = title;
   document.getElementById('result-src').textContent = src;
   document.getElementById('result-content').innerHTML = contentHtml;
@@ -4550,6 +4554,7 @@ async function aiCall(path, body, label) {
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
   openResult(label, lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
+  const myReq = _resultReqId;   // 本次 AI 调用的请求序号；被新结果框作废后渲染一律丢弃
   const contentEl = document.getElementById('result-content');
   try {
     const r = await fetch(path, {
@@ -4566,6 +4571,7 @@ async function aiCall(path, body, label) {
       let buf = '', accumulated = '', lastRender = 0;
       let renderQueued = false;
       const renderNow = () => {
+        if (myReq !== _resultReqId) return;   // 已被新结果框作废 → 不写回（防延迟流式覆盖新结果）
         contentEl.innerHTML = md(accumulated || ' ');
         if (window.MathJax && MathJax.typesetPromise) {
           MathJax.typesetPromise([contentEl]).catch(()=>{});
@@ -4606,6 +4612,7 @@ async function aiCall(path, body, label) {
           } catch (_) {}
         }
       }
+      if (myReq !== _resultReqId) return;   // 本次已被新结果框作废 → 结尾不再写
       renderNow();
       if (errored) {
         contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + errored + '</div>';
@@ -4613,6 +4620,7 @@ async function aiCall(path, body, label) {
       addResultPickers();   // SSE 完成后给标题加 +
     } else {
       const d = await r.json();
+      if (myReq !== _resultReqId) return;
       if (d.ok) {
         const text = d.translation || d.explanation || JSON.stringify(d);
         contentEl.innerHTML = md(text);
@@ -4625,7 +4633,7 @@ async function aiCall(path, body, label) {
       }
     }
   } catch (e) {
-    contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
 }
 
