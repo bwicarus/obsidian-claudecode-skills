@@ -79,11 +79,13 @@ def _deepl(text: str, target: str = "zh-CN") -> str | None:
 
 
 def _mymemory(text: str, target: str = "zh-CN") -> str | None:
-    """MyMemory free / no key / 5000 chars/day anonymous."""
+    """MyMemory free。匿名 5000 字/天；带 de=email 50000 字/天。"""
     src_target = f"en|{target if target.startswith('zh') else target}"
-    url = "https://api.mymemory.translated.net/get?" + urllib.parse.urlencode({
-        "q": text, "langpair": src_target,
-    })
+    params = {"q": text, "langpair": src_target}
+    email = (_cfg().get("mymemory_email") or "").strip()
+    if email:
+        params["de"] = email   # 提配额到 50K/day
+    url = "https://api.mymemory.translated.net/get?" + urllib.parse.urlencode(params)
     try:
         with urllib.request.urlopen(url, timeout=8) as resp:
             d = json.loads(resp.read().decode("utf-8"))
