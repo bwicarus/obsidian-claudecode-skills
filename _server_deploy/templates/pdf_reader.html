@@ -1153,6 +1153,8 @@ function renderVocabSentences(pw, sentences) {
     const sid = String(si);
     const [stroke, fill] = SENT_COLORS[si % SENT_COLORS.length];
     const rects = s.rects || [];
+    // 竖排文字（书页边竖排注释等）：每行 rect 高>宽，句子框/L按钮的几何按横排算会乱 → 跳过
+    if (rects.length && rects.filter(r => (r[3]-r[1]) > (r[2]-r[0])).length > rects.length / 2) continue;
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
     // hatch 排线 (135° 斜细线)；颜色 = stroke + alpha ≈ 0.55；间距 4px 更密
