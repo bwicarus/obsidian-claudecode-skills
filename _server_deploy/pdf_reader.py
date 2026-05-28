@@ -1842,5 +1842,159 @@ def pdf_api_grammar_stream():
     )
 
 
+# ─────────────────── 单词本 tab ───────────────────
+
+def _vocab_read_fm(path: Path) -> dict:
+    """轻量解析 vocab 笔记 frontmatter 的标量字段（跳过 list 项）。"""
+    try:
+        txt = path.read_text("utf-8")
+    except Exception:
+        return {}
+    if not txt.startswith("---"):
+        return {}
+    end = txt.find("\n---", 3)
+    if end < 0:
+        return {}
+    fm = {}
+    for line in txt[3:end].splitlines():
+        if not line or line[:1] in (" ", "\t", "-"):
+            continue
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm
+
+
+def _vocab_ecdict_zh(lemma: str) -> str:
+    try:
+        vp = str(CLAUDE_DIR / "scripts" / "vocab")
+        if vp not in sys.path:
+            sys.path.insert(0, vp)
+        import dict_sources  # type: ignore
+        ec = dict_sources.lookup_ecdict(lemma)
+        if ec:
+            for d in dict_sources._ec_definitions(ec):
+                if d.get("zh"):
+                    return d["zh"][:40]
+    except Exception:
+        pass
+    return ""
+
+
+@bp.route("/api/vocab-list")
+def pdf_api_vocab_list():
+    """单词本列表。scope=book(本 PDF 查过/出现) / all(全部笔记)。
+    返回按 mastery 升序（最该复习的在前）的词条。"""
+    file = (request.args.get("file") or "").strip()
+    scope = (request.args.get("scope") or "book").strip()
+    vroot = OBSIDIAN_ROOT / "资源" / "vocab"
+    if not vroot.exists():
+        return jsonify({"ok": True, "items": [], "scope": scope})
+    # 全部笔记 frontmatter
+    notes = {}
+    for p in vroot.rglob("*.md"):
+        if p.parent.name == "_audio":
+            continue
+        fm = _vocab_read_fm(p)
+        lemma = (fm.get("lemma") or fm.get("word") or p.stem).strip().lower()
+        if lemma:
+            notes[lemma] = fm
+    # 反向索引（出现页）
+    exposure = {}
+    try:
+        exposure = json.loads((CLAUDE_DIR / "state" / "vocab-exposure.json").read_text("utf-8"))
+    except Exception:
+        pass
+    # book scope：本 PDF 查过的 lemma
+    target = set(notes.keys())
+    if scope == "book" and file:
+        book = set()
+        log = CLAUDE_DIR / "state" / "vocab-lookups.jsonl"
+        if log.exists():
+            for line in log.read_text("utf-8").splitlines():
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                if j.get("pdf") == file and j.get("lemma"):
+                    book.add(j["lemma"].strip().lower())
+        # 也并入「反向索引里在本书出现 + 有笔记」的词
+        for lem, ex in exposure.items():
+            ll = lem.strip().lower()
+            if ll in notes:
+                for pg in (ex.get("pages") or []):
+                    if pg.get("pdf") == file:
+                        book.add(ll); break
+        target = book & set(notes.keys())
+    items = []
+    for lemma in target:
+        fm = notes.get(lemma) or {}
+        pages = []
+        ex = exposure.get(lemma) or exposure.get(fm.get("lemma", "")) or {}
+        for pg in (ex.get("pages") or []):
+            if not file or pg.get("pdf") == file:
+                if pg.get("page") is not None:
+                    pages.append(int(pg["page"]))
+        try: mastery = float(fm.get("mastery") or 0)
+        except Exception: mastery = 0.0
+        try: lc = int(fm.get("lookup_count") or 0)
+        except Exception: lc = 0
+        try: ts = int(fm.get("last_lookup_ts") or 0)
+        except Exception: ts = 0
+        items.append({
+            "lemma": fm.get("lemma") or lemma,
+            "phonetic": fm.get("phonetic_us") or fm.get("phonetic_uk") or "",
+            "zh": _vocab_ecdict_zh(lemma),
+            "mastery": round(mastery, 3),
+            "mastery_label": fm.get("mastery_label") or "",
+            "audio": fm.get("audio_us") or fm.get("audio_uk") or "",
+            "pages": sorted(set(pages))[:30],
+            "lookup_count": lc,
+            "last_ts": ts,
+            "has_card": bool(fm.get("anki_card_id") or fm.get("card_id")),
+        })
+    items.sort(key=lambda x: (x["mastery"], -x["lookup_count"], -x["last_ts"]))
+    return jsonify({"ok": True, "items": items, "scope": scope, "total": len(items)})
+
+
+@bp.route("/api/vocab-audio")
+def pdf_api_vocab_audio():
+    """serve vocab 真人音频（限 资源/vocab/ 下）。"""
+    rel = (request.args.get("path") or "").strip()
+    if not rel or "资源/vocab/" not in rel:
+        abort(403)
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or not abs_path.exists():
+        abort(404)
+    ext = abs_path.suffix.lower()
+    mime = "audio/mpeg" if ext == ".mp3" else ("audio/ogg" if ext == ".ogg" else "audio/wav")
+    return send_file(str(abs_path), mimetype=mime)
+
+
+@bp.route("/api/vocab-add-anki", methods=["POST"])
+def pdf_api_vocab_add_anki():
+    """对一个 lemma 生成 Anki 单词卡（调 scripts/vocab/anki_from_word.py）。"""
+    import subprocess
+    data = request.get_json(silent=True) or {}
+    lemma = (data.get("lemma") or "").strip()
+    if not lemma:
+        return jsonify({"ok": False, "error": "no lemma"}), 400
+    script = CLAUDE_DIR / "scripts" / "vocab" / "anki_from_word.py"
+    try:
+        r = subprocess.run(
+            [sys.executable, str(script), lemma],
+            capture_output=True, text=True, timeout=90,
+        )
+        out = {}
+        if r.stdout.strip():
+            try: out = json.loads(r.stdout)
+            except Exception: out = {"raw": r.stdout[-400:]}
+        if not out.get("ok") and r.returncode != 0:
+            return jsonify({"ok": False, "error": (r.stderr or r.stdout or "anki 失败")[-300:]}), 500
+        return jsonify({"ok": out.get("ok", r.returncode == 0), **out})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
 def register_pdf_reader(app):
     app.register_blueprint(bp)

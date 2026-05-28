@@ -66,6 +66,30 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .side-pane{display:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0}
 .side-pane.active{display:block}
 #side-pane-kg{padding:14px}
+#side-pane-vocab{padding:12px}
+/* 单词本 */
+#vocab-scope-row{display:flex;align-items:center;gap:6px;padding-bottom:10px;border-bottom:1px solid #1c2740;margin-bottom:10px}
+#vocab-scope-row button{background:transparent;border:1px solid #2a3550;color:#7a8497;font-size:11px;border-radius:6px;padding:3px 12px;cursor:pointer}
+#vocab-scope-row button.active{background:#1a2540;color:#7dd3fc;border-color:#3b6db5;font-weight:600}
+#vocab-scope-row .vocab-count{margin-left:auto;font-size:10px;color:#5a6680}
+.vocab-item{border:1px solid #1f2740;border-radius:8px;padding:9px 11px;margin-bottom:8px;background:#0d1322}
+.vocab-item .vi-head{display:flex;align-items:center;gap:7px}
+.vocab-item .vi-word{font-size:14px;font-weight:600;color:#cfe6ff;cursor:pointer}
+.vocab-item .vi-word:hover{color:#7dd3fc;text-decoration:underline}
+.vocab-item .vi-phon{font-size:11px;color:#7a8497;font-family:monospace}
+.vocab-item .vi-audio{background:transparent;border:none;cursor:pointer;font-size:14px;padding:0 2px;line-height:1}
+.vocab-item .vi-audio:hover{transform:scale(1.15)}
+.vocab-item .vi-mastery-badge{margin-left:auto;font-size:9px;padding:1px 7px;border-radius:8px;white-space:nowrap}
+.vocab-item .vi-bar{height:4px;border-radius:2px;background:#1a2540;margin:6px 0;overflow:hidden}
+.vocab-item .vi-bar>div{height:100%;border-radius:2px;transition:width .2s}
+.vocab-item .vi-zh{font-size:11px;color:#9fb4d4;line-height:1.45;margin:3px 0}
+.vocab-item .vi-foot{display:flex;align-items:center;gap:8px;margin-top:5px}
+.vocab-item .vi-pages{font-size:10px;color:#7a8497;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.vocab-item .vi-pages a{color:#7dd3fc;cursor:pointer;margin-right:6px}
+.vocab-item .vi-pages a:hover{text-decoration:underline}
+.vocab-item .vi-anki{flex:0 0 auto;font-size:10px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:5px;padding:3px 9px;cursor:pointer}
+.vocab-item .vi-anki:hover{background:#2c3e6a}
+.vocab-item .vi-anki.done{color:#22c55e;border-color:#22c55e;cursor:default}
 .side-pane .side-h2{font-size:13px;color:#8a9bb4;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px;font-weight:600}
 /* 流式堆叠：按时间顺序，最新在最上 */
 #grammar-panel-body{padding:10px 10px 40px}
@@ -342,7 +366,8 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 <!-- 右侧统一面板：顶部 tab 切换「语法分析 / 知识点」-->
 <aside id="grammar-panel">
   <div id="side-tabs">
-    <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')">📊 语法分析</button>
+    <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')">📊 语法</button>
+    <button class="side-tab" data-pane="vocab" onclick="switchSideTab('vocab')">📒 单词本</button>
     <button class="side-tab" data-pane="kg" onclick="switchSideTab('kg')">📋 知识点</button>
     <span class="side-tab-sp"></span>
     <button class="side-icon-btn" id="side-clear" onclick="clearGrammarBlocks()" title="清空全部分析">🗑</button>
@@ -350,6 +375,14 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
   </div>
   <div id="grammar-panel-body" class="side-pane active" data-pane="grammar">
     <!-- 语法分析卡按时间顺序堆叠，最新在最上 -->
+  </div>
+  <div id="side-pane-vocab" class="side-pane" data-pane="vocab">
+    <div id="vocab-scope-row">
+      <button class="active" data-scope="book" onclick="loadVocabList('book')">本书</button>
+      <button data-scope="all" onclick="loadVocabList('all')">全部</button>
+      <span class="vocab-count" id="vocab-count"></span>
+    </div>
+    <div id="vocab-list"><div style="color:#5a6680;font-size:12px;padding:10px">点开载入…</div></div>
   </div>
   <div id="side-pane-kg" class="side-pane" data-pane="kg">
     <h2 class="side-h2">当前页对应知识点</h2>
@@ -821,7 +854,107 @@ window.switchSideTab = (pane) => {
   // 🗑 清空按钮只在语法 tab 显示
   const clr = document.getElementById('side-clear');
   if (clr) clr.style.display = (pane === 'grammar') ? '' : 'none';
+  if (pane === 'vocab' && !_vocabLoaded) loadVocabList();   // 首次进单词本自动载
 };
+// 「📒 单词本」按钮入口（顶栏没放按钮，但保留以备调用）
+window.toggleVocab = () => {
+  const p = document.getElementById('grammar-panel');
+  const on = document.querySelector('#side-tabs .side-tab[data-pane="vocab"]')?.classList.contains('active');
+  if (p.classList.contains('open') && on) { closeGrammarPanel(); return; }
+  openGrammarPanel(); switchSideTab('vocab');
+};
+
+// ── 单词本：列表 + 发音 + 加 Anki + 定位页 + 点开释义 ──
+let _vocabScope = 'book', _vocabLoaded = false;
+window.loadVocabList = async (scope) => {
+  if (scope) _vocabScope = scope;
+  _vocabLoaded = true;
+  const listEl = document.getElementById('vocab-list');
+  const cntEl = document.getElementById('vocab-count');
+  if (!listEl) return;
+  document.querySelectorAll('#vocab-scope-row button').forEach(b => b.classList.toggle('active', b.dataset.scope === _vocabScope));
+  listEl.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">加载中…</div>';
+  if (cntEl) cntEl.textContent = '';
+  try {
+    const r = await fetch('/pdf/api/vocab-list?file=' + encodeURIComponent(FILE_REL || '') + '&scope=' + _vocabScope);
+    const d = await r.json();
+    const items = d.items || [];
+    if (cntEl) cntEl.textContent = items.length ? (items.length + ' 词') : '';
+    if (!items.length) {
+      listEl.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">' +
+        (_vocabScope === 'book' ? '这本书还没查过单词' : '单词库为空') + '</div>';
+      return;
+    }
+    listEl.innerHTML = '';
+    for (const it of items) listEl.appendChild(_renderVocabItem(it));
+  } catch (e) {
+    listEl.innerHTML = '<div style="color:#ef4444;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
+  }
+};
+function _masteryColor(m) {
+  if (m >= 0.8) return '#22c55e';
+  if (m >= 0.5) return '#eab308';
+  if (m >= 0.2) return '#f97316';
+  return '#ef4444';
+}
+function _speakWord(lemma, audio) {
+  if (audio) {
+    try {
+      const a = new Audio('/pdf/api/vocab-audio?path=' + encodeURIComponent(audio));
+      a.play().catch(() => _ttsWord(lemma));
+      return;
+    } catch (e) {}
+  }
+  _ttsWord(lemma);
+}
+function _ttsWord(w) {
+  try { const u = new SpeechSynthesisUtterance(w); u.lang = 'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) {}
+}
+async function _vocabAddAnki(lemma, btn) {
+  const old = btn.textContent;
+  btn.textContent = '…'; btn.disabled = true;
+  try {
+    const r = await fetch('/pdf/api/vocab-add-anki', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lemma}),
+    });
+    const d = await r.json();
+    if (d.ok) { btn.textContent = '✓ 已加'; btn.classList.add('done'); }
+    else { btn.textContent = old; btn.disabled = false; _toast?.('加卡失败：' + (d.error || '?')); }
+  } catch (e) { btn.textContent = old; btn.disabled = false; _toast?.('加卡失败：' + e.message); }
+}
+function _renderVocabItem(it) {
+  const div = document.createElement('div');
+  div.className = 'vocab-item';
+  const pct = Math.round((it.mastery || 0) * 100);
+  const col = _masteryColor(it.mastery || 0);
+  const pagesHtml = (it.pages || []).slice(0, 12).map(p => `<a data-page="${p}">p${p}</a>`).join('');
+  div.innerHTML = `
+    <div class="vi-head">
+      <span class="vi-word">${_esc(it.lemma)}</span>
+      ${it.phonetic ? `<span class="vi-phon">${_esc(it.phonetic)}</span>` : ''}
+      <button class="vi-audio" title="发音">🔊</button>
+      <span class="vi-mastery-badge" style="background:${col}22;color:${col}">${_esc(it.mastery_label || (pct + '%'))}</span>
+    </div>
+    <div class="vi-bar"><div style="width:${pct}%;background:${col}"></div></div>
+    ${it.zh ? `<div class="vi-zh">${_esc(it.zh)}</div>` : ''}
+    <div class="vi-foot">
+      <span class="vi-pages">${pagesHtml}</span>
+      <button class="vi-anki">${it.has_card ? '✓ 已加' : '📇 加卡'}</button>
+    </div>`;
+  if (it.has_card) div.querySelector('.vi-anki').classList.add('done');
+  div.querySelector('.vi-word').addEventListener('click', () => dictStream(it.lemma, ''));
+  div.querySelector('.vi-audio').addEventListener('click', (e) => { e.stopPropagation(); _speakWord(it.lemma, it.audio); });
+  div.querySelector('.vi-anki').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    if (!b.classList.contains('done')) _vocabAddAnki(it.lemma, b);
+  });
+  div.querySelectorAll('.vi-pages a').forEach(a => a.addEventListener('click', () => {
+    const pg = parseInt(a.dataset.page); if (pg) goToPage(pg);
+  }));
+  return div;
+}
 window.toggleReadMode = async () => {
   readMode = readMode === 'single' ? 'continuous' : 'single';
   try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
