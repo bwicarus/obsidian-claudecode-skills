@@ -126,6 +126,11 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .dep-clause{margin-bottom:12px}
 .dep-clause:last-child{margin-bottom:0}
 .dep-clause-label{display:inline-block;font-size:10px;font-weight:600;color:#0d1322;background:#7dd3fc;border-radius:4px;padding:1px 7px;margin:0 0 3px 2px}
+/* 成分分块（主谓宾定状从句，彩色块）*/
+.comp-blocks{display:flex;flex-direction:column;gap:5px;padding:2px 0}
+.comp-block{border-left:3px solid #64748b;border-radius:0 6px 6px 0;background:#0d1322;padding:6px 9px;line-height:1.5}
+.comp-block .comp-label{display:inline-block;font-size:9px;font-weight:600;color:#0d1322;border-radius:4px;padding:1px 7px;margin-right:7px;vertical-align:middle}
+.comp-block .comp-text{font-size:13px;color:#e6e6f0}
 
 /* displaCy 词 / 词性标签 / 弧线 */
 .dep-token{cursor:pointer}
@@ -2892,6 +2897,7 @@ async function _streamGrammar(block, sentence, text) {
         sentence, text,
         sentence_zh: block.__zh || '',
         tokens: sp.tokens || [], deps: sp.deps || [], clauses: sp.clauses || [],
+        components: sp.components || [],
         analyses: block.__points || [],
       }}),
     }).catch(() => {});
@@ -3023,11 +3029,12 @@ function _fillGrammarBlock(block, d, sentence) {
   const deps = d.deps || [];
   const sentence_zh = d.sentence_zh || '';
   const analyses = d.analyses || [];
-  if (!tokens.length && !sentence_zh && !analyses.length) {
+  const components = d.components || [];
+  if (!tokens.length && !sentence_zh && !analyses.length && !components.length) {
     _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
   }
-  block.__spacy = {tokens, deps, clauses: d.clauses || []};   // 存依存数据供历史保存
+  block.__spacy = {tokens, deps, clauses: d.clauses || [], components};   // 存供历史保存
   const isSpacy = d.engine === 'spacy';   // spaCy 路径：翻译/语法点稍后由 SSE 流式填
   // 标题永远是原文（不被翻译覆盖）；翻译填到 header 外的常驻 gb-trans 行（折叠也可见）
   const transEl = block.querySelector('.gb-trans');
@@ -3042,9 +3049,10 @@ function _fillGrammarBlock(block, d, sentence) {
     badge.textContent = '语法点 ' + analyses.length;
     headEl.insertBefore(badge, headEl.querySelector('.gb-del'));
   }
-  // 依存图收进二级折叠区（默认收起，不占地方）；去掉了词性图例（词已着色+词下中文标）
-  const diagramHtml = tokens.length
-    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子结构图<span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
+  // 句子成分分块（主谓宾定状从句彩色块）；无 components 时回退依存图
+  const hasStruct = components.length || tokens.length;
+  const diagramHtml = hasStruct
+    ? `<div class="gb-diagram-wrap"><div class="gb-diagram-toggle">📐 句子成分<span class="dg-caret">▶</span></div><div class="gb-diagram"></div></div>`
     : '';
   // 语法点区：AI 路径直接渲染；spaCy 路径先占位等 SSE
   const anaHtml = analyses.length
@@ -3057,41 +3065,70 @@ function _fillGrammarBlock(block, d, sentence) {
     : (isSpacy ? `<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>` : '');
   const content = block.querySelector('.gb-content');
   content.innerHTML = diagramHtml + anaHtml;
-  if (tokens.length) {
+  if (hasStruct) {
     const wrap = content.querySelector('.gb-diagram-wrap');
     const diag = content.querySelector('.gb-diagram');
-    const clauses = d.clauses || [];
-    if (clauses.length > 1) {
-      // 长句：按从句切段，每段一个「从句类型」标题 + 短依存图（竖直堆，不横向超长）
-      for (const c of clauses) {
-        if (!(c.tokens || []).length) continue;
-        const seg = document.createElement('div');
-        seg.className = 'dep-clause';
-        const lbl = document.createElement('div');
-        lbl.className = 'dep-clause-label';
-        lbl.textContent = c.label || '从句';
-        seg.appendChild(lbl);
-        seg.appendChild(_renderDepSvg(c.tokens, c.deps || []));
-        diag.appendChild(seg);
-      }
+    if (components.length) {
+      diag.appendChild(_renderComponents(components));
+      wrap.classList.add('dgram-open');   // 成分分块紧凑，默认展开
     } else {
-      diag.appendChild(_renderDepSvg(tokens, deps));
+      // 无 components：回退依存图（长句按从句切段）
+      const clauses = d.clauses || [];
+      if (clauses.length > 1) {
+        for (const c of clauses) {
+          if (!(c.tokens || []).length) continue;
+          const seg = document.createElement('div');
+          seg.className = 'dep-clause';
+          const lbl = document.createElement('div');
+          lbl.className = 'dep-clause-label';
+          lbl.textContent = c.label || '从句';
+          seg.appendChild(lbl);
+          seg.appendChild(_renderDepSvg(c.tokens, c.deps || []));
+          diag.appendChild(seg);
+        }
+      } else {
+        diag.appendChild(_renderDepSvg(tokens, deps));
+      }
+      diag.addEventListener('wheel', (e) => {
+        if (diag.scrollWidth <= diag.clientWidth) return;
+        const dy = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        diag.scrollLeft += dy;
+        e.preventDefault();
+      }, {passive: false});
     }
     content.querySelector('.gb-diagram-toggle').addEventListener('click', () => wrap.classList.toggle('dgram-open'));
-    // 桌面：在图上滚轮 → 横向移动（仅当图比容器宽，不抢页面垂直滚动）
-    diag.addEventListener('wheel', (e) => {
-      if (diag.scrollWidth <= diag.clientWidth) return;
-      const dy = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-      diag.scrollLeft += dy;
-      e.preventDefault();
-    }, {passive: false});
   }
   content.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
   // 刚分析的块保持展开 + 高亮 5s，之后取消高亮（仍保持用户的展开/折叠状态）
   setTimeout(() => block.classList.remove('focus'), 5000);
 }
 
-// ── displaCy 依存图：弧线在词上方、词性着色、词性中文标在词下 ──
+// ── 句子成分分块：主谓宾定状从句彩色块（无弧线、可换行，长句清晰）──
+function _compColor(label) {
+  if (label.includes('谓语')) return '#ef4444';
+  if (label.includes('主语')) return '#3b82f6';
+  if (label.includes('宾语')) return '#22c55e';
+  if (label.includes('定语')) return '#06b6d4';
+  if (label.includes('状语')) return '#a855f7';
+  if (label.includes('表语') || label.includes('补语')) return '#eab308';
+  if (label.includes('并列')) return '#94a3b8';
+  return '#8a9bb4';
+}
+function _renderComponents(comps) {
+  const wrap = document.createElement('div');
+  wrap.className = 'comp-blocks';
+  for (const c of comps) {
+    const col = _compColor(c.label || '');
+    const b = document.createElement('div');
+    b.className = 'comp-block';
+    b.style.borderLeftColor = col;
+    b.innerHTML = `<span class="comp-label" style="background:${col}">${_esc(c.label || '')}</span><span class="comp-text">${_esc(c.text || '')}</span>`;
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+// ── displaCy 依存图：弧线在词上方、词性着色、词性中文标在词下（无 components 时回退）──
 function _renderDepSvg(tokens, deps) {
   const NS = 'http://www.w3.org/2000/svg';
   const PAD_X = 18, GAP = 40, FONT = 16, POS_GAP = 18;   // 词距/字号加大，更舒展不挤

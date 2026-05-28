@@ -56,7 +56,7 @@ def _load():
 def parse(text: str) -> dict:
     text = (text or "").strip()
     if not text:
-        return {"tokens": [], "deps": [], "clauses": []}
+        return {"tokens": [], "deps": [], "clauses": [], "components": []}
     nlp = _load()
     doc = nlp(text)
     tokens = [{"text": t.text, "pos": UPOS.get(t.pos_, t.pos_.lower())} for t in doc]
@@ -68,7 +68,79 @@ def parse(text: str) -> dict:
             "head": t.head.i, "child": t.i,
             "label": DEP.get(t.dep_, t.dep_),
         })
-    return {"tokens": tokens, "deps": deps, "clauses": _split_clauses(doc)}
+    return {
+        "tokens": tokens, "deps": deps,
+        "clauses": _split_clauses(doc),
+        "components": _split_components(doc),
+    }
+
+
+# 依存标签 → 中文句子成分名（成分分块用）
+_COMPONENT = {
+    "nsubj": "主语", "nsubjpass": "主语", "csubj": "主语从句", "csubjpass": "主语从句",
+    "expl": "形式主语",
+    "dobj": "宾语", "obj": "宾语", "iobj": "间接宾语", "dative": "间接宾语", "pobj": "介词宾语",
+    "attr": "表语", "acomp": "表语", "oprd": "宾语补足语",
+    "ccomp": "宾语从句", "xcomp": "补语", "advcl": "状语从句", "relcl": "定语从句", "acl": "定语",
+    "advmod": "状语", "npadvmod": "状语", "prep": "状语", "agent": "施事", "obl": "状语",
+    "cc": "连词", "conj": "并列成分", "mark": "引导词", "intj": "感叹",
+    "parataxis": "插入语", "appos": "同位语", "dep": "成分", "punct": "标点",
+}
+
+
+_CLAUSE_BOUNDARY = {"relcl", "ccomp", "advcl", "acl", "csubj", "csubjpass", "xcomp", "pcomp"}
+
+
+def _split_components(doc) -> list:
+    """把句子按「句子成分」线性切块：主语/谓语/宾语/状语/各类从句…
+    成分边界 = ROOT(谓语) + ROOT 的直接非粘连子(顶层成分头) + 所有从句根(从宿主里挖出)。
+    每个非标点 token 归属于最近的边界祖先。返回 [{label(中文), text}] 按出现顺序。
+    无弧线、可换行，长句也清晰。"""
+    root = None
+    for t in doc:
+        if t.dep_ == "ROOT":
+            root = t
+            break
+    if root is None:
+        return []
+    GLUE = ("aux", "auxpass", "aux:pass", "cop", "neg", "prt", "punct", "case")
+    boundaries = {root.i: "谓语"}
+    for ch in root.children:                      # root 的直接成分（主/宾/状/表/…）
+        if ch.dep_ not in GLUE:
+            boundaries.setdefault(ch.i, _COMPONENT.get(ch.dep_, ch.dep_))
+    for t in doc:                                 # 所有从句根，从宿主成分里挖出来单列
+        if t.dep_ in _CLAUSE_BOUNDARY:
+            boundaries[t.i] = _COMPONENT.get(t.dep_, t.dep_)
+
+    def owner(t):
+        cur, hops = t, 0
+        while hops < 200:
+            if cur.i in boundaries:
+                return cur.i
+            if cur.head == cur:
+                return None
+            cur = cur.head
+            hops += 1
+        return None
+
+    groups = {}
+    for t in doc:
+        if t.is_punct or t.is_space:
+            continue
+        o = owner(t)
+        if o is not None:
+            groups.setdefault(o, []).append(t.i)
+
+    comps = []
+    for hi, idxs in groups.items():
+        idxs = sorted(idxs)
+        label = boundaries[hi]
+        seg = doc[idxs[0]: idxs[-1] + 1]
+        text = seg.text.strip()
+        if text and any(ch.isalnum() for ch in text):
+            comps.append({"label": label, "text": text, "start": idxs[0]})
+    comps.sort(key=lambda c: c["start"])
+    return comps
 
 
 # 子句根的依存标签 → 中文从句名（长句按这些切段，每段单独画小图）
@@ -135,7 +207,7 @@ def main():
     try:
         out = parse(text)
     except Exception as ex:
-        print(json.dumps({"error": str(ex), "tokens": [], "deps": [], "clauses": []}, ensure_ascii=False))
+        print(json.dumps({"error": str(ex), "tokens": [], "deps": [], "clauses": [], "components": []}, ensure_ascii=False))
         sys.exit(1)
     print(json.dumps(out, ensure_ascii=False))
 
