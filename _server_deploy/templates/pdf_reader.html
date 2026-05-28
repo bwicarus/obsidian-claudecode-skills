@@ -48,7 +48,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #grammar-panel.open{display:flex}
 body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 #grammar-panel-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #2a3550}
-#grammar-panel-header h2{margin:0;font-size:13px;color:#cfe6ff;font-weight:600}
+#grammar-panel-header h2{margin:0;flex:1;font-size:13px;color:#cfe6ff;font-weight:600}
 #grammar-panel-header button{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:2px 8px}
 #grammar-panel-header button:hover{color:#fff}
 /* 流式堆叠：按时间顺序，最新在最上；不再撑高/绝对定位/左右对齐 */
@@ -61,6 +61,8 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 .grammar-block .gb-header:hover{background:#141d33}
 .grammar-block .gb-header .gb-title{flex:1;min-width:0;font-size:12px;color:#cfe6ff;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .grammar-block .gb-header .gb-badge{flex:0 0 auto;font-size:9px;color:#7dd3fc;background:#16243f;border-radius:8px;padding:1px 7px}
+.grammar-block .gb-header .gb-del{flex:0 0 auto;color:#5a6680;font-size:12px;cursor:pointer;padding:0 3px;opacity:.7}
+.grammar-block .gb-header .gb-del:hover{color:#ef4444;opacity:1}
 .grammar-block .gb-header .gb-caret{flex:0 0 auto;color:#7a8497;font-size:11px;transition:transform .15s}
 .grammar-block.open .gb-header .gb-caret{transform:rotate(90deg)}
 .grammar-block .gb-content{display:none}
@@ -304,6 +306,7 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
     <button onclick="toggleSidebar()" title="对应知识点">📋 知识点</button>
+    <button onclick="toggleGrammarPanel()" title="显示/隐藏语法分析侧栏">📊 语法</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <div id="main">
@@ -329,10 +332,11 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
   <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
 </aside>
 
-<!-- 右侧语法分析抽屉：每条分析按所在句子的 y 坐标定位（跟 PDF 滚动同步）-->
+<!-- 右侧语法分析抽屉：分析卡按时间堆叠，最新在最上 -->
 <aside id="grammar-panel">
   <div id="grammar-panel-header">
     <h2>📊 语法分析</h2>
+    <button onclick="clearGrammarBlocks()" title="清空全部分析" style="font-size:11px">🗑 清空</button>
     <button onclick="closeGrammarPanel()" title="关闭">✕</button>
   </div>
   <div id="grammar-panel-body">
@@ -2721,6 +2725,17 @@ window.closeGrammarPanel = () => {
   _hideDepTip();
   requestAnimationFrame(() => { _refitToWidth(true); });
 };
+// 顶栏「📊 语法」按钮：手动显示/隐藏侧栏（查看历史分析卡，不触发新分析）
+window.toggleGrammarPanel = () => {
+  const p = document.getElementById('grammar-panel');
+  if (!p) return;
+  if (p.classList.contains('open')) closeGrammarPanel();
+  else openGrammarPanel();
+};
+// 清空侧栏内全部分析卡
+window.clearGrammarBlocks = () => {
+  document.querySelectorAll('#grammar-panel-body .grammar-block').forEach(b => b.remove());
+};
 
 // ── POS 配色 + 中文短标签（displaCy 风格）──
 const POS_COLORS = {
@@ -2745,10 +2760,12 @@ function _addLoadingBlock(id, sentence) {
   block.innerHTML =
     `<div class="gb-header">
        <span class="gb-title">${_esc(summary)}</span>
+       <span class="gb-del" title="删除这条">🗑</span>
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-content"><div class="gb-loading">⏳ 分析中…</div></div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
+  block.querySelector('.gb-del').addEventListener('click', (e) => { e.stopPropagation(); block.remove(); });
   body.insertBefore(block, body.firstChild);   // 最新在最上
   body.scrollTop = 0;
   return block;
