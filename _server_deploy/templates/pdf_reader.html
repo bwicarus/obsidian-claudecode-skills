@@ -324,9 +324,12 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
       </select>
     </div>
     <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#8a9bb4;margin-bottom:6px">
-      📊 语法跟踪节点（仅此 PDF）<button onclick="_toggleAllGrammar(true)" style="background:transparent;border:none;color:#60a5fa;font-size:11px;cursor:pointer">全选</button><button onclick="_toggleAllGrammar(false)" style="background:transparent;border:none;color:#7a8497;font-size:11px;cursor:pointer">清空</button>
-    </label>
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📊 启用语法分析（per-PDF）</label>
+    <div style="font-size:10px;color:#7a8497;margin-bottom:6px;line-height:1.5">
+      勾选本 PDF 用哪些语法 KG。具体跟踪哪些语法点请去
+      <a href="/skilltree/grammar-demo/" target="_blank" style="color:#60a5fa">技能树页面</a>
+      点节点详情里的「👁 跟踪」按钮设置。
+    </div>
     <div id="set-grammar-list" style="max-height:200px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;margin-bottom:14px;font-size:12px">
       <div style="color:#7a8497">加载中…</div>
     </div>
@@ -2363,81 +2366,86 @@ async function markFromResult() {
 }
 window.markFromResult = markFromResult;
 
-// ─── 语法跟踪 + 分析 ─────────────────────────────────────────────────
-let _grammarNodes = null;       // [{id,name,category,summary,keywords}]
-let _grammarTracked = [];        // 当前 PDF 跟踪的 node ids
+// ─── 语法分析（per-PDF 启用语法 KG，节点跟踪在技能树页面切换）────────────
+let _grammarEnabledBooks = [];   // 本 PDF 启用的 grammar KG list（books）
+let _grammarHasTracked = false;  // 是否至少有一个启用书中含 tracked 节点
 
-async function loadGrammarNodes() {
-  if (_grammarNodes !== null) return _grammarNodes;
-  try {
-    const r = await fetch('/pdf/api/grammar-nodes');
-    const d = await r.json();
-    _grammarNodes = d.nodes || [];
-  } catch (e) { _grammarNodes = []; }
-  return _grammarNodes;
-}
 async function loadGrammarTracked() {
   try {
     const r = await fetch('/pdf/api/grammar-tracked?file=' + encodeURIComponent(FILE_REL));
     const d = await r.json();
-    _grammarTracked = d.tracked || [];
-  } catch (e) { _grammarTracked = []; }
+    _grammarEnabledBooks = d.enabled_books || [];
+  } catch (e) { _grammarEnabledBooks = []; }
+  await _refreshGrammarHasTracked();
   _updateGrammarBtnVisibility();
-  return _grammarTracked;
+  return _grammarEnabledBooks;
 }
-async function saveGrammarTracked(ids) {
-  _grammarTracked = ids;
+async function _refreshGrammarHasTracked() {
+  if (!_grammarEnabledBooks.length) { _grammarHasTracked = false; return; }
+  try {
+    const r = await fetch('/pdf/api/grammar-books');
+    const d = await r.json();
+    const enabledSet = new Set(_grammarEnabledBooks);
+    _grammarHasTracked = (d.books || []).some(b => enabledSet.has(b.book) && (b.tracked_count || 0) > 0);
+  } catch (e) { _grammarHasTracked = false; }
+}
+async function saveGrammarEnabledBooks(books) {
+  _grammarEnabledBooks = books;
   try {
     await fetch('/pdf/api/grammar-tracked', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file: FILE_REL, tracked: ids}),
+      body: JSON.stringify({file: FILE_REL, enabled_books: books}),
     });
   } catch (e) {}
+  await _refreshGrammarHasTracked();
   _updateGrammarBtnVisibility();
 }
 function _updateGrammarBtnVisibility() {
   const row = document.getElementById('grammar-btn-row');
   if (!row) return;
-  row.style.display = (_grammarTracked.length > 0 && lastSelText) ? '' : 'none';
+  row.style.display = (_grammarHasTracked && lastSelText) ? '' : 'none';
 }
 async function renderGrammarTrackList() {
   const wrap = document.getElementById('set-grammar-list');
   if (!wrap) return;
-  const [nodes] = await Promise.all([loadGrammarNodes(), loadGrammarTracked()]);
-  const trackedSet = new Set(_grammarTracked);
-  // 按 category 分组
-  const byCat = {};
-  for (const n of nodes) {
-    const c = n.category || '其它';
-    (byCat[c] ||= []).push(n);
+  let books = [];
+  try {
+    const r = await fetch('/pdf/api/grammar-books');
+    const d = await r.json();
+    books = d.books || [];
+  } catch (e) { books = []; }
+  await loadGrammarTracked();
+  const enabledSet = new Set(_grammarEnabledBooks);
+  if (!books.length) {
+    wrap.innerHTML = '<div style="color:#7a8497">还没有语法 KG。新建一本 kind=grammar 的书后会出现。</div>';
+    return;
   }
   let html = '';
-  for (const cat of Object.keys(byCat)) {
-    html += `<div style="color:#7a8497;font-size:11px;margin:6px 0 4px;font-weight:600">${cat}</div>`;
-    for (const n of byCat[cat]) {
-      const checked = trackedSet.has(n.id) ? 'checked' : '';
-      html += `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;color:#cfe6ff;border-radius:3px" title="${(n.summary||'').replace(/"/g,'&quot;')}">
-        <input type="checkbox" value="${n.id}" ${checked} onchange="_onGrammarToggle()" style="margin:0">
-        <span style="font-size:12px">${n.name}</span>
-      </label>`;
-    }
+  for (const b of books) {
+    const checked = enabledSet.has(b.book) ? 'checked' : '';
+    const hot = (b.tracked_count > 0) ? `<span style="color:#34d399;margin-left:4px">${b.tracked_count} 已跟踪</span>` : `<span style="color:#7a8497;margin-left:4px">无跟踪（去技能树点节点开）</span>`;
+    html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;color:#cfe6ff;border-radius:3px;border-bottom:1px solid #1f2740" title="共 ${b.total_l2} 个 level-2 语法点">
+      <input type="checkbox" value="${b.book}" ${checked} onchange="_onGrammarBookToggle()" style="margin:0">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px">${b.title.replace(/</g,'&lt;')}</div>
+        <div style="font-size:10px;color:#7a8497">${b.total_l2} 个语法点 · ${hot}</div>
+      </div>
+      <a href="/skilltree/${encodeURIComponent(b.book)}/" target="_blank" onclick="event.stopPropagation()" style="color:#60a5fa;font-size:11px;text-decoration:none">技能树 →</a>
+    </label>`;
   }
   wrap.innerHTML = html;
 }
-function _onGrammarToggle() {
-  const ids = Array.from(document.querySelectorAll('#set-grammar-list input[type=checkbox]:checked'))
+function _onGrammarBookToggle() {
+  const books = Array.from(document.querySelectorAll('#set-grammar-list input[type=checkbox]:checked'))
     .map(cb => cb.value);
-  saveGrammarTracked(ids);
+  saveGrammarEnabledBooks(books);
 }
-window._toggleAllGrammar = (on) => {
-  document.querySelectorAll('#set-grammar-list input[type=checkbox]').forEach(cb => cb.checked = on);
-  _onGrammarToggle();
-};
 
 // 选中工具栏的「📊 分析」按钮
 window.onGrammarAnalyze = async () => {
   if (!lastSelText) return;
-  if (!_grammarTracked.length) { _toast?.('请先在设置 → 语法跟踪 勾选要分析的语法点'); return; }
+  if (!_grammarEnabledBooks.length) { _toast?.('请在 PDF 设置中启用至少一个语法 KG'); return; }
+  if (!_grammarHasTracked) { _toast?.('已启用的 KG 中没有节点被跟踪，去技能树详情面板点「👁 跟踪」'); return; }
   const text = lastSelText.trim();
   if (text.length < 3) { _toast?.('选中片段太短'); return; }
   // 拿所在句子作为上下文
@@ -2452,7 +2460,7 @@ window.onGrammarAnalyze = async () => {
   try {
     const r = await fetch('/pdf/api/grammar-analyze', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text, sentence, file: FILE_REL, tracked_ids: _grammarTracked}),
+      body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
     });
     const d = await r.json();
     if (!d.ok) {

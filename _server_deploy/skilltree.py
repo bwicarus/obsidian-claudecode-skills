@@ -948,6 +948,29 @@ def register_skilltree(app):
             "obsidian_url": f"obsidian://open?vault={os.environ.get('OBSIDIAN_VAULT_NAME','Obsidian Vault')}&file={new_path.replace('.md','')}",
         })
 
+    @app.route("/skilltree/<book>/api/toggle-tracked", methods=["POST"])
+    def skilltree_toggle_tracked(book):
+        """语法 KG 节点的跟踪开关。仅 kg.kind=='grammar' + level=2 节点可切换。
+        body: {node_id} → {ok, tracked}"""
+        data = request.get_json(silent=True) or {}
+        node_id = (data.get("node_id") or "").strip()
+        if not node_id:
+            return jsonify({"ok": False, "error": "no node_id"}), 400
+        p, kg = _load_kg(book)
+        if not kg:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        if kg.get("kind") != "grammar":
+            return jsonify({"ok": False, "error": "not a grammar KG"}), 400
+        for n in kg.get("nodes", []):
+            if n.get("id") == node_id:
+                if n.get("level") != 2:
+                    return jsonify({"ok": False, "error": "only level 2 nodes can be tracked"}), 400
+                n["tracked"] = not n.get("tracked", False)
+                _save_kg(p, kg)
+                return jsonify({"ok": True, "tracked": n["tracked"]})
+        return jsonify({"ok": False, "error": "node not found"}), 404
+
+
     @app.route("/skilltree/<book>/api/edit", methods=["POST"])
     def skilltree_edit(book):
         p, kg = _load_kg(book)

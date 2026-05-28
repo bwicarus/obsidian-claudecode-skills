@@ -246,6 +246,11 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
     <div class="lbl">关联</div><div class="v" id="d-link">—</div>
     <div class="lbl">前置（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
     <div class="lbl">后续</div><ul class="prereqs" id="d-unlocks"></ul>
+    <div id="d-tracking-row" style="display:none;margin-top:14px;border-top:1px solid #2a3550;padding-top:12px">
+      <div class="lbl">PDF 阅读跟踪</div>
+      <button id="d-track-btn" onclick="toggleNodeTracked()" style="display:block;width:100%;margin-top:6px;padding:7px 0;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;cursor:pointer;font-size:12px">👁 开启跟踪</button>
+      <div style="margin-top:4px;font-size:10px;color:#7a8497;line-height:1.4">在 PDF 阅读器选中文字时，AI 用此节点内容分析（前提：在 PDF 设置中启用了此 KG）</div>
+    </div>
     <div id="edit-actions" style="display:none;margin-top:14px;border-top:1px solid #2a3550;padding-top:12px">
       <div class="lbl">编辑动作</div>
       <button class="foot" style="display:block;width:100%;margin-top:6px;padding:7px 0;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;cursor:pointer" onclick="editAddPrereqDlg()">＋ 添加前置</button>
@@ -1198,6 +1203,44 @@ function showEditPanel(n){
   editingNode=n;
   document.getElementById("edit-summary").value = n.summary||"";
   document.getElementById("edit-actions").style.display = editMode?"block":"none";
+  // 跟踪 row：仅 grammar 类 KG 的 level 2 节点显示
+  const tr = document.getElementById("d-tracking-row");
+  if (tr) {
+    if (KG && KG.kind === "grammar" && n.level === 2) {
+      tr.style.display = "block";
+      _updateTrackBtn(n);
+    } else {
+      tr.style.display = "none";
+    }
+  }
+}
+function _updateTrackBtn(n) {
+  const btn = document.getElementById("d-track-btn");
+  if (!btn) return;
+  if (n.tracked) {
+    btn.textContent = "👁 跟踪中（点击取消）";
+    btn.style.background = "#244470";
+    btn.style.borderColor = "#3b6db5";
+    btn.style.color = "#fff";
+  } else {
+    btn.textContent = "👁 开启跟踪";
+    btn.style.background = "#1a2540";
+    btn.style.borderColor = "#2a3550";
+    btn.style.color = "#cfe6ff";
+  }
+}
+async function toggleNodeTracked() {
+  if (!detailNodeId) return;
+  try {
+    const r = await fetch(`/skilltree/${BOOK}/api/toggle-tracked`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({node_id: detailNodeId}),
+    });
+    const d = await r.json();
+    if (!d.ok) { alert("切换失败：" + (d.error||"?")); return; }
+    const n = id2[detailNodeId];
+    if (n) { n.tracked = d.tracked; _updateTrackBtn(n); }
+  } catch (e) { alert("网络错误：" + e.message); }
 }
 async function editPost(op, payload){
   const r=await fetch(`/skilltree/${BOOK}/api/edit`,{

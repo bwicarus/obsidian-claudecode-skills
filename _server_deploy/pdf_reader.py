@@ -1489,26 +1489,97 @@ def _tracked_set(file_rel: str, tracked: list[str]):
 
 @bp.route("/api/grammar-nodes", methods=["GET"])
 def pdf_api_grammar_nodes():
-    """所有可跟踪的语法节点 list。"""
+    """所有可跟踪的语法节点 list（旧 demo 数据；保留兼容）"""
     return jsonify({"ok": True, "nodes": _grammar_nodes()})
+
+
+@bp.route("/api/grammar-books", methods=["GET"])
+def pdf_api_grammar_books():
+    """列出所有 kind=grammar 的 KG，含每本书 tracked 节点数。
+    返回 {ok, books: [{book, title, total_l2, tracked_count}]}"""
+    kg_dir = CLAUDE_DIR / "knowledge_graph"
+    out = []
+    for kg_f in kg_dir.glob("*.json"):
+        if kg_f.name.endswith(".bak.json"): continue
+        try:
+            kg = json.loads(kg_f.read_text("utf-8"))
+        except Exception:
+            continue
+        if kg.get("kind") != "grammar":
+            continue
+        nodes = kg.get("nodes") or []
+        l2 = [n for n in nodes if n.get("level") == 2]
+        tracked = [n for n in l2 if n.get("tracked")]
+        out.append({
+            "book": kg.get("book") or kg_f.stem,
+            "title": kg.get("title") or kg.get("book") or kg_f.stem,
+            "total_l2": len(l2),
+            "tracked_count": len(tracked),
+        })
+    out.sort(key=lambda x: x["book"])
+    return jsonify({"ok": True, "books": out})
+
+
+def _collect_grammar_tracked_nodes(enabled_books: list[str]) -> list[dict]:
+    """汇总指定 KG 中所有 tracked level-2 节点（合并视图给 AI 用）。"""
+    kg_dir = CLAUDE_DIR / "knowledge_graph"
+    out = []
+    for b in enabled_books:
+        kg_f = kg_dir / f"{b}.json"
+        if not kg_f.exists(): continue
+        try:
+            kg = json.loads(kg_f.read_text("utf-8"))
+        except Exception:
+            continue
+        if kg.get("kind") != "grammar": continue
+        for n in kg.get("nodes") or []:
+            if n.get("level") == 2 and n.get("tracked"):
+                out.append({
+                    "id": n["id"], "name": n.get("name", ""),
+                    "summary": n.get("summary", ""),
+                    "book": b,
+                })
+    return out
 
 
 @bp.route("/api/grammar-tracked", methods=["GET", "POST"])
 def pdf_api_grammar_tracked():
-    """读 / 写某 PDF 的跟踪节点集。
-    GET ?file=<rel> → {ok, tracked}
-    POST {file, tracked} → {ok}"""
+    """新语义：per-PDF 启用的 grammar KG 书列表。
+    用户在技能树页面 toggle 节点 tracked；PDF reader 这里勾选哪些书启用。
+    分析时合并所有启用书的 tracked 节点。
+    GET ?file=<rel> → {ok, enabled_books: [...]}
+    POST {file, enabled_books: [...]} → {ok}"""
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
         if not rel: return jsonify({"ok": False, "error": "no file"}), 400
-        return jsonify({"ok": True, "tracked": _tracked_get(rel)})
+        data = _load_grammar_enabled(rel)
+        return jsonify({"ok": True, "enabled_books": data})
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
-    tracked = data.get("tracked") or []
-    if not rel or not isinstance(tracked, list):
+    books = data.get("enabled_books") or []
+    if not rel or not isinstance(books, list):
         return jsonify({"ok": False, "error": "invalid"}), 400
-    _tracked_set(rel, [str(t) for t in tracked])
+    _save_grammar_enabled(rel, [str(b) for b in books])
     return jsonify({"ok": True})
+
+
+def _load_grammar_enabled(file_rel: str) -> list[str]:
+    p = _tracked_path(file_rel)
+    if not p.exists(): return []
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        # 兼容老格式（tracked 是 node ids）+ 新格式（enabled_books）
+        if "enabled_books" in d:
+            return list(d["enabled_books"])
+        return []
+    except Exception:
+        return []
+
+
+def _save_grammar_enabled(file_rel: str, books: list[str]):
+    p = _tracked_path(file_rel)
+    p.write_text(json.dumps({"pdf_rel": file_rel, "enabled_books": books},
+                            ensure_ascii=False, indent=2), "utf-8")
 
 
 @bp.route("/api/grammar-analyze", methods=["POST"])
@@ -1525,16 +1596,14 @@ def pdf_api_grammar_analyze():
     rel = (data.get("file") or "").strip()
     if not text or len(text) > 2000:
         return jsonify({"ok": False, "error": "no text / too long"}), 400
-    tracked_ids = data.get("tracked_ids") or _tracked_get(rel)
-    if not tracked_ids:
-        return jsonify({"ok": False, "error": "no tracked grammar nodes; set tracking first"}), 400
-    all_nodes = _grammar_nodes()
-    node_by_id = {n["id"]: n for n in all_nodes}
-    tracked_nodes = [node_by_id[i] for i in tracked_ids if i in node_by_id]
+    enabled_books = data.get("enabled_books") or _load_grammar_enabled(rel)
+    if not enabled_books:
+        return jsonify({"ok": False, "error": "no enabled grammar KGs; enable in settings + track nodes in skilltree"}), 400
+    tracked_nodes = _collect_grammar_tracked_nodes(enabled_books)
     if not tracked_nodes:
-        return jsonify({"ok": False, "error": "tracked ids not in grammar-nodes.json"}), 400
+        return jsonify({"ok": False, "error": "no tracked level-2 nodes in enabled KGs (toggle 跟踪 in skilltree page)"}), 400
 
-    # 缓存 key：text + 排序的 tracked id 列表
+    tracked_ids = [n["id"] for n in tracked_nodes]
     cache_key = hashlib.sha1((text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")).hexdigest()[:20]
     _GRAMMAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_p = _GRAMMAR_CACHE_DIR / f"{cache_key}.json"
@@ -1546,7 +1615,7 @@ def pdf_api_grammar_analyze():
 
     # 构 prompt
     nodes_block = "\n".join(
-        f"- [{n['id']}] **{n['name']}** ({n.get('category','')}): {n.get('summary','')}"
+        f"- [{n['id']}] **{n['name']}** ({n.get('book','')}): {n.get('summary','')}"
         for n in tracked_nodes
     )
     prompt = f"""你是英语语法分析助手。用户选中下面这句英文，请分析它涉及到的语法点（仅限'跟踪的语法点'列表里）。
