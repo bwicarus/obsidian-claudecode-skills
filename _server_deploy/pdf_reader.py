@@ -1355,29 +1355,65 @@ def pdf_api_highlights_delete():
     return jsonify({"ok": True})
 
 
-# ─── 整句翻译（用 MyMemory，不耗 AI）───────────────────────────────────────
+# ─── 整句翻译（DeepL / Haiku / MyMemory 可选）────────────────────────────
 
 @bp.route("/api/translate-sentence", methods=["POST"])
 def pdf_api_translate_sentence():
-    """body: {text} → {ok, zh, source}
-    用 scripts/vocab/translate.translate 路径（DeepL 有 key 用 / 没 key MyMemory）。
-    比 /api/translate 快（不调 AI），适合句子翻译按钮。"""
+    """body: {text, backend?, model?, effort?} → {ok, zh}
+    backend 留空时按 server-config.dict.translate_backend 默认（auto = deepl → mymemory）。"""
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     if not text or len(text) > 2000:
         return jsonify({"ok": False, "error": "no text / too long"}), 400
+    backend = (data.get("backend") or "").strip()
+    model = (data.get("model") or "").strip()
+    effort = (data.get("effort") or "").strip()
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
     if str(vp) not in sys.path:
         sys.path.insert(0, str(vp))
     try:
         from translate import translate as _tr  # type: ignore
-        zh = _tr(text)
+        zh = _tr(text, backend=backend, model=model, effort=effort)
         if zh:
             return jsonify({"ok": True, "zh": zh})
         return jsonify({"ok": False, "error": "translation failed (no result)"})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+@bp.route("/api/translate-config", methods=["GET", "POST"])
+def pdf_api_translate_config():
+    """读写句子翻译配置 (server-config.dict.translate_*)。
+    GET → {ok, backend, model, effort}
+    POST {backend, model, effort} → {ok}
+    """
+    cfg_path = CLAUDE_DIR / "state" / "server-config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text("utf-8"))
+    except Exception:
+        cfg = {}
+    d = cfg.setdefault("dict", {})
+    if request.method == "GET":
+        return jsonify({
+            "ok": True,
+            "backend": d.get("translate_backend", "auto"),
+            "model": d.get("translate_model", "haiku"),
+            "effort": d.get("translate_effort", "low"),
+        })
+    data = request.get_json(silent=True) or {}
+    bk = (data.get("backend") or "").strip().lower()
+    if bk and bk in ("auto", "deepl", "mymemory", "ai"):
+        d["translate_backend"] = bk
+    if "model" in data:
+        d["translate_model"] = (data.get("model") or "").strip()
+    if "effort" in data:
+        d["translate_effort"] = (data.get("effort") or "").strip()
+    try:
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True})
 
 
 # ─── vocab Anki 一键加卡 ────────────────────────────────────────────────────

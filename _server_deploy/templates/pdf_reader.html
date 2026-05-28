@@ -290,6 +290,31 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
     </label>
+    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">🌐 句子翻译源</label>
+    <select id="set-sent-backend" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px" onchange="_toggleAiModelRow()">
+      <option value="auto">auto（DeepL 有 key → MyMemory）</option>
+      <option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>
+      <option value="deepl">DeepL（需 dict.deepl_key）</option>
+      <option value="ai">AI（用主 AI 后端，按下面 model/effort）</option>
+    </select>
+    <div id="set-sent-ai-row" style="display:none;margin-bottom:14px">
+      <label style="display:block;font-size:12px;color:#8a9bb4;margin:8px 0 4px">AI 模型</label>
+      <select id="set-sent-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">
+        <option value="haiku">haiku（最快最便宜，句子翻译够用）</option>
+        <option value="sonnet">sonnet（平衡）</option>
+        <option value="opus">opus（最强）</option>
+        <option value="gpt-5">gpt-5</option>
+        <option value="gpt-5.5">gpt-5.5</option>
+      </select>
+      <label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">思考深度</label>
+      <select id="set-sent-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+        <option value="low">low（翻译用 low 足够）</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="max">max</option>
+      </select>
+    </div>
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
     <div id="set-hl-colors" class="set-hl-row"></div>
     <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
@@ -3120,11 +3145,25 @@ function _getAiOverrides() {
   try { return JSON.parse(localStorage.getItem('pdf-ai-overrides') || '{}'); }
   catch (_) { return {}; }
 }
+function _toggleAiModelRow() {
+  const v = document.getElementById('set-sent-backend').value;
+  document.getElementById('set-sent-ai-row').style.display = (v === 'ai') ? '' : 'none';
+}
+window._toggleAiModelRow = _toggleAiModelRow;
+
 window.openSettings = () => {
   const ov = _getAiOverrides();
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
+  // 拉句子翻译配置
+  fetch('/pdf/api/translate-config').then(r => r.json()).then(d => {
+    if (!d.ok) return;
+    document.getElementById('set-sent-backend').value = d.backend || 'auto';
+    document.getElementById('set-sent-model').value = d.model || 'haiku';
+    document.getElementById('set-sent-effort').value = d.effort || 'low';
+    _toggleAiModelRow();
+  }).catch(()=>{});
   const vu = localStorage.getItem('pdf-vocab-underline');
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   const ct = localStorage.getItem('pdf-click-translate-unmastered');
@@ -3145,6 +3184,16 @@ window.saveSettings = () => {
   try { localStorage.setItem('pdf-vocab-underline', vu ? '1' : '0'); } catch (_) {}
   const ct = document.getElementById('set-click-translate').checked;
   try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
+  // 句子翻译配置 POST 到服务端
+  fetch('/pdf/api/translate-config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      backend: document.getElementById('set-sent-backend').value,
+      model: document.getElementById('set-sent-model').value,
+      effort: document.getElementById('set-sent-effort').value,
+    }),
+  }).catch(()=>{});
   _applyDebugVisibility();
   closeSettings();
   // 切换下划线开关后立刻重渲染当前页

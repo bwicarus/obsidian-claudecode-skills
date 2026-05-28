@@ -78,6 +78,44 @@ def _deepl(text: str, target: str = "zh-CN") -> str | None:
     return None
 
 
+def _ai_translate(text: str, target: str = "zh-CN", model: str = "haiku", effort: str = "low") -> str | None:
+    """用 AI 后端翻译（claude_cli / codex_cli / openai_api / ollama）。
+    比 MyMemory 质量高，但耗 AI 额度。"""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(PROJECT_ROOT / "_client" / "core"))
+        _sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        _sys.path.insert(0, str(PROJECT_ROOT / "_server_deploy"))
+        from ai_backends import make_backend
+        try:
+            from qa_server import get_cfg
+            cfg_all = get_cfg()
+        except Exception:
+            cfg_all = json.loads(CFG_PATH.read_text("utf-8")) if CFG_PATH.exists() else {}
+        backend_name = cfg_all.get("ai_backend", "claude_cli")
+        settings = dict((cfg_all.get("ai") or {}).get(backend_name, {}))
+        if model:  settings["model"] = model
+        if effort: settings["effort"] = effort
+        ad = make_backend(backend_name, settings)
+        target_zh = "中文" if target.startswith("zh") else target
+        sys_msg = {"role": "system", "content": "你是专业英汉翻译助手。只输出译文，不要解释或注释。"}
+        user_msg = {"role": "user", "content": f"把下面这句翻译成{target_zh}：\n\n{text}"}
+        zh = ad.chat([sys_msg, user_msg])
+        if zh:
+            zh = zh.strip()
+            # 去掉 AI 可能加的引号 / 前缀
+            if zh.startswith(('"', '"', "'", "「")) and zh.endswith(('"', '"', "'", "」")):
+                zh = zh[1:-1].strip()
+            for prefix in ["译文：", "翻译：", "Translation:", "Answer:"]:
+                if zh.startswith(prefix):
+                    zh = zh[len(prefix):].strip()
+                    break
+            return zh or None
+    except Exception:
+        return None
+    return None
+
+
 def _mymemory(text: str, target: str = "zh-CN") -> str | None:
     """MyMemory free。匿名 5000 字/天；带 de=email 50000 字/天。"""
     src_target = f"en|{target if target.startswith('zh') else target}"
@@ -100,25 +138,52 @@ def _mymemory(text: str, target: str = "zh-CN") -> str | None:
         return None
 
 
-def translate(text: str, target: str = "zh-CN") -> str:
-    """主入口。返回中文翻译；失败返回空。"""
+def translate(text: str, target: str = "zh-CN",
+              backend: str = "", model: str = "", effort: str = "") -> str:
+    """主入口。返回中文翻译；失败返回空。
+
+    backend 优先级：
+      - 显式参数 > server-config.json dict.translate_backend > 默认 'mymemory'
+      - 'deepl' / 'ai' / 'mymemory' / 'auto'（'auto' = deepl → mymemory）
+    """
     text = (text or "").strip()
     if not text:
         return ""
-    # 已是中文（无英文字母）→ 不译
     if not re.search(r"[A-Za-z]", text):
         return ""
     cached = _cache_get(text, target)
     if cached is not None:
         return cached
-    tr = _deepl(text, target)
-    if tr:
-        _cache_put(text, target, tr, "deepl")
-        return tr
-    tr = _mymemory(text, target)
-    if tr:
-        _cache_put(text, target, tr, "mymemory")
-        return tr
+
+    cfg = _cfg()
+    if not backend:
+        backend = (cfg.get("translate_backend") or "auto").strip().lower()
+    if not model:
+        model = (cfg.get("translate_model") or "haiku").strip()
+    if not effort:
+        effort = (cfg.get("translate_effort") or "low").strip()
+
+    sources = []
+    if backend == "deepl":
+        sources = ["deepl"]
+    elif backend == "ai":
+        sources = ["ai"]
+    elif backend == "mymemory":
+        sources = ["mymemory"]
+    else:  # auto
+        sources = ["deepl", "mymemory"]
+
+    for src in sources:
+        tr = None
+        if src == "deepl":
+            tr = _deepl(text, target)
+        elif src == "ai":
+            tr = _ai_translate(text, target, model=model, effort=effort)
+        elif src == "mymemory":
+            tr = _mymemory(text, target)
+        if tr:
+            _cache_put(text, target, tr, src if src != "ai" else f"ai-{model}")
+            return tr
     return ""
 
 
