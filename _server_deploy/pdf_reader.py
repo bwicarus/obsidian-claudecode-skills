@@ -556,7 +556,13 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
             text = "".join(c["c"] for c in cur_chars).strip()
             text = re.sub(r"\s+", " ", text)[:500] if text else ""
             rects = _sentence_rects(cur_chars)
+            first_char = None
             last_char = None
+            for c in cur_chars:
+                if not c.get("sp"):
+                    first_char = [round(c["x0"], 2), round(c["y0"], 2),
+                                  round(c["x1"], 2), round(c["y1"], 2)]
+                    break
             for c in reversed(cur_chars):
                 if not c.get("sp"):
                     last_char = [round(c["x0"], 2), round(c["y0"], 2),
@@ -566,6 +572,7 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 "text": text, "rects": rects,
                 "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
                 "total_words": cur_total_words,
+                "first_char": first_char,
                 "last_char": last_char,
             })
         cur_chars = []

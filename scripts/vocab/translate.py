@@ -35,7 +35,8 @@ def _cache_path(text: str, target: str) -> Path:
     return CACHE_DIR / f"tr-{sha}.json"
 
 
-def _cache_get(text: str, target: str, ttl_days: int = 90) -> str | None:
+def _cache_get(text: str, target: str, ttl_days: int = 36500) -> str | None:
+    """翻译缓存读取。默认 TTL 100 年（实际永久；用户手动删 cache 文件才会重翻）。"""
     p = _cache_path(text, target)
     if not p.exists(): return None
     try:
