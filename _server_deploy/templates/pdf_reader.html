@@ -99,8 +99,9 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 .gb-ana .a-ex{margin:4px 0 0 16px;padding:0;font-size:10px;color:#7a8497}
 
 @media (max-width:900px){
-  #grammar-panel{width:88vw;max-width:none}
-  body.grammar-open #main{padding-right:12px}
+  /* 窄屏也挤压 PDF（不再全屏盖住），让左侧 PDF 缩小后完整显示 */
+  #grammar-panel{width:58vw;max-width:none}
+  body.grammar-open #main{padding-right:calc(58vw + 10px)}
 }
 
 /* 侧栏抽屉：默认收起，点 header 按钮滑出 */
@@ -2633,14 +2634,16 @@ function openGrammarPanel() {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
     _setupGrammarScrollLink();
-    // 抽屉打开会让 #main 变窄 → ResizeObserver 重 render → _positionGrammarBlocks 跟进；这里先按当前布局定位一次
-    requestAnimationFrame(_positionGrammarBlocks);
+    // 主动触发 PDF 缩放：不只靠 ResizeObserver（iPad Safari 上 padding 变化可能不及时回调）
+    // 等下一帧让 #main 的 padding-right 真正生效再算 content-box 宽
+    requestAnimationFrame(() => { _refitToWidth(true); _positionGrammarBlocks(); });
   }
 }
 window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
   _hideDepTip();
+  requestAnimationFrame(() => { _refitToWidth(true); _positionGrammarBlocks(); });
 };
 
 // ── 侧栏 ↔ PDF 双向同步滚动（按滚动比例联动；lock 防回弹循环）──
