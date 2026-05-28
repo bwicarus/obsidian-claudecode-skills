@@ -51,11 +51,15 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 #grammar-panel-header h2{margin:0;font-size:13px;color:#cfe6ff;font-weight:600}
 #grammar-panel-header button{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:2px 8px}
 #grammar-panel-header button:hover{color:#fff}
-#grammar-panel-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:10px}
+#grammar-panel-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;position:relative}
+/* spacer 撑到 PDF 等高，让右侧可滚 + 与左侧 1:1 对齐 */
+#grammar-panel-spacer{position:relative;width:100%}
 
-/* 一次分析 = 一个可折叠的框 */
-.grammar-block{margin-bottom:10px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
+/* 一次分析 = 一个绝对定位在对应句子 y 的可折叠框 */
+.grammar-block{position:absolute;left:8px;right:8px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
+.grammar-block.open{z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
 .grammar-block.focus{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.3)}
+.grammar-block.open.focus{box-shadow:0 6px 18px rgba(0,0,0,.5),0 0 0 1px rgba(251,191,36,.4)}
 .grammar-block .gb-header{display:flex;align-items:center;gap:7px;padding:9px 10px;cursor:pointer;user-select:none}
 .grammar-block .gb-header:hover{background:#141d33}
 .grammar-block .gb-header .gb-title{flex:1;min-width:0;font-size:12px;color:#cfe6ff;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -329,7 +333,8 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
     <button onclick="closeGrammarPanel()" title="关闭">✕</button>
   </div>
   <div id="grammar-panel-body">
-    <!-- 分析块流式插这里 -->
+    <div id="grammar-panel-spacer"></div>
+    <!-- 分析框绝对定位在对应句子的 y -->
   </div>
 </aside>
 <div id="dep-tip" class="dep-tip"></div>
@@ -823,11 +828,12 @@ async function _refitToWidth(force) {
       wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
-    // 按比例恢复滚动
+    // 按比例恢复滚动 + 重定位语法分析框（句子 y 随 scale 变了）
     requestAnimationFrame(() => {
       if (container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
+      if (typeof _positionGrammarBlocks === 'function') _positionGrammarBlocks();
     });
   } finally {
     _refitBusy = false;
@@ -2620,6 +2626,8 @@ function openGrammarPanel() {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
     _setupGrammarScrollLink();
+    // 抽屉打开会让 #main 变窄 → ResizeObserver 重 render → _positionGrammarBlocks 跟进；这里先按当前布局定位一次
+    requestAnimationFrame(_positionGrammarBlocks);
   }
 }
 window.closeGrammarPanel = () => {
@@ -2636,18 +2644,42 @@ function _setupGrammarScrollLink() {
   const panel = document.getElementById('grammar-panel');
   if (!main || !body || !panel || body.dataset.linkBound === '1') return;
   body.dataset.linkBound = '1';
+  // spacer 撑到与 PDF 等高、block.top 用 main 内的 y → 两边同坐标系，scrollTop 直接相等即对齐
   const sync = (src, dst) => {
     if (_scrollSyncLock || !panel.classList.contains('open')) return;
-    const sMax = src.scrollHeight - src.clientHeight;
-    const dMax = dst.scrollHeight - dst.clientHeight;
-    if (dMax <= 0) return;
-    const ratio = sMax > 0 ? src.scrollTop / sMax : 0;
-    _scrollSyncLock = true;                       // 设 dst.scrollTop 会触发 dst 的 scroll，锁住它别回弹
-    dst.scrollTop = ratio * dMax;
+    _scrollSyncLock = true;                       // 设 dst.scrollTop 会触发其 scroll，锁住别回弹
+    dst.scrollTop = src.scrollTop;
     requestAnimationFrame(() => { _scrollSyncLock = false; });
   };
   main.addEventListener('scroll', () => sync(main, body), {passive: true});
   body.addEventListener('scroll', () => sync(body, main), {passive: true});
+}
+
+// 句子在 #main 滚动坐标系里的 y（block.top 用同一坐标）
+function _blockTopFor(pageNum, topRatio) {
+  const pw = document.querySelector(`.page-wrap[data-page-num="${pageNum}"]`);
+  const container = document.getElementById('page-container');
+  if (!pw || !container) return 0;
+  let y = pw.offsetTop + (topRatio || 0) * pw.offsetHeight;
+  if (container.offsetParent) y += container.offsetTop;
+  return y;
+}
+function _refreshSpacerHeight() {
+  const spacer = document.getElementById('grammar-panel-spacer');
+  const container = document.getElementById('page-container');
+  if (!spacer || !container) return;
+  let h = container.offsetHeight;
+  if (container.offsetParent) h += container.offsetTop;
+  spacer.style.height = (h + 60) + 'px';
+}
+// PDF 缩放/重渲染后：句子 y 变了，重定位所有分析框 + 重算 spacer
+function _positionGrammarBlocks() {
+  const spacer = document.getElementById('grammar-panel-spacer');
+  if (!spacer) return;
+  spacer.querySelectorAll('.grammar-block[data-page-num]').forEach(b => {
+    b.style.top = _blockTopFor(parseInt(b.dataset.pageNum,10), parseFloat(b.dataset.topRatio||'0')) + 'px';
+  });
+  _refreshSpacerHeight();
 }
 
 // ── POS 配色 + 中文短标签（displaCy 风格）──
@@ -2666,6 +2698,8 @@ function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g
 // ── 分析块：标题栏（可点击折叠/展开）+ 内容区 ──
 function _addLoadingBlock(id, sentence, pageNum, topRatio) {
   const body = document.getElementById('grammar-panel-body');
+  const spacer = document.getElementById('grammar-panel-spacer');
+  const main = document.getElementById('main');
   const block = document.createElement('div');
   block.className = 'grammar-block focus open';   // loading 时默认展开看进度
   block.id = id;
@@ -2678,8 +2712,11 @@ function _addLoadingBlock(id, sentence, pageNum, topRatio) {
      </div>
      <div class="gb-content"><div class="gb-loading">⏳ 分析中…</div></div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
-  body.insertBefore(block, body.firstChild);   // 最新在最上
-  body.scrollTop = 0;
+  _refreshSpacerHeight();
+  block.style.top = _blockTopFor(pageNum, topRatio) + 'px';   // 绝对定位到对应句子 y
+  spacer.appendChild(block);
+  // 抽屉滚到与左侧 PDF 同一位置（用户刚选的句子此刻就在视口）
+  if (main) body.scrollTop = main.scrollTop;
   return block;
 }
 function _fillBlockError(block, msg) {
