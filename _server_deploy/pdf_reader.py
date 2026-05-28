@@ -30,6 +30,12 @@ from flask import (
 CLAUDE_DIR    = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 
+# spaCy 本地句法分析（独立 venv，subprocess 调用；装上则语法分析走它、零 AI）
+SPACY_PY     = Path(os.environ.get("SPACY_PYTHON", "/home/bwicarus/spacy-venv/bin/python"))
+SPACY_SCRIPT = CLAUDE_DIR / "scripts" / "spacy_parse.py"
+def _spacy_available() -> bool:
+    return SPACY_PY.exists() and SPACY_SCRIPT.exists()
+
 bp = Blueprint("pdf_reader", __name__, url_prefix="/pdf")
 
 
@@ -1582,9 +1588,62 @@ def _save_grammar_enabled(file_rel: str, books: list[str]):
                             ensure_ascii=False, indent=2), "utf-8")
 
 
+def _spacy_grammar(sentence: str) -> dict | None:
+    """用 spaCy venv 子进程做词性 + 依存分析；ECDICT 补每词中文义、MyMemory 译整句。
+    返回 {tokens, deps, sentence_zh}；失败返回 None（调用方回退 AI）。"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [str(SPACY_PY), str(SPACY_SCRIPT), sentence],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        parsed = json.loads(r.stdout)
+    except Exception:
+        return None
+    tokens = parsed.get("tokens") or []
+    deps = parsed.get("deps") or []
+    if not tokens:
+        return None
+    # ECDICT 补每个词的简明中文义（离线、毫秒级）
+    try:
+        vp = str(CLAUDE_DIR / "scripts" / "vocab")
+        if vp not in sys.path:
+            sys.path.insert(0, vp)
+        import dict_sources  # type: ignore
+        for tk in tokens:
+            w = (tk.get("text") or "").strip()
+            if not w or not w[0].isalpha():
+                continue
+            try:
+                ec = dict_sources.lookup_ecdict(w)
+                if ec:
+                    for d in dict_sources._ec_definitions(ec):
+                        if d.get("zh"):
+                            tk["zh"] = d["zh"][:30]
+                            break
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 整句翻译（MyMemory/翻译源，带缓存）
+    sentence_zh = ""
+    try:
+        vp = str(CLAUDE_DIR / "scripts" / "vocab")
+        if vp not in sys.path:
+            sys.path.insert(0, vp)
+        from translate import translate as _tr  # type: ignore
+        # 强制 auto(deepl→mymemory) 绕开 AI——否则 dict.translate_backend=ai 会让翻译走 claude_cli(~6s)
+        sentence_zh = _tr(sentence, backend="auto") or ""
+    except Exception:
+        pass
+    return {"tokens": tokens, "deps": deps, "sentence_zh": sentence_zh}
+
+
 @bp.route("/api/grammar-analyze", methods=["POST"])
 def pdf_api_grammar_analyze():
-    """AI 分析选中句段相对 tracked 语法节点。
+    """spaCy（默认，零 AI）/ AI（兜底）分析句子词性+依存，相对 tracked 语法节点。
     body: {text, sentence?, file, tracked_ids?, model?, effort?}
     返回 {ok, analyses: [{node_id, node_name, point, explanation, examples}]}
     缓存：state/grammar-cache/<sha1(text + sorted(ids))>.json
@@ -1613,6 +1672,24 @@ def pdf_api_grammar_analyze():
             return jsonify({"ok": True, "from_cache": True, **json.loads(cache_p.read_text("utf-8"))})
         except Exception:
             pass
+
+    # ── 优先 spaCy 本地分析（词性 + 依存，零 AI、秒级）──
+    if _spacy_available():
+        sp = _spacy_grammar(sentence)
+        if sp is not None:
+            out = {
+                "sentence_zh": sp.get("sentence_zh", ""),
+                "tokens":      sp.get("tokens", []),
+                "deps":        sp.get("deps", []),
+                "analyses":    [],   # 语法点匹配暂不在 spaCy 路径做（后续可加规则）
+                "engine":      "spacy",
+            }
+            try:
+                cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
+            except Exception:
+                pass
+            return jsonify({"ok": True, **out})
+        # spaCy 失败则继续走下面 AI 兜底
 
     # 构 prompt
     nodes_block = "\n".join(
