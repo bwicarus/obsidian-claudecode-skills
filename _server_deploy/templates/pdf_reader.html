@@ -47,12 +47,21 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #grammar-panel{position:fixed;top:48px;right:0;bottom:0;width:38vw;max-width:560px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:8;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
 #grammar-panel.open{display:flex}
 body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
-#grammar-panel-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #2a3550}
-#grammar-panel-header h2{margin:0;flex:1;font-size:13px;color:#cfe6ff;font-weight:600}
-#grammar-panel-header button{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:2px 8px}
-#grammar-panel-header button:hover{color:#fff}
-/* 流式堆叠：按时间顺序，最新在最上；不再撑高/绝对定位/左右对齐 */
-#grammar-panel-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:10px 10px 40px}
+/* 顶部 tab 栏：语法分析 / 知识点 切换 */
+#side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
+#side-tabs .side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 11px;border-radius:6px;white-space:nowrap}
+#side-tabs .side-tab:hover{background:#1a2540;color:#cfe6ff}
+#side-tabs .side-tab.active{background:#1a2540;color:#7dd3fc;font-weight:600}
+#side-tabs .side-tab-sp{flex:1}
+#side-tabs .side-icon-btn{background:transparent;border:none;color:#7a8497;font-size:15px;cursor:pointer;padding:3px 7px}
+#side-tabs .side-icon-btn:hover{color:#fff}
+/* pane：默认隐藏，active 显示并撑满 */
+.side-pane{display:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0}
+.side-pane.active{display:block}
+#side-pane-kg{padding:14px}
+.side-pane .side-h2{font-size:13px;color:#8a9bb4;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px;font-weight:600}
+/* 流式堆叠：按时间顺序，最新在最上 */
+#grammar-panel-body{padding:10px 10px 40px}
 
 /* 一次分析 = 一个可折叠卡片，文档流堆叠 */
 .grammar-block{position:relative;margin-bottom:12px;border:1px solid #2a3550;border-radius:8px;background:#0d1322;overflow:hidden}
@@ -112,12 +121,7 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
   body.grammar-open #main{padding-right:calc(58vw + 10px)}
 }
 
-/* 侧栏抽屉：默认收起，点 header 按钮滑出 */
-#sidebar{position:fixed;top:48px;right:0;bottom:0;width:320px;background:#10162a;border-left:1px solid #2a3550;overflow-y:auto;padding:14px;transform:translateX(100%);transition:transform .22s ease;z-index:10;box-shadow:-8px 0 24px rgba(0,0,0,.4)}
-#sidebar.open{transform:translateX(0)}
-#sidebar-close{position:absolute;top:8px;right:8px;background:transparent;border:none;color:#8a9bb4;font-size:18px;cursor:pointer;padding:4px 8px;border-radius:4px}
-#sidebar-close:hover{background:#1a2540;color:#fff}
-#sidebar h2{font-size:13px;color:#8a9bb4;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px;font-weight:600}
+/* 知识点节点卡（在统一面板的「知识点」pane 内）*/
 .kg-node{background:#0d1322;border:1px solid #1f2740;border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font-size:12px}
 .kg-node:hover{background:#162045;border-color:#3b6db5}
 .kg-node .lbl{font-weight:600;color:#cfe6ff}
@@ -292,9 +296,6 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 .set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}
 .set-hl-row .del:hover{background:#9a3232}
 
-@media (max-width:900px){
-  #sidebar{width:85vw}
-}
 </style>
 </head>
 <body>
@@ -330,21 +331,21 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
     </div>
   </div>
 </div>
-<aside id="sidebar">
-  <button id="sidebar-close" onclick="toggleSidebar()" title="关闭">✕</button>
-  <h2>当前页对应知识点</h2>
-  <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
-</aside>
-
-<!-- 右侧语法分析抽屉：分析卡按时间堆叠，最新在最上 -->
+<!-- 右侧统一面板：顶部 tab 切换「语法分析 / 知识点」-->
 <aside id="grammar-panel">
-  <div id="grammar-panel-header">
-    <h2>📊 语法分析</h2>
-    <button onclick="clearGrammarBlocks()" title="清空全部分析" style="font-size:11px">🗑 清空</button>
-    <button onclick="closeGrammarPanel()" title="关闭">✕</button>
+  <div id="side-tabs">
+    <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')">📊 语法分析</button>
+    <button class="side-tab" data-pane="kg" onclick="switchSideTab('kg')">📋 知识点</button>
+    <span class="side-tab-sp"></span>
+    <button class="side-icon-btn" id="side-clear" onclick="clearGrammarBlocks()" title="清空全部分析">🗑</button>
+    <button class="side-icon-btn" onclick="closeGrammarPanel()" title="关闭">✕</button>
   </div>
-  <div id="grammar-panel-body">
-    <!-- 分析卡按时间顺序堆叠，最新在最上 -->
+  <div id="grammar-panel-body" class="side-pane active" data-pane="grammar">
+    <!-- 语法分析卡按时间顺序堆叠，最新在最上 -->
+  </div>
+  <div id="side-pane-kg" class="side-pane" data-pane="kg">
+    <h2 class="side-h2">当前页对应知识点</h2>
+    <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
   </div>
 </aside>
 <div id="dep-tip" class="dep-tip"></div>
@@ -797,7 +798,22 @@ window.zoomChange = async (delta) => {
   if (readMode === 'continuous') await setupContinuousMode();
   else renderPage(currentPage);
 };
-window.toggleSidebar = () => document.getElementById('sidebar').classList.toggle('open');
+// 「📋 知识点」按钮：打开统一面板并切到知识点 tab（再点同 tab 则关闭）
+window.toggleSidebar = () => {
+  const p = document.getElementById('grammar-panel');
+  const onKg = document.querySelector('#side-tabs .side-tab[data-pane="kg"]')?.classList.contains('active');
+  if (p.classList.contains('open') && onKg) { closeGrammarPanel(); return; }
+  openGrammarPanel();
+  switchSideTab('kg');
+};
+// 切换 tab：语法分析 / 知识点
+window.switchSideTab = (pane) => {
+  document.querySelectorAll('#side-tabs .side-tab').forEach(t => t.classList.toggle('active', t.dataset.pane === pane));
+  document.querySelectorAll('#grammar-panel .side-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === pane));
+  // 🗑 清空按钮只在语法 tab 显示
+  const clr = document.getElementById('side-clear');
+  if (clr) clr.style.display = (pane === 'grammar') ? '' : 'none';
+};
 window.toggleReadMode = async () => {
   readMode = readMode === 'single' ? 'continuous' : 'single';
   try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
@@ -2605,6 +2621,7 @@ window.onGrammarAnalyze = async () => {
   const text = lastSelText.trim();   // 用户选中的子串（焦点）
   toolbar.classList.remove('open');
   openGrammarPanel();
+  switchSideTab('grammar');   // 分析时切到语法 tab
   const blockId = 'gb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const block = _addLoadingBlock(blockId, sentence);
   try {
@@ -2728,12 +2745,14 @@ window.closeGrammarPanel = () => {
   _hideDepTip();
   requestAnimationFrame(() => { _refitToWidth(true); });
 };
-// 顶栏「📊 语法」按钮：手动显示/隐藏侧栏（查看历史分析卡，不触发新分析）
+// 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）
 window.toggleGrammarPanel = () => {
   const p = document.getElementById('grammar-panel');
   if (!p) return;
-  if (p.classList.contains('open')) closeGrammarPanel();
-  else openGrammarPanel();
+  const onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
+  if (p.classList.contains('open') && onGr) { closeGrammarPanel(); return; }
+  openGrammarPanel();
+  switchSideTab('grammar');
 };
 // 清空侧栏内全部分析卡
 window.clearGrammarBlocks = () => {
