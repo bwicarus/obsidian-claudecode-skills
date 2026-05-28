@@ -10,7 +10,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 /* 用 dvh 避开 iOS Safari 100vh 包含 toolbar 高度让 header 挤出可视区的 bug */
 #app{display:flex;flex-direction:column;height:100vh;height:100dvh}
 #header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px;flex-wrap:wrap;overflow-x:auto}
-#header h1{font-size:14px;margin:0;color:#cfe6ff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 文件名不再 flex:1 撑开 → 后面的按钮都紧跟在文件名右侧靠左排，右上角让给侧栏 */
+#header h1{font-size:14px;margin:0;color:#cfe6ff;flex:0 1 auto;max-width:28vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
 #header button:hover{background:#2c3e6a;border-color:#3b6db5}
 #header input[type=number]{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:4px 8px;width:60px;font-size:12px}
@@ -44,9 +45,15 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .textLayer .endOfContent.active{inset:0}
 
 /* 右侧语法分析抽屉：流式堆叠的依存句法图（displaCy 风格） */
-#grammar-panel{position:fixed;top:48px;right:0;bottom:0;width:38vw;max-width:560px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:8;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
+/* 侧栏从顶部贯通用全高度（top:0），盖住 header 右侧空白区 */
+#grammar-panel{position:fixed;top:0;right:0;bottom:0;width:38vw;max-width:560px;background:#10162a;border-left:1px solid #2a3550;display:none;flex-direction:column;z-index:20;box-shadow:-6px 0 16px rgba(0,0,0,.4)}
 #grammar-panel.open{display:flex}
-body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
+/* 右边缘把手：竖排小标签，点击展开面板；面板展开时隐藏 */
+#side-handle{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:15;writing-mode:vertical-rl;background:#1a2540;border:1px solid #2a3550;border-right:none;border-radius:8px 0 0 8px;color:#7dd3fc;padding:14px 6px;font-size:12px;letter-spacing:2px;cursor:pointer;box-shadow:-2px 0 10px rgba(0,0,0,.35);user-select:none}
+#side-handle:hover{background:#2c3e6a;color:#fff}
+body.grammar-open #side-handle{display:none}
+/* 侧栏展开时 header + main 都让出右侧空间，按钮始终在侧栏左侧可见 */
+body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,560px) + 12px)}
 /* 顶部 tab 栏：语法分析 / 知识点 切换 */
 #side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
 #side-tabs .side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 11px;border-radius:6px;white-space:nowrap}
@@ -118,7 +125,7 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 @media (max-width:900px){
   /* 窄屏也挤压 PDF（不再全屏盖住），让左侧 PDF 缩小后完整显示 */
   #grammar-panel{width:58vw;max-width:none}
-  body.grammar-open #main{padding-right:calc(58vw + 10px)}
+  body.grammar-open #main,body.grammar-open #header{padding-right:calc(58vw + 10px)}
 }
 
 /* 知识点节点卡（在统一面板的「知识点」pane 内）*/
@@ -310,8 +317,6 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
     <button onclick="changePage(1)" title="下一页">▶</button>
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
-    <button onclick="toggleSidebar()" title="对应知识点">📋 知识点</button>
-    <button onclick="toggleGrammarPanel()" title="显示/隐藏语法分析侧栏">📊 语法</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <div id="main">
@@ -331,6 +336,9 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
     </div>
   </div>
 </div>
+<!-- 屏幕右边缘把手：点击展开右侧面板（关闭时显示）-->
+<div id="side-handle" onclick="toggleGrammarPanel()" title="展开侧栏：语法分析 / 知识点">语法 · 知识点</div>
+
 <!-- 右侧统一面板：顶部 tab 切换「语法分析 / 知识点」-->
 <aside id="grammar-panel">
   <div id="side-tabs">
