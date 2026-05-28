@@ -1384,6 +1384,7 @@ function _bindSentBtnDrag(btnEl, layer) {
     return pw && pw.__charDrag;
   };
   btnEl.addEventListener('mousedown', (e) => {
+    e.preventDefault();   // 对齐 cl mousedown：阻止产生原生 selection，否则 checkSelection 会覆盖 char-layer 选中
     e.stopPropagation();
     const api = getApi(); if (!api) return;
     const p = api.ptToLocal(e.clientX, e.clientY);
@@ -2555,12 +2556,14 @@ function paintSelectionOverlay() {
 }
 
 function checkSelection() {
-  paintSelectionOverlay();
   const sel = window.getSelection();
   const txt = (sel.toString() || '').trim();
   if (!txt || txt.length < 2) {
+    // 无原生 selection：char-layer 自定义选中(画在 sel-overlay、不走原生 selection)还在的话别清掉它
+    if (!(_charSel && lastSelText)) paintSelectionOverlay();
     return;
   }
+  paintSelectionOverlay();
   lastSelText = txt;
     _updateSelPreview(lastSelText);
   try {
