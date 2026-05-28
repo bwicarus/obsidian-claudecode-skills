@@ -1627,18 +1627,9 @@ def _spacy_grammar(sentence: str) -> dict | None:
                 pass
     except Exception:
         pass
-    # 整句翻译（MyMemory/翻译源，带缓存）
-    sentence_zh = ""
-    try:
-        vp = str(CLAUDE_DIR / "scripts" / "vocab")
-        if vp not in sys.path:
-            sys.path.insert(0, vp)
-        from translate import translate as _tr  # type: ignore
-        # 强制 auto(deepl→mymemory) 绕开 AI——否则 dict.translate_backend=ai 会让翻译走 claude_cli(~6s)
-        sentence_zh = _tr(sentence, backend="auto") or ""
-    except Exception:
-        pass
-    return {"tokens": tokens, "deps": deps, "sentence_zh": sentence_zh}
+    # 整句翻译 + 语法点讲解交给 AI 流式（/api/grammar-stream，翻译标志先出）
+    # 这里只出词性 + 依存，秒级零 AI
+    return {"tokens": tokens, "deps": deps, "sentence_zh": ""}
 
 
 @bp.route("/api/grammar-analyze", methods=["POST"])
@@ -1782,6 +1773,50 @@ def pdf_api_grammar_analyze():
     }
     cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
     return jsonify({"ok": True, **out})
+
+
+@bp.route("/api/grammar-stream", methods=["POST"])
+def pdf_api_grammar_stream():
+    """AI 流式：先输出整句翻译（[[TRANS]]..[[/TRANS]] 标志先到先显示），
+    再输出语法点讲解（[[POINTS]] JSON [[/POINTS]]）。配合 spaCy 出的依存图用。
+    依存图本身不在这里——spaCy 已经出了，这里只补「翻译 + 语法点讲解」。"""
+    from flask import Response, stream_with_context
+    data = request.get_json(silent=True) or {}
+    sentence = (data.get("sentence") or "").strip()
+    text = (data.get("text") or "").strip()
+    rel = (data.get("file") or "").strip()
+    if not sentence:
+        return jsonify({"ok": False, "error": "no sentence"}), 400
+    enabled_books = data.get("enabled_books") or _load_grammar_enabled(rel)
+    tracked_nodes = _collect_grammar_tracked_nodes(enabled_books) if enabled_books else []
+    nodes_block = "\n".join(
+        f"- {n['name']}：{n.get('summary','')}" for n in tracked_nodes
+    ) or "（无跟踪语法点，[[POINTS]] 直接输出 []）"
+    prompt = f"""你是英语句子分析助手。严格按下面顺序、用标志输出两部分，标志必须原样出现、不要加代码块围栏。
+
+第一部分——整句中文翻译（自然通顺）：
+[[TRANS]]这里写整句翻译[[/TRANS]]
+
+第二部分——语法点讲解，只讲【跟踪语法点】里命中的，JSON 数组：
+[[POINTS]][{{"point":"语法点名称","phrase":"句中实例短语","explanation":"针对该句的简明讲解","examples":["1-2个相似例句"]}}][[/POINTS]]
+没有命中的语法点就输出 [[POINTS]][][[/POINTS]]。
+
+【待分析句子】
+{sentence}
+
+【用户特别关注的片段】
+{text}
+
+【跟踪语法点】
+{nodes_block}
+
+只输出上面两段（含标志），先翻译后语法点，不要任何额外说明。"""
+    model = (data.get("model") or "haiku").strip()
+    effort = (data.get("effort") or "low").strip()
+    return Response(
+        stream_with_context(_sse_stream(prompt, model, effort)),
+        mimetype="text/event-stream",
+    )
 
 
 def register_pdf_reader(app):

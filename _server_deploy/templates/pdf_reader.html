@@ -72,6 +72,8 @@ body.grammar-open #main{padding-right:calc(min(38vw,560px) + 12px)}
 .grammar-block .gb-diagram{overflow-x:auto;overflow-y:hidden;padding:4px 8px 8px;-webkit-overflow-scrolling:touch}
 .grammar-block .gb-diagram svg{display:block}
 .grammar-block .gb-loading{padding:14px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
+.grammar-block .gb-pending{opacity:.65;font-style:italic;animation:gbpulse 1.2s ease-in-out infinite}
+@keyframes gbpulse{0%,100%{opacity:.4}50%{opacity:.8}}
 
 /* displaCy 词 / 词性标签 / 弧线 */
 .dep-token{cursor:pointer}
@@ -2620,11 +2622,97 @@ window.onGrammarAnalyze = async () => {
     }
     const d = await r.json();
     if (!d.ok) { _fillBlockError(block, d.error || '?'); return; }
-    _fillGrammarBlock(block, d, sentence);
+    _fillGrammarBlock(block, d, sentence);          // spaCy 依存图秒出（翻译/语法点先占位）
+    if (d.engine === 'spacy') _streamGrammar(block, sentence, text);  // AI 流式补翻译(先)+语法点
   } catch (e) {
     _fillBlockError(block, e.message);
   }
 };
+
+// AI 流式：先收翻译（[[TRANS]]..[[/TRANS]] 标志先出 → 立刻显示），再收语法点（[[POINTS]] JSON [[/POINTS]]）
+async function _streamGrammar(block, sentence, text) {
+  if (!block) return;
+  let resp;
+  try {
+    resp = await fetch('/pdf/api/grammar-stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
+      body: JSON.stringify({sentence, text, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
+    });
+  } catch (e) { _setBlockTransFail(block); return; }
+  if (!resp.ok || !resp.body) { _setBlockTransFail(block); return; }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let sseBuf = '', acc = '', transDone = false, pointsDone = false;
+  const tryParse = () => {
+    if (!transDone) {
+      const tm = acc.match(/\[\[TRANS\]\]([\s\S]*?)\[\[\/TRANS\]\]/);
+      if (tm) { _setBlockTrans(block, tm[1].trim()); transDone = true; }
+    }
+    if (!pointsDone) {
+      const pm = acc.match(/\[\[POINTS\]\]([\s\S]*?)\[\[\/POINTS\]\]/);
+      if (pm) { _setBlockPoints(block, pm[1].trim()); pointsDone = true; }
+    }
+  };
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      sseBuf += dec.decode(value, {stream: true});
+      const events = sseBuf.split('\n\n');
+      sseBuf = events.pop();
+      for (const ev of events) {
+        const m = ev.match(/^data: (.*)$/m);
+        if (!m) continue;
+        try { const j = JSON.parse(m[1]); if (j.text) acc += j.text; } catch {}
+      }
+      tryParse();
+    }
+  } catch (e) { /* 流中断 */ }
+  // 兜底：流结束仍未解析到标志，尽量从残文里抠
+  if (!transDone) {
+    const tm = acc.match(/\[\[TRANS\]\]([\s\S]*?)(\[\[\/TRANS\]\]|\[\[POINTS\]\]|$)/);
+    if (tm && tm[1].trim()) _setBlockTrans(block, tm[1].trim());
+    else _setBlockTransFail(block);
+  }
+  if (!pointsDone) {
+    const pm = acc.match(/\[\[POINTS\]\]([\s\S]*?)(\[\[\/POINTS\]\]|$)/);
+    _setBlockPoints(block, pm ? pm[1].trim() : '[]');
+  }
+}
+function _setBlockTrans(block, zh) {
+  const el = block.querySelector('.gb-trans');
+  if (el) { el.classList.remove('gb-pending'); el.textContent = '🌐 ' + zh; }
+  const titleEl = block.querySelector('.gb-title');
+  if (titleEl && zh) titleEl.textContent = zh;
+}
+function _setBlockTransFail(block) {
+  const el = block.querySelector('.gb-trans');
+  if (el) { el.classList.remove('gb-pending'); el.textContent = '🌐 （翻译失败，可重试）'; }
+}
+function _setBlockPoints(block, jsonStr) {
+  const wrap = block.querySelector('.gb-analyses');
+  if (!wrap) return;
+  let arr = [];
+  try { arr = JSON.parse(jsonStr) || []; } catch { arr = []; }
+  if (!arr.length) { wrap.remove(); return; }   // 没语法点就移除占位
+  wrap.classList.remove('gb-pending');
+  wrap.innerHTML = arr.map(a => `
+    <div class="gb-ana">
+      <div class="a-head">📊 ${_esc(a.point || a.node_name || '')}</div>
+      ${a.phrase ? `<div class="a-phrase">📍 ${_esc(a.phrase)}</div>` : ''}
+      <div class="a-body">${_esc(a.explanation || '')}${(a.examples||[]).length ? `<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>` : ''}</div>
+    </div>`).join('');
+  wrap.querySelectorAll('.gb-ana').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
+  // 标题栏角标
+  const headEl = block.querySelector('.gb-header');
+  if (headEl && !headEl.querySelector('.gb-badge')) {
+    const badge = document.createElement('span');
+    badge.className = 'gb-badge';
+    badge.textContent = '语法点 ' + arr.length;
+    headEl.insertBefore(badge, headEl.querySelector('.gb-caret'));
+  }
+}
 
 // ── 抽屉开关 ──
 function openGrammarPanel() {
@@ -2755,6 +2843,7 @@ function _fillGrammarBlock(block, d, sentence) {
     _fillBlockError(block, d.raw ? 'AI 未返回结构化结果' : '无结果');
     return;
   }
+  const isSpacy = d.engine === 'spacy';   // spaCy 路径：翻译/语法点稍后由 SSE 流式填
   // 标题栏：折叠时显示整句翻译（最有用），没翻译就用原句；语法点数量做角标
   const titleEl = block.querySelector('.gb-title');
   if (titleEl) titleEl.textContent = sentence_zh || sentence.slice(0,60);
@@ -2769,6 +2858,11 @@ function _fillGrammarBlock(block, d, sentence) {
   const legendHtml = usedPos.length
     ? `<div class="gb-legend">${usedPos.map(p=>`<span class="lg"><span class="sw" style="background:${_posColor(p)}"></span>${POS_LABEL[p]||p}</span>`).join('')}</div>`
     : '';
+  // 翻译区：有现成翻译就显示；spaCy 路径先占位「翻译中…」等 SSE
+  const transHtml = sentence_zh
+    ? `<div class="gb-trans">🌐 ${_esc(sentence_zh)}</div>`
+    : (isSpacy ? `<div class="gb-trans gb-pending">🌐 翻译中…</div>` : '');
+  // 语法点区：AI 路径直接渲染；spaCy 路径先占位等 SSE
   const anaHtml = analyses.length
     ? `<div class="gb-analyses">${analyses.map((a,i)=>`
         <div class="gb-ana" data-i="${i}">
@@ -2776,11 +2870,9 @@ function _fillGrammarBlock(block, d, sentence) {
           ${a.phrase?`<div class="a-phrase">📍 ${_esc(a.phrase)}</div>`:''}
           <div class="a-body">${_esc(a.explanation||'')}${(a.examples||[]).length?`<ul class="a-ex">${(a.examples||[]).map(e=>'<li>'+_esc(e)+'</li>').join('')}</ul>`:''}</div>
         </div>`).join('')}</div>`
-    : '';
+    : (isSpacy ? `<div class="gb-analyses gb-pending"><div class="gb-ana"><div class="a-head" style="color:#7a8497;font-weight:400">⏳ 语法点分析中…</div></div></div>` : '');
   const content = block.querySelector('.gb-content');
-  content.innerHTML =
-    (sentence_zh ? `<div class="gb-trans">🌐 ${_esc(sentence_zh)}</div>` : '') +
-    `<div class="gb-diagram"></div>` + legendHtml + anaHtml;
+  content.innerHTML = transHtml + `<div class="gb-diagram"></div>` + legendHtml + anaHtml;
   const diag = content.querySelector('.gb-diagram');
   if (tokens.length) {
     diag.appendChild(_renderDepSvg(tokens, deps));
