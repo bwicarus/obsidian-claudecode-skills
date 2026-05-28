@@ -354,6 +354,14 @@ def pdf_api_list_pdfs():
     return jsonify({"ok": True, "pdfs": _list_vault_pdfs()})
 
 
+# 连字(ligature)展开：PyMuPDF 把 ﬁ/ﬂ 等当单个非 ASCII 字形输出，前端词边界正则 [A-Za-z]
+# 不认它 → 单词在连字处被断(如 infinitely 只能选到 nitely)。提取时还原成 ASCII。
+_LIGATURES = {
+    "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl",
+    "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "ft", "ﬆ": "st",
+}
+
+
 @bp.route("/api/page-chars")
 def pdf_api_page_chars():
     """提取该页所有字符的精确 bbox（PDF 坐标）。
@@ -390,6 +398,7 @@ def pdf_api_page_chars():
                         c = ch.get("c", "")
                         if not c:
                             continue
+                        c = _LIGATURES.get(c, c)   # 还原连字 ﬁ→fi，免得词在此被断
                         # 保留空格（拼接选中文本时需要），但用 sp 标记免得占点击命中
                         chars.append({
                             "c": c,
@@ -705,6 +714,7 @@ def pdf_api_page_vocab_marks():
                         if not bb: continue
                         c = ch.get("c", "")
                         if not c: continue
+                        c = _LIGATURES.get(c, c)   # 还原连字 ﬁ→fi，免得词在此被断
                         chars.append({
                             "c": c, "x0": round(bb[0],2), "y0": round(bb[1],2),
                             "x1": round(bb[2],2), "y1": round(bb[3],2),
