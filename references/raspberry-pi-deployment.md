@@ -192,6 +192,15 @@ sudo tailscale cert bwicarus.taile44d0c.ts.net   # Let's Encrypt 真证书，3 �
 
 nginx 配置见 `_server_deploy/nginx/`，Pi 版的只在 `[bwicarus|Tailscale DNS|100.101.15.57]` 几个 host 上监听 80/443。
 
+**⚠️ Pi nginx (`/etc/nginx/sites-available/bwicarus`) 必须给 `/pdf` 和 `/api` location 加 `proxy_read_timeout 300s`**（80 + 443 两个 server 块各 2 处）。默认 60s 下，PDF 阅读器的 AI 端点（`/pdf/api/grammar-analyze` 语法分析、`/pdf/api/dict`/`translate` 走 claude_cli 翻译）在 Pi 上有时跑 >60s → nginx 返回 502。一行 sed 即可：
+
+```bash
+sudo sed -i 's|client_max_body_size 50m; }|client_max_body_size 50m; proxy_read_timeout 300s; proxy_connect_timeout 20s; }|g' /etc/nginx/sites-available/bwicarus
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+配套：`_server_deploy/app.py` 的 `app.run(..., threaded=True)`（已进 git）——否则 Flask dev server 单线程，一个慢 AI 请求阻塞全部，dict/translate 跟着 502。
+
 ### 阶段 7：bootstrap 状态数据（避开 register 把 1175 笔记当新笔记）
 
 ```bash
