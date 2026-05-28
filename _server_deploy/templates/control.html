@@ -886,9 +886,9 @@ async function saveBook(bookId){
   try{
     const results = await Promise.all(calls);
     const ok = results.every(r => r.ok);
-    toast(ok ? `✓ 已保存 ${bookId} 设置` : "保存部分失败，查 console");
+    showToast(ok ? `✓ 已保存 ${bookId} 设置` : "保存部分失败，查 console");
   }catch(ex){
-    toast("保存失败: " + ex.message);
+    showToast("保存失败: " + ex.message);
   }
 }
 
@@ -901,7 +901,7 @@ async function deleteBook(bookId, title){
     });
     const d = await r.json();
     if(d.ok){
-      toast("✓ " + d.info);
+      showToast("✓ " + d.info);
       loadBooks();
     } else {
       alert("删除失败: " + (d.error||"未知"));
