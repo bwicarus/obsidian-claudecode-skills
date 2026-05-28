@@ -2620,43 +2620,26 @@ window.closeGrammarPanel = () => {
   _hideDepTip();
 };
 
-// ── 侧栏滚动 → PDF 滚到对应句子（保证左右行对应；单向，不反向避免循环）──
+// ── 侧栏 ↔ PDF 双向同步滚动（按滚动比例联动；lock 防回弹循环）──
+let _scrollSyncLock = false;
 function _setupGrammarScrollLink() {
-  const body = document.getElementById('grammar-panel-body');
-  if (!body || body.dataset.linkBound === '1') return;
+  const main  = document.getElementById('main');
+  const body  = document.getElementById('grammar-panel-body');
+  const panel = document.getElementById('grammar-panel');
+  if (!main || !body || !panel || body.dataset.linkBound === '1') return;
   body.dataset.linkBound = '1';
-  let t = null;
-  body.addEventListener('scroll', () => {
-    if (t) return;
-    t = setTimeout(() => { t = null; _syncPdfToTopBlock(); }, 110);
-  }, {passive: true});
-}
-function _syncPdfToTopBlock() {
-  const body = document.getElementById('grammar-panel-body');
-  if (!body) return;
-  const blocks = [...body.querySelectorAll('.grammar-block[data-page-num]')];
-  if (!blocks.length) return;
-  const bodyTop = body.getBoundingClientRect().top;
-  // 视口顶部所在（或最接近）的块
-  let target = blocks[0];
-  for (const b of blocks) {
-    const r = b.getBoundingClientRect();
-    if (r.bottom - bodyTop > 8) { target = b; break; }
-  }
-  _scrollPdfToBlock(target, true);
-}
-function _scrollPdfToBlock(block, smooth) {
-  if (!block) return;
-  const pageNum = parseInt(block.dataset.pageNum || '0', 10);
-  const ratio = parseFloat(block.dataset.topRatio || '0');
-  if (!pageNum) return;
-  const pw = document.querySelector(`.page-wrap[data-page-num="${pageNum}"]`);
-  const main = document.getElementById('main');
-  const container = document.getElementById('page-container');
-  if (!pw || !main) return;
-  let y = pw.offsetTop + ratio * pw.offsetHeight;
-  if (container && container.offsetParent) y += container.offsetTop;
-  main.scrollTo({top: Math.max(0, y - 56), behavior: smooth ? 'smooth' : 'auto'});
+  const sync = (src, dst) => {
+    if (_scrollSyncLock || !panel.classList.contains('open')) return;
+    const sMax = src.scrollHeight - src.clientHeight;
+    const dMax = dst.scrollHeight - dst.clientHeight;
+    if (dMax <= 0) return;
+    const ratio = sMax > 0 ? src.scrollTop / sMax : 0;
+    _scrollSyncLock = true;                       // 设 dst.scrollTop 会触发 dst 的 scroll，锁住它别回弹
+    dst.scrollTop = ratio * dMax;
+    requestAnimationFrame(() => { _scrollSyncLock = false; });
+  };
+  main.addEventListener('scroll', () => sync(main, body), {passive: true});
+  body.addEventListener('scroll', () => sync(body, main), {passive: true});
 }
 
 // ── POS 配色 + 中文短标签（displaCy 风格）──
