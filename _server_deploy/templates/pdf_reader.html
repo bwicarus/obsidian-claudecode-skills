@@ -1977,6 +1977,7 @@ function _bindCharLayer(cl, pw) {
 
   const onMove = (x, y, ev) => {
     if (_dragStartCharIdx == null) return;
+    if (_charSel && _charSel.pw !== pw) return;   // 多页/翻页累积的 document 监听：只处理拖选起点页
     if (!_dragStartXY) return;
     const dx = Math.abs(x - _dragStartXY.x), dy = Math.abs(y - _dragStartXY.y);
     if (dx + dy < 8) return;
@@ -1989,6 +1990,7 @@ function _bindCharLayer(cl, pw) {
 
   const onEnd = (x, y) => {
     if (_dragStartCharIdx == null) return;
+    if (_charSel && _charSel.pw !== pw) return;   // 多页/翻页累积的 document 监听：只处理拖选起点页
     const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';  // 恢复 L 按钮可点
     const startIdx = _dragStartCharIdx;
     _dragStartCharIdx = null;
