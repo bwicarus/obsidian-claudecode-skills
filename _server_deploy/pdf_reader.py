@@ -115,6 +115,8 @@ def _find_kg_nodes_for_page(file_rel: str, page: int) -> list[dict]:
                     "summary": (n.get("summary") or "")[:120],
                     "book": kg.get("book", kg_f.stem),
                     "kg_file": kg_f.name,
+                    "kind": kg.get("kind", ""),          # grammar KG 才允许跟踪
+                    "tracked": bool(n.get("tracked", False)),
                 })
     out.sort(key=lambda x: x["numeric_label"] or "z")
     return out

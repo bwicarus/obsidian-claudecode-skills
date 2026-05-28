@@ -1669,7 +1669,7 @@ function showDetail(n){
         const web = `/skilltree/${BOOK}/pdf#page=${startPg}`;
         // 新增：跳网页 PDF 阅读器（带选中/翻译/解释工具栏）
         const reader = (KG && KG.pdf_vault_path)
-          ? `/pdf/view?file=${encodeURIComponent(KG.pdf_vault_path)}&page=${startPg}`
+          ? `/pdf/view?file=${encodeURIComponent(KG.pdf_vault_path)}&page=${startPg}&mode=continuous`
           : null;
         const main = obs
           ? `<a href="${obs}" class="page-link" title="在 Obsidian 中打开 PDF ${titleSuffix}">${label}</a>`

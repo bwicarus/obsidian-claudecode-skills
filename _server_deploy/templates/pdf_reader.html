@@ -181,8 +181,12 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 }
 
 /* 知识点节点卡（在统一面板的「知识点」pane 内）*/
-.kg-node{background:#0d1322;border:1px solid #1f2740;border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font-size:12px}
+.kg-node{background:#0d1322;border:1px solid #1f2740;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px;display:flex;align-items:flex-start;gap:8px}
+.kg-node .kg-node-main{flex:1;min-width:0;cursor:pointer}
 .kg-node:hover{background:#162045;border-color:#3b6db5}
+.kg-track-btn{flex:none;align-self:center;background:transparent;border:1px solid #3a4456;color:#8a9bb4;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap}
+.kg-track-btn:hover{border-color:#34d399;color:#cfe6ff}
+.kg-track-btn.on{background:#13351f;border-color:#34d399;color:#34d399}
 .kg-node .lbl{font-weight:600;color:#cfe6ff}
 .kg-node .sum{color:#8a9bb4;font-size:11px;margin-top:3px;line-height:1.5}
 .kg-node.mastered{border-left:3px solid #34d399}
@@ -598,7 +602,10 @@ window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = {{ page }};
 let scale = 1.4;
-let readMode = localStorage.getItem('pdf-read-mode') || 'single';   // 'single' | 'continuous'
+let readMode = (() => {
+  const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
+  return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
+})();   // 'single' | 'continuous'
 let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用
 let _scrollSaveTimer = null;
@@ -629,7 +636,7 @@ function _maybeRestoreLastPos() {
   // URL 显式带 page > 1 时尊重 URL；否则恢复
   const u = new URL(location.href);
   const urlPage = parseInt(u.searchParams.get('page') || '0');
-  if (urlPage > 1) return;
+  if (urlPage > 1 || u.searchParams.get('mode')) return;   // URL 显式带 page/mode 时尊重 URL，不恢复上次位置
   const pos = _getLastPosition();
   if (!pos) return;
   if (pos.mode && pos.mode !== readMode) {
@@ -852,17 +859,49 @@ async function loadPageNodes(num) {
       c.innerHTML = '<div style="color:#5a6680;font-size:12px">该页无 KG 节点（可能这本书没扫过/或本页不是知识点页）</div>';
       return;
     }
-    c.innerHTML = list.map(n =>
-      `<div class="kg-node ${n.state}" onclick="window.open('/skilltree/${encodeURIComponent(n.book)}/#${encodeURIComponent('f.'+n.id)}','_blank')">
-        <div class="lbl">[${n.numeric_label}] ${n.name}</div>
-        <div class="sum">${n.summary}</div>
-      </div>`
-    ).join('');
+    c.innerHTML = list.map(n => {
+      // 只有 grammar KG 的节点能跟踪（跟技能树 toggle-tracked 规则一致）
+      const trackBtn = (n.kind === 'grammar')
+        ? `<button class="kg-track-btn ${n.tracked ? 'on' : ''}" title="加入/取消语法跟踪"
+             onclick="event.stopPropagation(); toggleNodeTrack('${n.book}','${n.id}', this)">${n.tracked ? '★ 跟踪中' : '☆ 跟踪'}</button>`
+        : '';
+      const lbl = n.numeric_label ? `[${n.numeric_label}] ` : '';
+      return `<div class="kg-node ${n.state}">
+        <div class="kg-node-main" onclick="window.open('/skilltree/${encodeURIComponent(n.book)}/#${encodeURIComponent('f.'+n.id)}','_blank')">
+          <div class="lbl">${lbl}${n.name}</div>
+          <div class="sum">${n.summary}</div>
+        </div>
+        ${trackBtn}
+      </div>`;
+    }).join('');
   } catch (e) {
     document.getElementById('kg-nodes').innerHTML = '<div style="color:#c00;font-size:12px">加载失败</div>';
   }
   window._refreshVocabIfPage?.();   // 翻页时若单词本在「本页」scope，同步刷新
 }
+
+// 知识点卡上的「跟踪」按钮：直接 toggle 该 grammar 节点的 tracked（不用回技能树页面）
+window.toggleNodeTrack = async (book, nodeId, btn) => {
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/skilltree/${encodeURIComponent(book)}/api/toggle-tracked`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({node_id: nodeId}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      btn.classList.toggle('on', d.tracked);
+      btn.textContent = d.tracked ? '★ 跟踪中' : '☆ 跟踪';
+      loadGrammarTracked();   // 刷新工具栏「📊 语法分析」按钮的可用状态
+    } else {
+      _toast?.(d.error || '操作失败');
+    }
+  } catch (e) {
+    _toast?.('网络错误');
+  } finally {
+    btn.disabled = false;
+  }
+};
 
 window.changePage = async (delta) => {
   await renderPage(currentPage + delta);
@@ -1038,11 +1077,22 @@ function _renderVocabItem(it) {
   return div;
 }
 window.toggleReadMode = async () => {
+  const keepPage = currentPage;   // 记住切换前的页，切换后强制回到它（别跳回第一页）
   readMode = readMode === 'single' ? 'continuous' : 'single';
   try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
   document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
-  if (readMode === 'continuous') await setupContinuousMode();
-  else renderPage(currentPage);
+  _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
+  if (readMode === 'continuous') {
+    await setupContinuousMode();
+    currentPage = keepPage;
+    // 占位高度算准后再滚一次到原页（setupContinuousMode 内部那次可能早于布局稳定）
+    const t = document.querySelector(`[data-page-num="${keepPage}"]`);
+    if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+  } else {
+    currentPage = keepPage;
+    await renderPage(keepPage);
+  }
+  _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
