@@ -2292,10 +2292,13 @@ function _lineExpandFromChar(chars, idx) {
 function _paragraphExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const refH = chars[idx].height;
+  const _bkOf = (c) => (c.bk != null && c.bk >= 0) ? c.bk : -1;
+  const _bk0 = _bkOf(chars[idx]);   // 限本块(所在段落)：不跨栏/跨段/跨页，避免上下文吃到整页
   let s = idx, e = idx;
   let curTop = chars[idx].top;
   // 向左/上
   while (s > 0) {
+    if (_bk0 >= 0 && _bkOf(chars[s - 1]) >= 0 && _bkOf(chars[s - 1]) !== _bk0) break;
     const t = chars[s - 1].top;
     if (Math.abs(t - curTop) > refH * 2.2) break;
     s--;
@@ -2303,6 +2306,7 @@ function _paragraphExpandFromChar(chars, idx) {
   }
   curTop = chars[idx].top;
   while (e < chars.length - 1) {
+    if (_bk0 >= 0 && _bkOf(chars[e + 1]) >= 0 && _bkOf(chars[e + 1]) !== _bk0) break;
     const t = chars[e + 1].top;
     if (Math.abs(t - curTop) > refH * 2.2) break;
     e++;
