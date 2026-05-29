@@ -5203,6 +5203,7 @@ const _ink = {
   drawing: null,        // {pw, num, stroke|eraser}
   lastPw: null,         // 最近绘制的页（撤销/清空作用对象）
   saveTimers: {},
+  _lastTap: null,       // 上一下「极短 tap」的时间/位置（Pencil 双击切换检测用）
 };
 window._ink = _ink;
 
@@ -5315,17 +5316,42 @@ function _inkDrawCurrentOnSnap(d) {
   _inkDrawStroke(ctx, d.stroke, cv.width, cv.height, dpr);
 }
 
+// Pencil 双击画布（笔尖快速点两下同处）切换 笔 ↔ 橡皮（替代浏览器拿不到的 Pencil 双击手势）
+function _inkDoubleTapSwitch(pw) {
+  if (_ink.tool !== 'eraser') {            // 笔模式：撤销刚才那一下 tap 误画的点
+    const arr = pw.__inkStrokes || [];
+    if (arr.length) arr.pop();
+    _inkRedraw(pw);
+    _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
+  }
+  const next = (_ink.tool === 'eraser') ? 'pen' : 'eraser';
+  _ink.tool = next;
+  document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === next));
+  // 没开工具栏(纯 pen 自动模式)也给个浮窗提示当前工具
+  window.dlog && window.dlog('Pencil 双击 → ' + (next === 'eraser' ? '🧹 橡皮' : '✒️ 笔'));
+  const fb = document.getElementById('ink-fab'); if (fb) { fb.textContent = next === 'eraser' ? '🧹' : '✏️'; setTimeout(() => { fb.textContent = '✏️'; }, 1200); }
+}
+
 function _inkPointerDown(e) {
   if (!(e.pointerType === 'pen' || _ink.mode)) return;   // pen 自动；桌面/触屏需开 mode
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
   e.preventDefault(); e.stopPropagation();               // 挡掉 char-layer 选词
   try { pw.setPointerCapture(e.pointerId); } catch (_) {}
+  // Pencil 双击切换：400ms 内同处第二次落笔（上一下须是极短 tap）→ 切笔/橡皮
+  if (e.pointerType === 'pen' && _ink._lastTap) {
+    const lt = _ink._lastTap;
+    if (Date.now() - lt.t < 400 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 30) {
+      _ink._lastTap = null;
+      _inkDoubleTapSwitch(pw);
+      return;
+    }
+  }
   const num = parseInt(pw.dataset.pageNum) || currentPage;
   _ink.lastPw = pw;
   const pt = _inkNorm(pw, e.clientX, e.clientY); if (!pt) return;
   if (_ink.tool === 'eraser') {
     _inkPushUndo(pw); _inkEraseAt(pw, pt);
-    _ink.drawing = { pw, num, eraser: true };
+    _ink.drawing = { pw, num, eraser: true, startX: e.clientX, startY: e.clientY };
   } else {
     _inkPushUndo(pw);
     const cv = pw.__inkCanvas, ctx = cv.getContext('2d');
@@ -5334,7 +5360,7 @@ function _inkPointerDown(e) {
     try { snap = ctx.getImageData(0, 0, cv.width, cv.height); } catch (_) {}   // 拍快照
     const stroke = { t: _ink.tool, c: _ink.color, w: parseFloat(_ink.width) || 2.5, p: [pt] };
     _inkStrokesOf(pw).push(stroke);
-    _ink.drawing = { pw, num, stroke, snap, raf: null };
+    _ink.drawing = { pw, num, stroke, snap, raf: null, startX: e.clientX, startY: e.clientY };
     _inkDrawCurrentOnSnap(_ink.drawing);                  // 画当前起点
   }
   document.addEventListener('pointermove', _inkPointerMove, true);
@@ -5367,6 +5393,21 @@ function _inkPointerUp(e) {
       const arr = _inkStrokesOf(d.pw), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1);
     }
   }
+  // 记录「极短笔画(tap)」位置，供下次 Pencil 双击切换检测（正常长笔画 → 清空，不误触发）
+  let tapped = false;
+  if (e.pointerType === 'pen') {
+    if (d.eraser) tapped = true;
+    else if (d.stroke && d.stroke.t === 'pen') {
+      const pts = d.stroke.p;
+      tapped = pts.length <= 8;
+      if (tapped && pts.length > 1) {
+        let mnx = 1, mxx = 0, mny = 1, mxy = 0;
+        for (const p of pts) { if (p[0] < mnx) mnx = p[0]; if (p[0] > mxx) mxx = p[0]; if (p[1] < mny) mny = p[1]; if (p[1] > mxy) mxy = p[1]; }
+        tapped = Math.hypot(mxx - mnx, mxy - mny) < 0.02;   // 归一化对角 < 2% 页宽算 tap
+      }
+    }
+  }
+  _ink._lastTap = tapped ? { t: Date.now(), x: d.startX, y: d.startY } : null;
   d.snap = null;
   _ink.drawing = null;
   _inkRedraw(d.pw);              // 最终全量平滑重绘
