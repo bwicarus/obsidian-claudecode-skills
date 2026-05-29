@@ -1517,6 +1517,73 @@ def pdf_api_job_status():
     return jsonify(j if j else {"status": "unknown"})
 
 
+# ─── 手写墨迹（sidecar JSON 存 state/pdf-ink/<sha1>.json，按页存归一化笔画）──────
+
+_INK_DIR = CLAUDE_DIR / "state" / "pdf-ink"
+
+def _ink_path(rel: str) -> Path:
+    import hashlib
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+    _INK_DIR.mkdir(parents=True, exist_ok=True)
+    return _INK_DIR / f"{sha}.json"
+
+def _ink_load(rel: str) -> dict:
+    p = _ink_path(rel)
+    if not p.exists():
+        return {"pdf_rel": rel, "pages": {}}
+    try:
+        data = json.loads(p.read_text("utf-8"))
+        if not isinstance(data.get("pages"), dict):
+            data["pages"] = {}
+        data["pdf_rel"] = rel
+        return data
+    except Exception:
+        return {"pdf_rel": rel, "pages": {}}
+
+def _ink_save(rel: str, data: dict):
+    p = _ink_path(rel)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    tmp.replace(p)
+
+
+@bp.route("/api/ink", methods=["GET"])
+def pdf_api_ink_list():
+    """GET ?file=<rel> → {ok, pages:{"<page>":[stroke,...]}}。
+    stroke = {t:'pen'|'line'|'arrow'|'rect', c, w, p:[[x,y],...]}，坐标归一化 0-1。"""
+    rel = request.args.get("file", "")
+    if not rel or _safe_vault_path(rel) is None:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    return jsonify({"ok": True, **_ink_load(rel)})
+
+
+@bp.route("/api/ink", methods=["POST"])
+def pdf_api_ink_save():
+    """POST {file, page, strokes:[...]} → 整页替换该页墨迹（strokes 空则删该页）。"""
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    if not rel or _safe_vault_path(rel) is None:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    try:
+        page = int(data.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if page <= 0:
+        return jsonify({"ok": False, "error": "invalid page"}), 400
+    strokes = data.get("strokes")
+    if not isinstance(strokes, list):
+        return jsonify({"ok": False, "error": "invalid strokes"}), 400
+    if len(strokes) > 5000:
+        return jsonify({"ok": False, "error": "too many strokes"}), 400
+    doc = _ink_load(rel)
+    if strokes:
+        doc["pages"][str(page)] = strokes
+    else:
+        doc["pages"].pop(str(page), None)
+    _ink_save(rel, doc)
+    return jsonify({"ok": True, "count": len(strokes)})
+
+
 # ─── 高亮（sidecar JSON 存 state/pdf-highlights/<sha1>.json）───────────────────
 
 _HL_DIR = CLAUDE_DIR / "state" / "pdf-highlights"

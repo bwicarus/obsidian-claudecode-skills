@@ -319,6 +319,22 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .hl-layer .hl-saved.no-color{background:transparent !important;mix-blend-mode:normal;opacity:1;border:1px dashed rgba(150,170,200,.55)}
 .hl-layer .hl-saved.no-color:hover{border-color:#60a5fa;background:rgba(96,165,250,.08) !important}
 
+/* 手写墨迹层：canvas 永远 pointer-events:none（纯显示），绘制靠 page-wrap capture 拦截 */
+.ink-layer{position:absolute;inset:0;z-index:7;pointer-events:none}
+body.ink-mode .page-wrap{touch-action:none}              /* 手写模式：禁手指滚动，触屏可画 */
+body.ink-mode #main{cursor:crosshair}
+#ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
+#ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
+#ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
+#ink-toolbar.show{display:flex}
+#ink-toolbar button{background:transparent;border:1px solid transparent;color:#cfe6ff;border-radius:8px;padding:6px 9px;cursor:pointer;font-size:15px;line-height:1}
+#ink-toolbar button:hover{background:#1a2540}
+#ink-toolbar button.on{background:#244470;border-color:#3b6db5;color:#fff}
+#ink-toolbar .ink-sep{width:1px;align-self:stretch;background:#2a3550;margin:3px 4px}
+#ink-toolbar .ink-color{width:20px;height:20px;border-radius:50%;border:2px solid #0a0e1a;cursor:pointer;padding:0;box-shadow:0 0 0 1px #2a3550}
+#ink-toolbar .ink-color.on{box-shadow:0 0 0 2px #fff}
+#ink-toolbar input[type=range]{width:72px;accent-color:#3b6db5;vertical-align:middle}
+
 /* toolbar 内的高亮色板：只有色圆点，点 = 立刻标记 + 互斥激活外框 */
 #hl-color-picker{display:flex;flex-direction:column;gap:6px;align-items:center;padding:2px;flex-shrink:0;border-right:1px solid #2a3550;padding-right:8px}
 #hl-color-picker .swatch{width:17px;height:17px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
@@ -434,6 +450,28 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
     </div>
   </div>
 </div>
+<!-- 手写笔：Apple Pencil 落笔自动画；点 FAB 开桌面手写模式 + 显示工具栏 -->
+<button id="ink-fab" onclick="inkToggle()" title="手写笔（Apple Pencil 直接画；点此开桌面/触屏手写模式）">✏️</button>
+<div id="ink-toolbar">
+  <button data-tool="pen" class="on" onclick="inkSetTool('pen',this)" title="笔">✒️</button>
+  <button data-tool="line" onclick="inkSetTool('line',this)" title="直线">／</button>
+  <button data-tool="arrow" onclick="inkSetTool('arrow',this)" title="箭头">↗</button>
+  <button data-tool="rect" onclick="inkSetTool('rect',this)" title="矩形">▭</button>
+  <button data-tool="eraser" onclick="inkSetTool('eraser',this)" title="橡皮（点笔画删除整条）">🧹</button>
+  <span class="ink-sep"></span>
+  <button class="ink-color on" style="background:#e74c3c" onclick="inkSetColor('#e74c3c',this)" title="红"></button>
+  <button class="ink-color" style="background:#3b82f6" onclick="inkSetColor('#3b82f6',this)" title="蓝"></button>
+  <button class="ink-color" style="background:#22c55e" onclick="inkSetColor('#22c55e',this)" title="绿"></button>
+  <button class="ink-color" style="background:#fbbf24" onclick="inkSetColor('#fbbf24',this)" title="黄"></button>
+  <button class="ink-color" style="background:#e6e6f0" onclick="inkSetColor('#e6e6f0',this)" title="白"></button>
+  <input type="range" min="1" max="10" step="0.5" value="2.5" oninput="inkSetWidth(this.value)" title="粗细">
+  <span class="ink-sep"></span>
+  <button onclick="inkUndo()" title="撤销">↶</button>
+  <button onclick="inkRedo()" title="重做">↷</button>
+  <button id="ink-eye" onclick="inkToggleVisible()" title="显示/隐藏全部墨迹">👁</button>
+  <button onclick="inkClearPage()" title="清空本页墨迹" style="color:#ff8a8a">🗑</button>
+</div>
+
 <!-- 屏幕右边缘把手：点击展开右侧面板（关闭时显示）-->
 <div id="side-handle" onclick="toggleGrammarPanel()" title="展开侧栏：语法分析 / 知识点">语法 · 知识点</div>
 
@@ -747,6 +785,7 @@ async function loadPdf() {
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
     loadAllHighlights();
+    if (window._inkLoadAll) window._inkLoadAll();   // 手写墨迹：拉一次，渲染完页面再贴
     renderHlPicker();
     loadGrammarTracked();   // 拉该 PDF 的语法跟踪节点（影响工具栏按钮显示）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
@@ -814,6 +853,18 @@ async function _renderPageInto(num, wrap) {
   selOverlay.style.width  = cw + 'px';
   selOverlay.style.height = ch + 'px';
   wrap.appendChild(selOverlay);
+
+  // 手写墨迹 canvas（z7，纯显示；绘制靠 page-wrap capture 拦截 pen / 桌面手写模式）
+  const inkCanvas = document.createElement('canvas');
+  inkCanvas.className = 'ink-layer';
+  inkCanvas.style.width = cw + 'px';
+  inkCanvas.style.height = ch + 'px';
+  const _inkDpr = window.devicePixelRatio || 1;
+  inkCanvas.width  = Math.floor(cw * _inkDpr);
+  inkCanvas.height = Math.floor(ch * _inkDpr);
+  wrap.appendChild(inkCanvas);
+  wrap.__inkCanvas = inkCanvas;
+  wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
 
   // 渲染 canvas（用 transform 把 viewport 坐标 scale 到 backing store）
   const ctx = canvas.getContext('2d');
@@ -887,6 +938,9 @@ async function _renderPageInto(num, wrap) {
 
   // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
   loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
+  // 加载该页已存墨迹并重绘
+  wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
+  if (window._inkRedraw) window._inkRedraw(wrap);
   wrap.dataset.loaded = '1';
 
   // 同步 URL + 拉 KG 节点：只在单页模式做
@@ -5129,5 +5183,240 @@ document.addEventListener('keydown', (e) => {
 });
 
 loadPdf();
+</script>
+
+<script>
+// ══════════════ 手写笔（Apple Pencil 自动 + 桌面/触屏模式开关）══════════════
+// 坐标全部归一化 0-1（相对页 css 尺寸），跨缩放/设备稳定；线宽固定 css px。
+// canvas 永远 pointer-events:none（纯显示），绘制靠 page-wrap capture 拦截 pointerdown。
+const _ink = {
+  tool: 'pen', color: '#e74c3c', width: 2.5,
+  mode: false,          // 桌面/触屏手写模式（鼠标/手指接管）；Apple Pencil 始终可画
+  visible: true,
+  byPage: {},           // {num: [stroke,...]} 服务器加载
+  drawing: null,        // {pw, num, stroke|eraser}
+  lastPw: null,         // 最近绘制的页（撤销/清空作用对象）
+  saveTimers: {},
+};
+window._ink = _ink;
+
+function _inkActivePw() {
+  return _ink.lastPw || document.querySelector(`.page-wrap[data-page-num="${currentPage}"]`);
+}
+function _inkStrokesOf(pw) { if (!pw.__inkStrokes) pw.__inkStrokes = []; return pw.__inkStrokes; }
+
+// viewport client 坐标 → 该页归一化 [x,y]
+function _inkNorm(pw, cx, cy) {
+  const cv = pw.__inkCanvas; if (!cv) return null;
+  const r = cv.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  return [(cx - r.left) / r.width, (cy - r.top) / r.height];
+}
+
+function _inkRedraw(pw) {
+  const cv = pw && pw.__inkCanvas; if (!cv) return;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!_ink.visible) return;
+  const cssW = parseFloat(cv.style.width) || cv.width;
+  const dpr = (cv.width / cssW) || 1;
+  for (const s of (pw.__inkStrokes || [])) _inkDrawStroke(ctx, s, cv.width, cv.height, dpr);
+}
+window._inkRedraw = _inkRedraw;
+
+function _inkDrawStroke(ctx, s, W, H, dpr) {
+  const pts = s.p || []; if (!pts.length) return;
+  ctx.strokeStyle = s.c || '#e74c3c';
+  ctx.lineWidth = Math.max(0.6, (s.w || 2.5) * dpr);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const X = i => pts[i][0] * W, Y = i => pts[i][1] * H;
+  if (s.t === 'pen') {
+    ctx.beginPath(); ctx.moveTo(X(0), Y(0));
+    if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
+    else {
+      for (let i = 1; i < pts.length - 1; i++) {
+        const mx = (X(i) + X(i + 1)) / 2, my = (Y(i) + Y(i + 1)) / 2;
+        ctx.quadraticCurveTo(X(i), Y(i), mx, my);
+      }
+      ctx.lineTo(X(pts.length - 1), Y(pts.length - 1));
+    }
+    ctx.stroke();
+  } else if (s.t === 'line' && pts.length >= 2) {
+    ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
+  } else if (s.t === 'arrow' && pts.length >= 2) {
+    ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
+    const ang = Math.atan2(Y(1) - Y(0), X(1) - X(0)), ah = Math.max(9, ctx.lineWidth * 3.5);
+    ctx.beginPath(); ctx.moveTo(X(1), Y(1));
+    ctx.lineTo(X(1) - ah * Math.cos(ang - 0.42), Y(1) - ah * Math.sin(ang - 0.42));
+    ctx.moveTo(X(1), Y(1));
+    ctx.lineTo(X(1) - ah * Math.cos(ang + 0.42), Y(1) - ah * Math.sin(ang + 0.42));
+    ctx.stroke();
+  } else if (s.t === 'rect' && pts.length >= 2) {
+    const x0 = X(0), y0 = Y(0), x1 = X(1), y1 = Y(1);
+    ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+  }
+}
+
+// ── 橡皮命中检测（归一化坐标）──
+function _inkPtSeg(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+  if (l2 === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+function _inkHit(s, pt, thr) {
+  const pts = s.p || []; if (!pts.length) return false;
+  if (s.t === 'rect' && pts.length >= 2) {
+    const x0 = Math.min(pts[0][0], pts[1][0]), x1 = Math.max(pts[0][0], pts[1][0]);
+    const y0 = Math.min(pts[0][1], pts[1][1]), y1 = Math.max(pts[0][1], pts[1][1]);
+    const nx = (Math.abs(pt[0] - x0) < thr || Math.abs(pt[0] - x1) < thr) && pt[1] > y0 - thr && pt[1] < y1 + thr;
+    const ny = (Math.abs(pt[1] - y0) < thr || Math.abs(pt[1] - y1) < thr) && pt[0] > x0 - thr && pt[0] < x1 + thr;
+    return nx || ny;
+  }
+  for (let i = 0; i < pts.length - 1; i++) if (_inkPtSeg(pt, pts[i], pts[i + 1]) < thr) return true;
+  if (pts.length === 1) return Math.hypot(pt[0] - pts[0][0], pt[1] - pts[0][1]) < thr;
+  return false;
+}
+function _inkEraseAt(pw, pt) {
+  const arr = _inkStrokesOf(pw); let removed = false;
+  for (let i = arr.length - 1; i >= 0; i--) if (_inkHit(arr[i], pt, 0.014)) { arr.splice(i, 1); removed = true; }
+  if (removed) _inkRedraw(pw);
+  return removed;
+}
+
+// ── undo / redo（每页）──
+function _inkPushUndo(pw) {
+  if (!pw.__inkUndo) pw.__inkUndo = [];
+  pw.__inkUndo.push(JSON.stringify(pw.__inkStrokes || []));
+  if (pw.__inkUndo.length > 40) pw.__inkUndo.shift();
+  pw.__inkRedo = [];
+}
+
+// ── 指针绘制 ──
+function _inkPointerDown(e) {
+  if (!(e.pointerType === 'pen' || _ink.mode)) return;   // pen 自动；桌面/触屏需开 mode
+  const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
+  e.preventDefault(); e.stopPropagation();               // 挡掉 char-layer 选词
+  try { pw.setPointerCapture(e.pointerId); } catch (_) {}
+  const num = parseInt(pw.dataset.pageNum) || currentPage;
+  _ink.lastPw = pw;
+  const pt = _inkNorm(pw, e.clientX, e.clientY); if (!pt) return;
+  if (_ink.tool === 'eraser') {
+    _inkPushUndo(pw); _inkEraseAt(pw, pt);
+    _ink.drawing = { pw, num, eraser: true };
+  } else {
+    _inkPushUndo(pw);
+    const stroke = { t: _ink.tool, c: _ink.color, w: parseFloat(_ink.width) || 2.5, p: [pt] };
+    _inkStrokesOf(pw).push(stroke);
+    _ink.drawing = { pw, num, stroke };
+    _inkRedraw(pw);
+  }
+  document.addEventListener('pointermove', _inkPointerMove, true);
+  document.addEventListener('pointerup', _inkPointerUp, true);
+  document.addEventListener('pointercancel', _inkPointerUp, true);
+}
+function _inkPointerMove(e) {
+  const d = _ink.drawing; if (!d) return;
+  e.preventDefault();
+  if (d.eraser) { const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) _inkEraseAt(d.pw, pt); return; }
+  const s = d.stroke;
+  if (s.t === 'pen') {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ce of evs) { const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (p) s.p.push(p); }
+  } else {
+    const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) s.p[1] = pt;
+  }
+  _inkRedraw(d.pw);
+}
+function _inkPointerUp(e) {
+  const d = _ink.drawing; if (!d) return;
+  document.removeEventListener('pointermove', _inkPointerMove, true);
+  document.removeEventListener('pointerup', _inkPointerUp, true);
+  document.removeEventListener('pointercancel', _inkPointerUp, true);
+  if (!d.eraser) {
+    const s = d.stroke;
+    if (s.t !== 'pen' && s.p.length < 2) {   // 形状没拖动 → 丢弃
+      const arr = _inkStrokesOf(d.pw), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1);
+    }
+  }
+  _ink.drawing = null;
+  _inkRedraw(d.pw);
+  _inkScheduleSave(d.pw, d.num);
+}
+window._inkPointerDown = _inkPointerDown;
+
+// ── 保存 / 加载 ──
+function _inkScheduleSave(pw, num) {
+  _ink.byPage[num] = pw.__inkStrokes;
+  clearTimeout(_ink.saveTimers[num]);
+  _ink.saveTimers[num] = setTimeout(() => _inkSave(num, pw.__inkStrokes), 900);
+}
+async function _inkSave(num, strokes) {
+  if (!FILE_REL) return;
+  try {
+    await fetch('/pdf/api/ink', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page: num, strokes: strokes || [] }),
+    });
+  } catch (_) {}
+}
+async function _inkLoadAll() {
+  if (!FILE_REL) return;
+  try {
+    const r = await fetch('/pdf/api/ink?file=' + encodeURIComponent(FILE_REL));
+    const d = await r.json();
+    if (d.ok && d.pages) {
+      _ink.byPage = {};
+      for (const k in d.pages) _ink.byPage[parseInt(k)] = d.pages[k];
+      document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(pw => {
+        const n = parseInt(pw.dataset.pageNum);
+        if (_ink.byPage[n]) { pw.__inkStrokes = JSON.parse(JSON.stringify(_ink.byPage[n])); _inkRedraw(pw); }
+      });
+    }
+  } catch (_) {}
+}
+window._inkLoadAll = _inkLoadAll;
+
+// ── 工具栏 ──
+window.inkToggle = () => {
+  _ink.mode = !_ink.mode;
+  document.body.classList.toggle('ink-mode', _ink.mode);
+  document.getElementById('ink-fab').classList.toggle('on', _ink.mode);
+  document.getElementById('ink-toolbar').classList.toggle('show', _ink.mode);
+};
+window.inkSetTool = (t, btn) => {
+  _ink.tool = t;
+  document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b === btn));
+};
+window.inkSetColor = (c, btn) => {
+  _ink.color = c;
+  document.querySelectorAll('#ink-toolbar .ink-color').forEach(b => b.classList.toggle('on', b === btn));
+};
+window.inkSetWidth = (v) => { _ink.width = parseFloat(v) || 2.5; };
+window.inkToggleVisible = () => {
+  _ink.visible = !_ink.visible;
+  const eye = document.getElementById('ink-eye'); if (eye) eye.style.opacity = _ink.visible ? '1' : '.4';
+  document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(pw => _inkRedraw(pw));
+};
+window.inkUndo = () => {
+  const pw = _inkActivePw(); if (!pw || !pw.__inkUndo || !pw.__inkUndo.length) return;
+  if (!pw.__inkRedo) pw.__inkRedo = [];
+  pw.__inkRedo.push(JSON.stringify(pw.__inkStrokes || []));
+  pw.__inkStrokes = JSON.parse(pw.__inkUndo.pop());
+  _ink.lastPw = pw; _inkRedraw(pw); _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
+};
+window.inkRedo = () => {
+  const pw = _inkActivePw(); if (!pw || !pw.__inkRedo || !pw.__inkRedo.length) return;
+  if (!pw.__inkUndo) pw.__inkUndo = [];
+  pw.__inkUndo.push(JSON.stringify(pw.__inkStrokes || []));
+  pw.__inkStrokes = JSON.parse(pw.__inkRedo.pop());
+  _ink.lastPw = pw; _inkRedraw(pw); _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
+};
+window.inkClearPage = () => {
+  const pw = _inkActivePw(); if (!pw || !(pw.__inkStrokes && pw.__inkStrokes.length)) return;
+  _inkPushUndo(pw); pw.__inkStrokes = []; _ink.lastPw = pw;
+  _inkRedraw(pw); _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
+};
 </script>
 </body></html>
