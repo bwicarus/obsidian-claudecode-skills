@@ -1517,8 +1517,11 @@ function renderVocabSentences(pw, sentences) {
       btn0.style.setProperty('--sent-fill', fill);
       const charW0 = (fc[2] - fc[0]) * sx;
       const charH0 = (fc[3] - fc[1]) * sy;
-      const wantW0 = Math.max(charW0 * 6, 48);   // 跟句末 L 同宽
-      btn0.style.left = (fc[0] * sx - 2) + 'px';     // 句首字符 x0 减 padding
+      const left0 = fc[0] * sx - 2;
+      // clamp 不超页面右边界：句首字符正好在行最右时，固定 48px 向右会溢出页外画出延伸线
+      const maxW0 = Math.max(charW0, cssW - left0 - 1);
+      const wantW0 = Math.min(Math.max(charW0 * 6, 48), maxW0);
+      btn0.style.left = left0 + 'px';     // 句首字符 x0 减 padding
       btn0.style.top = (fc[1] * sy - 2) + 'px';
       btn0.style.width = wantW0 + 'px';
       btn0.style.height = charH0 + 'px';
@@ -1551,9 +1554,12 @@ function renderVocabSentences(pw, sentences) {
       const charH = (lc[3] - lc[1]) * sy;
       const wantW = Math.max(charW * 6, 48);   // 至少 48px 宽（约 5-6 个字符）
       const extraLeft = wantW - charW;
-      btn.style.left = (lc[0] * sx - extraLeft - 2) + 'px';
+      let leftE = lc[0] * sx - extraLeft - 2;
+      let widthE = wantW;
+      if (leftE < 0) { widthE = Math.max(charW, widthE + leftE); leftE = 0; }   // 句末在行首时向左延伸会溢出页左 → 截掉
+      btn.style.left = leftE + 'px';
       btn.style.top = (lc[1] * sy - 2) + 'px';
-      btn.style.width = wantW + 'px';
+      btn.style.width = widthE + 'px';
       btn.style.height = charH + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
