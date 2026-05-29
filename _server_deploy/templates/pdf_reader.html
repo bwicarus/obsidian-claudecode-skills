@@ -5300,6 +5300,21 @@ function _inkPushUndo(pw) {
 }
 
 // ── 指针绘制 ──
+// 绘制中：先 putImageData 还原「已完成笔画」快照，再用一条连续 quadratic 曲线重绘当前笔画
+// → 单次 stroke 抗锯齿光滑（无增量段 round cap 毛边），且每帧只重绘一条 → 流畅
+function _inkDrawCurrentOnSnap(d) {
+  const pw = d.pw, cv = pw && pw.__inkCanvas; if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const dpr = (cv.width / (parseFloat(cv.style.width) || cv.width)) || 1;
+  if (d.snap) {
+    ctx.putImageData(d.snap, 0, 0);
+  } else {   // 快照不可用（极少）→ 回退重绘除当前外的全部
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+    if (_ink.visible) for (const s of (pw.__inkStrokes || [])) if (s !== d.stroke) _inkDrawStroke(ctx, s, cv.width, cv.height, dpr);
+  }
+  _inkDrawStroke(ctx, d.stroke, cv.width, cv.height, dpr);
+}
+
 function _inkPointerDown(e) {
   if (!(e.pointerType === 'pen' || _ink.mode)) return;   // pen 自动；桌面/触屏需开 mode
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
@@ -5313,10 +5328,14 @@ function _inkPointerDown(e) {
     _ink.drawing = { pw, num, eraser: true };
   } else {
     _inkPushUndo(pw);
+    const cv = pw.__inkCanvas, ctx = cv.getContext('2d');
+    _inkRedraw(pw);                                        // 画已完成笔画（此刻还不含当前笔画）
+    let snap = null;
+    try { snap = ctx.getImageData(0, 0, cv.width, cv.height); } catch (_) {}   // 拍快照
     const stroke = { t: _ink.tool, c: _ink.color, w: parseFloat(_ink.width) || 2.5, p: [pt] };
     _inkStrokesOf(pw).push(stroke);
-    _ink.drawing = { pw, num, stroke };
-    _inkRedraw(pw);
+    _ink.drawing = { pw, num, stroke, snap, raf: null };
+    _inkDrawCurrentOnSnap(_ink.drawing);                  // 画当前起点
   }
   document.addEventListener('pointermove', _inkPointerMove, true);
   document.addEventListener('pointerup', _inkPointerUp, true);
@@ -5328,31 +5347,17 @@ function _inkPointerMove(e) {
   if (d.eraser) { const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) _inkEraseAt(d.pw, pt); return; }
   const s = d.stroke;
   if (s.t === 'pen') {
-    // 增量描线：只画新点之间的线段，不重绘整页 → 流畅（松手时再 quadratic 平滑重绘整条）
-    const cv = d.pw.__inkCanvas; if (!cv) return;
-    const ctx = cv.getContext('2d');
-    const cssW = parseFloat(cv.style.width) || cv.width, dpr = (cv.width / cssW) || 1;
-    const W = cv.width, H = cv.height;
-    ctx.strokeStyle = s.c || '#e74c3c';
-    ctx.lineWidth = Math.max(0.6, (s.w || 2.5) * dpr);
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of evs) {
-      const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (!p) continue;
-      const prev = s.p[s.p.length - 1];
-      s.p.push(p);
-      ctx.beginPath();
-      ctx.moveTo(prev[0] * W, prev[1] * H);
-      ctx.lineTo(p[0] * W, p[1] * H);
-      ctx.stroke();
-    }
+    for (const ce of evs) { const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (p) s.p.push(p); }
   } else {
     const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) s.p[1] = pt;
-    _inkRedraw(d.pw);   // 形状预览：重绘跟随终点
   }
+  // rAF 节流：每帧最多重绘一次（快照还原 + 当前笔画一条）→ 平滑 + 流畅
+  if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = null; if (_ink.drawing === d) _inkDrawCurrentOnSnap(d); });
 }
 function _inkPointerUp(e) {
   const d = _ink.drawing; if (!d) return;
+  if (d.raf) { cancelAnimationFrame(d.raf); d.raf = null; }
   document.removeEventListener('pointermove', _inkPointerMove, true);
   document.removeEventListener('pointerup', _inkPointerUp, true);
   document.removeEventListener('pointercancel', _inkPointerUp, true);
@@ -5362,8 +5367,9 @@ function _inkPointerUp(e) {
       const arr = _inkStrokesOf(d.pw), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1);
     }
   }
+  d.snap = null;
   _ink.drawing = null;
-  _inkRedraw(d.pw);
+  _inkRedraw(d.pw);              // 最终全量平滑重绘
   _inkScheduleSave(d.pw, d.num);
 }
 window._inkPointerDown = _inkPointerDown;
