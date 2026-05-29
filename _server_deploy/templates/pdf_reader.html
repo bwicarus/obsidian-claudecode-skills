@@ -4762,31 +4762,41 @@ window.onTranslate = async () => {
 window.onExplain = () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');
-  // 自动补上下文：短选区 → 句子，中选区 → 段落，长选区不加
   let context = '';
+  let explainText = lastSelText;   // 给 AI 解释的主体；短选区时换成所在整句
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const sLen = lastSelText.length;
-    let ctxRange = null;
     if (sLen < 50) {
-      // 短：句子
-      ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+      // 短选区(词/碎片，如跨行的 "at"+"or") → 以所在整句为解释主体，段落作上下文，
+      // 避免 AI 纠结孤立碎词"内容不完整"
+      const sR = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+      if (sR) {
+        const sentence = _charsRangeToText(chars, sR.start, sR.end);
+        if (sentence && sentence.length > sLen) explainText = sentence;
+        const p1 = _paragraphExpandFromChar(chars, sR.start);
+        const p2 = _paragraphExpandFromChar(chars, sR.end);
+        if (p1 && p2) {
+          const para = _charsRangeToText(chars, Math.min(p1.start, p2.start), Math.max(p1.end, p2.end));
+          if (para.length > explainText.length) context = para;
+        }
+      }
     } else if (sLen < 300) {
-      // 中：段落（合并起止两端的段范围）
+      // 中选区 → 段落作上下文
       const p1 = _paragraphExpandFromChar(chars, _charSel.startIdx);
       const p2 = _paragraphExpandFromChar(chars, _charSel.endIdx);
-      if (p1 && p2) ctxRange = {start: Math.min(p1.start, p2.start), end: Math.max(p1.end, p2.end)};
-    }
-    if (ctxRange && (ctxRange.start < _charSel.startIdx || ctxRange.end > _charSel.endIdx)) {
-      context = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
+      if (p1 && p2) {
+        const cr = {start: Math.min(p1.start, p2.start), end: Math.max(p1.end, p2.end)};
+        if (cr.start < _charSel.startIdx || cr.end > _charSel.endIdx)
+          context = _charsRangeToText(chars, cr.start, cr.end);
+      }
     }
   }
-  // 记录原始选中 + 上下文句，供 result-modal「🖌 标记到 PDF」用
   _resultContext = _charSel ? {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: context, kind: 'explain',
+    text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
-  aiCall('/pdf/api/explain', {text: lastSelText, context}, '💡 AI 解释');
+  aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释');
 };
 window.onToQA = () => {
   if (!lastSelText) return;
