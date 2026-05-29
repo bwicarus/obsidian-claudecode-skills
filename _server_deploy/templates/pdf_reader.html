@@ -3,6 +3,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ file_name }} · PDF 阅读器</title>
 <script src="/static/qa/marked.js"></script>
+<script>window.MathJax={tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']]},options:{skipHtmlTags:['script','noscript','style','textarea','pre','code']}};</script>
 <script src="//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js" async></script>
 <style>
 *{box-sizing:border-box}
@@ -5061,9 +5062,16 @@ setTimeout(_updateDraftBadge, 200);
 
 function md(s) {
   if (window.marked && marked.parse) {
-    try { return marked.parse(s); } catch(_) {}
+    try {
+      // CJK 与 markdown 强调标记紧贴时 marked 不识别(如 接**-ing**) → 之间插零宽空格，
+      // 让 ** / * / ` 有空白边界。不动 $（留给 MathJax 渲染行内/块公式）
+      const t = String(s == null ? '' : s)
+        .replace(/([一-鿿　-〿＀-￯])([*`])/g, '$1\u200b$2')
+        .replace(/([*`])([一-鿿　-〿＀-￯])/g, '$1\u200b$2');
+      return marked.parse(t);
+    } catch(_) {}
   }
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
 
 // AI 设置（per-browser localStorage，不动 server-config）
