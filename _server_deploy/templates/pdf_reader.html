@@ -5336,9 +5336,10 @@ function _inkPointerDown(e) {
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
   // 手指(touch)快速双击 → 切换 笔↔橡皮。仅「手写激活」时(开了工具栏 或 本次已画过笔)，
   // 不破坏纯阅读时手指双击选段；单指 tap/滑不拦截，照常选词/选段/滚动。
-  if (e.pointerType === 'touch' && (_ink.mode || _ink.lastPw)) {
+  // 笔正在画时忽略手指（挡掉写字时手掌/另一手误触切橡皮）；窗口/距离收紧防误判
+  if (e.pointerType === 'touch' && !_ink.drawing && (_ink.mode || _ink.lastPw)) {
     const now = Date.now(), lt = _ink._lastTap;
-    if (lt && now - lt.t < 400 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 45) {
+    if (lt && now - lt.t < 350 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 32) {
       e.preventDefault(); e.stopPropagation();
       _ink._lastTap = null;
       _inkDoubleTapSwitch(pw, true);
