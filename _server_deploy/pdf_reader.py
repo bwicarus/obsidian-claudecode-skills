@@ -636,6 +636,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 _flush_word()
                 _flush_sentence()
             pending_period = False
+        # 跨 block 切句：PyMuPDF 不同排版块（如对话气泡 vs 页脚导航条）的字符在 reading order
+        # 相邻时绝不混进同一句（否则气泡句的翻译会串成页脚的）。w = block*1e6+line*1e3+word_no
+        if prev and not prev.get("sp") and not ch.get("sp"):
+            pb, cb = prev.get("w", -1), ch.get("w", -1)
+            if pb >= 0 and cb >= 0 and pb // 1000000 != cb // 1000000:
+                _flush_word(); _flush_sentence()
         # 跨行检测：行间距 > 1.5× 行高 → 段落分界（新句）
         if prev and not prev.get("sp") and not ch.get("sp"):
             prev_h = max(0.1, prev["y1"] - prev["y0"])
