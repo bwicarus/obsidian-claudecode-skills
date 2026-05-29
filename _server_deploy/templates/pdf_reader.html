@@ -19,7 +19,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #main{flex:1;overflow:auto;background:#0a0e1a;padding:16px 6px;text-align:center;position:relative}
 /* canvas 用 inline 固定 cw×ch（精确比例，绝不被 CSS 缩放）；宽度自适应靠重算 scale 重 render，overlay 同坐标系永不错位 */
 #main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4)}
-.page-wrap{position:relative;display:inline-block}
+.page-wrap{position:relative;display:inline-block;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
 .textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
