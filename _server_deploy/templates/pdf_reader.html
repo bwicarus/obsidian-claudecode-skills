@@ -1690,7 +1690,7 @@ function renderVocabSentences(pw, sentences) {
     pw.appendChild(layer);
   }
   if (!layer) return;
-  layer.querySelectorAll('.vocab-sentence-box, .vocab-sentence-btn').forEach(el => el.remove());
+  layer.querySelectorAll('.vocab-sentence-box, [class*="vocab-sentence-btn"]').forEach(el => el.remove());   // 含 btn-l / btn-l-start，否则删除/重渲染时 L 按钮残留
   if (!sentences || !sentences.length) return;
   const canvas = pw.querySelector('canvas');
   const cssW = canvas?.clientWidth || pw.clientWidth;
@@ -1795,17 +1795,17 @@ function renderVocabSentences(pw, sentences) {
       btn.addEventListener('mouseleave', () => {
         layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"].highlight`).forEach(b => b.classList.remove('highlight'));
       });
-      _bindSentBtnLongPress(btn, s, pw);
+      if (s.manual) _bindSentBtnLongPress(btn, s, pw);   // 仅翻译功能形成的框选可长按删；自动生词框不可
       layer.appendChild(btn);
     }
-    if (s.first_char) {
+    if (s.first_char && s.manual) {
       const b0 = layer.querySelector(`.vocab-sentence-btn-l-start[data-sid="${sid}"]`);
       if (b0) _bindSentBtnLongPress(b0, s, pw);
     }
   }
 }
 
-// L 框长按 → 删除该句标记（持久隐藏）。与短按(翻译)/拖选共存：移动或短按则取消
+// L 框长按 → 删除该句标记（仅翻译框选）。与短按(翻译)/拖选共存：移动或短按则取消；触发后弹确认
 function _bindSentBtnLongPress(btn, s, pw) {
   let timer = null, x0 = 0, y0 = 0, fired = false;
   btn.addEventListener('pointerdown', (e) => {
@@ -1814,7 +1814,7 @@ function _bindSentBtnLongPress(btn, s, pw) {
     timer = setTimeout(() => {
       timer = null; fired = true;
       if (navigator.vibrate) { try { navigator.vibrate(30); } catch (_) {} }
-      _sentDismiss(s, pw);
+      if (confirm('删除这个翻译框选？（只去掉框线/译文标记，不影响原文）')) _sentDismiss(s, pw);
     }, 600);
   });
   const cancel = (e) => {
