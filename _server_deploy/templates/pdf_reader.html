@@ -828,6 +828,8 @@ async function _renderPageInto(num, wrap) {
   const viewport = page.getViewport({scale});
   // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset
   wrap.innerHTML = '';
+  wrap.__charLayer = null; wrap.__charBoxes = null;   // 清残留引用，避免重渲染后指向已删除的旧层
+  wrap.__inkStrokes = null;
   wrap.style.width = ''; wrap.style.height = '';
   wrap.style.background = ''; wrap.style.color = '';
   wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
@@ -1451,7 +1453,6 @@ let _charSel = null;   // {pw, startIdx, endIdx, dragging}
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
-  if (wrap.__charLayer) return;    // 已绑过（重试竞态保护）
   let d = null;
   try {
     const r = await fetch(`/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
@@ -1459,7 +1460,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   } catch (e) { d = null; }
   if (!d || !d.ok) {
     // 偶尔失败(并发/超时) → 退避重试，避免整页无 char-layer(点选失灵)/无 L 框
-    if (_retry < 2 && wrap.isConnected && !wrap.__charLayer) {
+    if (_retry < 2 && wrap.isConnected) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
     }
