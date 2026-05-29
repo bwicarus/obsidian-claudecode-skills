@@ -194,8 +194,9 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .kg-node.locked{border-left:3px solid #3a4456;opacity:.7}
 
 /* 选中工具栏：跟随选区浮出 */
-#sel-toolbar{position:absolute;display:none;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:6px;gap:6px;z-index:99;box-shadow:0 6px 16px rgba(0,0,0,0.6);flex-direction:column;max-width:480px}
+#sel-toolbar{position:absolute;display:none;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:6px;gap:8px;z-index:99;box-shadow:0 6px 16px rgba(0,0,0,0.6);flex-direction:row;align-items:flex-start;max-width:480px}
 #sel-toolbar.open{display:flex}
+#sel-main{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
 #sel-toolbar .preview{color:#a8cdff;font-size:11px;line-height:1.5;background:rgba(0,0,0,.3);border-radius:4px;padding:5px 9px;max-height:54px;overflow:hidden;word-break:break-word;border-left:2px solid #60a5fa}
 #sel-toolbar .preview .len{color:#7a8497;font-size:10px;margin-left:6px}
 #sel-toolbar .btns{display:flex;gap:4px;flex-wrap:wrap}
@@ -311,7 +312,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 .hl-layer .hl-saved.no-color:hover{border-color:#60a5fa;background:rgba(96,165,250,.08) !important}
 
 /* toolbar 内的高亮色板：只有色圆点，点 = 立刻标记 + 互斥激活外框 */
-#hl-color-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 2px 0}
+#hl-color-picker{display:flex;flex-direction:column;gap:6px;align-items:center;padding:2px;flex-shrink:0;border-right:1px solid #2a3550;padding-right:8px}
 #hl-color-picker .swatch{width:24px;height:24px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
 #hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
@@ -378,17 +379,23 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
   <div id="main">
     <div id="page-container"></div>
     <div id="sel-toolbar">
-      <div class="preview" id="sel-preview">—</div>
-      <div class="btns">
-        <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
-        <button onclick="onTranslate()">🌐 翻译</button>
-        <button onclick="onExplain()">💡 解释</button>
-        <button onclick="onToQA()" title="跳到 QA browser 继续问">💬 问 AI</button>
-        <button onclick="onToNote()" title="把选中内容加到笔记">📝 加笔记</button>
-      </div>
       <div id="hl-color-picker"><span class="lbl">🖌</span></div>
-      <div id="grammar-btn-row" style="display:none">
-        <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段">📊 语法分析</button>
+      <div id="sel-main">
+        <div class="preview" id="sel-preview">—</div>
+        <!-- 单词选中：查词（小框，第2步） -->
+        <div class="btns" id="sel-btns-word" style="display:none">
+          <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
+          <button onclick="onLookupWord()" title="查词典">🔍 查词</button>
+        </div>
+        <!-- 多词/句子选中：翻译 + 解释 -->
+        <div class="btns" id="sel-btns-multi" style="display:none">
+          <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
+          <button onclick="onTranslate()">🌐 翻译</button>
+          <button onclick="onExplain()">💡 解释</button>
+        </div>
+        <div id="grammar-btn-row" style="display:none">
+          <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段">📊 语法分析</button>
+        </div>
       </div>
     </div>
   </div>
@@ -2429,7 +2436,32 @@ function _updateSelPreview(text) {
   // 提示用户：虚线框是 textDiv 段范围（粗略），实际选中以下面文字为准
   el.innerHTML = '<b>已选：</b>' + display.replace(/&/g,'&amp;').replace(/</g,'&lt;') +
                  '<span class="len">（' + text.length + ' 字）</span>';
+  _updateToolbarMode(text);
 }
+
+// 选中后按「单词 vs 多词」切换工具栏按钮组：单词→查词；多词→翻译+解释
+function _updateToolbarMode(text) {
+  const t = (text || '').trim();
+  const isWord = t.length > 0 && t.length <= 30 && /^[A-Za-z][A-Za-z'’\-]*$/.test(t);
+  const w = document.getElementById('sel-btns-word');
+  const m = document.getElementById('sel-btns-multi');
+  if (w) w.style.display = isWord ? 'flex' : 'none';
+  if (m) m.style.display = isWord ? 'none' : 'flex';
+}
+
+// 工具栏「🔍 查词」：单词查词典（第2步会换成小框；这里先走现成的字典流式框）
+window.onLookupWord = () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  const word = lastSelText.trim().toLowerCase();
+  let ctx = '';
+  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+    const chars = _charSel.pw.__charBoxes;
+    const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+    if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
+  }
+  dictStream(word, ctx);
+};
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
 function _caretAtPoint(x, y) {
