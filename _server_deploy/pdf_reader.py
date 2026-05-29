@@ -470,7 +470,7 @@ def pdf_api_page_chars():
                     return wid
             return -1
         chars = []
-        for block in raw.get("blocks", []):
+        for _block_i, block in enumerate(raw.get("blocks", [])):
             if block.get("type", 0) != 0:
                 continue
             for line in block.get("lines", []):
@@ -492,6 +492,7 @@ def pdf_api_page_chars():
                             "sp": 1 if c.isspace() else 0,
                             "w": _word_id((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),  # 所属词 id
                             "b": 1 if _bold else 0,   # 加粗：整句加粗的练习指令/演示句/小标题排除用
+                            "bk": _block_i,           # rawdict 块号：切句用(比 word_id 可靠，斜体匹配失败也不丢块)
                         })
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
@@ -632,7 +633,8 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         nonlocal cur_word_letters, cur_total_words
         if cur_word_letters:
             w = "".join(cur_word_letters).lower()
-            if w in form_to_lemma_unmastered:
+            # ≤2 字母的词（am/is/he/we/it/of/to… 功能词）默认掌握，不算生词
+            if len(w) > 2 and w in form_to_lemma_unmastered:
                 cur_lemmas.add(form_to_lemma_unmastered[w])
             # 计数实际单词（不限英文）
             if len(w) >= 2 or w.isalpha():
@@ -734,8 +736,8 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         # 跨 block 切句：PyMuPDF 不同排版块（如对话气泡 vs 页脚导航条）的字符在 reading order
         # 相邻时绝不混进同一句（否则气泡句的翻译会串成页脚的）。w = block*1e6+line*1e3+word_no
         if prev and not prev.get("sp") and not ch.get("sp"):
-            pb, cb = prev.get("w", -1), ch.get("w", -1)
-            if pb >= 0 and cb >= 0 and pb // 1000000 != cb // 1000000:
+            pbk, cbk = prev.get("bk"), ch.get("bk")
+            if pbk is not None and cbk is not None and pbk != cbk:   # rawdict 块变 → 切句(斜体 w=-1 也不漏切)
                 _flush_word(); _flush_sentence()
         # 跨行检测：行间距 > 1.5× 行高 → 段落分界（新句）
         if prev and not prev.get("sp") and not ch.get("sp"):
