@@ -3672,6 +3672,9 @@ function openGrammarPanel() {
     // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时）
     requestAnimationFrame(() => { _refitToWidth(true); });
   }
+  // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
+  const _onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
+  if (_onGr && !_grammarHistLoaded && typeof loadGrammarHistory === 'function') loadGrammarHistory();
 }
 window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
