@@ -724,8 +724,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         c = ch.get("c", "")
         # 处理 pending period：根据当前字符决定上一个 . 是否真切句
         if pending_period:
+            # 延续(小数 3.14 / 缩写 e.g.)必须同一行：换行后的字符(如练习题下一行的编号 2/3)不算延续
+            _same_line = bool(prev) and not prev.get("sp") and \
+                abs(ch.get("y0", 0) - prev.get("y0", 0)) < max(1.0, (prev.get("y1", 0) - prev.get("y0", 0)) * 0.5)
             is_continuation = (
-                (not ch.get("sp"))
+                _same_line
+                and (not ch.get("sp"))
                 and len(c) == 1
                 and (c.isdigit() or (c.isalpha() and c.islower()))
             )
