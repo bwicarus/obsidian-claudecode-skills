@@ -5378,7 +5378,13 @@ function _inkPointerMove(e) {
   const s = d.stroke;
   if (s.t === 'pen') {
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of evs) { const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (p) s.p.push(p); }
+    for (const ce of evs) {
+      const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (!p) continue;
+      const last = s.p[s.p.length - 1];
+      // 抽稀：丢弃与上一点过近的采样点（120Hz Pencil 点太密 → quadratic 退化成折线、边缘发毛）
+      if (last) { const dx = p[0] - last[0], dy = p[1] - last[1]; if (dx * dx + dy * dy < 6e-6) continue; }
+      s.p.push(p);
+    }
   } else {
     const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) s.p[1] = pt;
   }
