@@ -1041,12 +1041,23 @@ def pdf_api_dict_quick():
             _trigger_vocab_note_async(word, "", 0, "")
     except Exception:
         pass
+    # 真人音频：若该词已有 vocab 笔记（之前查过），带上 audio_us 供小框喇叭播放（否则前端退化 TTS）
+    audio = ""
+    try:
+        import anki_from_word  # type: ignore
+        _p = anki_from_word._word_path(lemma)
+        if _p.exists():
+            _fm = _vocab_read_fm(_p)
+            audio = _fm.get("audio_us") or _fm.get("audio_uk") or ""
+    except Exception:
+        pass
     return jsonify({
         "ok": True, "word": word, "lemma": lemma, "forms": forms,
         "phonetic": ("/" + ec.get("phonetic", "") + "/") if ec.get("phonetic") else "",
         "translation": "\n".join(zh_defs[:8]),
         "definition": "\n".join(en_defs[:6]),
         "freq_bnc": ec.get("bnc", 0),
+        "audio": audio,
     })
 
 
