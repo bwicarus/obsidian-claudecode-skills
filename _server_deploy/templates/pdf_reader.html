@@ -2779,6 +2779,7 @@ window.showWordPopover = async (word, ctx) => {
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
       '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>' +
+      '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
   } catch (e) {
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
@@ -2802,6 +2803,11 @@ window._wordPopAnki = (btn) => {
   if (btn) { btn.disabled = true; btn.textContent = '🎴 制卡中…'; }
   addVocabAnki(s.lemma);   // dict-quick 已后台触发笔记生成(数据补全)，制卡复用现成接口
   setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 400);
+};
+// 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
+window._wordPopGrammar = () => {
+  const p = document.getElementById('word-pop'); if (p) p.style.display = 'none';
+  try { onGrammarAnalyze(); } catch (e) { window.dlog && window.dlog('grammar from word-pop fail: ' + (e && e.message)); }
 };
 // 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
