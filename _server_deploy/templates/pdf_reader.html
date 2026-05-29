@@ -1396,7 +1396,7 @@ async function setupContinuousMode() {
         _renderPageInto(num, e.target);
       }
     });
-  }, {rootMargin: '500px', root: document.getElementById('main')});
+  }, {rootMargin: '1400px', root: document.getElementById('main')});   // 提前 ~2 屏渲染+绑 char-layer，滚到时已就绪（threaded 后端并发处理）
   container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
   // 监听滚动同步 currentPage（跟踪可见页用于"上一页 / 下一页"按钮）
   const mainEl = document.getElementById('main');
@@ -2721,21 +2721,25 @@ function _updateToolbarMode(text) {
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
 let _wordPopState = null;
 function _positionWordPop(pop) {
-  // 挂进选中所在页(page-wrap)，absolute 定位到选中起点字符下方 → 随页面一起滚动
+  // 挂进 #main（不会被单页重渲染的 innerHTML='' 删掉）；用 page-wrap 布局坐标定位，
+  // absolute 相对 #main → 随内容滚动。（之前挂 page-wrap，侧栏展开触发重渲染会把小框删掉 → 闪没）
   const pw = _charSel && _charSel.pw;
   const ch = pw && pw.__charBoxes && pw.__charBoxes[_charSel.startIdx];
-  if (pw && ch && ch.left != null) {
-    if (pop.parentElement !== pw) pw.appendChild(pop);
+  const main = document.getElementById('main');
+  if (pw && ch && ch.left != null && main) {
+    if (pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'absolute';
-    const W = 340, pwW = pw.clientWidth || 9999;
-    let left = ch.left;
-    if (left + W > pwW - 4) left = Math.max(4, pwW - W - 4);
+    const W = 340;
+    let left = pw.offsetLeft + ch.left;   // pw.offsetParent === #main（page-container static）
+    const maxLeft = Math.max(4, main.scrollWidth - W - 4);
+    if (left > maxLeft) left = maxLeft;
+    if (left < 4) left = 4;
     pop.style.left = left + 'px';
-    pop.style.top = (ch.top + ch.height + 6) + 'px';
+    pop.style.top = (pw.offsetTop + ch.top + ch.height + 6) + 'px';
   } else {
-    if (pop.parentElement !== document.body) document.body.appendChild(pop);
+    if (main && pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'fixed';
-    const m = document.getElementById('main').getBoundingClientRect();
+    const m = (main || document.body).getBoundingClientRect();
     pop.style.left = (m.left + m.width / 2 - 170) + 'px';
     pop.style.top = (m.top + 70) + 'px';
   }
