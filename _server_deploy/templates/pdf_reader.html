@@ -283,6 +283,8 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 /* 句子框：素描排线 + mix-blend-mode 让颜色叠到字下方（白底显色，字像素不被遮）
    句首 / 句末用 L 按钮承担两端标识，box 自身无 border */
 .vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-image:var(--sent-hatch);background-color:transparent;mix-blend-mode:multiply}
+.vocab-sentence-box.translating{animation:sent-breathe 1.1s ease-in-out infinite}
+@keyframes sent-breathe{0%,100%{opacity:.3}50%{opacity:1}}
 .vocab-sentence-box.highlight{background-color:var(--sent-fill,rgba(245,158,11,.08))}
 
 /* 句末按钮：包裹最后一个字符的 L 形（右边 + 下边加粗）*/
@@ -1524,7 +1526,7 @@ function renderVocabSentences(pw, sentences) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
       const box = document.createElement('div');
-      box.className = 'vocab-sentence-box';
+      box.className = 'vocab-sentence-box' + (s.__translating ? ' translating' : '');
       box.dataset.sid = sid;
       box.style.color = stroke;
       box.style.setProperty('--sent-fill', fill);
@@ -4833,32 +4835,77 @@ document.addEventListener('copy', (e) => {
   e.preventDefault();
 });
 
+// 从选中 char 范围构造一个"句子标记"对象(几何同 vocab 句子，PDF pt)，供手动翻译标记用
+function _buildSentenceFromSel(pw, sIdx, eIdx) {
+  const chars = pw.__charBoxes;
+  if (!chars || sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return null;
+  const rects = []; let cur = null, firstC = null, lastC = null, text = '';
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (c.sp) { text += ' '; continue; }
+    const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
+    if (x0 == null) continue;
+    if (!firstC) firstC = [x0, y0, x1, y1];
+    lastC = [x0, y0, x1, y1];
+    text += c.c;
+    if (cur && Math.abs(y0 - cur[1]) <= (y1 - y0) * 0.6) {
+      cur[2] = Math.max(cur[2], x1); cur[1] = Math.min(cur[1], y0); cur[3] = Math.max(cur[3], y1);
+    } else {
+      if (cur) rects.push(cur.map(v => +v.toFixed(2)));
+      cur = [x0, y0, x1, y1];
+    }
+  }
+  if (cur) rects.push(cur.map(v => +v.toFixed(2)));
+  text = text.replace(/\s+/g, ' ').trim();
+  if (!rects.length || !text || !firstC) return null;
+  return {text, rects, first_char: firstC.map(v => +v.toFixed(2)), last_char: lastC.map(v => +v.toFixed(2)),
+          count: 0, lemmas: [], total_words: 0, manual: true};
+}
+
 window.onTranslate = async () => {
   if (!lastSelText) return;
-  // 记录原始选中位置 + kind，让 result-modal 的「🖌 标记到 PDF」按钮可用
-  _resultContext = _charSel ? {
-    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: '', kind: 'translate',
-  } : null;
   toolbar.classList.remove('open');
-  const text = lastSelText.trim();
-  // 单词（英文字母、长度 ≤ 30、无空格）→ 字典三源 SSE 流式（ECDICT 先到 → 自动入 vocab）
-  const isWord = text.length <= 30 && /^[A-Za-z][A-Za-z\-']*$/.test(text);
-  if (isWord) {
-    try {
-      let ctx = '';
-      if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
-        const chars = _charSel.pw.__charBoxes;
-        const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
-        if (ctxRange) ctx = _charsRangeToText(chars, ctxRange.start, ctxRange.end).slice(0, 400);
-      }
-      const ok = await dictStream(text.toLowerCase(), ctx);
-      if (ok) return;
-      // 字典没命中 → 回落 AI
-    } catch (e) { window.dlog?.('dict stream err: ' + e.message, '#ff6b6b'); }
+  const pw = _charSel && _charSel.pw;
+  // 无 char 信息(罕见) → 退回大框 AI 翻译
+  if (!pw || !pw.__charBoxes) {
+    aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
+    return;
   }
-  // 长文本 / 字典没命中 → AI 翻译
-  aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
+  // 选中句 → 生成句子标记(L框/box)，box 呼吸表示翻译中；译完存 sidecar + 自动弹译文浮层
+  const sent = _buildSentenceFromSel(pw, _charSel.startIdx, _charSel.endIdx);
+  if (!sent) { aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译'); return; }
+  sent.__translating = true;
+  pw.__vocabSentences = (pw.__vocabSentences || []).filter(s => s.text !== sent.text);
+  pw.__vocabSentences.push(sent);
+  renderVocabSentences(pw, pw.__vocabSentences);   // 呼吸 box
+  try {
+    const ov = _getAiOverrides();
+    const r = await fetch('/pdf/api/translate-sentence', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        text: sent.text, model: ov.model || '', effort: ov.effort || '',
+        file: FILE_REL, sentence: {rects: sent.rects, first_char: sent.first_char, last_char: sent.last_char, page: currentPage},
+      }),
+    });
+    const d = await r.json();
+    sent.__translating = false;
+    if (d.ok && d.zh) {
+      sent.zh = d.zh;
+      renderVocabSentences(pw, pw.__vocabSentences);   // 停呼吸
+      setTimeout(() => {   // 自动弹译文浮层(点该句的句首 L 按钮)
+        const si = pw.__vocabSentences.indexOf(sent);
+        const btn = pw.querySelector('.vocab-sentence-btn-l-start[data-sid="' + si + '"]');
+        if (btn) btn.click();
+      }, 60);
+    } else {
+      renderVocabSentences(pw, pw.__vocabSentences);
+      _toast('翻译失败：' + (d.error || '?'));
+    }
+  } catch (e) {
+    sent.__translating = false;
+    renderVocabSentences(pw, pw.__vocabSentences);
+    _toast('翻译错误：' + e.message);
+  }
 };
 window.onExplain = () => {
   if (!lastSelText) return;
