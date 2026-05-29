@@ -180,7 +180,9 @@ def _obsidian_url_for_pdf(rel_pdf: str, page: int) -> str:
 
 
 def _webapp_url_for_pdf(rel_pdf: str, page: int) -> str:
-    return f"https://bwicarus.space/pdf/view?file={rel_pdf}&page={page}"
+    # 域名从 env 读：Pi 配 Tailscale URL（笔记 source 链接走内网）；VPS 不配 = 默认 bwicarus.space
+    base = os.environ.get("WEBAPP_BASE_URL", "https://bwicarus.space").rstrip("/")
+    return f"{base}/pdf/view?file={rel_pdf}&page={page}"
 
 
 def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str = "") -> str:
