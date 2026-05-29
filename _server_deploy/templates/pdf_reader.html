@@ -1875,7 +1875,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
   const _blk = (c) => (c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000);
   const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
   const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b >= _bLo && b <= _bHi; };
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };  // b<0(空格/无词归属)保留，只排明确别块
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
