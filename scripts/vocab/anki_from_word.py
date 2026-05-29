@@ -194,7 +194,8 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
 
     entry = compose_entry(lemma, online=True)
     if not entry:
-        raise SystemExit(f"compose_entry empty for {lemma!r}")
+        # 连 ECDICT 都查不到（多半选错了非英文词）→ 正常退出 + 中文提示，前端 toast 友好
+        return {"ok": False, "error": f"查不到「{lemma}」的字典数据，无法制卡"}
     lemma = entry["lemma"]
     sources_db = _load_sources_db(lemma)
 
