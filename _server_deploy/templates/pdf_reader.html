@@ -1870,12 +1870,19 @@ function _selByCharRange(pw, sIdx, eIdx) {
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
+  // 按块过滤：只保留 block 序号在 [起点块, 终点块] 之间的字符，排除中间插入的别块
+  // （双栏选一栏不带另一栏、题号不粘进指令；跨段落=相邻块仍能选）。w=-1(无块信息)时不过滤
+  const _blk = (c) => (c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000);
+  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
+  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b >= _bLo && b <= _bHi; };
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
   let lastChar = null;
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (lastChar) {
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) {
@@ -1904,6 +1911,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
     let cur = null;
     for (let i = sIdx; i <= eIdx; i++) {
       const c = chars[i];
+      if (!_inBlk(c)) continue;   // 跨块过滤：别块字符不画选中高亮
       // 空格如果 bbox 缺失，用前一字符的位置 + 估算 width
       let cleft = c.left, ctop = c.top, cw = c.width, ch = c.height;
       if (c.sp && (!cw || cw < 0.5) && i > sIdx) {
