@@ -543,6 +543,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         if info.get("label_slug") and info["label_slug"] != "mastered"
     }
 
+    # 正文字号基准：非空格 char 高度中位数。明显大于它的句子（章节标题/单元名）不当学习句子
+    _hs = sorted((c["y1"] - c["y0"]) for c in chars if not c.get("sp") and c["y1"] > c["y0"])
+    median_h = _hs[len(_hs) // 2] if _hs else 0
+
     sentences: list[dict] = []
     cur_chars: list[dict] = []
     cur_lemmas: set[str] = set()
@@ -614,6 +618,11 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 if page_h:
                     sy0 = min(c["y0"] for c in nsp); sy1 = max(c["y1"] for c in nsp)
                     footer = (sy0 > page_h * 0.90 or sy1 < page_h * 0.06)
+                # 大字号 = 章节标题/单元名（如 "Present continuous and present simple 1"）→ 不当学习句子
+                if not footer and median_h:
+                    avg_h = sum(c["y1"] - c["y0"] for c in nsp) / len(nsp)
+                    if avg_h > median_h * 1.4:
+                        footer = True
             if not vertical and not footer:
                 sentences.append({
                     "text": text, "rects": rects,
