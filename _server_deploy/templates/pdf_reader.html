@@ -934,6 +934,7 @@ window.switchSideTab = (pane) => {
   if (clr) clr.style.display = (pane === 'grammar') ? '' : 'none';
   if (pane === 'vocab' && !_vocabLoaded) loadVocabList();   // 首次进单词本自动载
   if (pane === 'grammar' && !_grammarHistLoaded) loadGrammarHistory();   // 首次进语法载历史
+  if (pane === 'kg') loadPageNodes(currentPage);   // 进知识点 tab → 主动拉当前页（连续模式下不靠滚动触发，免得抽屉空要滑动才出）
 };
 // 语法分析历史：按书本持久，新旧倒序（最新在上）
 let _grammarHistLoaded = false;
