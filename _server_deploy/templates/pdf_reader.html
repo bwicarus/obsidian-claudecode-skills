@@ -2148,7 +2148,8 @@ function _selByCharRange(pw, sIdx, eIdx) {
   eIdx = _expandToWordEnd(chars, eIdx);
   // 按块过滤：只保留 block 序号在 [起点块, 终点块] 之间的字符，排除中间插入的别块
   // （双栏选一栏不带另一栏、题号不粘进指令；跨段落=相邻块仍能选）。w=-1(无块信息)时不过滤
-  const _blk = (c) => (c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000);
+  // 用 rawdict 块号 bk 过滤(斜体词 w=-1 也有块号)；bk 缺失才回退 w//1e6
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
   const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
   const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
   const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };  // b<0(空格/无词归属)保留，只排明确别块
