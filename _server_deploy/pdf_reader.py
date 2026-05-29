@@ -1162,33 +1162,48 @@ def pdf_api_explain():
         return jsonify({"ok": False, "error": f"AI 解释失败：{ex}"}), 500
 
 
-@bp.route("/api/snippets-to", methods=["POST"])
-def pdf_api_snippets_to():
-    """从用户在 AI 回答里勾选的段落 → 创建笔记 / Anki 卡 / 两者。
+# ─── 通用后台 AI job：任务在服务器跑，网页只轮询拉状态 ───
+# 防 iPad 切后台/锁屏时浏览器挂起 JS、掐断 fetch/SSE 长连接导致 AI 任务失败。
+import threading as _threading
+import uuid as _uuid
+import time as _time
+_JOBS: dict = {}
+_JOBS_LOCK = _threading.Lock()
 
-    body: {
-      snippets: [{text, source}],
-      make_note: bool, make_anki: bool,
-      note_name: str（make_note 时必填）,
-      model, effort
-    }
-    """
-    body = request.get_json(silent=True) or {}
+def _job_set(jid: str, **kw):
+    with _JOBS_LOCK:
+        _JOBS.setdefault(jid, {}).update(kw)
+        # 顺手清理 10 分钟前的旧 job（防内存堆积）
+        cutoff = _time.time() - 600
+        for k in [k for k, v in list(_JOBS.items()) if v.get("ts", 0) < cutoff and k != jid]:
+            _JOBS.pop(k, None)
+
+
+def _validate_snippets_body(body):
+    """校验 snippets-to 入参。返回 (params_dict, None) 或 (None, (errmsg, code))。"""
     snippets = body.get("snippets") or []
     make_note = bool(body.get("make_note"))
     make_anki = bool(body.get("make_anki"))
     note_name = (body.get("note_name") or "").strip()
     if not snippets:
-        return jsonify({"ok": False, "error": "无选中段落"}), 400
+        return None, ("无选中段落", 400)
     if not (make_note or make_anki):
-        return jsonify({"ok": False, "error": "至少选一个动作"}), 400
+        return None, ("至少选一个动作", 400)
     if make_note and not note_name:
-        return jsonify({"ok": False, "error": "笔记名不能为空"}), 400
+        return None, ("笔记名不能为空", 400)
+    return {
+        "snippets": snippets, "make_note": make_note, "make_anki": make_anki,
+        "note_name": note_name, "model": body.get("model") or "", "effort": body.get("effort") or "",
+    }, None
+
+
+def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -> dict:
+    """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。"""
     out = {"ok": True}
     # ── 创建笔记 ──
     if make_note:
         if not OBSIDIAN_ROOT:
-            return jsonify({"ok": False, "error": "VAULT 未配置"}), 500
+            return {"ok": False, "error": "VAULT 未配置"}
         safe = _sanitize_filename(note_name)
         if not safe.endswith(".md"):
             safe += ".md"
@@ -1215,7 +1230,7 @@ def pdf_api_snippets_to():
             f"=== 收集内容 ===\n{snippets_text}"
         )
         try:
-            content = _ai_call(prompt, body.get("model") or "", body.get("effort") or "").strip()
+            content = _ai_call(prompt, model or "", effort or "").strip()
             if content.startswith("```"):
                 import re as _re
                 content = _re.sub(r'^```[a-zA-Z]*\n', '', content)
@@ -1230,7 +1245,7 @@ def pdf_api_snippets_to():
                 f"&file={_up.quote(rel[:-3] if rel.endswith('.md') else rel, safe='/')}"
             )
         except Exception as ex:
-            return jsonify({"ok": False, "error": f"笔记创建失败：{ex}"}), 500
+            return {"ok": False, "error": f"笔记创建失败：{ex}"}
     # ── 创建 Anki 卡 ──
     if make_anki:
         try:
@@ -1258,8 +1273,8 @@ def pdf_api_snippets_to():
             )
             backend_name = cfg.get("ai_backend", "claude_cli")
             settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
-            if body.get("model"):  settings["model"] = body["model"]
-            if body.get("effort"): settings["effort"] = body["effort"]
+            if model:  settings["model"] = model
+            if effort: settings["effort"] = effort
             ad = make_backend(backend_name, settings)
             raw = ad.chat([
                 {"role": "system", "content": "你是 Anki 卡片生成器，严格只输出 JSON。"},
@@ -1277,15 +1292,15 @@ def pdf_api_snippets_to():
                 ctype = (c.get("type") or "basic").lower()
                 if ctype == "cloze":
                     fields = {"Text": c.get("text", ""), "Back Extra": ""}
-                    model = "Cloze"
+                    model_name = "Cloze"
                 else:
                     fields = {"Front": c.get("front", ""), "Back": c.get("back", "")}
-                    model = "Basic"
+                    model_name = "Basic"
                 req = json.dumps({
                     "action": "addNote", "version": 6,
                     "params": {"note": {
                         "deckName": "QA",
-                        "modelName": model,
+                        "modelName": model_name,
                         "fields": fields,
                         "tags": ["pdf-snippets"],
                     }}
@@ -1303,7 +1318,47 @@ def pdf_api_snippets_to():
             out["anki_added"] = added
         except Exception as ex:
             out["anki_error"] = str(ex)
-    return jsonify(out)
+    return out
+
+
+@bp.route("/api/snippets-to", methods=["POST"])
+def pdf_api_snippets_to():
+    """同步版（兼容）：勾选段落 → 笔记/Anki。"""
+    body = request.get_json(silent=True) or {}
+    params, err = _validate_snippets_body(body)
+    if err:
+        return jsonify({"ok": False, "error": err[0]}), err[1]
+    out = _run_snippets_to(**params)
+    return jsonify(out), (200 if out.get("ok") else 500)
+
+
+@bp.route("/api/snippets-to-async", methods=["POST"])
+def pdf_api_snippets_to_async():
+    """异步版：服务器后台线程跑，立即返回 job_id；网页轮询 /api/job-status。
+    防 iPad 切后台/锁屏时浏览器掐断长请求导致 AI 任务失败。"""
+    body = request.get_json(silent=True) or {}
+    params, err = _validate_snippets_body(body)
+    if err:
+        return jsonify({"ok": False, "error": err[0]}), err[1]
+    jid = _uuid.uuid4().hex[:12]
+    _job_set(jid, status="running", ts=_time.time(), kind="snippets-to")
+    def _work():
+        try:
+            out = _run_snippets_to(**params)
+            _job_set(jid, status="done", result=out, ts=_time.time())
+        except Exception as ex:
+            _job_set(jid, status="error", error=str(ex), ts=_time.time())
+    _threading.Thread(target=_work, daemon=True).start()
+    return jsonify({"ok": True, "job_id": jid})
+
+
+@bp.route("/api/job-status")
+def pdf_api_job_status():
+    """轮询后台 job：{status: running|done|error|unknown, result?, error?}。"""
+    jid = request.args.get("id", "")
+    with _JOBS_LOCK:
+        j = dict(_JOBS.get(jid) or {})
+    return jsonify(j if j else {"status": "unknown"})
 
 
 # ─── 高亮（sidecar JSON 存 state/pdf-highlights/<sha1>.json）───────────────────

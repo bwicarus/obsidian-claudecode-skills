@@ -2900,10 +2900,10 @@ async function ankiFromResult() {
   const sentence = (_resultContext && _resultContext.sentence) || '';
   const text = `【原文】${sel}` + (sentence && sentence !== sel ? `\n【上下文】${sentence}` : '') + `\n【解释】${body}`;
   closeResult();
-  const jobId = _startBgJob('制 Anki 中…');
+  const jobUi = _startBgJob('制 Anki 中…');
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/snippets-to', {
+    const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
         snippets: [{text, source: sel || sentence}],
@@ -2912,9 +2912,9 @@ async function ankiFromResult() {
       }),
     });
     const d = await r.json();
-    if (d.ok) _finishBgJob(jobId, 'Anki ' + (d.anki_added || 0) + ' 张', '');
-    else _failBgJob(jobId, (d.error || '失败'), null);
-  } catch (e) { _failBgJob(jobId, e.message, null); }
+    if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', null); return; }
+    _pollJob(d.job_id, jobUi, null);
+  } catch (e) { _failBgJob(jobUi, e.message, null); }
 }
 window.ankiFromResult = ankiFromResult;
 
@@ -4403,6 +4403,36 @@ function _failBgJob(id, text, restore) {
   }
 }
 
+// 轮询后台 job：网页切后台时轮询暂停、回来继续；job 在服务器跑完结果存着，不丢
+function _pollJob(jobId, jobUi, restoreOnFail) {
+  let tries = 0, unknownTries = 0;
+  const iv = setInterval(async () => {
+    tries++;
+    try {
+      const r = await fetch('/pdf/api/job-status?id=' + encodeURIComponent(jobId));
+      const d = await r.json();
+      if (d.status === 'done') {
+        clearInterval(iv);
+        const out = d.result || {};
+        if (out.ok) {
+          const parts = [];
+          if (out.note_path) parts.push('笔记已建');
+          if (out.anki_added) parts.push('Anki ' + out.anki_added + ' 张');
+          _finishBgJob(jobUi, parts.join(' · ') || '完成', out.obsidian_url || '');
+        } else { _failBgJob(jobUi, out.error || '失败', restoreOnFail); }
+      } else if (d.status === 'error') {
+        clearInterval(iv); _failBgJob(jobUi, d.error || '失败', restoreOnFail);
+      } else if (d.status === 'unknown') {
+        if (++unknownTries >= 3) { clearInterval(iv); _failBgJob(jobUi, '任务丢失(服务重启?)', restoreOnFail); }
+      }
+      // running → 继续轮询
+    } catch (e) {
+      // 网络瞬断/网页在后台 → 不立即失败，继续轮询；超 6 分钟才放弃
+      if (tries > 180) { clearInterval(iv); _failBgJob(jobUi, '轮询超时', restoreOnFail); }
+    }
+  }, 2000);
+}
+
 async function _doCreate(makeNote, makeAnki) {
   const picked = _drafts.filter(d => d.selected);
   if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
@@ -4418,10 +4448,11 @@ async function _doCreate(makeNote, makeAnki) {
   _drafts = _drafts.filter(x => !x.selected);
   _persistDrafts(); _updateDraftBadge(); closeDraftModal();
   const label = (makeNote && makeAnki) ? '笔记+Anki' : (makeNote ? '笔记' : 'Anki');
-  const jobId = _startBgJob('创建' + label + '中…（' + used.length + ' 段）');
+  const jobUi = _startBgJob('创建' + label + '中…（' + used.length + ' 段）');
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/snippets-to', {
+    // 提交到服务器后台 job（短请求，立即返回 job_id），再轮询；任务在服务器跑，网页切后台也不中断
+    const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
         snippets: used.map(d => ({text: d.text, source: d.source})),
@@ -4431,16 +4462,10 @@ async function _doCreate(makeNote, makeAnki) {
       }),
     });
     const d = await r.json();
-    if (d.ok) {
-      const parts = [];
-      if (d.note_path) parts.push('笔记已建');
-      if (d.anki_added) parts.push('Anki ' + d.anki_added + ' 张');
-      _finishBgJob(jobId, parts.join(' · ') || '完成', d.obsidian_url || '');
-    } else {
-      _failBgJob(jobId, (d.error || '失败'), used);
-    }
+    if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', used); return; }
+    _pollJob(d.job_id, jobUi, used);
   } catch (e) {
-    _failBgJob(jobId, e.message, used);
+    _failBgJob(jobUi, e.message, used);
   }
 }
 window.createNoteFromDrafts = () => _doCreate(true, false);
