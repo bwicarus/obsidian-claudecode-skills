@@ -690,6 +690,7 @@ window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = {{ page }};
 let scale = 1.4;
+let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
@@ -780,7 +781,9 @@ async function loadPdf() {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
-    scale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
+    const _dpr0 = window.devicePixelRatio || 1;
+    _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
+    scale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
@@ -1022,7 +1025,7 @@ window.goToPage = async (n) => {
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
 window.zoomChange = async (delta) => {
-  scale = Math.max(0.6, Math.min(3.0, scale + delta));
+  scale = Math.max(0.6, Math.min(_scaleMax, scale + delta));
   if (readMode === 'continuous') await setupContinuousMode();
   else renderPage(currentPage);
 };
@@ -1230,7 +1233,7 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(2.5, mainW / v0.width));
+    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');
@@ -1274,7 +1277,7 @@ window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {
   if (_refitBusy || !pdfDoc) return;
-  newScale = Math.max(0.5, Math.min(3.0, newScale));
+  newScale = Math.max(0.5, Math.min(_scaleMax, newScale));
   if (Math.abs(newScale - scale) < 0.01) return;
   _refitBusy = true;
   try {
@@ -1319,7 +1322,7 @@ function _setupPinchZoom() {
       e.preventDefault();
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      _pinch.target = Math.max(0.5, Math.min(3.0, _pinch.s0 * (d / _pinch.d0)));
+      _pinch.target = Math.max(0.5, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
       // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
       const pc = document.getElementById('page-container');
       const mr = main.getBoundingClientRect();
