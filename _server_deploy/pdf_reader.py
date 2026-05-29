@@ -426,7 +426,7 @@ def pdf_api_page_chars():
                         })
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
-        sentences = _build_unmastered_sentences(chars)
+        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
         return jsonify({
             "ok": True,
             "chars": chars,
@@ -518,7 +518,7 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
     return marks
 
 
-def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10) -> list[dict]:
+def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10, page_h: float = 0) -> list[dict]:
     """识别需要标注的句子。判定条件：
       - 至少 threshold 个未掌握 lemma（默认 3）
       - 句子总词数 > min_words - 1（默认 10，即 ≥ 10 词）
@@ -605,11 +605,16 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
             # （横排句子哪怕 2-3 行，行宽通常仍 > 行高叠加；竖排是一长列，高远大于宽）
             nsp = [c for c in cur_chars if not c.get("sp")]
             vertical = False
+            footer = False
             if nsp:
                 bw = max(c["x1"] for c in nsp) - min(c["x0"] for c in nsp)
                 bh = max(c["y1"] for c in nsp) - min(c["y0"] for c in nsp)
                 vertical = bh > bw * 1.6
-            if not vertical:
+                # 页脚/页眉（如底部"→ Unit X"导航条）：整句靠页底(>90%)或页顶(<6%) → 不当学习句子
+                if page_h:
+                    sy0 = min(c["y0"] for c in nsp); sy1 = max(c["y1"] for c in nsp)
+                    footer = (sy0 > page_h * 0.90 or sy1 < page_h * 0.06)
+            if not vertical and not footer:
                 sentences.append({
                     "text": text, "rects": rects,
                     "lemmas": sorted(cur_lemmas), "count": len(cur_lemmas),
@@ -755,7 +760,7 @@ def pdf_api_page_vocab_marks():
         except Exception:
             pass
         marks = _build_vocab_marks(chars)
-        sentences = _build_unmastered_sentences(chars)
+        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
         return jsonify({
             "ok": True,
             "vocab_marks": marks,
