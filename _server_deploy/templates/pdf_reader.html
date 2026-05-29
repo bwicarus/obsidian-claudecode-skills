@@ -1138,11 +1138,19 @@ function _speakWord(lemma, audio) {
   if (audio) {
     try {
       const a = new Audio('/pdf/api/vocab-audio?path=' + encodeURIComponent(audio));
-      a.play().catch(() => _ttsWord(lemma));
+      a.play().catch(() => _speakOnline(lemma));
       return;
     } catch (e) {}
   }
-  _ttsWord(lemma);
+  _speakOnline(lemma);
+}
+// 有道发音（真人 mp3，免 key 直连，覆盖几乎所有词）；失败再退化浏览器 TTS
+function _speakOnline(w) {
+  if (!w) { _ttsWord(w); return; }
+  try {
+    const a = new Audio('https://dict.youdao.com/dictvoice?type=2&audio=' + encodeURIComponent(w));
+    a.play().catch(() => _ttsWord(w));
+  } catch (e) { _ttsWord(w); }
 }
 function _ttsWord(w) {
   try {
