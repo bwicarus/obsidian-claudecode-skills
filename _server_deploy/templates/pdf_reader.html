@@ -443,6 +443,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
           <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
           <button onclick="onTranslate()">🌐 翻译</button>
           <button onclick="onExplain()">💡 解释</button>
+          <button onclick="onChat()">💬 对话</button>
         </div>
         <div id="grammar-btn-row" style="display:none">
           <button onclick="onGrammarAnalyze()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px" title="按跟踪的语法点分析选中片段">📊 语法分析</button>
@@ -5324,6 +5325,39 @@ window.onExplain = () => {
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
   aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释');
+};
+// 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问
+window.onChat = () => {
+  if (!lastSelText) return;
+  toolbar.classList.remove('open');
+  let context = '';
+  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+    const chars = _charSel.pw.__charBoxes;
+    const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+    if (cr) {
+      const p1 = _paragraphExpandFromChar(chars, cr.start);
+      const p2 = _paragraphExpandFromChar(chars, cr.end);
+      if (p1 && p2) context = _charsRangeToText(chars, Math.min(p1.start, p2.start), Math.max(p1.end, p2.end));
+      else context = _charsRangeToText(chars, cr.start, cr.end);
+    }
+  }
+  _resultContext = _charSel ? {
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    text: lastSelText, sentence: context || lastSelText, kind: 'chat',
+  } : null;
+  let html = '<div style="font-size:12.5px;line-height:1.65">'
+    + '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>'
+    + '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
+  if (context && context.trim() !== lastSelText.trim()) {
+    html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>'
+      + '<div style="color:#8a9bb4;white-space:pre-wrap">' + _esc(context) + '</div>';
+  }
+  html += '<div style="margin-top:12px;color:#5a6680">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
+  openResult('💬 AI 对话', lastSelText, html);
+  setTimeout(() => {
+    const i = document.getElementById('result-followup-input');
+    if (i) { i.placeholder = '问 AI（已带原文 + 上下文）…'; i.focus(); }
+  }, 120);
 };
 window.onToQA = () => {
   if (!lastSelText) return;
