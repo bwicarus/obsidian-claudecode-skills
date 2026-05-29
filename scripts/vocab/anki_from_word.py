@@ -149,7 +149,9 @@ def _build_title_url(sources: list[dict]) -> tuple[str, str]:
         pdf_rel = s["pdf"]
         page = int(s.get("page", 1))
         title = f"{Path(pdf_rel).name} · p.{page}"
-        url = f"https://bwicarus.space/pdf/view?file={pdf_rel}&page={page}"
+        # 域名从 env 读：Pi 配 Tailscale URL（卡链接走内网，不绕公网）；VPS 不配 = 默认 bwicarus.space
+        base = os.environ.get("WEBAPP_BASE_URL", "https://bwicarus.space").rstrip("/")
+        url = f"{base}/pdf/view?file={pdf_rel}&page={page}"
         return title, url
     if s.get("note"):
         return Path(s["note"]).stem, ""
