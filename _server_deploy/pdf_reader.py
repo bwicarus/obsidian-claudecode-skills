@@ -278,10 +278,12 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
                     except Exception as ex:
                         yield f"event: warn\ndata: {_json.dumps({'source': 'mw', 'error': str(ex)})}\n\n"
 
-        # 4. 例句翻译（并发翻译，先翻好的先 yield，整体从 N 句串行降到 ~N/4 批）
+        # 4. 例句翻译
         try:
-            from translate import translate as _tr
-            # 收集所有可翻译例句：MW + Free Dict + ECDICT 例句池（前 8 条）
+            import re as _re
+            from translate import (translate as _tr, _cache_get as _tr_cache_get,
+                                   _cache_put as _tr_cache_put, _cfg as _tr_cfg)
+            # 收集所有可翻译例句：MW + Free Dict 例句池（前 8 条）
             all_examples = []
             seen = set()
             for d_list in [
@@ -298,17 +300,64 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
                 if k and k not in seen:
                     seen.add(k); all_examples.append(ex)
             todo = all_examples[:8]
-            if todo:
-                with _cf.ThreadPoolExecutor(max_workers=4) as _tpool:
-                    _tfuts = {_tpool.submit(_tr, ex): ex for ex in todo}
-                    for _tf in _cf.as_completed(_tfuts):
-                        ex = _tfuts[_tf]
-                        try:
-                            zh = _tf.result()
-                        except Exception:
-                            zh = ""
-                        if zh:
-                            yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': zh}, ensure_ascii=False)}\n\n"
+
+            # 缓存命中的先秒出，未命中的留给后端翻译
+            pending = []
+            for ex in todo:
+                c = _tr_cache_get(ex, "zh-CN")
+                if c:
+                    yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': c}, ensure_ascii=False)}\n\n"
+                else:
+                    pending.append(ex)
+
+            if pending:
+                _tcfg = _tr_cfg()
+                _tb = (_tcfg.get("translate_backend") or "auto").strip().lower()
+                if _tb == "ai":
+                    # 一次 AI 调用翻译所有句子，marker 分隔流式输出 → 先翻好的先显示
+                    # （N 次 AI 调用 → 1 次；逐行解析，凑齐一句立刻 yield）
+                    _tmodel = (_tcfg.get("translate_model") or "haiku").strip()
+                    _teffort = (_tcfg.get("translate_effort") or "low").strip()
+                    _numbered = "\n".join(f"{i+1}‖ {ex}" for i, ex in enumerate(pending))
+                    _prompt = (
+                        "把下面每个英文例句翻译成简洁自然的中文。严格逐行输出，每行格式为"
+                        "「序号‖中文译文」，序号与输入一一对应。只输出译文，不要重复英文原文，"
+                        "不要任何解释。\n\n" + _numbered
+                    )
+                    _emitted = set()
+                    def _emit(idx, zh):
+                        if idx in _emitted or not (1 <= idx <= len(pending)):
+                            return None
+                        zh = (zh or "").strip().strip('"“”')
+                        if not zh:
+                            return None
+                        _emitted.add(idx)
+                        try: _tr_cache_put(pending[idx-1], "zh-CN", zh, f"ai-{_tmodel}")
+                        except Exception: pass
+                        return f"event: translate\ndata: {_json.dumps({'en': pending[idx-1], 'zh': zh}, ensure_ascii=False)}\n\n"
+                    _buf = ""
+                    for _chunk in _ai_call_stream(_prompt, _tmodel, _teffort):
+                        _buf += _chunk
+                        while "\n" in _buf:
+                            _line, _buf = _buf.split("\n", 1)
+                            _m = _re.match(r"\s*(\d+)\s*[‖|｜:：.]\s*(.+)", _line)
+                            if _m:
+                                _ev = _emit(int(_m.group(1)), _m.group(2))
+                                if _ev: yield _ev
+                    _m = _re.match(r"\s*(\d+)\s*[‖|｜:：.]\s*(.+)", _buf.strip())   # flush 末行
+                    if _m:
+                        _ev = _emit(int(_m.group(1)), _m.group(2))
+                        if _ev: yield _ev
+                else:
+                    # DeepL / MyMemory：HTTP 源不支持 marker 批量，并发逐句（先回先 yield）
+                    with _cf.ThreadPoolExecutor(max_workers=4) as _tpool:
+                        _tfuts = {_tpool.submit(_tr, ex): ex for ex in pending}
+                        for _tf in _cf.as_completed(_tfuts):
+                            ex = _tfuts[_tf]
+                            try: zh = _tf.result()
+                            except Exception: zh = ""
+                            if zh:
+                                yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': zh}, ensure_ascii=False)}\n\n"
         except Exception as ex:
             yield f"event: warn\ndata: {_json.dumps({'source': 'translate', 'error': str(ex)})}\n\n"
 
