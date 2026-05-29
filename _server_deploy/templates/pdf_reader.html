@@ -1448,10 +1448,24 @@ let _selTimer = null;
 
 let _charSel = null;   // {pw, startIdx, endIdx, dragging}
 
-async function loadCharsAndBindLayer(num, wrap, viewport) {
-  const r = await fetch(`/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
-  const d = await r.json();
-  if (!d.ok) { window.dlog?.('chars api fail: ' + (d.error || '?'), '#ff6b6b'); return; }
+async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
+  _retry = _retry || 0;
+  if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
+  if (wrap.__charLayer) return;    // 已绑过（重试竞态保护）
+  let d = null;
+  try {
+    const r = await fetch(`/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
+    d = await r.json();
+  } catch (e) { d = null; }
+  if (!d || !d.ok) {
+    // 偶尔失败(并发/超时) → 退避重试，避免整页无 char-layer(点选失灵)/无 L 框
+    if (_retry < 2 && wrap.isConnected && !wrap.__charLayer) {
+      await new Promise(res => setTimeout(res, 500 + _retry * 600));
+      return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
+    }
+    window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff6b6b');
+    return;
+  }
   const scale = viewport.scale;
   const pageH = d.page_h;
   // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
