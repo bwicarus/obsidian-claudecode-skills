@@ -118,6 +118,11 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .grammar-block .gb-fu-input{flex:1;min-width:0;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:12px}
 .grammar-block .gb-fu-input:focus{outline:none;border-color:#3b6db5}
 .grammar-block .gb-followup button{background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:12px;white-space:nowrap}
+#qhist-list .qhist-item{padding:8px 12px;border-bottom:1px solid #1f2740;cursor:pointer}
+#qhist-list .qhist-item:hover{background:#162045}
+#qhist-list .qhist-title{color:#cfe6ff;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#qhist-list .qhist-src{color:#8a9bb4;font-size:11px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#qhist-list .qhist-time{color:#5a6680;font-size:10px;margin-top:2px}
 /* 三个分区都留白 + 淡分隔，透气 */
 .grammar-block .gb-trans{padding:11px 12px;font-size:12px;color:#cfe6ff;line-height:1.55;border-top:1px solid #1c2740}
 .grammar-block .gb-loading{padding:14px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
@@ -493,6 +498,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')">📊 语法</button>
     <button class="side-tab" data-pane="vocab" onclick="switchSideTab('vocab')">📒 单词本</button>
     <button class="side-tab" data-pane="kg" onclick="switchSideTab('kg')">📋 知识点</button>
+    <button class="side-tab" data-pane="hist" onclick="switchSideTab('hist')">📜 历史</button>
     <span class="side-tab-sp"></span>
     <button class="side-icon-btn" id="side-clear" onclick="clearGrammarBlocks()" title="清空全部分析">🗑</button>
     <button class="side-icon-btn" onclick="closeGrammarPanel()" title="关闭">✕</button>
@@ -512,6 +518,10 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
   <div id="side-pane-kg" class="side-pane" data-pane="kg">
     <h2 class="side-h2">当前页对应知识点</h2>
     <div id="kg-nodes"><div style="color:#5a6680;font-size:12px">加载中…</div></div>
+  </div>
+  <div id="side-pane-hist" class="side-pane" data-pane="hist">
+    <h2 class="side-h2">查询结果历史（本书）</h2>
+    <div id="qhist-list"><div style="color:#5a6680;font-size:12px;padding:10px">还没有查询记录</div></div>
   </div>
 </aside>
 <div id="dep-tip" class="dep-tip"></div>
@@ -1062,6 +1072,7 @@ window.switchSideTab = (pane) => {
   if (pane === 'vocab' && !_vocabLoaded) loadVocabList();   // 首次进单词本自动载
   if (pane === 'grammar' && !_grammarHistLoaded) loadGrammarHistory();   // 首次进语法载历史
   if (pane === 'kg') loadPageNodes(currentPage);   // 进知识点 tab → 主动拉当前页（连续模式下不靠滚动触发，免得抽屉空要滑动才出）
+  if (pane === 'hist') renderQueryHistory();   // 进查询结果历史 tab
 };
 // 语法分析历史：按书本持久，新旧倒序（最新在上）
 let _grammarHistLoaded = false;
@@ -1080,6 +1091,8 @@ function _addHistoryBlock(item) {
   const sentence = item.sentence || '', text = item.text || '';
   const block = document.createElement('div');
   block.className = 'grammar-block';   // 历史卡默认折叠
+  const _hid = 'gbh_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  block.id = _hid;
   block.dataset.src = sentence; block.dataset.text = text;
   const summary = sentence.slice(0, 60) + (sentence.length > 60 ? '…' : '');
   block.innerHTML =
@@ -1089,7 +1102,12 @@ function _addHistoryBlock(item) {
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-trans"></div>
-     <div class="gb-content"></div>`;
+     <div class="gb-content"></div>
+     <div class="gb-fu-answers"></div>
+     <div class="gb-followup">
+       <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${_hid}');}">
+       <button onclick="_grammarFollowup('${_hid}')">追问</button>
+     </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4625,6 +4643,7 @@ const _origRenderPageInto = null;  // 仅占位
 
 // 结果 modal
 function openResult(title, src, contentHtml) {
+  try { _pushQueryHistory(); } catch (_) {}   // 开新结果前，把上一个结果快照进「📜 历史」
   _resultReqId++;   // 新结果框 → 作废所有进行中的旧异步任务（查词/翻译/解释），它们的延迟回调将被丢弃
   document.getElementById('result-title').textContent = title;
   document.getElementById('result-src').textContent = src;
@@ -4640,7 +4659,7 @@ function openResult(title, src, contentHtml) {
     MathJax.typesetPromise([document.getElementById('result-content')]).catch(()=>{});
   }
 }
-window.closeResult = () => document.getElementById('result-mask').classList.remove('open');
+window.closeResult = () => { try { _pushQueryHistory(); } catch (_) {} document.getElementById('result-mask').classList.remove('open'); };
 
 // ──────── AI 回答里的加号选中（同 QA browser 风格） ────────
 function _headLevel(h) { return parseInt(h.tagName.slice(1), 10); }
@@ -5073,6 +5092,46 @@ function md(s) {
   }
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
+
+// ── 查询结果历史（per-book localStorage；openResult/closeResult 快照，📜 历史 tab 回看）──
+let _restoringHistory = false;
+function _qhistKey() { return 'pdf-qhist-' + (FILE_REL || '_'); }
+function _loadQueryHistory() { try { return JSON.parse(localStorage.getItem(_qhistKey()) || '[]'); } catch (_) { return []; } }
+function _saveQueryHistory(h) { try { localStorage.setItem(_qhistKey(), JSON.stringify(h)); } catch (_) {} }
+function _pushQueryHistory() {
+  if (_restoringHistory) return;
+  const cont = document.getElementById('result-content'); if (!cont) return;
+  const html = cont.innerHTML || '';
+  const title = cont.dataset.title || '';
+  const src = cont.dataset.src || '';
+  if (!title && !src) return;
+  if (html.length < 40 || (/⏳|class="loading"/.test(html) && html.length < 120)) return;   // 跳过空/纯 loading
+  let h = _loadQueryHistory();
+  if (h.length && h[0].src === src && h[0].title === title) { h[0].html = html.slice(0, 60000); h[0].time = Date.now(); }
+  else h.unshift({ id: 'qh_' + Date.now(), title, src, html: html.slice(0, 60000), time: Date.now() });
+  _saveQueryHistory(h.slice(0, 40));
+  if (document.querySelector('#side-tabs .side-tab[data-pane="hist"].active')) renderQueryHistory();
+}
+function _qhFmtTime(t) {
+  const d = new Date(t), n = new Date();
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  return (d.toDateString() === n.toDateString() ? '今天 ' : ((d.getMonth() + 1) + '/' + d.getDate() + ' ')) + hm;
+}
+window.renderQueryHistory = () => {
+  const box = document.getElementById('qhist-list'); if (!box) return;
+  const h = _loadQueryHistory();
+  if (!h.length) { box.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">还没有查询记录</div>'; return; }
+  box.innerHTML = h.map(it =>
+    '<div class="qhist-item" data-id="' + it.id + '"><div class="qhist-title">' + _esc(it.title) + '</div>'
+    + '<div class="qhist-src">' + _esc((it.src || '').slice(0, 80)) + '</div>'
+    + '<div class="qhist-time">' + _qhFmtTime(it.time) + '</div></div>').join('');
+  box.querySelectorAll('.qhist-item').forEach(el => el.addEventListener('click', () => {
+    const it = _loadQueryHistory().find(x => x.id === el.dataset.id); if (!it) return;
+    _restoringHistory = true;
+    try { openResult(it.title, it.src, it.html); } finally { _restoringHistory = false; }
+    if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([document.getElementById('result-content')]).catch(() => {});
+  }));
+};
 
 // AI 设置（per-browser localStorage，不动 server-config）
 function _getAiOverrides() {
