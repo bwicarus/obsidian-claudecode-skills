@@ -320,9 +320,9 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .hl-layer .hl-saved.no-color:hover{border-color:#60a5fa;background:rgba(96,165,250,.08) !important}
 
 /* 手写墨迹层：canvas 永远 pointer-events:none（纯显示），绘制靠 page-wrap capture 拦截 */
-.ink-layer{position:absolute;inset:0;z-index:7;pointer-events:none}
-body.ink-mode .page-wrap{touch-action:none}              /* 手写模式：禁手指滚动，触屏可画 */
-body.ink-mode #main{cursor:crosshair}
+/* 必须覆盖 #main canvas{background:#fff} —— 否则墨迹层变白底盖住整个 PDF */
+.ink-layer{position:absolute;inset:0;z-index:7;pointer-events:none;background:transparent !important;box-shadow:none !important;margin:0 !important}
+body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（手指只滚动/双击切工具，不画）*/
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
@@ -5316,9 +5316,9 @@ function _inkDrawCurrentOnSnap(d) {
   _inkDrawStroke(ctx, d.stroke, cv.width, cv.height, dpr);
 }
 
-// Pencil 双击画布（笔尖快速点两下同处）切换 笔 ↔ 橡皮（替代浏览器拿不到的 Pencil 双击手势）
-function _inkDoubleTapSwitch(pw) {
-  if (_ink.tool !== 'eraser') {            // 笔模式：撤销刚才那一下 tap 误画的点
+// 手指快速双击画布切换 笔 ↔ 橡皮（替代浏览器拿不到的 Apple Pencil 双击笔身手势）
+function _inkDoubleTapSwitch(pw, skipUndo) {
+  if (!skipUndo && _ink.tool !== 'eraser') {   // 仅笔模式 pen 误点才需撤销；手指双击无误点
     const arr = pw.__inkStrokes || [];
     if (arr.length) arr.pop();
     _inkRedraw(pw);
@@ -5327,31 +5327,35 @@ function _inkDoubleTapSwitch(pw) {
   const next = (_ink.tool === 'eraser') ? 'pen' : 'eraser';
   _ink.tool = next;
   document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === next));
-  // 没开工具栏(纯 pen 自动模式)也给个浮窗提示当前工具
-  window.dlog && window.dlog('Pencil 双击 → ' + (next === 'eraser' ? '🧹 橡皮' : '✒️ 笔'));
-  const fb = document.getElementById('ink-fab'); if (fb) { fb.textContent = next === 'eraser' ? '🧹' : '✏️'; setTimeout(() => { fb.textContent = '✏️'; }, 1200); }
+  window.dlog && window.dlog('双击切换 → ' + (next === 'eraser' ? '🧹 橡皮' : '✒️ 笔'));
+  const fb = document.getElementById('ink-fab');
+  if (fb) { fb.textContent = next === 'eraser' ? '🧹' : '✏️'; clearTimeout(fb.__t); fb.__t = setTimeout(() => { fb.textContent = '✏️'; }, 1300); }
 }
 
 function _inkPointerDown(e) {
-  if (!(e.pointerType === 'pen' || _ink.mode)) return;   // pen 自动；桌面/触屏需开 mode
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
-  e.preventDefault(); e.stopPropagation();               // 挡掉 char-layer 选词
-  try { pw.setPointerCapture(e.pointerId); } catch (_) {}
-  // Pencil 双击切换：400ms 内同处第二次落笔（上一下须是极短 tap）→ 切笔/橡皮
-  if (e.pointerType === 'pen' && _ink._lastTap) {
-    const lt = _ink._lastTap;
-    if (Date.now() - lt.t < 400 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 30) {
+  // 手指(touch)快速双击 → 切换 笔↔橡皮。仅「手写激活」时(开了工具栏 或 本次已画过笔)，
+  // 不破坏纯阅读时手指双击选段；单指 tap/滑不拦截，照常选词/选段/滚动。
+  if (e.pointerType === 'touch' && (_ink.mode || _ink.lastPw)) {
+    const now = Date.now(), lt = _ink._lastTap;
+    if (lt && now - lt.t < 400 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 45) {
+      e.preventDefault(); e.stopPropagation();
       _ink._lastTap = null;
-      _inkDoubleTapSwitch(pw);
+      _inkDoubleTapSwitch(pw, true);
       return;
     }
+    _ink._lastTap = { t: now, x: e.clientX, y: e.clientY };
   }
+  // 绘制：Apple Pencil 始终；鼠标仅桌面手写模式；手指永不画（只滚动/双击切工具）
+  if (!(e.pointerType === 'pen' || (e.pointerType === 'mouse' && _ink.mode))) return;
+  e.preventDefault(); e.stopPropagation();               // 挡掉 char-layer 选词
+  try { pw.setPointerCapture(e.pointerId); } catch (_) {}
   const num = parseInt(pw.dataset.pageNum) || currentPage;
   _ink.lastPw = pw;
   const pt = _inkNorm(pw, e.clientX, e.clientY); if (!pt) return;
   if (_ink.tool === 'eraser') {
     _inkPushUndo(pw); _inkEraseAt(pw, pt);
-    _ink.drawing = { pw, num, eraser: true, startX: e.clientX, startY: e.clientY };
+    _ink.drawing = { pw, num, eraser: true };
   } else {
     _inkPushUndo(pw);
     const cv = pw.__inkCanvas, ctx = cv.getContext('2d');
@@ -5360,7 +5364,7 @@ function _inkPointerDown(e) {
     try { snap = ctx.getImageData(0, 0, cv.width, cv.height); } catch (_) {}   // 拍快照
     const stroke = { t: _ink.tool, c: _ink.color, w: parseFloat(_ink.width) || 2.5, p: [pt] };
     _inkStrokesOf(pw).push(stroke);
-    _ink.drawing = { pw, num, stroke, snap, raf: null, startX: e.clientX, startY: e.clientY };
+    _ink.drawing = { pw, num, stroke, snap, raf: null };
     _inkDrawCurrentOnSnap(_ink.drawing);                  // 画当前起点
   }
   document.addEventListener('pointermove', _inkPointerMove, true);
@@ -5393,21 +5397,6 @@ function _inkPointerUp(e) {
       const arr = _inkStrokesOf(d.pw), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1);
     }
   }
-  // 记录「极短笔画(tap)」位置，供下次 Pencil 双击切换检测（正常长笔画 → 清空，不误触发）
-  let tapped = false;
-  if (e.pointerType === 'pen') {
-    if (d.eraser) tapped = true;
-    else if (d.stroke && d.stroke.t === 'pen') {
-      const pts = d.stroke.p;
-      tapped = pts.length <= 8;
-      if (tapped && pts.length > 1) {
-        let mnx = 1, mxx = 0, mny = 1, mxy = 0;
-        for (const p of pts) { if (p[0] < mnx) mnx = p[0]; if (p[0] > mxx) mxx = p[0]; if (p[1] < mny) mny = p[1]; if (p[1] > mxy) mxy = p[1]; }
-        tapped = Math.hypot(mxx - mnx, mxy - mny) < 0.02;   // 归一化对角 < 2% 页宽算 tap
-      }
-    }
-  }
-  _ink._lastTap = tapped ? { t: Date.now(), x: d.startX, y: d.startY } : null;
   d.snap = null;
   _ink.drawing = null;
   _inkRedraw(d.pw);              // 最终全量平滑重绘
