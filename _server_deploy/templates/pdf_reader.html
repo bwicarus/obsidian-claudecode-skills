@@ -865,6 +865,12 @@ async function _renderPageInto(num, wrap) {
   wrap.appendChild(inkCanvas);
   wrap.__inkCanvas = inkCanvas;
   wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
+  // iOS：Apple Pencil 触摸(touchType=stylus)阻止其默认滚动，手指(direct)放行 → 笔不滚页、手指照常滚
+  const _inkBlockStylusScroll = (e) => {
+    for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } }
+  };
+  wrap.addEventListener('touchstart', _inkBlockStylusScroll, { passive: false });
+  wrap.addEventListener('touchmove', _inkBlockStylusScroll, { passive: false });
 
   // 渲染 canvas（用 transform 把 viewport 坐标 scale 到 backing store）
   const ctx = canvas.getContext('2d');
@@ -5322,12 +5328,28 @@ function _inkPointerMove(e) {
   if (d.eraser) { const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) _inkEraseAt(d.pw, pt); return; }
   const s = d.stroke;
   if (s.t === 'pen') {
+    // 增量描线：只画新点之间的线段，不重绘整页 → 流畅（松手时再 quadratic 平滑重绘整条）
+    const cv = d.pw.__inkCanvas; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const cssW = parseFloat(cv.style.width) || cv.width, dpr = (cv.width / cssW) || 1;
+    const W = cv.width, H = cv.height;
+    ctx.strokeStyle = s.c || '#e74c3c';
+    ctx.lineWidth = Math.max(0.6, (s.w || 2.5) * dpr);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of evs) { const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (p) s.p.push(p); }
+    for (const ce of evs) {
+      const p = _inkNorm(d.pw, ce.clientX, ce.clientY); if (!p) continue;
+      const prev = s.p[s.p.length - 1];
+      s.p.push(p);
+      ctx.beginPath();
+      ctx.moveTo(prev[0] * W, prev[1] * H);
+      ctx.lineTo(p[0] * W, p[1] * H);
+      ctx.stroke();
+    }
   } else {
     const pt = _inkNorm(d.pw, e.clientX, e.clientY); if (pt) s.p[1] = pt;
+    _inkRedraw(d.pw);   // 形状预览：重绘跟随终点
   }
-  _inkRedraw(d.pw);
 }
 function _inkPointerUp(e) {
   const d = _ink.drawing; if (!d) return;
