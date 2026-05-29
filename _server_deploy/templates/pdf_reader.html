@@ -54,6 +54,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 body.grammar-open #side-handle{display:none}
 /* 侧栏展开时 header + main 都让出右侧空间，按钮始终在侧栏左侧可见 */
 body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,560px) + 12px)}
+body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框居中到侧栏左侧可视区 */
 /* 顶部 tab 栏：语法分析 / 知识点 切换 */
 #side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
 #side-tabs .side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 11px;border-radius:6px;white-space:nowrap}
@@ -340,6 +341,15 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 #word-pop .wp-actions button{flex:1;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px;cursor:pointer;font-size:12px}
 #word-pop .wp-actions button:hover{border-color:#3b6db5}
 #word-pop .wp-anki{background:#13351f !important;border-color:#34d399 !important;color:#7ee2b8 !important}
+
+/* 句子译文浮层：点 L 按钮弹出。z-index 210 高于侧栏(20)/result-mask(200) */
+#sent-popover{position:fixed;display:none;z-index:210;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);padding:12px 30px 13px 14px;width:min(360px,86vw);font-size:13px;color:#cfe6ff}
+#sent-popover.open{display:block}
+#sent-popover .sent-close{position:absolute;top:5px;right:8px;background:transparent;border:none;color:#7a8497;font-size:18px;line-height:1;cursor:pointer;padding:2px 4px}
+#sent-popover .sent-close:hover{color:#fff}
+#sent-popover .sent-en{color:#a8cdff;font-size:12px;line-height:1.5;margin-bottom:8px;border-left:2px solid #3b6db5;padding-left:8px}
+#sent-popover .sent-zh{color:#cfe6ff;line-height:1.6;white-space:pre-wrap}
+#sent-popover .sent-zh.loading{color:#8a9bb4;font-style:italic}
 
 /* 高亮 popover：点击已存在的高亮弹出 */
 #hl-popover{position:absolute;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:10px 12px;z-index:150;display:none;box-shadow:0 6px 16px rgba(0,0,0,.6);min-width:280px;max-width:360px}
@@ -1727,6 +1737,15 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
 }
 
 // 翻译 popover
+// 可视区右边界：侧栏展开时扣掉侧栏宽度，避免浮层被 clamp 到侧栏底下
+function _visRight() {
+  const panel = document.getElementById('grammar-panel');
+  if (panel && document.body.classList.contains('grammar-open')) {
+    const r = panel.getBoundingClientRect();
+    if (r.width) return r.left;   // 侧栏左边缘 = 可视区右边界
+  }
+  return window.innerWidth;
+}
 function _ensureSentPopover() {
   let pop = document.getElementById('sent-popover');
   if (pop) return pop;
@@ -1759,7 +1778,7 @@ async function showSentenceTranslation(text, anchorBtn, preZh) {
   pop.classList.add('open');
   requestAnimationFrame(() => {
     const pr = pop.getBoundingClientRect();
-    if (pr.right > window.innerWidth - 8) {
+    if (pr.right > _visRight() - 8) {
       pop.style.left = Math.max(8, r.left + window.scrollX - pr.width / 2) + 'px';
       pop.style.top = (r.bottom + window.scrollY + 6) + 'px';
     }
@@ -4125,8 +4144,8 @@ function openHlPopover(h, anchorDiv, pw) {
   // 防止 popover 跑出视口右侧
   requestAnimationFrame(() => {
     const pr = pop.getBoundingClientRect();
-    if (pr.right > window.innerWidth - 8) {
-      pop.style.left = Math.max(8, window.innerWidth - pr.width - 8) + 'px';
+    if (pr.right > _visRight() - 8) {
+      pop.style.left = Math.max(8, _visRight() - pr.width - 8) + 'px';
     }
   });
 }
