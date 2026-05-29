@@ -405,7 +405,7 @@ def _mw_audio_url(audio_path: str) -> str:
 
 # ── 三源融合 ────────────────────────────────────────────────────────────────
 
-def compose_entry(word: str, *, online: bool = True) -> dict:
+def compose_entry(word: str, *, online: bool = True, translate_examples: bool = True) -> dict:
     word = (word or "").strip().lower()
     if not word:
         return {}
@@ -416,12 +416,20 @@ def compose_entry(word: str, *, online: bool = True) -> dict:
     lemma = ec["lemma"] if ec else word
     forms = ec["forms"] if ec else [word]
 
-    fd_raw = lookup_free_dict(lemma) if online else None
+    # Free Dictionary + MW 并行查（各 8s 超时，串行最坏 16s → 并行 ≤8s）
+    fd_raw = mw_raw = None
+    if online:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _fdf = _ex.submit(lookup_free_dict, lemma)
+            _mwf = _ex.submit(lookup_mw_learner, lemma)
+            try: fd_raw = _fdf.result()
+            except Exception: fd_raw = None
+            try: mw_raw = _mwf.result()
+            except Exception: mw_raw = None
     fd = _free_dict_unpack(fd_raw)
     if fd_raw and not fd_raw.get("_404"):
         sources_hit.append("free_dict")
-
-    mw_raw = lookup_mw_learner(lemma) if online else None
     mw = _mw_unpack(mw_raw, lemma=lemma)
     if mw_raw:
         sources_hit.append("mw")
@@ -454,12 +462,14 @@ def compose_entry(word: str, *, online: bool = True) -> dict:
     examples = examples[:20]
 
     # 例句中文翻译（前 N 条，缓存避免重复 API；离线模式跳过）
+    # translate_examples=True：主动翻译（查词路径，可调后端/AI 并缓存）
+    # translate_examples=False：只读已有翻译缓存，绝不调后端（制卡路径，守住"纯字典不调 AI"）
     examples_zh: dict[str, str] = {}
-    if online:
+    if online and examples:
         try:
-            from translate import translate as _tr   # 同包
+            from translate import translate as _tr, _cache_get as _tr_cache   # 同包
             for ex in examples[:8]:
-                t = _tr(ex)
+                t = _tr(ex) if translate_examples else _tr_cache(ex, "zh-CN")
                 if t: examples_zh[ex] = t
         except Exception:
             pass

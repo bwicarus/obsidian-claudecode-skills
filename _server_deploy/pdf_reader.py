@@ -2462,29 +2462,8 @@ def pdf_api_vocab_audio():
     return send_file(str(abs_path), mimetype=mime)
 
 
-@bp.route("/api/vocab-add-anki", methods=["POST"])
-def pdf_api_vocab_add_anki():
-    """对一个 lemma 生成 Anki 单词卡（调 scripts/vocab/anki_from_word.py）。"""
-    import subprocess
-    data = request.get_json(silent=True) or {}
-    lemma = (data.get("lemma") or "").strip()
-    if not lemma:
-        return jsonify({"ok": False, "error": "no lemma"}), 400
-    script = CLAUDE_DIR / "scripts" / "vocab" / "anki_from_word.py"
-    try:
-        r = subprocess.run(
-            [sys.executable, str(script), lemma],
-            capture_output=True, text=True, timeout=90,
-        )
-        out = {}
-        if r.stdout.strip():
-            try: out = json.loads(r.stdout)
-            except Exception: out = {"raw": r.stdout[-400:]}
-        if not out.get("ok") and r.returncode != 0:
-            return jsonify({"ok": False, "error": (r.stderr or r.stdout or "anki 失败")[-300:]}), 500
-        return jsonify({"ok": out.get("ok", r.returncode == 0), **out})
-    except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
+# 单词制卡统一走上面的 /api/vocab-anki（进程内 import make_card，无 subprocess 冷启动）；
+# 旧 /api/vocab-add-anki（subprocess 版）已并入它，前端 _vocabAddAnki 改调 /vocab-anki。
 
 
 # ── 语法分析历史：按 PDF 分文件持久保存（state/grammar-history/<sha>.json）──

@@ -53,11 +53,11 @@ def ensure_deck(name: str):
         anki_call("createDeck", {"deck": name})
 
 
-def store_audio(lemma: str, audio_path: Path) -> str:
+def store_audio(lemma: str, audio_path: Path, suffix: str = "us") -> str:
     """把 audio mp3 推 Anki media，返回 anki 内文件名。"""
     if not audio_path.exists():
         return ""
-    fname = f"vocab-{lemma}-us.mp3"
+    fname = f"vocab-{lemma}-{suffix}.mp3"
     import base64
     data = base64.b64encode(audio_path.read_bytes()).decode("ascii")
     anki_call("storeMediaFile", {"filename": fname, "data": data})
@@ -119,10 +119,10 @@ def _build_context(entry: dict, sources: list[dict], lemma: str) -> tuple[str, s
         cloze = sentence + " {{c1::" + lemma + "}}"
     zh = (entry.get("examples_zh") or {}).get(sentence, "")
     if not zh:
-        # 现场翻译一次
+        # 只读翻译缓存，不现场调后端（制卡零 AI；译句没预热就留空，锦上添花而已）
         try:
-            from translate import translate as _tr
-            zh = _tr(sentence) or ""
+            from translate import _cache_get as _tr_cache
+            zh = _tr_cache(sentence, "zh-CN") or ""
         except Exception:
             pass
     return bold, cloze, zh
@@ -192,7 +192,8 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
         # 已有卡 → 更新字段而非新建
         pass
 
-    entry = compose_entry(lemma, online=True)
+    # translate_examples=False：制卡只用已缓存译句，绝不现场翻译（守住"单词卡纯字典不调 AI"）
+    entry = compose_entry(lemma, online=True, translate_examples=False)
     if not entry:
         # 连 ECDICT 都查不到（多半选错了非英文词）→ 正常退出 + 中文提示，前端 toast 友好
         return {"ok": False, "error": f"查不到「{lemma}」的字典数据，无法制卡"}
@@ -201,11 +202,13 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
 
     # 音频：从 vault audio 推到 anki media
     audio_field = ""
-    audio_local = _audio_dir() / f"{lemma}-us.mp3"
-    if audio_local.exists():
-        anki_fname = store_audio(lemma, audio_local)
-        if anki_fname:
-            audio_field = f"[sound:{anki_fname}]"
+    for _suf in ("us", "uk"):   # us 优先，没有则回落 uk（只有英式音频的词也能有声）
+        audio_local = _audio_dir() / f"{lemma}-{_suf}.mp3"
+        if audio_local.exists():
+            anki_fname = store_audio(lemma, audio_local, _suf)
+            if anki_fname:
+                audio_field = f"[sound:{anki_fname}]"
+            break
 
     ensure_deck(ANKI_DECK)
 

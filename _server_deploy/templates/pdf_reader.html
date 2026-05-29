@@ -1200,9 +1200,9 @@ async function _vocabAddAnki(lemma, btn) {
   const old = btn.textContent;
   btn.textContent = '…'; btn.disabled = true;
   try {
-    const r = await fetch('/pdf/api/vocab-add-anki', {
+    const r = await fetch('/pdf/api/vocab-anki', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({lemma}),
+      body: JSON.stringify({word: lemma}),
     });
     const d = await r.json();
     if (d.ok) { btn.textContent = '✓ 已加'; btn.classList.add('done'); }
