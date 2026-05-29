@@ -118,6 +118,7 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .grammar-block .gb-fu-input{flex:1;min-width:0;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:12px}
 .grammar-block .gb-fu-input:focus{outline:none;border-color:#3b6db5}
 .grammar-block .gb-followup button{background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:12px;white-space:nowrap}
+.grammar-block .gb-followup button.gb-anki-btn{background:#13351f;border-color:#34d399;color:#7ee2b8;padding:7px 10px}
 #qhist-list .qhist-item{padding:8px 12px;border-bottom:1px solid #1f2740;cursor:pointer}
 #qhist-list .qhist-item:hover{background:#162045}
 #qhist-list .qhist-title{color:#cfe6ff;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1107,6 +1108,7 @@ function _addHistoryBlock(item) {
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${_hid}');}">
        <button onclick="_grammarFollowup('${_hid}')">追问</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${_hid}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -3446,6 +3448,7 @@ window._followupAsk = async () => {
     }
   } catch (e) { aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>'; }
   contentEl.scrollTop = contentEl.scrollHeight;
+  try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
 };
 
 // ─── 语法分析（per-PDF 启用语法 KG，节点跟踪在技能树页面切换）────────────
@@ -3730,6 +3733,7 @@ function _addLoadingBlock(id, sentence, text) {
      <div class="gb-followup">
        <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${id}');}">
        <button onclick="_grammarFollowup('${id}')">追问</button>
+       <button class="gb-anki-btn" onclick="_grammarAnki('${id}')" title="整句+译文+分析做成 Anki 卡">🎴</button>
      </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
@@ -3755,6 +3759,29 @@ function _fillBlockError(block, msg) {
   const content = block.querySelector('.gb-content') || block;
   content.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
 }
+// 语法卡片「🎴」：整句 + 译文 + 分析 + 追问 → 一张 Anki 卡（复用后台制卡，带原文出处链接）
+window._grammarAnki = async (blockId) => {
+  const block = document.getElementById(blockId); if (!block) return;
+  const sentence = block.dataset.src || '';
+  const zh = (block.querySelector('.gb-trans')?.textContent || '').replace(/^🌐\s*/, '').trim();
+  const analysis = (block.querySelector('.gb-content')?.textContent || '').trim();
+  const fu = (block.querySelector('.gb-fu-answers')?.textContent || '').trim();
+  if (!sentence && !analysis) { _toast && _toast('没有可制卡的内容'); return; }
+  const srcUrl = FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '';
+  const text = `【句子】${sentence}` + (zh ? `\n【译文】${zh}` : '') + (analysis ? `\n【语法分析】${analysis}` : '')
+    + (fu ? `\n【追问】${fu}` : '') + (srcUrl ? `\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】${srcUrl}` : '');
+  const jobUi = _startBgJob('制 Anki 中…');
+  try {
+    const ov = _getAiOverrides();
+    const r = await fetch('/pdf/api/snippets-to-async', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ snippets: [{text, source: sentence}], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' }),
+    });
+    const d = await r.json();
+    if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', null); return; }
+    _pollJob(d.job_id, jobUi, null);
+  } catch (e) { _failBgJob(jobUi, e.message, null); }
+};
 // 语法卡片底部「继续追问」：带原句 + 译文 + 已有分析作上下文，流式回答追加到卡片内
 window._grammarFollowup = async (blockId) => {
   const block = document.getElementById(blockId); if (!block) return;
