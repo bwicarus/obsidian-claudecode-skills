@@ -2700,7 +2700,7 @@ window.showWordPopover = async (word, ctx) => {
     pop.innerHTML =
       '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
       (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '') +
-      '<button class="wp-speak" onclick="_speakWord(' + JSON.stringify(d.lemma || word) + ',' + JSON.stringify(d.audio || '') + ')" title="发音">🔊</button>' +
+      '<button class="wp-speak" onclick="_speakOnline(' + JSON.stringify(d.lemma || word) + ')" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
       '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
