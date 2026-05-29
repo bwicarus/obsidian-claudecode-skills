@@ -2680,10 +2680,12 @@ function _positionWordPop(pop) {
     pop.style.top = (m.top + 70) + 'px';
   }
 }
-// 框外点击 → 自动关小框（capture 阶段，不受 char-layer stopPropagation 影响）
-document.addEventListener('mousedown', (e) => {
+// 框外点击 → 自动关小框（用 pointerdown：原生指针不合成，避免 iOS 合成 mousedown 把刚弹出的框误关）
+document.addEventListener('pointerdown', (e) => {
   const p = document.getElementById('word-pop');
-  if (p && p.style.display === 'block' && !p.contains(e.target)) p.style.display = 'none';
+  if (!p || p.style.display !== 'block') return;
+  if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;   // 刚弹出 400ms 内不关（挡打开那次 tap 的余波）
+  if (!p.contains(e.target)) p.style.display = 'none';
 }, true);
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
@@ -2692,6 +2694,7 @@ window.showWordPopover = async (word, ctx) => {
   _wordPopState = {word, ctx: ctx || '', lemma: word};
   const pop = document.getElementById('word-pop');
   pop.style.display = 'block';
+  window._wordPopOpenAt = Date.now();   // 框外关闭监听据此忽略刚弹出时的余波事件
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
   _positionWordPop(pop);
   try {
