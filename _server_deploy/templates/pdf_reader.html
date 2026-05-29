@@ -2038,13 +2038,16 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
 
 function _expandToWordStart(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK = (c) => /[一-鿿㐀-䶿]/.test(c);
   // 优先用 PyMuPDF 词边界：同一个词 id 直接扩到词首（根治连字/紧排/装饰编号粘连）
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
     while (idx > 0 && chars[idx - 1].w === wid) idx--;
+    // 跳过词首标点（PyMuPDF 把 “conditional 的弯引号并入同 word）
+    while (idx < chars.length - 1 && chars[idx + 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx++;
     return idx;
   }
-  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx > 0 && isWord(chars[idx - 1].c) &&
          Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
@@ -2055,12 +2058,15 @@ function _expandToWordStart(chars, idx) {
 }
 function _expandToWordEnd(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK = (c) => /[一-鿿㐀-䶿]/.test(c);
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
     while (idx < chars.length - 1 && chars[idx + 1].w === wid) idx++;
+    // 跳过词尾标点（more. 的句号、conditional” 的弯引号）
+    while (idx > 0 && chars[idx - 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx--;
     return idx;
   }
-  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx < chars.length - 1 && isWord(chars[idx + 1].c) &&
          Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
