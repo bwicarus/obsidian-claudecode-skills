@@ -1476,6 +1476,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     c: ch.c,
     _oi,   // PyMuPDF 原始顺序(=reading order)；sort 时 x 几乎重叠的字符靠它保序
     w: (ch.w == null ? -1 : ch.w),   // 所属词 id（PyMuPDF 分词）：判词边界用，根治连字/紧排
+    bk: (ch.bk == null ? -1 : ch.bk),   // rawdict 块号：句子扩展按块切（斜体 w=-1 也不丢块）
     left:   ch.x0 * scale,
     top:    ch.y0 * scale,
     width:  (ch.x1 - ch.x0) * scale,
@@ -2078,9 +2079,11 @@ function _charsRangeToText(chars, sIdx, eIdx) {
 // 找选中范围所在的句子（左/右扩到 . ! ? 。！？ 之后 / 段落起止）
 function _expandSentenceFromRange(chars, sIdx, eIdx) {
   const isSentEnd = (c) => /[.!?。！？]/.test(c);
+  const _bkBreak = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk !== b.bk;
   let s = sIdx;
   while (s > 0) {
     if (isSentEnd(chars[s - 1].c)) break;
+    if (_bkBreak(chars[s - 1], chars[s])) break;   // 跨 rawdict 块 → 停（不把标题/表格/邻段并进同句）
     // 也按行间距 > 1.5×height 停（段落起点）
     if (Math.abs(chars[s - 1].top - chars[s].top) > chars[s].height * 1.5) break;
     s--;
@@ -2088,6 +2091,7 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
   let e = eIdx;
   while (e < chars.length - 1) {
     if (isSentEnd(chars[e].c)) break;
+    if (_bkBreak(chars[e], chars[e + 1])) break;   // 跨块停
     if (Math.abs(chars[e + 1].top - chars[e].top) > chars[e].height * 1.5) break;
     e++;
   }
