@@ -328,7 +328,7 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
 #hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
 /* 单词小框 */
-#word-pop{position:fixed;display:none;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:#cfe6ff;overflow:hidden}
+#word-pop{position:absolute;display:none;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:#cfe6ff;overflow:hidden}
 #word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}
 #word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}
 #word-pop .wp-phon{color:#a8cdff;font-style:italic;font-size:12px}
@@ -2485,25 +2485,30 @@ function _updateToolbarMode(text) {
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
 let _wordPopState = null;
 function _positionWordPop(pop) {
-  // 跟随选中位置：锚到选中起点字符下方，越界自动翻到上方/收回边内
-  let ax = 0, ay = 0;
-  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
-    const ch = _charSel.pw.__charBoxes[_charSel.startIdx];
-    if (ch && ch.left != null) {
-      const pr = _charSel.pw.getBoundingClientRect();
-      ax = pr.left + ch.left;
-      ay = pr.top + ch.top + ch.height;
-    }
+  // 挂进选中所在页(page-wrap)，absolute 定位到选中起点字符下方 → 随页面一起滚动
+  const pw = _charSel && _charSel.pw;
+  const ch = pw && pw.__charBoxes && pw.__charBoxes[_charSel.startIdx];
+  if (pw && ch && ch.left != null) {
+    if (pop.parentElement !== pw) pw.appendChild(pop);
+    pop.style.position = 'absolute';
+    const W = 340, pwW = pw.clientWidth || 9999;
+    let left = ch.left;
+    if (left + W > pwW - 4) left = Math.max(4, pwW - W - 4);
+    pop.style.left = left + 'px';
+    pop.style.top = (ch.top + ch.height + 6) + 'px';
+  } else {
+    if (pop.parentElement !== document.body) document.body.appendChild(pop);
+    pop.style.position = 'fixed';
+    const m = document.getElementById('main').getBoundingClientRect();
+    pop.style.left = (m.left + m.width / 2 - 170) + 'px';
+    pop.style.top = (m.top + 70) + 'px';
   }
-  if (!ax && !ay) { const m = document.getElementById('main').getBoundingClientRect(); ax = m.left + m.width / 2 - 170; ay = m.top + 70; }
-  const W = 340, H = 220;
-  let left = ax, top = ay + 8;
-  if (left + W > window.innerWidth - 8) left = window.innerWidth - W - 8;
-  if (left < 8) left = 8;
-  if (top + H > window.innerHeight - 8) top = Math.max(8, ay - H - 8);   // 下方放不下 → 词上方
-  pop.style.left = left + 'px';
-  pop.style.top = top + 'px';
 }
+// 框外点击 → 自动关小框（capture 阶段，不受 char-layer stopPropagation 影响）
+document.addEventListener('mousedown', (e) => {
+  const p = document.getElementById('word-pop');
+  if (p && p.style.display === 'block' && !p.contains(e.target)) p.style.display = 'none';
+}, true);
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
@@ -2531,7 +2536,6 @@ window.showWordPopover = async (word, ctx) => {
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
       '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>' +
-      '<button onclick="document.getElementById(\'word-pop\').style.display=\'none\'">关闭</button>' +
       '</div>';
   } catch (e) {
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
