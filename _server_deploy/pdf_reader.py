@@ -230,67 +230,85 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
         except Exception:
             pass
 
-        # 2. Free Dictionary（在线 ~500ms，有缓存秒命中）
-        try:
-            fd_raw = ds.lookup_free_dict(lemma)
-            fd = ds._free_dict_unpack(fd_raw)
-            fd_payload = {
-                "phon_us": fd.get("phon_us", ""), "phon_uk": fd.get("phon_uk", ""),
-                "audio_us": fd.get("audio_us", ""), "audio_uk": fd.get("audio_uk", ""),
-                "definitions_en": [
-                    {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
-                    for d in (fd.get("definitions") or [])[:6]
-                ],
-                "examples": fd.get("examples", [])[:10],
-                "synonyms": fd.get("synonyms", [])[:10],
-                "antonyms": fd.get("antonyms", [])[:10],
-                "etymology": fd.get("etymology", ""),
+        # 2 + 3. Free Dictionary + MW Learner 并行（两个网络源同时请求，不再串行等待）
+        #         之前 mw 排在 free 后面 → 要等 free 整个跑完(最多 8s)才开始，MW 内容出现极晚。
+        #         现在两个请求同时发，谁先回先 yield，总耗时从 free+mw 降到 max(free, mw)。
+        import concurrent.futures as _cf
+        fd_payload = None
+        mw_payload = None
+        with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+            _futs = {
+                _pool.submit(ds.lookup_free_dict, lemma): "free",
+                _pool.submit(ds.lookup_mw_learner, lemma): "mw",
             }
-            yield f"event: free\ndata: {_json.dumps(fd_payload, ensure_ascii=False)}\n\n"
-        except Exception as ex:
-            yield f"event: warn\ndata: {_json.dumps({'source': 'free_dict', 'error': str(ex)})}\n\n"
+            for _fut in _cf.as_completed(_futs):
+                _which = _futs[_fut]
+                if _which == "free":
+                    try:
+                        fd = ds._free_dict_unpack(_fut.result())
+                        fd_payload = {
+                            "phon_us": fd.get("phon_us", ""), "phon_uk": fd.get("phon_uk", ""),
+                            "audio_us": fd.get("audio_us", ""), "audio_uk": fd.get("audio_uk", ""),
+                            "definitions_en": [
+                                {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
+                                for d in (fd.get("definitions") or [])[:6]
+                            ],
+                            "examples": fd.get("examples", [])[:10],
+                            "synonyms": fd.get("synonyms", [])[:10],
+                            "antonyms": fd.get("antonyms", [])[:10],
+                            "etymology": fd.get("etymology", ""),
+                        }
+                        yield f"event: free\ndata: {_json.dumps(fd_payload, ensure_ascii=False)}\n\n"
+                    except Exception as ex:
+                        yield f"event: warn\ndata: {_json.dumps({'source': 'free_dict', 'error': str(ex)})}\n\n"
+                else:
+                    try:
+                        mw = ds._mw_unpack(_fut.result(), lemma=lemma)
+                        mw_payload = {
+                            "phon_us": mw.get("phon_us", ""),
+                            "audio_us": ds._mw_audio_url(mw.get("audio_path", "")) if mw.get("audio_path") else "",
+                            "definitions_en": [
+                                {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
+                                for d in (mw.get("definitions") or [])
+                            ],
+                            "examples": mw.get("examples", [])[:15],
+                            "pos": mw.get("pos", []),
+                        }
+                        yield f"event: mw\ndata: {_json.dumps(mw_payload, ensure_ascii=False)}\n\n"
+                    except Exception as ex:
+                        yield f"event: warn\ndata: {_json.dumps({'source': 'mw', 'error': str(ex)})}\n\n"
 
-        # 3. MW Learner（在线 ~500ms）
-        try:
-            mw_raw = ds.lookup_mw_learner(lemma)
-            mw = ds._mw_unpack(mw_raw, lemma=lemma)
-            mw_payload = {
-                "phon_us": mw.get("phon_us", ""),
-                "audio_us": ds._mw_audio_url(mw.get("audio_path", "")) if mw.get("audio_path") else "",
-                "definitions_en": [
-                    {"pos": d.get("pos") or "", "en": d["en"], "examples": d.get("examples", [])}
-                    for d in (mw.get("definitions") or [])
-                ],
-                "examples": mw.get("examples", [])[:15],
-                "pos": mw.get("pos", []),
-            }
-            yield f"event: mw\ndata: {_json.dumps(mw_payload, ensure_ascii=False)}\n\n"
-        except Exception as ex:
-            yield f"event: warn\ndata: {_json.dumps({'source': 'mw', 'error': str(ex)})}\n\n"
-
-        # 4. 例句翻译（每翻 1 句 yield 1 次，让用户看到逐步进度）
+        # 4. 例句翻译（并发翻译，先翻好的先 yield，整体从 N 句串行降到 ~N/4 批）
         try:
             from translate import translate as _tr
             # 收集所有可翻译例句：MW + Free Dict + ECDICT 例句池（前 8 条）
             all_examples = []
             seen = set()
             for d_list in [
-                mw_payload.get("definitions_en", []) if 'mw_payload' in locals() else [],
-                fd_payload.get("definitions_en", []) if 'fd_payload' in locals() else [],
+                (mw_payload or {}).get("definitions_en", []),
+                (fd_payload or {}).get("definitions_en", []),
             ]:
                 for d in d_list:
                     for ex in (d.get("examples") or [])[:2]:
                         k = ex.lower()[:60]
                         if k and k not in seen:
                             seen.add(k); all_examples.append(ex)
-            for ex in (fd_payload.get("examples", []) if 'fd_payload' in locals() else [])[:5]:
+            for ex in (fd_payload or {}).get("examples", [])[:5]:
                 k = ex.lower()[:60]
                 if k and k not in seen:
                     seen.add(k); all_examples.append(ex)
-            for ex in all_examples[:8]:
-                zh = _tr(ex)
-                if zh:
-                    yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': zh}, ensure_ascii=False)}\n\n"
+            todo = all_examples[:8]
+            if todo:
+                with _cf.ThreadPoolExecutor(max_workers=4) as _tpool:
+                    _tfuts = {_tpool.submit(_tr, ex): ex for ex in todo}
+                    for _tf in _cf.as_completed(_tfuts):
+                        ex = _tfuts[_tf]
+                        try:
+                            zh = _tf.result()
+                        except Exception:
+                            zh = ""
+                        if zh:
+                            yield f"event: translate\ndata: {_json.dumps({'en': ex, 'zh': zh}, ensure_ascii=False)}\n\n"
         except Exception as ex:
             yield f"event: warn\ndata: {_json.dumps({'source': 'translate', 'error': str(ex)})}\n\n"
 
