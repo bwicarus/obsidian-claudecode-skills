@@ -429,6 +429,9 @@ def pdf_api_page_chars():
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
         sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
+        for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
+            if ts.get("rects") and ts.get("page", page) == page:
+                sentences.append(ts)
         return jsonify({
             "ok": True,
             "chars": chars,
@@ -1595,9 +1598,32 @@ def pdf_api_highlights_delete():
 
 # ─── 整句翻译（DeepL / Haiku / MyMemory 可选）────────────────────────────
 
+# 句子翻译 sidecar：手动翻译过的句子(几何 + 译文)持久化，下次渲染句子标记 + 点 L 框看译文
+_TR_DIR = CLAUDE_DIR / "state" / "pdf-tr-sentences"
+def _tr_path(rel: str) -> Path:
+    import hashlib
+    _TR_DIR.mkdir(parents=True, exist_ok=True)
+    return _TR_DIR / (hashlib.sha1(rel.encode("utf-8")).hexdigest() + ".json")
+def _tr_load(rel: str) -> list:
+    p = _tr_path(rel)
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text("utf-8")).get("sentences", [])
+    except Exception:
+        return []
+def _tr_save_one(rel: str, sent: dict):
+    arr = [s for s in _tr_load(rel) if s.get("text") != sent.get("text")]   # 同句重译覆盖
+    arr.append(sent)
+    try:
+        _tr_path(rel).write_text(json.dumps({"pdf_rel": rel, "sentences": arr[-500:]}, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
 @bp.route("/api/translate-sentence", methods=["POST"])
 def pdf_api_translate_sentence():
-    """body: {text, backend?, model?, effort?} → {ok, zh}
+    """body: {text, backend?, model?, effort?, file?, sentence?} → {ok, zh}
     backend 留空时按 server-config.dict.translate_backend 默认（auto = deepl → mymemory）。"""
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
@@ -1614,6 +1640,12 @@ def pdf_api_translate_sentence():
         from translate import translate as _tr  # type: ignore
         zh = _tr(text, backend=backend, model=model, effort=effort)
         if zh:
+            # 前端带 file + sentence 几何时 → 存 sidecar(持久句子标记 + 译文浮层)
+            sent = data.get("sentence")
+            file_rel = data.get("file") or ""
+            if file_rel and isinstance(sent, dict) and sent.get("rects"):
+                sent = dict(sent); sent["text"] = text; sent["zh"] = zh; sent["manual"] = True
+                _tr_save_one(file_rel, sent)
             return jsonify({"ok": True, "zh": zh})
         return jsonify({"ok": False, "error": "translation failed (no result)"})
     except Exception as ex:
