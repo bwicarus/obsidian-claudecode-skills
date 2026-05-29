@@ -108,6 +108,15 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .grammar-block.open .gb-header .gb-caret{transform:rotate(90deg)}
 .grammar-block .gb-content{display:none}
 .grammar-block.open .gb-content{display:block}
+.grammar-block .gb-fu-answers{display:none;padding:0 12px}
+.grammar-block.open .gb-fu-answers{display:block}
+.grammar-block .gb-fu-q{margin-top:10px;padding-top:8px;border-top:1px solid #2a3550;color:#a8cdff;font-size:12px;font-weight:600}
+.grammar-block .gb-fu-a{margin-top:5px;color:#e6e6f0;font-size:12.5px;line-height:1.6}
+.grammar-block .gb-followup{display:none;gap:6px;padding:8px 12px 12px}
+.grammar-block.open .gb-followup{display:flex}
+.grammar-block .gb-fu-input{flex:1;min-width:0;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:12px}
+.grammar-block .gb-fu-input:focus{outline:none;border-color:#3b6db5}
+.grammar-block .gb-followup button{background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:12px;white-space:nowrap}
 /* 三个分区都留白 + 淡分隔，透气 */
 .grammar-block .gb-trans{padding:11px 12px;font-size:12px;color:#cfe6ff;line-height:1.55;border-top:1px solid #1c2740}
 .grammar-block .gb-loading{padding:14px;text-align:center;color:#7a8497;font-style:italic;font-size:12px}
@@ -3694,7 +3703,12 @@ function _addLoadingBlock(id, sentence, text) {
        <span class="gb-caret">▶</span>
      </div>
      <div class="gb-trans gb-pending">🌐 翻译中…</div>
-     <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>`;
+     <div class="gb-content"><div class="gb-loading">⏳ 结构 / 语法分析中…</div></div>
+     <div class="gb-fu-answers"></div>
+     <div class="gb-followup">
+       <input class="gb-fu-input" placeholder="继续追问这句的语法…" onkeydown="if(event.key==='Enter'){event.preventDefault();_grammarFollowup('${id}');}">
+       <button onclick="_grammarFollowup('${id}')">追问</button>
+     </div>`;
   block.querySelector('.gb-header').addEventListener('click', () => block.classList.toggle('open'));
   block.querySelector('.gb-del').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -3719,6 +3733,47 @@ function _fillBlockError(block, msg) {
   const content = block.querySelector('.gb-content') || block;
   content.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
 }
+// 语法卡片底部「继续追问」：带原句 + 译文 + 已有分析作上下文，流式回答追加到卡片内
+window._grammarFollowup = async (blockId) => {
+  const block = document.getElementById(blockId); if (!block) return;
+  const inp = block.querySelector('.gb-fu-input');
+  const q = (inp && inp.value || '').trim(); if (!q) return;
+  inp.value = '';
+  const sentence = block.dataset.src || '';
+  const trans = (block.querySelector('.gb-trans')?.textContent || '').replace(/^🌐\s*/, '').trim();
+  const analysis = (block.querySelector('.gb-content')?.textContent || '').slice(0, 3000);
+  const prev = (block.querySelector('.gb-fu-answers')?.textContent || '').slice(-1500);
+  const context = '【句子】' + sentence + (trans ? '\n【译文】' + trans : '')
+    + '\n【已有语法分析】\n' + analysis + (prev ? '\n【之前的追问】\n' + prev : '');
+  const ans = block.querySelector('.gb-fu-answers');
+  const qDiv = document.createElement('div'); qDiv.className = 'gb-fu-q'; qDiv.textContent = '问：' + q; ans.appendChild(qDiv);
+  const aDiv = document.createElement('div'); aDiv.className = 'gb-fu-a'; aDiv.innerHTML = '<span class="gb-loading">⏳</span>'; ans.appendChild(aDiv);
+  try {
+    const ov = _getAiOverrides();
+    const r = await fetch('/pdf/api/explain', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
+      body: JSON.stringify({text: q, context: '基于这句的语法分析继续回答：\n' + context, model: ov.model || '', effort: ov.effort || ''}),
+    });
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('event-stream')) {
+      const reader = r.body.getReader(); const dec = new TextDecoder();
+      let buf = '', acc = '';
+      while (true) {
+        const {value, done} = await reader.read(); if (done) break;
+        buf += dec.decode(value, {stream: true}); let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const blk = buf.slice(0, i); buf = buf.slice(i + 2); let dl = '';
+          for (const ln of blk.split('\n')) { if (ln.startsWith('data:')) dl = ln.slice(5).trim(); }
+          if (!dl) continue;
+          try { const o = JSON.parse(dl); if (o.text) { acc += o.text; aDiv.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(()=>{}); } } catch (_) {}
+        }
+      }
+      if (!acc) aDiv.innerHTML = '(无回答)';
+    } else {
+      const d = await r.json(); aDiv.innerHTML = md(d.explanation || d.text || '(无回答)');
+    }
+  } catch (e) { aDiv.innerHTML = '追问失败：' + _esc(e.message); }
+};
 function _fillGrammarBlock(block, d, sentence) {
   if (!block) return;
   const tokens = d.tokens || [];
