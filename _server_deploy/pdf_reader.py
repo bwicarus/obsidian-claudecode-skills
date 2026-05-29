@@ -938,6 +938,48 @@ def _trigger_paragraph_exposure_async(pdf_rel: str, page: int, lemma: str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+@bp.route("/api/dict-quick")
+def pdf_api_dict_quick():
+    """单词小框用：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回；
+    同时后台触发 vocab note 生成（制卡数据补全）。完整 mw/free 走 /api/dict SSE「展开」。"""
+    word = (request.args.get("word", "") or "").strip().lower()
+    pdf_rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    context = request.args.get("context", "")
+    if not word:
+        return jsonify({"ok": False, "error": "no word"})
+    ds, _ = _vocab_modules()
+    if not ds:
+        return jsonify({"ok": False, "error": "dict unavailable"})
+    ec = ds.lookup_ecdict(word)
+    if not ec:
+        return jsonify({"ok": False, "word": word})
+    lemma = ec["lemma"]; forms = ec["forms"]
+    zh_defs = []; en_defs = []
+    for d in ds._ec_definitions(ec):
+        pos = d.get("pos") or ""
+        if d.get("zh"):
+            zh_defs.append((f"{pos} " if pos else "") + d["zh"])
+        elif d.get("en"):
+            en_defs.append((f"{pos} " if pos else "") + d["en"])
+    try:
+        _append_lookup_log(word, lemma, pdf_rel, page, context)
+        if pdf_rel and page > 0:
+            _trigger_vocab_note_async(word, pdf_rel, page, context)
+            _trigger_paragraph_exposure_async(pdf_rel, page, lemma)
+        else:
+            _trigger_vocab_note_async(word, "", 0, "")
+    except Exception:
+        pass
+    return jsonify({
+        "ok": True, "word": word, "lemma": lemma, "forms": forms,
+        "phonetic": ("/" + ec.get("phonetic", "") + "/") if ec.get("phonetic") else "",
+        "translation": "\n".join(zh_defs[:8]),
+        "definition": "\n".join(en_defs[:6]),
+        "freq_bnc": ec.get("bnc", 0),
+    })
+
+
 @bp.route("/api/dict")
 def pdf_api_dict():
     """字典查询（三源融合：ECDICT + Free Dict + MW Learner）。

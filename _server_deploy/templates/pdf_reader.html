@@ -316,6 +316,19 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 #hl-color-picker .swatch{width:24px;height:24px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
 #hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
+/* 单词小框 */
+#word-pop{position:fixed;display:none;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:#cfe6ff;overflow:hidden}
+#word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}
+#word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}
+#word-pop .wp-phon{color:#a8cdff;font-style:italic;font-size:12px}
+#word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
+#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
+#word-pop .wp-def:hover{background:#162045}
+#word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}
+#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322}
+#word-pop .wp-actions button{flex:1;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px;cursor:pointer;font-size:12px}
+#word-pop .wp-actions button:hover{border-color:#3b6db5}
+#word-pop .wp-anki{background:#13351f !important;border-color:#34d399 !important;color:#7ee2b8 !important}
 
 /* 高亮 popover：点击已存在的高亮弹出 */
 #hl-popover{position:absolute;background:#1a2540;border:1px solid #3b6db5;border-radius:8px;padding:10px 12px;z-index:150;display:none;box-shadow:0 6px 16px rgba(0,0,0,.6);min-width:280px;max-width:360px}
@@ -538,6 +551,9 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 
 <!-- 高亮 popover：点击已存在的高亮弹出 -->
 <div id="hl-popover" onclick="event.stopPropagation()"></div>
+
+<!-- 单词小框：单击单词/查词弹出，ecdict 核心 + 展开完整 + 主动制卡 -->
+<div id="word-pop" onclick="event.stopPropagation()"></div>
 
 <!-- 草稿 badge：永远在右下角；选中 snippets ≥ 1 时显示 -->
 <div id="draft-badge" onclick="openDraftModal()" title="已选段落">
@@ -2124,10 +2140,12 @@ function _bindCharLayer(cl, pw) {
         _selByCharRange(pw, bounds.start, bounds.end);
         // 单击命中未掌握生词 → 直接弹翻译（不需要再点工具栏）
         if (_clickCount === 1 && _clickTranslateEnabled()) {
-          const mark = _findVocabMarkAt(pw, startIdx);
-          if (mark && mark.label_slug && mark.label_slug !== 'mastered') {
-            // 用 setTimeout 让 _selByCharRange 的工具栏先放好，再触发翻译（关掉它）
-            setTimeout(() => { try { window.onTranslate(); } catch(_){} }, 30);
+          // 单击单词(无记录/已掌握都可) → 弹单词小框查词
+          const _t = (lastSelText || '').trim();
+          if (_t && _t.length <= 30 && /^[A-Za-z][A-Za-z'’\-]*$/.test(_t)) {
+            const _cr = _expandSentenceFromRange(pw.__charBoxes, bounds.start, bounds.end);
+            const _ctx = _cr ? _charsRangeToText(pw.__charBoxes, _cr.start, _cr.end).slice(0, 400) : '';
+            setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
         }
       }
@@ -2449,18 +2467,69 @@ function _updateToolbarMode(text) {
   if (m) m.style.display = isWord ? 'none' : 'flex';
 }
 
-// 工具栏「🔍 查词」：单词查词典（第2步会换成小框；这里先走现成的字典流式框）
+// ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
+let _wordPopState = null;
+function _positionWordPop(pop) {
+  const main = document.getElementById('main');
+  const mr = main.getBoundingClientRect();
+  pop.style.left = Math.max(8, mr.left + mr.width / 2 - 170) + 'px';
+  pop.style.top = (mr.top + 70) + 'px';
+}
+window.showWordPopover = async (word, ctx) => {
+  word = (word || '').trim().toLowerCase();
+  if (!word) return;
+  toolbar.classList.remove('open');
+  _wordPopState = {word, ctx: ctx || '', lemma: word};
+  const pop = document.getElementById('word-pop');
+  pop.style.display = 'block';
+  pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
+  _positionWordPop(pop);
+  try {
+    const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
+      '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
+      '&context=' + encodeURIComponent(ctx || ''));
+    const d = await r.json();
+    if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
+    _wordPopState.lemma = d.lemma || word;
+    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
+    pop.innerHTML =
+      '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
+      (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '') +
+      (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
+      '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +
+      '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
+      '<div class="wp-actions">' +
+      '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>' +
+      '<button onclick="document.getElementById(\'word-pop\').style.display=\'none\'">关闭</button>' +
+      '</div>';
+  } catch (e) {
+    pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
+  }
+};
+window._expandWordFull = (w, c) => {
+  const s = _wordPopState;
+  const word = w || (s && s.word);
+  const ctx = (c != null ? c : (s && s.ctx)) || '';
+  const pop = document.getElementById('word-pop'); if (pop) pop.style.display = 'none';
+  if (word) dictStream(word, ctx);   // 完整三源大框(ecdict+free+mw+例句)
+};
+window._wordPopAnki = (btn) => {
+  const s = _wordPopState; if (!s) return;
+  if (btn) { btn.disabled = true; btn.textContent = '🎴 制卡中…'; }
+  addVocabAnki(s.lemma);   // dict-quick 已后台触发笔记生成(数据补全)，制卡复用现成接口
+  setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 400);
+};
+// 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
   if (!lastSelText) return;
-  toolbar.classList.remove('open');
-  const word = lastSelText.trim().toLowerCase();
   let ctx = '';
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
     if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
   }
-  dictStream(word, ctx);
+  showWordPopover(lastSelText, ctx);
 };
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
