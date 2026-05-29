@@ -2101,7 +2101,7 @@ function _expandToWordStart(chars, idx) {
   // 优先用 PyMuPDF 词边界：同一个词 id 直接扩到词首（根治连字/紧排/装饰编号粘连）
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
-    while (idx > 0 && chars[idx - 1].w === wid) idx--;
+    while (idx > 0 && chars[idx - 1].w === wid && !'/|／'.includes(chars[idx - 1].c)) idx--;
     // 跳过词首标点（PyMuPDF 把 “conditional 的弯引号并入同 word）
     while (idx < chars.length - 1 && chars[idx + 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx++;
     return idx;
@@ -2120,7 +2120,7 @@ function _expandToWordEnd(chars, idx) {
   const isCJK = (c) => /[一-鿿㐀-䶿]/.test(c);
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
-    while (idx < chars.length - 1 && chars[idx + 1].w === wid) idx++;
+    while (idx < chars.length - 1 && chars[idx + 1].w === wid && !'/|／'.includes(chars[idx + 1].c)) idx++;
     // 跳过词尾标点（more. 的句号、conditional” 的弯引号）
     while (idx > 0 && chars[idx - 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx--;
     return idx;
@@ -2240,8 +2240,8 @@ function _wordExpandFromChar(chars, idx) {
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
     let s = idx, e = idx;
-    while (s > 0 && chars[s - 1].w === wid) s--;
-    while (e < chars.length - 1 && chars[e + 1].w === wid) e++;
+    while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
+    while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
     while (s < e && !isWord(chars[s].c) && !isCJK(chars[s].c)) s++;   // 去词首标点
     while (e > s && !isWord(chars[e].c) && !isCJK(chars[e].c)) e--;   // 去词尾标点(如 often. 的句号)
     return {start: s, end: e};
