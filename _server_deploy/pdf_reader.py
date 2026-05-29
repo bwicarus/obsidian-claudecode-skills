@@ -1713,6 +1713,35 @@ def pdf_api_vocab_anki():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+@bp.route("/api/vocab-mark", methods=["POST"])
+def pdf_api_vocab_mark():
+    """用户在完整字典框手动标「已掌握 / 没掌握 / 清除」。
+    body: {word: <lemma>, mark: "known"|"unknown"|""}
+    写 vocab 笔记 frontmatter.user_mark + 立即锁定 mastery（known→1.0），刷新 vocab_index。
+    """
+    data = request.get_json(silent=True) or {}
+    word = (data.get("word") or "").strip().lower()
+    mark = (data.get("mark") or "known").strip().lower()
+    if not word or len(word) > 50:
+        return jsonify({"ok": False, "error": "invalid word"}), 400
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        import compute_mastery   # type: ignore
+        result = compute_mastery.apply_user_mark(word, mark)
+        if result.get("ok"):
+            try:
+                import vocab_index   # type: ignore
+                vocab_index.index(force_reload=True)   # 让下划线/句子标记立即反映新 mastery
+            except Exception:
+                pass
+        return jsonify(result)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
 # ─── 英语语法分析 ─────────────────────────────────────────────────────────
 
 _GRAMMAR_NODES_PATH = CLAUDE_DIR / "_server_deploy" / "grammar-nodes.json"

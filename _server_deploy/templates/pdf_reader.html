@@ -1203,28 +1203,29 @@ async function setupContinuousMode() {
   const container = document.getElementById('page-container');
   container.innerHTML = '';
   if (_contIO) { _contIO.disconnect(); _contIO = null; }
-  // 拿所有页的 viewport 算占位 size（并发 fetch）
-  const pageInfos = await Promise.all(Array.from({length: pdfDoc.numPages}, async (_, i) => {
-    const page = await pdfDoc.getPage(i + 1);
-    const v = page.getViewport({scale});
-    return {num: i + 1, w: Math.floor(v.width), h: Math.floor(v.height)};
-  }));
-  for (const info of pageInfos) {
+  // 占位 size：用第 1 页尺寸估算所有页（同一本书各页尺寸基本一致），避免逐页 getPage 阻塞主线程。
+  // 渲染该页时 _renderPageInto 会清掉固定高、按真实 viewport 撑开 → 尺寸自动修正。
+  const p1 = await pdfDoc.getPage(1);
+  const v1 = p1.getViewport({scale});
+  const estW = Math.floor(v1.width), estH = Math.floor(v1.height);
+  const frag = document.createDocumentFragment();
+  for (let num = 1; num <= pdfDoc.numPages; num++) {
     const ph = document.createElement('div');
     ph.className = 'page-wrap';
-    ph.dataset.pageNum = info.num;
+    ph.dataset.pageNum = num;
     ph.dataset.loaded = '0';
-    ph.style.width  = info.w + 'px';
-    ph.style.height = info.h + 'px';
+    ph.style.width  = estW + 'px';
+    ph.style.height = estH + 'px';
     ph.style.background = '#fff';
     ph.style.color = '#888';
     ph.style.display = 'flex';
     ph.style.alignItems = 'center';
     ph.style.justifyContent = 'center';
     ph.style.margin = '0 auto 12px';
-    ph.textContent = '… 第 ' + info.num + ' 页';
-    container.appendChild(ph);
+    ph.textContent = '… 第 ' + num + ' 页';
+    frag.appendChild(ph);
   }
+  container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
   // IntersectionObserver：可见 ±500px 渲染；离开 ±2000px 释放（节内存）
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
@@ -3895,6 +3896,7 @@ async function dictStream(word, ctx) {
       va.className = 'show';
       va.innerHTML =
         `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
+        `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>` +
         (s.sources_hit.length
           ? `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
@@ -3998,6 +4000,32 @@ async function dictStream(word, ctx) {
   return gotEcdict;
 }
 window.dictStream = dictStream;
+
+// 完整字典框「✓ 已掌握」按钮：mastery 直接锁 100% → POST /pdf/api/vocab-mark
+window.markVocabKnown = async (lemma, btn) => {
+  if (!lemma) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.style.opacity = '0.6'; btn.textContent = '⏳ …';
+  try {
+    const r = await fetch('/pdf/api/vocab-mark', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({word: lemma, mark: 'known'}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d.ok) {
+      btn.textContent = '✓ 已掌握 100%';
+      btn.style.background = '#1f5132'; btn.style.borderColor = '#3ba566'; btn.style.color = '#cdf5d9';
+      btn.style.opacity = '1';
+      refreshVocabUnderlinesForAllPages?.();   // 掌握后该词不再标生词下划线
+      window.dlog?.('vocab-mark known ok: ' + lemma + ' → mastery 1.0');
+    } else {
+      btn.disabled = false; btn.style.opacity = '1'; btn.textContent = old;
+      window.dlog?.('vocab-mark failed: ' + (d.error || 'unknown'));
+    }
+  } catch (e) {
+    btn.disabled = false; btn.style.opacity = '1'; btn.textContent = old;
+  }
+};
 
 // 字典 modal「🎴 加入 Anki」按钮：POST /pdf/api/vocab-anki
 window.addVocabAnki = async (lemma) => {

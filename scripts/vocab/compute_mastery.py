@@ -144,6 +144,12 @@ def load_exposure() -> dict[str, int]:
 
 def compute_score(fm: dict, *, anki_data: dict, lookups_recent: int, exposure: int) -> tuple[float, dict]:
     """主算法。返回 (mastery, debug_info)."""
+    # 用户手动标记 = 最高优先级，直接锁定（不被 Anki / 查词 / 暴露等信号侵蚀）
+    user_mark = (fm.get("user_mark") or "").strip().lower()
+    if user_mark == "known":
+        return 1.0, {"user_known_lock": 1.0}
+    if user_mark == "unknown":
+        return 0.0, {"user_unknown_lock": 0.0}
     base = 0.50
     score = base
     debug = {"base": base}
@@ -201,13 +207,7 @@ def compute_score(fm: dict, *, anki_data: dict, lookups_recent: int, exposure: i
         except (ValueError, TypeError):
             pass
 
-    # 5. 用户手动标
-    user_mark = (fm.get("user_mark") or "").strip().lower()
-    if user_mark == "known":
-        score += 0.50; debug["user_known"] = 0.50
-    elif user_mark == "unknown":
-        score -= 0.50; debug["user_unknown"] = -0.50
-
+    # （用户手动标记已在函数开头短路处理 → 锁定 1.0 / 0.0）
     return max(0.0, min(1.0, score)), debug
 
 
@@ -252,6 +252,60 @@ def _rewrite_fm(path: Path, new_mastery: float, new_label: str, new_slug: str) -
     if changed:
         path.write_text("---\n" + fm_text + rest, "utf-8")
     return changed
+
+
+def _set_fm_field(path: Path, field: str, value) -> bool:
+    """在 frontmatter 里设/删一个字段。value 为 "" / None → 删除该行。"""
+    raw = path.read_text("utf-8")
+    if not raw.startswith("---\n"):
+        return False
+    end = raw.find("\n---\n", 4)
+    if end < 0:
+        return False
+    fm_text = raw[4:end]
+    rest = raw[end:]
+    pat = rf"^{field}:.*$"
+    if value == "" or value is None:
+        new_fm = re.sub(pat + r"\n?", "", fm_text, flags=re.M)   # 删字段行
+    else:
+        line = f"{field}: {value}"
+        if re.search(pat, fm_text, flags=re.M):
+            new_fm = re.sub(pat, line, fm_text, flags=re.M)
+        else:
+            new_fm = fm_text.rstrip() + f"\n{line}\n"
+    if new_fm != fm_text:
+        path.write_text("---\n" + new_fm + rest, "utf-8")
+        return True
+    return False
+
+
+def apply_user_mark(lemma: str, mark: str) -> dict:
+    """阅读器手动标「已掌握 / 没掌握 / 清除」。写 frontmatter.user_mark 并立即锁定 mastery。
+    mark: "known" → 1.0；"unknown" → 0.0；"" / "clear" → 删标记（恢复算法，暂置 0.5）。
+    返回 {ok, mastery, label, path}。"""
+    lemma = (lemma or "").strip().lower()
+    if not lemma:
+        return {"ok": False, "error": "empty lemma"}
+    vroot = _vocab_dir()
+    first = lemma[0] if lemma and lemma[0].isalpha() else "_"
+    path = vroot / first / f"{lemma}.md"
+    if not path.exists():
+        return {"ok": False, "error": "note not found", "path": str(path)}
+    mark = (mark or "").strip().lower()
+    if mark == "known":
+        mastery = 1.0
+    elif mark == "unknown":
+        mastery = 0.0
+    else:
+        mark = ""        # 清除标记
+        mastery = 0.5
+    label, slug = _label_for(mastery)
+    _set_fm_field(path, "user_mark", mark)            # 锁定信号
+    _rewrite_fm(path, mastery, label, slug)           # 立即生效（mastery + label + tags）
+    return {
+        "ok": True, "mastery": mastery, "label": label,
+        "path": str(path.relative_to(VAULT_ROOT).as_posix()),
+    }
 
 
 def main():
