@@ -408,6 +408,7 @@ def pdf_api_page_chars():
                 continue
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
+                    _bold = bool(span.get("flags", 0) & 16) or "bold" in (span.get("font", "") or "").lower()
                     for ch in span.get("chars", []):
                         bbox = ch.get("bbox")
                         if not bbox or len(bbox) != 4:
@@ -423,6 +424,7 @@ def pdf_api_page_chars():
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
                             "sp": 1 if c.isspace() else 0,
                             "w": _word_id((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),  # 所属词 id
+                            "b": 1 if _bold else 0,   # 加粗：整句加粗的练习指令/演示句/小标题排除用
                         })
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
@@ -622,6 +624,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 if not footer and median_h:
                     avg_h = sum(c["y1"] - c["y0"] for c in nsp) / len(nsp)
                     if avg_h > median_h * 1.4:
+                        footer = True
+                # 整句加粗(>90%) = 练习指令/加粗演示句/小标题（如 "Put the verb into..."）→ 不当学习句子
+                # （正文叙述句不加粗；演示句只部分加粗、比例低于此阈值，不误伤普通正文）
+                if not footer:
+                    nb = sum(1 for c in nsp if c.get("b"))
+                    if nb / len(nsp) > 0.9:
                         footer = True
             if not vertical and not footer:
                 sentences.append({
