@@ -320,7 +320,11 @@ body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,56
 
 /* toolbar 内的高亮色板：只有色圆点，点 = 立刻标记 + 互斥激活外框 */
 #hl-color-picker{display:flex;flex-direction:column;gap:6px;align-items:center;padding:2px;flex-shrink:0;border-right:1px solid #2a3550;padding-right:8px}
-#hl-color-picker .swatch{width:24px;height:24px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
+#hl-color-picker .swatch{width:17px;height:17px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
+/* 选中句子(多词)按钮加大；单词小框发音按钮 */
+#sel-btns-multi button{padding:9px 18px;font-size:14px}
+#word-pop .wp-speak{background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}
+#word-pop .wp-speak:hover{background:#244470;color:#fff}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
 #hl-color-picker .swatch.active{border-color:#fff;box-shadow:0 0 0 2px #0078d4,inset 0 0 0 1px rgba(0,0,0,.3);transform:scale(1.05)}
 /* 单词小框 */
@@ -2481,10 +2485,24 @@ function _updateToolbarMode(text) {
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
 let _wordPopState = null;
 function _positionWordPop(pop) {
-  const main = document.getElementById('main');
-  const mr = main.getBoundingClientRect();
-  pop.style.left = Math.max(8, mr.left + mr.width / 2 - 170) + 'px';
-  pop.style.top = (mr.top + 70) + 'px';
+  // 跟随选中位置：锚到选中起点字符下方，越界自动翻到上方/收回边内
+  let ax = 0, ay = 0;
+  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+    const ch = _charSel.pw.__charBoxes[_charSel.startIdx];
+    if (ch && ch.left != null) {
+      const pr = _charSel.pw.getBoundingClientRect();
+      ax = pr.left + ch.left;
+      ay = pr.top + ch.top + ch.height;
+    }
+  }
+  if (!ax && !ay) { const m = document.getElementById('main').getBoundingClientRect(); ax = m.left + m.width / 2 - 170; ay = m.top + 70; }
+  const W = 340, H = 220;
+  let left = ax, top = ay + 8;
+  if (left + W > window.innerWidth - 8) left = window.innerWidth - W - 8;
+  if (left < 8) left = 8;
+  if (top + H > window.innerHeight - 8) top = Math.max(8, ay - H - 8);   // 下方放不下 → 词上方
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
 }
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
@@ -2507,6 +2525,7 @@ window.showWordPopover = async (word, ctx) => {
     pop.innerHTML =
       '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
       (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '') +
+      '<button class="wp-speak" onclick="_speakWord(' + JSON.stringify(d.lemma || word) + ')" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
       '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
