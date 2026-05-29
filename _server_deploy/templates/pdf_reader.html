@@ -1268,6 +1268,74 @@ function _setupResizeWatcher() {
 }
 window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 
+// ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
+async function _applyZoom(newScale) {
+  if (_refitBusy || !pdfDoc) return;
+  newScale = Math.max(0.5, Math.min(3.0, newScale));
+  if (Math.abs(newScale - scale) < 0.01) return;
+  _refitBusy = true;
+  try {
+    const main = document.getElementById('main');
+    const container = document.getElementById('page-container');
+    const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
+    scale = newScale;
+    _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
+    if (readMode === 'continuous') {
+      await setupContinuousMode();
+    } else {
+      const wrap = container.querySelector('.page-wrap') || container;
+      if (wrap.dataset) wrap.dataset.loaded = '0';
+      await renderPage(currentPage);
+    }
+    requestAnimationFrame(() => { if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight); });
+  } finally { _refitBusy = false; }
+}
+window._applyZoom = _applyZoom;
+
+let _pinch = null;
+function _setupPinchZoom() {
+  const main = document.getElementById('main');
+  if (!main || main.dataset.pinchWatch === '1') return;
+  main.dataset.pinchWatch = '1';
+  // 禁 iOS Safari 浏览器级页面缩放（否则双指仍是拉伸位图 → 糊）
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('gesturechange', (e) => e.preventDefault());
+  main.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+      const [a, b] = e.touches;
+      _pinch = {
+        d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+        s0: scale, target: scale,
+        cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2,
+      };
+      e.preventDefault();
+    }
+  }, { passive: false });
+  main.addEventListener('touchmove', (e) => {
+    if (_pinch && e.touches.length === 2) {
+      e.preventDefault();
+      const [a, b] = e.touches;
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      _pinch.target = Math.max(0.5, Math.min(3.0, _pinch.s0 * (d / _pinch.d0)));
+      // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
+      const pc = document.getElementById('page-container');
+      const mr = main.getBoundingClientRect();
+      pc.style.transformOrigin = (main.scrollLeft + _pinch.cx - mr.left) + 'px ' + (main.scrollTop + _pinch.cy - mr.top) + 'px';
+      pc.style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
+    }
+  }, { passive: false });
+  const endPinch = () => {
+    if (!_pinch) return;
+    const target = _pinch.target; _pinch = null;
+    const pc = document.getElementById('page-container');
+    pc.style.transform = ''; pc.style.transformOrigin = '';
+    if (Math.abs(target - scale) > 0.02) _applyZoom(target);
+  };
+  main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
+  main.addEventListener('touchcancel', endPinch, { passive: false });
+}
+window.addEventListener('DOMContentLoaded', _setupPinchZoom);
+
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
   const container = document.getElementById('page-container');
