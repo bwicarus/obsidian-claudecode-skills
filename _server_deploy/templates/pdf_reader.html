@@ -2058,9 +2058,15 @@ function _findCharAt(charBoxes, x, y) {
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
 function _charsRangeToText(chars, sIdx, eIdx) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
+  // 块过滤：跳掉 reading order 落在区间中间、却属于别块的字符（双栏交错时把另一栏串进来）
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
+  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
   let text = '', lastChar = null;
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
     if (lastChar) {
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) text += '\n';
