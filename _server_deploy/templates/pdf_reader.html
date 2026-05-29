@@ -1257,8 +1257,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
   // 关键修正：PyMuPDF rawdict 的 bbox 已经是 image coordinate (y 向下, 原点左上)
   // 之前误做 (pageH - y1) y 翻转 → 上下颠倒，整个 chars overlay 错位
-  const charBoxes = d.chars.map(ch => ({
+  const charBoxes = d.chars.map((ch, _oi) => ({
     c: ch.c,
+    _oi,   // PyMuPDF 原始顺序(=reading order)；sort 时 x 几乎重叠的字符靠它保序
     left:   ch.x0 * scale,
     top:    ch.y0 * scale,
     width:  (ch.x1 - ch.x0) * scale,
@@ -1277,6 +1278,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     const bBase = b.top + b.height;
     const ref = Math.max(a.height, b.height) || 1;
     if (Math.abs(aBase - bBase) > ref * 0.8) return aBase - bBase;
+    // 同行内 x 几乎重叠（如 often 的 t/e 紧排 kerning，left 差 <0.3 字高）→ 保持 PyMuPDF
+    // 原始 reading order，不按 left 排反（否则 o-f-t-e-n 会被排成 o-f-e-t-n）
+    if (Math.abs(a.left - b.left) < ref * 0.3) return a._oi - b._oi;
     return a.left - b.left;
   });
   // 调试模式（URL 加 ?dbg=1）：显示 char bbox + 内容，验证 PyMuPDF 提取跟 PDF 视觉是否对齐
