@@ -387,6 +387,21 @@ def pdf_api_page_chars():
             return jsonify({"ok": False, "error": "page out of range"}), 400
         p = doc[page - 1]
         raw = p.get_text("rawdict")
+        # 词级提取：PyMuPDF 已按字形+间距分好词（比前端拿字符自己拼可靠）→ 给每个 char 标它属于哪个词，
+        # 前端据此判词边界，根治连字/紧排/粘连导致的选词错乱（如 often 被排成 etn）
+        words_raw = p.get_text("words")   # (x0,y0,x1,y1, text, block_no, line_no, word_no)
+        # 按行分桶加速：char 先按 y 找候选行的词，再判 x（避免每个 char 扫全部词）
+        _wbuckets: dict = {}
+        for _wi, _w in enumerate(words_raw):
+            _wid = _w[5] * 1000000 + _w[6] * 1000 + _w[7]
+            _yk = int(_w[1] // 5)
+            for _k in (_yk - 1, _yk, _yk + 1):
+                _wbuckets.setdefault(_k, []).append((_w[0], _w[1], _w[2], _w[3], _wid))
+        def _word_id(cx, cy):
+            for (wx0, wy0, wx1, wy1, wid) in _wbuckets.get(int(cy // 5), ()):  # noqa
+                if wy0 - 0.5 <= cy <= wy1 + 0.5 and wx0 - 0.5 <= cx <= wx1 + 0.5:
+                    return wid
+            return -1
         chars = []
         for block in raw.get("blocks", []):
             if block.get("type", 0) != 0:
@@ -407,6 +422,7 @@ def pdf_api_page_chars():
                             "x0": round(bbox[0], 2), "y0": round(bbox[1], 2),
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
                             "sp": 1 if c.isspace() else 0,
+                            "w": _word_id((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),  # 所属词 id
                         })
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)

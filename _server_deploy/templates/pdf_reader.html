@@ -1261,6 +1261,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
   const charBoxes = d.chars.map((ch, _oi) => ({
     c: ch.c,
     _oi,   // PyMuPDF 原始顺序(=reading order)；sort 时 x 几乎重叠的字符靠它保序
+    w: (ch.w == null ? -1 : ch.w),   // 所属词 id（PyMuPDF 分词）：判词边界用，根治连字/紧排
     left:   ch.x0 * scale,
     top:    ch.y0 * scale,
     width:  (ch.x1 - ch.x0) * scale,
@@ -1279,8 +1280,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport) {
     const bBase = b.top + b.height;
     const ref = Math.max(a.height, b.height) || 1;
     if (Math.abs(aBase - bBase) > ref * 0.8) return aBase - bBase;
-    // 同行内 x 几乎重叠（如 often 的 t/e 紧排 kerning，left 差 <0.3 字高）→ 保持 PyMuPDF
-    // 原始 reading order，不按 left 排反（否则 o-f-t-e-n 会被排成 o-f-e-t-n）
+    // 同一个词内(PyMuPDF 分词)→ 严格按原始 reading order，绝不按 left 排乱(连字/紧排 often→etn 的根治)
+    if (a.w !== -1 && a.w === b.w) return a._oi - b._oi;
+    // 词信息缺失(旧数据/符号)的兜底：x 几乎重叠也保原序
     if (Math.abs(a.left - b.left) < ref * 0.3) return a._oi - b._oi;
     return a.left - b.left;
   });
@@ -1827,23 +1829,34 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
 
 function _expandToWordStart(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
+  // 优先用 PyMuPDF 词边界：同一个词 id 直接扩到词首（根治连字/紧排/装饰编号粘连）
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    while (idx > 0 && chars[idx - 1].w === wid) idx--;
+    return idx;
+  }
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx > 0 && isWord(chars[idx - 1].c) &&
          Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
          (chars[idx].left - (chars[idx - 1].left + chars[idx - 1].width)) <= chars[idx].height * 0.8) {
-    idx--;   // 大水平间隙(>0.8字高)=跨排版块(如 Unit 编号↔标题)，不并入同一词
+    idx--;   // 词信息缺失兜底：大水平间隙(>0.8字高)=跨排版块，不并入同一词
   }
   return idx;
 }
 function _expandToWordEnd(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    while (idx < chars.length - 1 && chars[idx + 1].w === wid) idx++;
+    return idx;
+  }
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   if (!isWord(chars[idx].c)) return idx;
   while (idx < chars.length - 1 && isWord(chars[idx + 1].c) &&
          Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
          (chars[idx + 1].left - (chars[idx].left + chars[idx].width)) <= chars[idx].height * 0.8) {
-    idx++;   // 大水平间隙=跨排版块，不并入同一词
+    idx++;
   }
   return idx;
 }
@@ -1942,6 +1955,16 @@ function _wordExpandFromChar(chars, idx) {
   const isCJK  = (c) => /[一-鿿㐀-䶿]/.test(c);
   const c = chars[idx].c;
   if (isCJK(c)) return {start: idx, end: idx};
+  // 优先用 PyMuPDF 词边界：同一个词 id 扩成整词，再去掉首尾标点（PyMuPDF 把 "often." 当一个词）
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    let s = idx, e = idx;
+    while (s > 0 && chars[s - 1].w === wid) s--;
+    while (e < chars.length - 1 && chars[e + 1].w === wid) e++;
+    while (s < e && !isWord(chars[s].c) && !isCJK(chars[s].c)) s++;   // 去词首标点
+    while (e > s && !isWord(chars[e].c) && !isCJK(chars[e].c)) e--;   // 去词尾标点(如 often. 的句号)
+    return {start: s, end: e};
+  }
   if (!isWord(c)) return {start: idx, end: idx};
   let s = idx;
   while (s > 0 && isWord(chars[s - 1].c) &&
