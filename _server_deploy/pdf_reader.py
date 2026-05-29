@@ -499,6 +499,9 @@ def pdf_api_page_chars():
         for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
             if ts.get("rects") and ts.get("page", page) == page:
                 sentences.append(ts)
+        _dis = _dismiss_load(rel)   # 过滤用户长按 L 框删除的句子标记
+        if _dis:
+            sentences = [s for s in sentences if (s.get("text") or "").strip() not in _dis]
         return jsonify({
             "ok": True,
             "chars": chars,
@@ -1764,6 +1767,48 @@ def _tr_save_one(rel: str, sent: dict):
         _tr_path(rel).write_text(json.dumps({"pdf_rel": rel, "sentences": arr[-500:]}, ensure_ascii=False), "utf-8")
     except Exception:
         pass
+def _tr_delete(rel: str, text: str):
+    arr = [s for s in _tr_load(rel) if (s.get("text") or "") != text]
+    try:
+        _tr_path(rel).write_text(json.dumps({"pdf_rel": rel, "sentences": arr}, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+# 用户长按 L 框删除的句子（持久隐藏，page-chars 过滤）
+_DISMISS_DIR = CLAUDE_DIR / "state" / "pdf-sent-dismissed"
+def _dismiss_path(rel: str) -> Path:
+    import hashlib
+    _DISMISS_DIR.mkdir(parents=True, exist_ok=True)
+    return _DISMISS_DIR / (hashlib.sha1(rel.encode("utf-8")).hexdigest() + ".json")
+def _dismiss_load(rel: str) -> set:
+    p = _dismiss_path(rel)
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text("utf-8")).get("texts", []))
+    except Exception:
+        return set()
+def _dismiss_add(rel: str, text: str):
+    s = _dismiss_load(rel); s.add(text)
+    try:
+        _dismiss_path(rel).write_text(json.dumps({"pdf_rel": rel, "texts": sorted(s)[-2000:]}, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+@bp.route("/api/sentence-dismiss", methods=["POST"])
+def pdf_api_sentence_dismiss():
+    """长按 L 框删除句子标记：记入 dismissed(page-chars 过滤) + 若是翻译句则从译文 sidecar 删。
+    body: {file, text}"""
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    text = (data.get("text") or "").strip()
+    if not rel or _safe_vault_path(rel) is None or not text:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    _dismiss_add(rel, text)
+    try: _tr_delete(rel, text)
+    except Exception: pass
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/translate-sentence", methods=["POST"])

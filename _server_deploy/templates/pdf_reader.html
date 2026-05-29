@@ -1780,8 +1780,51 @@ function renderVocabSentences(pw, sentences) {
       btn.addEventListener('mouseleave', () => {
         layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"].highlight`).forEach(b => b.classList.remove('highlight'));
       });
+      _bindSentBtnLongPress(btn, s, pw);
       layer.appendChild(btn);
     }
+    if (s.first_char) {
+      const b0 = layer.querySelector(`.vocab-sentence-btn-l-start[data-sid="${sid}"]`);
+      if (b0) _bindSentBtnLongPress(b0, s, pw);
+    }
+  }
+}
+
+// L 框长按 → 删除该句标记（持久隐藏）。与短按(翻译)/拖选共存：移动或短按则取消
+function _bindSentBtnLongPress(btn, s, pw) {
+  let timer = null, x0 = 0, y0 = 0, fired = false;
+  btn.addEventListener('pointerdown', (e) => {
+    x0 = e.clientX; y0 = e.clientY; fired = false;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null; fired = true;
+      if (navigator.vibrate) { try { navigator.vibrate(30); } catch (_) {} }
+      _sentDismiss(s, pw);
+    }, 600);
+  });
+  const cancel = (e) => {
+    if (timer && e && e.type === 'pointermove' && Math.hypot(e.clientX - x0, e.clientY - y0) < 12) return;
+    clearTimeout(timer); timer = null;
+  };
+  btn.addEventListener('pointermove', cancel);
+  btn.addEventListener('pointerup', cancel);
+  btn.addEventListener('pointercancel', cancel);
+  // 长按已删 → 吃掉随后的 click，避免触发整句翻译
+  btn.addEventListener('click', (e) => { if (fired) { fired = false; e.stopPropagation(); e.preventDefault(); } }, true);
+}
+function _sentDismiss(s, pw) {
+  if (!s || !pw) return;
+  const txt = (s.text || '').trim();
+  if (pw.__vocabSentences) {
+    pw.__vocabSentences = pw.__vocabSentences.filter(x => x !== s && (x.text || '').trim() !== txt);
+    try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {}
+  }
+  try { closeSentPopover && closeSentPopover(); } catch (_) {}
+  if (FILE_REL && txt) {
+    fetch('/pdf/api/sentence-dismiss', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, text: txt }),
+    }).catch(() => {});
   }
 }
 
@@ -2345,6 +2388,7 @@ function _bindCharLayer(cl, pw) {
 
   cl.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (Date.now() - (window._clLastTouchAt || 0) < 700) return;   // 忽略 touch 后 iOS 合成的 mousedown（否则 onStart 双触发→假双击→刚弹的小框被冲掉）
     e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
     const p = ptToLocal(e.clientX, e.clientY);
     onStart(p.x, p.y);
@@ -2361,6 +2405,7 @@ function _bindCharLayer(cl, pw) {
   });
   cl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; return; }
+    window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
     e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
