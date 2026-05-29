@@ -5102,7 +5102,8 @@ async function aiCall(path, body, label) {
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
-  openResult(label, lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
+  // 预览框显示「实际要处理的文本」(body.text，短选区已扩成整句) → 预览=输入，所见即所处理
+  openResult(label, body.text || body.sentence || lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
   const myReq = _resultReqId;   // 本次 AI 调用的请求序号；被新结果框作废后渲染一律丢弃
   const contentEl = document.getElementById('result-content');
   try {
