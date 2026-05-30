@@ -34,11 +34,18 @@ import numpy as np
 
 
 def _is_cjk_punct_or_bullet(c: str) -> bool:
-    """字符是否为强装饰圆形 bullet(嵌入这些已占视觉 bullet 位置,不需要额外 offset)。
-    收紧到只含厚实 bullet 形状 —— `『「【〔・` 等细括号/中点都不在此列,因为
-    mokuro 经常把视觉 `●` 误识别为它们(`『マルウェア対策` 实为 `●`,`・不正ログイン` 实为 `●`)。
-    真 `『「【〔` 等括号细窄,detector 用 blob 几何会判 False 不会误偏移。"""
-    return c in "●◆■▲▶" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
+    """字符是否为 bullet 或 mokuro 对 bullet 的常见误识别 (装饰符/标点/括号)。
+    跟 visual seg[0] 是 bullet 的情况配合:这些字符的 text[0] 应嵌到 seg[0] 位置
+    (text[0] 是 OCR 对 visual bullet 的某种识别;真正的 `『xxx』` 等行 seg[0]
+    几何判定会判 False 自动走 seg[0] align 路径)。
+
+    包含:
+    - 真 bullet:●◆■▲▶
+    - mokuro 常见把 `●` 误识为的字符:。．・、,. (圆形/中点)
+                                  『「【〔《（(［[（左括号)
+                                  ★☆※"""
+    return c in "●◆■▲▶。．・、,.「『【〔《（(［[★☆※" or \
+           (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
 
 
 def _segment_line_chars(patch_gray: "np.ndarray", line_h: int) -> list[tuple[int, int]]:
