@@ -1,0 +1,89 @@
+{% extends "fitness/_base.html" %}
+{% block title %}训练历史{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>历史记录</h2>
+  <p class="small dim">看每个动作的进度曲线。点动作名展开历史。</p>
+  <label class="small dim">筛选动作:
+    <select id="ex-filter" style="background:var(--bg);color:var(--text);
+                                  border:1px solid var(--border);border-radius:4px;
+                                  padding:6px 8px;font-size:14px;">
+      <option value="">全部</option>
+      {% for day in plan.days %}
+      <optgroup label="{{ day.name }}">
+        {% for ex in day.exercises %}
+        <option value="{{ ex.id }}">{{ ex.name }}</option>
+        {% endfor %}
+      </optgroup>
+      {% endfor %}
+    </select>
+  </label>
+</div>
+
+<div class="card">
+  <div id="history-list">
+    <p class="dim">加载中…</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PLAN = {{ plan | tojson }};
+const EX_NAME = {};
+PLAN.days.forEach(d => d.exercises.forEach(e => { EX_NAME[e.id] = e.name; }));
+
+async function load(exId) {
+  const url = '/api/fitness/history' + (exId ? '?exercise_id=' + encodeURIComponent(exId) : '');
+  const r = await fetch(url);
+  const d = await r.json();
+  const root = document.getElementById('history-list');
+  root.innerHTML = '';
+  if (!d.ok || !d.rows || d.rows.length === 0) {
+    root.innerHTML = '<p class="dim">暂无记录。</p>';
+    return;
+  }
+  // group by date
+  const byDate = {};
+  d.rows.forEach(r => {
+    if (!byDate[r.date]) byDate[r.date] = [];
+    byDate[r.date].push(r);
+  });
+  const dates = Object.keys(byDate).sort().reverse();
+  dates.forEach(date => {
+    const block = document.createElement('div');
+    block.style.marginBottom = '20px';
+    const h = document.createElement('h3');
+    h.textContent = date;
+    h.style.color = 'var(--text)';
+    block.appendChild(h);
+
+    // group by exercise within date
+    const byEx = {};
+    byDate[date].forEach(r => {
+      if (!byEx[r.exercise_id]) byEx[r.exercise_id] = [];
+      byEx[r.exercise_id].push(r);
+    });
+
+    Object.keys(byEx).forEach(exId => {
+      const sets = byEx[exId].sort((a,b) => a.set_no - b.set_no);
+      const row = document.createElement('div');
+      row.style.marginBottom = '6px';
+      row.style.fontSize = '14px';
+      const sum = sets.map(s => `${s.weight_kg ?? '?'}kg×${s.reps ?? '?'}`).join(' / ');
+      const total = sets.reduce((a,s) => a + (s.weight_kg||0) * (s.reps||0), 0);
+      row.innerHTML = `<strong>${EX_NAME[exId] || exId}</strong>:
+        <span class="dim">${sum}</span>
+        <span class="dim small"> · 总量 ${total.toFixed(0)} kg</span>`;
+      block.appendChild(row);
+    });
+    root.appendChild(block);
+  });
+}
+
+document.getElementById('ex-filter').addEventListener('change', e => load(e.target.value));
+load('');
+</script>
+{% endblock %}

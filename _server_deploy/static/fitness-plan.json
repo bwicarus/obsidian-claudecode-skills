@@ -1,0 +1,265 @@
+{
+  "name": "PPL 3-day Hypertrophy",
+  "description": "Push / Pull / Legs 3 天循环,适合家庭健身设备(可调哑铃 + 综合训练机 + EZ 杆 + 训练凳)",
+  "schedule_hint": "周一/周三/周五(休 vs 强度可调成 4 天 Upper-Lower)",
+  "days": [
+    {
+      "id": "push",
+      "name": "Push 推日",
+      "focus": "胸 / 肩 / 三头",
+      "exercises": [
+        {
+          "id": "db_bench_flat",
+          "name": "平板哑铃卧推",
+          "sets": "4 × 6-8",
+          "start_weight_hint": "10-12 kg / 手",
+          "video_id": "vcKaP67eMhk",
+          "video_title": "Jeff Nippard · How to Bench Press for Hypertrophy",
+          "tips": [
+            "肩胛骨后缩下压贴凳,胸推顶,不要拱腰",
+            "下放至接近胸口 1-2cm 停顿,稳控离心",
+            "推起时不要锁肘到底(保留 5° 弯曲)"
+          ]
+        },
+        {
+          "id": "db_bench_incline",
+          "name": "上斜哑铃卧推(30°)",
+          "sets": "3 × 8-10",
+          "start_weight_hint": "8-10 kg / 手",
+          "video_id": "8iPEnn-ltC8",
+          "video_title": "Jeff Nippard · Incline Dumbbell Press Form Guide",
+          "tips": [
+            "凳角 30° 最练上胸(超过 45° 三角肌占主导)",
+            "肘部约 30-45° 张开(不全外展不夹腋)",
+            "下放至略低于胸线,顶部稍内收哑铃"
+          ]
+        },
+        {
+          "id": "db_shoulder_press",
+          "name": "哑铃肩推(坐姿)",
+          "sets": "4 × 8-10",
+          "start_weight_hint": "8-10 kg / 手",
+          "video_id": "qEwKCR5JCog",
+          "video_title": "Jeff Nippard · Science-Based Shoulder Workout",
+          "tips": [
+            "凳背 85° 稍后倾,腰背贴紧",
+            "肘略前于身体侧面,推起手腕中立",
+            "顶端不夹哑铃 / 不锁肘"
+          ]
+        },
+        {
+          "id": "db_lateral_raise",
+          "name": "侧平举",
+          "sets": "3 × 12-15",
+          "start_weight_hint": "3-5 kg / 手",
+          "video_id": "geenhiHju-o",
+          "video_title": "Jeff Nippard · How To Grow Side Delts",
+          "tips": [
+            "微前倾躯干,肘略弯,小指略高于大拇指",
+            "举到肘部跟肩同高即停,不要过顶",
+            "重量优先轻 + 满 ROM,姿势第一"
+          ]
+        },
+        {
+          "id": "cable_tricep_pushdown",
+          "name": "绳索三头下压",
+          "sets": "4 × 10-12",
+          "start_weight_hint": "综合机 3-5 档",
+          "video_id": "2-LAMcpzODU",
+          "video_title": "Jeff Nippard · Triceps Workout Science",
+          "tips": [
+            "肘部贴住身侧不前后晃,只屈伸前臂",
+            "底部完全伸直 + 短暂挤压三头",
+            "绳索版顶部分开两侧(比直杆更全 ROM)"
+          ]
+        },
+        {
+          "id": "db_overhead_tricep",
+          "name": "哑铃过头三头屈伸",
+          "sets": "3 × 10-12",
+          "start_weight_hint": "6-8 kg 单哑铃双手持",
+          "video_id": "_gsUck-7M74",
+          "video_title": "Jeff Nippard · Overhead Triceps Extension Setup",
+          "tips": [
+            "双手持单哑铃头部,肘紧贴耳侧",
+            "下放至前臂触小臂(深拉伸三头长头)",
+            "上臂保持不动,只用肘关节运动"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pull",
+      "name": "Pull 拉日",
+      "focus": "背 / 二头 / 后三角",
+      "exercises": [
+        {
+          "id": "lat_pulldown",
+          "name": "高位下拉(综合机)",
+          "sets": "4 × 6-10",
+          "start_weight_hint": "综合机 5-7 档",
+          "video_id": "iKtaEPV1ZeQ",
+          "video_title": "Jeff Nippard · The Most Effective Back Workout",
+          "tips": [
+            "握距比肩宽 1.5 倍,反握能多练二头",
+            "肩胛骨先下沉再拉,胸顶向横杆",
+            "拉到上胸位置即可(不要拉到下胸)"
+          ]
+        },
+        {
+          "id": "db_row_single",
+          "name": "单臂哑铃划船",
+          "sets": "3 × 8-10",
+          "start_weight_hint": "10-14 kg",
+          "video_id": "pYcpY20QaE8",
+          "video_title": "Jeff Nippard · Dumbbell Row Form Tutorial",
+          "tips": [
+            "膝盖 + 同侧手撑训练凳,另一手持哑铃",
+            "背平,提肘指向后臀(不是举到肩高)",
+            "下放至完全伸展拉伸阔背"
+          ]
+        },
+        {
+          "id": "seated_row",
+          "name": "坐姿划船(综合机)",
+          "sets": "4 × 8-10",
+          "start_weight_hint": "综合机 4-6 档",
+          "video_id": "GZbfZ033f74",
+          "video_title": "Jeff Nippard · Seated Cable Row Variations",
+          "tips": [
+            "胸往前贴近(伸展)再后拉(肩胛收紧)",
+            "肘部夹紧身侧,拉到肚脐位置",
+            "不要靠后倾躯干借力"
+          ]
+        },
+        {
+          "id": "face_pull",
+          "name": "面拉(综合机绳索)",
+          "sets": "3 × 12-15",
+          "start_weight_hint": "综合机 2-3 档(轻)",
+          "video_id": "rep-qVOkqgk",
+          "video_title": "Jeff Nippard · How To Do Face Pulls Correctly",
+          "tips": [
+            "绳索调至上方,身体后倾 15°",
+            "拉到耳侧,手腕外旋(W 形)",
+            "重量必须轻,练后三角 + 中下斜方"
+          ]
+        },
+        {
+          "id": "ez_curl",
+          "name": "EZ 杆二头弯举",
+          "sets": "4 × 10-12",
+          "start_weight_hint": "EZ 杆 + 2.5kg/边",
+          "video_id": "in7PaeYlhrM",
+          "video_title": "Jeff Nippard · How To Build Bigger Biceps",
+          "tips": [
+            "肘贴体侧不前后晃动",
+            "完整 ROM 顶部短暂挤压不靠惯性",
+            "EZ 杆比直杆腕部更舒服"
+          ]
+        },
+        {
+          "id": "db_incline_curl",
+          "name": "斜板哑铃弯举",
+          "sets": "3 × 10-12",
+          "start_weight_hint": "5-7 kg / 手",
+          "video_id": "QlhxhICCmgs",
+          "video_title": "Jeff Nippard · Incline DB Curl for Long Head",
+          "tips": [
+            "凳背 60-70°,手臂自然下垂(肘略后于躯干)",
+            "拉伸位最大化练二头长头",
+            "翻腕(supination)上举顶峰挤压"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "legs",
+      "name": "Legs 腿日",
+      "focus": "股四 / 臀 / 腘绳 / 小腿 / 核心",
+      "exercises": [
+        {
+          "id": "goblet_squat",
+          "name": "高脚杯深蹲(双手抱单哑铃)",
+          "sets": "4 × 8-12",
+          "start_weight_hint": "12-15 kg 单哑铃",
+          "video_id": "MeIiIdhvXT4",
+          "video_title": "Jeff Nippard · Goblet Squat Tutorial",
+          "tips": [
+            "双手抱哑铃顶端贴胸,肘内收",
+            "下蹲至大腿略低于膝,膝盖与脚尖同向",
+            "起立时臀部和膝盖同时伸,不能塌腰"
+          ]
+        },
+        {
+          "id": "rdl",
+          "name": "罗马尼亚硬拉(EZ 杆)",
+          "sets": "4 × 8-10",
+          "start_weight_hint": "EZ 杆 + 5kg/边",
+          "video_id": "JCXUYuzwNrM",
+          "video_title": "Jeff Nippard · Romanian Deadlift Form Guide",
+          "tips": [
+            "膝盖微弯,屁股向后推(髋铰链)",
+            "杆贴大腿下滑至膝盖下方(腘绳深拉伸即停)",
+            "下背全程绷紧 + 中立,不要圆背"
+          ]
+        },
+        {
+          "id": "leg_extension",
+          "name": "腿屈伸(综合机)",
+          "sets": "4 × 10-12",
+          "start_weight_hint": "综合机 4-6 档",
+          "video_id": "YyvSfVjQeL0",
+          "video_title": "Jeff Nippard · Why Leg Extensions Matter",
+          "tips": [
+            "上身贴凳背,大腿不离座",
+            "顶部完全伸直 + 短暂挤压股四",
+            "下放控制 2 秒离心(增肌关键)"
+          ]
+        },
+        {
+          "id": "leg_curl",
+          "name": "腿弯举(综合机俯卧)",
+          "sets": "3 × 10-12",
+          "start_weight_hint": "综合机 3-5 档",
+          "video_id": "ELOCsoDSmrg",
+          "video_title": "Jeff Nippard · Hamstring Workout Science",
+          "tips": [
+            "髋紧贴垫子不抬起,只屈膝",
+            "脚尖背屈(勾起)练腘绳肌更多",
+            "底部完全伸展拉伸腘绳"
+          ]
+        },
+        {
+          "id": "db_calf_raise",
+          "name": "哑铃站立提踵",
+          "sets": "4 × 15-20",
+          "start_weight_hint": "12-15 kg / 手",
+          "video_id": "JbyjNymZOt0",
+          "video_title": "Jeff Nippard · Calves Training Guide",
+          "tips": [
+            "脚尖踩台阶或杠铃片,脚跟悬空",
+            "顶部完全踮起 + 短暂停顿",
+            "下放至小腿完全拉伸"
+          ]
+        },
+        {
+          "id": "plank",
+          "name": "平板支撑",
+          "sets": "3 × 60s",
+          "start_weight_hint": "—",
+          "video_id": "BQu26ABuVS0",
+          "video_title": "Jeff Nippard · Best Core Exercises Science",
+          "tips": [
+            "肘正下方撑,身体一条直线",
+            "腹肌收紧 + 臀夹紧 + 不塌腰不撅屁股",
+            "盯地面前方 30cm 保持颈椎中立"
+          ]
+        }
+      ]
+    }
+  ],
+  "progression_rule": "每周尝试 +0.5kg 或 +1-2 次。能力竭(RIR 1-2)且姿势稳了再加。",
+  "deload_rule": "每 6-8 周一次,所有重量降 40%,练 1 周让神经/关节恢复。",
+  "warmup": "5 分钟有氧 + 动态拉伸 + 主动作 2 组空杠/50% 重量"
+}

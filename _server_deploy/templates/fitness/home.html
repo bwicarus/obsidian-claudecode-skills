@@ -1,0 +1,42 @@
+{% extends "fitness/_base.html" %}
+{% block title %}今日训练{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>今天练哪个?</h2>
+  <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px;">
+    {% for d in plan.days %}
+    <a class="btn large primary" href="/private/fitness/log/{{ d.id }}"
+       style="flex: 1; min-width: 160px; text-align: center;">
+      {{ d.name }}<br>
+      <span style="font-size: 12px; opacity: 0.85;">{{ d.focus }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>近 30 天训练</h2>
+  {% if recent %}
+  <table>
+    <tr><th>日期</th><th>类型</th><th>记录组数</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td>{{ r.date }}</td>
+      <td>{% for d in plan.days %}{% if d.id == r.day_id %}{{ d.name }}{% endif %}{% endfor %}</td>
+      <td>{{ r.n }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="dim">还没练过。点上面任一日开始。</p>
+  {% endif %}
+</div>
+
+<div class="card small dim">
+  <strong>{{ plan.name }}</strong><br>
+  {{ plan.description }}<br>
+  <em>建议:{{ plan.schedule_hint }}</em>
+</div>
+
+{% endblock %}

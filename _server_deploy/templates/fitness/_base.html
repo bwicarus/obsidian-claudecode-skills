@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>{% block title %}健身{% endblock %} · bwicarus.space</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-card-hover: #1c232c;
+    --border: #2d333b;
+    --text: #e6edf3;
+    --text-dim: #7d8590;
+    --accent: #4493f8;
+    --accent-2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 16px; line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .container { max-width: 900px; margin: 0 auto; padding: 16px; }
+  .topbar {
+    position: sticky; top: 0; z-index: 100;
+    background: var(--bg-card); border-bottom: 1px solid var(--border);
+    padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+  }
+  .topbar h1 { margin: 0; font-size: 18px; flex: 1; }
+  .topbar nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  .topbar nav a {
+    padding: 6px 12px; border-radius: 6px; font-size: 14px;
+    background: transparent; color: var(--text-dim);
+  }
+  .topbar nav a.active, .topbar nav a:hover {
+    background: var(--bg-card-hover); color: var(--text); text-decoration: none;
+  }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 12px;
+  }
+  .btn {
+    display: inline-block; padding: 8px 16px; border-radius: 6px;
+    background: var(--bg-card-hover); color: var(--text); border: 1px solid var(--border);
+    font-size: 14px; cursor: pointer; text-decoration: none;
+  }
+  .btn:hover { background: var(--border); text-decoration: none; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.success { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+  .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn.large { padding: 12px 20px; font-size: 16px; }
+  h2 { margin: 8px 0 12px; font-size: 18px; }
+  h3 { margin: 8px 0 8px; font-size: 16px; color: var(--text-dim); }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  th { color: var(--text-dim); font-weight: normal; font-size: 13px; }
+  input[type=number], input[type=text] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-size: 16px;
+  }
+  .dim { color: var(--text-dim); }
+  .small { font-size: 13px; }
+</style>
+{% block head_extra %}{% endblock %}
+</head>
+<body>
+<div class="topbar">
+  <h1>💪 健身</h1>
+  <nav>
+    <a href="/private/fitness/" class="{% if request.endpoint == 'fitness.home' %}active{% endif %}">主页</a>
+    <a href="/private/fitness/plan" class="{% if request.endpoint == 'fitness.plan_page' %}active{% endif %}">计划</a>
+    <a href="/private/fitness/history" class="{% if request.endpoint == 'fitness.history_page' %}active{% endif %}">历史</a>
+  </nav>
+</div>
+<div class="container">
+{% block content %}{% endblock %}
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>
