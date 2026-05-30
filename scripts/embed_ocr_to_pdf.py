@@ -225,10 +225,14 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
                             segs_for_text = segs
                         if segs_for_text:
                             avg_seg_w = sum(e - s for s, e in segs_for_text) / len(segs_for_text)
-                            # 字号:用 median seg width (反映真实 visual char 宽),配合 line_h 限高
+                            # 字号:让 char bbox 宽度 ≈ visual char width(填满 visual seg,
+                            # 选中 highlight 跟 visual 字符大小一致)。
+                            # 'japan' 字体 char bbox 宽 ≈ fs × 0.78 → fs = seg_w / 0.78 让 bbox = seg_w。
+                            # invisible text,纵向略超 line_h 不影响 visual,但行间通常 gap > 30% line_h
+                            # 不会跟上一行 chars 重叠到选中错乱。
                             seg_widths_sorted = sorted(e - s for s, e in segs_for_text)
                             median_seg_w = seg_widths_sorted[len(seg_widths_sorted) // 2]
-                            fs = max(4.0, min(80.0, line_h_img * 0.95 * sy, median_seg_w * sx * 1.0))
+                            fs = max(4.0, min(80.0, median_seg_w * sx / 0.78))
                             baseline_pdf = (y2_img - line_h_img * 0.10) * sy
                             for i, c in enumerate(text_no_space):
                                 if i < len(segs_for_text):
