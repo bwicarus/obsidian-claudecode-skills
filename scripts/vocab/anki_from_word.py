@@ -98,31 +98,37 @@ def _vocab_model_spec(name: str) -> dict:
         ".night_mode .example b{color:#fff}"
         ".night_mode .url a{color:#60a5fa}"
     )
+    # 背面参考区（不含 Url，Url 单独处理）
     back_ref = (
         '<div class="refbox">'
         '{{#Example}}<div class="example">{{Example}}</div>{{/Example}}'
         '{{#ExampleZh}}<div class="example-zh">🇨🇳 {{ExampleZh}}</div>{{/ExampleZh}}'
         '{{#More}}<div class="more">{{More}}</div>{{/More}}'
-        '{{#Url}}<div class="url">来源：{{Url}}</div>{{/Url}}'
         '</div>'
     )
+    # EN→ZH 正面：单词 + 音标 + 原句出处链接（看英文时也能看到是从哪学的）
     front_en = (
         '<div class="word">{{Word}}</div>'
         '{{#Phonetic}}<div class="phonetic">{{Phonetic}}</div>{{/Phonetic}}'
+        '{{#Url}}<div class="url">📖 {{Url}}</div>{{/Url}}'
     )
+    # EN→ZH 背面：FrontSide 已含 Url（顶部），背面不重复
     back_en = (
         '{{FrontSide}}<hr>'
         '{{#Translation}}<div class="zh">{{Translation}}</div>{{/Translation}}'
         '{{#Audio}}<div class="audio-line">{{Audio}}</div>{{/Audio}}'
         + back_ref
     )
+    # ZH→EN 正面：纯中文，不带英文出处（避免暴露考点）
     front_zh = '<div class="zh">{{Translation}}</div>'
+    # ZH→EN 背面：参考区末尾加 Url
     back_zh = (
         '{{FrontSide}}<hr>'
         '<div class="word">{{Word}}</div>'
         '{{#Phonetic}}<div class="phonetic">{{Phonetic}}</div>{{/Phonetic}}'
         '{{#Audio}}<div class="audio-line">{{Audio}}</div>{{/Audio}}'
         + back_ref
+        + '{{#Url}}<div class="url">📖 {{Url}}</div>{{/Url}}'
     )
     return {
         "modelName": name,
@@ -136,17 +142,23 @@ def _vocab_model_spec(name: str) -> dict:
 
 
 def ensure_model(name: str):
-    """创建 Vocab Bilingual model（如不存在）。8 字段 + 双模板。verify + retry 兜底（同 ensure_deck）。"""
-    if name in (anki_call("modelNames") or []):
-        return
+    """确保 Vocab Bilingual model 存在 + 同步最新 templates/CSS（让模板代码改动立即作用于现有卡）。
+    create 失败带 retry 兜底（同 ensure_deck）。"""
     spec = _vocab_model_spec(name)
-    anki_call("createModel", spec)
-    if name in (anki_call("modelNames") or []):
-        return
-    import time; time.sleep(0.3)
-    anki_call("createModel", spec)
     if name not in (anki_call("modelNames") or []):
-        raise RuntimeError(f"createModel failed: {name!r} not in modelNames after retry")
+        anki_call("createModel", spec)
+        if name not in (anki_call("modelNames") or []):
+            import time; time.sleep(0.3)
+            anki_call("createModel", spec)
+            if name not in (anki_call("modelNames") or []):
+                raise RuntimeError(f"createModel failed: {name!r} not in modelNames after retry")
+    # 不论新建还是已存在，都同步最新模板/CSS：改了 _vocab_model_spec 后下次制卡自动迁移所有旧卡渲染
+    try:
+        tmpl_dict = {t["Name"]: {"Front": t["Front"], "Back": t["Back"]} for t in spec["cardTemplates"]}
+        anki_call("updateModelTemplates", {"model": {"name": name, "templates": tmpl_dict}})
+        anki_call("updateModelStyling", {"model": {"name": name, "css": spec["css"]}})
+    except Exception as ex:
+        sys.stderr.write(f"updateModelTemplates/Styling warn: {ex}\n")
 
 
 def store_audio(lemma: str, audio_path: Path, suffix: str = "us") -> str:
