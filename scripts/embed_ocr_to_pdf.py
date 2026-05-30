@@ -89,6 +89,9 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
             #    (大字号标题 line_h > char_w 时,fs 取 char_w 防 ASCII bbox 越界到下个字符)
             char_w_cjk = line_w / total_w  # CJK 全宽字符的间距(weight=1.0 对应宽度)
             fs = max(4.0, min(80.0, line_h * 0.95, char_w_cjk))
+            # mokuro detector 输出 line bbox 比 visual text 起点偏左 ~ 1-2 image px,
+            # user 实测反馈"有点左偏" → 加 char_w * 5% 的右偏移修正
+            x1 += char_w_cjk * 0.05
             baseline = y2 - line_h * 0.10
             pos_acc = 0.0
             # 统一 'japan' 字体(切 'helv' 会触发 PyMuPDF reflow 插空格污染整 page text)
