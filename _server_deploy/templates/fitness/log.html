@@ -493,7 +493,103 @@ async function loadRec(exId) {
   } catch (e) { lastInfo.textContent = '推荐:网络失败'; }
 }
 
-document.querySelectorAll('.last-info').forEach(el => loadRec(el.dataset.ex));
+// 恢复今天已存的组(刷新后用)+ 推荐 prefill(优先用已存值,空着的位置填推荐)
+async function restoreToday(exId) {
+  const card = document.querySelector(`.card[data-exercise-id="${CSS.escape(exId)}"]`);
+  if (!card) return;
+  const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+  try {
+    const r = await fetch(`/api/fitness/today_sets/${encodeURIComponent(exId)}?date=${encodeURIComponent(date)}`);
+    const d = await r.json();
+    if (!d.ok || !d.sets) return;
+    d.sets.forEach(s => {
+      const row = card.querySelector(`.set-row[data-set="${s.set_no}"]`);
+      if (!row) return;
+      const wEl = row.querySelector('.set-weight');
+      const rEl = row.querySelector('.set-reps');
+      if (s.weight_kg != null) wEl.value = s.weight_kg;
+      if (s.reps != null) rEl.value = s.reps;
+      markSaved(row, s.weight_kg != null && s.reps != null);
+    });
+  } catch (e) {}
+}
+
+function markSaved(row, complete) {
+  const btn = row.querySelector('.save-set');
+  if (complete) {
+    btn.textContent = '✓ 已存';
+    btn.classList.add('success');
+  } else {
+    btn.textContent = '✓';
+    btn.classList.remove('success');
+  }
+  // input 边框给一抹绿
+  row.querySelectorAll('input').forEach(inp => {
+    inp.style.borderColor = complete ? 'var(--accent-2)' : '';
+  });
+}
+
+// ───────────── autosave (debounced 500ms) ─────────────
+const _saveTimers = {};
+async function autoSaveSet(exId, setNo) {
+  const card = document.querySelector(`.card[data-exercise-id="${CSS.escape(exId)}"]`);
+  const row = card.querySelector(`.set-row[data-set="${setNo}"]`);
+  if (!row) return;
+  const wRaw = row.querySelector('.set-weight').value;
+  const rRaw = row.querySelector('.set-reps').value;
+  const w = wRaw === '' ? null : parseFloat(wRaw);
+  const r = rRaw === '' ? null : parseInt(rRaw);
+  if ((w === null || isNaN(w)) && (r === null || isNaN(r))) return;  // 全空不存
+  const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+  try {
+    const resp = await fetch('/api/fitness/log', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        date, day_id: DAY_ID, exercise_id: exId, set_no: setNo,
+        weight_kg: (w === null || isNaN(w)) ? null : w,
+        reps:     (r === null || isNaN(r)) ? null : r,
+      }),
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      const complete = (w != null && !isNaN(w)) && (r != null && !isNaN(r));
+      markSaved(row, complete);
+    }
+  } catch (e) {}
+}
+
+function scheduleAutoSave(exId, setNo) {
+  const key = `${exId}-${setNo}`;
+  if (_saveTimers[key]) clearTimeout(_saveTimers[key]);
+  _saveTimers[key] = setTimeout(() => autoSaveSet(exId, setNo), 500);
+}
+
+document.querySelectorAll('.set-row').forEach(row => {
+  const card = row.closest('.card');
+  const exId = card.dataset.exerciseId;
+  const setNo = parseInt(row.dataset.set);
+  row.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      row.querySelectorAll('input').forEach(i => i.style.borderColor = '');
+      scheduleAutoSave(exId, setNo);
+    });
+  });
+});
+
+// 日期改了 → 重新恢复
+document.getElementById('workout-date').addEventListener('change', () => {
+  document.querySelectorAll('.set-row').forEach(row => {
+    row.querySelectorAll('input').forEach(i => i.value = '');
+    markSaved(row, false);
+  });
+  document.querySelectorAll('.last-info').forEach(el => initEx(el.dataset.ex));
+});
+
+async function initEx(exId) {
+  await restoreToday(exId);   // 先填已存的(刷新恢复 / 当天补录)
+  await loadRec(exId);        // 再填空着的位置(推荐 prefill)
+}
+document.querySelectorAll('.last-info').forEach(el => initEx(el.dataset.ex));
 
 // ───────────── 休息倒计时 ─────────────
 const REST = {};   // exId -> {endTs, totalSec, intervalId}

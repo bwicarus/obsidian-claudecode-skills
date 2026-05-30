@@ -55,6 +55,11 @@ def _db(username: str) -> sqlite3.Connection:
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_log_date ON fitness_log(date)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_log_ex ON fitness_log(exercise_id, date)")
+    # upsert 用唯一约束:同一 (date, exercise_id, set_no) 只存一行,覆盖式更新
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_log_set "
+        "ON fitness_log(date, exercise_id, set_no)"
+    )
     # 用户自定义视频列表覆盖(默认 plan.json 的 videos 不对/不够时,自己 paste 覆盖)
     db.execute("""
         CREATE TABLE IF NOT EXISTS fitness_video_override (
@@ -142,8 +147,9 @@ def api_plan():
 
 @api_bp.route("/log", methods=["POST"])
 def api_log():
-    """录入一组训练。
-    body: {date, day_id, exercise_id, set_no, weight_kg, reps, note?}
+    """录入/更新一组训练 (upsert: 同 date+ex+set_no 的覆盖)。
+    body: {date, day_id, exercise_id, set_no, weight_kg?, reps?, note?}
+    weight_kg / reps 可为 null,允许只填一半(autosave 场景)。
     """
     username = _username()
     data = request.get_json(silent=True) or {}
@@ -152,18 +158,44 @@ def api_log():
         if k not in data:
             return jsonify({"ok": False, "error": f"missing {k}"}), 400
     db = _db(username)
-    cur = db.execute(
+    db.execute(
         "INSERT INTO fitness_log (date, day_id, exercise_id, set_no, weight_kg, reps, note) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(date, exercise_id, set_no) DO UPDATE SET "
+        "  weight_kg = excluded.weight_kg, "
+        "  reps      = excluded.reps, "
+        "  note      = excluded.note, "
+        "  day_id    = excluded.day_id",
         (
             data["date"], data["day_id"], data["exercise_id"], int(data["set_no"]),
             data.get("weight_kg"), data.get("reps"), data.get("note"),
         ),
     )
     db.commit()
-    log_id = cur.lastrowid
+    row = db.execute(
+        "SELECT id FROM fitness_log WHERE date=? AND exercise_id=? AND set_no=?",
+        (data["date"], data["exercise_id"], int(data["set_no"])),
+    ).fetchone()
     db.close()
-    return jsonify({"ok": True, "id": log_id})
+    return jsonify({"ok": True, "id": row["id"] if row else None})
+
+
+@api_bp.route("/today_sets/<exercise_id>")
+def api_today_sets(exercise_id: str):
+    """返回指定日期(默认今天)该动作所有已存的组(刷新后恢复用)。
+
+    query: ?date=YYYY-MM-DD(可选,默认今天)
+    """
+    username = _username()
+    date = request.args.get("date") or time.strftime("%Y-%m-%d")
+    db = _db(username)
+    rows = db.execute(
+        "SELECT id, set_no, weight_kg, reps, note FROM fitness_log "
+        "WHERE exercise_id=? AND date=? ORDER BY set_no",
+        (exercise_id, date),
+    ).fetchall()
+    db.close()
+    return jsonify({"ok": True, "date": date, "sets": [dict(r) for r in rows]})
 
 
 @api_bp.route("/log/<int:log_id>", methods=["DELETE"])
