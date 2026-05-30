@@ -2356,7 +2356,9 @@ function _bindCharLayer(cl, pw) {
     return {x: clientX - r.left, y: clientY - r.top};
   };
 
-  // 严格 bbox 命中（落在 char 实际矩形内才开始拖选；空白处保持 null 不拦截默认滚动）
+  // 严格 bbox 命中 + 同行最近 char fallback。
+  // 日语扫描书走 visual segmentation 定位字符,char bbox 宽 ≈ 0.78 × spacing →
+  // 字符之间有 ~22% 空隙；严格命中空隙时回落"y 在行内 + x 离 char center 最近"防止点了没反应。
   const _findCharStrict = (x, y) => {
     for (let i = 0; i < pw.__charBoxes.length; i++) {
       const c = pw.__charBoxes[i];
@@ -2364,6 +2366,18 @@ function _bindCharLayer(cl, pw) {
       if (x >= c.left && x <= c.left + c.width &&
           y >= c.top  && y <= c.top  + c.height) return i;
     }
+    // fallback:y 严格在行高内,取 x 距 char center 最近的(距离阈值 < 1× char height,
+    // 避免远处空白也错命中)
+    let best = -1, bestDist = Infinity;
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      if (y < c.top || y > c.top + c.height) continue;
+      const cx = c.left + c.width / 2;
+      const d = Math.abs(x - cx);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    if (best >= 0 && bestDist <= (pw.__charBoxes[best].height || 30) * 1.0) return best;
     return -1;
   };
   const onStart = (x, y) => {
