@@ -25,15 +25,18 @@ from typing import Any
 sys.path.insert(0, "/home/bwicarus/claude/scripts")
 from ai_client import ask  # noqa: E402
 
-# Opus + xhigh effort = 深度思考。fitness coaching 需要分析趋势 +
-# 引用研究,值得用最强配置。用户明确说不在乎限额。
-CLAUDE_MODEL = "opus"
-CLAUDE_EFFORT = "xhigh"
+# 默认 Opus + max effort。用户在 fitness 设置面板可调。
+DEFAULT_MODEL = "opus"
+DEFAULT_EFFORT = "max"
 
 
-def _ask(prompt: str) -> str:
-    """走 Claude Opus + xhigh effort(深度思考)。"""
-    return ask(prompt, claude_model=CLAUDE_MODEL, claude_effort=CLAUDE_EFFORT)
+def _ask(prompt: str, model: str = "", effort: str = "") -> str:
+    """走 Claude (model/effort 从参数或默认)。"""
+    return ask(
+        prompt,
+        claude_model=model or DEFAULT_MODEL,
+        claude_effort=effort or DEFAULT_EFFORT,
+    )
 
 
 def _extract_json(text: str) -> dict:
@@ -116,33 +119,76 @@ def _format_history(sessions: list[dict], plan_exercises: list[dict]) -> str:
 
 
 # ──────────────────────── analyze_session ────────────────────────
-ANALYZE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。深度思考下面问题,
-熟练引用以下文献:
+LITERATURE_REF = """【可引用的循证训练文献库】(自然引用,不堆砌)
 
-- Schoenfeld 系列 hypertrophy(肌肥大)meta-analyses (2017-2024):
-  * rep range 5-30 在 effort 等同时增肌等效
-  * volume-response curve:周容量是肥大主驱动
-  * frequency 在 volume 等同时差别小
-- Refalo 2023 systematic review:proximity to failure(力竭距离)
-  * 孤立动作近力竭收益 > 复合动作
-  * 复合动作留 RIR(剩余次数)1-2 平衡疲劳 / 受伤风险
-- Pelland 2024 meta:RIR 0-5 范围内无显著肥大差异(volume 等同前提)
-- Maeo 2023, Sato 2024, Pedrosa 2022:lengthened-bias training
-  * 拉伸位训练长头肌肥大 +40%(overhead triceps / incline curl)
-- Baz-Valle 2022, Schoenfeld 2024:MAV (maximal adaptive volume)
-  * 12-20 sets/肌/周个体差异大,部分人 30 sets 仍 progressing
-- Lockie 2017, Rodríguez-Ridao 2020:上斜 15-30° 上胸激活最强
-- Helms 2018:deload 6-8 周一次,减 40-50% volume + intensity
-- Israetel MEV/MV/MAV/MRV framework
-- Coratella 2020:cable lateral 拉伸位有阻力 > 哑铃峰值在中段
-- Doma 2013:chin-up EMG ≈ lat pulldown 但闭链全身参与
+# 训练量 / 频率 / 容量曲线
+- Schoenfeld 2017 meta: 周容量 ≥10 sets/肌显著优于 <5(剂量-效应曲线)
+- Schoenfeld 2019: 频率在 volume 等同时差别小,2x/周略胜 1x
+- Baz-Valle 2022 systematic review: MAV(最大适应容量)12-20 sets/肌/周
+  个体差异大,部分人 30+ sets 仍进步
+- Heaselgrave 2019: junk volume(过低强度组)对增肌无贡献
+- Aube 2020: 周 20 sets 后边际收益快速降
+- Mangine 2015: 高频(5x/周)vs 低频在 volume 等同时同效
+- Schoenfeld 2024 update: 跨研究 12-22 sets/肌/周为高响应区
+- Wernbom 2007 综述: frequency + intensity + volume 三因素综合
+
+# 力竭距离 / RIR / RPE / 强度
+- Refalo 2023 systematic review: 孤立动作近力竭收益 > 复合;复合留 RIR 1-2
+- Pelland 2024 meta: RIR 0-5 范围内无显著肥大差异(volume 等同)
+- Helms 2024: autoregulation RPE 比固定 %1RM 更精准
+- Latella 2019: training to failure 的疲劳成本(神经 + 关节)
+- Hackett 2018: RPE-based autoregulation
+- Krzysztofik 2019: ≥70% 1RM 阈值激活高阈值运动单位
+- Carroll 2017: 神经适应 vs 肌肥大不同时间窗
+
+# 拉伸位 / ROM / 动作选择
+- Maeo 2023: 拉伸位训练长头肌肥大 +40%(overhead triceps)
+- Sato 2024: 斜板二头(incline curl)拉伸位 > 站立
+- Pedrosa 2022: lengthened-bias 训练在多关节同样有效
+- Pinto 2012: 完整 ROM > 半 ROM(同重量)
+- Bloomquist 2013: 深蹲深位(ATG)股四肥大 +25% vs 半蹲
+- Vargas 2021: 离心 tempo 2-4s 增肌优于快放
+- Kubo 2019: 深蹲深度对股四的影响
+- Tsaklis 2015: 脚尖背屈对腘绳激活 +10%
+- Andersen 2014: lat pulldown 宽 vs 窄握增肌等效
+
+# 动作特定 EMG / 角度
+- Lockie 2017: 上斜 15-30° 上胸激活最强(>45° 三角肌主导)
+- Rodríguez-Ridao 2020: incline 30° optimum upper chest
+- Coratella 2020: cable lateral 拉伸位有阻力 > 哑铃峰值在中段
+- Reinold 2009: face pull 后三角 + 中下斜方
+- Youdas 2010: 反握引体二头激活 +20% vs 正握
+- Doma 2013: chin-up EMG ≈ lat pulldown 但闭链全身参与
+- Marcolin 2018: EZ 杆腕关节压力 < 直杆
+
+# 休息 / 间歇
+- Schoenfeld 2016: 3 min rest 增肌 > 1 min(同 volume)
+
+# 周期化 / Deload / 长期渐进
+- Helms 2018: deload 6-8 周一次,减 40-50% volume + intensity
+- Israetel MEV/MV/MAV/MRV framework(Renaissance Periodization)
+- Helms 2019: cut/bulk phases 营养与训练协同
+- Pearson 2021: 长期可持续 progression ≤5%/周
+
+# 营养 / 恢复
+- Phillips 2014: 蛋白质 1.6-2.2 g/kg/d 增肌 optimum
+- Burd 2010: leucine threshold ~3g 触发肌肉蛋白合成
+- Walberg 1988: 睡眠 <6h 抗阻训练增肌减半
+- Murach 2018: satellite cells 恢复机制
+- Mannarino 2024: 中年男性恢复速度 / 容量耐受
+"""
+
+ANALYZE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。深度思考下面问题。
+
+{literature}
 
 任务:深度分析一次完成的训练,不是简单看数字:
 - 推断真实疲劳(reps 完成度 + 时间间隔 + RIR target 完成情况)
 - 跟历史对比识别 stagnation(同 W×R 连续 ≥3 次)、overreach(完成率<70%)
 - 跨动作识别(eg 卧推顶上但飞鸟掉了 → 三头疲劳 cap 了卧推?)
 - 给具体 RPE 估算 + 每个动作 verdict + next_action
-- key_insights / warnings 引用具体研究或经验法则
+- key_insights / warnings 引用具体研究或经验法则,提供 ≥3 条 insights
+- 别罗列文献,挑跟本次最相关的 1-3 篇精确引用
 
 【本次训练】({date} · {day_id} 日)
 {actual}
@@ -187,7 +233,7 @@ ANALYZE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博
 
 
 def analyze_session(db: sqlite3.Connection, date: str, day_id: str,
-                    plan_data: dict) -> dict:
+                    plan_data: dict, model: str = "", effort: str = "") -> dict:
     """分析一次完成的训练。返回 JSON dict(失败时 {}}。"""
     # 拉本次实际 + 计划
     rows = db.execute(
@@ -236,11 +282,12 @@ def analyze_session(db: sqlite3.Connection, date: str, day_id: str,
     history = _format_history(sessions, day["exercises"])
 
     prompt = ANALYZE_PROMPT.format(
+        literature=LITERATURE_REF,
         date=date, day_id=day_id,
         actual=actual_str, planned=planned_str, history=history,
     )
     try:
-        resp = _ask(prompt)   # Opus + xhigh
+        resp = _ask(prompt, model=model, effort=effort)
     except Exception as e:
         return {"error": f"ai_call_failed: {e}"}
     result = _extract_json(resp)
@@ -252,26 +299,20 @@ def analyze_session(db: sqlite3.Connection, date: str, day_id: str,
 
 # ──────────────────────── suggest_plan ────────────────────────
 SUGGEST_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。深度思考给用户调整
-本次 {day_id} 训练。熟练引用以下文献(自然引用,不要堆砌):
+本次 {day_id} 训练。
 
-- Schoenfeld 系列 hypertrophy meta (2017-2024):rep 5-30 等效、容量优先
-- Refalo 2023:复合 RIR 1-2 / 孤立可近力竭
-- Pelland 2024:RIR 0-5 等效(等 volume 时)
-- Maeo 2023, Sato 2024, Pedrosa 2022:拉伸位训练 +40% 长头肥大
-- Baz-Valle 2022:MAV 12-20 sets/肌/周
-- Helms 2018:deload 6-8 周
-- Israetel MEV/MV/MAV/MRV
-- Lockie 2017:上斜 15-30° 上胸激活最强
-- Coratella 2020:cable 侧平举优于哑铃(拉伸位有阻力)
-- Doma 2013:chin-up EMG ≈ lat pulldown 但闭链优
+{literature}
 
 思考要素(深度):
 - Double Progression:全 rep_range 上限 → 加重;<下限 → 减 10%;中间 → +1 rep
-- 检查 stagnation(同重连续 ≥3 次同 reps)→ 是否换 rep range / RIR / 变体
-- 平衡容量(肌群周 sets 在 MAV-MRV 区间)
+- 检查 stagnation(同重连续 ≥3 次同 reps)→ 换 rep range / RIR / 变体
+- 平衡容量(肌群周 sets 在 MAV-MRV 区间,Baz-Valle 2022)
 - 关节疲劳征兆(同侧重复力竭 / 完成率掉)→ 降量或换 lengthened bias 变体
-- 长头肌(三头长头 / 二头长头 / 腘绳长头)优先拉伸位
+- 长头肌(三头长头 / 二头长头 / 腘绳长头)优先拉伸位 (Maeo 2023)
 - 起步周(无历史)维持默认,先建基线 RPE 反馈环
+- 复合动作留 RIR 1-2,孤立动作可近力竭 (Refalo 2023)
+- 上斜推 angle 15-30° (Lockie 2017)
+- 自重动作做不到下限 → negatives / band-assisted;能 reps_high+ → 加负重
 
 【当前默认计划(动作 + 默认 prescribed)】
 {default}
@@ -314,7 +355,8 @@ SUGGEST_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博
 """
 
 
-def suggest_plan(db: sqlite3.Connection, day_id: str, plan_data: dict) -> dict:
+def suggest_plan(db: sqlite3.Connection, day_id: str, plan_data: dict,
+                 model: str = "", effort: str = "") -> dict:
     """看历史 + 上次分析,给出 day_id 的新 prescribed 建议。"""
     day = next((d for d in plan_data["days"] if d["id"] == day_id), None)
     if not day:
@@ -334,13 +376,14 @@ def suggest_plan(db: sqlite3.Connection, day_id: str, plan_data: dict) -> dict:
     latest_str = json.dumps(latest, ensure_ascii=False, indent=2) if latest else "(无)"
 
     prompt = SUGGEST_PROMPT.format(
+        literature=LITERATURE_REF,
         day_id=day_id,
         default=default_str,
         history=history,
         latest_analysis=latest_str,
     )
     try:
-        resp = _ask(prompt)   # Opus + xhigh
+        resp = _ask(prompt, model=model, effort=effort)
     except Exception as e:
         return {"error": f"ai_call_failed: {e}"}
     result = _extract_json(resp)

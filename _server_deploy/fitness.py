@@ -89,7 +89,41 @@ def _db(username: str) -> sqlite3.Connection:
             PRIMARY KEY (date, day_id)
         )
     """)
+    # 用户级 fitness 设置(AI 模型 / effort / 自动分析开关 等)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     return db
+
+
+# fitness_settings 默认值
+DEFAULT_FITNESS_SETTINGS = {
+    "ai_model":                   "opus",   # opus | sonnet | haiku
+    "ai_effort":                  "max",    # low | medium | high | xhigh | max
+    "auto_analyze_after_finish":  "1",      # 完成训练后自动调 AI 分析
+    "auto_suggest_after_analyze": "1",      # 分析后自动调 suggest 下次计划
+    "deload_check_weeks":         "6",      # 多少周提示 deload 一次
+}
+
+
+def _get_settings(db) -> dict:
+    rows = db.execute("SELECT key, value FROM fitness_settings").fetchall()
+    out = dict(DEFAULT_FITNESS_SETTINGS)
+    for r in rows:
+        out[r["key"]] = r["value"]
+    return out
+
+
+def _set_setting(db, key: str, value: str) -> None:
+    db.execute(
+        "INSERT OR REPLACE INTO fitness_settings (key, value, updated_at) "
+        "VALUES (?, ?, CURRENT_TIMESTAMP)",
+        (key, value),
+    )
 
 
 def _exercise_prescribed_with_override(db, plan, ex_id):
@@ -254,6 +288,32 @@ def api_today_sets(exercise_id: str):
 
 
 # ───────────────────────── AI 教练 ─────────────────────────
+@api_bp.route("/settings", methods=["GET"])
+def api_settings_get():
+    username = _username()
+    db = _db(username)
+    s = _get_settings(db)
+    db.close()
+    return jsonify({"ok": True, "settings": s, "defaults": DEFAULT_FITNESS_SETTINGS})
+
+
+@api_bp.route("/settings", methods=["POST"])
+def api_settings_set():
+    """body: {key1: value1, key2: value2, ...}"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    db = _db(username)
+    valid = set(DEFAULT_FITNESS_SETTINGS.keys())
+    saved = {}
+    for k, v in data.items():
+        if k in valid:
+            _set_setting(db, k, str(v))
+            saved[k] = str(v)
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "saved": saved})
+
+
 @api_bp.route("/ai/suggest_plan", methods=["POST"])
 def api_ai_suggest_plan():
     """让 AI 看历史 + 上次 analysis 给出本日所有动作的 prescribed 建议。
@@ -270,7 +330,9 @@ def api_ai_suggest_plan():
     try:
         from fitness_coach import suggest_plan
         plan = _load_plan()
-        r = suggest_plan(db, day_id, plan)
+        s = _get_settings(db)
+        r = suggest_plan(db, day_id, plan,
+                         model=s["ai_model"], effort=s["ai_effort"])
     finally:
         db.close()
     if "error" in r:
@@ -294,7 +356,9 @@ def api_ai_analyze_session():
     try:
         from fitness_coach import analyze_session
         plan = _load_plan()
-        r = analyze_session(db, date, day_id, plan)
+        s = _get_settings(db)
+        r = analyze_session(db, date, day_id, plan,
+                            model=s["ai_model"], effort=s["ai_effort"])
         if "error" not in r:
             # 持久化分析(下次 suggest_plan 用)
             db.execute(

@@ -28,6 +28,8 @@
                                        transition:width 0.4s ease-out;"></div>
     </div>
     <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+      <button id="ai-settings" class="btn" style="font-size:14px;padding:6px 12px;"
+              title="AI 教练设置(模型 / effort / 自动分析开关)">⚙</button>
       <button id="ai-suggest" class="btn" style="font-size:14px;padding:6px 14px;"
               title="让 AI 看历史和最近分析,给出本日计划调整建议(每个动作的 sets/reps/weight)">
         🤖 调整计划
@@ -35,6 +37,70 @@
       <button id="finish-workout" class="btn primary" style="font-size:14px;padding:6px 14px;">
         🏁 完成训练
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- AI 设置 modal -->
+<div id="settings-modal" style="display:none;position:fixed;inset:0;background:#000a;
+                                  z-index:1001;align-items:center;justify-content:center;
+                                  padding:16px;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
+              max-width:500px;width:100%;padding:20px;">
+    <h2 style="margin:0 0 14px;">⚙ AI 教练设置</h2>
+
+    <label style="display:block;margin-bottom:14px;">
+      <div class="small dim" style="margin-bottom:4px;">Claude 模型</div>
+      <select id="set-model" style="width:100%;background:var(--bg);color:var(--text);
+                                      border:1px solid var(--border);border-radius:4px;
+                                      padding:8px;font-size:14px;">
+        <option value="opus">Opus(最强,推荐)</option>
+        <option value="sonnet">Sonnet(中等)</option>
+        <option value="haiku">Haiku(快但浅)</option>
+      </select>
+    </label>
+
+    <label style="display:block;margin-bottom:14px;">
+      <div class="small dim" style="margin-bottom:4px;">思考深度(effort)</div>
+      <select id="set-effort" style="width:100%;background:var(--bg);color:var(--text);
+                                       border:1px solid var(--border);border-radius:4px;
+                                       padding:8px;font-size:14px;">
+        <option value="low">Low(秒回,粗略)</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="xhigh">XHigh(深度)</option>
+        <option value="max">Max(最深,3-5 分钟)</option>
+      </select>
+    </label>
+
+    <label style="display:flex;gap:10px;align-items:start;margin-bottom:12px;cursor:pointer;">
+      <input type="checkbox" id="set-auto-analyze" style="margin-top:3px;">
+      <div>
+        <div>🤖 完成训练后自动 AI 分析</div>
+        <div class="small dim">点 🏁 完成训练 后自动调用 AI 分析,无需再点按钮</div>
+      </div>
+    </label>
+
+    <label style="display:flex;gap:10px;align-items:start;margin-bottom:14px;cursor:pointer;">
+      <input type="checkbox" id="set-auto-suggest" style="margin-top:3px;">
+      <div>
+        <div>🤖 分析后自动调用调整下次计划</div>
+        <div class="small dim">分析跑完后串行调 suggest_plan,提示明日推荐 ready</div>
+      </div>
+    </label>
+
+    <label style="display:block;margin-bottom:14px;">
+      <div class="small dim" style="margin-bottom:4px;">Deload 提示周数</div>
+      <input type="number" id="set-deload-weeks" min="3" max="12" step="1"
+             style="width:100px;background:var(--bg);color:var(--text);
+                    border:1px solid var(--border);border-radius:4px;
+                    padding:6px 8px;font-size:14px;">
+      <span class="small dim">周</span>
+    </label>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn" id="settings-close">取消</button>
+      <button class="btn primary" id="settings-save">保存</button>
     </div>
   </div>
 </div>
@@ -839,8 +905,16 @@ function showFinishSummary() {
   modal.style.display = 'flex';
 }
 
-document.getElementById('finish-workout').addEventListener('click', () => {
+document.getElementById('finish-workout').addEventListener('click', async () => {
   showFinishSummary();
+  // 如果设置开了自动分析,自动触发(无需用户再点按钮)
+  await loadSettings();
+  if (_settings && _settings.auto_analyze_after_finish === '1') {
+    const btn = document.getElementById('ai-analyze-btn');
+    if (btn && !btn.disabled) {
+      setTimeout(() => btn.click(), 600);   // 给 modal 渲染一会儿
+    }
+  }
 });
 document.getElementById('finish-close').addEventListener('click', () => {
   document.getElementById('finish-modal').style.display = 'none';
@@ -969,6 +1043,57 @@ async function rejectSuggestion(exId) {
   } catch (e) {}
 }
 
+// ───────────── 设置 modal ─────────────
+let _settings = null;
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/fitness/settings');
+    const d = await r.json();
+    if (d.ok) _settings = d.settings;
+  } catch (e) {}
+  return _settings || {};
+}
+
+async function openSettings() {
+  const s = await loadSettings();
+  document.getElementById('set-model').value = s.ai_model || 'opus';
+  document.getElementById('set-effort').value = s.ai_effort || 'max';
+  document.getElementById('set-auto-analyze').checked = s.auto_analyze_after_finish === '1';
+  document.getElementById('set-auto-suggest').checked = s.auto_suggest_after_analyze === '1';
+  document.getElementById('set-deload-weeks').value = s.deload_check_weeks || '6';
+  document.getElementById('settings-modal').style.display = 'flex';
+}
+
+document.getElementById('ai-settings').addEventListener('click', openSettings);
+document.getElementById('settings-close').addEventListener('click',
+  () => document.getElementById('settings-modal').style.display = 'none');
+document.getElementById('settings-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'settings-modal') e.target.style.display = 'none';
+});
+document.getElementById('settings-save').addEventListener('click', async () => {
+  const body = {
+    ai_model: document.getElementById('set-model').value,
+    ai_effort: document.getElementById('set-effort').value,
+    auto_analyze_after_finish: document.getElementById('set-auto-analyze').checked ? '1' : '0',
+    auto_suggest_after_analyze: document.getElementById('set-auto-suggest').checked ? '1' : '0',
+    deload_check_weeks: document.getElementById('set-deload-weeks').value || '6',
+  };
+  try {
+    const r = await fetch('/api/fitness/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      _settings = { ..._settings, ...body };
+      document.getElementById('settings-modal').style.display = 'none';
+    } else {
+      alert('保存失败');
+    }
+  } catch (e) { alert('网络失败'); }
+});
+
 document.getElementById('ai-suggest').addEventListener('click', openAiSuggest);
 document.getElementById('ai-close').addEventListener('click',
   () => document.getElementById('ai-modal').style.display = 'none');
@@ -1042,6 +1167,30 @@ document.getElementById('ai-analyze-btn').addEventListener('click', async () => 
     out.innerHTML = html;
     out.style.display = 'block';
     btn.style.display = 'none';
+    // 设置开了自动 suggest → 串行调用
+    if (_settings && _settings.auto_suggest_after_analyze === '1') {
+      const auto = document.createElement('div');
+      auto.style.cssText = 'margin-top:14px;padding:10px;background:#0f1d2e;border-radius:6px;font-size:13px;';
+      auto.innerHTML = '🤖 自动跑下次计划 suggest…';
+      out.appendChild(auto);
+      try {
+        const sr = await fetch('/api/fitness/ai/suggest_plan', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ day_id: DAY_ID }),
+        });
+        const sd = await sr.json();
+        if (sd.ok) {
+          auto.innerHTML = `✓ 下次 ${DAY_ID} 计划已就绪
+            (${(sd.exercises||[]).length} 个动作)
+            <br><span class="small dim">${sd.overall_reasoning || ''}</span>
+            <br><a href="/private/fitness/log/${DAY_ID}" style="color:var(--accent);">下次进 log 页点 🤖 调整计划 查看 →</a>`;
+        } else {
+          auto.innerHTML = `<span style="color:var(--warn);">⚠ 自动 suggest 失败,可下次手动:</span> ${sd.error || '?'}`;
+        }
+      } catch (e) {
+        auto.innerHTML = '<span style="color:var(--warn);">⚠ 自动 suggest 网络失败</span>';
+      }
+    }
   } catch (e) {
     out.innerHTML = '<span style="color:var(--danger);">✗ 网络失败</span>';
     out.style.display = 'block';
