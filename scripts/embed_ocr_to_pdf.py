@@ -72,6 +72,54 @@ def _segment_line_chars(patch_gray: "np.ndarray", line_h: int) -> list[tuple[int
     return merged
 
 
+def _segment_visual_chars(patch_gray: "np.ndarray", line_h: int) -> list[tuple[int, int]]:
+    """精细 char segmentation:列投影 → 合并字内笔画 → 按 median char_w 等分宽 segs。
+    返回 list of (x0, x1) per visual char,可与 OCR text 一一对应做精确嵌入。"""
+    binary = patch_gray < 100
+    col_sum = binary.sum(axis=0)
+    runs = []
+    in_run = False
+    start = 0
+    for x in range(len(col_sum)):
+        if col_sum[x] > 0:
+            if not in_run:
+                start = x
+                in_run = True
+        else:
+            if in_run:
+                if x - start >= 2:
+                    runs.append((start, x))
+                in_run = False
+    if in_run:
+        runs.append((start, len(col_sum)))
+    if not runs:
+        return []
+    # 合并字内笔画散开(gap < 8% line_h,比之前 15% 更紧,防止把相邻 chars 当 1 个 merge)
+    merged: list[tuple[int, int]] = []
+    for s, e in runs:
+        if merged and s - merged[-1][1] < line_h * 0.08:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    # 估 median char_w (median 排除 outlier: bullet width 小 + long-dash 段长)
+    widths = sorted(e - s for s, e in merged)
+    median_w = widths[len(widths) // 2] if widths else int(line_h * 0.85)
+    if median_w < 5:
+        median_w = max(int(line_h * 0.6), 10)
+    # 等分宽 segs(width > 1.4 × median 视为 N 个 chars merged)
+    normalized: list[tuple[int, int]] = []
+    for s, e in merged:
+        w = e - s
+        if w > median_w * 1.4:
+            n_sub = max(2, round(w / median_w))
+            sub_w = w / n_sub
+            for i in range(n_sub):
+                normalized.append((int(s + i * sub_w), int(s + (i + 1) * sub_w)))
+        else:
+            normalized.append((s, e))
+    return normalized
+
+
 def _seg_is_bullet(patch_gray: "np.ndarray", seg: tuple[int, int], line_h: int) -> bool:
     """判断 segmentation 出来的某 seg 是不是 bullet (实心圆/方块)还是普通文字。
     bullet: blob 高度 < 70% line_h, 宽高比 0.6-1.7(近正方形)。
@@ -143,11 +191,13 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
             ys = [pt[1] for pt in coords]
             x1_img = min(xs); x2_img = max(xs)
             y1_img = min(ys); y2_img = max(ys)
-            # 用 visual char segmentation 判第一段是不是 bullet:
-            # - mokuro 漏识/误识 bullet → visual seg[0] 是 bullet 但 OCR text 起不是 strong bullet
-            #   → offset 1 char_w_cjk(weight-based 位置计算不变,只挪整行起点)
-            # - 不再用 segments 做精确 char-level 定位(weight-based 跟 segs merge 状态不一致
-            #   会 over-correct;让位置算法保持简单稳定)
+            # ── seg-based per-char positioning(根本解,精准定位每字)──
+            # 1) 列投影 + 字内笔画合并 + 宽 segs 等分 → 拿 visual N 个 char (x0, x1) bbox
+            # 2) 第一段是 bullet 且 OCR text 起非 strong bullet → 跳 visual 第一段(mokuro 漏识)
+            # 3) 把 NFKC + space 后的 text 非空格字符按顺序映射到 visual segs
+            # 4) 超出 visual segs 的尾部 chars 用 avg seg width fallback(罕见,长 dash 区)
+            #
+            # 成功时 continue 跳过下面 weight-based 路径。失败(无 image / 无 segs)走 fallback。
             if image is not None:
                 py0 = max(0, int(y1_img)); py1 = min(image.shape[0], int(y2_img))
                 px0 = max(0, int(x1_img)); px1 = min(image.shape[1], int(x2_img))
@@ -155,14 +205,40 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
                     patch = image[py0:py1, px0:px1]
                     if patch.ndim == 3:
                         patch = patch.mean(axis=2)
-                    segs = _segment_line_chars(patch, py1 - py0)
-                    if segs:
+                    line_h_img = py1 - py0
+                    segs = _segment_visual_chars(patch, line_h_img)
+                    text_no_space = [c for c in text if not c.isspace()]
+                    if segs and text_no_space:
                         text_first = text[0] if text else ""
                         first_text_is_strong = _is_cjk_punct_or_bullet(text_first)
-                        first_seg_is_bullet = _seg_is_bullet(patch, segs[0], py1 - py0)
+                        first_seg_is_bullet = _seg_is_bullet(patch, segs[0], line_h_img)
                         if first_seg_is_bullet and not first_text_is_strong:
-                            char_w_cjk_img = (x2_img - x1_img) / max(1, total_w)
-                            x1_img += char_w_cjk_img
+                            segs_for_text = segs[1:]
+                        else:
+                            segs_for_text = segs
+                        if segs_for_text:
+                            avg_seg_w = sum(e - s for s, e in segs_for_text) / len(segs_for_text)
+                            # 字号:用 median seg width (反映真实 visual char 宽),配合 line_h 限高
+                            seg_widths_sorted = sorted(e - s for s, e in segs_for_text)
+                            median_seg_w = seg_widths_sorted[len(seg_widths_sorted) // 2]
+                            fs = max(4.0, min(80.0, line_h_img * 0.95 * sy, median_seg_w * sx * 1.0))
+                            baseline_pdf = (y2_img - line_h_img * 0.10) * sy
+                            for i, c in enumerate(text_no_space):
+                                if i < len(segs_for_text):
+                                    seg = segs_for_text[i]
+                                    x_pdf = (px0 + seg[0]) * sx
+                                else:
+                                    last = segs_for_text[-1]
+                                    extra = i - len(segs_for_text) + 1
+                                    x_pdf = (px0 + last[1] + (extra - 1) * avg_seg_w) * sx
+                                page.insert_text(
+                                    fitz.Point(x_pdf, baseline_pdf), c,
+                                    fontname="japan", fontsize=fs,
+                                    color=(0, 0, 0), fill=(0, 0, 0),
+                                    render_mode=0, fill_opacity=0, stroke_opacity=0,
+                                )
+                                n_chars += 1
+                            continue   # 跳过 weight-based fallback
             x1 = x1_img * sx
             y1 = y1_img * sy
             x2 = x2_img * sx
