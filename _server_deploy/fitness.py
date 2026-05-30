@@ -201,6 +201,144 @@ def api_last(exercise_id: str):
     })
 
 
+# ───────────────────────── recommendation ─────────────────────────
+def _round_step(weight: float, step: float) -> float:
+    """按 weight_step_kg 取整(避免 1.234 kg 这种)。"""
+    if step <= 0:
+        return round(weight, 1)
+    n = round(weight / step)
+    return round(n * step, 2)
+
+
+def _exercise_spec(plan: dict, exercise_id: str) -> dict | None:
+    for d in plan.get("days", []):
+        for ex in d.get("exercises", []):
+            if ex["id"] == exercise_id:
+                return ex
+    return None
+
+
+def _compute_recommendation(spec: dict, last_sets: list[dict]) -> dict:
+    """Double Progression 算法。
+
+    输入:
+      spec: plan.json 里该动作的字典(含 prescribed 字段)
+      last_sets: 上次该动作的所有组,e.g. [{set_no, weight_kg, reps}, ...]
+    输出 dict:
+      {weight_kg, target_reps, target_sets, rir_target, rest_seconds, reason, source}
+    """
+    p = spec.get("prescribed") or {}
+    rep_low, rep_high = (p.get("rep_range") or [8, 12])
+    target_sets = p.get("sets") or 3
+    rir = p.get("rir_target") or 2
+    rest = p.get("rest_seconds") or 120
+    start_w = p.get("start_weight_kg") or 0
+    step = p.get("weight_step_kg") or 1.0
+
+    base = {
+        "target_sets": target_sets,
+        "rir_target": rir,
+        "rest_seconds": rest,
+    }
+
+    if not last_sets:
+        return {
+            **base,
+            "weight_kg": start_w,
+            "target_reps": rep_low,
+            "reason": f"首次,从起步重量 {start_w} kg × 下限 {rep_low} reps 开始",
+            "source": "initial",
+        }
+
+    weights = [s["weight_kg"] for s in last_sets if s.get("weight_kg") is not None]
+    reps_list = [s["reps"] for s in last_sets if s.get("reps") is not None]
+    if not weights or not reps_list:
+        return {
+            **base,
+            "weight_kg": start_w,
+            "target_reps": rep_low,
+            "reason": "上次数据不全,回到起步",
+            "source": "fallback",
+        }
+
+    # 上次主重量:最常出现的 weight(单组热身放轻不影响推荐)
+    last_w = max(set(weights), key=weights.count)
+    # 该重量下的所有 reps
+    reps_at_w = [s["reps"] for s in last_sets
+                 if s.get("weight_kg") == last_w and s.get("reps") is not None]
+    min_reps = min(reps_at_w) if reps_at_w else min(reps_list)
+    max_reps = max(reps_at_w) if reps_at_w else max(reps_list)
+
+    # 所有组到上限 → 加重
+    if min_reps >= rep_high:
+        new_w = _round_step(last_w + step, step)
+        return {
+            **base,
+            "weight_kg": new_w,
+            "target_reps": rep_low,
+            "reason": f"上次 {last_w} kg 全部 ≥{rep_high} reps → 加 {step} kg,目标回 {rep_low} reps",
+            "source": "progress",
+        }
+    # 任一组没到下限 → 减 10%
+    if min_reps < rep_low:
+        new_w = _round_step(last_w * 0.9, step)
+        if new_w >= last_w:   # step 较大时避免不变
+            new_w = _round_step(last_w - step, step)
+        return {
+            **base,
+            "weight_kg": max(new_w, 0),
+            "target_reps": rep_low,
+            "reason": f"上次 {last_w} kg 有组只做了 {min_reps} reps(<{rep_low})→ 减约 10% 巩固姿势",
+            "source": "deload",
+        }
+    # 区间内 → 同重量,目标 +1 rep
+    target = min(min_reps + 1, rep_high)
+    return {
+        **base,
+        "weight_kg": last_w,
+        "target_reps": target,
+        "reason": f"上次 {last_w} kg × {min_reps}-{max_reps} reps,区间内 → 同重量,目标 {target} reps",
+        "source": "rep_progress",
+    }
+
+
+@api_bp.route("/recommend/<exercise_id>")
+def api_recommend(exercise_id: str):
+    """基于历史 + plan.prescribed 给出本次推荐。"""
+    username = _username()
+    plan = _load_plan()
+    spec = _exercise_spec(plan, exercise_id)
+    if not spec:
+        return jsonify({"ok": False, "error": "unknown exercise_id"}), 404
+    db = _db(username)
+    last_row = db.execute(
+        "SELECT date FROM fitness_log WHERE exercise_id = ? "
+        "ORDER BY date DESC LIMIT 1", (exercise_id,)
+    ).fetchone()
+    last_sets: list[dict] = []
+    last_date = None
+    if last_row:
+        last_date = last_row["date"]
+        rows = db.execute(
+            "SELECT set_no, weight_kg, reps FROM fitness_log "
+            "WHERE exercise_id = ? AND date = ? ORDER BY set_no",
+            (exercise_id, last_date),
+        ).fetchall()
+        last_sets = [dict(r) for r in rows]
+    db.close()
+
+    rec = _compute_recommendation(spec, last_sets)
+    return jsonify({
+        "ok": True,
+        "exercise_id": exercise_id,
+        "exercise_name": spec.get("name"),
+        "evidence_note": spec.get("evidence_note", ""),
+        "last_date": last_date,
+        "last_sets": last_sets,
+        "recommendation": rec,
+    })
+
+
 @api_bp.route("/history")
 def api_history():
     """所有训练历史(给图表 / 列表用)。

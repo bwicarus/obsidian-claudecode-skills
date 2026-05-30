@@ -4,7 +4,7 @@
 
 <div class="card">
   <h2>{{ day.name }} <span class="dim small">· {{ day.focus }}</span></h2>
-  <p class="small dim">每组录完点 ✓ 自动跳下一组。视频区可切换 / 添加 / 删除推荐(默认 Jeff Nippard)。</p>
+  <p class="small dim">每组录完点 ✓ 自动跳下一组。蓝色 badge 是基于上次成绩 + Double Progression 算出的本次推荐。</p>
   <div class="small dim">
     日期:<input type="date" id="workout-date"
           style="background:var(--bg);color:var(--text);border:1px solid var(--border);
@@ -19,8 +19,29 @@
       <h3 style="color:var(--text);margin:0;">{{ ex.name }}
         <span class="dim small">· {{ ex.sets }}</span>
       </h3>
-      <div class="small dim">起点参考:{{ ex.start_weight_hint }}</div>
-      <div class="small dim last-info" data-ex="{{ ex.id }}">上次:加载中…</div>
+      {% if ex.prescribed %}
+      <div class="small dim" style="margin-top:2px;">
+        RIR {{ ex.prescribed.rir_target }} · 间歇 {{ ex.prescribed.rest_seconds }}s · 起步 {{ ex.prescribed.start_weight_kg }} kg
+      </div>
+      {% endif %}
+      <!-- 推荐 badge,JS 填充 -->
+      <div class="rec-badge" data-ex="{{ ex.id }}" style="margin-top:6px;display:none;">
+        <span style="display:inline-block;background:#1f3a5f;color:#7dd3fc;
+                      border:1px solid #2d5a8a;border-radius:6px;
+                      padding:4px 8px;font-size:13px;font-weight:600;">
+          📊 推荐 <span class="rec-w">?</span> kg × <span class="rec-r">?</span> reps × <span class="rec-s">?</span> 组
+        </span>
+        <button class="btn small rec-why" type="button" style="margin-left:6px;padding:2px 8px;font-size:12px;">为什么</button>
+      </div>
+      <div class="small dim last-info" data-ex="{{ ex.id }}">加载中…</div>
+      {% if ex.evidence_note %}
+      <details style="margin-top:4px;">
+        <summary class="small dim" style="cursor:pointer;">📚 证据 ▾</summary>
+        <div class="small dim" style="margin-top:4px;padding-left:8px;border-left:2px solid var(--border);">
+          {{ ex.evidence_note }}
+        </div>
+      </details>
+      {% endif %}
     </div>
     <button class="btn small video-toggle" data-ex="{{ ex.id }}">🎬 教学</button>
   </div>
@@ -241,30 +262,56 @@ document.querySelectorAll('.video-wrap').forEach(wrap => {
   });
 });
 
-// ───────────── 训练记录 ─────────────
-async function loadLast(exId, el) {
+// ───────────── 训练记录 + 推荐 ─────────────
+// state: per-exId 缓存推荐结果(为什么气泡用)
+const REC = {};
+
+async function loadRec(exId) {
+  const card = document.querySelector(`.card[data-exercise-id="${CSS.escape(exId)}"]`);
+  if (!card) return;
+  const badge = card.querySelector('.rec-badge');
+  const lastInfo = card.querySelector('.last-info');
   try {
-    const r = await fetch(`/api/fitness/last/${encodeURIComponent(exId)}`);
+    const r = await fetch(`/api/fitness/recommend/${encodeURIComponent(exId)}`);
     const d = await r.json();
-    if (!d.ok || !d.sets || d.sets.length === 0) {
-      el.textContent = '上次:无记录';
-      return;
+    if (!d.ok) { lastInfo.textContent = '推荐:读取失败'; return; }
+    REC[exId] = d;
+    const rec = d.recommendation;
+    // 填 badge
+    badge.querySelector('.rec-w').textContent = rec.weight_kg;
+    badge.querySelector('.rec-r').textContent = rec.target_reps;
+    badge.querySelector('.rec-s').textContent = rec.target_sets;
+    badge.style.display = 'block';
+    // 上次信息
+    if (d.last_date && d.last_sets.length > 0) {
+      const sum = d.last_sets.map(s => `${s.weight_kg ?? '?'}kg×${s.reps ?? '?'}`).join(' / ');
+      lastInfo.textContent = `上次(${d.last_date}): ${sum}`;
+    } else {
+      lastInfo.textContent = '上次:无记录';
     }
-    const summary = d.sets.map(s =>
-      `${s.weight_kg ?? '?'}kg×${s.reps ?? '?'}`).join(' / ');
-    el.textContent = `上次(${d.date}): ${summary}`;
-    const card = el.closest('.card');
+    // prefill 第 1 组(推荐重量 + 推荐 reps,只在空值时填)
     const firstRow = card.querySelector('.set-row[data-set="1"]');
-    if (firstRow && d.sets[0]) {
+    if (firstRow) {
       const wEl = firstRow.querySelector('.set-weight');
       const rEl = firstRow.querySelector('.set-reps');
-      if (!wEl.value) wEl.value = d.sets[0].weight_kg ?? '';
-      if (!rEl.value) rEl.value = d.sets[0].reps ?? '';
+      if (!wEl.value && rec.weight_kg != null) wEl.value = rec.weight_kg;
+      if (!rEl.value && rec.target_reps != null) rEl.value = rec.target_reps;
     }
-  } catch (e) { el.textContent = '上次:读取失败'; }
+  } catch (e) { lastInfo.textContent = '推荐:网络失败'; }
 }
-document.querySelectorAll('.last-info').forEach(el =>
-  loadLast(el.dataset.ex, el));
+
+document.querySelectorAll('.last-info').forEach(el => loadRec(el.dataset.ex));
+
+// 「为什么」气泡
+document.querySelectorAll('.rec-why').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const badge = btn.closest('.rec-badge');
+    const exId = badge.dataset.ex;
+    const d = REC[exId];
+    if (!d) return;
+    alert(d.recommendation.reason + (d.evidence_note ? `\n\n📚 ${d.evidence_note}` : ''));
+  });
+});
 
 async function saveSet(btn) {
   const exId = btn.dataset.ex;
