@@ -34,8 +34,10 @@ import numpy as np
 
 
 def _is_cjk_punct_or_bullet(c: str) -> bool:
-    """字符是否为常见的行首装饰符(防止 OCR text 已含装饰时还误加 offset)。"""
-    return c in "●◆■▲▶『「【〔《［・★☆※" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
+    """字符是否为强装饰符(嵌入这些字符已占视觉 bullet 位置,不需要额外 offset)。
+    注意:`・`(U+30FB 中点)不在此列 —— mokuro 经常把视觉 `●` 误识别为 `・`,
+    需要 detector 二次判断;真 `・` 本身比 `●` 小很多,detector 会判 False。"""
+    return c in "●◆■▲▶『「【〔《［★☆※" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
 
 
 def _detect_left_bullet(
