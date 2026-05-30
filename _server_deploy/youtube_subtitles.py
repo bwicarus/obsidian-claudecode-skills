@@ -46,6 +46,17 @@ def _db() -> sqlite3.Connection:
             PRIMARY KEY (video_id, target_lang)
         )
     """)
+    # migrate: add source column + change PK to (video_id, target_lang, source)
+    cols = [r[1] for r in db.execute("PRAGMA table_info(youtube_subtitles)")]
+    if "source" not in cols:
+        db.execute(
+            "ALTER TABLE youtube_subtitles ADD COLUMN source TEXT NOT NULL DEFAULT 'auto'"
+        )
+    # 唯一索引保证 (video_id, lang, source) 唯一
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_subtitle "
+        "ON youtube_subtitles(video_id, target_lang, source)"
+    )
     return db
 
 
@@ -181,52 +192,74 @@ def _translate_all(segments: list[dict]) -> list[dict]:
     return segments
 
 
+def _fetch_stt(video_id: str) -> tuple[list[dict], str]:
+    """走 Cloud Speech-to-Text(慢 + 烧赠金,但 YT auto-caption 质量太差时用)。
+
+    返回 (segments, source_lang='en')。失败抛异常。
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    from youtube_speech import transcribe_youtube
+    segs = transcribe_youtube(video_id, language="en-US")
+    return segs, "en"
+
+
 def get_or_translate(video_id: str, target_lang: str = "zh",
-                     force: bool = False) -> dict:
+                     source: str = "auto", force: bool = False) -> dict:
     """同步:cache hit 立即返回;cache miss 拉 + 翻译 + 写 cache。
 
-    返回:{status: "ready"|"error", segments?: [...], error?: str, from_cache?: bool}
+    source:
+      "auto" — YouTube 自带 caption(快,免费,质量一般)
+      "stt"  — Cloud Speech-to-Text(慢,烧赠金,质量高,完整句子+标点)
+
+    返回:{status: "ready"|"error", segments?: [...], error?: str, from_cache?: bool, source: str}
     """
+    if source not in ("auto", "stt"):
+        return {"status": "error", "error": f"unknown source {source!r}"}
+    cache_key = f"{video_id}:{source}"
     if not force:
         db = _db()
         row = db.execute(
             "SELECT segments_json FROM youtube_subtitles "
-            "WHERE video_id=? AND target_lang=?",
-            (video_id, target_lang),
+            "WHERE video_id=? AND target_lang=? AND source=?",
+            (video_id, target_lang, source),
         ).fetchone()
         db.close()
         if row:
             return {
                 "status": "ready",
                 "from_cache": True,
+                "source": source,
                 "segments": json.loads(row[0]),
             }
-    # 并发锁:同一视频同时多请求,后到的等已发起的完成 → 走 cache
     with _LOCK:
-        ev = _INFLIGHT.get(video_id)
+        ev = _INFLIGHT.get(cache_key)
         if ev is not None:
             wait_ev = ev
         else:
             wait_ev = None
-            _INFLIGHT[video_id] = threading.Event()
+            _INFLIGHT[cache_key] = threading.Event()
     if wait_ev is not None:
-        wait_ev.wait(timeout=120)
-        return get_or_translate(video_id, target_lang, force=False)
+        wait_ev.wait(timeout=600)
+        return get_or_translate(video_id, target_lang, source, force=False)
     try:
-        segs, src = _fetch_english(video_id)
+        if source == "stt":
+            segs, src = _fetch_stt(video_id)
+        else:
+            segs, src = _fetch_english(video_id)
         segs = _translate_all(segs)
         db = _db()
         db.execute(
             "INSERT OR REPLACE INTO youtube_subtitles "
-            "(video_id, target_lang, segments_json, source_lang, translated_at) "
-            "VALUES (?, ?, ?, ?, datetime('now'))",
-            (video_id, target_lang, json.dumps(segs, ensure_ascii=False), src),
+            "(video_id, target_lang, source, segments_json, source_lang, translated_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            (video_id, target_lang, source, json.dumps(segs, ensure_ascii=False), src),
         )
         db.commit()
         db.close()
         return {
             "status": "ready",
             "from_cache": False,
+            "source": source,
             "segments": segs,
             "source_lang": src,
         }
@@ -234,16 +267,16 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
     finally:
         with _LOCK:
-            ev = _INFLIGHT.pop(video_id, None)
+            ev = _INFLIGHT.pop(cache_key, None)
         if ev is not None:
             ev.set()
 
 
-def has_cached(video_id: str, target_lang: str = "zh") -> bool:
+def has_cached(video_id: str, target_lang: str = "zh", source: str = "auto") -> bool:
     db = _db()
     row = db.execute(
-        "SELECT 1 FROM youtube_subtitles WHERE video_id=? AND target_lang=?",
-        (video_id, target_lang),
+        "SELECT 1 FROM youtube_subtitles WHERE video_id=? AND target_lang=? AND source=?",
+        (video_id, target_lang, source),
     ).fetchone()
     db.close()
     return row is not None

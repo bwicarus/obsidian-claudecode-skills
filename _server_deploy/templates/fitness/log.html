@@ -127,7 +127,8 @@
       <span class="v-title dim small"
             style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
                    white-space:nowrap;padding:0 4px;"></span>
-      <button class="btn small v-cc" title="中文字幕(首次 ~10-30s,之后秒出)">🇨🇳</button>
+      <button class="btn small v-cc" title="中文字幕(YT auto-caption,首次 ~5s,之后秒出)">🇨🇳</button>
+      <button class="btn small v-cc-hq" title="高质量字幕(Cloud Speech-to-Text 重新转录,首次 ~30-60s,之后秒出)">🎯HQ</button>
       <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
       <button class="btn small v-del" title="从列表删除该视频">🗑</button>
       <button class="btn small v-save" title="保存当前列表为我的">💾</button>
@@ -309,10 +310,11 @@ function startSubLoop(exId) {
   }, 200);
 }
 
-async function toggleSubtitle(exId) {
+async function toggleSubtitle(exId, source = 'auto') {
   const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
   const subBox = wrap.querySelector('.v-subtitle');
   const ccBtn = wrap.querySelector('.v-cc');
+  const ccHqBtn = wrap.querySelector('.v-cc-hq');
   const player = PLAYERS[exId];
   if (!player || !player.getVideoData) {
     alert('视频还没就绪,等 1 秒再点'); return;
@@ -321,26 +323,31 @@ async function toggleSubtitle(exId) {
   if (!vidId) return;
 
   let sub = SUBS[exId];
-  // 视频换了 → 字幕失效
-  if (sub && sub.videoId !== vidId) {
+  // 视频换了 或 source 换了 → 重新拉
+  if (sub && (sub.videoId !== vidId || sub.source !== source)) {
     stopSubLoop(exId);
     delete SUBS[exId];
     sub = null;
   }
-  // 关
+  // 关(同 source 再点就是 toggle off)
   if (sub && sub.enabled) {
     sub.enabled = false;
     subBox.style.display = 'none';
     stopSubLoop(exId);
     ccBtn.classList.remove('success');
+    ccHqBtn.classList.remove('success');
     return;
   }
   // 开
   if (!sub) {
     subBox.style.display = 'block';
-    wrap.querySelector('.sub-zh').textContent = '⏳ 加载字幕(首次需翻译,~10-30s)…';
+    const hint = source === 'stt'
+      ? '⏳ 高质量转录中(yt-dlp 下载 + ffmpeg + Cloud STT,~30-60s)…'
+      : '⏳ 加载字幕(YT auto-caption + 翻译,~5s)…';
+    wrap.querySelector('.sub-zh').textContent = hint;
+    wrap.querySelector('.sub-en').textContent = '';
     try {
-      const r = await fetch(`/api/fitness/subtitles/${encodeURIComponent(vidId)}`);
+      const r = await fetch(`/api/fitness/subtitles/${encodeURIComponent(vidId)}?source=${source}`);
       const d = await r.json();
       if (!d.ok || !d.segments) {
         wrap.querySelector('.sub-zh').textContent = '✗ 字幕加载失败: ' + (d.error || '?');
@@ -348,14 +355,18 @@ async function toggleSubtitle(exId) {
       }
       sub = SUBS[exId] = {
         videoId: vidId,
+        source,
         segments: d.segments,
         lastIdx: -2,
         enabled: false,
         timer: null,
       };
       if (d.from_cache) {
-        wrap.querySelector('.sub-en').textContent = '(已缓存,秒出)';
+        wrap.querySelector('.sub-en').textContent = `(已缓存 · ${source.toUpperCase()})`;
         setTimeout(() => { wrap.querySelector('.sub-en').textContent = ''; }, 1500);
+      } else {
+        wrap.querySelector('.sub-en').textContent = `(新生成 · ${source.toUpperCase()},下次秒出)`;
+        setTimeout(() => { wrap.querySelector('.sub-en').textContent = ''; }, 2000);
       }
     } catch (e) {
       wrap.querySelector('.sub-zh').textContent = '✗ 网络失败';
@@ -365,7 +376,13 @@ async function toggleSubtitle(exId) {
   sub.enabled = true;
   sub.lastIdx = -2;
   subBox.style.display = 'block';
-  ccBtn.classList.add('success');
+  if (source === 'stt') {
+    ccHqBtn.classList.add('success');
+    ccBtn.classList.remove('success');
+  } else {
+    ccBtn.classList.add('success');
+    ccHqBtn.classList.remove('success');
+  }
   startSubLoop(exId);
 }
 
@@ -497,7 +514,8 @@ document.querySelectorAll('.video-toggle').forEach(btn => {
 // 委托:每个 wrap 内的控制按钮
 document.querySelectorAll('.video-wrap').forEach(wrap => {
   const exId = wrap.dataset.ex;
-  wrap.querySelector('.v-cc').addEventListener('click', () => toggleSubtitle(exId));
+  wrap.querySelector('.v-cc').addEventListener('click', () => toggleSubtitle(exId, 'auto'));
+  wrap.querySelector('.v-cc-hq').addEventListener('click', () => toggleSubtitle(exId, 'stt'));
   wrap.querySelector('.v-prev').addEventListener('click', () => {
     if (!VS[exId]) return;
     VS[exId].idx--;

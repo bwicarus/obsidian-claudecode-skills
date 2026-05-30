@@ -522,17 +522,21 @@ def api_videos_reset(exercise_id: str):
     return jsonify({"ok": True})
 
 
-# ───────────────────────── YouTube 字幕 (Claude CLI 翻译) ─────────────────────
+# ───────────────────────── YouTube 字幕 (Gemini Flash 翻译) ─────────────────────
 @api_bp.route("/subtitles/<video_id>")
 def api_subtitles(video_id: str):
     """拉 + 翻 YouTube 字幕(全局缓存,首次 ~5-30 秒,之后秒出)。
 
-    query: ?force=1 强制重新翻译(忽略 cache)
+    query:
+      ?source=auto  YT 自带 caption(默认,快+免费)
+      ?source=stt   Cloud Speech-to-Text 高质量(慢 ~20s+,烧赠金,完整句子)
+      ?force=1      强制重新拉 + 翻译(忽略 cache)
     """
-    _username()  # 鉴权
+    _username()
     from youtube_subtitles import get_or_translate
     force = request.args.get("force") == "1"
-    r = get_or_translate(video_id, target_lang="zh", force=force)
+    source = request.args.get("source", "auto")
+    r = get_or_translate(video_id, target_lang="zh", source=source, force=force)
     code = 200 if r.get("status") == "ready" else 500
     return jsonify({"ok": r.get("status") == "ready", **r}), code
 
@@ -542,7 +546,8 @@ def api_subtitles_status(video_id: str):
     """只查 cache,不触发翻译。前端可用来 prefetch 显示「已缓存」标记。"""
     _username()
     from youtube_subtitles import has_cached
-    return jsonify({"ok": True, "cached": has_cached(video_id)})
+    source = request.args.get("source", "auto")
+    return jsonify({"ok": True, "cached": has_cached(video_id, source=source)})
 
 
 @api_bp.route("/today")
