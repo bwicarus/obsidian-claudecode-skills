@@ -98,6 +98,27 @@
     </tr>
     {% endfor %}
   </table>
+
+  <!-- 休息倒计时 (saveSet 成功后由 JS show) -->
+  <div class="rest-timer" data-ex="{{ ex.id }}"
+       data-default-rest="{{ ex.prescribed.rest_seconds if ex.prescribed else 120 }}"
+       style="display:none;margin-top:10px;padding:12px;border-radius:8px;
+              background:#0f1d2e;border:2px solid var(--accent);text-align:center;">
+    <div class="rest-label small dim" style="margin-bottom:4px;">休息中</div>
+    <div class="rest-time" style="font-size:36px;font-weight:700;
+                                    font-family:'SF Mono','Roboto Mono',monospace;
+                                    color:var(--accent);line-height:1;">0:00</div>
+    <div class="rest-bar" style="height:6px;background:#0a1420;border-radius:3px;
+                                   margin-top:8px;overflow:hidden;">
+      <div class="rest-bar-fill" style="height:100%;width:100%;background:var(--accent);
+                                          transition:width 0.25s linear;"></div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;justify-content:center;">
+      <button class="btn small rest-sub" type="button">−30s</button>
+      <button class="btn small rest-add" type="button">+30s</button>
+      <button class="btn small rest-skip" type="button">跳过</button>
+    </div>
+  </div>
 </div>
 {% endfor %}
 
@@ -474,6 +495,137 @@ async function loadRec(exId) {
 
 document.querySelectorAll('.last-info').forEach(el => loadRec(el.dataset.ex));
 
+// ───────────── 休息倒计时 ─────────────
+const REST = {};   // exId -> {endTs, totalSec, intervalId}
+let _audioCtx = null;
+function audio() {
+  if (!_audioCtx) {
+    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) {}
+  }
+  // iOS 锁屏后 audio context 会 suspended,resume 一下
+  if (_audioCtx && _audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+function beepDone() {
+  const ctx = audio();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  // 双音 ding-ding
+  [[880, 0], [1320, 0.25]].forEach(([freq, delay]) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = freq;
+    osc.type = 'sine';
+    const start = t0 + delay;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.35, start + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.55);
+    osc.start(start);
+    osc.stop(start + 0.6);
+  });
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+}
+function beepWarn() {  // 最后 5 秒每秒一声
+  const ctx = audio();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.connect(gain); gain.connect(ctx.destination);
+  osc.frequency.value = 660;
+  osc.type = 'sine';
+  const t0 = ctx.currentTime;
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.2, t0 + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2);
+  osc.start(t0); osc.stop(t0 + 0.25);
+}
+
+function fmtMSS(sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function stopRestTimer(exId) {
+  const st = REST[exId];
+  if (st && st.intervalId) clearInterval(st.intervalId);
+  delete REST[exId];
+}
+
+function startRestTimer(exId, totalSec) {
+  stopRestTimer(exId);
+  const card = document.querySelector(`.card[data-exercise-id="${CSS.escape(exId)}"]`);
+  if (!card) return;
+  const box = card.querySelector('.rest-timer');
+  const timeEl = box.querySelector('.rest-time');
+  const barEl = box.querySelector('.rest-bar-fill');
+  const labelEl = box.querySelector('.rest-label');
+  box.style.display = 'block';
+  box.style.borderColor = 'var(--accent)';
+  timeEl.style.color = 'var(--accent)';
+  labelEl.textContent = `休息中 · 推荐 ${fmtMSS(totalSec)}`;
+  const st = REST[exId] = {
+    endTs: Date.now() + totalSec * 1000,
+    totalSec,
+    intervalId: null,
+    warnedAtSec: new Set(),
+    finished: false,
+  };
+  audio();   // unlock iOS audio
+  const tick = () => {
+    const cur = REST[exId];
+    if (!cur) return;
+    const remain = (cur.endTs - Date.now()) / 1000;
+    timeEl.textContent = fmtMSS(remain);
+    barEl.style.width = `${Math.max(0, remain / cur.totalSec * 100)}%`;
+    // 最后 5 秒每秒提示音
+    const remCeil = Math.ceil(remain);
+    if (!cur.finished && remCeil > 0 && remCeil <= 5 && !cur.warnedAtSec.has(remCeil)) {
+      cur.warnedAtSec.add(remCeil);
+      beepWarn();
+    }
+    if (remain <= 0 && !cur.finished) {
+      cur.finished = true;
+      box.style.borderColor = 'var(--accent-2)';
+      timeEl.style.color = 'var(--accent-2)';
+      labelEl.textContent = '✓ 休息完成,开始下一组';
+      timeEl.textContent = '0:00';
+      barEl.style.width = '0%';
+      beepDone();
+    }
+  };
+  tick();
+  st.intervalId = setInterval(tick, 250);
+}
+
+document.querySelectorAll('.rest-timer').forEach(box => {
+  const exId = box.dataset.ex;
+  box.querySelector('.rest-add').addEventListener('click', () => {
+    const st = REST[exId];
+    if (!st) return;
+    st.endTs += 30000; st.totalSec += 30;
+    if (st.finished) {   // 已结束的恢复倒计时
+      st.finished = false;
+      st.warnedAtSec.clear();
+      box.style.borderColor = 'var(--accent)';
+      box.querySelector('.rest-time').style.color = 'var(--accent)';
+      box.querySelector('.rest-label').textContent = `休息中 · 推荐 ${fmtMSS(st.totalSec)}`;
+    }
+  });
+  box.querySelector('.rest-sub').addEventListener('click', () => {
+    const st = REST[exId];
+    if (!st) return;
+    st.endTs -= 30000; st.totalSec = Math.max(15, st.totalSec - 30);
+  });
+  box.querySelector('.rest-skip').addEventListener('click', () => {
+    stopRestTimer(exId);
+    box.style.display = 'none';
+  });
+});
+
 // 「为什么」气泡
 document.querySelectorAll('.rec-why').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -515,6 +667,13 @@ async function saveSet(btn) {
         if (!r2.value) r2.value = reps;
         nextRow.querySelector('.set-weight').focus();
       }
+      // 启动休息倒计时(优先用推荐 API 返回的 rest_seconds,fallback data-default-rest)
+      const restBox = card.querySelector('.rest-timer');
+      let restSec = parseInt(restBox.dataset.defaultRest) || 120;
+      if (REC[exId] && REC[exId].recommendation && REC[exId].recommendation.rest_seconds) {
+        restSec = REC[exId].recommendation.rest_seconds;
+      }
+      startRestTimer(exId, restSec);
     } else {
       btn.disabled = false; btn.textContent = '✓';
       alert('存失败: ' + (d.error || '?'));
