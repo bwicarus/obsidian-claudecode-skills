@@ -22,8 +22,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from ai_client import ask  # noqa: E402
 
+import requests as _req  # 跟 ai_client 的依赖分开
+
 DATA_ROOT = Path(os.environ.get("WEBAPP_DATA", "/home/bwicarus/webapp/data"))
 DB_PATH = DATA_ROOT / "youtube_subtitles.db"
+GEMINI_KEY_FILE = Path("/home/bwicarus/.config/gemini-api-key")
 
 _LOCK = threading.Lock()
 _INFLIGHT: dict[str, threading.Event] = {}
@@ -77,32 +80,21 @@ def _fetch_english(video_id: str) -> tuple[list[dict], str]:
     return segs, src
 
 
-def _translate_all(segments: list[dict]) -> list[dict]:
-    """整本字幕一次翻译。失败的段 zh=None,保留 en 显示。"""
-    if not segments:
-        return segments
-    lines = "\n".join(f"[{i+1}] {s['en']}" for i, s in enumerate(segments))
-    prompt = (
-        "你是健身视频字幕翻译。把下面英文字幕翻成简洁自然的中文。\n"
-        "严格规则:\n"
-        "1. 保留每行 [n] 行号,一行一段,不合并不拆分行\n"
-        "2. 长度贴近原文,不要过度意译\n"
-        "3. 半句话按上下文连贯翻\n"
-        "4. 专业术语保留英文但首次出现括号解释:RIR(剩余次数)/RPE(自感强度)/ROM(动作幅度)/"
-        "hypertrophy(肌肥大)/eccentric(离心)/concentric(向心)/deload(减载周)\n"
-        "5. 动作名第一次出现时给中文译名:bench press(卧推)/squat(深蹲)/deadlift(硬拉) 等\n\n"
-        f"原文({len(segments)} 段):\n{lines}\n\n"
-        "输出每行一段,带 [n] 行号:"
-    )
-    try:
-        resp = ask(prompt)
-    except Exception as e:
-        print(f"[subtitles] ai ask failed: {e}", file=sys.stderr)
-        return segments
-    if not resp:
-        return segments
+_TRANSLATE_PROMPT_HEAD = (
+    "你是健身视频字幕翻译。把下面英文字幕翻成简洁自然的中文。\n"
+    "严格规则:\n"
+    "1. 保留每行 [n] 行号,一行一段,不合并不拆分行\n"
+    "2. 长度贴近原文,不要过度意译\n"
+    "3. 半句话按上下文连贯翻\n"
+    "4. 专业术语保留英文但首次出现括号解释:RIR(剩余次数)/RPE(自感强度)/ROM(动作幅度)/"
+    "hypertrophy(肌肥大)/eccentric(离心)/concentric(向心)/deload(减载周)\n"
+    "5. 动作名第一次出现时给中文译名:bench press(卧推)/squat(深蹲)/deadlift(硬拉) 等\n\n"
+)
+
+
+def _parse_lines(text: str, total: int, segments: list[dict]) -> None:
     out_map: dict[int, str] = {}
-    for line in resp.splitlines():
+    for line in text.splitlines():
         m = re.match(r"^\s*\[(\d+)\]\s*(.+?)\s*$", line)
         if m:
             out_map[int(m.group(1))] = m.group(2)
@@ -110,6 +102,82 @@ def _translate_all(segments: list[dict]) -> list[dict]:
         zh = out_map.get(i + 1)
         if zh and zh != s["en"]:
             s["zh"] = zh
+
+
+def _translate_gemini_flash(segments: list[dict], key: str) -> bool:
+    """走 Gemini 2.5 Flash 翻译。返回是否成功(任一段翻译到就算)。"""
+    lines = "\n".join(f"[{i+1}] {s['en']}" for i, s in enumerate(segments))
+    prompt = _TRANSLATE_PROMPT_HEAD + f"原文({len(segments)} 段):\n{lines}\n\n输出每行一段,带 [n] 行号:"
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash:generateContent?key=" + key
+    )
+    r = _req.post(
+        url,
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 32000,
+                "thinkingConfig": {"thinkingBudget": 0},  # 字幕不需要 reasoning
+            },
+        },
+        timeout=120,
+    )
+    # quota log
+    try:
+        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        from google_api_quota import log_usage
+        log_usage("gemini", 1, "generateContent:flash",
+                  note=f"{len(segments)} segs, status={r.status_code}")
+    except Exception:
+        pass
+    if r.status_code != 200:
+        raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(f"Gemini API: {data['error'].get('message')}")
+    cand = (data.get("candidates") or [{}])[0]
+    text = ""
+    for part in (cand.get("content") or {}).get("parts", []):
+        if "text" in part:
+            text += part["text"]
+    if not text:
+        raise RuntimeError(f"Gemini empty response (finishReason={cand.get('finishReason')})")
+    _parse_lines(text, len(segments), segments)
+    return any(s.get("zh") for s in segments)
+
+
+def _translate_claude(segments: list[dict]) -> bool:
+    """走 ai_client.ask()(Claude/Codex 按 ai-settings.json)。Fallback 用。"""
+    lines = "\n".join(f"[{i+1}] {s['en']}" for i, s in enumerate(segments))
+    prompt = _TRANSLATE_PROMPT_HEAD + f"原文({len(segments)} 段):\n{lines}\n\n输出每行一段,带 [n] 行号:"
+    try:
+        resp = ask(prompt)
+    except Exception as e:
+        print(f"[subtitles] Claude ask failed: {e}", file=sys.stderr)
+        return False
+    if not resp:
+        return False
+    _parse_lines(resp, len(segments), segments)
+    return any(s.get("zh") for s in segments)
+
+
+def _translate_all(segments: list[dict]) -> list[dict]:
+    """整本字幕一次翻译。优先 Gemini Flash(快+免费 250/天),失败 fallback Claude。"""
+    if not segments:
+        return segments
+    # 优先 Gemini Flash
+    if GEMINI_KEY_FILE.exists():
+        try:
+            key = GEMINI_KEY_FILE.read_text().strip()
+            if _translate_gemini_flash(segments, key):
+                return segments
+            print("[subtitles] Gemini 无翻译输出,fallback Claude", file=sys.stderr)
+        except Exception as e:
+            print(f"[subtitles] Gemini failed ({e}),fallback Claude", file=sys.stderr)
+    # fallback Claude
+    _translate_claude(segments)
     return segments
 
 
