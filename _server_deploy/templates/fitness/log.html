@@ -27,6 +27,58 @@
       <div id="progress-bar" style="height:100%;width:0%;background:var(--accent-2);
                                        transition:width 0.4s ease-out;"></div>
     </div>
+    <div style="margin-top:10px;text-align:right;">
+      <button id="finish-workout" class="btn primary" style="font-size:14px;padding:6px 14px;">
+        🏁 完成训练
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 训练完成总结 modal -->
+<div id="finish-modal" style="display:none;position:fixed;inset:0;background:#000a;
+                              z-index:1000;align-items:center;justify-content:center;
+                              padding:16px;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
+              max-width:560px;width:100%;max-height:90vh;overflow-y:auto;padding:20px;">
+    <h2 style="margin:0 0 6px;">训练完成 🎉</h2>
+    <div class="dim small" id="finish-date" style="margin-bottom:14px;"></div>
+
+    <!-- 总览统计 -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+      <div style="padding:10px;background:#0f1d2e;border-radius:6px;">
+        <div class="dim small">⏱ 用时</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent);"
+             id="finish-elapsed">--:--</div>
+      </div>
+      <div style="padding:10px;background:#0f1d2e;border-radius:6px;">
+        <div class="dim small">✅ 完成</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent-2);"
+             id="finish-sets">-- / --</div>
+      </div>
+      <div style="padding:10px;background:#0f1d2e;border-radius:6px;">
+        <div class="dim small">💪 总训练量</div>
+        <div style="font-size:24px;font-weight:700;" id="finish-volume">-- kg</div>
+      </div>
+      <div style="padding:10px;background:#0f1d2e;border-radius:6px;">
+        <div class="dim small">📦 总次数</div>
+        <div style="font-size:24px;font-weight:700;" id="finish-reps">--</div>
+      </div>
+    </div>
+
+    <!-- 各动作明细 -->
+    <details style="margin-bottom:16px;" open>
+      <summary class="small" style="cursor:pointer;color:var(--accent);">
+        各动作明细 ▾
+      </summary>
+      <div id="finish-by-ex" style="margin-top:10px;font-size:14px;"></div>
+    </details>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+      <button class="btn" id="finish-close">继续录入</button>
+      <a class="btn" href="/private/fitness/history">看历史</a>
+      <a class="btn primary" href="/private/fitness/">返回主页</a>
+    </div>
   </div>
 </div>
 
@@ -674,6 +726,77 @@ async function loadWorkoutMeta() {
   );
   updateProgress();
 })();
+
+// ───────────── 完成训练总结 ─────────────
+function showFinishSummary() {
+  const allRows = Array.from(document.querySelectorAll('.set-row'));
+  let totalSets = allRows.length;
+  let doneSets = 0;
+  let totalVolume = 0;
+  let totalReps = 0;
+  const byEx = {};   // exId -> {name, sets: [{w, r}]}
+  allRows.forEach(row => {
+    const card = row.closest('.card');
+    const exId = card.dataset.exerciseId;
+    const exName = card.querySelector('h3').firstChild.textContent.trim();
+    const wRaw = row.querySelector('.set-weight').value;
+    const rRaw = row.querySelector('.set-reps').value;
+    if (wRaw === '' && rRaw === '') return;
+    const w = parseFloat(wRaw);
+    const r = parseInt(rRaw);
+    if (!byEx[exId]) byEx[exId] = { name: exName, sets: [] };
+    byEx[exId].sets.push({ w: isNaN(w) ? null : w, r: isNaN(r) ? null : r });
+    if (!isNaN(w) && !isNaN(r)) {
+      doneSets++;
+      totalReps += r;
+      // 自重(w=0)也算次数,不算容量;有重量才算 volume
+      if (w > 0) totalVolume += w * r;
+    }
+  });
+
+  // 渲染统计
+  document.getElementById('finish-date').textContent =
+    document.getElementById('workout-date').value + ' · ' + DAY_ID.toUpperCase();
+  document.getElementById('finish-sets').textContent = `${doneSets} / ${totalSets}`;
+  document.getElementById('finish-volume').textContent =
+    totalVolume.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + ' kg';
+  document.getElementById('finish-reps').textContent = totalReps;
+
+  let elapsed = 0;
+  if (_firstSetTs) elapsed = (Date.now() - _firstSetTs) / 1000;
+  document.getElementById('finish-elapsed').textContent = fmtElapsed(elapsed);
+
+  // 各动作明细
+  const byExHtml = Object.entries(byEx).map(([exId, data]) => {
+    const setStrs = data.sets.map((s, i) => {
+      const wStr = s.w == null ? '?' : (s.w === 0 ? '自重' : s.w + 'kg');
+      const rStr = s.r == null ? '?' : s.r;
+      return `<span class="dim">${wStr}×${rStr}</span>`;
+    }).join(' / ');
+    return `<div style="margin-bottom:6px;padding:6px 8px;background:#0f1d2e;border-radius:4px;">
+      <strong>${data.name}</strong> <span class="dim small">· ${data.sets.length} 组</span><br>
+      ${setStrs}
+    </div>`;
+  }).join('');
+  document.getElementById('finish-by-ex').innerHTML = byExHtml || '<div class="dim">还没录入任何组</div>';
+
+  // 显示 modal
+  const modal = document.getElementById('finish-modal');
+  modal.style.display = 'flex';
+}
+
+document.getElementById('finish-workout').addEventListener('click', () => {
+  showFinishSummary();
+});
+document.getElementById('finish-close').addEventListener('click', () => {
+  document.getElementById('finish-modal').style.display = 'none';
+});
+document.getElementById('finish-modal').addEventListener('click', (e) => {
+  // 点遮罩(不是 modal 内容)关闭
+  if (e.target.id === 'finish-modal') {
+    e.target.style.display = 'none';
+  }
+});
 
 // ───────────── 休息倒计时 ─────────────
 const REST = {};   // exId -> {endTs, totalSec, intervalId}
