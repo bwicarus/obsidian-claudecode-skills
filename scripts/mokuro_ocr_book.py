@@ -27,10 +27,24 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 
 import fitz  # PyMuPDF
+import numpy as np
 from mokuro.manga_page_ocr import MangaPageOcr
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 STATE_DIR = PROJECT / "state" / "mokuro-ocr"
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """mokuro 输出含 numpy int32 / float32 / bool_ / ndarray(bbox 坐标等)，
+    Python 默认 json.dumps 不接受 → 转成原生 Python 类型。
+    np.generic 是所有 numpy scalar (int/float/bool/etc) 的基类，一次性收掉。"""
+
+    def default(self, o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.generic):  # 所有 numpy scalar
+            return o.item()
+        return super().default(o)
 
 
 def pdf_sha(pdf_path: Path) -> str:
@@ -102,7 +116,7 @@ def main() -> int:
         out["_page"] = i
         out["_ocr_seconds"] = round(dt, 2)
         (work / f"p{i:04d}.json").write_text(
-            json.dumps(out, ensure_ascii=False), encoding="utf-8"
+            json.dumps(out, ensure_ascii=False, cls=_NumpyEncoder), encoding="utf-8"
         )
         img_path.unlink(missing_ok=True)  # 删 PNG 省空间，sidecar JSON 足够
         done.add(i)
@@ -124,7 +138,7 @@ def main() -> int:
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         progress_path.write_text(
-            json.dumps(progress, ensure_ascii=False, indent=2), "utf-8"
+            json.dumps(progress, ensure_ascii=False, indent=2, cls=_NumpyEncoder), "utf-8"
         )
 
         now = time.time()
