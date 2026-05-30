@@ -4,11 +4,29 @@
 
 <div class="card">
   <h2>{{ day.name }} <span class="dim small">· {{ day.focus }}</span></h2>
-  <p class="small dim">每组录完点 ✓ 自动跳下一组。蓝色 badge 是基于上次成绩 + Double Progression 算出的本次推荐。</p>
+  <p class="small dim">每组录完点 ✓ 自动跳下一组 + 启动休息倒计时。输入即存,刷新不丢。</p>
   <div class="small dim">
     日期:<input type="date" id="workout-date"
           style="background:var(--bg);color:var(--text);border:1px solid var(--border);
                  border-radius:4px;padding:4px 6px;font-size:14px;">
+  </div>
+
+  <!-- 训练总览 -->
+  <div style="margin-top:10px;padding:10px 12px;background:#0f1d2e;
+              border-left:3px solid var(--accent);border-radius:6px;">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:14px;align-items:baseline;">
+      <div>⏱ 预计 <strong>{{ est_minutes }}</strong> <span class="dim small">分钟</span></div>
+      <div>📦 <strong>{{ total_sets }}</strong> <span class="dim small">组</span></div>
+      <div>💪 <strong>{{ day.exercises | length }}</strong> <span class="dim small">动作</span></div>
+      <div style="margin-left:auto;">
+        ✓ <strong id="progress-done">0</strong> / {{ total_sets }} 组
+        · <strong id="progress-elapsed" class="dim">0:00</strong>
+      </div>
+    </div>
+    <div style="height:6px;background:#0a1420;border-radius:3px;margin-top:8px;overflow:hidden;">
+      <div id="progress-bar" style="height:100%;width:0%;background:var(--accent-2);
+                                       transition:width 0.4s ease-out;"></div>
+    </div>
   </div>
 </div>
 
@@ -132,8 +150,46 @@
 {% block scripts %}
 <script>
 const DAY_ID = {{ day.id | tojson }};
+const TOTAL_SETS = {{ total_sets }};
 const TODAY_DEFAULT = new Date().toISOString().slice(0, 10);
 document.getElementById('workout-date').value = TODAY_DEFAULT;
+
+// ───────────── 训练进度 + 已用时间 ─────────────
+const progDone = document.getElementById('progress-done');
+const progBar  = document.getElementById('progress-bar');
+const progElapsed = document.getElementById('progress-elapsed');
+let _firstSetTs = null;   // 第一组保存时间(本次训练起点)
+
+function fmtElapsed(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function updateProgress() {
+  let done = 0;
+  document.querySelectorAll('.set-row').forEach(row => {
+    const w = row.querySelector('.set-weight').value;
+    const r = row.querySelector('.set-reps').value;
+    if (w !== '' && r !== '') done++;
+  });
+  progDone.textContent = done;
+  const pct = TOTAL_SETS > 0 ? Math.min(100, done / TOTAL_SETS * 100) : 0;
+  progBar.style.width = pct + '%';
+  if (done >= TOTAL_SETS && TOTAL_SETS > 0) {
+    progBar.style.background = 'var(--accent-2)';
+    progDone.style.color = 'var(--accent-2)';
+  }
+}
+
+setInterval(() => {
+  if (_firstSetTs) {
+    const sec = (Date.now() - _firstSetTs) / 1000;
+    progElapsed.textContent = fmtElapsed(sec);
+    progElapsed.classList.remove('dim');
+  }
+}, 1000);
 
 // ───────────── YouTube IFrame API (一次加载,全局共享) ─────────────
 let _ytReady = false;
@@ -523,10 +579,10 @@ function markSaved(row, complete) {
     btn.textContent = '✓';
     btn.classList.remove('success');
   }
-  // input 边框给一抹绿
   row.querySelectorAll('input').forEach(inp => {
     inp.style.borderColor = complete ? 'var(--accent-2)' : '';
   });
+  updateProgress();
 }
 
 // ───────────── autosave (debounced 500ms) ─────────────
@@ -554,6 +610,8 @@ async function autoSaveSet(exId, setNo) {
     if (d.ok) {
       const complete = (w != null && !isNaN(w)) && (r != null && !isNaN(r));
       markSaved(row, complete);
+      // 第一次保存任何东西 → 设训练起点
+      if (!_firstSetTs) _firstSetTs = Date.now();
     }
   } catch (e) {}
 }
@@ -589,7 +647,31 @@ async function initEx(exId) {
   await restoreToday(exId);   // 先填已存的(刷新恢复 / 当天补录)
   await loadRec(exId);        // 再填空着的位置(推荐 prefill)
 }
-document.querySelectorAll('.last-info').forEach(el => initEx(el.dataset.ex));
+
+async function loadWorkoutMeta() {
+  const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+  try {
+    const r = await fetch(`/api/fitness/workout_meta?date=${encodeURIComponent(date)}&day_id=${encodeURIComponent(DAY_ID)}`);
+    const d = await r.json();
+    if (d.ok && d.first_at) {
+      // SQLite "YYYY-MM-DD HH:MM:SS" 默认 UTC 无后缀,补 Z 让 Date 当 UTC 解析
+      const iso = d.first_at.replace(' ', 'T') + 'Z';
+      const ts = Date.parse(iso);
+      if (!isNaN(ts)) _firstSetTs = ts;
+    } else {
+      _firstSetTs = null;
+    }
+  } catch (e) {}
+}
+
+(async () => {
+  await loadWorkoutMeta();
+  await Promise.all(
+    Array.from(document.querySelectorAll('.last-info'))
+      .map(el => initEx(el.dataset.ex))
+  );
+  updateProgress();
+})();
 
 // ───────────── 休息倒计时 ─────────────
 const REST = {};   // exId -> {endTs, totalSec, intervalId}

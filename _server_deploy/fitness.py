@@ -124,7 +124,22 @@ def log_page(day_id: str):
     day = next((d for d in plan["days"] if d["id"] == day_id), None)
     if not day:
         abort(404)
-    return render_template("fitness/log.html", plan=plan, day=day)
+    # 估算训练总时间(每组做组 ~30s + 组间 rest_seconds + 动作切换 60s)
+    SET_TIME = 30
+    SWITCH_TIME = 60
+    est_sec = 0
+    total_sets = 0
+    for ex in day["exercises"]:
+        p = ex.get("prescribed", {}) or {}
+        s = int(p.get("sets") or 3)
+        rest = int(p.get("rest_seconds") or 120)
+        est_sec += s * SET_TIME + max(0, s - 1) * rest + SWITCH_TIME
+        total_sets += s
+    return render_template(
+        "fitness/log.html", plan=plan, day=day,
+        est_minutes=round(est_sec / 60),
+        total_sets=total_sets,
+    )
 
 
 @bp.route("/history")
@@ -196,6 +211,31 @@ def api_today_sets(exercise_id: str):
     ).fetchall()
     db.close()
     return jsonify({"ok": True, "date": date, "sets": [dict(r) for r in rows]})
+
+
+@api_bp.route("/workout_meta")
+def api_workout_meta():
+    """返回某 date+day_id 训练的元信息(起点时间 + 已存组数)。
+
+    query: ?date=YYYY-MM-DD&day_id=push
+    """
+    username = _username()
+    date = request.args.get("date") or time.strftime("%Y-%m-%d")
+    day_id = request.args.get("day_id", "")
+    db = _db(username)
+    row = db.execute(
+        "SELECT MIN(created_at) AS first_at, COUNT(*) AS cnt "
+        "FROM fitness_log WHERE date=? AND day_id=?",
+        (date, day_id),
+    ).fetchone()
+    db.close()
+    return jsonify({
+        "ok": True,
+        "date": date,
+        "day_id": day_id,
+        "first_at": row["first_at"],   # SQLite 默认 UTC 字符串(无 TZ 后缀)
+        "count": row["cnt"] or 0,
+    })
 
 
 @api_bp.route("/log/<int:log_id>", methods=["DELETE"])
