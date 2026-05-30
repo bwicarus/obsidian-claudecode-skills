@@ -1492,6 +1492,16 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
                 except Exception:
                     pass
             out["anki_added"] = added
+            # 制完触发 AnkiWeb sync（fire-and-forget，~50ms 返回，后台推送）
+            if added > 0:
+                try:
+                    sreq = json.dumps({"action": "sync", "version": 6}).encode()
+                    urllib.request.urlopen(
+                        urllib.request.Request(ANKI_URL, data=sreq,
+                                                headers={"Content-Type": "application/json"}),
+                        timeout=5).read()
+                except Exception:
+                    pass
         except Exception as ex:
             out["anki_error"] = str(ex)
     return out

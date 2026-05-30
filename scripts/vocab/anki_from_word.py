@@ -64,6 +64,15 @@ def ensure_deck(name: str):
         raise RuntimeError(f"createDeck failed: {name!r} not in deckNames after retry")
 
 
+def _sync_quiet():
+    """触发 AnkiWeb sync。AnkiConnect 的 sync 是 fire-and-forget（API ~50ms 返回，
+    实际推送后台跑），所以每次制卡后调用对前端无感。失败仅记 stderr 不抛。"""
+    try:
+        anki_call("sync")
+    except Exception as ex:
+        sys.stderr.write(f"[anki sync warn] {ex}\n")
+
+
 def store_audio(lemma: str, audio_path: Path, suffix: str = "us") -> str:
     """把 audio mp3 推 Anki media，返回 anki 内文件名。"""
     if not audio_path.exists():
@@ -262,6 +271,7 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
         try:
             anki_call("updateNoteFields", {"note": {"id": existing_card_id_int, "fields": fields}})
             anki_call("addTags", {"notes": [existing_card_id_int], "tags": " ".join(tags)})
+            _sync_quiet()
             return {"ok": True, "action": "updated", "note_id": existing_card_id_int}
         except Exception as ex:
             # 更新失败可能是 card 已被删，回落新建
@@ -286,6 +296,7 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
                 anki_call("updateNoteFields", {"note": {"id": note_id, "fields": fields}})
                 anki_call("addTags", {"notes": [note_id], "tags": " ".join(tags)})
                 _update_card_id_in_md(lemma, note_id)
+                _sync_quiet()
                 return {"ok": True, "action": "updated-duplicate", "note_id": note_id}
         raise
 
@@ -298,6 +309,7 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
         except Exception:
             pass
         _update_card_id_in_md(lemma, note_id)
+        _sync_quiet()
         return {"ok": True, "action": "created", "note_id": note_id}
     return {"ok": False, "error": "addNote returned no id"}
 
