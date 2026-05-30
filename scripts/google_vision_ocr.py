@@ -61,6 +61,15 @@ def ocr_one_page(api_key: str, png_bytes: bytes) -> dict:
         },
         timeout=60,
     )
+    # 配额计数(Vision API 每张图 1 unit,免费 1000/月)
+    try:
+        import sys as _sys, pathlib as _pl
+        _sys.path.insert(0, str(_pl.Path(__file__).parent))
+        from google_api_quota import log_usage as _logq
+        _logq("vision", 1, "images:annotate",
+              note=f"DOCUMENT_TEXT_DETECTION status={resp.status_code}")
+    except Exception:
+        pass
     resp.raise_for_status()
     data = resp.json()
     r0 = data.get("responses", [{}])[0]

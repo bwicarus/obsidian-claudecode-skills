@@ -26,6 +26,12 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from google_api_quota import log_usage as _log_quota
+except Exception:
+    def _log_quota(*a, **kw): pass
+
 KEY_FILE = Path("/home/bwicarus/.config/gcp-vision-key")
 PLAN_PATH = Path("/home/bwicarus/claude/_server_deploy/static/fitness-plan.json")
 WEBAPP_PLAN = Path("/home/bwicarus/webapp/static/fitness-plan.json")
@@ -88,7 +94,10 @@ def search_channel(q: str, channel_id: str, key: str, per: int) -> list[dict]:
     data = r.json()
     if "error" in data:
         msg = data["error"].get("message", str(data["error"]))
+        # quota 错也算消耗(请求已发,即使失败也常计费)
+        _log_quota("youtube", 100, "search.list", note=f"FAILED: {msg[:80]}")
         raise RuntimeError(f"YouTube API: {msg}")
+    _log_quota("youtube", 100, "search.list", note=f"q={q[:60]}")
     return [
         {"video_id": item["id"]["videoId"], "title": item["snippet"]["title"]}
         for item in data.get("items", [])
