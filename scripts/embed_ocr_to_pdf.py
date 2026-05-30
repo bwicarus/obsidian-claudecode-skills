@@ -34,10 +34,11 @@ import numpy as np
 
 
 def _is_cjk_punct_or_bullet(c: str) -> bool:
-    """字符是否为强装饰符(嵌入这些字符已占视觉 bullet 位置,不需要额外 offset)。
-    注意:`・`(U+30FB 中点)不在此列 —— mokuro 经常把视觉 `●` 误识别为 `・`,
-    需要 detector 二次判断;真 `・` 本身比 `●` 小很多,detector 会判 False。"""
-    return c in "●◆■▲▶『「【〔《［★☆※" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
+    """字符是否为强装饰圆形 bullet(嵌入这些已占视觉 bullet 位置,不需要额外 offset)。
+    收紧到只含厚实 bullet 形状 —— `『「【〔・` 等细括号/中点都不在此列,因为
+    mokuro 经常把视觉 `●` 误识别为它们(`『マルウェア対策` 实为 `●`,`・不正ログイン` 实为 `●`)。
+    真 `『「【〔` 等括号细窄,detector 用 blob 几何会判 False 不会误偏移。"""
+    return c in "●◆■▲▶" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
 
 
 def _detect_left_bullet(
