@@ -35,6 +35,35 @@ CHANNELS = {
     "athlean_x":    ("UCe0TLA0EsQbE-MjuHXevj2A", "Jeff Cavaliere"),
 }
 
+# 每动作必含关键词(case-insensitive,任一命中即可)。
+# YouTube 限定 channelId 后,搜不到精确匹配会用"频道里相关的"补,导致
+# 标题完全不沾边的视频也回来。靠 must_contain 过滤掉这类噪声。
+MUST_CONTAIN: dict[str, list[str]] = {
+    # Push
+    "db_bench_flat":         ["bench"],
+    "db_bench_incline":      ["incline", "upper chest"],
+    "db_shoulder_press":     ["shoulder", "overhead press"],
+    "db_lateral_raise":      ["lateral", "side delt"],
+    "cable_tricep_pushdown": ["triceps", "tricep"],
+    "db_overhead_tricep":    ["triceps", "tricep"],
+    "dip":                   ["dip"],
+    # Pull
+    "chin_up":               ["chin", "pull-up", "pull up", "chinup", "pullup"],
+    "lat_pulldown":          ["pulldown", "pull-down", "pull down"],
+    "db_row_single":         ["row"],
+    "seated_row":            ["row"],
+    "face_pull":             ["face pull", "rear delt"],
+    "ez_curl":               ["curl", "biceps"],
+    "db_incline_curl":       ["curl", "biceps"],
+    # Legs
+    "goblet_squat":          ["squat"],
+    "rdl":                   ["rdl", "romanian", "deadlift", "hamstring"],
+    "leg_extension":         ["leg extension", "quad"],
+    "leg_curl":              ["leg curl", "hamstring"],
+    "db_calf_raise":         ["calf", "calve"],   # calves 含 calve 不含 calf
+    "hanging_leg_raise":     ["leg raise", "hanging", "knee raise"],
+}
+
 
 def _key() -> str:
     k = os.environ.get("GOOGLE_VISION_API_KEY") or os.environ.get("YOUTUBE_API_KEY")
@@ -67,6 +96,14 @@ def search_channel(q: str, channel_id: str, key: str, per: int) -> list[dict]:
     ]
 
 
+def _title_matches(title: str, must_contain: list[str]) -> bool:
+    """case-insensitive substring 任一命中即 True;空 must_contain 视为命中。"""
+    if not must_contain:
+        return True
+    t = title.lower()
+    return any(kw.lower() in t for kw in must_contain)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只搜不写回 plan.json")
@@ -86,34 +123,53 @@ def main() -> int:
 
     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
     total_quota = 0
+    # 搜 OVERSEARCH 倍数,然后用 must_contain 过滤后留 per 个;不够再补 fallback
+    OVERSEARCH = 3
     for day in plan["days"]:
         for ex in day["exercises"]:
             q = ex.get("search_q")
             if not q:
                 continue
+            must_contain = ex.get("must_contain") or MUST_CONTAIN.get(ex["id"], [])
             merged: list[dict] = []
             seen: set[str] = set()
             for ch in selected:
                 cid, cname = CHANNELS[ch]
                 try:
-                    vids = search_channel(q, cid, key, args.per)
+                    vids = search_channel(q, cid, key, args.per * OVERSEARCH)
                     total_quota += 100
                 except Exception as ex_err:
                     print(f"  ✗ {ex['name']} {cname}: {ex_err}", flush=True)
                     continue
+                primary: list[dict] = []
+                fallback: list[dict] = []
                 for v in vids:
                     if v["video_id"] in seen:
                         continue
+                    if _title_matches(v["title"], must_contain):
+                        primary.append({**v, "channel": cname})
+                    else:
+                        fallback.append({**v, "channel": cname, "fallback": True})
+                taken: list[dict] = primary[: args.per]
+                # 不够 per 个 → 补 fallback
+                if len(taken) < args.per:
+                    need = args.per - len(taken)
+                    taken += fallback[:need]
+                for v in taken:
                     seen.add(v["video_id"])
-                    v_with_ch = {**v, "channel": cname}
-                    merged.append(v_with_ch)
+                    merged.append(v)
                 time.sleep(0.3)
 
-            print(f"\n[{ex['name']}] q={q!r}")
+            print(f"\n[{ex['name']}] q={q!r}  must_contain={must_contain}")
             for i, v in enumerate(merged):
-                print(f"  [{i+1}] {v['video_id']}  ({v.get('channel', '?')})  {v['title'][:60]}")
+                tag = " [fallback]" if v.get("fallback") else ""
+                print(f"  [{i+1}] {v['video_id']}  ({v.get('channel', '?')}){tag}  {v['title'][:60]}")
             if not args.dry_run:
-                ex["videos"] = merged
+                # 写回时不带 fallback 标记(避免污染 schema),但保留 channel
+                ex["videos"] = [
+                    {"video_id": v["video_id"], "title": v["title"], "channel": v.get("channel", "")}
+                    for v in merged
+                ]
 
     print(f"\nquota 用量: 约 {total_quota} units(免费 10000/day)")
 
