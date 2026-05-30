@@ -107,8 +107,14 @@ def _log_ai_call(backend: str, label: str, prompt: str, response: str, duration:
 _claude_lock = threading.Lock()
 
 
-def claude_raw(prompt: str, first: bool = False) -> str:
+def claude_raw(prompt: str, first: bool = False,
+               model: str = "", effort: str = "") -> str:
     """调用 Claude CLI；first=True 开新会话，False 使用 --continue 续写。
+
+    Args:
+        model: "" 默认 / "opus" / "sonnet" / "haiku" / 完整 model id
+        effort: "" 默认 / "low" / "medium" / "high" / "xhigh" / "max"
+                深度思考用 xhigh/max。
 
     Windows 加 --dangerously-skip-permissions 跳过本机交互式权限确认。
     Linux/root 下 Claude CLI 拒绝该 flag（"cannot be used with root/sudo"），
@@ -119,6 +125,10 @@ def claude_raw(prompt: str, first: bool = False) -> str:
         if WINDOWS:
             cmd += ["--dangerously-skip-permissions"]
         cmd += ["--output-format", "text"]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
         if not first:
             cmd.append("--continue")
         cmd += ["-p", prompt]
@@ -126,7 +136,10 @@ def claude_raw(prompt: str, first: bool = False) -> str:
         r = _run_hidden(cmd, cwd=PROJECT, capture_output=True,
                         text=True, encoding="utf-8", errors="replace")
         out = r.stdout.strip()
-        _log_ai_call("claude", "raw" + ("" if first else " --continue"), prompt, out, time.time() - t0)
+        tag = "raw" + ("" if first else " --continue")
+        if model: tag += f" model={model}"
+        if effort: tag += f" effort={effort}"
+        _log_ai_call("claude", tag, prompt, out, time.time() - t0)
         return out
 
 
@@ -187,13 +200,21 @@ def route(backend: str, try_claude, try_codex) -> str:
 
 # ── 高层接口 ──────────────────────────────────────────────────────────────────
 
-def ask(prompt: str, image_path: str = None) -> str:
-    """一次性查询，无历史上下文。"""
+def ask(prompt: str, image_path: str = None,
+        claude_model: str = "", claude_effort: str = "") -> str:
+    """一次性查询，无历史上下文。
+
+    Args:
+        claude_model: 强制 Claude 用某模型 ("opus" / "sonnet" / "haiku")
+        claude_effort: 强制 Claude 用某 effort ("low"/"medium"/"high"/"xhigh"/"max")
+
+    Codex 不受这两个参数影响,Codex 用 settings.model。
+    """
     s = load_settings()
     m = s.get("model", "")
     return route(
         s.get("backend", "auto-claude"),
-        lambda: claude_raw(prompt, first=True),
+        lambda: claude_raw(prompt, first=True, model=claude_model, effort=claude_effort),
         lambda: codex_raw(prompt, image_path=image_path, model=m),
     )
 

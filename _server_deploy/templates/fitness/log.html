@@ -861,7 +861,7 @@ async function openAiSuggest() {
   const overall = document.getElementById('ai-overall');
   const list = document.getElementById('ai-list');
   modal.style.display = 'flex';
-  status.textContent = '🤖 AI 思考中(看你最近 4 周历史)…';
+  status.textContent = '🤖 Claude Opus 深度思考中(看 4 周历史 + 文献,~1-3 分钟,别关页面)…';
   overall.style.display = 'none';
   list.innerHTML = '';
   try {
@@ -989,7 +989,7 @@ document.getElementById('ai-analyze-btn').addEventListener('click', async () => 
   const btn = document.getElementById('ai-analyze-btn');
   const out = document.getElementById('ai-analyze-out');
   btn.disabled = true;
-  btn.textContent = '🤖 AI 分析中…(看本次 + 最近 3 次同日历史)';
+  btn.textContent = '🤖 Claude Opus 深度分析中(~1-3 分钟)…';
   try {
     const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
     const r = await fetch('/api/fitness/ai/analyze_session', {
