@@ -431,6 +431,72 @@ _LIGATURES = {
 }
 
 
+# 日语分词(fugashi/MeCab + unidic-lite)：CJK 行 override char.w，前端单击选词逻辑零改动复用。
+# Tagger 全局缓存(thread-safe,Flask threaded 模式 OK),import 失败 fallback 跳过分词。
+_JP_TAGGER = None
+_JP_TAGGER_TRIED = False
+
+
+def _get_jp_tagger():
+    global _JP_TAGGER, _JP_TAGGER_TRIED
+    if not _JP_TAGGER_TRIED:
+        _JP_TAGGER_TRIED = True
+        try:
+            from fugashi import Tagger
+            _JP_TAGGER = Tagger()
+        except Exception as ex:
+            sys.stderr.write(f"[jp tokenize] fugashi 不可用,跳过日语分词: {ex}\n")
+            _JP_TAGGER = None
+    return _JP_TAGGER
+
+
+def _is_cjk_char(c: str) -> bool:
+    if not c:
+        return False
+    o = ord(c[0])
+    # 汉字 / 假名 / CJK 标点 / 兼容汉字
+    return (0x3000 <= o <= 0x303F) or (0x3040 <= o <= 0x30FF) or \
+           (0x3400 <= o <= 0x4DBF) or (0x4E00 <= o <= 0x9FFF) or \
+           (0xF900 <= o <= 0xFAFF) or (0xFF00 <= o <= 0xFFEF)
+
+
+def _apply_jp_tokenize(chars: list, start: int, end: int,
+                       block_i: int, line_i: int) -> None:
+    """对 CJK 行(含 ≥1 个 CJK 字符)用 fugashi 分词，覆盖区间内 chars 的 w 字段。
+    word_id 跟现有英语 _word_id 同格式(block*1e6 + line*1e3 + word_no)。
+    分词失败/未装 fugashi 静默跳过(前端 w 还是英语 lookup 结果或 -1)。"""
+    if end <= start:
+        return
+    seg = chars[start:end]
+    # 该 line 至少含 1 个 CJK 字符才跑分词(纯英语行走原 _word_id 逻辑)
+    if not any(_is_cjk_char(c.get("c", "")) for c in seg if not c.get("sp")):
+        return
+    tagger = _get_jp_tagger()
+    if tagger is None:
+        return
+    # fugashi 输出 token 跳空格,但 PDF chars 含空格(PyMuPDF reflow 自动加,或用户嵌入)→
+    # 用 sp-filtered chars 跟 fugashi 字数对齐(seg 中的 dict ref 不变,改 ['w'] 仍 propagate)
+    text_chars = [c for c in seg if not c.get("sp")]
+    line_text = "".join(c.get("c", "") for c in text_chars)
+    if not line_text.strip():
+        return
+    try:
+        char_ptr = 0
+        for wn, w in enumerate(tagger(line_text)):
+            surf = w.surface or ""
+            wlen = len(surf)
+            if wlen == 0:
+                continue
+            wid = block_i * 1000000 + line_i * 1000 + wn
+            for j in range(wlen):
+                idx = char_ptr + j
+                if 0 <= idx < len(text_chars):
+                    text_chars[idx]["w"] = wid
+            char_ptr += wlen
+    except Exception as ex:
+        sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
+
+
 @bp.route("/api/page-chars")
 def pdf_api_page_chars():
     """提取该页所有字符的精确 bbox（PDF 坐标）。
@@ -473,7 +539,8 @@ def pdf_api_page_chars():
         for _block_i, block in enumerate(raw.get("blocks", [])):
             if block.get("type", 0) != 0:
                 continue
-            for line in block.get("lines", []):
+            for _line_i, line in enumerate(block.get("lines", [])):
+                _line_start = len(chars)
                 for span in line.get("spans", []):
                     _bold = bool(span.get("flags", 0) & 16) or "bold" in (span.get("font", "") or "").lower()
                     for ch in span.get("chars", []):
@@ -494,6 +561,8 @@ def pdf_api_page_chars():
                             "b": 1 if _bold else 0,   # 加粗：整句加粗的练习指令/演示句/小标题排除用
                             "bk": _block_i,           # rawdict 块号：切句用(比 word_id 可靠，斜体匹配失败也不丢块)
                         })
+                # CJK 行用 fugashi 分词，覆盖前端单击选词用的 word_id 'w'
+                _apply_jp_tokenize(chars, _line_start, len(chars), _block_i, _line_i)
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
         vocab_marks = _build_vocab_marks(chars)
         sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
