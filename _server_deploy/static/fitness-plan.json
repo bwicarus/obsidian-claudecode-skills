@@ -50,18 +50,18 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "H60A3ev7pr0",
-              "title": "Bench Press Heavier Dumbbells (GUARANTEED!)",
-              "channel": "Jeff Cavaliere"
-            },
-            {
               "video_id": "XgwXopZadqs",
               "title": "The ONLY 2 Dumbbell Chest Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "v8y8dQZMJXw",
-              "title": "How to Lift Heavy Dumbbells (NEVER DO THIS!)",
+              "video_id": "H60A3ev7pr0",
+              "title": "Bench Press Heavier Dumbbells (GUARANTEED!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "vthMCtgVtFw",
+              "title": "The Official Bench Press Check List (AVOID MISTAKES!)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -192,13 +192,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "Gu1t7X2yq4M",
-              "title": "Overhead Shoulder Press (3 MISTAKES!)",
+              "video_id": "02W0832OQos",
+              "title": "Which Press is Best for Bigger Shoulders? (IRON FACE/OFF)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "02W0832OQos",
-              "title": "Which Press is Best for Bigger Shoulders? (IRON FACE/OFF)",
+              "video_id": "Gu1t7X2yq4M",
+              "title": "Overhead Shoulder Press (3 MISTAKES!)",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -207,13 +207,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "9v8leGpX9O8",
-              "title": "The ONLY 2 Exercises for Bigger Shoulders",
+              "video_id": "s-T3E6654A8",
+              "title": "STOP DOING THIS! Overhead Press Form Fix",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "s-T3E6654A8",
-              "title": "STOP DOING THIS! Overhead Press Form Fix",
+              "video_id": "9v8leGpX9O8",
+              "title": "The ONLY 2 Exercises for Bigger Shoulders",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -248,24 +248,19 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "HeovYNoZDRg",
-              "title": "A Better Way To Do Lateral Raises",
+              "video_id": "21lYP86dHW4",
+              "title": "Top 3 Shoulder Exercises For 3D Delts",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "f_OGBg2KxgY",
-              "title": "Stop Messing Up Lateral Raises (Easy Fix)",
+              "video_id": "SgyUoY0IZ7A",
+              "title": "The Best And Worst Shoulder Exercises",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "jy8L7l-3hRI",
-              "title": "Should You Go &quot;Pinkies Up&quot; On Lateral Raises?",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "OWAfHGmOf0A",
-              "title": "What Is The Best Side Delt Exercise?",
-              "channel": "Jeff Nippard"
+              "video_id": "sS77YMMLX-8",
+              "title": "Stop Doing DB Lateral Raises Like This! (SAVE A FRIEND)",
+              "channel": "Jeff Cavaliere"
             },
             {
               "video_id": "q5sNYB1Q6aM",
@@ -280,11 +275,6 @@
             {
               "video_id": "9v8leGpX9O8",
               "title": "The ONLY 2 Exercises for Bigger Shoulders",
-              "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "IlqmuM9FPUU",
-              "title": "The ULTIMATE Shoulder Warmup Routine",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -389,6 +379,83 @@
           "evidence_note": "短头训练,与过头屈伸互补;高 rep 范围对孤立动作增肌等效 (Schoenfeld 2021)"
         },
         {
+          "id": "dip",
+          "name": "双杠臂屈伸 (dip,需双杠)",
+          "prescribed": {
+            "sets": 3,
+            "rep_range": [
+              6,
+              10
+            ],
+            "rir_target": 1,
+            "rest_seconds": 150,
+            "start_weight_kg": 0,
+            "weight_step_kg": 1.25
+          },
+          "evidence_note": "复合三头 + 下胸 + 前三角;前倾躯干练胸,垂直躯干练三头 (Bergstrom 2012)。架子没双杠则跳过,改加一组哑铃过头三头",
+          "search_q": "dips chest triceps",
+          "sets": "3 × 6-10",
+          "start_weight_hint": "自重 (能 10+ reps 后挂负重)",
+          "tips": [
+            "想练胸:躯干前倾 ~30°,肘略外展",
+            "想练三头:躯干直立,肘紧贴体侧",
+            "下放到上臂与地面平行,不要更深(肩前囊压力大)",
+            "完整做不到:先做 bench dip(脚撑地)或 negatives"
+          ],
+          "videos": [
+            {
+              "video_id": "yN6Q1UI_xkE",
+              "title": "How To Do Dips For A Bigger Chest and Shoulders (Fix Mistakes!)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "bvwg4D9UWGI",
+              "title": "Best Push Workout For 2025 (Chest, Shoulders &amp; Triceps)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "OpRMRhr0Ycc",
+              "title": "The Best &amp; Worst TRICEPS Exercises (Ranked Using Science)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "3TN4otAxzZk",
+              "title": "4 Amazing Chest Builders You’re Missing Out On",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "fGm-ef-4PVk",
+              "title": "The Best And Worst Chest Exercises (Ranked By Science)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "9llvBAV4RHI",
+              "title": "STOP Doing Tricep Dips Like This! (SAVE A FRIEND)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "vi1-BOcj3cQ",
+              "title": "Are You Doing Dips Properly? (AVOID MISTAKES!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "BRBVKxMb1RQ",
+              "title": "Get a Bigger Chest from Dips (AVOID THESE!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "jdFzYGmvDyg",
+              "title": "Stop Doing Bench Dips Like This!",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "THqN40NcT8M",
+              "title": "The ONLY 2 Exercises for Thicker Triceps",
+              "channel": "Jeff Cavaliere"
+            }
+          ]
+        },
+        {
           "id": "db_overhead_tricep",
           "name": "哑铃过头三头屈伸",
           "sets": "4 × 8-12",
@@ -425,13 +492,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "TzWgv2BeITs",
-              "title": "How to Fix Your &quot;FLAT&quot; Triceps (GUARANTEED)",
+              "video_id": "THqN40NcT8M",
+              "title": "The ONLY 2 Exercises for Thicker Triceps",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "THqN40NcT8M",
-              "title": "The ONLY 2 Exercises for Thicker Triceps",
+              "video_id": "TzWgv2BeITs",
+              "title": "How to Fix Your &quot;FLAT&quot; Triceps (GUARANTEED)",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -472,19 +539,38 @@
       "focus": "背 / 二头 / 后三角",
       "exercises": [
         {
-          "id": "lat_pulldown",
-          "name": "高位下拉(综合机)",
-          "sets": "4 × 8-12",
-          "start_weight_hint": "30 kg 起",
+          "id": "chin_up",
+          "name": "反握引体 (chin-up)",
+          "prescribed": {
+            "sets": 4,
+            "rep_range": [
+              5,
+              10
+            ],
+            "rir_target": 1,
+            "rest_seconds": 180,
+            "start_weight_kg": 0,
+            "weight_step_kg": 1.25
+          },
+          "evidence_note": "拉类王者复合,反握二头激活 +20% vs 正握 (Youdas 2010);EMG 阔背与 lat pulldown 等效但闭链全身参与 (Doma 2013)。完整做不到时:negatives 慢下降(5 秒)或脚踩凳助力",
+          "search_q": "chin up pull up form",
+          "sets": "4 × 5-10",
+          "start_weight_hint": "自重 (能 10+ reps 后挂负重)",
+          "tips": [
+            "正手宽距 = 阔背主;反手肩宽 = 二头 + 阔背平衡(我们用反手)",
+            "肩胛骨先下沉,胸顶向横杆,不耸肩",
+            "上拉到下巴过杆,下放到肘部完全伸直(全 ROM)",
+            "完整做不到:先做 negatives(从顶位慢下 5s)或脚踩凳助力"
+          ],
           "videos": [
             {
-              "video_id": "O94yEoGXtBY",
-              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
+              "video_id": "Hdc7Mw6BIEE",
+              "title": "The Best Way To Do Pull Ups For A Wide Back (Optimal Training Technique)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "hnSqbBk15tw",
-              "title": "Stop Messing Up Your Lat Pulldowns",
+              "video_id": "npQCpz5UWwE",
+              "title": "What Is My Pull-Up Max?",
               "channel": "Jeff Nippard"
             },
             {
@@ -493,8 +579,66 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "KV4D8MQrdhw",
-              "title": "Best Pull Workout For 2025 (Back, Biceps, Rear Delts)",
+              "video_id": "hnSqbBk15tw",
+              "title": "Stop Messing Up Your Lat Pulldowns",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "lf8cleyFDYM",
+              "title": "4 Amazing Lat Exercises You’re Missing Out On",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "dhn5lND_Dfs",
+              "title": "Chinups vs. Pullups for Bigger Arms (THE VERDICT!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "KG4Lwg4eSjg",
+              "title": "Build Muscle With Pull Ups!",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "74XocPGr1SU",
+              "title": "Do More Unbroken Pull-Ups (INSTANTLY)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "sIvJTfGxdFo",
+              "title": "The Official Pull-Up Checklist (AVOID MISTAKES!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "vY9avl0B1I0",
+              "title": "Pullup vs Chinup Grip Width (CHEAT SHEET!)",
+              "channel": "Jeff Cavaliere"
+            }
+          ]
+        },
+        {
+          "id": "lat_pulldown",
+          "name": "高位下拉(综合机)",
+          "sets": "4 × 8-12",
+          "start_weight_hint": "30 kg 起",
+          "videos": [
+            {
+              "video_id": "hnSqbBk15tw",
+              "title": "Stop Messing Up Your Lat Pulldowns",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "O94yEoGXtBY",
+              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "SqQxuEpXnF4",
+              "title": "Do You Have A Perfect Lat Pulldown? (Find Out)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "jLvqKgW-_G8",
+              "title": "The Best And Worst Back Exercises (Ranked By Science)",
               "channel": "Jeff Nippard"
             },
             {
@@ -564,13 +708,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "jLvqKgW-_G8",
-              "title": "The Best And Worst Back Exercises (Ranked By Science)",
+              "video_id": "lf8cleyFDYM",
+              "title": "4 Amazing Lat Exercises You’re Missing Out On",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "lf8cleyFDYM",
-              "title": "4 Amazing Lat Exercises You’re Missing Out On",
+              "video_id": "jLvqKgW-_G8",
+              "title": "The Best And Worst Back Exercises (Ranked By Science)",
               "channel": "Jeff Nippard"
             },
             {
@@ -630,11 +774,6 @@
           "start_weight_hint": "30 kg 起",
           "videos": [
             {
-              "video_id": "jLvqKgW-_G8",
-              "title": "The Best And Worst Back Exercises (Ranked By Science)",
-              "channel": "Jeff Nippard"
-            },
-            {
               "video_id": "1mGXae-LCiM",
               "title": "The Best Back Exercise No One Knows",
               "channel": "Jeff Nippard"
@@ -642,6 +781,11 @@
             {
               "video_id": "PAXkl-AdJFg",
               "title": "How To Train Back WIDTH vs THICKNESS (Close vs Wide Grip? Rows or Pullups?)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "jLvqKgW-_G8",
+              "title": "The Best And Worst Back Exercises (Ranked By Science)",
               "channel": "Jeff Nippard"
             },
             {
@@ -675,8 +819,8 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "8686PLZB_1Q",
-              "title": "STOP Doing Face Pulls Like This! (I&#39;M BEGGING YOU)",
+              "video_id": "Oa1ta2lU3ZI",
+              "title": "Stop Doing THIS On Lat Pulldowns!",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -711,13 +855,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "qfc70k40318",
-              "title": "How To Build Boulder Rear Delts: Optimal Training Explained",
+              "video_id": "P5CXx_jgTDE",
+              "title": "A Better Way To Train Rear Delts",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "P5CXx_jgTDE",
-              "title": "A Better Way To Train Rear Delts",
+              "video_id": "qfc70k40318",
+              "title": "How To Build Boulder Rear Delts: Optimal Training Explained",
               "channel": "Jeff Nippard"
             },
             {
@@ -817,18 +961,18 @@
               "channel": "Jeff Cavaliere"
             },
             {
+              "video_id": "tciCEtwnGuc",
+              "title": "Man vs Preacher Curls",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "nL7JFiGYxRU",
+              "title": "The GREATEST Biceps Exercise You’ve NEVER Tried…",
+              "channel": "Jeff Cavaliere"
+            },
+            {
               "video_id": "neuPgj1lyqE",
               "title": "Best Wrist Position for Curls (HUGE BICEPS)",
-              "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "dl_GlQJPy8Q",
-              "title": "Wrist Pain with Bicep Curls (NOT ANYMORE!)",
-              "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "9TGhtatQeag",
-              "title": "Biceps Workout Tip You&#39;ll NEVER Forget!",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -858,8 +1002,8 @@
           "start_weight_hint": "5 kg 起",
           "videos": [
             {
-              "video_id": "GNO4OtYoCYk",
-              "title": "The Best And Worst Biceps Exercises",
+              "video_id": "_GziHDdJY10",
+              "title": "Don’t Skip These 3 Biceps Exercises",
               "channel": "Jeff Nippard"
             },
             {
@@ -868,13 +1012,8 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "_GziHDdJY10",
-              "title": "Don’t Skip These 3 Biceps Exercises",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "i1YgFZB6alI",
-              "title": "How To Build Huge Biceps: Optimal Training Explained",
+              "video_id": "GNO4OtYoCYk",
+              "title": "The Best And Worst Biceps Exercises",
               "channel": "Jeff Nippard"
             },
             {
@@ -883,8 +1022,33 @@
               "channel": "Jeff Nippard"
             },
             {
+              "video_id": "i1YgFZB6alI",
+              "title": "How To Build Huge Biceps: Optimal Training Explained",
+              "channel": "Jeff Nippard"
+            },
+            {
               "video_id": "DCe8f6vMe9A",
               "title": "Stop Screwing Up Incline Dumbbell Curls (PROPER FORM!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "slC0OBYb7EI",
+              "title": "Incline Curls Tip You’re Forgetting!",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "plvHqKkfKwk",
+              "title": "How to Get Taller, Wider Biceps",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "L5CBFv_xSQc",
+              "title": "The ONLY 2 Exercises for Peaked Biceps",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "VCw_uIxW8WE",
+              "title": "STOP Doing This On Bicep Curls!",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -921,34 +1085,29 @@
           "start_weight_hint": "12 kg 起",
           "videos": [
             {
+              "video_id": "A9OxBT-6Mw0",
+              "title": "Top 3 Quad Exercises For Tree Trunk Legs",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "60gZOXu5gcQ",
+              "title": "Top 4 QUAD Exercises (Brutal Stretch!)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "PPmvh7gBTi0",
+              "title": "Do You Have A Perfect Squat? (Find Out)",
+              "channel": "Jeff Nippard"
+            },
+            {
               "video_id": "kIXcoivzGf8",
               "title": "The Best &amp; Worst QUAD Exercises (Ranked Using Science)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "v-mQm_droHg",
-              "title": "HOW TO FRONT SQUAT: Build Bigger Quads &amp; A Stronger Squat",
+              "video_id": "nDh_BlnLCGc",
+              "title": "How To Leg Press With Perfect Technique",
               "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "bEv6CCg2BC8",
-              "title": "How To Get A Huge Squat With Perfect Technique (Fix Mistakes)",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "sdeQjm7avi8",
-              "title": "The Fastest Way To Blow Up Your Squat (4 Science-Based Steps)",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "-7TPSr0-yo4",
-              "title": "The ONLY 2 Quad Exercises You Need (NO, SERIOUSLY!)",
-              "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "zcJeHchdp9o",
-              "title": "How to Get a “MONSTER” Squat! (3 BEST MOVES)",
-              "channel": "Jeff Cavaliere"
             },
             {
               "video_id": "AB5yJWn-Yik",
@@ -956,13 +1115,23 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "o7yFuIR9XVU",
-              "title": "Bulgarian Split Squats Made Easy (FORM FIX)",
+              "video_id": "-7TPSr0-yo4",
+              "title": "The ONLY 2 Quad Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
               "video_id": "BZ1TUVr4LFk",
               "title": "NEVER DO SQUATS LIKE THIS! | 10 Most Common Mistakes!",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "hiLF_pF3EJM",
+              "title": "Stop F*cking Up Bulgarian Split Squats (PROPER FORM!)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "o7yFuIR9XVU",
+              "title": "Bulgarian Split Squats Made Easy (FORM FIX)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -1073,13 +1242,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "ljO4jkwv8wQ",
-              "title": "How To Do Leg Extensions With Perfect Technique (Grow Every Quad Head)",
+              "video_id": "ztNBgrGy6FQ",
+              "title": "A Better Way To Do Leg Extensions",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "ztNBgrGy6FQ",
-              "title": "A Better Way To Do Leg Extensions",
+              "video_id": "ljO4jkwv8wQ",
+              "title": "How To Do Leg Extensions With Perfect Technique (Grow Every Quad Head)",
               "channel": "Jeff Nippard"
             },
             {
@@ -1088,8 +1257,8 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "kIXcoivzGf8",
-              "title": "The Best &amp; Worst QUAD Exercises (Ranked Using Science)",
+              "video_id": "jf9PBwwNAMs",
+              "title": "Best Scientific Leg Workout For 2025",
               "channel": "Jeff Nippard"
             },
             {
@@ -1184,13 +1353,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "1jp2uhfO8M0",
-              "title": "Glute Exercises Ranked | Hamstrings (BEST TO WORST!)",
+              "video_id": "TiUJA6Hunr0",
+              "title": "Leg Presses WON’T Build Your Glutes!",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "TiUJA6Hunr0",
-              "title": "Leg Presses WON’T Build Your Glutes!",
+              "video_id": "1jp2uhfO8M0",
+              "title": "Glute Exercises Ranked | Hamstrings (BEST TO WORST!)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -1290,14 +1459,33 @@
           "evidence_note": "深拉伸位是小腿训练关键 (Stasinopoulos 2017);腓肠肌恢复快可高频训练 (2-3x/周)"
         },
         {
-          "id": "plank",
-          "name": "平板支撑",
-          "sets": "3 × 40-90",
-          "start_weight_hint": "自重",
+          "id": "hanging_leg_raise",
+          "name": "悬垂举腿",
+          "prescribed": {
+            "sets": 3,
+            "rep_range": [
+              8,
+              15
+            ],
+            "rir_target": 1,
+            "rest_seconds": 90,
+            "start_weight_kg": 0,
+            "weight_step_kg": 0
+          },
+          "evidence_note": "腹直肌下部激活 +35% vs plank,核心动态收缩更全 (Escamilla 2010);难度可调:屈膝 → 直腿 → 直腿到水平 → toes-to-bar",
+          "search_q": "hanging leg raise abs",
+          "sets": "3 × 8-15",
+          "start_weight_hint": "自重 (从屈膝开始)",
+          "tips": [
+            "握杆 + 全身悬垂,肩胛骨主动下沉(不要松垮挂着)",
+            "屈膝抬到腰位 → 进阶直腿到水平 → 大神 toes-to-bar",
+            "用腹肌发力,不要荡秋千借力",
+            "下放控制 2 秒离心,避免甩落"
+          ],
           "videos": [
             {
-              "video_id": "1G0y8D5rFDc",
-              "title": "How To Build A Better Core &amp; Six Pack Abs: Optimal Training Explained",
+              "video_id": "eLCBC6fjtQU",
+              "title": "The Best Ab Exercise No One Knows",
               "channel": "Jeff Nippard"
             },
             {
@@ -1311,8 +1499,8 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "eLCBC6fjtQU",
-              "title": "The Best Ab Exercise No One Knows",
+              "video_id": "2RrGnjxSsiA",
+              "title": "Top 3 Science-Based Exercises For Six Pack Abs (Upper vs Lower Abs) ft. Matt Ogus",
               "channel": "Jeff Nippard"
             },
             {
@@ -1321,49 +1509,31 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "ZyWEXjdAGCQ",
-              "title": "The TRUTH About Planks (IT’S UGLY!)",
+              "video_id": "155cGWBbWEA",
+              "title": "STOP Doing Hanging Ab Raises Like This!",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "gIhCuqtC0r0",
-              "title": "7 Core Exercises for Low Back Pain (IMPORTANT!)",
+              "video_id": "Pr1ieGZ5atk",
+              "title": "Hanging Leg Raise | HOW-TO",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "7qPYYw3lPSA",
+              "title": "How NOT to Swing on Hanging Ab Exercises!",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "ejNkNHes4LY",
+              "title": "Best LOWER ABS Exercise You’ve NEVER Tried!",
               "channel": "Jeff Cavaliere"
             },
             {
               "video_id": "HhXl6NAxUAo",
               "title": "The ONLY 2 Ab Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "A2s4QLmND2E",
-              "title": "The ONLY 2 Exercises for Chiseled Abs",
-              "channel": "Jeff Cavaliere"
-            },
-            {
-              "video_id": "wrRIs2Dk_8U",
-              "title": "PLANK POWER-UPS! (6 Ways to Make Ab Planks Harder)",
-              "channel": "Jeff Cavaliere"
             }
-          ],
-          "search_q": "plank core stability",
-          "tips": [
-            "肘正下方撑,身体一条直线",
-            "腹肌收紧 + 臀夹紧 + 不塌腰不撅屁股",
-            "盯地面前方 30cm 保持颈椎中立"
-          ],
-          "prescribed": {
-            "sets": 3,
-            "rep_range": [
-              40,
-              90
-            ],
-            "rir_target": 1,
-            "rest_seconds": 60,
-            "start_weight_kg": 0,
-            "weight_step_kg": 0
-          },
-          "evidence_note": "腹横肌 + 多裂肌等深层稳定肌训练 (McGill 2013);单位是秒不是次数"
+          ]
         }
       ]
     }

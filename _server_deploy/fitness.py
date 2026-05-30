@@ -269,6 +269,42 @@ def _compute_recommendation(spec: dict, last_sets: list[dict]) -> dict:
     min_reps = min(reps_at_w) if reps_at_w else min(reps_list)
     max_reps = max(reps_at_w) if reps_at_w else max(reps_list)
 
+    # ── 自重动作特殊处理 ──
+    bodyweight = (start_w == 0) and (last_w == 0 or last_w is None)
+    if bodyweight:
+        if min_reps >= rep_high:
+            # 自重达上限 → 提示加负重(或维持自重 +reps)
+            if step > 0:
+                return {
+                    **base,
+                    "weight_kg": 0,
+                    "target_reps": rep_high,
+                    "reason": f"自重 {min_reps} reps ≥{rep_high},可挂 {step} kg 负重(或维持自重继续加 reps)",
+                    "source": "bodyweight_progression",
+                }
+            return {
+                **base,
+                "weight_kg": 0,
+                "target_reps": min_reps + 1,
+                "reason": f"自重已能 {min_reps} reps,目标 +1",
+                "source": "bodyweight_progression",
+            }
+        if min_reps < rep_low:
+            return {
+                **base,
+                "weight_kg": 0,
+                "target_reps": max(rep_low - 2, 3),
+                "reason": f"自重做不到 {rep_low} reps,试 negatives(5s 慢下降)或脚踩凳助力",
+                "source": "bodyweight_regress",
+            }
+        target = min(min_reps + 1, rep_high)
+        return {
+            **base,
+            "weight_kg": 0,
+            "target_reps": target,
+            "reason": f"自重区间内,上次 {min_reps}-{max_reps} reps → 目标 {target}",
+            "source": "bodyweight_rep_progress",
+        }
     # 所有组到上限 → 加重
     if min_reps >= rep_high:
         new_w = _round_step(last_w + step, step)
