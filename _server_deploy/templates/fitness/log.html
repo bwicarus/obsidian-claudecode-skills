@@ -27,10 +27,36 @@
       <div id="progress-bar" style="height:100%;width:0%;background:var(--accent-2);
                                        transition:width 0.4s ease-out;"></div>
     </div>
-    <div style="margin-top:10px;text-align:right;">
+    <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+      <button id="ai-suggest" class="btn" style="font-size:14px;padding:6px 14px;"
+              title="让 AI 看历史和最近分析,给出本日计划调整建议(每个动作的 sets/reps/weight)">
+        🤖 调整计划
+      </button>
       <button id="finish-workout" class="btn primary" style="font-size:14px;padding:6px 14px;">
         🏁 完成训练
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- AI 调整计划 modal -->
+<div id="ai-modal" style="display:none;position:fixed;inset:0;background:#000a;z-index:1000;
+                            align-items:center;justify-content:center;padding:16px;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
+              max-width:760px;width:100%;max-height:90vh;overflow-y:auto;padding:20px;">
+    <h2 style="margin:0 0 8px;">🤖 AI 调整本日计划</h2>
+    <div id="ai-status" class="dim small" style="margin-bottom:12px;">准备中…</div>
+    <div id="ai-overall" style="margin-bottom:14px;padding:10px;background:#0f1d2e;
+                                  border-left:3px solid var(--accent);border-radius:6px;
+                                  font-size:14px;line-height:1.5;display:none;"></div>
+    <div id="ai-list"></div>
+    <div style="display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;margin-top:14px;
+                position:sticky;bottom:0;background:var(--bg-card);padding-top:10px;">
+      <div>
+        <button class="btn small" id="ai-accept-all">✓ 全部接受</button>
+        <button class="btn small" id="ai-reject-all">✗ 全部拒绝</button>
+      </div>
+      <button class="btn" id="ai-close">关闭</button>
     </div>
   </div>
 </div>
@@ -73,6 +99,16 @@
       </summary>
       <div id="finish-by-ex" style="margin-top:10px;font-size:14px;"></div>
     </details>
+
+    <!-- AI 分析(按钮触发) -->
+    <div id="ai-analyze-zone" style="margin-bottom:16px;">
+      <button class="btn" id="ai-analyze-btn" style="width:100%;">
+        🤖 让 AI 分析这次训练
+      </button>
+      <div id="ai-analyze-out" style="display:none;margin-top:10px;padding:12px;
+                                       background:#0f1d2e;border-left:3px solid var(--accent);
+                                       border-radius:6px;font-size:14px;line-height:1.55;"></div>
+    </div>
 
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
       <button class="btn" id="finish-close">继续录入</button>
@@ -813,6 +849,204 @@ document.getElementById('finish-modal').addEventListener('click', (e) => {
   // 点遮罩(不是 modal 内容)关闭
   if (e.target.id === 'finish-modal') {
     e.target.style.display = 'none';
+  }
+});
+
+// ───────────── AI 调整计划 ─────────────
+const _aiSuggestState = { suggestions: null };
+
+async function openAiSuggest() {
+  const modal = document.getElementById('ai-modal');
+  const status = document.getElementById('ai-status');
+  const overall = document.getElementById('ai-overall');
+  const list = document.getElementById('ai-list');
+  modal.style.display = 'flex';
+  status.textContent = '🤖 AI 思考中(看你最近 4 周历史)…';
+  overall.style.display = 'none';
+  list.innerHTML = '';
+  try {
+    const r = await fetch('/api/fitness/ai/suggest_plan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ day_id: DAY_ID }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      status.textContent = '✗ AI 调用失败: ' + (d.error || '?');
+      if (d.raw) {
+        list.innerHTML = `<pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);">${d.raw}</pre>`;
+      }
+      return;
+    }
+    _aiSuggestState.suggestions = d.exercises || [];
+    status.textContent = `✓ 已生成 ${_aiSuggestState.suggestions.length} 个动作建议`;
+    if (d.overall_reasoning) {
+      overall.textContent = '💡 ' + d.overall_reasoning;
+      overall.style.display = 'block';
+    }
+    list.innerHTML = _aiSuggestState.suggestions.map(s => renderSuggestionRow(s)).join('');
+    // 绑定每行的接受/拒绝
+    list.querySelectorAll('.sug-accept').forEach(b =>
+      b.addEventListener('click', () => acceptSuggestion(b.dataset.ex)));
+    list.querySelectorAll('.sug-reject').forEach(b =>
+      b.addEventListener('click', () => rejectSuggestion(b.dataset.ex)));
+  } catch (e) {
+    status.textContent = '✗ 网络失败';
+  }
+}
+
+function renderSuggestionRow(s) {
+  const p = s.prescribed || {};
+  const lo = (p.rep_range || [0,0])[0];
+  const hi = (p.rep_range || [0,0])[1];
+  const change = s.change_summary || '';
+  const isHold = /维持|hold|no change/i.test(change);
+  return `
+    <div class="sug-row" data-ex="${s.id}" style="margin-bottom:10px;padding:10px;
+         background:#0f1d2e;border-radius:6px;border:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;">
+        <div style="flex:1;min-width:0;">
+          <strong>${s.id}</strong>
+          <span style="margin-left:6px;padding:2px 6px;border-radius:4px;
+                       background:${isHold ? '#2d333b' : '#1f3a5f'};
+                       color:${isHold ? 'var(--text-dim)' : '#7dd3fc'};
+                       font-size:12px;">${change || '调整'}</span>
+        </div>
+        <div style="white-space:nowrap;">
+          <button class="btn small success sug-accept" data-ex="${s.id}">✓ 接受</button>
+          <button class="btn small sug-reject" data-ex="${s.id}">✗ 拒绝</button>
+        </div>
+      </div>
+      <div class="small dim" style="margin-top:6px;">
+        ${p.sets || '?'} × ${lo}-${hi} @ <strong style="color:var(--text);">${p.start_weight_kg ?? '?'} kg</strong>
+        · RIR ${p.rir_target ?? '?'} · 间歇 ${p.rest_seconds ?? '?'}s · step ${p.weight_step_kg ?? '?'}kg
+      </div>
+      ${s.reasoning ? `<div class="small" style="margin-top:6px;color:var(--text-dim);">📝 ${s.reasoning}</div>` : ''}
+    </div>
+  `;
+}
+
+async function acceptSuggestion(exId) {
+  const s = (_aiSuggestState.suggestions || []).find(x => x.id === exId);
+  if (!s) return;
+  try {
+    const r = await fetch(`/api/fitness/exercise_override/${encodeURIComponent(exId)}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prescribed: s.prescribed,
+        source: 'ai',
+        reasoning: s.reasoning,
+        change_summary: s.change_summary,
+      }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      // 该行变绿 + 禁用按钮
+      const row = document.querySelector(`.sug-row[data-ex="${CSS.escape(exId)}"]`);
+      if (row) {
+        row.style.borderColor = 'var(--accent-2)';
+        row.querySelector('.sug-accept').textContent = '✓ 已存';
+        row.querySelector('.sug-accept').disabled = true;
+        row.querySelector('.sug-reject').textContent = '撤销';
+      }
+      // 重刷该动作的 loadRec
+      loadRec(exId);
+    }
+  } catch (e) {}
+}
+
+async function rejectSuggestion(exId) {
+  // 拒绝 = 删除 override(回 plan.json 默认)
+  try {
+    await fetch(`/api/fitness/exercise_override/${encodeURIComponent(exId)}`, { method: 'DELETE' });
+    const row = document.querySelector(`.sug-row[data-ex="${CSS.escape(exId)}"]`);
+    if (row) {
+      row.style.opacity = '0.5';
+      row.querySelector('.sug-accept').textContent = '✓ 接受';
+      row.querySelector('.sug-accept').disabled = false;
+      row.querySelector('.sug-reject').textContent = '✗ 拒绝';
+    }
+    loadRec(exId);
+  } catch (e) {}
+}
+
+document.getElementById('ai-suggest').addEventListener('click', openAiSuggest);
+document.getElementById('ai-close').addEventListener('click',
+  () => document.getElementById('ai-modal').style.display = 'none');
+document.getElementById('ai-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'ai-modal') e.target.style.display = 'none';
+});
+document.getElementById('ai-accept-all').addEventListener('click', () => {
+  document.querySelectorAll('.sug-accept').forEach(b => {
+    if (!b.disabled) b.click();
+  });
+});
+document.getElementById('ai-reject-all').addEventListener('click', () => {
+  document.querySelectorAll('.sug-reject').forEach(b => b.click());
+});
+
+// ───────────── AI 分析这次训练 ─────────────
+document.getElementById('ai-analyze-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('ai-analyze-btn');
+  const out = document.getElementById('ai-analyze-out');
+  btn.disabled = true;
+  btn.textContent = '🤖 AI 分析中…(看本次 + 最近 3 次同日历史)';
+  try {
+    const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+    const r = await fetch('/api/fitness/ai/analyze_session', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ date, day_id: DAY_ID }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      out.innerHTML = '<span style="color:var(--danger);">✗ 分析失败: ' + (d.error || '?') + '</span>';
+      if (d.raw) out.innerHTML += `<pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);margin-top:6px;">${d.raw}</pre>`;
+      out.style.display = 'block';
+      btn.textContent = '🤖 重试';
+      btn.disabled = false;
+      return;
+    }
+    // 渲染分析
+    const verdictColor = {
+      progress: 'var(--accent-2)', stagnation: 'var(--warn)',
+      overreach: 'var(--danger)', fatigue: 'var(--warn)', deload_due: 'var(--danger)',
+    }[d.verdict] || 'var(--accent)';
+    let html = `<div style="margin-bottom:8px;">
+      <span style="padding:2px 8px;border-radius:4px;background:${verdictColor};color:#fff;font-size:12px;">
+        ${d.verdict || '?'}
+      </span>
+      <span style="margin-left:8px;">完成 <strong>${d.completion_rate_pct ?? '?'}%</strong>
+      · RPE 估 <strong>${d.rpe_estimate ?? '?'}</strong></span>
+    </div>`;
+    if (d.summary) html += `<div style="margin-bottom:10px;font-style:italic;">"${d.summary}"</div>`;
+    if (d.per_exercise && d.per_exercise.length) {
+      html += '<div style="margin-bottom:8px;"><strong>各动作:</strong></div>';
+      html += '<ul style="margin:0 0 10px 18px;padding:0;">';
+      for (const ex of d.per_exercise) {
+        const v = { progress: '✓', stagnation: '~', fail: '✗', skipped: '⊘' }[ex.verdict] || '·';
+        html += `<li style="margin-bottom:4px;"><strong>${v} ${ex.id}</strong>: ${ex.note || ''}`;
+        if (ex.next_action) html += ` <span class="dim small">[${ex.next_action}]</span>`;
+        html += '</li>';
+      }
+      html += '</ul>';
+    }
+    if (d.key_insights && d.key_insights.length) {
+      html += '<div><strong>💡 洞察:</strong><ul style="margin:4px 0 10px 18px;">';
+      d.key_insights.forEach(i => html += `<li>${i}</li>`);
+      html += '</ul></div>';
+    }
+    if (d.warnings && d.warnings.length) {
+      html += '<div style="color:var(--warn);"><strong>⚠ 提醒:</strong><ul style="margin:4px 0 0 18px;">';
+      d.warnings.forEach(w => html += `<li>${w}</li>`);
+      html += '</ul></div>';
+    }
+    out.innerHTML = html;
+    out.style.display = 'block';
+    btn.style.display = 'none';
+  } catch (e) {
+    out.innerHTML = '<span style="color:var(--danger);">✗ 网络失败</span>';
+    out.style.display = 'block';
+    btn.textContent = '🤖 重试';
+    btn.disabled = false;
   }
 });
 

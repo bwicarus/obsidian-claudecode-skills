@@ -68,7 +68,47 @@ def _db(username: str) -> sqlite3.Connection:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # AI 调整后的动作 prescribed 覆盖(per-user,优先于 plan.json)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_exercise_override (
+            exercise_id TEXT PRIMARY KEY,
+            prescribed_json TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'ai',  -- 'ai' | 'manual'
+            reasoning TEXT,
+            change_summary TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # AI 训练分析(每次完成训练后)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_session_analysis (
+            date TEXT NOT NULL,
+            day_id TEXT NOT NULL,
+            analysis_json TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (date, day_id)
+        )
+    """)
     return db
+
+
+def _exercise_prescribed_with_override(db, plan, ex_id):
+    """读 plan.prescribed + 用户 override(若存在 override 优先)。"""
+    row = db.execute(
+        "SELECT prescribed_json FROM fitness_exercise_override WHERE exercise_id=?",
+        (ex_id,),
+    ).fetchone()
+    if row:
+        try:
+            return json.loads(row["prescribed_json"])
+        except Exception:
+            pass
+    # fallback plan.json
+    for d in plan.get("days", []):
+        for ex in d.get("exercises", []):
+            if ex["id"] == ex_id:
+                return ex.get("prescribed") or {}
+    return {}
 
 
 def _videos_for(db, exercise_id: str, plan: dict) -> list[dict]:
@@ -213,6 +253,144 @@ def api_today_sets(exercise_id: str):
     return jsonify({"ok": True, "date": date, "sets": [dict(r) for r in rows]})
 
 
+# ───────────────────────── AI 教练 ─────────────────────────
+@api_bp.route("/ai/suggest_plan", methods=["POST"])
+def api_ai_suggest_plan():
+    """让 AI 看历史 + 上次 analysis 给出本日所有动作的 prescribed 建议。
+
+    body: {day_id: "push" | "pull" | "legs"}
+    返回: AI 输出的 JSON (overall_reasoning + exercises[].{id, prescribed, change_summary, reasoning})
+    """
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    day_id = data.get("day_id")
+    if not day_id:
+        return jsonify({"ok": False, "error": "missing day_id"}), 400
+    db = _db(username)
+    try:
+        from fitness_coach import suggest_plan
+        plan = _load_plan()
+        r = suggest_plan(db, day_id, plan)
+    finally:
+        db.close()
+    if "error" in r:
+        return jsonify({"ok": False, **r}), 500
+    return jsonify({"ok": True, **r})
+
+
+@api_bp.route("/ai/analyze_session", methods=["POST"])
+def api_ai_analyze_session():
+    """AI 分析一次完成的训练。
+
+    body: {date: "YYYY-MM-DD", day_id: "push"}
+    """
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    date = data.get("date") or time.strftime("%Y-%m-%d")
+    day_id = data.get("day_id")
+    if not day_id:
+        return jsonify({"ok": False, "error": "missing day_id"}), 400
+    db = _db(username)
+    try:
+        from fitness_coach import analyze_session
+        plan = _load_plan()
+        r = analyze_session(db, date, day_id, plan)
+        if "error" not in r:
+            # 持久化分析(下次 suggest_plan 用)
+            db.execute(
+                "INSERT OR REPLACE INTO fitness_session_analysis "
+                "(date, day_id, analysis_json) VALUES (?, ?, ?)",
+                (date, day_id, json.dumps(r, ensure_ascii=False)),
+            )
+            db.commit()
+    finally:
+        db.close()
+    if "error" in r:
+        return jsonify({"ok": False, **r}), 500
+    return jsonify({"ok": True, **r})
+
+
+@api_bp.route("/exercise_override/<exercise_id>", methods=["GET"])
+def api_exercise_override_get(exercise_id: str):
+    username = _username()
+    db = _db(username)
+    row = db.execute(
+        "SELECT prescribed_json, source, reasoning, change_summary, updated_at "
+        "FROM fitness_exercise_override WHERE exercise_id=?",
+        (exercise_id,),
+    ).fetchone()
+    db.close()
+    if not row:
+        return jsonify({"ok": True, "override": None})
+    return jsonify({"ok": True, "override": {
+        "prescribed": json.loads(row["prescribed_json"]),
+        "source": row["source"],
+        "reasoning": row["reasoning"],
+        "change_summary": row["change_summary"],
+        "updated_at": row["updated_at"],
+    }})
+
+
+@api_bp.route("/exercise_override/<exercise_id>", methods=["POST"])
+def api_exercise_override_set(exercise_id: str):
+    """接受 AI 建议(或手动)写入 override。
+    body: {prescribed: {...}, source?: "ai"|"manual", reasoning?, change_summary?}
+    """
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    pres = data.get("prescribed")
+    if not isinstance(pres, dict):
+        return jsonify({"ok": False, "error": "missing prescribed"}), 400
+    db = _db(username)
+    db.execute(
+        "INSERT OR REPLACE INTO fitness_exercise_override "
+        "(exercise_id, prescribed_json, source, reasoning, change_summary, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        (
+            exercise_id, json.dumps(pres, ensure_ascii=False),
+            data.get("source", "ai"),
+            data.get("reasoning"),
+            data.get("change_summary"),
+        ),
+    )
+    db.commit()
+    db.close()
+    return jsonify({"ok": True})
+
+
+@api_bp.route("/exercise_override/<exercise_id>", methods=["DELETE"])
+def api_exercise_override_delete(exercise_id: str):
+    username = _username()
+    db = _db(username)
+    db.execute("DELETE FROM fitness_exercise_override WHERE exercise_id=?", (exercise_id,))
+    db.commit()
+    db.close()
+    return jsonify({"ok": True})
+
+
+@api_bp.route("/exercise_overrides")
+def api_exercise_overrides_list():
+    """列出当前用户所有 override(给 UI 显示哪些动作被 AI 调整过)。"""
+    username = _username()
+    db = _db(username)
+    rows = db.execute(
+        "SELECT exercise_id, prescribed_json, source, reasoning, change_summary, updated_at "
+        "FROM fitness_exercise_override ORDER BY updated_at DESC"
+    ).fetchall()
+    db.close()
+    return jsonify({"ok": True, "overrides": [
+        {
+            "exercise_id": r["exercise_id"],
+            "prescribed": json.loads(r["prescribed_json"]),
+            "source": r["source"],
+            "reasoning": r["reasoning"],
+            "change_summary": r["change_summary"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]})
+
+
 @api_bp.route("/workout_meta")
 def api_workout_meta():
     """返回某 date+day_id 训练的元信息(起点时间 + 已存组数)。
@@ -282,11 +460,23 @@ def _round_step(weight: float, step: float) -> float:
     return round(n * step, 2)
 
 
-def _exercise_spec(plan: dict, exercise_id: str) -> dict | None:
+def _exercise_spec(plan: dict, exercise_id: str, db=None) -> dict | None:
+    """找到动作的 dict。若 db 提供,prescribed 优先用 override。"""
     for d in plan.get("days", []):
         for ex in d.get("exercises", []):
             if ex["id"] == exercise_id:
-                return ex
+                out = dict(ex)
+                if db is not None:
+                    row = db.execute(
+                        "SELECT prescribed_json FROM fitness_exercise_override WHERE exercise_id=?",
+                        (exercise_id,),
+                    ).fetchone()
+                    if row:
+                        try:
+                            out["prescribed"] = json.loads(row["prescribed_json"])
+                        except Exception:
+                            pass
+                return out
     return None
 
 
@@ -415,10 +605,11 @@ def api_recommend(exercise_id: str):
     """基于历史 + plan.prescribed 给出本次推荐。"""
     username = _username()
     plan = _load_plan()
-    spec = _exercise_spec(plan, exercise_id)
-    if not spec:
-        return jsonify({"ok": False, "error": "unknown exercise_id"}), 404
     db = _db(username)
+    spec = _exercise_spec(plan, exercise_id, db=db)
+    if not spec:
+        db.close()
+        return jsonify({"ok": False, "error": "unknown exercise_id"}), 404
     last_row = db.execute(
         "SELECT date FROM fitness_log WHERE exercise_id = ? "
         "ORDER BY date DESC LIMIT 1", (exercise_id,)
