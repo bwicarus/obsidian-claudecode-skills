@@ -108,10 +108,12 @@
     {% for n in range(1, 6) %}
     <tr class="set-row" data-set="{{ n }}">
       <td>{{ n }}</td>
-      <td><input type="number" step="0.5" class="set-weight"
-                 style="width:80px;font-size:16px;" inputmode="decimal"></td>
-      <td><input type="number" step="1" class="set-reps"
-                 style="width:70px;font-size:16px;" inputmode="numeric"></td>
+      <td><input type="text" class="set-weight" inputmode="decimal"
+                 pattern="[0-9]*\.?[0-9]*" autocomplete="off"
+                 style="width:80px;font-size:16px;"></td>
+      <td><input type="text" class="set-reps" inputmode="numeric"
+                 pattern="[0-9]*" autocomplete="off"
+                 style="width:70px;font-size:16px;"></td>
       <td><button class="btn save-set" data-ex="{{ ex.id }}" data-set="{{ n }}">✓</button></td>
     </tr>
     {% endfor %}
