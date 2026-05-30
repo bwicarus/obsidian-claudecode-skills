@@ -143,12 +143,11 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
             ys = [pt[1] for pt in coords]
             x1_img = min(xs); x2_img = max(xs)
             y1_img = min(ys); y2_img = max(ys)
-            # 用 visual char segmentation 精确定位 OCR text 起点(根本解,替代之前的 detector + 短路 list)
-            # 1) 分割 visual 行内每字 bbox
-            # 2) 判断第一段是不是 bullet (blob h<70% line_h + 宽高比≈1)
-            # 3) 若 visual 有 bullet 但 OCR text 不是 strong bullet 字符 → 跳过 visual 第一段,
-            #    OCR text 起点对齐到 visual 第二段(mokuro 漏识别/误识别 bullet 的情况)
-            # 4) 其它情况:OCR text 起点对齐到 visual 第一段(覆盖正常情况 + OCR 起 bullet 正确)
+            # 用 visual char segmentation 判第一段是不是 bullet:
+            # - mokuro 漏识/误识 bullet → visual seg[0] 是 bullet 但 OCR text 起不是 strong bullet
+            #   → offset 1 char_w_cjk(weight-based 位置计算不变,只挪整行起点)
+            # - 不再用 segments 做精确 char-level 定位(weight-based 跟 segs merge 状态不一致
+            #   会 over-correct;让位置算法保持简单稳定)
             if image is not None:
                 py0 = max(0, int(y1_img)); py1 = min(image.shape[0], int(y2_img))
                 px0 = max(0, int(x1_img)); px1 = min(image.shape[1], int(x2_img))
@@ -159,15 +158,11 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
                     segs = _segment_line_chars(patch, py1 - py0)
                     if segs:
                         text_first = text[0] if text else ""
-                        first_is_strong_bullet_text = _is_cjk_punct_or_bullet(text_first)
+                        first_text_is_strong = _is_cjk_punct_or_bullet(text_first)
                         first_seg_is_bullet = _seg_is_bullet(patch, segs[0], py1 - py0)
-                        if first_seg_is_bullet and not first_is_strong_bullet_text:
-                            # mokuro 漏识 / 误识 bullet → OCR text 起点对齐 visual 第二段
-                            actual_start_x = px0 + (segs[1][0] if len(segs) > 1 else segs[0][1])
-                        else:
-                            # OCR 跟 visual 第一段对齐(正常 / OCR 起 bullet 准确)
-                            actual_start_x = px0 + segs[0][0]
-                        x1_img = float(actual_start_x)
+                        if first_seg_is_bullet and not first_text_is_strong:
+                            char_w_cjk_img = (x2_img - x1_img) / max(1, total_w)
+                            x1_img += char_w_cjk_img
             x1 = x1_img * sx
             y1 = y1_img * sy
             x2 = x2_img * sx
