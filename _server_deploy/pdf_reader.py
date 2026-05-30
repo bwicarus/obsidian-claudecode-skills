@@ -395,15 +395,19 @@ def pdf_view():
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
+    # mtime 做 cache-busting 参数:每次 PDF 改了,pdf_url 变 → 浏览器(尤其 iOS Safari PDF.js)必重 fetch
+    try:
+        mtime = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        mtime = 0
     from flask import make_response
     resp = make_response(render_template(
         "pdf_reader.html",
         file_rel=rel,
         file_name=Path(rel).name,
         page=page,
-        pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}",
+        pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}",
     ))
-    # HTML 还在快速迭代，强制每次拿新版（避免浏览器缓存旧 JS 报语法错）
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -414,7 +418,11 @@ def pdf_file(rel):
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
-    return send_file(str(abs_path), mimetype="application/pdf")
+    resp = send_file(str(abs_path), mimetype="application/pdf")
+    # PDF 本身也禁缓存:iOS Safari PDF.js worker 会缓存 PDF blob 即使 HTML 重 fetch
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @bp.route("/api/list-pdfs")
