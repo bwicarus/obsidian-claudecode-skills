@@ -29,3 +29,9 @@ env/
 .env.local
 knowledge_graph/
 state/kg/
+
+# Google Cloud Vision API key (绝对不入 git,用环境变量传)
+*gcp-vision-key*
+*google-vision-key*
+.config/gcp-vision-key
+
