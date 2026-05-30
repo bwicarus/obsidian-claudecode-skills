@@ -946,9 +946,10 @@ async function openAiSuggest() {
     const d = await r.json();
     if (!d.ok) {
       status.textContent = '✗ AI 调用失败: ' + (d.error || '?');
-      if (d.raw) {
-        list.innerHTML = `<pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);">${d.raw}</pre>`;
-      }
+      let extra = '';
+      if (d.raw) extra += `<div class="dim small" style="margin-top:8px;">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);max-height:200px;overflow:auto;">${d.raw}</pre>`;
+      if (d.traceback) extra += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);max-height:300px;overflow:auto;">${d.traceback}</pre>`;
+      list.innerHTML = extra;
       return;
     }
     _aiSuggestState.suggestions = d.exercises || [];
@@ -1123,8 +1124,9 @@ document.getElementById('ai-analyze-btn').addEventListener('click', async () => 
     });
     const d = await r.json();
     if (!d.ok) {
-      out.innerHTML = '<span style="color:var(--danger);">✗ 分析失败: ' + (d.error || '?') + '</span>';
-      if (d.raw) out.innerHTML += `<pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);margin-top:6px;">${d.raw}</pre>`;
+      out.innerHTML = '<div style="color:var(--danger);font-weight:600;margin-bottom:6px;">✗ 分析失败: ' + (d.error || '?') + '</div>';
+      if (d.raw) out.innerHTML += `<div class="dim small">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);margin:2px 0 6px;max-height:200px;overflow:auto;">${d.raw}</pre>`;
+      if (d.traceback) out.innerHTML += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);margin:2px 0;max-height:300px;overflow:auto;">${d.traceback}</pre>`;
       out.style.display = 'block';
       btn.textContent = '🤖 重试';
       btn.disabled = false;
