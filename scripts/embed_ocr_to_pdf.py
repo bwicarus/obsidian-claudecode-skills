@@ -30,6 +30,51 @@ from pathlib import Path
 import unicodedata
 
 import fitz  # PyMuPDF
+import numpy as np
+
+
+def _is_cjk_punct_or_bullet(c: str) -> bool:
+    """字符是否为常见的行首装饰符(防止 OCR text 已含装饰时还误加 offset)。"""
+    return c in "●◆■▲▶『「【〔《［・★☆※" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
+
+
+def _detect_left_bullet(
+    image: "np.ndarray | None",
+    line_x: int,
+    line_y_top: int,
+    line_y_bottom: int,
+    char_w: int,
+) -> bool:
+    """检测 mokuro line bbox 左侧 1 char_w 区域是不是 bullet(●) 还是普通文字。
+    判别用 blob 几何特征(bullet 是矮小方形 dot,文字铺满 line 高度且结构散开):
+    - bullet: blob 高度 < line_h * 0.6, aspect ratio ≈ 1, dark pixel 紧凑
+    - 文字: blob 高度 ≈ line_h, aspect 多变, dark pixel 散布
+    """
+    if image is None or char_w <= 5:
+        return False
+    H, W = image.shape[:2]
+    x0 = max(0, line_x)
+    x1 = min(W, line_x + char_w)
+    y0 = max(0, line_y_top)
+    y1 = min(H, line_y_bottom)
+    if x1 <= x0 + 5 or y1 <= y0 + 5:
+        return False
+    patch = image[y0:y1, x0:x1]
+    if patch.ndim == 3:
+        patch = patch.mean(axis=2)
+    line_h = y1 - y0
+    dark_mask = patch < 80
+    n_dark = int(dark_mask.sum())
+    if n_dark < 30:
+        return False   # 几乎空白
+    ys, xs = np.where(dark_mask)
+    blob_h = int(ys.max() - ys.min()) + 1
+    blob_w = int(xs.max() - xs.min()) + 1
+    # 关键判别:bullet 占 line 中部小区域(高度 < 70% line_h),宽高比近 1
+    if blob_h >= line_h * 0.70:
+        return False   # 高度铺满 → 是字符
+    ratio = blob_w / max(1, blob_h)
+    return 0.6 <= ratio <= 1.7
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 STATE_DIR = PROJECT / "state" / "mokuro-ocr"
@@ -39,8 +84,13 @@ def pdf_sha(pdf_path: Path) -> str:
     return hashlib.sha1(str(pdf_path.resolve()).encode()).hexdigest()[:16]
 
 
-def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
-    """对一页嵌入文字层。返回插入字符数。"""
+def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
+               image: "np.ndarray | None" = None) -> int:
+    """对一页嵌入文字层。返回插入字符数。
+
+    image: 该 page 的原始扫描图(image 坐标系,跟 sidecar 的 img_width/height 同),
+    用于检测每 line 左侧是否有 bullet(●)做 per-line offset 修正。
+    None 时跳过修正(行为同之前)。"""
     n_chars = 0
     for b in sidecar.get("blocks") or []:
         lines = b.get("lines") or []
@@ -75,10 +125,21 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
             total_w = sum(weights) or 1.0
             xs = [pt[0] for pt in coords]
             ys = [pt[1] for pt in coords]
-            x1 = min(xs) * sx
-            y1 = min(ys) * sy
-            x2 = max(xs) * sx
-            y2 = max(ys) * sy
+            x1_img = min(xs); x2_img = max(xs)
+            y1_img = min(ys); y2_img = max(ys)
+            # bullet 检测:mokuro 把 '●' 算进 line bbox 但 lines text 不输出时,
+            # 整行嵌入字符向左偏 1 字宽。检测 line bbox 左侧 1 char_w 区域是否有 dark blob。
+            text_first = text[0] if text else ""
+            if image is not None and not _is_cjk_punct_or_bullet(text_first):
+                char_w_img = (x2_img - x1_img) / max(1, total_w)
+                if _detect_left_bullet(image,
+                                       int(x1_img), int(y1_img), int(y2_img),
+                                       int(char_w_img)):
+                    x1_img += char_w_img   # 右移 1 char_w 跳过 bullet
+            x1 = x1_img * sx
+            y1 = y1_img * sy
+            x2 = x2_img * sx
+            y2 = y2_img * sy
             line_w = x2 - x1
             line_h = y2 - y1
             if not text:
