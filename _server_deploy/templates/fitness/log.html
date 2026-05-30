@@ -4,9 +4,9 @@
 
 <div class="card">
   <h2>{{ day.name }} <span class="dim small">· {{ day.focus }}</span></h2>
-  <p class="small dim">每组录完点 ✓,所有动作完后无需手动提交(自动保存)。点 🎬 看 Jeff Nippard 教学。</p>
+  <p class="small dim">每组录完点 ✓ 自动跳下一组。视频区可切换 / 添加 / 删除推荐(默认 Jeff Nippard)。</p>
   <div class="small dim">
-    日期:<input type="date" id="workout-date" value="{{ '' }}"
+    日期:<input type="date" id="workout-date"
           style="background:var(--bg);color:var(--text);border:1px solid var(--border);
                  border-radius:4px;padding:4px 6px;font-size:14px;">
   </div>
@@ -22,15 +22,31 @@
       <div class="small dim">起点参考:{{ ex.start_weight_hint }}</div>
       <div class="small dim last-info" data-ex="{{ ex.id }}">上次:加载中…</div>
     </div>
-    <button class="btn small video-toggle" data-vid="{{ ex.video_id }}"
-            data-title="{{ ex.video_title }}">🎬 教学</button>
+    <button class="btn small video-toggle" data-ex="{{ ex.id }}">🎬 教学</button>
   </div>
 
-  <div class="video-wrap" style="display:none; margin-top:12px; aspect-ratio:16/9;">
-    <iframe style="width:100%;height:100%;border:0;border-radius:6px;"
-            data-src=""
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowfullscreen></iframe>
+  <!-- carousel 容器,按需展开 -->
+  <div class="video-wrap" data-ex="{{ ex.id }}" style="display:none; margin-top:12px;">
+    <!-- 控制条 -->
+    <div class="video-ctrl" style="display:flex;align-items:center;gap:6px;
+                                    margin-bottom:6px;flex-wrap:wrap;font-size:13px;">
+      <button class="btn small v-prev" title="上个">◀</button>
+      <span class="v-pos dim" style="min-width:50px;text-align:center;">- / -</span>
+      <button class="btn small v-next" title="下个">▶</button>
+      <span class="v-title dim small"
+            style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+                   white-space:nowrap;padding:0 4px;"></span>
+      <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
+      <button class="btn small v-del" title="从列表删除该视频">🗑</button>
+      <button class="btn small v-save" title="保存当前列表为我的">💾</button>
+      <button class="btn small v-reset" title="重置回默认列表">🔄</button>
+    </div>
+    <div style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;">
+      <iframe class="v-iframe" style="width:100%;height:100%;border:0;"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowfullscreen></iframe>
+    </div>
+    <div class="v-status small dim" style="margin-top:4px;min-height:16px;"></div>
   </div>
 
   {% if ex.tips %}
@@ -71,25 +87,161 @@ const DAY_ID = {{ day.id | tojson }};
 const TODAY_DEFAULT = new Date().toISOString().slice(0, 10);
 document.getElementById('workout-date').value = TODAY_DEFAULT;
 
-// 教学视频 toggle (iframe 懒加载,点开才载入避免 6 个 iframe 同时拉)
+// ───────────── 视频 carousel ─────────────
+// state: {exId: {videos: [...], idx: 0, dirty: false}}
+const VS = {};
+
+function ytIdFromUrl(s) {
+  // 解析 YouTube URL / videoId
+  s = (s || '').trim();
+  if (!s) return null;
+  // 已经是纯 id(11 位)
+  if (/^[\w-]{11}$/.test(s)) return s;
+  const m = s.match(/[?&]v=([\w-]{11})/) ||
+            s.match(/youtu\.be\/([\w-]{11})/) ||
+            s.match(/embed\/([\w-]{11})/) ||
+            s.match(/shorts\/([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+async function fetchTitle(vid) {
+  // 尝试 YouTube oEmbed(public,无需 key)
+  try {
+    const r = await fetch(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${vid}&format=json`,
+      { mode: 'cors' }
+    );
+    if (r.ok) {
+      const d = await r.json();
+      return d.title || '';
+    }
+  } catch (e) {}
+  return '';
+}
+
+function renderCarousel(exId) {
+  const state = VS[exId];
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  if (!wrap || !state) return;
+  const posEl = wrap.querySelector('.v-pos');
+  const titleEl = wrap.querySelector('.v-title');
+  const iframe = wrap.querySelector('.v-iframe');
+  const statusEl = wrap.querySelector('.v-status');
+  if (state.videos.length === 0) {
+    posEl.textContent = '0 / 0';
+    titleEl.textContent = '(无视频,点 ➕ 添加)';
+    iframe.src = '';
+    return;
+  }
+  if (state.idx < 0) state.idx = state.videos.length - 1;
+  if (state.idx >= state.videos.length) state.idx = 0;
+  const v = state.videos[state.idx];
+  posEl.textContent = `${state.idx + 1} / ${state.videos.length}`;
+  titleEl.textContent = v.title || v.video_id;
+  const newSrc = `https://www.youtube-nocookie.com/embed/${v.video_id}`;
+  if (iframe.src !== newSrc) iframe.src = newSrc;
+  statusEl.textContent = state.dirty ? '⚠ 未保存(点 💾)' : '';
+}
+
+async function loadVideos(exId) {
+  try {
+    const r = await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}`);
+    const d = await r.json();
+    VS[exId] = { videos: d.videos || [], idx: 0, dirty: false };
+  } catch (e) {
+    VS[exId] = { videos: [], idx: 0, dirty: false };
+  }
+}
+
 document.querySelectorAll('.video-toggle').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const card = btn.closest('.card');
-    const wrap = card.querySelector('.video-wrap');
-    const iframe = wrap.querySelector('iframe');
+  btn.addEventListener('click', async () => {
+    const exId = btn.dataset.ex;
+    const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
     if (wrap.style.display === 'none') {
-      const vid = btn.dataset.vid;
-      if (!iframe.src) iframe.src = `https://www.youtube-nocookie.com/embed/${vid}`;
+      btn.textContent = '🎬 加载…';
+      if (!VS[exId]) await loadVideos(exId);
+      renderCarousel(exId);
       wrap.style.display = 'block';
       btn.textContent = '🎬 关闭';
     } else {
       wrap.style.display = 'none';
+      wrap.querySelector('.v-iframe').src = '';   // 停止播放
       btn.textContent = '🎬 教学';
     }
   });
 });
 
-// 预填上次记录
+// 委托:每个 wrap 内的控制按钮
+document.querySelectorAll('.video-wrap').forEach(wrap => {
+  const exId = wrap.dataset.ex;
+  wrap.querySelector('.v-prev').addEventListener('click', () => {
+    if (!VS[exId]) return;
+    VS[exId].idx--;
+    renderCarousel(exId);
+  });
+  wrap.querySelector('.v-next').addEventListener('click', () => {
+    if (!VS[exId]) return;
+    VS[exId].idx++;
+    renderCarousel(exId);
+  });
+  wrap.querySelector('.v-add').addEventListener('click', async () => {
+    const url = prompt('粘贴 YouTube 视频 URL 或 ID:');
+    if (!url) return;
+    const vid = ytIdFromUrl(url);
+    if (!vid) { alert('解析失败,确认是 youtube.com 链接或 11 位 video_id'); return; }
+    if (!VS[exId]) VS[exId] = { videos: [], idx: 0, dirty: false };
+    if (VS[exId].videos.some(v => v.video_id === vid)) {
+      VS[exId].idx = VS[exId].videos.findIndex(v => v.video_id === vid);
+      renderCarousel(exId);
+      return;
+    }
+    const title = await fetchTitle(vid);
+    VS[exId].videos.push({ video_id: vid, title });
+    VS[exId].idx = VS[exId].videos.length - 1;
+    VS[exId].dirty = true;
+    renderCarousel(exId);
+  });
+  wrap.querySelector('.v-del').addEventListener('click', () => {
+    const state = VS[exId];
+    if (!state || state.videos.length === 0) return;
+    if (!confirm(`从列表删除 "${state.videos[state.idx].title || state.videos[state.idx].video_id}" ?`)) return;
+    state.videos.splice(state.idx, 1);
+    state.dirty = true;
+    if (state.idx >= state.videos.length) state.idx = state.videos.length - 1;
+    if (state.idx < 0) state.idx = 0;
+    renderCarousel(exId);
+  });
+  wrap.querySelector('.v-save').addEventListener('click', async () => {
+    const state = VS[exId];
+    if (!state) return;
+    const statusEl = wrap.querySelector('.v-status');
+    statusEl.textContent = '保存中…';
+    try {
+      const r = await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ videos: state.videos }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        state.dirty = false;
+        statusEl.textContent = '✓ 已保存';
+        setTimeout(() => { if (!state.dirty) statusEl.textContent = ''; }, 1500);
+      } else {
+        statusEl.textContent = '✗ 保存失败';
+      }
+    } catch (e) { statusEl.textContent = '✗ 网络失败'; }
+  });
+  wrap.querySelector('.v-reset').addEventListener('click', async () => {
+    if (!confirm('重置该动作的视频列表为默认(Jeff Nippard)?会丢掉你自己加的。')) return;
+    try {
+      await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}/reset`, { method: 'POST' });
+      await loadVideos(exId);
+      renderCarousel(exId);
+    } catch (e) { alert('重置失败'); }
+  });
+});
+
+// ───────────── 训练记录 ─────────────
 async function loadLast(exId, el) {
   try {
     const r = await fetch(`/api/fitness/last/${encodeURIComponent(exId)}`);
@@ -101,7 +253,6 @@ async function loadLast(exId, el) {
     const summary = d.sets.map(s =>
       `${s.weight_kg ?? '?'}kg×${s.reps ?? '?'}`).join(' / ');
     el.textContent = `上次(${d.date}): ${summary}`;
-    // 自动 prefill 第 1 组的重量
     const card = el.closest('.card');
     const firstRow = card.querySelector('.set-row[data-set="1"]');
     if (firstRow && d.sets[0]) {
@@ -115,17 +266,13 @@ async function loadLast(exId, el) {
 document.querySelectorAll('.last-info').forEach(el =>
   loadLast(el.dataset.ex, el));
 
-// 保存单组
 async function saveSet(btn) {
   const exId = btn.dataset.ex;
   const setNo = parseInt(btn.dataset.set);
   const row = btn.closest('.set-row');
   const weight = parseFloat(row.querySelector('.set-weight').value);
   const reps = parseInt(row.querySelector('.set-reps').value);
-  if (isNaN(weight) || isNaN(reps)) {
-    alert('填重量和次数');
-    return;
-  }
+  if (isNaN(weight) || isNaN(reps)) { alert('填重量和次数'); return; }
   const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
   btn.disabled = true; btn.textContent = '...';
   try {
@@ -140,7 +287,6 @@ async function saveSet(btn) {
     if (d.ok) {
       btn.textContent = '✓ 已存';
       btn.classList.add('success');
-      // 下一组自动 prefill 同重量
       const card = btn.closest('.card');
       const nextRow = card.querySelector(`.set-row[data-set="${setNo + 1}"]`);
       if (nextRow) {
@@ -162,7 +308,6 @@ async function saveSet(btn) {
 document.querySelectorAll('.save-set').forEach(btn =>
   btn.addEventListener('click', () => saveSet(btn)));
 
-// 回车跳下一字段
 document.querySelectorAll('input.set-weight, input.set-reps').forEach(inp => {
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {

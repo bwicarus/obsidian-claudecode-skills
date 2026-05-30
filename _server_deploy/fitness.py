@@ -55,7 +55,34 @@ def _db(username: str) -> sqlite3.Connection:
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_log_date ON fitness_log(date)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_log_ex ON fitness_log(exercise_id, date)")
+    # 用户自定义视频列表覆盖(默认 plan.json 的 videos 不对/不够时,自己 paste 覆盖)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_video_override (
+            exercise_id TEXT PRIMARY KEY,
+            videos_json TEXT NOT NULL,  -- list of {"video_id": "xxx", "title": "xxx"}
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     return db
+
+
+def _videos_for(db, exercise_id: str, plan: dict) -> list[dict]:
+    """合并 user override + plan 默认。优先 override(用户自定义)。"""
+    row = db.execute(
+        "SELECT videos_json FROM fitness_video_override WHERE exercise_id = ?",
+        (exercise_id,)
+    ).fetchone()
+    if row:
+        try:
+            return json.loads(row["videos_json"])
+        except Exception:
+            pass
+    # 回落 plan.json 默认
+    for d in plan.get("days", []):
+        for ex in d.get("exercises", []):
+            if ex["id"] == exercise_id:
+                return ex.get("videos", [])
+    return []
 
 
 # ───────────────────────── helpers ─────────────────────────
@@ -198,6 +225,55 @@ def api_history():
     rows = db.execute(sql, params).fetchall()
     db.close()
     return jsonify({"ok": True, "rows": [dict(r) for r in rows]})
+
+
+@api_bp.route("/videos/<exercise_id>", methods=["GET"])
+def api_videos_get(exercise_id: str):
+    """合并 user override + plan 默认的视频列表。"""
+    username = _username()
+    db = _db(username)
+    plan = _load_plan()
+    vids = _videos_for(db, exercise_id, plan)
+    db.close()
+    return jsonify({"ok": True, "videos": vids})
+
+
+@api_bp.route("/videos/<exercise_id>", methods=["POST"])
+def api_videos_set(exercise_id: str):
+    """完整替换该动作的视频列表(覆盖 plan 默认)。
+    body: {videos: [{video_id, title?}, ...]}
+    """
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    videos = data.get("videos") or []
+    # 验证: 每个元素必须含 video_id
+    clean = []
+    for v in videos:
+        if isinstance(v, str):
+            clean.append({"video_id": v, "title": ""})
+        elif isinstance(v, dict) and v.get("video_id"):
+            clean.append({"video_id": v["video_id"], "title": v.get("title", "")})
+    db = _db(username)
+    db.execute(
+        "INSERT INTO fitness_video_override (exercise_id, videos_json, updated_at) "
+        "VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(exercise_id) DO UPDATE SET videos_json=excluded.videos_json, updated_at=CURRENT_TIMESTAMP",
+        (exercise_id, json.dumps(clean, ensure_ascii=False))
+    )
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "videos": clean})
+
+
+@api_bp.route("/videos/<exercise_id>/reset", methods=["POST"])
+def api_videos_reset(exercise_id: str):
+    """删除 override → 回落到 plan 默认。"""
+    username = _username()
+    db = _db(username)
+    db.execute("DELETE FROM fitness_video_override WHERE exercise_id = ?", (exercise_id,))
+    db.commit()
+    db.close()
+    return jsonify({"ok": True})
 
 
 @api_bp.route("/today")

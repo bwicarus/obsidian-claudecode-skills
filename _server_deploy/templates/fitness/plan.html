@@ -30,13 +30,21 @@
           </ul>
         </details>
         {% endif %}
-        <details style="margin-top:4px;">
-          <summary class="small" style="cursor:pointer;color:var(--accent);">🎬 {{ ex.video_title }}</summary>
-          <div style="margin-top:8px;aspect-ratio:16/9;">
-            <iframe style="width:100%;height:100%;border:0;border-radius:6px;"
-                    src="https://www.youtube-nocookie.com/embed/{{ ex.video_id }}"
-                    allow="accelerometer; encrypted-media; picture-in-picture"
-                    allowfullscreen loading="lazy"></iframe>
+        <details class="video-toggle-row" data-ex="{{ ex.id }}" style="margin-top:4px;">
+          <summary class="small" style="cursor:pointer;color:var(--accent);">🎬 Jeff Nippard 教学(切换 / 自定义在「开始训练」页)</summary>
+          <div class="v-mini" style="margin-top:8px;">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:13px;">
+              <button class="btn small mini-prev">◀</button>
+              <span class="mini-pos dim" style="min-width:50px;text-align:center;">- / -</span>
+              <button class="btn small mini-next">▶</button>
+              <span class="mini-title dim small"
+                    style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+                           white-space:nowrap;padding:0 4px;"></span>
+            </div>
+            <div style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;">
+              <iframe class="mini-iframe" style="width:100%;height:100%;border:0;"
+                      allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
+            </div>
           </div>
         </details>
       </td>
@@ -48,4 +56,62 @@
 </div>
 {% endfor %}
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 简版 carousel:只切换,不编辑(编辑在 log 页)。点 details 展开才载视频。
+const MINI = {};
+
+async function loadMini(exId) {
+  if (MINI[exId]) return MINI[exId];
+  try {
+    const r = await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}`);
+    const d = await r.json();
+    MINI[exId] = { videos: d.videos || [], idx: 0 };
+  } catch (e) { MINI[exId] = { videos: [], idx: 0 }; }
+  return MINI[exId];
+}
+
+function renderMini(exId, root) {
+  const s = MINI[exId];
+  const iframe = root.querySelector('.mini-iframe');
+  const posEl = root.querySelector('.mini-pos');
+  const titleEl = root.querySelector('.mini-title');
+  if (!s || s.videos.length === 0) {
+    posEl.textContent = '0 / 0';
+    titleEl.textContent = '(无)';
+    iframe.src = '';
+    return;
+  }
+  if (s.idx < 0) s.idx = s.videos.length - 1;
+  if (s.idx >= s.videos.length) s.idx = 0;
+  const v = s.videos[s.idx];
+  posEl.textContent = `${s.idx + 1} / ${s.videos.length}`;
+  titleEl.textContent = v.title || v.video_id;
+  const src = `https://www.youtube-nocookie.com/embed/${v.video_id}`;
+  if (iframe.src !== src) iframe.src = src;
+}
+
+document.querySelectorAll('details.video-toggle-row').forEach(det => {
+  const exId = det.dataset.ex;
+  const mini = det.querySelector('.v-mini');
+  det.addEventListener('toggle', async () => {
+    if (det.open) {
+      await loadMini(exId);
+      renderMini(exId, mini);
+    } else {
+      mini.querySelector('.mini-iframe').src = '';   // 停止
+    }
+  });
+  mini.querySelector('.mini-prev').addEventListener('click', e => {
+    e.preventDefault();
+    if (MINI[exId]) { MINI[exId].idx--; renderMini(exId, mini); }
+  });
+  mini.querySelector('.mini-next').addEventListener('click', e => {
+    e.preventDefault();
+    if (MINI[exId]) { MINI[exId].idx++; renderMini(exId, mini); }
+  });
+});
+</script>
 {% endblock %}
