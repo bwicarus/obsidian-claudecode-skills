@@ -33,7 +33,7 @@ from build_vocab_note import (_word_path, _load_existing, _audio_dir,
                               _load_sources_db, _parse_simple_yaml,
                               _USER_NOTES_MARKER)  # noqa: E402
 
-ANKI_MODEL = "Obsidian-cloze"      # 字段 Text (cloze) + Extra；正反面
+ANKI_MODEL = "Vocab Bilingual"     # 8 字段 + 双模板：EN→ZH / ZH→EN（英中互译为考点，例句/音频/来源在背面参考区）
 ANKI_DECK  = "Vocab"
 
 
@@ -71,6 +71,82 @@ def _sync_quiet():
         anki_call("sync")
     except Exception as ex:
         sys.stderr.write(f"[anki sync warn] {ex}\n")
+
+
+_VOCAB_FIELDS = ["Word", "Phonetic", "Audio", "Translation", "Example", "ExampleZh", "More", "Url"]
+
+
+def _vocab_model_spec(name: str) -> dict:
+    css = (
+        ".card{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;"
+        "background:#fff;color:#1a1a1a;line-height:1.5;padding:16px}"
+        ".word{font-size:30px;font-weight:600;text-align:center;margin:8px 0}"
+        ".phonetic{color:#888;font-size:16px;text-align:center;margin-bottom:8px}"
+        ".zh{font-size:22px;text-align:center;margin:12px 0}"
+        "hr{margin:18px auto;border:none;border-top:1px solid #ddd;width:60%}"
+        ".refbox{max-width:640px;margin:14px auto 0;text-align:left}"
+        ".example{color:#444;line-height:1.6;font-size:15px}"
+        ".example b{color:#222}"
+        ".example-zh{color:#888;font-size:13px;margin-top:2px}"
+        ".more{margin-top:10px;color:#666;font-size:12px}"
+        ".url{margin-top:10px;font-size:12px}"
+        ".url a{color:#3b82f6;text-decoration:none}"
+        ".audio-line{text-align:center;margin:6px 0}"
+        ".night_mode .card{background:#1a1a1a;color:#e5e5e5}"
+        ".night_mode .word,.night_mode .zh{color:#fff}"
+        ".night_mode hr{border-top-color:#444}"
+        ".night_mode .example b{color:#fff}"
+        ".night_mode .url a{color:#60a5fa}"
+    )
+    back_ref = (
+        '<div class="refbox">'
+        '{{#Example}}<div class="example">{{Example}}</div>{{/Example}}'
+        '{{#ExampleZh}}<div class="example-zh">🇨🇳 {{ExampleZh}}</div>{{/ExampleZh}}'
+        '{{#More}}<div class="more">{{More}}</div>{{/More}}'
+        '{{#Url}}<div class="url">来源：{{Url}}</div>{{/Url}}'
+        '</div>'
+    )
+    front_en = (
+        '<div class="word">{{Word}}</div>'
+        '{{#Phonetic}}<div class="phonetic">{{Phonetic}}</div>{{/Phonetic}}'
+    )
+    back_en = (
+        '{{FrontSide}}<hr>'
+        '{{#Translation}}<div class="zh">{{Translation}}</div>{{/Translation}}'
+        '{{#Audio}}<div class="audio-line">{{Audio}}</div>{{/Audio}}'
+        + back_ref
+    )
+    front_zh = '<div class="zh">{{Translation}}</div>'
+    back_zh = (
+        '{{FrontSide}}<hr>'
+        '<div class="word">{{Word}}</div>'
+        '{{#Phonetic}}<div class="phonetic">{{Phonetic}}</div>{{/Phonetic}}'
+        '{{#Audio}}<div class="audio-line">{{Audio}}</div>{{/Audio}}'
+        + back_ref
+    )
+    return {
+        "modelName": name,
+        "inOrderFields": _VOCAB_FIELDS,
+        "css": css,
+        "cardTemplates": [
+            {"Name": "EN→ZH", "Front": front_en, "Back": back_en},
+            {"Name": "ZH→EN", "Front": front_zh, "Back": back_zh},
+        ],
+    }
+
+
+def ensure_model(name: str):
+    """创建 Vocab Bilingual model（如不存在）。8 字段 + 双模板。verify + retry 兜底（同 ensure_deck）。"""
+    if name in (anki_call("modelNames") or []):
+        return
+    spec = _vocab_model_spec(name)
+    anki_call("createModel", spec)
+    if name in (anki_call("modelNames") or []):
+        return
+    import time; time.sleep(0.3)
+    anki_call("createModel", spec)
+    if name not in (anki_call("modelNames") or []):
+        raise RuntimeError(f"createModel failed: {name!r} not in modelNames after retry")
 
 
 def store_audio(lemma: str, audio_path: Path, suffix: str = "us") -> str:
@@ -237,45 +313,64 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
     context_bold, context_cloze, context_zh = _build_context(entry, sources_db, lemma)
     title, url = _build_title_url(sources_db)
 
-    # Extra 字段：富文本聚合（lemma + 音标 + 翻译 + 译句 + 例句 + 同义反义 + 词形 + 词频 + 来源 + 音频）
-    extra_parts = [
-        f"<h2 style='margin:4px 0'>{_esc_html(lemma)}</h2>",
-        f"<div style='color:#888'>{_esc_html(entry['phonetics']['us'] or '')}{(' / ' + _esc_html(entry['phonetics']['uk'])) if entry['phonetics']['uk'] else ''}{(' ' + audio_field) if audio_field else ''}</div>",
-        f"<hr><div>{_build_translation_html(entry)}</div>",
-    ]
-    if context_zh:
-        extra_parts.append(f"<div style='margin-top:8px;color:#888'>🇨🇳 {_esc_html(context_zh)}</div>")
-    # 其他例句
-    other_examples = [e for e in entry.get("examples", []) if e not in {context_bold.replace('<b>','').replace('</b>','')}]
+    # ── 字段拼装（对应 Vocab Bilingual model 的 8 字段）──
+    phonetic_str = (entry['phonetics']['us'] or '') + (
+        ' / ' + entry['phonetics']['uk'] if entry['phonetics']['uk'] else ''
+    )
+
+    # More：其它例句 + 词形/词频/同义反义（背面参考区，不影响主考点）
+    other_examples = [e for e in entry.get("examples", []) if e not in {context_bold.replace('<b>', '').replace('</b>', '')}]
+    more_parts = []
     if other_examples:
         ex_lines = []
         zh_map = entry.get("examples_zh") or {}
         for ex in other_examples[:4]:
             zh = zh_map.get(ex, "")
             ex_lines.append(f"<li>{_esc_html(ex)}" + (f"<br><span style='color:#888'>🇨🇳 {_esc_html(zh)}</span>" if zh else "") + "</li>")
-        extra_parts.append(f"<details><summary style='cursor:pointer;color:#888'>更多例句</summary><ul style='margin:6px 0 0 18px;padding:0'>{''.join(ex_lines)}</ul></details>")
+        more_parts.append(f"<details><summary style='cursor:pointer;color:#888'>更多例句</summary><ul style='margin:6px 0 0 18px;padding:0'>{''.join(ex_lines)}</ul></details>")
     note_field = _build_note_field(entry)
     if note_field:
-        extra_parts.append(f"<div style='margin-top:8px;color:#666;font-size:90%'>{note_field}</div>")
+        more_parts.append(f"<div style='margin-top:8px'>{note_field}</div>")
+
+    url_html = ""
     if title and url:
-        extra_parts.append(f"<div style='margin-top:8px;font-size:80%'>来源：<a href='{_esc_html(url)}'>{_esc_html(title)}</a></div>")
+        url_html = f"<a href='{_esc_html(url)}' target='_blank'>{_esc_html(title)}</a>"
 
     fields = {
-        "Text":  context_cloze or f"{{{{c1::{lemma}}}}}",
-        "Extra": "".join(extra_parts),
+        "Word":        lemma,
+        "Phonetic":    _esc_html(phonetic_str),
+        "Audio":       audio_field,
+        "Translation": _build_translation_html(entry),
+        "Example":     context_bold,
+        "ExampleZh":   _esc_html(context_zh) if context_zh else "",
+        "More":        "".join(more_parts),
+        "Url":         url_html,
     }
     tags = ["vocab", f"vocab/lemma::{lemma}"]
 
+    ensure_model(ANKI_MODEL)
+
+    # 已有卡：同 model 直接 update；旧 model（如 Obsidian-cloze）→ 删旧重建（review 历史无法跨 model 迁移）
     if existing_card_id_int:
-        # 更新现有卡
         try:
-            anki_call("updateNoteFields", {"note": {"id": existing_card_id_int, "fields": fields}})
-            anki_call("addTags", {"notes": [existing_card_id_int], "tags": " ".join(tags)})
-            _sync_quiet()
-            return {"ok": True, "action": "updated", "note_id": existing_card_id_int}
-        except Exception as ex:
-            # 更新失败可能是 card 已被删，回落新建
-            sys.stderr.write(f"updateNoteFields failed ({ex}), creating new\n")
+            info = anki_call("notesInfo", {"notes": [existing_card_id_int]}) or []
+            old_model = info[0].get("modelName") if info else ""
+        except Exception:
+            old_model = ""
+        if old_model == ANKI_MODEL:
+            try:
+                anki_call("updateNoteFields", {"note": {"id": existing_card_id_int, "fields": fields}})
+                anki_call("addTags", {"notes": [existing_card_id_int], "tags": " ".join(tags)})
+                _sync_quiet()
+                return {"ok": True, "action": "updated", "note_id": existing_card_id_int}
+            except Exception as ex:
+                sys.stderr.write(f"updateNoteFields failed ({ex}), creating new\n")
+        elif old_model:
+            try:
+                anki_call("deleteNotes", {"notes": [existing_card_id_int]})
+                sys.stderr.write(f"[migrate] {lemma}: deleted old {old_model!r} note {existing_card_id_int}\n")
+            except Exception:
+                pass
 
     note = {
         "deckName": ANKI_DECK,
@@ -287,10 +382,8 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
     try:
         note_id = anki_call("addNote", {"note": note})
     except Exception as ex:
-        # duplicate 视为已存在
         if "duplicate" in str(ex).lower():
-            # 查找现有卡
-            found = anki_call("findNotes", {"query": f'deck:"{ANKI_DECK}" Text:"{lemma}*"'})
+            found = anki_call("findNotes", {"query": f'deck:"{ANKI_DECK}" Word:"{lemma}"'})
             if found:
                 note_id = found[0]
                 anki_call("updateNoteFields", {"note": {"id": note_id, "fields": fields}})
