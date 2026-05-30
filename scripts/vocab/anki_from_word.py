@@ -165,23 +165,31 @@ def _esc_html(s: str) -> str:
 
 
 def _build_translation_html(entry: dict) -> str:
-    """中文释义为主，附 MW/Wiktionary 简洁定义。"""
+    """纯中文释义（用于 Translation 字段；ZH→EN 卡正面只显示这个，不暴露英文定义）。"""
     parts = []
-    zh_defs = [d for d in entry["definitions"] if d.get("zh")]
-    if zh_defs:
-        for d in zh_defs[:5]:
-            pos = d.get("pos") or ""
-            text = _esc_html(d["zh"])
-            parts.append(f"<b>{pos}</b> {text}" if pos else text)
-    mw_defs = [d for d in entry["definitions"] if d.get("source") == "mw"]
-    if mw_defs:
-        parts.append("<br><span style='color:#888;font-size:90%'>")
-        for d in mw_defs[:3]:
-            pos = d.get("pos") or ""
-            text = _esc_html(d["en"])
-            parts.append(f"<i>{pos}</i> {text}" if pos else text)
-        parts.append("</span>")
+    for d in entry["definitions"]:
+        if not d.get("zh"):
+            continue
+        pos = d.get("pos") or ""
+        text = _esc_html(d["zh"])
+        parts.append(f"<b>{pos}</b> {text}" if pos else text)
+        if len(parts) >= 5:
+            break
     return "<br>".join(parts)
+
+
+def _build_mw_defs_html(entry: dict) -> str:
+    """MW/Wiktionary 英文定义。放进 More 字段（背面参考区），避免污染 ZH→EN 卡正面。"""
+    mw_defs = [d for d in entry["definitions"] if d.get("source") == "mw"]
+    if not mw_defs:
+        return ""
+    parts = ["<div style='margin-top:6px;color:#888;font-size:90%'>英文定义：<br>"]
+    for d in mw_defs[:3]:
+        pos = d.get("pos") or ""
+        text = _esc_html(d["en"])
+        parts.append(f"<i>{pos}</i> {text}<br>" if pos else f"{text}<br>")
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _build_context(entry: dict, sources: list[dict], lemma: str) -> tuple[str, str, str]:
@@ -331,6 +339,9 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
     note_field = _build_note_field(entry)
     if note_field:
         more_parts.append(f"<div style='margin-top:8px'>{note_field}</div>")
+    mw_defs_html = _build_mw_defs_html(entry)
+    if mw_defs_html:
+        more_parts.append(mw_defs_html)
 
     url_html = ""
     if title and url:
