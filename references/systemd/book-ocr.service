@@ -1,0 +1,30 @@
+[Unit]
+Description=Mokuro OCR (Japanese textbook, low priority background)
+After=network.target
+
+[Service]
+Type=simple
+User=bwicarus
+Group=bwicarus
+WorkingDirectory=/home/bwicarus/claude
+Environment="CLAUDE_PROJECT=/home/bwicarus/claude"
+Environment="OBSIDIAN_VAULT=/home/bwicarus/obsidian"
+Environment="HOME=/home/bwicarus"
+
+# 低优先级：让 webapp / AI 调用 / SSH 等正常使用，OCR 跑闲时
+Nice=19
+CPUWeight=20
+IOWeight=10
+
+ExecStart=/home/bwicarus/manga-ocr-venv/bin/python /home/bwicarus/claude/scripts/mokuro_ocr_book.py --pdf "/home/bwicarus/obsidian/资源/books/応用情報技術者.pdf"
+
+Restart=on-failure
+RestartSec=60
+# OCR 完成会正常退出（exit 0），systemd 不要把它视为需要保持运行
+RemainAfterExit=no
+
+StandardOutput=append:/home/bwicarus/claude/state/logs/book-ocr.log
+StandardError=append:/home/bwicarus/claude/state/logs/book-ocr.log
+
+[Install]
+WantedBy=multi-user.target
