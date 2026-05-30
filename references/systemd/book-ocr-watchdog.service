@@ -1,0 +1,8 @@
+[Unit]
+Description=Book OCR health watchdog (oneshot)
+After=book-ocr.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/book_ocr_watchdog.py
