@@ -41,42 +41,55 @@ def _is_cjk_punct_or_bullet(c: str) -> bool:
     return c in "●◆■▲▶" or (c and ord(c) in (0x25CF, 0x25C6, 0x25A0, 0x25B2, 0x25B6))
 
 
-def _detect_left_bullet(
-    image: "np.ndarray | None",
-    line_x: int,
-    line_y_top: int,
-    line_y_bottom: int,
-    char_w: int,
-) -> bool:
-    """检测 mokuro line bbox 左侧 1 char_w 区域是不是 bullet(●) 还是普通文字。
-    判别用 blob 几何特征(bullet 是矮小方形 dot,文字铺满 line 高度且结构散开):
-    - bullet: blob 高度 < line_h * 0.6, aspect ratio ≈ 1, dark pixel 紧凑
-    - 文字: blob 高度 ≈ line_h, aspect 多变, dark pixel 散布
-    """
-    if image is None or char_w <= 5:
+def _segment_line_chars(patch_gray: "np.ndarray", line_h: int) -> list[tuple[int, int]]:
+    """vertical column projection 分出 line 内每个 visual 字符的 (x0, x1) bbox。
+    CJK 字间通常 1-3px 空白可分 → 合并 close-by gaps (< 15% line_h) 防止字内笔画散开。
+    返回 list of (x0, x1) in patch-local image coords."""
+    binary = patch_gray < 100
+    col_sum = binary.sum(axis=0)
+    segs: list[tuple[int, int]] = []
+    in_run = False
+    start = 0
+    for x in range(len(col_sum)):
+        if col_sum[x] > 0:
+            if not in_run:
+                start = x
+                in_run = True
+        else:
+            if in_run:
+                if x - start >= 3:
+                    segs.append((start, x))
+                in_run = False
+    if in_run:
+        segs.append((start, len(col_sum)))
+    # 合并同字内白(gap < 15% line_h)
+    merged: list[tuple[int, int]] = []
+    for s, e in segs:
+        if merged and s - merged[-1][1] < line_h * 0.15:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _seg_is_bullet(patch_gray: "np.ndarray", seg: tuple[int, int], line_h: int) -> bool:
+    """判断 segmentation 出来的某 seg 是不是 bullet (实心圆/方块)还是普通文字。
+    bullet: blob 高度 < 70% line_h, 宽高比 0.6-1.7(近正方形)。
+    标题文字粗体也 dark 重,但 blob 高度 ≈ line_h,会 fail 高度 check。"""
+    if seg[1] - seg[0] < 3:
         return False
-    H, W = image.shape[:2]
-    x0 = max(0, line_x)
-    x1 = min(W, line_x + char_w)
-    y0 = max(0, line_y_top)
-    y1 = min(H, line_y_bottom)
-    if x1 <= x0 + 5 or y1 <= y0 + 5:
+    blob_patch = patch_gray[:, seg[0]:seg[1]]
+    dark = blob_patch < 100
+    if int(dark.sum()) < 20:
         return False
-    patch = image[y0:y1, x0:x1]
-    if patch.ndim == 3:
-        patch = patch.mean(axis=2)
-    line_h = y1 - y0
-    dark_mask = patch < 80
-    n_dark = int(dark_mask.sum())
-    if n_dark < 30:
-        return False   # 几乎空白
-    ys, xs = np.where(dark_mask)
-    blob_h = int(ys.max() - ys.min()) + 1
-    blob_w = int(xs.max() - xs.min()) + 1
-    # 关键判别:bullet 占 line 中部小区域(高度 < 70% line_h),宽高比近 1
-    if blob_h >= line_h * 0.70:
-        return False   # 高度铺满 → 是字符
-    ratio = blob_w / max(1, blob_h)
+    y_idx = np.where(dark.any(axis=1))[0]
+    if len(y_idx) == 0:
+        return False
+    bh = int(y_idx.max() - y_idx.min()) + 1
+    if bh >= line_h * 0.70:
+        return False
+    seg_w = seg[1] - seg[0]
+    ratio = seg_w / max(1, bh)
     return 0.6 <= ratio <= 1.7
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
@@ -130,15 +143,31 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
             ys = [pt[1] for pt in coords]
             x1_img = min(xs); x2_img = max(xs)
             y1_img = min(ys); y2_img = max(ys)
-            # bullet 检测:mokuro 把 '●' 算进 line bbox 但 lines text 不输出时,
-            # 整行嵌入字符向左偏 1 字宽。检测 line bbox 左侧 1 char_w 区域是否有 dark blob。
-            text_first = text[0] if text else ""
-            if image is not None and not _is_cjk_punct_or_bullet(text_first):
-                char_w_img = (x2_img - x1_img) / max(1, total_w)
-                if _detect_left_bullet(image,
-                                       int(x1_img), int(y1_img), int(y2_img),
-                                       int(char_w_img)):
-                    x1_img += char_w_img   # 右移 1 char_w 跳过 bullet
+            # 用 visual char segmentation 精确定位 OCR text 起点(根本解,替代之前的 detector + 短路 list)
+            # 1) 分割 visual 行内每字 bbox
+            # 2) 判断第一段是不是 bullet (blob h<70% line_h + 宽高比≈1)
+            # 3) 若 visual 有 bullet 但 OCR text 不是 strong bullet 字符 → 跳过 visual 第一段,
+            #    OCR text 起点对齐到 visual 第二段(mokuro 漏识别/误识别 bullet 的情况)
+            # 4) 其它情况:OCR text 起点对齐到 visual 第一段(覆盖正常情况 + OCR 起 bullet 正确)
+            if image is not None:
+                py0 = max(0, int(y1_img)); py1 = min(image.shape[0], int(y2_img))
+                px0 = max(0, int(x1_img)); px1 = min(image.shape[1], int(x2_img))
+                if px1 > px0 + 5 and py1 > py0 + 5:
+                    patch = image[py0:py1, px0:px1]
+                    if patch.ndim == 3:
+                        patch = patch.mean(axis=2)
+                    segs = _segment_line_chars(patch, py1 - py0)
+                    if segs:
+                        text_first = text[0] if text else ""
+                        first_is_strong_bullet_text = _is_cjk_punct_or_bullet(text_first)
+                        first_seg_is_bullet = _seg_is_bullet(patch, segs[0], py1 - py0)
+                        if first_seg_is_bullet and not first_is_strong_bullet_text:
+                            # mokuro 漏识 / 误识 bullet → OCR text 起点对齐 visual 第二段
+                            actual_start_x = px0 + (segs[1][0] if len(segs) > 1 else segs[0][1])
+                        else:
+                            # OCR 跟 visual 第一段对齐(正常 / OCR 起 bullet 准确)
+                            actual_start_x = px0 + segs[0][0]
+                        x1_img = float(actual_start_x)
             x1 = x1_img * sx
             y1 = y1_img * sy
             x2 = x2_img * sx
