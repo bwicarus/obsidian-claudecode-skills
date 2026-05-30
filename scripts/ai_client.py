@@ -133,9 +133,22 @@ def claude_raw(prompt: str, first: bool = False,
             cmd.append("--continue")
         cmd += ["-p", prompt]
         t0 = time.time()
-        r = _run_hidden(cmd, cwd=PROJECT, capture_output=True,
-                        text=True, encoding="utf-8", errors="replace")
-        out = r.stdout.strip()
+        try:
+            r = _run_hidden(cmd, cwd=PROJECT, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace",
+                            timeout=900)   # 15 分钟,够 Opus max effort
+        except subprocess.TimeoutExpired as e:
+            tag = f"raw TIMEOUT model={model} effort={effort}"
+            _log_ai_call("claude", tag, prompt, f"TIMEOUT after {e.timeout}s", time.time() - t0)
+            return ""
+        out = (r.stdout or "").strip()
+        # CLI 失败时(returncode != 0)记录 stderr 帮调试
+        if r.returncode != 0 and not out:
+            stderr = (r.stderr or "").strip()
+            tag = f"raw FAIL rc={r.returncode} model={model} effort={effort}"
+            _log_ai_call("claude", tag, prompt,
+                         f"STDERR: {stderr[:500]}", time.time() - t0)
+            return ""
         tag = "raw" + ("" if first else " --continue")
         if model: tag += f" model={model}"
         if effort: tag += f" effort={effort}"

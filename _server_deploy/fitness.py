@@ -326,6 +326,7 @@ def api_ai_suggest_plan():
     day_id = data.get("day_id")
     if not day_id:
         return jsonify({"ok": False, "error": "missing day_id"}), 400
+    import traceback
     db = _db(username)
     try:
         from fitness_coach import suggest_plan
@@ -333,6 +334,10 @@ def api_ai_suggest_plan():
         s = _get_settings(db)
         r = suggest_plan(db, day_id, plan,
                          model=s["ai_model"], effort=s["ai_effort"])
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[fitness] suggest_plan exception: {e}\n{tb}", flush=True)
+        r = {"error": f"{type(e).__name__}: {e}", "traceback": tb[:1500]}
     finally:
         db.close()
     if "error" in r:
@@ -352,6 +357,7 @@ def api_ai_analyze_session():
     day_id = data.get("day_id")
     if not day_id:
         return jsonify({"ok": False, "error": "missing day_id"}), 400
+    import traceback
     db = _db(username)
     try:
         from fitness_coach import analyze_session
@@ -360,13 +366,20 @@ def api_ai_analyze_session():
         r = analyze_session(db, date, day_id, plan,
                             model=s["ai_model"], effort=s["ai_effort"])
         if "error" not in r:
-            # 持久化分析(下次 suggest_plan 用)
-            db.execute(
-                "INSERT OR REPLACE INTO fitness_session_analysis "
-                "(date, day_id, analysis_json) VALUES (?, ?, ?)",
-                (date, day_id, json.dumps(r, ensure_ascii=False)),
-            )
-            db.commit()
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO fitness_session_analysis "
+                    "(date, day_id, analysis_json) VALUES (?, ?, ?)",
+                    (date, day_id, json.dumps(r, ensure_ascii=False)),
+                )
+                db.commit()
+            except Exception as e:
+                print(f"[fitness] persist analysis failed: {e}\n{traceback.format_exc()}",
+                      flush=True)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[fitness] analyze_session exception: {e}\n{tb}", flush=True)
+        r = {"error": f"{type(e).__name__}: {e}", "traceback": tb[:1500]}
     finally:
         db.close()
     if "error" in r:
