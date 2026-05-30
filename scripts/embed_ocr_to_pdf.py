@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+import unicodedata
+
 import fitz  # PyMuPDF
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
@@ -49,6 +51,28 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
             coords = line_coords[li]
             if not coords or not text.strip():
                 continue
+            # mokuro 输出全角数字/标点(如 "１１．３")，跟图像印刷半角不一致 → NFKC 还原
+            text = unicodedata.normalize("NFKC", text)
+            # ASCII↔CJK 切换边界手动插空格(mokuro 不加,但图像里有视觉间距):
+            # 比如 "11.3セキュリティ対策" → "11.3 セキュリティ対策"。
+            # 空格不嵌字符但占 weight 位置 → ASCII 字符 bbox 不延伸到下个 CJK 字符位置,
+            # 防止用户拖选 CJK 时误选末尾 ASCII。
+            def _is_asc(c: str) -> bool:
+                return c.isascii() and not c.isspace()
+            new_text = []
+            prev_asc = None
+            for c in text:
+                cur_asc = _is_asc(c)
+                if new_text and prev_asc is not None and prev_asc != cur_asc:
+                    new_text.append(" ")
+                new_text.append(c)
+                prev_asc = cur_asc
+            text = "".join(new_text)
+            # 字符宽度权重:CJK 假名/汉字 = 1.0,ASCII/标点/空格 = 0.5(图像里半宽印刷)
+            def _w(c: str) -> float:
+                return 0.5 if (c.isascii() or c.isspace() or ord(c) <= 0xFF) else 1.0
+            weights = [_w(c) for c in text]
+            total_w = sum(weights) or 1.0
             xs = [pt[0] for pt in coords]
             ys = [pt[1] for pt in coords]
             x1 = min(xs) * sx
@@ -57,16 +81,25 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
             y2 = max(ys) * sy
             line_w = x2 - x1
             line_h = y2 - y1
-            n = len(text)  # 含空格,空格只跳过 insert
-            if n == 0:
+            if not text:
                 continue
-            fs = max(4.0, min(80.0, line_h * 0.95))
-            char_w = line_w / n
+            # fs 同时受 line_h 和 char_w_cjk 限制:
+            # 1) line_h*0.95 让 char bbox 高度填满行高(纵向选中准)
+            # 2) char_w_cjk = line_w/total_w 让 char bbox 宽不超过单字符 spacing
+            #    (大字号标题 line_h > char_w 时,fs 取 char_w 防 ASCII bbox 越界到下个字符)
+            char_w_cjk = line_w / total_w  # CJK 全宽字符的间距(weight=1.0 对应宽度)
+            fs = max(4.0, min(80.0, line_h * 0.95, char_w_cjk))
             baseline = y2 - line_h * 0.10
+            pos_acc = 0.0
+            # 统一 'japan' 字体(切 'helv' 会触发 PyMuPDF reflow 插空格污染整 page text)
+            # ASCII 字符 char bbox 宽仍 ~fs(japan 是全宽 metric),但 position 按 weight 紧排
+            # 相邻 ASCII chars 的 bbox 会重叠,但 selection 准确(PyMuPDF 不插空格因为 japan 全宽 advance)
             for ci, c in enumerate(text):
+                w = weights[ci]
+                x = x1 + (pos_acc / total_w) * line_w
+                pos_acc += w
                 if c.isspace():
                     continue
-                x = x1 + ci * char_w
                 page.insert_text(
                     fitz.Point(x, baseline),
                     c,
