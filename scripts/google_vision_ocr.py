@@ -99,6 +99,8 @@ def main() -> int:
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--pages", default=None,
                     help="如 '10' 单页, '10,80,200' 多页, '10-15' 范围;不指定 = 全本")
+    ap.add_argument("--workers", type=int, default=10,
+                    help="并发 worker 数(API 调用 IO-bound,10-20 倍效提速)")
     args = ap.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -113,10 +115,9 @@ def main() -> int:
 
     doc = fitz.open(str(pdf_path))
     n = len(doc)
-    print(f"PDF: {pdf_path.name}  共 {n} 页", flush=True)
+    print(f"PDF: {pdf_path.name}  共 {n} 页  workers={args.workers}", flush=True)
 
     if args.pages:
-        # 解析 --pages
         pages = set()
         for tok in args.pages.split(","):
             tok = tok.strip()
@@ -129,50 +130,84 @@ def main() -> int:
     else:
         page_list = list(range(n))
 
-    # 跳过已 OCR 的
     todo = [i for i in page_list if not (work / f"p{i:04d}.json").exists()]
     print(f"  需 OCR: {len(todo)}/{len(page_list)}(已完成 {len(page_list) - len(todo)})", flush=True)
 
-    t0 = time.time()
-    for k, i in enumerate(todo):
-        page = doc[i]
-        pix = page.get_pixmap(dpi=args.dpi)
-        png_bytes = pix.tobytes("png")
-        t = time.time()
+    if not todo:
+        print("全部已完成,无需 OCR", flush=True)
+        return 0
+
+    # 并发:fitz Doc 不 thread-safe → 主线程串行 render PNG,workers 跑 API call + 写 sidecar
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    sem = threading.BoundedSemaphore(args.workers * 2)   # in-flight 限制(防 png buffer 爆内存)
+    write_lock = threading.Lock()                          # progress.json 写互斥
+    state = {"completed": 0}
+
+    def worker(page_idx: int, png_bytes: bytes, pix_w: int, pix_h: int):
         try:
+            t = time.time()
             result = ocr_one_page(api_key, png_bytes)
+            dt = time.time() - t
             err = None
         except Exception as ex:
-            result = None
+            result = None; dt = 0
             err = f"{type(ex).__name__}: {ex}"
-        dt = time.time() - t
         out = result if result else {"error": err}
-        out["_page"] = i
+        out["_page"] = page_idx
         out["_seconds"] = round(dt, 2)
-        out["img_width"] = pix.width
-        out["img_height"] = pix.height
-        (work / f"p{i:04d}.json").write_text(
+        out["img_width"] = pix_w
+        out["img_height"] = pix_h
+        (work / f"p{page_idx:04d}.json").write_text(
             json.dumps(out, ensure_ascii=False), encoding="utf-8"
         )
-        del pix
-        completed = k + 1
-        avg = (time.time() - t0) / completed
-        eta = (len(todo) - completed) * avg
-        progress = {
-            "completed": completed,
-            "total": len(todo),
-            "page": i + 1,
-            "last_seconds": round(dt, 2),
-            "avg_seconds": round(avg, 2),
-            "eta_minutes": round(eta / 60, 1),
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        progress_path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), "utf-8")
-        if completed % 20 == 0 or completed == len(todo):
-            print(f"  [{completed}/{len(todo)}] page {i+1} {dt:.1f}s "
-                  f"| avg {avg:.1f}s | ETA {eta/60:.1f}min", flush=True)
+        return page_idx, dt
 
-    print(f"[{time.strftime('%H:%M:%S')}] 完成,总耗时 {time.time()-t0:.1f}s", flush=True)
+    def worker_release(*a):
+        try:
+            return worker(*a)
+        finally:
+            sem.release()
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        # submit pipeline: 主线程 render,worker 处理
+        futures = []
+        for i in todo:
+            sem.acquire()
+            page = doc[i]
+            pix = page.get_pixmap(dpi=args.dpi)
+            png = pix.tobytes("png")
+            futures.append(ex.submit(worker_release, i, png, pix.width, pix.height))
+            del pix, png
+
+        # 收 results + 刷 progress
+        for fut in as_completed(futures):
+            page_idx, dt = fut.result()
+            with write_lock:
+                state["completed"] += 1
+                k = state["completed"]
+                avg = (time.time() - t0) / k
+                eta = (len(todo) - k) * avg
+                progress = {
+                    "completed": k,
+                    "total": len(todo),
+                    "last_page": page_idx + 1,
+                    "last_seconds": round(dt, 2),
+                    "avg_seconds": round(avg, 2),
+                    "eta_minutes": round(eta / 60, 1),
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                progress_path.write_text(
+                    json.dumps(progress, ensure_ascii=False, indent=2), "utf-8"
+                )
+                if k % 20 == 0 or k == len(todo):
+                    print(f"  [{k}/{len(todo)}] p{page_idx+1} {dt:.1f}s "
+                          f"| avg {avg:.1f}s | ETA {eta/60:.1f}min", flush=True)
+
+    print(f"[{time.strftime('%H:%M:%S')}] 完成,总耗时 {time.time()-t0:.1f}s "
+          f"({(time.time()-t0)/len(todo):.2f}s/页 平均)", flush=True)
     return 0
 
 
