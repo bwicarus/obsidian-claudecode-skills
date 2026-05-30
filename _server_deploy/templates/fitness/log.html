@@ -57,15 +57,21 @@
       <span class="v-title dim small"
             style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
                    white-space:nowrap;padding:0 4px;"></span>
+      <button class="btn small v-cc" title="中文字幕(首次 ~10-30s,之后秒出)">🇨🇳</button>
       <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
       <button class="btn small v-del" title="从列表删除该视频">🗑</button>
       <button class="btn small v-save" title="保存当前列表为我的">💾</button>
       <button class="btn small v-reset" title="重置回默认列表">🔄</button>
     </div>
-    <div style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;">
-      <iframe class="v-iframe" style="width:100%;height:100%;border:0;"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowfullscreen></iframe>
+    <div class="v-player-box" style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;">
+      <div class="v-player-mount" style="width:100%;height:100%;"></div>
+    </div>
+    <!-- 字幕条 -->
+    <div class="v-subtitle" style="display:none;margin-top:6px;padding:10px 12px;
+                                    background:#000a;border:1px solid var(--border);
+                                    border-radius:6px;text-align:center;line-height:1.4;">
+      <div class="sub-zh" style="color:#fff;font-size:15px;min-height:20px;"></div>
+      <div class="sub-en" style="color:#9aa4af;font-size:12px;margin-top:2px;min-height:14px;"></div>
     </div>
     <div class="v-status small dim" style="margin-top:4px;min-height:16px;"></div>
   </div>
@@ -108,9 +114,135 @@ const DAY_ID = {{ day.id | tojson }};
 const TODAY_DEFAULT = new Date().toISOString().slice(0, 10);
 document.getElementById('workout-date').value = TODAY_DEFAULT;
 
+// ───────────── YouTube IFrame API (一次加载,全局共享) ─────────────
+let _ytReady = false;
+let _ytPromise = null;
+function loadYT() {
+  if (_ytReady) return Promise.resolve();
+  if (_ytPromise) return _ytPromise;
+  _ytPromise = new Promise(resolve => {
+    if (window.YT && window.YT.Player) { _ytReady = true; resolve(); return; }
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+    window.onYouTubeIframeAPIReady = () => { _ytReady = true; resolve(); };
+  });
+  return _ytPromise;
+}
+
+// ───────────── 字幕 ─────────────
+// SUBS[exId] = {videoId, segments, lastIdx, enabled, timer}
+const SUBS = {};
+
+function clearSubDisplay(exId) {
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  if (!wrap) return;
+  wrap.querySelector('.sub-zh').textContent = '';
+  wrap.querySelector('.sub-en').textContent = '';
+}
+
+function stopSubLoop(exId) {
+  const sub = SUBS[exId];
+  if (sub && sub.timer) { clearInterval(sub.timer); sub.timer = null; }
+}
+
+function startSubLoop(exId) {
+  stopSubLoop(exId);
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  const subBox = wrap.querySelector('.v-subtitle');
+  const zhEl = wrap.querySelector('.sub-zh');
+  const enEl = wrap.querySelector('.sub-en');
+  const sub = SUBS[exId];
+  sub.timer = setInterval(() => {
+    const player = PLAYERS[exId];
+    if (!player || !player.getCurrentTime || !sub.enabled) return;
+    let t;
+    try { t = player.getCurrentTime(); } catch (e) { return; }
+    // 简单线性查找(段数 ~200,O(n) 200/200ms 完全没问题)
+    let idx = -1;
+    for (let i = 0; i < sub.segments.length; i++) {
+      const s = sub.segments[i];
+      if (t >= s.start && t < s.start + s.duration) { idx = i; break; }
+      if (s.start > t) break;
+    }
+    if (idx === sub.lastIdx) return;
+    sub.lastIdx = idx;
+    if (idx >= 0) {
+      const s = sub.segments[idx];
+      zhEl.textContent = s.zh || '(未翻译)';
+      enEl.textContent = s.en || '';
+    } else {
+      zhEl.textContent = '';
+      enEl.textContent = '';
+    }
+  }, 200);
+}
+
+async function toggleSubtitle(exId) {
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  const subBox = wrap.querySelector('.v-subtitle');
+  const ccBtn = wrap.querySelector('.v-cc');
+  const player = PLAYERS[exId];
+  if (!player || !player.getVideoData) {
+    alert('视频还没就绪,等 1 秒再点'); return;
+  }
+  const vidId = player.getVideoData().video_id;
+  if (!vidId) return;
+
+  let sub = SUBS[exId];
+  // 视频换了 → 字幕失效
+  if (sub && sub.videoId !== vidId) {
+    stopSubLoop(exId);
+    delete SUBS[exId];
+    sub = null;
+  }
+  // 关
+  if (sub && sub.enabled) {
+    sub.enabled = false;
+    subBox.style.display = 'none';
+    stopSubLoop(exId);
+    ccBtn.classList.remove('success');
+    return;
+  }
+  // 开
+  if (!sub) {
+    subBox.style.display = 'block';
+    wrap.querySelector('.sub-zh').textContent = '⏳ 加载字幕(首次需翻译,~10-30s)…';
+    try {
+      const r = await fetch(`/api/fitness/subtitles/${encodeURIComponent(vidId)}`);
+      const d = await r.json();
+      if (!d.ok || !d.segments) {
+        wrap.querySelector('.sub-zh').textContent = '✗ 字幕加载失败: ' + (d.error || '?');
+        return;
+      }
+      sub = SUBS[exId] = {
+        videoId: vidId,
+        segments: d.segments,
+        lastIdx: -2,
+        enabled: false,
+        timer: null,
+      };
+      if (d.from_cache) {
+        wrap.querySelector('.sub-en').textContent = '(已缓存,秒出)';
+        setTimeout(() => { wrap.querySelector('.sub-en').textContent = ''; }, 1500);
+      }
+    } catch (e) {
+      wrap.querySelector('.sub-zh').textContent = '✗ 网络失败';
+      return;
+    }
+  }
+  sub.enabled = true;
+  sub.lastIdx = -2;
+  subBox.style.display = 'block';
+  ccBtn.classList.add('success');
+  startSubLoop(exId);
+}
+
 // ───────────── 视频 carousel ─────────────
 // state: {exId: {videos: [...], idx: 0, dirty: false}}
 const VS = {};
+// PLAYERS[exId] = YT.Player 实例
+const PLAYERS = {};
 
 function ytIdFromUrl(s) {
   // 解析 YouTube URL / videoId
@@ -146,22 +278,35 @@ function renderCarousel(exId) {
   if (!wrap || !state) return;
   const posEl = wrap.querySelector('.v-pos');
   const titleEl = wrap.querySelector('.v-title');
-  const iframe = wrap.querySelector('.v-iframe');
   const statusEl = wrap.querySelector('.v-status');
   if (state.videos.length === 0) {
     posEl.textContent = '0 / 0';
     titleEl.textContent = '(无视频,点 ➕ 添加)';
-    iframe.src = '';
     return;
   }
   if (state.idx < 0) state.idx = state.videos.length - 1;
   if (state.idx >= state.videos.length) state.idx = 0;
   const v = state.videos[state.idx];
   posEl.textContent = `${state.idx + 1} / ${state.videos.length}`;
-  titleEl.textContent = v.title || v.video_id;
-  const newSrc = `https://www.youtube-nocookie.com/embed/${v.video_id}`;
-  if (iframe.src !== newSrc) iframe.src = newSrc;
+  titleEl.textContent = `${v.title || v.video_id}` + (v.channel ? ` · ${v.channel}` : '');
   statusEl.textContent = state.dirty ? '⚠ 未保存(点 💾)' : '';
+  // 切换视频:YT.Player 已就绪就 loadVideoById,否则等 player 创建后会自动用 v.video_id
+  const player = PLAYERS[exId];
+  if (player && player.loadVideoById) {
+    try {
+      const cur = player.getVideoData && player.getVideoData().video_id;
+      if (cur !== v.video_id) player.loadVideoById(v.video_id);
+    } catch (e) {}
+  }
+  // 字幕状态:视频换了 → 清空当前字幕显示(下次开还得重新拉新视频的)
+  const sub = SUBS[exId];
+  if (sub && sub.videoId !== v.video_id) {
+    sub.enabled = false;
+    stopSubLoop(exId);
+    wrap.querySelector('.v-subtitle').style.display = 'none';
+    wrap.querySelector('.v-cc').classList.remove('success');
+    delete SUBS[exId];
+  }
 }
 
 async function loadVideos(exId) {
@@ -174,6 +319,25 @@ async function loadVideos(exId) {
   }
 }
 
+async function ensurePlayer(exId) {
+  if (PLAYERS[exId]) return PLAYERS[exId];
+  await loadYT();
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  const mount = wrap.querySelector('.v-player-mount');
+  const state = VS[exId];
+  const firstVid = state && state.videos[state.idx] ? state.videos[state.idx].video_id : '';
+  return await new Promise(resolve => {
+    const p = new YT.Player(mount, {
+      videoId: firstVid,
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: { enablejsapi: 1, modestbranding: 1, rel: 0 },
+      events: {
+        onReady: () => { PLAYERS[exId] = p; resolve(p); }
+      }
+    });
+  });
+}
+
 document.querySelectorAll('.video-toggle').forEach(btn => {
   btn.addEventListener('click', async () => {
     const exId = btn.dataset.ex;
@@ -181,12 +345,19 @@ document.querySelectorAll('.video-toggle').forEach(btn => {
     if (wrap.style.display === 'none') {
       btn.textContent = '🎬 加载…';
       if (!VS[exId]) await loadVideos(exId);
-      renderCarousel(exId);
       wrap.style.display = 'block';
+      await ensurePlayer(exId);
+      renderCarousel(exId);
       btn.textContent = '🎬 关闭';
     } else {
+      // 关:暂停 + 隐藏(保留 player 实例)
+      const p = PLAYERS[exId];
+      if (p && p.pauseVideo) { try { p.pauseVideo(); } catch (e) {} }
+      stopSubLoop(exId);
+      if (SUBS[exId]) SUBS[exId].enabled = false;
+      wrap.querySelector('.v-subtitle').style.display = 'none';
+      wrap.querySelector('.v-cc').classList.remove('success');
       wrap.style.display = 'none';
-      wrap.querySelector('.v-iframe').src = '';   // 停止播放
       btn.textContent = '🎬 教学';
     }
   });
@@ -195,6 +366,7 @@ document.querySelectorAll('.video-toggle').forEach(btn => {
 // 委托:每个 wrap 内的控制按钮
 document.querySelectorAll('.video-wrap').forEach(wrap => {
   const exId = wrap.dataset.ex;
+  wrap.querySelector('.v-cc').addEventListener('click', () => toggleSubtitle(exId));
   wrap.querySelector('.v-prev').addEventListener('click', () => {
     if (!VS[exId]) return;
     VS[exId].idx--;
