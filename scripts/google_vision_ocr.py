@@ -141,12 +141,24 @@ def main() -> int:
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
 
-    sem = threading.BoundedSemaphore(args.workers * 2)   # in-flight 限制(防 png buffer 爆内存)
-    write_lock = threading.Lock()                          # progress.json 写互斥
+    write_lock = threading.Lock()
     state = {"completed": 0}
+    pdf_path_str = str(pdf_path)
+    dpi = args.dpi
 
-    def worker(page_idx: int, png_bytes: bytes, pix_w: int, pix_h: int):
+    def worker(page_idx: int):
+        """每 worker 自己 fitz.open + render + API call(避免主线程 render 成 bottleneck)。
+        fitz 多实例 open 同一 PDF 是 thread-safe(各自独立 file handle)。"""
         try:
+            doc_local = fitz.open(pdf_path_str)
+            try:
+                page = doc_local[page_idx]
+                pix = page.get_pixmap(dpi=dpi)
+                png_bytes = pix.tobytes("png")
+                pix_w, pix_h = pix.width, pix.height
+                del pix
+            finally:
+                doc_local.close()
             t = time.time()
             result = ocr_one_page(api_key, png_bytes)
             dt = time.time() - t
@@ -154,6 +166,7 @@ def main() -> int:
         except Exception as ex:
             result = None; dt = 0
             err = f"{type(ex).__name__}: {ex}"
+            pix_w = pix_h = 0
         out = result if result else {"error": err}
         out["_page"] = page_idx
         out["_seconds"] = round(dt, 2)
@@ -164,25 +177,10 @@ def main() -> int:
         )
         return page_idx, dt
 
-    def worker_release(*a):
-        try:
-            return worker(*a)
-        finally:
-            sem.release()
-
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        # submit pipeline: 主线程 render,worker 处理
-        futures = []
-        for i in todo:
-            sem.acquire()
-            page = doc[i]
-            pix = page.get_pixmap(dpi=args.dpi)
-            png = pix.tobytes("png")
-            futures.append(ex.submit(worker_release, i, png, pix.width, pix.height))
-            del pix, png
+        futures = [ex.submit(worker, i) for i in todo]
 
-        # 收 results + 刷 progress
         for fut in as_completed(futures):
             page_idx, dt = fut.result()
             with write_lock:
