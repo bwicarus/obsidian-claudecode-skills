@@ -48,9 +48,20 @@ def anki_call(action: str, params: dict | None = None, timeout: int = 15):
 
 
 def ensure_deck(name: str):
+    """创建 deck，verify 真生效（Anki 25 偶有 createDeck 静默没建立 → addNote 落默认 deck）。"""
+    decks = anki_call("deckNames") or []
+    if name in decks:
+        return
+    anki_call("createDeck", {"deck": name})
+    decks = anki_call("deckNames") or []
+    if name in decks:
+        return
+    # 第一次没生效，sleep 后再试（race condition 兜底）
+    import time; time.sleep(0.3)
+    anki_call("createDeck", {"deck": name})
     decks = anki_call("deckNames") or []
     if name not in decks:
-        anki_call("createDeck", {"deck": name})
+        raise RuntimeError(f"createDeck failed: {name!r} not in deckNames after retry")
 
 
 def store_audio(lemma: str, audio_path: Path, suffix: str = "us") -> str:
@@ -279,6 +290,13 @@ def make_card(lemma: str, *, force: bool = False) -> dict:
         raise
 
     if note_id:
+        # 兜底：addNote 带 deckName 但 Anki 偶尔仍把卡放进默认 deck（race condition），显式归位
+        try:
+            cids = anki_call("findCards", {"query": f"nid:{note_id}"}) or []
+            if cids:
+                anki_call("changeDeck", {"cards": cids, "deck": ANKI_DECK})
+        except Exception:
+            pass
         _update_card_id_in_md(lemma, note_id)
         return {"ok": True, "action": "created", "note_id": note_id}
     return {"ok": False, "error": "addNote returned no id"}
