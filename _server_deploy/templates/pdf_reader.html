@@ -2138,7 +2138,7 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
 function _expandToWordStart(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
-  const isCJK = (c) => /[一-鿿㐀-䶿]/.test(c);
+  const isCJK = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);   // 汉字+平/片假名+全角+CJK标点
   // 优先用 PyMuPDF 词边界：同一个词 id 直接扩到词首（根治连字/紧排/装饰编号粘连）
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
@@ -2158,7 +2158,7 @@ function _expandToWordStart(chars, idx) {
 function _expandToWordEnd(chars, idx) {
   if (idx < 0 || idx >= chars.length) return idx;
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
-  const isCJK = (c) => /[一-鿿㐀-䶿]/.test(c);
+  const isCJK = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);   // 汉字+平/片假名+全角+CJK标点
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
     while (idx < chars.length - 1 && chars[idx + 1].w === wid && !'/|／'.includes(chars[idx + 1].c)) idx++;
@@ -2275,10 +2275,10 @@ function _selByCharRange(pw, sIdx, eIdx) {
 function _wordExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
-  const isCJK  = (c) => /[一-鿿㐀-䶿]/.test(c);
+  const isCJK  = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);
   const c = chars[idx].c;
-  if (isCJK(c)) return {start: idx, end: idx};
-  // 优先用 PyMuPDF 词边界：同一个词 id 扩成整词，再去掉首尾标点（PyMuPDF 把 "often." 当一个词）
+  // 优先用词边界(英语 PyMuPDF + 日语 fugashi)：同一个 w 扩成整词；
+  // 之前 CJK 在这里 hardcoded 返回 single,阻止了 fugashi 分词生效。
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
     let s = idx, e = idx;
@@ -2288,6 +2288,8 @@ function _wordExpandFromChar(chars, idx) {
     while (e > s && !isWord(chars[e].c) && !isCJK(chars[e].c)) e--;   // 去词尾标点(如 often. 的句号)
     return {start: s, end: e};
   }
+  // 没词 id 时:CJK 字符无分词信息 → 只选 1 字(避免整页扩),英文按 isWord 扩
+  if (isCJK(c)) return {start: idx, end: idx};
   if (!isWord(c)) return {start: idx, end: idx};
   let s = idx;
   while (s > 0 && isWord(chars[s - 1].c) &&
