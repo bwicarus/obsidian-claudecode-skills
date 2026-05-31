@@ -1295,6 +1295,95 @@ def pdf_api_page_vocab_marks():
             except Exception: pass
 
 
+def _book_text_index(abs_path, rel: str) -> dict:
+    """全书逐页纯文本，磁盘缓存(键含 mtime)。{page_str: text}。首次约 3s(679 页)，之后秒读。"""
+    import hashlib
+    try:
+        mtime = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        mtime = 0
+    cdir = CLAUDE_DIR / "state" / "pdf-text-index"
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    cpath = cdir / f"{sha}-{mtime}.json"
+    if cpath.exists():
+        try:
+            return json.loads(cpath.read_text("utf-8"))
+        except Exception:
+            pass
+    import fitz
+    out = {}
+    doc = fitz.open(str(abs_path))
+    try:
+        for i in range(len(doc)):
+            try:
+                out[str(i + 1)] = doc[i].get_text("text")
+            except Exception:
+                out[str(i + 1)] = ""
+    finally:
+        doc.close()
+    try:
+        cdir.mkdir(parents=True, exist_ok=True)
+        # 顺手清理同书旧 mtime 的索引
+        for old in cdir.glob(f"{sha}-*.json"):
+            if old != cpath:
+                try: old.unlink()
+                except Exception: pass
+        cpath.write_text(json.dumps(out, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return out
+
+
+@bp.route("/api/search")
+def pdf_api_search():
+    """全文搜索：在全书文本索引里找 q（大小写不敏感，子串匹配，适配中日无词边界）。
+    GET ?file=&q=&limit= → {ok, total, matches:[{page, count, snippet, pos}]}"""
+    rel = request.args.get("file", "")
+    q = (request.args.get("q", "") or "").strip()
+    abs_path = _safe_vault_path(rel)
+    if not abs_path:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    if len(q) < 1:
+        return jsonify({"ok": False, "error": "empty query"}), 400
+    try:
+        limit = max(1, min(400, int(request.args.get("limit", "200") or "200")))
+    except ValueError:
+        limit = 200
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
+    try:
+        idx = _book_text_index(abs_path, rel)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"index build fail: {ex}"}), 500
+    ql = q.lower()
+    matches = []
+    total = 0
+    for pg in sorted(idx.keys(), key=lambda x: int(x)):
+        text = idx[pg] or ""
+        low = text.lower()
+        cnt = low.count(ql)
+        if not cnt:
+            continue
+        total += cnt
+        if len(matches) < limit:
+            # 取第一处命中做 snippet（折叠空白，上下文 ±28 字）
+            pos = low.find(ql)
+            flat = re.sub(r"\s+", " ", text)
+            flow = flat.lower()
+            fpos = flow.find(ql)
+            if fpos < 0:
+                fpos = 0
+            a = max(0, fpos - 28)
+            b = min(len(flat), fpos + len(q) + 28)
+            snippet = ("…" if a > 0 else "") + flat[a:b].strip() + ("…" if b < len(flat) else "")
+            matches.append({"page": int(pg), "count": cnt, "snippet": snippet,
+                            "pos": fpos - a + (1 if a > 0 else 0)})
+    return jsonify({"ok": True, "q": q, "total": total,
+                    "pages": len(matches), "matches": matches})
+
+
 @bp.route("/api/page-nodes")
 def pdf_api_page_nodes():
     rel = request.args.get("file", "")

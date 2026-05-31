@@ -347,6 +347,22 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .page-tr-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
 .page-tr-line{position:absolute;box-sizing:border-box;background:#fff;color:#111;white-space:nowrap;overflow:hidden;text-align:left;font-weight:500;padding-left:1px;border-radius:1px;box-shadow:inset 3px 0 0 #2563eb}
 #pagetr-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
+/* 全文搜索面板 */
+#search-panel{display:none;position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:260;width:min(520px,94vw);background:#10162a;border:1px solid #3b6db5;border-radius:12px;box-shadow:0 10px 36px rgba(0,0,0,.65);overflow:hidden}
+#search-panel.open{display:block}
+#search-panel .sp-bar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #2a3550}
+#search-panel .sp-bar input{flex:1;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:7px;padding:8px 11px;font-size:14px;outline:none}
+#search-panel .sp-bar input:focus{border-color:#3b6db5}
+#search-panel .sp-stat{color:#7a8497;font-size:11px;white-space:nowrap;min-width:48px;text-align:right}
+#search-panel .sp-close{background:transparent;border:none;color:#7a8497;font-size:18px;cursor:pointer;padding:2px 6px}
+#search-panel .sp-close:hover{color:#fff}
+#search-results{max-height:min(60vh,440px);overflow-y:auto}
+#search-results .sr-item{padding:9px 13px;border-bottom:1px solid #1b2336;cursor:pointer;display:flex;gap:10px;align-items:baseline}
+#search-results .sr-item:hover{background:#162045}
+#search-results .sr-pg{color:#7dd3fc;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;flex-shrink:0}
+#search-results .sr-snip{color:#cfe6ff;font-size:12.5px;line-height:1.5;overflow:hidden}
+#search-results .sr-snip mark{background:#3b6db5;color:#fff;border-radius:2px;padding:0 1px}
+#search-results .sr-empty{padding:16px;color:#5a6680;font-size:12px;text-align:center}
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
@@ -489,6 +505,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
     <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
+    <button onclick="openSearch()" title="全文搜索（全书）">🔍</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <!-- 本书语言选择 -->
@@ -527,6 +544,15 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
     <div id="page-container"></div>
+    <div id="search-panel">
+      <div class="sp-bar">
+        <input id="search-input" type="search" placeholder="全文搜索（全书）…" autocomplete="off"
+               oninput="_searchDebounced()" onkeydown="if(event.key==='Enter'){event.preventDefault();_runSearch();}else if(event.key==='Escape'){closeSearch();}">
+        <span class="sp-stat" id="search-stat"></span>
+        <button class="sp-close" onclick="closeSearch()" title="关闭">✕</button>
+      </div>
+      <div id="search-results"></div>
+    </div>
     <div id="sel-toolbar">
       <div id="hl-color-picker"><span class="lbl">🖌</span></div>
       <div id="sel-main">
@@ -1969,6 +1995,61 @@ window.togglePageTranslate = () => {
     document.querySelectorAll('.page-tr-layer').forEach(el => el.remove());
     document.querySelectorAll('[data-page-num]').forEach(pw => { pw.__pageTrSeq = null; });
   }
+};
+
+// ──────── 全文搜索（F4） ────────
+let _searchTimer = null, _searchSeq = 0;
+window.openSearch = () => {
+  const p = document.getElementById('search-panel');
+  p.classList.add('open');
+  const inp = document.getElementById('search-input');
+  inp.focus(); inp.select();
+  if (inp.value.trim()) _runSearch();
+};
+window.closeSearch = () => { document.getElementById('search-panel').classList.remove('open'); };
+window._searchDebounced = () => {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(_runSearch, 320);
+};
+window._runSearch = async () => {
+  const q = (document.getElementById('search-input').value || '').trim();
+  const stat = document.getElementById('search-stat');
+  const box = document.getElementById('search-results');
+  if (!q) { box.innerHTML = ''; stat.textContent = ''; return; }
+  const seq = ++_searchSeq;
+  stat.textContent = '搜索中…';
+  box.innerHTML = '<div class="sr-empty">⏳ 首次搜索本书需建索引（约几秒）…</div>';
+  try {
+    const r = await fetch('/pdf/api/search?file=' + encodeURIComponent(FILE_REL) +
+      '&q=' + encodeURIComponent(q) + '&limit=200');
+    const d = await r.json();
+    if (seq !== _searchSeq) return;   // 已被更新的查询取代
+    if (!d.ok) { box.innerHTML = '<div class="sr-empty">搜索失败：' + (d.error || '?') + '</div>'; stat.textContent = ''; return; }
+    stat.textContent = d.total + ' 处 / ' + d.pages + ' 页';
+    if (!d.matches.length) { box.innerHTML = '<div class="sr-empty">未找到「' + _esc(q) + '」</div>'; return; }
+    const ql = q.toLowerCase();
+    box.innerHTML = d.matches.map(m => {
+      // snippet 高亮所有 q 出现处（大小写不敏感）
+      let html = '', s = m.snippet || '', sl = s.toLowerCase(), i = 0;
+      while (i < s.length) {
+        const j = sl.indexOf(ql, i);
+        if (j < 0) { html += _esc(s.slice(i)); break; }
+        html += _esc(s.slice(i, j)) + '<mark>' + _esc(s.slice(j, j + q.length)) + '</mark>';
+        i = j + q.length;
+      }
+      return '<div class="sr-item" onclick="_searchJump(' + m.page + ')">' +
+        '<span class="sr-pg">P' + m.page + (m.count > 1 ? '·' + m.count : '') + '</span>' +
+        '<span class="sr-snip">' + html + '</span></div>';
+    }).join('');
+  } catch (e) {
+    if (seq !== _searchSeq) return;
+    box.innerHTML = '<div class="sr-empty">网络错误：' + _esc(e.message) + '</div>';
+    stat.textContent = '';
+  }
+};
+window._searchJump = (pg) => {
+  closeSearch();
+  goToPage(pg);
 };
 
 // 乐观下划线：查词 ECDICT 秒回 lemma+forms 后，立刻在所在页把这些词形画上下划线(橙=new)，
