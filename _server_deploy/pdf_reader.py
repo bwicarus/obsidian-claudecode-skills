@@ -1162,8 +1162,10 @@ def pdf_api_dict_quick():
         jp = ds.lookup_jp(word_raw, context=context)
         if not jp or (jp.get("zh") in ("(无)", "", None)):
             return jsonify({"ok": False, "word": word_raw, "jp": True})
-        ex = jp.get("examples") or []
-        ex_txt = "\n".join(f"· {e.get('ja','')} — {e.get('zh','')}" for e in ex[:2] if isinstance(e, dict))
+        ex = [e for e in (jp.get("examples") or []) if isinstance(e, dict)][:2]
+        # zh 未翻译则回退英文;Tanaka 母语例句即使没中文也先给原句+英译
+        ex_txt = "\n".join(
+            f"· {e.get('ja','')} — {e.get('zh') or e.get('en') or ''}" for e in ex)
         try:
             _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
         except Exception:
@@ -1183,6 +1185,8 @@ def pdf_api_dict_quick():
             "mora": ra.get("mora"),
             "translation": (f"{jp.get('pos','')} " if jp.get("pos") else "") + (jp.get("zh") or ""),
             "definition": ex_txt,
+            "examples": ex,                    # [{ja, zh, en}] 结构化,前端可富渲染
+            "examples_src": jp.get("examples_src", ""),
             "from_cache": jp.get("from_cache", False),
         })
     ec = ds.lookup_ecdict(word)

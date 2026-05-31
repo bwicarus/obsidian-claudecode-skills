@@ -457,6 +457,117 @@ def _jp_reading_accent(word: str) -> dict:
     return {"reading": hira, "reading_kata": kata, "accent": accent, "mora": mora}
 
 
+# ── Tanaka 语料库例句(离线母语例句 + 中文翻译缓存)──────────────────────────
+_TANAKA_DB = None
+_TANAKA_TRIED = False
+_TANAKA_PATH = PROJECT_ROOT / "data" / "tanaka.db"
+
+
+def _tanaka_con():
+    """只读连接(缓存)。无 db 返回 None。"""
+    global _TANAKA_DB, _TANAKA_TRIED
+    if not _TANAKA_TRIED:
+        _TANAKA_TRIED = True
+        try:
+            if _TANAKA_PATH.exists():
+                _TANAKA_DB = sqlite3.connect(
+                    f"file:{_TANAKA_PATH}?mode=ro", uri=True, check_same_thread=False)
+        except Exception:
+            _TANAKA_DB = None
+    return _TANAKA_DB
+
+
+def tanaka_examples(word: str, limit: int = 3) -> list[dict]:
+    """按词条查 Tanaka 母语例句 → [{ja, en, good}]。优质(~ 标记)优先。离线毫秒级。"""
+    con = _tanaka_con()
+    if not con or not word:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT s.ja, s.en, w.good FROM wex w JOIN sent s ON s.id=w.sid "
+            "WHERE w.hw=? ORDER BY w.good DESC, length(s.ja) ASC LIMIT ?",
+            (word.strip(), limit)).fetchall()
+    except Exception:
+        return []
+    return [{"ja": ja, "en": en, "good": bool(g)} for ja, en, g in rows]
+
+
+def _sent_zh(ja: str) -> str | None:
+    """读单句中文翻译缓存(永久)。"""
+    c = _cache_load("jasent", ja, ttl_days=3650)
+    return c.get("zh") if c else None
+
+
+def translate_sentences(sentences: list[str], model: str = "sonnet") -> dict:
+    """批量把日语句子翻成中文 → {ja: zh}。命中缓存的跳过,只翻未缓存的并落库(永久)。"""
+    out = {}
+    todo = []
+    for ja in sentences:
+        ja = (ja or "").strip()
+        if not ja:
+            continue
+        z = _sent_zh(ja)
+        if z:
+            out[ja] = z
+        elif ja not in todo:
+            todo.append(ja)
+    if not todo:
+        return out
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        from ai_client import ask
+    except Exception:
+        return out
+    listing = "\n".join(f"{i+1}. {s}" for i, s in enumerate(todo))
+    prompt = (
+        "把下面每个日语句子翻成自然的简体中文。严格只输出 JSON 数组,顺序对应,"
+        '每项 {"i":序号,"zh":"中文翻译"}。不要解释。\n' + listing + "\n\n只输出 JSON 数组。"
+    )
+    try:
+        resp = ask(prompt, claude_model=model, claude_effort="low")
+    except Exception:
+        return out
+    m = re.search(r"\[.*\]", resp or "", re.DOTALL)
+    if not m:
+        return out
+    try:
+        arr = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return out
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("i", 0)) - 1
+        except (ValueError, TypeError):
+            continue
+        zh = (item.get("zh") or "").strip()
+        if 0 <= idx < len(todo) and zh:
+            ja = todo[idx]
+            out[ja] = zh
+            _cache_save("jasent", ja, {"ja": ja, "zh": zh})
+    return out
+
+
+def jp_examples_zh(word: str, limit: int = 2, translate: bool = False,
+                   model: str = "sonnet") -> list[dict]:
+    """词 → 母语例句 + 中文翻译 [{ja, zh, en}]。
+    translate=False(默认,读路径):只用已缓存的中文翻译,没翻的 zh 留空(前端回退英文)。
+    translate=True(预建路径):同步批量翻译并落库。"""
+    exs = tanaka_examples(word, limit=limit)
+    if not exs:
+        return []
+    if translate:
+        zmap = translate_sentences([e["ja"] for e in exs], model=model)
+    else:
+        zmap = {}
+        for e in exs:
+            z = _sent_zh(e["ja"])
+            if z:
+                zmap[e["ja"]] = z
+    return [{"ja": e["ja"], "zh": zmap.get(e["ja"], ""), "en": e["en"]} for e in exs]
+
+
 def is_japanese(word: str) -> bool:
     """判定是否走日语词典:含假名 → 必是日语;全汉字无拉丁 → 也按日语处理
     (ECDICT 是英语词库,汉字本来就查不到,交给 AI 出中文释义)。"""
@@ -476,9 +587,19 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | Non
     word = (word or "").strip()
     if not word:
         return None
+
+    def _attach_examples(entry: dict) -> dict:
+        """词条自带例句优先;没有则挂 Tanaka 母语例句(只取已缓存的中文翻译)。"""
+        ex = entry.get("examples") or []
+        if not ex:
+            tex = jp_examples_zh(word, limit=2, translate=False)
+            if tex:
+                entry = {**entry, "examples": tex, "examples_src": "tanaka"}
+        return entry
+
     cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
     if cached:
-        return {**cached, "from_cache": True}
+        return _attach_examples({**cached, "from_cache": True})
     # 调 AI
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -509,7 +630,7 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | Non
     data["word"] = word
     data["source"] = "jp_ai"
     _cache_save("jp", word, data)
-    return {**data, "from_cache": False}
+    return _attach_examples({**data, "from_cache": False})
 
 
 def compose_entry(word: str, *, online: bool = True, translate_examples: bool = True) -> dict:
