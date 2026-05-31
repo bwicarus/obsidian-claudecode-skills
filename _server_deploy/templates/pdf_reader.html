@@ -2049,10 +2049,27 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   // 逐行盒子(每行=原文那行的精确 rect 位置/宽度),中文**贪心自然填充**:
   // 填满一行换下一行(像正常文字排版,标点跟着走、不躲逗号、不强行平均切),
   // **字号 = 原文字符高**(跟原句一致)。→ 中文严格落在原句每行位置上、该分行就分行。
-  const rects = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
+  const raw = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
   const zh = (s.zh || '').trim();
-  if (!rects.length || !zh) return;
+  if (!raw.length || !zh) return;
   layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
+  // 关键:s.rects 在逗号/间隙处被切成碎块 → 先把同一视觉行的碎块合并成「整行一个 rect」,
+  // 否则每个碎块当一行填、逗号处留空、中文被切碎(整句莫名其妙地断开)。
+  const rects = (() => {
+    const sorted = raw.slice().sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
+    const lines = [];
+    for (const r of sorted) {
+      const last = lines[lines.length - 1];
+      const h = r[3] - r[1];
+      if (last && Math.abs(r[1] - last[1]) <= h * 0.6) {   // 同一视觉行 → 并入(跨逗号/间隙)
+        last[0] = Math.min(last[0], r[0]); last[1] = Math.min(last[1], r[1]);
+        last[2] = Math.max(last[2], r[2]); last[3] = Math.max(last[3], r[3]);
+      } else {
+        lines.push([r[0], r[1], r[2], r[3]]);
+      }
+    }
+    return lines;
+  })();
   const charH = (rects[0][3] - rects[0][1]) * sy;
   const fontPx = Math.max(9, Math.round(charH * 0.95));   // 与原句字符一致
   const cps = Array.from(zh);                              // 按码点切
