@@ -35,3 +35,6 @@ state/kg/
 *google-vision-key*
 .config/gcp-vision-key
 
+
+# 大体积词典/语料二进制(可由脚本重建,不入库)
+data/
