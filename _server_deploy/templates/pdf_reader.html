@@ -1565,27 +1565,23 @@ async function setupContinuousMode() {
     frag.appendChild(ph);
   }
   container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
-  // IntersectionObserver：可见 ±500px 渲染；离开 ±2000px 释放（节内存）
+  const mainEl = document.getElementById('main');
+  // 「打开即可用」关键:先把视口定位到目标页(占位高已按首页尺寸估算、各页同尺寸→定位准),
+  // 再 **显式渲染目标页并等它完成**(图像+选词层都就绪=可用),最后才 observe 其余页懒加载。
+  // 旧逻辑是先 observe(IO 立刻渲染页1-3,白白浪费+抢带宽)→ 50ms 后才滚到目标页。
+  const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
+  if (targetPh) targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
+  if (targetPh) { try { await _renderPageInto(currentPage, targetPh); } catch (_) {} }
+  // IntersectionObserver:此时视口已在目标页 → 只渲染其附近 ±1400px 的页(目标页已 loaded=1 会跳过)
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
       if (e.isIntersecting && e.target.dataset.loaded === '0') {
-        const num = parseInt(e.target.dataset.pageNum);
-        _renderPageInto(num, e.target);
+        _renderPageInto(parseInt(e.target.dataset.pageNum), e.target);
       }
     });
-  }, {rootMargin: '1400px', root: document.getElementById('main')});   // 提前 ~2 屏渲染+绑 char-layer，滚到时已就绪（threaded 后端并发处理）
+  }, {rootMargin: '1400px', root: mainEl});   // 提前 ~2 屏渲染,滚动顺滑
   container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
-  // 监听滚动同步 currentPage（跟踪可见页用于"上一页 / 下一页"按钮）
-  const mainEl = document.getElementById('main');
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
-  // 滚到 currentPage — 但若有 _pendingScrollY（从位置记忆恢复中）就跳过，
-  // 交给 _restoreScrollAfterRender 设精确 scrollY，避免被 scrollIntoView 覆盖到页首
-  if (!_pendingScrollY) {
-    const target = document.querySelector(`[data-page-num="${currentPage}"]`);
-    if (target) {
-      setTimeout(() => target.scrollIntoView({block: 'start', behavior: 'auto'}), 50);
-    }
-  }
 }
 
 let _scrollTimer = null;
