@@ -441,7 +441,29 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
+    <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
+  </div>
+  <!-- 本书语言选择 -->
+  <div id="lang-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
+       align-items:center;justify-content:center;z-index:251"
+       onclick="if(event.target===this) document.getElementById('lang-mask').style.display='none'">
+    <div style="background:#161b22;border:1px solid #2d333b;border-radius:10px;padding:18px;
+         min-width:260px;max-width:90vw;color:#e6edf3;">
+      <div style="font-size:15px;font-weight:600;margin-bottom:4px;">🌐 本书文本语言</div>
+      <div style="font-size:12px;color:#8a9bb4;margin-bottom:12px;">
+        勾选书里出现的语言。决定点词查哪本词典:日语→中日(读音+中文),英语→英汉,中文→不查。
+      </div>
+      <div id="lang-checks" style="display:flex;flex-direction:column;gap:10px;font-size:14px;">
+        <label style="cursor:pointer;"><input type="checkbox" value="en" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">英语 English</label>
+        <label style="cursor:pointer;"><input type="checkbox" value="ja" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">日语 日本語</label>
+        <label style="cursor:pointer;"><input type="checkbox" value="zh" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">中文(母语,不查词)</label>
+      </div>
+      <div style="margin-top:16px;text-align:right;">
+        <button onclick="document.getElementById('lang-mask').style.display='none'" style="margin-right:8px;">取消</button>
+        <button onclick="saveLangPicker()" style="background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:6px;">保存</button>
+      </div>
+    </div>
   </div>
   <div id="main">
     <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;
@@ -720,6 +742,30 @@ try {
 
 const PDF_URL = {{ pdf_url|tojson }};
 const FILE_REL = {{ file_rel|tojson }};
+let BOOK_LANGS = [];   // 本书声明的语言,如 ['en','ja'];影响点词查哪本词典
+async function loadBookLangs() {
+  try {
+    const r = await fetch('/pdf/api/book-langs?file=' + encodeURIComponent(FILE_REL || ''));
+    const d = await r.json();
+    if (d.ok) BOOK_LANGS = d.langs || [];
+  } catch (e) {}
+}
+function openLangPicker() {
+  document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = BOOK_LANGS.includes(c.value); });
+  document.getElementById('lang-mask').style.display = 'flex';
+}
+async function saveLangPicker() {
+  const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
+  try {
+    const r = await fetch('/pdf/api/book-langs', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ file: FILE_REL, langs }),
+    });
+    const d = await r.json();
+    if (d.ok) BOOK_LANGS = d.langs || langs;
+  } catch (e) {}
+  document.getElementById('lang-mask').style.display = 'none';
+}
 window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = {{ page }};
@@ -865,6 +911,7 @@ async function loadPdf() {
     if (window._inkLoadAll) window._inkLoadAll();   // 手写墨迹：拉一次，渲染完页面再贴
     renderHlPicker();
     loadGrammarTracked();   // 拉该 PDF 的语法跟踪节点（影响工具栏按钮显示）
+    loadBookLangs();        // 拉本书语言声明(影响点词查词典路由)
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
     if (readMode === 'continuous') {
       await setupContinuousMode();
@@ -2510,11 +2557,17 @@ function _bindCharLayer(cl, pw) {
           const hasKana  = s => /[぀-ゟ゠-ヿ]/.test(s);      // 平/片假名 = 铁定日语
           const hasKanji = s => /[一-鿿㐀-䶿]/.test(s);      // CJK 汉字(日中共用,光看词分不出)
           const isEng = /^[A-Za-z][A-Za-z'’\-]*$/.test(_t);
-          // 日语判定:词含假名 → 铁定日语;纯汉字词 → 看上下文(整句)有没有假名
-          // (日语句几乎必夹假名 → 该汉字是日语词;整句无假名 = 中文文档,不当日语)
-          const isJa = hasKana(_t) || (hasKanji(_t) && hasKana(_ctx));
-          // 日语:总是弹词典(没有别的查法);英文:沿用「点击未掌握词直接翻译」开关
-          if (_t && _t.length <= 30 && (isJa || (isEng && _clickTranslateEnabled()))) {
+          const declared = BOOK_LANGS.length > 0;
+          // 日语判定:优先用本书语言声明;没声明则回退启发(假名铁定/纯汉字看上下文假名)
+          let isJa;
+          if (declared) {
+            isJa = BOOK_LANGS.includes('ja') && (hasKana(_t) || hasKanji(_t));
+          } else {
+            isJa = hasKana(_t) || (hasKanji(_t) && hasKana(_ctx));
+          }
+          // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
+          const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
+          if (_t && _t.length <= 30 && (isJa || engOk)) {
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
         }
@@ -2885,7 +2938,8 @@ window.showWordPopover = async (word, ctx) => {
   try {
     const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
       '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
-      '&context=' + encodeURIComponent(ctx || ''));
+      '&context=' + encodeURIComponent(ctx || '') +
+      '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
     const d = await r.json();
     if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
     _wordPopState.lemma = d.lemma || word;

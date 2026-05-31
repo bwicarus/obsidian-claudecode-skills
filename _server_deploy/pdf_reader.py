@@ -1098,6 +1098,44 @@ def _trigger_paragraph_exposure_async(pdf_rel: str, page: int, lemma: str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+# ── 每本书的文本语言声明(影响查词路由:汉字词按 ja 走中日 / 按 zh 当中文)──
+_BOOK_LANGS_PATH = CLAUDE_DIR / "state" / "pdf-book-langs.json"
+_VALID_LANGS = {"en", "ja", "zh", "ko", "fr", "de"}
+
+
+def _load_book_langs() -> dict:
+    try:
+        return json.loads(_BOOK_LANGS_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _book_langs_for(rel: str) -> list:
+    return _load_book_langs().get(rel, [])
+
+
+@bp.route("/api/book-langs")
+def pdf_api_book_langs_get():
+    return jsonify({"ok": True, "langs": _book_langs_for(request.args.get("file", ""))})
+
+
+@bp.route("/api/book-langs", methods=["POST"])
+def pdf_api_book_langs_set():
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    if not rel:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    langs = [l for l in (data.get("langs") or []) if l in _VALID_LANGS]
+    allm = _load_book_langs()
+    allm[rel] = langs
+    try:
+        _BOOK_LANGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BOOK_LANGS_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "langs": langs})
+
+
 @bp.route("/api/dict-quick")
 def pdf_api_dict_quick():
     """单词小框用：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回；
@@ -1112,8 +1150,15 @@ def pdf_api_dict_quick():
     ds, _ = _vocab_modules()
     if not ds:
         return jsonify({"ok": False, "error": "dict unavailable"})
+    # 本书声明的语言(前端传 ?langs=en,ja;没传则按 rel 读存储)。决定汉字词走哪。
+    langs = [l for l in (request.args.get("langs", "") or "").split(",") if l]
+    if not langs and pdf_rel:
+        langs = _book_langs_for(pdf_rel)
+    word_is_cjk = bool(getattr(ds, "is_japanese", None)) and ds.is_japanese(word_raw)
+    # 声明了 ja → 汉字/假名词走中日;声明了但没 ja → 不当日语;没声明 → 自动判断(is_japanese)
+    want_ja = word_is_cjk and ((not langs) or ("ja" in langs))
     # 日语词 → 走 AI 中日词典(无免费离线中日库;Claude Haiku + 永久缓存)
-    if getattr(ds, "is_japanese", None) and ds.is_japanese(word_raw):
+    if want_ja:
         jp = ds.lookup_jp(word_raw, context=context)
         if not jp or (jp.get("zh") in ("(无)", "", None)):
             return jsonify({"ok": False, "word": word_raw, "jp": True})
