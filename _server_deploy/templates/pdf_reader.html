@@ -1338,6 +1338,10 @@ function _ttsWord(w, lang) {
     speechSynthesis.speak(u);
   } catch (e) {}
 }
+// 暴露到全局:HTML 内联 onclick 在全局作用域执行,模块内的函数声明它够不到(否则按钮无声)
+window._ttsWord = _ttsWord;
+window._speakOnline = _speakOnline;
+window._speakWord = _speakWord;
 async function _vocabAddAnki(lemma, btn) {
   const old = btn.textContent;
   btn.textContent = '…'; btn.disabled = true;
