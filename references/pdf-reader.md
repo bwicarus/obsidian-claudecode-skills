@@ -600,5 +600,8 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 ### 14.10 竖直拖动当滚动、横向拖动才选字(手势消歧)
 手指落在可选字符上、想上下滑页时,旧逻辑一拖就竖向选中很多行。改:`_bindCharLayer` 的 `onMove` 里,**触摸**拖动首次动够 8px 时锁定方向 `_dragDir` —— `dy>dx`(竖直为主)→ `scroll`:置 `_dragStartCharIdx=null`、清选区、**不 `preventDefault`**(页面正常上下滚);否则 `select`(原逻辑,preventDefault+选字)。**鼠标(ev=null)不受限**,竖直拖仍可选。妙处:多行选择只要**起手横向**就锁成 select、后续往下拉照常多行选;只有**一上来直上直下**才滚动。(依据:复制几乎都是沿行水平方向。)
 
+### 14.11 top-level await 之后绑 DOMContentLoaded 永不触发(坑,曾静默废掉多个 setup)
+`<script type="module">` 顶部有 `await import('/static/pdfjs/pdf.mjs?v=…')`。**top-level await 不延迟 DOMContentLoaded** → 该事件在 await 期间就已触发;await **之后**才执行的 `window.addEventListener('DOMContentLoaded', fn)` 是在事件已过之后注册的 → **fn 永不执行**。这静默废掉了 `_setupPinchZoom`(双指缩放)、`_setupResizeWatcher`、`_applyDebugVisibility`、以及新加的页码 scrubber(完全无反应)。修法(所有 await 之后的 DOMContentLoaded 绑定都改这个稳健模式):`if (document.readyState !== 'loading') fn(); else addEventListener('DOMContentLoaded', fn);`。(教训:有 top-level await 的 module 里,await 之后别再依赖 DOMContentLoaded。)
+
 ### 14.9 日语发音
 有道 dictvoice 是英语库 → 日语无声。改 `_speakOnline` 日语分流到浏览器原生 `speechSynthesis` **ja-JP**（iPad 自带 Kyoko，离线，念假名读音保证读对；iOS getVoices 暂空时靠 `u.lang='ja-JP'` 路由）。免费真人录音离线日语词典基本不存在（Forvo 要联网+key），合成音够用。
