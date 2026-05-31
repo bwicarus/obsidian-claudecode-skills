@@ -418,10 +418,14 @@ def pdf_file(rel):
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
-    resp = send_file(str(abs_path), mimetype="application/pdf")
-    # PDF 本身也禁缓存:iOS Safari PDF.js worker 会缓存 PDF blob 即使 HTML 重 fetch
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
+    # conditional=True → 支持 HTTP Range(206),PDF.js 才能逐页流式只取所需字节,
+    # 大文件(几百 MB)不必整本下载到浏览器,iPad Safari 不再 OOM。
+    resp = send_file(str(abs_path), mimetype="application/pdf", conditional=True)
+    resp.headers["Accept-Ranges"] = "bytes"
+    # 缓存:用 private + must-revalidate 而非 no-store —— no-store 会让部分浏览器
+    # 放弃 Range 分块缓存、退回整本下载。private 允许 PDF.js 缓存已取分块但不进
+    # 共享缓存,且仍每次校验(配合 ?v=mtime query 防跨版本串味)。
+    resp.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
     return resp
 
 

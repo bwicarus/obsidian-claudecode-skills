@@ -792,9 +792,15 @@ async function loadPdf() {
       cMapUrl: '/static/pdfjs/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: '/static/pdfjs/standard_fonts/',
+      // 大文件关键:只对实际翻到的页发 Range 请求,不在后台把整本下完。
+      // 服务器 /pdf/file 支持 byte-range(conditional=True),几百 MB 的 PDF
+      // 浏览器只持有当前页,iPad Safari 不再 OOM。
+      disableAutoFetch: true,
+      disableStream: false,
+      rangeChunkSize: 262144,   // 256KB 一块
     });
     task.onProgress = (p) => {
-      if (p.total) window.dlog('下载 ' + Math.round(p.loaded / p.total * 100) + '%');
+      if (p.total) window.dlog('加载 ' + Math.round(p.loaded / p.total * 100) + '%');
     };
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
