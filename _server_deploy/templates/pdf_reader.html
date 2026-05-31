@@ -2785,6 +2785,7 @@ function _paragraphExpandFromChar(chars, idx) {
 
 let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
 let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为主→翻页) / 'select'(水平为主→选字)
+let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 
 function _bindCharLayer(cl, pw) {
@@ -2944,12 +2945,14 @@ function _bindCharLayer(cl, pw) {
     onEnd(p.x, p.y);
   });
   cl.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { _dragStartCharIdx = null; return; }
+    if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
     window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
     e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
-    onStart(p.x, p.y);
+    const hit = onStart(p.x, p.y);
+    // 起点在空白(没命中字) + 单页模式 → 记录可能的横滑翻页(touchend 判定方向/距离)
+    _swipeStart = (!hit && readMode === 'single') ? {x: t.clientX, y: t.clientY, t: Date.now()} : null;
   }, {passive: true});
   cl.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 1 || _dragStartCharIdx == null) return;
@@ -2959,6 +2962,19 @@ function _bindCharLayer(cl, pw) {
     onMove(p.x, p.y, e);
   }, {passive: false});
   cl.addEventListener('touchend', (e) => {
+    // 横滑翻页（单页模式 + 起点空白）：右滑→上一页，左滑→下一页
+    if (_swipeStart) {
+      const t0 = e.changedTouches[0];
+      const sw = _swipeStart; _swipeStart = null;
+      if (t0) {
+        const dx = t0.clientX - sw.x, dy = t0.clientY - sw.y;
+        if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.6 && (Date.now() - sw.t) < 700) {
+          e.preventDefault();
+          window.changePage(dx > 0 ? -1 : 1);
+          return;
+        }
+      }
+    }
     if (_dragStartCharIdx == null) return;
     e.preventDefault(); e.stopPropagation();
     const t = e.changedTouches[0];
@@ -2966,7 +2982,7 @@ function _bindCharLayer(cl, pw) {
     const p = ptToLocal(t.clientX, t.clientY);
     onEnd(p.x, p.y);
   });
-  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; });
+  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; _swipeStart = null; });
   // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
   pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
 }
