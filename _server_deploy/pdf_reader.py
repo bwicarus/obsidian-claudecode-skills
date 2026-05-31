@@ -20,7 +20,7 @@ import urllib.parse
 from pathlib import Path
 
 from flask import (
-    Blueprint, abort, jsonify, render_template, request,
+    Blueprint, Response, abort, jsonify, render_template, request,
     send_file,
 )
 
@@ -1269,6 +1269,78 @@ def pdf_api_dict_quick():
         "freq_bnc": ec.get("bnc", 0),
         "audio": audio,
     })
+
+
+@bp.route("/api/dict-jp")
+def pdf_api_dict_jp():
+    """日语词「完整字典」离线富内容(JSON,秒回):读音+音调+罗马字+词性+完整中文释义
+    + 5 句母语例句(Tanaka,中译,未译的后台补译) + 汉字拆解(KANJIDIC 音读/训读/字义)。
+    深入讲解(用法/语感/近义辨析)走 /api/dict-jp-ai SSE,按需触发。"""
+    word = (request.args.get("word", "") or "").strip()
+    if not word:
+        return jsonify({"ok": False, "error": "no word"})
+    ds, _ = _vocab_modules()
+    if not ds:
+        return jsonify({"ok": False, "error": "dict unavailable"})
+    jp = ds.lookup_jp(word, context=request.args.get("context", ""))
+    if not jp or (jp.get("zh") in ("(无)", "", None)):
+        return jsonify({"ok": False, "word": word, "jp": True})
+    ra = {}
+    try:
+        ra = ds._jp_reading_accent(word) or {}
+    except Exception:
+        pass
+    reading = ra.get("reading") or jp.get("reading", "")
+    # 例句:5 句,已缓存中译直接给,未译的回退英文 + 后台补译(下次就有中文)
+    exs = ds.jp_examples_zh(word, limit=5, translate=False)
+    if any(not e.get("zh") for e in exs):
+        try:
+            import threading
+            threading.Thread(target=lambda: ds.jp_examples_zh(word, limit=5, translate=True),
+                             daemon=True).start()
+        except Exception:
+            pass
+    kanji = ds.word_kanji_breakdown(word)
+    return jsonify({
+        "ok": True, "jp": True, "word": word,
+        "reading": reading, "reading_kata": ra.get("reading_kata", ""),
+        "accent": ra.get("accent"), "mora": ra.get("mora"),
+        "romaji": jp.get("romaji", ""), "pos": jp.get("pos", ""),
+        "zh": jp.get("zh", ""),
+        "examples": exs,
+        "kanji": kanji,
+    })
+
+
+@bp.route("/api/dict-jp-ai")
+def pdf_api_dict_jp_ai():
+    """日语词「✨AI 深入讲解」SSE 流式:用法/语感/近义辨析/汉字记忆法。按需触发,耗 AI。"""
+    word = (request.args.get("word", "") or "").strip()
+    context = request.args.get("context", "")
+    if not word:
+        return jsonify({"ok": False, "error": "no word"})
+    prompt = (
+        f"你是资深日语老师,面向中文母语学习者讲解日语词「{word}」"
+        + (f"(出现在句子:{context[:120]})" if context else "")
+        + "。用简体中文,Markdown,简洁有条理,讲这几块(有才写):\n"
+        "1. **核心义** — 多义项分点,每项给典型搭配\n"
+        "2. **用法/语感** — 常见搭配、助词、敬体/口语差异、易错点\n"
+        "3. **近义辨析** — 跟意思相近的日语词的区别(若有)\n"
+        "4. **汉字记忆** — 各汉字音读/训读怎么记、构词规律\n"
+        "不要寒暄,不要重复词本身的读音表格(前面已显示)。"
+    )
+
+    def gen():
+        try:
+            for chunk in _ai_call_stream(prompt):
+                if chunk:
+                    yield f"data: {json.dumps({'t': chunk}, ensure_ascii=False)}\n\n"
+            yield "data: {\"done\": true}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @bp.route("/api/dict")

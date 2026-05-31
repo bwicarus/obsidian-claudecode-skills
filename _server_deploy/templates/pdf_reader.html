@@ -373,6 +373,28 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #word-pop .wp-ex{margin-top:8px;padding-top:7px;border-top:1px dashed #243049}
 #word-pop .wp-ex .wp-ex-ja{color:#dfe9ff;font-size:13px;line-height:1.5;margin-top:5px}
 #word-pop .wp-ex .wp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45;margin-bottom:3px}
+/* 日语完整字典大页面 */
+#result-content .jp-head{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding-bottom:4px}
+#result-content .jp-romaji{color:#8fb0d8;font-style:italic;font-size:13px}
+#result-content .jp-pos{color:#5a6680;font-size:11px;border:1px solid #2a3450;border-radius:4px;padding:0 5px;align-self:center}
+#result-content .jp-zh{margin-top:8px;color:#dff1ff;font-size:15px;line-height:1.6}
+#result-content .jp-sec-label{margin-top:14px;color:#7a8497;font-size:11px;border-top:1px solid #2a3550;padding-top:8px}
+#result-content .jp-kanji-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+#result-content .jp-kanji-chip{font-size:26px;line-height:1;padding:8px 12px;background:#162045;border:1px solid #2e3f63;border-radius:10px;color:#dff1ff;cursor:pointer;transition:all .12s}
+#result-content .jp-kanji-chip.active{background:#244470;border-color:#6fd3ff;box-shadow:0 0 0 1px #6fd3ff}
+#result-content .jp-kanji-detail{margin-top:8px;display:flex;gap:12px;align-items:flex-start;background:#10162a;border:1px solid #243049;border-radius:8px;padding:10px}
+#result-content .jp-kanji-detail:empty{display:none}
+#result-content .jk-lit{font-size:40px;line-height:1;color:#fff;flex-shrink:0}
+#result-content .jk-body{font-size:13px;color:#cfe6ff;line-height:1.8}
+#result-content .jk-tag{display:inline-block;width:18px;text-align:center;border-radius:3px;font-size:11px;margin-right:6px;color:#0b1020;font-style:normal}
+#result-content .jk-tag.jk-on{background:#6fd3ff}
+#result-content .jk-tag.jk-kun{background:#9fe0b8}
+#result-content .jk-mean{color:#8fb0d8;font-size:12px;margin-top:3px}
+#result-content .jp-ex-ja{color:#dfe9ff;font-size:14px;line-height:1.6;margin-top:7px}
+#result-content .jp-ex-zh{color:#8fb0d8;font-size:12.5px;line-height:1.45}
+#result-content .jp-ai-btn{margin-top:14px;width:100%;background:#1a2748;border:1px solid #3b6db5;color:#a8cdff;border-radius:8px;padding:9px;cursor:pointer;font-size:13px}
+#result-content .jp-ai-btn:disabled{opacity:.6}
+#result-content .jp-ai-out{margin-top:10px;color:#cfe6ff;line-height:1.7}
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
 #word-pop .wp-def:hover{background:#162045}
@@ -3021,12 +3043,22 @@ window.showWordPopover = async (word, ctx) => {
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
   }
 };
+// 判定是否日语词:含假名→是;含汉字时按本书语言声明(声明含 ja 才算,未声明默认按日语,
+// 跟后端 dict-quick want_ja 一致)。中文书(只声明 zh)的汉字词不当日语。
+function _isJaWord(w) {
+  if (/[぀-ヿ]/.test(w)) return true;
+  if (!/[㐀-鿿]/.test(w)) return false;
+  const declared = (BOOK_LANGS || []).length > 0;
+  return declared ? BOOK_LANGS.includes('ja') : true;
+}
 window._expandWordFull = (w, c) => {
   const s = _wordPopState;
   const word = w || (s && s.word);
   const ctx = (c != null ? c : (s && s.ctx)) || '';
   const pop = document.getElementById('word-pop'); if (pop) pop.style.display = 'none';
-  if (word) dictStream(word, ctx);   // 完整三源大框(ecdict+free+mw+例句)
+  if (!word) return;
+  if (_isJaWord(word)) dictStreamJP(word, ctx);   // 日语完整字典(离线富内容+按需AI)
+  else dictStream(word, ctx);                     // 英语三源大框(ecdict+free+mw+例句)
 };
 // 小框喇叭：读当前词（避开 onclick 内联传参的引号冲突），同步播有道(手势栈内)
 window._speakCurWord = () => {
@@ -4860,6 +4892,104 @@ document.addEventListener('click', (e) => {
 // 缩放/重渲染后重新贴高亮（zoom 变了 css px 也变了）
 const _origRenderPageInto = null;  // 仅占位
 // 在 _renderPageInto 里 loadCharsAndBindLayer 内部已经调用了 renderHighlightsOnPage
+
+// ── 日语词「完整字典」大页面(离线富内容 + 按需 AI 深入)──────────────────
+let _jpKanjiData = [];   // 当前词的汉字拆解,供 chip 点击展开
+async function dictStreamJP(word, ctx) {
+  openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
+  const myReq = _resultReqId;
+  const contentEl = document.getElementById('result-content');
+  let d;
+  try {
+    const r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
+      '&context=' + encodeURIComponent(ctx || ''));
+    d = await r.json();
+  } catch (e) {
+    if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00;padding:14px">查词失败：' + e.message + '</div>';
+    return false;
+  }
+  if (myReq !== _resultReqId) return false;
+  if (!d.ok) return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const wq = esc(word).replace(/'/g, "\\'");
+  const phon = (d.reading && d.accent != null) ? _renderPitch(d.reading, d.accent)
+    : (d.reading ? '<span class="wp-phon">' + esc(d.reading) + '</span>' : '');
+  let html = '<div class="jp-head">' + phon +
+    (d.romaji ? '<span class="jp-romaji">' + esc(d.romaji) + '</span>' : '') +
+    (d.pos ? '<span class="jp-pos">' + esc(d.pos) + '</span>' : '') + '</div>';
+  if (d.zh) html += '<div class="jp-zh">' + esc(d.zh) + '</div>';
+  _jpKanjiData = d.kanji || [];
+  if (_jpKanjiData.length) {
+    html += '<div class="jp-sec-label">汉字（点字看音读/训读）</div><div class="jp-kanji-row">' +
+      _jpKanjiData.map((k, i) => '<button class="jp-kanji-chip" onclick="_jpKanjiTap(' + i + ')">' + esc(k.kanji) + '</button>').join('') +
+      '</div><div id="jp-kanji-detail" class="jp-kanji-detail"></div>';
+  }
+  if ((d.examples || []).length) {
+    html += '<div class="jp-sec-label">母语例句</div><div class="jp-ex">';
+    for (const e of d.examples) {
+      html += '<div class="jp-ex-ja">' + esc(e.ja) + '</div>' +
+              '<div class="jp-ex-zh">' + esc(e.zh || e.en || '') + '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<button id="jp-ai-btn" class="jp-ai-btn" onclick="_jpAiDeep(\'' + wq + '\')">✨ AI 深入讲解（用法 / 语感 / 近义辨析）</button>' +
+          '<div id="jp-ai-out" class="jp-ai-out"></div>';
+  contentEl.innerHTML = html;
+  contentEl.scrollTop = 0;
+  if (_jpKanjiData.length) _jpKanjiTap(0);   // 默认展开第一个汉字
+  const va = document.getElementById('vocab-actions');
+  if (va) {
+    va.className = 'show';
+    const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
+    va.innerHTML =
+      '<button onclick="_speakOnline(\'' + wq + '\')" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
+      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid #3b6db5;color:#fff;' + bs + '">🎴 加入 Anki</button>' +
+      '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
+  }
+  return true;
+}
+window._jpKanjiTap = (i) => {
+  const k = _jpKanjiData[i]; if (!k) return;
+  document.querySelectorAll('.jp-kanji-chip').forEach((c, j) => c.classList.toggle('active', j === i));
+  const det = document.getElementById('jp-kanji-detail'); if (!det) return;
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  let h = '<div class="jk-lit">' + esc(k.kanji) + '</div><div class="jk-body">';
+  if ((k.on || []).length) h += '<div><span class="jk-tag jk-on">音</span>' + k.on.map(esc).join('、') + '</div>';
+  if ((k.kun || []).length) h += '<div><span class="jk-tag jk-kun">訓</span>' + k.kun.map(esc).join('、') + '</div>';
+  if ((k.meanings || []).length) h += '<div class="jk-mean">' + k.meanings.map(esc).join('; ') + '</div>';
+  h += '</div>';
+  det.innerHTML = h;
+};
+window._jpAiDeep = async (word) => {
+  const btn = document.getElementById('jp-ai-btn');
+  const out = document.getElementById('jp-ai-out');
+  if (!out) return;
+  const myReq = _resultReqId;
+  if (btn) { btn.disabled = true; btn.textContent = '✨ 生成中…'; }
+  const ctx = (_wordPopState && _wordPopState.ctx) || '';
+  let acc = '';
+  try {
+    const r = await fetch('/pdf/api/dict-jp-ai?word=' + encodeURIComponent(word) +
+      '&context=' + encodeURIComponent(ctx), {headers: {'Accept': 'text/event-stream'}});
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const {value, done} = await reader.read(); if (done) break;
+      if (myReq !== _resultReqId) return;   // 结果框已被新内容作废
+      buf += dec.decode(value, {stream: true}); let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        const blk = buf.slice(0, i); buf = buf.slice(i + 2);
+        let dl = '';
+        for (const ln of blk.split('\n')) if (ln.startsWith('data:')) dl = ln.slice(5).trim();
+        if (!dl) continue;
+        try { const o = JSON.parse(dl); if (o.t) { acc += o.t; out.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([out]).catch(() => {}); } } catch (_) {}
+      }
+      out.scrollIntoView && out.scrollIntoView({block: 'nearest'});
+    }
+  } catch (e) {
+    out.innerHTML = '<span style="color:#c00">AI 失败：' + e.message + '</span>';
+  }
+  if (btn) btn.style.display = 'none';
+};
 
 // 结果 modal
 function openResult(title, src, contentHtml) {

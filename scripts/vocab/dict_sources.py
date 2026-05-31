@@ -568,6 +568,45 @@ def jp_examples_zh(word: str, limit: int = 2, translate: bool = False,
     return [{"ja": e["ja"], "zh": zmap.get(e["ja"], ""), "en": e["en"]} for e in exs]
 
 
+# ── KANJIDIC 汉字拆解(离线:音読み/訓読み/字义)────────────────────────────
+_KANJIDIC = None
+_KANJIDIC_TRIED = False
+_KANJIDIC_PATH = PROJECT_ROOT / "data" / "kanjidic.json"
+
+
+def _kanjidic():
+    global _KANJIDIC, _KANJIDIC_TRIED
+    if not _KANJIDIC_TRIED:
+        _KANJIDIC_TRIED = True
+        try:
+            if _KANJIDIC_PATH.exists():
+                _KANJIDIC = json.loads(_KANJIDIC_PATH.read_text("utf-8"))
+        except Exception:
+            _KANJIDIC = None
+    return _KANJIDIC or {}
+
+
+def kanji_info(ch: str) -> dict | None:
+    """单个汉字 → {on, kun, meanings}。非汉字/查无返回 None。"""
+    if not ch or not _KANJI_RE.search(ch):
+        return None
+    e = _kanjidic().get(ch)
+    return dict(e) if e else None
+
+
+def word_kanji_breakdown(word: str) -> list[dict]:
+    """词里每个汉字的拆解 [{kanji, on, kun, meanings}](去重保序,跳过假名)。"""
+    out, seen = [], set()
+    for ch in (word or ""):
+        if ch in seen or not _KANJI_RE.search(ch):
+            continue
+        seen.add(ch)
+        info = kanji_info(ch)
+        if info:
+            out.append({"kanji": ch, **info})
+    return out
+
+
 def is_japanese(word: str) -> bool:
     """判定是否走日语词典:含假名 → 必是日语;全汉字无拉丁 → 也按日语处理
     (ECDICT 是英语词库,汉字本来就查不到,交给 AI 出中文释义)。"""
