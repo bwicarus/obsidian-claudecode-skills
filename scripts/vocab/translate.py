@@ -79,7 +79,7 @@ def _deepl(text: str, target: str = "zh-CN") -> str | None:
     return None
 
 
-def _ai_translate(text: str, target: str = "zh-CN", model: str = "haiku", effort: str = "low") -> str | None:
+def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effort: str = "low") -> str | None:
     """用 AI 后端翻译（claude_cli / codex_cli / openai_api / ollama）。
     比 MyMemory 质量高，但耗 AI 额度。"""
     try:
@@ -160,7 +160,7 @@ def translate(text: str, target: str = "zh-CN",
     if not backend:
         backend = (cfg.get("translate_backend") or "auto").strip().lower()
     if not model:
-        model = (cfg.get("translate_model") or "haiku").strip()
+        model = (cfg.get("translate_model") or "sonnet").strip()
     if not effort:
         effort = (cfg.get("translate_effort") or "low").strip()
 

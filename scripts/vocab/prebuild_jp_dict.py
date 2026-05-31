@@ -75,7 +75,7 @@ _BATCH_PROMPT = (
 )
 
 
-def _batch_lookup(words: list[str], model: str = "haiku") -> dict:
+def _batch_lookup(words: list[str], model: str = "sonnet") -> dict:
     """一次 AI 调用查一批词 → {word: entry}。失败返回 {}。"""
     from ai_client import ask
     listing = "\n".join(f"{i+1}. {w}" for i, w in enumerate(words))

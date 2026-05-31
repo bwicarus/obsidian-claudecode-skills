@@ -316,7 +316,7 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
                 if _tb == "ai":
                     # 一次 AI 调用翻译所有句子，marker 分隔流式输出 → 先翻好的先显示
                     # （N 次 AI 调用 → 1 次；逐行解析，凑齐一句立刻 yield）
-                    _tmodel = (_tcfg.get("translate_model") or "haiku").strip()
+                    _tmodel = (_tcfg.get("translate_model") or "sonnet").strip()
                     _teffort = (_tcfg.get("translate_effort") or "low").strip()
                     _numbered = "\n".join(f"{i+1}‖ {ex}" for i, ex in enumerate(pending))
                     _prompt = (
@@ -2019,7 +2019,7 @@ def pdf_api_translate_config():
         return jsonify({
             "ok": True,
             "backend": d.get("translate_backend", "auto"),
-            "model": d.get("translate_model", "haiku"),
+            "model": d.get("translate_model", "sonnet"),
             "effort": d.get("translate_effort", "low"),
         })
     data = request.get_json(silent=True) or {}
@@ -2384,7 +2384,7 @@ def pdf_api_grammar_analyze():
   "analyses": [{{"node_id": "<id>", "phrase": "<语法实例>", "explanation": "<简明解释>", "examples": ["..."]}}]
 }}
 """
-    model = (data.get("model") or "haiku").strip()
+    model = (data.get("model") or "sonnet").strip()
     effort = (data.get("effort") or "low").strip()
     try:
         zh = _ai_call(prompt, override_model=model, override_effort=effort)
@@ -2476,7 +2476,7 @@ def pdf_api_grammar_stream():
 {nodes_block}
 
 只输出上面两段（含标志），先翻译后语法点，不要任何额外说明。"""
-    model = (data.get("model") or "haiku").strip()
+    model = (data.get("model") or "sonnet").strip()
     effort = (data.get("effort") or "low").strip()
     return Response(
         stream_with_context(_sse_stream(prompt, model, effort)),
