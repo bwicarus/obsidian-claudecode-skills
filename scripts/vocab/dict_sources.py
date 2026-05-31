@@ -411,6 +411,52 @@ _KANJI_RE = re.compile(r"[一-鿿㐀-䶿]")       # CJK 汉字
 _LATIN_RE = re.compile(r"[A-Za-z]")
 
 
+_JP_TAGGER_DS = None
+_JP_TAGGER_DS_TRIED = False
+
+
+def _jp_reading_accent(word: str) -> dict:
+    """用 unidic(fugashi)取词的权威读音 + 声调(ピッチアクセント)。离线毫秒级。
+
+    返回 {reading(平假名), reading_kata(片假名/含长音ー), accent(int 重音核,0=平板),
+          mora(拍数)}。多 token 词取首 token 的 accent(近似)。失败返回 {}。
+    """
+    global _JP_TAGGER_DS, _JP_TAGGER_DS_TRIED
+    if not _JP_TAGGER_DS_TRIED:
+        _JP_TAGGER_DS_TRIED = True
+        try:
+            from fugashi import Tagger
+            _JP_TAGGER_DS = Tagger()
+        except Exception:
+            _JP_TAGGER_DS = None
+    if not _JP_TAGGER_DS or not word:
+        return {}
+    try:
+        toks = _JP_TAGGER_DS(word)
+    except Exception:
+        return {}
+    if not toks:
+        return {}
+    # 读音:各 token 的 kana 拼接;声调:取首 token 的 aType(整词近似)
+    kata = "".join((getattr(t.feature, "kana", None) or t.surface) for t in toks)
+    acc_raw = getattr(toks[0].feature, "aType", None)
+    accent = None
+    if acc_raw not in (None, "", "*"):
+        try:
+            accent = int(str(acc_raw).split(",")[0])   # "1,3" 取首
+        except ValueError:
+            accent = None
+    # 片假名 → 平假名(U+30A1..30F6 → U+3041..3096),长音ー保留
+    hira = "".join(
+        chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c
+        for c in kata
+    )
+    # 拍数:小书写假名(ゃゅょ等)不单独算拍
+    small = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ"
+    mora = sum(1 for c in hira if c not in small)
+    return {"reading": hira, "reading_kata": kata, "accent": accent, "mora": mora}
+
+
 def is_japanese(word: str) -> bool:
     """判定是否走日语词典:含假名 → 必是日语;全汉字无拉丁 → 也按日语处理
     (ECDICT 是英语词库,汉字本来就查不到,交给 AI 出中文释义)。"""

@@ -365,6 +365,11 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}
 #word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}
 #word-pop .wp-phon{color:#a8cdff;font-style:italic;font-size:12px}
+#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:#cfe6ff;padding-top:4px}
+#word-pop .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent}
+#word-pop .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}
+#word-pop .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}
+#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
 #word-pop .wp-def:hover{background:#162045}
@@ -2925,6 +2930,36 @@ document.addEventListener('pointerdown', (e) => {
   if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;   // 刚弹出 400ms 内不关（挡打开那次 tap 的余波）
   if (!p.contains(e.target)) p.style.display = 'none';
 }, true);
+// 画日语声调(ピッチアクセント):读音拆拍 → 高/低 + 下降标记。
+// accent: 0=平板(LHHH…不降),1=頭高(HLLL…),N=第N拍后下降(LH…H↓L)
+function _renderPitch(reading, accent) {
+  const small = 'ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ';
+  // 拆拍:小书写假名并入前一拍
+  const mora = [];
+  for (const ch of reading) {
+    if (small.includes(ch) && mora.length) mora[mora.length - 1] += ch;
+    else mora.push(ch);
+  }
+  const n = mora.length;
+  if (!n) return '';
+  // 每拍高低
+  const hi = i => {            // i: 0-based 拍
+    if (accent === 0) return i >= 1;          // 平板:第1拍低,其余高
+    if (accent === 1) return i === 0;         // 頭高:第1拍高,其余低
+    return i >= 1 && i < accent;              // 中高/尾高:2..accent 高
+  };
+  let html = '<span class="wp-pitch" title="声调型 ' +
+    (accent === 0 ? '平板' : accent === 1 ? '頭高' : '第' + accent + '拍后降') + '">';
+  for (let i = 0; i < n; i++) {
+    const h = hi(i);
+    const drop = (accent >= 1 && i + 1 === accent);   // 此拍后下降
+    html += '<span class="pm' + (h ? ' hi' : '') + (drop ? ' drop' : '') + '">' + mora[i] + '</span>';
+  }
+  const tlabel = accent === 0 ? '平板' : accent === 1 ? '頭高' : '['+accent+']';
+  html += '<span class="pm-type">' + tlabel + '</span></span>';
+  return html;
+}
+
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
@@ -2945,9 +2980,13 @@ window.showWordPopover = async (word, ctx) => {
     _wordPopState.lemma = d.lemma || word;
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
+    // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
+    const phonHtml = (d.jp && d.reading && d.accent != null)
+      ? _renderPitch(d.reading, d.accent)
+      : (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '');
     pop.innerHTML =
       '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
-      (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '') +
+      phonHtml +
       '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
       '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +

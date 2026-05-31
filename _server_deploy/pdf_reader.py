@@ -1168,9 +1168,19 @@ def pdf_api_dict_quick():
             _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
         except Exception:
             pass
+        # unidic 权威读音 + 声调(ピッチアクセント),离线毫秒级,覆盖 AI 读音
+        ra = {}
+        try:
+            ra = ds._jp_reading_accent(word_raw) or {}
+        except Exception:
+            pass
+        reading = ra.get("reading") or jp.get("reading", "")
         return jsonify({
             "ok": True, "jp": True, "word": word_raw, "lemma": word_raw, "forms": [],
-            "phonetic": jp.get("reading", "") + (f" [{jp['romaji']}]" if jp.get("romaji") else ""),
+            "phonetic": reading + (f" [{jp['romaji']}]" if jp.get("romaji") else ""),
+            "reading": reading,
+            "accent": ra.get("accent"),       # 重音核:0=平板,N=第 N 拍后下降
+            "mora": ra.get("mora"),
             "translation": (f"{jp.get('pos','')} " if jp.get("pos") else "") + (jp.get("zh") or ""),
             "definition": ex_txt,
             "from_cache": jp.get("from_cache", False),
