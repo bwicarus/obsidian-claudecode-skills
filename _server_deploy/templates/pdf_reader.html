@@ -341,7 +341,7 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（手指只滚动/双击切工具，不画）*/
 /* 振假名/音标叠加层：z-index 8 在所有层之上但 pointer-events:none → 点击穿透到 char-layer 选词 */
 .ruby-layer{position:absolute;inset:0;z-index:8;pointer-events:none}
-.ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:1.05;white-space:nowrap;text-align:center;background:rgba(255,255,255,.78);border-radius:2px;padding:0 1px;overflow:hidden;text-overflow:clip}
+.ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:.95;white-space:nowrap;text-align:center;background:rgba(255,255,255,.72);border-radius:2px;padding:0 1px;overflow:hidden;text-overflow:clip}
 #ruby-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 整页翻译：逐行白底中文覆盖在原文上方（z-index 9 盖住一切；pointer-events none → 点击穿透到 char-layer 仍可选原文） */
 .page-tr-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
@@ -363,6 +363,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #search-results .sr-snip{color:#cfe6ff;font-size:12.5px;line-height:1.5;overflow:hidden}
 #search-results .sr-snip mark{background:#3b6db5;color:#fff;border-radius:2px;padding:0 1px}
 #search-results .sr-empty{padding:16px;color:#5a6680;font-size:12px;text-align:center}
+/* 搜索命中在原文位置的临时高亮（黄，z-index 6 在 char-layer 之上但 pointer-events:none） */
+.search-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
+.search-hl{position:absolute;background:rgba(250,204,21,.45);border-radius:2px;mix-blend-mode:multiply;box-shadow:0 0 0 1px rgba(234,179,8,.65)}
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
@@ -1817,6 +1820,10 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
+  // 全文搜索跳转：本页刚好是待高亮页且 chars 已就绪 → 立即画命中高亮
+  if (window._pendingSearchHighlight && window._pendingSearchHighlight.page === num) {
+    try { _applyPendingSearchHighlight(); } catch (_) {}
+  }
 }
 
 // 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
@@ -1896,15 +1903,17 @@ function renderRubyLayer(pw) {
     const rt = it.rt || ''; if (!rt) continue;
     const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
     const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：取词高一半，但不超过「词宽 / 读音字数」使读音横向不溢出原词
-    const fs = Math.max(7, Math.min(h * 0.52, w / Math.max(1, rt.length) * 1.75));
+    // 字号：约词高 42%（振假名通常正文 40-45%），且不超过「词宽/读音字数」横向不溢出原词
+    const fs = Math.max(7, Math.min(h * 0.42, w / Math.max(1, rt.length) * 1.5));
     const sp = document.createElement('span');
     sp.className = 'rt';
     sp.textContent = rt;
     sp.style.left = x0 + 'px';
     sp.style.width = w + 'px';
     sp.style.fontSize = fs.toFixed(1) + 'px';
-    sp.style.top = Math.max(0, y0 - fs * 1.2 - 1) + 'px';   // 词正上方，顶行不出负坐标
+    // 紧贴本行词的正上方、落在两行之间的小空隙：只抬 ruby 自身高度 + 极小间隙
+    // （之前 y0-fs*1.2-1 抬太高，越过上一行底压住上面的内容）
+    sp.style.top = Math.max(0, y0 - fs - Math.max(2, h * 0.08)) + 'px';
     layer.appendChild(sp);
   }
 }
@@ -2055,10 +2064,73 @@ window._runSearch = async () => {
     stat.textContent = '';
   }
 };
+window._pendingSearchHighlight = null;   // {query, page}：跳转后等该页 chars ready 再高亮原文位置
 window._searchJump = (pg) => {
+  const q = (document.getElementById('search-input').value || '').trim();
   closeSearch();
+  window._pendingSearchHighlight = q ? {query: q, page: pg} : null;
   goToPage(pg);
+  _applyPendingSearchHighlight();   // 已加载的页立即高亮；未加载则轮询等待
 };
+// 轮询等目标页 __charBoxes 就绪（单页/连续模式通用），就绪后画命中高亮
+function _applyPendingSearchHighlight(tries) {
+  tries = tries || 0;
+  const ph = window._pendingSearchHighlight;
+  if (!ph) return;
+  const wrap = document.querySelector('[data-page-num="' + ph.page + '"]');
+  if (wrap && wrap.dataset.loaded === '1' && wrap.__charBoxes && wrap.__charBoxes.length) {
+    try { _highlightSearchResultsOnPage(wrap, ph.query); } catch (_) {}
+    window._pendingSearchHighlight = null;
+    return;
+  }
+  if (tries < 30) setTimeout(() => _applyPendingSearchHighlight(tries + 1), 160);   // 最多 ~4.8s
+  else window._pendingSearchHighlight = null;
+}
+// 从 __charBoxes 合并同行相邻字符成矩形（viewport px）
+function _buildRectsFromCharRange(chars, s, e) {
+  if (s >= e || s < 0 || e > chars.length) return [];
+  const rects = []; let cur = null;
+  for (let i = s; i < e; i++) {
+    const c = chars[i];
+    if (c.left == null) continue;
+    const lineH = c.height || 1;
+    if (cur && Math.abs((c.top + c.height) - (cur.top + cur.height)) <= lineH * 0.6 && c.left >= cur.left - 2) {
+      cur.width = Math.max(cur.left + cur.width, c.left + c.width) - cur.left;
+      cur.top = Math.min(cur.top, c.top);
+      cur.height = Math.max(cur.height, c.height);
+    } else { if (cur) rects.push(cur); cur = {left: c.left, top: c.top, width: c.width, height: c.height}; }
+  }
+  if (cur) rects.push(cur);
+  return rects;
+}
+// 在页面上把 query 所有命中处画黄色高亮（子串、大小写不敏感），滚到第一处，6s 后淡出
+function _highlightSearchResultsOnPage(wrap, query) {
+  if (!wrap || !wrap.__charBoxes || !query) return;
+  wrap.querySelector('.search-hl-layer')?.remove();
+  const chars = wrap.__charBoxes;
+  const fullLower = chars.map(c => (c.c || '')).join('').toLowerCase();
+  const ql = query.toLowerCase();
+  if (!ql) return;
+  const matches = []; let pos = 0;
+  while (true) { const i = fullLower.indexOf(ql, pos); if (i < 0) break; matches.push(i); pos = i + Math.max(1, ql.length); }
+  if (!matches.length) return;
+  const layer = document.createElement('div');
+  layer.className = 'search-hl-layer';
+  wrap.appendChild(layer);
+  let first = null;
+  for (let m = 0; m < Math.min(matches.length, 40); m++) {
+    for (const r of _buildRectsFromCharRange(chars, matches[m], matches[m] + ql.length)) {
+      const div = document.createElement('div');
+      div.className = 'search-hl';
+      div.style.left = r.left + 'px'; div.style.top = r.top + 'px';
+      div.style.width = r.width + 'px'; div.style.height = r.height + 'px';
+      layer.appendChild(div);
+      if (!first) first = div;
+    }
+  }
+  if (first) { try { first.scrollIntoView({block: 'center', behavior: 'auto'}); } catch (_) {} }
+  setTimeout(() => { layer.style.transition = 'opacity 1.2s'; layer.style.opacity = '0'; setTimeout(() => layer.remove(), 1300); }, 6000);
+}
 
 // 乐观下划线：查词 ECDICT 秒回 lemma+forms 后，立刻在所在页把这些词形画上下划线(橙=new)，
 // 不等后台笔记生成 + refresh。后续真实 refresh 会用真实 mastery 颜色覆盖。
@@ -2963,7 +3035,17 @@ function _bindCharLayer(cl, pw) {
     _swipeStart = (!hit && readMode === 'single') ? {x: t.clientX, y: t.clientY, t: Date.now()} : null;
   }, {passive: true});
   cl.addEventListener('touchmove', (e) => {
-    if (e.touches.length !== 1 || _dragStartCharIdx == null) return;
+    if (e.touches.length !== 1) return;
+    // 横滑翻页候选（起点空白+单页）：横向主导时 preventDefault **抢下手势**，
+    // 否则浏览器把它判成滚动 → 触发 touchcancel 清掉 _swipeStart → touchend 永远翻不了页（F2 根因）。
+    // 竖向主导不拦 → 高页仍可原生上下滚。
+    if (_swipeStart && _dragStartCharIdx == null) {
+      const t = e.touches[0];
+      const dx = t.clientX - _swipeStart.x, dy = t.clientY - _swipeStart.y;
+      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) && e.cancelable) e.preventDefault();
+      return;
+    }
+    if (_dragStartCharIdx == null) return;
     e.stopPropagation();
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
@@ -3312,6 +3394,10 @@ window.showPhrasePopover = async (text) => {
   window._wordPopOpenAt = Date.now();
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
   _positionWordPop(pop);
+  // 加载期间：原选中区域持续呼吸闪烁（高亮保活），完成后转常亮
+  clearTimeout(_phraseBreatheTimer);   // 取消选中时的 1.6s 自动停，改由加载完成控制
+  const _breatheOvs = [...document.querySelectorAll('.sel-overlay')].filter(o => o.querySelector('.hl'));
+  _breatheOvs.forEach(o => o.classList.add('phrase-breathe'));
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
   let zh = '', reading = '', accent = null;
@@ -3326,7 +3412,9 @@ window.showPhrasePopover = async (text) => {
       })).json();
       if (d.ok) zh = d.zh || '';
     }
-  } catch (_) {}
+  } catch (_) {} finally {
+    _breatheOvs.forEach(o => o.classList.remove('phrase-breathe'));   // 加载完 → 常亮
+  }
   _wordPopState.reading = reading;
   const phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
     : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
@@ -3461,6 +3549,7 @@ window.showWordPopover = async (word, ctx) => {
     if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
+    _wordPopState.mastered = !!d.mastered;   // 日语掌握开关初始态
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
@@ -3485,7 +3574,7 @@ window.showWordPopover = async (word, ctx) => {
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
       (d.jp
-        ? '<button onclick="_wordPopJpMaster(this)" title="标记已掌握：该词下划线消失">✓ 掌握</button>'
+        ? '<button id="jp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopJpMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>'
         : '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>') +
       '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
@@ -3528,16 +3617,26 @@ window._wordPopAnki = (btn) => {
   setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 400);
 };
 // 日语小框「✓ 掌握」：标记掌握 → jp-vocab store mastered → 下划线消失
+// 日语「掌握」开关：未掌握↔掌握 100 来回切，不关框（让用户能再点切回）
 window._wordPopJpMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
   const w = s.lemma || s.word;   // dict-quick 对日语返回 lemma=原始表层(=store 键)
-  if (btn) { btn.disabled = true; btn.textContent = '✓ 已掌握'; }
+  const newMark = s.mastered ? 'unknown' : 'mastered';
+  if (btn) btn.disabled = true;
   fetch('/pdf/api/jp-vocab-mark', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({word: w, mark: 'mastered'}),
-  }).then(() => { try { refreshVocabUnderlinesForAllPages(); } catch (_) {} _toast?.('已标记掌握'); })
-    .catch(() => {});
-  setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 350);
+    body: JSON.stringify({word: w, mark: newMark}),
+  }).then(r => r.json()).then(() => {
+    s.mastered = (newMark === 'mastered');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+      btn.title = s.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
+      btn.classList.toggle('wp-anki', s.mastered);
+    }
+    try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
+    _toast?.(s.mastered ? '已掌握 100，下划线消失' : '已设为未掌握');
+  }).catch(() => { if (btn) btn.disabled = false; });
 };
 // 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
 window._wordPopGrammar = () => {
