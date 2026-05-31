@@ -1313,22 +1313,28 @@ function _speakWord(lemma, audio) {
   }
   _speakOnline(lemma);
 }
-// 有道发音（真人 mp3，免 key 直连，覆盖几乎所有词）；失败再退化浏览器 TTS
+// 发音:日语词用浏览器原生日语语音(iPad 自带 Kyoko/Otoya,有道英语库没有日语 → 之前无声);
+// 英语词用有道真人 mp3(免 key,覆盖广),失败退化浏览器 en-US TTS。
 function _speakOnline(w) {
-  if (!w) { _ttsWord(w); return; }
+  if (!w) return;
+  if (typeof _isJaWord === 'function' && _isJaWord(w)) { _ttsWord(w, 'ja-JP'); return; }
   try {
     const a = new Audio('https://dict.youdao.com/dictvoice?type=2&audio=' + encodeURIComponent(w));
-    a.play().catch(() => _ttsWord(w));
-  } catch (e) { _ttsWord(w); }
+    a.play().catch(() => _ttsWord(w, 'en-US'));
+  } catch (e) { _ttsWord(w, 'en-US'); }
 }
-function _ttsWord(w) {
+function _ttsWord(w, lang) {
+  lang = lang || 'en-US';
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(w);
-    u.lang = 'en-US';
+    u.lang = lang;
+    const pref = lang.slice(0, 2).toLowerCase();
+    const norm = s => (s || '').toLowerCase().replace('_', '-');
     const vs = speechSynthesis.getVoices() || [];   // iOS 首次可能为空，getVoices 触发加载
-    const en = vs.find(v => /en[-_]US/i.test(v.lang)) || vs.find(v => /^en/i.test(v.lang));
-    if (en) u.voice = en;
+    const v = vs.find(x => norm(x.lang) === lang.toLowerCase())
+           || vs.find(x => norm(x.lang).startsWith(pref));
+    if (v) u.voice = v;
     speechSynthesis.speak(u);
   } catch (e) {}
 }
@@ -3017,6 +3023,7 @@ window.showWordPopover = async (word, ctx) => {
     if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 这是旧响应,丢弃(防覆盖新词)
     if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
     _wordPopState.lemma = d.lemma || word;
+    _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
@@ -3068,7 +3075,9 @@ window._expandWordFull = (w, c) => {
 // 小框喇叭：读当前词（避开 onclick 内联传参的引号冲突），同步播有道(手势栈内)
 window._speakCurWord = () => {
   const s = _wordPopState;
-  const w = s && (s.lemma || s.word);
+  if (!s) return;
+  if (s.reading) { _ttsWord(s.reading, 'ja-JP'); return; }   // 日语:直接念假名读音
+  const w = s.lemma || s.word;
   if (w) _speakOnline(w);
 };
 window._wordPopAnki = (btn) => {
@@ -4917,6 +4926,7 @@ async function dictStreamJP(word, ctx) {
   if (!d.ok) return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const wq = esc(word).replace(/'/g, "\\'");
+  const rq = esc(d.reading || word).replace(/'/g, "\\'");   // 发音念假名读音
   const phon = (d.reading && d.accent != null) ? _renderPitch(d.reading, d.accent)
     : (d.reading ? '<span class="wp-phon">' + esc(d.reading) + '</span>' : '');
   let html = '<div class="jp-head">' + phon +
@@ -4947,7 +4957,7 @@ async function dictStreamJP(word, ctx) {
     va.className = 'show';
     const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
     va.innerHTML =
-      '<button onclick="_speakOnline(\'' + wq + '\')" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
+      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
       '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid #3b6db5;color:#fff;' + bs + '">🎴 加入 Anki</button>' +
       '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
   }
