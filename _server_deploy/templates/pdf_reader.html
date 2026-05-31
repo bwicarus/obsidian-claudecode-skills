@@ -343,6 +343,10 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .ruby-layer{position:absolute;inset:0;z-index:8;pointer-events:none}
 .ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:1.05;white-space:nowrap;text-align:center;background:rgba(255,255,255,.78);border-radius:2px;padding:0 1px;overflow:hidden;text-overflow:clip}
 #ruby-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
+/* 整页翻译：逐行白底中文覆盖在原文上方（z-index 9 盖住一切；pointer-events none → 点击穿透到 char-layer 仍可选原文） */
+.page-tr-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
+.page-tr-line{position:absolute;box-sizing:border-box;background:#fff;color:#111;white-space:nowrap;overflow:hidden;text-align:left;font-weight:500;padding-left:1px;border-radius:1px;box-shadow:inset 3px 0 0 #2563eb}
+#pagetr-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
@@ -484,6 +488,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
     <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
+    <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <!-- 本书语言选择 -->
@@ -1776,6 +1781,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   // 振假名/音标叠加（后端 page-chars 已返回 furigana：日语 unidic 读音 + 英文 ECDICT 音标）
   wrap.__furigana = d.furigana || [];
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
+  // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
+  if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
 }
 
 // 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
@@ -1878,6 +1885,90 @@ window.toggleRuby = () => {
   const b = document.getElementById('ruby-toggle');
   if (b) b.classList.toggle('active', on);
   refreshRubyAllPages();
+};
+
+// ──────── 整页翻译（F3）：逐句就地白底中文覆盖 ────────
+let _pageTrOn = false;
+function _clearPageTranslate(pw) { pw.querySelector('.page-tr-layer')?.remove(); }
+function _drawPageTranslate(pw, sentences) {
+  _clearPageTranslate(pw);
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth;
+  const cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const layer = document.createElement('div');
+  layer.className = 'page-tr-layer';
+  pw.appendChild(layer);
+  for (const s of sentences) {
+    const zh = (s.zh || '').trim(); if (!zh) continue;
+    const raw = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
+    if (!raw.length) continue;
+    // 行合并（按垂直中心聚类，同 _drawSentenceOverlay）
+    const refH = Math.max.apply(null, raw.map(r => r[3] - r[1])) || 1;
+    const cy = r => (r[1] + r[3]) / 2;
+    const sorted = raw.slice().sort((a, b) => (cy(a) - cy(b)) || (a[0] - b[0]));
+    const lines = [];
+    for (const r of sorted) {
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(cy(r) - cy(last)) <= refH * 0.5) {
+        last[0] = Math.min(last[0], r[0]); last[1] = Math.min(last[1], r[1]);
+        last[2] = Math.max(last[2], r[2]); last[3] = Math.max(last[3], r[3]);
+      } else lines.push([r[0], r[1], r[2], r[3]]);
+    }
+    lines.sort((a, b) => a[1] - b[1]);
+    const charH = Math.min(...lines.map(r => (r[3] - r[1]) * sy));
+    const fontPx = Math.max(9, Math.round(charH * 0.72));
+    const cps = Array.from(zh); const N = cps.length; let idx = 0;
+    lines.forEach((r, i) => {
+      const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
+      const cap = Math.max(1, Math.floor(w / fontPx));
+      const n = (i === lines.length - 1) ? (N - idx) : Math.max(0, Math.min(cap, N - idx));
+      const slice = cps.slice(idx, idx + n).join(''); idx += n;
+      if (!slice) return;
+      const ov = document.createElement('div');
+      ov.className = 'page-tr-line';
+      ov.style.left = (r[0] * sx) + 'px';
+      ov.style.top = (r[1] * sy) + 'px';
+      ov.style.width = w + 'px';
+      ov.style.height = h + 'px';
+      ov.style.fontSize = fontPx + 'px';
+      ov.style.lineHeight = h + 'px';
+      ov.textContent = slice;
+      layer.appendChild(ov);
+    });
+  }
+}
+async function _pageTranslatePage(pw) {
+  if (!_pageTrOn || !pw) return;
+  const num = parseInt(pw.dataset.pageNum || '0', 10); if (!num) return;
+  if (pw.__pageTrSeq === num) return;   // 该页已翻过（防重复请求）
+  pw.__pageTrSeq = num;
+  try {
+    const r = await fetch('/pdf/api/page-translate?file=' + encodeURIComponent(FILE_REL) + '&page=' + num);
+    const d = await r.json();
+    if (!_pageTrOn) return;             // 请求途中被关掉
+    if (d.ok && d.sentences) _drawPageTranslate(pw, d.sentences);
+  } catch (e) {
+    window.dlog?.('page-tr p.' + num + ' fail: ' + e.message, '#ff6b6b');
+    pw.__pageTrSeq = null;             // 失败允许重试
+  }
+}
+function _pageTranslateApplyAll() {
+  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => _pageTranslatePage(pw));
+}
+window.togglePageTranslate = () => {
+  _pageTrOn = !_pageTrOn;
+  const b = document.getElementById('pagetr-toggle');
+  if (b) b.classList.toggle('active', _pageTrOn);
+  if (_pageTrOn) {
+    _toast?.('整页翻译开启，翻译中…');
+    _pageTranslateApplyAll();
+  } else {
+    document.querySelectorAll('.page-tr-layer').forEach(el => el.remove());
+    document.querySelectorAll('[data-page-num]').forEach(pw => { pw.__pageTrSeq = null; });
+  }
 };
 
 // 乐观下划线：查词 ECDICT 秒回 lemma+forms 后，立刻在所在页把这些词形画上下划线(橙=new)，

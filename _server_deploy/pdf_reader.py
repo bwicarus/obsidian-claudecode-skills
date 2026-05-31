@@ -1085,6 +1085,153 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     return sentences
 
 
+def _split_page_sentences(chars: list[dict], page_h: float = 0) -> list[dict]:
+    """整页翻译用：把整页 chars 切成**所有**句子（不限生词数，不排除标题/页脚——整页都译）。
+    边界规则同 _build_unmastered_sentences：. ! ? 。！？ / 列表标记 / 跨 block / 大行间距。
+    返回 [{text, rects, first_char, last_char}]；跳过竖排文字（几何会让 overlay 乱）。"""
+    sentences: list[dict] = []
+    cur_chars: list[dict] = []
+
+    def _rects(sent_chars):
+        rects = []
+        cur_rect = None
+        for c in sent_chars:
+            if c.get("sp") and (not cur_rect):
+                continue
+            x0, y0, x1, y1 = c["x0"], c["y0"], c["x1"], c["y1"]
+            lineH = y1 - y0
+            if cur_rect and abs(y0 - cur_rect[1]) <= lineH * 0.5:
+                cur_rect[2] = max(cur_rect[2], x1)
+                cur_rect[1] = min(cur_rect[1], y0)
+                cur_rect[3] = max(cur_rect[3], y1)
+            else:
+                if cur_rect:
+                    rects.append([round(x, 2) for x in cur_rect])
+                if c.get("sp"):
+                    continue
+                cur_rect = [x0, y0, x1, y1]
+        if cur_rect:
+            rects.append([round(x, 2) for x in cur_rect])
+        return rects
+
+    def _flush():
+        nonlocal cur_chars
+        nsp = [c for c in cur_chars if not c.get("sp")]
+        if nsp:
+            text = re.sub(r"\s+", " ", "".join(c["c"] for c in cur_chars).strip())[:500]
+            if len(text) >= 4:
+                bw = max(c["x1"] for c in nsp) - min(c["x0"] for c in nsp)
+                bh = max(c["y1"] for c in nsp) - min(c["y0"] for c in nsp)
+                if not (bh > bw * 1.6):   # 竖排跳过
+                    fc = lc = None
+                    for c in cur_chars:
+                        if not c.get("sp"):
+                            fc = [round(c["x0"],2), round(c["y0"],2), round(c["x1"],2), round(c["y1"],2)]; break
+                    for c in reversed(cur_chars):
+                        if not c.get("sp"):
+                            lc = [round(c["x0"],2), round(c["y0"],2), round(c["x1"],2), round(c["y1"],2)]; break
+                    sentences.append({"text": text, "rects": _rects(cur_chars),
+                                      "first_char": fc, "last_char": lc})
+        cur_chars = []
+
+    prev = None
+    pending_period = False
+    for ch in chars:
+        c = ch.get("c", "")
+        if pending_period:
+            _same_line = bool(prev) and not prev.get("sp") and \
+                abs(ch.get("y0", 0) - prev.get("y0", 0)) < max(1.0, (prev.get("y1", 0) - prev.get("y0", 0)) * 0.5)
+            is_cont = (_same_line and (not ch.get("sp")) and len(c) == 1
+                       and (c.isdigit() or (c.isalpha() and c.islower())))
+            if not is_cont:
+                _flush()
+            pending_period = False
+        if prev is not None:
+            pbk, cbk = prev.get("bk"), ch.get("bk")
+            if pbk is not None and cbk is not None and pbk != cbk:
+                _flush()
+        if prev and not prev.get("sp") and not ch.get("sp"):
+            ph = max(0.1, prev["y1"] - prev["y0"])
+            gap = ch["y0"] - prev["y0"]
+            if gap > ph * 1.5:
+                _flush()
+        if c in "•▪▶◆●○◇":
+            _flush(); cur_chars.append(ch); prev = ch; continue
+        if ch.get("sp"):
+            cur_chars.append(ch); prev = ch; continue
+        if c in "!?。！？":
+            cur_chars.append(ch); _flush(); prev = ch; continue
+        if c == ".":
+            cur_chars.append(ch); pending_period = True; prev = ch; continue
+        cur_chars.append(ch)
+        prev = ch
+    _flush()
+    return sentences
+
+
+@bp.route("/api/page-translate")
+def pdf_api_page_translate():
+    """整页翻译：切出该页所有句子 → 批量翻译（Google batch 优先，带 sidecar 缓存）→ 返回。
+    GET ?file=&page= → {ok, sentences:[{text,rects,zh,first_char,last_char}], page_w, page_h}"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
+    res = _page_chars_cached(abs_path, rel, page)
+    if res is None:
+        return jsonify({"ok": False, "error": "page out of range"}), 400
+    chars, page_w, page_h, _furi = res
+    sentences = _split_page_sentences(chars, page_h)
+    if not sentences:
+        return jsonify({"ok": True, "sentences": [], "page_w": page_w, "page_h": page_h})
+    import sys as _sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in _sys.path:
+        _sys.path.insert(0, str(vp))
+    try:
+        from translate import (gtranslate_batch as _gb, translate as _tr,
+                               _cache_get as _cg, _cache_put as _cp)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"translate load fail: {ex}"}), 500
+    texts = [s["text"] for s in sentences]
+    # 1) 先吃缓存（重开同页秒出）
+    zhs = [(_cg(t, "zh-CN") or "") for t in texts]
+    miss_idx = [i for i, z in enumerate(zhs) if not z]
+    # 2) 未命中的批量 Google 翻译
+    if miss_idx:
+        miss_texts = [texts[i] for i in miss_idx]
+        batch = None
+        try:
+            batch = _gb(miss_texts)
+        except Exception:
+            batch = None
+        if batch and len(batch) == len(miss_texts):
+            for k, i in enumerate(miss_idx):
+                if batch[k]:
+                    zhs[i] = batch[k]
+                    try: _cp(texts[i], "zh-CN", batch[k], "gtranslate")
+                    except Exception: pass
+        # 3) Google 没 key / 整体失败 → 逐句兜底（auto 链：deepl/mymemory）
+        still = [i for i in miss_idx if not zhs[i]]
+        for i in still[:60]:   # 限量兜底，避免极端长页阻塞
+            try:
+                z = _tr(texts[i])
+                if z:
+                    zhs[i] = z
+            except Exception:
+                pass
+    for s, z in zip(sentences, zhs):
+        s["zh"] = z
+    done = sum(1 for z in zhs if z)
+    return jsonify({"ok": True, "sentences": sentences, "page_w": page_w,
+                    "page_h": page_h, "translated": done, "total": len(sentences)})
+
+
 @bp.route("/api/page-vocab-marks")
 def pdf_api_page_vocab_marks():
     """轻量路由：仅返回该页 vocab_marks（不返回 chars）。
