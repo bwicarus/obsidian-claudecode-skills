@@ -370,6 +370,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #word-pop .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}
 #word-pop .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}
 #word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}
+#word-pop .wp-ex{margin-top:8px;padding-top:7px;border-top:1px dashed #243049}
+#word-pop .wp-ex .wp-ex-ja{color:#dfe9ff;font-size:13px;line-height:1.5;margin-top:5px}
+#word-pop .wp-ex .wp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45;margin-bottom:3px}
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
 #word-pop .wp-def:hover{background:#162045}
@@ -2984,12 +2987,21 @@ window.showWordPopover = async (word, ctx) => {
     const phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
       : (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '');
+    // 日语母语例句(Tanaka):直接展示在小框;zh 未翻译则回退英文
+    let exHtml = '';
+    if (d.jp && Array.isArray(d.examples) && d.examples.length) {
+      exHtml = '<div class="wp-ex">' + d.examples.slice(0, 2).map(e =>
+        '<div class="wp-ex-ja">' + esc(e.ja) + '</div>' +
+        '<div class="wp-ex-zh">' + esc(e.zh || e.en || '') + '</div>'
+      ).join('') + '</div>';
+    }
     pop.innerHTML =
       '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
       phonHtml +
       '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
       '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +
+      exHtml +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
       '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>' +
