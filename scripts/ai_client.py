@@ -5,7 +5,7 @@ ai_client.py — 统一 AI 调用模块
 提供一次性查询（ask）和多轮对话（AISession）两种接口。
 """
 
-import json, os, subprocess, sys, tempfile, threading
+import json, os, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
 
 # ── 路径常量（跨平台，复用 config.py 的 env-aware 路径） ────────────────────────
@@ -22,6 +22,30 @@ from config import (  # noqa: E402
 PROJECT   = str(PROJECT_DIR)
 STORE_DIR = SETTINGS_FILE.parent
 WINDOWS   = sys.platform == "win32"
+
+
+def _resolve_cli(configured: str, name: str) -> str:
+    """配置的 CLI 路径不存在时,回退到 PATH 里的同名可执行文件。
+
+    claude CLI 会自更新并迁移安装位置(如 /usr/bin → ~/.local/bin),
+    硬编码 APP_CLAUDE 路径会失效。Linux 上若配置路径缺失就用 shutil.which
+    兜底,避免 webapp/daily 整条 AI 链路因 CLI 搬家而崩。
+    """
+    if WINDOWS:
+        return configured
+    try:
+        if configured and os.path.exists(configured):
+            return configured
+        found = shutil.which(name)
+        if found:
+            return found
+    except Exception:
+        pass
+    return configured
+
+
+CLAUDE = _resolve_cli(CLAUDE, "claude")
+CODEX  = _resolve_cli(CODEX, "codex")
 
 DEFAULT_SETTINGS = {"backend": "auto-claude", "model": ""}
 _VALID_BACKENDS  = frozenset(("auto-claude", "auto-codex", "claude", "codex"))
