@@ -584,7 +584,7 @@ def pdf_api_page_chars():
         _dis = _dismiss_load(rel)   # 过滤用户长按 L 框删除的句子标记
         if _dis:
             sentences = [s for s in sentences if (s.get("text") or "").strip() not in _dis]
-        return jsonify({
+        resp = jsonify({
             "ok": True,
             "chars": chars,
             "page_w": p.rect.width,
@@ -592,6 +592,11 @@ def pdf_api_page_chars():
             "vocab_marks": vocab_marks,
             "vocab_sentences": sentences,
         })
+        # 动态数据绝不缓存:之前无 Cache-Control,iOS Safari 启发式缓存了旧版(分词上线前
+        # 每字 w 各自独立)→ 整页单字。no-store 杜绝;前端再加 ?v=mtime 换 cache key 立即生效。
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
     finally:
