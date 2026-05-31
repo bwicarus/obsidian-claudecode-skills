@@ -1820,9 +1820,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
-  // 全文搜索跳转：本页刚好是待高亮页且 chars 已就绪 → 立即画命中高亮
-  if (window._pendingSearchHighlight && window._pendingSearchHighlight.page === num) {
-    try { _applyPendingSearchHighlight(); } catch (_) {}
+  // 全文搜索跳转：本页刚好是待高亮页 → 此处 __charBoxes 已赋值，直接画（不走轮询，秒级到位）
+  if (window._pendingSearchHighlight && window._pendingSearchHighlight.page === num
+      && wrap.__charBoxes && wrap.__charBoxes.length) {
+    try { _highlightSearchResultsOnPage(wrap, window._pendingSearchHighlight.query); } catch (_) {}
+    window._pendingSearchHighlight = null;
   }
 }
 
@@ -1903,17 +1905,17 @@ function renderRubyLayer(pw) {
     const rt = it.rt || ''; if (!rt) continue;
     const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
     const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：约词高 42%（振假名通常正文 40-45%），且不超过「词宽/读音字数」横向不溢出原词
-    const fs = Math.max(7, Math.min(h * 0.42, w / Math.max(1, rt.length) * 1.5));
+    // 字号：约词高 40%（振假名通常正文 40-45%），且不超过「词宽/读音字数」横向不溢出原词
+    const fs = Math.max(7, Math.min(h * 0.40, w / Math.max(1, rt.length) * 1.5));
     const sp = document.createElement('span');
     sp.className = 'rt';
     sp.textContent = rt;
     sp.style.left = x0 + 'px';
     sp.style.width = w + 'px';
     sp.style.fontSize = fs.toFixed(1) + 'px';
-    // 紧贴本行词的正上方、落在两行之间的小空隙：只抬 ruby 自身高度 + 极小间隙
-    // （之前 y0-fs*1.2-1 抬太高，越过上一行底压住上面的内容）
-    sp.style.top = Math.max(0, y0 - fs - Math.max(2, h * 0.08)) + 'px';
+    // ruby 底边紧贴词顶(y0)上方 1px、整体只上探自身高度 ≈0.4×词高 → 落在两行间空隙、不压上一行
+    // （之前 y0-fs*1.2-1 + 大字号 抬太高，越过上一行底压住上面的内容）
+    sp.style.top = Math.max(0, y0 - fs - 1) + 'px';
     layer.appendChild(sp);
   }
 }
@@ -3042,7 +3044,8 @@ function _bindCharLayer(cl, pw) {
     if (_swipeStart && _dragStartCharIdx == null) {
       const t = e.touches[0];
       const dx = t.clientX - _swipeStart.x, dy = t.clientY - _swipeStart.y;
-      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) && e.cancelable) e.preventDefault();
+      // 尽早认领横向手势（阈值小到 6px + 横向不弱于竖向）→ 抢在浏览器判定滚动/cancel 之前
+      if (Math.abs(dx) > 6 && Math.abs(dx) >= Math.abs(dy) && e.cancelable) e.preventDefault();
       return;
     }
     if (_dragStartCharIdx == null) return;
@@ -3396,8 +3399,7 @@ window.showPhrasePopover = async (text) => {
   _positionWordPop(pop);
   // 加载期间：原选中区域持续呼吸闪烁（高亮保活），完成后转常亮
   clearTimeout(_phraseBreatheTimer);   // 取消选中时的 1.6s 自动停，改由加载完成控制
-  const _breatheOvs = [...document.querySelectorAll('.sel-overlay')].filter(o => o.querySelector('.hl'));
-  _breatheOvs.forEach(o => o.classList.add('phrase-breathe'));
+  document.querySelectorAll('.sel-overlay').forEach(o => { if (o.querySelector('.hl')) o.classList.add('phrase-breathe'); });
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
   let zh = '', reading = '', accent = null;
@@ -3413,7 +3415,7 @@ window.showPhrasePopover = async (text) => {
       if (d.ok) zh = d.zh || '';
     }
   } catch (_) {} finally {
-    _breatheOvs.forEach(o => o.classList.remove('phrase-breathe'));   // 加载完 → 常亮
+    document.querySelectorAll('.sel-overlay.phrase-breathe').forEach(o => o.classList.remove('phrase-breathe'));   // 加载完 → 常亮（live DOM）
   }
   _wordPopState.reading = reading;
   const phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
@@ -3498,9 +3500,11 @@ document.addEventListener('pointerdown', (e) => {
   if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;   // 刚弹出 400ms 内不关（挡打开那次 tap 的余波）
   if (!p.contains(e.target)) {
     p.style.display = 'none';
-    // 词组模式：关闭面板时高亮框消失（原始 F6 需求「关闭后高亮框消失」）
+    // 词组模式：关闭面板时高亮框消失（原始 F6 需求「关闭后高亮框消失」）。只清词组所在页，不误伤其它页选中
     if (_wordPopState && _wordPopState.phrase) {
-      document.querySelectorAll('.sel-overlay').forEach(o => { o.classList.remove('phrase-breathe'); o.innerHTML = ''; });
+      const _pw = _charSel && _charSel.pw;
+      if (_pw) { const ov = _pw.querySelector('.sel-overlay'); if (ov) { ov.classList.remove('phrase-breathe'); ov.innerHTML = ''; } }
+      else document.querySelectorAll('.sel-overlay.phrase-breathe').forEach(o => o.classList.remove('phrase-breathe'));
       lastSelText = ''; _updateSelPreview(''); _charSel = null;
       toolbar.classList.remove('open');
     }
