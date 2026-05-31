@@ -221,8 +221,9 @@ def translate(text: str, target: str = "zh-CN",
         sources = ["mymemory"]
     elif backend in ("gtranslate", "google"):
         sources = ["gtranslate"]
-    else:  # auto:Google 翻译优先(快~0.3s+质量高+走赠金,key 未放行则自动跳过)→ mymemory → AI 兜底
-        sources = ["gtranslate", "deepl", "mymemory", "ai"]
+    else:  # auto:Google 优先(快~0.3s,质量评审 acc3.9/flu4.5,走赠金)→ AI 兜底(质量最高,接住 Google
+        # 偶发 API 抖动)→ mymemory 仅最后兜底(评审质量垫底,放最后只防 Google+AI 都挂)
+        sources = ["gtranslate", "deepl", "ai", "mymemory"]
 
     for src in sources:
         tr = None
