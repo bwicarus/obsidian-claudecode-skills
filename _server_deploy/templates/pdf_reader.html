@@ -3496,7 +3496,15 @@ document.addEventListener('pointerdown', (e) => {
   const p = document.getElementById('word-pop');
   if (!p || p.style.display !== 'block') return;
   if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;   // 刚弹出 400ms 内不关（挡打开那次 tap 的余波）
-  if (!p.contains(e.target)) p.style.display = 'none';
+  if (!p.contains(e.target)) {
+    p.style.display = 'none';
+    // 词组模式：关闭面板时高亮框消失（原始 F6 需求「关闭后高亮框消失」）
+    if (_wordPopState && _wordPopState.phrase) {
+      document.querySelectorAll('.sel-overlay').forEach(o => { o.classList.remove('phrase-breathe'); o.innerHTML = ''; });
+      lastSelText = ''; _updateSelPreview(''); _charSel = null;
+      toolbar.classList.remove('open');
+    }
+  }
 }, true);
 // 画日语声调(ピッチアクセント):读音拆拍 → 高/低 + 下降标记。
 // accent: 0=平板(LHHH…不降),1=頭高(HLLL…),N=第N拍后下降(LH…H↓L)
