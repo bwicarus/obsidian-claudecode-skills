@@ -1010,7 +1010,21 @@ def _merge_favorite_phrases(chars: list[dict]) -> None:
             if k < 0:
                 break
             i0 = cidx[k]; i1 = cidx[k + len(p) - 1]
-            if not any(used[i0:i1 + 1]):
+            # 校验是连续文本流（防跨段/跨栏把 reading-order 相邻但视觉分离的字误并）：
+            # 相邻非空格字符竖直跳变 > 2.2 行高 → 不是同一词组，跳过
+            ok = not any(used[i0:i1 + 1])
+            prevc = None
+            if ok:
+                for j in range(i0, i1 + 1):
+                    cj = chars[j]
+                    if cj.get("sp"):
+                        continue
+                    if prevc is not None:
+                        h = max(1.0, prevc["y1"] - prevc["y0"])
+                        if abs(cj["y0"] - prevc["y0"]) > h * 2.2:
+                            ok = False; break
+                    prevc = cj
+            if ok:
                 wid = 900000000 + wn; wn += 1
                 for j in range(i0, i1 + 1):
                     chars[j]["w"] = wid

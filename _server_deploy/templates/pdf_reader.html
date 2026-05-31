@@ -3287,9 +3287,10 @@ let _phraseBreatheTimer = null;
 function _setSelPhraseBreathe(on) {
   clearTimeout(_phraseBreatheTimer);
   document.querySelectorAll('.sel-overlay').forEach(o => o.classList.toggle('phrase-breathe', on));
-  if (on) {   // 呼吸 1.6s 后转常亮（去掉动画类，高亮保持）
+  if (on) {   // 呼吸 1.6s 后转常亮（去掉动画类，高亮保持）；按钮也停止呼吸
     _phraseBreatheTimer = setTimeout(() => {
       document.querySelectorAll('.sel-overlay.phrase-breathe').forEach(o => o.classList.remove('phrase-breathe'));
+      document.getElementById('sel-phrase-btn')?.classList.remove('breathe');
     }, 1600);
   }
 }
