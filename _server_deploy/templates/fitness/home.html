@@ -4,12 +4,25 @@
 
 <div class="card">
   <h2>今天练哪个?</h2>
+  {% if recommended_day %}
+  {% for d in plan.days %}{% if d.id == recommended_day %}
+  <div class="small" style="margin-top:4px;color:var(--accent-2);">
+    🤖 推荐今天练 <strong>{{ d.name }}</strong>
+    {% if last_by_day.get(d.id) %}<span class="dim">· 上次 {{ last_by_day.get(d.id) }}</span>{% else %}<span class="dim">· 还没练过</span>{% endif %}
+  </div>
+  {% endif %}{% endfor %}
+  {% endif %}
   <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px;">
     {% for d in plan.days %}
-    <a class="btn large primary" href="/private/fitness/log/{{ d.id }}"
-       style="flex: 1; min-width: 160px; text-align: center;">
+    <a class="btn large {% if d.id == recommended_day %}primary{% endif %}"
+       href="/private/fitness/log/{{ d.id }}"
+       style="flex: 1; min-width: 160px; text-align: center; position: relative;
+              {% if d.id != recommended_day %}background:var(--bg-card-hover);{% endif %}">
+      {% if d.id == recommended_day %}<span style="position:absolute;top:-8px;right:8px;
+        background:var(--accent-2);color:#fff;font-size:11px;padding:1px 7px;border-radius:8px;">今天</span>{% endif %}
       {{ d.name }}<br>
       <span style="font-size: 12px; opacity: 0.85;">{{ d.focus }}</span>
+      {% if last_by_day.get(d.id) %}<br><span style="font-size:11px;opacity:0.6;">上次 {{ last_by_day.get(d.id) }}</span>{% endif %}
     </a>
     {% endfor %}
   </div>

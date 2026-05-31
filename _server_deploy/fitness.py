@@ -208,9 +208,25 @@ def home():
         "SELECT date, day_id, COUNT(*) AS n FROM fitness_log "
         "WHERE date >= date('now', '-30 day') GROUP BY date ORDER BY date DESC"
     ).fetchall()
-    db.close()
     recent_workouts = [dict(r) for r in rows]
-    return render_template("fitness/home.html", plan=plan, recent=recent_workouts)
+    # 推荐今天练哪天:每个 plan day 取最近一次训练日期,选「最久没练」的那天
+    # (从没练过的优先)。轮转 PPL 自然得到 push→pull→legs 循环。
+    last_by_day = {}
+    for r in db.execute(
+        "SELECT day_id, MAX(date) AS last FROM fitness_log GROUP BY day_id"
+    ).fetchall():
+        last_by_day[r["day_id"]] = r["last"]
+    db.close()
+    recommended_day = None
+    if plan.get("days"):
+        # 从没练过的 day 优先;否则 last 最早的
+        never = [d["id"] for d in plan["days"] if d["id"] not in last_by_day]
+        if never:
+            recommended_day = never[0]
+        else:
+            recommended_day = min(plan["days"], key=lambda d: last_by_day.get(d["id"], ""))["id"]
+    return render_template("fitness/home.html", plan=plan, recent=recent_workouts,
+                           recommended_day=recommended_day, last_by_day=last_by_day)
 
 
 @bp.route("/log/<day_id>")
@@ -807,6 +823,60 @@ def _compute_recommendation(spec: dict, last_sets: list[dict]) -> dict:
     }
 
 
+def _est_1rm(weight, reps) -> float:
+    """Epley 公式估算 1RM。weight*(1+reps/30)。自重(0)返回 0。"""
+    try:
+        w = float(weight); r = float(reps)
+    except (TypeError, ValueError):
+        return 0.0
+    if w <= 0 or r <= 0:
+        return 0.0
+    return round(w * (1 + r / 30.0), 1)
+
+
+def _exercise_pr(db, exercise_id: str, before_date: str = None) -> dict:
+    """该动作历史个人纪录(PR)。before_date 给定则只看该日之前(排除今天在录的)。
+
+    返回 {best_weight, best_1rm, best_reps_at_top, has_history}。
+    """
+    sql = "SELECT weight_kg, reps FROM fitness_log WHERE exercise_id=? AND weight_kg IS NOT NULL AND reps IS NOT NULL"
+    params = [exercise_id]
+    if before_date:
+        sql += " AND date < ?"
+        params.append(before_date)
+    rows = db.execute(sql, params).fetchall()
+    best_w = 0.0
+    best_1rm = 0.0
+    best_reps_at_top = 0
+    for r in rows:
+        w, reps = r["weight_kg"], r["reps"]
+        if w is None or reps is None:
+            continue
+        if w > best_w:
+            best_w = w; best_reps_at_top = reps
+        elif w == best_w and reps > best_reps_at_top:
+            best_reps_at_top = reps
+        e = _est_1rm(w, reps)
+        if e > best_1rm:
+            best_1rm = e
+    return {
+        "best_weight": best_w,
+        "best_1rm": best_1rm,
+        "best_reps_at_top": best_reps_at_top,
+        "has_history": len(rows) > 0,
+    }
+
+
+@api_bp.route("/pr/<exercise_id>")
+def api_pr(exercise_id: str):
+    """该动作 PR(给前端 saveSet 后判断是否破纪录)。"""
+    username = _username()
+    db = _db(username)
+    pr = _exercise_pr(db, exercise_id, before_date=time.strftime("%Y-%m-%d"))
+    db.close()
+    return jsonify({"ok": True, "pr": pr})
+
+
 @api_bp.route("/recommend/<exercise_id>")
 def api_recommend(exercise_id: str):
     """基于历史 + plan.prescribed 给出本次推荐。"""
@@ -834,6 +904,9 @@ def api_recommend(exercise_id: str):
     db.close()
 
     rec = _compute_recommendation(spec, last_sets)
+    pr = _exercise_pr(db2 := _db(username), exercise_id,
+                      before_date=time.strftime("%Y-%m-%d"))
+    db2.close()
     return jsonify({
         "ok": True,
         "exercise_id": exercise_id,
@@ -842,6 +915,7 @@ def api_recommend(exercise_id: str):
         "last_date": last_date,
         "last_sets": last_sets,
         "recommendation": rec,
+        "pr": pr,
     })
 
 
