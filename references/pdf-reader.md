@@ -597,5 +597,8 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
   - 演进踩坑：① 最早「单段中文流进按原文每行形状切的 clip-path」→ 中日长度/换行不一致 **必错位溢出**；② 一度改 `showSentenceTranslation` 干净浮层；③ 改回就地覆盖、试过「逐行白条 + 按行宽比例切中文」→ 中文被**按行硬切**导致**标点落在每行奇怪位置、看着错乱**；④ **最终**：整句一个盒子 + 自然流排 + 字号同原文（标点自然、不错开）。`showSentenceTranslation` 浮层函数保留未用。
 - **提速** 5s→~1s：见 [`google-cloud-apis.md`](google-cloud-apis.md)（Google Translate 首选、CLI 冷启动/热进程结论、translate.py 两个 guard 坑）。
 
+### 14.10 竖直拖动当滚动、横向拖动才选字(手势消歧)
+手指落在可选字符上、想上下滑页时,旧逻辑一拖就竖向选中很多行。改:`_bindCharLayer` 的 `onMove` 里,**触摸**拖动首次动够 8px 时锁定方向 `_dragDir` —— `dy>dx`(竖直为主)→ `scroll`:置 `_dragStartCharIdx=null`、清选区、**不 `preventDefault`**(页面正常上下滚);否则 `select`(原逻辑,preventDefault+选字)。**鼠标(ev=null)不受限**,竖直拖仍可选。妙处:多行选择只要**起手横向**就锁成 select、后续往下拉照常多行选;只有**一上来直上直下**才滚动。(依据:复制几乎都是沿行水平方向。)
+
 ### 14.9 日语发音
 有道 dictvoice 是英语库 → 日语无声。改 `_speakOnline` 日语分流到浏览器原生 `speechSynthesis` **ja-JP**（iPad 自带 Kyoko，离线，念假名读音保证读对；iOS getVoices 暂空时靠 `u.lang='ja-JP'` 路由）。免费真人录音离线日语词典基本不存在（Forvo 要联网+key），合成音够用。

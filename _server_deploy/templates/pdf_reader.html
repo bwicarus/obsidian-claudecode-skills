@@ -2500,6 +2500,7 @@ function _paragraphExpandFromChar(chars, idx) {
 }
 
 let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
+let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为主→翻页) / 'select'(水平为主→选字)
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 
 function _bindCharLayer(cl, pw) {
@@ -2554,6 +2555,7 @@ function _bindCharLayer(cl, pw) {
     _dragStartCharIdx = idx;
     _dragStartXY = {x, y};
     _dragMoved = false;
+    _dragDir = null;   // 方向未定;首次动够时锁定
     _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
     // 拖选期间禁用 vocab-layer 拦截：否则拖到/松手在 L 按钮(pointer-events:auto)上会丢 move/up → 卡住/全选
     const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = 'none';
@@ -2566,6 +2568,19 @@ function _bindCharLayer(cl, pw) {
     if (!_dragStartXY) return;
     const dx = Math.abs(x - _dragStartXY.x), dy = Math.abs(y - _dragStartXY.y);
     if (dx + dy < 8) return;
+    // 触摸:首次动够时锁定方向。竖直为主(dy>dx) → 当作翻页/滚动:放弃选字、不拦默认滚动。
+    // 鼠标(ev=null)不受此限,竖直拖仍可选。多行选择只要**起手横向**就锁成 select、后续往下拉照常选。
+    const isTouch = !!(ev && ev.touches);
+    if (isTouch && _dragDir === null) {
+      _dragDir = (dy > dx) ? 'scroll' : 'select';
+      if (_dragDir === 'scroll') {
+        _dragStartCharIdx = null;   // 放弃这次拖选 → 后续 move/end 直接 return,页面正常上下滚
+        _charSel = null;
+        pw.querySelector('.sel-overlay')?.replaceChildren();
+        const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        return;   // 不 preventDefault
+      }
+    }
     _dragMoved = true;
     if (ev && ev.cancelable) ev.preventDefault();
     const idx = _findCharAt(pw.__charBoxes, x, y);
