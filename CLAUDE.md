@@ -13,6 +13,8 @@
 ## 学习方向
 自学：英语、日语、计算机科学（当前重心：大学数学、大学物理）
 
+英语已有一套**语法分析系统**（grammar KG + spacy 词性/依存 + PDF 阅读器 grammar 路由），详见 `references/grammar-analysis-system.md`（即将新建）。
+
 ## 技能 (Skills)
 | 指令 | 功能 |
 |------|------|
@@ -25,6 +27,8 @@
 | `/website` | 管理个人网站 bwicarus.space：部署页面、更新仪表板、nginx 配置 |
 | `/openai-cli-chat` | Codex CLI 多轮对话实现模板：`codex_call()` + `--image` 附图 + 应用层历史拼接 |
 | `/claude-quota` | 查 Claude Code 实时额度（5h/7d/Sonnet 使用率 + extra credits），零 token 消耗 |
+| 截图问答 | （非斜杠命令，session 入口指南）QA Browser 系统怎么工作 / 如何改，指向 `references/qa-browser-features.md` |
+| 技能树 | （非斜杠命令，session 入口指南）技能树 / 知识图谱（KG）怎么工作 / 如何改，指向 `references/skill-tree-system.md` |
 
 ## 关键文件
 
@@ -39,9 +43,9 @@
 - `references/pdf-annotation-format.md`
 - `references/ipad-remote-qa.md` — iPad 远程截图问答操作指南（链路、快捷指令、URL 模板、排错）
 - `references/linux-server-migration.md` — 2026-05-14 服务器迁移完整指南（systemd 服务、路径、踩坑速查）
-- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.service|timer）
+- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（约 13 个：xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.service|timer / anki-sync-refresh.service|timer / bwicarus-quick-sync.service|timer / book-ocr.service / book-ocr-watchdog.service|timer）
 - `references/server-side-claude-code.md` — 在服务器侧用 Claude Code 继续这个项目（tmux 会话、memory 同步、跨机器切换）
-- `references/client-exe-development.md` — bwicarus-client.exe 开发指南（launcher + core 架构、build_core.py、deploy_core.sh、版本号管理、跟 webapp 控制面板的职责对照）
+- `references/client-exe-development.md` — bwicarus-client.exe 开发指南（launcher + core 架构、版本号管理、跟 webapp 控制面板的职责对照）。注：早期文档提到的 `build_core.py` / `deploy_core.sh` 等构建脚本**实际不在仓库**（`_client/` 下只有 `core/` 和 `launcher/`，无 `build/` 目录），core zip / manifest 的真实打包方式以该文档修订后的说明为准
 - `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）
 - `references/ipad-switch-to-server.md` — iPad 快捷指令切换到服务器的完整步骤
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
@@ -52,6 +56,9 @@
 - `references/vocab-system.md` — 单词系统完整文档：vault 当数据库（`资源/vocab/<首字母>/<lemma>.md` + `_audio/`）、**三源字典融合**（ECDICT 离线中文+词频 / Free Dictionary 例句+音频备份 / Merriam-Webster Learner's 高质例句+美音音频）、ECDICT exchange 表 lemma 化、MW 富文本 `{bc}/{it}` 剥除、MW 音频 URL 子目录规则、笔记模板（frontmatter + 各源分段 + 文中出现 + 用户备注保留区）、`/pdf/api/dict` 改造（写 lookup 日志 + 后台异步生成笔记）、阶段 A-E 路线 + mastery 算法草稿
 - `references/fitness-system.md` — 健身系统完整文档：多用户 web 训练追踪 + **循证 AI 教练**（Claude **Opus + max effort + 25+ 篇文献**深度思考）、PPL 3 天 20 动作（拉伸位/RIR/MAV 循证）、Double Progression 推荐、autosave + 刷新恢复 + 休息倒计时、🏁 完成训练总结、Nippard + Cavaliere 双频道视频（`MUST_CONTAIN` 关键词过滤）、YT auto-caption + Cloud STT 双源字幕（Gemini Flash 翻译 fallback Claude）、`fitness_exercise_override` AI 调整后落库、`fitness_session_analysis` 反馈环、⚙ 设置面板（model/effort/auto_analyze/auto_suggest）、5 张 per-user 表 schema + 完整 API 清单 + 6 条踩坑
 - `references/google-cloud-apis.md` — GCP API 集成（Vision/YouTube/STT/Gemini）+ ¥47867 Free Trial 赠金管理、双 API key 隔离（`AIzaSy*` GCP 服务 vs `AQ.Ab*` Gemini service-account 绑定）、**计费分流大坑**（Gemini API 走 AI Studio 独立 billing 跟 GCP 赠金不通）、本地配额计数器（`scripts/google_api_quota.py` + SQLite `state/google_api_quota.db`）、YouTube 每日 10k units 硬上限（耗尽走本地 reorder）、PT 重置时区、key regenerate 流程
+- `references/claude-code-quota-api.md` — Claude Code 额度查询 API（/claude-quota skill 的实现参考：端点 / 认证 header / 响应格式 + 共享模块 `scripts/lib/claude_quota.py`）
+- `references/book-ocr-pipeline.md` — （即将新建）日文扫描 PDF 双 OCR 流水线：mokuro manga-ocr + Google Vision 两条路径、`state/mokuro-ocr/<sha>/` 断点续传、不可见文字层 embed、book-ocr / book-ocr-watchdog systemd
+- `references/grammar-analysis-system.md` — （即将新建）英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析）
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）
@@ -83,7 +90,7 @@
   - 首次启动弹「选择数据保存位置」窗口，写指针文件 `%APPDATA%\bwicarus-client\datadir.txt`
   - 之后每次启动读 manifest 检查 core 版本，新版自动下载 + 解压 + 加载
 - **Core**（`%LOCALAPPDATA%\bwicarus-client\core\<version>\`）— 业务逻辑 zip，可热更
-  - 服务端 `static/client/core-<v>.zip` + `manifest.json`，build 脚本：`_client/build/build_core.py`
+  - 服务端 `static/client/core-<v>.zip` + `manifest.json`（launcher 只消费 `version` + `core_url`）。注：`_client/build/build_core.py` / `deploy_core.sh` 等构建脚本**实际不在仓库**（`_client/` 下只有 `core/` + `launcher/`），真实打包方式见 `references/client-exe-development.md`
 
 **关键模块**（`_client/core/`）
 
@@ -235,7 +242,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | Vault | `/root/obsidian/` | obsidian-headless sync 拉，1175 笔记 |
 | Anki | `/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` | aqt 25.2.7 + Xvfb 跑 GUI，5634 卡 |
 | 环境变量 | `/root/claude/.env` + `/etc/profile.d/claude.sh` | `CLAUDE_PROJECT` / `OBSIDIAN_VAULT` / `APP_PYTHON` / `APP_CLAUDE` / `APP_CODEX` / `ANKI_CONNECT_URL` / `AI_SETTINGS_FILE` |
-| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` |
+| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` + `anki-sync-refresh.timer` (15min 拉手机复习数据) + `bwicarus-quick-sync.timer` (15min vault 状态同步) + `book-ocr.service` + `book-ocr-watchdog.timer` (日文 PDF OCR 后台 + 自检) |
 | **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
@@ -331,6 +338,13 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 - 主项目 ps1 用 `Ensure-AnkiConnect` 函数（force_restart 始终 True），客户端用 `AnkiClient.ensure_alive`
 
 **「Obsidian Headless Sync」**：登录时启动 sync daemon，持续后台运行（不在 daily 流程内）。
+
+**15 分钟轻量周期任务**（服务器 systemd timer，跟 daily 重型流程互补，不调 AI）：
+
+| timer | 脚本 | 作用 |
+|---|---|---|
+| `bwicarus-quick-sync.timer` (每 15min) | `scripts/quick_sync.py` | vault 状态同步：不调 Anki / 不调 AI，只跑 `cleanup_orphans` 索引/record 部分 + KG `containing_notes` prune，让重命名/删除在 15 分钟内反映到 KG / 仪表盘 / 索引 |
+| `anki-sync-refresh.timer` (每 15min) | `scripts/anki_sync_refresh.py` | 拉手机复习数据：AnkiConnect sync 拉 AnkiDroid 等设备的复习记录，今日复习数有变化才轻量刷仪表盘（anki_status → review_priority → export_dashboard → 部署）。只读卡片状态，**不改牌组**、不写 frontmatter |
 
 **state 备份**（仅主项目 ps1 做）：每天备份 `state/note-states.json` 和 `anki/records/` 到 `state/backup/`，保留 7 天。
 

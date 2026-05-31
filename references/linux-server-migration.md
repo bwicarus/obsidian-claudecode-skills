@@ -34,7 +34,10 @@ APP_CLAUDE=/usr/bin/claude
 APP_CODEX=/usr/bin/codex
 ANKI_CONNECT_URL=http://127.0.0.1:8765
 AI_SETTINGS_FILE=/root/claude/state/ai-settings.json
+WEBAPP_DASHBOARD_DIR=/root/webapp/data/users/bwicarus/dashboard
+QA_PUBLIC_URL=https://bwicarus.space/qa
 ```
+（Pi 实例把 `/root` 换成 `/home/bwicarus`，`QA_PUBLIC_URL` 用 Tailscale 地址。`WEBAPP_DASHBOARD_DIR` 由 daily 的 `deploy_dashboard` 读取，缺省落到硬编码 VPS 路径。）
 
 ## systemd services
 
@@ -45,8 +48,11 @@ AI_SETTINGS_FILE=/root/claude/state/ai-settings.json
 | `obsidian-sync.service` | `ob sync --continuous` 持续同步 vault |
 | `bwicarus-daily.service` | 一次性跑 daily 流程（`scripts/daily_anki_status.py`） |
 | `bwicarus-daily.timer` | 每天 04:00 触发 daily.service（含 missed-run 补跑） |
+| `anki-sync-refresh.service`/`.timer` | review 数据变动时 AnkiWeb sync + dashboard refresh（后续新增） |
+| `bwicarus-quick-sync.service`/`.timer` | vault 快速 sync + cleanup + KG prune，无 AI / 无 Anki（后续新增） |
+| `book-ocr.service` + `book-ocr-watchdog.service`/`.timer` | Mokuro 日文教材 OCR 后台（后续新增） |
 
-所有 unit 文件源码在 `references/systemd/`。`systemctl enable` 后开机自启。
+所有 unit 文件源码在 `references/systemd/`（OCR / quick-sync / sync-refresh 这几套是 2026-05-14 之后新增的，文件都已纳入该目录）。`systemctl enable` 后开机自启。
 
 ## webapp 控制面板
 
@@ -149,16 +155,19 @@ API：
 - BWICARUS_APP_DIR env 让客户端 `paths.py` 找对路径
 
 ### qa-server.service 必须的 sed patch（ExecStartPre，每次重启自动跑）
+
+实际只有 3 条 ExecStartPre sed（见 `references/systemd/qa-server.service`）：
 ```
-sed -i "s|cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|bwicarus.space/static/qa/mathjax.js|g" qa_browser.py
-sed -i "s|cdn.jsdelivr.net/npm/marked@9/marked.min.js|bwicarus.space/static/qa/marked.js|g" qa_browser.py
-sed -i 's|"--dangerously-skip-permissions",\s*||g' ai_backends.py
-sed -i 's|"--output-format", "text", "-p"|"--allowedTools", "Read", "--output-format", "text", "-p"|g' ai_backends.py
+sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|https://bwicarus.space/static/qa/mathjax.js|g" qa_browser.py
+sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|https://bwicarus.space/static/qa/marked.js|g" qa_browser.py
+sed -i 's|"--dangerously-skip-permissions"|"--allowedTools", "Read"|g' ai_backends.py
 ```
 3 个原因：
 1. iPad 在中国访问 jsdelivr CDN 慢/被墙 → 本机 host MathJax + marked
 2. Claude CLI 在 root 下拒绝 `--dangerously-skip-permissions`
-3. 去掉 flag 后 Read tool 默认询问被拒 → 加 `--allowedTools Read` 显式白名单
+3. 把该 flag 原地替换成 `--allowedTools Read`（一步搞定：既去掉被拒的 flag，又显式白名单 Read tool）
+
+注：`_client/core/ai_backends.py` 源码现已内置 `--allowedTools Read` 且不含 `--dangerously-skip-permissions`，所以第 3 条 sed 当前命中目标串已不存在、是幂等保底（git pull 万一引回旧写法时兜底）。
 
 ### Web 控制面板（`/control/`）
 - 完整复刻 dashboard 视觉风格（深紫渐变背景 + 毛玻璃 panel + indigo/violet 强调）
@@ -180,7 +189,23 @@ sed -i 's|"--output-format", "text", "-p"|"--allowedTools", "Read", "--output-fo
 - `.panel-stack { overflow-y: auto }` 兜底滚动
 
 ### 完整 daily 流程验证
-- Daily 任务自动跑过完整 9 步（含 register 全 vault 6 分钟、anki_status、review_priority、build_review_deck 重建 62 张必复习卡、cleanup、export_dashboard、部署、AnkiWeb sync）
+- `scripts/daily_anki_status.py::main` 现在跑约 15 步（权威流程见 CLAUDE.md「自动化任务」小节）：
+  1. smoke tests（守门，任一 fail 立即 abort，不动 Anki / vault / dashboard）
+  2. 确保 AnkiConnect
+  3. AnkiWeb 同步（拉最新 —— 在读 Anki 数据**之前**先拉，吃进 AnkiDroid 等其它设备的复习记录；失败不阻断）
+  4. 登记新笔记（`register_notes.py --no-update-kg`，全 vault 约 6 分钟）
+  5. 更新 Anki 状态（anki_status）
+  6. 计算复习优先级（review_priority）
+  7. 薄弱卡 AI 改写（step_weak）
+  8. 已掌握卡换问法（step_antimodel）
+  9. 卡片质量体检（step_quality）
+  10. 重建必复习牌组（build_review_deck）
+  11. 清理孤儿（cleanup_orphans --apply）
+  12. KG 关联+掌握度（run_kg_link_mastery，含 link_with_ai + audit_kg）
+  13. 导出仪表板（export_dashboard）
+  14. 部署仪表板（deploy_dashboard）
+  15. AnkiWeb 同步（推送本次改动）
+  - 三个 AI 卡维护步骤（7/8/9）各由 server-config `weak_card_refresh` / `card_antimodel` / `card_quality` 的 `enabled` 单独控制。
 - `state/last_run.json` 实时记录每步进度，控制面板"状态"panel 实时显示
 
 ### 在服务器侧继续这个项目

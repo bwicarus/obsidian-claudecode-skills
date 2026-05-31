@@ -11,7 +11,7 @@
 | `book` | 书名 |
 | `note_prefix` | 笔记命名前缀（如 LADR=`000-`），用于 `register_notes.py::_find_book_for_note` 反查 |
 | `pdf` | 教材 PDF 路径 |
-| `scan_config` | rescan_rolling 参数（pages_per_night / model / stable_threshold / max_stable_days）|
+| `scan_config` | rescan_rolling 参数（enabled / pages_per_night / stable_threshold / max_stable_days / deep_model / deep_effort）|
 | `nodes` | L0 章 / L1 节 / L2 知识点节点列表 |
 | `edges` | 节点间依赖（`kind="prereq"`）|
 | `_note_to_covered_l2` | 持久化字典 `{note_rel_path: [node_id, ...]}` |
@@ -131,15 +131,20 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
 
 | 路由 | 用途 |
 |---|---|
+| `/skilltree/` (GET) | 书本索引页（`skilltree_index`，render `skilltree_index.html`）|
+| `/skilltree/api/books-meta` (GET) | 列**所有书**元数据（控制面板技能树 tab 用，不带 `<book>`）|
 | `/skilltree/<book>/` | HTML 页面 |
 | `/skilltree/<book>/data.json` | KG JSON 数据 |
-| `/skilltree/<book>/api/edit` | 编辑：add_prereq / delete_edge / delete_node / merge / update_summary |
+| `/skilltree/<book>/pdf` (GET) | 取该书的教材 PDF（`skilltree_pdf`）|
+| `/skilltree/<book>/api/edit` (POST) | 编辑，op：`add_edge` / `delete_edge` / `delete_node` / `merge` / `update_summary` / `set_meta`（`set_meta` 改 KG 顶层元数据，白名单 key = note_prefix / title / scan_config）|
 | `/skilltree/<book>/api/archive-node` | 把节点归档到回收站笔记 |
 | `/skilltree/<book>/api/restore-node` | 从回收站恢复（删 trash section + 创建独立笔记）|
 | `/skilltree/<book>/api/build-note` | 从 PDF 创建笔记（含 AI 验证：ok/merge/delete） |
 | `/skilltree/<book>/api/prune-notes` | 清理悬空笔记关联 |
-| `/skilltree/<book>/api/books-meta` (POST) | 改 KG 元数据：title / note_prefix / scan_config |
+| `/skilltree/<book>/api/toggle-tracked` (POST) | 切换该书是否纳入跟踪 |
 | `/skilltree/<book>/api/delete` | 删除整本 KG |
+
+> 元数据编辑（title / note_prefix / scan_config）走 `POST /skilltree/<book>/api/edit` body `op="set_meta" key=... value=...`（control.html 第 877-884 行就是这么调的），**没有** `/skilltree/<book>/api/books-meta` 这个 per-book POST 路由。
 
 控制面板技能树 tab：`https://bwicarus.space/control/` → "技能树" panel
 - 书本列表 / 编辑 (title, note_prefix, scan_config) / 删除
@@ -162,11 +167,11 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
 └──────────────────────────────────────────┘
 ```
 
-后端 `POST /control/api/kg-build`：
-1. 生成 `nodes/<book>/meta.yml`
-2. 在后台线程 spawn `build_nodes.py` → 写各章节点 yml
-3. 完成后 spawn `extract_edges.py` → 推导 prereq 关系
-4. 返回 `{job_id}`；前端轮询 `/control/api/kg-build-log?job_id=` 滚动显示日志（stdout + stderr）
+后端 `POST /control/api/kg-build`（`control.py::control_kg_build`，后台线程串行）：
+1. spawn `scripts/kg/build_nodes.py --pdf --book --model --effort [--pages]` → **直接写 `knowledge_graph/<book>.json`**（没有任何 yml / `nodes/<book>/` 目录）
+2. 把 `note_prefix` / `title` 写进该 json
+3. spawn `scripts/kg/extract_edges.py --kg <json> --in-place` → 推导 prereq 关系
+4. 返回 `{job_id}`；前端轮询 `/control/api/kg-build-log?job=<job_id>` 滚动显示日志（stdout + stderr）。注意查询参数名是 `job`（响应体里字段才叫 `job_id`）
 
 job 状态在内存 dict 里（webapp restart 丢失，但 KG 文件已落盘所以不影响最终结果）。
 
@@ -210,7 +215,7 @@ job 状态在内存 dict 里（webapp restart 丢失，但 KG 文件已落盘所
 
 ### `_note_to_covered_l2` 是覆盖不是 union
 
-`link_with_ai.py:248-279`：每次 AI 跑完，对处理的笔记 `persistent[rel] = sorted(set(covered))` **直接覆盖**，不是 union。后果：
+`link_with_ai.py` 的「增量合并」块（约第 336-344 行）：每次 AI 跑完，对处理的笔记 `persistent[rel] = sorted(set(covered))` **直接覆盖**，不是 union。后果：
 
 - 手动编辑 KG 给某节点加 `containing_notes`，下次 link_with_ai 重新处理该笔记会**清空**手动添加的关联
 - 防御：用解锁规则过滤（已加 `_rejected_links`）+ 必要时改节点本身的 name/summary 让 AI 不再漏判（而不是手动加 containing_notes）
@@ -309,7 +314,6 @@ systemd 服务（qa-server / bwicarus-daily）有 `EnvironmentFile=...env`，跑
 | `.tile.chain-anc/desc/desc-locked/self/fade` | focus 模式应用 chain 角色 | 链路高亮（蓝/紫/虚线/黄/淡化）|
 | `.tile.inferred` | mastery_inferred=true | 边框 stroke-dasharray + ↓ 角标 |
 | `.tile.search-hit` | applySearchHighlight 匹配 | 粉框 |
-| `.tile.has-pick`（QA 用）| addHeadingPickers 加 | 仅占位 padding |
 | `g.locked-bar` | home 视图未开放章节 | 折叠条，点击展开/折叠 |
 | `path.edge.mast/unl/prev/lock` | edgeClass(e) 输出 | 边颜色按目标节点 state |
 | `path.edge.chain-edge-anc/desc/desc-locked/fade` | focus 模式 | 链路边高亮 |
@@ -384,7 +388,7 @@ systemd 服务（qa-server / bwicarus-daily）有 `EnvironmentFile=...env`，跑
 - 图像作 ground truth，让 AI "看见" 真实排版（上下标、公式、定理编号视觉对齐）
 - 文字层作辅助候选（避免 OCR 错误）
 
-实现：`page.get_pixmap(matrix=fitz.Matrix(2,2))` 渲染高清 PNG → base64 → 传给 vision-capable AI 后端（claude / gpt-4o vision）。
+实现：`page.get_pixmap(matrix=fitz.Matrix(DPI/72, DPI/72))`（`DPI=144`，约 2x）渲染高清 PNG → base64 → 传给 vision-capable AI 后端（claude / gpt-4o vision）。
 
 **坑**：vision token 是文本 token ~10x 单价；只在首次构建跑（不进 daily 流程）。
 

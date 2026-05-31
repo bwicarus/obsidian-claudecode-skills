@@ -19,8 +19,10 @@ PDF 原文内容以 HTML 注释写入笔记，**阅读模式不显示，源码�
 
 如需将旧版 `> [!quote] 原文` callout 块转换为 HTML 注释格式：
 
+（从项目根运行，路径平台无关；当前主实例在 Linux，项目根 `/home/bwicarus/claude`）
+
 ```
-python C:\claude\scripts\annotate_note.py --note <笔记路径> --migrate
+python3 scripts/annotate_note.py --note <笔记路径> --migrate
 ```
 
 ---
@@ -92,8 +94,8 @@ python C:\claude\scripts\annotate_note.py --note <笔记路径> --migrate
 ### 工作流（Claude Code 执行）
 
 ```
-# 第一步：脚本扫描，输出待处理图片 JSON
-python C:\claude\scripts\annotate_images.py scan --note <笔记路径>
+# 第一步：脚本扫描，输出待处理图片 JSON（从项目根运行，路径平台无关）
+python3 scripts/annotate_images.py scan --note <笔记路径>
 
 # 第二步：Claude Code 用 Read 工具读取 JSON 中 path 字段指向的图片文件
 #         对每个 section 的图片：分析内容，判断关联性，生成分组描述
@@ -115,7 +117,7 @@ python C:\claude\scripts\annotate_images.py scan --note <笔记路径>
 # }
 
 # 第四步：脚本写回标注
-python C:\claude\scripts\annotate_images.py apply --note <笔记路径> --result <结果JSON路径>
+python3 scripts/annotate_images.py apply --note <笔记路径> --result <结果JSON路径>
 ```
 
 支持的图片格式：`.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.svg`

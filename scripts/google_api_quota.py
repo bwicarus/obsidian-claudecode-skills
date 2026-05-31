@@ -28,10 +28,12 @@ DB_PATH = Path(os.environ.get(
     "/home/bwicarus/claude/state/google_api_quota.db",
 ))
 
-# 各 service 的每日免费配额
+# 各 service 的每日免费配额(0 / None = 无固定日限,只计量不算百分比)
 DAILY_LIMITS = {
     "youtube": 10_000,      # search.list 每次 100 units
     "vision":  1_000,       # 我们 OCR 用的
+    "gemini":  250,         # Gemini 2.5 Flash free tier 约 250 请求/天
+    "stt":     None,        # Cloud Speech-to-Text 无固定免费日限(按 Free Trial 赠金计费)
 }
 
 # 重置时区(PT)
@@ -87,7 +89,7 @@ def report(service: str = "youtube") -> dict:
         (service.lower(), iso),
     ).fetchone()
     used, calls = int(rows[0]), int(rows[1])
-    limit = DAILY_LIMITS.get(service.lower(), 0)
+    limit = DAILY_LIMITS.get(service.lower(), 0) or 0   # None/缺省都归一成 0 = 无固定日限
     remaining = max(0, limit - used) if limit else None
     next_reset = window_start + timedelta(days=1)
     secs = (next_reset - datetime.now(timezone.utc)).total_seconds()
@@ -125,8 +127,12 @@ def _cli():
     print(f"=== {r['service'].upper()} Data API 配额 ===")
     print(f"  窗口起点(UTC): {r['window_start_utc']}")
     print(f"  下次重置(UTC): {r['next_reset_utc']} (约 {fmt_secs(r['seconds_to_reset'])} 后)")
-    print(f"  已用: {r['used']:,} units / 限额 {r['limit']:,}  ({r['used']/r['limit']*100:.1f}%)")
-    print(f"  剩余: {r['remaining']:,} units")
+    if r['limit']:
+        pct = r['used'] / r['limit'] * 100
+        print(f"  已用: {r['used']:,} units / 限额 {r['limit']:,}  ({pct:.1f}%)")
+        print(f"  剩余: {r['remaining']:,} units")
+    else:
+        print(f"  已用: {r['used']:,} units / 限额 无固定日限")
     print(f"  调用次数: {r['calls']}")
     if r["recent"]:
         print(f"  最近 5 条:")

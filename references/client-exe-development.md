@@ -24,9 +24,9 @@ bwicarus-client.exe (PyInstaller --onefile, ~33MB)
 
 | 路径 | 内容 |
 |---|---|
-| `_client/launcher/launcher.py` | PyInstaller 入口（onefile） |
-| `_client/launcher/__main__.py` | launcher 主流程：选数据目录 → 拉 manifest → 下载 core zip → 解压 → load main |
-| `_client/core/main.py` | 实际业务入口 + `CORE_VERSION = "0.9.32"` 写死 |
+| `_client/launcher/main.py` | PyInstaller 入口 + 主流程（`LAUNCHER_VERSION = "0.2.0"`）：选数据目录 → 拉 manifest → 下载 core zip → 解压 → load core/main。含 `_pointer_file` / `_default_data_dir` / `fetch_manifest` / `download_core` / `load_core` / `main` |
+| `_client/launcher/_runtime_imports.py` | 占位 import 清单，让 PyInstaller 静态分析时把 core 运行时依赖（customtkinter / watchdog / pystray / PIL / keyboard / stdlib 等）全打进 .exe（本身不被调用） |
+| `_client/core/main.py` | 实际业务入口 + `CORE_VERSION = "0.9.32"` 写死（`main.py:13`） |
 | `_client/core/gui.py` | customtkinter 主窗口（7 个 tab，约 1800 行） |
 | `_client/core/wizard.py` | 首次启动 4 步配置向导 |
 | `_client/core/anki.py` | AnkiClient（ping + sync + ensure_alive） |
@@ -44,24 +44,26 @@ bwicarus-client.exe (PyInstaller --onefile, ~33MB)
 | `_client/core/startup.py` | HKCU\\...\\Run 开机自启 |
 | `_client/core/ai_backends.py` | 5 个 AI 后端 adapter |
 | `_client/core/auth.py` | device-link OAuth |
-| `_client/build/build_core.py` | core 打包脚本（生成 core-<v>.zip + manifest.json）|
-| `_client/build/build_launcher.py` | launcher.exe 打包脚本（PyInstaller --onefile） |
-| `_client/build/bwicarus-client.spec` | PyInstaller spec 文件 |
-| `_client/build/deploy_core.sh` | scp core zip + manifest 到服务器 |
+| `_client/core/screenshot.py` | 全屏截图工具（PIL ImageGrab → PNG bytes，`capture_full_screen()`） |
+| `_client/core/task_state.py` | 只读主项目 `state/active_tasks.json`（task_tracker 写），给悬浮窗当数据源 |
+
+> ⚠️ **build/deploy 脚本不在仓库**：`_client/` 下当前只有 `core/` 和 `launcher/` 两个目录（外加 `README.md`），**没有 `_client/build/` 目录**。早期文档提到的 `build_core.py` / `build_launcher.py` / `deploy_core.sh` / `bwicarus-client.spec` 全仓库找不到。core zip / manifest.json 的生成与部署方式目前在仓库里无迹可寻（疑似手工或在另一台机器上做），下文「改 core / 改 launcher / 发布新版」的命令示例属于 **理想流程，并不能照搬执行**——动手前需先确认真实打包脚本所在。`_client/README.md` 也引用了同一批不存在的脚本。
 
 ## 改 core 业务逻辑（最常见）
 
+> ⚠️ 下面第 3、4 步引用的 `build/build_core.py`、`build/deploy_core.sh` **当前不在仓库**（见上文源码位置表的警告）。打包/部署的真实手段需先确认；以下仅为目标流程示意。
+
 ```bash
 # 1. 改 _client/core/*.py 任何文件
-# 2. 升级版本号
+# 2. 升级版本号（写死在 _client/core/main.py:13）
 sed -i 's/CORE_VERSION = "0.9.32"/CORE_VERSION = "0.9.33"/' _client/core/main.py
 
-# 3. build core zip + manifest
+# 3. build core zip + manifest（脚本缺失，待补 / 手工打包）
 cd _client
-python build/build_core.py
+python build/build_core.py        # ← 该脚本仓库里不存在
 
-# 4. 部署到服务器（scp）
-bash build/deploy_core.sh
+# 4. 部署到服务器（脚本缺失）
+bash build/deploy_core.sh         # ← 该脚本仓库里不存在
 # 或手动：scp dist/client/* root@bwicarus.space:/var/www/html/static/client/
 
 # 5. 客户端下次启动自动拉新版（用户不用操作）
@@ -69,17 +71,18 @@ bash build/deploy_core.sh
 
 ## 改 launcher（罕见）
 
-通常**不需要**改 launcher。只有改动数据目录指针逻辑 / 拉 core 流程 / 首次配置向导**外壳**时才动。改完后：
+通常**不需要**改 launcher。只有改动数据目录指针逻辑 / 拉 core 流程 / 首次配置向导**外壳**时才动（入口文件是 `_client/launcher/main.py`，依赖清单在 `_client/launcher/_runtime_imports.py`）。改完后用 PyInstaller `--onefile` 打包：
+
+> ⚠️ 下面命令引用的 `build/bwicarus-client.spec` **当前不在仓库**（`_client/build/` 目录不存在）；真实打包入口应指向 `_client/launcher/main.py`。命令仅为示意，实际 spec / 打包脚本需先确认或补齐。
 
 ```bash
 cd _client
-# PyInstaller 打包
+# PyInstaller 打包（spec 文件缺失，需指向 launcher/main.py 自行准备）
 C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe \
     --onefile --noconsole \
     --distpath dist \
     --workpath build \
-    --specpath . \
-    build/bwicarus-client.spec
+    launcher/main.py        # 或自备 .spec
 # 部署到服务器（用户下次「下载客户端」时拿到新 .exe）
 scp dist/bwicarus-client.exe root@bwicarus.space:/var/www/html/static/client/
 ```
@@ -89,7 +92,8 @@ scp dist/bwicarus-client.exe root@bwicarus.space:/var/www/html/static/client/
 ## 版本号管理
 
 - `CORE_VERSION = "0.9.32"`（写死在 `_client/core/main.py:13`）
-- `min_launcher = "0.1.0"` 在 manifest.json，限制最低 launcher 版本（防止旧 launcher 加载新 core）
+- `LAUNCHER_VERSION = "0.2.0"`（写死在 `_client/launcher/main.py:30`，仅用于日志/UA，不参与 core 选择）
+- launcher 的版本比对逻辑只做 `manifest.version != cfg.current_core_version` 的字符串不等判断（`launcher/main.py` 的 `main()` 里），**没有任何最低 launcher 版本校验**，也从不读取 `min_launcher` 字段（代码里根本没有这个字段）。如需「防止旧 launcher 加载新 core」的下限保护，需先在 launcher 里实现。
 - 每次 core 改动建议升级 patch 号（0.9.32 → 0.9.33），让用户客户端感知有新版
 
 ## 服务端文件
@@ -97,21 +101,24 @@ scp dist/bwicarus-client.exe root@bwicarus.space:/var/www/html/static/client/
 | 路径 | 内容 |
 |---|---|
 | `/var/www/html/static/client/core-<v>.zip` | core 业务逻辑（每版本独立文件） |
-| `/var/www/html/static/client/manifest.json` | 当前版本指针 + sha256 + size + min_launcher |
+| `/var/www/html/static/client/manifest.json` | core 版本指针。launcher 实际只消费 `version` + `core_url` 两个键（`download_core()`）；**不校验 sha256，也不读 size**（代码里无任何 sha256/size/min_launcher 校验逻辑） |
 | `/var/www/html/static/client/bwicarus-client.exe` | launcher exe（一次性下载） |
 
 nginx 配置中 `/static/` 由 nginx 直接 serve（不经过 Flask）。
 
 ## 客户端运行时数据
 
+只有 `datadir.txt` 路径写死在 `%APPDATA%`（launcher 唯一硬编码的位置，作指针）。其余文件全部落在**用户首次启动时选定的数据目录**（由 `datadir.txt` 指向）——`%LOCALAPPDATA%\bwicarus-client\` 只是 launcher `_default_data_dir()` 的默认兜底值，用户在首次启动弹窗里可改到 D 盘 / 网盘 / U 盘。下表用 `<数据目录>` 表示该可变根（默认即 `%LOCALAPPDATA%\bwicarus-client\`）。
+
 | 路径 | 内容 |
 |---|---|
-| `%APPDATA%\bwicarus-client\datadir.txt` | 指针文件（指向真实数据目录）|
-| `%LOCALAPPDATA%\bwicarus-client\core\<version>\` | 解压后的 core .py 文件 |
-| `%LOCALAPPDATA%\bwicarus-client\config.json` | GUI 配置 |
-| `%LOCALAPPDATA%\bwicarus-client\cmd_server_key.txt` | iPad API key |
-| `%LOCALAPPDATA%\bwicarus-client\launcher.log` | 启动日志 |
-| `%LOCALAPPDATA%\bwicarus-client\qa-history\` / `qa-temp\` | 截图问答临时图 |
+| `%APPDATA%\bwicarus-client\datadir.txt` | 指针文件（写死位置，指向真实数据目录）|
+| `<数据目录>\core\<version>\` | 解压后的 core .py 文件 |
+| `<数据目录>\config.json` | GUI 配置 |
+| `<数据目录>\cmd_server_key.txt` | iPad API key |
+| `<数据目录>\launcher.log` | 启动日志 |
+| `<数据目录>\qa-history\` / `qa-temp\` | 截图问答临时图 |
+| `<数据目录>\client.lock` | 主 GUI 单例锁（`--qa` 模式跳过）|
 
 ## 客户端调主项目 scripts
 

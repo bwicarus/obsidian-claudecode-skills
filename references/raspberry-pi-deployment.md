@@ -15,7 +15,7 @@
 bwicarus.space (VPS, 1vCPU/3.8G)   bwicarus.taile44d0c.ts.net (Pi 5, 8GB)
   └─ 1175 笔记 vault                 └─ 1175 笔记 vault（独立副本）
   └─ 5634 Anki 卡                   └─ 5634 Anki 卡（独立副本，AnkiWeb sync）
-  └─ webapp/qa-server/...           └─ 同上 7 个 systemd 服务
+  └─ webapp/qa-server/...           └─ 同上 6 个项目 systemd unit + nginx
   └─ Let's Encrypt (bwicarus.space) └─ Let's Encrypt (Tailscale Cert 自动签)
   └─ daily timer 04:00 CST          └─ daily timer 04:00 JST（错开 1 小时）
 ```
@@ -27,7 +27,7 @@ bwicarus.space (VPS, 1vCPU/3.8G)   bwicarus.taile44d0c.ts.net (Pi 5, 8GB)
 - Raspberry Pi 5 8GB（aarch64）
 - Debian 13 trixie
 - 235 GB NVMe SSD（用了 ~6GB after deployment）
-- Tailscale 1.96.4 已装并加入 tailnet（hostname `bwicarus`，IP `100.101.15.57`）
+- Tailscale 已装并加入 tailnet（hostname `bwicarus`，IP `100.101.15.57`；部署时 1.96.4，之后自动升级，现 1.98.3）
 
 ## 部署 checklist（参考实际操作顺序）
 
@@ -149,11 +149,10 @@ PASSWORD_HASH=$(ssh $VPS 'grep PASSWORD_HASH /root/webapp/.env | cut -d= -f2-')
 RELAY_KEY=$(openssl rand -hex 16)
 WEBAPP_DATA=/home/bwicarus/webapp/data
 CLAUDE_PROJECT=/home/bwicarus/claude
-WEBAPP_DASHBOARD_DIR=/home/bwicarus/webapp/data/users/bwicarus/dashboard
 EOF
 chmod 600 ~/webapp/.env
 
-# 项目 .env（systemd 全用这个）
+# 项目 .env（systemd 全用这个；bwicarus-daily.service 的 EnvironmentFile 指向它）
 cat > ~/claude/.env <<EOF
 CLAUDE_PROJECT=/home/bwicarus/claude
 OBSIDIAN_VAULT=/home/bwicarus/obsidian
@@ -163,10 +162,28 @@ APP_CLAUDE=/usr/bin/claude
 APP_CODEX=/usr/bin/codex
 ANKI_CONNECT_URL=http://127.0.0.1:8765
 AI_SETTINGS_FILE=/home/bwicarus/claude/state/ai-settings.json
+WEBAPP_DASHBOARD_DIR=/home/bwicarus/webapp/data/users/bwicarus/dashboard
 EOF
 ```
 
-7 个 systemd unit 写在 [systemd/](systemd/)，Pi 版用 `User=bwicarus` + `/home/bwicarus/` 路径。
+> ⚠️ `WEBAPP_DASHBOARD_DIR` 必须放在**项目 `~/claude/.env`**（不是 `~/webapp/.env`）：
+> `bwicarus-daily.service` 的 `EnvironmentFile` 指向 `/home/bwicarus/claude/.env`，
+> `scripts/daily_anki_status.py` 从环境读 `WEBAPP_DASHBOARD_DIR`，缺省值是硬编码的 VPS
+> 路径 `/root/webapp/data/users/bwicarus/dashboard`。若漏放进项目 .env，daily 的部署仪表板
+> 步骤会落到不存在的 `/root` 路径，dashboard 静默不更新。
+
+项目自带的 systemd unit 写在 [systemd/](systemd/)（Pi 版用 `User=bwicarus` + `/home/bwicarus/` 路径）：
+`xvfb-99` / `anki-headless` / `obsidian-sync` / `qa-server` / `webapp` / `bwicarus-daily.{service,timer}`
+这 6 个核心 unit，加上系统包 `nginx`。
+
+另有两套 **2026-05-15 之后新增**的增量 timer（Pi 实机已在跑）：
+
+- `anki-sync-refresh.{service,timer}`（2026-05-23）—— 每 15 分钟跑 `scripts/anki_sync_refresh.py`，
+  复习数据有变化时做 Anki sync + 仪表板刷新。
+- `bwicarus-quick-sync.{service,timer}`（2026-05-24）—— 每 15 分钟跑 `scripts/quick_sync.py`，
+  vault 快速同步（清理 + KG prune，不跑 AI / 不动 Anki）。
+
+副本都在 `references/systemd/`，enable 方式同其它 timer（见阶段 10）。
 
 `qa-server.service` 在 Pi 上还需要额外两个 env：
 
@@ -274,16 +291,21 @@ codex --version
 ```bash
 sudo systemctl enable --now xvfb-99 anki-headless obsidian-sync qa-server webapp nginx
 sudo systemctl enable --now bwicarus-daily.timer
-sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证 10 步全 ok
+sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer   # 两套增量 timer（后续新增）
+sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
 ```
 
-预期：10 步全 ✓（smoke tests / AnkiConnect / register-空 / anki_status / review / build_review_deck / cleanup / export_dashboard / deploy_dashboard / AnkiWeb sync）。
+预期：所有 step 全 ✓。`scripts/daily_anki_status.py` 当前跑 **15 步**（按顺序）：
+smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔记 / 更新 Anki 状态 /
+计算复习优先级 / 薄弱卡 AI 改写 / 已掌握卡换问法 / 卡片质量体检 / 重建必复习牌组 /
+清理孤儿 / KG 关联+掌握度 / 导出仪表板 / 部署仪表板 / AnkiWeb 同步。
+（脚本顶部 docstring 仍是早期 0-8 的旧编号，以 `main()` 里的 `step(...)` 调用为准。）
 
 ## 跟服务器对等度
 
 | 维度 | 服务器 | Pi |
 |---|---|---|
-| systemd 服务 | 7 个 | 7 个 |
+| systemd 服务 | 6 个项目 unit + nginx（+ 2 套增量 timer） | 同上 |
 | webapp 路由 | 完整 | 完整 |
 | Vault | 1175 md / 1.4GB | 1175 md / 1.4GB |
 | Anki | 33 decks / 5634 cards / 3258 notes | 完全一致 |

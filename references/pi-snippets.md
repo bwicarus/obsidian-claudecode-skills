@@ -43,7 +43,7 @@ systemctl status webapp anki-headless qa-server obsidian-sync xvfb-99 nginx bwic
 cat ~/claude/state/last_run.json | python3 -m json.tool | head -40
 ```
 
-10 步全 ok 的话 `"status": "ok"` 在顶部。
+15 步全 ok 的话 `"status": "ok"` 在顶部。
 
 ## ▶️ 手动触发完整 daily
 
@@ -104,11 +104,16 @@ echo "anki:  $(curl -s -d '{"action":"findCards","version":6,"params":{"query":"
 ## 🧠 看跨会话 auto memory
 
 ```bash
-ls ~/.claude/projects/home-bwicarus--claude/memory/
-cat ~/.claude/projects/home-bwicarus--claude/memory/MEMORY.md
+# 取最新的 memory 目录（不依赖目录名编码）
+MEMDIR=$(ls -td ~/.claude/projects/*/memory 2>/dev/null | head -1)
+ls "$MEMDIR"
+cat "$MEMDIR/MEMORY.md"
 ```
 
-`MEMORY.md` 是索引，逐个 `.md` 是具体记忆。
+`MEMORY.md` 是索引，逐个 `.md` 是具体记忆。当前活动目录是
+`~/.claude/projects/-home-bwicarus-claude/memory/`（前导单个连字符，目录名编码自
+`/home/bwicarus/claude`）；旧的 `home-bwicarus--claude/`（双连字符）已冻结，里面是
+2026-05-15 的旧 feedback 条目，别照那个看。
 
 ## ⚙️ iPad 触发 URL 模板
 

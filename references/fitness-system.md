@@ -160,7 +160,7 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 
 走 `ai_client.ask(prompt, claude_model="opus", claude_effort="max")`,默认从 `fitness_settings` 读。
 
-- **Opus + max**:深度思考,3-5 分钟,~$0.3 / 次
+- **Opus + max**:深度思考,~1-3 分钟(前端按钮文案,看 4 周历史 + 文献),~$0.3 / 次(设置面板里 max 选项标注「3-5 分钟」是上界)
 - 用户明说不在乎 Claude 限额,所以默认最强
 
 ### Prompt 文献库(`LITERATURE_REF`)
@@ -205,7 +205,7 @@ analyze_session(db, date, day_id, plan_data, model=, effort=) → {
 
 ```
 点 🤖 调整计划 (log 页顶部 banner)
-  ↓  ~3-5 min Opus + max
+  ↓  ~1-3 min Opus + max(前端文案)
 modal: overall_reasoning + per-exercise diff
   ↓
 [✓接受] → POST exercise_override → loadRec 刷新推荐
@@ -357,7 +357,7 @@ RIR 2 · 间歇 180s · 起步 10 kg
 📊 各动作明细 ▾  (每动作的所有组 w×r 一行)
 
 [🤖 让 AI 分析这次训练] (auto_analyze 时自动点)
-   ↓ ~3-5 min
+   ↓ ~1-3 min(前端文案)
    verdict badge + summary + per_exercise + insights + warnings
    ↓ (auto_suggest):
    "下次 push 计划已就绪 → 进 log 页点 🤖 调整计划 查看"
@@ -416,7 +416,7 @@ register_fitness(app)
 
 1. **Gemini billing 模式陷阱**:AI Studio 默认 free tier 250 req/天 OK;但如果触发了 "prepayment" 模式,prepay 余额 0 时就报 `prepayment depleted`。解决:`https://ai.studio/projects` 关掉 billing。
 2. **Gemini API 不走 GCP 赠金**:`generativelanguage.googleapis.com` 即使在 GCP project 启用,计费走 AI Studio 独立账户,**赠金不通**。要烧赠金做 Gemini 得走 Vertex AI(需 service account)。
-3. **Opus + max effort 慢**:3-5 分钟。设置 modal 可调成 high(~45s)。nginx /api proxy_read_timeout=300s,Pi 上 max effort 偶尔会撞超时。
+3. **Opus + max effort 慢**:前端文案标 ~1-3 分钟(设置面板里 max 选项标到「3-5 分钟」上界)。设置 modal 可调成 high(~45s)。`proxy_read_timeout 300s` 是 **Pi nginx**(`/etc/nginx/sites-available/bwicarus` 的 `/api` location)上的设置,Pi 上 max effort 偶尔会撞超时;git 里 `_server_deploy/nginx/bwicarus.conf`(VPS 版)的 `/api` 块**没设** `proxy_read_timeout`(只有 `/stocks` 设了 600),照那份找 300s 会找不到。
 4. **plan.json 顺序敏感**:`upgrade_fitness_plan.py` 只更新现有动作,顺序保留;新增动作走 `add_pullup_exercises.py`(`_insert: prepend/after/replace`)。
 5. **YouTube Data API 配额 10k/天硬上限**:不能用赠金扩。**配额耗尽就换本地 `reorder_videos_by_keyword.py` 离线调整,不调 API**。
 6. **fitness_log schema migration**:加 UNIQUE INDEX 时存量数据可能有冲突(同 date+ex+set_no 多行),迁移脚本保留 max id 删旧。已对 bwicarus 用户跑过。

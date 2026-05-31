@@ -1,6 +1,6 @@
 # Vault 学科分类体系
 
-Vault 根目录：`C:\obsidian\`
+Vault 根目录：Linux 实例（当前主实例）`/home/bwicarus/obsidian`；Windows 实例 `C:\obsidian\`
 
 ## 一级科目与二级分支
 
@@ -47,7 +47,6 @@ Vault 根目录：`C:\obsidian\`
 | `diary/` | — | 不纳入知识索引 |
 | `Excalidraw/` | — | 绘图文件，不纳入索引 |
 | `garbage/` | — | 不纳入索引 |
-| `claude/` | — | 本项目目录，不纳入索引 |
 
 ## 分类原则
 1. 按笔记**内容**归类，不强制按所在文件夹归类

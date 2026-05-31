@@ -11,23 +11,25 @@ Pi 部署细节见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 | 项 | VPS (`bwicarus.space`) | Pi (`bwicarus.taile44d0c.ts.net`) |
 |---|---|---|
 | 项目代码 | `/root/claude/` | `/home/bwicarus/claude/` |
-| Vault | `/root/obsidian/` (1175 md) | `/home/bwicarus/obsidian/` (1175 md) |
+| Vault | `/root/obsidian/` (约 1300+ md) | `/home/bwicarus/obsidian/` (约 1300+ md) |
 | Anki | `/root/.local/share/Anki2/User 1/` | `/home/bwicarus/.local/share/Anki2/User 1/` |
 | Anki venv | `/opt/anki-venv/` | `/opt/anki-venv/`（同位置） |
-| Claude CLI | `/usr/bin/claude` v2.1.141+ | 同左 |
-| Codex CLI | `/usr/bin/codex` v0.130+ | 同左 |
+| Claude CLI | `/usr/bin/claude` v2.1.141+ | `/home/bwicarus/.local/bin/claude` v2.1.158（native installer，经 PATH 调用，非 /usr/bin） |
+| Codex CLI | `/usr/bin/codex` v0.130+ | `/usr/bin/codex`（symlink，同左） |
 | OAuth 凭据 | `/root/.claude/.credentials.json` | `/home/bwicarus/.claude/.credentials.json` |
 | Python / Node | 3.10 / 22 (nvm) | 3.13 / 22 (NodeSource) |
 | 项目 .env | `/root/claude/.env` | `/home/bwicarus/claude/.env` |
 | 用户 | `root` | `bwicarus`（NOPASSWD sudo） |
 | MagicDNS | `bwicarus-3.taile44d0c.ts.net` | `bwicarus.taile44d0c.ts.net` |
 
-memory（跨会话）路径不同（cwd 决定 project key）：
+memory（跨会话）路径取决于 cwd（cwd 决定 project key）。**新版 Claude Code 已改 project-key 编码：memory 现与 jsonl transcripts 同处「单横杠」目录**，旧的「双横杠」目录已废弃（仅留陈旧的 feedback 文件，别再往那找）：
 
-| 实例 | memory 目录（双横杠）| jsonl transcripts（单横杠）|
-|---|---|---|
-| VPS | `/root/.claude/projects/root--claude/memory/` | `.../-root-claude/*.jsonl` |
-| Pi | `/home/bwicarus/.claude/projects/home-bwicarus--claude/memory/` | `.../-home-bwicarus-claude/*.jsonl` |
+| 实例 | memory 目录（活跃，单横杠）| jsonl transcripts（同目录）| 旧废弃目录（双横杠）|
+|---|---|---|---|
+| VPS | `/root/.claude/projects/-root-claude/memory/` | `.../-root-claude/*.jsonl` | `root--claude/`（旧，本机无法核实 VPS，按 Pi 同理推断已迁单横杠）|
+| Pi | `/home/bwicarus/.claude/projects/-home-bwicarus-claude/memory/` | `.../-home-bwicarus-claude/*.jsonl` | `home-bwicarus--claude/`（旧，冻结于 2026-05-15）|
+
+不确定时用 `ls -td ~/.claude/projects/*/memory 2>/dev/null | head -1` 取最近更新的 memory 目录。
 
 ## 切换工作流的两种方式
 
@@ -97,7 +99,7 @@ ssh root@bwicarus.space 'cd /root/claude && claude -p "项目当前状态"'
 | 内存 / 上下文 | 完整保留（这个对话窗）| 全新会话 |
 | 操作 Windows | 直接 | **无法**（除非反向 ssh 回 Windows） |
 | 操作服务器 | ssh + 132ms RTT | **本地直接** bash / file 编辑（即时） |
-| Memory（auto memory） | `~/.claude/projects/C--claude/memory/` (Windows 私有) | `/root/.claude/projects/root--claude/memory/`（服务器侧；用户切换时手动 scp 同步） |
+| Memory（auto memory） | `~/.claude/projects/C--claude/memory/` (Windows 私有) | `/root/.claude/projects/-root-claude/memory/`（服务器侧，新版单横杠；用户切换时手动 scp 同步） |
 
 ### 让上下文跨机器同步
 
@@ -115,14 +117,14 @@ ssh root@bwicarus.space 'cd /root/claude && claude -p "项目当前状态"'
 ```bash
 # Windows → 服务器
 scp -r ~/.claude/projects/C--claude/memory/ \
-    root@bwicarus.space:/root/.claude/projects/root--claude/
+    root@bwicarus.space:/root/.claude/projects/-root-claude/
 
 # 反向：服务器 → Windows（如果服务器侧也产生了新 memory）
-scp -r root@bwicarus.space:/root/.claude/projects/root--claude/memory/ \
+scp -r root@bwicarus.space:/root/.claude/projects/-root-claude/memory/ \
     ~/.claude/projects/C--claude/
 ```
 
-注意：服务器侧的 project name 取决于 cwd（`/root/claude` → `root--claude`）。
+注意：服务器侧的 project name 取决于 cwd（`/root/claude`）。新版 Claude Code 用「单横杠」编码（`-root-claude`），memory 与 transcripts 同目录；旧的双横杠目录 `root--claude/` 已废弃。同步前用 `ls -td /root/.claude/projects/*/memory | head -1` 确认实际活跃目录。
 
 ## 服务器侧 Claude Code 该知道的关键事实
 
@@ -130,7 +132,7 @@ scp -r root@bwicarus.space:/root/.claude/projects/root--claude/memory/ \
 - `/root/claude/CLAUDE.md`
 - `/root/claude/references/linux-server-migration.md`
 
-也会自动读 `/root/.claude/projects/root--claude/memory/MEMORY.md`（如果有的话，要先 scp）。
+也会自动读 `/root/.claude/projects/-root-claude/memory/MEMORY.md`（新版单横杠目录；如果有的话，要先 scp）。
 
 ## 常见操作快速参考
 
@@ -187,7 +189,7 @@ journalctl -u anki-headless -n 30 --no-pager
 | Anki collection | `/root/.local/share/Anki2/User 1/collection.anki2` | ✅ AnkiWeb 是权威 |
 | Claude / Codex CLI token | `/root/.claude/.credentials.json` + `/root/.codex/auth.json` | ✅ 已 scp，独立的（独立 device 记录） |
 | AnkiConnect plugin | `/root/.local/share/Anki2/addons21/2055492159/` | ✅ git clone 自 FooSoft repo |
-| Memory（auto memory） | `/root/.claude/projects/root--claude/memory/` (13 files) | ✅ 删 Windows 前手动 `scp -r` 同步过来即可 |
+| Memory（auto memory） | `/root/.claude/projects/-root-claude/memory/`（新版单横杠目录） | ✅ 删 Windows 前手动 `scp -r` 同步过来即可 |
 | systemd 服务 + Daily timer | 跑着 | ✅ |
 | 控制面板 + qa-server | 跑着 | ✅ |
 

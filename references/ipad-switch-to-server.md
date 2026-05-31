@@ -67,7 +67,7 @@ ssh root@bwicarus.space 'cat /root/claude/state/qa-server-data/cmd_server_key.tx
 | 症状 | 检查 |
 |---|---|
 | iPad 浏览器连不上 9091 | 服务器 `systemctl status qa-server` 是否 active；`tailscale status` 是否 idle/active |
-| POST 9090 返回 401/403 | API key 错；重新 `cat /root/claude/state/qa-server-data/cmd_server_key.txt` |
+| POST 9090 返回 403 `forbidden` | API key 错（cmd_server `_auth` 失败固定返回 403，不会返回 401）；重新 `cat /root/claude/state/qa-server-data/cmd_server_key.txt` |
 | POST 9090 返回 404 `/qa` | 服务器 cmd_server 没跑 —— `systemctl restart qa-server` |
 | 截图注入成功但浏览器看不到 | qa_browser daemon 没拿到新截图 —— `journalctl -u qa-server -n 30` 看 inject 日志 |
 | AI 没回答 / 报错 | 服务器 AI CLI 凭据问题，看 `/root/claude/state/logs/ai_calls.log` |

@@ -1,7 +1,7 @@
 # 截图问答（QA Browser）功能详解
 
 源码：`_client/core/qa_browser.py`（HTML/JS 内嵌字符串）。
-入口：本机 `ctrl+shift+q`（临时进程）或服务器 systemd `qa-server.service`（常驻 :9091 + :9090）。
+入口：本机 `ctrl+shift+q`（临时进程）或服务器 systemd `qa-server.service`（常驻 :9091 + :9090）。systemd ExecStart 直接跑 `_server_deploy/qa_server.py`，它内部再起 qa_browser daemon(:9091) + cmd_server(:9090)。
 iPad 用法见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
 
 ## 两种模式
@@ -56,11 +56,11 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 参数：`/?card=<local_id>` → `loadCardContext()` 拉卡片两面 + 显示在截图位置。
 
 勾选有用回答后，header 出现三个按钮：
-- **更新到笔记**：`_card_update_note(local_id, pairs, mode='detailed'|'concise')` → AI 改写源笔记
+- **更新到笔记**：`_card_update_note(local_id, pairs, verbosity='verbose'|'concise')` → AI 改写源笔记
 - **根据此修改 Anki**：`_card_update_anki(local_id, pairs)` → AI 生成新卡替代原卡（删/留旧卡由 server-config 控制）
 - **全部更新**：两个都跑
 
-异步实现：后端立即返回 `job_id`，前端轮询 `/api/card-job/<job_id>` 拿结果（移动端连接断了不丢）。
+异步实现：提交 POST `/api/card-update`（立即返回 `{job_id}`），前端轮询 GET `/api/card-update-status?job=<job_id>` 拿结果（done 的 job 保留 30 分钟，弱网下轮询能重取，移动端连接断了不丢）。
 
 ### 笔记改写两种模式（2026-05-27）
 
@@ -71,7 +71,7 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 | **详细**（默认） | 默认保留 ④ 全部原文 + 在合适位置追加 / 改写 QA 内容；prompt 强调"有判断力"——允许重组顺序、合并相似段、连贯化跨段衔接（应对用户选了**间断**段落）；不强制逐字照搬 | 原笔记内容多、QA 是详细解析 |
 | **精炼** | 允许大幅删减，提炼核心；同样有判断力可改写但不损失关键信息 | 原笔记太啰嗦想压缩 |
 
-两种模式共用 `_card_update_note`，传 `mode` 参数。返回里加"保留率"百分比（新内容 / 旧内容长度比）让用户验证 AI 没过度精炼。
+两种模式共用 `_card_update_note`，传 `verbosity` 参数（`verbose`=详细 / `concise`=精炼，`/api/card-update` body 也读 `verbosity`，非法值回落 `verbose`）。返回里加"保留率"百分比（新内容 / 旧内容长度比）让用户验证 AI 没过度精炼。
 
 **prompt 进化历史**（按时间）：
 1. 初版：要求 AI 严格保留所有原文 → 用户反馈"过度精炼"
@@ -87,7 +87,7 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 
 ## AI 后端 + System Prompt
 
-`_AdapterSession`（`ai_client.py` 内）每次 send 重新读 `ai_settings.json`，支持切 backend 不重启。
+`_AdapterSession`（定义在 `_client/core/qa_browser.py`，**不在** scripts/ai_client.py）每次 send 调 `_GET_CFG()` 读当前 `ai_backend` + `ai.{backend}` 设置（来自 server-config / 客户端 cfg），支持切 backend 不重启。QA browser 用 `from ai_backends import make_backend`，并用 shim `_AiClientShim` 把 `ai_client.xxx` 重定向到本地实现——与主项目 scripts/ai_client.py 是两套，**不读 `ai_settings.json`**。
 
 `_SESSION_PROMPT`（2026-05-26 强化）：
 ```
@@ -108,8 +108,8 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 
 ## 数据存储
 
-- `BWICARUS_APP_DIR/qa.sqlite` —— 历史对话（QA session）
-- `BWICARUS_APP_DIR/screenshots/` —— 截图 PNG
+- `<STORE_DIR>/history.db` —— 历史对话（QA session，表名 `conversations`）
+- `<STORE_DIR>/images/`（`HIST_IMG_DIR`）—— 截图 PNG
 - 服务器实例：`/home/bwicarus/claude/state/qa-server-data/`
 - 历史导出：`WEBAPP_HISTORY_DIR=/home/bwicarus/webapp/data/users/bwicarus/history/`（用户 dashboard 能看历史）
 
@@ -126,7 +126,7 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 | `/api/save` / `/api/discard` | 保存对话到 vault / 弃稿 |
 | `/api/reset` | 清空 session |
 | `/api/history/*` | 历史侧边栏 |
-| `/api/search-related` | 「关联知识」按钮：搜 KG 关联节点 |
+| `/api/search-related` | 「关联知识」按钮：AI 基于知识索引选相关**笔记**（带 mastery%），非 KG/Anki 卡 |
 
 ## iPad 远程入口
 
@@ -142,35 +142,35 @@ POST 截图注入：    http://<Tailscale-IP>:9090/qa?key=<KEY>
 
 ## 数据存储详解
 
-### SQLite schema（`<APP_DIR>/qa.sqlite`）
+### SQLite schema（`<STORE_DIR>/history.db`）
 
 ```sql
-CREATE TABLE history (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  created_at TEXT NOT NULL,           -- ISO 时间
-  title TEXT NOT NULL,                -- 用户问题的首句作摘要
-  messages_json TEXT NOT NULL,        -- 整条对话 [{role,text,image?}, ...]
-  image_filename TEXT,                -- 关联截图（在 HIST_IMG_DIR）
-  note TEXT,                          -- 保存到 vault 时的笔记路径（相对 VAULT）
-  card_id TEXT                        -- cardCtx 模式下的 anki local_id
+CREATE TABLE conversations (
+  id          TEXT PRIMARY KEY,       -- 时间戳字符串 %Y%m%d-%H%M%S（非自增整数）
+  timestamp   TEXT NOT NULL,          -- 保存时间
+  img_fname   TEXT,                   -- 关联截图文件名（在 HIST_IMG_DIR=images/）
+  note        TEXT,                   -- 保存信息文本（含 "→ /path/to/note.md"，删除时正则解析）
+  messages    TEXT,                   -- 整条对话 JSON
+  record_type TEXT DEFAULT 'normal',  -- normal | wrong（错题）
+  related_cards TEXT DEFAULT '[]'     -- 错题关联卡片 JSON（do_save 时 find_related_cards 填）
 );
 ```
 
+（`record_type` / `related_cards` 由 `init_db()` 用 `ALTER TABLE` 补加，老库自动迁移。cardCtx 模式的卡片身份**不**存这张表，复习链接靠 URL `?card=<local_id>`。）
+
 ### 截图文件
 
-存 `<APP_DIR>/screenshots/<sha1>.png`，文件名是图片二进制 sha1（去重）。
+存 `<STORE_DIR>/images/`（`HIST_IMG_DIR`）。文件名是时间戳：远程注入 `remote-<ts>.png`、本机 `screenshot-<ts>.png`（不是 sha1）。剪贴板图片去重用的 md5（`get_clipboard_hash`）只用于粘贴轮询，跟落盘文件名无关。
 
 ### 历史侧边栏（删除级联）
 
 GUI：`/history-btn` 按钮 → 滑出 sidebar 列出最近条目。每条带「打开 / 删除」。
 
-**删除是级联的**：`POST /api/history/delete` 内部 `_delete_history(hid)`：
-1. SQLite `DELETE FROM history WHERE id=?`
-2. 截图文件 `HIST_IMG_DIR/<file>.png` unlink（如果 ref count=0）
-3. **Obsidian 笔记**：如果 entry 有 `note` 字段（保存到 vault 的笔记），`vault/<note>` 也 unlink
+**删除是级联的**：`POST /api/history/delete` 的级联逻辑直接 inline 在 do_POST 分支里（qa_browser.py:3063 起，无独立 `_delete_history` 函数）：
+1. SQLite `DELETE FROM conversations WHERE id=?`
+2. 截图文件 `HIST_IMG_DIR/<img_fname>` 无条件 unlink（`if img.exists(): img.unlink()`，无 ref-count 判断）
+3. **Obsidian 笔记**（除非 body 传 `keep_note=true` 只删库+截图保留笔记）：从 `note` 字段正则解析出 `→ ...md` 路径 → 若该路径存在直接 unlink；跨平台 fallback：路径不可达时按文件名在 `EXERCISES_DIR` / `WRONG_DIR` 下查找
 4. 触发 `_export_history_to_webapp()` 同步到 webapp `WEBAPP_HISTORY_DIR`
-
-**踩坑**：早期版本不级联 → 删历史后留下孤儿截图 + 孤儿笔记。现在 daemon 启动会扫一次。
 
 ---
 
@@ -182,10 +182,12 @@ GUI：`/history-btn` 按钮 → 滑出 sidebar 列出最近条目。每条带「
 
 ### 关联知识搜索（`🔍 关联知识`）
 
-`/api/search-related` (POST)：
-1. 从当前对话取最近 user message 作 query
-2. 调 `find_related_cards(note_names, match=query)`：从 anki records 找最相近的卡
-3. 返回 markdown 渲染的卡片列表 + obsidian:// 链接
+`/api/search-related` (POST)（qa_browser.py:3114）：
+1. 调 `load_index_notes()` 加载知识索引（笔记名 → keywords + summary），取最近 6 条对话 + 可选 `query` 作上下文
+2. 把上下文 + 笔记摘要（前 80 篇）喂给 `ai_client.ask()`，让 AI 选 3-6 篇最相关**笔记**并给关联原因
+3. 返回 markdown：每行 `- [[笔记名]] — 关联原因  掌握 X%`（mastery 来自 `get_mastery`），并把这次搜索追加进 session
+
+**注意**：`find_related_cards`（从 anki records 找相近卡）是另一套机制，只在 `/api/save`（错题保存，qa_browser.py:3017）里调，与 search-related 无关。
 
 ### 快捷按钮（`quick-bar`）
 
@@ -229,7 +231,7 @@ function maybeRender() {
 
 | backend_name | 实现 | 特点 |
 |---|---|---|
-| `claude_cli` | 调 `/usr/bin/claude` CLI（subprocess） | 服务器侧默认；Linux 上 sed patch 移除 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（防 AI 乱改文件）|
+| `claude_cli` | 调 `claude` CLI（走 PATH，`default_command="claude"`，subprocess） | 服务器侧默认；`--allowedTools Read`（防 AI 乱改文件）现已**硬编码**进 ai_backends.py 的 chat/chat_stream，源码里已无 `--dangerously-skip-permissions` 字面量。qa-server.service 那条 sed patch 现在是历史残留/幂等兜底，命中目标串已不存在 |
 | `codex_cli` | 调 `/usr/bin/codex` CLI | OpenAI 的本地 CLI |
 | `claude_api` | Anthropic API direct（不经 CLI） | 需 API key |
 | `openai_api` | OpenAI API direct | 需 API key |

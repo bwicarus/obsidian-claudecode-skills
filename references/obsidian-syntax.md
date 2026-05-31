@@ -41,13 +41,13 @@
 - [[文件名]] — 关联原因（不超过20字）
 ```
 
-写入时使用：
+写入时使用（从项目根运行，路径平台无关；当前主实例在 Linux，项目根 `/home/bwicarus/claude`）：
 ```
-C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe C:\claude\scripts\connect_note.py --note "<笔记路径>" --link "文件名|关联原因"
+python3 scripts/connect_note.py --note "<笔记路径>" --link "文件名|关联原因"
 ```
 
 ## 注意事项
 - 文件名**不需要**写 `.md` 扩展名
 - 路径中有空格不需要转义，Obsidian 自动解析
 - 链接在 Obsidian 内可点击跳转；在 Claude 中仅作文本标识
-- 文件名大小写不敏感（Windows vault）
+- 文件名大小写：Linux 实例（当前主实例，vault 在 `/home/bwicarus/obsidian`）大小写**敏感**，链接需与文件名完全一致；Windows 实例则大小写不敏感

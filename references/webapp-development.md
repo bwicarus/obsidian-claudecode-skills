@@ -23,15 +23,18 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 
 | 路径 | 部署到服务器 |
 |---|---|
+| `_server_deploy/app.py` | `/root/webapp/app.py`（git tracked，765 行，scp 部署） |
 | `_server_deploy/control.py` | `/root/webapp/control.py` |
 | `_server_deploy/templates/control.html` | `/root/webapp/templates/control.html` |
 | `_server_deploy/qa_server.py` | `/root/claude/_server_deploy/qa_server.py`（git pull 拿到）|
 
-### 服务器（真实部署，**不在 git** —— 历史代码）
+> 注：`_server_deploy/app.py` 是 Flask 主入口，**完全在版本控制下**，可像 control.py 一样 scp 部署。仓库里另有一个废弃的 `webapp/app.py`（旧 stub，~3.7KB）应清理删除。
+
+### 服务器（真实部署路径）
 
 | 路径 | 内容 |
 |---|---|
-| `/root/webapp/app.py` | Flask 主入口（671 行，由各种 routes 直接挂 @app.route） |
+| `/root/webapp/app.py` | Flask 主入口（765 行，由各种 routes 直接挂 @app.route；源码 = git `_server_deploy/app.py`） |
 | `/root/webapp/control.py` | 控制面板 blueprint（git tracked，scp 部署）|
 | `/root/webapp/.env` | SECRET_KEY / RELAY_KEY / 其他 webapp env |
 | `/root/webapp/templates/*.html` | Jinja2 模板 |
@@ -66,13 +69,19 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/dashboard/graph-settings.json` | GET/POST | 图谱设置（per-user）|
 | `/history/` | GET | 复习历史 |
 | `/private/` | GET | 用户私有文件 |
-| `/api/upload/<dataset>` | POST | 客户端上传（dashboard/history），bearer token |
+| `/api/upload/<dataset>` | POST | 客户端上传（dashboard/history/private），bearer token |
+| `/api/qa-history/<hid>/delete` | POST | 删一条 QA 历史（proxy 到 qa-server :9091）|
+| `/api/nav-links` | GET/POST | per-user 导航链接持久化（nav.js 用）|
 | `/control/` | GET | 控制面板首页 |
 | `/control/api/status` | GET | 系统状态 JSON |
+| `/control/api/config/schema` | GET | server-config 字段 schema |
+| `/control/api/ipad-config` | GET | iPad 端配置（cmd_server key / 端点等）|
+| `/control/api/quota-log` | GET | 额度消耗日志（state/quota_log.json）|
+| `/control/api/quota-now` | GET | 当前额度快照 |
 | `/control/api/trigger/<action>` | POST | 触发 register/daily/anki-restart/ankiweb-sync/switch-ai |
 | `/control/api/trigger-log` | GET | webapp_trigger.log 末 N 行 |
 | `/control/api/config` | GET/POST | 读写 server-config.json |
-| `/control/api/kg-build` | POST | 新建书本（spawn build_nodes.py + extract_edges.py 后台任务） |
+| `/control/api/kg-build` | POST | 新建书本（spawn `scripts/kg/build_nodes.py` + `scripts/kg/extract_edges.py` 后台任务） |
 | `/control/api/kg-build-log` | GET | 新建书本 job 日志 |
 | `/skilltree/<book>/` | GET | KG 可视化页（见 skill-tree-system.md） |
 | `/pdf/` | GET | PDF 阅读器入口（PDF 列表） |
@@ -88,7 +97,12 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/pdf/api/list-pdfs` | GET | PDF 列表 JSON |
 | `/pdf/api/snippets-to` | POST | 草稿 → 笔记 / Anki / 两者 |
 | `/pdf/api/highlights` | GET/POST/PATCH/DELETE | 高亮 sidecar JSON 增删改查 |
-| ~~`/qa/`~~ | — | **已废弃** 2026-05-11；iPad 现走 Tailscale 直连 qa-server :9091，不经 webapp |
+| `/qa/` `/qa` | GET | 渲染 `qa.html`（旧 qa 流程，读 `data/qa.json`）|
+| `/qa/update` | POST | 旧 relay 写 qa.json（X-API-Key = RELAY_KEY）|
+
+> **PDF reader 完整路由**：pdf_reader.py（url_prefix=`/pdf`）实际有约 30+ 路由，上表只列了核心几条。手写笔（`/api/ink`）、生词系统（`/api/vocab-*`、`/api/page-vocab-marks`、`/api/dict-quick`）、语法分析（`/api/grammar-*` 7 条）、句子翻译（`/api/translate-sentence`/`-config`/`-dismiss`）、异步草稿（`/api/snippets-to-async`+`/api/job-status`）等新功能未在此罗列，完整清单见 pdf_reader.py / [`pdf-reader.md`](pdf-reader.md)。
+
+> **`/qa` 注意**：路由代码在 app.py 里仍 active（非废弃），iPad 现走 Tailscale 直连 qa-server :9091 不经 webapp（nginx `/qa` 反代 2026-05-11 已删，外部不可达）。但 `qa.html` 模板**不在**部署源目录 `_server_deploy/templates/`，只在废弃的 `webapp/templates/qa.html`，所以真机访问 `/qa` 会 TemplateNotFound。要么把模板加进部署源目录，要么真正删掉 `/qa`/`/qa/update` 两条路由。
 
 详细 PDF reader 文档（含选中机制、高亮编辑、踩坑 17 条）：[`pdf-reader.md`](pdf-reader.md)
 
@@ -96,7 +110,7 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 
 ```python
 # /root/webapp/app.py
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/skilltree")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf")
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request
@@ -113,16 +127,21 @@ def require_login_global():
 
 ### SQLite（app.db）
 
+`init_db()` 只 CREATE 三张表（users / invites / api_tokens）：
+
 | 表 | 字段 |
 |---|---|
 | `users` | id / username / password_hash / role (admin/user) / created_at |
-| `api_tokens` | id / user_id / name / token_hash / created_at / last_used |
-| `invites` | token / role / created_by / expires_at |
-| `qa_history` | id / user_id / image_path / question / answer / created_at（旧 qa 流程用，新流程在 SQLite 在 qa-server-data 下）|
+| `api_tokens` | id / user_id / token（**明文**，`secrets.token_urlsafe(32)` 直接 INSERT，非 hash）/ label / created_at / last_used_at |
+| `invites` | token / created_by / created_at / used_by / used_at / expires_at / note（无 role 列，角色在 users 表）|
+
+旧 QA 流程的数据存在文件 `data/qa.json`（`QA_FILE`），**不是** SQLite 表（app.db 里没有 qa_history 表）；新 QA 流程的 SQLite 在 `qa-server-data/` 下另一个 db（见 qa-browser-features.md）。
 
 ### 用户文件
 
 `/root/webapp/data/users/<username>/{dashboard,history,private}/`：客户端 / 服务器 daily 流程上传 `dashboard.json` / `history.json` / 图片到这里。
+
+`ALLOWED_DATASETS = {"dashboard", "history", "private"}` —— 三者都是合法上传 dataset（`/api/upload/<dataset>`）。private 也走 `_serve_user`，只是不享受 template fallback（template 同步只对 dashboard/history）。
 
 Admin 用户上传的 HTML/CSS/JS 自动同步到 `dashboard_template/` / `history_template/`（其他用户没有这些文件时回落到 template）。
 
@@ -154,16 +173,23 @@ git push origin main
 
 ### 改 app.py（罕见 + 慎重）
 
-`app.py` **不在 git** —— 改之前**先备份**：
+`app.py` 在 git（`_server_deploy/app.py`），流程跟 control.py 一致：本机改 → scp → restart → commit：
 
 ```bash
-ssh root@bwicarus.space
-cp /root/webapp/app.py /root/webapp/app.py.bak.$(date +%s)
-nvim /root/webapp/app.py
-systemctl restart webapp
-sleep 2
-systemctl is-active webapp || echo "FAILED, rollback!"
-journalctl -u webapp -n 20 --no-pager | tail
+# 本机编辑
+nvim _server_deploy/app.py
+
+# scp 部署
+scp _server_deploy/app.py root@bwicarus.space:/root/webapp/app.py
+
+# 重启 + 验证
+ssh root@bwicarus.space 'systemctl restart webapp && sleep 2 && systemctl is-active webapp || echo "FAILED, rollback!"'
+ssh root@bwicarus.space 'journalctl -u webapp -n 20 --no-pager | tail'
+
+# commit + push
+git add _server_deploy/app.py
+git commit -m "app: ..."
+git push origin main
 ```
 
 ### 加新 location 到 nginx（少做）
@@ -203,7 +229,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-**注意**：`app.py` 末尾 `if __name__ == "__main__": app.run(host="127.0.0.1", port=5000)` 是阻塞调用 —— 任何 `if __name__` 之后的代码**永远不会执行**。所以 `control.py` import 必须在 `if __name__` **之前**：
+**注意**：`app.py` 末尾 `if __name__ == "__main__": app.run(host="127.0.0.1", port=5000, threaded=True)` 是阻塞调用 —— 任何 `if __name__` 之后的代码**永远不会执行**。所以 `control.py` import 必须在 `if __name__` **之前**：
 
 ```python
 # ... 所有 routes 定义
@@ -213,8 +239,11 @@ from control import register_control
 register_control(app)
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000)
+    # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
+    app.run(host="127.0.0.1", port=5000, threaded=True)
 ```
+
+> `webapp.service` 的 systemd unit 文件**未**纳入 `references/systemd/` 副本（那目录只有 anki / qa-server / xvfb / obsidian-sync / bwicarus-daily 等），上面的 ini 是手抄，无法跟真机 unit 对照。
 
 ## 现有模板
 
@@ -226,7 +255,7 @@ if __name__ == "__main__":
 | `admin.html` | 管理后台 |
 | `control.html` | 控制面板（深色毛玻璃 + 仿 dashboard panel-stack + 左侧 drawer） |
 | `device_link.html` | OAuth 设备登录回调 |
-| `qa.html` | ~~已废弃~~ |
+| `qa.html` | 旧 qa 流程页面，**不在** 部署源目录 `_server_deploy/templates/`（只在废弃的 `webapp/templates/qa.html`）；`/qa` 路由仍在但模板缺失，访问会 TemplateNotFound |
 
 `data/dashboard_template/index.html` 和 `data/history_template/index.html` 是仪表板/历史的页面（个人化数据由 JS fetch 加载），用户私有目录里有自己的副本时优先用私有的。
 
@@ -275,9 +304,12 @@ systemctl start webapp
 ## 客户端上传 API（被 EXE / `_full_daily_pipeline` 调用）
 
 ```python
-# 客户端调
-api_client.upload_dataset(Path("dashboard"), "dashboard")
-# 等于 POST /api/upload/dashboard 含 multipart files
+# 客户端调（uploader 是模块函数，3 个参数：client, root, dataset）
+from uploader import upload_dataset
+upload_dataset(client, Path(dash_dir), "dashboard")
+# 内部对每个文件调 api_client.upload(dataset, rel_path, data)：
+#   POST /api/upload/dashboard，单文件 body（application/octet-stream）
+#   相对路径走 X-Path header（不是 multipart files 复数）
 # Header: Authorization: Bearer <api_token>
 
 # 白名单：JSON + 图片（PNG/JPG/PDF），不传 HTML/JS/CSS

@@ -2,7 +2,7 @@
 
 `/home/bwicarus/claude/state/server-config.json`（VPS 是 `/root/claude/state/...`）。控制面板「设置」面板写入，所有 Windows EXE 客户端开关跟服务端共享同一份。
 
-`qa-server.py::DEFAULT_CONFIG` 是默认值；用户改的部分通过 `_deep_merge` 覆盖到默认上。
+`_server_deploy/qa_server.py::DEFAULT_CONFIG` 是默认值（注意：Python 文件是下划线 `qa_server.py`，systemd 服务名才是连字符 `qa-server.service`）；用户改的部分通过 `_deep_merge` 深度合并覆盖到默认上。
 
 ## 顶层字段
 
@@ -63,12 +63,12 @@
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `weak_card_refresh.enabled` | `true` | 凌晨是否跑这一步 |
-| `weak_card_refresh.min_lapses` | `""`（用脚本默认 3） | 卡片至少 lapses 几次才入候选 |
-| `weak_card_refresh.limit` | `""`（默认 20） | 单次最多处理多少张 |
-| `weak_card_refresh.cooldown_days` | `""`（默认 30） | 改过的卡多少天内不再改 |
-| `weak_card_refresh.escalate_lapses` | `""` | 升级 L2（拆删）的 lapses 阈值 |
-| `weak_card_refresh.auto_escalate` | `true` | 多次 L1 仍 lapse 自动升 L2 |
+| `weak_card_refresh.enabled` | `false`（默认关，控制面板勾选才凌晨跑） | 凌晨是否跑这一步 |
+| `weak_card_refresh.min_lapses` | `"3"` | 卡片至少 lapses 几次才入候选 |
+| `weak_card_refresh.limit` | `"5"` | 单次最多处理多少张 |
+| `weak_card_refresh.cooldown_days` | `"30"` | 改过的卡多少天内不再改 |
+| `weak_card_refresh.escalate_lapses` | `"2"` | 升级 L2（拆删）的 lapses 阈值 |
+| `weak_card_refresh.auto_escalate` | `false`（L2 拆/删默认不自动，破坏性） | 多次 L1 仍 lapse 自动升 L2 |
 
 ### `card_antimodel.*` —— 已掌握卡换问法
 
@@ -76,11 +76,11 @@
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `card_antimodel.enabled` | `true` | 凌晨是否跑 |
-| `card_antimodel.min_stability_days` | `60` | 卡稳定多少天后才换问法 |
-| `card_antimodel.min_reps` | `5` | 至少复习几次 |
-| `card_antimodel.limit` | `20` | 单次最多处理 |
-| `card_antimodel.cooldown_days` | `60` | 改过的卡多少天内不再换 |
+| `card_antimodel.enabled` | `false` | 凌晨是否跑 |
+| `card_antimodel.min_stability_days` | `"60"` | 卡稳定多少天后才换问法 |
+| `card_antimodel.min_reps` | `"5"` | 至少复习几次 |
+| `card_antimodel.limit` | `"5"` | 单次最多处理 |
+| `card_antimodel.cooldown_days` | `"90"`（已掌握别太勤换） | 改过的卡多少天内不再换 |
 
 ### `card_quality.*` —— 卡片质量体检
 
@@ -89,24 +89,53 @@
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `card_quality.enabled` | `false`（默认关，因为 AI 评分贵） | 凌晨是否跑 |
-| `card_quality.max_back_len` | `200` | 答案最大字数（超过算"过长"启发式）|
-| `card_quality.limit` | `20` | 单次最多评 |
-| `card_quality.cooldown_days` | `45` | 已评卡多少天内不再评 |
-| `card_quality.auto_split` | `true` | AI 判定"应拆"时是否自动拆 |
+| `card_quality.max_back_len` | `"280"` | 答案最大字数（超过算"过长"启发式）|
+| `card_quality.limit` | `"5"` | 单次最多评 |
+| `card_quality.cooldown_days` | `"45"` | 已评卡多少天内不再评 |
+| `card_quality.auto_split` | `false`（AI 判该拆时是否凌晨自动拆，破坏性） | AI 判定"应拆"时是否自动拆 |
 | `card_quality.relative_threshold` | `true` | 用同 type 的 P85 作动态阈值（而非绝对值）|
-| `card_quality.hard_again_ratio` | `""`（默认 0.4） | again+hard 占比阈值 |
-| `card_quality.min_reviews` | `""`（默认 3） | 至少复习几次才入候选 |
-| `card_quality.sample_per_run` | `""`（默认 5） | 每晚随机采样几张全卡片库覆盖盲区 |
+| `card_quality.hard_again_ratio` | `"0.4"` | again+hard 占比阈值 |
+| `card_quality.min_reviews` | `"4"` | 至少复习几次才入候选 |
+| `card_quality.sample_per_run` | `"3"` | 每晚随机采样几张全卡片库覆盖盲区 |
 
 ### `card_qa.*` —— QA 卡片改进
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `card_qa.delete_original` | `true` | QA cardCtx 模式「修改 Anki」时，AI 生成新卡后是否删原卡（关掉则原 + 新都留）|
+| `card_qa.delete_original` | `false`（不在 DEFAULT_CONFIG，`.get(..., False)` 兜底） | QA cardCtx 模式「修改 Anki」时，AI 生成新卡后是否删原卡（关掉则原 + 新都留）|
 
 ### `sidebar_links` —— 控制面板侧边栏自定义链接
 
 `[{"label": "Obsidian", "url": "obsidian://..."}, ...]`，per-user 持久化（不在 server-config，在 `/api/nav-links` 用户单独存）。
+
+### `dict.*` —— PDF 阅读器字典 / 翻译配置
+
+注意：`dict.*` **不在** `qa_server.py::DEFAULT_CONFIG` 里（不会被 seed 进文件），完全靠各处 `.get(key, 默认)` 兜底。被 `_server_deploy/pdf_reader.py`（行 315/996/1000/1949）、`scripts/vocab/dict_sources.py`、`scripts/vocab/translate.py` 读取。`dict_sources.py::_cfg()` / `translate.py::_cfg()` 取的就是 `cfg["dict"]` 子字典。
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `dict.translate_backend` | `auto`（auto = deepl → mymemory） | 句子翻译后端 |
+| `dict.translate_model` | `haiku` | 翻译用 AI 模型（backend 走 AI 时）|
+| `dict.translate_effort` | `low` | 翻译 reasoning effort |
+| `dict.deepl_key` | `""` | DeepL API key（可选；空则 auto 走 mymemory）|
+| `dict.mymemory_email` | `""` | MyMemory 翻译 API 的 email（提高免费配额）|
+| `dict.mw_key` | `""` | Merriam-Webster Learner's key（dict_sources 用，free tier 1000 req/天）|
+| `dict.free_dict_enabled` | `true` | 是否启用 Free Dictionary 源 |
+| `dict.cache_dir` | `state/dict-cache`（相对项目根） | 字典查询缓存目录 |
+| `dict.auto_anki_lookups` | `3`（0 = 关） | 一个词被查多少次后后台自动建 vocab Anki 卡 |
+| `dict.auto_anki_cooldown_h` | `24` | 同一词触发自动建卡的冷却小时数 |
+
+### `vocab.*` —— 生词系统配置
+
+被 `scripts/vocab/build_vocab_note.py`（行 47/50）、`scripts/vocab/paragraph_exposure.py`（行 32）读取（取 `cfg["vocab"]` 子字典）。同样不在 DEFAULT_CONFIG 里，靠 `.get()` 兜底。
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `vocab.vault_subdir` | `资源/vocab` | 生词笔记在 vault 内的子目录 |
+| `vocab.audio_subdir` | `资源/vocab/_audio` | 音频文件子目录 |
+| `vocab.lookup_cooldown_hours` | `24` | 查词后多少小时内 mastery 只跌不涨（冷却期）|
+
+完整生词系统说明见 [`vocab-system.md`](vocab-system.md)；PDF 阅读器字典/翻译细节见 [`pdf-reader.md`](pdf-reader.md)。
 
 ## 字段位置流转
 

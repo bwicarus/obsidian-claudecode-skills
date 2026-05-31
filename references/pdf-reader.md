@@ -13,13 +13,14 @@
 后端：
 - `_server_deploy/pdf_reader.py` — Flask Blueprint `bp = Blueprint("pdf_reader", __name__, url_prefix="/pdf")`，所有路由
 - `_server_deploy/app.py` — 入口注册 `register_pdf_reader(app)`，`/pdf` 加入 `PROTECTED_PREFIXES`
-- `data/ecdict.db` — ECDICT 离线英汉字典 ~850MB（`stardict` 表 + `exchange` 屈折表）
+- `data/ecdict.db` — ECDICT 离线英汉字典 ~850MB（单张 `stardict` 表，含 `word/phonetic/translation/definition/exchange` 等列；`exchange` 是列里的屈折数据，不是独立表）
 
-前端（单文件 ~2200 行）：
-- `_server_deploy/templates/pdf_reader.html` — 主页（PDF.js + textLayer + char-layer + selToolbar + sidebar + result-modal + draft-modal + hl-popover）
+前端（单文件 ~5900 行）：
+- `_server_deploy/templates/pdf_reader.html` — 阅读器主页（PDF.js + textLayer + char-layer + selToolbar + sidebar + result-modal + draft-modal + hl-popover + 手写墨迹层 + vocab-layer + 字典小框 + 句子翻译浮层）
+- `_server_deploy/templates/pdf_index.html` — PDF 列表页（GET `/` render）
 
-静态资源：
-- `/static/pdfjs/pdf.mjs` + `pdf.worker.mjs` — PDF.js v4.7.76
+静态资源（部署在服务器侧，不在 git 仓库）：
+- `/static/pdfjs/pdf.mjs` + `pdf.worker.mjs` — PDF.js v4（运行时从 `pdfjsLib.version` 读真实版本；前端 `PDFJS_V` 只是 cache-buster query，如 `20260526a`，并非版本号）
 - `/static/pdfjs/cmaps/` + `standard_fonts/` — CJK + 字体回落
 
 服务端部署位置（VPS / Pi）：
@@ -32,28 +33,53 @@
 
 ---
 
-## 2. 后端路由完整清单
+## 2. 后端路由清单
 
-所有路由前缀 `/pdf`。
+所有路由前缀 `/pdf`。实际 `pdf_reader.py` 有 35+ 个 `@bp.route`，下表是**核心阅读 / 高亮 / 草稿**那一组；vocab 字典融合、英语语法分析、手写墨迹、句子翻译、后台 job 等子系统的路由见后面「2.x 其余子系统路由」一节。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/` | PDF 列表（vault 下所有 *.pdf；按 mtime 倒序） |
-| GET | `/view?file=<rel>&page=N` | 阅读器主页（鉴权后渲染 template） |
+| GET | `/` | PDF 列表页（render `pdf_index.html`；vault 下所有 *.pdf 按 mtime 倒序） |
+| GET | `/view?file=<rel>&page=N` | 阅读器主页（鉴权后渲染 `pdf_reader.html`） |
 | GET | `/file/<vault_rel_path>` | 返回 PDF 二进制 `application/pdf` |
 | GET | `/api/list-pdfs` | JSON 列表 |
-| GET | `/api/page-chars?file=<rel>&page=N` | PyMuPDF 提取该页所有字符 bbox + 内容（驱动 char-layer） |
+| GET | `/api/page-chars?file=<rel>&page=N` | PyMuPDF 提取该页所有字符 bbox + 内容（驱动 char-layer，含 `vocab_marks`） |
 | GET | `/api/page-nodes?file=<rel>&page=N` | 该页对应的 KG 节点 |
-| GET | `/api/dict?word=X` | ECDICT 离线英汉查询 |
+| GET | `/api/dict?word=X[&file=&page=&context=]` | 三源融合字典（ECDICT 离线 + Free Dictionary + MW Learner's）；`Accept: text/event-stream` 时 SSE 分段（ECDICT 先到 → free → mw → translate → done），否则一次性 JSON |
+| GET | `/api/dict-quick?word=X` | 单词小框：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回 + 后台触发 vocab note 生成 |
 | POST | `/api/translate` body:`{text, target_lang}` | AI 翻译 |
 | POST | `/api/explain` body:`{text, context?}` | AI 解释（SSE 流式 或 JSON） |
 | POST | `/api/to-note` body:`{text, name, file?, page?}` | 把选中内容 → vault 笔记 |
-| POST | `/api/upload` body:`{file, dest}` | 上传 PDF 到 vault |
-| POST | `/api/snippets-to` body:`{snippets, kind, note_name?}` | 草稿 → 笔记 / Anki / 两者 |
+| POST | `/api/upload` | 上传 PDF 到 vault。**multipart form**：`file`（文件）+ `target_dir`（目录，默认 `资源/uploads`）。返回 `{ok, rel, view_url}` |
+| POST | `/api/snippets-to` body:`{snippets, make_note(bool), make_anki(bool), note_name?, model?, effort?}` | 草稿 → 笔记 / Anki（同步版，兼容） |
+| POST | `/api/snippets-to-async` | 同上 body，后台线程跑，立即返回 `{job_id}`；防 iPad 切后台掐断长请求 |
+| GET | `/api/job-status?id=<job_id>` | 轮询后台 job：`{status: running\|done\|error\|unknown, result?, error?}` |
 | GET | `/api/highlights?file=<rel>` | 列出该 PDF 的所有高亮 |
 | POST | `/api/highlights` body:`{file,page,rects,color,text,kind?,sentence?,body?,note?,page_w?,page_h?}` | 新增高亮 |
 | PATCH | `/api/highlights` body:`{file,id,color?,note?,sentence?,body?}` | 修改 |
 | DELETE | `/api/highlights` body 或 query:`{file,id}` | 删除 |
+
+### 2.x 其余子系统路由（vocab / grammar / 墨迹 / 句子）
+
+这几组属于后来扩出的子系统，路由都在同一个 `pdf_reader.py`：
+
+| 方法 | 路径 | 子系统 / 用途 |
+|---|---|---|
+| GET | `/api/page-vocab-marks` | vocab：该页生词下划线标记（也内嵌在 page-chars 返回里） |
+| POST | `/api/vocab-mark` | vocab：标记 / 取消标记一个词 |
+| POST | `/api/vocab-anki` | vocab：单词一键制卡 |
+| GET | `/api/vocab-list` | vocab：生词列表 |
+| GET | `/api/vocab-audio` | vocab：取真人音频 |
+| GET/POST | `/api/ink` | 手写墨迹层：按页存归一化笔画（sidecar `state/pdf-ink/<sha1>.json`） |
+| POST | `/api/sentence-dismiss` | 句子翻译：忽略某句虚线框 |
+| POST | `/api/translate-sentence` | 句子翻译：整句翻译 |
+| GET/POST | `/api/translate-config` | 句子翻译：后端配置读写 |
+| GET | `/api/grammar-nodes` / `-books` | 英语语法分析：列语法 KG / 节点 |
+| GET/POST | `/api/grammar-tracked` | 语法分析：选哪些书启用 + tracked 节点 |
+| POST | `/api/grammar-analyze` / `-stream` | 语法分析：spaCy（零 AI）/ AI 兜底，对句子按 tracked 语法点分析 |
+| GET/POST | `/api/grammar-history` / `-history-save` / `-forget` | 语法分析：分析历史读写/清除 |
+
+vocab 字典融合系统详见 [`vocab-system.md`](vocab-system.md)；英语语法分析系统是后加的子系统（spaCy 词性依存 + tracked 语法节点对齐）。
 
 ### SSE 流式 (`/api/explain`)
 
@@ -201,11 +227,16 @@ left = x0 * sx
 
 ## 4. 高亮编辑
 
-### 4.1 工具栏色板
+### 4.1 工具栏（色板 + 按钮分流）
 
-`#sel-toolbar` 底部一行 `[○○○○]`，没有 lbl / 标记按钮（之前曾加过，被用户要求去掉）。
+`#sel-toolbar` 现为左右两块（task #188「工具栏分流 + 颜色竖排」）：
+- 左侧 `#hl-color-picker`：色板**竖排**一列（`flex-direction:column`），首元素仍是 `<span class="lbl">🖌</span>`
+- 右侧 `#sel-main`：preview + 按钮区，按选中类型分流显示：
+  - 单词选中 → `#sel-btns-word`：`📋 复制` / `🔍 查词`（`onLookupWord` 弹字典小框）
+  - 多词 / 句子选中 → `#sel-btns-multi`：`📋 复制` / `🌐 翻译`（`onTranslate`）/ `💡 解释`（`onExplain`）/ `💬 对话`（`onChat`）
+  - `#grammar-btn-row`：`📊 语法分析`（`onGrammarAnalyze`，按跟踪的语法点分析选中片段）
 
-行为：
+色板行为：
 - 点色 → 立即 `saveHighlight({color, kind:'note'})` → POST `/api/highlights` → 渲染 hl-saved + 该色 `.active` 外框（互斥）+ 关 toolbar + `_lastHlColor` 更新
 - 再点同色 → 取消激活外框（**不删除高亮**，仅清 picker 状态）
 - 没选中文字时点色 → 仅切激活色 + toast
@@ -318,10 +349,12 @@ result-modal 渲染完 AI 回复后 `addResultPickers()`：
 
 ### 5.3 后端 `/api/snippets-to`
 
-`kind = 'note' | 'anki' | 'both'`：
-- note：AI 把 snippets 重排为连贯笔记 → 写 `vault/<note_name>.md`（含 PDF 来源、原始截图引用），返回 obsidian:// URL
-- anki：AnkiConnect 加卡（deck "QA"，tag "pdf-snippets"）
-- both：两个都做
+body 用两个独立布尔 `make_note` / `make_anki`（不是单个 `kind` 字符串），可选 `note_name` / `model` / `effort`。`_validate_snippets_body` 校验：snippets 非空、至少选一个动作、make_note 时 note_name 不能为空。
+- `make_note`：AI 把 snippets 重排为连贯笔记 → 写 `vault/<note_name>.md`（含 PDF 来源、原始截图引用），返回 obsidian:// URL
+- `make_anki`：AnkiConnect 加卡（deck "QA"，tag "pdf-snippets"）
+- 两者都 true → 两个都做
+
+**同步 vs 异步**：`/api/snippets-to` 是同步版（兼容）；`/api/snippets-to-async` 后台线程跑，立即返回 `{job_id}`，前端轮询 `/api/job-status?id=<job_id>`，防 iPad 切后台 / 锁屏掐断长 AI 请求。
 
 ---
 
@@ -407,11 +440,13 @@ zoom：`zoomChange(delta)` → 改 `scale`（0.6~3.0）→ 重渲染当前页 / 
 
 点 header 「📋 知识点」→ `#sidebar.open`。
 
-`/api/page-nodes` 查 KG：
-- 遍历 `nodes/<book>/*.yml` 的 `pdf_pages` 字段，命中当前页号 → 返回 `{id, name, summary, state, numeric_label, book}`
+`/api/page-nodes` 查 KG（`_find_kg_nodes_for_page`）：
+- 遍历 `knowledge_graph/*.json`（跳过 `*.bak.json`），按 KG 顶层 `pdf` 字段定位到本 PDF（绝对路径自动归一化为 vault 相对路径再比对）
+- 在命中的 KG 里取 `level == 2` 且 `pages` 数组含当前页号的节点
+- 返回字段：`{id, name, numeric_label, state, mastery_level, summary(截前120字), book, kg_file, kind, tracked}`（按 numeric_label 排序）
 - 点节点 → 新窗口跳 `/skilltree/<book>/#f.<id>`
 
-详见 [`skill-tree-system.md`](skill-tree-system.md)。
+（旧文档说的 `nodes/<book>/*.yml` 目录 / `pdf_pages` 字段都不存在。）详见 [`skill-tree-system.md`](skill-tree-system.md)。
 
 ---
 

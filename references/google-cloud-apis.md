@@ -74,9 +74,9 @@ Google 故意把 `generativelanguage.googleapis.com` 跟 GCP billing 隔离 — 
 
 `scripts/google_api_quota.py`:
 
-- SQLite `state/google_api_quota.db` 记每次调用 (service, units, action, note, ts)
+- SQLite `state/google_api_quota.db` 表 `quota_log`,记每次调用 (id 自增主键, service, units, action, note, ts_utc)
 - 各调用脚本(find_jeff_videos / google_vision_ocr / youtube_speech / youtube_subtitles)都接了 `log_usage()`
-- CLI:`python scripts/google_api_quota.py [youtube|vision|stt|gemini]`
+- CLI:`python scripts/google_api_quota.py [youtube|vision]`(只 youtube/vision 有 `DAILY_LIMITS`;传 stt/gemini 会因 `used/limit*100` 除零崩溃,这俩只能在脚本里用 `report()`)
 
 ### 当前已知配额(各 service)
 
@@ -114,8 +114,8 @@ YouTube 重置:Pacific Time 午夜 = UTC 08:00。脚本里默认取 UTC 08:00 �
 
 - `scripts/find_jeff_videos.py` — `--channels jeff_nippard,athlean_x --per 5`
 - 内置 `MUST_CONTAIN` dict 过滤标题
-- 配额:每动作每频道 search.list = 100 units;over-search × 3 → 300 units/动作
-- 双频道 20 动作 = ~12000 units(超限,只能跑一次)
+- 配额:每动作每频道 1 次 search.list = 100 units(`OVERSEARCH=3` 只放大单次请求的 `maxResults`,不增加 API 调用次数,不乘进配额)
+- 双频道 20 动作 ≈ 4000 units(10000/天上限内可跑约 2 次)
 - 没配额了用 `scripts/reorder_videos_by_keyword.py`(**纯本地不调 API**)
 
 ### Cloud Speech-to-Text
@@ -169,10 +169,10 @@ chmod 600 /home/bwicarus/.config/gcp-vision-key
 ```
 *gcp-vision-key*
 *google-vision-key*
-*gemini-api-key*
 .config/gcp-vision-key
-.config/gemini-api-key
 ```
+
+> 注:`.gitignore` 实际只有上面 3 行。gemini key 文件在仓库外的 `~/.config/gemini-api-key`,本就不会被提交;但目前 `.gitignore` 里**没有** `*gemini-api-key*` / `.config/gemini-api-key` 规则——若日后把 key 文件挪进仓库内需补上。
 
 ---
 

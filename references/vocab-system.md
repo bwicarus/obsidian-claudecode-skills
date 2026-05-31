@@ -34,7 +34,14 @@ vault/
 claude/
 ├── scripts/vocab/
 │   ├── dict_sources.py              三源融合 + cache
-│   └── build_vocab_note.py          生成 / 更新 .md
+│   ├── build_vocab_note.py          生成 / 更新 .md
+│   ├── anki_from_word.py            一键制卡（Vocab Bilingual 模型）
+│   ├── anki_sync.py                 Anki review 反馈 ↔ mastery 双向同步
+│   ├── build_exposure.py            扫 vault 所有 PDF 统计暴露次数
+│   ├── compute_mastery.py           旧版全量重算 mastery（已废弃保留）
+│   ├── paragraph_exposure.py        查词触发同段落 +0.03 mastery
+│   ├── translate.py                 例句中英翻译（MyMemory）
+│   └── vocab_index.py               form→lemma in-memory 索引
 ├── data/
 │   └── ecdict.db                    ~850MB SQLite
 └── state/
@@ -276,8 +283,8 @@ python3 scripts/vocab/build_vocab_note.py constructed
 | **A** | 字典三源 + cache + vault 笔记生成 + audio 下载 + PDF reader 查词集成 | ✅ 完成（2026-05-27）|
 | **B** | mastery 算法：Anki state + 查词次数 + 暴露但未查 + 衰减 + 用户手动标 | ✅ 完成（2026-05-27）|
 | **C** | PDF 阅读时未掌握词**下划线着色**（橙=新/黄=见过/淡绿=熟/掌握不画） | ✅ 完成（2026-05-27）|
-| **D** | 一键 Anki 卡（Obsidian-cloze 模板，纯字典数据不调 AI）+ 字典 modal [🎴 加入 Anki] | ✅ 完成（2026-05-27）|
-| **E** | 跨 PDF 暴露计数 + 反向索引（vocab.md 加"📍 全文出现"section）| ✅ 完成（2026-05-27）|
+| **D** | 一键 Anki 卡（自定义 `Vocab Bilingual` 模型，纯字典数据不调 AI）+ 字典 modal [🎴 加入 Anki] | ✅ 完成（2026-05-27）|
+| **E** | 跨 PDF 暴露计数（exposure 数据存 `state/vocab-exposure.json` 仅供 mastery 算法用，**不渲染到 .md**）| ✅ 完成（2026-05-27）|
 | 例句中英 | MyMemory 翻译（free 无 key）+ 缓存；DeepL 可选升级 | ✅ 完成（2026-05-27）|
 
 ### 阶段 D：一键 Anki 卡
@@ -286,26 +293,23 @@ python3 scripts/vocab/build_vocab_note.py constructed
 - PDF reader 字典 modal 底部「🎴 加入 Anki」按钮 → POST `/pdf/api/vocab-anki` body `{word}`
 - CLI: `python3 scripts/vocab/anki_from_word.py construction [--force]`
 
-**模板**：`Obsidian-cloze`（字段 Text + Extra）；deck `Vocab`（不存在自动建）
+**模型**：自定义 `ANKI_MODEL = "Vocab Bilingual"`（**非 cloze**）；deck `Vocab`（不存在自动建）。`ensure_model` 会在制卡时 `updateModelTemplates` / `updateModelStyling` 同步最新模板 + CSS，所以改了 `_vocab_model_spec` 后下次制卡自动应用到现有卡。
 
-**字段映射**：
-- `Text` (cloze 字段)：上下文句子，词形替换为 `{{c1::word}}`
-  - 优先 PDF source（用户实际选中的句子）
-  - 其次 MW/Wiktionary 含 lemma 的例句
-- `Extra` (富文本聚合)：
-  - `<h2>lemma</h2>` + 音标 + `[sound:vocab-<lemma>-us.mp3]`
-  - 中文释义（朗道）+ 英文释义（MW 学习者）
-  - 选中句的中文翻译
-  - 更多例句（含中文翻译；用 `<details>` 折叠）
-  - 词形 / 同义反义 / BNC 词频
-  - 来源 PDF 链接
+**8 字段**（`_VOCAB_FIELDS`，按序）：`Word` / `Phonetic` / `Audio` / `Translation` / `Example` / `ExampleZh` / `More` / `Url`
+- `Word` 单词、`Phonetic` 音标、`Audio` `[sound:<lemma>-us.mp3]`、`Translation` 中文释义
+- `Example` 例句（优先 PDF 选中句，其次 MW/Wiktionary 含 lemma 例句）、`ExampleZh` 例句中文
+- `More` 英文释义（MW 学习者 / Wiktionary）、`Url` 来源 PDF 链接
 
-**音频**：通过 `storeMediaFile` 推 Anki 媒体库 `vocab-<lemma>-us.mp3`
+**双卡模板**（`cardTemplates`）：
+- `EN→ZH`：正面 `Word` + 音标 + 来源 Url；背面 FrontSide + 中文释义 + 音频 + 参考区（Example/ExampleZh/More）
+- `ZH→EN`：正面纯中文 `Translation`（不暴露英文）；背面 FrontSide + `Word` + 音标 + 音频 + 参考区 + Url
+
+**音频**：通过 `storeMediaFile` 推 Anki 媒体库 `<lemma>-us.mp3`
 **tag**：`vocab vocab/lemma::<lemma>`
-**重复检测**：`duplicateScope: deck` + tag 反查；已存在则 `updateNoteFields`
+**重复检测**：`options.duplicateScope: deck` + `findNotes deck:"Vocab" Word:"<lemma>"` 反查；已存在则 `updateNoteFields` + `addTags`
+**旧 cloze 卡迁移**：若 `anki_card_id` 指向的旧 note 是别的 model（如历史 `Obsidian-cloze`），`Vocab Bilingual` 与之不同则**删旧重建**（review 历史无法跨 model 迁移）
 
-**bug 修复历史**：
-- 试 `Saladict Word` 模板报 "cannot create note because it is empty"（即使所有字段非空）。原因未深查；改用 `Obsidian-cloze`（Text 含 `{{c1::}}` 即满足 cloze 检测）
+**历史**：早期 D 阶段曾用 `Obsidian-cloze`（字段 Text 含 `{{c1::word}}` + Extra 富文本聚合），现已完全迁移到上述 `Vocab Bilingual` 双向模型。再早试过 `Saladict Word` 模板报 "cannot create note because it is empty"（即使字段非空，原因未深查），才改的 cloze。
 
 ### 查询冷却期（2026-05-27 加）
 
@@ -414,7 +418,7 @@ if user_mark == "unknown": score -= 0.50
 - 实现：char-layer onEnd 单击分支内，`_clickCount === 1` 命中 vocab mark 且 `label_slug != mastered` → `setTimeout(onTranslate, 30)`（让 selByCharRange 先布工具栏，translate 关掉它弹字典）
 - 三击/双击保持原行为（选行 / 选段）；选中范围跨多词不触发自动翻译
 
-后端 `/api/page-chars` 新增 `vocab_marks: [{start,end,word,lemma,mastery,label_slug}]`：
+后端 `/api/page-chars` 新增 `vocab_marks: [{word, lemma, mastery, label_slug, rects:[[x0,y0,x1,y1],...]}]`（`_build_vocab_marks`，用 PDF pt 坐标 rect 列表，不依赖 char idx —— 跟前端 chars sort 与否无关）。另有轻量路由 `/api/page-vocab-marks` 仅返回该页 vocab_marks（不返回 chars）：
 1. 扫该页 chars 识别英文词边界（连续 `isalpha`/`'-`）
 2. word lemma 化（不走 ECDICT！直接查 `vocab_index` —— index 已把所有 forms 都 cache）
 3. 命中 vocab 且 `label_slug != mastered` → 标记
@@ -434,7 +438,7 @@ if user_mark == "unknown": score -= 0.50
 - `.m-known` 淡绿 #a3e635 1.5px opacity 0.65
 - `.m-mastered` `display:none`
 
-z-index：vocab-layer 在 char-layer 之下（z 2 vs 4），不影响选中事件。
+z-index：vocab-layer 在 char-layer 之上（`.vocab-layer{z-index:6}` vs `.char-layer{z-index:4}`）。不拦截选中事件是靠 `.vocab-layer{pointer-events:none}`（layer 本体透传，仅 `.vocab-sentence-btn` 等 auto），不是靠 z-ordering。
 
 ### 阶段 E：暴露计数 + 反向索引
 
@@ -466,10 +470,7 @@ for pdf in vault.rglob("*.pdf"):
 }
 ```
 
-**反向索引**：`build_vocab_note.py` 渲染时拉 exposure 数据，加 `## 📍 全文出现 (N 处)` section：
-- 按 PDF 分组列出页号
-- 每个页号生成 PDF reader 链接
-- 默认显示前 15 页 + "…+N" 提示
+**不渲染到 .md**：`build_vocab_note.py::render_md` 明确注释「全文 exposure 数据保留在 `state/vocab-exposure.json` 仅用于 mastery 算法，不渲染到 .md」。笔记里只渲染用户实际查过的地方（`## 📝 文中出现`，按所在整句给链接）。全文 exposure 不写进笔记。
 
 ## 10. CLI 总览
 
@@ -513,49 +514,14 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 
 | 坑 | 现象 | 修复 |
 |---|---|---|
-| Anki Saladict Word 模板拒绝 | "cannot create note because it is empty" 即使所有字段有内容 | 改用 `Obsidian-cloze` 模板（Text + Extra 两字段，cloze 类型）|
+| Anki Saladict Word 模板拒绝 | "cannot create note because it is empty" 即使所有字段有内容 | 一度改用 `Obsidian-cloze`，最终改用自定义 `Vocab Bilingual` 模型（8 字段双向模板，非 cloze）|
 | AnkiConnect tag 含 `::` 不能直接 findNotes | `tag:vocab/lemma::xxx` 查不到 | 用 `findCards deck:Vocab` 然后 cardsInfo 拿 noteId，按需 |
 | ECDICT lemma 化太慢 | 扫 vault 暴露时每 token 1 次 sqlite | `vocab_index` 已把 forms 全 cache，build_exposure 直接查字典命中 |
 | YAML mastery 浮点漂移 | 0.45 写回后再读变 0.45000001 | `round(mastery, 3)` + 比较时 `abs() > 0.01` 阈值 |
 | Anki 没卡也算分 | anki_no_card 扣分 -0.05 没写进 debug log | 仅 log 缺失；最终 score 正确 |
 | YAML 空值变 list | `anki_card_id:` 加载后变 `[]` 而非 `""` | `_parse_simple_yaml` 空值默认 `""` |
 
-## 13. 已知踩坑（原阶段 A）
-
-## 10. 阶段 B 设计（mastery 算法草稿）
-
-`scripts/vocab/compute_mastery.py`（待写）daily 04:00 跑，扫所有 vocab/*.md → 算新 mastery → 写回 frontmatter。
-
-```python
-def mastery(word, fm, anki_data, lookup_log, exposure):
-    score = 0.0
-    # 1. Anki 信号（权重最高）
-    card = anki_data.get(fm['anki_card_id'])
-    if card:
-        if card['queue'] == 2 and card['ease'] >= 2.5: score += 0.35
-        if card['queue'] == 0: score -= 0.10      # 新卡未学
-        score -= min(0.2, card['lapses'] * 0.05)
-    # 2. 查询次数（近 30 天）
-    n_recent = sum(1 for L in lookup_log if L['lemma']==fm['lemma'] and within_30d(L['ts']))
-    if n_recent >= 5: score -= 0.3
-    elif n_recent >= 2: score -= 0.1
-    # 3. 暴露但未查（核心信号）
-    exposed_without_lookup = exposure[fm['lemma']]['count'] - n_recent
-    score += min(0.4, exposed_without_lookup * 0.05)
-    # 4. 时间衰减
-    days = (today - last_lookup_date(fm)).days
-    if days > 90: score += 0.10
-    elif days > 30: score += 0.05
-    # 用户标记
-    if fm.get('user_mark') == 'known':   score += 0.5
-    if fm.get('user_mark') == 'unknown': score -= 0.5
-    return max(0.0, min(1.0, score + 0.5))   # bias 0.5
-
-LABELS = [(0.2, "新词", "new"), (0.5, "见过", "seen"),
-          (0.8, "熟", "known"), (1.01, "掌握", "mastered")]
-```
-
-**暴露计数**：每页 PDF 扫一遍所有英文 token，token 经 ECDICT lemma 化（exchange 表反查）后归类。这个扫描结果缓存到 `state/vocab-exposure.json`，文件级粒度：`{pdf: {page: {lemma: count}}}`。每次 PDF 渲染（或 daily）刷新。
+> 早期「阶段 B 设计草稿」（base=0.0 + bias 0.5 的旧 mastery 伪代码、旧 LABELS、`{pdf:{page:{lemma:count}}}` 缓存格式）已删除：与实际实现（见上文「新 mastery 模型」+ `paragraph_exposure.py` / `compute_mastery.py`）不一致，避免误导。
 
 ## 13. 已知踩坑（原阶段 A）
 

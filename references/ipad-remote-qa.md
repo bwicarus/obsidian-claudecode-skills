@@ -111,9 +111,29 @@ QA daemon 自身只监听 **HTTP** `:9091`。但浏览器的 **Web Speech API（
 ## 自托管前端资源（MathJax / marked）—— 必须用 SVG 版 MathJax
 
 QA 页的 MathJax / marked 不走 jsdelivr CDN（公网/隐私考虑），由 nginx 从
-`/var/www/html/static/qa/` 提供（VPS 同名路径）。systemd `qa-server` 的
-ExecStartPre 用 sed 把源码里的 jsdelivr URL 替换成
-`bwicarus.taile44d0c.ts.net/static/qa/mathjax.js`（git pull 覆盖后重启自动重打）。
+`/var/www/html/static/qa/` 提供（VPS 同名路径）。
+
+**现状（2026-05-31 核实）**：URL 现在**直接硬编码**在 `_client/core/qa_browser.py`
+（约 1592-1593 行），是协议相对的自托管地址、且已是 SVG 版：
+
+```html
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1" async id="MathJax-script"></script>
+<script src="//bwicarus.taile44d0c.ts.net/static/qa/marked.js"></script>
+```
+
+源码里已经 grep 不到任何 `jsdelivr` / `tex-chtml` 字串。
+
+**注意（systemd sed 已成 no-op）**：`references/systemd/qa-server.service`
+（VPS 版）的 ExecStartPre 仍有两条 sed，想把
+`https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js` /
+`.../marked@9/marked.min.js` 替换成 `bwicarus.space/static/qa/...`。但这两个
+**目标字串源码里早已不存在**，sed 现在每次都命中 0 处、纯属历史遗留兜底（可删）。
+
+**两实例 host 不一致**：源码硬编码的是 **Pi** 的 `bwicarus.taile44d0c.ts.net`
+（协议相对，HTTP:9091 与 HTTPS 都不报混合内容）。VPS 历史上靠那条已失效的 sed
+想改成 `bwicarus.space`，如今 sed 无效 → VPS 实际也会去加载 Pi 的 ts.net 静态资源
+（协议相对地址跨实例都能取到，只要 Pi 在线）；若要让 VPS 走自己的
+`bwicarus.space/static/qa/`，需另行处理（直接改源码或在部署侧 patch）。
 
 **坑（2026-05-22 踩过）**：`mathjax.js` 不能用 **CHTML** 版（`tex-chtml.js`）。
 CHTML 渲染特殊字形（如 `\underbrace` 的横花括号 `⏟`）要从
@@ -133,8 +153,10 @@ sudo curl -so mathjax.js https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js
 ```
 
 > `static/qa/mathjax.js` 是手放的静态文件、不在 git，git pull 不会覆盖它，
-> 但**重新部署/换机时记得放 SVG 版**，别又抓成 CHTML。客户端（Windows）走
-> jsdelivr CDN 的 CHTML 版没问题（CDN 自带字体），只有自托管缺字体才豆腐。
+> 但**重新部署/换机时记得放 SVG 版**，别又抓成 CHTML。注意：现在源码已直接硬编码
+> 自托管协议相对 URL（见本节开头），所有入口（含 Windows 客户端、本机 ctrl+shift+q）
+> 都加载同一份 `//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1`，
+> 不再各走各的 CDN——所以这份自托管文件务必是 SVG 版，否则全端一起豆腐。
 
 ## 流式回复 + 历史删除（2026-05-15+）
 
