@@ -2023,40 +2023,20 @@ function _sentDismiss(s, pw) {
 
 // 在原句位置叠覆盖层显示中文（再次点击或点 overlay 关闭）
 function toggleSentenceOverlay(layer, s, btn, sx, sy) {
-  // 已存在 overlay → 关闭
-  const existing = layer.querySelector('.vocab-sentence-overlay[data-active="1"]');
-  if (existing && existing.dataset.sentText === s.text) {
-    existing.remove();
+  // 改用干净的译文浮层(锚到句首 L 标记):原地白底覆盖要把中文塞进按原文日语行切的
+  // clip-path 里,中日长度/换行不一致必然错位溢出(已弃用 _drawSentenceOverlay)。
+  const pop = document.getElementById('sent-popover');
+  const open = pop && pop.classList.contains('open');
+  const sameText = open && pop.querySelector('.sent-en')?.textContent === s.text;
+  if (sameText) {   // 再点同一句 → 关闭
+    closeSentPopover();
     btn.classList.remove('active');
     return;
   }
-  // 关掉其它句子的 overlay（一次只显示一个）
-  layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
   layer.querySelectorAll('.vocab-sentence-btn-l.active, .vocab-sentence-btn-l-start.active')
     .forEach(b => b.classList.remove('active'));
-
-  const zh = s.zh || '';
-  if (!zh) {
-    // fallback：现场翻译
-    btn.textContent = '⏳';
-    fetch('/pdf/api/translate-sentence', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text: s.text}),
-    }).then(r => r.json()).then(d => {
-      btn.textContent = '🌐';
-      if (d.ok && d.zh) {
-        s.zh = d.zh;
-        _drawSentenceOverlay(layer, s, btn, sx, sy);
-      } else {
-        _toast?.('翻译失败：' + (d.error || '?'));
-      }
-    }).catch(e => {
-      btn.textContent = '🌐';
-      _toast?.('网络错误：' + e.message);
-    });
-    return;
-  }
-  _drawSentenceOverlay(layer, s, btn, sx, sy);
+  btn.classList.add('active');
+  showSentenceTranslation(s.text, btn, s.zh || '');   // 有缓存译文秒显,没有则内部现场翻
 }
 
 function _drawSentenceOverlay(layer, s, btn, sx, sy) {
@@ -5767,10 +5747,10 @@ window.onTranslate = async () => {
     if (d.ok && d.zh) {
       sent.zh = d.zh;
       renderVocabSentences(pw, pw.__vocabSentences);   // 停呼吸
-      setTimeout(() => {   // 自动弹译文浮层(点该句的句首 L 按钮)
+      setTimeout(() => {   // 翻完自动弹干净译文浮层(锚到句首 L 标记,带上译文秒显)
         const si = pw.__vocabSentences.indexOf(sent);
         const btn = pw.querySelector('.vocab-sentence-btn-l-start[data-sid="' + si + '"]');
-        if (btn) btn.click();
+        if (btn) { btn.classList.add('active'); showSentenceTranslation(sent.text, btn, sent.zh); }
       }, 60);
     } else {
       renderVocabSentences(pw, pw.__vocabSentences);

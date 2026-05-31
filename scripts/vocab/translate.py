@@ -117,9 +117,19 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
     return None
 
 
+def _detect_src(text: str) -> str:
+    """粗判源语言(给免费翻译 API 用):含假名→ja;纯汉字无拉丁→ja(本项目场景是日语书);否则 en。"""
+    if re.search(r"[぀-ヿ]", text):
+        return "ja"
+    if re.search(r"[㐀-鿿一-鿿]", text) and not re.search(r"[A-Za-z]", text):
+        return "ja"
+    return "en"
+
+
 def _mymemory(text: str, target: str = "zh-CN") -> str | None:
     """MyMemory free。匿名 5000 字/天；带 de=email 50000 字/天。"""
-    src_target = f"en|{target if target.startswith('zh') else target}"
+    # source 之前写死 en → 日语句子被当英语翻、出乱码/空,导致退化到慢的 AI。改自动判源。
+    src_target = f"{_detect_src(text)}|{target}"
     params = {"q": text, "langpair": src_target}
     email = (_cfg().get("mymemory_email") or "").strip()
     if email:
@@ -173,8 +183,8 @@ def translate(text: str, target: str = "zh-CN",
         sources = ["ai"]
     elif backend == "mymemory":
         sources = ["mymemory"]
-    else:  # auto
-        sources = ["deepl", "mymemory"]
+    else:  # auto:先免费即时源(deepl 无 key 自动跳过 → mymemory ~0.5s),失败才用 AI(慢但稳)
+        sources = ["deepl", "mymemory", "ai"]
 
     for src in sources:
         tr = None
