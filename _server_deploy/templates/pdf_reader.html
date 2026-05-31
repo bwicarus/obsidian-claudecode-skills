@@ -799,7 +799,9 @@ function _attachScrollSaver() {
 // ───────────── 加载指示 ─────────────
 (function(){ const st=document.createElement('style');
   st.textContent='@keyframes pdfspin{to{transform:rotate(360deg)}}'; document.head.appendChild(st); })();
+let _pdfInitDone = false;   // 初次加载+首页渲染完后置 true;之后 onProgress(翻页取字节)不再弹加载层
 function pdfLoadShow(text, hint) {
+  if(_pdfInitDone) return;   // 已过初次加载,绝不再遮挡已渲染内容
   const box=document.getElementById('pdf-loading');
   if(!box) return;
   box.style.display='flex';
@@ -813,6 +815,7 @@ function pdfLoadBar(pct) {  // pct null = 不确定(只转圈)
   else { bar.style.opacity='1'; bar.style.width=Math.max(2,Math.min(100,pct))+'%'; }
 }
 function pdfLoadHide() {
+  _pdfInitDone = true;   // 锁死:此后任何 onProgress/pdfLoadShow 都不再显示加载层
   const box=document.getElementById('pdf-loading');
   if(box) box.style.display='none';
 }
