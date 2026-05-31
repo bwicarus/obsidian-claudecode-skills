@@ -2502,11 +2502,13 @@ function _bindCharLayer(cl, pw) {
       else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
       if (bounds) {
         _selByCharRange(pw, bounds.start, bounds.end);
-        // 单击命中未掌握生词 → 直接弹翻译（不需要再点工具栏）
-        if (_clickCount === 1 && _clickTranslateEnabled()) {
-          // 单击单词(无记录/已掌握都可) → 弹单词小框查词
+        // 单击单词 → 弹单词小框查词
+        if (_clickCount === 1) {
           const _t = (lastSelText || '').trim();
-          if (_t && _t.length <= 30 && /^[A-Za-z][A-Za-z'’\-]*$/.test(_t)) {
+          const isEng = /^[A-Za-z][A-Za-z'’\-]*$/.test(_t);
+          const isJa  = /[぀-ゟ゠-ヿ一-鿿㐀-䶿]/.test(_t);   // 含假名 / 汉字 → 日语词
+          // 日语:总是弹词典(没有别的查法);英文:沿用「点击未掌握词直接翻译」开关
+          if (_t && _t.length <= 30 && (isJa || (isEng && _clickTranslateEnabled()))) {
             const _cr = _expandSentenceFromRange(pw.__charBoxes, bounds.start, bounds.end);
             const _ctx = _cr ? _charsRangeToText(pw.__charBoxes, _cr.start, _cr.end).slice(0, 400) : '';
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
