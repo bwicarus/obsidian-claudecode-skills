@@ -15,7 +15,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
+import traceback
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import (
@@ -97,6 +101,23 @@ def _db(username: str) -> sqlite3.Connection:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # AI 后台 job(异步:点一下立即返回 job_id,AI 在服务器线程跑,结果落库;
+    # 关页面/刷新都不影响,回来轮询拿结果)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_ai_job (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,            -- suggest_plan | analyze_session
+            day_id TEXT,
+            date TEXT,
+            status TEXT NOT NULL,          -- running | done | error
+            result_json TEXT,
+            error TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_aijob_kind_day "
+               "ON fitness_ai_job(kind, day_id, status)")
     return db
 
 
@@ -314,77 +335,186 @@ def api_settings_set():
     return jsonify({"ok": True, "saved": saved})
 
 
-@api_bp.route("/ai/suggest_plan", methods=["POST"])
-def api_ai_suggest_plan():
-    """让 AI 看历史 + 上次 analysis 给出本日所有动作的 prescribed 建议。
+# ───────────────────────── AI 后台 job 基础设施 ─────────────────────────
+# 异步:HTTP 立即返回 job_id,AI 在 daemon 线程里跑(实际算力在服务器),
+# 结果落 fitness_ai_job 表。前端关页面/刷新都不影响,回来轮询拿结果。
+# 参照 qa_browser 的 card-update job + pdf_reader 的 snippets-to-async 模式。
 
-    body: {day_id: "push" | "pull" | "legs"}
-    返回: AI 输出的 JSON (overall_reasoning + exercises[].{id, prescribed, change_summary, reasoning})
-    """
-    username = _username()
-    data = request.get_json(silent=True) or {}
-    day_id = data.get("day_id")
-    if not day_id:
-        return jsonify({"ok": False, "error": "missing day_id"}), 400
-    import traceback
+JOB_STALE_SECONDS = 900   # running 超过 15 分钟视为僵死(进程重启等)
+
+
+def _job_set(db, job_id: str, status: str, result=None, error: str = None):
+    db.execute(
+        "UPDATE fitness_ai_job SET status=?, result_json=?, error=?, "
+        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status,
+         json.dumps(result, ensure_ascii=False) if result is not None else None,
+         error, job_id),
+    )
+    db.commit()
+
+
+def _run_ai_job(username: str, job_id: str, kind: str, day_id: str, date: str):
+    """daemon 线程:跑 AI + 写结果。自己开 DB 连接(sqlite 跨线程不共享)。"""
     db = _db(username)
     try:
-        from fitness_coach import suggest_plan
+        from fitness_coach import suggest_plan, analyze_session
         plan = _load_plan()
         s = _get_settings(db)
-        r = suggest_plan(db, day_id, plan,
-                         model=s["ai_model"], effort=s["ai_effort"])
-    except Exception as e:
-        tb = traceback.format_exc()
-        print(f"[fitness] suggest_plan exception: {e}\n{tb}", flush=True)
-        r = {"error": f"{type(e).__name__}: {e}", "traceback": tb[:1500]}
-    finally:
-        db.close()
-    if "error" in r:
-        return jsonify({"ok": False, **r}), 500
-    return jsonify({"ok": True, **r})
-
-
-@api_bp.route("/ai/analyze_session", methods=["POST"])
-def api_ai_analyze_session():
-    """AI 分析一次完成的训练。
-
-    body: {date: "YYYY-MM-DD", day_id: "push"}
-    """
-    username = _username()
-    data = request.get_json(silent=True) or {}
-    date = data.get("date") or time.strftime("%Y-%m-%d")
-    day_id = data.get("day_id")
-    if not day_id:
-        return jsonify({"ok": False, "error": "missing day_id"}), 400
-    import traceback
-    db = _db(username)
-    try:
-        from fitness_coach import analyze_session
-        plan = _load_plan()
-        s = _get_settings(db)
-        r = analyze_session(db, date, day_id, plan,
-                            model=s["ai_model"], effort=s["ai_effort"])
-        if "error" not in r:
-            try:
+        if kind == "suggest_plan":
+            r = suggest_plan(db, day_id, plan, model=s["ai_model"], effort=s["ai_effort"])
+        else:  # analyze_session
+            r = analyze_session(db, date, day_id, plan,
+                                model=s["ai_model"], effort=s["ai_effort"])
+            if "error" not in r:
                 db.execute(
                     "INSERT OR REPLACE INTO fitness_session_analysis "
                     "(date, day_id, analysis_json) VALUES (?, ?, ?)",
                     (date, day_id, json.dumps(r, ensure_ascii=False)),
                 )
                 db.commit()
-            except Exception as e:
-                print(f"[fitness] persist analysis failed: {e}\n{traceback.format_exc()}",
-                      flush=True)
+        if "error" in r:
+            _job_set(db, job_id, "error", result=r, error=str(r.get("error"))[:500])
+        else:
+            _job_set(db, job_id, "done", result=r)
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"[fitness] analyze_session exception: {e}\n{tb}", flush=True)
-        r = {"error": f"{type(e).__name__}: {e}", "traceback": tb[:1500]}
+        print(f"[fitness] ai job {kind} exception: {e}\n{tb}", flush=True)
+        try:
+            _job_set(db, job_id, "error",
+                     result={"error": f"{type(e).__name__}: {e}", "traceback": tb[:1500]},
+                     error=f"{type(e).__name__}: {e}"[:500])
+        except Exception:
+            pass
     finally:
         db.close()
-    if "error" in r:
-        return jsonify({"ok": False, **r}), 500
+
+
+def _start_ai_job(username: str, kind: str, day_id: str, date: str) -> dict:
+    """创建 job + 起线程。同 (kind, day_id[, date]) 已有 running 则复用,不重复跑。"""
+    db = _db(username)
+    try:
+        # dedup:已有 running 的同类 job 就复用
+        if kind == "suggest_plan":
+            row = db.execute(
+                "SELECT id FROM fitness_ai_job WHERE kind=? AND day_id=? AND status='running' "
+                "ORDER BY created_at DESC LIMIT 1", (kind, day_id),
+            ).fetchone()
+        else:
+            row = db.execute(
+                "SELECT id FROM fitness_ai_job WHERE kind=? AND day_id=? AND date=? AND status='running' "
+                "ORDER BY created_at DESC LIMIT 1", (kind, day_id, date),
+            ).fetchone()
+        if row:
+            return {"job_id": row["id"], "status": "running", "reused": True}
+        job_id = uuid.uuid4().hex[:16]
+        db.execute(
+            "INSERT INTO fitness_ai_job (id, kind, day_id, date, status) "
+            "VALUES (?, ?, ?, ?, 'running')", (job_id, kind, day_id, date),
+        )
+        db.commit()
+    finally:
+        db.close()
+    t = threading.Thread(target=_run_ai_job, args=(username, job_id, kind, day_id, date),
+                         daemon=True)
+    t.start()
+    return {"job_id": job_id, "status": "running", "reused": False}
+
+
+def _job_row_to_dict(row) -> dict:
+    result = None
+    if row["result_json"]:
+        try:
+            result = json.loads(row["result_json"])
+        except Exception:
+            result = None
+    return {
+        "id": row["id"], "kind": row["kind"], "day_id": row["day_id"],
+        "date": row["date"], "status": row["status"], "error": row["error"],
+        "result": result, "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+
+
+def _maybe_mark_stale(db, row) -> str:
+    """running 太久(进程可能重启过)→ 标 error,返回最新 status。"""
+    if row["status"] != "running":
+        return row["status"]
+    try:
+        upd = datetime.strptime(row["updated_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - upd).total_seconds()
+        if age > JOB_STALE_SECONDS:
+            _job_set(db, row["id"], "error",
+                     result={"error": "job 超时(服务器可能重启过),请重试"},
+                     error="stale_timeout")
+            return "error"
+    except Exception:
+        pass
+    return "running"
+
+
+@api_bp.route("/ai/suggest_plan", methods=["POST"])
+def api_ai_suggest_plan():
+    """启动「调整本日计划」AI job(异步)。body: {day_id}。返回 {job_id, status}。"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    day_id = data.get("day_id")
+    if not day_id:
+        return jsonify({"ok": False, "error": "missing day_id"}), 400
+    r = _start_ai_job(username, "suggest_plan", day_id, "")
     return jsonify({"ok": True, **r})
+
+
+@api_bp.route("/ai/analyze_session", methods=["POST"])
+def api_ai_analyze_session():
+    """启动「分析本次训练」AI job(异步)。body: {date, day_id}。返回 {job_id, status}。"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    date = data.get("date") or time.strftime("%Y-%m-%d")
+    day_id = data.get("day_id")
+    if not day_id:
+        return jsonify({"ok": False, "error": "missing day_id"}), 400
+    r = _start_ai_job(username, "analyze_session", day_id, date)
+    return jsonify({"ok": True, **r})
+
+
+@api_bp.route("/ai/job/<job_id>")
+def api_ai_job(job_id: str):
+    """轮询 job 状态/结果。status: running | done | error。"""
+    username = _username()
+    db = _db(username)
+    row = db.execute("SELECT * FROM fitness_ai_job WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({"ok": False, "error": "job not found"}), 404
+    _maybe_mark_stale(db, row)
+    row = db.execute("SELECT * FROM fitness_ai_job WHERE id=?", (job_id,)).fetchone()
+    db.close()
+    return jsonify({"ok": True, "job": _job_row_to_dict(row)})
+
+
+@api_bp.route("/ai/jobs")
+def api_ai_jobs():
+    """列最近 job(刷新/重进页面恢复用)。query: ?day_id=&kind=&date=&limit=。"""
+    username = _username()
+    db = _db(username)
+    sql = "SELECT * FROM fitness_ai_job WHERE 1=1"
+    params = []
+    for k in ("kind", "day_id", "date"):
+        v = request.args.get(k)
+        if v:
+            sql += f" AND {k}=?"
+            params.append(v)
+    limit = min(int(request.args.get("limit", 20)), 50)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = db.execute(sql, params).fetchall()
+    # 顺手把僵死的标 error
+    for row in rows:
+        if row["status"] == "running":
+            _maybe_mark_stale(db, row)
+    rows = db.execute(sql, params).fetchall()
+    db.close()
+    return jsonify({"ok": True, "jobs": [_job_row_to_dict(r) for r in rows]})
 
 
 @api_bp.route("/exercise_override/<exercise_id>", methods=["GET"])

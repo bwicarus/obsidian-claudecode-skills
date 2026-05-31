@@ -926,47 +926,42 @@ document.getElementById('finish-modal').addEventListener('click', (e) => {
   }
 });
 
-// ───────────── AI 调整计划 ─────────────
-const _aiSuggestState = { suggestions: null };
+// ───────────── AI 调整计划(异步 job)─────────────
+const _aiSuggestState = { suggestions: null, result: null };
 
-async function openAiSuggest() {
+// 点「调整计划」:有现成结果直接看,否则起后台 job(不阻塞,缩成角落药丸)
+function onClickSuggest() {
+  if (_aiSuggestState.result) { renderSuggestResult(_aiSuggestState.result); return; }
+  startAiJob('suggest_plan', { day_id: DAY_ID });
+}
+
+// 把 suggest 结果渲染进 modal 并打开
+function renderSuggestResult(d) {
   const modal = document.getElementById('ai-modal');
   const status = document.getElementById('ai-status');
   const overall = document.getElementById('ai-overall');
   const list = document.getElementById('ai-list');
   modal.style.display = 'flex';
-  status.textContent = '🤖 Claude Opus 深度思考中(看 4 周历史 + 文献,~1-3 分钟,别关页面)…';
-  overall.style.display = 'none';
-  list.innerHTML = '';
-  try {
-    const r = await fetch('/api/fitness/ai/suggest_plan', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ day_id: DAY_ID }),
-    });
-    const d = await r.json();
-    if (!d.ok) {
-      status.textContent = '✗ AI 调用失败: ' + (d.error || '?');
-      let extra = '';
-      if (d.raw) extra += `<div class="dim small" style="margin-top:8px;">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);max-height:200px;overflow:auto;">${d.raw}</pre>`;
-      if (d.traceback) extra += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);max-height:300px;overflow:auto;">${d.traceback}</pre>`;
-      list.innerHTML = extra;
-      return;
-    }
-    _aiSuggestState.suggestions = d.exercises || [];
-    status.textContent = `✓ 已生成 ${_aiSuggestState.suggestions.length} 个动作建议`;
-    if (d.overall_reasoning) {
-      overall.textContent = '💡 ' + d.overall_reasoning;
-      overall.style.display = 'block';
-    }
-    list.innerHTML = _aiSuggestState.suggestions.map(s => renderSuggestionRow(s)).join('');
-    // 绑定每行的接受/拒绝
-    list.querySelectorAll('.sug-accept').forEach(b =>
-      b.addEventListener('click', () => acceptSuggestion(b.dataset.ex)));
-    list.querySelectorAll('.sug-reject').forEach(b =>
-      b.addEventListener('click', () => rejectSuggestion(b.dataset.ex)));
-  } catch (e) {
-    status.textContent = '✗ 网络失败';
+  if (d && d.error) {
+    status.textContent = '✗ AI 调用失败: ' + (d.error || '?');
+    overall.style.display = 'none';
+    let extra = '';
+    if (d.raw) extra += `<div class="dim small" style="margin-top:8px;">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);max-height:200px;overflow:auto;">${d.raw}</pre>`;
+    if (d.traceback) extra += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);max-height:300px;overflow:auto;">${d.traceback}</pre>`;
+    list.innerHTML = extra || '<div class="dim">无更多信息</div>';
+    return;
   }
+  _aiSuggestState.suggestions = (d && d.exercises) || [];
+  status.textContent = `✓ 已生成 ${_aiSuggestState.suggestions.length} 个动作建议`;
+  if (d && d.overall_reasoning) {
+    overall.textContent = '💡 ' + d.overall_reasoning;
+    overall.style.display = 'block';
+  } else { overall.style.display = 'none'; }
+  list.innerHTML = _aiSuggestState.suggestions.map(s => renderSuggestionRow(s)).join('');
+  list.querySelectorAll('.sug-accept').forEach(b =>
+    b.addEventListener('click', () => acceptSuggestion(b.dataset.ex)));
+  list.querySelectorAll('.sug-reject').forEach(b =>
+    b.addEventListener('click', () => rejectSuggestion(b.dataset.ex)));
 }
 
 function renderSuggestionRow(s) {
@@ -1095,7 +1090,7 @@ document.getElementById('settings-save').addEventListener('click', async () => {
   } catch (e) { alert('网络失败'); }
 });
 
-document.getElementById('ai-suggest').addEventListener('click', openAiSuggest);
+document.getElementById('ai-suggest').addEventListener('click', onClickSuggest);
 document.getElementById('ai-close').addEventListener('click',
   () => document.getElementById('ai-modal').style.display = 'none');
 document.getElementById('ai-modal').addEventListener('click', (e) => {
@@ -1110,96 +1105,229 @@ document.getElementById('ai-reject-all').addEventListener('click', () => {
   document.querySelectorAll('.sug-reject').forEach(b => b.click());
 });
 
-// ───────────── AI 分析这次训练 ─────────────
-document.getElementById('ai-analyze-btn').addEventListener('click', async () => {
+// ───────────── AI 分析这次训练(异步 job)─────────────
+const _aiAnalyzeState = { result: null };
+
+// 点「让 AI 分析这次训练」→ 起后台 job(不阻塞)
+document.getElementById('ai-analyze-btn').addEventListener('click', () => {
+  if (_aiAnalyzeState.result) { renderAnalyzeResult(_aiAnalyzeState.result); return; }
+  const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+  startAiJob('analyze_session', { date, day_id: DAY_ID });
+});
+
+// 把 analyze 结果渲染进完成 modal 的 analyze 区
+function renderAnalyzeResult(d) {
   const btn = document.getElementById('ai-analyze-btn');
   const out = document.getElementById('ai-analyze-out');
-  btn.disabled = true;
-  btn.textContent = '🤖 Claude Opus 深度分析中(~1-3 分钟)…';
+  if (btn) btn.style.display = 'none';
+  out.style.display = 'block';
+  if (d && d.error) {
+    out.innerHTML = '<div style="color:var(--danger);font-weight:600;margin-bottom:6px;">✗ 分析失败: ' + (d.error || '?') + '</div>';
+    if (d.raw) out.innerHTML += `<div class="dim small">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);margin:2px 0 6px;max-height:200px;overflow:auto;">${d.raw}</pre>`;
+    if (d.traceback) out.innerHTML += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);margin:2px 0;max-height:300px;overflow:auto;">${d.traceback}</pre>`;
+    if (btn) { btn.style.display = ''; btn.textContent = '🤖 重试'; btn.disabled = false; }
+    return;
+  }
+  const verdictColor = {
+    progress: 'var(--accent-2)', stagnation: 'var(--warn)',
+    overreach: 'var(--danger)', fatigue: 'var(--warn)', deload_due: 'var(--danger)',
+  }[d.verdict] || 'var(--accent)';
+  let html = `<div style="margin-bottom:8px;">
+    <span style="padding:2px 8px;border-radius:4px;background:${verdictColor};color:#fff;font-size:12px;">
+      ${d.verdict || '?'}
+    </span>
+    <span style="margin-left:8px;">完成 <strong>${d.completion_rate_pct ?? '?'}%</strong>
+    · RPE 估 <strong>${d.rpe_estimate ?? '?'}</strong></span>
+  </div>`;
+  if (d.summary) html += `<div style="margin-bottom:10px;font-style:italic;">"${d.summary}"</div>`;
+  if (d.per_exercise && d.per_exercise.length) {
+    html += '<div style="margin-bottom:8px;"><strong>各动作:</strong></div>';
+    html += '<ul style="margin:0 0 10px 18px;padding:0;">';
+    for (const ex of d.per_exercise) {
+      const v = { progress: '✓', stagnation: '~', fail: '✗', skipped: '⊘' }[ex.verdict] || '·';
+      html += `<li style="margin-bottom:4px;"><strong>${v} ${ex.id}</strong>: ${ex.note || ''}`;
+      if (ex.next_action) html += ` <span class="dim small">[${ex.next_action}]</span>`;
+      html += '</li>';
+    }
+    html += '</ul>';
+  }
+  if (d.key_insights && d.key_insights.length) {
+    html += '<div><strong>💡 洞察:</strong><ul style="margin:4px 0 10px 18px;">';
+    d.key_insights.forEach(i => html += `<li>${i}</li>`);
+    html += '</ul></div>';
+  }
+  if (d.warnings && d.warnings.length) {
+    html += '<div style="color:var(--warn);"><strong>⚠ 提醒:</strong><ul style="margin:4px 0 0 18px;">';
+    d.warnings.forEach(w => html += `<li>${w}</li>`);
+    html += '</ul></div>';
+  }
+  // 设置开了自动 suggest → 顺手起一个 suggest job(也异步,不阻塞)
+  if (_settings && _settings.auto_suggest_after_analyze === '1' && !_aiSuggestState.result) {
+    html += `<div class="small dim" style="margin-top:12px;">🤖 已自动开始生成下次计划(角落药丸显示进度)…</div>`;
+    startAiJob('suggest_plan', { day_id: DAY_ID });
+  }
+  out.innerHTML = html;
+}
+
+// ═════════════ AI 后台 job 框架(角落药丸 + 轮询 + 刷新恢复)═════════════
+// 点 AI 按钮 → POST 立即拿 job_id(AI 在服务器线程跑)→ 缩成右下角药丸
+// 显示进度 → 关页面/刷新都不影响 → 回来轮询拿结果。参照成熟站的后台任务模式。
+const AI_POLL_MS = 4000;
+const _aiPoll = {};   // kind -> intervalId
+const KIND_LABEL = { suggest_plan: '新计划', analyze_session: '本次分析' };
+
+function _lsKey(kind) { return `fit_aijob_${kind}_${DAY_ID}`; }
+
+function _pillHost() {
+  let host = document.getElementById('ai-pill-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'ai-pill-host';
+    host.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:1200;'
+      + 'display:flex;flex-direction:column;gap:8px;align-items:flex-end;';
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+// state: 'run' | 'ok' | 'err'
+function setPill(kind, { text, state, onclick }) {
+  const host = _pillHost();
+  let pill = document.getElementById('ai-pill-' + kind);
+  if (!pill) {
+    pill = document.createElement('div');
+    pill.id = 'ai-pill-' + kind;
+    host.appendChild(pill);
+  }
+  const bg = state === 'ok' ? 'var(--accent-2)' : state === 'err' ? 'var(--danger)' : '#1f3a5f';
+  const bd = state === 'ok' ? 'var(--accent-2)' : state === 'err' ? 'var(--danger)' : '#2d5a8a';
+  pill.style.cssText = `background:${bg}1a;border:1px solid ${bd};color:var(--text);`
+    + 'border-radius:20px;padding:8px 14px;font-size:13px;max-width:78vw;'
+    + 'box-shadow:0 4px 16px #0008;display:flex;align-items:center;gap:8px;'
+    + (onclick ? 'cursor:pointer;' : '');
+  const spin = state === 'run'
+    ? '<span class="ai-spin" style="width:13px;height:13px;border:2px solid #7dd3fc55;'
+      + 'border-top-color:#7dd3fc;border-radius:50%;display:inline-block;'
+      + 'animation:aispin .8s linear infinite;"></span>' : '';
+  pill.innerHTML = spin + `<span>${text}</span>`;
+  pill.onclick = onclick || null;
+}
+
+function clearPill(kind) {
+  const pill = document.getElementById('ai-pill-' + kind);
+  if (pill) pill.remove();
+  if (_aiPoll[kind]) { clearInterval(_aiPoll[kind]); delete _aiPoll[kind]; }
+}
+
+// 注入 spinner keyframes
+(function(){
+  const st = document.createElement('style');
+  st.textContent = '@keyframes aispin{to{transform:rotate(360deg)}}';
+  document.head.appendChild(st);
+})();
+
+async function startAiJob(kind, body) {
+  setPill(kind, { text: `🤖 正在生成${KIND_LABEL[kind]}…(可关页面)`, state: 'run' });
   try {
-    const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
-    const r = await fetch('/api/fitness/ai/analyze_session', {
+    const r = await fetch(`/api/fitness/ai/${kind}`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ date, day_id: DAY_ID }),
+      body: JSON.stringify(body),
     });
     const d = await r.json();
-    if (!d.ok) {
-      out.innerHTML = '<div style="color:var(--danger);font-weight:600;margin-bottom:6px;">✗ 分析失败: ' + (d.error || '?') + '</div>';
-      if (d.raw) out.innerHTML += `<div class="dim small">AI raw:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--text-dim);margin:2px 0 6px;max-height:200px;overflow:auto;">${d.raw}</pre>`;
-      if (d.traceback) out.innerHTML += `<div class="dim small">Traceback:</div><pre style="white-space:pre-wrap;font-size:11px;color:var(--warn);margin:2px 0;max-height:300px;overflow:auto;">${d.traceback}</pre>`;
-      out.style.display = 'block';
-      btn.textContent = '🤖 重试';
-      btn.disabled = false;
+    if (!d.ok || !d.job_id) {
+      setPill(kind, { text: `✗ ${KIND_LABEL[kind]}启动失败 · 重试`, state: 'err',
+        onclick: () => startAiJob(kind, body) });
       return;
     }
-    // 渲染分析
-    const verdictColor = {
-      progress: 'var(--accent-2)', stagnation: 'var(--warn)',
-      overreach: 'var(--danger)', fatigue: 'var(--warn)', deload_due: 'var(--danger)',
-    }[d.verdict] || 'var(--accent)';
-    let html = `<div style="margin-bottom:8px;">
-      <span style="padding:2px 8px;border-radius:4px;background:${verdictColor};color:#fff;font-size:12px;">
-        ${d.verdict || '?'}
-      </span>
-      <span style="margin-left:8px;">完成 <strong>${d.completion_rate_pct ?? '?'}%</strong>
-      · RPE 估 <strong>${d.rpe_estimate ?? '?'}</strong></span>
-    </div>`;
-    if (d.summary) html += `<div style="margin-bottom:10px;font-style:italic;">"${d.summary}"</div>`;
-    if (d.per_exercise && d.per_exercise.length) {
-      html += '<div style="margin-bottom:8px;"><strong>各动作:</strong></div>';
-      html += '<ul style="margin:0 0 10px 18px;padding:0;">';
-      for (const ex of d.per_exercise) {
-        const v = { progress: '✓', stagnation: '~', fail: '✗', skipped: '⊘' }[ex.verdict] || '·';
-        html += `<li style="margin-bottom:4px;"><strong>${v} ${ex.id}</strong>: ${ex.note || ''}`;
-        if (ex.next_action) html += ` <span class="dim small">[${ex.next_action}]</span>`;
-        html += '</li>';
-      }
-      html += '</ul>';
-    }
-    if (d.key_insights && d.key_insights.length) {
-      html += '<div><strong>💡 洞察:</strong><ul style="margin:4px 0 10px 18px;">';
-      d.key_insights.forEach(i => html += `<li>${i}</li>`);
-      html += '</ul></div>';
-    }
-    if (d.warnings && d.warnings.length) {
-      html += '<div style="color:var(--warn);"><strong>⚠ 提醒:</strong><ul style="margin:4px 0 0 18px;">';
-      d.warnings.forEach(w => html += `<li>${w}</li>`);
-      html += '</ul></div>';
-    }
-    out.innerHTML = html;
-    out.style.display = 'block';
-    btn.style.display = 'none';
-    // 设置开了自动 suggest → 串行调用
-    if (_settings && _settings.auto_suggest_after_analyze === '1') {
-      const auto = document.createElement('div');
-      auto.style.cssText = 'margin-top:14px;padding:10px;background:#0f1d2e;border-radius:6px;font-size:13px;';
-      auto.innerHTML = '🤖 自动跑下次计划 suggest…';
-      out.appendChild(auto);
-      try {
-        const sr = await fetch('/api/fitness/ai/suggest_plan', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ day_id: DAY_ID }),
-        });
-        const sd = await sr.json();
-        if (sd.ok) {
-          auto.innerHTML = `✓ 下次 ${DAY_ID} 计划已就绪
-            (${(sd.exercises||[]).length} 个动作)
-            <br><span class="small dim">${sd.overall_reasoning || ''}</span>
-            <br><a href="/private/fitness/log/${DAY_ID}" style="color:var(--accent);">下次进 log 页点 🤖 调整计划 查看 →</a>`;
-        } else {
-          auto.innerHTML = `<span style="color:var(--warn);">⚠ 自动 suggest 失败,可下次手动:</span> ${sd.error || '?'}`;
-        }
-      } catch (e) {
-        auto.innerHTML = '<span style="color:var(--warn);">⚠ 自动 suggest 网络失败</span>';
-      }
-    }
+    localStorage.setItem(_lsKey(kind), JSON.stringify({ job_id: d.job_id, body }));
+    watchJob(kind, d.job_id, body);
   } catch (e) {
-    out.innerHTML = '<span style="color:var(--danger);">✗ 网络失败</span>';
-    out.style.display = 'block';
-    btn.textContent = '🤖 重试';
-    btn.disabled = false;
+    setPill(kind, { text: `✗ 网络失败 · 重试`, state: 'err',
+      onclick: () => startAiJob(kind, body) });
   }
-});
+}
+
+function watchJob(kind, jobId, body) {
+  setPill(kind, { text: `🤖 正在生成${KIND_LABEL[kind]}…(可关页面)`, state: 'run' });
+  if (_aiPoll[kind]) clearInterval(_aiPoll[kind]);
+  const tick = async () => {
+    let d;
+    try { d = await (await fetch(`/api/fitness/ai/job/${jobId}`)).json(); }
+    catch (e) { return; }   // 网络抖动,下次再试
+    if (!d.ok) {            // job 不存在(服务器重启清库等)
+      clearInterval(_aiPoll[kind]); delete _aiPoll[kind];
+      localStorage.removeItem(_lsKey(kind));
+      setPill(kind, { text: `✗ ${KIND_LABEL[kind]} job 丢失 · 重试`, state: 'err',
+        onclick: () => startAiJob(kind, body || {}) });
+      return;
+    }
+    const job = d.job;
+    if (job.status === 'running') return;
+    clearInterval(_aiPoll[kind]); delete _aiPoll[kind];
+    onJobDone(kind, job, body);
+  };
+  _aiPoll[kind] = setInterval(tick, AI_POLL_MS);
+  tick();   // 立即查一次(可能秒 done)
+}
+
+function onJobDone(kind, job, body) {
+  const result = job.result || {};
+  const isErr = job.status === 'error' || (result && result.error);
+  if (kind === 'suggest_plan') {
+    if (isErr) {
+      setPill(kind, { text: `✗ 新计划失败 · 重试`, state: 'err',
+        onclick: () => { clearPill(kind); localStorage.removeItem(_lsKey(kind)); startAiJob(kind, body || { day_id: DAY_ID }); } });
+      _aiSuggestState.result = result;   // 让点开 modal 能看到错误详情
+      return;
+    }
+    _aiSuggestState.result = result;
+    setPill(kind, { text: `✓ 新计划就绪 · 点击查看`, state: 'ok',
+      onclick: () => { renderSuggestResult(result); clearPill(kind); localStorage.removeItem(_lsKey(kind)); } });
+  } else {  // analyze_session
+    _aiAnalyzeState.result = result;
+    if (isErr) {
+      setPill(kind, { text: `✗ 分析失败 · 重试`, state: 'err',
+        onclick: () => { clearPill(kind); localStorage.removeItem(_lsKey(kind));
+          const date = document.getElementById('workout-date').value || TODAY_DEFAULT;
+          startAiJob(kind, { date, day_id: DAY_ID }); } });
+      return;
+    }
+    // 完成 modal 开着就直接渲染进去,否则给可点击药丸
+    const finishOpen = document.getElementById('finish-modal').style.display === 'flex';
+    if (finishOpen) {
+      renderAnalyzeResult(result);
+      clearPill(kind); localStorage.removeItem(_lsKey(kind));
+    } else {
+      setPill(kind, { text: `✓ 本次分析就绪 · 点击查看`, state: 'ok',
+        onclick: () => { showFinishSummary(); renderAnalyzeResult(result);
+          clearPill(kind); localStorage.removeItem(_lsKey(kind)); } });
+    }
+  }
+}
+
+// 刷新/重进页面:恢复进行中的 job(localStorage)+ 兜底查服务器最近 running job
+async function restoreAiJobs() {
+  const seen = {};
+  for (const kind of ['suggest_plan', 'analyze_session']) {
+    const raw = localStorage.getItem(_lsKey(kind));
+    if (raw) {
+      try { const o = JSON.parse(raw); if (o.job_id) { seen[kind] = 1; watchJob(kind, o.job_id, o.body); } }
+      catch (e) { localStorage.removeItem(_lsKey(kind)); }
+    }
+  }
+  // 兜底:本机没记但服务器有该日 running 的 job(比如别的设备发起的)
+  try {
+    const d = await (await fetch(`/api/fitness/ai/jobs?day_id=${encodeURIComponent(DAY_ID)}&limit=10`)).json();
+    if (d.ok) {
+      for (const kind of ['suggest_plan', 'analyze_session']) {
+        if (seen[kind]) continue;
+        const j = (d.jobs || []).find(x => x.kind === kind && x.status === 'running');
+        if (j) { localStorage.setItem(_lsKey(kind), JSON.stringify({ job_id: j.id, body: {} })); watchJob(kind, j.id, {}); }
+      }
+    }
+  } catch (e) {}
+}
+restoreAiJobs();
 
 // ───────────── 休息倒计时 ─────────────
 const REST = {};   // exId -> {endTs, totalSec, intervalId}
