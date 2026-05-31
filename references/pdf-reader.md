@@ -605,3 +605,25 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 
 ### 14.9 日语发音
 有道 dictvoice 是英语库 → 日语无声。改 `_speakOnline` 日语分流到浏览器原生 `speechSynthesis` **ja-JP**（iPad 自带 Kyoko，离线，念假名读音保证读对；iOS getVoices 暂空时靠 `u.lang='ja-JP'` 路由）。免费真人录音离线日语词典基本不存在（Forvo 要联网+key），合成音够用。
+
+## 15. 2026-06-01 批次：操作性 7 件套（F1–F7）
+
+一次性加的 7 个阅读体验功能。前端验证脚本：`bash scripts/check_pdf_reader_js.sh`（抽 module script → 去 Jinja → `node --check`）。后端实时验证：`cd /home/bwicarus/webapp && set -a && . ./.env && set +a && WEBAPP_DATA=/tmp/wtest_data python3`（test_client + `session_transaction` 绕登录；`/pdf` 在 PROTECTED_PREFIXES，且 app 用 root 的 `/root/webapp/data`，故必须 `WEBAPP_DATA` 指临时目录）。
+
+| 功能 | 顶栏/入口 | 后端 | 前端 |
+|---|---|---|---|
+| **F1 页码 scrubber** | 顶栏页码 | — | `#page-scrub` 左右拖快速跳页+预览，点击 prompt 输页码 |
+| **F2 单页横滑翻页** | 手势 | — | char-layer touchstart 记 `_swipeStart`（**起点空白 + 单页模式**）→ touchend：`|dx|≥55 且 dx>1.6×dy 且 <700ms` → 右滑上一页/左滑下一页。**起点在字上仍走拖选**（不冲突） |
+| **F3 整页翻译** | 「译页」 | `_split_page_sentences`（切整页所有句，不限生词不排标题）+ `/api/page-translate`（gtranslate_batch + `_cache_get/put` sidecar 缓存，无 GCP key 逐句兜底限 60 句） | `togglePageTranslate` + `_drawPageTranslate`（`.page-tr-layer` z9，逐行白底中文覆盖，复用 `_drawSentenceOverlay` 的按中心行合并+贪心填充+字号 0.72×原文高；`pointer-events:none` 仍可选原文）。连续模式滚入新页自动译（`__pageTrSeq` 防重复） |
+| **F4 全文搜索** | 「🔍」 | `_book_text_index`（全书逐页 `get_text` 磁盘缓存，键含 mtime，679 页首建 ~3s 之后秒读）+ `/api/search`（子串、大小写不敏感、适配中日无词边界，limit 200 页） | `#search-panel` 顶部下拉，debounce 320ms / Enter / Esc，结果页码·命中数+片段 `<mark>` 高亮，点击 `goToPage` |
+| **F5 振假名/音标** | 「あ」 | page-chars 新增 `furigana`：日语 unidic `feature.kana`→平假名（`_furigana_item` 剥送り仮名贴汉字核心）+ 英文 `_build_en_furigana`（**单连接直查 ECDICT phonetic，不走 lemma/LIKE 全表扫描**）。**随 chars 进磁盘缓存**（老缓存无该键自动重算） | `.ruby-layer`（**z-index 8 + `pointer-events:none` → 点击穿透到 char-layer 选词**）+ `toggleRuby`（localStorage `pdf-ruby` 默认关）。字号 `min(词高×0.52, 词宽/读音字数×1.75)` 防溢出 |
+| **F6 词组模式** | 选中后「📘词组」 | `_merge_favorite_phrases`（收藏词组在页内出现处合并 chars 的 `w`→单击选整词组；空白不敏感/ASCII 大小写不敏感/长词组优先/防重叠/**连续文本流校验：相邻字竖直跳变 >2.2 行高拒绝，防跨段误并**；**live 应用不进缓存**）+ `/api/phrases` CRUD（`state/pdf-phrases.json` 全局） | `_isShortPhrase`（中日 2-8 字/拉丁 2-5 词，无句末标点）→ 工具栏「📘词组」按钮（高亮+呼吸）+ 选中框呼吸 1.6s 转常亮；`showPhrasePopover`（复用 word-pop，JP 走 dict-jp 读音+声调，兜底 translate-sentence）+ ☆收藏切换 → `refreshCharsWForAllPages` 原地更新 `w` |
+| **F7 日语生词高亮** | 自动（同英语下划线开关） | `state/jp-vocab.json` store（查过的 JP 词记 looks/mastered）+ `_jp_vocab_bump`（dict-quick want_ja / dict-jp 查词时）+ `_build_jp_vocab_marks`（**按 fugashi `w` 分组成 token**，命中 store 未掌握的画下划线，looks≤1 橙/≤3 黄/≥4 淡绿，mastered 不画）。合并进 `vocab_marks`（page-chars + page-vocab-marks，后者补跑 `_apply_jp_tokenize` 让 `w` 存在）+ `/api/jp-vocab-mark`（mastered/unknown/forget） | 复用现有 `.vocab-underline` 渲染；JP 词框「✓掌握」按钮（`_wordPopJpMaster`）；查 JP 词后 `refreshVocabUnderlinesForAllPages` |
+
+**关键设计决策**
+- F5/F7 都**按 `w`（fugashi token / 收藏合并）分组**，跟单击选词同一套词边界 → 振假名落在词上、生词下划线整词、收藏词组单击整选，三者一致。
+- F3/F5/F7 的重活（振假名读音、整页翻译、搜索索引）全部**磁盘缓存键含 mtime**，首次慢、之后秒读；F6 收藏合并 `w` 是**每请求 live 应用**（不进缓存，否则改收藏要等缓存失效）。
+- F5 ruby 层 `pointer-events:none` + 高 z-index：盖在最上但点击穿透，选词不受影响。F3 page-tr 层同理（z9 盖住 ruby）。
+- F2 横滑严格限「起点空白 + 单页模式」：尊重既有「起点在字上=拖选、竖滑=滚动」规则，零冲突。
+
+**验证结论**（独立 reviewer 审 `6ed9d9c..` 全 diff）：无崩溃/解包遗漏/未定义符号/重复声明/死锁/越界/回归；4-tuple 解包、translate 签名、window 挂载、store 键、坐标缩放全部跨函数核对一致。実测 応用情報 p22 振假名 169 条、整页翻译 38 句全译（冷 439ms/缓存 103ms）、搜索 試験 256 处（冷 2.6s/缓存 18ms）；EGIU/线代书 IPA 261 条/66ms。
