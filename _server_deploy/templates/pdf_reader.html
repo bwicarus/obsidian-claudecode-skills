@@ -2905,6 +2905,7 @@ function _updateToolbarMode(text) {
 
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
 let _wordPopState = null;
+let _wordPopSeq = 0;   // 查词请求序号:防竞态(快速点不同词,旧词响应晚到覆盖新词)
 function _positionWordPop(pop) {
   // 挂进 #main（不会被单页重渲染的 innerHTML='' 删掉）；用 page-wrap 布局坐标定位，
   // absolute 相对 #main → 随内容滚动。（之前挂 page-wrap，侧栏展开触发重渲染会把小框删掉 → 闪没）
@@ -2969,6 +2970,7 @@ function _renderPitch(reading, accent) {
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
+  const myseq = ++_wordPopSeq;   // 本次查词序号;await 回来若已被新查词覆盖则放弃渲染
   toolbar.classList.remove('open');
   _wordPopState = {word, ctx: ctx || '', lemma: word};
   const pop = document.getElementById('word-pop');
@@ -2982,6 +2984,7 @@ window.showWordPopover = async (word, ctx) => {
       '&context=' + encodeURIComponent(ctx || '') +
       '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
     const d = await r.json();
+    if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 这是旧响应,丢弃(防覆盖新词)
     if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
     _wordPopState.lemma = d.lemma || word;
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -3011,6 +3014,7 @@ window.showWordPopover = async (word, ctx) => {
       '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
   } catch (e) {
+    if (myseq !== _wordPopSeq) return;   // 旧请求出错也不覆盖当前词
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
   }
 };
