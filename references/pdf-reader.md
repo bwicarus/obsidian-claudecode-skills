@@ -41,7 +41,7 @@
 |---|---|---|
 | GET | `/` | PDF 列表页（render `pdf_index.html`；vault 下所有 *.pdf 按 mtime 倒序） |
 | GET | `/view?file=<rel>&page=N` | 阅读器主页（鉴权后渲染 `pdf_reader.html`） |
-| GET | `/file/<vault_rel_path>` | 返回 PDF 二进制 `application/pdf` |
+| GET | `/file/<vault_rel_path>` | 返回 PDF 二进制 `application/pdf`(**`conditional=True` 支持 HTTP Range/206** + `Accept-Ranges`;前端 getDocument 开 `disableAutoFetch:true`+`rangeChunkSize 256KB` → PDF.js 只取翻到的页,几百 MB 大文件 iPad Safari 不 OOM;超大书 `qpdf --linearize` 无损线性化加快首开。2026-05-31 根治"稍大文件打不开")|
 | GET | `/api/list-pdfs` | JSON 列表 |
 | GET | `/api/page-chars?file=<rel>&page=N` | PyMuPDF 提取该页所有字符 bbox + 内容（驱动 char-layer，含 `vocab_marks`） |
 | GET | `/api/page-nodes?file=<rel>&page=N` | 该页对应的 KG 节点 |

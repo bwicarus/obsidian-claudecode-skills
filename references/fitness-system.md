@@ -49,6 +49,7 @@ youtube_speech.py ── Cloud STT  ──  GCP API key
 | `fitness_exercise_override` | AI 调整后的 prescribed 覆盖 | exercise_id PK,prescribed_json,source(ai/manual),reasoning,change_summary |
 | `fitness_session_analysis` | 每次完成训练 AI 分析 | (date, day_id) PK,analysis_json |
 | `fitness_settings` | 用户级设置(AI 模型 / 自动开关) | key/value pairs |
+| `fitness_ai_job` | AI 后台 job(异步,关页面不丢) | id PK,kind(suggest_plan/analyze_session),day_id,date,status(running/done/error),result_json,error |
 
 ### fitness_settings 默认值
 
@@ -112,7 +113,8 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 | POST | `/api/fitness/log` | upsert 一组(autosave / ✓ 都走这个)|
 | GET | `/api/fitness/today_sets/<ex>?date=` | 拉某日某动作所有组(刷新恢复)|
 | GET | `/api/fitness/workout_meta?date=&day_id=` | 训练 MIN(created_at) + count(已用时间起点)|
-| GET | `/api/fitness/recommend/<ex>` | Double Progression 推荐(weight/reps/sets/rir/rest + reason)|
+| GET | `/api/fitness/recommend/<ex>` | Double Progression 推荐(weight/reps/sets/rir/rest + reason)+ `pr`(历史最佳)|
+| GET | `/api/fitness/pr/<ex>` | 该动作 PR(best_weight / best_1rm Epley / best_reps_at_top,排除今天)|
 | GET | `/api/fitness/last/<ex>` | 该动作最近一次完整记录 |
 | GET | `/api/fitness/history?exercise_id=&days=` | 全部历史(图表用)|
 | DELETE | `/api/fitness/log/<id>` | 删一组 |
@@ -140,10 +142,18 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/fitness/ai/suggest_plan` body `{day_id}` | Claude 看历史 + 上次 analysis → 调整 prescribed 建议(per-exercise) |
-| POST | `/api/fitness/ai/analyze_session` body `{date, day_id}` | Claude 分析一次完成的训练,落库 fitness_session_analysis |
+| POST | `/api/fitness/ai/suggest_plan` body `{day_id}` | **异步**:建 job + daemon 线程跑 → 立即返回 `{job_id, status:running}` |
+| POST | `/api/fitness/ai/analyze_session` body `{date, day_id}` | **异步**:同上,done 后落库 fitness_session_analysis |
+| GET | `/api/fitness/ai/job/<job_id>` | 轮询 job 状态/结果(running/done/error;>15min 判僵死)|
+| GET | `/api/fitness/ai/jobs?day_id=` | 列最近 job(刷新/换设备恢复用)|
 | GET/POST/DELETE | `/api/fitness/exercise_override/<ex>` | 用户接受 AI 建议的落地 |
 | GET | `/api/fitness/exercise_overrides` | 列所有 override(看哪些已调整)|
+
+**AI 调用全异步(关页面不丢)**:点 🤖 调整计划/分析 → POST 拿 job_id →
+右下角药丸「正在生成…(可关页面)」转圈 → AI 在服务器 daemon 线程跑,结果落
+`fitness_ai_job` → 前端轮询(4s),done → 药丸「✓ 就绪 · 点击查看」打开 modal。
+刷新/换设备 restoreAiJobs()(localStorage + /ai/jobs)续接。dedup 同
+(kind,day_id) 不重复跑。参照 qa_browser card-update job 模式。
 
 ### 设置
 
@@ -285,6 +295,18 @@ log 页每动作展开:
 成本:`latest_long` enhanced $0.024/min。赠金 ¥47867 ≈ **跑 4700 小时视频**。
 
 ---
+
+## 成熟 app 化 UX(参照 Hevy/Strong,2026-05-31)
+
+- **首页推荐练哪天**:home() 取每 plan day 最近训练日期,选「最久没练/没练过」
+  的那天高亮 +「今天」角标 + 每按钮显示上次日期(PPL 自然轮转)。
+- **每组幽灵值 + 预填全部组**:set-row 加 `.prev-ghost` 显示上次该组 `10kg×8`;
+  loadRec 用 last_sets 预填全部 5 组(推荐重量×目标 reps,非只第 1 组)。
+- **PR 检测 + 庆祝**:后端 `_exercise_pr`(最大重量 / Epley 估 1RM,排除今天);
+  saveSet 后 `checkPR` 破纪录 → 行高亮 + 🏆 角标 + 顶部绿 toast + 振动;本地累进
+  更新避免同次重复报。
+- **历史页进度曲线**:history.html 选单动作 → 纯 SVG 折线(无外部依赖),
+  顶组重量 / 估1RM / 总容量 三指标可切,带刻度/日期/涨跌幅。
 
 ## 训练 log 页核心交互
 
