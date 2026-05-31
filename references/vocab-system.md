@@ -548,7 +548,7 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 
 **母语例句** Tanaka 语料库（EDRDG 免费）：
 - `scripts/vocab/build_tanaka_index.py` 下 `examples.utf`（14.7 万日英句对，B 行标注词条）→ SQLite `data/tanaka.db`（句子表 + 词→句索引，`~` 标优质例句）。
-- `tanaka_examples(word, limit)` 离线查母语例句；`translate_sentences(sents)` AI 批量翻中文、**按句永久缓存**（`jasent-*.json`，同句跨词复用）；`jp_examples_zh(word, translate=False)` 组装 [{ja, zh, en}]，读路径只用缓存翻译、未翻回退英文。
+- `tanaka_examples(word, limit)` 离线查母语例句；`translate_sentences(sents)` 批量翻中文（**Google Cloud Translation 批量优先、AI 兜底**，2026-05-31 起；原纯 AI 慢）、**按句永久缓存**（`jasent-*.json`，同句跨词复用）；`jp_examples_zh(word, translate=False)` 组装 [{ja, zh, en}]，读路径只用缓存翻译、未翻回退英文。
 - `lookup_jp` 自带例句为空时自动挂 Tanaka 例句。
 - 预建：`scripts/vocab/prebuild_jp_examples.py <pdf>|--all-cached` 批量预翻全书例句（73% 词能匹配到母语例句）。
 

@@ -513,6 +513,25 @@ def translate_sentences(sentences: list[str], model: str = "sonnet") -> dict:
             todo.append(ja)
     if not todo:
         return out
+    # 1) Google Cloud Translation 批量优先(快~0.3s/块、走 GCP 赠金、JA→ZH 质量够用)
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from translate import gtranslate_batch
+        gres = gtranslate_batch(todo) or []
+        remaining = []
+        for ja, zh in zip(todo, gres):
+            zh = (zh or "").strip()
+            if zh:
+                out[ja] = zh
+                _cache_save("jasent", ja, {"ja": ja, "zh": zh, "src": "google"})
+            else:
+                remaining.append(ja)
+        todo = remaining
+    except Exception:
+        pass
+    if not todo:
+        return out
+    # 2) AI 兜底(Google 没 key/没翻到的)
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
         from ai_client import ask
