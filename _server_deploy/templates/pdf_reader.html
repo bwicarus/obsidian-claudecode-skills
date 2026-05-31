@@ -395,6 +395,14 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #result-content .jp-ai-btn{margin-top:14px;width:100%;background:#1a2748;border:1px solid #3b6db5;color:#a8cdff;border-radius:8px;padding:9px;cursor:pointer;font-size:13px}
 #result-content .jp-ai-btn:disabled{opacity:.6}
 #result-content .jp-ai-out{margin-top:10px;color:#cfe6ff;line-height:1.7}
+/* 页码 scrubber + 拖动预览 */
+#page-scrub{cursor:ew-resize;user-select:none;-webkit-user-select:none;touch-action:none;padding:2px 4px;display:inline-flex;align-items:baseline;gap:2px;border-radius:5px}
+#page-scrub:active{background:#1a2540}
+#page-scrub #page-cur{color:#cfe6ff;font-variant-numeric:tabular-nums;min-width:1.5em;text-align:right}
+#page-scrub-pop{display:none;position:fixed;left:50%;top:64px;transform:translateX(-50%);z-index:240;background:#10162a;border:1px solid #3b6db5;border-radius:12px;padding:12px 18px;box-shadow:0 8px 28px rgba(0,0,0,.6);flex-direction:column;align-items:center;gap:8px;pointer-events:none;min-width:200px}
+#page-scrub-pop .psp-num{color:#dff1ff;font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+#page-scrub-pop .psp-track{width:180px;height:4px;background:#243049;border-radius:2px;overflow:hidden}
+#page-scrub-pop .psp-fill{height:100%;background:#6fd3ff;width:0%}
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
 #word-pop .wp-def:hover{background:#162045}
@@ -465,8 +473,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <h1>{{ file_name }}</h1>
     <button id="mode-toggle" onclick="toggleReadMode()" title="切换 单页 / 连续滚动">📄 单页</button>
     <button onclick="changePage(-1)" title="上一页">◀</button>
-    <input type="number" id="page-input" value="{{ page }}" min="1" onchange="goToPage(this.value)">
-    <span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span>
+    <span id="page-scrub" title="左右拖动快速跳页 · 点击输入页码"><b id="page-cur">{{ page }}</b><span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span></span>
     <button onclick="changePage(1)" title="下一页">▶</button>
     <button onclick="zoomChange(0.1)">＋</button>
     <button onclick="zoomChange(-0.1)">－</button>
@@ -508,6 +515,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
       </div>
       <div id="pdf-loading-hint" class="dim" style="font-size:12px;color:#7d8590;"></div>
     </div>
+    <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
     <div id="page-container"></div>
     <div id="sel-toolbar">
       <div id="hl-color-picker"><span class="lbl">🖌</span></div>
@@ -969,7 +977,7 @@ async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
   currentPage = num;
-  document.getElementById('page-input').value = num;
+  { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
   if (readMode === 'continuous') {
     // 连续模式：滚到对应页占位 + 立即渲染目标页(别等 IO,跳页/翻页不卡)
     const ph = document.querySelector(`[data-page-num="${num}"]`);
@@ -1187,6 +1195,51 @@ window.goToPage = async (n) => {
   await renderPage(n);
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
+// 页码 scrubber:左右拖动快速跳页(全宽≈整本),实时预览;点击(没拖)→ 输入页码
+function _setupPageScrub() {
+  const el = document.getElementById('page-scrub');
+  const pop = document.getElementById('page-scrub-pop');
+  if (!el || !pop) return;
+  let st = null;
+  const numEl = () => pop.querySelector('.psp-num');
+  const fillEl = () => pop.querySelector('.psp-fill');
+  el.addEventListener('pointerdown', (e) => {
+    if (!pdfDoc) return;
+    st = {x: e.clientX, p: currentPage, total: pdfDoc.numPages, moved: false, tgt: currentPage};
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!st) return;
+    const dx = e.clientX - st.x;
+    if (Math.abs(dx) > 4) st.moved = true;
+    if (!st.moved) return;
+    const w = Math.max(220, (document.getElementById('main')?.clientWidth || window.innerWidth) * 0.7);
+    let tgt = Math.round(st.p + dx / w * st.total);
+    tgt = Math.max(1, Math.min(st.total, tgt));
+    st.tgt = tgt;
+    pop.style.display = 'flex';
+    numEl().textContent = tgt + ' / ' + st.total;
+    fillEl().style.width = (tgt / st.total * 100) + '%';
+    const pc = document.getElementById('page-cur'); if (pc) pc.textContent = tgt;
+    e.preventDefault();
+  });
+  const end = () => {
+    if (!st) return;
+    const s = st; st = null;
+    pop.style.display = 'none';
+    if (s.moved) { goToPage(s.tgt); }
+    else {
+      const n = prompt('跳到第几页 (1-' + s.total + ')', currentPage);
+      const v = parseInt(n);
+      if (v) goToPage(Math.max(1, Math.min(s.total, v)));
+      else { const pc = document.getElementById('page-cur'); if (pc) pc.textContent = currentPage; }
+    }
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', () => { st = null; pop.style.display = 'none'; });
+}
+window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(0.6, Math.min(_scaleMax, scale + delta));
   if (readMode === 'continuous') await setupContinuousMode();
@@ -1608,7 +1661,7 @@ function _onContinuousScroll() {
         const num = parseInt(w.dataset.pageNum);
         if (num !== currentPage) {
           currentPage = num;
-          document.getElementById('page-input').value = num;
+          { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
           // 同步 URL + 拉 KG 节点
           const u = new URL(location.href);
           u.searchParams.set('page', num);
