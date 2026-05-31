@@ -153,27 +153,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-26T04:00:02+09:00",
+    "checked_at": "2026-06-01T01:00:15+09:00",
     "total": 8,
     "new": 0,
-    "learning": 1,
-    "review": 7,
+    "learning": 0,
+    "review": 8,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9227961974700905,
-    "retention_min": 0.4,
-    "mastery_avg": 0.39411174090714846,
-    "mastery_min": 0.25,
-    "reps_total": 37,
+    "retention_avg": 0.980870769067808,
+    "retention_min": 0.9486851959012623,
+    "mastery_avg": 0.4103243150432606,
+    "mastery_min": 0.3829618625269877,
+    "reps_total": 43,
     "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-26T04:00:02+09:00",
-    "score": 0.1632,
-    "activation": 0.519,
-    "importance": 0.519,
-    "weakness": 0.6059,
+    "computed_at": "2026-06-01T01:00:16+09:00",
+    "score": 0.1778,
+    "activation": 0.548,
+    "importance": 0.5502,
+    "weakness": 0.5897,
     "formula": "(1-M) * activation * importance"
   }
 }

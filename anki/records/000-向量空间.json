@@ -8,8 +8,8 @@
   "reason": "本节给出向量空间的正式定义，包含加法、标量乘法以及八条公理，是后续所有线性代数内容的根基，需要精确复述。同时强调了'满足封闭性的集合不一定是向量空间'这一易混点，值得制卡。",
   "warnings": [],
   "section_hashes": {
-    "": "6176d9f951edc006",
-    "基本定义": "ced489049b9e8c02",
+    "": "dba96ae9c5cf3b65",
+    "基本定义": "ba107facc292f012",
     "加法恒等元，加法逆元的唯一性": "b3d4cdce52479cd9",
     "其他论证": "22c71cf6b1ec0349",
     "相关笔记": "db9b6c09e8d67c48"
@@ -141,7 +141,8 @@
         "向量空间"
       ],
       "anki_note_id": 1779683536895,
-      "status": "synced"
+      "status": "deleted_by_qa",
+      "_qa_deleted": "2026-05-26T13:54:40.901171"
     },
     {
       "local_id": "20260525133216-002",
@@ -181,8 +182,8 @@
       "type": "cloze",
       "deck": "数学::线性代数",
       "front": "",
-      "back": "可结合性同时包含 \\((a+b)+c = a+(b+c)\\) 与 \\((\\lambda\\mu)b = \\lambda(\\mu b)\\)；分配性质包含 \\(\\lambda(a+b) = \\lambda a + \\lambda b\\) 与 \\((\\lambda+\\mu)b = \\lambda b + \\mu b\\)。",
-      "text": "向量空间的八条公理：{{c1::可交换性}}、{{c2::可结合性}}、{{c3::加法恒等元}}、{{c4::加法逆元}}、{{c5::乘法恒等元}}、{{c6::分配性质}}。",
+      "back": "",
+      "text": "向量空间的公理——根据数学含义辨认它的名称：\\(a+b=b+a\\) 是 {{c1::可交换性}}；\\((a+b)+c=a+(b+c)\\) 与 \\((\\lambda\\mu)b=\\lambda(\\mu b)\\) 是 {{c2::可结合性}}；存在 \\(0\\) 使得 \\(b+0=b\\) 是 {{c3::加法恒等元}}；每个 \\(b\\) 都有 \\(c\\) 使得 \\(b+c=0\\) 是 {{c4::加法逆元}}；\\(1b=b\\) 是 {{c5::乘法恒等元}}；\\(\\lambda(a+b)=\\lambda a+\\lambda b\\) 与 \\((\\lambda+\\mu)b=\\lambda b+\\mu b\\) 是 {{c6::分配性质}}。",
       "reason": "向量空间公理列表是必须主动回忆的核心条件，挖空考查能否完整列出。",
       "tags": [
         "数学",
@@ -190,7 +191,22 @@
         "向量空间"
       ],
       "anki_note_id": 1779683537044,
-      "status": "synced"
+      "status": "synced",
+      "_refresh": {
+        "count": 1,
+        "history": [
+          {
+            "ts": "2026-05-29T01:00:36+09:00",
+            "stage": "L1",
+            "front": "",
+            "back": "可结合性同时包含 \\((a+b)+c = a+(b+c)\\) 与 \\((\\lambda\\mu)b = \\lambda(\\mu b)\\)；分配性质包含 \\(\\lambda(a+b) = \\lambda a + \\lambda b\\) 与 \\((\\lambda+\\mu)b = \\lambda b + \\mu b\\)。",
+            "text": "向量空间的八条公理：{{c1::可交换性}}、{{c2::可结合性}}、{{c3::加法恒等元}}、{{c4::加法逆元}}、{{c5::乘法恒等元}}、{{c6::分配性质}}。"
+          }
+        ],
+        "last_ts": "2026-05-29T01:00:37+09:00",
+        "lapses_at": 0,
+        "stage": "L1"
+      }
     },
     {
       "local_id": "20260525133216-005",
@@ -271,30 +287,62 @@
       ],
       "anki_note_id": 1779683537319,
       "status": "synced"
+    },
+    {
+      "local_id": "20260526135440-001",
+      "type": "basic",
+      "deck": "数学::线性代数",
+      "front": "集合 \\(V\\) 上的加法（addition）定义是什么？",
+      "back": "加法是一个函数 \\(+: V \\times V \\to V\\)，即每一对 \\(a, b \\in V\\) 都映到唯一的 \\(a+b \\in V\\)。\n\n这个写法一次性表达三件事：\n\n（1）**全域性（totality）**：任何两个 \\(V\\) 中元素都能相加；\n\n（2）**单值性（well-definedness）**：相加的结果唯一确定；\n\n（3）**封闭性（closure）**：相加的结果仍属于 \\(V\\)（由陪域是 \\(V\\) 强制）。",
+      "text": "",
+      "reason": "原卡只说『加法是函数』，但没点破这个写法到底打包了什么。补上三条性质的对应，让『为什么用函数定义』落到具体含义上。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779771280847,
+      "status": "synced",
+      "_qa_from": "20260525133216-001",
+      "_qa_created": "2026-05-26T13:54:40.854950"
+    },
+    {
+      "local_id": "20260526135440-002",
+      "type": "cloze",
+      "deck": "数学::线性代数",
+      "front": "",
+      "back": "",
+      "text": "加法定义 \\(+: V \\times V \\to V\\) 同时表达三件事：\n\n- {{c1::全域性}}：任何两个 \\(V\\) 中元素都能相加；\n- {{c2::单值性}}：相加的结果唯一确定；\n- {{c3::封闭性}}：相加的结果仍属于 \\(V\\)（由陪域是 \\(V\\) 强制）。",
+      "reason": "把三条性质做成 cloze，分别从『名称』方向回忆，强化对这三件事的拆分记忆。",
+      "tags": [
+        "qa_improved"
+      ],
+      "anki_note_id": 1779771280878,
+      "status": "synced",
+      "_qa_from": "20260525133216-001",
+      "_qa_created": "2026-05-26T13:54:40.880697"
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-26T04:00:02+09:00",
-    "total": 21,
-    "new": 15,
-    "learning": 0,
-    "review": 6,
+    "checked_at": "2026-06-01T01:00:15+09:00",
+    "total": 24,
+    "new": 10,
+    "learning": 1,
+    "review": 13,
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.2854173369500769,
+    "retention_avg": 0.5395152617837043,
     "retention_min": 0.0,
-    "mastery_avg": 0.12000948267567603,
+    "mastery_avg": 0.2273623083963301,
     "mastery_min": 0.0,
-    "reps_total": 30,
+    "reps_total": 55,
     "lapses_total": 1
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-26T04:00:02+09:00",
-    "score": 0.88,
+    "computed_at": "2026-06-01T01:00:16+09:00",
+    "score": 0.7726,
     "activation": 1.0,
     "importance": 1.0,
-    "weakness": 0.88,
+    "weakness": 0.7726,
     "formula": "(1-M) * activation * importance"
   }
 }

@@ -339,6 +339,10 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 /* 必须覆盖 #main canvas{background:#fff} —— 否则墨迹层变白底盖住整个 PDF */
 .ink-layer{position:absolute;inset:0;z-index:7;pointer-events:none;background:transparent !important;box-shadow:none !important;margin:0 !important}
 body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（手指只滚动/双击切工具，不画）*/
+/* 振假名/音标叠加层：z-index 8 在所有层之上但 pointer-events:none → 点击穿透到 char-layer 选词 */
+.ruby-layer{position:absolute;inset:0;z-index:8;pointer-events:none}
+.ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:1.05;white-space:nowrap;text-align:center;background:rgba(255,255,255,.78);border-radius:2px;padding:0 1px;overflow:hidden;text-overflow:clip}
+#ruby-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
@@ -479,6 +483,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="zoomChange(-0.1)">－</button>
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
     <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
+    <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <!-- 本书语言选择 -->
@@ -950,6 +955,7 @@ async function loadPdf() {
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+    { const rb = document.getElementById('ruby-toggle'); if (rb) rb.classList.toggle('active', _rubyEnabled()); }   // 振假名按钮恢复上次开关态
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
     loadAllHighlights();
     if (window._inkLoadAll) window._inkLoadAll();   // 手写墨迹：拉一次，渲染完页面再贴
@@ -1767,6 +1773,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__vocabSentences = d.vocab_sentences || [];
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
   try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+  // 振假名/音标叠加（后端 page-chars 已返回 furigana：日语 unidic 读音 + 英文 ECDICT 音标）
+  wrap.__furigana = d.furigana || [];
+  try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
 }
 
 // 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
@@ -1825,6 +1834,51 @@ function _vocabUnderlineEnabled() {
   const v = localStorage.getItem('pdf-vocab-underline');
   return v === null ? true : (v === '1');
 }
+
+// ──────── 振假名 / 音标叠加（ruby） ────────
+function _rubyEnabled() { return localStorage.getItem('pdf-ruby') === '1'; }   // 默认关
+function renderRubyLayer(pw) {
+  let layer = pw.querySelector('.ruby-layer');
+  if (!_rubyEnabled()) { if (layer) layer.remove(); return; }
+  const items = pw.__furigana || [];
+  if (!layer) { layer = document.createElement('div'); layer.className = 'ruby-layer'; pw.appendChild(layer); }
+  layer.innerHTML = '';
+  if (!items.length) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth;
+  const cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW;
+  const pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  for (const it of items) {
+    const rt = it.rt || ''; if (!rt) continue;
+    const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
+    const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
+    // 字号：取词高一半，但不超过「词宽 / 读音字数」使读音横向不溢出原词
+    const fs = Math.max(7, Math.min(h * 0.52, w / Math.max(1, rt.length) * 1.75));
+    const sp = document.createElement('span');
+    sp.className = 'rt';
+    sp.textContent = rt;
+    sp.style.left = x0 + 'px';
+    sp.style.width = w + 'px';
+    sp.style.fontSize = fs.toFixed(1) + 'px';
+    sp.style.top = Math.max(0, y0 - fs * 1.2 - 1) + 'px';   // 词正上方，顶行不出负坐标
+    layer.appendChild(sp);
+  }
+}
+function refreshRubyAllPages() {
+  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
+    try { renderRubyLayer(pw); } catch (_) {}
+  });
+}
+window.toggleRuby = () => {
+  const on = !_rubyEnabled();
+  try { localStorage.setItem('pdf-ruby', on ? '1' : '0'); } catch (_) {}
+  const b = document.getElementById('ruby-toggle');
+  if (b) b.classList.toggle('active', on);
+  refreshRubyAllPages();
+};
 
 // 乐观下划线：查词 ECDICT 秒回 lemma+forms 后，立刻在所在页把这些词形画上下划线(橙=new)，
 // 不等后台笔记生成 + refresh。后续真实 refresh 会用真实 mastery 颜色覆盖。

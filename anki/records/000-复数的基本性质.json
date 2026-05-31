@@ -82,7 +82,7 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-26T04:00:02+09:00",
+    "checked_at": "2026-06-01T01:00:15+09:00",
     "total": 4,
     "new": 0,
     "learning": 0,
@@ -90,19 +90,19 @@
     "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.9991829612330877,
-    "retention_min": 0.9988054197602261,
-    "mastery_avg": 0.4273806783180213,
-    "mastery_min": 0.42115872019350586,
-    "reps_total": 16,
+    "retention_avg": 0.9938764330852365,
+    "retention_min": 0.9904678976492064,
+    "mastery_avg": 0.4368266002130967,
+    "mastery_min": 0.4176431003616621,
+    "reps_total": 17,
     "lapses_total": 0
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-26T04:00:02+09:00",
-    "score": 0.2947,
-    "activation": 0.7174,
-    "importance": 0.7173,
-    "weakness": 0.5726,
+    "computed_at": "2026-06-01T01:00:16+09:00",
+    "score": 0.2771,
+    "activation": 0.7087,
+    "importance": 0.6942,
+    "weakness": 0.5632,
     "formula": "(1-M) * activation * importance"
   }
 }

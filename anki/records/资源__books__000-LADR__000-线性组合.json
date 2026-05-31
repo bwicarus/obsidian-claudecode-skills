@@ -133,8 +133,8 @@
       "local_id": "20260507130551-003",
       "type": "basic",
       "deck": "数学::线性代数",
-      "front": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 与包含 \\(b_1,\\dots,b_N\\) 的子空间之间有什么最小性关系？",
-      "back": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 是包含 \\(b_1,\\dots,b_N\\) 的最小子空间；任何包含这些向量的子空间都必然包含它们的所有线性组合，因而包含 \\(\\operatorname{span}(b_1,\\dots,b_N)\\)。",
+      "front": "设 \\(U\\) 是 \\(V\\) 的子空间且 \\(b_1,\\dots,b_N\\in U\\)。能由此得出 \\(U\\) 与 \\(\\operatorname{span}(b_1,\\dots,b_N)\\) 之间什么包含关系？这反过来说明了 \\(\\operatorname{span}(b_1,\\dots,b_N)\\) 在所有包含 \\(b_1,\\dots,b_N\\) 的子空间中的什么地位？",
+      "back": "必有 \\(\\operatorname{span}(b_1,\\dots,b_N)\\subseteq U\\)：因为 \\(U\\) 对加法和数乘封闭，所以 \\(U\\) 必包含 \\(b_1,\\dots,b_N\\) 的一切线性组合 \\(a_1b_1+\\dots+a_Nb_N\\)，也就是包含整个 \\(\\operatorname{span}(b_1,\\dots,b_N)\\)。由此可知，任何包含 \\(b_1,\\dots,b_N\\) 的子空间都'装得下' \\(\\operatorname{span}(b_1,\\dots,b_N)\\)，所以 \\(\\operatorname{span}(b_1,\\dots,b_N)\\) 是包含这些向量的最小子空间。",
       "text": "",
       "reason": "常用判定性事实, 证明子空间包含关系和生成空间时会直接使用。",
       "tags": [
@@ -144,7 +144,22 @@
         "子空间"
       ],
       "anki_note_id": 1778126751551,
-      "status": "synced"
+      "status": "synced",
+      "_refresh": {
+        "count": 1,
+        "history": [
+          {
+            "ts": "2026-05-27T01:00:32+09:00",
+            "stage": "L1",
+            "front": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 与包含 \\(b_1,\\dots,b_N\\) 的子空间之间有什么最小性关系？",
+            "back": "\\(\\operatorname{span}(b_1,\\dots,b_N)\\) 是包含 \\(b_1,\\dots,b_N\\) 的最小子空间；任何包含这些向量的子空间都必然包含它们的所有线性组合，因而包含 \\(\\operatorname{span}(b_1,\\dots,b_N)\\)。",
+            "text": ""
+          }
+        ],
+        "last_ts": "2026-05-27T01:00:32+09:00",
+        "lapses_at": 2,
+        "stage": "L1"
+      }
     },
     {
       "local_id": "20260507130551-004",
@@ -228,27 +243,27 @@
     }
   ],
   "status_snapshot": {
-    "checked_at": "2026-05-26T04:00:02+09:00",
+    "checked_at": "2026-06-01T01:00:15+09:00",
     "total": 16,
-    "new": 3,
+    "new": 2,
     "learning": 0,
-    "review": 12,
-    "relearning": 1,
+    "review": 14,
+    "relearning": 0,
     "suspended": 0,
     "buried": 0,
-    "retention_avg": 0.7670633507306732,
+    "retention_avg": 0.8529769414333318,
     "retention_min": 0.0,
-    "mastery_avg": 0.325450598699184,
+    "mastery_avg": 0.36127829595743793,
     "mastery_min": 0.0,
-    "reps_total": 59,
-    "lapses_total": 2
+    "reps_total": 70,
+    "lapses_total": 3
   },
   "priority_snapshot": {
-    "computed_at": "2026-05-26T04:00:02+09:00",
-    "score": 0.2866,
-    "activation": 0.6518,
-    "importance": 0.6518,
-    "weakness": 0.6745,
+    "computed_at": "2026-06-01T01:00:16+09:00",
+    "score": 0.3056,
+    "activation": 0.6909,
+    "importance": 0.6927,
+    "weakness": 0.6387,
     "formula": "(1-M) * activation * importance"
   }
 }

@@ -473,10 +473,72 @@ def _is_cjk_char(c: str) -> bool:
            (0xF900 <= o <= 0xFAFF) or (0xFF00 <= o <= 0xFFEF)
 
 
+def _kata_to_hira(s: str) -> str:
+    """片假名 → 平假名（长音符 ー 等非假名原样保留）。"""
+    out = []
+    for ch in s or "":
+        o = ord(ch)
+        out.append(chr(o - 0x60) if 0x30A1 <= o <= 0x30F6 else ch)
+    return "".join(out)
+
+
+def _is_kanji_ch(c: str) -> bool:
+    if not c:
+        return False
+    o = ord(c[0])
+    return (0x3400 <= o <= 0x4DBF) or (0x4E00 <= o <= 0x9FFF) or (0xF900 <= o <= 0xFAFF)
+
+
+def _is_kana_ch(c: str) -> bool:
+    if not c:
+        return False
+    o = ord(c[0])
+    return (0x3040 <= o <= 0x309F) or (0x30A0 <= o <= 0x30FF)
+
+
+def _furigana_item(surface: str, reading: str, tchars: list) -> dict | None:
+    """为含汉字的 token 生成振假名条目：剥送り仮名(okurigana)后把读音放在汉字核心上方。
+    surface=token 表层, reading=平假名读音, tchars=该 token 的非空格 char dict(顺序对齐 surface)。
+    返回 {x0,y0,x1,y1,rt} (PDF pt 坐标) 或 None(无汉字/读音无效)。"""
+    if not reading or "*" in reading or not tchars:
+        return None
+    if not any(_is_kanji_ch(c) for c in surface):
+        return None   # 纯假名/纯符号 → 不需要振假名
+    core = tchars
+    rt = reading
+    if len(surface) == len(tchars):
+        surf_h = _kata_to_hira(surface)
+        # 剥共同后缀（送り仮名，如 食べる→べる）
+        suf = 0
+        while (suf < len(surf_h) and suf < len(reading)
+               and _is_kana_ch(surface[len(surface) - 1 - suf])
+               and surf_h[len(surf_h) - 1 - suf] == reading[len(reading) - 1 - suf]):
+            suf += 1
+        # 剥共同前缀（少见的前置假名）
+        pre = 0
+        while (pre < len(surf_h) - suf and pre < len(reading) - suf
+               and _is_kana_ch(surface[pre]) and surf_h[pre] == reading[pre]):
+            pre += 1
+        core_surface = surface[pre: len(surface) - suf]
+        core_reading = reading[pre: len(reading) - suf]
+        core_chars = tchars[pre: len(tchars) - suf] if (len(tchars) - suf) > pre else []
+        # 核心全是汉字才贴在核心上方；否则(内部夹假名如 持ち運ぶ)整词读音兜底
+        if core_chars and core_reading and all(_is_kanji_ch(c) for c in core_surface):
+            core, rt = core_chars, core_reading
+    try:
+        x0 = min(c["x0"] for c in core); y0 = min(c["y0"] for c in core)
+        x1 = max(c["x1"] for c in core); y1 = max(c["y1"] for c in core)
+    except (ValueError, KeyError):
+        return None
+    return {"x0": round(x0, 2), "y0": round(y0, 2),
+            "x1": round(x1, 2), "y1": round(y1, 2), "rt": rt}
+
+
 def _apply_jp_tokenize(chars: list, start: int, end: int,
-                       block_i: int, line_i: int) -> None:
+                       block_i: int, line_i: int, furigana_out: list | None = None) -> None:
     """对 CJK 行(含 ≥1 个 CJK 字符)用 fugashi 分词，覆盖区间内 chars 的 w 字段。
     word_id 跟现有英语 _word_id 同格式(block*1e6 + line*1e3 + word_no)。
+    furigana_out 非空时顺带把含汉字 token 的振假名条目 append 进去(读音来自 unidic kana)。
     分词失败/未装 fugashi 静默跳过(前端 w 还是英语 lookup 结果或 -1)。"""
     if end <= start:
         return
@@ -501,18 +563,100 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
             if wlen == 0:
                 continue
             wid = block_i * 1000000 + line_i * 1000 + wn
+            tok_chars = []
             for j in range(wlen):
                 idx = char_ptr + j
                 if 0 <= idx < len(text_chars):
                     text_chars[idx]["w"] = wid
+                    tok_chars.append(text_chars[idx])
+            if furigana_out is not None and tok_chars:
+                reading = ""
+                try:
+                    reading = _kata_to_hira(getattr(w.feature, "kana", "") or "")
+                except Exception:
+                    reading = ""
+                item = _furigana_item(surf, reading, tok_chars)
+                if item:
+                    furigana_out.append(item)
             char_ptr += wlen
     except Exception as ex:
         sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
 
 
+def _build_en_furigana(chars: list) -> list:
+    """英文词音标叠加：把连续字母 char 拼成词，单连接直查 ECDICT phonetic（不做 lemma/LIKE，
+    避免逐词全表扫描）。返回 [{x0,y0,x1,y1,rt}]（rt = IPA，无斜杠）。"""
+    import sqlite3
+    db = _DICT_DB_PATH
+    if not db.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except Exception:
+        return []
+    cur = conn.cursor()
+    phon_cache: dict = {}
+
+    def _phon(word: str) -> str:
+        key = word.lower()
+        if key in phon_cache:
+            return phon_cache[key]
+        p = ""
+        try:
+            cur.execute("SELECT phonetic FROM stardict WHERE word=? COLLATE NOCASE LIMIT 1", (key,))
+            r = cur.fetchone()
+            if r and r[0]:
+                p = r[0].strip()
+        except Exception:
+            p = ""
+        phon_cache[key] = p
+        return p
+
+    out: list = []
+    cur_chars: list = []
+
+    def _flush():
+        if len(cur_chars) >= 2:
+            word = "".join(c["c"] for c in cur_chars)
+            if word.isascii() and any(ch.isalpha() for ch in word):
+                p = _phon(word)
+                if p:
+                    try:
+                        x0 = min(c["x0"] for c in cur_chars); y0 = min(c["y0"] for c in cur_chars)
+                        x1 = max(c["x1"] for c in cur_chars); y1 = max(c["y1"] for c in cur_chars)
+                        out.append({"x0": round(x0, 2), "y0": round(y0, 2),
+                                    "x1": round(x1, 2), "y1": round(y1, 2), "rt": p})
+                    except (ValueError, KeyError):
+                        pass
+        cur_chars.clear()
+
+    prev = None
+    for ch in chars:
+        c = ch.get("c", "")
+        # 跨行/跨大间距断词（同 _build_vocab_marks 逻辑的简化版）
+        if prev and not prev.get("sp") and not ch.get("sp") and cur_chars:
+            ph = max(0.1, prev["y1"] - prev["y0"])
+            if abs(ch["y0"] - prev["y0"]) > ph * 0.5:
+                _flush()
+        if ch.get("sp"):
+            _flush()
+        elif (c.isascii() and c.isalpha()) or c in "'-":
+            cur_chars.append(ch)
+        else:
+            _flush()
+        prev = ch
+    _flush()
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return out
+
+
 def _compute_page_chars(abs_path, page: int):
     """提取该页所有字符 bbox + 词 id(rawdict + PyMuPDF words + fugashi 分词)。
-    只依赖 (文件内容, 页码) → 可缓存。返回 (chars, page_w, page_h) 或 None(越界)。"""
+    只依赖 (文件内容, 页码) → 可缓存。返回 (chars, page_w, page_h, furigana) 或 None(越界)。
+    furigana = 振假名/音标叠加条目(日语 unidic 读音 + 英文 ECDICT 音标)。"""
     import fitz
     doc = fitz.open(str(abs_path))
     try:
@@ -533,6 +677,7 @@ def _compute_page_chars(abs_path, page: int):
                     return wid
             return -1
         chars = []
+        furigana: list = []
         for _block_i, block in enumerate(raw.get("blocks", [])):
             if block.get("type", 0) != 0:
                 continue
@@ -557,9 +702,14 @@ def _compute_page_chars(abs_path, page: int):
                             "b": 1 if _bold else 0,
                             "bk": _block_i,
                         })
-                # CJK 行用 fugashi 分词，覆盖前端单击选词用的 word_id 'w'
-                _apply_jp_tokenize(chars, _line_start, len(chars), _block_i, _line_i)
-        return chars, p.rect.width, p.rect.height
+                # CJK 行用 fugashi 分词，覆盖前端单击选词用的 word_id 'w'；顺带收振假名
+                _apply_jp_tokenize(chars, _line_start, len(chars), _block_i, _line_i, furigana)
+        # 英文词音标叠加（单连接直查 ECDICT；日语为主的书几乎无开销）
+        try:
+            furigana.extend(_build_en_furigana(chars))
+        except Exception as ex:
+            sys.stderr.write(f"[furigana en] fail: {ex}\n")
+        return chars, p.rect.width, p.rect.height, furigana
     finally:
         doc.close()
 
@@ -580,20 +730,21 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     if cpath.exists():
         try:
             d = json.loads(cpath.read_text("utf-8"))
-            return d["chars"], d["page_w"], d["page_h"]
+            if "furigana" in d:   # 老缓存无 furigana → 落到重算补上
+                return d["chars"], d["page_w"], d["page_h"], d.get("furigana", [])
         except Exception:
             pass   # 缓存损坏 → 重算
     res = _compute_page_chars(abs_path, page)
     if res is None:
         return None
-    chars, pw, ph = res
+    chars, pw, ph, furigana = res
     try:
         cdir.mkdir(parents=True, exist_ok=True)
-        cpath.write_text(json.dumps({"chars": chars, "page_w": pw, "page_h": ph},
-                                    ensure_ascii=False), "utf-8")
+        cpath.write_text(json.dumps({"chars": chars, "page_w": pw, "page_h": ph,
+                                     "furigana": furigana}, ensure_ascii=False), "utf-8")
     except Exception:
         pass
-    return chars, pw, ph
+    return chars, pw, ph, furigana
 
 
 @bp.route("/api/page-chars")
@@ -616,7 +767,7 @@ def pdf_api_page_chars():
         res = _page_chars_cached(abs_path, rel, page)
         if res is None:
             return jsonify({"ok": False, "error": "page out of range"}), 400
-        chars, page_w, page_h = res
+        chars, page_w, page_h, furigana = res
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
         vocab_marks = _build_vocab_marks(chars)
         sentences = _build_unmastered_sentences(chars, page_h=page_h)
@@ -633,6 +784,7 @@ def pdf_api_page_chars():
             "page_h": page_h,
             "vocab_marks": vocab_marks,
             "vocab_sentences": sentences,
+            "furigana": furigana,
         })
         # 动态数据绝不缓存:之前无 Cache-Control,iOS Safari 启发式缓存了旧版(分词上线前
         # 每字 w 各自独立)→ 整页单字。no-store 杜绝;前端再加 ?v=mtime 换 cache key 立即生效。
