@@ -2046,49 +2046,54 @@ function toggleSentenceOverlay(layer, s, btn, sx, sy) {
 }
 
 function _drawSentenceOverlay(layer, s, btn, sx, sy) {
-  // 整句一个白盒,中文**自然流排**(标点跟句子走,不按行硬切 → 不再错位/标点错开),
-  // **字号 = 原文字符高**(跟原句一致),行高 = 原文行距 → 中文逐行落在原文行上。
+  // 逐行盒子(每行=原文那行的精确 rect 位置/宽度),中文**贪心自然填充**:
+  // 填满一行换下一行(像正常文字排版,标点跟着走、不躲逗号、不强行平均切),
+  // **字号 = 原文字符高**(跟原句一致)。→ 中文严格落在原句每行位置上、该分行就分行。
   const rects = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
   const zh = (s.zh || '').trim();
   if (!rects.length || !zh) return;
   layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
-  let minL = rects[0][0], minT = rects[0][1], maxR = rects[0][2], maxB = rects[0][3];
-  for (const r of rects) {
-    minL = Math.min(minL, r[0]); minT = Math.min(minT, r[1]);
-    maxR = Math.max(maxR, r[2]); maxB = Math.max(maxB, r[3]);
-  }
-  const charH = (rects[0][3] - rects[0][1]) * sy;                 // 原文字符高 ≈ 字号
-  const fontPx = Math.max(9, Math.round(charH * 0.95));           // 与原句一致
-  const pitch = (rects.length >= 2) ? (rects[1][1] - rects[0][1]) * sy : charH * 1.5;
-  const ov = document.createElement('div');
-  ov.className = 'vocab-sentence-overlay';
-  ov.dataset.active = '1';
-  ov.dataset.sentText = s.text;
-  if (s.__stroke) {
-    ov.style.setProperty('--sent-stroke', s.__stroke);
-    ov.style.setProperty('--sent-hatch',
-      `repeating-linear-gradient(135deg, ${s.__stroke}33 0 1.2px, transparent 1.2px 4px)`);
-  }
-  if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
-  ov.style.left = (minL * sx) + 'px';
-  ov.style.top = (minT * sy) + 'px';
-  ov.style.width = ((maxR - minL) * sx) + 'px';
-  ov.style.height = ((maxB - minT) * sy) + 'px';
-  ov.style.fontSize = fontPx + 'px';
-  ov.style.lineHeight = pitch + 'px';
-  ov.style.whiteSpace = 'normal';
-  ov.style.wordBreak = 'break-word';
-  ov.style.textAlign = 'left';
-  ov.style.paddingLeft = '2px';
-  ov.textContent = zh;
-  ov.addEventListener('click', (e) => {
-    e.stopPropagation();
-    layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
-    btn.classList.remove('active');
+  const charH = (rects[0][3] - rects[0][1]) * sy;
+  const fontPx = Math.max(9, Math.round(charH * 0.95));   // 与原句字符一致
+  const cps = Array.from(zh);                              // 按码点切
+  const N = cps.length;
+  let idx = 0;
+  rects.forEach((r, i) => {
+    const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
+    const cap = Math.max(1, Math.floor(w / fontPx));       // 该行能放几个汉字(≈方块宽=字号)
+    const n = (i === rects.length - 1) ? (N - idx)         // 末行收尾(余下全给它)
+      : Math.max(0, Math.min(cap, N - idx));
+    const slice = cps.slice(idx, idx + n).join('');
+    idx += n;
+    const ov = document.createElement('div');
+    ov.className = 'vocab-sentence-overlay';
+    ov.dataset.active = '1';
+    ov.dataset.sentText = s.text;
+    if (s.__stroke) {
+      ov.style.setProperty('--sent-stroke', s.__stroke);
+      ov.style.setProperty('--sent-hatch',
+        `repeating-linear-gradient(135deg, ${s.__stroke}33 0 1.2px, transparent 1.2px 4px)`);
+    }
+    if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
+    ov.style.left = (r[0] * sx) + 'px';                    // 贴该行原文位置(首行从行中间起也对)
+    ov.style.top = (r[1] * sy) + 'px';
+    ov.style.width = w + 'px';
+    ov.style.height = h + 'px';
+    ov.style.fontSize = fontPx + 'px';
+    ov.style.lineHeight = h + 'px';                        // 单行垂直居中
+    ov.style.whiteSpace = 'nowrap';
+    ov.style.textAlign = 'left';
+    ov.style.paddingLeft = '1px';
+    ov.textContent = slice;
+    ov.addEventListener('click', (e) => {
+      e.stopPropagation();
+      layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
+      btn.classList.remove('active');
+    });
+    ov.addEventListener('mousedown', (e) => e.stopPropagation());
+    ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+    layer.appendChild(ov);
   });
-  ov.addEventListener('mousedown', (e) => e.stopPropagation());
-  ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
-  layer.appendChild(ov);
   btn.classList.add('active');
 }
 
