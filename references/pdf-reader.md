@@ -588,8 +588,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 `_expandSentenceFromRange` 原来「跨 rawdict 块就断」。日语 justified 排版把同一视觉行拆成多块（同行的「…解き,」「それら…」），按块断会在**逗号**处截断、到不了句号。改为「**跨块 _且_ 跨视觉行才断**」+ 段落大行距兜底：同行拆块继续到 。，标题/邻段（不同行+不同块）仍断开。真实数据验证：直近那句跨逗号到 。，複/構成 句仍正确排除上方绿色标题。
 
 ### 14.8 多选翻译显示错位 + 自动弹 + 提速
-- **显示错位**：原地白底覆盖 `_drawSentenceOverlay` 把中文塞进按原文日语行切的 clip-path，中日长度/换行不一致必错位溢出。**弃用**，改 `showSentenceTranslation` 干净浮层（锚句首，原文+中文，无对齐问题）；`toggleSentenceOverlay` 与 `onTranslate` 都走它。
-- **自动弹**：翻完直接弹浮层（带译文秒显），不靠手点。
+- **显示（就地覆盖，用户原设计）**：`_drawSentenceOverlay` **逐行白条贴合**——每行原文一个白盒（几何精确贴该行 rect），中文按各行宽度**比例分配**字符填入，**统一字号** = `min(行高×1.05, 总宽/中文长×0.96)`。彻底避开旧版「单段中文流进多行 clip-path」的错位（中日长度/换行不一致 → 短句只填上面几行、不规则行错位）。`toggleSentenceOverlay` 画它（再点同句关闭），`onTranslate` 翻完 `btn.click()` 自动画。中途一度改成 `showSentenceTranslation` 干净浮层，后按用户偏好**改回就地覆盖**（浮层函数保留未用）。
 - **提速** 5s→~1s：见 [`google-cloud-apis.md`](google-cloud-apis.md)（Google Translate 首选、CLI 冷启动/热进程结论、translate.py 两个 guard 坑）。
 
 ### 14.9 日语发音

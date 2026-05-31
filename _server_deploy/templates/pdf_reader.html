@@ -2023,82 +2023,79 @@ function _sentDismiss(s, pw) {
 
 // 在原句位置叠覆盖层显示中文（再次点击或点 overlay 关闭）
 function toggleSentenceOverlay(layer, s, btn, sx, sy) {
-  // 改用干净的译文浮层(锚到句首 L 标记):原地白底覆盖要把中文塞进按原文日语行切的
-  // clip-path 里,中日长度/换行不一致必然错位溢出(已弃用 _drawSentenceOverlay)。
-  const pop = document.getElementById('sent-popover');
-  const open = pop && pop.classList.contains('open');
-  const sameText = open && pop.querySelector('.sent-en')?.textContent === s.text;
-  if (sameText) {   // 再点同一句 → 关闭
-    closeSentPopover();
+  // 就地覆盖(用户原设计):逐行白条贴合原文行,中文按各行宽度比例分配填入。
+  const existing = layer.querySelector('.vocab-sentence-overlay[data-active="1"]');
+  if (existing && existing.dataset.sentText === s.text) {   // 再点同句 → 关
+    layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
     btn.classList.remove('active');
     return;
   }
+  layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
   layer.querySelectorAll('.vocab-sentence-btn-l.active, .vocab-sentence-btn-l-start.active')
     .forEach(b => b.classList.remove('active'));
+  if (s.zh) { _drawSentenceOverlay(layer, s, btn, sx, sy); return; }
+  // 没译过 → 现场翻再画
   btn.classList.add('active');
-  showSentenceTranslation(s.text, btn, s.zh || '');   // 有缓存译文秒显,没有则内部现场翻
+  fetch('/pdf/api/translate-sentence', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text: s.text}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok && d.zh) { s.zh = d.zh; _drawSentenceOverlay(layer, s, btn, sx, sy); }
+    else { btn.classList.remove('active'); _toast?.('翻译失败：' + (d.error || '?')); }
+  }).catch(e => { btn.classList.remove('active'); _toast?.('网络错误：' + e.message); });
 }
 
 function _drawSentenceOverlay(layer, s, btn, sx, sy) {
-  const rects = s.rects || [];
-  if (!rects.length) return;
-  const zh = s.zh || '';
-  if (!zh) return;
-  // union bounding box
-  let bx0 = rects[0][0], by0 = rects[0][1], bx1 = rects[0][2], by1 = rects[0][3];
-  for (const r of rects) {
-    bx0 = Math.min(bx0, r[0]); by0 = Math.min(by0, r[1]);
-    bx1 = Math.max(bx1, r[2]); by1 = Math.max(by1, r[3]);
-  }
-  // 左侧留 8px 边距：overlay box 向左扩 8px，clip-path 内 x 也 +8 偏移，
-  // padding-left:8px 让文字往右挤 8px → 文字位置仍对齐原字符 + 视觉上左边有空隙
-  const PAD_L = 8;
-  const subpaths = rects.map(r => {
-    const x  = ((r[0] - bx0) * sx + PAD_L).toFixed(2);
-    const y  = ((r[1] - by0) * sy).toFixed(2);
-    const x2 = ((r[2] - bx0) * sx + PAD_L).toFixed(2);
-    const y2 = ((r[3] - by0) * sy).toFixed(2);
-    return `M${x} ${y}L${x2} ${y}L${x2} ${y2}L${x} ${y2}Z`;
-  }).join(' ');
-
+  // 逐行贴合白条:每行原文一个白盒(几何精确贴合该行),中文按各行宽度比例分配填入,
+  // 统一字号铺满。避开了"单段中文流进多行 clip-path"的错位(中日长度/换行不一致)。
+  let rects = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
+  const zh = (s.zh || '').trim();
+  if (!rects.length || !zh) return;
+  layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
+  const widths = rects.map(r => (r[2] - r[0]) * sx);
+  const totalW = widths.reduce((a, b) => a + b, 0) || 1;
+  const cps = Array.from(zh);            // 按码点切,别切坏字符
+  const L = cps.length;
   const rectH = (rects[0][3] - rects[0][1]) * sy;
-  const fontPx = Math.max(9, Math.round(rectH * 0.78));
-  let lineHeightPx = rectH;
-  if (rects.length >= 2) lineHeightPx = (rects[1][1] - rects[0][1]) * sy;
-
-  const ov = document.createElement('div');
-  ov.className = 'vocab-sentence-overlay';
-  ov.dataset.active = '1';
-  ov.dataset.sentText = s.text;
-  // 沿用句子颜色：左 4px 实色 stroke + hatch 排线（跟原句框相同的素描风格）
-  if (s.__stroke) {
-    ov.style.setProperty('--sent-stroke', s.__stroke);
-    ov.style.setProperty('--sent-hatch',
-      `repeating-linear-gradient(135deg, ${s.__stroke}33 0 1.2px, transparent 1.2px 4px)`);
-  }
-  if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
-  ov.style.left = (bx0 * sx - PAD_L) + 'px';
-  ov.style.top = (by0 * sy) + 'px';
-  ov.style.width = ((bx1 - bx0) * sx + PAD_L) + 'px';
-  ov.style.height = ((by1 - by0) * sy) + 'px';
-  ov.style.clipPath = `path('${subpaths}')`;
-  ov.style.webkitClipPath = `path('${subpaths}')`;
-  ov.style.fontSize = fontPx + 'px';
-  ov.style.lineHeight = lineHeightPx + 'px';
-  ov.style.paddingLeft = PAD_L + 'px';
-  // 首字符跟原句开头对齐
-  const firstIndent = (rects[0][0] - bx0) * sx;
-  if (firstIndent > 1) ov.style.textIndent = firstIndent + 'px';
-  ov.textContent = zh;
-  ov.addEventListener('click', (e) => {
-    e.stopPropagation();
-    ov.remove();
-    btn.classList.remove('active');
+  // 统一字号:中文要铺满总宽(totalW/L)又不超行高;封顶 1.05×行高,免短句字过大
+  let fontPx = Math.min(rectH * 1.05, (totalW / Math.max(1, L)) * 0.96);
+  fontPx = Math.max(9, fontPx);
+  let idx = 0;
+  rects.forEach((r, i) => {
+    const n = (i === rects.length - 1) ? (L - idx)
+      : Math.max(0, Math.min(L - idx, Math.round(L * widths[i] / totalW)));
+    const slice = cps.slice(idx, idx + n).join('');
+    idx += n;
+    const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
+    const ov = document.createElement('div');
+    ov.className = 'vocab-sentence-overlay';
+    ov.dataset.active = '1';
+    ov.dataset.sentText = s.text;
+    if (s.__stroke) {
+      ov.style.setProperty('--sent-stroke', s.__stroke);
+      ov.style.setProperty('--sent-hatch',
+        `repeating-linear-gradient(135deg, ${s.__stroke}33 0 1.2px, transparent 1.2px 4px)`);
+    }
+    if (s.__fill) ov.style.setProperty('--sent-fill', s.__fill);
+    ov.style.left = (r[0] * sx) + 'px';
+    ov.style.top = (r[1] * sy) + 'px';
+    ov.style.width = w + 'px';
+    ov.style.height = h + 'px';
+    ov.style.fontSize = fontPx + 'px';
+    ov.style.lineHeight = h + 'px';      // 单行垂直居中
+    ov.style.whiteSpace = 'nowrap';
+    ov.style.textAlign = 'left';
+    ov.style.paddingLeft = '2px';
+    ov.textContent = slice;
+    ov.addEventListener('click', (e) => {
+      e.stopPropagation();
+      layer.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());
+      btn.classList.remove('active');
+    });
+    ov.addEventListener('mousedown', (e) => e.stopPropagation());
+    ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
+    layer.appendChild(ov);
   });
-  ov.addEventListener('mousedown', (e) => e.stopPropagation());
-  ov.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true});
-  layer.appendChild(ov);
-  // 字号固定（跟原文一致），不自适应。中文太长则被 clip-path 截掉不显示
   btn.classList.add('active');
 }
 
@@ -5747,10 +5744,10 @@ window.onTranslate = async () => {
     if (d.ok && d.zh) {
       sent.zh = d.zh;
       renderVocabSentences(pw, pw.__vocabSentences);   // 停呼吸
-      setTimeout(() => {   // 翻完自动弹干净译文浮层(锚到句首 L 标记,带上译文秒显)
+      setTimeout(() => {   // 翻完自动画就地覆盖(点句首 L 标记 → toggleSentenceOverlay 逐行贴合)
         const si = pw.__vocabSentences.indexOf(sent);
         const btn = pw.querySelector('.vocab-sentence-btn-l-start[data-sid="' + si + '"]');
-        if (btn) { btn.classList.add('active'); showSentenceTranslation(sent.text, btn, sent.zh); }
+        if (btn) btn.click();
       }, 60);
     } else {
       renderVocabSentences(pw, pw.__vocabSentences);
