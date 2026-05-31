@@ -174,11 +174,40 @@ def _translate_claude(segments: list[dict]) -> bool:
     return any(s.get("zh") for s in segments)
 
 
+def _translate_google(segments: list[dict]) -> bool:
+    """Google Cloud Translation 批量(EN→ZH 快+质量好+走 GCP 赠金)。返回是否翻到。"""
+    try:
+        sys.path.insert(0, "/home/bwicarus/claude/scripts/vocab")
+        from translate import gtranslate_batch
+    except Exception:
+        return False
+    res = gtranslate_batch([s["en"] for s in segments])
+    if not res:
+        return False
+    for s, zh in zip(segments, res):
+        if zh and zh != s["en"]:
+            s["zh"] = zh
+    try:
+        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        from google_api_quota import log_usage
+        log_usage("translate", len(segments), "v2:batch", note=f"{len(segments)} segs")
+    except Exception:
+        pass
+    return any(s.get("zh") for s in segments)
+
+
 def _translate_all(segments: list[dict]) -> list[dict]:
-    """整本字幕一次翻译。优先 Gemini Flash(快+免费 250/天),失败 fallback Claude。"""
+    """整本字幕一次翻译。优先 Google Translate(快+质量好+走赠金),再 Gemini Flash,最后 Claude。"""
     if not segments:
         return segments
-    # 优先 Gemini Flash
+    # 优先 Google Cloud Translation(Gemini 赠金常耗尽 429,Google 走 GCP 赠金更稳)
+    try:
+        if _translate_google(segments):
+            return segments
+        print("[subtitles] Google 翻译未生效,试 Gemini/Claude", file=sys.stderr)
+    except Exception as e:
+        print(f"[subtitles] Google failed ({e}),试 Gemini/Claude", file=sys.stderr)
+    # 其次 Gemini Flash
     if GEMINI_KEY_FILE.exists():
         try:
             key = GEMINI_KEY_FILE.read_text().strip()

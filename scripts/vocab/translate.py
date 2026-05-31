@@ -93,6 +93,42 @@ def _gtranslate(text: str, target: str = "zh-CN") -> str | None:
         return None
 
 
+def gtranslate_batch(texts: list[str], target: str = "zh-CN",
+                     chunk_n: int = 64, chunk_chars: int = 3000) -> list[str] | None:
+    """Google Cloud Translation v2 批量(一次多段,顺序对应)。给视频字幕/例句批量翻译用。
+    返回与 texts 等长的译文列表(空串=空原文或该段失败);整体没 key 返回 None。
+    v2 单请求上限 128 段,这里按段数 + 累计字符数分块。走 GCP 赠金、~0.3s/块。"""
+    key = _gcp_key()
+    if not key:
+        return None
+    tgt = "zh-CN" if target.startswith("zh") else target
+    out = ["" for _ in texts]
+    i = 0
+    while i < len(texts):
+        batch, idxs, cc = [], [], 0
+        while i < len(texts) and len(batch) < chunk_n and cc < chunk_chars:
+            t = (texts[i] or "").strip()
+            if t:
+                batch.append(t); idxs.append(i); cc += len(t) + 1
+            i += 1
+        if not batch:
+            continue
+        params = [("q", t) for t in batch] + [("target", tgt), ("format", "text"), ("key", key)]
+        try:
+            data = urllib.parse.urlencode(params).encode("utf-8")
+            req = urllib.request.Request(
+                "https://translation.googleapis.com/language/translate/v2", data=data)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                d = json.loads(resp.read().decode("utf-8"))
+            trs = (d.get("data") or {}).get("translations") or []
+            for k, idx in enumerate(idxs):
+                if k < len(trs):
+                    out[idx] = (trs[k].get("translatedText", "") or "").strip()
+        except Exception:
+            pass   # 该块失败 → 留空,调用方按空率决定是否回退
+    return out
+
+
 def _deepl(text: str, target: str = "zh-CN") -> str | None:
     key = _cfg().get("deepl_key", "").strip()
     if not key:
