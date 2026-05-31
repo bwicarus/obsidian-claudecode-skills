@@ -3367,9 +3367,13 @@ window.showWordPopover = async (word, ctx) => {
       exHtml +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
-      '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>' +
+      (d.jp
+        ? '<button onclick="_wordPopJpMaster(this)" title="标记已掌握：该词下划线消失">✓ 掌握</button>'
+        : '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>') +
       '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
+    // 日语词：查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
+    if (d.jp) { try { refreshVocabUnderlinesForAllPages(); } catch (_) {} }
   } catch (e) {
     if (myseq !== _wordPopSeq) return;   // 旧请求出错也不覆盖当前词
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
@@ -3405,6 +3409,18 @@ window._wordPopAnki = (btn) => {
   if (btn) { btn.disabled = true; btn.textContent = '🎴 制卡中…'; }
   addVocabAnki(s.lemma);   // dict-quick 已后台触发笔记生成(数据补全)，制卡复用现成接口
   setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 400);
+};
+// 日语小框「✓ 掌握」：标记掌握 → jp-vocab store mastered → 下划线消失
+window._wordPopJpMaster = (btn) => {
+  const s = _wordPopState; if (!s) return;
+  const w = s.lemma || s.word;   // dict-quick 对日语返回 lemma=原始表层(=store 键)
+  if (btn) { btn.disabled = true; btn.textContent = '✓ 已掌握'; }
+  fetch('/pdf/api/jp-vocab-mark', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({word: w, mark: 'mastered'}),
+  }).then(() => { try { refreshVocabUnderlinesForAllPages(); } catch (_) {} _toast?.('已标记掌握'); })
+    .catch(() => {});
+  setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 350);
 };
 // 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
 window._wordPopGrammar = () => {

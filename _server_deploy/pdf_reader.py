@@ -770,6 +770,7 @@ def pdf_api_page_chars():
         chars, page_w, page_h, furigana = res
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
         vocab_marks = _build_vocab_marks(chars)
+        vocab_marks += _build_jp_vocab_marks(chars)   # 日语生词下划线(查过的 JP 词)
         sentences = _build_unmastered_sentences(chars, page_h=page_h)
         for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
             if ts.get("rects") and ts.get("page", page) == page:
@@ -867,6 +868,99 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
             _flush()
         prev = ch
     _flush()
+    return marks
+
+
+# ── 日语生词 store（state/jp-vocab.json）：查过的 JP 词按熟悉度高亮，镜像英语生词系统 ──
+import threading as _jp_threading
+_JP_VOCAB_PATH = CLAUDE_DIR / "state" / "jp-vocab.json"
+_JP_VOCAB_LOCK = _jp_threading.Lock()
+
+
+def _jp_vocab_load() -> dict:
+    try:
+        return json.loads(_JP_VOCAB_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _jp_vocab_save(d: dict):
+    try:
+        _JP_VOCAB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _JP_VOCAB_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        tmp.replace(_JP_VOCAB_PATH)
+    except Exception:
+        pass
+
+
+def _jp_vocab_bump(word: str):
+    """JP 词被查 → looks+1、刷新 last_ts。已 mastered 的查了也不复活（除非显式取消）。"""
+    import time as _t
+    word = (word or "").strip()
+    if not word:
+        return
+    with _JP_VOCAB_LOCK:
+        d = _jp_vocab_load()
+        e = d.get(word) or {}
+        e["looks"] = int(e.get("looks", 0)) + 1
+        e["last_ts"] = int(_t.time())
+        e.setdefault("first_ts", e["last_ts"])
+        d[word] = e
+        _jp_vocab_save(d)
+
+
+def _jp_vocab_slug(e: dict) -> str | None:
+    """熟悉度 → 颜色 slug（镜像英语 new/seen/known/mastered）。mastered 返回 None（不画）。"""
+    if e.get("mastered"):
+        return None
+    looks = int(e.get("looks", 0))
+    if looks <= 1:
+        return "new"
+    if looks <= 3:
+        return "seen"
+    return "known"
+
+
+def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
+    """按 fugashi 分词的 w 把 chars 分组成 JP token，命中 jp-vocab store(未 mastered) 的画下划线。
+    rects 用 PDF pt 坐标（同英语 marks 的结构），前端 renderVocabUnderlines 直接复用。"""
+    store = _jp_vocab_load()
+    if not store:
+        return []
+    marks: list[dict] = []
+    i = 0
+    n = len(chars)
+    while i < n:
+        c = chars[i]
+        wid = c.get("w", -1)
+        if c.get("sp") or wid is None or wid < 0:
+            i += 1
+            continue
+        # 收集同 w 的连续 token chars
+        j = i
+        toks = []
+        while j < n and chars[j].get("w") == wid and not chars[j].get("sp"):
+            toks.append(chars[j]); j += 1
+        surf = "".join(t.get("c", "") for t in toks)
+        e = store.get(surf)
+        if e:
+            slug = _jp_vocab_slug(e)
+            if slug:
+                # token 合并成同行 rect（一般单行；跨行也按行高聚类）
+                rects = []
+                cur = None
+                for t in toks:
+                    lh = t["y1"] - t["y0"]
+                    if cur and abs(t["y0"] - cur[1]) <= lh * 0.5:
+                        cur[2] = max(cur[2], t["x1"]); cur[1] = min(cur[1], t["y0"]); cur[3] = max(cur[3], t["y1"])
+                    else:
+                        if cur: rects.append([round(x, 2) for x in cur])
+                        cur = [t["x0"], t["y0"], t["x1"], t["y1"]]
+                if cur: rects.append([round(x, 2) for x in cur])
+                marks.append({"word": surf, "lemma": surf, "mastery": 0.0,
+                              "label_slug": slug, "rects": rects, "jp": True})
+        i = j
     return marks
 
 
@@ -1253,9 +1347,10 @@ def pdf_api_page_vocab_marks():
         p = doc[page - 1]
         raw = p.get_text("rawdict")
         chars = []
-        for b in raw.get("blocks", []):
+        for _bi, b in enumerate(raw.get("blocks", [])):
             if b.get("type") != 0: continue
-            for ln in b.get("lines", []):
+            for _li, ln in enumerate(b.get("lines", [])):
+                _ls = len(chars)
                 for sp in ln.get("spans", []):
                     for ch in sp.get("chars", []):
                         bb = ch.get("bbox")
@@ -1268,6 +1363,7 @@ def pdf_api_page_vocab_marks():
                             "x1": round(bb[2],2), "y1": round(bb[3],2),
                             "sp": 1 if c.isspace() else 0,
                         })
+                _apply_jp_tokenize(chars, _ls, len(chars), _bi, _li)   # CJK 行补 w（JP 生词下划线要按词）
         # 强制刷新 vocab_index（防 vocab note 刚写完缓存还旧）
         try:
             import sys as _sys
@@ -1279,6 +1375,7 @@ def pdf_api_page_vocab_marks():
         except Exception:
             pass
         marks = _build_vocab_marks(chars)
+        marks += _build_jp_vocab_marks(chars)   # 日语生词下划线
         sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
         return jsonify({
             "ok": True,
@@ -1599,6 +1696,7 @@ def pdf_api_dict_quick():
             f"· {e.get('ja','')} — {e.get('zh') or e.get('en') or ''}" for e in ex)
         try:
             _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
+            _jp_vocab_bump(word_raw)   # 日语生词高亮：查过即记，按熟悉度上色
         except Exception:
             pass
         # unidic 权威读音 + 声调(ピッチアクセント),离线毫秒级,覆盖 AI 读音
@@ -1674,6 +1772,10 @@ def pdf_api_dict_jp():
     jp = ds.lookup_jp(word, context=request.args.get("context", ""))
     if not jp or (jp.get("zh") in ("(无)", "", None)):
         return jsonify({"ok": False, "word": word, "jp": True})
+    try:
+        _jp_vocab_bump(word)   # 完整字典也算一次「查过」→ 生词高亮
+    except Exception:
+        pass
     ra = {}
     try:
         ra = ds._jp_reading_accent(word) or {}
@@ -1699,6 +1801,29 @@ def pdf_api_dict_jp():
         "examples": exs,
         "kanji": kanji,
     })
+
+
+@bp.route("/api/jp-vocab-mark", methods=["POST"])
+def pdf_api_jp_vocab_mark():
+    """标记日语词「已掌握 / 取消掌握 / 删除记录」→ 控制下划线显隐。
+    body: {word, mark: "mastered"|"unknown"|"forget"}"""
+    data = request.get_json(silent=True) or {}
+    word = (data.get("word") or "").strip()
+    mark = (data.get("mark") or "mastered").strip().lower()
+    if not word:
+        return jsonify({"ok": False, "error": "no word"}), 400
+    import time as _t
+    with _JP_VOCAB_LOCK:
+        d = _jp_vocab_load()
+        if mark == "forget":
+            d.pop(word, None)
+        else:
+            e = d.get(word) or {"looks": 1, "first_ts": int(_t.time())}
+            e["mastered"] = (mark == "mastered")
+            e["last_ts"] = int(_t.time())
+            d[word] = e
+        _jp_vocab_save(d)
+    return jsonify({"ok": True, "word": word, "mark": mark})
 
 
 @bp.route("/api/dict-jp-ai")
