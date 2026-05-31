@@ -50,6 +50,8 @@
 - `references/server-config-schema.md` — `state/server-config.json` 字段完整对照（qa_* / ai_* / anki.* / scheduled_register / weak_card_refresh / card_antimodel / card_quality / card_qa）+ 字段流转图 + 修改方法
 - `references/pdf-reader.md` — 网页 PDF 阅读器完整文档：路由清单（page-chars/translate/explain/dict/highlights CRUD/snippets-to）、char-layer 选中机制（PyMuPDF rawdict）、**高亮编辑系统**（sidecar JSON、4 字段 color/sentence/body/note、no-color 虚框模式、popover 小框规则）、AI 草稿系统、**iOS Mail 风格 swipe-to-delete**（双处实现 + 三个关键 CSS 点）、设置面板、**踩坑总结 17 条**（y 翻转、thenn 空格、popover z-index、TypeError、visibility 隐藏、PATCH 空 color 等）
 - `references/vocab-system.md` — 单词系统完整文档：vault 当数据库（`资源/vocab/<首字母>/<lemma>.md` + `_audio/`）、**三源字典融合**（ECDICT 离线中文+词频 / Free Dictionary 例句+音频备份 / Merriam-Webster Learner's 高质例句+美音音频）、ECDICT exchange 表 lemma 化、MW 富文本 `{bc}/{it}` 剥除、MW 音频 URL 子目录规则、笔记模板（frontmatter + 各源分段 + 文中出现 + 用户备注保留区）、`/pdf/api/dict` 改造（写 lookup 日志 + 后台异步生成笔记）、阶段 A-E 路线 + mastery 算法草稿
+- `references/fitness-system.md` — 健身系统完整文档：多用户 web 训练追踪 + **循证 AI 教练**（Claude **Opus + max effort + 25+ 篇文献**深度思考）、PPL 3 天 20 动作（拉伸位/RIR/MAV 循证）、Double Progression 推荐、autosave + 刷新恢复 + 休息倒计时、🏁 完成训练总结、Nippard + Cavaliere 双频道视频（`MUST_CONTAIN` 关键词过滤）、YT auto-caption + Cloud STT 双源字幕（Gemini Flash 翻译 fallback Claude）、`fitness_exercise_override` AI 调整后落库、`fitness_session_analysis` 反馈环、⚙ 设置面板（model/effort/auto_analyze/auto_suggest）、5 张 per-user 表 schema + 完整 API 清单 + 6 条踩坑
+- `references/google-cloud-apis.md` — GCP API 集成（Vision/YouTube/STT/Gemini）+ ¥47867 Free Trial 赠金管理、双 API key 隔离（`AIzaSy*` GCP 服务 vs `AQ.Ab*` Gemini service-account 绑定）、**计费分流大坑**（Gemini API 走 AI Studio 独立 billing 跟 GCP 赠金不通）、本地配额计数器（`scripts/google_api_quota.py` + SQLite `state/google_api_quota.db`）、YouTube 每日 10k units 硬上限（耗尽走本地 reorder）、PT 重置时区、key regenerate 流程
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）
@@ -239,12 +241,22 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
 | **技能树 / KG** | `https://bwicarus.space/skilltree/<book>/` | 知识图谱可视化页。home 整体永远底层，左侧 focus 叠加面板（紧凑章带，仅 chain 节点）+ 右侧 detail，进页面定位 localStorage 最近学习节点。完整架构 + 关联校验规则（_rejected_links）+ 回收站 见 [`references/skill-tree-system.md`](references/skill-tree-system.md) |
 | **PDF 阅读器** | `https://bwicarus.space/pdf/` | 网页 PDF 阅读器：PDF.js v4 + PyMuPDF char-bbox 选中（绕开 textLayer 偏移）+ AI 翻译/解释/问 AI（SSE 流式 + Markdown + MathJax）+ ECDICT 离线字典（单词秒查不耗 AI）+ **高亮编辑**（sidecar JSON、4 色板互斥激活态、点 cur 色取消颜色保留备注、popover 备注小框单行省略点击展开、iOS Mail 左滑右侧露出 🗑 删除）+ 草稿系统（AI 回答 + 选段 → 笔记/Anki）+ 设置面板（model/effort/debug/颜色管理）+ 右侧抽屉知识点关联。完整文档 + 17 条踩坑见 [`references/pdf-reader.md`](references/pdf-reader.md) |
+| **健身系统** | `https://bwicarus.taile44d0c.ts.net/private/fitness/` | 多用户 web 训练追踪：PPL 3 天 / 20 动作 / 循证训练原则（拉伸位+RIR+MAV）。每动作 Double Progression 推荐 + autosave + 刷新恢复 + 休息倒计时（按 `prescribed.rest_seconds`）。🤖 **循证 AI 教练**（Claude Opus + max effort + 25+ 篇 hypertrophy meta 文献）手动触发调整 prescribed + 完成训练后分析（completion / RPE 估 / verdict / per-exercise next_action / insights / warnings）+ 反馈环（落库 `fitness_session_analysis` 下次 suggest 引用）。视频 carousel 5 Nippard + 5 Cavaliere 双频道（YouTube Data API + `MUST_CONTAIN` 关键词过滤）。字幕双源:YT auto-caption（Gemini Flash 翻译 ~5s）/ Cloud STT 重新转录（高质量 + 烧 GCP 赠金）。⚙ 设置面板可调 model/effort + 自动分析开关。完整架构 + API 清单 + 文献库 + 踩坑见 [`references/fitness-system.md`](references/fitness-system.md) + GCP 集成见 [`references/google-cloud-apis.md`](references/google-cloud-apis.md) |
 
 **控制面板源码**（全部在 git，部署 = 纯 cp）：
 - `_server_deploy/app.py` → 部署到 `/root/webapp/app.py`（含 `/api/nav-links` 路由、`register_control` 导入、`/control` 进 `PROTECTED_PREFIXES` / `NAV_INJECT_PREFIXES`）
 - `_server_deploy/control.py` → 部署到 `/root/webapp/control.py`
 - `_server_deploy/templates/control.html` → 部署到 `/root/webapp/templates/control.html`
 - `_server_deploy/static/nav.js` → 部署到 `/var/www/html/static/nav.js`（全站通用左侧导航 + per-user 链接持久化）
+
+**健身系统源码**（部署见 `references/fitness-system.md`,等价 `cp _server_deploy/{fitness,fitness_coach,youtube_subtitles,youtube_speech}.py /webapp/` + `cp templates/fitness/*.html /webapp/templates/fitness/` + `cp static/fitness-plan.json /webapp/static/` + restart）:
+- `_server_deploy/fitness.py` → Flask blueprint(`/private/fitness/*` 页面 + `/api/fitness/*` API,21 个 endpoint)
+- `_server_deploy/fitness_coach.py` → AI 教练(Claude Opus + max,25+ 篇文献 prompts)
+- `_server_deploy/youtube_subtitles.py` → 字幕拉 + 翻译(Gemini Flash fallback Claude)
+- `_server_deploy/youtube_speech.py` → Cloud Speech-to-Text 转录(yt-dlp + ffmpeg + 并发 4 worker)
+- `_server_deploy/static/fitness-plan.json` → PPL 3 天 20 动作循证 plan
+- `_server_deploy/templates/fitness/{_base,home,log,plan,history}.html` → 模板
+- 相关脚本:`scripts/{upgrade_fitness_plan,add_pullup_exercises,find_jeff_videos,reorder_videos_by_keyword,google_api_quota}.py`
 - `_server_deploy/nginx/bwicarus.conf` → **仅 VPS** 部署到 `/etc/nginx/sites-enabled/default`（含 `/`、`/control`、`/auth`、`/api` 等所有 location 块）。改完 `nginx -t && systemctl restart nginx`（注意：新增 location 块 `reload` 可能不完全生效，要 `restart`）
   - ⚠️ **Pi 实例 nginx 配置独立**：`/etc/nginx/sites-available/bwicarus`（Tailscale HTTPS Cert + 80/443 两 server 块，server_name 是 ts.net），**结构与 git 这份 VPS 版完全不同，绝不可 cp 覆盖**（会冲掉 Tailscale 证书配置全站挂）。Pi 改 nginx 只能手工 patch 该文件对应 server 块，git 这份只代表 VPS
 
