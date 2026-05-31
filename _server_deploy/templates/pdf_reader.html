@@ -971,9 +971,12 @@ async function renderPage(num) {
   currentPage = num;
   document.getElementById('page-input').value = num;
   if (readMode === 'continuous') {
-    // 连续模式：滚到对应页占位 + 触发 IntersectionObserver 渲染
+    // 连续模式：滚到对应页占位 + 立即渲染目标页(别等 IO,跳页/翻页不卡)
     const ph = document.querySelector(`[data-page-num="${num}"]`);
-    if (ph) ph.scrollIntoView({block: 'start', behavior: 'auto'});
+    if (ph) {
+      ph.scrollIntoView({block: 'start', behavior: 'auto'});
+      if (ph.dataset.loaded === '0') _renderPageInto(num, ph).catch(() => {});
+    }
     return;
   }
   await _renderPageInto(num, document.getElementById('page-container'), true);
@@ -1583,7 +1586,7 @@ async function setupContinuousMode() {
         _renderPageInto(parseInt(e.target.dataset.pageNum), e.target);
       }
     });
-  }, {rootMargin: '1400px', root: mainEl});   // 提前 ~2 屏渲染,滚动顺滑
+  }, {rootMargin: '3000px', root: mainEl});   // 提前渲染 ~2-3 页(大图书 644KB/页,留足提前量防翻页卡)
   container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
