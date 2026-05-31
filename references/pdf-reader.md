@@ -588,7 +588,8 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 `_expandSentenceFromRange` 原来「跨 rawdict 块就断」。日语 justified 排版把同一视觉行拆成多块（同行的「…解き,」「それら…」），按块断会在**逗号**处截断、到不了句号。改为「**跨块 _且_ 跨视觉行才断**」+ 段落大行距兜底：同行拆块继续到 。，标题/邻段（不同行+不同块）仍断开。真实数据验证：直近那句跨逗号到 。，複/構成 句仍正确排除上方绿色标题。
 
 ### 14.8 多选翻译显示错位 + 自动弹 + 提速
-- **显示（就地覆盖，用户原设计）**：`_drawSentenceOverlay` **逐行白条贴合**——每行原文一个白盒（几何精确贴该行 rect），中文按各行宽度**比例分配**字符填入，**统一字号** = `min(行高×1.05, 总宽/中文长×0.96)`。彻底避开旧版「单段中文流进多行 clip-path」的错位（中日长度/换行不一致 → 短句只填上面几行、不规则行错位）。`toggleSentenceOverlay` 画它（再点同句关闭），`onTranslate` 翻完 `btn.click()` 自动画。中途一度改成 `showSentenceTranslation` 干净浮层，后按用户偏好**改回就地覆盖**（浮层函数保留未用）。
+- **显示（就地覆盖，用户原设计）**：`_drawSentenceOverlay` —— **整句一个白盒 + 中文自然流排**。盒子 = 句子所有 rect 的 union（left/top/宽/高），中文 `white-space:normal` 自然换行（标点跟句子走，不按行硬切），**字号 = 原文字符高**（`charH*0.95`，跟原句一致），`line-height = 原文行距` → 中文逐行落在原文行上。`toggleSentenceOverlay` 画它（再点同句关闭），`onTranslate` 翻完 `btn.click()` 自动画。
+  - 演进踩坑：① 最早「单段中文流进按原文每行形状切的 clip-path」→ 中日长度/换行不一致 **必错位溢出**；② 一度改 `showSentenceTranslation` 干净浮层；③ 改回就地覆盖、试过「逐行白条 + 按行宽比例切中文」→ 中文被**按行硬切**导致**标点落在每行奇怪位置、看着错乱**；④ **最终**：整句一个盒子 + 自然流排 + 字号同原文（标点自然、不错开）。`showSentenceTranslation` 浮层函数保留未用。
 - **提速** 5s→~1s：见 [`google-cloud-apis.md`](google-cloud-apis.md)（Google Translate 首选、CLI 冷启动/热进程结论、translate.py 两个 guard 坑）。
 
 ### 14.9 日语发音
