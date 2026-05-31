@@ -405,6 +405,67 @@ def _mw_audio_url(audio_path: str) -> str:
 
 # ── 三源融合 ────────────────────────────────────────────────────────────────
 
+# ── 日语词典(AI + 永久缓存,绕开"无免费离线中日词典"的现实)──────────────
+_KANA_RE = re.compile(r"[぀-ゟ゠-ヿ]")        # 平/片假名
+_KANJI_RE = re.compile(r"[一-鿿㐀-䶿]")       # CJK 汉字
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def is_japanese(word: str) -> bool:
+    """判定是否走日语词典:含假名 → 必是日语;全汉字无拉丁 → 也按日语处理
+    (ECDICT 是英语词库,汉字本来就查不到,交给 AI 出中文释义)。"""
+    if not word:
+        return False
+    if _KANA_RE.search(word):
+        return True
+    return bool(_KANJI_RE.search(word)) and not _LATIN_RE.search(word)
+
+
+def lookup_jp(word: str, context: str = "", model: str = "haiku") -> dict | None:
+    """日语词 → {reading, romaji, pos, zh, examples}。AI 生成,永久本地缓存。
+
+    缓存命中离线秒回(等于边读边攒一本自己的中日词典);未命中调 Claude Haiku
+    (低 effort,~2-4s)。Gemini Flash 若可用更快,但其 billing 常挂,故主用 Claude。
+    """
+    word = (word or "").strip()
+    if not word:
+        return None
+    cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
+    if cached:
+        return {**cached, "from_cache": True}
+    # 调 AI
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        from ai_client import ask
+    except Exception:
+        return None
+    ctx = f"(出现在句子:{context[:80]})" if context else ""
+    prompt = (
+        f"你是日中词典。给日语词「{word}」{ctx}的词典条目。严格只输出 JSON,不要解释:\n"
+        '{"reading":"假名读音(振り仮名)","romaji":"罗马字","pos":"词性(名詞/動詞/形容詞/副詞 等)",'
+        '"zh":"简洁中文释义,多义用;分隔","examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
+        "examples 给 1-2 句即可。若该词无意义或非日语,zh 填\"(无)\"。"
+    )
+    try:
+        resp = ask(prompt, claude_model=model, claude_effort="low")
+    except Exception:
+        return None
+    if not resp:
+        return None
+    # 提 JSON
+    m = re.search(r"\{.*\}", resp, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    data["word"] = word
+    data["source"] = "jp_ai"
+    _cache_save("jp", word, data)
+    return {**data, "from_cache": False}
+
+
 def compose_entry(word: str, *, online: bool = True, translate_examples: bool = True) -> dict:
     word = (word or "").strip().lower()
     if not word:

@@ -1102,7 +1102,8 @@ def _trigger_paragraph_exposure_async(pdf_rel: str, page: int, lemma: str):
 def pdf_api_dict_quick():
     """单词小框用：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回；
     同时后台触发 vocab note 生成（制卡数据补全）。完整 mw/free 走 /api/dict SSE「展开」。"""
-    word = (request.args.get("word", "") or "").strip().lower()
+    word_raw = (request.args.get("word", "") or "").strip()
+    word = word_raw.lower()
     pdf_rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
     context = request.args.get("context", "")
@@ -1111,6 +1112,24 @@ def pdf_api_dict_quick():
     ds, _ = _vocab_modules()
     if not ds:
         return jsonify({"ok": False, "error": "dict unavailable"})
+    # 日语词 → 走 AI 中日词典(无免费离线中日库;Claude Haiku + 永久缓存)
+    if getattr(ds, "is_japanese", None) and ds.is_japanese(word_raw):
+        jp = ds.lookup_jp(word_raw, context=context)
+        if not jp or (jp.get("zh") in ("(无)", "", None)):
+            return jsonify({"ok": False, "word": word_raw, "jp": True})
+        ex = jp.get("examples") or []
+        ex_txt = "\n".join(f"· {e.get('ja','')} — {e.get('zh','')}" for e in ex[:2] if isinstance(e, dict))
+        try:
+            _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
+        except Exception:
+            pass
+        return jsonify({
+            "ok": True, "jp": True, "word": word_raw, "lemma": word_raw, "forms": [],
+            "phonetic": jp.get("reading", "") + (f" [{jp['romaji']}]" if jp.get("romaji") else ""),
+            "translation": (f"{jp.get('pos','')} " if jp.get("pos") else "") + (jp.get("zh") or ""),
+            "definition": ex_txt,
+            "from_cache": jp.get("from_cache", False),
+        })
     ec = ds.lookup_ecdict(word)
     if not ec:
         return jsonify({"ok": False, "word": word})
