@@ -627,3 +627,13 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - F2 横滑严格限「起点空白 + 单页模式」：尊重既有「起点在字上=拖选、竖滑=滚动」规则，零冲突。
 
 **验证结论**（独立 reviewer 审 `6ed9d9c..` 全 diff）：无崩溃/解包遗漏/未定义符号/重复声明/死锁/越界/回归；4-tuple 解包、translate 签名、window 挂载、store 键、坐标缩放全部跨函数核对一致。実测 応用情報 p22 振假名 169 条、整页翻译 38 句全译（冷 439ms/缓存 103ms）、搜索 試験 256 处（冷 2.6s/缓存 18ms）；EGIU/线代书 IPA 261 条/66ms。
+
+### 15.1 F1-F7 反馈修复 round（2026-06-01）
+
+用户实机反馈后的 5 项修正（诊断 + 修复 + 对抗复审都走了 workflow）：
+
+- **F2 横滑「完全没反应」根因 = touchcancel**（坑）：在空白处横滑时，char-layer touchmove 对空白起点 early-return 不 preventDefault → 浏览器把横滑判成滚动 → **触发 touchcancel 清掉 `_swipeStart`** → touchend 永远拿不到 swipe。修：touchmove 里对「起点空白+横向不弱于竖向(`|dx|≥|dy|`)+移动>6px」**preventDefault 抢下手势**，浏览器就不 cancel 了，touchend 正常翻页；竖向主导不拦 → 高页仍原生滚动。（教训：靠 touchend 判手势时，必须在 touchmove 早早 preventDefault 认领，否则 iOS 一旦判为滚动就 cancel。）
+- **F5 振假名位置**：原 `top=y0-fs*1.2-1` + 字号 0.52×词高 → 抬太高压住上一行。改 **字号 0.40×词高、`top=y0-fs-1`**（ruby 底边贴词顶上方 1px，整体只上探 ~0.4×词高）→ 落在两行间空隙、紧贴本行。CSS `.rt` line-height .95。注意 OCR char bbox 偏高（含 ascent 留白），字号系数要按 bbox 高来压。
+- **F6 词组面板加载期呼吸**：`showPhrasePopover` fetch 期间给原选中 `.sel-overlay` 加 `phrase-breathe`，`finally` 里**用 live DOM 查 `.sel-overlay.phrase-breathe` 移除**（不能存开始时的元素引用，中途可能被别处 pointerdown 清掉变 stale）→ 转常亮。关闭面板时只清 `_charSel.pw` 那一页的高亮（不 `querySelectorAll('.sel-overlay')` 全清，避免误伤多页选中）。
+- **F4 搜索原文高亮**：`_searchJump` 记 `_pendingSearchHighlight={query,page}` → goToPage；**loadCharsAndBindLayer 末尾**（此处 `__charBoxes` 已赋值）直接 `_highlightSearchResultsOnPage` 一次到位（不走轮询 re-check `dataset.loaded`，那个时序脆弱）；已加载页则 `_searchJump` 里的轮询 fallback 立即命中。命中处黄色 `.search-hl`（z6 + pointer-events:none + multiply），滚到第一处，6s 淡出。
+- **F7 掌握键改 toggle**：`dict-quick(want_ja)` 返回 `mastered`；按钮显示当前态（未掌握「☆标记掌握」↔ 已掌握「✓已掌握100」），点击 toggle（mastered↔unknown）**不关框**，刷下划线。后端 `/api/jp-vocab-mark` 的 `unknown` 即清 mastered。
