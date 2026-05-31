@@ -2505,12 +2505,16 @@ function _bindCharLayer(cl, pw) {
         // 单击单词 → 弹单词小框查词
         if (_clickCount === 1) {
           const _t = (lastSelText || '').trim();
+          const _cr = _expandSentenceFromRange(pw.__charBoxes, bounds.start, bounds.end);
+          const _ctx = _cr ? _charsRangeToText(pw.__charBoxes, _cr.start, _cr.end).slice(0, 400) : '';
+          const hasKana  = s => /[぀-ゟ゠-ヿ]/.test(s);      // 平/片假名 = 铁定日语
+          const hasKanji = s => /[一-鿿㐀-䶿]/.test(s);      // CJK 汉字(日中共用,光看词分不出)
           const isEng = /^[A-Za-z][A-Za-z'’\-]*$/.test(_t);
-          const isJa  = /[぀-ゟ゠-ヿ一-鿿㐀-䶿]/.test(_t);   // 含假名 / 汉字 → 日语词
+          // 日语判定:词含假名 → 铁定日语;纯汉字词 → 看上下文(整句)有没有假名
+          // (日语句几乎必夹假名 → 该汉字是日语词;整句无假名 = 中文文档,不当日语)
+          const isJa = hasKana(_t) || (hasKanji(_t) && hasKana(_ctx));
           // 日语:总是弹词典(没有别的查法);英文:沿用「点击未掌握词直接翻译」开关
           if (_t && _t.length <= 30 && (isJa || (isEng && _clickTranslateEnabled()))) {
-            const _cr = _expandSentenceFromRange(pw.__charBoxes, bounds.start, bounds.end);
-            const _ctx = _cr ? _charsRangeToText(pw.__charBoxes, _cr.start, _cr.end).slice(0, 400) : '';
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
         }
