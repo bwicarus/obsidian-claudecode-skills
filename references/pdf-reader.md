@@ -578,6 +578,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 修：`scripts/optimize_pdf.py`（PyMuPDF `garbage=4 + clean=True 合并内容流 + deflate` → qpdf `--linearize`，**不动图片像素=清晰度无损**，多页抽样校验文字+图尺寸一致才落地、自动备份到 `data/pdf-backup/`）。该书 489786→**2045 对象**，408→318MB，xref 9.3MB→~40KB。
 - page-chars 落盘缓存：`_page_chars_cached`（键 = rel+page+mtime，存 `state/pdf-char-cache/`），只缓存不变的 chars/page_w/page_h；vocab_marks/句子框（依赖可变掌握度）每次现算。重复打开同页 387ms→13ms。
 - **「打开即可用」加载顺序**（`setupContinuousMode`）：旧逻辑先 `observe` 全部占位（IntersectionObserver 立刻渲染页 1-3，再 50ms 后才滚到目标页）→ 白白渲染没人看的页 1-3、和目标页抢带宽。改为：① 先 `scrollIntoView` 到目标页（占位高已按首页估算、各页同尺寸→定位准）② **`await _renderPageInto(目标页)` 显式渲染并等它就绪**（图像+选词层=可用）③ 才 `observe` 其余页懒加载（视口已在目标页 → 只渲染其 ±1400px 邻页，目标页 loaded=1 跳过）。打开只渲染 1 页即可用,其余后台补。
+- **加载遮罩别等渲染**:`#pdf-loading` 全屏遮罩只该挂到「文档结构就绪 + 占位建好 + 滚到目标页」,**不能等目标页图像渲染完**(否则遮罩挂太久)。故 setupContinuousMode 里目标页渲染 `_renderPageInto(...).catch()` **不 await**,`loadPdf` 的 `pdfLoadHide()` 紧随其后即触发 → 遮罩秒撤、先显占位「…第N页」、目标页图像几百ms 后弹出。(教训:别为了"打开即可用"把整页渲染塞进遮罩等待里,那只会让遮罩更久。)
 
 ### 14.5 模块作用域 vs 内联 onclick 全局（反复踩！）
 `<script type="module">` 里的 `function foo(){}` **不是全局**，HTML 内联 `onclick="foo()"` 在全局作用域跑 → 找不到 → 静默失败。已中招：`openLangPicker`/`saveLangPicker`（🌐 按钮）、`_ttsWord`（完整字典 🔊 无声）。**规则：任何要被内联 onclick 调的函数必须 `window.xxx = xxx`**。小框 🔊 没事是因为走的是 `window._speakCurWord`（它内部再调模块函数 OK）。

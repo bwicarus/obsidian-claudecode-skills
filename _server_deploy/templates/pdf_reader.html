@@ -1570,8 +1570,12 @@ async function setupContinuousMode() {
   // 再 **显式渲染目标页并等它完成**(图像+选词层都就绪=可用),最后才 observe 其余页懒加载。
   // 旧逻辑是先 observe(IO 立刻渲染页1-3,白白浪费+抢带宽)→ 50ms 后才滚到目标页。
   const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
-  if (targetPh) targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
-  if (targetPh) { try { await _renderPageInto(currentPage, targetPh); } catch (_) {} }
+  if (targetPh) {
+    targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
+    // 不 await:占位建好 + 滚到目标页后就让加载遮罩撤掉(loadPdf 里 pdfLoadHide),
+    // 目标页图像在后台渲染、随后弹出(用户先看到占位"…第N页",几百ms 后图片出来)。
+    _renderPageInto(currentPage, targetPh).catch(() => {});
+  }
   // IntersectionObserver:此时视口已在目标页 → 只渲染其附近 ±1400px 的页(目标页已 loaded=1 会跳过)
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
