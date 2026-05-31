@@ -34,9 +34,14 @@ def _resolve_cli(configured: str, name: str) -> str:
     if WINDOWS:
         return configured
     try:
-        if configured and os.path.exists(configured):
+        # 配置的是存在的真路径 → 直接用
+        if configured and os.sep in configured and os.path.exists(configured):
             return configured
-        found = shutil.which(name)
+        # 否则按 name 在增强 PATH 里找:并入 ~/.local/bin + 常见安装位,
+        # 解决 sudo/systemd 最小 PATH(不含 ~/.local/bin)下 which 找不到。
+        extra = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/usr/bin", "/bin"]
+        search = os.pathsep.join([os.environ.get("PATH", "")] + extra)
+        found = shutil.which(name, path=search)
         if found:
             return found
     except Exception:

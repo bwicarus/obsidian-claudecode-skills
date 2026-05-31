@@ -421,7 +421,7 @@ def is_japanese(word: str) -> bool:
     return bool(_KANJI_RE.search(word)) and not _LATIN_RE.search(word)
 
 
-def lookup_jp(word: str, context: str = "", model: str = "haiku") -> dict | None:
+def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | None:
     """日语词 → {reading, romaji, pos, zh, examples}。AI 生成,永久本地缓存。
 
     缓存命中离线秒回(等于边读边攒一本自己的中日词典);未命中调 Claude Haiku
