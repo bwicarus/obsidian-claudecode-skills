@@ -422,10 +422,11 @@ def pdf_file(rel):
     # 大文件(几百 MB)不必整本下载到浏览器,iPad Safari 不再 OOM。
     resp = send_file(str(abs_path), mimetype="application/pdf", conditional=True)
     resp.headers["Accept-Ranges"] = "bytes"
-    # 缓存:用 private + must-revalidate 而非 no-store —— no-store 会让部分浏览器
-    # 放弃 Range 分块缓存、退回整本下载。private 允许 PDF.js 缓存已取分块但不进
-    # 共享缓存,且仍每次校验(配合 ?v=mtime query 防跨版本串味)。
-    resp.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    # 缓存:**immutable + 长 max-age**。URL 带 ?v=<mtime>(文件一变 URL 就变),所以
+    # 同一 URL 的字节永不变 → 可让浏览器长期缓存已取的 Range 分块、**重复打开直接命中
+    # 本地缓存、零网络往返**(之前 max-age=0/must-revalidate 每块都要回服务器校验,
+    # 大图书每次打开反复读)。文件改了 mtime 变 → 新 URL 自然 miss 取新版,不会串味。
+    resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
     return resp
 
 
