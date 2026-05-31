@@ -444,6 +444,18 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
   <div id="main">
+    <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;
+         background:#0d1117ee;flex-direction:column;align-items:center;justify-content:center;
+         gap:14px;color:#e6edf3;font-size:15px;">
+      <div style="width:34px;height:34px;border:3px solid #2d5a8a;border-top-color:#7dd3fc;
+           border-radius:50%;animation:pdfspin .8s linear infinite;"></div>
+      <div id="pdf-loading-text">📄 加载中…</div>
+      <div style="width:200px;height:6px;background:#1c232c;border-radius:3px;overflow:hidden;">
+        <div id="pdf-loading-bar" style="height:100%;width:0%;background:#7dd3fc;
+             transition:width .25s;"></div>
+      </div>
+      <div id="pdf-loading-hint" class="dim" style="font-size:12px;color:#7d8590;"></div>
+    </div>
     <div id="page-container"></div>
     <div id="sel-toolbar">
       <div id="hl-color-picker"><span class="lbl">🖌</span></div>
@@ -784,7 +796,30 @@ function _attachScrollSaver() {
 }
 
 
+// ───────────── 加载指示 ─────────────
+(function(){ const st=document.createElement('style');
+  st.textContent='@keyframes pdfspin{to{transform:rotate(360deg)}}'; document.head.appendChild(st); })();
+function pdfLoadShow(text, hint) {
+  const box=document.getElementById('pdf-loading');
+  if(!box) return;
+  box.style.display='flex';
+  if(text) document.getElementById('pdf-loading-text').textContent=text;
+  if(hint!==undefined) document.getElementById('pdf-loading-hint').textContent=hint||'';
+}
+function pdfLoadBar(pct) {  // pct null = 不确定(只转圈)
+  const bar=document.getElementById('pdf-loading-bar');
+  if(!bar) return;
+  if(pct==null){ bar.style.width='40%'; bar.style.opacity='0.4'; }
+  else { bar.style.opacity='1'; bar.style.width=Math.max(2,Math.min(100,pct))+'%'; }
+}
+function pdfLoadHide() {
+  const box=document.getElementById('pdf-loading');
+  if(box) box.style.display='none';
+}
+
 async function loadPdf() {
+  pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
+  pdfLoadBar(null);
   try {
     window.dlog('开始 getDocument...');
     const task = pdfjsLib.getDocument({
@@ -800,8 +835,15 @@ async function loadPdf() {
       rangeChunkSize: 262144,   // 256KB 一块
     });
     task.onProgress = (p) => {
-      if (p.total) window.dlog('加载 ' + Math.round(p.loaded / p.total * 100) + '%');
+      if (p.total) {
+        const pct = Math.round(p.loaded / p.total * 100);
+        window.dlog('加载 ' + pct + '%');
+        pdfLoadBar(pct);
+        pdfLoadShow('📄 加载中… ' + pct + '%');
+      }
     };
+    pdfLoadShow('📄 渲染首页…', '');
+    pdfLoadBar(100);
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
@@ -828,8 +870,10 @@ async function loadPdf() {
     }
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
+    pdfLoadHide();   // 首页已渲染,撤加载层
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
+    pdfLoadHide();
     document.getElementById('page-container').innerHTML =
       '<div style="color:#c00;padding:20px">加载 PDF 失败：' + e.message + '</div>';
   }

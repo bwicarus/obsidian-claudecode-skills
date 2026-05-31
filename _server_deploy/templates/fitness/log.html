@@ -326,11 +326,11 @@ function fmtElapsed(sec) {
 }
 
 function updateProgress() {
+  // 只数「真正存过库」的组(✓ / autosave 落库 = data-saved=1),
+  // 预填的占位值不算(否则一进页面就显示全完成)。
   let done = 0;
   document.querySelectorAll('.set-row').forEach(row => {
-    const w = row.querySelector('.set-weight').value;
-    const r = row.querySelector('.set-reps').value;
-    if (w !== '' && r !== '') done++;
+    if (row.dataset.saved === '1') done++;
   });
   progDone.textContent = done;
   const pct = TOTAL_SETS > 0 ? Math.min(100, done / TOTAL_SETS * 100) : 0;
@@ -734,8 +734,11 @@ async function loadRec(exId) {
         ghost.textContent = `上次 ${wTxt}×${ref.reps ?? '?'}`;
       }
       // 预填全部组(只填空值):重量用推荐值,次数用推荐 target_reps
-      if (!wEl.value && rec.weight_kg != null) wEl.value = rec.weight_kg;
-      if (!rEl.value && rec.target_reps != null) rEl.value = rec.target_reps;
+      // 标 prefilled(灰斜体)→ 暗示这是建议未录;一编辑/落库就转正常色
+      if (row.dataset.saved !== '1') {
+        if (!wEl.value && rec.weight_kg != null) { wEl.value = rec.weight_kg; wEl.classList.add('prefilled'); }
+        if (!rEl.value && rec.target_reps != null) { rEl.value = rec.target_reps; rEl.classList.add('prefilled'); }
+      }
     });
   } catch (e) { lastInfo.textContent = '推荐:网络失败'; }
 }
@@ -763,9 +766,12 @@ async function restoreToday(exId) {
 
 function markSaved(row, complete) {
   const btn = row.querySelector('.save-set');
+  row.dataset.saved = complete ? '1' : '';   // 进度只数 data-saved=1 的组
   if (complete) {
     btn.textContent = '✓ 已存';
     btn.classList.add('success');
+    // 落库即不再是"预填占位",输入恢复正常色
+    row.querySelectorAll('input').forEach(i => { i.classList.remove('prefilled'); });
   } else {
     btn.textContent = '✓';
     btn.classList.remove('success');
@@ -819,11 +825,17 @@ document.querySelectorAll('.set-row').forEach(row => {
   const setNo = parseInt(row.dataset.set);
   row.querySelectorAll('input').forEach(inp => {
     inp.addEventListener('input', () => {
-      row.querySelectorAll('input').forEach(i => i.style.borderColor = '');
+      row.querySelectorAll('input').forEach(i => { i.style.borderColor = ''; i.classList.remove('prefilled'); });
       scheduleAutoSave(exId, setNo);
     });
+    // 聚焦预填值 → 转正常色(用户在动这一组了)
+    inp.addEventListener('focus', () => inp.classList.remove('prefilled'));
   });
 });
+// 预填值灰斜体样式(暗示建议未录)
+(function(){ const st=document.createElement('style');
+  st.textContent='.set-weight.prefilled,.set-reps.prefilled{color:#7d8590;font-style:italic;}';
+  document.head.appendChild(st); })();
 
 // 日期改了 → 重新恢复
 document.getElementById('workout-date').addEventListener('change', () => {
@@ -866,21 +878,19 @@ async function loadWorkoutMeta() {
 
 // ───────────── 完成训练总结 ─────────────
 function showFinishSummary() {
-  const allRows = Array.from(document.querySelectorAll('.set-row'));
-  let totalSets = allRows.length;
+  // 只统计「真正存过库」的组(data-saved=1),预填占位不算
+  const savedRows = Array.from(document.querySelectorAll('.set-row[data-saved="1"]'));
+  const totalSets = TOTAL_SETS;
   let doneSets = 0;
   let totalVolume = 0;
   let totalReps = 0;
   const byEx = {};   // exId -> {name, sets: [{w, r}]}
-  allRows.forEach(row => {
+  savedRows.forEach(row => {
     const card = row.closest('.card');
     const exId = card.dataset.exerciseId;
     const exName = card.querySelector('h3').firstChild.textContent.trim();
-    const wRaw = row.querySelector('.set-weight').value;
-    const rRaw = row.querySelector('.set-reps').value;
-    if (wRaw === '' && rRaw === '') return;
-    const w = parseFloat(wRaw);
-    const r = parseInt(rRaw);
+    const w = parseFloat(row.querySelector('.set-weight').value);
+    const r = parseInt(row.querySelector('.set-reps').value);
     if (!byEx[exId]) byEx[exId] = { name: exName, sets: [] };
     byEx[exId].sets.push({ w: isNaN(w) ? null : w, r: isNaN(r) ? null : r });
     if (!isNaN(w) && !isNaN(r)) {
