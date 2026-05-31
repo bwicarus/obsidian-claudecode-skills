@@ -150,7 +150,9 @@ def translate(text: str, target: str = "zh-CN",
     text = (text or "").strip()
     if not text:
         return ""
-    if not re.search(r"[A-Za-z]", text):
+    # 至少含一个「可翻译字符」(拉丁字母 / 假名 / 汉字)。之前只判 [A-Za-z] →
+    # 整句日语/中文(无拉丁)被误判为无内容直接返回空,导致日语多选翻译永远失败。
+    if not re.search(r"[A-Za-z぀-ヿ㐀-鿿一-鿿々ー]", text):
         return ""
     cached = _cache_get(text, target)
     if cached is not None:

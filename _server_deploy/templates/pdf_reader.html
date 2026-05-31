@@ -2251,21 +2251,26 @@ function _charsRangeToText(chars, sIdx, eIdx) {
 
 // 找选中范围所在的句子（左/右扩到 . ! ? 。！？ 之后 / 段落起止）
 function _expandSentenceFromRange(chars, sIdx, eIdx) {
+  // 句子边界 = 句末标点(。！？.!?)优先。
+  // ⚠ rawdict 块(bk)只在「跨块 **且** 跨视觉行」时才断:
+  //   - 日语 justified 排版会把同一视觉行拆成多个块(如同行的「…解き,」「それら…」),
+  //     这种同行拆块绝不能断,否则句子在逗号处截断、到不了句号(用户报的 bug)
+  //   - 标题/邻段在不同视觉行+不同块 → 断(不把标题并进句子)
   const isSentEnd = (c) => /[.!?。！？]/.test(c);
-  const _bkBreak = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk !== b.bk;
+  const _bk = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk !== b.bk;
+  const _lineChanged = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 0.5;
+  const _paraGap = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 1.5;
+  const _stop = (a, b) => (_bk(a, b) && _lineChanged(a, b)) || _paraGap(a, b);
   let s = sIdx;
   while (s > 0) {
     if (isSentEnd(chars[s - 1].c)) break;
-    if (_bkBreak(chars[s - 1], chars[s])) break;   // 跨 rawdict 块 → 停（不把标题/表格/邻段并进同句）
-    // 也按行间距 > 1.5×height 停（段落起点）
-    if (Math.abs(chars[s - 1].top - chars[s].top) > chars[s].height * 1.5) break;
+    if (_stop(chars[s - 1], chars[s])) break;
     s--;
   }
   let e = eIdx;
   while (e < chars.length - 1) {
     if (isSentEnd(chars[e].c)) break;
-    if (_bkBreak(chars[e], chars[e + 1])) break;   // 跨块停
-    if (Math.abs(chars[e + 1].top - chars[e].top) > chars[e].height * 1.5) break;
+    if (_stop(chars[e], chars[e + 1])) break;
     e++;
   }
   return {start: s, end: e};
