@@ -12,10 +12,32 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+
+
+def _resolve_exec(command: str) -> str:
+    """配置的可执行路径不存在时,在增强 PATH 里按 basename 找回。
+
+    解决两类问题:
+    1. CLI 自更新搬家(如 claude 从 /usr/bin/claude 迁到 ~/.local/bin/claude),
+       硬编码的绝对路径失效。
+    2. systemd 服务的受限 PATH(/usr/local/bin:/usr/bin:/bin,不含 ~/.local/bin),
+       导致 bare name `claude` 或默认 shutil.which 都找不到。
+    增强 PATH 并入 ~/.local/bin + 常见安装位,确保服务里也能解析。
+    Windows 不动(客户端 GUI 用完整路径或 .cmd)。
+    """
+    if os.name == "nt" or not command:
+        return command
+    if os.sep in command and os.path.exists(command):
+        return command   # 已是存在的绝对/相对路径,直接用
+    name = os.path.basename(command)
+    extra = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/usr/bin", "/bin"]
+    search = os.pathsep.join([os.environ.get("PATH", "")] + extra)
+    return shutil.which(name, path=search) or command
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -106,7 +128,8 @@ class CliBackend(BackendAdapter):
     default_command = "echo"
 
     def _command(self) -> str:
-        return (self.settings.get("command") or self.default_command).strip()
+        raw = (self.settings.get("command") or self.default_command).strip()
+        return _resolve_exec(raw)
 
     def ping(self) -> tuple[bool, str]:
         cmd = self._command()
