@@ -533,3 +533,37 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 | YAML 空值变 list | `anki_card_id:` 加载后变 `[]` | `_parse_simple_yaml` 空 value 默认 `""`，仅在下一行出现 `- xxx` 时转 list |
 | 派生形 lemma 化覆盖 | `constructs`、`constructed` 查询都写同一 `construct.md` | 期望行为；lookup_count 累加；sources 按 (pdf, page) 去重 |
 | Obsidian PDF 跳转页号 | `obsidian://open?file=X.pdf#page=N` 需要 PDF.js 插件支持 | 给两个链接：obsidian:// 跳本机 + bwicarus.space/pdf/view 跳 web reader |
+
+---
+
+## 14. 中日词典 / 日语支持（2026-05-31）
+
+英语词典之外，给日语书加了一整套（PDF 阅读器点日语词触发）。核心都在 `scripts/vocab/dict_sources.py`。
+
+**判定**：`is_japanese(w)` — 含假名→是；纯汉字无拉丁→是（日中共用汉字交给 AI 出中文）。PDF 阅读器按**本书语言声明**(`state/pdf-book-langs.json`，🌐 按钮选 en/ja)路由查哪本词典。
+
+**词义** `lookup_jp(word, context, model="sonnet")`：AI（Claude）出 `{reading, romaji, pos, zh, examples}`，**永久本地缓存**（`state/dict-cache/jp-*.json`，ttl 10 年）——等于边读边攒自己的中日词典，命中缓存离线秒回。
+
+**读音 + 音调** `_jp_reading_accent(word)`：**unidic（fugashi）离线**取权威假名读音 + 重音核 aType（0=平板，N=第 N 拍后降）+ 拍数。**覆盖 AI 读音**（unidic 更准）。前端 `_renderPitch` 画高低 overline + 红色下降标记。片假名→平假名转换、长音 ー 算独立拍、小书写假名（ゃゅょ）并入前拍。
+
+**母语例句** Tanaka 语料库（EDRDG 免费）：
+- `scripts/vocab/build_tanaka_index.py` 下 `examples.utf`（14.7 万日英句对，B 行标注词条）→ SQLite `data/tanaka.db`（句子表 + 词→句索引，`~` 标优质例句）。
+- `tanaka_examples(word, limit)` 离线查母语例句；`translate_sentences(sents)` AI 批量翻中文、**按句永久缓存**（`jasent-*.json`，同句跨词复用）；`jp_examples_zh(word, translate=False)` 组装 [{ja, zh, en}]，读路径只用缓存翻译、未翻回退英文。
+- `lookup_jp` 自带例句为空时自动挂 Tanaka 例句。
+- 预建：`scripts/vocab/prebuild_jp_examples.py <pdf>|--all-cached` 批量预翻全书例句（73% 词能匹配到母语例句）。
+
+**汉字拆解** KANJIDIC2（EDRDG 免费）：`build_kanjidic.py` → `data/kanjidic.json`（12633 字：音読み/訓読み/字义）。`kanji_info(ch)` / `word_kanji_breakdown(word)`。字义是英文（读音才是学习重点，汉字本身中文母语者看得懂）。
+
+**预建词库**：`prebuild_jp_dict.py <pdf>`（fugashi 全文分词 → 批量 AI 查词义，跳助词/标点；幂等续传）。
+
+**后端路由**（`_server_deploy/pdf_reader.py`）：
+- `/api/dict-quick`（小框秒回）JP 分支 = lookup_jp + unidic 读音音调 overlay，返回 `reading/accent/mora/examples`。
+- `/api/dict-jp`（完整字典页 JSON）= 读音+音调+罗马字+词性+完整中文 + 5 句 Tanaka 例句 + 汉字拆解；未译例句后台线程补译。
+- `/api/dict-jp-ai`（SSE）= 按需「✨AI 深入讲解」（核心义/用法语感/近义辨析/汉字记忆）。
+
+**句子翻译**（多选 🌐）：见 `scripts/vocab/translate.py`，链路 `gtranslate(Google,赠金)→deepl→ai→mymemory`。两个历史坑：
+- guard `if not re.search("[A-Za-z]"): return ""` → **整句日语无拉丁字母被判空**，日语翻译永远失败。改成「无拉丁**且**无假名汉字」才跳过。
+- `_mymemory` 的 source 写死 `en` → 日语句被当英语翻失败。改 `_detect_src`（假名/纯汉字→ja）。
+- 详细引擎对比/质量评审/Google 放行/CLI 冷启动结论见 [`google-cloud-apis.md`](google-cloud-apis.md)。
+
+发音：日语走浏览器原生 `speechSynthesis` ja-JP（iPad 自带 Kyoko，离线，念假名读音），不走有道英语库。详见 [`pdf-reader.md`](pdf-reader.md)。

@@ -186,7 +186,36 @@ chmod 600 /home/bwicarus/.config/gcp-vision-key
 
 ---
 
+## Cloud Translation API(PDF 句子翻译,2026-05-31 接入)
+
+PDF 阅读器多选句子的 🌐 翻译走 `scripts/vocab/translate.py`,链路 `gtranslate → deepl → ai → mymemory`(`server-config.dict.translate_backend = "auto"`)。
+
+**`_gtranslate`**:Cloud Translation **v2** REST,POST `https://translation.googleapis.com/language/translate/v2`,form 参数 `q / target=zh-CN / format=text / key=<GCP key>`,**不传 source**(让 Google 自动检测,en/ja 都准),~0.3s、走赠金。key 复用 `~/.config/gcp-vision-key`。
+
+### 踩坑:`API_KEY_SERVICE_BLOCKED`(key 的 API 限制没放行)
+- 现象:403 `PERMISSION_DENIED` + `reason: API_KEY_SERVICE_BLOCKED` + `service: translate.googleapis.com`。**不是**配额/计费问题。
+- 根因:该 key 的「API 限制」白名单里没有 Cloud Translation。
+- 放行(GCP 控制台):① 启用 Cloud Translation API ② 凭据→该 key→API 限制勾上 Cloud Translation API(连同已有 Vision/YouTube/STT)。
+- **传播抖动**:刚放行后几分钟内**间歇性** 403(边缘节点逐步生效)→ 同批句子随机失败几条,几分钟稳定。`auto` 链遇 gtranslate 失败自动回落,用户无感。
+
+### 翻译质量评审结论(11-agent workflow,10 句真实日语)
+| 引擎 | 准确度均 | 流畅度均 | 拿「最佳」 |
+|---|---|---|---|
+| **Google** | 3.9/5 | **4.5/5** | 3(+1 平手) |
+| AI(sonnet) | ~4.6 | ~4.8 | **6** |
+| MyMemory | ~3.2 | ~3.1 | 0 |
+- **AI 最强 > Google 次之 >> MyMemory**。Google 流畅度稳,准确度起伏是短板。
+- Google 高发翻车区:**考试术语**(午後問題→误"下午课程")、**关键时间点译反**(当日→"第二天")、长句限定/因果结构丢。简单/术语清晰句又快又准甚至胜 AI。
+- 决策:`auto = gtranslate→deepl→ai→mymemory` —— **AI 排 MyMemory 前**(Google 抖动时回落到质量最高的 AI,不回落垫底的 MyMemory),MyMemory 仅 Google+AI 都挂时兜底。
+
+### Claude CLI「冷启动」与「热进程」实验结论
+- `ai_client` 每次 `subprocess.run(["claude",...])` **从零起进程**(Node 启动+鉴权+建连),~4-5s,**大头是启动不是模型** → haiku 反而 5.2s 比 sonnet 4.6s 慢(换模型无用)。
+- 热进程实验(`claude -p --input-format stream-json --output-format stream-json --verbose` 常驻逐条喂):冷 5.2s / 热 3.1s / 第3条 5.0s(上下文累积变慢)。省的只是 Node 启动 ~2s,网络往返+agent 轮次开销消不掉,单一对话越喂越长越慢。**结论:不值得做**(收益 3-5s、复杂度高),用 Google/MyMemory(HTTP ~1s)更划算。
+
+---
+
 ## 相关 reference
 
 - [`fitness-system.md`](fitness-system.md) — 健身页面(主要消费者:YouTube/STT/Gemini)
 - [`pdf-reader.md`](pdf-reader.md) — PDF 阅读器(主要消费者:Vision OCR)
+- [`vocab-system.md`](vocab-system.md) — 单词/中日词典 + 句子翻译

@@ -556,3 +556,41 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 高亮 import/export：暂无 UI，可直接复制 `state/pdf-highlights/*.json`
 - 高亮搜索：暂无 UI 列出某 PDF 所有高亮的概览（只能逐个点开）
 - 多用户：高亮 sidecar 全 user 共享（一个 vault 一个 sha1）；如果未来要 per-user 可改路径加 username 前缀
+
+---
+
+## 14. 2026-05-31 批次：日语支持 + 性能 + 翻译显示（坑 + 结论）
+
+### 14.1 日语词典（详见 [`vocab-system.md`](vocab-system.md) §14）
+点日语词：小框 = 读音 + **音调线**（unidic aType，`_renderPitch` 画高低 overline + 下降标记）+ 中文 + 2 句母语例句。「展开完整字典」走 `dictStreamJP`（`/api/dict-jp`）：多义释义 + **汉字 chip 拆解**（点字展开音读/训读，默认展开首字）+ 5 句 Tanaka 母语例句 + 「✨AI 深入」按需 SSE。`_isJaWord(w)` 据 `BOOK_LANGS` 路由日/英。
+
+### 14.2 整页只能选单字（root cause = 缓存，非代码）
+- 现象：某些页每个汉字/假名都只能选 1 个字。
+- 真因：`/api/page-chars` **之前无 Cache-Control** → iOS Safari **启发式缓存**了 fugashi 分词上线**前**的旧 JSON（每字 `w` 各自独立）。后端 `w` 一直对、HTML 早 no-store、JS 最新，唯独 page-chars 吃旧缓存。
+- 修：page-chars 响应加 `no-store/no-cache/must-revalidate + Pragma`；前端请求加 `?v=<pdf mtime>` 换 cache key（立即绕开旧缓存，不用用户清缓存）。
+- 排查留痕：全书端到端复刻 0 退化页；非传递排序比较器只拆散 3/261（**不是**根因，且改传递性排序会打乱英文混排页 reading order，故没动）。
+
+### 14.3 加载像在「下整本书」（disableStream）
+- PDF.js **`disableAutoFetch:true` 必须同时 `disableStream:true` 才生效**（官方）。之前 `disableStream:false` → 即便禁了预取仍后台**流式下整本 408MB**（进度条跑的就是整本）。range 已确认 Flask+nginx 两端都 206，故关 stream 纯按需取当前页。
+
+### 14.4 大 PDF 打开慢（对象结构病，根治）
+- `応用情報技術者.pdf` = 679 张全页 JPEG（1352×1920，~536KB/页）+ 隐藏文字层，**48.9 万个对象**（epub→PDF 把每页文字层拆成几百个碎流），PDF 1.3 **经典 xref 表 ~9.3MB** → PDF.js 打开（尤其恢复到深层页）必须先下完整 xref，极慢。
+- 修：`scripts/optimize_pdf.py`（PyMuPDF `garbage=4 + clean=True 合并内容流 + deflate` → qpdf `--linearize`，**不动图片像素=清晰度无损**，多页抽样校验文字+图尺寸一致才落地、自动备份到 `data/pdf-backup/`）。该书 489786→**2045 对象**，408→318MB，xref 9.3MB→~40KB。
+- page-chars 落盘缓存：`_page_chars_cached`（键 = rel+page+mtime，存 `state/pdf-char-cache/`），只缓存不变的 chars/page_w/page_h；vocab_marks/句子框（依赖可变掌握度）每次现算。重复打开同页 387ms→13ms。
+
+### 14.5 模块作用域 vs 内联 onclick 全局（反复踩！）
+`<script type="module">` 里的 `function foo(){}` **不是全局**，HTML 内联 `onclick="foo()"` 在全局作用域跑 → 找不到 → 静默失败。已中招：`openLangPicker`/`saveLangPicker`（🌐 按钮）、`_ttsWord`（完整字典 🔊 无声）。**规则：任何要被内联 onclick 调的函数必须 `window.xxx = xxx`**。小框 🔊 没事是因为走的是 `window._speakCurWord`（它内部再调模块函数 OK）。
+
+### 14.6 点词竞态
+快速点不同词时，前一个慢请求（未缓存日语词要现调 AI）的响应晚到会覆盖当前词。修：`_wordPopSeq` 序号守卫，await 回来若序号已变就丢弃旧响应（catch 分支也守）。
+
+### 14.7 解释/句子要按句号断，不按逗号
+`_expandSentenceFromRange` 原来「跨 rawdict 块就断」。日语 justified 排版把同一视觉行拆成多块（同行的「…解き,」「それら…」），按块断会在**逗号**处截断、到不了句号。改为「**跨块 _且_ 跨视觉行才断**」+ 段落大行距兜底：同行拆块继续到 。，标题/邻段（不同行+不同块）仍断开。真实数据验证：直近那句跨逗号到 。，複/構成 句仍正确排除上方绿色标题。
+
+### 14.8 多选翻译显示错位 + 自动弹 + 提速
+- **显示错位**：原地白底覆盖 `_drawSentenceOverlay` 把中文塞进按原文日语行切的 clip-path，中日长度/换行不一致必错位溢出。**弃用**，改 `showSentenceTranslation` 干净浮层（锚句首，原文+中文，无对齐问题）；`toggleSentenceOverlay` 与 `onTranslate` 都走它。
+- **自动弹**：翻完直接弹浮层（带译文秒显），不靠手点。
+- **提速** 5s→~1s：见 [`google-cloud-apis.md`](google-cloud-apis.md)（Google Translate 首选、CLI 冷启动/热进程结论、translate.py 两个 guard 坑）。
+
+### 14.9 日语发音
+有道 dictvoice 是英语库 → 日语无声。改 `_speakOnline` 日语分流到浏览器原生 `speechSynthesis` **ja-JP**（iPad 自带 Kyoko，离线，念假名读音保证读对；iOS getVoices 暂空时靠 `u.lang='ja-JP'` 路由）。免费真人录音离线日语词典基本不存在（Forvo 要联网+key），合成音够用。
