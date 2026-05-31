@@ -509,33 +509,17 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
         sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
 
 
-@bp.route("/api/page-chars")
-def pdf_api_page_chars():
-    """提取该页所有字符的精确 bbox（PDF 坐标）。
-    前端按这个画 char-level overlay 接管选中事件，绕开 PDF.js textLayer 字符位置不准。
-
-    返回：{chars: [{c, x0, y0, x1, y1}], page_w, page_h}
-    """
-    rel = request.args.get("file", "")
-    page = int(request.args.get("page", "0") or "0")
-    abs_path = _safe_vault_path(rel)
-    if not abs_path or page < 1:
-        return jsonify({"ok": False, "error": "invalid"}), 400
+def _compute_page_chars(abs_path, page: int):
+    """提取该页所有字符 bbox + 词 id(rawdict + PyMuPDF words + fugashi 分词)。
+    只依赖 (文件内容, 页码) → 可缓存。返回 (chars, page_w, page_h) 或 None(越界)。"""
+    import fitz
+    doc = fitz.open(str(abs_path))
     try:
-        import fitz
-    except ImportError:
-        return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
-    doc = None
-    try:
-        doc = fitz.open(str(abs_path))
         if page > len(doc):
-            return jsonify({"ok": False, "error": "page out of range"}), 400
+            return None
         p = doc[page - 1]
         raw = p.get_text("rawdict")
-        # 词级提取：PyMuPDF 已按字形+间距分好词（比前端拿字符自己拼可靠）→ 给每个 char 标它属于哪个词，
-        # 前端据此判词边界，根治连字/紧排/粘连导致的选词错乱（如 often 被排成 etn）
         words_raw = p.get_text("words")   # (x0,y0,x1,y1, text, block_no, line_no, word_no)
-        # 按行分桶加速：char 先按 y 找候选行的词，再判 x（避免每个 char 扫全部词）
         _wbuckets: dict = {}
         for _wi, _w in enumerate(words_raw):
             _wid = _w[5] * 1000000 + _w[6] * 1000 + _w[7]
@@ -563,21 +547,78 @@ def pdf_api_page_chars():
                         if not c:
                             continue
                         c = _LIGATURES.get(c, c)   # 还原连字 ﬁ→fi，免得词在此被断
-                        # 保留空格（拼接选中文本时需要），但用 sp 标记免得占点击命中
                         chars.append({
                             "c": c,
                             "x0": round(bbox[0], 2), "y0": round(bbox[1], 2),
                             "x1": round(bbox[2], 2), "y1": round(bbox[3], 2),
                             "sp": 1 if c.isspace() else 0,
-                            "w": _word_id((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),  # 所属词 id
-                            "b": 1 if _bold else 0,   # 加粗：整句加粗的练习指令/演示句/小标题排除用
-                            "bk": _block_i,           # rawdict 块号：切句用(比 word_id 可靠，斜体匹配失败也不丢块)
+                            "w": _word_id((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),
+                            "b": 1 if _bold else 0,
+                            "bk": _block_i,
                         })
                 # CJK 行用 fugashi 分词，覆盖前端单击选词用的 word_id 'w'
                 _apply_jp_tokenize(chars, _line_start, len(chars), _block_i, _line_i)
-        # 生成 vocab_marks + 含 ≥2 未掌握词的句子框
+        return chars, p.rect.width, p.rect.height
+    finally:
+        doc.close()
+
+
+def _page_chars_cached(abs_path, rel: str, page: int):
+    """带磁盘缓存的 chars 提取。缓存键含 mtime → PDF 改了自动失效。
+    缓存的是「只依赖文件+页」的不变部分(chars/page_w/page_h);vocab_marks/句子框
+    依赖可变的掌握度/译文/删除态,不缓存,每次从 chars 现算(便宜,无 fitz/rawdict)。
+    返回 (chars, page_w, page_h) 或 None。"""
+    import hashlib
+    try:
+        mtime = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        mtime = 0
+    cdir = CLAUDE_DIR / "state" / "pdf-char-cache"
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    cpath = cdir / f"{sha}-p{page}-{mtime}.json"
+    if cpath.exists():
+        try:
+            d = json.loads(cpath.read_text("utf-8"))
+            return d["chars"], d["page_w"], d["page_h"]
+        except Exception:
+            pass   # 缓存损坏 → 重算
+    res = _compute_page_chars(abs_path, page)
+    if res is None:
+        return None
+    chars, pw, ph = res
+    try:
+        cdir.mkdir(parents=True, exist_ok=True)
+        cpath.write_text(json.dumps({"chars": chars, "page_w": pw, "page_h": ph},
+                                    ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return chars, pw, ph
+
+
+@bp.route("/api/page-chars")
+def pdf_api_page_chars():
+    """提取该页所有字符的精确 bbox（PDF 坐标）。
+    前端按这个画 char-level overlay 接管选中事件，绕开 PDF.js textLayer 字符位置不准。
+
+    返回：{chars: [{c, x0, y0, x1, y1}], page_w, page_h}
+    """
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
+    try:
+        res = _page_chars_cached(abs_path, rel, page)
+        if res is None:
+            return jsonify({"ok": False, "error": "page out of range"}), 400
+        chars, page_w, page_h = res
+        # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
         vocab_marks = _build_vocab_marks(chars)
-        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
+        sentences = _build_unmastered_sentences(chars, page_h=page_h)
         for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
             if ts.get("rects") and ts.get("page", page) == page:
                 sentences.append(ts)
@@ -587,8 +628,8 @@ def pdf_api_page_chars():
         resp = jsonify({
             "ok": True,
             "chars": chars,
-            "page_w": p.rect.width,
-            "page_h": p.rect.height,
+            "page_w": page_w,
+            "page_h": page_h,
             "vocab_marks": vocab_marks,
             "vocab_sentences": sentences,
         })
@@ -599,10 +640,6 @@ def pdf_api_page_chars():
         return resp
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
-    finally:
-        if doc:
-            try: doc.close()
-            except Exception: pass
 
 
 def _build_vocab_marks(chars: list[dict]) -> list[dict]:

@@ -890,8 +890,11 @@ async function loadPdf() {
       // 大文件关键:只对实际翻到的页发 Range 请求,不在后台把整本下完。
       // 服务器 /pdf/file 支持 byte-range(conditional=True),几百 MB 的 PDF
       // 浏览器只持有当前页,iPad Safari 不再 OOM。
+      // ⚠ PDF.js 官方:disableAutoFetch(禁后台预取)必须 **同时** disableStream:true 才生效!
+      // 之前 disableStream:false → 仍后台流式下载整本 408MB(进度条跑的就是整本),
+      // disableAutoFetch 形同虚设 → 打开慢。range 已确认 206 可用,关 stream 纯按需取。
       disableAutoFetch: true,
-      disableStream: false,
+      disableStream: true,
       rangeChunkSize: 262144,   // 256KB 一块
     });
     task.onProgress = (p) => {
