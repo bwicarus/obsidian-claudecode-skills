@@ -57,6 +57,42 @@ def _cache_put(text: str, target: str, tr: str, source: str):
         pass
 
 
+def _gcp_key() -> str:
+    """GCP API key:env 优先(GOOGLE_VISION_API_KEY/GCP_API_KEY),回落 ~/.config/gcp-vision-key
+    (跟 Vision/STT 共用同一 key)。"""
+    k = os.environ.get("GOOGLE_VISION_API_KEY") or os.environ.get("GCP_API_KEY")
+    if k:
+        return k.strip()
+    try:
+        from pathlib import Path
+        return Path("/home/bwicarus/.config/gcp-vision-key").read_text("utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _gtranslate(text: str, target: str = "zh-CN") -> str | None:
+    """Google Cloud Translation v2。~0.3s、质量高、走 GCP 赠金。
+    需在 GCP 控制台:① 启用 Cloud Translation API ② 给该 key 的「API 限制」放行 Translation。
+    未放行会 403(API_KEY_SERVICE_BLOCKED)→ 返回 None,auto 链自动回落 mymemory。
+    source 不指定 → 让 Google 自动检测(en/ja/… 都准),target=zh-CN。"""
+    key = _gcp_key()
+    if not key:
+        return None
+    tgt = "zh-CN" if target.startswith("zh") else target
+    try:
+        data = urllib.parse.urlencode(
+            {"q": text, "target": tgt, "format": "text", "key": key}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://translation.googleapis.com/language/translate/v2", data=data)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        trs = ((d.get("data") or {}).get("translations") or [])
+        tr = (trs[0].get("translatedText", "").strip() if trs else "")
+        return tr or None
+    except Exception:
+        return None
+
+
 def _deepl(text: str, target: str = "zh-CN") -> str | None:
     key = _cfg().get("deepl_key", "").strip()
     if not key:
@@ -183,12 +219,16 @@ def translate(text: str, target: str = "zh-CN",
         sources = ["ai"]
     elif backend == "mymemory":
         sources = ["mymemory"]
-    else:  # auto:先免费即时源(deepl 无 key 自动跳过 → mymemory ~0.5s),失败才用 AI(慢但稳)
-        sources = ["deepl", "mymemory", "ai"]
+    elif backend in ("gtranslate", "google"):
+        sources = ["gtranslate"]
+    else:  # auto:Google 翻译优先(快~0.3s+质量高+走赠金,key 未放行则自动跳过)→ mymemory → AI 兜底
+        sources = ["gtranslate", "deepl", "mymemory", "ai"]
 
     for src in sources:
         tr = None
-        if src == "deepl":
+        if src == "gtranslate":
+            tr = _gtranslate(text, target)
+        elif src == "deepl":
             tr = _deepl(text, target)
         elif src == "ai":
             tr = _ai_translate(text, target, model=model, effort=effort)
