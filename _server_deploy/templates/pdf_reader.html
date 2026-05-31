@@ -380,6 +380,12 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #hl-color-picker .swatch{width:17px;height:17px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;flex-shrink:0;transition:border-color .12s,transform .12s,box-shadow .12s}
 /* 选中句子(多词)按钮加大；单词小框发音按钮 */
 #sel-btns-multi button{padding:9px 18px;font-size:14px}
+/* 短词组：词组按钮高亮 + 呼吸；选中高亮框呼吸（完成后常亮） */
+#sel-phrase-btn{background:#244470 !important;border-color:#6fd3ff !important;color:#cfe6ff !important}
+#sel-phrase-btn.breathe{animation:phrase-breathe 1.1s ease-in-out infinite}
+@keyframes phrase-breathe{0%,100%{box-shadow:0 0 0 0 rgba(111,211,255,.0)}50%{box-shadow:0 0 0 3px rgba(111,211,255,.45)}}
+.sel-overlay.phrase-breathe .hl{animation:sel-breathe 1.1s ease-in-out infinite}
+@keyframes sel-breathe{0%,100%{opacity:.45}50%{opacity:.9}}
 #word-pop .wp-speak{background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}
 #word-pop .wp-speak:hover{background:#244470;color:#fff}
 #hl-color-picker .swatch:hover{border-color:#fff;transform:scale(1.08)}
@@ -562,8 +568,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
           <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
           <button onclick="onLookupWord()" title="查词典">🔍 查词</button>
         </div>
-        <!-- 多词/句子选中：翻译 + 解释 -->
+        <!-- 多词/句子选中：翻译 + 解释；短词组额外显示「词组」按钮 -->
         <div class="btns" id="sel-btns-multi" style="display:none">
+          <button id="sel-phrase-btn" onclick="onPhrase()" title="当作词组：看释义/翻译 + 收藏作分词依据" style="display:none">📘 词组</button>
           <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
           <button onclick="onTranslate()">🌐 翻译</button>
           <button onclick="onExplain()">💡 解释</button>
@@ -993,6 +1000,7 @@ async function loadPdf() {
     renderHlPicker();
     loadGrammarTracked();   // 拉该 PDF 的语法跟踪节点（影响工具栏按钮显示）
     loadBookLangs();        // 拉本书语言声明(影响点词查词典路由)
+    _loadPhraseFavs();      // 拉收藏词组（词组按钮收藏态 + 分词依据）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
     if (readMode === 'continuous') {
       await setupContinuousMode();
@@ -3257,6 +3265,114 @@ function _updateToolbarMode(text) {
   const m = document.getElementById('sel-btns-multi');
   if (w) w.style.display = isWord ? 'flex' : 'none';
   if (m) m.style.display = isWord ? 'none' : 'flex';
+  // 短词组（F6）：显示「📘词组」按钮 + 呼吸高亮（完成后约 1.6s 转常亮）
+  const phrase = !isWord && _isShortPhrase(t);
+  const pb = document.getElementById('sel-phrase-btn');
+  if (pb) { pb.style.display = phrase ? '' : 'none'; pb.classList.toggle('breathe', phrase); }
+  _setSelPhraseBreathe(phrase);
+}
+
+// 短词组判定：中日 2-8 字(无句末标点) / 拉丁 2-5 词且不太长(无句末标点)
+function _isShortPhrase(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (/[。！？、，.!?]$/.test(t)) return false;
+  if (/[぀-ヿ㐀-鿿]/.test(t)) {
+    return t.length >= 2 && t.length <= 8 && !/[。！？、，.!?]/.test(t);
+  }
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.length >= 2 && words.length <= 5 && t.length <= 40;
+}
+let _phraseBreatheTimer = null;
+function _setSelPhraseBreathe(on) {
+  clearTimeout(_phraseBreatheTimer);
+  document.querySelectorAll('.sel-overlay').forEach(o => o.classList.toggle('phrase-breathe', on));
+  if (on) {   // 呼吸 1.6s 后转常亮（去掉动画类，高亮保持）
+    _phraseBreatheTimer = setTimeout(() => {
+      document.querySelectorAll('.sel-overlay.phrase-breathe').forEach(o => o.classList.remove('phrase-breathe'));
+    }, 1600);
+  }
+}
+
+// ──────── F6 词组：收藏（作分词依据）+ 词组详情面板 ────────
+let _phraseFavSet = new Set();
+async function _loadPhraseFavs() {
+  try { const d = await (await fetch('/pdf/api/phrases')).json(); if (d.ok) _phraseFavSet = new Set(d.phrases || []); } catch (_) {}
+}
+window.onPhrase = () => {
+  const t = (lastSelText || '').trim();
+  if (t) showPhrasePopover(t);
+};
+window.showPhrasePopover = async (text) => {
+  const pop = document.getElementById('word-pop');
+  toolbar.classList.remove('open');
+  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: ''};
+  pop.style.display = 'block';
+  window._wordPopOpenAt = Date.now();
+  pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
+  _positionWordPop(pop);
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const isJa = _isJaWord(text);
+  let zh = '', reading = '', accent = null;
+  try {
+    if (isJa) {
+      const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
+      if (d.ok) { zh = d.zh || ''; reading = d.reading || ''; accent = (d.accent != null ? d.accent : null); }
+    }
+    if (!zh) {
+      const d = await (await fetch('/pdf/api/translate-sentence', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}),
+      })).json();
+      if (d.ok) zh = d.zh || '';
+    }
+  } catch (_) {}
+  _wordPopState.reading = reading;
+  const phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
+    : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
+  const fav = _phraseFavSet.has(text);
+  pop.innerHTML =
+    '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
+    (reading ? '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' : '') + '</div>' +
+    '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
+    '<div class="wp-actions">' +
+    '<button id="phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_phraseFav(this)">' +
+    (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+    '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
+    '</div>';
+};
+window._phraseFav = (btn) => {
+  const s = _wordPopState; if (!s || !s.word) return;
+  const t = s.word;
+  const has = _phraseFavSet.has(t);
+  if (btn) btn.disabled = true;
+  fetch('/pdf/api/phrases', {
+    method: has ? 'DELETE' : 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: t}),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      _phraseFavSet = new Set(d.phrases || []);
+      const nowFav = _phraseFavSet.has(t);
+      if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
+      _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
+      refreshCharsWForAllPages();   // 让分词合并立即生效
+    } else if (btn) { btn.disabled = false; }
+  }).catch(() => { if (btn) btn.disabled = false; });
+};
+// 收藏/取消后重拉各已渲染页 chars 的 w（原地更新，不重建 char-layer）→ 单击立即按新词组边界选
+async function refreshCharsWForAllPages() {
+  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
+  for (const pw of wraps) {
+    const num = parseInt(pw.dataset.pageNum || '0', 10);
+    if (!num || !pw.__charBoxes) continue;
+    try {
+      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER)).json();
+      if (!d.ok || !d.chars) continue;
+      const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
+      for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+      pw.__vocabMarks = d.vocab_marks || pw.__vocabMarks;
+      try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+    } catch (_) {}
+  }
 }
 
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──

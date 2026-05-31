@@ -768,6 +768,7 @@ def pdf_api_page_chars():
         if res is None:
             return jsonify({"ok": False, "error": "page out of range"}), 400
         chars, page_w, page_h, furigana = res
+        _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）；live 应用不进缓存
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
         vocab_marks = _build_vocab_marks(chars)
         vocab_marks += _build_jp_vocab_marks(chars)   # 日语生词下划线(查过的 JP 词)
@@ -962,6 +963,59 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
                               "label_slug": slug, "rects": rects, "jp": True})
         i = j
     return marks
+
+
+# ── 收藏词组（state/pdf-phrases.json）：作为之后分词依据，合并成单个 w（单击选中整词组）──
+_PHRASES_PATH = CLAUDE_DIR / "state" / "pdf-phrases.json"
+
+
+def _phrases_load() -> list:
+    try:
+        d = json.loads(_PHRASES_PATH.read_text("utf-8"))
+        return [p for p in (d.get("phrases") or []) if isinstance(p, str) and p.strip()]
+    except Exception:
+        return []
+
+
+def _phrases_save(lst: list):
+    try:
+        _PHRASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PHRASES_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"phrases": lst}, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(_PHRASES_PATH)
+    except Exception:
+        pass
+
+
+def _merge_favorite_phrases(chars: list[dict]) -> None:
+    """把收藏词组在该页出现处的 chars 合并成同一个 w（含内部空格）→ 单击选词时整词组一起选。
+    空白不敏感 + ASCII 大小写不敏感匹配；按收藏长度降序优先，used 标记防重叠。"""
+    favs = _phrases_load()
+    if not favs or not chars:
+        return
+    nonsp = [(i, ch.get("c", "")) for i, ch in enumerate(chars) if not ch.get("sp")]
+    if not nonsp:
+        return
+    compact = "".join(c for _i, c in nonsp).lower()
+    cidx = [i for i, _c in nonsp]
+    used = [False] * len(chars)
+    wn = 0
+    for ph in sorted(set(favs), key=len, reverse=True):
+        p = re.sub(r"\s+", "", ph).lower()
+        if len(p) < 2:
+            continue
+        start = 0
+        while True:
+            k = compact.find(p, start)
+            if k < 0:
+                break
+            i0 = cidx[k]; i1 = cidx[k + len(p) - 1]
+            if not any(used[i0:i1 + 1]):
+                wid = 900000000 + wn; wn += 1
+                for j in range(i0, i1 + 1):
+                    chars[j]["w"] = wid
+                    used[j] = True
+            start = k + 1
 
 
 def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10, page_h: float = 0) -> list[dict]:
@@ -1364,6 +1418,7 @@ def pdf_api_page_vocab_marks():
                             "sp": 1 if c.isspace() else 0,
                         })
                 _apply_jp_tokenize(chars, _ls, len(chars), _bi, _li)   # CJK 行补 w（JP 生词下划线要按词）
+        _merge_favorite_phrases(chars)   # 收藏词组合并 w
         # 强制刷新 vocab_index（防 vocab note 刚写完缓存还旧）
         try:
             import sys as _sys
@@ -1662,6 +1717,29 @@ def pdf_api_book_langs_set():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "langs": langs})
+
+
+@bp.route("/api/phrases", methods=["GET", "POST", "DELETE"])
+def pdf_api_phrases():
+    """收藏词组（全局，作为分词依据）。
+    GET → {ok, phrases:[...]}
+    POST {text} → 添加；DELETE {text} → 删除。"""
+    if request.method == "GET":
+        return jsonify({"ok": True, "phrases": _phrases_load()})
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text or len(text) > 60:
+        return jsonify({"ok": False, "error": "invalid text"}), 400
+    lst = _phrases_load()
+    if request.method == "POST":
+        if text not in lst:
+            lst.append(text)
+            _phrases_save(lst)
+        return jsonify({"ok": True, "phrases": lst, "added": text})
+    # DELETE
+    lst = [p for p in lst if p != text]
+    _phrases_save(lst)
+    return jsonify({"ok": True, "phrases": lst, "removed": text})
 
 
 @bp.route("/api/dict-quick")
