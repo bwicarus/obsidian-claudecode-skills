@@ -1239,7 +1239,10 @@ function _setupPageScrub() {
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', () => { st = null; pop.style.display = 'none'; });
 }
-window.addEventListener('DOMContentLoaded', _setupPageScrub);
+// ⚠ 本 module 顶部有 top-level await(import pdf.mjs),它**不延迟 DOMContentLoaded** →
+// await 之后(本行)再绑 DOMContentLoaded 已晚、永不触发。故:DOM 已就绪就直接调。
+if (document.readyState !== 'loading') _setupPageScrub();
+else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(0.6, Math.min(_scaleMax, scale + delta));
   if (readMode === 'continuous') await setupContinuousMode();
@@ -1523,7 +1526,8 @@ function _setupResizeWatcher() {
     window.addEventListener('resize', () => _scheduleRefit(false));
   }
 }
-window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
+if (document.readyState !== 'loading') _setupResizeWatcher();
+else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {
@@ -1591,7 +1595,8 @@ function _setupPinchZoom() {
   main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
   main.addEventListener('touchcancel', endPinch, { passive: false });
 }
-window.addEventListener('DOMContentLoaded', _setupPinchZoom);
+if (document.readyState !== 'loading') _setupPinchZoom();
+else window.addEventListener('DOMContentLoaded', _setupPinchZoom);
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
@@ -5659,7 +5664,8 @@ function _applyDebugVisibility() {
 }
 // 启动时按 localStorage 设 debug 显示（默认隐藏）
 if (localStorage.getItem('pdf-debug') !== '1') {
-  document.addEventListener('DOMContentLoaded', _applyDebugVisibility);
+  if (document.readyState !== 'loading') _applyDebugVisibility();
+  else document.addEventListener('DOMContentLoaded', _applyDebugVisibility);
   setTimeout(_applyDebugVisibility, 0);
 }
 
