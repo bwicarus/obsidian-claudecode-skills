@@ -135,8 +135,10 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 | GET | `/api/fitness/subtitles/<vid>/status?source=` | 只查 cache |
 
 **source**:
-- `auto`(默认):YT 自带 caption + Gemini Flash 翻译(~5s 首次,秒出缓存)
+- `auto`(默认):YT 自带 caption + 翻译(~1s 首次,秒出缓存)
 - `stt`:Cloud Speech-to-Text 重新转录 + 翻译(~30-60s,烧赠金,质量高)
+
+> 翻译链路(2026-05-31 起):`youtube_subtitles._translate_all` = **Google Cloud Translation 批量优先**(`translate.gtranslate_batch`,v2 一次多段、走 GCP 赠金、EN→ZH 质量高、整集一两秒)→ Gemini Flash(赠金常 429,基本失效)→ Claude 兜底。之前主用 Gemini,因「prepayment depleted」长期退化到慢的 Claude;Google Translation API 放行后改它首选。详见 [`google-cloud-apis.md`](google-cloud-apis.md)。
 
 ### AI 教练
 

@@ -192,6 +192,8 @@ PDF 阅读器多选句子的 🌐 翻译走 `scripts/vocab/translate.py`,链路 
 
 **`_gtranslate`**:Cloud Translation **v2** REST,POST `https://translation.googleapis.com/language/translate/v2`,form 参数 `q / target=zh-CN / format=text / key=<GCP key>`,**不传 source**(让 Google 自动检测,en/ja 都准),~0.3s、走赠金。key 复用 `~/.config/gcp-vision-key`。
 
+**`gtranslate_batch(texts)`**:v2 批量(一次多段,按段数 64 + 累计 3000 字分块)。**视频字幕翻译**用它(`youtube_subtitles._translate_all` 首选 Google → Gemini → Claude;之前主用 Gemini 因 429 长期退化到慢 Claude)。整集字幕一两秒、EN→ZH 质量高,quota 日志记为 `translate` service。
+
 ### 踩坑:`API_KEY_SERVICE_BLOCKED`(key 的 API 限制没放行)
 - 现象:403 `PERMISSION_DENIED` + `reason: API_KEY_SERVICE_BLOCKED` + `service: translate.googleapis.com`。**不是**配额/计费问题。
 - 根因:该 key 的「API 限制」白名单里没有 Cloud Translation。
