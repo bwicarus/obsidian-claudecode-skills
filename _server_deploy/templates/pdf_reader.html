@@ -1822,6 +1822,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   // 振假名/音标叠加（后端 page-chars 已返回 furigana：日语 unidic 读音 + 英文 ECDICT 音标）
   wrap.__furigana = d.furigana || [];
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
+  try { renderPhraseHl(wrap); } catch(_) {}   // 词组持久高亮：重渲染后从状态恢复（防"自动消失"）
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
   // 全文搜索跳转：本页刚好是待高亮页 → 此处 __charBoxes 已赋值，直接画（不走轮询，秒级到位）
@@ -3401,32 +3402,63 @@ window.onPhrase = () => {
   const t = (lastSelText || '').trim();
   if (t) showPhrasePopover(t);
 };
-// 词组持久高亮：选中短词组(拖选结束)时把 sel-overlay 的 .hl 克隆到独立 .phrase-hl-layer。
-// 该层独立于选词逻辑 → 点空白、点其他词都不消失。高亮**可点击**：点它 → 打开词组结果并移除高亮。
-// 自带词组文本(lastSelText 会被点空白清掉，所以存在 layer 上)。breathe 1.6s 后转常亮，一直留到被点开。
+// 词组持久高亮：**状态驱动**——存 PDF pt 坐标 + 文本到 _activePhraseHl，每次页面渲染由
+// renderPhraseHl 重画(像 vocab 下划线)。→ 任何重渲染(refit/缩放/重观察)后都自动恢复，
+// 绝不"定时自动消失"；独立于选词逻辑(点空白/选别词都不动它)；高亮可点 → 点它才打开结果并清除。
 let _phraseHlTimer = null;
+let _activePhraseHl = null;   // {page, text, rects:[[x0,y0,x1,y1]pt...]}
+function _charRangeToPtRects(chars, s, e) {
+  if (s > e) { const t = s; s = e; e = t; }
+  const rects = []; let cur = null;
+  for (let i = s; i <= e && i < chars.length; i++) {
+    const c = chars[i];
+    if (c.sp || c._x0 == null) continue;
+    const lh = (c._y1 - c._y0) || 1;
+    if (cur && Math.abs(c._y0 - cur[1]) <= lh * 0.6) {
+      cur[2] = Math.max(cur[2], c._x1); cur[1] = Math.min(cur[1], c._y0); cur[3] = Math.max(cur[3], c._y1);
+    } else { if (cur) rects.push(cur); cur = [c._x0, c._y0, c._x1, c._y1]; }
+  }
+  if (cur) rects.push(cur);
+  return rects;
+}
+function renderPhraseHl(pw) {
+  pw.querySelector('.phrase-hl-layer')?.remove();
+  const a = _activePhraseHl;
+  if (!a || !a.rects || !a.rects.length) return;
+  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const layer = document.createElement('div');
+  layer.className = 'phrase-hl-layer breathe';
+  for (const r of a.rects) {
+    const d = document.createElement('div'); d.className = 'hl';
+    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+    layer.appendChild(d);
+  }
+  layer.addEventListener('click', (e) => { e.stopPropagation(); showPhrasePopover(a.text); });
+  pw.appendChild(layer);
+  clearTimeout(_phraseHlTimer);
+  _phraseHlTimer = setTimeout(() => layer.classList.remove('breathe'), 1600);   // 呼吸 1.6s → 常亮(只停呼吸，不移除)
+}
 function _removePhraseHighlight() {
+  _activePhraseHl = null;
   clearTimeout(_phraseHlTimer);
   document.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());
 }
 function _showPhraseHighlight(pw) {
-  _removePhraseHighlight();   // 同一时刻只一个
-  if (!pw) return null;
-  const sel = pw.querySelector('.sel-overlay');
-  const hls = sel ? sel.querySelectorAll('.hl') : [];
+  if (!pw || !_charSel || !pw.__charBoxes) return null;
   const text = (lastSelText || '').trim();
-  if (!hls.length || !text) return null;
-  const layer = document.createElement('div');
-  layer.className = 'phrase-hl-layer breathe';
-  layer.dataset.phraseText = text;   // 记住自己的词组文本（点开时用，不依赖会被清的 lastSelText）
-  hls.forEach(h => layer.appendChild(h.cloneNode(true)));
-  // 点高亮 → 打开词组结果（用存的文本）。click 在 tap 时触发、拖动滚动时不触发
-  layer.addEventListener('click', (e) => { e.stopPropagation(); showPhrasePopover(layer.dataset.phraseText); });
-  pw.appendChild(layer);
-  sel.innerHTML = '';   // 移交给持久层，避免双重高亮；selection 状态(_charSel/lastSelText)不动
-  clearTimeout(_phraseHlTimer);
-  _phraseHlTimer = setTimeout(() => layer.classList.remove('breathe'), 1600);   // 呼吸 1.6s → 常亮(持久)
-  return layer;
+  if (!text) return null;
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  if (!rects.length) return null;
+  _activePhraseHl = {page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects};
+  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层，避免双重高亮
+  renderPhraseHl(pw);
+  return true;
 }
 window.showPhrasePopover = async (text) => {
   const pop = document.getElementById('word-pop');
