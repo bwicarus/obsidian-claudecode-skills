@@ -515,7 +515,7 @@ def _furigana_item(surface: str, reading: str, tchars: list) -> dict | None:
     except (ValueError, KeyError):
         return None
     return {"x0": round(x0, 2), "y0": round(y0, 2),
-            "x1": round(x1, 2), "y1": round(y1, 2), "rt": reading}
+            "x1": round(x1, 2), "y1": round(y1, 2), "rt": reading, "wd": surface}
 
 
 # 日语助动词/助词 → 中文语法标签（变形分析用）。lemma 或 surface 命中即取。
@@ -614,6 +614,7 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
         prev_surf = ""        # 上一 token 表层（日计数器读音判定用）
         prev_pos1 = ""        # 上一 token 词性（サ变 名詞+する 合并判定）
         prev_wid = None
+        prev_is_num = False   # 上一 token 是数字（量词读音随数字变，只对 数字+量词 标 ctx）
         for wn, w in enumerate(tagger(line_text)):
             surf = w.surface or ""
             wlen = len(surf)
@@ -654,8 +655,14 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
                     reading = "か" if n in _JP_DAY_KA else ("ついたち" if n == 1 else "にち")
                 item = _furigana_item(surf, reading, tok_chars)
                 if item:
+                    # 量词(接尾辞,如 日/人/本/月/回)读音随前面数字变(365日=にち vs 三日=みっか)，
+                    # unidic 常给错 → 标 ctx=数字+量词，留给 AI 按上下文校正(通用,不硬编码每个量词)。
+                    # 只对【数字+量词】标(排除 正規化/正規形 这类名词后缀,它们读音本就对)
+                    if p1 == "接尾辞" and prev_is_num and prev_surf:
+                        item["ctx"] = prev_surf + surf
                     furigana_out.append(item)
-            prev_surf = surf; prev_pos1 = p1; prev_wid = wid
+            _is_num = (p2 == "数詞") or surf.isdigit() or bool(surf) and all(ch in "〇零一二三四五六七八九十百千万億兆" for ch in surf)
+            prev_surf = surf; prev_pos1 = p1; prev_wid = wid; prev_is_num = _is_num
             char_ptr += wlen
     except Exception as ex:
         sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
@@ -703,7 +710,7 @@ def _build_en_furigana(chars: list) -> list:
                         x0 = min(c["x0"] for c in cur_chars); y0 = min(c["y0"] for c in cur_chars)
                         x1 = max(c["x1"] for c in cur_chars); y1 = max(c["y1"] for c in cur_chars)
                         out.append({"x0": round(x0, 2), "y0": round(y0, 2),
-                                    "x1": round(x1, 2), "y1": round(y1, 2), "rt": p})
+                                    "x1": round(x1, 2), "y1": round(y1, 2), "rt": p, "wd": word})
                     except (ValueError, KeyError):
                         pass
         cur_chars.clear()
@@ -792,8 +799,8 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 4   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
-                      # (v2: 修坏缓存全 w=-1; v3: 振假名完整读音; v4: 动词链合并 w + 日计数器读音)
+_CHAR_CACHE_VER = 6   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+                      # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
@@ -2028,6 +2035,82 @@ def pdf_api_dict_jp_zh():
         "examples": [{"ja": e.get("ja", ""), "zh": e.get("zh", "")} for e in exs],
         "kanji": [{"kanji": k.get("kanji", ""), "meanings_zh": k.get("meanings_zh", "")} for k in kanji],
     })
+
+
+_FURIFIX_DIR = CLAUDE_DIR / "state" / "pdf-furigana-fix"
+
+
+def _furifix_path(rel: str, page: int, mtime: int) -> Path:
+    import hashlib
+    _FURIFIX_DIR.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    return _FURIFIX_DIR / f"{sha}-p{page}-{mtime}.json"
+
+
+@bp.route("/api/furigana-verify")
+def pdf_api_furigana_verify():
+    """振假名读音**按整页上下文 AI 校正**（通用解决计数器/熟字训/多音字读错，不硬编码）。
+    GET ?file=&page= → {ok, fixes:[{i, r}]}（i=furigana 下标, r=纠正后平假名；只列改了的）。
+    每页缓存(mtime 键)永久；前端 ruby 渲染后台调一次，拿 fixes 原地替换。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz  # noqa: F401
+        mtime = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        mtime = 0
+    fpath = _furifix_path(rel, page, mtime)
+    if fpath.exists():
+        try:
+            return jsonify({"ok": True, "cached": True, "fixes": json.loads(fpath.read_text("utf-8"))})
+        except Exception:
+            pass
+    res = _page_chars_cached(abs_path, rel, page)
+    if res is None:
+        return jsonify({"ok": False, "error": "page out of range"}), 400
+    chars, _pw, _ph, furigana = res
+    def _is_kana_rt(s):
+        return bool(s) and all(("぀" <= ch <= "ヿ") or ch == "ー" for ch in s)
+    # 只校「量词读音」(带 ctx 的接尾辞项):这是读音高发错误类，且少而集中 → prompt 极小、AI 快。
+    cnt = [(i, it) for i, it in enumerate(furigana) if it.get("ctx") and _is_kana_rt(it.get("rt", ""))]
+    if not cnt:
+        try: fpath.write_text("[]", "utf-8")
+        except Exception: pass
+        return jsonify({"ok": True, "fixes": []})
+    listing = "\n".join(f"{i}. {it['ctx']}（末尾「{it['wd']}」当前注 {it['rt']}）" for i, it in cnt[:30])
+    prompt = (
+        "下面每行是日语「数字/词 + 量词」组合，末尾量词的假名注音可能有误"
+        "(如 365日 的「日」应读 にち、14日 读 か、3人 读 にん)。请给出**末尾量词**在该组合里的"
+        "正确平假名读音。\n" + listing + "\n\n"
+        '严格只输出 JSON 数组，每项 {"i":行号,"r":"末尾量词的正确平假名"}；'
+        "每行都要给(即使本来就对)。不要解释。"
+    )
+    fixes = []
+    try:
+        raw = _ai_call(prompt, "haiku", "low")
+        m = re.search(r"\[.*\]", raw or "", re.DOTALL)
+        if m:
+            arr = json.loads(m.group(0))
+            valid_idx = {i for i, _ in cnt}
+            for it in arr:
+                if not isinstance(it, dict):
+                    continue
+                try: i = int(it.get("i"))
+                except (TypeError, ValueError): continue
+                r = (it.get("r") or "").strip()
+                if i in valid_idx and r and _is_kana_rt(r) and len(r) <= 12:
+                    if r != furigana[i].get("rt", ""):
+                        fixes.append({"i": i, "r": r})
+    except Exception as ex:
+        sys.stderr.write(f"[furigana-verify] {rel} p{page}: {ex}\n")
+    try:
+        fpath.write_text(json.dumps(fixes, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "fixes": fixes})
 
 
 @bp.route("/api/dict-jp")

@@ -1827,7 +1827,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
   // 振假名/音标叠加（后端 page-chars 已返回 furigana：日语 unidic 读音 + 英文 ECDICT 音标）
   wrap.__furigana = d.furigana || [];
+  wrap.__furiVerified = false;
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
+  if (_rubyEnabled()) _verifyFurigana(wrap);   // 振假名读音 AI 上下文校正(后台,不阻塞)
   try { renderPhraseHl(wrap); } catch(_) {}   // 词组持久高亮：重渲染后从状态恢复（防"自动消失"）
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
@@ -1934,7 +1936,26 @@ function renderRubyLayer(pw) {
 function refreshRubyAllPages() {
   document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
     try { renderRubyLayer(pw); } catch (_) {}
+    if (_rubyEnabled()) _verifyFurigana(pw);
   });
+}
+// 振假名读音 AI 上下文校正：后台调 /api/furigana-verify，拿纠正(计数器/熟字训/多音字)原地重画。
+// 每页只调一次（结果后端按页永久缓存）；不阻塞渲染。
+async function _verifyFurigana(pw) {
+  if (!_rubyEnabled() || !pw || pw.__furiVerified || !(pw.__furigana || []).length) return;
+  const num = parseInt(pw.dataset.pageNum || '0', 10); if (!num) return;
+  pw.__furiVerified = true;
+  try {
+    const d = await (await fetch('/pdf/api/furigana-verify?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json();
+    if (!d.ok || !(d.fixes || []).length) return;
+    let changed = false;
+    for (const f of d.fixes) {
+      if (pw.__furigana && pw.__furigana[f.i] && pw.__furigana[f.i].rt !== f.r) {
+        pw.__furigana[f.i].rt = f.r; changed = true;
+      }
+    }
+    if (changed && _rubyEnabled()) renderRubyLayer(pw);   // 用纠正后的读音重画
+  } catch (_) { pw.__furiVerified = false; }
 }
 window.toggleRuby = () => {
   const on = !_rubyEnabled();
