@@ -1875,10 +1875,87 @@ def pdf_api_dict_quick():
     })
 
 
+def _kanji_fill_zh(kanji: list, do_translate: bool) -> None:
+    """给汉字拆解填 meanings_zh(KANJIDIC 英文字义→中文)。do_translate=False 只读缓存;
+    True 则把未缓存的用 Google batch 翻译并落缓存。"""
+    if not kanji:
+        return
+    try:
+        import sys as _sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in _sys.path:
+            _sys.path.insert(0, str(vp))
+        from translate import gtranslate_batch as _gb, _cache_get as _cg, _cache_put as _cp
+    except Exception:
+        return
+    for k in kanji:
+        ms = k.get("meanings") or []
+        k["_mstr"] = "; ".join(ms) if isinstance(ms, list) else str(ms)
+        if k["_mstr"]:
+            c = _cg(k["_mstr"], "zh-CN")
+            if c:
+                k["meanings_zh"] = c
+    if do_translate:
+        miss = [k for k in kanji if k.get("_mstr") and not k.get("meanings_zh")]
+        if miss:
+            try:
+                res = _gb([k["_mstr"] for k in miss]) or []
+            except Exception:
+                res = []
+            if len(res) == len(miss):
+                for k, z in zip(miss, res):
+                    z = (z or "").strip()
+                    if z:
+                        k["meanings_zh"] = z
+                        try: _cp(k["_mstr"], "zh-CN", z, "gtranslate")
+                        except Exception: pass
+    for k in kanji:
+        k.pop("_mstr", None)
+
+
+def _jp_dict_bg_translate(word: str, kanji: list) -> None:
+    """后台线程:翻例句(jp_examples_zh translate=True 落缓存) + 汉字字义(_kanji_fill_zh translate=True)。
+    不阻塞 dict-jp 响应;前端随后轮询 /api/dict-jp-zh 拿翻好的结果替换英文。"""
+    import threading
+    def _run():
+        try:
+            ds, _ = _vocab_modules()
+            if ds:
+                ds.jp_examples_zh(word, limit=5, translate=True)
+            _kanji_fill_zh([dict(k) for k in (kanji or [])], do_translate=True)
+        except Exception as ex:
+            sys.stderr.write(f"[dict-jp bg] {word!r}: {ex}\n")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@bp.route("/api/dict-jp-zh")
+def pdf_api_dict_jp_zh():
+    """轮询用:只读缓存返回该词的例句中译 + 汉字字义中译(后台翻完即有)。前端拿来原地替换英文。
+    GET ?word= → {ok, examples:[{ja,zh}], kanji:[{kanji,meanings_zh}]}"""
+    word = (request.args.get("word", "") or "").strip()
+    if not word:
+        return jsonify({"ok": False})
+    ds, _ = _vocab_modules()
+    if not ds:
+        return jsonify({"ok": False})
+    try:
+        exs = ds.jp_examples_zh(word, limit=5, translate=False)
+    except Exception:
+        exs = []
+    kanji = ds.word_kanji_breakdown(word)
+    _kanji_fill_zh(kanji, do_translate=False)
+    return jsonify({
+        "ok": True,
+        "examples": [{"ja": e.get("ja", ""), "zh": e.get("zh", "")} for e in exs],
+        "kanji": [{"kanji": k.get("kanji", ""), "meanings_zh": k.get("meanings_zh", "")} for k in kanji],
+    })
+
+
 @bp.route("/api/dict-jp")
 def pdf_api_dict_jp():
     """日语词「完整字典」离线富内容(JSON,秒回):读音+音调+罗马字+词性+完整中文释义
-    + 5 句母语例句(Tanaka,中译,未译的后台补译) + 汉字拆解(KANJIDIC 音读/训读/字义)。
+    + 5 句母语例句(Tanaka,缓存中译/未译先回退英文+后台补译) + 汉字拆解(KANJIDIC 音读/训读/字义)。
+    例句/汉字字义的中译走后台(_jp_dict_bg_translate)+ 前端轮询 /api/dict-jp-zh 原地替换,不增加首屏等待。
     深入讲解(用法/语感/近义辨析)走 /api/dict-jp-ai SSE,按需触发。"""
     word = (request.args.get("word", "") or "").strip()
     if not word:
@@ -1899,39 +1976,12 @@ def pdf_api_dict_jp():
     except Exception:
         pass
     reading = ra.get("reading") or jp.get("reading", "")
-    # 例句:5 句,**同步翻成中文**(Google batch + 永久缓存,首次~0.3s,之后秒回);
-    # 不再回退英文 + 后台补译(那样首屏会显示英文,跟英文单词例句不一致)
-    exs = ds.jp_examples_zh(word, limit=5, translate=True)
+    # 跟英文单词一致:**秒回**——例句/汉字字义只取已缓存的中文,没翻的先回退英文;
+    # 同时后台翻译(下一次轮询/重开就有中文),不增加首屏等待。前端轮询 /api/dict-jp-zh 自动替换。
+    exs = ds.jp_examples_zh(word, limit=5, translate=False)
     kanji = ds.word_kanji_breakdown(word)
-    # 汉字字义来自 KANJIDIC(英文 list)→ 批量翻成中文 meanings_zh(Google batch + 缓存),
-    # 跟英文单词详情一样统一显示中文(前端优先 meanings_zh,缺失回退英文)
-    try:
-        import sys as _sys
-        vp = CLAUDE_DIR / "scripts" / "vocab"
-        if str(vp) not in _sys.path:
-            _sys.path.insert(0, str(vp))
-        from translate import gtranslate_batch as _gb, _cache_get as _cg, _cache_put as _cp
-        for k in kanji:
-            ms = k.get("meanings") or []
-            k["_mstr"] = "; ".join(ms) if isinstance(ms, list) else str(ms)
-            if k["_mstr"]:
-                c = _cg(k["_mstr"], "zh-CN")
-                if c:
-                    k["meanings_zh"] = c
-        miss = [k for k in kanji if k.get("_mstr") and not k.get("meanings_zh")]
-        if miss:
-            res = _gb([k["_mstr"] for k in miss]) or []
-            if len(res) == len(miss):
-                for k, z in zip(miss, res):
-                    z = (z or "").strip()
-                    if z:
-                        k["meanings_zh"] = z
-                        try: _cp(k["_mstr"], "zh-CN", z, "gtranslate")
-                        except Exception: pass
-        for k in kanji:
-            k.pop("_mstr", None)
-    except Exception as ex:
-        sys.stderr.write(f"[dict-jp] kanji meanings zh fail: {ex}\n")
+    _kanji_fill_zh(kanji, do_translate=False)   # 只读缓存
+    _jp_dict_bg_translate(word, kanji)           # 后台翻例句 + 汉字字义(落缓存)
     return jsonify({
         "ok": True, "jp": True, "word": word,
         "reading": reading, "reading_kata": ra.get("reading_kata", ""),

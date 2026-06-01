@@ -5545,7 +5545,38 @@ const _origRenderPageInto = null;  // 仅占位
 
 // ── 日语词「完整字典」大页面(离线富内容 + 按需 AI 深入)──────────────────
 let _jpKanjiData = [];   // 当前词的汉字拆解,供 chip 点击展开
+let _jpPollTimer = null;   // 例句/汉字字义中译后台轮询替换的计时器
+// 轮询 /api/dict-jp-zh,拿后台翻好的例句/汉字字义中文，原地替换英文（跟英文单词一致，不增加等待）
+function _jpPollZh(word) {
+  clearInterval(_jpPollTimer);
+  let tries = 0;
+  _jpPollTimer = setInterval(async () => {
+    tries++;
+    let d = null;
+    try { d = await (await fetch('/pdf/api/dict-jp-zh?word=' + encodeURIComponent(word))).json(); }
+    catch (_) { d = null; }
+    if (!d || !d.ok) { if (tries >= 10) clearInterval(_jpPollTimer); return; }
+    let pending = false;
+    (d.examples || []).forEach((e, i) => {
+      if (e.zh) {
+        const el = document.querySelector('.jp-ex-zh[data-exi="' + i + '"]:not([data-zhdone])');
+        if (el) { el.textContent = e.zh; el.dataset.zhdone = '1'; }
+      } else pending = true;
+    });
+    (d.kanji || []).forEach((k, i) => {
+      if (k.meanings_zh) {
+        if (_jpKanjiData[i] && !_jpKanjiData[i].meanings_zh) {
+          _jpKanjiData[i].meanings_zh = k.meanings_zh;
+          const chip = document.querySelectorAll('.jp-kanji-chip')[i];
+          if (chip && chip.classList.contains('active')) _jpKanjiTap(i);   // 详情正打开 → 刷新
+        }
+      } else pending = true;
+    });
+    if (!pending || tries >= 10) clearInterval(_jpPollTimer);
+  }, 1500);
+}
 async function dictStreamJP(word, ctx) {
+  clearInterval(_jpPollTimer);   // 取消上一个词的中译轮询，避免串到当前词
   openResult('📖 ' + word, word, '<div class="loading">⏳ 查词中…</div>');
   const myReq = _resultReqId;
   const contentEl = document.getElementById('result-content');
@@ -5577,10 +5608,11 @@ async function dictStreamJP(word, ctx) {
   }
   if ((d.examples || []).length) {
     html += '<div class="jp-sec-label">母语例句</div><div class="jp-ex">';
-    for (const e of d.examples) {
+    d.examples.forEach((e, ei) => {
       html += '<div class="jp-ex-ja">' + esc(e.ja) + '</div>' +
-              '<div class="jp-ex-zh">' + esc(e.zh || e.en || '') + '</div>';
-    }
+              '<div class="jp-ex-zh" data-exi="' + ei + '"' + (e.zh ? ' data-zhdone="1"' : '') + '>' +
+              esc(e.zh || e.en || '') + '</div>';   // 没中译先回退英文，后台翻好由 _jpPollZh 替换
+    });
     html += '</div>';
   }
   html += '<button id="jp-ai-btn" class="jp-ai-btn" onclick="_jpAiDeep(\'' + wq + '\')">✨ AI 深入讲解（用法 / 语感 / 近义辨析）</button>' +
@@ -5588,6 +5620,8 @@ async function dictStreamJP(word, ctx) {
   contentEl.innerHTML = html;
   contentEl.scrollTop = 0;
   if (_jpKanjiData.length) _jpKanjiTap(0);   // 默认展开第一个汉字
+  // 有未翻的例句/汉字字义 → 后台翻 + 轮询替换英文（不增加等待）
+  if ((d.examples || []).some(e => !e.zh) || _jpKanjiData.some(k => !k.meanings_zh)) _jpPollZh(word);
   const va = document.getElementById('vocab-actions');
   if (va) {
     va.className = 'show';
