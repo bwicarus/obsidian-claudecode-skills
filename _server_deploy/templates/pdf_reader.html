@@ -443,6 +443,11 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
 #word-pop .wp-pos-tag{display:inline-block;font-size:10.5px;color:#7a8497;background:#1a2540;border:1px solid #2a3550;border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}
+/* 日语变形分析行（原形 + 语法标签）；word-pop 小框 + 完整字典(result-content)共用 */
+#word-pop .jp-inflect,#result-content .jp-inflect{font-size:12px;color:#9fb4cf;padding:6px 14px 0;line-height:1.5}
+#result-content .jp-inflect{padding:6px 0 0}
+.jp-inflect b{color:#dff1ff;font-weight:600}
+.jp-inflect .jp-inflect-mark{display:inline-block;background:#16352a;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:4px;padding:0 6px;font-size:11px;margin-left:2px}
 #word-pop .wp-def:hover{background:#162045}
 #word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}
 #word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322}
@@ -3620,6 +3625,16 @@ function _renderPitch(reading, accent) {
   return html;
 }
 
+// 日语变形分析 → HTML 行（原形 + 中文语法标签）。word-pop 和完整字典共用。
+function _jpInflectHtml(inf, word) {
+  if (!inf) return '';
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const showBase = inf.base && inf.base !== (word || '');
+  const b = showBase ? '原形 <b>' + esc(inf.base) + '</b>' : '';
+  const m = (inf.marks || []).length ? '<span class="jp-inflect-mark">' + inf.marks.map(esc).join('・') + '</span>' : '';
+  if (!b && !m) return '';
+  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+}
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
@@ -3644,8 +3659,10 @@ window.showWordPopover = async (word, ctx) => {
     _wordPopState.mastered = !!d.mastered;   // 日语掌握开关初始态
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
-    // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ変 等）
+    // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ变 等）
     const posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
+    // 变形分析（日语）：原形 + 语法标签（过去た/否定ない/て形…）
+    const inflectHtml = _jpInflectHtml(d.inflect, word);
     // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
     const phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
@@ -3663,6 +3680,7 @@ window.showWordPopover = async (word, ctx) => {
       phonHtml +
       '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
+      inflectHtml +
       '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
       exHtml +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
@@ -5610,6 +5628,7 @@ async function dictStreamJP(word, ctx) {
     (d.romaji ? '<span class="jp-romaji">' + esc(d.romaji) + '</span>' : '') +
     (d.pos ? '<span class="jp-pos">' + esc(d.pos) + '</span>' : '') + '</div>';
   if (d.zh) html += '<div class="jp-zh">' + esc(d.zh) + '</div>';
+  html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签
   _jpKanjiData = d.kanji || [];
   if (_jpKanjiData.length) {
     html += '<div class="jp-sec-label">汉字（点字看音读/训读）</div><div class="jp-kanji-row">' +

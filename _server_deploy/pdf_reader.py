@@ -514,6 +514,70 @@ def _furigana_item(surface: str, reading: str, tchars: list) -> dict | None:
             "x1": round(x1, 2), "y1": round(y1, 2), "rt": reading}
 
 
+# 日语助动词/助词 → 中文语法标签（变形分析用）。lemma 或 surface 命中即取。
+_JP_AUX_ZH = {
+    "た": "过去/完成", "だ": "过去/完成",
+    "ない": "否定", "ぬ": "否定(书)", "ん": "否定(口语)", "ず": "否定(文语)",
+    "ます": "敬体(礼貌)", "です": "敬体(礼貌)",
+    "たい": "愿望(想…)", "たがる": "(他人)想…",
+    "れる": "被动/可能/自发/尊敬", "られる": "被动/可能/自发/尊敬",
+    "せる": "使役(让…)", "させる": "使役(让…)",
+    "う": "意志/推量(吧)", "よう": "意志/推量(吧)", "まい": "否定意志",
+    "らしい": "推测(似乎)", "そう": "样态/传闻", "よう": "比况/推测",
+    "て": "て形(接续/请求/进行)", "で": "て形(接续)",
+    "ば": "假定(如果…就)", "たら": "假定(…的话)", "なら": "假定(要是)",
+    "ください": "请求(请…)", "下さる": "请求(请…)", "くださる": "请求(请…)",
+    "ちゃう": "完了/不经意(口语)", "じゃう": "完了/不经意(口语)",
+    "って": "引用/口语(=と/と言って)", "という": "称为/叫做",
+    "ながら": "一边…一边", "つつ": "一边…一边(文)",
+}
+# 动词/形容词自身活用形（无助动词时兜底；只标有意义的，基本形/连体形不啰嗦）
+_JP_CFORM_ZH = {
+    "未然形": "未然形(否定/意志接续)", "連用形": "连用形(中止/接续)",
+    "仮定形": "假定形(ば)", "命令形": "命令形(命令)",
+    "意志推量形": "意志/推量形",
+}
+
+
+def _jp_inflection(text: str) -> dict | None:
+    """用 fugashi 分析选中日语文本的变形：还原原形 + 列出变形语法标签(中文)。
+    返回 {base, marks:[中文标签]} 或 None(无动词/形容词=不是变形,如纯名词)。"""
+    tagger = _get_jp_tagger()
+    s = (text or "").strip()
+    if tagger is None or not s:
+        return None
+    try:
+        toks = list(tagger(s))
+    except Exception:
+        return None
+    base = None
+    cform = ""
+    marks: list = []
+    for w in toks:
+        f = w.feature
+        p1 = (getattr(f, "pos1", "") or "")
+        surf = w.surface or ""
+        lemma = (getattr(f, "lemma", "") or surf)
+        if base is None and p1 in ("動詞", "形容詞", "形容動詞"):
+            base = lemma
+            cform = (getattr(f, "cForm", "") or "")
+        elif p1 in ("助動詞", "助詞"):
+            z = _JP_AUX_ZH.get(lemma) or _JP_AUX_ZH.get(surf)
+            if z and z not in marks:
+                marks.append(z)
+    if base is None:
+        return None   # 没动词/形容词 → 不是变形（纯名词等不显示）
+    # 没助动词标记时，用动词/形容词自身活用形兜底（基本形/终止形/连体形不啰嗦）
+    if not marks and cform:
+        head = cform.split("-")[0]
+        z = _JP_CFORM_ZH.get(head)
+        if z:
+            marks.append(z)
+    if base == s and not marks:
+        return None   # 就是原形、无变形 → 不显示
+    return {"base": base, "marks": marks}
+
+
 def _apply_jp_tokenize(chars: list, start: int, end: int,
                        block_i: int, line_i: int, furigana_out: list | None = None) -> None:
     """对 CJK 行(含 ≥1 个 CJK 字符)用 fugashi 分词，覆盖区间内 chars 的 w 字段。
@@ -1809,6 +1873,7 @@ def pdf_api_dict_quick():
             "mora": ra.get("mora"),
             "mastered": bool((_jp_vocab_load().get(word_raw) or {}).get("mastered")),   # 掌握开关初始态
             "pos": jp.get("pos", ""),          # 词性单独给前端(小框里做暗色标签,跟含义区分)
+            "inflect": _jp_inflection(word_raw),   # 变形分析:原形 + 中文语法标签(过去た/否定ない/て形…)
             "translation": (jp.get("zh") or ""),
             "definition": ex_txt,
             "examples": ex,                    # [{ja, zh, en}] 结构化,前端可富渲染
@@ -1968,6 +2033,7 @@ def pdf_api_dict_jp():
         "accent": ra.get("accent"), "mora": ra.get("mora"),
         "romaji": jp.get("romaji", ""), "pos": jp.get("pos", ""),
         "zh": jp.get("zh", ""),
+        "inflect": _jp_inflection(word),   # 变形分析:原形 + 中文语法标签
         "examples": exs,
         "kanji": kanji,
     })
