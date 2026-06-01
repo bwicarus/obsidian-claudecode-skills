@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-02T00:00:13+09:00",
+  "generated_at": "2026-06-02T01:22:19+09:00",
   "notes": [
     {
       "name": "000-向量空间",
@@ -18,14 +18,14 @@
       "anki_learning": 1,
       "anki_review": 13,
       "anki_relearning": 0,
-      "retention": 0.5403,
-      "mastery": 0.2277,
+      "retention": 0.5395,
+      "mastery": 0.2274,
       "reps_total": 55,
       "lapses_total": 1,
-      "priority": 0.7723,
+      "priority": 0.7726,
       "activation": 1.0,
       "importance": 1.0,
-      "weakness": 0.7723
+      "weakness": 0.7726
     },
     {
       "name": "000-Fn",
@@ -45,14 +45,14 @@
       "anki_learning": 0,
       "anki_review": 10,
       "anki_relearning": 0,
-      "retention": 0.9881,
-      "mastery": 0.4316,
+      "retention": 0.9876,
+      "mastery": 0.4314,
       "reps_total": 47,
       "lapses_total": 0,
-      "priority": 0.455,
-      "activation": 0.8951,
+      "priority": 0.4552,
+      "activation": 0.8952,
       "importance": 0.8943,
-      "weakness": 0.5684
+      "weakness": 0.5686
     },
     {
       "name": "000-线性组合",
@@ -70,14 +70,14 @@
       "anki_learning": 0,
       "anki_review": 14,
       "anki_relearning": 0,
-      "retention": 0.8539,
-      "mastery": 0.3616,
+      "retention": 0.853,
+      "mastery": 0.3613,
       "reps_total": 70,
       "lapses_total": 3,
-      "priority": 0.3055,
-      "activation": 0.6909,
+      "priority": 0.3056,
+      "activation": 0.6906,
       "importance": 0.6927,
-      "weakness": 0.6384
+      "weakness": 0.6387
     },
     {
       "name": "000-复数的基本性质",
@@ -96,14 +96,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.9941,
-      "mastery": 0.4369,
+      "retention": 0.9939,
+      "mastery": 0.4368,
       "reps_total": 17,
       "lapses_total": 0,
-      "priority": 0.277,
-      "activation": 0.7087,
+      "priority": 0.2778,
+      "activation": 0.7105,
       "importance": 0.6942,
-      "weakness": 0.5631
+      "weakness": 0.5632
     },
     {
       "name": "000-子空间",
@@ -122,14 +122,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.9752,
-      "mastery": 0.4003,
+      "retention": 0.9741,
+      "mastery": 0.3999,
       "reps_total": 22,
       "lapses_total": 1,
       "priority": 0.2344,
-      "activation": 0.6237,
+      "activation": 0.6233,
       "importance": 0.6267,
-      "weakness": 0.5997
+      "weakness": 0.6001
     },
     {
       "name": "000-F^s",
@@ -149,14 +149,14 @@
       "anki_learning": 0,
       "anki_review": 3,
       "anki_relearning": 0,
-      "retention": 0.7054,
-      "mastery": 0.2853,
+      "retention": 0.7035,
+      "mastery": 0.2846,
       "reps_total": 11,
       "lapses_total": 0,
-      "priority": 0.2188,
-      "activation": 0.5521,
+      "priority": 0.2189,
+      "activation": 0.5519,
       "importance": 0.5545,
-      "weakness": 0.7147
+      "weakness": 0.7154
     },
     {
       "name": "000-线性无关",
@@ -175,14 +175,14 @@
       "anki_learning": 0,
       "anki_review": 14,
       "anki_relearning": 0,
-      "retention": 0.9518,
-      "mastery": 0.4001,
+      "retention": 0.9508,
+      "mastery": 0.3997,
       "reps_total": 52,
       "lapses_total": 0,
-      "priority": 0.2163,
-      "activation": 0.6019,
+      "priority": 0.2165,
+      "activation": 0.6022,
       "importance": 0.599,
-      "weakness": 0.5999
+      "weakness": 0.6003
     },
     {
       "name": "000-组的定义",
@@ -201,14 +201,14 @@
       "anki_learning": 0,
       "anki_review": 5,
       "anki_relearning": 0,
-      "retention": 0.9933,
-      "mastery": 0.4543,
+      "retention": 0.9931,
+      "mastery": 0.4542,
       "reps_total": 21,
       "lapses_total": 0,
-      "priority": 0.1903,
-      "activation": 0.5936,
+      "priority": 0.1906,
+      "activation": 0.5943,
       "importance": 0.5875,
-      "weakness": 0.5457
+      "weakness": 0.5458
     },
     {
       "name": "000-直和",
@@ -227,14 +227,14 @@
       "anki_learning": 0,
       "anki_review": 8,
       "anki_relearning": 0,
-      "retention": 0.9817,
-      "mastery": 0.4106,
+      "retention": 0.9809,
+      "mastery": 0.4103,
       "reps_total": 43,
       "lapses_total": 1,
       "priority": 0.1777,
-      "activation": 0.548,
+      "activation": 0.5478,
       "importance": 0.5502,
-      "weakness": 0.5894
+      "weakness": 0.5897
     },
     {
       "name": "010-泰勒级数",
@@ -253,14 +253,14 @@
       "anki_learning": 0,
       "anki_review": 6,
       "anki_relearning": 0,
-      "retention": 0.9844,
-      "mastery": 0.4068,
+      "retention": 0.9838,
+      "mastery": 0.4065,
       "reps_total": 30,
       "lapses_total": 1,
-      "priority": 0.1612,
-      "activation": 0.5289,
+      "priority": 0.1618,
+      "activation": 0.5307,
       "importance": 0.5138,
-      "weakness": 0.5932
+      "weakness": 0.5935
     },
     {
       "name": "010-链式法则",
@@ -279,14 +279,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.9925,
-      "mastery": 0.4389,
+      "retention": 0.9922,
+      "mastery": 0.4388,
       "reps_total": 17,
       "lapses_total": 0,
-      "priority": 0.1568,
-      "activation": 0.5364,
+      "priority": 0.1574,
+      "activation": 0.5382,
       "importance": 0.5211,
-      "weakness": 0.5611
+      "weakness": 0.5612
     },
     {
       "name": "010-指数函数求导",
@@ -304,14 +304,14 @@
       "anki_learning": 0,
       "anki_review": 5,
       "anki_relearning": 0,
-      "retention": 0.9897,
-      "mastery": 0.4161,
+      "retention": 0.9892,
+      "mastery": 0.4159,
       "reps_total": 30,
       "lapses_total": 1,
-      "priority": 0.1551,
-      "activation": 0.5229,
+      "priority": 0.1557,
+      "activation": 0.5247,
       "importance": 0.508,
-      "weakness": 0.5839
+      "weakness": 0.5841
     },
     {
       "name": "010-导数的定义",
@@ -331,14 +331,14 @@
       "anki_learning": 0,
       "anki_review": 3,
       "anki_relearning": 0,
-      "retention": 0.7385,
-      "mastery": 0.3139,
+      "retention": 0.738,
+      "mastery": 0.3137,
       "reps_total": 12,
       "lapses_total": 0,
-      "priority": 0.125,
-      "activation": 0.4334,
+      "priority": 0.1255,
+      "activation": 0.4349,
       "importance": 0.4205,
-      "weakness": 0.6861
+      "weakness": 0.6863
     },
     {
       "name": "000-减法与除法",
@@ -356,14 +356,14 @@
       "anki_learning": 0,
       "anki_review": 2,
       "anki_relearning": 0,
-      "retention": 0.6553,
-      "mastery": 0.2739,
+      "retention": 0.6548,
+      "mastery": 0.2737,
       "reps_total": 5,
       "lapses_total": 0,
-      "priority": 0.1116,
-      "activation": 0.3951,
+      "priority": 0.1119,
+      "activation": 0.3958,
       "importance": 0.3892,
-      "weakness": 0.7261
+      "weakness": 0.7263
     }
   ],
   "graph": {
@@ -373,10 +373,10 @@
         "wdeg": 6.94,
         "degree": 10,
         "subject": "数学",
-        "priority": 0.455,
-        "weakness": 0.5684,
-        "retention": 0.9881,
-        "mastery": 0.4316,
+        "priority": 0.4552,
+        "weakness": 0.5686,
+        "retention": 0.9876,
+        "mastery": 0.4314,
         "importance": 0.8943,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn",
         "has_cards": true
@@ -386,10 +386,10 @@
         "wdeg": 4.233,
         "degree": 7,
         "subject": "数学",
-        "priority": 0.1903,
-        "weakness": 0.5457,
-        "retention": 0.9933,
-        "mastery": 0.4543,
+        "priority": 0.1906,
+        "weakness": 0.5458,
+        "retention": 0.9931,
+        "mastery": 0.4542,
         "importance": 0.5875,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BB%84%E7%9A%84%E5%AE%9A%E4%B9%89",
         "has_cards": true
@@ -399,10 +399,10 @@
         "wdeg": 7.868,
         "degree": 10,
         "subject": "数学",
-        "priority": 0.7723,
-        "weakness": 0.7723,
-        "retention": 0.5403,
-        "mastery": 0.2277,
+        "priority": 0.7726,
+        "weakness": 0.7726,
+        "retention": 0.5395,
+        "mastery": 0.2274,
         "importance": 1.0,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%90%91%E9%87%8F%E7%A9%BA%E9%97%B4",
         "has_cards": true
@@ -412,10 +412,10 @@
         "wdeg": 4.24,
         "degree": 7,
         "subject": "数学",
-        "priority": 0.277,
-        "weakness": 0.5631,
-        "retention": 0.9941,
-        "mastery": 0.4369,
+        "priority": 0.2778,
+        "weakness": 0.5632,
+        "retention": 0.9939,
+        "mastery": 0.4368,
         "importance": 0.6942,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%A4%8D%E6%95%B0%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%80%A7%E8%B4%A8",
         "has_cards": true
@@ -426,9 +426,9 @@
         "degree": 7,
         "subject": "数学",
         "priority": 0.2344,
-        "weakness": 0.5997,
-        "retention": 0.9752,
-        "mastery": 0.4003,
+        "weakness": 0.6001,
+        "retention": 0.9741,
+        "mastery": 0.3999,
         "importance": 0.6267,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%AD%90%E7%A9%BA%E9%97%B4",
         "has_cards": true
@@ -439,9 +439,9 @@
         "degree": 6,
         "subject": "数学",
         "priority": 0.1777,
-        "weakness": 0.5894,
-        "retention": 0.9817,
-        "mastery": 0.4106,
+        "weakness": 0.5897,
+        "retention": 0.9809,
+        "mastery": 0.4103,
         "importance": 0.5502,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%9B%B4%E5%92%8C",
         "has_cards": true
@@ -451,10 +451,10 @@
         "wdeg": 5.372,
         "degree": 8,
         "subject": "数学",
-        "priority": 0.3055,
-        "weakness": 0.6384,
-        "retention": 0.8539,
-        "mastery": 0.3616,
+        "priority": 0.3056,
+        "weakness": 0.6387,
+        "retention": 0.853,
+        "mastery": 0.3613,
         "importance": 0.6927,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BA%BF%E6%80%A7%E7%BB%84%E5%90%88",
         "has_cards": true
@@ -464,10 +464,10 @@
         "wdeg": 4.57,
         "degree": 6,
         "subject": "数学",
-        "priority": 0.2163,
-        "weakness": 0.5999,
-        "retention": 0.9518,
-        "mastery": 0.4001,
+        "priority": 0.2165,
+        "weakness": 0.6003,
+        "retention": 0.9508,
+        "mastery": 0.3997,
         "importance": 0.599,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E7%BA%BF%E6%80%A7%E6%97%A0%E5%85%B3",
         "has_cards": true
@@ -477,10 +477,10 @@
         "wdeg": 2.516,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1116,
-        "weakness": 0.7261,
-        "retention": 0.6553,
-        "mastery": 0.2739,
+        "priority": 0.1119,
+        "weakness": 0.7263,
+        "retention": 0.6548,
+        "mastery": 0.2737,
         "importance": 0.3892,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%87%8F%E6%B3%95%E4%B8%8E%E9%99%A4%E6%B3%95",
         "has_cards": true
@@ -490,10 +490,10 @@
         "wdeg": 4.17,
         "degree": 6,
         "subject": "数学",
-        "priority": 0.2188,
-        "weakness": 0.7147,
-        "retention": 0.7054,
-        "mastery": 0.2853,
+        "priority": 0.2189,
+        "weakness": 0.7154,
+        "retention": 0.7035,
+        "mastery": 0.2846,
         "importance": 0.5545,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-F%5Es",
         "has_cards": true
@@ -516,10 +516,10 @@
         "wdeg": 2.469,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1612,
-        "weakness": 0.5932,
-        "retention": 0.9844,
-        "mastery": 0.4068,
+        "priority": 0.1618,
+        "weakness": 0.5935,
+        "retention": 0.9838,
+        "mastery": 0.4065,
         "importance": 0.5138,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
         "has_cards": true
@@ -529,10 +529,10 @@
         "wdeg": 2.44,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1551,
-        "weakness": 0.5839,
-        "retention": 0.9897,
-        "mastery": 0.4161,
+        "priority": 0.1557,
+        "weakness": 0.5841,
+        "retention": 0.9892,
+        "mastery": 0.4159,
         "importance": 0.508,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%8C%87%E6%95%B0%E5%87%BD%E6%95%B0%E6%B1%82%E5%AF%BC",
         "has_cards": true
@@ -542,10 +542,10 @@
         "wdeg": 2.509,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1568,
-        "weakness": 0.5611,
-        "retention": 0.9925,
-        "mastery": 0.4389,
+        "priority": 0.1574,
+        "weakness": 0.5612,
+        "retention": 0.9922,
+        "mastery": 0.4388,
         "importance": 0.5211,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=010-%E9%93%BE%E5%BC%8F%E6%B3%95%E5%88%99",
         "has_cards": true
@@ -555,10 +555,10 @@
         "wdeg": 1.866,
         "degree": 3,
         "subject": "数学",
-        "priority": 0.125,
-        "weakness": 0.6861,
-        "retention": 0.7385,
-        "mastery": 0.3139,
+        "priority": 0.1255,
+        "weakness": 0.6863,
+        "retention": 0.738,
+        "mastery": 0.3137,
         "importance": 0.4205,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E5%AF%BC%E6%95%B0%E7%9A%84%E5%AE%9A%E4%B9%89",
         "has_cards": true
@@ -566,8 +566,8 @@
     ],
     "edges": [
       {
-        "source": "000-复数的基本性质",
-        "target": "010-链式法则",
+        "source": "000-Fn",
+        "target": "000-回收站-1",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -575,59 +575,35 @@
       },
       {
         "source": "000-向量空间",
-        "target": "000-回收站-1",
-        "weight": 0.644,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-线性组合",
+        "target": "000-线性无关",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
         "kind": "explicit"
       },
       {
-        "source": "000-回收站-1",
-        "target": "000-直和",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-指数函数求导",
+        "source": "010-导数的定义",
         "target": "010-泰勒级数",
-        "weight": 0.6,
+        "weight": 0.633,
         "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
+        "kw_shared": 1,
+        "kind": "both"
       },
       {
-        "source": "000-减法与除法",
-        "target": "000-向量空间",
-        "weight": 0.64,
+        "source": "000-F^s",
+        "target": "000-子空间",
+        "weight": 0.633,
         "link_count": 2,
         "kw_shared": 1,
         "kind": "both"
       },
       {
         "source": "000-Fn",
-        "target": "000-回收站-1",
+        "target": "000-复数的基本性质",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
         "kind": "explicit"
-      },
-      {
-        "source": "000-子空间",
-        "target": "000-直和",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
       },
       {
         "source": "000-线性无关",
@@ -638,110 +614,6 @@
         "kind": "both"
       },
       {
-        "source": "000-F^s",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-直和",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-回收站-1",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-线性无关",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-直和",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-线性组合",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-导数的定义",
-        "target": "010-链式法则",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-向量空间",
-        "weight": 1.066,
-        "link_count": 2,
-        "kw_shared": 2,
-        "kind": "both"
-      },
-      {
-        "source": "000-减法与除法",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-减法与除法",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-复数的基本性质",
-        "target": "010-指数函数求导",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-Fn",
-        "weight": 0.631,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
         "source": "000-回收站-1",
         "target": "000-子空间",
         "weight": 0.644,
@@ -750,39 +622,7 @@
         "kind": "both"
       },
       {
-        "source": "010-泰勒级数",
-        "target": "010-链式法则",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-组的定义",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "010-导数的定义",
-        "target": "010-泰勒级数",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
         "source": "000-向量空间",
-        "target": "000-子空间",
-        "weight": 1.078,
-        "link_count": 2,
-        "kw_shared": 2,
-        "kind": "both"
-      },
-      {
-        "source": "000-F^s",
         "target": "000-线性组合",
         "weight": 0.6,
         "link_count": 2,
@@ -791,7 +631,23 @@
       },
       {
         "source": "000-复数的基本性质",
+        "target": "010-链式法则",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-F^s",
         "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "010-指数函数求导",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -808,6 +664,110 @@
       {
         "source": "000-线性无关",
         "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-减法与除法",
+        "target": "000-向量空间",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "010-指数函数求导",
+        "target": "010-泰勒级数",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-回收站-1",
+        "target": "000-直和",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-F^s",
+        "target": "000-向量空间",
+        "weight": 1.066,
+        "link_count": 2,
+        "kw_shared": 2,
+        "kind": "both"
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-线性组合",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-子空间",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-复数的基本性质",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-组的定义",
+        "weight": 0.633,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-直和",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-直和",
+        "target": "000-线性无关",
+        "weight": 1.078,
+        "link_count": 2,
+        "kw_shared": 2,
+        "kind": "both"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-减法与除法",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-F^s",
+        "target": "000-线性组合",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-回收站-1",
+        "target": "000-线性组合",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -823,39 +783,47 @@
       },
       {
         "source": "010-导数的定义",
-        "target": "010-指数函数求导",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-子空间",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-指数函数求导",
         "target": "010-链式法则",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-子空间",
         "weight": 0.633,
         "link_count": 2,
         "kw_shared": 1,
         "kind": "both"
       },
       {
+        "source": "010-泰勒级数",
+        "target": "010-链式法则",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "010-泰勒级数",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-减法与除法",
+        "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-F^s",
+        "target": "000-回收站-1",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
         "source": "000-Fn",
-        "target": "000-线性无关",
+        "target": "000-直和",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -870,16 +838,24 @@
         "kind": "both"
       },
       {
-        "source": "000-复数的基本性质",
-        "target": "010-泰勒级数",
-        "weight": 0.6,
+        "source": "000-向量空间",
+        "target": "000-子空间",
+        "weight": 1.078,
         "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
+        "kw_shared": 2,
+        "kind": "both"
       },
       {
-        "source": "000-回收站-1",
-        "target": "000-线性组合",
+        "source": "000-子空间",
+        "target": "000-直和",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-指数函数求导",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -894,31 +870,47 @@
         "kind": "both"
       },
       {
-        "source": "000-向量空间",
-        "target": "000-复数的基本性质",
+        "source": "000-Fn",
+        "target": "000-线性无关",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
         "kind": "explicit"
       },
       {
-        "source": "000-子空间",
-        "target": "000-线性组合",
-        "weight": 0.64,
+        "source": "000-复数的基本性质",
+        "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-回收站-1",
+        "weight": 0.644,
         "link_count": 2,
         "kw_shared": 1,
         "kind": "both"
       },
       {
-        "source": "000-直和",
-        "target": "000-线性无关",
-        "weight": 1.078,
+        "source": "000-向量空间",
+        "target": "000-组的定义",
+        "weight": 0.6,
         "link_count": 2,
-        "kw_shared": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-F^s",
+        "target": "000-Fn",
+        "weight": 0.631,
+        "link_count": 2,
+        "kw_shared": 1,
         "kind": "both"
       },
       {
-        "source": "000-向量空间",
+        "source": "000-Fn",
         "target": "000-线性组合",
         "weight": 0.6,
         "link_count": 2,
@@ -926,163 +918,171 @@
         "kind": "explicit"
       },
       {
-        "source": "000-Fn",
-        "target": "000-复数的基本性质",
+        "source": "000-线性组合",
+        "target": "000-组的定义",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
         "kind": "explicit"
+      },
+      {
+        "source": "010-指数函数求导",
+        "target": "010-链式法则",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
       }
     ]
   },
   "keywords": [
     [
       "加法",
-      2.2902,
+      2.2912,
       "jiafa",
       "jf"
     ],
     [
       "标量乘法",
-      2.1323,
+      2.1331,
       "biaoliangchengfa",
       "blcf"
     ],
     [
       "加法逆元",
-      2.1204,
+      2.1217,
       "jiafaniyuan",
       "jfny"
     ],
     [
       "向量空间",
-      1.9408,
+      1.9415,
       "xiangliangkongjian",
       "xlkj"
     ],
     [
       "加法恒等元",
-      1.749,
+      1.7495,
       "jiafahengdengyuan",
       "jfhdy"
     ],
     [
       "分配性质",
-      1.5446,
+      1.5452,
       "fenpeixingzhi",
       "fpxz"
     ],
     [
       "子空间",
-      1.1365,
+      1.1366,
       "zikongjian",
       "zkj"
     ],
     [
       "组",
-      1.1211,
+      1.122,
       "zu",
       "z"
     ],
     [
       "Fn",
-      0.91,
+      0.9104,
       "fn",
       "fn"
     ],
     [
       "可交换性",
-      0.91,
+      0.9104,
       "kejiaohuanxing",
       "kjhx"
     ],
     [
       "坐标",
-      0.91,
+      0.9104,
       "zuobiao",
       "zb"
     ],
     [
-      "线性组合",
-      0.9065,
-      "xianxingzuhe",
-      "xxzh"
-    ],
-    [
       "张成空间",
-      0.9065,
+      0.9071,
       "zhangchengkongjian",
       "zckj"
     ],
     [
+      "线性组合",
+      0.9071,
+      "xianxingzuhe",
+      "xxzh"
+    ],
+    [
       "导数",
-      0.7016,
+      0.7043,
       "daoshu",
       "ds"
     ],
     [
-      "直和",
-      0.6845,
-      "zhihe",
-      "zh"
-    ],
-    [
       "唯一表示",
-      0.6845,
+      0.6849,
       "weiyibiaoshi",
       "wybs"
     ],
     [
+      "直和",
+      0.6849,
+      "zhihe",
+      "zh"
+    ],
+    [
       "复数运算",
-      0.6751,
+      0.677,
       "fushuyunsuan",
       "fsys"
     ],
     [
       "有限维向量空间",
-      0.611,
+      0.6112,
       "youxianweixiangliangkongjian",
       "yxwxlkj"
     ],
     [
       "向量组",
-      0.611,
+      0.6112,
       "xiangliangzu",
       "xlz"
     ],
     [
-      "复数除法",
-      0.554,
-      "fushuchufa",
-      "fscf"
-    ],
-    [
       "复数",
-      0.554,
+      0.5556,
       "fushu",
       "fs"
     ],
     [
+      "复数除法",
+      0.5556,
+      "fushuchufa",
+      "fscf"
+    ],
+    [
       "复数定义",
-      0.554,
+      0.5556,
       "fushudingyi",
       "fsdy"
     ],
     [
-      "欧拉公式",
-      0.554,
-      "oulagongshi",
-      "olgs"
-    ],
-    [
       "极坐标",
-      0.554,
+      0.5556,
       "jizuobiao",
       "jzb"
     ],
     [
+      "欧拉公式",
+      0.5556,
+      "oulagongshi",
+      "olgs"
+    ],
+    [
       "链式法则",
-      0.5419,
+      0.544,
       "lianshifaze",
       "lsfz"
     ],
@@ -1106,75 +1106,81 @@
     ],
     [
       "F^S",
-      0.4376,
+      0.4378,
       "f^s",
       "f^s"
     ],
     [
-      "抽象代数",
-      0.4376,
-      "chouxiangdaishu",
-      "cxds"
-    ],
-    [
-      "函数空间",
-      0.4376,
-      "hanshukongjian",
-      "hskj"
-    ],
-    [
       "数乘",
-      0.4376,
+      0.4378,
       "shucheng",
       "sc"
     ],
     [
       "线性代数",
-      0.4376,
+      0.4378,
       "xianxingdaishu",
       "xxds"
     ],
     [
+      "函数空间",
+      0.4378,
+      "hanshukongjian",
+      "hskj"
+    ],
+    [
+      "抽象代数",
+      0.4378,
+      "chouxiangdaishu",
+      "cxds"
+    ],
+    [
       "线性无关",
-      0.4326,
+      0.433,
       "xianxingwuguan",
       "xxwg"
     ],
     [
       "线性相关",
-      0.4326,
+      0.433,
       "xianxingxiangguan",
       "xxxg"
     ],
     [
-      "有序元素",
-      0.3806,
-      "youxuyuansu",
-      "yxys"
-    ],
-    [
-      "集合",
-      0.3806,
-      "jihe",
-      "jh"
-    ],
-    [
-      "重复元素",
-      0.3806,
-      "chongfuyuansu",
-      "cfys"
-    ],
-    [
       "长度",
-      0.3806,
+      0.3812,
       "changdu",
       "cd"
     ],
     [
+      "重复元素",
+      0.3812,
+      "chongfuyuansu",
+      "cfys"
+    ],
+    [
+      "集合",
+      0.3812,
+      "jihe",
+      "jh"
+    ],
+    [
+      "有序元素",
+      0.3812,
+      "youxuyuansu",
+      "yxys"
+    ],
+    [
       "相等性",
-      0.3806,
+      0.3812,
       "xiangdengxing",
       "xdx"
+    ],
+    [
+      "维数公式",
+      0.3554,
+      "weishugongshi",
+      "wsgs"
     ],
     [
       "零向量判定",
@@ -1189,157 +1195,151 @@
       "jjwl"
     ],
     [
-      "维数公式",
-      0.3554,
-      "weishugongshi",
-      "wsgs"
-    ],
-    [
       "泰勒级数",
-      0.3224,
+      0.3236,
       "taileijishu",
       "tljs"
     ],
     [
-      "几何理解",
-      0.3224,
-      "jihelijie",
-      "jhlj"
-    ],
-    [
-      "多项式近似",
-      0.3224,
-      "duoxiangshijinsi",
-      "dxsjs"
-    ],
-    [
       "e^x",
-      0.3224,
+      0.3236,
       "e^x",
       "e^x"
     ],
     [
       "泰勒多项式",
-      0.3224,
+      0.3236,
       "taileiduoxiangshi",
       "tldxs"
     ],
     [
-      "复合函数",
-      0.3136,
-      "fuhehanshu",
-      "fhhs"
+      "多项式近似",
+      0.3236,
+      "duoxiangshijinsi",
+      "dxsjs"
     ],
     [
-      "加法法则",
-      0.3136,
-      "jiafafaze",
-      "jffz"
+      "几何理解",
+      0.3236,
+      "jihelijie",
+      "jhlj"
     ],
     [
       "乘法法则",
-      0.3136,
+      0.3148,
       "chengfafaze",
       "cffz"
     ],
     [
       "微积分",
-      0.3136,
+      0.3148,
       "weijifen",
       "wjf"
     ],
     [
-      "自然对数",
-      0.3102,
-      "ziranduishu",
-      "zrds"
+      "加法法则",
+      0.3148,
+      "jiafafaze",
+      "jffz"
+    ],
+    [
+      "复合函数",
+      0.3148,
+      "fuhehanshu",
+      "fhhs"
     ],
     [
       "指数函数求导",
-      0.3102,
+      0.3114,
       "zhishuhanshuqiudao",
       "zshsqd"
     ],
     [
-      "欧拉数",
-      0.3102,
-      "oulashu",
-      "ols"
+      "自然对数",
+      0.3114,
+      "ziranduishu",
+      "zrds"
     ],
     [
       "导数定义",
-      0.3102,
+      0.3114,
       "daoshudingyi",
       "dsdy"
     ],
     [
-      "极限",
-      0.25,
-      "jixian",
-      "jx"
-    ],
-    [
-      "最佳近似",
-      0.25,
-      "zuijiajinsi",
-      "zjjs"
+      "欧拉数",
+      0.3114,
+      "oulashu",
+      "ols"
     ],
     [
       "dt",
-      0.25,
+      0.251,
       "dt",
       "dt"
     ],
     [
-      "变化率",
-      0.25,
-      "bianhualv",
-      "bhl"
-    ],
-    [
       "牛顿多项式",
-      0.25,
+      0.251,
       "niudunduoxiangshi",
       "nddxs"
     ],
     [
+      "最佳近似",
+      0.251,
+      "zuijiajinsi",
+      "zjjs"
+    ],
+    [
       "微分",
-      0.25,
+      0.251,
       "weifen",
       "wf"
     ],
     [
+      "极限",
+      0.251,
+      "jixian",
+      "jx"
+    ],
+    [
+      "变化率",
+      0.251,
+      "bianhualv",
+      "bhl"
+    ],
+    [
       "除法",
-      0.2232,
+      0.2238,
       "chufa",
       "cf"
     ],
     [
       "减法",
-      0.2232,
+      0.2238,
       "jianfa",
       "jf"
     ],
     [
       "乘法逆元",
-      0.2232,
+      0.2238,
       "chengfaniyuan",
       "cfny"
     ]
   ],
   "last_run": {
     "kind": "daily_anki_status",
-    "started_at": "2026-06-01T01:00:08+09:00",
-    "updated_at": "2026-06-01T01:21:24+09:00",
-    "status": "ok",
+    "started_at": "2026-06-02T01:00:11+09:00",
+    "updated_at": "2026-06-02T01:22:18+09:00",
+    "status": "running",
     "steps": [
       {
         "name": "smoke tests",
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:08+09:00",
-        "ended_at": "2026-06-01T01:00:10+09:00",
+        "started_at": "2026-06-02T01:00:11+09:00",
+        "ended_at": "2026-06-02T01:00:12+09:00",
         "duration_s": 1
       },
       {
@@ -1347,8 +1347,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:10+09:00",
-        "ended_at": "2026-06-01T01:00:10+09:00",
+        "started_at": "2026-06-02T01:00:12+09:00",
+        "ended_at": "2026-06-02T01:00:12+09:00",
         "duration_s": 0
       },
       {
@@ -1356,8 +1356,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:10+09:00",
-        "ended_at": "2026-06-01T01:00:10+09:00",
+        "started_at": "2026-06-02T01:00:12+09:00",
+        "ended_at": "2026-06-02T01:00:12+09:00",
         "duration_s": 0
       },
       {
@@ -1365,8 +1365,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:10+09:00",
-        "ended_at": "2026-06-01T01:00:14+09:00",
+        "started_at": "2026-06-02T01:00:12+09:00",
+        "ended_at": "2026-06-02T01:00:16+09:00",
         "duration_s": 4
       },
       {
@@ -1374,8 +1374,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:14+09:00",
-        "ended_at": "2026-06-01T01:00:16+09:00",
+        "started_at": "2026-06-02T01:00:17+09:00",
+        "ended_at": "2026-06-02T01:00:18+09:00",
         "duration_s": 1
       },
       {
@@ -1383,8 +1383,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:16+09:00",
-        "ended_at": "2026-06-01T01:00:16+09:00",
+        "started_at": "2026-06-02T01:00:18+09:00",
+        "ended_at": "2026-06-02T01:00:18+09:00",
         "duration_s": 0
       },
       {
@@ -1392,8 +1392,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:16+09:00",
-        "ended_at": "2026-06-01T01:00:16+09:00",
+        "started_at": "2026-06-02T01:00:18+09:00",
+        "ended_at": "2026-06-02T01:00:18+09:00",
         "duration_s": 0
       },
       {
@@ -1401,8 +1401,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:16+09:00",
-        "ended_at": "2026-06-01T01:00:17+09:00",
+        "started_at": "2026-06-02T01:00:18+09:00",
+        "ended_at": "2026-06-02T01:00:18+09:00",
         "duration_s": 0
       },
       {
@@ -1410,8 +1410,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:17+09:00",
-        "ended_at": "2026-06-01T01:00:17+09:00",
+        "started_at": "2026-06-02T01:00:18+09:00",
+        "ended_at": "2026-06-02T01:00:18+09:00",
         "duration_s": 0
       },
       {
@@ -1419,8 +1419,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:17+09:00",
-        "ended_at": "2026-06-01T01:00:18+09:00",
+        "started_at": "2026-06-02T01:00:18+09:00",
+        "ended_at": "2026-06-02T01:00:19+09:00",
         "duration_s": 0
       },
       {
@@ -1428,8 +1428,8 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:18+09:00",
-        "ended_at": "2026-06-01T01:00:18+09:00",
+        "started_at": "2026-06-02T01:00:19+09:00",
+        "ended_at": "2026-06-02T01:00:20+09:00",
         "duration_s": 0
       },
       {
@@ -1437,36 +1437,18 @@
         "status": "ok",
         "rc": 0,
         "error": null,
-        "started_at": "2026-06-01T01:00:18+09:00",
-        "ended_at": "2026-06-01T01:21:23+09:00",
-        "duration_s": 1264
+        "started_at": "2026-06-02T01:00:20+09:00",
+        "ended_at": "2026-06-02T01:22:18+09:00",
+        "duration_s": 1318
       },
       {
         "name": "导出仪表板",
-        "status": "ok",
-        "rc": 0,
+        "status": "running",
+        "rc": null,
         "error": null,
-        "started_at": "2026-06-01T01:21:23+09:00",
-        "ended_at": "2026-06-01T01:21:24+09:00",
-        "duration_s": 0
-      },
-      {
-        "name": "部署仪表板",
-        "status": "ok",
-        "rc": 0,
-        "error": null,
-        "started_at": "2026-06-01T01:21:24+09:00",
-        "ended_at": "2026-06-01T01:21:24+09:00",
-        "duration_s": 0
-      },
-      {
-        "name": "AnkiWeb 同步",
-        "status": "ok",
-        "rc": 0,
-        "error": null,
-        "started_at": "2026-06-01T01:21:24+09:00",
-        "ended_at": "2026-06-01T01:21:24+09:00",
-        "duration_s": 0
+        "started_at": "2026-06-02T01:22:18+09:00",
+        "ended_at": null,
+        "duration_s": null
       }
     ]
   },
@@ -1496,7 +1478,7 @@
     }
   ],
   "kg_audit": {
-    "generated_at": "2026-06-01T01:15:39",
+    "generated_at": "2026-06-02T01:16:14",
     "kg_file": "LADR.json",
     "kg_book": "LADR",
     "summary": {
@@ -1563,16 +1545,15 @@
     "auto_applied": [],
     "audit_progress": {
       "ai_audited_node_ids": [],
-      "last_run": "2026-06-01T01:15:39"
+      "last_run": "2026-06-02T01:16:14"
     },
     "rescan_diffs": {
-      "scan_20260601_012123": {
-        "scanned_at": "2026-06-01T01:21:23",
+      "scan_20260602_012218": {
+        "scanned_at": "2026-06-02T01:22:18",
         "scan_pages": [
           12,
           13,
           14,
-          20,
           21,
           22,
           25,
@@ -1593,6 +1574,7 @@
           56,
           60,
           62,
+          70,
           91,
           93,
           162,
@@ -1600,97 +1582,88 @@
           164,
           299
         ],
-        "safe_count": 8,
-        "risky_count": 64,
+        "safe_count": 7,
+        "risky_count": 68,
         "safe_changes": [
           {
             "kind": "summary_changed",
-            "node_id": "ladr.l2.1A.1_5",
-            "numeric_label": "1.5",
-            "name": "减法与除法",
-            "old_summary": "用加法逆元定义减法，用乘法逆元定义除法",
-            "new_summary": "以加法逆元定义减法，以乘法逆元定义除法",
-            "similarity": 0.895
-          },
-          {
-            "kind": "summary_changed",
-            "node_id": "ladr.l2.1C.1_33",
-            "numeric_label": "1.33",
-            "name": "子空间",
-            "old_summary": "V的子集U与V共享同一加法恒等元、加法和标量乘法运算，且构成向量空间",
-            "new_summary": "V的子集U与V共享加法恒等元、加法和标量乘法，且构成向量空间",
-            "similarity": 0.938
-          },
-          {
-            "kind": "summary_changed",
-            "node_id": "ladr.l2.1C.1_36",
-            "numeric_label": "1.36",
-            "name": "子空间的和",
-            "old_summary": "若干子空间中所有可能的元素之和构成的集合",
-            "new_summary": "多个子空间中元素所有可能之和构成的集合",
-            "similarity": 0.769
-          },
-          {
-            "kind": "summary_changed",
-            "node_id": "ladr.l2.2A.2_4",
-            "numeric_label": "2.4",
-            "name": "张成空间",
-            "old_summary": "向量组所有线性组合构成的集合，空向量组张成空间为{0}",
-            "new_summary": "向量组所有线性组合构成的集合",
-            "similarity": 0.683
+            "node_id": "ladr.l2.1A.1_1",
+            "numeric_label": "1.1",
+            "name": "复数",
+            "old_summary": "有序对(a,b)写成a+bi，C上定义加法与乘法",
+            "new_summary": "有序对(a,b)写作a+bi，定义加法与乘法运算",
+            "similarity": 0.875
           },
           {
             "kind": "summary_changed",
             "node_id": "ladr.l2.3B.3_11",
             "numeric_label": "3.11",
             "name": "零空间",
-            "old_summary": "线性映射 T 的零空间 null T 是被映射到 0 的所有向量构成的子空间",
-            "new_summary": "线性映射 N 的零空间 null N 是被映射为 0 的所有向量构成的子空间",
-            "similarity": 0.921
+            "old_summary": "线性映射 N 的零空间 null N 是被映射为 0 的所有向量构成的子空间",
+            "new_summary": "线性映射被映射为0的所有向量构成的子集",
+            "similarity": 0.632
           },
           {
             "kind": "summary_changed",
-            "node_id": "ladr.l2.1B.1_24",
-            "numeric_label": "1.24",
-            "name": "F^S",
-            "old_summary": "从集合S到F的全体函数构成的集合，配逐点加法与标量乘法",
-            "new_summary": "F^S表示从集合S到F的所有函数构成的集合，并定义其上加法与标量乘法",
-            "similarity": 0.721
+            "node_id": "ladr.l2.3C.3_34",
+            "numeric_label": "3.34",
+            "name": "矩阵加法",
+            "old_summary": "两个同型矩阵对应元素相加得到的矩阵",
+            "new_summary": "两同型矩阵之和为对应元素相加所得矩阵",
+            "similarity": 0.8
+          },
+          {
+            "kind": "summary_changed",
+            "node_id": "ladr.l2.3C.3_36",
+            "numeric_label": "3.36",
+            "name": "矩阵的标量乘法",
+            "old_summary": "标量与矩阵每个元素相乘得到的矩阵",
+            "new_summary": "标量与矩阵之积为矩阵各元素乘以该标量所得矩阵",
+            "similarity": 0.579
+          },
+          {
+            "kind": "summary_changed",
+            "node_id": "ladr.l2.1B.1_22",
+            "numeric_label": "1.22",
+            "name": "实向量空间、复向量空间",
+            "old_summary": "R上的向量空间称实向量空间，C上的向量空间称复向量空间",
+            "new_summary": "R上的向量空间称实向量空间，C上的称复向量空间",
+            "similarity": 0.92
           },
           {
             "kind": "summary_changed",
             "node_id": "ladr.l2.1B.1_26",
             "numeric_label": "1.26",
             "name": "加法恒等元唯一",
-            "old_summary": "向量空间中加法恒等元存在且唯一",
-            "new_summary": "向量空间的加法恒等元是唯一的",
-            "similarity": 0.759
+            "old_summary": "向量空间的加法恒等元是唯一的",
+            "new_summary": "向量空间中加法恒等元是唯一的",
+            "similarity": 0.929
           },
           {
             "kind": "summary_changed",
             "node_id": "ladr.l2.1B.1_27",
             "numeric_label": "1.27",
             "name": "加法逆元唯一",
-            "old_summary": "向量空间中每个元素的加法逆元唯一",
-            "new_summary": "向量空间中每个元素的加法逆元是唯一的",
+            "old_summary": "向量空间中每个元素的加法逆元是唯一的",
+            "new_summary": "向量空间中每个元素的加法逆元唯一",
             "similarity": 0.941
           }
         ],
         "risky_changes": [
           {
             "kind": "name_changed",
-            "node_id": "ladr.l2.1A.1_1",
-            "numeric_label": "1.1",
-            "old_name": "复数",
-            "new_name": "复数与C",
-            "reason": "重扫发现节点名变化"
-          },
-          {
-            "kind": "name_changed",
             "node_id": "ladr.l2.1A.1_3",
             "numeric_label": "1.3",
             "old_name": "复数的加法与乘法",
             "new_name": "复数的算术性质",
+            "reason": "重扫发现节点名变化"
+          },
+          {
+            "kind": "name_changed",
+            "node_id": "ladr.l2.1A.1_5",
+            "numeric_label": "1.5",
+            "old_name": "减法与除法",
+            "new_name": "-α、减法，1/α、除法",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1746,7 +1719,7 @@
             "node_id": "ladr.l2.2C.2_39",
             "numeric_label": "2.39",
             "old_name": "维数判基条件",
-            "new_name": "维数相同子空间等于整个空间",
+            "new_name": "维数相同的子空间等于全空间",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1770,7 +1743,15 @@
             "node_id": "ladr.l2.3A.3_2",
             "numeric_label": "3.2",
             "old_name": "线性映射",
-            "new_name": "L(V,W)、L(V)",
+            "new_name": "L(V,W)、L(V)记号",
+            "reason": "重扫发现节点名变化"
+          },
+          {
+            "kind": "name_changed",
+            "node_id": "ladr.l2.3A.3_3",
+            "numeric_label": "3.3",
+            "old_name": "零映射",
+            "new_name": "线性映射的例",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1778,7 +1759,7 @@
             "node_id": "ladr.l2.3A.3_5",
             "numeric_label": "3.5",
             "old_name": "微分映射",
-            "new_name": "L上的加法和标量乘法",
+            "new_name": "L(V,W)上的加法和标量乘法",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1799,10 +1780,18 @@
           },
           {
             "kind": "name_changed",
-            "node_id": "ladr.l2.3B.3_20",
-            "numeric_label": "3.20",
-            "old_name": "值域是子空间",
-            "new_name": "满射取决于目标空间",
+            "node_id": "ladr.l2.3C.3_35",
+            "numeric_label": "3.35",
+            "old_name": "线性映射的矩阵加法",
+            "new_name": "线性映射之和的矩阵",
+            "reason": "重扫发现节点名变化"
+          },
+          {
+            "kind": "name_changed",
+            "node_id": "ladr.l2.3C.3_38",
+            "numeric_label": "3.38",
+            "old_name": "线性映射的标量乘法矩阵",
+            "new_name": "标量与线性映射之积的矩阵",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1834,7 +1823,7 @@
             "node_id": "ladr.l2.9B.9_24",
             "numeric_label": "9.24",
             "old_name": "V 的 m 次幂",
-            "new_name": "V的N次积",
+            "new_name": "V^N",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1847,18 +1836,10 @@
           },
           {
             "kind": "name_changed",
-            "node_id": "ladr.l2.1B.1_19",
-            "numeric_label": "1.19",
-            "old_name": "加法、标量乘法",
-            "new_name": "加法与标量乘法",
-            "reason": "重扫发现节点名变化"
-          },
-          {
-            "kind": "name_changed",
-            "node_id": "ladr.l2.1B.1_21",
-            "numeric_label": "1.21",
-            "old_name": "向量、点",
-            "new_name": "向量与点",
+            "node_id": "ladr.l2.1B.1_24",
+            "numeric_label": "1.24",
+            "old_name": "F^S",
+            "new_name": "F^S记号",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1866,7 +1847,7 @@
             "node_id": "ladr.l2.1B.1_28",
             "numeric_label": "1.28",
             "old_name": "−v、w−v",
-            "new_name": "负向量与减法记号",
+            "new_name": "记号 −v、w−v",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1874,7 +1855,7 @@
             "node_id": "ladr.l2.1B.1_29",
             "numeric_label": "1.29",
             "old_name": "V",
-            "new_name": "V 的记号约定",
+            "new_name": "记号 V",
             "reason": "重扫发现节点名变化"
           },
           {
@@ -1984,13 +1965,6 @@
           },
           {
             "kind": "node_disappeared",
-            "node_id": "ladr.l2.3A.3_3",
-            "numeric_label": "3.3",
-            "name": "零映射",
-            "reason": "重扫未在 PDF 该 page 找到此节点（可能 AI 误识别或 PDF 变化）"
-          },
-          {
-            "kind": "node_disappeared",
             "node_id": "ladr.l2.3A.3_4",
             "numeric_label": "3.4",
             "name": "恒等算子",
@@ -2001,6 +1975,13 @@
             "node_id": "ladr.l2.3B.3_16",
             "numeric_label": "3.16",
             "name": "满射",
+            "reason": "重扫未在 PDF 该 page 找到此节点（可能 AI 误识别或 PDF 变化）"
+          },
+          {
+            "kind": "node_disappeared",
+            "node_id": "ladr.l2.3B.3_20",
+            "numeric_label": "3.20",
+            "name": "值域是子空间",
             "reason": "重扫未在 PDF 该 page 找到此节点（可能 AI 误识别或 PDF 变化）"
           },
           {
@@ -2022,7 +2003,7 @@
             "node_id": "(待分配)",
             "numeric_label": "1.6",
             "name": "F",
-            "summary": "F 代表 R 或 C，用于统一表述对实数和复数都成立的定理",
+            "summary": "全书中F代表R或C，统一表示实数域或复数域",
             "parent_id": "ladr.l1.1A",
             "pages": [
               14
@@ -2032,9 +2013,45 @@
           {
             "kind": "node_added",
             "node_id": "(待分配)",
+            "numeric_label": "1.23",
+            "name": "F∞",
+            "summary": "由F中元素组成的无穷序列全体，配逐项加法与标量乘法构成向量空间",
+            "parent_id": "ladr.l1.1B",
+            "pages": [
+              21
+            ],
+            "reason": "重扫发现 PDF 该 page 有新节点（未在主 KG 中）"
+          },
+          {
+            "kind": "node_added",
+            "node_id": "(待分配)",
+            "numeric_label": "1.25",
+            "name": "F^S是向量空间",
+            "summary": "S非空时F^S配逐点运算构成F上的向量空间",
+            "parent_id": "ladr.l1.1B",
+            "pages": [
+              21
+            ],
+            "reason": "重扫发现 PDF 该 page 有新节点（未在主 KG 中）"
+          },
+          {
+            "kind": "node_added",
+            "node_id": "(待分配)",
+            "numeric_label": "1.35",
+            "name": "子空间示例",
+            "summary": "给出F4、连续函数集、可微函数集等子空间的具体例子",
+            "parent_id": "ladr.l1.1C",
+            "pages": [
+              25
+            ],
+            "reason": "重扫发现 PDF 该 page 有新节点（未在主 KG 中）"
+          },
+          {
+            "kind": "node_added",
+            "node_id": "(待分配)",
             "numeric_label": "2.9",
             "name": "有限维向量空间",
-            "summary": "可由某向量组张成的向量空间称为有限维向量空间",
+            "summary": "可由某向量组张成的向量空间称为有限维的",
             "parent_id": "ladr.l1.2A",
             "pages": [
               35
@@ -2046,7 +2063,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.10",
             "name": "多项式与P(F)",
-            "summary": "函数可表示为有限次幂和形式，系数在F中，全体构成P(F)",
+            "summary": "F上存在系数表示的函数k称为多项式，P(F)为其全体集合",
             "parent_id": "ladr.l1.2A",
             "pages": [
               35
@@ -2058,7 +2075,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.11",
             "name": "多项式的次数",
-            "summary": "最高非零系数对应的幂次，零多项式次数定义为负无穷",
+            "summary": "最高次非零系数对应的幂次为多项式的次数，零多项式次数为负无穷",
             "parent_id": "ladr.l1.2A",
             "pages": [
               35
@@ -2070,7 +2087,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.19",
             "name": "线性相关性引理",
-            "summary": "线性相关组中必存在某向量属于其前序向量的张成空间，去掉该向量不改变张成空间",
+            "summary": "线性相关组中某向量属于其前面向量的张成空间，去掉该向量不改变张成空间",
             "parent_id": "ladr.l1.2A",
             "pages": [
               38
@@ -2094,7 +2111,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.28",
             "name": "基的判定准则",
-            "summary": "向量组是基当且仅当每个向量可被唯一线性表示",
+            "summary": "向量组是基当且仅当空间中每个向量可被唯一线性表示",
             "parent_id": "ladr.l1.2B",
             "pages": [
               43
@@ -2106,7 +2123,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.30",
             "name": "每个张成组都包含基",
-            "summary": "向量空间中每个张成组都能被削减成该向量空间的基",
+            "summary": "向量空间中任意张成组均可被削减成该空间的一个基",
             "parent_id": "ladr.l1.2B",
             "pages": [
               44
@@ -2130,7 +2147,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.32",
             "name": "每个线性无关组都可被扩充成基",
-            "summary": "有限维向量空间中每个线性无关组都可被扩充成该向量空间的基",
+            "summary": "有限维向量空间中任意线性无关组均可扩充为该空间的基",
             "parent_id": "ladr.l1.2B",
             "pages": [
               44
@@ -2141,8 +2158,8 @@
             "kind": "node_added",
             "node_id": "(待分配)",
             "numeric_label": "2.33",
-            "name": "子空间是直和组成部分",
-            "summary": "有限维V的每个子空间U存在补子空间M，使得V=U⊕M",
+            "name": "每个子空间都是直和组成部分",
+            "summary": "有限维空间V中每个子空间U都存在补子空间M使V=U⊕M",
             "parent_id": "ladr.l1.2B",
             "pages": [
               45
@@ -2154,7 +2171,7 @@
             "node_id": "(待分配)",
             "numeric_label": "2.37",
             "name": "子空间的维数",
-            "summary": "有限维子空间U的维数不超过V的维数",
+            "summary": "有限维子空间的维数不超过全空间维数",
             "parent_id": "ladr.l1.2C",
             "pages": [
               47
@@ -2166,7 +2183,7 @@
             "node_id": "(待分配)",
             "numeric_label": "3.1",
             "name": "线性映射",
-            "summary": "满足可加性与齐次性的函数T:V→W",
+            "summary": "满足可加性与齐次性的函数，是线性代数核心概念",
             "parent_id": "ladr.l1.3A",
             "pages": [
               54
@@ -2201,8 +2218,8 @@
             "kind": "node_added",
             "node_id": "(待分配)",
             "numeric_label": "3.95",
-            "name": "b+U 记号",
-            "summary": "向量 b 与子集 U 之和定义为集合 {b+u : u∈U}",
+            "name": "向量与子集之和",
+            "summary": "b∈V，J⊆V，定义b+J={b+d: d∈J}为V的一个子集",
             "parent_id": "ladr.l1.3E",
             "pages": [
               93
@@ -2214,7 +2231,7 @@
             "node_id": "(待分配)",
             "numeric_label": "6.2",
             "name": "内积",
-            "summary": "将有序对映射到F中数、满足正性/定性/可加性/齐次性/共轭对称性的函数",
+            "summary": "将有序对映射到域F中数、满足正性/定性/可加性/齐次性/共轭对称性的函数",
             "parent_id": "ladr.l1.6A",
             "pages": [
               163
@@ -2238,7 +2255,7 @@
             "node_id": "(待分配)",
             "numeric_label": "6.6",
             "name": "内积的基本性质",
-            "summary": "内积在第一位置线性、与零向量内积为零、第二位置共轭线性等基本性质",
+            "summary": "内积在第二位置的共轭线性、零向量内积为零等六条基本性质",
             "parent_id": "ladr.l1.6A",
             "pages": [
               164

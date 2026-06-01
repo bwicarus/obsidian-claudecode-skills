@@ -15,21 +15,24 @@
 - `_server_deploy/app.py` — 入口注册 `register_pdf_reader(app)`，`/pdf` 加入 `PROTECTED_PREFIXES`
 - `data/ecdict.db` — ECDICT 离线英汉字典 ~850MB（单张 `stardict` 表，含 `word/phonetic/translation/definition/exchange` 等列；`exchange` 是列里的屈折数据，不是独立表）
 
-前端（单文件 ~5900 行）：
-- `_server_deploy/templates/pdf_reader.html` — 阅读器主页（PDF.js + textLayer + char-layer + selToolbar + sidebar + result-modal + draft-modal + hl-popover + 手写墨迹层 + vocab-layer + 字典小框 + 句子翻译浮层）
+前端（2026-06 起 HTML 与主逻辑 JS 分离）：
+- `_server_deploy/templates/pdf_reader.html` — 阅读器主页**模板**（~1116 行：HTML 标记 + 全部 CSS + 两段经典 `<script>`：① `window.dlog`/错误监听 ② 手写墨迹 `_ink`）。主逻辑模块已抽出，模板里只剩：`<script>window.__PDF_CFG={pdf_url,file_rel,page}</script>` + `<script type="module" src="/static/pdf/reader.js?v={{reader_js_v}}">`
+- **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~5831 行，原内联 `<script type="module">` 整体抽出；配置走 `window.__PDF_CFG`，架构/全局未变，纯物理拆分）。语法校验：`bash scripts/check_pdf_reader_js.sh`（默认就检它，top-level await 包 async IIFE 后 node --check）
 - `_server_deploy/templates/pdf_index.html` — PDF 列表页（GET `/` render）
 
-静态资源（部署在服务器侧，不在 git 仓库）：
-- `/static/pdfjs/pdf.mjs` + `pdf.worker.mjs` — PDF.js v4（运行时从 `pdfjsLib.version` 读真实版本；前端 `PDFJS_V` 只是 cache-buster query，如 `20260526a`，并非版本号）
-- `/static/pdfjs/cmaps/` + `standard_fonts/` — CJK + 字体回落
+静态资源（部署在服务器侧）：
+- `/static/pdfjs/pdf.mjs` + `pdf.worker.mjs` — PDF.js v4（运行时从 `pdfjsLib.version` 读真实版本；前端 `PDFJS_V` 只是 cache-buster query，如 `20260526a`，并非版本号）。**不在 git 仓库**
+- `/static/pdfjs/cmaps/` + `standard_fonts/` — CJK + 字体回落。**不在 git 仓库**
+- `/static/pdf/reader.js` — 阅读器主逻辑（**在 git**：`_server_deploy/static/pdf/reader.js`）。cache-bust 自动：`pdf_view` 注入 `reader_js_v=_reader_js_v()`（=已部署文件 mtime，每次部署 URL 自动变，免手动 bump）
 
-服务端部署位置（VPS / Pi）：
+服务端部署位置（VPS `/root/...` / Pi `/home/bwicarus/...`）：
 ```
-/root/claude/_server_deploy/pdf_reader.py        → /root/webapp/pdf_reader.py
-/root/claude/_server_deploy/templates/pdf_reader.html → /root/webapp/templates/pdf_reader.html
-/root/claude/data/ecdict.db                       → /root/webapp/data/ecdict.db
+_server_deploy/pdf_reader.py            → <webapp>/pdf_reader.py
+_server_deploy/templates/pdf_reader.html → <webapp>/templates/pdf_reader.html
+_server_deploy/static/pdf/reader.js     → /var/www/html/static/pdf/reader.js   ★ 新增,改前端必带,漏了阅读器白屏
+data/ecdict.db                           → <webapp>/data/ecdict.db
 ```
-改完 `cp` 到 webapp 目录 + `systemctl restart webapp`。
+改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.js`,不是 html**；改完 `cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。
 
 ---
 

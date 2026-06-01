@@ -388,6 +388,14 @@ def pdf_index():
     return render_template("pdf_index.html", pdfs=pdfs)
 
 
+def _reader_js_v():
+    """reader.js 的 cache-bust 版本 = 已部署静态文件 mtime（每次部署自动变，免手动 bump）。"""
+    try:
+        return str(int(os.path.getmtime("/var/www/html/static/pdf/reader.js")))
+    except Exception:
+        return "1"
+
+
 @bp.route("/view")
 def pdf_view():
     rel = request.args.get("file", "")
@@ -407,6 +415,7 @@ def pdf_view():
         file_name=Path(rel).name,
         page=page,
         pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}",
+        reader_js_v=_reader_js_v(),
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
