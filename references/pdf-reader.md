@@ -627,6 +627,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - F5/F7 都**按 `w`（fugashi token / 收藏合并）分组**，跟单击选词同一套词边界 → 振假名落在词上、生词下划线整词、收藏词组单击整选，三者一致。
 - F3/F5/F7 的重活（振假名读音、整页翻译、搜索索引）全部**磁盘缓存键含 mtime**，首次慢、之后秒读；F6 收藏合并 `w` 是**每请求 live 应用**（不进缓存，否则改收藏要等缓存失效）。
 - F5 ruby 层 `pointer-events:none` + 高 z-index：盖在最上但点击穿透，选词不受影响。F3 page-tr 层同理（z9 盖住 ruby）。
+- **译文自适应字号（防被白盒切掉）**：`_drawPageTranslate` / `_drawSentenceOverlay` 早期固定 `fontPx=round(charH*0.72)` + 贪心填充把余字全塞末行 → 译文比原文长时末行超出白盒被 `overflow:hidden` 切掉（实测 933 句里 ~472 句中文比日文原文宽）。改：`fontPx = max(9, min(round(charH*0.72), floor(Wtot/(N+行数)))`（`Wtot`=各行总宽，`N`=译文字数；`+行数` 给每行 floor 取整留余量，数学上保证各行 cap 之和 ≥ N → 贪心填充必不溢出末行）。短译文仍取自然字高（观感不变），长译文按比例缩小塞下。**极端兜底**：单行原文配超长译文、字号触底 9px 仍放不下（933 句里 10 句，多半是封面 OCR 噪声）→ 该框 `white-space:normal + wordBreak:break-all + minHeight` 换行向下展开（不再硬切丢字）。检测条件 `slice.length*fontPx > w`。
 - F2 横滑严格限「起点空白 + 单页模式」：尊重既有「起点在字上=拖选、竖滑=滚动」规则，零冲突。
 
 **验证结论**（独立 reviewer 审 `6ed9d9c..` 全 diff）：无崩溃/解包遗漏/未定义符号/重复声明/死锁/越界/回归；4-tuple 解包、translate 签名、window 挂载、store 键、坐标缩放全部跨函数核对一致。実测 応用情報 p22 振假名 169 条、整页翻译 38 句全译（冷 439ms/缓存 103ms）、搜索 試験 256 处（冷 2.6s/缓存 18ms）；EGIU/线代书 IPA 261 条/66ms。

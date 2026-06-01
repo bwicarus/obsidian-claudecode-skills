@@ -1997,8 +1997,12 @@ function _drawPageTranslate(pw, sentences) {
     }
     lines.sort((a, b) => a[1] - b[1]);
     const charH = Math.min(...lines.map(r => (r[3] - r[1]) * sy));
-    const fontPx = Math.max(9, Math.round(charH * 0.72));
     const cps = Array.from(zh); const N = cps.length; let idx = 0;
+    // 字号默认=原文字高(×0.72);但译文常比原文长 → 按「各行总宽 / 字数」算下限,
+    // 译文塞不下时自动缩小,保证整句完整显示不被白框 overflow:hidden 切掉。
+    // (+lines.length 给每行 floor 取整留余量 → 各行 cap 之和必 ≥ N,贪心填充不溢出末行)
+    const Wtot = lines.reduce((s, r) => s + (r[2] - r[0]) * sx, 0);
+    const fontPx = Math.max(9, Math.min(Math.round(charH * 0.72), Math.floor(Wtot / (N + lines.length))));
     lines.forEach((r, i) => {
       const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
       const cap = Math.max(1, Math.floor(w / fontPx));
@@ -2010,9 +2014,19 @@ function _drawPageTranslate(pw, sentences) {
       ov.style.left = (r[0] * sx) + 'px';
       ov.style.top = (r[1] * sy) + 'px';
       ov.style.width = w + 'px';
-      ov.style.height = h + 'px';
       ov.style.fontSize = fontPx + 'px';
-      ov.style.lineHeight = h + 'px';
+      // 极端:单行原文 + 超长译文,字号已触底仍放不下 → 允许该框换行向下展开(不硬切丢字)
+      if (slice.length * fontPx > w + 0.5) {
+        ov.style.minHeight = h + 'px';
+        ov.style.whiteSpace = 'normal';
+        ov.style.wordBreak = 'break-all';
+        ov.style.lineHeight = (fontPx * 1.18) + 'px';
+        ov.style.overflow = 'visible';
+        ov.style.paddingTop = Math.max(0, (h - fontPx * 1.18) / 2) + 'px';
+      } else {
+        ov.style.height = h + 'px';
+        ov.style.lineHeight = h + 'px';
+      }
       ov.textContent = slice;
       layer.appendChild(ov);
     });
@@ -2479,9 +2493,12 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
   // 字号与原文一致:PyMuPDF char bbox(charH)比实际字号略大(含 ascent/descent 留白),
   // ×0.72 才视觉等于原文字符大小(0.95 实测明显偏大、行间挤);取各行最小行高更稳(避免某行有高字符拉大)
   const charH = Math.min(...rects.map(r => (r[3] - r[1]) * sy));
-  const fontPx = Math.max(9, Math.round(charH * 0.72));
   const cps = Array.from(zh);                              // 按码点切
   const N = cps.length;
+  // 字号默认=原文字高(×0.72);译文比原文长时按「各行总宽 / 字数」缩小,保证整句塞得下不被切
+  // (+rects.length 留 floor 取整余量 → 各行 cap 之和 ≥ N,末行收尾不溢出 overflow:hidden)
+  const Wtot = rects.reduce((s, r) => s + (r[2] - r[0]) * sx, 0);
+  const fontPx = Math.max(9, Math.min(Math.round(charH * 0.72), Math.floor(Wtot / (N + rects.length))));
   let idx = 0;
   rects.forEach((r, i) => {
     const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
@@ -2503,12 +2520,22 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
     ov.style.left = (r[0] * sx) + 'px';                    // 贴该行原文位置(首行从行中间起也对)
     ov.style.top = (r[1] * sy) + 'px';
     ov.style.width = w + 'px';
-    ov.style.height = h + 'px';
     ov.style.fontSize = fontPx + 'px';
-    ov.style.lineHeight = h + 'px';                        // 单行垂直居中
-    ov.style.whiteSpace = 'nowrap';
     ov.style.textAlign = 'left';
     ov.style.paddingLeft = '1px';
+    // 极端:单行原文 + 超长译文,字号触底仍放不下 → 该框换行向下展开(不硬切)
+    if (slice.length * fontPx > w + 0.5) {
+      ov.style.minHeight = h + 'px';
+      ov.style.whiteSpace = 'normal';
+      ov.style.wordBreak = 'break-all';
+      ov.style.lineHeight = (fontPx * 1.18) + 'px';
+      ov.style.overflow = 'visible';
+      ov.style.paddingTop = Math.max(0, (h - fontPx * 1.18) / 2) + 'px';
+    } else {
+      ov.style.height = h + 'px';
+      ov.style.lineHeight = h + 'px';                      // 单行垂直居中
+      ov.style.whiteSpace = 'nowrap';
+    }
     ov.textContent = slice;
     ov.addEventListener('click', (e) => {
       e.stopPropagation();
