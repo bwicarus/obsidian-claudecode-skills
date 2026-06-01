@@ -5607,7 +5607,9 @@ window._jpKanjiTap = (i) => {
   let h = '<div class="jk-lit">' + esc(k.kanji) + '</div><div class="jk-body">';
   if ((k.on || []).length) h += '<div><span class="jk-tag jk-on">音</span>' + k.on.map(esc).join('、') + '</div>';
   if ((k.kun || []).length) h += '<div><span class="jk-tag jk-kun">訓</span>' + k.kun.map(esc).join('、') + '</div>';
-  if ((k.meanings || []).length) h += '<div class="jk-mean">' + k.meanings.map(esc).join('; ') + '</div>';
+  // 字义优先显示中文(meanings_zh,后端 Google 翻译)，缺失才回退英文
+  const _meanEn = (k.meanings || []).map(esc).join('; ');
+  if (k.meanings_zh || _meanEn) h += '<div class="jk-mean">' + (k.meanings_zh ? esc(k.meanings_zh) : _meanEn) + '</div>';
   h += '</div>';
   det.innerHTML = h;
 };

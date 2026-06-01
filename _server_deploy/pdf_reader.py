@@ -1899,16 +1899,39 @@ def pdf_api_dict_jp():
     except Exception:
         pass
     reading = ra.get("reading") or jp.get("reading", "")
-    # 例句:5 句,已缓存中译直接给,未译的回退英文 + 后台补译(下次就有中文)
-    exs = ds.jp_examples_zh(word, limit=5, translate=False)
-    if any(not e.get("zh") for e in exs):
-        try:
-            import threading
-            threading.Thread(target=lambda: ds.jp_examples_zh(word, limit=5, translate=True),
-                             daemon=True).start()
-        except Exception:
-            pass
+    # 例句:5 句,**同步翻成中文**(Google batch + 永久缓存,首次~0.3s,之后秒回);
+    # 不再回退英文 + 后台补译(那样首屏会显示英文,跟英文单词例句不一致)
+    exs = ds.jp_examples_zh(word, limit=5, translate=True)
     kanji = ds.word_kanji_breakdown(word)
+    # 汉字字义来自 KANJIDIC(英文 list)→ 批量翻成中文 meanings_zh(Google batch + 缓存),
+    # 跟英文单词详情一样统一显示中文(前端优先 meanings_zh,缺失回退英文)
+    try:
+        import sys as _sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in _sys.path:
+            _sys.path.insert(0, str(vp))
+        from translate import gtranslate_batch as _gb, _cache_get as _cg, _cache_put as _cp
+        for k in kanji:
+            ms = k.get("meanings") or []
+            k["_mstr"] = "; ".join(ms) if isinstance(ms, list) else str(ms)
+            if k["_mstr"]:
+                c = _cg(k["_mstr"], "zh-CN")
+                if c:
+                    k["meanings_zh"] = c
+        miss = [k for k in kanji if k.get("_mstr") and not k.get("meanings_zh")]
+        if miss:
+            res = _gb([k["_mstr"] for k in miss]) or []
+            if len(res) == len(miss):
+                for k, z in zip(miss, res):
+                    z = (z or "").strip()
+                    if z:
+                        k["meanings_zh"] = z
+                        try: _cp(k["_mstr"], "zh-CN", z, "gtranslate")
+                        except Exception: pass
+        for k in kanji:
+            k.pop("_mstr", None)
+    except Exception as ex:
+        sys.stderr.write(f"[dict-jp] kanji meanings zh fail: {ex}\n")
     return jsonify({
         "ok": True, "jp": True, "word": word,
         "reading": reading, "reading_kata": ra.get("reading_kata", ""),
