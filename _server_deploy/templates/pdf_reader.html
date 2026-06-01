@@ -2615,16 +2615,19 @@ function _charsRangeToText(chars, sIdx, eIdx) {
   const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
   const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
   let text = '', lastChar = null;
+  const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
     if (lastChar) {
+      // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(否则 公表する 跨行被拆成「公 表する」无法识别)
+      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
       const dy = Math.abs(c.top - lastChar.top);
-      if (dy > c.height * 0.5) text += '\n';
+      if (dy > c.height * 0.5) { if (!cjkPair) text += '\n'; }
       else {
         const gap = c.left - (lastChar.left + lastChar.width);
         const ref = Math.min(c.height, lastChar.height);
-        if (gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
     text += c.sp ? ' ' : c.c;
@@ -2719,18 +2722,21 @@ function _selByCharRange(pw, sIdx, eIdx) {
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
   let lastChar = null;
+  const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (lastChar) {
+      // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
+      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) {
-        text += '\n';
+        if (!cjkPair) text += '\n';
       } else {
         // 同行：按 X gap 判断要不要加空格
         const gap = c.left - (lastChar.left + lastChar.width);
         const ref = Math.min(c.height, lastChar.height);
-        if (gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
     // 真实空格 char 直接保留；其它 char 写入
