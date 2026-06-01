@@ -341,7 +341,7 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（手指只滚动/双击切工具，不画）*/
 /* 振假名/音标叠加层：z-index 8 在所有层之上但 pointer-events:none → 点击穿透到 char-layer 选词 */
 .ruby-layer{position:absolute;inset:0;z-index:8;pointer-events:none}
-.ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:.95;white-space:nowrap;text-align:center;background:rgba(255,255,255,.72);border-radius:2px;padding:0 1px;overflow:hidden;text-overflow:clip}
+.ruby-layer .rt{position:absolute;box-sizing:border-box;color:#1746a2;font-weight:600;line-height:.95;white-space:nowrap;text-align:center;background:rgba(255,255,255,.72);border-radius:2px;padding:0 1px;overflow:visible}
 #ruby-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 整页翻译：逐行白底中文覆盖在原文上方（z-index 9 盖住一切；pointer-events none → 点击穿透到 char-layer 仍可选原文） */
 .page-tr-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
@@ -442,6 +442,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #page-scrub-pop .psp-fill{height:100%;background:#6fd3ff;width:0%}
 #word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}
 #word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}
+#word-pop .wp-pos-tag{display:inline-block;font-size:10.5px;color:#7a8497;background:#1a2540;border:1px solid #2a3550;border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}
 #word-pop .wp-def:hover{background:#162045}
 #word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}
 #word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322}
@@ -1910,8 +1911,9 @@ function renderRubyLayer(pw) {
     const rt = it.rt || ''; if (!rt) continue;
     const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
     const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：约词高 36%（这本书行距≈字框高、行间仅 ~4pt，注音必须很小才不挤上一行）
-    const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.4));
+    // 字号：约词高 36%；并受「词宽/读音字数」约束使读音横向不超过词宽（系数 1.0，
+    // 之前 1.4 → 读音比词宽 40% + overflow:hidden 把末尾假名切掉，故收到 1.0 + 配 overflow:visible）
+    const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.0));
     const sp = document.createElement('span');
     sp.className = 'rt';
     sp.textContent = rt;
@@ -3636,6 +3638,8 @@ window.showWordPopover = async (word, ctx) => {
     _wordPopState.mastered = !!d.mastered;   // 日语掌握开关初始态
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
+    // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ変 等）
+    const posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
     // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
     const phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
@@ -3653,7 +3657,7 @@ window.showWordPopover = async (word, ctx) => {
       phonHtml +
       '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
-      '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + defLines +
+      '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
       exHtml +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +

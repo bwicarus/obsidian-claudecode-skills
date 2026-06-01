@@ -1828,8 +1828,8 @@ def pdf_api_dict_quick():
             "accent": ra.get("accent"),       # 重音核:0=平板,N=第 N 拍后下降
             "mora": ra.get("mora"),
             "mastered": bool((_jp_vocab_load().get(word_raw) or {}).get("mastered")),   # 掌握开关初始态
-
-            "translation": (f"{jp.get('pos','')} " if jp.get("pos") else "") + (jp.get("zh") or ""),
+            "pos": jp.get("pos", ""),          # 词性单独给前端(小框里做暗色标签,跟含义区分)
+            "translation": (jp.get("zh") or ""),
             "definition": ex_txt,
             "examples": ex,                    # [{ja, zh, en}] 结构化,前端可富渲染
             "examples_src": jp.get("examples_src", ""),
