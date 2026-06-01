@@ -994,11 +994,22 @@ def _jp_vocab_save(d: dict):
         pass
 
 
+def _jp_vocab_is_trackable(word: str) -> bool:
+    """是否值得记入生词库(画下划线)。过滤垃圾:跨行残片(含空白)、单假名助词(を/た/の)。
+    规则:无空白 + (含汉字 或 ≥2 个假名)。单个假名/单符号不记。"""
+    w = (word or "").strip()
+    if not w or any(ch.isspace() for ch in w):
+        return False
+    has_kanji = any(_is_kanji_ch(ch) for ch in w)
+    return has_kanji or len(w) >= 2
+
+
 def _jp_vocab_bump(word: str):
-    """JP 词被查 → looks+1、刷新 last_ts。已 mastered 的查了也不复活（除非显式取消）。"""
+    """JP 词被查 → looks+1、刷新 last_ts。已 mastered 的查了也不复活（除非显式取消）。
+    垃圾词(单假名/跨行残片)不记,避免下划线噪声。"""
     import time as _t
     word = (word or "").strip()
-    if not word:
+    if not word or not _jp_vocab_is_trackable(word):
         return
     with _JP_VOCAB_LOCK:
         d = _jp_vocab_load()

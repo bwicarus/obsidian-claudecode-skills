@@ -478,17 +478,24 @@ def _tanaka_con():
 
 
 def tanaka_examples(word: str, limit: int = 3) -> list[dict]:
-    """按词条查 Tanaka 母语例句 → [{ja, en, good}]。优质(~ 标记)优先。离线毫秒级。"""
-    con = _tanaka_con()
-    if not con or not word:
+    """按词条查 Tanaka 母语例句 → [{ja, en, good}]。优质(~ 标记)优先。离线毫秒级。
+    **每次开独立只读连接**:之前共享 _TANAKA_DB 单连接,后台翻译线程 + 请求线程并发用同一
+    连接的游标 → sqlite 报错被吞 → 例句返回空(dict-jp-zh 拿不到例句)。read-only open ~ms,廉价。"""
+    if not word or not _TANAKA_PATH.exists():
         return []
+    con = None
     try:
+        con = sqlite3.connect(f"file:{_TANAKA_PATH}?mode=ro", uri=True)
         rows = con.execute(
             "SELECT s.ja, s.en, w.good FROM wex w JOIN sent s ON s.id=w.sid "
             "WHERE w.hw=? ORDER BY w.good DESC, length(s.ja) ASC LIMIT ?",
             (word.strip(), limit)).fetchall()
     except Exception:
         return []
+    finally:
+        if con is not None:
+            try: con.close()
+            except Exception: pass
     return [{"ja": ja, "en": en, "good": bool(g)} for ja, en, g in rows]
 
 
