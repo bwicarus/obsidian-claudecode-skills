@@ -497,41 +497,21 @@ def _is_kana_ch(c: str) -> bool:
 
 
 def _furigana_item(surface: str, reading: str, tchars: list) -> dict | None:
-    """为含汉字的 token 生成振假名条目：剥送り仮名(okurigana)后把读音放在汉字核心上方。
-    surface=token 表层, reading=平假名读音, tchars=该 token 的非空格 char dict(顺序对齐 surface)。
+    """为含汉字的 token 生成振假名条目：**完整读音**放在整个词上方(不剥送り仮名)。
+    学习者要看全部读音(役立つ→やくだつ,つ 也要;之前剥成 やくだ 缺了 つ)。
+    surface=token 表层, reading=平假名读音, tchars=该 token 的非空格 char dict。
     返回 {x0,y0,x1,y1,rt} (PDF pt 坐标) 或 None(无汉字/读音无效)。"""
     if not reading or "*" in reading or not tchars:
         return None
     if not any(_is_kanji_ch(c) for c in surface):
         return None   # 纯假名/纯符号 → 不需要振假名
-    core = tchars
-    rt = reading
-    if len(surface) == len(tchars):
-        surf_h = _kata_to_hira(surface)
-        # 剥共同后缀（送り仮名，如 食べる→べる）
-        suf = 0
-        while (suf < len(surf_h) and suf < len(reading)
-               and _is_kana_ch(surface[len(surface) - 1 - suf])
-               and surf_h[len(surf_h) - 1 - suf] == reading[len(reading) - 1 - suf]):
-            suf += 1
-        # 剥共同前缀（少见的前置假名）
-        pre = 0
-        while (pre < len(surf_h) - suf and pre < len(reading) - suf
-               and _is_kana_ch(surface[pre]) and surf_h[pre] == reading[pre]):
-            pre += 1
-        core_surface = surface[pre: len(surface) - suf]
-        core_reading = reading[pre: len(reading) - suf]
-        core_chars = tchars[pre: len(tchars) - suf] if (len(tchars) - suf) > pre else []
-        # 核心全是汉字才贴在核心上方；否则(内部夹假名如 持ち運ぶ)整词读音兜底
-        if core_chars and core_reading and all(_is_kanji_ch(c) for c in core_surface):
-            core, rt = core_chars, core_reading
     try:
-        x0 = min(c["x0"] for c in core); y0 = min(c["y0"] for c in core)
-        x1 = max(c["x1"] for c in core); y1 = max(c["y1"] for c in core)
+        x0 = min(c["x0"] for c in tchars); y0 = min(c["y0"] for c in tchars)
+        x1 = max(c["x1"] for c in tchars); y1 = max(c["y1"] for c in tchars)
     except (ValueError, KeyError):
         return None
     return {"x0": round(x0, 2), "y0": round(y0, 2),
-            "x1": round(x1, 2), "y1": round(y1, 2), "rt": rt}
+            "x1": round(x1, 2), "y1": round(y1, 2), "rt": reading}
 
 
 def _apply_jp_tokenize(chars: list, start: int, end: int,
@@ -714,8 +694,8 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 2   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
-                      # (v2: 修「fugashi 临时挂掉写的坏缓存(全 w=-1)被一直命中→整页单字」)
+_CHAR_CACHE_VER = 3   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+                      # (v2: 修坏缓存全 w=-1; v3: 振假名改完整读音不剥送り仮名,旧 furigana 失效)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
