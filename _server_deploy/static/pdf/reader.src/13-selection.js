@@ -1,0 +1,526 @@
+function _findCharAt(charBoxes, x, y) {
+  // 先尝试落在某 char bbox 内（优先 non-space）
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    if (c.sp) continue;
+    if (x >= c.left && x <= c.left + c.width && y >= c.top && y <= c.top + c.height) {
+      return i;
+    }
+  }
+  let best = -1, bestD = Infinity;
+  // 同行内 X 距离最近的 non-space
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    if (c.sp) continue;
+    const yIn = (y >= c.top - 2 && y <= c.top + c.height + 2);
+    if (yIn) {
+      const dx = (x < c.left) ? (c.left - x) : (x > c.left + c.width) ? (x - c.left - c.width) : 0;
+      if (dx < bestD) { bestD = dx; best = i; }
+    }
+  }
+  if (best >= 0) return best;
+  // 整体 Manhattan 距离兜底
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    if (c.sp) continue;
+    const cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+    const d = Math.abs(x - cx) + Math.abs(y - cy) * 3;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
+function _charsRangeToText(chars, sIdx, eIdx) {
+  if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
+  // 块过滤：跳掉 reading order 落在区间中间、却属于别块的字符（双栏交错时把另一栏串进来）
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
+  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
+  let text = '', lastChar = null;
+  const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
+    if (lastChar) {
+      // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(否则 公表する 跨行被拆成「公 表する」无法识别)
+      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      const dy = Math.abs(c.top - lastChar.top);
+      if (dy > c.height * 0.5) { if (!cjkPair) text += '\n'; }
+      else {
+        const gap = c.left - (lastChar.left + lastChar.width);
+        const ref = Math.min(c.height, lastChar.height);
+        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+      }
+    }
+    text += c.sp ? ' ' : c.c;
+    lastChar = c;
+  }
+  return text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
+}
+
+// 找选中范围所在的句子（左/右扩到 . ! ? 。！？ 之后 / 段落起止）
+function _expandSentenceFromRange(chars, sIdx, eIdx) {
+  // 句子边界 = 句末标点(。！？.!?)优先。
+  // ⚠ rawdict 块(bk)只在「跨块 **且** 跨视觉行」时才断:
+  //   - 日语 justified 排版会把同一视觉行拆成多个块(如同行的「…解き,」「それら…」),
+  //     这种同行拆块绝不能断,否则句子在逗号处截断、到不了句号(用户报的 bug)
+  //   - 标题/邻段在不同视觉行+不同块 → 断(不把标题并进句子)
+  const isSentEnd = (c) => /[.!?。！？]/.test(c);
+  const _bk = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk !== b.bk;
+  const _lineChanged = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 0.5;
+  const _paraGap = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 1.5;
+  const _stop = (a, b) => (_bk(a, b) && _lineChanged(a, b)) || _paraGap(a, b);
+  let s = sIdx;
+  while (s > 0) {
+    if (isSentEnd(chars[s - 1].c)) break;
+    if (_stop(chars[s - 1], chars[s])) break;
+    s--;
+  }
+  let e = eIdx;
+  while (e < chars.length - 1) {
+    if (isSentEnd(chars[e].c)) break;
+    if (_stop(chars[e], chars[e + 1])) break;
+    e++;
+  }
+  return {start: s, end: e};
+}
+
+function _expandToWordStart(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);   // 汉字+平/片假名+全角+CJK标点
+  // 优先用 PyMuPDF 词边界：同一个词 id 直接扩到词首（根治连字/紧排/装饰编号粘连）
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    while (idx > 0 && chars[idx - 1].w === wid && !'/|／'.includes(chars[idx - 1].c)) idx--;
+    // 跳过词首标点（PyMuPDF 把 “conditional 的弯引号并入同 word）
+    while (idx < chars.length - 1 && chars[idx + 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx++;
+    return idx;
+  }
+  if (!isWord(chars[idx].c)) return idx;
+  while (idx > 0 && isWord(chars[idx - 1].c) &&
+         Math.abs(chars[idx - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[idx].left - (chars[idx - 1].left + chars[idx - 1].width)) <= chars[idx].height * 0.8) {
+    idx--;   // 词信息缺失兜底：大水平间隙(>0.8字高)=跨排版块，不并入同一词
+  }
+  return idx;
+}
+function _expandToWordEnd(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return idx;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);   // 汉字+平/片假名+全角+CJK标点
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    while (idx < chars.length - 1 && chars[idx + 1].w === wid && !'/|／'.includes(chars[idx + 1].c)) idx++;
+    // 跳过词尾标点（more. 的句号、conditional” 的弯引号）
+    while (idx > 0 && chars[idx - 1].w === wid && !isWord(chars[idx].c) && !isCJK(chars[idx].c)) idx--;
+    return idx;
+  }
+  if (!isWord(chars[idx].c)) return idx;
+  while (idx < chars.length - 1 && isWord(chars[idx + 1].c) &&
+         Math.abs(chars[idx + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[idx + 1].left - (chars[idx].left + chars[idx].width)) <= chars[idx].height * 0.8) {
+    idx++;
+  }
+  return idx;
+}
+
+function _selByCharRange(pw, sIdx, eIdx) {
+  if (!pw || !pw.__charBoxes) return;
+  if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
+  const chars = pw.__charBoxes;
+  if (sIdx < 0 || eIdx >= chars.length) return;
+  // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
+  sIdx = _expandToWordStart(chars, sIdx);
+  eIdx = _expandToWordEnd(chars, eIdx);
+  // 按块过滤：只保留 block 序号在 [起点块, 终点块] 之间的字符，排除中间插入的别块
+  // （双栏选一栏不带另一栏、题号不粘进指令；跨段落=相邻块仍能选）。w=-1(无块信息)时不过滤
+  // 用 rawdict 块号 bk 过滤(斜体词 w=-1 也有块号)；bk 缺失才回退 w//1e6
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
+  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };  // b<0(空格/无词归属)保留，只排明确别块
+  // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
+  // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
+  let text = '';
+  let lastChar = null;
+  const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
+    if (lastChar) {
+      // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
+      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      const dy = Math.abs(c.top - lastChar.top);
+      if (dy > c.height * 0.5) {
+        if (!cjkPair) text += '\n';
+      } else {
+        // 同行：按 X gap 判断要不要加空格
+        const gap = c.left - (lastChar.left + lastChar.width);
+        const ref = Math.min(c.height, lastChar.height);
+        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+      }
+    }
+    // 真实空格 char 直接保留；其它 char 写入
+    text += c.sp ? ' ' : c.c;
+    lastChar = c;
+  }
+  // 压缩多余空格 / trim
+  text = text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
+  lastSelText = text;
+  _updateSelPreview(lastSelText);
+  if (typeof _updateGrammarBtnVisibility === 'function') _updateGrammarBtnVisibility();
+  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
+  const ov = pw.querySelector('.sel-overlay');
+  if (ov) {
+    ov.innerHTML = '';
+    let cur = null;
+    for (let i = sIdx; i <= eIdx; i++) {
+      const c = chars[i];
+      if (!_inBlk(c)) continue;   // 跨块过滤：别块字符不画选中高亮
+      // 空格如果 bbox 缺失，用前一字符的位置 + 估算 width
+      let cleft = c.left, ctop = c.top, cw = c.width, ch = c.height;
+      if (c.sp && (!cw || cw < 0.5) && i > sIdx) {
+        const prev = chars[i - 1];
+        cleft = prev.left + prev.width;
+        ctop = prev.top;
+        ch = prev.height;
+        cw = ch * 0.3;   // 估算空格宽度
+      }
+      if (cur && Math.abs(ctop - cur.top) <= ch * 0.4 && cleft <= cur.left + cur.width + ch * 0.5) {
+        cur.width = Math.max(cur.left + cur.width, cleft + cw) - cur.left;
+        cur.height = Math.max(cur.height, ch);
+      } else {
+        if (cur) {
+          const div = document.createElement('div');
+          div.className = 'hl';
+          div.style.left = cur.left + 'px';
+          div.style.top = cur.top + 'px';
+          div.style.width = cur.width + 'px';
+          div.style.height = cur.height + 'px';
+          ov.appendChild(div);
+        }
+        cur = {left: cleft, top: ctop, width: cw, height: ch};
+      }
+    }
+    if (cur) {
+      const div = document.createElement('div');
+      div.className = 'hl';
+      div.style.left = cur.left + 'px';
+      div.style.top = cur.top + 'px';
+      div.style.width = cur.width + 'px';
+      div.style.height = cur.height + 'px';
+      ov.appendChild(div);
+    }
+  }
+  // 工具栏位置：选区底部
+  const pwRect = pw.getBoundingClientRect();
+  const mainEl = document.getElementById('main');
+  const mainRect = mainEl.getBoundingClientRect();
+  const endChar = chars[eIdx];
+  toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
+  toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
+  toolbar.classList.add('open');
+}
+
+// 按 char 扩展到词边界（英文 \w / CJK 逐字）。空格视作非词字符
+function _wordExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const isWord = (c) => /[A-Za-z0-9_]/.test(c);
+  const isCJK  = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);
+  const c = chars[idx].c;
+  // 优先用词边界(英语 PyMuPDF + 日语 fugashi)：同一个 w 扩成整词；
+  // 之前 CJK 在这里 hardcoded 返回 single,阻止了 fugashi 分词生效。
+  if (chars[idx].w !== -1) {
+    const wid = chars[idx].w;
+    let s = idx, e = idx;
+    while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
+    while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
+    while (s < e && !isWord(chars[s].c) && !isCJK(chars[s].c)) s++;   // 去词首标点
+    while (e > s && !isWord(chars[e].c) && !isCJK(chars[e].c)) e--;   // 去词尾标点(如 often. 的句号)
+    return {start: s, end: e};
+  }
+  // 没词 id 时:CJK 字符无分词信息 → 只选 1 字(避免整页扩),英文按 isWord 扩
+  if (isCJK(c)) return {start: idx, end: idx};
+  if (!isWord(c)) return {start: idx, end: idx};
+  let s = idx;
+  while (s > 0 && isWord(chars[s - 1].c) &&
+         Math.abs(chars[s - 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[s].left - (chars[s - 1].left + chars[s - 1].width)) <= chars[idx].height * 0.8) {
+    s--;   // 大水平间隙=跨排版块(如 Unit 编号↔标题)，不并入同一词
+  }
+  let e = idx;
+  while (e < chars.length - 1 && isWord(chars[e + 1].c) &&
+         Math.abs(chars[e + 1].top - chars[idx].top) <= chars[idx].height * 0.5 &&
+         (chars[e + 1].left - (chars[e].left + chars[e].width)) <= chars[idx].height * 0.8) {
+    e++;   // 大水平间隙=跨排版块，不并入同一词
+  }
+  return {start: s, end: e};
+}
+
+// 同行扩展（双击）—— 含空格
+function _lineExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const refTop = chars[idx].top;
+  const refH = chars[idx].height;
+  let s = idx, e = idx;
+  while (s > 0 && Math.abs(chars[s - 1].top - refTop) <= refH * 0.4) s--;
+  while (e < chars.length - 1 && Math.abs(chars[e + 1].top - refTop) <= refH * 0.4) e++;
+  // 去掉两端空格
+  while (s < e && chars[s].sp) s++;
+  while (e > s && chars[e].sp) e--;
+  return {start: s, end: e};
+}
+
+// 段扩展（三击）：连续行 + 行间距 < 2.2× 行高
+function _paragraphExpandFromChar(chars, idx) {
+  if (idx < 0 || idx >= chars.length) return null;
+  const refH = chars[idx].height;
+  const _bkOf = (c) => (c.bk != null && c.bk >= 0) ? c.bk : -1;
+  const _bk0 = _bkOf(chars[idx]);   // 限本块(所在段落)：不跨栏/跨段/跨页，避免上下文吃到整页
+  let s = idx, e = idx;
+  let curTop = chars[idx].top;
+  // 向左/上
+  while (s > 0) {
+    if (_bk0 >= 0 && _bkOf(chars[s - 1]) >= 0 && _bkOf(chars[s - 1]) !== _bk0) break;
+    const t = chars[s - 1].top;
+    if (Math.abs(t - curTop) > refH * 2.2) break;
+    s--;
+    if (Math.abs(t - curTop) > refH * 0.4) curTop = t;
+  }
+  curTop = chars[idx].top;
+  while (e < chars.length - 1) {
+    if (_bk0 >= 0 && _bkOf(chars[e + 1]) >= 0 && _bkOf(chars[e + 1]) !== _bk0) break;
+    const t = chars[e + 1].top;
+    if (Math.abs(t - curTop) > refH * 2.2) break;
+    e++;
+    if (Math.abs(t - curTop) > refH * 0.4) curTop = t;
+  }
+  return {start: s, end: e};
+}
+
+let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
+let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为主→翻页) / 'select'(水平为主→选字)
+let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
+let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
+
+function _bindCharLayer(cl, pw) {
+  const ptToLocal = (clientX, clientY) => {
+    const r = cl.getBoundingClientRect();
+    return {x: clientX - r.left, y: clientY - r.top};
+  };
+
+  // 严格 bbox 命中 + 同行最近 char fallback。
+  // 日语扫描书走 visual segmentation 定位字符,char bbox 宽 ≈ 0.78 × spacing →
+  // 字符之间有 ~22% 空隙；严格命中空隙时回落"y 在行内 + x 离 char center 最近"防止点了没反应。
+  const _findCharStrict = (x, y) => {
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      if (x >= c.left && x <= c.left + c.width &&
+          y >= c.top  && y <= c.top  + c.height) return i;
+    }
+    // fallback:y 严格在行高内,取 x 距 char center 最近的(距离阈值 < 1× char height,
+    // 避免远处空白也错命中)
+    let best = -1, bestDist = Infinity;
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      if (y < c.top || y > c.top + c.height) continue;
+      const cx = c.left + c.width / 2;
+      const d = Math.abs(x - cx);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    if (best >= 0 && bestDist <= (pw.__charBoxes[best].height || 30) * 1.0) return best;
+    return -1;
+  };
+  const onStart = (x, y) => {
+    _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
+    // 诊断：每次按下输出 char-layer rect + 点击位置
+    if (!window._loggedRect) {
+      const r = cl.getBoundingClientRect();
+      window.dlog?.(`cl rect: l=${r.left.toFixed(0)} t=${r.top.toFixed(0)} w=${r.width.toFixed(0)} h=${r.height.toFixed(0)}`);
+      window._loggedRect = true;
+    }
+    window.dlog?.(`tap local: x=${x.toFixed(0)} y=${y.toFixed(0)}`);
+    const idx = _findCharStrict(x, y);
+    if (idx < 0) {
+      _dragStartCharIdx = null;
+      // 点空白 → 关 toolbar + 清选区（用户期望取消选中状态）
+      toolbar.classList.remove('open');
+      lastSelText = '';
+      _updateSelPreview('');
+      document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+      return false;
+    }
+    _dragStartCharIdx = idx;
+    _dragStartXY = {x, y};
+    _dragMoved = false;
+    _dragDir = null;   // 方向未定;首次动够时锁定
+    _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
+    // 拖选期间禁用 vocab-layer 拦截：否则拖到/松手在 L 按钮(pointer-events:auto)上会丢 move/up → 卡住/全选
+    const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = 'none';
+    return true;
+  };
+
+  const onMove = (x, y, ev) => {
+    if (_dragStartCharIdx == null) return;
+    if (_charSel && _charSel.pw !== pw) return;   // 多页/翻页累积的 document 监听：只处理拖选起点页
+    if (!_dragStartXY) return;
+    const dx = Math.abs(x - _dragStartXY.x), dy = Math.abs(y - _dragStartXY.y);
+    if (dx + dy < 8) return;
+    // 触摸:首次动够时锁定方向。竖直为主(dy>dx) → 当作翻页/滚动:放弃选字、不拦默认滚动。
+    // 鼠标(ev=null)不受此限,竖直拖仍可选。多行选择只要**起手横向**就锁成 select、后续往下拉照常选。
+    const isTouch = !!(ev && ev.touches);
+    if (isTouch && _dragDir === null) {
+      _dragDir = (dy > dx) ? 'scroll' : 'select';
+      if (_dragDir === 'scroll') {
+        _dragStartCharIdx = null;   // 放弃这次拖选 → 后续 move/end 直接 return,页面正常上下滚
+        _charSel = null;
+        pw.querySelector('.sel-overlay')?.replaceChildren();
+        const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        return;   // 不 preventDefault
+      }
+    }
+    _dragMoved = true;
+    if (ev && ev.cancelable) ev.preventDefault();
+    const idx = _findCharAt(pw.__charBoxes, x, y);
+    if (idx < 0) return;
+    _selByCharRange(pw, _dragStartCharIdx, idx);
+  };
+
+  const onEnd = (x, y) => {
+    if (_dragStartCharIdx == null) return;
+    if (_charSel && _charSel.pw !== pw) return;   // 多页/翻页累积的 document 监听：只处理拖选起点页
+    const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';  // 恢复 L 按钮可点
+    const startIdx = _dragStartCharIdx;
+    _dragStartCharIdx = null;
+    if (_dragMoved) {
+      const idx = _findCharAt(pw.__charBoxes, x, y);
+      if (idx >= 0) _selByCharRange(pw, startIdx, idx);
+      // 选中=普通选中(点别处照常消失)。持久呼吸高亮只在点「词组」按钮查询期间出现(showPhrasePopover)
+    } else if (_fromLBtn) {
+      // 从 L 按钮起点且没拖动 = 单击 L 按钮 → 交给 L 按钮 click 处理整句翻译，这里不查词
+      _fromLBtn = false;
+    } else {
+      // 单/双/三击
+      const now = Date.now();
+      if (_lastClickCharIdx === startIdx && now - _lastClickTime < 380) {
+        _clickCount = (_clickCount % 3) + 1;
+      } else {
+        _clickCount = 1;
+        _lastClickCharIdx = startIdx;
+      }
+      _lastClickTime = now;
+      let bounds = null;
+      if (_clickCount === 1) bounds = _wordExpandFromChar(pw.__charBoxes, startIdx);
+      else if (_clickCount === 2) bounds = _lineExpandFromChar(pw.__charBoxes, startIdx);
+      else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
+      if (bounds) {
+        _selByCharRange(pw, bounds.start, bounds.end);
+        // 单击单词 → 弹单词小框查词
+        if (_clickCount === 1) {
+          const _t = (lastSelText || '').trim();
+          const _cr = _expandSentenceFromRange(pw.__charBoxes, bounds.start, bounds.end);
+          const _ctx = _cr ? _charsRangeToText(pw.__charBoxes, _cr.start, _cr.end).slice(0, 400) : '';
+          const hasKana  = s => /[぀-ゟ゠-ヿ]/.test(s);      // 平/片假名 = 铁定日语
+          const hasKanji = s => /[一-鿿㐀-䶿]/.test(s);      // CJK 汉字(日中共用,光看词分不出)
+          const isEng = /^[A-Za-z][A-Za-z'’\-]*$/.test(_t);
+          const declared = BOOK_LANGS.length > 0;
+          // 日语判定:优先用本书语言声明;没声明则回退启发(假名铁定/纯汉字看上下文假名)
+          let isJa;
+          if (declared) {
+            isJa = BOOK_LANGS.includes('ja') && (hasKana(_t) || hasKanji(_t));
+          } else {
+            isJa = hasKana(_t) || (hasKanji(_t) && hasKana(_ctx));
+          }
+          // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
+          const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
+          if (_t && _t.length <= 30 && (isJa || engOk)) {
+            setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+          }
+        }
+      }
+    }
+  };
+
+  cl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (Date.now() - (window._clLastTouchAt || 0) < 700) return;   // 忽略 touch 后 iOS 合成的 mousedown（否则 onStart 双触发→假双击→刚弹的小框被冲掉）
+    e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
+    const p = ptToLocal(e.clientX, e.clientY);
+    onStart(p.x, p.y);
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (_dragStartCharIdx == null) return;
+    const p = ptToLocal(e.clientX, e.clientY);
+    onMove(p.x, p.y, null);
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (_dragStartCharIdx == null) return;
+    const p = ptToLocal(e.clientX, e.clientY);
+    onEnd(p.x, p.y);
+  });
+  cl.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
+    window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
+    e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
+    const t = e.touches[0];
+    const p = ptToLocal(t.clientX, t.clientY);
+    onStart(p.x, p.y);
+    // 单页模式：整页任意处都可横滑翻页（不限空白）。tap=选词 / 横滑=翻页 / 竖滑=滚动；单页不做拖选。
+    _swipeStart = (readMode === 'single')
+      ? {x: t.clientX, y: t.clientY, lastX: t.clientX, decided: false, h: false}
+      : null;
+  }, {passive: true});
+  cl.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 1) return;
+    if (_swipeStart) {   // 单页模式：横滑翻页 / 竖滑滚动 / 移动即放弃选词
+      const t = e.touches[0];
+      const dx = t.clientX - _swipeStart.x, dy = t.clientY - _swipeStart.y;
+      _swipeStart.lastX = t.clientX;
+      if (!_swipeStart.decided && (Math.abs(dx) + Math.abs(dy)) > 8) {
+        _swipeStart.decided = true;
+        _swipeStart.h = Math.abs(dx) > Math.abs(dy);   // 横向主导=翻页，否则=滚动
+        // 一旦移动 → 放弃 tap 选词（拖动不在单页里选字）
+        _dragStartCharIdx = null; _charSel = null;
+        pw.querySelector('.sel-overlay')?.replaceChildren();
+        const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        if (!_swipeStart.h) _swipeStart = null;   // 竖滑 → 交回原生滚动，不再拦
+      }
+      // 横滑：每次 move 都 preventDefault 抢下手势，防浏览器判滚动→touchcancel→翻不了页（F2 根因）
+      if (_swipeStart && _swipeStart.h && e.cancelable) e.preventDefault();
+      return;
+    }
+    if (_dragStartCharIdx == null) return;
+    e.stopPropagation();
+    const t = e.touches[0];
+    const p = ptToLocal(t.clientX, t.clientY);
+    onMove(p.x, p.y, e);
+  }, {passive: false});
+  cl.addEventListener('touchend', (e) => {
+    // 单页横滑翻页：右滑→上一页，左滑→下一页（阈值 40px）；没构成横滑则落到下面 tap 选词
+    if (_swipeStart) {
+      const sw = _swipeStart; _swipeStart = null;
+      if (sw.h) {
+        const t0 = e.changedTouches[0];
+        const dx = (t0 ? t0.clientX : sw.lastX) - sw.x;
+        if (Math.abs(dx) >= 40) { e.preventDefault(); window.changePage(dx > 0 ? -1 : 1); return; }
+        return;   // 横向移动了但不够阈值 → 不翻也不选
+      }
+    }
+    if (_dragStartCharIdx == null) return;
+    e.preventDefault(); e.stopPropagation();
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const p = ptToLocal(t.clientX, t.clientY);
+    onEnd(p.x, p.y);
+  });
+  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; _swipeStart = null; });
+  // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
+  pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
+}
+

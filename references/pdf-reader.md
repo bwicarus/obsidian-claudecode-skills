@@ -17,7 +17,11 @@
 
 前端（2026-06 起 HTML 与主逻辑 JS 分离）：
 - `_server_deploy/templates/pdf_reader.html` — 阅读器主页**模板**（~1116 行：HTML 标记 + 全部 CSS + 两段经典 `<script>`：① `window.dlog`/错误监听 ② 手写墨迹 `_ink`）。主逻辑模块已抽出，模板里只剩：`<script>window.__PDF_CFG={pdf_url,file_rel,page}</script>` + `<script type="module" src="/static/pdf/reader.js?v={{reader_js_v}}">`
-- **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~5831 行，原内联 `<script type="module">` 整体抽出；配置走 `window.__PDF_CFG`，架构/全局未变，纯物理拆分）。语法校验：`bash scripts/check_pdf_reader_js.sh`（默认就检它，top-level await 包 async IIFE 后 node --check）
+- **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~5831 行，运行时是**一个 ES module**；配置走 `window.__PDF_CFG`，架构/全局未变）。**它是构建产物**：由下面的分块源 `cat` 拼接而成
+- **`_server_deploy/static/pdf/reader.src/NN-*.js`** — 按功能分块的源（2026-06，21 个文件 60~730 行）。**改前端 = 改这里对应的功能文件**，不是改 reader.js。拼接成单文件运行 → 所有现有交叉调用/全局原样工作（**不是** import/export 强边界，是「分文件、共享同一模块作用域」，故拆分零运行时风险，diff 拼接结果 vs 原 reader.js = 0）。分块清单：
+  `01-boot`(PDFJS import/配置/langs) `02-position`(位置记忆) `03-loader`(loadPdf) `04-render`(renderPage) `05-nav`(页导航/缩放/侧栏/vocab-list/tts) `06-layout`(阅读模式/适宽/pinch) `07-continuous`(连续滚动) `08-charlayer`(char-layer绑定/生词下划线) `09-ruby`(振假名) `10-pagetranslate`(整页翻译/行间对照) `11-search`(全文搜索) `12-vocab-sentences`(句子虚框/翻译浮层) `13-selection`(char选中核心) `14-textlayer-legacy`(旧textLayer+工具栏/preview) `15-phrase-wordpop`(F6词组+单词小框) `16-caret-select`(caret/bindTextLayerClick) `17-highlight`(高亮sidecar+markFromResult) `18-grammar`(语法分析+依存图) `19-dict`(字典SSE+hl popover+日语AI) `20-result-draft`(结果modal/草稿/后台job) `21-misc-ai`(md/设置/`_aiStream`/aiCall/onTranslate等)
+  - **构建**：`bash scripts/build_pdf_reader_js.sh`（= `cat reader.src/*.js > reader.js`，NN- 前缀保序）。`check_pdf_reader_js.sh` 会**先自动重建再校验**，所以正常流程 `改 src → bash scripts/check_pdf_reader_js.sh（顺带重建）→ cp reader.js → 部署`
+  - 进一步要做 import/export 强边界 = 逐个模块迁移（拆全局状态，风险高、无运行时测试，须小步 + 真机验证），目前**未做**
 - `_server_deploy/templates/pdf_index.html` — PDF 列表页（GET `/` render）
 
 静态资源（部署在服务器侧）：
@@ -32,7 +36,7 @@ _server_deploy/templates/pdf_reader.html → <webapp>/templates/pdf_reader.html
 _server_deploy/static/pdf/reader.js     → /var/www/html/static/pdf/reader.js   ★ 新增,改前端必带,漏了阅读器白屏
 data/ecdict.db                           → <webapp>/data/ecdict.db
 ```
-改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.js`,不是 html**；改完 `cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。
+改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.src/NN-*.js`,不是 html、也不是直接改 reader.js**；流程：`改 reader.src/ → bash scripts/check_pdf_reader_js.sh（自动重建 reader.js + 校验）→ cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。restart webapp 只为 py/html 改动；纯 JS 改动只需 cp reader.js（前端 ?v=mtime 自动失效缓存）。
 
 ---
 

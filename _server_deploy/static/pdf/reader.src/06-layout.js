@@ -1,0 +1,153 @@
+window.toggleReadMode = async () => {
+  const keepPage = currentPage;   // 记住切换前的页，切换后强制回到它（别跳回第一页）
+  readMode = readMode === 'single' ? 'continuous' : 'single';
+  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
+  document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+  _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
+  if (readMode === 'continuous') {
+    await setupContinuousMode();
+    currentPage = keepPage;
+    // 占位高度算准后再滚一次到原页（setupContinuousMode 内部那次可能早于布局稳定）
+    const t = document.querySelector(`[data-page-num="${keepPage}"]`);
+    if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+  } else {
+    currentPage = keepPage;
+    await renderPage(keepPage);
+  }
+  _saveLastPosition({page: currentPage, mode: readMode, scale});
+};
+
+// 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
+let _refitDebounce = null, _refitBusy = false, _lastFitWidth = 0;
+// #main 真实可用内容宽度（clientWidth 含 padding，开侧栏加 padding-right 后必须减掉真实 padding）
+function _mainContentWidth() {
+  const m = document.getElementById('main');
+  const cs = getComputedStyle(m);
+  return m.clientWidth - (parseFloat(cs.paddingLeft)||0) - (parseFloat(cs.paddingRight)||0);
+}
+function _scheduleRefit(force) {
+  if (_refitDebounce) clearTimeout(_refitDebounce);
+  _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
+}
+async function _refitToWidth(force) {
+  if (_refitBusy || !pdfDoc) return;
+  const main = document.getElementById('main');
+  const mainW = _mainContentWidth();
+  if (mainW <= 0) return;
+  if (!force && Math.abs(mainW - _lastFitWidth) < 30) return;
+  _refitBusy = true;
+  try {
+    const page1 = await pdfDoc.getPage(1);
+    const v0 = page1.getViewport({scale: 1});
+    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
+    if (Math.abs(newScale - scale) < 0.01 && !force) return;
+    // 保存当前滚动相对位置（按 page-container 高度比例）
+    const container = document.getElementById('page-container');
+    const ratio = container && container.offsetHeight
+      ? main.scrollTop / Math.max(1, container.offsetHeight)
+      : 0;
+    scale = newScale;
+    _lastFitWidth = mainW;
+    if (readMode === 'continuous') {
+      await setupContinuousMode();
+    } else {
+      // 单页模式：清 loaded 标记重 render
+      const wrap = container.querySelector('.page-wrap') || container;
+      wrap.dataset.loaded = '0';
+      await renderPage(currentPage);
+    }
+    // 按比例恢复滚动
+    requestAnimationFrame(() => {
+      if (container && container.offsetHeight) {
+        main.scrollTop = Math.floor(ratio * container.offsetHeight);
+      }
+    });
+  } finally {
+    _refitBusy = false;
+  }
+}
+
+// 监视 #main 宽度（窗口缩放、panel 打开 / 关闭、横竖屏）
+function _setupResizeWatcher() {
+  const main = document.getElementById('main');
+  if (!main || main.dataset.resizeWatch === '1') return;
+  main.dataset.resizeWatch = '1';
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => _scheduleRefit(false)).observe(main);
+  } else {
+    window.addEventListener('resize', () => _scheduleRefit(false));
+  }
+}
+if (document.readyState !== 'loading') _setupResizeWatcher();
+else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
+
+// ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
+async function _applyZoom(newScale) {
+  if (_refitBusy || !pdfDoc) return;
+  newScale = Math.max(0.5, Math.min(_scaleMax, newScale));
+  if (Math.abs(newScale - scale) < 0.01) return;
+  _refitBusy = true;
+  try {
+    const main = document.getElementById('main');
+    const container = document.getElementById('page-container');
+    const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
+    scale = newScale;
+    _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
+    if (readMode === 'continuous') {
+      await setupContinuousMode();
+    } else {
+      const wrap = container.querySelector('.page-wrap') || container;
+      if (wrap.dataset) wrap.dataset.loaded = '0';
+      await renderPage(currentPage);
+    }
+    requestAnimationFrame(() => { if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight); });
+  } finally { _refitBusy = false; }
+}
+window._applyZoom = _applyZoom;
+
+let _pinch = null;
+function _setupPinchZoom() {
+  const main = document.getElementById('main');
+  if (!main || main.dataset.pinchWatch === '1') return;
+  main.dataset.pinchWatch = '1';
+  // 禁 iOS Safari 浏览器级页面缩放（否则双指仍是拉伸位图 → 糊）
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('gesturechange', (e) => e.preventDefault());
+  main.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+      const [a, b] = e.touches;
+      _pinch = {
+        d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+        s0: scale, target: scale,
+        cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2,
+      };
+      e.preventDefault();
+    }
+  }, { passive: false });
+  main.addEventListener('touchmove', (e) => {
+    if (_pinch && e.touches.length === 2) {
+      e.preventDefault();
+      const [a, b] = e.touches;
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      _pinch.target = Math.max(0.5, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
+      // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
+      const pc = document.getElementById('page-container');
+      const mr = main.getBoundingClientRect();
+      pc.style.transformOrigin = (main.scrollLeft + _pinch.cx - mr.left) + 'px ' + (main.scrollTop + _pinch.cy - mr.top) + 'px';
+      pc.style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
+    }
+  }, { passive: false });
+  const endPinch = () => {
+    if (!_pinch) return;
+    const target = _pinch.target; _pinch = null;
+    const pc = document.getElementById('page-container');
+    pc.style.transform = ''; pc.style.transformOrigin = '';
+    if (Math.abs(target - scale) > 0.02) _applyZoom(target);
+  };
+  main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
+  main.addEventListener('touchcancel', endPinch, { passive: false });
+}
+if (document.readyState !== 'loading') _setupPinchZoom();
+else window.addEventListener('DOMContentLoaded', _setupPinchZoom);
+
+// 连续模式：所有页占位 + IntersectionObserver 懒加载
