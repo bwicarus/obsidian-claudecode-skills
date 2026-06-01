@@ -363,9 +363,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #search-results .sr-snip{color:#cfe6ff;font-size:12.5px;line-height:1.5;overflow:hidden}
 #search-results .sr-snip mark{background:#3b6db5;color:#fff;border-radius:2px;padding:0 1px}
 #search-results .sr-empty{padding:16px;color:#5a6680;font-size:12px;text-align:center}
-/* 词组查询期间的呼吸高亮层（纯视觉，pointer-events:none；只在点「词组」按钮查询时出现，结果出来即移除） */
+/* 词组高亮层：点「词组」按钮后出现，查询中呼吸、出结果后常亮**保持**；可点击 → 点它才消失。 */
 .phrase-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
-.phrase-hl-layer .hl{position:absolute;background:rgba(59,109,181,.42);border:1px solid rgba(111,211,255,.85);border-radius:3px;pointer-events:none}
+.phrase-hl-layer .hl{position:absolute;background:rgba(59,109,181,.42);border:1px solid rgba(111,211,255,.85);border-radius:3px;pointer-events:auto;cursor:pointer}
 .phrase-hl-layer.breathe .hl{animation:sel-breathe 1.1s ease-in-out infinite}
 /* 搜索命中在原文位置的临时高亮（黄，z-index 6 在 char-layer 之上但 pointer-events:none） */
 .search-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
@@ -3431,13 +3431,15 @@ function renderPhraseHl(pw) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
   const layer = document.createElement('div');
-  layer.className = 'phrase-hl-layer breathe';   // 查询期间持续呼吸(纯视觉,不可点)，结果出来由 _removePhraseHighlight 移除
+  layer.className = 'phrase-hl-layer' + (a.solid ? '' : ' breathe');   // 查询中呼吸；出结果转常亮(a.solid)保持
   for (const r of a.rects) {
     const d = document.createElement('div'); d.className = 'hl';
     d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
     d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
     layer.appendChild(d);
   }
+  // 点高亮才消失（用户要求：没点高亮就不该自动消失）
+  layer.addEventListener('click', (e) => { e.stopPropagation(); _removePhraseHighlight(); });
   pw.appendChild(layer);
 }
 function _removePhraseHighlight() {
@@ -3452,7 +3454,7 @@ function _showPhraseHighlight(pw) {
   const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
   if (!rects.length) return null;
   document.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());   // 清掉别页残留的旧高亮
-  _activePhraseHl = {page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects};
+  _activePhraseHl = {page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects, solid: false};
   const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层，避免双重高亮
   renderPhraseHl(pw);
   return true;
@@ -3482,7 +3484,11 @@ window.showPhrasePopover = async (text) => {
       if (d.ok) zh = d.zh || '';
     }
   } catch (_) {}
-  _removePhraseHighlight();   // 打开词组结果后高亮消失（不是定时淡出，是被打开动作触发移除）
+  // 出结果 → 停呼吸转常亮**保持**（不移除）；只有点高亮本身才消失
+  if (_activePhraseHl) {
+    _activePhraseHl.solid = true;
+    document.querySelector('.phrase-hl-layer')?.classList.remove('breathe');
+  }
   _wordPopState.reading = reading;
   const phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
     : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
