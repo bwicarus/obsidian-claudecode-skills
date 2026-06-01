@@ -3438,8 +3438,13 @@ function renderPhraseHl(pw) {
     d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
     layer.appendChild(d);
   }
-  // 点高亮才消失（用户要求：没点高亮就不该自动消失）
-  layer.addEventListener('click', (e) => { e.stopPropagation(); _removePhraseHighlight(); });
+  // 点高亮：高亮消失 + 重新弹出该词组的翻译小框（不再建新高亮）
+  layer.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const txt = (_activePhraseHl && _activePhraseHl.text) || a.text;
+    _removePhraseHighlight();
+    showPhrasePopover(txt, {noHighlight: true});
+  });
   pw.appendChild(layer);
 }
 function _removePhraseHighlight() {
@@ -3459,7 +3464,7 @@ function _showPhraseHighlight(pw) {
   renderPhraseHl(pw);
   return true;
 }
-window.showPhrasePopover = async (text) => {
+window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
   _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: ''};
@@ -3467,8 +3472,9 @@ window.showPhrasePopover = async (text) => {
   window._wordPopOpenAt = Date.now();
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
   _positionWordPop(pop);
-  // **点了词组按钮**才把当前选区变成持久呼吸高亮（查询期间常亮闪烁、点别处不消失），结果出来即移除。
-  if (_wordPopState.phrase) _showPhraseHighlight(_charSel && _charSel.pw);
+  // **点了词组按钮**才把当前选区变持久呼吸高亮（查询中呼吸→出结果常亮保持，点高亮才消失）。
+  // 点高亮重新弹框时 opts.noHighlight=true → 只弹框、不再建新高亮。
+  if (_wordPopState.phrase && !(opts && opts.noHighlight)) _showPhraseHighlight(_charSel && _charSel.pw);
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
   let zh = '', reading = '', accent = null;
