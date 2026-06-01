@@ -3455,6 +3455,7 @@ function _showPhraseHighlight(pw) {
   if (!text) return null;
   const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
   if (!rects.length) return null;
+  document.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());   // 清掉别页残留的旧高亮
   _activePhraseHl = {page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects};
   const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层，避免双重高亮
   renderPhraseHl(pw);
