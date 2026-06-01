@@ -4374,32 +4374,20 @@ window._followupAsk = async () => {
   const myReq = _resultReqId;
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/explain', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
-      body: JSON.stringify({text: q, context: '基于之前的解释/对话继续回答：\n' + history, model: ov.model || '', effort: ov.effort || ''}),
+    const render = (text) => {
+      if (myReq !== _resultReqId) return;   // 结果框已被新内容作废
+      aDiv.innerHTML = md(text || ' ');
+      if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(() => {});
+      contentEl.scrollTop = contentEl.scrollHeight;
+    };
+    const res = await _aiStream('/pdf/api/explain', {
+      method: 'POST', onText: render,
+      body: {text: q, context: '基于之前的解释/对话继续回答：\n' + history, model: ov.model || '', effort: ov.effort || ''},
     });
-    const ct = r.headers.get('content-type') || '';
-    if (ct.includes('event-stream')) {
-      const reader = r.body.getReader(); const dec = new TextDecoder();
-      let buf = '', acc = '';
-      while (true) {
-        const {value, done} = await reader.read(); if (done) break;
-        if (myReq !== _resultReqId) return;   // 结果框已被新内容作废
-        buf += dec.decode(value, {stream: true}); let i;
-        while ((i = buf.indexOf('\n\n')) !== -1) {
-          const block = buf.slice(0, i); buf = buf.slice(i + 2);
-          let dl = '';
-          for (const ln of block.split('\n')) { if (ln.startsWith('data:')) dl = ln.slice(5).trim(); }
-          if (!dl) continue;
-          try { const o = JSON.parse(dl); if (o.text) { acc += o.text; aDiv.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(()=>{}); } } catch (_) {}
-        }
-        contentEl.scrollTop = contentEl.scrollHeight;
-      }
-      if (!acc) aDiv.innerHTML = '(无回答)';
-    } else {
-      const d = await r.json();
-      aDiv.innerHTML = md(d.explanation || d.text || '(无回答)');
-    }
+    if (myReq !== _resultReqId) return;
+    if (res.ok && res.text) render(res.text);
+    else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00">✗ ' + (res.error || '失败') + '</span>';
+    else aDiv.innerHTML = '(无回答)';
   } catch (e) { aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>'; }
   contentEl.scrollTop = contentEl.scrollHeight;
   try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
@@ -4522,18 +4510,7 @@ window.onGrammarAnalyze = async () => {
 // AI 流式：先收翻译（[[TRANS]]..[[/TRANS]] 标志先出 → 立刻显示），再收语法点（[[POINTS]] JSON [[/POINTS]]）
 async function _streamGrammar(block, sentence, text) {
   if (!block) return;
-  let resp;
-  try {
-    resp = await fetch('/pdf/api/grammar-stream', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
-      body: JSON.stringify({sentence, text, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
-    });
-  } catch (e) { _setBlockTransFail(block); return; }
-  if (!resp.ok || !resp.body) { _setBlockTransFail(block); return; }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let sseBuf = '', acc = '', transDone = false, pointsDone = false;
+  let acc = '', transDone = false, pointsDone = false;
   const tryParse = () => {
     if (!transDone) {
       const tm = acc.match(/\[\[TRANS\]\]([\s\S]*?)\[\[\/TRANS\]\]/);
@@ -4544,21 +4521,14 @@ async function _streamGrammar(block, sentence, text) {
       if (pm) { _setBlockPoints(block, pm[1].trim()); pointsDone = true; }
     }
   };
-  try {
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      sseBuf += dec.decode(value, {stream: true});
-      const events = sseBuf.split('\n\n');
-      sseBuf = events.pop();
-      for (const ev of events) {
-        const m = ev.match(/^data: (.*)$/m);
-        if (!m) continue;
-        try { const j = JSON.parse(m[1]); if (j.text) acc += j.text; } catch {}
-      }
-      tryParse();
-    }
-  } catch (e) { /* 流中断 */ }
+  // 抗断连：SSE 主路 + 切后台/网抖回退轮询（后台线程跑完，标志解析照常）
+  const res = await _aiStream('/pdf/api/grammar-stream', {
+    method: 'POST',
+    body: {sentence, text, file: FILE_REL, enabled_books: _grammarEnabledBooks},
+    onText: (t) => { acc = t; tryParse(); },
+  });
+  if (!res.ok && !acc) { _setBlockTransFail(block); return; }
+  acc = res.text || acc; tryParse();
   // 兜底：流结束仍未解析到标志，尽量从残文里抠
   if (!transDone) {
     const tm = acc.match(/\[\[TRANS\]\]([\s\S]*?)(\[\[\/TRANS\]\]|\[\[POINTS\]\]|$)/);
@@ -5737,24 +5707,18 @@ window._jpAiDeep = async (word) => {
   const myReq = _resultReqId;
   if (btn) { btn.disabled = true; btn.textContent = '✨ 生成中…'; }
   const ctx = (_wordPopState && _wordPopState.ctx) || '';
-  let acc = '';
   try {
-    const r = await fetch('/pdf/api/dict-jp-ai?word=' + encodeURIComponent(word) +
-      '&context=' + encodeURIComponent(ctx), {headers: {'Accept': 'text/event-stream'}});
-    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
-    while (true) {
-      const {value, done} = await reader.read(); if (done) break;
+    const render = (text) => {
       if (myReq !== _resultReqId) return;   // 结果框已被新内容作废
-      buf += dec.decode(value, {stream: true}); let i;
-      while ((i = buf.indexOf('\n\n')) !== -1) {
-        const blk = buf.slice(0, i); buf = buf.slice(i + 2);
-        let dl = '';
-        for (const ln of blk.split('\n')) if (ln.startsWith('data:')) dl = ln.slice(5).trim();
-        if (!dl) continue;
-        try { const o = JSON.parse(dl); if (o.t) { acc += o.t; out.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([out]).catch(() => {}); } } catch (_) {}
-      }
+      out.innerHTML = md(text || ' ');
+      if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([out]).catch(() => {});
       out.scrollIntoView && out.scrollIntoView({block: 'nearest'});
-    }
+    };
+    const res = await _aiStream('/pdf/api/dict-jp-ai?word=' + encodeURIComponent(word) +
+      '&context=' + encodeURIComponent(ctx), { method: 'GET', onText: render });
+    if (myReq !== _resultReqId) return;
+    if (res.ok) render(res.text);
+    else out.innerHTML = '<span style="color:#c00">AI 失败：' + (res.error || '') + '</span>';
   } catch (e) {
     out.innerHTML = '<span style="color:#c00">AI 失败：' + e.message + '</span>';
   }
@@ -6346,6 +6310,88 @@ if (localStorage.getItem('pdf-debug') !== '1') {
   setTimeout(_applyDebugVisibility, 0);
 }
 
+// 抗断连流式 AI:SSE 主路(桌面端流式打字),iPad 切后台/网抖断了 → 回退轮询 /api/ai-stream-result
+// 拿后台线程已生成的完整文本(断点不丢)。onText(累计全文) 实时回调(内部~80ms 节流)。返回 {ok,text,error}。
+// 后端 rid 路由:translate/explain/grammar POST body.rid;dict-jp-ai GET ?rid=。
+async function _aiStream(url, opts) {
+  opts = opts || {};
+  const method = (opts.method || 'GET').toUpperCase();
+  const rid = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  let furl = url, body = null;
+  const headers = { 'Accept': 'text/event-stream' };
+  if (method === 'GET') {
+    furl += (url.indexOf('?') >= 0 ? '&' : '?') + 'rid=' + encodeURIComponent(rid);
+  } else {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(Object.assign({}, opts.body || {}, { rid }));
+  }
+  const onTextRaw = opts.onText || (() => {});
+  let acc = '', finished = false, usingPoll = false, lastCb = 0, cbTimer = null;
+  const ctrl = new AbortController();
+  return new Promise((resolve) => {
+    const emit = (force) => {                  // onText 节流(~80ms),结束时强制
+      if (finished && !force) return;
+      const now = Date.now();
+      if (force || now - lastCb >= 80) { lastCb = now; if (cbTimer) { clearTimeout(cbTimer); cbTimer = null; } try { onTextRaw(acc); } catch (_) {} }
+      else if (!cbTimer) cbTimer = setTimeout(() => { cbTimer = null; lastCb = Date.now(); try { onTextRaw(acc); } catch (_) {} }, 80 - (now - lastCb));
+    };
+    const cleanup = () => { document.removeEventListener('visibilitychange', onVis); if (cbTimer) clearTimeout(cbTimer); try { ctrl.abort(); } catch (_) {} };
+    const finish = (ok, error) => { if (finished) return; finished = true; try { onTextRaw(acc); } catch (_) {} cleanup(); resolve({ ok, text: acc, error: error || '' }); };
+    // 回退轮询:后台线程仍在跑,拉它已生成的完整文本
+    let pollN = 0;
+    const poll = async () => {
+      if (finished) return;
+      pollN++;
+      try {
+        const r = await fetch('/pdf/api/ai-stream-result?id=' + encodeURIComponent(rid));
+        const d = await r.json();
+        if (typeof d.full === 'string' && d.full.length > acc.length) { acc = d.full; emit(); }
+        if (d.status === 'done') return finish(true);
+        if (d.status === 'error') return finish(false, d.error || 'AI 失败');
+        if (d.status === 'unknown' && pollN > 3) return finish(!!acc, acc ? '' : '任务丢失(服务重启?)');
+      } catch (_) { /* 网瞬断:继续 */ }
+      if (pollN > 240) return finish(!!acc, acc ? '' : '轮询超时');   // ~5min 兜底
+      setTimeout(poll, 1200);
+    };
+    const startPoll = () => { if (usingPoll || finished) return; usingPoll = true; try { ctrl.abort(); } catch (_) {} poll(); };
+    // 切后台→回前台:iOS 挂起 JS 会让 SSE reader 卡死,主动转轮询
+    const onVis = () => { if (document.visibilityState === 'visible' && !finished) startPoll(); };
+    document.addEventListener('visibilitychange', onVis);
+    // SSE 主路
+    (async () => {
+      try {
+        const r = await fetch(furl, { method, headers, body, signal: ctrl.signal });
+        const ct = r.headers.get('content-type') || '';
+        if (!r.ok || !ct.includes('event-stream')) {   // 服务端没流式(多半错误 JSON) → 当普通 JSON
+          let d = {}; try { d = await r.json(); } catch (_) {}
+          if (d && d.ok && (d.translation || d.explanation)) { acc = d.translation || d.explanation; return finish(true); }
+          return finish(false, (d && d.error) || ('HTTP ' + r.status));
+        }
+        const reader = r.body.getReader(), dec = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (usingPoll || finished) return;
+          buf += dec.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            if (usingPoll || finished) return;
+            const ev = buf.slice(0, idx); buf = buf.slice(idx + 2);
+            if (/^event:\s*error/m.test(ev)) { let er = ''; const m = ev.match(/^data:\s*(.*)/m); try { er = JSON.parse(m[1]).error; } catch (_) {} return finish(false, er || 'AI 失败'); }
+            if (/^event:\s*done/m.test(ev)) return finish(true);
+            const m = ev.match(/^data:\s*(.*)/m);
+            if (m) { try { const j = JSON.parse(m[1]); if (j.text) { acc += j.text; emit(); } } catch (_) {} }
+          }
+        }
+        if (!finished && !usingPoll) startPoll();   // 流断了没收到 done → 转轮询补全
+      } catch (e) {
+        if (!finished && !usingPoll) startPoll();    // SSE 出错/abort → 后台线程仍在跑,转轮询
+      }
+    })();
+  });
+}
+
 async function aiCall(path, body, label) {
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
@@ -6354,82 +6400,18 @@ async function aiCall(path, body, label) {
   openResult(label, body.text || body.sentence || lastSelText, '<div class="loading">⏳ AI 处理中…</div>');
   const myReq = _resultReqId;   // 本次 AI 调用的请求序号；被新结果框作废后渲染一律丢弃
   const contentEl = document.getElementById('result-content');
+  const render = (text) => {              // 渲染累计全文（marked + MathJax）
+    if (myReq !== _resultReqId) return;   // 已被新结果框作废 → 不写回（防延迟流式覆盖新结果）
+    contentEl.innerHTML = md(text || ' ');
+    if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([contentEl]).catch(() => {});
+  };
   try {
-    const r = await fetch(path, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const ct = r.headers.get('content-type') || '';
-    if (ct.includes('event-stream')) {
-      // SSE 流式：边收边渲染（marked + MathJax 节流 120ms）
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '', accumulated = '', lastRender = 0;
-      let renderQueued = false;
-      const renderNow = () => {
-        if (myReq !== _resultReqId) return;   // 已被新结果框作废 → 不写回（防延迟流式覆盖新结果）
-        contentEl.innerHTML = md(accumulated || ' ');
-        if (window.MathJax && MathJax.typesetPromise) {
-          MathJax.typesetPromise([contentEl]).catch(()=>{});
-        }
-        lastRender = Date.now();
-        renderQueued = false;
-      };
-      const maybeRender = () => {
-        const now = Date.now();
-        if (now - lastRender >= 120) renderNow();
-        else if (!renderQueued) {
-          renderQueued = true;
-          setTimeout(renderNow, 120 - (now - lastRender));
-        }
-      };
-      let errored = null;
-      outer: while (true) {
-        const {value, done} = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, {stream: true});
-        let idx;
-        while ((idx = buf.indexOf('\n\n')) !== -1) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          let isError = false, dataLine = '';
-          for (const line of block.split('\n')) {
-            if (line.startsWith('event:')) {
-              if (line.includes('error')) isError = true;
-            } else if (line.startsWith('data:')) {
-              dataLine = line.slice(5).trim();
-            }
-          }
-          if (!dataLine) continue;
-          try {
-            const obj = JSON.parse(dataLine);
-            if (isError) { errored = obj.error || '错误'; break outer; }
-            if (obj.text) { accumulated += obj.text; maybeRender(); }
-          } catch (_) {}
-        }
-      }
-      if (myReq !== _resultReqId) return;   // 本次已被新结果框作废 → 结尾不再写
-      renderNow();
-      if (errored) {
-        contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + errored + '</div>';
-      }
-      addResultPickers();   // SSE 完成后给标题加 +
-    } else {
-      const d = await r.json();
-      if (myReq !== _resultReqId) return;
-      if (d.ok) {
-        const text = d.translation || d.explanation || JSON.stringify(d);
-        contentEl.innerHTML = md(text);
-        if (window.MathJax && MathJax.typesetPromise) {
-          MathJax.typesetPromise([contentEl]).catch(()=>{});
-        }
-        addResultPickers();
-      } else {
-        contentEl.innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
-      }
-    }
+    // 抗断连：SSE 主路 + 切后台/网抖回退轮询（后台线程跑完，结果不丢）
+    const res = await _aiStream(path, { method: 'POST', body, onText: render });
+    if (myReq !== _resultReqId) return;
+    render(res.text);
+    if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
+    addResultPickers();   // 完成后给标题加 +
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }

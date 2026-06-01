@@ -2216,18 +2216,7 @@ def pdf_api_dict_jp_ai():
         "4. **汉字记忆** — 各汉字音读/训读怎么记、构词规律\n"
         "不要寒暄,不要重复词本身的读音表格(前面已显示)。"
     )
-
-    def gen():
-        try:
-            for chunk in _ai_call_stream(prompt):
-                if chunk:
-                    yield f"data: {json.dumps({'t': chunk}, ensure_ascii=False)}\n\n"
-            yield "data: {\"done\": true}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-
-    return Response(gen(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _start_ai_stream(prompt, "", "", (request.args.get("rid") or "").strip())
 
 
 @bp.route("/api/dict")
@@ -2352,10 +2341,7 @@ def pdf_api_translate():
     model = (body.get("model") or "").strip()
     effort = (body.get("effort") or "").strip()
     if "text/event-stream" in (request.headers.get("Accept") or ""):
-        from flask import Response, stream_with_context
-        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
-                        mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return _start_ai_stream(prompt, model, effort, (body.get("rid") or "").strip())
     try:
         out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "translation": out})
@@ -2487,10 +2473,7 @@ def pdf_api_explain():
     model = (body.get("model") or "").strip()
     effort = (body.get("effort") or "").strip()
     if "text/event-stream" in (request.headers.get("Accept") or ""):
-        from flask import Response, stream_with_context
-        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
-                        mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return _start_ai_stream(prompt, model, effort, (body.get("rid") or "").strip())
     try:
         out = _ai_call(prompt, model, effort).strip()
         return jsonify({"ok": True, "explanation": out})
@@ -2513,6 +2496,74 @@ def _job_set(jid: str, **kw):
         cutoff = _time.time() - 600
         for k in [k for k, v in list(_JOBS.items()) if v.get("ts", 0) < cutoff and k != jid]:
             _JOBS.pop(k, None)
+
+
+# ─── 抗断连流式 AI：生成跑在后台线程（脱离客户端连接），SSE 只「tail」读取已生成文本 ───
+# iPad 切后台/锁屏/网络抖 → SSE 长连接断 → 但后台线程仍把 AI 答案跑完写进 _JOBS[rid]，
+# 前端回前台后轮询 /api/ai-stream-result?id=rid 拿完整结果，断点也不丢。rid 为空则退化成原行内流式。
+def _aistream_init(rid: str):
+    if not rid:
+        return
+    with _JOBS_LOCK:
+        _JOBS[rid] = {"status": "running", "kind": "aistream", "ts": _time.time(), "full": ""}
+        cutoff = _time.time() - 600
+        for k in [k for k, v in list(_JOBS.items()) if v.get("ts", 0) < cutoff and k != rid]:
+            _JOBS.pop(k, None)
+
+def _aistream_update(rid: str, full: str, status: str = "", error: str = ""):
+    if not rid:
+        return
+    with _JOBS_LOCK:
+        j = _JOBS.get(rid)
+        if j is None:
+            j = _JOBS[rid] = {"kind": "aistream"}
+        j["full"] = full
+        j["ts"] = _time.time()
+        if status:
+            j["status"] = status
+        if error:
+            j["error"] = error
+
+def _ai_stream_worker(rid: str, prompt: str, model: str, effort: str):
+    acc = []
+    try:
+        for chunk in _ai_call_stream(prompt, model, effort):
+            if chunk:
+                acc.append(chunk)
+                _aistream_update(rid, "".join(acc))
+        _aistream_update(rid, "".join(acc), status="done")
+    except Exception as e:
+        _aistream_update(rid, "".join(acc), status="error", error=str(e))
+
+def _start_ai_stream(prompt: str, model: str = "", effort: str = "", rid: str = ""):
+    """启动后台 AI 生成线程 + 返回「tail」SSE Response（边生成边推，且断连后线程继续跑完）。
+    rid 为空 → 退化成原行内 _sse_stream（不抗断，兼容老前端）。"""
+    from flask import Response, stream_with_context
+    if not rid:
+        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
+                        mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    import json as _json
+    _aistream_init(rid)
+    _threading.Thread(target=_ai_stream_worker, args=(rid, prompt, model, effort), daemon=True).start()
+
+    def tail():
+        yield "event: start\ndata: {}\n\n"
+        sent = 0
+        while True:
+            with _JOBS_LOCK:
+                j = _JOBS.get(rid) or {}
+                full = j.get("full", ""); st = j.get("status"); err = j.get("error", "")
+            if len(full) > sent:
+                yield f"data: {_json.dumps({'text': full[sent:]}, ensure_ascii=False)}\n\n"
+                sent = len(full)
+            if st == "done":
+                yield "event: done\ndata: {}\n\n"; return
+            if st == "error":
+                yield f"event: error\ndata: {_json.dumps({'error': err or 'AI 失败'}, ensure_ascii=False)}\n\n"; return
+            _time.sleep(0.08)
+    return Response(stream_with_context(tail()), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _validate_snippets_body(body):
@@ -2705,6 +2756,19 @@ def pdf_api_job_status():
     with _JOBS_LOCK:
         j = dict(_JOBS.get(jid) or {})
     return jsonify(j if j else {"status": "unknown"})
+
+
+@bp.route("/api/ai-stream-result")
+def pdf_api_ai_stream_result():
+    """抗断连流式 AI 的结果轮询：SSE 断了（切后台/网抖）前端轮询这里，拿后台线程已生成的完整文本。
+    {status: running|done|error|unknown, full, error}。"""
+    rid = request.args.get("id", "")
+    with _JOBS_LOCK:
+        j = dict(_JOBS.get(rid) or {})
+    if not j:
+        return jsonify({"status": "unknown"})
+    return jsonify({"status": j.get("status", "running"),
+                    "full": j.get("full", ""), "error": j.get("error", "")})
 
 
 # ─── 手写墨迹（sidecar JSON 存 state/pdf-ink/<sha1>.json，按页存归一化笔画）──────
@@ -3493,10 +3557,7 @@ def pdf_api_grammar_stream():
 只输出上面两段（含标志），先翻译后语法点，不要任何额外说明。"""
     model = (data.get("model") or "sonnet").strip()
     effort = (data.get("effort") or "low").strip()
-    return Response(
-        stream_with_context(_sse_stream(prompt, model, effort)),
-        mimetype="text/event-stream",
-    )
+    return _start_ai_stream(prompt, model, effort, (data.get("rid") or "").strip())
 
 
 # ─────────────────── 单词本 tab ───────────────────
