@@ -2005,8 +2005,9 @@ function _drawPageTranslate(pw, sentences) {
   layer.className = 'page-tr-layer';
   pw.appendChild(layer);
 
-  // 行间对照翻译:不遮原文。每句译文按其各行分配,把该行对应的译文片段放到**该行正上方**
-  // (= 振假名所在的行间空隙)。原文保持可见,译文当行间小字。注音与译页互斥(共用行上方空间)。
+  // 行间对照翻译:不遮原文。每句译文按其各行分配,每行片段放到该行**字框顶部留白**里(完全照搬
+  // 振假名定位:top=y0-fs*0.34,字号≈行高×0.4)。char bbox 含上下留白(字形只占中段),所以这块
+  // 留白视觉上是空的,小字落进去基本不压字形,也是振假名能和密排正文共存的原因。注音与译页互斥。
   for (const s of sentences) {
     const zh = (s.zh || '').trim(); if (!zh) continue;
     const raw = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
@@ -2015,18 +2016,17 @@ function _drawPageTranslate(pw, sentences) {
     const cps = Array.from(zh); const N = cps.length; let idx = 0;
     lines.forEach((r, i) => {
       const x0 = r[0] * sx, y0 = r[1] * sy, w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
-      const annFs = Math.max(8, h * 0.45);                 // 行间小字档(≈原文行高×0.45)
-      const cap = Math.max(1, Math.floor(w / annFs));      // 该行上方一行能放几个汉字
+      const annFs = Math.max(7, h * 0.40);                 // 行间小字档(≈原文行高×0.4,略大于振假名 0.36)
+      const cap = Math.max(1, Math.floor(w / annFs));      // 该行能放几个汉字(分配用)
       const n = (i === lines.length - 1) ? (N - idx) : Math.max(0, Math.min(cap, N - idx));
       const slice = cps.slice(idx, idx + n).join(''); idx += n;
       if (!slice) return;
-      // 实际字号:不超小字档;若该行片段偏长(末行收尾)则按行宽压一下,保证单行塞进行宽不外溢
-      const fs = Math.max(8, Math.min(annFs, w / slice.length));
+      const fs = Math.max(7, Math.min(annFs, w / slice.length));   // 不超小字档 + 塞进行宽单行不外溢
       const rt = document.createElement('div');
       rt.className = 'page-tr-rt';
       rt.style.left = x0 + 'px';
       rt.style.width = w + 'px';
-      rt.style.top = (y0 - fs * 0.95) + 'px';   // 放到本行正上方的行间空隙(原文在下方仍可见)
+      rt.style.top = (y0 - fs * 0.34) + 'px';   // = 振假名位置:落在本行字框顶部留白
       rt.style.fontSize = fs.toFixed(1) + 'px';
       rt.textContent = slice;
       layer.appendChild(rt);
