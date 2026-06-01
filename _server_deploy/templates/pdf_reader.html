@@ -1905,17 +1905,18 @@ function renderRubyLayer(pw) {
     const rt = it.rt || ''; if (!rt) continue;
     const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
     const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：约词高 40%（振假名通常正文 40-45%），且不超过「词宽/读音字数」横向不溢出原词
-    const fs = Math.max(7, Math.min(h * 0.40, w / Math.max(1, rt.length) * 1.5));
+    // 字号：约词高 36%（这本书行距≈字框高、行间仅 ~4pt，注音必须很小才不挤上一行）
+    const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.4));
     const sp = document.createElement('span');
     sp.className = 'rt';
     sp.textContent = rt;
     sp.style.left = x0 + 'px';
     sp.style.width = w + 'px';
     sp.style.fontSize = fs.toFixed(1) + 'px';
-    // ruby 底边紧贴词顶(y0)上方 1px、整体只上探自身高度 ≈0.4×词高 → 落在两行间空隙、不压上一行
-    // （之前 y0-fs*1.2-1 + 大字号 抬太高，越过上一行底压住上面的内容）
-    sp.style.top = Math.max(0, y0 - fs - 1) + 'px';
+    // 关键：OCR 字框顶有 padding(框比实际字高)，按框顶上方放会窜进上一行。
+    // 改成 ruby **中心对齐汉字框顶线**(top=y0-fs/2)：一半落进本行字框顶部 padding(=视觉空隙)、
+    // 一半在框顶之上 → 紧贴自己这行汉字正上方，基本不侵入上一行视觉字形。
+    sp.style.top = Math.max(0, y0 - fs * 0.5) + 'px';
     layer.appendChild(sp);
   }
 }
@@ -3032,20 +3033,29 @@ function _bindCharLayer(cl, pw) {
     e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
-    const hit = onStart(p.x, p.y);
-    // 起点在空白(没命中字) + 单页模式 → 记录可能的横滑翻页(touchend 判定方向/距离)
-    _swipeStart = (!hit && readMode === 'single') ? {x: t.clientX, y: t.clientY, t: Date.now()} : null;
+    onStart(p.x, p.y);
+    // 单页模式：整页任意处都可横滑翻页（不限空白）。tap=选词 / 横滑=翻页 / 竖滑=滚动；单页不做拖选。
+    _swipeStart = (readMode === 'single')
+      ? {x: t.clientX, y: t.clientY, lastX: t.clientX, decided: false, h: false}
+      : null;
   }, {passive: true});
   cl.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 1) return;
-    // 横滑翻页候选（起点空白+单页）：横向主导时 preventDefault **抢下手势**，
-    // 否则浏览器把它判成滚动 → 触发 touchcancel 清掉 _swipeStart → touchend 永远翻不了页（F2 根因）。
-    // 竖向主导不拦 → 高页仍可原生上下滚。
-    if (_swipeStart && _dragStartCharIdx == null) {
+    if (_swipeStart) {   // 单页模式：横滑翻页 / 竖滑滚动 / 移动即放弃选词
       const t = e.touches[0];
       const dx = t.clientX - _swipeStart.x, dy = t.clientY - _swipeStart.y;
-      // 尽早认领横向手势（阈值小到 6px + 横向不弱于竖向）→ 抢在浏览器判定滚动/cancel 之前
-      if (Math.abs(dx) > 6 && Math.abs(dx) >= Math.abs(dy) && e.cancelable) e.preventDefault();
+      _swipeStart.lastX = t.clientX;
+      if (!_swipeStart.decided && (Math.abs(dx) + Math.abs(dy)) > 8) {
+        _swipeStart.decided = true;
+        _swipeStart.h = Math.abs(dx) > Math.abs(dy);   // 横向主导=翻页，否则=滚动
+        // 一旦移动 → 放弃 tap 选词（拖动不在单页里选字）
+        _dragStartCharIdx = null; _charSel = null;
+        pw.querySelector('.sel-overlay')?.replaceChildren();
+        const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        if (!_swipeStart.h) _swipeStart = null;   // 竖滑 → 交回原生滚动，不再拦
+      }
+      // 横滑：每次 move 都 preventDefault 抢下手势，防浏览器判滚动→touchcancel→翻不了页（F2 根因）
+      if (_swipeStart && _swipeStart.h && e.cancelable) e.preventDefault();
       return;
     }
     if (_dragStartCharIdx == null) return;
@@ -3055,17 +3065,14 @@ function _bindCharLayer(cl, pw) {
     onMove(p.x, p.y, e);
   }, {passive: false});
   cl.addEventListener('touchend', (e) => {
-    // 横滑翻页（单页模式 + 起点空白）：右滑→上一页，左滑→下一页
+    // 单页横滑翻页：右滑→上一页，左滑→下一页（阈值 40px）；没构成横滑则落到下面 tap 选词
     if (_swipeStart) {
-      const t0 = e.changedTouches[0];
       const sw = _swipeStart; _swipeStart = null;
-      if (t0) {
-        const dx = t0.clientX - sw.x, dy = t0.clientY - sw.y;
-        if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.6 && (Date.now() - sw.t) < 700) {
-          e.preventDefault();
-          window.changePage(dx > 0 ? -1 : 1);
-          return;
-        }
+      if (sw.h) {
+        const t0 = e.changedTouches[0];
+        const dx = (t0 ? t0.clientX : sw.lastX) - sw.x;
+        if (Math.abs(dx) >= 40) { e.preventDefault(); window.changePage(dx > 0 ? -1 : 1); return; }
+        return;   // 横向移动了但不够阈值 → 不翻也不选
       }
     }
     if (_dragStartCharIdx == null) return;
@@ -3500,14 +3507,8 @@ document.addEventListener('pointerdown', (e) => {
   if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;   // 刚弹出 400ms 内不关（挡打开那次 tap 的余波）
   if (!p.contains(e.target)) {
     p.style.display = 'none';
-    // 词组模式：关闭面板时高亮框消失（原始 F6 需求「关闭后高亮框消失」）。只清词组所在页，不误伤其它页选中
-    if (_wordPopState && _wordPopState.phrase) {
-      const _pw = _charSel && _charSel.pw;
-      if (_pw) { const ov = _pw.querySelector('.sel-overlay'); if (ov) { ov.classList.remove('phrase-breathe'); ov.innerHTML = ''; } }
-      else document.querySelectorAll('.sel-overlay.phrase-breathe').forEach(o => o.classList.remove('phrase-breathe'));
-      lastSelText = ''; _updateSelPreview(''); _charSel = null;
-      toolbar.classList.remove('open');
-    }
+    // 词组模式：点别处只藏面板，**保留选中高亮**（用户要求「点击其他内容时这个词的高亮不消失」）。
+    // 高亮只在「重新选词 / 点空白」时由 onStart 自然替换或清除；查词加载完会转常亮（独立于面板可见性）。
   }
 }, true);
 // 画日语声调(ピッチアクセント):读音拆拍 → 高/低 + 下降标记。
