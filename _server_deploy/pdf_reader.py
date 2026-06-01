@@ -557,13 +557,17 @@ def _jp_inflection(text: str) -> dict | None:
     base = None
     cform = ""
     marks: list = []
-    for w in toks:
+    for i, w in enumerate(toks):
         f = w.feature
         p1 = (getattr(f, "pos1", "") or "")
         surf = w.surface or ""
         lemma = (getattr(f, "lemma", "") or surf)
         if base is None and p1 in ("動詞", "形容詞", "形容動詞"):
-            base = lemma
+            # サ变(名詞+する):原形 = 名詞+する(稼働した→稼働する),不要显示成 為る
+            if lemma in ("為る", "する") and i > 0 and (getattr(toks[i - 1].feature, "pos1", "") == "名詞"):
+                base = (toks[i - 1].surface or "") + "する"
+            else:
+                base = lemma
             cform = (getattr(f, "cForm", "") or "")
         elif p1 in ("助動詞", "助詞"):
             z = _JP_AUX_ZH.get(lemma) or _JP_AUX_ZH.get(surf)
@@ -608,6 +612,8 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
         chain_wid = None      # 当前动词链的 w（助动词/接续助词て/补助动词 并入它 → 单击选整个变形词）
         chain_active = False
         prev_surf = ""        # 上一 token 表层（日计数器读音判定用）
+        prev_pos1 = ""        # 上一 token 词性（サ变 名詞+する 合并判定）
+        prev_wid = None
         for wn, w in enumerate(tagger(line_text)):
             surf = w.surface or ""
             wlen = len(surf)
@@ -616,10 +622,14 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
             f = w.feature
             p1 = (getattr(f, "pos1", "") or "")
             p2 = (getattr(f, "pos2", "") or "")
+            lemma = (getattr(f, "lemma", "") or "")
             my_wid = block_i * 1000000 + line_i * 1000 + wn
             # 动词链合并：助动词(た/ない/ます/られ…) / 接续助词(て/で) / 补助动词(ている的いる) 并入前面动词
             attachable = (p1 == "助動詞") or (p1 == "助詞" and p2 == "接続助詞") or (p1 == "動詞" and "非自立" in p2)
-            if chain_active and attachable:
+            is_suru = (p1 == "動詞" and lemma in ("為る", "する"))
+            if is_suru and prev_pos1 == "名詞":
+                wid = prev_wid; chain_wid = prev_wid; chain_active = True   # サ变:名詞+する 合并成一个词(稼働する)
+            elif chain_active and attachable:
                 wid = chain_wid
             elif p1 in ("動詞", "形容詞", "形容動詞"):
                 wid = my_wid; chain_wid = my_wid; chain_active = True
@@ -645,7 +655,7 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
                 item = _furigana_item(surf, reading, tok_chars)
                 if item:
                     furigana_out.append(item)
-            prev_surf = surf
+            prev_surf = surf; prev_pos1 = p1; prev_wid = wid
             char_ptr += wlen
     except Exception as ex:
         sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
