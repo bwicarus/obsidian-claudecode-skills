@@ -363,9 +363,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #search-results .sr-snip{color:#cfe6ff;font-size:12.5px;line-height:1.5;overflow:hidden}
 #search-results .sr-snip mark{background:#3b6db5;color:#fff;border-radius:2px;padding:0 1px}
 #search-results .sr-empty{padding:16px;color:#5a6680;font-size:12px;text-align:center}
-/* 词组持久高亮层（独立于 sel-overlay → 点空白/点其他词都不清除）。高亮本身可点击 → 点它才打开词组结果并消失 */
+/* 词组查询期间的呼吸高亮层（纯视觉，pointer-events:none；只在点「词组」按钮查询时出现，结果出来即移除） */
 .phrase-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
-.phrase-hl-layer .hl{position:absolute;background:rgba(59,109,181,.42);border:1px solid rgba(111,211,255,.85);border-radius:3px;mix-blend-mode:normal;pointer-events:auto;cursor:pointer}
+.phrase-hl-layer .hl{position:absolute;background:rgba(59,109,181,.42);border:1px solid rgba(111,211,255,.85);border-radius:3px;pointer-events:none}
 .phrase-hl-layer.breathe .hl{animation:sel-breathe 1.1s ease-in-out infinite}
 /* 搜索命中在原文位置的临时高亮（黄，z-index 6 在 char-layer 之上但 pointer-events:none） */
 .search-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
@@ -2969,8 +2969,7 @@ function _bindCharLayer(cl, pw) {
     if (_dragMoved) {
       const idx = _findCharAt(pw.__charBoxes, x, y);
       if (idx >= 0) _selByCharRange(pw, startIdx, idx);
-      // 拖选出短词组 → 建持久可点高亮（点它才打开词组结果；点空白/别词都不消失）
-      if (_isShortPhrase((lastSelText || '').trim())) _showPhraseHighlight(pw);
+      // 选中=普通选中(点别处照常消失)。持久呼吸高亮只在点「词组」按钮查询期间出现(showPhrasePopover)
     } else if (_fromLBtn) {
       // 从 L 按钮起点且没拖动 = 单击 L 按钮 → 交给 L 按钮 click 处理整句翻译，这里不查词
       _fromLBtn = false;
@@ -3363,11 +3362,11 @@ function _updateToolbarMode(text) {
   const m = document.getElementById('sel-btns-multi');
   if (w) w.style.display = isWord ? 'flex' : 'none';
   if (m) m.style.display = isWord ? 'none' : 'flex';
-  // 短词组（F6）：显示「📘词组」按钮 + 呼吸高亮（完成后约 1.6s 转常亮）
+  // 短词组（F6）：只显示「📘词组」按钮(呼吸提示)。选中高亮本身=普通选中，点别处照常消失；
+  // 只有点了「词组」按钮、在查询期间才把选区变持久呼吸高亮(见 showPhrasePopover)。
   const phrase = !isWord && _isShortPhrase(t);
   const pb = document.getElementById('sel-phrase-btn');
   if (pb) { pb.style.display = phrase ? '' : 'none'; pb.classList.toggle('breathe', phrase); }
-  _setSelPhraseBreathe(phrase);
 }
 
 // 短词组判定：中日 2-8 字(无句末标点) / 拉丁 2-5 词且不太长(无句末标点)
@@ -3402,9 +3401,9 @@ window.onPhrase = () => {
   const t = (lastSelText || '').trim();
   if (t) showPhrasePopover(t);
 };
-// 词组持久高亮：**状态驱动**——存 PDF pt 坐标 + 文本到 _activePhraseHl，每次页面渲染由
-// renderPhraseHl 重画(像 vocab 下划线)。→ 任何重渲染(refit/缩放/重观察)后都自动恢复，
-// 绝不"定时自动消失"；独立于选词逻辑(点空白/选别词都不动它)；高亮可点 → 点它才打开结果并清除。
+// 词组查询期间的呼吸高亮：**只在点「词组」按钮、查询进行中**出现（showPhrasePopover 开始时建、
+// 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、
+// 持续呼吸；不受点别处影响(独立层)。平时选中=普通选中(点别处照常消失)，这里不参与。
 let _phraseHlTimer = null;
 let _activePhraseHl = null;   // {page, text, rects:[[x0,y0,x1,y1]pt...]}
 function _charRangeToPtRects(chars, s, e) {
@@ -3432,17 +3431,14 @@ function renderPhraseHl(pw) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
   const layer = document.createElement('div');
-  layer.className = 'phrase-hl-layer breathe';
+  layer.className = 'phrase-hl-layer breathe';   // 查询期间持续呼吸(纯视觉,不可点)，结果出来由 _removePhraseHighlight 移除
   for (const r of a.rects) {
     const d = document.createElement('div'); d.className = 'hl';
     d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
     d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
     layer.appendChild(d);
   }
-  layer.addEventListener('click', (e) => { e.stopPropagation(); showPhrasePopover(a.text); });
   pw.appendChild(layer);
-  clearTimeout(_phraseHlTimer);
-  _phraseHlTimer = setTimeout(() => layer.classList.remove('breathe'), 1600);   // 呼吸 1.6s → 常亮(只停呼吸，不移除)
 }
 function _removePhraseHighlight() {
   _activePhraseHl = null;
@@ -3469,8 +3465,8 @@ window.showPhrasePopover = async (text) => {
   window._wordPopOpenAt = Date.now();
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
   _positionWordPop(pop);
-  // 词组高亮在选中时已创建并持久留着；这里查词期间让它呼吸，结果出来后移除（=「点开结果后高亮消失」）
-  document.querySelector('.phrase-hl-layer')?.classList.add('breathe');
+  // **点了词组按钮**才把当前选区变成持久呼吸高亮（查询期间常亮闪烁、点别处不消失），结果出来即移除。
+  if (_wordPopState.phrase) _showPhraseHighlight(_charSel && _charSel.pw);
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
   let zh = '', reading = '', accent = null;

@@ -1460,6 +1460,15 @@ def pdf_api_page_vocab_marks():
         marks = _build_vocab_marks(chars)
         marks += _build_jp_vocab_marks(chars)   # 日语生词下划线
         sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
+        # **必须跟 page-chars 路由一致**：合并手动翻译句 sidecar + 过滤已删除句。
+        # 否则 refreshVocabUnderlinesForAllPages(查词后调) 会用「只有自动生词句」覆盖前端
+        # __vocabSentences → 手动翻译形成的 L 框/边框被刷没（本次 bug 根因）。
+        for ts in _tr_load(rel):
+            if ts.get("rects") and ts.get("page", page) == page:
+                sentences.append(ts)
+        _dis = _dismiss_load(rel)
+        if _dis:
+            sentences = [s for s in sentences if (s.get("text") or "").strip() not in _dis]
         return jsonify({
             "ok": True,
             "vocab_marks": marks,
