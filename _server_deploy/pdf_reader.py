@@ -473,6 +473,10 @@ def _is_cjk_char(c: str) -> bool:
            (0xF900 <= o <= 0xFAFF) or (0xFF00 <= o <= 0xFFEF)
 
 
+# 日「X日」读 か(訓読み)的数字：2-10、14、20、24（ふつか…とおか/じゅうよっか/はつか/にじゅうよっか）；其余読 にち
+_JP_DAY_KA = {2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 20, 24}
+
+
 def _kata_to_hira(s: str) -> str:
     """片假名 → 平假名（长音符 ー 等非假名原样保留）。"""
     out = []
@@ -601,12 +605,26 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
         return
     try:
         char_ptr = 0
+        chain_wid = None      # 当前动词链的 w（助动词/接续助词て/补助动词 并入它 → 单击选整个变形词）
+        chain_active = False
+        prev_surf = ""        # 上一 token 表层（日计数器读音判定用）
         for wn, w in enumerate(tagger(line_text)):
             surf = w.surface or ""
             wlen = len(surf)
             if wlen == 0:
                 continue
-            wid = block_i * 1000000 + line_i * 1000 + wn
+            f = w.feature
+            p1 = (getattr(f, "pos1", "") or "")
+            p2 = (getattr(f, "pos2", "") or "")
+            my_wid = block_i * 1000000 + line_i * 1000 + wn
+            # 动词链合并：助动词(た/ない/ます/られ…) / 接续助词(て/で) / 补助动词(ている的いる) 并入前面动词
+            attachable = (p1 == "助動詞") or (p1 == "助詞" and p2 == "接続助詞") or (p1 == "動詞" and "非自立" in p2)
+            if chain_active and attachable:
+                wid = chain_wid
+            elif p1 in ("動詞", "形容詞", "形容動詞"):
+                wid = my_wid; chain_wid = my_wid; chain_active = True
+            else:
+                wid = my_wid; chain_active = False; chain_wid = None
             tok_chars = []
             for j in range(wlen):
                 idx = char_ptr + j
@@ -616,12 +634,18 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
             if furigana_out is not None and tok_chars:
                 reading = ""
                 try:
-                    reading = _kata_to_hira(getattr(w.feature, "kana", "") or "")
+                    reading = _kata_to_hira(getattr(f, "kana", "") or "")
                 except Exception:
                     reading = ""
+                # 日计数器读音修正:unidic 接尾辞「日」默认 カ(三日=みっか对),但阿拉伯数字+日
+                # 多数读 にち(365日)。数字不在 native-か 集合(2-10,14,20,24)→ にち。
+                if surf == "日" and reading == "か" and p1 == "接尾辞" and prev_surf.isdigit():
+                    n = int(prev_surf)
+                    reading = "か" if n in _JP_DAY_KA else ("ついたち" if n == 1 else "にち")
                 item = _furigana_item(surf, reading, tok_chars)
                 if item:
                     furigana_out.append(item)
+            prev_surf = surf
             char_ptr += wlen
     except Exception as ex:
         sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
@@ -758,8 +782,8 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 3   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
-                      # (v2: 修坏缓存全 w=-1; v3: 振假名改完整读音不剥送り仮名,旧 furigana 失效)
+_CHAR_CACHE_VER = 4   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+                      # (v2: 修坏缓存全 w=-1; v3: 振假名完整读音; v4: 动词链合并 w + 日计数器读音)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
