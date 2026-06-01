@@ -627,7 +627,12 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - F5/F7 都**按 `w`（fugashi token / 收藏合并）分组**，跟单击选词同一套词边界 → 振假名落在词上、生词下划线整词、收藏词组单击整选，三者一致。
 - F3/F5/F7 的重活（振假名读音、整页翻译、搜索索引）全部**磁盘缓存键含 mtime**，首次慢、之后秒读；F6 收藏合并 `w` 是**每请求 live 应用**（不进缓存，否则改收藏要等缓存失效）。
 - F5 ruby 层 `pointer-events:none` + 高 z-index：盖在最上但点击穿透，选词不受影响。F3 page-tr 层同理（z9 盖住 ruby）。
-- **译文自适应字号（防被白盒切掉）**：`_drawPageTranslate` / `_drawSentenceOverlay` 早期固定 `fontPx=round(charH*0.72)` + 贪心填充把余字全塞末行 → 译文比原文长时末行超出白盒被 `overflow:hidden` 切掉（实测 933 句里 ~472 句中文比日文原文宽）。改：`fontPx = max(9, min(round(charH*0.72), floor(Wtot/(N+行数)))`（`Wtot`=各行总宽，`N`=译文字数；`+行数` 给每行 floor 取整留余量，数学上保证各行 cap 之和 ≥ N → 贪心填充必不溢出末行）。短译文仍取自然字高（观感不变），长译文按比例缩小塞下。**极端兜底**：单行原文配超长译文、字号触底 9px 仍放不下（933 句里 10 句，多半是封面 OCR 噪声）→ 该框 `white-space:normal + wordBreak:break-all + minHeight` 换行向下展开（不再硬切丢字）。检测条件 `slice.length*fontPx > w`。
+- **整页翻译 `_drawPageTranslate` 三件套（遮挡 + 统一字号 + 完整显示，2026-06）**：原版逐句固定 `round(charH*0.72)` 有两个毛病——(a) 译文比原文长时末行被 `overflow:hidden` 切掉；(b) 后来按每句长度自适应缩放又导致**每句字号都不同**看着乱。最终方案：
+  1. **整页白底遮罩**（彻底盖原文）：从 `pw.__charBoxes` 取整页**所有**字符（含被 `_split_page_sentences` 丢弃的 <4 字碎片、页眉），用 `_maskLines()`（阈值=相邻两字**较小高×0.6**，局部聚类，标题大字不会把正文行吸并、不越界盖插图）合并成视觉行，每行铺 `.page-tr-mask` 纯白盒（±1px 盖字形边缘）。译文行 DOM 在遮罩之后 → 盖在白底上。实测覆盖 98–100%。
+  2. **字高量化分档**（字号统一）：OCR char bbox 高度逐句抖动（同样大的正文 charH 有 26~35 之差）→ 直接拿 charH 当字号必然「每句不同」。改取全页 charH **中位数**当「正文档 `_med`」，`ratio=charH/_med ≤1.35` 的句子（整段正文）统一 `repH=_med`，更大的标题按 0.5 档 `_med*round(ratio*2)/2`（1.5/2/2.5×）。→ 整段正文必同字号，标题统一更大。
+  3. **全页统一缩放 `gScale`**：译文比原文长放不下时，全页乘**同一个** `gScale`（各档比例不变 → 仍统一），取各句 `scale_s=min(1, Wtot/((N+行数)*repH*0.72))` 的 **P6 稳健分位**（避免个别 OCR 噪声句把全页缩太小；P3 会被噪声拖到 14px，P12 仅 80% 统一，P6≈88% 且正文 27-28px）。
+  4. **放不下的少数句子单独压字号，不换行**：`fontPx = max(9, round(min(repH*0.72*gScale, fitFont)))`，`fitFont=Wtot/(N+行数)`。88% 正文用统一档，最长的 ~12% 句子压到 `fitFont` **单行**放下——**不换行**（换行会被下一句后画的白底框盖掉而丢字！）、不重叠、不丢字。仅 `fitFont<9px` 的极端 OCR 噪声才 `white-space:normal` 换行兜底。`_mergeLines()` 抽成公共行合并（全局 refH×0.5，给逐句用；遮罩用 `_maskLines` 局部阈值）。实测 933 句 0 丢字、正文页 0 换行。
+  - 单句翻译 `_drawSentenceOverlay` 仍用早期 `min(自然字高, floor(Wtot/(N+行数)))` 自适应（一次只一句，无「每句不同」问题）+ 同样的换行兜底。
 - F2 横滑严格限「起点空白 + 单页模式」：尊重既有「起点在字上=拖选、竖滑=滚动」规则，零冲突。
 
 **验证结论**（独立 reviewer 审 `6ed9d9c..` 全 diff）：无崩溃/解包遗漏/未定义符号/重复声明/死锁/越界/回归；4-tuple 解包、translate 签名、window 挂载、store 键、坐标缩放全部跨函数核对一致。実测 応用情報 p22 振假名 169 条、整页翻译 38 句全译（冷 439ms/缓存 103ms）、搜索 試験 256 处（冷 2.6s/缓存 18ms）；EGIU/线代书 IPA 261 条/66ms。

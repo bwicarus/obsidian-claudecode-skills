@@ -345,6 +345,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #ruby-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 整页翻译：逐行白底中文覆盖在原文上方（z-index 9 盖住一切；pointer-events none → 点击穿透到 char-layer 仍可选原文） */
 .page-tr-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
+.page-tr-mask{position:absolute;background:#fff}  /* 整页文字白底遮罩,铺在译文行下方(DOM 在前→层级在下),彻底盖住原文 */
 .page-tr-line{position:absolute;box-sizing:border-box;background:#fff;color:#111;white-space:nowrap;overflow:hidden;text-align:left;font-weight:500;padding-left:1px;border-radius:1px;box-shadow:inset 3px 0 0 #2563eb}
 #pagetr-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 全文搜索面板 */
@@ -1968,6 +1969,42 @@ window.toggleRuby = () => {
 // ──────── 整页翻译（F3）：逐句就地白底中文覆盖 ────────
 let _pageTrOn = false;
 function _clearPageTranslate(pw) { pw.querySelector('.page-tr-layer')?.remove(); }
+// rects[[x0,y0,x1,y1]...] → 按垂直中心聚类合并成「每视觉行一个 rect」(同 _drawSentenceOverlay)
+function _mergeLines(rects) {
+  const raw = rects.filter(r => (r[2] - r[0]) > 0.5 && (r[3] - r[1]) > 0.5);
+  if (!raw.length) return [];
+  const refH = Math.max.apply(null, raw.map(r => r[3] - r[1])) || 1;
+  const cy = r => (r[1] + r[3]) / 2;
+  const sorted = raw.slice().sort((a, b) => (cy(a) - cy(b)) || (a[0] - b[0]));
+  const lines = [];
+  for (const r of sorted) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(cy(r) - cy(last)) <= refH * 0.5) {
+      last[0] = Math.min(last[0], r[0]); last[1] = Math.min(last[1], r[1]);
+      last[2] = Math.max(last[2], r[2]); last[3] = Math.max(last[3], r[3]);
+    } else lines.push([r[0], r[1], r[2], r[3]]);
+  }
+  lines.sort((a, b) => a[1] - b[1]);
+  return lines;
+}
+// 整页遮罩专用行合并:阈值用「相邻两字较小高 ×0.6」(局部),标题大字不会把正文行吸并、
+// 不会越界盖到插图;每行紧贴文字。返回每视觉行一个 rect。
+function _maskLines(rects) {
+  const raw = rects.filter(r => (r[2] - r[0]) > 0.5 && (r[3] - r[1]) > 0.5);
+  if (!raw.length) return [];
+  const cy = r => (r[1] + r[3]) / 2, hh = r => r[3] - r[1];
+  const sorted = raw.slice().sort((a, b) => (cy(a) - cy(b)) || (a[0] - b[0]));
+  const lines = [];
+  for (const r of sorted) {
+    const last = lines[lines.length - 1];
+    const thr = last ? Math.min(hh(r), last[3] - last[1]) * 0.6 : 0;
+    if (last && Math.abs(cy(r) - cy(last)) <= thr) {
+      last[0] = Math.min(last[0], r[0]); last[1] = Math.min(last[1], r[1]);
+      last[2] = Math.max(last[2], r[2]); last[3] = Math.max(last[3], r[3]);
+    } else lines.push([r[0], r[1], r[2], r[3]]);
+  }
+  return lines;
+}
 function _drawPageTranslate(pw, sentences) {
   _clearPageTranslate(pw);
   const canvas = pw.querySelector('canvas');
@@ -1979,50 +2016,77 @@ function _drawPageTranslate(pw, sentences) {
   const layer = document.createElement('div');
   layer.className = 'page-tr-layer';
   pw.appendChild(layer);
+
+  // ① 整页文字白底遮罩:从 __charBoxes 取**整页所有字符**(含被句子切分丢弃的 <4 字碎片、
+  //    页眉等),按视觉行合并铺白底 → 彻底盖住原文,译文无论长短/换行都不会露出日文。
+  const cb = pw.__charBoxes || [];
+  const mchars = cb.filter(c => !c.sp && c._x1 > c._x0 && c._y1 > c._y0)
+                   .map(c => [c._x0, c._y0, c._x1, c._y1]);
+  for (const r of _maskLines(mchars)) {
+    const m = document.createElement('div');
+    m.className = 'page-tr-mask';
+    m.style.left = (r[0] * sx - 1) + 'px';   // ±1px 盖住字形边缘(bbox 偶尔略小于墨迹)
+    m.style.top = (r[1] * sy - 1) + 'px';
+    m.style.width = ((r[2] - r[0]) * sx + 2) + 'px';
+    m.style.height = ((r[3] - r[1]) * sy + 2) + 'px';
+    layer.appendChild(m);
+  }
+
+  // ② 预处理每句:合并行 + 算原文字高 charH / 行总宽 Wtot / 译文码点
+  const prepared = [];
   for (const s of sentences) {
     const zh = (s.zh || '').trim(); if (!zh) continue;
     const raw = (s.rects || []).filter(r => (r[2] - r[0]) > 1 && (r[3] - r[1]) > 1);
     if (!raw.length) continue;
-    // 行合并（按垂直中心聚类，同 _drawSentenceOverlay）
-    const refH = Math.max.apply(null, raw.map(r => r[3] - r[1])) || 1;
-    const cy = r => (r[1] + r[3]) / 2;
-    const sorted = raw.slice().sort((a, b) => (cy(a) - cy(b)) || (a[0] - b[0]));
-    const lines = [];
-    for (const r of sorted) {
-      const last = lines[lines.length - 1];
-      if (last && Math.abs(cy(r) - cy(last)) <= refH * 0.5) {
-        last[0] = Math.min(last[0], r[0]); last[1] = Math.min(last[1], r[1]);
-        last[2] = Math.max(last[2], r[2]); last[3] = Math.max(last[3], r[3]);
-      } else lines.push([r[0], r[1], r[2], r[3]]);
-    }
-    lines.sort((a, b) => a[1] - b[1]);
+    const lines = _mergeLines(raw);
     const charH = Math.min(...lines.map(r => (r[3] - r[1]) * sy));
-    const cps = Array.from(zh); const N = cps.length; let idx = 0;
-    // 字号默认=原文字高(×0.72);但译文常比原文长 → 按「各行总宽 / 字数」算下限,
-    // 译文塞不下时自动缩小,保证整句完整显示不被白框 overflow:hidden 切掉。
-    // (+lines.length 给每行 floor 取整留余量 → 各行 cap 之和必 ≥ N,贪心填充不溢出末行)
-    const Wtot = lines.reduce((s, r) => s + (r[2] - r[0]) * sx, 0);
-    const fontPx = Math.max(9, Math.min(Math.round(charH * 0.72), Math.floor(Wtot / (N + lines.length))));
-    lines.forEach((r, i) => {
+    const Wtot = lines.reduce((a, r) => a + (r[2] - r[0]) * sx, 0);
+    prepared.push({ lines, charH, Wtot, cps: Array.from(zh) });
+  }
+  if (!prepared.length) return;
+
+  // ③ 字高量化分档:OCR 的 char bbox 高度逐句抖动(同样大的正文 charH 也有 26~35 之差)→ 直接拿
+  //    charH 当字号会「每句都不一样」。改:取全页 charH **中位数**当「正文档」,凡接近它的句子(整段正文)
+  //    统一成同一 repH;明显更大的(标题)按 0.5 档(1.5/2/2.5×)放大。→ 整段正文必然同字号,标题统一更大。
+  const _med = (arr => { const a = arr.slice().sort((x, y) => x - y); return a[Math.floor(a.length / 2)] || 1; })(prepared.map(p => p.charH));
+  for (const p of prepared) {
+    const ratio = p.charH / _med;
+    p.repH = ratio <= 1.35 ? _med : _med * (Math.round(ratio * 2) / 2);
+  }
+  // 译文比原文长放不下时,**全页用同一个缩放系数 gScale 整体缩**(各档比例不变 → 仍统一),
+  // 而不是每句各缩(那才是「每句字号都不同」的根源)。gScale 取各句可放下比例的 P12 稳健分位,
+  // 避免个别 OCR 噪声句把全页缩太小;低于该比例的极少数句子换行展开(已被①白底遮住不露原文)。
+  const scales = prepared.map(p => {
+    const need = (p.cps.length + p.lines.length) * p.repH * 0.72;   // +行数:每行 floor 取整余量
+    return Math.min(1, p.Wtot / Math.max(1, need));
+  }).sort((a, b) => a - b);
+  const gScale = scales[Math.floor(scales.length * 0.06)] ?? 1;   // P6:统一率 ~88%,正文字号不被个别噪声拖太小
+
+  // ④ 逐句渲染译文。字号 = min(统一档 repH×0.72×gScale, 该句恰好放下的 fitFont)。
+  //    92% 正文用统一档;放不下的极少数(最长)句子单独压到 fitFont **单行放下** —— 不换行(换行会被
+  //    下一句的白底框盖掉而丢字)、不重叠、不丢字。仅 fitFont<9px 的极端(OCR 噪声)才换行兜底。
+  for (const p of prepared) {
+    const fitFont = p.Wtot / (p.cps.length + p.lines.length);   // 该句单行恰好放下的字号
+    const fontPx = Math.max(9, Math.round(Math.min(p.repH * 0.72 * gScale, fitFont)));
+    const N = p.cps.length; let idx = 0;
+    p.lines.forEach((r, i) => {
       const w = (r[2] - r[0]) * sx, h = (r[3] - r[1]) * sy;
       const cap = Math.max(1, Math.floor(w / fontPx));
-      const n = (i === lines.length - 1) ? (N - idx) : Math.max(0, Math.min(cap, N - idx));
-      const slice = cps.slice(idx, idx + n).join(''); idx += n;
-      if (!slice) return;
+      const n = (i === p.lines.length - 1) ? (N - idx) : Math.max(0, Math.min(cap, N - idx));
+      const slice = p.cps.slice(idx, idx + n).join(''); idx += n;
+      if (!slice) return;   // 空行不画字(白底已铺,原文已遮)
       const ov = document.createElement('div');
       ov.className = 'page-tr-line';
       ov.style.left = (r[0] * sx) + 'px';
       ov.style.top = (r[1] * sy) + 'px';
       ov.style.width = w + 'px';
       ov.style.fontSize = fontPx + 'px';
-      // 极端:单行原文 + 超长译文,字号已触底仍放不下 → 允许该框换行向下展开(不硬切丢字)
-      if (slice.length * fontPx > w + 0.5) {
+      if (slice.length * fontPx > w + 0.5) {   // 仅 fitFont<9 的极端才会到这 → 换行兜底(白底已遮)
         ov.style.minHeight = h + 'px';
         ov.style.whiteSpace = 'normal';
         ov.style.wordBreak = 'break-all';
         ov.style.lineHeight = (fontPx * 1.18) + 'px';
         ov.style.overflow = 'visible';
-        ov.style.paddingTop = Math.max(0, (h - fontPx * 1.18) / 2) + 'px';
       } else {
         ov.style.height = h + 'px';
         ov.style.lineHeight = h + 'px';
