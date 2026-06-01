@@ -714,6 +714,10 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
+_CHAR_CACHE_VER = 2   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+                      # (v2: 修「fugashi 临时挂掉写的坏缓存(全 w=-1)被一直命中→整页单字」)
+
+
 def _page_chars_cached(abs_path, rel: str, page: int):
     """带磁盘缓存的 chars 提取。缓存键含 mtime → PDF 改了自动失效。
     缓存的是「只依赖文件+页」的不变部分(chars/page_w/page_h);vocab_marks/句子框
@@ -730,7 +734,7 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     if cpath.exists():
         try:
             d = json.loads(cpath.read_text("utf-8"))
-            if "furigana" in d:   # 老缓存无 furigana → 落到重算补上
+            if d.get("cver") == _CHAR_CACHE_VER:   # 版本不符(或老缓存) → 落到重算
                 return d["chars"], d["page_w"], d["page_h"], d.get("furigana", [])
         except Exception:
             pass   # 缓存损坏 → 重算
@@ -738,10 +742,20 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     if res is None:
         return None
     chars, pw, ph, furigana = res
+    # 安全阀:别缓存「分词失败」的结果。fugashi 不可用(tagger None) → 该页 CJK 全 w=-1;
+    # 或有汉字却没产出振假名 = 分词没跑成。否则 fugashi 临时挂掉时写的坏缓存(全 w=-1)会被
+    # 之后一直命中 → 整页单字选中(本次 bug 根因)。纯假名页(无汉字)无振假名属正常,不拦。
+    tagger_down = _get_jp_tagger() is None
+    has_kanji = any(_is_kanji_ch(c.get("c", "")) for c in chars if not c.get("sp"))
+    has_cjk = any(_is_cjk_char(c.get("c", "")) for c in chars if not c.get("sp"))
+    if (tagger_down and has_cjk) or (has_kanji and not furigana):
+        sys.stderr.write(f"[page-chars] p{page} 分词未成(tagger_down={tagger_down}),跳过缓存等 fugashi 恢复\n")
+        return chars, pw, ph, furigana
     try:
         cdir.mkdir(parents=True, exist_ok=True)
         cpath.write_text(json.dumps({"chars": chars, "page_w": pw, "page_h": ph,
-                                     "furigana": furigana}, ensure_ascii=False), "utf-8")
+                                     "furigana": furigana, "cver": _CHAR_CACHE_VER},
+                                    ensure_ascii=False), "utf-8")
     except Exception:
         pass
     return chars, pw, ph, furigana
