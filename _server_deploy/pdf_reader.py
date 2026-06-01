@@ -1898,7 +1898,11 @@ def pdf_api_dict_quick():
     want_ja = word_is_cjk and ((not langs) or ("ja" in langs))
     # 日语词 → 走 AI 中日词典(无免费离线中日库;Claude Haiku + 永久缓存)
     if want_ja:
-        jp = ds.lookup_jp(word_raw, context=context)
+        # 活用形先还原成原形再查释义:確認します/確認した/確認して 都→確認する 共用一份缓存
+        # (否则每个变形各调一次 AI、各存一份,既慢又浪费。变形说明仍按选中原文单独显示)
+        _inf = _jp_inflection(word_raw)
+        _lookup = (_inf or {}).get("base") or word_raw
+        jp = ds.lookup_jp(_lookup, context=context)
         if not jp or (jp.get("zh") in ("(无)", "", None)):
             return jsonify({"ok": False, "word": word_raw, "jp": True})
         ex = [e for e in (jp.get("examples") or []) if isinstance(e, dict)][:2]
@@ -1925,7 +1929,7 @@ def pdf_api_dict_quick():
             "mora": ra.get("mora"),
             "mastered": bool((_jp_vocab_load().get(word_raw) or {}).get("mastered")),   # 掌握开关初始态
             "pos": jp.get("pos", ""),          # 词性单独给前端(小框里做暗色标签,跟含义区分)
-            "inflect": _jp_inflection(word_raw),   # 变形分析:原形 + 中文语法标签(过去た/否定ない/て形…)
+            "inflect": _inf,                       # 变形分析:原形 + 中文语法标签(过去た/否定ない/て形…)
             "translation": (jp.get("zh") or ""),
             "definition": ex_txt,
             "examples": ex,                    # [{ja, zh, en}] 结构化,前端可富渲染
@@ -2035,11 +2039,13 @@ def pdf_api_dict_jp_zh():
     ds, _ = _vocab_modules()
     if not ds:
         return jsonify({"ok": False})
+    # 跟 dict-jp 一致用原形(否则例句/汉字集不一致 → 前端按 index 替换错位)
+    _base = (_jp_inflection(word) or {}).get("base") or word
     try:
-        exs = ds.jp_examples_zh(word, limit=5, translate=False)
+        exs = ds.jp_examples_zh(_base, limit=5, translate=False)
     except Exception:
         exs = []
-    kanji = ds.word_kanji_breakdown(word)
+    kanji = ds.word_kanji_breakdown(_base)
     _kanji_fill_zh(kanji, do_translate=False)
     return jsonify({
         "ok": True,
@@ -2136,7 +2142,10 @@ def pdf_api_dict_jp():
     ds, _ = _vocab_modules()
     if not ds:
         return jsonify({"ok": False, "error": "dict unavailable"})
-    jp = ds.lookup_jp(word, context=request.args.get("context", ""))
+    # 活用形→原形再查释义/例句:確認します/確認した 都→確認する 共用缓存(快、省)
+    _inf = _jp_inflection(word)
+    _base = (_inf or {}).get("base") or word
+    jp = ds.lookup_jp(_base, context=request.args.get("context", ""))
     if not jp or (jp.get("zh") in ("(无)", "", None)):
         return jsonify({"ok": False, "word": word, "jp": True})
     try:
@@ -2151,17 +2160,17 @@ def pdf_api_dict_jp():
     reading = ra.get("reading") or jp.get("reading", "")
     # 跟英文单词一致:**秒回**——例句/汉字字义只取已缓存的中文,没翻的先回退英文;
     # 同时后台翻译(下一次轮询/重开就有中文),不增加首屏等待。前端轮询 /api/dict-jp-zh 自动替换。
-    exs = ds.jp_examples_zh(word, limit=5, translate=False)
-    kanji = ds.word_kanji_breakdown(word)
+    exs = ds.jp_examples_zh(_base, limit=5, translate=False)   # 例句也用原形(Tanaka 有 確認 没 確認します)
+    kanji = ds.word_kanji_breakdown(_base)
     _kanji_fill_zh(kanji, do_translate=False)   # 只读缓存
-    _jp_dict_bg_translate(word, kanji)           # 后台翻例句 + 汉字字义(落缓存)
+    _jp_dict_bg_translate(_base, kanji)          # 后台翻例句 + 汉字字义(落缓存,按原形)
     return jsonify({
         "ok": True, "jp": True, "word": word,
         "reading": reading, "reading_kata": ra.get("reading_kata", ""),
         "accent": ra.get("accent"), "mora": ra.get("mora"),
         "romaji": jp.get("romaji", ""), "pos": jp.get("pos", ""),
         "zh": jp.get("zh", ""),
-        "inflect": _jp_inflection(word),   # 变形分析:原形 + 中文语法标签
+        "inflect": _inf,                   # 变形分析:原形 + 中文语法标签
         "examples": exs,
         "kanji": kanji,
     })
