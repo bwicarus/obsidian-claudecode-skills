@@ -485,12 +485,13 @@ def tanaka_examples(word: str, limit: int = 3) -> list[dict]:
         return []
     con = None
     try:
-        con = sqlite3.connect(f"file:{_TANAKA_PATH}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{_TANAKA_PATH}?mode=ro", uri=True, check_same_thread=False)
         rows = con.execute(
             "SELECT s.ja, s.en, w.good FROM wex w JOIN sent s ON s.id=w.sid "
             "WHERE w.hw=? ORDER BY w.good DESC, length(s.ja) ASC LIMIT ?",
             (word.strip(), limit)).fetchall()
-    except Exception:
+    except Exception as ex:
+        sys.stderr.write(f"[tanaka] examples fail {word!r}: {ex}\n")   # 别静默吞(原 bug 就是被吞)
         return []
     finally:
         if con is not None:
