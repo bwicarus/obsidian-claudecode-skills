@@ -259,6 +259,11 @@ async function loadPdf() {
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
+    // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
+    if (typeof _autoOrientOn === 'function' && _autoOrientOn()) {
+      const _lay = _loadOrientLayout(_orient());
+      if (_lay) _applyOrientLayoutVars(_lay);
+    }
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
@@ -318,6 +323,7 @@ window.toggleCrop = () => {
   _updateCropBtn();
   if (_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) _toast?.('去边已开,但还没设隐藏百分比 → 在 ⚙ 设置里配');
   _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
+  window._rememberOrientLayout?.();   // 记进当前方向(若开了旋转自动切换)
 };
 // 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
 async function saveCropSettings(crop, autoOn) {
@@ -875,6 +881,7 @@ window.toggleSpread = async () => {
   } catch (_) {}
   _updateModeButtons();
   await _applyModeChange(keepPage);
+  window._rememberOrientLayout?.();   // 记进当前方向(若开了旋转自动切换)
 };
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
@@ -962,6 +969,47 @@ function _setupResizeWatcher() {
 }
 if (document.readyState !== 'loading') _setupResizeWatcher();
 else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
+
+// ── 旋转自动切换排版：每本 PDF 按 横/竖屏 各记一套 {排版 readMode, 去边开关 _cropOn, 双页错位 _spreadOffset} ──
+function _autoOrientOn() { try { return localStorage.getItem('pdf-auto-orient') === '1'; } catch (_) { return false; } }
+function _orient() { return (window.innerWidth >= window.innerHeight) ? 'land' : 'port'; }
+function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
+function _saveOrientLayout(o) {
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0 })); } catch (_) {}
+}
+function _loadOrientLayout(o) {
+  try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
+}
+function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调用方负责),返回是否套了
+  if (!lay) return false;
+  readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
+  _spreadOffset = lay.off ? 1 : 0;
+  _cropOn = !!lay.crop;
+  try {
+    localStorage.setItem('pdf-read-mode', readMode);
+    localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
+    localStorage.setItem(_spreadKey(), String(_spreadOffset));
+  } catch (_) {}
+  return true;
+}
+// 手动改排版/去边后调用：开了自动切换就把当前布局记进当前方向
+window._rememberOrientLayout = function () { if (_autoOrientOn()) _saveOrientLayout(_orient()); };
+let _lastOrient = _orient();
+async function _onOrientChange() {
+  const now = _orient();
+  if (now === _lastOrient) return;       // 没真转(只是窗口宽变) → 不动
+  if (!_autoOrientOn()) { _lastOrient = now; return; }
+  _saveOrientLayout(_lastOrient);        // 先存离开方向的当前布局
+  _lastOrient = now;
+  const lay = _loadOrientLayout(now);
+  if (!lay) return;                      // 新方向没存过 → 保持当前布局
+  if (_applyOrientLayoutVars(lay)) {
+    _updateModeButtons(); _updateCropBtn();
+    await _applyModeChange(currentPage);
+  }
+}
+window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
+try { window.matchMedia('(orientation: portrait)').addEventListener('change', () => setTimeout(_onOrientChange, 300)); } catch (_) {}
 
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {
@@ -5652,6 +5700,7 @@ window.openSettings = () => {
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   const ct = localStorage.getItem('pdf-click-translate-unmastered');
   document.getElementById('set-click-translate').checked = (ct === null) ? true : (ct === '1');
+  { const e = document.getElementById('set-auto-orient'); if (e) e.checked = (localStorage.getItem('pdf-auto-orient') === '1'); }
   // 去边百分比(本书,从已加载的 _crop 回填)
   { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
     g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
@@ -5685,6 +5734,11 @@ window.saveSettings = async () => {
     const ct = document.getElementById('set-click-translate')?.checked;
     if (ct !== undefined) {
       try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
+    }
+    const ao = document.getElementById('set-auto-orient')?.checked;
+    if (ao !== undefined) {
+      try { localStorage.setItem('pdf-auto-orient', ao ? '1' : '0'); } catch (_) {}
+      if (ao) window._rememberOrientLayout?.();   // 刚开启 → 把当前布局记进当前方向作基线
     }
     // 句子翻译配置 POST 到服务端
     const sb = document.getElementById('set-sent-backend');

@@ -83,6 +83,7 @@ window.openSettings = () => {
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   const ct = localStorage.getItem('pdf-click-translate-unmastered');
   document.getElementById('set-click-translate').checked = (ct === null) ? true : (ct === '1');
+  { const e = document.getElementById('set-auto-orient'); if (e) e.checked = (localStorage.getItem('pdf-auto-orient') === '1'); }
   // 去边百分比(本书,从已加载的 _crop 回填)
   { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
     g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
@@ -116,6 +117,11 @@ window.saveSettings = async () => {
     const ct = document.getElementById('set-click-translate')?.checked;
     if (ct !== undefined) {
       try { localStorage.setItem('pdf-click-translate-unmastered', ct ? '1' : '0'); } catch (_) {}
+    }
+    const ao = document.getElementById('set-auto-orient')?.checked;
+    if (ao !== undefined) {
+      try { localStorage.setItem('pdf-auto-orient', ao ? '1' : '0'); } catch (_) {}
+      if (ao) window._rememberOrientLayout?.();   // 刚开启 → 把当前布局记进当前方向作基线
     }
     // 句子翻译配置 POST 到服务端
     const sb = document.getElementById('set-sent-backend');

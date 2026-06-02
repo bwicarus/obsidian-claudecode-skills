@@ -37,6 +37,7 @@ window.toggleSpread = async () => {
   } catch (_) {}
   _updateModeButtons();
   await _applyModeChange(keepPage);
+  window._rememberOrientLayout?.();   // 记进当前方向(若开了旋转自动切换)
 };
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
@@ -124,6 +125,47 @@ function _setupResizeWatcher() {
 }
 if (document.readyState !== 'loading') _setupResizeWatcher();
 else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
+
+// ── 旋转自动切换排版：每本 PDF 按 横/竖屏 各记一套 {排版 readMode, 去边开关 _cropOn, 双页错位 _spreadOffset} ──
+function _autoOrientOn() { try { return localStorage.getItem('pdf-auto-orient') === '1'; } catch (_) { return false; } }
+function _orient() { return (window.innerWidth >= window.innerHeight) ? 'land' : 'port'; }
+function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
+function _saveOrientLayout(o) {
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0 })); } catch (_) {}
+}
+function _loadOrientLayout(o) {
+  try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
+}
+function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调用方负责),返回是否套了
+  if (!lay) return false;
+  readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
+  _spreadOffset = lay.off ? 1 : 0;
+  _cropOn = !!lay.crop;
+  try {
+    localStorage.setItem('pdf-read-mode', readMode);
+    localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
+    localStorage.setItem(_spreadKey(), String(_spreadOffset));
+  } catch (_) {}
+  return true;
+}
+// 手动改排版/去边后调用：开了自动切换就把当前布局记进当前方向
+window._rememberOrientLayout = function () { if (_autoOrientOn()) _saveOrientLayout(_orient()); };
+let _lastOrient = _orient();
+async function _onOrientChange() {
+  const now = _orient();
+  if (now === _lastOrient) return;       // 没真转(只是窗口宽变) → 不动
+  if (!_autoOrientOn()) { _lastOrient = now; return; }
+  _saveOrientLayout(_lastOrient);        // 先存离开方向的当前布局
+  _lastOrient = now;
+  const lay = _loadOrientLayout(now);
+  if (!lay) return;                      // 新方向没存过 → 保持当前布局
+  if (_applyOrientLayoutVars(lay)) {
+    _updateModeButtons(); _updateCropBtn();
+    await _applyModeChange(currentPage);
+  }
+}
+window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
+try { window.matchMedia('(orientation: portrait)').addEventListener('change', () => setTimeout(_onOrientChange, 300)); } catch (_) {}
 
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {

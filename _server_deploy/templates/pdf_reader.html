@@ -676,6 +676,10 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
     </label>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
+      <input type="checkbox" id="set-auto-orient" style="width:16px;height:16px"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）
+    </label>
+    <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>
     <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
     <div style="display:flex;gap:8px;margin-bottom:8px">

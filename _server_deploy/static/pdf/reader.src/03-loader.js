@@ -114,6 +114,11 @@ async function loadPdf() {
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
+    // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
+    if (typeof _autoOrientOn === 'function' && _autoOrientOn()) {
+      const _lay = _loadOrientLayout(_orient());
+      if (_lay) _applyOrientLayoutVars(_lay);
+    }
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
@@ -173,6 +178,7 @@ window.toggleCrop = () => {
   _updateCropBtn();
   if (_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) _toast?.('去边已开,但还没设隐藏百分比 → 在 ⚙ 设置里配');
   _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
+  window._rememberOrientLayout?.();   // 记进当前方向(若开了旋转自动切换)
 };
 // 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
 async function saveCropSettings(crop, autoOn) {
