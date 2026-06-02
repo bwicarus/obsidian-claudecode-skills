@@ -59,7 +59,8 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
+    const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);   // 双页扣行内 gap
+    const newScale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr)));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');

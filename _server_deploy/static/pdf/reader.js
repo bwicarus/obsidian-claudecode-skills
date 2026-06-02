@@ -206,8 +206,9 @@ async function loadPdf() {
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
-    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2,每页占半宽)
-    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
+    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2),且扣掉行内 10px gap → 两页正好铺满
+    { const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);
+      scale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr))); }
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     _updateModeButtons();   // 模式按钮文字 + 双页按钮高亮态(readMode 可能是 spread)
@@ -830,7 +831,8 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
+    const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);   // 双页扣行内 gap
+    const newScale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr)));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');
