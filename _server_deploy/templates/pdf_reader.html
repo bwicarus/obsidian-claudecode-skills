@@ -28,7 +28,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #crop-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 #spread-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 双页模式:一行两页并排。flex:0 0 auto 禁止挤压(否则总宽略超→页面被 shrink,去边的 overflow 裁切窗口跟着变窄→裁切位置/宽度错乱) */
-.spread-row{display:flex;justify-content:center;align-items:flex-start;gap:10px;margin:0 auto 12px}
+.spread-row{display:flex;justify-content:safe center;align-items:flex-start;gap:10px;margin:0 auto 12px}/* safe center:放得下居中,放大后超宽则靠左对齐(否则 flex 居中会把左页推到 scrollLeft<0 不可达) */
 .spread-row>.page-wrap{flex:0 0 auto;margin:0}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
 .textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;

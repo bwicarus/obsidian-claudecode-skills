@@ -1,8 +1,9 @@
 function _updateModeButtons() {
-  const m = document.getElementById('mode-toggle');
-  if (m) m.textContent = readMode === 'continuous' ? '📚 连续' : (readMode === 'spread' ? '📄 单页' : '📄 单页');
+  // 双页按钮文字随形态变化:单页 / 双页1|2 / 双页2|3(点击循环切换,标签显示当前所在形态)
   const s = document.getElementById('spread-toggle');
-  if (s) s.classList.toggle('active', readMode === 'spread');
+  if (!s) return;
+  s.classList.toggle('active', readMode === 'spread');
+  s.textContent = (readMode === 'spread') ? (_spreadOffset ? '⊞ 双页 2|3' : '⊞ 双页 1|2') : '📄 单页';
 }
 async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
