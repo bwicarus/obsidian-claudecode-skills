@@ -1030,16 +1030,41 @@ def _jp_vocab_bump(word: str):
         _jp_vocab_save(d)
 
 
-def _jp_vocab_slug(e: dict) -> str | None:
-    """熟悉度 → 颜色 slug（镜像英语 new/seen/known/mastered）。mastered 返回 None（不画）。"""
-    if e.get("mastered"):
-        return None
+def _mastery_slug(m: float) -> str:
+    """mastery 0-1 → 颜色 slug。跟英语 compute_mastery.LABELS 完全相同的阈值(统一两语言着色)。"""
+    if m < 0.25: return "new"
+    if m < 0.55: return "seen"
+    if m < 0.85: return "known"
+    return "mastered"
+
+
+def _jp_mastery(e: dict) -> float:
+    """日语词 mastery（0-1），跟英语 compute_score 统一模型，用日语侧可用信号：
+    用户手动锁(user_mark/legacy mastered) > 查询次数(查得多=没掌握) > 时间衰减(久未查=大概率学会、缓慢回升)。
+    冷却:刚查过 last_ts≈now → days=0 → 无回升加成 → 24h 内只会因再次查询而降、不会自己涨(=「查后只跌不涨」)。
+    注:日语暂无 Anki 卡链接 + 段落暴露信号(那是英语 vault 笔记管线),故不含这两项；其余跟英语一致。"""
+    um = (e.get("user_mark") or "").strip().lower()
+    if um == "known" or e.get("mastered"):   # mastered 兼容旧数据
+        return 1.0
+    if um == "unknown":
+        return 0.0
+    score = 0.50
     looks = int(e.get("looks", 0))
-    if looks <= 1:
-        return "new"
-    if looks <= 3:
-        return "seen"
-    return "known"
+    if looks >= 5: score -= 0.25
+    elif looks >= 3: score -= 0.15
+    elif looks >= 2: score -= 0.05
+    last = int(e.get("last_ts", 0) or 0)
+    if last:
+        days = (_time.time() - last) / 86400.0
+        if days > 90: score += 0.10
+        elif days > 30: score += 0.05
+    return max(0.0, min(1.0, score))
+
+
+def _jp_vocab_slug(e: dict) -> str | None:
+    """熟悉度 → 颜色 slug（跟英语统一：new/seen/known/mastered）。mastered 返回 None（不画下划线）。"""
+    slug = _mastery_slug(_jp_mastery(e))
+    return None if slug == "mastered" else slug
 
 
 def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
@@ -1078,7 +1103,7 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
                         if cur: rects.append([round(x, 2) for x in cur])
                         cur = [t["x0"], t["y0"], t["x1"], t["y1"]]
                 if cur: rects.append([round(x, 2) for x in cur])
-                marks.append({"word": surf, "lemma": surf, "mastery": 0.0,
+                marks.append({"word": surf, "lemma": surf, "mastery": round(_jp_mastery(e), 3),
                               "label_slug": slug, "rects": rects, "jp": True})
         i = j
     return marks
@@ -1950,7 +1975,7 @@ def pdf_api_dict_quick():
             "reading": reading,
             "accent": ra.get("accent"),       # 重音核:0=平板,N=第 N 拍后下降
             "mora": ra.get("mora"),
-            "mastered": bool((_jp_vocab_load().get(word_raw) or {}).get("mastered")),   # 掌握开关初始态
+            "mastered": _mastery_slug(_jp_mastery(_jp_vocab_load().get(word_raw) or {})) == "mastered",   # 掌握按钮初始态(跟英语同口径)
             "pos": jp.get("pos", ""),          # 词性单独给前端(小框里做暗色标签,跟含义区分)
             "inflect": _inf,                       # 变形分析:原形 + 中文语法标签(过去た/否定ない/て形…)
             "translation": (jp.get("zh") or ""),
@@ -2202,11 +2227,11 @@ def pdf_api_dict_jp():
 
 @bp.route("/api/jp-vocab-mark", methods=["POST"])
 def pdf_api_jp_vocab_mark():
-    """标记日语词「已掌握 / 取消掌握 / 删除记录」→ 控制下划线显隐。
-    body: {word, mark: "mastered"|"unknown"|"forget"}"""
+    """标记日语词「已掌握 / 没掌握 / 清除 / 删除记录」→ user_mark 锁 mastery(跟英语 /api/vocab-mark 同口径)。
+    body: {word, mark: "known"|"unknown"|""|"forget"}（兼容旧 "mastered"=known）"""
     data = request.get_json(silent=True) or {}
     word = (data.get("word") or "").strip()
-    mark = (data.get("mark") or "mastered").strip().lower()
+    mark = (data.get("mark") or "known").strip().lower()
     if not word:
         return jsonify({"ok": False, "error": "no word"}), 400
     import time as _t
@@ -2216,7 +2241,12 @@ def pdf_api_jp_vocab_mark():
             d.pop(word, None)
         else:
             e = d.get(word) or {"looks": 1, "first_ts": int(_t.time())}
-            e["mastered"] = (mark == "mastered")
+            if mark in ("known", "mastered"):
+                e["user_mark"] = "known"; e["mastered"] = True   # mastered 字段保留兼容旧逻辑/旧数据
+            elif mark == "unknown":
+                e["user_mark"] = "unknown"; e["mastered"] = False
+            else:   # "" 清除手动标记 → 回到分数驱动
+                e.pop("user_mark", None); e["mastered"] = False
             e["last_ts"] = int(_t.time())
             d[word] = e
         _jp_vocab_save(d)

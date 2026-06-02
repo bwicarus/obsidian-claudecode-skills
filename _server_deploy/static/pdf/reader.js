@@ -2980,7 +2980,7 @@ window._wordPopMaster = (btn) => {
   const w = s.lemma || s.word;
   const next = !s.mastered;
   const url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
-  const mark = s.jp ? (next ? 'mastered' : 'unknown') : (next ? 'known' : 'unknown');
+  const mark = next ? 'known' : 'unknown';   // 日英统一口径(jp-vocab-mark 已接受 known/unknown)
   if (btn) btn.disabled = true;
   fetch(url, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
