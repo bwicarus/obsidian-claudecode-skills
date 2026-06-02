@@ -561,6 +561,114 @@ def pdf_api_delete_pdf():
     return jsonify({"ok": True})
 
 
+def _migrate_book_sidecars(old_rel: str, new_rel: str, old_abs: Path, new_abs: Path):
+    """重命名 PDF 时迁移所有按 rel/绝对路径哈希命名的 sidecar 到新 key。
+    用户数据(高亮/墨迹/翻译/隐藏句/语法跟踪)+贵产物(预处理 OCR)迁移;字符/振假名缓存按 mtime
+    命名(rename 保留 mtime)也顺手迁;langs/crop 共享 json 改 key。漏迁的纯缓存会自动重建。"""
+    import hashlib, shutil
+    def _h(s):   return hashlib.sha1(s.encode("utf-8")).hexdigest()
+    def _h16(s): return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+    o_full, n_full = _h(old_rel), _h(new_rel)
+    o16, n16 = _h16(old_rel), _h16(new_rel)
+    o_bsha, n_bsha = _book_sha(old_abs), _book_sha(new_abs)
+
+    def _mv(src: Path, dst: Path):
+        try:
+            if src.exists() and src.resolve() != dst.resolve():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True) if dst.is_dir() else dst.unlink()
+                src.replace(dst)
+        except Exception:
+            pass
+
+    # 用户数据(整 sha1(rel) 命名)
+    for d in (_HL_DIR, _INK_DIR, _TR_DIR, _DISMISS_DIR):
+        _mv(d / f"{o_full}.json", d / f"{n_full}.json")
+    # 语法跟踪(sha1(rel)[:16])
+    _mv(_GRAMMAR_TRACKED_DIR / f"{o16}.json", _GRAMMAR_TRACKED_DIR / f"{n16}.json")
+    # 贵产物:预处理(绝对路径 sha)+ 备份/嵌入 pdf + OCR 目录
+    for suffix in (".json", ".orig.pdf", ".embedded.pdf"):
+        _mv(_BOOK_PREPROCESS_DIR / f"{o_bsha}{suffix}", _BOOK_PREPROCESS_DIR / f"{n_bsha}{suffix}")
+    for base in (CLAUDE_DIR / "state" / "google-vision-ocr", CLAUDE_DIR / "state" / "mokuro-ocr"):
+        _mv(base / o_bsha, base / n_bsha)
+    # 按页缓存(sha16-p{page}-{mtime}.json):字符层 + 振假名验证(rename 保留 mtime → key 仍有效)
+    for cdir in (CLAUDE_DIR / "state" / "pdf-char-cache", _FURIFIX_DIR):
+        try:
+            for f in cdir.glob(f"{o16}-p*"):
+                _mv(f, cdir / (n16 + f.name[len(o16):]))
+        except Exception:
+            pass
+    # 共享 json:langs + crop 改 key
+    for path in (_BOOK_LANGS_PATH, _BOOK_CROP_PATH):
+        try:
+            if path.exists():
+                m = json.loads(path.read_text("utf-8"))
+                if old_rel in m:
+                    m[new_rel] = m.pop(old_rel)
+                    path.write_text(json.dumps(m, ensure_ascii=False, indent=2), "utf-8")
+        except Exception:
+            pass
+
+
+@bp.route("/api/rename-pdf", methods=["POST"])
+def pdf_api_rename_pdf():
+    """重命名一本书：改文件名(保留所在目录)+ 迁移所有 sidecar。路径必须在 vault 内。"""
+    body = request.get_json(silent=True) or {}
+    old_rel = (body.get("file") or "").strip()
+    old_ap = _safe_vault_path(old_rel)
+    if not old_ap or not old_ap.exists():
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    new_name = (body.get("new_name") or "").strip().replace("/", "").replace("\\", "").strip()
+    if not new_name:
+        return jsonify({"ok": False, "error": "新名称非法"}), 400
+    if not new_name.lower().endswith(".pdf"):
+        new_name += ".pdf"
+    new_ap = old_ap.parent / new_name
+    new_rel = new_ap.relative_to(OBSIDIAN_ROOT).as_posix()
+    if new_ap.resolve() == old_ap.resolve():
+        return jsonify({"ok": True, "rel": old_rel, "name": new_name})
+    if new_ap.exists():
+        return jsonify({"ok": False, "error": "同名文件已存在"}), 400
+    try:
+        old_ap.rename(new_ap)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"重命名失败：{ex}"}), 500
+    _migrate_book_sidecars(old_rel, new_rel, old_ap, new_ap)
+    return jsonify({"ok": True, "rel": new_rel, "name": new_name})
+
+
+@bp.route("/api/preprocess-active")
+def pdf_api_preprocess_active():
+    """列出当前进行中的预处理任务(列表页刷新后据此恢复进度条+轮询)。
+    扫 book-preprocess/*.json,phase∈(detecting/ocr/embedding) 且进程没死的。"""
+    out = []
+    try:
+        for sp in _BOOK_PREPROCESS_DIR.glob("*.json"):
+            try:
+                st = json.loads(sp.read_text("utf-8"))
+            except Exception:
+                continue
+            if st.get("phase") not in ("detecting", "ocr", "embedding"):
+                continue
+            pid = st.get("pid")
+            stale = (_time.time() - st.get("updated_at", 0)) > 30
+            if pid is not None and stale and not _pid_alive(pid):
+                continue   # 死进程,不算进行中
+            pdf = st.get("pdf")
+            if not pdf:
+                continue
+            try:
+                rel = Path(pdf).resolve().relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+            except Exception:
+                continue
+            out.append({"rel": rel, "phase": st.get("phase"),
+                        "percent": st.get("percent", 0), "msg": st.get("msg", "")})
+    except Exception:
+        pass
+    return jsonify({"ok": True, "active": out})
+
+
 # 连字(ligature)展开：PyMuPDF 把 ﬁ/ﬂ 等当单个非 ASCII 字形输出，前端词边界正则 [A-Za-z]
 # 不认它 → 单词在连字处被断(如 infinitely 只能选到 nitely)。提取时还原成 ASCII。
 _LIGATURES = {

@@ -23,12 +23,17 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
 .prep-bar{height:100%;width:0;background:#3b82f6;transition:width .3s}
 .prep-msg{color:#8a9bb4;font-size:11px;white-space:nowrap;max-width:55%;overflow:hidden;text-overflow:ellipsis}
 .empty{color:#5a6680;text-align:center;padding:60px}
+.ctx-menu{position:fixed;z-index:1000;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.6);overflow:hidden;display:none;min-width:150px}
+.ctx-menu .ctx-title{padding:9px 16px;color:#8a9bb4;font-size:11px;border-bottom:1px solid #1f2740;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.ctx-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:#cfe6ff;padding:12px 16px;font-size:14px;cursor:pointer}
+.ctx-menu button:active,.ctx-menu button:hover{background:#1a2540}
+.ctx-menu button.danger{color:#ff8a8a}
 </style>
 </head>
 <body>
 <div class="container">
   <h1>📚 PDF 阅读器</h1>
-  <div class="sub">vault 里所有 PDF（{{ pdfs|length }} 个），按修改时间倒序 · 长按一本可删除 · 🔧 预处理给扫描书补文字层</div>
+  <div class="sub">vault 里所有 PDF（{{ pdfs|length }} 个），按修改时间倒序 · 长按一本可重命名/删除 · 🔧 预处理给扫描书补文字层</div>
   <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
     <label style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px">
       ⬆️ 上传 PDF
@@ -62,6 +67,11 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
     {% endfor %}
   </div>
 </div>
+<div class="ctx-menu" id="ctx-menu">
+  <div class="ctx-title" id="ctx-title"></div>
+  <button onclick="ctxRename()">✏️ 重命名</button>
+  <button class="danger" onclick="ctxDelete()">🗑 删除</button>
+</div>
 <script>
 function filter() {
   const q = document.getElementById('search').value.toLowerCase();
@@ -70,18 +80,53 @@ function filter() {
   });
 }
 
-// ── 长按删除（移动端 ~550ms / 桌面右键） ──
-let _lpTimer = null, _lpFired = false;
+// ── 长按弹菜单：重命名 / 删除（移动端 ~500ms / 桌面右键） ──
+let _lpTimer = null, _lpFired = false, _ctxItem = null;
 function lpStart(ev, item) {
-  if (ev.target.closest('.prep-btn')) return;   // 长按预处理按钮不算删除
+  if (ev.target.closest('.prep-btn')) return;   // 长按预处理按钮不弹菜单
   _lpFired = false;
   clearTimeout(_lpTimer);
-  _lpTimer = setTimeout(() => { _lpFired = true; deleteBook(item); }, 550);
+  const pt = ev.touches ? ev.touches[0] : ev;
+  const x = pt ? pt.clientX : 0, y = pt ? pt.clientY : 0;
+  _lpTimer = setTimeout(() => { _lpFired = true; showCtxMenu(item, x, y); }, 500);
 }
 function lpEnd() { clearTimeout(_lpTimer); }
-function ctxDel(ev, item) { ev.preventDefault(); deleteBook(item); return false; }
+function ctxDel(ev, item) { ev.preventDefault(); _lpFired = true; showCtxMenu(item, ev.clientX, ev.clientY); return false; }
+function showCtxMenu(item, x, y) {
+  _ctxItem = item;
+  const m = document.getElementById('ctx-menu');
+  document.getElementById('ctx-title').textContent = item.dataset.disp;
+  m.style.display = 'block';
+  const mw = m.offsetWidth || 160, mh = m.offsetHeight || 110;
+  m.style.left = Math.max(8, Math.min(x, window.innerWidth - mw - 8)) + 'px';
+  m.style.top  = Math.max(8, Math.min(y, window.innerHeight - mh - 8)) + 'px';
+}
+function hideCtxMenu() { const m = document.getElementById('ctx-menu'); if (m) m.style.display = 'none'; _ctxItem = null; }
+document.addEventListener('click', (e) => { if (!e.target.closest('#ctx-menu')) hideCtxMenu(); });
+document.addEventListener('touchstart', (e) => { if (!e.target.closest('#ctx-menu') && !e.target.closest('.pdf-item')) hideCtxMenu(); }, true);
+function ctxDelete() { const item = _ctxItem; hideCtxMenu(); if (item) deleteBook(item); }
+async function ctxRename() {
+  const item = _ctxItem; hideCtxMenu();
+  if (!item) return;
+  const cur = item.dataset.disp, base = cur.replace(/\.pdf$/i, '');
+  const nn = prompt('重命名《' + cur + '》\n输入新文件名（可不带 .pdf）：', base);
+  if (nn === null) return;
+  const name = nn.trim();
+  if (!name || name === base) return;
+  try {
+    const r = await fetch('/pdf/api/rename-pdf', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: item.dataset.rel, new_name: name}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      item.dataset.rel = d.rel; item.dataset.disp = d.name; item.dataset.name = d.name.toLowerCase();
+      item.querySelector('.pdf-name').textContent = d.name;
+    } else alert('重命名失败：' + (d.error || ''));
+  } catch (e) { alert('重命名失败：' + e.message); }
+}
 function openBook(ev, row) {
-  if (_lpFired) { _lpFired = false; return; }   // 长按刚触发删除 → 不导航
+  if (_lpFired) { _lpFired = false; return; }   // 长按刚弹过菜单 → 不导航
   const item = row.closest('.pdf-item');
   location.href = '/pdf/view?file=' + encodeURIComponent(item.dataset.rel);
 }
@@ -165,5 +210,25 @@ async function uploadPdf(input) {
   }
   input.value = '';
 }
+
+// ── 刷新后恢复进行中的预处理/OCR 任务（后端进度文件驱动，进程没停 → 重新挂进度条+轮询）──
+async function resumeActiveJobs() {
+  try {
+    const r = await fetch('/pdf/api/preprocess-active');
+    const d = await r.json();
+    (d.active || []).forEach(job => {
+      const item = [...document.querySelectorAll('.pdf-item')].find(el => el.dataset.rel === job.rel);
+      if (!item) return;
+      const btns = [...item.querySelectorAll('.prep-btn')];
+      const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
+      btns.forEach(b => b.disabled = true);
+      prog.style.display = 'flex';
+      bar.style.width = (job.percent || 0) + '%';
+      msg.textContent = (job.msg || job.phase || '处理中…');
+      pollPrep(job.rel, btns, bar, msg);
+    });
+  } catch (e) {}
+}
+resumeActiveJobs();
 </script>
 </body></html>
