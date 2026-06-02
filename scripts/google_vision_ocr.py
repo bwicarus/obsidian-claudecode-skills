@@ -49,18 +49,29 @@ def pdf_sha(pdf_path: Path) -> str:
 
 
 def ocr_one_page(api_key: str, png_bytes: bytes) -> dict:
-    """对一张 PNG 调 Vision API,提取 char-level (text + bbox)。"""
-    resp = requests.post(
-        f"https://vision.googleapis.com/v1/images:annotate?key={api_key}",
-        json={
-            "requests": [{
-                "image": {"content": base64.b64encode(png_bytes).decode()},
-                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-                "imageContext": {"languageHints": ["ja"]},
-            }]
-        },
-        timeout=60,
-    )
+    """对一张图(PNG/JPEG)调 Vision API,提取 char-level (text + bbox)。
+    瞬时网络/SSL 抖动(SSLEOFError 等)重试 3 次,避免单页因一次抖动永久缺 OCR。"""
+    payload = {
+        "requests": [{
+            "image": {"content": base64.b64encode(png_bytes).decode()},
+            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+            "imageContext": {"languageHints": ["ja"]},
+        }]
+    }
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=payload, timeout=60)
+            break
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.SSLError) as ex:
+            last_exc = ex
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    else:
+        raise last_exc
     # 配额计数(Vision API 每张图 1 unit,免费 1000/月)
     try:
         import sys as _sys, pathlib as _pl
@@ -110,6 +121,11 @@ def main() -> int:
                     help="如 '10' 单页, '10,80,200' 多页, '10-15' 范围;不指定 = 全本")
     ap.add_argument("--workers", type=int, default=10,
                     help="并发 worker 数(API 调用 IO-bound,10-20 倍效提速)")
+    ap.add_argument("--max-long-side", type=int, default=4000,
+                    help="渲染长边像素上限。巨幅扫描页按 DPI 会出几十 MB 图把 Vision "
+                         "请求体撑爆(SSL 超时)/把内存吃光,封顶后等比缩小")
+    ap.add_argument("--jpeg-quality", type=int, default=90,
+                    help="上传用 JPEG 质量。JPEG 比 PNG 小一个量级,OCR 质量无可感知损失")
     args = ap.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -139,7 +155,18 @@ def main() -> int:
     else:
         page_list = list(range(n))
 
-    todo = [i for i in page_list if not (work / f"p{i:04d}.json").exists()]
+    def _page_done(i: int) -> bool:
+        """已成功 OCR 才算完成；上次报错的页(写了带 error 的 json)要重跑。"""
+        jf = work / f"p{i:04d}.json"
+        if not jf.exists():
+            return False
+        try:
+            sc = json.loads(jf.read_text("utf-8"))
+        except Exception:
+            return False
+        return not sc.get("error")
+
+    todo = [i for i in page_list if not _page_done(i)]
     print(f"  需 OCR: {len(todo)}/{len(page_list)}(已完成 {len(page_list) - len(todo)})", flush=True)
 
     if not todo:
@@ -154,6 +181,8 @@ def main() -> int:
     state = {"completed": 0}
     pdf_path_str = str(pdf_path)
     dpi = args.dpi
+    max_long = max(256, args.max_long_side)
+    jpg_q = max(40, min(100, args.jpeg_quality))
 
     def worker(page_idx: int):
         """每 worker 自己 fitz.open + render + API call(避免主线程 render 成 bottleneck)。
@@ -162,14 +191,21 @@ def main() -> int:
             doc_local = fitz.open(pdf_path_str)
             try:
                 page = doc_local[page_idx]
-                pix = page.get_pixmap(dpi=dpi)
-                png_bytes = pix.tobytes("png")
+                # 自适应缩放:按 DPI 算,但长边封顶 max_long。巨幅扫描页(本例页面
+                # 原生 2227×3242pt,300dpi → 9280×13509px / 49MB PNG)会把 Vision
+                # 请求体撑爆(SSL 上传超时重试耗尽)且 10 worker 同时渲染会 OOM。
+                long_pt = max(page.rect.width, page.rect.height) or 1.0
+                zoom = min(dpi / 72.0, max_long / long_pt)
+                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                # 上传用 JPEG:扫描照片页 JPEG 比 PNG 小一个量级(49MB→~1MB),
+                # OCR 文字识别对 q90 JPEG 无可感知损失。
+                img_bytes = pix.tobytes("jpg", jpg_quality=jpg_q)
                 pix_w, pix_h = pix.width, pix.height
                 del pix
             finally:
                 doc_local.close()
             t = time.time()
-            result = ocr_one_page(api_key, png_bytes)
+            result = ocr_one_page(api_key, img_bytes)
             dt = time.time() - t
             err = None
         except Exception as ex:

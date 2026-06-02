@@ -71,7 +71,8 @@ def main() -> int:
         if not pdf.exists():
             _write(sha, phase="error", error="PDF 不存在", pdf=str(pdf))
             return 1
-        _write(sha, phase="detecting", percent=0, msg="检测文字层…", pdf=str(pdf), error="")
+        _write(sha, phase="detecting", percent=0, msg="检测文字层…", pdf=str(pdf),
+               error="", pid=os.getpid())
         if has_text_layer(pdf):
             _write(sha, phase="done", percent=100, has_text=True, msg="已有文字层，无需 OCR")
             return 0
@@ -97,6 +98,27 @@ def main() -> int:
                 pass
         if proc.returncode != 0:
             _write(sha, phase="error", error=f"OCR 退出码 {proc.returncode}")
+            return 1
+
+        # OCR 子进程返回 0 不代表识别成功：逐页 sidecar 可能整本都是 error
+        # (网络/SSL/图过大)。统计有文字的页 vs 报错页，全错就别嵌入空文字层动原书。
+        vdir = VISION_DIR / sha
+        ok_pages = err_pages = 0
+        sample_err = ""
+        for jf in sorted(vdir.glob("p*.json")):
+            try:
+                sc = json.loads(jf.read_text("utf-8"))
+            except Exception:
+                continue
+            if sc.get("error"):
+                err_pages += 1
+                sample_err = sample_err or str(sc.get("error"))[:120]
+            elif sc.get("text") or sc.get("chars"):
+                ok_pages += 1
+        if ok_pages == 0:
+            _write(sha, phase="error",
+                   error=f"OCR 未识别到任何文字（{err_pages} 页失败，原书未改动）"
+                         + (f"：{sample_err}" if sample_err else ""))
             return 1
 
         # ② 嵌入文字层（现成脚本）→ 库外临时文件

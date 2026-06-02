@@ -454,6 +454,25 @@ def _book_sha(abs_path) -> str:
     return hashlib.sha1(str(Path(abs_path).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
+def _pid_alive(pid) -> bool:
+    """进程是否还活着（用于判断预处理后台进程是否崩了/被 OOM 杀）。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # 存在但无权发信号 → 仍算活着
+    except Exception:
+        return False
+
+
 @bp.route("/api/preprocess-status")
 def pdf_api_preprocess_status():
     """预处理状态：读 state/book-preprocess/<sha>.json（文件驱动 → 关网页/webapp 重启都不丢）。
@@ -462,9 +481,17 @@ def pdf_api_preprocess_status():
     if not ap:
         return jsonify({"phase": "idle"})
     try:
-        return jsonify(json.loads((_BOOK_PREPROCESS_DIR / f"{_book_sha(ap)}.json").read_text("utf-8")))
+        st = json.loads((_BOOK_PREPROCESS_DIR / f"{_book_sha(ap)}.json").read_text("utf-8"))
     except Exception:
         return jsonify({"phase": "idle"})
+    # 存活检测：进行中的相位但后台进程已退出（崩溃/OOM/被杀）→ 别让进度条永远卡着，报错
+    if st.get("phase") in ("detecting", "ocr", "embedding"):
+        pid = st.get("pid")
+        stale = (_time.time() - st.get("updated_at", 0)) > 30
+        if pid is not None and stale and not _pid_alive(pid):
+            st = {**st, "phase": "error",
+                  "error": "预处理进程已中断（可能内存不足或被终止），请重试"}
+    return jsonify(st)
 
 
 @bp.route("/api/preprocess-async", methods=["POST"])
@@ -479,8 +506,14 @@ def pdf_api_preprocess_async():
     sp = _BOOK_PREPROCESS_DIR / f"{sha}.json"
     try:
         st = json.loads(sp.read_text("utf-8"))
-        if st.get("phase") in ("detecting", "ocr", "embedding") and (_time.time() - st.get("updated_at", 0) < 120):
-            return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
+        # 真正在跑（进程活着 / 或刚更新过且没记 pid 的老状态）才拦重复启动；
+        # 死进程留下的陈旧 in-progress 状态允许直接重跑。
+        if st.get("phase") in ("detecting", "ocr", "embedding"):
+            pid = st.get("pid")
+            fresh = (_time.time() - st.get("updated_at", 0)) < 120
+            alive = _pid_alive(pid) if pid is not None else fresh
+            if alive:
+                return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
     except Exception:
         pass
     py = os.environ.get("APP_PYTHON") or sys.executable
