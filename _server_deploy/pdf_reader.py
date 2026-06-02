@@ -466,13 +466,21 @@ def _pid_alive(pid) -> bool:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True   # 存在但无权发信号 → 仍算活着
     except Exception:
         return False
+    # **僵尸(Z)算死**:os.kill(pid,0) 对僵尸仍成功(pid 还在表里)→ 否则被杀/崩溃后没被父进程
+    # 回收的子进程会被误判"还活着",进度条永远卡在最后一步、还挡住重新启动(2026-06 踩)。
+    try:
+        st = open(f"/proc/{pid}/stat", "rb").read().rsplit(b")", 1)[1].split()[0]
+        if st in (b"Z", b"X", b"x"):   # Z=僵尸 X/x=已死
+            return False
+    except Exception:
+        pass
+    return True
 
 
 @bp.route("/api/preprocess-status")
