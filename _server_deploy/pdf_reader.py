@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import statistics
 import sys
 import urllib.parse
 from pathlib import Path
@@ -720,16 +721,16 @@ def _jp_inflection(text: str) -> dict | None:
     return {"base": base, "marks": marks}
 
 
-def _apply_jp_tokenize(chars: list, start: int, end: int,
-                       block_i: int, line_i: int, furigana_out: list | None = None) -> None:
-    """对 CJK 行(含 ≥1 个 CJK 字符)用 fugashi 分词，覆盖区间内 chars 的 w 字段。
-    word_id 跟现有英语 _word_id 同格式(block*1e6 + line*1e3 + word_no)。
+def _apply_jp_tokenize(seg: list, block_i: int, col_i: int,
+                       furigana_out: list | None = None) -> None:
+    """对一列(块内 gutter 切出的列,如漫画一个气泡)的 chars 用 fugashi 分词,覆盖其 w 字段。
+    seg = 该列的 char dict 列表(已按 reading order)。word_id = block*1e6 + col*1e3 + word_no。
     furigana_out 非空时顺带把含汉字 token 的振假名条目 append 进去(读音来自 unidic kana)。
     分词失败/未装 fugashi 静默跳过(前端 w 还是英语 lookup 结果或 -1)。"""
-    if end <= start:
+    line_i = col_i   # word_id 用列号占原 line 槽位(块内列唯一即可)
+    if not seg:
         return
-    seg = chars[start:end]
-    # 该 line 至少含 1 个 CJK 字符才跑分词(纯英语行走原 _word_id 逻辑)
+    # 该列至少含 1 个 CJK 字符才跑分词(纯英语列走原 _word_id 逻辑)
     if not any(_is_cjk_char(c.get("c", "")) for c in seg if not c.get("sp")):
         return
     tagger = _get_jp_tagger()
@@ -799,7 +800,46 @@ def _apply_jp_tokenize(chars: list, start: int, end: int,
             prev_surf = surf; prev_pos1 = p1; prev_wid = wid; prev_is_num = _is_num
             char_ptr += wlen
     except Exception as ex:
-        sys.stderr.write(f"[jp tokenize] fail line {line_i}: {ex}\n")
+        sys.stderr.write(f"[jp tokenize] fail col {col_i}: {ex}\n")
+
+
+def _split_block_columns(block_chars: list) -> list:
+    """把一个 PyMuPDF block 的 chars 按竖直空隙(gutter)分成左右并排列。
+    漫画并排气泡常被 Vision/PyMuPDF 并成一个块、按视觉行左右交错读 → 选中/分词分不开;
+    检测块内贯穿的竖直空白条(gutter,宽 > 1.5×字宽)在那里切列。
+    返回 [列chars, ...](左→右;列内保持原 reading order)。无明显空隙 → 原样一列。"""
+    ns = [c for c in block_chars if not c.get("sp") and c.get("c", "").strip()]
+    if len(ns) < 4:
+        return [block_chars]
+    chw = statistics.median([max(1.0, c["x1"] - c["x0"]) for c in ns]) or 1.0
+    tol = chw * 0.6           # 词内/字间小缝不算 gutter
+    gutter_min = chw * 1.5    # 列间空隙阈值
+    merged: list = []
+    for a, b in sorted((c["x0"], c["x1"]) for c in ns):
+        if merged and a <= merged[-1][1] + tol:
+            if b > merged[-1][1]:
+                merged[-1][1] = b
+        else:
+            merged.append([a, b])
+    cols = [list(merged[0])]
+    for a, b in merged[1:]:
+        if a - cols[-1][1] >= gutter_min:    # 空隙够宽 → 新列
+            cols.append([a, b])
+        elif b > cols[-1][1]:
+            cols[-1][1] = b
+    if len(cols) <= 1:
+        return [block_chars]
+    bounds = [(cols[i][1] + cols[i + 1][0]) / 2 for i in range(len(cols) - 1)]
+    groups: list = [[] for _ in cols]
+    for c in block_chars:
+        cx = (c["x0"] + c["x1"]) / 2
+        gi = len(cols) - 1
+        for i, bd in enumerate(bounds):
+            if cx < bd:
+                gi = i
+                break
+        groups[gi].append(c)
+    return [g for g in groups if g]
 
 
 def _build_en_furigana(chars: list) -> list:
@@ -897,6 +937,7 @@ def _compute_page_chars(abs_path, page: int):
             return -1
         chars = []
         furigana: list = []
+        _col_seq = 0   # 全局列 id：每个 gutter 切出的列一个唯一 bk(并排气泡分开)
         for _block_i, block in enumerate(raw.get("blocks", [])):
             if block.get("type", 0) != 0:
                 continue
@@ -921,10 +962,15 @@ def _compute_page_chars(abs_path, page: int):
                             "b": 1 if _bold else 0,
                             "bk": _block_i,
                         })
-            # 整块(段落)一起 fugashi 分词,而非逐行 —— 跨行的词(如 間食:間 在行尾、食 在行首)
-            # 才不会被行边界拆成 間(あいだ)+食(しょく) 读错音;块内各行本就是连续 reading order。
-            # word_id 用 line=0 + 块内 token 序号 wn(块内唯一),振假名跨行由 _furigana_item 处理。
-            _apply_jp_tokenize(chars, _block_start, len(chars), _block_i, 0, furigana)
+            # 块内按竖直空隙切列(漫画并排气泡分开)。每列:① 给唯一 bk → 选中/句子框不串气泡;
+            # ② 整列一起 fugashi 分词(列内各行连续 reading order,跨行词如 間食 读对 かんしょく)。
+            block_chars = chars[_block_start:]
+            for _col in _split_block_columns(block_chars):
+                cur_bk = _col_seq
+                _col_seq += 1
+                for c in _col:
+                    c["bk"] = cur_bk
+                _apply_jp_tokenize(_col, _block_i, cur_bk % 1000, furigana)
         # 英文词音标叠加（单连接直查 ECDICT；日语为主的书几乎无开销）
         try:
             furigana.extend(_build_en_furigana(chars))
@@ -935,9 +981,10 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 7   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+_CHAR_CACHE_VER = 8   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
                       # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx;
-                      #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段)
+                      #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段;
+                      #  v8:块内 gutter 切列[漫画并排气泡分开 bk]→ 选中/分词不串气泡)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
@@ -1765,10 +1812,11 @@ def pdf_api_page_vocab_marks():
         p = doc[page - 1]
         raw = p.get_text("rawdict")
         chars = []
+        _col_seq = 0   # 跟 _compute_page_chars 一致:块内 gutter 切列,每列唯一 bk(并排气泡分开)
         for _bi, b in enumerate(raw.get("blocks", [])):
             if b.get("type") != 0: continue
+            _bs = len(chars)
             for _li, ln in enumerate(b.get("lines", [])):
-                _ls = len(chars)
                 for sp in ln.get("spans", []):
                     for ch in sp.get("chars", []):
                         bb = ch.get("bbox")
@@ -1780,9 +1828,12 @@ def pdf_api_page_vocab_marks():
                             "c": c, "x0": round(bb[0],2), "y0": round(bb[1],2),
                             "x1": round(bb[2],2), "y1": round(bb[3],2),
                             "sp": 1 if c.isspace() else 0,
-                            "bk": _bi,   # 块号:句子检测靠它跨块切句(之前漏了→不同块被并成跨多行大框)
+                            "bk": _bi,   # 块号:下面按列覆盖。句子检测/选中靠它(并排气泡分列才不串)
                         })
-                _apply_jp_tokenize(chars, _ls, len(chars), _bi, _li)   # CJK 行补 w（JP 生词下划线要按词）
+            for _col in _split_block_columns(chars[_bs:]):
+                cur_bk = _col_seq; _col_seq += 1
+                for c in _col: c["bk"] = cur_bk
+                _apply_jp_tokenize(_col, _bi, cur_bk % 1000)   # CJK 列补 w（JP 生词下划线要按词）
         _merge_favorite_phrases(chars)   # 收藏词组合并 w
         # 强制刷新 vocab_index（防 vocab note 刚写完缓存还旧）
         try:
