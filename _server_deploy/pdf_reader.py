@@ -2427,7 +2427,14 @@ def pdf_api_jp_vocab_mark():
     mark = (data.get("mark") or "known").strip().lower()
     if not word:
         return jsonify({"ok": False, "error": "no word"}), 400
-    base = (_jp_inflection(word) or {}).get("base") or word
+    # ⚠ 关键:**标记下划线实际命中的那个笔记**,而不是盲目还原原形再标。
+    # 下划线 _build_jp_vocab_marks 是 idx.get(表层) → 否则 idx.get(原形)。迁移来的旧笔记可能按
+    # **表层活用形**为键(jp-vocab.json 里有 削った/使わ/加え 这种),若标记只认原形会标到另一个笔记
+    # → 下划线那个没变 → 标了也不消失。故按同一套解析找到 info,标 info['lemma']。
+    base_inf = (_jp_inflection(word) or {}).get("base")
+    idx = _vocab_idx()
+    info = idx.get(word.lower()) or (idx.get(base_inf.lower()) if base_inf else None)
+    target = (info or {}).get("lemma") or base_inf or word
     _, bvn = _vocab_modules()
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
@@ -2438,7 +2445,7 @@ def pdf_api_jp_vocab_mark():
         import vocab_index      # type: ignore
         if mark == "forget":
             try:
-                p = bvn._word_path(base)
+                p = bvn._word_path(target)
                 if p.exists(): p.unlink()
             except Exception:
                 pass
@@ -2446,10 +2453,10 @@ def pdf_api_jp_vocab_mark():
             return jsonify({"ok": True, "word": word, "mark": mark})
         # 确保笔记存在(没查过的词也能直接标)
         if bvn is not None and hasattr(bvn, "update_jp_word_note"):
-            if not bvn._word_path(base).exists():
-                bvn.update_jp_word_note(base, forms=[word, base], _new_source=False)
+            if not bvn._word_path(target).exists():
+                bvn.update_jp_word_note(target, forms=[word, target], _new_source=False)
         m = mark if mark in ("known", "unknown", "") else ("known" if mark == "mastered" else "")
-        result = compute_mastery.apply_user_mark(base, m)
+        result = compute_mastery.apply_user_mark(target, m)
         vocab_index.index(force_reload=True)   # 让下划线立即反映
         return jsonify(result if result.get("ok") else {"ok": True, "word": word, "mark": mark, "warn": result.get("error")})
     except Exception as ex:
