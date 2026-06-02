@@ -51,7 +51,7 @@ function _charsRangeToText(chars, sIdx, eIdx) {
       else {
         const gap = c.left - (lastChar.left + lastChar.width);
         const ref = Math.min(c.height, lastChar.height);
-        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(c.c) && /[A-Za-z]/.test(lastChar.c)) ? 1.3 : 0.6) && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
     text += c.sp ? ' ' : c.c;
@@ -160,7 +160,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
         // 同行：按 X gap 判断要不要加空格
         const gap = c.left - (lastChar.left + lastChar.width);
         const ref = Math.min(c.height, lastChar.height);
-        if (!cjkPair && gap > ref * 0.6 && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
+        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(c.c) && /[A-Za-z]/.test(lastChar.c)) ? 1.3 : 0.6) && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
     // 真实空格 char 直接保留；其它 char 写入
