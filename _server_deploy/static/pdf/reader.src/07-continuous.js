@@ -6,7 +6,8 @@ async function setupContinuousMode() {
   // 渲染该页时 _renderPageInto 会清掉固定高、按真实 viewport 撑开 → 尺寸自动修正。
   const p1 = await pdfDoc.getPage(1);
   const v1 = p1.getViewport({scale});
-  const estW = Math.floor(v1.width), estH = Math.floor(v1.height);
+  // 去边时占位尺寸也按可见(裁切后)宽高,跟渲染后的 wrap 一致 → 未渲染页不会比已渲染页宽
+  const estW = Math.floor(v1.width * _cropVisWFrac()), estH = Math.floor(v1.height * _cropVisHFrac());
   const frag = document.createDocumentFragment();
   const _mkPh = (num, marg) => {
     const ph = document.createElement('div');

@@ -56,6 +56,11 @@ async function _renderPageInto(num, wrap) {
     4096 / Math.max(1, Math.max(viewport.width, viewport.height))));
   const cw = Math.floor(viewport.width);
   const ch = Math.floor(viewport.height);
+  // 去边:**渲染前**就把 wrap 收成裁切窄宽 + 加 .crop-on(overflow:hidden + 子层 translate)。
+  // 否则 page.render()/getTextContent() 那几百 ms 异步窗口里 wrap 是全宽 canvas、还没 crop,
+  // 该页会短暂显示成全宽未裁切(双页模式下表现为"有些页比别的宽")。子层 CSS 规则 .crop-on>*
+  // 会自动 translate 之后 append 进来的每个层,故此处先设无妨。
+  _applyCropToWrap(wrap, cw, ch);
   canvas.width  = Math.floor(viewport.width  * outputScale);
   canvas.height = Math.floor(viewport.height * outputScale);
   canvas.style.width  = cw + 'px';
