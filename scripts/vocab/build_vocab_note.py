@@ -50,9 +50,34 @@ def _audio_dir() -> Path:
     return VAULT_ROOT / _cfg().get("audio_subdir", "资源/vocab/_audio")
 
 
+def _is_jp_lemma(s: str) -> bool:
+    """含平假名/片假名/汉字 → 当日语词。"""
+    return bool(re.search(r"[぀-ゟ゠-ヿ㐀-鿿]", s or ""))
+
+
+def _jp_reading_initial(lemma: str) -> str:
+    """日语词分桶用「读音首假名」（あいうえお順），比按汉字分有意义。
+    用 unidic 读音（确定性：只由 lemma 决定 → apply_user_mark 等用 _word_path 的工具都能定位同一笔记）。
+    片假名归一到平假名（同 gojūon 行）；取不到读音则回退词首字。"""
+    rd = ""
+    try:
+        from dict_sources import _jp_reading_accent
+        rd = (_jp_reading_accent(lemma) or {}).get("reading") or ""
+    except Exception:
+        rd = ""
+    ch = (rd or lemma)[:1]
+    o = ord(ch) if ch else 0
+    if 0x30A1 <= o <= 0x30F6:   # 片假名 → 平假名
+        ch = chr(o - 0x60)
+    return ch or "_"
+
+
 def _word_path(lemma: str) -> Path:
     lemma = lemma.lower()
-    first = lemma[0] if lemma and lemma[0].isalpha() else "_"
+    if _is_jp_lemma(lemma):
+        first = _jp_reading_initial(lemma)   # 日语：读音首假名分桶（あいうえお順）
+    else:
+        first = lemma[0] if lemma and lemma[0].isalpha() else "_"
     return _vocab_dir() / first / f"{lemma}.md"
 
 
@@ -436,6 +461,74 @@ def update_word_note(
     md_text = render_md(entry, fm_extra, sources_db, user_notes)
     path.write_text(md_text, "utf-8")
     return path, fm_extra
+
+
+def update_jp_word_note(lemma, *, reading="", meaning="", examples=None,
+                        forms=None, add_source=None, _new_source=None):
+    """日语词 vault 笔记。跟英语**同一套 frontmatter schema + 同 `_word_path` 分桶**
+    → vocab_index / compute_mastery / apply_user_mark / paragraph_exposure 全部原样复用（真·一套代码）。
+    （compose_entry 是英语 ECDICT 专属，日语内容单独写：读音 / 释义 / 例句。）
+    new_source（本次是查词触发）→ mastery 重置 0.0（同英语：主动查=不会）。返回 (path, fm)。"""
+    lemma = (lemma or "").strip()
+    if not lemma:
+        raise ValueError("empty jp lemma")
+    examples = examples or []
+    new_source = bool(add_source) if _new_source is None else bool(_new_source)
+    path = _word_path(lemma)   # 汉字/假名 isalpha()=True → 按首字分桶，跟英语工具完全一致
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old_fm, user_notes = _load_existing(path)
+
+    cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
+    try:
+        from paragraph_exposure import _label_for as _label_fn
+        lbl, slug = _label_fn(cur_mastery)
+    except Exception:
+        lbl, slug = "新词", "new"
+
+    # forms：合并旧 + 本次表层（让 vocab_index 把活用形也映射回 lemma）
+    old_forms = old_fm.get("forms") or []
+    if isinstance(old_forms, str):
+        old_forms = [old_forms]
+    merged_forms = []
+    for f in [lemma] + list(old_forms) + list(forms or []):
+        f = (f or "").strip()
+        if f and f not in merged_forms:
+            merged_forms.append(f)
+
+    fm = {
+        "word": lemma, "lemma": lemma, "lang": "ja",
+        "forms": merged_forms,
+        "reading": reading or old_fm.get("reading", ""),
+        "first_seen": old_fm.get("first_seen") or _dt.date.today().isoformat(),
+        "last_lookup": _dt.date.today().isoformat() if new_source else (old_fm.get("last_lookup") or _dt.date.today().isoformat()),
+        "last_lookup_ts": int(time.time()) if new_source else int(old_fm.get("last_lookup_ts", 0) or 0),
+        "lookup_count": int(old_fm.get("lookup_count", 0) or 0) + (1 if new_source else 0),
+        "exposure_count": int(old_fm.get("exposure_count", 0) or 0),
+        "mastery": round(cur_mastery, 3),
+        "mastery_label": lbl,
+        "anki_card_id": old_fm.get("anki_card_id", ""),
+        "tags": ["vocab", "vocab/ja", f"vocab/{slug}"],
+    }
+    if old_fm.get("user_mark"):
+        fm["user_mark"] = old_fm["user_mark"]   # 保留手动锁（apply_user_mark 写的）
+
+    body = [f"# {lemma}"]
+    if fm["reading"]:
+        body.append(f"\n**读音**：{fm['reading']}")
+    if meaning:
+        body.append(f"\n**释义**：{meaning}")
+    if examples:
+        body.append("\n## 例句")
+        for e in examples[:3]:
+            ja = (e.get("ja") or e.get("text") or "").strip()
+            zh = (e.get("zh") or e.get("en") or "").strip()
+            if ja:
+                body.append(f"- {ja}" + (f" — {zh}" if zh else ""))
+    if user_notes:
+        body.append("\n" + _USER_NOTES_MARKER + user_notes.rstrip())
+    md_text = "---\n" + _dump_simple_yaml(fm) + "\n---\n\n" + "\n".join(body) + "\n"
+    path.write_text(md_text, "utf-8")
+    return path, fm
 
 
 # ── sources db：存 state（不放 frontmatter，让 .md 更可读）─────────────────

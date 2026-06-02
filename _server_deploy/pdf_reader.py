@@ -1067,11 +1067,24 @@ def _jp_vocab_slug(e: dict) -> str | None:
     return None if slug == "mastered" else slug
 
 
+def _vocab_idx() -> dict:
+    """vocab_index.index()（英日**同一库**，2026-06 日语并入后）。失败返回 {}。"""
+    try:
+        import sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in sys.path:
+            sys.path.insert(0, str(vp))
+        import vocab_index  # type: ignore
+        return vocab_index.index() or {}
+    except Exception:
+        return {}
+
+
 def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
-    """按 fugashi 分词的 w 把 chars 分组成 JP token，命中 jp-vocab store(未 mastered) 的画下划线。
-    rects 用 PDF pt 坐标（同英语 marks 的结构），前端 renderVocabUnderlines 直接复用。"""
-    store = _jp_vocab_load()
-    if not store:
+    """按 fugashi 分词的 w 把 chars 分组成 JP token → 解析原形 → 查 **vocab_index（英日统一库）** →
+    未掌握(label_slug!=mastered)的按 mastery 上色画下划线。rects 用 PDF pt 坐标，前端复用 renderVocabUnderlines。"""
+    idx = _vocab_idx()
+    if not idx:
         return []
     marks: list[dict] = []
     i = 0
@@ -1082,29 +1095,31 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
         if c.get("sp") or wid is None or wid < 0:
             i += 1
             continue
-        # 收集同 w 的连续 token chars
         j = i
         toks = []
         while j < n and chars[j].get("w") == wid and not chars[j].get("sp"):
             toks.append(chars[j]); j += 1
         surf = "".join(t.get("c", "") for t in toks)
-        e = store.get(surf)
-        if e:
-            slug = _jp_vocab_slug(e)
-            if slug:
-                # token 合并成同行 rect（一般单行；跨行也按行高聚类）
-                rects = []
-                cur = None
-                for t in toks:
-                    lh = t["y1"] - t["y0"]
-                    if cur and abs(t["y0"] - cur[1]) <= lh * 0.5:
-                        cur[2] = max(cur[2], t["x1"]); cur[1] = min(cur[1], t["y0"]); cur[3] = max(cur[3], t["y1"])
-                    else:
-                        if cur: rects.append([round(x, 2) for x in cur])
-                        cur = [t["x0"], t["y0"], t["x1"], t["y1"]]
-                if cur: rects.append([round(x, 2) for x in cur])
-                marks.append({"word": surf, "lemma": surf, "mastery": round(_jp_mastery(e), 3),
-                              "label_slug": slug, "rects": rects, "jp": True})
+        # 先按表层查（forms 映射已含活用形）；查不到再解析原形(辞書形)查
+        info = idx.get(surf.lower())
+        if not info:
+            base = (_jp_inflection(surf) or {}).get("base")
+            if base:
+                info = idx.get(base.lower())
+        if info and info.get("label_slug") and info["label_slug"] != "mastered":
+            rects = []
+            cur = None
+            for t in toks:
+                lh = t["y1"] - t["y0"]
+                if cur and abs(t["y0"] - cur[1]) <= lh * 0.5:
+                    cur[2] = max(cur[2], t["x1"]); cur[1] = min(cur[1], t["y0"]); cur[3] = max(cur[3], t["y1"])
+                else:
+                    if cur: rects.append([round(x, 2) for x in cur])
+                    cur = [t["x0"], t["y0"], t["x1"], t["y1"]]
+            if cur: rects.append([round(x, 2) for x in cur])
+            marks.append({"word": surf, "lemma": info["lemma"],
+                          "mastery": round(float(info.get("mastery", 0.0)), 3),
+                          "label_slug": info["label_slug"], "rects": rects, "jp": True})
         i = j
     return marks
 
@@ -1848,6 +1863,58 @@ def _trigger_paragraph_exposure_async(pdf_rel: str, page: int, lemma: str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _trigger_jp_note_async(lemma, reading, meaning, examples, forms, pdf_rel, page, context):
+    """日语查词 → 后台建/更新 vault vocab 笔记(英日同库)+ 句子暴露。镜像英语 _trigger_vocab_note_async。"""
+    import threading
+    def _run():
+        try:
+            _, bvn = _vocab_modules()
+            if bvn is None or not hasattr(bvn, "update_jp_word_note"):
+                return
+            bvn.update_jp_word_note(
+                lemma, reading=reading, meaning=meaning, examples=examples, forms=forms,
+                add_source={"pdf": pdf_rel, "page": page, "context": context} if pdf_rel else None)
+            try: _maybe_auto_anki(lemma)
+            except Exception: pass
+            _jp_exposure(context or "", lemma)   # 同句其他已入库日语词 +mastery(被动暴露=大概率认识)
+        except Exception as ex:
+            sys.stderr.write(f"jp note bg fail for {lemma!r}: {ex}\n")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _jp_exposure(context: str, looked_lemma: str):
+    """日语句子暴露:context(整句)里**其他**已入 vocab 库的日语词 → +mastery(看到没查=大概率认识)。
+    复用英语 paragraph_exposure._bump_mastery(语言无关:按 lemma 给笔记加分)。"""
+    if not (context or "").strip():
+        return
+    try:
+        tagger = _get_jp_tagger()
+        idx = _vocab_idx()
+        if not tagger or not idx:
+            return
+        import sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in sys.path:
+            sys.path.insert(0, str(vp))
+        import paragraph_exposure  # type: ignore
+        looked = (looked_lemma or "").lower()
+        seen = set()
+        for tok in tagger(context):
+            surf = tok.surface
+            base = (getattr(tok.feature, "lemma", "") or surf)
+            info = idx.get(surf.lower()) or idx.get(base.lower())
+            if not info:
+                continue
+            lm = info["lemma"].lower()
+            if lm == looked or lm in seen:
+                continue
+            seen.add(lm)
+            try: paragraph_exposure._bump_mastery(lm, 0.05)
+            except Exception: pass
+    except Exception as ex:
+        sys.stderr.write(f"jp exposure fail: {ex}\n")
+
+
 # ── 每本书的文本语言声明(影响查词路由:汉字词按 ja 走中日 / 按 zh 当中文)──
 _BOOK_LANGS_PATH = CLAUDE_DIR / "state" / "pdf-book-langs.json"
 _VALID_LANGS = {"en", "ja", "zh", "ko", "fr", "de"}
@@ -1969,13 +2036,16 @@ def pdf_api_dict_quick():
         except Exception:
             pass
         reading = ra.get("reading") or jp.get("reading", "")
+        # 入统一 vocab 库:查词→建/更新 vault 笔记(原形为键,表层入 forms)+ 句子暴露(同英语)
+        _trigger_jp_note_async(_lookup, reading, jp.get("zh", ""), jp.get("examples") or [],
+                               [word_raw, _lookup], pdf_rel, page, context)
         return jsonify({
             "ok": True, "jp": True, "word": word_raw, "lemma": word_raw, "forms": [],
             "phonetic": reading + (f" [{jp['romaji']}]" if jp.get("romaji") else ""),
             "reading": reading,
             "accent": ra.get("accent"),       # 重音核:0=平板,N=第 N 拍后下降
             "mora": ra.get("mora"),
-            "mastered": _mastery_slug(_jp_mastery(_jp_vocab_load().get(word_raw) or {})) == "mastered",   # 掌握按钮初始态(跟英语同口径)
+            "mastered": (_vocab_idx().get((_lookup or word_raw).lower()) or {}).get("label_slug") == "mastered",   # 掌握按钮初始态:读统一 vocab 库
             "pos": jp.get("pos", ""),          # 词性单独给前端(小框里做暗色标签,跟含义区分)
             "inflect": _inf,                       # 变形分析:原形 + 中文语法标签(过去た/否定ない/て形…)
             "translation": (jp.get("zh") or ""),
@@ -2197,16 +2267,19 @@ def pdf_api_dict_jp():
     jp = ds.lookup_jp(_base, context=request.args.get("context", ""))
     if not jp or (jp.get("zh") in ("(无)", "", None)):
         return jsonify({"ok": False, "word": word, "jp": True})
-    try:
-        _jp_vocab_bump(word)   # 完整字典也算一次「查过」→ 生词高亮
-    except Exception:
-        pass
     ra = {}
     try:
         ra = ds._jp_reading_accent(word) or {}
     except Exception:
         pass
     reading = ra.get("reading") or jp.get("reading", "")
+    try:
+        # 完整字典也算一次「查过」→ 入统一 vocab 库(建/更新笔记 + 暴露)
+        _trigger_jp_note_async(_base, reading, jp.get("zh", ""), jp.get("examples") or [],
+                               [word, _base], request.args.get("file", ""),
+                               int(request.args.get("page", "0") or "0"), request.args.get("context", ""))
+    except Exception:
+        pass
     # 跟英文单词一致:**秒回**——例句/汉字字义只取已缓存的中文,没翻的先回退英文;
     # 同时后台翻译(下一次轮询/重开就有中文),不增加首屏等待。前端轮询 /api/dict-jp-zh 自动替换。
     exs = ds.jp_examples_zh(_base, limit=5, translate=False)   # 例句也用原形(Tanaka 有 確認 没 確認します)
@@ -2227,30 +2300,41 @@ def pdf_api_dict_jp():
 
 @bp.route("/api/jp-vocab-mark", methods=["POST"])
 def pdf_api_jp_vocab_mark():
-    """标记日语词「已掌握 / 没掌握 / 清除 / 删除记录」→ user_mark 锁 mastery(跟英语 /api/vocab-mark 同口径)。
+    """日语词掌握标记 → 跟英语**完全同一条路径** compute_mastery.apply_user_mark
+    (写 vault vocab 笔记 user_mark + 锁 mastery)。笔记按**原形**为键(活用形先还原)。
     body: {word, mark: "known"|"unknown"|""|"forget"}（兼容旧 "mastered"=known）"""
     data = request.get_json(silent=True) or {}
     word = (data.get("word") or "").strip()
     mark = (data.get("mark") or "known").strip().lower()
     if not word:
         return jsonify({"ok": False, "error": "no word"}), 400
-    import time as _t
-    with _JP_VOCAB_LOCK:
-        d = _jp_vocab_load()
+    base = (_jp_inflection(word) or {}).get("base") or word
+    _, bvn = _vocab_modules()
+    import sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in sys.path:
+        sys.path.insert(0, str(vp))
+    try:
+        import compute_mastery  # type: ignore
+        import vocab_index      # type: ignore
         if mark == "forget":
-            d.pop(word, None)
-        else:
-            e = d.get(word) or {"looks": 1, "first_ts": int(_t.time())}
-            if mark in ("known", "mastered"):
-                e["user_mark"] = "known"; e["mastered"] = True   # mastered 字段保留兼容旧逻辑/旧数据
-            elif mark == "unknown":
-                e["user_mark"] = "unknown"; e["mastered"] = False
-            else:   # "" 清除手动标记 → 回到分数驱动
-                e.pop("user_mark", None); e["mastered"] = False
-            e["last_ts"] = int(_t.time())
-            d[word] = e
-        _jp_vocab_save(d)
-    return jsonify({"ok": True, "word": word, "mark": mark})
+            try:
+                p = bvn._word_path(base)
+                if p.exists(): p.unlink()
+            except Exception:
+                pass
+            vocab_index.index(force_reload=True)
+            return jsonify({"ok": True, "word": word, "mark": mark})
+        # 确保笔记存在(没查过的词也能直接标)
+        if bvn is not None and hasattr(bvn, "update_jp_word_note"):
+            if not bvn._word_path(base).exists():
+                bvn.update_jp_word_note(base, forms=[word, base], _new_source=False)
+        m = mark if mark in ("known", "unknown", "") else ("known" if mark == "mastered" else "")
+        result = compute_mastery.apply_user_mark(base, m)
+        vocab_index.index(force_reload=True)   # 让下划线立即反映
+        return jsonify(result if result.get("ok") else {"ok": True, "word": word, "mark": mark, "warn": result.get("error")})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
 
 
 @bp.route("/api/dict-jp-ai")

@@ -286,9 +286,8 @@ def apply_user_mark(lemma: str, mark: str) -> dict:
     lemma = (lemma or "").strip().lower()
     if not lemma:
         return {"ok": False, "error": "empty lemma"}
-    vroot = _vocab_dir()
-    first = lemma[0] if lemma and lemma[0].isalpha() else "_"
-    path = vroot / first / f"{lemma}.md"
+    from build_vocab_note import _word_path   # 统一分桶（日语按读音首假名，英语按首字母）
+    path = _word_path(lemma)
     if not path.exists():
         return {"ok": False, "error": "note not found", "path": str(path)}
     mark = (mark or "").strip().lower()
