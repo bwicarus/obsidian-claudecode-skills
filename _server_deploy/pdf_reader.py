@@ -3374,6 +3374,15 @@ def pdf_api_vocab_mark():
     try:
         import compute_mastery   # type: ignore
         result = compute_mastery.apply_user_mark(word, mark)
+        if not result.get("ok") and "not found" in (result.get("error") or "").lower():
+            # 笔记还没建好(查词后台建笔记是异步+在线,慢)就点了掌握 → 先离线建一个再标,避免标记失败
+            try:
+                _, bvn = _vocab_modules()
+                if bvn is not None:
+                    bvn.update_word_note(word, online=False, download_audio=False)
+                    result = compute_mastery.apply_user_mark(word, mark)
+            except Exception:
+                pass
         if result.get("ok"):
             try:
                 import vocab_index   # type: ignore

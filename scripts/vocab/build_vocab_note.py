@@ -231,6 +231,7 @@ def render_md(entry: dict, fm_extra: dict, sources: list[dict], user_notes: str 
         "exposure_count": fm_extra.get("exposure_count", 0),
         "mastery": fm_extra.get("mastery", 0.0),
         "mastery_label": fm_extra.get("mastery_label", "新词"),
+        "user_mark": fm_extra.get("user_mark", ""),   # 手动锁(known/unknown);apply_user_mark 写、查词重建保留
         "anki_card_id": fm_extra.get("anki_card_id", ""),
         "sources_hit": entry.get("sources_hit", []),
         "tags": ["vocab", f"vocab/{fm_extra.get('mastery_label_slug', 'new')}"],
@@ -438,7 +439,15 @@ def update_word_note(
 
     # mastery 模型（新）：用户主动查 = 不会，所以新建/再次查 → 重置 0.0
     # 默认 1.0 是"未查过的词"隐式状态，不会进入 vocab dir
-    cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
+    # ⚠ 但用户手动锁(user_mark)优先级最高：查词不能把「已掌握」的词重置回 0（否则标记掌握后再被某次
+    #   后台笔记重建/再查覆盖 → 下划线复活）。known→1.0 / unknown→0.0 锁定，不被 new_source 重置。
+    _um = (old_fm.get("user_mark") or "").strip().lower()
+    if _um == "known":
+        cur_mastery = 1.0
+    elif _um == "unknown":
+        cur_mastery = 0.0
+    else:
+        cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
     # 用 paragraph_exposure 的 LABELS_NEW 保持一致
     try:
         from paragraph_exposure import _label_for as _label_fn
@@ -446,6 +455,7 @@ def update_word_note(
     except Exception:
         lbl, slug = "完全不会", "new"
     fm_extra = {
+        "user_mark": old_fm.get("user_mark", ""),   # 保留手动锁(否则 render_md 重建 frontmatter 会丢)
         "first_seen": old_fm.get("first_seen") or _dt.date.today().isoformat(),
         "last_lookup": _dt.date.today().isoformat(),
         "last_lookup_ts": int(time.time()) if new_source else int(old_fm.get("last_lookup_ts", 0) or 0),
@@ -478,7 +488,13 @@ def update_jp_word_note(lemma, *, reading="", meaning="", examples=None,
     path.parent.mkdir(parents=True, exist_ok=True)
     old_fm, user_notes = _load_existing(path)
 
-    cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
+    _um = (old_fm.get("user_mark") or "").strip().lower()   # 手动锁优先,查词不重置已掌握的词
+    if _um == "known":
+        cur_mastery = 1.0
+    elif _um == "unknown":
+        cur_mastery = 0.0
+    else:
+        cur_mastery = 0.0 if new_source else float(old_fm.get("mastery", 0.0) or 0.0)
     try:
         from paragraph_exposure import _label_for as _label_fn
         lbl, slug = _label_fn(cur_mastery)
