@@ -74,6 +74,18 @@ def _needs_width_norm(pdf: Path, tol: float = 0.02) -> bool:
     return (max(ws) - min(ws)) / max(ws) > tol
 
 
+def _pages_missing_text(pdf: Path, min_chars: int = 4) -> list:
+    """**逐页**(非抽样)检查文字层:返回缺文字层的页 index 列表。每页可提取文字 < min_chars 视为缺。
+    抽样的 has_text_layer 会被"前段有文字、后段没有"的合并书骗过(只看到前几页有文字就判整书 OK),
+    这里逐页保证"是否所有页都 OCR 过"判得准。"""
+    doc = fitz.open(str(pdf))
+    try:
+        return [i for i in range(doc.page_count)
+                if len((doc[i].get_text("text") or "").strip()) < min_chars]
+    finally:
+        doc.close()
+
+
 def _enhance_jpeg(pix, jpg_quality: int) -> bytes:
     """对一页渲染图做"字迹更清晰"增强:UnsharpMask 锐化 + 轻对比度,**保留色彩**
     (封面/橙色边框不变灰)。实测模糊扫描书字迹明显变黑变利、网点不崩、颜色不偏。"""
@@ -170,26 +182,39 @@ def main() -> int:
                error="", pid=os.getpid(), engine=a.engine)
 
         orig = STATUS_DIR / f"{sha}.orig.pdf"
-        # 有 .orig.pdf 备份 = 之前从扫描件 OCR 过 → 视为扫描书,从干净原图重做(支持改归一/换引擎);
-        # 否则无文字层 = 未处理的扫描书。真·数字版(有文字层且无备份)且非漫画引擎 → 不动。
+        # 有 .orig.pdf 备份 = 之前从扫描件 OCR 过 → 视为扫描书,从干净原图重做(支持改归一/换引擎)。
         prev_ocrd = orig.exists()
         clean_src = orig if prev_ocrd else pdf       # 干净原图(归一/重 OCR 的源)
-        scanned = prev_ocrd or not has_text_layer(clean_src)
-        if not scanned and a.engine != "manga":
-            _write(sha, phase="done", percent=100, has_text=True, msg="已有文字层，无需 OCR")
+
+        # ── 检查流程（用户要求）──：① 先查页宽是否一致 ② 再逐页查是否都 OCR 过(有文字层)。
+        _write(sha, phase="detecting", percent=1, msg="① 检查页宽一致性…", engine=a.engine)
+        need_width = bool(a.uniform and _needs_width_norm(clean_src))
+        enhance = bool(a.enhance)
+        _write(sha, phase="detecting", percent=2, msg="② 逐页检查文字层覆盖…", engine=a.engine)
+        missing = _pages_missing_text(clean_src)     # 缺文字层的页(逐页,非抽样)
+        n_total = fitz.open(str(clean_src)).page_count
+
+        # 早退：非漫画 + 没要增强 + 页宽已一致 + 所有页都有文字层（且不是"曾处理过的扫描书"）→ 无需处理。
+        if a.engine != "manga" and not enhance and not need_width and not missing and not prev_ocrd:
+            _write(sha, phase="done", percent=100, has_text=True,
+                   msg=f"检查通过：{n_total} 页宽度一致且都有文字层，无需处理")
             return 0
 
-        # 顺序(图像处理在前):**先重建(等宽/增强/烘焙旋转)→ 再 OCR 重建图 → 嵌到同一张图**。
-        # 实测栅格化重建后 OCR 识别率持平甚至略好(509→511);重建页 rotation=0 → OCR/embed 坐标平凡,
-        # 不必 derotation、不必把 sidecar 坐标缩放映射。(早期"先 OCR 再归一"是为绕开 show_pdf_page
-        # 重采样致 OCR 暴跌 126→34;归一改用栅格化后已无此问题,故按更顺的"图像处理在前"重排。)
-        uniform = bool(a.uniform and _needs_width_norm(clean_src))
-        enhance = bool(a.enhance)
-        rebuild = uniform or enhance
+        # 决定是否栅格化重建。**触发条件**：增强 / 页宽不一致(归一) / 部分页缺文字层(0<缺<总→
+        # 重建后全页统一 OCR,避免给已有文字的页叠加重复层)。栅格化会毁掉所有现存文字层 → 之后对
+        # 重建图全页 OCR,这正是"所有页都 OCR 过"的落实。整书都没文字层(缺==全部)且没要增强/归一时
+        # 不重建,直接在锐利原图上 OCR(质量更好),embed 也不会重复(本就无文字)。
+        # 重建页 rotation=0 → OCR/embed 坐标平凡(get_pixmap 烘焙旋转,见 rebuild_pages 注释)。
+        uniform = need_width
+        partial_missing = 0 < len(missing) < n_total
+        rebuild = enhance or uniform or partial_missing
         if rebuild:
-            msg = "统一页宽+增强清晰度…" if (uniform and enhance) else \
-                  ("统一页宽（烘焙旋转）…" if uniform else "增强清晰度（锐化）…")
-            _write(sha, phase="normalizing", percent=3, msg=msg, engine=a.engine)
+            tags = []
+            if uniform: tags.append(f"统一页宽（{n_total} 页参差→中位宽）")
+            if enhance: tags.append("增强清晰度（锐化）")
+            if missing: tags.append(f"{len(missing)}/{n_total} 页缺文字层→重建后全页 OCR")
+            _write(sha, phase="normalizing", percent=3,
+                   msg="检查后处理：" + "、".join(tags) + "…", engine=a.engine)
             if not orig.exists():
                 shutil.copy2(str(pdf), str(orig))          # 备份真·原始(重建前,clean_src=pdf 时仍是原图)
             tmp = STATUS_DIR / f"{sha}.norm.pdf"
