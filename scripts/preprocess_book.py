@@ -100,7 +100,7 @@ def _enhance_jpeg(pix, jpg_quality: int) -> bytes:
 
 def rebuild_pages(src_path: Path, out_path: Path, uniform: bool = True,
                   enhance: bool = False, raster_scale: float = 2.0,
-                  jpg_quality: int = 82) -> bool:
+                  jpg_quality: int = 82, progress_cb=None) -> bool:
     """重建扫描书每页(栅格化)。两个独立开关:
       uniform=True  → 视觉宽统一成中位宽(前端单一全局 scale 即等宽显示,不碰浮层锚定);
       enhance=True  → 锐化+对比增强,让模糊字迹更清晰(见 _enhance_jpeg)。
@@ -118,9 +118,10 @@ def rebuild_pages(src_path: Path, out_path: Path, uniform: bool = True,
         if not ws:
             return False
         target = statistics.median(ws)
+        n = src.page_count
         dst = fitz.open()
         try:
-            for p in src:
+            for i, p in enumerate(src):
                 vw, vh = p.rect.width, p.rect.height           # 视觉尺寸
                 if vw <= 0 or vh <= 0:
                     return False
@@ -132,6 +133,9 @@ def rebuild_pages(src_path: Path, out_path: Path, uniform: bool = True,
                 del pix
                 npg = dst.new_page(width=vw * k, height=vh * k)  # rotation=0;uniform 时宽=target
                 npg.insert_image(npg.rect, stream=jpg)
+                if progress_cb:
+                    try: progress_cb(i + 1, n)
+                    except Exception: pass
             dst.save(str(out_path), garbage=4, deflate=True)
         finally:
             dst.close()
@@ -210,15 +214,21 @@ def main() -> int:
         rebuild = enhance or uniform or partial_missing
         if rebuild:
             tags = []
-            if uniform: tags.append(f"统一页宽（{n_total} 页参差→中位宽）")
-            if enhance: tags.append("增强清晰度（锐化）")
-            if missing: tags.append(f"{len(missing)}/{n_total} 页缺文字层→重建后全页 OCR")
-            _write(sha, phase="normalizing", percent=3,
-                   msg="检查后处理：" + "、".join(tags) + "…", engine=a.engine)
+            if uniform: tags.append("统一页宽")
+            if enhance: tags.append("增强清晰度")
+            if missing: tags.append(f"补 {len(missing)} 页文字层")
+            tag = "+".join(tags) or "重建"
+            _write(sha, phase="normalizing", percent=3, total=n_total, completed=0,
+                   msg=f"重建（{tag}）0/{n_total} 页…", engine=a.engine)
             if not orig.exists():
                 shutil.copy2(str(pdf), str(orig))          # 备份真·原始(重建前,clean_src=pdf 时仍是原图)
             tmp = STATUS_DIR / f"{sha}.norm.pdf"
-            if not rebuild_pages(clean_src, tmp, uniform=uniform, enhance=enhance):
+            # 逐页报进度(否则栅格化几十张大图几分钟里进度条卡在 3% 看着像死了);占 3→15% 段
+            def _norm_prog(done, tot):
+                _write(sha, phase="normalizing", total=tot, completed=done,
+                       percent=3 + int(done * 12 / max(1, tot)),
+                       msg=f"重建（{tag}）{done}/{tot} 页…", engine=a.engine)
+            if not rebuild_pages(clean_src, tmp, uniform=uniform, enhance=enhance, progress_cb=_norm_prog):
                 _write(sha, phase="error", error="页重建失败（原书未改动）")
                 return 1
             shutil.move(str(tmp), str(pdf))                # pdf = 重建后(等宽/增强/rotation=0)的图
