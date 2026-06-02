@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""智能压缩 PDF：Ghostscript 把图像降采样到 ~150dpi + 重压(几乎不影响阅读画质),
-**保留文字层**(gs pdfwrite 不动文字,只压图像)→ qpdf 重新线性化(Fast Web View)→ 原地替换。
+"""智能压缩 PDF：**只重压图像 XObject**(PIL 降采样+JPEG 重压)，**完全不碰字体/文字层**
+→ qpdf 重新线性化(Fast Web View)→ 原地替换。
 
-实测扫描书省 ~1/3 体积、文字层完整。状态写 state/book-preprocess/<sha>.json(跟预处理共用一套,
+⚠ **为什么不用 Ghostscript**:gs pdfwrite 会重写/子集化字体,**破坏 OCR 文字层的 ToUnicode CMap**
+→ PDF.js 靠字形照常显示,但 PyMuPDF 抽文字得到乱码 → 只能选单字、字典/搜索/振假名全废
+(2026-06-02 实测 gs /ebook 压完 part1/part2 文字层全乱)。改用 PyMuPDF 逐图重压:文字/字体
+对象一字不动,只换图像流 → ToUnicode 完好,抽字照常。
+
+实测扫描书省可观体积、文字层完整。状态写 state/book-preprocess/<sha>.json(跟预处理共用一套,
 前端进度条/刷新恢复/KillMode 防杀全复用);phase=compressing。
 
-用法: python compress_pdf.py --pdf <绝对路径>
+用法: python compress_pdf.py --pdf <绝对路径> [--max-px 2400] [--quality 72]
 注:压缩是有损图像。原书的 .orig.pdf(真·扫描原图)不动 → 不满意可重跑「增加清晰度」从原图重建。
 """
 import argparse
 import hashlib
+import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +25,7 @@ import time
 from pathlib import Path
 
 import fitz
+from PIL import Image
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 STATUS_DIR = ROOT / "state" / "book-preprocess"
@@ -37,10 +43,31 @@ def _write(sha: str, **kw):
     tmp.replace(STATUS_DIR / f"{sha}.json")
 
 
+def _recompress_image(data: bytes, max_px: int, quality: int):
+    """把一张图字节降采样(长边≤max_px)+ JPEG 重压。返回 (新字节, 是否变小)。失败/没变小返回 (None, False)。"""
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except Exception:
+        return None, False
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")   # CMYK/带 alpha → RGB(扫描书无透明需求)
+    w, h = im.size
+    long_side = max(w, h)
+    if long_side > max_px:
+        scale = max_px / long_side
+        im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BICUBIC)  # BICUBIC 比 LANCZOS 快很多,降采样质量足够
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=quality)   # 不用 optimize(多一遍 Huffman,Pi 上太慢、省的有限)
+    out = buf.getvalue()
+    return (out, True) if len(out) < len(data) else (None, False)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdf", required=True)
-    ap.add_argument("--dpi", type=int, default=150, help="图像降采样目标 dpi(默认 150,阅读够清晰)")
+    ap.add_argument("--max-px", type=int, default=2400, help="图像长边上限 px(超出降采样;阅读+缩放够用)")
+    ap.add_argument("--quality", type=int, default=72, help="JPEG 重压质量(72≈几乎不影响阅读)")
     a = ap.parse_args()
     pdf = Path(a.pdf)
     sha = _sha(pdf)
@@ -48,45 +75,55 @@ def main() -> int:
         if not pdf.exists():
             _write(sha, phase="error", error="PDF 不存在", pdf=str(pdf))
             return 1
-        if not shutil.which("gs"):
-            _write(sha, phase="error", error="需要 ghostscript（gs）", pdf=str(pdf))
-            return 1
         before = pdf.stat().st_size
-        total = fitz.open(str(pdf)).page_count
+        doc = fitz.open(str(pdf))
+        total = doc.page_count
         _write(sha, phase="compressing", percent=2, total=total, completed=0,
                pid=os.getpid(), pdf=str(pdf), error="",
-               msg=f"压缩中（{a.dpi}dpi，保留文字层）0/{total} 页…")
+               msg=f"压缩中（重压图像，保留文字层）0/{total} 页…")
+
+        # 逐页重压图像 XObject（文字/字体对象一字不动 → ToUnicode 完好 → 抽字照常）。
+        # 同一 xref 可能多页共用 → 用 seen 去重只压一次。
+        seen, n_done, n_img = set(), 0, 0
+        for pno in range(total):
+            page = doc[pno]
+            for info in page.get_images(full=True):
+                xref = info[0]
+                if xref in seen:
+                    continue
+                seen.add(xref)
+                try:
+                    base = doc.extract_image(xref)
+                except Exception:
+                    continue
+                if not base or not base.get("image"):
+                    continue
+                new, ok = _recompress_image(base["image"], a.max_px, a.quality)
+                if ok and new:
+                    try:
+                        page.replace_image(xref, stream=new)
+                        n_img += 1
+                    except Exception:
+                        pass
+            n_done += 1
+            if n_done % 3 == 0 or n_done == total:
+                _write(sha, phase="compressing", total=total, completed=n_done,
+                       percent=2 + int(n_done * 86 / max(1, total)),
+                       pid=os.getpid(), pdf=str(pdf),
+                       msg=f"压缩中（重压图像，保留文字层）{n_done}/{total} 页…")
 
         out = STATUS_DIR / f"{sha}.compressed.pdf"
         out.unlink(missing_ok=True)
-        # gs pdfwrite /ebook 预设：图像降采样到 150dpi + JPEG 重压(中等质量),文字层不动。
-        # 实测扫描书省 ~1/3,文字层完整。**关键**:只降采样不重压(自定义 ColorImageResolution)
-        # 对本就 ~150dpi 的图几乎无效(实测只省 4%),/ebook 的 JPEG 重压才是省体积主力。
-        # dpi<=100 用 /screen(更狠,质量更低),否则 /ebook。不加 -dQUIET → 打印 "Page N" 供解析进度。
-        preset = "/screen" if a.dpi <= 100 else "/ebook"
-        cmd = [
-            "gs", "-sDEVICE=pdfwrite", "-dNOPAUSE", "-dBATCH", "-dSAFER",
-            f"-dPDFSETTINGS={preset}", "-dCompatibilityLevel=1.6",
-            "-o", str(out), str(pdf),
-        ]
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1)
-        page_re = re.compile(r"^Page (\d+)")
-        for line in proc.stdout:
-            m = page_re.match(line.strip())
-            if m:
-                done = int(m.group(1))
-                _write(sha, phase="compressing", total=total, completed=done,
-                       percent=2 + int(done * 88 / max(1, total)),
-                       pid=os.getpid(), pdf=str(pdf),
-                       msg=f"压缩中（{a.dpi}dpi）{done}/{total} 页…")
-        proc.wait()
-        if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        _write(sha, phase="compressing", percent=90, total=total, completed=total,
+               pid=os.getpid(), pdf=str(pdf), msg=f"保存（已重压 {n_img} 张图）…")
+        doc.save(str(out), garbage=4, deflate=True)   # garbage=4 清掉被替换的旧图流
+        doc.close()
+        if not out.exists() or out.stat().st_size == 0:
             out.unlink(missing_ok=True)
-            _write(sha, phase="error", error=f"gs 压缩失败（退出码 {proc.returncode}，原书未改动）")
+            _write(sha, phase="error", error="保存失败（原书未改动）")
             return 1
 
-        # 重新线性化(gs 输出未必是 Fast Web View)
+        # 重新线性化(Fast Web View)
         if shutil.which("qpdf"):
             _write(sha, phase="compressing", percent=93, total=total, completed=total,
                    pid=os.getpid(), pdf=str(pdf), msg="线性化(Fast Web View)…")

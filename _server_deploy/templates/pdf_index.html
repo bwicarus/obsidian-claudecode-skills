@@ -58,7 +58,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="prep-btn" onclick="preprocess(event,this,'vision')" title="印刷/文档书：Google Vision OCR，快（~2s/页）。已有文字层秒判跳过">📄 文档</button>
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
           <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
-          <button class="prep-btn" onclick="compress(event,this)" title="智能压缩：图像降采样到 150dpi + 重压，几乎不影响阅读画质、保留文字层、体积约省 1/3（gs，原书可重建）">🗜 压缩</button>
+          <button class="prep-btn" onclick="compress(event,this)" title="智能压缩：只重压图像（长边≤2400px + JPEG q72），保留文字层/选中/搜索不受影响，扫描书体积常省一大半（原书可重建）">🗜 压缩</button>
         </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
@@ -171,7 +171,7 @@ async function compress(ev, btn) {
   const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
   const btns = [...item.querySelectorAll('.prep-btn')];
   const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
-  if (!confirm('智能压缩《' + item.dataset.disp + '》？\n图像降采样到 150dpi + 重压，几乎不影响阅读画质、保留文字层，体积约省 1/3。\n有损图像，但原书可重建（不满意就再点「增加清晰度」）。后台跑，关页面不中断。')) return;
+  if (!confirm('智能压缩《' + item.dataset.disp + '》？\n只重压图像（长边≤2400px + JPEG），保留文字层、选中/搜索不受影响，扫描书体积常省一大半。\n有损图像，但原书可重建（不满意就再点「增加清晰度」）。后台跑，关页面不中断。')) return;
   btns.forEach(b => b.disabled = true);
   prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '启动中…';
   try {

@@ -555,9 +555,8 @@ def pdf_api_compress_async():
                 return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
     except Exception:
         pass
-    dpi = int(body.get("dpi") or 150)
     py = os.environ.get("APP_PYTHON") or sys.executable
-    cmd = [py, str(CLAUDE_DIR / "scripts" / "compress_pdf.py"), "--pdf", str(ap), "--dpi", str(dpi)]
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "compress_pdf.py"), "--pdf", str(ap)]
     try:
         subprocess.Popen(cmd, cwd=str(CLAUDE_DIR), start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
