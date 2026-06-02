@@ -578,7 +578,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 排查留痕：全书端到端复刻 0 退化页；非传递排序比较器只拆散 3/261（**不是**根因，且改传递性排序会打乱英文混排页 reading order，故没动）。
 
 ### 14.2.1 「某些页整页单字」复发 = 坏缓存（fugashi 临时挂掉时写入）
-`state/pdf-char-cache/<sha>-p<page>-<mtime>.json` 若在 **fugashi 临时不可用**（`_get_jp_tagger()` 返回 None）时被写入，会存下「全 `w=-1`（无分词）+ `furigana=[]`」的坏结果；F5 的「无 furigana 键才重算」守卫挡不住它（它有 furigana 键，只是空）→ 之后**永久命中坏缓存 → 那几页整页单字选中**。根治（commit 见 §15.2）：① `_CHAR_CACHE_VER`（缓存 schema 版本号，写进 payload，读时版本不符就重算——改抽取/分词逻辑就 +1 一次性废掉所有旧缓存）；② **安全阀**：`_page_chars_cached` 里若 `tagger is None && 有 CJK` 或 `有汉字却 furigana 为空` → 判分词失败、**不写缓存**（返回结果但等 fugashi 恢复后重算）。排查命令：`_compute_page_chars` 现算 vs 缓存里各页 CJK 的「多字共享 w 的 token 数」对比，缓存=0 而现算>0 即坏缓存。
+`state/pdf-char-cache/<sha>-p<page>-<mtime>.json` 若在 **fugashi 临时不可用**（`_get_jp_tagger()` 返回 None）时被写入，会存下「全 `w=-1`（无分词）+ `furigana=[]`」的坏结果；F5 的「无 furigana 键才重算」守卫挡不住它（它有 furigana 键，只是空）→ 之后**永久命中坏缓存 → 那几页整页单字选中**。根治（commit 见 §15.2）：① `_CHAR_CACHE_VER`（缓存 schema 版本号，写进 payload，读时版本不符就重算——改抽取/分词逻辑就 +1 一次性废掉所有旧缓存）。**前端 page-chars 缓存键也并入它**(`CHARS_VER = PDF_mtime + "." + __PDF_CFG.chars_ver`),所以 bump 版本同时冲掉 iOS Safari 同 mtime 下的旧分词缓存(否则后端改了、客户端还命中旧"单字"缓存)；② **安全阀**：`_page_chars_cached` 里若 `tagger is None && 有 CJK` 或 `有汉字却 furigana 为空` → 判分词失败、**不写缓存**（返回结果但等 fugashi 恢复后重算）。排查命令：`_compute_page_chars` 现算 vs 缓存里各页 CJK 的「多字共享 w 的 token 数」对比，缓存=0 而现算>0 即坏缓存。
 
 ### 14.3 加载像在「下整本书」（disableStream）
 - PDF.js **`disableAutoFetch:true` 必须同时 `disableStream:true` 才生效**（官方）。之前 `disableStream:false` → 即便禁了预取仍后台**流式下整本 408MB**（进度条跑的就是整本）。range 已确认 Flask+nginx 两端都 206，故关 stream 纯按需取当前页。
