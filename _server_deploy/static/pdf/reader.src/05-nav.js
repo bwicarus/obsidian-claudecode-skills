@@ -109,8 +109,8 @@ function _setupPageScrub() {
 if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
-  scale = Math.max(0.6, Math.min(_scaleMax, scale + delta));
-  if (readMode === 'continuous') await setupContinuousMode();
+  scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
+  if (readMode !== 'single') await setupContinuousMode();
   else renderPage(currentPage);
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）

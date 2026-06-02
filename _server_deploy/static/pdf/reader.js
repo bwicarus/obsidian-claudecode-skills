@@ -54,6 +54,7 @@ let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
+const _ZOOM_MIN = 0.18;   // 用户缩放下限(双指/zoomChange)。放宽到 0.18 → 可缩到比 fit-width 更小(这些书 fit≈0.5)
 // 去边阅读模式：每本书可配左/右/上/下各隐藏 %。开启时把可见区填满宽度(fit-width 除以可见宽占比),
 // 再给 page-wrap 子层加同一 translate 位移 + overflow:hidden 裁切。纯位移不破坏选中坐标。
 let _crop = {l: 0, r: 0, t: 0, b: 0};   // 百分比(后端 /api/book-crop 加载)
@@ -568,8 +569,8 @@ function _setupPageScrub() {
 if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
-  scale = Math.max(0.6, Math.min(_scaleMax, scale + delta));
-  if (readMode === 'continuous') await setupContinuousMode();
+  scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
+  if (readMode !== 'single') await setupContinuousMode();
   else renderPage(currentPage);
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
@@ -877,7 +878,7 @@ else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {
   if (_refitBusy || !pdfDoc) return;
-  newScale = Math.max(0.5, Math.min(_scaleMax, newScale));
+  newScale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, newScale));   // 下限放宽:可缩到比 fit-width 更小
   if (Math.abs(newScale - scale) < 0.01) return;
   _refitBusy = true;
   try {
@@ -922,7 +923,7 @@ function _setupPinchZoom() {
       e.preventDefault();
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      _pinch.target = Math.max(0.5, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
+      _pinch.target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
       // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
       const pc = document.getElementById('page-container');
       const mr = main.getBoundingClientRect();

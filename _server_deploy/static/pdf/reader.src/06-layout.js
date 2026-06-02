@@ -105,7 +105,7 @@ else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
 async function _applyZoom(newScale) {
   if (_refitBusy || !pdfDoc) return;
-  newScale = Math.max(0.5, Math.min(_scaleMax, newScale));
+  newScale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, newScale));   // 下限放宽:可缩到比 fit-width 更小
   if (Math.abs(newScale - scale) < 0.01) return;
   _refitBusy = true;
   try {
@@ -150,7 +150,7 @@ function _setupPinchZoom() {
       e.preventDefault();
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      _pinch.target = Math.max(0.5, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
+      _pinch.target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
       // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
       const pc = document.getElementById('page-container');
       const mr = main.getBoundingClientRect();
