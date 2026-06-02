@@ -20,9 +20,11 @@ try {
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
 const FILE_REL = window.__PDF_CFG.file_rel;
-// page-chars 缓存版本:取 PDF mtime(PDF_URL 里的 ?v=)做 cache key,既在 PDF 变更时刷新,
-// 又跟旧的无版本 URL 区分开 → iOS Safari 已缓存的旧分词数据立即失效(配合后端 no-store)
-const CHARS_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '2';
+// page-chars 缓存版本 = PDF mtime + 后端分词版本 _CHAR_CACHE_VER。前者在 PDF 变更时刷新,
+// 后者在**分词逻辑变更**时刷新(同一 mtime 下也能让 iOS Safari 已缓存的旧分词数据失效 →
+// 修了"只能选单字"类 bug 后客户端立刻重取,不必等 PDF mtime 变。配合后端 no-store。
+const CHARS_VER = ((String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '2')
+  + '.' + ((window.__PDF_CFG && window.__PDF_CFG.chars_ver) || '0');
 let BOOK_LANGS = [];   // 本书声明的语言,如 ['en','ja'];影响点词查哪本词典
 async function loadBookLangs() {
   try {

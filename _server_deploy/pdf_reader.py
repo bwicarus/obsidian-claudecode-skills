@@ -417,6 +417,7 @@ def pdf_view():
         page=page,
         pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}",
         reader_js_v=_reader_js_v(),
+        chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
