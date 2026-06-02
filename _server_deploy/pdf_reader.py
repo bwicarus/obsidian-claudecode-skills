@@ -445,6 +445,81 @@ def pdf_api_list_pdfs():
     return jsonify({"ok": True, "pdfs": _list_vault_pdfs()})
 
 
+# ── 书本预处理（扫描 PDF 补文字层）：检测文字层 → 无则 Google Vision OCR + 嵌入 → 原地替换 ──
+# 只编排现有脚本(scripts/{preprocess_book,google_vision_ocr,embed_google_ocr_to_pdf}.py)。
+_BOOK_PREPROCESS_DIR = CLAUDE_DIR / "state" / "book-preprocess"
+
+def _book_sha(abs_path) -> str:
+    import hashlib
+    return hashlib.sha1(str(Path(abs_path).resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+@bp.route("/api/preprocess-status")
+def pdf_api_preprocess_status():
+    """预处理状态：读 state/book-preprocess/<sha>.json（文件驱动 → 关网页/webapp 重启都不丢）。
+    {phase: idle|detecting|ocr|embedding|done|error, percent, msg, completed, total, has_text, error}"""
+    ap = _safe_vault_path(request.args.get("file", ""))
+    if not ap:
+        return jsonify({"phase": "idle"})
+    try:
+        return jsonify(json.loads((_BOOK_PREPROCESS_DIR / f"{_book_sha(ap)}.json").read_text("utf-8")))
+    except Exception:
+        return jsonify({"phase": "idle"})
+
+
+@bp.route("/api/preprocess-async", methods=["POST"])
+def pdf_api_preprocess_async():
+    """启动预处理：detached 子进程跑 scripts/preprocess_book.py（关网页/重启不中断；在跑则不重复启）。"""
+    import subprocess
+    body = request.get_json(silent=True) or {}
+    ap = _safe_vault_path((body.get("file") or "").strip())
+    if not ap or not ap.exists():
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    sha = _book_sha(ap)
+    sp = _BOOK_PREPROCESS_DIR / f"{sha}.json"
+    try:
+        st = json.loads(sp.read_text("utf-8"))
+        if st.get("phase") in ("detecting", "ocr", "embedding") and (_time.time() - st.get("updated_at", 0) < 120):
+            return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    try:
+        subprocess.Popen(
+            [py, str(CLAUDE_DIR / "scripts" / "preprocess_book.py"), "--pdf", str(ap)],
+            cwd=str(CLAUDE_DIR), start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    return jsonify({"ok": True, "sha": sha})
+
+
+@bp.route("/api/delete-pdf", methods=["POST"])
+def pdf_api_delete_pdf():
+    """删除一本书：删 PDF + 清 sidecar(OCR/预处理/备份)。路径必须在 vault 内。"""
+    import shutil
+    body = request.get_json(silent=True) or {}
+    ap = _safe_vault_path((body.get("file") or "").strip())
+    if not ap or not ap.exists():
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    sha = _book_sha(ap)
+    try:
+        ap.unlink()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"删除失败：{ex}"}), 500
+    for path in [_BOOK_PREPROCESS_DIR / f"{sha}.json",
+                 _BOOK_PREPROCESS_DIR / f"{sha}.orig.pdf",
+                 _BOOK_PREPROCESS_DIR / f"{sha}.embedded.pdf",
+                 CLAUDE_DIR / "state" / "google-vision-ocr" / sha,
+                 CLAUDE_DIR / "state" / "mokuro-ocr" / sha]:
+        try:
+            if path.is_dir(): shutil.rmtree(path, ignore_errors=True)
+            elif path.exists(): path.unlink()
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
 # 连字(ligature)展开：PyMuPDF 把 ﬁ/ﬂ 等当单个非 ASCII 字形输出，前端词边界正则 [A-Za-z]
 # 不认它 → 单词在连字处被断(如 infinitely 只能选到 nitely)。提取时还原成 ASCII。
 _LIGATURES = {

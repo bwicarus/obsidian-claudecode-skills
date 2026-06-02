@@ -246,3 +246,13 @@ python scripts/embed_google_ocr_to_pdf.py --pdf "<原PDF>" [--out <输出>] [--s
 
 - [`google-cloud-apis.md`](google-cloud-apis.md) — Vision API key 隔离、赠金/配额管理、`google_api_quota.py` 本地计数器（`ocr_one_page` 每页调 `log_usage("vision", 1, ...)` 记账）
 - [`pdf-reader.md`](pdf-reader.md) — 网页 PDF 阅读器：char-layer 选中机制（消费这里嵌出来的文字层）、AI 翻译/解释/问 AI、高亮编辑系统
+
+## 网页按需触发（2026-06，接到文件列表 UI）
+
+OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。现在在 PDF 阅读器**文件列表页**（`/pdf/`）每本书加了 🔧 **预处理** 按钮 + 长按删除，把现有脚本编排起来（**不重写 OCR**）：
+
+- **编排器 `scripts/preprocess_book.py --pdf <绝对路径>`**（纯粘合）：① `has_text_layer`（抽样 8 页累计可提取文字 ≥20 字符）检测；有 → 写 `done has_text` 直接跳过。② 无 → `subprocess` 跑 `google_vision_ocr.py`（现成，断点续传）边跑边把它的 `progress.json` 同步进状态。③ `embed_google_ocr_to_pdf.py`（现成）嵌入不可见文字层到库外临时文件。④ **原地替换**原 PDF（先备份到 `state/book-preprocess/<sha>.orig.pdf`，**不放 vault 以免污染书列表**）。状态全程写 `state/book-preprocess/<sha>.json`（`<sha>`=OCR 流水线同款 `sha1(resolve路径)[:16]`）。
+- **路由（`pdf_reader.py`）**：`POST /api/preprocess-async`（用 `APP_PYTHON` + `start_new_session=True` **detached** 起编排器 → 关网页/webapp 重启都不中断；状态文件显示在跑 <120s 则不重复启）；`GET /api/preprocess-status?file=`（读状态文件，文件驱动 → 重启不丢进度）；`POST /api/delete-pdf`（删 PDF + 清 OCR/预处理/备份 sidecar，`_safe_vault_path` 挡路径穿越）。
+- **前端（`pdf_index.html`）**：每本书 🔧 预处理 → 进度条轮询 `preprocess-status`（轮询断了后台不停，重点按钮 `already:true` 续看）；长按 ~550ms / 右键 → 确认删除。
+- **「不中断」三层**：编排器 detached（关网页不停）+ 状态写文件（webapp 重启进度不丢）+ OCR sidecar 断点续传（进程被杀重跑自动续）。
+- ⚠ 默认走 **Google Vision**（烧 GCP 赠金，~2s/页，配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书秒判跳过、零成本。
