@@ -632,10 +632,21 @@ def _furigana_item(surface: str, reading: str, tchars: list) -> dict | None:
         return None
     if not any(_is_kanji_ch(c) for c in surface):
         return None   # 纯假名/纯符号 → 不需要振假名
+    # token 可能跨行(如 間食:間 在行尾、食 在行首,按块分词才读对 かんしょく)。振假名只放在
+    # 首字所在那一行的连续片段上方,否则 bbox 纵向跨两行、读音飘在行间。单行 token 不受影响。
     try:
-        x0 = min(c["x0"] for c in tchars); y0 = min(c["y0"] for c in tchars)
-        x1 = max(c["x1"] for c in tchars); y1 = max(c["y1"] for c in tchars)
-    except (ValueError, KeyError):
+        ref = tchars[0]
+        rh = max(0.1, ref["y1"] - ref["y0"])
+        row = []
+        for c in tchars:
+            if abs(c["y0"] - ref["y0"]) <= rh * 0.6:
+                row.append(c)
+            else:
+                break
+        rc = row or tchars
+        x0 = min(c["x0"] for c in rc); y0 = min(c["y0"] for c in rc)
+        x1 = max(c["x1"] for c in rc); y1 = max(c["y1"] for c in rc)
+    except (ValueError, KeyError, IndexError):
         return None
     return {"x0": round(x0, 2), "y0": round(y0, 2),
             "x1": round(x1, 2), "y1": round(y1, 2), "rt": reading, "wd": surface}
@@ -889,8 +900,8 @@ def _compute_page_chars(abs_path, page: int):
         for _block_i, block in enumerate(raw.get("blocks", [])):
             if block.get("type", 0) != 0:
                 continue
+            _block_start = len(chars)
             for _line_i, line in enumerate(block.get("lines", [])):
-                _line_start = len(chars)
                 for span in line.get("spans", []):
                     _bold = bool(span.get("flags", 0) & 16) or "bold" in (span.get("font", "") or "").lower()
                     for ch in span.get("chars", []):
@@ -910,8 +921,10 @@ def _compute_page_chars(abs_path, page: int):
                             "b": 1 if _bold else 0,
                             "bk": _block_i,
                         })
-                # CJK 行用 fugashi 分词，覆盖前端单击选词用的 word_id 'w'；顺带收振假名
-                _apply_jp_tokenize(chars, _line_start, len(chars), _block_i, _line_i, furigana)
+            # 整块(段落)一起 fugashi 分词,而非逐行 —— 跨行的词(如 間食:間 在行尾、食 在行首)
+            # 才不会被行边界拆成 間(あいだ)+食(しょく) 读错音;块内各行本就是连续 reading order。
+            # word_id 用 line=0 + 块内 token 序号 wn(块内唯一),振假名跨行由 _furigana_item 处理。
+            _apply_jp_tokenize(chars, _block_start, len(chars), _block_i, 0, furigana)
         # 英文词音标叠加（单连接直查 ECDICT；日语为主的书几乎无开销）
         try:
             furigana.extend(_build_en_furigana(chars))
@@ -922,8 +935,9 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 6   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
-                      # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx)
+_CHAR_CACHE_VER = 7   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+                      # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx;
+                      #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
