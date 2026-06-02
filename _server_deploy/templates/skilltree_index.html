@@ -1,25 +1,308 @@
 <!doctype html>
 <html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>技能树</title>
+<title>技能树 · 管理</title>
 <style>
-body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f7;color:#222;margin:0;padding:32px}
-h1{margin:0 0 16px;font-size:22px}
-ul{list-style:none;padding:0}
-li{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 18px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
-a{color:#0057b8;text-decoration:none;font-weight:600;font-size:15px}
-.meta{color:#888;font-size:12px}
-</style></head>
+body{margin:0;padding:0;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+.container{max-width:1000px;margin:0 auto;padding:30px 20px}
+h1{font-size:22px;color:#cfe6ff;margin:0 0 8px}
+.sub{color:#8a9bb4;font-size:13px;margin-bottom:24px}
+input[type=search]{width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:10px 14px;font-size:14px;margin-bottom:20px;box-sizing:border-box}
+input[type=search]:focus{outline:none;border-color:#3b6db5}
+.bk-list{display:flex;flex-direction:column;gap:8px}
+.bk-item{background:#10162a;border:1px solid #1f2740;border-radius:6px;padding:12px 16px;transition:all .15s;-webkit-touch-callout:none;user-select:none;cursor:pointer}
+.bk-item:hover{background:#162045;border-color:#3b6db5}
+.bk-row{display:flex;align-items:center;gap:10px}
+.bk-name{color:#cfe6ff;font-weight:600;font-size:15px}
+.bk-id{color:#5a6680;font-size:11px;font-family:monospace;margin-left:8px}
+.bk-meta{color:#8a9bb4;font-size:11px;margin-top:4px}
+.bk-bar{height:5px;border-radius:3px;background:#1f2740;overflow:hidden;margin-top:7px;max-width:260px}
+.bk-bar>span{display:block;height:100%;background:#34d399}
+.bk-warn{color:#f0a070;font-size:11px;margin-top:3px}
+.empty{color:#5a6680;text-align:center;padding:60px}
+.act{background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px}
+.act:hover{background:#244470}
+.ctx-menu{position:fixed;z-index:1000;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.6);overflow:hidden;display:none;min-width:160px}
+.ctx-menu .ctx-title{padding:9px 16px;color:#8a9bb4;font-size:11px;border-bottom:1px solid #1f2740;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+.ctx-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:#cfe6ff;padding:12px 16px;font-size:14px;cursor:pointer}
+.ctx-menu button:active,.ctx-menu button:hover{background:#1a2540}
+.ctx-menu button.danger{color:#ff8a8a}
+.mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center}
+.modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:20px;width:min(640px,92vw);max-height:90vh;overflow:auto}
+.modal h3{margin:0 0 12px;color:#cfe6ff;font-size:16px}
+.lbl{display:block;color:#9fb0c8;font-size:12px;margin-bottom:4px}
+.fld{width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;box-sizing:border-box;margin-bottom:10px}
+.modal .btn{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px}
+.modal .btn.primary{background:#244470;border-color:#3b6db5;color:#fff}
+.meta{color:#7a8497;font-size:11px;line-height:1.6}
+#nb-status{margin-top:14px;padding:10px;background:#0d1322;border-radius:6px;font-family:monospace;font-size:11px;color:#7be096;display:none;white-space:pre-wrap;max-height:220px;overflow:auto}
+</style>
+</head>
 <body>
-<h1>知识图谱（技能树）</h1>
-{% if books %}
-<ul>
-{% for b in books %}
-  <li><a href="/skilltree/{{ b.id }}/">{{ b.id }}</a>
-      <span class="meta">{{ b.nodes }} 节点 · {{ b.edges }} 边</span></li>
-{% endfor %}
-</ul>
-{% else %}
-<p>还没有书的知识图谱。先用 <code>scripts/kg/*</code> 流水线生成 <code>knowledge_graph/&lt;book&gt;.json</code>。</p>
-{% endif %}
+<div class="container">
+  <h1>🌳 技能树（知识图谱）</h1>
+  <div class="sub">所有书本的知识图谱 · 长按一本可重命名/设置/删除 · 上传 PDF 后用「生成技能树」抽节点建图</div>
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+    <label class="act">
+      ⬆️ 上传 PDF
+      <input type="file" accept="application/pdf" style="display:none" onchange="uploadPdf(this)">
+    </label>
+    <button class="act" onclick="openGen()">🌳 生成技能树</button>
+    <input type="text" id="upload-dir" placeholder="上传目标目录（默认 资源/uploads）" style="background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:8px 12px;font-size:13px;flex:1;min-width:180px">
+    <span id="upload-status" style="color:#8a9bb4;font-size:12px"></span>
+  </div>
+  <input type="search" id="search" placeholder="🔍 搜索（按书名 / id）" oninput="filterBooks()">
+  <div class="bk-list" id="list"><div class="empty">加载中…</div></div>
+</div>
+
+<!-- 长按菜单 -->
+<div class="ctx-menu" id="ctx-menu">
+  <div class="ctx-title" id="ctx-title"></div>
+  <button onclick="ctxRename()">✏️ 重命名</button>
+  <button onclick="ctxSettings()">⚙ 设置（前缀/扫描）</button>
+  <button class="danger" onclick="ctxDelete()">🗑 删除</button>
+</div>
+
+<!-- 生成技能树 modal -->
+<div class="mask" id="gen-mask" onclick="if(event.target===this) closeGen()">
+  <div class="modal">
+    <h3>🌳 生成技能树</h3>
+    <p class="meta" style="margin-bottom:14px">流程：扫描 PDF 抽节点 (build_nodes) → 抽依赖边 (extract_edges)。<br>
+      ⚠️ 一本 300 页教材约消耗 5–15% 的 7d 额度，<b>建议先用页范围试水 20 页看效果再全跑</b>。</p>
+    <label class="lbl">书本 ID（短标识，英文，如 LADR / CALC）</label>
+    <input type="text" id="nb-id" class="fld" placeholder="MYBOOK">
+    <label class="lbl">书名（显示用，可中文）</label>
+    <input type="text" id="nb-title" class="fld" placeholder="我的教材">
+    <label class="lbl">笔记前缀（如 LADR=000-, 微积分=010-）</label>
+    <input type="text" id="nb-prefix" class="fld" placeholder="002-">
+    <label class="lbl">PDF 文件（vault 相对路径）</label>
+    <select id="nb-pdf" class="fld"><option value="">加载中…</option></select>
+    <label class="lbl">页范围（建议先试水 1-20；全书留空）</label>
+    <input type="text" id="nb-pages" class="fld" placeholder="如 1-20 或留空跑全书">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="lbl">模型</label>
+        <select id="nb-model" class="fld"><option value="sonnet">sonnet (推荐)</option><option value="opus">opus (更准但贵)</option><option value="haiku">haiku (便宜)</option></select></div>
+      <div style="flex:1"><label class="lbl">思考深度</label>
+        <select id="nb-effort" class="fld"><option value="medium" selected>medium</option><option value="low">low</option><option value="high">high</option></select></div>
+    </div>
+    <div id="nb-status"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+      <button class="btn" onclick="closeGen()">取消</button>
+      <button class="btn primary" id="nb-go" onclick="startGen()">🚀 开始扫描</button>
+    </div>
+  </div>
+</div>
+
+<!-- 每本设置 modal（前缀 + 扫描参数）-->
+<div class="mask" id="set-mask" onclick="if(event.target===this) closeSettings()">
+  <div class="modal">
+    <h3 id="set-h">⚙ 设置</h3>
+    <label class="lbl">笔记前缀（制卡/建笔记时加在文件名前，如 000-）</label>
+    <input type="text" id="set-prefix" class="fld" placeholder="000-">
+    <h3 style="font-size:13px;margin:14px 0 10px;color:#9fb0c8">夜间扫描参数</h3>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;font-size:13px">
+      <input type="checkbox" id="set-enabled" style="width:16px;height:16px"> 启用夜间深扫
+    </label>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="lbl">每晚页数</label><input type="number" id="set-ppn" class="fld" min="1"></div>
+      <div style="flex:1"><label class="lbl">稳定阈值(连续)</label><input type="number" id="set-stab" class="fld" min="1"></div>
+      <div style="flex:1"><label class="lbl">最长稳定天</label><input type="number" id="set-maxd" class="fld" min="1"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="lbl">深扫模型</label>
+        <select id="set-dmodel" class="fld"><option value="opus">opus</option><option value="sonnet">sonnet</option><option value="haiku">haiku</option></select></div>
+      <div style="flex:1"><label class="lbl">深扫深度</label>
+        <select id="set-deffort" class="fld"><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let _books = [];
+async function loadBooks() {
+  const el = document.getElementById('list');
+  try {
+    const r = await fetch('/skilltree/api/books-meta');
+    _books = await r.json();
+  } catch (e) { el.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>'; return; }
+  if (!_books.length) { el.innerHTML = '<div class="empty">还没有技能树。上传 PDF 后点「生成技能树」。</div>'; return; }
+  el.innerHTML = _books.map(b => {
+    const pct = b.l2_count ? Math.round(b.mastered_count / b.l2_count * 100) : 0;
+    const warn = b.pdf_exists ? '' : '<div class="bk-warn">⚠ 关联 PDF 不存在，部分功能（生成笔记）不可用</div>';
+    return `<div class="bk-item" data-id="${b.id}" data-title="${(b.title||'').replace(/"/g,'&quot;')}"
+        data-search="${((b.title||'')+' '+b.id).toLowerCase().replace(/"/g,'')}">
+      <div class="bk-row" onclick="if(!_lpFired)location.href='/skilltree/'+encodeURIComponent('${b.id}')+'/'">
+        <div style="flex:1;min-width:0">
+          <div><span class="bk-name">${b.title||b.id}</span><span class="bk-id">${b.id}${b.note_prefix?' · 前缀 '+b.note_prefix:''}</span></div>
+          <div class="bk-meta">${b.node_count} 节点 · ${b.edge_count} 边 · 已掌握 ${b.mastered_count}/${b.l2_count}（${pct}%）</div>
+          <div class="bk-bar"><span style="width:${pct}%"></span></div>
+          ${warn}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+function filterBooks() {
+  const q = document.getElementById('search').value.toLowerCase();
+  document.querySelectorAll('.bk-item').forEach(el => { el.style.display = el.dataset.search.includes(q) ? '' : 'none'; });
+}
+
+// ── 长按菜单：重命名 / 设置 / 删除 ──
+let _lpTimer = null, _lpFired = false, _ctxId = null, _ctxTitle = '';
+function _bindLongPress() {
+  document.querySelectorAll('.bk-item').forEach(item => {
+    const start = (ev) => {
+      _lpFired = false; clearTimeout(_lpTimer);
+      const pt = ev.touches ? ev.touches[0] : ev;
+      const x = pt ? pt.clientX : 0, y = pt ? pt.clientY : 0;
+      _lpTimer = setTimeout(() => { _lpFired = true; showCtx(item, x, y); }, 500);
+    };
+    const end = () => clearTimeout(_lpTimer);
+    item.addEventListener('touchstart', start, {passive:true});
+    item.addEventListener('touchend', end); item.addEventListener('touchmove', end);
+    item.addEventListener('mousedown', start); item.addEventListener('mouseup', end); item.addEventListener('mouseleave', end);
+    item.addEventListener('contextmenu', (ev) => { ev.preventDefault(); _lpFired = true; showCtx(item, ev.clientX, ev.clientY); });
+  });
+}
+function showCtx(item, x, y) {
+  _ctxId = item.dataset.id; _ctxTitle = item.dataset.title || item.dataset.id;
+  const m = document.getElementById('ctx-menu');
+  document.getElementById('ctx-title').textContent = _ctxTitle;
+  m.style.display = 'block';
+  const mw = m.offsetWidth || 170, mh = m.offsetHeight || 130;
+  m.style.left = Math.max(8, Math.min(x, innerWidth - mw - 8)) + 'px';
+  m.style.top  = Math.max(8, Math.min(y, innerHeight - mh - 8)) + 'px';
+}
+function hideCtx() { document.getElementById('ctx-menu').style.display = 'none'; }
+document.addEventListener('click', (e) => { if (!e.target.closest('#ctx-menu')) hideCtx(); });
+document.addEventListener('touchstart', (e) => { if (!e.target.closest('#ctx-menu') && !e.target.closest('.bk-item')) hideCtx(); }, true);
+
+async function _setMeta(id, key, value) {
+  const r = await fetch('/skilltree/' + encodeURIComponent(id) + '/api/edit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({op: 'set_meta', key, value}),
+  });
+  return r.json();
+}
+async function ctxRename() {
+  const id = _ctxId, cur = _ctxTitle; hideCtx(); if (!id) return;
+  const nn = prompt('重命名技能树《' + cur + '》\n输入新的显示名（书本 id 不变）：', cur);
+  if (nn === null) return;
+  const name = nn.trim(); if (!name || name === cur) return;
+  const d = await _setMeta(id, 'title', name);
+  if (d.ok) loadBooks(); else alert('重命名失败：' + (d.info || d.error || ''));
+}
+function ctxDelete() {
+  const id = _ctxId, cur = _ctxTitle; hideCtx(); if (!id) return;
+  if (!confirm('删除技能树《' + cur + '》？\nKG 会移到归档（可在 knowledge_graph/_archive 找回），不会动笔记。')) return;
+  const delPdf = confirm('同时删除它关联的 PDF 文件吗？\n确定=连 PDF 一起删，取消=只删技能树。');
+  fetch('/skilltree/' + encodeURIComponent(id) + '/api/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({delete_pdf: delPdf}),
+  }).then(r => r.json()).then(d => { if (d.ok) loadBooks(); else alert('删除失败：' + (d.error || '')); });
+}
+
+// ── 每本设置（前缀 + 扫描参数）──
+function ctxSettings() {
+  const id = _ctxId; hideCtx(); if (!id) return;
+  const b = _books.find(x => x.id === id); if (!b) return;
+  document.getElementById('set-h').textContent = '⚙ 设置 · ' + (b.title || id);
+  document.getElementById('set-mask').dataset.id = id;
+  document.getElementById('set-prefix').value = b.note_prefix || '';
+  const sc = b.scan_config || {};
+  document.getElementById('set-enabled').checked = sc.enabled !== false;
+  document.getElementById('set-ppn').value = sc.pages_per_night ?? 30;
+  document.getElementById('set-stab').value = sc.stable_threshold ?? 3;
+  document.getElementById('set-maxd').value = sc.max_stable_days ?? 90;
+  document.getElementById('set-dmodel').value = sc.deep_model || 'opus';
+  document.getElementById('set-deffort').value = sc.deep_effort || 'high';
+  document.getElementById('set-mask').style.display = 'flex';
+}
+function closeSettings() { document.getElementById('set-mask').style.display = 'none'; }
+async function saveSettings() {
+  const id = document.getElementById('set-mask').dataset.id; if (!id) return;
+  const prefix = document.getElementById('set-prefix').value.trim();
+  const scan = {
+    enabled: document.getElementById('set-enabled').checked,
+    pages_per_night: parseInt(document.getElementById('set-ppn').value) || 30,
+    stable_threshold: parseInt(document.getElementById('set-stab').value) || 3,
+    max_stable_days: parseInt(document.getElementById('set-maxd').value) || 90,
+    deep_model: document.getElementById('set-dmodel').value,
+    deep_effort: document.getElementById('set-deffort').value,
+  };
+  const d1 = await _setMeta(id, 'note_prefix', prefix);
+  const d2 = await _setMeta(id, 'scan_config', scan);
+  if (d1.ok && d2.ok) { closeSettings(); loadBooks(); }
+  else alert('保存失败：' + (d1.info || d2.info || ''));
+}
+
+// ── 生成技能树 ──
+async function openGen() {
+  document.getElementById('gen-mask').style.display = 'flex';
+  document.getElementById('nb-status').style.display = 'none';
+  document.getElementById('nb-status').textContent = '';
+  document.getElementById('nb-go').disabled = false;
+  try {
+    const r = await fetch('/pdf/api/list-pdfs'); const d = await r.json();
+    const sel = document.getElementById('nb-pdf');
+    sel.innerHTML = d.ok ? '<option value="">— 选择 PDF —</option>' +
+      d.pdfs.map(p => `<option value="${p.rel}">${p.name} (${p.dir})</option>`).join('')
+      : '<option value="">加载失败</option>';
+  } catch (e) { document.getElementById('nb-pdf').innerHTML = '<option value="">网络失败</option>'; }
+}
+function closeGen() { document.getElementById('gen-mask').style.display = 'none'; }
+async function startGen() {
+  const bookId = document.getElementById('nb-id').value.trim();
+  const title = document.getElementById('nb-title').value.trim();
+  const prefix = document.getElementById('nb-prefix').value.trim();
+  const pdfRel = document.getElementById('nb-pdf').value;
+  const pages = document.getElementById('nb-pages').value.trim();
+  const model = document.getElementById('nb-model').value;
+  const effort = document.getElementById('nb-effort').value;
+  if (!bookId || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(bookId)) { alert('book id 必须以字母开头，只含字母/数字/-/_'); return; }
+  if (!pdfRel) { alert('请选 PDF 文件'); return; }
+  const st = document.getElementById('nb-status'), btn = document.getElementById('nb-go');
+  btn.disabled = true; st.style.display = 'block'; st.textContent = '⏳ 启动 build_nodes…\n';
+  try {
+    const r = await fetch('/control/api/kg-build', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({book_id: bookId, title, note_prefix: prefix, pdf: pdfRel, pages, model, effort}),
+    });
+    const d = await r.json();
+    if (!d.ok) { st.textContent += '❌ ' + (d.error || '失败') + '\n'; btn.disabled = false; return; }
+    st.textContent += `✓ job 启动 (id=${d.job_id})\n\n`;
+    const poll = async () => {
+      const lr = await fetch('/control/api/kg-build-log?job=' + d.job_id); const ld = await lr.json();
+      st.textContent = `Job ${d.job_id}\n──────\n` + (ld.log || '...'); st.scrollTop = st.scrollHeight;
+      if (ld.status === 'running') setTimeout(poll, 3000);
+      else { btn.disabled = false; if (ld.status === 'done') { st.textContent += '\n\n✅ 完成！'; loadBooks(); } }
+    };
+    poll();
+  } catch (e) { st.textContent += '❌ ' + e.message + '\n'; btn.disabled = false; }
+}
+
+// ── 上传 PDF（复用 PDF 阅读器接口）──
+async function uploadPdf(input) {
+  const file = input.files[0]; if (!file) return;
+  const status = document.getElementById('upload-status');
+  const dir = document.getElementById('upload-dir').value.trim() || '资源/uploads';
+  status.textContent = '⏳ 上传中…' + (file.size > 1048576 ? ` (${(file.size/1048576).toFixed(1)} MB)` : '');
+  const fd = new FormData(); fd.append('file', file); fd.append('target_dir', dir);
+  try {
+    const r = await fetch('/pdf/api/upload', {method: 'POST', body: fd}); const d = await r.json();
+    if (d.ok) status.innerHTML = `✓ 已上传 ${d.rel}（去「生成技能树」选它）`;
+    else status.innerHTML = `<span style="color:#f88">✗ ${d.error || '失败'}</span>`;
+  } catch (e) { status.innerHTML = `<span style="color:#f88">✗ ${e.message}</span>`; }
+  input.value = '';
+}
+
+// 列表渲染后重新绑定长按（loadBooks 重写了 innerHTML）
+const _origLoad = loadBooks;
+loadBooks = async function() { await _origLoad(); _bindLongPress(); };
+loadBooks();
+</script>
 </body></html>

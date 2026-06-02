@@ -283,7 +283,7 @@
     <div class="panel-tab">
       <div class="tab-dot" style="color:#7dd3fc; background:#7dd3fc"></div>
       <span class="tab-title">技能树</span>
-      <span class="tab-meta">书本管理 + 扫描参数</span>
+      <span class="tab-meta">额度 · 书本管理见技能树页</span>
     </div>
     <div class="panel-body">
       <div class="config-section">
@@ -295,65 +295,13 @@
         <p class="meta" style="font-size:11px;line-height:1.5">夜间 daily 流程的每个 step 都记录 quota 差值，可查"哪个 step 烧了多少 token"。</p>
       </div>
       <div class="config-section">
-        <h3 style="display:flex;align-items:center;gap:14px">
-          <span>已登记书本</span>
-          <button class="btn" onclick="openNewBookDialog()" style="font-size:11px;padding:4px 10px;margin-left:auto">➕ 新建书本</button>
-        </h3>
-        <div id="books-list">加载中…</div>
+        <h3><span>书本管理</span></h3>
+        <p class="meta" style="font-size:12px;line-height:1.7">书本的新建（生成技能树）、重命名、笔记前缀 / 夜间扫描设置、删除已搬到 <a href="/skilltree/" target="_blank" style="color:#7dd3fc;font-weight:600">🌳 技能树管理页</a>（在技能树页点顶部标题即可进入）。</p>
       </div>
     </div>
   </div>
 
-<!-- 新建书本 modal -->
-<div id="new-book-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center" onclick="if(event.target===this) closeNewBookDialog()">
-  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:20px;width:min(640px,92vw);max-height:90vh;overflow:auto">
-    <h3 style="margin:0 0 12px">➕ 新建书本</h3>
-    <p class="meta" style="font-size:11px;line-height:1.6;margin-bottom:14px">
-      流程：扫描 PDF 抽节点 (build_nodes) → 抽依赖边 (extract_edges)。<br>
-      ⚠️ 一本 300 页教材约消耗 5–15% 的 7d 额度，<b>建议先用 --pages 试水 20 页看效果再全跑</b>。
-    </p>
-    <div style="display:grid;gap:10px">
-      <label class="lbl">书本 ID（短标识，英文，如 LADR / CALC）
-        <input type="text" id="nb-book-id" placeholder="MYBOOK" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-      </label>
-      <label class="lbl">书名（显示用，可中文）
-        <input type="text" id="nb-title" placeholder="我的教材" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-      </label>
-      <label class="lbl">笔记前缀（如 LADR=000-, 微积分=010-）
-        <input type="text" id="nb-prefix" placeholder="002-" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-      </label>
-      <label class="lbl">PDF 文件（vault 相对路径）
-        <select id="nb-pdf-select" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-          <option value="">加载中…</option>
-        </select>
-      </label>
-      <label class="lbl">页范围（建议先试水：1-20；全书留空）
-        <input type="text" id="nb-pages" placeholder="如 1-20 或留空跑全书" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-      </label>
-      <div style="display:flex;gap:10px">
-        <label class="lbl" style="flex:1">模型
-          <select id="nb-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-            <option value="sonnet">sonnet (推荐)</option>
-            <option value="opus">opus (更准但贵)</option>
-            <option value="haiku">haiku (便宜)</option>
-          </select>
-        </label>
-        <label class="lbl" style="flex:1">思考深度
-          <select id="nb-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-            <option value="medium" selected>medium</option>
-            <option value="low">low</option>
-            <option value="high">high</option>
-          </select>
-        </label>
-      </div>
-    </div>
-    <div id="nb-status" style="margin-top:14px;padding:10px;background:#0d1322;border-radius:6px;font-family:monospace;font-size:11px;color:#7be096;display:none;white-space:pre-wrap;max-height:200px;overflow:auto"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <button class="btn" onclick="closeNewBookDialog()" style="font-size:13px">取消</button>
-      <button class="btn" id="nb-go-btn" onclick="startNewBookBuild()" style="background:#244470;color:#fff;font-size:13px">🚀 开始扫描</button>
-    </div>
-  </div>
-</div>
+<!-- 新建书本 modal 已移到技能树管理页 /skilltree/ -->
 
 </div>
 
@@ -657,7 +605,7 @@ document.querySelector('[data-panel="config"]').addEventListener('click', () => 
   setTimeout(() => { loadConfig(); renderIPadCmds(); }, 300);
 }, {once: true});
 document.querySelector('[data-panel="skilltree"]').addEventListener('click', () => {
-  setTimeout(() => { loadBooks(); refreshQuotaNow(); }, 300);
+  setTimeout(() => { refreshQuotaNow(); }, 300);   // 书本管理已移到 /skilltree/，不再 loadBooks
 }, {once: true});
 
 async function refreshQuotaNow(){
@@ -725,191 +673,6 @@ async function loadQuotaLog(){
   }
 }
 
-// ──── 新建书本 ────
-async function openNewBookDialog() {
-  document.getElementById('new-book-mask').style.display = 'flex';
-  document.getElementById('nb-status').style.display = 'none';
-  document.getElementById('nb-status').textContent = '';
-  document.getElementById('nb-go-btn').disabled = false;
-  // 拉 vault PDF 列表
-  try {
-    const r = await fetch('/pdf/api/list-pdfs');
-    const d = await r.json();
-    const sel = document.getElementById('nb-pdf-select');
-    if (d.ok) {
-      sel.innerHTML = '<option value="">— 选择 PDF —</option>' +
-        d.pdfs.map(p => `<option value="${p.rel}">${p.name} (${p.dir})</option>`).join('');
-    } else {
-      sel.innerHTML = '<option value="">加载失败：' + (d.error||'?') + '</option>';
-    }
-  } catch (e) {
-    document.getElementById('nb-pdf-select').innerHTML = '<option value="">网络失败</option>';
-  }
-}
-function closeNewBookDialog() { document.getElementById('new-book-mask').style.display = 'none'; }
-async function startNewBookBuild() {
-  const bookId = document.getElementById('nb-book-id').value.trim();
-  const title  = document.getElementById('nb-title').value.trim();
-  const prefix = document.getElementById('nb-prefix').value.trim();
-  const pdfRel = document.getElementById('nb-pdf-select').value;
-  const pages  = document.getElementById('nb-pages').value.trim();
-  const model  = document.getElementById('nb-model').value;
-  const effort = document.getElementById('nb-effort').value;
-  if (!bookId || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(bookId)) {
-    alert('book_id 必须以字母开头，只含字母/数字/-/_'); return;
-  }
-  if (!pdfRel) { alert('请选 PDF 文件'); return; }
-  const statusEl = document.getElementById('nb-status');
-  const btn = document.getElementById('nb-go-btn');
-  btn.disabled = true;
-  statusEl.style.display = 'block';
-  statusEl.textContent = '⏳ 启动 build_nodes…\n';
-  try {
-    const r = await fetch('/control/api/kg-build', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        book_id: bookId, title, note_prefix: prefix,
-        pdf: pdfRel, pages, model, effort,
-      }),
-    });
-    const d = await r.json();
-    if (!d.ok) { statusEl.textContent += '❌ ' + (d.error||'失败') + '\n'; btn.disabled = false; return; }
-    statusEl.textContent += `✓ job 启动 (id=${d.job_id})\n日志：${d.log_file}\n\n`;
-    // 轮询日志
-    const pollLog = async () => {
-      const lr = await fetch('/control/api/kg-build-log?job=' + d.job_id);
-      const ld = await lr.json();
-      statusEl.textContent = `Job ${d.job_id}\n──────\n` + (ld.log || '...');
-      statusEl.scrollTop = statusEl.scrollHeight;
-      if (ld.status === 'running') setTimeout(pollLog, 3000);
-      else {
-        btn.disabled = false;
-        if (ld.status === 'done') {
-          statusEl.textContent += '\n\n✅ 完成！书本已加入列表。';
-          loadBooks();   // 刷新书本列表
-        }
-      }
-    };
-    pollLog();
-  } catch (e) {
-    statusEl.textContent += '❌ ' + e.message + '\n';
-    btn.disabled = false;
-  }
-}
-
-async function loadBooks(){
-  const el = document.getElementById("books-list");
-  el.innerHTML = "加载中…";
-  try{
-    const r = await fetch("/skilltree/api/books-meta");
-    const books = await r.json();
-    if(!books || !books.length){
-      el.innerHTML = '<p class="meta">还没有书本。手动跑 <code>scripts/kg/build_nodes.py</code> 扫描 PDF 后会自动出现。</p>';
-      return;
-    }
-    el.innerHTML = books.map(b => `
-      <div class="book-card" data-id="${b.id}" style="border:1px solid #2a3550;border-radius:8px;padding:14px;margin-bottom:12px;background:#0d1322">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
-          <div style="flex:1;min-width:240px">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-              <a href="/skilltree/${b.id}/" target="_blank" style="font-size:15px;font-weight:700;color:#7dd3fc;text-decoration:none">📚 ${b.title}</a>
-              <span class="meta" style="font-size:11px">id=${b.id}</span>
-            </div>
-            <div class="meta" style="font-size:12px;line-height:1.6">
-              ${b.l2_count} 知识点 · ${b.mastered_count} 已掌握 · ${b.edge_count} 边<br>
-              KG: <code>${b.kg_file}</code> · PDF: ${b.pdf_exists ? '<span style="color:#34d399">存在</span>' : '<span style="color:#f87171">缺失</span>'}
-            </div>
-          </div>
-          <button class="btn danger" onclick="deleteBook('${b.id}','${(b.title||'').replace(/'/g,'')}')" style="font-size:11px;padding:6px 10px">删除</button>
-        </div>
-        <div style="margin-top:10px;border-top:1px solid #1f2740;padding-top:10px">
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
-            <label style="font-size:11px;color:#8a9bb4">书本标题（用于显示）
-              <input type="text" data-field="title" value="${(b.title||'').replace(/"/g,'&quot;')}" style="width:100%;padding:5px 8px;background:#0a0e1a;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;margin-top:3px">
-            </label>
-            <label style="font-size:11px;color:#8a9bb4">笔记前缀（如 000-）
-              <input type="text" data-field="note_prefix" value="${(b.note_prefix||'').replace(/"/g,'&quot;')}" style="width:100%;padding:5px 8px;background:#0a0e1a;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;margin-top:3px;font-family:monospace">
-            </label>
-            <label style="font-size:11px;color:#8a9bb4">每晚扫描页数
-              <input type="number" data-field="pages_per_night" value="${b.scan_config.pages_per_night}" min="0" max="200" style="width:100%;padding:5px 8px;background:#0a0e1a;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;margin-top:3px">
-            </label>
-            <label style="font-size:11px;color:#8a9bb4">稳定阈值（连续 N 次无变化判稳定）
-              <input type="number" data-field="stable_threshold" value="${b.scan_config.stable_threshold}" min="1" max="10" style="width:100%;padding:5px 8px;background:#0a0e1a;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;margin-top:3px">
-            </label>
-            <label style="font-size:11px;color:#8a9bb4">最大稳定天数（超期强制复查）
-              <input type="number" data-field="max_stable_days" value="${b.scan_config.max_stable_days}" min="7" max="365" style="width:100%;padding:5px 8px;background:#0a0e1a;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;margin-top:3px">
-            </label>
-            <label style="font-size:11px;color:#8a9bb4;display:flex;align-items:flex-end;gap:6px">
-              <input type="checkbox" data-field="enabled" ${b.scan_config.enabled ? "checked" : ""} style="width:16px;height:16px">
-              <span>启用夜间扫描</span>
-            </label>
-          </div>
-          <div style="margin-top:8px;display:flex;gap:8px">
-            <button class="btn primary" onclick="saveBook('${b.id}')" style="font-size:11px;padding:6px 12px">保存</button>
-            <span class="meta" style="font-size:11px">深度复查模型：opus high（恒定）</span>
-          </div>
-        </div>
-      </div>
-    `).join("");
-  }catch(ex){
-    el.innerHTML = '<p class="meta">加载失败: '+ ex.message +'</p>';
-  }
-}
-
-async function saveBook(bookId){
-  const card = document.querySelector(`.book-card[data-id="${bookId}"]`);
-  if(!card) return;
-  const inputs = card.querySelectorAll("[data-field]");
-  const meta = {};   // 顶层字段：title / note_prefix
-  const scanCfg = {}; // scan_config 嵌套字段
-  for(const inp of inputs){
-    const k = inp.dataset.field;
-    let v;
-    if(inp.type === "checkbox") v = inp.checked;
-    else if(inp.type === "number") v = parseInt(inp.value, 10) || 0;
-    else v = inp.value.trim();
-    if(["title","note_prefix"].includes(k)) meta[k] = v;
-    else scanCfg[k] = v;
-  }
-  // 调 API 保存
-  const calls = [];
-  for(const [k, v] of Object.entries(meta)){
-    calls.push(fetch(`/skilltree/${bookId}/api/edit`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({op:"set_meta", key:k, value:v})
-    }));
-  }
-  calls.push(fetch(`/skilltree/${bookId}/api/edit`, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({op:"set_meta", key:"scan_config", value:scanCfg})
-  }));
-  try{
-    const results = await Promise.all(calls);
-    const ok = results.every(r => r.ok);
-    showToast(ok ? `✓ 已保存 ${bookId} 设置` : "保存部分失败，查 console");
-  }catch(ex){
-    showToast("保存失败: " + ex.message);
-  }
-}
-
-async function deleteBook(bookId, title){
-  if(!confirm(`确定删除「${title}」？\n\nKG 会被归档到 knowledge_graph/_archive/\nPDF 文件保留，可手动删除。`)) return;
-  try{
-    const r = await fetch(`/skilltree/${bookId}/api/delete`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({delete_pdf: false})
-    });
-    const d = await r.json();
-    if(d.ok){
-      showToast("✓ " + d.info);
-      loadBooks();
-    } else {
-      alert("删除失败: " + (d.error||"未知"));
-    }
-  }catch(ex){
-    alert("删除失败: " + ex.message);
-  }
-}
 function tick() {
   refreshStatus();
   // "操作"panel active 时同步刷日志
