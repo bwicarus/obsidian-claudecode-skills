@@ -61,6 +61,16 @@ let _cropOn = false;                    // 开关(per-book localStorage)
 function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
 function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
 function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
+// 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
+let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
+function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
+function _pagesPerRow() { return readMode === 'spread' ? 2 : 1; }
+function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1],[2,3],[4,5]…]
+  const rows = []; let p = 1;
+  if (offset === 1 && total >= 1) { rows.push([1]); p = 2; }
+  while (p <= total) { const row = [p]; if (p + 1 <= total) row.push(p + 1); rows.push(row); p += 2; }
+  return rows;
+}
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
@@ -196,11 +206,11 @@ async function loadPdf() {
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
-    // 去边模式:把"可见区"(扣掉左右裁切)填满宽度 → scale 除以可见宽占比(_cropVisWFrac<1 → 放大)
-    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
+    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2,每页占半宽)
+    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
-    document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+    _updateModeButtons();   // 模式按钮文字 + 双页按钮高亮态(readMode 可能是 spread)
     { const rb = document.getElementById('ruby-toggle'); if (rb) rb.classList.toggle('active', _rubyEnabled()); }   // 振假名按钮恢复上次开关态
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
     loadAllHighlights();
@@ -210,7 +220,7 @@ async function loadPdf() {
     loadBookLangs();        // 拉本书语言声明(影响点词查词典路由)
     _loadPhraseFavs();      // 拉收藏词组（词组按钮收藏态 + 分词依据）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
-    if (readMode === 'continuous') {
+    if (readMode !== 'single') {   // 连续 / 双页 都走 setupContinuousMode(内部按 spread 分行)
       await setupContinuousMode();
     } else {
       await renderPage(currentPage);
@@ -271,7 +281,7 @@ async function renderPage(num) {
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
   currentPage = num;
   { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
-  if (readMode === 'continuous') {
+  if (readMode !== 'single') {   // 连续 / 双页:滚到对应页占位 + 立即渲染
     // 连续模式：滚到对应页占位 + 立即渲染目标页(别等 IO,跳页/翻页不卡)
     const ph = document.querySelector(`[data-page-num="${num}"]`);
     if (ph) {
@@ -759,23 +769,43 @@ function _renderVocabItem(it) {
   }));
   return div;
 }
-window.toggleReadMode = async () => {
-  const keepPage = currentPage;   // 记住切换前的页，切换后强制回到它（别跳回第一页）
-  readMode = readMode === 'single' ? 'continuous' : 'single';
-  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
-  document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+function _updateModeButtons() {
+  const m = document.getElementById('mode-toggle');
+  if (m) m.textContent = readMode === 'continuous' ? '📚 连续' : (readMode === 'spread' ? '📄 单页' : '📄 单页');
+  const s = document.getElementById('spread-toggle');
+  if (s) s.classList.toggle('active', readMode === 'spread');
+}
+async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
-  if (readMode === 'continuous') {
-    await setupContinuousMode();
-    currentPage = keepPage;
-    // 占位高度算准后再滚一次到原页（setupContinuousMode 内部那次可能早于布局稳定）
+  await _refitToWidth(true);   // 重算 scale(单页/连续=整宽,双页=半宽)+ 重建布局
+  currentPage = keepPage;
+  if (readMode === 'single') {
+    await renderPage(keepPage);
+  } else {
     const t = document.querySelector(`[data-page-num="${keepPage}"]`);
     if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
-  } else {
-    currentPage = keepPage;
-    await renderPage(keepPage);
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
+}
+window.toggleReadMode = async () => {
+  const keepPage = currentPage;
+  // 单页↔连续;若当前在双页,切回单页(双页用 ⊞ 按钮单独控制)
+  readMode = readMode === 'single' ? 'continuous' : 'single';
+  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
+  _updateModeButtons();
+  await _applyModeChange(keepPage);
+};
+// 双页(spread):不在双页→进入(offset 0);已在双页→错开 offset 0↔1(facing 页对调);用 ⊞ 反复点切换
+window.toggleSpread = async () => {
+  const keepPage = currentPage;
+  if (readMode !== 'spread') { readMode = 'spread'; }
+  else { _spreadOffset = _spreadOffset ? 0 : 1; }
+  try {
+    localStorage.setItem('pdf-read-mode', 'spread');
+    localStorage.setItem(_spreadKey(), String(_spreadOffset));
+  } catch (_) {}
+  _updateModeButtons();
+  await _applyModeChange(keepPage);
 };
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
@@ -800,7 +830,7 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
+    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');
@@ -809,7 +839,7 @@ async function _refitToWidth(force) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode === 'continuous') {
+    if (readMode !== 'single') {   // 连续 / 双页 都重建滚动列表
       await setupContinuousMode();
     } else {
       // 单页模式：清 loaded 标记重 render
@@ -922,7 +952,7 @@ async function setupContinuousMode() {
   const v1 = p1.getViewport({scale});
   const estW = Math.floor(v1.width), estH = Math.floor(v1.height);
   const frag = document.createDocumentFragment();
-  for (let num = 1; num <= pdfDoc.numPages; num++) {
+  const _mkPh = (num, marg) => {
     const ph = document.createElement('div');
     ph.className = 'page-wrap';
     ph.dataset.pageNum = num;
@@ -934,9 +964,20 @@ async function setupContinuousMode() {
     ph.style.display = 'flex';
     ph.style.alignItems = 'center';
     ph.style.justifyContent = 'center';
-    ph.style.margin = '0 auto 12px';
+    ph.style.margin = marg;
     ph.textContent = '… 第 ' + num + ' 页';
-    frag.appendChild(ph);
+    return ph;
+  };
+  if (readMode === 'spread') {
+    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
+    for (const row of _spreadRows(pdfDoc.numPages, _spreadOffset)) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'spread-row';
+      for (const num of row) rowEl.appendChild(_mkPh(num, '0'));
+      frag.appendChild(rowEl);
+    }
+  } else {
+    for (let num = 1; num <= pdfDoc.numPages; num++) frag.appendChild(_mkPh(num, '0 auto 12px'));
   }
   container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
   const mainEl = document.getElementById('main');

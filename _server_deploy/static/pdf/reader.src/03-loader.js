@@ -62,11 +62,11 @@ async function loadPdf() {
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
-    // 去边模式:把"可见区"(扣掉左右裁切)填满宽度 → scale 除以可见宽占比(_cropVisWFrac<1 → 放大)
-    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
+    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2,每页占半宽)
+    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
-    document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+    _updateModeButtons();   // 模式按钮文字 + 双页按钮高亮态(readMode 可能是 spread)
     { const rb = document.getElementById('ruby-toggle'); if (rb) rb.classList.toggle('active', _rubyEnabled()); }   // 振假名按钮恢复上次开关态
     // 高亮：先拉一次（后续渲染完页面 loadCharsAndBindLayer 自动贴到 page-wrap）
     loadAllHighlights();
@@ -76,7 +76,7 @@ async function loadPdf() {
     loadBookLangs();        // 拉本书语言声明(影响点词查词典路由)
     _loadPhraseFavs();      // 拉收藏词组（词组按钮收藏态 + 分词依据）
     _maybeRestoreLastPos();   // URL 未带 page 时跳到上次位置
-    if (readMode === 'continuous') {
+    if (readMode !== 'single') {   // 连续 / 双页 都走 setupContinuousMode(内部按 spread 分行)
       await setupContinuousMode();
     } else {
       await renderPage(currentPage);

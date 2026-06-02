@@ -61,6 +61,16 @@ let _cropOn = false;                    // 开关(per-book localStorage)
 function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
 function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
 function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
+// 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
+let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
+function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
+function _pagesPerRow() { return readMode === 'spread' ? 2 : 1; }
+function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1],[2,3],[4,5]…]
+  const rows = []; let p = 1;
+  if (offset === 1 && total >= 1) { rows.push([1]); p = 2; }
+  while (p <= total) { const row = [p]; if (p + 1 <= total) row.push(p + 1); rows.push(row); p += 2; }
+  return rows;
+}
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');

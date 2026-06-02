@@ -1,20 +1,40 @@
-window.toggleReadMode = async () => {
-  const keepPage = currentPage;   // 记住切换前的页，切换后强制回到它（别跳回第一页）
-  readMode = readMode === 'single' ? 'continuous' : 'single';
-  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
-  document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
+function _updateModeButtons() {
+  const m = document.getElementById('mode-toggle');
+  if (m) m.textContent = readMode === 'continuous' ? '📚 连续' : (readMode === 'spread' ? '📄 单页' : '📄 单页');
+  const s = document.getElementById('spread-toggle');
+  if (s) s.classList.toggle('active', readMode === 'spread');
+}
+async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
-  if (readMode === 'continuous') {
-    await setupContinuousMode();
-    currentPage = keepPage;
-    // 占位高度算准后再滚一次到原页（setupContinuousMode 内部那次可能早于布局稳定）
+  await _refitToWidth(true);   // 重算 scale(单页/连续=整宽,双页=半宽)+ 重建布局
+  currentPage = keepPage;
+  if (readMode === 'single') {
+    await renderPage(keepPage);
+  } else {
     const t = document.querySelector(`[data-page-num="${keepPage}"]`);
     if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
-  } else {
-    currentPage = keepPage;
-    await renderPage(keepPage);
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
+}
+window.toggleReadMode = async () => {
+  const keepPage = currentPage;
+  // 单页↔连续;若当前在双页,切回单页(双页用 ⊞ 按钮单独控制)
+  readMode = readMode === 'single' ? 'continuous' : 'single';
+  try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
+  _updateModeButtons();
+  await _applyModeChange(keepPage);
+};
+// 双页(spread):不在双页→进入(offset 0);已在双页→错开 offset 0↔1(facing 页对调);用 ⊞ 反复点切换
+window.toggleSpread = async () => {
+  const keepPage = currentPage;
+  if (readMode !== 'spread') { readMode = 'spread'; }
+  else { _spreadOffset = _spreadOffset ? 0 : 1; }
+  try {
+    localStorage.setItem('pdf-read-mode', 'spread');
+    localStorage.setItem(_spreadKey(), String(_spreadOffset));
+  } catch (_) {}
+  _updateModeButtons();
+  await _applyModeChange(keepPage);
 };
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
@@ -39,7 +59,7 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
+    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac() * _pagesPerRow())));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');
@@ -48,7 +68,7 @@ async function _refitToWidth(force) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode === 'continuous') {
+    if (readMode !== 'single') {   // 连续 / 双页 都重建滚动列表
       await setupContinuousMode();
     } else {
       // 单页模式：清 loaded 标记重 render
