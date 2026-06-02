@@ -28,8 +28,17 @@ def pdf_sha(pdf_path: Path) -> str:
 
 
 def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
-    """对一页嵌入 char-level 文字层。"""
+    """对一页嵌入 char-level 文字层。
+
+    OCR bbox 在「视觉(渲染后)」坐标系(get_pixmap 已应用 /Rotate)。但 page.insert_text
+    用的是 mediabox(未旋转)坐标系,旋转页(如扫描书常见 /Rotate 90)直接喂视觉坐标会让
+    落在 mediabox 外的字被裁掉(实测某 90° 页 107 字只剩 35,中下部全丢→"选不中")。
+    用 page.derotation_matrix 把视觉点转回 mediabox 点,并 rotate=page.rotation 让字形朝向
+    跟视觉一致(读回 bbox 才对得上选中层)。rotation=0 时 derotation 是单位阵、rotate=0,
+    对所有非旋转书完全无变化(向后兼容)。"""
     chars = sidecar.get("chars") or []
+    derot = page.derotation_matrix
+    rot = page.rotation
     n = 0
     for ch in chars:
         c = ch.get("c", "")
@@ -49,11 +58,13 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
         # baseline:bbox 底部稍上
         baseline_pdf = y1 * sy - char_h_img * sy * 0.10
         x_pdf = x0 * sx
+        pt = fitz.Point(x_pdf, baseline_pdf) * derot   # 视觉坐标 → mediabox 坐标(旋转页关键)
         page.insert_text(
-            fitz.Point(x_pdf, baseline_pdf),
+            pt,
             c,
             fontname="japan",
             fontsize=fs_pdf,
+            rotate=rot,
             color=(0, 0, 0),
             fill=(0, 0, 0),
             render_mode=0,

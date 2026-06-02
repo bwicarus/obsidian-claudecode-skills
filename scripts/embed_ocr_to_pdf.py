@@ -162,6 +162,12 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
     image: 该 page 的原始扫描图(image 坐标系,跟 sidecar 的 img_width/height 同),
     用于检测每 line 左侧是否有 bullet(●)做 per-line offset 修正。
     None 时跳过修正(行为同之前)。"""
+    # OCR bbox 在视觉(渲染后)坐标系,insert_text 用 mediabox 坐标系。旋转页(/Rotate 90 等,
+    # 扫描书常见)若直接喂视觉坐标,落在 mediabox 外的字会被裁掉(中下部文字全丢→选不中)。
+    # derotation_matrix 把视觉点转回 mediabox,rotate=page.rotation 让字形朝向对齐。
+    # rotation=0 时为单位阵 + rotate=0,对非旋转书完全无变化。
+    derot = page.derotation_matrix
+    rot = page.rotation
     n_chars = 0
     for b in sidecar.get("blocks") or []:
         lines = b.get("lines") or []
@@ -243,8 +249,8 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
                                     extra = i - len(segs_for_text) + 1
                                     x_pdf = (px0 + last[1] + (extra - 1) * avg_seg_w) * sx
                                 page.insert_text(
-                                    fitz.Point(x_pdf, baseline_pdf), c,
-                                    fontname="japan", fontsize=fs,
+                                    fitz.Point(x_pdf, baseline_pdf) * derot, c,
+                                    fontname="japan", fontsize=fs, rotate=rot,
                                     color=(0, 0, 0), fill=(0, 0, 0),
                                     render_mode=0, fill_opacity=0, stroke_opacity=0,
                                 )
@@ -279,10 +285,11 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float,
                 if c.isspace():
                     continue
                 page.insert_text(
-                    fitz.Point(x, baseline),
+                    fitz.Point(x, baseline) * derot,
                     c,
                     fontname="japan",
                     fontsize=fs,
+                    rotate=rot,
                     color=(0, 0, 0),
                     fill=(0, 0, 0),
                     render_mode=0,
