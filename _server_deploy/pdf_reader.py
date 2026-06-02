@@ -1317,6 +1317,11 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     # 正文字号基准：非空格 char 高度中位数。明显大于它的句子（章节标题/单元名）不当学习句子
     _hs = sorted((c["y1"] - c["y0"]) for c in chars if not c.get("sp") and c["y1"] > c["y0"])
     median_h = _hs[len(_hs) // 2] if _hs else 0
+    # 页面文本右边界 / 宽度:用于「短行=独立行」判定(标题/版权/ISBN/居中行等没顶到右边界 → 不该并入下一行)
+    _x1s = [c["x1"] for c in chars if not c.get("sp") and c["x1"] > c["x0"]]
+    _x0s = [c["x0"] for c in chars if not c.get("sp") and c["x1"] > c["x0"]]
+    right_edge = max(_x1s) if _x1s else 0
+    text_width = max(1.0, right_edge - (min(_x0s) if _x0s else 0))
 
     sentences: list[dict] = []
     cur_chars: list[dict] = []
@@ -1441,6 +1446,7 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         return bool(_list_head_re.match(s))
 
     prev = None
+    prev_ns = None   # 上一个非空格字符(换行/短行判定用,避开行尾空格)
     pending_period = False   # 上一字符是 .，需要看下一字符决定切不切
     for i, ch in enumerate(chars):
         c = ch.get("c", "")
@@ -1465,10 +1471,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
             pbk, cbk = prev.get("bk"), ch.get("bk")
             if pbk is not None and cbk is not None and pbk != cbk:   # rawdict 块变即切(斜体 w=-1 也不漏)
                 _flush_word(); _flush_sentence()
-        # 跨行检测：行间距 > 1.5× 行高 → 段落分界（新句）
-        if prev and not prev.get("sp") and not ch.get("sp"):
-            prev_h = max(0.1, prev["y1"] - prev["y0"])
-            line_gap = ch["y0"] - prev["y0"]
+        # 跨行检测：用「上一个非空格字符」prev_ns(行尾常有空格 char,用 prev 会漏判换行 → 整块并成大框)
+        if prev_ns is not None and not ch.get("sp"):
+            prev_h = max(0.1, prev_ns["y1"] - prev_ns["y0"])
+            line_gap = ch["y0"] - prev_ns["y0"]
             if line_gap > prev_h * 1.5:
                 # 大段落间距 → 切句
                 _flush_word()
@@ -1478,6 +1484,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 if _is_list_head(i):
                     # 新行是列表项(10.1 / 10. / a) …) → 独立成句,不并进上一项(否则整列表框成一大块)
                     _flush_word(); _flush_sentence()
+                elif (right_edge - prev_ns.get("x1", 0)) > text_width * 0.30:
+                    # 上一行明显没顶到右边界(>30% 短) = 独立短行(标题/版权/ISBN/居中行/段末) → 断句,
+                    # 不并入下一行(否则标题块那几行被并成一个跨行大框)。正文顶格换行的行≈到右边界,不受影响。
+                    _flush_word(); _flush_sentence()
                 elif cur_word_letters and cur_word_letters[-1] == "-":
                     cur_word_letters.pop()   # 行尾连字符 → 拼回
                 else:
@@ -1486,27 +1496,27 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         if c in "•▪▶◆●○◇":
             _flush_word()
             _flush_sentence()
-            cur_chars.append(ch); prev = ch; continue
+            cur_chars.append(ch); prev = ch; prev_ns = ch; continue
         if ch.get("sp"):
             _flush_word()
-            cur_chars.append(ch); prev = ch; continue
+            cur_chars.append(ch); prev = ch; continue   # 空格不更新 prev_ns
         # 句末标点
         if c in "!?。！？":
             _flush_word()
             cur_chars.append(ch)
             _flush_sentence()
-            prev = ch; continue
+            prev = ch; prev_ns = ch; continue
         if c == ".":
             _flush_word()
             cur_chars.append(ch)
             pending_period = True   # 推迟切句决策到下一字符
-            prev = ch; continue
+            prev = ch; prev_ns = ch; continue
         if c.isalpha() or c in "'-":
             cur_word_letters.append(c)
         else:
             _flush_word()
         cur_chars.append(ch)
-        prev = ch
+        prev = ch; prev_ns = ch
     _flush_word()
     # 文件末尾：如果有 pending period 也切
     if pending_period:
@@ -1717,6 +1727,7 @@ def pdf_api_page_vocab_marks():
                             "c": c, "x0": round(bb[0],2), "y0": round(bb[1],2),
                             "x1": round(bb[2],2), "y1": round(bb[3],2),
                             "sp": 1 if c.isspace() else 0,
+                            "bk": _bi,   # 块号:句子检测靠它跨块切句(之前漏了→不同块被并成跨多行大框)
                         })
                 _apply_jp_tokenize(chars, _ls, len(chars), _bi, _li)   # CJK 行补 w（JP 生词下划线要按词）
         _merge_favorite_phrases(chars)   # 收藏词组合并 w
