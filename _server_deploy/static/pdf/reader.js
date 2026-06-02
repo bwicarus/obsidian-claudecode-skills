@@ -1021,11 +1021,13 @@ async function _onOrientChange() {
 window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
 try { window.matchMedia('(orientation: portrait)').addEventListener('change', () => setTimeout(_onOrientChange, 300)); } catch (_) {}
 
-// ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF + 笔迹）──
-async function _applyZoom(newScale) {
+// ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF → 清晰）──
+// focal = {fx,fy,cx,cy,s0}:fx/fy=捏合焦点在内容坐标(旧 s0 布局下);cx/cy=该点的屏幕位置;
+// 重渲后把它放回同一屏幕位置(焦点保持,缩放不跳)。无 focal(旋转恢复)→ 按相对位置保持。
+async function _applyZoom(newScale, focal) {
   if (_refitBusy || !pdfDoc) return;
   newScale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, newScale));   // 下限放宽:可缩到比 fit-width 更小
-  if (Math.abs(newScale - scale) < 0.01) return;
+  if (Math.abs(newScale - scale) < 0.005) return;
   _refitBusy = true;
   try {
     const main = document.getElementById('main');
@@ -1033,7 +1035,7 @@ async function _applyZoom(newScale) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
-    if (readMode === 'continuous') {
+    if (readMode !== 'single') {           // 连续 + 双页 都重建滚动列表(原来只判 continuous 漏了 spread)
       await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
@@ -1041,7 +1043,14 @@ async function _applyZoom(newScale) {
       await renderPage(currentPage);
     }
     requestAnimationFrame(() => {
-      if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight);
+      if (focal && focal.s0 > 0) {
+        const mr = main.getBoundingClientRect();
+        const k = newScale / focal.s0;   // 内容坐标随 scale 等比放大
+        main.scrollLeft = Math.max(0, focal.fx * k - (focal.cx - mr.left));
+        main.scrollTop  = Math.max(0, focal.fy * k - (focal.cy - mr.top));
+      } else if (container && container.offsetHeight) {
+        main.scrollTop = Math.floor(ratio * container.offsetHeight);   // 无焦点:保持相对竖直位置
+      }
       _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
       window._rememberOrientLayout?.();   // 手动缩放记进当前方向(若开了旋转自动切换)
     });
@@ -1060,11 +1069,18 @@ function _setupPinchZoom() {
   main.addEventListener('touchstart', (e) => {
     if (e.touches.length === 2) {
       const [a, b] = e.touches;
+      const mr = main.getBoundingClientRect();
+      const cx = (a.clientX + b.clientX) / 2, cy = (a.clientY + b.clientY) / 2;
+      // 焦点固定在**起始**两指中点:内容坐标(含滚动;#main padding=0 → 内容坐标=page-container 坐标)
       _pinch = {
         d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
         s0: scale, target: scale,
-        cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2,
+        fx: main.scrollLeft + (cx - mr.left),
+        fy: main.scrollTop + (cy - mr.top),
+        cx, cy,
       };
+      const pc = document.getElementById('page-container');
+      pc.style.transformOrigin = _pinch.fx + 'px ' + _pinch.fy + 'px';   // 整个手势固定不变 → 焦点视觉锁定
       e.preventDefault();
     }
   }, { passive: false });
@@ -1074,19 +1090,19 @@ function _setupPinchZoom() {
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       _pinch.target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
-      // 实时预览：CSS transform 缩放 page-container（临时位图拉伸，松手后重渲染清晰）
-      const pc = document.getElementById('page-container');
-      const mr = main.getBoundingClientRect();
-      pc.style.transformOrigin = (main.scrollLeft + _pinch.cx - mr.left) + 'px ' + (main.scrollTop + _pinch.cy - mr.top) + 'px';
-      pc.style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
+      // 实时预览:只改 scale(origin 起始已定),焦点点视觉不动;松手后按新倍率重渲染→清晰
+      document.getElementById('page-container').style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
     }
   }, { passive: false });
   const endPinch = () => {
     if (!_pinch) return;
-    const target = _pinch.target; _pinch = null;
+    const p = _pinch; _pinch = null;
     const pc = document.getElementById('page-container');
     pc.style.transform = ''; pc.style.transformOrigin = '';
-    if (Math.abs(target - scale) > 0.02) _applyZoom(target);
+    if (Math.abs(p.target - scale) > 0.01) {
+      // 焦点保持:把起始焦点内容点放回起始屏幕位置(cx,cy),缩放不跳
+      _applyZoom(p.target, { fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, s0: p.s0 });
+    }
   };
   main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
   main.addEventListener('touchcancel', endPinch, { passive: false });
