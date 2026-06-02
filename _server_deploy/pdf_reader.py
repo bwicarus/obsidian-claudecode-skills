@@ -1300,18 +1300,35 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     cur_lemmas: set[str] = set()
     cur_word_letters: list[str] = []
     cur_total_words: int = 0
+    _jptag = _get_jp_tagger()   # 日语段用 fugashi 真分词计数（汉字/假名也算 isalpha，整段无空格会被当 1 个词）
 
     def _flush_word():
         nonlocal cur_word_letters, cur_total_words
-        if cur_word_letters:
-            w = "".join(cur_word_letters).lower()
-            # ≤2 字母的词（am/is/he/we/it/of/to… 功能词）默认掌握，不算生词
-            if len(w) > 2 and w in form_to_lemma_unmastered:
-                cur_lemmas.add(form_to_lemma_unmastered[w])
-            # 计数实际单词（不限英文）
-            if len(w) >= 2 or w.isalpha():
-                cur_total_words += 1
+        if not cur_word_letters:
+            return
+        w = "".join(cur_word_letters)
         cur_word_letters = []
+        # 含日语(平/片假名/汉字) → fugashi 分词，按**真 token** 计数 + 查未掌握（跟下划线同一套，
+        # 否则「確認しますがその他…」整段被当 1 个"词"，threshold/min_words 全失效 → 误框/漏框）
+        if re.search(r"[぀-ゟ゠-ヿ㐀-鿿]", w):
+            if _jptag:
+                for tok in _jptag(w):
+                    surf = (tok.surface or "").strip()
+                    if not surf:
+                        continue
+                    cur_total_words += 1
+                    base = (getattr(tok.feature, "lemma", "") or surf)
+                    if surf.lower() in form_to_lemma_unmastered:
+                        cur_lemmas.add(form_to_lemma_unmastered[surf.lower()])
+                    elif base.lower() in form_to_lemma_unmastered:
+                        cur_lemmas.add(form_to_lemma_unmastered[base.lower()])
+            return
+        wl = w.lower()
+        # ≤2 字母的词（am/is/he/we/it/of/to… 功能词）默认掌握，不算生词
+        if len(wl) > 2 and wl in form_to_lemma_unmastered:
+            cur_lemmas.add(form_to_lemma_unmastered[wl])
+        if len(wl) >= 2 or wl.isalpha():
+            cur_total_words += 1
 
     def _sentence_rects(sent_chars: list[dict]) -> list[list[float]]:
         rects = []
