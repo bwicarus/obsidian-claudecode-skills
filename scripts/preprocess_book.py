@@ -10,7 +10,7 @@ detached 运行(start_new_session) → 关网页 / webapp 重启都不中断；O
 
 用法: python3 scripts/preprocess_book.py --pdf <PDF 绝对路径>
 """
-import argparse, hashlib, json, os, shutil, statistics, subprocess, sys, time
+import argparse, hashlib, io, json, os, shutil, statistics, subprocess, sys, time
 from pathlib import Path
 
 import fitz  # PyMuPDF（webapp 同款）
@@ -74,18 +74,31 @@ def _needs_width_norm(pdf: Path, tol: float = 0.02) -> bool:
     return (max(ws) - min(ws)) / max(ws) > tol
 
 
-def normalize_page_widths(src_path: Path, out_path: Path,
-                          raster_scale: float = 2.0, jpg_quality: int = 82) -> bool:
-    """把每页「视觉(含 /Rotate)宽」统一成中位宽,使前端单一全局 scale 即可等宽显示
-    (不碰浮层锚定那套脆弱布局)。
+def _enhance_jpeg(pix, jpg_quality: int) -> bytes:
+    """对一页渲染图做"字迹更清晰"增强:UnsharpMask 锐化 + 轻对比度,**保留色彩**
+    (封面/橙色边框不变灰)。实测模糊扫描书字迹明显变黑变利、网点不崩、颜色不偏。"""
+    from PIL import Image, ImageFilter, ImageEnhance
+    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    img = img.filter(ImageFilter.UnsharpMask(radius=2.2, percent=170, threshold=2))
+    img = ImageEnhance.Contrast(img).enhance(1.35)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=jpg_quality)
+    return buf.getvalue()
 
-    **用栅格化(get_pixmap)而非 show_pdf_page**:get_pixmap 自动应用 /Rotate → 输出正立图,
-    顺带把旋转烘焙成 rotation=0,新页就是一张正立图。这样:
-      ① 等宽(视觉宽=中位宽);② rotation=0 → 后续 embed 不必 derotation、坐标平凡(旋转页
-         show_pdf_page 嵌文字 save 后会整体错位,栅格化根治);③ 正立 + 铺满无 letterbox。
-    raster_scale=2 渲染 2× 显示分辨率保证缩放清晰;JPEG 压缩控体积(实测 18 页扫描书 26→33MB)。
-    **务必在 OCR 之后调用**:OCR 要在锐利原图上做(栅格化会有一次重采样,降低 OCR 命中率);
-    embed 时 sidecar(原图渲染坐标)按 sx=页宽/sidecar.img_w 映射到栅格页,无关其像素分辨率。
+
+def rebuild_pages(src_path: Path, out_path: Path, uniform: bool = True,
+                  enhance: bool = False, raster_scale: float = 2.0,
+                  jpg_quality: int = 82) -> bool:
+    """重建扫描书每页(栅格化)。两个独立开关:
+      uniform=True  → 视觉宽统一成中位宽(前端单一全局 scale 即等宽显示,不碰浮层锚定);
+      enhance=True  → 锐化+对比增强,让模糊字迹更清晰(见 _enhance_jpeg)。
+
+    **用栅格化(get_pixmap)而非 show_pdf_page**:get_pixmap 自动应用 /Rotate → 正立图,
+    顺带烘焙旋转成 rotation=0 → 后续 embed 不必 derotation、坐标平凡(旋转页 show_pdf_page
+    嵌文字 save 后会整体错位,栅格化根治);且正立铺满无 letterbox。
+    raster_scale=2 渲 2× 显示分辨率保证缩放清晰;JPEG 压缩控体积。
+    **务必在 OCR 之后调用**:OCR 要在锐利原图上做(栅格化有一次重采样会降命中率);embed 时
+    sidecar(原图渲染坐标)按 sx=页宽/sidecar.img_w 映射到重建页,与其像素分辨率无关。
     失败返回 False(不动原书)。"""
     src = fitz.open(str(src_path))
     try:
@@ -99,13 +112,14 @@ def normalize_page_widths(src_path: Path, out_path: Path,
                 vw, vh = p.rect.width, p.rect.height           # 视觉尺寸
                 if vw <= 0 or vh <= 0:
                     return False
-                k = target / vw
+                k = (target / vw) if uniform else 1.0
                 mat = fitz.Matrix(k * raster_scale, k * raster_scale)
                 pix = p.get_pixmap(matrix=mat)                 # 自动应用 /Rotate → 正立
-                jpg = pix.tobytes("jpg", jpg_quality=jpg_quality)
+                jpg = _enhance_jpeg(pix, jpg_quality) if enhance \
+                    else pix.tobytes("jpg", jpg_quality=jpg_quality)
                 del pix
-                npg = dst.new_page(width=vw * k, height=vh * k)  # 视觉宽=target,rotation=0
-                npg.insert_image(npg.rect, stream=jpg)           # 嵌 JPEG(压缩,铺满)
+                npg = dst.new_page(width=vw * k, height=vh * k)  # rotation=0;uniform 时宽=target
+                npg.insert_image(npg.rect, stream=jpg)
             dst.save(str(out_path), garbage=4, deflate=True)
         finally:
             dst.close()
@@ -126,6 +140,8 @@ def main() -> int:
                          "manga=manga-ocr(漫画气泡/竖排/手写体,慢,~40s/页 CPU)")
     ap.add_argument("--no-uniform", dest="uniform", action="store_false",
                     help="不统一页宽(默认:扫描书各页宽参差时归一成等宽+烘焙旋转再 OCR)")
+    ap.add_argument("--enhance", dest="enhance", action="store_true",
+                    help="清晰度增强:栅格化+锐化+对比,让模糊扫描字迹更清晰(由「增加清晰度」按钮触发)")
     a = ap.parse_args()
     pdf = Path(a.pdf)
     sha = _sha(pdf)
@@ -166,13 +182,15 @@ def main() -> int:
         # 统一页宽(你的思路)。关键顺序:**先在锐利原图上 OCR,再归一,最后把 OCR 结果嵌到归一页**。
         # 不能先归一再 OCR——show_pdf_page 重排会多一次重采样把图变糊,Vision 识别率暴跌(实测 126→34)。
         uniform = bool(a.uniform and _needs_width_norm(clean_src))
-        # 先确保 pdf = 干净原图(无文字层),在它上面 OCR 质量最好;归一推迟到 OCR 之后。
+        enhance = bool(a.enhance)
+        rebuild = uniform or enhance                   # 任一为真都要栅格化重建页
+        # 先确保 pdf = 干净原图(无文字层),在它上面 OCR 质量最好;重建推迟到 OCR 之后。
         if prev_ocrd:
             shutil.copy2(str(orig), str(pdf))          # 从备份恢复干净原图
             for d in (VISION_DIR / sha, MOKURO_DIR / sha):
                 shutil.rmtree(d, ignore_errors=True)   # 重新 OCR
-        elif uniform and not orig.exists():
-            shutil.copy2(str(pdf), str(orig))          # 首次:先备份真·原始(归一会改 pdf)
+        elif rebuild and not orig.exists():
+            shutil.copy2(str(pdf), str(orig))          # 首次:先备份真·原始(重建会改 pdf)
 
         total = fitz.open(str(pdf)).page_count
         _write(sha, phase="ocr", percent=0, total=total, completed=0,
@@ -221,14 +239,16 @@ def main() -> int:
                          + (f"：{sample_err}" if sample_err else ""))
             return 1
 
-        # ①.5 统一页宽：OCR 已在锐利原图上完成(sidecar=原图渲染坐标)，此刻 pdf 仍是无文字的
-        # 干净原图(归一不会丢字)。归一成等宽 + 烘焙 /Rotate=0。**不清 sidecar**——下面 embed 的
-        # sx=归一页宽/sidecar.img_w，正好把原图坐标等比映射到归一页(无损,且 rot=0 不必 derotation)。
-        if uniform:
-            _write(sha, phase="normalizing", percent=92, msg="统一页宽（烘焙旋转）…")
+        # ①.5 重建页(等宽 / 清晰度增强):OCR 已在锐利原图完成(sidecar=原图渲染坐标),此刻
+        # pdf 仍是无文字的干净原图(栅格化不会丢字)。栅格化烘焙 /Rotate=0。**不清 sidecar**——
+        # 下面 embed 的 sx=重建页宽/sidecar.img_w 把原图坐标等比映射到重建页(rot=0 不必 derotation)。
+        if rebuild:
+            msg = "统一页宽+增强清晰度…" if (uniform and enhance) else \
+                  ("统一页宽（烘焙旋转）…" if uniform else "增强清晰度（锐化）…")
+            _write(sha, phase="normalizing", percent=92, msg=msg)
             tmp = STATUS_DIR / f"{sha}.norm.pdf"
-            if not normalize_page_widths(pdf, tmp):
-                _write(sha, phase="error", error="统一页宽失败（原书未改动）")
+            if not rebuild_pages(pdf, tmp, uniform=uniform, enhance=enhance):
+                _write(sha, phase="error", error="页重建失败（原书未改动）")
                 return 1
             shutil.move(str(tmp), str(pdf))
 

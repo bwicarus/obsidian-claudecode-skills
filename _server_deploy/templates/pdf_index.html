@@ -52,6 +52,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
         <div style="display:flex;gap:6px;flex-shrink:0">
           <button class="prep-btn" onclick="preprocess(event,this,'vision')" title="印刷/文档书：Google Vision OCR，快（~2s/页）。已有文字层秒判跳过">📄 文档</button>
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
+          <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
         </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
@@ -99,18 +100,19 @@ async function deleteBook(item) {
 }
 
 // ── 预处理（扫描书补文字层）：后台 detached 跑，关网页/重启不中断；前端轮询进度 ──
-async function preprocess(ev, btn, engine) {
+async function preprocess(ev, btn, engine, enhance) {
   ev.stopPropagation();
   const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
   const btns = [...item.querySelectorAll('.prep-btn')];
   const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
   if (engine === 'manga' && !confirm('用 manga-ocr 处理《' + item.dataset.disp + '》？\n适合漫画书（读气泡/竖排/手写体字）。CPU 上较慢（约 40 秒/页），后台跑，关页面不中断。')) return;
+  if (enhance && !confirm('增加《' + item.dataset.disp + '》的清晰度？\n会把扫描页栅格化并锐化（字迹更清晰），同时 OCR 补文字层。后台跑，关页面不中断。')) return;
   btns.forEach(b => b.disabled = true);
   prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '启动中…';
   try {
     const r = await fetch('/pdf/api/preprocess-async', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file: rel, engine: engine || 'vision'}),
+      body: JSON.stringify({file: rel, engine: engine || 'vision', enhance: !!enhance}),
     });
     const d = await r.json();
     if (!d.ok) { msg.textContent = '✗ ' + (d.error || '失败'); btns.forEach(b => b.disabled = false); return; }
