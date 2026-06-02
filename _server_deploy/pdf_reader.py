@@ -487,7 +487,7 @@ def pdf_api_preprocess_status():
     except Exception:
         return jsonify({"phase": "idle"})
     # 存活检测：进行中的相位但后台进程已退出（崩溃/OOM/被杀）→ 别让进度条永远卡着，报错
-    if st.get("phase") in ("detecting", "ocr", "embedding"):
+    if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding"):
         pid = st.get("pid")
         stale = (_time.time() - st.get("updated_at", 0)) > 30
         if pid is not None and stale and not _pid_alive(pid):
@@ -510,7 +510,7 @@ def pdf_api_preprocess_async():
         st = json.loads(sp.read_text("utf-8"))
         # 真正在跑（进程活着 / 或刚更新过且没记 pid 的老状态）才拦重复启动；
         # 死进程留下的陈旧 in-progress 状态允许直接重跑。
-        if st.get("phase") in ("detecting", "ocr", "embedding"):
+        if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding"):
             pid = st.get("pid")
             fresh = (_time.time() - st.get("updated_at", 0)) < 120
             alive = _pid_alive(pid) if pid is not None else fresh
@@ -649,7 +649,7 @@ def pdf_api_preprocess_active():
                 st = json.loads(sp.read_text("utf-8"))
             except Exception:
                 continue
-            if st.get("phase") not in ("detecting", "ocr", "embedding"):
+            if st.get("phase") not in ("detecting", "normalizing", "ocr", "embedding"):
                 continue
             pid = st.get("pid")
             stale = (_time.time() - st.get("updated_at", 0)) > 30
