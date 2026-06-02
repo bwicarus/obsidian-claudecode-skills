@@ -228,6 +228,19 @@ function _jpInflectHtml(inf, word) {
   if (!b && !m) return '';
   return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
+// 英语原型 + 变形 → HTML 行（跟日语变形行同款样式）。clicked=用户点的词；lemma=ECDICT 还原的原型；
+// forms=该词的各种屈折(复数/过去式/比较级…)。点的是变形词时显「原型 run」，并列出其余变形 chip。
+function _enFormsHtml(lemma, forms, clicked) {
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  lemma = (lemma || '').toLowerCase();
+  const c = (clicked || '').toLowerCase();
+  const fs = [...new Set((forms || []).map(f => String(f || '').toLowerCase()).filter(Boolean))]
+    .filter(f => f !== lemma).slice(0, 8);
+  const b = (lemma && c && c !== lemma) ? '原型 <b>' + esc(lemma) + '</b>' : '';
+  const m = fs.length ? '变形 <span class="jp-inflect-mark">' + fs.map(esc).join('・') + '</span>' : '';
+  if (!b && !m) return '';
+  return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+}
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
@@ -254,8 +267,8 @@ window.showWordPopover = async (word, ctx) => {
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ变 等）
     const posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
-    // 变形分析（日语）：原形 + 语法标签（过去た/否定ない/て形…）
-    const inflectHtml = _jpInflectHtml(d.inflect, word);
+    // 变形分析：日语=原形+语法标签（过去た/否定ない/て形…）；英语=原型+各种屈折变形
+    const inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
     // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
     const phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
