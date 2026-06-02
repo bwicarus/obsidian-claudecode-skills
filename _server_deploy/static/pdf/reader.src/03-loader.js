@@ -168,14 +168,10 @@ function _updateCropBtn() {
   if (b) b.classList.toggle('active', _cropActive());
 }
 window.toggleCrop = () => {
-  if (!(_crop.l || _crop.r || _crop.t || _crop.b)) {   // 没配过裁切 → 直接开设置面板
-    _toast?.('先在 ⚙ 设置里设定左右上下隐藏百分比');
-    window.openSettings?.();
-    return;
-  }
-  _cropOn = !_cropOn;
+  _cropOn = !_cropOn;   // 直接切换开/关(去边百分比只在 ⚙ 设置里配,不再点按钮就跳设置)
   try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
   _updateCropBtn();
+  if (_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) _toast?.('去边已开,但还没设隐藏百分比 → 在 ⚙ 设置里配');
   _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
 };
 // 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边

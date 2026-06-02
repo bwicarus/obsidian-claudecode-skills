@@ -33,11 +33,8 @@ async function loadBookLangs() {
     if (d.ok) BOOK_LANGS = d.langs || [];
   } catch (e) {}
 }
-window.openLangPicker = function() {
-  document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = BOOK_LANGS.includes(c.value); });
-  document.getElementById('lang-mask').style.display = 'flex';
-};
-window.saveLangPicker = async function() {
+window.openLangPicker = function() { window.openSettings?.(); };   // 语言已并入设置面板,旧入口转开设置
+window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮(每本书独立,POST book-langs by FILE_REL)
   const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
   try {
     const r = await fetch('/pdf/api/book-langs', {
@@ -46,8 +43,8 @@ window.saveLangPicker = async function() {
     });
     const d = await r.json();
     if (d.ok) BOOK_LANGS = d.langs || langs;
-  } catch (e) {}
-  document.getElementById('lang-mask').style.display = 'none';
+    (typeof _toast === 'function') && _toast('已保存本书语言：' + (BOOK_LANGS.join(' / ') || '无'));
+  } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
@@ -316,14 +313,10 @@ function _updateCropBtn() {
   if (b) b.classList.toggle('active', _cropActive());
 }
 window.toggleCrop = () => {
-  if (!(_crop.l || _crop.r || _crop.t || _crop.b)) {   // 没配过裁切 → 直接开设置面板
-    _toast?.('先在 ⚙ 设置里设定左右上下隐藏百分比');
-    window.openSettings?.();
-    return;
-  }
-  _cropOn = !_cropOn;
+  _cropOn = !_cropOn;   // 直接切换开/关(去边百分比只在 ⚙ 设置里配,不再点按钮就跳设置)
   try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
   _updateCropBtn();
+  if (_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) _toast?.('去边已开,但还没设隐藏百分比 → 在 ⚙ 设置里配');
   _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
 };
 // 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
@@ -5662,6 +5655,8 @@ window.openSettings = () => {
   // 去边百分比(本书,从已加载的 _crop 回填)
   { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
     g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
+  // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
+  document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
 };

@@ -10,7 +10,7 @@
 html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
 /* 用 dvh 避开 iOS Safari 100vh 包含 toolbar 高度让 header 挤出可视区的 bug */
 #app{display:flex;flex-direction:column;height:100vh;height:100dvh}
-#header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px;flex-wrap:wrap;overflow-x:auto}
+#header{flex:0 0 48px;display:flex;align-items:center;padding:0 14px 0 52px;background:#10162a;border-bottom:1px solid #2a3550;gap:12px;flex-wrap:wrap;overflow-x:auto}/* 左留 52px 给全站 nav.js 的 ☰ */
 /* 文件名不再 flex:1 撑开 → 后面的按钮都紧跟在文件名右侧靠左排，右上角让给侧栏 */
 #header h1{font-size:14px;margin:0;color:#cfe6ff;flex:0 1 auto;max-width:28vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
@@ -525,39 +525,17 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 <body>
 <div id="app">
   <div id="header">
-    <button onclick="location.href='/pdf/'">📚 文件</button>
-    <h1>{{ file_name }}</h1>
+    <h1 onclick="location.href='/pdf/'" title="点击返回 PDF 列表" style="cursor:pointer">{{ file_name }}</h1>
     <button id="spread-toggle" onclick="toggleSpread()" title="双页并排(连续滚动)。再点错开 facing 页(12↔23);第三下回单列连续">⊞ 双页</button>
     <span id="page-scrub" title="左右拖动快速跳页 · 点击输入页码"><b id="page-cur">{{ page }}</b><span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span></span>
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
-    <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
     <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
     <button id="crop-toggle" onclick="toggleCrop()" title="去边阅读模式：隐藏每页左/右/上/下边距（在 ⚙ 设置里配各边百分比）">✂️ 去边</button>
     <button onclick="openSearch()" title="全文搜索（全书）">🔍</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
-  <!-- 本书语言选择 -->
-  <div id="lang-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;
-       align-items:center;justify-content:center;z-index:251"
-       onclick="if(event.target===this) document.getElementById('lang-mask').style.display='none'">
-    <div style="background:#161b22;border:1px solid #2d333b;border-radius:10px;padding:18px;
-         min-width:260px;max-width:90vw;color:#e6edf3;">
-      <div style="font-size:15px;font-weight:600;margin-bottom:4px;">🌐 本书文本语言</div>
-      <div style="font-size:12px;color:#8a9bb4;margin-bottom:12px;">
-        勾选书里出现的语言。决定点词查哪本词典:日语→中日(读音+中文),英语→英汉,中文→不查。
-      </div>
-      <div id="lang-checks" style="display:flex;flex-direction:column;gap:10px;font-size:14px;">
-        <label style="cursor:pointer;"><input type="checkbox" value="en" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">英语 English</label>
-        <label style="cursor:pointer;"><input type="checkbox" value="ja" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">日语 日本語</label>
-        <label style="cursor:pointer;"><input type="checkbox" value="zh" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;">中文(母语,不查词)</label>
-      </div>
-      <div style="margin-top:16px;text-align:right;">
-        <button onclick="document.getElementById('lang-mask').style.display='none'" style="margin-right:8px;">取消</button>
-        <button onclick="saveLangPicker()" style="background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:6px;">保存</button>
-      </div>
-    </div>
-  </div>
+  <!-- 本书语言选择已移入 ⚙ 设置面板 -->
   <div id="main">
     <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;
          background:#0d1117ee;flex-direction:column;align-items:center;justify-content:center;
@@ -707,6 +685,14 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
       <label style="flex:1;font-size:11px;color:#8a9bb4">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
     </div>
     <button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>
+    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 本书文本语言（决定点词查哪本词典：日语→中日，英语→英汉，中文→不查；<b>每本书独立</b>）</label>
+    <div id="lang-checks" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">
+      <label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>
+      <label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>
+      <label style="cursor:pointer"><input type="checkbox" value="zh" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">中文(不查)</label>
+    </div>
+    <button onclick="saveLangPicker()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">保存本书语言</button>
     <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
     <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">

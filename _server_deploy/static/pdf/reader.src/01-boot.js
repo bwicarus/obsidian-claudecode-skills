@@ -33,11 +33,8 @@ async function loadBookLangs() {
     if (d.ok) BOOK_LANGS = d.langs || [];
   } catch (e) {}
 }
-window.openLangPicker = function() {
-  document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = BOOK_LANGS.includes(c.value); });
-  document.getElementById('lang-mask').style.display = 'flex';
-};
-window.saveLangPicker = async function() {
+window.openLangPicker = function() { window.openSettings?.(); };   // 语言已并入设置面板,旧入口转开设置
+window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮(每本书独立,POST book-langs by FILE_REL)
   const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);
   try {
     const r = await fetch('/pdf/api/book-langs', {
@@ -46,8 +43,8 @@ window.saveLangPicker = async function() {
     });
     const d = await r.json();
     if (d.ok) BOOK_LANGS = d.langs || langs;
-  } catch (e) {}
-  document.getElementById('lang-mask').style.display = 'none';
+    (typeof _toast === 'function') && _toast('已保存本书语言：' + (BOOK_LANGS.join(' / ') || '无'));
+  } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;

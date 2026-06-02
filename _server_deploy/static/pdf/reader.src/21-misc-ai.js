@@ -86,6 +86,8 @@ window.openSettings = () => {
   // 去边百分比(本书,从已加载的 _crop 回填)
   { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
     g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
+  // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
+  document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
 };
