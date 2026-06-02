@@ -953,9 +953,11 @@ def pdf_api_page_chars():
         chars, page_w, page_h, furigana = res
         _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）；live 应用不进缓存
         # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
+        _aj = _page_allows_ja(chars, rel)   # 该页是否日语(中文书纯汉字 → 否,免撞日语词库)
         vocab_marks = _build_vocab_marks(chars)
-        vocab_marks += _build_jp_vocab_marks(chars)   # 日语生词下划线(查过的 JP 词)
-        sentences = _build_unmastered_sentences(chars, page_h=page_h)
+        if _aj:
+            vocab_marks += _build_jp_vocab_marks(chars)   # 日语生词下划线(查过的 JP 词)
+        sentences = _build_unmastered_sentences(chars, page_h=page_h, allow_ja=_aj)
         for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
             if ts.get("rects") and ts.get("page", page) == page:
                 sentences.append(ts)
@@ -978,6 +980,24 @@ def pdf_api_page_chars():
         return resp
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+def _page_allows_ja(chars: list[dict], rel: str) -> bool:
+    """是否对该页做日语分词/匹配。声明了 ja → 是；否则按**假名比例**判：中文书纯汉字(无假名)→ 否
+    (免中文/日语共用汉字时，中文书的汉字撞上日语词库 → 误下划线/误框)。日语正文假名占比高。"""
+    if "ja" in (_book_langs_for(rel) or []):
+        return True
+    kana = cjk = 0
+    for c in chars:
+        ch = c.get("c", "")
+        if not ch:
+            continue
+        o = ord(ch[0])
+        if 0x3040 <= o <= 0x30FF:   # 平/片假名
+            kana += 1; cjk += 1
+        elif 0x4E00 <= o <= 0x9FFF:   # 汉字
+            cjk += 1
+    return cjk > 0 and (kana / cjk) > 0.06   # 有相当比例假名 = 日语；纯汉字(中文) → 不当日语
 
 
 def _build_vocab_marks(chars: list[dict]) -> list[dict]:
@@ -1266,12 +1286,13 @@ def _merge_favorite_phrases(chars: list[dict]) -> None:
             start = k + 1
 
 
-def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10, page_h: float = 0) -> list[dict]:
+def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10, page_h: float = 0, allow_ja: bool = True) -> list[dict]:
     """识别需要标注的句子。判定条件：
       - 至少 threshold 个未掌握 lemma（默认 3）
       - 句子总词数 > min_words - 1（默认 10，即 ≥ 10 词）
     返回 [{text, rects, lemmas, count, total_words, last_char}]
     句子边界 = . ! ? 。！？ / 列表标记 • / 段落分界（行间距 > 1.5× 行高）
+    allow_ja=False（中文书等非日语 CJK 页）→ 不对 CJK 段做日语分词/匹配（免中文汉字撞日语词库）。
     """
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
@@ -1284,11 +1305,13 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     idx = vocab_index.index()
     if not idx:
         return []
-    # 未掌握的 forms 映射到 lemma
+    # 未掌握的 forms 映射到 lemma。**排除超常见词**(BNC 高频 the/for/will/course…)：它们就算被查过
+    # 也不该把句子凑到阈值（否则只有 1 个真生词的句子被误框）。freq_bnc=0 = 未排名/生僻 → 保留计数。
     form_to_lemma_unmastered = {
         form: info["lemma"]
         for form, info in idx.items()
         if info.get("label_slug") and info["label_slug"] != "mastered"
+        and not (0 < int(info.get("freq_bnc", 0) or 0) < 3000)
     }
 
     # 正文字号基准：非空格 char 高度中位数。明显大于它的句子（章节标题/单元名）不当学习句子
@@ -1311,6 +1334,8 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         # 含日语(平/片假名/汉字) → fugashi 分词，按**真 token** 计数 + 查未掌握（跟下划线同一套，
         # 否则「確認しますがその他…」整段被当 1 个"词"，threshold/min_words 全失效 → 误框/漏框）
         if re.search(r"[぀-ゟ゠-ヿ㐀-鿿]", w):
+            if not allow_ja:
+                return   # 中文书等非日语:CJK 段不分词不匹配,免中文汉字撞日语词库(误框)
             if _jptag:
                 for tok in _jptag(w):
                     surf = (tok.surface or "").strip()
@@ -1694,9 +1719,11 @@ def pdf_api_page_vocab_marks():
             vocab_index.index(force_reload=True)
         except Exception:
             pass
+        _aj = _page_allows_ja(chars, rel)   # 中文书纯汉字 → 不当日语,免撞日语词库
         marks = _build_vocab_marks(chars)
-        marks += _build_jp_vocab_marks(chars)   # 日语生词下划线
-        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height)
+        if _aj:
+            marks += _build_jp_vocab_marks(chars)   # 日语生词下划线
+        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height, allow_ja=_aj)
         # **必须跟 page-chars 路由一致**：合并手动翻译句 sidecar + 过滤已删除句。
         # 否则 refreshVocabUnderlinesForAllPages(查词后调) 会用「只有自动生词句」覆盖前端
         # __vocabSentences → 手动翻译形成的 L 框/边框被刷没（本次 bug 根因）。

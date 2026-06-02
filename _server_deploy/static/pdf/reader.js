@@ -1494,7 +1494,7 @@ function renderVocabSentences(pw, sentences) {
     s.__stroke = stroke; s.__fill = fill;
     // hatch 排线 (135° 斜细线)。默认**淡**(alpha≈0x2e≈18%,细 1px,间距 5px)→ 整页多句也不刺眼；
     // 「翻译中」用加深版(strong, alpha 0x88) 配呼吸。
-    const hatch = `repeating-linear-gradient(135deg, ${stroke}2e 0 1px, transparent 1px 5px)`;
+    const hatch = `repeating-linear-gradient(135deg, ${stroke}55 0 1px, transparent 1px 4px)`;
     const hatchStrong = `repeating-linear-gradient(135deg, ${stroke}88 0 1.2px, transparent 1.2px 4px)`;
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
