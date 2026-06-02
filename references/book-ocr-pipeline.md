@@ -239,6 +239,9 @@ python scripts/embed_google_ocr_to_pdf.py --pdf "<原PDF>" [--out <输出>] [--s
 11. **mokuro 跑完删 PNG**：每页 render 出的 `p<num>.png` OCR 完即 `unlink` 省空间，只留 JSON sidecar。
 12. **watchdog sidecar sha 写死**：`SIDECAR_DIR` 硬编码当前书的 sha，换书要改脚本。
 13. **service 硬编码书名**：`book-ocr.service` 的 `ExecStart` 写死具体 PDF + mokuro venv，换书/切 Vision 要改 unit 重新 `daemon-reload`。
+14. **巨幅扫描页把 Vision 撑爆 + OOM（2026-06，料理师1.pdf 实战）**：有的扫描书单页原生尺寸极大（料理师1：`2227×3242 pt`），固定 `--dpi 300` 渲染 → `9280×13509 px / 单页 PNG 49MB`，base64 后请求体 ~66MB **远超 Vision API 上限**（`SSLError: Max retries exceeded` 上传超时反复重试），且 10 个 worker 同时各持一张 49MB pixmap 直接把内存吃光 → **编排进程被 OOM 杀**，状态停在 `ocr` 无终态 → 前端进度条永久卡住。修复：`google_vision_ocr.py` 渲染改 **按 DPI 但长边封顶 `--max-long-side`（默 4000）等比缩小** + **上传改 JPEG（`--jpeg-quality` 默 90）**——49MB→1.2MB，OCR 质量无可感知损失；正常尺寸书（A4 842pt → 3508px < 4000）不受影响仍 300dpi。
+15. **断点续传把"报错页"误当完成**：旧逻辑 `todo = 没有 p*.json 的页`，但报错页也写了带 `error` 的 `p*.json` → 重跑永久跳过它，错误页一直缺 OCR。改 `_page_done()` 只把**成功（无 `error` 键）的页**算完成，错误页重跑。配合 `ocr_one_page` 对 SSL/连接/超时**重试 3 次**（退避 1.5/3s），瞬时网络抖动当场自愈。
+16. **全页失败别动原书**：OCR 子进程整本都 SSLError 时仍 `return 0`（不抛异常）。`preprocess_book.py` 在 OCR 后统计 sidecar，**0 页有文字 → 报 `error`，不嵌入空文字层、不替换原书**，避免把好书换成"有壳无字"的 PDF。
 
 ---
 
@@ -252,7 +255,7 @@ python scripts/embed_google_ocr_to_pdf.py --pdf "<原PDF>" [--out <输出>] [--s
 OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。现在在 PDF 阅读器**文件列表页**（`/pdf/`）每本书加了 🔧 **预处理** 按钮 + 长按删除，把现有脚本编排起来（**不重写 OCR**）：
 
 - **编排器 `scripts/preprocess_book.py --pdf <绝对路径>`**（纯粘合）：① `has_text_layer`（抽样 8 页累计可提取文字 ≥20 字符）检测；有 → 写 `done has_text` 直接跳过。② 无 → `subprocess` 跑 `google_vision_ocr.py`（现成，断点续传）边跑边把它的 `progress.json` 同步进状态。③ `embed_google_ocr_to_pdf.py`（现成）嵌入不可见文字层到库外临时文件。④ **原地替换**原 PDF（先备份到 `state/book-preprocess/<sha>.orig.pdf`，**不放 vault 以免污染书列表**）。状态全程写 `state/book-preprocess/<sha>.json`（`<sha>`=OCR 流水线同款 `sha1(resolve路径)[:16]`）。
-- **路由（`pdf_reader.py`）**：`POST /api/preprocess-async`（用 `APP_PYTHON` + `start_new_session=True` **detached** 起编排器 → 关网页/webapp 重启都不中断；状态文件显示在跑 <120s 则不重复启）；`GET /api/preprocess-status?file=`（读状态文件，文件驱动 → 重启不丢进度）；`POST /api/delete-pdf`（删 PDF + 清 OCR/预处理/备份 sidecar，`_safe_vault_path` 挡路径穿越）。
+- **路由（`pdf_reader.py`）**：`POST /api/preprocess-async`（用 `APP_PYTHON` + `start_new_session=True` **detached** 起编排器 → 关网页/webapp 重启都不中断；重复启动守卫**按进程存活判定**：状态里 `pid` 进程还活着才拦，死进程留的陈旧 in-progress 状态允许直接重跑）；`GET /api/preprocess-status?file=`（读状态文件，文件驱动 → 重启不丢进度；**存活检测**：进行中相位但 `pid` 进程已退出 [`os.kill(pid,0)` 不存在] 且 >30s 未更新 → 返回 `error` 让进度条停在 ✗ 而非永久卡住）；`POST /api/delete-pdf`（删 PDF + 清 OCR/预处理/备份 sidecar，`_safe_vault_path` 挡路径穿越）。编排器启动时把自己 `pid` 写进状态文件供前两者用。
 - **前端（`pdf_index.html`）**：每本书 🔧 预处理 → 进度条轮询 `preprocess-status`（轮询断了后台不停，重点按钮 `already:true` 续看）；长按 ~550ms / 右键 → 确认删除。
 - **「不中断」三层**：编排器 detached（关网页不停）+ 状态写文件（webapp 重启进度不丢）+ OCR sidecar 断点续传（进程被杀重跑自动续）。
-- ⚠ 默认走 **Google Vision**（烧 GCP 赠金，~2s/页，配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书秒判跳过、零成本。
+- ⚠ 默认走 **Google Vision**（烧 GCP 赠金，~2s/页，配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书秒判跳过、零成本。巨幅扫描页的尺寸/JPEG/重试坑见上面踩坑 14–16。
