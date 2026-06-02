@@ -1884,6 +1884,20 @@ def pdf_api_phrases():
     return jsonify({"ok": True, "phrases": lst, "removed": text})
 
 
+def _en_word_mastered(lemma: str) -> bool:
+    """英语词当前是否「已掌握」(vocab_index label_slug=='mastered')。给单词小框掌握按钮初始态。"""
+    try:
+        import sys
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in sys.path:
+            sys.path.insert(0, str(vp))
+        import vocab_index  # type: ignore
+        info = (vocab_index.index() or {}).get((lemma or "").lower())
+        return bool(info and info.get("label_slug") == "mastered")
+    except Exception:
+        return False
+
+
 @bp.route("/api/dict-quick")
 def pdf_api_dict_quick():
     """单词小框用：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回；
@@ -1982,6 +1996,7 @@ def pdf_api_dict_quick():
         "definition": "\n".join(en_defs[:6]),
         "freq_bnc": ec.get("bnc", 0),
         "audio": audio,
+        "mastered": _en_word_mastered(lemma),   # 掌握按钮初始态(跟日语对称)
     })
 
 

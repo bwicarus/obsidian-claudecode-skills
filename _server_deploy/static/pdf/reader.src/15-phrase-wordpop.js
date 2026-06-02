@@ -261,8 +261,9 @@ window.showWordPopover = async (word, ctx) => {
     if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 这是旧响应,丢弃(防覆盖新词)
     if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
     _wordPopState.lemma = d.lemma || word;
+    _wordPopState.jp = !!d.jp;                // 掌握按钮按语言分流(jp/en 不同 store)
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
-    _wordPopState.mastered = !!d.mastered;   // 日语掌握开关初始态
+    _wordPopState.mastered = !!d.mastered;   // 掌握开关初始态(日英都返回 mastered)
     const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ变 等）
@@ -291,13 +292,12 @@ window.showWordPopover = async (word, ctx) => {
       exHtml +
       '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
       '<div class="wp-actions">' +
-      (d.jp
-        ? '<button id="jp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopJpMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>'
-        : '<button class="wp-anki" onclick="_wordPopAnki(this)">🎴 制 Anki</button>') +
+      // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
+      '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
       '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
-    // 日语词：查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
-    if (d.jp) { try { refreshVocabUnderlinesForAllPages(); } catch (_) {} }
+    // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
+    try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
   } catch (e) {
     if (myseq !== _wordPopSeq) return;   // 旧请求出错也不覆盖当前词
     pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
@@ -328,24 +328,22 @@ window._speakCurWord = () => {
   const w = s.lemma || s.word;
   if (w) _speakOnline(w);
 };
-window._wordPopAnki = (btn) => {
+// 小框「掌握」toggle（日英统一）：未掌握 ↔ 掌握 100 来回切，不关框。
+// 掌握 → 该词不再标生词下划线；按语言走不同 store：日语 jp-vocab-mark(mastered/unknown)，
+// 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
+window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
-  if (btn) { btn.disabled = true; btn.textContent = '🎴 制卡中…'; }
-  addVocabAnki(s.lemma);   // dict-quick 已后台触发笔记生成(数据补全)，制卡复用现成接口
-  setTimeout(() => { const p = document.getElementById('word-pop'); if (p) p.style.display = 'none'; }, 400);
-};
-// 日语小框「✓ 掌握」：标记掌握 → jp-vocab store mastered → 下划线消失
-// 日语「掌握」开关：未掌握↔掌握 100 来回切，不关框（让用户能再点切回）
-window._wordPopJpMaster = (btn) => {
-  const s = _wordPopState; if (!s) return;
-  const w = s.lemma || s.word;   // dict-quick 对日语返回 lemma=原始表层(=store 键)
-  const newMark = s.mastered ? 'unknown' : 'mastered';
+  const w = s.lemma || s.word;
+  const next = !s.mastered;
+  const url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
+  const mark = s.jp ? (next ? 'mastered' : 'unknown') : (next ? 'known' : 'unknown');
   if (btn) btn.disabled = true;
-  fetch('/pdf/api/jp-vocab-mark', {
+  fetch(url, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({word: w, mark: newMark}),
-  }).then(r => r.json()).then(() => {
-    s.mastered = (newMark === 'mastered');
+    body: JSON.stringify({word: w, mark}),
+  }).then(r => r.json()).then((d) => {
+    if (d && d.ok === false) throw new Error(d.error || 'fail');
+    s.mastered = next;
     if (btn) {
       btn.disabled = false;
       btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
@@ -354,7 +352,7 @@ window._wordPopJpMaster = (btn) => {
     }
     try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
     _toast?.(s.mastered ? '已掌握 100，下划线消失' : '已设为未掌握');
-  }).catch(() => { if (btn) btn.disabled = false; });
+  }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
 };
 // 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
 window._wordPopGrammar = () => {
