@@ -527,11 +527,8 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
   <div id="header">
     <button onclick="location.href='/pdf/'">📚 文件</button>
     <h1>{{ file_name }}</h1>
-    <button id="mode-toggle" onclick="toggleReadMode()" title="切换 单页 / 连续滚动">📄 单页</button>
-    <button id="spread-toggle" onclick="toggleSpread()" title="双页并排(连续滚动)。再点错开 facing 页(12,34↔23,45);用单页/连续退出">⊞ 双页</button>
-    <button onclick="changePage(-1)" title="上一页">◀</button>
+    <button id="spread-toggle" onclick="toggleSpread()" title="双页并排(连续滚动)。再点错开 facing 页(12↔23);第三下回单列连续">⊞ 双页</button>
     <span id="page-scrub" title="左右拖动快速跳页 · 点击输入页码"><b id="page-cur">{{ page }}</b><span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span></span>
-    <button onclick="changePage(1)" title="下一页">▶</button>
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
     <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>

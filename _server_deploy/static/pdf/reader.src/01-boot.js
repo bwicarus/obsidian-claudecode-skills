@@ -75,8 +75,10 @@ function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1
 }
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
-  return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
-})();   // 'single' | 'continuous'
+  let v = (m === 'continuous' || m === 'spread') ? m : (localStorage.getItem('pdf-read-mode') || 'continuous');
+  if (v === 'single') v = 'continuous';   // **已取消单页模式**:旧 localStorage/URL 的 single 一律当连续
+  return v;
+})();   // 'continuous' | 'spread'（不再有 'single'）
 let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用
 let _scrollSaveTimer = null;

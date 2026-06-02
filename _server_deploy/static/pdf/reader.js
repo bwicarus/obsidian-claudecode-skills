@@ -75,8 +75,10 @@ function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1
 }
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
-  return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
-})();   // 'single' | 'continuous'
+  let v = (m === 'continuous' || m === 'spread') ? m : (localStorage.getItem('pdf-read-mode') || 'continuous');
+  if (v === 'single') v = 'continuous';   // **已取消单页模式**:旧 localStorage/URL 的 single 一律当连续
+  return v;
+})();   // 'continuous' | 'spread'（不再有 'single'）
 let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用
 let _scrollSaveTimer = null;
@@ -867,13 +869,15 @@ window.toggleReadMode = async () => {
   _updateModeButtons();
   await _applyModeChange(keepPage);
 };
-// 双页(spread):不在双页→进入(offset 0);已在双页→错开 offset 0↔1(facing 页对调);用 ⊞ 反复点切换
+// 双页(spread)按钮：单页/连续切换已删,双页按钮兼任「进入/错开/退出」三态循环——
+// 连续 → 双页(offset0) → 双页(offset1,facing 错开) → 连续。
 window.toggleSpread = async () => {
   const keepPage = currentPage;
-  if (readMode !== 'spread') { readMode = 'spread'; }
-  else { _spreadOffset = _spreadOffset ? 0 : 1; }
+  if (readMode !== 'spread') { readMode = 'spread'; _spreadOffset = 0; }
+  else if (_spreadOffset === 0) { _spreadOffset = 1; }
+  else { readMode = 'continuous'; }      // 第三下回单列连续(取消单页后,这是退出双页的唯一入口)
   try {
-    localStorage.setItem('pdf-read-mode', 'spread');
+    localStorage.setItem('pdf-read-mode', readMode);
     localStorage.setItem(_spreadKey(), String(_spreadOffset));
   } catch (_) {}
   _updateModeButtons();
