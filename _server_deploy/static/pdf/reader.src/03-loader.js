@@ -84,6 +84,7 @@ async function loadPdf() {
     }
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
+    requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
     pdfLoadHide();   // 首页已渲染,撤加载层
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');

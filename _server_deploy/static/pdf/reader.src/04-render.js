@@ -171,6 +171,7 @@ async function _renderPageInto(num, wrap) {
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
   wrap.dataset.loaded = '1';
+  if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
   // 同步 URL + 拉 KG 节点：只在单页模式做
   if (readMode === 'single') {

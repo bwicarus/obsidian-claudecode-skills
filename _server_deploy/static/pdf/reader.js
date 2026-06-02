@@ -230,6 +230,7 @@ async function loadPdf() {
     }
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
+    requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
     pdfLoadHide();   // 首页已渲染,撤加载层
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
@@ -452,6 +453,7 @@ async function _renderPageInto(num, wrap) {
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
   wrap.dataset.loaded = '1';
+  if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
   // 同步 URL + 拉 KG 节点：只在单页模式做
   if (readMode === 'single') {
@@ -837,6 +839,17 @@ function _computeFitScale(v0w, v0h) {
   }
   return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
 }
+// 横向滚动锁:内容宽 ≤ 视口宽(适应/去边/缩小态,页面正好或不足铺满)→ overflow-x:hidden,
+// 左右拖动不再让页面滑动(iOS overflow:auto 的横向橡皮筋也一并禁掉);只有真放大超宽时放开 auto。
+// 先临时设 auto 量真实 scrollWidth(hidden 态会把溢出裁掉量不出),再据此决定锁不锁。
+function _updateMainOverflowX() {
+  const main = document.getElementById('main');
+  if (!main) return;
+  main.style.overflowX = 'auto';
+  const overflow = main.scrollWidth > main.clientWidth + 2;
+  main.style.overflowX = overflow ? 'auto' : 'hidden';
+}
+window._updateMainOverflowX = _updateMainOverflowX;
 function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
@@ -873,6 +886,7 @@ async function _refitToWidth(force) {
       if (container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
+      _updateMainOverflowX();   // 适应/去边后内容铺满宽 → 锁横向拖动
     });
   } finally {
     _refitBusy = false;
@@ -912,7 +926,10 @@ async function _applyZoom(newScale) {
       if (wrap.dataset) wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
-    requestAnimationFrame(() => { if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight); });
+    requestAnimationFrame(() => {
+      if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight);
+      _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
+    });
   } finally { _refitBusy = false; }
 }
 window._applyZoom = _applyZoom;
