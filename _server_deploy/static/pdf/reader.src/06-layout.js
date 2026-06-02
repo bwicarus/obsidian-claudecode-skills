@@ -129,7 +129,11 @@ else window.addEventListener('DOMContentLoaded', _setupResizeWatcher);
 
 // ── 旋转自动切换排版：每本 PDF 按 横/竖屏 各记一套 {排版 readMode, 去边开关 _cropOn, 双页错位 _spreadOffset} ──
 function _autoOrientOn() { try { return localStorage.getItem('pdf-auto-orient') === '1'; } catch (_) { return false; } }
-function _orient() { return (window.innerWidth >= window.innerHeight) ? 'land' : 'port'; }
+function _orient() {
+  // 优先用 matchMedia(旋转时比 innerWidth/Height 更早、更稳定地翻转);取不到再退回尺寸比较
+  try { if (window.matchMedia) return window.matchMedia('(orientation: portrait)').matches ? 'port' : 'land'; } catch (_) {}
+  return (window.innerWidth >= window.innerHeight) ? 'land' : 'port';
+}
 function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
 function _saveOrientLayout(o) {
   // 也存 scale(当前缩放=是否宽度适应/手动放大),恢复时按该方向上次的缩放还原
@@ -160,22 +164,32 @@ async function _applyPendingOrientScale() {
 // 手动改排版/去边后调用：开了自动切换就把当前布局记进当前方向
 window._rememberOrientLayout = function () { if (_autoOrientOn()) _saveOrientLayout(_orient()); };
 let _lastOrient = _orient();
+let _orientBusy = false;
 async function _onOrientChange() {
   const now = _orient();
   if (now === _lastOrient) return;       // 没真转(只是窗口宽变) → 不动
+  window.dlog && window.dlog('orient change: ' + _lastOrient + '→' + now + ' auto=' + _autoOrientOn());
   if (!_autoOrientOn()) { _lastOrient = now; return; }
-  _saveOrientLayout(_lastOrient);        // 先存离开方向的当前布局
-  _lastOrient = now;
-  const lay = _loadOrientLayout(now);
-  if (!lay) return;                      // 新方向没存过 → 保持当前布局
-  if (_applyOrientLayoutVars(lay)) {
-    _updateModeButtons(); _updateCropBtn();
-    await _applyModeChange(currentPage);
-    await _applyPendingOrientScale();   // 还原该方向上次的缩放(宽度适应/手动放大)
-  }
+  if (_orientBusy) return;               // 旋转动画期多次 resize → 防重入
+  _orientBusy = true;
+  try {
+    _saveOrientLayout(_lastOrient);      // 先存离开方向的当前布局
+    _lastOrient = now;
+    const lay = _loadOrientLayout(now);
+    if (!lay) { window.dlog && window.dlog('orient: ' + now + ' 无存档,保持当前'); return; }
+    if (_applyOrientLayoutVars(lay)) {
+      window.dlog && window.dlog('orient: 套用 ' + now + ' = ' + JSON.stringify(lay));
+      _updateModeButtons(); _updateCropBtn();
+      await _applyModeChange(currentPage);
+      await _applyPendingOrientScale();  // 还原该方向上次的缩放(宽度适应/手动放大)
+    }
+  } finally { _orientBusy = false; }
 }
 window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
 try { window.matchMedia('(orientation: portrait)').addEventListener('change', () => setTimeout(_onOrientChange, 300)); } catch (_) {}
+// 兜底:iPad 上 orientationchange/matchMedia 偶尔不触发,但旋转必触发 resize。debounce 后判方向(同样靠 now!==_lastOrient 守卫,只在真转时动)
+let _orientResizeT = 0;
+window.addEventListener('resize', () => { clearTimeout(_orientResizeT); _orientResizeT = setTimeout(_onOrientChange, 280); });
 
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF → 清晰）──
 // focal = {fx,fy,cx,cy,s0}:fx/fy=捏合焦点在内容坐标(旧 s0 布局下);cx/cy=该点的屏幕位置;
