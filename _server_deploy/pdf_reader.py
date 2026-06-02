@@ -487,7 +487,7 @@ def pdf_api_preprocess_status():
     except Exception:
         return jsonify({"phase": "idle"})
     # 存活检测：进行中的相位但后台进程已退出（崩溃/OOM/被杀）→ 别让进度条永远卡着，报错
-    if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding"):
+    if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding", "compressing"):
         pid = st.get("pid")
         stale = (_time.time() - st.get("updated_at", 0)) > 30
         if pid is not None and stale and not _pid_alive(pid):
@@ -510,7 +510,7 @@ def pdf_api_preprocess_async():
         st = json.loads(sp.read_text("utf-8"))
         # 真正在跑（进程活着 / 或刚更新过且没记 pid 的老状态）才拦重复启动；
         # 死进程留下的陈旧 in-progress 状态允许直接重跑。
-        if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding"):
+        if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding", "compressing"):
             pid = st.get("pid")
             fresh = (_time.time() - st.get("updated_at", 0)) < 120
             alive = _pid_alive(pid) if pid is not None else fresh
@@ -533,6 +533,37 @@ def pdf_api_preprocess_async():
     except Exception as ex:
         return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
     return jsonify({"ok": True, "sha": sha, "engine": engine, "enhance": enhance})
+
+
+@bp.route("/api/compress-async", methods=["POST"])
+def pdf_api_compress_async():
+    """智能压缩：detached 子进程跑 scripts/compress_pdf.py(gs 降采样图像+保留文字层+重线性化)。
+    复用 book-preprocess 状态文件 → 进度条/刷新恢复/重复启动守卫跟预处理共用一套。"""
+    import subprocess
+    body = request.get_json(silent=True) or {}
+    ap = _safe_vault_path((body.get("file") or "").strip())
+    if not ap or not ap.exists():
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    sha = _book_sha(ap)
+    sp = _BOOK_PREPROCESS_DIR / f"{sha}.json"
+    try:                                  # 已在跑(预处理/压缩任一)且进程活着 → 不重复启
+        st = json.loads(sp.read_text("utf-8"))
+        if st.get("phase") in ("detecting", "normalizing", "ocr", "embedding", "compressing"):
+            pid = st.get("pid")
+            fresh = (_time.time() - st.get("updated_at", 0)) < 120
+            if (_pid_alive(pid) if pid is not None else fresh):
+                return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
+    except Exception:
+        pass
+    dpi = int(body.get("dpi") or 150)
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "compress_pdf.py"), "--pdf", str(ap), "--dpi", str(dpi)]
+    try:
+        subprocess.Popen(cmd, cwd=str(CLAUDE_DIR), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    return jsonify({"ok": True, "sha": sha})
 
 
 @bp.route("/api/delete-pdf", methods=["POST"])
@@ -649,7 +680,7 @@ def pdf_api_preprocess_active():
                 st = json.loads(sp.read_text("utf-8"))
             except Exception:
                 continue
-            if st.get("phase") not in ("detecting", "normalizing", "ocr", "embedding"):
+            if st.get("phase") not in ("detecting", "normalizing", "ocr", "embedding", "compressing"):
                 continue
             pid = st.get("pid")
             stale = (_time.time() - st.get("updated_at", 0)) > 30
