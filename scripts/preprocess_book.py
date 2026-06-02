@@ -179,18 +179,30 @@ def main() -> int:
             _write(sha, phase="done", percent=100, has_text=True, msg="已有文字层，无需 OCR")
             return 0
 
-        # 统一页宽(你的思路)。关键顺序:**先在锐利原图上 OCR,再归一,最后把 OCR 结果嵌到归一页**。
-        # 不能先归一再 OCR——show_pdf_page 重排会多一次重采样把图变糊,Vision 识别率暴跌(实测 126→34)。
+        # 顺序(图像处理在前):**先重建(等宽/增强/烘焙旋转)→ 再 OCR 重建图 → 嵌到同一张图**。
+        # 实测栅格化重建后 OCR 识别率持平甚至略好(509→511);重建页 rotation=0 → OCR/embed 坐标平凡,
+        # 不必 derotation、不必把 sidecar 坐标缩放映射。(早期"先 OCR 再归一"是为绕开 show_pdf_page
+        # 重采样致 OCR 暴跌 126→34;归一改用栅格化后已无此问题,故按更顺的"图像处理在前"重排。)
         uniform = bool(a.uniform and _needs_width_norm(clean_src))
         enhance = bool(a.enhance)
-        rebuild = uniform or enhance                   # 任一为真都要栅格化重建页
-        # 先确保 pdf = 干净原图(无文字层),在它上面 OCR 质量最好;重建推迟到 OCR 之后。
-        if prev_ocrd:
-            shutil.copy2(str(orig), str(pdf))          # 从备份恢复干净原图
+        rebuild = uniform or enhance
+        if rebuild:
+            msg = "统一页宽+增强清晰度…" if (uniform and enhance) else \
+                  ("统一页宽（烘焙旋转）…" if uniform else "增强清晰度（锐化）…")
+            _write(sha, phase="normalizing", percent=3, msg=msg, engine=a.engine)
+            if not orig.exists():
+                shutil.copy2(str(pdf), str(orig))          # 备份真·原始(重建前,clean_src=pdf 时仍是原图)
+            tmp = STATUS_DIR / f"{sha}.norm.pdf"
+            if not rebuild_pages(clean_src, tmp, uniform=uniform, enhance=enhance):
+                _write(sha, phase="error", error="页重建失败（原书未改动）")
+                return 1
+            shutil.move(str(tmp), str(pdf))                # pdf = 重建后(等宽/增强/rotation=0)的图
             for d in (VISION_DIR / sha, MOKURO_DIR / sha):
-                shutil.rmtree(d, ignore_errors=True)   # 重新 OCR
-        elif rebuild and not orig.exists():
-            shutil.copy2(str(pdf), str(orig))          # 首次:先备份真·原始(重建会改 pdf)
+                shutil.rmtree(d, ignore_errors=True)       # 几何变了,重新 OCR
+        elif prev_ocrd:
+            shutil.copy2(str(orig), str(pdf))              # 之前处理过、本次不重建:从干净原图恢复再 OCR
+            for d in (VISION_DIR / sha, MOKURO_DIR / sha):
+                shutil.rmtree(d, ignore_errors=True)
 
         total = fitz.open(str(pdf)).page_count
         _write(sha, phase="ocr", percent=0, total=total, completed=0,
@@ -239,20 +251,8 @@ def main() -> int:
                          + (f"：{sample_err}" if sample_err else ""))
             return 1
 
-        # ①.5 重建页(等宽 / 清晰度增强):OCR 已在锐利原图完成(sidecar=原图渲染坐标),此刻
-        # pdf 仍是无文字的干净原图(栅格化不会丢字)。栅格化烘焙 /Rotate=0。**不清 sidecar**——
-        # 下面 embed 的 sx=重建页宽/sidecar.img_w 把原图坐标等比映射到重建页(rot=0 不必 derotation)。
-        if rebuild:
-            msg = "统一页宽+增强清晰度…" if (uniform and enhance) else \
-                  ("统一页宽（烘焙旋转）…" if uniform else "增强清晰度（锐化）…")
-            _write(sha, phase="normalizing", percent=92, msg=msg)
-            tmp = STATUS_DIR / f"{sha}.norm.pdf"
-            if not rebuild_pages(pdf, tmp, uniform=uniform, enhance=enhance):
-                _write(sha, phase="error", error="页重建失败（原书未改动）")
-                return 1
-            shutil.move(str(tmp), str(pdf))
-
-        # ② 嵌入文字层（现成脚本）→ 库外临时文件
+        # ② 嵌入文字层(现成脚本)→ 库外临时文件。pdf 跟 OCR 的是同一张图(重建后 rotation=0),
+        # sidecar 坐标直接对得上,embed 无需 derotation/缩放映射。
         _write(sha, phase="embedding", percent=94, msg="嵌入文字层…")
         out = STATUS_DIR / f"{sha}.embedded.pdf"
         r = subprocess.run(
