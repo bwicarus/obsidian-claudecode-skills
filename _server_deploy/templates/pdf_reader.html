@@ -304,10 +304,10 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 
 /* 句子框：素描排线 + mix-blend-mode 让颜色叠到字下方（白底显色，字像素不被遮）
    句首 / 句末用 L 按钮承担两端标识，box 自身无 border */
-/* 自动检测到的「学习句子」默认**不铺斜纹**（查得多了整页全是斜纹很乱）→ 只靠句首 L 按钮指示；
-   斜纹仅「翻译中」(点 L 后加载译文期间)显示并呼吸，译文出来后由 .vocab-sentence-overlay 接管。*/
-.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-color:transparent}
-.vocab-sentence-box.translating{background-image:var(--sent-hatch);mix-blend-mode:multiply;animation:sent-breathe 1.1s ease-in-out infinite}
+/* 自动检测到的「学习句子」框(达到阈值才框)：默认铺**淡**斜纹(查得多了整页太满,故 alpha 调低)；
+   「翻译中」(点 L 加载译文期间)斜纹加深 + 呼吸，译文出来后由 .vocab-sentence-overlay 接管。*/
+.vocab-sentence-box{position:absolute;pointer-events:none;box-sizing:border-box;transition:all .12s;background-image:var(--sent-hatch);background-color:transparent;mix-blend-mode:multiply}
+.vocab-sentence-box.translating{background-image:var(--sent-hatch-strong,var(--sent-hatch));animation:sent-breathe 1.1s ease-in-out infinite}
 @keyframes sent-breathe{0%,100%{opacity:.3}50%{opacity:1}}
 .vocab-sentence-box.highlight{background-color:var(--sent-fill,rgba(245,158,11,.08))}
 

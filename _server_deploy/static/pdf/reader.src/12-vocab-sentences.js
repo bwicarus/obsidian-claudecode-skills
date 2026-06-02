@@ -118,8 +118,10 @@ function renderVocabSentences(pw, sentences) {
     if (rects.length && rects.filter(r => (r[3]-r[1]) > (r[2]-r[0])).length > rects.length / 2) continue;
     // 缓存颜色到 sentence 对象（覆盖层 / Anki 加卡时复用）
     s.__stroke = stroke; s.__fill = fill;
-    // hatch 排线 (135° 斜细线)；颜色 = stroke + alpha ≈ 0.55；间距 4px 更密
-    const hatch = `repeating-linear-gradient(135deg, ${stroke}88 0 1.2px, transparent 1.2px 4px)`;
+    // hatch 排线 (135° 斜细线)。默认**淡**(alpha≈0x2e≈18%,细 1px,间距 5px)→ 整页多句也不刺眼；
+    // 「翻译中」用加深版(strong, alpha 0x88) 配呼吸。
+    const hatch = `repeating-linear-gradient(135deg, ${stroke}2e 0 1px, transparent 1px 5px)`;
+    const hatchStrong = `repeating-linear-gradient(135deg, ${stroke}88 0 1.2px, transparent 1.2px 4px)`;
     for (let ri = 0; ri < rects.length; ri++) {
       const r = rects[ri];
       const [x0, y0, x1, y1] = r;
@@ -129,6 +131,7 @@ function renderVocabSentences(pw, sentences) {
       box.style.color = stroke;
       box.style.setProperty('--sent-fill', fill);
       box.style.setProperty('--sent-hatch', hatch);
+      box.style.setProperty('--sent-hatch-strong', hatchStrong);
       box.style.left = (x0 * sx - 2) + 'px';
       box.style.top = (y0 * sy - 1) + 'px';
       box.style.width = ((x1 - x0) * sx + 4) + 'px';
