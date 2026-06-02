@@ -116,7 +116,10 @@ def main() -> int:
         out.unlink(missing_ok=True)
         _write(sha, phase="compressing", percent=90, total=total, completed=total,
                pid=os.getpid(), pdf=str(pdf), msg=f"保存（已重压 {n_img} 张图）…")
-        doc.save(str(out), garbage=4, deflate=True)   # garbage=4 清掉被替换的旧图流
+        # garbage=1 只丢被 replace_image 弃用的旧大图流(够回收空间),**不**用 garbage=4(全量去重)
+        # 和 deflate(对已是 JPEG 的图无益)——这俩在 Pi 上对 100MB+ 文档极慢(实测卡 6min+)。
+        # 重量级压实/线性化交给后面的 qpdf(C++,快)。
+        doc.save(str(out), garbage=1)
         doc.close()
         if not out.exists() or out.stat().st_size == 0:
             out.unlink(missing_ok=True)
