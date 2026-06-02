@@ -1432,9 +1432,17 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
         cur_lemmas = set()
         cur_total_words = 0
 
+    # 列表项序号:新行以 10.1 / 10. / 1) / a. / iv) 等开头 → 该行是独立列表项,要在它前面断句
+    # (编号列表行尾常无句号、行距又不大 → 否则 10.1/10.2/… 会被并成一个跨多行的大句子框)。
+    _list_head_re = re.compile(r"^\s*(\d{1,3}([.)]|\.\d)|[A-Za-z][.)]|[ivxIVX]{1,4}[.)])")
+
+    def _is_list_head(idx: int) -> bool:
+        s = "".join(chars[j].get("c", "") for j in range(idx, min(idx + 12, len(chars))))
+        return bool(_list_head_re.match(s))
+
     prev = None
     pending_period = False   # 上一字符是 .，需要看下一字符决定切不切
-    for ch in chars:
+    for i, ch in enumerate(chars):
         c = ch.get("c", "")
         # 处理 pending period：根据当前字符决定上一个 . 是否真切句
         if pending_period:
@@ -1466,9 +1474,12 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 _flush_word()
                 _flush_sentence()
             elif abs(line_gap) > prev_h * 0.5:
-                # 普通跨行：拼词处理
-                if cur_word_letters and cur_word_letters[-1] == "-":
-                    cur_word_letters.pop()
+                # 普通跨行
+                if _is_list_head(i):
+                    # 新行是列表项(10.1 / 10. / a) …) → 独立成句,不并进上一项(否则整列表框成一大块)
+                    _flush_word(); _flush_sentence()
+                elif cur_word_letters and cur_word_letters[-1] == "-":
+                    cur_word_letters.pop()   # 行尾连字符 → 拼回
                 else:
                     _flush_word()
         # 列表标记 → 切句（每个列表项独立句）
