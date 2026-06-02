@@ -52,6 +52,7 @@ let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
+let _refPageW = 0;     // 参考页(第1页)在 scale=1 时的宽。统一页宽：每页按自身原生宽缩放到 _refPageW × scale
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
@@ -185,6 +186,7 @@ async function loadPdf() {
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
+    _refPageW = v0.width;   // 统一页宽基准：所有页缩放到 _refPageW × scale 的显示宽
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
     scale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
     _lastFitWidth = mainW;
@@ -236,7 +238,20 @@ async function _renderPageInto(num, wrap) {
   if (!pdfDoc) return;
   if (wrap.dataset.loaded === '1') return;
   const page = await pdfDoc.getPage(num);
-  const viewport = page.getViewport({scale});
+  // 统一页宽：每页按自身原生宽算 scale，使显示宽都等于参考页(第1页)在当前缩放下的宽度
+  // (_refPageW × scale)。下游 canvas/textLayer/itemBoxes/char 层全部从这个 viewport 派生 →
+  // 自动按本页真实 scale 对齐，不会因各页原生尺寸不同而宽窄不一。
+  let _pageScale = scale;
+  if (_refPageW > 0) {
+    const _v1 = page.getViewport({scale: 1});
+    if (_v1.width > 0) {
+      _pageScale = (_refPageW * scale) / _v1.width;
+      // 防极端高页 canvas backing 高 × dpr 超 iOS ~4096：必要时收一下（宁可这页略窄也不崩）
+      const _cap = 4000 / (_v1.height * (window.devicePixelRatio || 1));
+      if (_pageScale > _cap) _pageScale = _cap;
+    }
+  }
+  const viewport = page.getViewport({scale: _pageScale});
   // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null;   // 清残留引用，避免重渲染后指向已删除的旧层

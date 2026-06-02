@@ -52,6 +52,7 @@ let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
+let _refPageW = 0;     // 参考页(第1页)在 scale=1 时的宽。统一页宽：每页按自身原生宽缩放到 _refPageW × scale
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');

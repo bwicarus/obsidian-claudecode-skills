@@ -516,15 +516,19 @@ def pdf_api_preprocess_async():
                 return jsonify({"ok": True, "already": True, "phase": st.get("phase")})
     except Exception:
         pass
+    engine = (body.get("engine") or "vision").strip()
+    if engine not in ("vision", "manga"):
+        engine = "vision"
     py = os.environ.get("APP_PYTHON") or sys.executable
     try:
         subprocess.Popen(
-            [py, str(CLAUDE_DIR / "scripts" / "preprocess_book.py"), "--pdf", str(ap)],
+            [py, str(CLAUDE_DIR / "scripts" / "preprocess_book.py"),
+             "--pdf", str(ap), "--engine", engine],
             cwd=str(CLAUDE_DIR), start_new_session=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as ex:
         return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
-    return jsonify({"ok": True, "sha": sha})
+    return jsonify({"ok": True, "sha": sha, "engine": engine})
 
 
 @bp.route("/api/delete-pdf", methods=["POST"])

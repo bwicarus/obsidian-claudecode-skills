@@ -49,7 +49,10 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <div class="pdf-name">{{ p.name }}</div>
           <div class="pdf-meta"><span class="pdf-dir">{{ p.dir }}</span> · {{ p.size_kb }} KB</div>
         </div>
-        <button class="prep-btn" onclick="preprocess(event,this)" title="检测文字层；扫描书没有则调 Google OCR 补上（可选中/查词）">🔧 预处理</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="prep-btn" onclick="preprocess(event,this,'vision')" title="印刷/文档书：Google Vision OCR，快（~2s/页）。已有文字层秒判跳过">📄 文档</button>
+          <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
+        </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
     </div>
@@ -96,22 +99,25 @@ async function deleteBook(item) {
 }
 
 // ── 预处理（扫描书补文字层）：后台 detached 跑，关网页/重启不中断；前端轮询进度 ──
-async function preprocess(ev, btn) {
+async function preprocess(ev, btn, engine) {
   ev.stopPropagation();
   const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  const btns = [...item.querySelectorAll('.prep-btn')];
   const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
-  btn.disabled = true; prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '启动中…';
+  if (engine === 'manga' && !confirm('用 manga-ocr 处理《' + item.dataset.disp + '》？\n适合漫画书（读气泡/竖排/手写体字）。CPU 上较慢（约 40 秒/页），后台跑，关页面不中断。')) return;
+  btns.forEach(b => b.disabled = true);
+  prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '启动中…';
   try {
     const r = await fetch('/pdf/api/preprocess-async', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file: rel}),
+      body: JSON.stringify({file: rel, engine: engine || 'vision'}),
     });
     const d = await r.json();
-    if (!d.ok) { msg.textContent = '✗ ' + (d.error || '失败'); btn.disabled = false; return; }
-    pollPrep(rel, btn, bar, msg);
-  } catch (e) { msg.textContent = '✗ ' + e.message; btn.disabled = false; }
+    if (!d.ok) { msg.textContent = '✗ ' + (d.error || '失败'); btns.forEach(b => b.disabled = false); return; }
+    pollPrep(rel, btns, bar, msg);
+  } catch (e) { msg.textContent = '✗ ' + e.message; btns.forEach(b => b.disabled = false); }
 }
-function pollPrep(rel, btn, bar, msg) {
+function pollPrep(rel, btns, bar, msg) {
   let tries = 0;
   const iv = setInterval(async () => {
     tries++;
@@ -122,16 +128,15 @@ function pollPrep(rel, btn, bar, msg) {
       bar.style.width = pct + '%';
       if (d.phase === 'done') {
         clearInterval(iv); bar.style.width = '100%';
-        msg.textContent = '✓ ' + (d.msg || '完成'); btn.disabled = false;
-        btn.textContent = d.has_text ? '✓ 已处理' : '✓ 完成';
+        msg.textContent = '✓ ' + (d.msg || '完成'); btns.forEach(b => b.disabled = false);
         return;
       }
       if (d.phase === 'error') {
-        clearInterval(iv); msg.textContent = '✗ ' + (d.error || '失败'); btn.disabled = false; return;
+        clearInterval(iv); msg.textContent = '✗ ' + (d.error || '失败'); btns.forEach(b => b.disabled = false); return;
       }
       msg.textContent = (d.msg || d.phase || '处理中') + (pct ? ' · ' + pct + '%' : '');
     } catch (e) { /* 网络瞬断：继续轮询（后台没停） */ }
-    if (tries > 2400) { clearInterval(iv); btn.disabled = false; }   // ~80min 兜底
+    if (tries > 3600) { clearInterval(iv); btns.forEach(b => b.disabled = false); }   // ~2h 兜底(漫画慢)
   }, 2000);
 }
 
