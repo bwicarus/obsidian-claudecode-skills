@@ -812,8 +812,12 @@ def _split_block_columns(block_chars: list) -> list:
     if len(ns) < 4:
         return [block_chars]
     chw = statistics.median([max(1.0, c["x1"] - c["x0"]) for c in ns]) or 1.0
-    tol = chw * 0.6           # 词内/字间小缝不算 gutter
-    gutter_min = chw * 1.5    # 列间空隙阈值
+    # CJK 列内字紧挨(字间 gap≈0),并排气泡间隙只有 ~1 字宽 → 小阈值才切得开,且不会误切;
+    # Latin 有词间空格(~0.5 字宽)→ 阈值要大,免得在词缝处误切(真双栏间隙很大仍能切)。
+    cjk_ratio = sum(1 for c in ns if _is_cjk_char(c.get("c", ""))) / len(ns)
+    cjk = cjk_ratio > 0.5
+    tol = chw * (0.45 if cjk else 1.2)         # 同列内允许的字/词间小缝(合并成一簇)
+    gutter_min = chw * (0.8 if cjk else 3.0)   # 列间空隙阈值(≥它才分列)
     merged: list = []
     for a, b in sorted((c["x0"], c["x1"]) for c in ns):
         if merged and a <= merged[-1][1] + tol:
