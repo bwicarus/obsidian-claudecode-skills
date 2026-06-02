@@ -669,3 +669,11 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **F6 词组高亮 = 可点击持久层**（多轮定稿）：用户最终要的交互——拖选出短词组 → 建独立 `.phrase-hl-layer`（蓝框、`.hl` 上 `pointer-events:auto` 可点、记 `dataset.phraseText`），呼吸 1.6s 转常亮、**一直留着**；**点空白/点其他词都不消失**（独立于 sel-overlay 选词逻辑，onStart 清的是 sel-overlay 不碰这层）；**只有手动点这个高亮**（或 📘词组按钮）→ `showPhrasePopover` 打开词组结果 → 结果出来 `_removePhraseHighlight()` 移除（**不是定时淡出，是被打开动作触发移除**）。坑：高亮自带文本存 `layer.dataset`，因为 `lastSelText` 会被点空白清掉。F5 注音 `top` 二次微调到 `y0-fs*0.34`（用户要求再向下贴本行）。
 - **F4 搜索原文高亮**：`_searchJump` 记 `_pendingSearchHighlight={query,page}` → goToPage；**loadCharsAndBindLayer 末尾**（此处 `__charBoxes` 已赋值）直接 `_highlightSearchResultsOnPage` 一次到位（不走轮询 re-check `dataset.loaded`，那个时序脆弱）；已加载页则 `_searchJump` 里的轮询 fallback 立即命中。命中处黄色 `.search-hl`（z6 + pointer-events:none + multiply），滚到第一处，6s 淡出。
 - **F7 掌握键改 toggle**：`dict-quick(want_ja)` 返回 `mastered`；按钮显示当前态（未掌握「☆标记掌握」↔ 已掌握「✓已掌握100」），点击 toggle（mastered↔unknown）**不关框**，刷下划线。后端 `/api/jp-vocab-mark` 的 `unknown` 即清 mastered。
+
+### 16. 上传 PDF 失败 = nginx 体积限制（2026-06-02）
+- 现象：`POST /pdf/api/upload` 前端报「上传失败」，**Flask 日志里看不到这条请求**——被 nginx 在到达 Flask 前就挡了。nginx error.log：`client intended to send too large body: NNNN bytes`（HTTP 413）。
+- 根因：扫描书原始 PDF 常 >50m（实测 76m 被挡），nginx `client_max_body_size` 默认/旧值太小。Flask 侧**没设** `MAX_CONTENT_LENGTH`，所以唯一闸门是 nginx。
+- 处置：单用户私有实例直接 `client_max_body_size 0`（不限制）。
+  - **Pi 活动配置**：`/etc/nginx/sites-available/bwicarus`（手工 patch，**不可从 git cp**，会冲掉 Tailscale 证书），两个 server 块 + /pdf + /api 共 5 处 `client_max_body_size`，`sed` 全改后 `nginx -t && systemctl reload nginx`。
+  - **git VPS 配置**：`_server_deploy/nginx/bwicarus.conf` 同步改（部署到 VPS `/etc/nginx/sites-enabled/default`）。
+- 排查口诀：上传失败先看 `sudo tail /var/log/nginx/error.log` 有没有 `too large body`；有就是体积限制，跟 Flask/前端无关。
