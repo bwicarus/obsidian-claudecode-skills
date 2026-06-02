@@ -677,3 +677,12 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
   - **Pi 活动配置**：`/etc/nginx/sites-available/bwicarus`（手工 patch，**不可从 git cp**，会冲掉 Tailscale 证书），两个 server 块 + /pdf + /api 共 5 处 `client_max_body_size`，`sed` 全改后 `nginx -t && systemctl reload nginx`。
   - **git VPS 配置**：`_server_deploy/nginx/bwicarus.conf` 同步改（部署到 VPS `/etc/nginx/sites-enabled/default`）。
 - 排查口诀：上传失败先看 `sudo tail /var/log/nginx/error.log` 有没有 `too large body`；有就是体积限制，跟 Flask/前端无关。
+
+### 17. 大 PDF 加载提速：线性化 + IndexedDB 本地缓存（2026-06-02）
+两条互补路线（用户要"下载到本地加快加载"；纯 `file://` 网页打不开，故用浏览器本地缓存等效）：
+- **A 服务器端线性化（Fast Web View）**：`preprocess_book.py` 嵌字后用 **`qpdf --linearize`** 把页对象按阅读顺序重排 + 首页/xref 放文件头 → PDF.js 开 url 只取文件头几百 KB 就能渲首页，后续页 byte-range 流式更快。
+  - ⚠ **本版 PyMuPDF/MuPDF 已移除 `linear=True`**（`save` 报 `Linearisation is no longer supported`）→ 必须用 qpdf（`/usr/bin/qpdf` v12，rc 0=ok / 3=warnings 都算成功）。缺 qpdf 或失败 → 用未线性化版（不报错）。
+  - 存量书一次性线性化：`scripts/linearize_pdf.py <pdf>...` 或 `--vault-larger-than 20`（无损，只重排；会改 mtime → char 缓存 + 前端缓存 key 失效自动重建）。
+- **B 浏览器 IndexedDB 整本缓存**（`reader.src/03-loader.js`）：首次打开走流式（线性化后首页快）**+ 后台 4s 后下整本存 IndexedDB**（`db=pdf-blob-cache` store=`pdfs` key=`FILE_REL` value=`{v,buf}`，`v` 绑 `?v=<mtime>` → PDF 变即失效重下）；第 2 次起命中缓存直接 `getDocument({data:buf})` 零网络秒开。
+  - **>220MB 不整本缓存**（`_PDF_CACHE_MAX`，`{data}` 模式整本进内存，防 iPad Safari 单页 OOM；408MB 线代书仍走 range 流式）。
+  - 设计取舍：故意**不在首次就 `{data}` 全量加载**（会双份内存 + PDF.js transfer detach 竞态）→ 首次流式、后台填缓存、次次秒开，最稳。IndexedDB 不可用（隐私模式/配额）静默回落流式。

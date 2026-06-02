@@ -287,6 +287,26 @@ def main() -> int:
             _write(sha, phase="error", error="嵌入文字层失败")
             return 1
 
+        # ②.5 线性化(Fast Web View)：把页对象按阅读顺序重排 + 首页/xref 放文件头。
+        # PDF.js 开 url 时只需先取文件头几百 KB 就能渲首页,后续页 byte-range 流式更快,
+        # 大书(part2 143MB)网络打开从"全 xref 扫一遍"变"读头即可"。
+        # 注:本版 PyMuPDF/MuPDF 已移除 linear=True(报 "Linearisation is no longer supported"),
+        # 改用 qpdf --linearize(经典 Fast Web View 工具);qpdf 缺失/失败就用未线性化版。
+        if shutil.which("qpdf"):
+            _write(sha, phase="embedding", percent=97, msg="线性化(Fast Web View)…")
+            lin = STATUS_DIR / f"{sha}.linear.pdf"
+            try:
+                rc = subprocess.run(["qpdf", "--linearize", str(out), str(lin)],
+                                    capture_output=True, timeout=600).returncode
+                if rc in (0, 3) and lin.exists():   # 0=ok,3=warnings(仍产出有效文件)
+                    out.unlink(missing_ok=True)
+                    out = lin
+                else:
+                    lin.unlink(missing_ok=True)
+                    sys.stderr.write(f"[preprocess] qpdf 线性化 rc={rc},用未线性化版\n")
+            except Exception as ex:
+                sys.stderr.write(f"[preprocess] 线性化失败,用未线性化版: {ex}\n")
+
         # ③ 原地替换（先备份原书到库外，不污染 vault 书列表；只备份一次）
         bak = STATUS_DIR / f"{sha}.orig.pdf"
         if not bak.exists():

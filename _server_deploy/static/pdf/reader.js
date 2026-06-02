@@ -168,26 +168,70 @@ function pdfLoadHide() {
   if(box) box.style.display='none';
 }
 
+// ── PDF 整本本地缓存（IndexedDB）──
+// 首次打开走流式(线性化后首页秒出)+ 后台把整本下到设备 IndexedDB;第 2 次起直接读本地缓存
+// 喂给 PDF.js({data}),零网络延迟秒开。key=FILE_REL,value={v,buf};v 跟 ?v=<mtime> 绑定→PDF
+// 变了自动失效重下。>_PDF_CACHE_MAX 的书不整本缓存(防 iPad Safari 单页内存炸),仍走流式 range。
+const _PDF_DB = 'pdf-blob-cache', _PDF_STORE = 'pdfs';
+const _PDF_CACHE_MAX = 220 * 1024 * 1024;   // 220MB 上限(part2 143MB 进缓存;408MB 线代书走流式)
+const _PDF_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '0';
+function _idb() {
+  return new Promise((res, rej) => {
+    let r = indexedDB.open(_PDF_DB, 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore(_PDF_STORE); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function _idbGet(k) {
+  try { const db = await _idb(); return await new Promise(res => {
+    const q = db.transaction(_PDF_STORE).objectStore(_PDF_STORE).get(k);
+    q.onsuccess = () => res(q.result || null); q.onerror = () => res(null);
+  }); } catch (_) { return null; }
+}
+async function _idbPut(k, v) {
+  try { const db = await _idb(); await new Promise((res, rej) => {
+    const tx = db.transaction(_PDF_STORE, 'readwrite');
+    tx.objectStore(_PDF_STORE).put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  }); return true; } catch (_) { return false; }
+}
+// 后台下整本存 IndexedDB(不阻塞首屏;超上限/失败静默跳过,下次仍流式)
+function _cachePdfInBackground() {
+  setTimeout(async () => {
+    try {
+      const h = await fetch(PDF_URL, { method: 'HEAD' });
+      const size = parseInt(h.headers.get('Content-Length') || '0');
+      if (!size || size > _PDF_CACHE_MAX) { window.dlog?.('PDF ' + Math.round(size/1048576) + 'MB 不整本缓存(超上限/未知),走流式'); return; }
+      const r = await fetch(PDF_URL);
+      const buf = await r.arrayBuffer();
+      await _idbPut(FILE_REL, { v: _PDF_VER, buf });
+      window.dlog?.('✓ PDF 已缓存到本地 (' + Math.round(size/1048576) + 'MB)，下次秒开');
+    } catch (e) { window.dlog?.('后台缓存失败(不影响阅读): ' + e.message); }
+  }, 4000);   // 首屏渲完几秒后再下,不抢首屏带宽
+}
+
 async function loadPdf() {
   pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
   pdfLoadBar(null);
   try {
     window.dlog('开始 getDocument...');
-    const task = pdfjsLib.getDocument({
-      url: PDF_URL,
+    const _common = {
       cMapUrl: '/static/pdfjs/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: '/static/pdfjs/standard_fonts/',
-      // 大文件关键:只对实际翻到的页发 Range 请求,不在后台把整本下完。
-      // 服务器 /pdf/file 支持 byte-range(conditional=True),几百 MB 的 PDF
-      // 浏览器只持有当前页,iPad Safari 不再 OOM。
-      // ⚠ PDF.js 官方:disableAutoFetch(禁后台预取)必须 **同时** disableStream:true 才生效!
-      // 之前 disableStream:false → 仍后台流式下载整本 408MB(进度条跑的就是整本),
-      // disableAutoFetch 形同虚设 → 打开慢。range 已确认 206 可用,关 stream 纯按需取。
-      disableAutoFetch: true,
-      disableStream: true,
-      rangeChunkSize: 262144,   // 256KB 一块
-    });
+    };
+    // 大文件关键:默认只对实际翻到的页发 Range 请求,不在后台把整本下完(iPad Safari 不 OOM)。
+    // ⚠ PDF.js 官方:disableAutoFetch 必须 **同时** disableStream:true 才生效。
+    const _rangeOpts = { url: PDF_URL, disableAutoFetch: true, disableStream: true, rangeChunkSize: 262144 };
+    // 本地缓存优先:命中(且版本一致)→ 从 IndexedDB 直接喂字节,零网络、秒开;
+    // 未命中 → 走流式(线性化后首页快)+ 后台把整本下到本地,下次秒开。
+    let _src = _rangeOpts, _fromCache = false;
+    try {
+      const c = await _idbGet(FILE_REL);
+      if (c && c.v === _PDF_VER && c.buf) { _src = { data: c.buf }; _fromCache = true; window.dlog('✓ 命中本地缓存,秒开'); }
+    } catch (_) {}
+    if (!_fromCache) _cachePdfInBackground();
+    const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {
         const pct = Math.round(p.loaded / p.total * 100);
