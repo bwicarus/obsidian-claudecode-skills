@@ -175,6 +175,17 @@ function pdfLoadHide() {
 const _PDF_DB = 'pdf-blob-cache', _PDF_STORE = 'pdfs';
 const _PDF_CACHE_MAX = 220 * 1024 * 1024;   // 220MB 上限(part2 143MB 进缓存;408MB 线代书走流式)
 const _PDF_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '0';
+// 请求"持久化存储":iOS Safari 普通标签页默认 best-effort(7 天没访问 ITP 清掉 + 配额满 LRU 驱逐),
+// persist() 求系统别清(加到主屏=独立 PWA 时 iOS 自动授予 → 缓存真正长存,见下方给用户的提示)。
+(async () => {
+  try {
+    if (navigator.storage?.persist) {
+      const ok = await navigator.storage.persisted?.() || await navigator.storage.persist();
+      const est = navigator.storage.estimate ? await navigator.storage.estimate() : null;
+      window.dlog?.('存储持久化=' + ok + (est ? ` 用量 ${Math.round((est.usage||0)/1048576)}/${Math.round((est.quota||0)/1048576)}MB` : ''));
+    }
+  } catch (_) {}
+})();
 function _idb() {
   return new Promise((res, rej) => {
     let r = indexedDB.open(_PDF_DB, 1);
