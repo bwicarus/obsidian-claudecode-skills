@@ -1431,31 +1431,44 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     cur_chars: list[dict] = []
     cur_lemmas: set[str] = set()
     cur_word_letters: list[str] = []
+    cur_word_chars: list[dict] = []   # 当前词的 char dict(带 w),JP 按 w 分组计数用
     cur_total_words: int = 0
-    _jptag = _get_jp_tagger()   # 日语段用 fugashi 真分词计数（汉字/假名也算 isalpha，整段无空格会被当 1 个词）
 
     def _flush_word():
-        nonlocal cur_word_letters, cur_total_words
-        if not cur_word_letters:
+        nonlocal cur_word_letters, cur_word_chars, cur_total_words
+        if not cur_word_chars:
+            cur_word_letters = []
             return
-        w = "".join(cur_word_letters)
+        w = "".join(x.get("c", "") for x in cur_word_chars)
+        chs = cur_word_chars
         cur_word_letters = []
-        # 含日语(平/片假名/汉字) → fugashi 分词，按**真 token** 计数 + 查未掌握（跟下划线同一套，
-        # 否则「確認しますがその他…」整段被当 1 个"词"，threshold/min_words 全失效 → 误框/漏框）
+        cur_word_chars = []
+        # 含日语(平/片假名/汉字) → **按 page-chars 的 w 分组**(fugashi token / 收藏词组合并),
+        # 跟下划线 _build_jp_vocab_marks 同一套 → 计数严格 = 下划线:收藏词组(一个 w)算 1 个,
+        # 不会被拆成内部词素跟「词组本身」重复计数(用户报的 词组 aabb + aa + bb = 3 的 bug)。
         if re.search(r"[぀-ゟ゠-ヿ㐀-鿿]", w):
             if not allow_ja:
                 return   # 中文书等非日语:CJK 段不分词不匹配,免中文汉字撞日语词库(误框)
-            if _jptag:
-                for tok in _jptag(w):
-                    surf = (tok.surface or "").strip()
-                    if not surf:
-                        continue
-                    cur_total_words += 1
-                    base = (getattr(tok.feature, "lemma", "") or surf)
-                    if surf.lower() in form_to_lemma_unmastered:
-                        cur_lemmas.add(form_to_lemma_unmastered[surf.lower()])
-                    elif base.lower() in form_to_lemma_unmastered:
-                        cur_lemmas.add(form_to_lemma_unmastered[base.lower()])
+            m = len(chs)
+            k = 0
+            while k < m:
+                wid = chs[k].get("w", -1)
+                if wid is None or wid < 0:
+                    k += 1
+                    continue
+                g = k
+                while g < m and chs[g].get("w") == wid:
+                    g += 1
+                surf = "".join(x.get("c", "") for x in chs[k:g])
+                cur_total_words += 1
+                lk = form_to_lemma_unmastered.get(surf.lower())
+                if not lk:
+                    base = (_jp_inflection(surf) or {}).get("base")
+                    if base:
+                        lk = form_to_lemma_unmastered.get(base.lower())
+                if lk:
+                    cur_lemmas.add(lk)
+                k = g
             return
         wl = w.lower()
         # ≤2 字母的词（am/is/he/we/it/of/to… 功能词）默认掌握，不算生词
@@ -1594,6 +1607,7 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                     _flush_word(); _flush_sentence()
                 elif cur_word_letters and cur_word_letters[-1] == "-":
                     cur_word_letters.pop()   # 行尾连字符 → 拼回
+                    if cur_word_chars: cur_word_chars.pop()
                 else:
                     _flush_word()
         # 列表标记 → 切句（每个列表项独立句）
@@ -1617,6 +1631,7 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
             prev = ch; prev_ns = ch; continue
         if c.isalpha() or c in "'-":
             cur_word_letters.append(c)
+            cur_word_chars.append(ch)   # 带 w,JP 按 w 分组计数(词组算一个)
         else:
             _flush_word()
         cur_chars.append(ch)
