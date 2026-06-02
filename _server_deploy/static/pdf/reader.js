@@ -3002,7 +3002,7 @@ function _showPhraseHighlight(pw) {
 window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
-  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: ''};
+  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false, mastered: false};
   pop.style.display = 'block';
   window._wordPopOpenAt = Date.now();
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
@@ -3012,6 +3012,7 @@ window.showPhrasePopover = async (text, opts) => {
   if (_wordPopState.phrase && !(opts && opts.noHighlight)) _showPhraseHighlight(_charSel && _charSel.pw);
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
+  _wordPopState.jp = isJa;   // 掌握按钮按语言分流 store(jp-vocab-mark / vocab-mark)
   let zh = '', reading = '', accent = null;
   try {
     if (isJa) {
@@ -3041,6 +3042,8 @@ window.showPhrasePopover = async (text, opts) => {
     '<div class="wp-actions">' +
     '<button id="phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_phraseFav(this)">' +
     (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+    '<button id="wp-master-btn" class="' + (_wordPopState.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (_wordPopState.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
+    (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
 };
