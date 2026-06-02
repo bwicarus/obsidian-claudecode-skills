@@ -49,8 +49,11 @@ async function _renderPageInto(num, wrap) {
   wrap.dataset.pageNum = num;
   const canvas = document.createElement('canvas');
   // PDF.js v4 推荐：canvas backing store = viewport * devicePixelRatio（retina 清晰）
-  // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）
-  const outputScale = window.devicePixelRatio || 1;
+  // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）。
+  // backing 任一维超 iOS ~4096 会渲染空白 → 高倍放大时**动态降 outputScale**(保 backing≤4096,
+  // CSS 尺寸照常放大)→ 缩放上限不再被页高卡死(否则高页 _scaleMax 只有 ~0.7),只是极端放大略软。
+  const outputScale = Math.max(0.6, Math.min(window.devicePixelRatio || 1,
+    4096 / Math.max(1, Math.max(viewport.width, viewport.height))));
   const cw = Math.floor(viewport.width);
   const ch = Math.floor(viewport.height);
   canvas.width  = Math.floor(viewport.width  * outputScale);

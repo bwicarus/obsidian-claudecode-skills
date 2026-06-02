@@ -206,7 +206,8 @@ async function loadPdf() {
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
-    _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
+    _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
+                       // 不再用页高卡死缩放(旧 min(3.5,4000/(页高×dpr)) 对高页只有 ~0.7)
     // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2),且扣掉行内 10px gap → 两页正好铺满
     { const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);
       scale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr))); }
@@ -329,8 +330,11 @@ async function _renderPageInto(num, wrap) {
   wrap.dataset.pageNum = num;
   const canvas = document.createElement('canvas');
   // PDF.js v4 推荐：canvas backing store = viewport * devicePixelRatio（retina 清晰）
-  // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）
-  const outputScale = window.devicePixelRatio || 1;
+  // 但 CSS 显示尺寸 = viewport（跟 textLayer 一致 → spans 跟文字对齐）。
+  // backing 任一维超 iOS ~4096 会渲染空白 → 高倍放大时**动态降 outputScale**(保 backing≤4096,
+  // CSS 尺寸照常放大)→ 缩放上限不再被页高卡死(否则高页 _scaleMax 只有 ~0.7),只是极端放大略软。
+  const outputScale = Math.max(0.6, Math.min(window.devicePixelRatio || 1,
+    4096 / Math.max(1, Math.max(viewport.width, viewport.height))));
   const cw = Math.floor(viewport.width);
   const ch = Math.floor(viewport.height);
   canvas.width  = Math.floor(viewport.width  * outputScale);

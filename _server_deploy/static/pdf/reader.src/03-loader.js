@@ -61,7 +61,8 @@ async function loadPdf() {
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
-    _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
+    _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
+                       // 不再用页高卡死缩放(旧 min(3.5,4000/(页高×dpr)) 对高页只有 ~0.7)
     // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2),且扣掉行内 10px gap → 两页正好铺满
     { const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);
       scale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr))); }
