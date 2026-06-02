@@ -124,9 +124,13 @@ def inject_nav(response):
     if not row:
         return response
     user_blob = json.dumps({"username": row["username"], "role": row["role"]})
+    try:                                  # mtime 做 cache-bust:nav.js 一更新客户端就重取(免 iOS 缓存旧版)
+        nav_v = int(os.path.getmtime("/var/www/html/static/nav.js"))
+    except Exception:
+        nav_v = 1
     inject = (
         f'<script>window.__USER__={user_blob};</script>'
-        '<script src="/static/nav.js" defer></script>'
+        f'<script src="/static/nav.js?v={nav_v}" defer></script>'
     )
     response.set_data(body.replace("</body>", inject + "</body>", 1))
     return response

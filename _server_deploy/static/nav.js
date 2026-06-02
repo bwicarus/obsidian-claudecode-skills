@@ -15,7 +15,7 @@
     + 'border:1px solid rgba(255,255,255,0.22);border-left:none;'
     + 'border-radius:0 16px 16px 0;'
     + 'box-shadow:inset -1px 0 0 rgba(255,255,255,0.18),3px 6px 18px rgba(0,0,0,0.28);'
-    + 'cursor:pointer;user-select:none;'
+    + 'cursor:grab;user-select:none;touch-action:none;'
     + 'transition:left 0.4s cubic-bezier(0.4,0,0.2,1),background 0.15s,color 0.15s,box-shadow 0.15s;'
     + '}'
     + '.nav-handle:hover{'
@@ -310,8 +310,47 @@
       document.body.classList.toggle('nav-open', open);
     }
 
+    // ── 手柄竖向拖动调整位置（per-device 持久化 localStorage）+ 轻点=开抽屉 ──
+    var HANDLE_TOP_KEY = 'nav-handle-top';
+    function clampTop(t) {
+      var h = handle.offsetHeight || 56;
+      return Math.max(4, Math.min(t, window.innerHeight - h - 4));
+    }
+    (function () {                                   // 启动时恢复上次位置
+      var saved = parseFloat(localStorage.getItem(HANDLE_TOP_KEY));
+      if (!isNaN(saved)) handle.style.top = clampTop(saved) + 'px';
+    })();
+    window.addEventListener('resize', function () {  // 旋转/改窗口 → 重新夹紧防出屏
+      if (handle.style.top) handle.style.top = clampTop(parseFloat(handle.style.top)) + 'px';
+    });
+    var drag = null, navDragged = false;
+    handle.addEventListener('pointerdown', function (e) {
+      drag = { startY: e.clientY, startTop: handle.getBoundingClientRect().top, moved: false };
+      navDragged = false;
+      handle.style.cursor = 'grabbing';
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    handle.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      var dy = e.clientY - drag.startY;
+      if (!drag.moved && Math.abs(dy) < 6) return;   // 6px 阈值内仍当点击
+      drag.moved = true; navDragged = true;
+      e.preventDefault();
+      handle.style.top = clampTop(drag.startTop + dy) + 'px';
+    });
+    function endDrag(e) {
+      if (!drag) return;
+      handle.style.cursor = 'grab';
+      try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (drag.moved) localStorage.setItem(HANDLE_TOP_KEY, String(clampTop(parseFloat(handle.style.top) || drag.startTop)));
+      drag = null;
+    }
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+
     handle.addEventListener('click', function (e) {
       e.stopPropagation();
+      if (navDragged) { navDragged = false; return; }   // 刚拖动过 → 不切换抽屉
       setOpen(!drawer.classList.contains('open'));
     });
 
