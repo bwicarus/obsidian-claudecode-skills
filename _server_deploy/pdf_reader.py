@@ -1305,13 +1305,13 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     idx = vocab_index.index()
     if not idx:
         return []
-    # 未掌握的 forms 映射到 lemma。**排除超常见词**(BNC 高频 the/for/will/course…)：它们就算被查过
-    # 也不该把句子凑到阈值（否则只有 1 个真生词的句子被误框）。freq_bnc=0 = 未排名/生僻 → 保留计数。
+    # 未掌握的 forms 映射到 lemma。**计数集 = 下划线集**：凡是查过且未掌握(label_slug!=mastered)的词都算，
+    # 跟 _build_vocab_marks 下划线完全一致 → 句中被下划线的词数 ≥ threshold 就框（不再按词频排除，
+    # 否则会出现「下划线 5 个词、框只数到 1 个 → 不框」的不一致）。不想要某词计数 → 把它标记掌握即可。
     form_to_lemma_unmastered = {
         form: info["lemma"]
         for form, info in idx.items()
         if info.get("label_slug") and info["label_slug"] != "mastered"
-        and not (0 < int(info.get("freq_bnc", 0) or 0) < 3000)
     }
 
     # 正文字号基准：非空格 char 高度中位数。明显大于它的句子（章节标题/单元名）不当学习句子
