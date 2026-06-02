@@ -116,10 +116,11 @@ def main() -> int:
         out.unlink(missing_ok=True)
         _write(sha, phase="compressing", percent=90, total=total, completed=total,
                pid=os.getpid(), pdf=str(pdf), msg=f"保存（已重压 {n_img} 张图）…")
-        # garbage=1 只丢被 replace_image 弃用的旧大图流(够回收空间),**不**用 garbage=4(全量去重)
-        # 和 deflate(对已是 JPEG 的图无益)——这俩在 Pi 上对 100MB+ 文档极慢(实测卡 6min+)。
-        # 重量级压实/线性化交给后面的 qpdf(C++,快)。
-        doc.save(str(out), garbage=1)
+        # garbage=1 只丢被 replace_image 弃用的旧大图流(够回收空间)；**不**用 garbage=4(全量去重,
+        # 对 100MB+/几百页文档极慢,实测卡 6min+ 的真凶是它,不是 deflate)。deflate=True 压缩
+        # 文字层/内容流——**不能省**:大书(679 页)文字层流巨大,不 deflate 会膨胀到比原文件还大
+        # (2026-06 踩:省了 deflate → 252MB 压成 294MB)。JPEG 图是 DCTDecode,deflate 自动跳过,不亏。
+        doc.save(str(out), garbage=1, deflate=True)
         doc.close()
         if not out.exists() or out.stat().st_size == 0:
             out.unlink(missing_ok=True)
@@ -132,7 +133,9 @@ def main() -> int:
                    pid=os.getpid(), pdf=str(pdf), msg="线性化(Fast Web View)…")
             lin = STATUS_DIR / f"{sha}.clin.pdf"
             try:
-                rc = subprocess.run(["qpdf", "--linearize", str(out), str(lin)],
+                # --object-streams=generate 把海量对象塞进压缩对象流(大书省一截);--compress-streams=y 兜底
+                rc = subprocess.run(["qpdf", "--linearize", "--object-streams=generate",
+                                     "--compress-streams=y", str(out), str(lin)],
                                     capture_output=True, timeout=600).returncode
                 if rc in (0, 3) and lin.exists():
                     out.unlink(missing_ok=True)
@@ -143,6 +146,14 @@ def main() -> int:
                 pass
 
         after = out.stat().st_size
+        # **变大就别替换**(彻底杜绝"越压越大"):图已是最优/B&W CCITT 之类 PIL 压不动时,
+        # 重存反而可能略大 → 保持原文件不动,如实告知。
+        if after >= before:
+            out.unlink(missing_ok=True)
+            _write(sha, phase="done", percent=100, has_text=True, total=total, completed=total,
+                   pdf=str(pdf),
+                   msg=f"已是最优：重压后 {after/1048576:.0f}MB ≥ 原 {before/1048576:.0f}MB，保持原文件不变")
+            return 0
         shutil.move(str(out), str(pdf))   # 原地替换(.orig.pdf 真·扫描原图不动,可据此重建)
         pct = round(after / max(1, before) * 100)
         _write(sha, phase="done", percent=100, has_text=True, total=total, completed=total,
