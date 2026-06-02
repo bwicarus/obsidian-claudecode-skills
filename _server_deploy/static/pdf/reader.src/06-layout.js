@@ -45,19 +45,14 @@ function _mainContentWidth() {
   const cs = getComputedStyle(m);
   return m.clientWidth - (parseFloat(cs.paddingLeft)||0) - (parseFloat(cs.paddingRight)||0);
 }
-// fit-width scale。双页(spread)额外受**高度**约束:取宽/高拟合更小者,让整页(含高度)完整显示
-// (否则双页填满宽时页面太高、竖向看不全)。去边时按可见宽/高占比换算。
+// fit-width scale:始终按**宽度**拟合(用户明确要宽度适应,不要高度适应)。
+// 单页/连续=一页铺满宽;双页=两页并排铺满宽(扣行内 gap),页太高就竖向滚(spread 本是连续滚动)。
+// 去边时按可见宽占比换算(÷可见宽 → 让裁切后的可见区填满宽)。
 function _computeFitScale(v0w, v0h) {
   const mainW = _mainContentWidth();
   const ppr = _pagesPerRow();
   const avail = mainW - (ppr > 1 ? 10 : 0);
-  let s = avail / (v0w * _cropVisWFrac() * ppr);
-  if (readMode === 'spread') {
-    const m = document.getElementById('main');
-    const mainH = (m ? m.clientHeight : 800) - 24;   // 留一点余量
-    const sh = mainH / (v0h * _cropVisHFrac());
-    if (sh > 0) s = Math.min(s, sh);
-  }
+  const s = avail / (v0w * _cropVisWFrac() * ppr);
   return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
 }
 // 横向滚动锁:内容宽 ≤ 视口宽(适应/去边/缩小态,页面正好或不足铺满)→ overflow-x:hidden,
