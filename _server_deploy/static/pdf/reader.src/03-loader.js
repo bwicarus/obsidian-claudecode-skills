@@ -60,7 +60,6 @@ async function loadPdf() {
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
-    _refPageW = v0.width;   // 统一页宽基准：所有页缩放到 _refPageW × scale 的显示宽
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
     scale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
     _lastFitWidth = mainW;
