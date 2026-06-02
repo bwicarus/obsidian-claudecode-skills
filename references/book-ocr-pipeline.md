@@ -242,6 +242,7 @@ python scripts/embed_google_ocr_to_pdf.py --pdf "<原PDF>" [--out <输出>] [--s
 14. **巨幅扫描页把 Vision 撑爆 + OOM（2026-06，料理师1.pdf 实战）**：有的扫描书单页原生尺寸极大（料理师1：`2227×3242 pt`），固定 `--dpi 300` 渲染 → `9280×13509 px / 单页 PNG 49MB`，base64 后请求体 ~66MB **远超 Vision API 上限**（`SSLError: Max retries exceeded` 上传超时反复重试），且 10 个 worker 同时各持一张 49MB pixmap 直接把内存吃光 → **编排进程被 OOM 杀**，状态停在 `ocr` 无终态 → 前端进度条永久卡住。修复：`google_vision_ocr.py` 渲染改 **按 DPI 但长边封顶 `--max-long-side`（默 4000）等比缩小** + **上传改 JPEG（`--jpeg-quality` 默 90）**——49MB→1.2MB，OCR 质量无可感知损失；正常尺寸书（A4 842pt → 3508px < 4000）不受影响仍 300dpi。
 15. **断点续传把"报错页"误当完成**：旧逻辑 `todo = 没有 p*.json 的页`，但报错页也写了带 `error` 的 `p*.json` → 重跑永久跳过它，错误页一直缺 OCR。改 `_page_done()` 只把**成功（无 `error` 键）的页**算完成，错误页重跑。配合 `ocr_one_page` 对 SSL/连接/超时**重试 3 次**（退避 1.5/3s），瞬时网络抖动当场自愈。
 16. **全页失败别动原书**：OCR 子进程整本都 SSLError 时仍 `return 0`（不抛异常）。`preprocess_book.py` 在 OCR 后统计 sidecar，**0 页有文字 → 报 `error`，不嵌入空文字层、不替换原书**，避免把好书换成"有壳无字"的 PDF。
+17. **旋转页(/Rotate 90)嵌字层丢字 —— 选不中的真凶（2026-06，料理师1.pdf 实战）**：扫描书常见整本 `/Rotate 90`（横扫描、显示时转正）。`page.get_pixmap()` 渲染**已应用旋转**→ OCR bbox 在「视觉(竖)」坐标系；但 `page.insert_text` 用 **mediabox(未旋转、横)坐标系**。直接喂视觉坐标 → 视觉 y 超出 mediabox 高度(横书 mediabox 高 = 视觉宽)的字**落到页框外被 PyMuPDF 静默裁掉**。实测某 90° 页 sidecar 107 字、嵌入读回只剩 35，**页面中下部整片丢失**（"上半能选、下半选不中"，且 OCR 其实全识别了，极易误判成"OCR 漏识"去换引擎）。修复：`embed_page` 用 `page.derotation_matrix` 把视觉点转回 mediabox 点、`rotate=page.rotation` 让字形朝向对齐（读回 bbox 才对得上选中层）。`rotation=0` 时 derotation 是单位阵 + `rotate=0` → 对所有非旋转书完全无变化。两个 embed 脚本（google char-level / mokuro seg+weight 两路径）都改。诊断手法：把嵌入文字临时设可见红色渲染 PNG，看红字是否压在印刷字上，一眼定位。
 
 ---
 
@@ -252,10 +253,11 @@ python scripts/embed_google_ocr_to_pdf.py --pdf "<原PDF>" [--out <输出>] [--s
 
 ## 网页按需触发（2026-06，接到文件列表 UI）
 
-OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。现在在 PDF 阅读器**文件列表页**（`/pdf/`）每本书加了 🔧 **预处理** 按钮 + 长按删除，把现有脚本编排起来（**不重写 OCR**）：
+OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。现在在 PDF 阅读器**文件列表页**（`/pdf/`）每本书加了 **📄 文档 / 🎴 漫画** 两个引擎按钮 + 长按删除，把现有脚本编排起来（**不重写 OCR**）：
 
-- **编排器 `scripts/preprocess_book.py --pdf <绝对路径>`**（纯粘合）：① `has_text_layer`（抽样 8 页累计可提取文字 ≥20 字符）检测；有 → 写 `done has_text` 直接跳过。② 无 → `subprocess` 跑 `google_vision_ocr.py`（现成，断点续传）边跑边把它的 `progress.json` 同步进状态。③ `embed_google_ocr_to_pdf.py`（现成）嵌入不可见文字层到库外临时文件。④ **原地替换**原 PDF（先备份到 `state/book-preprocess/<sha>.orig.pdf`，**不放 vault 以免污染书列表**）。状态全程写 `state/book-preprocess/<sha>.json`（`<sha>`=OCR 流水线同款 `sha1(resolve路径)[:16]`）。
-- **路由（`pdf_reader.py`）**：`POST /api/preprocess-async`（用 `APP_PYTHON` + `start_new_session=True` **detached** 起编排器 → 关网页/webapp 重启都不中断；重复启动守卫**按进程存活判定**：状态里 `pid` 进程还活着才拦，死进程留的陈旧 in-progress 状态允许直接重跑）；`GET /api/preprocess-status?file=`（读状态文件，文件驱动 → 重启不丢进度；**存活检测**：进行中相位但 `pid` 进程已退出 [`os.kill(pid,0)` 不存在] 且 >30s 未更新 → 返回 `error` 让进度条停在 ✗ 而非永久卡住）；`POST /api/delete-pdf`（删 PDF + 清 OCR/预处理/备份 sidecar，`_safe_vault_path` 挡路径穿越）。编排器启动时把自己 `pid` 写进状态文件供前两者用。
-- **前端（`pdf_index.html`）**：每本书 🔧 预处理 → 进度条轮询 `preprocess-status`（轮询断了后台不停，重点按钮 `already:true` 续看）；长按 ~550ms / 右键 → 确认删除。
+- **编排器 `scripts/preprocess_book.py --pdf <绝对路径> [--engine vision|manga]`**（纯粘合）：① `has_text_layer`（抽样 8 页累计可提取文字 ≥20 字符）检测；有 + vision 引擎 → 写 `done has_text` 直接跳过（manga 引擎**强制 OCR**，因 Vision 漏的漫画字要补）。② 无 → `subprocess` 跑 OCR（vision=`google_vision_ocr.py`，manga=`mokuro_ocr_book.py` 用 `MANGA_OCR_PYTHON`=manga-ocr-venv），边跑边把 `progress.json`（vision 给 `eta_minutes` / mokuro 给 `eta_hours`）同步进状态。③ 嵌入脚本（vision=`embed_google_ocr_to_pdf.py` / manga=`embed_ocr_to_pdf.py`）嵌不可见文字层到库外临时文件。④ **原地替换**原 PDF（先备份到 `state/book-preprocess/<sha>.orig.pdf`，**不放 vault 以免污染书列表**）。状态全程写 `state/book-preprocess/<sha>.json`（`<sha>`=OCR 流水线同款 `sha1(resolve路径)[:16]`）。**全失败 guard** 兼容 `text/chars`(vision)+`blocks`(mokuro)。
+- **引擎怎么选**：默认 **📄 文档=Vision**（快 ~2s/页，印刷/正文/表格质量高，**含漫画气泡也能读**——只要修了上面踩坑 17 的旋转 bug；料理师1.pdf 实测 Vision 完全够用）。**🎴 漫画=manga-ocr** 是 Vision 真读不出的高度风格化手写漫画的兜底：CPU ~40s/页慢，且**会幻觉**（难读区吐出 `そういえば、そうでしょうか` 之类重复假文本 → 污染文字层）。所以**优先 Vision**，manga 仅在 Vision 明显漏识时手动选（带确认弹窗警告慢）。
+- **路由（`pdf_reader.py`）**：`POST /api/preprocess-async`（body 带 `engine`，用 `APP_PYTHON` + `start_new_session=True` **detached** 起编排器 → 关网页/webapp 重启都不中断；重复启动守卫**按进程存活判定**：状态里 `pid` 进程还活着才拦，死进程留的陈旧 in-progress 状态允许直接重跑）；`GET /api/preprocess-status?file=`（读状态文件，文件驱动 → 重启不丢进度；**存活检测**：进行中相位但 `pid` 进程已退出 [`os.kill(pid,0)` 不存在] 且 >30s 未更新 → 返回 `error` 让进度条停在 ✗ 而非永久卡住）；`POST /api/delete-pdf`（删 PDF + 清 OCR/预处理/备份 sidecar，`_safe_vault_path` 挡路径穿越）。编排器启动时把自己 `pid` 写进状态文件供前两者用。
+- **前端（`pdf_index.html`）**：每本书两个引擎按钮 → 共用进度条轮询 `preprocess-status`（轮询断了后台不停；跑时两按钮都禁用）；长按 ~550ms / 右键 → 确认删除。
 - **「不中断」三层**：编排器 detached（关网页不停）+ 状态写文件（webapp 重启进度不丢）+ OCR sidecar 断点续传（进程被杀重跑自动续）。
-- ⚠ 默认走 **Google Vision**（烧 GCP 赠金，~2s/页，配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书秒判跳过、零成本。巨幅扫描页的尺寸/JPEG/重试坑见上面踩坑 14–16。
+- ⚠ Vision 烧 GCP 赠金（配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书 vision 引擎秒判跳过、零成本。巨幅扫描页/旋转页的尺寸/JPEG/重试/旋转坑见上面踩坑 14–17。
