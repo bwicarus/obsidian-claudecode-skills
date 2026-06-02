@@ -639,6 +639,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **分桶按读音首假名(あいうえお順)**：`_word_path` 对日语词(`_is_jp_lemma`)用 `_jp_reading_initial`(unidic 读音首假名，片→平归一) → `资源/vocab/か/確認する.md`（不是按汉字！比汉字分有意义）。**确定性只由 lemma 决定** → `apply_user_mark`(也改用 `_word_path`)等所有工具都能定位同一笔记。
 - **查词建笔记 + 句子暴露**：`_trigger_jp_note_async`(dict-quick want_ja / dict-jp 查词时后台) → `update_jp_word_note` + `_jp_exposure`(fugashi 分词整句、同句其他已入库日语词复用 `paragraph_exposure._bump_mastery` +0.05 = 被动暴露提分，跟英语一样)。
 - **下划线读 vocab_index**：`_build_jp_vocab_marks` 改读 `_vocab_idx()`(=vocab_index.index())——token 先按表层查、查不到用 `_jp_inflection` 还原原形查(forms 已含活用形)；按 `mastery`/`label_slug` 上色(跟英语同阈值)，mastered 不画。
+- **句子框计数 = 下划线(按 w 分组,2026-06)**：`_build_unmastered_sentences` 的 JP 计数原先用 fugashi **重新分词**,跟下划线(按 page-chars 的 `w`)不一致——收藏词组合并成一个 `w`(下划线算 1),但 fugashi 把它拆成内部词素分别计数 → 词组 + 各组成词重复算(用户报「词组 aabb + aa + bb = 3」)。改成 `_flush_word` 的 JP 路径**也按 `w` 分组**(逐 w-group 查 vocab,收藏词组=1 个 token),计数严格 == 下划线。EN 路径(按空格/字母)不变。
 - **标记一条路径**：`/api/jp-vocab-mark` → `compute_mastery.apply_user_mark(base, known/unknown)`(原形为键、确保笔记存在)，跟英语 `/api/vocab-mark` 同函数；小框 toggle 日英共用 `_wordPopMaster`。
 - **迁移**：`scripts/vocab/migrate_jp_vocab.py` 一次性把 `jp-vocab.json`(161 词) → vault 笔记(mastered→user_mark known，其余按旧分数落库，保留 last_ts/looks/first_seen)；**非破坏**(保留 `jp-vocab.json`+`.bak` 做备份)。旧 `_jp_mastery`/`_mastery_slug`/`_jp_vocab_slug`/`_jp_vocab_bump`/`jp-vocab.json` 自此不再驱动下划线(留作 dead code/备份)。
 
