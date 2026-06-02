@@ -49,19 +49,22 @@ async function _idbPut(k, v) {
     tx.objectStore(_PDF_STORE).put(v, k); tx.oncomplete = res; tx.onerror = () => rej(tx.error);
   }); return true; } catch (_) { return false; }
 }
-// 后台下整本存 IndexedDB(不阻塞首屏;超上限/失败静默跳过,下次仍流式)
+// 后台下整本存 IndexedDB(给"下次秒开"用)。**关键**:Tailscale 是单链路,这个整本下载会抢
+// 首开/翻页的 range 带宽 → 大文件首开明显变慢(2026-06 实测:打开 138MB 书后台立刻下整本占满链路)。
+// 两道防护:① 延后 20s 让首开/初翻彻底过去;② fetch priority:'low' 让浏览器把它排在交互 range
+// 请求之后(只填空闲带宽,翻页时自动让路)。超上限/失败静默跳过,下次仍走流式 range。
 function _cachePdfInBackground() {
   setTimeout(async () => {
     try {
-      const h = await fetch(PDF_URL, { method: 'HEAD' });
+      const h = await fetch(PDF_URL, { method: 'HEAD', priority: 'low' });
       const size = parseInt(h.headers.get('Content-Length') || '0');
       if (!size || size > _PDF_CACHE_MAX) { window.dlog?.('PDF ' + Math.round(size/1048576) + 'MB 不整本缓存(超上限/未知),走流式'); return; }
-      const r = await fetch(PDF_URL);
+      const r = await fetch(PDF_URL, { priority: 'low' });   // 低优先级:不抢交互 range 带宽
       const buf = await r.arrayBuffer();
       await _idbPut(FILE_REL, { v: _PDF_VER, buf });
       window.dlog?.('✓ PDF 已缓存到本地 (' + Math.round(size/1048576) + 'MB)，下次秒开');
     } catch (e) { window.dlog?.('后台缓存失败(不影响阅读): ' + e.message); }
-  }, 4000);   // 首屏渲完几秒后再下,不抢首屏带宽
+  }, 20000);   // 延后 20s:让首开 + 初次翻页彻底过去再下整本,绝不抢首开带宽
 }
 
 async function loadPdf() {
@@ -76,7 +79,7 @@ async function loadPdf() {
     };
     // 大文件关键:默认只对实际翻到的页发 Range 请求,不在后台把整本下完(iPad Safari 不 OOM)。
     // ⚠ PDF.js 官方:disableAutoFetch 必须 **同时** disableStream:true 才生效。
-    const _rangeOpts = { url: PDF_URL, disableAutoFetch: true, disableStream: true, rangeChunkSize: 262144 };
+    const _rangeOpts = { url: PDF_URL, disableAutoFetch: true, disableStream: true, rangeChunkSize: 1048576 };  // 1MB 块:减少 Tailscale 高延迟下的往返次数
     // 本地缓存优先:命中(且版本一致)→ 从 IndexedDB 直接喂字节,零网络、秒开;
     // 未命中 → 走流式(线性化后首页快)+ 后台把整本下到本地,下次秒开。
     let _src = _rangeOpts, _fromCache = false;
