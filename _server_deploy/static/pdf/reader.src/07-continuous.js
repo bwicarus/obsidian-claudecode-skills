@@ -8,7 +8,7 @@ async function setupContinuousMode() {
   const v1 = p1.getViewport({scale});
   const estW = Math.floor(v1.width), estH = Math.floor(v1.height);
   const frag = document.createDocumentFragment();
-  for (let num = 1; num <= pdfDoc.numPages; num++) {
+  const _mkPh = (num, marg) => {
     const ph = document.createElement('div');
     ph.className = 'page-wrap';
     ph.dataset.pageNum = num;
@@ -20,9 +20,20 @@ async function setupContinuousMode() {
     ph.style.display = 'flex';
     ph.style.alignItems = 'center';
     ph.style.justifyContent = 'center';
-    ph.style.margin = '0 auto 12px';
+    ph.style.margin = marg;
     ph.textContent = '… 第 ' + num + ' 页';
-    frag.appendChild(ph);
+    return ph;
+  };
+  if (readMode === 'spread') {
+    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
+    for (const row of _spreadRows(pdfDoc.numPages, _spreadOffset)) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'spread-row';
+      for (const num of row) rowEl.appendChild(_mkPh(num, '0'));
+      frag.appendChild(rowEl);
+    }
+  } else {
+    for (let num = 1; num <= pdfDoc.numPages; num++) frag.appendChild(_mkPh(num, '0 auto 12px'));
   }
   container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
   const mainEl = document.getElementById('main');

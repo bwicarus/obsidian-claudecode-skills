@@ -62,6 +62,7 @@ let _cropOn = false;                    // 开关(per-book localStorage)
 function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
 function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
 function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
+function _cropVisHFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.t + _crop.b) / 100) : 1; }
 // 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
 let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
 function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
@@ -208,9 +209,8 @@ async function loadPdf() {
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
                        // 不再用页高卡死缩放(旧 min(3.5,4000/(页高×dpr)) 对高页只有 ~0.7)
-    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2),且扣掉行内 10px gap → 两页正好铺满
-    { const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);
-      scale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr))); }
+    // 去边:可见区填满宽;双页:两页并排(扣 gap)+ 受高度约束(整页可见)。统一走 _computeFitScale
+    scale = _computeFitScale(v0.width, v0.height);
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     _updateModeButtons();   // 模式按钮文字 + 双页按钮高亮态(readMode 可能是 spread)
@@ -822,6 +822,21 @@ function _mainContentWidth() {
   const cs = getComputedStyle(m);
   return m.clientWidth - (parseFloat(cs.paddingLeft)||0) - (parseFloat(cs.paddingRight)||0);
 }
+// fit-width scale。双页(spread)额外受**高度**约束:取宽/高拟合更小者,让整页(含高度)完整显示
+// (否则双页填满宽时页面太高、竖向看不全)。去边时按可见宽/高占比换算。
+function _computeFitScale(v0w, v0h) {
+  const mainW = _mainContentWidth();
+  const ppr = _pagesPerRow();
+  const avail = mainW - (ppr > 1 ? 10 : 0);
+  let s = avail / (v0w * _cropVisWFrac() * ppr);
+  if (readMode === 'spread') {
+    const m = document.getElementById('main');
+    const mainH = (m ? m.clientHeight : 800) - 24;   // 留一点余量
+    const sh = mainH / (v0h * _cropVisHFrac());
+    if (sh > 0) s = Math.min(s, sh);
+  }
+  return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
+}
 function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
@@ -836,8 +851,7 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);   // 双页扣行内 gap
-    const newScale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr)));
+    const newScale = _computeFitScale(v0.width, v0.height);   // 双页含高度约束(整页可见)
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');

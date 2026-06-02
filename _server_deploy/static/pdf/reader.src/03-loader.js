@@ -63,9 +63,8 @@ async function loadPdf() {
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
                        // 不再用页高卡死缩放(旧 min(3.5,4000/(页高×dpr)) 对高页只有 ~0.7)
-    // 去边:可见区填满宽(÷可见宽占比);双页:每行 2 页并排(÷2),且扣掉行内 10px gap → 两页正好铺满
-    { const _ppr = _pagesPerRow(), _avail = mainW - (_ppr > 1 ? 10 : 0);
-      scale = Math.max(0.5, Math.min(_scaleMax, _avail / (v0.width * _cropVisWFrac() * _ppr))); }
+    // 去边:可见区填满宽;双页:两页并排(扣 gap)+ 受高度约束(整页可见)。统一走 _computeFitScale
+    scale = _computeFitScale(v0.width, v0.height);
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     _updateModeButtons();   // 模式按钮文字 + 双页按钮高亮态(readMode 可能是 spread)

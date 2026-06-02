@@ -62,6 +62,7 @@ let _cropOn = false;                    // 开关(per-book localStorage)
 function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
 function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
 function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
+function _cropVisHFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.t + _crop.b) / 100) : 1; }
 // 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
 let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
 function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
