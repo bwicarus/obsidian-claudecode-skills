@@ -145,6 +145,7 @@ async function loadPdf() {
     } else {
       await renderPage(currentPage);
     }
+    if (typeof _applyPendingOrientScale === 'function') await _applyPendingOrientScale();   // 旋转记忆:套用该方向上次缩放
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动

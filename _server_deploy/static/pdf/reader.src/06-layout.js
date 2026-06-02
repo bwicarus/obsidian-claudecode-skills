@@ -131,22 +131,30 @@ function _autoOrientOn() { try { return localStorage.getItem('pdf-auto-orient') 
 function _orient() { return (window.innerWidth >= window.innerHeight) ? 'land' : 'port'; }
 function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
 function _saveOrientLayout(o) {
-  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0 })); } catch (_) {}
+  // 也存 scale(当前缩放=是否宽度适应/手动放大),恢复时按该方向上次的缩放还原
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, scale: +scale.toFixed(3) })); } catch (_) {}
 }
 function _loadOrientLayout(o) {
   try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
 }
+let _orientPendingScale = 0;   // 待套用的缩放(渲染完后由 _applyPendingOrientScale 处理)
 function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调用方负责),返回是否套了
   if (!lay) return false;
   readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
   _spreadOffset = lay.off ? 1 : 0;
   _cropOn = !!lay.crop;
+  _orientPendingScale = (lay.scale > 0) ? lay.scale : 0;
   try {
     localStorage.setItem('pdf-read-mode', readMode);
     localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
     localStorage.setItem(_spreadKey(), String(_spreadOffset));
   } catch (_) {}
   return true;
+}
+// 重排渲染后套用记住的缩放:与当前(=宽度适应)差得多才套(说明该方向上次是手动放大;一致=就是适应,免重渲)
+async function _applyPendingOrientScale() {
+  const t = _orientPendingScale; _orientPendingScale = 0;
+  if (t > 0 && Math.abs(t - scale) > 0.02 && typeof _applyZoom === 'function') await _applyZoom(t);
 }
 // 手动改排版/去边后调用：开了自动切换就把当前布局记进当前方向
 window._rememberOrientLayout = function () { if (_autoOrientOn()) _saveOrientLayout(_orient()); };
@@ -162,6 +170,7 @@ async function _onOrientChange() {
   if (_applyOrientLayoutVars(lay)) {
     _updateModeButtons(); _updateCropBtn();
     await _applyModeChange(currentPage);
+    await _applyPendingOrientScale();   // 还原该方向上次的缩放(宽度适应/手动放大)
   }
 }
 window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
@@ -189,6 +198,7 @@ async function _applyZoom(newScale) {
     requestAnimationFrame(() => {
       if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight);
       _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
+      window._rememberOrientLayout?.();   // 手动缩放记进当前方向(若开了旋转自动切换)
     });
   } finally { _refitBusy = false; }
 }

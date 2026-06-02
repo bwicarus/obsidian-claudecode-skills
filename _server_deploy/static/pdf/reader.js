@@ -290,6 +290,7 @@ async function loadPdf() {
     } else {
       await renderPage(currentPage);
     }
+    if (typeof _applyPendingOrientScale === 'function') await _applyPendingOrientScale();   // 旋转记忆:套用该方向上次缩放
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
@@ -645,7 +646,7 @@ window.zoomChange = async (delta) => {
   else renderPage(currentPage);
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
-window.fitWidth = () => { _refitToWidth(true); };
+window.fitWidth = async () => { await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 适应也记进当前方向
 // 「📋 知识点」按钮：打开统一面板并切到知识点 tab（再点同 tab 则关闭）
 window.toggleSidebar = () => {
   const p = document.getElementById('grammar-panel');
@@ -975,22 +976,30 @@ function _autoOrientOn() { try { return localStorage.getItem('pdf-auto-orient') 
 function _orient() { return (window.innerWidth >= window.innerHeight) ? 'land' : 'port'; }
 function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
 function _saveOrientLayout(o) {
-  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0 })); } catch (_) {}
+  // 也存 scale(当前缩放=是否宽度适应/手动放大),恢复时按该方向上次的缩放还原
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, scale: +scale.toFixed(3) })); } catch (_) {}
 }
 function _loadOrientLayout(o) {
   try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
 }
+let _orientPendingScale = 0;   // 待套用的缩放(渲染完后由 _applyPendingOrientScale 处理)
 function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调用方负责),返回是否套了
   if (!lay) return false;
   readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
   _spreadOffset = lay.off ? 1 : 0;
   _cropOn = !!lay.crop;
+  _orientPendingScale = (lay.scale > 0) ? lay.scale : 0;
   try {
     localStorage.setItem('pdf-read-mode', readMode);
     localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
     localStorage.setItem(_spreadKey(), String(_spreadOffset));
   } catch (_) {}
   return true;
+}
+// 重排渲染后套用记住的缩放:与当前(=宽度适应)差得多才套(说明该方向上次是手动放大;一致=就是适应,免重渲)
+async function _applyPendingOrientScale() {
+  const t = _orientPendingScale; _orientPendingScale = 0;
+  if (t > 0 && Math.abs(t - scale) > 0.02 && typeof _applyZoom === 'function') await _applyZoom(t);
 }
 // 手动改排版/去边后调用：开了自动切换就把当前布局记进当前方向
 window._rememberOrientLayout = function () { if (_autoOrientOn()) _saveOrientLayout(_orient()); };
@@ -1006,6 +1015,7 @@ async function _onOrientChange() {
   if (_applyOrientLayoutVars(lay)) {
     _updateModeButtons(); _updateCropBtn();
     await _applyModeChange(currentPage);
+    await _applyPendingOrientScale();   // 还原该方向上次的缩放(宽度适应/手动放大)
   }
 }
 window.addEventListener('orientationchange', () => setTimeout(_onOrientChange, 300));   // 等尺寸稳定再判
@@ -1033,6 +1043,7 @@ async function _applyZoom(newScale) {
     requestAnimationFrame(() => {
       if (container && container.offsetHeight) main.scrollTop = Math.floor(ratio * container.offsetHeight);
       _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
+      window._rememberOrientLayout?.();   // 手动缩放记进当前方向(若开了旋转自动切换)
     });
   } finally { _refitBusy = false; }
 }
@@ -5960,6 +5971,9 @@ window.onTranslate = async () => {
   // 选中句 → 生成句子标记(L框/box)，box 呼吸表示翻译中；译完存 sidecar + 自动弹译文浮层
   const sent = _buildSentenceFromSel(pw, _charSel.startIdx, _charSel.endIdx);
   if (!sent) { aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译'); return; }
+  // **所译严格 = 预览(所选)文本**：sent.rects 只用作译文覆盖位置(geometry),要翻译的文字一律
+  // 用工具栏预览那串 lastSelText，杜绝「翻译内容跟预览不一致」(_buildSentenceFromSel 重拼可能分歧)。
+  { const _pv = (lastSelText || '').replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
   sent.__translating = true;
   pw.__vocabSentences = (pw.__vocabSentences || []).filter(s => s.text !== sent.text);
   pw.__vocabSentences.push(sent);

@@ -343,6 +343,9 @@ window.onTranslate = async () => {
   // 选中句 → 生成句子标记(L框/box)，box 呼吸表示翻译中；译完存 sidecar + 自动弹译文浮层
   const sent = _buildSentenceFromSel(pw, _charSel.startIdx, _charSel.endIdx);
   if (!sent) { aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译'); return; }
+  // **所译严格 = 预览(所选)文本**：sent.rects 只用作译文覆盖位置(geometry),要翻译的文字一律
+  // 用工具栏预览那串 lastSelText，杜绝「翻译内容跟预览不一致」(_buildSentenceFromSel 重拼可能分歧)。
+  { const _pv = (lastSelText || '').replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
   sent.__translating = true;
   pw.__vocabSentences = (pw.__vocabSentences || []).filter(s => s.text !== sent.text);
   pw.__vocabSentences.push(sent);
