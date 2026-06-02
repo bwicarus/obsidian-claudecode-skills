@@ -54,6 +54,13 @@ let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
+// 去边阅读模式：每本书可配左/右/上/下各隐藏 %。开启时把可见区填满宽度(fit-width 除以可见宽占比),
+// 再给 page-wrap 子层加同一 translate 位移 + overflow:hidden 裁切。纯位移不破坏选中坐标。
+let _crop = {l: 0, r: 0, t: 0, b: 0};   // 百分比(后端 /api/book-crop 加载)
+let _cropOn = false;                    // 开关(per-book localStorage)
+function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
+function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
+function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');
@@ -182,13 +189,15 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
+    await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
-    scale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
+    // 去边模式:把"可见区"(扣掉左右裁切)填满宽度 → scale 除以可见宽占比(_cropVisWFrac<1 → 放大)
+    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
@@ -217,6 +226,46 @@ async function loadPdf() {
   }
 }
 
+// ── 去边阅读模式 ──
+async function loadBookCrop() {
+  try {
+    const d = await (await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))).json();
+    if (d && d.ok && d.crop) {
+      _crop = {l: +d.crop.l || 0, r: +d.crop.r || 0, t: +d.crop.t || 0, b: +d.crop.b || 0};
+    }
+  } catch (_) {}
+  _cropOn = localStorage.getItem(_cropKey()) === '1';
+  _updateCropBtn();
+}
+function _updateCropBtn() {
+  const b = document.getElementById('crop-toggle');
+  if (b) b.classList.toggle('active', _cropActive());
+}
+window.toggleCrop = () => {
+  if (!(_crop.l || _crop.r || _crop.t || _crop.b)) {   // 没配过裁切 → 直接开设置面板
+    _toast?.('先在 ⚙ 设置里设定左右上下隐藏百分比');
+    window.openSettings?.();
+    return;
+  }
+  _cropOn = !_cropOn;
+  try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
+  _updateCropBtn();
+  _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
+};
+// 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
+async function saveCropSettings(crop, autoOn) {
+  _crop = {l: +crop.l || 0, r: +crop.r || 0, t: +crop.t || 0, b: +crop.b || 0};
+  try {
+    await fetch('/pdf/api/book-crop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, crop: _crop}),
+    });
+  } catch (_) {}
+  if (autoOn && _cropActive()) { _cropOn = true; try { localStorage.setItem(_cropKey(), '1'); } catch (_) {} }
+  _updateCropBtn();
+  _refitToWidth(true);
+}
+
 async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
@@ -232,6 +281,25 @@ async function renderPage(num) {
     return;
   }
   await _renderPageInto(num, document.getElementById('page-container'), true);
+}
+
+// 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS
+// 给所有子层(canvas/textLayer/char层/ruby/句子层…)加**同一个 translate** 位移到裁切原点。
+// 纯位移→各层相对位置不变、选中坐标(ptToLocal 用 getBoundingClientRect)自动跟随,不会错位。
+// canvas/层 CSS 尺寸仍是整页(cw×ch);裁切只靠 wrap 窗口 + 子层位移。
+function _applyCropToWrap(wrap, cw, ch) {
+  if (!_cropActive()) {
+    wrap.classList.remove('crop-on');
+    wrap.style.removeProperty('--crop-l');
+    wrap.style.removeProperty('--crop-t');
+    return;
+  }
+  const fl = _crop.l / 100, fr = _crop.r / 100, ft = _crop.t / 100, fb = _crop.b / 100;
+  wrap.classList.add('crop-on');
+  wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
+  wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
+  wrap.style.setProperty('--crop-l', (cw * fl).toFixed(1) + 'px');
+  wrap.style.setProperty('--crop-t', (ch * ft).toFixed(1) + 'px');
 }
 
 async function _renderPageInto(num, wrap) {
@@ -366,6 +434,7 @@ async function _renderPageInto(num, wrap) {
   // 加载该页已存墨迹并重绘
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
+  _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
   wrap.dataset.loaded = '1';
 
   // 同步 URL + 拉 KG 节点：只在单页模式做
@@ -731,7 +800,7 @@ async function _refitToWidth(force) {
   try {
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
-    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
+    const newScale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
     // 保存当前滚动相对位置（按 page-container 高度比例）
     const container = document.getElementById('page-container');
@@ -5447,8 +5516,18 @@ window.openSettings = () => {
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   const ct = localStorage.getItem('pdf-click-translate-unmastered');
   document.getElementById('set-click-translate').checked = (ct === null) ? true : (ct === '1');
+  // 去边百分比(本书,从已加载的 _crop 回填)
+  { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
+    g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
+};
+window._applyCropSettings = () => {
+  const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
+  const crop = {l: num('set-crop-l'), r: num('set-crop-r'), t: num('set-crop-t'), b: num('set-crop-b')};
+  saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
+  closeSettings();
+  _toast?.('去边已应用');
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
 window.saveSettings = async () => {

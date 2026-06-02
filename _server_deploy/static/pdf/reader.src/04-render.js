@@ -15,6 +15,25 @@ async function renderPage(num) {
   await _renderPageInto(num, document.getElementById('page-container'), true);
 }
 
+// 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS
+// 给所有子层(canvas/textLayer/char层/ruby/句子层…)加**同一个 translate** 位移到裁切原点。
+// 纯位移→各层相对位置不变、选中坐标(ptToLocal 用 getBoundingClientRect)自动跟随,不会错位。
+// canvas/层 CSS 尺寸仍是整页(cw×ch);裁切只靠 wrap 窗口 + 子层位移。
+function _applyCropToWrap(wrap, cw, ch) {
+  if (!_cropActive()) {
+    wrap.classList.remove('crop-on');
+    wrap.style.removeProperty('--crop-l');
+    wrap.style.removeProperty('--crop-t');
+    return;
+  }
+  const fl = _crop.l / 100, fr = _crop.r / 100, ft = _crop.t / 100, fb = _crop.b / 100;
+  wrap.classList.add('crop-on');
+  wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
+  wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
+  wrap.style.setProperty('--crop-l', (cw * fl).toFixed(1) + 'px');
+  wrap.style.setProperty('--crop-t', (ch * ft).toFixed(1) + 'px');
+}
+
 async function _renderPageInto(num, wrap) {
   if (!pdfDoc) return;
   if (wrap.dataset.loaded === '1') return;
@@ -147,6 +166,7 @@ async function _renderPageInto(num, wrap) {
   // 加载该页已存墨迹并重绘
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
+  _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
   wrap.dataset.loaded = '1';
 
   // 同步 URL + 拉 KG 节点：只在单页模式做

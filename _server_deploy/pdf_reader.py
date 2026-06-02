@@ -2218,6 +2218,61 @@ def pdf_api_book_langs_set():
     return jsonify({"ok": True, "langs": langs})
 
 
+_BOOK_CROP_PATH = CLAUDE_DIR / "state" / "pdf-book-crop.json"
+
+
+def _load_book_crop() -> dict:
+    try:
+        return json.loads(_BOOK_CROP_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _book_crop_for(rel: str) -> dict:
+    """每本书的去边百分比 {l,r,t,b}(左/右/上/下各隐藏 %)。无配置 → 全 0。"""
+    d = _load_book_crop().get(rel) or {}
+    out = {}
+    for k in ("l", "r", "t", "b"):
+        try:
+            out[k] = max(0.0, min(45.0, float(d.get(k, 0) or 0)))
+        except Exception:
+            out[k] = 0.0
+    return out
+
+
+@bp.route("/api/book-crop")
+def pdf_api_book_crop_get():
+    return jsonify({"ok": True, "crop": _book_crop_for(request.args.get("file", ""))})
+
+
+@bp.route("/api/book-crop", methods=["POST"])
+def pdf_api_book_crop_set():
+    """设置某书去边百分比。每边 0–45%,且左+右、上+下各 < 90(防裁没)。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    if not rel:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    c = data.get("crop") or {}
+    crop = {}
+    for k in ("l", "r", "t", "b"):
+        try:
+            crop[k] = max(0.0, min(45.0, float(c.get(k, 0) or 0)))
+        except Exception:
+            crop[k] = 0.0
+    if crop["l"] + crop["r"] > 90:
+        crop["l"] = crop["r"] = min(crop["l"], crop["r"], 45)
+    if crop["t"] + crop["b"] > 90:
+        crop["t"] = crop["b"] = min(crop["t"], crop["b"], 45)
+    allm = _load_book_crop()
+    allm[rel] = crop
+    try:
+        _BOOK_CROP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BOOK_CROP_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "crop": crop})
+
+
 @bp.route("/api/phrases", methods=["GET", "POST", "DELETE"])
 def pdf_api_phrases():
     """收藏词组（全局，作为分词依据）。

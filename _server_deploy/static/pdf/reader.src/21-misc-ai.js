@@ -83,8 +83,18 @@ window.openSettings = () => {
   document.getElementById('set-vocab-underline').checked = (vu === null) ? true : (vu === '1');
   const ct = localStorage.getItem('pdf-click-translate-unmastered');
   document.getElementById('set-click-translate').checked = (ct === null) ? true : (ct === '1');
+  // 去边百分比(本书,从已加载的 _crop 回填)
+  { const g = (id, v) => { const e = document.getElementById(id); if (e) e.value = v || 0; };
+    g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
   renderHlColorSetting();
   document.getElementById('settings-mask').style.display = 'flex';
+};
+window._applyCropSettings = () => {
+  const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
+  const crop = {l: num('set-crop-l'), r: num('set-crop-r'), t: num('set-crop-t'), b: num('set-crop-b')};
+  saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
+  closeSettings();
+  _toast?.('去边已应用');
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
 window.saveSettings = async () => {

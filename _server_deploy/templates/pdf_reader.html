@@ -21,6 +21,11 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 /* canvas 用 inline 固定 cw×ch（精确比例，绝不被 CSS 缩放）；宽度自适应靠重算 scale 重 render，overlay 同坐标系永不错位 */
 #main canvas{display:block;margin:0 auto 12px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4)}
 .page-wrap{position:relative;display:inline-block;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+/* 去边模式:page-wrap 裁成可见区(width/height 内联设)+ overflow 裁切;所有子层(canvas/textLayer/
+   char层/ruby/句子层)加同一 translate 位移到裁切原点 → 各层相对位置不变、选中坐标自动跟随 */
+.crop-on{position:relative;overflow:hidden}  /* position:relative 仅去边时加→单页模式 #page-container 才能裁住浮层(否则浮层锚到 #main 逃逸) */
+.crop-on>*{transform:translate(calc(-1*var(--crop-l,0px)),calc(-1*var(--crop-t,0px)))}
+#crop-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* PDF.js v4 官方 textLayer CSS（来自 web/viewer.css）+ iPad/触屏适配 */
 .textLayer{position:absolute;text-align:initial;inset:0;overflow:hidden;opacity:.25;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;z-index:2;pointer-events:auto;
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
@@ -528,6 +533,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button onclick="openLangPicker()" title="本书文本语言(决定查词用哪本词典)">🌐</button>
     <button id="ruby-toggle" onclick="toggleRuby()" title="振假名 / 英文音标叠加（汉字上方注假名读音、英文词上方注音标）">あ</button>
     <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
+    <button id="crop-toggle" onclick="toggleCrop()" title="去边阅读模式：隐藏每页左/右/上/下边距（在 ⚙ 设置里配各边百分比）">✂️ 去边</button>
     <button onclick="openSearch()" title="全文搜索（全书）">🔍</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
@@ -692,6 +698,15 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
       <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
     </label>
+    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <label style="flex:1;font-size:11px;color:#8a9bb4">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+      <label style="flex:1;font-size:11px;color:#8a9bb4">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+      <label style="flex:1;font-size:11px;color:#8a9bb4">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+      <label style="flex:1;font-size:11px;color:#8a9bb4">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+    </div>
+    <button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>
     <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
     <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
     <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">

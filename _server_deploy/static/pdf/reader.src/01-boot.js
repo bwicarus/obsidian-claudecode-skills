@@ -54,6 +54,13 @@ let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
+// 去边阅读模式：每本书可配左/右/上/下各隐藏 %。开启时把可见区填满宽度(fit-width 除以可见宽占比),
+// 再给 page-wrap 子层加同一 translate 位移 + overflow:hidden 裁切。纯位移不破坏选中坐标。
+let _crop = {l: 0, r: 0, t: 0, b: 0};   // 百分比(后端 /api/book-crop 加载)
+let _cropOn = false;                    // 开关(per-book localStorage)
+function _cropKey() { return 'pdf-crop-on:' + FILE_REL; }
+function _cropActive() { return _cropOn && (_crop.l || _crop.r || _crop.t || _crop.b); }
+function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _crop.r) / 100) : 1; }
 let readMode = (() => {
   const m = new URLSearchParams(location.search).get('mode');   // 技能树书本图标可带 ?mode=continuous
   return (m === 'continuous' || m === 'single') ? m : (localStorage.getItem('pdf-read-mode') || 'single');

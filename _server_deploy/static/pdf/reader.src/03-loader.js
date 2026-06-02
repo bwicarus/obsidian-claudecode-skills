@@ -55,13 +55,15 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
+    await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = Math.min(3.5, 4000 / (v0.height * _dpr0));   // 防 canvas backing 高超 iOS ~4096 限制
-    scale = Math.max(0.5, Math.min(_scaleMax, mainW / v0.width));
+    // 去边模式:把"可见区"(扣掉左右裁切)填满宽度 → scale 除以可见宽占比(_cropVisWFrac<1 → 放大)
+    scale = Math.max(0.5, Math.min(_scaleMax, mainW / (v0.width * _cropVisWFrac())));
     _lastFitWidth = mainW;
     window.dlog('autoscale: ' + scale.toFixed(2) + ' (mainW=' + mainW + ', pageW@1=' + v0.width.toFixed(0) + ')');
     document.getElementById('mode-toggle').textContent = readMode === 'continuous' ? '📚 连续' : '📄 单页';
@@ -88,5 +90,45 @@ async function loadPdf() {
     document.getElementById('page-container').innerHTML =
       '<div style="color:#c00;padding:20px">加载 PDF 失败：' + e.message + '</div>';
   }
+}
+
+// ── 去边阅读模式 ──
+async function loadBookCrop() {
+  try {
+    const d = await (await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))).json();
+    if (d && d.ok && d.crop) {
+      _crop = {l: +d.crop.l || 0, r: +d.crop.r || 0, t: +d.crop.t || 0, b: +d.crop.b || 0};
+    }
+  } catch (_) {}
+  _cropOn = localStorage.getItem(_cropKey()) === '1';
+  _updateCropBtn();
+}
+function _updateCropBtn() {
+  const b = document.getElementById('crop-toggle');
+  if (b) b.classList.toggle('active', _cropActive());
+}
+window.toggleCrop = () => {
+  if (!(_crop.l || _crop.r || _crop.t || _crop.b)) {   // 没配过裁切 → 直接开设置面板
+    _toast?.('先在 ⚙ 设置里设定左右上下隐藏百分比');
+    window.openSettings?.();
+    return;
+  }
+  _cropOn = !_cropOn;
+  try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
+  _updateCropBtn();
+  _refitToWidth(true);   // 重算 fit-width scale(按可见宽)+ 重渲染所有页(应用/撤销裁切)
+};
+// 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
+async function saveCropSettings(crop, autoOn) {
+  _crop = {l: +crop.l || 0, r: +crop.r || 0, t: +crop.t || 0, b: +crop.b || 0};
+  try {
+    await fetch('/pdf/api/book-crop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, crop: _crop}),
+    });
+  } catch (_) {}
+  if (autoOn && _cropActive()) { _cropOn = true; try { localStorage.setItem(_cropKey(), '1'); } catch (_) {} }
+  _updateCropBtn();
+  _refitToWidth(true);
 }
 
