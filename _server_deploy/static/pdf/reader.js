@@ -343,6 +343,7 @@ async function renderPage(num) {
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
   currentPage = num;
   { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
+  window._refreshVocabIfPage?.();   // 离散翻页(◀▶/滑块/跳页)也刷新「本页」单词本(连续模式下 loadPageNodes 只靠滚动触发,会漏)
   if (readMode !== 'single') {   // 连续 / 双页:滚到对应页占位 + 立即渲染
     // 连续模式：滚到对应页占位 + 立即渲染目标页(别等 IO,跳页/翻页不卡)
     const ph = document.querySelector(`[data-page-num="${num}"]`);
