@@ -5645,9 +5645,16 @@ document.addEventListener('copy', (e) => {
 function _buildSentenceFromSel(pw, sIdx, eIdx) {
   const chars = pw.__charBoxes;
   if (!chars || sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return null;
+  // 跟选中预览 _selByCharRange 用**同款块过滤**：排序后选区首尾之间会交错进别气泡/别栏的字，
+  // 翻译/解释必须只取起止块区间内的字（= 预览所见），否则译文混进左右气泡内容。
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
+  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
+  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
   const rects = []; let cur = null, firstC = null, lastC = null, text = '';
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (!_inBlk(c)) continue;   // 别块(别气泡/别栏)字符不计入，跟预览严格一致
     if (c.sp) { text += ' '; continue; }
     const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
     if (x0 == null) continue;
