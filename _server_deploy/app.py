@@ -98,7 +98,7 @@ with app.app_context():
 
 # ─────────────────────────── 通用左侧导航 (auto-inject) ───────────────────────────
 
-NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf")
+NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf", "/skilltree")
 
 @app.after_request
 def inject_nav(response):
