@@ -4221,8 +4221,10 @@ function openGrammarPanel() {
       readMode = 'continuous';
       _updateModeButtons();
     }
-    // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时；含上面的模式重建）
-    requestAnimationFrame(() => { _refitToWidth(true); });
+    // 打开侧栏让 #main 变窄 → 重算 scale。用 _scheduleRefit(debounce) 而非 rAF 立即跑:
+    // 重建几百页占位很重,放下一帧同步跑会卡住面板滑入动画(还要双击);debounce 把它挪到动画后、
+    // 且与 ResizeObserver(#main 变窄)触发的 refit 去重 → 只重建一次。
+    _scheduleRefit(true);
   }
   // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
   const _onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
@@ -4239,7 +4241,7 @@ window.closeGrammarPanel = () => {
     _spreadBeforePanel = null;
     _updateModeButtons();
   }
-  requestAnimationFrame(() => { _refitToWidth(true); });
+  _scheduleRefit(true);   // 同 open:debounce 重建,挪出动画帧 + 与 ResizeObserver 去重
 };
 // 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）
 window.toggleGrammarPanel = () => {
