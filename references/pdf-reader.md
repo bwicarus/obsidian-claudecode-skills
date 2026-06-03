@@ -712,3 +712,13 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 根因：`translate()` auto 链 `gtranslate→deepl→ai→mymemory`，gtranslate/deepl 偶发失败时落到 `_ai_translate`，它用 **`cfg.ai_backend`=`claude_cli`（Claude Code）**——其内置「编程助手」人格**间歇性拒翻**非编程内容，返回的拒绝说明**非空** → `if tr:` 当成功 → **`_cache_put` 缓存了拒绝**（之后永久命中）。
 - 修：① `_ai_translate` 加**拒绝识别**（`scripts/vocab/translate.py`）：只匹配拒绝特有的**完整短语**（`"我是一个软件工程"`/`"专注于编程和代码"`/`"不在我的职责范围"`/`"software engineering assistant"`/`"i cannot translate"`…），**不能用「软件工程/编程/代码」单词**否则 IT 教材的正经译文会被误判；命中 → 返回 `None` 落下个源、不缓存。② `translate(..., no_cache=False)`：`重新翻译`(`fresh=1`)绕读缓存、仍写回覆盖坏译文；路由 `/api/translate-sentence` 收 `fresh`，前端 `_sentRetranslate` 带 `fresh:1`。③ 一次性清掉 `state/dict-cache/` 里 45 条已缓存拒绝。
 - 注：`claude_cli` 翻译质量好**当它不拒绝时**；拒绝是概率性的。长期更稳的是给翻译走 `claude_api`（直 API + 自定 system prompt，不带 Claude Code 人格），但需配 key；当前用「拒绝识别 + 落 mymemory」兜底已够。
+
+### 21. 压缩版开关 + 大文件非阻塞加载（2026-06-03）
+- 背景:iPad 远程经 Tailscale 连家里 Pi(测得 Pi 上下行 700Mbit/s、本机 nginx 发 318MB 仅 0.5s → **服务器/家宽都不是瓶颈**;iPad 那侧远程网络慢+断续才是)。OCR 质量依赖图像质量,故**原书做 OCR + 默认/好网传输**,慢网才用压缩版。
+- **架构**:原书=主文件(`vault/<name>.pdf`,OCR + 默认源);压缩版单独存 `state/pdf-compressed/<sha1(rel)[:16]>.pdf`(**不进 Obsidian 同步**,省得 143MB 同步到所有设备),X-Accel internal location `/_compressed_pdf/`(alias 到该目录,www-data 经 /home/bwicarus 的 ACL 可读)。`.orig.pdf`/`.compressed.pdf` 从 list 扫描排除。
+- **compress_pdf.py**:加 `--out`(输出单独文件、不原地替换)+ `--status`(独立状态文件 `<sha>.status.json`,不和预处理 book-preprocess 状态冲突)。
+- **后端**(`pdf_reader.py`):`_compressed_paths/_compressed_info`;`pdf_file`/`pdf_view` 支持 `?compressed=1`(X-Accel 到 `/_compressed_pdf/`,pdf_size 用压缩版);`/api/compressed-status`(exists/compressing/percent) + `/api/compress-make`(后台 detached compress_pdf --out --status,默认 max-px 1150 q55 ≈ 省 55%);`_list_vault_pdfs` 带每本 `comp_exists/comp_compressing`。
+- **list 页开关**(`pdf_index.html`):`🗜 压缩版` 三态——灰(无压缩版,点击 → compress-make + 呼吸 `.breathing` + 轮询 compressed-status,完成转可用) / ○(有但不用) / ●(用)。偏好存 `localStorage['pdf-use-compressed:'+rel]`;`openBook` 开关开 → 链接带 `&compressed=1`。
+- **reader**(`reader.src`):`__PDF_CFG.compressed/comp_avail`;`loadPdf` 起 13s 计时,若仍没出首页 + 有压缩版 + 当前没在用 → 加载层显「⚡ 切换压缩版」按钮(`_switchToCompressed` 记偏好 + 重载带 `&compressed=1`)。
+- ⚠ **大文件加载改非阻塞**(撤回更早版本的"阻塞式整本下载"——慢网下盯进度条等几分钟是噩梦):**range 立即看当前页** + 整本在**后台分块续传缓存**(`_fetchFullWithProgress(url,{silent,priority:'low'})`,6MB 块、每块退避重试抗中断,≤220MB 才存);小文件(<30MB)才前台整本取。**iOS Safari 无 Background Fetch API → 无法"关掉浏览器还在后台下",只能阅读器开着时后台缓存**(已如实告知用户)。
+- 验证:Pi 端 curl 确认 `?compressed=1` 返回 206/来自压缩版(Content-Range .../149MB);compressed-status exists:true;view?compressed=1 的 __PDF_CFG compressed:1/comp_avail:1/size=压缩版。
