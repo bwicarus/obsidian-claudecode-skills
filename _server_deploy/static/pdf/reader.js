@@ -466,6 +466,30 @@ function _applyCropToWrap(wrap, cw, ch) {
   wrap.style.setProperty('--crop-t', (ch * ft).toFixed(1) + 'px');
 }
 
+// 后台预取当前页前后若干页的图(read-ahead,大型文档网站标配):低优先级 fetch → 落进浏览器缓存
+// → 翻到时瞬开。已加载/已预取的页本就被 HTTP immutable 缓存,不重复取(_prefetched 去重)。
+const _prefetched = new Set();
+function _prefetchAround(num, radius) {
+  if (!_imgMode) return;
+  const meta = window.__imgMeta; if (!meta) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cw = Math.floor(meta.page_w * scale);
+  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const R = radius || 3;
+  const want = [];
+  for (let d = 1; d <= R; d++) { want.push(num + d); if (num - d >= 1) want.push(num - d); }   // 偏向后页(顺序阅读)
+  for (const p of want) {
+    if (p < 1 || p > meta.page_count) continue;
+    const key = p + ':' + reqW;
+    if (_prefetched.has(key)) continue;
+    _prefetched.add(key);
+    const url = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + p + '&w=' + reqW + '&v=' + (meta.mtime || 0);
+    try {
+      fetch(url, { priority: 'low' }).then(r => r.blob()).catch(() => _prefetched.delete(key));   // 消费响应 → 进缓存;不抢交互带宽
+    } catch (_) { _prefetched.delete(key); }
+  }
+}
+window._prefetchAround = _prefetchAround;
 // 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
@@ -510,6 +534,7 @@ async function _renderPageImg(num, wrap, viewport) {
   _applyCropToWrap(wrap, cw, ch);
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
+  setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
   if (readMode === 'single') {
     const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
     loadPageNodes(num);
@@ -1394,6 +1419,7 @@ function _onContinuousScroll() {
           u.searchParams.set('page', num);
           history.replaceState(null, '', u);
           loadPageNodes(num);
+          if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
         }
         break;
       }

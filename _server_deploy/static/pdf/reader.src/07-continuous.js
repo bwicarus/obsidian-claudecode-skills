@@ -115,6 +115,7 @@ function _onContinuousScroll() {
           u.searchParams.set('page', num);
           history.replaceState(null, '', u);
           loadPageNodes(num);
+          if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
         }
         break;
       }
