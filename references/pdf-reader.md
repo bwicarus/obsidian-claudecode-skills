@@ -686,3 +686,10 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **B 浏览器 IndexedDB 整本缓存**（`reader.src/03-loader.js`）：首次打开走流式（线性化后首页快）**+ 后台 4s 后下整本存 IndexedDB**（`db=pdf-blob-cache` store=`pdfs` key=`FILE_REL` value=`{v,buf}`，`v` 绑 `?v=<mtime>` → PDF 变即失效重下）；第 2 次起命中缓存直接 `getDocument({data:buf})` 零网络秒开。
   - **>220MB 不整本缓存**（`_PDF_CACHE_MAX`，`{data}` 模式整本进内存，防 iPad Safari 单页 OOM；408MB 线代书仍走 range 流式）。
   - 设计取舍：故意**不在首次就 `{data}` 全量加载**（会双份内存 + PDF.js transfer detach 竞态）→ 首次流式、后台填缓存、次次秒开，最稳。IndexedDB 不可用（隐私模式/配额）静默回落流式。
+
+### 18. 连续模式内存虚拟化：远页卸载（2026-06-03）
+- 现象（用户）：iPad「用别的软件后回来又要重新缓存」。根因：连续模式**只懒加载、从不卸载**——`_renderPageInto` 渲染后 `dataset.loaded='1'` 永久保留 canvas，翻过几百页后所有访问过的页 canvas 全堆 DOM，内存无上限增长（每页 retina canvas ~10MB，100 页 ~1GB）→ iPad 内存吃紧时 **iOS 提前回收整个 Safari 标签**，回来重载/重渲。
+- 修（`07-continuous.js`）：`_unloadFarPages`（挂在 `_onContinuousScroll` 200ms 节流尾部，停滚也做最后一次清扫）扫所有 `loaded==='1'` 的 wrap，离视口 **>5000px** 的调 `_unloadPage`：`canvas.width/height=0`（iOS 显式释放 backing）+ 清各 `__*` 叠层引用 + `innerHTML=''` + **恢复成同尺寸占位**（`style.height=offsetHeight`→总高不变、滚动不跳）+ `loaded='0'`；滚回视口由 IntersectionObserver 重渲。
+  - **阈值 5000px 必须 > IO `rootMargin`（3000px）**，留 2000px 缓冲，否则边界来回抖动反复卸载/重渲。内存从无上限封顶到 ~±5000px（约 10 页 canvas）。
+  - 配套：`04-render.js` wrap 级 ink 监听（pointerdown/touchstart/touchmove）加 `wrap.__inkBound` 守卫——**卸载→重渲同一 wrap 不重复绑定**（否则每次重渲多挂一组 → 泄漏 + 多次触发）。
+  - 与 §17 互补：卸载**降低被回收频率**；IndexedDB blob 缓存+persist **让即便被回收、重载也从磁盘读不重新下载**。
