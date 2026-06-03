@@ -705,3 +705,10 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
   3. **权限**：nginx worker=www-data，但 `/home/bwicarus` 是 `0700`（www-data 进不去；其下 obsidian/资源/books 本就 world-rx、文件 world-r，唯一卡点是 home 的 traverse）。装 acl + `setfacl -m u:www-data:--x /home/bwicarus`（**仅给 www-data 一个 traverse**，mode 不变、不动 group、对其他用户仍封闭；最小授权）。ACL 存 xattr，持久跨重启。
 - **git VPS 配置**：`_server_deploy/nginx/bwicarus.conf` 加了 `location /_vault_pdf/ { internal; alias /root/obsidian/; }`，但 **VPS 默认不设 PDF_XACCEL → 休眠回落 send_file**；要在 VPS 启用须同样设 env + `setfacl -m u:www-data:--x /root`。
 - 验证口诀：`curl -k -H "Range: bytes=0-1048575" -b "session=<签名cookie>" https://<host>/pdf/file/<urlquote路径>` → 应 `206` + `Content-Range: bytes 0-1048575/总大小` + 落地正好 1MB；响应头**不该**出现 X-Accel-Redirect（被 nginx 内部消费了）。
+- ⚠ **坑（2026-06-03 回归）**：Flask X-Accel 分支**绝不能再设 `Accept-Ranges`**。nginx 服务静态文件时会自己加一个；若 Flask 也加 → 两份合成 `Accept-Ranges: bytes, bytes`，PDF.js 检查 `=== 'bytes'` 不等 → **判定不支持 range → 回退整本下载几百 MB → `Load failed`/极慢**。症状：nginx access.log 里该文件大量 `200`(整文件,client abort 后记录已发字节如 20MB)+`499`,而非 `206`。排查：`curl -I -b session=<cookie>` 看 `accept-ranges` 出现几次（应=1）。curl 带 `-H Range` 仍能 206（curl 不看 Accept-Ranges 直接发 Range），所以**只测 curl Range 会漏掉这个 bug，必须测 Safari/PDF.js 或数 Accept-Ranges 头数量**。
+
+### 20. 句子翻译出现「AI 拒绝」+ 被缓存（2026-06-03）
+- 现象：自动生词句的译文浮层显示「我是一个软件工程助手，专注于编程和代码…翻译数学不在我的职责范围」之类——**AI 拒绝**当成了译文。
+- 根因：`translate()` auto 链 `gtranslate→deepl→ai→mymemory`，gtranslate/deepl 偶发失败时落到 `_ai_translate`，它用 **`cfg.ai_backend`=`claude_cli`（Claude Code）**——其内置「编程助手」人格**间歇性拒翻**非编程内容，返回的拒绝说明**非空** → `if tr:` 当成功 → **`_cache_put` 缓存了拒绝**（之后永久命中）。
+- 修：① `_ai_translate` 加**拒绝识别**（`scripts/vocab/translate.py`）：只匹配拒绝特有的**完整短语**（`"我是一个软件工程"`/`"专注于编程和代码"`/`"不在我的职责范围"`/`"software engineering assistant"`/`"i cannot translate"`…），**不能用「软件工程/编程/代码」单词**否则 IT 教材的正经译文会被误判；命中 → 返回 `None` 落下个源、不缓存。② `translate(..., no_cache=False)`：`重新翻译`(`fresh=1`)绕读缓存、仍写回覆盖坏译文；路由 `/api/translate-sentence` 收 `fresh`，前端 `_sentRetranslate` 带 `fresh:1`。③ 一次性清掉 `state/dict-cache/` 里 45 条已缓存拒绝。
+- 注：`claude_cli` 翻译质量好**当它不拒绝时**；拒绝是概率性的。长期更稳的是给翻译走 `claude_api`（直 API + 自定 system prompt，不带 Claude Code 人格），但需配 key；当前用「拒绝识别 + 落 mymemory」兜底已够。
