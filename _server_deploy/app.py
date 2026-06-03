@@ -11,7 +11,7 @@ from pathlib import Path
 from functools import wraps
 from flask import (
     Flask, render_template, request, redirect,
-    url_for, session, send_from_directory, jsonify, abort, g,
+    url_for, session, send_from_directory, jsonify, abort, g, Response,
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -100,6 +100,32 @@ with app.app_context():
 
 NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf", "/skilltree")
 
+# PWA:让站点能「装到 iPad 主屏 + 全屏运行(无 Safari 地址栏)」,像原生 app。manifest + 苹果专用 meta。
+_PWA_HEAD = (
+    '<link rel="manifest" href="/manifest.webmanifest">'
+    '<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">'
+    '<meta name="apple-mobile-web-app-capable" content="yes">'
+    '<meta name="mobile-web-app-capable" content="yes">'
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">'
+    '<meta name="apple-mobile-web-app-title" content="bwicarus">'
+    '<meta name="theme-color" content="#10162a">'
+)
+
+@app.route("/manifest.webmanifest")
+def pwa_manifest():
+    """PWA 清单(可装到主屏、独立窗口运行)。公开(浏览器装应用时取,无需登录)。"""
+    return Response(json.dumps({
+        "name": "bwicarus 学习", "short_name": "bwicarus",
+        "start_url": "/dashboard/", "scope": "/",
+        "display": "standalone", "orientation": "any",
+        "background_color": "#10162a", "theme_color": "#10162a", "lang": "zh-CN",
+        "icons": [
+            {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+            {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    }, ensure_ascii=False), mimetype="application/manifest+json")
+
 @app.after_request
 def inject_nav(response):
     if response.status_code != 200:
@@ -132,6 +158,9 @@ def inject_nav(response):
         f'<script>window.__USER__={user_blob};</script>'
         f'<script src="/static/nav.js?v={nav_v}" defer></script>'
     )
+    # PWA:全站注入 manifest/apple-touch-icon/全屏 meta(可装到主屏、全屏像 app)
+    if "</head>" in body and 'rel="manifest"' not in body:
+        body = body.replace("</head>", _PWA_HEAD + "</head>", 1)
     response.set_data(body.replace("</body>", inject + "</body>", 1))
     return response
 
