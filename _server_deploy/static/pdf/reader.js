@@ -2969,10 +2969,17 @@ let _phraseHlTimer = null;
 let _activePhraseHl = null;   // {page, text, rects:[[x0,y0,x1,y1]pt...]}
 function _charRangeToPtRects(chars, s, e) {
   if (s > e) { const t = s; s = e; e = t; }
+  // 块过滤:跟选中预览(_selByCharRange)/句子构造(_buildSentenceFromSel)严格一致——排序后选区首尾之间
+  // 会交错进别气泡/别栏的字,不过滤就把别行的字也框进来(表现:选第2行却高亮第1、3行)。只取起止块区间内的字。
+  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+  const sb = _blk(chars[s]), eb = _blk(chars[e]);
+  const bLo = Math.min(sb, eb), bHi = Math.max(sb, eb);
+  const inBlk = (c) => { if (sb < 0 || eb < 0) return true; const b = _blk(c); return b < 0 || (b >= bLo && b <= bHi); };
   const rects = []; let cur = null;
   for (let i = s; i <= e && i < chars.length; i++) {
     const c = chars[i];
     if (c.sp || c._x0 == null) continue;
+    if (!inBlk(c)) continue;   // 别块字符不框,跟预览一致
     const lh = (c._y1 - c._y0) || 1;
     if (cur && Math.abs(c._y0 - cur[1]) <= lh * 0.6) {
       cur[2] = Math.max(cur[2], c._x1); cur[1] = Math.min(cur[1], c._y0); cur[3] = Math.max(cur[3], c._y1);
@@ -3025,11 +3032,11 @@ function _showPhraseHighlight(pw) {
   renderPhraseHl(pw);
   return true;
 }
-// ──────── 解释持久高亮（与词组高亮平行：独立琥珀色 + 独立状态，可与词组高亮共存）────────
-// 点「解释」时在选区建高亮：AI 加载中呼吸 → 出结果转常亮**保持**(不自动取消);
-// 点高亮 → 用缓存的解释 HTML 重开结果面板(沿用现有面板)并移除该高亮。单 active(再开新解释替换旧)。
-let _activeExplainHl = null;   // {page,text,rects,solid,html,title,src,resultContext}
-let _explainHlPending = null;  // onExplain 设;aiCall 完成时认领并把结果缓存进高亮
+// ──────── 解释高亮（与词组高亮平行：独立琥珀色，可与词组高亮共存）────────
+// 设计:点「解释」**不开面板**,只在选区建一个**一直闪烁**的高亮,AI 在后台跑;
+// 点高亮 → 打开解释页面(就绪=显缓存,未就绪=显加载中由后台填充) + **一次点击即移除高亮**。
+// 单 active:再开新解释把旧 job 标 canceled 并替换高亮。
+let _activeExplainHl = null;   // {page,text,rects,html,ready,canceled,panelReqId,title,src,resultContext}
 function renderExplainHl(pw) {
   pw.querySelector('.explain-hl-layer')?.remove();
   const a = _activeExplainHl;
@@ -3041,7 +3048,7 @@ function renderExplainHl(pw) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
   const layer = document.createElement('div');
-  layer.className = 'explain-hl-layer' + (a.solid ? '' : ' breathe');
+  layer.className = 'explain-hl-layer breathe';   // 一直闪烁,提示"点我看解释"
   for (const r of a.rects) {
     const d = document.createElement('div'); d.className = 'hl';
     d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
@@ -3061,10 +3068,12 @@ function _showExplainHighlight(pw, text) {
   if (!t) return null;
   const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
   if (!rects.length) return null;
+  if (_activeExplainHl) _activeExplainHl.canceled = true;   // 旧 job 作废(结果丢弃,不再填面板)
   document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
   _activeExplainHl = {
     page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage,
-    text: t, rects, solid: false, html: '', title: '💡 AI 解释', src: t, resultContext: null,
+    text: t, rects, html: null, ready: false, canceled: false, panelReqId: null,
+    title: '💡 AI 解释', src: t, resultContext: null,
   };
   const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层,避免双重高亮
   renderExplainHl(pw);
@@ -3074,11 +3083,18 @@ function _reopenExplain() {
   const a = _activeExplainHl;
   if (!a) return;
   if (a.html) {
+    // 已就绪 → 直接显缓存
     openResult(a.title || '💡 AI 解释', a.src || a.text, a.html);
-    try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}   // 恢复加号选段/草稿上下文
+    try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}
     try { addResultPickers(); } catch (_) {}
+  } else {
+    // 还在后台跑 → 开加载面板,登记 reqId,完成时由 _runExplainBg 填充(并补 pickers)
+    openResult(a.title || '💡 AI 解释', a.src || a.text, '<div class="loading">⏳ AI 处理中…</div>');
+    a.panelReqId = _resultReqId;   // openResult 已自增 _resultReqId,这里取新值
   }
-  _removeExplainHighlight();   // 点高亮=打开页面,随即移除(同词组)
+  // 点高亮=打开页面 → 一次点击即移除高亮(后台 job 仍持自身引用,未 canceled 时继续填面板)
+  document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
+  _activeExplainHl = null;
 }
 window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
@@ -3142,6 +3158,7 @@ window._phraseFav = (btn) => {
       const nowFav = _phraseFavSet.has(t);
       if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
       _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
+      if (nowFav) _removePhraseHighlight();   // 收藏后该词组变成划线(分词单元),呼吸查询高亮自动消除
       refreshCharsWForAllPages();   // 让分词合并立即生效
     } else if (btn) { btn.disabled = false; }
   }).catch(() => { if (btn) btn.disabled = false; });
@@ -5974,7 +5991,6 @@ async function _aiStream(url, opts) {
 }
 
 async function aiCall(path, body, label) {
-  const _ehl = _explainHlPending; _explainHlPending = null;   // 本次是否绑定"解释高亮"(onExplain 设)
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
@@ -5994,12 +6010,6 @@ async function aiCall(path, body, label) {
     render(res.text);
     if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
     addResultPickers();   // 完成后给标题加 +
-    // 解释高亮:出结果 → 转常亮 + 缓存内容(供点高亮重开解释页),前提是没被更新的解释替换掉
-    if (_ehl && typeof _activeExplainHl !== 'undefined' && _activeExplainHl === _ehl) {
-      _ehl.solid = true; _ehl.title = label; _ehl.src = body.text || _ehl.src;
-      _ehl.html = contentEl.innerHTML;
-      document.querySelectorAll('.explain-hl-layer').forEach(l => l.classList.remove('breathe'));
-    }
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
@@ -6158,11 +6168,39 @@ window.onExplain = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
-  // 选区建持久"解释高亮"(琥珀色,AI 加载中呼吸):不自动取消,点高亮可重开解释页(见 _reopenExplain)
+  // 解释**不开面板**:选区建一个一直闪烁的琥珀高亮,AI 后台跑;点高亮才开解释页 + 移除高亮(一次点击)。
   const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
-  if (_ehl) { _ehl.resultContext = _resultContext; _explainHlPending = _ehl; }
-  aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释');
+  if (!_ehl) { aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释'); return; }   // 建不了高亮(罕见)→退回旧式直接开面板
+  _ehl.title = '💡 AI 解释'; _ehl.src = explainText; _ehl.resultContext = _resultContext;
+  _runExplainBg(_ehl, explainText, context);
 };
+// 后台跑解释:不开面板,把渲染好的 HTML 缓存进高亮;若用户中途点了高亮开了加载面板(panelReqId 匹配),实时/收尾填充
+async function _runExplainBg(hl, text, context) {
+  const ov = _getAiOverrides();
+  const body = {text, context};
+  if (ov.model)  body.model  = ov.model;
+  if (ov.effort) body.effort = ov.effort;
+  const _fillPanel = (innerHtml, pickers) => {
+    if (hl.panelReqId == null || hl.panelReqId !== _resultReqId) return;   // 用户没点开等 / 已开别的结果 → 不填
+    const el = document.getElementById('result-content'); if (!el) return;
+    el.innerHTML = innerHtml;
+    if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
+    if (pickers) { try { _resultContext = hl.resultContext; } catch (_) {} try { addResultPickers(); } catch (_) {} }
+  };
+  let acc = '';
+  try {
+    const res = await _aiStream('/pdf/api/explain', { method: 'POST', body, onText: (t) => { acc = t; _fillPanel(md(t || ' '), false); } });
+    if (hl.canceled) return;   // 被新解释替换 → 丢弃
+    const full = res.text || acc;
+    hl.html = md(full || ' ') + (res.ok ? '' : '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>');
+    hl.ready = true;
+    _fillPanel(hl.html, true);
+  } catch (e) {
+    if (hl.canceled) return;
+    hl.html = '<div style="color:#c00">✗ ' + (e.message || '失败') + '</div>'; hl.ready = true;
+    _fillPanel(hl.html, false);
+  }
+}
 // 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问
 window.onChat = () => {
   if (!lastSelText) return;
