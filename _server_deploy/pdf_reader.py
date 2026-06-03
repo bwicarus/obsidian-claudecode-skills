@@ -440,7 +440,8 @@ def pdf_file(rel):
             resp = Response()
             resp.headers["X-Accel-Redirect"] = "/_vault_pdf/" + urllib.parse.quote(rel_clean)
             resp.headers["Content-Type"] = "application/pdf"
-            resp.headers["Accept-Ranges"] = "bytes"
+            # ⚠ 不要在此设 Accept-Ranges:nginx 服务该静态文件时会自己加 → 两份会被合成
+            # "bytes, bytes" ≠ "bytes" → PDF.js 判定不支持 range → 回退整本下载大文件 → Load failed/极慢。
             resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
             return resp
         except Exception:
@@ -3689,13 +3690,14 @@ def pdf_api_translate_sentence():
     backend = (data.get("backend") or "").strip()
     model = (data.get("model") or "").strip()
     effort = (data.get("effort") or "").strip()
+    no_cache = bool(data.get("fresh"))   # 「重新翻译」绕缓存,必出新结果(覆盖旧/坏译文如 AI 拒绝)
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
     if str(vp) not in sys.path:
         sys.path.insert(0, str(vp))
     try:
         from translate import translate as _tr  # type: ignore
-        zh = _tr(text, backend=backend, model=model, effort=effort)
+        zh = _tr(text, backend=backend, model=model, effort=effort, no_cache=no_cache)
         if zh:
             # 前端带 file + sentence 几何时 → 存 sidecar(持久句子标记 + 译文浮层)
             sent = data.get("sentence")

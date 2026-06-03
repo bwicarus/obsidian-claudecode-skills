@@ -183,6 +183,20 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
                 if zh.startswith(prefix):
                     zh = zh[len(prefix):].strip()
                     break
+            # 拒绝识别:claude_cli(Claude Code)有内置「编程助手」人格,间歇性拒翻数学/非编程内容 →
+            # 返回一段拒绝说明(非译文,且非空)。**只匹配拒绝特有的完整短语**(不能用"软件工程/编程"
+            # 等单词,否则 IT 教材的正经译文会被误判)。命中 → 返回 None(落下个翻译源,不缓存拒绝)。
+            _low = zh.lower()
+            if ("我是一个软件工程" in zh or "我是一名软件工程" in zh or "专注于编程和代码" in zh
+                    or "不在我的职责范围" in zh or "不属于我的职责" in zh or "超出了我的职责" in zh
+                    or "我无法翻译" in zh or "我不能翻译" in zh or "我无法为您翻译" in zh or "我不提供翻译" in zh
+                    or "software engineering assistant" in _low or "as a coding assistant" in _low
+                    or "coding-related task" in _low or "not within my responsibilit" in _low
+                    or "not within my scope" in _low or "i'm a software engineering" in _low
+                    or "i am a software engineering" in _low or "i cannot translate" in _low
+                    or "i can't translate" in _low or "i'm unable to translate" in _low
+                    or "i am unable to translate" in _low):
+                return None
             return zh or None
     except Exception:
         return None
@@ -222,7 +236,7 @@ def _mymemory(text: str, target: str = "zh-CN") -> str | None:
 
 
 def translate(text: str, target: str = "zh-CN",
-              backend: str = "", model: str = "", effort: str = "") -> str:
+              backend: str = "", model: str = "", effort: str = "", no_cache: bool = False) -> str:
     """主入口。返回中文翻译；失败返回空。
 
     backend 优先级：
@@ -236,7 +250,7 @@ def translate(text: str, target: str = "zh-CN",
     # 整句日语/中文(无拉丁)被误判为无内容直接返回空,导致日语多选翻译永远失败。
     if not re.search(r"[A-Za-z぀-ヿ㐀-鿿一-鿿々ー]", text):
         return ""
-    cached = _cache_get(text, target)
+    cached = None if no_cache else _cache_get(text, target)   # no_cache(重新翻译)→ 跳过读缓存,但仍写回覆盖
     if cached is not None:
         return cached
 

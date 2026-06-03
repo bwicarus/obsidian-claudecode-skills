@@ -1994,7 +1994,7 @@ function _sentRetranslate(s, pw) {
   try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {}   // 呼吸表示翻译中
   fetch('/pdf/api/translate-sentence', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: s.text }),
+    body: JSON.stringify({ text: s.text, fresh: 1 }),   // fresh:绕后端缓存,必出新结果(覆盖旧/坏译文)
   }).then(r => r.json()).then(d => {
     s.__translating = false;
     if (d.ok && d.zh) { s.zh = d.zh; try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {} _reopenSentOverlay(pw, s); _toast?.('已重新翻译'); }
