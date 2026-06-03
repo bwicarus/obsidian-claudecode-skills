@@ -78,26 +78,41 @@ function _cachePdfInBackground() {
   }, 20000);   // 延后 20s:让首开 + 初次翻页彻底过去再下整本,绝不抢首开带宽
 }
 
-// 整本流式下载 + 真实进度(读 ReadableStream 逐块累计,边下边更新进度条)。返回 ArrayBuffer。
+// 整本下载 + 真实进度。**分块(6MB) Range 顺序拉 + 每块失败退避重试**:iPad 在弱/断续网络下,
+// 单次大 fetch 一被中断(iOS 切后台/抖动)就从 0 重来、永远下不完;改成断了只重试**当前块**、已下的不丢,
+// 切后台回来也从上次位置续。需 total(文件大小);拿不到则回退单次流式。返回 ArrayBuffer。
 async function _fetchFullWithProgress(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  const total = (+resp.headers.get('content-length')) || PDF_SIZE || 0;
-  if (!resp.body || !resp.body.getReader) return await resp.arrayBuffer();   // 老引擎无 stream → 整本(无进度)
-  const reader = resp.body.getReader();
-  const chunks = []; let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value); received += value.length;
-    if (total) {
-      const pct = Math.max(1, Math.min(99, Math.round(received / total * 100)));
-      pdfLoadBar(pct);
-      pdfLoadShow('📄 下载中… ' + pct + '%  (' + Math.round(received / 1048576) + '/' + Math.round(total / 1048576) + 'MB)');
-    }
+  const total = PDF_SIZE || 0;
+  const _showPct = (got) => {
+    if (!total) return;
+    const pct = Math.max(1, Math.min(99, Math.round(got / total * 100)));
+    pdfLoadBar(pct);
+    pdfLoadShow('📄 下载中… ' + pct + '%  (' + Math.round(got / 1048576) + '/' + Math.round(total / 1048576) + 'MB)');
+  };
+  if (!total) {   // 不知道大小 → 单次流式(无续传)
+    const resp = await fetch(url); if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.arrayBuffer();
   }
-  const out = new Uint8Array(received);
-  let off = 0; for (const c of chunks) { out.set(c, off); off += c.length; }
+  const CHUNK = 6 * 1024 * 1024;
+  const out = new Uint8Array(total);
+  let pos = 0;
+  while (pos < total) {
+    const end = Math.min(pos + CHUNK, total) - 1;
+    let ok = false, lastErr = null;
+    for (let tries = 0; tries < 6 && !ok; tries++) {
+      if (tries) await new Promise(r => setTimeout(r, 700 * tries));   // 退避重试同一块
+      try {
+        const resp = await fetch(url, { headers: { Range: 'bytes=' + pos + '-' + end } });
+        if (resp.status !== 206 && resp.status !== 200) throw new Error('HTTP ' + resp.status);
+        const part = new Uint8Array(await resp.arrayBuffer());
+        if (!part.length) throw new Error('empty chunk');
+        out.set(part.subarray(0, Math.min(part.length, total - pos)), pos);
+        pos += part.length; ok = true;
+      } catch (e) { lastErr = e; }
+    }
+    if (!ok) throw lastErr || new Error('chunk failed @' + pos);
+    _showPct(pos);
+  }
   return out.buffer;
 }
 async function loadPdf() {
