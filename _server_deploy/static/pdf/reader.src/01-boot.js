@@ -50,6 +50,7 @@ window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
+let _fitPageW = 0, _fitPageH = 0;   // 首页 @scale1 尺寸缓存(旋转记忆判"当前是否=宽度适应"用)
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
 const _ZOOM_MIN = 0.18;   // 用户缩放下限(双指/zoomChange)。放宽到 0.18 → 可缩到比 fit-width 更小(这些书 fit≈0.5)
 // 去边阅读模式：每本书可配左/右/上/下各隐藏 %。开启时把可见区填满宽度(fit-width 除以可见宽占比),

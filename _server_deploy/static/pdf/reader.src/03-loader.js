@@ -122,6 +122,7 @@ async function loadPdf() {
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
+    _fitPageW = v0.width; _fitPageH = v0.height;   // 缓存供 _saveOrientLayout 判是否宽度适应
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
@@ -146,6 +147,7 @@ async function loadPdf() {
       await renderPage(currentPage);
     }
     if (typeof _applyPendingOrientScale === 'function') await _applyPendingOrientScale();   // 旋转记忆:套用该方向上次缩放
+    if (typeof _rememberOrientLayout === 'function') _rememberOrientLayout();   // 存当前方向基线(开了自动切换才存),保证从未改过的方向也有存档可切回
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动

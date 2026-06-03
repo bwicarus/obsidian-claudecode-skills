@@ -50,6 +50,7 @@ window.dlog('PDF_URL = ' + PDF_URL);
 let pdfDoc = null;
 let currentPage = window.__PDF_CFG.page;
 let scale = 1.4;
+let _fitPageW = 0, _fitPageH = 0;   // 首页 @scale1 尺寸缓存(旋转记忆判"当前是否=宽度适应"用)
 let _scaleMax = 3.0;   // scale 上限：loadPdf 按页高×dpr 动态算（防 canvas backing 高超 iOS ~4096）
 const _ZOOM_MIN = 0.18;   // 用户缩放下限(双指/zoomChange)。放宽到 0.18 → 可缩到比 fit-width 更小(这些书 fit≈0.5)
 // 去边阅读模式：每本书可配左/右/上/下各隐藏 %。开启时把可见区填满宽度(fit-width 除以可见宽占比),
@@ -267,6 +268,7 @@ async function loadPdf() {
     // 自适应宽度：让 PDF 渲染宽度 ≈ #main 可用宽度（防超屏横向 scroll）
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
+    _fitPageW = v0.width; _fitPageH = v0.height;   // 缓存供 _saveOrientLayout 判是否宽度适应
     const mainW = _mainContentWidth();
     const _dpr0 = window.devicePixelRatio || 1;
     _scaleMax = 4.0;   // 放大上限(绝对倍率)。backing≤4096 由 _renderPageInto 动态 outputScale 兜住,
@@ -291,6 +293,7 @@ async function loadPdf() {
       await renderPage(currentPage);
     }
     if (typeof _applyPendingOrientScale === 'function') await _applyPendingOrientScale();   // 旋转记忆:套用该方向上次缩放
+    if (typeof _rememberOrientLayout === 'function') _rememberOrientLayout();   // 存当前方向基线(开了自动切换才存),保证从未改过的方向也有存档可切回
     _restoreScrollAfterRender();   // 两种模式都恢复 scrollY（_pendingScrollY=0 时 no-op）
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
@@ -981,8 +984,11 @@ function _orient() {
 }
 function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
 function _saveOrientLayout(o) {
-  // 也存 scale(当前缩放=是否宽度适应/手动放大),恢复时按该方向上次的缩放还原
-  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, scale: +scale.toFixed(3) })); } catch (_) {}
+  // 记 fit 标志:当前是否=宽度适应(相对值,随容器宽变)。是 → 恢复时重算适应而非套旧 scale(否则换了
+  // 容器宽/方向后旧绝对 scale 会盖掉新算的适应,表现为"宽度适应没应用")。否(手动放大过) → 才存绝对 scale 还原。
+  let fit = 1;
+  try { if (_fitPageW > 0) fit = Math.abs(scale - _computeFitScale(_fitPageW, _fitPageH)) < 0.025 ? 1 : 0; } catch (_) {}
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, fit, scale: +scale.toFixed(3) })); } catch (_) {}
 }
 function _loadOrientLayout(o) {
   try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
@@ -993,7 +999,9 @@ function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调�
   readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
   _spreadOffset = lay.off ? 1 : 0;
   _cropOn = !!lay.crop;
-  _orientPendingScale = (lay.scale > 0) ? lay.scale : 0;
+  // fit=1(存档时是宽度适应) → 不套绝对 scale,让重排后的 _refitToWidth 重算适应(适应是相对值);
+  // fit=0(手动放大过) → 套回绝对 scale。旧存档无 fit 字段时退回老行为(套 scale)。
+  _orientPendingScale = (lay.fit === 1) ? 0 : ((lay.scale > 0) ? lay.scale : 0);
   try {
     localStorage.setItem('pdf-read-mode', readMode);
     localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
@@ -1018,7 +1026,9 @@ async function _onOrientChange() {
   if (_orientBusy) return;               // 旋转动画期多次 resize → 防重入
   _orientBusy = true;
   try {
-    _saveOrientLayout(_lastOrient);      // 先存离开方向的当前布局
+    // 不在此重存"离开方向"——此刻 mainW 已是新方向,算 fit 会用错宽度。离开方向的布局已由
+    // 用户在该方向里的每次改动(toggleCrop/toggleSpread/fitWidth/_applyZoom 各自调 _rememberOrientLayout,
+    // 当时宽度正确)以及载入基线存好了。
     _lastOrient = now;
     const lay = _loadOrientLayout(now);
     if (!lay) { window.dlog && window.dlog('orient: ' + now + ' 无存档,保持当前'); return; }

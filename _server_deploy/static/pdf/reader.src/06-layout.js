@@ -136,8 +136,11 @@ function _orient() {
 }
 function _orientKey(o) { return 'pdf-layout:' + FILE_REL + ':' + o; }
 function _saveOrientLayout(o) {
-  // 也存 scale(当前缩放=是否宽度适应/手动放大),恢复时按该方向上次的缩放还原
-  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, scale: +scale.toFixed(3) })); } catch (_) {}
+  // 记 fit 标志:当前是否=宽度适应(相对值,随容器宽变)。是 → 恢复时重算适应而非套旧 scale(否则换了
+  // 容器宽/方向后旧绝对 scale 会盖掉新算的适应,表现为"宽度适应没应用")。否(手动放大过) → 才存绝对 scale 还原。
+  let fit = 1;
+  try { if (_fitPageW > 0) fit = Math.abs(scale - _computeFitScale(_fitPageW, _fitPageH)) < 0.025 ? 1 : 0; } catch (_) {}
+  try { localStorage.setItem(_orientKey(o), JSON.stringify({ mode: readMode, crop: _cropOn ? 1 : 0, off: _spreadOffset || 0, fit, scale: +scale.toFixed(3) })); } catch (_) {}
 }
 function _loadOrientLayout(o) {
   try { const s = localStorage.getItem(_orientKey(o)); return s ? JSON.parse(s) : null; } catch (_) { return null; }
@@ -148,7 +151,9 @@ function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调�
   readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
   _spreadOffset = lay.off ? 1 : 0;
   _cropOn = !!lay.crop;
-  _orientPendingScale = (lay.scale > 0) ? lay.scale : 0;
+  // fit=1(存档时是宽度适应) → 不套绝对 scale,让重排后的 _refitToWidth 重算适应(适应是相对值);
+  // fit=0(手动放大过) → 套回绝对 scale。旧存档无 fit 字段时退回老行为(套 scale)。
+  _orientPendingScale = (lay.fit === 1) ? 0 : ((lay.scale > 0) ? lay.scale : 0);
   try {
     localStorage.setItem('pdf-read-mode', readMode);
     localStorage.setItem(_cropKey(), _cropOn ? '1' : '0');
@@ -173,7 +178,9 @@ async function _onOrientChange() {
   if (_orientBusy) return;               // 旋转动画期多次 resize → 防重入
   _orientBusy = true;
   try {
-    _saveOrientLayout(_lastOrient);      // 先存离开方向的当前布局
+    // 不在此重存"离开方向"——此刻 mainW 已是新方向,算 fit 会用错宽度。离开方向的布局已由
+    // 用户在该方向里的每次改动(toggleCrop/toggleSpread/fitWidth/_applyZoom 各自调 _rememberOrientLayout,
+    // 当时宽度正确)以及载入基线存好了。
     _lastOrient = now;
     const lay = _loadOrientLayout(now);
     if (!lay) { window.dlog && window.dlog('orient: ' + now + ' 无存档,保持当前'); return; }
