@@ -23,6 +23,14 @@ if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片�
 } else {
   window.dlog('图片模式:跳过 PDF.js 库(省 2.8MB 下载 + import 等待)');
 }
+// Service Worker:缓存页图(抗 iOS 定期清缓存 + 离线可读看过的页;PWA 标准做法)。只接管页图,其余放行。
+// 作用域 /pdf/ 需 SW 从 /pdf/sw.js 提供。+ 申请持久存储(persist)让缓存更不易被系统清。
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' })
+    .then(() => window.dlog && window.dlog('✓ Service Worker 已注册(页图持久缓存)'))
+    .catch((e) => window.dlog && window.dlog('SW 注册失败(不影响阅读):' + (e && e.message)));
+}
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
 const FILE_REL = window.__PDF_CFG.file_rel;

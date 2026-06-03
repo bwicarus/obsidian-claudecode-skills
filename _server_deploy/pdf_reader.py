@@ -452,6 +452,48 @@ def pdf_api_book_meta():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+_SW_JS = r"""// PDF 阅读器 Service Worker:只接管页图(GET /pdf/api/page-image),缓存优先 →
+// 抗 iOS 定期清缓存 + 离线可读已看过的页。其余请求(查词/SSE/POST 等)一律放行,不拦截。
+const CACHE = 'pdf-pages-v1';
+self.addEventListener('install', (e) => self.skipWaiting());
+self.addEventListener('activate', (e) => {
+  e.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k.startsWith('pdf-pages-') && k !== CACHE).map(k => caches.delete(k)));
+    await self.clients.claim();
+  })());
+});
+self.addEventListener('fetch', (e) => {
+  let url;
+  try { url = new URL(e.request.url); } catch (_) { return; }
+  if (e.request.method !== 'GET' || url.pathname !== '/pdf/api/page-image') return;   // 只管页图,其余放行
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(e.request);
+    if (hit) return hit;                                   // 命中缓存:零网络(含离线)
+    try {
+      const resp = await fetch(e.request);
+      if (resp && resp.ok) cache.put(e.request, resp.clone());   // 存进持久缓存(抗 iOS 清)
+      return resp;
+    } catch (err) {
+      const any = await cache.match(e.request, { ignoreSearch: false });
+      if (any) return any;
+      throw err;
+    }
+  })());
+});
+"""
+
+@bp.route("/sw.js")
+def pdf_sw_js():
+    """Service Worker 脚本。**必须从 /pdf/ 下提供**(SW 作用域=其所在目录 → 覆盖 /pdf/api/page-image)。
+    no-cache:SW 更新能被及时拉取(改了版本号即生效)。"""
+    resp = Response(_SW_JS, mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Service-Worker-Allowed"] = "/pdf/"
+    return resp
+
+
 @bp.route("/api/page-image")
 def pdf_api_page_image():
     """渲染某页为 JPEG(PyMuPDF,宽 w px),磁盘缓存(键含 mtime)。客户端逐页按需取 → 只下看到的页。"""
