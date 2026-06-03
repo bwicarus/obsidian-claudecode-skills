@@ -70,6 +70,61 @@ function _showPhraseHighlight(pw) {
   renderPhraseHl(pw);
   return true;
 }
+// ──────── 解释持久高亮（与词组高亮平行：独立琥珀色 + 独立状态，可与词组高亮共存）────────
+// 点「解释」时在选区建高亮：AI 加载中呼吸 → 出结果转常亮**保持**(不自动取消);
+// 点高亮 → 用缓存的解释 HTML 重开结果面板(沿用现有面板)并移除该高亮。单 active(再开新解释替换旧)。
+let _activeExplainHl = null;   // {page,text,rects,solid,html,title,src,resultContext}
+let _explainHlPending = null;  // onExplain 设;aiCall 完成时认领并把结果缓存进高亮
+function renderExplainHl(pw) {
+  pw.querySelector('.explain-hl-layer')?.remove();
+  const a = _activeExplainHl;
+  if (!a || !a.rects || !a.rects.length) return;
+  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const layer = document.createElement('div');
+  layer.className = 'explain-hl-layer' + (a.solid ? '' : ' breathe');
+  for (const r of a.rects) {
+    const d = document.createElement('div'); d.className = 'hl';
+    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+    layer.appendChild(d);
+  }
+  layer.addEventListener('click', (e) => { e.stopPropagation(); _reopenExplain(); });
+  pw.appendChild(layer);
+}
+function _removeExplainHighlight() {
+  _activeExplainHl = null;
+  document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
+}
+function _showExplainHighlight(pw, text) {
+  if (!pw || !_charSel || !pw.__charBoxes) return null;
+  const t = (text || lastSelText || '').trim();
+  if (!t) return null;
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  if (!rects.length) return null;
+  document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
+  _activeExplainHl = {
+    page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage,
+    text: t, rects, solid: false, html: '', title: '💡 AI 解释', src: t, resultContext: null,
+  };
+  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层,避免双重高亮
+  renderExplainHl(pw);
+  return _activeExplainHl;
+}
+function _reopenExplain() {
+  const a = _activeExplainHl;
+  if (!a) return;
+  if (a.html) {
+    openResult(a.title || '💡 AI 解释', a.src || a.text, a.html);
+    try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}   // 恢复加号选段/草稿上下文
+    try { addResultPickers(); } catch (_) {}
+  }
+  _removeExplainHighlight();   // 点高亮=打开页面,随即移除(同词组)
+}
 window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');

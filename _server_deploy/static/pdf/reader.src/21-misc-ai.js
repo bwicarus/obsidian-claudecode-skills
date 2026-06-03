@@ -246,6 +246,7 @@ async function _aiStream(url, opts) {
 }
 
 async function aiCall(path, body, label) {
+  const _ehl = _explainHlPending; _explainHlPending = null;   // 本次是否绑定"解释高亮"(onExplain 设)
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
@@ -265,6 +266,12 @@ async function aiCall(path, body, label) {
     render(res.text);
     if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
     addResultPickers();   // 完成后给标题加 +
+    // 解释高亮:出结果 → 转常亮 + 缓存内容(供点高亮重开解释页),前提是没被更新的解释替换掉
+    if (_ehl && typeof _activeExplainHl !== 'undefined' && _activeExplainHl === _ehl) {
+      _ehl.solid = true; _ehl.title = label; _ehl.src = body.text || _ehl.src;
+      _ehl.html = contentEl.innerHTML;
+      document.querySelectorAll('.explain-hl-layer').forEach(l => l.classList.remove('breathe'));
+    }
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
@@ -423,6 +430,9 @@ window.onExplain = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
+  // 选区建持久"解释高亮"(琥珀色,AI 加载中呼吸):不自动取消,点高亮可重开解释页(见 _reopenExplain)
+  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
+  if (_ehl) { _ehl.resultContext = _resultContext; _explainHlPending = _ehl; }
   aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释');
 };
 // 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问

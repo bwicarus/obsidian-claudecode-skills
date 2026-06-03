@@ -1322,6 +1322,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
   if (_rubyEnabled()) _verifyFurigana(wrap);   // 振假名读音 AI 上下文校正(后台,不阻塞)
   try { renderPhraseHl(wrap); } catch(_) {}   // 词组持久高亮：重渲染后从状态恢复（防"自动消失"）
+  try { renderExplainHl(wrap); } catch(_) {}   // 解释持久高亮：同上,重渲染后恢复
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
   // 全文搜索跳转：本页刚好是待高亮页 → 此处 __charBoxes 已赋值，直接画（不走轮询，秒级到位）
@@ -3023,6 +3024,61 @@ function _showPhraseHighlight(pw) {
   const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层，避免双重高亮
   renderPhraseHl(pw);
   return true;
+}
+// ──────── 解释持久高亮（与词组高亮平行：独立琥珀色 + 独立状态，可与词组高亮共存）────────
+// 点「解释」时在选区建高亮：AI 加载中呼吸 → 出结果转常亮**保持**(不自动取消);
+// 点高亮 → 用缓存的解释 HTML 重开结果面板(沿用现有面板)并移除该高亮。单 active(再开新解释替换旧)。
+let _activeExplainHl = null;   // {page,text,rects,solid,html,title,src,resultContext}
+let _explainHlPending = null;  // onExplain 设;aiCall 完成时认领并把结果缓存进高亮
+function renderExplainHl(pw) {
+  pw.querySelector('.explain-hl-layer')?.remove();
+  const a = _activeExplainHl;
+  if (!a || !a.rects || !a.rects.length) return;
+  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const layer = document.createElement('div');
+  layer.className = 'explain-hl-layer' + (a.solid ? '' : ' breathe');
+  for (const r of a.rects) {
+    const d = document.createElement('div'); d.className = 'hl';
+    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+    layer.appendChild(d);
+  }
+  layer.addEventListener('click', (e) => { e.stopPropagation(); _reopenExplain(); });
+  pw.appendChild(layer);
+}
+function _removeExplainHighlight() {
+  _activeExplainHl = null;
+  document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
+}
+function _showExplainHighlight(pw, text) {
+  if (!pw || !_charSel || !pw.__charBoxes) return null;
+  const t = (text || lastSelText || '').trim();
+  if (!t) return null;
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  if (!rects.length) return null;
+  document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
+  _activeExplainHl = {
+    page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage,
+    text: t, rects, solid: false, html: '', title: '💡 AI 解释', src: t, resultContext: null,
+  };
+  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层,避免双重高亮
+  renderExplainHl(pw);
+  return _activeExplainHl;
+}
+function _reopenExplain() {
+  const a = _activeExplainHl;
+  if (!a) return;
+  if (a.html) {
+    openResult(a.title || '💡 AI 解释', a.src || a.text, a.html);
+    try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}   // 恢复加号选段/草稿上下文
+    try { addResultPickers(); } catch (_) {}
+  }
+  _removeExplainHighlight();   // 点高亮=打开页面,随即移除(同词组)
 }
 window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
@@ -5918,6 +5974,7 @@ async function _aiStream(url, opts) {
 }
 
 async function aiCall(path, body, label) {
+  const _ehl = _explainHlPending; _explainHlPending = null;   // 本次是否绑定"解释高亮"(onExplain 设)
   const ov = _getAiOverrides();
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
@@ -5937,6 +5994,12 @@ async function aiCall(path, body, label) {
     render(res.text);
     if (!res.ok) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
     addResultPickers();   // 完成后给标题加 +
+    // 解释高亮:出结果 → 转常亮 + 缓存内容(供点高亮重开解释页),前提是没被更新的解释替换掉
+    if (_ehl && typeof _activeExplainHl !== 'undefined' && _activeExplainHl === _ehl) {
+      _ehl.solid = true; _ehl.title = label; _ehl.src = body.text || _ehl.src;
+      _ehl.html = contentEl.innerHTML;
+      document.querySelectorAll('.explain-hl-layer').forEach(l => l.classList.remove('breathe'));
+    }
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
@@ -6095,6 +6158,9 @@ window.onExplain = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
+  // 选区建持久"解释高亮"(琥珀色,AI 加载中呼吸):不自动取消,点高亮可重开解释页(见 _reopenExplain)
+  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
+  if (_ehl) { _ehl.resultContext = _resultContext; _explainHlPending = _ehl; }
   aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释');
 };
 // 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问
