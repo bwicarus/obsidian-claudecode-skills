@@ -29,6 +29,7 @@ window.toggleReadMode = async () => {
 // 连续 → 双页(offset0) → 双页(offset1,facing 错开) → 连续。
 window.toggleSpread = async () => {
   const keepPage = currentPage;
+  _spreadBeforePanel = null;   // 手动切模式 → 取消"关栏还原双页"(以用户手动选择为准)
   if (readMode !== 'spread') { readMode = 'spread'; _spreadOffset = 0; }
   else if (_spreadOffset === 0) { _spreadOffset = 1; }
   else { readMode = 'continuous'; }      // 第三下回单列连续(取消单页后,这是退出双页的唯一入口)

@@ -201,7 +201,13 @@ function openGrammarPanel() {
   if (!p.classList.contains('open')) {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
-    // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时）
+    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页
+    if (readMode === 'spread') {
+      _spreadBeforePanel = _spreadOffset;
+      readMode = 'continuous';
+      _updateModeButtons();
+    }
+    // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时；含上面的模式重建）
     requestAnimationFrame(() => { _refitToWidth(true); });
   }
   // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
@@ -212,6 +218,13 @@ window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
   _hideDepTip();
+  // 还原侧栏打开时临时切走的双页
+  if (_spreadBeforePanel != null) {
+    readMode = 'spread';
+    _spreadOffset = _spreadBeforePanel;
+    _spreadBeforePanel = null;
+    _updateModeButtons();
+  }
   requestAnimationFrame(() => { _refitToWidth(true); });
 };
 // 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）

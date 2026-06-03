@@ -63,6 +63,7 @@ function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _
 function _cropVisHFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.t + _crop.b) / 100) : 1; }
 // 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
 let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
+let _spreadBeforePanel = null;   // 侧栏打开时把双页临时切单列,存被切走的 offset(关栏还原);null=没临时切。不持久。
 function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
 function _pagesPerRow() { return readMode === 'spread' ? 2 : 1; }
 function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1],[2,3],[4,5]…]

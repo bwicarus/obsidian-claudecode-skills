@@ -63,6 +63,7 @@ function _cropVisWFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.l + _
 function _cropVisHFrac() { return _cropActive() ? Math.max(0.1, 1 - (_crop.t + _crop.b) / 100) : 1; }
 // 双页(spread)模式：连续滚动、每行 2 页并排。_spreadOffset 0/1 错开facing(0:1|2,3|4… 1:1单+2|3,4|5…)
 let _spreadOffset = (() => { try { return localStorage.getItem('pdf-spread-offset:' + FILE_REL) === '1' ? 1 : 0; } catch (_) { return 0; } })();
+let _spreadBeforePanel = null;   // 侧栏打开时把双页临时切单列,存被切走的 offset(关栏还原);null=没临时切。不持久。
 function _spreadKey() { return 'pdf-spread-offset:' + FILE_REL; }
 function _pagesPerRow() { return readMode === 'spread' ? 2 : 1; }
 function _spreadRows(total, offset) {   // → [[1,2],[3,4]…] 或 offset=1 [[1],[2,3],[4,5]…]
@@ -881,6 +882,7 @@ window.toggleReadMode = async () => {
 // 连续 → 双页(offset0) → 双页(offset1,facing 错开) → 连续。
 window.toggleSpread = async () => {
   const keepPage = currentPage;
+  _spreadBeforePanel = null;   // 手动切模式 → 取消"关栏还原双页"(以用户手动选择为准)
   if (readMode !== 'spread') { readMode = 'spread'; _spreadOffset = 0; }
   else if (_spreadOffset === 0) { _spreadOffset = 1; }
   else { readMode = 'continuous'; }      // 第三下回单列连续(取消单页后,这是退出双页的唯一入口)
@@ -4213,7 +4215,13 @@ function openGrammarPanel() {
   if (!p.classList.contains('open')) {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
-    // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时）
+    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页
+    if (readMode === 'spread') {
+      _spreadBeforePanel = _spreadOffset;
+      readMode = 'continuous';
+      _updateModeButtons();
+    }
+    // 打开侧栏让 #main 变窄 → 主动重算 scale 缩放 PDF（iPad Safari ResizeObserver 可能不及时；含上面的模式重建）
     requestAnimationFrame(() => { _refitToWidth(true); });
   }
   // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
@@ -4224,6 +4232,13 @@ window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
   _hideDepTip();
+  // 还原侧栏打开时临时切走的双页
+  if (_spreadBeforePanel != null) {
+    readMode = 'spread';
+    _spreadOffset = _spreadBeforePanel;
+    _spreadBeforePanel = null;
+    _updateModeButtons();
+  }
   requestAnimationFrame(() => { _refitToWidth(true); });
 };
 // 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）
