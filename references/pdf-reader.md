@@ -693,3 +693,15 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
   - **阈值 5000px 必须 > IO `rootMargin`（3000px）**，留 2000px 缓冲，否则边界来回抖动反复卸载/重渲。内存从无上限封顶到 ~±5000px（约 10 页 canvas）。
   - 配套：`04-render.js` wrap 级 ink 监听（pointerdown/touchstart/touchmove）加 `wrap.__inkBound` 守卫——**卸载→重渲同一 wrap 不重复绑定**（否则每次重渲多挂一组 → 泄漏 + 多次触发）。
   - 与 §17 互补：卸载**降低被回收频率**；IndexedDB blob 缓存+persist **让即便被回收、重载也从磁盘读不重新下载**。
+
+### 19. 大文件加载卡在「1%」根治：X-Accel-Redirect（2026-06-03）
+- 现象（用户）：317MB 扫描书（応用情報技術者.pdf，679 页，已线性化）打开**卡在「加载中 1%」不动**。
+- 排查：文件头有 `/Linearized 1`（线性化 OK，非该问题）；Werkzeug `send_file(conditional=True)` 单测返回 206 正常；**真因 = 经 `nginx → Flask(Werkzeug dev server)` 服务几百 MB**：dev server 吞吐弱 + nginx 默认 `proxy_buffering on` 把每个 range 块先缓冲到磁盘临时文件，大文件链路慢/卡。
+- 根治 = **X-Accel-Redirect**：`/pdf/file/<rel>` 鉴权 + `_safe_vault_path` 校验后，**不再 `send_file`**，改返回 `X-Accel-Redirect: /_vault_pdf/<urlquote(rel)>`（+ Content-Type/Accept-Ranges/Cache-Control）；nginx 见此头 → 走 internal location `/_vault_pdf/`（`alias` 到 vault）**原生 sendfile + 原生 Range** 发文件（快、并发好、零 Python、零代理缓冲）。Range 由 nginx 自动套到内部子请求 → 完美 206。
+- **env 门控**：`pdf_reader.py` 读 `PDF_XACCEL=1` 才发该头，否则回落 `send_file`（本地开发/未配 nginx 仍可用）。安全性：`/_vault_pdf/` 是 `internal`（直访 404，只能由 Flask 的 X-Accel 触发），暴露面 = `pdf_file` 原本已允许的（`_safe_vault_path` 防穿越）。
+- **Pi 实例手工配置（不在 git）**：
+  1. `webapp/.env` 加 `PDF_XACCEL=1` → `systemctl restart webapp`。
+  2. nginx `/etc/nginx/sites-available/bwicarus` **两个 server 块各加** `location /_vault_pdf/ { internal; alias /home/bwicarus/obsidian/; }`（手工 patch，**勿 cp git**——会冲掉 Tailscale 证书）。`nginx -t && systemctl reload nginx`。
+  3. **权限**：nginx worker=www-data，但 `/home/bwicarus` 是 `0700`（www-data 进不去；其下 obsidian/资源/books 本就 world-rx、文件 world-r，唯一卡点是 home 的 traverse）。装 acl + `setfacl -m u:www-data:--x /home/bwicarus`（**仅给 www-data 一个 traverse**，mode 不变、不动 group、对其他用户仍封闭；最小授权）。ACL 存 xattr，持久跨重启。
+- **git VPS 配置**：`_server_deploy/nginx/bwicarus.conf` 加了 `location /_vault_pdf/ { internal; alias /root/obsidian/; }`，但 **VPS 默认不设 PDF_XACCEL → 休眠回落 send_file**；要在 VPS 启用须同样设 env + `setfacl -m u:www-data:--x /root`。
+- 验证口诀：`curl -k -H "Range: bytes=0-1048575" -b "session=<签名cookie>" https://<host>/pdf/file/<urlquote路径>` → 应 `206` + `Content-Range: bytes 0-1048575/总大小` + 落地正好 1MB；响应头**不该**出现 X-Accel-Redirect（被 nginx 内部消费了）。

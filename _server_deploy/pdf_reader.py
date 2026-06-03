@@ -30,6 +30,9 @@ from flask import (
 
 CLAUDE_DIR    = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+# PDF_XACCEL=1:用 nginx X-Accel-Redirect 发大 PDF(原生 sendfile+Range,绕开 Werkzeug dev server
+# 服务几百 MB 时的卡顿)。需 nginx internal location `/_vault_pdf/`(alias 到 vault)+ www-data 有读权限。
+_PDF_XACCEL = os.environ.get("PDF_XACCEL", "").strip() == "1"
 
 # spaCy 本地句法分析（独立 venv，subprocess 调用；装上则语法分析走它、零 AI）
 SPACY_PY     = Path(os.environ.get("SPACY_PYTHON", "/home/bwicarus/spacy-venv/bin/python"))
@@ -429,6 +432,19 @@ def pdf_file(rel):
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
+    # 大文件优先走 X-Accel-Redirect:Flask 只鉴权,文件交给 nginx 原生 sendfile + 原生 Range 发
+    # (Werkzeug dev server 服务几百 MB 时慢/卡 → "加载中 1% 卡死";nginx 原生快且并发好)。
+    if _PDF_XACCEL:
+        try:
+            rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+            resp = Response()
+            resp.headers["X-Accel-Redirect"] = "/_vault_pdf/" + urllib.parse.quote(rel_clean)
+            resp.headers["Content-Type"] = "application/pdf"
+            resp.headers["Accept-Ranges"] = "bytes"
+            resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+            return resp
+        except Exception:
+            pass   # 兜底:任何意外 → 回落 send_file
     # conditional=True → 支持 HTTP Range(206),PDF.js 才能逐页流式只取所需字节,
     # 大文件(几百 MB)不必整本下载到浏览器,iPad Safari 不再 OOM。
     resp = send_file(str(abs_path), mimetype="application/pdf", conditional=True)
