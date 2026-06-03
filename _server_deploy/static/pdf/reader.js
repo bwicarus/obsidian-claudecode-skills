@@ -20,6 +20,7 @@ try {
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
 const FILE_REL = window.__PDF_CFG.file_rel;
+const PDF_SIZE = (window.__PDF_CFG && +window.__PDF_CFG.size) || 0;   // 文件字节数(决定小文件整本取/大文件 range)
 // page-chars 缓存版本 = PDF mtime + 后端分词版本 _CHAR_CACHE_VER。前者在 PDF 变更时刷新,
 // 后者在**分词逻辑变更**时刷新(同一 mtime 下也能让 iOS Safari 已缓存的旧分词数据失效 →
 // 修了"只能选单字"类 bug 后客户端立刻重取,不必等 PDF mtime 变。配合后端 no-store。
@@ -240,12 +241,24 @@ async function loadPdf() {
     const _rangeOpts = { url: PDF_URL, disableAutoFetch: true, disableStream: true, rangeChunkSize: 1048576 };  // 1MB 块:减少 Tailscale 高延迟下的往返次数
     // 本地缓存优先:命中(且版本一致)→ 从 IndexedDB 直接喂字节,零网络、秒开;
     // 未命中 → 走流式(线性化后首页快)+ 后台把整本下到本地,下次秒开。
-    let _src = _rangeOpts, _fromCache = false;
+    let _src = _rangeOpts, _haveBuf = false;
     try {
       const c = await _idbGet(FILE_REL);
-      if (c && c.v === _PDF_VER && c.buf) { _src = { data: c.buf }; _fromCache = true; window.dlog('✓ 命中本地缓存,秒开'); }
+      if (c && c.v === _PDF_VER && c.buf) { _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开'); }
     } catch (_) {}
-    if (!_fromCache) _cachePdfInBackground();
+    // 小文件(<30MB)且未缓存:**一次性整本取** → {data}。range 模式要先 HEAD 探测 + 逐页 range,
+    // 高延迟(VPN)下这些往返反而比一次 GET 慢;小文件一次取最快,顺便缓存下次秒开。大文件仍走 range(防 OOM/省流量)。
+    const _SMALL_MAX = 30 * 1024 * 1024;
+    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _SMALL_MAX) {
+      try {
+        pdfLoadShow('📄 加载中…', '小文件一次性下载');
+        const buf = await (await fetch(PDF_URL)).arrayBuffer();
+        _src = { data: buf }; _haveBuf = true;
+        _idbPut(FILE_REL, { v: _PDF_VER, buf }).catch(() => {});   // 缓存,下次秒开
+        window.dlog('小文件整本取 ' + Math.round(buf.byteLength / 1024) + 'KB,无 range 往返');
+      } catch (e) { window.dlog('小文件整本取失败,回落 range: ' + (e && e.message)); }
+    }
+    if (!_haveBuf) _cachePdfInBackground();   // 大文件 / 整本取失败 → range + 后台缓存
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {

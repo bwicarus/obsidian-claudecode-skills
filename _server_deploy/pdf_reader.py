@@ -419,6 +419,7 @@ def pdf_view():
         file_name=Path(rel).name,
         page=page,
         pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}",
+        pdf_size=(abs_path.stat().st_size if abs_path.exists() else 0),   # 字节数:前端据此决定小文件整本取/大文件 range
         reader_js_v=_reader_js_v(),
         chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
     ))

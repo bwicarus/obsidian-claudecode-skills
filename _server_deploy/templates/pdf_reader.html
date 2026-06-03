@@ -857,7 +857,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, chars_ver: {{ chars_ver|default(0) }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}};</script>
 <script type="module" src="/static/pdf/reader.js?v={{ reader_js_v }}"></script>
 
 <script>

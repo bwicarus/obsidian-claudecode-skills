@@ -20,6 +20,7 @@ try {
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
 const FILE_REL = window.__PDF_CFG.file_rel;
+const PDF_SIZE = (window.__PDF_CFG && +window.__PDF_CFG.size) || 0;   // 文件字节数(决定小文件整本取/大文件 range)
 // page-chars 缓存版本 = PDF mtime + 后端分词版本 _CHAR_CACHE_VER。前者在 PDF 变更时刷新,
 // 后者在**分词逻辑变更**时刷新(同一 mtime 下也能让 iOS Safari 已缓存的旧分词数据失效 →
 // 修了"只能选单字"类 bug 后客户端立刻重取,不必等 PDF mtime 变。配合后端 no-store。
