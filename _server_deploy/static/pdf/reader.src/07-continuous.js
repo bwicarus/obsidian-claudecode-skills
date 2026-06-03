@@ -60,6 +60,38 @@ async function setupContinuousMode() {
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
 
+// ── 内存控制:滚出视口足够远的已渲染页自动卸载(释放 canvas/各叠层),保留占位高度→滚动不跳。 ──
+// iPad 内存吃紧时 iOS 会把整个 Safari 标签回收(回来要重载)。连续模式若把访问过的几百页 canvas 全留
+// 在 DOM,内存无上限增长 → 更早被回收。卸载后 dataset.loaded='0',滚回视口由 IntersectionObserver 重渲。
+// 卸载阈值(5000px)必须 > IO 的 rootMargin(3000px),留 2000px 缓冲,避免边界来回抖动反复卸载/重渲。
+const _KEEP_DIST_PX = 5000;
+function _unloadPage(w) {
+  const h = w.offsetHeight, wd = w.offsetWidth, num = w.dataset.pageNum;   // 记当前尺寸,占位沿用→不跳
+  w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
+  w.__vocabMarks = null; w.__vocabSentences = null; w.__furigana = null;
+  w.__pageWPt = null; w.__pageHPt = null;
+  w.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });   // 显式清零,iOS 释放 backing 更彻底
+  w.innerHTML = '';
+  w.classList.remove('crop-on');
+  w.style.width = wd + 'px'; w.style.height = h + 'px';
+  w.style.background = '#fff'; w.style.color = '#888';
+  w.style.display = 'flex'; w.style.alignItems = 'center'; w.style.justifyContent = 'center';
+  w.textContent = '… 第 ' + num + ' 页';
+  w.dataset.loaded = '0';
+}
+function _unloadFarPages() {
+  const mainEl = document.getElementById('main');
+  if (!mainEl) return;
+  const mr = mainEl.getBoundingClientRect(), vh = mainEl.clientHeight;
+  const wraps = document.querySelectorAll('#page-container .page-wrap');
+  for (const w of wraps) {
+    if (w.dataset.loaded !== '1') continue;   // 占位页便宜跳过(不调 getBoundingClientRect)
+    const r = w.getBoundingClientRect();
+    const relTop = r.top - mr.top, relBot = r.bottom - mr.top;
+    if (relBot < -_KEEP_DIST_PX || relTop > vh + _KEEP_DIST_PX) _unloadPage(w);
+  }
+}
+
 let _scrollTimer = null;
 function _onContinuousScroll() {
   if (_scrollTimer) return;
@@ -87,6 +119,7 @@ function _onContinuousScroll() {
         break;
       }
     }
+    _unloadFarPages();   // 顺带卸载远处页,封顶内存
   }, 200);
 }
 

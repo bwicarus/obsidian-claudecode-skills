@@ -92,13 +92,17 @@ async function _renderPageInto(num, wrap) {
   inkCanvas.height = Math.floor(ch * _inkDpr);
   wrap.appendChild(inkCanvas);
   wrap.__inkCanvas = inkCanvas;
-  wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
-  // iOS：Apple Pencil 触摸(touchType=stylus)阻止其默认滚动，手指(direct)放行 → 笔不滚页、手指照常滚
-  const _inkBlockStylusScroll = (e) => {
-    for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } }
-  };
-  wrap.addEventListener('touchstart', _inkBlockStylusScroll, { passive: false });
-  wrap.addEventListener('touchmove', _inkBlockStylusScroll, { passive: false });
+  // wrap 级监听只绑一次(卸载→重渲染同一 wrap 时不重复绑定,否则累积成内存泄漏 + 多次触发)
+  if (!wrap.__inkBound) {
+    wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
+    // iOS：Apple Pencil 触摸(touchType=stylus)阻止其默认滚动，手指(direct)放行 → 笔不滚页、手指照常滚
+    const _inkBlockStylusScroll = (e) => {
+      for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } }
+    };
+    wrap.addEventListener('touchstart', _inkBlockStylusScroll, { passive: false });
+    wrap.addEventListener('touchmove', _inkBlockStylusScroll, { passive: false });
+    wrap.__inkBound = true;
+  }
 
   // 渲染 canvas（用 transform 把 viewport 坐标 scale 到 backing store）
   const ctx = canvas.getContext('2d');
