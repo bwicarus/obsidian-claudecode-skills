@@ -182,7 +182,7 @@ function pdfLoadHide() {
 // 喂给 PDF.js({data}),零网络延迟秒开。key=FILE_REL,value={v,buf};v 跟 ?v=<mtime> 绑定→PDF
 // 变了自动失效重下。>_PDF_CACHE_MAX 的书不整本缓存(防 iPad Safari 单页内存炸),仍走流式 range。
 const _PDF_DB = 'pdf-blob-cache', _PDF_STORE = 'pdfs';
-const _PDF_CACHE_MAX = 220 * 1024 * 1024;   // 220MB 上限(part2 143MB 进缓存;408MB 线代书走流式)
+const _PDF_CACHE_MAX = 360 * 1024 * 1024;   // 360MB 上限(M4 iPad 内存足):≤此整本缓存→{data}喂 PDF.js→永不重拉;>此才走 range(会反复重拉,建议开压缩版)
 const _PDF_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '0';
 // 请求"持久化存储":iOS Safari 普通标签页默认 best-effort(7 天没访问 ITP 清掉 + 配额满 LRU 驱逐),
 // persist() 求系统别清(加到主屏=独立 PWA 时 iOS 自动授予 → 缓存真正长存,见下方给用户的提示)。
@@ -299,18 +299,18 @@ async function loadPdf() {
         _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开');
       } else if (c && c.buf) { window.dlog('缓存失效(版本/大小不符:' + (c.buf.byteLength||0) + ' vs ' + PDF_SIZE + '),丢弃重取'); }
     } catch (_) {}
-    // 小文件(<30MB)且未缓存:前台整本取(快)+缓存。大文件**不阻塞**:走 range 立即看当前页,
-    // 整本在后台分块缓存(下次秒开)——绝不让用户盯着进度条等整本下完(慢网下那是噩梦)。
-    const _SMALL_MAX = 30 * 1024 * 1024;
-    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _SMALL_MAX) {
+    // 未缓存且 ≤360MB:**下载一次(分块续传+进度)→ 缓存 → {data} 喂 PDF.js**,之后从内存读、永不重拉。
+    // 为何不用 range「边读边拉」:PDF.js 对这些扫描书的 disableAutoFetch 挡不住,range 模式每次打开都
+    // 反复重拉整本(实测累计 >10GB),慢网下灾难。整本下一次后缓存,后续秒开、零网络。>360MB 才 range(装不下内存→建议压缩版)。
+    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _PDF_CACHE_MAX) {
       try {
-        pdfLoadShow('📄 加载中…', '');
+        pdfLoadShow('📄 下载中…', PDF_SIZE > 30 * 1048576 ? '首次整本下载,下完缓存 → 之后秒开、不再重拉' : '');
         const buf = await _fetchFullWithProgress(PDF_URL);
-        try { await _idbPut(FILE_REL, { v: _PDF_VER, buf }); } catch (_) {}   // 先缓存(IndexedDB clone 不 detach buf),完成后再交给 PDF.js
+        try { await _idbPut(FILE_REL, { v: _PDF_VER, buf }); } catch (_) {}   // 缓存(IndexedDB clone 不 detach buf),再喂 PDF.js
         _src = { data: buf }; _haveBuf = true;
-      } catch (e) { window.dlog('小文件整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
+      } catch (e) { window.dlog('整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
     }
-    // 大文件 / 整本取失败 → range 立即看当前页 + 后台分块缓存(≤220MB 才存;317MB 原书太大不缓存,建议开压缩版)
+    // >360MB / 整本取失败 → range(会反复重拉)+ 后台缓存(>360 跳过)
     if (!_haveBuf) _cachePdfInBackground();
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
