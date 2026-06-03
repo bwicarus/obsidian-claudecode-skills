@@ -35,12 +35,14 @@ def _sha(p: Path) -> str:
     return hashlib.sha1(str(Path(p).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
+_STATUS_OVERRIDE = None   # --status 指定时写到此文件(压缩版构建用独立状态文件,不和预处理状态冲突)
 def _write(sha: str, **kw):
-    STATUS_DIR.mkdir(parents=True, exist_ok=True)
     kw["updated_at"] = time.time()
-    tmp = STATUS_DIR / f"{sha}.json.tmp"
+    dst = Path(_STATUS_OVERRIDE) if _STATUS_OVERRIDE else (STATUS_DIR / f"{sha}.json")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
     tmp.write_text(json.dumps(kw, ensure_ascii=False), "utf-8")
-    tmp.replace(STATUS_DIR / f"{sha}.json")
+    tmp.replace(dst)
 
 
 def _recompress_image(data: bytes, max_px: int, quality: int):
@@ -68,7 +70,12 @@ def main() -> int:
     ap.add_argument("--pdf", required=True)
     ap.add_argument("--max-px", type=int, default=2400, help="图像长边上限 px(超出降采样;阅读+缩放够用)")
     ap.add_argument("--quality", type=int, default=72, help="JPEG 重压质量(72≈几乎不影响阅读)")
+    ap.add_argument("--out", default="", help="输出到单独文件(不原地替换原书);留空=原地替换")
+    ap.add_argument("--status", default="", help="状态写到此文件;留空=state/book-preprocess/<sha>.json")
     a = ap.parse_args()
+    global _STATUS_OVERRIDE
+    if a.status:
+        _STATUS_OVERRIDE = a.status
     pdf = Path(a.pdf)
     sha = _sha(pdf)
     try:
@@ -146,6 +153,15 @@ def main() -> int:
                 pass
 
         after = out.stat().st_size
+        if a.out:   # --out:写到单独文件(压缩版),不动原书。即使没变小也写(供"压缩版开关"用)。
+            dst = Path(a.out)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(out), str(dst))
+            pct = round(after / max(1, before) * 100)
+            _write(sha, phase="done", percent=100, has_text=True, total=total, completed=total,
+                   pdf=str(pdf), out=str(dst),
+                   msg=f"压缩版生成：{before/1048576:.0f}MB → {after/1048576:.0f}MB（{pct}%），原书不动，文字层保留")
+            return 0
         # **变大就别替换**(彻底杜绝"越压越大"):图已是最优/B&W CCITT 之类 PIL 压不动时,
         # 重存反而可能略大 → 保持原文件不动,如实告知。
         if after >= before:

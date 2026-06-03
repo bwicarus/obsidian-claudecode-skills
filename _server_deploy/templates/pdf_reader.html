@@ -560,6 +560,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
              transition:width .25s;"></div>
       </div>
       <div id="pdf-loading-hint" class="dim" style="font-size:12px;color:#7d8590;"></div>
+      <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px">⚡ 加载慢？切换到压缩版（更小更快，下次记住）</button>
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
     <div id="page-container"></div>
@@ -857,7 +858,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}};</script>
 <script type="module" src="/static/pdf/reader.js?v={{ reader_js_v }}"></script>
 
 <script>

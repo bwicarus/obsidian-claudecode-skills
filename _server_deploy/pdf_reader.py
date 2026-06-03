@@ -58,19 +58,53 @@ def _safe_vault_path(rel: str) -> Path | None:
     return abs_path
 
 
+# ── 压缩版（原书不动,压缩版单独存服务器,不进 Obsidian 同步;开关打开才传压缩版）──
+_COMPRESSED_DIR = CLAUDE_DIR / "state" / "pdf-compressed"
+def _compressed_paths(rel: str):
+    """压缩版文件 + 其独立状态文件(键=sha1(vault-rel)[:16];状态独立,不和预处理状态冲突)。"""
+    import hashlib
+    sha = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16]
+    return _COMPRESSED_DIR / f"{sha}.pdf", _COMPRESSED_DIR / f"{sha}.status.json"
+def _compressed_info(rel: str) -> dict:
+    """压缩版状态:{exists, compressing, percent, comp_kb, phase, msg, error}。"""
+    cf, sf = _compressed_paths(rel)
+    info = {"exists": cf.exists(), "compressing": False, "percent": 0, "comp_kb": 0}
+    if cf.exists():
+        try: info["comp_kb"] = round(cf.stat().st_size / 1024, 1)
+        except OSError: pass
+    try:
+        st = json.loads(sf.read_text("utf-8"))
+        info["phase"] = st.get("phase", ""); info["msg"] = st.get("msg", "")
+        if st.get("phase") == "error": info["error"] = st.get("error", "")
+        if st.get("phase") not in ("done", "error", "", None):
+            pid = st.get("pid")
+            alive = _pid_alive(pid) if pid else (_time.time() - st.get("updated_at", 0) < 120)
+            if alive:
+                info["compressing"] = True; info["percent"] = st.get("percent", 0)
+    except Exception:
+        pass
+    return info
+
+
 def _list_vault_pdfs() -> list[dict]:
-    """扫 vault 下所有 PDF。返回 [{rel, name, size_kb, mtime}, ...]，按修改时间倒序。"""
+    """扫 vault 下所有 PDF。返回 [{rel, name, size_kb, mtime, comp_*}, ...]，按修改时间倒序。"""
     out = []
     for p in OBSIDIAN_ROOT.rglob("*.pdf"):
+        if p.name.endswith((".orig.pdf", ".compressed.pdf")):
+            continue   # 备份/旧式压缩版残留,不当独立书列出
         try:
             rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
             st = p.stat()
+            ci = _compressed_info(rel)
             out.append({
                 "rel": rel,
                 "name": p.name,
                 "dir": str(Path(rel).parent),
                 "size_kb": round(st.st_size / 1024, 1),
                 "mtime": int(st.st_mtime),
+                "comp_exists": ci["exists"],
+                "comp_compressing": ci["compressing"],
+                "comp_percent": ci["percent"],
             })
         except OSError:
             continue
@@ -412,14 +446,27 @@ def pdf_view():
         mtime = int(os.path.getmtime(str(abs_path)))
     except Exception:
         mtime = 0
+    # 压缩版:?compressed=1 且压缩版存在 → 传压缩版(pdf_url 带 &compressed=1 + pdf_size 用压缩版)
+    rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    comp_file, _ = _compressed_paths(rel_clean)
+    comp_avail = comp_file.exists()
+    use_comp = (request.args.get("compressed", "") == "1") and comp_avail
+    if use_comp:
+        src_mt = int(comp_file.stat().st_mtime); pdf_size_val = comp_file.stat().st_size
+        pdf_url = f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={src_mt}&compressed=1"
+    else:
+        pdf_url = f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}"
+        pdf_size_val = abs_path.stat().st_size if abs_path.exists() else 0
     from flask import make_response
     resp = make_response(render_template(
         "pdf_reader.html",
         file_rel=rel,
         file_name=Path(rel).name,
         page=page,
-        pdf_url=f"/pdf/file/{urllib.parse.quote(rel, safe='/')}?v={mtime}",
-        pdf_size=(abs_path.stat().st_size if abs_path.exists() else 0),   # 字节数:前端据此决定小文件整本取/大文件 range
+        pdf_url=pdf_url,
+        pdf_size=pdf_size_val,   # 字节数:前端据此决定小文件整本取/大文件 range
+        compressed=(1 if use_comp else 0),     # 当前是否在用压缩版
+        comp_avail=(1 if comp_avail else 0),   # 是否存在压缩版(供"加载慢→切压缩版"提示)
         reader_js_v=_reader_js_v(),
         chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
     ))
@@ -433,13 +480,20 @@ def pdf_file(rel):
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
+    rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    # ?compressed=1 且压缩版存在 → 发压缩版(单独存 state/pdf-compressed/,不动原书)
+    comp_file, _ = _compressed_paths(rel_clean)
+    serve_comp = (request.args.get("compressed", "") == "1") and comp_file.exists()
     # 大文件优先走 X-Accel-Redirect:Flask 只鉴权,文件交给 nginx 原生 sendfile + 原生 Range 发
     # (Werkzeug dev server 服务几百 MB 时慢/卡 → "加载中 1% 卡死";nginx 原生快且并发好)。
     if _PDF_XACCEL:
         try:
-            rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+            if serve_comp:
+                xaccel = "/_compressed_pdf/" + urllib.parse.quote(comp_file.name)   # nginx internal:alias state/pdf-compressed/
+            else:
+                xaccel = "/_vault_pdf/" + urllib.parse.quote(rel_clean)
             resp = Response()
-            resp.headers["X-Accel-Redirect"] = "/_vault_pdf/" + urllib.parse.quote(rel_clean)
+            resp.headers["X-Accel-Redirect"] = xaccel
             resp.headers["Content-Type"] = "application/pdf"
             # ⚠ 不要在此设 Accept-Ranges:nginx 服务该静态文件时会自己加 → 两份会被合成
             # "bytes, bytes" ≠ "bytes" → PDF.js 判定不支持 range → 回退整本下载大文件 → Load failed/极慢。
@@ -449,7 +503,7 @@ def pdf_file(rel):
             pass   # 兜底:任何意外 → 回落 send_file
     # conditional=True → 支持 HTTP Range(206),PDF.js 才能逐页流式只取所需字节,
     # 大文件(几百 MB)不必整本下载到浏览器,iPad Safari 不再 OOM。
-    resp = send_file(str(abs_path), mimetype="application/pdf", conditional=True)
+    resp = send_file(str(comp_file if serve_comp else abs_path), mimetype="application/pdf", conditional=True)
     resp.headers["Accept-Ranges"] = "bytes"
     # 缓存:**immutable + 长 max-age**。URL 带 ?v=<mtime>(文件一变 URL 就变),所以
     # 同一 URL 的字节永不变 → 可让浏览器长期缓存已取的 Range 分块、**重复打开直接命中
@@ -589,6 +643,48 @@ def pdf_api_compress_async():
     except Exception as ex:
         return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
     return jsonify({"ok": True, "sha": sha})
+
+
+@bp.route("/api/compressed-status")
+def pdf_api_compressed_status():
+    """压缩版状态:{ok, exists, compressing, percent, comp_kb, orig_kb, phase, msg, error}。"""
+    ap = _safe_vault_path(request.args.get("file", ""))
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    rel_clean = ap.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    info = _compressed_info(rel_clean); info["ok"] = True
+    try: info["orig_kb"] = round(ap.stat().st_size / 1024, 1)
+    except OSError: pass
+    return jsonify(info)
+
+
+@bp.route("/api/compress-make", methods=["POST"])
+def pdf_api_compress_make():
+    """生成**压缩版**到单独文件(不动原书,原书仍是 OCR + 默认/好网传输源);后台 detached 跑
+    compress_pdf.py --out --status(独立状态文件,不和预处理冲突)。"""
+    import subprocess
+    body = request.get_json(silent=True) or {}
+    ap = _safe_vault_path((body.get("file") or "").strip())
+    if not ap or not ap.exists():
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    rel_clean = ap.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    comp_file, status_file = _compressed_paths(rel_clean)
+    if comp_file.exists():
+        return jsonify({"ok": True, "already": True, "exists": True})
+    if _compressed_info(rel_clean).get("compressing"):
+        return jsonify({"ok": True, "already": True, "compressing": True})
+    comp_file.parent.mkdir(parents=True, exist_ok=True)
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    mp = str(int(body.get("max_px") or 1150)); q = str(int(body.get("quality") or 55))   # 1920px 源→~1150px q55 ≈ 省 55%
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "compress_pdf.py"),
+           "--pdf", str(ap), "--out", str(comp_file), "--status", str(status_file),
+           "--max-px", mp, "--quality", q]
+    try:
+        subprocess.Popen(cmd, cwd=str(CLAUDE_DIR), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    return jsonify({"ok": True, "compressing": True})
 
 
 @bp.route("/api/delete-pdf", methods=["POST"])

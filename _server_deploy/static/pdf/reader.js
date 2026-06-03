@@ -21,6 +21,13 @@ try {
 const PDF_URL = window.__PDF_CFG.pdf_url;
 const FILE_REL = window.__PDF_CFG.file_rel;
 const PDF_SIZE = (window.__PDF_CFG && +window.__PDF_CFG.size) || 0;   // 文件字节数(决定小文件整本取/大文件 range)
+const PDF_COMPRESSED = (window.__PDF_CFG && +window.__PDF_CFG.compressed) || 0;   // 当前是否在用压缩版
+const PDF_COMP_AVAIL = (window.__PDF_CFG && +window.__PDF_CFG.comp_avail) || 0;   // 是否存在压缩版(供"加载慢→切压缩版")
+// 切换到压缩版打开:记住偏好 + 重载带 &compressed=1
+window._switchToCompressed = () => {
+  try { localStorage.setItem('pdf-use-compressed:' + FILE_REL, '1'); } catch (_) {}
+  const u = new URL(location.href); u.searchParams.set('compressed', '1'); location.href = u.toString();
+};
 // page-chars 缓存版本 = PDF mtime + 后端分词版本 _CHAR_CACHE_VER。前者在 PDF 变更时刷新,
 // 后者在**分词逻辑变更**时刷新(同一 mtime 下也能让 iOS Safari 已缓存的旧分词数据失效 →
 // 修了"只能选单字"类 bug 后客户端立刻重取,不必等 PDF mtime 变。配合后端 no-store。
@@ -215,30 +222,30 @@ async function _idbPut(k, v) {
 function _cachePdfInBackground() {
   setTimeout(async () => {
     try {
-      const h = await fetch(PDF_URL, { method: 'HEAD', priority: 'low' });
-      const size = parseInt(h.headers.get('Content-Length') || '0');
-      if (!size || size > _PDF_CACHE_MAX) { window.dlog?.('PDF ' + Math.round(size/1048576) + 'MB 不整本缓存(超上限/未知),走流式'); return; }
-      const r = await fetch(PDF_URL, { priority: 'low' });   // 低优先级:不抢交互 range 带宽
-      const buf = await r.arrayBuffer();
+      if (!PDF_SIZE || PDF_SIZE > _PDF_CACHE_MAX) { window.dlog?.('PDF ' + Math.round(PDF_SIZE/1048576) + 'MB 超缓存上限,不整本缓存(走流式 range;想秒开请开压缩版)'); return; }
+      // 分块续传(抗弱网中断)+ silent(不动加载 UI)+ low(不抢当前阅读的交互 range 带宽)
+      const buf = await _fetchFullWithProgress(PDF_URL, { silent: true, priority: 'low' });
       await _idbPut(FILE_REL, { v: _PDF_VER, buf });
-      window.dlog?.('✓ PDF 已缓存到本地 (' + Math.round(size/1048576) + 'MB)，下次秒开');
-    } catch (e) { window.dlog?.('后台缓存失败(不影响阅读): ' + e.message); }
-  }, 20000);   // 延后 20s:让首开 + 初次翻页彻底过去再下整本,绝不抢首开带宽
+      window.dlog?.('✓ 后台已缓存到本地 (' + Math.round(buf.byteLength/1048576) + 'MB)，下次秒开');
+    } catch (e) { window.dlog?.('后台缓存失败(不影响阅读): ' + (e && e.message)); }
+  }, 20000);   // 延后 20s:让首开 + 初次翻页彻底过去再后台下整本,绝不抢首开带宽
 }
 
 // 整本下载 + 真实进度。**分块(6MB) Range 顺序拉 + 每块失败退避重试**:iPad 在弱/断续网络下,
 // 单次大 fetch 一被中断(iOS 切后台/抖动)就从 0 重来、永远下不完;改成断了只重试**当前块**、已下的不丢,
 // 切后台回来也从上次位置续。需 total(文件大小);拿不到则回退单次流式。返回 ArrayBuffer。
-async function _fetchFullWithProgress(url) {
+async function _fetchFullWithProgress(url, opts) {
+  const silent = !!(opts && opts.silent);          // 后台缓存:不动加载 UI
+  const prio = (opts && opts.priority) || 'auto';  // 后台用 low,不抢交互 range 带宽
   const total = PDF_SIZE || 0;
   const _showPct = (got) => {
-    if (!total) return;
+    if (silent || !total) return;
     const pct = Math.max(1, Math.min(99, Math.round(got / total * 100)));
     pdfLoadBar(pct);
     pdfLoadShow('📄 下载中… ' + pct + '%  (' + Math.round(got / 1048576) + '/' + Math.round(total / 1048576) + 'MB)');
   };
   if (!total) {   // 不知道大小 → 单次流式(无续传)
-    const resp = await fetch(url); if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const resp = await fetch(url, { priority: prio }); if (!resp.ok) throw new Error('HTTP ' + resp.status);
     return await resp.arrayBuffer();
   }
   const CHUNK = 6 * 1024 * 1024;
@@ -250,7 +257,7 @@ async function _fetchFullWithProgress(url) {
     for (let tries = 0; tries < 6 && !ok; tries++) {
       if (tries) await new Promise(r => setTimeout(r, 700 * tries));   // 退避重试同一块
       try {
-        const resp = await fetch(url, { headers: { Range: 'bytes=' + pos + '-' + end } });
+        const resp = await fetch(url, { headers: { Range: 'bytes=' + pos + '-' + end }, priority: prio });
         if (resp.status !== 206 && resp.status !== 200) throw new Error('HTTP ' + resp.status);
         const part = new Uint8Array(await resp.arrayBuffer());
         if (!part.length) throw new Error('empty chunk');
@@ -266,6 +273,12 @@ async function _fetchFullWithProgress(url) {
 async function loadPdf() {
   pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
   pdfLoadBar(null);
+  // 加载 13s 还没出首页 + 有压缩版 + 当前没在用压缩版 → 在加载层显示「切换压缩版」按钮(慢网救急)
+  setTimeout(() => {
+    if (!_pdfInitDone && PDF_COMP_AVAIL && !PDF_COMPRESSED) {
+      const b = document.getElementById('pdf-loading-switch'); if (b) b.style.display = '';
+    }
+  }, 13000);
   try {
     window.dlog('开始 getDocument...');
     const _common = {
@@ -286,20 +299,19 @@ async function loadPdf() {
         _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开');
       } else if (c && c.buf) { window.dlog('缓存失效(版本/大小不符:' + (c.buf.byteLength||0) + ' vs ' + PDF_SIZE + '),丢弃重取'); }
     } catch (_) {}
-    // 未缓存且 <360MB(M4 iPad 整本载入内存 OK):**一次性整本流式下载(带进度)** → 先缓存再喂 {data}。
-    // range 模式在高延迟 VPN 下要发几十个并发小请求导航 679 页结构,又慢又易卡死("加载不出来");
-    // 整本一次顺序下载更快更稳,进度条真实推进,下完缓存 → 之后秒开。≥360MB 才走 range(防 Safari 单页 OOM)。
-    const _FULL_MAX = 360 * 1024 * 1024;
-    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _FULL_MAX) {
+    // 小文件(<30MB)且未缓存:前台整本取(快)+缓存。大文件**不阻塞**:走 range 立即看当前页,
+    // 整本在后台分块缓存(下次秒开)——绝不让用户盯着进度条等整本下完(慢网下那是噩梦)。
+    const _SMALL_MAX = 30 * 1024 * 1024;
+    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _SMALL_MAX) {
       try {
-        pdfLoadShow('📄 下载中…', PDF_SIZE > 30 * 1048576 ? '大文件首次整本下载,之后秒开' : '');
+        pdfLoadShow('📄 加载中…', '');
         const buf = await _fetchFullWithProgress(PDF_URL);
-        try { await _idbPut(FILE_REL, { v: _PDF_VER, buf }); } catch (_) {}   // 先缓存(IndexedDB clone 不 detach buf),完成后再交给 PDF.js → 避免 transfer 竞态,且不用复制一份
+        try { await _idbPut(FILE_REL, { v: _PDF_VER, buf }); } catch (_) {}   // 先缓存(IndexedDB clone 不 detach buf),完成后再交给 PDF.js
         _src = { data: buf }; _haveBuf = true;
-        window.dlog('整本取 ' + Math.round(buf.byteLength / 1048576) + 'MB,无 range 风暴');
-      } catch (e) { window.dlog('整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
+      } catch (e) { window.dlog('小文件整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
     }
-    if (!_haveBuf) _cachePdfInBackground();   // ≥360MB / 整本取失败 → range + 后台缓存(仅 ≤220MB 存)
+    // 大文件 / 整本取失败 → range 立即看当前页 + 后台分块缓存(≤220MB 才存;317MB 原书太大不缓存,建议开压缩版)
+    if (!_haveBuf) _cachePdfInBackground();
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {

@@ -18,6 +18,11 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
 .pdf-dir{color:#5a6680;font-size:11px;font-family:monospace}
 .prep-btn{background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:6px 11px;font-size:12px;cursor:pointer;white-space:nowrap;flex-shrink:0}
 .prep-btn:disabled{opacity:.5;cursor:default}
+.comp-toggle{background:#141a2e;border:1px solid #2a3550;color:#7a8497;border-radius:6px;padding:6px 11px;font-size:12px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.comp-toggle.on{background:#244470;border-color:#3b6db5;color:#cfe6ff;font-weight:600}
+.comp-toggle.gray{opacity:.55}
+.comp-toggle.breathing{animation:comp-breathe 1.1s ease-in-out infinite;color:#9fcbff;border-color:#3b6db5}
+@keyframes comp-breathe{0%,100%{opacity:.4}50%{opacity:1}}
 .prep-prog{display:flex;align-items:center;gap:8px;margin-top:10px}
 .prep-track{flex:1;height:6px;background:#1f2740;border-radius:3px;overflow:hidden}
 .prep-bar{height:100%;width:0;background:#3b82f6;transition:width .3s}
@@ -46,6 +51,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
   <div class="pdf-list" id="list">
     {% for p in pdfs %}
     <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}"
+         data-comp-exists="{{ '1' if p.comp_exists else '' }}" data-comp-compressing="{{ '1' if p.comp_compressing else '' }}"
          ontouchstart="lpStart(event,this)" ontouchend="lpEnd()" ontouchmove="lpEnd()"
          onmousedown="lpStart(event,this)" onmouseup="lpEnd()" onmouseleave="lpEnd()"
          oncontextmenu="return ctxDel(event,this)">
@@ -58,7 +64,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="prep-btn" onclick="preprocess(event,this,'vision')" title="印刷/文档书：Google Vision OCR，快（~2s/页）。已有文字层秒判跳过">📄 文档</button>
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
           <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
-          <button class="prep-btn" onclick="compress(event,this)" title="智能压缩：只重压图像（长边≤2400px + JPEG q72），保留文字层/选中/搜索不受影响，扫描书体积常省一大半（原书可重建）">🗜 压缩</button>
+          <button class="comp-toggle" onclick="compToggle(event,this)" title="压缩版：体积更小、慢网更快。开启后打开本书传压缩版；原书不动（OCR/好网仍用原书）。无压缩版时灰色，点一下生成（呼吸=压缩中）。">🗜 压缩版</button>
         </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
@@ -129,8 +135,59 @@ async function ctxRename() {
 function openBook(ev, row) {
   if (_lpFired) { _lpFired = false; return; }   // 长按刚弹过菜单 → 不导航
   const item = row.closest('.pdf-item');
-  location.href = '/pdf/view?file=' + encodeURIComponent(item.dataset.rel);
+  let url = '/pdf/view?file=' + encodeURIComponent(item.dataset.rel);
+  // 压缩版开关开着 → 带 &compressed=1(打开时传压缩版)
+  if (item.dataset.compExists === '1' && localStorage.getItem(_compKey(item.dataset.rel)) === '1') url += '&compressed=1';
+  location.href = url;
 }
+// ── 压缩版开关(每本书独立):灰=无压缩版(点击生成,呼吸=压缩中) / ○=有但不用 / ●=用压缩版打开 ──
+function _compKey(rel) { return 'pdf-use-compressed:' + rel; }
+function _compRender(item) {
+  const btn = item.querySelector('.comp-toggle'); if (!btn) return;
+  const rel = item.dataset.rel, exists = item.dataset.compExists === '1';
+  const breathing = btn.classList.contains('breathing');
+  const on = exists && localStorage.getItem(_compKey(rel)) === '1';
+  btn.classList.toggle('on', on && !breathing);
+  btn.classList.toggle('gray', !exists && !breathing);
+  if (breathing) return;   // 文字由轮询更新(压缩中 N%)
+  btn.textContent = !exists ? '🗜 生成压缩版' : (on ? '🗜 压缩版 ●' : '🗜 压缩版 ○');
+}
+function compToggle(ev, btn) {
+  ev.stopPropagation();
+  const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  if (btn.classList.contains('breathing')) return;   // 压缩中,忽略点击
+  if (item.dataset.compExists === '1') {              // 已有压缩版 → 切 用/不用
+    const cur = localStorage.getItem(_compKey(rel)) === '1';
+    localStorage.setItem(_compKey(rel), cur ? '0' : '1');
+    _compRender(item);
+  } else {                                            // 无压缩版 → 触发生成 + 呼吸 + 轮询
+    btn.classList.add('breathing'); btn.textContent = '🗜 压缩中…';
+    fetch('/pdf/api/compress-make', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({file: rel})})
+      .then(r => r.json()).then(d => {
+        if (!d.ok) { btn.classList.remove('breathing'); _compRender(item); alert('启动压缩失败：' + (d.error || '')); return; }
+        if (d.exists) { item.dataset.compExists = '1'; btn.classList.remove('breathing'); localStorage.setItem(_compKey(rel), '1'); _compRender(item); return; }
+        _compPoll(item);
+      }).catch(e => { btn.classList.remove('breathing'); _compRender(item); });
+  }
+}
+function _compPoll(item) {
+  const rel = item.dataset.rel, btn = item.querySelector('.comp-toggle');
+  let tries = 0;
+  const iv = setInterval(async () => {
+    tries++;
+    try {
+      const d = await (await fetch('/pdf/api/compressed-status?file=' + encodeURIComponent(rel))).json();
+      if (d.exists) { clearInterval(iv); btn.classList.remove('breathing'); item.dataset.compExists = '1'; localStorage.setItem(_compKey(rel), '1'); _compRender(item); return; }
+      if (d.phase === 'error') { clearInterval(iv); btn.classList.remove('breathing'); _compRender(item); alert('压缩失败：' + (d.error || '')); return; }
+      if (d.compressing) btn.textContent = '🗜 压缩中… ' + (d.percent || 0) + '%';
+    } catch (e) {}
+    if (tries > 1800) { clearInterval(iv); btn.classList.remove('breathing'); _compRender(item); }   // ~1h 兜底
+  }, 2000);
+}
+document.querySelectorAll('.pdf-item').forEach(it => {
+  _compRender(it);
+  if (it.dataset.compCompressing === '1') { const b = it.querySelector('.comp-toggle'); if (b) { b.classList.add('breathing'); b.textContent = '🗜 压缩中…'; _compPoll(it); } }
+});
 async function deleteBook(item) {
   const name = item.dataset.disp, rel = item.dataset.rel;
   if (!confirm('删除《' + name + '》？\n不可恢复（会一并清理它的 OCR/预处理缓存；高亮/笔记另存不动）。')) return;
