@@ -1991,7 +1991,7 @@ function _showSentMenu(btn, s, pw) {
     e.stopPropagation(); e.preventDefault();
     const act = b.dataset.act; menu.remove();
     if (act === 're') _sentRetranslate(s, pw);
-    else if (act === 'del') { if (confirm('删除这个翻译框选？（只去掉框线/译文标记，不影响原文）')) _sentDismiss(s, pw); }
+    else if (act === 'del') _sentDismiss(s, pw);   // 长按菜单已是刻意操作,直接删,不再二次确认
   });
   setTimeout(() => {
     const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); } };

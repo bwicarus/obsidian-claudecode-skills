@@ -154,10 +154,28 @@ def lookup_ecdict(word: str) -> dict | None:
     # lemma 化：如果当前词不是 lemma，递归再拿 lemma 的完整行
     if lemma_word.lower() != row["word"].lower():
         lemma_row = _ec_row(lemma_word)
+        # 校验脏 0: 指针:ECDICT 个别行的 exchange "0:" lemma 指针是错的(实例:'also' 的 exchange='0:conjurer'
+        # → also 被误当 conjurer 的变形)。只在「原词确实是该 lemma 的屈折变形(出现在 lemma 的屈折表里)」
+        # 时才跟随重定向,否则保留原词作 lemma。能正确处理不规则(went→go/mice→mouse,因 go/mouse 的屈折表
+        # 含 went/mice),又拦住 also→conjurer 这类脏指针。
+        _redirect_ok = False
         if lemma_row:
+            _lex = _parse_exchange(lemma_row.get("exchange", ""))
+            _lemma_forms = {lemma_word.lower()}
+            for _k, _v in _lex.items():
+                if _k in ("0", "1"):   # 0=lemma 指针自身,1=类型标记,都不是屈折形
+                    continue
+                for _part in re.split(r"[,/]", str(_v)):
+                    _part = _part.strip().lower()
+                    if _part:
+                        _lemma_forms.add(_part)
+            _redirect_ok = row["word"].lower() in _lemma_forms
+        if _redirect_ok:
             row = lemma_row
             ex = _parse_exchange(row.get("exchange", ""))
             lemma_word = ex.get("0", row["word"])
+        else:
+            lemma_word = row["word"]   # 脏 0: 指针 → 用原词,不跟随
 
     forms = {row["word"].lower()}
     for k in ("d", "i", "s", "p", "3", "r", "t"):
