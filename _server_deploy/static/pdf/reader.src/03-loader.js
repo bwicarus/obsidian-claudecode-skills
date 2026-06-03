@@ -78,6 +78,28 @@ function _cachePdfInBackground() {
   }, 20000);   // 延后 20s:让首开 + 初次翻页彻底过去再下整本,绝不抢首开带宽
 }
 
+// 整本流式下载 + 真实进度(读 ReadableStream 逐块累计,边下边更新进度条)。返回 ArrayBuffer。
+async function _fetchFullWithProgress(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const total = (+resp.headers.get('content-length')) || PDF_SIZE || 0;
+  if (!resp.body || !resp.body.getReader) return await resp.arrayBuffer();   // 老引擎无 stream → 整本(无进度)
+  const reader = resp.body.getReader();
+  const chunks = []; let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); received += value.length;
+    if (total) {
+      const pct = Math.max(1, Math.min(99, Math.round(received / total * 100)));
+      pdfLoadBar(pct);
+      pdfLoadShow('📄 下载中… ' + pct + '%  (' + Math.round(received / 1048576) + '/' + Math.round(total / 1048576) + 'MB)');
+    }
+  }
+  const out = new Uint8Array(received);
+  let off = 0; for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out.buffer;
+}
 async function loadPdf() {
   pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
   pdfLoadBar(null);
@@ -96,21 +118,25 @@ async function loadPdf() {
     let _src = _rangeOpts, _haveBuf = false;
     try {
       const c = await _idbGet(FILE_REL);
-      if (c && c.v === _PDF_VER && c.buf) { _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开'); }
+      // 校验缓存字节数 == 期望大小:防之前(transfer 竞态等)存进坏/被 detach 的 buffer → 命中坏缓存就**永远加载不出**。
+      if (c && c.v === _PDF_VER && c.buf && (!PDF_SIZE || c.buf.byteLength === PDF_SIZE)) {
+        _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开');
+      } else if (c && c.buf) { window.dlog('缓存失效(版本/大小不符:' + (c.buf.byteLength||0) + ' vs ' + PDF_SIZE + '),丢弃重取'); }
     } catch (_) {}
-    // 小文件(<30MB)且未缓存:**一次性整本取** → {data}。range 模式要先 HEAD 探测 + 逐页 range,
-    // 高延迟(VPN)下这些往返反而比一次 GET 慢;小文件一次取最快,顺便缓存下次秒开。大文件仍走 range(防 OOM/省流量)。
-    const _SMALL_MAX = 30 * 1024 * 1024;
-    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _SMALL_MAX) {
+    // 未缓存且 <360MB(M4 iPad 整本载入内存 OK):**一次性整本流式下载(带进度)** → 先缓存再喂 {data}。
+    // range 模式在高延迟 VPN 下要发几十个并发小请求导航 679 页结构,又慢又易卡死("加载不出来");
+    // 整本一次顺序下载更快更稳,进度条真实推进,下完缓存 → 之后秒开。≥360MB 才走 range(防 Safari 单页 OOM)。
+    const _FULL_MAX = 360 * 1024 * 1024;
+    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _FULL_MAX) {
       try {
-        pdfLoadShow('📄 加载中…', '小文件一次性下载');
-        const buf = await (await fetch(PDF_URL)).arrayBuffer();
+        pdfLoadShow('📄 下载中…', PDF_SIZE > 30 * 1048576 ? '大文件首次整本下载,之后秒开' : '');
+        const buf = await _fetchFullWithProgress(PDF_URL);
+        try { await _idbPut(FILE_REL, { v: _PDF_VER, buf }); } catch (_) {}   // 先缓存(IndexedDB clone 不 detach buf),完成后再交给 PDF.js → 避免 transfer 竞态,且不用复制一份
         _src = { data: buf }; _haveBuf = true;
-        _idbPut(FILE_REL, { v: _PDF_VER, buf }).catch(() => {});   // 缓存,下次秒开
-        window.dlog('小文件整本取 ' + Math.round(buf.byteLength / 1024) + 'KB,无 range 往返');
-      } catch (e) { window.dlog('小文件整本取失败,回落 range: ' + (e && e.message)); }
+        window.dlog('整本取 ' + Math.round(buf.byteLength / 1048576) + 'MB,无 range 风暴');
+      } catch (e) { window.dlog('整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
     }
-    if (!_haveBuf) _cachePdfInBackground();   // 大文件 / 整本取失败 → range + 后台缓存
+    if (!_haveBuf) _cachePdfInBackground();   // ≥360MB / 整本取失败 → range + 后台缓存(仅 ≤220MB 存)
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {
