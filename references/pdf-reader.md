@@ -722,3 +722,13 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **reader**(`reader.src`):`__PDF_CFG.compressed/comp_avail`;`loadPdf` 起 13s 计时,若仍没出首页 + 有压缩版 + 当前没在用 → 加载层显「⚡ 切换压缩版」按钮(`_switchToCompressed` 记偏好 + 重载带 `&compressed=1`)。
 - ⚠ **大文件加载改非阻塞**(撤回更早版本的"阻塞式整本下载"——慢网下盯进度条等几分钟是噩梦):**range 立即看当前页** + 整本在**后台分块续传缓存**(`_fetchFullWithProgress(url,{silent,priority:'low'})`,6MB 块、每块退避重试抗中断,≤220MB 才存);小文件(<30MB)才前台整本取。**iOS Safari 无 Background Fetch API → 无法"关掉浏览器还在后台下",只能阅读器开着时后台缓存**(已如实告知用户)。
 - 验证:Pi 端 curl 确认 `?compressed=1` 返回 206/来自压缩版(Content-Range .../149MB);compressed-status exists:true;view?compressed=1 的 __PDF_CFG compressed:1/comp_avail:1/size=压缩版。
+
+### 22. 图片模式：服务端按页出图(大型文档网站成熟方案)+ read-ahead 预取（2026-06-03）
+- 起因:用户指出之前每次打开都重拉整本(nginx 日志实测 15734 个 1MB range = 11.5GB)。range 模式 PDF.js 对扫描书 disableAutoFetch 挡不住、且 >220MB 无法缓存 → 每开重拉。用户要求**参考大公司成熟方案**(已记 memory `prefer-big-company-solutions`)。
+- **成熟方案 = 服务端按页渲染成图,客户端只按需取看到的页**(Google Books / Scribd / issuu)。`_imgMode` 默认开(`localStorage['pdf-img-mode']='0'` 关作安全阀,回退经典 PDF.js canvas 模式)。
+- **后端**:`/api/book-meta`(页数+首页尺寸 pt,不下载 PDF)+ `/api/page-image?file=&page=&w=`(PyMuPDF `get_pixmap` 渲染该页→JPEG q78,磁盘缓存 `state/pdf-page-img/<book_sha>-p<page>-w<w>-<mtime>.jpg`,~285KB/页@1200px,首次 ~0.35s、缓存后 ~0.01s)。
+- **前端**:① boot:图片模式**跳过 PDF.js 库 import**(省 2.8MB + 那 5 秒"import PDF.js"等待)。② loadPdf:图片模式只取 book-meta 建 **pdfDoc shim**(`{numPages, getPage:()=>({getViewport:({scale})=>({width:page_w*scale,height:page_h*scale,scale})})}`)→ 其余代码(setupContinuousMode/_refitToWidth/_computeFitScale)靠 shim 照常工作,**完全跳过下载 PDF/IndexedDB 整本缓存那套**(都在 `else` 非图片模式分支)。③ `_renderPageInto` 开头 `if(_imgMode){await _renderPageImg();return;}`:`_renderPageImg` 用 `<img src=page-image?w=cw*dpr>` 代替 canvas,其余叠层(sel-overlay/char 层/墨迹)照搬。
+- **关键能成立的原因**:选词/高亮/振假名/搜索全走 **char 层**(`loadCharsAndBindLayer`,数据来自 `/api/page-chars` PyMuPDF),它**只用 `viewport.scale`(数字)+ 自己做 PDF→viewport 坐标转换**,不调 PDF.js 方法 → shim 的 viewport 够用。`__itemBoxes/__textDivs`(legacy textlayer 选中)已被 char 层取代,图片模式不建它们不影响。
+- **缓存 + read-ahead**(`_prefetchAround`):已加载页被 page-image 的 `Cache-Control: immutable` 缓存(re-view 零网络);翻到某页后**低优先级预取前后 ±3 页**(偏向后页,顺序阅读)→ 消费 blob 进缓存 → 翻页瞬开。`_prefetched` Set 去重。渲染完当前页(延后 400ms)+ 连续模式翻到新页触发。
+- 效果:打开书**不下载整本、不加载 PDF.js**,只下看到的页(每页 ~285KB),慢网秒翻。图片模式下原书 vs 压缩版的区分基本无意义(按屏幕尺寸出图本就小);压缩版开关仅留给经典模式。
+- ⚠ 假设页面尺寸**统一**(shim 用首页尺寸算所有页 cssW/cssH;这本及多数扫描书统一)。尺寸不一的书图片会被拉伸——需要时改 `_renderPageImg` 按 page-chars 的 per-page page_w/page_h 取尺寸。
