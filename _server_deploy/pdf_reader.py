@@ -434,6 +434,58 @@ def _reader_js_v():
         return "1"
 
 
+# ── 图片模式(大型文档网站成熟方案:服务端按页出图,客户端只按需取看到的页,不下载整本 PDF)──
+_PAGE_IMG_DIR = CLAUDE_DIR / "state" / "pdf-page-img"
+
+@bp.route("/api/book-meta")
+def pdf_api_book_meta():
+    """书元数据(图片模式用,不下载 PDF):页数 + 首页尺寸(pt)。"""
+    ap = _safe_vault_path(request.args.get("file", ""))
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    import fitz
+    try:
+        d = fitz.open(str(ap)); n = d.page_count; r = d[0].rect
+        pw, ph = round(r.width, 1), round(r.height, 1); d.close()
+        return jsonify({"ok": True, "page_count": n, "page_w": pw, "page_h": ph, "mtime": int(ap.stat().st_mtime)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/page-image")
+def pdf_api_page_image():
+    """渲染某页为 JPEG(PyMuPDF,宽 w px),磁盘缓存(键含 mtime)。客户端逐页按需取 → 只下看到的页。"""
+    ap = _safe_vault_path(request.args.get("file", ""))
+    if not ap:
+        abort(404)
+    try:
+        page = int(request.args.get("page", "1")); w = int(request.args.get("w", "1400"))
+    except ValueError:
+        abort(400)
+    w = max(400, min(w, 3000))   # 限幅(防超大渲染)
+    sha = _book_sha(ap); mt = int(ap.stat().st_mtime)
+    _PAGE_IMG_DIR.mkdir(parents=True, exist_ok=True)
+    cf = _PAGE_IMG_DIR / f"{sha}-p{page}-w{w}-{mt}.jpg"
+    if not cf.exists():
+        import fitz
+        try:
+            d = fitz.open(str(ap))
+            if page < 1 or page > d.page_count:
+                d.close(); abort(404)
+            p = d[page - 1]; zoom = w / max(1.0, p.rect.width)
+            pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            tmp = cf.with_suffix(".jpg.tmp")
+            tmp.write_bytes(pix.tobytes("jpg", jpg_quality=78))
+            tmp.replace(cf); d.close()
+        except Exception:
+            try: d.close()
+            except Exception: pass
+            abort(500)
+    resp = send_file(str(cf), mimetype="image/jpeg", conditional=True)
+    resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+    return resp
+
+
 @bp.route("/view")
 def pdf_view():
     rel = request.args.get("file", "")

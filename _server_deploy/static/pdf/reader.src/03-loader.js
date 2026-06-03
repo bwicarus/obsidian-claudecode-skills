@@ -125,6 +125,18 @@ async function loadPdf() {
     }
   }, 13000);
   try {
+    if (_imgMode) {
+      // 图片模式(成熟方案):不下载 PDF、不解析整本,只取书元数据建 pdfDoc shim(页数+尺寸),
+      // 每页按需取服务端渲染好的图(/api/page-image)。其余代码靠 shim 的 getPage().getViewport() 照常工作。
+      window.dlog('图片模式:取 book-meta(不下载 PDF)');
+      const meta = await (await fetch('/pdf/api/book-meta?file=' + encodeURIComponent(FILE_REL))).json();
+      if (!meta.ok) throw new Error('book-meta 失败:' + (meta.error || ''));
+      window.__imgMeta = meta;
+      pdfDoc = {
+        numPages: meta.page_count, _img: true,
+        getPage: (n) => Promise.resolve({ getViewport: (o) => { const s = (o && o.scale) || 1; return { width: meta.page_w * s, height: meta.page_h * s, scale: s }; } }),
+      };
+    } else {
     window.dlog('开始 getDocument...');
     const _common = {
       cMapUrl: '/static/pdfjs/cmaps/',
@@ -169,6 +181,7 @@ async function loadPdf() {
     pdfLoadShow('📄 渲染首页…', '');
     pdfLoadBar(100);
     pdfDoc = await task.promise;
+    }
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算

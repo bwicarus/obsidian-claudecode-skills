@@ -3,19 +3,25 @@
 window.dlog('module script 开始执行（ES module 加载 OK）');
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
+// 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
+let _imgMode = (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
-try {
-  pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
-  window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
-} catch (e) {
-  window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
-  throw e;
-}
-try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
-  window.dlog('✓ workerSrc set');
-} catch (e) {
-  window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待
+  try {
+    pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
+    window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
+  } catch (e) {
+    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
+    throw e;
+  }
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
+    window.dlog('✓ workerSrc set');
+  } catch (e) {
+    window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+  }
+} else {
+  window.dlog('图片模式:跳过 PDF.js 库(省 2.8MB 下载 + import 等待)');
 }
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
@@ -280,6 +286,18 @@ async function loadPdf() {
     }
   }, 13000);
   try {
+    if (_imgMode) {
+      // 图片模式(成熟方案):不下载 PDF、不解析整本,只取书元数据建 pdfDoc shim(页数+尺寸),
+      // 每页按需取服务端渲染好的图(/api/page-image)。其余代码靠 shim 的 getPage().getViewport() 照常工作。
+      window.dlog('图片模式:取 book-meta(不下载 PDF)');
+      const meta = await (await fetch('/pdf/api/book-meta?file=' + encodeURIComponent(FILE_REL))).json();
+      if (!meta.ok) throw new Error('book-meta 失败:' + (meta.error || ''));
+      window.__imgMeta = meta;
+      pdfDoc = {
+        numPages: meta.page_count, _img: true,
+        getPage: (n) => Promise.resolve({ getViewport: (o) => { const s = (o && o.scale) || 1; return { width: meta.page_w * s, height: meta.page_h * s, scale: s }; } }),
+      };
+    } else {
     window.dlog('开始 getDocument...');
     const _common = {
       cMapUrl: '/static/pdfjs/cmaps/',
@@ -324,6 +342,7 @@ async function loadPdf() {
     pdfLoadShow('📄 渲染首页…', '');
     pdfLoadBar(100);
     pdfDoc = await task.promise;
+    }
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
     document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
@@ -447,11 +466,61 @@ function _applyCropToWrap(wrap, cw, ch) {
   wrap.style.setProperty('--crop-t', (ch * ft).toFixed(1) + 'px');
 }
 
+// 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
+// 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
+async function _renderPageImg(num, wrap, viewport) {
+  const cw = Math.floor(viewport.width), ch = Math.floor(viewport.height);
+  wrap.innerHTML = '';
+  wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
+  wrap.style.width = ''; wrap.style.height = '';
+  wrap.style.background = ''; wrap.style.color = '';
+  wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
+  wrap.dataset.pageNum = num;
+  _applyCropToWrap(wrap, cw, ch);   // 去边:渲染前先收成裁切窄宽(子层 translate)
+  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
+  const img = document.createElement('img');
+  img.className = 'page-img'; img.decoding = 'async';
+  img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
+  img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
+  wrap.appendChild(img);
+  const selOverlay = document.createElement('div');   // 选中高亮叠层(同 canvas 路径)
+  selOverlay.className = 'sel-overlay';
+  selOverlay.style.width = cw + 'px'; selOverlay.style.height = ch + 'px';
+  wrap.appendChild(selOverlay);
+  const inkCanvas = document.createElement('canvas');   // 手写墨迹层
+  inkCanvas.className = 'ink-layer';
+  inkCanvas.style.width = cw + 'px'; inkCanvas.style.height = ch + 'px';
+  const _inkDpr = window.devicePixelRatio || 1;
+  inkCanvas.width = Math.floor(cw * _inkDpr); inkCanvas.height = Math.floor(ch * _inkDpr);
+  wrap.appendChild(inkCanvas); wrap.__inkCanvas = inkCanvas;
+  if (!wrap.__inkBound) {
+    wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
+    const _blk = (e) => { for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } } };
+    wrap.addEventListener('touchstart', _blk, { passive: false });
+    wrap.addEventListener('touchmove', _blk, { passive: false });
+    wrap.__inkBound = true;
+  }
+  // char 层(PyMuPDF chars:选词/高亮/振假名/搜索)。它只用 viewport.scale + 自己做坐标转换 → shim viewport 够。
+  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + (e && e.message)));
+  wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
+  if (window._inkRedraw) window._inkRedraw(wrap);
+  _applyCropToWrap(wrap, cw, ch);
+  wrap.dataset.loaded = '1';
+  if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
+  if (readMode === 'single') {
+    const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
+    loadPageNodes(num);
+  }
+}
 async function _renderPageInto(num, wrap) {
   if (!pdfDoc) return;
   if (wrap.dataset.loaded === '1') return;
   const page = await pdfDoc.getPage(num);
   const viewport = page.getViewport({scale});
+  if (_imgMode) { await _renderPageImg(num, wrap, viewport); return; }   // 图片模式:渲染服务端页图,不用 canvas/PDF.js
   // 清空 wrap（placeholder 内容或上次的渲染），不动 wrap 本身的 className/dataset
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null;   // 清残留引用，避免重渲染后指向已删除的旧层

@@ -3,19 +3,25 @@
 window.dlog('module script 开始执行（ES module 加载 OK）');
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
+// 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
+let _imgMode = (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
-try {
-  pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
-  window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
-} catch (e) {
-  window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
-  throw e;
-}
-try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
-  window.dlog('✓ workerSrc set');
-} catch (e) {
-  window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待
+  try {
+    pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
+    window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
+  } catch (e) {
+    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
+    throw e;
+  }
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
+    window.dlog('✓ workerSrc set');
+  } catch (e) {
+    window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+  }
+} else {
+  window.dlog('图片模式:跳过 PDF.js 库(省 2.8MB 下载 + import 等待)');
 }
 
 const PDF_URL = window.__PDF_CFG.pdf_url;
