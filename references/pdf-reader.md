@@ -732,3 +732,11 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **缓存 + read-ahead**(`_prefetchAround`):已加载页被 page-image 的 `Cache-Control: immutable` 缓存(re-view 零网络);翻到某页后**低优先级预取前后 ±3 页**(偏向后页,顺序阅读)→ 消费 blob 进缓存 → 翻页瞬开。`_prefetched` Set 去重。渲染完当前页(延后 400ms)+ 连续模式翻到新页触发。
 - 效果:打开书**不下载整本、不加载 PDF.js**,只下看到的页(每页 ~285KB),慢网秒翻。图片模式下原书 vs 压缩版的区分基本无意义(按屏幕尺寸出图本就小);压缩版开关仅留给经典模式。
 - ⚠ 假设页面尺寸**统一**(shim 用首页尺寸算所有页 cssW/cssH;这本及多数扫描书统一)。尺寸不一的书图片会被拉伸——需要时改 `_renderPageImg` 按 page-chars 的 per-page page_w/page_h 取尺寸。
+
+### 23. Service Worker + Cache API：页图持久缓存(抗 iOS 清 + 离线)（2026-06-03）
+- 动机:HTTP `immutable` 缓存能存页图,但 iOS Safari 定期清(7天 ITP/存储紧张)→"过几天又重下"。用 PWA 标准做法(Google Docs/Books 同款)持久化。
+- `/pdf/sw.js`(Flask 路由,内联脚本):**必须从 `/pdf/` 下提供**——SW 作用域=其所在目录,要覆盖 `/pdf/api/page-image`;响应带 `Service-Worker-Allowed: /pdf/` + `Cache-Control: no-cache`(SW 更新及时拉取,改 `CACHE` 版本号即生效)。
+- SW 策略:**只接管 `GET /pdf/api/page-image`**(cache-first:命中 Cache Storage 零网络/离线;未命中 fetch+put)。**其余请求一律 `return`(不 respondWith)→ 浏览器默认处理**,绝不拦截 SSE/POST/查词(否则会断流/出错)。`activate` 删非当前版本缓存。
+- 注册:boot `navigator.serviceWorker.register('/pdf/sw.js',{scope:'/pdf/'})` + `navigator.storage.persist()`(配合 Cache Storage,系统几乎不清)。
+- 三层缓存叠加:① page-image immutable HTTP 缓存(同会话快) ② Cache Storage(SW,跨会话/抗清/离线) ③ read-ahead 预取(`_prefetchAround` 前后±3页 → 经 SW 进 Cache Storage)。看过+预取的页持久存住,翻页瞬开、离线可读。
+- 注:Cache Storage 会随阅读增长;`pdf-pages-v1` 版本号 bump 会清旧缓存。需要时可加按页数/容量的 LRU 修剪(暂未做,靠 iOS 配额兜底)。
