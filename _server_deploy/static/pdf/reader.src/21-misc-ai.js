@@ -63,7 +63,14 @@ function _toggleAiModelRow() {
 }
 window._toggleAiModelRow = _toggleAiModelRow;
 
+// 设置面板页内 tab 切换(AI·翻译 / 阅读 / 语法 / 高亮),记住上次所在 tab
+window._setSettingsTab = (name) => {
+  document.querySelectorAll('#settings-mask .set-tab').forEach(t => t.classList.toggle('active', t.dataset.pane === name));
+  document.querySelectorAll('#settings-mask .set-pane').forEach(p => { p.style.display = (p.dataset.pane === name) ? '' : 'none'; });
+  try { localStorage.setItem('pdf-set-tab', name); } catch (_) {}
+};
 window.openSettings = () => {
+  try { _setSettingsTab(localStorage.getItem('pdf-set-tab') || 'ai'); } catch (_) {}
   const ov = _getAiOverrides();
   document.getElementById('set-model').value = ov.model || '';
   document.getElementById('set-effort').value = ov.effort || '';

@@ -380,6 +380,14 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .phrase-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
 .phrase-hl-layer .hl{position:absolute;background:rgba(59,109,181,.42);border:1px solid rgba(111,211,255,.85);border-radius:3px;pointer-events:auto;cursor:pointer}
 .phrase-hl-layer.breathe .hl{animation:sel-breathe 1.1s ease-in-out infinite}
+/* 句子 L 按钮长按菜单 */
+.sent-menu{position:fixed;z-index:300;background:#10162a;border:1px solid #3b6db5;border-radius:8px;padding:4px;display:flex;flex-direction:column;gap:2px;box-shadow:0 4px 18px rgba(0,0,0,.55)}
+.sent-menu button{background:#1a2540;border:none;color:#cfe6ff;font-size:13px;padding:9px 16px;border-radius:5px;cursor:pointer;text-align:left;white-space:nowrap}
+.sent-menu button:active{background:#244470}
+/* 设置面板页内 tab */
+.set-tabs{display:flex;gap:2px;border-bottom:1px solid #2a3550;flex-wrap:wrap}
+.set-tab{background:transparent;border:none;border-bottom:2px solid transparent;color:#8a9bb4;font-size:13px;padding:7px 13px;cursor:pointer;margin-bottom:-1px}
+.set-tab.active{color:#cfe6ff;border-bottom-color:#3b6db5;font-weight:600}
 /* 解释持久高亮：琥珀色,跟词组(蓝)区分;AI 加载呼吸→出结果常亮,点高亮重开解释页 */
 .explain-hl-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
 .explain-hl-layer .hl{position:absolute;background:rgba(214,158,46,.34);border:1px solid rgba(255,201,99,.92);border-radius:3px;pointer-events:auto;cursor:pointer}
@@ -649,109 +657,130 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 
 <!-- AI 设置 modal -->
 <div id="settings-mask" style="position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:250" onclick="if(event.target===this) closeSettings()">
-  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:420px;max-width:92vw">
-    <h3 style="margin:0 0 14px;font-size:15px;color:#cfe6ff">⚙️ AI 设置</h3>
-    <div style="font-size:11px;color:#8a9bb4;margin-bottom:14px;line-height:1.6">
-      仅本浏览器生效（不影响服务端 default 配置）。空白 = 用服务端默认。
+  <div style="background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column">
+    <h3 style="margin:0 0 10px;font-size:15px;color:#cfe6ff">⚙️ 设置</h3>
+    <div class="set-tabs">
+      <button type="button" class="set-tab active" data-pane="ai" onclick="_setSettingsTab('ai')">AI·翻译</button>
+      <button type="button" class="set-tab" data-pane="read" onclick="_setSettingsTab('read')">阅读</button>
+      <button type="button" class="set-tab" data-pane="grammar" onclick="_setSettingsTab('grammar')">语法</button>
+      <button type="button" class="set-tab" data-pane="hl" onclick="_setSettingsTab('hl')">高亮</button>
     </div>
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">模型 (model)</label>
-    <select id="set-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
-      <option value="">默认（跟随服务端）</option>
-      <option value="haiku">claude haiku（最快、最便宜）</option>
-      <option value="sonnet">claude sonnet（平衡）</option>
-      <option value="opus">claude opus（最强）</option>
-      <option value="gpt-5">gpt-5（OpenAI）</option>
-      <option value="gpt-5.5">gpt-5.5（OpenAI 更强）</option>
-    </select>
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">思考深度 (effort)</label>
-    <select id="set-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
-      <option value="">默认</option>
-      <option value="low">low（快）</option>
-      <option value="medium">medium（中）</option>
-      <option value="high">high（深）</option>
-      <option value="max">max（最深、最慢）</option>
-    </select>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
-      <input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
-      <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
-      <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
-      <input type="checkbox" id="set-auto-orient" style="width:16px;height:16px"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）
-    </label>
-    <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>
-    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
-    <div style="display:flex;gap:8px;margin-bottom:8px">
-      <label style="flex:1;font-size:11px;color:#8a9bb4">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
-      <label style="flex:1;font-size:11px;color:#8a9bb4">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
-      <label style="flex:1;font-size:11px;color:#8a9bb4">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
-      <label style="flex:1;font-size:11px;color:#8a9bb4">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+    <div style="overflow-y:auto;flex:1;min-height:0;padding:12px 4px 2px">
+
+      <!-- ════ pane: AI·翻译 ════ -->
+      <div class="set-pane" data-pane="ai">
+        <div style="font-size:11px;color:#8a9bb4;margin-bottom:14px;line-height:1.6">仅本浏览器生效（不影响服务端 default 配置）。空白 = 用服务端默认。</div>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">模型 (model)</label>
+        <select id="set-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
+          <option value="">默认（跟随服务端）</option>
+          <option value="haiku">claude haiku（最快、最便宜）</option>
+          <option value="sonnet">claude sonnet（平衡）</option>
+          <option value="opus">claude opus（最强）</option>
+          <option value="gpt-5">gpt-5（OpenAI）</option>
+          <option value="gpt-5.5">gpt-5.5（OpenAI 更强）</option>
+        </select>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">思考深度 (effort)</label>
+        <select id="set-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px">
+          <option value="">默认</option>
+          <option value="low">low（快）</option>
+          <option value="medium">medium（中）</option>
+          <option value="high">high（深）</option>
+          <option value="max">max（最深、最慢）</option>
+        </select>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">🌐 句子翻译源</label>
+        <select id="set-sent-backend" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px" onchange="_toggleAiModelRow()">
+          <option value="auto">auto（DeepL 有 key → MyMemory）</option>
+          <option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>
+          <option value="deepl">DeepL（需 dict.deepl_key）</option>
+          <option value="ai">AI（用主 AI 后端，按下面 model/effort）</option>
+        </select>
+        <div id="set-sent-ai-row" style="display:none;margin-bottom:14px">
+          <label style="display:block;font-size:12px;color:#8a9bb4;margin:8px 0 4px">AI 模型</label>
+          <select id="set-sent-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">
+            <option value="haiku">haiku（最快最便宜，句子翻译够用）</option>
+            <option value="sonnet">sonnet（平衡）</option>
+            <option value="opus">opus（最强）</option>
+            <option value="gpt-5">gpt-5</option>
+            <option value="gpt-5.5">gpt-5.5</option>
+          </select>
+          <label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">思考深度</label>
+          <select id="set-sent-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
+            <option value="low">low（翻译用 low 足够）</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
+          <input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）
+        </label>
+      </div>
+
+      <!-- ════ pane: 阅读 ════ -->
+      <div class="set-pane" data-pane="read" style="display:none">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
+          <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
+          <input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
+          <input type="checkbox" id="set-auto-orient" style="width:16px;height:16px"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）
+        </label>
+        <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <label style="flex:1;font-size:11px;color:#8a9bb4">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+          <label style="flex:1;font-size:11px;color:#8a9bb4">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+          <label style="flex:1;font-size:11px;color:#8a9bb4">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+          <label style="flex:1;font-size:11px;color:#8a9bb4">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+        </div>
+        <button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 本书文本语言（决定点词查哪本词典：日语→中日，英语→英汉，中文→不查；<b>每本书独立</b>）</label>
+        <div id="lang-checks" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">
+          <label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>
+          <label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>
+          <label style="cursor:pointer"><input type="checkbox" value="zh" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">中文(不查)</label>
+        </div>
+        <button onclick="saveLangPicker()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存本书语言</button>
+      </div>
+
+      <!-- ════ pane: 语法 ════ -->
+      <div class="set-pane" data-pane="grammar" style="display:none">
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
+        <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">
+          <option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>
+          <option value="components">成分分块（主谓宾定状从句彩色块）</option>
+          <option value="skeleton">主干+修饰折叠（骨架先行，修饰点开）</option>
+          <option value="deps">依存关系图（displaCy 弧线 + 从句切段）</option>
+        </select>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📊 启用语法分析（per-PDF）</label>
+        <div style="font-size:10px;color:#7a8497;margin-bottom:6px;line-height:1.5">
+          勾选本 PDF 用哪些语法 KG。具体跟踪哪些语法点请去
+          <a href="/skilltree/grammar-demo/" target="_blank" style="color:#60a5fa">技能树页面</a>
+          点节点详情里的「👁 跟踪」按钮设置。
+        </div>
+        <div id="set-grammar-list" style="max-height:240px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;font-size:12px">
+          <div style="color:#7a8497">加载中…</div>
+        </div>
+      </div>
+
+      <!-- ════ pane: 高亮 ════ -->
+      <div class="set-pane" data-pane="hl" style="display:none">
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
+        <div id="set-hl-colors" class="set-hl-row"></div>
+        <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
+          <input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">
+          <button onclick="addHlColor()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">＋ 添加</button>
+          <button onclick="resetHlColors()" style="background:transparent;border:1px solid #2a3550;color:#7a8497;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">恢复默认</button>
+        </div>
+      </div>
+
     </div>
-    <button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>
-    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 本书文本语言（决定点词查哪本词典：日语→中日，英语→英汉，中文→不查；<b>每本书独立</b>）</label>
-    <div id="lang-checks" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">
-      <label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>
-      <label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>
-      <label style="cursor:pointer"><input type="checkbox" value="zh" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">中文(不查)</label>
-    </div>
-    <button onclick="saveLangPicker()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">保存本书语言</button>
-    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📐 长句结构显示</label>
-    <select id="set-grammar-view" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px" onchange="setGrammarView(this.value)">
-      <option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>
-      <option value="components">成分分块（主谓宾定状从句彩色块）</option>
-      <option value="skeleton">主干+修饰折叠（骨架先行，修饰点开）</option>
-      <option value="deps">依存关系图（displaCy 弧线 + 从句切段）</option>
-    </select>
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">🌐 句子翻译源</label>
-    <select id="set-sent-backend" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px" onchange="_toggleAiModelRow()">
-      <option value="auto">auto（DeepL 有 key → MyMemory）</option>
-      <option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>
-      <option value="deepl">DeepL（需 dict.deepl_key）</option>
-      <option value="ai">AI（用主 AI 后端，按下面 model/effort）</option>
-    </select>
-    <div id="set-sent-ai-row" style="display:none;margin-bottom:14px">
-      <label style="display:block;font-size:12px;color:#8a9bb4;margin:8px 0 4px">AI 模型</label>
-      <select id="set-sent-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">
-        <option value="haiku">haiku（最快最便宜，句子翻译够用）</option>
-        <option value="sonnet">sonnet（平衡）</option>
-        <option value="opus">opus（最强）</option>
-        <option value="gpt-5">gpt-5</option>
-        <option value="gpt-5.5">gpt-5.5</option>
-      </select>
-      <label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">思考深度</label>
-      <select id="set-sent-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">
-        <option value="low">low（翻译用 low 足够）</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="max">max</option>
-      </select>
-    </div>
-    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px">📊 启用语法分析（per-PDF）</label>
-    <div style="font-size:10px;color:#7a8497;margin-bottom:6px;line-height:1.5">
-      勾选本 PDF 用哪些语法 KG。具体跟踪哪些语法点请去
-      <a href="/skilltree/grammar-demo/" target="_blank" style="color:#60a5fa">技能树页面</a>
-      点节点详情里的「👁 跟踪」按钮设置。
-    </div>
-    <div id="set-grammar-list" style="max-height:200px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;margin-bottom:14px;font-size:12px">
-      <div style="color:#7a8497">加载中…</div>
-    </div>
-    <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-    <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>
-    <div id="set-hl-colors" class="set-hl-row"></div>
-    <div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">
-      <input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">
-      <button onclick="addHlColor()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">＋ 添加</button>
-      <button onclick="resetHlColors()" style="background:transparent;border:1px solid #2a3550;color:#7a8497;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">恢复默认</button>
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid #2a3550;margin-top:2px">
       <button onclick="closeSettings()" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>
       <button onclick="saveSettings()" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>
     </div>

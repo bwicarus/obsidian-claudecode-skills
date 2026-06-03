@@ -207,17 +207,18 @@ function renderVocabSentences(pw, sentences) {
       btn.addEventListener('mouseleave', () => {
         layer.querySelectorAll(`.vocab-sentence-box[data-sid="${sid}"].highlight`).forEach(b => b.classList.remove('highlight'));
       });
-      if (s.manual) _bindSentBtnLongPress(btn, s, pw);   // 仅翻译功能形成的框选可长按删；自动生词框不可
+      _bindSentBtnLongPress(btn, s, pw);   // 所有句(自动+手动)L 按钮:长按弹菜单(重新翻译[+删除,仅手动])
       layer.appendChild(btn);
     }
-    if (s.first_char && s.manual) {
+    if (s.first_char) {
       const b0 = layer.querySelector(`.vocab-sentence-btn-l-start[data-sid="${sid}"]`);
       if (b0) _bindSentBtnLongPress(b0, s, pw);
     }
   }
 }
 
-// L 框长按 → 删除该句标记（仅翻译框选）。与短按(翻译)/拖选共存：移动或短按则取消；触发后弹确认
+// L 框长按 → 弹菜单(🔄 重新翻译 [+ 🗑 删除,仅手动框])。短按仍是显示/隐藏译文(不重译,防误触重译干扰)。
+// 与短按/拖选共存：移动或短按则取消；触发后吃掉随后的 click。
 function _bindSentBtnLongPress(btn, s, pw) {
   let timer = null, x0 = 0, y0 = 0, fired = false;
   btn.addEventListener('pointerdown', (e) => {
@@ -226,8 +227,8 @@ function _bindSentBtnLongPress(btn, s, pw) {
     timer = setTimeout(() => {
       timer = null; fired = true;
       if (navigator.vibrate) { try { navigator.vibrate(30); } catch (_) {} }
-      if (confirm('删除这个翻译框选？（只去掉框线/译文标记，不影响原文）')) _sentDismiss(s, pw);
-    }, 600);
+      _showSentMenu(btn, s, pw);
+    }, 550);
   });
   const cancel = (e) => {
     if (timer && e && e.type === 'pointermove' && Math.hypot(e.clientX - x0, e.clientY - y0) < 12) return;
@@ -236,8 +237,61 @@ function _bindSentBtnLongPress(btn, s, pw) {
   btn.addEventListener('pointermove', cancel);
   btn.addEventListener('pointerup', cancel);
   btn.addEventListener('pointercancel', cancel);
-  // 长按已删 → 吃掉随后的 click，避免触发整句翻译
+  // 长按已弹菜单 → 吃掉随后的 click，避免又触发整句翻译/显示
   btn.addEventListener('click', (e) => { if (fired) { fired = false; e.stopPropagation(); e.preventDefault(); } }, true);
+}
+// 句子 L 按钮长按菜单
+function _showSentMenu(btn, s, pw) {
+  document.querySelectorAll('.sent-menu').forEach(m => m.remove());
+  const menu = document.createElement('div');
+  menu.className = 'sent-menu';
+  let html = '<button type="button" data-act="re">🔄 重新翻译</button>';
+  if (s.manual) html += '<button type="button" data-act="del">🗑 删除标记</button>';
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+  const r = btn.getBoundingClientRect();
+  menu.style.left = Math.max(6, Math.min(r.left, window.innerWidth - menu.offsetWidth - 6)) + 'px';
+  menu.style.top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 6) + 'px';
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    e.stopPropagation(); e.preventDefault();
+    const act = b.dataset.act; menu.remove();
+    if (act === 're') _sentRetranslate(s, pw);
+    else if (act === 'del') { if (confirm('删除这个翻译框选？（只去掉框线/译文标记，不影响原文）')) _sentDismiss(s, pw); }
+  });
+  setTimeout(() => {
+    const close = (ev) => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('pointerdown', close, true); } };
+    document.addEventListener('pointerdown', close, true);
+  }, 0);
+}
+// 强制重新翻译该句(单句翻译后端不缓存 → 必出新结果),重画译文浮层
+function _sentRetranslate(s, pw) {
+  if (!s || !pw) return;
+  const lay0 = pw.querySelector('.vocab-layer');
+  if (lay0) lay0.querySelectorAll('.vocab-sentence-overlay').forEach(el => el.remove());   // 关旧译文
+  s.zh = ''; s.__translating = true;
+  try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {}   // 呼吸表示翻译中
+  fetch('/pdf/api/translate-sentence', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: s.text }),
+  }).then(r => r.json()).then(d => {
+    s.__translating = false;
+    if (d.ok && d.zh) { s.zh = d.zh; try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {} _reopenSentOverlay(pw, s); _toast?.('已重新翻译'); }
+    else { try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {} _toast?.('翻译失败：' + (d.error || '?')); }
+  }).catch(e => { s.__translating = false; try { renderVocabSentences(pw, pw.__vocabSentences); } catch (_) {} _toast?.('网络错误：' + e.message); });
+}
+// 重画某句的就地译文浮层(renderVocabSentences 重建按钮后,按 sid 找回 L 按钮 + sx/sy)
+function _reopenSentOverlay(pw, s) {
+  const layer = pw.querySelector('.vocab-layer'); if (!layer || !s.zh) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const si = (pw.__vocabSentences || []).indexOf(s);
+  const btn = layer.querySelector(`.vocab-sentence-btn-l[data-sid="${si}"]`)
+           || layer.querySelector(`.vocab-sentence-btn-l-start[data-sid="${si}"]`);
+  if (btn) _drawSentenceOverlay(layer, s, btn, sx, sy);
 }
 function _sentDismiss(s, pw) {
   if (!s || !pw) return;
