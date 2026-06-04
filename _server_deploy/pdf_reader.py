@@ -22,7 +22,7 @@ from pathlib import Path
 
 from flask import (
     Blueprint, Response, abort, jsonify, render_template, request,
-    send_file,
+    send_file, session,
 )
 
 # AI 后端复用 _client/core 的 ai_backends + scripts/ai_client
@@ -483,6 +483,47 @@ self.addEventListener('fetch', (e) => {
   })());
 });
 """
+
+# ── 跨设备/跨上下文同步阅读器设置+进度+排版(Kindle/Google Books 做法)──
+# iOS 把"装到主屏的 PWA"和 Safari 当成独立存储沙箱 → localStorage 不互通。把这些 pdf-* 偏好
+# 存服务端(按登录用户),前端进页面先灌入 localStorage、改动防抖回传 → 设置/进度/旋转排版跨端同步。
+_PDF_PREFS_DIR = CLAUDE_DIR / "state" / "pdf-prefs"
+def _prefs_path():
+    import re as _re
+    user = (session.get("username") or "anon")
+    safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(user))[:64] or "anon"
+    return _PDF_PREFS_DIR / f"{safe}.json"
+
+@bp.route("/api/prefs", methods=["GET", "POST"])
+def pdf_api_prefs():
+    """GET → {ok, prefs:{key:value}}; POST {patch:{k:v|null}} 合并(null=删) → {ok}。键为前端 localStorage 的 pdf-*。"""
+    p = _prefs_path()
+    try:
+        cur = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except Exception:
+        cur = {}
+    if request.method == "GET":
+        return jsonify({"ok": True, "prefs": cur})
+    body = request.get_json(silent=True) or {}
+    patch = body.get("patch") or {}
+    if not isinstance(patch, dict):
+        return jsonify({"ok": False, "error": "bad patch"}), 400
+    for k, v in patch.items():
+        if not isinstance(k, str):
+            continue
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[str(k)] = v
+    try:
+        _PDF_PREFS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cur, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True})
+
 
 @bp.route("/sw.js")
 def pdf_sw_js():
@@ -1076,6 +1117,42 @@ def _jp_inflection(text: str) -> dict | None:
     return {"base": base, "marks": marks}
 
 
+def _stitch_latin_words(chars: list[dict]) -> None:
+    """删掉西文词内的合成空格(字距拉开 tracking 时 PyMuPDF 会在词内插一个空格 glyph)。
+    判据:某空格的「同行前一个非空格 char」与「后一个非空格 char」都是单个 ASCII 字母,
+    且二者 w 相同且 ≥0(PyMuPDF 把它们归为同一个词)→ 这是词内空格 → 删。
+    保留真正的词间空格(前后 w 不同)。否则像「Web」会被切出 surface「W eb」:
+    含空格 → 前端单词正则 /^[A-Za-z]+$/ 不通过 → 落到词组工具条、查不出单词、无「已掌握」。"""
+    n = len(chars)
+    _SP = (" ", " ", " ", " ", " ", " ", " ")
+    drop = set()
+    for i, c in enumerate(chars):
+        if not c.get("sp") or (c.get("c") or "") not in _SP:
+            continue
+        p = i - 1
+        while p >= 0 and chars[p].get("sp"):
+            p -= 1
+        q = i + 1
+        while q < n and chars[q].get("sp"):
+            q += 1
+        if p < 0 or q >= n:
+            continue
+        a, b = chars[p], chars[q]
+        bk = c.get("bk")
+        if a.get("bk") != bk or b.get("bk") != bk:
+            continue
+        ca, cb = a.get("c", ""), b.get("c", "")
+        if not (len(ca) == 1 and ca.isascii() and ca.isalpha()):
+            continue
+        if not (len(cb) == 1 and cb.isascii() and cb.isalpha()):
+            continue
+        wa, wb = a.get("w", -1), b.get("w", -1)
+        if wa >= 0 and wa == wb:
+            drop.add(i)
+    if drop:
+        chars[:] = [c for i, c in enumerate(chars) if i not in drop]
+
+
 def _apply_jp_tokenize(seg: list, block_i: int, col_i: int,
                        furigana_out: list | None = None) -> None:
     """对一列(块内 gutter 切出的列,如漫画一个气泡)的 chars 用 fugashi 分词,覆盖其 w 字段。
@@ -1330,6 +1407,8 @@ def _compute_page_chars(abs_path, page: int):
                 for c in _col:
                     c["bk"] = cur_bk
                 _apply_jp_tokenize(_col, _block_i, cur_bk % 1000, furigana)
+        # 西文词内合成空格清理(字距拉开 → "Web" 被切成 surface "W eb")。须在分词后、furigana 前。
+        _stitch_latin_words(chars)
         # 英文词音标叠加（单连接直查 ECDICT；日语为主的书几乎无开销）
         try:
             furigana.extend(_build_en_furigana(chars))
@@ -1340,7 +1419,7 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 8   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+_CHAR_CACHE_VER = 9   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
                       # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx;
                       #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段;
                       #  v8:块内 gutter 切列[漫画并排气泡分开 bk]→ 选中/分词不串气泡)
@@ -1486,6 +1565,8 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
         cur_letters.clear()
         chars_snap = cur_chars[:]
         cur_chars.clear()
+        if any(c.get("favm") for c in chars_snap):
+            return   # 属于已掌握收藏词组的字 → 整条不画(即便单词本身在生词库)
         if not info or not info.get("label_slug"):
             return
         if info["label_slug"] == "mastered":
@@ -1651,8 +1732,15 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
             continue
         j = i
         toks = []
-        while j < n and chars[j].get("w") == wid and not chars[j].get("sp"):
-            toks.append(chars[j]); j += 1
+        # 同 w 继续合并;中间的 sp char(收藏词组跨行/词内空格,_merge_favorite_phrases 给它也设了同 w)
+        # 跳过不计入 surface、但**不终止**分组 → 跨行词组「公表する」不会被换行空格切成两段各自查词。
+        while j < n and chars[j].get("w") == wid:
+            if not chars[j].get("sp"):
+                toks.append(chars[j])
+            j += 1
+        if any(t.get("favm") for t in toks):
+            i = j   # 已掌握收藏词组 → 不画下划线
+            continue
         surf = "".join(t.get("c", "") for t in toks)
         # 先按表层查（forms 映射已含活用形）；查不到再解析原形(辞書形)查
         info = idx.get(surf.lower())
@@ -1700,11 +1788,42 @@ def _phrases_save(lst: list):
         pass
 
 
+# ── 词组「已掌握」store（state/pdf-phrase-mark.json）：标记掌握的词组不再画生词下划线 ──
+# 跟单词掌握分开:单词走 vocab 笔记 frontmatter,词组没有笔记(强行建会生成 "web browser.md" 幽灵笔记)。
+_PHRASE_MARK_PATH = CLAUDE_DIR / "state" / "pdf-phrase-mark.json"
+
+
+def _phrase_norm(t: str) -> str:
+    """词组归一化键:折叠空白 + 转小写(空白/大小写不敏感匹配,跟 _merge_favorite_phrases 一致)。"""
+    return re.sub(r"\s+", " ", (t or "")).strip().lower()
+
+
+def _phrase_marks_load() -> set:
+    try:
+        d = json.loads(_PHRASE_MARK_PATH.read_text("utf-8"))
+        return {_phrase_norm(p) for p in (d.get("mastered") or []) if isinstance(p, str) and p.strip()}
+    except Exception:
+        return set()
+
+
+def _phrase_marks_save(s: set):
+    try:
+        _PHRASE_MARK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PHRASE_MARK_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"mastered": sorted(s)}, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(_PHRASE_MARK_PATH)
+    except Exception:
+        pass
+
+
 def _merge_favorite_phrases(chars: list[dict]) -> None:
     """把收藏词组在该页出现处的 chars 合并成同一个 w（含内部空格）→ 单击选词时整词组一起选。
-    空白不敏感 + ASCII 大小写不敏感匹配；按收藏长度降序优先，used 标记防重叠。"""
+    空白不敏感 + ASCII 大小写不敏感匹配；按收藏长度降序优先，used 标记防重叠。
+    已掌握的词组(_phrase_marks_load)也参与合并,并给 chars 打 favm=1 → 两个 vocab builder 据此跳过下划线。"""
     favs = _phrases_load()
-    if not favs or not chars:
+    marked = _phrase_marks_load()
+    targets = set(favs) | marked
+    if not targets or not chars:
         return
     nonsp = [(i, ch.get("c", "")) for i, ch in enumerate(chars) if not ch.get("sp")]
     if not nonsp:
@@ -1713,10 +1832,11 @@ def _merge_favorite_phrases(chars: list[dict]) -> None:
     cidx = [i for i, _c in nonsp]
     used = [False] * len(chars)
     wn = 0
-    for ph in sorted(set(favs), key=len, reverse=True):
+    for ph in sorted(targets, key=len, reverse=True):
         p = re.sub(r"\s+", "", ph).lower()
         if len(p) < 2:
             continue
+        is_mastered = _phrase_norm(ph) in marked
         start = 0
         while True:
             k = compact.find(p, start)
@@ -1742,6 +1862,8 @@ def _merge_favorite_phrases(chars: list[dict]) -> None:
                 for j in range(i0, i1 + 1):
                     chars[j]["w"] = wid
                     used[j] = True
+                    if is_mastered:
+                        chars[j]["favm"] = 1   # 已掌握词组 → builder 跳过下划线
             start = k + 1
 
 
@@ -2337,6 +2459,83 @@ def pdf_api_search():
                     "pages": len(matches), "matches": matches})
 
 
+# ── 全局搜索:跨 vault 所有 PDF 书的全文(SQLite FTS5 trigram,索引由 scripts/build_search_index.py 建)──
+_SEARCH_DB = CLAUDE_DIR / "state" / "pdf-search.db"
+
+
+def _clean_snippet(body: str, q: str, ctx: int = 40):
+    """从整页文本取 q 首处命中、折叠空白、上下文 ±ctx 字的片段 + 命中相对位置(供前端加粗)。"""
+    flat = re.sub(r"\s+", " ", body)
+    flow = flat.lower()
+    fpos = flow.find(q.lower())
+    if fpos < 0:
+        fpos = 0
+    a = max(0, fpos - ctx)
+    b = min(len(flat), fpos + len(q) + ctx)
+    snippet = ("…" if a > 0 else "") + flat[a:b].strip() + ("…" if b < len(flat) else "")
+    return snippet, max(0, fpos - a + (1 if a > 0 else 0))
+
+
+@bp.route("/search")
+def pdf_search_page():
+    """全局搜索页(跨所有 PDF 书,点结果跳阅读器对应页)。"""
+    return render_template("pdf_search.html")
+
+
+@bp.route("/api/global-search")
+def pdf_api_global_search():
+    """跨全书全文搜索。GET ?q=&limit= → {ok, q, books:[{file,name,dir,hits,pages:[{page,snippet,pos,qlen}]}], total_books, total_hits, truncated}。
+    q≥3 字走 FTS5 trigram + bm25 排序;q<3 字(如 2 字 CJK 词)trigram 无法匹配 → LIKE 子串兜底。"""
+    import sqlite3
+    q = (request.args.get("q", "") or "").strip()
+    if len(q) < 1:
+        return jsonify({"ok": True, "q": q, "books": [], "total_books": 0, "total_hits": 0})
+    if not _SEARCH_DB.exists():
+        return jsonify({"ok": False, "error": "搜索索引未建,请先运行 build_search_index.py"}), 503
+    try:
+        cap = max(20, min(500, int(request.args.get("limit", "300") or "300")))
+    except ValueError:
+        cap = 300
+    con = sqlite3.connect(f"file:{_SEARCH_DB}?mode=ro", uri=True)
+    try:
+        names = dict(con.execute("SELECT file, name FROM meta").fetchall())
+        dirs = dict(con.execute("SELECT file, dir FROM meta").fetchall())
+        if len(q) >= 3:
+            fts = '"' + q.replace('"', '""') + '"'   # 当字符串/短语,避开 FTS5 查询语法
+            rows = con.execute(
+                "SELECT d.file, d.page, d.body FROM pages_fts "
+                "JOIN pages_data d ON d.id = pages_fts.rowid "
+                "WHERE pages_fts MATCH ? ORDER BY bm25(pages_fts) LIMIT ?",
+                (fts, cap + 1),
+            ).fetchall()
+        else:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            rows = con.execute(
+                "SELECT file, page, body FROM pages_data WHERE body LIKE ? ESCAPE '\\' LIMIT ?",
+                (like, cap + 1),
+            ).fetchall()
+    finally:
+        con.close()
+    truncated = len(rows) > cap
+    rows = rows[:cap]
+    books = {}
+    for file, page, body in rows:
+        snippet, pos = _clean_snippet(body, q)
+        bk = books.get(file)
+        if bk is None:
+            bk = books[file] = {"file": file, "name": names.get(file, file),
+                                "dir": dirs.get(file, ""), "pages": []}
+        bk["pages"].append({"page": page, "snippet": snippet, "pos": pos, "qlen": len(q)})
+    book_list = list(books.values())   # 保持插入序 = 最佳命中书在前(rows 已按 bm25 排)
+    for bk in book_list:
+        bk["pages"].sort(key=lambda x: x["page"])   # 书内按页序(阅读顺序)
+        bk["hits"] = len(bk["pages"])
+    return jsonify({"ok": True, "q": q, "books": book_list,
+                    "total_books": len(book_list),
+                    "total_hits": sum(b["hits"] for b in book_list),
+                    "truncated": truncated})
+
+
 @bp.route("/api/page-nodes")
 def pdf_api_page_nodes():
     rel = request.args.get("file", "")
@@ -2650,6 +2849,30 @@ def pdf_api_phrases():
     return jsonify({"ok": True, "phrases": lst, "removed": text})
 
 
+@bp.route("/api/phrase-mark", methods=["GET", "POST"])
+def pdf_api_phrase_mark():
+    """词组「已掌握」(跟单词掌握分开,不建幽灵 vocab 笔记)。
+    GET → {ok, mastered:[归一化键...]}
+    POST {text, mark} → mark∈{mastered,known,1,true} 标掌握;否则取消。
+    标掌握的词组也会作为分词单元参与合并(单击整词组),且不再画生词下划线。"""
+    if request.method == "GET":
+        return jsonify({"ok": True, "mastered": sorted(_phrase_marks_load())})
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text or len(text) > 60:
+        return jsonify({"ok": False, "error": "invalid text"}), 400
+    mark = str(data.get("mark") or "").strip().lower()
+    on = mark in ("mastered", "known", "1", "true", "yes")
+    key = _phrase_norm(text)
+    s = _phrase_marks_load()
+    if on:
+        s.add(key)
+    else:
+        s.discard(key)
+    _phrase_marks_save(s)
+    return jsonify({"ok": True, "mastered": sorted(s), "marked": on, "key": key})
+
+
 def _en_word_mastered(lemma: str) -> bool:
     """英语词当前是否「已掌握」(vocab_index label_slug=='mastered')。给单词小框掌握按钮初始态。"""
     try:
@@ -2691,7 +2914,7 @@ def pdf_api_dict_quick():
         # (否则每个变形各调一次 AI、各存一份,既慢又浪费。变形说明仍按选中原文单独显示)
         _inf = _jp_inflection(word_raw)
         _lookup = (_inf or {}).get("base") or word_raw
-        jp = ds.lookup_jp(_lookup, context=context)
+        jp = ds.lookup_jp(_lookup, context=context, langs=langs)   # 传本书语言 → 防中日同形异义
         if not jp or (jp.get("zh") in ("(无)", "", None)):
             return jsonify({"ok": False, "word": word_raw, "jp": True})
         ex = [e for e in (jp.get("examples") or []) if isinstance(e, dict)][:2]
@@ -2938,7 +3161,10 @@ def pdf_api_dict_jp():
     # 活用形→原形再查释义/例句:確認します/確認した 都→確認する 共用缓存(快、省)
     _inf = _jp_inflection(word)
     _base = (_inf or {}).get("base") or word
-    jp = ds.lookup_jp(_base, context=request.args.get("context", ""))
+    # 本书声明语言(?langs= 优先,否则按 file 读存储;都没有 → None=默认纯日语)。dict-jp 本就是日语路径。
+    _langs = [l for l in (request.args.get("langs", "") or "").split(",") if l] \
+        or _book_langs_for(request.args.get("file", "")) or None
+    jp = ds.lookup_jp(_base, context=request.args.get("context", ""), langs=_langs)
     if not jp or (jp.get("zh") in ("(无)", "", None)):
         return jsonify({"ok": False, "word": word, "jp": True})
     ra = {}
@@ -3974,6 +4200,10 @@ def pdf_api_vocab_mark():
     mark = (data.get("mark") or "known").strip().lower()
     if not word or len(word) > 50:
         return jsonify({"ok": False, "error": "invalid word"}), 400
+    if any(ch.isspace() for ch in word):
+        # 含空格的是词组,不是单词。单词掌握会建 vocab 笔记,词组建会生成幽灵笔记(web browser.md)。
+        # 词组掌握走 /api/phrase-mark。这里直接拒,避免脏数据。
+        return jsonify({"ok": False, "error": "phrase not allowed; use phrase-mark"}), 400
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
     if str(vp) not in sys.path:

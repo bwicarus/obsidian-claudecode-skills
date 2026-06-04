@@ -47,7 +47,10 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
     <input type="text" id="upload-dir" placeholder="目标目录（默认 资源/uploads）" style="background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:8px 12px;font-size:13px;flex:1;min-width:200px">
     <span id="upload-status" style="color:#8a9bb4;font-size:12px"></span>
   </div>
-  <input type="search" id="search" placeholder="🔍 搜索（按文件名）" oninput="filter()">
+  <div style="display:flex;gap:10px;align-items:stretch;margin-bottom:20px">
+    <input type="search" id="search" placeholder="🔍 按文件名筛选" oninput="filter()" style="margin-bottom:0;flex:1">
+    <a href="/pdf/search" style="background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:10px 16px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap;display:flex;align-items:center">🔎 全文搜索</a>
+  </div>
   <div class="pdf-list" id="list">
     {% for p in pdfs %}
     <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}"

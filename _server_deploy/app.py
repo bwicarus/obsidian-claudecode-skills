@@ -98,7 +98,7 @@ with app.app_context():
 
 # ─────────────────────────── 通用左侧导航 (auto-inject) ───────────────────────────
 
-NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf", "/skilltree")
+NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf", "/skilltree", "/insights")
 
 # PWA:让站点能「装到 iPad 主屏 + 全屏运行(无 Safari 地址栏)」,像原生 app。manifest + 苹果专用 meta。
 _PWA_HEAD = (
@@ -195,7 +195,7 @@ def user_dir(username, dataset=""):
         base = base / dataset
     return base
 
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/insights")
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request
@@ -792,6 +792,10 @@ register_pdf_reader(app)
 # 健身页(/private/fitness)
 from fitness import register as register_fitness
 register_fitness(app)
+
+# 学习数据看板(/insights)
+from insights import register_insights
+register_insights(app)
 
 if __name__ == "__main__":
     # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求

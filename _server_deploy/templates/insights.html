@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>学习数据看板</title>
+<style>
+:root{--bg:#12151c;--card:#10162a;--bd:#1f2740;--bd2:#2a3550;--fg:#e6e6f0;--hd:#cfe6ff;--sub:#8a9bb4;--dim:#5a6680;--acc:#3b6db5;--acc2:#9fcbff;
+  --g0:#1b2236;--g1:#16433a;--g2:#1c6b4f;--g3:#25966a;--g4:#3ad88f;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;-webkit-text-size-adjust:100%}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 16px 90px}
+h1{font-size:21px;color:var(--hd);margin:0 0 2px}
+.gen{color:var(--dim);font-size:11px;margin-bottom:18px}
+a.back{color:var(--sub);font-size:12px;text-decoration:none}a.back:hover{color:var(--hd)}
+/* KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:10px;margin:14px 0 20px}
+.kpi{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:13px 12px;text-align:center}
+.kpi .v{font-size:24px;font-weight:700;color:var(--hd);line-height:1.1}
+.kpi .l{font-size:11px;color:var(--sub);margin-top:5px}
+.kpi.hot .v{color:#ffd479}
+/* cards */
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px 16px 18px;margin-bottom:14px}
+.card h2{font-size:15px;color:var(--hd);margin:0 0 3px;display:flex;align-items:center;gap:8px}
+.card .desc{color:var(--sub);font-size:11px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:680px){.grid2{grid-template-columns:1fr}}
+.sub-h{font-size:12px;color:var(--acc2);margin:2px 0 10px;font-weight:600}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--sub);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.row{display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 0}
+.row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
+.row .vv{color:var(--acc2);font-variant-numeric:tabular-nums;flex-shrink:0}
+.bar-tr{flex:1;height:8px;background:var(--g0);border-radius:5px;overflow:hidden;min-width:40px}
+.bar-fl{height:100%;border-radius:5px}
+.chip{display:inline-block;background:#1a2540;border:1px solid var(--bd2);color:var(--acc2);border-radius:14px;padding:3px 10px;font-size:11px;margin:3px 4px 0 0}
+.muted{color:var(--dim);font-size:12px}
+.hm-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tt{position:fixed;z-index:50;background:#0a0f1c;border:1px solid var(--acc);border-radius:8px;padding:6px 10px;font-size:11px;color:var(--fg);pointer-events:none;display:none;box-shadow:0 6px 18px rgba(0,0,0,.5);white-space:nowrap}
+svg text{fill:var(--sub);font-size:10px}
+.loading{color:var(--dim);text-align:center;padding:60px}
+.big-stat{display:flex;gap:18px;align-items:baseline;margin-bottom:10px}
+.big-stat .n{font-size:30px;font-weight:700;color:var(--g4)}
+.big-stat .n.amber{color:#ffd479}
+.big-stat .u{font-size:12px;color:var(--sub)}
+.seg{display:flex;height:26px;border-radius:7px;overflow:hidden;border:1px solid var(--bd)}
+.seg div{display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;min-width:0;overflow:hidden}
+.tag{font-size:10px;color:var(--dim);background:#161d30;border:1px solid var(--bd);border-radius:5px;padding:1px 6px;margin-left:6px}
+.subj-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.subj{background:#0d1322;border:1px solid var(--bd);border-radius:10px;padding:11px 13px}
+.subj .s{color:var(--hd);font-weight:600;font-size:13px}
+.subj .m{color:var(--sub);font-size:11px;margin-top:5px;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/dashboard/">← 仪表板</a>
+  <h1>📊 学习数据看板</h1>
+  <div class="gen" id="gen">加载中…</div>
+  <div id="root"><div class="loading">正在聚合 Anki / 生词 / 知识图谱 / 阅读 数据…</div></div>
+</div>
+<div class="tt" id="tt"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const pct = (x) => x == null ? '—' : (x * 100).toFixed(0) + '%';
+const heatColor = (t) => t <= 0 ? 'var(--g0)' : t < 80 ? 'var(--g1)' : t < 180 ? 'var(--g2)' : t < 320 ? 'var(--g3)' : 'var(--g4)';
+
+// ── tooltip ──
+const tt = $('tt');
+function showTT(e, html){ tt.innerHTML = html; tt.style.display='block'; moveTT(e); }
+function moveTT(e){ const x=(e.touches?e.touches[0].clientX:e.clientX), y=(e.touches?e.touches[0].clientY:e.clientY);
+  tt.style.left=Math.min(x+12, innerWidth-tt.offsetWidth-8)+'px'; tt.style.top=(y-36)+'px'; }
+function hideTT(){ tt.style.display='none'; }
+
+// ── 日历热力图(GitHub/Duolingo 风格) ──
+function renderHeatmap(days){
+  // 对齐到周一为列首:在最前补齐到周一
+  const cell=13, gap=3, rows=7;
+  // JS getDay: 0=日..6=六 → 转成 周一=0
+  const first = new Date(days[0].date+'T00:00:00');
+  let pad = (first.getDay()+6)%7;
+  const cells = Array(pad).fill(null).concat(days);
+  const weeks = Math.ceil(cells.length/7);
+  const W = weeks*(cell+gap), H = rows*(cell+gap)+16;
+  let r = '<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">';
+  const monLbl=['一','二','三','四','五','六','日'];
+  for(let i=0;i<cells.length;i++){
+    const c=cells[i]; if(!c) continue;
+    const wk=Math.floor(i/7), dy=i%7;
+    const x=wk*(cell+gap), y=dy*(cell+gap);
+    r+='<rect x="'+x+'" y="'+y+'" width="'+cell+'" height="'+cell+'" rx="3" fill="'+heatColor(c.total)+'" '
+      +'data-d="'+c.date+'" data-r="'+c.reviews+'" data-l="'+c.lookups+'" class="hc"/>';
+  }
+  // 月份刻度(每月第一周标月份)
+  let lastM=-1;
+  for(let wk=0; wk<weeks; wk++){
+    const idx=wk*7; const c=cells[idx]||cells.find((x,j)=>j>=idx&&x); if(!c) continue;
+    const m=new Date(c.date+'T00:00:00').getMonth();
+    if(m!==lastM){ r+='<text x="'+(wk*(cell+gap))+'" y="'+(H-3)+'">'+(m+1)+'月</text>'; lastM=m; }
+  }
+  r+='</svg>';
+  return r;
+}
+
+// ── 横向条形列表 ──
+function hbars(items, opts){
+  opts=opts||{}; const max=opts.max||Math.max(1,...items.map(i=>i.value));
+  return items.map(i=>{
+    const w=Math.max(2,Math.round(100*i.value/max));
+    const col=i.color||'linear-gradient(90deg,#2a6fb0,#4ea0e8)';
+    return '<div class="row"><div class="nm" title="'+esc(i.label)+'">'+esc(i.label)+'</div>'
+      +'<div class="bar-tr"><div class="bar-fl" style="width:'+w+'%;background:'+col+'"></div></div>'
+      +'<div class="vv">'+(i.disp!=null?i.disp:i.value)+'</div></div>';
+  }).join('');
+}
+
+// ── 竖向柱状(留存曲线/到期/分布) ──
+function vbars(items, opts){
+  opts=opts||{}; const h=opts.h||120, bw=opts.bw||0, pad=22;
+  const max=opts.max||Math.max(1,...items.map(i=>i.value));
+  const n=items.length; const gap=6;
+  const cw=bw||Math.max(14,Math.floor((opts.w||320 - (n+1)*gap)/n));
+  const W=n*(cw+gap)+gap, H=h+34;
+  let r='<svg width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">';
+  items.forEach((it,k)=>{
+    const bh=Math.round(h*it.value/max);
+    const x=gap+k*(cw+gap), y=h-bh+8;
+    const col=it.color||'#3b82f6';
+    r+='<rect x="'+x+'" y="'+y+'" width="'+cw+'" height="'+Math.max(1,bh)+'" rx="3" fill="'+col+'"'
+      +(it.tip?' data-tip="'+esc(it.tip)+'" class="vb"':'')+'/>';
+    if(it.top!=null) r+='<text x="'+(x+cw/2)+'" y="'+(y-3)+'" text-anchor="middle" fill="'+(it.topcol||'var(--acc2)')+'">'+it.top+'</text>';
+    r+='<text x="'+(x+cw/2)+'" y="'+(h+20)+'" text-anchor="middle">'+esc(it.label)+'</text>';
+  });
+  r+='</svg>';
+  return r;
+}
+
+// ── 折线/面积 ──
+function area(points, opts){
+  opts=opts||{}; const W=opts.w||320,H=opts.h||90,pl=4,pr=4,pt=6,pb=4;
+  if(!points.length) return '<div class="muted">无数据</div>';
+  const max=Math.max(1,...points.map(p=>p.v)), n=points.length;
+  const X=i=>pl+(W-pl-pr)*(n<=1?0.5:i/(n-1)), Y=v=>pt+(H-pt-pb)*(1-v/max);
+  let d='', a='';
+  points.forEach((p,i)=>{const x=X(i).toFixed(1),y=Y(p.v).toFixed(1); d+=(i?'L':'M')+x+' '+y+' '; });
+  a='M'+X(0).toFixed(1)+' '+(H-pb)+' '+points.map((p,i)=>'L'+X(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ')+' L'+X(n-1).toFixed(1)+' '+(H-pb)+' Z';
+  return '<svg width="100%" height="'+H+'" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'
+    +'<path d="'+a+'" fill="rgba(58,216,143,.14)"/>'
+    +'<path d="'+d+'" fill="none" stroke="#3ad88f" stroke-width="2"/></svg>';
+}
+
+function passColor(p){ return p==null?'#555':p>=0.85?'#3ad88f':p>=0.7?'#7cc4ff':p>=0.55?'#ffd479':'#ff8a8a'; }
+
+// ── 主渲染 ──
+function render(d){
+  if(!d.ok){ $('root').innerHTML='<div class="loading">数据加载失败：'+esc(d.error||'')+'</div>'; return; }
+  $('gen').textContent='更新于 '+d.generated_at;
+  const K=d.kpis||{}, A=d.anki||{}, V=d.vocab||{}, G=d.kg||{}, R=d.reading||{}, N=d.notes||{};
+  let h='';
+
+  // KPI strip
+  const kpiDefs=[
+    {v:K.streak_days, l:'🔥 连续学习(天)', hot:K.streak_days>0},
+    {v:K.today_lookups, l:'今日查词'},
+    {v:K.today_reviews, l:'今日复习'},
+    {v:K.due_today, l:(K.overdue?'待复习(逾期'+K.overdue+')':'待复习'), hot:K.due_today>200},
+    {v:K.total_vocab, l:'生词总数'},
+    {v:K.total_cards, l:'Anki 卡总数'},
+    {v:K.mastered_nodes, l:'已掌握知识点'},
+  ];
+  h+='<div class="kpis">'+kpiDefs.map(k=>'<div class="kpi'+(k.hot?' hot':'')+'"><div class="v">'+(k.v??'—')+'</div><div class="l">'+k.l+'</div></div>').join('')+'</div>';
+
+  // 活跃度热力图
+  if(d.activity&&d.activity.length){
+    h+='<div class="card"><h2>📅 学习活跃度</h2><div class="desc">近 26 周每日 Anki 复习 + 查词次数（本周复习 '+(K.week_reviews||0)+' · 查词 '+(K.week_lookups||0)+'）</div>'
+      +'<div class="hm-wrap" id="hm"></div>'
+      +'<div class="legend"><span>少</span>'
+      +['var(--g0)','var(--g1)','var(--g2)','var(--g3)','var(--g4)'].map(c=>'<i style="background:'+c+'"></i>').join('')
+      +'<span>多</span></div></div>';
+  }
+
+  // Anki 记忆与复习
+  const exDecks=(A.excluded_legacy_decks||[]);
+  h+='<div class="card"><h2>🧠 Anki 记忆与复习</h2>'
+    +'<div class="desc">只统计本工作流创建的卡'+(exDecks.length?'（已忽略旧牌组：'+exDecks.map(esc).join(' / ')+'）':'')+'</div>'
+    +'<div class="grid2">';
+  // 留存曲线
+  if(A.retention_curve){
+    const items=A.retention_curve.filter(c=>c.n>0).map(c=>({label:c.bucket,value:c.pass==null?0:c.pass*100,
+      color:passColor(c.pass),top:c.pass==null?'':(c.pass*100).toFixed(0),tip:c.bucket+'：'+c.n+' 次复习，保持率 '+pct(c.pass)}));
+    h+='<div><div class="sub-h">保持率曲线（按上次间隔分桶）</div>'
+      +'<div class="big-stat"><span><span class="n">'+pct(A.retention_young)+'</span> <span class="u">young(&lt;21d)</span></span>'
+      +'<span><span class="n">'+pct(A.retention_mature)+'</span> <span class="u">mature(≥21d)</span></span></div>'
+      +vbars(items,{w:320,h:96})+'</div>';
+  }
+  // 卡片漏斗 + 到期
+  if(A.funnel){
+    const F=A.funnel, tot=Math.max(1,F.new+F.learning+F.review+F.suspended+(F.buried||0));
+    const segs=[['新',F.new,'#6b7280'],['学习中',F.learning,'#f59e0b'],['复习',F.review,'#3b82f6'],['暂停',F.suspended,'#444c5e']];
+    h+='<div><div class="sub-h">卡片状态分布（共 '+(A.total_cards||tot)+' 张）</div>'
+      +'<div class="seg">'+segs.map(s=>{const w=100*s[1]/tot; return w<0.5?'':'<div style="width:'+w+'%;background:'+s[2]+'" title="'+s[0]+' '+s[1]+'">'+(w>9?s[1]:'')+'</div>';}).join('')+'</div>'
+      +'<div class="legend">'+segs.map(s=>'<span><i style="background:'+s[2]+'"></i>'+s[0]+' '+s[1]+'</span>').join('')+'</div>';
+    if(A.due_forecast){
+      const items=A.due_forecast.map(f=>({label:f.day===0?'今':String(f.day),value:f.count,color:f.day===0?'#ffd479':'#2a6fb0',tip:(f.day===0?'今天':f.day+'天后')+' '+f.count+' 张到期'}));
+      h+='<div class="sub-h" style="margin-top:14px">未来 14 天到期排期</div>'+vbars(items,{w:320,h:70});
+    }
+    h+='</div>';
+  }
+  h+='</div>';  // grid2
+  // stability + per-deck
+  h+='<div class="grid2" style="margin-top:6px">';
+  if(A.stability){
+    const items=A.stability.map(s=>({label:s.bucket,value:s.count,color:'#7c5cff',top:s.count||'',tip:'记忆强度 '+s.bucket+'：'+s.count+' 张'}));
+    h+='<div><div class="sub-h">记忆强度分布（FSRS stability）</div>'+vbars(items,{w:320,h:80})+'</div>';
+  }
+  if(A.per_deck&&A.per_deck.length){
+    const items=A.per_deck.slice(0,8).map(p=>({label:p.deck,value:p.reviews,disp:p.reviews+'·'+pct(p.pass),
+      color:'linear-gradient(90deg,#2a6fb0,'+passColor(p.pass)+')'}));
+    h+='<div><div class="sub-h">各牌组复习量（数字·保持率）</div>'+hbars(items)+'</div>';
+  }
+  h+='</div></div>';
+
+  // 薄弱点
+  if(N.by_lapse||N.by_retention){
+    h+='<div class="card"><h2>⚠️ 薄弱点</h2><div class="desc">最该回头复习的知识点（来自有 Anki 卡的笔记）</div><div class="grid2">';
+    if(N.by_retention&&N.by_retention.length){
+      h+='<div><div class="sub-h">低保持率笔记</div>'
+        +hbars(N.by_retention.map(w=>({label:w.name,value:w.retention*100,disp:pct(w.retention),max:100,color:'linear-gradient(90deg,#7a2b2b,'+passColor(w.retention)+')'})))+'</div>';
+    }
+    if(N.by_lapse&&N.by_lapse.length){
+      h+='<div><div class="sub-h">易忘笔记（lapse 率）</div>'
+        +hbars(N.by_lapse.map(w=>({label:w.name,value:w.lapse_rate*100,disp:(w.lapse_rate*100).toFixed(1)+'%',color:'linear-gradient(90deg,#7a2b2b,#ff8a8a)'})))+'</div>';
+    }
+    h+='</div>';
+    if(N.subjects&&N.subjects.length){
+      h+='<div class="sub-h" style="margin-top:14px">按科目</div><div class="subj-grid">'
+        +N.subjects.map(s=>'<div class="subj"><div class="s">'+esc(s.subject)+'</div><div class="m">'+s.notes+' 篇 · '+s.cards+' 卡<br>平均掌握 '+pct(s.avg_mastery)+(s.avg_retention!=null?' · 保持 '+pct(s.avg_retention):'')+'</div></div>').join('')+'</div>';
+    }
+    h+='</div>';
+  }
+
+  // 词汇
+  if(V.total){
+    h+='<div class="card"><h2>📖 生词掌握</h2><div class="desc">共 '+V.total+' 个生词（英 '+((V.by_lang||{}).en||0)+' · 日 '+((V.by_lang||{}).ja||0)+'）</div><div class="grid2">';
+    if(V.mastery_hist){
+      const grad=['#ff6b6b','#ff8a5b','#ffae4d','#ffd479','#e8e36b','#bfe06b','#8fd86b','#6bd88f','#4ed8a0','#3ad88f'];
+      const items=V.mastery_hist.map((c,i)=>({label:(i*10)+'',value:c,color:grad[i],top:c||'',tip:'掌握度 '+(i*10)+'–'+(i*10+10)+'%：'+c+' 词'}));
+      h+='<div><div class="sub-h">掌握度分布（0→100%）</div>'+vbars(items,{w:330,h:90})+'</div>';
+    }
+    if(V.cumulative&&V.cumulative.length>1){
+      h+='<div><div class="sub-h">词汇量增长（累计 '+(V.cumulative[V.cumulative.length-1].total)+'）</div>'+area(V.cumulative.map(c=>({v:c.total})),{h:90})+'</div>';
+    }
+    h+='</div><div class="grid2" style="margin-top:6px">';
+    // 查词趋势(近30天)
+    if(V.lookups_per_day&&Object.keys(V.lookups_per_day).length){
+      const today=new Date(); const pts=[];
+      for(let i=29;i>=0;i--){const dt=new Date(today); dt.setDate(today.getDate()-i); const ds=dt.toISOString().slice(0,10); pts.push({v:V.lookups_per_day[ds]||0});}
+      h+='<div><div class="sub-h">近 30 天查词</div>'+area(pts,{h:80})+'</div>';
+    }
+    if(V.top_books&&V.top_books.length){
+      h+='<div><div class="sub-h">生词来源 top 书</div>'+hbars(V.top_books.map(b=>({label:b.book,value:b.count,color:'linear-gradient(90deg,#2a6fb0,#7cc4ff)'})))+'</div>';
+    }
+    h+='</div>';
+    if(V.by_label&&V.by_label.length){
+      h+='<div class="legend" style="margin-top:12px">';
+      V.by_label.forEach(l=>{ h+='<span class="chip">'+esc(l.label)+' '+l.count+'</span>'; });
+      h+='</div>';
+    }
+    h+='</div>';
+  }
+
+  // 知识图谱进度
+  if(G.books&&G.books.length){
+    h+='<div class="card"><h2>🌳 知识图谱进度</h2><div class="desc">每本书已掌握知识点占比（语法书按已跟踪点计）</div>';
+    G.books.forEach(b=>{
+      const done=b.is_grammar?b.tracked:b.mastered, label=b.is_grammar?'跟踪':'掌握';
+      h+='<div class="row"><div class="nm" title="'+esc(b.title)+'">'+esc(b.title)+'<span class="tag">'+done+'/'+b.l2_total+'</span></div>'
+        +'<div class="bar-tr"><div class="bar-fl" style="width:'+Math.max(2,b.pct)+'%;background:linear-gradient(90deg,#1c6b4f,#3ad88f)"></div></div>'
+        +'<div class="vv">'+b.pct+'%</div></div>';
+    });
+    h+='<div class="grid2" style="margin-top:12px">';
+    if(G.recently_mastered&&G.recently_mastered.length){
+      h+='<div><div class="sub-h">最近掌握</div>'+G.recently_mastered.map(r=>'<div class="row"><div class="nm">'+esc(r.label)+' '+esc(r.name)+'</div><div class="vv muted">'+esc((r.title||'').slice(0,8))+'</div></div>').join('')+'</div>';
+    }
+    if(G.next_up&&G.next_up.length){
+      h+='<div><div class="sub-h">下一步可学</div>'+G.next_up.map(n=>'<span class="chip" title="'+esc(n.title)+'">'+esc(n.label)+' '+esc(n.name)+'</span>').join('')+'</div>';
+    }
+    h+='</div></div>';
+  }
+
+  // 阅读进度
+  if(R.books&&R.books.length){
+    h+='<div class="card"><h2>📚 阅读进度</h2><div class="desc">最近在读的 PDF（按最后阅读时间）</div>';
+    R.books.forEach(b=>{
+      const w=b.pct==null?0:Math.max(2,b.pct);
+      h+='<div class="row"><div class="nm" title="'+esc(b.title)+'">'+esc(b.title)+'</div>'
+        +'<div class="bar-tr"><div class="bar-fl" style="width:'+w+'%;background:linear-gradient(90deg,#7c5cff,#9fcbff)"></div></div>'
+        +'<div class="vv">'+(b.total?('p'+b.page+'/'+b.total):('p'+b.page))+(b.pct!=null?' · '+b.pct+'%':'')+'</div></div>';
+    });
+    h+='</div>';
+  }
+
+  $('root').innerHTML=h;
+
+  // 热力图注入 + 交互
+  if(d.activity&&d.activity.length){
+    $('hm').innerHTML=renderHeatmap(d.activity);
+    $('hm').querySelectorAll('rect.hc').forEach(rc=>{
+      const f=()=>showTT(event, esc(rc.dataset.d)+'<br>复习 '+rc.dataset.r+' · 查词 '+rc.dataset.l);
+      rc.addEventListener('mouseenter',f); rc.addEventListener('mousemove',moveTT);
+      rc.addEventListener('mouseleave',hideTT); rc.addEventListener('touchstart',f,{passive:true});
+    });
+  }
+  // 柱状 tooltip
+  document.querySelectorAll('rect[data-tip]').forEach(rc=>{
+    const f=()=>showTT(event, esc(rc.dataset.tip));
+    rc.addEventListener('mouseenter',f); rc.addEventListener('mousemove',moveTT);
+    rc.addEventListener('mouseleave',hideTT); rc.addEventListener('touchstart',f,{passive:true});
+  });
+  document.addEventListener('touchend',hideTT);
+}
+
+fetch('/insights/api/data',{headers:{Accept:'application/json'}})
+  .then(r=>r.json()).then(render)
+  .catch(e=>{$('root').innerHTML='<div class="loading">加载失败：'+esc(e.message)+'</div>';});
+</script>
+</body></html>

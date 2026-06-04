@@ -103,6 +103,10 @@ def main() -> int:
                 PYTHON, str(PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
                 "--kg", str(kg_f), "--in-place",
             ])
+    # 4. PDF 全文搜索索引增量更新（新书/改动的书入 FTS；无变动几乎零成本，只比对 mtime）
+    rc |= run("build_search_index", [
+        PYTHON, str(PROJECT_DIR / "scripts" / "build_search_index.py"),
+    ])
     return rc
 
 

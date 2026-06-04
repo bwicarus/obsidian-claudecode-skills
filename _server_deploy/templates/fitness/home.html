@@ -46,10 +46,95 @@
   {% endif %}
 </div>
 
+<div class="card">
+  <h2>🩺 全身平衡体检</h2>
+  <p class="small dim" style="margin-top:-4px;">跨 Push/Pull/Legs 分析拮抗肌群/前后链平衡（推:拉、股四:腘绳、后束:前束、前链:后链…），AI 标出失衡 + 纠正建议。</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn primary" id="bal-btn">开始体检（AI · 约 1–2 分钟）</button>
+    <a class="btn" href="/private/fitness/body">🧍 3D 肌群图</a>
+  </div>
+  <div id="bal-out" style="margin-top:12px;"></div>
+</div>
+
 <div class="card small dim">
   <strong>{{ plan.name }}</strong><br>
   {{ plan.description }}<br>
   <em>建议:{{ plan.schedule_hint }}</em>
 </div>
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+const balEsc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const BAL_COLOR = {green:'var(--accent-2)', yellow:'var(--warn)', red:'var(--danger)', insufficient:'var(--text-dim)', na:'var(--text-dim)'};
+const BAL_TXT = {green:'均衡', yellow:'偏失衡', red:'失衡', insufficient:'数据不足', na:'—'};
+let _balPoll = null;
+function balRender(res){
+  const out = document.getElementById('bal-out');
+  const p = res.profile || {}, ai = res.ai || {};
+  if (ai.error){ out.innerHTML = '<div style="color:var(--danger)">✗ 体检失败：'+balEsc(ai.error)+'</div>'; return; }
+  let h = '';
+  const grade = {balanced:'✅ 整体均衡', minor_imbalance:'🟡 轻度失衡', moderate_imbalance:'🟠 中度失衡', major_imbalance:'🔴 明显失衡'}[ai.overall_balance_grade] || ai.overall_balance_grade || '';
+  if (grade) h += '<div style="font-weight:700;font-size:16px;margin-bottom:4px;">'+balEsc(grade)+'</div>';
+  if (ai.summary) h += '<div style="margin-bottom:10px;">'+balEsc(ai.summary)+'</div>';
+  h += '<div style="display:flex;flex-direction:column;gap:5px;margin-bottom:12px;">';
+  (p.ratios || []).forEach(r=>{
+    const c = BAL_COLOR[r.status] || 'var(--text-dim)';
+    h += '<div style="display:flex;align-items:center;gap:8px;font-size:13px;">'
+       + '<span style="width:9px;height:9px;border-radius:50%;background:'+c+';flex-shrink:0;"></span>'
+       + '<span style="flex:1;min-width:0;">'+balEsc(r.name)+'</span>'
+       + '<span style="font-variant-numeric:tabular-nums;color:'+c+';font-weight:600;">'+(r.value==null?'—':r.value)+'</span>'
+       + '<span class="dim" style="font-size:11px;min-width:56px;text-align:right;">'+(BAL_TXT[r.status]||'')+'</span></div>';
+  });
+  h += '</div>';
+  (ai.imbalances || []).forEach(im=>{
+    const c = im.severity==='red' ? 'var(--danger)' : 'var(--warn)';
+    h += '<div style="border-left:3px solid '+c+';padding:6px 10px;margin-bottom:8px;background:var(--bg-card-hover);border-radius:4px;">'
+       + '<div style="font-weight:600;">'+balEsc(im.ratio_name)+(im.measured!=null?' · '+im.measured:'')+'</div>'
+       + '<div class="small" style="margin-top:3px;">⚠ '+balEsc(im.risk||'')+'</div>'
+       + (im.root_cause ? '<div class="small dim" style="margin-top:2px;">原因：'+balEsc(im.root_cause)+'</div>' : '')+'</div>';
+  });
+  if ((ai.corrective_actions || []).length){
+    h += '<div style="font-weight:600;margin:10px 0 4px;">🔧 纠正建议</div>';
+    ai.corrective_actions.forEach(a=>{
+      h += '<div class="small" style="margin-bottom:5px;">• '+balEsc(a.concrete||'')
+         + (a.expected_after ? ' <span class="dim">→ '+balEsc(a.expected_after)+'</span>' : '')+'</div>';
+    });
+  }
+  if (ai.do_not_overcorrect) h += '<div class="small dim" style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px;">💡 '+balEsc(ai.do_not_overcorrect)+'</div>';
+  if (p.since) h += '<div class="small dim" style="margin-top:8px;">数据窗口 '+balEsc(p.since)+' 起 · '+p.total_logged_sets+' 组</div>';
+  out.innerHTML = h;
+}
+function balPoll(jobId){
+  const out = document.getElementById('bal-out');
+  out.innerHTML = '<div class="dim">🤖 AI 体检中…（可离开页面，回来再进就行）</div>';
+  const tick = async ()=>{
+    let d; try{ d = await (await fetch('/api/fitness/ai/job/'+jobId)).json(); }catch(e){ return; }
+    if (!d.ok){ if(_balPoll) clearInterval(_balPoll); out.innerHTML='<div style="color:var(--danger)">任务丢失，请重试</div>'; document.getElementById('bal-btn').disabled=false; return; }
+    if (d.job.status === 'running') return;
+    if (_balPoll){ clearInterval(_balPoll); _balPoll=null; }
+    document.getElementById('bal-btn').disabled = false;
+    if (d.job.status === 'error'){ out.innerHTML='<div style="color:var(--danger)">✗ 体检失败：'+balEsc((d.job.result||{}).error || d.job.error || '?')+'</div>'; return; }
+    balRender(d.job.result || {});
+  };
+  _balPoll = setInterval(tick, 4000); tick();
+}
+document.getElementById('bal-btn').addEventListener('click', async ()=>{
+  const btn = document.getElementById('bal-btn'); btn.disabled = true;
+  try{
+    const d = await (await fetch('/api/fitness/ai/balance_check', {method:'POST'})).json();
+    if (d.ok && d.job_id) balPoll(d.job_id);
+    else { btn.disabled=false; document.getElementById('bal-out').innerHTML='<div style="color:var(--danger)">启动失败</div>'; }
+  }catch(e){ btn.disabled=false; }
+});
+// 进页面若已有 running 的体检 job → 自动续上(关页面也不丢)
+(async ()=>{
+  try{
+    const d = await (await fetch('/api/fitness/ai/jobs?kind=balance_check&limit=3')).json();
+    const run = (d.jobs || []).find(x => x.status === 'running');
+    if (run){ document.getElementById('bal-btn').disabled = true; balPoll(run.id); }
+  }catch(e){}
+})();
+</script>
 {% endblock %}

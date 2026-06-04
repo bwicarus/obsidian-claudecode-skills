@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>全局搜索 · PDF 全文</title>
+<style>
+body{margin:0;padding:0;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
+.container{max-width:920px;margin:0 auto;padding:26px 18px 80px}
+h1{font-size:21px;color:#cfe6ff;margin:0 0 4px}
+.sub{color:#8a9bb4;font-size:12px;margin-bottom:18px}
+.searchbar{position:sticky;top:0;z-index:5;background:#1a1d24;padding:10px 0 12px}
+input[type=search]{width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:10px;padding:13px 16px;font-size:16px;box-sizing:border-box}
+input[type=search]:focus{outline:none;border-color:#3b6db5;box-shadow:0 0 0 3px rgba(59,109,181,.18)}
+.status{color:#8a9bb4;font-size:12px;margin:8px 2px 14px;min-height:16px}
+.book{background:#10162a;border:1px solid #1f2740;border-radius:10px;margin-bottom:12px;overflow:hidden}
+.book-hd{display:flex;align-items:center;gap:10px;padding:12px 15px;cursor:pointer;user-select:none}
+.book-hd:hover{background:#162045}
+.book-name{color:#cfe6ff;font-weight:600;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.book-dir{color:#5a6680;font-size:11px;font-family:monospace;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.book-cnt{color:#9fcbff;background:#1a2540;border:1px solid #2a3550;border-radius:20px;padding:2px 10px;font-size:11px;flex-shrink:0}
+.book-arrow{color:#5a6680;font-size:12px;flex-shrink:0;transition:transform .15s}
+.book.collapsed .book-arrow{transform:rotate(-90deg)}
+.book.collapsed .hits{display:none}
+.hits{border-top:1px solid #1f2740}
+.hit{display:flex;gap:12px;align-items:baseline;padding:10px 15px;cursor:pointer;border-bottom:1px solid #141a2e}
+.hit:last-child{border-bottom:none}
+.hit:hover{background:#162045}
+.hit-pg{color:#7a8497;font-size:11px;font-family:monospace;flex-shrink:0;min-width:42px;text-align:right}
+.hit-snip{color:#c2cbe0;font-size:13px;line-height:1.5;word-break:break-word}
+.hit-snip mark{background:#3b5b9a;color:#fff;border-radius:2px;padding:0 1px}
+.empty{color:#5a6680;text-align:center;padding:50px 20px}
+.empty.err{color:#d98a8a}
+.tip{color:#5a6680;font-size:11px;margin-top:6px}
+a.backlink{color:#8a9bb4;font-size:12px;text-decoration:none}
+a.backlink:hover{color:#cfe6ff}
+</style>
+</head>
+<body>
+<div class="container">
+  <a class="backlink" href="/pdf/">← 返回书库</a>
+  <h1 style="margin-top:8px">🔍 全局搜索</h1>
+  <div class="sub">跨 vault 所有 PDF 书的正文搜索 · 点结果直接跳到对应书的对应页</div>
+  <div class="searchbar">
+    <input type="search" id="q" placeholder="输入关键词（支持中 / 日 / 英）" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="search">
+    <div class="tip">2 字以内的词会用子串匹配（稍慢）；3 字及以上走全文索引（更快、按相关度排序）</div>
+  </div>
+  <div class="status" id="status"></div>
+  <div id="results"></div>
+</div>
+<script>
+const $q = document.getElementById('q');
+const $st = document.getElementById('status');
+const $res = document.getElementById('results');
+let _t = 0, _ctrl = null, _seq = 0;
+
+function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 在折叠空白后的 snippet 里,用后端给的 pos+qlen 精确加粗首处命中(避开 HTML 注入 + 大小写差异)
+function hl(snip, pos, qlen){
+  if (pos == null || qlen <= 0 || pos < 0 || pos + qlen > snip.length) return esc(snip);
+  return esc(snip.slice(0, pos)) + '<mark>' + esc(snip.slice(pos, pos + qlen)) + '</mark>' + esc(snip.slice(pos + qlen));
+}
+
+function render(d){
+  if (!d.ok){ $res.innerHTML = '<div class="empty err">'+esc(d.error||'搜索出错')+'</div>'; $st.textContent=''; return; }
+  if (!d.books.length){ $res.innerHTML = '<div class="empty">没有找到「'+esc(d.q)+'」</div>'; $st.textContent=''; return; }
+  $st.textContent = (d.truncated ? '超过 ' : '') + d.total_hits + ' 处命中，分布在 ' + d.total_books + ' 本书' + (d.truncated ? '（已截断，请细化关键词）' : '');
+  let html = '';
+  for (const b of d.books){
+    const collapsed = d.books.length > 4 ? ' collapsed' : '';   // 书多时默认收起,书少时展开
+    html += '<div class="book'+collapsed+'">';
+    html += '<div class="book-hd" onclick="this.parentNode.classList.toggle(\'collapsed\')">'
+          + '<div style="flex:1;min-width:0"><div class="book-name">'+esc(b.name)+'</div>'
+          + '<div class="book-dir">'+esc(b.dir)+'</div></div>'
+          + '<span class="book-cnt">'+b.hits+' 页</span><span class="book-arrow">▼</span></div>';
+    html += '<div class="hits">';
+    for (const h of b.pages){
+      const url = '/pdf/view?file='+encodeURIComponent(b.file)+'&page='+h.page;
+      html += '<div class="hit" onclick="location.href=\''+url+'\'">'
+            + '<span class="hit-pg">p'+h.page+'</span>'
+            + '<span class="hit-snip">'+hl(h.snippet, h.pos, h.qlen)+'</span></div>';
+    }
+    html += '</div></div>';
+  }
+  $res.innerHTML = html;
+}
+
+async function run(){
+  const q = $q.value.trim();
+  if (q.length < 1){ $res.innerHTML=''; $st.textContent=''; return; }
+  $st.textContent = '搜索中…';
+  if (_ctrl) _ctrl.abort();
+  _ctrl = new AbortController();
+  const my = ++_seq;
+  try{
+    const r = await fetch('/pdf/api/global-search?q='+encodeURIComponent(q), {signal:_ctrl.signal, headers:{Accept:'application/json'}});
+    const d = await r.json();
+    if (my !== _seq) return;   // 已被更新的查询取代
+    render(d);
+  }catch(e){ if (e.name !== 'AbortError' && my === _seq){ $st.textContent=''; $res.innerHTML='<div class="empty err">请求失败</div>'; } }
+}
+
+$q.addEventListener('input', () => { clearTimeout(_t); _t = setTimeout(run, 250); });
+$q.addEventListener('keydown', (e) => { if (e.key === 'Enter'){ clearTimeout(_t); run(); $q.blur(); } });
+// URL ?q= 预填(从其它页跳来带查询)
+const _u = new URLSearchParams(location.search).get('q');
+if (_u){ $q.value = _u; run(); }
+$q.focus();
+</script>
+</body></html>

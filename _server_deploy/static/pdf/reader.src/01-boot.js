@@ -1,6 +1,56 @@
 // PDF 阅读器主模块(从 pdf_reader.html 内联 <script type="module"> 抽出,2026-06)。
 // 配置经 window.__PDF_CFG(模板内联 script 注入:pdf_url/file_rel/page)。架构/全局未变,纯物理拆分。
 window.dlog('module script 开始执行（ES module 加载 OK）');
+// ── 跨端同步(Kindle/Google Books 做法):iOS 把"装到主屏的 PWA"和 Safari 当成独立存储沙箱 →
+//    localStorage 不互通(设置/阅读进度/旋转排版不同步)。进页面**先**把服务端存的本用户 pdf-* 偏好
+//    灌进 localStorage(用原始 setItem,不回传),再往下读 localStorage 就是同步后的值。之后任何 pdf-*
+//    写入(除大块 qhist)防抖回传服务器 → 设置/进度/排版自动跨设备/跨上下文同步。3s 超时不阻塞阅读。
+const _origSetItem = localStorage.setItem.bind(localStorage);
+const _prefTouched = new Set();   // 本次会话本地改过的 pdf-* 键:后台刷新不回写它们(防覆盖刚改的值)
+async function _seedPrefs() {   // 拉服务端偏好灌进 localStorage(原始 setItem,不回传)
+  const _r = await fetch('/pdf/api/prefs', { headers: { Accept: 'application/json' } });
+  if (!_r || !_r.ok) return 0;
+  const _d = await _r.json();
+  let _n = 0;
+  if (_d && _d.prefs) { for (const _k in _d.prefs) { if (_prefTouched.has(_k)) continue; try { _origSetItem(_k, _d.prefs[_k]); _n++; } catch (_) {} } }
+  return _n;
+}
+// stale-while-revalidate(SWR,大站通用):本沙箱**首次**才阻塞拉取(否则旋转/设置读到的是空)→ 1.5s 超时不卡死;
+// 之后每次用本地已同步值秒开,后台静默刷新供下次打开用(跨设备改动延迟一次打开生效)。__SYNCED 标记区分。
+const _SYNC_FLAG = 'pdf-prefs-synced';
+try {
+  if (localStorage.getItem(_SYNC_FLAG)) {
+    _seedPrefs().catch(() => {});   // 已同步过:后台刷新,不阻塞
+  } else {
+    const _n = await Promise.race([_seedPrefs(), new Promise((res) => setTimeout(() => res(0), 1500))]);
+    // 迁移:服务端为空(老用户首次)→ 把本沙箱现有 pdf-* 一次性 push 上去(这些键是在回传 override 之前
+    // 写的、不会自动上传)。让"已用 Safari 很久"的设置/进度/排版能被随后打开的 PWA 同步到。
+    if (_n === 0) {
+      const _boot = {};
+      try {
+        for (let _i = 0; _i < localStorage.length; _i++) {
+          const _k = localStorage.key(_i);
+          if (_k && _k.indexOf('pdf-') === 0 && _k.indexOf('pdf-qhist-') !== 0 && _k !== _SYNC_FLAG) _boot[_k] = localStorage.getItem(_k);
+        }
+        if (Object.keys(_boot).length) fetch('/pdf/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch: _boot }) });
+      } catch (_) {}
+    }
+    _origSetItem(_SYNC_FLAG, '1');
+    window.dlog('✓ 首次从服务器同步 ' + _n + ' 项 PDF 偏好');
+  }
+} catch (_) { window.dlog('prefs 同步跳过(离线?)'); }
+let _prefQueue = {}, _prefTimer = 0;
+localStorage.setItem = function (k, v) {
+  _origSetItem(k, v);
+  if (typeof k === 'string' && k.indexOf('pdf-') === 0 && k.indexOf('pdf-qhist-') !== 0 && k !== _SYNC_FLAG) {
+    _prefTouched.add(k);
+    _prefQueue[k] = v; clearTimeout(_prefTimer);
+    _prefTimer = setTimeout(() => {
+      const patch = _prefQueue; _prefQueue = {};
+      try { fetch('/pdf/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch }) }); } catch (_) {}
+    }, 1500);
+  }
+};
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
 // 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。

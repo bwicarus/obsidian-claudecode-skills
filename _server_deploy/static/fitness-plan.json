@@ -237,10 +237,10 @@
           "evidence_note": "前/中三角同时刺激;坐姿避免借力 (Coratella 2020);90% 1RM 与 70% 1RM 增肌等效 (Schoenfeld 2017)"
         },
         {
-          "id": "db_lateral_raise",
-          "name": "侧平举",
-          "sets": "4 × 10-15",
-          "start_weight_hint": "3 kg 起",
+          "id": "cable_lateral_raise",
+          "name": "绳索侧平举",
+          "sets": "4 × 12-20",
+          "start_weight_hint": "5 kg 起(绳索配重)",
           "videos": [
             {
               "video_id": "v_ZkxWzYnMc",
@@ -283,24 +283,24 @@
               "channel": "Jeff Cavaliere"
             }
           ],
-          "search_q": "dumbbell lateral raise side delts",
+          "search_q": "cable lateral raise side delts",
           "tips": [
-            "微前倾躯干,肘略弯,小指略高于大拇指",
-            "举到肘部跟肩同高即停,不要过顶",
-            "重量优先轻 + 满 ROM,姿势第一"
+            "低位滑轮,绳索从身体前/对侧绕过 → 能做背后式,拉伸位更充分",
+            "全程恒张力:底部别松,肘到肩高即停,不要过顶",
+            "轻重量满 ROM,躯干别借力摆动"
           ],
           "prescribed": {
             "sets": 4,
             "rep_range": [
-              10,
-              15
+              12,
+              20
             ],
             "rir_target": 1,
-            "rest_seconds": 90,
-            "start_weight_kg": 3,
-            "weight_step_kg": 0.5
+            "rest_seconds": 75,
+            "start_weight_kg": 5,
+            "weight_step_kg": 2.5
           },
-          "evidence_note": "侧三角周容量上调到 12-16 sets,孤立动作可近力竭 (Refalo 2023);轻重量满 ROM 优于重重量半 ROM (Pinto 2012)"
+          "evidence_note": "绳索全程恒张力 + 加载拉伸位(底部),侧三角刺激优于哑铃(哑铃底部力臂≈0有死区);拉伸位负荷利增长(Maeo/Wolf 2022-2024)。轻重量满 ROM 优于重半程(Pinto 2012),孤立动作可近力竭(Refalo 2023)"
         },
         {
           "id": "cable_tricep_pushdown",

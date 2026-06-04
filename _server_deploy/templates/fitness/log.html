@@ -176,6 +176,22 @@
                                        border-radius:6px;font-size:14px;line-height:1.55;"></div>
     </div>
 
+    <!-- 教练复盘对话:补充训练实情 → AI 多轮理解 → 据此调下次计划 -->
+    <details id="coach-chat-zone" style="margin-bottom:16px;">
+      <summary class="small" style="cursor:pointer;color:var(--accent);">
+        💬 跟教练聊聊这次训练（补充感受/酸痛/时间，AI 据此调下次计划）▾
+      </summary>
+      <div id="coach-msgs" style="margin-top:10px;display:flex;flex-direction:column;gap:8px;
+                                  max-height:48vh;overflow-y:auto;padding-right:2px;"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:stretch;">
+        <textarea id="coach-input" rows="2" placeholder="例：绳索侧平举太轻松了，肩没不适；今天只睡了5小时…（⌘/Ctrl+Enter 发送）"
+                  style="flex:1;background:#0d1322;border:1px solid var(--border);color:var(--text);
+                         border-radius:8px;padding:8px 10px;font-size:14px;resize:vertical;"></textarea>
+        <button class="btn primary" id="coach-send">发送</button>
+      </div>
+      <button class="btn small" id="coach-force" style="width:100%;margin-top:6px;">📋 聊够了，直接出下次计划</button>
+    </details>
+
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
       <button class="btn" id="finish-close">继续录入</button>
       <a class="btn" href="/private/fitness/history">看历史</a>
@@ -230,14 +246,16 @@
             style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
                    white-space:nowrap;padding:0 4px;"></span>
       <button class="btn small v-cc" title="中文字幕(YT auto-caption,首次 ~5s,之后秒出)">🇨🇳</button>
-      <button class="btn small v-cc-hq" title="高质量字幕(Cloud Speech-to-Text 重新转录,首次 ~30-60s,之后秒出)">🎯HQ</button>
+      <button class="btn small v-cc-hq" title="高质量字幕(优先 YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)">🎯HQ</button>
       <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
       <button class="btn small v-del" title="从列表删除该视频">🗑</button>
       <button class="btn small v-save" title="保存当前列表为我的">💾</button>
       <button class="btn small v-reset" title="重置回默认列表">🔄</button>
     </div>
-    <div class="v-player-box" style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;">
+    <div class="v-player-box" style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;position:relative;">
       <div class="v-player-mount" style="width:100%;height:100%;"></div>
+      <div class="v-player-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#8a9bb4;font-size:13px;pointer-events:none;">⏳ 加载播放器…</div>
+      <a class="v-yt-fallback" target="_blank" rel="noopener" style="display:none;position:absolute;left:0;right:0;bottom:0;text-align:center;padding:7px;background:#000c;color:#9fcbff;font-size:12px;text-decoration:none;">加载慢? ▶ 在 YouTube 打开</a>
     </div>
     <!-- 字幕条 -->
     <div class="v-subtitle" style="display:none;margin-top:6px;padding:10px 12px;
@@ -326,11 +344,10 @@ function fmtElapsed(sec) {
 }
 
 function updateProgress() {
-  // 只数「真正存过库」的组(✓ / autosave 落库 = data-saved=1),
-  // 预填的占位值不算(否则一进页面就显示全完成)。
+  // 只数用户**点过 ✓ 确认**的组(data-confirmed=1);autosave 草稿/预填占位都不算。
   let done = 0;
   document.querySelectorAll('.set-row').forEach(row => {
-    if (row.dataset.saved === '1') done++;
+    if (row.dataset.confirmed === '1') done++;
   });
   progDone.textContent = done;
   const pct = TOTAL_SETS > 0 ? Math.min(100, done / TOTAL_SETS * 100) : 0;
@@ -350,6 +367,11 @@ setInterval(() => {
 }, 1000);
 
 // ───────────── YouTube IFrame API (一次加载,全局共享) ─────────────
+// 预连接 YouTube 各域名(慢网下提前握手 TLS,首个视频少等几百 ms~几秒)
+(function(){
+  ['https://www.youtube-nocookie.com','https://www.youtube.com','https://i.ytimg.com','https://s.ytimg.com','https://www.google.com']
+    .forEach(h => { const l=document.createElement('link'); l.rel='preconnect'; l.href=h; l.crossOrigin=''; document.head.appendChild(l); });
+})();
 let _ytReady = false;
 let _ytPromise = null;
 function loadYT() {
@@ -364,6 +386,13 @@ function loadYT() {
   });
   return _ytPromise;
 }
+// 页面空闲时**提前**把 IFrame API 拉好(不等点🎬),这样点开视频时 API 已就绪,
+// 把"下载 API + 初始化"从点击→播放的关键路径里挪走(刷新后首播慢的主因)。
+(function(){
+  const warm = () => loadYT();
+  if ('requestIdleCallback' in window) requestIdleCallback(warm, { timeout: 3000 });
+  else setTimeout(warm, 1500);
+})();
 
 // ───────────── 字幕 ─────────────
 // SUBS[exId] = {videoId, segments, lastIdx, enabled, timer}
@@ -444,8 +473,8 @@ async function toggleSubtitle(exId, source = 'auto') {
   // 开
   if (!sub) {
     subBox.style.display = 'block';
-    const hint = source === 'stt'
-      ? '⏳ 高质量转录中(yt-dlp 下载 + ffmpeg + Cloud STT,~30-60s)…'
+    const hint = source === 'hq'
+      ? '⏳ 高质量字幕(优先 YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)…'
       : '⏳ 加载字幕(YT auto-caption + 翻译,~5s)…';
     wrap.querySelector('.sub-zh').textContent = hint;
     wrap.querySelector('.sub-en').textContent = '';
@@ -479,7 +508,7 @@ async function toggleSubtitle(exId, source = 'auto') {
   sub.enabled = true;
   sub.lastIdx = -2;
   subBox.style.display = 'block';
-  if (source === 'stt') {
+  if (source === 'hq') {
     ccHqBtn.classList.add('success');
     ccBtn.classList.remove('success');
   } else {
@@ -575,15 +604,28 @@ async function ensurePlayer(exId) {
   await loadYT();
   const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
   const mount = wrap.querySelector('.v-player-mount');
+  const loadingEl = wrap.querySelector('.v-player-loading');
+  const fbEl = wrap.querySelector('.v-yt-fallback');
   const state = VS[exId];
   const firstVid = state && state.videos[state.idx] ? state.videos[state.idx].video_id : '';
+  if (fbEl && firstVid) fbEl.href = 'https://www.youtube.com/watch?v=' + firstVid;
+  // 慢网兜底:8s 还没 ready 就露出"在 YouTube 打开"链接(播放器仍继续加载)
+  const fbTimer = setTimeout(() => { if (fbEl) fbEl.style.display = 'block'; }, 8000);
   return await new Promise(resolve => {
     const p = new YT.Player(mount, {
+      width: '100%', height: '100%',   // 让 iframe 填满 16:9 容器(否则默认 640×390 固定尺寸)
       videoId: firstVid,
       host: 'https://www.youtube-nocookie.com',
-      playerVars: { enablejsapi: 1, modestbranding: 1, rel: 0 },
+      // playsinline=1:iOS 必须,否则内联区域黑屏要点全屏才放;origin:IFrame API 需要
+      playerVars: { enablejsapi: 1, modestbranding: 1, rel: 0, playsinline: 1, origin: location.origin },
       events: {
-        onReady: () => { PLAYERS[exId] = p; resolve(p); }
+        onReady: () => {
+          clearTimeout(fbTimer);
+          if (loadingEl) loadingEl.style.display = 'none';
+          if (fbEl) fbEl.style.display = 'none';
+          PLAYERS[exId] = p; resolve(p);
+        },
+        onError: () => { if (fbEl) fbEl.style.display = 'block'; }
       }
     });
   });
@@ -618,7 +660,7 @@ document.querySelectorAll('.video-toggle').forEach(btn => {
 document.querySelectorAll('.video-wrap').forEach(wrap => {
   const exId = wrap.dataset.ex;
   wrap.querySelector('.v-cc').addEventListener('click', () => toggleSubtitle(exId, 'auto'));
-  wrap.querySelector('.v-cc-hq').addEventListener('click', () => toggleSubtitle(exId, 'stt'));
+  wrap.querySelector('.v-cc-hq').addEventListener('click', () => toggleSubtitle(exId, 'hq'));
   wrap.querySelector('.v-prev').addEventListener('click', () => {
     if (!VS[exId]) return;
     VS[exId].idx--;
@@ -759,27 +801,51 @@ async function restoreToday(exId) {
       const rEl = row.querySelector('.set-reps');
       if (s.weight_kg != null) wEl.value = s.weight_kg;
       if (s.reps != null) rEl.value = s.reps;
-      markSaved(row, s.weight_kg != null && s.reps != null);
+      // DB 不区分草稿/已确认 → 刷新时两值齐全的历史组按"已确认"恢复(绿+计入进度),最佳努力
+      const both = s.weight_kg != null && s.reps != null;
+      markSaved(row, both, both);
     });
   } catch (e) {}
 }
 
-function markSaved(row, complete) {
+// complete=两个框都填了(已落库);confirmed=用户点了 ✓(才进绿色「已存」态 + 计入进度/总结)。
+// autosave 只存草稿(complete 可true 但 confirmed=false)→ 弱视觉,不绿;只有点 ✓ 才变绿。
+function markSaved(row, complete, confirmed) {
   const btn = row.querySelector('.save-set');
-  row.dataset.saved = complete ? '1' : '';   // 进度只数 data-saved=1 的组
-  if (complete) {
+  row.dataset.saved = complete ? '1' : '';            // 已落库(草稿/确认):loadRec 据此不再预填覆盖
+  row.dataset.confirmed = (confirmed && complete) ? '1' : '';  // 仅点 ✓:进度/总结/绿色据此
+  if (confirmed && complete) {
     btn.textContent = '✓ 已存';
     btn.classList.add('success');
-    // 落库即不再是"预填占位",输入恢复正常色
-    row.querySelectorAll('input').forEach(i => { i.classList.remove('prefilled'); });
+    row.querySelectorAll('input').forEach(i => { i.classList.remove('prefilled'); i.style.borderColor = 'var(--accent-2)'; });
   } else {
     btn.textContent = '✓';
     btn.classList.remove('success');
+    // 草稿(autosave 存了但没点 ✓):弱边框提示"已暂存"但未确认;一边都没填则无边框
+    row.querySelectorAll('input').forEach(i => { i.style.borderColor = complete ? '#3a4658' : ''; });
   }
-  row.querySelectorAll('input').forEach(inp => {
-    inp.style.borderColor = complete ? 'var(--accent-2)' : '';
-  });
+  btn.disabled = false;   // 始终可点(编辑已确认组后还能再 ✓);POST 在途的 disable 由 saveSet 自己管
   updateProgress();
+}
+
+// 刚录完一组 → 把**还没被用户碰过**的后续组建议值**镜像成你这一组实际做的**(重量+次数)。
+// 这样:做得比建议重 → 后续跟着重;做得比建议轻(如开局推荐 11×6 你实际 10×12)→ 后续也跟成 10×12,
+// 不再保留过时的开局推荐。已落库(dataset.saved=1)和已手填(脱了 prefilled class)的组都不动。
+// 下次训练的跨日 Double Progression 仍由后端 recommend 按本次落库数据重算,不受影响。
+function propagateForward(card, fromSetNo, W, R) {
+  if (W == null || isNaN(W)) return;
+  card.querySelectorAll('.set-row').forEach(row => {
+    if (parseInt(row.dataset.set) <= fromSetNo) return;
+    if (row.dataset.saved === '1') return;            // 已落库(草稿/确认)不覆盖
+    const wEl = row.querySelector('.set-weight');
+    const rEl = row.querySelector('.set-reps');
+    if (wEl.value === '' || wEl.classList.contains('prefilled')) {
+      wEl.value = W; wEl.classList.add('prefilled');  // 仍是建议(灰斜体),未录、不计完成
+    }
+    if ((rEl.value === '' || rEl.classList.contains('prefilled')) && R != null && !isNaN(R)) {
+      rEl.value = R; rEl.classList.add('prefilled');
+    }
+  });
 }
 
 // ───────────── autosave (debounced 500ms) ─────────────
@@ -806,7 +872,8 @@ async function autoSaveSet(exId, setNo) {
     const d = await resp.json();
     if (d.ok) {
       const complete = (w != null && !isNaN(w)) && (r != null && !isNaN(r));
-      markSaved(row, complete);
+      markSaved(row, complete, false);   // autosave 只存草稿,不点亮绿色「已存」(那要点 ✓)
+      if (complete) propagateForward(card, setNo, w, r);   // 做得更重 → 后续未填组建议跟涨
       // 第一次保存任何东西 → 设训练起点
       if (!_firstSetTs) _firstSetTs = Date.now();
     }
@@ -878,8 +945,8 @@ async function loadWorkoutMeta() {
 
 // ───────────── 完成训练总结 ─────────────
 function showFinishSummary() {
-  // 只统计「真正存过库」的组(data-saved=1),预填占位不算
-  const savedRows = Array.from(document.querySelectorAll('.set-row[data-saved="1"]'));
+  // 只统计用户**点过 ✓ 确认**的组(data-confirmed=1);autosave 草稿/预填占位不算
+  const savedRows = Array.from(document.querySelectorAll('.set-row[data-confirmed="1"]'));
   const totalSets = TOTAL_SETS;
   let doneSets = 0;
   let totalVolume = 0;
@@ -1356,6 +1423,122 @@ async function restoreAiJobs() {
 }
 restoreAiJobs();
 
+// ═════════════ 教练复盘对话(发消息→后台 job→轮询→气泡;proposal 可一键应用为下次计划)═════════════
+function coachEsc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const _coachDate = () => document.getElementById('workout-date').value || TODAY_DEFAULT;
+let _coachBusy = false, _coachLoaded = false;
+
+function coachBubble(role, contentHtml, proposal){
+  const wrap = document.getElementById('coach-msgs');
+  const me = role === 'user';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;' + (me ? 'justify-content:flex-end;' : 'justify-content:flex-start;');
+  const b = document.createElement('div');
+  b.style.cssText = 'max-width:88%;padding:8px 12px;border-radius:12px;font-size:14px;line-height:1.55;'
+    + 'white-space:pre-wrap;word-break:break-word;'
+    + (me ? 'background:#244470;color:#eaf2ff;border-top-right-radius:4px;'
+          : 'background:#0f1d2e;border:1px solid var(--border);border-top-left-radius:4px;');
+  b.innerHTML = contentHtml;
+  row.appendChild(b); wrap.appendChild(row);
+  if (proposal && proposal.exercises && proposal.exercises.length){
+    const card = document.createElement('div');
+    card.style.cssText = 'align-self:flex-start;max-width:92%;background:#11251c;'
+      + 'border:1px solid var(--accent-2);border-radius:10px;padding:10px 12px;font-size:13px;';
+    let h = '<div style="font-weight:600;color:var(--accent-2);margin-bottom:6px;">📋 建议的下次计划调整</div>';
+    if (proposal.overall_reasoning) h += '<div class="dim small" style="margin-bottom:6px;">'+coachEsc(proposal.overall_reasoning)+'</div>';
+    h += '<ul style="margin:0 0 8px 16px;padding:0;">';
+    proposal.exercises.forEach(e=>{
+      if (e.change_summary && e.change_summary !== '维持')
+        h += '<li style="margin-bottom:3px;"><strong>'+coachEsc(e.id)+'</strong>: '+coachEsc(e.change_summary)
+           + (e.reasoning ? ' <span class="dim small">— '+coachEsc(e.reasoning)+'</span>' : '')+'</li>';
+    });
+    h += '</ul><button class="btn primary coach-apply" style="width:100%;">✓ 应用到下次计划</button>';
+    card.innerHTML = h;
+    card.querySelector('.coach-apply').onclick = () => coachApply(proposal, card.querySelector('.coach-apply'));
+    wrap.appendChild(card);
+  }
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function coachApply(proposal, btn){
+  if (btn){ btn.disabled = true; btn.textContent = '应用中…'; }
+  try{
+    const r = await (await fetch('/api/fitness/ai/coach_chat/apply', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({proposal})})).json();
+    if (r.ok && btn){ btn.textContent = '✓ 已应用('+r.applied+'个动作) · 下次 '+DAY_ID+' 生效'; btn.classList.remove('primary'); btn.style.opacity='.7'; }
+    else if (btn){ btn.disabled = false; btn.textContent = '✗ 失败,重试'; }
+  }catch(e){ if (btn){ btn.disabled = false; btn.textContent = '✗ 网络失败,重试'; } }
+}
+
+// 轮询某轮对话 job;done 后追加教练气泡(含 proposal)。think=思考气泡元素(轮询前已插入)。
+function coachPoll(jobId, think){
+  const done = () => { _coachBusy = false; const s=document.getElementById('coach-send'); if(s) s.disabled=false; };
+  const tick = async () => {
+    let jd;
+    try { jd = await (await fetch('/api/fitness/ai/job/'+jobId)).json(); }
+    catch(e){ setTimeout(tick, 4000); return; }   // 网络抖动重试
+    if (!jd.ok){ if(think) think.remove(); coachBubble('assistant','✗ 任务丢失,请重试'); done(); return; }
+    const job = jd.job;
+    if (job.status === 'running'){ setTimeout(tick, 4000); return; }
+    if (think) think.remove();
+    const res = job.result || {};
+    if (job.status === 'error' || res.error) coachBubble('assistant', '✗ '+coachEsc(res.error || '分析失败'));
+    else coachBubble('assistant', coachEsc(res.reply || '(无回复)'), res.proposal);
+    done();
+  };
+  tick();
+}
+
+function coachThink(){
+  const wrap = document.getElementById('coach-msgs');
+  const t = document.createElement('div');
+  t.style.cssText = 'display:flex;justify-content:flex-start;';
+  t.innerHTML = '<div style="background:#0f1d2e;border:1px solid var(--border);border-radius:12px;'
+    + 'padding:8px 12px;font-size:14px;color:var(--text-dim);">教练思考中…'
+    + '<span class="ai-spin" style="width:12px;height:12px;border:2px solid #7dd3fc55;border-top-color:#7dd3fc;'
+    + 'border-radius:50%;display:inline-block;margin-left:6px;animation:aispin .8s linear infinite;vertical-align:-2px;"></span></div>';
+  wrap.appendChild(t); wrap.scrollTop = wrap.scrollHeight;
+  return t;
+}
+
+async function coachSend(presetMsg){
+  if (_coachBusy) return;
+  const inp = document.getElementById('coach-input');
+  const msg = (presetMsg || inp.value || '').trim();
+  if (!msg) return;
+  _coachBusy = true;
+  document.getElementById('coach-send').disabled = true;
+  coachBubble('user', coachEsc(msg));
+  if (!presetMsg) inp.value = '';
+  const think = coachThink();
+  try{
+    const d = await (await fetch('/api/fitness/ai/coach_chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ day_id:DAY_ID, date:_coachDate(), message:msg })})).json();
+    if (!d.ok || !d.job_id){ think.remove(); coachBubble('assistant','✗ 发送失败,请重试'); _coachBusy=false; document.getElementById('coach-send').disabled=false; return; }
+    coachPoll(d.job_id, think);
+  }catch(e){ think.remove(); coachBubble('assistant','✗ 网络失败,请重试'); _coachBusy=false; document.getElementById('coach-send').disabled=false; }
+}
+
+// 展开对话区时懒加载历史 + 续接刷新前还在跑的对话 job
+async function coachLoad(){
+  if (_coachLoaded) return; _coachLoaded = true;
+  try{
+    const d = await (await fetch('/api/fitness/ai/coach_chat/messages?day_id='+encodeURIComponent(DAY_ID)+'&date='+encodeURIComponent(_coachDate()))).json();
+    const wrap = document.getElementById('coach-msgs'); wrap.innerHTML = '';
+    if (d.ok) (d.messages || []).forEach(m => coachBubble(m.role, coachEsc(m.content), m.proposal));
+    // 续接:刷新前还在跑的 coach_chat job(等它的回复)
+    const jd = await (await fetch('/api/fitness/ai/jobs?kind=coach_chat&day_id='+encodeURIComponent(DAY_ID)+'&date='+encodeURIComponent(_coachDate())+'&limit=3')).json();
+    const running = (jd.jobs || []).find(x => x.status === 'running');
+    if (running && !_coachBusy){ _coachBusy = true; document.getElementById('coach-send').disabled = true; coachPoll(running.id, coachThink()); }
+  }catch(e){}
+}
+document.getElementById('coach-send').addEventListener('click', () => coachSend());
+document.getElementById('coach-force').addEventListener('click', () =>
+  coachSend('我们聊得差不多了，请基于以上对话直接给出下次 ' + DAY_ID + ' 训练每个动作的具体计划调整(proposal)。'));
+document.getElementById('coach-input').addEventListener('keydown', e=>{ if (e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); coachSend(); } });
+document.getElementById('coach-chat-zone').addEventListener('toggle', e=>{ if (e.target.open) coachLoad(); });
+
 // ───────────── 休息倒计时 ─────────────
 const REST = {};   // exId -> {endTs, totalSec, intervalId}
 let _audioCtx = null;
@@ -1561,17 +1744,12 @@ async function saveSet(btn) {
     });
     const d = await r.json();
     if (d.ok) {
-      btn.textContent = '✓ 已存';
-      btn.classList.add('success');
       const card = btn.closest('.card');
+      markSaved(row, true, true);   // 点 ✓ 才进绿色「已存」+ 计入进度/总结
+      // 后续未填组建议跟着这组上调(只增不减;已手填/已落库的不动),再聚焦下一组
+      propagateForward(card, setNo, weight, reps);
       const nextRow = card.querySelector(`.set-row[data-set="${setNo + 1}"]`);
-      if (nextRow) {
-        const w = nextRow.querySelector('.set-weight');
-        const r2 = nextRow.querySelector('.set-reps');
-        if (!w.value) w.value = weight;
-        if (!r2.value) r2.value = reps;
-        nextRow.querySelector('.set-weight').focus();
-      }
+      if (nextRow) nextRow.querySelector('.set-weight').focus();
       // PR(个人纪录)检测 + 庆祝
       checkPR(exId, card, row, weight, reps);
       // 启动休息倒计时(优先用推荐 API 返回的 rest_seconds,fallback data-default-rest)

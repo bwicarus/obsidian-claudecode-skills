@@ -112,6 +112,8 @@
   var DEFAULT_LINKS = [
     { label: '主页', url: '/' },
     { label: '仪表板', url: '/dashboard/' },
+    { label: '学习数据看板', url: '/insights/' },
+    { label: '全文搜索', url: '/pdf/search' },
     { label: '问答历史', url: '/history/' }
   ];
   var LS_KEY = 'site.navLinks.v1';     // 离线/迁移缓存

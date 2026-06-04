@@ -297,6 +297,397 @@ def analyze_session(db: sqlite3.Connection, date: str, day_id: str,
     return result
 
 
+# ──────────────────────── coach_chat (多轮复盘对话) ────────────────────────
+COACH_CHAT_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士,正在和运动员**复盘刚结束的 {day_id} 训练**。
+通过对话了解训练实情(感受 / 哪里吃力 / 酸痛或不适 / 睡眠恢复 / 可用时间 / 器械限制 / RPE 真实感受),
+信息足够后给出对**下次**该训练的计划调整。
+
+{literature}
+
+【本次训练实际】({date} · {day_id})
+{actual}
+
+【对应计划目标(每动作 sets×rep_range @ weight, RIR, step)】
+{planned}
+
+【最近几次同日历史】
+{history}
+
+【本次客观分析(系统已生成,供你承接)】
+{analysis}
+
+【对话记录】(你=教练,用户=运动员)
+{transcript}
+
+任务:像真人教练一样回应用户**最新一条**。先判断信息是否足够负责任地调下次计划:
+- 信息不足(关键缺口:具体哪个动作吃力 / 哪里酸痛或受限 / 可用时间 / 器械 / 睡眠恢复 / RPE 真实感受)
+  → 自然地**追问 1-2 个最关键的问题**, ready=false, proposal=null。
+- 信息足够 → 给一段中文复盘 + 调整说明(放进 reply), 并产出 proposal(每个动作的新 prescribed)。
+- **尽快收敛**:最多追问一轮;用户已答复关键问题、无重大安全未知时,**直接 ready=true 给出 proposal**,
+  不要反复追问或只讲不调。若用户明确要"直接给计划",必须 ready=true 出 proposal(哪怕仅基于现有信息)。
+- 用户提到的限制必须显式落到 proposal:例 "肩疼"→ 该动作换 lengthened-bias 变体或降量并在 reasoning 说明;
+  "只有 30 分钟"→ 砍 junk volume / 缩 rest;"某动作很轻松"→ 加重或加 rep。
+
+**整个回复必须是一个严格 JSON 对象**(不要 markdown 代码块外的任何字,不要在 JSON 前后写解释),格式:
+{{
+  "reply": "对用户说的话(中文,自然口语,可含追问;所有要对用户讲的内容都放这里)",
+  "ready": false,
+  "proposal": null
+}}
+当 ready=true 时, proposal 为(结构同计划调整):
+{{
+  "overall_reasoning": "整体调整逻辑(中文)",
+  "exercises": [
+    {{"id":"db_bench_flat","prescribed":{{"sets":4,"rep_range":[6,10],"rir_target":2,"rest_seconds":180,"start_weight_kg":11.25,"weight_step_kg":1.25}},"change_summary":"+1.25kg","reasoning":"中文,引用对话实情/历史/研究"}}
+  ]
+}}
+
+proposal 规则(同计划调整):
+- 保留该日**所有**动作(不增删,顺序保留),只调 prescribed 内字段
+- start_weight_kg 必须按 weight_step_kg 取整(step=1.25 → 1.25 的倍数)
+- reasoning 必须引用对话实情 / 历史数据 / 研究依据,不空话
+- 信息不足以调的动作维持当前值
+- 数字与术语用纯文本,术语带括号:RIR(剩余次数) / RPE(自感强度) / ROM(动作幅度)
+"""
+
+
+def coach_chat(db: sqlite3.Connection, date: str, day_id: str, plan_data: dict,
+               messages: list[dict], model: str = "", effort: str = "") -> dict:
+    """多轮复盘对话(无状态:每轮把全量对话历史拼进单 prompt,因 ai_client.ask 无历史)。
+    messages = [{"role":"user"|"assistant","content":str}, ...](含最新一条 user)。
+    返回 {reply, ready, proposal}:ready=true 时 proposal 为 suggest_plan 同结构。"""
+    day = next((d for d in plan_data["days"] if d["id"] == day_id), None)
+    if not day:
+        return {"error": f"unknown day_id {day_id}"}
+    # 本次实际
+    rows = db.execute(
+        "SELECT exercise_id, set_no, weight_kg, reps FROM fitness_log "
+        "WHERE date=? AND day_id=? ORDER BY exercise_id, set_no",
+        (date, day_id),
+    ).fetchall()
+    name_by_id = {ex["id"]: ex["name"] for ex in day["exercises"]}
+    actual_by_ex: dict[str, list] = {}
+    for r in rows:
+        actual_by_ex.setdefault(r["exercise_id"], []).append(
+            {"w": r["weight_kg"], "r": r["reps"]})
+    actual_lines = []
+    for ex_id, sets in actual_by_ex.items():
+        ss = " / ".join(
+            f"{x['w']}kg×{x['r']}" if x['w'] is not None and x['r'] is not None else "—"
+            for x in sets)
+        actual_lines.append(f"  {name_by_id.get(ex_id, ex_id)} ({ex_id}): {ss}")
+    actual_str = "\n".join(actual_lines) or "(无记录)"
+    # 计划目标
+    planned_lines = []
+    for ex in day["exercises"]:
+        p = ex.get("prescribed") or {}
+        lo, hi = (p.get("rep_range") or [0, 0])
+        planned_lines.append(
+            f"  {ex['name']} ({ex['id']}): {p.get('sets')}×{lo}-{hi} @ "
+            f"{p.get('start_weight_kg')}kg (RIR {p.get('rir_target')}, step {p.get('weight_step_kg')})")
+    planned_str = "\n".join(planned_lines)
+    # 历史(去掉今天)
+    sessions = [s for s in _recent_sessions(db, day_id, n=4) if s["date"] != date][:3]
+    history = _format_history(sessions, day["exercises"])
+    # 客观分析
+    latest = _latest_analysis(db, day_id)
+    analysis_str = json.dumps(latest, ensure_ascii=False, indent=2) if latest else "(无)"
+    # 对话记录
+    tlines = []
+    for m in messages:
+        who = "用户" if m.get("role") == "user" else "教练"
+        tlines.append(f"{who}: {m.get('content', '')}")
+    transcript = "\n".join(tlines) or "(空)"
+
+    prompt = COACH_CHAT_PROMPT.format(
+        literature=LITERATURE_REF, date=date, day_id=day_id,
+        actual=actual_str, planned=planned_str, history=history,
+        analysis=analysis_str, transcript=transcript,
+    )
+    try:
+        resp = _ask(prompt, model=model, effort=effort)
+    except Exception as e:
+        return {"error": f"ai_call_failed: {e}"}
+    result = _extract_json(resp)
+    if not result or "reply" not in result:
+        # 容错:AI 没给干净 JSON → 整段当 reply(对话至少能继续)
+        return {"reply": (resp or "").strip()[:2000] or "(无回复)",
+                "ready": False, "proposal": None, "_parse_fallback": True}
+    result.setdefault("ready", False)
+    result.setdefault("proposal", None)
+    return result
+
+
+# ──────────────────────── 全身平衡体检 (balance_check) ────────────────────────
+# 动作 → 容量桶摊派权重(复合动作把协同肌按权重摊给对应桶,否则后束/三头会被系统性算成 0)。
+# 桶:h_push/v_push(=push)、h_pull/v_pull(=pull)、front_delt/side_delt/rear_delt、
+#    biceps(肘屈)/triceps(肘伸)、quad/ham/glute/calf/core、anterior/posterior(躯干+腿前后链;手臂不计入链)。
+# 权重循证近似(EMG/经验),不求精确,供比值方向判断 + AI 解读。新增/换动作时在此补一行。
+MUSCLE_MAP = {
+    # —— push 日 ——
+    "db_bench_flat":      {"h_push": 1, "front_delt": 0.5, "triceps": 0.3, "anterior": 1},
+    "db_bench_incline":   {"h_push": 1, "front_delt": 0.6, "triceps": 0.3, "anterior": 1},
+    "db_shoulder_press":  {"v_push": 1, "front_delt": 1.0, "triceps": 0.3, "anterior": 1},
+    "cable_lateral_raise": {"side_delt": 1},                      # 外展孤立,不计推/拉/链
+    "db_lateral_raise":    {"side_delt": 1},
+    "cable_tricep_pushdown": {"triceps": 1},
+    "dip":                {"v_push": 1, "front_delt": 0.3, "triceps": 0.5, "anterior": 1},
+    "db_overhead_tricep": {"triceps": 1},
+    # —— pull 日 ——
+    "chin_up":     {"v_pull": 1, "biceps": 0.4, "posterior": 1},
+    "lat_pulldown": {"v_pull": 1, "biceps": 0.3, "posterior": 1},
+    "db_row_single": {"h_pull": 1, "rear_delt": 0.3, "biceps": 0.3, "posterior": 1},
+    "seated_row":  {"h_pull": 1, "rear_delt": 0.4, "biceps": 0.3, "posterior": 1},
+    "face_pull":   {"h_pull": 0.5, "rear_delt": 1.0, "posterior": 1},
+    "ez_curl":     {"biceps": 1},
+    "db_incline_curl": {"biceps": 1},
+    # —— legs 日 ——
+    "goblet_squat":  {"quad": 1, "glute": 0.5, "ham": 0.2, "anterior": 1},
+    "rdl":           {"ham": 1, "glute": 0.7, "posterior": 1},
+    "leg_extension": {"quad": 1, "anterior": 1},
+    "leg_curl":      {"ham": 1, "posterior": 1},
+    "db_calf_raise": {"calf": 1, "posterior": 0.3},
+    "hanging_leg_raise": {"core": 1, "anterior": 0.3},
+}
+
+# 六大拮抗比:(标签, 分子桶组, 分母桶组, 健康区间[lo,hi], 黄阈, 红阈方向说明)
+# value=分子/分母。status 由 _ratio_status 按区间判。
+_BAL_RATIOS = [
+    {"name": "拉:推 容量比", "num": ["h_pull", "v_pull"], "den": ["h_push", "v_push"],
+     "good": [0.8, 1.4], "yellow": 0.65, "red": 0.5, "dir": "low_bad",
+     "hint": "拉应≥推(≥1:1);圆肩/久坐矫正期可 1.5–2:1。推远多于拉→肩胛前倾/圆肩/肩峰撞击风险"},
+    {"name": "股四:腘绳 容量比", "num": ["quad"], "den": ["ham"],
+     "good": [1.0, 1.5], "yellow": 1.8, "red": 2.2, "dir": "high_bad",
+     "hint": "股四略多正常(深蹲也练后链);后链严重不足→ACL/腘绳拉伤风险升"},
+    {"name": "后束:前束 容量比", "num": ["rear_delt"], "den": ["front_delt"],
+     "good": [0.8, 1.5], "yellow": 0.5, "red": 0.3, "dir": "low_bad",
+     "hint": "后束直接量应接近前束总刺激;后束欠练→圆肩/肩前移/推力受限(多数人后束严重不足)"},
+    {"name": "垂直拉:水平拉 比", "num": ["v_pull"], "den": ["h_pull"],
+     "good": [0.7, 1.4], "yellow": 1.6, "red": 2.0, "dir": "high_bad",
+     "hint": "只做引体/下拉、不练划船→菱形/中斜方(肩胛后缩)不足,姿态差"},
+    {"name": "二头:三头 容量比", "num": ["biceps"], "den": ["triceps"],
+     "good": [0.7, 1.2], "yellow": 1.5, "red": 2.0, "dir": "high_bad",
+     "hint": "三头肌量约上臂2/3,孤立量略多正常;只练弯举→肘伸不足"},
+    {"name": "后链:前链 总比", "num": ["posterior"], "den": ["anterior"],
+     "good": [0.85, 1.3], "yellow": 0.7, "red": 0.55, "dir": "low_bad",
+     "hint": "后链应接近或略多于前链;全身前侧主导→姿态/肩健康风险"},
+]
+
+
+def _ratio_status(val, spec) -> str:
+    """green / yellow / red。dir=low_bad:值越低越糟;high_bad:越高越糟。"""
+    if val is None:
+        return "na"
+    if spec["dir"] == "low_bad":
+        if val < spec["red"]:
+            return "red"
+        if val < spec["yellow"]:
+            return "yellow"
+        return "green"
+    else:  # high_bad
+        if val > spec["red"]:
+            return "red"
+        if val > spec["yellow"]:
+            return "yellow"
+        return "green"
+
+
+def _balance_profile(db: sqlite3.Connection, plan_data: dict, window_days: int = 28) -> dict:
+    """跨所有训练日聚合近 window_days 的容量到拮抗桶,算六大平衡比 + 每动作 est-1RM。纯客观,不调 AI。"""
+    import datetime as _dt
+    # 窗口起始(本地日期)
+    today = _dt.datetime.utcfromtimestamp(__import__("time").time() + 9 * 3600).date()
+    since = (today - _dt.timedelta(days=window_days - 1)).strftime("%Y-%m-%d")
+    weeks = max(1.0, window_days / 7.0)
+    rows = db.execute(
+        "SELECT date, exercise_id, weight_kg, reps FROM fitness_log WHERE date>=?",
+        (since,),
+    ).fetchall()
+    buckets: dict[str, float] = {}
+    raw_sets: dict[str, float] = {}        # 名义组数(不摊派,仅该动作主桶计)——这里用 exercise 计数
+    est1rm: dict[str, float] = {}
+    ex_name = {ex["id"]: ex["name"] for d in plan_data.get("days", []) for ex in d["exercises"]}
+    total_sets = 0
+    unmapped = set()
+    for r in rows:
+        exid = r["exercise_id"]
+        total_sets += 1
+        w = r["weight_kg"]
+        reps = r["reps"]
+        # est-1RM(Epley),取该动作最高
+        if w is not None and reps is not None and reps > 0:
+            e = w * (1 + reps / 30.0)
+            if e > est1rm.get(exid, 0):
+                est1rm[exid] = round(e, 1)
+        m = MUSCLE_MAP.get(exid)
+        if not m:
+            unmapped.add(exid)
+            continue
+        for bucket, wt in m.items():
+            buckets[bucket] = buckets.get(bucket, 0) + wt
+    # 周均
+    wk = {k: round(v / weeks, 1) for k, v in buckets.items()}
+
+    def _sum(keys):
+        return sum(wk.get(k, 0) for k in keys)
+
+    ratios = []
+    for spec in _BAL_RATIOS:
+        num = _sum(spec["num"])
+        den = _sum(spec["den"])
+        # 数据充分度:任一侧周均 < 3 组 → insufficient(只展示不判定)
+        insufficient = num < 3 or den < 3
+        val = round(num / max(den, 0.1), 2) if den > 0 else None
+        ratios.append({
+            "name": spec["name"], "value": val,
+            "num_sets": round(num, 1), "den_sets": round(den, 1),
+            "good_range": spec["good"], "hint": spec["hint"],
+            "status": "insufficient" if insufficient else _ratio_status(val, spec),
+        })
+    return {
+        "window_days": window_days, "weeks": round(weeks, 1), "since": since,
+        "total_logged_sets": total_sets,
+        "weekly_sets_by_bucket": wk,
+        "est_1rm": {ex_name.get(k, k): v for k, v in sorted(est1rm.items())},
+        "ratios": ratios,
+        "unmapped_exercises": sorted(unmapped),
+    }
+
+
+def _muscle_status(profile: dict) -> dict:
+    """把六大比值 + 桶容量翻成**每块肌肉**的强弱状态(给 3D 人体上色用)。
+    status: green(充足/均衡) / yellow(偏弱) / red(明显弱/失衡) / insufficient(数据不足)。
+    比值『弱侧』取该比值状态;非比值肌肉按绝对周容量判。"""
+    R = {r["name"]: r for r in profile.get("ratios", [])}
+    wk = profile.get("weekly_sets_by_bucket", {})
+
+    def vol(bucket, low=4.0, verylow=2.0):
+        v = wk.get(bucket, 0)
+        if v < 0.5:
+            return "insufficient", v
+        if v < verylow:
+            return "red", v
+        if v < low:
+            return "yellow", v
+        return "green", v
+
+    def ratio_weak(name):
+        """该比值『弱侧』应得状态(直接用比值 status:insufficient/green/yellow/red)+ 值。"""
+        r = R.get(name)
+        if not r:
+            return "insufficient", None
+        st = r["status"]
+        return ("insufficient" if st == "insufficient" else st), r.get("value")
+
+    out = {}
+    # —— 比值驱动(弱侧)——
+    s, v = ratio_weak("拉:推 容量比")          # 低=背/拉弱
+    out["back"] = {"status": s, "label": "背 / 拉", "metric": "拉:推", "value": v}
+    s, v = ratio_weak("后束:前束 容量比")       # 低=后束弱(很多人的痛点)
+    out["rear_delt"] = {"status": s, "label": "后束(三角后)", "metric": "后束:前束", "value": v}
+    s, v = ratio_weak("二头:三头 容量比")       # 高=三头弱(只练弯举)
+    out["triceps"] = {"status": s, "label": "三头", "metric": "二头:三头", "value": v}
+    s, v = ratio_weak("股四:腘绳 容量比")       # 高=腘绳弱(后链不足)
+    out["hamstrings"] = {"status": s, "label": "腘绳", "metric": "股四:腘绳", "value": v}
+    # —— 容量驱动(对立的强侧 + 无直接拮抗的)——
+    st, vv = vol("front_delt"); out["front_delt"] = {"status": st, "label": "前束(三角前)", "weekly": vv}
+    st, vv = vol("side_delt");  out["side_delt"]  = {"status": st, "label": "中束(三角中)", "weekly": vv}
+    st, vv = vol("biceps");     out["biceps"]     = {"status": st, "label": "二头", "weekly": vv}
+    st, vv = vol("core");       out["core"]       = {"status": st, "label": "核心 / 腹", "weekly": vv}
+    st, vv = vol("glute");      out["glutes"]     = {"status": st, "label": "臀", "weekly": vv}
+    st, vv = vol("calf");       out["calves"]     = {"status": st, "label": "小腿", "weekly": vv}
+    # 胸=推侧:用推总容量判(推通常不缺,但量太低也提示)
+    push = wk.get("h_push", 0) + wk.get("v_push", 0)
+    out["chest"] = {"status": ("insufficient" if push < 0.5 else "red" if push < 3 else "yellow" if push < 6 else "green"),
+                    "label": "胸", "weekly": round(push, 1)}
+    # 股四=伸膝侧:用 quad 桶判(腿没练→insufficient)
+    st, vv = vol("quad"); out["quads"] = {"status": st, "label": "股四头", "weekly": vv}
+    return out
+
+
+BALANCE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。下面是用户近 {weeks} 周(跨 Push/Pull/Legs)
+的**客观训练容量聚合**,已按拮抗肌群/前后链算好六大平衡比(分子÷分母的周均有效组数)。请做**全身平衡体检**:
+找出失衡(尤其前后交叉肌群:推拉、股四腘绳、前后束、前后链),说清风险,给纠正性调整。
+
+{literature}
+
+【六大平衡比(后端已算,你只解读不重算)】
+{ratios}
+
+【各拮抗桶周均组数】
+{buckets}
+
+【各动作 est-1RM(Epley,力量参考;仅方向性,非等速测力)】
+{est1rm}
+
+数据说明:近 {weeks} 周共 {total_sets} 个记录组。status=insufficient 的比值数据不足(某侧周均<3组),
+**只提示数据不够、先别下失衡结论**。容量比阈值是『编程目标』不是等速力量比,别混用。
+
+输出严格 JSON(只输出 {{...}}):
+{{
+  "overall_balance_grade": "balanced|minor_imbalance|moderate_imbalance|major_imbalance",
+  "summary": "2-3 句中文:最突出的 1-2 个失衡 + 总体方向",
+  "data_sufficiency": "full|partial|insufficient",
+  "imbalances": [
+    {{
+      "ratio_name": "拉:推 容量比",
+      "measured": 0.6,
+      "severity": "yellow|red",
+      "risk": "中文,具体风险 + 自然引用 1 篇文献(如 Reinold 2009 / Schoenfeld / Cavaliere)",
+      "root_cause": "中文,指出哪些动作堆太多/哪些缺位(用具体动作名+组数)"
+    }}
+  ],
+  "corrective_actions": [
+    {{
+      "concrete": "中文具体处方,如『Pull 日加 3 组面拉 + 坐姿划船 3→4 组,目标水平拉≥水平推』",
+      "suggested_exercise_ids": ["face_pull","seated_row"],
+      "delta_sets_per_week": "+5",
+      "expected_after": "拉:推 ≈ 1:1"
+    }}
+  ],
+  "do_not_overcorrect": "中文:提醒哪些非对称是合理的(矫正期偏好/个人薄弱强化),别机械追求 1:1 牺牲主线"
+}}
+
+约束:
+- imbalances 只列 status=yellow/red 的;balanced 时 imbalances=[]
+- 全中文;术语带括号:RIR(剩余次数)/ROM(动作幅度)/后束(三角肌后束)等
+- suggested_exercise_ids 优先用现有动作 id(face_pull/seated_row/rdl/leg_curl 等),缺合适动作才标 "NEW:动作名"
+- 别让平衡比凌驾增肌主线(do_not_overcorrect 必填)
+"""
+
+
+def balance_check(db: sqlite3.Connection, plan_data: dict,
+                  model: str = "", effort: str = "") -> dict:
+    """全身平衡体检:聚合客观容量比 → AI 解读失衡 + 纠正建议。返回 {profile, ai}。"""
+    profile = _balance_profile(db, plan_data)
+    if profile["total_logged_sets"] < 8:
+        return {"profile": profile, "ai": {
+            "overall_balance_grade": "balanced",
+            "summary": "记录的训练组数太少(需要先多练几次、覆盖 Push/Pull/Legs)才能做平衡体检。",
+            "data_sufficiency": "insufficient", "imbalances": [], "corrective_actions": [],
+        }}
+    ratios_str = "\n".join(
+        f"  {r['name']}: {r['value']}  (分子 {r['num_sets']} 组 / 分母 {r['den_sets']} 组, "
+        f"健康区间 {r['good_range']}, 状态 {r['status']}) — {r['hint']}"
+        for r in profile["ratios"]
+    )
+    buckets_str = json.dumps(profile["weekly_sets_by_bucket"], ensure_ascii=False)
+    est1rm_str = json.dumps(profile["est_1rm"], ensure_ascii=False)
+    prompt = BALANCE_PROMPT.format(
+        literature=LITERATURE_REF, weeks=profile["weeks"],
+        ratios=ratios_str, buckets=buckets_str, est1rm=est1rm_str,
+        total_sets=profile["total_logged_sets"],
+    )
+    try:
+        resp = _ask(prompt, model=model, effort=effort)
+    except Exception as e:
+        return {"profile": profile, "ai": {"error": f"ai_call_failed: {e}"}}
+    ai = _extract_json(resp)
+    if not ai:
+        ai = {"error": "json_parse_failed", "raw": (resp or "")[:500]}
+    return {"profile": profile, "ai": ai}
+
+
 # ──────────────────────── suggest_plan ────────────────────────
 SUGGEST_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。深度思考给用户调整
 本次 {day_id} 训练。

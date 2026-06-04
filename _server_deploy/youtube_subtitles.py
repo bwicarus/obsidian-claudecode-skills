@@ -221,6 +221,41 @@ def _translate_all(segments: list[dict]) -> list[dict]:
     return segments
 
 
+def _translate_hq(segments: list[dict]) -> list[dict]:
+    """HQ 翻译:LLM 优先(Gemini 2.5 Flash → Claude),带全文上下文、术语规则,质量/连贯性优先。
+    不走 Google 机翻(机翻偏直译生硬)。源英文已是准确的 YouTube 字幕原文 → LLM 据此精翻。
+    注:Gemini 若 429(AI Studio 预付费余额耗尽,见 fitness 踩坑#1)→ 落 Claude。
+    Claude 对长字幕**分批**(每 80 段一次),避免一次 200+ 行超 nginx 300s 超时;翻完整本缓存,下次秒出。"""
+    if not segments:
+        return segments
+    # HQ 的核心诉求 = **AI 处理准确字幕原文**(机翻太生硬)。所以 AI 优先,Google 仅在 AI 全挂时兜底。
+    # 1) Gemini(AI,快;429 余额耗尽则跳过 → 见踩坑#1)
+    if GEMINI_KEY_FILE.exists():
+        try:
+            key = GEMINI_KEY_FILE.read_text().strip()
+            if _translate_gemini_flash(segments, key):
+                return segments
+            print("[subtitles] HQ Gemini 无输出,转 Claude(分批)", file=sys.stderr)
+        except Exception as e:
+            print(f"[subtitles] HQ Gemini failed ({e}),转 Claude(分批)", file=sys.stderr)
+    # 2) Claude AI 精翻,分批(每 60 段一次,避免一次 200+ 行超 nginx 300s;断连也由 inflight+cache 兜住)
+    BATCH = 60
+    for i in range(0, len(segments), BATCH):
+        try:
+            _translate_claude(segments[i:i + BATCH])
+        except Exception as e:
+            print(f"[subtitles] HQ Claude batch {i} failed: {e}", file=sys.stderr)
+    if any(s.get("zh") for s in segments):
+        return segments
+    # 3) AI 全挂的最后兜底:Google 机翻(至少有译文,不留空)
+    print("[subtitles] HQ AI 全失败,兜底 Google 机翻", file=sys.stderr)
+    try:
+        _translate_google(segments)
+    except Exception:
+        pass
+    return segments
+
+
 def _fetch_stt(video_id: str) -> tuple[list[dict], str]:
     """走 Cloud Speech-to-Text(慢 + 烧赠金,但 YT auto-caption 质量太差时用)。
 
@@ -237,12 +272,14 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
     """同步:cache hit 立即返回;cache miss 拉 + 翻译 + 写 cache。
 
     source:
-      "auto" — YouTube 自带 caption(快,免费,质量一般)
-      "stt"  — Cloud Speech-to-Text(慢,烧赠金,质量高,完整句子+标点)
+      "auto" — YouTube 自带 caption + Google 机翻(快,免费)
+      "hq"   — **优先 YouTube 英文字幕原文**(准确),无字幕才退回 Cloud STT;再用 **LLM 精翻**
+               (Gemini/Claude,带上下文+术语)。比 stt 质量好得多:STT 转录本身易错,而频道多有准确字幕。
+      "stt"  — 纯 Cloud Speech-to-Text(仅无字幕视频用;转录易错,保留作底层 fallback)
 
     返回:{status: "ready"|"error", segments?: [...], error?: str, from_cache?: bool, source: str}
     """
-    if source not in ("auto", "stt"):
+    if source not in ("auto", "stt", "hq"):
         return {"status": "error", "error": f"unknown source {source!r}"}
     cache_key = f"{video_id}:{source}"
     if not force:
@@ -271,11 +308,23 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
         wait_ev.wait(timeout=600)
         return get_or_translate(video_id, target_lang, source, force=False)
     try:
-        if source == "stt":
+        if source == "hq":
+            # 优先 YouTube 英文字幕原文(准确);无字幕才退回 STT(易错)
+            try:
+                segs, src = _fetch_english(video_id)
+                src = "yt-caption"
+            except Exception as cap_err:
+                try:
+                    segs, src = _fetch_stt(video_id)
+                except Exception:
+                    raise cap_err   # 字幕和 STT 都失败 → 报字幕缺失更直观
+            segs = _translate_hq(segs)   # LLM 精翻
+        elif source == "stt":
             segs, src = _fetch_stt(video_id)
+            segs = _translate_all(segs)
         else:
             segs, src = _fetch_english(video_id)
-        segs = _translate_all(segs)
+            segs = _translate_all(segs)
         db = _db()
         db.execute(
             "INSERT OR REPLACE INTO youtube_subtitles "

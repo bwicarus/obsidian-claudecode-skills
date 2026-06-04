@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""全局 PDF 全文搜索索引构建器(成熟方案:SQLite FTS5 + trigram 分词器)。
+
+跨 vault 所有 PDF 书的**逐页**纯文本建索引,供 `/pdf/search` 全局搜索 + 深链到阅读器对应页。
+- trigram 分词器:中/日/英统一子串匹配(避开 unicode61 把整段 CJK 当一个 token 的坑),≥3 字走 FTS5,
+  <3 字前端不触发(由 API 兜底 LIKE)。bm25 排序。
+- external-content + 触发器:`pages_data` 是真源,FTS 自动同步;删书 = `DELETE FROM pages_data WHERE file=?`。
+- 增量:`meta` 记每本 mtime,只重建新增/改动的书;磁盘上消失的书清出索引。
+- 页文本复用 `state/pdf-text-index/<sha1(rel)[:16]>-<mtime>.json`(与阅读器 F4 全文搜索共享缓存)。
+
+用法:
+  python3 scripts/build_search_index.py            # 增量(默认)
+  python3 scripts/build_search_index.py --rebuild  # 全量重建
+  python3 scripts/build_search_index.py --stats     # 只看统计
+"""
+import argparse
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
+OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+DB_PATH = CLAUDE_DIR / "state" / "pdf-search.db"
+TEXT_INDEX_DIR = CLAUDE_DIR / "state" / "pdf-text-index"
+
+
+def _connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(DB_PATH))
+    con.execute("PRAGMA journal_mode=WAL")
+    return con
+
+
+def _init_schema(con):
+    con.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pages_data(
+            id   INTEGER PRIMARY KEY,
+            file TEXT NOT NULL,
+            page INTEGER NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pages_file ON pages_data(file);
+        CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
+            body,
+            content='pages_data', content_rowid='id',
+            tokenize='trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS pages_ai AFTER INSERT ON pages_data BEGIN
+            INSERT INTO pages_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS pages_ad AFTER DELETE ON pages_data BEGIN
+            INSERT INTO pages_fts(pages_fts, rowid, body) VALUES('delete', old.id, old.body);
+        END;
+        CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages_data BEGIN
+            INSERT INTO pages_fts(pages_fts, rowid, body) VALUES('delete', old.id, old.body);
+            INSERT INTO pages_fts(rowid, body) VALUES (new.id, new.body);
+        END;
+        CREATE TABLE IF NOT EXISTS meta(
+            file       TEXT PRIMARY KEY,
+            name       TEXT,
+            dir        TEXT,
+            mtime      INTEGER,
+            pages      INTEGER,
+            indexed_at INTEGER
+        );
+        """
+    )
+    con.commit()
+
+
+def _list_pdfs():
+    """扫 vault 下所有 PDF(排除 .orig/.compressed 备份),返回 [{rel,name,dir,mtime}]。"""
+    out = []
+    for p in OBSIDIAN_ROOT.rglob("*.pdf"):
+        if p.name.endswith((".orig.pdf", ".compressed.pdf")):
+            continue
+        try:
+            rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
+            out.append({
+                "rel": rel,
+                "name": p.name,
+                "dir": str(Path(rel).parent),
+                "mtime": int(p.stat().st_mtime),
+                "abs": p,
+            })
+        except OSError:
+            continue
+    return out
+
+
+def _page_texts(abs_path: Path, rel: str) -> dict:
+    """{page_str: text},复用 pdf-text-index 缓存(与阅读器 F4 共享),缺则用 fitz 抽 + 写缓存。"""
+    try:
+        mtime = int(abs_path.stat().st_mtime)
+    except OSError:
+        mtime = 0
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    cpath = TEXT_INDEX_DIR / f"{sha}-{mtime}.json"
+    if cpath.exists():
+        try:
+            return json.loads(cpath.read_text("utf-8"))
+        except Exception:
+            pass
+    import fitz
+    out = {}
+    doc = fitz.open(str(abs_path))
+    try:
+        for i in range(len(doc)):
+            try:
+                out[str(i + 1)] = doc[i].get_text("text")
+            except Exception:
+                out[str(i + 1)] = ""
+    finally:
+        doc.close()
+    try:
+        TEXT_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        for old in TEXT_INDEX_DIR.glob(f"{sha}-*.json"):
+            if old != cpath:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        cpath.write_text(json.dumps(out, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return out
+
+
+def _index_book(con, bk: dict) -> int:
+    """重建单本书的页行。返回插入的页数。"""
+    rel = bk["rel"]
+    con.execute("DELETE FROM pages_data WHERE file=?", (rel,))
+    texts = _page_texts(bk["abs"], rel)
+    n = 0
+    for pg_str, text in texts.items():
+        text = (text or "").strip()
+        if not text:
+            continue
+        try:
+            pg = int(pg_str)
+        except ValueError:
+            continue
+        con.execute("INSERT INTO pages_data(file, page, body) VALUES (?,?,?)", (rel, pg, text))
+        n += 1
+    con.execute(
+        "INSERT OR REPLACE INTO meta(file,name,dir,mtime,pages,indexed_at) VALUES (?,?,?,?,?,?)",
+        (rel, bk["name"], bk["dir"], bk["mtime"], n, int(time.time())),
+    )
+    return n
+
+
+def build(rebuild=False):
+    con = _connect()
+    _init_schema(con)
+    if rebuild:
+        con.execute("DELETE FROM pages_data")
+        con.execute("DELETE FROM meta")
+        con.commit()
+    pdfs = _list_pdfs()
+    on_disk = {bk["rel"] for bk in pdfs}
+    have = {row[0]: row[1] for row in con.execute("SELECT file, mtime FROM meta").fetchall()}
+    # 清理磁盘上已消失的书
+    for gone in set(have) - on_disk:
+        con.execute("DELETE FROM pages_data WHERE file=?", (gone,))
+        con.execute("DELETE FROM meta WHERE file=?", (gone,))
+        print(f"  ✗ 移除(已删除): {gone}")
+    con.commit()
+    changed = 0
+    for bk in pdfs:
+        if not rebuild and have.get(bk["rel"]) == bk["mtime"]:
+            continue  # 未变,跳过
+        t0 = time.time()
+        n = _index_book(con, bk)
+        con.commit()
+        changed += 1
+        print(f"  ✓ {bk['rel']}  {n} 页  ({time.time()-t0:.1f}s)")
+    # 优化 FTS(合并 b-tree,加快查询)——仅在有变动时,避免每 15min 空转
+    if changed:
+        try:
+            con.execute("INSERT INTO pages_fts(pages_fts) VALUES('optimize')")
+            con.commit()
+        except Exception:
+            pass
+    total_books = con.execute("SELECT COUNT(*) FROM meta").fetchone()[0]
+    total_pages = con.execute("SELECT COUNT(*) FROM pages_data").fetchone()[0]
+    con.close()
+    print(f"完成:{changed} 本变动 / 共 {total_books} 本 {total_pages} 页 → {DB_PATH}")
+
+
+def stats():
+    if not DB_PATH.exists():
+        print("索引不存在,先运行 build")
+        return
+    con = _connect()
+    rows = con.execute("SELECT name, pages, indexed_at FROM meta ORDER BY indexed_at DESC").fetchall()
+    print(f"共 {len(rows)} 本:")
+    for name, pages, ts in rows:
+        print(f"  {pages:>5} 页  {name}")
+    con.close()
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rebuild", action="store_true", help="全量重建(删旧表)")
+    ap.add_argument("--stats", action="store_true", help="只看统计")
+    args = ap.parse_args()
+    if args.stats:
+        stats()
+    else:
+        build(rebuild=args.rebuild)

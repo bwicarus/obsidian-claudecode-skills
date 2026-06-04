@@ -147,9 +147,33 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 | POST | `/api/fitness/ai/suggest_plan` body `{day_id}` | **异步**:建 job + daemon 线程跑 → 立即返回 `{job_id, status:running}` |
 | POST | `/api/fitness/ai/analyze_session` body `{date, day_id}` | **异步**:同上,done 后落库 fitness_session_analysis |
 | GET | `/api/fitness/ai/job/<job_id>` | 轮询 job 状态/结果(running/done/error;>15min 判僵死)|
-| GET | `/api/fitness/ai/jobs?day_id=` | 列最近 job(刷新/换设备恢复用)|
+| GET | `/api/fitness/ai/jobs?day_id=&kind=&date=` | 列最近 job(刷新/换设备恢复用)|
+| POST | `/api/fitness/ai/coach_chat` body `{date, day_id, message}` | **教练复盘对话**:写 user 消息 + 启 coach_chat job(异步,**不 dedup**)→ `{job_id}` |
+| GET | `/api/fitness/ai/coach_chat/messages?date=&day_id=` | 取该次训练的全部对话消息(刷新/换设备恢复)|
+| POST | `/api/fitness/ai/coach_chat/apply` body `{proposal}` | 把对话产出的 proposal 落成 exercise_override(下次该日计划生效,source=`ai_chat`)|
+| POST | `/api/fitness/ai/balance_check` | **全身平衡体检**:启 balance_check job(异步,跨所有训练日聚合)→ `{job_id}` |
 | GET/POST/DELETE | `/api/fitness/exercise_override/<ex>` | 用户接受 AI 建议的落地 |
 | GET | `/api/fitness/exercise_overrides` | 列所有 override(看哪些已调整)|
+
+**全身平衡体检(2026-06-04)**:主页「🩺 全身平衡体检」按钮 → `balance_check` job(异步)→ 主页内渲染。
+跨 Push/Pull/Legs 聚合**拮抗肌群/前后链**容量,算六大平衡比 + AI 解读失衡 + 纠正建议:
+- `fitness_coach.MUSCLE_MAP`(exercise_id → 容量桶摊派权重):复合动作按权重摊给协同肌(卧推→前束0.5/三头0.3;
+  划船→后束0.3-0.4;引体→二头0.4;face_pull→后束1.0),**否则后束/三头会被系统性算成 0 → 假失衡**。换动作要在此补一行。
+- `_balance_profile()`:近 28 天跨日聚合到桶 → 周均组数 + 每动作 Epley est-1RM。六大比:拉:推 / 股四:腘绳 /
+  后束:前束 / 垂直:水平拉 / 二头:三头 / 后链:前链。每比按循证区间算 green/yellow/red;**任一侧周均<3组 → insufficient
+  (只展示不判定,防 0 组比值爆炸/误报)**。容量比阈值≠等速力量比,不混用。
+- `balance_check()`:profile(客观数字)→ `BALANCE_PROMPT`(opus+max + LITERATURE_REF)→ AI 出
+  `{overall_balance_grade, summary, imbalances[], corrective_actions[], do_not_overcorrect}`。
+- 前端主页自包含轮询(非 log.html 的药丸框架):六比彩色圆点 + 失衡卡 + 纠正建议;关页面回来自动续接 running job。
+- **3D 肌群图(2026-06-04,用户选真 3D 而非 2D)**:`/private/fitness/body`(`body.html`)用 **Three.js(自托管 `/var/www/html/static/three/three.module.min.js` + `OrbitControls.js`,r0.160;OrbitControls 内 `import 'three'` 已 sed 改相对路径)**程序化建半透明人体(头/躯干/四肢 capsule 外壳)+ 12 块独立肌群网格(胸/前中后束/二头三头/背/核心/臀/股四/腘绳/小腿,左右镜像),按强弱**上色**(green/yellow/red/gray)。OrbitControls 旋转+缩放、正/背面按钮、raycast 点肌肉看详情、图例。颜色数据走 `_muscle_status(profile)`(把六比+桶翻成每肌强弱:比值弱侧取比值 status,无拮抗肌按绝对周容量判)→ 同步快端点 `GET /api/fitness/balance_profile`(0.02s,无 AI,秒上色)。**没用真实解剖 GLB**(免费且分肌群可选中的难找+体积大+远端慢网吃力)→ 程序化几何体,轻、离线、零外部素材。换动作要同步 `MUSCLE_MAP` 才纳入聚合。
+  - ⚠ Three.js 是 ES module:页面用 `<script type="module">` import 自托管路径;nginx `/static/three/*.js` 经 `location /` try_files 直供(mime application/javascript 正常)。
+
+**教练复盘对话(2026-06-04)**:完成训练 modal 里「💬 跟教练聊聊这次训练」(`<details>` 折叠) →
+补充实情(感受/酸痛/时间/器械)→ `coach_chat()` 多轮理解(信息不足先追问,够了出 proposal)→
+气泡下「✓ 应用到下次计划」一键写 override。底层仍是**后台 job + 4s 轮询**(非 SSE,因 ai_client 是阻塞
+subprocess;iPad 断连由 job+缓存兜住,刷新 `coachLoad` 读 messages + 续接 running job)。「📋 聊够了
+直接出计划」按钮发强制指令让 AI 立即 ready=true 出 proposal(opus 偏谨慎,prompt 已加"尽快收敛")。
+对话存独立表 `fitness_coach_chat`(一行一消息,按 (date,day_id) 标识一次会话)。
 
 **AI 调用全异步(关页面不丢)**:点 🤖 调整计划/分析 → POST 拿 job_id →
 右下角药丸「正在生成…(可关页面)」转圈 → AI 在服务器 daemon 线程跑,结果落
@@ -280,8 +304,12 @@ log 页每动作展开:
 ### 后端
 
 `_server_deploy/youtube_subtitles.py`:
-- 拉源:`youtube-transcript-api`(免费 + Pi 出口 IP 未被封)或 `youtube_speech.py` STT
-- 翻译:**优先 Gemini 2.5 Flash**(~3-5s + 250 req/天 免费),失败 fallback Claude(~20s)
+- 三种 source(2026-06-04 重构):
+  - `auto`(🇨🇳)= YT caption + `_translate_all`(Google 机翻优先,快免费)
+  - `hq`(🎯HQ)= **优先 YouTube 英文字幕原文**(`_fetch_english`,准确)+ `_translate_hq` **AI 精翻**(Gemini→Claude 分批,Google 仅 AI 全挂兜底);**无字幕才退回 STT**。旧版 HQ 直接用 Cloud STT 转录→英文本身易错→翻译差(用户反馈"HQ效果差")。改后 HQ 用准确字幕原文 + AI 处理,质量大幅提升。cache namespace 从 `stt` 换成 `hq` → 自动绕开旧 STT 垃圾缓存。
+  - `stt` = 纯 Cloud STT(仅 hq 在无字幕时内部 fallback;UI 不再直接用)
+- **HQ 翻译走 AI**(用户明确要"参考原字幕用 AI 处理",机翻太生硬):Gemini 2.5 Flash 优先(~5s),但 ⚠ Gemini 现 429(AI Studio 预付费余额耗尽,见踩坑#1)→ 落 **Claude 分批**(每 60 段,246 段约 130s,在 nginx 300s 内;断连由 inflight+cache 兜住,缓存后秒出)。Claude 实测 30 段 13s、质量自然。修好 Gemini billing 后 HQ 自动用更快的 Gemini。`auto`(🇨🇳)仍用 `_translate_all`(Google 机翻优先,快)
+- 注:YT caption 是按时间切的句子片段,逐行译必然碎(中英都碎),Claude 在每批 60 行上下文里尽量连贯;这是字幕固有特性,非 bug
 - 缓存:全局共享 SQLite `WEBAPP_DATA/youtube_subtitles.db`,key (video_id, target_lang, source)
 - 并发锁:同视频同 source 并发请求只翻 1 次
 
@@ -289,8 +317,8 @@ log 页每动作展开:
 
 `_server_deploy/youtube_speech.py`:
 1. yt-dlp 拉 m4a(只要 audio,体积小)
-2. ffmpeg 切 50s chunks + 转 FLAC 16kHz mono
-3. **并发 4 worker** 调 STT `recognize` sync API(每片 <60s 限制)
+2. ffmpeg 切 50s chunks + 转 **WAV(LINEAR16)** 16kHz mono(⚠ 不用 FLAC,见踩坑#7)
+3. **并发 4 worker** 调 STT `recognize` sync API(每片 <60s 限制;encoding=LINEAR16)
 4. word-level + chunk offset 合并
 5. word → segments(max_sec=5,max_words=15,gap>0.5 切)
 
@@ -352,9 +380,9 @@ RIR 2 · 间歇 180s · 起步 10 kg
 - 任何 input 改 → 500ms 防抖 → POST `/api/fitness/log`(upsert)
 - 服务器 UNIQUE INDEX (date, exercise_id, set_no) 保证同组覆盖
 - weight_kg / reps 都允许 null(只填一半也保住)
-- 边框变 `--accent-2` 绿色 = 已存
-- 两都填了 → ✓ 按钮变 "✓ 已存" + 绿底
-- **刷新页面**:initEx → restoreToday → loadRec(空位置才 prefill 推荐)
+- **草稿 vs 确认两态分离(2026-06-03 修)**:autosave 只存**草稿**(`dataset.saved=1`,弱灰边框 `#3a4658`,按钮仍 `✓`,**不绿、不计进度**);只有点 `✓`(saveSet)才进**确认态**(`dataset.confirmed=1`,绿底「✓ 已存」+ 绿边框 + 计入进度/完成总结 + 触发休息倒计时/PR/propagateForward)。`markSaved(row, complete, confirmed)` 第三参区分;进度条(updateProgress)和完成总结(showFinishSummary)都数 `data-confirmed=1`。**根因**:旧版 autosave 复用了 ✓ 的绿色渲染 → 两框一填就变绿「已存」,显得没点对勾就完成了。
+- **比计划做得更重 → 后续组建议跟涨(2026-06-03 加)**:`propagateForward(card, fromSetNo, W, R)` 在 autosave 完成 / 点 ✓ 后调,把**还没被用户碰过**的后续组(空 或 仍带 `prefilled` class)建议值上调到 `max(当前建议, 本组实际)`,只增不减;已落库(`dataset.saved=1`)和已手填(脱了 prefilled)的组不动。取代旧的"只复制到下一组且 `if(!w.value)` 被预填值挡掉"的逻辑。
+- **刷新页面**:initEx → restoreToday → loadRec(空位置才 prefill 推荐)。DB 不存 confirmed 列,restoreToday 对两值齐全的历史组按"已确认"恢复(绿+计数,最佳努力)。
 
 ### 休息倒计时
 
@@ -444,6 +472,9 @@ register_fitness(app)
 4. **plan.json 顺序敏感**:`upgrade_fitness_plan.py` 只更新现有动作,顺序保留;新增动作走 `add_pullup_exercises.py`(`_insert: prepend/after/replace`)。
 5. **YouTube Data API 配额 10k/天硬上限**:不能用赠金扩。**配额耗尽就换本地 `reorder_videos_by_keyword.py` 离线调整,不调 API**。
 6. **fitness_log schema migration**:加 UNIQUE INDEX 时存量数据可能有冲突(同 date+ex+set_no 多行),迁移脚本保留 max id 删旧。已对 bwicarus 用户跑过。
+8. **视频"刷新后首播黑屏/等很久"**(2026-06-04 改):刷新后 PLAYERS{} 丢失,首个视频要重新下 YouTube IFrame API + 建 player,在远端慢网下很慢、且黑屏期间无反馈像卡死。修:① 页头 `preconnect` YouTube 各域名提前握手;② 页面空闲(`requestIdleCallback`)**提前预载** IFrame API(不等点🎬),把"下载 API"挪出点击→播放关键路径;③ `YT.Player` 加 `width/height:'100%'`(否则默认 640×390 固定尺寸)+ `playerVars.playsinline:1`(iOS 必须,否则内联黑屏)+ `origin`;④ 播放器 box 加"⏳加载播放器…"提示层 + 8s 超时/onError 露出"▶在 YouTube 打开"兜底链接。
+9. **in-session 下一组建议要"镜像实际"不是"取 max"**(2026-06-04 改):propagateForward 早期版用 `max(开局推荐, 实际)` → 你录 10×12 但开局推荐 11×6(DP 建议加重)时,后续组保留更高的 11(还有 reps 没跟上显示 11×6),反直觉。改为**直接用你刚录的实际值覆盖**未碰过的后续组 → 后续镜像你当前表现(做重→跟重,做轻→跟轻)。跨日 DP 仍由后端按落库数据重算,不受影响。
+7. **★HQ 字幕(Cloud STT)切片必须用 WAV 不能用 FLAC★**(2026-06-03 修):`ffmpeg -f segment -c:a flac` 的 segment muxer 会把**整段**总时长写进**每片** FLAC 的 STREAMINFO `total_samples`(实测最后一片头报整段 130s,而真实仅 13s),STT sync `recognize` 据此判为 >60s → `400 Sync input too long. For audio longer than 1 min use LongRunningRecognize`。改用 `-segment_format wav -c:a pcm_s16le`(WAV 的 segment muxer finalize 时写正确的 per-chunk data 大小)+ STT config `encoding=LINEAR16` → 头时长准确,STT 200。WAV 16k mono 50s ≈1.6MB,base64 ~2.1MB,远低于 sync 10MB 限。ffprobe 验证:FLAC 末片头=130s(整段)/ WAV 三片头=50/50/30s(正确)。端到端实测 19s 视频 → 4 段转录 OK。
 
 ---
 

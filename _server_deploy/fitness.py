@@ -118,6 +118,20 @@ def _db(username: str) -> sqlite3.Connection:
     """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_aijob_kind_day "
                "ON fitness_ai_job(kind, day_id, status)")
+    # 教练复盘对话(一次训练 = 一个会话, 按 (date, day_id) 标识;一行一条消息)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_coach_chat (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            day_id TEXT NOT NULL,
+            role TEXT NOT NULL,            -- user | assistant
+            content TEXT NOT NULL,
+            proposal_json TEXT,            -- assistant 轮带的 prescribed 调整提案(可空)
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_coachchat_session "
+               "ON fitness_coach_chat(date, day_id, id)")
     return db
 
 
@@ -265,6 +279,12 @@ def plan_page():
     return render_template("fitness/plan.html", plan=plan)
 
 
+@bp.route("/body")
+def body_page():
+    """3D 肌群强弱图(Three.js;数据来自 /api/fitness/balance_profile)。"""
+    return render_template("fitness/body.html")
+
+
 # ───────────────────────── API ─────────────────────────
 @api_bp.route("/plan")
 def api_plan():
@@ -374,11 +394,34 @@ def _run_ai_job(username: str, job_id: str, kind: str, day_id: str, date: str):
     """daemon 线程:跑 AI + 写结果。自己开 DB 连接(sqlite 跨线程不共享)。"""
     db = _db(username)
     try:
-        from fitness_coach import suggest_plan, analyze_session
+        from fitness_coach import suggest_plan, analyze_session, coach_chat, balance_check
         plan = _load_plan()
         s = _get_settings(db)
         if kind == "suggest_plan":
             r = suggest_plan(db, day_id, plan, model=s["ai_model"], effort=s["ai_effort"])
+        elif kind == "balance_check":
+            r = balance_check(db, plan, model=s["ai_model"], effort=s["ai_effort"])
+        elif kind == "coach_chat":
+            # 读该会话全量消息(含刚 endpoint 插入的最新 user 条)→ 多轮对话
+            msgs = [
+                {"role": row["role"], "content": row["content"]}
+                for row in db.execute(
+                    "SELECT role, content FROM fitness_coach_chat "
+                    "WHERE date=? AND day_id=? ORDER BY id", (date, day_id),
+                ).fetchall()
+            ]
+            r = coach_chat(db, date, day_id, plan, msgs,
+                           model=s["ai_model"], effort=s["ai_effort"])
+            if "error" not in r:
+                # 落 assistant 回复(带 proposal)
+                prop = r.get("proposal")
+                db.execute(
+                    "INSERT INTO fitness_coach_chat (date, day_id, role, content, proposal_json) "
+                    "VALUES (?, ?, 'assistant', ?, ?)",
+                    (date, day_id, r.get("reply", ""),
+                     json.dumps(prop, ensure_ascii=False) if prop else None),
+                )
+                db.commit()
         else:  # analyze_session
             r = analyze_session(db, date, day_id, plan,
                                 model=s["ai_model"], effort=s["ai_effort"])
@@ -410,17 +453,25 @@ def _start_ai_job(username: str, kind: str, day_id: str, date: str) -> dict:
     """创建 job + 起线程。同 (kind, day_id[, date]) 已有 running 则复用,不重复跑。"""
     db = _db(username)
     try:
-        # dedup:已有 running 的同类 job 就复用
-        if kind == "suggest_plan":
+        # dedup:已有 running 的同类 job 就复用。coach_chat **不 dedup**(每轮消息不同,
+        # 否则第二句会拿到第一句的 job → 同一会话连发会串)。
+        row = None
+        if kind == "coach_chat":
+            row = None
+        elif kind == "suggest_plan":
             row = db.execute(
-                "SELECT id FROM fitness_ai_job WHERE kind=? AND day_id=? AND status='running' "
+                "SELECT * FROM fitness_ai_job WHERE kind=? AND day_id=? AND status='running' "
                 "ORDER BY created_at DESC LIMIT 1", (kind, day_id),
             ).fetchone()
         else:
             row = db.execute(
-                "SELECT id FROM fitness_ai_job WHERE kind=? AND day_id=? AND date=? AND status='running' "
+                "SELECT * FROM fitness_ai_job WHERE kind=? AND day_id=? AND date=? AND status='running' "
                 "ORDER BY created_at DESC LIMIT 1", (kind, day_id, date),
             ).fetchone()
+        # 复用前先判僵死:服务器重启会杀掉 daemon 线程但 DB 行仍 running →
+        # 这种僵尸会卡住后续同类请求达 15min。stale 的标 error 不复用,让新 job 起。
+        if row and _maybe_mark_stale(db, row) != "running":
+            row = None
         if row:
             return {"job_id": row["id"], "status": "running", "reused": True}
         job_id = uuid.uuid4().hex[:16]
@@ -493,6 +544,29 @@ def api_ai_analyze_session():
     return jsonify({"ok": True, **r})
 
 
+@api_bp.route("/balance_profile")
+def api_balance_profile():
+    """同步(无 AI,秒返回)的客观平衡画像 + 每肌群强弱状态,给 3D 肌群图上色。"""
+    username = _username()
+    db = _db(username)
+    try:
+        from fitness_coach import _balance_profile, _muscle_status
+        plan = _load_plan()
+        profile = _balance_profile(db, plan)
+        muscles = _muscle_status(profile)
+    finally:
+        db.close()
+    return jsonify({"ok": True, "profile": profile, "muscles": muscles})
+
+
+@api_bp.route("/ai/balance_check", methods=["POST"])
+def api_ai_balance_check():
+    """启动「全身平衡体检」AI job(异步,跨所有训练日聚合)。返回 {job_id, status}。"""
+    username = _username()
+    r = _start_ai_job(username, "balance_check", "", "")
+    return jsonify({"ok": True, **r})
+
+
 @api_bp.route("/ai/job/<job_id>")
 def api_ai_job(job_id: str):
     """轮询 job 状态/结果。status: running | done | error。"""
@@ -531,6 +605,85 @@ def api_ai_jobs():
     rows = db.execute(sql, params).fetchall()
     db.close()
     return jsonify({"ok": True, "jobs": [_job_row_to_dict(r) for r in rows]})
+
+
+# ───────────────────────── 教练复盘对话 ─────────────────────────
+@api_bp.route("/ai/coach_chat", methods=["POST"])
+def api_coach_chat():
+    """发一条复盘消息。body: {date, day_id, message}。
+    立即写入 user 消息 + 启动 coach_chat job(异步,不 dedup),返回 {job_id}。"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    day_id = data.get("day_id")
+    date = data.get("date") or time.strftime("%Y-%m-%d")
+    message = (data.get("message") or "").strip()
+    if not day_id or not message:
+        return jsonify({"ok": False, "error": "missing day_id or message"}), 400
+    db = _db(username)
+    try:
+        db.execute(
+            "INSERT INTO fitness_coach_chat (date, day_id, role, content) "
+            "VALUES (?, ?, 'user', ?)", (date, day_id, message),
+        )
+        db.commit()
+    finally:
+        db.close()
+    r = _start_ai_job(username, "coach_chat", day_id, date)
+    return jsonify({"ok": True, **r})
+
+
+@api_bp.route("/ai/coach_chat/messages")
+def api_coach_chat_messages():
+    """取某次训练(date, day_id)的全部复盘消息(刷新/换设备恢复对话)。"""
+    username = _username()
+    day_id = request.args.get("day_id")
+    date = request.args.get("date") or time.strftime("%Y-%m-%d")
+    if not day_id:
+        return jsonify({"ok": False, "error": "missing day_id"}), 400
+    db = _db(username)
+    rows = db.execute(
+        "SELECT role, content, proposal_json, created_at FROM fitness_coach_chat "
+        "WHERE date=? AND day_id=? ORDER BY id", (date, day_id),
+    ).fetchall()
+    db.close()
+    msgs = [{
+        "role": r["role"], "content": r["content"],
+        "proposal": json.loads(r["proposal_json"]) if r["proposal_json"] else None,
+        "created_at": r["created_at"],
+    } for r in rows]
+    return jsonify({"ok": True, "messages": msgs})
+
+
+@api_bp.route("/ai/coach_chat/apply", methods=["POST"])
+def api_coach_chat_apply():
+    """把对话产出的 proposal 落成 exercise_override(下次该日计划生效)。
+    body: {proposal: {exercises:[{id, prescribed, change_summary, reasoning}]}}。"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    proposal = data.get("proposal") or {}
+    exercises = proposal.get("exercises") or []
+    if not exercises:
+        return jsonify({"ok": False, "error": "proposal 无 exercises"}), 400
+    db = _db(username)
+    n = 0
+    try:
+        for ex in exercises:
+            ex_id = ex.get("id")
+            pres = ex.get("prescribed")
+            if not ex_id or not isinstance(pres, dict):
+                continue
+            db.execute(
+                "INSERT OR REPLACE INTO fitness_exercise_override "
+                "(exercise_id, prescribed_json, source, reasoning, change_summary, updated_at) "
+                "VALUES (?, ?, 'ai_chat', ?, ?, CURRENT_TIMESTAMP)",
+                (ex_id, json.dumps(pres, ensure_ascii=False),
+                 ex.get("reasoning"), ex.get("change_summary")),
+            )
+            n += 1
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True, "applied": n})
 
 
 @api_bp.route("/exercise_override/<exercise_id>", methods=["GET"])
@@ -1000,8 +1153,9 @@ def api_subtitles(video_id: str):
     """拉 + 翻 YouTube 字幕(全局缓存,首次 ~5-30 秒,之后秒出)。
 
     query:
-      ?source=auto  YT 自带 caption(默认,快+免费)
-      ?source=stt   Cloud Speech-to-Text 高质量(慢 ~20s+,烧赠金,完整句子)
+      ?source=auto  YT 自带 caption + Google 机翻(默认,快+免费)
+      ?source=hq    优先 YouTube 英文字幕原文(无字幕才 Cloud STT)+ LLM 精翻(质量优先)
+      ?source=stt   纯 Cloud STT(仅底层 fallback)
       ?force=1      强制重新拉 + 翻译(忽略 cache)
     """
     _username()

@@ -29,9 +29,11 @@
   a:hover { text-decoration: underline; }
   .container { max-width: 900px; margin: 0 auto; padding: 16px; }
   .topbar {
-    position: sticky; top: 0; z-index: 100;
+    /* z-index 必须 < 全站导航(nav.js)的把手(90)/抽屉(80),否则盖住左上角导航把手点不到;
+       左侧留 52px 给那个把手 */
+    position: sticky; top: 0; z-index: 60;
     background: var(--bg-card); border-bottom: 1px solid var(--border);
-    padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px 12px 52px; display: flex; align-items: center; gap: 12px;
   }
   .topbar h1 { margin: 0; font-size: 18px; flex: 1; }
   .topbar nav { display: flex; gap: 6px; flex-wrap: wrap; }

@@ -3,7 +3,7 @@
 替代 YouTube 自动 caption 的低质量转录(尤其健身术语经常错)。
 流程:
   yt-dlp 下载视频 audio
-  → ffmpeg 切 50s chunks + 转 FLAC 16kHz mono
+  → ffmpeg 切 50s chunks + 转 WAV(LINEAR16) 16kHz mono
   → 并发调 STT sync API(每片 <60s 限制内)
   → 合并 word-level + 调 timestamps
   → word → segments(每段 ~5-7 秒)
@@ -64,7 +64,10 @@ def _download_audio(video_id: str, out: Path) -> None:
 
 
 def _split_to_chunks(audio: Path, chunk_dir: Path) -> list[Path]:
-    """ffmpeg 切 CHUNK_SEC 秒,转 FLAC 16kHz mono(STT 推荐格式)。"""
+    """ffmpeg 切 CHUNK_SEC 秒,转 WAV(LINEAR16) 16kHz mono。
+    ⚠ 不用 FLAC:`-f segment -c:a flac` 会把**整段**时长写进每片 FLAC 的 STREAMINFO total_samples,
+       STT 据此判为 >60s → 400 'Sync input too long'。WAV(pcm_s16le)的 segment muxer 对每片
+       finalize 时写正确的 data chunk 大小 → 头时长准确,STT 正常。"""
     chunk_dir.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
         [
@@ -73,14 +76,15 @@ def _split_to_chunks(audio: Path, chunk_dir: Path) -> list[Path]:
             "-ar", str(SAMPLE_RATE), "-ac", "1",
             "-f", "segment",
             "-segment_time", str(CHUNK_SEC),
-            "-c:a", "flac",
-            str(chunk_dir / "chunk_%03d.flac"),
+            "-segment_format", "wav",
+            "-c:a", "pcm_s16le",
+            str(chunk_dir / "chunk_%03d.wav"),
         ],
         capture_output=True, text=True, timeout=120,
     )
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {r.stderr[:300]}")
-    return sorted(chunk_dir.glob("chunk_*.flac"))
+    return sorted(chunk_dir.glob("chunk_*.wav"))
 
 
 def _stt_chunk(args) -> list[dict]:
@@ -91,7 +95,7 @@ def _stt_chunk(args) -> list[dict]:
         f"{STT_URL}?key={key}",
         json={
             "config": {
-                "encoding": "FLAC",
+                "encoding": "LINEAR16",
                 "sampleRateHertz": SAMPLE_RATE,
                 "languageCode": language,
                 "enableAutomaticPunctuation": True,

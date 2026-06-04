@@ -740,3 +740,38 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 注册:boot `navigator.serviceWorker.register('/pdf/sw.js',{scope:'/pdf/'})` + `navigator.storage.persist()`(配合 Cache Storage,系统几乎不清)。
 - 三层缓存叠加:① page-image immutable HTTP 缓存(同会话快) ② Cache Storage(SW,跨会话/抗清/离线) ③ read-ahead 预取(`_prefetchAround` 前后±3页 → 经 SW 进 Cache Storage)。看过+预取的页持久存住,翻页瞬开、离线可读。
 - 注:Cache Storage 会随阅读增长;`pdf-pages-v1` 版本号 bump 会清旧缓存。需要时可加按页数/容量的 LRU 修剪(暂未做,靠 iOS 配额兜底)。
+
+### 24. 跨端偏好同步：PWA ↔ Safari ↔ 多设备（2026-06-03）
+- 动机:用户反馈「装到主屏的 PWA 里的 PDF 设置、阅读进度(当前页)、旋转排版都跟 Safari 不同步」。**根因:iOS 把"安装的 PWA(standalone)"和"Safari 标签"当成两个独立存储沙箱**——localStorage 不互通。阅读器所有偏好(设置面板项、`pdf-last-positions` 阅读进度、`pdf-layout:*`/`pdf-auto-orient` 旋转排版)都存 localStorage → 两边各存各的,旋转不切排版/进度不还原全是因为目标沙箱里这些键是空的。
+- **成熟方案 = 服务端按用户存偏好,各端启动时拉取**(Kindle/Google Books 同步阅读进度同款)。
+- **后端**(`pdf_reader.py`):`/pdf/api/prefs` GET 回 `{ok, prefs:{...}}`,POST `{patch:{k:v|null}}` 合并(null=删键);存 `state/pdf-prefs/<safe-username>.json`(用户名经 `[^A-Za-z0-9_.-]→_` 清洗,无 session 回 `anon`)。需登录(`/pdf` 蓝图本就在 PROTECTED_PREFIXES,未登录 GET 会 302 到 /login,前端 fetch 跟随后拿到 HTML→`.json()` 抛错被 try/catch 吞,优雅降级)。
+- **前端**(`01-boot.js` 顶部,**必须在任何 `pdf-*` localStorage 读取之前**):
+  - `_seedPrefs()`:GET 偏好,用**原始 `setItem`**(`_origSetItem`,不触发回传)灌进 localStorage;跳过本次会话已本地改过的键(`_prefTouched` Set,防后台刷新覆盖刚改的值)。
+  - **SWR(stale-while-revalidate)**:本沙箱**首次**(无 `pdf-prefs-synced` 标记)才 `await` 阻塞拉取(否则下面 `_imgMode`/`readMode`/orient 读到空)——配 **1.5s 超时**防慢网卡死;之后每次用本地已同步值**秒开** + 后台静默 `_seedPrefs()` 刷新(跨设备改动延迟"下一次打开"生效)。`pdf-prefs-synced` 标记用 `_origSetItem` 写 → 不回传 → 永不落服务端 → 每个沙箱独立判首次。
+  - **回传**:override `localStorage.setItem`——凡 `pdf-*`(排除大块 `pdf-qhist-*` 问答历史、排除 `pdf-prefs-synced`)写入都进 `_prefQueue`,防抖 1.5s POST `{patch}`。`_prefTouched.add(k)` 标记。
+- 效果:设置/阅读进度/旋转排版三者在 PWA、Safari、多设备间自动同步;旋转排版恢复正常(`pdf-auto-orient`+`pdf-layout:*` 带过去了)。**注:旋转自动切排版是 opt-in**(设置里开`pdf-auto-orient`);宽度适应随容器宽变由 ResizeObserver 始终重算(与同步无关)。
+- ⚠ 单用户低冲突场景够用(末写胜),没做向量时钟/冲突合并。`pdf-qhist-*` 故意不同步(体积大、本就各端独立查看)。
+
+### 25. 全局搜索：跨所有 PDF 书的全文（SQLite FTS5 trigram）（2026-06-03）
+- 需求:用户选「全部 PDF 书的正文」搜索(Google Books 图书馆搜索体验),点结果直接深链到阅读器对应页。**不建笔记查看器**(只搜 PDF 正文)。
+- **索引器** `scripts/build_search_index.py`:扫 vault 所有 PDF(排除 `.orig/.compressed`),逐页纯文本入 **SQLite FTS5**(`state/pdf-search.db`)。
+  - **trigram 分词器**:中/日/英统一**子串匹配**(避开 unicode61 把整段 CJK 当一个 token 的坑),≥3 字走 FTS5 + **bm25 排序**。
+  - **external-content + 触发器**:`pages_data`(真源 id/file/page/body)+ `pages_fts`(`content='pages_data'`)+ ai/ad/au 三触发器自动同步 → 删书 = `DELETE FROM pages_data WHERE file=?`,FTS 自动跟删。
+  - **增量**:`meta` 表记每本 mtime,只重建新增/改动的书;磁盘消失的书清出。页文本**复用** `state/pdf-text-index/<sha1(rel)[:16]>-<mtime>.json`(与阅读器 F4 单本搜索共享缓存)。`optimize` 仅在有变动时跑。
+  - 实测:24 本 9959 页全量 ~38s;无变动增量 ~0.07s。少数扫描书(无文字层)只索引到很少页 → 需 OCR 流水线补文字层(已知限制)。
+- **后端**(`pdf_reader.py`):
+  - `GET /pdf/search` → 渲染 `pdf_search.html`。
+  - `GET /pdf/api/global-search?q=&limit=` → `{ok,q,books:[{file,name,dir,hits,pages:[{page,snippet,pos,qlen}]}],total_books,total_hits,truncated}`。**q≥3 字**:FTS5 `MATCH '"..."'`(双引号当字符串避开查询语法)+ bm25 order;**q<3 字**(如 2 字 CJK 词「情報」「向量」):trigram 无法匹配 → `body LIKE '%q%' ESCAPE` 子串兜底。snippet **不用 FTS5 的 `snippet()`**(trigram 只高亮 3-char token,如 `《deriva》`)→ 用 `_clean_snippet` 从整页 body 找首处命中、折叠空白、±40 字上下文 + 返回 `pos` 供前端精确加粗。结果按 bm25 序分组到书(dict 插入序=最佳命中书在前),书内按页序。`mode=ro` 只读打开。cap 300 行 + `truncated` 标记。
+- **前端** `templates/pdf_search.html`:暗色(匹配书库页 #1a1d24/#10162a),搜索即查(250ms 防抖 + AbortController + `_seq` 防竞态),结果按书分组(>4 本默认折叠、≤4 本展开),每条命中 `pos+qlen` 精确 `<mark>` 加粗(避 HTML 注入 + 大小写差异),点命中 → `/pdf/view?file=<rel>&page=<n>`。支持 `?q=` 预填。
+- **入口**:书库页(`pdf_index.html`)筛选框旁加「🔎 全文搜索」按钮。nav 抽屉链接是用户自管的(默认仅 3 条),没硬塞;Cmd+K 是桌面思路对 iPad 触屏价值低,未做。
+- **保鲜**:`scripts/quick_sync.py`(每 15min systemd timer)第 4 步跑 `build_search_index.py` 增量 → 新书/改动 15 分钟内入索引,无变动近零成本。
+
+### 26. 日语阅读 3 连修：跨行词组下划线 / 西文词内空格 / 词组标掌握（2026-06-04，`_CHAR_CACHE_VER`→9）
+用户报三个连带 bug，根因各不同：
+
+- **① 跨行词组上半段没下划线**（如收藏词组「公表する」跨行，只下半行有线）。根因:`_build_jp_vocab_marks` 按 `w` 分组 token 时，**遇到中间的 sp char 就 `break` 终止分组** → 换行处的空格把同一个 `w` 的词组切成两段，各自查词（上半段查不到 vocab 笔记 → 不画）。修:分组 `while` 条件只判 `chars[j].get("w")==wid`，**sp char 跳过不计入 surface 但不终止分组**（`_merge_favorite_phrases` 给词组内部含跨行空格的 char 也设了同 `w`）。rects 循环本就按行高分段 → 多行各画一条。`reader.src/08-charlayer.js::renderVocabUnderlines` 早已逐 rect 画，无需改前端。
+
+- **② 选「Web」变成「W eb」+ 只出多词工具条、无「已掌握」**。根因:PyMuPDF rawdict 对**字距拉开(tracking)的西文词**会在词内插一个**合成空格 glyph**；PyMuPDF `words` 把 W/e/b 归同一个 `w`（所以选中按 `w` 扩展会带上那个空格 → surface「W eb」），含空格 → 前端单词正则 `/^[A-Za-z]+$/` 不通过 → 落到词组工具条、查不出单词、无「已掌握」。修:`_compute_page_chars` 抽完字符、分词后加 `_stitch_latin_words(chars)` —— 删掉「同行前后非空格 char 都是单个 ASCII 字母且二者 `w` 相同且 ≥0」的内部空格（用 PyMuPDF 自己的词分组当判据，**词间空格**前后 `w` 不同→保留，零误删）。删后「Web」连续 → 单词工具条 + 已掌握正常。须 bump `_CHAR_CACHE_VER`（8→9）废旧缓存。覆盖 U+0020/00A0/2009/200A/202F/2008/2006 等空格。
+
+- **③ 收藏词组「标记掌握」无效（且会建幽灵 vocab 笔记）**。根因:词组 popover 的「标记掌握」原走 `/api/vocab-mark`，用词组 surface 当 lemma → 建出 `资源/vocab/w/web browser.md` 幽灵笔记，跟下划线（按组成词/合并 token 的 `w`）脱节。修:**独立词组掌握 store** `state/pdf-phrase-mark.json`（归一化键=折叠空白+小写）+ 路由 `/pdf/api/phrase-mark`（GET 列表 / POST `{text,mark}`）。`_merge_favorite_phrases` 现合并 `收藏∪已掌握` 词组，已掌握的给 char 打 `favm=1`；`_build_vocab_marks`/`_build_jp_vocab_marks` 见 `favm` 即跳过下划线。前端 `15-phrase-wordpop.js`:`showPhrasePopover` 初始态读 `_phraseMarkSet`、`_wordPopMaster` 对 `phrase` 走 phrase-mark（标完 `refreshCharsWForAllPages` 重画→线消失）。另:`/api/vocab-mark` 加守卫，含空格的「词」直接 400（防别处再建幽灵笔记，词组必须走 phrase-mark）。
+- 验证:`_stitch_latin_words` 5 单测 + 6 真实页残留词内空格=0；phrase-mark/vocab-mark 守卫 test_client 端到端通过。

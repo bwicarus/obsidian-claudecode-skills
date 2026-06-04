@@ -1,0 +1,180 @@
+{% extends "fitness/_base.html" %}
+{% block title %}3D 肌群图{% endblock %}
+{% block content %}
+<div class="card" style="padding:0;overflow:hidden;">
+  <div id="body3d" style="width:100%;height:68vh;min-height:420px;position:relative;
+        background:radial-gradient(circle at 50% 32%, #16202e, #0b0f16);touch-action:none;">
+    <div id="b3-loading" style="position:absolute;inset:0;display:flex;align-items:center;
+         justify-content:center;color:var(--text-dim);">加载 3D 模型…</div>
+    <div id="b3-legend" style="position:absolute;right:10px;top:10px;background:#0a0f1ca8;
+         border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:11px;line-height:1.9;"></div>
+    <div id="b3-info" style="position:absolute;left:10px;right:10px;bottom:10px;background:#0a0f1cdd;
+         border:1px solid var(--border);border-radius:8px;padding:9px 13px;font-size:13px;display:none;"></div>
+  </div>
+</div>
+<div class="card small dim">
+  拖动旋转 · 双指缩放 · 点肌肉看详情。颜色 = 近 4 周训练容量的强弱 / 拮抗失衡（数据来自全身平衡体检）。
+  <span style="display:inline-block;margin-top:6px;">
+    <button class="btn small" id="b3-front">正面</button>
+    <button class="btn small" id="b3-back">背面</button>
+    <a class="btn small" href="/private/fitness/">🩺 看体检详情</a>
+  </span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+import * as THREE from '/static/three/three.module.min.js';
+import { OrbitControls } from '/static/three/OrbitControls.js';
+
+const COL = { green: 0x3fb950, yellow: 0xd29922, red: 0xf85149, insufficient: 0x49515f };
+const STATUS_TXT = { green: '充足/均衡', yellow: '偏弱', red: '明显弱/失衡', insufficient: '数据不足' };
+const host = document.getElementById('body3d');
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, host.clientWidth / host.clientHeight, 0.1, 100);
+camera.position.set(0, 0.15, 3.1);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(host.clientWidth, host.clientHeight);
+host.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.1;
+controls.minDistance = 1.6; controls.maxDistance = 6; controls.target.set(0, 0, 0);
+controls.enablePan = false;
+scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+const dl = new THREE.DirectionalLight(0xffffff, 0.9); dl.position.set(1.5, 2, 2.5); scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0x88aaff, 0.4); dl2.position.set(-1.5, 0.5, -2); scene.add(dl2);
+
+// 半透明"玻璃"身体外壳(锥形收腰躯干 + 圆头颈 + 加粗四肢,比方块/胶囊像人多了)
+const shellMat = new THREE.MeshStandardMaterial({ color: 0xa6bbdd, transparent: true, opacity: 0.12, depthWrite: false, roughness: 0.65, metalness: 0.0 });
+function addShell(geo, pos, quat, scale){ const m = new THREE.Mesh(geo, shellMat); m.position.set(...pos); if (quat) m.quaternion.copy(quat); if (scale) m.scale.set(...scale); scene.add(m); }
+function capGeoQuat(a, b, r){
+  const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
+  const dir = B.clone().sub(A), len = dir.length();
+  const geo = new THREE.CapsuleGeometry(r, Math.max(0.01, len - 2 * r), 8, 16);
+  const mid = A.clone().add(B).multiplyScalar(0.5);
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  return { geo, pos: [mid.x, mid.y, mid.z], quat: q };
+}
+// 头(蛋形)+ 颈 + 锥形躯干(肩宽腰窄,前后压扁)+ 盆 + 四肢
+addShell(new THREE.SphereGeometry(0.115, 24, 18), [0, 0.74, 0], null, [1, 1.15, 0.95]);
+addShell(new THREE.CylinderGeometry(0.05, 0.07, 0.12, 16), [0, 0.645, 0]);
+addShell(new THREE.CylinderGeometry(0.205, 0.135, 0.46, 28, 1), [0, 0.34, 0], null, [1, 1, 0.62]);   // 躯干 V 形
+addShell(new THREE.CylinderGeometry(0.135, 0.17, 0.20, 28, 1), [0, 0.02, 0], null, [1, 1, 0.72]);     // 盆
+for (const sx of [1, -1]) {
+  addShell(new THREE.SphereGeometry(0.085, 18, 14), [sx*0.205, 0.535, 0], null, [1, 0.85, 0.85]);     // 肩圆角
+  let c;
+  c = capGeoQuat([sx*0.205, 0.52, 0], [sx*0.265, 0.17, 0], 0.052); addShell(c.geo, c.pos, c.quat);     // 上臂
+  c = capGeoQuat([sx*0.265, 0.17, 0], [sx*0.30, -0.16, 0], 0.043); addShell(c.geo, c.pos, c.quat);      // 前臂
+  c = capGeoQuat([sx*0.10, -0.04, 0], [sx*0.12, -0.48, 0], 0.085); addShell(c.geo, c.pos, c.quat);      // 大腿
+  c = capGeoQuat([sx*0.12, -0.50, 0], [sx*0.12, -0.90, 0], 0.058); addShell(c.geo, c.pos, c.quat);      // 小腿
+}
+
+// 肌群定义:key → part。ell=椭球肌腹 [sx,sy,sz(半径)],[x,y,z];cap=沿肢体的肌腹 [ax..bz,r]。
+// 左右对称自动镜像(mir=true)。椭球比方块/球像肌肉得多。
+const MUSC = {
+  chest:      { mir: true,  parts: [['ell', [0.085, 0.10, 0.055], [0.072, 0.46, 0.10]]] },        // 胸大肌(扁椭)
+  core:       { mir: false, parts: [['ell', [0.085, 0.135, 0.05], [0, 0.18, 0.10]]] },             // 腹
+  front_delt: { mir: true,  parts: [['ell', [0.072, 0.072, 0.06], [0.205, 0.53, 0.05]]] },         // 前束
+  side_delt:  { mir: true,  parts: [['ell', [0.07, 0.085, 0.075], [0.24, 0.52, 0]]] },             // 中束(肩最外)
+  rear_delt:  { mir: true,  parts: [['ell', [0.068, 0.068, 0.058], [0.205, 0.53, -0.05]]] },       // 后束
+  biceps:     { mir: true,  parts: [['cap', [0.215, 0.45, 0.055, 0.27, 0.22, 0.055, 0.05]]] },     // 二头(上臂前)
+  triceps:    { mir: true,  parts: [['cap', [0.215, 0.45, -0.055, 0.27, 0.22, -0.055, 0.052]]] },  // 三头(上臂后)
+  back:       { mir: true,  parts: [['ell', [0.09, 0.145, 0.05], [0.08, 0.40, -0.095]]] },          // 背阔(扁)
+  glutes:     { mir: true,  parts: [['ell', [0.092, 0.085, 0.072], [0.082, -0.02, -0.10]]] },       // 臀
+  quads:      { mir: true,  parts: [['cap', [0.10, 0.02, 0.058, 0.12, -0.44, 0.05, 0.063]]] },      // 股四(大腿前)
+  hamstrings: { mir: true,  parts: [['cap', [0.10, 0.02, -0.058, 0.12, -0.44, -0.05, 0.058]]] },    // 腘绳(大腿后)
+  calves:     { mir: true,  parts: [['cap', [0.12, -0.52, -0.038, 0.12, -0.78, -0.038, 0.053]]] },  // 小腿(后上)
+};
+const meshesByKey = {};   // key → [mesh,...]
+function statusColor(s){ return COL[s] || COL.insufficient; }
+function buildPart(def, sx){
+  let geo, pos, quat = null, scl = null;
+  if (def[0] === 'ell'){ geo = new THREE.SphereGeometry(1, 18, 14); const s = def[1], p = def[2]; pos = [p[0]*sx, p[1], p[2]]; scl = s; }
+  else { const a = def[1]; const c = capGeoQuat([a[0]*sx, a[1], a[2]], [a[3]*sx, a[4], a[5]], a[6]); geo = c.geo; pos = c.pos; quat = c.quat; }
+  return { geo, pos, quat, scl };
+}
+function buildMuscles(statusMap){
+  for (const key in MUSC){
+    const def = MUSC[key];
+    const st = (statusMap[key] || {}).status || 'insufficient';
+    const mat = new THREE.MeshStandardMaterial({ color: statusColor(st), transparent: true, opacity: 0.95,
+      roughness: 0.45, emissive: statusColor(st), emissiveIntensity: 0.14 });
+    meshesByKey[key] = [];
+    const sides = def.mir ? [1, -1] : [1];
+    for (const sx of sides){
+      for (const p of def.parts){
+        const { geo, pos, quat, scl } = buildPart(p, sx);
+        const m = new THREE.Mesh(geo, mat);
+        m.position.set(...pos); if (quat) m.quaternion.copy(quat); if (scl) m.scale.set(...scl);
+        m.userData.key = key;
+        scene.add(m); meshesByKey[key].push(m);
+      }
+    }
+  }
+}
+
+// 图例
+document.getElementById('b3-legend').innerHTML = ['green','yellow','red','insufficient']
+  .map(s => `<div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+    background:#${COL[s].toString(16).padStart(6,'0')};margin-right:5px;vertical-align:-1px;"></span>${STATUS_TXT[s]}</div>`).join('');
+
+// 点击/触摸 → raycast 选中肌群
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+let DATA = {};
+function showInfo(key){
+  const info = document.getElementById('b3-info');
+  const d = (DATA.muscles || {})[key]; if (!d){ info.style.display = 'none'; return; }
+  const c = '#' + (COL[d.status] || COL.insufficient).toString(16).padStart(6, '0');
+  let extra = '';
+  if (d.metric) extra = ` · ${d.metric} = ${d.value == null ? '—' : d.value}`;
+  else if (d.weekly != null) extra = ` · 周均 ${d.weekly} 组`;
+  info.innerHTML = `<span style="color:${c};font-weight:700;">${d.label || key}</span>
+    <span style="color:${c};">[${STATUS_TXT[d.status] || ''}]</span>${extra}`;
+  info.style.display = 'block';
+}
+function onPick(ev){
+  const r = renderer.domElement.getBoundingClientRect();
+  const x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+  const y = (ev.touches ? ev.touches[0].clientY : ev.clientY) - r.top;
+  ndc.x = (x / r.width) * 2 - 1; ndc.y = -(y / r.height) * 2 + 1;
+  ray.setFromCamera(ndc, camera);
+  const hit = ray.intersectObjects(Object.values(meshesByKey).flat(), false)[0];
+  if (hit) showInfo(hit.object.userData.key);
+}
+renderer.domElement.addEventListener('pointerdown', onPick);
+
+// 正/背面快捷
+let _camAnim = null;
+function camTo(z){ _camAnim = { from: camera.position.clone(), to: new THREE.Vector3(0, 0.15, z), t: 0 }; }
+document.getElementById('b3-front').onclick = () => camTo(3.1);
+document.getElementById('b3-back').onclick  = () => camTo(-3.1);
+
+function resize(){ camera.aspect = host.clientWidth / host.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(host.clientWidth, host.clientHeight); }
+addEventListener('resize', resize);
+function loop(){
+  requestAnimationFrame(loop);
+  if (_camAnim){ _camAnim.t = Math.min(1, _camAnim.t + 0.06); camera.position.lerpVectors(_camAnim.from, _camAnim.to, _camAnim.t); if (_camAnim.t >= 1) _camAnim = null; }
+  controls.update(); renderer.render(scene, camera);
+}
+loop();
+
+// 拉数据 → 上色
+fetch('/api/fitness/balance_profile').then(r => r.json()).then(d => {
+  document.getElementById('b3-loading').style.display = 'none';
+  if (!d.ok){ buildMuscles({}); return; }
+  DATA = d; buildMuscles(d.muscles || {});
+  // 顶部小结
+  const ratios = (d.profile || {}).ratios || [];
+  const bad = ratios.filter(r => r.status === 'red' || r.status === 'yellow');
+  const info = document.getElementById('b3-info');
+  if (bad.length){
+    info.innerHTML = '点肌肉看详情 · 当前偏弱：' + bad.map(r => r.name.replace(' 容量比', '')).join('、');
+    info.style.display = 'block';
+  } else if ((d.profile || {}).total_logged_sets < 8){
+    info.innerHTML = '记录的训练还太少，多练几次（覆盖 Push/Pull/Legs）颜色才准。'; info.style.display = 'block';
+  }
+}).catch(e => { document.getElementById('b3-loading').textContent = '加载失败：' + e.message; });
+</script>
+{% endblock %}

@@ -662,11 +662,29 @@ def is_japanese(word: str) -> bool:
     return bool(_KANJI_RE.search(word)) and not _LATIN_RE.search(word)
 
 
-def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | None:
+# JP 词典 prompt 版本。**改 prompt 就 +1** → 含汉字的旧缓存(可能带中文同形词语感,如
+# 下流 误标"低级/粗俗")在下次查词时自动重生成;纯假名词无伪朋友风险,旧缓存仍直接命中(不浪费 AI)。
+_JP_PROMPT_VER = 4
+
+
+def _jp_langs_label(langs) -> tuple[str, bool]:
+    """本书声明语言 → (中文标签, 是否纯日语)。空/None → 当作纯日语(lookup_jp 只在日语路径被调)。"""
+    ls = [l for l in (langs or []) if l]
+    if not ls:
+        return "日语", True
+    names = {"ja": "日语", "zh": "中文", "en": "英语"}
+    label = "、".join(names.get(l, l) for l in ls)
+    return label, (ls == ["ja"])
+
+
+def lookup_jp(word: str, context: str = "", model: str = "sonnet", langs=None) -> dict | None:
     """日语词 → {reading, romaji, pos, zh, examples}。AI 生成,永久本地缓存。
 
     缓存命中离线秒回(等于边读边攒一本自己的中日词典);未命中调 Claude Haiku
     (低 effort,~2-4s)。Gemini Flash 若可用更快,但其 billing 常挂,故主用 Claude。
+
+    langs = 本书声明语言(来自每本 PDF 的语言设置)。lookup_jp 只在「按日语处理」时被调,
+    所以一律按**日语词**出释义,并显式警告中日同形异义(伪朋友),绝不套用中文同形词语感。
     """
     word = (word or "").strip()
     if not word:
@@ -683,7 +701,11 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | Non
 
     cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
     if cached:
-        return _attach_examples({**cached, "from_cache": True})
+        # 针对性失效:含汉字的词若是旧 prompt 版本生成 → 丢弃重生成(防中文同形词语感残留);
+        # 纯假名词无伪朋友风险,旧缓存照用(不为升级 prompt 而浪费 AI 重查 5000+ 词)。
+        has_kanji = bool(_KANJI_RE.search(word))
+        if cached.get("pv") == _JP_PROMPT_VER or not has_kanji:
+            return _attach_examples({**cached, "from_cache": True})
     # 调 AI
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -691,8 +713,24 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | Non
     except Exception:
         return None
     ctx = f"(出现在句子:{context[:80]})" if context else ""
+    lang_label, pure_ja = _jp_langs_label(langs)
+    book_note = (f"这是一本**纯日语书**(声明语言:{lang_label}),其中所有汉字词都是**日语**。"
+                 if pure_ja else
+                 f"本书声明语言:{lang_label};此处按**日语**处理这个词。")
     prompt = (
-        f"你是日中词典。给日语词「{word}」{ctx}的词典条目。严格只输出 JSON,不要解释:\n"
+        f"你是权威的【日语→中文】词典(广辞苑/大辞林 水准)。给日语词「{word}」{ctx}的词典条目。\n"
+        f"{book_note}请给出它**在日语里的实际含义**。\n"
+        "⚠ 务必小心中日同形异义(伪朋友),两种错都要避免:\n"
+        "(A) **别把中文同形词才有的义项/贬义混进来**(最常见的错):下流(かりゅう) 日语里**只有**"
+        "「下游 / 社会下层」两义,**没有**中文的「猥琐·色情·粗鄙·下品」义(日语那个义用 下品/下劣,不是 下流);"
+        "勉強=学习 /(买卖)便宜,不是「勉强」;手紙=书信,不是「手纸」;汽車=火车,不是「汽车」;"
+        "検討=研究·探讨,不是「检讨」;質問=提问,不是「质问」。\n"
+        "(B) 反过来,**该词在日语辞典里确实带的语感也别淡化**:愛人(あいじん)=情夫·情妇(婚外·不伦对象,"
+        "带秘密·负面语感),不是中文中性的「爱人/恋人」(日语正面恋人用 恋人);適当 既有「恰当」也有「敷衍·随便」;"
+        "老婆(ろうば)=老太婆,不是「妻子」。\n"
+        "原则:**只给日语辞典里确实存在的义项**;拿不准某贬义日语到底有没有时,宁可不加,**绝不为了和中文对称而臆造**。\n"
+        "按重要性排序(核心义在前);首义别用与中文同形、易误解的词打头(如 経理 用「会计·财务管理」而非「经理」)。\n"
+        "严格只输出 JSON,不要解释:\n"
         '{"reading":"假名读音(振り仮名)","romaji":"罗马字","pos":"词性(名詞/動詞/形容詞/副詞 等)",'
         '"zh":"简洁中文释义,多义用;分隔","examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
         "examples 给 1-2 句即可。若该词无意义或非日语,zh 填\"(无)\"。"
@@ -713,6 +751,7 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet") -> dict | Non
         return None
     data["word"] = word
     data["source"] = "jp_ai"
+    data["pv"] = _JP_PROMPT_VER
     _cache_save("jp", word, data)
     return _attach_examples({**data, "from_cache": False})
 

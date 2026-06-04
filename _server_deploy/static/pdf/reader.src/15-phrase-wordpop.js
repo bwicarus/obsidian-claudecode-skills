@@ -1,7 +1,10 @@
 // ──────── F6 词组：收藏（作分词依据）+ 词组详情面板 ────────
 let _phraseFavSet = new Set();
+let _phraseMarkSet = new Set();   // 已掌握词组(归一化键):标掌握后不再画生词下划线
+const _phraseNorm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
 async function _loadPhraseFavs() {
   try { const d = await (await fetch('/pdf/api/phrases')).json(); if (d.ok) _phraseFavSet = new Set(d.phrases || []); } catch (_) {}
+  try { const d = await (await fetch('/pdf/api/phrase-mark')).json(); if (d.ok) _phraseMarkSet = new Set(d.mastered || []); } catch (_) {}
 }
 window.onPhrase = () => {
   const t = (lastSelText || '').trim();
@@ -144,7 +147,8 @@ function _reopenExplain() {
 window.showPhrasePopover = async (text, opts) => {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
-  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false, mastered: false};
+  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false,
+                   mastered: _phraseMarkSet.has(_phraseNorm(text))};
   pop.style.display = 'block';
   window._wordPopOpenAt = Date.now();
   pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
@@ -408,8 +412,30 @@ window._speakCurWord = () => {
 // 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
 window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
-  const w = s.lemma || s.word;
   const next = !s.mastered;
+  // 词组(多词/含空格):走 phrase-mark store，不建 ghost vocab 笔记；标掌握后该词组不再画生词下划线
+  if (s.phrase) {
+    const t = s.word;
+    if (btn) btn.disabled = true;
+    fetch('/pdf/api/phrase-mark', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: t, mark: next ? 'mastered' : ''}),
+    }).then(r => r.json()).then((d) => {
+      if (d && d.ok === false) throw new Error(d.error || 'fail');
+      s.mastered = next;
+      _phraseMarkSet = new Set(d.mastered || []);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
+        btn.title = s.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）';
+        btn.classList.toggle('wp-anki', s.mastered);
+      }
+      refreshCharsWForAllPages();   // 重拉 w + 重画下划线(掌握→该词组下划线消失)
+      _toast?.(s.mastered ? '已掌握，下划线消失' : '已取消掌握');
+    }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
+    return;
+  }
+  const w = s.lemma || s.word;
   const url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
   const mark = next ? 'known' : 'unknown';   // 日英统一口径(jp-vocab-mark 已接受 known/unknown)
   if (btn) btn.disabled = true;
