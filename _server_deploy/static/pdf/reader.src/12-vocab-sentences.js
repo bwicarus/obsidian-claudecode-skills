@@ -163,7 +163,8 @@ function renderVocabSentences(pw, sentences) {
       // clamp 到句首所在行的文本右边界(rects[0][2])，不伸进纸张右 margin → 不画出延伸到页边的线
       const lineRight = (rects[0] ? rects[0][2] * sx : visR);
       const maxW0 = Math.max(charW0, lineRight - left0);
-      const wantW0 = Math.min(Math.max(charW0 * 6, 48), maxW0);
+      // 角标臂长固定 ~44px(不再按字宽×6 → CJK 首字 34pt×6=204pt 像上划线;首尾一致干净小角标)
+      const wantW0 = Math.min(Math.max(charW0, 44), maxW0);
       btn0.style.left = left0 + 'px';
       btn0.style.top = top0 + 'px';
       btn0.style.width = wantW0 + 'px';
@@ -196,7 +197,7 @@ function renderVocabSentences(pw, sentences) {
       // margin)→ 去边模式下「⌟」的右/下边不会被 overflow:hidden 裁成半截(末字本身在可见区内,边框必可见)。
       const charW = (lc[2] - lc[0]) * sx;
       const charH = (lc[3] - lc[1]) * sy;
-      const wantW = Math.max(charW * 6, 48);   // 至少 48px 宽（约 5-6 个字符）
+      const wantW = Math.max(charW, 44);   // 角标臂长固定 ~44px(跟句首一致;不再按字宽×6)
       // 「⌟」右/下边框落在末字外侧间隙(看得见、不压字形)；末字贴可见右/下边界时夹回(否则竖/横线被裁)
       const rightE = Math.min(visR, lc[2] * sx + GAP);
       const botE   = Math.min(visB, lc[3] * sy + GAP);
