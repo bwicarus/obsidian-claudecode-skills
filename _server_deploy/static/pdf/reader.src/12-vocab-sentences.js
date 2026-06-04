@@ -109,6 +109,13 @@ function renderVocabSentences(pw, sentences) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt;
   const sy = cssH / pageHPt;
+  // 可见窗口(样式坐标)：去边时 .crop-on>* 给本层加了 translate(-crop-l,-crop-t)，wrap overflow:hidden 裁切。
+  // 所以 L 按钮的 left/top 落在 [cropL, cropL+裁后宽] × [cropT, cropT+裁后高] 内才不被裁。非去边 = [0,全宽]。
+  const _cropL = parseFloat(pw.style.getPropertyValue('--crop-l')) || 0;
+  const _cropT = parseFloat(pw.style.getPropertyValue('--crop-t')) || 0;
+  const _visW = layer.clientWidth || cssW, _visH = layer.clientHeight || cssH;
+  const visL = _cropL, visR = _cropL + _visW, visT = _cropT, visB = _cropT + _visH;
+  const GAP = 3;   // L 边框落在字外侧间隙(看得见,不压字形);贴可见边界时夹回(防被裁)
   for (let si = 0; si < sentences.length; si++) {
     const s = sentences[si];
     const sid = String(si);
@@ -150,16 +157,17 @@ function renderVocabSentences(pw, sentences) {
       btn0.style.setProperty('--sent-fill', fill);
       const charW0 = (fc[2] - fc[0]) * sx;
       const charH0 = (fc[3] - fc[1]) * sy;
-      // border-box：左/上外缘**贴齐首字左/上边缘**(不再 -2 外扩)→ 去边/overflow:hidden 不会把「⌐」裁成半截
-      const left0 = Math.max(0, fc[0] * sx);
-      // clamp 到句首所在行的文本右边界(rects[0][2])，不伸进纸张右 margin → 不再画出延伸到页边的线
-      const lineRight = (rects[0] ? rects[0][2] * sx : cssW);
+      // 「⌐」左/上边框落在首字外侧间隙(看得见、不压字形)；贴可见左/上边界时夹回(否则竖/横线被裁)
+      let left0 = Math.max(visL, fc[0] * sx - GAP);
+      let top0  = Math.max(visT, fc[1] * sy - GAP);
+      // clamp 到句首所在行的文本右边界(rects[0][2])，不伸进纸张右 margin → 不画出延伸到页边的线
+      const lineRight = (rects[0] ? rects[0][2] * sx : visR);
       const maxW0 = Math.max(charW0, lineRight - left0);
       const wantW0 = Math.min(Math.max(charW0 * 6, 48), maxW0);
       btn0.style.left = left0 + 'px';
-      btn0.style.top = Math.max(0, fc[1] * sy) + 'px';
+      btn0.style.top = top0 + 'px';
       btn0.style.width = wantW0 + 'px';
-      btn0.style.height = charH0 + 'px';
+      btn0.style.height = (fc[3] * sy - top0) + 'px';   // 到首字底
       btn0.addEventListener('click', (e) => {
         e.stopPropagation();
         if (_dragMoved) return;   // 刚从 L 按钮拖选 → 不触发整句翻译
@@ -189,13 +197,15 @@ function renderVocabSentences(pw, sentences) {
       const charW = (lc[2] - lc[0]) * sx;
       const charH = (lc[3] - lc[1]) * sy;
       const wantW = Math.max(charW * 6, 48);   // 至少 48px 宽（约 5-6 个字符）
-      const rightE = lc[2] * sx;               // 右外缘 = 末字右边缘
-      let leftE = Math.max(0, rightE - wantW); // 向左延伸;行首时夹到 0
-      const widthE = Math.max(charW, rightE - leftE);
+      // 「⌟」右/下边框落在末字外侧间隙(看得见、不压字形)；末字贴可见右/下边界时夹回(否则竖/横线被裁)
+      const rightE = Math.min(visR, lc[2] * sx + GAP);
+      const botE   = Math.min(visB, lc[3] * sy + GAP);
+      let leftE = Math.max(visL, rightE - wantW);   // 向左延伸;行首时夹到可见左界
+      const top = lc[1] * sy;
       btn.style.left = leftE + 'px';
-      btn.style.top = Math.max(0, lc[1] * sy) + 'px';
-      btn.style.width = widthE + 'px';
-      btn.style.height = charH + 'px';
+      btn.style.top = top + 'px';
+      btn.style.width = Math.max(charW, rightE - leftE) + 'px';
+      btn.style.height = Math.max(charH, botE - top) + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (_dragMoved) return;   // 刚从 L 按钮拖选 → 不触发整句翻译

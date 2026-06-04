@@ -815,3 +815,4 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`→`border-box`(border 改画在框内缘);② `12-vocab-sentences.js`
 几何**贴齐字符边缘**——句末按钮右外缘=末字右边缘(`lc[2]*sx`)、句首按钮左外缘=首字左边缘(`fc[0]*sx`),去掉 `-2` 外扩,
 `top/left` 夹 `≥0`。字符本身一定在可见区内 → 边框画在其边缘内侧必可见,不再被裁(crop 与否都成立,无需算裁切坐标)。
+- **修正(同日)**：§31 把边框**贴齐字符边缘**导致竖线压在字形上「看不见」(用户报"竖线又不见了")。改成正解:边框落在字**外侧 GAP=3px 间隙**(看得见、不压字形),**再夹回可见窗口**——去边时 `.crop-on>*` 给本层加 `translate(-crop-l,-crop-t)` + wrap `overflow:hidden`,可见窗口(样式坐标)=`[cropL, cropL+layer.clientWidth] × [cropT, cropT+clientH]`(非去边=`[0,全宽]`)。句首⌐ `left=max(visL, fc0*sx-3)`、句末⌟ `right=min(visR, lc2*sx+3)`/`bot=min(visB, lc3*sy+3)`,leftE 也夹 `≥visL`。普通字符→边框在间隙(可见);贴裁切边界的字符→夹回边界内(仍可见,不被裁)。node 自测 8 例(去边/非去边 × 普通/边缘)通过。
