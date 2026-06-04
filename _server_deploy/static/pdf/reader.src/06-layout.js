@@ -213,8 +213,8 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
-    if (readMode !== 'single') {           // 连续 + 双页 都重建滚动列表(原来只判 continuous 漏了 spread)
-      await setupContinuousMode();
+    if (readMode !== 'single') {           // 连续 + 双页:原地重标尺(不清空容器→不"重新加载");没建过列表才全建
+      if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
       if (wrap.dataset) wrap.dataset.loaded = '0';

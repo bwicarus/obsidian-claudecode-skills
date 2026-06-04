@@ -60,6 +60,30 @@ async function setupContinuousMode() {
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
 
+// 缩放时「原地重标尺」：不清空容器(避免整列塌成占位的"重新加载"感)，只把各 page-wrap 按当前 scale 调整。
+// 已渲染页就地重渲(图片走 _ratchetReqW 缓存→秒回不闪;叠层按新 scale 重算坐标)；未渲染占位只改宽高。
+// 返回 false(没建过列表)→ 调用方回退 setupContinuousMode。global scale 已由 _applyZoom 设好。
+async function _rescaleContinuousInPlace() {
+  const container = document.getElementById('page-container');
+  const wraps = [...container.querySelectorAll('.page-wrap')];
+  if (!wraps.length) return false;
+  let estW = 0, estH = 0;
+  try {
+    const v1 = (await pdfDoc.getPage(1)).getViewport({ scale });
+    estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
+  } catch (_) {}
+  for (const w of wraps) {
+    if (w.dataset.loaded === '1') {
+      w.dataset.loaded = '0';
+      try { await _renderPageInto(parseInt(w.dataset.pageNum, 10), w); } catch (_) {}
+    } else if (estW) {
+      w.style.width = estW + 'px'; w.style.height = estH + 'px';
+    }
+  }
+  return true;
+}
+window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
+
 // ── 内存控制:滚出视口足够远的已渲染页自动卸载(释放 canvas/各叠层),保留占位高度→滚动不跳。 ──
 // iPad 内存吃紧时 iOS 会把整个 Safari 标签回收(回来要重载)。连续模式若把访问过的几百页 canvas 全留
 // 在 DOM,内存无上限增长 → 更早被回收。卸载后 dataset.loaded='0',滚回视口由 IntersectionObserver 重渲。

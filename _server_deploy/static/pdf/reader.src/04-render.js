@@ -37,18 +37,27 @@ function _applyCropToWrap(wrap, cw, ch) {
 
 // 后台预取当前页前后若干页的图(read-ahead,大型文档网站标配):低优先级 fetch → 落进浏览器缓存
 // → 翻到时瞬开。已加载/已预取的页本就被 HTTP immutable 缓存,不重复取(_prefetched 去重)。
+// 页图栅格宽**只增不减**（按页记最大用过的 w）。缩小(zoom out)时不降栅格 → 复用已缓存的更大图、
+// 浏览器降采样显示(清晰),不换 src 重新 fetch → 消除"缩小一下整页白屏重新加载"。放大超过当前栅格才取更高清。
+const _imgRasterW = {};
+function _ratchetReqW(page, w) {
+  const rw = Math.max(w, _imgRasterW[page] || 0);
+  _imgRasterW[page] = rw;
+  return rw;
+}
 const _prefetched = new Set();
 function _prefetchAround(num, radius) {
   if (!_imgMode) return;
   const meta = window.__imgMeta; if (!meta) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cw = Math.floor(meta.page_w * scale);
-  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const baseW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
   const R = radius || 3;
   const want = [];
   for (let d = 1; d <= R; d++) { want.push(num + d); if (num - d >= 1) want.push(num - d); }   // 偏向后页(顺序阅读)
   for (const p of want) {
     if (p < 1 || p > meta.page_count) continue;
+    const reqW = _ratchetReqW(p, baseW);   // 跟渲染用同一 ratchet → 缓存键一致
     const key = p + ':' + reqW;
     if (_prefetched.has(key)) continue;
     _prefetched.add(key);
@@ -70,9 +79,9 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
   wrap.dataset.pageNum = num;
   _applyCropToWrap(wrap, cw, ch);   // 去边:渲染前先收成裁切窄宽(子层 translate)
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页
+  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
   const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
   const img = document.createElement('img');
   img.className = 'page-img'; img.decoding = 'async';

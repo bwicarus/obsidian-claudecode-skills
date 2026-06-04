@@ -224,6 +224,27 @@ function _selByCharRange(pw, sIdx, eIdx) {
   toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
   toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
   toolbar.classList.add('open');
+  // 防溢出屏：选区靠右/靠下时工具栏(max-width 480)会跑出可见区被裁 → 夹回 #main 可见区
+  _clampToolbarIntoView(mainEl, pwRect.top - mainRect.top + mainEl.scrollTop + chars[sIdx].top);
+}
+// 把选择工具栏夹进 #main 可见区(absolute 定位在可滚动的 #main 内;可见区=滚动偏移+clientW/H)。
+// selTopY=选区顶部内容 Y;底部放不下就翻到选区上方。
+function _clampToolbarIntoView(mainEl, selTopY) {
+  const tb = toolbar;
+  const tbW = tb.offsetWidth, tbH = tb.offsetHeight;   // 读 offset 触发 reflow，open 后尺寸已确定
+  if (!tbW || !tbH) return;
+  const visL = mainEl.scrollLeft, visT = mainEl.scrollTop;
+  const visR = visL + mainEl.clientWidth, visB = visT + mainEl.clientHeight;
+  let left = parseFloat(tb.style.left) || 0;
+  let top  = parseFloat(tb.style.top) || 0;
+  if (left + tbW > visR - 8) left = visR - 8 - tbW;   // 右溢 → 左移
+  if (left < visL + 8) left = visL + 8;               // 仍左溢 → 贴左
+  if (top + tbH > visB - 8) {                         // 底溢 → 翻到选区上方
+    const above = (selTopY != null ? selTopY : top) - tbH - 6;
+    top = (above >= visT + 8) ? above : Math.max(visT + 8, visB - 8 - tbH);
+  }
+  tb.style.left = left + 'px';
+  tb.style.top  = top + 'px';
 }
 
 // 按 char 扩展到词边界（英文 \w / CJK 逐字）。空格视作非词字符

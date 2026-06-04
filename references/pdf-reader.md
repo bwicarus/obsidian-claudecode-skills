@@ -800,3 +800,11 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 隐藏后右上角浮出半透明圆形 `#fs-restore`(⤢,fixed top-right,`backdrop-filter` 毛玻璃,`.fs-mode #fs-restore{display:flex}`) → 点它退出全屏。
 - **持久化**:`localStorage['pdf-fullscreen']`,`_applyFullscreen`/`_fsEnabled` 在 06-layout.js。**防刷新闪顶栏**:class 挂 `<html>`(不是 body),`<head>` 里一段**渲染前内联脚本**读 localStorage 先加 `.fs-mode`(早于 body 绘制),reader.js boot 再 `_applyFullscreen` 同步按钮激活态。
 - 左侧 nav `☰` 抽屉手柄、右侧「语法·知识点」侧 tab 不受影响(都是 fixed 边缘元素,全屏下仍可用)。
+
+### 30. 双指缩小不再「重新加载」+ 选择工具栏不溢出屏（2026-06-04）
+两个反馈:
+- **缩小时整页像重新加载**。两个叠加原因 + 各自修法:
+  - ① 图片模式按 `scale` 算栅格宽 `reqW`,缩小→更小 `w` 的新 `img.src`→**网络重取、白屏一下**。修:`_ratchetReqW(page,w)`(`04-render.js`)按页记**最大用过的 w**,缩小不降 → 复用已缓存的更大图、浏览器降采样显示(清晰),不换 src 不重 fetch。放大超过当前栅格才取更高清。`_renderPageImg` + `_prefetchAround` 共用同一 ratchet(缓存键一致)。
+  - ② `_applyZoom` 连续/双页缩放时 `setupContinuousMode()` 会 `container.innerHTML=''` 把整列塌成占位再重建(滚动位置丢→`scrollIntoView`→明显"重载")。修:新增 `_rescaleContinuousInPlace()`(`07-continuous.js`)**不清空容器**,只把各 `page-wrap` 按新 `scale` 调:已渲染页就地重渲(img 走 ratchet 缓存秒回、叠层按新 scale 重算坐标)、未渲染占位只改宽高;IO 不重建(元素还在,继续观察)。`_applyZoom` 优先用它,没建过列表才回退 `setupContinuousMode`。single 模式仍重渲单页(快)。
+- **选区靠右/靠下时工具栏(`#sel-toolbar` max-width 480)跑出屏外被裁**(截图只剩边缘一排色板)。修:`_clampToolbarIntoView(mainEl, selTopY)`(`13-selection.js`)在 `open` 后量 `offsetW/H`,把工具栏夹进 `#main` 可见区(`scrollLeft..+clientW` × `scrollTop..+clientH`):右溢左移、底溢翻到选区上方。
+- 验证:`_ratchetReqW` node 自测(只增不减 + 按页独立)通过;build+check OK。

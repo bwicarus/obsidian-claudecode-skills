@@ -526,18 +526,27 @@ function _applyCropToWrap(wrap, cw, ch) {
 
 // 后台预取当前页前后若干页的图(read-ahead,大型文档网站标配):低优先级 fetch → 落进浏览器缓存
 // → 翻到时瞬开。已加载/已预取的页本就被 HTTP immutable 缓存,不重复取(_prefetched 去重)。
+// 页图栅格宽**只增不减**（按页记最大用过的 w）。缩小(zoom out)时不降栅格 → 复用已缓存的更大图、
+// 浏览器降采样显示(清晰),不换 src 重新 fetch → 消除"缩小一下整页白屏重新加载"。放大超过当前栅格才取更高清。
+const _imgRasterW = {};
+function _ratchetReqW(page, w) {
+  const rw = Math.max(w, _imgRasterW[page] || 0);
+  _imgRasterW[page] = rw;
+  return rw;
+}
 const _prefetched = new Set();
 function _prefetchAround(num, radius) {
   if (!_imgMode) return;
   const meta = window.__imgMeta; if (!meta) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cw = Math.floor(meta.page_w * scale);
-  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const baseW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
   const R = radius || 3;
   const want = [];
   for (let d = 1; d <= R; d++) { want.push(num + d); if (num - d >= 1) want.push(num - d); }   // 偏向后页(顺序阅读)
   for (const p of want) {
     if (p < 1 || p > meta.page_count) continue;
+    const reqW = _ratchetReqW(p, baseW);   // 跟渲染用同一 ratchet → 缓存键一致
     const key = p + ':' + reqW;
     if (_prefetched.has(key)) continue;
     _prefetched.add(key);
@@ -559,9 +568,9 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
   wrap.dataset.pageNum = num;
   _applyCropToWrap(wrap, cw, ch);   // 去边:渲染前先收成裁切窄宽(子层 translate)
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页
+  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
   const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
   const img = document.createElement('img');
   img.className = 'page-img'; img.decoding = 'async';
@@ -1284,8 +1293,8 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
-    if (readMode !== 'single') {           // 连续 + 双页 都重建滚动列表(原来只判 continuous 漏了 spread)
-      await setupContinuousMode();
+    if (readMode !== 'single') {           // 连续 + 双页:原地重标尺(不清空容器→不"重新加载");没建过列表才全建
+      if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
       if (wrap.dataset) wrap.dataset.loaded = '0';
@@ -1435,6 +1444,30 @@ async function setupContinuousMode() {
   container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
+
+// 缩放时「原地重标尺」：不清空容器(避免整列塌成占位的"重新加载"感)，只把各 page-wrap 按当前 scale 调整。
+// 已渲染页就地重渲(图片走 _ratchetReqW 缓存→秒回不闪;叠层按新 scale 重算坐标)；未渲染占位只改宽高。
+// 返回 false(没建过列表)→ 调用方回退 setupContinuousMode。global scale 已由 _applyZoom 设好。
+async function _rescaleContinuousInPlace() {
+  const container = document.getElementById('page-container');
+  const wraps = [...container.querySelectorAll('.page-wrap')];
+  if (!wraps.length) return false;
+  let estW = 0, estH = 0;
+  try {
+    const v1 = (await pdfDoc.getPage(1)).getViewport({ scale });
+    estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
+  } catch (_) {}
+  for (const w of wraps) {
+    if (w.dataset.loaded === '1') {
+      w.dataset.loaded = '0';
+      try { await _renderPageInto(parseInt(w.dataset.pageNum, 10), w); } catch (_) {}
+    } else if (estW) {
+      w.style.width = estW + 'px'; w.style.height = estH + 'px';
+    }
+  }
+  return true;
+}
+window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
 
 // ── 内存控制:滚出视口足够远的已渲染页自动卸载(释放 canvas/各叠层),保留占位高度→滚动不跳。 ──
 // iPad 内存吃紧时 iOS 会把整个 Safari 标签回收(回来要重载)。连续模式若把访问过的几百页 canvas 全留
@@ -2680,6 +2713,27 @@ function _selByCharRange(pw, sIdx, eIdx) {
   toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
   toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
   toolbar.classList.add('open');
+  // 防溢出屏：选区靠右/靠下时工具栏(max-width 480)会跑出可见区被裁 → 夹回 #main 可见区
+  _clampToolbarIntoView(mainEl, pwRect.top - mainRect.top + mainEl.scrollTop + chars[sIdx].top);
+}
+// 把选择工具栏夹进 #main 可见区(absolute 定位在可滚动的 #main 内;可见区=滚动偏移+clientW/H)。
+// selTopY=选区顶部内容 Y;底部放不下就翻到选区上方。
+function _clampToolbarIntoView(mainEl, selTopY) {
+  const tb = toolbar;
+  const tbW = tb.offsetWidth, tbH = tb.offsetHeight;   // 读 offset 触发 reflow，open 后尺寸已确定
+  if (!tbW || !tbH) return;
+  const visL = mainEl.scrollLeft, visT = mainEl.scrollTop;
+  const visR = visL + mainEl.clientWidth, visB = visT + mainEl.clientHeight;
+  let left = parseFloat(tb.style.left) || 0;
+  let top  = parseFloat(tb.style.top) || 0;
+  if (left + tbW > visR - 8) left = visR - 8 - tbW;   // 右溢 → 左移
+  if (left < visL + 8) left = visL + 8;               // 仍左溢 → 贴左
+  if (top + tbH > visB - 8) {                         // 底溢 → 翻到选区上方
+    const above = (selTopY != null ? selTopY : top) - tbH - 6;
+    top = (above >= visT + 8) ? above : Math.max(visT + 8, visB - 8 - tbH);
+  }
+  tb.style.left = left + 'px';
+  tb.style.top  = top + 'px';
 }
 
 // 按 char 扩展到词边界（英文 \w / CJK 逐字）。空格视作非词字符
