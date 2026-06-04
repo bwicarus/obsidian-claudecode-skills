@@ -2138,13 +2138,14 @@ function renderVocabSentences(pw, sentences) {
       btn0.style.setProperty('--sent-fill', fill);
       const charW0 = (fc[2] - fc[0]) * sx;
       const charH0 = (fc[3] - fc[1]) * sy;
-      const left0 = fc[0] * sx - 2;
+      // border-box：左/上外缘**贴齐首字左/上边缘**(不再 -2 外扩)→ 去边/overflow:hidden 不会把「⌐」裁成半截
+      const left0 = Math.max(0, fc[0] * sx);
       // clamp 到句首所在行的文本右边界(rects[0][2])，不伸进纸张右 margin → 不再画出延伸到页边的线
       const lineRight = (rects[0] ? rects[0][2] * sx : cssW);
       const maxW0 = Math.max(charW0, lineRight - left0);
       const wantW0 = Math.min(Math.max(charW0 * 6, 48), maxW0);
-      btn0.style.left = left0 + 'px';     // 句首字符 x0 减 padding
-      btn0.style.top = (fc[1] * sy - 2) + 'px';
+      btn0.style.left = left0 + 'px';
+      btn0.style.top = Math.max(0, fc[1] * sy) + 'px';
       btn0.style.width = wantW0 + 'px';
       btn0.style.height = charH0 + 'px';
       btn0.addEventListener('click', (e) => {
@@ -2171,16 +2172,16 @@ function renderVocabSentences(pw, sentences) {
       btn.title = `翻译整句（含 ${s.count} 个未掌握词）：${(s.text||'').slice(0,80)}…`;
       btn.style.color = stroke;
       btn.style.setProperty('--sent-fill', fill);
-      // 加宽：L 形左缘向左延伸（更易点击）
+      // 加宽：L 形左缘向左延伸（更易点击）。border-box：右/下外缘**贴齐末字右/下边缘**(不再 +6 外扩到页边
+      // margin)→ 去边模式下「⌟」的右/下边不会被 overflow:hidden 裁成半截(末字本身在可见区内,边框必可见)。
       const charW = (lc[2] - lc[0]) * sx;
       const charH = (lc[3] - lc[1]) * sy;
       const wantW = Math.max(charW * 6, 48);   // 至少 48px 宽（约 5-6 个字符）
-      const extraLeft = wantW - charW;
-      let leftE = lc[0] * sx - extraLeft - 2;
-      let widthE = wantW;
-      if (leftE < 0) { widthE = Math.max(charW, widthE + leftE); leftE = 0; }   // 句末在行首时向左延伸会溢出页左 → 截掉
+      const rightE = lc[2] * sx;               // 右外缘 = 末字右边缘
+      let leftE = Math.max(0, rightE - wantW); // 向左延伸;行首时夹到 0
+      const widthE = Math.max(charW, rightE - leftE);
       btn.style.left = leftE + 'px';
-      btn.style.top = (lc[1] * sy - 2) + 'px';
+      btn.style.top = Math.max(0, lc[1] * sy) + 'px';
       btn.style.width = widthE + 'px';
       btn.style.height = charH + 'px';
       btn.addEventListener('click', (e) => {

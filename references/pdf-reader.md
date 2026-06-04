@@ -808,3 +808,10 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
   - ② `_applyZoom` 连续/双页缩放时 `setupContinuousMode()` 会 `container.innerHTML=''` 把整列塌成占位再重建(滚动位置丢→`scrollIntoView`→明显"重载")。修:新增 `_rescaleContinuousInPlace()`(`07-continuous.js`)**不清空容器**,只把各 `page-wrap` 按新 `scale` 调:已渲染页就地重渲(img 走 ratchet 缓存秒回、叠层按新 scale 重算坐标)、未渲染占位只改宽高;IO 不重建(元素还在,继续观察)。`_applyZoom` 优先用它,没建过列表才回退 `setupContinuousMode`。single 模式仍重渲单页(快)。
 - **选区靠右/靠下时工具栏(`#sel-toolbar` max-width 480)跑出屏外被裁**(截图只剩边缘一排色板)。修:`_clampToolbarIntoView(mainEl, selTopY)`(`13-selection.js`)在 `open` 后量 `offsetW/H`,把工具栏夹进 `#main` 可见区(`scrollLeft..+clientW` × `scrollTop..+clientH`):右溢左移、底溢翻到选区上方。
 - 验证:`_ratchetReqW` node 自测(只增不减 + 按页独立)通过;build+check OK。
+
+### 31. 句末 L 按钮被去边裁成半截（2026-06-04）
+反馈:开**去边**时句子框「⌟」(句末 L 按钮)不完整。根因:`.vocab-sentence-btn-l`/`-l-start` 用 `content-box`+padding，
+让边框比字符边缘**外扩 ~6-8px**；去边把页面裁到正文区(`.crop-on overflow:hidden`)，外扩的右/下边框落进被裁的页边
+margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`→`border-box`(border 改画在框内缘);② `12-vocab-sentences.js`
+几何**贴齐字符边缘**——句末按钮右外缘=末字右边缘(`lc[2]*sx`)、句首按钮左外缘=首字左边缘(`fc[0]*sx`),去掉 `-2` 外扩,
+`top/left` 夹 `≥0`。字符本身一定在可见区内 → 边框画在其边缘内侧必可见,不再被裁(crop 与否都成立,无需算裁切坐标)。

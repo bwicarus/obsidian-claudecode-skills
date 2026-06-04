@@ -331,12 +331,12 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 .vocab-sentence-box.highlight{background-color:var(--sent-fill,rgba(245,158,11,.08))}
 
 /* 句末按钮：包裹最后一个字符的 L 形（右边 + 下边加粗）*/
-.vocab-sentence-btn-l{position:absolute;background:transparent;border:none;border-right:4px solid currentColor;border-bottom:4px solid currentColor;padding:2px 4px 2px 2px;cursor:pointer;pointer-events:auto;box-sizing:content-box;transition:background .12s,box-shadow .12s}
+.vocab-sentence-btn-l{position:absolute;background:transparent;border:none;border-right:4px solid currentColor;border-bottom:4px solid currentColor;cursor:pointer;pointer-events:auto;box-sizing:border-box;transition:background .12s,box-shadow .12s}
 .vocab-sentence-btn-l:hover{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:0 0 0 1px var(--sent-fill,rgba(245,158,11,.3))}
 .vocab-sentence-btn-l.active{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:inset -4px -4px 0 0 currentColor}
 
 /* 句首按钮：包裹第一个字符的反 L 形（左边 + 上边加粗）— 跟句末对称 */
-.vocab-sentence-btn-l-start{position:absolute;background:transparent;border:none;border-left:4px solid currentColor;border-top:4px solid currentColor;padding:2px 2px 2px 4px;cursor:pointer;pointer-events:auto;box-sizing:content-box;transition:background .12s,box-shadow .12s}
+.vocab-sentence-btn-l-start{position:absolute;background:transparent;border:none;border-left:4px solid currentColor;border-top:4px solid currentColor;cursor:pointer;pointer-events:auto;box-sizing:border-box;transition:background .12s,box-shadow .12s}
 .vocab-sentence-btn-l-start:hover{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:0 0 0 1px var(--sent-fill,rgba(245,158,11,.3))}
 .vocab-sentence-btn-l-start.active{background:var(--sent-fill,rgba(245,158,11,.10));box-shadow:inset 4px 4px 0 0 currentColor}
 
