@@ -88,6 +88,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   if (_rubyEnabled()) _verifyFurigana(wrap);   // 振假名读音 AI 上下文校正(后台,不阻塞)
   try { renderPhraseHl(wrap); } catch(_) {}   // 词组持久高亮：重渲染后从状态恢复（防"自动消失"）
   try { renderExplainHl(wrap); } catch(_) {}   // 解释持久高亮：同上,重渲染后恢复
+  try { renderWordHl(wrap); } catch(_) {}   // 查词等待高亮：慢词查词中呼吸/就绪常亮,同上重渲染恢复
   // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
   // 全文搜索跳转：本页刚好是待高亮页 → 此处 __charBoxes 已赋值，直接画（不走轮询，秒级到位）

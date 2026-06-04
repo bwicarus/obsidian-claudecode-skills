@@ -784,3 +784,11 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **为何放 `<head>` 内联而非 nav.js**:同步早于 body 渲染 → 无「先闪一下仪表盘再跳」;且 SW(`/pdf/sw.js`)只拦 `/pdf/api/page-image`、不缓存 HTML,故服务端注入的脚本恒新鲜。
 - **安全**:跳转目标须以单 `/` 开头且非 `//`(挡协议相对开放重定向);非内容页不记录。
 - 验证:node 模拟 8 场景(冷启动跳/同会话不跳/剥 page/login 不覆盖/Safari 不跳/无 lastUrl 不跳/挡 `//`/insights 记录)全过;test_client 确认脚本注入 `/dashboard` `/insights` `/pdf/view` 且在 `</head>` 前。
+
+### 28. 单击查词「等待」改呼吸高亮（2026-06-04，`reader.src/15-phrase-wordpop.js`）
+需求:慢词(日语 AI 查词 2-4s)单击后弹一个挡视线的「查词中…」框。改成跟「解释/翻译」一致——给词建呼吸高亮当等待指示,点高亮才出结果+高亮消失。
+- **快/慢分流(关键)**:`showWordPopover` 不再立刻弹 loading 框。先后台 `_lookupWordFetch`,**300ms 计时器**:≤300ms 回(英语 ecdict / 已缓存日语)→ `_renderWordPop` 直接弹小框(全程无「查词中」框);>300ms 未回(日语 AI 等)→ `_showWordHighlight` 建**青绿呼吸高亮**(`.word-hl-layer`,区别于选区蓝/词组蓝/解释琥珀)当等待指示,清掉蓝选区。
+- **就绪/点击**:fetch 回来 → 高亮 `ready=true` 呼吸转常亮(不自动弹);**点高亮** `_wordHlClick` → `_renderWordPop` 弹小框 + 移除高亮。查询中就点(`boxOpen`)→ 这才显示「查词中」小框,fetch 回来自动填。
+- **照搬解释三件套**:`_activeWordHl` 状态 + `renderWordHl(pw)`(渲染循环 `08-charlayer.js` 调,重渲染/滚动后从状态恢复;`boxOpen` 后不再重画)+ `_charRangeToPtRects` 算 pt rects。`_positionWordPop(pop, cs)` 加可选 `cs` 参数(慢词点高亮时 `_charSel` 可能已变,用查词时捕获的 charSel 定位)。
+- **重构**:原 `showWordPopover` 拆成 `_lookupWordFetch`(纯查) + `_renderWordPop`(纯渲染,含 `!ok→_expandWordFull`) + 编排器。`_wordPopSeq` 竞态守卫保留。
+- 验证:node 模拟 5 场景(快词直接弹/慢词建高亮就绪不自动弹/点就绪弹框/查询中点开框后自动填/竞态 A 作废 B 正常)全过;build+check OK。**词组 `showPhrasePopover` 暂未改**(它已有呼吸高亮,只是仍显 loading 框,需要的话同法改)。

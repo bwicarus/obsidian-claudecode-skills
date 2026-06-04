@@ -232,11 +232,13 @@ async function refreshCharsWForAllPages() {
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
 let _wordPopState = null;
 let _wordPopSeq = 0;   // 查词请求序号:防竞态(快速点不同词,旧词响应晚到覆盖新词)
-function _positionWordPop(pop) {
+function _positionWordPop(pop, cs) {
   // 挂进 #main（不会被单页重渲染的 innerHTML='' 删掉）；用 page-wrap 布局坐标定位，
   // absolute 相对 #main → 随内容滚动。（之前挂 page-wrap，侧栏展开触发重渲染会把小框删掉 → 闪没）
-  const pw = _charSel && _charSel.pw;
-  const ch = pw && pw.__charBoxes && pw.__charBoxes[_charSel.startIdx];
+  // cs：可传入查词时捕获的 charSel（慢词点高亮后定位用，防此时 _charSel 已变）。默认用当前 _charSel。
+  cs = cs || _charSel;
+  const pw = cs && cs.pw;
+  const ch = pw && pw.__charBoxes && pw.__charBoxes[cs.startIdx];
   const main = document.getElementById('main');
   if (pw && ch && ch.left != null && main) {
     if (pop.parentElement !== main) main.appendChild(pop);
@@ -320,66 +322,152 @@ function _enFormsHtml(lemma, forms, clicked) {
   if (!b && !m) return '';
   return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
+// ── 单击查词的"等待"表现（照「解释」那套）──────────────────────────────────
+// 快词(≤300ms 回，英语 ecdict / 已缓存日语)直接弹小框；慢词(日语 AI 等)不弹挡视线的"查词中"框，
+// 而是给词建一个呼吸高亮当等待指示，就绪转常亮，**点高亮才出结果 + 高亮消失**。
+let _activeWordHl = null;   // {seq,page,rects,word,ctx,charSel,ready,data,error,boxOpen}
+function renderWordHl(pw) {
+  pw.querySelector('.word-hl-layer')?.remove();
+  const a = _activeWordHl;
+  if (!a || !a.rects || !a.rects.length || a.boxOpen) return;   // boxOpen=用户已点开"查词中"小框,别再重画呼吸高亮
+  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+  const canvas = pw.querySelector('canvas');
+  const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+  const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+  if (!cssW || !cssH || !pageWPt || !pageHPt) return;
+  const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const layer = document.createElement('div');
+  layer.className = 'word-hl-layer' + (a.ready ? '' : ' breathe');   // 查词中呼吸；就绪转常亮(点我看词义)
+  for (const r of a.rects) {
+    const d = document.createElement('div'); d.className = 'hl';
+    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+    layer.appendChild(d);
+  }
+  layer.addEventListener('click', (e) => { e.stopPropagation(); _wordHlClick(); });
+  pw.appendChild(layer);
+}
+function _removeWordHighlight() {
+  _activeWordHl = null;
+  document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
+}
+function _showWordHighlight(pw, word, ctx, cs, seq) {
+  if (!pw || !cs || !pw.__charBoxes) return null;
+  const rects = _charRangeToPtRects(pw.__charBoxes, cs.startIdx, cs.endIdx);
+  if (!rects.length) return null;
+  document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
+  _activeWordHl = {
+    seq, page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage,
+    rects, word, ctx, charSel: cs, ready: false, data: null, error: null, boxOpen: false,
+  };
+  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层(蓝选区→呼吸高亮),避免双重高亮
+  renderWordHl(pw);
+  return _activeWordHl;
+}
+// 点呼吸高亮：就绪→直接弹小框并移除高亮；未就绪→用户主动开"查词中"小框(等 fetch 回来自动填)
+function _wordHlClick() {
+  const h = _activeWordHl; if (!h) return;
+  if (h.ready) {
+    if (h.error) { _toast?.('查词失败'); _removeWordHighlight(); return; }
+    _renderWordPop(h.word, h.ctx, h.data, h.charSel);
+    _removeWordHighlight();
+  } else {
+    h.boxOpen = true;
+    _wordPopState = {word: h.word, ctx: h.ctx, lemma: h.word};
+    const pop = document.getElementById('word-pop');
+    pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
+    pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
+    _positionWordPop(pop, h.charSel);
+    document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());   // 视觉移除；_activeWordHl 留着等 fetch 填框
+  }
+}
+async function _lookupWordFetch(word, ctx) {
+  const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
+    '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
+    '&context=' + encodeURIComponent(ctx || '') +
+    '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
+  return await r.json();
+}
+// 渲染单词小框(已拿到 dict-quick 结果 d)。cs=查词时捕获的 charSel,用于定位(防之后选区变了定位飘)。
+function _renderWordPop(word, ctx, d, cs) {
+  const pop = document.getElementById('word-pop');
+  _wordPopState = {word, ctx: ctx || '', lemma: word};
+  if (!d || !d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
+  _wordPopState.lemma = d.lemma || word;
+  _wordPopState.jp = !!d.jp;                // 掌握按钮按语言分流(jp/en 不同 store)
+  _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
+  _wordPopState.mastered = !!d.mastered;   // 掌握开关初始态(日英都返回 mastered)
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
+  // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ变 等）
+  const posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
+  // 变形分析：日语=原形+语法标签（过去た/否定ない/て形…）；英语=原型+各种屈折变形
+  const inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
+  // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
+  const phonHtml = (d.jp && d.reading && d.accent != null)
+    ? _renderPitch(d.reading, d.accent)
+    : (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '');
+  // 日语母语例句(Tanaka):直接展示在小框;zh 未翻译则回退英文
+  let exHtml = '';
+  if (d.jp && Array.isArray(d.examples) && d.examples.length) {
+    exHtml = '<div class="wp-ex">' + d.examples.slice(0, 2).map(e =>
+      '<div class="wp-ex-ja">' + esc(e.ja) + '</div>' +
+      '<div class="wp-ex-zh">' + esc(e.zh || e.en || '') + '</div>'
+    ).join('') + '</div>';
+  }
+  pop.style.display = 'block';
+  window._wordPopOpenAt = Date.now();   // 框外关闭监听据此忽略刚弹出时的余波事件
+  pop.innerHTML =
+    '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
+    phonHtml +
+    '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
+    (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
+    inflectHtml +
+    '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
+    exHtml +
+    '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
+    '<div class="wp-actions">' +
+    // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
+    '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
+    '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
+    '</div>';
+  _positionWordPop(pop, cs);
+  // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
+  try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
+}
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
   const myseq = ++_wordPopSeq;   // 本次查词序号;await 回来若已被新查词覆盖则放弃渲染
   toolbar.classList.remove('open');
-  _wordPopState = {word, ctx: ctx || '', lemma: word};
-  const pop = document.getElementById('word-pop');
-  pop.style.display = 'block';
-  window._wordPopOpenAt = Date.now();   // 框外关闭监听据此忽略刚弹出时的余波事件
-  pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
-  _positionWordPop(pop);
-  try {
-    const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
-      '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
-      '&context=' + encodeURIComponent(ctx || '') +
-      '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
-    const d = await r.json();
-    if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 这是旧响应,丢弃(防覆盖新词)
-    if (!d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
-    _wordPopState.lemma = d.lemma || word;
-    _wordPopState.jp = !!d.jp;                // 掌握按钮按语言分流(jp/en 不同 store)
-    _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
-    _wordPopState.mastered = !!d.mastered;   // 掌握开关初始态(日英都返回 mastered)
-    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
-    // 词性单独做暗色小标签，跟含义用颜色/字号区分（日语：名詞・サ变 等）
-    const posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
-    // 变形分析：日语=原形+语法标签（过去た/否定ない/て形…）；英语=原型+各种屈折变形
-    const inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
-    // 日语:画声调曲线(读音+ピッチアクセント);否则普通音标
-    const phonHtml = (d.jp && d.reading && d.accent != null)
-      ? _renderPitch(d.reading, d.accent)
-      : (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : '');
-    // 日语母语例句(Tanaka):直接展示在小框;zh 未翻译则回退英文
-    let exHtml = '';
-    if (d.jp && Array.isArray(d.examples) && d.examples.length) {
-      exHtml = '<div class="wp-ex">' + d.examples.slice(0, 2).map(e =>
-        '<div class="wp-ex-ja">' + esc(e.ja) + '</div>' +
-        '<div class="wp-ex-zh">' + esc(e.zh || e.en || '') + '</div>'
-      ).join('') + '</div>';
+  _removeWordHighlight();   // 清掉上一个词遗留的等待高亮
+  const pw = _charSel && _charSel.pw;
+  const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
+  // 慢词(>300ms 未回)才建呼吸高亮当等待指示；快词直接弹小框(全程不显示挡视线的"查词中"框)
+  let resolved = false;
+  const hlTimer = setTimeout(() => {
+    if (resolved || myseq !== _wordPopSeq || !cap) return;
+    _showWordHighlight(pw, word, ctx, cap, myseq);
+  }, 300);
+  let d = null, err = null;
+  try { d = await _lookupWordFetch(word, ctx); } catch (e) { err = e; }
+  clearTimeout(hlTimer);
+  resolved = true;
+  if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 旧响应丢弃
+  const h = (_activeWordHl && _activeWordHl.seq === myseq) ? _activeWordHl : null;
+  if (!h) {
+    // 快路径:300ms 内回来,没建高亮 → 直接弹小框
+    if (err) { _toast?.('查词失败：' + err.message); return; }
+    _renderWordPop(word, ctx, d, cap);
+  } else {
+    // 慢路径:高亮已在 → 存结果,呼吸转常亮,等用户点高亮
+    h.ready = true; h.data = d; h.error = err;
+    document.querySelector('.word-hl-layer')?.classList.remove('breathe');
+    if (h.boxOpen) {   // 用户已点高亮开了"查词中"小框 → 立即填
+      if (err) { const p = document.getElementById('word-pop'); if (p) p.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + err.message + '</div>'; }
+      else _renderWordPop(word, ctx, d, h.charSel);
+      _removeWordHighlight();
     }
-    pop.innerHTML =
-      '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
-      phonHtml +
-      '<button class="wp-speak" onclick="_speakCurWord()" title="发音">🔊</button>' +
-      (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
-      inflectHtml +
-      '<div class="wp-def" onclick="_expandWordFull()" title="点开看完整释义/例句">' + posTag + defLines +
-      exHtml +
-      '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
-      '<div class="wp-actions">' +
-      // 掌握 toggle:日英统一同一个按钮(onclick 内部按语言分流 store);✓掌握=下划线消失
-      '<button id="wp-master-btn" class="' + (d.mastered ? 'wp-anki' : '') + '" onclick="_wordPopMaster(this)" title="' + (d.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）') + '">' + (d.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-      '<button onclick="_wordPopGrammar()" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
-      '</div>';
-    // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
-    try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
-  } catch (e) {
-    if (myseq !== _wordPopSeq) return;   // 旧请求出错也不覆盖当前词
-    pop.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + e.message + '</div>';
   }
 };
 // 判定是否日语词:含假名→是;含汉字时按本书语言声明(声明含 ja 才算,未声明默认按日语,
