@@ -2078,6 +2078,18 @@ function _bindSentBtnDrag(btnEl, layer) {
   });
 }
 
+// 找字符 ch 所在的「行 rect」(y 中心落其中、且比 ch 明显宽 → 排除退化小 rect)。找不到回退 ch 本身。
+// 用途:句末字常是小标点「。」(高度仅 ~15pt 且低在行底),直接拿它做 L 竖线会太短/难点 → 改用整行高。
+function _lineRectOf(ch, rects) {
+  const cy = (ch[1] + ch[3]) / 2, cw = ch[2] - ch[0];
+  let best = null;
+  for (const r of (rects || [])) {
+    if (r[1] - 1 <= cy && cy <= r[3] + 1 && (r[2] - r[0]) > cw * 1.5) {
+      if (!best || (r[3] - r[1]) > (best[3] - best[1])) best = r;   // 取最高的(最像真行)
+    }
+  }
+  return best || ch;
+}
 function renderVocabSentences(pw, sentences) {
   if (!_vocabUnderlineEnabled()) return;
   let layer = pw.querySelector('.vocab-layer');
@@ -2184,17 +2196,18 @@ function renderVocabSentences(pw, sentences) {
       // 加宽：L 形左缘向左延伸（更易点击）。border-box：右/下外缘**贴齐末字右/下边缘**(不再 +6 外扩到页边
       // margin)→ 去边模式下「⌟」的右/下边不会被 overflow:hidden 裁成半截(末字本身在可见区内,边框必可见)。
       const charW = (lc[2] - lc[0]) * sx;
-      const charH = (lc[3] - lc[1]) * sy;
       const wantW = Math.max(charW, 44);   // 角标臂长固定 ~44px(跟句首一致;不再按字宽×6)
-      // 「⌟」右/下边框落在末字外侧间隙(看得见、不压字形)；末字贴可见右/下边界时夹回(否则竖/横线被裁)
+      // 竖线高度用末字**所在行**的高度,不用小标点「。」(15pt)本身 → 否则竖线太短像只剩横线、点击区也太小点不中。
+      const lcLine = _lineRectOf(lc, rects);
+      // 「⌟」右/下边框落在末字外侧间隙(看得见、不压字形)；贴可见右/下边界时夹回(否则竖/横线被裁)
       const rightE = Math.min(visR, lc[2] * sx + GAP);
-      const botE   = Math.min(visB, lc[3] * sy + GAP);
+      const botE   = Math.min(visB, lcLine[3] * sy + GAP);   // 行底
+      const top    = Math.max(visT, lcLine[1] * sy);          // 行顶
       let leftE = Math.max(visL, rightE - wantW);   // 向左延伸;行首时夹到可见左界
-      const top = lc[1] * sy;
       btn.style.left = leftE + 'px';
       btn.style.top = top + 'px';
       btn.style.width = Math.max(charW, rightE - leftE) + 'px';
-      btn.style.height = Math.max(charH, botE - top) + 'px';
+      btn.style.height = Math.max(1, botE - top) + 'px';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (_dragMoved) return;   // 刚从 L 按钮拖选 → 不触发整句翻译
