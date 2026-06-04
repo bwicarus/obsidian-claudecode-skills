@@ -3590,63 +3590,73 @@ function _enFormsHtml(lemma, forms, clicked) {
   if (!b && !m) return '';
   return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
 }
-// ── 单击查词的"等待"表现（照「解释」那套）──────────────────────────────────
+// ── 单击查词的"等待"表现（照「解释」那套，多个可并存）──────────────────────────
 // 快词(≤300ms 回，英语 ecdict / 已缓存日语)直接弹小框；慢词(日语 AI 等)不弹挡视线的"查词中"框，
-// 而是给词建一个呼吸高亮当等待指示，就绪转常亮，**点高亮才出结果 + 高亮消失**。
-let _activeWordHl = null;   // {seq,page,rects,word,ctx,charSel,ready,data,error,boxOpen}
-function renderWordHl(pw) {
-  pw.querySelector('.word-hl-layer')?.remove();
-  const a = _activeWordHl;
-  if (!a || !a.rects || !a.rects.length || a.boxOpen) return;   // boxOpen=用户已点开"查词中"小框,别再重画呼吸高亮
-  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+// 而是给词建呼吸高亮当等待指示，就绪转常亮，**点高亮才出结果 + 高亮消失**。
+// 多个查词可同时进行 → 多个呼吸高亮并存（`_wordHls` 数组），各自独立查、各自点开。
+let _wordHlSeq = 0;          // 高亮 id 发号
+let _wordHls = [];           // 并存的查词高亮 [{id,page,pw,rects,word,ctx,charSel,shown,ready,data,error,boxOpen}]
+let _wordPopOwnerId = null;  // 当前 word-pop 小框归属的高亮 id（防并发查词回来填错框）
+function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存；boxOpen 的不画）
+  pw.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
+  const page = parseInt(pw.dataset.pageNum || '0', 10);
+  const mine = _wordHls.filter(h => h.page === page && h.rects && h.rects.length && !h.boxOpen);
+  if (!mine.length) return;
   const canvas = pw.querySelector('canvas');
   const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
   const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
-  const layer = document.createElement('div');
-  layer.className = 'word-hl-layer' + (a.ready ? '' : ' breathe');   // 查词中呼吸；就绪转常亮(点我看词义)
-  for (const r of a.rects) {
-    const d = document.createElement('div'); d.className = 'hl';
-    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
-    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
-    layer.appendChild(d);
+  for (const h of mine) {
+    const layer = document.createElement('div');
+    layer.className = 'word-hl-layer' + (h.ready ? '' : ' breathe');   // 查词中呼吸；就绪转常亮(点我看词义)
+    for (const r of h.rects) {
+      const d = document.createElement('div'); d.className = 'hl';
+      d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+      d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+      layer.appendChild(d);
+    }
+    layer.addEventListener('click', (e) => { e.stopPropagation(); _wordHlClick(h); });
+    pw.appendChild(layer);
   }
-  layer.addEventListener('click', (e) => { e.stopPropagation(); _wordHlClick(); });
-  pw.appendChild(layer);
 }
-function _removeWordHighlight() {
-  _activeWordHl = null;
+function _renderWordHlsFor(pw) { if (pw) { try { renderWordHl(pw); } catch (_) {} } }
+function _removeWordHl(hl) {   // 移除单个高亮(点开/出错/查完后)
+  _wordHls = _wordHls.filter(o => o !== hl);
+  _renderWordHlsFor(hl.pw);
+}
+function _removeWordHighlight() {   // 清掉全部查词高亮(换书/大跳转时备用)
+  _wordHls = [];
   document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
 }
-function _showWordHighlight(pw, word, ctx, cs, seq) {
-  if (!pw || !cs || !pw.__charBoxes) return null;
-  const rects = _charRangeToPtRects(pw.__charBoxes, cs.startIdx, cs.endIdx);
-  if (!rects.length) return null;
-  document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
-  _activeWordHl = {
-    seq, page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage,
-    rects, word, ctx, charSel: cs, ready: false, data: null, error: null, boxOpen: false,
-  };
-  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层(蓝选区→呼吸高亮),避免双重高亮
-  renderWordHl(pw);
-  return _activeWordHl;
+// 把一个慢词查词 hl 物化成呼吸高亮(加入 _wordHls 并渲染)。同范围去重防重复点同词叠两层。
+function _materializeWordHl(hl) {
+  const pw = hl.pw;
+  if (!pw || !hl.charSel || !pw.__charBoxes) return;
+  const rects = _charRangeToPtRects(pw.__charBoxes, hl.charSel.startIdx, hl.charSel.endIdx);
+  if (!rects.length) return;
+  hl.rects = rects; hl.shown = true;
+  _wordHls = _wordHls.filter(o => !(o.page === hl.page && o.charSel && o.charSel.startIdx === hl.charSel.startIdx));
+  _wordHls.push(hl);
+  const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层(蓝选区→呼吸高亮)
+  _renderWordHlsFor(pw);
 }
-// 点呼吸高亮：就绪→直接弹小框并移除高亮；未就绪→用户主动开"查词中"小框(等 fetch 回来自动填)
-function _wordHlClick() {
-  const h = _activeWordHl; if (!h) return;
-  if (h.ready) {
-    if (h.error) { _toast?.('查词失败'); _removeWordHighlight(); return; }
-    _renderWordPop(h.word, h.ctx, h.data, h.charSel);
-    _removeWordHighlight();
+// 点呼吸高亮：就绪→直接弹小框并移除该高亮；未就绪→用户主动开"查词中"小框(等 fetch 回来自动填)
+function _wordHlClick(hl) {
+  if (!hl) return;
+  if (hl.ready) {
+    if (hl.error) { _toast?.('查词失败'); _removeWordHl(hl); return; }
+    _wordPopOwnerId = hl.id;
+    _renderWordPop(hl.word, hl.ctx, hl.data, hl.charSel);
+    _removeWordHl(hl);
   } else {
-    h.boxOpen = true;
-    _wordPopState = {word: h.word, ctx: h.ctx, lemma: h.word};
+    hl.boxOpen = true; _wordPopOwnerId = hl.id;
+    _wordPopState = {word: hl.word, ctx: hl.ctx, lemma: hl.word};
     const pop = document.getElementById('word-pop');
     pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
     pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
-    _positionWordPop(pop, h.charSel);
-    document.querySelectorAll('.word-hl-layer').forEach(l => l.remove());   // 视觉移除；_activeWordHl 留着等 fetch 填框
+    _positionWordPop(pop, hl.charSel);
+    _renderWordHlsFor(hl.pw);   // boxOpen=true → renderWordHl 过滤掉它,不再画呼吸高亮
   }
 }
 async function _lookupWordFetch(word, ctx) {
@@ -3706,35 +3716,34 @@ function _renderWordPop(word, ctx, d, cs) {
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
-  const myseq = ++_wordPopSeq;   // 本次查词序号;await 回来若已被新查词覆盖则放弃渲染
   toolbar.classList.remove('open');
-  _removeWordHighlight();   // 清掉上一个词遗留的等待高亮
   const pw = _charSel && _charSel.pw;
   const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
-  // 慢词(>300ms 未回)才建呼吸高亮当等待指示；快词直接弹小框(全程不显示挡视线的"查词中"框)
-  let resolved = false;
-  const hlTimer = setTimeout(() => {
-    if (resolved || myseq !== _wordPopSeq || !cap) return;
-    _showWordHighlight(pw, word, ctx, cap, myseq);
-  }, 300);
+  // 每次查词一个独立 hl;多个可并存(各自呼吸/各自点开)，**不清掉别的查词高亮**。
+  // 慢词(>300ms 未回)才物化成呼吸高亮当等待指示;快词直接弹小框(全程不显示挡视线的"查词中"框)。
+  const hl = {
+    id: ++_wordHlSeq, page: pw ? (parseInt(pw.dataset.pageNum || '0', 10) || currentPage) : currentPage,
+    pw, word, ctx, charSel: cap, rects: null, shown: false, ready: false, data: null, error: null, boxOpen: false,
+  };
+  const hlTimer = setTimeout(() => { if (!hl.ready && cap) _materializeWordHl(hl); }, 300);
   let d = null, err = null;
   try { d = await _lookupWordFetch(word, ctx); } catch (e) { err = e; }
   clearTimeout(hlTimer);
-  resolved = true;
-  if (myseq !== _wordPopSeq) return;   // 期间点了别的词 → 旧响应丢弃
-  const h = (_activeWordHl && _activeWordHl.seq === myseq) ? _activeWordHl : null;
-  if (!h) {
-    // 快路径:300ms 内回来,没建高亮 → 直接弹小框
+  hl.ready = true; hl.data = d; hl.error = err;
+  if (!hl.shown) {
+    // 快路径:300ms 内回来,没物化高亮 → 直接弹小框(归属本 hl)
     if (err) { _toast?.('查词失败：' + err.message); return; }
+    _wordPopOwnerId = hl.id;
     _renderWordPop(word, ctx, d, cap);
   } else {
-    // 慢路径:高亮已在 → 存结果,呼吸转常亮,等用户点高亮
-    h.ready = true; h.data = d; h.error = err;
-    document.querySelector('.word-hl-layer')?.classList.remove('breathe');
-    if (h.boxOpen) {   // 用户已点高亮开了"查词中"小框 → 立即填
-      if (err) { const p = document.getElementById('word-pop'); if (p) p.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + err.message + '</div>'; }
-      else _renderWordPop(word, ctx, d, h.charSel);
-      _removeWordHighlight();
+    // 慢路径:呼吸高亮已在 → 重画(本 hl 转常亮),等用户点
+    _renderWordHlsFor(hl.pw);
+    if (hl.boxOpen) {   // 用户已点高亮开了"查词中"小框 → 查完就清掉该高亮;框仍归属本 hl 才填(否则被别的查词接管了)
+      if (_wordPopOwnerId === hl.id) {
+        if (err) { const p = document.getElementById('word-pop'); if (p) p.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + err.message + '</div>'; }
+        else _renderWordPop(word, ctx, d, hl.charSel);
+      }
+      _removeWordHl(hl);
     }
   }
 };
