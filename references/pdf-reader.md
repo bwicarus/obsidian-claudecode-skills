@@ -775,3 +775,12 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 
 - **③ 收藏词组「标记掌握」无效（且会建幽灵 vocab 笔记）**。根因:词组 popover 的「标记掌握」原走 `/api/vocab-mark`，用词组 surface 当 lemma → 建出 `资源/vocab/w/web browser.md` 幽灵笔记，跟下划线（按组成词/合并 token 的 `w`）脱节。修:**独立词组掌握 store** `state/pdf-phrase-mark.json`（归一化键=折叠空白+小写）+ 路由 `/pdf/api/phrase-mark`（GET 列表 / POST `{text,mark}`）。`_merge_favorite_phrases` 现合并 `收藏∪已掌握` 词组，已掌握的给 char 打 `favm=1`；`_build_vocab_marks`/`_build_jp_vocab_marks` 见 `favm` 即跳过下划线。前端 `15-phrase-wordpop.js`:`showPhrasePopover` 初始态读 `_phraseMarkSet`、`_wordPopMaster` 对 `phrase` 走 phrase-mark（标完 `refreshCharsWForAllPages` 重画→线消失）。另:`/api/vocab-mark` 加守卫，含空格的「词」直接 400（防别处再建幽灵笔记，词组必须走 phrase-mark）。
 - 验证:`_stitch_latin_words` 5 单测 + 6 真实页残留词内空格=0；phrase-mark/vocab-mark 守卫 test_client 端到端通过。
+
+### 27. PWA 冷启动恢复上次页面（2026-06-04，`_server_deploy/app.py`）
+需求:把 PWA 装到主屏后,每次打开都进固定的 `start_url=/dashboard/`(复习仪表盘),而非上次在读的书/页。
+- **做法（不改 manifest → 已装的 PWA 免重装）**:`_PWA_HEAD` 里加一段 `<head>` 内联脚本(`_PWA_RESUME_JS`),`after_request` 全站注入(同 manifest 那套,登录态 + `NAV_INJECT_PREFIXES`):
+  - **记录**:每页(除首页 `/dashboard`、`/login`、`/logout`、`/app`)把 `location.pathname+search` 存进 `localStorage['pwa:lastUrl']`。阅读器 `/pdf/view` 记录时**剥掉 `page`/`mode` 参数** → 让阅读器自己的「上次位置恢复」(§见 02-position.js,URL 不带 page 才恢复)接管,精确到滚动位置。
+  - **跳转**:仅在 **standalone**(`navigator.standalone` 或 `display-mode: standalone`,即装到主屏)且**落在首页**且 **本会话首次**(`sessionStorage['pwa:launched']` 未置)时,`location.replace(lastUrl)`。`sessionStorage` 标记保证一次会话只跳一次(会话内再点回首页不被跳走;关掉 PWA 重开=新会话再跳)。Safari 普通浏览不受影响(非 standalone 不跳)。
+- **为何放 `<head>` 内联而非 nav.js**:同步早于 body 渲染 → 无「先闪一下仪表盘再跳」;且 SW(`/pdf/sw.js`)只拦 `/pdf/api/page-image`、不缓存 HTML,故服务端注入的脚本恒新鲜。
+- **安全**:跳转目标须以单 `/` 开头且非 `//`(挡协议相对开放重定向);非内容页不记录。
+- 验证:node 模拟 8 场景(冷启动跳/同会话不跳/剥 page/login 不覆盖/Safari 不跳/无 lastUrl 不跳/挡 `//`/insights 记录)全过;test_client 确认脚本注入 `/dashboard` `/insights` `/pdf/view` 且在 `</head>` 前。

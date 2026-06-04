@@ -100,6 +100,28 @@ with app.app_context():
 
 NAV_INJECT_PREFIXES = ("/dashboard", "/history", "/private", "/profile", "/admin", "/qa", "/control", "/pdf", "/skilltree", "/insights")
 
+# PWA「恢复上次页面」:① 每页(除首页/登录)把当前 URL 记进 localStorage['pwa:lastUrl'];
+# ② PWA 冷启动(本会话首次)落在 start_url=/dashboard/ 时,跳到上次浏览的内容页。
+# 放 <head> 内联(同步、早于 body 渲染 → 无闪烁);只在 standalone(装到主屏)下跳,Safari 浏览不受影响;
+# sessionStorage 标记保证一次会话只跳一次(会话内再点回首页不会被跳走;关掉 PWA 重开=新会话再跳)。
+# 阅读器 URL 记录时去掉 page/mode → 让阅读器自己的"上次位置恢复"(02-position.js)接管,精确到滚动位置。
+# start_url 不改(仍 /dashboard/)→ 已装到主屏的 PWA 无需重装即生效。SW 只管页图,不缓存 HTML,脚本恒新鲜。
+_PWA_RESUME_JS = """
+(function(){try{
+var P=location.pathname,Q=location.search,full=P+Q;
+var standalone=navigator.standalone||(window.matchMedia&&matchMedia('(display-mode: standalone)').matches);
+var isHome=(P==='/dashboard'||P==='/dashboard/');
+var skip=isHome||P.indexOf('/login')===0||P.indexOf('/logout')===0||P==='/app';
+if(!skip){var rec=full;
+  if(P==='/pdf/view'){try{var sp=new URLSearchParams(Q);sp.delete('page');sp.delete('mode');var qs=sp.toString();rec=P+(qs?'?'+qs:'');}catch(e){}}
+  try{localStorage.setItem('pwa:lastUrl',rec);}catch(e){}}
+if(standalone&&isHome&&!sessionStorage.getItem('pwa:launched')){
+  sessionStorage.setItem('pwa:launched','1');
+  var last=null;try{last=localStorage.getItem('pwa:lastUrl');}catch(e){}
+  if(last&&last.charAt(0)==='/'&&last.indexOf('//')!==0&&last!==full){location.replace(last);}}
+}catch(e){}})();
+"""
+
 # PWA:让站点能「装到 iPad 主屏 + 全屏运行(无 Safari 地址栏)」,像原生 app。manifest + 苹果专用 meta。
 _PWA_HEAD = (
     '<link rel="manifest" href="/manifest.webmanifest">'
@@ -109,6 +131,7 @@ _PWA_HEAD = (
     '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">'
     '<meta name="apple-mobile-web-app-title" content="bwicarus">'
     '<meta name="theme-color" content="#10162a">'
+    '<script>' + _PWA_RESUME_JS + '</script>'
 )
 
 @app.route("/manifest.webmanifest")
