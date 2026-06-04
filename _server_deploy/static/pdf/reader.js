@@ -2499,6 +2499,8 @@ window.showSentenceTranslation = showSentenceTranslation;
 window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
 
 // 找点击位置最近的非空格 char index
+// 拖选期间要临时禁点的呼吸高亮 .hl（查词/词组/解释）——防拖选经过它们被截获(丢 move/up + 误弹)
+const _OVL_HL_SEL = '.word-hl-layer .hl, .phrase-hl-layer .hl, .explain-hl-layer .hl';
 function _findCharAt(charBoxes, x, y) {
   // 先尝试落在某 char bbox 内（优先 non-space）
   for (let i = 0; i < charBoxes.length; i++) {
@@ -2885,6 +2887,9 @@ function _bindCharLayer(cl, pw) {
     _charSel = {pw, startIdx: idx, endIdx: idx, dragging: true};
     // 拖选期间禁用 vocab-layer 拦截：否则拖到/松手在 L 按钮(pointer-events:auto)上会丢 move/up → 卡住/全选
     const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = 'none';
+    // 同理禁用 查词/词组/解释 呼吸高亮的 .hl 点击：否则拖选经过它们会被截获 → 丢 move/up(选区乱涨成多词
+    // → 误弹词组按钮)+ 误触发其 click(弹出别词结果)。松手(onEnd)/转滚动(scroll)时恢复。
+    pw.querySelectorAll(_OVL_HL_SEL).forEach(el => el.style.pointerEvents = 'none');
     return true;
   };
 
@@ -2904,6 +2909,7 @@ function _bindCharLayer(cl, pw) {
         _charSel = null;
         pw.querySelector('.sel-overlay')?.replaceChildren();
         const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        pw.querySelectorAll(_OVL_HL_SEL).forEach(el => el.style.pointerEvents = '');
         return;   // 不 preventDefault
       }
     }
@@ -2918,6 +2924,7 @@ function _bindCharLayer(cl, pw) {
     if (_dragStartCharIdx == null) return;
     if (_charSel && _charSel.pw !== pw) return;   // 多页/翻页累积的 document 监听：只处理拖选起点页
     const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';  // 恢复 L 按钮可点
+    pw.querySelectorAll(_OVL_HL_SEL).forEach(el => el.style.pointerEvents = '');       // 恢复呼吸高亮可点
     const startIdx = _dragStartCharIdx;
     _dragStartCharIdx = null;
     if (_dragMoved) {
@@ -3011,6 +3018,7 @@ function _bindCharLayer(cl, pw) {
         _dragStartCharIdx = null; _charSel = null;
         pw.querySelector('.sel-overlay')?.replaceChildren();
         const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+        pw.querySelectorAll(_OVL_HL_SEL).forEach(el => el.style.pointerEvents = '');
         if (!_swipeStart.h) _swipeStart = null;   // 竖滑 → 交回原生滚动，不再拦
       }
       // 横滑：每次 move 都 preventDefault 抢下手势，防浏览器判滚动→touchcancel→翻不了页（F2 根因）
@@ -3041,7 +3049,9 @@ function _bindCharLayer(cl, pw) {
     const p = ptToLocal(t.clientX, t.clientY);
     onEnd(p.x, p.y);
   });
-  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; _swipeStart = null; });
+  cl.addEventListener('touchcancel', () => { _dragStartCharIdx = null; _swipeStart = null;
+    const vl = pw.querySelector('.vocab-layer'); if (vl) vl.style.pointerEvents = '';
+    pw.querySelectorAll(_OVL_HL_SEL).forEach(el => el.style.pointerEvents = ''); });
   // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
   pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
 }
