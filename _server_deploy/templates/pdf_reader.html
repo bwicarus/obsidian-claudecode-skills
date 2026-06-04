@@ -313,7 +313,10 @@ body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框
 
 /* vocab 下划线层：z-index 6 高于 char-layer(4) / hl-layer(5)，让句子按钮可点；
    layer 本体 pointer-events:none 不拦 char-layer 拖选；只有 .vocab-sentence-btn auto */
-.vocab-layer{position:absolute;inset:0;z-index:6;pointer-events:none;overflow:hidden}
+/* 不加 overflow:hidden —— 去边时 .crop-on>.vocab-layer 带 translate(-crop-l),但本层 overflow 的裁切区
+   是本地 [0,裁后宽],而句子框/L按钮用整页坐标 X → 右侧(X>裁后宽)被错误裁掉(句末「⌟」竖线没了)。
+   裁切交给外层 .crop-on{overflow:hidden}(它带 translate,裁切区正确)+ JS visR 夹取。 */
+.vocab-layer{position:absolute;inset:0;z-index:6;pointer-events:none}
 .vocab-underline{position:absolute;pointer-events:none;border-radius:1px}
 .vocab-underline.m-new   {height:2.5px;background:#f59e0b}                    /* 新词：橙 */
 .vocab-underline.m-learning {height:2.3px;background:#fb923c;opacity:.92}    /* 学习中：浅橙（之前漏了这档样式→下划线隐形，框却计数→看着「1个词却框」）*/
