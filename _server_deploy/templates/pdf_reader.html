@@ -16,6 +16,15 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #header button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px}
 #header button:hover{background:#2c3e6a;border-color:#3b6db5}
 #header input[type=number]{background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:4px;padding:4px 8px;width:60px;font-size:12px}
+/* 全屏阅读：隐藏顶栏(#main flex:1 自动撑满，页宽不变无需重渲染)，浮出右上角恢复按钮 */
+.fs-mode #header{display:none}
+#fs-restore{display:none;position:fixed;top:8px;right:8px;z-index:1400;width:34px;height:34px;
+  border-radius:50%;background:rgba(16,22,42,.62);border:1px solid rgba(120,160,220,.5);
+  color:#cfe6ff;font-size:16px;line-height:1;cursor:pointer;align-items:center;justify-content:center;
+  backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);box-shadow:0 2px 10px rgba(0,0,0,.35);padding:0}
+#fs-restore:active{background:rgba(40,55,95,.85)}
+.fs-mode #fs-restore{display:flex}
+#fs-toggle.active{background:#2c3e6a;border-color:#3b6db5}
 
 #main{flex:1;overflow:auto;background:#0a0e1a;padding:0;text-align:center;position:relative}/* 0 内边距:页面铺满(尽量全屏)+ page-container 坐标=内容坐标(pinch 焦点算得准) */
 /* canvas 用 inline 固定 cw×ch（精确比例，绝不被 CSS 缩放）；宽度自适应靠重算 scale 重 render，overlay 同坐标系永不错位 */
@@ -537,6 +546,10 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .set-hl-row .del:hover{background:#9a3232}
 
 </style>
+<script>
+/* 全屏阅读偏好：渲染前(早于 body)就给 <html> 加 fs-mode，避免开着全屏时刷新一闪顶栏 */
+try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentElement.classList.add('fs-mode'); } catch (e) {}
+</script>
 </head>
 <body>
 <div id="app">
@@ -549,8 +562,11 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     <button id="pagetr-toggle" onclick="togglePageTranslate()" title="整页翻译：当前页所有句子就地显示中文（再按关闭）">译页</button>
     <button id="crop-toggle" onclick="toggleCrop()" title="去边阅读模式：隐藏每页左/右/上/下边距（在 ⚙ 设置里配各边百分比）">✂️ 去边</button>
     <button onclick="openSearch()" title="全文搜索（全书）">🔍</button>
+    <button id="fs-toggle" onclick="toggleFullscreen()" title="全屏阅读：隐藏顶栏腾出空间（再点右上角 ⤢ 恢复）">⛶ 全屏</button>
     <button onclick="openSettings()" title="AI 设置">⚙️</button>
   </div>
+  <!-- 全屏阅读时浮出的恢复按钮（点它显示顶栏） -->
+  <button id="fs-restore" onclick="toggleFullscreen()" title="退出全屏：显示顶栏">⤢</button>
   <!-- 本书语言选择已移入 ⚙ 设置面板 -->
   <div id="main">
     <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;

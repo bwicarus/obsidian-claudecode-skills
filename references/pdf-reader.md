@@ -793,3 +793,10 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **重构**:原 `showWordPopover` 拆成 `_lookupWordFetch`(纯查) + `_renderWordPop`(纯渲染,含 `!ok→_expandWordFull`) + 编排器。`_wordPopSeq` 竞态守卫保留。
 - 验证:node 模拟 5 场景(快词直接弹/慢词建高亮就绪不自动弹/点就绪弹框/查询中点开框后自动填/竞态 A 作废 B 正常)全过;build+check OK。**词组 `showPhrasePopover` 暂未改**(它已有呼吸高亮,只是仍显 loading 框,需要的话同法改)。
 - **多个高亮并存（2026-06-04 改）**：单全局 `_activeWordHl` → 数组 `_wordHls`，可同时点多个生词、各自后台查、各自呼吸高亮、各自点开（边读边点的体验）。每次查词建独立 `hl`（`id=++_wordHlSeq`），`showWordPopover` 不再清别的高亮。`renderWordHl(pw)` 渲染该页**所有**匹配高亮(各一个 `.word-hl-layer`，`boxOpen` 的不画)；`_materializeWordHl` 同范围去重防重复点同词叠层；`_removeWordHl(hl)` 移除单个；`_removeWordHighlight()` 保留为"清全部"。**框是单例**：`_wordPopOwnerId` 记当前框归属的 hl id，并发查词回来只填仍归属自己的框(否则被后点的接管),查完无论填没填都清掉自己。node 模拟 8 断言(3 慢词并存/就绪不自动弹/逐个点开只移除对应/快词不扰慢词/并发抢框)全过。
+
+### 29. 全屏阅读（隐藏顶栏，2026-06-04）
+顶栏 `#header`(固定 48px)在 iPad 上挺占竖向空间。加全屏阅读:
+- 顶栏「⛶ 全屏」按钮 `toggleFullscreen()` → 给 `<html>` 加 `.fs-mode` class,CSS `.fs-mode #header{display:none}` 隐藏顶栏(`#main` flex:1 自动撑满)。**页宽不变 → 无需重渲染**(只多露竖向)。
+- 隐藏后右上角浮出半透明圆形 `#fs-restore`(⤢,fixed top-right,`backdrop-filter` 毛玻璃,`.fs-mode #fs-restore{display:flex}`) → 点它退出全屏。
+- **持久化**:`localStorage['pdf-fullscreen']`,`_applyFullscreen`/`_fsEnabled` 在 06-layout.js。**防刷新闪顶栏**:class 挂 `<html>`(不是 body),`<head>` 里一段**渲染前内联脚本**读 localStorage 先加 `.fs-mode`(早于 body 绘制),reader.js boot 再 `_applyFullscreen` 同步按钮激活态。
+- 左侧 nav `☰` 抽屉手柄、右侧「语法·知识点」侧 tab 不受影响(都是 fixed 边缘元素,全屏下仍可用)。

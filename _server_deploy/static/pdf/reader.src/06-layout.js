@@ -288,4 +288,18 @@ function _setupPinchZoom() {
 if (document.readyState !== 'loading') _setupPinchZoom();
 else window.addEventListener('DOMContentLoaded', _setupPinchZoom);
 
+// ── 全屏阅读：隐藏顶栏腾空间（class 挂 <html>，<head> 内联脚本已在渲染前应用持久值）──
+function _fsEnabled() { try { return localStorage.getItem('pdf-fullscreen') === '1'; } catch (_) { return false; } }
+function _applyFullscreen(on) {
+  document.documentElement.classList.toggle('fs-mode', on);
+  const b = document.getElementById('fs-toggle'); if (b) b.classList.toggle('active', on);
+}
+window.toggleFullscreen = function () {
+  const on = !document.documentElement.classList.contains('fs-mode');
+  _applyFullscreen(on);
+  try { localStorage.setItem('pdf-fullscreen', on ? '1' : '0'); } catch (_) {}
+  _toast?.(on ? '全屏阅读：点右上角 ⤢ 恢复顶栏' : '已退出全屏');
+};
+_applyFullscreen(_fsEnabled());   // 同步按钮激活态(class 已由内联脚本应用)
+
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
