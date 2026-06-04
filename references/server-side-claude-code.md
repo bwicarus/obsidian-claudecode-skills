@@ -97,7 +97,7 @@ ssh root@bwicarus.space 'cd /root/claude && claude -p "项目当前状态"'
 | 工作目录 | `C:\claude\` | `/root/claude/` |
 | Claude Code 版本 | Opus 4.7 1M context | 默认（Sonnet 4.6）—— 要 Opus 加 `--model claude-opus-4-7` |
 | 内存 / 上下文 | 完整保留（这个对话窗）| 全新会话 |
-| 操作 Windows | 直接 | **无法**（除非反向 ssh 回 Windows） |
+| 操作 Windows | 直接 | **可 SSH 进**（2026-06-05 配通）：从 Pi `ssh bwicarus@100.99.9.124`(Tailscale `bwicarus-2`)免密(Pi ed25519 公钥已加 PC 的 `administrators_authorized_keys`)。前提 PC 开机+Tailscale 在线；默认 shell 有 Zellij TUI 噪声 → 用 `cmd /c "..."` + `tail` 取 `Bye from Zellij!` 之后的真输出。详见 memory `pc-ssh-access` |
 | 操作服务器 | ssh + 132ms RTT | **本地直接** bash / file 编辑（即时） |
 | Memory（auto memory） | `~/.claude/projects/C--claude/memory/` (Windows 私有) | `/root/.claude/projects/-root-claude/memory/`（服务器侧，新版单横杠；用户切换时手动 scp 同步） |
 
