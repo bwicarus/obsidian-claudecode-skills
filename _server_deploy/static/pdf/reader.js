@@ -3700,6 +3700,9 @@ function _enFormsHtml(lemma, forms, clicked) {
 let _wordHlSeq = 0;          // 高亮 id 发号
 let _wordHls = [];           // 并存的查词高亮 [{id,page,pw,rects,word,ctx,charSel,shown,ready,data,error,boxOpen}]
 let _wordPopOwnerId = null;  // 当前 word-pop 小框归属的高亮 id（防并发查词回来填错框）
+// 本会话查词结果缓存（word→dict-quick d）：已查过的词再点**直接秒显小框**(不发请求/不建高亮),
+// 后台再打一次刷新暴露计数。用户诉求:"已有现成数据的词单击应直接出结果,不要先高亮再点"。
+const _dictCache = new Map();
 function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存；boxOpen 的不画）
   pw.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
   const page = parseInt(pw.dataset.pageNum || '0', 10);
@@ -3774,6 +3777,7 @@ function _renderWordPop(word, ctx, d, cs) {
   const pop = document.getElementById('word-pop');
   _wordPopState = {word, ctx: ctx || '', lemma: word};
   if (!d || !d.ok) { pop.style.display = 'none'; _expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
+  try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
   _wordPopState.lemma = d.lemma || word;
   _wordPopState.jp = !!d.jp;                // 掌握按钮按语言分流(jp/en 不同 store)
   _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
@@ -3822,13 +3826,21 @@ window.showWordPopover = async (word, ctx) => {
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
+  // 已有现成数据(本会话查过)→ **直接秒显小框**,不发请求/不建高亮;后台再打一次刷新暴露计数+缓存
+  const cached = _dictCache.get(word);
+  if (cached) {
+    _wordPopOwnerId = ++_wordHlSeq;   // 占新 owner id(框归属);没有 hl 会匹配它 → 别的并发慢词回来不会覆盖本框
+    _renderWordPop(word, ctx, cached, cap);
+    _lookupWordFetch(word, ctx).then(d => { if (d && d.ok) _dictCache.set(word, d); }).catch(() => {});
+    return;
+  }
   // 每次查词一个独立 hl;多个可并存(各自呼吸/各自点开)，**不清掉别的查词高亮**。
-  // 慢词(>300ms 未回)才物化成呼吸高亮当等待指示;快词直接弹小框(全程不显示挡视线的"查词中"框)。
+  // 慢词(>400ms 未回)才物化成呼吸高亮当等待指示;快词(含服务端已缓存)直接弹小框(全程不显示"查词中"框)。
   const hl = {
     id: ++_wordHlSeq, page: pw ? (parseInt(pw.dataset.pageNum || '0', 10) || currentPage) : currentPage,
     pw, word, ctx, charSel: cap, rects: null, shown: false, ready: false, data: null, error: null, boxOpen: false,
   };
-  const hlTimer = setTimeout(() => { if (!hl.ready && cap) _materializeWordHl(hl); }, 300);
+  const hlTimer = setTimeout(() => { if (!hl.ready && cap) _materializeWordHl(hl); }, 400);
   let d = null, err = null;
   try { d = await _lookupWordFetch(word, ctx); } catch (e) { err = e; }
   clearTimeout(hlTimer);
@@ -3913,6 +3925,7 @@ window._wordPopMaster = (btn) => {
   }).then(r => r.json()).then((d) => {
     if (d && d.ok === false) throw new Error(d.error || 'fail');
     s.mastered = next;
+    try { const c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}   // 同步缓存,再点不显旧掌握态
     if (btn) {
       btn.disabled = false;
       btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';

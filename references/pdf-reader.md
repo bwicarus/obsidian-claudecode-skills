@@ -794,6 +794,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 验证:node 模拟 5 场景(快词直接弹/慢词建高亮就绪不自动弹/点就绪弹框/查询中点开框后自动填/竞态 A 作废 B 正常)全过;build+check OK。**词组 `showPhrasePopover` 暂未改**(它已有呼吸高亮,只是仍显 loading 框,需要的话同法改)。
 - **多个高亮并存（2026-06-04 改）**：单全局 `_activeWordHl` → 数组 `_wordHls`，可同时点多个生词、各自后台查、各自呼吸高亮、各自点开（边读边点的体验）。每次查词建独立 `hl`（`id=++_wordHlSeq`），`showWordPopover` 不再清别的高亮。`renderWordHl(pw)` 渲染该页**所有**匹配高亮(各一个 `.word-hl-layer`，`boxOpen` 的不画)；`_materializeWordHl` 同范围去重防重复点同词叠层；`_removeWordHl(hl)` 移除单个；`_removeWordHighlight()` 保留为"清全部"。**框是单例**：`_wordPopOwnerId` 记当前框归属的 hl id，并发查词回来只填仍归属自己的框(否则被后点的接管),查完无论填没填都清掉自己。node 模拟 8 断言(3 慢词并存/就绪不自动弹/逐个点开只移除对应/快词不扰慢词/并发抢框)全过。
 - **拖选经过高亮被截获修复（2026-06-04）**：词查/词组/解释呼吸高亮的 `.hl` 是 `pointer-events:auto`、z6 盖在 char-layer 上。拖选起点在 char-layer，但**拖动经过某高亮 `.hl` 时被它截获** → 丢 move/up(选区乱涨成多词→误弹词组按钮呼吸)+ 误触发其 click(弹出别词结果)。原 onStart 只禁 `.vocab-layer`(L 按钮),漏了这三类。修:`13-selection.js` 加 `_OVL_HL_SEL`,onStart 禁这些 `.hl` 点击、onEnd/单页横滑放弃/touchcancel/竖滑转滚动 都恢复(顺手补了 vocab-layer 在 touchcancel 的同类遗漏)。deliberate 点高亮(onStart 不触发)不受影响、照常开结果。
+- **已查过的词单击直接秒显(2026-06-04)**：用户诉求"已有现成数据的词单击应直接出结果,不要先高亮再点"。加本会话客户端缓存 `_dictCache`(word→dict-quick d):`showWordPopover` 命中缓存 → **直接 `_renderWordPop` 秒显小框,不发请求/不建高亮**,后台再打一次 `_lookupWordFetch` 刷新暴露计数+缓存;`_renderWordPop` 在 d.ok 时存缓存(>600 条淘汰最旧);`_wordPopMaster` 切掌握后同步缓存 `mastered`(再点不显旧态)。另把慢词高亮阈值 300→400ms(让首次但服务端已缓存的词更可能走直显)。
 
 ### 29. 全屏阅读（隐藏顶栏，2026-06-04）
 顶栏 `#header`(固定 48px)在 iPad 上挺占竖向空间。加全屏阅读:
