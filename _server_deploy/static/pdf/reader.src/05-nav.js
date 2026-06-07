@@ -110,7 +110,8 @@ if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
-  if (readMode !== 'single') await setupContinuousMode();
+  // +/- 缩放跟双指缩放(_applyZoom)一致:连续/双页原地重排(不整列重建→不"重新加载"),原地失败才重建
+  if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
   else renderPage(currentPage);
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）

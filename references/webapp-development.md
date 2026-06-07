@@ -315,3 +315,14 @@ upload_dataset(client, Path(dash_dir), "dashboard")
 # 白名单：JSON + 图片（PNG/JPG/PDF），不传 HTML/JS/CSS
 # admin 用户上传的 HTML/CSS/JS 自动同步到 template
 ```
+
+## 全站 PWA service worker（2026-06-07）
+
+让 PC/iPad **重复打开秒回 + 数据本地缓存**，Pi 仍是唯一写入源。`app.py`：
+
+- `/sw.js` 路由（`_SITE_SW_TEMPLATE`，`Cache-Control: no-cache` + `Service-Worker-Allowed: /`）；`_PWA_HEAD` 注入 `navigator.serviceWorker.register('/sw.js',{scope:'/'})`（after_request `inject_nav` 给登录后页面注）。
+- **VERSION = SW 代码的 md5**（`_SITE_SW_VERSION`）→ 改了缓存逻辑 version 自动变 → `activate` 清旧缓存，**不靠手动 bump**。
+- 策略：`/static` + 数据 GET（`/api`、`*.json`、`/dashboard/`、`/history/`、`/insights`）→ **stale-while-revalidate**（先返本地缓存秒开、后台刷新）；导航/HTML → **network-first + 离线回退**；`login/logout/auth/admin`、POST、媒体 Range、`/pdf/`、跨源 → 放行不缓存；只缓存 `status===200 && type==='basic'`。
+- **登出清缓存**：`/logout` 请求时 SW 清掉所有 `bw-*` 缓存（防共享设备/登出后私有数据 + `window.__USER__` 残留）。
+- `/pdf/` 由它**自己的** `/pdf/sw.js`（缓存页图 + page-chars）管，scope 更具体优先；两者隔离共存。
+- ⚠ **nginx 必须把 `/sw.js` 代理到 Flask**（前缀代理 + 静态兜底的站点会 404）→ 见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)（Pi 手工 patch，80/443 各一条 `location = /sw.js`）。验证：`curl -sk https://<host>/sw.js` 返 `application/javascript`。

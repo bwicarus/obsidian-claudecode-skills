@@ -132,6 +132,9 @@ _PWA_HEAD = (
     '<meta name="apple-mobile-web-app-title" content="bwicarus">'
     '<meta name="theme-color" content="#10162a">'
     '<script>' + _PWA_RESUME_JS + '</script>'
+    # 全站 service worker(scope /):静态/数据 SWR(秒开+本地缓存)、导航 network-first(离线回退)。
+    # Pi 仍是唯一写入源(只缓存 GET;POST/鉴权不碰)。/pdf/ 由它自己的 SW 管。
+    '<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>'
 )
 
 @app.route("/manifest.webmanifest")
@@ -148,6 +151,83 @@ def pwa_manifest():
             {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
         ],
     }, ensure_ascii=False), mimetype="application/manifest+json")
+
+
+# 全站 service worker —— 让 PC/iPad 重复打开秒回 + 数据本地缓存(Pi 仍是唯一写入源)。
+# 缓存策略:静态/数据 GET → stale-while-revalidate(先返本地缓存秒开,后台向 Pi 刷新→下次新);
+#           导航/HTML → network-first(在线拿最新壳,离线/Pi没醒回退上次缓存)。
+# 安全:只缓存同源 GET 的 200(basic);POST/鉴权(login/logout/auth/admin)绝不缓存;/pdf/ 由 /pdf/sw.js 管。
+# 更新:改 VERSION → activate 时清旧缓存;/sw.js 以 no-cache 提供,浏览器每次校验→改了即生效。
+_SITE_SW_TEMPLATE = """
+const VERSION='%s';
+const STATIC_C='bw-static-'+VERSION, DATA_C='bw-data-'+VERSION, NAV_C='bw-nav-'+VERSION;
+self.addEventListener('install', function(){ self.skipWaiting(); });
+self.addEventListener('activate', function(e){
+  e.waitUntil((async function(){
+    const keys=await caches.keys();
+    await Promise.all(keys.map(function(k){
+      if((k.indexOf('bw-static-')===0&&k!==STATIC_C)||(k.indexOf('bw-data-')===0&&k!==DATA_C)||(k.indexOf('bw-nav-')===0&&k!==NAV_C)) return caches.delete(k);
+    }));
+    await self.clients.claim();
+  })());
+});
+function noCache(p){ return /^\\/(login|logout|register|auth|admin)\\b/.test(p); }
+function isStatic(u){ return u.pathname.indexOf('/static/')===0 || /\\.(?:css|js|mjs|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|webp|ico)$/i.test(u.pathname); }
+function isData(u){ return u.pathname.indexOf('/api/')===0 || /\\.json$/i.test(u.pathname) || u.pathname.indexOf('/dashboard/')===0 || u.pathname.indexOf('/history/')===0 || u.pathname.indexOf('/insights')===0; }
+self.addEventListener('fetch', function(e){
+  const req=e.request;
+  if(req.method!=='GET') return;
+  if(req.headers.has('range')) return;            // 媒体拖动(206 partial)放行,别缓存半段坏播放
+  var u; try{ u=new URL(req.url); }catch(err){ return; }
+  if(u.origin!==location.origin) return;
+  if(u.pathname.indexOf('/pdf/')===0) return;     // /pdf/ 有自己的 SW(页图)
+  if(/\\.(?:mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mov|m3u8)$/i.test(u.pathname)) return;  // 音视频不缓存(防整段大对象/206)
+  if(u.pathname.indexOf('/logout')===0){          // 登出:清掉全部本地私有缓存(防共享设备/登出后残留),再放行
+    caches.keys().then(function(ks){ ks.forEach(function(k){ if(k.indexOf('bw-')===0) caches.delete(k); }); });
+    return;
+  }
+  if(noCache(u.pathname)) return;                 // 鉴权相关绝不缓存
+  if(req.mode==='navigate'){ e.respondWith(networkFirst(req,NAV_C)); return; }
+  if(isStatic(u)){ e.respondWith(swr(req,STATIC_C)); return; }
+  if(isData(u)){ e.respondWith(swr(req,DATA_C)); return; }
+});
+async function swr(req,cn){
+  const c=await caches.open(cn);
+  const hit=await c.match(req);
+  const net=fetch(req).then(function(res){ if(res&&res.status===200&&res.type==='basic') c.put(req,res.clone()); return res; }).catch(function(){ return null; });
+  if(hit){ net.catch(function(){}); return hit; }
+  return (await net) || Response.error();
+}
+async function networkFirst(req,cn){
+  const c=await caches.open(cn);
+  try{
+    const res=await fetch(req);
+    if(res&&res.status===200&&res.type==='basic') c.put(req,res.clone());
+    return res;
+  }catch(err){
+    const hit=await c.match(req);
+    return hit || Response.error();
+  }
+}
+self.addEventListener('message', function(e){
+  if(e.data==='skipWaiting'){ self.skipWaiting(); }
+  if(e.data==='clearCache'){ caches.keys().then(function(ks){ ks.forEach(function(k){ if(k.indexOf('bw-')===0) caches.delete(k); }); }); }
+});
+"""
+import hashlib as _sw_hl
+# VERSION = SW 代码哈希 → 改了缓存逻辑(noCache/isData/swr 等)version 自动变 → activate 清旧缓存,
+# 不靠手动 bump(复审 update-staleness 项)。代码没变则 version 稳定 → 缓存持久 → 仍秒开。
+_SITE_SW_VERSION = "h" + _sw_hl.md5(_SITE_SW_TEMPLATE.encode("utf-8")).hexdigest()[:10]
+_SITE_SW_JS = _SITE_SW_TEMPLATE % _SITE_SW_VERSION
+
+
+@app.route("/sw.js")
+def site_sw():
+    return Response(_SITE_SW_JS, mimetype="application/javascript", headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Service-Worker-Allowed": "/",
+    })
+
 
 @app.after_request
 def inject_nav(response):

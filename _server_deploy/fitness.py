@@ -72,6 +72,15 @@ def _db(username: str) -> sqlite3.Connection:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # 用户收藏的视频(per-user,per-exercise);收藏的在列表里置顶
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS fitness_video_favorite (
+            exercise_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (exercise_id, video_id)
+        )
+    """)
     # AI 调整后的动作 prescribed 覆盖(per-user,优先于 plan.json)
     db.execute("""
         CREATE TABLE IF NOT EXISTS fitness_exercise_override (
@@ -1100,13 +1109,52 @@ def api_history():
 
 @api_bp.route("/videos/<exercise_id>", methods=["GET"])
 def api_videos_get(exercise_id: str):
-    """合并 user override + plan 默认的视频列表。"""
+    """合并 user override + plan 默认的视频列表;收藏的置顶 + 标 favorite。"""
     username = _username()
     db = _db(username)
     plan = _load_plan()
     vids = _videos_for(db, exercise_id, plan)
+    favs = {r["video_id"] for r in db.execute(
+        "SELECT video_id FROM fitness_video_favorite WHERE exercise_id=?", (exercise_id,))}
     db.close()
+    for v in vids:
+        v["favorite"] = v.get("video_id") in favs
+    # 收藏置顶:sort 稳定 → 收藏组/非收藏组各自保持原相对顺序
+    vids.sort(key=lambda v: 0 if v.get("favorite") else 1)
     return jsonify({"ok": True, "videos": vids})
+
+
+@api_bp.route("/videos/<exercise_id>/favorite", methods=["POST"])
+def api_videos_favorite(exercise_id: str):
+    """收藏 / 取消收藏一个视频。body: {video_id, favorite: bool}。收藏的会在列表里置顶。"""
+    username = _username()
+    data = request.get_json(silent=True) or {}
+    vid = data.get("video_id")
+    fav = bool(data.get("favorite"))
+    if not vid:
+        return jsonify({"ok": False, "error": "missing video_id"}), 400
+    db = _db(username)
+    if fav:
+        db.execute("INSERT OR IGNORE INTO fitness_video_favorite (exercise_id, video_id) "
+                   "VALUES (?, ?)", (exercise_id, vid))
+    else:
+        db.execute("DELETE FROM fitness_video_favorite WHERE exercise_id=? AND video_id=?",
+                   (exercise_id, vid))
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "favorite": fav})
+
+
+@api_bp.route("/summary/<video_id>")
+def api_summary(video_id: str):
+    """按字幕 AI 总结要点 + 时间锚点(可点击跳转)。全局缓存,首次 ~5-30s,之后秒出。
+    ?force=1 强制重算。返回 {ok, points:[{t,text}], from_cache}。"""
+    _username()
+    from youtube_subtitles import summarize_video
+    force = request.args.get("force") == "1"
+    r = summarize_video(video_id, target_lang="zh", force=force)
+    code = 200 if r.get("status") == "ready" else 500
+    return jsonify({"ok": r.get("status") == "ready", **r}), code
 
 
 @api_bp.route("/videos/<exercise_id>", methods=["POST"])

@@ -492,6 +492,104 @@ def _ratio_status(val, spec) -> str:
         return "green"
 
 
+# ── 力量(est-1RM)拮抗平衡：动作负重"模态"标注 + 同模态拮抗对 ──
+# est-1RM 跨模态量纲不一致(哑铃单手 vs 器械满栈 vs 绳索阻力),直接相除会出假象。
+# 故只在 *同一模态* 内比 est-1RM;跨模态/缺动作一律 insufficient(诚实降级,不硬算)。
+_EXERCISE_MODALITY = {
+    "db_bench_flat": "db", "db_bench_incline": "db", "db_shoulder_press": "db",
+    "db_row_single": "db", "db_incline_curl": "db", "db_overhead_tricep": "db",
+    "db_lateral_raise": "db", "db_calf_raise": "db", "goblet_squat": "db",
+    "lat_pulldown": "machine", "seated_row": "machine",
+    "leg_extension": "machine", "leg_curl": "machine",
+    "cable_lateral_raise": "cable", "cable_tricep_pushdown": "cable", "face_pull": "cable",
+    "ez_curl": "barbell", "rdl": "barbell",
+    "chin_up": "bodyweight", "dip": "bodyweight", "hanging_leg_raise": "bodyweight",
+}
+
+# 力量拮抗对:只在同模态、两侧各≥2组时算 est-1RM 比;否则 insufficient。
+# good=[lo,hi] 绿区;绿区外到 yel=[lo,hi] 为 yellow,再外为 red(双向偏离都不好)。
+# weak_low/weak_high:比值偏低/偏高时"弱"的那块肌肉(用于 3D 上色)。
+_STRENGTH_PAIRS = [
+    {"key": "pull_push_h", "name": "水平拉:推 力量比",
+     "num": ["db_row_single", "seated_row"], "den": ["db_bench_flat", "db_bench_incline"],
+     "good": [0.85, 1.25], "yel": [0.70, 1.45], "weak_low": "back", "weak_high": "chest",
+     "evidence": "中等(肩健康共识+群体数据):水平拉应≈水平推。拉显著弱(<0.7)→肩胛后缩不足、圆肩/肩峰撞击风险(Reinold 2009;scapular force couple)。本系统用训练负荷 est-1RM 近似,非等速测力",
+     "hint": "推拉力量应大致相当;拉明显弱→圆肩倾向"},
+    {"key": "ham_quad", "name": "腘绳:股四 力量比(H:Q)",
+     "num": ["leg_curl"], "den": ["leg_extension"],
+     "good": [0.55, 0.85], "yel": [0.45, 1.05], "weak_low": "hamstrings", "weak_high": "quads",
+     "evidence": "强(就方向):等速 H:Q≈0.6(Coombs&Garbutt 2002);低 H:Q 与腘绳拉伤/ACL 风险相关(Croisier 2008)。本系统用同器械负荷比近似,仅方向参考、非等速力矩比",
+     "hint": "腘绳应达股四约 0.6;过低→后链弱、拉伤/ACL 风险升"},
+    {"key": "bi_tri", "name": "二头:三头 力量比",
+     "num": ["ez_curl", "db_incline_curl"], "den": ["cable_tricep_pushdown", "db_overhead_tricep"],
+     "good": [0.5, 1.0], "yel": [0.4, 1.3], "weak_low": None, "weak_high": "triceps",
+     "evidence": "弱(解剖):三头横截面>二头,力量上肘伸通常≥肘屈;无公认硬比,仅同模态干净对时判",
+     "hint": "三头力量通常≥二头;二头明显强(>1.3)→只练弯举、肘伸不足"},
+    {"key": "vpull_hpull", "name": "垂直拉:水平拉 力量比",
+     "num": ["lat_pulldown", "chin_up"], "den": ["db_row_single", "seated_row"],
+     "good": [0.8, 1.3], "yel": [0.6, 1.6], "weak_low": "back", "weak_high": "back",
+     "evidence": "弱-中:同模态下下拉≈划船;只做下拉不划船→菱形/中斜方(肩胛后缩)欠练",
+     "hint": "下拉与划船力量应相当"},
+]
+
+
+def _strength_status(r, spec):
+    lo, hi = spec["good"]
+    ylo, yhi = spec["yel"]
+    if lo <= r <= hi:
+        return "green"
+    if ylo <= r <= yhi:
+        return "yellow"
+    return "red"
+
+
+def _compute_strength_ratios(per_ex):
+    """per_ex: {exid: {"e1rm": float, "sets": int, "modality": str}}。
+    每对只在同模态、两侧都有(且各≥2组)时算 est-1RM 比;否则 insufficient(给出缺口提示)。"""
+    def side(exids):
+        by_mod = {}                       # mod -> (e1rm, low_conf)
+        for exid in exids:
+            d = per_ex.get(exid)
+            if not d or d["e1rm"] <= 0 or d["sets"] < 2:
+                continue
+            if d["e1rm"] > by_mod.get(d["modality"], (0, False))[0]:
+                by_mod[d["modality"]] = (d["e1rm"], d.get("low_conf", False))
+        return by_mod
+
+    def missing(spec):
+        n, d = side(spec["num"]), side(spec["den"])
+        if not n and not d:
+            return "两侧都缺数据;先补这对动作"
+        if not n:
+            return "缺「" + "/".join(spec["num"]) + "」(≥2组)"
+        if not d:
+            return "缺「" + "/".join(spec["den"]) + "」(≥2组)"
+        return "两侧设备不同(跨模态不可比),需同器械再比"
+
+    out = []
+    for spec in _STRENGTH_PAIRS:
+        n, d = side(spec["num"]), side(spec["den"])
+        shared = set(n) & set(d)
+        base = {"name": spec["name"], "key": spec["key"], "evidence": spec["evidence"],
+                "hint": spec["hint"], "weak_low": spec["weak_low"], "weak_high": spec["weak_high"]}
+        if not shared:
+            out.append({**base, "value": None, "status": "insufficient",
+                        "modality": None, "missing": missing(spec)})
+            continue
+        # 选两侧都有、较重(更可信)的模态
+        mod = max(shared, key=lambda m: min(n[m][0], d[m][0]))
+        nv, ncf = n[mod]
+        dv, dcf = d[mod]
+        r = round(nv / dv, 2)
+        status = _strength_status(r, spec)
+        low_conf = ncf or dcf
+        if low_conf and status == "red":
+            status = "yellow"            # 高 rep Epley 外推不可信 → 封顶 yellow,不判 red
+        out.append({**base, "value": r, "status": status, "low_conf": low_conf,
+                    "modality": mod, "num_1rm": nv, "den_1rm": dv})
+    return out
+
+
 def _balance_profile(db: sqlite3.Connection, plan_data: dict, window_days: int = 28) -> dict:
     """跨所有训练日聚合近 window_days 的容量到拮抗桶,算六大平衡比 + 每动作 est-1RM。纯客观,不调 AI。"""
     import datetime as _dt
@@ -506,19 +604,23 @@ def _balance_profile(db: sqlite3.Connection, plan_data: dict, window_days: int =
     buckets: dict[str, float] = {}
     raw_sets: dict[str, float] = {}        # 名义组数(不摊派,仅该动作主桶计)——这里用 exercise 计数
     est1rm: dict[str, float] = {}
+    est1rm_reps: dict[str, int] = {}
+    ex_sets: dict[str, int] = {}
     ex_name = {ex["id"]: ex["name"] for d in plan_data.get("days", []) for ex in d["exercises"]}
     total_sets = 0
     unmapped = set()
     for r in rows:
         exid = r["exercise_id"]
         total_sets += 1
+        ex_sets[exid] = ex_sets.get(exid, 0) + 1
         w = r["weight_kg"]
         reps = r["reps"]
-        # est-1RM(Epley),取该动作最高
+        # est-1RM(Epley),取该动作最高;记录贡献该最高值的 reps(用于高 rep 外推降权)
         if w is not None and reps is not None and reps > 0:
             e = w * (1 + reps / 30.0)
             if e > est1rm.get(exid, 0):
                 est1rm[exid] = round(e, 1)
+                est1rm_reps[exid] = reps
         m = MUSCLE_MAP.get(exid)
         if not m:
             unmapped.add(exid)
@@ -544,84 +646,118 @@ def _balance_profile(db: sqlite3.Connection, plan_data: dict, window_days: int =
             "good_range": spec["good"], "hint": spec["hint"],
             "status": "insufficient" if insufficient else _ratio_status(val, spec),
         })
+    # —— 力量(est-1RM)拮抗比(主信号);跨模态/缺动作 → insufficient ——
+    per_ex = {exid: {"e1rm": est1rm.get(exid, 0.0), "sets": ex_sets.get(exid, 0),
+                     "modality": _EXERCISE_MODALITY.get(exid, "other"),
+                     "low_conf": est1rm_reps.get(exid, 0) > 12}   # 高 rep Epley 外推不可信
+              for exid in set(list(est1rm) + list(ex_sets))}
+    strength_ratios = _compute_strength_ratios(per_ex)
+    n_eval = sum(1 for s in strength_ratios if s["status"] != "insufficient")
+    if total_sets < 8:
+        data_suff = "insufficient"
+    elif n_eval >= len(_STRENGTH_PAIRS):
+        data_suff = "full"
+    else:
+        data_suff = "partial"
+
     return {
         "window_days": window_days, "weeks": round(weeks, 1), "since": since,
         "total_logged_sets": total_sets,
         "weekly_sets_by_bucket": wk,
         "est_1rm": {ex_name.get(k, k): v for k, v in sorted(est1rm.items())},
-        "ratios": ratios,
+        "ratios": ratios,                       # 容量比(辅助/覆盖度,不再驱动上色)
+        "strength_ratios": strength_ratios,     # 力量比(主信号,驱动 3D 上色)
+        "data_sufficiency": data_suff,
         "unmapped_exercises": sorted(unmapped),
     }
 
 
 def _muscle_status(profile: dict) -> dict:
-    """把六大比值 + 桶容量翻成**每块肌肉**的强弱状态(给 3D 人体上色用)。
-    status: green(充足/均衡) / yellow(偏弱) / red(明显弱/失衡) / insufficient(数据不足)。
-    比值『弱侧』取该比值状态;非比值肌肉按绝对周容量判。"""
-    R = {r["name"]: r for r in profile.get("ratios", [])}
+    """每块肌肉 green/yellow/red/insufficient(给 3D 人体上色)。
+    **主信号=力量比**(同模态 est-1RM 拮抗对);力量比 insufficient/未覆盖的肌肉回退容量绝对值。
+    每块带 source:'strength'(力量比驱动) / 'volume'(容量兜底)。"""
     wk = profile.get("weekly_sets_by_bucket", {})
 
-    def vol(bucket, low=4.0, verylow=2.0):
-        v = wk.get(bucket, 0)
+    def vol_status(v, low=4.0, verylow=2.0):
         if v < 0.5:
-            return "insufficient", v
+            return "insufficient"
         if v < verylow:
-            return "red", v
+            return "red"
         if v < low:
-            return "yellow", v
-        return "green", v
-
-    def ratio_weak(name):
-        """该比值『弱侧』应得状态(直接用比值 status:insufficient/green/yellow/red)+ 值。"""
-        r = R.get(name)
-        if not r:
-            return "insufficient", None
-        st = r["status"]
-        return ("insufficient" if st == "insufficient" else st), r.get("value")
+            return "yellow"
+        return "green"
 
     out = {}
-    # —— 比值驱动(弱侧)——
-    s, v = ratio_weak("拉:推 容量比")          # 低=背/拉弱
-    out["back"] = {"status": s, "label": "背 / 拉", "metric": "拉:推", "value": v}
-    s, v = ratio_weak("后束:前束 容量比")       # 低=后束弱(很多人的痛点)
-    out["rear_delt"] = {"status": s, "label": "后束(三角后)", "metric": "后束:前束", "value": v}
-    s, v = ratio_weak("二头:三头 容量比")       # 高=三头弱(只练弯举)
-    out["triceps"] = {"status": s, "label": "三头", "metric": "二头:三头", "value": v}
-    s, v = ratio_weak("股四:腘绳 容量比")       # 高=腘绳弱(后链不足)
-    out["hamstrings"] = {"status": s, "label": "腘绳", "metric": "股四:腘绳", "value": v}
-    # —— 容量驱动(对立的强侧 + 无直接拮抗的)——
-    st, vv = vol("front_delt"); out["front_delt"] = {"status": st, "label": "前束(三角前)", "weekly": vv}
-    st, vv = vol("side_delt");  out["side_delt"]  = {"status": st, "label": "中束(三角中)", "weekly": vv}
-    st, vv = vol("biceps");     out["biceps"]     = {"status": st, "label": "二头", "weekly": vv}
-    st, vv = vol("core");       out["core"]       = {"status": st, "label": "核心 / 腹", "weekly": vv}
-    st, vv = vol("glute");      out["glutes"]     = {"status": st, "label": "臀", "weekly": vv}
-    st, vv = vol("calf");       out["calves"]     = {"status": st, "label": "小腿", "weekly": vv}
-    # 胸=推侧:用推总容量判(推通常不缺,但量太低也提示)
-    push = wk.get("h_push", 0) + wk.get("v_push", 0)
-    out["chest"] = {"status": ("insufficient" if push < 0.5 else "red" if push < 3 else "yellow" if push < 6 else "green"),
-                    "label": "胸", "weekly": round(push, 1)}
-    # 股四=伸膝侧:用 quad 桶判(腿没练→insufficient)
-    st, vv = vol("quad"); out["quads"] = {"status": st, "label": "股四头", "weekly": vv}
+
+    def put_vol(key, label, bucket=None, raw=None):
+        v = raw if raw is not None else wk.get(bucket, 0)
+        out[key] = {"status": vol_status(v), "label": label, "weekly": round(v, 1), "source": "volume"}
+
+    # —— 1) 全部先用容量兜底 ——
+    put_vol("chest", "胸", raw=wk.get("h_push", 0) + wk.get("v_push", 0))
+    put_vol("back",  "背 / 拉", raw=wk.get("h_pull", 0) + wk.get("v_pull", 0))
+    put_vol("front_delt", "前束(三角前)", "front_delt")
+    put_vol("side_delt",  "中束(三角中)", "side_delt")
+    put_vol("rear_delt",  "后束(三角后)", "rear_delt")
+    put_vol("biceps", "二头", "biceps")
+    put_vol("triceps", "三头", "triceps")
+    put_vol("core", "核心 / 腹", "core")
+    put_vol("glutes", "臀", "glute")
+    put_vol("calves", "小腿", "calf")
+    put_vol("quads", "股四头", "quad")
+    put_vol("hamstrings", "腘绳", "ham")
+
+    # —— 2) 力量比覆盖(主信号):可评的对 → 弱侧给力量状态、强侧绿 ——
+    spec_by_key = {p["key"]: p for p in _STRENGTH_PAIRS}
+
+    def put_str(key, status, s):
+        if key and key in out:
+            out[key] = {"status": status, "label": out[key]["label"], "source": "strength",
+                        "metric": s["name"], "value": s.get("value")}
+
+    for s in profile.get("strength_ratios", []):
+        if s["status"] == "insufficient":
+            continue
+        spec = spec_by_key.get(s["key"])
+        if not spec:
+            continue
+        r = s["value"]
+        lo, hi = spec["good"]
+        if s["status"] == "green":
+            put_str(s["weak_low"], "green", s)
+            put_str(s["weak_high"], "green", s)
+        elif r < lo:                                   # 偏低 → weak_low 弱
+            put_str(s["weak_low"], s["status"], s)
+            if s["weak_high"] != s["weak_low"]:        # 同肌肉(如 vpull_hpull 都是 back)别用 green 盖掉失衡
+                put_str(s["weak_high"], "green", s)
+        else:                                          # 偏高 → weak_high 弱
+            put_str(s["weak_high"], s["status"], s)
+            if s["weak_low"] != s["weak_high"]:
+                put_str(s["weak_low"], "green", s)
     return out
 
 
-BALANCE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。下面是用户近 {weeks} 周(跨 Push/Pull/Legs)
-的**客观训练容量聚合**,已按拮抗肌群/前后链算好六大平衡比(分子÷分母的周均有效组数)。请做**全身平衡体检**:
-找出失衡(尤其前后交叉肌群:推拉、股四腘绳、前后束、前后链),说清风险,给纠正性调整。
+BALANCE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博士。下面是用户近 {weeks} 周(跨 Push/Pull/Legs)的训练数据。
+**全身平衡体检以「力量比」为主信号**(同模态 est-1RM 相除的拮抗肌群力量对比)——这能反映用户『一开始就有的体态/力量失衡』,而非只看训练量(练得多≠强)。容量比仅作辅助(覆盖度:某肌群练没练够、1RM 可不可信)。
 
 {literature}
 
-【六大平衡比(后端已算,你只解读不重算)】
+【力量比(主信号;同模态 est-1RM 拮抗对,后端已算,你只解读不重算)】
+{strength}
+说明:status=insufficient = 该对两侧**不在同一负重模态**(哑铃/器械/绳索量纲不可比)**或缺动作**——这种**绝不下失衡结论**,只用 missing 字段提示"补哪个同器械动作就能解锁这条力量比"。evidence 字段标了证据强度:在 risk 里如实区分『等速研究支持(如 H:Q)』vs『经验法则(如 bench:OHP)』,别把经验法则讲成"研究证实"。
+
+【容量比(辅助/覆盖度;周均有效组数,非力量,别据此下力量失衡结论)】
 {ratios}
 
-【各拮抗桶周均组数】
+【各拮抗桶周均组数(覆盖度)】
 {buckets}
 
-【各动作 est-1RM(Epley,力量参考;仅方向性,非等速测力)】
+【各动作 est-1RM(Epley,kg;仅同模态内可比)】
 {est1rm}
 
-数据说明:近 {weeks} 周共 {total_sets} 个记录组。status=insufficient 的比值数据不足(某侧周均<3组),
-**只提示数据不够、先别下失衡结论**。容量比阈值是『编程目标』不是等速力量比,别混用。
+数据说明:近 {weeks} 周共 {total_sets} 个记录组,data_sufficiency={data_suff}。
+- 力量比 insufficient → 不下结论。容量极低(某肌群周<2组)→ 提示"练得太少",但务必区分『没练』(容量低)与『练了也相对弱』(力量比偏低=既有体态问题的关键信号,优先纠正)。
+- **误报代价 > 漏报**:宁可说"数据不够",不要凭跨模态假象判失衡、让用户做不必要的纠正训练牺牲增肌主线。
 
 输出严格 JSON(只输出 {{...}}):
 {{
@@ -630,7 +766,7 @@ BALANCE_PROMPT = """你是一名世界级的循证健身教练 / 运动科学博
   "data_sufficiency": "full|partial|insufficient",
   "imbalances": [
     {{
-      "ratio_name": "拉:推 容量比",
+      "ratio_name": "水平拉:推 力量比",
       "measured": 0.6,
       "severity": "yellow|red",
       "risk": "中文,具体风险 + 自然引用 1 篇文献(如 Reinold 2009 / Schoenfeld / Cavaliere)",
@@ -666,6 +802,12 @@ def balance_check(db: sqlite3.Connection, plan_data: dict,
             "summary": "记录的训练组数太少(需要先多练几次、覆盖 Push/Pull/Legs)才能做平衡体检。",
             "data_sufficiency": "insufficient", "imbalances": [], "corrective_actions": [],
         }}
+    def _sline(s):
+        if s["status"] == "insufficient":
+            return f"  {s['name']}: insufficient — {s.get('missing','')}  [证据:{s['evidence']}]"
+        return (f"  {s['name']}: {s['value']} (={s['num_1rm']}/{s['den_1rm']}kg, 模态 {s['modality']}, "
+                f"状态 {s['status']}) — {s['hint']}  [证据:{s['evidence']}]")
+    strength_str = "\n".join(_sline(s) for s in profile["strength_ratios"])
     ratios_str = "\n".join(
         f"  {r['name']}: {r['value']}  (分子 {r['num_sets']} 组 / 分母 {r['den_sets']} 组, "
         f"健康区间 {r['good_range']}, 状态 {r['status']}) — {r['hint']}"
@@ -675,8 +817,8 @@ def balance_check(db: sqlite3.Connection, plan_data: dict,
     est1rm_str = json.dumps(profile["est_1rm"], ensure_ascii=False)
     prompt = BALANCE_PROMPT.format(
         literature=LITERATURE_REF, weeks=profile["weeks"],
-        ratios=ratios_str, buckets=buckets_str, est1rm=est1rm_str,
-        total_sets=profile["total_logged_sets"],
+        strength=strength_str, ratios=ratios_str, buckets=buckets_str, est1rm=est1rm_str,
+        total_sets=profile["total_logged_sets"], data_suff=profile["data_sufficiency"],
     )
     try:
         resp = _ask(prompt, model=model, effort=effort)

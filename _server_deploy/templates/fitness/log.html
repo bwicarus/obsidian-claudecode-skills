@@ -247,6 +247,8 @@
                    white-space:nowrap;padding:0 4px;"></span>
       <button class="btn small v-cc" title="中文字幕(YT auto-caption,首次 ~5s,之后秒出)">🇨🇳</button>
       <button class="btn small v-cc-hq" title="高质量字幕(优先 YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)">🎯HQ</button>
+      <button class="btn small v-fav" title="收藏(收藏的视频在列表里置顶)">☆</button>
+      <button class="btn small v-points" title="AI 要点 + 时间锚点(点要点跳到视频对应时间)">📌要点</button>
       <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
       <button class="btn small v-del" title="从列表删除该视频">🗑</button>
       <button class="btn small v-save" title="保存当前列表为我的">💾</button>
@@ -264,6 +266,10 @@
       <div class="sub-zh" style="color:#fff;font-size:15px;min-height:20px;"></div>
       <div class="sub-en" style="color:#9aa4af;font-size:12px;margin-top:2px;min-height:14px;"></div>
     </div>
+    <!-- AI 要点 + 时间锚点(点击跳转) -->
+    <div class="v-points-box" style="display:none;margin-top:6px;padding:8px 10px;
+                                     background:#0a1420;border:1px solid var(--border);
+                                     border-radius:6px;font-size:13px;line-height:1.5;"></div>
     <div class="v-status small dim" style="margin-top:4px;min-height:16px;"></div>
   </div>
 
@@ -523,6 +529,68 @@ async function toggleSubtitle(exId, source = 'auto') {
 const VS = {};
 // PLAYERS[exId] = YT.Player 实例
 const PLAYERS = {};
+// PTS[exId] = {videoId, points:[{t,text}]} —— AI 要点缓存(每视频)
+const PTS = {};
+
+// 收藏置顶:稳定保序(收藏组在前,各组维持原相对顺序)
+function stableFavSort(arr) {
+  return arr.filter(v => v.favorite).concat(arr.filter(v => !v.favorite));
+}
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ':' + String(s).padStart(2, '0');
+}
+function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+function renderPoints(exId, points) {
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  const box = wrap.querySelector('.v-points-box');
+  box.innerHTML = '<div class="dim" style="margin-bottom:4px;">📌 点要点跳到视频对应时间</div>';
+  points.forEach(p => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;align-items:baseline;padding:4px 2px;cursor:pointer;border-radius:4px;';
+    row.innerHTML = `<span style="color:var(--accent);font-family:'SF Mono','Roboto Mono',monospace;flex:none;min-width:42px;">${fmtTime(p.t)}</span><span style="flex:1;">${escapeHtml(p.text)}</span>`;
+    row.addEventListener('click', () => {
+      const player = PLAYERS[exId];
+      if (player && player.seekTo) { try { player.seekTo(p.t, true); player.playVideo(); } catch (e) {} }
+    });
+    row.addEventListener('mouseenter', () => { row.style.background = '#16263a'; });
+    row.addEventListener('mouseleave', () => { row.style.background = ''; });
+    box.appendChild(row);
+  });
+}
+
+async function togglePoints(exId) {
+  const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
+  const box = wrap.querySelector('.v-points-box');
+  const ptBtn = wrap.querySelector('.v-points');
+  const player = PLAYERS[exId];
+  if (!player || !player.getVideoData) { alert('视频还没就绪,等 1 秒再点'); return; }
+  const vidId = player.getVideoData().video_id;
+  if (!vidId) return;
+  // 同视频已展开 → 收起
+  if (box.style.display !== 'none' && PTS[exId] && PTS[exId].videoId === vidId) {
+    box.style.display = 'none'; ptBtn.classList.remove('success'); return;
+  }
+  box.style.display = 'block'; ptBtn.classList.add('success');
+  if (PTS[exId] && PTS[exId].videoId === vidId && PTS[exId].points) {
+    renderPoints(exId, PTS[exId].points); return;   // 已缓存
+  }
+  box.innerHTML = '<span class="dim">⏳ AI 按字幕总结要点中(首次 ~5-30s,之后秒出)…</span>';
+  try {
+    const r = await fetch(`/api/fitness/summary/${encodeURIComponent(vidId)}`);
+    const d = await r.json();
+    if (!d.ok || !d.points || !d.points.length) {
+      box.innerHTML = '<span class="dim">✗ 要点生成失败:' + escapeHtml(d.error || '该视频可能无字幕') + '</span>';
+      return;
+    }
+    PTS[exId] = { videoId: vidId, points: d.points };
+    renderPoints(exId, d.points);
+  } catch (e) {
+    box.innerHTML = '<span class="dim">✗ 网络失败</span>';
+  }
+}
 
 function ytIdFromUrl(s) {
   // 解析 YouTube URL / videoId
@@ -570,6 +638,15 @@ function renderCarousel(exId) {
   posEl.textContent = `${state.idx + 1} / ${state.videos.length}`;
   titleEl.textContent = `${v.title || v.video_id}` + (v.channel ? ` · ${v.channel}` : '');
   statusEl.textContent = state.dirty ? '⚠ 未保存(点 💾)' : '';
+  // 收藏星标(当前视频)
+  const favBtn = wrap.querySelector('.v-fav');
+  if (favBtn) { favBtn.textContent = v.favorite ? '⭐' : '☆'; favBtn.classList.toggle('success', !!v.favorite); }
+  // 视频换了 → 收起要点面板(要点是针对具体视频的)
+  const pts = PTS[exId];
+  if (pts && pts.videoId !== v.video_id) {
+    wrap.querySelector('.v-points-box').style.display = 'none';
+    wrap.querySelector('.v-points').classList.remove('success');
+  }
   // 切换视频:YT.Player 已就绪就 loadVideoById,否则等 player 创建后会自动用 v.video_id
   const player = PLAYERS[exId];
   if (player && player.loadVideoById) {
@@ -661,6 +738,30 @@ document.querySelectorAll('.video-wrap').forEach(wrap => {
   const exId = wrap.dataset.ex;
   wrap.querySelector('.v-cc').addEventListener('click', () => toggleSubtitle(exId, 'auto'));
   wrap.querySelector('.v-cc-hq').addEventListener('click', () => toggleSubtitle(exId, 'hq'));
+  wrap.querySelector('.v-points').addEventListener('click', () => togglePoints(exId));
+  wrap.querySelector('.v-fav').addEventListener('click', async () => {
+    const state = VS[exId];
+    if (!state || !state.videos.length) return;
+    const v = state.videos[state.idx];
+    const newFav = !v.favorite;
+    const favBtn = wrap.querySelector('.v-fav');
+    favBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}/favorite`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ video_id: v.video_id, favorite: newFav }),
+      });
+      const d = await r.json();
+      if (!d.ok) { alert('收藏失败'); return; }
+      v.favorite = newFav;
+      // 收藏置顶 + 继续显示这个视频
+      const cur = v.video_id;
+      state.videos = stableFavSort(state.videos);
+      state.idx = Math.max(0, state.videos.findIndex(x => x.video_id === cur));
+      renderCarousel(exId);
+    } catch (e) { alert('网络失败'); }
+    finally { favBtn.disabled = false; }
+  });
   wrap.querySelector('.v-prev').addEventListener('click', () => {
     if (!VS[exId]) return;
     VS[exId].idx--;

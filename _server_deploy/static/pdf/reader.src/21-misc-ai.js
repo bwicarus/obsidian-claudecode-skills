@@ -97,6 +97,7 @@ window.openSettings = () => {
   // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
   document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   renderHlColorSetting();
+  if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
   document.getElementById('settings-mask').style.display = 'flex';
 };
 window._applyCropSettings = () => {
@@ -536,6 +537,120 @@ window.onToNote = async () => {
   } catch (e) {
     document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
+};
+
+// ──────── 文字层校准(扫描/OCR 书:文字层没对齐时手动微调 + 可视化文字框) ────────
+window._charOfsByPage = window._charOfsByPage || {};
+
+// 重渲已加载页(图走 decode-first 缓存→快;会重新拉 page-chars 应用新偏移 + 重画/撤红框)
+function _rerenderLoadedPages() {
+  const pc = document.getElementById('page-container');
+  if (!pc) return;
+  let wraps = [...pc.querySelectorAll('.page-wrap[data-loaded="1"]')];
+  if (!wraps.length && pc.dataset.loaded === '1') wraps = [pc];   // 单页模式:容器即 wrap
+  wraps.forEach(w => {
+    w.dataset.loaded = '0';
+    const num = parseInt(w.dataset.pageNum || currentPage, 10);
+    if (typeof _renderPageInto === 'function') _renderPageInto(num, w).catch(() => {});
+  });
+}
+
+window._charboxToggle = (cb) => {
+  try { localStorage.setItem('pdf-charbox', (cb && cb.checked) ? '1' : '0'); } catch (_) {}
+  _rerenderLoadedPages();   // 红框立即出现/消失
+};
+
+async function _fetchCharOfs(page) {
+  try {
+    const r = await fetch(`/pdf/api/char-offset?file=${encodeURIComponent(FILE_REL)}&page=${page}`);
+    const d = await r.json();
+    if (d.ok) return d.offset;
+  } catch (_) {}
+  return { dx: 0, dy: 0, scale: 1 };
+}
+async function _saveCharOfs(page, ofs) {
+  try {
+    const r = await fetch('/pdf/api/char-offset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page, dx: ofs.dx, dy: ofs.dy, scale: ofs.scale }),
+    });
+    const d = await r.json();
+    if (d && d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + page, d.cv); } catch (_) {} }  // 偏移变→更新 cv→重渲即取新(不靠 backstop)
+    return d;
+  } catch (_) { return null; }
+}
+function _charOfsStep() {
+  const v = parseFloat(document.getElementById('charofs-step')?.value);
+  return (isFinite(v) && v > 0) ? v : 2;
+}
+function _updateCharOfsLabel(page, ofs) {
+  const el = document.getElementById('charofs-cur');
+  if (el) el.textContent = `第 ${page} 页　dx ${(+ofs.dx).toFixed(1)} · dy ${(+ofs.dy).toFixed(1)}` +
+    ((+ofs.scale !== 1) ? ` · ×${(+ofs.scale).toFixed(2)}` : '');
+}
+// dirx/diry: -1/0/1。注意 PDF y 向下为正 → "下移文字"= dy 增大
+window._nudgeChars = async (dirx, diry) => {
+  const page = currentPage;
+  let ofs = window._charOfsByPage[page] || await _fetchCharOfs(page);
+  const step = _charOfsStep();
+  ofs = { dx: (ofs.dx || 0) + dirx * step, dy: (ofs.dy || 0) + diry * step, scale: ofs.scale || 1 };
+  window._charOfsByPage[page] = ofs;
+  _updateCharOfsLabel(page, ofs);
+  await _saveCharOfs(page, ofs);
+  _rerenderLoadedPages();
+};
+window._resetCharOffset = async () => {
+  const page = currentPage;
+  const ofs = { dx: 0, dy: 0, scale: 1 };
+  window._charOfsByPage[page] = ofs;
+  _updateCharOfsLabel(page, ofs);
+  await _saveCharOfs(page, ofs);
+  _rerenderLoadedPages();
+};
+window._initCharOfsPanel = async () => {
+  const cb = document.getElementById('set-charbox');
+  if (cb) { try { cb.checked = localStorage.getItem('pdf-charbox') === '1'; } catch (_) {} }
+  const st = document.getElementById('reocr-status'); if (st) st.textContent = '';
+  const ofs = await _fetchCharOfs(currentPage);
+  window._charOfsByPage[currentPage] = ofs;
+  _updateCharOfsLabel(currentPage, ofs);
+};
+
+// 单页重扫:对当前页用 Google Vision 重新 OCR → 覆盖文字层(修识别错/漏/整页歪)
+window._reocrPage = async () => {
+  const btn = document.getElementById('reocr-btn');
+  const st = document.getElementById('reocr-status');
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ 重扫第 ' + currentPage + ' 页…(Google Vision,几秒)';
+  try {
+    const r = await fetch('/pdf/api/reocr-page', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page: currentPage }),
+    });
+    const d = await r.json();
+    if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 重扫后 cv 更新→重渲直接取新覆盖
+    if (d.ok && d.chars > 0) {
+      if (st) st.textContent = '✓ 第 ' + currentPage + ' 页重扫完成(' + d.chars + ' 字)';
+      _rerenderLoadedPages();   // cv 变 → 重渲拿新文字层
+    } else if (d.ok) {
+      if (st) st.textContent = '⚠ 未识别到文字(空白页或扫描质量差)';
+    } else if (st) { st.textContent = '✗ ' + (d.error || '失败'); }
+  } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
+  finally { if (btn) btn.disabled = false; }
+};
+window._clearReocr = async () => {
+  const st = document.getElementById('reocr-status');
+  if (st) st.textContent = '撤销中…';
+  try {
+    const r = await fetch('/pdf/api/reocr-page/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page: currentPage }),
+    });
+    const d = await r.json();
+    if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 撤销后 cv 更新→重渲取回原文字层
+    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + currentPage + ' 页重扫') : '该页无重扫记录';
+    _rerenderLoadedPages();
+  } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
 };
 
 // 键盘快捷键

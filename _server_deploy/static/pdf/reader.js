@@ -560,7 +560,20 @@ window._prefetchAround = _prefetchAround;
 // 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
+  const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
   const cw = Math.floor(viewport.width), ch = Math.floor(viewport.height);
+  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
+  const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
+  const img = document.createElement('img');
+  img.className = 'page-img'; img.decoding = 'async';
+  img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
+  // **先把新页图 decode 好再换**:旧内容/旧图一直可见到此刻 → 去边/缩放/侧栏等重渲染无空白闪烁(cache 命中=秒回)
+  try { await img.decode(); } catch (_) {}
+  if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
+  if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
+  img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
   wrap.style.width = ''; wrap.style.height = '';
@@ -568,14 +581,6 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
   wrap.dataset.pageNum = num;
   _applyCropToWrap(wrap, cw, ch);   // 去边:渲染前先收成裁切窄宽(子层 translate)
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
-  const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
-  const img = document.createElement('img');
-  img.className = 'page-img'; img.decoding = 'async';
-  img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
-  img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
   wrap.appendChild(img);
   const selOverlay = document.createElement('div');   // 选中高亮叠层(同 canvas 路径)
   selOverlay.className = 'sel-overlay';
@@ -599,6 +604,7 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);
+  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时可按比例瞬时缩放现有位图(无 __pageWPt 时兜底)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
@@ -753,6 +759,7 @@ async function _renderPageInto(num, wrap) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
+  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排兜底用(canvas 模式同样需要)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
@@ -877,7 +884,8 @@ if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
-  if (readMode !== 'single') await setupContinuousMode();
+  // +/- 缩放跟双指缩放(_applyZoom)一致:连续/双页原地重排(不整列重建→不"重新加载"),原地失败才重建
+  if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
   else renderPage(currentPage);
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
@@ -1087,13 +1095,21 @@ function _updateModeButtons() {
 }
 async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
-  await _refitToWidth(true);   // 重算 scale(单页/连续=整宽,双页=半宽)+ 重建布局
   currentPage = keepPage;
-  if (readMode === 'single') {
-    await renderPage(keepPage);
-  } else {
+  // 连续↔双页:优先**原地 reparent** 已渲染页(不重渲→不"重新加载"),再原地重标尺到新 fit 宽;失败才整列重建
+  if (readMode !== 'single' && _remodeListInPlace()) {
+    await _refitToWidth(true, false);   // 结构已与新 readMode 匹配 → 走原地重标尺(instant-resize + 后台高清化)
     const t = document.querySelector(`[data-page-num="${keepPage}"]`);
-    if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+    // rAF 排在 _refitToWidth 内部按比例恢复滚动的 rAF 之后 → keepPage 定位最终生效(覆盖比例恢复)
+    if (t) requestAnimationFrame(() => t.scrollIntoView({block: 'start', behavior: 'auto'}));
+  } else {
+    await _refitToWidth(true, true);   // 回退:整列重建(列表不完整 / single 残留)
+    if (readMode === 'single') {
+      await renderPage(keepPage);
+    } else {
+      const t = document.querySelector(`[data-page-num="${keepPage}"]`);
+      if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+    }
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 }
@@ -1136,7 +1152,7 @@ function _mainContentWidth() {
 function _computeFitScale(v0w, v0h) {
   const mainW = _mainContentWidth();
   const ppr = _pagesPerRow();
-  const avail = mainW - (ppr > 1 ? 10 : 0);
+  const avail = mainW - (ppr > 1 ? 4 : 0);   // 4 = .spread-row 两页间 gap(须与 CSS 一致)
   const s = avail / (v0w * _cropVisWFrac() * ppr);
   return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
 }
@@ -1155,7 +1171,7 @@ function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
 }
-async function _refitToWidth(force) {
+async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();
@@ -1174,8 +1190,8 @@ async function _refitToWidth(force) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode !== 'single') {   // 连续 / 双页 都重建滚动列表
-      await setupContinuousMode();
+    if (readMode !== 'single') {   // 连续/双页:结构没变就原地重排(不清容器→不"重新加载");mode 变(rebuild)或原地失败才整列重建
+      if (rebuild || !(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       // 单页模式：清 loaded 标记重 render
       const wrap = container.querySelector('.page-wrap') || container;
@@ -1297,6 +1313,14 @@ async function _applyZoom(newScale, focal) {
       if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
+      // 单页同理:先用现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小)
+      let scw = 0, sch = 0;
+      if (wrap.__pageWPt && wrap.__pageHPt) { scw = Math.floor(wrap.__pageWPt * scale); sch = Math.floor(wrap.__pageHPt * scale); }
+      else if (wrap.__renderScale) {   // 兜底:页点尺寸暂缺(char 层未回)→ 按 scale 比例缩放现有图
+        const r = scale / wrap.__renderScale, im = wrap.querySelector('.page-img, canvas');
+        if (im) { scw = Math.round((parseFloat(im.style.width) || 0) * r); sch = Math.round((parseFloat(im.style.height) || 0) * r); }
+      }
+      if (scw && sch) wrap.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = scw + 'px'; el.style.height = sch + 'px'; });
       if (wrap.dataset) wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
@@ -1374,13 +1398,32 @@ function _applyFullscreen(on) {
   document.documentElement.classList.toggle('fs-mode', on);
   const b = document.getElementById('fs-toggle'); if (b) b.classList.toggle('active', on);
 }
+// 浏览器/PWA 真·全屏(Fullscreen API)助手。iOS Safari 文档级不支持 → 静默失败,只保留页内全屏
+function _browserFsActive() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function _reqBrowserFs() {
+  const el = document.documentElement, fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (fn && !_browserFsActive()) { try { Promise.resolve(fn.call(el)).catch(() => {}); } catch (_) {} }
+}
+function _exitBrowserFs() {
+  const fn = document.exitFullscreen || document.webkitExitFullscreen;
+  if (fn && _browserFsActive()) { try { Promise.resolve(fn.call(document)).catch(() => {}); } catch (_) {} }
+}
 window.toggleFullscreen = function () {
   const on = !document.documentElement.classList.contains('fs-mode');
   _applyFullscreen(on);
   try { localStorage.setItem('pdf-fullscreen', on ? '1' : '0'); } catch (_) {}
-  _toast?.(on ? '全屏阅读：点右上角 ⤢ 恢复顶栏' : '已退出全屏');
+  if (on) _reqBrowserFs(); else _exitBrowserFs();   // 同时切浏览器/PWA 整窗真·全屏
+  _toast?.(on ? '全屏阅读：点右上角 ⤢ 恢复' : '已退出全屏');
 };
-_applyFullscreen(_fsEnabled());   // 同步按钮激活态(class 已由内联脚本应用)
+// 用户用 Esc/F11 退出浏览器全屏 → 同步退出页内全屏(顶栏恢复),两边状态不打架
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev =>
+  document.addEventListener(ev, () => {
+    if (!_browserFsActive() && document.documentElement.classList.contains('fs-mode')) {
+      _applyFullscreen(false);
+      try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
+    }
+  }));
+_applyFullscreen(_fsEnabled());   // 载入同步页内全屏态(浏览器全屏须用户手势,不在此触发)
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
@@ -1445,22 +1488,74 @@ async function setupContinuousMode() {
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
 
-// 缩放时「原地重标尺」：不清空容器(避免整列塌成占位的"重新加载"感)，只把各 page-wrap 按当前 scale 调整。
-// 已渲染页就地重渲(图片走 _ratchetReqW 缓存→秒回不闪;叠层按新 scale 重算坐标)；未渲染占位只改宽高。
-// 返回 false(没建过列表)→ 调用方回退 setupContinuousMode。global scale 已由 _applyZoom 设好。
+// 模式切换(连续↔双页,含双页 offset 1|2 ↔ 2|3 变化)**原地重排**:把已渲染的 .page-wrap 节点直接 reparent
+// (移动 DOM 不重渲,图像/选词层/墨迹/loaded 状态全保留),只重组 行/列 结构——
+// 连续=各 wrap 直挂 container;双页=每行一个 .spread-row 裹 1~2 个 wrap。
+// 之后调用方走 _refitToWidth(true,false) 原地重标尺(instant-resize 到新 fit 宽 + 后台高清化),全程不"重新加载"。
+// 返回 false(列表不完整,例如来自已废弃的 single 残留)→ 调用方回退 setupContinuousMode 整列重建。
+function _remodeListInPlace() {
+  const container = document.getElementById('page-container');
+  if (!container || !pdfDoc) return false;
+  const wraps = [...container.querySelectorAll('.page-wrap')];
+  if (wraps.length !== pdfDoc.numPages) return false;   // 必须是完整页列表,否则回退重建(防缺页)
+  wraps.sort((a, b) => (parseInt(a.dataset.pageNum, 10) || 0) - (parseInt(b.dataset.pageNum, 10) || 0));
+  const byNum = new Map(wraps.map(w => [parseInt(w.dataset.pageNum, 10), w]));
+  const frag = document.createDocumentFragment();
+  if (readMode === 'spread') {
+    for (const row of _spreadRows(pdfDoc.numPages, _spreadOffset)) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'spread-row';
+      for (const num of row) { const w = byNum.get(num); if (w) { w.style.margin = '0'; rowEl.appendChild(w); } }   // appendChild=移动节点(含已渲染内容)
+      frag.appendChild(rowEl);
+    }
+  } else {   // continuous:各 wrap 直挂,恢复单列行距
+    for (const w of wraps) { w.style.margin = '0 auto 12px'; frag.appendChild(w); }
+  }
+  container.innerHTML = '';   // wraps 已被 frag 接管(已 reparent);此处只清掉空的旧 .spread-row 壳。与下一行同步执行→无空容器 painted 帧
+  container.appendChild(frag);
+  return true;
+}
+window._remodeListInPlace = _remodeListInPlace;
+
+// 缩放时「原地重标尺」——两段式,**绝不串行阻塞手势**(双指松手只调一次,旧实现逐页 await decode → 放大要等 N 页 fetch 串行 1~2s = "失效",缩小先 snap 回旧大小再换 = "抽搐"):
+//   ① 瞬时(同步):用各页**现有位图**按新 scale 做 CSS 缩放到精确新尺寸(__pageWPt×scale = 服务端权威点尺寸)。
+//      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
+//   ② 后台(不 await):并发重栅格化到新 scale 高清图,各自 decode-first 换入(缩小走缓存秒回;放大并发一次 fetch ≈300ms)。
+//      重入由 _renderPageImg 的 __imgGen 守卫(最后发起的赢),所以期间用户再捏合也安全。
+// 返回 false(没建过列表 / 结构不符)→ 调用方回退 setupContinuousMode。global scale 已由调用方设好。
 async function _rescaleContinuousInPlace() {
   const container = document.getElementById('page-container');
   const wraps = [...container.querySelectorAll('.page-wrap')];
   if (!wraps.length) return false;
+  // 结构必须匹配 readMode(双页有 .spread-row 行,单列没有);不匹配=列数/排版真变了→回退重建
+  if ((readMode === 'spread') !== !!container.querySelector('.spread-row')) return false;
   let estW = 0, estH = 0;
-  try {
-    const v1 = (await pdfDoc.getPage(1)).getViewport({ scale });
-    estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
-  } catch (_) {}
+  const _meta = window.__imgMeta;
+  if (_imgMode && _meta && _meta.page_w) {   // 图片模式:用页 meta 同步算占位尺寸,免去 await getPage → 整个函数全同步,_refitBusy 立刻释放(手势不卡)
+    estW = Math.floor(_meta.page_w * scale * _cropVisWFrac()); estH = Math.floor(_meta.page_h * scale * _cropVisHFrac());
+  } else {
+    try {
+      const v1 = (await pdfDoc.getPage(1)).getViewport({ scale });
+      estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
+    } catch (_) {}
+  }
   for (const w of wraps) {
     if (w.dataset.loaded === '1') {
+      // ① 瞬时 CSS 缩放现有位图到新尺寸(精确:页点尺寸×scale;兜底:按 scale 比例缩放现有图)
+      let cw = 0, ch = 0;
+      if (w.__pageWPt && w.__pageHPt) { cw = Math.floor(w.__pageWPt * scale); ch = Math.floor(w.__pageHPt * scale); }
+      else if (w.__renderScale) {
+        const r = scale / w.__renderScale, im = w.querySelector('.page-img, canvas');
+        if (im) { cw = Math.round((parseFloat(im.style.width) || 0) * r); ch = Math.round((parseFloat(im.style.height) || 0) * r); }
+      }
+      if (cw && ch) {
+        w.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = cw + 'px'; el.style.height = ch + 'px'; });
+        w.style.width = cw + 'px'; w.style.height = ch + 'px';   // wrap 容器也显式定尺寸 → 布局/滚动数学即刻精确(crop-on 下随即被 _applyCropToWrap 覆盖为裁切窄宽)
+        _applyCropToWrap(w, cw, ch);
+      }
+      // ② 后台高清化:不 await(否则又串行阻塞手势),decode-first + __imgGen 守卫保证无闪且不被旧渲染覆盖
       w.dataset.loaded = '0';
-      try { await _renderPageInto(parseInt(w.dataset.pageNum, 10), w); } catch (_) {}
+      _renderPageInto(parseInt(w.dataset.pageNum, 10), w).catch(() => {});
     } else if (estW) {
       w.style.width = estW + 'px'; w.style.height = estH + 'px';
     }
@@ -1479,6 +1574,7 @@ function _unloadPage(w) {
   w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
   w.__vocabMarks = null; w.__vocabSentences = null; w.__furigana = null;
   w.__pageWPt = null; w.__pageHPt = null;
+  w.__imgGen = (w.__imgGen || 0) + 1;   // 作废可能在途的旧渲染:decode 回来发现 gen 变了→放弃,不会把已卸载页又渲染回来
   w.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });   // 显式清零,iOS 释放 backing 更彻底
   w.innerHTML = '';
   w.classList.remove('crop-on');
@@ -1542,16 +1638,41 @@ let _selTimer = null;
 
 let _charSel = null;   // {pw, startIdx, endIdx, dragging}
 
+// chars → charBoxes(坐标映射 + reading-order 排序)。初次建层 + cv 校正重取 都用它。
+// PyMuPDF rawdict bbox 已是 image coordinate(y 向下,原点左上),不做 y 翻转(翻了会上下颠倒)。
+function _mapCharBoxes(chars, scale) {
+  const cb = chars.map((ch, _oi) => ({
+    c: ch.c, _oi,
+    w: (ch.w == null ? -1 : ch.w),
+    bk: (ch.bk == null ? -1 : ch.bk),
+    left: ch.x0 * scale, top: ch.y0 * scale,
+    width: (ch.x1 - ch.x0) * scale, height: (ch.y1 - ch.y0) * scale,
+    sp: !!ch.sp,
+    _x0: ch.x0, _y0: ch.y0, _x1: ch.x1, _y1: ch.y1,
+  }));
+  cb.sort((a, b) => {
+    const aBase = a.top + a.height, bBase = b.top + b.height;
+    const ref = Math.max(a.height, b.height) || 1;
+    if (Math.abs(aBase - bBase) > ref * 0.8) return aBase - bBase;
+    if (a.w !== -1 && a.w === b.w) return a._oi - b._oi;   // 同词内严格 reading order(连字/紧排根治)
+    if (Math.abs(a.left - b.left) < ref * 0.3) return a._oi - b._oi;
+    return a.left - b.left;
+  });
+  return cb;
+}
+
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
+  const scale = viewport.scale;
+  const cvKey = 'pdf-cv:' + FILE_REL + ':' + num;
+  let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
+  const charsUrl = (cv) => `/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}&v=${CHARS_VER}&cv=${encodeURIComponent(cv)}`;
+  // overlay(生词/句子/真 cv)**并行**拉,不阻塞选词层;chars 用上次 cv 猜测 → 命中 SW 缓存秒回 → 选词立即可用
+  const ovP = fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${num}`).then(r => r.json()).catch(() => null);
   let d = null;
-  try {
-    const r = await fetch(`/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}&v=${CHARS_VER}`);
-    d = await r.json();
-  } catch (e) { d = null; }
+  try { d = await (await fetch(charsUrl(cvGuess))).json(); } catch (e) { d = null; }
   if (!d || !d.ok) {
-    // 偶尔失败(并发/超时) → 退避重试，避免整页无 char-layer(点选失灵)/无 L 框
     if (_retry < 2 && wrap.isConnected) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
@@ -1559,84 +1680,71 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff6b6b');
     return;
   }
-  const scale = viewport.scale;
-  const pageH = d.page_h;
-  // PDF 坐标 → viewport CSS px。PDF y 向上为正，需翻转
-  // 关键修正：PyMuPDF rawdict 的 bbox 已经是 image coordinate (y 向下, 原点左上)
-  // 之前误做 (pageH - y1) y 翻转 → 上下颠倒，整个 chars overlay 错位
-  const charBoxes = d.chars.map((ch, _oi) => ({
-    c: ch.c,
-    _oi,   // PyMuPDF 原始顺序(=reading order)；sort 时 x 几乎重叠的字符靠它保序
-    w: (ch.w == null ? -1 : ch.w),   // 所属词 id（PyMuPDF 分词）：判词边界用，根治连字/紧排
-    bk: (ch.bk == null ? -1 : ch.bk),   // rawdict 块号：句子扩展按块切（斜体 w=-1 也不丢块）
-    left:   ch.x0 * scale,
-    top:    ch.y0 * scale,
-    width:  (ch.x1 - ch.x0) * scale,
-    height: (ch.y1 - ch.y0) * scale,
-    sp: !!ch.sp,
-    // raw PDF 坐标（pt）— 用于持久化高亮 rects（不随 zoom 变）
-    _x0: ch.x0, _y0: ch.y0, _x1: ch.x1, _y1: ch.y1,
-  }));
+  const charBoxes = _mapCharBoxes(d.chars, scale);
   wrap.__pageWPt = d.page_w;
   wrap.__pageHPt = d.page_h;
   wrap.__viewportScale = scale;
-  // sort 让 idx 顺序 = visual reading order：用 baseline (top + height) + 宽松阈值
-  // ref 用 max height 避开 subscript/superscript（小字符）误判到不同行
-  charBoxes.sort((a, b) => {
-    const aBase = a.top + a.height;
-    const bBase = b.top + b.height;
-    const ref = Math.max(a.height, b.height) || 1;
-    if (Math.abs(aBase - bBase) > ref * 0.8) return aBase - bBase;
-    // 同一个词内(PyMuPDF 分词)→ 严格按原始 reading order，绝不按 left 排乱(连字/紧排 often→etn 的根治)
-    if (a.w !== -1 && a.w === b.w) return a._oi - b._oi;
-    // 词信息缺失(旧数据/符号)的兜底：x 几乎重叠也保原序
-    if (Math.abs(a.left - b.left) < ref * 0.3) return a._oi - b._oi;
-    return a.left - b.left;
-  });
-  // 调试模式（URL 加 ?dbg=1）：显示 char bbox + 内容，验证 PyMuPDF 提取跟 PDF 视觉是否对齐
-  if (new URLSearchParams(location.search).get('dbg') === '1') {
+  // 可视化文字框(URL ?dbg=1 或 设置开关)
+  let _cbOn = new URLSearchParams(location.search).get('dbg') === '1';
+  try { _cbOn = _cbOn || localStorage.getItem('pdf-charbox') === '1'; } catch (_) {}
+  if (_cbOn) {
     const dbgLayer = document.createElement('div');
+    dbgLayer.className = 'char-dbg-layer';
     dbgLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5';
-    charBoxes.forEach((c, i) => {
-      const d = document.createElement('div');
-      d.style.cssText = `position:absolute;left:${c.left}px;top:${c.top}px;width:${c.width}px;height:${c.height}px;border:1px solid rgba(255,0,0,.4);font-size:9px;color:rgba(255,0,0,.8);line-height:${c.height}px;text-align:center;font-family:monospace`;
-      d.textContent = c.sp ? '·' : c.c;
-      d.title = `idx=${i} c=${JSON.stringify(c.c)}`;
-      dbgLayer.appendChild(d);
+    charBoxes.forEach((c) => {
+      const e = document.createElement('div');
+      e.style.cssText = `position:absolute;left:${c.left}px;top:${c.top}px;width:${c.width}px;height:${c.height}px;border:1px solid rgba(255,0,0,.4);font-size:9px;color:rgba(255,0,0,.8);line-height:${c.height}px;text-align:center;font-family:monospace`;
+      e.textContent = c.sp ? '·' : c.c;
+      dbgLayer.appendChild(e);
     });
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
-  // 创建 char-layer（透明覆盖整个 page-wrap）
+  // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
   const cl = document.createElement('div');
   cl.className = 'char-layer';
   wrap.appendChild(cl);
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
-  // 已保存高亮：渲染到该页
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
-  // 单词下划线（mastery 着色）；后端 page-chars 已返回 vocab_marks
-  wrap.__vocabMarks = d.vocab_marks || [];
-  wrap.__vocabSentences = d.vocab_sentences || [];
-  try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
-  try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
-  // 振假名/音标叠加（后端 page-chars 已返回 furigana：日语 unidic 读音 + 英文 ECDICT 音标）
+  // 振假名/音标（chars 那条带的 furigana）
   wrap.__furigana = d.furigana || [];
   wrap.__furiVerified = false;
   try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
-  if (_rubyEnabled()) _verifyFurigana(wrap);   // 振假名读音 AI 上下文校正(后台,不阻塞)
-  try { renderPhraseHl(wrap); } catch(_) {}   // 词组持久高亮：重渲染后从状态恢复（防"自动消失"）
-  try { renderExplainHl(wrap); } catch(_) {}   // 解释持久高亮：同上,重渲染后恢复
-  try { renderWordHl(wrap); } catch(_) {}   // 查词等待高亮：慢词查词中呼吸/就绪常亮,同上重渲染恢复
-  // 整页翻译模式开着 → 新渲染/滚入的页自动翻译
+  if (_rubyEnabled()) _verifyFurigana(wrap);
+  try { renderPhraseHl(wrap); } catch(_) {}
+  try { renderExplainHl(wrap); } catch(_) {}
+  try { renderWordHl(wrap); } catch(_) {}
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
-  // 全文搜索跳转：本页刚好是待高亮页 → 此处 __charBoxes 已赋值，直接画（不走轮询，秒级到位）
   if (window._pendingSearchHighlight && window._pendingSearchHighlight.page === num
       && wrap.__charBoxes && wrap.__charBoxes.length) {
     try { _highlightSearchResultsOnPage(wrap, window._pendingSearchHighlight.query); } catch (_) {}
     window._pendingSearchHighlight = null;
   }
+  // —— overlay 到了(慢:服务端跑分词/生词,不阻塞上面的选词)：渲染生词/句子 + 校正 cv ——
+  ovP.then(async (ov) => {
+    if (!wrap.isConnected) return;
+    if (ov && ov.ok && ov.cv) {
+      try { localStorage.setItem(cvKey, ov.cv); } catch (_) {}   // 记真 cv,下次秒命中缓存
+      if (ov.cv !== cvGuess) {
+        // cvGuess 猜错(内容自上次起变过)→ 刚 chars 可能来自旧 SW 缓存 → 用真 cv 重取并刷新选词数据
+        try {
+          const d2 = await (await fetch(charsUrl(ov.cv))).json();
+          if (d2 && d2.ok && wrap.isConnected) {
+            wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
+            wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
+            wrap.__furigana = d2.furigana || [];
+            try { renderRubyLayer(wrap); } catch (_) {}
+          }
+        } catch (_) {}
+      }
+    }
+    wrap.__vocabMarks = (ov && ov.vocab_marks) || [];
+    wrap.__vocabSentences = (ov && ov.vocab_sentences) || [];
+    try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+    try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+  });
 }
 
 // 查 char idx 是否在某 vocab mark 范围（rects PDF pt 坐标）内；返回 mark 或 null
@@ -1713,23 +1821,25 @@ function renderRubyLayer(pw) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
   for (const it of items) {
-    const rt = it.rt || ''; if (!rt) continue;
-    const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
-    const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：约词高 36%；并受「词宽/读音字数」约束使读音横向不超过词宽（系数 1.0，
-    // 之前 1.4 → 读音比词宽 40% + overflow:hidden 把末尾假名切掉，故收到 1.0 + 配 overflow:visible）
-    const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.0));
-    const sp = document.createElement('span');
-    sp.className = 'rt';
-    sp.textContent = rt;
-    sp.style.left = x0 + 'px';
-    sp.style.width = w + 'px';
-    sp.style.fontSize = fs.toFixed(1) + 'px';
-    // ruby 略偏下贴近本行汉字：只 1/3 露在框顶之上，2/3 落进本行字框顶部 padding(=视觉空隙)。
-    // （OCR 字框顶有 padding，框比实际字高；偏下放更贴自己这行、更不碰上一行。用户要求再向下些。）
-    sp.style.top = Math.max(0, y0 - fs * 0.34) + 'px';
-    layer.appendChild(sp);
+    const sp = _makeRubySpan(it, sx, sy);
+    if (sp) layer.appendChild(sp);
   }
+}
+// 单个振假名/音标条目 → .rt span。renderRubyLayer 和「查词等待注音」共用,保证显示一致。
+// 字号≈词高 36% 且受词宽/读音字数约束(横向不超词宽);略偏下贴本行。须放进 .ruby-layer 容器(CSS 作用域)。
+function _makeRubySpan(it, sx, sy) {
+  const rt = it.rt || ''; if (!rt) return null;
+  const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
+  const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
+  const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.0));
+  const sp = document.createElement('span');
+  sp.className = 'rt';
+  sp.textContent = rt;
+  sp.style.left = x0 + 'px';
+  sp.style.width = w + 'px';
+  sp.style.fontSize = fs.toFixed(1) + 'px';
+  sp.style.top = Math.max(0, y0 - fs * 0.34) + 'px';
+  return sp;
 }
 function refreshRubyAllPages() {
   document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
@@ -3590,11 +3700,16 @@ async function refreshCharsWForAllPages() {
     const num = parseInt(pw.dataset.pageNum || '0', 10);
     if (!num || !pw.__charBoxes) continue;
     try {
-      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER)).json();
+      // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
+      let ov = null;
+      try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
+      const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
+      if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
+      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
       if (!d.ok || !d.chars) continue;
       const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
       for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
-      pw.__vocabMarks = d.vocab_marks || pw.__vocabMarks;
+      pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
       try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
     } catch (_) {}
   }
@@ -3614,13 +3729,31 @@ function _positionWordPop(pop, cs) {
   if (pw && ch && ch.left != null && main) {
     if (pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'absolute';
-    const W = 340;
-    let left = pw.offsetLeft + ch.left;   // pw.offsetParent === #main（page-container static）
-    const maxLeft = Math.max(4, main.scrollWidth - W - 4);
-    if (left > maxLeft) left = maxLeft;
-    if (left < 4) left = 4;
-    pop.style.left = left + 'px';
+    const left = pw.offsetLeft + ch.left;   // pw.offsetParent === #main（page-container static）
+    pop.style.left = Math.max(4, left) + 'px';
     pop.style.top = (pw.offsetTop + ch.top + ch.height + 6) + 'px';
+    // 渲染后按「可视视口」夹取(不是 main.scrollWidth)：#main 可横向滚动 / 缩放，
+    // 固定宽 + scrollWidth 夹会把框推到视口外被裁(日语词框右侧 語法/例句/标记掌握 被切)。
+    // pop 是 absolute-in-#main、无额外 CSS 缩放 → 视口空间位移量 == 内容坐标位移量。
+    requestAnimationFrame(() => {
+      if (pop.style.display === 'none') return;
+      const pr = pop.getBoundingClientRect();
+      if (!pr.width) return;
+      const mainRect = main.getBoundingClientRect();
+      const vr = (typeof _visRight === 'function') ? _visRight() : window.innerWidth;
+      let dL = parseFloat(pop.style.left) || 0;
+      // 左右互斥(框不会同时两边溢出，除非比可视区还宽 → 那时优先保右缘[动作按钮]在视野)
+      if (pr.right > vr - 8) dL -= (pr.right - (vr - 8));                        // 右溢出 → 左移
+      else if (pr.left < mainRect.left + 8) dL += (mainRect.left + 8 - pr.left); // 左溢出 → 右移
+      pop.style.left = Math.max(4, dL) + 'px';
+      // 竖直：max-height(CSS 80vh)已封顶高度 → 在视口空间把框夹进 [8, innerH-8]
+      // (pop 是 absolute-in-#main、无 CSS 缩放 → 视口位移量 == top 内容坐标位移量)
+      const pr2 = pop.getBoundingClientRect();
+      let dT = 0;
+      if (pr2.bottom > window.innerHeight - 8) dT -= (pr2.bottom - (window.innerHeight - 8)); // 底溢 → 上移
+      if (pr2.top + dT < 8) dT += (8 - (pr2.top + dT));                                       // 顶溢 → 下移
+      if (dT) pop.style.top = ((parseFloat(pop.style.top) || 0) + dT) + 'px';
+    });
   } else {
     if (main && pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'fixed';
@@ -3703,6 +3836,20 @@ let _wordPopOwnerId = null;  // 当前 word-pop 小框归属的高亮 id（防�
 // 本会话查词结果缓存（word→dict-quick d）：已查过的词再点**直接秒显小框**(不发请求/不建高亮),
 // 后台再打一次刷新暴露计数。用户诉求:"已有现成数据的词单击应直接出结果,不要先高亮再点"。
 const _dictCache = new Map();
+// 按词的 rects 从本页 furigana(日读音/英音标,page-chars 一直返回)取命中条目 → 查词等待时先标出来
+function _furiHitsForRects(pw, rects) {
+  const fg = pw && pw.__furigana;
+  if (!fg || !fg.length || !rects || !rects.length) return [];
+  let X0 = Infinity, Y0 = Infinity, X1 = -Infinity, Y1 = -Infinity;
+  for (const r of rects) { X0 = Math.min(X0, r[0]); Y0 = Math.min(Y0, r[1]); X1 = Math.max(X1, r[2]); Y1 = Math.max(Y1, r[3]); }
+  const hit = fg.filter(it => {
+    if (!it.rt) return false;
+    const cx = (it.x0 + it.x1) / 2, cy = (it.y0 + it.y1) / 2;
+    return cx >= X0 - 1 && cx <= X1 + 1 && cy >= Y0 - 2 && cy <= Y1 + 2;
+  });
+  hit.sort((a, b) => (Math.abs(a.y0 - b.y0) > 4 ? a.y0 - b.y0 : a.x0 - b.x0));
+  return hit;
+}
 function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存；boxOpen 的不画）
   pw.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
   const page = parseInt(pw.dataset.pageNum || '0', 10);
@@ -3721,6 +3868,14 @@ function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存�
       d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
       d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
       layer.appendChild(d);
+    }
+    // 查词等待时:先把这处注音(日读音/英音标,本页 furigana)标在词上方——复用原振假名 .ruby-layer .rt 样式(大小/位置一致)
+    const _hits = _furiHitsForRects(pw, h.rects);
+    if (_hits.length) {
+      const rl = document.createElement('div');
+      rl.className = 'ruby-layer';   // pointer-events:none → 不挡高亮点击;.rt 样式靠这个作用域
+      for (const it of _hits) { const sp = _makeRubySpan(it, sx, sy); if (sp) rl.appendChild(sp); }
+      layer.appendChild(rl);
     }
     layer.addEventListener('click', (e) => { e.stopPropagation(); _wordHlClick(h); });
     pw.appendChild(layer);
@@ -4728,16 +4883,16 @@ function openGrammarPanel() {
   if (!p.classList.contains('open')) {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
-    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页
-    if (readMode === 'spread') {
+    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页。
+    // 但悬浮显示模式抽屉盖在正文上、不挤压 → 页面不变窄 → 保持双页不切。
+    if (readMode === 'spread' && !document.body.classList.contains('grammar-floating')) {
       _spreadBeforePanel = _spreadOffset;
       readMode = 'continuous';
       _updateModeButtons();
     }
-    // 打开侧栏让 #main 变窄 → 重算 scale。用 _scheduleRefit(debounce) 而非 rAF 立即跑:
-    // 重建几百页占位很重,放下一帧同步跑会卡住面板滑入动画(还要双击);debounce 把它挪到动画后、
-    // 且与 ResizeObserver(#main 变窄)触发的 refit 去重 → 只重建一次。
-    _scheduleRefit(true);
+    // 打开侧栏让 #main 变窄 → 重算 scale(debounce,挪出动画帧 + 与 ResizeObserver 去重)。
+    // 悬浮模式 #main 宽度不变 → 不重排(重排会让背后 PDF 重渲染→闪烁);仅挤压模式重排。
+    if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);
   }
   // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
   const _onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
@@ -4754,8 +4909,43 @@ window.closeGrammarPanel = () => {
     _spreadBeforePanel = null;
     _updateModeButtons();
   }
-  _scheduleRefit(true);   // 同 open:debounce 重建,挪出动画帧 + 与 ResizeObserver 去重
+  if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
+
+// ── 右栏外观设置：悬浮显示 + 背景模糊度（localStorage 持久化，仿仪表盘抽屉设置）──
+function _gpApplyAppearance() {
+  document.body.classList.toggle('grammar-floating', localStorage.getItem('pdf-gp-floating') === '1');
+  const blur = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
+  document.documentElement.style.setProperty('--gp-blur', blur + 'px');
+}
+window._gpSetFloating = (on) => {
+  localStorage.setItem('pdf-gp-floating', on ? '1' : '0');
+  document.body.classList.toggle('grammar-floating', !!on);
+  if (typeof _scheduleRefit === 'function') _scheduleRefit(true);   // 悬浮↔挤压 → #main 宽度变 → 重排
+};
+window._gpSetBlur = (v) => {
+  localStorage.setItem('pdf-gp-blur', String(v));
+  document.documentElement.style.setProperty('--gp-blur', v + 'px');
+  const el = document.getElementById('gp-blur-val'); if (el) el.textContent = v;
+};
+window.toggleSideSettings = (ev) => {
+  if (ev) ev.stopPropagation();
+  const m = document.getElementById('side-settings'); if (!m) return;
+  if (m.style.display === 'block') { m.style.display = 'none'; return; }
+  const f = document.getElementById('gp-floating');
+  if (f) f.checked = localStorage.getItem('pdf-gp-floating') === '1';
+  const b = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
+  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
+  if (bi) bi.value = b; if (bv) bv.textContent = b;
+  m.style.display = 'block';
+};
+document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
+  const m = document.getElementById('side-settings');
+  if (m && m.style.display === 'block' && !m.contains(e.target) && !e.target.closest('#side-settings-btn')) {
+    m.style.display = 'none';
+  }
+}, true);
+_gpApplyAppearance();   // 载入即应用持久化设置
 // 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）
 window.toggleGrammarPanel = () => {
   const p = document.getElementById('grammar-panel');
@@ -6409,6 +6599,7 @@ window.openSettings = () => {
   // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
   document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   renderHlColorSetting();
+  if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
   document.getElementById('settings-mask').style.display = 'flex';
 };
 window._applyCropSettings = () => {
@@ -6848,6 +7039,120 @@ window.onToNote = async () => {
   } catch (e) {
     document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
   }
+};
+
+// ──────── 文字层校准(扫描/OCR 书:文字层没对齐时手动微调 + 可视化文字框) ────────
+window._charOfsByPage = window._charOfsByPage || {};
+
+// 重渲已加载页(图走 decode-first 缓存→快;会重新拉 page-chars 应用新偏移 + 重画/撤红框)
+function _rerenderLoadedPages() {
+  const pc = document.getElementById('page-container');
+  if (!pc) return;
+  let wraps = [...pc.querySelectorAll('.page-wrap[data-loaded="1"]')];
+  if (!wraps.length && pc.dataset.loaded === '1') wraps = [pc];   // 单页模式:容器即 wrap
+  wraps.forEach(w => {
+    w.dataset.loaded = '0';
+    const num = parseInt(w.dataset.pageNum || currentPage, 10);
+    if (typeof _renderPageInto === 'function') _renderPageInto(num, w).catch(() => {});
+  });
+}
+
+window._charboxToggle = (cb) => {
+  try { localStorage.setItem('pdf-charbox', (cb && cb.checked) ? '1' : '0'); } catch (_) {}
+  _rerenderLoadedPages();   // 红框立即出现/消失
+};
+
+async function _fetchCharOfs(page) {
+  try {
+    const r = await fetch(`/pdf/api/char-offset?file=${encodeURIComponent(FILE_REL)}&page=${page}`);
+    const d = await r.json();
+    if (d.ok) return d.offset;
+  } catch (_) {}
+  return { dx: 0, dy: 0, scale: 1 };
+}
+async function _saveCharOfs(page, ofs) {
+  try {
+    const r = await fetch('/pdf/api/char-offset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page, dx: ofs.dx, dy: ofs.dy, scale: ofs.scale }),
+    });
+    const d = await r.json();
+    if (d && d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + page, d.cv); } catch (_) {} }  // 偏移变→更新 cv→重渲即取新(不靠 backstop)
+    return d;
+  } catch (_) { return null; }
+}
+function _charOfsStep() {
+  const v = parseFloat(document.getElementById('charofs-step')?.value);
+  return (isFinite(v) && v > 0) ? v : 2;
+}
+function _updateCharOfsLabel(page, ofs) {
+  const el = document.getElementById('charofs-cur');
+  if (el) el.textContent = `第 ${page} 页　dx ${(+ofs.dx).toFixed(1)} · dy ${(+ofs.dy).toFixed(1)}` +
+    ((+ofs.scale !== 1) ? ` · ×${(+ofs.scale).toFixed(2)}` : '');
+}
+// dirx/diry: -1/0/1。注意 PDF y 向下为正 → "下移文字"= dy 增大
+window._nudgeChars = async (dirx, diry) => {
+  const page = currentPage;
+  let ofs = window._charOfsByPage[page] || await _fetchCharOfs(page);
+  const step = _charOfsStep();
+  ofs = { dx: (ofs.dx || 0) + dirx * step, dy: (ofs.dy || 0) + diry * step, scale: ofs.scale || 1 };
+  window._charOfsByPage[page] = ofs;
+  _updateCharOfsLabel(page, ofs);
+  await _saveCharOfs(page, ofs);
+  _rerenderLoadedPages();
+};
+window._resetCharOffset = async () => {
+  const page = currentPage;
+  const ofs = { dx: 0, dy: 0, scale: 1 };
+  window._charOfsByPage[page] = ofs;
+  _updateCharOfsLabel(page, ofs);
+  await _saveCharOfs(page, ofs);
+  _rerenderLoadedPages();
+};
+window._initCharOfsPanel = async () => {
+  const cb = document.getElementById('set-charbox');
+  if (cb) { try { cb.checked = localStorage.getItem('pdf-charbox') === '1'; } catch (_) {} }
+  const st = document.getElementById('reocr-status'); if (st) st.textContent = '';
+  const ofs = await _fetchCharOfs(currentPage);
+  window._charOfsByPage[currentPage] = ofs;
+  _updateCharOfsLabel(currentPage, ofs);
+};
+
+// 单页重扫:对当前页用 Google Vision 重新 OCR → 覆盖文字层(修识别错/漏/整页歪)
+window._reocrPage = async () => {
+  const btn = document.getElementById('reocr-btn');
+  const st = document.getElementById('reocr-status');
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '⏳ 重扫第 ' + currentPage + ' 页…(Google Vision,几秒)';
+  try {
+    const r = await fetch('/pdf/api/reocr-page', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page: currentPage }),
+    });
+    const d = await r.json();
+    if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 重扫后 cv 更新→重渲直接取新覆盖
+    if (d.ok && d.chars > 0) {
+      if (st) st.textContent = '✓ 第 ' + currentPage + ' 页重扫完成(' + d.chars + ' 字)';
+      _rerenderLoadedPages();   // cv 变 → 重渲拿新文字层
+    } else if (d.ok) {
+      if (st) st.textContent = '⚠ 未识别到文字(空白页或扫描质量差)';
+    } else if (st) { st.textContent = '✗ ' + (d.error || '失败'); }
+  } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
+  finally { if (btn) btn.disabled = false; }
+};
+window._clearReocr = async () => {
+  const st = document.getElementById('reocr-status');
+  if (st) st.textContent = '撤销中…';
+  try {
+    const r = await fetch('/pdf/api/reocr-page/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, page: currentPage }),
+    });
+    const d = await r.json();
+    if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 撤销后 cv 更新→重渲取回原文字层
+    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + currentPage + ' 页重扫') : '该页无重扫记录';
+    _rerenderLoadedPages();
+  } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
 };
 
 // 键盘快捷键

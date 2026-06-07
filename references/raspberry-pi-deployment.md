@@ -331,3 +331,22 @@ smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔�
 - `9d79606` `scripts/platform_utils.py` + `register_notes.py::ensure_obsidian_synced` Linux 分支
 
 下次起新实例（第二台 Pi / Mac mini / 别人的 VPS）：复用本文档，预期 30 min 内全套跑起来。
+
+## 全站 PWA service worker：nginx 必加 `/sw.js`（2026-06-07，手工 patch）
+
+全站 service worker `/sw.js`（`app.py` 路由，scope `/`）让 PC/iPad 重复打开秒回 + 数据本地缓存。但 **Pi nginx 是前缀代理 + `location / { try_files }` 静态兜底** → `/sw.js`（`.js`）落到静态兜底去找 `/var/www/html/sw.js` → 404 → SW 注册失败、全站 PWA 不生效。
+
+**必须在 80 / 443 两个 server 块各加一条**（仿已有的 `location = /manifest.webmanifest`）：
+
+```
+location = /sw.js { proxy_pass http://127.0.0.1:5000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-Proto https; }
+```
+
+一行 sed（在每个 manifest location 后插）：
+
+```bash
+sudo sed -i '/location = \/manifest\.webmanifest/a\    location = /sw.js { proxy_pass http://127.0.0.1:5000; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-Proto https; }' /etc/nginx/sites-available/bwicarus
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+⚠ **手工 patch** `/etc/nginx/sites-available/bwicarus`（跟 git 里 VPS 版结构不同，**绝不可 cp 覆盖**，否则冲掉 Tailscale 证书）。验证：`curl -sk https://bwicarus.taile44d0c.ts.net/sw.js` 应 `200` + `application/javascript`（不是 404 html）。`/pdf/sw.js` 走 `/pdf` 代理前缀，不用单独加。

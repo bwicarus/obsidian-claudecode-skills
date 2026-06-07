@@ -47,104 +47,82 @@
     body.drawer-open.drawer-floating { padding-right: 14px; }
 
     /* ── Filters ── */
-    .filters { flex-shrink: 0; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 8px; }
-    .filter-btn {
-      padding: 5px 16px; border-radius: 20px; font-size: 13px; cursor: pointer;
-      background: var(--glass-bg); border: 1px solid var(--glass-border);
-      color: var(--text); transition: all 0.2s;
-    }
-    .filter-btn:hover  { background: rgba(255,255,255,0.13); }
-    .filter-btn.active { background: rgba(165,180,252,0.25); border-color: #a5b4fc; color: #e0e7ff; }
 
-    /* ── Panel stack（上下排列）── */
-    .panel-stack {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      align-items: stretch;
-    }
+    /* ── 标签页式仪表盘（左侧竖向 folder tab + 单版面填满整卡片）── */
+    .dash { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 
-    .panel {
-      flex: 0 0 52px;
-      width: 100%;
-      overflow: hidden;
-      position: relative;
-      border-radius: 18px;
+    .dash-tabbar {
+      display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+      align-items: stretch; padding: 4px 0; margin-right: -1px; position: relative; z-index: 6;
+    }
+    .dash-tabs {
+      display: flex; flex-direction: column; gap: 6px; min-height: 0;
+      overflow-y: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    }
+    .dash-tabs::-webkit-scrollbar { display: none; }
+    .dash-tab {
+      display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;
+      padding: 13px 16px; cursor: pointer; white-space: nowrap;
+      font-size: 13.5px; font-weight: 600; color: rgba(255,255,255,0.5);
+      background: rgba(255,255,255,0.035);
+      border: 1px solid var(--glass-border); border-right: 1px solid transparent;
+      border-radius: 16px 0 0 16px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .dash-tab:hover { color: rgba(255,255,255,0.85); background: rgba(255,255,255,0.07); }
+    .dash-tab .dash-tdot {
+      width: 9px; height: 9px; border-radius: 50%; background: var(--c);
+      flex-shrink: 0; opacity: 0.55; transition: opacity 0.2s, box-shadow 0.2s;
+    }
+    .dash-tab.active {
+      color: #fff; background: var(--glass-bg);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      border-color: var(--glass-border); border-right-color: var(--glass-bg);
+    }
+    .dash-tab.active .dash-tdot { opacity: 1; box-shadow: 0 0 9px var(--c); }
+
+    /* 各页面标题栏的学科筛选按钮 + 下拉 */
+    .dash-filter-btn {
+      position: relative; display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--glass-border);
+      color: rgba(255,255,255,0.6); cursor: pointer; transition: background .2s, color .2s, border-color .2s;
+    }
+    .dash-filter-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    .dash-filter-btn.active { background: rgba(165,180,252,0.22); border-color: #a5b4fc; color: #c7d2fe; }
+    .dash-filter-badge {
+      position: absolute; top: -5px; right: -5px; min-width: 15px; height: 15px; padding: 0 3px;
+      border-radius: 8px; background: #a5b4fc; color: #0b0f16; font-size: 10px; font-weight: 700;
+      line-height: 15px; text-align: center; box-shadow: 0 0 0 2px #10162a;
+    }
+    .subj-filter-menu {
+      position: fixed; z-index: 300; min-width: 150px; max-height: 60vh; overflow-y: auto;
+      background: #10162a; border: 1px solid var(--glass-border); border-radius: 12px;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.6); padding: 6px; font-size: 13px;
+    }
+    .subj-filter-menu[hidden] { display: none; }
+    .sf-row {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+      color: #cfe0ff; cursor: pointer; white-space: nowrap;
+    }
+    .sf-row:hover { background: rgba(165,180,252,0.14); }
+    .sf-check { width: 14px; flex-shrink: 0; color: #a5b4fc; font-weight: 700; text-align: center; }
+
+    .dash-panes {
+      flex: 1; min-height: 0; position: relative;
+      border: 1px solid var(--glass-border); border-radius: 18px;
       background: var(--glass-bg);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      border: 1px solid var(--glass-border);
-      box-shadow: 0 6px 28px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08);
-      transition:
-        flex-grow 0.5s cubic-bezier(0.4, 0, 0.2, 1),
-        flex-basis 0.5s cubic-bezier(0.4, 0, 0.2, 1),
-        box-shadow 0.4s ease,
-        opacity    0.3s ease;
-      cursor: pointer;
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 14px 48px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.08);
+      overflow: hidden;
     }
-
-    /* 自然堆叠 z-index */
-    .panel:nth-child(1) { z-index: 1; }
-    .panel:nth-child(2) { z-index: 2; }
-    .panel:nth-child(3) { z-index: 3; }
-    .panel:nth-child(4) { z-index: 4; }
-    .panel:nth-child(5) { z-index: 5; }
-    .panel:nth-child(6) { z-index: 6; }
-
-    /* 非激活面板暗化 */
-    .panel-stack:has(.panel.active) .panel:not(.active) {
-      opacity: 0.55;
+    .dash-pane {
+      position: absolute; inset: 0; padding: 16px 20px 18px;
+      overflow-y: auto; overflow-x: hidden;
+      opacity: 0; pointer-events: none; transform: translateY(6px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
     }
-
-    .panel.active {
-      flex-grow: 1;
-      box-shadow: 0 18px 56px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18);
-      z-index: 20;
-      cursor: default;
-      opacity: 1 !important;
-    }
-
-    /* ── Tab strip（横排在折叠态顶部）── */
-    .panel-tab {
-      position: absolute;
-      left: 0; right: 0; top: 0;
-      height: 52px;
-      display: flex; flex-direction: row;
-      align-items: center; justify-content: flex-start;
-      gap: 12px;
-      padding: 0 20px;
-      pointer-events: none;
-      user-select: none;
-    }
-    .tab-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      flex-shrink: 0;
-    }
-    .tab-title {
-      writing-mode: horizontal-tb;
-      font-size: 11px; font-weight: 700;
-      letter-spacing: 0.14em; text-transform: uppercase;
-      color: rgba(255,255,255,0.55);
-      white-space: nowrap;
-    }
-
-    /* ── Panel body ── */
-    .panel-body {
-      position: absolute;
-      left: 0; top: 52px; right: 0; bottom: 0;
-      padding: 6px 18px 18px;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s ease 0.3s;
-      overflow-y: auto;
-      overflow-x: hidden;
-    }
-    .panel.active .panel-body {
-      opacity: 1;
-      pointer-events: auto;
-    }
+    .dash-pane.active { opacity: 1; pointer-events: auto; transform: none; }
     .panel-body-title {
       font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
       text-transform: uppercase; color: var(--muted); margin-bottom: 14px;
@@ -535,64 +513,62 @@
 <div id="kwPopover"></div>
 
 <div id="lastRunBanner" class="last-run-banner"></div>
-<div id="qualityHealth" class="last-run-banner"></div>
 
-<div style="margin:2px 0 12px;text-align:right">
-  <a href="/insights/" style="display:inline-block;background:#162045;border:1px solid #3b6db5;color:#9fcbff;border-radius:8px;padding:8px 16px;font-size:13px;text-decoration:none;font-weight:600">📊 学习数据看板 →</a>
-</div>
+<!-- 学科筛选下拉（共享，锚定到各页面标题栏的筛选按钮）-->
+<div id="subjFilterMenu" class="subj-filter-menu" hidden></div>
 
-<div class="filters" id="filters">
-  <button class="filter-btn active" data-subject="all">全部</button>
-</div>
-
-<!-- ═══ Panel Stack ═══ -->
-<div class="panel-stack">
-
-  <!-- 1. 词云 -->
-  <div class="panel" data-panel="cloud">
-    <div class="panel-tab">
-      <div class="tab-dot" style="background:#67e8f9"></div>
-      <span class="tab-title">词云</span>
+<!-- ═══ 标签页式仪表盘 ═══ -->
+<div class="dash">
+  <div class="dash-tabbar">
+    <div class="dash-tabs" id="dashTabs">
+      <button type="button" class="dash-tab" data-panel="cloud"><i class="dash-tdot" style="--c:#67e8f9"></i>词云</button>
+      <button type="button" class="dash-tab active" data-panel="notes"><i class="dash-tdot" style="--c:#a5b4fc"></i>笔记</button>
+      <button type="button" class="dash-tab" data-panel="kg-audit"><i class="dash-tdot" style="--c:#f59e0b"></i>KG 审计</button>
     </div>
-    <div class="panel-body">
+  </div>
+
+  <div class="dash-panes">
+
+    <!-- 词云 -->
+    <section class="dash-pane" data-panel="cloud">
       <div class="panel-body-title kw-title-row">
         <span>关键词云</span>
-        <span class="kw-search-wrap">
-          <input id="kwSearch" class="kw-search" type="search" placeholder="搜索关键词，回车定位…" autocomplete="off">
-          <button id="kwSearchBtn" class="kw-search-btn" type="button" aria-label="搜索关键词" title="搜索关键词">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+        <span style="display:flex;align-items:center;gap:6px;">
+          <span class="kw-search-wrap">
+            <input id="kwSearch" class="kw-search" type="search" placeholder="搜索关键词，回车定位…" autocomplete="off">
+            <button id="kwSearchBtn" class="kw-search-btn" type="button" aria-label="搜索关键词" title="搜索关键词">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+            </button>
+          </span>
+          <button type="button" class="dash-filter-btn" aria-label="学科筛选" title="学科筛选">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+            <span class="dash-filter-badge" style="display:none"></span>
           </button>
         </span>
       </div>
       <div id="wordcloudContainer" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 4px;padding:8px 0;"></div>
-    </div>
-  </div>
+    </section>
 
-  <!-- 2. 笔记列表 -->
-  <div class="panel" data-panel="notes">
-    <div class="panel-tab">
-      <div class="tab-dot" style="background:#a5b4fc"></div>
-      <span class="tab-title">笔记</span>
-    </div>
-    <div class="panel-body">
-      <div class="panel-body-title">复习优先级</div>
+    <!-- 笔记列表 -->
+    <section class="dash-pane active" data-panel="notes">
+      <div class="panel-body-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span>复习优先级</span>
+        <button type="button" class="dash-filter-btn" aria-label="学科筛选" title="学科筛选">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+          <span class="dash-filter-badge" style="display:none"></span>
+        </button>
+      </div>
       <div class="note-list" id="noteList"></div>
-    </div>
-  </div>
+    </section>
 
-  <!-- 3. KG 准确性审计 -->
-  <div class="panel" data-panel="kg-audit">
-    <div class="panel-tab">
-      <div class="tab-dot" style="background:#f59e0b"></div>
-      <span class="tab-title">KG 审计</span>
-    </div>
-    <div class="panel-body">
+    <!-- KG 准确性审计 -->
+    <section class="dash-pane" data-panel="kg-audit">
       <div class="panel-body-title" id="kgAuditTitle">技能树准确性 — 待 review</div>
       <div id="kgAuditBody" style="font-size:13px;line-height:1.6;color:#cfd6e6"></div>
-    </div>
-  </div>
+    </section>
 
-</div><!-- end panel-stack -->
+  </div>
+</div>
 
 <!-- ═══ 图谱抽屉（右侧滑出，磨砂玻璃半透明）═══ -->
 <button class="graph-drawer-toggle" id="graphDrawerToggle" type="button" aria-label="切换图谱抽屉" title="拖动或点击：图谱抽屉"><span class="grip"></span></button>
@@ -802,18 +778,23 @@ function edgeW(d){
 }
 const openNote = url => { const a=document.createElement('a'); a.href=url; a.click(); };
 
-/* Panel activation: mouseenter switches active panel; stays open on leave */
-const allPanels = document.querySelectorAll('.panel');
+/* 标签页切换：点击 tab → 切换 active(tab + pane)，记忆上次选中 */
+const allTabs  = document.querySelectorAll('.dash-tab');
+const allPanes = document.querySelectorAll('.dash-pane');
 
-function setActive(panel) {
-  allPanels.forEach(p => p.classList.remove('active'));
-  panel.classList.add('active');
+function setActive(name) {
+  allTabs.forEach(t  => t.classList.toggle('active', t.dataset.panel === name));
+  allPanes.forEach(p => p.classList.toggle('active', p.dataset.panel === name));
+  try { localStorage.setItem('dash.activeTab', name); } catch (e) {}
 }
 
-allPanels.forEach(panel => panel.addEventListener('mouseenter', () => setActive(panel)));
+allTabs.forEach(tab => tab.addEventListener('click', () => setActive(tab.dataset.panel)));
 
-/* Default: notes panel open on load */
-setActive(document.querySelector('[data-panel="notes"]') || allPanels[0]);
+/* 默认：上次选中的版面，否则笔记 */
+let _savedTab = null;
+try { _savedTab = localStorage.getItem('dash.activeTab'); } catch (e) {}
+setActive((_savedTab && document.querySelector('.dash-tab[data-panel="' + _savedTab + '"]')) ? _savedTab : 'notes');
+
 
 /* ── Data loading ── */
 async function loadData() {
@@ -823,56 +804,95 @@ async function loadData() {
     allGraph    = data.graph    || {nodes:[],edges:[]};
     allKeywords = data.keywords || [];
     renderLastRun(data.last_run);
-    renderQualityHealth(data.quality_health);
     renderKgAudit(data.kg_audit);
     buildKwIndex(allNotes);
-    buildFilters(allNotes);
-    renderAll(allNotes, allGraph, allKeywords);
+    buildSubjectFilter(allNotes);   // 内部 applyDashFilter() → renderAll(按已持久化的学科选择)
   } catch(e) {
     document.querySelector('.header .meta').textContent = '数据加载失败：'+e.message;
   }
 }
 
-function buildFilters(notes) {
-  const subjects=[...new Set(notes.map(n=>n.subject).filter(Boolean))].sort();
-  const c=document.getElementById('filters');
-  subjects.forEach(s=>{
-    const b=document.createElement('button');
-    b.className='filter-btn'; b.dataset.subject=s; b.textContent=s; c.appendChild(b);
+// ── 学科筛选（共享、持久化；入口在各页面标题栏的筛选按钮，多选打勾）──
+let allSubjects = [];
+let selectedSubjects = new Set();
+try { const _s = JSON.parse(localStorage.getItem('dash.subjects') || '[]'); if (Array.isArray(_s)) selectedSubjects = new Set(_s); } catch (e) {}
+function _persistSubjects(){ try { localStorage.setItem('dash.subjects', JSON.stringify([...selectedSubjects])); } catch (e) {} }
+function _esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function buildSubjectFilter(notes) {
+  allSubjects = [...new Set(notes.map(n => n.subject).filter(Boolean))].sort();
+  for (const s of [...selectedSubjects]) if (!allSubjects.includes(s)) selectedSubjects.delete(s);
+  updateFilterBadges();
+  applyDashFilter();
+}
+
+// 按当前 selectedSubjects（空=全部）过滤 笔记 / 图谱 / 词云 后重渲染
+function applyDashFilter() {
+  const sel = selectedSubjects, useAll = sel.size === 0;
+  const fn = useAll ? allNotes : allNotes.filter(n => sel.has(n.subject));
+  let fg = allGraph;
+  if (!useAll) {
+    const nodes = allGraph.nodes.filter(n => sel.has(n.subject));
+    const ids = new Set(nodes.map(n => n.id));
+    fg = { nodes, edges: allGraph.edges.filter(e => ids.has(e.source) || ids.has(e.target)) };
+  }
+  const fk = useAll ? allKeywords : allKeywords.filter(k => {
+    const txt = Array.isArray(k) ? k[0] : k.text;
+    return (kwIndex[txt] || []).some(n => sel.has(n.subject));
   });
-  c.addEventListener('click', e=>{
-    const btn=e.target.closest('.filter-btn'); if(!btn) return;
-    document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    const sub=btn.dataset.subject;
-    const fn = sub==='all' ? allNotes : allNotes.filter(n=>n.subject===sub);
-    const nodeSet=new Set(allGraph.nodes.filter(n=>sub==='all'||n.subject===sub).map(n=>n.id));
-    const fg={
-      nodes:allGraph.nodes.filter(n=>sub==='all'||n.subject===sub),
-      edges:allGraph.edges.filter(e=>nodeSet.has(e.source)||nodeSet.has(e.target)),
-    };
-    renderAll(fn, fg, allKeywords);
+  renderAll(fn, fg, fk);
+}
+
+function updateFilterBadges() {
+  document.querySelectorAll('.dash-filter-btn').forEach(btn => {
+    const n = selectedSubjects.size;
+    btn.classList.toggle('active', n > 0);
+    const badge = btn.querySelector('.dash-filter-badge');
+    if (badge) { badge.textContent = n > 0 ? n : ''; badge.style.display = n > 0 ? '' : 'none'; }
   });
 }
 
-const LAST_RUN_DISMISS_KEY = 'lastRunBanner.dismissedStartedAt';
-function renderQualityHealth(qh) {
-  const el = document.getElementById('qualityHealth');
-  if (!el) return;
-  if (!qh || !qh.length) { el.style.display = 'none'; return; }
-  el.style.display = '';
-  el.className = 'last-run-banner running';
-  const last = qh[qh.length - 1];
-  const bf = Object.entries(last.by_flag || {}).map(([k, v]) =>
-    `<span class="step-pill">${k}×${v}</span>`).join('');
-  const trend = qh.slice(-8).map(h => {
-    const ch = (h.rewrite || 0) + (h.split || 0);
-    return `<span class="step-pill ${ch ? 'failed' : 'ok'}">${(h.date || '').slice(5)} 改${h.rewrite || 0}拆${h.split || 0}</span>`;
-  }).join('');
-  el.innerHTML = `<span class="icon">◍</span><b>卡片体检</b>`
-    + `<span style="opacity:0.7">最新 ${last.date || ''}：体检 ${last.processed || 0} · ok ${last.ok || 0} · 改 ${last.rewrite || 0} · 拆 ${last.split || 0}</span>`
-    + bf + `<span style="opacity:0.5">｜近期</span>` + trend;
+// 共享一个下拉菜单，锚定到被点的筛选按钮
+const subjMenu = document.getElementById('subjFilterMenu');
+let _subjMenuOpen = false;
+function _renderSubjMenu() {
+  const rows = ['<div class="sf-row" data-subj="__all__"><span class="sf-check">' + (selectedSubjects.size === 0 ? '✓' : '') + '</span>全部</div>']
+    .concat(allSubjects.map(s => '<div class="sf-row" data-subj="' + _esc(s) + '"><span class="sf-check">' + (selectedSubjects.has(s) ? '✓' : '') + '</span>' + _esc(s) + '</div>'));
+  subjMenu.innerHTML = rows.join('');
 }
+function openSubjMenu(anchor) {
+  if (!subjMenu) return;
+  _renderSubjMenu();
+  subjMenu.hidden = false; _subjMenuOpen = true;
+  const r = anchor.getBoundingClientRect();
+  subjMenu.style.top = (r.bottom + 6) + 'px';
+  let left = r.right - subjMenu.offsetWidth;
+  left = Math.max(8, Math.min(left, window.innerWidth - subjMenu.offsetWidth - 8));
+  subjMenu.style.left = left + 'px';
+}
+function closeSubjMenu() { if (subjMenu) subjMenu.hidden = true; _subjMenuOpen = false; }
+
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.dash-filter-btn');
+  if (btn) { e.stopPropagation(); _subjMenuOpen ? closeSubjMenu() : openSubjMenu(btn); return; }
+  if (!_subjMenuOpen || !subjMenu) return;
+  const row = e.target.closest('.sf-row');
+  if (row && subjMenu.contains(row)) {
+    const subj = row.dataset.subj;
+    if (subj === '__all__') selectedSubjects.clear();
+    else selectedSubjects.has(subj) ? selectedSubjects.delete(subj) : selectedSubjects.add(subj);
+    _persistSubjects(); updateFilterBadges(); applyDashFilter();
+    subjMenu.querySelectorAll('.sf-row').forEach(r2 => {
+      const s2 = r2.dataset.subj;
+      const on = s2 === '__all__' ? selectedSubjects.size === 0 : selectedSubjects.has(s2);
+      r2.querySelector('.sf-check').textContent = on ? '✓' : '';
+    });
+    return;   // 多选：保持菜单打开
+  }
+  if (!subjMenu.contains(e.target)) closeSubjMenu();
+});
+
+const LAST_RUN_DISMISS_KEY = 'lastRunBanner.dismissedStartedAt';
 
 function renderKgAudit(ka) {
   const body = document.getElementById('kgAuditBody');
@@ -1619,6 +1639,21 @@ function applyKwSearch(){
     .style('font-weight',d=>(q&&kwMatch(d,q))?700:(d.size>28?700:400));
 }
 
+// 词云布局盒子 = 当前设备容器(cloud 页)的实际宽高 → 按画面比例渲染、填满不滚动
+function _cloudSize(container){
+  let W = container.clientWidth || 520, H = 400;
+  const pane = container.closest('.dash-pane');
+  if (pane){
+    const cs = getComputedStyle(pane);
+    const padV = (parseFloat(cs.paddingTop)||0) + (parseFloat(cs.paddingBottom)||0);
+    const title = pane.querySelector('.panel-body-title');
+    let titleH = 0;
+    if (title){ const tc = getComputedStyle(title); titleH = title.offsetHeight + (parseFloat(tc.marginBottom)||0); }
+    H = pane.clientHeight - padV - titleH - 26;   // 留余量,避免恰好溢出触发滚动
+  }
+  return [Math.max(220, Math.round(W)), Math.max(160, Math.round(H))];
+}
+
 function renderWordCloud(keywords) {
   const container=document.getElementById('wordcloudContainer');
   const _ks=document.getElementById('kwSearch');
@@ -1647,13 +1682,14 @@ function renderWordCloud(keywords) {
   }
   container.innerHTML='';
   if(!keywords.length){ container.innerHTML='<span style="color:var(--muted);font-size:13px">暂无关键词</span>'; return; }
-  const W=520, H=400;
+  const [W,H]=_cloudSize(container);              // 按当前设备容器宽高(画面比例)布局,填满不滚动
   const colors=['#a5b4fc','#67e8f9','#6ee7b7','#fde68a','#fca5a5','#c4b5fd'];
   const maxW=keywords[0][1];
   const ROTATIONS=[-90,-45,0,0,0,0,45,90];
+  const areaScale=Math.min(1.7,Math.max(0.7,Math.sqrt((W*H)/(520*400)))); // 盒子越大字越大,保持填充密度
   const words=keywords.map(([text,weight,py,init],i)=>({
     text, weight, py:py||'', init:init||'',
-    size: Math.round(11+Math.pow(weight/maxW,2)*46),
+    size: Math.max(10,Math.round((11+Math.pow(weight/maxW,2)*46)*areaScale)),
     color: colors[i%colors.length],
     opacity: +(0.55+0.45*(weight/maxW)).toFixed(2),
   }));
@@ -1667,7 +1703,8 @@ function renderWordCloud(keywords) {
     .on('end', placed=>{
       const svg=d3.select(container).append('svg')
         .attr('viewBox',`0 0 ${W} ${H}`)
-        .style('width','100%').style('height','auto').style('display','block');
+        .attr('preserveAspectRatio','xMidYMid meet')
+        .style('width','100%').style('height',H+'px').style('max-height','100%').style('display','block');
       svg.append('g')
         .attr('transform',`translate(${W/2},${H/2})`)
         .selectAll('text').data(placed).join('text')
@@ -1687,6 +1724,15 @@ function renderWordCloud(keywords) {
     })
     .start();
 }
+
+// 设备旋转/窗口变化 → 按新画面比例重排词云(防抖)
+let _cloudResizeT = null;
+addEventListener('resize', () => {
+  clearTimeout(_cloudResizeT);
+  _cloudResizeT = setTimeout(() => {
+    if (currentKeywords && currentKeywords.length) renderWordCloud(currentKeywords);
+  }, 250);
+});
 
 const LINK_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>';
 

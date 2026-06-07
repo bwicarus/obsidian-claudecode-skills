@@ -219,11 +219,16 @@ async function refreshCharsWForAllPages() {
     const num = parseInt(pw.dataset.pageNum || '0', 10);
     if (!num || !pw.__charBoxes) continue;
     try {
-      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER)).json();
+      // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
+      let ov = null;
+      try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
+      const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
+      if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
+      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
       if (!d.ok || !d.chars) continue;
       const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
       for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
-      pw.__vocabMarks = d.vocab_marks || pw.__vocabMarks;
+      pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
       try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
     } catch (_) {}
   }
@@ -243,13 +248,31 @@ function _positionWordPop(pop, cs) {
   if (pw && ch && ch.left != null && main) {
     if (pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'absolute';
-    const W = 340;
-    let left = pw.offsetLeft + ch.left;   // pw.offsetParent === #main（page-container static）
-    const maxLeft = Math.max(4, main.scrollWidth - W - 4);
-    if (left > maxLeft) left = maxLeft;
-    if (left < 4) left = 4;
-    pop.style.left = left + 'px';
+    const left = pw.offsetLeft + ch.left;   // pw.offsetParent === #main（page-container static）
+    pop.style.left = Math.max(4, left) + 'px';
     pop.style.top = (pw.offsetTop + ch.top + ch.height + 6) + 'px';
+    // 渲染后按「可视视口」夹取(不是 main.scrollWidth)：#main 可横向滚动 / 缩放，
+    // 固定宽 + scrollWidth 夹会把框推到视口外被裁(日语词框右侧 語法/例句/标记掌握 被切)。
+    // pop 是 absolute-in-#main、无额外 CSS 缩放 → 视口空间位移量 == 内容坐标位移量。
+    requestAnimationFrame(() => {
+      if (pop.style.display === 'none') return;
+      const pr = pop.getBoundingClientRect();
+      if (!pr.width) return;
+      const mainRect = main.getBoundingClientRect();
+      const vr = (typeof _visRight === 'function') ? _visRight() : window.innerWidth;
+      let dL = parseFloat(pop.style.left) || 0;
+      // 左右互斥(框不会同时两边溢出，除非比可视区还宽 → 那时优先保右缘[动作按钮]在视野)
+      if (pr.right > vr - 8) dL -= (pr.right - (vr - 8));                        // 右溢出 → 左移
+      else if (pr.left < mainRect.left + 8) dL += (mainRect.left + 8 - pr.left); // 左溢出 → 右移
+      pop.style.left = Math.max(4, dL) + 'px';
+      // 竖直：max-height(CSS 80vh)已封顶高度 → 在视口空间把框夹进 [8, innerH-8]
+      // (pop 是 absolute-in-#main、无 CSS 缩放 → 视口位移量 == top 内容坐标位移量)
+      const pr2 = pop.getBoundingClientRect();
+      let dT = 0;
+      if (pr2.bottom > window.innerHeight - 8) dT -= (pr2.bottom - (window.innerHeight - 8)); // 底溢 → 上移
+      if (pr2.top + dT < 8) dT += (8 - (pr2.top + dT));                                       // 顶溢 → 下移
+      if (dT) pop.style.top = ((parseFloat(pop.style.top) || 0) + dT) + 'px';
+    });
   } else {
     if (main && pop.parentElement !== main) main.appendChild(pop);
     pop.style.position = 'fixed';
@@ -332,6 +355,20 @@ let _wordPopOwnerId = null;  // 当前 word-pop 小框归属的高亮 id（防�
 // 本会话查词结果缓存（word→dict-quick d）：已查过的词再点**直接秒显小框**(不发请求/不建高亮),
 // 后台再打一次刷新暴露计数。用户诉求:"已有现成数据的词单击应直接出结果,不要先高亮再点"。
 const _dictCache = new Map();
+// 按词的 rects 从本页 furigana(日读音/英音标,page-chars 一直返回)取命中条目 → 查词等待时先标出来
+function _furiHitsForRects(pw, rects) {
+  const fg = pw && pw.__furigana;
+  if (!fg || !fg.length || !rects || !rects.length) return [];
+  let X0 = Infinity, Y0 = Infinity, X1 = -Infinity, Y1 = -Infinity;
+  for (const r of rects) { X0 = Math.min(X0, r[0]); Y0 = Math.min(Y0, r[1]); X1 = Math.max(X1, r[2]); Y1 = Math.max(Y1, r[3]); }
+  const hit = fg.filter(it => {
+    if (!it.rt) return false;
+    const cx = (it.x0 + it.x1) / 2, cy = (it.y0 + it.y1) / 2;
+    return cx >= X0 - 1 && cx <= X1 + 1 && cy >= Y0 - 2 && cy <= Y1 + 2;
+  });
+  hit.sort((a, b) => (Math.abs(a.y0 - b.y0) > 4 ? a.y0 - b.y0 : a.x0 - b.x0));
+  return hit;
+}
 function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存；boxOpen 的不画）
   pw.querySelectorAll('.word-hl-layer').forEach(l => l.remove());
   const page = parseInt(pw.dataset.pageNum || '0', 10);
@@ -350,6 +387,14 @@ function renderWordHl(pw) {   // 渲染该页所有查词高亮（多个并存�
       d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
       d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
       layer.appendChild(d);
+    }
+    // 查词等待时:先把这处注音(日读音/英音标,本页 furigana)标在词上方——复用原振假名 .ruby-layer .rt 样式(大小/位置一致)
+    const _hits = _furiHitsForRects(pw, h.rects);
+    if (_hits.length) {
+      const rl = document.createElement('div');
+      rl.className = 'ruby-layer';   // pointer-events:none → 不挡高亮点击;.rt 样式靠这个作用域
+      for (const it of _hits) { const sp = _makeRubySpan(it, sx, sy); if (sp) rl.appendChild(sp); }
+      layer.appendChild(rl);
     }
     layer.addEventListener('click', (e) => { e.stopPropagation(); _wordHlClick(h); });
     pw.appendChild(layer);

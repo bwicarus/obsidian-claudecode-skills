@@ -15,23 +15,25 @@ function renderRubyLayer(pw) {
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
   for (const it of items) {
-    const rt = it.rt || ''; if (!rt) continue;
-    const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
-    const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
-    // 字号：约词高 36%；并受「词宽/读音字数」约束使读音横向不超过词宽（系数 1.0，
-    // 之前 1.4 → 读音比词宽 40% + overflow:hidden 把末尾假名切掉，故收到 1.0 + 配 overflow:visible）
-    const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.0));
-    const sp = document.createElement('span');
-    sp.className = 'rt';
-    sp.textContent = rt;
-    sp.style.left = x0 + 'px';
-    sp.style.width = w + 'px';
-    sp.style.fontSize = fs.toFixed(1) + 'px';
-    // ruby 略偏下贴近本行汉字：只 1/3 露在框顶之上，2/3 落进本行字框顶部 padding(=视觉空隙)。
-    // （OCR 字框顶有 padding，框比实际字高；偏下放更贴自己这行、更不碰上一行。用户要求再向下些。）
-    sp.style.top = Math.max(0, y0 - fs * 0.34) + 'px';
-    layer.appendChild(sp);
+    const sp = _makeRubySpan(it, sx, sy);
+    if (sp) layer.appendChild(sp);
   }
+}
+// 单个振假名/音标条目 → .rt span。renderRubyLayer 和「查词等待注音」共用,保证显示一致。
+// 字号≈词高 36% 且受词宽/读音字数约束(横向不超词宽);略偏下贴本行。须放进 .ruby-layer 容器(CSS 作用域)。
+function _makeRubySpan(it, sx, sy) {
+  const rt = it.rt || ''; if (!rt) return null;
+  const x0 = it.x0 * sx, y0 = it.y0 * sy, x1 = it.x1 * sx, y1 = it.y1 * sy;
+  const w = Math.max(6, x1 - x0), h = Math.max(6, y1 - y0);
+  const fs = Math.max(7, Math.min(h * 0.36, w / Math.max(1, rt.length) * 1.0));
+  const sp = document.createElement('span');
+  sp.className = 'rt';
+  sp.textContent = rt;
+  sp.style.left = x0 + 'px';
+  sp.style.width = w + 'px';
+  sp.style.fontSize = fs.toFixed(1) + 'px';
+  sp.style.top = Math.max(0, y0 - fs * 0.34) + 'px';
+  return sp;
 }
 function refreshRubyAllPages() {
   document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {

@@ -466,7 +466,9 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   let url;
   try { url = new URL(e.request.url); } catch (_) { return; }
-  if (e.request.method !== 'GET' || url.pathname !== '/pdf/api/page-image') return;   // 只管页图,其余放行
+  if (e.request.method !== 'GET') return;
+  // 页图 + 文字层(page-chars 带 &cv 内容版本→cache-first 不会陈旧):命中即本地(秒开/离线),其余放行
+  if (url.pathname !== '/pdf/api/page-image' && url.pathname !== '/pdf/api/page-chars') return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const hit = await cache.match(e.request);
@@ -1430,6 +1432,9 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     缓存的是「只依赖文件+页」的不变部分(chars/page_w/page_h);vocab_marks/句子框
     依赖可变的掌握度/译文/删除态,不缓存,每次从 chars 现算(便宜,无 fitz/rawdict)。
     返回 (chars, page_w, page_h) 或 None。"""
+    ovr = _page_ocr_override_load(rel, page)   # 单页重扫覆盖:有则直接用(绕过 PDF 嵌入文字层)
+    if ovr is not None:
+        return ovr["chars"], ovr["page_w"], ovr["page_h"], ovr.get("furigana", [])
     import hashlib
     try:
         mtime = int(os.path.getmtime(str(abs_path)))
@@ -1489,30 +1494,83 @@ def pdf_api_page_chars():
         if res is None:
             return jsonify({"ok": False, "error": "page out of range"}), 400
         chars, page_w, page_h, furigana = res
-        _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）；live 应用不进缓存
-        # 生成 vocab_marks + 含 ≥2 未掌握词的句子框(依赖可变状态,每次现算)
-        _aj = _page_allows_ja(chars, rel)   # 该页是否日语(中文书纯汉字 → 否,免撞日语词库)
-        vocab_marks = _build_vocab_marks(chars)
-        if _aj:
-            vocab_marks += _build_jp_vocab_marks(chars)   # 日语生词下划线(查过的 JP 词)
-        sentences = _build_unmastered_sentences(chars, page_h=page_h, allow_ja=_aj)
-        for ts in _tr_load(rel):   # 合并该页手动翻译过的句子(持久 sidecar，带译文)
-            if ts.get("rects") and ts.get("page", page) == page:
-                sentences.append(ts)
-        _dis = _dismiss_load(rel)   # 过滤用户长按 L 框删除的句子标记
-        if _dis:
-            sentences = [s for s in sentences if (s.get("text") or "").strip() not in _dis]
+        _apply_char_offset(chars, _char_offset_for(rel, page))   # 文字层校准:偏移 live 应用(不进磁盘缓存)
+        _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）
+        # **只回不变部分**(字 bbox/分词/振假名);可变的生词/句子框走 /page-overlay。
+        # 可缓存:前端带 &cv=<内容版本>(偏移/重扫/PDF 改 → cv 变 → 换 key → 不会陈旧);
+        # /pdf/sw.js 缓存命中即本地(读过的书秒开/离线),没命中才回 Pi。
         resp = jsonify({
             "ok": True,
             "chars": chars,
             "page_w": page_w,
             "page_h": page_h,
-            "vocab_marks": vocab_marks,
-            "vocab_sentences": sentences,
             "furigana": furigana,
         })
-        # 动态数据绝不缓存:之前无 Cache-Control,iOS Safari 启发式缓存了旧版(分词上线前
-        # 每字 w 各自独立)→ 整页单字。no-store 杜绝;前端再加 ?v=mtime 换 cache key 立即生效。
+        resp.headers["Cache-Control"] = "private, max-age=3600"
+        return resp
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+def _page_content_version(abs_path, rel: str, page: int) -> str:
+    """该页内容版本签名:PDF mtime + 分词版本 + 偏移 + 单页重扫覆盖。任一变 → cv 变 → 前端换缓存 key。"""
+    import hashlib
+    try:
+        mt = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        mt = 0
+    ofs = _char_offset_for(rel, page)
+    ovr = _page_ocr_override_sig(rel, page)   # 单页重扫覆盖签名(无则空)
+    try:
+        ph = int(os.path.getmtime(str(_PHRASES_PATH)))   # 收藏词组改 → 合并 w 变 → cv 必须变
+    except Exception:
+        ph = 0
+    try:
+        pm = int(os.path.getmtime(str(_PHRASE_MARK_PATH)))   # 词组掌握态改 → chars 的 favm 变 → cv 也得变
+    except Exception:
+        pm = 0
+    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}"
+    return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
+
+
+@bp.route("/api/page-overlay")
+def pdf_api_page_overlay():
+    """该页**可变**叠层数据(生词下划线/句子框)+ 偏移 + 内容版本 cv。no-store(实时,随掌握度/译文变)。
+    前端先拉它拿 cv,再用 cv 拉可缓存的 /page-chars。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
+    try:
+        res = _page_chars_cached(abs_path, rel, page)
+        if res is None:
+            return jsonify({"ok": False, "error": "page out of range"}), 400
+        chars, page_w, page_h, furigana = res
+        _apply_char_offset(chars, _char_offset_for(rel, page))
+        _merge_favorite_phrases(chars)
+        _aj = _page_allows_ja(chars, rel)
+        vocab_marks = _build_vocab_marks(chars)
+        if _aj:
+            vocab_marks += _build_jp_vocab_marks(chars)
+        sentences = _build_unmastered_sentences(chars, page_h=page_h, allow_ja=_aj)
+        for ts in _tr_load(rel):
+            if ts.get("rects") and ts.get("page", page) == page:
+                sentences.append(ts)
+        _dis = _dismiss_load(rel)
+        if _dis:
+            sentences = [s for s in sentences if (s.get("text") or "").strip() not in _dis]
+        resp = jsonify({
+            "ok": True,
+            "vocab_marks": vocab_marks,
+            "vocab_sentences": sentences,
+            "offset": _char_offset_for(rel, page),
+            "cv": _page_content_version(abs_path, rel, page),
+        })
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
         return resp
@@ -2824,6 +2882,207 @@ def pdf_api_book_crop_set():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "crop": crop})
+
+
+# ──────── 文字层校准:per-book per-page 偏移(扫描/OCR 书文字层没对齐时手动微调) ────────
+_CHAR_OFFSET_PATH = CLAUDE_DIR / "state" / "pdf-char-offset.json"
+
+
+def _load_char_offsets() -> dict:
+    try:
+        return json.loads(_CHAR_OFFSET_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _char_offset_for(rel: str, page: int) -> dict:
+    """该书该页文字层偏移 {dx,dy,scale}(pt;dx/dy 平移、scale 缩放,绕页原点)。无 → 0/0/1。"""
+    d = (_load_char_offsets().get(rel) or {}).get(str(page)) or {}
+    out = {"dx": 0.0, "dy": 0.0, "scale": 1.0}
+    for k in ("dx", "dy"):
+        try:
+            out[k] = float(d.get(k, 0) or 0)
+        except Exception:
+            out[k] = 0.0
+    try:
+        out["scale"] = max(0.5, min(2.0, float(d.get("scale", 1) or 1)))
+    except Exception:
+        out["scale"] = 1.0
+    return out
+
+
+def _apply_char_offset(chars: list, ofs: dict) -> None:
+    """就地把偏移应用到 char bbox(只动 x0/x1/y0/y1;w 是词 id 不能动)。"""
+    dx, dy, sc = ofs["dx"], ofs["dy"], ofs["scale"]
+    if dx == 0 and dy == 0 and sc == 1.0:
+        return
+    for c in chars:
+        if "x0" in c:
+            c["x0"] = c["x0"] * sc + dx
+        if "x1" in c:
+            c["x1"] = c["x1"] * sc + dx
+        if "y0" in c:
+            c["y0"] = c["y0"] * sc + dy
+        if "y1" in c:
+            c["y1"] = c["y1"] * sc + dy
+
+
+# ──────── 单页重扫(重新 OCR)覆盖:per-book per-page 存重新 OCR 的 chars,优先于 PDF 嵌入文字层 ────────
+_PAGE_OCR_DIR = CLAUDE_DIR / "state" / "pdf-page-ocr"
+
+
+def _page_ocr_path(rel: str, page: int) -> Path:
+    import hashlib
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    return _PAGE_OCR_DIR / f"{sha}-p{page}.json"
+
+
+def _page_ocr_override_sig(rel: str, page: int) -> str:
+    p = _page_ocr_path(rel, page)
+    try:
+        return str(int(p.stat().st_mtime))
+    except Exception:
+        return ""
+
+
+def _page_ocr_override_load(rel: str, page: int):
+    p = _page_ocr_path(rel, page)
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        if isinstance(d, dict) and isinstance(d.get("chars"), list):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def _page_ocr_override_save(rel: str, page: int, chars, page_w, page_h, furigana=None) -> None:
+    p = _page_ocr_path(rel, page)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"chars": chars, "page_w": page_w, "page_h": page_h,
+                             "furigana": furigana or []}, ensure_ascii=False), "utf-8")
+
+
+def _page_ocr_override_clear(rel: str, page: int) -> bool:
+    p = _page_ocr_path(rel, page)
+    try:
+        if p.exists():
+            p.unlink()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _reocr_page_vision(rel: str, abs_path, page: int, dpi: int = 300) -> int:
+    """单页重新 OCR(Google Vision DOCUMENT_TEXT_DETECTION)→ 转 char 格式存覆盖 sidecar。返回字符数。
+    坐标:Vision 给视觉(渲染后)图像像素 → ×(pt/px) 转 PDF 点,跟 page-chars(rawdict)/页图同一坐标系。"""
+    import fitz
+    doc = fitz.open(str(abs_path))
+    try:
+        if page < 1 or page > doc.page_count:
+            raise ValueError("page out of range")
+        p = doc[page - 1]
+        if p.rotation:
+            raise RuntimeError(f"该页有旋转({p.rotation}°),单页重扫暂不支持")
+        # 长边封顶 4000px(同 build 流程):巨幅扫描页 300dpi 会撑爆 Vision 40MB 请求上限
+        long_pt = max(p.rect.width, p.rect.height) or 1.0
+        zoom = min(dpi / 72.0, 4000.0 / long_pt)
+        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        img_bytes = pix.tobytes("jpg", jpg_quality=90)   # JPEG 比 PNG 小一个量级,OCR 无可感损失
+        img_w, img_h = pix.width, pix.height
+        page_w, page_h = p.rect.width, p.rect.height
+    finally:
+        doc.close()
+    sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+    from google_vision_ocr import ocr_one_page, _load_key
+    res = ocr_one_page(_load_key(), img_bytes)
+    sx = (page_w / img_w) if img_w else 1.0
+    sy = (page_h / img_h) if img_h else 1.0
+    out = []
+    for ch in res.get("chars", []):
+        bb = ch.get("bbox")
+        if not bb or len(bb) != 4:
+            continue
+        x0, y0, x1, y1 = bb
+        c = {"c": ch.get("c", ""), "x0": x0 * sx, "y0": y0 * sy, "x1": x1 * sx, "y1": y1 * sy,
+             "w": ch.get("w", -1), "bk": ch.get("bk", -1)}
+        if ch.get("sp"):
+            c["sp"] = 1
+        out.append(c)
+    _page_ocr_override_save(rel, page, out, page_w, page_h)
+    return len(out)
+
+
+@bp.route("/api/reocr-page", methods=["POST"])
+def pdf_api_reocr_page():
+    """单页重扫:对当前页重跑 Google Vision OCR → 覆盖该页文字层(修识别错/漏/对不齐)。
+    body {file, page}。同步(单页 ~2-5s,nginx 300s 内)。完成后 cv 变 → 前端重渲拿新文字层。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    page = int(data.get("page", 0) or 0)
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        n = _reocr_page_vision(rel, abs_path, page)
+        return jsonify({"ok": True, "chars": n, "cv": _page_content_version(abs_path, rel, page)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
+@bp.route("/api/reocr-page/clear", methods=["POST"])
+def pdf_api_reocr_clear():
+    """撤销单页重扫:删覆盖 sidecar → 回到 PDF 原嵌入文字层。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    page = int(data.get("page", 0) or 0)
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    cleared = _page_ocr_override_clear(rel, page)
+    return jsonify({"ok": True, "cleared": cleared, "cv": _page_content_version(abs_path, rel, page)})
+
+
+@bp.route("/api/char-offset")
+def pdf_api_char_offset_get():
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    return jsonify({"ok": True, "offset": _char_offset_for(rel, page)})
+
+
+@bp.route("/api/char-offset", methods=["POST"])
+def pdf_api_char_offset_set():
+    """设置某书某页文字层偏移。dx/dy(pt) 平移、scale(0.5–2)缩放。归零=删除该页记录。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    page = int(data.get("page", 0) or 0)
+    if not rel or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        dx = float(data.get("dx", 0) or 0)
+        dy = float(data.get("dy", 0) or 0)
+        sc = max(0.5, min(2.0, float(data.get("scale", 1) or 1)))
+    except Exception:
+        return jsonify({"ok": False, "error": "bad numbers"}), 400
+    allofs = _load_char_offsets()
+    book = allofs.setdefault(rel, {})
+    if dx == 0 and dy == 0 and sc == 1.0:
+        book.pop(str(page), None)            # 归零 → 清掉该页记录
+    else:
+        book[str(page)] = {"dx": round(dx, 2), "dy": round(dy, 2), "scale": round(sc, 4)}
+    if not book:
+        allofs.pop(rel, None)
+    try:
+        _CHAR_OFFSET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CHAR_OFFSET_PATH.write_text(json.dumps(allofs, ensure_ascii=False), "utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    abs_path = _safe_vault_path(rel)
+    cv = _page_content_version(abs_path, rel, page) if abs_path else None
+    return jsonify({"ok": True, "offset": _char_offset_for(rel, page), "cv": cv})
 
 
 @bp.route("/api/phrases", methods=["GET", "POST", "DELETE"])

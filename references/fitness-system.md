@@ -478,8 +478,15 @@ register_fitness(app)
 
 ---
 
+## 视频收藏置顶 + AI 要点 + 视频过滤修复 + 3D 模型（2026-06-07）
+
+- **视频过滤修复**（`scripts/find_jeff_videos.py`）：用户报"视频跟动作对不上"。根因三连——① `MUST_CONTAIN` 键名 `db_lateral_raise` ≠ plan 里的 `cable_lateral_raise`（取不到过滤词 → 侧平举完全不过滤）；② 关键词太松（`["squat"]` 放行"保加利亚分腿蹲"）；③ 某频道匹配不够时用**跑偏视频凑数**到 5 个（划船被塞 Lat Pulldown/Rear Delt）。修：键名对齐 plan id + 新增 `MUST_EXCLUDE` 负向词（剔"另一个动作/另一块肌群"）+ **取消用跑偏视频凑数**（宁可少而准）+ 新增 `--prune-existing`（不调 API、按规则清洗现有 plan.json）。清洗了 plan（剔 45）+ 用户 3 个 override（per-user DB，剔 7）。`ocr_one_page` 无关，但 `google_vision_ocr.py` 也在本批改（见 pdf-reader §32）。
+- **视频收藏置顶**：per-user 表 `fitness_video_favorite(exercise_id, video_id)`；`GET /api/fitness/videos/<id>` 收藏置顶（**稳定排序**，各组保原序）+ 标 `favorite`；`POST /api/fitness/videos/<id>/favorite {video_id, favorite}`。log 页控制条 ☆/⭐ 按钮（切换后本地稳定排序到首位 + 重渲）。
+- **AI 要点 + 时间锚点**：`GET /api/fitness/summary/<vid>` → `youtube_subtitles.summarize_video`：拉字幕（复用 `get_or_translate` 缓存）→ 喂带 `[秒]` 时间戳的字幕给 AI → 输出"秒数 | 要点" → `_parse_points` 解析 → 缓存表 `youtube_summaries`。log 页 📌要点：列表每条 `[mm:ss] 要点`，点击 `player.seekTo(t)` 跳转。Gemini Flash 优先、**429 落 Claude**（webapp `.env` 有 `CLAUDE_PROJECT`；`youtube_subtitles` 顶部 `os.environ.setdefault("CLAUDE_PROJECT", PROJECT_ROOT)` 防独立脚本报 `C:\claude`）。实测练肩视频产出 8 条可读要点 + 准时间戳。
+- **3D 肌肉模型**（task #203，`templates/fitness/body.html` + `static/fitness/body_muscles.glb` 2.1M + `static/three/` Three.js）：用户给的 C 盘"人体模型" → Blender headless 转 glTF（含模型自带头部，不用程序生成）→ Three.js GLTFLoader 渲染；按强度（est-1RM，同 modality 拮抗肌比值）算肌肉平衡（`fitness_coach.py` 的 `_compute_strength_ratios`/`_balance_profile`，非按训练量）。
+
 ## 相关 reference
 
 - [`google-cloud-apis.md`](google-cloud-apis.md) — Vision / YouTube / STT / Gemini 集成 + 赠金计费
-- [`webapp-development.md`](webapp-development.md) — Flask + nginx 部署框架
+- [`webapp-development.md`](webapp-development.md) — Flask + nginx 部署框架（全站 PWA service worker 也在此）
 - [`server-config-schema.md`](server-config-schema.md) — server 端配置(不含 fitness)

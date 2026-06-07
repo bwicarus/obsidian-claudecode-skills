@@ -201,16 +201,16 @@ function openGrammarPanel() {
   if (!p.classList.contains('open')) {
     p.classList.add('open');
     document.body.classList.add('grammar-open');
-    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页
-    if (readMode === 'spread') {
+    // 双页模式下侧栏挤窄 → 两页并排太小 → **临时**切单列(不写 localStorage/orient),关栏自动还原双页。
+    // 但悬浮显示模式抽屉盖在正文上、不挤压 → 页面不变窄 → 保持双页不切。
+    if (readMode === 'spread' && !document.body.classList.contains('grammar-floating')) {
       _spreadBeforePanel = _spreadOffset;
       readMode = 'continuous';
       _updateModeButtons();
     }
-    // 打开侧栏让 #main 变窄 → 重算 scale。用 _scheduleRefit(debounce) 而非 rAF 立即跑:
-    // 重建几百页占位很重,放下一帧同步跑会卡住面板滑入动画(还要双击);debounce 把它挪到动画后、
-    // 且与 ResizeObserver(#main 变窄)触发的 refit 去重 → 只重建一次。
-    _scheduleRefit(true);
+    // 打开侧栏让 #main 变窄 → 重算 scale(debounce,挪出动画帧 + 与 ResizeObserver 去重)。
+    // 悬浮模式 #main 宽度不变 → 不重排(重排会让背后 PDF 重渲染→闪烁);仅挤压模式重排。
+    if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);
   }
   // 展开时若停在语法 tab 且历史未载 → 主动载（刷新后默认语法 tab，不点切换也能显示记录）
   const _onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
@@ -227,8 +227,43 @@ window.closeGrammarPanel = () => {
     _spreadBeforePanel = null;
     _updateModeButtons();
   }
-  _scheduleRefit(true);   // 同 open:debounce 重建,挪出动画帧 + 与 ResizeObserver 去重
+  if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
+
+// ── 右栏外观设置：悬浮显示 + 背景模糊度（localStorage 持久化，仿仪表盘抽屉设置）──
+function _gpApplyAppearance() {
+  document.body.classList.toggle('grammar-floating', localStorage.getItem('pdf-gp-floating') === '1');
+  const blur = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
+  document.documentElement.style.setProperty('--gp-blur', blur + 'px');
+}
+window._gpSetFloating = (on) => {
+  localStorage.setItem('pdf-gp-floating', on ? '1' : '0');
+  document.body.classList.toggle('grammar-floating', !!on);
+  if (typeof _scheduleRefit === 'function') _scheduleRefit(true);   // 悬浮↔挤压 → #main 宽度变 → 重排
+};
+window._gpSetBlur = (v) => {
+  localStorage.setItem('pdf-gp-blur', String(v));
+  document.documentElement.style.setProperty('--gp-blur', v + 'px');
+  const el = document.getElementById('gp-blur-val'); if (el) el.textContent = v;
+};
+window.toggleSideSettings = (ev) => {
+  if (ev) ev.stopPropagation();
+  const m = document.getElementById('side-settings'); if (!m) return;
+  if (m.style.display === 'block') { m.style.display = 'none'; return; }
+  const f = document.getElementById('gp-floating');
+  if (f) f.checked = localStorage.getItem('pdf-gp-floating') === '1';
+  const b = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
+  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
+  if (bi) bi.value = b; if (bv) bv.textContent = b;
+  m.style.display = 'block';
+};
+document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
+  const m = document.getElementById('side-settings');
+  if (m && m.style.display === 'block' && !m.contains(e.target) && !e.target.closest('#side-settings-btn')) {
+    m.style.display = 'none';
+  }
+}, true);
+_gpApplyAppearance();   // 载入即应用持久化设置
 // 顶栏「📊 语法」按钮：打开统一面板并切到语法 tab（再点同 tab 则关闭）
 window.toggleGrammarPanel = () => {
   const p = document.getElementById('grammar-panel');

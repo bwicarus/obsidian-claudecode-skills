@@ -7,13 +7,21 @@ function _updateModeButtons() {
 }
 async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
-  await _refitToWidth(true);   // 重算 scale(单页/连续=整宽,双页=半宽)+ 重建布局
   currentPage = keepPage;
-  if (readMode === 'single') {
-    await renderPage(keepPage);
-  } else {
+  // 连续↔双页:优先**原地 reparent** 已渲染页(不重渲→不"重新加载"),再原地重标尺到新 fit 宽;失败才整列重建
+  if (readMode !== 'single' && _remodeListInPlace()) {
+    await _refitToWidth(true, false);   // 结构已与新 readMode 匹配 → 走原地重标尺(instant-resize + 后台高清化)
     const t = document.querySelector(`[data-page-num="${keepPage}"]`);
-    if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+    // rAF 排在 _refitToWidth 内部按比例恢复滚动的 rAF 之后 → keepPage 定位最终生效(覆盖比例恢复)
+    if (t) requestAnimationFrame(() => t.scrollIntoView({block: 'start', behavior: 'auto'}));
+  } else {
+    await _refitToWidth(true, true);   // 回退:整列重建(列表不完整 / single 残留)
+    if (readMode === 'single') {
+      await renderPage(keepPage);
+    } else {
+      const t = document.querySelector(`[data-page-num="${keepPage}"]`);
+      if (t) setTimeout(() => t.scrollIntoView({block: 'start', behavior: 'auto'}), 80);
+    }
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 }
@@ -56,7 +64,7 @@ function _mainContentWidth() {
 function _computeFitScale(v0w, v0h) {
   const mainW = _mainContentWidth();
   const ppr = _pagesPerRow();
-  const avail = mainW - (ppr > 1 ? 10 : 0);
+  const avail = mainW - (ppr > 1 ? 4 : 0);   // 4 = .spread-row 两页间 gap(须与 CSS 一致)
   const s = avail / (v0w * _cropVisWFrac() * ppr);
   return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
 }
@@ -75,7 +83,7 @@ function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
 }
-async function _refitToWidth(force) {
+async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();
@@ -94,8 +102,8 @@ async function _refitToWidth(force) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode !== 'single') {   // 连续 / 双页 都重建滚动列表
-      await setupContinuousMode();
+    if (readMode !== 'single') {   // 连续/双页:结构没变就原地重排(不清容器→不"重新加载");mode 变(rebuild)或原地失败才整列重建
+      if (rebuild || !(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       // 单页模式：清 loaded 标记重 render
       const wrap = container.querySelector('.page-wrap') || container;
@@ -217,6 +225,14 @@ async function _applyZoom(newScale, focal) {
       if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
+      // 单页同理:先用现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小)
+      let scw = 0, sch = 0;
+      if (wrap.__pageWPt && wrap.__pageHPt) { scw = Math.floor(wrap.__pageWPt * scale); sch = Math.floor(wrap.__pageHPt * scale); }
+      else if (wrap.__renderScale) {   // 兜底:页点尺寸暂缺(char 层未回)→ 按 scale 比例缩放现有图
+        const r = scale / wrap.__renderScale, im = wrap.querySelector('.page-img, canvas');
+        if (im) { scw = Math.round((parseFloat(im.style.width) || 0) * r); sch = Math.round((parseFloat(im.style.height) || 0) * r); }
+      }
+      if (scw && sch) wrap.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = scw + 'px'; el.style.height = sch + 'px'; });
       if (wrap.dataset) wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
@@ -294,12 +310,31 @@ function _applyFullscreen(on) {
   document.documentElement.classList.toggle('fs-mode', on);
   const b = document.getElementById('fs-toggle'); if (b) b.classList.toggle('active', on);
 }
+// 浏览器/PWA 真·全屏(Fullscreen API)助手。iOS Safari 文档级不支持 → 静默失败,只保留页内全屏
+function _browserFsActive() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+function _reqBrowserFs() {
+  const el = document.documentElement, fn = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (fn && !_browserFsActive()) { try { Promise.resolve(fn.call(el)).catch(() => {}); } catch (_) {} }
+}
+function _exitBrowserFs() {
+  const fn = document.exitFullscreen || document.webkitExitFullscreen;
+  if (fn && _browserFsActive()) { try { Promise.resolve(fn.call(document)).catch(() => {}); } catch (_) {} }
+}
 window.toggleFullscreen = function () {
   const on = !document.documentElement.classList.contains('fs-mode');
   _applyFullscreen(on);
   try { localStorage.setItem('pdf-fullscreen', on ? '1' : '0'); } catch (_) {}
-  _toast?.(on ? '全屏阅读：点右上角 ⤢ 恢复顶栏' : '已退出全屏');
+  if (on) _reqBrowserFs(); else _exitBrowserFs();   // 同时切浏览器/PWA 整窗真·全屏
+  _toast?.(on ? '全屏阅读：点右上角 ⤢ 恢复' : '已退出全屏');
 };
-_applyFullscreen(_fsEnabled());   // 同步按钮激活态(class 已由内联脚本应用)
+// 用户用 Esc/F11 退出浏览器全屏 → 同步退出页内全屏(顶栏恢复),两边状态不打架
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev =>
+  document.addEventListener(ev, () => {
+    if (!_browserFsActive() && document.documentElement.classList.contains('fs-mode')) {
+      _applyFullscreen(false);
+      try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
+    }
+  }));
+_applyFullscreen(_fsEnabled());   // 载入同步页内全屏态(浏览器全屏须用户手势,不在此触发)
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载

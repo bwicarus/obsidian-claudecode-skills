@@ -90,10 +90,14 @@ def ocr_one_page(api_key: str, png_bytes: bytes) -> dict:
     if not full:
         return {"chars": [], "text": ""}
     chars = []
+    bk_id = 0
+    w_id = 0
     for page in full.get("pages", []):
         for block in page.get("blocks", []):
+            bk_id += 1
             for para in block.get("paragraphs", []):
                 for word in para.get("words", []):
+                    w_id += 1   # Vision 词分组 → 词 id(词级选中/分词依据)
                     for sym in word.get("symbols", []):
                         bb = sym.get("boundingBox", {}).get("vertices", [])
                         if not bb:
@@ -103,13 +107,14 @@ def ocr_one_page(api_key: str, png_bytes: bytes) -> dict:
                         chars.append({
                             "c": sym.get("text", ""),
                             "bbox": [min(xs), min(ys), max(xs), max(ys)],
+                            "w": w_id, "bk": bk_id,
                         })
                         # detectedBreak:WORD-end SPACE / EOL / SURE_SPACE / LINE_BREAK
                         brk = sym.get("property", {}).get("detectedBreak", {})
                         if brk.get("type") in ("SPACE", "SURE_SPACE", "EOL_SURE_SPACE"):
-                            chars.append({"c": " ", "bbox": chars[-1]["bbox"], "sp": 1})
+                            chars.append({"c": " ", "bbox": chars[-1]["bbox"], "sp": 1, "w": w_id, "bk": bk_id})
                         elif brk.get("type") in ("LINE_BREAK",):
-                            chars.append({"c": "\n", "bbox": chars[-1]["bbox"], "sp": 1})
+                            chars.append({"c": "\n", "bbox": chars[-1]["bbox"], "sp": 1, "w": w_id, "bk": bk_id})
     return {"chars": chars, "text": full.get("text", "")}
 
 

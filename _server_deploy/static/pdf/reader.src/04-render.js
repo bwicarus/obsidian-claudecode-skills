@@ -71,7 +71,20 @@ window._prefetchAround = _prefetchAround;
 // 图片模式渲染:用服务端渲染好的页图(<img>)代替 PDF.js canvas。叠层(选词 char 层/高亮/振假名/墨迹)
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
+  const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
   const cw = Math.floor(viewport.width), ch = Math.floor(viewport.height);
+  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
+  const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
+  const img = document.createElement('img');
+  img.className = 'page-img'; img.decoding = 'async';
+  img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
+  // **先把新页图 decode 好再换**:旧内容/旧图一直可见到此刻 → 去边/缩放/侧栏等重渲染无空白闪烁(cache 命中=秒回)
+  try { await img.decode(); } catch (_) {}
+  if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
+  if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
+  img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
   wrap.style.width = ''; wrap.style.height = '';
@@ -79,14 +92,6 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.style.display = ''; wrap.style.alignItems = ''; wrap.style.justifyContent = '';
   wrap.dataset.pageNum = num;
   _applyCropToWrap(wrap, cw, ch);   // 去边:渲染前先收成裁切窄宽(子层 translate)
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
-  const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
-  const img = document.createElement('img');
-  img.className = 'page-img'; img.decoding = 'async';
-  img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
-  img.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt;
   wrap.appendChild(img);
   const selOverlay = document.createElement('div');   // 选中高亮叠层(同 canvas 路径)
   selOverlay.className = 'sel-overlay';
@@ -110,6 +115,7 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);
+  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时可按比例瞬时缩放现有位图(无 __pageWPt 时兜底)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
@@ -264,6 +270,7 @@ async function _renderPageInto(num, wrap) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
+  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排兜底用(canvas 模式同样需要)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
