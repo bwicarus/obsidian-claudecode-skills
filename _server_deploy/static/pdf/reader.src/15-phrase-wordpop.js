@@ -228,6 +228,10 @@ async function refreshCharsWForAllPages() {
       if (!d.ok || !d.chars) continue;
       const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
       for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+      if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
+        pw.__furigana = d.furigana;
+        try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
+      }
       pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
       try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
     } catch (_) {}

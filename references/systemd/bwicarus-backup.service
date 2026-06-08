@@ -1,0 +1,15 @@
+[Unit]
+Description=bwicarus 每日数据备份(webapp/data 账号数据 + claude/state 学习状态,跳过可再生缓存)
+After=network.target
+
+[Service]
+Type=oneshot
+User=bwicarus
+Group=bwicarus
+Environment=BACKUP_DIR=/home/bwicarus/backups
+Environment=WEBAPP_DATA=/home/bwicarus/webapp/data
+Environment=STATE_DIR=/home/bwicarus/claude/state
+Environment=KEEP=14
+ExecStart=/usr/bin/env bash /home/bwicarus/claude/scripts/backup_data.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,19 @@
+# /etc/systemd/system/webapp.service
+[Unit]
+Description=bwicarus webapp (Pi instance, gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=bwicarus
+WorkingDirectory=/home/bwicarus/webapp
+EnvironmentFile=/home/bwicarus/webapp/.env
+# 生产 WSGI:gunicorn 替代 Flask dev server。单 worker(保住进程内 _JOBS 断连恢复 + 后台线程共享内存,
+# 等同原 threaded=True)+ gthread 多线程并发 + timeout 600(放过慢 AI/翻译) + access/error log 入 journald。
+ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 8 --worker-class gthread --timeout 600 --graceful-timeout 30 --bind 127.0.0.1:5000 --access-logfile - --error-logfile - app:app
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

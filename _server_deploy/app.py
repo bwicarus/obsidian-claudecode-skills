@@ -1,6 +1,11 @@
 import os
 import json
 import base64
+import mimetypes
+# .mjs/.js 显式注册为 JS MIME:有 nginx 时它管;**无 nginx 的本地实例(Windows/standalone)** Flask 直接服务
+# 静态时,werkzeug 默认可能把 .mjs 猜成 text/plain → 浏览器拒绝当 ES module(PDF.js import 失败,整个阅读器挂)。
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/javascript", ".js")
 import shutil
 import secrets
 import sqlite3
@@ -35,11 +40,31 @@ ALLOWED_DATASETS = {"dashboard", "history", "private"}
 
 # ─────────────────────────── DB ───────────────────────────
 
+def _atomic_write_text(path, text):
+    """原子写:写临时文件 + os.replace(同目录 rename,POSIX 原子)→ 崩溃/并发不会读到半截文件。
+    大厂配置/状态文件标配写法。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _tune_conn(conn):
+    # WAL:读写不再互相全表锁(并发读 + 单写并行) → 多请求/多线程下不再 "database is locked"。
+    # busy_timeout:拿不到锁时等待而非立即报错。synchronous=NORMAL:WAL 下安全且更快(仅 OS 崩溃丢最后事务)。
+    # 大厂 SQLite 标配(同 Django/Rails 的 SQLite 生产建议)。WAL 是 DB 级持久设置,每次连接重设幂等无害。
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
 def get_db():
     if "db" not in g:
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        _tune_conn(conn)
         g.db = conn
     return g.db
 
@@ -54,7 +79,7 @@ def init_db():
     USERS_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    _tune_conn(conn)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -330,10 +355,49 @@ def index():
     return redirect(url_for("login"))
 
 
+# ── CSRF(会话级 token,零依赖)──
+# SameSite=Lax 已挡跨站带 cookie 的 POST(CSRF 主载体);这里给公开 auth 表单再加 token 做纵深防御。
+# 模板里 {{ csrf_token() }} 输出隐藏域,POST 时与 session 内 token 比对(constant-time)。JSON API 不走此校验
+# (它们靠 SameSite + session/Bearer;给所有 fetch 串 token 风险高、收益低,故不做)。
+def _csrf_token():
+    tok = session.get("_csrf")
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session["_csrf"] = tok
+    return tok
+
+def _csrf_ok():
+    real = session.get("_csrf", "")
+    sent = request.form.get("csrf_token", "")
+    return bool(real) and secrets.compare_digest(str(real), str(sent))
+
+@app.context_processor
+def _inject_csrf():
+    return {"csrf_token": _csrf_token}
+
+
+def _safe_next(nxt, fallback="/dashboard/"):
+    """开放重定向防护:登录后只跳站内相对路径,拒绝 //evil.com、http(s)://、javascript: 等外站/协议跳转。
+    等价 Django url_has_allowed_host_and_scheme 的最小实现。"""
+    if not nxt:
+        return fallback
+    nxt = nxt.strip()
+    # 必须是单斜杠开头的站内绝对路径,且不是协议相对(//host)或反斜杠绕过(/\host)
+    if not nxt.startswith("/") or nxt.startswith("//") or nxt.startswith("/\\"):
+        return fallback
+    from urllib.parse import urlparse
+    p = urlparse(nxt)
+    if p.scheme or p.netloc:   # 带 scheme/host 一律拒
+        return fallback
+    return nxt
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "POST":
+        if not _csrf_ok():
+            return render_template("login.html", error="会话已过期，请重试"), 400
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         row = get_db().execute(
@@ -347,7 +411,7 @@ def login():
             session["role"]      = row["role"]
             session["logged_in"] = True  # legacy
             user_dir(row["username"]).mkdir(parents=True, exist_ok=True)
-            return redirect(request.args.get("next") or "/dashboard/")
+            return redirect(_safe_next(request.args.get("next")))
         error = "用户名或密码错误"
     return render_template("login.html", error=error)
 
@@ -386,7 +450,9 @@ def register():
         password2 = request.form.get("password2", "")
         # 重新查一次 invite，避免 GET/POST 之间被使用
         invite = db.execute("SELECT * FROM invites WHERE token = ?", (token,)).fetchone() if token else None
-        if not _invite_valid(invite):
+        if not _csrf_ok():
+            error = "会话已过期，请刷新后重试"
+        elif not _invite_valid(invite):
             error = "邀请码无效或已使用"
         elif not username or not all(c.isalnum() or c in "_-" for c in username):
             error = "用户名只能包含字母、数字、下划线、连字符"
@@ -507,8 +573,7 @@ def graph_settings():
         data = request.get_json(force=True, silent=True) or {}
         if not isinstance(data, dict):
             abort(400)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(f, json.dumps(data, ensure_ascii=False, indent=2))
         return jsonify({"ok": True})
     if f.exists():
         try:
@@ -570,8 +635,7 @@ def nav_links():
             url   = str(item.get("url",   "")).strip()
             if label and url:
                 clean.append({"label": label, "url": url})
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(f, json.dumps(clean, ensure_ascii=False, indent=2))
         return jsonify({"ok": True, "links": clean})
     if f.exists():
         try:

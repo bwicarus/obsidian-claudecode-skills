@@ -39,6 +39,9 @@ _INFLIGHT: dict[str, threading.Event] = {}
 def _db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(DB_PATH))
+    db.execute("PRAGMA journal_mode = WAL")      # 并发读写不互锁
+    db.execute("PRAGMA busy_timeout = 5000")
+    db.execute("PRAGMA synchronous = NORMAL")
     db.execute("""
         CREATE TABLE IF NOT EXISTS youtube_subtitles (
             video_id TEXT NOT NULL,
@@ -151,7 +154,7 @@ def _translate_gemini_flash(segments: list[dict], key: str) -> bool:
     )
     # quota log
     try:
-        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
         from google_api_quota import log_usage
         log_usage("gemini", 1, "generateContent:flash",
                   note=f"{len(segments)} segs, status={r.status_code}")
@@ -191,7 +194,7 @@ def _translate_claude(segments: list[dict]) -> bool:
 def _translate_google(segments: list[dict]) -> bool:
     """Google Cloud Translation 批量(EN→ZH 快+质量好+走 GCP 赠金)。返回是否翻到。"""
     try:
-        sys.path.insert(0, "/home/bwicarus/claude/scripts/vocab")
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts", "vocab"))
         from translate import gtranslate_batch
     except Exception:
         return False
@@ -202,7 +205,7 @@ def _translate_google(segments: list[dict]) -> bool:
         if zh and zh != s["en"]:
             s["zh"] = zh
     try:
-        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
         from google_api_quota import log_usage
         log_usage("translate", len(segments), "v2:batch", note=f"{len(segments)} segs")
     except Exception:
@@ -407,7 +410,7 @@ def _gemini_text(prompt: str, key: str, max_tokens: int = 8000) -> str:
                              "thinkingConfig": {"thinkingBudget": 0}},
     }, timeout=120)
     try:
-        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
         from google_api_quota import log_usage
         log_usage("gemini", 1, "generateContent:summary", note=f"status={r.status_code}")
     except Exception:

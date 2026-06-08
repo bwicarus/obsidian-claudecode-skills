@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, "/home/bwicarus/claude/scripts")
+sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
 from ai_client import ask  # noqa: E402
 
 # 默认 Opus + max effort。用户在 fitness 设置面板可调。

@@ -333,7 +333,10 @@ let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
     const r = cl.getBoundingClientRect();
-    return {x: clientX - r.left, y: clientY - r.top};
+    // 缩放过渡期 wrap 带补偿 zoom → getBoundingClientRect 是缩放后视觉坐标,但 __charBoxes 是栅格 scale 的原始像素。
+    // 除回 zoom 让点击坐标与 charBoxes 同一坐标系。稳态 zoom='' → parseFloat=NaN → 1 → ÷1 无变化(与改动前一致)。
+    const z = parseFloat(pw.style.zoom) || 1;
+    return {x: (clientX - r.left) / z, y: (clientY - r.top) / z};
   };
 
   // 严格 bbox 命中 + 同行最近 char fallback。

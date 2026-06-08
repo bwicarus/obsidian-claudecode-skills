@@ -89,6 +89,25 @@ function _remodeListInPlace() {
 }
 window._remodeListInPlace = _remodeListInPlace;
 
+// ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
+const READER_BUILD = 'reader-fix-3';
+window._auditScales = function (tag) {
+  try {
+    const wraps = [...document.querySelectorAll('.page-wrap')];
+    const loaded = wraps.filter(w => w.dataset.loaded === '1');
+    const rs = {}, iw = {}, ww = {};
+    for (const w of loaded) {
+      const k = (w.__renderScale || 0).toFixed(3); rs[k] = (rs[k] || 0) + 1;
+      const im = w.querySelector('.page-img, canvas');
+      const wv = im ? Math.round(parseFloat(im.style.width) || im.offsetWidth || 0) : 0; iw[wv] = (iw[wv] || 0) + 1;
+      const wpw = Math.round(w.offsetWidth || 0); ww[wpw] = (ww[wpw] || 0) + 1;
+    }
+    window.dlog && window.dlog('[' + READER_BUILD + '|' + tag + '] mode=' + readMode + ' scale=' + (+scale).toFixed(3)
+      + ' loaded=' + loaded.length + '/' + wraps.length
+      + ' renderScale=' + JSON.stringify(rs) + ' imgW=' + JSON.stringify(iw) + ' wrapW=' + JSON.stringify(ww));
+  } catch (e) { window.dlog && window.dlog('audit err: ' + (e && e.message)); }
+};
+
 // 缩放时「原地重标尺」——两段式,**绝不串行阻塞手势**(双指松手只调一次,旧实现逐页 await decode → 放大要等 N 页 fetch 串行 1~2s = "失效",缩小先 snap 回旧大小再换 = "抽搐"):
 //   ① 瞬时(同步):用各页**现有位图**按新 scale 做 CSS 缩放到精确新尺寸(__pageWPt×scale = 服务端权威点尺寸)。
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
@@ -112,20 +131,18 @@ async function _rescaleContinuousInPlace() {
     } catch (_) {}
   }
   for (const w of wraps) {
-    if (w.dataset.loaded === '1') {
-      // ① 瞬时 CSS 缩放现有位图到新尺寸(精确:页点尺寸×scale;兜底:按 scale 比例缩放现有图)
-      let cw = 0, ch = 0;
-      if (w.__pageWPt && w.__pageHPt) { cw = Math.floor(w.__pageWPt * scale); ch = Math.floor(w.__pageHPt * scale); }
-      else if (w.__renderScale) {
-        const r = scale / w.__renderScale, im = w.querySelector('.page-img, canvas');
-        if (im) { cw = Math.round((parseFloat(im.style.width) || 0) * r); ch = Math.round((parseFloat(im.style.height) || 0) * r); }
-      }
-      if (cw && ch) {
-        w.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = cw + 'px'; el.style.height = ch + 'px'; });
-        w.style.width = cw + 'px'; w.style.height = ch + 'px';   // wrap 容器也显式定尺寸 → 布局/滚动数学即刻精确(crop-on 下随即被 _applyCropToWrap 覆盖为裁切窄宽)
-        _applyCropToWrap(w, cw, ch);
-      }
-      // ② 后台高清化:不 await(否则又串行阻塞手势),decode-first + __imgGen 守卫保证无闪且不被旧渲染覆盖
+    // loaded==='1' 已结算页;loaded==='0' 但有 .page-img/canvas = 上次缩放的后台重渲仍 in-flight
+    // (decode-first 期间旧图还挂着)。这类页也必须重标尺并重发渲染:否则连续多次捏合时它被当占位跳过,
+    // 上一次的后台渲染(用旧 scale 的 viewport)随后完成、把它定格在旧 scale,本次又没碰它
+    // → 页面 scale 混杂(部分页不跟着缩放)。重发的 _renderPageInto 会 bump __imgGen 让旧 in-flight 作废。
+    if (w.dataset.loaded === '1' || w.querySelector('.page-img, canvas')) {
+      // ① 瞬时:CSS zoom 把现有位图(renderScale 像素)按比例缩到当前 scale。zoom **同时缩放内容+布局占位**
+      //    (不像 transform 不影响布局)→ 滚动/行距即刻精确;页内仍是 renderScale 像素坐标 → 稳态 zoom=1 时
+      //    选中/高亮/去边坐标完全不变。所有页一次过同步设 zoom → 行间 scale 永远一致;就算某页后台重渲漏了/失败,
+      //    zoom 也一直顶着正确视觉尺寸 → 结构上不可能出现"部分页不跟着缩放"。(PDF.js cssTransform 同款思路)
+      const rs = w.__renderScale || 0;
+      if (rs > 0) w.style.zoom = (scale / rs);
+      // ② 后台按新 scale 重栅格化(decode-first 无闪 + __imgGen 防叠加);完成时 _renderPageImg 把 zoom 归 1(原生清晰)。
       w.dataset.loaded = '0';
       _renderPageInto(parseInt(w.dataset.pageNum, 10), w).catch(() => {});
     } else if (estW) {
@@ -142,14 +159,27 @@ window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
 // 卸载阈值(5000px)必须 > IO 的 rootMargin(3000px),留 2000px 缓冲,避免边界来回抖动反复卸载/重渲。
 const _KEEP_DIST_PX = 5000;
 function _unloadPage(w) {
-  const h = w.offsetHeight, wd = w.offsetWidth, num = w.dataset.pageNum;   // 记当前尺寸,占位沿用→不跳
+  const num = w.dataset.pageNum;
+  // 占位尺寸用 **fit 公式**(页 meta × 当前 scale × 去边可见比),跟 setupContinuousMode 的 estW 一致 →
+  // 永远精确 fit-width;**不**用 getBoundingClientRect 测量(若卸载瞬间该页还带补偿 zoom,测到的是放大/缩小后的
+  // 错误宽,定格进占位 → 滚动经过时整列宽度乱 = "适应失效")。meta 缺失才退回测量。
+  let wd, h;
+  const _meta = window.__imgMeta;
+  if (_imgMode && _meta && _meta.page_w && scale) {
+    wd = Math.floor(_meta.page_w * scale * _cropVisWFrac());
+    h  = Math.floor(_meta.page_h * scale * _cropVisHFrac());
+  } else {
+    const _r = w.getBoundingClientRect();
+    wd = Math.round(_r.width); h = Math.round(_r.height);
+  }
   w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
   w.__vocabMarks = null; w.__vocabSentences = null; w.__furigana = null;
-  w.__pageWPt = null; w.__pageHPt = null;
+  w.__pageWPt = null; w.__pageHPt = null; w.__renderScale = null;
   w.__imgGen = (w.__imgGen || 0) + 1;   // 作废可能在途的旧渲染:decode 回来发现 gen 变了→放弃,不会把已卸载页又渲染回来
   w.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });   // 显式清零,iOS 释放 backing 更彻底
   w.innerHTML = '';
   w.classList.remove('crop-on');
+  w.style.zoom = '';   // 撤掉缩放过渡期的补偿 zoom → 占位盒按显式视觉尺寸,不再被 zoom 二次缩放
   w.style.width = wd + 'px'; w.style.height = h + 'px';
   w.style.background = '#fff'; w.style.color = '#888';
   w.style.display = 'flex'; w.style.alignItems = 'center'; w.style.justifyContent = 'center';

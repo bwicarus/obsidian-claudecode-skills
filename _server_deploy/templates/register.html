@@ -49,6 +49,7 @@
       <div class="invite">邀请码 ✓ 已验证</div>
       <form method="post">
         <input type="hidden" name="token" value="{{ token }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>用户名 <small>字母 / 数字 / _ / -，2–32 位</small></label>
         <input type="text" name="username" autofocus required minlength="2" maxlength="32" pattern="[A-Za-z0-9_\-]+">
         <label>密码 <small>至少 6 位</small></label>

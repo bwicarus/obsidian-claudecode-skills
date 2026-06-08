@@ -84,6 +84,13 @@ async function _renderPageImg(num, wrap, viewport) {
   try { await img.decode(); } catch (_) {}
   if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
   if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
+  // 自愈:decode 这段异步窗口里全局 scale 变了(缩放/切模式与渲染赛跑)→ 别用旧 scale 的图换入,否则本页
+  // 定格在旧 scale(其它页已新 scale → 行间大小不一)。按当前 scale 重渲;__imgGen 守卫防叠加,scale 稳定后
+  // viewport.scale==scale → 不再触发,自然收敛。(__imgGen 只防同页两渲染互覆盖,挡不住"用旧全局 scale 发起的渲染")
+  if (Math.abs(scale - (viewport.scale || 1)) > 0.005) {
+    const _p2 = await pdfDoc.getPage(num);
+    return _renderPageImg(num, wrap, _p2.getViewport({ scale }));
+  }
   img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
@@ -115,7 +122,8 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);
-  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时可按比例瞬时缩放现有位图(无 __pageWPt 时兜底)
+  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时按比例 zoom 现有位图(过渡期补偿)
+  wrap.style.zoom = '';   // 本页位图已是当前 scale 原生像素 → 撤掉缩放过渡期的补偿 zoom(回到 1)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
@@ -270,7 +278,14 @@ async function _renderPageInto(num, wrap) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
-  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排兜底用(canvas 模式同样需要)
+  // 自愈:渲染期间(render/getTextContent/tl.render 几段 await)全局 scale 变了 → 本页定格旧 scale
+  // (与缩放/切模式赛跑,行间大小不一)。按当前 scale 重渲;__imgGen 防叠加,scale 稳定后自然收敛。
+  if (wrap.isConnected && Math.abs(scale - (viewport.scale || 1)) > 0.005) {
+    wrap.dataset.loaded = '0';
+    return _renderPageInto(num, wrap);
+  }
+  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排按比例 zoom 现有位图(过渡期补偿)
+  wrap.style.zoom = '';   // 本页已是当前 scale 原生像素 → 撤掉补偿 zoom(回到 1),canvas 模式同样
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 

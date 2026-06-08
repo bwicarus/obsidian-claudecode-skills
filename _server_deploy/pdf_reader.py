@@ -1496,6 +1496,7 @@ def pdf_api_page_chars():
         chars, page_w, page_h, furigana = res
         _apply_char_offset(chars, _char_offset_for(rel, page))   # 文字层校准:偏移 live 应用(不进磁盘缓存)
         _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）
+        furigana = _merge_favorite_phrases_furigana(furigana)   # 收藏词组按整体读音合并振假名(一条 ruby)
         # **只回不变部分**(字 bbox/分词/振假名);可变的生词/句子框走 /page-overlay。
         # 可缓存:前端带 &cv=<内容版本>(偏移/重扫/PDF 改 → cv 变 → 换 key → 不会陈旧);
         # /pdf/sw.js 缓存命中即本地(读过的书秒开/离线),没命中才回 Pi。
@@ -1923,6 +1924,37 @@ def _merge_favorite_phrases(chars: list[dict]) -> None:
                     if is_mastered:
                         chars[j]["favm"] = 1   # 已掌握词组 → builder 跳过下划线
             start = k + 1
+
+
+def _merge_favorite_phrases_furigana(furigana: list[dict]) -> list[dict]:
+    """收藏/已掌握词组覆盖处:把连续的多个振假名条目合并成单条(bbox 并集 + 读音拼接),
+    让注音按词组整体读音显示一个 ruby(如 当試験 → とうしけん 一条),而非分词的 当(とう)/試験(しけん) 两条。
+    匹配同 _merge_favorite_phrases(空白不敏感 + 小写);同行 y 容差防跨行误并。"""
+    targets = set(_phrases_load()) | _phrase_marks_load()
+    norm_targets = {re.sub(r"\s+", "", t).lower() for t in targets if len(re.sub(r"\s+", "", t)) >= 2}
+    if not norm_targets or not furigana:
+        return furigana
+    out: list[dict] = []
+    n = len(furigana)
+    i = 0
+    while i < n:
+        matched = False
+        hi = min(n, i + 8)   # 词组最多并 8 个 token
+        for j in range(hi, i + 1, -1):   # 优先最长匹配
+            grp = furigana[i:j]
+            if max(g["y0"] for g in grp) - min(g["y0"] for g in grp) > 3:   # 跨行 → 不并
+                continue
+            surf = "".join((g.get("wd") or "") for g in grp)
+            if re.sub(r"\s+", "", surf).lower() in norm_targets:
+                out.append({
+                    "x0": min(g["x0"] for g in grp), "y0": min(g["y0"] for g in grp),
+                    "x1": max(g["x1"] for g in grp), "y1": max(g["y1"] for g in grp),
+                    "rt": "".join((g.get("rt") or "") for g in grp), "wd": surf,
+                })
+                i = j; matched = True; break
+        if not matched:
+            out.append(furigana[i]); i += 1
+    return out
 
 
 def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words: int = 10, page_h: float = 0, allow_ja: bool = True) -> list[dict]:

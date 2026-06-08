@@ -1,0 +1,10 @@
+[Unit]
+Description=每日触发 bwicarus 数据备份(03:30,在 04:00 daily 流程前)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

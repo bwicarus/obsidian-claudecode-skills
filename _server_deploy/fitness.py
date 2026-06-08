@@ -44,6 +44,9 @@ def _user_db_path(username: str) -> Path:
 def _db(username: str) -> sqlite3.Connection:
     db = sqlite3.connect(str(_user_db_path(username)))
     db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode = WAL")      # 并发读写不互锁
+    db.execute("PRAGMA busy_timeout = 5000")     # 拿不到锁等待而非立即报错
+    db.execute("PRAGMA synchronous = NORMAL")
     db.execute("""
         CREATE TABLE IF NOT EXISTS fitness_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

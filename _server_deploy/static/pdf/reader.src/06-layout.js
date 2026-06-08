@@ -24,6 +24,8 @@ async function _applyModeChange(keepPage) {
     }
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
+  window._auditScales && window._auditScales('mode');
+  window._auditScales && setTimeout(() => window._auditScales('mode+1.2s'), 1200);
 }
 window.toggleReadMode = async () => {
   const keepPage = currentPage;
@@ -212,6 +214,7 @@ window.addEventListener('resize', () => { clearTimeout(_orientResizeT); _orientR
 // 重渲后把它放回同一屏幕位置(焦点保持,缩放不跳)。无 focal(旋转恢复)→ 按相对位置保持。
 async function _applyZoom(newScale, focal) {
   if (_refitBusy || !pdfDoc) return;
+  { const _pc = document.getElementById('page-container'); if (_pc && _pc.style.transform) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; } }  // 防御:清掉任何残留的捏合预览 transform(否则跟栅格缩放叠成两层)
   newScale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, newScale));   // 下限放宽:可缩到比 fit-width 更小
   if (Math.abs(newScale - scale) < 0.005) return;
   _refitBusy = true;
@@ -225,14 +228,10 @@ async function _applyZoom(newScale, focal) {
       if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
-      // 单页同理:先用现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小)
-      let scw = 0, sch = 0;
-      if (wrap.__pageWPt && wrap.__pageHPt) { scw = Math.floor(wrap.__pageWPt * scale); sch = Math.floor(wrap.__pageHPt * scale); }
-      else if (wrap.__renderScale) {   // 兜底:页点尺寸暂缺(char 层未回)→ 按 scale 比例缩放现有图
-        const r = scale / wrap.__renderScale, im = wrap.querySelector('.page-img, canvas');
-        if (im) { scw = Math.round((parseFloat(im.style.width) || 0) * r); sch = Math.round((parseFloat(im.style.height) || 0) * r); }
-      }
-      if (scw && sch) wrap.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = scw + 'px'; el.style.height = sch + 'px'; });
+      // 单页同理:先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小),
+      // 渲染完成 _renderPageImg 把 zoom 归 1(原生清晰)。
+      const rs = wrap.__renderScale || 0;
+      if (rs > 0) wrap.style.zoom = (scale / rs);
       if (wrap.dataset) wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
@@ -247,6 +246,8 @@ async function _applyZoom(newScale, focal) {
       }
       _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
       window._rememberOrientLayout?.();   // 手动缩放记进当前方向(若开了旋转自动切换)
+      window._auditScales && window._auditScales('zoom');
+      window._auditScales && setTimeout(() => window._auditScales('zoom+1.2s'), 1200);
     });
   } finally { _refitBusy = false; }
 }
@@ -300,6 +301,18 @@ function _setupPinchZoom() {
   };
   main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
   main.addEventListener('touchcancel', endPinch, { passive: false });
+  // 桌面:Ctrl+滚轮 / 触控板双指捏合(Chrome 发 wheel+ctrlKey) → 接管成阅读器缩放(绕 cursor),
+  // 否则走浏览器原生页面缩放(连工具栏一起缩 / 跟阅读器缩放叠加)。触摸屏走上面的 touch 分支。
+  main.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    if (_refitBusy || !pdfDoc) return;
+    const mr = main.getBoundingClientRect();
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale * factor));
+    if (Math.abs(target - scale) < 0.005) return;
+    _applyZoom(target, { fx: main.scrollLeft + (e.clientX - mr.left), fy: main.scrollTop + (e.clientY - mr.top), cx: e.clientX, cy: e.clientY, s0: scale });
+  }, { passive: false });
 }
 if (document.readyState !== 'loading') _setupPinchZoom();
 else window.addEventListener('DOMContentLoaded', _setupPinchZoom);

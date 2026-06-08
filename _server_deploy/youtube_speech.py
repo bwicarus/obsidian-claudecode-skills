@@ -109,7 +109,7 @@ def _stt_chunk(args) -> list[dict]:
     )
     # quota log
     try:
-        sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
         from google_api_quota import log_usage
         # STT 计费按 15s 块,latest_long enhanced = $0.024/min ≈ $0.006/15s
         # units 用 chunk 秒数估算(精确账单看 Cloud Billing)

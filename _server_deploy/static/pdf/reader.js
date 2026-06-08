@@ -573,6 +573,13 @@ async function _renderPageImg(num, wrap, viewport) {
   try { await img.decode(); } catch (_) {}
   if (!wrap.isConnected || wrap.__imgGen !== _gen) return;   // 解码期间该页已被释放 / 已有更新的渲染 → 放弃
   if (img.naturalWidth === 0) return;   // decode 失败(catch 吞掉)→ 别换入空/坏图,留旧内容;loaded 仍 0,IO 滚到时重试
+  // 自愈:decode 这段异步窗口里全局 scale 变了(缩放/切模式与渲染赛跑)→ 别用旧 scale 的图换入,否则本页
+  // 定格在旧 scale(其它页已新 scale → 行间大小不一)。按当前 scale 重渲;__imgGen 守卫防叠加,scale 稳定后
+  // viewport.scale==scale → 不再触发,自然收敛。(__imgGen 只防同页两渲染互覆盖,挡不住"用旧全局 scale 发起的渲染")
+  if (Math.abs(scale - (viewport.scale || 1)) > 0.005) {
+    const _p2 = await pdfDoc.getPage(num);
+    return _renderPageImg(num, wrap, _p2.getViewport({ scale }));
+  }
   img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
@@ -604,7 +611,8 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);
-  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时可按比例瞬时缩放现有位图(无 __pageWPt 时兜底)
+  wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时按比例 zoom 现有位图(过渡期补偿)
+  wrap.style.zoom = '';   // 本页位图已是当前 scale 原生像素 → 撤掉缩放过渡期的补偿 zoom(回到 1)
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
@@ -759,7 +767,14 @@ async function _renderPageInto(num, wrap) {
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
-  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排兜底用(canvas 模式同样需要)
+  // 自愈:渲染期间(render/getTextContent/tl.render 几段 await)全局 scale 变了 → 本页定格旧 scale
+  // (与缩放/切模式赛跑,行间大小不一)。按当前 scale 重渲;__imgGen 防叠加,scale 稳定后自然收敛。
+  if (wrap.isConnected && Math.abs(scale - (viewport.scale || 1)) > 0.005) {
+    wrap.dataset.loaded = '0';
+    return _renderPageInto(num, wrap);
+  }
+  wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排按比例 zoom 现有位图(过渡期补偿)
+  wrap.style.zoom = '';   // 本页已是当前 scale 原生像素 → 撤掉补偿 zoom(回到 1),canvas 模式同样
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
@@ -1112,6 +1127,8 @@ async function _applyModeChange(keepPage) {
     }
   }
   _saveLastPosition({page: currentPage, mode: readMode, scale});
+  window._auditScales && window._auditScales('mode');
+  window._auditScales && setTimeout(() => window._auditScales('mode+1.2s'), 1200);
 }
 window.toggleReadMode = async () => {
   const keepPage = currentPage;
@@ -1300,6 +1317,7 @@ window.addEventListener('resize', () => { clearTimeout(_orientResizeT); _orientR
 // 重渲后把它放回同一屏幕位置(焦点保持,缩放不跳)。无 focal(旋转恢复)→ 按相对位置保持。
 async function _applyZoom(newScale, focal) {
   if (_refitBusy || !pdfDoc) return;
+  { const _pc = document.getElementById('page-container'); if (_pc && _pc.style.transform) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; } }  // 防御:清掉任何残留的捏合预览 transform(否则跟栅格缩放叠成两层)
   newScale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, newScale));   // 下限放宽:可缩到比 fit-width 更小
   if (Math.abs(newScale - scale) < 0.005) return;
   _refitBusy = true;
@@ -1313,14 +1331,10 @@ async function _applyZoom(newScale, focal) {
       if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
       const wrap = container.querySelector('.page-wrap') || container;
-      // 单页同理:先用现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小)
-      let scw = 0, sch = 0;
-      if (wrap.__pageWPt && wrap.__pageHPt) { scw = Math.floor(wrap.__pageWPt * scale); sch = Math.floor(wrap.__pageHPt * scale); }
-      else if (wrap.__renderScale) {   // 兜底:页点尺寸暂缺(char 层未回)→ 按 scale 比例缩放现有图
-        const r = scale / wrap.__renderScale, im = wrap.querySelector('.page-img, canvas');
-        if (im) { scw = Math.round((parseFloat(im.style.width) || 0) * r); sch = Math.round((parseFloat(im.style.height) || 0) * r); }
-      }
-      if (scw && sch) wrap.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = scw + 'px'; el.style.height = sch + 'px'; });
+      // 单页同理:先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小),
+      // 渲染完成 _renderPageImg 把 zoom 归 1(原生清晰)。
+      const rs = wrap.__renderScale || 0;
+      if (rs > 0) wrap.style.zoom = (scale / rs);
       if (wrap.dataset) wrap.dataset.loaded = '0';
       await renderPage(currentPage);
     }
@@ -1335,6 +1349,8 @@ async function _applyZoom(newScale, focal) {
       }
       _updateMainOverflowX();   // 缩放后:超宽放开横向 auto,缩回 fit 内则锁
       window._rememberOrientLayout?.();   // 手动缩放记进当前方向(若开了旋转自动切换)
+      window._auditScales && window._auditScales('zoom');
+      window._auditScales && setTimeout(() => window._auditScales('zoom+1.2s'), 1200);
     });
   } finally { _refitBusy = false; }
 }
@@ -1388,6 +1404,18 @@ function _setupPinchZoom() {
   };
   main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
   main.addEventListener('touchcancel', endPinch, { passive: false });
+  // 桌面:Ctrl+滚轮 / 触控板双指捏合(Chrome 发 wheel+ctrlKey) → 接管成阅读器缩放(绕 cursor),
+  // 否则走浏览器原生页面缩放(连工具栏一起缩 / 跟阅读器缩放叠加)。触摸屏走上面的 touch 分支。
+  main.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    if (_refitBusy || !pdfDoc) return;
+    const mr = main.getBoundingClientRect();
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale * factor));
+    if (Math.abs(target - scale) < 0.005) return;
+    _applyZoom(target, { fx: main.scrollLeft + (e.clientX - mr.left), fy: main.scrollTop + (e.clientY - mr.top), cx: e.clientX, cy: e.clientY, s0: scale });
+  }, { passive: false });
 }
 if (document.readyState !== 'loading') _setupPinchZoom();
 else window.addEventListener('DOMContentLoaded', _setupPinchZoom);
@@ -1517,6 +1545,25 @@ function _remodeListInPlace() {
 }
 window._remodeListInPlace = _remodeListInPlace;
 
+// ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
+const READER_BUILD = 'reader-fix-3';
+window._auditScales = function (tag) {
+  try {
+    const wraps = [...document.querySelectorAll('.page-wrap')];
+    const loaded = wraps.filter(w => w.dataset.loaded === '1');
+    const rs = {}, iw = {}, ww = {};
+    for (const w of loaded) {
+      const k = (w.__renderScale || 0).toFixed(3); rs[k] = (rs[k] || 0) + 1;
+      const im = w.querySelector('.page-img, canvas');
+      const wv = im ? Math.round(parseFloat(im.style.width) || im.offsetWidth || 0) : 0; iw[wv] = (iw[wv] || 0) + 1;
+      const wpw = Math.round(w.offsetWidth || 0); ww[wpw] = (ww[wpw] || 0) + 1;
+    }
+    window.dlog && window.dlog('[' + READER_BUILD + '|' + tag + '] mode=' + readMode + ' scale=' + (+scale).toFixed(3)
+      + ' loaded=' + loaded.length + '/' + wraps.length
+      + ' renderScale=' + JSON.stringify(rs) + ' imgW=' + JSON.stringify(iw) + ' wrapW=' + JSON.stringify(ww));
+  } catch (e) { window.dlog && window.dlog('audit err: ' + (e && e.message)); }
+};
+
 // 缩放时「原地重标尺」——两段式,**绝不串行阻塞手势**(双指松手只调一次,旧实现逐页 await decode → 放大要等 N 页 fetch 串行 1~2s = "失效",缩小先 snap 回旧大小再换 = "抽搐"):
 //   ① 瞬时(同步):用各页**现有位图**按新 scale 做 CSS 缩放到精确新尺寸(__pageWPt×scale = 服务端权威点尺寸)。
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
@@ -1540,20 +1587,18 @@ async function _rescaleContinuousInPlace() {
     } catch (_) {}
   }
   for (const w of wraps) {
-    if (w.dataset.loaded === '1') {
-      // ① 瞬时 CSS 缩放现有位图到新尺寸(精确:页点尺寸×scale;兜底:按 scale 比例缩放现有图)
-      let cw = 0, ch = 0;
-      if (w.__pageWPt && w.__pageHPt) { cw = Math.floor(w.__pageWPt * scale); ch = Math.floor(w.__pageHPt * scale); }
-      else if (w.__renderScale) {
-        const r = scale / w.__renderScale, im = w.querySelector('.page-img, canvas');
-        if (im) { cw = Math.round((parseFloat(im.style.width) || 0) * r); ch = Math.round((parseFloat(im.style.height) || 0) * r); }
-      }
-      if (cw && ch) {
-        w.querySelectorAll('.page-img, canvas, .sel-overlay, .ink-layer').forEach(el => { el.style.width = cw + 'px'; el.style.height = ch + 'px'; });
-        w.style.width = cw + 'px'; w.style.height = ch + 'px';   // wrap 容器也显式定尺寸 → 布局/滚动数学即刻精确(crop-on 下随即被 _applyCropToWrap 覆盖为裁切窄宽)
-        _applyCropToWrap(w, cw, ch);
-      }
-      // ② 后台高清化:不 await(否则又串行阻塞手势),decode-first + __imgGen 守卫保证无闪且不被旧渲染覆盖
+    // loaded==='1' 已结算页;loaded==='0' 但有 .page-img/canvas = 上次缩放的后台重渲仍 in-flight
+    // (decode-first 期间旧图还挂着)。这类页也必须重标尺并重发渲染:否则连续多次捏合时它被当占位跳过,
+    // 上一次的后台渲染(用旧 scale 的 viewport)随后完成、把它定格在旧 scale,本次又没碰它
+    // → 页面 scale 混杂(部分页不跟着缩放)。重发的 _renderPageInto 会 bump __imgGen 让旧 in-flight 作废。
+    if (w.dataset.loaded === '1' || w.querySelector('.page-img, canvas')) {
+      // ① 瞬时:CSS zoom 把现有位图(renderScale 像素)按比例缩到当前 scale。zoom **同时缩放内容+布局占位**
+      //    (不像 transform 不影响布局)→ 滚动/行距即刻精确;页内仍是 renderScale 像素坐标 → 稳态 zoom=1 时
+      //    选中/高亮/去边坐标完全不变。所有页一次过同步设 zoom → 行间 scale 永远一致;就算某页后台重渲漏了/失败,
+      //    zoom 也一直顶着正确视觉尺寸 → 结构上不可能出现"部分页不跟着缩放"。(PDF.js cssTransform 同款思路)
+      const rs = w.__renderScale || 0;
+      if (rs > 0) w.style.zoom = (scale / rs);
+      // ② 后台按新 scale 重栅格化(decode-first 无闪 + __imgGen 防叠加);完成时 _renderPageImg 把 zoom 归 1(原生清晰)。
       w.dataset.loaded = '0';
       _renderPageInto(parseInt(w.dataset.pageNum, 10), w).catch(() => {});
     } else if (estW) {
@@ -1570,14 +1615,27 @@ window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
 // 卸载阈值(5000px)必须 > IO 的 rootMargin(3000px),留 2000px 缓冲,避免边界来回抖动反复卸载/重渲。
 const _KEEP_DIST_PX = 5000;
 function _unloadPage(w) {
-  const h = w.offsetHeight, wd = w.offsetWidth, num = w.dataset.pageNum;   // 记当前尺寸,占位沿用→不跳
+  const num = w.dataset.pageNum;
+  // 占位尺寸用 **fit 公式**(页 meta × 当前 scale × 去边可见比),跟 setupContinuousMode 的 estW 一致 →
+  // 永远精确 fit-width;**不**用 getBoundingClientRect 测量(若卸载瞬间该页还带补偿 zoom,测到的是放大/缩小后的
+  // 错误宽,定格进占位 → 滚动经过时整列宽度乱 = "适应失效")。meta 缺失才退回测量。
+  let wd, h;
+  const _meta = window.__imgMeta;
+  if (_imgMode && _meta && _meta.page_w && scale) {
+    wd = Math.floor(_meta.page_w * scale * _cropVisWFrac());
+    h  = Math.floor(_meta.page_h * scale * _cropVisHFrac());
+  } else {
+    const _r = w.getBoundingClientRect();
+    wd = Math.round(_r.width); h = Math.round(_r.height);
+  }
   w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
   w.__vocabMarks = null; w.__vocabSentences = null; w.__furigana = null;
-  w.__pageWPt = null; w.__pageHPt = null;
+  w.__pageWPt = null; w.__pageHPt = null; w.__renderScale = null;
   w.__imgGen = (w.__imgGen || 0) + 1;   // 作废可能在途的旧渲染:decode 回来发现 gen 变了→放弃,不会把已卸载页又渲染回来
   w.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });   // 显式清零,iOS 释放 backing 更彻底
   w.innerHTML = '';
   w.classList.remove('crop-on');
+  w.style.zoom = '';   // 撤掉缩放过渡期的补偿 zoom → 占位盒按显式视觉尺寸,不再被 zoom 二次缩放
   w.style.width = wd + 'px'; w.style.height = h + 'px';
   w.style.background = '#fff'; w.style.color = '#888';
   w.style.display = 'flex'; w.style.alignItems = 'center'; w.style.justifyContent = 'center';
@@ -2957,7 +3015,10 @@ let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
     const r = cl.getBoundingClientRect();
-    return {x: clientX - r.left, y: clientY - r.top};
+    // 缩放过渡期 wrap 带补偿 zoom → getBoundingClientRect 是缩放后视觉坐标,但 __charBoxes 是栅格 scale 的原始像素。
+    // 除回 zoom 让点击坐标与 charBoxes 同一坐标系。稳态 zoom='' → parseFloat=NaN → 1 → ÷1 无变化(与改动前一致)。
+    const z = parseFloat(pw.style.zoom) || 1;
+    return {x: (clientX - r.left) / z, y: (clientY - r.top) / z};
   };
 
   // 严格 bbox 命中 + 同行最近 char fallback。
@@ -3709,6 +3770,10 @@ async function refreshCharsWForAllPages() {
       if (!d.ok || !d.chars) continue;
       const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
       for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+      if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
+        pw.__furigana = d.furigana;
+        try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
+      }
       pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
       try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
     } catch (_) {}

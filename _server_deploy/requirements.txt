@@ -1,0 +1,11 @@
+# bwicarus webapp 运行依赖(锁定版本,供复现/迁移/安全审计)。
+# Pi/VPS 上装在系统 python3(Debian PEP668 需 --break-system-packages):
+#   /usr/bin/python3 -m pip install --break-system-packages -r requirements.txt
+# 仅 webapp(Flask 服务)依赖;主项目脚本(spacy/anthropic 等)各自独立 venv,不在此。
+Flask==3.1.1
+Werkzeug==3.1.3
+Jinja2==3.1.6
+MarkupSafe==2.1.5
+requests==2.32.3
+PyMuPDF==1.27.2.3
+gunicorn==26.0.0

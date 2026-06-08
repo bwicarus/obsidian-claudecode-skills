@@ -326,3 +326,32 @@ upload_dataset(client, Path(dash_dir), "dashboard")
 - **登出清缓存**：`/logout` 请求时 SW 清掉所有 `bw-*` 缓存（防共享设备/登出后私有数据 + `window.__USER__` 残留）。
 - `/pdf/` 由它**自己的** `/pdf/sw.js`（缓存页图 + page-chars）管，scope 更具体优先；两者隔离共存。
 - ⚠ **nginx 必须把 `/sw.js` 代理到 Flask**（前缀代理 + 静态兜底的站点会 404）→ 见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)（Pi 手工 patch，80/443 各一条 `location = /sw.js`）。验证：`curl -sk https://<host>/sw.js` 返 `application/javascript`。
+
+## 安全 / 生产化加固（2026-06 全栈审计落地）
+
+对照大厂/OWASP 标准的一轮加固。**源码在 git，部署见各项；Pi nginx 手工 patch 绝不 cp。**
+
+### 生产 WSGI：gunicorn（替代 Flask dev server）
+- `webapp.service` 的 `ExecStart` 改为 `gunicorn --workers 1 --threads 8 --worker-class gthread --timeout 600 --graceful-timeout 30 --bind 127.0.0.1:5000 --access-logfile - --error-logfile - app:app`。
+- **必须单 worker**：`pdf_reader.py` 的 `_JOBS`(AI 断连恢复)+ 4 处后台 `threading.Thread` 是**进程内**状态;多 worker 会割裂(轮询打到别的 worker 拿不到结果)。单 worker + gthread = 等同原 `threaded=True` 的内存共享并发,但生产级。
+- `timeout 600` 放过慢 AI/翻译;access log 进 journald(`journalctl -u webapp`)。
+- 装:`/usr/bin/python3 -m pip install --break-system-packages -r _server_deploy/requirements.txt`(Debian PEP668)。unit 副本 `references/systemd/webapp.service`。
+
+### nginx 加固（Pi `/etc/nginx/sites-available/bwicarus` 手工 patch，先 `nginx -t` 再 reload）
+- **安全响应头**(443 server 块):HSTS `max-age=15552000` + `X-Content-Type-Options:nosniff` + `X-Frame-Options:SAMEORIGIN` + `Referrer-Policy:strict-origin-when-cross-origin`;两块都 `server_tokens off`。⚠ CSP 故意没加(站内大量内联脚本 + CDN MathJax,'unsafe-inline' 会抵消价值且易打挂)。
+- **gzip**:`gzip on` 已在 nginx.conf;site 文件 http 顶部补 `gzip_proxied any`(否则代理响应不压)+ `gzip_types`(JSON/JS/CSS/svg)。
+- **限流**:http 顶部 `limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m`;**仅** `/login` `/register` 加 `limit_req zone=auth burst=5 nodelay`。**不限 /api**(PWA 高频调用会误伤)。
+- **上传上限**:`client_max_body_size 0`(无限)→ `600m`(防 DoS,够大 PDF)。
+- ⚠ nginx `add_header` 继承坑:有自己 `add_header` 的 location(如 `/static/pdfjs/`)不继承 server 级安全头;代理类 location 无 add_header → 正常继承。
+
+### 数据稳健（对线上零影响）
+- **SQLite WAL**:`app.py _tune_conn` + `fitness.py`/`youtube_subtitles.py` 的 `_db` 都加 `PRAGMA journal_mode=WAL` + `busy_timeout=5000` + `synchronous=NORMAL` → 并发读写不再 "database is locked"。
+- **原子写**:高频 sidecar(高亮 `_hl_save`/墨迹 `_ink_save`/偏好/词组)本已 tmp+replace;app.py 用户设置(graph-settings/nav-links)补 `_atomic_write_text`。
+- **自动备份**:`scripts/backup_data.sh` + systemd `bwicarus-backup.timer`(每日 03:30)。只备份**不可再生**数据(webapp/data 的 app.db/youtube/fitness DB 走 `sqlite3 .backup` 在线一致备份 + 用户 json;claude/state 小状态文件),**排除** page-img/OCR/模型/搜索索引等可再生大缓存。保留 14 份,落 `/home/bwicarus/backups/`。
+
+### 鉴权加固（app.py）
+- **开放重定向**:`/login?next=` 经 `_safe_next()` 只放行站内相对路径(拒 `//host`、`http(s)://`、`javascript:`)。
+- **CSRF**:零依赖会话级 token(`_csrf_token()`/`_csrf_ok()` + `context_processor` 注入 `csrf_token()`)。**仅**登录/注册两个公开 HTML 表单校验(模板加隐藏 `csrf_token` 域);JSON API 不走(靠 `SameSite=Lax` + session/Bearer,给所有 fetch 串 token 风险高收益低)。`SameSite=Lax` 本已挡跨站带 cookie 的 POST。
+- session cookie 早已 `HttpOnly + SameSite=Lax + Secure`,SECRET_KEY 走 env(无需改)。
+
+**部署回顾**:Python 改 `cp _server_deploy/*.py /home/bwicarus/webapp/` + `systemctl restart webapp`;模板 `cp templates/*.html`;nginx `nginx -t && systemctl reload nginx`;systemd `cp references/systemd/*.{service,timer} /etc/systemd/system/ && daemon-reload`。VPS 实例同源码,nginx 用 git 的 `_server_deploy/nginx/bwicarus.conf`(需同步加这些 header/gzip/limit_req)。
