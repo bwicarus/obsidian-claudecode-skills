@@ -1,6 +1,10 @@
 [Unit]
 Description=Mokuro OCR (Japanese textbook, low priority background)
 After=network.target
+# 防 fail-loop：5 分钟内 fail 3 次就停（避免代码 bug 时烧资源）。注：这两键属 [Unit]，
+# 旧版误放 [Service] → systemd 报 "Unknown key…ignoring" 实际未生效，2026-06-10 移正。
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -20,9 +24,6 @@ ExecStart=/home/bwicarus/manga-ocr-venv/bin/python /home/bwicarus/claude/scripts
 
 Restart=on-failure
 RestartSec=60
-# 防 fail-loop：5 分钟内 fail 3 次就停（避免代码 bug 时烧资源）→ 我看 sidecar/log 排查
-StartLimitIntervalSec=300
-StartLimitBurst=3
 # OCR 完成会正常退出（exit 0），systemd 不要把它视为需要保持运行
 RemainAfterExit=no
 
