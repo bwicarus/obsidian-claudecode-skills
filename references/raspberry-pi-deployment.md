@@ -176,12 +176,14 @@ EOF
 `xvfb-99` / `anki-headless` / `obsidian-sync` / `qa-server` / `webapp` / `bwicarus-daily.{service,timer}`
 这 6 个核心 unit，加上系统包 `nginx`。
 
-另有两套 **2026-05-15 之后新增**的增量 timer（Pi 实机已在跑）：
+另有几套 **2026-05-15 之后新增**的增量 timer（Pi 实机已在跑）：
 
 - `anki-sync-refresh.{service,timer}`（2026-05-23）—— 每 15 分钟跑 `scripts/anki_sync_refresh.py`，
   复习数据有变化时做 Anki sync + 仪表板刷新。
 - `bwicarus-quick-sync.{service,timer}`（2026-05-24）—— 每 15 分钟跑 `scripts/quick_sync.py`，
   vault 快速同步（清理 + KG prune，不跑 AI / 不动 Anki）。
+- `push-big-files.{service,timer}`（2026-06-08）—— 每 4 小时把 vault 里 >200MB 的文件推到 PC，
+  绕过 Obsidian Sync 单文件 200MB 上限。详见「大文件跨设备」一节。
 
 副本都在 `references/systemd/`，enable 方式同其它 timer（见阶段 10）。
 
@@ -291,7 +293,7 @@ codex --version
 ```bash
 sudo systemctl enable --now xvfb-99 anki-headless obsidian-sync qa-server webapp nginx
 sudo systemctl enable --now bwicarus-daily.timer
-sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer   # 两套增量 timer（后续新增）
+sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer push-big-files.timer   # 增量 timer（后续新增）
 sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
 ```
 
@@ -321,6 +323,63 @@ smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔�
 - **webapp 用户表独立**：Pi 上 `/home/bwicarus/webapp/data/app.db` 是 Pi 自己的 SQLite，跟 VPS 分离。admin `bwicarus` 用同 PASSWORD_HASH 在两边都能登录；其它注册用户在 Pi 上不自动出现。
 - **Obsidian Sync**：两边都是 sync 客户端，云端是真相源，多设备 supported。
 - **Memory**：两边 auto memory 是分支快照。在 Pi 上累积的新 memory 不自动回流 VPS，反之亦然。
+
+## 大文件跨设备（Obsidian Sync 200MB/文件上限旁路，2026-06-08）
+
+Obsidian Sync **Plus** 单文件上限 **200MB**（Standard 仅 5MB）。≤200MB 的笔记/PDF 它自己双向同步；
+**>200MB 的它永远不同步**。目前全 vault 仅 `応用情報技術者.pdf`（318M）超限
+（`scripts/push_big_files_to_pc.py` docstring），其余都走 Obsidian 云端。这本就靠下面的旁路从 Pi 推到 PC。
+
+### 机制：Pi 每 4h 主动推（不是 PC 拉）
+
+`scripts/push_big_files_to_pc.py` 扫 `/home/bwicarus/obsidian`（`VAULT`，`:22`）下 **>200MiB**
+（`THRESHOLD = 200*1024*1024`，`:24`）且非隐藏的文件，`scp` 到 PC 的 `C:/obsidian`
+（`PC_VAULT`，`:23`）对应相对路径下。PC 地址硬编码 `bwicarus@100.99.9.124`（`PC`，`:21`，Tailscale IP）。
+
+**为何 Pi 推而非 PC 拉**（`push_big_files_to_pc.py:8`）：PC 会睡眠 / 间歇掉 Tailscale，Pi 永远在线。
+Pi push「PC 可达才推、不可达静默跳过、下次 timer 再补」对 PC 的不稳定最鲁棒；且 Pi→PC 免密 SSH
+本来就通（见 memory `pc-ssh-access`），不用配新密钥。
+
+**关键行为**：
+
+- **PC 睡着静默跳过**：开头 `pc_reachable()`（`:34`，`ssh -o BatchMode=yes -o ConnectTimeout=8` 跑
+  `cmd /c echo OK`）失败就 `print` 一行「PC 不可达…下次 timer 再补」并 **return 0**（成功退出，不报警）。
+- **幂等不重传**：每个文件先 `pc_size()`（`:43`，PowerShell `Get-Item .Length`）拿 PC 上同路径大小，
+  同名同大小就跳过（`:68`）。否则 `New-Item -Force` 建目标中间目录（`:74`）再 `scp`（`:78`，单文件超时
+  3600s）。
+- **PowerShell 调用**走 `_ps()`（`:27`）：把命令 UTF-16LE base64 后 `powershell -NoProfile -EncodedCommand`
+  传过去（避开引号/编码坑）。
+- 退出码：有失败返回 1，否则 0（`:91`）。
+
+### systemd 安装（Pi 侧）
+
+副本在 `references/systemd/push-big-files.{service,timer}`：
+
+- `push-big-files.service`：`Type=oneshot`，`EnvironmentFile=/home/bwicarus/claude/.env`，
+  `User=bwicarus`，`TimeoutStartSec=3600`（跟脚本里单文件 scp 超时对齐）。
+- `push-big-files.timer`：`OnBootSec=5min` + `OnUnitActiveSec=4h` + `Persistent=true`
+  （错过的周期开机补跑一次）。
+
+enable：
+
+```bash
+sudo cp ~/claude/references/systemd/push-big-files.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now push-big-files.timer
+# 手动验证一次：
+sudo systemctl start push-big-files.service && journalctl -u push-big-files.service -n 20
+```
+
+### 背景事实：PC 那本停更其实不是尺寸问题
+
+PC 的「Obsidian Headless Sync」计划任务从 **2026-05-15 起被禁用**（迁服务器时连同每日任务一起禁掉），
+导致 PC vault **停更 3 周**——这是任务被禁、不是 318M 那本超限。**2026-06-08 已重新 Enable + Start**，
+PC vault 重新跟 Obsidian 云端同步；超限那本则由本旁路补上。
+
+PC 端现在由 `_server_deploy/local_supervisor.pyw` 的 `ensure_obsidian_sync()`（`local_supervisor.pyw:272`）
+持续看护这个计划任务：`Get-ScheduledTask` 读 State（语言中立的 Disabled/Ready/Running），被禁 → `Enable-ScheduledTask`、
+没跑 → `Start-ScheduledTask`（任务名 `Obsidian Headless Sync`，`:45`）。开机即看护一次 + 托盘有「保持 Obsidian 同步」开关。
+所以「≤200MB 走 Obsidian 双向同步、>200MB 走 Pi push」两条链路在 PC 侧分别由 supervisor 和本旁路兜底。
 
 ## 跨平台修复（部署这次顺带提交的）
 

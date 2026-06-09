@@ -245,6 +245,48 @@ if __name__ == "__main__":
 
 > `webapp.service` 的 systemd unit 文件**未**纳入 `references/systemd/` 副本（那目录只有 anki / qa-server / xvfb / obsidian-sync / bwicarus-daily 等），上面的 ini 是手抄，无法跟真机 unit 对照。
 
+## 本地实例（Windows）
+
+同一份 `_server_deploy/app.py` 也能在 PC 前裸跑 localhost（**无 nginx / 无 gunicorn**），在 PC 前走本地算/本地 PDF/本地 Claude CLI，离开时 iPad 照走 Pi。三端共享 source of truth（Obsidian Sync + git + AnkiWeb）。入口 `_server_deploy/run_local.ps1`。
+
+> ⚠ `run_local.ps1` 必须保持 **UTF-8 with BOM**（PowerShell 5.1 按 GBK 解码无 BOM 中文注释会炸）。Edit / Write 后立刻补 BOM。
+
+### run_local.ps1 两种模式
+
+1. **默认（推荐）**：用 `pythonw` 后台 detached 拉起托盘守护进程 `local_supervisor.pyw`，本 PS 窗口随即退出 —— **关窗不杀服务**（`run_local.ps1:85-97`）。守护自己负责健康检查 / 崩溃自动拉起 / 代码改动自动重启 / 开 Chrome `--app` 窗口 / 托盘菜单。
+2. **`-Foreground`（仅调试）**：老的前台阻塞模式（直接 `python app.py`，Ctrl+C 停），自己开 Chrome `--app=…/dashboard/` 窗口（`run_local.ps1:73-84`）。
+
+`run_local.ps1` 还做：首次生成 `.env.local`（随机 SECRET_KEY + 本机 vault/项目路径 + `SESSION_COOKIE_SECURE=0`，`run_local.ps1:23-40`）；加载 `.env.local` 到进程环境；依赖检查 `import flask, fitz, requests, jinja2, pystray, PIL`，缺则 `pip install`（`run_local.ps1:50-54`，比生产多了 `pystray`+`pillow` 给托盘）；提示一次性拷 PDF.js（不在 git）和 `app.db`（从 Pi 复用同账号登录）。选 `$Pythonw`：`$Python` 形如 `python.exe` → 同目录 `pythonw.exe`（缺则退回 `$Python`）；`$Python` 回退成 PATH 里的 `'python'` 时 → 用 `'pythonw'` 命令（避免弹控制台，`run_local.ps1:88-93`）。
+
+### local_supervisor.pyw 守护架构
+
+把本地 Flask 从「裸 dev server，关窗就宕」升级成大厂本地工具那套「本地 server + 托盘 + `--app` 窗口」范式（Jupyter/Gradio/Ollama 同路子），全程纯 Python，不引 Electron/Tauri/Node。`Supervisor` 类（`local_supervisor.pyw:302`）+ 托盘（`run_tray`）+ `monitor_loop` 后台线程（`local_supervisor.pyw:430`）。
+
+| 能力 | 实现要点 | 代码 |
+|---|---|---|
+| **detached 后台** | `pythonw local_supervisor.pyw`，无控制台；Flask 子进程 `subprocess.Popen([sys.executable, "app.py"], creationflags=CREATE_NO_WINDOW)`，日志进 `FLASK_LOG` | `:330-348` |
+| **崩溃自愈 + 退避** | `p.poll()` 检出退出 → `time.sleep(backoff)` 后 `restart()`，`backoff` 每次 ×2 封顶 30s。退避**按"稳定存活时长"重置而非每 tick**：存活超 `_STABLE_SECS=30` 才把 backoff/快失败计数归零 | `:448-468` |
+| **连续快失败熔断** | 存活不到 `_FAST_FAIL_SECS=10` 算一次"快失败"；连续 `_FAST_FAIL_LIMIT=5` 次 → `_halted=True` 暂停自动重启 + 托盘气泡报警（端口占用/缺 SECRET_KEY/代码错时不刷爆日志），等用户托盘「重启服务」手动解除 | `:449-458` |
+| **Job Object** | `CreateJobObjectW` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`(0x2000)，Flask 子进程 `AssignProcessToJobObject`。守护进程一旦消失（含被任务管理器强杀）Flask 随之被带走 → **不留残留占 5000 端口**。失败则降级靠熔断兜底 | `:157-226` |
+| **单实例锁** | `CreateMutexW` 命名 mutex `Local\bwicarus-local-supervisor`（per-session）+ `WinDLL(use_last_error=True)` 读 `ERROR_ALREADY_EXISTS`(183)；已在运行 → MessageBox 提示后静默退出 | `:135-150` |
+| **代码变更自动重启** | 轮询 `DEPLOY_DIR/*.py` 的 mtime，变了 debounce 1.5s 后 `restart`（治「改端点要手动重启」）。`auto_reload` 默认开，托盘可切 | `:419-474` |
+| **开机自启** | 写 `HKCU\…\Run` 值名 `BwicarusLocal`，命令 = `"pythonw" "local_supervisor.pyw 绝对路径"`（源码模式有效） | `:240-268` |
+| **看护 Obsidian 同步** | `ensure_obsidian_sync()` 用 `Get-ScheduledTask … .State`（语言中立枚举，不解析中文 schtasks）看「Obsidian Headless Sync」计划任务：`Disabled`→`Enable-ScheduledTask`、非 `Running`→`Start-ScheduledTask`。开机即看护一次 + 每 `_SYNC_CHECK_TICKS=150` tick(~5min)一次。`keep_sync` 默认开，托盘可切。防住「任务被禁没人发现」（PC vault 曾因此停更 3 周）| `:272-298, 433-442` |
+| **启动前预检** | `_preflight()` 查 `requests`/`pystray`/`PIL` + `SECRET_KEY`，缺则原生 `MessageBox` 报清楚（pythonw 无控制台时唯一可见报错途径），**绝不静默闪退**。绕过 run_local.ps1 直接双击/HKCU 自启时这是唯一护栏 | `:561-578` |
+
+**健康检查**：`_wait_healthy` GET `http://127.0.0.1:5000/`，任何 HTTP 响应（含 302/401）都算活；首次健康后 `_first_open` 才开一次 Chrome `--app` 窗口（之后崩溃重启不再弹窗，用户原窗口自动重连）。
+
+**托盘菜单**（绿色 L 图标，`run_tray`，`:544-554`）：打开 webapp 窗口 / 重启服务（manual 重启会清熔断+快失败计数）/ 打开日志 / ☑ 开机自启 / ☑ 代码变更自动重启 / ☑ 保持 Obsidian 同步 / 退出。
+
+**数据/日志**：`DATA_DIR` = `WEBAPP_DATA` 或 `<项目根>/webapp-data`；守护日志 `local_supervisor.log`、Flask 日志 `local_flask.log`。
+
+### 控制面板的本地实例适配（n/a 灰点不报警）
+
+`/control/api/status` 调 `get_systemd_status(unit)` —— `sys.platform=="win32"` 直接返回 `"n/a"`（`control.py:48-50`，本地实例无 systemd，`xvfb`/`anki-headless`/`obsidian-sync`/`qa-server`/`tailscaled` 是 Pi 专属服务）。`control.html` 前端据此区分：
+
+- `svc()` 里 `val==='n/a'` → dot 类 `na`（`.dot.na` 灰点 `#6b7280` + 不报警，`control.html:124,361`），值显示「本地不适用」（`control.html:364`）。
+- 状态总判定：`local = data.anki_headless==='n/a'` 识别本地实例；`svcOk` 把 `'active'` 和 `'n/a'` 都算正常；`allOk = svcOk && (ankiOk || local)` → **本地实例不因 Pi 专属服务 n/a 或 Anki 未开而报「有问题」**，meta 显示「本地实例正常」（`control.html:374-377`）。
+
 ## 现有模板
 
 | 模板 | 用途 |
@@ -352,6 +394,6 @@ upload_dataset(client, Path(dash_dir), "dashboard")
 ### 鉴权加固（app.py）
 - **开放重定向**:`/login?next=` 经 `_safe_next()` 只放行站内相对路径(拒 `//host`、`http(s)://`、`javascript:`)。
 - **CSRF**:零依赖会话级 token(`_csrf_token()`/`_csrf_ok()` + `context_processor` 注入 `csrf_token()`)。**仅**登录/注册两个公开 HTML 表单校验(模板加隐藏 `csrf_token` 域);JSON API 不走(靠 `SameSite=Lax` + session/Bearer,给所有 fetch 串 token 风险高收益低)。`SameSite=Lax` 本已挡跨站带 cookie 的 POST。
-- session cookie 早已 `HttpOnly + SameSite=Lax + Secure`,SECRET_KEY 走 env(无需改)。
+- session cookie 早已 `HttpOnly + SameSite=Lax + Secure`,SECRET_KEY 走 env(无需改)。`SESSION_COOKIE_SECURE` 随环境降级:`os.environ.get("SESSION_COOKIE_SECURE","1") not in ("0","false","False")`(`app.py:33`),**默认仍 Secure(生产不变)**;本地裸 http 实例由 `.env.local` 设 `SESSION_COOKIE_SECURE=0` 关掉,兼容非 Chrome 浏览器(注:Chrome/Firefox 对 127.0.0.1/localhost 视作 secure context,即便 True 本地也能登录,此处降级只为边界场景)。
 
 **部署回顾**:Python 改 `cp _server_deploy/*.py /home/bwicarus/webapp/` + `systemctl restart webapp`;模板 `cp templates/*.html`;nginx `nginx -t && systemctl reload nginx`;systemd `cp references/systemd/*.{service,timer} /etc/systemd/system/ && daemon-reload`。VPS 实例同源码,nginx 用 git 的 `_server_deploy/nginx/bwicarus.conf`(需同步加这些 header/gzip/limit_req)。

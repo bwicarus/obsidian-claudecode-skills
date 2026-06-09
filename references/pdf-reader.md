@@ -435,7 +435,7 @@ debug 日志（左下 `#debug-log`）：`localStorage['pdf-debug']='1'` 切换�
 `localStorage['pdf-read-mode'] = 'single' | 'continuous'`，header 按钮切换。
 
 - **单页**：`_renderPageInto(num, page-container)` 销毁旧 wrap 渲染新页
-- **连续**：`setupContinuousMode()` 给每页生成 placeholder `.page-wrap[data-loaded=0]`（高度估算自 page1 viewport），`IntersectionObserver` 监视，进入 ±500px 才真渲染
+- **连续**：`setupContinuousMode()` 给每页生成 placeholder `.page-wrap[data-loaded=0]`（高度估算自 page1 viewport），`IntersectionObserver`（`rootMargin:3000px`）监视，进入 ±3000px 才真渲染（占位现**分批建**，见 §34②）
 
 zoom：`zoomChange(delta)` → 改 `scale`（0.6~3.0）→ 重渲染当前页 / 全部 placeholder（连续模式）
 
@@ -563,6 +563,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 高亮 import/export：暂无 UI，可直接复制 `state/pdf-highlights/*.json`
 - 高亮搜索：暂无 UI 列出某 PDF 所有高亮的概览（只能逐个点开）
 - 多用户：高亮 sidecar 全 user 共享（一个 vault 一个 sha1）；如果未来要 per-user 可改路径加 username 前缀
+- 日语生词下划线**密度治理待定**：`_build_jp_vocab_marks` 把库里非 mastered 的词全划，库攒大后词密页几乎全划（机制如实工作，非 bug）；限量/开关/频率阈值还没做，见 §34④
 
 ---
 
@@ -587,7 +588,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - `応用情報技術者.pdf` = 679 张全页 JPEG（1352×1920，~536KB/页）+ 隐藏文字层，**48.9 万个对象**（epub→PDF 把每页文字层拆成几百个碎流），PDF 1.3 **经典 xref 表 ~9.3MB** → PDF.js 打开（尤其恢复到深层页）必须先下完整 xref，极慢。
 - 修：`scripts/optimize_pdf.py`（PyMuPDF `garbage=4 + clean=True 合并内容流 + deflate` → qpdf `--linearize`，**不动图片像素=清晰度无损**，多页抽样校验文字+图尺寸一致才落地、自动备份到 `data/pdf-backup/`）。该书 489786→**2045 对象**，408→318MB，xref 9.3MB→~40KB。
 - page-chars 落盘缓存：`_page_chars_cached`（键 = rel+page+mtime，存 `state/pdf-char-cache/`），只缓存不变的 chars/page_w/page_h；vocab_marks/句子框（依赖可变掌握度）每次现算。重复打开同页 387ms→13ms。
-- **「打开即可用」加载顺序**（`setupContinuousMode`）：旧逻辑先 `observe` 全部占位（IntersectionObserver 立刻渲染页 1-3，再 50ms 后才滚到目标页）→ 白白渲染没人看的页 1-3、和目标页抢带宽。改为：① 先 `scrollIntoView` 到目标页（占位高已按首页估算、各页同尺寸→定位准）② **`await _renderPageInto(目标页)` 显式渲染并等它就绪**（图像+选词层=可用）③ 才 `observe` 其余页懒加载（视口已在目标页 → 只渲染其 ±1400px 邻页，目标页 loaded=1 跳过）。打开只渲染 1 页即可用,其余后台补。
+- **「打开即可用」加载顺序**（`setupContinuousMode`）：旧逻辑先 `observe` 全部占位（IntersectionObserver 立刻渲染页 1-3，再 50ms 后才滚到目标页）→ 白白渲染没人看的页 1-3、和目标页抢带宽。改为：① 先 `scrollIntoView` 到目标页（占位高已按首页估算、各页同尺寸→定位准）② **`_renderPageInto(目标页).catch()`（不 await）后台渲染目标页 + 立即 `pdfLoadHide()` 撤遮罩**（占位一就位即可读/可返回，图像随后弹出）③ 才 `observe` 其余页懒加载（视口已在目标页 → 只渲染其 ±3000px（IO `rootMargin`）邻页，目标页 loaded=1 跳过）。打开只渲染 1 页即可用,其余后台补。**占位现分批建（CHUNK=80 + `setTimeout(0)` 让出事件循环），见 §34②**。
 - **加载遮罩别等渲染**:`#pdf-loading` 全屏遮罩只该挂到「文档结构就绪 + 占位建好 + 滚到目标页」,**不能等目标页图像渲染完**(否则遮罩挂太久)。故 setupContinuousMode 里目标页渲染 `_renderPageInto(...).catch()` **不 await**,`loadPdf` 的 `pdfLoadHide()` 紧随其后即触发 → 遮罩秒撤、先显占位「…第N页」、目标页图像几百ms 后弹出。(教训:别为了"打开即可用"把整页渲染塞进遮罩等待里,那只会让遮罩更久。)
 - **PDF 字节浏览器缓存**:`/pdf/file` 的 Cache-Control 从 `max-age=0, must-revalidate`(每块都回服务器校验→每次打开反复读)改成 **`private, max-age=31536000, immutable`**。URL 带 `?v=<mtime>`,同一 URL 字节永不变 → 浏览器长期缓存已取的 Range 分块、**重复打开读过的页直接命中本地缓存、零网络往返**;文件改了 mtime 变→新 URL 自然取新版,不串味。注:首次打开仍要取;只缓存实际看过的页;iPad Safari 缓存有容量上限,超大书只保最近用的块。(为什么这本书慢:它是 318MB 扫描图书、每页 ~644KB 大图,其它书是几 MB 矢量文字书、整本秒下;这是物理下限,缓存只能让重复打开快。)
 - **PDF.js 库静态缓存**(nginx,Pi 手工 patch):`/static/pdfjs/pdf.mjs`(625KB)+`pdf.worker.mjs`(**2.19MB**)原来 nginx 无 Cache-Control → 每次刷新都回源校验/重下这 ~2.8MB。两者 import 时都带 `?v=PDFJS_V`(版本变 URL 变)→ 安全设 immutable。Pi nginx `/etc/nginx/sites-available/bwicarus` 两个 server 块各加 `location ^~ /static/pdfjs/ { add_header Cache-Control "public, max-age=2592000, immutable" always; try_files $uri =404; }`(⚠ Pi 专属、**不在 git**,VPS 那份 `_server_deploy/nginx/bwicarus.conf` 结构不同勿混)。
@@ -731,7 +732,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **关键能成立的原因**:选词/高亮/振假名/搜索全走 **char 层**(`loadCharsAndBindLayer`,数据来自 `/api/page-chars` PyMuPDF),它**只用 `viewport.scale`(数字)+ 自己做 PDF→viewport 坐标转换**,不调 PDF.js 方法 → shim 的 viewport 够用。`__itemBoxes/__textDivs`(legacy textlayer 选中)已被 char 层取代,图片模式不建它们不影响。
 - **缓存 + read-ahead**(`_prefetchAround`):已加载页被 page-image 的 `Cache-Control: immutable` 缓存(re-view 零网络);翻到某页后**低优先级预取前后 ±3 页**(偏向后页,顺序阅读)→ 消费 blob 进缓存 → 翻页瞬开。`_prefetched` Set 去重。渲染完当前页(延后 400ms)+ 连续模式翻到新页触发。
 - 效果:打开书**不下载整本、不加载 PDF.js**,只下看到的页(每页 ~285KB),慢网秒翻。图片模式下原书 vs 压缩版的区分基本无意义(按屏幕尺寸出图本就小);压缩版开关仅留给经典模式。
-- ⚠ 假设页面尺寸**统一**(shim 用首页尺寸算所有页 cssW/cssH;这本及多数扫描书统一)。尺寸不一的书图片会被拉伸——需要时改 `_renderPageImg` 按 page-chars 的 per-page page_w/page_h 取尺寸。
+- ⚠ shim 用首页尺寸算所有页 cssW/cssH。**已渲染页**：`_renderPageImg` 改按**图自身真实宽高比**定高（不再用 page1 高），根治扫描书「每页高度不同 → 越往下错位越严重」（详见 §34③，2026-06-08）。**残留**：未渲染的占位仍按 page1 估高（`07-continuous.js` `estH`），滚动微抖。
 
 ### 23. Service Worker + Cache API：页图持久缓存(抗 iOS 清 + 离线)（2026-06-03）
 - 动机:HTTP `immutable` 缓存能存页图,但 iOS Safari 定期清(7天 ITP/存储紧张)→"过几天又重下"。用 PWA 标准做法(Google Docs/Books 同款)持久化。
@@ -833,3 +834,46 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - **选词浮层提速（修"浮层很久才可用"）**：`loadCharsAndBindLayer` 不再 overlay→chars 串行。改 **chars 优先**（用 localStorage `pdf-cv:<file>:<page>` 猜测 → 命中 SW 缓存秒回）→ 立即建 char 层（`_bindCharLayer`，**选词此刻可用**）；overlay **并行**、到了再渲生词 + 校正 cv（猜错 → 后台用真 cv 重取刷新 `__charBoxes` 兜底）。改内容的操作（重扫/偏移/收藏词组）主动写 localStorage cv → 重渲即新。实测 page-chars 4ms vs overlay 17ms（后者跑分词/生词）。
 - **文字层校准 + 单页重扫**（⚙ 设置「🔧 文字层校准」，仅扫描/OCR 书）：① 可视化文字框（复用 `?dbg=1` 红框，开关 localStorage `pdf-charbox`）；② 手动微调偏移（方向键 nudge，per-page sidecar `state/pdf-char-offset.json`，`_apply_char_offset` live 应用，`/api/char-offset` GET/POST 返 cv）；③ **单页重扫**（Google Vision）`/api/reocr-page`：渲该页（长边封顶 4000px + JPEG q90 避开 Vision 40MB 上限）→ `google_vision_ocr.ocr_one_page`（已补词/块 id `w`/`bk`）→ Vision px ×(pt/px) 转 PDF 点（**rotation=0；实测与 rawdict 同坐标系、无需 y 翻转**：同页第一字都「版」@y74、末字@y786/788）→ 存覆盖 sidecar `state/pdf-page-ocr/<sha>-p<page>.json`，`_page_chars_cached` 顶部优先读它；`/api/reocr-page/clear` 撤销。实测料理师4（原零文字层）p5 重扫 396 字 2.9s 可读。
 - **查词等待先标注音**（用户要"等查词时除高亮闪烁，先把这处注音标了，英日都一样"）：慢词建呼吸高亮时，`_furiHitsForRects` 按词 rects 匹配本页 furigana（日读音/英音标，后端 `_compute_page_chars` **始终计算**、不受 ruby 开关 gate），用**抽出共用的 `_makeRubySpan`**（与 `renderRubyLayer` 同款字号/位置/`.ruby-layer .rt` 样式）在词上方先标读音 → 跟开「あ」看到的振假名长一模一样。
+
+### 33. 整本预热子系统（2026-06-08，commit 22f6b8a）
+
+**动机**：图片模式（§22）按需取页，**第一次翻到某页**才渲背景图 + 算字符层/振假名，慢网/弱机有等待。预热 = 开书后（或手动点）在后台把**全书所有页**一次渲好进磁盘缓存 → 之后翻页/查词/振假名全部命中缓存秒开。**本地实例（强 CPU）尤其值得**——全本一次备齐、零等待。
+
+**链路**：
+
+| 层 | 文件 | 关键点 |
+|---|---|---|
+| 端点（启动） | `pdf_reader.py::pdf_api_prewarm_async`（`/api/prewarm-async` POST `{file,width}`，`pdf_reader.py:768`）| detached 子进程跑 `scripts/prewarm_pdf.py`；**已在跑则不重复启**（读状态文件 `state/pdf-prewarm/<sha>-w<w>.json` 的 `pid` + `_pid_alive`）；**低优先级**：Linux `nice -n 19` / Windows `BELOW_NORMAL_PRIORITY_CLASS|CREATE_NO_WINDOW`（不抢翻页/查词/返回选书页的交互 CPU），Linux 还 `start_new_session=True` detach；width clamp `[400,3000]` |
+| 端点（进度） | `pdf_reader.py::pdf_api_prewarm_status`（`/api/prewarm-status?file=&width=`，`pdf_reader.py:811`）| `percent = 已缓存页图张数 / 总页数`：数 `state/pdf-page-img/<sha>-p*-w<w>-<mtime>.jpg` 的文件数 / `fitz` 页数；附 `running`（pid 还活着否） |
+| 一把梭脚本 | `scripts/prewarm_pdf.py` | 串行跑两步：① `prewarm_pdf_pages.py`（按 width 渲全部页图）② `prewarm_pdf_chars.py`（算全部页字符 + 振假名，width-independent 只跑一次）。`--workers` 默认 `cpu-1` |
+| 页图脚本 | `scripts/prewarm_pdf_pages.py` | `ProcessPoolExecutor` 并发 `fitz get_pixmap(matrix=w/page_width).tobytes('jpg', q78)` → atomic 写到 `state/pdf-page-img/<sha1(resolve(abs))[:16]>-p<page>-w<w>-<mtime>.jpg`。**缓存键与 `/api/page-image` 完全一致**（复刻 `_book_sha` = `sha1(resolve 后绝对路径)[:16]` + `int(mtime)`），已存的 `cached` 跳过 |
+| 字符脚本 | `scripts/prewarm_pdf_chars.py` | 并发调阅读器同款 `pdf_reader._page_chars_cached(ap, rel, page)`（缓存键含 mtime），把 chars + fugashi 振假名算进 `state/pdf-char-cache`。需 `CLAUDE_PROJECT`/`OBSIDIAN_VAULT` env + fugashi/unidic-lite |
+| 选书页按钮 | `templates/pdf_index.html::prewarmFromList`（`pdf_index.html:230`）| 每本「📥 预热」按钮：先 `/api/book-meta` 取 `page_w`（**渲染基准 = 页原生点宽**，clamp `[400,2400]`，与显示解耦）→ POST `/api/prewarm-async` → **复用智能压缩那条进度条**（`.prep-prog/.prep-bar/.prep-msg`），2s 轮询 `/api/prewarm-status` 到 100% |
+| 阅读器前端 | `reader.src/22-prewarm.js` | `window._prewarmBook(manual)` + 开书自动 `window._maybeAutoPrewarm`（`04-render.js:138` 首页渲完触发一次） |
+
+**前端 `22-prewarm.js` 要点**（`reader.src/22-prewarm.js`）：
+- 宽度 `_prewarmWidth()` = `clamp(__imgMeta.page_w, 400, 2400)`（页**原生点宽**，与窗口/缩放级别无关）——**和 `_renderPageImg` 的 `reqW` 同基准**（`04-render.js:82`：`max(_natW, cw*dpr)` 也以原生宽 `_natW=__imgMeta.page_w` 为底）→ 预热宽度=阅读器实际请求宽度，不会错配「换窗口就没命中缓存」。
+- 仅图片模式（`window._imgMode && __imgMeta && scale` 才跑）。手动入口 `_prewarmBook(true)`；自动入口 `_maybeAutoPrewarm()`：`localStorage['pdf-auto-prewarm']==='0'` 关，**默认开**，首页渲完延迟 1.5s 触发，且 `_autoPrewarmDone` 只触发一次。
+- 自动模式 `percent >= 95` 直接跳过（已基本预热好不重启）；`running` 时只 `_prewarmTrack` 跟进度不重启。
+- `_prewarmTrack(w)` 2.5s 轮询，把进度写进顶栏「📥 N%」按钮，100%（或 `!running && percent>0`）停轮询、`_toast` 提示「整本预热完成 ✓ 翻页秒开」。
+
+### 34. 三个根因修复 + 日语下划线密度成因（2026-06-08，commit 22f6b8a，`READER_BUILD`→`reader-fix-9`）
+
+> **构建提醒**：`reader.js` = 纯 `cat reader.src/*.js`（NN- 前缀保序、无分隔），见 §1。这三处改的都是 `reader.src/NN-*.js`，重建/校验走 `bash scripts/check_pdf_reader_js.sh`。当前 build tag `READER_BUILD = 'reader-fix-9'`（`reader.src/07-continuous.js:113`，dlog 打点用）。
+
+**① 加载遮罩盖住标题 → 点不动「返回」**：
+- 现象：`#pdf-loading`（`pdf_reader.html:602`，`position:fixed;inset:0;z-index:1500` **整页覆盖**）在加载期间盖住顶栏标题 → 想退回选书页点不动，"点了名半天没反应"。
+- 修 A（遮罩自带出口）：遮罩内加**原生 `<a href="/pdf/">← 返回书架</a>`**（`pdf_reader.html:606`，`position:absolute;top:16px;left:16px`）——原生导航即刻生效、不依赖任何 JS/不等加载完。
+- 修 B（标题返回有即时反馈）：`<h1 onclick="goPdfList()">`（`pdf_reader.html:587`）。`goPdfList`（`reader.src/03-loader.js:26`，module 作用域挂 `window` 供内联 onclick 调）**先同步把遮罩切到「← 返回书架…」再 paint，然后才 `location.href='/pdf/'`**——整页卸载前先给视觉反馈（重阅读器整页卸载要点时间）。坑：`goPdfList` 里要 `_pdfInitDone=false` 解锁，否则 `pdfLoadShow` 的「已过初次加载不再遮挡」守卫（`03-loader.js:6`）会拦住遮罩不显示。
+
+**② 打开大书冻主线程 → 连原生 `<a>` 都点不动**（`reader.src/07-continuous.js`）：
+- 根因：旧版 `setupContinuousMode` **同步 `for`** 给全书每页建占位 DOM（几千页）→ 冻主线程 2-5s，期间事件队列停摆，连原生 `<a>`/标题返回都点不动。
+- 修：**分批建占位**（`CHUNK=80`，每批 `await new Promise(r=>setTimeout(r,0))` 让出事件循环，`07-continuous.js:50/65/76`）+ **边建边 observe**（IntersectionObserver 先建好，占位 push 进 `phs` 后 `phs.forEach(ph=>_contIO.observe(ph))`，把 O(N) 的 observe 也分摊，不再一次性 observe 几千个）+ **目标页占位一就位就 `pdfLoadHide()`**（`_afterTargetReady`，`07-continuous.js:38`：`scrollIntoView` + 渲染目标页 + 撤遮罩，不等全书占位都建完，用户已可读/可返回，余下占位继续后台分批建）。每批主线程只忙几 ms，加载中也点得动。
+
+**③ 图片模式扫描书「越往下错位越严重」**（`reader.src/04-render.js::_renderPageImg`，`04-render.js:73`）：
+- 根因 = **image-mode shim 用 page1 尺寸是陷阱**：图片模式 `pdfDoc` 是 shim（§22），`getPage` 对**所有页**都返回 page1 的 meta 尺寸 → `viewport.height` 初值 `ch=floor(meta.page_h×scale)` 是 page1 的高。但**扫描书每页高度不同**（料理师 part1 53 页高 2215~2487pt 各不同）→ 本页图被压/拉到 page1 高度显示，而 char 层按本页**真实**高度铺坐标 → 纵向比例不一致、误差随 y 累积（顶部不偏、底部最偏）。
+- 修：`decode` 后改用**图自身真实宽高比**算显示高 `ch = round(cw × naturalHeight/naturalWidth)`（`04-render.js:101`）——扫描书宽统一（reqW 固定）→ 按图真实比例对齐准。**残留**：未渲染的占位仍按 page1 估高（`07-continuous.js` `estH`），滚动时微抖。
+
+**④ 日语生词下划线密度成因（非 bug，是库攒大了）**：
+- `_build_jp_vocab_marks`（`pdf_reader.py:1861`）按统一 `vocab_index`（`_vocab_idx()`，英日**同一库** `资源/vocab/`，见 §15「日英 vocab 完全统一」）判定：每个 fugashi `w` token 解析原形查库，**`label_slug` 存在且 `!= "mastered"` 的词全部画下划线**（mastered 不画）。
+- 故密度直接由「库里非 mastered 词数」决定：库越攒越大（查过的词都入库、`new_source` 查词 mastery 重置 0），词密的日语页几乎整页被划。**这是机制如实工作，不是 bug**。密度治理（限量/开关/频率阈值）**待定**，目前无 UI 旋钮。

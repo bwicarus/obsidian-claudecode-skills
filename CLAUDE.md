@@ -7,13 +7,14 @@
 ## Sync
 - 用 `obsidian-headless`(npm 包)做后台 sync,不依赖 Obsidian GUI
 - Windows 计划任务「Obsidian Headless Sync」开机/登录自启,启动器在 `bin/start_obsidian_sync.ps1`,日志写到 `state/logs/obsidian_sync.log`
-- 远端 vault:Obsidian Sync(Plus 订阅),Asia 区
+- 远端 vault:Obsidian Sync(Plus 订阅),Asia 区。**单文件上限 200MB**(Standard 仅 5MB);>200MB 的文件 Sync 永不同步,走旁路 `scripts/push_big_files_to_pc.py`(Pi→PC scp,见「脚本」段)
 - iPad 端写完几秒内 Windows 端就能看到,没有等待窗口期
+- 注:PC 的「Obsidian Headless Sync」计划任务 2026-05-15 迁服务器时连同每日任务一起被禁,导致 PC vault 停更 3 周(非尺寸问题),2026-06-08 已重新 Enable+Start;托盘守护 `local_supervisor.pyw` 的 `ensure_obsidian_sync()` 现会看护该任务(被禁→Enable、没跑→Start)
 
 ## 学习方向
 自学：英语、日语、计算机科学（当前重心：大学数学、大学物理）
 
-英语已有一套**语法分析系统**（grammar KG + spacy 词性/依存 + PDF 阅读器 grammar 路由），详见 `references/grammar-analysis-system.md`（即将新建）。
+英语已有一套**语法分析系统**（grammar KG + spacy 词性/依存 + PDF 阅读器 grammar 路由），详见 `references/grammar-analysis-system.md`。
 
 ## 技能 (Skills)
 | 指令 | 功能 |
@@ -43,23 +44,23 @@
 - `references/pdf-annotation-format.md`
 - `references/ipad-remote-qa.md` — iPad 远程截图问答操作指南（链路、快捷指令、URL 模板、排错）
 - `references/linux-server-migration.md` — 2026-05-14 服务器迁移完整指南（systemd 服务、路径、踩坑速查）
-- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（约 13 个：xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.service|timer / anki-sync-refresh.service|timer / bwicarus-quick-sync.service|timer / book-ocr.service / book-ocr-watchdog.service|timer）
+- `references/systemd/*.service|*.timer` — 服务器 systemd unit 文件副本（xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.service|timer / anki-sync-refresh.service|timer / bwicarus-quick-sync.service|timer / book-ocr.service / book-ocr-watchdog.service|timer / **push-big-files.service|timer**（仅 Pi：每 4h 把 vault 里 >200MB 文件推到 PC，OnBootSec=5min + OnUnitActiveSec=4h + Persistent，User=bwicarus））
 - `references/server-side-claude-code.md` — 在服务器侧用 Claude Code 继续这个项目（tmux 会话、memory 同步、跨机器切换）
 - `references/client-exe-development.md` — bwicarus-client.exe 开发指南（launcher + core 架构、版本号管理、跟 webapp 控制面板的职责对照）。注：早期文档提到的 `build_core.py` / `deploy_core.sh` 等构建脚本**实际不在仓库**（`_client/` 下只有 `core/` 和 `launcher/`，无 `build/` 目录），core zip / manifest 的真实打包方式以该文档修订后的说明为准
-- `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）
+- `references/webapp-development.md` — bwicarus.space webapp 开发指南（Flask routes 清单、鉴权、SQLite schema、模板两套主题、nginx 反代、部署流程、改 control.py 流程）+ **本地实例（Windows PC 跑 Flask-only）**：`_server_deploy/run_local.ps1` 默认用 pythonw detached 拉起托盘守护进程 `local_supervisor.pyw`（关窗不宕、崩溃自愈+快失败熔断、Job Object 不残留占端口、单实例锁、代码变更自动重启、开机自启、看护「Obsidian Headless Sync」计划任务、托盘菜单）；`-Foreground` 保留前台 `python app.py` 调试。`app.py` `SESSION_COOKIE_SECURE` 默认仍 Secure，本地裸 http 由 `.env.local` 设 0；`control.py` 在 Windows 下 systemd 状态返回 `n/a`（control.html 显灰点不报警 / "本地实例正常"）
 - `references/ipad-switch-to-server.md` — iPad 快捷指令切换到服务器的完整步骤
 - `references/prompts/*.md` — AI prompt 模板（analyze / analyze_excalidraw / find_related / anki_cards / image_describe）
 - `references/skill-tree-system.md` — 技能树/知识图谱（KG）完整系统：KG 结构、关联校验规则（_rejected_links）、UI 叠加面板架构、register 同步链路、回收站机制、**踩坑笔记（覆盖语义/source .env/subprocess buffer/两套 nginx）、renderAnim 调用点、面板布局算法、CSS class 速查、全局变量速查、ADR 架构决策、反向链接 propagate_back_links**
 - `references/qa-browser-features.md` — 截图问答（QA Browser）功能详解：两种模式（普通 / cardCtx）、加号选中（真/假标题）、创建新笔记 `/api/create-note`、Anki 卡片 AI 改进、SSE 流式、**SQLite schema + 删除级联、快捷功能、MathJax 节流、AI 后端 adapter、控制面板交互**
 - `references/server-config-schema.md` — `state/server-config.json` 字段完整对照（qa_* / ai_* / anki.* / scheduled_register / weak_card_refresh / card_antimodel / card_quality / card_qa）+ 字段流转图 + 修改方法
 - `references/learning-dashboard.md` — 学习数据看板（`/insights`）完整文档：自包含 blueprint + 请求时实时聚合 + 120s **按用户分键**缓存、跨 Anki/生词/KG/PDF 阅读 的统一分析、手搓 SVG 图表（活跃度热力图/留存曲线/漏斗/到期/词汇分布/KG 进度）、**Anki 统计忽略旧卡片**（`_LEGACY_DECKS` 默认排除 新/漢字/意味 大批量日语沉浸牌组）、payload 结构、踩坑（stability 桶下界=0 / forecast 占位符顺序 / 缓存分键 / JST 时区）
-- `references/pdf-reader.md` — 网页 PDF 阅读器完整文档：路由清单（page-chars/translate/explain/dict/highlights CRUD/snippets-to）、char-layer 选中机制（PyMuPDF rawdict）、**高亮编辑系统**（sidecar JSON、4 字段 color/sentence/body/note、no-color 虚框模式、popover 小框规则）、AI 草稿系统、**iOS Mail 风格 swipe-to-delete**（双处实现 + 三个关键 CSS 点）、设置面板、**踩坑总结**（y 翻转、thenn 空格、popover z-index、TypeError、PATCH 空 color 等）+ **§14 日语支持/性能/翻译批次**（日语词典点词:音调线+汉字 chip 拆解+完整字典页；整页单字=page-chars 缺 no-store 被 iOS Safari 缓存旧分词；disableStream 须配 disableAutoFetch 否则下整本；大 PDF 对象瘦身 `optimize_pdf.py`；模块作用域 vs 内联 onclick 全局必须 `window.`；点词竞态 `_wordPopSeq`；句子按句号断 `bkBreak+lineChanged`；翻译改干净浮层；日语 TTS 用 ja-JP speechSynthesis）
+- `references/pdf-reader.md` — 网页 PDF 阅读器完整文档：路由清单（page-chars/translate/explain/dict/highlights CRUD/snippets-to）、char-layer 选中机制（PyMuPDF rawdict）、**高亮编辑系统**（sidecar JSON、4 字段 color/sentence/body/note、no-color 虚框模式、popover 小框规则）、AI 草稿系统、**iOS Mail 风格 swipe-to-delete**（双处实现 + 三个关键 CSS 点）、设置面板、**踩坑总结**（y 翻转、thenn 空格、popover z-index、TypeError、PATCH 空 color 等）+ **§14 日语支持/性能/翻译批次**（日语词典点词:音调线+汉字 chip 拆解+完整字典页；整页单字=page-chars 缺 no-store 被 iOS Safari 缓存旧分词；disableStream 须配 disableAutoFetch 否则下整本；大 PDF 对象瘦身 `optimize_pdf.py`；模块作用域 vs 内联 onclick 全局必须 `window.`；点词竞态 `_wordPopSeq`；句子按句号断 `bkBreak+lineChanged`；翻译改干净浮层；日语 TTS 用 ja-JP speechSynthesis）+ **整本预热**（`/api/prewarm-async` detached 低优先级跑 `scripts/prewarm_pdf.py` + `/api/prewarm-status` 按已缓存页图算 percent；选书页「📥 预热」按钮 + 开书自动后台预热 `_maybeAutoPrewarm`）+ **三个根因修复**（加载遮罩盖住返回 → 遮罩内加「← 返回书架」+ `goPdfList` 即时反馈；`setupContinuousMode` 几千页同步建占位冻主线程 → 分批 CHUNK=80 + setTimeout(0) 让出事件循环；`_renderPageImg` 全页套 page1 高度致扫描书越往下错位 → ch 改按图真实宽高比）
 - `references/vocab-system.md` — 单词系统完整文档：vault 当数据库（`资源/vocab/<首字母>/<lemma>.md` + `_audio/`）、**三源字典融合**（ECDICT 离线中文+词频 / Free Dictionary 例句+音频备份 / Merriam-Webster Learner's 高质例句+美音音频）、ECDICT exchange 表 lemma 化、MW 富文本 `{bc}/{it}` 剥除、MW 音频 URL 子目录规则、笔记模板（frontmatter + 各源分段 + 文中出现 + 用户备注保留区）、`/pdf/api/dict` 改造（写 lookup 日志 + 后台异步生成笔记）、阶段 A-E 路线 + mastery 算法草稿、**§14 中日词典/日语**（`is_japanese` 路由、`lookup_jp` AI 永久缓存、`_jp_reading_accent` unidic 离线读音+音调 aType、Tanaka 母语例句 `data/tanaka.db`+按句翻译缓存、KANJIDIC 汉字拆解 `data/kanjidic.json`、`/api/dict-jp`+`/api/dict-jp-ai`、预建脚本 `build_tanaka_index`/`build_kanjidic`/`prebuild_jp_dict`/`prebuild_jp_examples`、句子翻译 `translate.py` 两个 guard 坑[A-Za-z]/mymemory源=en）
 - `references/fitness-system.md` — 健身系统完整文档：多用户 web 训练追踪 + **循证 AI 教练**（Claude **Opus + max effort + 25+ 篇文献**深度思考）、PPL 3 天 20 动作（拉伸位/RIR/MAV 循证）、Double Progression 推荐、autosave + 刷新恢复 + 休息倒计时、🏁 完成训练总结、Nippard + Cavaliere 双频道视频（`MUST_CONTAIN` 关键词过滤）、YT auto-caption + Cloud STT 双源字幕（Gemini Flash 翻译 fallback Claude）、`fitness_exercise_override` AI 调整后落库、`fitness_session_analysis` 反馈环、⚙ 设置面板（model/effort/auto_analyze/auto_suggest）、5 张 per-user 表 schema + 完整 API 清单 + 6 条踩坑
 - `references/google-cloud-apis.md` — GCP API 集成（Vision/YouTube/STT/Gemini）+ ¥47867 Free Trial 赠金管理、双 API key 隔离（`AIzaSy*` GCP 服务 vs `AQ.Ab*` Gemini service-account 绑定）、**计费分流大坑**（Gemini API 走 AI Studio 独立 billing 跟 GCP 赠金不通）、本地配额计数器（`scripts/google_api_quota.py` + SQLite `state/google_api_quota.db`）、YouTube 每日 10k units 硬上限（耗尽走本地 reorder）、PT 重置时区、key regenerate 流程、**Cloud Translation API**（PDF 句子翻译 `_gtranslate`、`API_KEY_SERVICE_BLOCKED` 放行步骤+刚放行传播抖动、翻译质量评审结论 Google 3.9/4.5<AI、auto 链 `gtranslate→deepl→ai→mymemory`、CLI 冷启动~5s/热进程实验不值得的结论）
 - `references/claude-code-quota-api.md` — Claude Code 额度查询 API（/claude-quota skill 的实现参考：端点 / 认证 header / 响应格式 + 共享模块 `scripts/lib/claude_quota.py`）
-- `references/book-ocr-pipeline.md` — （即将新建）日文扫描 PDF 双 OCR 流水线：mokuro manga-ocr + Google Vision 两条路径、`state/mokuro-ocr/<sha>/` 断点续传、不可见文字层 embed、book-ocr / book-ocr-watchdog systemd
-- `references/grammar-analysis-system.md` — （即将新建）英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析）
+- `references/book-ocr-pipeline.md` — 日文扫描 PDF 双 OCR 流水线：mokuro manga-ocr + Google Vision 两条路径、`state/mokuro-ocr/<sha>/` 断点续传、不可见文字层 embed、book-ocr / book-ocr-watchdog systemd
+- `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析）
 
 **脚本**
 - `scripts/config.py` — 集中管理路径和常量（其他脚本从这里读）
@@ -71,6 +72,8 @@
 - `scripts/refresh_weak_cards.py` — 卡片 AI 维护，`--task` 多模式共用一套管道（原地 updateNoteFields 不破坏 FSRS + 冷却 + 回滚 record `_refresh.history` + 裸文本 LaTeX 校验 + dry-run 默认）：`weak` 薄弱卡 L1 重写问法/L2 拆删；`antimodel` 已掌握卡换角度重问防只记问法；`quality` 低质卡：静态启发式(答案过长/多知识点/指代不清) + 行为信号(again+hard 占比、答题耗时，来自 getReviewsOfCards) 扩召回 + 同 type P85 相对阈值 + 每晚随机采样兜底盲区 → AI 评分原地优化或建议拆，写 `state/quality_report.json`(ok/改/拆 + by_flag 趋势)上仪表盘。凌晨由 server-config `weak_card_refresh`/`card_antimodel`/`card_quality` 各自 enabled 控制
 - `scripts/note_state.py` — 笔记内容哈希 + 失败追踪（连续失败 ≥3 次自动跳过）
 - `scripts/backfill_back_links.py` — 一次性脚本，给存量笔记补全反向链接
+- `scripts/push_big_files_to_pc.py` — Pi 把 vault 里 >200MB 文件 scp 推到 PC（超 Obsidian Sync Plus 单文件 200MB 上限的旁路；PC 可达才推、睡着静默跳过、同名同大小不重传；目前全 vault 仅 `応用情報技術者.pdf` 318M 触发）。由 Pi systemd timer `push-big-files.timer` 每 4h 跑
+- `scripts/prewarm_pdf.py` — PDF 阅读器整本预热一把梭：先 `prewarm_pdf_pages.py`（按宽度渲全部页图）再 `prewarm_pdf_chars.py`（算全部字符层+振假名），各自 ProcessPoolExecutor 并行。被 `pdf_reader.py` 的 `/api/prewarm-async` 以 detached 低优先级子进程启动
 
 **EXE 启动器**（双击运行，源码在 `launchers/`，编译产物在 `launchers/dist/`）
 - `任务监视.exe` — 系统托盘 + 悬浮窗。开机启动后自动拉起 cmd_server / 截图问答 / relay；菜单可切换 AI 后端（Claude / GPT）
@@ -243,7 +246,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | Vault | `/root/obsidian/` | obsidian-headless sync 拉，1175 笔记 |
 | Anki | `/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` | aqt 25.2.7 + Xvfb 跑 GUI，5634 卡 |
 | 环境变量 | `/root/claude/.env` + `/etc/profile.d/claude.sh` | `CLAUDE_PROJECT` / `OBSIDIAN_VAULT` / `APP_PYTHON` / `APP_CLAUDE` / `APP_CODEX` / `ANKI_CONNECT_URL` / `AI_SETTINGS_FILE` |
-| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` + `anki-sync-refresh.timer` (15min 拉手机复习数据) + `bwicarus-quick-sync.timer` (15min vault 状态同步) + `book-ocr.service` + `book-ocr-watchdog.timer` (日文 PDF OCR 后台 + 自检) |
+| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` + `anki-sync-refresh.timer` (15min 拉手机复习数据) + `bwicarus-quick-sync.timer` (15min vault 状态同步) + `book-ocr.service` + `book-ocr-watchdog.timer` (日文 PDF OCR 后台 + 自检)。**仅 Pi** 另有 `push-big-files.timer` (每 4h 把 vault 里 >200MB 文件推到 PC，绕过 Obsidian Sync Plus 单文件 200MB 上限) |
 | **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
