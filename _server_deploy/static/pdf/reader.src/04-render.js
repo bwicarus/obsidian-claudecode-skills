@@ -72,10 +72,14 @@ window._prefetchAround = _prefetchAround;
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
   const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
-  const cw = Math.floor(viewport.width), ch = Math.floor(viewport.height);
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
+  const cw = Math.floor(viewport.width);
+  let ch = Math.floor(viewport.height);   // 初值用 meta(page1)高,decode 后改用本页图的真实宽高比(见下)
+  // **渲染分辨率与显示宽度解耦**:基准=页**原生点宽**(扫描书=原生像素宽),显示多大由客户端 CSS 缩放决定。
+  // → 适应阅读时 reqW=原生宽(与窗口/缩放级别无关) → 预热一次即覆盖任意窗口大小,不会"换窗口就没命中"。
+  //   只有手动放大到超过原生(cw×dpr>原生)才按 dpr 提分辨率防糊。reqW 只增不减(缩小复用大图→不闪)。封顶 2400。
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
+  const _natW = Math.round((window.__imgMeta && window.__imgMeta.page_w) || cw);
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.max(_natW, Math.round(cw * dpr)))));
   const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
   const img = document.createElement('img');
   img.className = 'page-img'; img.decoding = 'async';
@@ -91,6 +95,10 @@ async function _renderPageImg(num, wrap, viewport) {
     const _p2 = await pdfDoc.getPage(num);
     return _renderPageImg(num, wrap, _p2.getViewport({ scale }));
   }
+  // ⚡ 根治「越往下错位越严重」:扫描书**每页高度不同**,但图片模式 shim 对所有页都用 page1 的 meta 高
+  // (ch=floor(meta.page_h×scale))→ 本页图被压/拉到 page1 高度显示,而 char 层按本页**真实**高度铺坐标
+  // → 纵向比例不一致、误差随 y 累积(顶部不偏、底部最偏)。改用**图自身真实宽高比**算显示高(宽统一→对齐准)。
+  ch = Math.max(1, Math.round(cw * (img.naturalHeight / img.naturalWidth)));
   img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
@@ -127,6 +135,7 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
+  if (window._maybeAutoPrewarm) window._maybeAutoPrewarm();   // 首页渲完(scale/宽度已定)→ 自动后台预热整本(只触发一次)
   if (readMode === 'single') {
     const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
     loadPageNodes(num);

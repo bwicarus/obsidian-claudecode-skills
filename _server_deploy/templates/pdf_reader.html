@@ -584,7 +584,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
 <body>
 <div id="app">
   <div id="header">
-    <h1 onclick="location.href='/pdf/'" title="点击返回 PDF 列表" style="cursor:pointer">{{ file_name }}</h1>
+    <h1 onclick="goPdfList()" title="点击返回 PDF 列表" style="cursor:pointer">{{ file_name }}</h1>
     <button id="spread-toggle" onclick="toggleSpread()" title="双页并排(连续滚动)。再点错开 facing 页(12↔23);第三下回单列连续">⊞ 双页</button>
     <span id="page-scrub" title="左右拖动快速跳页 · 点击输入页码"><b id="page-cur">{{ page }}</b><span id="page-total" style="color:#8a9bb4;font-size:12px">/ –</span></span>
     <button onclick="fitWidth()" title="按页宽自适应（取消手动缩放）">↔ 适应</button>
@@ -602,6 +602,9 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
     <div id="pdf-loading" style="display:none;position:fixed;inset:0;z-index:1500;
          background:#0d1117ee;flex-direction:column;align-items:center;justify-content:center;
          gap:14px;color:#e6edf3;font-size:15px;">
+      <!-- 加载期间也能退回选书页(遮罩盖住标题,这里给个出口;原生 <a> 即刻导航、不等加载完)-->
+      <a href="/pdf/" style="position:absolute;top:16px;left:16px;background:#244470;border:1px solid #3b6db5;
+         color:#cfe6ff;border-radius:8px;padding:9px 16px;font-size:14px;text-decoration:none;cursor:pointer">← 返回书架</a>
       <div style="width:34px;height:34px;border:3px solid #2d5a8a;border-top-color:#7dd3fc;
            border-radius:50%;animation:pdfspin .8s linear infinite;"></div>
       <div id="pdf-loading-text">📄 加载中…</div>

@@ -240,6 +240,21 @@ function pdfLoadHide() {
   const box=document.getElementById('pdf-loading');
   if(box) box.style.display='none';
 }
+// 返回选书页:重阅读器整页卸载要点时间,先**即时盖一层「返回中」**(同步显示,在导航前先 paint)
+// → 用户点了立刻有反馈,不再"点了名半天没反应"。module 作用域,挂 window 供 h1/链接的内联 onclick 调用。
+window.goPdfList = function () {
+  try {
+    const box = document.getElementById('pdf-loading');
+    if (box) {
+      const t = document.getElementById('pdf-loading-text'); if (t) t.textContent = '← 返回书架…';
+      const hint = document.getElementById('pdf-loading-hint'); if (hint) hint.textContent = '';
+      const sw = document.getElementById('pdf-loading-switch'); if (sw) sw.style.display = 'none';
+      _pdfInitDone = false;            // 解锁,让遮罩能显示
+      box.style.display = 'flex';
+    }
+  } catch (_) {}
+  location.href = '/pdf/';
+};
 
 // ── PDF 整本本地缓存（IndexedDB）──
 // 首次打开走流式(线性化后首页秒出)+ 后台把整本下到设备 IndexedDB;第 2 次起直接读本地缓存
@@ -561,10 +576,14 @@ window._prefetchAround = _prefetchAround;
 // 全是按坐标定位,跟 canvas 路径一样工作。只取这一页的图(几百 KB),不下载整本 PDF。
 async function _renderPageImg(num, wrap, viewport) {
   const _gen = (wrap.__imgGen = (wrap.__imgGen || 0) + 1);   // 重入守卫:并发/IO 重渲时,旧渲染 decode 完别覆盖新渲染(最后发起的赢)
-  const cw = Math.floor(viewport.width), ch = Math.floor(viewport.height);
-  // 页图:设备像素宽 → retina 清晰(封顶 2400);只取这一页。reqW 只增不减(缩小复用大图,不重取→不闪)
+  const cw = Math.floor(viewport.width);
+  let ch = Math.floor(viewport.height);   // 初值用 meta(page1)高,decode 后改用本页图的真实宽高比(见下)
+  // **渲染分辨率与显示宽度解耦**:基准=页**原生点宽**(扫描书=原生像素宽),显示多大由客户端 CSS 缩放决定。
+  // → 适应阅读时 reqW=原生宽(与窗口/缩放级别无关) → 预热一次即覆盖任意窗口大小,不会"换窗口就没命中"。
+  //   只有手动放大到超过原生(cw×dpr>原生)才按 dpr 提分辨率防糊。reqW 只增不减(缩小复用大图→不闪)。封顶 2400。
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.round(cw * dpr))));
+  const _natW = Math.round((window.__imgMeta && window.__imgMeta.page_w) || cw);
+  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.max(_natW, Math.round(cw * dpr)))));
   const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
   const img = document.createElement('img');
   img.className = 'page-img'; img.decoding = 'async';
@@ -580,6 +599,10 @@ async function _renderPageImg(num, wrap, viewport) {
     const _p2 = await pdfDoc.getPage(num);
     return _renderPageImg(num, wrap, _p2.getViewport({ scale }));
   }
+  // ⚡ 根治「越往下错位越严重」:扫描书**每页高度不同**,但图片模式 shim 对所有页都用 page1 的 meta 高
+  // (ch=floor(meta.page_h×scale))→ 本页图被压/拉到 page1 高度显示,而 char 层按本页**真实**高度铺坐标
+  // → 纵向比例不一致、误差随 y 累积(顶部不偏、底部最偏)。改用**图自身真实宽高比**算显示高(宽统一→对齐准)。
+  ch = Math.max(1, Math.round(cw * (img.naturalHeight / img.naturalWidth)));
   img.style.width = cw + 'px'; img.style.height = ch + 'px'; img.style.display = 'block';
   wrap.innerHTML = '';
   wrap.__charLayer = null; wrap.__charBoxes = null; wrap.__inkStrokes = null;
@@ -616,6 +639,7 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.dataset.loaded = '1';
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
+  if (window._maybeAutoPrewarm) window._maybeAutoPrewarm();   // 首页渲完(scale/宽度已定)→ 自动后台预热整本(只触发一次)
   if (readMode === 'single') {
     const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
     loadPageNodes(num);
@@ -1464,7 +1488,6 @@ async function setupContinuousMode() {
   const v1 = p1.getViewport({scale});
   // 去边时占位尺寸也按可见(裁切后)宽高,跟渲染后的 wrap 一致 → 未渲染页不会比已渲染页宽
   const estW = Math.floor(v1.width * _cropVisWFrac()), estH = Math.floor(v1.height * _cropVisHFrac());
-  const frag = document.createDocumentFragment();
   const _mkPh = (num, marg) => {
     const ph = document.createElement('div');
     ph.className = 'page-wrap';
@@ -1481,30 +1504,8 @@ async function setupContinuousMode() {
     ph.textContent = '… 第 ' + num + ' 页';
     return ph;
   };
-  if (readMode === 'spread') {
-    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
-    for (const row of _spreadRows(pdfDoc.numPages, _spreadOffset)) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'spread-row';
-      for (const num of row) rowEl.appendChild(_mkPh(num, '0'));
-      frag.appendChild(rowEl);
-    }
-  } else {
-    for (let num = 1; num <= pdfDoc.numPages; num++) frag.appendChild(_mkPh(num, '0 auto 12px'));
-  }
-  container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
   const mainEl = document.getElementById('main');
-  // 「打开即可用」关键:先把视口定位到目标页(占位高已按首页尺寸估算、各页同尺寸→定位准),
-  // 再 **显式渲染目标页并等它完成**(图像+选词层都就绪=可用),最后才 observe 其余页懒加载。
-  // 旧逻辑是先 observe(IO 立刻渲染页1-3,白白浪费+抢带宽)→ 50ms 后才滚到目标页。
-  const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
-  if (targetPh) {
-    targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
-    // 不 await:占位建好 + 滚到目标页后就让加载遮罩撤掉(loadPdf 里 pdfLoadHide),
-    // 目标页图像在后台渲染、随后弹出(用户先看到占位"…第N页",几百ms 后图片出来)。
-    _renderPageInto(currentPage, targetPh).catch(() => {});
-  }
-  // IntersectionObserver:此时视口已在目标页 → 只渲染其附近 ±1400px 的页(目标页已 loaded=1 会跳过)
+  // IntersectionObserver 先建好,占位**边建边 observe**(把 O(N) 的 observe 也分摊掉,不再一次性 observe 几千个)。
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
       if (e.isIntersecting && e.target.dataset.loaded === '0') {
@@ -1512,7 +1513,50 @@ async function setupContinuousMode() {
       }
     });
   }, {rootMargin: '3000px', root: mainEl});   // 提前渲染 ~2-3 页(大图书 644KB/页,留足提前量防翻页卡)
-  container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
+  // 「打开即可用」:目标页占位一就位 → 滚过去 + 显式渲染 + **立刻撤加载遮罩**(不必等全书几千页占位都建完)。
+  let _targetReady = false;
+  const _afterTargetReady = () => {
+    if (_targetReady) return;
+    const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
+    if (!targetPh) return;
+    _targetReady = true;
+    targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
+    _renderPageInto(currentPage, targetPh).catch(() => {});        // 目标页图像后台渲染、随后弹出
+    pdfLoadHide();   // 目标页就位即撤遮罩 → 余下占位继续后台分批建,用户已可读/可返回
+  };
+  // ⚡ 根治「打开新文件时点不动返回」:**分批建占位,每批 setTimeout(0) 让出事件循环**。
+  //   旧版同步 for 给全书每页建占位(几千页)冻主线程 2-5s,期间事件队列停摆,连原生 <a>/标题返回都点不动。
+  //   分批后主线程每批只忙几 ms,加载中也能点「返回书架」/标题返回。
+  const CHUNK = 80;
+  if (readMode === 'spread') {
+    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
+    const rows = Array.from(_spreadRows(pdfDoc.numPages, _spreadOffset));
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const frag = document.createDocumentFragment(), phs = [];
+      for (const row of rows.slice(i, i + CHUNK)) {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'spread-row';
+        for (const num of row) { const ph = _mkPh(num, '0'); phs.push(ph); rowEl.appendChild(ph); }
+        frag.appendChild(rowEl);
+      }
+      container.appendChild(frag);
+      _afterTargetReady();
+      phs.forEach(ph => _contIO.observe(ph));
+      if (i + CHUNK < rows.length) await new Promise(r => setTimeout(r, 0));   // 让出事件循环
+    }
+  } else {
+    const total = pdfDoc.numPages;
+    for (let start = 1; start <= total; start += CHUNK) {
+      const frag = document.createDocumentFragment(), phs = [];
+      const end = Math.min(start + CHUNK - 1, total);
+      for (let num = start; num <= end; num++) { const ph = _mkPh(num, '0 auto 12px'); phs.push(ph); frag.appendChild(ph); }
+      container.appendChild(frag);
+      _afterTargetReady();
+      phs.forEach(ph => _contIO.observe(ph));
+      if (end < total) await new Promise(r => setTimeout(r, 0));   // 让出事件循环
+    }
+  }
+  _afterTargetReady();   // 兜底(目标页号异常等极端情况;正常路径上面已触发)
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
 
@@ -1546,7 +1590,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-3';
+const READER_BUILD = 'reader-fix-9';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -4110,6 +4154,21 @@ window._speakCurWord = () => {
 // 小框「掌握」toggle（日英统一）：未掌握 ↔ 掌握 100 来回切，不关框。
 // 掌握 → 该词不再标生词下划线；按语言走不同 store：日语 jp-vocab-mark(mastered/unknown)，
 // 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
+// 乐观更新:标掌握瞬间先把该词下划线从所有已加载页移掉(不等服务器写库+重算),服务器响应后 refresh 再校正。
+// 大厂标配(optimistic UI):本地实例下尤其明显——画面立刻响应,不用等任何往返。
+function _dropVocabUnderlineOptimistic(s) {
+  const keys = new Set();
+  for (const k of [s && s.lemma, s && s.word]) if (k) keys.add(String(k).toLowerCase());
+  if (!keys.size) return;
+  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
+    if (!pw.__vocabMarks || !pw.__vocabMarks.length) return;
+    const before = pw.__vocabMarks.length;
+    pw.__vocabMarks = pw.__vocabMarks.filter(m =>
+      !(keys.has(String(m.lemma || '').toLowerCase()) || keys.has(String(m.word || '').toLowerCase())));
+    if (pw.__vocabMarks.length !== before) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+  });
+}
+
 window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
   const next = !s.mastered;
@@ -4138,6 +4197,7 @@ window._wordPopMaster = (btn) => {
   const w = s.lemma || s.word;
   const url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
   const mark = next ? 'known' : 'unknown';   // 日英统一口径(jp-vocab-mark 已接受 known/unknown)
+  if (next) _dropVocabUnderlineOptimistic(s);   // 乐观:立刻去下划线,不等服务器
   if (btn) btn.disabled = true;
   fetch(url, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -7229,3 +7289,60 @@ document.addEventListener('keydown', (e) => {
 });
 
 loadPdf();
+// ── 整本预热:按当前显示宽度把全书(背景图 + 字符/振假名)渲好缓存 → 翻页秒开。──
+// 手动「📥 预热」按钮 + 开书自动后台预热(客户端自己解决,不用手动管)。后端 /api/prewarm-async 跑
+// scripts/prewarm_pdf.py(detached,关网页不中断);进度按已缓存页图张数算,显示在按钮上。
+// 宽度复刻 _renderPageImg 的 reqW(clamp(page_w×scale×dpr,400,2400))→ 预热的宽度=阅读器实际请求的宽度,不会错配。
+
+function _prewarmWidth() {
+  // 与 _renderPageImg 解耦后的基准一致:页**原生点宽**(与显示无关)。预热这个宽度=覆盖任意窗口的适应阅读。
+  const pw = Math.round((window.__imgMeta && window.__imgMeta.page_w) || 0);
+  return Math.max(400, Math.min(2400, pw || 1260));
+}
+
+let _prewarmPoll = null;
+function _prewarmTrack(w) {
+  const btn = document.getElementById('prewarm-btn');
+  if (_prewarmPoll) clearInterval(_prewarmPoll);
+  _prewarmPoll = setInterval(async () => {
+    let st;
+    try { st = await (await fetch('/pdf/api/prewarm-status?file=' + encodeURIComponent(FILE_REL) + '&width=' + w)).json(); }
+    catch (_) { return; }
+    if (!st || !st.ok) return;
+    if (btn) btn.textContent = (st.percent >= 100) ? '📥 预热' : ('📥 ' + Math.floor(st.percent) + '%');
+    if (st.percent >= 100 || (!st.running && st.percent > 0)) {
+      clearInterval(_prewarmPoll); _prewarmPoll = null;
+      if (btn) btn.textContent = '📥 预热';
+      if (st.percent >= 100) _toast?.('整本预热完成 ✓ 翻页秒开');
+    }
+  }, 2500);
+}
+
+window._prewarmBook = async function (manual) {
+  if (!window._imgMode || !window.__imgMeta || !scale) return;   // 仅图片模式
+  const w = _prewarmWidth();
+  let st;
+  try { st = await (await fetch('/pdf/api/prewarm-status?file=' + encodeURIComponent(FILE_REL) + '&width=' + w)).json(); }
+  catch (_) { return; }
+  if (!st || !st.ok) return;
+  if (!manual && st.percent >= 95) return;          // 自动:已基本预热好 → 不重复启
+  if (st.running) { _prewarmTrack(w); return; }      // 已在跑 → 只跟进度
+  try {
+    await fetch('/pdf/api/prewarm-async', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, width: w }),
+    });
+  } catch (_) { return; }
+  if (manual) _toast?.('开始预热整本（后台渲染，完成后翻页秒开）');
+  _prewarmTrack(w);
+};
+
+// 开书后自动后台预热(默认开;localStorage pdf-auto-prewarm='0' 可关)。等首页渲完(scale/宽度已定)触发一次。
+let _autoPrewarmDone = false;
+window._maybeAutoPrewarm = function () {
+  if (_autoPrewarmDone) return;
+  if (localStorage.getItem('pdf-auto-prewarm') === '0') { _autoPrewarmDone = true; return; }
+  if (!window._imgMode || !window.__imgMeta || !scale) return;
+  _autoPrewarmDone = true;
+  setTimeout(() => { try { window._prewarmBook(false); } catch (_) {} }, 1500);
+};

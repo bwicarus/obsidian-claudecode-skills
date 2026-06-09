@@ -1,0 +1,12 @@
+[Unit]
+Description=Push >200MB vault files to PC every 4h (when PC reachable; skip if asleep)
+Requires=push-big-files.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=4h
+Persistent=true
+Unit=push-big-files.service
+
+[Install]
+WantedBy=timers.target

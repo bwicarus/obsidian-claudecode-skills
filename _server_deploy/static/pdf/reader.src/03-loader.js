@@ -21,6 +21,21 @@ function pdfLoadHide() {
   const box=document.getElementById('pdf-loading');
   if(box) box.style.display='none';
 }
+// 返回选书页:重阅读器整页卸载要点时间,先**即时盖一层「返回中」**(同步显示,在导航前先 paint)
+// → 用户点了立刻有反馈,不再"点了名半天没反应"。module 作用域,挂 window 供 h1/链接的内联 onclick 调用。
+window.goPdfList = function () {
+  try {
+    const box = document.getElementById('pdf-loading');
+    if (box) {
+      const t = document.getElementById('pdf-loading-text'); if (t) t.textContent = '← 返回书架…';
+      const hint = document.getElementById('pdf-loading-hint'); if (hint) hint.textContent = '';
+      const sw = document.getElementById('pdf-loading-switch'); if (sw) sw.style.display = 'none';
+      _pdfInitDone = false;            // 解锁,让遮罩能显示
+      box.style.display = 'flex';
+    }
+  } catch (_) {}
+  location.href = '/pdf/';
+};
 
 // ── PDF 整本本地缓存（IndexedDB）──
 // 首次打开走流式(线性化后首页秒出)+ 后台把整本下到设备 IndexedDB;第 2 次起直接读本地缓存

@@ -121,6 +121,7 @@
     .dot.ok { background: var(--emerald); color: var(--emerald); }
     .dot.warn { background: var(--amber); color: var(--amber); }
     .dot.bad { background: var(--rose); color: var(--rose); }
+    .dot.na { background: #6b7280; color: #6b7280; opacity: .6; box-shadow: none; }   /* 本地实例:Pi 服务不适用,灰点不报警 */
     .status-name { font-weight: 600; min-width: 140px; color: var(--text); }
     .status-value { color: var(--muted); flex: 1; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 
@@ -357,9 +358,11 @@ async function refreshStatus() {
     const data = await r.json();
     const ankiOk = data.ankiconnect_version === 6;
     function svc(name, val, extra) {
-      const dot = (val === 'active' || (name === 'AnkiConnect' && ankiOk)) ? 'ok' :
+      const dot = (val === 'n/a') ? 'na' :   // 本地实例(Windows):Pi 专属 systemd 服务不适用 → 灰点,不报警
+                  (val === 'active' || (name === 'AnkiConnect' && ankiOk)) ? 'ok' :
                   ((val === 'inactive' || val == null) ? 'bad' : 'warn');
-      return `<div class="status-row"><span class="dot ${dot}"></span><span class="status-name">${name}</span><span class="status-value">${extra || val || 'n/a'}</span></div>`;
+      const shown = (val === 'n/a') ? (extra ? extra.replace(val, '本地不适用') : '本地不适用') : (extra || val || 'n/a');
+      return `<div class="status-row"><span class="dot ${dot}"></span><span class="status-name">${name}</span><span class="status-value">${shown}</span></div>`;
     }
     document.getElementById('status').innerHTML =
       svc('AnkiConnect', ankiOk ? 'active' : 'bad', ankiOk ? `v${data.ankiconnect_version} @ :8765` : '离线') +
@@ -368,8 +371,10 @@ async function refreshStatus() {
       svc('obsidian-sync', data.obsidian_sync) +
       svc('qa-server', data.qa_server, (data.qa_server || 'n/a') + ' (iPad 截图问答 daemon)') +
       svc('tailscaled', data.tailscaled);
-    const allOk = ankiOk && ['anki_headless','xvfb_99','obsidian_sync','qa_server'].every(k => data[k] === 'active');
-    document.getElementById('status-tab-meta').textContent = allOk ? '全部正常' : '有问题';
+    const local = data.anki_headless === 'n/a';   // 本地实例(Windows):Pi 专属服务返回 n/a
+    const svcOk = ['anki_headless','xvfb_99','obsidian_sync','qa_server'].every(k => data[k] === 'active' || data[k] === 'n/a');
+    const allOk = svcOk && (ankiOk || local);   // 本地实例不因 Pi 服务 n/a 或 Anki 未开而报"有问题"
+    document.getElementById('status-tab-meta').textContent = allOk ? (local ? '本地实例正常' : '全部正常') : '有问题';
     document.getElementById('status-tab-meta').style.color = allOk ? 'var(--emerald)' : 'var(--amber)';
     // 运行中任务
     const at = data.active_tasks || {tasks: [], completed: []};

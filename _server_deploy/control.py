@@ -46,6 +46,8 @@ def load_claude_env() -> dict:
 
 
 def get_systemd_status(unit: str) -> str:
+    if sys.platform == "win32":
+        return "n/a"   # 本地实例(Windows)无 systemd:xvfb/anki-headless/obsidian-sync/qa-server/tailscaled 是 Pi 专属服务,本地不适用
     try:
         r = subprocess.run(
             ["systemctl", "is-active", unit],

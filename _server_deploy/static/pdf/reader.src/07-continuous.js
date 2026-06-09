@@ -8,7 +8,6 @@ async function setupContinuousMode() {
   const v1 = p1.getViewport({scale});
   // 去边时占位尺寸也按可见(裁切后)宽高,跟渲染后的 wrap 一致 → 未渲染页不会比已渲染页宽
   const estW = Math.floor(v1.width * _cropVisWFrac()), estH = Math.floor(v1.height * _cropVisHFrac());
-  const frag = document.createDocumentFragment();
   const _mkPh = (num, marg) => {
     const ph = document.createElement('div');
     ph.className = 'page-wrap';
@@ -25,30 +24,8 @@ async function setupContinuousMode() {
     ph.textContent = '… 第 ' + num + ' 页';
     return ph;
   };
-  if (readMode === 'spread') {
-    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
-    for (const row of _spreadRows(pdfDoc.numPages, _spreadOffset)) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'spread-row';
-      for (const num of row) rowEl.appendChild(_mkPh(num, '0'));
-      frag.appendChild(rowEl);
-    }
-  } else {
-    for (let num = 1; num <= pdfDoc.numPages; num++) frag.appendChild(_mkPh(num, '0 auto 12px'));
-  }
-  container.appendChild(frag);   // 一次性插入，避免 N 次 reflow
   const mainEl = document.getElementById('main');
-  // 「打开即可用」关键:先把视口定位到目标页(占位高已按首页尺寸估算、各页同尺寸→定位准),
-  // 再 **显式渲染目标页并等它完成**(图像+选词层都就绪=可用),最后才 observe 其余页懒加载。
-  // 旧逻辑是先 observe(IO 立刻渲染页1-3,白白浪费+抢带宽)→ 50ms 后才滚到目标页。
-  const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
-  if (targetPh) {
-    targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
-    // 不 await:占位建好 + 滚到目标页后就让加载遮罩撤掉(loadPdf 里 pdfLoadHide),
-    // 目标页图像在后台渲染、随后弹出(用户先看到占位"…第N页",几百ms 后图片出来)。
-    _renderPageInto(currentPage, targetPh).catch(() => {});
-  }
-  // IntersectionObserver:此时视口已在目标页 → 只渲染其附近 ±1400px 的页(目标页已 loaded=1 会跳过)
+  // IntersectionObserver 先建好,占位**边建边 observe**(把 O(N) 的 observe 也分摊掉,不再一次性 observe 几千个)。
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
       if (e.isIntersecting && e.target.dataset.loaded === '0') {
@@ -56,7 +33,50 @@ async function setupContinuousMode() {
       }
     });
   }, {rootMargin: '3000px', root: mainEl});   // 提前渲染 ~2-3 页(大图书 644KB/页,留足提前量防翻页卡)
-  container.querySelectorAll('.page-wrap').forEach(ph => _contIO.observe(ph));
+  // 「打开即可用」:目标页占位一就位 → 滚过去 + 显式渲染 + **立刻撤加载遮罩**(不必等全书几千页占位都建完)。
+  let _targetReady = false;
+  const _afterTargetReady = () => {
+    if (_targetReady) return;
+    const targetPh = container.querySelector(`[data-page-num="${currentPage}"]`);
+    if (!targetPh) return;
+    _targetReady = true;
+    targetPh.scrollIntoView({block: 'start', behavior: 'auto'});  // _pendingScrollY 时 _restoreScrollAfterRender 会再精修
+    _renderPageInto(currentPage, targetPh).catch(() => {});        // 目标页图像后台渲染、随后弹出
+    pdfLoadHide();   // 目标页就位即撤遮罩 → 余下占位继续后台分批建,用户已可读/可返回
+  };
+  // ⚡ 根治「打开新文件时点不动返回」:**分批建占位,每批 setTimeout(0) 让出事件循环**。
+  //   旧版同步 for 给全书每页建占位(几千页)冻主线程 2-5s,期间事件队列停摆,连原生 <a>/标题返回都点不动。
+  //   分批后主线程每批只忙几 ms,加载中也能点「返回书架」/标题返回。
+  const CHUNK = 80;
+  if (readMode === 'spread') {
+    // 双页：每行一个 .spread-row 容器,内含 1–2 个 page-wrap 并排;行间距交给 .spread-row
+    const rows = Array.from(_spreadRows(pdfDoc.numPages, _spreadOffset));
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const frag = document.createDocumentFragment(), phs = [];
+      for (const row of rows.slice(i, i + CHUNK)) {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'spread-row';
+        for (const num of row) { const ph = _mkPh(num, '0'); phs.push(ph); rowEl.appendChild(ph); }
+        frag.appendChild(rowEl);
+      }
+      container.appendChild(frag);
+      _afterTargetReady();
+      phs.forEach(ph => _contIO.observe(ph));
+      if (i + CHUNK < rows.length) await new Promise(r => setTimeout(r, 0));   // 让出事件循环
+    }
+  } else {
+    const total = pdfDoc.numPages;
+    for (let start = 1; start <= total; start += CHUNK) {
+      const frag = document.createDocumentFragment(), phs = [];
+      const end = Math.min(start + CHUNK - 1, total);
+      for (let num = start; num <= end; num++) { const ph = _mkPh(num, '0 auto 12px'); phs.push(ph); frag.appendChild(ph); }
+      container.appendChild(frag);
+      _afterTargetReady();
+      phs.forEach(ph => _contIO.observe(ph));
+      if (end < total) await new Promise(r => setTimeout(r, 0));   // 让出事件循环
+    }
+  }
+  _afterTargetReady();   // 兜底(目标页号异常等极端情况;正常路径上面已触发)
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
 }
 
@@ -90,7 +110,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-3';
+const READER_BUILD = 'reader-fix-9';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];

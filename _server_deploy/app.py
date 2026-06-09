@@ -27,7 +27,10 @@ app.permanent_session_lifetime = datetime.timedelta(days=30)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,  # nginx 终结 HTTPS
+    # 生产(nginx 终结 HTTPS)默认 Secure;本地裸 http 实例可设 SESSION_COOKIE_SECURE=0 关掉。
+    # 注:Chrome/Firefox 对 127.0.0.1/localhost 视作 secure context,即便 True 本地也能登录;
+    # 此处随环境降级是为兼容其它浏览器/边界场景,默认仍 Secure 不改生产行为。
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "1") not in ("0", "false", "False"),
 )
 # 信任 nginx 转发头：让 url_for / redirect 用真实 https scheme + 客户端 IP
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -164,12 +167,17 @@ _PWA_HEAD = (
 
 @app.route("/manifest.webmanifest")
 def pwa_manifest():
-    """PWA 清单(可装到主屏、独立窗口运行)。公开(浏览器装应用时取,无需登录)。"""
+    """PWA 清单(可装到主屏、独立窗口运行)。公开(浏览器装应用时取,无需登录)。
+    本地实例(localhost)→ 名字/主题色区分,避免跟 Pi 的「bwicarus 学习」PWA 图标撞名分不清。"""
+    _h = (request.host or "").split(":")[0].lower()
+    _local = _h in ("localhost", "127.0.0.1", "::1")
     return Response(json.dumps({
-        "name": "bwicarus 学习", "short_name": "bwicarus",
+        "name": "bwicarus 本地" if _local else "bwicarus 学习",
+        "short_name": "本地" if _local else "bwicarus",
         "start_url": "/dashboard/", "scope": "/",
         "display": "standalone", "orientation": "any",
-        "background_color": "#10162a", "theme_color": "#10162a", "lang": "zh-CN",
+        "background_color": "#10162a", "lang": "zh-CN",
+        "theme_color": "#16351f" if _local else "#10162a",   # 本地=深绿主题条,一眼区分
         "icons": [
             {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
             {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},

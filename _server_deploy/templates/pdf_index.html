@@ -68,6 +68,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
           <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
           <button class="comp-toggle" onclick="compToggle(event,this)" title="压缩版：体积更小、慢网更快。开启后打开本书传压缩版；原书不动（OCR/好网仍用原书）。无压缩版时灰色，点一下生成（呼吸=压缩中）。">🗜 压缩版</button>
+          <button class="prep-btn" onclick="prewarmFromList(event,this)" title="预热整本：按页原生宽度把全书所有页（背景图 + 字符/振假名）一次渲好缓存 → 之后翻页秒开。本地实例尤其推荐（本地直接全本渲好、零等待）。">📥 预热</button>
         </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
@@ -225,6 +226,40 @@ async function preprocess(ev, btn, engine, enhance) {
     pollPrep(rel, btns, bar, msg);
   } catch (e) { msg.textContent = '✗ ' + e.message; btns.forEach(b => b.disabled = false); }
 }
+// ── 整本预热（背景图 + 字符层/振假名，按页原生宽度；后台跑，复用进度条）──
+async function prewarmFromList(ev, btn) {
+  ev.stopPropagation();
+  const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
+  prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '预热启动中…';
+  let width = 1352;
+  try {
+    const m = await (await fetch('/pdf/api/book-meta?file=' + encodeURIComponent(rel))).json();
+    if (m && m.ok && m.page_w) width = Math.max(400, Math.min(2400, Math.round(m.page_w)));   // 渲染基准=页原生宽(与显示解耦)
+  } catch (_) {}
+  try {
+    const r = await fetch('/pdf/api/prewarm-async', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: rel, width}),
+    });
+    const d = await r.json();
+    if (!d.ok) { msg.textContent = '✗ ' + (d.error || '启动失败'); return; }
+  } catch (e) { msg.textContent = '✗ ' + e.message; return; }
+  const iv = setInterval(async () => {
+    let st;
+    try { st = await (await fetch('/pdf/api/prewarm-status?file=' + encodeURIComponent(rel) + '&width=' + width)).json(); }
+    catch (_) { return; }
+    if (!st || !st.ok) return;
+    bar.style.width = (st.percent || 0) + '%';
+    msg.textContent = (st.percent >= 100) ? '✓ 已预热整本（翻页秒开）' : ('预热中… ' + Math.floor(st.percent) + '%');
+    if (st.percent >= 100 || (!st.running && st.done > 0)) {
+      clearInterval(iv);
+      if (st.percent >= 100) { bar.style.width = '100%'; msg.textContent = '✓ 已预热整本（翻页秒开）'; }
+      setTimeout(() => { prog.style.display = 'none'; }, 4000);
+    }
+  }, 2000);
+}
+
 // ── 智能压缩（gs 降采样图像+保留文字层）：复用同一进度条/轮询 ──
 async function compress(ev, btn) {
   ev.stopPropagation();

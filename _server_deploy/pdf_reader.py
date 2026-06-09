@@ -427,11 +427,15 @@ def pdf_index():
 
 
 def _reader_js_v():
-    """reader.js 的 cache-bust 版本 = 已部署静态文件 mtime（每次部署自动变，免手动 bump）。"""
-    try:
-        return str(int(os.path.getmtime("/var/www/html/static/pdf/reader.js")))
-    except Exception:
-        return "1"
+    """reader.js 的 cache-bust 版本 = 已部署静态文件 mtime（每次部署自动变，免手动 bump）。
+    Pi:nginx 服务 /var/www/...;本地实例(Windows,无 nginx):Flask 从 _server_deploy/static 服务 → 读那份。"""
+    for _p in ("/var/www/html/static/pdf/reader.js",
+               str(Path(__file__).resolve().parent / "static" / "pdf" / "reader.js")):
+        try:
+            return str(int(os.path.getmtime(_p)))
+        except Exception:
+            continue
+    return "1"
 
 
 # ── 图片模式(大型文档网站成熟方案:服务端按页出图,客户端只按需取看到的页,不下载整本 PDF)──
@@ -750,6 +754,86 @@ def pdf_api_preprocess_async():
     except Exception as ex:
         return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
     return jsonify({"ok": True, "sha": sha, "engine": engine, "enhance": enhance})
+
+
+# ── 整本预热(页图 + 字符层/振假名)：本地实例后台一次渲好全书 → 之后任意翻页秒开。──
+# 按当前显示宽度渲(width-specific),detached 子进程(关网页/翻页不中断),状态文件去重防重复启。
+_PREWARM_DIR = CLAUDE_DIR / "state" / "pdf-prewarm"
+
+
+def _prewarm_status_path(sha: str, w: int):
+    return _PREWARM_DIR / f"{sha}-w{w}.json"
+
+
+@bp.route("/api/prewarm-async", methods=["POST"])
+def pdf_api_prewarm_async():
+    """启动整本预热:scripts/prewarm_pdf.py(先渲全部页图@width,再算全部字符层)。在跑则不重复启。"""
+    import subprocess, time
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    try:
+        w = max(400, min(int(body.get("width") or 1260), 3000))
+    except (TypeError, ValueError):
+        w = 1260
+    sha = _book_sha(ap)
+    _PREWARM_DIR.mkdir(parents=True, exist_ok=True)
+    sp = _prewarm_status_path(sha, w)
+    try:                                  # 已在跑 → 不重复启
+        st = json.loads(sp.read_text("utf-8"))
+        if st.get("pid") and _pid_alive(st["pid"]):
+            return jsonify({"ok": True, "already_running": True, "width": w})
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "prewarm_pdf.py"),
+           "--pdf", str(ap), "--rel", rel, "--width", str(w)]
+    # 后台预热降到低优先级:别让整本渲染抢满 CPU 拖慢交互请求(翻页/查词/返回选书页)。
+    popen_kw = dict(cwd=str(CLAUDE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = 0x00004000 | 0x08000000  # BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW
+    else:
+        popen_kw["start_new_session"] = True
+        cmd = ["nice", "-n", "19"] + cmd
+    try:
+        p = subprocess.Popen(cmd, **popen_kw)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    try:
+        sp.write_text(json.dumps({"pid": p.pid, "width": w, "ts": int(time.time())}), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "started": True, "width": w, "pid": p.pid})
+
+
+@bp.route("/api/prewarm-status")
+def pdf_api_prewarm_status():
+    """整本预热进度:按已缓存页图张数(@该宽度)/总页数算 percent;附后台进程是否在跑。"""
+    rel = (request.args.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    try:
+        w = max(400, min(int(request.args.get("width") or 1260), 3000))
+    except (TypeError, ValueError):
+        w = 1260
+    sha = _book_sha(ap); mt = int(ap.stat().st_mtime)
+    try:
+        import fitz
+        total = fitz.open(str(ap)).page_count
+    except Exception:
+        total = 0
+    done = len(list(_PAGE_IMG_DIR.glob(f"{sha}-p*-w{w}-{mt}.jpg"))) if _PAGE_IMG_DIR.exists() else 0
+    running = False
+    try:
+        st = json.loads(_prewarm_status_path(sha, w).read_text("utf-8"))
+        running = bool(st.get("pid") and _pid_alive(st["pid"]))
+    except Exception:
+        pass
+    pct = round(100.0 * done / total, 1) if total else 0
+    return jsonify({"ok": True, "total": total, "done": done, "percent": pct, "running": running, "width": w})
 
 
 @bp.route("/api/compress-async", methods=["POST"])

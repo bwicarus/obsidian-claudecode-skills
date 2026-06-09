@@ -568,6 +568,21 @@ window._speakCurWord = () => {
 // 小框「掌握」toggle（日英统一）：未掌握 ↔ 掌握 100 来回切，不关框。
 // 掌握 → 该词不再标生词下划线；按语言走不同 store：日语 jp-vocab-mark(mastered/unknown)，
 // 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
+// 乐观更新:标掌握瞬间先把该词下划线从所有已加载页移掉(不等服务器写库+重算),服务器响应后 refresh 再校正。
+// 大厂标配(optimistic UI):本地实例下尤其明显——画面立刻响应,不用等任何往返。
+function _dropVocabUnderlineOptimistic(s) {
+  const keys = new Set();
+  for (const k of [s && s.lemma, s && s.word]) if (k) keys.add(String(k).toLowerCase());
+  if (!keys.size) return;
+  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
+    if (!pw.__vocabMarks || !pw.__vocabMarks.length) return;
+    const before = pw.__vocabMarks.length;
+    pw.__vocabMarks = pw.__vocabMarks.filter(m =>
+      !(keys.has(String(m.lemma || '').toLowerCase()) || keys.has(String(m.word || '').toLowerCase())));
+    if (pw.__vocabMarks.length !== before) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+  });
+}
+
 window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
   const next = !s.mastered;
@@ -596,6 +611,7 @@ window._wordPopMaster = (btn) => {
   const w = s.lemma || s.word;
   const url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
   const mark = next ? 'known' : 'unknown';   // 日英统一口径(jp-vocab-mark 已接受 known/unknown)
+  if (next) _dropVocabUnderlineOptimistic(s);   // 乐观:立刻去下划线,不等服务器
   if (btn) btn.disabled = true;
   fetch(url, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
