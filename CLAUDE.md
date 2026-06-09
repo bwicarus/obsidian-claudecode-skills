@@ -267,7 +267,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 | Vault | `/root/obsidian/` | obsidian-headless sync 拉，1175 笔记 |
 | Anki | `/opt/anki-venv/` + `/root/.local/share/Anki2/User 1/` | aqt 25.2.7 + Xvfb 跑 GUI，5634 卡 |
 | 环境变量 | `/root/claude/.env` + `/etc/profile.d/claude.sh` | `CLAUDE_PROJECT` / `OBSIDIAN_VAULT` / `APP_PYTHON` / `APP_CLAUDE` / `APP_CODEX` / `ANKI_CONNECT_URL` / `AI_SETTINGS_FILE` |
-| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (04:00) + `tailscaled` + `webapp` + `anki-sync-refresh.timer` (15min 拉手机复习数据) + `bwicarus-quick-sync.timer` (15min vault 状态同步) + `book-ocr.service` + `book-ocr-watchdog.timer` (日文 PDF OCR 后台 + 自检)。**仅 Pi** 另有 `push-big-files.timer` (每 4h 把 vault 里 >200MB 文件推到 PC，绕过 Obsidian Sync Plus 单文件 200MB 上限) |
+| **systemd 服务** | `/etc/systemd/system/` | `xvfb-99` + `anki-headless` + `obsidian-sync` + `qa-server` + `bwicarus-daily.timer` (01:00;原 04:00,73d8eb6 起提前错开时段) + `tailscaled` + `webapp` + `anki-sync-refresh.timer` (15min 拉手机复习数据) + `bwicarus-quick-sync.timer` (15min vault 状态同步) + `book-ocr.service` + `book-ocr-watchdog.timer` (日文 PDF OCR 后台 + 自检)。**仅 Pi** 另有 `push-big-files.timer` (每 4h 把 vault 里 >200MB 文件推到 PC，绕过 Obsidian Sync Plus 单文件 200MB 上限) |
 | **控制面板** | `https://bwicarus.space/control/` | 替代 Windows 客户端 EXE。3-panel 布局：状态（系统+Daily）/ 操作（触发+日志）/ 设置（AI 后端+所有同步开关）+ 左侧滑出 drawer 含可编辑导航链接，需登录 |
 | **qa-server daemon** | systemd `qa-server.service` | 跑 iPad 截图问答 daemon (`:9091`) + cmd_server (`:9090`)，复用 `_client/core/qa_browser.py` + `cmd_server_thread.py`，ExecStartPre sed 替换 jsdelivr CDN URL 为 `bwicarus.space/static/qa/` + 去掉 `--dangerously-skip-permissions` + 加 `--allowedTools Read`（这 3 个 patch 必须保留，git pull 覆盖后 service restart 时自动重新 patch）|
 | **服务器侧配置** | `/root/claude/state/server-config.json` | 控制面板「设置」面板写入，所有 Windows EXE 客户端开关同步在此（sidebar_links 自定义链接、anki.auto_restart、auto_upload_after_register、scheduled_register.{wake_anki,upload_after}、weak_card_refresh.*、card_antimodel.*、card_quality.*、qa_remote_daemon、qa_exercises_subdir、qa_wrong_subdir）|
@@ -348,13 +348,13 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 
 ## 自动化任务
 
-**三套等价的"每日 04:00 任务"**（同一逻辑，三个运行环境）：
+**三套等价的"每日凌晨任务"**（同一逻辑，三个运行环境;Windows 侧 04:00,服务器 timer **01:00**）：
 
 | 任务 | 运行环境 | 实现 |
 |---|---|---|
-| Windows 计划任务「Obsidian Anki 每日状态更新」 | 主项目本机 PowerShell | `scripts/daily_anki_status.ps1` |
-| bwicarus-client 凌晨定时（0.9.32+） | 客户端进程 | `_client/core/gui.py::_full_daily_pipeline` |
-| **服务器 systemd timer `bwicarus-daily.timer`**（2026-05-14+） | bwicarus.space VPS | `scripts/daily_anki_status.py` (Linux) |
+| Windows 计划任务「Obsidian Anki 每日状态更新」(04:00) | 主项目本机 PowerShell | `scripts/daily_anki_status.ps1` |
+| bwicarus-client 凌晨定时（0.9.32+,默认 04:00） | 客户端进程 | `_client/core/gui.py::_full_daily_pipeline` |
+| **服务器 systemd timer `bwicarus-daily.timer`**（2026-05-14+,OnCalendar **01:00**） | Pi / VPS | `scripts/daily_anki_status.py` (Linux) |
 
 两边都跑：`ensure_alive → register_notes → anki_status → review_priority → 薄弱卡改写/已掌握换问法/质量体检(三个 server-config 开关各自控制) → build_review_deck → cleanup_orphans → export_dashboard → (可选)upload → AnkiWeb sync`。
 

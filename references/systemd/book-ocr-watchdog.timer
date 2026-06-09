@@ -3,6 +3,11 @@ Description=Run book-ocr health watchdog every 15 minutes
 
 [Timer]
 OnBootSec=5min
+# OnActiveSec:以 timer 自身激活时刻为基准 → 开机很久后才 (re)start timer 也必有首跑。
+# 坑(2026-06-10 修):只有 OnBootSec+OnUnitActiveSec 时,开机 7 天后 restart timer →
+# OnBootSec 早过、service 又没跑过(OnUnitActiveSec 无参考点)→ Trigger:n/a 永不触发;
+# Persistent= 仅对 OnCalendar 有效,救不了 monotonic timer。
+OnActiveSec=15min
 OnUnitActiveSec=15min
 Persistent=true
 
