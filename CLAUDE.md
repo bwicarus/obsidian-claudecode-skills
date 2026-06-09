@@ -1,8 +1,29 @@
 # Obsidian 笔记管理项目
 
+## ⚡ 环境定向（新 session 先读这个）
+
+**同一套代码跑在 3 个环境,路径/端口/服务管理方式都不同。先认清你在哪台机**(`hostname`):
+
+| 环境 | 判定 | 项目根 | Vault | webapp | 服务管理 |
+|---|---|---|---|---|---|
+| **Windows PC**（主力开发机） | `sys.platform==win32` / 有 `C:\` | `C:\claude` | `C:\obsidian` | `run_local.ps1`→Flask `127.0.0.1:5000`(本地实例,托盘守护 `local_supervisor.pyw`) | Windows 计划任务 + 托盘 |
+| **Pi**（hostname `bwicarus`,Tailscale-only） | Linux + hostname `bwicarus` | `/home/bwicarus/claude` | `/home/bwicarus/obsidian` | **gunicorn `127.0.0.1:5000`** ← nginx HTTPS(`webapp.service`) | **systemd**(`systemctl`) |
+| **VPS**（hostname `bwicarus-3`,公网 `bwicarus.space`） | Linux + hostname `bwicarus-3` | `/root/claude` | `/root/obsidian` | 同 Pi,webapp 代码在 `/root/webapp` | **systemd** |
+
+- ⚠ **本文档下方所有 `C:\...` 路径是 Windows 视角**;在 Linux(Pi/VPS)上换成上表对应根。Python:Windows=`C:\Users\bwica\...\Python313\python.exe`,Linux=`/usr/bin/python3`(env `APP_PYTHON`,见 `.env`)。
+- 🔌 **webapp 本机端口恒为 `127.0.0.1:5000`(别猜)**:Linux 上是 gunicorn,外部经 nginx 走 HTTPS(VPS=`bwicarus.space`、Pi=`<host>.taile44d0c.ts.net`)。iPad 截图问答另在 `:9091`(daemon)/`:9090`(cmd_server)。
+- 🩺 **一眼看当前状态(Linux)**:
+  ```
+  hostname; for s in xvfb-99 anki-headless obsidian-sync qa-server webapp bwicarus-daily.timer; do echo "$s=$(systemctl is-active $s)"; done
+  curl -sI -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/login   # 应 200
+  git -C "$CLAUDE_PROJECT" status -sb
+  ```
+- 🧭 **接续工作/部署细节**:服务器侧 Claude Code 工作流 → `references/server-side-claude-code.md`;Pi 部署 → `references/raspberry-pi-deployment.md`;VPS 迁移 → `references/linux-server-migration.md`;本地实例(Windows Flask) → `references/webapp-development.md`「本地实例」章。
+
 ## Vault 位置
-- Vault 根目录：`C:\obsidian\`
-- 本项目目录：`C:\claude\`（管理脚本和配置，不含笔记）
+> 见上「环境定向」表;下面按 Windows 主力机写,Linux 换对应根。
+- Vault 根目录：`C:\obsidian\`（Pi=`/home/bwicarus/obsidian`、VPS=`/root/obsidian`）
+- 本项目目录：`C:\claude\`（管理脚本和配置，不含笔记；Pi=`/home/bwicarus/claude`、VPS=`/root/claude`）
 
 ## Sync
 - 用 `obsidian-headless`(npm 包)做后台 sync,不依赖 Obsidian GUI
