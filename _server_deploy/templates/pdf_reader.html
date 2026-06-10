@@ -54,6 +54,8 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .bs-item.cur{background:#10243a}
 .bs-name{font-size:15px;font-weight:600}
 .bs-meta{font-size:12px;color:#7d8590}
+.bs-item.opening{background:#1a2c44}
+.bs-item.opening .bs-name{color:#7dd3fc}
 #spread-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 双页模式:一行两页并排。flex:0 0 auto 禁止挤压(否则总宽略超→页面被 shrink,去边的 overflow 裁切窗口跟着变窄→裁切位置/宽度错乱) */
 .spread-row{display:flex;justify-content:safe center;align-items:flex-start;gap:4px;margin:0 auto 6px}/* gap=两页间缝(须与 06-layout.js _computeFitScale 扣的 4 一致);safe center:放得下居中,放大后超宽则靠左对齐(否则 flex 居中会把左页推到 scrollLeft<0 不可达) */

@@ -1587,7 +1587,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-15';
+const READER_BUILD = 'reader-fix-16';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7506,7 +7506,7 @@ function _openBookshelf() {
       try {
         if (p.comp_exists && localStorage.getItem('pdf-use-compressed:' + p.rel) === '1') url += '&compressed=1';
       } catch (_) {}
-      return '<a class="bs-item' + (here ? ' cur' : '') + '" href="' + url + '">' +
+      return '<a class="bs-item' + (here ? ' cur' : '') + '" href="' + url + '" onclick="return _bsOpen(this)">' +
         '<span class="bs-name">' + _esc(p.name) + (here ? '　←当前' : '') + '</span>' +
         '<span class="bs-meta">' + _esc(p.dir && p.dir !== '.' ? p.dir : '') + (p.dir && p.dir !== '.' ? ' · ' : '') + mb + ' MB' +
         (p.comp_exists ? ' · 🗜有压缩版' : '') + '</span></a>';
@@ -7521,3 +7521,26 @@ function _openBookshelf() {
   }).catch(() => {});
 }
 window._openBookshelf = _openBookshelf;
+
+// 点书:**立即给行内反馈**(⏳打开中,iPad 上整页导航首绘前老页面冻住,没反馈像死机),
+// 画出反馈后再 ① 主动清空 page-container(几千 DOM 的卸载成本提前、可控,Safari 导航提交更快)
+// ② 真正导航。href 保留 → 长按/新标签打开不受影响。
+window._bsOpen = function (a) {
+  try {
+    if (a.classList.contains('opening')) return false;   // 防双击
+    a.classList.add('opening');
+    const n = a.querySelector('.bs-name');
+    if (n) n.textContent = '⏳ 打开中…　' + n.textContent;
+    requestAnimationFrame(() => requestAnimationFrame(() => {   // 两帧:确保反馈已 paint 再开拆
+      try {
+        if (typeof _contIO !== 'undefined' && _contIO) _contIO.disconnect();
+        const pc = document.getElementById('page-container');
+        if (pc) pc.replaceChildren();
+      } catch (_) {}
+      location.href = a.href;
+    }));
+    return false;
+  } catch (_) {
+    return true;   // 异常 → 走 <a> 默认导航
+  }
+};
