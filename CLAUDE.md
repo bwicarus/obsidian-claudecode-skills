@@ -7,8 +7,8 @@
 | 环境 | 判定 | 项目根 | Vault | webapp | 服务管理 |
 |---|---|---|---|---|---|
 | **Windows PC**（主力开发机） | `sys.platform==win32` / 有 `C:\` | `C:\claude` | `C:\obsidian` | `run_local.ps1`→Flask `127.0.0.1:5000`(本地实例,托盘守护 `local_supervisor.pyw`) | Windows 计划任务 + 托盘 |
-| **Pi**（hostname `bwicarus`,Tailscale-only） | Linux + hostname `bwicarus` | `/home/bwicarus/claude` | `/home/bwicarus/obsidian` | **gunicorn `127.0.0.1:5000`** ← nginx HTTPS(`webapp.service`) | **systemd**(`systemctl`) |
-| **VPS**（hostname `bwicarus-3`,公网 `bwicarus.space`） | Linux + hostname `bwicarus-3` | `/root/claude` | `/root/obsidian` | 同 Pi,webapp 代码在 `/root/webapp` | **systemd** |
+| **Pi**（hostname `bwicarus`,Tailscale-only,**当前主力服务器**） | Linux + 存在 `/home/bwicarus/claude` | `/home/bwicarus/claude` | `/home/bwicarus/obsidian` | **gunicorn `127.0.0.1:5000`** ← nginx HTTPS(`webapp.service`) | **systemd**(`systemctl`) |
+| **VPS**（公网 `bwicarus.space`,⏸ **2026-06-10 起暂停**:只跑 webapp,自动化已 disable） | Linux + 存在 `/root/claude`(⚠ hostname 也是 `bwicarus`,跟 Pi 撞名,**别用 hostname 判定**) | `/root/claude` | `/root/obsidian` | 同 Pi,webapp 代码在 `/root/webapp` | **systemd** |
 
 - ⚠ **本文档下方所有 `C:\...` 路径是 Windows 视角**;在 Linux(Pi/VPS)上换成上表对应根。Python:Windows=`C:\Users\bwica\...\Python313\python.exe`,Linux=`/usr/bin/python3`(env `APP_PYTHON`,见 `.env`)。
 - 🔌 **webapp 本机端口恒为 `127.0.0.1:5000`(别猜)**:Linux 上是 gunicorn,外部经 nginx 走 HTTPS(VPS=`bwicarus.space`、Pi=`<host>.taile44d0c.ts.net`)。iPad 截图问答另在 `:9091`(daemon)/`:9090`(cmd_server)。
@@ -230,12 +230,12 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 ## 服务器侧自动化（多实例：VPS + Raspberry Pi）
 
-2026-05-14 起整套工作流跑在 `bwicarus.space` VPS 上（Ubuntu 22.04，1 vCPU / 3.8GB RAM）。**2026-05-15** 又 mirror 到 Raspberry Pi 5（Debian 13，8GB / NVMe，hostname `bwicarus`）作为完全独立的备份实例。两边 **功能 1:1 对等**，git 仓库 + AnkiWeb + Obsidian Sync 是共享 source of truth。
+2026-05-14 起整套工作流跑在 `bwicarus.space` VPS 上（Ubuntu 22.04，2 vCPU / 7.8GB RAM,曾升配）。**2026-05-15** 迁到 Raspberry Pi 5（Debian 13，8GB / NVMe，hostname `bwicarus`）,Pi 成为**唯一活跃实例**。⏸ **VPS 自 2026-06-10 起正式暂停**:自动化单元(xvfb-99/anki-headless/obsidian-sync/qa-server/bwicarus-daily.timer)已 `systemctl disable`(重启也不复活),只保留公网 `webapp.service`;代码停在 2026-05-28(落后 main,重新启用前必须先 `git pull` + 重部署)。git 仓库 + AnkiWeb + Obsidian Sync 是共享 source of truth。
 
 | 实例 | hostname | 公网 | Tailscale IP | 角色 |
 |---|---|---|---|---|
-| VPS | `bwicarus-3` | `bwicarus.space` ✅ | `100.110.193.39` | 公网入口 + 多用户 webapp |
-| Pi 5 | `bwicarus` | ❌ Tailscale only | `100.101.15.57` | 自有数据中心，私网入口 |
+| VPS | ⚠ 实际也是 `bwicarus`(跟 Pi 撞名;Tailscale 设备名才是 `bwicarus-3`) | `bwicarus.space` ✅ | `100.110.193.39` | ⏸ 暂停中,只跑公网 webapp |
+| Pi 5 | `bwicarus` | ❌ Tailscale only | `100.101.15.57` | **主力**:自有数据中心 + 全部自动化 |
 
 **长期目标**：关 Windows EXE 客户端 → 工作主体迁服务器 / Pi → 在 SSH + tmux + Claude Code 模式下用。
 
