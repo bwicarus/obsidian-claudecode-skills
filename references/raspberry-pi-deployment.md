@@ -62,8 +62,12 @@ sudo apt-file update
 # obsidian-headless（vault sync）
 sudo npm install -g obsidian-headless
 
-# Claude / Codex CLI（npm 全局）
-sudo npm install -g @anthropic-ai/claude-code @openai/codex
+# Claude CLI:用 native installer(装到 ~/.local/bin,自更新可用)。
+# ⚠ 别用 npm 全局装 claude-code:自更新替换不了 /usr/bin/claude → 版本永远停在装机当天
+#   (VPS 踩过:5-14 npm 装 2.1.141,自更新只会下到 ~/.local 但被 /usr/bin 挡住,2026-06-10 卸 npm 版修复)
+curl -fsSL https://claude.ai/install.sh | bash
+# Codex CLI（npm 全局）
+sudo npm install -g @openai/codex
 
 # PEP 668 系统 Python（Debian 13 默认锁 pip）
 sudo pip3 install --break-system-packages pymupdf pytesseract
@@ -158,7 +162,7 @@ CLAUDE_PROJECT=/home/bwicarus/claude
 OBSIDIAN_VAULT=/home/bwicarus/obsidian
 APP_PYTHON=/usr/bin/python3
 APP_PYTHONW=/usr/bin/python3
-APP_CLAUDE=/usr/bin/claude
+APP_CLAUDE=/home/bwicarus/.local/bin/claude
 APP_CODEX=/usr/bin/codex
 ANKI_CONNECT_URL=http://127.0.0.1:8765
 AI_SETTINGS_FILE=/home/bwicarus/claude/state/ai-settings.json
