@@ -4851,19 +4851,70 @@ def _save_grammar_enabled(file_rel: str, books: list[str]):
                             ensure_ascii=False, indent=2), "utf-8")
 
 
-def _spacy_grammar(sentence: str) -> dict | None:
-    """用 spaCy venv 子进程做词性 + 依存分析；ECDICT 补每词中文义、MyMemory 译整句。
-    返回 {tokens, deps, sentence_zh}；失败返回 None（调用方回退 AI）。"""
-    import subprocess
+_SPACY_LOCK = _threading.Lock()
+_SPACY_PROC: list = [None]    # 常驻 spacy worker 进程盒(2026-06-10:原每句 spawn 子进程,固定付 ~3.3s 进程+模型加载税)
+
+
+def _spacy_worker_kill():
+    p = _SPACY_PROC[0]
     try:
-        r = subprocess.run(
-            [str(SPACY_PY), str(SPACY_SCRIPT), sentence],
-            capture_output=True, text=True, timeout=30,
-        )
-        if r.returncode != 0 or not r.stdout.strip():
-            return None
-        parsed = json.loads(r.stdout)
+        if p:
+            p.kill()
     except Exception:
+        pass
+
+
+import atexit as _atexit
+_atexit.register(_spacy_worker_kill)   # gunicorn 重启不留孤儿
+
+
+def _spacy_worker_request(sentence: str, timeout: float = 10.0) -> str | None:
+    """向常驻 spacy worker(spacy_parse.py --server)发一行 JSON、读一行响应。
+    锁覆盖完整收发(8 gthread 下防响应错配);进程没起/死了就地拉起(首次含模型加载 ~3s);
+    超时/异常 → kill+置空下次重拉,返回 None(调用方走既有 AI 兜底,语义不变)。"""
+    import subprocess
+    with _SPACY_LOCK:
+        first = _SPACY_PROC[0] is None
+        out: list = []
+
+        def _io():
+            try:
+                p = _SPACY_PROC[0]
+                if p is None or p.poll() is not None:
+                    p = subprocess.Popen(
+                        [str(SPACY_PY), str(SPACY_SCRIPT), "--server"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                    _SPACY_PROC[0] = p          # 先存(超时路径才能 kill 到),再等 ready
+                    if not p.stdout.readline():  # {"ready":true}
+                        raise RuntimeError("worker no ready")
+                p.stdin.write(json.dumps({"text": sentence}, ensure_ascii=False) + "\n")
+                p.stdin.flush()
+                out.append(p.stdout.readline())
+            except Exception:
+                pass
+
+        t = _threading.Thread(target=_io, daemon=True)
+        t.start()
+        t.join(timeout + (8.0 if first else 0.0))   # 首次多给模型加载时间
+        if t.is_alive() or not out or not (out[0] or "").strip():
+            _spacy_worker_kill()
+            _SPACY_PROC[0] = None
+            return None
+        return out[0]
+
+
+def _spacy_grammar(sentence: str) -> dict | None:
+    """用 spaCy 常驻 worker 做词性 + 依存分析；ECDICT 补每词中文义、MyMemory 译整句。
+    返回 {tokens, deps, sentence_zh}；失败返回 None（调用方回退 AI）。"""
+    line = _spacy_worker_request(sentence)
+    if not line:
+        return None
+    try:
+        parsed = json.loads(line)
+    except Exception:
+        return None
+    if parsed.get("error"):
         return None
     tokens = parsed.get("tokens") or []
     deps = parsed.get("deps") or []
@@ -4950,7 +5001,20 @@ def pdf_api_grammar_analyze():
     cache_p = _GRAMMAR_CACHE_DIR / f"{cache_key}.json"
     if cache_p.exists():
         try:
-            return jsonify({"ok": True, "from_cache": True, **json.loads(cache_p.read_text("utf-8"))})
+            _cd = json.loads(cache_p.read_text("utf-8"))
+            # 同键文件可能被 grammar-stream 先建(只含 ai_stream_full)→ 必须有真分析内容才算命中
+            if _cd.get("tokens") or _cd.get("analyses"):
+                return jsonify({"ok": True, "from_cache": True, **_cd})
+        except Exception:
+            pass
+    # spaCy 输出只依赖 sentence(不看 text/tracked_ids)→ 单独的 sentence-only 键:
+    # 换选中焦点词/toggle 任一跟踪节点不再全量重付分析(2026-06-10)。先查全键(兼容存量
+    # 含 AI 结果的条目),miss 再查 sp 键。若将来 spaCy 路径用 tracked_ids 做规则匹配,键需加回。
+    sp_key = hashlib.sha1(("spacy||" + sentence).encode("utf-8")).hexdigest()[:20]
+    sp_p = _GRAMMAR_CACHE_DIR / f"{sp_key}.json"
+    if sp_p.exists():
+        try:
+            return jsonify({"ok": True, "from_cache": True, **json.loads(sp_p.read_text("utf-8"))})
         except Exception:
             pass
 
@@ -4969,7 +5033,7 @@ def pdf_api_grammar_analyze():
                 "engine":      "spacy",
             }
             try:
-                cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
+                sp_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
             except Exception:
                 pass
             return jsonify({"ok": True, **out})
@@ -5064,7 +5128,11 @@ def pdf_api_grammar_analyze():
         "deps":        deps,
         "analyses":    j.get("analyses") or [],
     }
-    cache_p.write_text(json.dumps(out, ensure_ascii=False, indent=2), "utf-8")
+    try:   # merge:别覆盖 grammar-stream 已存进同键文件的 ai_stream_full
+        _old = json.loads(cache_p.read_text("utf-8")) if cache_p.exists() else {}
+    except Exception:
+        _old = {}
+    cache_p.write_text(json.dumps({**_old, **out}, ensure_ascii=False, indent=2), "utf-8")
     return jsonify({"ok": True, **out})
 
 
@@ -5082,6 +5150,26 @@ def pdf_api_grammar_stream():
         return jsonify({"ok": False, "error": "no sentence"}), 400
     enabled_books = data.get("enabled_books") or _load_grammar_enabled(rel)
     tracked_nodes = _collect_grammar_tracked_nodes(enabled_books) if enabled_books else []
+    # 服务端回放缓存(2026-06-10):同 (sentence,text,tracked_ids) 讲解过一次就存进
+    # grammar-cache 同键文件(grammar-forget 已 unlink 同文件,级联免费)。命中 → 按
+    # dict-jp-ai 同款 SSE 一次性回放全文(前端对累计文本抠 [[TRANS]]/[[POINTS]],天然兼容)。
+    # prompt 变更需 bump ai_v。
+    import hashlib
+    tracked_ids = [n["id"] for n in tracked_nodes]
+    _gs_key = hashlib.sha1((sentence + "||" + text + "||" + ",".join(sorted(tracked_ids))).encode("utf-8")).hexdigest()[:20]
+    _GRAMMAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _gs_p = _GRAMMAR_CACHE_DIR / f"{_gs_key}.json"
+    try:
+        _gs_old = json.loads(_gs_p.read_text("utf-8")) if _gs_p.exists() else {}
+    except Exception:
+        _gs_old = {}
+    if _gs_old.get("ai_stream_full") and _gs_old.get("ai_v") == 1:
+        def _gs_replay(md=_gs_old["ai_stream_full"]):
+            yield "event: start\ndata: {}\n\n"
+            yield f"data: {json.dumps({'text': md}, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        return Response(stream_with_context(_gs_replay()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     nodes_block = "\n".join(
         f"- {n['name']}：{n.get('summary','')}" for n in tracked_nodes
     ) or "（无跟踪语法点，[[POINTS]] 直接输出 []）"
@@ -5106,7 +5194,23 @@ def pdf_api_grammar_stream():
 只输出上面两段（含标志），先翻译后语法点，不要任何额外说明。"""
     model = (data.get("model") or "sonnet").strip()
     effort = (data.get("effort") or "low").strip()
-    return _start_ai_stream(prompt, model, effort, (data.get("rid") or "").strip())
+
+    def _gs_save(full, _p=_gs_p):
+        # 只缓存完整输出(两个闭合标志都在,防报错/截断永久缓存);merge 不覆盖同键已有字段(AI 依存分析)
+        if "[[/TRANS]]" not in full or "[[POINTS]]" not in full:
+            return
+        try:
+            old = json.loads(_p.read_text("utf-8")) if _p.exists() else {}
+        except Exception:
+            old = {}
+        old["ai_stream_full"] = full
+        old["ai_v"] = 1
+        try:
+            _p.write_text(json.dumps(old, ensure_ascii=False, indent=2), "utf-8")
+        except Exception:
+            pass
+
+    return _start_ai_stream(prompt, model, effort, (data.get("rid") or "").strip(), on_done=_gs_save)
 
 
 # ─────────────────── 单词本 tab ───────────────────
@@ -5348,6 +5452,13 @@ def pdf_api_grammar_forget():
     if p.exists():
         try:
             p.unlink(); removed = 1
+        except Exception:
+            pass
+    # 级联删 spaCy sentence-only 键(保住「删卡→同句从头生成」语义)
+    sp_p = _GRAMMAR_CACHE_DIR / (hashlib.sha1(("spacy||" + sentence).encode("utf-8")).hexdigest()[:20] + ".json")
+    if sp_p.exists():
+        try:
+            sp_p.unlink(); removed += 1
         except Exception:
             pass
     # 从历史删

@@ -272,7 +272,28 @@ def _split_clauses(doc) -> list:
     return clauses
 
 
+def serve():
+    """常驻 worker 模式(--server):启动即加载模型,stdin 每行一个 {"text":...},
+    每行回一个 JSON + flush。webapp 常驻复用 → 免掉每句 ~3.3s 的进程+模型加载税。
+    JSON 编码天然处理句内换行;空行跳过;EOF/管道断 → 退出。"""
+    _load()   # 预加载,首个请求即快
+    print(json.dumps({"ready": True}), flush=True)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            text = (json.loads(line) or {}).get("text", "")
+            out = parse(text)
+        except Exception as ex:
+            out = {"error": str(ex), "tokens": [], "deps": [], "clauses": [], "components": []}
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+
+
 def main():
+    if "--server" in sys.argv:
+        serve()
+        return
     text = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
     try:
         out = parse(text)
