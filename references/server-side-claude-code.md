@@ -16,7 +16,7 @@ Pi 部署细节见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 | Vault | `/root/obsidian/` (约 1300+ md) | `/home/bwicarus/obsidian/` (约 1300+ md) |
 | Anki | `/root/.local/share/Anki2/User 1/` | `/home/bwicarus/.local/share/Anki2/User 1/` |
 | Anki venv | `/opt/anki-venv/` | `/opt/anki-venv/`（同位置） |
-| Claude CLI | `/root/.local/bin/claude`（native installer;2026-06-10 卸掉了挡道的 npm 版 /usr/bin/claude,PATH 加了 ~/.local/bin） | `/home/bwicarus/.local/bin/claude`（native installer，经 PATH 调用，非 /usr/bin） |
+| Claude CLI | `/root/.local/bin/claude`（native installer;2026-06-10 卸掉了挡道的 npm 版 /usr/bin/claude,PATH 加了 ~/.local/bin,另有 `/usr/local/bin/claude` symlink 兜底——旧 shell/非登录 shell 也找得到,自更新只改 ~/.local 内层链接不受影响） | `/home/bwicarus/.local/bin/claude`（native installer，经 PATH 调用，非 /usr/bin） |
 | Codex CLI | `/usr/bin/codex` v0.130+ | `/usr/bin/codex`（symlink，同左） |
 | OAuth 凭据 | `/root/.claude/.credentials.json` | `/home/bwicarus/.claude/.credentials.json` |
 | Python / Node | 3.10 / 22 (nvm) | 3.13 / 22 (NodeSource) |
