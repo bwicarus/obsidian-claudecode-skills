@@ -1590,7 +1590,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-10';
+const READER_BUILD = 'reader-fix-11';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -3144,6 +3144,24 @@ function _bindCharLayer(cl, pw) {
       if (d < bestDist) { bestDist = d; best = i; }
     }
     if (best >= 0 && bestDist <= (pw.__charBoxes[best].height || 30) * 1.0) return best;
+    // 第三段:振假名带/行间缝/行尾余白容差。ruby 画在字行**上方 ~0.5 行高**(pointer-events:none),
+    // 点在假名或行缝上时 y 不落在任何 char bbox 行内 → 此前直接 MISS 被当「点空白」清选区
+    // (实测 応用情報 p37「議事」上方 furigana 区即死区)。给竖直偏差 ≤0.7×行高、水平贴近的字兜底;
+    // dy 权重 ×2 → 行缝处优先归属更近的那一行。
+    let best3 = -1, bd3 = Infinity;
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      const h = c.height || 30;
+      const dy = y < c.top ? (c.top - y) : (y > c.top + c.height ? y - c.top - c.height : 0);
+      if (dy > h * 0.7) continue;
+      const cx = c.left + c.width / 2;
+      const dx = Math.abs(x - cx);
+      if (dx > h * 1.2) continue;
+      const d = dx + dy * 2;
+      if (d < bd3) { bd3 = d; best3 = i; }
+    }
+    if (best3 >= 0) return best3;
     return -1;
   };
   const onStart = (x, y) => {
@@ -3254,6 +3272,9 @@ function _bindCharLayer(cl, pw) {
           // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
           const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
           if (_t && _t.length <= 30 && (isJa || engOk)) {
+            // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
+            // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
+            toolbar.classList.remove('open');
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
         }
@@ -4148,9 +4169,21 @@ function _renderWordPop(word, ctx, d, cs) {
   // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
   try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
 }
+// 「结果到了自动弹出」的取消信号:点词后只要页面被滚动/滚轮、或又点了别的词,
+// 慢词结果回来就**不再**自动弹(退回旧行为:常亮高亮等用户点,位置才不会错)。
+let _wordPopCancelSeq = 0;
+(() => {
+  const m = document.getElementById('main');
+  if (m) {
+    m.addEventListener('scroll', () => { _wordPopCancelSeq++; }, { passive: true });
+    m.addEventListener('wheel',  () => { _wordPopCancelSeq++; }, { passive: true });
+  }
+})();
+
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
+  const _cseq = ++_wordPopCancelSeq;   // 本次点词占位;同时取消上一个还没回来的词的自动弹出
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
@@ -4179,13 +4212,19 @@ window.showWordPopover = async (word, ctx) => {
     _wordPopOwnerId = hl.id;
     _renderWordPop(word, ctx, d, cap);
   } else {
-    // 慢路径:呼吸高亮已在 → 重画(本 hl 转常亮),等用户点
+    // 慢路径:呼吸高亮已在 → 重画(本 hl 转常亮)
     _renderWordHlsFor(hl.pw);
     if (hl.boxOpen) {   // 用户已点高亮开了"查词中"小框 → 查完就清掉该高亮;框仍归属本 hl 才填(否则被别的查词接管了)
       if (_wordPopOwnerId === hl.id) {
         if (err) { const p = document.getElementById('word-pop'); if (p) p.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + err.message + '</div>'; }
         else _renderWordPop(word, ctx, d, hl.charSel);
       }
+      _removeWordHl(hl);
+    } else if (!err && _wordPopCancelSeq === _cseq) {
+      // 结果到了且期间**没滚动页面、也没点别的词** → 自动弹出,不用再点高亮
+      // (位置安全:没滚动过 → charSel 矩形仍是点击时的屏幕位置)。滚动/再点词后保持旧行为。
+      _wordPopOwnerId = hl.id;
+      _renderWordPop(word, ctx, d, hl.charSel);
       _removeWordHl(hl);
     }
   }

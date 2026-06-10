@@ -514,9 +514,21 @@ function _renderWordPop(word, ctx, d, cs) {
   // 查过即记入生词库 → 刷新本页下划线（橙=新/黄=见过/淡绿=熟）
   try { refreshVocabUnderlinesForAllPages(); } catch (_) {}
 }
+// 「结果到了自动弹出」的取消信号:点词后只要页面被滚动/滚轮、或又点了别的词,
+// 慢词结果回来就**不再**自动弹(退回旧行为:常亮高亮等用户点,位置才不会错)。
+let _wordPopCancelSeq = 0;
+(() => {
+  const m = document.getElementById('main');
+  if (m) {
+    m.addEventListener('scroll', () => { _wordPopCancelSeq++; }, { passive: true });
+    m.addEventListener('wheel',  () => { _wordPopCancelSeq++; }, { passive: true });
+  }
+})();
+
 window.showWordPopover = async (word, ctx) => {
   word = (word || '').trim().toLowerCase();
   if (!word) return;
+  const _cseq = ++_wordPopCancelSeq;   // 本次点词占位;同时取消上一个还没回来的词的自动弹出
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
@@ -545,13 +557,19 @@ window.showWordPopover = async (word, ctx) => {
     _wordPopOwnerId = hl.id;
     _renderWordPop(word, ctx, d, cap);
   } else {
-    // 慢路径:呼吸高亮已在 → 重画(本 hl 转常亮),等用户点
+    // 慢路径:呼吸高亮已在 → 重画(本 hl 转常亮)
     _renderWordHlsFor(hl.pw);
     if (hl.boxOpen) {   // 用户已点高亮开了"查词中"小框 → 查完就清掉该高亮;框仍归属本 hl 才填(否则被别的查词接管了)
       if (_wordPopOwnerId === hl.id) {
         if (err) { const p = document.getElementById('word-pop'); if (p) p.innerHTML = '<div style="padding:14px;color:#c00">查词失败：' + err.message + '</div>'; }
         else _renderWordPop(word, ctx, d, hl.charSel);
       }
+      _removeWordHl(hl);
+    } else if (!err && _wordPopCancelSeq === _cseq) {
+      // 结果到了且期间**没滚动页面、也没点别的词** → 自动弹出,不用再点高亮
+      // (位置安全:没滚动过 → charSel 矩形仍是点击时的屏幕位置)。滚动/再点词后保持旧行为。
+      _wordPopOwnerId = hl.id;
+      _renderWordPop(word, ctx, d, hl.charSel);
       _removeWordHl(hl);
     }
   }

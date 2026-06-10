@@ -377,6 +377,24 @@ function _bindCharLayer(cl, pw) {
       if (d < bestDist) { bestDist = d; best = i; }
     }
     if (best >= 0 && bestDist <= (pw.__charBoxes[best].height || 30) * 1.0) return best;
+    // 第三段:振假名带/行间缝/行尾余白容差。ruby 画在字行**上方 ~0.5 行高**(pointer-events:none),
+    // 点在假名或行缝上时 y 不落在任何 char bbox 行内 → 此前直接 MISS 被当「点空白」清选区
+    // (实测 応用情報 p37「議事」上方 furigana 区即死区)。给竖直偏差 ≤0.7×行高、水平贴近的字兜底;
+    // dy 权重 ×2 → 行缝处优先归属更近的那一行。
+    let best3 = -1, bd3 = Infinity;
+    for (let i = 0; i < pw.__charBoxes.length; i++) {
+      const c = pw.__charBoxes[i];
+      if (c.sp) continue;
+      const h = c.height || 30;
+      const dy = y < c.top ? (c.top - y) : (y > c.top + c.height ? y - c.top - c.height : 0);
+      if (dy > h * 0.7) continue;
+      const cx = c.left + c.width / 2;
+      const dx = Math.abs(x - cx);
+      if (dx > h * 1.2) continue;
+      const d = dx + dy * 2;
+      if (d < bd3) { bd3 = d; best3 = i; }
+    }
+    if (best3 >= 0) return best3;
     return -1;
   };
   const onStart = (x, y) => {
@@ -487,6 +505,9 @@ function _bindCharLayer(cl, pw) {
           // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
           const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
           if (_t && _t.length <= 30 && (isJa || engOk)) {
+            // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
+            // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
+            toolbar.classList.remove('open');
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
         }
