@@ -34,6 +34,13 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
    char层/ruby/句子层)加同一 translate 位移到裁切原点 → 各层相对位置不变、选中坐标自动跟随 */
 .crop-on{position:relative;overflow:hidden}  /* position:relative 仅去边时加→单页模式 #page-container 才能裁住浮层(否则浮层锚到 #main 逃逸) */
 .crop-on>*{transform:translate(calc(-1*var(--crop-l,0px)),calc(-1*var(--crop-t,0px)))}
+/* ⚡ 去边时叠层撑满整张位图(2026-06-10 修「右缘/页底点不中」根因):
+   这些层默认 inset:0 = 裁后宽高,translate 后可见页面**右侧 cropL、底部 cropT 条带没有层** →
+   点击落到 <img>,选词失效;振假名 overflow 照画 → "有文字浮层但点不中"。--full-w/h 由
+   _applyCropToWrap 写入(=位图 css 尺寸)。sel-overlay/ink-layer 本就内联整宽,无需列。 */
+.crop-on>.char-layer,.crop-on>.vocab-layer,.crop-on>.ruby-layer,.crop-on>.hl-layer,
+.crop-on>.word-hl-layer,.crop-on>.phrase-hl-layer,.crop-on>.explain-hl-layer,.crop-on>.char-dbg-layer{
+  right:auto;bottom:auto;width:var(--full-w,100%);height:var(--full-h,100%)}
 #crop-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 #spread-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
 /* 双页模式:一行两页并排。flex:0 0 auto 禁止挤压(否则总宽略超→页面被 shrink,去边的 overflow 裁切窗口跟着变窄→裁切位置/宽度错乱) */

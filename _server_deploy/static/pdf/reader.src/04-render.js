@@ -33,6 +33,12 @@ function _applyCropToWrap(wrap, cw, ch) {
   wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
   wrap.style.setProperty('--crop-l', (cw * fl).toFixed(1) + 'px');
   wrap.style.setProperty('--crop-t', (ch * ft).toFixed(1) + 'px');
+  // ⚡ 叠层必须撑满**整张位图**(2026-06-10 修):inset:0 的层(char-layer/vocab/ruby/hl 等)
+  // 只有裁后宽高,translate(-cropL,-cropT) 后可见页面的**右侧 cropL、底部 cropT 条带没有层覆盖**
+  // → 点击落到 <img> 上,选词全失效(振假名 overflow 照画 → "有浮层但点不中"的根因)。
+  // CSS 里 .crop-on 的叠层改用这两个变量定宽高(sel-overlay/ink 本就内联整宽,不受影响)。
+  wrap.style.setProperty('--full-w', cw + 'px');
+  wrap.style.setProperty('--full-h', ch + 'px');
 }
 
 // 后台预取当前页前后若干页的图(read-ahead,大型文档网站标配):低优先级 fetch → 落进浏览器缓存

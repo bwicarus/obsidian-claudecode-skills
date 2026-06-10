@@ -1,5 +1,26 @@
 // 拖选期间要临时禁点的呼吸高亮 .hl（查词/词组/解释）——防拖选经过它们被截获(丢 move/up + 误弹)
 const _OVL_HL_SEL = '.word-hl-layer .hl, .phrase-hl-layer .hl, .explain-hl-layer .hl';
+
+// ⚡ charBoxes 的像素坐标是 loadCharsAndBindLayer 当时的 scale 烘焙的;refit/双页切换等竞态后
+// 可能与当前显示尺寸脱节(实测 応用情報 p37 偏 19% → 页面右缘/底部整片点不中,而振假名/下划线
+// 反而是准的——它们渲染时实时用 clientWidth/pageWPt 算比例)。交互入口处按**实时尺寸**重标定:
+// boxes 自带 pt 坐标(_x0/_y0/_x1/_y1),O(N) 重算 left/top/width/height,比例没变就跳过。
+function _syncCharBoxScale(pw) {
+  const cb = pw && pw.__charBoxes;
+  if (!cb || !cb.length || !pw.__pageWPt || !pw.__pageHPt) return;
+  const ref = pw.__charLayer || pw.querySelector('.char-layer') || pw;
+  const w = ref.clientWidth, h = ref.clientHeight;
+  if (!w || !h) return;
+  const sx = w / pw.__pageWPt, sy = h / pw.__pageHPt;
+  if (Math.abs((pw.__cbSX || 0) - sx) < 0.001 && Math.abs((pw.__cbSY || 0) - sy) < 0.001) return;
+  if (cb[0]._x0 == null) return;   // 旧结构无 pt 字段 → 放弃(下次重载自然修复)
+  for (const c of cb) {
+    if (c._x0 == null) continue;
+    c.left = c._x0 * sx; c.width  = (c._x1 - c._x0) * sx;
+    c.top  = c._y0 * sy; c.height = (c._y1 - c._y0) * sy;
+  }
+  pw.__cbSX = sx; pw.__cbSY = sy;
+}
 function _findCharAt(charBoxes, x, y) {
   // 先尝试落在某 char bbox 内（优先 non-space）
   for (let i = 0; i < charBoxes.length; i++) {
@@ -349,10 +370,13 @@ document.addEventListener('mouseup', (e) => {
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
     const r = cl.getBoundingClientRect();
-    // 缩放过渡期 wrap 带补偿 zoom → getBoundingClientRect 是缩放后视觉坐标,但 __charBoxes 是栅格 scale 的原始像素。
-    // 除回 zoom 让点击坐标与 charBoxes 同一坐标系。稳态 zoom='' → parseFloat=NaN → 1 → ÷1 无变化(与改动前一致)。
-    const z = parseFloat(pw.style.zoom) || 1;
-    return {x: (clientX - r.left) / z, y: (clientY - r.top) / z};
+    // 视觉坐标 → charBoxes 布局坐标:用 BCR 与 layout 尺寸的**比值**补偿全链路缩放——
+    // wrap 自身的过渡 zoom、page-container/祖先的 pinch zoom、transform scale 一并覆盖。
+    // 旧实现只除 pw.style.zoom:祖先有 zoom 时(实测双页态 ≈0.84)整页点击横向偏 ~16%,
+    // 页中部胖字能蒙对、右缘/页底整片点不中(点視覺上的 議 → 命中右页的 内部)。
+    const kx = r.width  ? cl.clientWidth  / r.width  : 1;
+    const ky = r.height ? cl.clientHeight / r.height : 1;
+    return {x: (clientX - r.left) * kx, y: (clientY - r.top) * ky};
   };
 
   // 严格 bbox 命中 + 同行最近 char fallback。
@@ -398,6 +422,7 @@ function _bindCharLayer(cl, pw) {
     return -1;
   };
   const onStart = (x, y) => {
+    _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
     // 诊断：每次按下输出 char-layer rect + 点击位置
     if (!window._loggedRect) {
