@@ -17,6 +17,7 @@ import os
 import re
 import statistics
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -441,6 +442,34 @@ def _reader_js_v():
 # ── 图片模式(大型文档网站成熟方案:服务端按页出图,客户端只按需取看到的页,不下载整本 PDF)──
 _PAGE_IMG_DIR = CLAUDE_DIR / "state" / "pdf-page-img"
 
+# ── 缓存命中统计(2026-06-10):进程内计数器(gunicorn 单 worker,重启清零)。
+# 目的:链路变慢时区分「没命中缓存(该预热/该修键)」vs「网络/渲染本身慢」,不再靠猜。
+# 看法:curl https://.../pdf/api/cache-stats(或浏览器直开)。
+_CACHE_STATS: dict[str, int] = {}
+_CACHE_STATS_SINCE = time.time()
+
+def _cstat(key: str, n: int = 1) -> None:
+    _CACHE_STATS[key] = _CACHE_STATS.get(key, 0) + n
+
+@bp.route("/api/cache-stats")
+def pdf_api_cache_stats():
+    """各层缓存命中/重算计数。键约定 <层>.<结果>:page_img.hit/fallback_ge/fallback_lt/render_sync,
+    page_chars.override/hit/compute,sent_tr.hit/miss,grammar.full_hit/sp_hit/spacy_run/ai_run,
+    dict_jp.cache/ai。比值异常(hit 远低于预期)= 缓存键漂移/预热缺口,先查键再怪网络。"""
+    r = jsonify({"ok": True, "since": int(_CACHE_STATS_SINCE),
+                 "uptime_s": int(time.time() - _CACHE_STATS_SINCE),
+                 "stats": dict(sorted(_CACHE_STATS.items()))})
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+@bp.route("/api/ping")
+def pdf_api_ping():
+    """连接质量探针:前端定期量 RTT 显示 🟢直连/🟡中继/🔴断(Tailscale 掉中继时用户能一眼归因网络)。"""
+    r = jsonify({"ok": True})
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
 @bp.route("/api/book-meta")
 def pdf_api_book_meta():
     """书元数据(图片模式用,不下载 PDF):页数 + 首页尺寸(pt)。"""
@@ -620,14 +649,18 @@ def pdf_api_page_image():
             best = lt[-1]
             _spawn_exact_render(ap, page, w, cf)             # 后台补精确宽,本次先即时回近似图
         if best is not None:
+            _cstat("page_img.fallback_ge" if best[0] >= w else "page_img.fallback_lt")
             resp = send_file(str(best[1]), mimetype="image/jpeg", conditional=True)
             # ≥请求宽=终态可长缓存;放大回退=临时图,短缓存(后台正在补精确图)
             resp.headers["Cache-Control"] = ("private, max-age=31536000, immutable"
                                              if best[0] >= w else "private, max-age=3600")
             resp.headers["X-PageImg-Fallback"] = str(best[0])
             return resp
+        _cstat("page_img.render_sync")
         if not _render_page_jpg(ap, page, w, cf):
             abort(500)
+    else:
+        _cstat("page_img.hit")
     resp = send_file(str(cf), mimetype="image/jpeg", conditional=True)
     resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
     return resp
@@ -1576,6 +1609,7 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     返回 (chars, page_w, page_h) 或 None。"""
     ovr = _page_ocr_override_load(rel, page)   # 单页重扫覆盖:有则直接用(绕过 PDF 嵌入文字层)
     if ovr is not None:
+        _cstat("page_chars.override")
         return ovr["chars"], ovr["page_w"], ovr["page_h"], ovr.get("furigana", [])
     import hashlib
     try:
@@ -1589,9 +1623,11 @@ def _page_chars_cached(abs_path, rel: str, page: int):
         try:
             d = json.loads(cpath.read_text("utf-8"))
             if d.get("cver") == _CHAR_CACHE_VER:   # 版本不符(或老缓存) → 落到重算
+                _cstat("page_chars.hit")
                 return d["chars"], d["page_w"], d["page_h"], d.get("furigana", [])
         except Exception:
             pass   # 缓存损坏 → 重算
+    _cstat("page_chars.compute")
     res = _compute_page_chars(abs_path, page)
     if res is None:
         return None
@@ -2370,8 +2406,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 continue
             zh = _cache_get(t, "zh-CN")
             if zh:
+                _cstat("sent_tr.hit")
                 s["zh"] = zh
             else:
+                _cstat("sent_tr.miss")
                 misses.append(t)
         if misses:
             _bg_translate_sentences(misses)
@@ -3359,6 +3397,7 @@ def pdf_api_dict_quick():
         _inf = _jp_inflection(word_raw)
         _lookup = (_inf or {}).get("base") or word_raw
         jp = ds.lookup_jp(_lookup, context=context, langs=langs)   # 传本书语言 → 防中日同形异义
+        _cstat("dict_jp.cache" if (jp or {}).get("from_cache") else "dict_jp.ai")
         if not jp or (jp.get("zh") in ("(无)", "", None)):
             return jsonify({"ok": False, "word": word_raw, "jp": True})
         ex = [e for e in (jp.get("examples") or []) if isinstance(e, dict)][:2]
@@ -5004,6 +5043,7 @@ def pdf_api_grammar_analyze():
             _cd = json.loads(cache_p.read_text("utf-8"))
             # 同键文件可能被 grammar-stream 先建(只含 ai_stream_full)→ 必须有真分析内容才算命中
             if _cd.get("tokens") or _cd.get("analyses"):
+                _cstat("grammar.full_hit")
                 return jsonify({"ok": True, "from_cache": True, **_cd})
         except Exception:
             pass
@@ -5014,12 +5054,15 @@ def pdf_api_grammar_analyze():
     sp_p = _GRAMMAR_CACHE_DIR / f"{sp_key}.json"
     if sp_p.exists():
         try:
-            return jsonify({"ok": True, "from_cache": True, **json.loads(sp_p.read_text("utf-8"))})
+            _out = json.loads(sp_p.read_text("utf-8"))
+            _cstat("grammar.sp_hit")
+            return jsonify({"ok": True, "from_cache": True, **_out})
         except Exception:
             pass
 
     # ── 优先 spaCy 本地分析（词性 + 依存，零 AI、秒级）──
     if _spacy_available():
+        _cstat("grammar.spacy_run")
         sp = _spacy_grammar(sentence)
         if sp is not None:
             out = {
@@ -5078,6 +5121,7 @@ def pdf_api_grammar_analyze():
 """
     model = (data.get("model") or "sonnet").strip()
     effort = (data.get("effort") or "low").strip()
+    _cstat("grammar.ai_run")
     try:
         zh = _ai_call(prompt, override_model=model, override_effort=effort)
     except Exception as ex:

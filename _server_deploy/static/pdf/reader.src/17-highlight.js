@@ -48,11 +48,7 @@ async function loadAllHighlights() {
 
 function renderHighlightsOnPage(pw, pageNum) {
   if (!pw) return;
-  let layer = pw.querySelector('.hl-layer');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.className = 'hl-layer';
-  }
+  const layer = ensurePageLayer(pw, 'hl-layer');
   // 永远把 hl-layer append 到最后，让它在 DOM 顺序上晚于 char-layer
   // （配合 z-index:5 双保险）→ hl-saved 在最上层接收点击
   pw.appendChild(layer);

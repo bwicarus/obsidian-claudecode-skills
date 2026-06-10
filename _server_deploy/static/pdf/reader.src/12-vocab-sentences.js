@@ -3,7 +3,7 @@ function _markVocabOptimistic(pw, lemma, forms) {
   const fset = new Set([lemma, ...(forms || [])].filter(Boolean).map(f => String(f).toLowerCase()));
   if (!fset.size) return;
   let layer = pw.querySelector('.vocab-layer');
-  if (!layer) { layer = document.createElement('div'); layer.className = 'vocab-layer'; pw.appendChild(layer); }
+  if (!layer) layer = ensurePageLayer(pw, 'vocab-layer');
   const chars = pw.__charBoxes;
   let i = 0;
   while (i < chars.length) {
@@ -125,11 +125,7 @@ function _lineRectOf(ch, rects) {
 function renderVocabSentences(pw, sentences) {
   if (!_vocabUnderlineEnabled()) return;
   let layer = pw.querySelector('.vocab-layer');
-  if (!layer && sentences && sentences.length) {
-    layer = document.createElement('div');
-    layer.className = 'vocab-layer';
-    pw.appendChild(layer);
-  }
+  if (!layer && sentences && sentences.length) layer = ensurePageLayer(pw, 'vocab-layer');
   if (!layer) return;
   layer.querySelectorAll('.vocab-sentence-box, [class*="vocab-sentence-btn"]').forEach(el => el.remove());   // 含 btn-l / btn-l-start，否则删除/重渲染时 L 按钮残留
   if (!sentences || !sentences.length) return;

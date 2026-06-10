@@ -154,6 +154,50 @@ let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用
 let _scrollSaveTimer = null;
 
+
+
+// ── 页面叠层工厂(2026-06-10):wrap 直挂的全页叠层一律经这里建 ──
+// 统一打 .page-layer 标记:CSS 的 .crop-on>.page-layer 会把层撑满整张位图(--full-w/h)。
+// 经此创建的新叠层不可能再踩「去边模式右/下条带没有层 → 点不中」(pdf-reader.md §36⑤)。
+function ensurePageLayer(pw, cls) {
+  let l = pw.querySelector(':scope > .' + cls);
+  if (!l) {
+    l = document.createElement('div');
+    l.className = cls + ' page-layer';
+    pw.appendChild(l);
+  } else if (!l.classList.contains('page-layer')) {
+    l.classList.add('page-layer');
+  }
+  return l;
+}
+
+// 叠层几何自检(debug 用,console/_auditLayers() 调):层尺寸≠位图 或 charBoxes 烘焙比例≠实时比例 → 列出来。
+// 这两类不一致正是「右缘点不中/越往下错位」级 bug 的前兆,让它自己喊出来,别等用户撞上。
+window._auditLayers = function () {
+  try {
+    const out = [];
+    for (const w of document.querySelectorAll('.page-wrap[data-loaded="1"]')) {
+      const img = w.querySelector('.page-img, canvas');
+      if (!img) continue;
+      const ew = img.clientWidth, eh = img.clientHeight;
+      for (const ch of w.children) {
+        if (ch === img || !ch.className || !/layer|overlay/.test(String(ch.className))) continue;
+        if (Math.abs(ch.clientWidth - ew) > 2 || Math.abs(ch.clientHeight - eh) > 2)
+          out.push('p' + w.dataset.pageNum + ' ' + String(ch.className).split(' ')[0] + ' ' +
+                   ch.clientWidth + 'x' + ch.clientHeight + ' ≠ 位图 ' + ew + 'x' + eh);
+      }
+      const cb = w.__charBoxes;
+      if (cb && cb.length && w.__pageWPt && cb[0]._x0 != null && cb[0]._x1 > cb[0]._x0) {
+        const live = ew / w.__pageWPt;
+        const baked = cb[0].width / (cb[0]._x1 - cb[0]._x0);
+        if (Math.abs(live - baked) > 0.01)
+          out.push('p' + w.dataset.pageNum + ' charBoxes 比例 ' + baked.toFixed(3) + ' ≠ 实时 ' + live.toFixed(3) + '(交互时 _syncCharBoxScale 会自愈)');
+      }
+    }
+    (out.length ? out : ['✓ 全部叠层尺寸/比例一致']).forEach(x => (window.dlog || console.log)(x));
+    return out;
+  } catch (e) { console.warn('auditLayers', e); return []; }
+};
 // ─── per-PDF 位置记忆（localStorage pdf-last-positions） ───
 const LAST_POS_KEY = 'pdf-last-positions';
 function _loadLastPositions() {
@@ -1587,7 +1631,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-16';
+const READER_BUILD = 'reader-fix-18';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -1808,8 +1852,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   let _cbOn = new URLSearchParams(location.search).get('dbg') === '1';
   try { _cbOn = _cbOn || localStorage.getItem('pdf-charbox') === '1'; } catch (_) {}
   if (_cbOn) {
-    const dbgLayer = document.createElement('div');
-    dbgLayer.className = 'char-dbg-layer';
+    const dbgLayer = ensurePageLayer(wrap, 'char-dbg-layer');
+    dbgLayer.innerHTML = '';
     dbgLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5';
     charBoxes.forEach((c) => {
       const e = document.createElement('div');
@@ -1822,9 +1866,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
-  const cl = document.createElement('div');
-  cl.className = 'char-layer';
-  wrap.appendChild(cl);
+  const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
@@ -1891,9 +1933,7 @@ function renderVocabUnderlines(pw, marks) {
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
   if (!layer && marks && marks.length) {
-    layer = document.createElement('div');
-    layer.className = 'vocab-layer';
-    pw.appendChild(layer);
+    layer = ensurePageLayer(pw, 'vocab-layer');
   }
   if (!layer) return;
   layer.innerHTML = '';
@@ -1930,7 +1970,7 @@ function renderRubyLayer(pw) {
   let layer = pw.querySelector('.ruby-layer');
   if (!_rubyEnabled()) { if (layer) layer.remove(); return; }
   const items = pw.__furigana || [];
-  if (!layer) { layer = document.createElement('div'); layer.className = 'ruby-layer'; pw.appendChild(layer); }
+  if (!layer) layer = ensurePageLayer(pw, 'ruby-layer');
   layer.innerHTML = '';
   if (!items.length) return;
   const canvas = pw.querySelector('canvas');
@@ -2221,7 +2261,7 @@ function _markVocabOptimistic(pw, lemma, forms) {
   const fset = new Set([lemma, ...(forms || [])].filter(Boolean).map(f => String(f).toLowerCase()));
   if (!fset.size) return;
   let layer = pw.querySelector('.vocab-layer');
-  if (!layer) { layer = document.createElement('div'); layer.className = 'vocab-layer'; pw.appendChild(layer); }
+  if (!layer) layer = ensurePageLayer(pw, 'vocab-layer');
   const chars = pw.__charBoxes;
   let i = 0;
   while (i < chars.length) {
@@ -2343,11 +2383,7 @@ function _lineRectOf(ch, rects) {
 function renderVocabSentences(pw, sentences) {
   if (!_vocabUnderlineEnabled()) return;
   let layer = pw.querySelector('.vocab-layer');
-  if (!layer && sentences && sentences.length) {
-    layer = document.createElement('div');
-    layer.className = 'vocab-layer';
-    pw.appendChild(layer);
-  }
+  if (!layer && sentences && sentences.length) layer = ensurePageLayer(pw, 'vocab-layer');
   if (!layer) return;
   layer.querySelectorAll('.vocab-sentence-box, [class*="vocab-sentence-btn"]').forEach(el => el.remove());   // 含 btn-l / btn-l-start，否则删除/重渲染时 L 按钮残留
   if (!sentences || !sentences.length) return;
@@ -4699,11 +4735,7 @@ async function loadAllHighlights() {
 
 function renderHighlightsOnPage(pw, pageNum) {
   if (!pw) return;
-  let layer = pw.querySelector('.hl-layer');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.className = 'hl-layer';
-  }
+  const layer = ensurePageLayer(pw, 'hl-layer');
   // 永远把 hl-layer append 到最后，让它在 DOM 顺序上晚于 char-layer
   // （配合 z-index:5 双保险）→ hl-saved 在最上层接收点击
   pw.appendChild(layer);
@@ -7544,3 +7576,47 @@ window._bsOpen = function (a) {
     return true;   // 异常 → 走 <a> 默认导航
   }
 };
+// ── 连接质量指示器(2026-06-10):工具栏小圆点 🟢直连 / 🟡慢(中继/弱网) / 🔴断 ──
+// 背景:iPad Tailscale 掉中继(relay 绕东京)时整站变慢数秒,但应用零线索,用户只能怀疑代码。
+// 每 30s(+页面回前台时)对 /api/ping 量一次 RTT;点圆点弹 toast 显示毫秒数与判级。
+// 纯归因用,不做任何降级逻辑。
+let _connDot = null, _connMs = -1;
+
+function _connClass(ms) {
+  if (ms < 0) return 'r';
+  if (ms < 120) return 'g';     // 直连典型 <80ms(Tailscale 私网)
+  if (ms < 450) return 'y';     // 中继/弱网
+  return 'r';
+}
+
+async function _connProbe() {
+  let ms = -1;
+  try {
+    const t0 = performance.now();
+    const r = await fetch('/pdf/api/ping?_=' + Date.now(), { cache: 'no-store' });
+    if (r.ok) ms = Math.round(performance.now() - t0);
+  } catch (_) {}
+  _connMs = ms;
+  if (_connDot) {
+    _connDot.className = 'conn-dot ' + _connClass(ms);
+    _connDot.title = ms < 0 ? '服务器不可达' :
+      `网络 ${ms}ms · ${ms < 120 ? '直连,正常' : ms < 450 ? '偏慢(可能 Tailscale 走中继/弱网)' : '很慢(中继/网络差)'}`;
+  }
+}
+
+(() => {
+  const tb = document.getElementById('header');
+  if (!tb) return;
+  _connDot = document.createElement('span');
+  _connDot.className = 'conn-dot g';
+  _connDot.onclick = () => {
+    _toast?.(_connMs < 0 ? '🔴 服务器不可达' :
+      `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} 网络往返 ${_connMs}ms` +
+      (_connMs >= 120 ? '(偏慢:多半是 Tailscale 掉中继/弱网,非服务器问题)' : ''));
+    _connProbe();
+  };
+  tb.appendChild(_connDot);
+  _connProbe();
+  setInterval(_connProbe, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) _connProbe(); });
+})();

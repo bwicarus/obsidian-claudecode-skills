@@ -52,8 +52,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   let _cbOn = new URLSearchParams(location.search).get('dbg') === '1';
   try { _cbOn = _cbOn || localStorage.getItem('pdf-charbox') === '1'; } catch (_) {}
   if (_cbOn) {
-    const dbgLayer = document.createElement('div');
-    dbgLayer.className = 'char-dbg-layer';
+    const dbgLayer = ensurePageLayer(wrap, 'char-dbg-layer');
+    dbgLayer.innerHTML = '';
     dbgLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5';
     charBoxes.forEach((c) => {
       const e = document.createElement('div');
@@ -66,9 +66,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
-  const cl = document.createElement('div');
-  cl.className = 'char-layer';
-  wrap.appendChild(cl);
+  const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
   try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
@@ -135,9 +133,7 @@ function renderVocabUnderlines(pw, marks) {
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
   if (!layer && marks && marks.length) {
-    layer = document.createElement('div');
-    layer.className = 'vocab-layer';
-    pw.appendChild(layer);
+    layer = ensurePageLayer(pw, 'vocab-layer');
   }
   if (!layer) return;
   layer.innerHTML = '';

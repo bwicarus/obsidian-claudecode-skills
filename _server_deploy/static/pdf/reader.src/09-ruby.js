@@ -4,7 +4,7 @@ function renderRubyLayer(pw) {
   let layer = pw.querySelector('.ruby-layer');
   if (!_rubyEnabled()) { if (layer) layer.remove(); return; }
   const items = pw.__furigana || [];
-  if (!layer) { layer = document.createElement('div'); layer.className = 'ruby-layer'; pw.appendChild(layer); }
+  if (!layer) layer = ensurePageLayer(pw, 'ruby-layer');
   layer.innerHTML = '';
   if (!items.length) return;
   const canvas = pw.querySelector('canvas');

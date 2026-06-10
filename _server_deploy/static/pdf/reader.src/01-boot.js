@@ -154,3 +154,47 @@ let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用
 let _scrollSaveTimer = null;
 
+
+
+// ── 页面叠层工厂(2026-06-10):wrap 直挂的全页叠层一律经这里建 ──
+// 统一打 .page-layer 标记:CSS 的 .crop-on>.page-layer 会把层撑满整张位图(--full-w/h)。
+// 经此创建的新叠层不可能再踩「去边模式右/下条带没有层 → 点不中」(pdf-reader.md §36⑤)。
+function ensurePageLayer(pw, cls) {
+  let l = pw.querySelector(':scope > .' + cls);
+  if (!l) {
+    l = document.createElement('div');
+    l.className = cls + ' page-layer';
+    pw.appendChild(l);
+  } else if (!l.classList.contains('page-layer')) {
+    l.classList.add('page-layer');
+  }
+  return l;
+}
+
+// 叠层几何自检(debug 用,console/_auditLayers() 调):层尺寸≠位图 或 charBoxes 烘焙比例≠实时比例 → 列出来。
+// 这两类不一致正是「右缘点不中/越往下错位」级 bug 的前兆,让它自己喊出来,别等用户撞上。
+window._auditLayers = function () {
+  try {
+    const out = [];
+    for (const w of document.querySelectorAll('.page-wrap[data-loaded="1"]')) {
+      const img = w.querySelector('.page-img, canvas');
+      if (!img) continue;
+      const ew = img.clientWidth, eh = img.clientHeight;
+      for (const ch of w.children) {
+        if (ch === img || !ch.className || !/layer|overlay/.test(String(ch.className))) continue;
+        if (Math.abs(ch.clientWidth - ew) > 2 || Math.abs(ch.clientHeight - eh) > 2)
+          out.push('p' + w.dataset.pageNum + ' ' + String(ch.className).split(' ')[0] + ' ' +
+                   ch.clientWidth + 'x' + ch.clientHeight + ' ≠ 位图 ' + ew + 'x' + eh);
+      }
+      const cb = w.__charBoxes;
+      if (cb && cb.length && w.__pageWPt && cb[0]._x0 != null && cb[0]._x1 > cb[0]._x0) {
+        const live = ew / w.__pageWPt;
+        const baked = cb[0].width / (cb[0]._x1 - cb[0]._x0);
+        if (Math.abs(live - baked) > 0.01)
+          out.push('p' + w.dataset.pageNum + ' charBoxes 比例 ' + baked.toFixed(3) + ' ≠ 实时 ' + live.toFixed(3) + '(交互时 _syncCharBoxScale 会自愈)');
+      }
+    }
+    (out.length ? out : ['✓ 全部叠层尺寸/比例一致']).forEach(x => (window.dlog || console.log)(x));
+    return out;
+  } catch (e) { console.warn('auditLayers', e); return []; }
+};
