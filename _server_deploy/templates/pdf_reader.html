@@ -42,12 +42,13 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .crop-on>.word-hl-layer,.crop-on>.phrase-hl-layer,.crop-on>.explain-hl-layer,.crop-on>.char-dbg-layer{
   right:auto;bottom:auto;width:var(--full-w,100%);height:var(--full-h,100%)}
 #crop-toggle.active{background:#244470;border-color:#3b6db5;color:#7dd3fc}
-/* 书架浮层(23-bookshelf.js):点「返回书架」零跳转秒开;点书才真正导航 */
-#bookshelf-ov{display:none;position:fixed;inset:0;z-index:1600;background:#0d1117f5;flex-direction:column;color:#e6edf3}
+/* 书架浮层(23-bookshelf.js):点「返回书架」零跳转秒开;点书才真正导航。
+   背景必须**全不透明**:半透明(f5)时每帧要与底下重阅读器混合,实测滚动列表出 50-113ms 长任务=卡顿源 */
+#bookshelf-ov{display:none;position:fixed;inset:0;z-index:1600;background:#0d1117;flex-direction:column;color:#e6edf3;contain:strict}
 .bs-head{display:flex;align-items:center;gap:14px;padding:max(12px,env(safe-area-inset-top)) 18px 12px;border-bottom:1px solid #1c2733;font-size:16px}
 .bs-full{color:#7dd3fc;font-size:13px;text-decoration:none;margin-left:auto}
 .bs-close{background:#1c2733;border:1px solid #2d3a4a;color:#cfe6ff;border-radius:8px;padding:7px 14px;font-size:14px;cursor:pointer;margin-left:10px}
-.bs-list{flex:1;overflow:auto;padding:10px 14px 50px;-webkit-overflow-scrolling:touch;max-width:760px;width:100%;margin:0 auto}
+.bs-list{flex:1;overflow:auto;padding:10px 14px 50px;-webkit-overflow-scrolling:touch;max-width:760px;width:100%;margin:0 auto;overscroll-behavior:contain;touch-action:pan-y}/* contain:列表滚到头不把滚动链传给底下 #main(否则阅读器在浮层下偷偷滚→IO 渲页=卡) */
 .bs-item{display:flex;flex-direction:column;gap:3px;padding:13px 12px;border-bottom:1px solid #151d27;text-decoration:none;color:#e6edf3;border-radius:8px}
 .bs-item:active,.bs-item:hover{background:#16202c}
 .bs-item.cur{background:#10243a}
