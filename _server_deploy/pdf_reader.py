@@ -3677,13 +3677,43 @@ def pdf_api_jp_vocab_mark():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+_JP_EXPLAIN_VER = 1   # 深入讲解 prompt 版本(改 prompt 就 +1 → 旧缓存自动重生成)
+
+
 @bp.route("/api/dict-jp-ai")
 def pdf_api_dict_jp_ai():
-    """日语词「✨AI 深入讲解」SSE 流式:用法/语感/近义辨析/汉字记忆法。按需触发,耗 AI。"""
+    """日语词「✨AI 深入讲解」SSE 流式:用法/语感/近义辨析/汉字记忆法。按需触发,耗 AI。
+
+    服务端永久缓存(2026-06-10):同一个词(按原形)讲解过一次就存 dict-cache,再点
+    **任何设备**都按同 SSE 格式秒回全文(此前每次都现场跑 AI 等数秒)。前端零改动。"""
     word = (request.args.get("word", "") or "").strip()
     context = request.args.get("context", "")
     if not word:
         return jsonify({"ok": False, "error": "no word"})
+    ds, _ = _vocab_modules()
+    # 活用形→原形共用一份缓存(確認します/確認した → 確認する)
+    _base = ((_jp_inflection(word) or {}).get("base") or word)
+    if ds:
+        try:
+            c = ds._cache_load("jp-explain", _base, ttl_days=3650)
+        except Exception:
+            c = None
+        if c and c.get("v") == _JP_EXPLAIN_VER and c.get("md"):
+            from flask import Response, stream_with_context
+
+            def _replay(md=c["md"]):
+                yield "event: start\ndata: {}\n\n"
+                yield f"data: {json.dumps({'text': md}, ensure_ascii=False)}\n\n"
+                yield "event: done\ndata: {}\n\n"
+            return Response(stream_with_context(_replay()), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    def _save_explain(full, _b=_base, _ds=ds):
+        if _ds and full and len(full) > 40:   # 太短多半是报错文本,不缓存
+            try:
+                _ds._cache_save("jp-explain", _b, {"v": _JP_EXPLAIN_VER, "md": full, "word": _b})
+            except Exception:
+                pass
     prompt = (
         f"你是资深日语老师,面向中文母语学习者讲解日语词「{word}」"
         + (f"(出现在句子:{context[:120]})" if context else "")
@@ -3694,7 +3724,8 @@ def pdf_api_dict_jp_ai():
         "4. **汉字记忆** — 各汉字音读/训读怎么记、构词规律\n"
         "不要寒暄,不要重复词本身的读音表格(前面已显示)。"
     )
-    return _start_ai_stream(prompt, "", "", (request.args.get("rid") or "").strip())
+    return _start_ai_stream(prompt, "", "", (request.args.get("rid") or "").strip(),
+                            on_done=_save_explain)
 
 
 @bp.route("/api/dict")
@@ -4013,9 +4044,10 @@ def _ai_stream_worker(rid: str, prompt: str, model: str, effort: str):
     except Exception as e:
         _aistream_update(rid, "".join(acc), status="error", error=str(e))
 
-def _start_ai_stream(prompt: str, model: str = "", effort: str = "", rid: str = ""):
+def _start_ai_stream(prompt: str, model: str = "", effort: str = "", rid: str = "", on_done=None):
     """启动后台 AI 生成线程 + 返回「tail」SSE Response（边生成边推，且断连后线程继续跑完）。
-    rid 为空 → 退化成原行内 _sse_stream（不抗断，兼容老前端）。"""
+    rid 为空 → 退化成原行内 _sse_stream（不抗断，兼容老前端）。
+    on_done(full_text):生成成功后回调(写服务端缓存等);仅 rid 路径生效。"""
     from flask import Response, stream_with_context
     if not rid:
         return Response(stream_with_context(_sse_stream(prompt, model, effort)),
@@ -4023,7 +4055,19 @@ def _start_ai_stream(prompt: str, model: str = "", effort: str = "", rid: str = 
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     import json as _json
     _aistream_init(rid)
-    _threading.Thread(target=_ai_stream_worker, args=(rid, prompt, model, effort), daemon=True).start()
+
+    def _worker():
+        _ai_stream_worker(rid, prompt, model, effort)
+        if on_done:
+            with _JOBS_LOCK:
+                j = _JOBS.get(rid) or {}
+            if j.get("status") == "done" and j.get("full"):
+                try:
+                    on_done(j["full"])
+                except Exception:
+                    pass
+
+    _threading.Thread(target=_worker, daemon=True).start()
 
     def tail():
         yield "event: start\ndata: {}\n\n"

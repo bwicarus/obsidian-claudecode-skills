@@ -701,12 +701,41 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet", langs=None) -
 
     cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
     if cached:
-        # 针对性失效:含汉字的词若是旧 prompt 版本生成 → 丢弃重生成(防中文同形词语感残留);
-        # 纯假名词无伪朋友风险,旧缓存照用(不为升级 prompt 而浪费 AI 重查 5000+ 词)。
         has_kanji = bool(_KANJI_RE.search(word))
         if cached.get("pv") == _JP_PROMPT_VER or not has_kanji:
             return _attach_examples({**cached, "from_cache": True})
-    # 调 AI
+        # 旧 prompt 版的含汉字词(存量 ~4300 条/78%):**先秒回旧条目**(服务器有就不让用户等
+        # ——此前这里直接丢弃重生成,点一下=同步干等 ~7s AI),后台按新 prompt 重生成升级缓存
+        # (伪朋友修正下次点击生效)。stale-while-revalidate,跟 page-image 宽度回退同思路。
+        _jp_regen_bg(word, context, model, langs)
+        return _attach_examples({**cached, "from_cache": True, "stale_pv": True})
+    data = _jp_ai_fetch(word, context, model, langs)
+    if not data:
+        return None
+    return _attach_examples({**data, "from_cache": False})
+
+
+_JP_REGEN_INFLIGHT: set = set()
+
+
+def _jp_regen_bg(word: str, context: str, model: str, langs) -> None:
+    """后台重生成一个旧版本词条(在途去重)。失败无害:旧缓存还在,下次再试。"""
+    import threading
+    if word in _JP_REGEN_INFLIGHT:
+        return
+    _JP_REGEN_INFLIGHT.add(word)
+
+    def _run():
+        try:
+            _jp_ai_fetch(word, context, model, langs)
+        finally:
+            _JP_REGEN_INFLIGHT.discard(word)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _jp_ai_fetch(word: str, context: str = "", model: str = "sonnet", langs=None) -> dict | None:
+    """调 AI 生成 JP 词条 + 写缓存(lookup_jp 同步路径与后台升级线程共用)。返回原始 data。"""
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
         from ai_client import ask
@@ -753,7 +782,7 @@ def lookup_jp(word: str, context: str = "", model: str = "sonnet", langs=None) -
     data["source"] = "jp_ai"
     data["pv"] = _JP_PROMPT_VER
     _cache_save("jp", word, data)
-    return _attach_examples({**data, "from_cache": False})
+    return data
 
 
 def compose_entry(word: str, *, online: bool = True, translate_examples: bool = True) -> dict:
