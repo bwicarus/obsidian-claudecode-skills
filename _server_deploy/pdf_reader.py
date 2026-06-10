@@ -2353,23 +2353,64 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     _flush_sentence()
     # 加 NBSP（避免极短句子无法被 hit）：按文本长度过滤
     sentences = [s for s in sentences if len(s.get("text", "")) >= 12]
-    # 预翻译：cache 命中秒返回；未命中调 MyMemory ~300ms/句（同步在这里阻塞）
-    # 第一次访问该页慢一点，但后续命中 cache 一次就秒了
+    # 预翻译(2026-06-10 改 SWR):**只取已缓存的译文**即回——此前 miss 句逐句同步翻
+    # (Google ~300ms/句,抖动时退化为每句数秒 AI CLI),首访页被阻塞 1-3s+ 且可耗尽线程池。
+    # miss 句丢后台批量翻译(去重、绝不落 AI CLI),下次 overlay/vocab-marks 重取自然带上;
+    # 前端句子 L 按钮本就有按需翻译路径,首访功能不丢。
     try:
         import sys as _sys
         vp = CLAUDE_DIR / "scripts" / "vocab"
         if str(vp) not in _sys.path:
             _sys.path.insert(0, str(vp))
-        from translate import translate as _tr   # type: ignore
+        from translate import _cache_get   # type: ignore
+        misses = []
         for s in sentences:
             t = s.get("text") or ""
-            if t:
-                zh = _tr(t)
-                if zh:
-                    s["zh"] = zh
+            if not t:
+                continue
+            zh = _cache_get(t, "zh-CN")
+            if zh:
+                s["zh"] = zh
+            else:
+                misses.append(t)
+        if misses:
+            _bg_translate_sentences(misses)
     except Exception:
         pass
     return sentences
+
+
+_BG_TR_INFLIGHT: set = set()    # 后台补翻去重(多页并发不重复提交)
+
+
+def _bg_translate_sentences(texts: list[str]) -> None:
+    """后台批量补翻句子进 tr-cache(gtranslate_batch 一次过;失败静默,下次再试)。不调 AI CLI。"""
+    import threading
+    todo = [t for t in texts if t not in _BG_TR_INFLIGHT]
+    if not todo:
+        return
+    _BG_TR_INFLIGHT.update(todo)
+
+    def _run():
+        try:
+            import sys as _sys
+            vp = CLAUDE_DIR / "scripts" / "vocab"
+            if str(vp) not in _sys.path:
+                _sys.path.insert(0, str(vp))
+            from translate import gtranslate_batch, _cache_put   # type: ignore
+            res = gtranslate_batch(todo, "zh-CN")   # 等长 list;无 key → None
+            for t, zh in zip(todo, res or []):
+                if zh:
+                    try:
+                        _cache_put(t, "zh-CN", zh, "gtranslate")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            _BG_TR_INFLIGHT.difference_update(todo)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _split_page_sentences(chars: list[dict], page_h: float = 0) -> list[dict]:
@@ -2503,11 +2544,17 @@ def pdf_api_page_translate():
                     zhs[i] = batch[k]
                     try: _cp(texts[i], "zh-CN", batch[k], "gtranslate")
                     except Exception: pass
-        # 3) Google 没 key / 整体失败 → 逐句兜底（auto 链：deepl/mymemory）
+        # 3) Google 没 key / 整体失败 → 逐句兜底。2026-06-10 改:① backend="no_ai"
+        #    (gtranslate→deepl→mymemory,**绝不落 AI CLI**——此前走 auto 链,Google 故障窗
+        #    60 句 × [8s 超时 + AI 数秒] 单请求挂 4-7 分钟还烧几十次额度);② 10s 墙钟预算,
+        #    超时即止,未译句 zh 留空原样返回(前端对空 zh 优雅跳过,响应带 translated/total)。
         still = [i for i in miss_idx if not zhs[i]]
+        _deadline = _time.monotonic() + 10
         for i in still[:60]:   # 限量兜底，避免极端长页阻塞
+            if _time.monotonic() > _deadline:
+                break
             try:
-                z = _tr(texts[i])
+                z = _tr(texts[i], backend="no_ai")
                 if z:
                     zhs[i] = z
             except Exception:
@@ -2521,66 +2568,34 @@ def pdf_api_page_translate():
 
 @bp.route("/api/page-vocab-marks")
 def pdf_api_page_vocab_marks():
-    """轻量路由：仅返回该页 vocab_marks（不返回 chars）。
-    用户查词后用来立刻刷新下划线，不需要重传整页 chars。"""
+    """轻量路由：仅返回该页 vocab_marks（不返回 chars）。用户查词后用来立刻刷新下划线。
+
+    2026-06-10 统一到 /api/page-overlay 同路径:此前这里内联 fitz.open+rawdict+分词全重算
+    (查词后 3-4 轮 × 多页,每页几百 ms 纯浪费)+ vocab_index force_reload 全库重读(~150ms);
+    改用 _page_chars_cached(磁盘缓存秒回)+ _apply_char_offset(顺带修校准页错位)+
+    OCR override 一致 + 普通 mtime 扫描足以感知刚写盘的笔记(前端刷新延迟 ≥1.5s)。"""
     rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
     abs_path = _safe_vault_path(rel)
     if not abs_path or page < 1:
         return jsonify({"ok": False, "error": "invalid"}), 400
     try:
-        import fitz
+        import fitz  # noqa: F401
     except ImportError:
         return jsonify({"ok": False, "error": "PyMuPDF missing"}), 500
-    doc = None
     try:
-        doc = fitz.open(str(abs_path))
-        if page > len(doc):
+        res = _page_chars_cached(abs_path, rel, page)
+        if res is None:
             return jsonify({"ok": False, "error": "page out of range"}), 400
-        p = doc[page - 1]
-        raw = p.get_text("rawdict")
-        chars = []
-        _col_seq = 0   # 跟 _compute_page_chars 一致:块内 gutter 切列,每列唯一 bk(并排气泡分开)
-        for _bi, b in enumerate(raw.get("blocks", [])):
-            if b.get("type") != 0: continue
-            _bs = len(chars)
-            for _li, ln in enumerate(b.get("lines", [])):
-                for sp in ln.get("spans", []):
-                    for ch in sp.get("chars", []):
-                        bb = ch.get("bbox")
-                        if not bb: continue
-                        c = ch.get("c", "")
-                        if not c: continue
-                        c = _LIGATURES.get(c, c)   # 还原连字 ﬁ→fi，免得词在此被断
-                        chars.append({
-                            "c": c, "x0": round(bb[0],2), "y0": round(bb[1],2),
-                            "x1": round(bb[2],2), "y1": round(bb[3],2),
-                            "sp": 1 if c.isspace() else 0,
-                            "bk": _bi,   # 块号:下面按列覆盖。句子检测/选中靠它(并排气泡分列才不串)
-                        })
-            for _col in _split_block_columns(chars[_bs:]):
-                cur_bk = _col_seq; _col_seq += 1
-                for c in _col: c["bk"] = cur_bk
-                _apply_jp_tokenize(_col, _bi, cur_bk % 1000)   # CJK 列补 w（JP 生词下划线要按词）
-        _merge_favorite_phrases(chars)   # 收藏词组合并 w
-        # 强制刷新 vocab_index（防 vocab note 刚写完缓存还旧）
-        try:
-            import sys as _sys
-            vp = CLAUDE_DIR / "scripts" / "vocab"
-            if str(vp) not in _sys.path:
-                _sys.path.insert(0, str(vp))
-            import vocab_index   # type: ignore
-            vocab_index.index(force_reload=True)
-        except Exception:
-            pass
+        chars, page_w, page_h, _furi = res
+        _apply_char_offset(chars, _char_offset_for(rel, page))
+        _merge_favorite_phrases(chars)
         _aj = _page_allows_ja(chars, rel)   # 中文书纯汉字 → 不当日语,免撞日语词库
         marks = _build_vocab_marks(chars)
         if _aj:
             marks += _build_jp_vocab_marks(chars)   # 日语生词下划线
-        sentences = _build_unmastered_sentences(chars, page_h=p.rect.height, allow_ja=_aj)
-        # **必须跟 page-chars 路由一致**：合并手动翻译句 sidecar + 过滤已删除句。
-        # 否则 refreshVocabUnderlinesForAllPages(查词后调) 会用「只有自动生词句」覆盖前端
-        # __vocabSentences → 手动翻译形成的 L 框/边框被刷没（本次 bug 根因）。
+        sentences = _build_unmastered_sentences(chars, page_h=page_h, allow_ja=_aj)
+        # **必须跟 page-overlay 一致**：合并手动翻译句 sidecar + 过滤已删除句。
         for ts in _tr_load(rel):
             if ts.get("rects") and ts.get("page", page) == page:
                 sentences.append(ts)
@@ -2591,15 +2606,11 @@ def pdf_api_page_vocab_marks():
             "ok": True,
             "vocab_marks": marks,
             "vocab_sentences": sentences,
-            "page_w": p.rect.width,
-            "page_h": p.rect.height,
+            "page_w": page_w,
+            "page_h": page_h,
         })
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
-    finally:
-        if doc:
-            try: doc.close()
-            except Exception: pass
 
 
 def _book_text_index(abs_path, rel: str) -> dict:
@@ -4867,7 +4878,9 @@ def _spacy_grammar(sentence: str) -> dict | None:
         if vp not in sys.path:
             sys.path.insert(0, vp)
         import dict_sources  # type: ignore
-        _zh_cache: dict[str, str] = {}
+        _zh_cache = _GRAMMAR_ZH_CACHE   # 模块级 memo:ECDICT 是静态库,跨请求复用(含 miss 空串负缓存)
+        if len(_zh_cache) > 20000:
+            _zh_cache.clear()
         def _zh(w: str) -> str:
             w = (w or "").strip()
             if not w or not w[0].isalpha():
@@ -5119,7 +5132,38 @@ def _vocab_read_fm(path: Path) -> dict:
     return fm
 
 
+_GRAMMAR_ZH_CACHE: dict = {}    # 语法分析 token→简明中文 memo(ECDICT 静态库,常驻进程跨请求复用)
+_VOCAB_ZH_CACHE: dict = {}      # vocab-list lemma→中文 memo(含空串负缓存)
+_VOCAB_NOTES_CACHE: dict = {"sig": None, "notes": None}   # vocab 笔记 frontmatter(mtime 签名失效)
+
+
+def _vocab_notes_all(vroot) -> dict:
+    """全部 vocab 笔记 frontmatter,带 (文件数,最大mtime) 签名缓存——没变不重读。"""
+    files = [p for p in vroot.rglob("*.md") if p.parent.name != "_audio"]
+    try:
+        sig = (len(files), max((p.stat().st_mtime for p in files), default=0))
+    except OSError:
+        sig = None
+    c = _VOCAB_NOTES_CACHE
+    if sig is not None and c["sig"] == sig and c["notes"] is not None:
+        return c["notes"]
+    notes = {}
+    for p in files:
+        fm = _vocab_read_fm(p)
+        lemma = (fm.get("lemma") or fm.get("word") or p.stem).strip().lower()
+        if lemma:
+            notes[lemma] = fm
+    c["sig"], c["notes"] = sig, notes
+    return notes
+
+
 def _vocab_ecdict_zh(lemma: str) -> str:
+    key = (lemma or "").lower()
+    if key in _VOCAB_ZH_CACHE:
+        return _VOCAB_ZH_CACHE[key]
+    if len(_VOCAB_ZH_CACHE) > 5000:
+        _VOCAB_ZH_CACHE.clear()
+    z = ""
     try:
         vp = str(CLAUDE_DIR / "scripts" / "vocab")
         if vp not in sys.path:
@@ -5129,10 +5173,12 @@ def _vocab_ecdict_zh(lemma: str) -> str:
         if ec:
             for d in dict_sources._ec_definitions(ec):
                 if d.get("zh"):
-                    return d["zh"][:40]
+                    z = d["zh"][:40]
+                    break
     except Exception:
         pass
-    return ""
+    _VOCAB_ZH_CACHE[key] = z
+    return z
 
 
 @bp.route("/api/vocab-list")
@@ -5147,15 +5193,7 @@ def pdf_api_vocab_list():
     vroot = OBSIDIAN_ROOT / "资源" / "vocab"
     if not vroot.exists():
         return jsonify({"ok": True, "items": [], "scope": scope})
-    # 全部笔记 frontmatter
-    notes = {}
-    for p in vroot.rglob("*.md"):
-        if p.parent.name == "_audio":
-            continue
-        fm = _vocab_read_fm(p)
-        lemma = (fm.get("lemma") or fm.get("word") or p.stem).strip().lower()
-        if lemma:
-            notes[lemma] = fm
+    notes = _vocab_notes_all(vroot)   # mtime 签名缓存:笔记没变不重读全部 frontmatter
     # 反向索引（出现页）
     exposure = {}
     try:

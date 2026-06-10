@@ -132,20 +132,9 @@ def lookup_ecdict(word: str) -> dict | None:
     """查 ECDICT，返回原始 + lemma 化后的派生词列表。"""
     row = _ec_row(word)
     if not row:
-        # 屈折形态：从 exchange LIKE 反查原型
-        try:
-            conn = sqlite3.connect(f"file:{ECDICT_DB}?mode=ro", uri=True)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT word FROM stardict WHERE exchange LIKE ? LIMIT 1",
-                (f"%/{word.lower()}%",))
-            r = cur.fetchone()
-            conn.close()
-            if r:
-                row = _ec_row(r[0])
-        except Exception:
-            pass
-    if not row:
+        # (2026-06-10 删:原 exchange LIKE '%/word%' 反查——exchange 格式是 'p:went/i:going',
+        # 值前必有 '类型:',LIKE 模式结构上**永不可能命中**,却对 340 万行全表扫描 ~1.4s/词。
+        # went/mice/children 等不规则变形在 ECDICT 本就是独立行,上面的精确查询已覆盖。)
         return None
 
     ex = _parse_exchange(row.get("exchange", ""))
