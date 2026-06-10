@@ -86,6 +86,8 @@ data/ecdict.db                           → <webapp>/data/ecdict.db
 | GET/POST | `/api/grammar-tracked` | 语法分析：选哪些书启用 + tracked 节点 |
 | POST | `/api/grammar-analyze` / `-stream` | 语法分析：spaCy（零 AI）/ AI 兜底，对句子按 tracked 语法点分析 |
 | GET/POST | `/api/grammar-history` / `-history-save` / `-forget` | 语法分析：分析历史读写/清除 |
+| GET | `/api/ping` | 连接质量探针（no-store，前端连接小圆点量 RTT，见 §37②） |
+| GET | `/api/cache-stats` | 各层缓存命中/重算计数（进程内，重启清零，见 §37④） |
 
 vocab 字典融合系统详见 [`vocab-system.md`](vocab-system.md)；英语语法分析系统是后加的子系统（spaCy 词性依存 + tracked 语法节点对齐）。
 
@@ -915,3 +917,12 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - **④ 防御两件**：`_syncCharBoxScale`（charBoxes 像素坐标是加载瞬间 scale 烘焙的，交互入口按实时 `clientWidth/pageWPt` 重标定——boxes 自带 `_x0` pt 字段，O(N) 重算）；`ptToLocal` 改 **BCR 与 layout 尺寸比值**换算（旧实现只除 `pw.style.zoom`，祖先 zoom/transform 漏算）。
 - **⑤ 真凶：crop-on 叠层只有裁后尺寸**（`04-render.js::_applyCropToWrap` + 模板 CSS）。去边模式 wrap 收成裁后宽高、子层 `translate(-cropL,-cropT)`；`inset:0` 的叠层(char-layer/vocab/ruby/hl 等)只有**裁后**尺寸 → 可见页面**右侧 cropL、底部 cropT 条带没有任何点击层**(实测 55/69px)，点击落到 `<img>` 上;振假名层 overflow 照画 → 「有浮层但点不中」。`sel-overlay`/`ink-layer` 因 `_renderPageImg` 内联整宽幸免(也因此此前难定位)。修:`_applyCropToWrap` 写 `--full-w/--full-h`(位图 css 尺寸)，CSS 对 `.crop-on` 下 8 个叠层(`char-layer/vocab-layer/ruby-layer/hl-layer/word-hl-layer/phrase-hl-layer/explain-hl-layer/char-dbg-layer`)改 `right:auto;bottom:auto;width/height:var(--full-w/h)`。新增叠层时记得加进这组选择器。
 - **复现方法论**（可复用）：Pi 上 `pip install playwright` + chromium headless；用 webapp SECRET_KEY 铸 session cookie；走 nginx HTTPS(直连 gunicorn :5000 时 /static 不在 Flask 侧会 404 模块)；`page.route` 拦截 reader.js 可换任意 commit 的 bundle 做二分；注意 crop translate——瞄准要用 `charBox + transform 矩阵 e/f`。改模板后 **gunicorn 不自动重载 Jinja 缓存，必须 restart webapp**。
+
+### 37. 链路工程化四件套（2026-06-10 晚，`reader-fix-17`→`fix-18`，commit 7980c9c）
+
+针对「文字层↔浮层↔服务器↔PWA」这条链路反复踩的工程坑，固化四件基础设施：
+
+- **① E2E 冒烟 + 一键部署**。`scripts/reader_e2e.py`（Playwright，Pi 本机 ~40s）：铸 session cookie → 开応用情報 p37 → charBoxes 就绪 → 视觉坐标点右缘「議」（历史死区，含 crop transform `e/f`）→ `elementFromPoint` 必须是 char-layer → 选中=議事 → 词典 ≤12s 弹出 → 书架浮层开/有书/关；页面 JS 错误零容忍（FILE_REL 历史问题白名单）。`scripts/deploy_reader.sh [--no-e2e] [--pc]`：拼 bundle → `node --check` → 部署副本尾部追加 `window.__READER_GIT='<hash>+<clean|dirty>·<时间>'`（**仓库 reader.js 保持纯 cat，戳只打在部署副本**）→ cp 模板+pdf_reader.py → py_compile → restart webapp → /login 200 → E2E。治三个反复犯的错：忘拼 bundle / 改模板忘 restart / 部署完不验证。**改阅读器一律走这个脚本部署**。
+- **② 连接质量小圆点**。`/pdf/api/ping`（no-store）+ `24-connquality.js`：30s + 回前台时量 RTT，header 尾部圆点 🟢<120ms 直连 / 🟡<450ms 中继/弱网 / 🔴断，点击 toast 显示毫秒数与归因。背景：iPad Tailscale 掉中继时整站慢数秒、应用零线索，用户只能怀疑代码。纯归因用，不做降级。
+- **③ 叠层工厂 `ensurePageLayer(pw, cls)`**（`01-boot.js`）。所有页级叠层（char/vocab/ruby/hl/char-dbg…8 处创建点）统一经它建，自动附加 `.page-layer` 标记类；crop CSS 在原 8 个显式类名外加 `.crop-on>.page-layer` 兜底 → **新叠层不会再漏掉去边补偿**（§36⑤「有浮层点不中」的根因再也不会因加新层复发）。注意两处**故意不用**工厂：`15-phrase-wordpop` 词典框内的 ruby-layer（不是页级层）；`17-highlight` 保留 `pw.appendChild` 重排到末尾（stacking 语义）。配 `window._auditLayers()` console 自检：逐 wrap 比对各叠层尺寸 vs `<img>`、charBoxes 烘焙 scale vs 实时 scale（>1% 警告，交互时 `_syncCharBoxScale` 会自愈）。
+- **④ 缓存命中计数**。`_CACHE_STATS` 进程内计数器（gunicorn 单 worker，重启清零）+ `GET /pdf/api/cache-stats`。键：`page_img.hit/fallback_ge/fallback_lt/render_sync`、`page_chars.override/hit/compute`、`sent_tr.hit/miss`、`grammar.full_hit/sp_hit/spacy_run/ai_run`、`dict_jp.cache/ai`。用法：用户报「慢」→ 先看比值——hit 占比异常低 = 缓存键漂移/预热缺口（如 §35① 的 85 种宽度问题，当时只能靠 ls 缓存目录数文件）；比值正常 = 看 ② 的圆点怪网络。
