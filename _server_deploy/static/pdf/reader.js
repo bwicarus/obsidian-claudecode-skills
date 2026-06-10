@@ -1590,7 +1590,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-9';
+const READER_BUILD = 'reader-fix-10';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -1658,7 +1658,8 @@ window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
 // 在 DOM,内存无上限增长 → 更早被回收。卸载后 dataset.loaded='0',滚回视口由 IntersectionObserver 重渲。
 // 卸载阈值(5000px)必须 > IO 的 rootMargin(3000px),留 2000px 缓冲,避免边界来回抖动反复卸载/重渲。
 const _KEEP_DIST_PX = 5000;
-function _unloadPage(w) {
+// preRect: 调用方批量预读好的 getBoundingClientRect(读写分离,免逐页 读→写→读 强制 reflow)
+function _unloadPage(w, preRect) {
   const num = w.dataset.pageNum;
   // 占位尺寸用 **fit 公式**(页 meta × 当前 scale × 去边可见比),跟 setupContinuousMode 的 estW 一致 →
   // 永远精确 fit-width;**不**用 getBoundingClientRect 测量(若卸载瞬间该页还带补偿 zoom,测到的是放大/缩小后的
@@ -1669,7 +1670,7 @@ function _unloadPage(w) {
     wd = Math.floor(_meta.page_w * scale * _cropVisWFrac());
     h  = Math.floor(_meta.page_h * scale * _cropVisHFrac());
   } else {
-    const _r = w.getBoundingClientRect();
+    const _r = preRect || w.getBoundingClientRect();
     wd = Math.round(_r.width); h = Math.round(_r.height);
   }
   w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
@@ -1686,17 +1687,22 @@ function _unloadPage(w) {
   w.textContent = '… 第 ' + num + ' 页';
   w.dataset.loaded = '0';
 }
-function _unloadFarPages() {
+// wraps 可由调用方(_onContinuousScroll)传入复用,免二次全量 querySelectorAll
+function _unloadFarPages(wraps) {
   const mainEl = document.getElementById('main');
   if (!mainEl) return;
   const mr = mainEl.getBoundingClientRect(), vh = mainEl.clientHeight;
-  const wraps = document.querySelectorAll('#page-container .page-wrap');
+  wraps = wraps || document.querySelectorAll('#page-container .page-wrap');
+  // 读写分离:先一轮只读 rect 收集待卸载页(rect 一并传给 _unloadPage 当回退测量),
+  // 再统一写 → 不再 读rect→写样式→读rect 交错触发逐页强制 reflow(占位尺寸不变,预读 rect 仍有效)
+  const toUnload = [];
   for (const w of wraps) {
     if (w.dataset.loaded !== '1') continue;   // 占位页便宜跳过(不调 getBoundingClientRect)
     const r = w.getBoundingClientRect();
     const relTop = r.top - mr.top, relBot = r.bottom - mr.top;
-    if (relBot < -_KEEP_DIST_PX || relTop > vh + _KEEP_DIST_PX) _unloadPage(w);
+    if (relBot < -_KEEP_DIST_PX || relTop > vh + _KEEP_DIST_PX) toUnload.push([w, r]);
   }
+  for (const [w, r] of toUnload) _unloadPage(w, r);
 }
 
 let _scrollTimer = null;
@@ -1707,27 +1713,42 @@ function _onContinuousScroll() {
     const mainEl = document.getElementById('main');
     const mainTop = mainEl.getBoundingClientRect().top;
     const viewportH = mainEl.clientHeight;
-    // 找视口中线穿过的页面
+    // 找视口中线穿过的页面——wraps 文档序=页序、top 竖向单调非降 → 二分代替全书 O(N) rect 扫描
+    // (千页书每 tick 5-15ms → <1ms)。语义与原 for 扫描一致:
+    //   · center 落页间隙(bottom 校验不过)→ 不更新页码(否则 URL ?page=/KG 拉取/预取漂移)
+    //   · spread 同行两页同 top,二分落组尾(右页)→ 回退到同 top 组首,组内按 DOM 序取第一个
+    //     bottom>=center 者(等高=左页,与原行为相同)
     const center = mainTop + viewportH / 2;
     const wraps = document.querySelectorAll('#page-container .page-wrap');
-    for (const w of wraps) {
-      const r = w.getBoundingClientRect();
-      if (r.top <= center && r.bottom >= center) {
-        const num = parseInt(w.dataset.pageNum);
-        if (num !== currentPage) {
-          currentPage = num;
-          { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
-          // 同步 URL + 拉 KG 节点
-          const u = new URL(location.href);
-          u.searchParams.set('page', num);
-          history.replaceState(null, '', u);
-          loadPageNodes(num);
-          if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
-        }
-        break;
+    let lo = 0, hi = wraps.length - 1, hit = -1;
+    while (lo <= hi) {   // 找最后一个 top<=center 的 wrap(空 NodeList 时 hi=-1 自然跳过)
+      const mid = (lo + hi) >> 1;
+      if (wraps[mid].getBoundingClientRect().top <= center) { hit = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    let target = null;
+    if (hit >= 0) {
+      const hitTop = wraps[hit].getBoundingClientRect().top;
+      let g = hit;   // 回退到同 top 组首(±1px 容差吸收子像素;单列页距数百 px 不会误并)
+      while (g > 0 && Math.abs(wraps[g - 1].getBoundingClientRect().top - hitTop) <= 1) g--;
+      for (let i = g; i <= hit; i++) {
+        if (wraps[i].getBoundingClientRect().bottom >= center) { target = wraps[i]; break; }
       }
     }
-    _unloadFarPages();   // 顺带卸载远处页,封顶内存
+    if (target) {
+      const num = parseInt(target.dataset.pageNum);
+      if (num !== currentPage) {
+        currentPage = num;
+        { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
+        // 同步 URL + 拉 KG 节点
+        const u = new URL(location.href);
+        u.searchParams.set('page', num);
+        history.replaceState(null, '', u);
+        loadPageNodes(num);
+        if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
+      }
+    }
+    _unloadFarPages(wraps);   // 顺带卸载远处页,封顶内存(复用已取好的 wraps)
   }, 200);
 }
 
@@ -2227,23 +2248,43 @@ function _markVocabOptimistic(pw, lemma, forms) {
 }
 
 // 查完一个词后，刷新所有已渲染页的下划线（让新查的词立刻出现下划线）
+// trailing-coalesce:运行中再触发只记 rerun、跑完补一轮——1.8s/3.5s/1.5s 多轮是故意错峰等服务端
+// vocab note 写盘的,直接 skip 会停在旧态;可视页优先 + 并发 3 小池(无界 Promise.all 会打满
+// 单 worker 8 gthread,饿死滚动渲染请求)。
+let _vocabRefreshing = false, _vocabRerun = false;
 async function refreshVocabUnderlinesForAllPages() {
   if (!_vocabUnderlineEnabled() || !pdfDoc) return;
-  // 单页模式当前页是 #page-container 自身(无 .page-wrap class)，故按 data-loaded+page-num 选，覆盖两种模式
-  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
-  for (const pw of wraps) {
-    const pn = parseInt(pw.dataset.pageNum || '0', 10);
-    if (!pn) continue;
-    try {
-      const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
-      const d = await r.json();
-      if (!d.ok) continue;
-      pw.__vocabMarks = d.vocab_marks || [];
-      pw.__vocabSentences = d.vocab_sentences || [];
-      renderVocabUnderlines(pw, pw.__vocabMarks);
-      renderVocabSentences(pw, pw.__vocabSentences);
-    } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
-  }
+  if (_vocabRefreshing) { _vocabRerun = true; return; }
+  _vocabRefreshing = true;
+  try {
+    do {
+      _vocabRerun = false;
+      // 单页模式当前页是 #page-container 自身(无 .page-wrap class)，故按 data-loaded+page-num 选，覆盖两种模式
+      const wraps = [...document.querySelectorAll('[data-loaded="1"][data-page-num]')];
+      // 可视页优先:用户正看的页下划线先变
+      const vh = window.innerHeight || 0;
+      const inView = (pw) => { const r = pw.getBoundingClientRect(); return r.bottom > 0 && r.top < vh; };
+      wraps.sort((a, b) => (inView(b) ? 1 : 0) - (inView(a) ? 1 : 0));
+      let next = 0;
+      const worker = async () => {
+        while (next < wraps.length) {
+          const pw = wraps[next++];
+          const pn = parseInt(pw.dataset.pageNum || '0', 10);
+          if (!pn) continue;
+          try {
+            const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
+            const d = await r.json();
+            if (!d.ok) continue;
+            pw.__vocabMarks = d.vocab_marks || [];
+            pw.__vocabSentences = d.vocab_sentences || [];
+            renderVocabUnderlines(pw, pw.__vocabMarks);
+            renderVocabSentences(pw, pw.__vocabSentences);
+          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+    } while (_vocabRerun);
+  } finally { _vocabRefreshing = false; }
 }
 
 // 句子颜色 palette：[stroke, fill]；按 sid 轮替
@@ -3056,6 +3097,22 @@ let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为�
 let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 
+// document 级 mousemove/mouseup 只在模块顶层注册一次:原先在 _bindCharLayer 内注册且从不移除,
+// 每次页面重渲/缩放重绑都泄漏 +2 个监听,且旧闭包捕获过期 cl(缩放后 rect 失真致选区错位)。
+// 经 __charDrag 分发:每次重绑都覆盖为指向最新 connected cl(见 _bindCharLayer 尾),天然路由到最新绑定。
+document.addEventListener('mousemove', (e) => {
+  if (_dragStartCharIdx == null || !_charSel) return;   // _dragStartCharIdx 为主守卫(touchcancel 只清它)
+  const d = _charSel.pw && _charSel.pw.__charDrag; if (!d) return;
+  const p = d.ptToLocal(e.clientX, e.clientY);
+  d.onMove(p.x, p.y, null);
+});
+document.addEventListener('mouseup', (e) => {
+  if (_dragStartCharIdx == null || !_charSel) return;
+  const d = _charSel.pw && _charSel.pw.__charDrag; if (!d) return;
+  const p = d.ptToLocal(e.clientX, e.clientY);
+  d.onEnd(p.x, p.y);
+});
+
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
     const r = cl.getBoundingClientRect();
@@ -3211,16 +3268,7 @@ function _bindCharLayer(cl, pw) {
     const p = ptToLocal(e.clientX, e.clientY);
     onStart(p.x, p.y);
   });
-  document.addEventListener('mousemove', (e) => {
-    if (_dragStartCharIdx == null) return;
-    const p = ptToLocal(e.clientX, e.clientY);
-    onMove(p.x, p.y, null);
-  });
-  document.addEventListener('mouseup', (e) => {
-    if (_dragStartCharIdx == null) return;
-    const p = ptToLocal(e.clientX, e.clientY);
-    onEnd(p.x, p.y);
-  });
+  // document 级 mousemove/mouseup 移到模块顶层单 dispatcher(经 pw.__charDrag 分发),不再每次绑定泄漏
   cl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
     window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
@@ -3799,29 +3847,45 @@ window._phraseFav = (btn) => {
   }).catch(() => { if (btn) btn.disabled = false; });
 };
 // 收藏/取消后重拉各已渲染页 chars 的 w（原地更新，不重建 char-layer）→ 单击立即按新词组边界选
-async function refreshCharsWForAllPages() {
-  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
-  for (const pw of wraps) {
-    const num = parseInt(pw.dataset.pageNum || '0', 10);
-    if (!num || !pw.__charBoxes) continue;
-    try {
-      // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
-      let ov = null;
-      try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
-      const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
-      if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
-      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
-      if (!d.ok || !d.chars) continue;
-      const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
-      for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
-      if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
-        pw.__furigana = d.furigana;
-        try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
-      }
-      pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
-      try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
-    } catch (_) {}
+// generation 守卫:快速收藏→立即取消两次调用交错时,旧轮迟到的响应不准写回(只让最新一轮落地);
+// 距视口中心近的页先刷 + 并发 3 小池(页内 overlay→chars 的 cv 依赖仍串行;无界并发会打满服务端 gthread)。
+let _charsWGen = 0;
+async function _refreshOnePageCharsW(pw, num, gen) {
+  // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
+  let ov = null;
+  try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
+  if (gen !== _charsWGen) return;   // 已有更新一轮 → 本轮结果作废(连 localStorage cv 也不写,防旧值覆盖新)
+  const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
+  if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
+  const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
+  if (gen !== _charsWGen) return;
+  if (!d.ok || !d.chars) return;
+  const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
+  for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+  if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
+    pw.__furigana = d.furigana;
+    try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
   }
+  pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
+  try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+}
+async function refreshCharsWForAllPages() {
+  const gen = ++_charsWGen;   // 入口 bump:作废所有在途旧轮
+  const wraps = [...document.querySelectorAll('[data-loaded="1"][data-page-num]')];
+  // 距视口中心近的页优先(用户正看的页分词最先生效)
+  const cy = (window.innerHeight || 0) / 2;
+  const dist = (pw) => { const r = pw.getBoundingClientRect(); return Math.abs((r.top + r.bottom) / 2 - cy); };
+  wraps.sort((a, b) => dist(a) - dist(b));
+  let next = 0;
+  const worker = async () => {
+    while (next < wraps.length && gen === _charsWGen) {
+      const pw = wraps[next++];
+      const num = parseInt(pw.dataset.pageNum || '0', 10);
+      if (!num || !pw.__charBoxes) continue;
+      try { await _refreshOnePageCharsW(pw, num, gen); } catch (_) {}
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
 }
 
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
@@ -4176,6 +4240,20 @@ window._wordPopMaster = (btn) => {
   if (s.phrase) {
     const t = s.word;
     if (btn) btn.disabled = true;
+    // 乐观:标掌握瞬间先去掉该词组下划线(对齐下方非 phrase 分支);失败按快照回滚
+    let _undoDrop = null;
+    if (next) {
+      const snaps = [];
+      document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
+        if (pw.__vocabMarks && pw.__vocabMarks.length) snaps.push({pw, marks: pw.__vocabMarks});
+      });
+      _dropVocabUnderlineOptimistic(s);
+      const changed = snaps.filter(sn => sn.pw.__vocabMarks !== sn.marks).map(sn => ({...sn, after: sn.pw.__vocabMarks}));
+      // 只回滚仍是本次乐观结果的页(防覆盖期间其他刷新写入的新 marks)
+      _undoDrop = () => changed.forEach(({pw, marks, after}) => {
+        if (pw.__vocabMarks === after) { pw.__vocabMarks = marks; try { renderVocabUnderlines(pw, marks); } catch (_) {} }
+      });
+    }
     fetch('/pdf/api/phrase-mark', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text: t, mark: next ? 'mastered' : ''}),
@@ -4191,7 +4269,7 @@ window._wordPopMaster = (btn) => {
       }
       refreshCharsWForAllPages();   // 重拉 w + 重画下划线(掌握→该词组下划线消失)
       _toast?.(s.mastered ? '已掌握，下划线消失' : '已取消掌握');
-    }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
+    }).catch(() => { if (_undoDrop) _undoDrop(); if (btn) btn.disabled = false; _toast?.('标记失败'); });
     return;
   }
   const w = s.lemma || s.word;
@@ -5185,28 +5263,19 @@ window._grammarFollowup = async (blockId) => {
   const aDiv = document.createElement('div'); aDiv.className = 'gb-fu-a'; aDiv.innerHTML = '<span class="gb-loading">⏳</span>'; ans.appendChild(aDiv);
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/explain', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
-      body: JSON.stringify({text: q, context: '基于这句的语法分析继续回答：\n' + context, model: ov.model || '', effort: ov.effort || ''}),
+    // 为什么:原手写 SSE 循环每个 chunk 都全文重渲+MathJax 排版(零节流卡主线程,且断连丢结果);
+    // 改用 _aiStream(同 17-highlight _followupAsk):自带 80ms 节流 + 非 SSE JSON 兜底 + rid 断连轮询。
+    const render = (t) => {
+      aDiv.innerHTML = md(t || ' ');
+      if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(() => {});
+    };
+    const res = await _aiStream('/pdf/api/explain', {
+      method: 'POST', onText: render,
+      body: {text: q, context: '基于这句的语法分析继续回答：\n' + context, model: ov.model || '', effort: ov.effort || ''},
     });
-    const ct = r.headers.get('content-type') || '';
-    if (ct.includes('event-stream')) {
-      const reader = r.body.getReader(); const dec = new TextDecoder();
-      let buf = '', acc = '';
-      while (true) {
-        const {value, done} = await reader.read(); if (done) break;
-        buf += dec.decode(value, {stream: true}); let i;
-        while ((i = buf.indexOf('\n\n')) !== -1) {
-          const blk = buf.slice(0, i); buf = buf.slice(i + 2); let dl = '';
-          for (const ln of blk.split('\n')) { if (ln.startsWith('data:')) dl = ln.slice(5).trim(); }
-          if (!dl) continue;
-          try { const o = JSON.parse(dl); if (o.text) { acc += o.text; aDiv.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(()=>{}); } } catch (_) {}
-        }
-      }
-      if (!acc) aDiv.innerHTML = '(无回答)';
-    } else {
-      const d = await r.json(); aDiv.innerHTML = md(d.explanation || d.text || '(无回答)');
-    }
+    if (res.ok && res.text) render(res.text);
+    else if (!res.ok) aDiv.innerHTML = '追问失败：' + _esc(res.error || '失败');
+    else aDiv.innerHTML = '(无回答)';
   } catch (e) { aDiv.innerHTML = '追问失败：' + _esc(e.message); }
 };
 function _fillGrammarBlock(block, d, sentence) {

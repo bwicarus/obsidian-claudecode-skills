@@ -403,6 +403,8 @@ function loadYT() {
 // ───────────── 字幕 ─────────────
 // SUBS[exId] = {videoId, segments, lastIdx, enabled, timer}
 const SUBS = {};
+// 轮询代际:toggleSubtitle 每次调用 +1,旧轮询发现代际变了即中止(切视频/切 source/重开)
+const SUBPOLL = {};
 
 function clearSubDisplay(exId) {
   const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
@@ -448,7 +450,7 @@ function startSubLoop(exId) {
   }, 200);
 }
 
-async function toggleSubtitle(exId, source = 'auto') {
+async function toggleSubtitle(exId, source = 'auto', force = false) {
   const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
   const subBox = wrap.querySelector('.v-subtitle');
   const ccBtn = wrap.querySelector('.v-cc');
@@ -485,10 +487,27 @@ async function toggleSubtitle(exId, source = 'auto') {
     wrap.querySelector('.sub-zh').textContent = hint;
     wrap.querySelector('.sub-en').textContent = '';
     try {
-      const r = await fetch(`/api/fitness/subtitles/${encodeURIComponent(vidId)}?source=${source}`);
-      const d = await r.json();
-      if (!d.ok || !d.segments) {
-        wrap.querySelector('.sub-zh').textContent = '✗ 字幕加载失败: ' + (d.error || '?');
+      // 服务端 miss 时后台生成,立即回 {status:'running'} → 每 3s 轮询(hq LLM 精翻可达 ~10min);
+      // segments 未到前不置 sub.enabled / 不启 subLoop。force=1 只带第一发(给失败负缓存一个出口)
+      const myPoll = (SUBPOLL[exId] = (SUBPOLL[exId] || 0) + 1);
+      let d = null;
+      for (let i = 0; i < 200; i++) {   // 200×3s ≈ 10min 上限
+        const fq = (force && i === 0) ? '&force=1' : '';
+        const r = await fetch(`/api/fitness/subtitles/${encodeURIComponent(vidId)}?source=${source}${fq}`);
+        d = await r.json();
+        if (d.status !== 'running') break;
+        await new Promise(res => setTimeout(res, 3000));
+        if (SUBPOLL[exId] !== myPoll) return;   // 切视频/切 source/重开 → 中止旧轮询
+        try { if (player.getVideoData().video_id !== vidId) return; } catch (e) { return; }
+      }
+      if (!d || !d.ok || !d.segments) {
+        const msg = d ? (d.error || (d.status === 'running' ? '仍在后台生成,稍后再点' : '?')) : '?';
+        const zhEl2 = wrap.querySelector('.sub-zh');
+        zhEl2.textContent = '✗ 字幕加载失败: ' + msg + ' ';
+        const retry = document.createElement('a');   // 「重试」带 force=1,负缓存唯一出口
+        retry.textContent = '重试'; retry.href = 'javascript:void(0)'; retry.style.color = 'var(--accent)';
+        retry.addEventListener('click', () => toggleSubtitle(exId, source, true));
+        zhEl2.appendChild(retry);
         return;
       }
       sub = SUBS[exId] = {
@@ -531,6 +550,8 @@ const VS = {};
 const PLAYERS = {};
 // PTS[exId] = {videoId, points:[{t,text}]} —— AI 要点缓存(每视频)
 const PTS = {};
+// 要点轮询代际(同 SUBPOLL):重开/切视频时中止旧轮询
+const PTPOLL = {};
 
 // 收藏置顶:稳定保序(收藏组在前,各组维持原相对顺序)
 function stableFavSort(arr) {
@@ -561,7 +582,7 @@ function renderPoints(exId, points) {
   });
 }
 
-async function togglePoints(exId) {
+async function togglePoints(exId, force = false) {
   const wrap = document.querySelector(`.video-wrap[data-ex="${CSS.escape(exId)}"]`);
   const box = wrap.querySelector('.v-points-box');
   const ptBtn = wrap.querySelector('.v-points');
@@ -579,10 +600,25 @@ async function togglePoints(exId) {
   }
   box.innerHTML = '<span class="dim">⏳ AI 按字幕总结要点中(首次 ~5-30s,之后秒出)…</span>';
   try {
-    const r = await fetch(`/api/fitness/summary/${encodeURIComponent(vidId)}`);
-    const d = await r.json();
-    if (!d.ok || !d.points || !d.points.length) {
-      box.innerHTML = '<span class="dim">✗ 要点生成失败:' + escapeHtml(d.error || '该视频可能无字幕') + '</span>';
+    // 服务端 miss 后台生成回 {status:'running'} → 每 3s 轮询;force=1 只带第一发(失败负缓存出口)
+    const myPoll = (PTPOLL[exId] = (PTPOLL[exId] || 0) + 1);
+    let d = null;
+    for (let i = 0; i < 120; i++) {   // 120×3s ≈ 6min 上限
+      const fq = (force && i === 0) ? '?force=1' : '';
+      const r = await fetch(`/api/fitness/summary/${encodeURIComponent(vidId)}${fq}`);
+      d = await r.json();
+      if (d.status !== 'running') break;
+      await new Promise(res => setTimeout(res, 3000));
+      if (PTPOLL[exId] !== myPoll) return;   // 重开/切视频 → 中止旧轮询
+      try { if (player.getVideoData().video_id !== vidId) return; } catch (e) { return; }
+    }
+    if (!d || !d.ok || !d.points || !d.points.length) {
+      const msg = d ? (d.error || (d.status === 'running' ? '仍在后台生成,稍后再点' : '该视频可能无字幕')) : '该视频可能无字幕';
+      box.innerHTML = '<span class="dim">✗ 要点生成失败:' + escapeHtml(msg) + ' </span>';
+      const retry = document.createElement('a');   // 「重试」带 force=1,负缓存唯一出口
+      retry.textContent = '重试'; retry.href = 'javascript:void(0)'; retry.style.color = 'var(--accent)';
+      retry.addEventListener('click', () => togglePoints(exId, true));
+      box.appendChild(retry);
       return;
     }
     PTS[exId] = { videoId: vidId, points: d.points };

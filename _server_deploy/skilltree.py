@@ -4,12 +4,15 @@ skilltree.py — /skilltree/<book>/ 知识图谱可视化路由 + 编辑 API。
 模式跟 control.py 一致：register_skilltree(app) 注册路由。
 KG 数据 = CLAUDE_PROJECT/knowledge_graph/<book>.json
 """
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -63,6 +66,7 @@ def _save_kg(p, kg):
 
 
 _edit_lock = threading.Lock()
+_build_note_jobs = {}   # job_id → {status, book, node_id, ts, result}（build-note job 化轮询，照 control.py _kg_build_jobs 模式）
 
 
 # ─── 回收站：trivial 节点收纳，按章节分册 ───────────────────────────────────────
@@ -226,14 +230,54 @@ kg_node_ids: [{node['id']}]
 
 
 # ─── AI 验证：节点是否真实/描述准确 + 自动 merge/delete 决策 ─────────────────
+# 验证结论落盘缓存：只缓存真实 action==ok（delete/merge 改 KG 节点随之消失,缓存重放会误删/误并,绝不缓存;
+# AI 调用失败兜底的 ok 带 _fallback 标记,同样不缓存,下次还有机会真验证）
+_VERIFY_CACHE_FILE = CLAUDE_DIR / "state" / "skilltree-verify-cache.json"
+_verify_cache_lock = threading.Lock()
+
+def _verify_cache_key(node: dict, pdf_path: Path) -> str:
+    """缓存键：节点元数据 + PDF mtime,任一变化即失效重验。"""
+    try:
+        mtime = int(pdf_path.stat().st_mtime)
+    except OSError:
+        mtime = 0
+    raw = f"{node['id']}|{node.get('name','')}|{node.get('summary','')}|{node.get('pages')}|{mtime}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+def _verify_cache_load() -> dict:
+    try:
+        d = json.loads(_VERIFY_CACHE_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}   # 缺文件/坏 JSON → 当 miss 直接调 AI,不阻断建笔记
+
+def _verify_cache_hit(key: str) -> bool:
+    return key in _verify_cache_load()
+
+def _verify_cache_put(key: str, node_id: str):
+    with _verify_cache_lock:
+        d = _verify_cache_load()
+        d[key] = {"ts": datetime.now().isoformat(timespec="seconds"), "node_id": node_id}
+        if len(d) > 2000:   # 防常驻进程下文件无限膨胀
+            for k in list(d)[:len(d) - 2000]:
+                d.pop(k, None)
+        try:
+            _VERIFY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _VERIFY_CACHE_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(_VERIFY_CACHE_FILE)
+        except Exception:
+            pass   # 写失败只损失缓存,不阻断
+
+
 def _ai_verify_node(kg: dict, node: dict, raw_pdf_text: str) -> dict:
     """让 AI 看节点元数据 + PDF 实际内容 + 兄弟节点，决定 ok/merge/delete。
-    返回 {action, target_id?, reason}。失败时返回 {action:'ok'}（不阻断）。"""
+    返回 {action, target_id?, reason}。失败时返回 {action:'ok', _fallback:True}（不阻断、不进缓存）。"""
     try:
         sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
         from ai_backends import make_backend
     except Exception:
-        return {"action": "ok", "reason": "ai_backends unavailable"}
+        return {"action": "ok", "reason": "ai_backends unavailable", "_fallback": True}
     id2 = {n["id"]: n for n in kg["nodes"]}
     parent = id2.get(node.get("parent_id"))
     siblings = [n for n in kg["nodes"]
@@ -284,19 +328,19 @@ id: {node['id']}
         })
         raw = backend.chat([{"role": "user", "content": prompt}]).strip()
     except Exception as ex:
-        return {"action": "ok", "reason": f"ai 调用失败: {ex}"}
+        return {"action": "ok", "reason": f"ai 调用失败: {ex}", "_fallback": True}
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
         raw = re.sub(r"\n```\s*$", "", raw)
     s, e = raw.find("{"), raw.rfind("}")
     if s == -1 or e <= s:
-        return {"action": "ok", "reason": "无 JSON"}
+        return {"action": "ok", "reason": "无 JSON", "_fallback": True}
     try:
         data = json.loads(raw[s:e+1])
     except Exception:
-        return {"action": "ok", "reason": "JSON 解析失败"}
+        return {"action": "ok", "reason": "JSON 解析失败", "_fallback": True}
     if data.get("action") not in ("ok", "merge", "delete"):
-        return {"action": "ok", "reason": "unknown action"}
+        return {"action": "ok", "reason": "unknown action", "_fallback": True}
     return data
 # ───────────────────────────────────────────────────────────────────────
 
@@ -574,6 +618,107 @@ def _apply_edit(kg, op, payload):
         kg[key] = val
         return True, f"set {key}"
     return False, f"unknown op: {op}"
+
+
+def _build_note_job(book: str, node_id: str) -> dict:
+    """build-note 重活（fitz 提文本 + AI 验证 + 生成笔记 + 锁内更新 KG），
+    在后台线程跑（AI 验证可达 2min,同步路由会撞 nginx 超时）。
+    返回 dict 与旧同步路由响应体一致,前端 deleted/merged/ok 三分支复用。"""
+    p, kg = _load_kg(book)
+    if not kg:
+        return {"ok": False, "error": "kg not found"}
+    node = next((n for n in kg["nodes"] if n["id"] == node_id), None)
+    if not node:
+        return {"ok": False, "error": "node not found"}
+    pdf_path = kg.get("pdf")
+    if not pdf_path or not Path(pdf_path).exists():
+        return {"ok": False, "error": "pdf 缺失"}
+
+    # ===== AI 验证（仅 L2，L1 整节笔记不验证因为节点本身没具体定义）=====
+    # verified 守卫：已验证过的节点重复建笔记不再烧 AI
+    if node["level"] == 2 and not node.get("note_ref_ai_verified"):
+        vkey = _verify_cache_key(node, Path(pdf_path))
+        if _verify_cache_hit(vkey):
+            pass   # 此前 AI 已判 ok 且节点元数据+PDF 均未变 → 跳过重复验证
+        else:
+            try:
+                import fitz
+                doc = fitz.open(pdf_path)
+                page_texts = []
+                for pg in (node.get("pages") or []):
+                    if 1 <= pg <= len(doc):
+                        page_texts.append(doc[pg-1].get_text())
+                doc.close()
+                raw_pdf = "\n---\n".join(page_texts) if page_texts else ""
+            except Exception:
+                raw_pdf = ""
+            if raw_pdf:
+                verify = _ai_verify_node(kg, node, raw_pdf)
+                action = verify.get("action")
+                reason = verify.get("reason", "")
+                if action == "delete":
+                    # AI 判断 KG 节点是误识别 → 自动删除
+                    with _edit_lock:
+                        _, kg2 = _load_kg(book)
+                        if kg2:
+                            ok, info = _apply_edit(kg2, "delete_node", {"id": node_id})
+                            if ok:
+                                _save_kg(p, kg2); _trigger_mastery_recompute(p)
+                    return {
+                        "ok": False, "auto_action": "deleted",
+                        "reason": reason,
+                        "message": f"AI 判定节点是 KG 误识别，已删除：{reason}",
+                    }
+                if action == "merge":
+                    target_id = verify.get("target_id", "")
+                    target = next((n for n in kg["nodes"] if n["id"] == target_id), None)
+                    if target_id and target:
+                        with _edit_lock:
+                            _, kg2 = _load_kg(book)
+                            if kg2:
+                                ok, info = _apply_edit(kg2, "merge",
+                                    {"canonical": target_id, "drop": [node_id]})
+                                if ok:
+                                    _save_kg(p, kg2); _trigger_mastery_recompute(p)
+                        return {
+                            "ok": False, "auto_action": "merged",
+                            "target_id": target_id, "target_name": target["name"],
+                            "reason": reason,
+                            "message": f"AI 判定该节点是「{target['name']}」的重复，已合并：{reason}",
+                        }
+                # action=ok → 落盘缓存（_fallback 的假 ok 不缓存）后继续走正常 build-note
+                if action == "ok" and not verify.get("_fallback"):
+                    _verify_cache_put(vkey, node_id)
+
+    try:
+        new_path, covered_ids = _build_note_for_node(kg, node, Path(pdf_path))
+    except Exception as ex:
+        return {"ok": False, "error": f"生成失败: {ex}"}
+
+    # 更新 KG 持久化字典 + 节点
+    with _edit_lock:
+        _, kg2 = _load_kg(book)
+        if not kg2:
+            return {"ok": False, "error": "kg reload failed"}
+        persistent = kg2.setdefault("_note_to_covered_l2", {})
+        persistent[new_path] = covered_ids
+        # 重建节点 containing_notes
+        id2 = {n["id"]: n for n in kg2["nodes"]}
+        for cid in covered_ids:
+            if cid in id2:
+                n2 = id2[cid]
+                notes = list(set((n2.get("containing_notes") or []) + [new_path]))
+                n2["containing_notes"] = sorted(notes)
+                n2["note_ref"] = sorted(notes)[0]
+                n2["note_ref_ai_verified"] = True
+        _save_kg(p, kg2)
+        _trigger_mastery_recompute(p)
+
+    return {
+        "ok": True, "note_path": new_path,
+        "covered_node_ids": covered_ids,
+        "obsidian_url": f"obsidian://open?vault={os.environ.get('OBSIDIAN_VAULT_NAME','Obsidian Vault')}&file={new_path.replace('.md','')}",
+    }
 
 
 def register_skilltree(app):
@@ -854,6 +999,8 @@ def register_skilltree(app):
         - L1 节点：整节笔记，含该节所有 L2 节点各一段
         生成的笔记用 ![[X.pdf#page=N&rect=...]] obsidian 嵌入语法。
         写入 vault 根 + 更新 KG containing_notes + 触发 link_and_mastery 重算。
+        job 化：秒回 {ok, job_id}，重活进后台线程（_build_note_job），
+        前端 2s 轮询 build-note-status 取结果。
         """
         p, kg = _load_kg(book)
         if not kg:
@@ -869,85 +1016,38 @@ def register_skilltree(app):
         pdf_path = kg.get("pdf")
         if not pdf_path or not Path(pdf_path).exists():
             return jsonify({"ok": False, "error": "pdf 缺失"}), 400
+        # 同节点已有 running job → 复用 job_id（防重复点击起双 job 烧双份 AI）
+        for jid, j in list(_build_note_jobs.items()):
+            if j.get("book") == book and j.get("node_id") == node_id and j.get("status") == "running":
+                return jsonify({"ok": True, "job_id": jid, "dedup": True})
+        job_id = uuid.uuid4().hex[:8]
+        _build_note_jobs[job_id] = {"status": "running", "book": book,
+                                    "node_id": node_id, "ts": time.time(), "result": None}
 
-        # ===== AI 验证（仅 L2，L1 整节笔记不验证因为节点本身没具体定义）=====
-        if node["level"] == 2:
+        def _run():
             try:
-                import fitz
-                doc = fitz.open(pdf_path)
-                page_texts = []
-                for pg in (node.get("pages") or []):
-                    if 1 <= pg <= len(doc):
-                        page_texts.append(doc[pg-1].get_text())
-                doc.close()
-                raw_pdf = "\n---\n".join(page_texts) if page_texts else ""
-            except Exception:
-                raw_pdf = ""
-            if raw_pdf:
-                verify = _ai_verify_node(kg, node, raw_pdf)
-                action = verify.get("action")
-                reason = verify.get("reason", "")
-                if action == "delete":
-                    # AI 判断 KG 节点是误识别 → 自动删除
-                    with _edit_lock:
-                        _, kg2 = _load_kg(book)
-                        if kg2:
-                            ok, info = _apply_edit(kg2, "delete_node", {"id": node_id})
-                            if ok:
-                                _save_kg(p, kg2); _trigger_mastery_recompute(p)
-                    return jsonify({
-                        "ok": False, "auto_action": "deleted",
-                        "reason": reason,
-                        "message": f"AI 判定节点是 KG 误识别，已删除：{reason}",
-                    })
-                if action == "merge":
-                    target_id = verify.get("target_id", "")
-                    target = next((n for n in kg["nodes"] if n["id"] == target_id), None)
-                    if target_id and target:
-                        with _edit_lock:
-                            _, kg2 = _load_kg(book)
-                            if kg2:
-                                ok, info = _apply_edit(kg2, "merge",
-                                    {"canonical": target_id, "drop": [node_id]})
-                                if ok:
-                                    _save_kg(p, kg2); _trigger_mastery_recompute(p)
-                        return jsonify({
-                            "ok": False, "auto_action": "merged",
-                            "target_id": target_id, "target_name": target["name"],
-                            "reason": reason,
-                            "message": f"AI 判定该节点是「{target['name']}」的重复，已合并：{reason}",
-                        })
-                # action=ok 继续走正常 build-note
+                res = _build_note_job(book, node_id)
+            except Exception as ex:
+                res = {"ok": False, "error": f"生成失败: {ex}"}
+            _build_note_jobs[job_id].update(status="done", result=res)
 
-        try:
-            new_path, covered_ids = _build_note_for_node(kg, node, Path(pdf_path))
-        except Exception as ex:
-            return jsonify({"ok": False, "error": f"生成失败: {ex}"}), 500
+        threading.Thread(target=_run, daemon=True).start()
+        # 顺手清 1h 前已完成的旧 job（防常驻进程字典膨胀）
+        cutoff = time.time() - 3600
+        for jid in [k for k, v in _build_note_jobs.items()
+                    if v.get("ts", 0) < cutoff and v.get("status") != "running"]:
+            _build_note_jobs.pop(jid, None)
+        return jsonify({"ok": True, "job_id": job_id})
 
-        # 更新 KG 持久化字典 + 节点
-        with _edit_lock:
-            _, kg2 = _load_kg(book)
-            if not kg2:
-                return jsonify({"ok": False, "error": "kg reload failed"}), 500
-            persistent = kg2.setdefault("_note_to_covered_l2", {})
-            persistent[new_path] = covered_ids
-            # 重建节点 containing_notes
-            id2 = {n["id"]: n for n in kg2["nodes"]}
-            for cid in covered_ids:
-                if cid in id2:
-                    n2 = id2[cid]
-                    notes = list(set((n2.get("containing_notes") or []) + [new_path]))
-                    n2["containing_notes"] = sorted(notes)
-                    n2["note_ref"] = sorted(notes)[0]
-                    n2["note_ref_ai_verified"] = True
-            _save_kg(p, kg2)
-            _trigger_mastery_recompute(p)
-
-        return jsonify({
-            "ok": True, "note_path": new_path,
-            "covered_node_ids": covered_ids,
-            "obsidian_url": f"obsidian://open?vault={os.environ.get('OBSIDIAN_VAULT_NAME','Obsidian Vault')}&file={new_path.replace('.md','')}",
-        })
+    @app.route("/skilltree/<book>/api/build-note-status/<job_id>")
+    def skilltree_build_note_status(book, job_id):
+        """build-note job 轮询端点。unknown = 进程重启 job 丢失，前端兜底提示。"""
+        job = _build_note_jobs.get(job_id)
+        if not job:
+            return jsonify({"ok": False, "status": "unknown", "error": "unknown job"})
+        if job["status"] == "running":
+            return jsonify({"ok": True, "status": "running"})
+        return jsonify({"ok": True, "status": "done", "result": job.get("result")})
 
     @app.route("/skilltree/<book>/api/toggle-tracked", methods=["POST"])
     def skilltree_toggle_tracked(book):

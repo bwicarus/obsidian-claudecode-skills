@@ -330,6 +330,22 @@ let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为�
 let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
 
+// document 级 mousemove/mouseup 只在模块顶层注册一次:原先在 _bindCharLayer 内注册且从不移除,
+// 每次页面重渲/缩放重绑都泄漏 +2 个监听,且旧闭包捕获过期 cl(缩放后 rect 失真致选区错位)。
+// 经 __charDrag 分发:每次重绑都覆盖为指向最新 connected cl(见 _bindCharLayer 尾),天然路由到最新绑定。
+document.addEventListener('mousemove', (e) => {
+  if (_dragStartCharIdx == null || !_charSel) return;   // _dragStartCharIdx 为主守卫(touchcancel 只清它)
+  const d = _charSel.pw && _charSel.pw.__charDrag; if (!d) return;
+  const p = d.ptToLocal(e.clientX, e.clientY);
+  d.onMove(p.x, p.y, null);
+});
+document.addEventListener('mouseup', (e) => {
+  if (_dragStartCharIdx == null || !_charSel) return;
+  const d = _charSel.pw && _charSel.pw.__charDrag; if (!d) return;
+  const p = d.ptToLocal(e.clientX, e.clientY);
+  d.onEnd(p.x, p.y);
+});
+
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
     const r = cl.getBoundingClientRect();
@@ -485,16 +501,7 @@ function _bindCharLayer(cl, pw) {
     const p = ptToLocal(e.clientX, e.clientY);
     onStart(p.x, p.y);
   });
-  document.addEventListener('mousemove', (e) => {
-    if (_dragStartCharIdx == null) return;
-    const p = ptToLocal(e.clientX, e.clientY);
-    onMove(p.x, p.y, null);
-  });
-  document.addEventListener('mouseup', (e) => {
-    if (_dragStartCharIdx == null) return;
-    const p = ptToLocal(e.clientX, e.clientY);
-    onEnd(p.x, p.y);
-  });
+  // document 级 mousemove/mouseup 移到模块顶层单 dispatcher(经 pw.__charDrag 分发),不再每次绑定泄漏
   cl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
     window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略

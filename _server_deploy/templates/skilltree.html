@@ -1404,13 +1404,39 @@ async function pruneNotes(){
 async function createNote(nodeId){
   const btn = document.getElementById("btn-create-note");
   if(btn){ btn.disabled = true; btn.textContent = "⏳ AI 验证节点 + 生成笔记..."; btn.style.opacity = ".6"; }
+  const restoreBtn = () => { if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; } };
   try{
+    // job 化：POST 秒回 job_id（AI 验证可达 2min，同步等会撞 HTTP/nginx 超时），2s 轮询取结果
     const r = await fetch(`/skilltree/${BOOK}/api/build-note`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({node_id: nodeId})
     });
-    const d = await r.json();
+    const jr = await r.json();
+    if(!jr.ok || !jr.job_id){
+      alert("创建失败: " + (jr.error || "未知错误"));
+      restoreBtn();
+      return;
+    }
+    let d = null;
+    for(let i = 0; i < 150; i++){   // 2s × 150 = 5min 上限
+      await new Promise(res => setTimeout(res, 2000));
+      let s = null;
+      try{
+        s = await (await fetch(`/skilltree/${BOOK}/api/build-note-status/${jr.job_id}`)).json();
+      }catch(ex){ continue; }   // 网络抖动：跳过本轮继续轮询
+      if(s.status === "unknown"){   // 进程重启 job 丢失 → 兜底提示，不僵死
+        alert("任务状态丢失（服务可能重启了），请刷新页面确认笔记是否已生成。");
+        restoreBtn();
+        return;
+      }
+      if(s.status === "done"){ d = s.result || {}; break; }
+    }
+    if(!d){
+      alert("等待超时（5 分钟），任务可能仍在后台跑，请稍后刷新页面确认。");
+      restoreBtn();
+      return;
+    }
     if(!d.ok && d.auto_action === "deleted"){
       alert(`🗑 ${d.message}`);
       const newD = await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
@@ -1435,7 +1461,7 @@ async function createNote(nodeId){
     }
     if(!d.ok){
       alert("创建失败: " + (d.error || "未知错误"));
-      if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; }
+      restoreBtn();
       return;
     }
     alert(`✓ 笔记已创建：${d.note_path}\n含 ${d.covered_node_ids.length} 个知识点的 PDF 嵌入区域。\n打开 Obsidian 编辑。`);
@@ -1453,7 +1479,7 @@ async function createNote(nodeId){
     showDetail(id2[nodeId]);
   }catch(ex){
     alert("创建失败: " + ex.message);
-    if(btn){ btn.disabled = false; btn.textContent = "📝 从 PDF 创建笔记"; btn.style.opacity = "1"; }
+    restoreBtn();
   }
 }
 

@@ -378,28 +378,19 @@ window._grammarFollowup = async (blockId) => {
   const aDiv = document.createElement('div'); aDiv.className = 'gb-fu-a'; aDiv.innerHTML = '<span class="gb-loading">⏳</span>'; ans.appendChild(aDiv);
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/explain', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
-      body: JSON.stringify({text: q, context: '基于这句的语法分析继续回答：\n' + context, model: ov.model || '', effort: ov.effort || ''}),
+    // 为什么:原手写 SSE 循环每个 chunk 都全文重渲+MathJax 排版(零节流卡主线程,且断连丢结果);
+    // 改用 _aiStream(同 17-highlight _followupAsk):自带 80ms 节流 + 非 SSE JSON 兜底 + rid 断连轮询。
+    const render = (t) => {
+      aDiv.innerHTML = md(t || ' ');
+      if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(() => {});
+    };
+    const res = await _aiStream('/pdf/api/explain', {
+      method: 'POST', onText: render,
+      body: {text: q, context: '基于这句的语法分析继续回答：\n' + context, model: ov.model || '', effort: ov.effort || ''},
     });
-    const ct = r.headers.get('content-type') || '';
-    if (ct.includes('event-stream')) {
-      const reader = r.body.getReader(); const dec = new TextDecoder();
-      let buf = '', acc = '';
-      while (true) {
-        const {value, done} = await reader.read(); if (done) break;
-        buf += dec.decode(value, {stream: true}); let i;
-        while ((i = buf.indexOf('\n\n')) !== -1) {
-          const blk = buf.slice(0, i); buf = buf.slice(i + 2); let dl = '';
-          for (const ln of blk.split('\n')) { if (ln.startsWith('data:')) dl = ln.slice(5).trim(); }
-          if (!dl) continue;
-          try { const o = JSON.parse(dl); if (o.text) { acc += o.text; aDiv.innerHTML = md(acc); if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([aDiv]).catch(()=>{}); } } catch (_) {}
-        }
-      }
-      if (!acc) aDiv.innerHTML = '(无回答)';
-    } else {
-      const d = await r.json(); aDiv.innerHTML = md(d.explanation || d.text || '(无回答)');
-    }
+    if (res.ok && res.text) render(res.text);
+    else if (!res.ok) aDiv.innerHTML = '追问失败：' + _esc(res.error || '失败');
+    else aDiv.innerHTML = '(无回答)';
   } catch (e) { aDiv.innerHTML = '追问失败：' + _esc(e.message); }
 };
 function _fillGrammarBlock(block, d, sentence) {

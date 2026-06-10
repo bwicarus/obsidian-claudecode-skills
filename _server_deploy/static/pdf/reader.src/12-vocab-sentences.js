@@ -27,23 +27,43 @@ function _markVocabOptimistic(pw, lemma, forms) {
 }
 
 // 查完一个词后，刷新所有已渲染页的下划线（让新查的词立刻出现下划线）
+// trailing-coalesce:运行中再触发只记 rerun、跑完补一轮——1.8s/3.5s/1.5s 多轮是故意错峰等服务端
+// vocab note 写盘的,直接 skip 会停在旧态;可视页优先 + 并发 3 小池(无界 Promise.all 会打满
+// 单 worker 8 gthread,饿死滚动渲染请求)。
+let _vocabRefreshing = false, _vocabRerun = false;
 async function refreshVocabUnderlinesForAllPages() {
   if (!_vocabUnderlineEnabled() || !pdfDoc) return;
-  // 单页模式当前页是 #page-container 自身(无 .page-wrap class)，故按 data-loaded+page-num 选，覆盖两种模式
-  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
-  for (const pw of wraps) {
-    const pn = parseInt(pw.dataset.pageNum || '0', 10);
-    if (!pn) continue;
-    try {
-      const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
-      const d = await r.json();
-      if (!d.ok) continue;
-      pw.__vocabMarks = d.vocab_marks || [];
-      pw.__vocabSentences = d.vocab_sentences || [];
-      renderVocabUnderlines(pw, pw.__vocabMarks);
-      renderVocabSentences(pw, pw.__vocabSentences);
-    } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
-  }
+  if (_vocabRefreshing) { _vocabRerun = true; return; }
+  _vocabRefreshing = true;
+  try {
+    do {
+      _vocabRerun = false;
+      // 单页模式当前页是 #page-container 自身(无 .page-wrap class)，故按 data-loaded+page-num 选，覆盖两种模式
+      const wraps = [...document.querySelectorAll('[data-loaded="1"][data-page-num]')];
+      // 可视页优先:用户正看的页下划线先变
+      const vh = window.innerHeight || 0;
+      const inView = (pw) => { const r = pw.getBoundingClientRect(); return r.bottom > 0 && r.top < vh; };
+      wraps.sort((a, b) => (inView(b) ? 1 : 0) - (inView(a) ? 1 : 0));
+      let next = 0;
+      const worker = async () => {
+        while (next < wraps.length) {
+          const pw = wraps[next++];
+          const pn = parseInt(pw.dataset.pageNum || '0', 10);
+          if (!pn) continue;
+          try {
+            const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
+            const d = await r.json();
+            if (!d.ok) continue;
+            pw.__vocabMarks = d.vocab_marks || [];
+            pw.__vocabSentences = d.vocab_sentences || [];
+            renderVocabUnderlines(pw, pw.__vocabMarks);
+            renderVocabSentences(pw, pw.__vocabSentences);
+          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+    } while (_vocabRerun);
+  } finally { _vocabRefreshing = false; }
 }
 
 // 句子颜色 palette：[stroke, fill]；按 sid 轮替

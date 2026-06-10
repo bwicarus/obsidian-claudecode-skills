@@ -3,7 +3,9 @@
 - 拉 YT 自带英文字幕(youtube-transcript-api,免费无 key)
 - 一次性整本发给 Claude CLI 翻译(保留行号对齐 + 全局上下文)
 - 全局缓存 SQLite(全用户共享,字幕翻译是公开内容)
-- 并发锁:同一视频同时多请求只翻 1 次,其余 wait + 用缓存
+- 并发锁:同一视频同时多请求只翻 1 次,其余直接回 running 由前端轮询
+- 失败负缓存(内存,10min TTL):无字幕/限流视频不被前端反复触发重打外网
+- 首次生成默认 nowait 后台化:立即回 {status:"running"},前端每 3s 轮询
 """
 from __future__ import annotations
 
@@ -34,6 +36,26 @@ GEMINI_KEY_FILE = Path("/home/bwicarus/.config/gemini-api-key")
 
 _LOCK = threading.Lock()
 _INFLIGHT: dict[str, threading.Event] = {}
+
+# 失败负缓存(只进内存,**绝不写 youtube_subtitles 表**:错误行会被 ready/has_cached 误读毒化成功路径)。
+# TTL 必须短:前端常规路径无 force 出口,只有失败提示上的「重试」按钮带 force=1。
+_ERR_TTL = 600.0   # 10min
+_ERR_CACHE: dict[str, tuple[float, str]] = {}   # cache_key -> (写入时刻, 错误信息)
+
+
+def _err_get(cache_key: str) -> str | None:
+    ent = _ERR_CACHE.get(cache_key)
+    if ent and time.time() - ent[0] < _ERR_TTL:
+        return ent[1]
+    return None
+
+
+def _err_put(cache_key: str, msg: str) -> None:
+    now = time.time()
+    # 顺手清过期项,防常驻进程慢性膨胀
+    for k in [k for k, (ts, _) in _ERR_CACHE.items() if now - ts >= _ERR_TTL]:
+        _ERR_CACHE.pop(k, None)
+    _ERR_CACHE[cache_key] = (now, msg)
 
 
 def _db() -> sqlite3.Connection:
@@ -285,8 +307,11 @@ def _fetch_stt(video_id: str) -> tuple[list[dict], str]:
 
 
 def get_or_translate(video_id: str, target_lang: str = "zh",
-                     source: str = "auto", force: bool = False) -> dict:
-    """同步:cache hit 立即返回;cache miss 拉 + 翻译 + 写 cache。
+                     source: str = "auto", force: bool = False,
+                     nowait: bool = True) -> dict:
+    """cache hit 立即返回;cache miss 默认 nowait=True:后台线程拉+翻+写 cache,
+    先回 {status:"running"} 由前端每 3s 轮询(fitness.py 调用处不传 nowait 即后台化;
+    summarize_video 内部传 nowait=False 同步等字幕)。失败进内存负缓存 10min,force=1 是唯一出口。
 
     source:
       "auto" — YouTube 自带 caption + Google 机翻(快,免费)
@@ -294,11 +319,13 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
                (Gemini/Claude,带上下文+术语)。比 stt 质量好得多:STT 转录本身易错,而频道多有准确字幕。
       "stt"  — 纯 Cloud Speech-to-Text(仅无字幕视频用;转录易错,保留作底层 fallback)
 
-    返回:{status: "ready"|"error", segments?: [...], error?: str, from_cache?: bool, source: str}
+    返回:{status: "ready"|"running"|"error", segments?: [...], error?: str, from_cache?: bool, source: str}
     """
     if source not in ("auto", "stt", "hq"):
         return {"status": "error", "error": f"unknown source {source!r}"}
     cache_key = f"{video_id}:{source}"
+    if force:
+        _ERR_CACHE.pop(cache_key, None)   # 「重试」按钮给负缓存一个出口
     if not force:
         db = _db()
         row = db.execute(
@@ -314,6 +341,9 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
                 "source": source,
                 "segments": json.loads(row[0]),
             }
+        err = _err_get(cache_key)
+        if err:   # 负缓存 TTL 内秒回,不重打 YT/翻译 API
+            return {"status": "error", "error": err, "from_cache": True, "source": source}
     with _LOCK:
         ev = _INFLIGHT.get(cache_key)
         if ev is not None:
@@ -322,49 +352,60 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
             wait_ev = None
             _INFLIGHT[cache_key] = threading.Event()
     if wait_ev is not None:
+        if nowait:   # 轮询绝不落回 wait 占 gunicorn 线程,直接报 running
+            return {"status": "running", "source": source}
         wait_ev.wait(timeout=600)
-        return get_or_translate(video_id, target_lang, source, force=False)
-    try:
-        if source == "hq":
-            # 优先 YouTube 英文字幕原文(准确);无字幕才退回 STT(易错)
-            try:
-                segs, src = _fetch_english(video_id)
-                src = "yt-caption"
-            except Exception as cap_err:
+        return get_or_translate(video_id, target_lang, source, force=False, nowait=False)
+
+    def _work() -> dict:
+        try:
+            if source == "hq":
+                # 优先 YouTube 英文字幕原文(准确);无字幕才退回 STT(易错)
                 try:
-                    segs, src = _fetch_stt(video_id)
-                except Exception:
-                    raise cap_err   # 字幕和 STT 都失败 → 报字幕缺失更直观
-            segs = _translate_hq(segs)   # LLM 精翻
-        elif source == "stt":
-            segs, src = _fetch_stt(video_id)
-            segs = _translate_all(segs)
-        else:
-            segs, src = _fetch_english(video_id)
-            segs = _translate_all(segs)
-        db = _db()
-        db.execute(
-            "INSERT OR REPLACE INTO youtube_subtitles "
-            "(video_id, target_lang, source, segments_json, source_lang, translated_at) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-            (video_id, target_lang, source, json.dumps(segs, ensure_ascii=False), src),
-        )
-        db.commit()
-        db.close()
-        return {
-            "status": "ready",
-            "from_cache": False,
-            "source": source,
-            "segments": segs,
-            "source_lang": src,
-        }
-    except Exception as e:
-        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
-    finally:
-        with _LOCK:
-            ev = _INFLIGHT.pop(cache_key, None)
-        if ev is not None:
-            ev.set()
+                    segs, src = _fetch_english(video_id)
+                    src = "yt-caption"
+                except Exception as cap_err:
+                    try:
+                        segs, src = _fetch_stt(video_id)
+                    except Exception:
+                        raise cap_err   # 字幕和 STT 都失败 → 报字幕缺失更直观
+                segs = _translate_hq(segs)   # LLM 精翻
+            elif source == "stt":
+                segs, src = _fetch_stt(video_id)
+                segs = _translate_all(segs)
+            else:
+                segs, src = _fetch_english(video_id)
+                segs = _translate_all(segs)
+            db = _db()
+            db.execute(
+                "INSERT OR REPLACE INTO youtube_subtitles "
+                "(video_id, target_lang, source, segments_json, source_lang, translated_at) "
+                "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+                (video_id, target_lang, source, json.dumps(segs, ensure_ascii=False), src),
+            )
+            db.commit()
+            db.close()
+            return {
+                "status": "ready",
+                "from_cache": False,
+                "source": source,
+                "segments": segs,
+                "source_lang": src,
+            }
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            _err_put(cache_key, msg)   # 失败只进内存负缓存,绝不写表
+            return {"status": "error", "error": msg, "source": source}
+        finally:
+            with _LOCK:
+                ev2 = _INFLIGHT.pop(cache_key, None)
+            if ev2 is not None:
+                ev2.set()
+
+    if nowait:
+        threading.Thread(target=_work, daemon=True, name=f"yt-sub-{cache_key}").start()
+        return {"status": "running", "source": source}
+    return _work()
 
 
 # ───────────────────────── AI 要点总结(带时间锚点) ─────────────────────────
@@ -438,11 +479,16 @@ def _summary_ai(prompt: str) -> str:
         return ""
 
 
-def summarize_video(video_id: str, target_lang: str = "zh", force: bool = False) -> dict:
-    """按字幕 AI 总结要点 + 时间锚点。全局缓存,inflight 去重(同 get_or_translate 机制)。
+def summarize_video(video_id: str, target_lang: str = "zh", force: bool = False,
+                    nowait: bool = True) -> dict:
+    """按字幕 AI 总结要点 + 时间锚点。全局缓存,inflight 去重 + nowait 后台化 + 失败负缓存
+    (同 get_or_translate 机制;4 个业务早退也统一进负缓存,防前端反复触发)。
 
-    返回:{status:"ready"|"error", points?:[{t,text}], from_cache?, error?}
+    返回:{status:"ready"|"running"|"error", points?:[{t,text}], from_cache?, error?}
     """
+    cache_key = f"sum:{video_id}:{target_lang}"
+    if force:
+        _ERR_CACHE.pop(cache_key, None)
     if not force:
         db = _db()
         row = db.execute(
@@ -452,51 +498,66 @@ def summarize_video(video_id: str, target_lang: str = "zh", force: bool = False)
         db.close()
         if row:
             return {"status": "ready", "from_cache": True, "points": json.loads(row[0])}
-    cache_key = f"sum:{video_id}:{target_lang}"
+        err = _err_get(cache_key)
+        if err:
+            return {"status": "error", "error": err, "from_cache": True}
     with _LOCK:
         ev = _INFLIGHT.get(cache_key)
         wait_ev = ev if ev is not None else None
         if ev is None:
             _INFLIGHT[cache_key] = threading.Event()
     if wait_ev is not None:
+        if nowait:
+            return {"status": "running"}
         wait_ev.wait(timeout=300)
-        return summarize_video(video_id, target_lang, force=False)
-    try:
-        # 复用字幕(及其缓存);总结喂英文原文(更准),夹带 zh 兜底
-        res = get_or_translate(video_id, target_lang=target_lang, source="auto")
-        if res.get("status") != "ready":
-            return {"status": "error", "error": res.get("error", "字幕获取失败")}
-        segs = res.get("segments") or []
-        if not segs:
-            return {"status": "error", "error": "该视频无字幕,无法总结"}
-        max_t = int(segs[-1]["start"] + segs[-1].get("duration", 0))
-        lines = "\n".join(
-            f"[{int(s['start'])}] {(s.get('en') or s.get('zh') or '').strip()}"
-            for s in segs if (s.get("en") or s.get("zh"))
-        )
-        prompt = _SUMMARY_PROMPT + f"字幕({len(segs)} 行):\n{lines}\n\n现在输出要点(每行 '秒数 | 要点'):"
-        text = _summary_ai(prompt)
-        if not text.strip():
-            return {"status": "error", "error": "AI 无输出"}
-        points = _parse_points(text, max_t)
-        if not points:
-            return {"status": "error", "error": "AI 输出无法解析为要点"}
-        db = _db()
-        db.execute(
-            "INSERT OR REPLACE INTO youtube_summaries "
-            "(video_id, target_lang, points_json, created_at) VALUES (?, ?, ?, datetime('now'))",
-            (video_id, target_lang, json.dumps(points, ensure_ascii=False)),
-        )
-        db.commit()
-        db.close()
-        return {"status": "ready", "from_cache": False, "points": points}
-    except Exception as e:
-        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
-    finally:
-        with _LOCK:
-            ev = _INFLIGHT.pop(cache_key, None)
-        if ev is not None:
-            ev.set()
+        return summarize_video(video_id, target_lang, force=False, nowait=False)
+
+    def _err(msg: str) -> dict:
+        _err_put(cache_key, msg)   # 业务早退/异常统一负缓存,绝不写表
+        return {"status": "error", "error": msg}
+
+    def _work() -> dict:
+        try:
+            # 复用字幕(及其缓存);后台线程内同步等字幕(nowait=False)。总结喂英文原文(更准),夹带 zh 兜底
+            res = get_or_translate(video_id, target_lang=target_lang, source="auto", nowait=False)
+            if res.get("status") != "ready":
+                return _err(res.get("error", "字幕获取失败"))
+            segs = res.get("segments") or []
+            if not segs:
+                return _err("该视频无字幕,无法总结")
+            max_t = int(segs[-1]["start"] + segs[-1].get("duration", 0))
+            lines = "\n".join(
+                f"[{int(s['start'])}] {(s.get('en') or s.get('zh') or '').strip()}"
+                for s in segs if (s.get("en") or s.get("zh"))
+            )
+            prompt = _SUMMARY_PROMPT + f"字幕({len(segs)} 行):\n{lines}\n\n现在输出要点(每行 '秒数 | 要点'):"
+            text = _summary_ai(prompt)
+            if not text.strip():
+                return _err("AI 无输出")
+            points = _parse_points(text, max_t)
+            if not points:
+                return _err("AI 输出无法解析为要点")
+            db = _db()
+            db.execute(
+                "INSERT OR REPLACE INTO youtube_summaries "
+                "(video_id, target_lang, points_json, created_at) VALUES (?, ?, ?, datetime('now'))",
+                (video_id, target_lang, json.dumps(points, ensure_ascii=False)),
+            )
+            db.commit()
+            db.close()
+            return {"status": "ready", "from_cache": False, "points": points}
+        except Exception as e:
+            return _err(f"{type(e).__name__}: {e}")
+        finally:
+            with _LOCK:
+                ev2 = _INFLIGHT.pop(cache_key, None)
+            if ev2 is not None:
+                ev2.set()
+
+    if nowait:
+        threading.Thread(target=_work, daemon=True, name=f"yt-sum-{video_id}").start()
+        return {"status": "running"}
+    return _work()
 
 
 def has_cached(video_id: str, target_lang: str = "zh", source: str = "auto") -> bool:

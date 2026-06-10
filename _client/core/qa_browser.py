@@ -1037,12 +1037,15 @@ def _card_delete(local_id: str) -> dict:
         rec_file.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as ex:
         return {"ok": False, "error": f"写 records 失败：{ex}"}
-    synced = False
-    try:
-        _anki_request("sync", timeout=120); synced = True
-    except Exception:
-        pass
-    return {"ok": True, "synced": synced}
+    # AnkiWeb sync 最长 120s,不值得占住请求线程（移动端早断连）→ 后台 fire-and-forget
+    # deleteNotes + records 写盘已在上面同步完成,sync 失败也会被 15min anki-sync-refresh 兜住
+    def _bg_sync():
+        try:
+            _anki_request("sync", timeout=120)
+        except Exception:
+            pass
+    threading.Thread(target=_bg_sync, daemon=True).start()
+    return {"ok": True, "synced": "pending"}
 
 
 def find_related_cards(note_names: list, match: str = "") -> list:
@@ -1140,7 +1143,10 @@ def push_to_website(img_fname: str):
 
 # ─── 分类 + 保存（script化）─────────────────────────────────────────────────────
 
-def classify_conversation() -> dict:
+def classify_conversation(msgs: list = None) -> dict:
+    # msgs=会话快照（server 模式异步保存时传入；reset 后 state 里已是空会话，不能再读全局）
+    if msgs is None:
+        msgs = state["session"].messages
     anki_notes = []
     if ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists():
         anki_notes = sorted(p.stem for p in ANKI_RECORDS_DIR.glob("000-*.json"))
@@ -1152,7 +1158,7 @@ def classify_conversation() -> dict:
     anki_list   = "、".join(anki_notes[:60])
     msgs_text   = "\n".join(
         f"{'用户' if m['role'] == 'user' else 'Claude'}：{m['text'][:300]}"
-        for m in state["session"].messages
+        for m in msgs
     )
     prompt = (
         "根据以下对话完成三个任务：\n"
@@ -1184,11 +1190,16 @@ def classify_conversation() -> dict:
     return parsed
 
 
-def do_save(match: str, is_wrong: bool, related_cards: list = None) -> str:
+def do_save(match: str, is_wrong: bool, related_cards: list = None,
+            msgs: list = None, img_fname: str = None, temp_path=None) -> str:
+    # msgs/img_fname/temp_path=会话快照（server 模式异步保存传入，避免 reset 后读到空 state）
     if VAULT is None or EXERCISES_DIR is None or WRONG_DIR is None:
         return "未配置 vault 路径，无法保存（请在客户端 GUI 设 qa_vault_path）"
     ts        = datetime.now().strftime("%Y-%m-%d %H:%M")
-    img_fname = state["img_fname"]
+    if img_fname is None:
+        img_fname = state["img_fname"]
+    if temp_path is None:
+        temp_path = state["temp_path"]
     fallback  = f"未分类-{datetime.now().strftime('%Y%m%d')}"
 
     has_prefix = bool(match and re.match(r'^[0-9A-Fa-f]{3}-', match))
@@ -1199,7 +1210,9 @@ def do_save(match: str, is_wrong: bool, related_cards: list = None) -> str:
     exfile     = save_dir / f"{ex_prefix}-{note_name}.md"
 
     # 构建问答正文
-    qa_parts, msgs, i = [], state["session"].messages, 0
+    if msgs is None:
+        msgs = state["session"].messages
+    qa_parts, i = [], 0
     while i < len(msgs):
         if msgs[i]["role"] == "user":
             q = msgs[i]["text"]
@@ -1222,8 +1235,8 @@ def do_save(match: str, is_wrong: bool, related_cards: list = None) -> str:
     save_dir.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     dest = ASSETS_DIR / img_fname
-    if not dest.exists() and state["temp_path"] and Path(state["temp_path"]).exists():
-        shutil.copy2(state["temp_path"], dest)
+    if not dest.exists() and temp_path and Path(temp_path).exists():
+        shutil.copy2(temp_path, dest)
 
     # 写入习题/错题文件
     if exfile.exists():
@@ -1258,11 +1271,18 @@ def do_save(match: str, is_wrong: bool, related_cards: list = None) -> str:
 
 # ─── 归档对话 ──────────────────────────────────────────────────────────────────
 
-def archive_conversation(note_result: str, record_type: str = "normal", related_cards: list = None):
+def archive_conversation(note_result: str, record_type: str = "normal", related_cards: list = None,
+                         msgs: list = None, img_fname: str = None, temp_path=None):
+    # msgs/img_fname/temp_path=会话快照（server 模式异步保存传入，reset 后不能再读全局 state）
     HIST_IMG_DIR.mkdir(parents=True, exist_ok=True)
     hist_id   = datetime.now().strftime("%Y%m%d-%H%M%S")
-    img_fname = state["img_fname"]
-    src       = Path(state["temp_path"])
+    if img_fname is None:
+        img_fname = state["img_fname"]
+    if temp_path is None:
+        temp_path = state["temp_path"]
+    if msgs is None:
+        msgs = state["session"].messages
+    src       = Path(temp_path)
     dst       = HIST_IMG_DIR / img_fname
     if src.exists() and not dst.exists():
         shutil.copy2(src, dst)
@@ -1275,7 +1295,7 @@ def archive_conversation(note_result: str, record_type: str = "normal", related_
              datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
              img_fname,
              note_result,
-             json.dumps(state["session"].messages, ensure_ascii=False),
+             json.dumps(msgs, ensure_ascii=False),
              record_type,
              json.dumps(related_cards or [], ensure_ascii=False))
         )
@@ -1819,8 +1839,10 @@ function deleteNewcard(btn) {
   }).then(r => r.json()).then(j => {
     if (j.ok) {
       card.style.opacity = '.45';
+      // synced 三态：true=已同步 / 'pending'=后台同步中 / falsy=未同步（'pending' 是 truthy，不能直接 j.synced ?）
+      const syncLabel = j.synced === 'pending' ? '（同步中）' : (j.synced ? '（已同步）' : '');
       card.querySelector('.newcard-head').innerHTML =
-        '<span style="color:#b91c1c;font-size:12px">已删除' + (j.synced ? '（已同步）' : '') + '</span>';
+        '<span style="color:#b91c1c;font-size:12px">已删除' + syncLabel + '</span>';
       const b = card.querySelector('.newcard-body'); if (b) b.style.display = 'none';
     } else {
       btn.disabled = false; btn.textContent = '删除';
@@ -1966,20 +1988,45 @@ function runCreateNote() {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name: trimmed, pairs: pairs, image_b64: img_b64}),
   }).then(r => r.json()).then(j => {
+    // 后台 job：轮询期间按钮保持 disabled，防重复点击产生 name-1.md 垃圾
+    if (j.job_id) { pollCreateNoteJob(j.job_id, btn, 0); return; }
     btn.disabled = false; btn.textContent = '📝 创建新笔记';
-    if (j.ok) {
-      const safePath = (j.note_path || '').replace(/'/g, "\\'");
-      const safeUrl = (j.obsidian_url || '').replace(/'/g, "\\'");
-      const html = '<div><b>✓ 笔记已创建：</b>' + (j.note_path || '') + '</div>' +
-        '<button class="card-act-btn" onclick="location.href=\'' + safeUrl + '\'" style="margin-top:8px">📂 在 Obsidian 中打开</button>';
-      showCardResult(html);
-    } else {
-      showCardResult('✗ 创建失败：' + (j.error || '未知'));
-    }
+    renderCreateNoteResult(j);   // 兼容旧式同步返回
   }).catch(e => {
     btn.disabled = false; btn.textContent = '📝 创建新笔记';
     showCardResult('✗ 请求失败：' + e.message);
   });
+}
+
+function renderCreateNoteResult(j) {
+  if (j && j.ok) {
+    const safeUrl = (j.obsidian_url || '').replace(/'/g, "\\'");
+    const html = '<div><b>✓ 笔记已创建：</b>' + (j.note_path || '') + '</div>' +
+      '<button class="card-act-btn" onclick="location.href=\'' + safeUrl + '\'" style="margin-top:8px">📂 在 Obsidian 中打开</button>';
+    showCardResult(html);
+  } else {
+    showCardResult('✗ 创建失败：' + ((j && j.error) || '未知'));
+  }
+}
+
+function pollCreateNoteJob(jobId, btn, tries) {
+  // 复用 card-update-status 端点（零新端点）；封顶 60 次轮询
+  const reset = () => { btn.disabled = false; btn.textContent = '📝 创建新笔记'; };
+  fetch('api/card-update-status?job=' + encodeURIComponent(jobId))
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(j => {
+      if (j.status === 'running') {
+        if (tries >= 60) { reset(); showCardResult('⚠️ 整理超时，任务仍在后台执行，稍后可在 vault 查看'); return; }
+        setTimeout(() => pollCreateNoteJob(jobId, btn, tries + 1), 2000); return;
+      }
+      reset();
+      renderCreateNoteResult(j.result);
+    })
+    .catch(() => {
+      // 轮询暂时失败（锁屏/网络抖动）→ 重试；任务仍在后台跑
+      if (tries < 60) { setTimeout(() => pollCreateNoteJob(jobId, btn, tries + 1), 3000); }
+      else { reset(); showCardResult('⚠️ 暂时取不到结果，任务已在后台执行，稍后可在 vault 查看'); }
+    });
 }
 
 // ─── 粘贴图片 ────────────────────────────────────────────────────────────────
@@ -2450,6 +2497,28 @@ async function send() {
   input.focus();
 }
 
+function pollSaveJob(jobId) {
+  // server 模式异步保存：复用 card-update-status 端点轮询；弱网/锁屏失败重试不放弃
+  return new Promise((resolve, reject) => {
+    let fails = 0, tries = 0;
+    const tick = () => {
+      fetch('api/card-update-status?job=' + encodeURIComponent(jobId))
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(j => {
+          fails = 0;
+          if (j.status === 'done') { resolve((j.result && j.result.result) || '已保存'); return; }
+          if (++tries > 120) { reject(new Error('保存超时，任务仍在后台执行，稍后可在历史记录查看')); return; }
+          setTimeout(tick, 2000);
+        })
+        .catch(() => {
+          if (++fails > 40) { reject(new Error('轮询失败，任务仍在后台执行，稍后可在历史记录查看')); return; }
+          setTimeout(tick, 3000);
+        });
+    };
+    tick();
+  });
+}
+
 async function save() {
   if (sending) return;
   const saveBtn = document.getElementById('save-btn');
@@ -2460,9 +2529,11 @@ async function save() {
       method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
     });
     const d = await r.json();
-    status.textContent = '✓ ' + d.result;
+    // server 模式返回 job_id（AI 分类数十秒，连接易断）→ 轮询拿最终结果
+    const resultText = d.job_id ? await pollSaveJob(d.job_id) : d.result;
+    status.textContent = '✓ ' + resultText;
     saveBtn.textContent = '已保存 ✓'; saveBtn.style.background = '#666';
-    addMsg('assistant', '📝 ' + d.result);
+    addMsg('assistant', '📝 ' + resultText);
     setTimeout(() => window.close(), 2000);
   } catch(e) {
     status.textContent = '保存失败：' + e.message;
@@ -2996,11 +3067,18 @@ class Handler(BaseHTTPRequestHandler):
             elif not pairs:
                 self.send_json({"ok": False, "error": "没有标记为有用的回答"}, 400)
             else:
-                try:
-                    out = _create_note_from_qa(name, pairs, img_b64)
-                    self.send_json(out)
-                except Exception as ex:
-                    self.send_json({"ok": False, "error": str(ex)}, 500)
+                # 后台跑（AI 整理 10-30s，移动端连接易断）；复用 _card_jobs + card-update-status 轮询
+                import uuid
+                job_id = uuid.uuid4().hex[:12]
+                _card_jobs[job_id] = {"status": "running"}
+                def _run(job_id=job_id, name=name, pairs=pairs, img_b64=img_b64):
+                    try:
+                        out = _create_note_from_qa(name, pairs, img_b64)
+                    except Exception as ex:
+                        out = {"ok": False, "error": str(ex)}
+                    _card_jobs[job_id] = {"status": "done", "result": out, "_t": time.time()}
+                threading.Thread(target=_run, daemon=True).start()
+                self.send_json({"ok": True, "job_id": job_id})
 
         elif self.path == "/api/card-delete":
             lid = (body.get("local_id") or "").strip()
@@ -3010,28 +3088,50 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(_card_delete(lid))
 
         elif self.path == "/api/save":
-            try:
-                cls      = classify_conversation()
-                match    = cls.get("match", "")
-                is_wrong = bool(cls.get("wrong", False))
-                related  = find_related_cards(cls.get("related", []), match) if is_wrong else []
-                result   = do_save(match, is_wrong, related)
-                archive_conversation(result, "wrong" if is_wrong else "normal", related)
-                threading.Thread(
-                    target=push_to_website,
-                    args=(state["img_fname"],),
-                    daemon=True,
-                ).start()
-            except Exception as e:
-                result = f"保存失败：{e}"
-            _export_history_to_webapp()  # 服务端实例：让 webapp /history/ 立刻看到新条目
-            self.send_json({"result": result})
-            if not state.get("_server_mode"):
-                state["done"].set()
-            else:
-                # server 模式：保存后重置会话继续服务
+            # 先快照会话（classify 是同步 AI 调用，可达数十秒；server 模式下立刻 reset 继续服务，
+            # 后台全链路只用快照 —— 任何一处仍读全局都会在 reset 后拿到空会话）
+            msgs_snap = [dict(m) for m in state["session"].messages]
+            img_snap  = state["img_fname"]
+            tmp_snap  = state["temp_path"]
+
+            def _do_full_save():
+                try:
+                    cls      = classify_conversation(msgs_snap)
+                    match    = cls.get("match", "")
+                    is_wrong = bool(cls.get("wrong", False))
+                    related  = find_related_cards(cls.get("related", []), match) if is_wrong else []
+                    result   = do_save(match, is_wrong, related,
+                                       msgs=msgs_snap, img_fname=img_snap, temp_path=tmp_snap)
+                    archive_conversation(result, "wrong" if is_wrong else "normal", related,
+                                         msgs=msgs_snap, img_fname=img_snap, temp_path=tmp_snap)
+                    threading.Thread(
+                        target=push_to_website,
+                        args=(img_snap,),
+                        daemon=True,
+                    ).start()
+                except Exception as e:
+                    result = f"保存失败：{e}"
+                _export_history_to_webapp()  # 服务端实例：让 webapp /history/ 立刻看到新条目
+                return result
+
+            if state.get("_server_mode"):
+                # server 模式异步：job 化（移动端锁屏断连也不丢结果），复用 _card_jobs 轮询端点
+                import uuid
+                job_id = uuid.uuid4().hex[:12]
+                _card_jobs[job_id] = {"status": "running"}
+                def _run(job_id=job_id):
+                    res = _do_full_save()
+                    _card_jobs[job_id] = {"status": "done", "result": {"result": res}, "_t": time.time()}
+                threading.Thread(target=_run, daemon=True).start()
+                # 快照已取，立即重置会话继续服务
                 state["session"].reset()
                 state.update({"img_b64": None, "img_fname": None, "temp_path": None})
+                self.send_json({"ok": True, "job_id": job_id})
+            else:
+                # 本地模式保持同步（state['done'].set() 时机依赖响应已送出）
+                result = _do_full_save()
+                self.send_json({"result": result})
+                state["done"].set()
 
         elif self.path == "/api/discard":
             self.send_json({"ok": True})

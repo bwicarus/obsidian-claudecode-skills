@@ -110,7 +110,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-9';
+const READER_BUILD = 'reader-fix-10';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -178,7 +178,8 @@ window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
 // 在 DOM,内存无上限增长 → 更早被回收。卸载后 dataset.loaded='0',滚回视口由 IntersectionObserver 重渲。
 // 卸载阈值(5000px)必须 > IO 的 rootMargin(3000px),留 2000px 缓冲,避免边界来回抖动反复卸载/重渲。
 const _KEEP_DIST_PX = 5000;
-function _unloadPage(w) {
+// preRect: 调用方批量预读好的 getBoundingClientRect(读写分离,免逐页 读→写→读 强制 reflow)
+function _unloadPage(w, preRect) {
   const num = w.dataset.pageNum;
   // 占位尺寸用 **fit 公式**(页 meta × 当前 scale × 去边可见比),跟 setupContinuousMode 的 estW 一致 →
   // 永远精确 fit-width;**不**用 getBoundingClientRect 测量(若卸载瞬间该页还带补偿 zoom,测到的是放大/缩小后的
@@ -189,7 +190,7 @@ function _unloadPage(w) {
     wd = Math.floor(_meta.page_w * scale * _cropVisWFrac());
     h  = Math.floor(_meta.page_h * scale * _cropVisHFrac());
   } else {
-    const _r = w.getBoundingClientRect();
+    const _r = preRect || w.getBoundingClientRect();
     wd = Math.round(_r.width); h = Math.round(_r.height);
   }
   w.__charLayer = null; w.__charBoxes = null; w.__inkStrokes = null; w.__inkCanvas = null;
@@ -206,17 +207,22 @@ function _unloadPage(w) {
   w.textContent = '… 第 ' + num + ' 页';
   w.dataset.loaded = '0';
 }
-function _unloadFarPages() {
+// wraps 可由调用方(_onContinuousScroll)传入复用,免二次全量 querySelectorAll
+function _unloadFarPages(wraps) {
   const mainEl = document.getElementById('main');
   if (!mainEl) return;
   const mr = mainEl.getBoundingClientRect(), vh = mainEl.clientHeight;
-  const wraps = document.querySelectorAll('#page-container .page-wrap');
+  wraps = wraps || document.querySelectorAll('#page-container .page-wrap');
+  // 读写分离:先一轮只读 rect 收集待卸载页(rect 一并传给 _unloadPage 当回退测量),
+  // 再统一写 → 不再 读rect→写样式→读rect 交错触发逐页强制 reflow(占位尺寸不变,预读 rect 仍有效)
+  const toUnload = [];
   for (const w of wraps) {
     if (w.dataset.loaded !== '1') continue;   // 占位页便宜跳过(不调 getBoundingClientRect)
     const r = w.getBoundingClientRect();
     const relTop = r.top - mr.top, relBot = r.bottom - mr.top;
-    if (relBot < -_KEEP_DIST_PX || relTop > vh + _KEEP_DIST_PX) _unloadPage(w);
+    if (relBot < -_KEEP_DIST_PX || relTop > vh + _KEEP_DIST_PX) toUnload.push([w, r]);
   }
+  for (const [w, r] of toUnload) _unloadPage(w, r);
 }
 
 let _scrollTimer = null;
@@ -227,27 +233,42 @@ function _onContinuousScroll() {
     const mainEl = document.getElementById('main');
     const mainTop = mainEl.getBoundingClientRect().top;
     const viewportH = mainEl.clientHeight;
-    // 找视口中线穿过的页面
+    // 找视口中线穿过的页面——wraps 文档序=页序、top 竖向单调非降 → 二分代替全书 O(N) rect 扫描
+    // (千页书每 tick 5-15ms → <1ms)。语义与原 for 扫描一致:
+    //   · center 落页间隙(bottom 校验不过)→ 不更新页码(否则 URL ?page=/KG 拉取/预取漂移)
+    //   · spread 同行两页同 top,二分落组尾(右页)→ 回退到同 top 组首,组内按 DOM 序取第一个
+    //     bottom>=center 者(等高=左页,与原行为相同)
     const center = mainTop + viewportH / 2;
     const wraps = document.querySelectorAll('#page-container .page-wrap');
-    for (const w of wraps) {
-      const r = w.getBoundingClientRect();
-      if (r.top <= center && r.bottom >= center) {
-        const num = parseInt(w.dataset.pageNum);
-        if (num !== currentPage) {
-          currentPage = num;
-          { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
-          // 同步 URL + 拉 KG 节点
-          const u = new URL(location.href);
-          u.searchParams.set('page', num);
-          history.replaceState(null, '', u);
-          loadPageNodes(num);
-          if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
-        }
-        break;
+    let lo = 0, hi = wraps.length - 1, hit = -1;
+    while (lo <= hi) {   // 找最后一个 top<=center 的 wrap(空 NodeList 时 hi=-1 自然跳过)
+      const mid = (lo + hi) >> 1;
+      if (wraps[mid].getBoundingClientRect().top <= center) { hit = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    let target = null;
+    if (hit >= 0) {
+      const hitTop = wraps[hit].getBoundingClientRect().top;
+      let g = hit;   // 回退到同 top 组首(±1px 容差吸收子像素;单列页距数百 px 不会误并)
+      while (g > 0 && Math.abs(wraps[g - 1].getBoundingClientRect().top - hitTop) <= 1) g--;
+      for (let i = g; i <= hit; i++) {
+        if (wraps[i].getBoundingClientRect().bottom >= center) { target = wraps[i]; break; }
       }
     }
-    _unloadFarPages();   // 顺带卸载远处页,封顶内存
+    if (target) {
+      const num = parseInt(target.dataset.pageNum);
+      if (num !== currentPage) {
+        currentPage = num;
+        { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }
+        // 同步 URL + 拉 KG 节点
+        const u = new URL(location.href);
+        u.searchParams.set('page', num);
+        history.replaceState(null, '', u);
+        loadPageNodes(num);
+        if (window._prefetchAround) window._prefetchAround(num);   // 翻到新页 → 后台预取前后页(read-ahead)
+      }
+    }
+    _unloadFarPages(wraps);   // 顺带卸载远处页,封顶内存(复用已取好的 wraps)
   }, 200);
 }
 

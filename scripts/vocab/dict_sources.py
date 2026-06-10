@@ -82,6 +82,29 @@ def _cache_save(source: str, word: str, data: dict):
     except Exception:
         pass
 
+def _cache_age(source: str, word: str) -> float:
+    """缓存文件 mtime 距今秒数;无文件返回 inf(负缓存 TTL 由读方按 mtime 判,不动 _cache_load)。"""
+    try:
+        return time.time() - _cache_path(source, word).stat().st_mtime
+    except OSError:
+        return float("inf")
+
+_ERR_TTL_SEC = 1800   # 非 404 失败(限流/超时)负缓存 30min:防限流期每词反复 8s 干等重打外网
+
+def _neg_cache_err(source: str, word: str) -> dict | None:
+    """非 404 失败写负缓存 {"_err":1}。文件里已有好词条(非 _404/_err,含 30d 过期的 stale)
+    则**不覆盖**,直接返回旧词条(stale-while-error);否则写 _err 返回 None。"""
+    try:
+        p = _cache_path(source, word)
+        if p.exists():
+            old = json.loads(p.read_text("utf-8"))
+            if isinstance(old, dict) and not old.get("_404") and not old.get("_err"):
+                return old
+    except Exception:
+        pass
+    _cache_save(source, word, {"_err": 1})
+    return None
+
 # ── ECDICT ─────────────────────────────────────────────────────────────────
 
 def _parse_exchange(raw: str) -> dict[str, str]:
@@ -216,6 +239,12 @@ def lookup_free_dict(word: str) -> dict | None:
     if not _cfg().get("free_dict_enabled", True):
         return None
     cached = _cache_load("freedict", word)
+    # _err 拦截必须在通用 cached 返回之前:否则 {"_err":1} 被当词条返回 →
+    # _free_dict_unpack 解出全空 + compose_entry 误计 sources_hit
+    if isinstance(cached, dict) and cached.get("_err"):
+        if _cache_age("freedict", word) < _ERR_TTL_SEC:
+            return None
+        cached = None   # 负缓存过期 → 落到下面重试网络
     if cached is not None:
         cached["_from_cache"] = True
         return cached
@@ -228,11 +257,11 @@ def lookup_free_dict(word: str) -> dict | None:
         if e.code == 404:
             _cache_save("freedict", word, {"_404": True})
             return None
-        return None
+        return _neg_cache_err("freedict", word)   # 限流(429)等非 404 → 负缓存/stale 回退
     except Exception:
-        return None
+        return _neg_cache_err("freedict", word)
     if not isinstance(data, list) or not data:
-        return None
+        return _neg_cache_err("freedict", word)
     _cache_save("freedict", word, data[0])
     return data[0]
 
@@ -294,12 +323,23 @@ def lookup_mw_learner(word: str) -> list | None:
     if not key:
         return None
     cached = _cache_load("mw", word)
+    # _err 显式拦截:不拦的话未知 dict 形状会 fall-through 重打网络,负缓存被静默绕过
+    if isinstance(cached, dict) and cached.get("_err"):
+        if _cache_age("mw", word) < _ERR_TTL_SEC:
+            return None
+        cached = None   # 负缓存过期 → 落到重试
     if cached is not None:
         cached_list = cached.get("data") if isinstance(cached, dict) else cached
         if isinstance(cached_list, list):
             return cached_list
         if isinstance(cached, dict) and cached.get("_404"):
             return None
+
+    def _fail():   # 非 404 失败:写负缓存,有 stale 好词条({"data":[...]})则回退旧数据
+        old = _neg_cache_err("mw", word)
+        ol = old.get("data") if isinstance(old, dict) else None
+        return ol if isinstance(ol, list) else None
+
     url = (f"https://www.dictionaryapi.com/api/v3/references/learners/json/"
            f"{urllib.parse.quote(word)}?key={urllib.parse.quote(key)}")
     try:
@@ -307,9 +347,9 @@ def lookup_mw_learner(word: str) -> list | None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
-        return None
+        return _fail()
     if not isinstance(data, list):
-        return None
+        return _fail()
     if not data or isinstance(data[0], str):
         # MW 返回 list[str] 表示"没命中，但拼写建议"
         _cache_save("mw", word, {"_404": True, "suggestions": data if data else []})
@@ -530,7 +570,9 @@ def translate_sentences(sentences: list[str], model: str = "sonnet") -> dict:
         return out
     # 1) Google Cloud Translation 批量优先(快~0.3s/块、走 GCP 赠金、JA→ZH 质量够用)
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
+        _p = str(Path(__file__).parent)
+        if _p not in sys.path:   # guard:gunicorn 常驻进程反复调用防 sys.path 无限增长
+            sys.path.insert(0, _p)
         from translate import gtranslate_batch
         gres = gtranslate_batch(todo) or []
         remaining = []
@@ -548,7 +590,9 @@ def translate_sentences(sentences: list[str], model: str = "sonnet") -> dict:
         return out
     # 2) AI 兜底(Google 没 key/没翻到的)
     try:
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        _p = str(PROJECT_ROOT / "scripts")
+        if _p not in sys.path:   # guard:常驻进程防重复插入
+            sys.path.insert(0, _p)
         from ai_client import ask
     except Exception:
         return out
@@ -726,7 +770,9 @@ def _jp_regen_bg(word: str, context: str, model: str, langs) -> None:
 def _jp_ai_fetch(word: str, context: str = "", model: str = "sonnet", langs=None) -> dict | None:
     """调 AI 生成 JP 词条 + 写缓存(lookup_jp 同步路径与后台升级线程共用)。返回原始 data。"""
     try:
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        _p = str(PROJECT_ROOT / "scripts")
+        if _p not in sys.path:   # guard:常驻进程防重复插入
+            sys.path.insert(0, _p)
         from ai_client import ask
     except Exception:
         return None

@@ -14,6 +14,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -45,17 +47,21 @@ def load_claude_env() -> dict:
     return env
 
 
-def get_systemd_status(unit: str) -> str:
+def get_systemd_statuses(units) -> dict:
+    """一次 systemctl 查全部 unit（原先每 unit 各 spawn 一次，轮询路径上 5 次/请求）。"""
     if sys.platform == "win32":
-        return "n/a"   # 本地实例(Windows)无 systemd:xvfb/anki-headless/obsidian-sync/qa-server/tailscaled 是 Pi 专属服务,本地不适用
+        return {u: "n/a" for u in units}   # 本地实例(Windows)无 systemd:xvfb/anki-headless/obsidian-sync/qa-server/tailscaled 是 Pi 专属服务,本地不适用
     try:
+        # 不看 returncode:任一 unit 非 active 整体就非零;stdout 每行对应一个参数顺序的 unit
         r = subprocess.run(
-            ["systemctl", "is-active", unit],
+            ["systemctl", "is-active", *units],
             capture_output=True, text=True, timeout=3,
         )
-        return r.stdout.strip() or "unknown"
+        lines = r.stdout.splitlines()
+        return {u: ((lines[i].strip() or "unknown") if i < len(lines) else "unknown")
+                for i, u in enumerate(units)}
     except Exception as e:
-        return f"err:{e}"
+        return {u: f"err:{e}" for u in units}
 
 
 def ankiconnect_version():
@@ -70,6 +76,47 @@ def ankiconnect_version():
             return data.get("result")
     except Exception:
         return None
+
+
+# ── /api/status 慢字段缓存(5s TTL + 单飞) ────────────────────
+# 面板 fast-poll 500ms 一发,systemctl spawn + AnkiConnect ping 每发都跑会吃满 CPU;
+# active_tasks / last_run 不进缓存(任务进度依赖新鲜度,且读文件便宜)。
+_SYSTEMD_UNITS = ("anki-headless", "xvfb-99", "obsidian-sync", "qa-server", "tailscaled")
+_STATUS_TTL = 5.0
+_status_cache = {"ts": 0.0, "data": None}
+_status_lock = threading.Lock()
+
+
+def _expensive_status() -> dict:
+    st = get_systemd_statuses(_SYSTEMD_UNITS)
+    return {
+        "ankiconnect_version": ankiconnect_version(),
+        "anki_headless": st["anki-headless"],
+        "xvfb_99": st["xvfb-99"],
+        "obsidian_sync": st["obsidian-sync"],
+        "qa_server": st["qa-server"],
+        "tailscaled": st["tailscaled"],
+    }
+
+
+def get_status_cached() -> dict:
+    """TTL 内直接回缓存;过期由抢到锁的请求重算,其余并发请求拿旧值不阻塞(单飞)。"""
+    now = time.monotonic()
+    if _status_cache["data"] is not None and now - _status_cache["ts"] < _STATUS_TTL:
+        return _status_cache["data"]
+    if _status_lock.acquire(blocking=False):
+        try:
+            data = _expensive_status()
+            _status_cache["data"] = data
+            _status_cache["ts"] = time.monotonic()
+            return data
+        finally:
+            _status_lock.release()
+    if _status_cache["data"] is not None:
+        return _status_cache["data"]
+    # 冷启动且别的线程正在重算:等它算完拿结果
+    with _status_lock:
+        return _status_cache["data"] or _expensive_status()
 
 
 def get_ai_backend() -> str:
@@ -120,17 +167,14 @@ def register_control(app):
 
     @app.route("/control/api/status")
     def control_status():
-        return jsonify({
-            "ankiconnect_version": ankiconnect_version(),
-            "anki_headless": get_systemd_status("anki-headless"),
-            "xvfb_99": get_systemd_status("xvfb-99"),
-            "obsidian_sync": get_systemd_status("obsidian-sync"),
-            "qa_server": get_systemd_status("qa-server"),
-            "tailscaled": get_systemd_status("tailscaled"),
+        # 慢字段(systemctl + AnkiConnect ping)走 5s 缓存,快字段每次现读
+        out = dict(get_status_cached())
+        out.update({
             "ai_backend": get_ai_backend(),
             "last_run": get_last_run(),
             "active_tasks": task_tracker.read_snapshot(),
         })
+        return jsonify(out)
 
     @app.route("/control/api/config/schema")
     def control_config_schema():
@@ -217,6 +261,7 @@ def register_control(app):
         # 但是 qa_remote_daemon 控制 bind 行为，所以保险起见重启）
         if "qa_remote_daemon" in new_cfg or "qa_vault_path" in new_cfg:
             subprocess.run(["systemctl", "restart", "qa-server"], check=False)
+            _status_cache["ts"] = 0   # 重启 qa-server 后失效缓存,状态点尽快反映
 
         msg = "配置已保存"
         if errors:
@@ -289,6 +334,7 @@ def register_control(app):
 
     @app.route("/control/api/trigger/<action>", methods=["POST"])
     def control_trigger(action):
+        _status_cache["ts"] = 0   # 触发类操作可能改服务状态,主动失效缓存让状态点尽快刷新
         if action == "register":
             _trigger_script("register_notes.py")
             return jsonify({"ok": True, "msg": "register_notes 已启动（后台跑，日志在 state/logs/webapp_trigger.log）"})

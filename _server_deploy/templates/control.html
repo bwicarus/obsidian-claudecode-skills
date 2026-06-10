@@ -678,12 +678,18 @@ async function loadQuotaLog(){
   }
 }
 
-function tick() {
-  refreshStatus();
-  // "操作"panel active 时同步刷日志
-  if (document.querySelector('[data-panel="trigger"]').classList.contains('active')) refreshTriggerLog();
-  const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
-  setTimeout(tick, interval);
+async function tick() {
+  try {
+    if (!document.hidden) {   // 后台标签页跳过本轮,省请求
+      await refreshStatus();   // await 防慢请求时轮询堆叠(同一时刻 in-flight ≤1)
+      // "操作"panel active 时同步刷日志
+      if (document.querySelector('[data-panel="trigger"]').classList.contains('active')) await refreshTriggerLog();
+    }
+  } finally {
+    // setTimeout 必须在 finally:否则 fetch 异常会断掉轮询链
+    const interval = Date.now() < _fastPollUntil ? FAST_INTERVAL : NORMAL_INTERVAL;
+    setTimeout(tick, interval);
+  }
 }
 loadConfig().then(() => { tick(); });
 </script>

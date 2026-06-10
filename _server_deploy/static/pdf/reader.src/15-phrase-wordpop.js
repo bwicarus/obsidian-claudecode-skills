@@ -213,29 +213,45 @@ window._phraseFav = (btn) => {
   }).catch(() => { if (btn) btn.disabled = false; });
 };
 // 收藏/取消后重拉各已渲染页 chars 的 w（原地更新，不重建 char-layer）→ 单击立即按新词组边界选
-async function refreshCharsWForAllPages() {
-  const wraps = document.querySelectorAll('[data-loaded="1"][data-page-num]');
-  for (const pw of wraps) {
-    const num = parseInt(pw.dataset.pageNum || '0', 10);
-    if (!num || !pw.__charBoxes) continue;
-    try {
-      // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
-      let ov = null;
-      try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
-      const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
-      if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
-      const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
-      if (!d.ok || !d.chars) continue;
-      const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
-      for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
-      if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
-        pw.__furigana = d.furigana;
-        try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
-      }
-      pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
-      try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
-    } catch (_) {}
+// generation 守卫:快速收藏→立即取消两次调用交错时,旧轮迟到的响应不准写回(只让最新一轮落地);
+// 距视口中心近的页先刷 + 并发 3 小池(页内 overlay→chars 的 cv 依赖仍串行;无界并发会打满服务端 gthread)。
+let _charsWGen = 0;
+async function _refreshOnePageCharsW(pw, num, gen) {
+  // 先 overlay 拿新 cv(收藏词组改了→cv 变,避开 SW 缓存里旧 w)+ 新 vocab_marks
+  let ov = null;
+  try { ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)).json(); } catch (_) {}
+  if (gen !== _charsWGen) return;   // 已有更新一轮 → 本轮结果作废(连 localStorage cv 也不写,防旧值覆盖新)
+  const cv = (ov && ov.ok && ov.cv) ? ov.cv : CHARS_VER;
+  if (ov && ov.ok && ov.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + num, ov.cv); } catch (_) {} }  // 词组变后更新各页 cv
+  const d = await (await fetch('/pdf/api/page-chars?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv))).json();
+  if (gen !== _charsWGen) return;
+  if (!d.ok || !d.chars) return;
+  const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
+  for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+  if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
+    pw.__furigana = d.furigana;
+    try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
   }
+  pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
+  try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+}
+async function refreshCharsWForAllPages() {
+  const gen = ++_charsWGen;   // 入口 bump:作废所有在途旧轮
+  const wraps = [...document.querySelectorAll('[data-loaded="1"][data-page-num]')];
+  // 距视口中心近的页优先(用户正看的页分词最先生效)
+  const cy = (window.innerHeight || 0) / 2;
+  const dist = (pw) => { const r = pw.getBoundingClientRect(); return Math.abs((r.top + r.bottom) / 2 - cy); };
+  wraps.sort((a, b) => dist(a) - dist(b));
+  let next = 0;
+  const worker = async () => {
+    while (next < wraps.length && gen === _charsWGen) {
+      const pw = wraps[next++];
+      const num = parseInt(pw.dataset.pageNum || '0', 10);
+      if (!num || !pw.__charBoxes) continue;
+      try { await _refreshOnePageCharsW(pw, num, gen); } catch (_) {}
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
 }
 
 // ── 单词小框：单击单词/点查词 → 先 ecdict 核心(秒回)，可展开完整大框，可主动制卡 ──
@@ -590,6 +606,20 @@ window._wordPopMaster = (btn) => {
   if (s.phrase) {
     const t = s.word;
     if (btn) btn.disabled = true;
+    // 乐观:标掌握瞬间先去掉该词组下划线(对齐下方非 phrase 分支);失败按快照回滚
+    let _undoDrop = null;
+    if (next) {
+      const snaps = [];
+      document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
+        if (pw.__vocabMarks && pw.__vocabMarks.length) snaps.push({pw, marks: pw.__vocabMarks});
+      });
+      _dropVocabUnderlineOptimistic(s);
+      const changed = snaps.filter(sn => sn.pw.__vocabMarks !== sn.marks).map(sn => ({...sn, after: sn.pw.__vocabMarks}));
+      // 只回滚仍是本次乐观结果的页(防覆盖期间其他刷新写入的新 marks)
+      _undoDrop = () => changed.forEach(({pw, marks, after}) => {
+        if (pw.__vocabMarks === after) { pw.__vocabMarks = marks; try { renderVocabUnderlines(pw, marks); } catch (_) {} }
+      });
+    }
     fetch('/pdf/api/phrase-mark', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text: t, mark: next ? 'mastered' : ''}),
@@ -605,7 +635,7 @@ window._wordPopMaster = (btn) => {
       }
       refreshCharsWForAllPages();   // 重拉 w + 重画下划线(掌握→该词组下划线消失)
       _toast?.(s.mastered ? '已掌握，下划线消失' : '已取消掌握');
-    }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
+    }).catch(() => { if (_undoDrop) _undoDrop(); if (btn) btn.disabled = false; _toast?.('标记失败'); });
     return;
   }
   const w = s.lemma || s.word;

@@ -156,9 +156,11 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
     比 MyMemory 质量高，但耗 AI 额度。"""
     try:
         import sys as _sys
-        _sys.path.insert(0, str(PROJECT_ROOT / "_client" / "core"))
-        _sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        _sys.path.insert(0, str(PROJECT_ROOT / "_server_deploy"))
+        for _p in (str(PROJECT_ROOT / "_client" / "core"),
+                   str(PROJECT_ROOT / "scripts"),
+                   str(PROJECT_ROOT / "_server_deploy")):
+            if _p not in _sys.path:   # guard:常驻进程每次翻译都插会让 sys.path 无限增长
+                _sys.path.insert(0, _p)
         from ai_backends import make_backend
         try:
             from qa_server import get_cfg
