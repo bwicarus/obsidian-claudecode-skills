@@ -184,6 +184,16 @@ EOF
   vault 快速同步（清理 + KG prune，不跑 AI / 不动 Anki）。
 - `push-big-files.{service,timer}`（2026-06-08）—— 每 4 小时把 vault 里 >200MB 的文件推到 PC，
   绕过 Obsidian Sync 单文件 200MB 上限。详见「大文件跨设备」一节。
+- `book-ocr.service` + `book-ocr-watchdog.{service,timer}`（2026-05-30）—— 日文扫描书后台 OCR
+  （低优先级长任务）+ 每 15 分钟健康自检（详见 [`book-ocr-pipeline.md`](book-ocr-pipeline.md)）。
+  这套 unit 踩过两个 **systemd 通用坑**（都 2026-06-10 修，写 timer/unit 时通用）：
+  - **monotonic timer 重启后永不触发**：watchdog.timer 原来只有 `OnBootSec=5min + OnUnitActiveSec=15min`。
+    开机很久后再 (re)start timer 时，OnBootSec 早已过去、service 又没跑过（OnUnitActiveSec 无参考点）→
+    `systemctl list-timers` 显示 `Trigger: n/a`，**永不触发**（实际 5-30 起 11 天没自检过）；
+    `Persistent=true` 只对 OnCalendar 生效，救不了 monotonic timer。修法：加 `OnActiveSec=15min`
+    （以 timer 自身激活时刻为基准，(re)start 后必有首跑）。
+  - **`StartLimitIntervalSec` / `StartLimitBurst` 属 `[Unit]` 段**：book-ocr.service 旧版误放 `[Service]`，
+    systemd 只在 journal 里报一行 `Unknown key ... ignoring` 实际未生效，防 fail-loop 形同虚设。
 
 副本都在 `references/systemd/`，enable 方式同其它 timer（见阶段 10）。
 
@@ -307,7 +317,7 @@ smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔�
 
 | 维度 | 服务器 | Pi |
 |---|---|---|
-| systemd 服务 | 6 个项目 unit + nginx（+ 2 套增量 timer） | 同上 |
+| systemd 服务 | 6 个项目 unit + nginx（+ 增量 timer 数套，见上） | 同上（另有仅 Pi 的 push-big-files.timer） |
 | webapp 路由 | 完整 | 完整 |
 | Vault | 1175 md / 1.4GB | 1175 md / 1.4GB |
 | Anki | 33 decks / 5634 cards / 3258 notes | 完全一致 |

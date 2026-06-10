@@ -1,7 +1,7 @@
 # Skill: pdf-mark
 
 从 Obsidian vault 的 PDF 中提取指定区域内容。
-自动判断是否有文字层；无文字层时依次尝试 OCR 和 Claude Haiku 视觉分析。
+自动判断是否有文字层；无文字层时依次尝试 OCR 和 AI 视觉分析（按 settings.json 的 backend 路由：Claude API `claude-haiku-4-5` 或 Codex CLI，见 `pdf_extract.py::extract_via_vision`）。
 
 ## 触发方式
 用户输入 `/pdf-mark`，可以：
@@ -48,9 +48,9 @@
 ## 脚本输出前缀
 - `TEXT:` — 文字层提取（最准确）
 - `OCR:` — Tesseract OCR
-- `VISION:` — Claude Haiku 视觉分析
+- `VISION:` — AI 视觉分析（Claude Haiku 或 Codex CLI）
 
 ## 依赖
 - `pip install pymupdf`（必须）
 - `pip install pytesseract pillow` + 安装 Tesseract-OCR（OCR 可选）
-- Anthropic API key（视觉分析可选，设置环境变量 `ANTHROPIC_API_KEY`）
+- 视觉分析（可选）：走 Claude 路径需 `ANTHROPIC_API_KEY`（anthropic SDK）；走 Codex 路径用 `ai_client.codex_raw`，按共享 settings 的 `backend` 自动选择

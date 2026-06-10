@@ -131,12 +131,16 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/fitness/subtitles/<vid>?source=auto\|stt&force=` | 拉 + 翻 + 缓存 |
+| GET | `/api/fitness/subtitles/<vid>?source=auto\|hq\|stt&force=` | 拉 + 翻 + 缓存(miss 时后台生成,回 `running`) |
 | GET | `/api/fitness/subtitles/<vid>/status?source=` | 只查 cache |
+| GET | `/api/fitness/summary/<vid>?force=` | AI 要点 + 时间锚点(同样 miss → `running`) |
 
 **source**:
 - `auto`(默认):YT 自带 caption + 翻译(~1s 首次,秒出缓存)
-- `stt`:Cloud Speech-to-Text 重新转录 + 翻译(~30-60s,烧赠金,质量高)
+- `hq`:YT 字幕原文 + LLM 精翻(质量优先;无字幕才内部退 STT)
+- `stt`:纯 Cloud Speech-to-Text 转录 + 翻译(仅底层 fallback,UI 不直接用)
+
+**返回态(2026-06-10 起)**:`status` = `ready` / `running` / `error`。cache miss 默认 **nowait 后台化**(daemon 线程跑,HTTP 立即回 `{status:"running"}`),前端每 3s 轮询;失败进**内存负缓存 10min**(`?force=1` 是唯一出口)。注意路由对非 `ready` 一律回 HTTP 500(含 `running`),前端只看 body 的 `status` 字段。详见下「字幕系统」。
 
 > 翻译链路(2026-05-31 起):`youtube_subtitles._translate_all` = **Google Cloud Translation 批量优先**(`translate.gtranslate_batch`,v2 一次多段、走 GCP 赠金、EN→ZH 质量高、整集一两秒)→ Gemini Flash(赠金常 429,基本失效)→ Claude 兜底。之前主用 Gemini,因「prepayment depleted」长期退化到慢的 Claude;Google Translation API 放行后改它首选。详见 [`google-cloud-apis.md`](google-cloud-apis.md)。
 
@@ -308,10 +312,13 @@ log 页每动作展开:
   - `auto`(🇨🇳)= YT caption + `_translate_all`(Google 机翻优先,快免费)
   - `hq`(🎯HQ)= **优先 YouTube 英文字幕原文**(`_fetch_english`,准确)+ `_translate_hq` **AI 精翻**(Gemini→Claude 分批,Google 仅 AI 全挂兜底);**无字幕才退回 STT**。旧版 HQ 直接用 Cloud STT 转录→英文本身易错→翻译差(用户反馈"HQ效果差")。改后 HQ 用准确字幕原文 + AI 处理,质量大幅提升。cache namespace 从 `stt` 换成 `hq` → 自动绕开旧 STT 垃圾缓存。
   - `stt` = 纯 Cloud STT(仅 hq 在无字幕时内部 fallback;UI 不再直接用)
-- **HQ 翻译走 AI**(用户明确要"参考原字幕用 AI 处理",机翻太生硬):Gemini 2.5 Flash 优先(~5s),但 ⚠ Gemini 现 429(AI Studio 预付费余额耗尽,见踩坑#1)→ 落 **Claude 分批**(每 60 段,246 段约 130s,在 nginx 300s 内;断连由 inflight+cache 兜住,缓存后秒出)。Claude 实测 30 段 13s、质量自然。修好 Gemini billing 后 HQ 自动用更快的 Gemini。`auto`(🇨🇳)仍用 `_translate_all`(Google 机翻优先,快)
+- **HQ 翻译走 AI**(用户明确要"参考原字幕用 AI 处理",机翻太生硬):Gemini 2.5 Flash 优先(~5s),但 ⚠ Gemini 现 429(AI Studio 预付费余额耗尽,见踩坑#1)→ 落 **Claude 分批**(每 60 段,246 段约 130s;2026-06-10 起 nowait 后台化,HTTP 不再长挂,nginx 300s 不再是约束)。Claude 实测 30 段 13s、质量自然。修好 Gemini billing 后 HQ 自动用更快的 Gemini。`auto`(🇨🇳)仍用 `_translate_all`(Google 机翻优先,快)
 - 注:YT caption 是按时间切的句子片段,逐行译必然碎(中英都碎),Claude 在每批 60 行上下文里尽量连贯;这是字幕固有特性,非 bug
 - 缓存:全局共享 SQLite `WEBAPP_DATA/youtube_subtitles.db`,key (video_id, target_lang, source)
-- 并发锁:同视频同 source 并发请求只翻 1 次
+- **nowait 后台化 + 失败负缓存(2026-06-10)**,`get_or_translate(..., nowait=True)` 默认值:
+  - cache miss → daemon 线程跑拉+翻+写表,立即回 `{status:"running"}`;并发锁下撞到 inflight 的轮询请求也直接回 `running`(**绝不 wait 占 gunicorn 线程**;只有 `nowait=False` 才落回 `ev.wait`,目前仅 `summarize_video` 内部同步等字幕时用)
+  - 失败进**内存负缓存 10min**(`_ERR_CACHE`,**绝不写 youtube_subtitles 表**——错误行会被 ready/`has_cached` 误读毒化成功路径)。TTL 内同 key 秒回 error 不重打 YT/翻译 API;`force=1` 清该 key 负缓存,是唯一出口(前端失败提示上的「重试」链接带 force=1)
+  - 前端(log.html `toggleSubtitle`):收到 `running` 每 3s 轮询,上限 200×3s≈10min(hq LLM 精翻可达此量级);`SUBPOLL[exId]` **代际计数**——切视频/切 source/重开时旧轮询发现代际变了即中止,另查 `player.getVideoData().video_id` 防错位注入
 
 ### Cloud Speech-to-Text 流程
 
@@ -482,7 +489,7 @@ register_fitness(app)
 
 - **视频过滤修复**（`scripts/find_jeff_videos.py`）：用户报"视频跟动作对不上"。根因三连——① `MUST_CONTAIN` 键名 `db_lateral_raise` ≠ plan 里的 `cable_lateral_raise`（取不到过滤词 → 侧平举完全不过滤）；② 关键词太松（`["squat"]` 放行"保加利亚分腿蹲"）；③ 某频道匹配不够时用**跑偏视频凑数**到 5 个（划船被塞 Lat Pulldown/Rear Delt）。修：键名对齐 plan id + 新增 `MUST_EXCLUDE` 负向词（剔"另一个动作/另一块肌群"）+ **取消用跑偏视频凑数**（宁可少而准）+ 新增 `--prune-existing`（不调 API、按规则清洗现有 plan.json）。清洗了 plan（剔 45）+ 用户 3 个 override（per-user DB，剔 7）。`ocr_one_page` 无关，但 `google_vision_ocr.py` 也在本批改（见 pdf-reader §32）。
 - **视频收藏置顶**：per-user 表 `fitness_video_favorite(exercise_id, video_id)`；`GET /api/fitness/videos/<id>` 收藏置顶（**稳定排序**，各组保原序）+ 标 `favorite`；`POST /api/fitness/videos/<id>/favorite {video_id, favorite}`。log 页控制条 ☆/⭐ 按钮（切换后本地稳定排序到首位 + 重渲）。
-- **AI 要点 + 时间锚点**：`GET /api/fitness/summary/<vid>` → `youtube_subtitles.summarize_video`：拉字幕（复用 `get_or_translate` 缓存）→ 喂带 `[秒]` 时间戳的字幕给 AI → 输出"秒数 | 要点" → `_parse_points` 解析 → 缓存表 `youtube_summaries`。log 页 📌要点：列表每条 `[mm:ss] 要点`，点击 `player.seekTo(t)` 跳转。Gemini Flash 优先、**429 落 Claude**（webapp `.env` 有 `CLAUDE_PROJECT`；`youtube_subtitles` 顶部 `os.environ.setdefault("CLAUDE_PROJECT", PROJECT_ROOT)` 防独立脚本报 `C:\claude`）。实测练肩视频产出 8 条可读要点 + 准时间戳。
+- **AI 要点 + 时间锚点**：`GET /api/fitness/summary/<vid>` → `youtube_subtitles.summarize_video`：拉字幕（复用 `get_or_translate` 缓存，内部传 `nowait=False` 同步等字幕）→ 喂带 `[秒]` 时间戳的字幕给 AI → 输出"秒数 | 要点" → `_parse_points` 解析 → 缓存表 `youtube_summaries`。log 页 📌要点：列表每条 `[mm:ss] 要点`，点击 `player.seekTo(t)` 跳转。Gemini Flash 优先、**429 落 Claude**（webapp `.env` 有 `CLAUDE_PROJECT`；`youtube_subtitles` 顶部 `os.environ.setdefault("CLAUDE_PROJECT", PROJECT_ROOT)` 防独立脚本报 `C:\claude`）。实测练肩视频产出 8 条可读要点 + 准时间戳。2026-06-10 起同 `get_or_translate` 机制：miss 回 `running` + 前端 `togglePoints` 每 3s 轮询（上限 120×3s≈6min，`PTPOLL[exId]` 代际中止）+ 失败负缓存 10min（**4 个业务早退**——字幕获取失败 / 无字幕 / AI 无输出 / 解析失败——统一经 `_err()` 进负缓存，防前端反复触发）+「重试」带 force=1。
 - **3D 肌肉模型**（task #203，`templates/fitness/body.html` + `static/fitness/body_muscles.glb` 2.1M + `static/three/` Three.js）：用户给的 C 盘"人体模型" → Blender headless 转 glTF（含模型自带头部，不用程序生成）→ Three.js GLTFLoader 渲染；按强度（est-1RM，同 modality 拮抗肌比值）算肌肉平衡（`fitness_coach.py` 的 `_compute_strength_ratios`/`_balance_profile`，非按训练量）。
 
 ## 相关 reference

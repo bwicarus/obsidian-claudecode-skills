@@ -73,7 +73,7 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/api/qa-history/<hid>/delete` | POST | 删一条 QA 历史（proxy 到 qa-server :9091）|
 | `/api/nav-links` | GET/POST | per-user 导航链接持久化（nav.js 用）|
 | `/control/` | GET | 控制面板首页 |
-| `/control/api/status` | GET | 系统状态 JSON |
+| `/control/api/status` | GET | 系统状态 JSON（systemd/AnkiConnect 慢字段走 5s TTL 缓存，见「控制面板状态轮询」节）|
 | `/control/api/config/schema` | GET | server-config 字段 schema |
 | `/control/api/ipad-config` | GET | iPad 端配置（cmd_server key / 端点等）|
 | `/control/api/quota-log` | GET | 额度消耗日志（state/quota_log.json）|
@@ -282,7 +282,7 @@ if __name__ == "__main__":
 
 ### 控制面板的本地实例适配（n/a 灰点不报警）
 
-`/control/api/status` 调 `get_systemd_status(unit)` —— `sys.platform=="win32"` 直接返回 `"n/a"`（`control.py:48-50`，本地实例无 systemd，`xvfb`/`anki-headless`/`obsidian-sync`/`qa-server`/`tailscaled` 是 Pi 专属服务）。`control.html` 前端据此区分：
+`/control/api/status` 经 `get_status_cached()` 调 `get_systemd_statuses(units)`（批量版，见下「控制面板状态轮询」）—— `sys.platform=="win32"` 直接返回全 `"n/a"`（`control.py:52-53`，本地实例无 systemd，`xvfb`/`anki-headless`/`obsidian-sync`/`qa-server`/`tailscaled` 是 Pi 专属服务）。`control.html` 前端据此区分：
 
 - `svc()` 里 `val==='n/a'` → dot 类 `na`（`.dot.na` 灰点 `#6b7280` + 不报警，`control.html:124,361`），值显示「本地不适用」（`control.html:364`）。
 - 状态总判定：`local = data.anki_headless==='n/a'` 识别本地实例；`svcOk` 把 `'active'` 和 `'n/a'` 都算正常；`allOk = svcOk && (ankiOk || local)` → **本地实例不因 Pi 专属服务 n/a 或 Anki 未开而报「有问题」**，meta 显示「本地实例正常」（`control.html:374-377`）。
@@ -397,3 +397,22 @@ upload_dataset(client, Path(dash_dir), "dashboard")
 - session cookie 早已 `HttpOnly + SameSite=Lax + Secure`,SECRET_KEY 走 env(无需改)。`SESSION_COOKIE_SECURE` 随环境降级:`os.environ.get("SESSION_COOKIE_SECURE","1") not in ("0","false","False")`(`app.py:33`),**默认仍 Secure(生产不变)**;本地裸 http 实例由 `.env.local` 设 `SESSION_COOKIE_SECURE=0` 关掉,兼容非 Chrome 浏览器(注:Chrome/Firefox 对 127.0.0.1/localhost 视作 secure context,即便 True 本地也能登录,此处降级只为边界场景)。
 
 **部署回顾**:Python 改 `cp _server_deploy/*.py /home/bwicarus/webapp/` + `systemctl restart webapp`;模板 `cp templates/*.html`;nginx `nginx -t && systemctl reload nginx`;systemd `cp references/systemd/*.{service,timer} /etc/systemd/system/ && daemon-reload`。VPS 实例同源码,nginx 用 git 的 `_server_deploy/nginx/bwicarus.conf`(需同步加这些 header/gzip/limit_req)。
+
+## 控制面板状态轮询（/control/api/status 缓存 + 前端节流，2026-06）
+
+面板轮询最快 500ms 一发，原实现每发都 spawn 5 次 `systemctl is-active` + ping AnkiConnect，单 worker gunicorn 上会吃满 CPU。现拆成「慢字段缓存 + 快字段现读」：
+
+### 后端（control.py）
+
+- **`get_systemd_statuses(units)`**（`control.py:50`）：**一次** `systemctl is-active <u1> <u2> ...` 批量查全部 unit（`_SYSTEMD_UNITS` = anki-headless / xvfb-99 / obsidian-sync / qa-server / tailscaled）。不看 returncode（任一 unit 非 active 整体就非零），stdout **每行按参数顺序对应一个 unit**。Windows 本地实例直接返回全 `"n/a"`。
+- **5s TTL 缓存 + 单飞**（`get_status_cached()`，`control.py:102`）：慢字段（5 个 systemd 状态 + `ankiconnect_version` ping）进模块级 `_status_cache`，`_STATUS_TTL=5.0`。过期时由抢到 `_status_lock`（**非阻塞** acquire）的那个请求重算，其余并发请求直接拿旧值不阻塞；只有冷启动（缓存还没有值）才阻塞等首算。
+- **快字段不进缓存**：`ai_backend` / `last_run` / `active_tasks` 每请求现读（任务进度依赖新鲜度，且读文件便宜，`control_status`，`control.py:168-177`）。
+- **主动失效**：`/control/api/trigger/<action>` 入口处 `_status_cache["ts"] = 0`（`control.py:337`，触发类操作可能改服务状态，让状态点最多 1 个轮询周期内反映）；`/control/api/config` POST 重启 qa-server 那条分支同样失效（`control.py:264`）。
+
+### 前端（control.html `tick()` 轮询链，`control.html:681-694`）
+
+- `document.hidden` 时跳过本轮（后台标签页不发请求，省服务器）。
+- `await refreshStatus()` —— 防慢请求时轮询堆叠，同一时刻 in-flight ≤ 1。
+- `setTimeout(tick, interval)` 放在 **finally**：改成 await 后 fetch 异常会把递归 setTimeout 链整个断掉，必须 finally 续命（旧版 tick 不 await、fire-and-forget，没这问题但请求会堆叠）。
+- 自适应间隔：默认 `NORMAL_INTERVAL=1500ms`；`Date.now() < _fastPollUntil` 时用 `FAST_INTERVAL=500ms` —— 有活跃任务 +10s、daily `running` +60s、手动 trigger 后 +30s。
+- 「操作」panel 处于 active 时才连带刷 `refreshTriggerLog()`（同样 await）。

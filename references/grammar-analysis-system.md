@@ -22,10 +22,10 @@ knowledge_graph/<BOOK>.json   kind="grammar" 的三层 KG（L0 主题组 / L1 Un
    ▼
 PDF 阅读器选中英文 → 「📊 语法分析」（onGrammarAnalyze）
    │
-   ├─ /api/grammar-analyze   spaCy venv 子进程：词性 + 依存 + 成分 + 子句树（零 AI，秒级）
-   │                          → state/grammar-cache/<sha>.json
+   ├─ /api/grammar-analyze   spaCy venv 常驻 worker：词性 + 依存 + 成分 + 子句树（零 AI，毫秒级）
+   │                          → state/grammar-cache/（双键缓存，见 §5）
    │
-   └─ /api/grammar-stream    AI SSE 流式：先整句翻译，再命中的语法点讲解
+   └─ /api/grammar-stream    AI SSE 流式：先整句翻译，再命中的语法点讲解（服务端回放缓存，见 §5.1）
                               → 完成后 /api/grammar-history-save 落 state/grammar-history/<sha>.json
 ```
 
@@ -152,8 +152,20 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 - 脚本：`scripts/spacy_parse.py`（`SPACY_SCRIPT`）。
 - `pdf_reader.py::_spacy_available()` = `SPACY_PY.exists() and SPACY_SCRIPT.exists()`，
   不可达时 `/api/grammar-analyze` 回退到 AI 兜底路径。
-- 调用：`subprocess.run([SPACY_PY, SPACY_SCRIPT, sentence], capture_output=True, timeout=30)`，
-  stdout 是 UTF-8 JSON。
+
+### 4.1.1 常驻 worker（`--server` 模式，2026-06-10）
+
+原来每句一个 `subprocess.run` 子进程，固定付 **~3.3s 进程 + 模型加载税**。现改常驻 worker：
+
+- `spacy_parse.py --server`（`serve()`）：启动即 `_load()` 加载模型，stdout 先吐一行 `{"ready": true}`；
+  之后 stdin 每行一个 `{"text": ...}`、每行回一个 JSON + flush（JSON 编码天然处理句内换行）；EOF/管道断 → 退出。
+- webapp 侧 `pdf_reader.py::_spacy_worker_request(sentence, timeout=10)`：
+  - `_SPACY_LOCK` 覆盖**完整收发**（gunicorn 8 gthread 下防多请求响应错配，请求串行排队）；
+  - 进程没起 / 死了（`poll() is not None`）就地拉起；首次多给 8s 等模型加载（先存进程盒 `_SPACY_PROC`
+    再等 ready，超时路径才 kill 得到）；
+  - 超时 / 异常 → kill + 置空进程盒，下次重拉；本次返回 None（调用方 `_spacy_grammar` 返回 None
+    → 走既有 AI 兜底，语义不变）；
+  - `atexit` 注册 `_spacy_worker_kill()`，gunicorn 重启不留孤儿 worker。
 
 ### 4.2 spacy_parse.py 做的解析
 
@@ -179,42 +191,53 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 
 ## 5. `pdf_reader.py` grammar 路由清单
 
-全部在 `pdf_reader.py` 约 L2028–2645（`bp` blueprint，挂在 `/pdf` 前缀下）。
+全部在 `pdf_reader.py` 约 L4759–5475（`bp` blueprint，挂在 `/pdf` 前缀下；行号随版本漂移，按路由名 grep）。
 
 | 路由 | 方法 | body / query | 返回 / 行为 |
 |---|---|---|---|
 | `/api/grammar-nodes` | GET | — | 旧 demo 扁平节点 list（读 `grammar-nodes.json`，保留兼容，前端已不用）|
 | `/api/grammar-books` | GET | — | 所有 `kind=grammar` KG：`[{book, title, total_l2, tracked_count}]`（扫 `knowledge_graph/*.json`，跳 `.bak.json`）|
 | `/api/grammar-tracked` | GET/POST | GET `?file=<rel>` / POST `{file, enabled_books:[...]}` | **per-PDF 启用的 grammar KG 书列表**（不是节点 id！）。存 `state/grammar-tracked/<sha1(file_rel)[:16]>.json`，格式 `{pdf_rel, enabled_books}` |
-| `/api/grammar-analyze` | POST | `{text, sentence?, file, enabled_books?, model?, effort?}` | 句子结构分析。**优先 spaCy**（`engine:"spacy"`，返回 tokens/deps/clauses/components/clause_tree），spaCy 不可达才 AI 兜底。缓存 `state/grammar-cache/<sha1(sentence‖text‖sorted(tracked_ids))[:20]>.json` |
-| `/api/grammar-stream` | POST | `{sentence, text, file, enabled_books?, model?, effort?}` | **SSE 流式**。先 `[[TRANS]]整句翻译[[/TRANS]]`（先到先显示），再 `[[POINTS]]JSON 数组[[/POINTS]]`（命中的跟踪语法点讲解）。配合 spaCy 出的依存图用——依存图不在这里出 |
+| `/api/grammar-analyze` | POST | `{text, sentence?, file, enabled_books?, model?, effort?}` | 句子结构分析。**优先 spaCy**（`engine:"spacy"`，返回 tokens/deps/clauses/components/clause_tree），spaCy 不可达才 AI 兜底。**双键缓存**（`state/grammar-cache/`，2026-06-10）：spaCy 结果存 **sentence-only 键** `sha1("spacy||"+sentence)[:20]`（spaCy 输出不看 text/tracked_ids → 换焦点词 / toggle 跟踪节点不再全量重付分析）；AI 兜底结果存**全键** `sha1(sentence‖text‖sorted(tracked_ids))[:20]`。查找顺序：全键（兼容存量，命中须含 tokens/analyses 真内容——见踩坑 9）→ sp 键 |
+| `/api/grammar-stream` | POST | `{sentence, text, file, enabled_books?, model?, effort?, rid?}` | **SSE 流式**。先 `[[TRANS]]整句翻译[[/TRANS]]`（先到先显示），再 `[[POINTS]]JSON 数组[[/POINTS]]`（命中的跟踪语法点讲解）。配合 spaCy 出的依存图用——依存图不在这里出。**服务端回放缓存**（2026-06-10）：完整输出存进**全键**文件的 `ai_stream_full` + `ai_v:1`，命中 → 一次性 SSE 回放全文（见 §5.1）|
 | `/api/grammar-history` | GET | `?file=<rel>` | 该 PDF 的分析历史，按 `ts` 倒序（新在前）|
 | `/api/grammar-history-save` | POST | `{file, item}` | 保存一条结果（同句去重更新，限 200 条）。`item` 含 sentence/text/sentence_zh/tokens/deps/clauses/components/clause_tree/analyses。存 `state/grammar-history/<sha1(file_rel)[:16]>.json` |
-| `/api/grammar-forget` | POST | `{sentence, text, file, enabled_books?}` | 删该句缓存 + 历史（删卡 / 删块时调）。用**跟 grammar-analyze 完全一致的 cache_key 算法** 命中缓存文件 |
+| `/api/grammar-forget` | POST | `{sentence, text, file, enabled_books?}` | 删该句缓存 + 历史（删卡 / 删块时调）。**级联删两键**：全键（跟 grammar-analyze 完全一致的 cache_key 算法，连带 grammar-stream 存在同文件里的 `ai_stream_full` 一起删，回放缓存级联免费）+ spaCy sentence-only 键（保住「删卡 → 同句从头生成」语义）|
 
-辅助函数：`_grammar_nodes()`（读 demo）、`_tracked_path()`（sha 路径）、`_load/_save_grammar_enabled()`（启用书读写，兼容老格式）、`_collect_grammar_tracked_nodes(enabled_books)`（汇总所有启用书的 tracked L2 节点给 AI）、`_spacy_grammar(sentence)`（subprocess + ECDICT 补 zh）、`_grammar_hist_load/write()`。
+辅助函数：`_grammar_nodes()`（读 demo）、`_tracked_path()`（sha 路径）、`_load/_save_grammar_enabled()`（启用书读写，兼容老格式）、`_collect_grammar_tracked_nodes(enabled_books)`（汇总所有启用书的 tracked L2 节点给 AI）、`_spacy_worker_request(sentence)`（常驻 worker 收发，见 §4.1.1）、`_spacy_grammar(sentence)`（worker 结果 + ECDICT 补 zh）、`_grammar_hist_load/write()`。
 
 ### 5.1 整句翻译 + 语法点讲解的 SSE 流式
 
-`/api/grammar-stream` 用 `_sse_stream(prompt, model, effort)`（与 PDF 阅读器其它 AI 路由共用）。prompt 强制 AI
-**按顺序、用标志输出两部分**，标志原样出现、不加代码块围栏：
+`/api/grammar-stream` 用 `_start_ai_stream(prompt, model, effort, rid, on_done=_gs_save)`（与 PDF 阅读器其它
+AI 路由共用：带 `rid` 时后台线程跑完 + tail SSE 推送，断连可按 rid 轮询恢复；`on_done` 钩子在生成成功后回调）。
+prompt 强制 AI **按顺序、用标志输出两部分**，标志原样出现、不加代码块围栏：
 
 ```
 [[TRANS]]整句中文翻译[[/TRANS]]
 [[POINTS]][{"point":..,"phrase":句中实例,"explanation":针对该句的讲解,"examples":[相似例句]}][[/POINTS]]
 ```
 
-前端 `_streamGrammar`（pdf_reader.html）边收边正则抠：翻译标志一闭合就立刻填到常驻翻译行（`.gb-trans`），
-语法点标志闭合再 parse JSON 渲染。流中断有兜底（从残文里抠未闭合的标志）。
-默认 `model=haiku, effort=low`（轻量任务）。命中语料只取 `_collect_grammar_tracked_nodes` 给的 tracked 节点，
+前端 `_streamGrammar`（`static/pdf/reader.src/18-grammar.js`，构建进 `reader.js`）经 `_aiStream` 边收边正则抠：
+翻译标志一闭合就立刻填到常驻翻译行（`.gb-trans`），语法点标志闭合再 parse JSON 渲染。流中断有兜底
+（从残文里抠未闭合的标志）。默认 `model=sonnet, effort=low`（后端缺省，前端 grammar-stream 不传 override）。
+命中语料只取 `_collect_grammar_tracked_nodes` 给的 tracked 节点，
 无跟踪点则 prompt 让 AI 直接输出 `[[POINTS]][][[/POINTS]]`。
+
+**服务端回放缓存**（2026-06-10）：同 `(sentence, text, tracked_ids)` 讲解过一次就由 `on_done=_gs_save`
+存进 grammar-cache **全键**文件（`ai_stream_full` + `ai_v:1`）。命中 → 按 dict-jp-ai 同款方式一次性 SSE
+回放全文（前端对累计文本抠标志，天然兼容）。注意：
+- 只缓存**完整输出**——`[[/TRANS]]` 和 `[[POINTS]]` 两个闭合标志都在才存（防报错 / 截断被永久缓存）；
+- 写入是 **merge**，不覆盖同键文件里 grammar-analyze AI 兜底已存的依存分析字段（反向同理，见踩坑 9）；
+- prompt 变更需 bump `ai_v`（不匹配视为 miss，重新生成）。
 
 ---
 
-## 6. 「右侧行对齐抽屉」UI（task #183，`templates/pdf_reader.html`）
+## 6. 「右侧行对齐抽屉」UI（task #183）
 
 > 命名沿用 task #183「右侧行对齐抽屉」。实际落地的形态：**右侧固定抽屉 + 分析卡按时间堆叠**（最新在最上），
-> 不是逐行左右对齐 / 滚动同步（代码注释 L3684「抽屉开关（流式堆叠，无左右对齐/滚动同步）」明确说明了演进结果）。
+> 不是逐行左右对齐 / 滚动同步（代码注释「抽屉开关（流式堆叠，无左右对齐/滚动同步）」明确说明了演进结果）。
+> 代码位置（#187 前端模块化后）：JS 逻辑在 `static/pdf/reader.src/18-grammar.js`（构建进 `reader.js`），
+> 面板 HTML 骨架（`#grammar-panel` / `#side-tabs`）+ CSS 仍在 `templates/pdf_reader.html`。
 
 ### 6.1 抽屉骨架
 
@@ -235,7 +258,7 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 - **常驻翻译行**（`.gb-trans`，折叠也可见）：`🌐 整句翻译`，流式到达前显示「🌐 翻译中…」（呼吸动画 `gb-pending`）。
 - **结构图区**（`.gb-diagram-wrap`，可折叠）：标题「📐 句子结构」+ 四视图切换按钮 + 图。
 - **语法点区**（`.gb-analyses`）：每条 `📊 点名 / 📍 句中实例 / 讲解 + 例句`，点击展开。
-- **底部追问**（`.gb-followup`）：输入框 + 「追问」（`_grammarFollowup`，走 `/api/explain` SSE，带原句+译文+已有分析作上下文，Markdown+MathJax）+ `🎴` 制 Anki（`_grammarAnki`，整句+译文+分析+追问+原文出处链接 → `/api/snippets-to-async` 后台 job）。
+- **底部追问**（`.gb-followup`）：输入框 + 「追问」（`_grammarFollowup`，经 `_aiStream` 走 `/api/explain`——自带 80ms 节流 + 非 SSE JSON 兜底 + rid 断连轮询，带原句+译文+已有分析作上下文，Markdown+MathJax）+ `🎴` 制 Anki（`_grammarAnki`，整句+译文+分析+追问+原文出处链接 → `/api/snippets-to-async` 后台 job）。
 
 ### 6.3 四种句子结构视图（`setGrammarView` + `_renderStructInto`）
 
@@ -280,8 +303,8 @@ PDF 设置面板「📊 启用语法分析（per-PDF）」`renderGrammarTrackLis
 - L2 节点虽有 `mastery_level` / `mastery` / `state` 等字段（KG 同步补的），但**语法点本身没有独立的复习 / 掌握度闭环**。
   目前 `tracked` 是个纯布尔开关，不随「这个点在多少句子里被正确识别 / 复习过」演进。
 - 设想的闭环（#185）：语法点像单词的 mastery 一样累积暴露 / 复习信号，自动调整跟踪优先级、提示「该复习哪个语法点」。
-- 相关待办还有 #186（grammar AI 任务全部走后台 job + 断连恢复，现在 grammar-stream 是前端直连 SSE，移动端断连会丢）
-  和 #187（pdf_reader 前端模块化 + 状态收敛）。
+- #186（AI 任务后台 job + 断连恢复）**已完成**：grammar-stream / 追问都经 `_aiStream`（rid 后台线程 +
+  断连按 rid 轮询恢复），grammar-stream 另有服务端回放缓存（§5.1）。#187（pdf_reader 前端模块化 + 状态收敛）进行中。
 
 > 当前「学习」靠两条人工路径：分析卡 `🎴` 制 Anki（整句 + 译文 + 分析进卡片），以及 grammar-history 持久化（同句再看不重算）。
 
@@ -292,7 +315,9 @@ PDF 设置面板「📊 启用语法分析（per-PDF）」`renderGrammarTrackLis
 1. **`grammar-tracked` 是「启用书列表」不是「节点 id 列表」**。文件名带 `tracked` 容易误解。`_load_grammar_enabled`
    做了兼容：老格式（`tracked` 存 node ids）直接返回 `[]`，只认新格式的 `enabled_books`。改这块别把两层语义搞混。
 2. **删卡 / 删块清缓存的 cache_key 必须跟 grammar-analyze 完全一致**：`sha1(sentence + "||" + text + "||" + ",".join(sorted(tracked_ids)))[:20]`。
-   tracked_ids 变了（用户改了跟踪 / 启用书）→ key 变 → 同句会重算、旧缓存命不中（这是预期：跟踪集变了分析也该变）。
+   tracked_ids 变了（用户改了跟踪 / 启用书）→ 全键变 → AI 部分（兜底分析 / grammar-stream 讲解）会重算、旧缓存命不中
+   （这是预期：跟踪集变了讲解也该变）；spaCy 结构图走 sentence-only 键照旧命中（结构分析本就不依赖跟踪集）。
+   grammar-forget 必须**两键都删**（已实现级联），只删全键会留下 spaCy 旧缓存。
 3. **spaCy venv 必须真装**：`SPACY_PYTHON` 指向的 venv 不存在 → `_spacy_available()` 假 → 退 AI 兜底（慢且耗额度）。
    迁移 / 新机器记得建 `/home/bwicarus/spacy-venv` 装 spacy + `en_core_web_sm`。
 4. **PyMuPDF（fitz）非线程安全**：`build_grammar_nodes.py` 并行抽 L2 时，渲染 / 取文字必须在 `fitz_lock` 里串行，
@@ -303,7 +328,15 @@ PDF 设置面板「📊 启用语法分析（per-PDF）」`renderGrammarTrackLis
    `[ ... ]` 子串再 parse；`grammar-analyze` AI 兜底路径同样剥 ` ``` ` 再试一次。
 7. **SSE 标志解析的兜底**：`_streamGrammar` 流中断 / AI 没闭合标志时，从残文里用宽松正则（`[[/TRANS]]|[[POINTS]]|$`）
    抠翻译，语法点兜底成 `[]`。后端 prompt 必须强调「标志原样出现、不要加代码块围栏」，否则前端正则抠不到。
-8. **grammar-stream 是前端直连 SSE，没走后台 job**：移动端切后台 / 断连会丢分析结果（#186 待解）。
+8. ~~grammar-stream 是前端直连 SSE，断连会丢~~（#186 已解，2026-06-10）：现走 `_aiStream`（rid 后台线程跑完 +
+   断连按 rid 轮询恢复）+ 服务端回放缓存。残留注意：回放只存**含两个闭合标志的完整输出**，prompt 改了要 bump `ai_v`。
+9. **全键缓存文件有两个写入方，读写都要守规矩**：grammar-analyze 的 AI 兜底结果和 grammar-stream 的
+   `ai_stream_full` 回放缓存**共用同一个全键文件**。grammar-stream 可能先建该文件（只含 `ai_stream_full`）——
+   所以 grammar-analyze 的缓存命中必须验 `tokens`/`analyses` 真内容（否则空结构被当命中返回）；
+   两边写入都必须 merge 旧字段（直接整文件覆盖会冲掉对方的结果）。
+10. **spaCy worker 是单进程 + 锁串行**：`_spacy_worker_request` 的 `_SPACY_LOCK` 覆盖完整收发，多请求排队。
+    绝不能绕锁直接写 worker stdin（gunicorn 8 gthread 下响应会错配到别的请求）。worker 卡死靠超时
+    kill + 置空自愈，下一个请求重拉（首次含模型加载 ~3s）。
 
 ---
 

@@ -139,9 +139,10 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
 | `/skilltree/<book>/api/edit` (POST) | 编辑，op：`add_edge` / `delete_edge` / `delete_node` / `merge` / `update_summary` / `set_meta`（`set_meta` 改 KG 顶层元数据，白名单 key = note_prefix / title / scan_config）|
 | `/skilltree/<book>/api/archive-node` | 把节点归档到回收站笔记 |
 | `/skilltree/<book>/api/restore-node` | 从回收站恢复（删 trash section + 创建独立笔记）|
-| `/skilltree/<book>/api/build-note` | 从 PDF 创建笔记（含 AI 验证：ok/merge/delete） |
+| `/skilltree/<book>/api/build-note` | 从 PDF 创建笔记（含 AI 验证：ok/merge/delete）。**job 化**：秒回 `{ok, job_id}`，重活进后台线程（见下「build-note 流程」）|
+| `/skilltree/<book>/api/build-note-status/<job_id>` (GET) | build-note job 轮询：`running` / `done`（带 `result`）/ `unknown`（webapp 重启 job 丢失，前端兜底提示）|
 | `/skilltree/<book>/api/prune-notes` | 清理悬空笔记关联 |
-| `/skilltree/<book>/api/toggle-tracked` (POST) | 切换该书是否纳入跟踪 |
+| `/skilltree/<book>/api/toggle-tracked` (POST) | 切换**语法 KG L2 节点**的 `tracked`（仅 `kg.kind=='grammar'` + level 2 可切，body `{node_id}`；语法分析系统用，见 `grammar-analysis-system.md`）|
 | `/skilltree/<book>/api/delete` | 删除整本 KG |
 
 > 元数据编辑（title / note_prefix / scan_config）走 `POST /skilltree/<book>/api/edit` body `op="set_meta" key=... value=...`（control.html 第 877-884 行就是这么调的），**没有** `/skilltree/<book>/api/books-meta` 这个 per-book POST 路由。
@@ -179,6 +180,28 @@ job 状态在内存 dict 里（webapp restart 丢失，但 KG 文件已落盘所
 - 旧版只给 AI 喂 PDF 文字层 → 数学符号、公式、上下标常被识别错（如 V₁ → V1，定理编号错位）
 - 新版同时喂 **PDF 渲染图像 + 文字层**：AI 拿图当 ground truth，文字层只做候选辅助
 - 修了大量"编号识别错位"bug（如本来是定理 5.2.3 被识别成 5.23）
+
+### build-note 流程：AI 验证 + job 化（2026-06-10）
+
+`POST /api/build-note` body `{node_id}` **秒回 `{ok, job_id}`**，重活全在后台线程
+`_build_note_job(book, node_id)`（fitz 提页文本 + AI 验证可达 2min + 生成笔记 + `_edit_lock` 内更新 KG——
+旧同步路由会撞 nginx 超时）。前端（skilltree.html L1409 起）2s 轮询
+`GET /api/build-note-status/<job_id>`，`result` 与旧同步响应体一致，deleted / merged / ok 三分支复用。
+- 同 (book, node_id) 已有 running job → 直接复用 `job_id`（响应带 `dedup:true`，防重复点击起双 job 烧双份 AI）
+- job 存内存 dict `_build_note_jobs`（webapp 重启丢失 → status 返回 `unknown`）；每次新建顺手清 1h 前已完成的旧 job
+
+**AI 验证**（仅 L2 且 `note_ref_ai_verified` 为假时跑；L1 整节笔记不验证）：`_ai_verify_node` 把节点元数据 +
+PDF pages 实际文本 + 同节兄弟节点喂给 AI（claude_cli sonnet/medium），判定：
+- `ok` → 正常建笔记
+- `merge`（与某兄弟同概念）→ `_apply_edit(kg, "merge", {canonical: target_id, drop: [node_id]})` 自动合并
+- `delete`（PDF 里该编号是例子等 KG 误识别）→ `_apply_edit delete_node` 自动删除
+- AI 调用失败兜底返回 ok 但带 `_fallback: True` 标记（不阻断建笔记）
+
+**验证结论落盘缓存** `state/skilltree-verify-cache.json`（`_verify_cache_key/hit/put`，skilltree.py L235 起）：
+- 键 = `sha1(node.id|name|summary|pages|PDF mtime)`——节点元数据或 PDF 任一变化即失效重验
+- **只缓存真实 `action==ok`**：delete/merge 执行后节点随之消失，缓存重放会误删/误并，绝不缓存；
+  `_fallback` 的假 ok 同样不缓存（下次还有机会真验证）
+- 命中 → 跳过重复验证直接建笔记；超 2000 条按插入序截断；写失败只损失缓存不阻断
 
 ## 回收站机制
 

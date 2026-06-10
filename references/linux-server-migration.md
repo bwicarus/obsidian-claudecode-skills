@@ -1,11 +1,13 @@
 # Linux 服务器迁移指南（2026-05-14）
 
+> ⏸ **状态注记（2026-06-10）：VPS 已暂停。** 自动化单元（xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.timer）已 `systemctl disable`（重启也不复活），只保留公网 `webapp.service`；代码停在 2026-05-28（落后 main），**重新启用前必须先 `git pull` + 重部署**。当前唯一活跃实例是 **Pi**（部署见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)）。⚠ VPS 的 OS hostname 实际也是 `bwicarus`（跟 Pi 撞名，Tailscale 设备名才是 `bwicarus-3`），**判定环境用路径**（`/root/claude` = VPS，`/home/bwicarus/claude` = Pi），别用 hostname。本文其余内容保留作 VPS 部署/踩坑参考——操作类段落（systemd / 控制面板 / daily 验证）描述的运行态现在在 Pi 上，VPS 上同款命令仅在重新启用后有效。
+
 把整套 Windows 工作流（vault + Anki + 笔记登记 + 仪表板）搬到 `bwicarus.space` 服务器，目标：Windows 可以关机，所有功能由服务器和 web 控制面板代替。
 
 ## 服务器现状
 
-- Ubuntu 22.04.5 / 1 vCPU / 3.8GB RAM / 39GB 可用磁盘
-- 已跑：nginx + Flask webapp (:5000) + OpenVPN Access Server + Anki + obsidian-headless
+- Ubuntu 22.04.5 / 2 vCPU / 7.8GB RAM（迁移当时 1 vCPU / 3.8GB，后升配）/ 39GB 可用磁盘
+- 已跑：nginx + Flask webapp (:5000) + OpenVPN Access Server；Anki + obsidian-headless 等自动化 2026-06-10 起已停（见顶部注记）
 - 时区：Asia/Shanghai (CST，比本机 JST 早 1h)
 
 ## 关键路径
@@ -142,7 +144,7 @@ API：
 ## 2026-05-14 晚期补充：iPad / 控制面板完整上线
 
 ### Tailscale 接入
-- 服务器加入 tailnet（`tailscale up --authkey=...` 一次性，hostname `bwicarus-3`）
+- 服务器加入 tailnet（`tailscale up --authkey=...` 一次性，**Tailscale 设备名** `bwicarus-3`；⚠ OS hostname 实际是 `bwicarus`，跟 Pi 撞名，见顶部注记）
 - 当前 IP：`100.110.193.39`（用 `tailscale ip -4` 查）
 - 跟现有 OpenVPN Access Server 不冲突（端口/interface/网段都错开）
 

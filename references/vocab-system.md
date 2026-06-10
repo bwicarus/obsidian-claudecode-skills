@@ -45,7 +45,7 @@ claude/
 ├── data/
 │   └── ecdict.db                    ~850MB SQLite
 └── state/
-    ├── dict-cache/<source>-<sha>.json   在线 API 缓存（TTL 30 天）
+    ├── dict-cache/<source>-<sha>.json   在线 API 缓存（TTL 30 天；404/_err 负缓存见 §4；jp-* / jasent-* / jp-explain-* 永久，见 §14）
     ├── vocab-lookups.jsonl              每次查词写一行
     └── vocab-sources.json               { lemma: [{pdf,page,ctx,ts}...] }
 ```
@@ -115,6 +115,14 @@ MW 富文本标记 `{bc}` / `{it}` / `{wi}` / `{phrase}` 等用 `_mw_strip` 剥�
 
 完整：`https://media.merriam-webster.com/audio/prons/en/us/mp3/<sub>/<file>.mp3`
 
+### 在线源（Free Dict / MW）失败缓存（2026-06-10）
+
+- **404**（词不存在）→ 写 `{"_404": true}` 正常缓存（MW 返回 list[str] 拼写建议也按 `_404`+suggestions 存），TTL 30 天内不再打外网
+- **非 404 失败**（429 限流 / 超时 / 坏响应）→ `_neg_cache_err(source, word)`：
+  - 缓存文件里已有**好词条**（非 `_404`/`_err`，**含 30 天 TTL 已过期的 stale**）→ **不覆盖**，直接返回旧词条（stale-while-error）
+  - 否则写 `{"_err": 1}` 负缓存，`_ERR_TTL_SEC = 1800`（30min，按文件 mtime `_cache_age` 判，不动 `_cache_load`）内不重试——防限流期每词反复 8s 干等重打外网
+- **读侧坑**：`_err` 拦截必须放在通用 cached 返回**之前**——freedict 不拦的话 `{"_err":1}` 被当词条返回 → `_free_dict_unpack` 解出全空 + compose_entry 误计 sources_hit；MW 不拦的话未知 dict 形状 fall-through 重打网络，负缓存被静默绕过
+
 ### ECDICT exchange 解析
 
 `d:bettered/i:bettering/s:betters/p:bettered/3:betters/0:good/1:r`：
@@ -131,9 +139,9 @@ MW 富文本标记 `{bc}` / `{it}` / `{wi}` / `{phrase}` 等用 `_mw_strip` 剥�
 | `1` | type indicator（如 `1:dp`、`1:r`）|
 
 `lookup_ecdict(word)`：
-1. 先 `word=?` 直接命中
-2. 没命中 → `exchange LIKE '%/{word}%'` 反查 lemma
-3. lemma ≠ word → 再用 lemma 查完整行
+1. `word=?`（COLLATE NOCASE）精确命中；没命中**直接返回 None**
+   - **（2026-06-10 删）原第 2 步 `exchange LIKE '%/{word}%'` 反查 lemma 是死代码**：exchange 值前必有「类型:」前缀（`p:went/i:going`），该 LIKE 模式结构上**永不可能命中**，却对 340 万行全表扫描 ~1.4s/词。went/mice/children 等不规则变形在 ECDICT 本就是独立行，精确查询已覆盖
+2. exchange `0:` 指向的 lemma ≠ 当前词 → 再查 lemma 完整行。**脏 `0:` 指针守卫**：ECDICT 个别行的 `0:` 指错（实例 `also` 的 exchange=`0:conjurer`），只在「原词确实出现在 lemma 行的屈折表里」时才跟随重定向，否则保留原词作 lemma——went→go / mice→mouse 正常通过（go/mouse 的屈折表含 went/mice），also→conjurer 被拦
 
 ## 5. vocab `.md` 模板
 
@@ -237,6 +245,18 @@ tags:
   "vocab_note": "资源/vocab/c/construct.md"
 }
 ```
+
+### 服务端 in-process memo 缓存（2026-06-10，`_server_deploy/pdf_reader.py`）
+
+ECDICT 是静态库、vocab 笔记可按 mtime 检测，所以常驻 gunicorn 进程里加了三个模块级 memo（性能审计 75ebafa）：
+
+| 缓存 | 内容 | 失效/防胀 |
+|---|---|---|
+| `_GRAMMAR_ZH_CACHE` | 语法分析 token → ECDICT 简明中文（主 tokens + 各子句共用），**含 miss 空串负缓存** | >20000 条整体清空 |
+| `_VOCAB_ZH_CACHE` | `/api/vocab-list` lemma → ECDICT 中文（`_vocab_ecdict_zh`），含空串负缓存 | >5000 条整体清空 |
+| `_VOCAB_NOTES_CACHE` | 全部 vocab 笔记 frontmatter（`_vocab_notes_all`） | `(文件数, 最大 mtime)` 签名，笔记没变不重读全部文件 |
+
+效果：vocab-list 从分钟级降到 ~545ms。注意这些都在 pdf_reader 进程内，跟 `vocab_index.index()` 自己的 in-memory + vault mtime 缓存（见 §9 阶段 C）是两层。
 
 ## 7. PDF reader 字典 modal
 
@@ -549,7 +569,8 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
   - (B) 反过来，**日语辞典确实带的语感别淡化**——`愛人(あいじん)`=情夫/情妇（婚外·不伦，负面语感）≠ 中文中性「爱人」（日语正面恋人用 恋人）；`適当`=恰当/敷衍；`老婆(ろうば)`=老太婆。
   - **保守原则**：只给日语辞典里确实有的义项，拿不准就不加，**绝不为了和中文对称而臆造**（pv=3 曾因「按语感如实给」过度，给 下流 臆造出「粗鄙」义 → pv=4 加此原则修正）。按重要性排序，首义别用易误解的同形词打头（経理 用「会计」非「经理」）。
   - **教训**：A/B 两类错方向相反，靠独立 judge agent 逐词对抗核验（`workflows/jp-falsefriend-verify`）才暴露——单测/自查容易漏。
-- **缓存版本** `_JP_PROMPT_VER`（改 prompt 就 +1）：**针对性失效**——含汉字的词若缓存是旧版本(`pv` 不符) → 下次查词自动重生成；纯假名词无伪朋友风险，旧缓存照命中（不为升级 prompt 浪费 AI 重查 5000+ 词）。当前 `pv=4`。
+- **缓存版本** `_JP_PROMPT_VER`（改 prompt 就 +1）：**针对性失效**——只对含汉字的词生效；纯假名词无伪朋友风险，旧缓存照命中（不为升级 prompt 浪费 AI 重查 5000+ 词）。当前 `pv=4`。
+- **旧 pv 失效改 stale-while-revalidate（2026-06-10，709a918）**：含汉字 + `pv` 不符的旧词条（存量 ~4300 条/78%）**先秒回旧条目**（响应带 `stale_pv: True`），同时 `_jp_regen_bg` 起后台线程按新 prompt 重生成升级缓存（`_JP_REGEN_INFLIGHT` 在途去重；失败无害，旧缓存还在下次再试），伪朋友修正**下次点击生效**。此前是直接丢弃旧缓存同步重生成 = 点一下干等 ~7s AI。AI 调用 + 写缓存抽出 `_jp_ai_fetch`（同步 miss 路径与后台升级线程共用）。
 
 **读音 + 音调** `_jp_reading_accent(word)`：**unidic（fugashi）离线**取权威假名读音 + 重音核 aType（0=平板，N=第 N 拍后降）+ 拍数。**覆盖 AI 读音**（unidic 更准）。前端 `_renderPitch` 画高低 overline + 红色下降标记。片假名→平假名转换、长音 ー 算独立拍、小书写假名（ゃゅょ）并入前拍。
 
@@ -566,9 +587,13 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 **后端路由**（`_server_deploy/pdf_reader.py`）：
 - `/api/dict-quick`（小框秒回）JP 分支 = lookup_jp + unidic 读音音调 overlay，返回 `reading/accent/mora/examples`。
 - `/api/dict-jp`（完整字典页 JSON）= 读音+音调+罗马字+词性+完整中文 + 5 句 Tanaka 例句 + 汉字拆解；未译例句后台线程补译。
-- `/api/dict-jp-ai`（SSE）= 按需「✨AI 深入讲解」（核心义/用法语感/近义辨析/汉字记忆）。
+- `/api/dict-jp-ai`（SSE）= 按需「✨AI 深入讲解」（核心义/用法语感/近义辨析/汉字记忆）。**服务端永久缓存（2026-06-10）**：按**原形**为键（`_jp_inflection` 活用还原，確認します/確認した → 確認する 共用一份）存 dict-cache `jp-explain`（ttl 10 年）；命中且 `v == _JP_EXPLAIN_VER`（当前 =1，改 prompt 就 +1 → 旧缓存自动重生成）→ 按同 SSE 格式一次性回放全文（start/data/done，前端零改动），**任何设备**再点都秒回。写入走 `_start_ai_stream` 的 `on_done` 钩子，全文 ≤40 字不缓存（多半是报错文本）。
 
-**句子翻译**（多选 🌐）：见 `scripts/vocab/translate.py`，链路 `gtranslate(Google,赠金)→deepl→ai→mymemory`。两个历史坑：
+**句子翻译**（多选 🌐）：见 `scripts/vocab/translate.py`，`translate(text, backend=...)` 的 auto 链路 `gtranslate(Google,赠金)→deepl→ai→mymemory`。
+- **backend `no_ai`（2026-06-10 新增）**：链 = `gtranslate→deepl→mymemory`，**绝不落 AI CLI**（单句数秒 + 烧额度）——批量/请求路径专用。整页翻译 `/api/page-translate` 的逐句兜底用它（外加 10s 墙钟预算，超时即止、未译句 zh 留空原样返回）；此前走 auto 链，Google 故障窗 60 句 × (8s 超时 + AI 数秒) 单请求挂 4-7 分钟还烧几十次额度。
+- `translate()` 另有 `no_cache=True`（「重新翻译」）：跳过读 tr-cache 但仍写回覆盖。
+
+两个历史坑：
 - guard `if not re.search("[A-Za-z]"): return ""` → **整句日语无拉丁字母被判空**，日语翻译永远失败。改成「无拉丁**且**无假名汉字」才跳过。
 - `_mymemory` 的 source 写死 `en` → 日语句被当英语翻失败。改 `_detect_src`（假名/纯汉字→ja）。
 - 详细引擎对比/质量评审/Google 放行/CLI 冷启动结论见 [`google-cloud-apis.md`](google-cloud-apis.md)。

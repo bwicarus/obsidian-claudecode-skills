@@ -50,7 +50,8 @@ data/ecdict.db                           → <webapp>/data/ecdict.db
 | GET | `/view?file=<rel>&page=N` | 阅读器主页（鉴权后渲染 `pdf_reader.html`） |
 | GET | `/file/<vault_rel_path>` | 返回 PDF 二进制 `application/pdf`(**`conditional=True` 支持 HTTP Range/206** + `Accept-Ranges`;前端 getDocument 开 `disableAutoFetch:true`+`rangeChunkSize 256KB` → PDF.js 只取翻到的页,几百 MB 大文件 iPad Safari 不 OOM;超大书 `qpdf --linearize` 无损线性化加快首开。2026-05-31 根治"稍大文件打不开")|
 | GET | `/api/list-pdfs` | JSON 列表 |
-| GET | `/api/page-chars?file=<rel>&page=N` | PyMuPDF 提取该页所有字符 bbox + 内容（驱动 char-layer，含 `vocab_marks`） |
+| GET | `/api/page-chars?file=<rel>&page=N&cv=` | PyMuPDF 提取该页所有字符 bbox + 内容（驱动 char-layer）。2026-06-07 拆分后**只回不变的** `{chars,page_w,page_h,furigana}`，`Cache-Control: private,max-age=3600` 可缓存（见 §32）|
+| GET | `/api/page-overlay?file=<rel>&page=N` | 该页**可变**叠层：`{vocab_marks,vocab_sentences,offset,cv}`，`no-store`。前端拿 `cv` 再拉可缓存的 page-chars（§32）|
 | GET | `/api/page-nodes?file=<rel>&page=N` | 该页对应的 KG 节点 |
 | GET | `/api/dict?word=X[&file=&page=&context=]` | 三源融合字典（ECDICT 离线 + Free Dictionary + MW Learner's）；`Accept: text/event-stream` 时 SSE 分段（ECDICT 先到 → free → mw → translate → done），否则一次性 JSON |
 | GET | `/api/dict-quick?word=X` | 单词小框：只查 ECDICT 核心（音标 + 中英释义 + lemma/forms），本地秒回 + 后台触发 vocab note 生成 |
@@ -72,7 +73,7 @@ data/ecdict.db                           → <webapp>/data/ecdict.db
 
 | 方法 | 路径 | 子系统 / 用途 |
 |---|---|---|
-| GET | `/api/page-vocab-marks` | vocab：该页生词下划线标记（也内嵌在 page-chars 返回里） |
+| GET | `/api/page-vocab-marks` | vocab：该页生词下划线标记（查词后前端用它刷新下划线；2026-06-10 起与 `/api/page-overlay` 完全同管道、字段一致，见 §35③。page-chars 自 §32 拆分后**不再内嵌** vocab_marks） |
 | POST | `/api/vocab-mark` | vocab：标记 / 取消标记一个词 |
 | POST | `/api/vocab-anki` | vocab：单词一键制卡 |
 | GET | `/api/vocab-list` | vocab：生词列表 |
@@ -575,7 +576,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 ### 14.2 整页只能选单字（root cause = 缓存，非代码）
 - 现象：某些页每个汉字/假名都只能选 1 个字。
 - 真因：`/api/page-chars` **之前无 Cache-Control** → iOS Safari **启发式缓存**了 fugashi 分词上线**前**的旧 JSON（每字 `w` 各自独立）。后端 `w` 一直对、HTML 早 no-store、JS 最新，唯独 page-chars 吃旧缓存。
-- 修：page-chars 响应加 `no-store/no-cache/must-revalidate + Pragma`；前端请求加 `?v=<pdf mtime>` 换 cache key（立即绕开旧缓存，不用用户清缓存）。
+- 修：page-chars 响应加 `no-store/no-cache/must-revalidate + Pragma`；前端请求加 `?v=<pdf mtime>` 换 cache key（立即绕开旧缓存，不用用户清缓存）。（历史：§32 拆分后 page-chars 改回**可缓存** `max-age=3600`，靠 `&cv=` 换 key 防陈旧；`no-store` 移到 page-overlay）
 - 排查留痕：全书端到端复刻 0 退化页；非传递排序比较器只拆散 3/261（**不是**根因，且改传递性排序会打乱英文混排页 reading order，故没动）。
 
 ### 14.2.1 「某些页整页单字」复发 = 坏缓存（fugashi 临时挂掉时写入）
@@ -592,7 +593,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - **加载遮罩别等渲染**:`#pdf-loading` 全屏遮罩只该挂到「文档结构就绪 + 占位建好 + 滚到目标页」,**不能等目标页图像渲染完**(否则遮罩挂太久)。故 setupContinuousMode 里目标页渲染 `_renderPageInto(...).catch()` **不 await**,`loadPdf` 的 `pdfLoadHide()` 紧随其后即触发 → 遮罩秒撤、先显占位「…第N页」、目标页图像几百ms 后弹出。(教训:别为了"打开即可用"把整页渲染塞进遮罩等待里,那只会让遮罩更久。)
 - **PDF 字节浏览器缓存**:`/pdf/file` 的 Cache-Control 从 `max-age=0, must-revalidate`(每块都回服务器校验→每次打开反复读)改成 **`private, max-age=31536000, immutable`**。URL 带 `?v=<mtime>`,同一 URL 字节永不变 → 浏览器长期缓存已取的 Range 分块、**重复打开读过的页直接命中本地缓存、零网络往返**;文件改了 mtime 变→新 URL 自然取新版,不串味。注:首次打开仍要取;只缓存实际看过的页;iPad Safari 缓存有容量上限,超大书只保最近用的块。(为什么这本书慢:它是 318MB 扫描图书、每页 ~644KB 大图,其它书是几 MB 矢量文字书、整本秒下;这是物理下限,缓存只能让重复打开快。)
 - **PDF.js 库静态缓存**(nginx,Pi 手工 patch):`/static/pdfjs/pdf.mjs`(625KB)+`pdf.worker.mjs`(**2.19MB**)原来 nginx 无 Cache-Control → 每次刷新都回源校验/重下这 ~2.8MB。两者 import 时都带 `?v=PDFJS_V`(版本变 URL 变)→ 安全设 immutable。Pi nginx `/etc/nginx/sites-available/bwicarus` 两个 server 块各加 `location ^~ /static/pdfjs/ { add_header Cache-Control "public, max-age=2592000, immutable" always; try_files $uri =404; }`(⚠ Pi 专属、**不在 git**,VPS 那份 `_server_deploy/nginx/bwicarus.conf` 结构不同勿混)。
-- **「刷新为何不秒开」**:HTTP 缓存只省**字节下载**(PDF 分块 + PDF.js 库);但每次刷新 PDF.js 仍要**重新 init worker + 重解析文档结构 + 重解码当前页那张 644KB 图 + 重渲染 canvas**(这些活在内存、刷新即丢),加上 HTML(`/pdf/view` no-store,取最新代码)+ page-chars(no-store)都重取。所以刷新已大幅变快(不再下 2.8MB 库 + 不再下已缓存的图字节),但非"瞬间"——剩下的是 CPU 重建那部分,属固有。
+- **「刷新为何不秒开」**:HTTP 缓存只省**字节下载**(PDF 分块 + PDF.js 库);但每次刷新 PDF.js 仍要**重新 init worker + 重解析文档结构 + 重解码当前页那张 644KB 图 + 重渲染 canvas**(这些活在内存、刷新即丢),加上 HTML(`/pdf/view` no-store,取最新代码)+ page-chars(当时 no-store;§32 后已可缓存)都重取。所以刷新已大幅变快(不再下 2.8MB 库 + 不再下已缓存的图字节),但非"瞬间"——剩下的是 CPU 重建那部分,属固有。
 
 ### 14.5 模块作用域 vs 内联 onclick 全局（反复踩！）
 `<script type="module">` 里的 `function foo(){}` **不是全局**，HTML 内联 `onclick="foo()"` 在全局作用域跑 → 找不到 → 静默失败。已中招：`openLangPicker`/`saveLangPicker`（🌐 按钮）、`_ttsWord`（完整字典 🔊 无声）。**规则：任何要被内联 onclick 调的函数必须 `window.xxx = xxx`**。小框 🔊 没事是因为走的是 `window._speakCurWord`（它内部再调模块函数 OK）。
@@ -625,15 +626,15 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 |---|---|---|---|
 | **F1 页码 scrubber** | 顶栏页码 | — | `#page-scrub` 左右拖快速跳页+预览，点击 prompt 输页码 |
 | **F2 单页横滑翻页** | 手势 | — | char-layer touchstart 记 `_swipeStart`（**起点空白 + 单页模式**）→ touchend：`|dx|≥55 且 dx>1.6×dy 且 <700ms` → 右滑上一页/左滑下一页。**起点在字上仍走拖选**（不冲突） |
-| **F3 整页翻译** | 「译页」 | `_split_page_sentences`（切整页所有句，不限生词不排标题）+ `/api/page-translate`（gtranslate_batch + `_cache_get/put` sidecar 缓存，无 GCP key 逐句兜底限 60 句） | `togglePageTranslate` + `_drawPageTranslate`（`.page-tr-layer` z9，逐行白底中文覆盖，复用 `_drawSentenceOverlay` 的按中心行合并+贪心填充+字号 0.72×原文高；`pointer-events:none` 仍可选原文）。连续模式滚入新页自动译（`__pageTrSeq` 防重复） |
+| **F3 整页翻译** | 「译页」 | `_split_page_sentences`（切整页所有句，不限生词不排标题）+ `/api/page-translate`（gtranslate_batch + `_cache_get/put` sidecar 缓存，无 GCP key/Google 故障时逐句兜底限 60 句；2026-06-10 起兜底走 `backend="no_ai"` + 10s 墙钟预算，见 §35④） | `togglePageTranslate` + `_drawPageTranslate`（`.page-tr-layer` z9，逐行白底中文覆盖，复用 `_drawSentenceOverlay` 的按中心行合并+贪心填充+字号 0.72×原文高；`pointer-events:none` 仍可选原文）。连续模式滚入新页自动译（`__pageTrSeq` 防重复） |
 | **F4 全文搜索** | 「🔍」 | `_book_text_index`（全书逐页 `get_text` 磁盘缓存，键含 mtime，679 页首建 ~3s 之后秒读）+ `/api/search`（子串、大小写不敏感、适配中日无词边界，limit 200 页） | `#search-panel` 顶部下拉，debounce 320ms / Enter / Esc，结果页码·命中数+片段 `<mark>` 高亮，点击 `goToPage` |
 | **F5 振假名/音标** | 「あ」 | page-chars 新增 `furigana`：日语 unidic `feature.kana`→平假名（`_furigana_item` 剥送り仮名贴汉字核心）+ 英文 `_build_en_furigana`（**单连接直查 ECDICT phonetic，不走 lemma/LIKE 全表扫描**）。**随 chars 进磁盘缓存**（老缓存无该键自动重算）。**分词按段落非逐行**（见下）| `.ruby-layer`（**z-index 8 + `pointer-events:none` → 点击穿透到 char-layer 选词**）+ `toggleRuby`（localStorage `pdf-ruby` 默认关）。字号 `min(词高×0.52, 词宽/读音字数×1.75)` 防溢出 |
 
-> **块内 gutter 切列 —— 漫画并排气泡能单独选中（2026-06，`_CHAR_CACHE_VER`→8）**：并排两个气泡的字选中时混在一起。根因:Vision 按整页视觉行读 → 并排气泡左右**交错**(左行1→右行1→左行2…),且 PyMuPDF 并成同一 block(bk 相同)→ 块过滤分不开、拖选 index 区间跨进另一气泡。修:`_split_block_columns` 在每个 block 内检测**竖直空白条**(gutter)切成左右列。阈值 **CJK 感知**:CJK 列(列内字紧挨)用 `0.8×字宽`、Latin(有词缝)用 `3×字宽`——并排气泡间隙常只有 ~1 字宽(料理师1 p12 左列伸到 x847、右列从 889、仅 42px),固定大阈值切不开。每列给唯一 `bk`(选中/句子框块过滤天然分开)+ 整列一起分词(`_apply_jp_tokenize` 改为接收"一列的 char 列表")。`page-chars` 与 `page-vocab-marks` 两处同改。普通单栏段落无 gutter → 不切(英文教材大段落仍各一个 bk)。
+> **块内 gutter 切列 —— 漫画并排气泡能单独选中（2026-06，`_CHAR_CACHE_VER`→8）**：并排两个气泡的字选中时混在一起。根因:Vision 按整页视觉行读 → 并排气泡左右**交错**(左行1→右行1→左行2…),且 PyMuPDF 并成同一 block(bk 相同)→ 块过滤分不开、拖选 index 区间跨进另一气泡。修:`_split_block_columns` 在每个 block 内检测**竖直空白条**(gutter)切成左右列。阈值 **CJK 感知**:CJK 列(列内字紧挨)用 `0.8×字宽`、Latin(有词缝)用 `3×字宽`——并排气泡间隙常只有 ~1 字宽(料理师1 p12 左列伸到 x847、右列从 889、仅 42px),固定大阈值切不开。每列给唯一 `bk`(选中/句子框块过滤天然分开)+ 整列一起分词(`_apply_jp_tokenize` 改为接收"一列的 char 列表")。`page-chars` 与 `page-vocab-marks` 两处同改（历史；2026-06-10 起 page-vocab-marks 复用 `_page_chars_cached` 同一管道，不再有第二份内联实现，见 §35③）。普通单栏段落无 gutter → 不切(英文教材大段落仍各一个 bk)。
 
 > **分词按段落（非逐行）—— 跨行复合词读对音（2026-06，`_CHAR_CACHE_VER`→7）**：`_compute_page_chars` 原**逐行**调 fugashi → 跨行的词（`間食`：間 行尾、食 行首）被行边界拆成 `間→あいだ`+`食→しょく`（读音全错，单击只选半个词）。改成 **`_apply_jp_tokenize` 整块(段落)调一次**（块内各行本就连续 reading order，拼起喂 fugashi 就把 `間食` 读 `かんしょく`；word_id=`block*1e6+块内token序号`）。跨行 token 的振假名由 `_furigana_item` 只放在**首字所在行的连续片段**上方（取首字 y 同行的连续 char 算 bbox，否则 ruby 飘行间）。副带：单击 `間食` 选中整词。
 | **F6 词组模式** | 选中后「📘词组」 | `_merge_favorite_phrases`（收藏词组在页内出现处合并 chars 的 `w`→单击选整词组；空白不敏感/ASCII 大小写不敏感/长词组优先/防重叠/**连续文本流校验：相邻字竖直跳变 >2.2 行高拒绝，防跨段误并**；**live 应用不进缓存**）+ `/api/phrases` CRUD（`state/pdf-phrases.json` 全局） | `_isShortPhrase`（中日 2-8 字/拉丁 2-5 词，无句末标点）→ 工具栏「📘词组」按钮（高亮+呼吸）+ 选中框呼吸 1.6s 转常亮；`showPhrasePopover`（复用 word-pop，JP 走 dict-jp 读音+声调，兜底 translate-sentence）+ ☆收藏切换 → `refreshCharsWForAllPages` 原地更新 `w` |
-| **F7 日语生词高亮** | 自动（同英语下划线开关） | `state/jp-vocab.json` store（查过的 JP 词记 looks/last_ts/user_mark）+ `_jp_vocab_bump`（dict-quick want_ja / dict-jp 查词时 looks+1）+ `_build_jp_vocab_marks`（**按 fugashi `w` 分组成 token**，按 mastery 上色画下划线，mastered 不画）。合并进 `vocab_marks`（page-chars + page-vocab-marks，后者补跑 `_apply_jp_tokenize` 让 `w` 存在）+ `/api/jp-vocab-mark`（known/unknown/""/forget） | 复用现有 `.vocab-underline` 渲染；查 JP 词后 `refreshVocabUnderlinesForAllPages` |
+| **F7 日语生词高亮** | 自动（同英语下划线开关） | `state/jp-vocab.json` store（查过的 JP 词记 looks/last_ts/user_mark）+ `_jp_vocab_bump`（dict-quick want_ja / dict-jp 查词时 looks+1）+ `_build_jp_vocab_marks`（**按 fugashi `w` 分组成 token**，按 mastery 上色画下划线，mastered 不画）。合并进 `vocab_marks`（由 `/api/page-overlay` 与 `/api/page-vocab-marks` 同管道返回，`w` 来自缓存 chars，见 §32 / §35③）+ `/api/jp-vocab-mark`（known/unknown/""/forget） | 复用现有 `.vocab-underline` 渲染；查 JP 词后 `refreshVocabUnderlinesForAllPages` |
 
 **日英 vocab 完全统一 / 日语并入 vault 词库（2026-06，真·一套系统）**：日语生词从独立 `jp-vocab.json`(looks 二元) **整体并入英语那套 vault 笔记库**(`资源/vocab/`)，从此日英共用 `vocab_index` / `compute_mastery` / `apply_user_mark` / `paragraph_exposure` 全套——一套代码、一套数据库、一套算法。
 - **JP 笔记生成** `build_vocab_note.update_jp_word_note(lemma, reading, meaning, examples, forms, add_source)`：`compose_entry` 是英语 ECDICT 专属，故日语内容(读音/释义/例句)单写；frontmatter schema 跟英语完全一致(lemma/forms/mastery/mastery_label/last_lookup_ts/user_mark…)，`new_source`(查词)→ mastery 重置 0(同英语:主动查=不会)。
@@ -713,6 +714,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 根因：`translate()` auto 链 `gtranslate→deepl→ai→mymemory`，gtranslate/deepl 偶发失败时落到 `_ai_translate`，它用 **`cfg.ai_backend`=`claude_cli`（Claude Code）**——其内置「编程助手」人格**间歇性拒翻**非编程内容，返回的拒绝说明**非空** → `if tr:` 当成功 → **`_cache_put` 缓存了拒绝**（之后永久命中）。
 - 修：① `_ai_translate` 加**拒绝识别**（`scripts/vocab/translate.py`）：只匹配拒绝特有的**完整短语**（`"我是一个软件工程"`/`"专注于编程和代码"`/`"不在我的职责范围"`/`"software engineering assistant"`/`"i cannot translate"`…），**不能用「软件工程/编程/代码」单词**否则 IT 教材的正经译文会被误判；命中 → 返回 `None` 落下个源、不缓存。② `translate(..., no_cache=False)`：`重新翻译`(`fresh=1`)绕读缓存、仍写回覆盖坏译文；路由 `/api/translate-sentence` 收 `fresh`，前端 `_sentRetranslate` 带 `fresh:1`。③ 一次性清掉 `state/dict-cache/` 里 45 条已缓存拒绝。
 - 注：`claude_cli` 翻译质量好**当它不拒绝时**；拒绝是概率性的。长期更稳的是给翻译走 `claude_api`（直 API + 自定 system prompt，不带 Claude Code 人格），但需配 key；当前用「拒绝识别 + 落 mymemory」兜底已够。
+- 2026-06-10 起批量路径（overlay 句子预翻译 §35② + 译页兜底 §35④）已**绝不落 AI CLI**，拒绝暴露面只剩手动单句 `/api/translate-sentence`（仍走配置的 auto 链）。
 
 ### 21. 压缩版开关 + 大文件非阻塞加载（2026-06-03）
 - 背景:iPad 远程经 Tailscale 连家里 Pi(测得 Pi 上下行 700Mbit/s、本机 nginx 发 318MB 仅 0.5s → **服务器/家宽都不是瓶颈**;iPad 那侧远程网络慢+断续才是)。OCR 质量依赖图像质量,故**原书做 OCR + 默认/好网传输**,慢网才用压缩版。
@@ -727,7 +729,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 ### 22. 图片模式：服务端按页出图(大型文档网站成熟方案)+ read-ahead 预取（2026-06-03）
 - 起因:用户指出之前每次打开都重拉整本(nginx 日志实测 15734 个 1MB range = 11.5GB)。range 模式 PDF.js 对扫描书 disableAutoFetch 挡不住、且 >220MB 无法缓存 → 每开重拉。用户要求**参考大公司成熟方案**(已记 memory `prefer-big-company-solutions`)。
 - **成熟方案 = 服务端按页渲染成图,客户端只按需取看到的页**(Google Books / Scribd / issuu)。`_imgMode` 默认开(`localStorage['pdf-img-mode']='0'` 关作安全阀,回退经典 PDF.js canvas 模式)。
-- **后端**:`/api/book-meta`(页数+首页尺寸 pt,不下载 PDF)+ `/api/page-image?file=&page=&w=`(PyMuPDF `get_pixmap` 渲染该页→JPEG q78,磁盘缓存 `state/pdf-page-img/<book_sha>-p<page>-w<w>-<mtime>.jpg`,~285KB/页@1200px,首次 ~0.35s、缓存后 ~0.01s)。
+- **后端**:`/api/book-meta`(页数+首页尺寸 pt,不下载 PDF)+ `/api/page-image?file=&page=&w=`(PyMuPDF `get_pixmap` 渲染该页→JPEG q78,磁盘缓存 `state/pdf-page-img/<book_sha>-p<page>-w<w>-<mtime>.jpg`,~285KB/页@1200px,首次 ~0.35s、缓存后 ~0.01s)。2026-06-10 起精确宽 miss 时有**宽度容差回退 + 后台补渲精确宽**(同页其它宽度的缓存图直接可用,见 §35①)。
 - **前端**:① boot:图片模式**跳过 PDF.js 库 import**(省 2.8MB + 那 5 秒"import PDF.js"等待)。② loadPdf:图片模式只取 book-meta 建 **pdfDoc shim**(`{numPages, getPage:()=>({getViewport:({scale})=>({width:page_w*scale,height:page_h*scale,scale})})}`)→ 其余代码(setupContinuousMode/_refitToWidth/_computeFitScale)靠 shim 照常工作,**完全跳过下载 PDF/IndexedDB 整本缓存那套**(都在 `else` 非图片模式分支)。③ `_renderPageInto` 开头 `if(_imgMode){await _renderPageImg();return;}`:`_renderPageImg` 用 `<img src=page-image?w=cw*dpr>` 代替 canvas,其余叠层(sel-overlay/char 层/墨迹)照搬。
 - **关键能成立的原因**:选词/高亮/振假名/搜索全走 **char 层**(`loadCharsAndBindLayer`,数据来自 `/api/page-chars` PyMuPDF),它**只用 `viewport.scale`(数字)+ 自己做 PDF→viewport 坐标转换**,不调 PDF.js 方法 → shim 的 viewport 够用。`__itemBoxes/__textDivs`(legacy textlayer 选中)已被 char 层取代,图片模式不建它们不影响。
 - **缓存 + read-ahead**(`_prefetchAround`):已加载页被 page-image 的 `Cache-Control: immutable` 缓存(re-view 零网络);翻到某页后**低优先级预取前后 ±3 页**(偏向后页,顺序阅读)→ 消费 blob 进缓存 → 翻页瞬开。`_prefetched` Set 去重。渲染完当前页(延后 400ms)+ 连续模式翻到新页触发。
@@ -852,14 +854,14 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 | 阅读器前端 | `reader.src/22-prewarm.js` | `window._prewarmBook(manual)` + 开书自动 `window._maybeAutoPrewarm`（`04-render.js:138` 首页渲完触发一次） |
 
 **前端 `22-prewarm.js` 要点**（`reader.src/22-prewarm.js`）：
-- 宽度 `_prewarmWidth()` = `clamp(__imgMeta.page_w, 400, 2400)`（页**原生点宽**，与窗口/缩放级别无关）——**和 `_renderPageImg` 的 `reqW` 同基准**（`04-render.js:82`：`max(_natW, cw*dpr)` 也以原生宽 `_natW=__imgMeta.page_w` 为底）→ 预热宽度=阅读器实际请求宽度，不会错配「换窗口就没命中缓存」。
+- 宽度 `_prewarmWidth()` = `clamp(__imgMeta.page_w, 400, 2400)`（页**原生点宽**，与窗口/缩放级别无关）——**和 `_renderPageImg` 的 `reqW` 同基准**（`04-render.js:82`：`max(_natW, cw*dpr)` 也以原生宽 `_natW=__imgMeta.page_w` 为底）→ 预热宽度=阅读器实际请求宽度，不会错配「换窗口就没命中缓存」。2026-06-10 起服务端另有宽度容差回退（§35①）双保险：即便宽度错配（高 dpr 设备 `cw*dpr > _natW`），预热渲的图也能即时回用 + 后台补渲精确宽。
 - 仅图片模式（`window._imgMode && __imgMeta && scale` 才跑）。手动入口 `_prewarmBook(true)`；自动入口 `_maybeAutoPrewarm()`：`localStorage['pdf-auto-prewarm']==='0'` 关，**默认开**，首页渲完延迟 1.5s 触发，且 `_autoPrewarmDone` 只触发一次。
 - 自动模式 `percent >= 95` 直接跳过（已基本预热好不重启）；`running` 时只 `_prewarmTrack` 跟进度不重启。
 - `_prewarmTrack(w)` 2.5s 轮询，把进度写进顶栏「📥 N%」按钮，100%（或 `!running && percent>0`）停轮询、`_toast` 提示「整本预热完成 ✓ 翻页秒开」。
 
 ### 34. 三个根因修复 + 日语下划线密度成因（2026-06-08，commit 22f6b8a，`READER_BUILD`→`reader-fix-9`）
 
-> **构建提醒**：`reader.js` = 纯 `cat reader.src/*.js`（NN- 前缀保序、无分隔），见 §1。这三处改的都是 `reader.src/NN-*.js`，重建/校验走 `bash scripts/check_pdf_reader_js.sh`。当前 build tag `READER_BUILD = 'reader-fix-9'`（`reader.src/07-continuous.js:113`，dlog 打点用）。
+> **构建提醒**：`reader.js` = 纯 `cat reader.src/*.js`（NN- 前缀保序、无分隔），见 §1。这三处改的都是 `reader.src/NN-*.js`，重建/校验走 `bash scripts/check_pdf_reader_js.sh`。build tag 在 `reader.src/07-continuous.js` 的 `READER_BUILD` 常量（dlog 打点用，每次改前端 bump +1）：当前值以代码为准（本批次=fix-9 → 性能审计批=fix-10 → 点词三修=fix-11 → 去边叠层修=fix-14，见 §35/§36）。
 
 **① 加载遮罩盖住标题 → 点不动「返回」**：
 - 现象：`#pdf-loading`（`pdf_reader.html:602`，`position:fixed;inset:0;z-index:1500` **整页覆盖**）在加载期间盖住顶栏标题 → 想退回选书页点不动，"点了名半天没反应"。
@@ -877,3 +879,39 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **④ 日语生词下划线密度成因（非 bug，是库攒大了）**：
 - `_build_jp_vocab_marks`（`pdf_reader.py:1861`）按统一 `vocab_index`（`_vocab_idx()`，英日**同一库** `资源/vocab/`，见 §15「日英 vocab 完全统一」）判定：每个 fugashi `w` token 解析原形查库，**`label_slug` 存在且 `!= "mastered"` 的词全部画下划线**（mastered 不画）。
 - 故密度直接由「库里非 mastered 词数」决定：库越攒越大（查过的词都入库、`new_source` 查词 mastery 重置 0），词密的日语页几乎整页被划。**这是机制如实工作，不是 bug**。密度治理（限量/开关/频率阈值）**待定**，目前无 UI 旋钮。
+
+### 35. 2026-06-10 性能审计批次（commits 264d140 / 75ebafa / 27a7396，`READER_BUILD`→`reader-fix-10`）
+
+> 同批次还有：点词 `lookup_jp` stale-while-revalidate + `/api/dict-jp-ai` 深入讲解服务端永久缓存（709a918）、ECDICT exchange 死扫描删除 + vocab-list mtime 签名缓存（75ebafa rank1-2）→ 归 [`vocab-system.md`](vocab-system.md)；spaCy 常驻 worker + grammar 双键缓存 + grammar-stream 回放缓存（f449521）→ 归 [`grammar-analysis-system.md`](grammar-analysis-system.md)。本节只记阅读器自己的。
+
+**① page-image 宽度容差回退 + 后台补渲精确宽**（264d140，`pdf_reader.py::pdf_api_page_image`，:588）
+- 根因：缓存键含**精确宽度** `-w<w>-`，每台设备/窗口/缩放请求的 `w` 都差一点 → 服务器明明有该页（预热过/别的设备渲过）却 miss、现场重渲 ~1-2s（实测 応用情報 被存了 ~85 种宽度、料理师 13 种；只有 SW 看过的页才秒开）。
+- 修：精确 miss 时 glob 同页其它宽度（`{sha}-p{page}-w*-{mt}.jpg`）：**≥请求宽 → 回最小那张**（缩小显示零质量损失，`immutable` 长缓存）；**≥70% 请求宽 → 先回它即时显示**（短缓存 `max-age=3600`）+ `_spawn_exact_render`（:570）后台线程补渲精确宽（`_BG_RENDERS` set 去重在途，下次请求命中精确图）；都没有才同步渲。回退响应带 `X-PageImg-Fallback: <实际宽>` 头可辨。渲染逻辑抽成 `_render_page_jpg(ap,page,w,cf)`（:544，tmp→replace 原子写）供同步路径与后台补渲共用。实测原 ~1-2s 重渲路径 → 9ms。
+- 客户端 `<img>` 是显式 CSS 定宽 → 固有宽度不同显示也正确。与 §33 预热协同：预热渲的图从此对**任意**设备/窗口宽都即时有效。
+
+**② overlay 句子预翻译改 SWR**（75ebafa，`_build_unmastered_sentences` 尾部 + `_bg_translate_sentences`，`pdf_reader.py:2386`）
+- 此前 miss 句**逐句同步翻**（Google ~300ms/句，抖动时退化为每句数秒 AI CLI）→ 首访页 page-overlay 阻塞 1-3s+ 且可耗尽 worker 线程池。改：**只取 `_cache_get` 已缓存译文即回**；miss 句交 `_bg_translate_sentences` 后台线程 `gtranslate_batch` 一次批量补翻进 tr-cache（`_BG_TR_INFLIGHT` set 对多页并发去重、失败静默下次再试、**绝不调 AI CLI**），下次 overlay/vocab-marks 重取自然带上。首访功能不丢——前端句子 L 按钮本就有按需翻译路径（`/api/translate-sentence`）。
+
+**③ page-vocab-marks 统一到 page-overlay 同管道**（75ebafa，`pdf_reader.py::pdf_api_page_vocab_marks`，:2570）
+- 此前该路由内联 `fitz.open`+rawdict+分词**全重算**（查词后前端刷 3-4 轮 × 多页，每页几百 ms 纯浪费）+ `vocab_index.index(force_reload=True)` 全库重读（~150ms）。改成与 `/api/page-overlay` 完全同管道：`_page_chars_cached`（磁盘缓存秒回）+ `_apply_char_offset`（顺带修「校准过偏移的页查词后下划线错位」）+ `_merge_favorite_phrases` + OCR override 一致；vocab_index 普通 mtime 扫描足以感知刚写盘的笔记（前端刷新延迟本就 ≥1.5s）。响应与 overlay 逐字段一致（实测 diff=0）；两路由差异只剩 vocab-marks 多回 `page_w/page_h`、overlay 多回 `offset/cv`。
+
+**④ page-translate（译页）兜底降级**（75ebafa，`pdf_reader.py::pdf_api_page_translate`，:2501）
+- 第 3 步逐句兜底此前走 auto 链（含 AI）：Google 故障窗 60 句 × [8s 超时 + AI 数秒] → 单请求挂 4-7 分钟还烧几十次 AI 额度。改：① `_tr(text, backend="no_ai")` —— `scripts/vocab/translate.py` 新增 backend（源链 `gtranslate→deepl→mymemory`，**绝不落 AI CLI**，都挂留空）；② **10s 墙钟预算**（`_deadline = monotonic()+10`）超时即止，未译句 `zh` 留空原样返回（响应带 `translated/total`，前端对空 zh 优雅跳过）。故障窗从分钟级挂死 → 秒级部分返回。
+
+**⑤ 前端五项**（27a7396，全在 `reader.src/`，build tag bump `reader-fix-9`→`reader-fix-10`）：
+- **查词后全页下划线刷新：trailing-coalesce + 视口优先 + 3-worker 并发池**（`12-vocab-sentences.js::refreshVocabUnderlinesForAllPages`，:34）。原串行逐页 fetch 全部已渲染页；现运行中再触发只置 `_vocabRerun`、跑完补一轮（查词后 1.8s/3.5s/1.5s 多轮是**故意错峰**等服务端 vocab note 写盘，直接 skip 会停在旧态，所以用 coalesce 不用 skip）+ 可视页排前 + 3 并发小池（无界 `Promise.all` 会打满单 worker 8 gthread，饿死滚动渲染请求）。
+- **`refreshCharsWForAllPages` 代际守卫 + 池**（`15-phrase-wordpop.js`，`_charsWGen` :218）。快速收藏→立即取消两次调用交错时，旧轮迟到响应不写回（连 localStorage cv 也不写，防旧值覆盖新）；距视口中心近的页优先 + 3-worker 池（页内 overlay→chars 的 cv 依赖仍串行）。配套：词组「标记掌握」**乐观去线**（先 `_dropVocabUnderlineOptimistic` 再发请求，失败按快照回滚——只回滚仍是本次乐观结果的页，防覆盖期间其他刷新写入的新 marks）。
+- **滚动 tick 读写分离 + 二分**（`07-continuous.js::_onContinuousScroll`，:229）。中线页定位由全书 O(N) rect 扫描改**二分**（wraps 文档序=页序、top 竖向单调非降；spread 同行两页同 top → 回退同 top 组首再按 DOM 序取第一个 `bottom>=center`；center 落页间隙不更新页码，语义与原扫描一致）；`_unloadFarPages(wraps)`（:211）复用调用方已取的 wraps + 改「先一轮只读 rect 收集待卸载页、再统一写」，消除逐页 读→写→读 强制 reflow。千页书每 tick 5-15ms → <1ms。
+- **char-layer document 单 dispatcher**（`13-selection.js`，模块顶层 `document.addEventListener` 块）。document 级 mousemove/mouseup 原在 `_bindCharLayer` 内注册且从不移除 → 每次重渲/缩放重绑泄漏 +2 监听，且旧闭包捕获过期 cl（缩放后 rect 失真致选区错位）。改模块顶层注册一次，经 `pw.__charDrag`（`_bindCharLayer` 尾部每次重绑覆盖为最新 cl 的 `{onStart,onMove,onEnd,ptToLocal}`）分发，天然路由到最新绑定。
+- **语法追问改 `_aiStream`**（`18-grammar.js::_grammarFollowup`，:365）。原手写 SSE 循环每 chunk 全文重渲+MathJax（零节流卡主线程、断连丢结果）→ 改用现成 `_aiStream`（`21-misc-ai.js`，80ms 节流 + 非 SSE JSON 兜底 + rid 断连轮询，同 `17-highlight` 的 `_followupAsk`）。语法系统其余改动（spaCy 常驻、缓存键策略）见 [`grammar-analysis-system.md`](grammar-analysis-system.md)。
+
+### 36. 点词链路三连修 + 去边叠层覆盖根因（2026-06-10 下午，`reader-fix-11`→`fix-14`，commits ded74db/e93fdfb）
+
+用户报「红圈处有文字浮层但点击不选中」。前两轮修复(③④)是真实改进但都没打中，最终靠 **Playwright 无头浏览器在 Pi 上真实点击 + `elementFromPoint` 逐像素查证**才确诊(⑤)——教训:命中类 bug 先查"点上是什么元素"，再查算法。
+
+- **① 慢词结果自动弹出**（`15-phrase-wordpop.js`，`_wordPopCancelSeq`）。点词后若期间没滚动(#main scroll/wheel)也没点别的词(每次 `showWordPopover` 自增 seq)，慢词(>400ms)结果一到自动 `_renderWordPop`，不用再点常亮高亮；有动作则保持旧行为(位置已不可信)。
+- **② 工具栏闪烁消除**（`13-selection.js` 单击查词分支）。单击选词会同步开 toolbar，30ms 后 `showWordPopover` 才关 → 浏览器画一帧(慢词时=「弹框闪一下消失」)。改为判定要弹词典时**同一事件 tick 内 `toolbar.classList.remove('open')`** → 根本不被 paint。
+- **③ `_findCharStrict` 振假名带容差**（第三段兜底）。振假名画在字行上方 ~0.5 行高(pointer-events:none)，点假名/行缝/行尾余白时 y 不落任何 bbox 行内 → 原直接 MISS 当点空白清选区。加竖直 ≤0.7×行高、水平 ≤1.2×行高的兜底(dy 权重×2 归属近行)。
+- **④ 防御两件**：`_syncCharBoxScale`（charBoxes 像素坐标是加载瞬间 scale 烘焙的，交互入口按实时 `clientWidth/pageWPt` 重标定——boxes 自带 `_x0` pt 字段，O(N) 重算）；`ptToLocal` 改 **BCR 与 layout 尺寸比值**换算（旧实现只除 `pw.style.zoom`，祖先 zoom/transform 漏算）。
+- **⑤ 真凶：crop-on 叠层只有裁后尺寸**（`04-render.js::_applyCropToWrap` + 模板 CSS）。去边模式 wrap 收成裁后宽高、子层 `translate(-cropL,-cropT)`；`inset:0` 的叠层(char-layer/vocab/ruby/hl 等)只有**裁后**尺寸 → 可见页面**右侧 cropL、底部 cropT 条带没有任何点击层**(实测 55/69px)，点击落到 `<img>` 上;振假名层 overflow 照画 → 「有浮层但点不中」。`sel-overlay`/`ink-layer` 因 `_renderPageImg` 内联整宽幸免(也因此此前难定位)。修:`_applyCropToWrap` 写 `--full-w/--full-h`(位图 css 尺寸)，CSS 对 `.crop-on` 下 8 个叠层(`char-layer/vocab-layer/ruby-layer/hl-layer/word-hl-layer/phrase-hl-layer/explain-hl-layer/char-dbg-layer`)改 `right:auto;bottom:auto;width/height:var(--full-w/h)`。新增叠层时记得加进这组选择器。
+- **复现方法论**（可复用）：Pi 上 `pip install playwright` + chromium headless；用 webapp SECRET_KEY 铸 session cookie；走 nginx HTTPS(直连 gunicorn :5000 时 /static 不在 Flask 侧会 404 模块)；`page.route` 拦截 reader.js 可换任意 commit 的 bundle 做二分；注意 crop translate——瞄准要用 `charBox + transform 矩阵 e/f`。改模板后 **gunicorn 不自动重载 Jinja 缓存，必须 restart webapp**。

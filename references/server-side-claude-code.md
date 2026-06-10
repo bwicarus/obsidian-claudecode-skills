@@ -1,14 +1,16 @@
 # 在服务器侧继续这个项目（Claude Code Linux）
 
-2026-05-14 起整套工作流已迁到 `bwicarus.space` 服务器；**2026-05-15** 又
-mirror 到 Raspberry Pi 5 作为完全独立的备份实例。这份指南教你（或下一个
+> ⏸ **状态注记（2026-06-10）：服务器侧 = Pi。VPS 已暂停**——自动化单元（xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily.timer）已 `systemctl disable`，只剩公网 `webapp.service`；代码停在 2026-05-28，重新启用前必须先 `git pull` + 重部署。日常接续工作一律 SSH 进 **Pi**（`ssh bwicarus@bwicarus.taile44d0c.ts.net`）；本文涉及 VPS 的命令/路径（`root@bwicarus.space`、`/root/claude` 等）保留作参考，仅在 VPS 重新启用后有效。⚠ VPS 的 OS hostname 实际也是 `bwicarus`（跟 Pi 撞名，Tailscale 设备名才是 `bwicarus-3`），判定在哪台机用路径（`/root/claude` = VPS，`/home/bwicarus/claude` = Pi），别用 hostname。
+
+2026-05-14 起整套工作流迁到 `bwicarus.space` 服务器；**2026-05-15** 又
+mirror 到 Raspberry Pi 5，此后 Pi 成为**唯一活跃实例**（VPS 见顶部注记）。这份指南教你（或下一个
 session 的 Claude Code）**从 Windows / 任意机器 切换到任一 Linux 实例**继续协作。
 
 Pi 部署细节见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 
 ## 两个 Linux 实例已就绪的一切
 
-| 项 | VPS (`bwicarus.space`) | Pi (`bwicarus.taile44d0c.ts.net`) |
+| 项 | VPS (`bwicarus.space`,⏸ 暂停,代码停 5-28) | Pi (`bwicarus.taile44d0c.ts.net`,**主力**) |
 |---|---|---|
 | 项目代码 | `/root/claude/` | `/home/bwicarus/claude/` |
 | Vault | `/root/obsidian/` (约 1300+ md) | `/home/bwicarus/obsidian/` (约 1300+ md) |
@@ -35,7 +37,15 @@ memory（跨会话）路径取决于 cwd（cwd 决定 project key）。**新版 
 
 ### A. 长任务（推荐）—— tmux + Claude Code
 
-VPS：
+Pi（日常用这个）：
+```bash
+ssh bwicarus@100.101.15.57        # 或 bwicarus@bwicarus.taile44d0c.ts.net
+tmux new -A -s claude
+cd ~/claude
+claude
+```
+
+VPS（⏸ 暂停中，重新启用后才适用）：
 ```bash
 ssh root@bwicarus.space
 tmux new -A -s claude    # -A：没就建，有就 attach（不会撞 duplicate）
@@ -43,14 +53,6 @@ cd /root/claude
 claude                   # 进入交互模式（Remote Control 默认开启，iPad App 可见）
 # 工作中如果要离开：Ctrl+B 然后 D（脱离 tmux，会话保留）
 # 回来：ssh + tmux attach -t claude
-```
-
-Pi：
-```bash
-ssh bwicarus@100.101.15.57        # 或 bwicarus@bwicarus.taile44d0c.ts.net
-tmux new -A -s claude
-cd ~/claude
-claude
 ```
 
 好处：
@@ -85,7 +87,8 @@ claude --resume <session-id>
 ### B. 一次性查询 —— 单次 prompt
 
 ```bash
-ssh root@bwicarus.space 'cd /root/claude && claude -p "项目当前状态"'
+ssh bwicarus@bwicarus.taile44d0c.ts.net 'cd ~/claude && claude -p "项目当前状态"'
+# VPS（暂停中）同理：ssh root@bwicarus.space 'cd /root/claude && claude -p "..."'
 ```
 
 好处：单次问答，不需要建立持久会话。
@@ -128,13 +131,15 @@ scp -r root@bwicarus.space:/root/.claude/projects/-root-claude/memory/ \
 
 ## 服务器侧 Claude Code 该知道的关键事实
 
-下次会话在服务器跑时，先让它**读这两个文件**就能恢复完整理解：
+下次会话在服务器跑时，先让它**读这两个文件**就能恢复完整理解（Pi 上把 `/root/claude` 换成 `/home/bwicarus/claude`）：
 - `/root/claude/CLAUDE.md`
 - `/root/claude/references/linux-server-migration.md`
 
-也会自动读 `/root/.claude/projects/-root-claude/memory/MEMORY.md`（新版单横杠目录；如果有的话，要先 scp）。
+也会自动读 `/root/.claude/projects/-root-claude/memory/MEMORY.md`（新版单横杠目录；如果有的话，要先 scp；Pi = `/home/bwicarus/.claude/projects/-home-bwicarus-claude/memory/`）。
 
 ## 常见操作快速参考
+
+> 下列命令是 VPS 视角（`/root/...`、root 直跑 systemctl）。**这些服务现在只在 Pi 跑**：Pi 上把 `/root` 换 `/home/bwicarus`，systemctl 前加 `sudo`（bwicarus 是 NOPASSWD sudo）。
 
 ```bash
 # 查 Tailscale IP（iPad 端点要用）

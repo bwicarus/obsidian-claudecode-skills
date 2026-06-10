@@ -11,14 +11,14 @@
 直接 bash 一行出结果：
 
 ```bash
-TOKEN=$(python3 -c "import json; print(json.load(open('/root/.claude/.credentials.json'))['claudeAiOauth']['accessToken'])")
+TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude/.credentials.json')))['claudeAiOauth']['accessToken'])")
 curl -sS https://api.anthropic.com/api/oauth/usage \
   -H "Authorization: Bearer $TOKEN" \
   -H 'anthropic-beta: oauth-2025-04-20' \
   -H 'User-Agent: claude-cli/2.0.0' | python3 -m json.tool
 ```
 
-如果 credentials.json 路径不一样：用 `~/.claude/.credentials.json` 通用展开（root 用户在 `/root/.claude/.credentials.json`，普通用户在 `$HOME/.claude/.credentials.json`）。
+`~/.claude/.credentials.json` 在三个环境都成立（VPS root 用户=`/root/.claude/...`，Pi=`/home/bwicarus/.claude/...`，Windows=`%USERPROFILE%\.claude\...`）。共享解析逻辑在 `scripts/lib/claude_quota.py`。
 
 ## 响应解读
 

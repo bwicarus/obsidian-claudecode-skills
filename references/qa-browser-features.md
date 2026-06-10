@@ -38,15 +38,17 @@ iPad 用法见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
 用户 prompt 输入笔记名（如 "F^S 向量空间的本质"）
         ↓
 POST /api/create-note  body={name, pairs, image_b64}
-        ↓
-_create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
+        ↓ 立即返回 {ok, job_id}（AI 整理 10-30s，移动端连接易断 → 后台线程跑，复用 _card_jobs）
+后台 _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
   ├─ 清理 name → vault/<name>.md（同名追加 -1/-2）
   ├─ AI 整理 pairs → 结构化 Markdown
   │   prompt 要求：去对话冗余、## 标题、$...$ 数学、不发挥
   ├─ 保存截图到 vault/attachments/<name>.png（如果有），笔记顶部加 ![[]]
   └─ 写文件 → 返回 obsidian://open?vault=...&file=...
         ↓
-前端弹出："✓ 笔记已创建" + "📂 在 Obsidian 中打开" 按钮
+前端 pollCreateNoteJob 轮询 GET /api/card-update-status?job=<id>（复用端点零新端点，封顶 60 次）
+        ↓
+弹出："✓ 笔记已创建" + "📂 在 Obsidian 中打开" 按钮
 ```
 
 **关键**：笔记**不带 `[0-9A-Fa-f]{3}-` 前缀** → 不被 `pending_notes.py` 扫到 → **不触发 register**。算"草稿型"笔记，用户可以后续重命名加前缀让其进入正式流程。
@@ -60,7 +62,7 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 - **根据此修改 Anki**：`_card_update_anki(local_id, pairs)` → AI 生成新卡替代原卡（删/留旧卡由 server-config 控制）
 - **全部更新**：两个都跑
 
-异步实现：提交 POST `/api/card-update`（立即返回 `{job_id}`），前端轮询 GET `/api/card-update-status?job=<job_id>` 拿结果（done 的 job 保留 30 分钟，弱网下轮询能重取，移动端连接断了不丢）。
+异步实现：提交 POST `/api/card-update`（立即返回 `{job_id}`），前端轮询 GET `/api/card-update-status?job=<job_id>` 拿结果（done 的 job 保留 30 分钟，弱网下轮询能重取，移动端连接断了不丢）。这套 `_card_jobs` + 轮询端点同时被 `/api/create-note` 和 server 模式 `/api/save` 复用，见「后台 job 化」节。
 
 ### 笔记改写两种模式（2026-05-27）
 
@@ -84,6 +86,30 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
    - 精炼模式：能删但要标注"已精简"位置
 
 写回前哈希覆盖（`state/note-states.json` 的 hash 更新），防止下次 register 把新内容当"已修改"重新跑 summarize/connect 流程。
+
+## 后台 job 化（断连不丢结果，2026-06）
+
+慢操作（AI 调用 / AnkiWeb sync）全部移出请求线程，移动端锁屏/弱网断连不丢结果。
+
+### `_card_jobs` job 表 + 共用轮询端点
+
+模块级 `_card_jobs: job_id → {"status": "running"|"done", "result", "_t"}`（qa_browser.py:296）。三个 POST 路由立即返回 `{ok, job_id}` 后台线程跑：
+
+| 路由 | 后台跑什么 | 前端轮询函数 |
+|---|---|---|
+| `/api/card-update` | `_card_update_anki` / `_card_update_note` | `pollCardJob`（2s 间隔，连续失败 40 次放弃）|
+| `/api/create-note` | `_create_note_from_qa` | `pollCreateNoteJob`（封顶 60 次）|
+| `/api/save`（仅 server 模式） | `_do_full_save` 全链路 | `pollSaveJob`（120 次未完成 / 连续 40 次轮询失败才放弃，提示「任务仍在后台执行，稍后可在历史记录查看」）|
+
+轮询端点统一 GET `/api/card-update-status?job=<id>`：**不 pop** —— done 的 job 保留 30 分钟（弱网下「done 响应丢了」的轮询能重取，避免 job 被删后一直 404），请求时懒清理过期项（qa_browser.py:2883-2893）。
+
+### `/api/save`：先快照再异步（关键顺序）
+
+`classify_conversation` 是同步 AI 调用可达数十秒。`/api/save` 入口**先**快照会话（`msgs_snap` = messages 深拷 + `img_snap` + `tmp_snap`，qa_browser.py:3090 起），后台 `_do_full_save`（classify → find_related_cards → do_save → archive_conversation → push_to_website 线程 → `_export_history_to_webapp`）**全链路只用快照**；server 模式拿到 job_id 响应前就 `session.reset()` + 清 state，daemon 立刻可服务下一轮。⚠ 坑：链路上任何一处仍读全局 `state` 都会在 reset 后拿到空会话。本地模式（ctrl+shift+q 临时进程）保持同步返回 —— `state['done'].set()` 的时机依赖响应已送出，不能 job 化。
+
+### `/api/card-delete`：sync 后台化（非 job）
+
+`_card_delete`（qa_browser.py:1024）：Anki `deleteNotes` + records 写盘**同步完成**后即返回 `{ok: true, synced: "pending"}`；AnkiWeb sync（最长 120s，不值得占住请求线程）改后台 fire-and-forget 线程，失败由 15min `anki-sync-refresh.timer` 兜住。前端 synced **三态**：`true`=已同步 / `'pending'`=后台同步中（显示「同步中」）/ falsy=未同步 —— `'pending'` 是 truthy，**不能直接 `j.synced ?`** 当布尔用。对比：cardCtx「修改 Anki」（`_card_update_anki`）末尾的 sync 仍同步等待 —— 它本身已在 job 线程里跑，等得起。
 
 ## AI 后端 + System Prompt
 
@@ -121,9 +147,10 @@ _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
 | `/api/inject-image` | iPad 远程注入截图 |
 | `/api/card-context` | 拿卡片两面（cardCtx 模式初始化） |
 | `/api/card-update` | 卡片改进（async job） |
-| `/api/card-delete` | 删卡 |
-| `/api/create-note` | **普通模式：创建新笔记**（2026-05-26 加） |
-| `/api/save` / `/api/discard` | 保存对话到 vault / 弃稿 |
+| `/api/card-update-status?job=` | GET 轮询 job 结果（card-update / create-note / server 模式 save 共用，done 保留 30min） |
+| `/api/card-delete` | 删卡（删 Anki note + records 同步完成；AnkiWeb sync 后台 fire-and-forget，返回 `synced:'pending'`） |
+| `/api/create-note` | **普通模式：创建新笔记**（2026-05-26 加；async job） |
+| `/api/save` / `/api/discard` | 保存对话到 vault / 弃稿（save 在 server 模式下先快照再 job 化，见「后台 job 化」节） |
 | `/api/reset` | 清空 session |
 | `/api/history/*` | 历史侧边栏 |
 | `/api/search-related` | 「关联知识」按钮：AI 基于知识索引选相关**笔记**（带 mastery%），非 KG/Anki 卡 |
@@ -166,7 +193,7 @@ CREATE TABLE conversations (
 
 GUI：`/history-btn` 按钮 → 滑出 sidebar 列出最近条目。每条带「打开 / 删除」。
 
-**删除是级联的**：`POST /api/history/delete` 的级联逻辑直接 inline 在 do_POST 分支里（qa_browser.py:3063 起，无独立 `_delete_history` 函数）：
+**删除是级联的**：`POST /api/history/delete` 的级联逻辑直接 inline 在 do_POST 分支里（无独立 `_delete_history` 函数）：
 1. SQLite `DELETE FROM conversations WHERE id=?`
 2. 截图文件 `HIST_IMG_DIR/<img_fname>` 无条件 unlink（`if img.exists(): img.unlink()`，无 ref-count 判断）
 3. **Obsidian 笔记**（除非 body 传 `keep_note=true` 只删库+截图保留笔记）：从 `note` 字段正则解析出 `→ ...md` 路径 → 若该路径存在直接 unlink；跨平台 fallback：路径不可达时按文件名在 `EXERCISES_DIR` / `WRONG_DIR` 下查找
@@ -182,12 +209,12 @@ GUI：`/history-btn` 按钮 → 滑出 sidebar 列出最近条目。每条带「
 
 ### 关联知识搜索（`🔍 关联知识`）
 
-`/api/search-related` (POST)（qa_browser.py:3114）：
+`/api/search-related` (POST，do_POST 分支)：
 1. 调 `load_index_notes()` 加载知识索引（笔记名 → keywords + summary），取最近 6 条对话 + 可选 `query` 作上下文
 2. 把上下文 + 笔记摘要（前 80 篇）喂给 `ai_client.ask()`，让 AI 选 3-6 篇最相关**笔记**并给关联原因
 3. 返回 markdown：每行 `- [[笔记名]] — 关联原因  掌握 X%`（mastery 来自 `get_mastery`），并把这次搜索追加进 session
 
-**注意**：`find_related_cards`（从 anki records 找相近卡）是另一套机制，只在 `/api/save`（错题保存，qa_browser.py:3017）里调，与 search-related 无关。
+**注意**：`find_related_cards`（从 anki records 找相近卡）是另一套机制，只在 `/api/save` 的 `_do_full_save`（错题保存）里调，与 search-related 无关。
 
 ### 快捷按钮（`quick-bar`）
 
