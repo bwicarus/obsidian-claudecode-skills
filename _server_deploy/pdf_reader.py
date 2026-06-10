@@ -541,9 +541,58 @@ def pdf_sw_js():
     return resp
 
 
+def _render_page_jpg(ap, page: int, w: int, cf: Path) -> bool:
+    """渲一页→JPEG 写到 cf(原子)。True=成功。同步路径与后台补渲共用。"""
+    import fitz
+    d = None
+    try:
+        d = fitz.open(str(ap))
+        if page < 1 or page > d.page_count:
+            return False
+        p = d[page - 1]; zoom = w / max(1.0, p.rect.width)
+        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        tmp = cf.with_suffix(".jpg.tmp")
+        tmp.write_bytes(pix.tobytes("jpg", jpg_quality=78))
+        tmp.replace(cf)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if d: d.close()
+        except Exception:
+            pass
+
+
+_BG_RENDERS: set = set()      # 去重在途的后台补渲(单 worker 进程内)
+
+
+def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
+    """后台补渲精确宽度(轻度放大回退时用):本次先回近似图即时显示,下次请求命中精确图。"""
+    import threading
+    key = str(cf)
+    if key in _BG_RENDERS:
+        return
+    _BG_RENDERS.add(key)
+
+    def _run():
+        try:
+            _render_page_jpg(ap, page, w, cf)
+        finally:
+            _BG_RENDERS.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @bp.route("/api/page-image")
 def pdf_api_page_image():
-    """渲染某页为 JPEG(PyMuPDF,宽 w px),磁盘缓存(键含 mtime)。客户端逐页按需取 → 只下看到的页。"""
+    """渲染某页为 JPEG(PyMuPDF,宽 w px),磁盘缓存(键含 mtime)。客户端逐页按需取 → 只下看到的页。
+
+    ⚡ 宽度容差回退(2026-06-10):缓存键含精确宽度,而每台设备/窗口/缩放请求的 w 都差一点 →
+    服务器明明有这页(预热过/别的设备渲过)却 miss、现场重渲(实测同一本书被存下 ~85 种宽度,
+    只有 SW 看过的页才秒开)。现在精确 miss 时找同页其它宽度:≥请求宽 → 回最小那张(缩小显示零损失);
+    ≥70% 请求宽 → 先回它(即时显示)+ 后台补渲精确宽(下次命中);都没有才同步渲。
+    客户端 <img> 是显式 CSS 定宽,固有宽度不同显示也正确。"""
     ap = _safe_vault_path(request.args.get("file", ""))
     if not ap:
         abort(404)
@@ -556,19 +605,28 @@ def pdf_api_page_image():
     _PAGE_IMG_DIR.mkdir(parents=True, exist_ok=True)
     cf = _PAGE_IMG_DIR / f"{sha}-p{page}-w{w}-{mt}.jpg"
     if not cf.exists():
-        import fitz
-        try:
-            d = fitz.open(str(ap))
-            if page < 1 or page > d.page_count:
-                d.close(); abort(404)
-            p = d[page - 1]; zoom = w / max(1.0, p.rect.width)
-            pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            tmp = cf.with_suffix(".jpg.tmp")
-            tmp.write_bytes(pix.tobytes("jpg", jpg_quality=78))
-            tmp.replace(cf); d.close()
-        except Exception:
-            try: d.close()
-            except Exception: pass
+        # 宽度容差回退:同页已有的其它宽度
+        alts = []
+        for f in _PAGE_IMG_DIR.glob(f"{sha}-p{page}-w*-{mt}.jpg"):
+            m = re.search(r"-w(\d+)-", f.name)
+            if m:
+                alts.append((int(m.group(1)), f))
+        ge = sorted(a for a in alts if a[0] >= w)            # ≥请求宽:缩小显示,零质量损失
+        lt = sorted(a for a in alts if a[0] < w)             # <请求宽:轻度放大可接受
+        best = None
+        if ge:
+            best = ge[0]
+        elif lt and lt[-1][0] >= int(w * 0.7):
+            best = lt[-1]
+            _spawn_exact_render(ap, page, w, cf)             # 后台补精确宽,本次先即时回近似图
+        if best is not None:
+            resp = send_file(str(best[1]), mimetype="image/jpeg", conditional=True)
+            # ≥请求宽=终态可长缓存;放大回退=临时图,短缓存(后台正在补精确图)
+            resp.headers["Cache-Control"] = ("private, max-age=31536000, immutable"
+                                             if best[0] >= w else "private, max-age=3600")
+            resp.headers["X-PageImg-Fallback"] = str(best[0])
+            return resp
+        if not _render_page_jpg(ap, page, w, cf):
             abort(500)
     resp = send_file(str(cf), mimetype="image/jpeg", conditional=True)
     resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
