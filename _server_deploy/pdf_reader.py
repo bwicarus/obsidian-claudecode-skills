@@ -2860,6 +2860,191 @@ def _append_lookup_log(word: str, lemma: str, pdf_rel: str, page: int, context: 
         pass
 
 
+# ── 例句 Anki 卡:自动收割(2026-06-14)。免 AI。边界 = 你最近查过词的页 ──
+# 思路:查词=你在这页学不动了/在学;那些页上「含多个未掌握词」的句子做成卡。
+# 读音(fugashi)+译文(translate no_ai 缓存)都离线;上限防泛滥;词全学会→suspend。
+_SENT_CARDS_STATE = CLAUDE_DIR / "state" / "sentence-cards.json"
+
+def _sent_cards_load() -> dict:
+    try:
+        return json.loads(_SENT_CARDS_STATE.read_text("utf-8"))
+    except Exception:
+        return {}
+
+def _sent_cards_save(d: dict) -> None:
+    try:
+        _SENT_CARDS_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SENT_CARDS_STATE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+        tmp.replace(_SENT_CARDS_STATE)
+    except Exception:
+        pass
+
+def _recent_active_pages(since_days: int, rel_filter: str | None = None) -> dict:
+    """读 vocab-lookups.jsonl → {(rel,page): 最新ts}，限最近 since_days 天(rel_filter 则只此书)。"""
+    import time as _t
+    cutoff = int(_t.time()) - since_days * 86400
+    out: dict = {}
+    p = CLAUDE_DIR / "state" / "vocab-lookups.jsonl"
+    if not p.exists():
+        return out
+    try:
+        for line in p.read_text("utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            ts = int(d.get("ts", 0))
+            if ts < cutoff:
+                continue
+            rel = d.get("pdf") or ""
+            pg = int(d.get("page") or 0)
+            if not rel or pg < 1:
+                continue
+            if rel_filter and rel != rel_filter:
+                continue
+            k = (rel, pg)
+            if ts > out.get(k, 0):
+                out[k] = ts
+    except Exception:
+        pass
+    return out
+
+def _all_lemmas_mastered(lemmas: list[str]) -> bool:
+    """该句的未掌握词是否已全部学会(label_slug=mastered)→ 卡片可退役。"""
+    if not lemmas:
+        return False
+    idx = _vocab_idx()
+    for lm in lemmas:
+        info = idx.get(str(lm).lower()) or idx.get(str(lm)) or {}
+        if info.get("label_slug") != "mastered":
+            return False
+    return True
+
+def _sent_zh_offline(text: str) -> str:
+    """取整句中文:先 translate 缓存(零网络),miss 走 no_ai 链(绝不 AI),都没有回空。"""
+    try:
+        vp = CLAUDE_DIR / "scripts" / "vocab"
+        if str(vp) not in sys.path:
+            sys.path.insert(0, str(vp))
+        from translate import _cache_get, translate as _tr   # type: ignore
+        zh = _cache_get(text, "zh-CN")
+        if zh:
+            return zh
+        zh = _tr(text, "zh-CN", backend="no_ai") or ""
+        return zh
+    except Exception:
+        return ""
+
+def _harvest_sentence_cards(rel: str | None = None, since_days: int = 14,
+                            per_page_cap: int = 2, run_cap: int = 15,
+                            max_len: int = 120) -> dict:
+    """核心收割:最近活跃页 → 未掌握句 → 离线译文+读音 → 建卡。返回统计 dict。"""
+    import sentence_card as sc
+    state = _sent_cards_load()
+    active = _recent_active_pages(since_days, rel)
+    # 最近查词的页排前(优先给「刚学的地方」出卡)
+    pages = sorted(active.items(), key=lambda kv: kv[1], reverse=True)
+    added = 0; scanned = 0; skipped_dup = 0; retired = 0
+    seen_prefix: set = set()   # 跨页近重复(同书同前缀)只取一条
+    for (prel, page), _ts in pages:
+        if added >= run_cap:
+            break
+        ap = _safe_vault_path(prel)
+        if not ap:
+            continue
+        scanned += 1
+        try:
+            res = _page_chars_cached(ap, prel, page)
+        except Exception:
+            res = None
+        if not res:
+            continue
+        chars, _pw, ph, _fg = res
+        langs = _book_langs_for(prel) if "_book_langs_for" in globals() else []
+        allow_ja = (not langs) or ("ja" in langs)
+        try:
+            sents = _build_unmastered_sentences(chars, page_h=ph, allow_ja=allow_ja)
+        except Exception:
+            sents = []
+        # 甜区:不太长、未掌握词多的优先
+        cand = [s for s in sents if len(s.get("text", "")) <= max_len and s.get("count", 0) >= 3]
+        cand.sort(key=lambda s: s.get("count", 0), reverse=True)
+        per = 0
+        for s in cand:
+            if added >= run_cap or per >= per_page_cap:
+                break
+            text = s["text"]
+            key = sc.sentence_key(prel, page, text)
+            pref = (prel.split("/")[-1], text[:18])
+            if key in state and state[key].get("anki_note_id"):
+                continue   # 已建过
+            if pref in seen_prefix:
+                skipped_dup += 1
+                continue
+            zh = _sent_zh_offline(text)
+            if not zh:
+                continue   # 没译文不出卡(半张卡无意义);下次缓存补上再收
+            bk = prel.split("/")[-1].replace(".pdf", "")
+            r = sc.make_sentence_card(file_rel=prel, page=page, text=text, zh=zh,
+                                      lemmas=s.get("lemmas") or [],
+                                      source=f"{bk} · p{page}")
+            if r.get("ok"):
+                state[key] = {"file": prel, "page": page, "text": text,
+                              "lemmas": s.get("lemmas") or [], "zh": zh,
+                              "anki_note_id": r.get("note_id"),
+                              "created_ts": int(_time.time()), "retired": False}
+                seen_prefix.add(pref)
+                added += 1; per += 1
+    # 退役:已建卡中未掌握词全学会的 → suspend
+    for key, rec in state.items():
+        if rec.get("retired") or not rec.get("anki_note_id"):
+            continue
+        if _all_lemmas_mastered(rec.get("lemmas") or []):
+            try:
+                sc.suspend_sentence_card(key)
+                rec["retired"] = True
+                retired += 1
+            except Exception:
+                pass
+    _sent_cards_save(state)
+    return {"ok": True, "added": added, "scanned_pages": scanned,
+            "skipped_dup": skipped_dup, "retired": retired,
+            "total_cards": sum(1 for v in state.values() if v.get("anki_note_id")),
+            "active_pages": len(active)}
+
+@bp.route("/api/sentence-cards/harvest", methods=["POST"])
+def pdf_api_sentence_harvest():
+    """后台收割例句卡。body 可选 {file, since_days, per_page_cap, run_cap}。返回 {job}。"""
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip() or None
+    since = int(data.get("since_days") or 14)
+    ppc = int(data.get("per_page_cap") or 2)
+    rcap = int(data.get("run_cap") or 15)
+    jid = _uuid.uuid4().hex[:12]
+    _job_set(jid, status="running", kind="sent_harvest", ts=_time.time())
+    def _run():
+        try:
+            out = _harvest_sentence_cards(rel, since, ppc, rcap)
+            _job_set(jid, status="done", result=out, ts=_time.time())
+        except Exception as e:
+            _job_set(jid, status="error", error=str(e), ts=_time.time())
+    _threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "job": jid})
+
+@bp.route("/api/sentence-cards/status")
+def pdf_api_sentence_status():
+    """轮询收割 job;另回 total_cards 供按钮显示。"""
+    jid = request.args.get("job", "")
+    with _JOBS_LOCK:
+        j = dict(_JOBS.get(jid) or {})
+    st = _sent_cards_load()
+    j["total_cards"] = sum(1 for v in st.values() if v.get("anki_note_id"))
+    return jsonify(j or {"status": "unknown"})
+
+
 def _auto_anki_cfg() -> tuple[int, int]:
     """(阈值, 冷却小时)。server-config dict.auto_anki_lookups(默认3,0=关) / auto_anki_cooldown_h(默认24)。"""
     try:
