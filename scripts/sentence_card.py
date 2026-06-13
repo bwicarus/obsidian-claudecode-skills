@@ -30,7 +30,7 @@ from anki_from_word import anki_call, ensure_deck  # 复用底层 AnkiConnect �
 
 SENT_DECK = "例句"
 SENT_MODEL = "例句JP"
-_FIELDS = ["Sentence", "Reading", "Translation", "Source", "Link", "Key"]
+_FIELDS = ["Sentence", "Reading", "Translation", "Source", "Key"]   # 链接放 Source(免新字段触发 schema full-sync)
 
 
 def _pdf_link_html(file_rel: str, page: int, label: str) -> str:
@@ -102,8 +102,7 @@ _CARD_BACK = (
     '<div class="jp-sent">{{Reading}}</div>'
     '<hr>'
     '<div class="zh">{{Translation}}</div>'
-    '{{#Link}}<div class="src">{{Link}}</div>{{/Link}}'
-    '{{^Link}}<div class="src">{{Source}}</div>{{/Link}}'
+    '<div class="src">{{Source}}</div>'   # Source 内含 <a> 链接,直接渲染
 )
 _CARD_CSS = """
 .card { font-family: -apple-system, "Hiragino Sans", "Noto Sans CJK JP", sans-serif;
@@ -179,8 +178,7 @@ def make_sentence_card(*, file_rel: str, page: int, text: str, zh: str,
         "deckName": deck, "modelName": SENT_MODEL,
         "fields": {"Sentence": html.escape(text), "Reading": reading,
                    "Translation": html.escape(zh or ""),
-                   "Source": src_val, "Link": "",
-                   "Key": key},
+                   "Source": src_val, "Key": key},
         "options": {"allowDuplicate": True},   # 我们用 Key 自管去重,不靠 Anki 内容查重
         "tags": tags,
     }
