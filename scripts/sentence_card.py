@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import os
 import sys
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vocab"))
@@ -28,7 +30,16 @@ from anki_from_word import anki_call, ensure_deck  # 复用底层 AnkiConnect �
 
 SENT_DECK = "例句"
 SENT_MODEL = "例句JP"
-_FIELDS = ["Sentence", "Reading", "Translation", "Source", "Key"]
+_FIELDS = ["Sentence", "Reading", "Translation", "Source", "Link", "Key"]
+
+
+def _pdf_link_html(file_rel: str, page: int, label: str) -> str:
+    """拼回原文那一页的深链(同 anki_from_word:WEBAPP_BASE_URL,Pi=Tailscale 内网,手机直连)。"""
+    if not file_rel:
+        return ""
+    base = os.environ.get("WEBAPP_BASE_URL", "https://bwicarus.space").rstrip("/")
+    url = f"{base}/pdf/view?file={urllib.parse.quote(file_rel, safe='/')}&page={page}"
+    return f'<a href="{html.escape(url)}" target="_blank">📖 {html.escape(label)}</a>'
 
 # ── 离线读音(fugashi/unidic),全局缓存 Tagger ──
 _TAGGER = None
@@ -91,7 +102,8 @@ _CARD_BACK = (
     '<div class="jp-sent">{{Reading}}</div>'
     '<hr>'
     '<div class="zh">{{Translation}}</div>'
-    '<div class="src">{{Source}}</div>'
+    '{{#Link}}<div class="src">{{Link}}</div>{{/Link}}'
+    '{{^Link}}<div class="src">{{Source}}</div>{{/Link}}'
 )
 _CARD_CSS = """
 .card { font-family: -apple-system, "Hiragino Sans", "Noto Sans CJK JP", sans-serif;
@@ -158,11 +170,13 @@ def make_sentence_card(*, file_rel: str, page: int, text: str, zh: str,
         tags.append(f"page::{page}")
     for lm in (lemmas or [])[:12]:
         tags.append("word::" + str(lm).replace(" ", "_"))
+    src_text = source or (bk + (f" · p{page}" if page else ""))
+    link = _pdf_link_html(file_rel, page, src_text)
     note = {
         "deckName": deck, "modelName": SENT_MODEL,
         "fields": {"Sentence": html.escape(text), "Reading": reading,
                    "Translation": html.escape(zh or ""),
-                   "Source": html.escape(source or bk + (f" · p{page}" if page else "")),
+                   "Source": html.escape(src_text), "Link": link,
                    "Key": key},
         "options": {"allowDuplicate": True},   # 我们用 Key 自管去重,不靠 Anki 内容查重
         "tags": tags,
