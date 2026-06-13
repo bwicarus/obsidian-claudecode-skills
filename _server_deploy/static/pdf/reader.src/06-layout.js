@@ -85,6 +85,32 @@ function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
 }
+// 适应兜底:渲染落定后若**实测**仍横向溢出(设备相关:去边比例取整 / dpr / 安全区让算出的 fit
+// scale 偏大一点点 → 双页两栏并排刚好超出几 px),按实测比例再缩,保证"适应"一定铺满不溢出。
+// 只在适应路径(_refitToWidth)末尾调,不影响用户主动放大。返回是否改了 scale。
+function _fixHOverflow() {
+  const main = document.getElementById('main');
+  if (!main) return false;
+  const cw = main.clientWidth, sw = main.scrollWidth;
+  if (sw <= cw + 2) return false;               // 没溢出
+  const k = cw / sw;
+  if (k > 0.998) return false;                  // 溢出可忽略(<0.2%)
+  const ns = Math.max(_ZOOM_MIN, scale * k);
+  if (Math.abs(ns - scale) < 0.002) return false;
+  scale = ns;
+  _lastFitWidth = _mainContentWidth();
+  return true;
+}
+async function _runFitOverflowGuard() {
+  if (_refitBusy || !pdfDoc) return;
+  if (!_fixHOverflow()) return;
+  _refitBusy = true;
+  try {
+    if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
+    else { const w = document.querySelector('#page-container .page-wrap'); if (w) { w.dataset.loaded = '0'; await renderPage(currentPage); } }
+  } finally { _refitBusy = false; }
+  requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
+}
 async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
@@ -93,6 +119,11 @@ async function _refitToWidth(force, rebuild) {
   if (!force && Math.abs(mainW - _lastFitWidth) < 30) return;
   _refitBusy = true;
   try {
+    // 清掉双指捏合残留的预览 transform/zoom：手势异常结束(iPad 上一指先抬 / touchend·cancel 没正常触发)
+    // 时 #page-container 会定格在 scale() 放大态。「适应」原来只重算 scale 没清它 → 视觉仍放大+横向溢出
+    // (用户报「双指缩放后按适应失效，应取消缩放」)。同 _applyZoom 的防御,补到适应路径。
+    _pinch = null;
+    { const _pc = document.getElementById('page-container'); if (_pc && (_pc.style.transform || _pc.style.transformOrigin)) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; } }
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
     const newScale = _computeFitScale(v0.width, v0.height);   // 双页含高度约束(整页可见)
@@ -118,6 +149,7 @@ async function _refitToWidth(force, rebuild) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
       _updateMainOverflowX();   // 适应/去边后内容铺满宽 → 锁横向拖动
+      setTimeout(_runFitOverflowGuard, 160);   // 渲染落定后兜底:仍横向溢出(设备微差)则再缩到铺满
     });
   } finally {
     _refitBusy = false;
