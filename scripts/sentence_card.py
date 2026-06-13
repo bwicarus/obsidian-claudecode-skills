@@ -171,12 +171,13 @@ def make_sentence_card(*, file_rel: str, page: int, text: str, zh: str,
     for lm in (lemmas or [])[:12]:
         tags.append("word::" + str(lm).replace(" ", "_"))
     src_text = source or (bk + (f" · p{page}" if page else ""))
-    link = _pdf_link_html(file_rel, page, src_text)
+    # 链接直接进 Source(原有字段)→ 任何模板版本都显示,免新字段引发的 schema full-sync 摩擦
+    src_val = _pdf_link_html(file_rel, page, src_text) or html.escape(src_text)
     note = {
         "deckName": deck, "modelName": SENT_MODEL,
         "fields": {"Sentence": html.escape(text), "Reading": reading,
                    "Translation": html.escape(zh or ""),
-                   "Source": html.escape(src_text), "Link": link,
+                   "Source": src_val, "Link": "",
                    "Key": key},
         "options": {"allowDuplicate": True},   # 我们用 Key 自管去重,不靠 Anki 内容查重
         "tags": tags,
