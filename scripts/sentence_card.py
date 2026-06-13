@@ -112,7 +112,9 @@ _CARD_CSS = """
 ruby rt { font-size: 0.5em; color: #6b7280; font-weight: 400; }
 hr { border: none; border-top: 1px solid #e3e3ea; margin: 16px 0; }
 .zh { font-size: 21px; color: #0a5; margin: 10px 6px; }
-.src { font-size: 13px; color: #9aa0aa; margin-top: 14px; }
+.src { font-size: 14px; margin-top: 16px; }
+.src a { color: #2563eb; text-decoration: underline; }
+.nightMode .src a { color: #6ea8fe; }
 .nightMode .card { color: #e6e6ef; background: #16161e; }
 .nightMode ruby rt { color: #8b93a3; }
 .nightMode .zh { color: #4ade80; }
