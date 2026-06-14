@@ -34,6 +34,8 @@ window.toggleReadMode = async () => {
   try { localStorage.setItem('pdf-read-mode', readMode); } catch (_) {}
   _updateModeButtons();
   await _applyModeChange(keepPage);
+  window._rememberOrientLayout?.();   // 把单页/连续选择记进当前方向(同 toggleSpread)。漏了的话切到单页后
+                                      // 旋转/iOS resize 触发 _onOrientChange 会按旧存档把模式还原回双页→"单页缩放变多页"
 };
 // 双页(spread)按钮：单页/连续切换已删,双页按钮兼任「进入/错开/退出」三态循环——
 // 连续 → 双页(offset0) → 双页(offset1,facing 错开) → 连续。
@@ -143,9 +145,11 @@ async function _refitToWidth(force, rebuild) {
     if (readMode !== 'single') {   // 连续/双页:结构没变就原地重排(不清容器→不"重新加载");mode 变(rebuild)或原地失败才整列重建
       if (rebuild || !(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
-      // 单页模式：清 loaded 标记重 render
-      const wrap = container.querySelector('.page-wrap') || container;
-      wrap.dataset.loaded = '0';
+      // 单页:页直接渲进 page-container。必须给 **page-container** 标 loaded='0'(原来错给第一个 .page-wrap,
+      // 当 DOM 还是多页结构时 page-container.loaded 仍是上次单页渲染留的 '1' → _renderPageInto 提前 return、
+      // 多页 wrap 没被清 → readMode=single 但页面仍多页,即用户报的「单页缩放变多页」根因)。
+      const pc = document.getElementById('page-container');
+      pc.dataset.loaded = '0';
       await renderPage(currentPage);
     }
     // 按比例恢复滚动
@@ -196,7 +200,9 @@ function _loadOrientLayout(o) {
 let _orientPendingScale = 0;   // 待套用的缩放(渲染完后由 _applyPendingOrientScale 处理)
 function _applyOrientLayoutVars(lay) {   // 套到当前变量(不重渲染,调用方负责),返回是否套了
   if (!lay) return false;
-  readMode = (lay.mode === 'spread') ? 'spread' : 'continuous';
+  // 三态都要还原:旧实现只认 spread,把 single 误并成 continuous → 切单页后旋转/方向重判会变多页(用户报的
+  // 「单页缩放变多页」)。single/spread/continuous 各自保留。
+  readMode = (lay.mode === 'spread') ? 'spread' : (lay.mode === 'single' ? 'single' : 'continuous');
   _spreadOffset = lay.off ? 1 : 0;
   _cropOn = !!lay.crop;
   // fit=1(存档时是宽度适应) → 不套绝对 scale,让重排后的 _refitToWidth 重算适应(适应是相对值);
