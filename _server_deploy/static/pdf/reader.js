@@ -1277,32 +1277,9 @@ function _scheduleRefit(force) {
   if (_refitDebounce) clearTimeout(_refitDebounce);
   _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
 }
-// 适应兜底:渲染落定后若**实测**仍横向溢出(设备相关:去边比例取整 / dpr / 安全区让算出的 fit
-// scale 偏大一点点 → 双页两栏并排刚好超出几 px),按实测比例再缩,保证"适应"一定铺满不溢出。
-// 只在适应路径(_refitToWidth)末尾调,不影响用户主动放大。返回是否改了 scale。
-function _fixHOverflow() {
-  const main = document.getElementById('main');
-  if (!main) return false;
-  const cw = main.clientWidth, sw = main.scrollWidth;
-  if (sw <= cw + 2) return false;               // 没溢出
-  const k = cw / sw;
-  if (k > 0.998) return false;                  // 溢出可忽略(<0.2%)
-  const ns = Math.max(_ZOOM_MIN, scale * k);
-  if (Math.abs(ns - scale) < 0.002) return false;
-  scale = ns;
-  _lastFitWidth = _mainContentWidth();
-  return true;
-}
-async function _runFitOverflowGuard() {
-  if (_refitBusy || !pdfDoc) return;
-  if (!_fixHOverflow()) return;
-  _refitBusy = true;
-  try {
-    // 统一:单页/连续/双页都用 wrap 路径(单页=唯一 wrap)→ _rescaleContinuousInPlace 原地重排;失败再按模式重建
-    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
-  } finally { _refitBusy = false; }
-  requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
-}
+// (已删除「适应溢出兜底 _runFitOverflowGuard」)它测 main.scrollWidth 来「兜底再缩」,但会把**非页面元素**
+// 的假溢出(如错位的 vocab 下划线、知识点抽屉)当真,于是把页面缩到 fit 以下 → 用户报的「适应后瞬间填满
+// 又回弹」就是它干的。_computeFitScale 本身精确(去边时也按可见宽算到正好填满),不需要这个投机性兜底。
 async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
@@ -1343,7 +1320,7 @@ async function _refitToWidth(force, rebuild) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
       _updateMainOverflowX();   // 适应/去边后内容铺满宽 → 锁横向拖动
-      setTimeout(_runFitOverflowGuard, 160);   // 渲染落定后兜底:仍横向溢出(设备微差)则再缩到铺满
+
     });
   } finally {
     _refitBusy = false;
@@ -1682,7 +1659,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-27';
+const READER_BUILD = 'reader-fix-28';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
