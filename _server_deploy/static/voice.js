@@ -59,6 +59,10 @@
       else fetch('/api/voice/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body, keepalive: true });
     } catch (_) {}
   }
+  // 聆听开始→预热待命大脑(省冷启动);结束→回收。fire-and-forget。
+  function prewarmBrain(off) {
+    try { fetch('/api/voice/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {}
+  }
 
   // ── 上下文 + 派发 ──
   function pageContext() {
@@ -260,7 +264,7 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { status('此设备/浏览器不支持录音'); return; }
     var myEp = ++epoch;
     listening = true; queue = []; busy = false; seg = false; ttsMute = false; preRoll = []; segChunks = []; voiceFrames = 0;
-    setState('listen'); status('🎙 在听…(点一下停止,长按切语种)'); beacon('start', {});
+    setState('listen'); status('🎙 在听…(点一下停止,长按切语种)'); beacon('start', {}); prewarmBrain(false);
     navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       .then(function (s) {
         if (myEp !== epoch) { try { s.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {} return; }  // 已被停:释放
@@ -298,7 +302,7 @@
     try { if (ac) { var pr = ac.close(); if (pr && pr.catch) pr.catch(function () {}); } } catch (_) {}
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
     sp = null; srcNode = null; stream = null; ac = null;
-    setState('off'); beacon('stop', {});
+    setState('off'); beacon('stop', {}); prewarmBrain(true);
   }
 
   function toggle() { if (listening) stopListening(); else startListening(); }

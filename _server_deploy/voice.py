@@ -18,9 +18,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import requests
@@ -293,9 +296,10 @@ def _fast_intent(t: str, context: dict):
             return _act("changePage", [1], "好,下一页")
         if _re.search(r"(上一?[页张个]|前一?[页张]|往[前上]|退回去|previous|back)", s):
             return _act("changePage", [-1], "好,上一页")
-        # 跳页:第N页 / 跳到N / 翻到N
-        if _re.search(r"(第.*[页张]|跳到|翻到|去第|到第|page)", s):
-            n = _parse_num(s)
+        # 跳页:第N页 / 跳到N / 翻到N。只取页码关键词紧跟的数字(避免「一点点」的「一」被当页码)
+        mpage = _re.search(r"(?:第|跳到|翻到|去第|到第|page)\s*([0-9零一二两三四五六七八九十百]+)", s)
+        if mpage:
+            n = _parse_num(mpage.group(1))
             if n:
                 return _act("goToPage", [n], f"好,翻到第{n}页")
         # 缩放 / 适应
@@ -440,6 +444,94 @@ def _entities_block(context: dict) -> str:
     return "\n".join(lines) if lines else "(无)"
 
 
+# ── 预热常驻大脑(「开一个 claude 待机」)──
+# 预热一个 claude --print stream-json 进程 idling(已完成 node 启动+鉴权,阻塞等 stdin);
+# 来命令直接喂 → 只付推理(实测省 ~2.4s 冷启动);每轮用完即弃 + 后台补热 = 无历史累积(无状态)。
+# 只在「聆听中」保活(前端 start 预热 / stop 回收),不长期空挂。失败回 None → 上层冷调用兜底。
+# gunicorn 单进程多线程,模块级单例 + _brain_lock 串行(语音命令本就一条条来)。
+_APP_CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
+_brain_lock = threading.Lock()
+_brain_proc = None
+
+
+def _brain_spawn():
+    try:
+        return subprocess.Popen(
+            [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+             "--verbose", "--model", "haiku", "--effort", "low"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, cwd=str(CLAUDE_DIR))
+    except Exception:
+        return None
+
+
+def _brain_kill(p):
+    if not p:
+        return
+    try:
+        if p.stdin:
+            p.stdin.close()
+    except Exception:
+        pass
+    try:
+        p.terminate()
+    except Exception:
+        pass
+
+
+def _brain_prewarm():
+    """后台预热:确保有一个 idling 进程待命。"""
+    global _brain_proc
+    with _brain_lock:
+        if _brain_proc is not None and _brain_proc.poll() is None:
+            return
+        _brain_proc = _brain_spawn()
+
+
+def _brain_reap():
+    global _brain_proc
+    with _brain_lock:
+        p, _brain_proc = _brain_proc, None
+    _brain_kill(p)
+
+
+def _brain_ask(prompt: str, timeout: float = 28.0):
+    """用预热进程发一轮,返回文本;失败/超时回 None(上层冷调用兜底)。用完丢弃 + 后台补热。"""
+    global _brain_proc
+    with _brain_lock:
+        p, _brain_proc = _brain_proc, None
+        if p is None or p.poll() is not None:
+            _brain_kill(p)
+            p = _brain_spawn()
+        if p is None:
+            return None
+        out = None
+        try:
+            p.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
+            p.stdin.flush()
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                r, _, _ = select.select([p.stdout], [], [], 0.5)
+                if r:
+                    ln = p.stdout.readline()
+                    if not ln:
+                        break
+                    if '"type":"result"' in ln:
+                        try:
+                            out = (json.loads(ln).get("result") or "").strip()
+                        except Exception:
+                            out = None
+                        break
+                if p.poll() is not None:
+                    break
+        except Exception:
+            out = None
+        finally:
+            _brain_kill(p)
+            threading.Thread(target=_brain_prewarm, daemon=True).start()   # 后台补热下一个
+    return out or None
+
+
 def _llm_intent(transcript: str, context: dict) -> dict:
     """Claude 把口令映射成真实动作(或简短作答)。返回定型结构,动作经白名单校验。"""
     ctx = context or {}
@@ -451,9 +543,11 @@ def _llm_intent(transcript: str, context: dict) -> dict:
               f"【当前页面】{meta_txt}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
     raw = ""
     try:
-        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-        import ai_client
-        raw = (ai_client.ask(prompt, claude_model="haiku", claude_effort="low") or "").strip()
+        raw = (_brain_ask(prompt) or "").strip()   # 预热常驻进程,快
+        if not raw:                                 # 没预热进程/失败 → 冷调用兜底
+            sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+            import ai_client
+            raw = (ai_client.ask(prompt, claude_model="haiku", claude_effort="low") or "").strip()
     except Exception as e:
         return {"speak": "我这边出了点问题:" + str(e)[:80],
                 "client_actions": [], "server_results": [], "confirm": None}
@@ -485,6 +579,16 @@ def voice_agent():
 @bp.route("/ping")
 def voice_ping():
     return jsonify({"ok": True, "has_gcp_key": bool(_gcp_key()), "ffmpeg": _has_ffmpeg()})
+
+
+@bp.route("/prewarm", methods=["POST"])
+def voice_prewarm():
+    """聆听开始→预热待命大脑;聆听结束→回收,不长期空挂。fire-and-forget。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    off = bool((request.get_json(silent=True) or {}).get("off"))
+    threading.Thread(target=(_brain_reap if off else _brain_prewarm), daemon=True).start()
+    return jsonify({"ok": True})
 
 
 def register_voice(app):
