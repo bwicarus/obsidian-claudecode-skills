@@ -1438,12 +1438,14 @@ async function _applyZoom(newScale, focal) {
     if (readMode !== 'single') {           // 连续 + 双页:原地重标尺(不清空容器→不"重新加载");没建过列表才全建
       if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
     } else {
-      const wrap = container.querySelector('.page-wrap') || container;
-      // 单页同理:先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 期间顶住正确尺寸→不 snap 回旧大小),
+      // 单页:目标恒为 page-container(原写 container.querySelector('.page-wrap')||container,DOM 还是多页结构时
+      // 会标错到第一个 .page-wrap、page-container.loaded 留 '1' → 重渲提前 return、多页没清 → 单页缩放变多页,
+      // 同 fix-22 _refitToWidth 根因)。先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 顶住尺寸→不 snap),
       // 渲染完成 _renderPageImg 把 zoom 归 1(原生清晰)。
-      const rs = wrap.__renderScale || 0;
-      if (rs > 0) wrap.style.zoom = (scale / rs);
-      if (wrap.dataset) wrap.dataset.loaded = '0';
+      const pc = container;
+      const rs = pc.__renderScale || 0;
+      if (rs > 0) pc.style.zoom = (scale / rs);
+      pc.dataset.loaded = '0';
       await renderPage(currentPage);
     }
     requestAnimationFrame(() => {
@@ -1674,7 +1676,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-22';
+const READER_BUILD = 'reader-fix-23';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
