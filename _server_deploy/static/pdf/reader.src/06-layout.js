@@ -122,8 +122,13 @@ async function _refitToWidth(force, rebuild) {
     // 清掉双指捏合残留的预览 transform/zoom：手势异常结束(iPad 上一指先抬 / touchend·cancel 没正常触发)
     // 时 #page-container 会定格在 scale() 放大态。「适应」原来只重算 scale 没清它 → 视觉仍放大+横向溢出
     // (用户报「双指缩放后按适应失效，应取消缩放」)。同 _applyZoom 的防御,补到适应路径。
+    // 清缩放残留:transform(捏合预览)+ zoom(单页缩放靠 page-container 的 CSS zoom 撑大)。必须显式清,
+    // 别只靠重渲 —— iPad 上适应的重渲被触摸/竞态打断时残留不清 → 适应一瞬生效又弹回放大态(用户报的
+    // 「单页适应后回弹」)。单页时 page-container 即 wrap,清它的 zoom 即解决;连续/双页 page-container 非
+    // wrap(子 .page-wrap 的过渡 zoom 由 _rescaleContinuousInPlace 重设),清它无副作用。
     _pinch = null;
-    { const _pc = document.getElementById('page-container'); if (_pc && (_pc.style.transform || _pc.style.transformOrigin)) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; } }
+    { const _pc = document.getElementById('page-container');
+      if (_pc) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; _pc.style.zoom = ''; } }
     const page1 = await pdfDoc.getPage(1);
     const v0 = page1.getViewport({scale: 1});
     const newScale = _computeFitScale(v0.width, v0.height);   // 双页含高度约束(整页可见)
