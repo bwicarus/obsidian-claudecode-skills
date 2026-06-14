@@ -72,15 +72,18 @@ function _computeFitScale(v0w, v0h) {
   const s = avail / (v0w * _cropVisWFrac() * ppr);
   return Math.max(_ZOOM_MIN, Math.min(_scaleMax, s));
 }
-// 横向滚动锁:内容宽 ≤ 视口宽(适应/去边/缩小态,页面正好或不足铺满)→ overflow-x:hidden,
-// 左右拖动不再让页面滑动(iOS overflow:auto 的横向橡皮筋也一并禁掉);只有真放大超宽时放开 auto。
-// 先临时设 auto 量真实 scrollWidth(hidden 态会把溢出裁掉量不出),再据此决定锁不锁。
+// 横向滚动锁:只看**页面本身**(连续/单页=.page-wrap,双页=.spread-row)有没有超过视口宽。
+// 不用 main.scrollWidth —— 去边时页图/叠层按整宽(--full-w)渲染再 translate 移位,落在裁掉边距里的
+// absolute 子元素(如生词下划线)会逃逸 overflow:hidden、把 scrollWidth 撑大 → 「适应后页面铺满却还能
+// 横拖出一片空白」(用户报)。改成量真正的页框宽度:页框 ≤ 视口 → 锁 hidden(无横滑);只有真放大超宽才放 auto。
 function _updateMainOverflowX() {
   const main = document.getElementById('main');
   if (!main) return;
-  main.style.overflowX = 'auto';
-  const overflow = main.scrollWidth > main.clientWidth + 2;
-  main.style.overflowX = overflow ? 'auto' : 'hidden';
+  const rowSel = (typeof readMode !== 'undefined' && readMode === 'spread') ? '.spread-row' : '.page-wrap';
+  let pageW = 0;
+  document.querySelectorAll(rowSel).forEach(w => { const bw = w.getBoundingClientRect().width; if (bw > pageW) pageW = bw; });
+  if (pageW > main.clientWidth + 2) { main.style.overflowX = 'auto'; }
+  else { main.style.overflowX = 'hidden'; main.scrollLeft = 0; }   // 锁 hidden 时归零横向偏移(防从放大态切回适应残留偏移)
 }
 window._updateMainOverflowX = _updateMainOverflowX;
 function _scheduleRefit(force) {
