@@ -552,7 +552,12 @@ async function renderPage(num) {
     }
     return;
   }
-  await _renderPageInto(num, document.getElementById('page-container'), true);
+  // 强力兜底:单页 page-container 里若残留多页/双页结构(.page-wrap/.spread-row),先无条件清空 + 复位
+  // loaded。否则 _renderPageImg 在 decode 竞态/scale 漂移时会提前 return、不执行 innerHTML='' → 残留的多页
+  // 结构留着 = 「单页缩放却显示多页」(iPad 真机捏合复现,headless 不必现)。清了再渲,保证单页只剩一页。
+  const _pc = document.getElementById('page-container');
+  if (_pc.querySelector('.page-wrap, .spread-row')) { _pc.innerHTML = ''; _pc.dataset.loaded = '0'; }
+  await _renderPageInto(num, _pc, true);
 }
 
 // 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS
@@ -1676,7 +1681,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-24';
+const READER_BUILD = 'reader-fix-25';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7655,11 +7660,22 @@ async function _connProbe() {
   _connDot = document.createElement('span');
   _connDot.className = 'conn-dot g';
   _connDot.onclick = () => {
-    const ver = (typeof READER_BUILD !== 'undefined' ? READER_BUILD : '?') + (window.__READER_GIT ? ' · ' + window.__READER_GIT : '');
-    _toast?.((_connMs < 0 ? '🔴 服务器不可达' :
-      `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} 网络往返 ${_connMs}ms` +
-      (_connMs >= 120 ? '(偏慢:多半 Tailscale 掉中继/弱网)' : '')) +
-      '\n版本 ' + ver);   // 一眼查阅读器版本:出 bug 时点圆点报这个版本号,确认是否最新
+    const ver = (typeof READER_BUILD !== 'undefined' ? READER_BUILD : '?');
+    // 实时状态诊断:模式/缩放/页元素数(出 bug 时点圆点把这串报给开发,直接看到 iPad 上的真实状态)
+    let diag = '';
+    try {
+      const rm = (typeof readMode !== 'undefined') ? readMode : '?';
+      const sc = (typeof scale !== 'undefined') ? Math.round(scale * 100) / 100 : '?';
+      const imgs = document.querySelectorAll('.page-img').length;
+      const wraps = document.querySelectorAll('.page-wrap').length;
+      const pc = document.getElementById('page-container');
+      const z = pc ? (getComputedStyle(pc).zoom || '1') : '?';
+      const t = pc && pc.style.transform ? 'T' : '-';
+      diag = `\n${rm} ×${sc} img${imgs} wrap${wraps} z${z}${t}`;
+    } catch (_) {}
+    _toast?.((_connMs < 0 ? '🔴 不可达' :
+      `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} ${_connMs}ms`) +
+      '  ' + ver + diag);
     _connProbe();
   };
   tb.appendChild(_connDot);

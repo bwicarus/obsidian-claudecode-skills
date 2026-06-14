@@ -32,11 +32,22 @@ async function _connProbe() {
   _connDot = document.createElement('span');
   _connDot.className = 'conn-dot g';
   _connDot.onclick = () => {
-    const ver = (typeof READER_BUILD !== 'undefined' ? READER_BUILD : '?') + (window.__READER_GIT ? ' · ' + window.__READER_GIT : '');
-    _toast?.((_connMs < 0 ? '🔴 服务器不可达' :
-      `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} 网络往返 ${_connMs}ms` +
-      (_connMs >= 120 ? '(偏慢:多半 Tailscale 掉中继/弱网)' : '')) +
-      '\n版本 ' + ver);   // 一眼查阅读器版本:出 bug 时点圆点报这个版本号,确认是否最新
+    const ver = (typeof READER_BUILD !== 'undefined' ? READER_BUILD : '?');
+    // 实时状态诊断:模式/缩放/页元素数(出 bug 时点圆点把这串报给开发,直接看到 iPad 上的真实状态)
+    let diag = '';
+    try {
+      const rm = (typeof readMode !== 'undefined') ? readMode : '?';
+      const sc = (typeof scale !== 'undefined') ? Math.round(scale * 100) / 100 : '?';
+      const imgs = document.querySelectorAll('.page-img').length;
+      const wraps = document.querySelectorAll('.page-wrap').length;
+      const pc = document.getElementById('page-container');
+      const z = pc ? (getComputedStyle(pc).zoom || '1') : '?';
+      const t = pc && pc.style.transform ? 'T' : '-';
+      diag = `\n${rm} ×${sc} img${imgs} wrap${wraps} z${z}${t}`;
+    } catch (_) {}
+    _toast?.((_connMs < 0 ? '🔴 不可达' :
+      `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} ${_connMs}ms`) +
+      '  ' + ver + diag);
     _connProbe();
   };
   tb.appendChild(_connDot);

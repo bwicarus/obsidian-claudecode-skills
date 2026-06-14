@@ -13,7 +13,12 @@ async function renderPage(num) {
     }
     return;
   }
-  await _renderPageInto(num, document.getElementById('page-container'), true);
+  // 强力兜底:单页 page-container 里若残留多页/双页结构(.page-wrap/.spread-row),先无条件清空 + 复位
+  // loaded。否则 _renderPageImg 在 decode 竞态/scale 漂移时会提前 return、不执行 innerHTML='' → 残留的多页
+  // 结构留着 = 「单页缩放却显示多页」(iPad 真机捏合复现,headless 不必现)。清了再渲,保证单页只剩一页。
+  const _pc = document.getElementById('page-container');
+  if (_pc.querySelector('.page-wrap, .spread-row')) { _pc.innerHTML = ''; _pc.dataset.loaded = '0'; }
+  await _renderPageInto(num, _pc, true);
 }
 
 // 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS
