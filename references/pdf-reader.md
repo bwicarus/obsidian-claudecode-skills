@@ -926,3 +926,13 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - **② 连接质量小圆点**。`/pdf/api/ping`（no-store）+ `24-connquality.js`：30s + 回前台时量 RTT，header 尾部圆点 🟢<120ms 直连 / 🟡<450ms 中继/弱网 / 🔴断，点击 toast 显示毫秒数与归因。背景：iPad Tailscale 掉中继时整站慢数秒、应用零线索，用户只能怀疑代码。纯归因用，不做降级。
 - **③ 叠层工厂 `ensurePageLayer(pw, cls)`**（`01-boot.js`）。所有页级叠层（char/vocab/ruby/hl/char-dbg…8 处创建点）统一经它建，自动附加 `.page-layer` 标记类；crop CSS 在原 8 个显式类名外加 `.crop-on>.page-layer` 兜底 → **新叠层不会再漏掉去边补偿**（§36⑤「有浮层点不中」的根因再也不会因加新层复发）。注意两处**故意不用**工厂：`15-phrase-wordpop` 词典框内的 ruby-layer（不是页级层）；`17-highlight` 保留 `pw.appendChild` 重排到末尾（stacking 语义）。配 `window._auditLayers()` console 自检：逐 wrap 比对各叠层尺寸 vs `<img>`、charBoxes 烘焙 scale vs 实时 scale（>1% 警告，交互时 `_syncCharBoxScale` 会自愈）。
 - **④ 缓存命中计数**。`_CACHE_STATS` 进程内计数器（gunicorn 单 worker，重启清零）+ `GET /pdf/api/cache-stats`。键：`page_img.hit/fallback_ge/fallback_lt/render_sync`、`page_chars.override/hit/compute`、`sent_tr.hit/miss`、`grammar.full_hit/sp_hit/spacy_run/ai_run`、`dict_jp.cache/ai`。用法：用户报「慢」→ 先看比值——hit 占比异常低 = 缓存键漂移/预热缺口（如 §35① 的 85 种宽度问题，当时只能靠 ls 缓存目录数文件）；比值正常 = 看 ② 的圆点怪网络。
+
+### 38. 单页改用统一 .page-wrap 结构(2026-06-14,`reader-fix-26`,commit 9dc958c)
+
+**反复的「单页缩放变多页 / 适应后回弹」根因 = 两套 DOM 结构并存**:连续/双页把每页渲进 `.page-wrap` 子元素(`setupContinuousMode` 建占位 + IO 懒渲染),而**单页直接渲进 `#page-container`**(`renderPage`→`_renderPageInto(page-container)`)。两套结构来回拆建,衍生一整类 bug:① 切模式/缩放时残留的多页 `.page-wrap` 没清干净 → 单页显示多页;② `page-container` 上的 CSS `zoom`/`transform` 残留没被清 → 适应回弹;③ `page-container.dataset.loaded` 在 `_renderPageInto` 被 decode 竞态/scale 漂移提前 return 时不复位 → 旧结构留存。fix-19~25 都在给这套打补丁(清 transform、清 zoom、标对 loaded、强力兜底),治标不治本。
+
+**修法(PDF.js 官方 viewer 思路:所有模式共用同一套 DOM,单页=只有一页的连续模式)**:
+- `_singleWrap()`(04-render):单页也渲进**唯一一个 `.page-wrap`**(残留多页/双页结构则清空重建),`renderPage` 单页 → 渲进该 wrap,翻页只换 `data-page-num` 重渲。
+- `_applyZoom` / `_refitToWidth` / `_runFitOverflowGuard` / `zoomChange`(06-layout、05-nav)三模式**统一**:`if (!await _rescaleContinuousInPlace()) { single→renderPage(currentPage); else→setupContinuousMode() }`。单页的唯一 wrap 走跟连续一模一样的 `_rescaleContinuousInPlace`(CSS-zoom 瞬时缩放 + 后台重栅格化,zoom 落在 **wrap** 而非 page-container → 无 page-container 残留 → 无回弹)。删掉所有「单页直渲 page-container」特殊分支。
+- 单页↔连续切换安全:`_remodeListInPlace` 已有 `wraps.length !== pdfDoc.numPages → return false` 守卫,单页只有 1 wrap ≠ 总页数 → 自动整列重建。
+- **教训**:跨设备渲染/手势 bug,headless 复现不出来时,别一层层打补丁;先看大厂(PDF.js / Mozilla viewer)怎么用**统一数据结构**消除特殊分支。补丁堆多了本身就是新 bug 源。
