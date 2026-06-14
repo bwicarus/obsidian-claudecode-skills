@@ -880,6 +880,7 @@ async function loadPageNodes(num) {
     const r = await fetch(`/pdf/api/page-nodes?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
     const d = await r.json();
     const list = d.nodes || [];
+    window.__lastPageNodes = list;   // 给语音助手 __voiceContext 做谐音纠错/上下文
     const c = document.getElementById('kg-nodes');
     if (!list.length) {
       c.innerHTML = '<div style="color:#5a6680;font-size:12px">该页无 KG 节点（可能这本书没扫过/或本页不是知识点页）</div>';
@@ -1082,6 +1083,7 @@ window.loadVocabList = async (scope) => {
     const r = await fetch(url);
     const d = await r.json();
     const items = d.items || [];
+    window.__lastVocab = items;   // 给语音助手 __voiceContext 做谐音纠错/上下文
     if (cntEl) cntEl.textContent = items.length ? (items.length + ' 词') : '';
     if (!items.length) {
       const empty = {page: '本页没查过单词', book: '这本书还没查过单词', all: '单词库为空'}[_vocabScope] || '没有单词';
@@ -1188,6 +1190,35 @@ function _renderVocabItem(it) {
   }));
   return div;
 }
+
+// 语音助手上下文:把「当前页能看到的实体」(书目/知识点/生词 + 当前页/书)报给 voice.js,
+// 供后端做 speechContexts 发音偏置 + 大脑谐音纠错(按读音映射到真实项)。模块作用域可见 FILE_REL/currentPage/pdfDoc/readMode/BOOK_LANGS。
+window.__voiceContext = function () {
+  try {
+    let sel = '';
+    try { sel = (window.getSelection && getSelection().toString().trim().slice(0, 400)) || ''; } catch (_) {}
+    let books = [];
+    try {
+      const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
+      if (Array.isArray(c)) books = c.map(p => ({ name: p.name, rel: p.rel })).slice(0, 120);
+    } catch (_) {}
+    const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
+    const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
+    return {
+      page_type: 'pdf',
+      file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
+      book_name: (typeof FILE_REL !== 'undefined' && FILE_REL) ? FILE_REL.split('/').pop() : '',
+      page: (typeof currentPage !== 'undefined' ? currentPage : 0),
+      total: (typeof pdfDoc !== 'undefined' && pdfDoc) ? pdfDoc.numPages : 0,
+      read_mode: (typeof readMode !== 'undefined' ? readMode : ''),
+      langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
+      selection: sel,
+      visible_kg_nodes: nodes,
+      visible_vocab: vocab,
+      books: books,
+    };
+  } catch (e) { return { page_type: 'pdf', url: location.pathname }; }
+};
 function _updateModeButtons() {
   // 双页按钮文字随形态变化:单页 / 双页1|2 / 双页2|3(点击循环切换,标签显示当前所在形态)
   const s = document.getElementById('spread-toggle');
@@ -1662,7 +1693,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-29';
+const READER_BUILD = 'reader-fix-30';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];

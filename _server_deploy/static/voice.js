@@ -71,15 +71,24 @@
     try { var sel = (window.getSelection && window.getSelection().toString() || '').trim(); if (sel) ctx.selection = sel.slice(0, 400); } catch (_) {}
     return ctx;
   }
-  function curHints() {   // 屏幕可见实体名 → speechContexts 发音偏置(谐音纠错的音频层兜底)
+  function curHints() {   // 屏幕可见实体名 → speechContexts 发音偏置(谐音纠错的音频层)
     try {
-      var c = pageContext(); var ents = c.visible_entities || [];
-      var out = [];
-      for (var i = 0; i < ents.length; i++) { var n = ents[i] && (ents[i].name || ents[i]); if (n) out.push(String(n)); }
-      return out.slice(0, 200);
+      var c = pageContext(), out = [];
+      function add(arr, key, strip) {
+        if (!arr) return;
+        for (var i = 0; i < arr.length; i++) {
+          var n = key ? (arr[i] && arr[i][key]) : arr[i];
+          if (!n) continue; n = String(n); if (strip) n = n.replace(/\.[a-z0-9]+$/i, '');
+          if (n) out.push(n);
+        }
+      }
+      add(c.books, 'name', true); add(c.visible_kg_nodes, 'name', false);
+      add(c.visible_vocab, null, false); add(c.visible_entities, 'name', false);
+      return out.slice(0, 250);
     } catch (_) { return []; }
   }
   window.__voiceGo = function (path) { try { if (path && typeof path === 'string' && path.charAt(0) === '/') location.href = path; } catch (_) {} };
+  window.__voiceOpenBook = function (rel) { try { if (rel && typeof rel === 'string') location.href = '/pdf/view?file=' + encodeURIComponent(rel); } catch (_) {} };
   function runClientActions(actions) {
     if (!actions || !actions.length) return;
     actions.forEach(function (a) {

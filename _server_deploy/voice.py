@@ -230,6 +230,7 @@ _PDF_ACTIONS = [
     ("toggleSidebar", "知识点侧栏 开关", "args=[]"),
     ("toggleVocab", "生词本 开关", "args=[]"),
     ("goPdfList", "回到书架/书本列表", "args=[]"),
+    ("__voiceOpenBook", "按书名打开一本书(切换到另一本书)", "args=[该书的 rel,必须从下方书架清单里挑]"),
 ]
 _GLOBAL_ACTIONS = [
     ("__voiceGo", "跳转到网站某个页面",
@@ -255,6 +256,31 @@ def _nav_intent(s):
     for pat, path, speak in _NAV:
         if _re.search(pat, s):
             return _act("__voiceGo", [path], speak)
+    return None
+
+
+def _open_book_intent(s, context):
+    """语音「打开X书」→ 把 X 跟书架清单(__voiceContext.books)做子串匹配,唯一对上就直接开。
+    谐音兜底交给 LLM(它拿到带 rel 的书目清单)。STT 若靠 speechContexts 把书名听对了,这里零延迟命中。"""
+    books = (context or {}).get("books") or []
+    if not books or not _re.search(r"(打开|翻开|进入|切换到|读|看|开)", s):
+        return None
+    q = _re.sub(r"(打开|翻开|进入|切换到|读一?读|看一?下|看|读|开|这本|那本|书|文件|pdf|PDF)", "", s).strip()
+    if len(q) < 2:
+        return None
+    best = None
+    for b in books:
+        nm = (b.get("name") or "")
+        stem = nm.rsplit(".", 1)[0]
+        rel = b.get("rel")
+        if not stem or not rel:
+            continue
+        if q in stem or stem in q:                 # 双向子串:STT 把名字听对就命中
+            score = len(stem)
+            if best is None or score > best[0]:
+                best = (score, stem, rel)
+    if best:
+        return _act("__voiceOpenBook", [best[2]], f"好,打开{best[1]}")
     return None
 
 
@@ -303,6 +329,10 @@ def _fast_intent(t: str, context: dict):
             return _act("toggleVocab", [], "打开生词本")
         if _re.search(r"(回书架|书本列表|回到列表|选书)", s):
             return _act("goPdfList", [], "回到书架")
+        # 按书名开书(命中书架清单子串)
+        ob = _open_book_intent(s, context)
+        if ob:
+            return ob
     # 全局导航(任意页面)
     nav = _nav_intent(s)
     if nav:
@@ -347,6 +377,11 @@ def _validate_actions(actions):
                 if p not in _NAV_OK:
                     continue
                 args = [p]
+            elif fn == "__voiceOpenBook":
+                p = str(args[0]).strip()
+                if not p or ".." in p or not p.lower().endswith(".pdf"):
+                    continue
+                args = [p]
             else:
                 args = []   # 其余都是无参 toggle
         except (IndexError, ValueError, TypeError):
@@ -376,8 +411,11 @@ def _extract_json(text: str):
 
 
 _LLM_SYS = (
-    "你是学习网站的语音指挥助手。用户用语音说一句话,你判断意图并直接给出可执行结果:\n"
-    "1) 操作类(翻页/缩放/跳转/打开某功能/去某页面等)→ 从下方动作清单选出要执行的动作,"
+    "你是学习网站的语音指挥助手。用户的话来自语音识别,可能有谐音/近音错字。\n"
+    "0) 若用户提到屏幕上能看到的东西(书名/知识点/生词等,见下方【当前可见实体】),按读音把可能听错的词"
+    "映射到清单里最接近的真实项:唯一对得上就直接执行对应动作(如开书用 __voiceOpenBook + 该书 rel);"
+    "多个都像才用 say 反问让用户二选一,别瞎猜。\n"
+    "1) 操作类(翻页/缩放/跳转/打开某书或功能/去某页面等)→ 从下方动作清单选出要执行的动作,"
     "返回 {\"say\":\"一句简短中文应承\",\"actions\":[{\"fn\":\"函数名\",\"args\":[参数]}]}。可一次多个动作。"
     "函数名必须严格来自清单,参数照清单格式,别编造。\n"
     "2) 提问/闲聊(不需要操作页面)→ 返回 {\"say\":\"简短中文口语回答,≤2句\",\"actions\":[]}。\n"
@@ -385,12 +423,32 @@ _LLM_SYS = (
 )
 
 
+def _entities_block(context: dict) -> str:
+    """把屏幕可见实体喂给大脑做谐音映射(书名带 rel 供开书)。"""
+    lines = []
+    books = (context or {}).get("books") or []
+    if books:
+        lines.append("书架(书名 → rel,开书用 __voiceOpenBook + 对应 rel):")
+        for b in books[:80]:
+            lines.append(f"  {b.get('name')} → {b.get('rel')}")
+    nodes = (context or {}).get("visible_kg_nodes") or []
+    if nodes:
+        lines.append("当前页知识点:" + "、".join(n.get("name", "") for n in nodes[:30] if n.get("name")))
+    vocab = (context or {}).get("visible_vocab") or []
+    if vocab:
+        lines.append("当前页生词:" + "、".join(str(v) for v in vocab[:40]))
+    return "\n".join(lines) if lines else "(无)"
+
+
 def _llm_intent(transcript: str, context: dict) -> dict:
     """Claude 把口令映射成真实动作(或简短作答)。返回定型结构,动作经白名单校验。"""
-    pt = (context or {}).get("page_type")
-    ctx_txt = json.dumps(context, ensure_ascii=False)[:800] if context else "(无)"
+    ctx = context or {}
+    pt = ctx.get("page_type")
+    meta = {k: ctx.get(k) for k in ("page_type", "book_name", "page", "total", "read_mode", "selection") if ctx.get(k)}
+    meta_txt = json.dumps(meta, ensure_ascii=False)[:500]
     prompt = (f"{_LLM_SYS}\n\n【可用动作清单】\n{_action_catalog(pt)}\n\n"
-              f"【当前页面】{ctx_txt}\n【用户说】{transcript}\n\n只输出 JSON:")
+              f"【当前可见实体(谐音映射用)】\n{_entities_block(ctx)}\n\n"
+              f"【当前页面】{meta_txt}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
     raw = ""
     try:
         sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
