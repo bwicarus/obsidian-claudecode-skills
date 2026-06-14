@@ -452,6 +452,7 @@ def _entities_block(context: dict) -> str:
 _APP_CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 _brain_lock = threading.Lock()
 _brain_proc = None
+_brain_wanted = False   # 仅聆听期间为 True;闸住「用完补热」与「停止回收」的竞态,停后不空挂
 
 
 def _brain_spawn():
@@ -480,17 +481,30 @@ def _brain_kill(p):
 
 
 def _brain_prewarm():
-    """后台预热:确保有一个 idling 进程待命。"""
+    """聆听开始:置 wanted + 确保有一个 idling 进程待命。"""
+    global _brain_proc, _brain_wanted
+    with _brain_lock:
+        _brain_wanted = True
+        if _brain_proc is not None and _brain_proc.poll() is None:
+            return
+        _brain_proc = _brain_spawn()
+
+
+def _brain_respawn():
+    """用完后台补热:仅当仍在聆听(wanted)才补,避免停止后留下空挂进程。"""
     global _brain_proc
     with _brain_lock:
+        if not _brain_wanted:
+            return
         if _brain_proc is not None and _brain_proc.poll() is None:
             return
         _brain_proc = _brain_spawn()
 
 
 def _brain_reap():
-    global _brain_proc
+    global _brain_proc, _brain_wanted
     with _brain_lock:
+        _brain_wanted = False
         p, _brain_proc = _brain_proc, None
     _brain_kill(p)
 
@@ -528,7 +542,7 @@ def _brain_ask(prompt: str, timeout: float = 28.0):
             out = None
         finally:
             _brain_kill(p)
-            threading.Thread(target=_brain_prewarm, daemon=True).start()   # 后台补热下一个
+            threading.Thread(target=_brain_respawn, daemon=True).start()   # 后台补热(仅聆听中,停后不补)
     return out or None
 
 
