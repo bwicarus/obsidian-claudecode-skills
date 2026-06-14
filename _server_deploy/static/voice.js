@@ -1,12 +1,16 @@
-/* 全站语音助手浮窗(阶段1·连续聆听)。被 app.py inject_nav 注入到每个登录页面。
-   交互:点麦克风 → 进入「聆听模式」(持续听、自动断句、免手);再点一下 → 关闭。长按切识别语种(中/日/英)。
-   主路 = iOS/桌面原生 Web Speech API(webkitSpeechRecognition,Apple Siri 同源引擎,中日英一线质量),
-   不支持时(非 Safari 壳 / 老浏览器)降级到现有 Cloud STT(MediaRecorder 单段录音 → /api/voice/transcribe)。
-   识别出的整句 → /api/voice/agent → 命令直接执行 client_actions(翻页/缩放/查词…);提问则 speechSynthesis 念回答。
-   iOS 加固(均来自实测坑):continuous 不可靠→onend 自动重启;单例不重建;麦克风预热防吞首句;节流重启防
-   InvalidStateError;final 后主动 abort 防自反馈;念回答时停识别、念完再续;speak 超时兜底(iOS onend 常不回调,
-   否则永久卡死);看门狗续命;fetch 超时;no-speech/aborted 当正常;切后台收手。需 HTTPS(本站 Tailscale 真证书)。
-   页面可定义 window.__voiceContext() 上报上下文。 */
+/* 全站语音助手浮窗 v2(阶段1:采集层 + 生命周期)。被 app.py inject_nav 注入到每个登录页面。
+   交互:点麦克风 → 进入持续聆听(Web Audio VAD 自动起停、免手);再点关闭。长按切识别语种。
+   采集(按工程范式,避开 Safari MediaRecorder 的坑):
+     - 单一麦克风消费者:只用 getUserMedia + Web Audio,不并用 webkitSpeechRecognition。
+     - getUserMedia 在点击同步栈里发起(本函数由 click 直接同步调用,首个 await 前),否则 iOS 拒授权。
+     - 音频图 source→ScriptProcessor→zeroGain→destination:必须接 destination,否则 iOS 读到静音、VAD 失灵。
+     - ScriptProcessor 抓 PCM → 浏览器内 OfflineAudioContext 风格降采样到 16k mono → 编 LINEAR16 WAV → 上传。
+     - VAD:RMS 阈值起录 + 静音超时收句 + 硬时长上限兜底(VAD 万一失灵也保证会收)。
+   生命周期纪律:每次会话一个自增 epoch;迟到的异步回调按 epoch 失配一律丢弃;timer 存 id 停时清;
+     停止后 active 门闸不再发;忙时 FIFO 队列缓存语音、按序补发;每条退出路径彻底释放(停轨+关 AudioContext)。
+   云端 STT(/api/voice/transcribe,command_and_search + speechContexts 把屏幕实体当发音偏置)→ 文字。
+   文字 → /api/voice/agent → 命令直接执行 client_actions / 提问 speechSynthesis 念回。念回期间静音 VAD 防自反馈。
+   关键步骤打 beacon 日志回 /api/voice/log(没法看用户设备控制台时盲调有据)。需 HTTPS(本站 Tailscale 真证书)。 */
 (function () {
   if (window.__voiceLoaded) return;
   window.__voiceLoaded = true;
@@ -23,17 +27,15 @@
     '#voice-fab{position:fixed;right:16px;bottom:84px;z-index:2147483000;width:54px;height:54px;border-radius:50%;' +
     'border:none;background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;' +
     'display:flex;align-items:center;justify-content:center;transition:transform .12s,background .2s;' +
-    '-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;' +
-    '-webkit-touch-callout:none;touch-action:manipulation}' +   /* callout:none = 防 iOS 长按弹系统菜单抢手势 */
+    '-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
     '#voice-fab:active{transform:scale(.92)}' +
-    '#voice-fab.listen{background:#059669;animation:voiceBreath 2.4s ease-in-out infinite}' +   /* 聆听中(绿·呼吸) */
-    '#voice-fab.hear{background:#059669;animation:voicePulse 1s infinite}' +                    /* 正听到声音(绿·脉冲) */
-    '#voice-fab.busy{background:#6b7280}' +                                                     /* 思考/处理 */
-    '#voice-fab.speak{background:#7c3aed}' +                                                    /* 念回答 */
+    '#voice-fab.listen{background:#059669;animation:voiceBreath 2.4s ease-in-out infinite}' +
+    '#voice-fab.hear{background:#059669;animation:voicePulse 1s infinite}' +
+    '#voice-fab.busy{background:#6b7280}' +
+    '#voice-fab.speak{background:#7c3aed}' +
     '#voice-ico{pointer-events:none}' +
     '#voice-lang{position:absolute;right:-2px;bottom:-2px;min-width:16px;height:16px;padding:0 3px;border-radius:9px;' +
-    'background:#0b1220;color:#cfe0ff;font-size:10px;line-height:16px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.5);' +
-    'pointer-events:none}' +
+    'background:#0b1220;color:#cfe0ff;font-size:10px;line-height:16px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.5);pointer-events:none}' +
     '@keyframes voicePulse{0%,100%{box-shadow:0 0 0 0 rgba(5,150,105,.5)}50%{box-shadow:0 0 0 12px rgba(5,150,105,0)}}' +
     '@keyframes voiceBreath{0%,100%{box-shadow:0 6px 18px rgba(0,0,0,.4)}50%{box-shadow:0 0 0 8px rgba(5,150,105,.18)}}' +
     '#voice-bubble{position:fixed;right:16px;bottom:148px;z-index:2147483000;max-width:min(78vw,360px);' +
@@ -49,6 +51,15 @@
   function status(t) { say('<div class="vs">' + t + '</div>'); }
   function escapeHtml(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
+  // ── beacon 日志(盲调有据)──
+  function beacon(step, obj) {
+    try {
+      var body = JSON.stringify({ step: step, page: location.pathname, ep: epoch, t: Date.now(), d: obj || {} });
+      if (navigator.sendBeacon) navigator.sendBeacon('/api/voice/log', body);
+      else fetch('/api/voice/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body, keepalive: true });
+    } catch (_) {}
+  }
+
   // ── 上下文 + 派发 ──
   function pageContext() {
     try { if (typeof window.__voiceContext === 'function') return window.__voiceContext() || {}; } catch (_) {}
@@ -60,9 +71,15 @@
     try { var sel = (window.getSelection && window.getSelection().toString() || '').trim(); if (sel) ctx.selection = sel.slice(0, 400); } catch (_) {}
     return ctx;
   }
-  // 全站导航(任何页面都有):语音「去健身/打开学习看板…」→ 后端返回 __voiceGo 动作
+  function curHints() {   // 屏幕可见实体名 → speechContexts 发音偏置(谐音纠错的音频层兜底)
+    try {
+      var c = pageContext(); var ents = c.visible_entities || [];
+      var out = [];
+      for (var i = 0; i < ents.length; i++) { var n = ents[i] && (ents[i].name || ents[i]); if (n) out.push(String(n)); }
+      return out.slice(0, 200);
+    } catch (_) { return []; }
+  }
   window.__voiceGo = function (path) { try { if (path && typeof path === 'string' && path.charAt(0) === '/') location.href = path; } catch (_) {} };
-
   function runClientActions(actions) {
     if (!actions || !actions.length) return;
     actions.forEach(function (a) {
@@ -70,225 +87,212 @@
     });
   }
 
-  // ── 状态机:off | listen | hear | busy | speak ──
+  // ── 状态机 + 语种 ──
   var STATE = 'off';
   function setState(s) {
     STATE = s;
     fab.classList.remove('listen', 'hear', 'busy', 'speak');
     if (s === 'off') ico.textContent = '🎤';
     else if (s === 'listen') { fab.classList.add('listen'); ico.textContent = '👂'; }
-    else if (s === 'hear') { fab.classList.add('hear'); ico.textContent = '👂'; }
+    else if (s === 'hear') { fab.classList.add('hear'); ico.textContent = '🔴'; }
     else if (s === 'busy') { fab.classList.add('busy'); ico.textContent = '…'; }
     else if (s === 'speak') { fab.classList.add('speak'); ico.textContent = '🔊'; }
     refreshBadge();
   }
-
-  // ── 语种(中文为主,长按切换;Web Speech 一次只认一种 BCP-47)──
-  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var LANGS = [{ code: 'zh-CN', tag: '中' }, { code: 'ja-JP', tag: '日' }, { code: 'en-US', tag: 'EN' }];
+  var LANGS = [{ code: 'cmn-Hans-CN', tag: '中' }, { code: 'ja-JP', tag: '日' }, { code: 'en-US', tag: 'EN' }];
   var langIdx = 0;
-  try { var saved = localStorage.getItem('voice-lang'); if (saved) { for (var i = 0; i < LANGS.length; i++) if (LANGS[i].code === saved) langIdx = i; } } catch (_) {}
+  try { var sv = localStorage.getItem('voice-lang'); if (sv) { for (var li = 0; li < LANGS.length; li++) if (LANGS[li].code === sv) langIdx = li; } } catch (_) {}
   function curLang() { return LANGS[langIdx].code; }
-  function refreshBadge() { badge.textContent = LANGS[langIdx].tag; badge.style.display = (SR && STATE !== 'off') ? 'block' : 'none'; }
+  function refreshBadge() { badge.textContent = LANGS[langIdx].tag; badge.style.display = (STATE !== 'off') ? 'block' : 'none'; }
   function cycleLang() {
-    if (!SR) { status('🎙 录音模式:语种由服务器自动识别(中/英/日)'); return; }  // fallback 下切语种无意义
     langIdx = (langIdx + 1) % LANGS.length;
     try { localStorage.setItem('voice-lang', curLang()); } catch (_) {}
-    refreshBadge();
-    status('🌐 识别语种:' + LANGS[langIdx].tag + '(' + curLang() + ')');
-    if (rec && wantListening) { try { rec.abort(); } catch (_) {} rec.lang = curLang(); }  // onend 会按新语种重启
+    refreshBadge(); status('🌐 识别语种:' + LANGS[langIdx].tag + '(' + curLang() + ')'); beacon('lang', { lang: curLang() });
   }
 
-  // ── 共享:识别整句 → 后端 → 执行命令 / 念回答。cmdGen 让「用户中途按停」能取消在途结果 ──
-  var busy = false, speaking = false, cmdGen = 0;
-  async function handleCommand(text) {
-    text = (text || '').trim();
-    if (!text) { resume(); return; }
-    var g = cmdGen;
-    busy = true; setState('busy');
+  // ════════════════ Web Audio 采集 + VAD ════════════════
+  var epoch = 0;                  // 会话身份号:迟到回调按它失配丢弃
+  var listening = false, stream = null, ac = null, sp = null, srcNode = null;
+  var srcRate = 48000, seg = false, segChunks = [], preRoll = [], voiceFrames = 0, segStart = 0, lastVoice = 0;
+  var queue = [], busy = false, ttsMute = false, ttsTimer = 0;
+  var START_RMS = 0.020, KEEP_RMS = 0.012, START_FRAMES = 2, SILENCE_MS = 800, MAX_MS = 9000, MIN_MS = 320, PREROLL = 4;
+
+  function rms(buf) { var s = 0; for (var i = 0; i < buf.length; i++) s += buf[i] * buf[i]; return Math.sqrt(s / buf.length); }
+
+  function onAudio(e) {
+    if (!listening) return;
+    var inp = e.inputBuffer.getChannelData(0);
+    var r = rms(inp), now = Date.now();
+    if (!seg) {
+      preRoll.push(new Float32Array(inp)); if (preRoll.length > PREROLL) preRoll.shift();
+      if (ttsMute) { voiceFrames = 0; return; }              // 念回答时不起新段(防自反馈)
+      if (r > START_RMS) { voiceFrames++; if (voiceFrames >= START_FRAMES) { seg = true; segStart = now; lastVoice = now; segChunks = preRoll.slice(); preRoll = []; setState('hear'); } }
+      else voiceFrames = 0;
+    } else {
+      segChunks.push(new Float32Array(inp));
+      if (r > KEEP_RMS) lastVoice = now;
+      if (now - lastVoice > SILENCE_MS || now - segStart > MAX_MS) endSeg(now);   // 静音收句 / 硬上限兜底
+    }
+  }
+
+  function endSeg(now) {
+    seg = false; voiceFrames = 0;
+    var dur = now - segStart, chunks = segChunks; segChunks = [];
+    if (listening && !busy && STATE !== 'off') setState('listen');
+    if (dur < MIN_MS) return;                                // 太短=噪声,丢弃
+    var wav = buildWav(chunks, srcRate);
+    beacon('seg', { ms: dur, bytes: wav.size });
+    queue.push({ wav: wav, ep: epoch }); pump();              // 带 epoch:跨会话残段可自鉴别丢弃
+  }
+
+  // PCM 合并 + 降采样到 16k + 编 LINEAR16 WAV
+  function buildWav(chunks, sr) {
+    var total = 0, i, j; for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+    var flat = new Float32Array(total), off = 0;
+    for (i = 0; i < chunks.length; i++) { flat.set(chunks[i], off); off += chunks[i].length; }
+    var ratio = sr / 16000, outLen = Math.floor(flat.length / ratio);
+    var out = new Int16Array(outLen);
+    for (i = 0; i < outLen; i++) {
+      var start = Math.floor(i * ratio), end = Math.floor((i + 1) * ratio); if (end > flat.length) end = flat.length;
+      var acc = 0, cnt = 0; for (j = start; j < end; j++) { acc += flat[j]; cnt++; }
+      var v = cnt ? acc / cnt : 0; v = v < -1 ? -1 : v > 1 ? 1 : v;
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+    }
+    var buf = new ArrayBuffer(44 + out.length * 2), dv = new DataView(buf);
+    function ws(o, s) { for (var k = 0; k < s.length; k++) dv.setUint8(o + k, s.charCodeAt(k)); }
+    ws(0, 'RIFF'); dv.setUint32(4, 36 + out.length * 2, true); ws(8, 'WAVE');
+    ws(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, 16000, true); dv.setUint32(28, 16000 * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    ws(36, 'data'); dv.setUint32(40, out.length * 2, true);
+    var o2 = 44; for (i = 0; i < out.length; i++) { dv.setInt16(o2, out[i], true); o2 += 2; }
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+
+  // ── FIFO 队列:一次处理一段,忙时排队、停止后丢弃 ──
+  async function pump() {
+    if (busy || !queue.length || !listening) return;
+    var item = queue.shift();
+    if (item.ep !== epoch) { pump(); return; }                // 跨会话残段:丢弃,看下一个
+    busy = true;
+    var ep = epoch;
+    try { await processSegment(item.wav, ep); } catch (_) {}
+    if (ep !== epoch) return;                                 // stale:绝不归还非自己会话的 busy(否则击穿 FIFO)
+    busy = false;
+    if (listening) { if (STATE !== 'off' && STATE !== 'hear') setState('listen'); pump(); }
+  }
+
+  function tctl(ms) { var c = new AbortController(); var id = setTimeout(function () { try { c.abort(); } catch (_) {} }, ms); return { s: c.signal, clear: function () { clearTimeout(id); } }; }
+
+  async function processSegment(wav, ep) {
+    setState('busy'); status('✍️ 识别中…');
+    var text = '';
+    var t = tctl(30000), fd = new FormData();
+    fd.append('audio', wav, 'rec.wav'); fd.append('lang', curLang());
+    try { fd.append('hints', JSON.stringify(curHints())); } catch (_) {}
+    try {
+      var r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd, signal: t.s });
+      if (ep !== epoch) return;
+      var d = await r.json();
+      text = d.ok ? (d.text || '').trim() : '';
+      if (!d.ok) { beacon('stt-fail', { e: (d.error || '').slice(0, 80) }); status('识别失败:' + (d.error || '')); }
+    } catch (e) { beacon('stt-err', { e: String(e && e.message || e).slice(0, 80) }); }
+    t.clear();
+    if (ep !== epoch) return;
+    if (!text) return;                                        // 没听清:不打扰,继续听
+    beacon('stt-ok', { text: text });
+    await handleCommand(text, ep);
+  }
+
+  async function handleCommand(text, ep) {
+    setState('busy');
     say('<div class="vq">🗣 ' + escapeHtml(text) + '</div><div class="vs">🤔 思考中…</div>');
-    var reply = '', actions = null;
-    var ctl = new AbortController();
-    var to = setTimeout(function () { try { ctl.abort(); } catch (_) {} }, 30000);  // 防 fetch 永久挂死 busy
+    var reply = '', actions = null, t = tctl(30000);
     try {
       var r = await fetch('/api/voice/agent', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: text, context: pageContext() }), signal: ctl.signal,
+        body: JSON.stringify({ transcript: text, context: pageContext() }), signal: t.s,
       });
+      if (ep !== epoch) { t.clear(); return; }
       var d = await r.json();
       if (d.ok) { reply = d.speak || ''; actions = d.client_actions; }
       else reply = '出错了:' + (d.error || '');
     } catch (e) { reply = (e && e.name === 'AbortError') ? '响应超时了' : ('出错了:' + (e && e.message || '')); }
-    clearTimeout(to);
-    busy = false;
-    if (g !== cmdGen) { resume(); return; }   // 处理期间用户按了停止/切后台 → 丢弃这次结果,不执行不朗读
+    t.clear();
+    if (ep !== epoch) return;
     runClientActions(actions);
+    beacon('agent', { n: (actions && actions.length) || 0 });
     say('<div class="vq">🗣 ' + escapeHtml(text) + '</div>' + escapeHtml(reply));
-    // 纯命令(带 client_action)只显示不朗读 → 连续聆听不被打断、零自反馈;提问类(无 action)才念。
-    if (reply && !(actions && actions.length)) speak(reply);
-    else resume();
+    // 纯命令(带 client_action)只显示不朗读 → 连续聆听不被打断、零自反馈;提问类才念。
+    if (reply && !(actions && actions.length)) await speak(reply, ep);
   }
 
-  function speak(text) {
-    if (!text || !window.speechSynthesis) { resume(); return; }
-    if (rec) { try { rec.abort(); } catch (_) {} }   // 念之前停识别(onend 因 speaking 守卫不重启)
-    speaking = true; setState('speak');
-    var done = false;
-    function fin() { if (done) return; done = true; try { window.speechSynthesis.cancel(); } catch (_) {} speaking = false; resume(); }
-    try {
-      window.speechSynthesis.cancel();
-      var u = new SpeechSynthesisUtterance(text);
-      u.lang = 'zh-CN'; u.rate = 1.05;   // 回答恒为中文口语(后端 prompt 约束),故 TTS 用 zh-CN
-      u.onend = u.onerror = fin;
-      window.speechSynthesis.speak(u);
-    } catch (_) { fin(); return; }
-    // iOS speechSynthesis 的 onend/onerror 常常不回调 → 不兜底就永久卡 speaking 态、麦再也不开。按字数估时长 + 上限。
-    setTimeout(fin, Math.min(15000, 1500 + text.length * 90));
-  }
-
-  // ════════════════ 主路:原生 Web Speech API ════════════════
-  var rec = null, wantListening = false, isRunning = false, lastStart = 0, lastActivity = 0, silenceTimer = 0, wdTimer = 0;
-
-  function buildRec() {
-    var r;
-    try { r = new SR(); } catch (_) { return null; }
-    r.lang = curLang();
-    r.interimResults = true;    // 实时反馈 + 静音断句
-    r.continuous = false;       // iOS continuous 不可靠,靠 onend 重启实现连续
-    r.maxAlternatives = 1;
-    r.onstart = function () { isRunning = true; lastActivity = Date.now(); if (!busy && !speaking) setState('listen'); };
-    r.onaudiostart = function () { lastActivity = Date.now(); if (wantListening && !busy && !speaking) setState('listen'); };
-    r.onresult = function (e) {
-      lastActivity = Date.now();
-      var interim = '', finalText = '';
-      for (var i = 0; i < e.results.length; i++) {
-        var t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) finalText += t; else interim += t;
+  function speak(text, ep) {
+    return new Promise(function (resolve) {
+      if (!text || !window.speechSynthesis || ep !== epoch) { resolve(); return; }
+      ttsMute = true; setState('speak');
+      var done = false;
+      function fin() {
+        if (done) return; done = true; clearTimeout(ttsTimer);
+        if (ep === epoch) { ttsMute = false; try { window.speechSynthesis.cancel(); } catch (_) {} }  // 仅当仍是本会话才动全局态/打断 TTS
+        resolve();
       }
-      if (finalText) {
-        clearTimeout(silenceTimer);
-        try { r.abort(); } catch (_) {}   // 主动停:iOS final 后可能仍开麦 → 防自反馈 + 防 onresult 重入
-        handleCommand(finalText);
-        return;
-      }
-      if (interim) {
-        if (!busy && !speaking) setState('hear');
-        say('<div class="vi">🎙 ' + escapeHtml(interim) + '…</div>');
-        clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(function () { try { r.stop(); } catch (_) {} }, 750);  // 750ms 无新词 = 说完
-      }
-    };
-    r.onerror = function (ev) {
-      var err = ev && ev.error;
-      if (err === 'not-allowed' || err === 'service-not-allowed') {
-        wantListening = false; setState('off');
-        status('麦克风权限被拒,去设置里允许后重试');
-      }
-      // no-speech / aborted / no-match / network 等交给 onend 重启续听
-    };
-    r.onend = function () {
-      isRunning = false; clearTimeout(silenceTimer);
-      if (wantListening && !busy && !speaking) restart();
-    };
-    return r;
+      try {
+        window.speechSynthesis.cancel();
+        var u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05;
+        u.onend = u.onerror = fin; window.speechSynthesis.speak(u);
+      } catch (_) { fin(); return; }
+      ttsTimer = setTimeout(fin, Math.min(15000, 1500 + text.length * 90));   // iOS onend 常不回调 → 超时兜底(存 id,停时清)
+    });
   }
 
-  function restart() {   // 节流重启,防 InvalidStateError / 抽风
-    var wait = Math.max(0, 320 - (Date.now() - lastStart));
-    setTimeout(function () {
-      if (!wantListening || busy || speaking || isRunning || !rec) return;
-      try { lastStart = Date.now(); isRunning = true; rec.start(); }
-      catch (err) {
-        if (err && err.name === 'InvalidStateError') { isRunning = true; }  // 其实还在跑:保持,交给已存在会话的 onend
-        else { isRunning = false; setTimeout(restart, 600); }
-      }
-    }, wait);
+  // ── 开 / 关(getUserMedia 必须在点击同步栈里发起)──
+  function startListening() {
+    if (listening) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { status('此设备/浏览器不支持录音'); return; }
+    var myEp = ++epoch;
+    listening = true; queue = []; busy = false; seg = false; ttsMute = false; preRoll = []; segChunks = []; voiceFrames = 0;
+    setState('listen'); status('🎙 在听…(点一下停止,长按切语种)'); beacon('start', {});
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+      .then(function (s) {
+        if (myEp !== epoch) { try { s.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {} return; }  // 已被停:释放
+        stream = s;
+        try {
+          ac = new (window.AudioContext || window.webkitAudioContext)();
+          if (ac.state === 'suspended') {   // resume 必须 await/catch:否则 reject 冒 unhandledrejection、或停在 suspended 成「静默死会话」空挂麦
+            ac.resume().then(function () { beacon('ac-state', { s: ac && ac.state }); })
+                       .catch(function (e) { beacon('ac-resume-fail', { e: String(e && e.message || e).slice(0, 60) }); });
+          }
+          srcRate = ac.sampleRate || 48000;
+          srcNode = ac.createMediaStreamSource(s);
+          sp = ac.createScriptProcessor(4096, 1, 1);
+          var zero = ac.createGain(); zero.gain.value = 0;
+          srcNode.connect(sp); sp.connect(zero); zero.connect(ac.destination);   // iOS:必须接 destination 否则读到静音
+          sp.onaudioprocess = onAudio;
+          beacon('mic-ok', { sr: srcRate });
+        } catch (e) { beacon('mic-graph-err', { e: String(e && e.message || e).slice(0, 80) }); status('音频初始化失败'); stopListening(); }
+      })
+      .catch(function (e) {
+        if (myEp !== epoch) return;
+        beacon('mic-deny', { e: String(e && e.name || e) });
+        status('麦克风权限被拒:' + (e && e.message || ''));
+        listening = false; setState('off');
+      });
   }
 
-  function watchdog() {   // 看门狗:任何「想听却停了/卡住」都在数秒内续上(覆盖 onend 不来、start 抛错残留等)
-    if (!wantListening || busy || speaking) return;
-    if (!isRunning) { restart(); return; }
-    if (Date.now() - lastActivity > 8000) { try { rec.abort(); } catch (_) {} }  // 长时间无任何事件 = 卡死 → 强制重启
-  }
-
-  function resume() {   // 处理/朗读结束后回到聆听
-    if (!wantListening) { if (STATE !== 'off') setState('off'); return; }
-    if (SR) { setState('listen'); restart(); }
-    else setState('listen');   // fallback 不会走到这(fbStop 已置 wantListening=false)
-  }
-
-  async function warmupMic() {   // 防吞首句:首个手势里先预热麦克风再立刻放掉
-    try { var s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
-  }
-
-  async function startSR() {
-    if (!rec) rec = buildRec();
-    if (!rec) { status('此浏览器不支持语音识别'); return; }
-    rec.lang = curLang();
-    await warmupMic();
-    wantListening = true; lastActivity = Date.now(); setState('listen');
-    status('🎙 在听…(点一下停止,长按切换语种)');
-    restart();
-    clearInterval(wdTimer); wdTimer = setInterval(watchdog, 3000);
-  }
-  function stopSR() {
-    cmdGen++;   // 作废在途命令
-    wantListening = false; clearTimeout(silenceTimer); clearInterval(wdTimer);
-    try { if (rec) rec.abort(); } catch (_) {}
+  function stopListening() {   // 每条退出路径都彻底释放,否则污染下次启动
+    epoch++;                   // 作废所有在途回调
+    listening = false; seg = false; busy = false; ttsMute = false; queue = []; segChunks = []; preRoll = [];
+    clearTimeout(ttsTimer);
+    try { if (sp) { sp.onaudioprocess = null; sp.disconnect(); } } catch (_) {}
+    try { if (srcNode) srcNode.disconnect(); } catch (_) {}
+    try { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+    try { if (ac) { var pr = ac.close(); if (pr && pr.catch) pr.catch(function () {}); } } catch (_) {}
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
-    speaking = false; busy = false; setState('off');
+    sp = null; srcNode = null; stream = null; ac = null;
+    setState('off'); beacon('stop', {});
   }
 
-  // ════════════════ Fallback:MediaRecorder → Cloud STT(切换式单段录音)════════════════
-  var fbStream = null, fbRec = null, fbChunks = [], fbRecording = false;
-  function pickMime() {
-    var c = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac'];
-    for (var i = 0; i < c.length; i++) { try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(c[i])) return c[i]; } catch (_) {} }
-    return '';
-  }
-  async function fbStart() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { status('此设备不支持录音'); return; }
-    try { fbStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
-    catch (e) { status('麦克风权限被拒:' + (e && e.message || '')); return; }
-    fbChunks = [];
-    var mime = pickMime();
-    try { fbRec = mime ? new MediaRecorder(fbStream, { mimeType: mime }) : new MediaRecorder(fbStream); }
-    catch (_) { try { fbRec = new MediaRecorder(fbStream); } catch (e2) { status('录音初始化失败'); return; } }
-    fbRec.ondataavailable = function (ev) { if (ev.data && ev.data.size) fbChunks.push(ev.data); };
-    fbRec.onstop = function () {
-      try { fbStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
-      fbProcess(new Blob(fbChunks, { type: (fbRec && fbRec.mimeType) || 'audio/mp4' }));
-    };
-    try { fbRec.start(); } catch (_) { status('无法开始录音'); return; }
-    fbRecording = true; setState('hear');
-    status('🔴 录音中…(点一下结束并识别)');
-  }
-  function fbStop() {
-    fbRecording = false;
-    try { if (fbRec && fbRec.state === 'recording') fbRec.stop(); } catch (_) {}
-    setState('busy');
-  }
-  async function fbProcess(blob) {
-    busy = true; setState('busy'); status('✍️ 识别中…');
-    var ext = (blob.type.indexOf('webm') >= 0) ? 'webm' : (blob.type.indexOf('mp4') >= 0 ? 'mp4' : 'm4a');
-    var fd = new FormData(); fd.append('audio', blob, 'rec.' + ext);
-    var text = '';
-    var ctl = new AbortController(); var to = setTimeout(function () { try { ctl.abort(); } catch (_) {} }, 30000);
-    try {
-      var r = await fetch('/api/voice/transcribe', { method: 'POST', body: fd, signal: ctl.signal });
-      var d = await r.json();
-      text = d.ok ? (d.text || '').trim() : '';
-      if (!d.ok && d.error) status('识别失败:' + d.error);
-    } catch (e) { status((e && e.name === 'AbortError') ? '识别超时' : ('识别出错:' + (e && e.message || ''))); }
-    clearTimeout(to); busy = false;
-    if (text) handleCommand(text); else setState('off');   // fallback:handleCommand 末尾 resume 因 wantListening=false 回 off,等再点
-  }
-
-  // ════════════════ 统一开关 ════════════════
-  function toggle() {
-    if (SR) { if (wantListening) stopSR(); else startSR(); }       // 主路:点开持续聆听 / 再点关闭
-    else { if (fbRecording) fbStop(); else fbStart(); }            // fallback:点开始录 / 再点结束识别(单段)
-  }
+  function toggle() { if (listening) stopListening(); else startListening(); }
 
   // 长按(480ms)切语种,短按 toggle
   var lpTimer = 0, lpFired = false;
@@ -299,10 +303,7 @@
   fab.addEventListener('pointerleave', clearLp);
   fab.addEventListener('click', function (e) { if (lpFired) { e.preventDefault(); return; } toggle(); });
 
-  // 切后台自动收手(iOS 媒体会话冲突)
-  document.addEventListener('visibilitychange', function () {
-    if (document.hidden) { cmdGen++; if (SR && wantListening) stopSR(); else if (fbRecording) fbStop(); }
-  });
+  document.addEventListener('visibilitychange', function () { if (document.hidden && listening) stopListening(); });
 
   setState('off');
 })();

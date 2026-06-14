@@ -63,32 +63,15 @@ def _ffmpeg_to_flac(src: Path, dst: Path) -> bool:
         return False
 
 
-def _cloud_stt(flac_path: Path) -> str:
-    """Cloud Speech-to-Text 转录。中文为主 + 英/日 备选。返回拼接的整段文字。"""
-    key = _gcp_key()
-    if not key:
-        raise RuntimeError("no gcp key")
-    content = base64.b64encode(flac_path.read_bytes()).decode()
-    r = requests.post(f"{STT_URL}?key={key}", json={
-        "config": {
-            "encoding": "FLAC",
-            "sampleRateHertz": 16000,
-            "languageCode": "zh-CN",
-            "alternativeLanguageCodes": ["en-US", "ja-JP"],   # 学日/英语,口令多为中文
-            "enableAutomaticPunctuation": True,
-            # 不指定 model:default 模型支持 zh-CN + 多语言(latest_short/enhanced 对 zh-CN 报 400 不支持)
-        },
-        "audio": {"content": content},
-    }, timeout=120)
-    try:
-        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-        from google_api_quota import log_usage
-        log_usage("stt", 1, "speech:recognize", note=f"voice status={r.status_code}")
-    except Exception:
-        pass
-    if r.status_code != 200:
-        raise RuntimeError(f"STT HTTP {r.status_code}: {r.text[:200]}")
-    data = r.json()
+# 常用命令/导航词:音频层发音偏置(屏幕实体另走高 boost,见 _cloud_stt)
+_STT_CORE_HINTS = ["下一页", "上一页", "翻页", "跳到", "放大", "缩小", "适应宽度",
+                   "双页", "单页", "连续滚动", "全屏", "去白边", "注音", "振假名", "整页翻译",
+                   "搜索", "知识点", "侧栏", "生词本", "回书架", "返回", "确定", "取消",
+                   "翻译", "健身", "学习看板", "技能树", "复习仪表盘"]
+_LANG_ALTS = ["cmn-Hans-CN", "en-US", "ja-JP"]
+
+
+def _stt_parse(data: dict) -> str:
     if "error" in data:
         raise RuntimeError("STT: " + data["error"].get("message", ""))
     parts = []
@@ -100,6 +83,48 @@ def _cloud_stt(flac_path: Path) -> str:
     return " ".join(parts).strip()
 
 
+def _cloud_stt(audio_b64: str, encoding: str, sample_rate: int, lang: str, hints) -> str:
+    """Cloud STT。command_and_search(短指令)+ speechContexts(屏幕实体当发音偏置,谐音纠错的音频层)。
+    失败自动降级到最小 config(去掉 alternatives/speechContexts)再试一次 —— 优雅降级,别比啥都没做更差。"""
+    key = _gcp_key()
+    if not key:
+        raise RuntimeError("no gcp key")
+    lang = lang or "cmn-Hans-CN"
+    ctx = []
+    ents = [h for h in (hints or []) if isinstance(h, str) and h.strip()][:200]
+    if ents:
+        ctx.append({"phrases": ents, "boost": 15})        # 屏幕实体:核心偏置(研究建议 12-18,别全局 20)
+    ctx.append({"phrases": _STT_CORE_HINTS, "boost": 14})  # 常用命令词:必中(研究建议 12-18)
+    full_cfg = {
+        "languageCode": lang,
+        "model": "command_and_search",   # 老 model 对 inline speechContexts 稳定生效(latest_* 中文 adaptation 覆盖不确定)
+        "encoding": encoding,
+        "sampleRateHertz": sample_rate,
+        "audioChannelCount": 1,
+        "enableAutomaticPunctuation": False,
+        "maxAlternatives": 1,
+        "alternativeLanguageCodes": [c for c in _LANG_ALTS if c != lang][:2],
+        "speechContexts": ctx,
+    }
+    min_cfg = {"languageCode": lang, "model": "command_and_search",
+               "encoding": encoding, "sampleRateHertz": sample_rate, "audioChannelCount": 1}
+    last = ""
+    for cfg in (full_cfg, min_cfg):
+        r = requests.post(f"{STT_URL}?key={key}",
+                          json={"config": cfg, "audio": {"content": audio_b64}}, timeout=60)
+        try:
+            sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+            from google_api_quota import log_usage
+            log_usage("stt", 1, "speech:recognize", note=f"voice status={r.status_code}")
+        except Exception:
+            pass
+        if r.status_code == 200:
+            return _stt_parse(r.json())
+        last = f"STT HTTP {r.status_code}: {r.text[:160]}"
+        # 仅在 full→min 之间重试(min 再失败就抛)
+    raise RuntimeError(last)
+
+
 @bp.route("/transcribe", methods=["POST"])
 def voice_transcribe():
     if not _logged_in():
@@ -107,17 +132,53 @@ def voice_transcribe():
     f = request.files.get("audio")
     if not f:
         return jsonify({"ok": False, "error": "no audio"}), 400
-    with tempfile.TemporaryDirectory() as td:
-        src = Path(td) / ("in" + (Path(f.filename or "a.bin").suffix or ".bin"))
-        f.save(str(src))
-        flac = Path(td) / "a.flac"
-        if not _ffmpeg_to_flac(src, flac):
-            return jsonify({"ok": False, "error": "ffmpeg 转码失败"}), 500
-        try:
-            text = _cloud_stt(flac)
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)[:200]}), 500
+    lang = (request.form.get("lang") or "cmn-Hans-CN").strip()
+    try:
+        hints = json.loads(request.form.get("hints") or "[]")
+        if not isinstance(hints, list):
+            hints = []
+    except Exception:
+        hints = []
+    raw = f.read()
+    fn = (f.filename or "").lower()
+    is_wav = fn.endswith(".wav") or raw[:4] == b"RIFF"
+    try:
+        if is_wav:
+            # 浏览器 Web Audio 编的 16k mono LINEAR16 WAV → 直接喂(WAV 自带头,无需 ffmpeg)
+            text = _cloud_stt(base64.b64encode(raw).decode(), "LINEAR16", 16000, lang, hints)
+        else:
+            # 老客户端 mp4/webm → ffmpeg 转 flac 兜底
+            with tempfile.TemporaryDirectory() as td:
+                src = Path(td) / ("in" + (Path(fn).suffix or ".bin"))
+                src.write_bytes(raw)
+                flac = Path(td) / "a.flac"
+                if not _ffmpeg_to_flac(src, flac):
+                    return jsonify({"ok": False, "error": "ffmpeg 转码失败"}), 500
+                text = _cloud_stt(base64.b64encode(flac.read_bytes()).decode(), "FLAC", 16000, lang, hints)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
     return jsonify({"ok": True, "text": text})
+
+
+_VOICE_LOG = CLAUDE_DIR / "state" / "logs" / "voice.log"
+
+
+@bp.route("/log", methods=["POST"])
+def voice_log():
+    """前端 beacon 日志(关键步骤)。sendBeacon 可能不带 cookie → 宽松接收,只落盘不鉴权。"""
+    try:
+        data = (request.get_data(as_text=True) or "")[:2000].replace("\n", " ").replace("\r", " ")
+        _VOICE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if _VOICE_LOG.exists() and _VOICE_LOG.stat().st_size > 2_000_000:
+                _VOICE_LOG.replace(_VOICE_LOG.with_suffix(".log.1"))
+        except Exception:
+            pass
+        with _VOICE_LOG.open("a", encoding="utf-8") as fp:
+            fp.write(data + "\n")
+    except Exception:
+        pass
+    return ("", 204)
 
 
 # ── 快路径意图(规则匹配,零 LLM、即时):PDF 阅读器常用口令直接出客户端动作 ──

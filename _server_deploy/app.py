@@ -303,6 +303,8 @@ def inject_nav(response):
     if "</head>" in body and 'rel="manifest"' not in body:
         body = body.replace("</head>", _PWA_HEAD + "</head>", 1)
     response.set_data(body.replace("</body>", inject + "</body>", 1))
+    # HTML 入口 no-store:改前端别跟浏览器旧缓存搏斗(Safari 尤甚);静态 js 仍走 mtime cache-bust
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
     return response
 
 # ─────────────────────────── helpers ───────────────────────────
