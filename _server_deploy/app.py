@@ -290,9 +290,14 @@ def inject_nav(response):
         nav_v = int(os.path.getmtime("/var/www/html/static/nav.js"))
     except Exception:
         nav_v = 1
+    try:
+        voice_v = int(os.path.getmtime("/var/www/html/static/voice.js"))
+    except Exception:
+        voice_v = 1
     inject = (
         f'<script>window.__USER__={user_blob};</script>'
         f'<script src="/static/nav.js?v={nav_v}" defer></script>'
+        f'<script src="/static/voice.js?v={voice_v}" defer></script>'   # 全站语音助手浮窗
     )
     # PWA:全站注入 manifest/apple-touch-icon/全屏 meta(可装到主屏、全屏像 app)
     if "</head>" in body and 'rel="manifest"' not in body:
@@ -971,6 +976,10 @@ register_fitness(app)
 # 学习数据看板(/insights)
 from insights import register_insights
 register_insights(app)
+
+# 全站语音助手(/api/voice/*):转录(Gemini)+ agent
+from voice import register_voice
+register_voice(app)
 
 if __name__ == "__main__":
     # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
