@@ -32,9 +32,11 @@ async function _connProbe() {
   _connDot = document.createElement('span');
   _connDot.className = 'conn-dot g';
   _connDot.onclick = () => {
-    _toast?.(_connMs < 0 ? '🔴 服务器不可达' :
+    const ver = (typeof READER_BUILD !== 'undefined' ? READER_BUILD : '?') + (window.__READER_GIT ? ' · ' + window.__READER_GIT : '');
+    _toast?.((_connMs < 0 ? '🔴 服务器不可达' :
       `${_connClass(_connMs) === 'g' ? '🟢' : _connClass(_connMs) === 'y' ? '🟡' : '🔴'} 网络往返 ${_connMs}ms` +
-      (_connMs >= 120 ? '(偏慢:多半是 Tailscale 掉中继/弱网,非服务器问题)' : ''));
+      (_connMs >= 120 ? '(偏慢:多半 Tailscale 掉中继/弱网)' : '')) +
+      '\n版本 ' + ver);   // 一眼查阅读器版本:出 bug 时点圆点报这个版本号,确认是否最新
     _connProbe();
   };
   tb.appendChild(_connDot);
