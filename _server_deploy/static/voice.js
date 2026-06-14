@@ -60,6 +60,9 @@
     try { var sel = (window.getSelection && window.getSelection().toString() || '').trim(); if (sel) ctx.selection = sel.slice(0, 400); } catch (_) {}
     return ctx;
   }
+  // 全站导航(任何页面都有):语音「去健身/打开学习看板…」→ 后端返回 __voiceGo 动作
+  window.__voiceGo = function (path) { try { if (path && typeof path === 'string' && path.charAt(0) === '/') location.href = path; } catch (_) {} };
+
   function runClientActions(actions) {
     if (!actions || !actions.length) return;
     actions.forEach(function (a) {

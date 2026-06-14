@@ -152,78 +152,200 @@ def _act(fn, args, speak):
             "server_results": [], "confirm": None}
 
 
-def _fast_intent(t: str, context: dict):
-    """命中返回结构,否则 None。仅 PDF 阅读器页生效(那些 window.fn 只在阅读器有)。"""
-    if (context or {}).get("page_type") != "pdf":
-        return None
-    s = t.replace(" ", "")
-    # 翻页
-    if _re.search(r"(下一?页|后一?页|往后|next)", s):
-        return _act("changePage", [1], "好,下一页")
-    if _re.search(r"(上一?页|前一?页|往前|previous|back)", s):
-        return _act("changePage", [-1], "好,上一页")
-    # 跳页:第N页 / 跳到N / 翻到N
-    if _re.search(r"(第.*页|跳到|翻到|去第|到第|page)", s):
-        n = _parse_num(s)
-        if n:
-            return _act("goToPage", [n], f"好,翻到第{n}页")
-    # 缩放 / 适应
-    if _re.search(r"(放大|拉大|zoom\s*in)", s):
-        return _act("zoomChange", [0.15], "放大一点")
-    if _re.search(r"(缩小|拉小|zoom\s*out)", s):
-        return _act("zoomChange", [-0.15], "缩小一点")
-    if _re.search(r"(适应|铺满|满屏|自适应|fit)", s):
-        return _act("fitWidth", [], "好,适应宽度")
-    # 排版模式
-    if _re.search(r"双页", s):
-        return _act("toggleSpread", [], "切到双页")
-    if _re.search(r"(单页模式|切.*单页|单页阅读|^单页$)", s):   # 不匹配「这一页/一页纸」等(那些是提问/数量)
-        return _act("toggleReadMode", [], "切到单页")
-    if _re.search(r"(连续模式|连续滚动|切.*连续)", s):
-        return _act("toggleReadMode", [], "切到连续")
-    if _re.search(r"(全屏|fullscreen)", s):
-        return _act("toggleFullscreen", [], "全屏")
-    if _re.search(r"(去边|裁边|裁切|边距)", s):
-        return _act("toggleCrop", [], "切换去边")
-    if _re.search(r"(振假名|假名|注音|读音|ruby)", s):
-        return _act("toggleRuby", [], "切换注音")
-    if _re.search(r"(整页翻译|译页|翻译这页|翻译本页|全页翻译)", s):
-        return _act("togglePageTranslate", [], "切换整页翻译")
-    # 面板 / 导航
-    if _re.search(r"(搜索|查找|找一?下|search)", s):
-        return _act("openSearch", [], "打开搜索")
-    if _re.search(r"(知识点|关联|侧栏)", s):
-        return _act("toggleSidebar", [], "打开知识点")
-    if _re.search(r"(生词本|单词本|生词列表)", s):
-        return _act("toggleVocab", [], "打开生词本")
-    if _re.search(r"(书架|书本列表|回到列表|选书)", s):
-        return _act("goPdfList", [], "回到书架")
+# ── 动作清单(同时给:fast_intent 出动作 + LLM 兜底用作工具表 + 服务端白名单校验)──
+# 每项 (fn, 说明, 参数格式)。fn 必须是前端 window 全局函数(reader.js 或 voice.js 定义)。
+_PDF_ACTIONS = [
+    ("changePage", "翻页", "args=[1]下一页 / [-1]上一页"),
+    ("goToPage", "跳到指定页", "args=[页码整数]"),
+    ("zoomChange", "缩放", "args=[0.15]放大 / [-0.15]缩小"),
+    ("fitWidth", "适应宽度铺满", "args=[]"),
+    ("toggleSpread", "单页↔双页 切换", "args=[]"),
+    ("toggleReadMode", "单页模式↔连续滚动 切换", "args=[]"),
+    ("toggleFullscreen", "全屏 开关", "args=[]"),
+    ("toggleCrop", "去白边 开关", "args=[]"),
+    ("toggleRuby", "注音(振假名/英文音标) 开关", "args=[]"),
+    ("togglePageTranslate", "整页翻译 开关", "args=[]"),
+    ("openSearch", "打开搜索框", "args=[]"),
+    ("toggleSidebar", "知识点侧栏 开关", "args=[]"),
+    ("toggleVocab", "生词本 开关", "args=[]"),
+    ("goPdfList", "回到书架/书本列表", "args=[]"),
+]
+_GLOBAL_ACTIONS = [
+    ("__voiceGo", "跳转到网站某个页面",
+     "args=[路径]: /pdf/ 书架, /insights/ 学习看板, /skilltree/ 技能树, "
+     "/dashboard/ 复习仪表盘, /private/fitness/ 健身, /history/ 问答历史, /profile/ 个人设置"),
+]
+_WHITELIST = {fn for fn, _, _ in _PDF_ACTIONS} | {fn for fn, _, _ in _GLOBAL_ACTIONS}
+_NAV_OK = {"/pdf/", "/insights/", "/skilltree/", "/dashboard/", "/private/fitness/", "/history/", "/profile/"}
+
+# 全局导航(任何页面都可用),映射到 window.__voiceGo
+_NAV = [
+    (r"(健身|训练|锻炼|举铁|肌肉)", "/private/fitness/", "好,去健身"),
+    (r"(学习看板|数据看板|学习数据|学习分析|洞察|insights)", "/insights/", "好,打开学习看板"),
+    (r"(技能树|知识图谱|知识树|skilltree)", "/skilltree/", "好,打开技能树"),
+    (r"(复习仪表盘|复习面板|今日复习|复习计划|仪表盘|dashboard)", "/dashboard/", "好,打开复习仪表盘"),
+    (r"(书架|看书|读书|阅读器|去读|pdf)", "/pdf/", "好,去书架"),
+    (r"(问答历史|历史记录|对话历史|history)", "/history/", "好,打开历史"),
+    (r"(个人设置|账号设置|我的设置|profile)", "/profile/", "好,打开个人设置"),
+]
+
+
+def _nav_intent(s):
+    for pat, path, speak in _NAV:
+        if _re.search(pat, s):
+            return _act("__voiceGo", [path], speak)
     return None
 
 
-# ── agent(阶段 0:会话作答 + 结构化返回;阶段 1/2 接工具映射 + 危险动作确认)──
-_AGENT_SYS = (
-    "你是一个学习软件的语音助手,用户在用网页 PDF 阅读器 / 技能树 / 学习看板等页面。"
-    "你的回答会被语音念出来:用简洁的中文口语,别用 markdown、符号、列表、长段落,控制在 2 句以内。"
-    "当前是早期阶段:若用户的请求需要操作页面(翻页、查词、跳转、制卡等),先用一句话应承"
-    "『好的,这个功能我马上接上』即可,暂不真正执行。其余问题正常简短作答。"
+def _fast_intent(t: str, context: dict):
+    """命中常用口令→即时出动作(零 LLM),否则 None(交给 LLM 兜底)。"""
+    s = t.replace(" ", "")
+    if (context or {}).get("page_type") == "pdf":
+        # 翻页
+        if _re.search(r"(下一?[页张个]|后一?[页张]|往[后下]|翻过去|next)", s):
+            return _act("changePage", [1], "好,下一页")
+        if _re.search(r"(上一?[页张个]|前一?[页张]|往[前上]|退回去|previous|back)", s):
+            return _act("changePage", [-1], "好,上一页")
+        # 跳页:第N页 / 跳到N / 翻到N
+        if _re.search(r"(第.*[页张]|跳到|翻到|去第|到第|page)", s):
+            n = _parse_num(s)
+            if n:
+                return _act("goToPage", [n], f"好,翻到第{n}页")
+        # 缩放 / 适应
+        if _re.search(r"(放大|拉大|大一[点些]|zoom\s*in)", s):
+            return _act("zoomChange", [0.15], "放大一点")
+        if _re.search(r"(缩小|拉小|小一[点些]|zoom\s*out)", s):
+            return _act("zoomChange", [-0.15], "缩小一点")
+        if _re.search(r"(适应|铺满|满屏|自适应|合适宽度|fit)", s):
+            return _act("fitWidth", [], "好,适应宽度")
+        # 排版模式
+        if _re.search(r"双页", s):
+            return _act("toggleSpread", [], "切到双页")
+        if _re.search(r"(单页模式|切.*单页|单页阅读|^单页$)", s):   # 不匹配「这一页/一页纸」等(那些是提问/数量)
+            return _act("toggleReadMode", [], "切到单页")
+        if _re.search(r"(连续模式|连续滚动|切.*连续|滚动模式)", s):
+            return _act("toggleReadMode", [], "切到连续")
+        if _re.search(r"(全屏|fullscreen)", s):
+            return _act("toggleFullscreen", [], "全屏")
+        if _re.search(r"(去边|裁边|裁切|去白边|边距)", s):
+            return _act("toggleCrop", [], "切换去边")
+        if _re.search(r"(振假名|假名|注音|音标|ruby)", s):
+            return _act("toggleRuby", [], "切换注音")
+        if _re.search(r"(整页翻译|译页|翻译这页|翻译本页|全页翻译|翻译整页)", s):
+            return _act("togglePageTranslate", [], "切换整页翻译")
+        # 面板
+        if _re.search(r"(搜索|查找|找一?下|search)", s):
+            return _act("openSearch", [], "打开搜索")
+        if _re.search(r"(知识点|关联|侧栏)", s):
+            return _act("toggleSidebar", [], "打开知识点")
+        if _re.search(r"(生词本|单词本|生词列表)", s):
+            return _act("toggleVocab", [], "打开生词本")
+        if _re.search(r"(回书架|书本列表|回到列表|选书)", s):
+            return _act("goPdfList", [], "回到书架")
+    # 全局导航(任意页面)
+    nav = _nav_intent(s)
+    if nav:
+        return nav
+    return None
+
+
+# ── LLM 兜底:把自然语言映射成真实可执行动作(fast_intent 没命中时走这里)──
+def _action_catalog(page_type: str) -> str:
+    lines = []
+    if page_type == "pdf":
+        lines.append("【PDF 阅读器动作(仅当前在阅读器时可用)】")
+        for fn, desc, args in _PDF_ACTIONS:
+            lines.append(f"- {fn}:{desc}({args})")
+    lines.append("【全站导航(任何页面都可用)】")
+    for fn, desc, args in _GLOBAL_ACTIONS:
+        lines.append(f"- {fn}:{desc}({args})")
+    return "\n".join(lines)
+
+
+def _validate_actions(actions):
+    """只放行白名单函数 + 规整参数,挡住 LLM 幻觉的函数名/坏参数。"""
+    out = []
+    for a in (actions or []):
+        if not isinstance(a, dict):
+            continue
+        fn = a.get("fn")
+        if fn not in _WHITELIST:
+            continue
+        args = a.get("args", [])
+        if not isinstance(args, list):
+            args = [args]
+        try:
+            if fn == "goToPage":
+                args = [int(args[0])]
+            elif fn == "changePage":
+                args = [1 if int(args[0]) >= 0 else -1]
+            elif fn == "zoomChange":
+                args = [float(args[0])]
+            elif fn == "__voiceGo":
+                p = str(args[0]).strip()
+                if p not in _NAV_OK:
+                    continue
+                args = [p]
+            else:
+                args = []   # 其余都是无参 toggle
+        except (IndexError, ValueError, TypeError):
+            continue
+        out.append({"fn": fn, "args": args})
+    return out
+
+
+def _extract_json(text: str):
+    """从 LLM 输出里抠出第一个完整 JSON 对象(容忍前后噪声/代码块围栏)。"""
+    i = text.find("{")
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[i:j + 1])
+                except Exception:
+                    return None
+    return None
+
+
+_LLM_SYS = (
+    "你是学习网站的语音指挥助手。用户用语音说一句话,你判断意图并直接给出可执行结果:\n"
+    "1) 操作类(翻页/缩放/跳转/打开某功能/去某页面等)→ 从下方动作清单选出要执行的动作,"
+    "返回 {\"say\":\"一句简短中文应承\",\"actions\":[{\"fn\":\"函数名\",\"args\":[参数]}]}。可一次多个动作。"
+    "函数名必须严格来自清单,参数照清单格式,别编造。\n"
+    "2) 提问/闲聊(不需要操作页面)→ 返回 {\"say\":\"简短中文口语回答,≤2句\",\"actions\":[]}。\n"
+    "只输出 JSON 本身,不要解释、不要 markdown、不要代码块围栏。say 会被语音念出,务必简短自然。"
 )
 
 
-def _agent_brain(transcript: str, context: dict) -> dict:
-    """阶段 0:用 Claude 简短口语作答,返回定型结构。"""
-    ctx_txt = json.dumps(context, ensure_ascii=False)[:1200] if context else "(无)"
-    prompt = f"{_AGENT_SYS}\n\n【当前页面上下文】{ctx_txt}\n【用户说】{transcript}\n\n你的回答(简短中文口语):"
-    speak = ""
+def _llm_intent(transcript: str, context: dict) -> dict:
+    """Claude 把口令映射成真实动作(或简短作答)。返回定型结构,动作经白名单校验。"""
+    pt = (context or {}).get("page_type")
+    ctx_txt = json.dumps(context, ensure_ascii=False)[:800] if context else "(无)"
+    prompt = (f"{_LLM_SYS}\n\n【可用动作清单】\n{_action_catalog(pt)}\n\n"
+              f"【当前页面】{ctx_txt}\n【用户说】{transcript}\n\n只输出 JSON:")
+    raw = ""
     try:
         sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
         import ai_client
-        speak = (ai_client.ask(prompt, claude_model="haiku", claude_effort="low") or "").strip()
+        raw = (ai_client.ask(prompt, claude_model="haiku", claude_effort="low") or "").strip()
     except Exception as e:
-        speak = "我这边出了点问题:" + str(e)[:80]
-    if not speak:
-        speak = "我没太听清,能再说一遍吗?"
-    return {"speak": speak, "client_actions": [], "server_results": [], "confirm": None}
+        return {"speak": "我这边出了点问题:" + str(e)[:80],
+                "client_actions": [], "server_results": [], "confirm": None}
+    data = _extract_json(raw) or {}
+    say = (data.get("say") or "").strip()
+    actions = _validate_actions(data.get("actions"))
+    if not say:
+        # JSON 解析失败但原文像句答话 → 当作答;否则兜底
+        say = raw if (raw and len(raw) < 200 and "{" not in raw) else (
+            "好的" if actions else "没太听清,能再说一遍吗?")
+    return {"speak": say, "client_actions": actions, "server_results": [], "confirm": None}
 
 
 @bp.route("/agent", methods=["POST"])
@@ -237,7 +359,7 @@ def voice_agent():
         return jsonify({"ok": False, "error": "empty transcript"}), 400
     out = _fast_intent(transcript, context)   # 常用口令:规则即时执行,不走 LLM
     if out is None:
-        out = _agent_brain(transcript, context)
+        out = _llm_intent(transcript, context)   # 兜底:Claude 映射成真实动作 / 简短作答
     return jsonify({"ok": True, **out})
 
 
