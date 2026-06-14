@@ -108,8 +108,8 @@ async function _runFitOverflowGuard() {
   if (!_fixHOverflow()) return;
   _refitBusy = true;
   try {
-    if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
-    else { const pc = document.getElementById('page-container'); if (pc) { pc.dataset.loaded = '0'; await renderPage(currentPage); } }   // 单页:页直接渲进 page-container(无 .page-wrap 子元素)
+    // 统一:单页/连续/双页都用 wrap 路径(单页=唯一 wrap)→ _rescaleContinuousInPlace 原地重排;失败再按模式重建
+    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
   } finally { _refitBusy = false; }
   requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
 }
@@ -142,15 +142,10 @@ async function _refitToWidth(force, rebuild) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode !== 'single') {   // 连续/双页:结构没变就原地重排(不清容器→不"重新加载");mode 变(rebuild)或原地失败才整列重建
-      if (rebuild || !(await _rescaleContinuousInPlace())) await setupContinuousMode();
-    } else {
-      // 单页:页直接渲进 page-container。必须给 **page-container** 标 loaded='0'(原来错给第一个 .page-wrap,
-      // 当 DOM 还是多页结构时 page-container.loaded 仍是上次单页渲染留的 '1' → _renderPageInto 提前 return、
-      // 多页 wrap 没被清 → readMode=single 但页面仍多页,即用户报的「单页缩放变多页」根因)。
-      const pc = document.getElementById('page-container');
-      pc.dataset.loaded = '0';
-      await renderPage(currentPage);
+    // 统一:三模式都走 wrap 原地重排(单页=唯一 wrap);rebuild 或原地失败才按模式重建(单页→renderPage 重建唯一 wrap)
+    if (rebuild || !(await _rescaleContinuousInPlace())) {
+      if (readMode === 'single') await renderPage(currentPage);
+      else await setupContinuousMode();
     }
     // 按比例恢复滚动
     requestAnimationFrame(() => {
@@ -267,19 +262,8 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
-    if (readMode !== 'single') {           // 连续 + 双页:原地重标尺(不清空容器→不"重新加载");没建过列表才全建
-      if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
-    } else {
-      // 单页:目标恒为 page-container(原写 container.querySelector('.page-wrap')||container,DOM 还是多页结构时
-      // 会标错到第一个 .page-wrap、page-container.loaded 留 '1' → 重渲提前 return、多页没清 → 单页缩放变多页,
-      // 同 fix-22 _refitToWidth 根因)。先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 顶住尺寸→不 snap),
-      // 渲染完成 _renderPageImg 把 zoom 归 1(原生清晰)。
-      const pc = container;
-      const rs = pc.__renderScale || 0;
-      if (rs > 0) pc.style.zoom = (scale / rs);
-      pc.dataset.loaded = '0';
-      await renderPage(currentPage);
-    }
+    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
+    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {
       if (focal && focal.s0 > 0) {
         const mr = main.getBoundingClientRect();

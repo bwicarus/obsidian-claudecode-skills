@@ -1,3 +1,22 @@
+// 单页统一结构(PDF.js 思路):单页也渲进**唯一一个 .page-wrap**(page-container 的子元素),不再直接
+// 渲进 page-container。→ 缩放/适应/字符层/选中全走跟连续一模一样的 wrap 路径,根除「两套 DOM 结构来回
+// 拆建」整类 bug(单页缩放变多页 / 适应回弹)。返回那个唯一 wrap;若残留多页/双页结构则清空重建。
+function _singleWrap() {
+  const pc = document.getElementById('page-container');
+  let w = pc.querySelector('.page-wrap');
+  if (!w || pc.querySelectorAll('.page-wrap').length > 1 || pc.querySelector('.spread-row')) {
+    if (_contIO) { _contIO.disconnect(); _contIO = null; }
+    pc.innerHTML = '';
+    pc.removeAttribute('data-loaded');
+    pc.style.zoom = ''; pc.style.transform = ''; pc.style.transformOrigin = '';   // 清掉直渲时代可能残留的缩放
+    w = document.createElement('div');
+    w.className = 'page-wrap';
+    w.dataset.loaded = '0';
+    w.style.margin = '0 auto';
+    pc.appendChild(w);
+  }
+  return w;
+}
 async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
@@ -13,12 +32,11 @@ async function renderPage(num) {
     }
     return;
   }
-  // 强力兜底:单页 page-container 里若残留多页/双页结构(.page-wrap/.spread-row),先无条件清空 + 复位
-  // loaded。否则 _renderPageImg 在 decode 竞态/scale 漂移时会提前 return、不执行 innerHTML='' → 残留的多页
-  // 结构留着 = 「单页缩放却显示多页」(iPad 真机捏合复现,headless 不必现)。清了再渲,保证单页只剩一页。
-  const _pc = document.getElementById('page-container');
-  if (_pc.querySelector('.page-wrap, .spread-row')) { _pc.innerHTML = ''; _pc.dataset.loaded = '0'; }
-  await _renderPageInto(num, _pc, true);
+  // 单页:渲进唯一 wrap(跟连续同一套结构),翻页只是换 wrap 的 data-page-num 重渲
+  const wrap = _singleWrap();
+  wrap.dataset.pageNum = num;
+  wrap.dataset.loaded = '0';
+  await _renderPageInto(num, wrap);
 }
 
 // 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS

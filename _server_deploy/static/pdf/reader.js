@@ -537,6 +537,25 @@ async function saveCropSettings(crop, autoOn) {
   _refitToWidth(true);
 }
 
+// 单页统一结构(PDF.js 思路):单页也渲进**唯一一个 .page-wrap**(page-container 的子元素),不再直接
+// 渲进 page-container。→ 缩放/适应/字符层/选中全走跟连续一模一样的 wrap 路径,根除「两套 DOM 结构来回
+// 拆建」整类 bug(单页缩放变多页 / 适应回弹)。返回那个唯一 wrap;若残留多页/双页结构则清空重建。
+function _singleWrap() {
+  const pc = document.getElementById('page-container');
+  let w = pc.querySelector('.page-wrap');
+  if (!w || pc.querySelectorAll('.page-wrap').length > 1 || pc.querySelector('.spread-row')) {
+    if (_contIO) { _contIO.disconnect(); _contIO = null; }
+    pc.innerHTML = '';
+    pc.removeAttribute('data-loaded');
+    pc.style.zoom = ''; pc.style.transform = ''; pc.style.transformOrigin = '';   // 清掉直渲时代可能残留的缩放
+    w = document.createElement('div');
+    w.className = 'page-wrap';
+    w.dataset.loaded = '0';
+    w.style.margin = '0 auto';
+    pc.appendChild(w);
+  }
+  return w;
+}
 async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
@@ -552,12 +571,11 @@ async function renderPage(num) {
     }
     return;
   }
-  // 强力兜底:单页 page-container 里若残留多页/双页结构(.page-wrap/.spread-row),先无条件清空 + 复位
-  // loaded。否则 _renderPageImg 在 decode 竞态/scale 漂移时会提前 return、不执行 innerHTML='' → 残留的多页
-  // 结构留着 = 「单页缩放却显示多页」(iPad 真机捏合复现,headless 不必现)。清了再渲,保证单页只剩一页。
-  const _pc = document.getElementById('page-container');
-  if (_pc.querySelector('.page-wrap, .spread-row')) { _pc.innerHTML = ''; _pc.dataset.loaded = '0'; }
-  await _renderPageInto(num, _pc, true);
+  // 单页:渲进唯一 wrap(跟连续同一套结构),翻页只是换 wrap 的 data-page-num 重渲
+  const wrap = _singleWrap();
+  wrap.dataset.pageNum = num;
+  wrap.dataset.loaded = '0';
+  await _renderPageInto(num, wrap);
 }
 
 // 去边模式：把 page-wrap 裁成可见区(width/height=可见尺寸 + overflow:hidden),并通过 CSS
@@ -969,9 +987,8 @@ if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
-  // +/- 缩放跟双指缩放(_applyZoom)一致:连续/双页原地重排(不整列重建→不"重新加载"),原地失败才重建
-  if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
-  else renderPage(currentPage);
+  // +/- 缩放跟双指缩放(_applyZoom)一致:三模式都原地重排(单页=唯一 wrap),原地失败才按模式重建
+  if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
 window.fitWidth = async () => { await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 适应也记进当前方向
@@ -1281,8 +1298,8 @@ async function _runFitOverflowGuard() {
   if (!_fixHOverflow()) return;
   _refitBusy = true;
   try {
-    if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
-    else { const pc = document.getElementById('page-container'); if (pc) { pc.dataset.loaded = '0'; await renderPage(currentPage); } }   // 单页:页直接渲进 page-container(无 .page-wrap 子元素)
+    // 统一:单页/连续/双页都用 wrap 路径(单页=唯一 wrap)→ _rescaleContinuousInPlace 原地重排;失败再按模式重建
+    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
   } finally { _refitBusy = false; }
   requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
 }
@@ -1315,15 +1332,10 @@ async function _refitToWidth(force, rebuild) {
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
-    if (readMode !== 'single') {   // 连续/双页:结构没变就原地重排(不清容器→不"重新加载");mode 变(rebuild)或原地失败才整列重建
-      if (rebuild || !(await _rescaleContinuousInPlace())) await setupContinuousMode();
-    } else {
-      // 单页:页直接渲进 page-container。必须给 **page-container** 标 loaded='0'(原来错给第一个 .page-wrap,
-      // 当 DOM 还是多页结构时 page-container.loaded 仍是上次单页渲染留的 '1' → _renderPageInto 提前 return、
-      // 多页 wrap 没被清 → readMode=single 但页面仍多页,即用户报的「单页缩放变多页」根因)。
-      const pc = document.getElementById('page-container');
-      pc.dataset.loaded = '0';
-      await renderPage(currentPage);
+    // 统一:三模式都走 wrap 原地重排(单页=唯一 wrap);rebuild 或原地失败才按模式重建(单页→renderPage 重建唯一 wrap)
+    if (rebuild || !(await _rescaleContinuousInPlace())) {
+      if (readMode === 'single') await renderPage(currentPage);
+      else await setupContinuousMode();
     }
     // 按比例恢复滚动
     requestAnimationFrame(() => {
@@ -1440,19 +1452,8 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
-    if (readMode !== 'single') {           // 连续 + 双页:原地重标尺(不清空容器→不"重新加载");没建过列表才全建
-      if (!(await _rescaleContinuousInPlace())) await setupContinuousMode();
-    } else {
-      // 单页:目标恒为 page-container(原写 container.querySelector('.page-wrap')||container,DOM 还是多页结构时
-      // 会标错到第一个 .page-wrap、page-container.loaded 留 '1' → 重渲提前 return、多页没清 → 单页缩放变多页,
-      // 同 fix-22 _refitToWidth 根因)。先用 CSS zoom 把现有图按新 scale 瞬时缩放(decode-first 顶住尺寸→不 snap),
-      // 渲染完成 _renderPageImg 把 zoom 归 1(原生清晰)。
-      const pc = container;
-      const rs = pc.__renderScale || 0;
-      if (rs > 0) pc.style.zoom = (scale / rs);
-      pc.dataset.loaded = '0';
-      await renderPage(currentPage);
-    }
+    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
+    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {
       if (focal && focal.s0 > 0) {
         const mr = main.getBoundingClientRect();
@@ -1681,7 +1682,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-25';
+const READER_BUILD = 'reader-fix-26';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
