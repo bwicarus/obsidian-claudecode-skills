@@ -120,6 +120,87 @@ def voice_transcribe():
     return jsonify({"ok": True, "text": text})
 
 
+# ── 快路径意图(规则匹配,零 LLM、即时):PDF 阅读器常用口令直接出客户端动作 ──
+import re as _re
+
+_CN_NUM = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+           "七": 7, "八": 8, "九": 9, "十": 10, "百": 100}
+
+
+def _parse_num(s: str):
+    """从口令里抠页码:阿拉伯数字优先;否则解析中文数字(到几百足够)。"""
+    m = _re.search(r"\d+", s)
+    if m:
+        return int(m.group())
+    cn = _re.search(r"[零一二两三四五六七八九十百]+", s)
+    if not cn:
+        return None
+    t = cn.group(); v = 0; section = 0
+    for ch in t:
+        n = _CN_NUM.get(ch, 0)
+        if n == 100:
+            section = (section or 1) * 100; v += section; section = 0
+        elif n == 10:
+            section = (section or 1) * 10; v += section; section = 0
+        else:
+            section += n
+    return (v + section) or None
+
+
+def _act(fn, args, speak):
+    return {"speak": speak, "client_actions": [{"fn": fn, "args": args}],
+            "server_results": [], "confirm": None}
+
+
+def _fast_intent(t: str, context: dict):
+    """命中返回结构,否则 None。仅 PDF 阅读器页生效(那些 window.fn 只在阅读器有)。"""
+    if (context or {}).get("page_type") != "pdf":
+        return None
+    s = t.replace(" ", "")
+    # 翻页
+    if _re.search(r"(下一?页|后一?页|往后|next)", s):
+        return _act("changePage", [1], "好,下一页")
+    if _re.search(r"(上一?页|前一?页|往前|previous|back)", s):
+        return _act("changePage", [-1], "好,上一页")
+    # 跳页:第N页 / 跳到N / 翻到N
+    if _re.search(r"(第.*页|跳到|翻到|去第|到第|page)", s):
+        n = _parse_num(s)
+        if n:
+            return _act("goToPage", [n], f"好,翻到第{n}页")
+    # 缩放 / 适应
+    if _re.search(r"(放大|拉大|zoom\s*in)", s):
+        return _act("zoomChange", [0.15], "放大一点")
+    if _re.search(r"(缩小|拉小|zoom\s*out)", s):
+        return _act("zoomChange", [-0.15], "缩小一点")
+    if _re.search(r"(适应|铺满|满屏|自适应|fit)", s):
+        return _act("fitWidth", [], "好,适应宽度")
+    # 排版模式
+    if _re.search(r"双页", s):
+        return _act("toggleSpread", [], "切到双页")
+    if _re.search(r"(单页模式|切.*单页|单页阅读|^单页$)", s):   # 不匹配「这一页/一页纸」等(那些是提问/数量)
+        return _act("toggleReadMode", [], "切到单页")
+    if _re.search(r"(连续模式|连续滚动|切.*连续)", s):
+        return _act("toggleReadMode", [], "切到连续")
+    if _re.search(r"(全屏|fullscreen)", s):
+        return _act("toggleFullscreen", [], "全屏")
+    if _re.search(r"(去边|裁边|裁切|边距)", s):
+        return _act("toggleCrop", [], "切换去边")
+    if _re.search(r"(振假名|假名|注音|读音|ruby)", s):
+        return _act("toggleRuby", [], "切换注音")
+    if _re.search(r"(整页翻译|译页|翻译这页|翻译本页|全页翻译)", s):
+        return _act("togglePageTranslate", [], "切换整页翻译")
+    # 面板 / 导航
+    if _re.search(r"(搜索|查找|找一?下|search)", s):
+        return _act("openSearch", [], "打开搜索")
+    if _re.search(r"(知识点|关联|侧栏)", s):
+        return _act("toggleSidebar", [], "打开知识点")
+    if _re.search(r"(生词本|单词本|生词列表)", s):
+        return _act("toggleVocab", [], "打开生词本")
+    if _re.search(r"(书架|书本列表|回到列表|选书)", s):
+        return _act("goPdfList", [], "回到书架")
+    return None
+
+
 # ── agent(阶段 0:会话作答 + 结构化返回;阶段 1/2 接工具映射 + 危险动作确认)──
 _AGENT_SYS = (
     "你是一个学习软件的语音助手,用户在用网页 PDF 阅读器 / 技能树 / 学习看板等页面。"
@@ -154,7 +235,9 @@ def voice_agent():
     context = body.get("context") or {}
     if not transcript:
         return jsonify({"ok": False, "error": "empty transcript"}), 400
-    out = _agent_brain(transcript, context)
+    out = _fast_intent(transcript, context)   # 常用口令:规则即时执行,不走 LLM
+    if out is None:
+        out = _agent_brain(transcript, context)
     return jsonify({"ok": True, **out})
 
 
