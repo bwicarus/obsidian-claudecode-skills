@@ -29,7 +29,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 #main{flex:1;overflow:auto;background:#0a0e1a;padding:0;text-align:center;position:relative;touch-action:pan-x pan-y;scrollbar-gutter:stable}/* 0 内边距:页面铺满(尽量全屏)+ page-container 坐标=内容坐标(pinch 焦点算得准)。touch-action:pan-x pan-y → 允许滚动+拖选(JS preventDefault 覆盖),**禁用浏览器原生双指缩放**。scrollbar-gutter:stable:永远预留竖直滚动条槽 → clientWidth 恒定 → 适应 scale 在滚动条出现前后一致,不会"算时满宽、滚条出现后内容超 15px→横滑条"(经典滚动条桌面端;iPad overlay 滚动条本就不占位) */
 /* canvas 用 inline 固定 cw×ch（精确比例，绝不被 CSS 缩放）；宽度自适应靠重算 scale 重 render，overlay 同坐标系永不错位 */
 #main canvas{display:block;margin:0 auto 4px;background:#fff;box-shadow:0 2px 14px rgba(0,0,0,0.4)}/* 页间距收到 4px,减少暗底边 */
-.page-wrap{position:relative;display:inline-block;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+/* display:block(非 inline-block)→ 连续模式每页恒占一行,缩小时**不会**并排平铺成网格(inline-block+text-align:center
+   缩小后一行塞好几页 = 用户报的「缩放变多页」真凶)。width:fit-content 保持 wrap=页图尺寸(叠层 inset:0 对齐不变),
+   margin auto 居中(替代原 text-align:center 居中);spread 行内/连续各自的 inline margin 仍生效 */
+.page-wrap{position:relative;display:block;width:-webkit-fit-content;width:fit-content;margin-left:auto;margin-right:auto;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 /* 去边模式:page-wrap 裁成可见区(width/height 内联设)+ overflow 裁切;所有子层(canvas/textLayer/
    char层/ruby/句子层)加同一 translate 位移到裁切原点 → 各层相对位置不变、选中坐标自动跟随 */
 .crop-on{position:relative;overflow:hidden}  /* position:relative 仅去边时加→单页模式 #page-container 才能裁住浮层(否则浮层锚到 #main 逃逸) */
