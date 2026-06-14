@@ -1275,7 +1275,7 @@ async function _runFitOverflowGuard() {
   _refitBusy = true;
   try {
     if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
-    else { const w = document.querySelector('#page-container .page-wrap'); if (w) { w.dataset.loaded = '0'; await renderPage(currentPage); } }
+    else { const pc = document.getElementById('page-container'); if (pc) { pc.dataset.loaded = '0'; await renderPage(currentPage); } }   // 单页:页直接渲进 page-container(无 .page-wrap 子元素)
   } finally { _refitBusy = false; }
   requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
 }
@@ -1663,7 +1663,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-19';
+const READER_BUILD = 'reader-fix-20';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];

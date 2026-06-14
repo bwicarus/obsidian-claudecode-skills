@@ -107,7 +107,7 @@ async function _runFitOverflowGuard() {
   _refitBusy = true;
   try {
     if (readMode !== 'single') { if (!(await _rescaleContinuousInPlace())) await setupContinuousMode(); }
-    else { const w = document.querySelector('#page-container .page-wrap'); if (w) { w.dataset.loaded = '0'; await renderPage(currentPage); } }
+    else { const pc = document.getElementById('page-container'); if (pc) { pc.dataset.loaded = '0'; await renderPage(currentPage); } }   // 单页:页直接渲进 page-container(无 .page-wrap 子元素)
   } finally { _refitBusy = false; }
   requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());
 }
