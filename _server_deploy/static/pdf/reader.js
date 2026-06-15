@@ -1704,7 +1704,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-35';
+const READER_BUILD = 'reader-fix-39';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7874,7 +7874,10 @@ async function _connProbe() {
     var uid = btn.getAttribute('data-uid'); btn.disabled = true; btn.textContent = '撤销中…';
     fetch('/api/assistant/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: uid }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { btn.outerHTML = d && d.ok ? '<span class="asst-tool">↩ 已撤销</span>' : ('<span class="asst-tool">撤销失败:' + esc((d && d.error) || '') + '</span>'); })
+      .then(function (d) {
+        if (d && d.ok && d.kind === 'highlight') { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} }   // 撤销高亮要重渲页面才视觉清掉
+        btn.outerHTML = d && d.ok ? '<span class="asst-tool">↩ 已撤销</span>' : ('<span class="asst-tool">撤销失败:' + esc((d && d.error) || '') + '</span>');
+      })
       .catch(function () { btn.disabled = false; btn.textContent = '↩ 撤销'; });
   });
   function notify(title, body) {
@@ -7903,33 +7906,78 @@ async function _connProbe() {
   // 输入
   function autorow() { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; }
   ta.addEventListener('input', autorow);
-  ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
-  sendBtn.addEventListener('click', function () { var v = ta.value; ta.value = ''; autorow(); send(v); });
+  ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (streaming) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
+  sendBtn.addEventListener('click', function () { if (streaming) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); });
 
-  // ── 苹果风格语音按钮:点一下开始听写(设备原生 STT=iOS Siri 级),再点一下停 / 静默自动停。
-  //    把识别结果实时填进输入框(用户审一眼再发),不直接发送。无 SR 的浏览器→点麦克风=聚焦输入框,用系统键盘自带听写麦克风。
+  // ── 苹果风格语音按钮:持续聆听,只手动停(再点麦克风 / 点发送即停)。设备原生 STT(iOS=Siri 级)。
+  //    iOS 的 SpeechRecognition 静默时会自己结束,所以只要用户没手动停,onend 就重启 = 真·持续聆听。
+  //    识别结果只填进输入框(用户审一眼再发),续写已有内容;无 SR 的浏览器→聚焦输入框,用系统键盘自带听写麦克风。
+  //    micStop/micStart 为函数声明(在本 IIFE 内提升),上面的发送处理器即可调用 micStop 收口,避免迟到结果回填残留。
   var micBtn = pane.querySelector('#asst-mic');
-  (function () {
-    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { micBtn.title = '点这里→用键盘的听写麦克风'; micBtn.addEventListener('click', function () { ta.focus(); }); return; }
-    var rec = null, listening = false, base = '';
-    micBtn.addEventListener('click', function () {
-      if (listening) { try { rec && rec.stop(); } catch (_) {} return; }
-      try {
-        rec = new SR();
-        rec.lang = 'zh-CN'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-        base = ta.value ? (ta.value.replace(/\s+$/, '') + ' ') : '';   // 续写已有内容
-        rec.onstart = function () { listening = true; micBtn.classList.add('on'); };
-        rec.onresult = function (e) {
-          var s = ''; for (var i = 0; i < e.results.length; i++) s += e.results[i][0].transcript;
-          ta.value = base + s; autorow();
-        };
-        rec.onerror = function () {};   // no-speech / not-allowed:交给 onend 收尾
-        rec.onend = function () { listening = false; micBtn.classList.remove('on'); autorow(); ta.focus(); };
-        rec.start();
-      } catch (_) { listening = false; micBtn.classList.remove('on'); ta.focus(); }
-    });
-  })();
+  var _SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var micRec = null, micOn = false, micCommitted = '', micSessFinal = '', micSessTok = null, micLastWrite = '';
+  var micStartTs = 0, micLastStart = 0, micFails = 0, micSessProductive = false;   // 总时长软上限 + 空转(弱网/无语音)退避
+  function micStop() {                 // 手动停:micOn=false + 作废会话 → 迟到 onresult 不回填、onend 不重启
+    if (!micOn) return;
+    micOn = false; micSessTok = null; micFails = 0;
+    try { micRec && micRec.stop(); } catch (_) {}
+    micBtn.classList.remove('on');
+  }
+  function micSpin() {                  // 起一段识别(每段:会话令牌 tok + 实例身份 thisRec 双重身份)
+    if (!micOn) return;
+    var tok = (micSessTok = {});
+    var thisRec;
+    try {
+      thisRec = micRec = new _SR();
+      micRec.lang = 'zh-CN'; micRec.interimResults = true; micRec.continuous = true; micRec.maxAlternatives = 1;
+      micSessFinal = ''; micSessProductive = false; micLastStart = Date.now();
+      micRec.onresult = function (e) {
+        if (!micOn || micSessTok !== tok) return;   // 发送/停止/编辑作废的会话:不回填(防残留/旧词复活/孤立实例串扰)
+        micSessProductive = true;
+        var f = '', it = '';
+        for (var i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) f += e.results[i][0].transcript; else it += e.results[i][0].transcript;
+        }
+        micSessFinal = f;
+        ta.value = micCommitted + f + it; micLastWrite = ta.value; autorow();
+      };
+      micRec.onerror = function (ev) {  // 权限/无麦:立即放弃;network/no-speech 等交给下面的空转计数收口,不单次就放弃
+        if (ev && (ev.error === 'not-allowed' || ev.error === 'service-not-allowed' || ev.error === 'audio-capture')) micOn = false;
+      };
+      micRec.onend = function () {
+        if (micRec !== thisRec) return;             // 已被更晚的 spin 取代的孤立实例:不提交不重启(根治 orphan + 竞态)
+        if (micSessTok === tok && micSessFinal) { micCommitted = (micCommitted + micSessFinal).replace(/\s+$/, '') + ' '; }
+        micSessFinal = '';
+        micBtn.classList.remove('on');
+        if (!micOn) { autorow(); return; }
+        if (Date.now() - micStartTs > 120000) { micStop(); return; }   // 总时长软上限 2min:忘关也不会一直占麦
+        // 这段没出任何结果且很快就结束 = 疑似弱网/引擎空转 → 累计 5 次即停;出过结果或在正常等静默则清零
+        if (!micSessProductive && (Date.now() - micLastStart) < 1200) { if (++micFails >= 5) { micStop(); return; } }
+        else micFails = 0;
+        micBtn.classList.add('on');
+        setTimeout(function () { if (micOn && micRec === thisRec) micSpin(); }, micFails ? 700 : 0);   // 异步重启(打断紧致 churn)+ 退避
+      };
+      micRec.start();
+    } catch (_) { micOn = false; micSessTok = null; micBtn.classList.remove('on'); ta.focus(); }
+  }
+  function micStart() {
+    if (!_SR) { ta.focus(); return; }   // 无原生 STT:聚焦输入框,用系统键盘的听写麦克风
+    micOn = true; micFails = 0; micStartTs = Date.now(); micBtn.classList.add('on');
+    micCommitted = ta.value ? (ta.value.replace(/\s+$/, '') + ' ') : '';   // 续写已有内容
+    micSessFinal = ''; micLastWrite = ta.value;
+    micSpin();
+  }
+  // 听写中用户手动改输入框(典型:逐字删除):以改后文本为新基线 + 作废当前会话重起一段(新实例 results 为空,
+  // 旧词不会被下次 onresult 带回来)。我们自己填的值不算手动编辑(programmatic 赋值不触发 input,micLastWrite 再兜底)。
+  ta.addEventListener('input', function () {
+    if (!micOn || ta.value === micLastWrite) return;
+    micSessTok = null;                  // 作废:在途/后续旧 onresult 不再回填
+    micCommitted = ta.value; micLastWrite = ta.value; micSessFinal = '';
+    try { micRec && micRec.stop(); } catch (_) {}   // onend(micOn 仍真,且是当前实例)→ micSpin 重起 fresh-results 新会话
+  });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) micStop(); });   // 切走/锁屏即停,免后台占麦空转
+  if (!_SR) micBtn.title = '点这里→用键盘的听写麦克风';
+  micBtn.addEventListener('click', function () { micOn ? micStop() : micStart(); });
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
   function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }

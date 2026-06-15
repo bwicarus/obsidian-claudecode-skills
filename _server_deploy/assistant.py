@@ -55,13 +55,22 @@ def _convo_load(uid):
         return []
 
 
-def _convo_append(uid, role, content):
+def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
-        msgs.append({"role": role, "content": content, "ts": int(time.time())})
+        rec = {"role": role, "content": content, "ts": int(time.time())}
+        if meta:   # 记每轮所在位置(书/页/选中句),让助手回看历史时知道"刚才那页"具体是第几页
+            for k in ("page", "pages", "book", "file_rel", "selection"):
+                v = meta.get(k)
+                if v:
+                    rec[k] = v
+        msgs.append(rec)
         try:
             _CONVO_DIR.mkdir(parents=True, exist_ok=True)
-            _convo_path(uid).write_text(json.dumps(msgs[-200:], ensure_ascii=False), "utf-8")
+            p = _convo_path(uid)
+            tmp = p.with_name(p.name + ".tmp")   # 原子替换:锁外读者(/chat 构造 history)永远看到完整旧/新文件,不会读到半截
+            tmp.write_text(json.dumps(msgs[-200:], ensure_ascii=False), "utf-8")
+            os.replace(tmp, p)
         except Exception:
             pass
 
@@ -406,19 +415,47 @@ def _sys_prompt(ctx):
         "  第3步(制卡已提交后)→ 才给最终回答:「总结好了:…;卡也在做了,完成会通知你」。\n"
         "  ——第2步绝不能省,用户要的是『卡』不是只看总结。同理『翻译并制卡』要 translate 后再 make_anki。\n"
         "★高亮重点:先 read_page 拿到正文,再把要强调的几句**原句逐字**(从正文照抄,不要改写/翻译)"
-        "**一次性**放进 highlight 的 texts 数组(一次调用搞定,别一句一调),否则在 PDF 上定位不到。\n\n"
+        "**一次性**放进 highlight 的 texts 数组(一次调用搞定,别一句一调),否则在 PDF 上定位不到。\n"
+        "★【最近对话】里每条用户消息都带括号标注了当时所在的书/页/选中句。用户说『刚才那页/上一页/回到那页/前面说的那段』时,"
+        "**从最近对话的标注里取出确切页码**,直接 goto_page(或 read_page 指定该页),别反问『哪一页』。\n\n"
         f"【可用工具】\n{cat}\n\n"
         f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}"
     )
 
 
+def _clean_tag(s):
+    """规整用户内容(选中句/书名)再拼进 prompt:折叠所有空白(含换行)成单空格 +
+    去掉 【】「」(它们是 _agent_run 切分 turn/【最近对话】分段的标签,裸拼会破坏结构甚至被注入伪造段)。"""
+    s = " ".join(str(s or "").split())
+    return s.translate({ord(c): None for c in "【】「」"})
+
+
+def _loc_tag(h):
+    """把某轮对话发生时的位置(书/页/选中句)拼成一小段标注,供助手定位『刚才那页』。"""
+    bits = []
+    book = _clean_tag(h.get("book"))
+    pages = h.get("pages") or ([h.get("page")] if h.get("page") else [])
+    pages = [p for p in pages if p]
+    if book:
+        bits.append(book)
+    if pages:
+        bits.append("第" + "/".join(str(p) for p in pages) + "页")
+    sel = _clean_tag(h.get("selection"))
+    if sel:
+        bits.append("选中「" + sel[:40] + "」")
+    return ("(" + "，".join(bits) + ")") if bits else ""
+
+
 def _format_history(history):
     out = []
     for h in (history or [])[-6:]:
-        role = "用户" if h.get("role") == "user" else "助手"
+        if h.get("role") == "user":
+            role, tag = "用户", _loc_tag(h)   # 用户那轮标上当时所在页/书/选中句
+        else:
+            role, tag = "助手", ""
         c = (h.get("content") or "").strip()
         if c:
-            out.append(f"{role}:{c[:600]}")
+            out.append(f"{role}{tag}:{c[:600]}")
     return ("【最近对话】\n" + "\n".join(out) + "\n") if out else ""
 
 
@@ -495,7 +532,9 @@ def assistant_chat():
     uid = session["user_id"]
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
-    history = [{"role": m.get("role"), "content": m.get("content")} for m in _convo_load(uid)[-6:]]   # 服务端历史
+    # 服务端历史(含每轮所在页/书/选中句,让助手能定位"刚才那页")
+    history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
+               for m in _convo_load(uid)[-6:]]
 
     def gen():
         final = ['']
@@ -507,7 +546,12 @@ def assistant_chat():
         except Exception as e:
             yield f"event: error\ndata: {json.dumps(str(e)[:160], ensure_ascii=False)}\n\n"
         yield "event: done\ndata: {}\n\n"
-        _convo_append(uid, "user", message)            # 存进服务端对话(跨设备)
+        # 存进服务端对话(跨设备),并记下这轮所在位置(书/页/选中句)→ 下次助手回看历史就知道"刚才那页"是第几页
+        _convo_append(uid, "user", message, {
+            "page": ctx.get("page"), "pages": ctx.get("pages"),
+            "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
+            "selection": ctx.get("selection"),
+        })
         if final[0]:
             _convo_append(uid, "assistant", str(final[0])[:1500])
 

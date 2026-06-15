@@ -720,7 +720,7 @@ def _undo_do(uid=None):
                 db = pdf_reader._hl_load(fr)
                 db["highlights"] = [h for h in db.get("highlights", []) if h.get("id") not in ids]
                 pdf_reader._hl_save(fr, db)
-        return {"ok": True, "label": label}
+        return {"ok": True, "label": label, "kind": kind}   # kind 给前端:highlight 撤销后要重渲页面才能视觉清掉
     except Exception as e:
         with _undo_lock:
             tgt["undone"] = False   # 撤销失败 → 恢复可撤销
