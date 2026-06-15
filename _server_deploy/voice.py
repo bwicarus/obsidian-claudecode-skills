@@ -349,7 +349,7 @@ def _fast_intent(t: str, context: dict):
         if _re.search(r"(整页翻译|译页|翻译这页|翻译本页|全页翻译|翻译整页)", s):
             return _act("togglePageTranslate", [], "切换整页翻译")
         # 面板
-        if _re.search(r"(搜索|查找|找一?下|search)", s):
+        if _re.search(r"(打开搜索|搜索框|查找框|开搜索|^搜索$|^查找$|^search$)", s):   # 仅「开搜索框」;「搜索X内容」交给综合任务
             return _act("openSearch", [], "打开搜索")
         if _re.search(r"(知识点|关联|侧栏)", s):
             return _act("toggleSidebar", [], "打开知识点")
@@ -649,6 +649,8 @@ _vtasks = {}
 _vtasks_lock = threading.Lock()
 _vtask_seq = 0
 _VTASK_KINDS = ("note", "anki", "vocab", "search")
+_task_sema = threading.Semaphore(2)   # 限并发综合任务(每个可能跑 opus,防 Pi 过载/烧额度),超出排队
+_anki_lock = threading.Lock()         # AnkiConnect 单实例:制卡/单词任务串行打它,防并发丢卡
 
 
 def _vtask_new(kind: str) -> str:
@@ -729,7 +731,8 @@ def _task_anki(tid, params, ctx, base):
     _vtask_set(tid, step="AI 制卡中")
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
     text = content + f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
-    out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
+    with _anki_lock:   # AnkiConnect 串行
+        out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
     n = out.get("anki_added", 0)
     if out.get("ok") and n:
         _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki")
@@ -752,7 +755,8 @@ def _task_vocab(tid, params, ctx, base):
         src = {"pdf": ctx.get("file_rel", ""), "page": ctx.get("page", 0), "context": ctx.get("selection", "")}
         build_vocab_note.update_word_note(word, add_source=src, online=True, download_audio=True)
         _vtask_set(tid, step="制卡")
-        r = anki_from_word.make_card(word, force=False)
+        with _anki_lock:   # AnkiConnect 串行
+            r = anki_from_word.make_card(word, force=False)
         if r.get("ok"):
             _vtask_set(tid, status="done", speak=f"{word} 已加到生词本并制卡了")
         else:
@@ -796,10 +800,12 @@ def _task_search(tid, params, ctx, base):
 
 
 def _run_task(tid, kind, params, context, base):
-    try:
-        {"note": _task_note, "anki": _task_anki, "vocab": _task_vocab, "search": _task_search}[kind](tid, params, context, base)
-    except Exception as e:
-        _vtask_set(tid, status="error", error=str(e)[:160])
+    _vtask_set(tid, step="排队中…")
+    with _task_sema:   # 阻塞排队:同时最多 2 个综合任务跑(daemon 线程阻塞无碍)
+        try:
+            {"note": _task_note, "anki": _task_anki, "vocab": _task_vocab, "search": _task_search}[kind](tid, params, context, base)
+        except Exception as e:
+            _vtask_set(tid, status="error", error=str(e)[:160])
 
 
 def _task_dir(kind, params, speak):

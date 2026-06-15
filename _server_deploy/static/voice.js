@@ -127,7 +127,7 @@
   var epoch = 0;                  // 会话身份号:迟到回调按它失配丢弃
   var listening = false, stream = null, ac = null, sp = null, srcNode = null;
   var srcRate = 48000, seg = false, segChunks = [], preRoll = [], voiceFrames = 0, segStart = 0, lastVoice = 0;
-  var queue = [], busy = false, ttsMute = false, ttsTimer = 0;
+  var queue = [], busy = false, ttsHold = 0, ttsTimer = 0;   // ttsHold:多播报源计数,>0 即静音 VAD(防串台)
   var START_RMS = 0.020, KEEP_RMS = 0.012, START_FRAMES = 2, SILENCE_MS = 800, MAX_MS = 9000, MIN_MS = 320, PREROLL = 4;
 
   function rms(buf) { var s = 0; for (var i = 0; i < buf.length; i++) s += buf[i] * buf[i]; return Math.sqrt(s / buf.length); }
@@ -138,7 +138,7 @@
     var r = rms(inp), now = Date.now();
     if (!seg) {
       preRoll.push(new Float32Array(inp)); if (preRoll.length > PREROLL) preRoll.shift();
-      if (ttsMute) { voiceFrames = 0; return; }              // 念回答时不起新段(防自反馈)
+      if (ttsHold > 0) { voiceFrames = 0; return; }          // 念回答/任务播报时不起新段(防自反馈)
       if (r > START_RMS) { voiceFrames++; if (voiceFrames >= START_FRAMES) { seg = true; segStart = now; lastVoice = now; segChunks = preRoll.slice(); preRoll = []; setState('hear'); } }
       else voiceFrames = 0;
     } else {
@@ -272,27 +272,28 @@
       })
       .catch(function () { _taskTimers[id] = setTimeout(function () { pollTask(id, n + 1); }, 3000); });
   }
-  function announce(text) {   // 任务完成播报:不依赖 listening;念时临时静音 VAD 防自反馈
+  function announce(text) {   // 任务完成播报:不依赖 listening;ttsHold 计数静音 VAD 防自反馈;不 cancel(排在当前朗读后)
     say('<div>' + escapeHtml(text) + '</div>');
     if (!text || !window.speechSynthesis) return;
-    var prev = ttsMute; ttsMute = true;
+    ttsHold++;
+    var done = false;
+    function rel() { if (done) return; done = true; ttsHold = Math.max(0, ttsHold - 1); }
     try {
-      window.speechSynthesis.cancel();
       var u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05;
-      u.onend = u.onerror = function () { ttsMute = prev; };
+      u.onend = u.onerror = rel;
       window.speechSynthesis.speak(u);
-      setTimeout(function () { ttsMute = prev; }, Math.min(15000, 1500 + text.length * 90));
-    } catch (_) { ttsMute = prev; }
+      setTimeout(rel, Math.min(15000, 1500 + text.length * 90));
+    } catch (_) { rel(); }
   }
 
   function speak(text, ep) {
     return new Promise(function (resolve) {
       if (!text || !window.speechSynthesis || ep !== epoch) { resolve(); return; }
-      ttsMute = true; setState('speak');
+      ttsHold++; setState('speak');
       var done = false;
       function fin() {
-        if (done) return; done = true; clearTimeout(ttsTimer);
-        if (ep === epoch) { ttsMute = false; try { window.speechSynthesis.cancel(); } catch (_) {} }  // 仅当仍是本会话才动全局态/打断 TTS
+        if (done) return; done = true; clearTimeout(ttsTimer); ttsHold = Math.max(0, ttsHold - 1);
+        if (ep === epoch) { try { window.speechSynthesis.cancel(); } catch (_) {} }  // 仅当仍是本会话才打断 TTS
         resolve();
       }
       try {
@@ -309,7 +310,7 @@
     if (listening) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { status('此设备/浏览器不支持录音'); return; }
     var myEp = ++epoch;
-    listening = true; queue = []; busy = false; seg = false; ttsMute = false; preRoll = []; segChunks = []; voiceFrames = 0;
+    listening = true; queue = []; busy = false; seg = false; ttsHold = 0; preRoll = []; segChunks = []; voiceFrames = 0;
     setState('listen'); status('🎙 在听…(点一下停止,长按切语种)'); beacon('start', {}); prewarmBrain(false);
     navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       .then(function (s) {
@@ -340,7 +341,7 @@
 
   function stopListening() {   // 每条退出路径都彻底释放,否则污染下次启动
     epoch++;                   // 作废所有在途回调
-    listening = false; seg = false; busy = false; ttsMute = false; queue = []; segChunks = []; preRoll = [];
+    listening = false; seg = false; busy = false; ttsHold = 0; queue = []; segChunks = []; preRoll = [];
     clearTimeout(ttsTimer);
     try { if (sp) { sp.onaudioprocess = null; sp.disconnect(); } } catch (_) {}
     try { if (srcNode) srcNode.disconnect(); } catch (_) {}
