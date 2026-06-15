@@ -4431,15 +4431,46 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
             # 通过 AnkiConnect 加入 Anki（deck 用 "QA"）
             import urllib.request
             ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+            def _ank(action, params=None):
+                rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
+                with urllib.request.urlopen(urllib.request.Request(
+                        ANKI_URL, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as rr:
+                    return json.loads(rr.read())
+            # 本地化 Anki 模型名/字段名可能是中文（「基础的」正面/背面、「填空题」文字/背面额外），动态解析,
+            # 否则硬编码 Basic/Cloze + Front/Back 在中文 Anki 上 addNote 全失败（model was not found）
+            try:
+                _mn = _ank("modelNames").get("result") or []
+            except Exception:
+                _mn = []
+            def _pickm(cands, dflt):
+                for cc in cands:
+                    if cc in _mn:
+                        return cc
+                return dflt
+            basic_m = _pickm(["Basic", "基础的", "基本"], "Basic")
+            cloze_m = _pickm(["Cloze", "填空题", "挖空题"], "Cloze")
+            def _mf(m):
+                try:
+                    return _ank("modelFieldNames", {"modelName": m}).get("result") or []
+                except Exception:
+                    return []
+            _bf, _cf = _mf(basic_m), _mf(cloze_m)
+            b_front = _bf[0] if _bf else "Front"
+            b_back = _bf[1] if len(_bf) > 1 else (_bf[0] if _bf else "Back")
+            c_text = _cf[0] if _cf else "Text"
+            try:
+                _ank("createDeck", {"deck": "QA"})   # 幂等,确保牌组在(headless addNote 偶尔落系统默认)
+            except Exception:
+                pass
             added = 0
             for c in cards:
                 ctype = (c.get("type") or "basic").lower()
                 if ctype == "cloze":
-                    fields = {"Text": c.get("text", ""), "Back Extra": ""}
-                    model_name = "Cloze"
+                    fields = {c_text: c.get("text", "")}
+                    model_name = cloze_m
                 else:
-                    fields = {"Front": c.get("front", ""), "Back": c.get("back", "")}
-                    model_name = "Basic"
+                    fields = {b_front: c.get("front", ""), b_back: c.get("back", "")}
+                    model_name = basic_m
                 req = json.dumps({
                     "action": "addNote", "version": 6,
                     "params": {"note": {

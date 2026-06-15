@@ -219,7 +219,7 @@
   async function handleCommand(text, ep) {
     setState('busy');
     say('<div class="vq">🗣 ' + escapeHtml(text) + '</div><div class="vs">🤔 思考中…</div>');
-    var reply = '', actions = null, t = tctl(30000);
+    var reply = '', actions = null, task = null, t = tctl(30000);
     try {
       var r = await fetch('/api/voice/agent', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -227,16 +227,62 @@
       });
       if (ep !== epoch) { t.clear(); return; }
       var d = await r.json();
-      if (d.ok) { reply = d.speak || ''; actions = d.client_actions; }
+      if (d.ok) { reply = d.speak || ''; actions = d.client_actions; task = d.task || null; }
       else reply = '出错了:' + (d.error || '');
     } catch (e) { reply = (e && e.name === 'AbortError') ? '响应超时了' : ('出错了:' + (e && e.message || '')); }
     t.clear();
     if (ep !== epoch) return;
     runClientActions(actions);
-    beacon('agent', { n: (actions && actions.length) || 0 });
+    beacon('agent', { n: (actions && actions.length) || 0, task: task && task.kind });
     say('<div class="vq">🗣 ' + escapeHtml(text) + '</div>' + escapeHtml(reply));
+    if (task) {                       // 综合任务:念应承 → 后台 worker 跑、独立轮询播报(不绑 listening)
+      if (reply) await speak(reply, ep);
+      startTask(task);
+      return;
+    }
     // 纯命令(带 client_action)只显示不朗读 → 连续聆听不被打断、零自反馈;提问类才念。
     if (reply && !(actions && actions.length)) await speak(reply, ep);
+  }
+
+  // ── 综合任务:派发 + 独立轮询播报(不绑 listening,锁屏/切后台恢复后仍能续播)──
+  var _taskTimers = {};
+  function startTask(task) {
+    beacon('task-start', { kind: task.kind });
+    fetch('/api/voice/task', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: task.kind, params: task.params || {}, context: pageContext() }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok && d.task_id) pollTask(d.task_id, 0); else announce('没能开始这个任务'); })
+      .catch(function () { announce('任务提交失败了'); });
+  }
+  function pollTask(id, n) {
+    if (n > 100) { announce('这个任务等太久了,先这样'); delete _taskTimers[id]; return; }   // ~3.5min 上限
+    fetch('/api/voice/task-status?id=' + encodeURIComponent(id))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) { delete _taskTimers[id]; return; }
+        if (d.status === 'running') {
+          if (d.step) status('⏳ ' + d.step + '…');
+          _taskTimers[id] = setTimeout(function () { pollTask(id, n + 1); }, 2000);
+        } else {
+          delete _taskTimers[id];
+          beacon('task-done', { st: d.status });
+          if (d.status === 'done') { announce(d.speak || '办好了'); runClientActions(d.client_actions); }
+          else announce('没办成:' + (d.error || ''));
+        }
+      })
+      .catch(function () { _taskTimers[id] = setTimeout(function () { pollTask(id, n + 1); }, 3000); });
+  }
+  function announce(text) {   // 任务完成播报:不依赖 listening;念时临时静音 VAD 防自反馈
+    say('<div>' + escapeHtml(text) + '</div>');
+    if (!text || !window.speechSynthesis) return;
+    var prev = ttsMute; ttsMute = true;
+    try {
+      window.speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05;
+      u.onend = u.onerror = function () { ttsMute = prev; };
+      window.speechSynthesis.speak(u);
+      setTimeout(function () { ttsMute = prev; }, Math.min(15000, 1500 + text.length * 90));
+    } catch (_) { ttsMute = prev; }
   }
 
   function speak(text, ep) {

@@ -618,9 +618,11 @@ def voice_agent():
     context = body.get("context") or {}
     if not transcript:
         return jsonify({"ok": False, "error": "empty transcript"}), 400
-    out = _fast_intent(transcript, context)   # 常用口令:规则即时执行,不走 LLM
+    out = _fast_intent(transcript, context)        # 常用口令:规则即时执行,不走 LLM
     if out is None:
-        out = _llm_intent(transcript, context)   # 兜底:Claude 映射成真实动作 / 简短作答
+        out = _composite_intent(transcript, context)   # 综合任务:后台 worker 编排多 skill
+    if out is None:
+        out = _llm_intent(transcript, context)     # 兜底:Claude 映射成真实动作 / 简短作答
     return jsonify({"ok": True, **out})
 
 
@@ -637,6 +639,227 @@ def voice_prewarm():
     off = bool((request.get_json(silent=True) or {}).get("off"))
     threading.Thread(target=(_brain_reap if off else _brain_prewarm), daemon=True).start()
     return jsonify({"ok": True})
+
+
+# ════════════════ 综合任务(后台 worker:多 skill 编排,锁屏不断)════════════════
+# 复用现有稳定能力进程内直调(绕 session 鉴权):pdf_reader._run_snippets_to(笔记/制卡,opus)、
+# build_vocab_note.update_word_note + anki_from_word.make_card(单词闭环)、_book_text_index(搜索)。
+# 任务跑在服务端线程,前端轮询 /task-status,断连/锁屏不影响。这 4 类都是新增性质,不弹确认。
+_vtasks = {}
+_vtasks_lock = threading.Lock()
+_vtask_seq = 0
+_VTASK_KINDS = ("note", "anki", "vocab", "search")
+
+
+def _vtask_new(kind: str) -> str:
+    global _vtask_seq
+    with _vtasks_lock:
+        _vtask_seq += 1
+        tid = f"vt{int(time.time())}_{_vtask_seq}"
+        _vtasks[tid] = {"id": tid, "kind": kind, "status": "running", "step": "",
+                        "speak": "", "client_actions": [], "result": None, "error": "", "ts": time.time()}
+        for k in [k for k, v in _vtasks.items() if time.time() - v.get("ts", 0) > 1800]:
+            _vtasks.pop(k, None)   # 清 30min 前的老任务
+        return tid
+
+
+def _vtask_set(tid, **kw):
+    with _vtasks_lock:
+        if tid in _vtasks:
+            _vtasks[tid].update(kw)
+
+
+def _vtask_get(tid):
+    with _vtasks_lock:
+        return dict(_vtasks.get(tid) or {})
+
+
+def _pdf_mod():
+    import pdf_reader   # 同一 webapp 进程,已加载
+    return pdf_reader
+
+
+def _deep_link(base, file_rel, page):
+    from urllib.parse import quote
+    return f"{(base or '').rstrip('/')}/pdf/view?file={quote(file_rel or '', safe='')}&page={page or 1}"
+
+
+def _gen_title(content: str) -> str:
+    """给笔记起个简短中文标题(haiku 快)。失败回空,调用方有兜底。"""
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+        import ai_client
+        t = (ai_client.ask("给下面内容起一个简短中文笔记标题,≤12字,只输出标题、不要书名号标点:\n\n" + content[:800],
+                           claude_model="haiku", claude_effort="low") or "").strip()
+        return t.splitlines()[0].strip().strip("《》\"'。，,. ")[:20] if t else ""
+    except Exception:
+        return ""
+
+
+def _content_for(params, ctx):
+    scope = params.get("scope") or ("sel" if (ctx.get("selection") or "").strip() else "page")
+    if scope == "sel":
+        return (ctx.get("selection") or "").strip()
+    return _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+
+
+def _task_note(tid, params, ctx, base):
+    content = _content_for(params, ctx)
+    if not content or len(content) < 10:
+        _vtask_set(tid, status="error", error="没找到要整理的内容(先选中文字或翻到有内容的页)")
+        return
+    _vtask_set(tid, step="拟标题")
+    book = (ctx.get("book_name") or "").rsplit(".", 1)[0]
+    title = _gen_title(content) or ((book + " 笔记") if book else "语音笔记")
+    _vtask_set(tid, step="AI 整理中")
+    link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
+    out = _pdf_mod()._run_snippets_to([{"text": content, "source": link}], True, False, title, "opus", "high")
+    if out.get("ok"):
+        _vtask_set(tid, status="done", speak=f"整理好了，笔记叫《{title}》",
+                   result={"note_path": out.get("note_path"), "obsidian_url": out.get("obsidian_url")})
+    else:
+        _vtask_set(tid, status="error", error=out.get("error", "整理失败"))
+
+
+def _task_anki(tid, params, ctx, base):
+    content = _content_for(params, ctx)
+    if not content or len(content) < 6:
+        _vtask_set(tid, status="error", error="没找到要做卡的内容(先选中文字)")
+        return
+    _vtask_set(tid, step="AI 制卡中")
+    link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
+    text = content + f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
+    out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
+    n = out.get("anki_added", 0)
+    if out.get("ok") and n:
+        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki")
+    elif out.get("ok"):
+        _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
+    else:
+        _vtask_set(tid, status="error", error=out.get("error") or out.get("anki_error") or "制卡失败")
+
+
+def _task_vocab(tid, params, ctx, base):
+    word = (params.get("word") or ctx.get("selection") or "").strip()
+    if not word:
+        _vtask_set(tid, status="error", error="没拿到要学的单词(先选中那个词)")
+        return
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "vocab"))
+        import build_vocab_note
+        import anki_from_word
+        _vtask_set(tid, step="查词建生词本")
+        src = {"pdf": ctx.get("file_rel", ""), "page": ctx.get("page", 0), "context": ctx.get("selection", "")}
+        build_vocab_note.update_word_note(word, add_source=src, online=True, download_audio=True)
+        _vtask_set(tid, step="制卡")
+        r = anki_from_word.make_card(word, force=False)
+        if r.get("ok"):
+            _vtask_set(tid, status="done", speak=f"{word} 已加到生词本并制卡了")
+        else:
+            _vtask_set(tid, status="done", speak=f"{word} 已加到生词本(制卡没成:{r.get('error', '?')})")
+    except Exception as e:
+        _vtask_set(tid, status="error", error=str(e)[:160])
+
+
+def _task_search(tid, params, ctx, base):
+    q = (params.get("query") or "").strip()
+    if len(q) < 2:
+        _vtask_set(tid, status="error", error="没听清要找什么")
+        return
+    file_rel = ctx.get("file_rel", "")
+    if not file_rel:
+        _vtask_set(tid, status="error", error="先打开一本书再搜")
+        return
+    _vtask_set(tid, step="搜索中")
+    try:
+        ap = (VAULT_ROOT / file_rel).resolve()
+        idx = _pdf_mod()._book_text_index(str(ap), file_rel)
+        ql = q.lower()
+        hits = []
+        for ps, txt in idx.items():
+            low = (txt or "").lower()
+            pos = low.find(ql)
+            if pos >= 0:
+                snip = (txt[max(0, pos - 20):pos + len(q) + 30] or "").replace("\n", " ").strip()
+                hits.append((int(ps), snip))
+        hits.sort()
+        if not hits:
+            _vtask_set(tid, status="done", speak=f"这本书里没找到讲「{q}」的地方")
+            return
+        p0, snip0 = hits[0]
+        more = f"，共{len(hits)}处" if len(hits) > 1 else ""
+        _vtask_set(tid, status="done", speak=f"在第{p0}页找到了{more}，{snip0[:40]}",
+                   client_actions=[{"fn": "goToPage", "args": [p0]}],
+                   result={"hits": [{"page": p, "snippet": s} for p, s in hits[:8]]})
+    except Exception as e:
+        _vtask_set(tid, status="error", error=str(e)[:160])
+
+
+def _run_task(tid, kind, params, context, base):
+    try:
+        {"note": _task_note, "anki": _task_anki, "vocab": _task_vocab, "search": _task_search}[kind](tid, params, context, base)
+    except Exception as e:
+        _vtask_set(tid, status="error", error=str(e)[:160])
+
+
+def _task_dir(kind, params, speak):
+    return {"speak": speak, "task": {"kind": kind, "params": params},
+            "client_actions": [], "server_results": [], "confirm": None}
+
+
+def _composite_intent(t, context):
+    """识别综合任务(笔记整理/制卡/单词闭环/查找跳转)→ 返回 task 指令。仅 PDF 页。"""
+    ctx = context or {}
+    if ctx.get("page_type") != "pdf":
+        return None
+    s = t.replace(" ", "")
+    sel = (ctx.get("selection") or "").strip()
+    # 笔记整理
+    if _re.search(r"(整理成笔记|做成笔记|记成笔记|整理笔记|存成笔记|总结成笔记|整理一下笔记|做个笔记|记个笔记|存成一?篇?笔记)", s):
+        return _task_dir("note", {"scope": "sel" if sel else "page"}, "好,我来整理成笔记,稍等")
+    # Anki 制卡
+    if _re.search(r"(做成卡片|制成卡片|做张卡|做几张卡|做成anki|加到anki|做成闪卡|背一下这个|做成记忆卡|制卡)", s):
+        return _task_dir("anki", {"scope": "sel" if sel else "page"}, "好,我来做成卡片,稍等")
+    # 单词闭环(查词→生词本→卡)
+    if _re.search(r"(加(到)?生词本|收藏(这个)?(词|单词)|学(一下)?这个(词|单词)|记(到)?生词本|这个词学一下)", s):
+        if not sel:
+            return {"speak": "先选中那个单词再说哦", "client_actions": [], "server_results": [], "confirm": None}
+        return _task_dir("vocab", {"word": sel}, f"好,把 {sel} 加到生词本并制卡")
+    # 查找并跳转(用原文 t 保留 query 字符)
+    mq = _re.search(r"(?:搜索|搜一?下|查找|全文搜索|找讲|找关于|找一下|哪一?页讲|哪里讲|哪一?页有|找有讲)\s*(.+)", t)
+    if mq:
+        qq = mq.group(1).strip()
+        qq = _re.sub(r"^(讲|关于|的|有|是)+", "", qq)
+        qq = _re.sub(r"(的那?一?页|的内容|这本书|在哪里?|的地方|讲(的)?什么)[\s。，,?？]*$", "", qq).strip(" 。，,?？的")
+        if len(qq) >= 2:
+            return _task_dir("search", {"query": qq}, f"好,找讲「{qq}」的地方")
+    return None
+
+
+@bp.route("/task", methods=["POST"])
+def voice_task():
+    if not _logged_in():
+        return jsonify({"ok": False, "error": "auth"}), 401
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind")
+    if kind not in _VTASK_KINDS:
+        return jsonify({"ok": False, "error": "unknown kind"}), 400
+    base = request.host_url.rstrip("/")   # 用户当前访问域(拼卡背深链,避开默认死链)
+    tid = _vtask_new(kind)
+    threading.Thread(target=_run_task, args=(tid, kind, body.get("params") or {}, body.get("context") or {}, base), daemon=True).start()
+    return jsonify({"ok": True, "task_id": tid})
+
+
+@bp.route("/task-status")
+def voice_task_status():
+    if not _logged_in():
+        return jsonify({"ok": False, "error": "auth"}), 401
+    t = _vtask_get(request.args.get("id", ""))
+    if not t:
+        return jsonify({"ok": False, "error": "unknown task"}), 404
+    return jsonify({"ok": True, "status": t.get("status"), "step": t.get("step"),
+                    "speak": t.get("speak"), "client_actions": t.get("client_actions") or [],
+                    "result": t.get("result"), "error": t.get("error")})
 
 
 def register_voice(app):
