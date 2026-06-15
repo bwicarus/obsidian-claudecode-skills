@@ -235,13 +235,7 @@
     runClientActions(actions);
     beacon('agent', { n: (actions && actions.length) || 0, task: task && task.kind });
     say('<div class="vq">🗣 ' + escapeHtml(text) + '</div>' + escapeHtml(reply));
-    if (task) {                       // 综合任务:念应承 → 后台 worker 跑、独立轮询播报(不绑 listening)
-      if (reply) await speak(reply, ep);
-      startTask(task);
-      return;
-    }
-    // 纯命令(带 client_action)只显示不朗读 → 连续聆听不被打断、零自反馈;提问类才念。
-    if (reply && !(actions && actions.length)) await speak(reply, ep);
+    if (task) { startTask(task); return; }   // 综合任务:后台 worker 跑 + 独立轮询,结果只显示在浮窗(不念)
   }
 
   // ── 综合任务:派发 + 独立轮询播报(不绑 listening,锁屏/切后台恢复后仍能续播)──
@@ -272,18 +266,8 @@
       })
       .catch(function () { _taskTimers[id] = setTimeout(function () { pollTask(id, n + 1); }, 3000); });
   }
-  function announce(text) {   // 任务完成播报:不依赖 listening;ttsHold 计数静音 VAD 防自反馈;不 cancel(排在当前朗读后)
+  function announce(text) {   // 任务完成:只更新浮窗,不念(用户选了不要语音播报;iOS 异步/锁屏 TTS 也不可靠)
     say('<div>' + escapeHtml(text) + '</div>');
-    if (!text || !window.speechSynthesis) return;
-    ttsHold++;
-    var done = false;
-    function rel() { if (done) return; done = true; ttsHold = Math.max(0, ttsHold - 1); }
-    try {
-      var u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05;
-      u.onend = u.onerror = rel;
-      window.speechSynthesis.speak(u);
-      setTimeout(rel, Math.min(15000, 1500 + text.length * 90));
-    } catch (_) { rel(); }
   }
 
   function speak(text, ep) {
