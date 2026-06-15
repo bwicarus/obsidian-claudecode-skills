@@ -14,6 +14,8 @@
 (function () {
   if (window.__voiceLoaded) return;
   window.__voiceLoaded = true;
+  // PDF 阅读器改用侧边栏 Copilot(reader.src/25-assistant.js),这里的悬浮麦克风不在 PDF 页出现
+  if (location.pathname.indexOf('/pdf') === 0) return;
 
   // ── DOM + 样式 ──
   var fab = document.createElement('button');
