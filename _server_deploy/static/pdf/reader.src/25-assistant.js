@@ -28,7 +28,9 @@
       '<button data-q="fit">适应</button><button data-q="zin">A+</button><button data-q="zout">A-</button>' +
       '<button data-q="ptrans">译页</button><button data-q="clear">🗑 清空</button>' +
     '</div>' +
-    '<div id="asst-input"><textarea id="asst-ta" rows="1" placeholder="问这本书 / 让我帮你…(点键盘麦克风可说)"></textarea>' +
+    '<div id="asst-input">' +
+      '<button id="asst-mic" title="语音输入"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V22h2v-3.07A7 7 0 0 0 19 12h-2z"/></svg></button>' +
+      '<textarea id="asst-ta" rows="1" placeholder="问这本书 / 让我帮你…"></textarea>' +
       '<button id="asst-send" title="发送">➤</button></div>';
   panelEl.appendChild(pane);
 
@@ -53,7 +55,12 @@
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #233156;align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
     '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
-    '#asst-send:disabled{opacity:.5}';
+    '#asst-send:disabled{opacity:.5}' +
+    // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
+    '#asst-mic{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
+    '#asst-mic:active{transform:scale(.9)}' +
+    '#asst-mic.on{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
+    '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}';
   document.head.appendChild(css);
 
   // 🤖 fab:一键开抽屉到助手 tab
@@ -190,6 +197,31 @@
   ta.addEventListener('input', autorow);
   ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
   sendBtn.addEventListener('click', function () { var v = ta.value; ta.value = ''; autorow(); send(v); });
+
+  // ── 苹果风格语音按钮:点一下开始听写(设备原生 STT=iOS Siri 级),再点一下停 / 静默自动停。
+  //    把识别结果实时填进输入框(用户审一眼再发),不直接发送。无 SR 的浏览器→点麦克风=聚焦输入框,用系统键盘自带听写麦克风。
+  var micBtn = pane.querySelector('#asst-mic');
+  (function () {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { micBtn.title = '点这里→用键盘的听写麦克风'; micBtn.addEventListener('click', function () { ta.focus(); }); return; }
+    var rec = null, listening = false, base = '';
+    micBtn.addEventListener('click', function () {
+      if (listening) { try { rec && rec.stop(); } catch (_) {} return; }
+      try {
+        rec = new SR();
+        rec.lang = 'zh-CN'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+        base = ta.value ? (ta.value.replace(/\s+$/, '') + ' ') : '';   // 续写已有内容
+        rec.onstart = function () { listening = true; micBtn.classList.add('on'); };
+        rec.onresult = function (e) {
+          var s = ''; for (var i = 0; i < e.results.length; i++) s += e.results[i][0].transcript;
+          ta.value = base + s; autorow();
+        };
+        rec.onerror = function () {};   // no-speech / not-allowed:交给 onend 收尾
+        rec.onend = function () { listening = false; micBtn.classList.remove('on'); autorow(); ta.focus(); };
+        rec.start();
+      } catch (_) { listening = false; micBtn.classList.remove('on'); ta.focus(); }
+    });
+  })();
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
   function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
