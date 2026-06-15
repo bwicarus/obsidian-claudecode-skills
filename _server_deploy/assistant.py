@@ -303,6 +303,62 @@ def _t_undo_last(args, ctx):
         return {"error": str(e)[:120]}
 
 
+def _t_highlight(args, ctx):
+    """把原文句子在 PDF 上画高亮:PyMuPDF search_for 文字→rects(同 char 层坐标系)→写高亮 sidecar。可撤销。"""
+    file_rel = ctx.get("file_rel", "")
+    if not file_rel:
+        return {"error": "没开书"}
+    texts = args.get("texts")
+    if not texts:
+        t = args.get("text")
+        texts = [t] if t else []
+    texts = [x.strip() for x in texts if isinstance(x, str) and x.strip()][:15]
+    if not texts:
+        return {"error": "没给要高亮的原文句子"}
+    color = args.get("color") or "#fff59d"
+    pages = [int(p) for p in (ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])) if p]
+    try:
+        import fitz
+        ap = (VAULT_ROOT / file_rel).resolve()
+        ap.relative_to(VAULT_ROOT.resolve())
+        doc = fitz.open(str(ap))
+        pdf = _pdf()
+        db = pdf._hl_load(file_rel)
+        ids, miss = [], []
+        for t in texts:
+            placed = False
+            for pg in (pages or [1]):
+                if pg < 1 or pg > doc.page_count:
+                    continue
+                p = doc[pg - 1]
+                rects = p.search_for(t[:180])   # search_for 上限,长句截断匹配
+                if not rects:
+                    continue
+                hid = "h_" + os.urandom(6).hex()
+                db["highlights"].append({
+                    "id": hid, "page": pg,
+                    "rects": [[round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)] for r in rects],
+                    "color": color, "text": t[:2000], "note": "", "kind": "note",
+                    "sentence": "", "body": "", "page_w": p.rect.width, "page_h": p.rect.height,
+                    "time": int(time.time()),
+                })
+                ids.append(hid)
+                placed = True
+                break
+            if not placed:
+                miss.append(t[:18])
+        doc.close()
+        if ids:
+            pdf._hl_save(file_rel, db)
+        res = {"highlighted": len(ids), "missed": miss, "client_action": {"fn": "_reloadHighlights", "args": []}}
+        if ids:
+            import voice
+            res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids})
+        return res
+    except Exception as e:
+        return {"error": str(e)[:120]}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
@@ -312,14 +368,16 @@ TOOLS = {
     "make_anki": ("把内容做成 Anki 卡(后台,带原文链接,完成通知)。args {text?}(不传用选中)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
-    "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
+    "highlight": ("在 PDF 上把重点句子画高亮(可撤销)。args {texts:[\"原句1\",\"原句2\"], color?}。"
+                  "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到", _t_highlight),
+    "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
 
 def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
-            "add_vocab": "加生词本", "undo_last": "撤销"}.get(name, name)
+            "add_vocab": "加生词本", "highlight": "高亮", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -346,7 +404,9 @@ def _sys_prompt(ctx):
         "  第1步 → {\"tool\":\"read_page\",\"args\":{}}\n"
         "  第2步(拿到正文后)→ {\"tool\":\"make_anki\",\"args\":{\"text\":\"<你总结出的要点>\"}}\n"
         "  第3步(制卡已提交后)→ 才给最终回答:「总结好了:…;卡也在做了,完成会通知你」。\n"
-        "  ——第2步绝不能省,用户要的是『卡』不是只看总结。同理『翻译并制卡』要 translate 后再 make_anki。\n\n"
+        "  ——第2步绝不能省,用户要的是『卡』不是只看总结。同理『翻译并制卡』要 translate 后再 make_anki。\n"
+        "★高亮重点:先 read_page 拿到正文,再把要强调的几句**原句逐字**(从正文照抄,不要改写/翻译)"
+        "**一次性**放进 highlight 的 texts 数组(一次调用搞定,别一句一调),否则在 PDF 上定位不到。\n\n"
         f"【可用工具】\n{cat}\n\n"
         f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}"
     )
@@ -406,6 +466,8 @@ def _agent_run(message, ctx, history):
                     client_actions.append(res.pop("client_action"))
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
+                if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
+                    yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs)}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue

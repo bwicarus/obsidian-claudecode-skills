@@ -712,6 +712,14 @@ def _undo_do(uid=None):
                 ap.relative_to(VAULT_ROOT.resolve())
                 if ap.exists():
                     ap.unlink()
+        elif kind == "highlight":
+            fr = (handle.get("file_rel") or "").strip()
+            ids = set(handle.get("ids") or [])
+            if fr and ids:
+                import pdf_reader
+                db = pdf_reader._hl_load(fr)
+                db["highlights"] = [h for h in db.get("highlights", []) if h.get("id") not in ids]
+                pdf_reader._hl_save(fr, db)
         return {"ok": True, "label": label}
     except Exception as e:
         with _undo_lock:

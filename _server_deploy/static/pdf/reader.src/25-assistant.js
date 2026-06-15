@@ -86,6 +86,15 @@
     if (!actions || !actions.length) return;
     actions.forEach(function (a) { try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {} });
   }
+  // agent 画完高亮后:重新拉高亮 + 重渲所有可见页(复用 17-highlight 的模块函数,本模块同作用域可调)
+  window._reloadHighlights = async function () {
+    try {
+      if (typeof loadAllHighlights === 'function') await loadAllHighlights();
+      document.querySelectorAll('.page-wrap').forEach(function (pw) {
+        var n = parseInt(pw.dataset.pageNum); if (n && typeof renderHighlightsOnPage === 'function') renderHighlightsOnPage(pw, n);
+      });
+    } catch (_) {}
+  };
 
   async function send(text) {
     text = (text || '').trim();
@@ -116,6 +125,7 @@
           else if (ev === 'answer') { answer = parsed; renderMd(aMsg, answer); scrollDown(); }
           else if (ev === 'actions') { acts = parsed; }
           else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
+          else if (ev === 'undo' && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }
           else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
         }
       }
