@@ -304,6 +304,46 @@ def _t_add_vocab(args, ctx):
     return _bg_task("vocab", {"word": word}, ctx)
 
 
+def _t_see_page(args, ctx):
+    """把当前页(或指定页)渲染成图片让 agent **真正看到**(图表/示意图/公式排版/手写等文字层拿不到的)。
+    返回 `_vision`(image block 列表),_agent_run 会把它作为图片喂回大脑(sonnet 多模态)。"""
+    file_rel = ctx.get("file_rel") or ""
+    if not file_rel:
+        return {"error": "当前不在 PDF 书里,没法看页面"}
+    if args.get("page"):
+        pages = [int(args["page"])]
+    else:
+        pages = [int(p) for p in (ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])) if p]
+    pages = pages[:2]   # 双页最多 2 张
+    if not pages:
+        return {"error": "不知道看哪页"}
+    try:
+        import base64
+        import fitz
+        ap = (VAULT_ROOT / file_rel).resolve()
+        ap.relative_to(VAULT_ROOT.resolve())
+        doc = fitz.open(str(ap))
+        vis, done = [], []
+        try:
+            for pg in pages:
+                if pg < 1 or pg > doc.page_count:
+                    continue
+                page = doc[pg - 1]
+                longside = max(page.rect.width, page.rect.height) or 1.0
+                scale = min(2.0, 1540.0 / longside) or 1.0   # 长边 ~1540px(Claude 视觉甜区),封顶 2x
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                vis.append({"media_type": "image/png", "b64": base64.b64encode(pix.tobytes("png")).decode()})
+                done.append(pg)
+        finally:
+            doc.close()
+        if not vis:
+            return {"error": "页码超出范围"}
+        return {"_vision": vis, "rendered_pages": done,
+                "note": "下面是这些页的渲染图。看图回答用户(图表/示意图/公式排版/手写等文字层读不到的内容)。"}
+    except Exception as e:
+        return {"error": str(e)[:140]}
+
+
 def _t_undo_last(args, ctx):
     try:
         import voice
@@ -411,6 +451,8 @@ TOOLS = {
                   "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到", _t_highlight),
     "page_vocab": ("查掌握度数据库:不传 words=当前页『还没掌握』的生词(权威,跟页面下划线一致);"
                    "传 words(数组)=逐词查掌握度(英+日)。args {words?:[...]}", _t_page_vocab),
+    "see_page": ("**真正看到**当前页(或指定页)的渲染图——图表/示意图/曲线/公式排版/手写等文字层读不到的东西。"
+                 "read_page 只有文字层、看不见图形;用户问『这张图/这个图表/这页的图/看一下』时用 see_page。args {page?}", _t_see_page),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
@@ -418,7 +460,8 @@ TOOLS = {
 def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
-            "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度", "undo_last": "撤销"}.get(name, name)
+            "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
+            "see_page": "看页面图", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -452,7 +495,9 @@ def _sys_prompt(ctx):
         "**从最近对话的标注里取出确切页码**,直接 goto_page(或 read_page 指定该页),别反问『哪一页』。\n"
         "★凡涉及『我(没)掌握哪些词/这页生词/某词我会不会』——**必须调 page_vocab 查掌握度数据库**,"
         "**严禁**拿正文里的词自己猜谁掌握没掌握(数据库才是准的:已掌握的词不算生词、从没查过的词系统不视为生词)。"
-        "不传 words 拿本页未掌握生词;问具体某些词会不会就传 words:[...]。\n\n"
+        "不传 words 拿本页未掌握生词;问具体某些词会不会就传 words:[...]。\n"
+        "★页面含图/图表/曲线/示意图/公式排版/手写,或用户问『这张图/这个图表/这页的图/看一下这页/这里画的是什么』时,"
+        "**用 see_page 真正看渲染图**——read_page 只有文字层、看不见图形与排版,别只靠文字硬猜图的内容。\n\n"
         f"【可用工具】\n{cat}\n\n"
         f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}"
     )
@@ -534,6 +579,7 @@ def _agent_run(message, ctx, history):
                     res = TOOLS[name][1](targs, ctx) or {}
                 except Exception as e:
                     res = {"error": str(e)[:160]}
+                vision = res.pop("_vision", None) if isinstance(res, dict) else None   # 图片喂回大脑(sonnet 多模态)
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
@@ -541,7 +587,14 @@ def _agent_run(message, ctx, history):
                 if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs)}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
-                content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                text_part = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                if vision:   # see_page:把渲染图作为 image block 喂回(大脑 sonnet 能看图)
+                    content = [{"type": "text", "text": text_part}]
+                    for v in vision[:2]:
+                        content.append({"type": "image", "source": {
+                            "type": "base64", "media_type": v.get("media_type", "image/png"), "data": v["b64"]}})
+                else:
+                    content = text_part
                 continue
             # 不是工具调用 = 给用户的最终回答
             yield {"event": "answer", "data": raw}
