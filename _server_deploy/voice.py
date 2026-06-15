@@ -699,6 +699,8 @@ def _gen_title(content: str) -> str:
 
 
 def _content_for(params, ctx):
+    if (params.get("text") or "").strip():        # agent 工具显式给的内容
+        return params["text"].strip()
     scope = params.get("scope") or ("sel" if (ctx.get("selection") or "").strip() else "page")
     if scope == "sel":
         return (ctx.get("selection") or "").strip()

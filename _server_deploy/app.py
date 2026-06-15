@@ -990,6 +990,8 @@ register_insights(app)
 # 全站语音助手(/api/voice/*):转录(Gemini)+ agent
 from voice import register_voice
 register_voice(app)
+from assistant import register_assistant   # PDF 侧边栏 Copilot(沙盒 agent + 工具循环)
+register_assistant(app)
 
 if __name__ == "__main__":
     # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
