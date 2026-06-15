@@ -33,7 +33,31 @@ bp = Blueprint("voice", __name__, url_prefix="/api/voice")
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 GCP_KEY_FILE = Path(os.environ.get("GCP_API_KEY_FILE", "/home/bwicarus/.config/gcp-vision-key"))
+VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
+
+
+def _page_text(file_rel: str, page) -> str:
+    """服务端按 file_rel+page 用 PyMuPDF 取该页正文(不依赖前端 char-layer,能拿全文)。"""
+    try:
+        rel = (file_rel or "").strip()
+        if not rel or ".." in rel:
+            return ""
+        ap = (VAULT_ROOT / rel).resolve()
+        ap.relative_to(VAULT_ROOT.resolve())   # 防路径越界
+        if not ap.exists():
+            return ""
+        import fitz
+        doc = fitz.open(str(ap))
+        try:
+            idx = int(page or 1) - 1
+            idx = max(0, min(idx, doc.page_count - 1))
+            txt = (doc[idx].get_text("text") or "").strip()
+        finally:
+            doc.close()
+        return txt[:2000]
+    except Exception:
+        return ""
 
 
 def _gcp_key() -> str:
@@ -422,9 +446,13 @@ _LLM_SYS = (
     "1) 操作类(翻页/缩放/跳转/打开某书或功能/去某页面等)→ 从下方动作清单选出要执行的动作,"
     "返回 {\"say\":\"一句简短中文应承\",\"actions\":[{\"fn\":\"函数名\",\"args\":[参数]}]}。可一次多个动作。"
     "函数名必须严格来自清单,参数照清单格式,别编造。\n"
-    "2) 提问/闲聊(不需要操作页面)→ 返回 {\"say\":\"简短中文口语回答,≤2句\",\"actions\":[]}。\n"
+    "2) 提问/闲聊(不需要操作页面)→ 返回 {\"say\":\"简短中文口语回答,≤2句\",\"actions\":[]}。"
+    "若下方给了【当前页正文】,据此回答用户关于「这页/这段讲什么、什么意思、解释一下」之类的内容问题。\n"
     "只输出 JSON 本身,不要解释、不要 markdown、不要代码块围栏。say 会被语音念出,务必简短自然。"
 )
+
+# 内容类提问(才去取页面正文,翻页/缩放等命令不触发,省 PDF 开销)
+_CONTENT_Q = _re.compile(r"(讲|说|写|介绍|表达|意思|内容|大意|主旨|概括|总结|归纳|解释|说明|关于|是什么|什么意思|怎么回事|为什么|重点|这段|这句|这里|这部分)")
 
 
 def _entities_block(context: dict) -> str:
@@ -552,9 +580,15 @@ def _llm_intent(transcript: str, context: dict) -> dict:
     pt = ctx.get("page_type")
     meta = {k: ctx.get(k) for k in ("page_type", "book_name", "page", "total", "read_mode", "selection") if ctx.get(k)}
     meta_txt = json.dumps(meta, ensure_ascii=False)[:500]
+    # 内容类提问且在 PDF 页 → 取当前页正文喂给大脑(翻页/缩放等命令不触发,省 PDF 开销)
+    page_block = ""
+    if pt == "pdf" and _CONTENT_Q.search(transcript or ""):
+        pgtxt = _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+        if pgtxt:
+            page_block = f"\n\n【当前页正文(第{ctx.get('page', '?')}页,回答本页内容问题用)】\n{pgtxt}"
     prompt = (f"{_LLM_SYS}\n\n【可用动作清单】\n{_action_catalog(pt)}\n\n"
               f"【当前可见实体(谐音映射用)】\n{_entities_block(ctx)}\n\n"
-              f"【当前页面】{meta_txt}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
+              f"【当前页面】{meta_txt}{page_block}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
     raw = ""
     try:
         raw = (_brain_ask(prompt) or "").strip()   # 预热常驻进程,快
