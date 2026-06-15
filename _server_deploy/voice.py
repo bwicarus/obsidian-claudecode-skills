@@ -652,6 +652,72 @@ _VTASK_KINDS = ("note", "anki", "vocab", "search")
 _task_sema = threading.Semaphore(2)   # 限并发综合任务(每个可能跑 opus,防 Pi 过载/烧额度),超出排队
 _anki_lock = threading.Lock()         # AnkiConnect 单实例:制卡/单词任务串行打它,防并发丢卡
 
+# ── 撤销:凡写操作(制卡/笔记/生词)记下「句柄」,assistant /undo 反向(删卡/删笔记)──
+import urllib.request as _ur
+
+_undo_log = []
+_undo_lock = threading.Lock()
+_undo_seq = 0
+
+
+def _anki_req(action, params=None):
+    rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
+    url = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    with _ur.urlopen(_ur.Request(url, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as r:
+        return json.loads(r.read())
+
+
+def _undo_record(kind, label, handle):
+    global _undo_seq
+    with _undo_lock:
+        _undo_seq += 1
+        uid = f"u{_undo_seq}"
+        _undo_log.append({"id": uid, "kind": kind, "label": label, "handle": handle, "ts": time.time(), "undone": False})
+        if len(_undo_log) > 80:
+            del _undo_log[:-80]
+    return uid
+
+
+def _undo_list(n=12):
+    with _undo_lock:
+        return [{"id": e["id"], "kind": e["kind"], "label": e["label"], "undone": e["undone"]} for e in _undo_log[-n:][::-1]]
+
+
+def _undo_do(uid=None):
+    with _undo_lock:
+        tgt = None
+        for e in reversed(_undo_log):
+            if e["undone"]:
+                continue
+            if uid is None or e["id"] == uid:
+                tgt = e
+                break
+        if not tgt:
+            return {"ok": False, "error": "没有可撤销的操作了"}
+        tgt["undone"] = True
+        kind, handle, label = tgt["kind"], tgt["handle"], tgt["label"]
+    try:
+        if kind in ("anki", "vocab"):
+            ids = [i for i in (handle.get("note_ids") or ([handle.get("card_id")] if handle.get("card_id") else [])) if i]
+            if ids:
+                _anki_req("deleteNotes", {"notes": ids})
+                try:
+                    _anki_req("sync")
+                except Exception:
+                    pass
+        elif kind == "note":
+            p = (handle.get("path") or "").strip()
+            if p and ".." not in p:
+                ap = (VAULT_ROOT / p).resolve()
+                ap.relative_to(VAULT_ROOT.resolve())
+                if ap.exists():
+                    ap.unlink()
+        return {"ok": True, "label": label}
+    except Exception as e:
+        with _undo_lock:
+            tgt["undone"] = False   # 撤销失败 → 恢复可撤销
+        return {"ok": False, "error": str(e)[:120]}
+
 
 def _vtask_new(kind: str) -> str:
     global _vtask_seq
@@ -719,8 +785,9 @@ def _task_note(tid, params, ctx, base):
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
     out = _pdf_mod()._run_snippets_to([{"text": content, "source": link}], True, False, title, "opus", "high")
     if out.get("ok"):
+        uid = _undo_record("note", f"笔记《{title}》", {"path": out.get("note_path")})
         _vtask_set(tid, status="done", speak=f"整理好了，笔记叫《{title}》",
-                   result={"note_path": out.get("note_path"), "obsidian_url": out.get("obsidian_url")})
+                   result={"note_path": out.get("note_path"), "obsidian_url": out.get("obsidian_url"), "undo_id": uid})
     else:
         _vtask_set(tid, status="error", error=out.get("error", "整理失败"))
 
@@ -737,7 +804,8 @@ def _task_anki(tid, params, ctx, base):
         out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
     n = out.get("anki_added", 0)
     if out.get("ok") and n:
-        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki")
+        uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []})
+        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki", result={"undo_id": uid})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
     else:
@@ -760,7 +828,8 @@ def _task_vocab(tid, params, ctx, base):
         with _anki_lock:   # AnkiConnect 串行
             r = anki_from_word.make_card(word, force=False)
         if r.get("ok"):
-            _vtask_set(tid, status="done", speak=f"{word} 已加到生词本并制卡了")
+            uid = _undo_record("vocab", f"{word} 生词卡", {"card_id": r.get("note_id")})
+            _vtask_set(tid, status="done", speak=f"{word} 已加到生词本并制卡了", result={"undo_id": uid})
         else:
             _vtask_set(tid, status="done", speak=f"{word} 已加到生词本(制卡没成:{r.get('error', '?')})")
     except Exception as e:

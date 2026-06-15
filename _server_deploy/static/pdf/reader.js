@@ -1704,7 +1704,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-32';
+const READER_BUILD = 'reader-fix-33';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7717,7 +7717,7 @@ async function _connProbe() {
   if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
   window.__asstLoaded = true;
 
-  var history = [], streaming = false;
+  var streaming = false;   // 对话历史由服务端保存,前端不再持本地数组
 
   // ── tab 注入(放第一个,最显眼)──
   var tabBtn = document.createElement('button');
@@ -7753,6 +7753,8 @@ async function _connProbe() {
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
     '.asst-a h1,.asst-a h2,.asst-a h3{font-size:1em;margin:.5em 0 .2em}' +
     '.asst-tool{align-self:flex-start;color:#7c93c4;font-size:12px;padding:2px 6px;font-style:italic}' +
+    '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
+    '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
     '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
@@ -7769,6 +7771,7 @@ async function _connProbe() {
     try { if (typeof openGrammarPanel === 'function') openGrammarPanel(); } catch (_) {}
     window.switchSideTab && window.switchSideTab('asst');
     prewarm(false);
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (_) {}
     setTimeout(function () { ta && ta.focus(); }, 250);
   });
   document.body.appendChild(fab);
@@ -7798,12 +7801,11 @@ async function _connProbe() {
     streaming = true; sendBtn.disabled = true;
     addMsg('asst-u', esc(text));
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
-    history.push({ role: 'user', content: text });
     var answer = '', acts = [];
     try {
-      var r = await fetch('/api/assistant/chat', {
+      var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, context: ctx(), history: history.slice(-6) }),
+        body: JSON.stringify({ message: text, context: ctx() }),
       });
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
       while (true) {
@@ -7821,15 +7823,50 @@ async function _connProbe() {
           if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
           else if (ev === 'answer') { answer = parsed; renderMd(aMsg, answer); scrollDown(); }
           else if (ev === 'actions') { acts = parsed; }
+          else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
           else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
         }
       }
     } catch (e) { answer = '⚠️ ' + (e && e.message || '出错了'); aMsg.innerHTML = esc(answer); }
-    if (!answer) { answer = '(没拿到回答)'; aMsg.innerHTML = esc(answer); }
+    if (!answer && aMsg.innerHTML.indexOf('asst-tool') >= 0) { aMsg.innerHTML = esc('(没拿到回答)'); }
     runActions(acts);
-    history.push({ role: 'assistant', content: answer.slice(0, 1200) });
-    if (history.length > 12) history = history.slice(-12);
     streaming = false; sendBtn.disabled = false;
+  }
+
+  // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
+  function trackTask(id, label) {
+    if (!id) return;
+    var line = addMsg('asst-a', '<span class="asst-tool">⏳ ' + esc(label || '处理') + '中…</span>');
+    var n = 0;
+    (function poll() {
+      if (n++ > 120) { line.innerHTML = '<span class="asst-tool">⌛ ' + esc(label) + ':等太久了</span>'; return; }
+      fetch('/api/voice/task-status?id=' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) { return; }
+        if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
+        if (d.status === 'done') {
+          var uid = d.result && d.result.undo_id;
+          line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+          notify('阅读助手 ✓', d.speak || '任务完成');
+        } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
+        scrollDown();
+      }).catch(function () { setTimeout(poll, 3000); });
+    })();
+  }
+  thread.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest && e.target.closest('.asst-undo'); if (!btn) return;
+    var uid = btn.getAttribute('data-uid'); btn.disabled = true; btn.textContent = '撤销中…';
+    fetch('/api/assistant/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: uid }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { btn.outerHTML = d && d.ok ? '<span class="asst-tool">↩ 已撤销</span>' : ('<span class="asst-tool">撤销失败:' + esc((d && d.error) || '') + '</span>'); })
+      .catch(function () { btn.disabled = false; btn.textContent = '↩ 撤销'; });
+  });
+  function notify(title, body) {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      var opt = { body: body, tag: 'asst-task', icon: '/static/icons/icon-192.png' };
+      if (navigator.serviceWorker && navigator.serviceWorker.ready) navigator.serviceWorker.ready.then(function (reg) { reg.showNotification(title, opt); }).catch(function () { try { new Notification(title, opt); } catch (_) {} });
+      else try { new Notification(title, opt); } catch (_) {}
+    } catch (_) {}
   }
 
   // 快捷按钮
@@ -7842,7 +7879,7 @@ async function _connProbe() {
       else if (q === 'zin') window.zoomChange(0.15);
       else if (q === 'zout') window.zoomChange(-0.15);
       else if (q === 'ptrans') window.togglePageTranslate();
-      else if (q === 'clear') { thread.innerHTML = ''; history = []; greet(); }
+      else if (q === 'clear') { thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }
     } catch (_) {}
   });
 
@@ -7853,6 +7890,17 @@ async function _connProbe() {
   sendBtn.addEventListener('click', function () { var v = ta.value; ta.value = ''; autorow(); send(v); });
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
-  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记'); }
-  greet();
+  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
+  function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
+    fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok && d.messages && d.messages.length) {
+        d.messages.forEach(function (m) {
+          if (m.role === 'user') addMsg('asst-u', esc(m.content));
+          else { var el = addMsg('asst-a', ''); renderMd(el, m.content || ''); }
+        });
+      } else greet();
+    }).catch(greet);
+  }
+  loadHistory();
 })();
+

@@ -39,6 +39,43 @@ def _pdf():
     return pdf_reader
 
 
+# ── 对话服务端持久化(跨设备,可手动清零)。state/assistant-convo/<user_id>.json ──
+_CONVO_DIR = CLAUDE_DIR / "state" / "assistant-convo"
+_convo_lock = threading.Lock()
+
+
+def _convo_path(uid):
+    return _CONVO_DIR / f"{uid}.json"
+
+
+def _convo_load(uid):
+    try:
+        return json.loads(_convo_path(uid).read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _convo_append(uid, role, content):
+    with _convo_lock:
+        msgs = _convo_load(uid)
+        msgs.append({"role": role, "content": content, "ts": int(time.time())})
+        try:
+            _CONVO_DIR.mkdir(parents=True, exist_ok=True)
+            _convo_path(uid).write_text(json.dumps(msgs[-200:], ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
+
+
+def _convo_clear(uid):
+    with _convo_lock:
+        try:
+            p = _convo_path(uid)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
+
 # ──────────────────────── claude 进程(stream-json 多轮)────────────────────────
 def _spawn():
     try:
@@ -258,6 +295,14 @@ def _t_add_vocab(args, ctx):
     return _bg_task("vocab", {"word": word}, ctx)
 
 
+def _t_undo_last(args, ctx):
+    try:
+        import voice
+        return voice._undo_do(None)   # 撤销最近一次没撤过的写操作
+    except Exception as e:
+        return {"error": str(e)[:120]}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
@@ -267,13 +312,14 @@ TOOLS = {
     "make_anki": ("把内容做成 Anki 卡(后台,带原文链接,完成通知)。args {text?}(不传用选中)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
+    "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
 
 def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
-            "add_vocab": "加生词本"}.get(name, name)
+            "add_vocab": "加生词本", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -358,6 +404,8 @@ def _agent_run(message, ctx, history):
                     res = {"error": str(e)[:160]}
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
+                if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
+                    yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue
@@ -382,20 +430,51 @@ def assistant_chat():
     message = (body.get("message") or "").strip()
     if not message:
         return jsonify({"ok": False, "error": "empty"}), 400
+    uid = session["user_id"]
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
-    history = body.get("history") or []
+    history = [{"role": m.get("role"), "content": m.get("content")} for m in _convo_load(uid)[-6:]]   # 服务端历史
 
     def gen():
+        final = ['']
         try:
             for ev in _agent_run(message, ctx, history):
+                if ev['event'] == 'answer':
+                    final[0] = ev['data']
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"event: error\ndata: {json.dumps(str(e)[:160], ensure_ascii=False)}\n\n"
         yield "event: done\ndata: {}\n\n"
+        _convo_append(uid, "user", message)            # 存进服务端对话(跨设备)
+        if final[0]:
+            _convo_append(uid, "assistant", str(final[0])[:1500])
 
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@bp.route("/history")
+def assistant_history():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "messages": _convo_load(session["user_id"])[-100:]})
+
+
+@bp.route("/clear", methods=["POST"])
+def assistant_clear():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    _convo_clear(session["user_id"])
+    return jsonify({"ok": True})
+
+
+@bp.route("/undo", methods=["POST"])
+def assistant_undo():
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    uid = (request.get_json(silent=True) or {}).get("id")
+    import voice
+    return jsonify(voice._undo_do(uid))
 
 
 @bp.route("/prewarm", methods=["POST"])

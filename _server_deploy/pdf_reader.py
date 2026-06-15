@@ -4463,6 +4463,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
             except Exception:
                 pass
             added = 0
+            note_ids = []
             for c in cards:
                 ctype = (c.get("type") or "basic").lower()
                 if ctype == "cloze":
@@ -4488,9 +4489,12 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
                         resp = json.loads(r.read())
                         if not resp.get("error"):
                             added += 1
+                            if resp.get("result"):
+                                note_ids.append(resp["result"])
                 except Exception:
                     pass
             out["anki_added"] = added
+            out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
             # 制完触发 AnkiWeb sync（fire-and-forget，~50ms 返回，后台推送）
             if added > 0:
                 try:
