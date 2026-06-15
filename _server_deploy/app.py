@@ -246,6 +246,14 @@ self.addEventListener('message', function(e){
   if(e.data==='skipWaiting'){ self.skipWaiting(); }
   if(e.data==='clearCache'){ caches.keys().then(function(ks){ ks.forEach(function(k){ if(k.indexOf('bw-')===0) caches.delete(k); }); }); }
 });
+self.addEventListener('notificationclick', function(e){  // 点语音任务完成通知 → 聚焦/打开 app
+  e.notification.close();
+  e.waitUntil((async function(){
+    const all=await self.clients.matchAll({type:'window', includeUncontrolled:true});
+    for(const c of all){ if('focus' in c) return c.focus(); }
+    if(self.clients.openWindow) return self.clients.openWindow('/pdf/');
+  })());
+});
 """
 import hashlib as _sw_hl
 # VERSION = SW 代码哈希 → 改了缓存逻辑(noCache/isData/swr 等)version 自动变 → activate 清旧缓存,

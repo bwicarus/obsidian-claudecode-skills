@@ -63,6 +63,20 @@
   function prewarmBrain(off) {
     try { fetch('/api/voice/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {}
   }
+  // PWA 系统通知:在点击手势里申请权限(iOS 要求);任务完成时弹(锁屏/切走也能收到)。走 service worker showNotification(iOS PWA 正路),退回 new Notification。
+  function ensureNotifyPerm() {
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (_) {}
+  }
+  function notify(title, body) {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      var opt = { body: body, tag: 'voice-task', icon: '/static/icons/icon-192.png', badge: '/static/icons/icon-192.png' };
+      if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then(function (reg) { reg.showNotification(title, opt); })
+          .catch(function () { try { new Notification(title, opt); } catch (_) {} });
+      } else { try { new Notification(title, opt); } catch (_) {} }
+    } catch (_) {}
+  }
 
   // ── 上下文 + 派发 ──
   function pageContext() {
@@ -260,8 +274,8 @@
         } else {
           delete _taskTimers[id];
           beacon('task-done', { st: d.status });
-          if (d.status === 'done') { announce(d.speak || '办好了'); runClientActions(d.client_actions); }
-          else announce('没办成:' + (d.error || ''));
+          if (d.status === 'done') { announce(d.speak || '办好了'); runClientActions(d.client_actions); notify('语音助手 ✓', d.speak || '任务完成'); }
+          else { announce('没办成:' + (d.error || '')); notify('语音助手', '任务没办成:' + (d.error || '')); }
         }
       })
       .catch(function () { _taskTimers[id] = setTimeout(function () { pollTask(id, n + 1); }, 3000); });
@@ -292,6 +306,7 @@
   // ── 开 / 关(getUserMedia 必须在点击同步栈里发起)──
   function startListening() {
     if (listening) return;
+    ensureNotifyPerm();   // 在点击手势里申请通知权限(iOS 要求手势触发)
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { status('此设备/浏览器不支持录音'); return; }
     var myEp = ++epoch;
     listening = true; queue = []; busy = false; seg = false; ttsHold = 0; preRoll = []; segChunks = []; voiceFrames = 0;
