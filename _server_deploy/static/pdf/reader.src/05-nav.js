@@ -332,6 +332,17 @@ window.__voiceContext = function () {
       file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
       book_name: (typeof FILE_REL !== 'undefined' && FILE_REL) ? FILE_REL.split('/').pop() : '',
       page: (typeof currentPage !== 'undefined' ? currentPage : 0),
+      pages: (function () {   // 双页模式报当前可见的两页(offset0:1|2,3|4…; offset1:1,2|3,4|5…),否则单页
+        try {
+          var cp = currentPage;
+          if (typeof readMode === 'undefined' || readMode !== 'spread') return [cp];
+          var off = (typeof _spreadOffset !== 'undefined') ? _spreadOffset : 0, a;
+          if (off === 0) a = (cp % 2) ? cp : cp - 1;
+          else a = (cp <= 1) ? 1 : ((cp % 2) ? cp - 1 : cp);
+          if (off === 1 && a === 1) return [1];
+          return [a, a + 1];
+        } catch (_) { return [currentPage]; }
+      })(),
       total: (typeof pdfDoc !== 'undefined' && pdfDoc) ? pdfDoc.numPages : 0,
       read_mode: (typeof readMode !== 'undefined' ? readMode : ''),
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),

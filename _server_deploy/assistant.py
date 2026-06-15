@@ -161,9 +161,17 @@ def _deep_link(base, file_rel, page):
 
 # ──────────────────────── 工具(沙盒:PDF 页可用)────────────────────────
 def _t_read_page(args, ctx):
-    pg = args.get("page") or ctx.get("page", 0)
-    txt = _page_text(ctx.get("file_rel", ""), pg)
-    return {"page": pg, "text": txt} if txt else {"error": "这页没取到文字(可能是纯图/未OCR)"}
+    # 双页模式下读全部可见页(ctx.pages),不传 page 时默认所有可见页
+    if args.get("page"):
+        pages = [args["page"]]
+    else:
+        pages = ctx.get("pages") or [ctx.get("page", 0)]
+    parts = []
+    for pg in pages:
+        t = _page_text(ctx.get("file_rel", ""), pg)
+        if t:
+            parts.append(f"【第{pg}页】\n{t[:2800]}")
+    return {"pages": pages, "text": "\n\n".join(parts)} if parts else {"error": "这些页没取到文字(可能纯图/未OCR)"}
 
 
 def _t_read_selection(args, ctx):
@@ -271,7 +279,9 @@ def _tool_label(name, args):
 # ──────────────────────── agent 循环 ────────────────────────
 def _sys_prompt(ctx):
     cat = "\n".join(f"- {n}: {d}" for n, (d, _) in TOOLS.items())
-    meta = {k: ctx.get(k) for k in ("book_name", "page", "total") if ctx.get(k)}
+    vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
+    meta = {"book": ctx.get("book_name"), "当前可见页": vis, "共": ctx.get("total")}
+    meta = {k: v for k, v in meta.items() if v}
     sel = (ctx.get("selection") or "").strip()
     sel_line = f"\n用户当前选中:「{sel[:200]}」" if sel else ""
     return (
@@ -349,7 +359,7 @@ def _agent_run(message, ctx, history):
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
-                content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:3500] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue
             # 不是工具调用 = 给用户的最终回答
             yield {"event": "answer", "data": raw}
