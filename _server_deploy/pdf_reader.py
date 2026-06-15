@@ -2003,6 +2003,59 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
     return marks
 
 
+def page_unmastered_vocab(rel: str, page: int) -> list[dict]:
+    """供侧边栏 agent 查掌握度数据库:某页**还没掌握**的生词(跟页面下划线一模一样,英+日)。
+    复用 /page-overlay 的管线(_page_chars_cached→marks),返回 [{word,lemma,mastery,level}]。
+    已掌握的词(label_slug=mastered)和**从没查过的词**(不在生词库)都不会出现——这才是真实的『没掌握』,别靠猜。"""
+    try:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path or page < 1:
+            return []
+        res = _page_chars_cached(abs_path, rel, page)
+        if res is None:
+            return []
+        chars, page_w, page_h, furigana = res
+        _apply_char_offset(chars, _char_offset_for(rel, page))
+        _merge_favorite_phrases(chars)
+        marks = _build_vocab_marks(chars)
+        if _page_allows_ja(chars, rel):
+            marks += _build_jp_vocab_marks(chars)
+        out = []
+        for m in marks:
+            out.append({"word": m.get("word"), "lemma": m.get("lemma"),
+                        "mastery": m.get("mastery"), "level": m.get("label_slug")})
+        return out
+    except Exception:
+        return []
+
+
+def vocab_mastery_for(words) -> list[dict]:
+    """供侧边栏 agent 查指定词的掌握度(英+日,日语自动解析活用→原形再查)。
+    返回每词 {word,lemma,mastery,level,mastered} 或 {word,tracked:False}(生词库没有=没查过)。"""
+    idx = _vocab_idx()
+    out = []
+    for w in (words or [])[:50]:
+        w = str(w or "").strip()
+        if not w:
+            continue
+        info = idx.get(w.lower())
+        if not info:
+            try:
+                base = (_jp_inflection(w) or {}).get("base")
+                if base:
+                    info = idx.get(base.lower())
+            except Exception:
+                pass
+        if info:
+            out.append({"word": w, "lemma": info.get("lemma"),
+                        "mastery": round(float(info.get("mastery", 0) or 0), 3),
+                        "level": info.get("label_slug"),
+                        "mastered": info.get("label_slug") == "mastered"})
+        else:
+            out.append({"word": w, "tracked": False})
+    return out
+
+
 # ── 收藏词组（state/pdf-phrases.json）：作为之后分词依据，合并成单个 w（单击选中整词组）──
 _PHRASES_PATH = CLAUDE_DIR / "state" / "pdf-phrases.json"
 

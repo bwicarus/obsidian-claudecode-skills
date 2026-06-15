@@ -312,6 +312,36 @@ def _t_undo_last(args, ctx):
         return {"error": str(e)[:120]}
 
 
+def _t_page_vocab(args, ctx):
+    """查掌握度数据库(权威,别靠猜):不传 words → 当前页『还没掌握』的生词(=页面下划线词);
+    传 words → 逐词查掌握度(英+日,日语自动按原形)。"""
+    pdf = _pdf()
+    words = args.get("words")
+    if isinstance(words, list) and words:
+        return {"lookups": pdf.vocab_mastery_for(words),
+                "note": "mastered=true=已掌握;tracked=false=生词库里没有(=从没查过)。以此为准回答,别自己猜。"}
+    file_rel = ctx.get("file_rel") or ""
+    if not file_rel:
+        return {"error": "当前不在 PDF 书里,无法查页面生词"}
+    pages = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
+    seen = {}
+    for pg in pages:
+        try:
+            pg = int(pg)
+        except Exception:
+            continue
+        for m in pdf.page_unmastered_vocab(file_rel, pg):
+            lem = m.get("lemma") or m.get("word")
+            if lem and lem not in seen:
+                seen[lem] = {"word": m.get("word"), "lemma": m.get("lemma"),
+                             "mastery": m.get("mastery"), "level": m.get("level"), "page": pg}
+    items = list(seen.values())
+    return {"unmastered_on_page": items, "count": len(items),
+            "note": "这是当前页你**还没掌握**的生词(=页面下划线词,来自掌握度数据库)。"
+                    "不在此列表的词:要么已掌握、要么从没查过(系统不视为生词)。"
+                    "回答『我没掌握哪些词/这页生词』就用这个列表,别拿正文里的词自己猜掌握与否。"}
+
+
 def _t_highlight(args, ctx):
     """把原文句子在 PDF 上画高亮:PyMuPDF search_for 文字→rects(同 char 层坐标系)→写高亮 sidecar。可撤销。"""
     file_rel = ctx.get("file_rel", "")
@@ -379,6 +409,8 @@ TOOLS = {
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
     "highlight": ("在 PDF 上把重点句子画高亮(可撤销)。args {texts:[\"原句1\",\"原句2\"], color?}。"
                   "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到", _t_highlight),
+    "page_vocab": ("查掌握度数据库:不传 words=当前页『还没掌握』的生词(权威,跟页面下划线一致);"
+                   "传 words(数组)=逐词查掌握度(英+日)。args {words?:[...]}", _t_page_vocab),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
@@ -386,7 +418,7 @@ TOOLS = {
 def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
-            "add_vocab": "加生词本", "highlight": "高亮", "undo_last": "撤销"}.get(name, name)
+            "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -417,7 +449,10 @@ def _sys_prompt(ctx):
         "★高亮重点:先 read_page 拿到正文,再把要强调的几句**原句逐字**(从正文照抄,不要改写/翻译)"
         "**一次性**放进 highlight 的 texts 数组(一次调用搞定,别一句一调),否则在 PDF 上定位不到。\n"
         "★【最近对话】里每条用户消息都带括号标注了当时所在的书/页/选中句。用户说『刚才那页/上一页/回到那页/前面说的那段』时,"
-        "**从最近对话的标注里取出确切页码**,直接 goto_page(或 read_page 指定该页),别反问『哪一页』。\n\n"
+        "**从最近对话的标注里取出确切页码**,直接 goto_page(或 read_page 指定该页),别反问『哪一页』。\n"
+        "★凡涉及『我(没)掌握哪些词/这页生词/某词我会不会』——**必须调 page_vocab 查掌握度数据库**,"
+        "**严禁**拿正文里的词自己猜谁掌握没掌握(数据库才是准的:已掌握的词不算生词、从没查过的词系统不视为生词)。"
+        "不传 words 拿本页未掌握生词;问具体某些词会不会就传 words:[...]。\n\n"
         f"【可用工具】\n{cat}\n\n"
         f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}"
     )
