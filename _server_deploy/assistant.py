@@ -304,6 +304,53 @@ def _t_add_vocab(args, ctx):
     return _bg_task("vocab", {"word": word}, ctx)
 
 
+def _t_lookup_word(args, ctx):
+    """查词:走现成确定性词典 + unidic 权威读音(读音/释义以此为准,LLM 别自己编)。
+    英文→ECDICT(音标+中文释义+原形);日语→unidic 离线读音+声调(权威,毫秒级)。args {word?}(不传用选中)。"""
+    w = (args.get("word") or "").strip() or (ctx.get("selection") or "").strip()
+    if not w:
+        return {"error": "没给要查的词"}
+    w = w[:60]
+    import sys as _sys
+    vp = str(CLAUDE_DIR / "scripts" / "vocab")
+    if vp not in _sys.path:
+        _sys.path.insert(0, vp)
+    out = {"word": w}
+    is_ja = any(("぀" <= c <= "ヿ") or ("一" <= c <= "鿿") for c in w) and not w.isascii()
+    try:
+        import dict_sources as ds
+        if is_ja:
+            ra = ds._jp_reading_accent(w) or {}
+            if ra.get("reading"):
+                out["reading"] = ra.get("reading")          # 平假名,unidic 权威读音
+                out["accent"] = ra.get("accent")            # 声调核(0=平板)
+                out["mora"] = ra.get("mora")
+            try:
+                base = (_pdf()._jp_inflection(w) or {}).get("base")
+                if base and base != w:
+                    out["lemma"] = base
+            except Exception:
+                pass
+            out["source"] = "unidic(离线权威读音)"
+            out["_note"] = "reading 是 unidic 权威平假名读音,**以它为准**,别自己编;含义请结合上下文用中文讲。"
+        else:
+            ec = ds.lookup_ecdict(w) or {}
+            if ec:
+                out["phonetic"] = ec.get("phonetic")
+                out["lemma"] = ec.get("lemma")
+                out["meaning_zh"] = ec.get("translation")   # ECDICT 中文释义
+                out["definition_en"] = ec.get("definition")
+                out["pos"] = ec.get("pos")
+                out["freq_rank"] = ec.get("frq")
+                out["source"] = "ECDICT(离线)"
+                out["_note"] = "音标/释义以 ECDICT 为准;结合上下文挑最贴切的义项讲。"
+            else:
+                out["note"] = "ECDICT 未收录,请结合上下文给出读音/释义"
+    except Exception as e:
+        return {"error": str(e)[:140]}
+    return out
+
+
 def _t_see_page(args, ctx):
     """把当前页(或指定页)渲染成图片让 agent **真正看到**(图表/示意图/公式排版/手写等文字层拿不到的)。
     返回 `_vision`(image block 列表),_agent_run 会把它作为图片喂回大脑(sonnet 多模态)。"""
@@ -451,6 +498,8 @@ TOOLS = {
                   "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到", _t_highlight),
     "page_vocab": ("查掌握度数据库:不传 words=当前页『还没掌握』的生词(权威,跟页面下划线一致);"
                    "传 words(数组)=逐词查掌握度(英+日)。args {words?:[...]}", _t_page_vocab),
+    "lookup_word": ("查词典:英→ECDICT(音标+中文释义+原形)、日→unidic **权威读音+声调**。"
+                    "**读音/释义以它为准,别自己编读音**;你只结合上下文挑义项+讲解。args {word?}(不传用选中)", _t_lookup_word),
     "see_page": ("**真正看到**当前页(或指定页)的渲染图——图表/示意图/曲线/公式排版/手写等文字层读不到的东西。"
                  "read_page 只有文字层、看不见图形;用户问『这张图/这个图表/这页的图/看一下』时用 see_page。args {page?}", _t_see_page),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
@@ -461,7 +510,7 @@ def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
-            "see_page": "看页面图", "undo_last": "撤销"}.get(name, name)
+            "lookup_word": "查词典", "see_page": "看页面图", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -496,9 +545,11 @@ def _sys_prompt(ctx):
         "★凡涉及『我(没)掌握哪些词/这页生词/某词我会不会』——**必须调 page_vocab 查掌握度数据库**,"
         "**严禁**拿正文里的词自己猜谁掌握没掌握(数据库才是准的:已掌握的词不算生词、从没查过的词系统不视为生词)。"
         "不传 words 拿本页未掌握生词;问具体某些词会不会就传 words:[...]。\n"
+        "★查词/读音(尤其日语读音、英语音标释义)**一律先用 lookup_word**——它走 ECDICT/unidic 离线权威词典,"
+        "**读音和释义以它为准,严禁自己编读音**(LLM 读音不可靠);你只负责结合上下文挑最贴切的义项、讲解。\n"
         "★用户**当前有选中文字**(见【当前页面】末尾『用户当前选中』)时,默认他就是在问这段选中内容——"
         "优先针对**选中**回答/查词/翻译/解释/语法/制卡。"
-        "**为定准读音和含义,先 read_page 拿选中所在段落的上下文**(尤其日语:同一汉字多音,靠上下文选读音;含义也随语境变)。"
+        "**为定准读音和含义,先 lookup_word 拿权威读音+释义,再 read_page 拿选中所在段落的上下文**挑义项(日语同字多音、含义随语境变)。"
         "但**『页内有图』≠『要看图』**:选中只是文字、其上下文里并没有图时,**别 see_page**;"
         "只有选中内容/它的上下文**确实涉及某张图**(如『图1-3』『如下图』指代某图),或用户明确说『这张图/这页的图/图里画的』,才 see_page。\n"
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n\n"
