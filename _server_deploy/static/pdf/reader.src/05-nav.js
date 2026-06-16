@@ -319,7 +319,9 @@ function _renderVocabItem(it) {
 window.__voiceContext = function () {
   try {
     let sel = '';
-    try { sel = (window.getSelection && getSelection().toString().trim().slice(0, 400)) || ''; } catch (_) {}
+    // 优先 char-layer 选中(lastSelText:阅读器自绘选中,如漫画/PDF 的 OCR 文字层,原生 getSelection 常为空)
+    // → 助手才拿得到"用户选中的内容"(修:开助手/点输入框后原生选区被清,但 lastSelText 仍在)。回退原生选区。
+    try { sel = (((typeof lastSelText === 'string' && lastSelText) || (window.getSelection ? getSelection().toString() : '')) || '').trim().slice(0, 400); } catch (_) {}
     let books = [];
     try {
       const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
