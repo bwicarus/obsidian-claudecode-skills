@@ -75,11 +75,22 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
     return n
 
 
+def _write_progress(path, done, total, phase):
+    """嵌入阶段进度落盘,供 preprocess_book 轮询(否则编排进度条整段嵌入冻在 94% 看着像卡死)。"""
+    if not path:
+        return
+    try:
+        Path(path).write_text(json.dumps({"done": done, "total": total, "phase": phase}), "utf-8")
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdf", required=True)
     ap.add_argument("--out", default=None)
     ap.add_argument("--sidecar", default=None)
+    ap.add_argument("--progress", default=None, help="进度文件路径(写 {done,total,phase});嵌入阶段供编排轮询")
     args = ap.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -121,12 +132,16 @@ def main() -> int:
         sy = page.rect.height / img_h
         nc = embed_page(page, sc, sx, sy)
         total_chars += nc
+        if (i + 1) % 20 == 0:
+            _write_progress(args.progress, i + 1, n_pages, "embed")
         if (i + 1) % 50 == 0:
             print(f"  [{i+1}/{n_pages}] {total_chars} chars  {time.time()-t0:.1f}s", flush=True)
 
     print(f"嵌入 {total_chars} chars  保存 → {out_path}", flush=True)
+    _write_progress(args.progress, n_pages, n_pages, "save")   # 大书 save(garbage+deflate)也耗时,标记保存中
     src.save(str(out_path), garbage=4, deflate=True)
     src.close()
+    _write_progress(args.progress, n_pages, n_pages, "done")
     return 0
 
 

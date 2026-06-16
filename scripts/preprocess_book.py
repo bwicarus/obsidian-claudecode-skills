@@ -288,12 +288,27 @@ def main() -> int:
 
         # ② 嵌入文字层(现成脚本)→ 库外临时文件。pdf 跟 OCR 的是同一张图(重建后 rotation=0),
         # sidecar 坐标直接对得上,embed 无需 derotation/缩放映射。
-        _write(sha, phase="embedding", percent=94, msg="嵌入文字层…")
+        _write(sha, phase="embedding", percent=90, total=total, completed=0, msg="嵌入文字层…")
         out = STATUS_DIR / f"{sha}.embedded.pdf"
-        r = subprocess.run(
+        embed_prog = STATUS_DIR / f"{sha}.embed-prog.json"
+        embed_prog.unlink(missing_ok=True)   # 清旧
+        ep = subprocess.Popen(
             [PY, str(ROOT / "scripts" / embed_script),
-             "--pdf", str(pdf), "--out", str(out)], cwd=str(ROOT))
-        if r.returncode != 0 or not out.exists():
+             "--pdf", str(pdf), "--out", str(out), "--progress", str(embed_prog)], cwd=str(ROOT))
+        while ep.poll() is None:   # 轮询嵌入进度 → 进度条 90→97% 走起,不再整段冻在 94%
+            time.sleep(2)
+            try:
+                pg = json.loads(embed_prog.read_text("utf-8"))
+                d = int(pg.get("done", 0)); t = int(pg.get("total", total) or total); ph = pg.get("phase", "embed")
+                if ph == "save":
+                    _write(sha, phase="embedding", percent=97, total=t, completed=t, msg="嵌入完成,保存 PDF(写盘)…")
+                else:
+                    _write(sha, phase="embedding", percent=90 + int(d * 7 / max(1, t)),
+                           total=t, completed=d, msg=f"嵌入文字层 {d}/{t} 页…")
+            except Exception:
+                pass
+        embed_prog.unlink(missing_ok=True)
+        if ep.returncode != 0 or not out.exists():
             _write(sha, phase="error", error="嵌入文字层失败")
             return 1
 
