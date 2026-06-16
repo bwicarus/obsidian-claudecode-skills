@@ -229,6 +229,7 @@ PDF pages 实际文本 + 同节兄弟节点喂给 AI（claude_cli sonnet/medium�
   ```
 - daily 自动跑：`bwicarus-daily.timer` (01:00) → `daily_anki_status.py::run_kg_link_mastery` (link_with_ai → link_and_mastery → audit_kg → rescan_rolling)
 - audit_kg 预算上限 `--budget-target-7d 60`（2026-05-26 从 88 调低）+ **`--budget-5h-cap 70`（2026-06-17 加）**防一晚消耗过大
+- **按书开关 + 增量审查**（2026-06-17，commit dc720c7）：daily 每本书查 `server-config["kg_audit"]`：`enabled`（全局总开关）/ `books[<book>]`（每本，未列出用 `default`，均默认 True）→ 关了跳过 audit（关联+掌握度照常）；`incremental`（默认 True）→ 传 `--incremental` 只审「新增/改过」的节点（按 `node_audit_hash`=编号/名称/摘要/类型/页码 指纹比对 `audit_progress.audited_hashes`，全局表跨书合并不轮转）。控制面板「设置」面板有每本书开关（`/control/api/kg-audit` 列书 + `data-cfg-path` 复用 saveConfig）。config_schema 加 `kg_audit.{enabled,incremental,default}` + `books.*` 通配（validate_partial 支持末段 `*`）
 - ⚠ **audit_kg 预算闸的「周低点暴涨」坑**（2026-06-16 实测：KG 步从常态 ~440s/Δ5h~15% 暴涨到 **3660s/Δ5h+87%(13→100%)/Δ7d-sonnet+24%**）：`audit_kg --deep --budget-loop` 对**每个 L2 节点**发 1 次 sonnet 深审（最多 `--budget-max-batches 30 × --ai-sample-size 20 = 600` 节点/本），预算闸 `can_run_aggressive`（`scripts/lib/claude_quota.py`）**只看 7d 利用率(<60%)+时间(<约 04:00 cutoff)、刻意不看 5h 窗口**。
   - **现象解释**：常态夜 7d-sonnet 起始 ≥60% → 闸第一批就 STOP，audit 几乎不跑(那 ~440s 是被闸住的样子)；某夜 7d-sonnet 正好滚到周低点(实测 0%)→ 闸整晚失效 → audit **跑满 600 节点上限**，叠加 LADR 触发「全图轮转、清空 `ai_audited_node_ids` 重审」放大到全 355 节点，把 5h 烧到 100%。
   - **诊断**：`state/quota_log.json` 看哪步 `delta` 非零(每步前后额度快照)；KG 步的 AI 调用**直接 spawn `/usr/bin/claude`、不写 `ai_calls.log`**，所以那个 log 在 KG 时段=0 行≠没消耗。
