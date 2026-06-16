@@ -115,7 +115,7 @@ window.saveLangPicker = async function() {   // 设置面板「保存本书语�
     });
     const d = await r.json();
     if (d.ok) BOOK_LANGS = d.langs || langs;
-    (typeof _toast === 'function') && _toast('已保存本书语言：' + (BOOK_LANGS.join(' / ') || '无'));
+    (typeof _toast === 'function') && _toast('已保存需要翻译的语言：' + (BOOK_LANGS.join(' / ') || '无(全部免于翻译)'));
   } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.dlog('PDF_URL = ' + PDF_URL);
@@ -1705,7 +1705,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-45';
+const READER_BUILD = 'reader-fix-46';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];

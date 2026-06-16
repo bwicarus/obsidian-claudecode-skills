@@ -115,7 +115,7 @@ window.saveLangPicker = async function() {   // 设置面板「保存本书语�
     });
     const d = await r.json();
     if (d.ok) BOOK_LANGS = d.langs || langs;
-    (typeof _toast === 'function') && _toast('已保存本书语言：' + (BOOK_LANGS.join(' / ') || '无'));
+    (typeof _toast === 'function') && _toast('已保存需要翻译的语言：' + (BOOK_LANGS.join(' / ') || '无(全部免于翻译)'));
   } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
 window.dlog('PDF_URL = ' + PDF_URL);

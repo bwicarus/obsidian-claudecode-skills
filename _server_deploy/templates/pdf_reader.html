@@ -850,13 +850,12 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
         </div>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">没对齐：先「可视化文字框」看差多少 → 方向键微调推齐。识别错/漏/整页歪：「单页重扫」用 Google Vision 对当前页重新 OCR（~几秒，重扫后文字层即时更新）。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
-        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 本书文本语言（决定点词查哪本词典：日语→中日，英语→英汉，中文→不查；<b>每本书独立</b>）</label>
+        <label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>
         <div id="lang-checks" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">
           <label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>
           <label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>
-          <label style="cursor:pointer"><input type="checkbox" value="zh" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">中文(不查)</label>
         </div>
-        <button onclick="saveLangPicker()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存本书语言</button>
+        <button onclick="saveLangPicker()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存</button>
       </div>
 
       <!-- ════ pane: 语法 ════ -->
