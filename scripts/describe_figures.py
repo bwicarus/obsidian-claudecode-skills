@@ -29,11 +29,17 @@ OUT_DIR = PROJECT / "state" / "pdf-figures"
 CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 
 PROMPT = (
-    "你在看一页教材扫描页。本页正文(供上下文):「{ctx}」。\n"
-    "请只针对页面上的**插图/图表/示意图/曲线图/电路图/几何图/物理装置图/数据图表**"
-    "(不含纯文字段落,也不含数学公式排版)用中文说明:每张图画的是什么、关键要素、在讲什么概念;"
-    "有图注/编号(如 图1-9)就带上。多张图分点列。\n"
-    "若整页没有真正的插图,只输出 NONE 这四个字母,别的都不要。"
+    "你在看一页教材的扫描页(第 {page} 页)。结合上下文判图、写描述。\n"
+    "【本页正文】{ctx}\n"
+    "【上一页结尾】{prev}\n"
+    "【下一页开头】{nxt}\n\n"
+    "找出页面上的**插图/示意图/曲线图/电路图/几何图/物理装置图/数据表/结构式**"
+    "(不含纯文字段落,也不含普通数学公式排版)。对每张图给一个对象:\n"
+    "- caption: 图注/编号原文(如 \"图1-9 空气中的紫罗兰香气分子\";没有就空串)\n"
+    "- bbox: 该图在页面上的大致位置 [x0,y0,x1,y1],都是 0~1 比例(左上角原点,x 向右、y 向下),估计即可\n"
+    "- desc: 中文说明这张图画的是什么、关键要素、在讲什么概念(结合上下文),2~4 句\n"
+    "**只输出一个 JSON 数组**(如 [{{\"caption\":\"...\",\"bbox\":[0.1,0.4,0.6,0.7],\"desc\":\"...\"}}]);"
+    "页面没有真正插图就输出 []。不要 ``` 围栏、不要数组以外的任何文字。"
 )
 
 
@@ -41,35 +47,87 @@ def pdf_sha(p: Path) -> str:
     return hashlib.sha1(str(p.resolve()).encode()).hexdigest()[:16]
 
 
-def describe_page(pdf_path: str, page_idx: int, model: str) -> str:
-    """渲染一页 → Claude 视觉 → 描述文本或 'NONE'。失败返回 ''(留待重试)。"""
+def _clip(s: str, n: int) -> str:
+    return " ".join((s or "").split())[:n].replace("「", "").replace("」", "")
+
+
+def _claude_vision(prompt: str, png: bytes, model: str):
+    """发一张图 + prompt 给 Claude,返回结果文本;失败 None。"""
+    msg = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": base64.b64encode(png).decode()}},
+    ]}}
     try:
-        doc = fitz.open(pdf_path)
-        try:
-            p = doc[page_idx]
-            ctx = (p.get_text("text") or "")[:280].replace("\n", " ").replace("「", "").replace("」", "")
-            z = min(2.0, 1540.0 / (max(p.rect.width, p.rect.height) or 1.0))
-            png = p.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False).tobytes("png")
-        finally:
-            doc.close()
-        msg = {"type": "user", "message": {"role": "user", "content": [
-            {"type": "text", "text": PROMPT.format(ctx=ctx)},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                         "data": base64.b64encode(png).decode()}},
-        ]}}
         proc = subprocess.run(
             [CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
              "--verbose", "--model", model],
             input=json.dumps(msg) + "\n", capture_output=True, text=True, timeout=120)
         for ln in proc.stdout.splitlines():
             if '"type":"result"' in ln:
-                try:
-                    return (json.loads(ln).get("result") or "").strip()
-                except Exception:
-                    return ""
-        return ""
+                return (json.loads(ln).get("result") or "").strip()
     except Exception:
-        return ""
+        return None
+    return None
+
+
+def _parse_figs(raw):
+    """解析 Claude 回的 JSON 数组 → list[{caption,bbox,desc}]。[] = 无图;None = 解析失败(重试)。"""
+    if raw is None:
+        return None
+    s = raw.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else ""
+        if s.endswith("```"):
+            s = s[:-3]
+        s = s.strip()
+    i, j = s.find("["), s.rfind("]")
+    if i < 0 or j < 0:
+        return None
+    try:
+        arr = json.loads(s[i:j + 1])
+    except Exception:
+        return None
+    if not isinstance(arr, list):
+        return None
+    out = []
+    for f in arr:
+        if not isinstance(f, dict):
+            continue
+        desc = str(f.get("desc") or "").strip()
+        if not desc:
+            continue
+        bb = f.get("bbox")
+        if isinstance(bb, list) and len(bb) == 4:
+            try:
+                bb = [max(0.0, min(1.0, float(v))) for v in bb]
+            except Exception:
+                bb = None
+        else:
+            bb = None
+        out.append({"caption": str(f.get("caption") or "").strip(), "bbox": bb, "desc": desc})
+    return out
+
+
+def describe_page_figures(pdf_path: str, page_idx: int, model: str = "sonnet"):
+    """渲染一页 + 前后页正文作上下文 → Claude 视觉 → 结构化图注 list[{caption,bbox,desc}]。
+    [] = 无图;None = 失败(留待重试)。"""
+    try:
+        doc = fitz.open(pdf_path)
+        try:
+            n = doc.page_count
+            p = doc[page_idx]
+            ctx = _clip(p.get_text("text"), 700)
+            prev = _clip(doc[page_idx - 1].get_text("text")[-400:], 300) if page_idx > 0 else ""
+            nxt = _clip(doc[page_idx + 1].get_text("text")[:400], 300) if page_idx + 1 < n else ""
+            z = min(2.0, 1540.0 / (max(p.rect.width, p.rect.height) or 1.0))
+            png = p.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False).tobytes("png")
+        finally:
+            doc.close()
+        prompt = PROMPT.format(page=page_idx + 1, ctx=ctx, prev=prev, nxt=nxt)
+        return _parse_figs(_claude_vision(prompt, png, model))
+    except Exception:
+        return None
 
 
 def main() -> int:
@@ -127,23 +185,25 @@ def main() -> int:
         tmp.replace(out_path)
 
     def work(pg):
-        desc = describe_page(str(pdf_path), pg - 1, args.model)
-        return pg, desc
+        return pg, describe_page_figures(str(pdf_path), pg - 1, args.model)
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = [ex.submit(work, p) for p in todo]
         for fut in as_completed(futs):
-            pg, desc = fut.result()
+            pg, figs = fut.result()
             with lock:
                 state["done"] += 1
-                if desc and desc.strip().upper() != "NONE" and len(desc.strip()) > 4:
-                    data["figures"] = [f for f in data["figures"] if f["page"] != pg]
-                    data["figures"].append({"page": pg, "description": desc.strip()})
+                if figs is None:
+                    pass                      # 失败 → 不记,下次重试
+                elif len(figs) == 0:
+                    none_pages.add(pg)        # 整页无图
+                else:
+                    data["figures"] = [f for f in data["figures"] if f.get("page") != pg]
+                    for f in figs:
+                        data["figures"].append({"page": pg, "caption": f["caption"],
+                                                "bbox": f["bbox"], "desc": f["desc"]})
                     state["figs"] += 1
-                elif desc.strip().upper() == "NONE":
-                    none_pages.add(pg)
-                # desc=='' (失败) 不记 → 下次重试
                 if state["done"] % 5 == 0 or state["done"] == len(todo):
                     save()
                     eta = (time.time() - t0) / max(1, state["done"]) * (len(todo) - state["done"])
