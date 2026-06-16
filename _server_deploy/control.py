@@ -273,6 +273,38 @@ def register_control(app):
             "errors":  errors,   # 前端可选展示
         })
 
+    @app.route("/control/api/kg-audit")
+    def control_kg_audit():
+        """列出 KG 书本 + 当前每本审查开关（给控制面板渲染 per-book 开关）。"""
+        cfg = {}
+        if SERVER_CONFIG.exists():
+            try:
+                cfg = json.loads(SERVER_CONFIG.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        ka = cfg.get("kg_audit") or {}
+        default_on = bool(ka.get("default", True))
+        books_cfg = ka.get("books") or {}
+        books = []
+        kg_dir = CLAUDE_DIR / "knowledge_graph"
+        if kg_dir.exists():
+            for f in sorted(kg_dir.glob("*.json")):
+                if f.name.endswith(".bak.json"):
+                    continue
+                nodes = 0
+                try:
+                    d = json.loads(f.read_text(encoding="utf-8"))
+                    nodes = sum(1 for n in d.get("nodes", []) if n.get("level") == 2)
+                except Exception:
+                    pass
+                books.append({"book": f.stem, "on": bool(books_cfg.get(f.stem, default_on)), "nodes": nodes})
+        return jsonify({
+            "enabled":     bool(ka.get("enabled", True)),
+            "incremental": bool(ka.get("incremental", True)),
+            "default":     default_on,
+            "books":       books,
+        })
+
     @app.route("/control/api/quota-log")
     def control_quota_log():
         """返回 state/quota_log.json 最近 N 条；?limit=80&ai_only=true 过滤。"""

@@ -347,6 +347,21 @@ def audit_deep_one_node(backend, kg: dict, node: dict, pdf_cache: dict) -> dict:
     return data
 
 
+def node_audit_hash(n: dict) -> str:
+    """节点内容指纹:编号/名称/摘要/类型/页码任一变动 → 哈希变 → 增量模式会重审它。
+    审查读的就是这些字段 + 该页 PDF 文本;这些没变、重审基本只会返回 ok,所以可跳过。"""
+    import hashlib
+    pages = n.get("pages") or []
+    key = "\x1f".join([
+        str(n.get("numeric_label") or n.get("label") or ""),
+        str(n.get("name") or ""),
+        str(n.get("summary") or ""),
+        str(n.get("type") or ""),
+        ",".join(str(p) for p in pages),
+    ])
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
 def select_audit_sample(kg: dict, audited_ids: set[str], n: int) -> list[dict]:
     """从未审过的 L2 节点里抽 n 个，全审完后清空进度循环重审。"""
     l2 = [n for n in kg["nodes"] if n["level"] == 2]
@@ -393,6 +408,10 @@ def main() -> int:
                     help="深度模式：每节点跑 PDF 内容验证，能输出 fix_summary/fix_pages/merge/delete 建议")
     ap.add_argument("--auto-apply-safe", action="store_true",
                     help="深度模式下自动 apply safe ops（fix_summary）；risky ops 仍写入 audit 待 review")
+    ap.add_argument("--incremental", action="store_true",
+                    help="增量审查:只审『新增/内容变动过』的节点(按 node_audit_hash 比对 audit_progress.audited_hashes),"
+                         "不再全图轮转重审。首跑某书时用当前哈希建基线、本轮跳过(信任刚被全量审过的现状)。"
+                         "根治『每晚把全图几百节点重审一遍』的浪费。")
     args = ap.parse_args()
 
     kg_path = Path(args.kg)
@@ -408,6 +427,9 @@ def main() -> int:
         try: prev = json.loads(out_path.read_text(encoding="utf-8"))
         except Exception: prev = {}
     prev_audited_ids = set(((prev.get("audit_progress") or {}).get("ai_audited_node_ids") or []))
+    # 增量审查用的全局节点哈希表 {node_id: 内容哈希}。node id 自带书前缀(egiu.* / ladr.*)不会撞,
+    # 故多本书共用这一张表、写回时合并保留其它书的条目(顺带绕开 kg_audit.json 被各书互相覆盖的坑)。
+    audited_hashes: dict = dict(((prev.get("audit_progress") or {}).get("audited_hashes") or {}))
 
     # C
     edge_gaps = heuristic_edge_gaps(kg)
@@ -421,8 +443,19 @@ def main() -> int:
     auto_applied: list[dict] = []     # 深度模式 safe ops 自动应用记录
     if not args.ai_skip:
         l2_total = sum(1 for n in kg["nodes"] if n["level"]==2)
-        # 已完成全图 → 清空进度重审
-        if len(prev_audited_ids) >= l2_total:
+        baseline_seeded = False
+        if args.incremental:
+            this_l2 = [n for n in kg["nodes"] if n["level"] == 2]
+            covered = sum(1 for n in this_l2 if n["id"] in audited_hashes)
+            if covered == 0 and this_l2:
+                # 本书还没哈希基线 → 用当前节点哈希建基线、本轮跳过审查
+                # (信任刚被全量审过的现状;以后只审 hash 变了的=新增/改过的节点)
+                for n in this_l2:
+                    audited_hashes[n["id"]] = node_audit_hash(n)
+                baseline_seeded = True
+                print(f"[B] 增量首跑:建立 {len(this_l2)} 节点哈希基线,本轮跳过审查(以后只审变动/新增)")
+        # 已完成全图 → 清空进度重审(仅全量模式;增量模式靠哈希判变动,不轮转)
+        elif len(prev_audited_ids) >= l2_total:
             print(f"[B] 已完成全图轮转（{l2_total} 节点），清空 ai_audited_node_ids 重新开始")
             audited_ids_now = set()
         backend = make_backend("claude_cli", {
@@ -442,8 +475,17 @@ def main() -> int:
                 except Exception as ex:
                     print(f"[DEEP] PDF 加载失败: {ex}")
 
+        def _pick_sample():
+            if not args.incremental:
+                return select_audit_sample(kg, audited_ids_now, args.ai_sample_size)
+            # 增量:只挑哈希变了的(新增节点缺哈希 → 也算变动)且本轮还没审过的
+            l2 = [x for x in kg["nodes"] if x["level"] == 2]
+            todo = [x for x in l2 if x["id"] not in audited_ids_now
+                    and node_audit_hash(x) != audited_hashes.get(x["id"])]
+            return random.sample(todo, min(args.ai_sample_size, len(todo))) if todo else []
+
         def run_one_batch():
-            sample = select_audit_sample(kg, audited_ids_now, args.ai_sample_size)
+            sample = _pick_sample()
             if not sample:
                 return False
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -479,9 +521,15 @@ def main() -> int:
                             ai_flagged.append(res)
                             print(f"  ⚠ {res['numeric_label']:8} {res['name'][:30]}: "
                                   f"{(res.get('issues') or ['(无具体说明)'])[0][:50]}")
+            # 增量:记录本批节点(若 fix_summary 已就地修正则记修正后)的最新哈希,下次不再重审
+            if args.incremental:
+                for nd in sample:
+                    audited_hashes[nd["id"]] = node_audit_hash(nd)
             return True
 
-        if args.budget_loop:
+        if baseline_seeded:
+            pass   # 增量首跑只建哈希基线,本轮不发任何 AI 调用
+        elif args.budget_loop:
             # 时间感知激进模式：保证 target_hour:target_min 时 5h 窗口自然清零
             print(f"[B] BUDGET-LOOP 时间感知模式")
             print(f"    目标满血时刻：{args.target_hour:02d}:{args.target_min:02d}")
@@ -532,6 +580,7 @@ def main() -> int:
         "auto_applied": auto_applied,
         "audit_progress": {
             "ai_audited_node_ids": sorted(audited_ids_now),
+            "audited_hashes": audited_hashes,   # 增量审查基线(全局,跨书合并)
             "last_run": datetime.now().isoformat(timespec="seconds"),
         },
     }

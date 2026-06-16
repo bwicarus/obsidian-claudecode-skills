@@ -266,6 +266,8 @@
       </div>
       <!-- 字段从 /control/api/config/schema 反射生成（消除前端跟 config_schema.py 双写）-->
       <div id="cfg-fields">加载中…</div>
+      <!-- KG 节点审查：按书开关 + 增量（书本列表动态，由 /control/api/kg-audit 渲染）-->
+      <div id="kg-audit-fields"></div>
       <p style="margin-top: 16px;">
         <button class="btn primary" onclick="saveConfig(event)">保存设置</button>
         <span class="action-desc" style="margin-left: 10px;">某些设置改动会重启 qa-server</span>
@@ -510,6 +512,29 @@ async function renderCfgFields() {
   }).join('\n');
   document.getElementById('cfg-fields').innerHTML = sections;
 }
+// KG 节点审查：动态渲染「按书开关 + 增量」。用 data-cfg-path 让现有 saveConfig 一并保存。
+// 书本列表 + 当前开关由 /control/api/kg-audit 给（含 default 计算后的 on 状态）。
+async function renderKgAudit() {
+  const el = document.getElementById('kg-audit-fields');
+  if (!el) return;
+  let d;
+  try { d = await (await fetch('/control/api/kg-audit')).json(); } catch (e) { el.innerHTML = ''; return; }
+  const ck = (path, on, label, desc) =>
+    `<label class="cfg-row"><input type="checkbox" data-cfg-path="${escapeHtml(path)}" ${on ? 'checked' : ''}> ${label}`
+    + (desc ? ` <span class="action-desc">${desc}</span>` : '') + `</label>`;
+  let h = '<div class="config-section"><h3>KG 节点审查（按书 + 增量）</h3>';
+  h += '<p class="meta" style="font-size:11px;line-height:1.5">夜间审查给技能树节点做 AI 质检（每节点 1 次 Claude 调用），是夜间额度大头。可按书关掉、或只审改动过的节点。</p>';
+  h += ck('kg_audit.enabled', d.enabled, '启用节点审查', '总开关；关掉则所有书都不夜审');
+  h += ck('kg_audit.incremental', d.incremental, '增量（只审新增 / 改过的节点）', '推荐；根治每晚把全图几百节点重审一遍的浪费');
+  h += '<div style="margin-top:6px;padding-left:6px;border-left:2px solid rgba(255,255,255,.08)">';
+  (d.books || []).forEach(b => {
+    h += ck('kg_audit.books.' + b.book, b.on,
+            escapeHtml(b.book) + ` <span class="meta" style="font-size:11px">(${b.nodes} 节点)</span>`);
+  });
+  if (!(d.books || []).length) h += '<p class="meta" style="font-size:11px">（暂无 KG 书本）</p>';
+  h += '</div></div>';
+  el.innerHTML = h;
+}
 async function loadConfig() {
   // 字段还没渲染先渲染（首次进 panel 才会调）
   if (!document.querySelector('#cfg-fields [data-cfg-path]')) {
@@ -524,6 +549,7 @@ async function loadConfig() {
       else el.value = val ?? '';
     });
   } catch (e) {}
+  await renderKgAudit();   // 末尾渲染 KG 审查段（自带正确勾选态，含 default 计算，不被上面的 cfg 填充覆盖）
 }
 async function saveConfig(e) {
   if (e) e.stopPropagation();

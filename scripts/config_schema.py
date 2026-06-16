@@ -73,6 +73,12 @@ SCHEMA: dict[str, type] = {
 
     # 卡片 QA 改进（从 Anki 卡片「问 AI / 改进这张卡」链接进入截图问答页的改卡流程）
     "card_qa.delete_original":           bool,
+
+    # KG 节点审查（每本书可单独开关 + 增量只审变动节点）
+    "kg_audit.enabled":                  bool,   # 全局总开关
+    "kg_audit.incremental":              bool,   # 只审新增/改过的节点
+    "kg_audit.default":                  bool,   # 未列出的书默认开/关
+    "kg_audit.books.*":                  bool,   # 每本书一个开关（* 通配，书名任意）
 }
 
 
@@ -263,6 +269,11 @@ def validate_partial(data: Any) -> tuple[dict, list[str]]:
     errors: list[str] = []
     for path, val in flat.items():
         expected = SCHEMA.get(path)
+        if expected is None:
+            # 通配:把最后一段换成 * 再查一次(支持 kg_audit.books.<任意书名> 这种动态键)
+            head = path.rsplit(".", 1)[0]
+            if "." in path:
+                expected = SCHEMA.get(head + ".*")
         if expected is None:
             errors.append(f"未知字段 {path}")
             continue

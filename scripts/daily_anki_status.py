@@ -249,22 +249,34 @@ def run_kg_link_mastery() -> int:
         if r2 != 0:
             print(f"    link_and_mastery 失败 (rc={r2})"); rc = r2
         # 3) KG 准确性审计（深度模式：含 PDF 内容验证 + safe ops 自动 apply）
-        r3 = run_py("kg/audit_kg.py", [
-            "--kg", str(kg), "--ai-sample-size", "20",
-            "--model", "sonnet", "--effort", "medium", "--workers", "4",
-            "--deep", "--auto-apply-safe",
-            "--budget-loop",
-            "--target-hour", "9", "--target-min", "0", "--buffer-min", "30",
-            # 2026-05-26 调低：原 88（昨晚一夜 7d 涨 +7%，过高）→ 60（更保守）
-            "--budget-target-7d", "60",
-            "--budget-max-batches", "30",
-            # 2026-06-17 新增：can_run_aggressive 不看 5h 窗口，7d 处于周低点时单夜能把 5h 烧到 100%
-            # （06-16 暴涨根因：7d-sonnet 起始 0% → 闸门整晚失效 → audit 跑满全图，5h 13→100、7d-sonnet +24%）。
-            # 加 5h 天花板 70%：审查仍持续维护 KG，但单夜不再独占整个 5h 窗口、不锁死白天用量。
-            "--budget-5h-cap", "70",
-        ])
-        if r3 != 0:
-            print(f"    audit_kg 失败 (rc={r3})")
+        # 按书开关 + 增量(只审变动节点):server-config["kg_audit"] 控制(控制面板可改)。
+        #   enabled  全局总开关(默认 True)；books[<book>] 每本书开关(未列出用 default，默认 True)；
+        #   incremental 只审新增/改过的节点(默认 True)，根治"每晚全图重审"的浪费。
+        kac = server_cfg().get("kg_audit") or {}
+        book = kg.stem
+        audit_on = bool(kac.get("enabled", True)) and \
+            bool((kac.get("books") or {}).get(book, kac.get("default", True)))
+        if not audit_on:
+            print(f"    审查未启用(book={book})，跳过")
+        else:
+            audit_args = [
+                "--kg", str(kg), "--ai-sample-size", "20",
+                "--model", "sonnet", "--effort", "medium", "--workers", "4",
+                "--deep", "--auto-apply-safe",
+                "--budget-loop",
+                "--target-hour", "9", "--target-min", "0", "--buffer-min", "30",
+                # 2026-05-26 调低：原 88（昨晚一夜 7d 涨 +7%，过高）→ 60（更保守）
+                "--budget-target-7d", "60",
+                "--budget-max-batches", "30",
+                # 2026-06-17：can_run_aggressive 不看 5h 窗口，7d 周低点时单夜能把 5h 烧到 100%。
+                # 加 5h 天花板 70%：单夜不独占整个 5h 窗口、不锁死白天用量。
+                "--budget-5h-cap", "70",
+            ]
+            if kac.get("incremental", True):
+                audit_args.append("--incremental")   # 只审变动/新增节点
+            r3 = run_py("kg/audit_kg.py", audit_args)
+            if r3 != 0:
+                print(f"    audit_kg 失败 (rc={r3})")
         # 4) 滚动重扫 PDF（夜间深度扫描书本，每晚 30 页轮转）
         r4 = run_py("kg/rescan_rolling.py", [
             "--kg", str(kg),
