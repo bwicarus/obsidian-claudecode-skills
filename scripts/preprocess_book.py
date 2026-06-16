@@ -126,8 +126,22 @@ def rebuild_pages(src_path: Path, out_path: Path, uniform: bool = True,
                 if vw <= 0 or vh <= 0:
                     return False
                 k = (target / vw) if uniform else 1.0
-                mat = fitz.Matrix(k * raster_scale, k * raster_scale)
-                pix = p.get_pixmap(matrix=mat)                 # 自动应用 /Rotate → 正立
+                # 渲染倍率按页内原图的原生分辨率定,**不再写死 raster_scale**。
+                # 老 bug:写死 raster_scale=2 = 144dpi,远低于 ~300dpi 扫描原图 → 整本被降采样变糊
+                # (2026-06-16 费曼/料理师即此)。get_image_info 给渲染后像素尺寸(已含旋转),取长边算
+                # scale=native/page_long → 渲染像素≈原生、不丢细节;floor=raster_scale 保低清页≥2× 显示,
+                # cap 5×(~360dpi)控体积。
+                native_long = 0
+                try:
+                    for _info in p.get_image_info():
+                        native_long = max(native_long, _info.get("width", 0), _info.get("height", 0))
+                except Exception:
+                    native_long = 0
+                page_long = max(vw, vh)
+                rscale = (native_long / page_long) if (native_long and page_long) else raster_scale
+                rscale = max(raster_scale, min(rscale, 5.0))
+                mat = fitz.Matrix(rscale, rscale)
+                pix = p.get_pixmap(matrix=mat)                 # 自动应用 /Rotate → 正立,像素≈原生
                 jpg = _enhance_jpeg(pix, jpg_quality) if enhance \
                     else pix.tobytes("jpg", jpg_quality=jpg_quality)
                 del pix
