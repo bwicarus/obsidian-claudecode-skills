@@ -936,3 +936,17 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - `_applyZoom` / `_refitToWidth` / `_runFitOverflowGuard` / `zoomChange`(06-layout、05-nav)三模式**统一**:`if (!await _rescaleContinuousInPlace()) { single→renderPage(currentPage); else→setupContinuousMode() }`。单页的唯一 wrap 走跟连续一模一样的 `_rescaleContinuousInPlace`(CSS-zoom 瞬时缩放 + 后台重栅格化,zoom 落在 **wrap** 而非 page-container → 无 page-container 残留 → 无回弹)。删掉所有「单页直渲 page-container」特殊分支。
 - 单页↔连续切换安全:`_remodeListInPlace` 已有 `wraps.length !== pdfDoc.numPages → return false` 守卫,单页只有 1 wrap ≠ 总页数 → 自动整列重建。
 - **教训**:跨设备渲染/手势 bug,headless 复现不出来时,别一层层打补丁;先看大厂(PDF.js / Mozilla viewer)怎么用**统一数据结构**消除特殊分支。补丁堆多了本身就是新 bug 源。
+
+### 39. 侧边栏 Copilot 助手:选中上下文 + 权威查词 + 额度护栏(2026-06-16,`reader-fix-48`,commit d4f52d3)
+
+**侧栏 Copilot = 带工具的对话 agent**(右侧抽屉「助手」tab)。后端 `_server_deploy/assistant.py`(部署 `/home/bwicarus/webapp/assistant.py`),前端 `reader.src/25-assistant.js`。大脑 = 预热常驻的 `claude --print --input-format stream-json --output-format stream-json --include-partial-messages --model sonnet --effort high`;**自管工具循环**(agent 吐一行 `{"tool","args"}` JSON → 服务端执行 Python → 喂回 `【工具结果】` → 循环到 final answer),不上 MCP。工具:`read_page / read_selection / search_book / translate / make_anki / make_note / add_vocab / goto_page / lookup_word / see_page / page_vocab / highlight / undo_last`。SSE 事件:`tool / tool-done / answer(流式) / task / undo / notice / actions / error`。前端 `ctx()` = `window.__voiceContext()`(05-nav.js),POST `/api/assistant/chat`。对话历史服务端持久化(跨设备)`state/assistant-convo/<uid>.json`,每轮带所在书/页/选中句标注,让助手懂「刚才那页」。
+
+本次 3 项加固(用户「除了 gemini 其他全做」中剩余 3 项,均不碰 Gemini):
+
+- **🟢 选中失效校验**(防跨页陈旧选中误当成「现在在问的」):阅读器自绘 char-layer 选中存模块级 `lastSelText`(原生 `getSelection()` 在 OCR/漫画书常为空),翻页/开助手都不清它 → 旧选中会跨页漏给助手。修:`_updateSelPreview`(14-textlayer-legacy.js)每次选中变化打 `window.__lastSelMeta={page,t}`(清空→null);`__voiceContext` 只认「**当前页 + 10min 内**」的 char-layer 选中,否则回退**实时**原生 `getSelection()`;无 meta 一律当陈旧丢弃。
+- **🟠 选中带「所在句」**(免每次都 read_page 才有上下文):`_selByCharRange`(13-selection.js)用现成 `_expandSentenceFromRange`+`_charsRangeToText` 算选中所在句存 `window.__lastSelSentence`(整句==选中则不存,免重复);`__voiceContext` 带出 `selection_sentence`;`assistant._sys_prompt` 把它拼进【当前页面】末尾,选中规则改成「**有所在句就别再 read_page**,不足才补读」。`sel`/句过 `_clean_tag`(折叠空白 + 剥 `【】「」`)防 prompt 注入。
+- **🟢 额度护栏**(用户明确**不用 Gemini 降级** → 只提醒不切后端):`assistant.py` 后台 150s 周期查实时额度(`scripts/lib/claude_quota`,零 token + 缓存,**非阻塞**:`_quota_loop` 守在快照里,`_agent_run` 只读快照),近上限(5h≥85/95 或 7d-sonnet≥90/97 两档)→ `_agent_run` 头部发 `notice` 事件;前端渲成 `.asst-note` 居中小黄条(不覆盖回答)。**绝不降级到别的后端**,助手照常用 Claude。
+
+**验证**:`_sys_prompt` 句显示/抑制/注入剥离;额度阈值 5 档 + 过期快照(>1800s 作废);staleness 6 场景 Node 矩阵;真机 e2e(`test_client` + 强制告警)SSE 顺序 `notice→answer(多段流式)→done`,真 claude 正常作答 + 新 `selection_sentence` 字段不报错。
+
+**踩坑**:① `_sys_prompt` 自检别拿静态 prompt 里也出现的词(「用户当前选中」「选中所在句」)当断言依据——它们在固定指令文本里也有;用动态专属串(`用户当前选中:「` 带冒号引号、`(已给好的上下文`)。② 额度查询若内联进 `/chat` 同步跑会给首条消息加最多几秒延迟(`fetch_quota` 网络调用);改成后台线程刷快照、请求端只读 → 零延迟。③ 额度护栏查询本身**零 token**(走 OAuth usage 端点),不烧配额。
