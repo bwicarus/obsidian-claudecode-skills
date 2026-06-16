@@ -90,6 +90,7 @@ def _spawn():
     try:
         return subprocess.Popen(
             [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+             "--include-partial-messages",   # 吐 text_delta → 最终回答可逐字流式
              "--verbose", "--model", _AGENT_MODEL, "--effort", "high"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, cwd=str(CLAUDE_DIR))
@@ -133,6 +134,43 @@ def _send(p, content: str, timeout: float = 90.0):
         if p.poll() is not None:
             break
     return None
+
+
+def _send_stream(p, content, timeout: float = 90.0):
+    """发一轮 user 消息,**流式** yield:('delta', 累计文本) 每来一段 text_delta;最后 ('result', 完整文本/None)。
+    供 _agent_run 把最终回答逐字吐给前端(tool 调用 JSON 不流式,见 _agent_run 的 startswith('{') 判别)。"""
+    try:
+        p.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
+        p.stdin.flush()
+    except Exception:
+        yield ("result", None); return
+    acc = ""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        r, _, _ = select.select([p.stdout], [], [], 0.5)
+        if r:
+            ln = p.stdout.readline()
+            if not ln:
+                break
+            if '"text_delta"' in ln:
+                try:
+                    o = json.loads(ln)
+                    ev = o.get("event") or o
+                    t = ((ev.get("delta") or {}).get("text")) or ""
+                    if t:
+                        acc += t
+                        yield ("delta", acc)
+                except Exception:
+                    pass
+            elif '"type":"result"' in ln:
+                try:
+                    full = (json.loads(ln).get("result") or "").strip()
+                except Exception:
+                    full = acc.strip()
+                yield ("result", full or acc.strip() or None); return
+        if p.poll() is not None:
+            break
+    yield ("result", acc.strip() or None)
 
 
 # 预热一个待命进程(侧边栏打开时 /prewarm 调),省冷启动
@@ -621,7 +659,18 @@ def _agent_run(message, ctx, history):
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         for step in range(6):
-            raw = _send(p, content)
+            raw = None
+            _last_emit = 0.0
+            for kind, val in _send_stream(p, content):
+                if kind == "delta":
+                    # tool 调用是裸 JSON(以 { 开头)→ 不流式;最终回答是文字 → 逐字吐 answer(前端边接边渲染)
+                    if val and not val.lstrip().startswith("{"):
+                        now = time.time()
+                        if now - _last_emit > 0.1:   # 节流 ~100ms,减 SSE/重渲(末尾 answer 会补完整)
+                            _last_emit = now
+                            yield {"event": "answer", "data": val}
+                else:
+                    raw = val
             if not raw:
                 yield {"event": "error", "data": "助手没响应(超时)"}
                 return
