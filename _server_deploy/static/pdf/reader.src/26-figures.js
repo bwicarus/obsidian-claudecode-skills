@@ -9,13 +9,13 @@
   var css = document.createElement('style');
   css.textContent =
     // 苹果风格:磨砂玻璃圆形徽标,轻投影,极简「照片」符号
-    '.fig-badge{position:absolute;width:30px;height:30px;border-radius:50%;z-index:6;cursor:pointer;' +
-    'display:flex;align-items:center;justify-content:center;color:#fff;' +
-    'background:rgba(10,132,255,.92);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);' +
-    'box-shadow:0 2px 8px rgba(0,0,0,.28),inset 0 0 0 .5px rgba(255,255,255,.35);' +
-    '-webkit-tap-highlight-color:transparent;transition:transform .12s}' +
-    '.fig-badge:active{transform:scale(.88)}' +
-    '.fig-badge svg{width:17px;height:17px;display:block}' +
+    '.fig-badge{position:absolute;width:26px;height:26px;border-radius:50%;z-index:6;cursor:pointer;' +
+    'display:flex;align-items:center;justify-content:center;color:#fff;opacity:.82;' +
+    'background:rgba(10,132,255,.9);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);' +
+    'box-shadow:0 2px 7px rgba(0,0,0,.26),inset 0 0 0 .5px rgba(255,255,255,.35);' +
+    '-webkit-tap-highlight-color:transparent;transition:transform .12s,opacity .12s}' +
+    '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:1}' +
+    '.fig-badge svg{width:15px;height:15px;display:block}' +
     '.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;' +
     'border:1px solid #2a3a63;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
     'padding:14px 16px;font-size:14px;line-height:1.6;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch}' +
@@ -66,17 +66,24 @@
     var canvas = pw.querySelector('canvas');
     var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
     if (!cssW || !cssH) return;
+    // 徽标放**左侧页边白边**、垂直对齐到图(像 iBooks 页边批注标记)——指向图但不压正文。
+    // 同一垂直高度有多图就横向错开,避免叠在一起。
+    var used = [];
     rec.figs.forEach(function (f) {
-      var bb = (f.bbox && f.bbox.length === 4) ? f.bbox : [0.86, 0.04, 0.98, 0.12];  // 无 bbox → 右上角
-      var bx = Math.max(0, Math.min(1, bb[0])) * cssW, by = Math.max(0, Math.min(1, bb[1])) * cssH;
+      var bb = (f.bbox && f.bbox.length === 4 && bb4ok(f.bbox)) ? f.bbox : null;
+      var cy = bb ? (bb[1] + bb[3]) / 2 : 0.5;        // 图的垂直中心(无 bbox → 页中)
+      var top = Math.max(2, Math.min(cssH - 28, cy * cssH - 13));
+      var lvl = 0; while (used.some(function (u) { return Math.abs(u.t - top) < 28 && u.l === lvl; })) lvl++;
+      used.push({ t: top, l: lvl });
       var b = document.createElement('div'); b.className = 'fig-badge'; b.innerHTML = PHOTO_SVG;
-      b.style.left = Math.max(2, Math.min(cssW - 32, bx + 4)) + 'px';
-      b.style.top = Math.max(2, Math.min(cssH - 32, by + 4)) + 'px';
+      b.style.left = (3 + lvl * 30) + 'px';
+      b.style.top = top + 'px';
       b.style.pointerEvents = 'auto';
       b.title = f.caption || '图说明';
       b.addEventListener('click', function (e) { e.stopPropagation(); openPop(b, f); });
       layer.appendChild(b);
     });
+    function bb4ok(a) { return a[2] > a[0] && a[3] > a[1]; }
   }
 
   window.renderFiguresOnPage = function (pw, num) {
