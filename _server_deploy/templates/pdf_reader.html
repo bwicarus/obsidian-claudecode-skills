@@ -135,8 +135,11 @@ body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #hea
 #side-tabs .side-tab:hover{background:#1a2540;color:#cfe6ff}
 #side-tabs .side-tab.active{background:#1a2540;color:#7dd3fc;font-weight:600}
 #side-tabs .side-tab-sp{flex:1}
-#side-tabs .side-icon-btn{background:transparent;border:none;color:#7a8497;font-size:15px;cursor:pointer;padding:3px 7px}
+#side-tabs .side-icon-btn{background:transparent;border:none;color:#7a8497;font-size:15px;cursor:pointer;padding:3px 7px;display:inline-flex;align-items:center}
 #side-tabs .side-icon-btn:hover{color:#fff}
+/* Apple/SF-Symbol 风格描边图标(替代 tab/按钮 emoji)：细描边、圆角、跟文字色 */
+#side-tabs .si{width:15px;height:15px;vertical-align:-3px;margin-right:5px;flex:none}
+#side-tabs .side-icon-btn .si{margin-right:0;width:16px;height:16px}
 /* pane：默认隐藏，active 显示并撑满 */
 .side-pane{display:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0}
 .side-pane.active{display:block}
@@ -708,13 +711,13 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
 <!-- 右侧统一面板：顶部 tab 切换「语法分析 / 知识点」-->
 <aside id="grammar-panel">
   <div id="side-tabs">
-    <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')">📊 语法</button>
-    <button class="side-tab" data-pane="vocab" onclick="switchSideTab('vocab')">📒 单词本</button>
-    <button class="side-tab" data-pane="kg" onclick="switchSideTab('kg')">📋 知识点</button>
-    <button class="side-tab" data-pane="hist" onclick="switchSideTab('hist')">📜 历史</button>
+    <button class="side-tab active" data-pane="grammar" onclick="switchSideTab('grammar')"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h11M4 18h7"/></svg>语法</button>
+    <button class="side-tab" data-pane="vocab" onclick="switchSideTab('vocab')"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h11a1 1 0 0 1 1 1v15H8a2 2 0 0 1-2-2V4z"/><path d="M6 4a2 2 0 0 0-2 2v12a2 2 0 0 1 2-2h12"/></svg>单词本</button>
+    <button class="side-tab" data-pane="kg" onclick="switchSideTab('kg')"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>知识点</button>
+    <button class="side-tab" data-pane="hist" onclick="switchSideTab('hist')"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>历史</button>
     <span class="side-tab-sp"></span>
-    <button class="side-icon-btn" id="side-clear" onclick="clearGrammarBlocks()" title="清空全部分析">🗑</button>
-    <button class="side-icon-btn" id="side-settings-btn" onclick="toggleSideSettings(event)" title="侧栏设置">⚙</button>
+    <button class="side-icon-btn" id="side-clear" onclick="clearGrammarBlocks()" title="清空全部分析"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1zM6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg></button>
+    <button class="side-icon-btn" id="side-settings-btn" onclick="toggleSideSettings(event)" title="侧栏设置"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg></button>
   </div>
   <div id="side-settings" style="display:none">
     <label class="ss-row"><span>悬浮显示（盖在正文上）</span><input type="checkbox" id="gp-floating" onchange="_gpSetFloating(this.checked)"></label>

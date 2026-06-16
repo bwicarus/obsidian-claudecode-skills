@@ -1240,6 +1240,7 @@ function _updateModeButtons() {
 async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
   currentPage = keepPage;
+  window._gpApplyAppearance && _gpApplyAppearance();   // 切排版 → 套用本排版各自记的侧栏外观(悬浮/模糊),在 refit 前置好 grammar-floating
   // 连续↔双页:优先**原地 reparent** 已渲染页(不重渲→不"重新加载"),再原地重标尺到新 fit 宽;失败才整列重建
   if (readMode !== 'single' && _remodeListInPlace()) {
     await _refitToWidth(true, false);   // 结构已与新 readMode 匹配 → 走原地重标尺(instant-resize + 后台高清化)
@@ -1704,7 +1705,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-41';
+const READER_BUILD = 'reader-fix-42';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -5282,19 +5283,33 @@ window.closeGrammarPanel = () => {
   if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
 
-// ── 右栏外观设置：悬浮显示 + 背景模糊度（localStorage 持久化，仿仪表盘抽屉设置）──
-function _gpApplyAppearance() {
-  document.body.classList.toggle('grammar-floating', localStorage.getItem('pdf-gp-floating') === '1');
-  const blur = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
-  document.documentElement.style.setProperty('--gp-blur', blur + 'px');
+// ── 右栏外观设置：悬浮显示 + 背景模糊度。**按排版(continuous/spread)分别记忆**(用户要两种排版各存一套)──
+// 键：pdf-gp-{floating,blur}-{continuous|spread}；缺则回退老的全局键(老用户迁移),再回退默认。切排版/转屏后重应用。
+function _gpMode() { return (typeof readMode !== 'undefined' && readMode === 'spread') ? 'spread' : 'continuous'; }
+function _gpGet(name, def) {
+  let v = localStorage.getItem('pdf-gp-' + name + '-' + _gpMode());
+  if (v === null) v = localStorage.getItem('pdf-gp-' + name);   // 迁移:老全局键
+  return v === null ? def : v;
 }
+function _gpSyncUI() {
+  const f = document.getElementById('gp-floating'); if (f) f.checked = _gpGet('floating', '0') === '1';
+  const b = parseInt(_gpGet('blur', '20'), 10);
+  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
+  if (bi) bi.value = b; if (bv) bv.textContent = b;
+}
+function _gpApplyAppearance() {
+  document.body.classList.toggle('grammar-floating', _gpGet('floating', '0') === '1');
+  document.documentElement.style.setProperty('--gp-blur', parseInt(_gpGet('blur', '20'), 10) + 'px');
+  _gpSyncUI();
+}
+window._gpApplyAppearance = _gpApplyAppearance;   // 切排版(toggleReadMode/toggleSpread)/旋转后调,重应用本排版的侧栏外观
 window._gpSetFloating = (on) => {
-  localStorage.setItem('pdf-gp-floating', on ? '1' : '0');
+  localStorage.setItem('pdf-gp-floating-' + _gpMode(), on ? '1' : '0');
   document.body.classList.toggle('grammar-floating', !!on);
   if (typeof _scheduleRefit === 'function') _scheduleRefit(true);   // 悬浮↔挤压 → #main 宽度变 → 重排
 };
 window._gpSetBlur = (v) => {
-  localStorage.setItem('pdf-gp-blur', String(v));
+  localStorage.setItem('pdf-gp-blur-' + _gpMode(), String(v));
   document.documentElement.style.setProperty('--gp-blur', v + 'px');
   const el = document.getElementById('gp-blur-val'); if (el) el.textContent = v;
 };
@@ -5302,11 +5317,7 @@ window.toggleSideSettings = (ev) => {
   if (ev) ev.stopPropagation();
   const m = document.getElementById('side-settings'); if (!m) return;
   if (m.style.display === 'block') { m.style.display = 'none'; return; }
-  const f = document.getElementById('gp-floating');
-  if (f) f.checked = localStorage.getItem('pdf-gp-floating') === '1';
-  const b = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
-  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
-  if (bi) bi.value = b; if (bv) bv.textContent = b;
+  _gpSyncUI();
   m.style.display = 'block';
 };
 document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
@@ -7723,7 +7734,8 @@ async function _connProbe() {
   // ── tab 注入(放第一个,最显眼)──
   var tabBtn = document.createElement('button');
   tabBtn.className = 'side-tab'; tabBtn.dataset.pane = 'asst';
-  tabBtn.textContent = '🤖 助手';
+  // Apple/SF「sparkles」图标(替代 🤖 emoji),复用模板 .si 样式
+  tabBtn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l1.4 4.2L18 9.6l-4.6 1.4L12 16l-1.4-4.6L6 9.6l4.6-1.4L12 4z"/><path d="M18.6 14.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7z"/></svg>助手';
   tabBtn.onclick = function () { window.switchSideTab && window.switchSideTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
   tabsEl.insertBefore(tabBtn, tabsEl.firstChild);
 

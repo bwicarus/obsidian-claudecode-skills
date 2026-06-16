@@ -8,6 +8,7 @@ function _updateModeButtons() {
 async function _applyModeChange(keepPage) {
   _pendingScrollY = 0;   // 清掉位置恢复残留，否则 setupContinuousMode 的定位会被跳过
   currentPage = keepPage;
+  window._gpApplyAppearance && _gpApplyAppearance();   // 切排版 → 套用本排版各自记的侧栏外观(悬浮/模糊),在 refit 前置好 grammar-floating
   // 连续↔双页:优先**原地 reparent** 已渲染页(不重渲→不"重新加载"),再原地重标尺到新 fit 宽;失败才整列重建
   if (readMode !== 'single' && _remodeListInPlace()) {
     await _refitToWidth(true, false);   // 结构已与新 readMode 匹配 → 走原地重标尺(instant-resize + 后台高清化)

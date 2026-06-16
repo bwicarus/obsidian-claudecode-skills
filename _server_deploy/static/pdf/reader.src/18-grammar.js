@@ -230,19 +230,33 @@ window.closeGrammarPanel = () => {
   if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
 
-// ── 右栏外观设置：悬浮显示 + 背景模糊度（localStorage 持久化，仿仪表盘抽屉设置）──
-function _gpApplyAppearance() {
-  document.body.classList.toggle('grammar-floating', localStorage.getItem('pdf-gp-floating') === '1');
-  const blur = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
-  document.documentElement.style.setProperty('--gp-blur', blur + 'px');
+// ── 右栏外观设置：悬浮显示 + 背景模糊度。**按排版(continuous/spread)分别记忆**(用户要两种排版各存一套)──
+// 键：pdf-gp-{floating,blur}-{continuous|spread}；缺则回退老的全局键(老用户迁移),再回退默认。切排版/转屏后重应用。
+function _gpMode() { return (typeof readMode !== 'undefined' && readMode === 'spread') ? 'spread' : 'continuous'; }
+function _gpGet(name, def) {
+  let v = localStorage.getItem('pdf-gp-' + name + '-' + _gpMode());
+  if (v === null) v = localStorage.getItem('pdf-gp-' + name);   // 迁移:老全局键
+  return v === null ? def : v;
 }
+function _gpSyncUI() {
+  const f = document.getElementById('gp-floating'); if (f) f.checked = _gpGet('floating', '0') === '1';
+  const b = parseInt(_gpGet('blur', '20'), 10);
+  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
+  if (bi) bi.value = b; if (bv) bv.textContent = b;
+}
+function _gpApplyAppearance() {
+  document.body.classList.toggle('grammar-floating', _gpGet('floating', '0') === '1');
+  document.documentElement.style.setProperty('--gp-blur', parseInt(_gpGet('blur', '20'), 10) + 'px');
+  _gpSyncUI();
+}
+window._gpApplyAppearance = _gpApplyAppearance;   // 切排版(toggleReadMode/toggleSpread)/旋转后调,重应用本排版的侧栏外观
 window._gpSetFloating = (on) => {
-  localStorage.setItem('pdf-gp-floating', on ? '1' : '0');
+  localStorage.setItem('pdf-gp-floating-' + _gpMode(), on ? '1' : '0');
   document.body.classList.toggle('grammar-floating', !!on);
   if (typeof _scheduleRefit === 'function') _scheduleRefit(true);   // 悬浮↔挤压 → #main 宽度变 → 重排
 };
 window._gpSetBlur = (v) => {
-  localStorage.setItem('pdf-gp-blur', String(v));
+  localStorage.setItem('pdf-gp-blur-' + _gpMode(), String(v));
   document.documentElement.style.setProperty('--gp-blur', v + 'px');
   const el = document.getElementById('gp-blur-val'); if (el) el.textContent = v;
 };
@@ -250,11 +264,7 @@ window.toggleSideSettings = (ev) => {
   if (ev) ev.stopPropagation();
   const m = document.getElementById('side-settings'); if (!m) return;
   if (m.style.display === 'block') { m.style.display = 'none'; return; }
-  const f = document.getElementById('gp-floating');
-  if (f) f.checked = localStorage.getItem('pdf-gp-floating') === '1';
-  const b = parseInt(localStorage.getItem('pdf-gp-blur') || '20', 10);
-  const bi = document.getElementById('gp-blur'), bv = document.getElementById('gp-blur-val');
-  if (bi) bi.value = b; if (bv) bv.textContent = b;
+  _gpSyncUI();
   m.style.display = 'block';
 };
 document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
