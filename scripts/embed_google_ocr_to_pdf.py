@@ -62,7 +62,10 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
         page.insert_text(
             pt,
             c,
-            fontname="japan",
+            # china-s 是 pan-CJK 超集:实测 insert_text+读回,简体/繁体/假名/和制汉字/共用全覆盖、一个不丢;
+            # 原写死 "japan"(为日语书做)对简体专用字(费/查/纽/约/获/战/间…)无字形 → 静默丢字 → 选字层缺字、
+            # "浮层近一半盖不全"。用 china-s 中日繁通吃,日语书也不退化(假名+和制汉字都在)。
+            fontname="china-s",
             fontsize=fs_pdf,
             rotate=rot,
             color=(0, 0, 0),
