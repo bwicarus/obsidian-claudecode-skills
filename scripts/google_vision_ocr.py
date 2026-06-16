@@ -48,14 +48,20 @@ def pdf_sha(pdf_path: Path) -> str:
     return hashlib.sha1(str(pdf_path.resolve()).encode()).hexdigest()[:16]
 
 
-def ocr_one_page(api_key: str, png_bytes: bytes) -> dict:
+def ocr_one_page(api_key: str, png_bytes: bytes, lang_hints=None) -> dict:
     """对一张图(PNG/JPEG)调 Vision API,提取 char-level (text + bbox)。
-    瞬时网络/SSL 抖动(SSLEOFError 等)重试 3 次,避免单页因一次抖动永久缺 OCR。"""
+    瞬时网络/SSL 抖动(SSLEOFError 等)重试 3 次,避免单页因一次抖动永久缺 OCR。
+
+    lang_hints: languageHints 列表(如 ["ja"] / ["zh-Hans","en"]);**空/None = 让 Vision 自动检测**。
+    ⚠ 历史踩坑:这里曾写死 ["ja"],导致简体中文书被当日语识别 → 整页繁体杂字+漏字乱码
+    (实测费曼讲义:ja→768字乱码,zh/自动→991字完美;日语书 ja 与自动检测结果一致)。
+    故默认自动检测:中文/英文/日文都对,且不再因单一硬编码语言把别的语种 OCR 毁掉。"""
+    image_context = {"languageHints": list(lang_hints)} if lang_hints else {}
     payload = {
         "requests": [{
             "image": {"content": base64.b64encode(png_bytes).decode()},
             "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            "imageContext": {"languageHints": ["ja"]},
+            "imageContext": image_context,
         }]
     }
     url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
@@ -131,7 +137,11 @@ def main() -> int:
                          "请求体撑爆(SSL 超时)/把内存吃光,封顶后等比缩小")
     ap.add_argument("--jpeg-quality", type=int, default=90,
                     help="上传用 JPEG 质量。JPEG 比 PNG 小一个量级,OCR 质量无可感知损失")
+    ap.add_argument("--lang-hints", default="",
+                    help="Vision languageHints,逗号分隔(如 'ja' 或 'zh-Hans,en')。"
+                         "留空=自动检测(推荐:中/日/英都对)。⚠ 别再写死单一语言,会把别的语种 OCR 毁掉")
     args = ap.parse_args()
+    lang_hints = [h.strip() for h in (args.lang_hints or "").split(",") if h.strip()]
 
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():
@@ -210,7 +220,7 @@ def main() -> int:
             finally:
                 doc_local.close()
             t = time.time()
-            result = ocr_one_page(api_key, img_bytes)
+            result = ocr_one_page(api_key, img_bytes, lang_hints)
             dt = time.time() - t
             err = None
         except Exception as ex:
