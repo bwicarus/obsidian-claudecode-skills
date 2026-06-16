@@ -384,6 +384,10 @@ def main() -> int:
                     help="7d 窗口 utilization 上限（默认 88，保护周窗口不爆）")
     ap.add_argument("--budget-max-batches", type=int, default=30,
                     help="budget-loop 硬上限批数（防意外，默认 30 批 × 20 节点 = 600）")
+    ap.add_argument("--budget-5h-cap", type=float, default=100.0,
+                    help="5h 窗口利用率天花板（默认 100=不限）。can_run_aggressive 故意只看 7d+时间、不看 5h 窗口，"
+                         "导致 7d 处于周低点时单夜能把 5h 烧满、锁死当天用量。设低于 100（如 70）"
+                         "让 budget-loop 在 5h 达此值时也停，防单夜独占整个 5h 窗口。")
     # 深度审计：含 PDF 内容验证 + 自动 apply safe ops（fix_summary）
     ap.add_argument("--deep", action="store_true",
                     help="深度模式：每节点跑 PDF 内容验证，能输出 fix_summary/fix_pages/merge/delete 建议")
@@ -484,6 +488,7 @@ def main() -> int:
             print(f"    安全 cutoff：5h - {args.buffer_min}min buffer = "
                   f"{args.target_hour - 5}:{args.target_min:02d}（左右）后停跑")
             print(f"    7d 触限阈值：{args.budget_target_7d:.0f}%")
+            print(f"    5h 天花板：{args.budget_5h_cap:.0f}%")
             print(f"    硬上限：{args.budget_max_batches} 批 × {args.ai_sample_size} 节点")
             for batch_i in range(args.budget_max_batches):
                 ok, reason = can_run_aggressive(
@@ -492,7 +497,11 @@ def main() -> int:
                 if not ok:
                     print(f"  [批 {batch_i+1}] STOP - {reason}")
                     break
-                print(f"  [批 {batch_i+1}/{args.budget_max_batches}] {reason}, 累计 {len(audited_ids_now)}/{l2_total}")
+                _u5 = util_5h()   # can_run_aggressive 不看 5h 窗口 → 这里补一道天花板,防单夜把 5h 烧满锁死当天用量
+                if _u5 >= args.budget_5h_cap:
+                    print(f"  [批 {batch_i+1}] STOP - 5h 窗口已达 {_u5:.0f}% >= 天花板 {args.budget_5h_cap:.0f}%")
+                    break
+                print(f"  [批 {batch_i+1}/{args.budget_max_batches}] {reason}, 5h={_u5:.0f}%, 累计 {len(audited_ids_now)}/{l2_total}")
                 if not run_one_batch():
                     print("  无更多节点可审，停"); break
         else:

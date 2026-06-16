@@ -258,6 +258,10 @@ def run_kg_link_mastery() -> int:
             # 2026-05-26 调低：原 88（昨晚一夜 7d 涨 +7%，过高）→ 60（更保守）
             "--budget-target-7d", "60",
             "--budget-max-batches", "30",
+            # 2026-06-17 新增：can_run_aggressive 不看 5h 窗口，7d 处于周低点时单夜能把 5h 烧到 100%
+            # （06-16 暴涨根因：7d-sonnet 起始 0% → 闸门整晚失效 → audit 跑满全图，5h 13→100、7d-sonnet +24%）。
+            # 加 5h 天花板 70%：审查仍持续维护 KG，但单夜不再独占整个 5h 窗口、不锁死白天用量。
+            "--budget-5h-cap", "70",
         ])
         if r3 != 0:
             print(f"    audit_kg 失败 (rc={r3})")
