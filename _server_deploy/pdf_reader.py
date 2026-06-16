@@ -4727,14 +4727,22 @@ def _fig_path_abs(abs_path) -> Path:
 
 def _fig_load_abs(abs_path) -> dict:
     p = _fig_path_abs(abs_path)
+    try:
+        cur_mt = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        cur_mt = 0
     if not p.exists():
-        return {"pdf": str(abs_path), "figures": [], "_none_pages": []}
+        return {"pdf": str(abs_path), "book_mtime": cur_mt, "figures": [], "_none_pages": []}
     try:
         d = json.loads(p.read_text("utf-8"))
         d.setdefault("figures", []); d.setdefault("_none_pages", [])
+        # 书变了(重 OCR/重嵌/替换 → mtime 变)→ 旧图注可能过期 → 清空,懒重描
+        if cur_mt and d.get("book_mtime") and d["book_mtime"] != cur_mt:
+            d["figures"] = []; d["_none_pages"] = []
+        d["book_mtime"] = cur_mt
         return d
     except Exception:
-        return {"pdf": str(abs_path), "figures": [], "_none_pages": []}
+        return {"pdf": str(abs_path), "book_mtime": cur_mt, "figures": [], "_none_pages": []}
 
 def _fig_save_abs(abs_path, data: dict):
     p = _fig_path_abs(abs_path)
