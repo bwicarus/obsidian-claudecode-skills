@@ -138,8 +138,11 @@ def main() -> int:
             print(f"  [{i+1}/{n_pages}] {total_chars} chars  {time.time()-t0:.1f}s", flush=True)
 
     print(f"嵌入 {total_chars} chars  保存 → {out_path}", flush=True)
-    _write_progress(args.progress, n_pages, n_pages, "save")   # 大书 save(garbage+deflate)也耗时,标记保存中
-    src.save(str(out_path), garbage=4, deflate=True)
+    _write_progress(args.progress, n_pages, n_pages, "save")   # 大书 save 也耗时,标记保存中
+    # ⚠ garbage=4(流去重)在大书(重建栅格化后 100+MB / 几百张图流)上病态慢——实测费曼(588 页
+    # 151MB)嵌入循环 46min 跑完后,save(garbage=4) 在 Pi 上磨 2.5h+ 没完。改 garbage=1(只清无引用
+    # 对象,不做 O(n) 流去重),输出几乎一样大但秒级保存。deflate 只压未压缩流(图本是 DCT 不动)。
+    src.save(str(out_path), garbage=1, deflate=True)
     src.close()
     _write_progress(args.progress, n_pages, n_pages, "done")
     return 0
