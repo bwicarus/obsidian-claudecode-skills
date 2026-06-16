@@ -1705,7 +1705,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-42';
+const READER_BUILD = 'reader-fix-43';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8075,24 +8075,36 @@ async function _connProbe() {
     var canvas = pw.querySelector('canvas');
     var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
     if (!cssW || !cssH) return;
-    // 徽标放**左侧页边白边**、垂直对齐到图(像 iBooks 页边批注标记)——指向图但不压正文。
-    // 同一垂直高度有多图就横向错开,避免叠在一起。
-    var used = [];
+    // 徽标贴在**图自己的某个角**(离图心远、在图上而非正文上),用 char boxes 选一个**不压字**的角。
+    // 图区本身没有 OCR 文字 → 图内的角天然空;text 检查主要挡 bbox 略大溢到邻近正文的情况。
+    var boxes = pw.__charBoxes || [];   // {left,top,width,height} CSS px(08-charlayer 设)
+    var S = 26, M = 3;
+    function hitsText(x, y) {
+      for (var i = 0; i < boxes.length; i++) {
+        var bx = boxes[i]; if (bx.sp) continue;
+        if (bx.left < x + S && bx.left + bx.width > x && bx.top < y + S && bx.top + bx.height > y) return true;
+      }
+      return false;
+    }
+    function clampX(x) { return Math.max(1, Math.min(cssW - S - 1, x)); }
+    function clampY(y) { return Math.max(1, Math.min(cssH - S - 1, y)); }
     rec.figs.forEach(function (f) {
-      var bb = (f.bbox && f.bbox.length === 4 && bb4ok(f.bbox)) ? f.bbox : null;
-      var cy = bb ? (bb[1] + bb[3]) / 2 : 0.5;        // 图的垂直中心(无 bbox → 页中)
-      var top = Math.max(2, Math.min(cssH - 28, cy * cssH - 13));
-      var lvl = 0; while (used.some(function (u) { return Math.abs(u.t - top) < 28 && u.l === lvl; })) lvl++;
-      used.push({ t: top, l: lvl });
+      var bb = (f.bbox && f.bbox.length === 4 && f.bbox[2] > f.bbox[0] && f.bbox[3] > f.bbox[1]) ? f.bbox : [0.02, 0.03, 0.1, 0.1];
+      var fx0 = bb[0] * cssW, fy0 = bb[1] * cssH, fx1 = bb[2] * cssW, fy1 = bb[3] * cssH;
+      // 四角候选(贴角内缩),优先 右上→左上→右下→左下;都离图心远
+      var cands = [[fx1 - S - M, fy0 + M], [fx0 + M, fy0 + M], [fx1 - S - M, fy1 - S - M], [fx0 + M, fy1 - S - M]];
+      var pos = null;
+      for (var i = 0; i < cands.length; i++) {
+        var x = clampX(cands[i][0]), y = clampY(cands[i][1]);
+        if (!hitsText(x, y)) { pos = [x, y]; break; }
+      }
+      if (!pos) { pos = [clampX((fx0 + fx1) / 2 - S / 2), clampY((fy0 + fy1) / 2 - S / 2)]; }   // 全压字 → 退图心(图区无字)
       var b = document.createElement('div'); b.className = 'fig-badge'; b.innerHTML = PHOTO_SVG;
-      b.style.left = (3 + lvl * 30) + 'px';
-      b.style.top = top + 'px';
-      b.style.pointerEvents = 'auto';
+      b.style.left = pos[0] + 'px'; b.style.top = pos[1] + 'px'; b.style.pointerEvents = 'auto';
       b.title = f.caption || '图说明';
       b.addEventListener('click', function (e) { e.stopPropagation(); openPop(b, f); });
       layer.appendChild(b);
     });
-    function bb4ok(a) { return a[2] > a[0] && a[3] > a[1]; }
   }
 
   window.renderFiguresOnPage = function (pw, num) {
