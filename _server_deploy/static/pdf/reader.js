@@ -1705,7 +1705,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-44';
+const READER_BUILD = 'reader-fix-45';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8050,7 +8050,6 @@ async function _connProbe() {
     if (_popRepos) { window.removeEventListener('scroll', _popRepos, true); window.removeEventListener('resize', _popRepos); _popRepos = null; }
     _popBadge = null;
   }
-  function _armAutoClose() { if (_popTimer) clearTimeout(_popTimer); _popTimer = setTimeout(closePop, 7000); }   // 无操作 7s 自动消失
   function openPop(badge, fig) {
     if (_popBadge === badge) { closePop(); return; }   // 再点同一徽标 → 关
     closePop();
@@ -8069,16 +8068,16 @@ async function _connProbe() {
       if (!badge.isConnected) { closePop(); return; }
       var br = badge.getBoundingClientRect(), pw = pop.getBoundingClientRect().width;
       pop.style.left = Math.min(Math.max(8, br.left), window.innerWidth - pw - 8) + 'px';
-      // 跟徽标上下移动(滚出视口就一起移出,不强行夹住)→ 浮层"贴着图"一起滚
       pop.style.top = (placeBelow ? br.bottom + 8 : br.top - pop.getBoundingClientRect().height - 8) + 'px';
+      // 徽标(图)滚出视口=显示不了 → 几秒后自动关;滚回可见 → 取消关闭。可见时一直跟着图,不关。
+      if (br.bottom <= 0 || br.top >= window.innerHeight) { if (!_popTimer) _popTimer = setTimeout(closePop, 3000); }
+      else if (_popTimer) { clearTimeout(_popTimer); _popTimer = null; }
     }
     reposition();
     var _raf = 0;
-    _popRepos = function () { if (!_raf) _raf = requestAnimationFrame(function () { _raf = 0; reposition(); }); _armAutoClose(); };
+    _popRepos = function () { if (!_raf) _raf = requestAnimationFrame(function () { _raf = 0; reposition(); }); };
     window.addEventListener('scroll', _popRepos, true);   // capture:任何滚动容器(连续模式 #main/window)都跟
     window.addEventListener('resize', _popRepos);
-    pop.addEventListener('pointerdown', _armAutoClose);    // 在浮层里操作(读长文)也续命
-    _armAutoClose();
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([pop]).catch(function () {}); } catch (_) {}
   }
 
