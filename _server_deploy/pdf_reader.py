@@ -4714,6 +4714,97 @@ def _hl_save(rel: str, data: dict):
     tmp.replace(p)
 
 
+# ── 页级图注(state/pdf-figures/<book-sha>.json):视觉模型(Claude)描述扫描书插图 ──
+# 懒加载+预取:阅读器打开某页 → 描述该页(+后几页)插图,缓存;供阅读器图区徽标/全文搜索/助手用。
+# ⚠ sidecar key 用 _book_sha(abspath)(= describe_figures.pdf_sha),跟 describe_figures.py 批量脚本互通。
+_FIG_DIR = CLAUDE_DIR / "state" / "pdf-figures"
+_fig_lock = _threading.Lock()
+_fig_inflight = set()   # 正在后台描述的 (sha,page),去重
+
+def _fig_path_abs(abs_path) -> Path:
+    _FIG_DIR.mkdir(parents=True, exist_ok=True)
+    return _FIG_DIR / f"{_book_sha(abs_path)}.json"
+
+def _fig_load_abs(abs_path) -> dict:
+    p = _fig_path_abs(abs_path)
+    if not p.exists():
+        return {"pdf": str(abs_path), "figures": [], "_none_pages": []}
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        d.setdefault("figures", []); d.setdefault("_none_pages", [])
+        return d
+    except Exception:
+        return {"pdf": str(abs_path), "figures": [], "_none_pages": []}
+
+def _fig_save_abs(abs_path, data: dict):
+    p = _fig_path_abs(abs_path)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    tmp.replace(p)
+
+def _fig_done_page(data: dict, page: int) -> bool:
+    return any(f.get("page") == page for f in data.get("figures", [])) or page in set(data.get("_none_pages", []))
+
+def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int = 2):
+    """后台:描述本页(+预取后 prefetch 页)插图,写 sidecar。in-flight 去重,失败不记(下次重试)。"""
+    import sys as _sys
+    sp = str(CLAUDE_DIR / "scripts")
+    if sp not in _sys.path:
+        _sys.path.insert(0, sp)
+    try:
+        import describe_figures as DF
+        import fitz
+        npages = fitz.open(str(abs_path)).page_count
+    except Exception:
+        return
+    sha = _book_sha(abs_path)
+    for pg in range(page, min(npages, page + prefetch) + 1):
+        if pg < 1:
+            continue
+        key = (sha, pg)
+        with _fig_lock:
+            data = _fig_load_abs(abs_path)
+            if _fig_done_page(data, pg) or key in _fig_inflight:
+                continue
+            _fig_inflight.add(key)
+        try:
+            figs = DF.describe_page_figures(str(abs_path), pg - 1, model)
+        except Exception:
+            figs = None
+        with _fig_lock:
+            _fig_inflight.discard(key)
+            if figs is None:
+                continue
+            data = _fig_load_abs(abs_path)
+            data["figures"] = [f for f in data["figures"] if f.get("page") != pg]
+            if figs:
+                for f in figs:
+                    data["figures"].append({"page": pg, "caption": f.get("caption", ""),
+                                            "bbox": f.get("bbox"), "desc": f.get("desc", "")})
+            elif pg not in data["_none_pages"]:
+                data["_none_pages"].append(pg)
+            _fig_save_abs(abs_path, data)
+
+@bp.route("/api/page-figures")
+def pdf_api_page_figures():
+    """GET ?file=&page= → {ok, figures:[{caption,bbox,desc}…本页], pending}。
+    没描述过的页 → 后台触发描述(本页 + 预取后 2 页),返回 pending=true,前端稍后重取。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    data = _fig_load_abs(abs_path)
+    figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"), "desc": f.get("desc", "")}
+            for f in data.get("figures", []) if f.get("page") == page]
+    done = _fig_done_page(data, page)
+    if not done:
+        _threading.Thread(target=_fig_describe_bg, args=(abs_path, page), daemon=True).start()
+    resp = jsonify({"ok": True, "figures": figs, "pending": (not done)})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @bp.route("/api/highlights", methods=["GET"])
 def pdf_api_highlights_list():
     """GET ?file=<rel> → {ok, highlights:[{id,page,rects,color,text,note,time}, ...]}"""

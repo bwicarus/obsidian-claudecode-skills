@@ -78,6 +78,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   try { renderPhraseHl(wrap); } catch(_) {}
   try { renderExplainHl(wrap); } catch(_) {}
   try { renderWordHl(wrap); } catch(_) {}
+  try { window.renderFiguresOnPage && renderFiguresOnPage(wrap, num); } catch(_) {}   // 页级图注 Apple 徽标
   if (_pageTrOn) { wrap.__pageTrSeq = null; _pageTranslatePage(wrap); }
   if (window._pendingSearchHighlight && window._pendingSearchHighlight.page === num
       && wrap.__charBoxes && wrap.__charBoxes.length) {
