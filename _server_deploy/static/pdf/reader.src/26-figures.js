@@ -34,14 +34,18 @@
   }
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
+  var _popTimer = null, _popRepos = null, _popBadge = null;
   function closePop() {
     var p = document.getElementById('fig-pop'); if (p) p.remove();
-    var m = document.getElementById('fig-pop-mask'); if (m) m.remove();
+    if (_popTimer) { clearTimeout(_popTimer); _popTimer = null; }
+    if (_popRepos) { window.removeEventListener('scroll', _popRepos, true); window.removeEventListener('resize', _popRepos); _popRepos = null; }
+    _popBadge = null;
   }
+  function _armAutoClose() { if (_popTimer) clearTimeout(_popTimer); _popTimer = setTimeout(closePop, 7000); }   // 无操作 7s 自动消失
   function openPop(badge, fig) {
+    if (_popBadge === badge) { closePop(); return; }   // 再点同一徽标 → 关
     closePop();
-    var mask = document.createElement('div'); mask.id = 'fig-pop-mask'; mask.className = 'fig-pop-mask';
-    mask.addEventListener('click', closePop); document.body.appendChild(mask);
+    _popBadge = badge;
     var pop = document.createElement('div'); pop.id = 'fig-pop'; pop.className = 'fig-pop';
     var body = md(fig.desc);
     pop.innerHTML = '<span class="fig-x">✕</span>' +
@@ -49,11 +53,23 @@
       '<div class="fig-body">' + (body != null ? body : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>')) + '</div>';
     document.body.appendChild(pop);
     pop.querySelector('.fig-x').addEventListener('click', closePop);
-    // 定位:徽标下方,超出则上方/夹到视口内
-    var br = badge.getBoundingClientRect(), pr = pop.getBoundingClientRect();
-    var left = Math.min(Math.max(8, br.left), window.innerWidth - pr.width - 8);
-    var top = br.bottom + 8; if (top + pr.height > window.innerHeight - 8) top = Math.max(8, br.top - pr.height - 8);
-    pop.style.left = left + 'px'; pop.style.top = top + 'px';
+    // 上下方定一次(防滚动时反复翻转抖动);左右跟徽标(夹进视口)
+    var ph = pop.getBoundingClientRect().height;
+    var placeBelow = (badge.getBoundingClientRect().bottom + 8 + ph) <= (window.innerHeight - 8);
+    function reposition() {
+      if (!badge.isConnected) { closePop(); return; }
+      var br = badge.getBoundingClientRect(), pw = pop.getBoundingClientRect().width;
+      pop.style.left = Math.min(Math.max(8, br.left), window.innerWidth - pw - 8) + 'px';
+      // 跟徽标上下移动(滚出视口就一起移出,不强行夹住)→ 浮层"贴着图"一起滚
+      pop.style.top = (placeBelow ? br.bottom + 8 : br.top - pop.getBoundingClientRect().height - 8) + 'px';
+    }
+    reposition();
+    var _raf = 0;
+    _popRepos = function () { if (!_raf) _raf = requestAnimationFrame(function () { _raf = 0; reposition(); }); _armAutoClose(); };
+    window.addEventListener('scroll', _popRepos, true);   // capture:任何滚动容器(连续模式 #main/window)都跟
+    window.addEventListener('resize', _popRepos);
+    pop.addEventListener('pointerdown', _armAutoClose);    // 在浮层里操作(读长文)也续命
+    _armAutoClose();
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([pop]).catch(function () {}); } catch (_) {}
   }
 
@@ -98,32 +114,29 @@
     });
   }
 
-  window.renderFiguresOnPage = function (pw, num) {
-    if (!pw || !num || typeof FILE_REL === 'undefined' || !FILE_REL) return;
-    if (_cache[num]) { draw(pw, num); if (_cache[num].pending) schedulePoll(pw, num); return; }
+  function _fetchFigs(pw, num) {
     fetch('/pdf/api/page-figures?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d || !d.ok) return;
         _cache[num] = { figs: d.figures || [], pending: !!d.pending };
         draw(pw, num);
-        if (d.pending) schedulePoll(pw, num);
+        if (d.pending) schedulePoll(pw, num);   // 还没描述完(或上次失败,后端会再触发)→ 轮询拿
       }).catch(function () {});
+  }
+
+  window.renderFiguresOnPage = function (pw, num) {
+    if (!pw || !num || typeof FILE_REL === 'undefined' || !FILE_REL) return;
+    var rec = _cache[num];
+    if (rec && !rec.pending) { draw(pw, num); return; }   // 已确定(有图/NONE)→ 直接画,不再打扰后端
+    // 没拉过 或 还 pending(含上次描述失败的页)→ 重新拉,重置轮询给新机会(回看/重渲会重试)
+    _poll[num] = 0;
+    _fetchFigs(pw, num);
   };
 
-  function schedulePoll(pw, num) {       // 后台描述 ~8s,轮询几次拿结果(只在该页仍在 DOM 时)
-    if ((_poll[num] || 0) >= 6) return;
+  function schedulePoll(pw, num) {       // 后台描述 ~8-15s,轮询几次拿结果(只在该页仍在 DOM 时)
+    if ((_poll[num] || 0) >= 8) return;
     _poll[num] = (_poll[num] || 0) + 1;
-    setTimeout(function () {
-      if (!pw.isConnected) return;
-      fetch('/pdf/api/page-figures?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d || !d.ok) return;
-          _cache[num] = { figs: d.figures || [], pending: !!d.pending };
-          draw(pw, num);
-          if (d.pending) schedulePoll(pw, num);
-        }).catch(function () {});
-    }, 4500);
+    setTimeout(function () { if (pw.isConnected) _fetchFigs(pw, num); }, 4500);
   }
 })();
