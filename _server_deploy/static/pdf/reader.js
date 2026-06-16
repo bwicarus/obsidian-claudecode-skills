@@ -1195,10 +1195,24 @@ function _renderVocabItem(it) {
 // 供后端做 speechContexts 发音偏置 + 大脑谐音纠错(按读音映射到真实项)。模块作用域可见 FILE_REL/currentPage/pdfDoc/readMode/BOOK_LANGS。
 window.__voiceContext = function () {
   try {
-    let sel = '';
+    let sel = '', selSentence = '';
     // 优先 char-layer 选中(lastSelText:阅读器自绘选中,如漫画/PDF 的 OCR 文字层,原生 getSelection 常为空)
-    // → 助手才拿得到"用户选中的内容"(修:开助手/点输入框后原生选区被清,但 lastSelText 仍在)。回退原生选区。
-    try { sel = (((typeof lastSelText === 'string' && lastSelText) || (window.getSelection ? getSelection().toString() : '')) || '').trim().slice(0, 400); } catch (_) {}
+    // → 助手才拿得到"用户选中的内容"(修:开助手/点输入框后原生选区被清,但 lastSelText 仍在)。
+    // 失效校验:char-layer 选中只认「当前页 + 10 分钟内」的,否则翻到别页后旧选中会被误当成现在在问的内容。
+    // 原生选区(getSelection)是实时的,无陈旧问题,作回退。
+    try {
+      const ls = (typeof lastSelText === 'string' ? lastSelText : '').trim();
+      const meta = window.__lastSelMeta;
+      const curP = (typeof currentPage !== 'undefined' ? currentPage : -1);
+      const fresh = ls && meta && meta.page === curP && (Date.now() - (meta.t || 0) < 600000);
+      if (fresh) {
+        sel = ls.slice(0, 400);
+        selSentence = (typeof window.__lastSelSentence === 'string' ? window.__lastSelSentence : '').trim().slice(0, 600);
+      } else {
+        const nat = (window.getSelection ? getSelection().toString() : '').trim();
+        if (nat) sel = nat.slice(0, 400);
+      }
+    } catch (_) {}
     let books = [];
     try {
       const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
@@ -1226,6 +1240,7 @@ window.__voiceContext = function () {
       read_mode: (typeof readMode !== 'undefined' ? readMode : ''),
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
       selection: sel,
+      selection_sentence: selSentence,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,
@@ -1707,7 +1722,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-47';
+const READER_BUILD = 'reader-fix-48';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -3072,6 +3087,16 @@ function _selByCharRange(pw, sIdx, eIdx) {
   lastSelText = text;
   _updateSelPreview(lastSelText);
   if (typeof _updateGrammarBtnVisibility === 'function') _updateGrammarBtnVisibility();
+  // 给侧栏助手记下选中「所在句」(左右扩到句末标点/段落边界):助手不必每次都 read_page 才有上下文,
+  // 直接拿这句判读音/义项(日语同字多音、含义随语境)。整句已被选中就不另存(避免与 selection 重复)。
+  try {
+    const _sr = _expandSentenceFromRange(chars, sIdx, eIdx);
+    if (_sr) {
+      const _sent = _charsRangeToText(chars, _sr.start, _sr.end).slice(0, 600);
+      const _norm = s => (s || '').replace(/\s+/g, '');
+      window.__lastSelSentence = (_sent && _norm(_sent) !== _norm(lastSelText)) ? _sent : '';
+    }
+  } catch (_) {}
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');
@@ -3737,8 +3762,16 @@ function _selectSpanRange(span, start, end) {
 // 更新工具栏内 preview 文本（让用户 verify 选中内容；视觉高亮可能跟 canvas 错位时这是 ground truth）
 function _updateSelPreview(text) {
   const el = document.getElementById('sel-preview');
-  if (!el) return;
   text = (text || '').trim();
+  // 选中元数据(所在页 + 时戳),给语音/侧栏助手 __voiceContext 做「跨页陈旧选中」校验:
+  // 翻到别页后旧选中不再当成"现在在问的内容"。每次选中变化都先清空所在句(char-layer 路径随后会补)。
+  try {
+    window.__lastSelSentence = '';
+    window.__lastSelMeta = text
+      ? { page: (typeof currentPage !== 'undefined' ? currentPage : 0), t: Date.now() }
+      : null;
+  } catch (_) {}
+  if (!el) return;
   if (!text) { el.textContent = '—'; return; }
   const max = 120;
   const display = text.length > max
@@ -7770,6 +7803,7 @@ async function _connProbe() {
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
     '.asst-a h1,.asst-a h2,.asst-a h3{font-size:1em;margin:.5em 0 .2em}' +
     '.asst-tool{align-self:flex-start;color:#7c93c4;font-size:12px;padding:2px 6px;font-style:italic}' +
+    '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
@@ -7853,6 +7887,7 @@ async function _connProbe() {
           var parsed; try { parsed = JSON.parse(data); } catch (_) { parsed = data; }
           if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
           else if (ev === 'answer') { answer = parsed; renderMd(aMsg, answer); scrollDown(); }
+          else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
           else if (ev === 'actions') { acts = parsed; }
           else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
           else if (ev === 'undo' && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }

@@ -195,6 +195,16 @@ function _selByCharRange(pw, sIdx, eIdx) {
   lastSelText = text;
   _updateSelPreview(lastSelText);
   if (typeof _updateGrammarBtnVisibility === 'function') _updateGrammarBtnVisibility();
+  // 给侧栏助手记下选中「所在句」(左右扩到句末标点/段落边界):助手不必每次都 read_page 才有上下文,
+  // 直接拿这句判读音/义项(日语同字多音、含义随语境)。整句已被选中就不另存(避免与 selection 重复)。
+  try {
+    const _sr = _expandSentenceFromRange(chars, sIdx, eIdx);
+    if (_sr) {
+      const _sent = _charsRangeToText(chars, _sr.start, _sr.end).slice(0, 600);
+      const _norm = s => (s || '').replace(/\s+/g, '');
+      window.__lastSelSentence = (_sent && _norm(_sent) !== _norm(lastSelText)) ? _sent : '';
+    }
+  } catch (_) {}
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');

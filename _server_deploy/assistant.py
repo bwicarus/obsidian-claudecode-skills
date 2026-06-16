@@ -217,6 +217,50 @@ def _warm_respawn():
         _warm_p = _spawn()
 
 
+# ──────────────────────── 额度护栏(只告警,不降级/不阻断)────────────────────────
+# 后台周期查实时额度(scripts/lib/claude_quota,零 token + 自带缓存),接近上限就给前端一句提醒。
+# 用户明确「不用 Gemini 降级」→ 这里**只**提醒、绝不切后端,助手照常用 Claude。
+_quota_note = {"text": None, "at": 0.0}
+_quota_started = [False]
+_quota_lock = threading.Lock()
+
+
+def _quota_loop():
+    lib = str(CLAUDE_DIR / "scripts" / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    while True:
+        try:
+            import claude_quota as cq
+            cq.fetch_quota(timeout=8, cache_ttl=1)
+            h5, s7 = cq.util_5h(), cq.util_7d_sonnet()
+            if h5 >= 95 or s7 >= 97:
+                _quota_note["text"] = f"⚠️ Claude 额度紧张(5h {h5:.0f}% · 7d-sonnet {s7:.0f}%),回答可能变慢或中断。"
+            elif h5 >= 85 or s7 >= 90:
+                _quota_note["text"] = f"额度提醒:接近上限(5h {h5:.0f}% · 7d-sonnet {s7:.0f}%)。"
+            else:
+                _quota_note["text"] = None
+            _quota_note["at"] = time.time()
+        except Exception:
+            pass
+        time.sleep(150)
+
+
+def _quota_ensure_loop():
+    with _quota_lock:
+        if _quota_started[0]:
+            return
+        _quota_started[0] = True
+    threading.Thread(target=_quota_loop, daemon=True).start()
+
+
+def _quota_warning():
+    """近上限时回一句告警字符串(给前端 notice 事件);正常/查询失败/快照过期都回 None。非阻塞。"""
+    _quota_ensure_loop()
+    txt = _quota_note["text"]
+    return txt if (txt and time.time() - _quota_note["at"] < 1800) else None
+
+
 # ──────────────────────── 本页正文(fitz)────────────────────────
 def _page_text(file_rel: str, page) -> str:
     try:
@@ -557,8 +601,13 @@ def _sys_prompt(ctx):
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
     meta = {"book": ctx.get("book_name"), "当前可见页": vis, "共": ctx.get("total")}
     meta = {k: v for k, v in meta.items() if v}
-    sel = (ctx.get("selection") or "").strip()
-    sel_line = f"\n用户当前选中:「{sel[:200]}」" if sel else ""
+    sel = _clean_tag(ctx.get("selection"))
+    sent = _clean_tag(ctx.get("selection_sentence"))
+    sel_line = ""
+    if sel:
+        sel_line = f"\n用户当前选中:「{sel[:200]}」"
+        if sent and sent.replace(" ", "") != sel.replace(" ", ""):
+            sel_line += f"\n选中所在句(已给好的上下文,可直接据此判读音/义项,**不必**再 read_page):「{sent[:300]}」"
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -587,7 +636,8 @@ def _sys_prompt(ctx):
         "**读音和释义以它为准,严禁自己编读音**(LLM 读音不可靠);你只负责结合上下文挑最贴切的义项、讲解。\n"
         "★用户**当前有选中文字**(见【当前页面】末尾『用户当前选中』)时,默认他就是在问这段选中内容——"
         "优先针对**选中**回答/查词/翻译/解释/语法/制卡。"
-        "**为定准读音和含义,先 lookup_word 拿权威读音+释义,再 read_page 拿选中所在段落的上下文**挑义项(日语同字多音、含义随语境变)。"
+        "**为定准读音和含义,先 lookup_word 拿权威读音+释义**,再结合上下文挑义项(日语同字多音、含义随语境变);"
+        "上下文优先用末尾已给好的『选中所在句』——**有它就别再 read_page**,只有所在句仍不足以定义项时才 read_page 拿更多段落。"
         "但**『页内有图』≠『要看图』**:选中只是文字、其上下文里并没有图时,**别 see_page**;"
         "只有选中内容/它的上下文**确实涉及某张图**(如『图1-3』『如下图』指代某图),或用户明确说『这张图/这页的图/图里画的』,才 see_page。\n"
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n\n"
@@ -655,6 +705,9 @@ def _agent_run(message, ctx, history):
     if not p:
         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
         return
+    _qw = _quota_warning()   # 额度护栏:近上限只提醒,不降级、不阻断(用户不用 Gemini 降级)
+    if _qw:
+        yield {"event": "notice", "data": _qw}
     client_actions = []
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"

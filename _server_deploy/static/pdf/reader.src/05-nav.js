@@ -318,10 +318,24 @@ function _renderVocabItem(it) {
 // 供后端做 speechContexts 发音偏置 + 大脑谐音纠错(按读音映射到真实项)。模块作用域可见 FILE_REL/currentPage/pdfDoc/readMode/BOOK_LANGS。
 window.__voiceContext = function () {
   try {
-    let sel = '';
+    let sel = '', selSentence = '';
     // 优先 char-layer 选中(lastSelText:阅读器自绘选中,如漫画/PDF 的 OCR 文字层,原生 getSelection 常为空)
-    // → 助手才拿得到"用户选中的内容"(修:开助手/点输入框后原生选区被清,但 lastSelText 仍在)。回退原生选区。
-    try { sel = (((typeof lastSelText === 'string' && lastSelText) || (window.getSelection ? getSelection().toString() : '')) || '').trim().slice(0, 400); } catch (_) {}
+    // → 助手才拿得到"用户选中的内容"(修:开助手/点输入框后原生选区被清,但 lastSelText 仍在)。
+    // 失效校验:char-layer 选中只认「当前页 + 10 分钟内」的,否则翻到别页后旧选中会被误当成现在在问的内容。
+    // 原生选区(getSelection)是实时的,无陈旧问题,作回退。
+    try {
+      const ls = (typeof lastSelText === 'string' ? lastSelText : '').trim();
+      const meta = window.__lastSelMeta;
+      const curP = (typeof currentPage !== 'undefined' ? currentPage : -1);
+      const fresh = ls && meta && meta.page === curP && (Date.now() - (meta.t || 0) < 600000);
+      if (fresh) {
+        sel = ls.slice(0, 400);
+        selSentence = (typeof window.__lastSelSentence === 'string' ? window.__lastSelSentence : '').trim().slice(0, 600);
+      } else {
+        const nat = (window.getSelection ? getSelection().toString() : '').trim();
+        if (nat) sel = nat.slice(0, 400);
+      }
+    } catch (_) {}
     let books = [];
     try {
       const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
@@ -349,6 +363,7 @@ window.__voiceContext = function () {
       read_mode: (typeof readMode !== 'undefined' ? readMode : ''),
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
       selection: sel,
+      selection_sentence: selSentence,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,

@@ -247,8 +247,16 @@ function _selectSpanRange(span, start, end) {
 // 更新工具栏内 preview 文本（让用户 verify 选中内容；视觉高亮可能跟 canvas 错位时这是 ground truth）
 function _updateSelPreview(text) {
   const el = document.getElementById('sel-preview');
-  if (!el) return;
   text = (text || '').trim();
+  // 选中元数据(所在页 + 时戳),给语音/侧栏助手 __voiceContext 做「跨页陈旧选中」校验:
+  // 翻到别页后旧选中不再当成"现在在问的内容"。每次选中变化都先清空所在句(char-layer 路径随后会补)。
+  try {
+    window.__lastSelSentence = '';
+    window.__lastSelMeta = text
+      ? { page: (typeof currentPage !== 'undefined' ? currentPage : 0), t: Date.now() }
+      : null;
+  } catch (_) {}
+  if (!el) return;
   if (!text) { el.textContent = '—'; return; }
   const max = 120;
   const display = text.length > max
