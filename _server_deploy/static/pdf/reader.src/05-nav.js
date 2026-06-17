@@ -392,6 +392,7 @@ window.__voiceContext = function () {
         return {
           page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
           desc: (a.desc || '').slice(0, 500), group: !!a.group,
+          file_rel: a.file_rel || (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
           has_ink: ink.length > 0, ink: ink
         };
       });

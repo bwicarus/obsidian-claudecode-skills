@@ -59,8 +59,8 @@ def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
-        if meta:   # 记每轮所在位置(书/页/选中句),让助手回看历史时知道"刚才那页"具体是第几页
-            for k in ("page", "pages", "book", "file_rel", "selection"):
+        if meta:   # 记每轮所在位置(书/页/选中句/用过的图),让助手回看历史时知道"刚才那页"具体是第几页,前端也据此在历史里渲染上下文卡片
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures"):
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -855,6 +855,9 @@ def assistant_chat():
             "page": ctx.get("page"), "pages": ctx.get("pages"),
             "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
             "selection": ctx.get("selection"),
+            # 用过的图:只留渲染缩略图/跳转所需字段,丢掉 ink 笔迹与 desc(过重),历史卡片用 has_ink 走 GET 合成
+            "figures": [{k: f.get(k) for k in ("page", "box", "caption", "group", "has_ink", "file_rel")}
+                        for f in (ctx.get("figures") or [])][:6],
         })
         if final[0]:
             _convo_append(uid, "assistant", str(final[0])[:1500])

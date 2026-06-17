@@ -1303,6 +1303,7 @@ window.__voiceContext = function () {
         return {
           page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
           desc: (a.desc || '').slice(0, 500), group: !!a.group,
+          file_rel: a.file_rel || (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
           has_ink: ink.length > 0, ink: ink
         };
       });
@@ -1810,7 +1811,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-61';
+const READER_BUILD = 'reader-fix-62';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7909,7 +7910,16 @@ async function _connProbe() {
     '#asst-mic{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
     '#asst-mic:active{transform:scale(.9)}' +
     '#asst-mic.on{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
-    '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}';
+    '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}' +
+    // 用户气泡里的「上下文卡片」:用过的图缩略图 / 选中的字段 / 涉及的页码,均可点击跳转
+    '.asst-ctx-card{margin-top:7px;display:flex;flex-direction:column;gap:5px}' +
+    '.actx-thumbs{display:flex;flex-wrap:wrap;gap:5px}' +
+    '.actx-thumb{width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,.45);background:#fff;cursor:pointer;flex:none}' +
+    '.actx-thumb:active{transform:scale(.94)}' +
+    '.actx-sel{font-size:12px;color:#dbe7ff;background:rgba(255,255,255,.13);border-left:2px solid rgba(255,255,255,.5);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1.4}' +
+    '.actx-sel:active{background:rgba(255,255,255,.22)}' +
+    '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
+    '.actx-page:active{background:rgba(255,255,255,.28)}';
   document.head.appendChild(css);
 
   // 🤖 fab:一键开抽屉到助手 tab
@@ -7968,6 +7978,52 @@ async function _connProbe() {
   function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
 
   function ctx() { try { if (typeof window.__voiceContext === 'function') return window.__voiceContext(); } catch (_) {} return { page_type: 'pdf' }; }
+
+  // 点击历史/上下文卡片 → 跳到那一页(同书走 jumpWithBack 带「回到」条;跨书则打开那本书定位到页)
+  function _jumpToCtx(file_rel, page) {
+    page = parseInt(page, 10); if (!page || page < 1) return;
+    var cur = (typeof FILE_REL !== 'undefined') ? FILE_REL : '';
+    if (file_rel && cur && file_rel !== cur) { location.href = '/pdf/?file=' + encodeURIComponent(file_rel) + '#page=' + page; return; }
+    if (typeof window.jumpWithBack === 'function') window.jumpWithBack(page);
+  }
+  // 一条用户消息的上下文卡片:用过的图缩略图 + 选中的字段 + 涉及的页码,点任意一处都能跳过去
+  // meta:{figures:[{file_rel,page,box,caption,group,has_ink}], selection, page, file_rel}; live=刚发的那条(图有笔迹走实时合成)
+  function _ctxCard(meta, live) {
+    if (!meta) return null;
+    var figs = (meta.figures || []).filter(function (f) { return f && f.box; });
+    var sel = (meta.selection || '').trim();
+    var page = parseInt(meta.page, 10) || 0;
+    var bookRel = meta.file_rel || (typeof FILE_REL !== 'undefined' ? FILE_REL : '');
+    if (!figs.length && !sel && !page) return null;
+    var card = document.createElement('div'); card.className = 'asst-ctx-card';
+    if (figs.length) {
+      var row = document.createElement('div'); row.className = 'actx-thumbs';
+      figs.forEach(function (f) {
+        var fr = f.file_rel || bookRel;
+        var img = document.createElement('img'); img.className = 'actx-thumb'; img.alt = '';
+        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + f.page + ' · 点击跳转';
+        if (typeof window.__figThumb === 'function') window.__figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
+        img.addEventListener('click', function () { _jumpToCtx(fr, f.page); });
+        row.appendChild(img);
+      });
+      card.appendChild(row);
+    }
+    if (sel) {
+      var s = document.createElement('div'); s.className = 'actx-sel';
+      s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
+      s.title = page ? ('跳到第 ' + page + ' 页') : '';
+      s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
+      card.appendChild(s);
+    }
+    if (page) {
+      var pg = document.createElement('span'); pg.className = 'actx-page';
+      pg.textContent = '📄 第 ' + page + ' 页';
+      pg.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
+      card.appendChild(pg);
+    }
+    return card;
+  }
+
   function runActions(actions) {
     if (!actions || !actions.length) return;
     actions.forEach(function (a) { try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {} });
@@ -7986,13 +8042,16 @@ async function _connProbe() {
     text = (text || '').trim();
     if (!text || streaming) return;
     streaming = true; sendBtn.disabled = true;
-    addMsg('asst-u', esc(text));
+    var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
+    var uMsg = addMsg('asst-u', esc(text));
+    try { var _cc = _ctxCard(sentCtx, true); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
+    try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
     var answer = '', acts = [];
     try {
       var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, context: ctx() }),
+        body: JSON.stringify({ message: text, context: sentCtx }),
       });
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
       while (true) {
@@ -8157,7 +8216,10 @@ async function _connProbe() {
     fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
         d.messages.forEach(function (m) {
-          if (m.role === 'user') addMsg('asst-u', esc(m.content));
+          if (m.role === 'user') {
+            var uel = addMsg('asst-u', esc(m.content));
+            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false); if (c) uel.appendChild(c); } catch (_) {}
+          }
           else { var el = addMsg('asst-a', ''); renderMd(el, m.content || ''); }
         });
       } else greet();
@@ -8446,6 +8508,14 @@ async function _connProbe() {
   }
   window.__renderFigChips = _renderChips;       // 助手打开时可调一次,补渲(点图在开助手前发生的情况)
   window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); };
+  // 给「历史/上下文卡片」渲缩略图:a={file_rel,page,box,has_ink};live(刚发的那条) 有笔迹走 POST 实时合成,
+  // 历史回看走 GET &ink=1(服务端读已保存的 sidecar 笔迹),都拿到带笔迹的合成图
+  window.__figThumb = function (a, imgEl, live) {
+    if (!a || !a.box || !imgEl) return;
+    if (live && a.has_ink) { _fetchComposite(a, function (url) { imgEl.src = url; }); }
+    else { imgEl.src = _cropUrlOf(a); }
+  };
+  window.__figLightbox = function (a) { try { _openFigLightbox(a); } catch (_) {} };
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
   document.addEventListener('pointerdown', function (e) {

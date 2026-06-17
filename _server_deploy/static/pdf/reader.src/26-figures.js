@@ -278,6 +278,14 @@
   }
   window.__renderFigChips = _renderChips;       // 助手打开时可调一次,补渲(点图在开助手前发生的情况)
   window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); };
+  // 给「历史/上下文卡片」渲缩略图:a={file_rel,page,box,has_ink};live(刚发的那条) 有笔迹走 POST 实时合成,
+  // 历史回看走 GET &ink=1(服务端读已保存的 sidecar 笔迹),都拿到带笔迹的合成图
+  window.__figThumb = function (a, imgEl, live) {
+    if (!a || !a.box || !imgEl) return;
+    if (live && a.has_ink) { _fetchComposite(a, function (url) { imgEl.src = url; }); }
+    else { imgEl.src = _cropUrlOf(a); }
+  };
+  window.__figLightbox = function (a) { try { _openFigLightbox(a); } catch (_) {} };
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
   document.addEventListener('pointerdown', function (e) {
