@@ -4794,11 +4794,11 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
             _fig_save_abs(abs_path, data)
 
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
-    """算徽标锚点(归一 [bx,by]=徽标中心)。**纯几何,不碰像素**:
-    障碍 = 文字层的精确 word bbox(我们本来就有,准)∪ 图自己的 bbox ∪ 同页邻图 bbox;
-    在图**右上方**沿对角线找一个最大的全空白正方形(既无文字、又不压图),徽标 = 该方块**左下角**
-    (贴图右上、落图外的空白带)。挤死的图(右上放不下)→ 退到图顶边正上方。失败回 None。
-    (旧版用像素找图块,左边文字栏笔画被误当图墨、min/max 被离群点撑大 → 红块盖到正文,已弃。)"""
+    """徽标锚点(归一 [bx,by]),**按用户算法,纯几何**:
+    A = 以**图中心**为中心,向四向各自撞到**最近的文字框 / 页边 / 邻图**围出的「无文字矩形」(图在 A 内);
+    B = 从 A 的**右上角顶点**沿 A 的**右上→左下对角线**(共线)往图方向缩放出的、与图不重叠的最大矩形;
+    徽标 = B 的**左下角**(= 该对角线撞到图边界 x=fx1 或 y=fy0 的那一点),再朝右上微退,使徽标落在图外。
+    文字框来自 page.get_text('words')(精确),不碰像素。失败回 None。"""
     try:
         pr = page.rect
         W = float(pr.width); H = float(pr.height)
@@ -4807,97 +4807,49 @@ def _fig_badge_anchor(page, bbox, others=None, debug=False):
         fx0, fy0, fx1, fy1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
         if fx1 <= fx0 or fy1 <= fy0:
             return None
-        ngh = []
+        fcx = (fx0 + fx1) / 2.0; fcy = (fy0 + fy1) / 2.0      # 图中心
+        # 障碍(归一):文字 word ∪ 邻图
+        obs = [(w[0] / W, w[1] / H, w[2] / W, w[3] / H) for w in page.get_text("words")]
         for og in (others or []):
             try:
-                ngh.append([float(v) for v in og[:4]])
+                obs.append(tuple(max(0.0, min(1.0, float(v))) for v in og[:4]))
             except Exception:
                 pass
-        # 工作区:图 bbox 外扩(给徽标留空间),夹在页边/邻图之外
-        ex = 0.12
-        rx0 = max(0.0, fx0 - ex); ry0 = max(0.0, fy0 - ex)
-        rx1 = min(1.0, fx1 + ex); ry1 = min(1.0, fy1 + ex)
-        for ox0, oy0, ox1, oy1 in ngh:
-            if ox0 >= fx1 and ox0 < rx1: rx1 = min(rx1, (fx1 + ox0) / 2.0)
-            if ox1 <= fx0 and ox1 > rx0: rx0 = max(rx0, (fx0 + ox1) / 2.0)
-            if oy0 >= fy1 and oy0 < ry1: ry1 = min(ry1, (fy1 + oy0) / 2.0)
-            if oy1 <= fy0 and oy1 > ry0: ry0 = max(ry0, (fy0 + oy1) / 2.0)
-        rw = rx1 - rx0; rh = ry1 - ry0
-        if rw <= 0 or rh <= 0:
+
+        def ovy(o): return o[3] > fy0 and o[1] < fy1         # 障碍 y 与图重叠(同高 → 算左右边界)
+        def ovx(o): return o[2] > fx0 and o[0] < fx1         # 障碍 x 与图重叠(同宽 → 算上下边界)
+        # A 四边:撞到图**外**的最近障碍/页边。**只看图外**的障碍(用图四条边过滤)——
+        # 否则 OCR 在图内识别出的"文字"(标签/噪声)会被当边界,把 A 挤进图里。
+        A_left  = max([0.0] + [o[2] for o in obs if o[2] <= fx0 and ovy(o)])
+        A_right = min([1.0] + [o[0] for o in obs if o[0] >= fx1 and ovy(o)])
+        A_top   = max([0.0] + [o[3] for o in obs if o[3] <= fy0 and ovx(o)])
+        A_bot   = min([1.0] + [o[1] for o in obs if o[1] >= fy1 and ovx(o)])
+        if A_right <= A_left or A_bot <= A_top:
             return None
-        # 网格(工作区映射到 ~G 格,长边 G)
-        G = 130
-        gw = max(8, int(round(G * rw / max(rw, rh))))
-        gh = max(8, int(round(G * rh / max(rw, rh))))
-
-        def cj(nx): return int((nx - rx0) / rw * gw)   # 归一 x → 列
-        def ci(ny): return int((ny - ry0) / rh * gh)   # 归一 y → 行
-
-        occ = bytearray(gw * gh)
-
-        def fill(a0, b0, a1, b1):   # 归一矩形 → 占格
-            j0 = max(0, cj(a0)); j1 = min(gw, cj(a1) + 1)
-            i0 = max(0, ci(b0)); i1 = min(gh, ci(b1) + 1)
-            for i in range(i0, i1):
-                row = i * gw
-                for j in range(j0, j1):
-                    occ[row + j] = 1
-
-        # 文字框(精确数据)= 障碍
-        for w in page.get_text("words"):
-            wx0, wy0, wx1, wy1 = w[0] / W, w[1] / H, w[2] / W, w[3] / H
-            if wx1 < rx0 or wx0 > rx1 or wy1 < ry0 or wy0 > ry1:
-                continue
-            fill(wx0, wy0, wx1, wy1)
-        fill(fx0, fy0, fx1, fy1)                     # 图自己 = 障碍(徽标要在图外)
-        for ox0, oy0, ox1, oy1 in ngh:               # 邻图 = 障碍
-            fill(ox0, oy0, ox1, oy1)
-
-        # 占用积分图 → O(1) 查任意窗口是否全空白
-        IW = gw + 1
-        I = [0] * (IW * (gh + 1))
-        for i in range(gh):
-            rs = 0; bo = (i + 1) * IW; bp = i * IW
-            for j in range(gw):
-                rs += occ[i * gw + j]
-                I[bo + j + 1] = I[bp + j + 1] + rs
-
-        def osum(x, y, w, h):
-            return I[(y + h) * IW + (x + w)] - I[y * IW + (x + w)] - I[(y + h) * IW + x] + I[y * IW + x]
-
-        bs = max(3, int(min(gw, gh) * 0.13))         # 徽标占位(格)
-
-        def nx(jj): return rx0 + jj / gw * rw
-        def ny(ii): return ry0 + ii / gh * rh
-
-        # 用户要的:**离图右上角最近**的全空白徽标窗口(贴着图、朝图中心),不是钉在页角那边。
-        # 只收图角的**上方或右方**(图外),取离图右上角 (tjx,tiy) 最近的 → 徽标落图右上、紧贴图。
-        tjx = cj(fx1); tiy = ci(fy0)
-        best = None; bestd = 1e18
-        for py in range(0, gh - bs + 1):
-            ccy = py + bs / 2.0
-            for px in range(0, gw - bs + 1):
-                ccx = px + bs / 2.0
-                if ccy > tiy and ccx < tjx:   # 落在图角左下方(=图里/图下)→ 跳;要图外的上方/右方
-                    continue
-                if osum(px, py, bs, bs) != 0:
-                    continue
-                d = (ccx - tjx) ** 2 + (ccy - tiy) ** 2
-                if d < bestd:
-                    bestd = d; best = (px, py)
-        if best is None:
-            jj = max(0, min(gw - bs, tjx - bs)); ii = max(0, min(gh - bs, tiy - bs))
-            best = (jj, ii)
-        px, py = best
-        bx = nx(px + bs / 2.0); by = ny(py + bs / 2.0)
+        # 对角线 TR(A_right,A_top) → BL(A_left,A_bot)。B 从 TR 沿对角线扩,撞图(x=fx1 或 y=fy0)即停。
+        dx = A_left - A_right    # < 0
+        dy = A_bot - A_top       # > 0
+        t1 = (fx1 - A_right) / dx if dx < 0 else 1.0     # 对角线 x 到达图右边 fx1 的参数
+        t2 = (fy0 - A_top) / dy if dy > 0 else 1.0       # 对角线 y 到达图上边 fy0 的参数
+        t = max(0.0, min(1.0, max(t1, t2)))              # B 最大 = 后到的那条边界(撞图前最后一刻)
+        px = A_right + t * dx                            # B 左下角(在对角线上、图边界上)
+        py = A_top + t * dy
+        # 朝右上(TR 方向)微退一点,让徽标整体落到图外(否则正好压在图边界上)
+        off = 0.022
+        ux, uy = (A_right - px), (A_top - py)
+        un = (ux * ux + uy * uy) ** 0.5
+        if un > 1e-6:
+            k = min(off, un * 0.5) / un
+            px += ux * k; py += uy * k
+        bx = max(0.0, min(1.0, px)); by = max(0.0, min(1.0, py))
         if debug:
             return {
-                "badge": [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)],
+                "badge": [round(bx, 4), round(by, 4)],
+                "A": [round(A_left, 4), round(A_top, 4), round(A_right, 4), round(A_bot, 4)],
                 "fig_block": [round(fx0, 4), round(fy0, 4), round(fx1, 4), round(fy1, 4)],
-                "empty_square": [round(nx(px), 4), round(ny(py), 4), round(nx(px + bs), 4), round(ny(py + bs), 4)],
-                "region": [round(rx0, 4), round(ry0, 4), round(rx1, 4), round(ry1, 4)],
+                "B": [round(A_right + t * dx, 4), round(A_top, 4), round(A_right, 4), round(A_top + t * dy, 4)],
             }
-        return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
+        return [round(bx, 4), round(by, 4)]
     except Exception:
         return None
 
