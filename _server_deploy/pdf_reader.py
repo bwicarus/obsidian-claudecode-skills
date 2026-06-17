@@ -4855,11 +4855,18 @@ def _fig_badge_anchor(page, bbox, others=None):
         if ink < 30 or maxx < minx or maxy < miny:
             return None
         fcx = (minx + maxx) / 2.0; fcy = (miny + maxy) / 2.0   # 图中心(图墨)
-        # 占用网格 = 图墨 ∪ 正文文字(徽标既不压图墨也不压文字 → 空白);积分图 O(1) 查窗口占用和。
+        # 占用网格 = 正文文字 ∪ **图的整块(图墨 bbox 填实)**。
+        # ⚠ 关键:不能只占"图墨像素"——点阵/线条图的笔画**之间**是空白,空白方块会从右上角顶点
+        # 顺着缝隙**钻进图内部**(徽标落到图里)。把整张图的包围盒当**实心障碍** → 空白方块只能停在
+        # 图**外面**(被页边/正文围出的空白带),其左下角落在图的外缘 → 徽标在图外。
+        dil = 2   # 图包围盒外扩几像素当障碍 → 徽标跟图之间留个小缝,明确"在图外面"
         occ = bytearray(pw * ph)
-        for k in range(pw * ph):
-            if samp[k] < TH or textmask[k]:
-                occ[k] = 1
+        for i in range(ph):
+            row = i * pw
+            in_y = (miny - dil <= i <= maxy + dil)
+            for j in range(pw):
+                if textmask[row + j] or (in_y and minx - dil <= j <= maxx + dil):
+                    occ[row + j] = 1
         # 最大空白正方形 DP:sq[i][j] = 以(i,j)为**右上角**、向下+向左扩的最大全空白正方形边长。
         sq = [0] * (pw * ph)
         for i in range(ph - 1, -1, -1):
