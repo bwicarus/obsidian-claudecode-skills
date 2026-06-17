@@ -29,7 +29,7 @@
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
     // 图区命中层(透明可点)/ 拖拽 ghost / 助手栏 drop 区 + 「+」
-    '.fig-hit{position:absolute;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +
+    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +
     '.fig-drag-ghost{position:fixed;z-index:240;width:118px;max-height:150px;object-fit:contain;opacity:.6;' +
     'border:2px solid rgba(10,132,255,.85);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.55);' +
     'transform:translate(-50%,-50%);pointer-events:none;background:#fff}' +
