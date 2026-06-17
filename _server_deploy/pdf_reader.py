@@ -485,37 +485,46 @@ def pdf_api_book_meta():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-_SW_JS = r"""// PDF 阅读器 Service Worker:只接管页图(GET /pdf/api/page-image),缓存优先 →
-// 抗 iOS 定期清缓存 + 离线可读已看过的页。其余请求(查词/SSE/POST 等)一律放行,不拦截。
-const CACHE = 'pdf-pages-v1';
+_SW_JS = r"""// PDF 阅读器 Service Worker(作用域 /pdf/,只拦 /pdf/*):
+//   页图 + 文字层 → cache-first(命中零网络,秒开/离线、抗 iOS 清缓存);
+//   徽标 page-figures → stale-while-revalidate(秒回缓存 + 后台刷,解决每次重开都要等网络拉徽标)。
+//   静态 JS(reader.js / pdf.mjs 在 /static/,超出本 SW 作用域)→ 靠浏览器 HTTP 缓存(nginx immutable)。
+const CACHE = 'pdf-cache-v2';
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter(k => k.startsWith('pdf-pages-') && k !== CACHE).map(k => caches.delete(k)));
+    await Promise.all(keys.filter(k => (k.startsWith('pdf-pages-') || k.startsWith('pdf-cache-')) && k !== CACHE).map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
+async function _cacheFirst(req) {
+  const cache = await caches.open(CACHE);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  try {
+    const resp = await fetch(req);
+    if (resp && resp.ok) cache.put(req, resp.clone());
+    return resp;
+  } catch (err) {
+    const any = await cache.match(req);
+    if (any) return any;
+    throw err;
+  }
+}
+async function _swr(req) {
+  const cache = await caches.open(CACHE);
+  const hit = await cache.match(req);
+  const net = fetch(req).then(resp => { if (resp && resp.ok) cache.put(req, resp.clone()); return resp; }).catch(() => null);
+  return hit || (await net) || Response.error();
+}
 self.addEventListener('fetch', (e) => {
   let url;
   try { url = new URL(e.request.url); } catch (_) { return; }
   if (e.request.method !== 'GET') return;
-  // 页图 + 文字层(page-chars 带 &cv 内容版本→cache-first 不会陈旧):命中即本地(秒开/离线),其余放行
-  if (url.pathname !== '/pdf/api/page-image' && url.pathname !== '/pdf/api/page-chars') return;
-  e.respondWith((async () => {
-    const cache = await caches.open(CACHE);
-    const hit = await cache.match(e.request);
-    if (hit) return hit;                                   // 命中缓存:零网络(含离线)
-    try {
-      const resp = await fetch(e.request);
-      if (resp && resp.ok) cache.put(e.request, resp.clone());   // 存进持久缓存(抗 iOS 清)
-      return resp;
-    } catch (err) {
-      const any = await cache.match(e.request, { ignoreSearch: false });
-      if (any) return any;
-      throw err;
-    }
-  })());
+  const p = url.pathname;
+  if (p === '/pdf/api/page-image' || p === '/pdf/api/page-chars') { e.respondWith(_cacheFirst(e.request)); return; }
+  if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
 });
 """
 
