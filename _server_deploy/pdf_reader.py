@@ -4793,8 +4793,62 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
                 data["_none_pages"].append(pg)
             _fig_save_abs(abs_path, data)
 
+def _fig_refine_bbox(page, bbox, scale=2.0, pad=1.5, dark=205):
+    """把 AI 给的(常偏大、上含正文/下含图题)插图 bbox 收紧到**真实墨迹范围**(= 图本身)。
+    做法:渲染该区域灰度图 → 二值化取墨迹 → 用**精确文字框** page.get_text('words') 抹掉文字层
+    → 中值滤波去椒盐噪(保留点簇/分子小圆) → getbbox 求剩余墨迹外接框。归一化并夹在原 bbox 内。
+    这样原本溢到正文/图题里的边会被拉回到图的真实边界,徽标几何(A/B)也随之落到正确位置。
+    失败 / 退化(区域几乎全是文字或空白)返回 None,调用方回退到原 bbox。不依赖 AI。"""
+    try:
+        import fitz
+        from PIL import Image, ImageDraw, ImageFilter
+        pr = page.rect; W = float(pr.width); H = float(pr.height)
+        if W <= 0 or H <= 0:
+            return None
+        fx0, fy0, fx1, fy1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
+        if fx1 - fx0 < 1e-3 or fy1 - fy0 < 1e-3:
+            return None
+        px0, py0, px1, py1 = fx0 * W, fy0 * H, fx1 * W, fy1 * H
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale),
+                              clip=fitz.Rect(px0, py0, px1, py1),
+                              colorspace=fitz.csGRAY, alpha=False)
+        if pix.width < 3 or pix.height < 3:
+            return None
+        ink = Image.frombytes("L", (pix.width, pix.height), pix.samples).point(
+            lambda p: 255 if p < dark else 0)            # 白=墨迹,黑=底
+        d = ImageDraw.Draw(ink)
+        for wd in page.get_text("words"):                # 抹掉文字层(精确框,略外扩 pad)
+            x0 = (wd[0] - pad - px0) * scale; y0 = (wd[1] - pad - py0) * scale
+            x1 = (wd[2] + pad - px0) * scale; y1 = (wd[3] + pad - py0) * scale
+            d.rectangle([x0, y0, x1, y1], fill=0)
+        ink = ink.filter(ImageFilter.MedianFilter(3))    # 去椒盐,保留分子小圆/点簇
+        bb = ink.getbbox()
+        if not bb:
+            return None
+        cx0, cy0, cx1, cy1 = bb
+        nx0 = (px0 + cx0 / scale) / W; ny0 = (py0 + cy0 / scale) / H
+        nx1 = (px0 + cx1 / scale) / W; ny1 = (py0 + cy1 / scale) / H
+        nx0 = max(fx0, min(fx1, nx0)); nx1 = max(fx0, min(fx1, nx1))   # 夹在原 bbox 内
+        ny0 = max(fy0, min(fy1, ny0)); ny1 = max(fy0, min(fy1, ny1))
+        if nx1 - nx0 < 0.01 or ny1 - ny0 < 0.01:         # 退化(几乎全文字/空白)→ 回退原 bbox
+            return None
+        return [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)]
+    except Exception:
+        return None
+
+
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
-    """徽标锚点(归一 [bx,by]),**按用户算法,纯几何**:
+    """徽标锚点:先把 AI bbox 收紧成真实图框(_fig_refine_bbox),邻图同样收紧,再交几何函数。
+    供独立脚本(重算徽标)直接用 AI bbox 调用;路由侧已缓存 fbox 时走 _fig_badge_from_block。"""
+    fb = _fig_refine_bbox(page, bbox) or [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
+    ofbs = []
+    for o in (others or []):
+        ofbs.append(_fig_refine_bbox(page, o) or [max(0.0, min(1.0, float(v))) for v in o[:4]])
+    return _fig_badge_from_block(page, fb, ofbs, debug)
+
+
+def _fig_badge_from_block(page, block, others=None, debug=False):
+    """徽标锚点(归一 [bx,by]),**按用户算法,纯几何**;block 已是收紧后的真实图框:
     A = 以**图中心**为中心,向四向各自撞到**最近的文字框 / 页边 / 邻图**围出的「无文字矩形」(图在 A 内);
     B = 从 A 的**右上角顶点**沿 A 的**右上→左下对角线**(共线)往图方向缩放出的、与图不重叠的最大矩形;
     徽标 = B 的**左下角**(= 该对角线撞到图边界 x=fx1 或 y=fy0 的那一点),再朝右上微退,使徽标落在图外。
@@ -4804,7 +4858,7 @@ def _fig_badge_anchor(page, bbox, others=None, debug=False):
         W = float(pr.width); H = float(pr.height)
         if W <= 0 or H <= 0:
             return None
-        fx0, fy0, fx1, fy1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
+        fx0, fy0, fx1, fy1 = [max(0.0, min(1.0, float(v))) for v in block[:4]]
         if fx1 <= fx0 or fy1 <= fy0:
             return None
         fcx = (fx0 + fx1) / 2.0; fcy = (fy0 + fy1) / 2.0      # 图中心
@@ -4866,16 +4920,21 @@ def pdf_api_page_figures():
         return jsonify({"ok": False, "error": "invalid"}), 400
     data = _fig_load_abs(abs_path)
     page_figs = [f for f in data.get("figures", []) if f.get("page") == page]
-    # 懒算徽标锚点(纯像素,无 AI):缺 badge 的补上并持久化 → 跨加载位置一致
-    need = [f for f in page_figs if f.get("bbox") and not f.get("badge")]
-    if need:
+    # 懒算真实图框 fbox + 徽标锚点(纯像素,无 AI):缺的补上并持久化 → 跨加载位置一致
+    need_fbox = [f for f in page_figs if f.get("bbox") and not f.get("fbox")]
+    need_badge = [f for f in page_figs if f.get("bbox") and not f.get("badge")]
+    if need_fbox or need_badge:
         try:
+            import fitz                       # ← 之前漏这行,fitz.open 一直 NameError 被 except 吞,懒算从未生效
             _doc = fitz.open(str(abs_path))
             try:
                 _pg = _doc[page - 1]
-                for f in need:
-                    others = [g["bbox"] for g in page_figs if g is not f and g.get("bbox")]
-                    a = _fig_badge_anchor(_pg, f["bbox"], others)
+                for f in need_fbox:           # 先把 AI bbox 收紧成真实图框(去掉溢出的正文/图题)
+                    f["fbox"] = _fig_refine_bbox(_pg, f["bbox"]) or f["bbox"]
+                for f in need_badge:          # 徽标几何用收紧后的图框(自己 + 邻图)
+                    others = [g.get("fbox") or g["bbox"] for g in page_figs
+                              if g is not f and (g.get("fbox") or g.get("bbox"))]
+                    a = _fig_badge_from_block(_pg, f.get("fbox") or f["bbox"], others)
                     if a:
                         f["badge"] = a
             finally:
@@ -4883,7 +4942,7 @@ def pdf_api_page_figures():
             _fig_save_abs(abs_path, data)
         except Exception:
             pass
-    figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"),
+    figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"), "fbox": f.get("fbox"),
              "desc": f.get("desc", ""), "badge": f.get("badge")}
             for f in page_figs]
     done = _fig_done_page(data, page)

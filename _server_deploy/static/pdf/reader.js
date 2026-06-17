@@ -1722,7 +1722,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-49';
+const READER_BUILD = 'reader-fix-50';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8147,8 +8147,9 @@ async function _connProbe() {
       if (f.badge && f.badge.length === 2) {
         pos = [clampX(f.badge[0] * cssW - S / 2), clampY(f.badge[1] * cssH - S / 2)];
       } else {
-        // 回退:旧启发(AI bbox 四角避开正文)。badge 缺(后端还没算好)时临时用
-        var bb = (f.bbox && f.bbox.length === 4 && f.bbox[2] > f.bbox[0] && f.bbox[3] > f.bbox[1]) ? f.bbox : [0.02, 0.03, 0.1, 0.1];
+        // 回退:旧启发(图框四角避开正文)。badge 缺(后端还没算好)时临时用。优先用收紧后的真实图框 fbox
+        var rawb = (f.fbox && f.fbox.length === 4) ? f.fbox : f.bbox;
+        var bb = (rawb && rawb.length === 4 && rawb[2] > rawb[0] && rawb[3] > rawb[1]) ? rawb : [0.02, 0.03, 0.1, 0.1];
         var fx0 = bb[0] * cssW, fy0 = bb[1] * cssH, fx1 = bb[2] * cssW, fy1 = bb[3] * cssH;
         var cands = [[fx1 - S - M, fy0 + M], [fx0 + M, fy0 + M], [fx1 - S - M, fy1 - S - M], [fx0 + M, fy1 - S - M]];
         for (var i = 0; i < cands.length; i++) {
