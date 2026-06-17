@@ -4853,55 +4853,48 @@ def _fig_badge_anchor(page, bbox, others=None, debug=False):
         for ox0, oy0, ox1, oy1 in ngh:               # 邻图 = 障碍
             fill(ox0, oy0, ox1, oy1)
 
-        # 最大空白正方形 DP(以(i,j)为右上角向左下扩)
-        sq = [0] * (gw * gh)
-        for i in range(gh - 1, -1, -1):
-            row = i * gw; below = (i + 1) * gw
-            for j in range(gw):
-                if occ[row + j]:
-                    sq[row + j] = 0
-                else:
-                    d = sq[below + j] if i + 1 < gh else 0
-                    l = sq[row + j - 1] if j - 1 >= 0 else 0
-                    dl = sq[below + j - 1] if (i + 1 < gh and j - 1 >= 0) else 0
-                    mm = d if d < l else l
-                    if dl < mm: mm = dl
-                    sq[row + j] = mm + 1
-        bs = max(3, int(min(gw, gh) * 0.14))         # 徽标占位(格)
-        fcj = cj((fx0 + fx1) / 2.0); fci = ci((fy0 + fy1) / 2.0)
-        # 从工作区右上角出发(对角线):取右上角最靠近区域右上顶点、放得下徽标、在图心右上方的空白方块
-        best = None; best_rank = 1e18
+        # 占用积分图 → O(1) 查任意窗口是否全空白
+        IW = gw + 1
+        I = [0] * (IW * (gh + 1))
         for i in range(gh):
-            row = i * gw
+            rs = 0; bo = (i + 1) * IW; bp = i * IW
             for j in range(gw):
-                if sq[row + j] < bs:
-                    continue
-                if j <= fcj or i >= fci:
-                    continue
-                rank = i + (gw - 1 - j)
-                if rank < best_rank:
-                    best_rank = rank; best = (i, j, sq[row + j])
+                rs += occ[i * gw + j]
+                I[bo + j + 1] = I[bp + j + 1] + rs
+
+        def osum(x, y, w, h):
+            return I[(y + h) * IW + (x + w)] - I[y * IW + (x + w)] - I[(y + h) * IW + x] + I[y * IW + x]
+
+        bs = max(3, int(min(gw, gh) * 0.13))         # 徽标占位(格)
 
         def nx(jj): return rx0 + jj / gw * rw
         def ny(ii): return ry0 + ii / gh * rh
 
-        if best is not None:
-            ai, aj, s = best
-            blj = aj - s + 1; bli = ai + s - 1           # 方块左下角(格)
-            bx = nx(blj + bs / 2.0); by = ny(bli - bs / 2.0)
-        else:
-            # 右上方放不下整块空白方块 → 贴图顶边正上方靠右(图外)
-            jj = max(0, min(gw - bs, cj(fx1) - bs)); ii = max(0, min(gh - bs, ci(fy0) - bs))
-            bx = nx(jj + bs / 2.0); by = ny(ii + bs / 2.0)
+        # 用户要的:**离图右上角最近**的全空白徽标窗口(贴着图、朝图中心),不是钉在页角那边。
+        # 只收图角的**上方或右方**(图外),取离图右上角 (tjx,tiy) 最近的 → 徽标落图右上、紧贴图。
+        tjx = cj(fx1); tiy = ci(fy0)
+        best = None; bestd = 1e18
+        for py in range(0, gh - bs + 1):
+            ccy = py + bs / 2.0
+            for px in range(0, gw - bs + 1):
+                ccx = px + bs / 2.0
+                if ccy > tiy and ccx < tjx:   # 落在图角左下方(=图里/图下)→ 跳;要图外的上方/右方
+                    continue
+                if osum(px, py, bs, bs) != 0:
+                    continue
+                d = (ccx - tjx) ** 2 + (ccy - tiy) ** 2
+                if d < bestd:
+                    bestd = d; best = (px, py)
+        if best is None:
+            jj = max(0, min(gw - bs, tjx - bs)); ii = max(0, min(gh - bs, tiy - bs))
+            best = (jj, ii)
+        px, py = best
+        bx = nx(px + bs / 2.0); by = ny(py + bs / 2.0)
         if debug:
-            sq_box = None
-            if best is not None:
-                ai, aj, s = best
-                sq_box = [round(nx(aj - s + 1), 4), round(ny(ai), 4), round(nx(aj + 1), 4), round(ny(ai + s), 4)]
             return {
                 "badge": [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)],
-                "fig_block": [round(fx0, 4), round(fy0, 4), round(fx1, 4), round(fy1, 4)],   # 障碍=图 bbox
-                "empty_square": sq_box,
+                "fig_block": [round(fx0, 4), round(fy0, 4), round(fx1, 4), round(fy1, 4)],
+                "empty_square": [round(nx(px), 4), round(ny(py), 4), round(nx(px + bs), 4), round(ny(py + bs), 4)],
                 "region": [round(rx0, 4), round(ry0, 4), round(rx1, 4), round(ry1, 4)],
             }
         return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
