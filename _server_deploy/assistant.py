@@ -49,9 +49,19 @@ def _convo_path(uid):
 
 
 def _convo_load(uid):
+    p = _convo_path(uid)
     try:
-        return json.loads(_convo_path(uid).read_text("utf-8"))
+        return json.loads(p.read_text("utf-8"))
+    except FileNotFoundError:
+        return []
     except Exception:
+        # 文件存在但内容坏了(原子替换已防"读半截",这里防"内容本身坏")→ 备份成 .corrupt 再返回 [],
+        # 别让随后的 append 直接用空数组覆盖 → 把可恢复的损坏变成不可恢复的历史丢失
+        try:
+            if p.exists() and p.stat().st_size > 2:
+                p.rename(p.with_name(p.name + f".corrupt.{int(time.time())}"))
+        except Exception:
+            pass
         return []
 
 
@@ -472,7 +482,11 @@ def _t_see_page(args, ctx):
                 longside = max(page.rect.width, page.rect.height) or 1.0
                 scale = min(2.0, 1540.0 / longside) or 1.0   # 长边 ~1540px(Claude 视觉甜区),封顶 2x
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-                vis.append({"media_type": "image/png", "b64": base64.b64encode(pix.tobytes("png")).decode()})
+                png = pix.tobytes("png")
+                if len(png) > 3_000_000:   # 超大页(扫描大开本)降一档再渲 → 防喂回 stdin 过大 / Pi 8GB OOM
+                    pix = page.get_pixmap(matrix=fitz.Matrix(scale * 0.6, scale * 0.6), alpha=False)
+                    png = pix.tobytes("png")
+                vis.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
                 done.append(pg)
         finally:
             doc.close()
