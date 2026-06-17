@@ -5121,6 +5121,73 @@ def pdf_api_page_figures():
     return resp
 
 
+def _formula_ocr_url():
+    """PC 上 pix2tex 服务地址:env FORMULA_OCR_URL > server-config.formula_ocr_url > 默认 PC Tailscale。"""
+    u = (os.environ.get("FORMULA_OCR_URL") or "").strip()
+    if u:
+        return u.rstrip("/")
+    try:
+        cfg = json.loads((CLAUDE_DIR / "state" / "server-config.json").read_text("utf-8"))
+        u = (cfg.get("formula_ocr_url") or "").strip()
+        if u:
+            return u.rstrip("/")
+    except Exception:
+        pass
+    return "http://100.99.9.124:8765"
+
+
+@bp.route("/api/formula-ocr", methods=["POST"])
+def pdf_api_formula_ocr():
+    """本地公式 OCR:渲染本书"还没 latex"的公式框 → 发到 PC 的 pix2tex 服务 → 写回 sidecar。
+    幂等(只补缺 latex 的,不覆盖已有,如已 AI 校正过的费曼)。需 PC 跑 scripts/formula_ocr_server.py。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    abs_path = _safe_vault_path(rel)
+    if not abs_path:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    data = _fig_load_abs(abs_path)
+    formulas = data.get("formulas") or []
+    if not formulas:
+        return jsonify({"ok": False, "error": "no_boxes", "msg": "本书还没检测到公式框(YOLO 公式检测未跑)"}), 200
+    todo = [(i, f) for i, f in enumerate(formulas)
+            if not (f.get("latex") or "").strip() and f.get("bbox") and len(f.get("bbox")) == 4]
+    if not todo:
+        return jsonify({"ok": True, "count": 0, "total": len(formulas), "msg": "所有公式都已 OCR"}), 200
+    import fitz, base64 as _b64
+    import requests as _rq
+    doc = fitz.open(str(abs_path))
+    crops = []
+    try:
+        mat = fitz.Matrix(4, 4)
+        for i, f in todo:
+            page = doc[int(f["page"]) - 1]
+            W, H = page.rect.width, page.rect.height
+            x0, y0, x1, y1 = f["bbox"]
+            bx0, by0, bx1, by1 = x0 * W, y0 * H, x1 * W, y1 * H
+            padh = max(4.0, 0.02 * (bx1 - bx0)); padv = max(4.0, 0.06 * (by1 - by0))
+            clip = fitz.Rect(max(0, bx0 - padh), max(0, by0 - padv), min(W, bx1 + padh), min(H, by1 + padv))
+            pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+            crops.append({"idx": i, "png_b64": _b64.b64encode(pix.tobytes("png")).decode("ascii")})
+    finally:
+        doc.close()
+    url = _formula_ocr_url()
+    try:
+        r = _rq.post(url + "/ocr", json={"crops": crops, "key": os.environ.get("FORMULA_OCR_KEY", "")}, timeout=300)
+        res = (r.json() or {}).get("results", [])
+    except Exception as e:
+        return jsonify({"ok": False, "error": "service",
+                        "msg": f"连不上本地 OCR 服务({url}):{str(e)[:90]}。请确认 PC 已启动 formula_ocr_server.py"}), 200
+    n = 0
+    for item in res:
+        idx = item.get("idx"); lx = item.get("latex")
+        if isinstance(idx, int) and 0 <= idx < len(formulas) and lx and str(lx).strip():
+            formulas[idx]["latex"] = str(lx).strip()
+            formulas[idx]["latex_engine"] = "pix2tex-local"
+            n += 1
+    _fig_save_abs(abs_path, data)
+    return jsonify({"ok": True, "count": n, "total": len(todo), "engine": "pix2tex-local"})
+
+
 @bp.route("/api/figure-crop", methods=["GET", "POST"])
 def pdf_api_figure_crop():
     """图框区域 PNG(拖拽 ghost / 缩略图 / 大图)。

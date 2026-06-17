@@ -1811,7 +1811,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-62';
+const READER_BUILD = 'reader-fix-64';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -1992,6 +1992,7 @@ function _mapCharBoxes(chars, scale) {
     left: ch.x0 * scale, top: ch.y0 * scale,
     width: (ch.x1 - ch.x0) * scale, height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
+    fml: !!ch.fml, flx: ch.flx || '',   // 公式注入字符:fml 标记 + 首字符带原始 latex(flx)
     _x0: ch.x0, _y0: ch.y0, _x1: ch.x1, _y1: ch.y1,
   }));
   cb.sort((a, b) => {
@@ -3337,6 +3338,85 @@ function _paragraphExpandFromChar(chars, idx) {
   return {start: s, end: e};
 }
 
+// 公式注入字符:整条选中(同一 w,不被 / | 等截断)。公式字符是连续追加的,按 w 左右扩到底。
+function _formulaBounds(chars, idx) {
+  const wid = chars[idx].w;
+  let s = idx, e = idx;
+  while (s > 0 && chars[s - 1].w === wid && chars[s - 1].fml) s--;
+  while (e < chars.length - 1 && chars[e + 1].w === wid && chars[e + 1].fml) e++;
+  return { start: s, end: e };
+}
+// 公式渲染浮层:MathJax 渲染该公式 + 复制LaTeX / 问AI / 制卡。点公式区即弹,点别处消失。
+function _formulaRawLatex(chars, b) {
+  for (let i = b.start; i <= b.end; i++) if (chars[i].flx) return chars[i].flx;
+  // 兜底:从字符 c 拼回并去掉首尾 $ / $$
+  let s = chars.slice(b.start, b.end + 1).map(c => c.c).join('');
+  s = s.replace(/^\$\$?/, '').replace(/\$\$?$/, '');
+  return s;
+}
+function _ensureFmlPopCss() {
+  if (document.getElementById('fml-pop-css')) return;
+  const st = document.createElement('style'); st.id = 'fml-pop-css';
+  st.textContent =
+    '#fml-pop{position:absolute;z-index:150;background:#0f1830;border:1px solid #2f4a7d;border-radius:12px;' +
+    'box-shadow:0 10px 30px rgba(0,0,0,.55);padding:10px 12px;max-width:min(92vw,560px);color:#e6eeff}' +
+    '#fml-pop .fp-render{overflow-x:auto;overflow-y:hidden;text-align:center;padding:4px 2px 8px;color:#eaf2ff;font-size:18px}' +
+    '#fml-pop .fp-tex{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#9fb4e0;background:#0a1120;' +
+    'border:1px solid #22325a;border-radius:7px;padding:5px 7px;white-space:pre-wrap;word-break:break-all;max-height:78px;overflow:auto;margin-bottom:8px}' +
+    '#fml-pop .fp-btns{display:flex;gap:7px;flex-wrap:wrap}' +
+    '#fml-pop .fp-btns button{flex:1 1 auto;min-width:66px;background:#16213e;border:1px solid #2f4a7d;color:#cfe0ff;' +
+    'border-radius:8px;padding:7px 6px;font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+    '#fml-pop .fp-btns button:active{background:#22325a}';
+  document.head.appendChild(st);
+}
+function _hideFmlPop() { const p = document.getElementById('fml-pop'); if (p) p.remove(); }
+window._hideFmlPop = _hideFmlPop;
+function showFormulaPopover(pw, b) {
+  _ensureFmlPopCss(); _hideFmlPop();
+  const chars = pw.__charBoxes;
+  const latex = _formulaRawLatex(chars, b);
+  const isBlock = /\\begin\{|\\\\/.test(latex);
+  const wrapped = isBlock ? ('$$' + latex + '$$') : ('$' + latex + '$');
+  const copyStr = isBlock ? ('$$' + latex + '$$') : ('$' + latex + '$');
+  const pop = document.createElement('div'); pop.id = 'fml-pop';
+  const render = document.createElement('div'); render.className = 'fp-render';
+  render.textContent = isBlock ? ('$$' + latex + '$$') : ('\\(' + latex + '\\)');
+  const tex = document.createElement('div'); tex.className = 'fp-tex'; tex.textContent = copyStr;
+  const btns = document.createElement('div'); btns.className = 'fp-btns';
+  const mk = (label, fn) => { const x = document.createElement('button'); x.textContent = label; x.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); }); return x; };
+  btns.appendChild(mk('📋 复制', () => {
+    (navigator.clipboard ? navigator.clipboard.writeText(copyStr) : Promise.reject()).then(() => { if (window._toast) window._toast('已复制 LaTeX'); }).catch(() => {
+      try { const ta = document.createElement('textarea'); ta.value = copyStr; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); if (window._toast) window._toast('已复制 LaTeX'); } catch (_) {}
+    });
+  }));
+  btns.appendChild(mk('💡 问 AI', () => { _hideFmlPop(); try { window.onExplain && window.onExplain(); } catch (_) {} }));
+  btns.appendChild(mk('🃏 制卡', () => {
+    _hideFmlPop();
+    try { window.addDraftText && window.addDraftText(copyStr, '公式', FILE_REL + (typeof currentPage !== 'undefined' ? ('#p' + currentPage) : '')); } catch (_) {}
+    try { window.openDraftModal && window.openDraftModal(); } catch (_) {}
+  }));
+  pop.appendChild(render); pop.appendChild(tex); pop.appendChild(btns);
+  const mainEl = document.getElementById('viewer') || document.querySelector('.viewer') || document.body;
+  mainEl.appendChild(pop);
+  // 定位:公式上方(放不下则下方)。用选区起止字符的页内坐标。
+  try {
+    const pwRect = pw.getBoundingClientRect(), mainRect = mainEl.getBoundingClientRect();
+    const c0 = chars[b.start], cN = chars[b.end];
+    const leftPx = pwRect.left - mainRect.left + mainEl.scrollLeft + Math.min(c0.left, cN.left);
+    const topAbove = pwRect.top - mainRect.top + mainEl.scrollTop + c0.top - pop.offsetHeight - 8;
+    const topBelow = pwRect.top - mainRect.top + mainEl.scrollTop + Math.max(c0.top + c0.height, cN.top + cN.height) + 8;
+    pop.style.left = Math.max(8, Math.min(leftPx, mainEl.scrollWidth - pop.offsetWidth - 8)) + 'px';
+    pop.style.top = (topAbove > mainEl.scrollTop + 4 ? topAbove : topBelow) + 'px';
+  } catch (_) {}
+  if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([render]).catch(() => {});
+}
+window.showFormulaPopover = showFormulaPopover;
+// 公式浮层外部点击关闭(char-layer 点击已 stopPropagation 不冒泡到这里 → 只处理页边/UI 等外部点)
+document.addEventListener('pointerdown', (e) => {
+  const p = document.getElementById('fml-pop');
+  if (p && !(e.target && e.target.closest && e.target.closest('#fml-pop'))) _hideFmlPop();
+});
+
 let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
 let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为主→翻页) / 'select'(水平为主→选字)
 let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
@@ -3414,6 +3494,7 @@ function _bindCharLayer(cl, pw) {
   };
   const onStart = (x, y) => {
     _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
+    _hideFmlPop();           // 任何新按下先关掉旧公式浮层(若新点中公式,onEnd 会重新弹)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
     // 诊断：每次按下输出 char-layer rect + 点击位置
     if (!window._loggedRect) {
@@ -3482,11 +3563,23 @@ function _bindCharLayer(cl, pw) {
     if (_dragMoved) {
       const idx = _findCharAt(pw.__charBoxes, x, y);
       if (idx >= 0) _selByCharRange(pw, startIdx, idx);
+      try { window.__setFocusSel && window.__setFocusSel((lastSelText || '').trim(), 'text'); } catch (_) {}   // 拖选段落 → 右侧焦点显示
       // 选中=普通选中(点别处照常消失)。持久呼吸高亮只在点「词组」按钮查询期间出现(showPhrasePopover)
     } else if (_fromLBtn) {
       // 从 L 按钮起点且没拖动 = 单击 L 按钮 → 交给 L 按钮 click 处理整句翻译，这里不查词
       _fromLBtn = false;
     } else {
+      // 公式注入字符:点公式区 → 整条公式选中 + MathJax 渲染浮层(不走单/双/三击词典)
+      const _h0 = pw.__charBoxes[startIdx];
+      if (_h0 && _h0.fml) {
+        const fb = _formulaBounds(pw.__charBoxes, startIdx);
+        _selByCharRange(pw, fb.start, fb.end);
+        toolbar.classList.remove('open');
+        try { showFormulaPopover(pw, fb); } catch (_) {}
+        try { window.__setFocusSel && window.__setFocusSel(_formulaRawLatex(pw.__charBoxes, fb), 'formula'); } catch (_) {}
+        _lastClickCharIdx = -1; _clickCount = 0;
+        return;
+      }
       // 单/双/三击
       const now = Date.now();
       if (_lastClickCharIdx === startIdx && now - _lastClickTime < 380) {
@@ -3526,6 +3619,9 @@ function _bindCharLayer(cl, pw) {
             toolbar.classList.remove('open');
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
           }
+        } else {
+          // 双击选行 / 三击选段 → 右侧焦点显示这段
+          try { window.__setFocusSel && window.__setFocusSel((lastSelText || '').trim(), 'text'); } catch (_) {}
         }
       }
     }
@@ -5461,6 +5557,7 @@ window.toggleGrammarPanel = () => {
   openGrammarPanel();
   switchSideTab('asst');
   try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
+  try { window.__renderFocusSel && window.__renderFocusSel(); } catch (_) {}   // 补渲焦点选区(公式/段落)chip
 };
 // 清空侧栏内全部分析卡
 window.clearGrammarBlocks = () => {
@@ -6740,6 +6837,16 @@ try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch 
 function _persistDrafts() {
   try { localStorage.setItem('pdf-drafts', JSON.stringify(_drafts)); } catch (_) {}
 }
+// 直接把一段文本(如公式 LaTeX)加进草稿,供「制卡/笔记」用(公式浮层等外部调用)
+window.addDraftText = (text, source, src) => {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (_drafts.some(d => d.text === t)) { _updateDraftBadge(); return true; }
+  _drafts.push({ id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+                 text: t, source: source || '公式', src: src || '', time: Date.now(), selected: true });
+  _persistDrafts(); _updateDraftBadge();
+  return true;
+};
 function _updateDraftBadge() {
   const b = document.getElementById('draft-badge');
   document.getElementById('draft-count').textContent = _drafts.length;
@@ -7751,10 +7858,13 @@ function _openBookshelf() {
       try {
         if (p.comp_exists && localStorage.getItem('pdf-use-compressed:' + p.rel) === '1') url += '&compressed=1';
       } catch (_) {}
-      return '<a class="bs-item' + (here ? ' cur' : '') + '" href="' + url + '" onclick="return _bsOpen(this)">' +
+      return '<div class="bs-row">' +
+        '<a class="bs-item' + (here ? ' cur' : '') + '" href="' + url + '" onclick="return _bsOpen(this)">' +
         '<span class="bs-name">' + _esc(p.name) + (here ? '　←当前' : '') + '</span>' +
         '<span class="bs-meta">' + _esc(p.dir && p.dir !== '.' ? p.dir : '') + (p.dir && p.dir !== '.' ? ' · ' : '') + mb + ' MB' +
-        (p.comp_exists ? ' · 🗜有压缩版' : '') + '</span></a>';
+        (p.comp_exists ? ' · 🗜有压缩版' : '') + '</span></a>' +
+        '<button class="bs-ocr" title="本地公式 OCR(需 PC 启动 formula_ocr_server.py)" data-rel="' + encodeURIComponent(p.rel) + '" onclick="_bsFormulaOCR(this)">🧮</button>' +
+        '</div>';
     }).join('');
   };
   try { const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || 'null'); if (c) render(c); } catch (_) {}
@@ -7766,6 +7876,28 @@ function _openBookshelf() {
   }).catch(() => {});
 }
 window._openBookshelf = _openBookshelf;
+
+// 书架每本书的「🧮 本地公式 OCR」:渲染缺 latex 的公式框 → 发到 PC pix2tex 服务 → 写回 sidecar(幂等)。
+if (!document.getElementById('bs-ocr-css')) {
+  const _st = document.createElement('style'); _st.id = 'bs-ocr-css';
+  _st.textContent = '.bs-row{display:flex;align-items:stretch;border-bottom:1px solid #151d27}' +
+    '.bs-row .bs-item{flex:1 1 auto;min-width:0;border-bottom:none;border-radius:8px 0 0 8px}' +
+    '.bs-ocr{flex:none;width:46px;background:transparent;border:none;color:#7d8590;font-size:17px;cursor:pointer;border-radius:0 8px 8px 0;-webkit-tap-highlight-color:transparent}' +
+    '.bs-ocr:hover,.bs-ocr:active{background:#16202c;color:#cfe0ff}.bs-ocr:disabled{opacity:.6}';
+  document.head.appendChild(_st);
+}
+window._bsFormulaOCR = async function (btn) {
+  const rel = decodeURIComponent(btn.dataset.rel || '');
+  if (!rel || btn._busy) return;
+  btn._busy = true; const old = btn.textContent; btn.disabled = true; btn.textContent = '⏳';
+  const done = (txt, msg) => { btn.textContent = txt; if (msg) { if (window._toast) window._toast(msg); else alert(msg); } setTimeout(() => { btn.textContent = old; btn.disabled = false; btn._busy = false; }, 4500); };
+  try {
+    const r = await fetch('/pdf/api/formula-ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rel }) });
+    const d = await r.json();
+    if (d.ok) done(d.count > 0 ? '✅' : '✓', d.count > 0 ? ('公式 OCR 完成:' + d.count + '/' + d.total + ' 条') : (d.msg || '没有待 OCR 的公式'));
+    else done('⚠', d.msg || '失败');
+  } catch (e) { done('⚠', '请求失败:' + (e && e.message || e)); }
+};
 
 // 点书:**立即给行内反馈**(⏳打开中,iPad 上整页导航首绘前老页面冻住,没反馈像死机),
 // 画出反馈后再 ① 主动清空 page-container(几千 DOM 的卸载成本提前、可控,Safari 导航提交更快)
@@ -8274,6 +8406,14 @@ async function _connProbe() {
     '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
     '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
     '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}' +
+    // 焦点选区 chip(公式/段落)
+    '#asst-sel-chip{padding:6px 10px 0}' +
+    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid #2f4a7d;border-radius:9px;max-width:100%}' +
+    '.asst-sel-chip-in.is-fml{border-color:#3b6db5}' +
+    '.asst-sel-chip-in .asc-icon{flex:none;font-size:14px}' +
+    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:#dbe7ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.asst-sel-chip-in.is-fml .asc-body{color:#eaf2ff;white-space:normal;max-height:46px;overflow:auto}' +
+    '.asst-sel-chip-in .asc-x{flex:none;background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;padding:0 2px}' +
     // 点缩略图看大图(合成图)
     '.fig-lightbox{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}' +
     '.fig-lightbox img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.6);background:#fff}';
@@ -8516,6 +8656,43 @@ async function _connProbe() {
     else { imgEl.src = _cropUrlOf(a); }
   };
   window.__figLightbox = function (a) { try { _openFigLightbox(a); } catch (_) {} };
+
+  // ── 焦点选区:把当前选中的公式/段落显示在右侧助手栏(表示「现在焦点在这部分」)──
+  // 与图附件并列。公式 kind='formula'(MathJax 渲染),文字 kind='text'(片段)。
+  window.__focusSel = null;   // {text, kind}
+  function _renderFocusSel() {
+    try {
+      var pane = document.getElementById('side-pane-asst');
+      var input = pane && pane.querySelector('#asst-input');
+      var wrap = document.getElementById('asst-sel-chip');
+      var fs = window.__focusSel;
+      if (!fs || !fs.text) { if (wrap) wrap.remove(); return; }
+      if (!input) return;       // 助手没开 → 数据仍在,开了再渲
+      if (!wrap) { wrap = document.createElement('div'); wrap.id = 'asst-sel-chip'; input.parentNode.insertBefore(wrap, input); }
+      wrap.innerHTML = '';
+      var chip = document.createElement('div'); chip.className = 'asst-sel-chip-in ' + (fs.kind === 'formula' ? 'is-fml' : 'is-txt');
+      var icon = document.createElement('span'); icon.className = 'asc-icon'; icon.textContent = fs.kind === 'formula' ? '🧮' : '¶';
+      var body = document.createElement('span'); body.className = 'asc-body';
+      if (fs.kind === 'formula') {
+        var raw = fs.text.replace(/^\$+/, '').replace(/\$+$/, '');
+        body.textContent = '\\(' + raw + '\\)';
+      } else {
+        body.textContent = fs.text.slice(0, 90) + (fs.text.length > 90 ? '…' : '');
+      }
+      var x = document.createElement('button'); x.className = 'asc-x'; x.textContent = '✕';
+      x.addEventListener('click', function () { window.__clearFocusSel(); });
+      chip.appendChild(icon); chip.appendChild(body); chip.appendChild(x); wrap.appendChild(chip);
+      if (fs.kind === 'formula' && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([body]).catch(function () {});
+    } catch (_) {}
+  }
+  window.__setFocusSel = function (text, kind) {
+    text = (text || '').trim();
+    if (!text) { window.__clearFocusSel(); return; }
+    window.__focusSel = { text: text, kind: kind || 'text' };
+    _renderFocusSel();
+  };
+  window.__clearFocusSel = function () { window.__focusSel = null; _renderFocusSel(); };
+  window.__renderFocusSel = _renderFocusSel;
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
   document.addEventListener('pointerdown', function (e) {

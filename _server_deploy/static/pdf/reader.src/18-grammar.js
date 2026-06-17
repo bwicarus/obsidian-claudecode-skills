@@ -284,6 +284,7 @@ window.toggleGrammarPanel = () => {
   openGrammarPanel();
   switchSideTab('asst');
   try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
+  try { window.__renderFocusSel && window.__renderFocusSel(); } catch (_) {}   // 补渲焦点选区(公式/段落)chip
 };
 // 清空侧栏内全部分析卡
 window.clearGrammarBlocks = () => {

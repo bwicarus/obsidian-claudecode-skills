@@ -44,6 +44,14 @@
     '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
     '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
     '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}' +
+    // 焦点选区 chip(公式/段落)
+    '#asst-sel-chip{padding:6px 10px 0}' +
+    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid #2f4a7d;border-radius:9px;max-width:100%}' +
+    '.asst-sel-chip-in.is-fml{border-color:#3b6db5}' +
+    '.asst-sel-chip-in .asc-icon{flex:none;font-size:14px}' +
+    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:#dbe7ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.asst-sel-chip-in.is-fml .asc-body{color:#eaf2ff;white-space:normal;max-height:46px;overflow:auto}' +
+    '.asst-sel-chip-in .asc-x{flex:none;background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;padding:0 2px}' +
     // 点缩略图看大图(合成图)
     '.fig-lightbox{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}' +
     '.fig-lightbox img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.6);background:#fff}';
@@ -286,6 +294,43 @@
     else { imgEl.src = _cropUrlOf(a); }
   };
   window.__figLightbox = function (a) { try { _openFigLightbox(a); } catch (_) {} };
+
+  // ── 焦点选区:把当前选中的公式/段落显示在右侧助手栏(表示「现在焦点在这部分」)──
+  // 与图附件并列。公式 kind='formula'(MathJax 渲染),文字 kind='text'(片段)。
+  window.__focusSel = null;   // {text, kind}
+  function _renderFocusSel() {
+    try {
+      var pane = document.getElementById('side-pane-asst');
+      var input = pane && pane.querySelector('#asst-input');
+      var wrap = document.getElementById('asst-sel-chip');
+      var fs = window.__focusSel;
+      if (!fs || !fs.text) { if (wrap) wrap.remove(); return; }
+      if (!input) return;       // 助手没开 → 数据仍在,开了再渲
+      if (!wrap) { wrap = document.createElement('div'); wrap.id = 'asst-sel-chip'; input.parentNode.insertBefore(wrap, input); }
+      wrap.innerHTML = '';
+      var chip = document.createElement('div'); chip.className = 'asst-sel-chip-in ' + (fs.kind === 'formula' ? 'is-fml' : 'is-txt');
+      var icon = document.createElement('span'); icon.className = 'asc-icon'; icon.textContent = fs.kind === 'formula' ? '🧮' : '¶';
+      var body = document.createElement('span'); body.className = 'asc-body';
+      if (fs.kind === 'formula') {
+        var raw = fs.text.replace(/^\$+/, '').replace(/\$+$/, '');
+        body.textContent = '\\(' + raw + '\\)';
+      } else {
+        body.textContent = fs.text.slice(0, 90) + (fs.text.length > 90 ? '…' : '');
+      }
+      var x = document.createElement('button'); x.className = 'asc-x'; x.textContent = '✕';
+      x.addEventListener('click', function () { window.__clearFocusSel(); });
+      chip.appendChild(icon); chip.appendChild(body); chip.appendChild(x); wrap.appendChild(chip);
+      if (fs.kind === 'formula' && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([body]).catch(function () {});
+    } catch (_) {}
+  }
+  window.__setFocusSel = function (text, kind) {
+    text = (text || '').trim();
+    if (!text) { window.__clearFocusSel(); return; }
+    window.__focusSel = { text: text, kind: kind || 'text' };
+    _renderFocusSel();
+  };
+  window.__clearFocusSel = function () { window.__focusSel = null; _renderFocusSel(); };
+  window.__renderFocusSel = _renderFocusSel;
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
   document.addEventListener('pointerdown', function (e) {

@@ -177,6 +177,16 @@ try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch 
 function _persistDrafts() {
   try { localStorage.setItem('pdf-drafts', JSON.stringify(_drafts)); } catch (_) {}
 }
+// 直接把一段文本(如公式 LaTeX)加进草稿,供「制卡/笔记」用(公式浮层等外部调用)
+window.addDraftText = (text, source, src) => {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (_drafts.some(d => d.text === t)) { _updateDraftBadge(); return true; }
+  _drafts.push({ id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+                 text: t, source: source || '公式', src: src || '', time: Date.now(), selected: true });
+  _persistDrafts(); _updateDraftBadge();
+  return true;
+};
 function _updateDraftBadge() {
   const b = document.getElementById('draft-badge');
   document.getElementById('draft-count').textContent = _drafts.length;

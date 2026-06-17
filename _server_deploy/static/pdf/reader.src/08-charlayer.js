@@ -12,6 +12,7 @@ function _mapCharBoxes(chars, scale) {
     left: ch.x0 * scale, top: ch.y0 * scale,
     width: (ch.x1 - ch.x0) * scale, height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
+    fml: !!ch.fml, flx: ch.flx || '',   // 公式注入字符:fml 标记 + 首字符带原始 latex(flx)
     _x0: ch.x0, _y0: ch.y0, _x1: ch.x1, _y1: ch.y1,
   }));
   cb.sort((a, b) => {
