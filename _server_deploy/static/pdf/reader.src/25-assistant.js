@@ -70,6 +70,7 @@
     '.afp-step{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:1.5}' +
     '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
     '.afp-m{color:#7c93c4;flex:none;font-variant-numeric:tabular-nums}' +
+    '.afp-foot{font-size:11px;color:#6b7da0;margin-top:5px;text-align:right;font-variant-numeric:tabular-nums}' +
     '.afp-acts{display:flex;flex-direction:column;gap:5px;margin-top:4px;border-top:1px solid #1d2742;padding-top:7px}' +
     '.afp-act{text-align:left;border:1px solid #2a3a63;border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:#dbe7ff}' +
     '.afp-q{background:#16293a;border-color:#2a4a63}.afp-q:active{background:#1d3a52}' +
@@ -155,11 +156,14 @@
     if (!fus || !fus.length) return;
     var box = document.createElement('div'); box.className = 'asst-followups';
     fus.forEach(function (q) {
-      var b = document.createElement('button'); b.className = 'asst-fu'; b.textContent = q;
+      var b = document.createElement('button'); b.className = 'asst-fu';
+      b.textContent = q;   // 纯文本占位;下面让 MathJax 就地把 chip 里的 $..$ 渲成公式(点击仍发原始 q)
       b.addEventListener('click', function () { if (!streaming) send(q); });
       box.appendChild(b);
     });
-    afterEl.appendChild(box); scrollDown();
+    afterEl.appendChild(box);
+    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([box]).catch(function () {}); } catch (_) {}   // 追问 chip 里的公式渲染
+    scrollDown();
   }
 
   // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作 ──
@@ -201,17 +205,27 @@
       .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast('已记录 · ' + (d.pref || '偏好已更新')); })
       .catch(function () {});
   }
-  function _buildFbPop(question, trace, close) {
+  function _buildFbPop(question, trace, close, ts) {
     var pop = document.createElement('div'); pop.className = 'asst-fb-pop';
     var h = document.createElement('div'); h.className = 'afp-h';
     h.textContent = (trace && trace.length) ? '这条回答经过的 AI 调用' : '对这条回答不满意?';
     pop.appendChild(h);
+    var _tot = 0;
     (trace || []).forEach(function (st) {
       var row = document.createElement('div'); row.className = 'afp-step';
-      var l = document.createElement('span'); l.className = 'afp-l'; l.textContent = st.label || '步骤';
-      var m = document.createElement('span'); m.className = 'afp-m'; m.textContent = st.model || '—';
+      var l = document.createElement('span'); l.className = 'afp-l'; l.textContent = st.label || '步骤';   // 任务名
+      var m = document.createElement('span'); m.className = 'afp-m';
+      if (typeof st.sec === 'number') _tot += st.sec;
+      m.textContent = (st.model || '—') + (typeof st.sec === 'number' ? ' · ' + st.sec + 's' : '');   // 模型 · 耗时
       row.appendChild(l); row.appendChild(m); pop.appendChild(row);
     });
+    if ((trace && trace.length) && (ts || _tot)) {   // 页脚:完成时刻 + 总耗时
+      var ft = document.createElement('div'); ft.className = 'afp-foot';
+      var bits = [];
+      if (ts && typeof _qhFmtTime === 'function') { try { bits.push('🕐 ' + _qhFmtTime(ts * 1000)); } catch (_) {} }
+      if (_tot) bits.push('共 ' + (Math.round(_tot * 10) / 10) + 's');
+      ft.textContent = bits.join(' · '); pop.appendChild(ft);
+    }
     var cur = _curTier(trace);
     var nxt = _nextTier(cur);   // null = 已在梯子顶(opus·max)
     var acts = document.createElement('div'); acts.className = 'afp-acts';
@@ -231,7 +245,7 @@
     acts.appendChild(bQ); acts.appendChild(bS); pop.appendChild(acts);
     return pop;
   }
-  function _attachFeedback(bubble, question, trace) {
+  function _attachFeedback(bubble, question, trace, ts) {
     if (!bubble) return;
     try { var old = bubble.querySelector('.asst-fb-bar'); if (old) old.remove(); } catch (_) {}   // 重渲时防重复挂
     var bar = document.createElement('div'); bar.className = 'asst-fb-bar';
@@ -240,7 +254,7 @@
       e.stopPropagation();
       if (_fbOpenPop && _fbOpenPop._owner === btn) { _fbClosePop(); return; }
       _fbClosePop();
-      var pop = _buildFbPop(question, trace, _fbClosePop); pop._owner = btn;
+      var pop = _buildFbPop(question, trace, _fbClosePop, ts); pop._owner = btn;
       bar.appendChild(pop); _fbOpenPop = pop; scrollDown();
     });
     bar.appendChild(btn); bubble.appendChild(bar);
@@ -401,7 +415,7 @@
     if (pf.text) renderMd(aMsg, pf.text, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
-    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 可重答)
+    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
     runActions(acts);
     streaming = false; _abort = null; _setSendMode(false);
   }
@@ -557,7 +571,7 @@
           else {
             var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text);
             try { _renderFollowups(el, _pf.followups); } catch (_) {}
-            try { _attachFeedback(el, _lastQ, null); } catch (_) {}   // 历史无逐步 trace → 仅给回报动作(质量回报会用 _lastQ 重答)
+            try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
           }
         });
         // 进面板自动滚到最新(最下方):渲完滚一次,再隔 250ms 补一次(图/MathJax 异步撑高后位置会漂)

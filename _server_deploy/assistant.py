@@ -69,8 +69,8 @@ def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
-        if meta:   # 记每轮所在位置(书/页/选中句/用过的图),让助手回看历史时知道"刚才那页"具体是第几页,前端也据此在历史里渲染上下文卡片
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures"):
+        if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace,让历史回看也能显示上下文卡片 / 感叹号步骤
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace"):
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -1062,13 +1062,15 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
+                _t_tool0 = time.time()
                 try:
                     res = TOOLS[name][1](targs, ctx) or {}
                 except Exception as e:
                     res = {"error": str(e)[:160]}
+                _tool_sec = round(time.time() - _t_tool0, 1)   # 这步耗时(感叹号弹窗显示)
                 vision = res.pop("_vision", None) if isinstance(res, dict) else None   # 图片喂回大脑(sonnet 多模态)
                 _gm = res.pop("_gen_model", None) if isinstance(res, dict) else None   # 生成步工具用的强模型(如 summarize=opus)
-                trace.append({"label": _tool_label(name, targs), "model": _gm or "—"})   # 轨迹:这步用了什么(— = 取数据,无 AI 生成)
+                trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec})   # 轨迹:这步用了什么(— = 取数据,无 AI 生成)+ 耗时
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
@@ -1092,7 +1094,9 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
             yield {"event": "answer", "data": "(想了太多步,先到这吧)"}
         if client_actions:
             yield {"event": "actions", "data": client_actions}
-        yield {"event": "trace", "data": trace}   # 调用轨迹(感叹号里展示:经过了哪些步、谁用了强模型)
+        _tool_total = sum(t.get("sec", 0) for t in trace[1:])   # 编排器自身耗时 = 总耗时 - 各工具耗时
+        trace[0]["sec"] = round(max(0.0, (time.time() - _t_start) - _tool_total), 1)
+        yield {"event": "trace", "data": trace}   # 调用轨迹(感叹号里展示:每步任务名 + 模型 + 耗时)
     finally:
         _kill(p)
         threading.Thread(target=_warm_respawn, daemon=True).start()
@@ -1127,10 +1131,13 @@ def assistant_chat():
 
     def gen():
         final = ['']
+        tr = [None]
         try:
             for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model):
                 if ev['event'] == 'answer':
                     final[0] = ev['data']
+                elif ev['event'] == 'trace':
+                    tr[0] = ev['data']   # 存进历史 → 历史回答的感叹号也能显示步骤/模型/耗时
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
             yield "event: done\ndata: {}\n\n"
         except Exception as e:   # 普通异常才回 error 事件;客户端断连是 GeneratorExit(BaseException,不被此捕获)→ 直接走 finally 落库
