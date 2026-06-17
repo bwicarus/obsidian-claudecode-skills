@@ -743,16 +743,18 @@ def _t_summarize_section(args, ctx):
             return {"error": "这一节没取到文字(可能纯扫描未OCR,可改用 see_page 逐页看)"}
         section_text = "\n\n".join(parts)[:9000]
         # 生成步:章节总结是真正需要强模型的活 → 现起强模型出高质量总结(编排器保持快模型)。
-        # 模型跟用户偏好:质量/平衡→opus,速度偏好→sonnet+high(更快)
-        _dm = "opus" if _pref_load(ctx.get("_uid")) >= 0 else _AGENT_MODEL
+        # 模型/深度:用户给「summarize」动作设了预设(⚙)就用它,否则默认 opus·high
+        _ap = _ap_get(ctx.get("_uid"), "summarize")
+        _dm, _de = _ap if _ap else ("opus", "high")
         gen = _deep_ask(
             f"下面是《{ctx.get('book_name', '')}》「{title}」(第{start}-{end}页)的正文。"
             "请用中文给出**结构化总结**:① 核心要点(分条)② 关键定义 ③ 重要公式(用 $...$)④ 易错点。"
             "引用具体内容时句末标来源页「(第N页)」。简洁但完整,别遗漏主线。\n\n正文:\n" + section_text,
-            model=_dm, effort="high")
+            model=_dm, effort=_de)
         if gen and gen.strip():
-            return {"section_title": title, "page_range": [start, end], "summary": gen.strip(), "_gen_model": _dm + "·high",
-                    "note": "这是 opus 深度总结好的章节内容,**直接原样转达给用户**(可微调排版,别再大改/精简),保留来源页标注。给最终回答时按规则附追问。"}
+            return {"section_title": title, "page_range": [start, end], "summary": gen.strip(),
+                    "_gen_model": f"{_dm}·{_de}", "_gen_action": "summarize",
+                    "note": "这是深度总结好的章节内容,**直接原样转达给用户**(可微调排版,别再大改/精简),保留来源页标注。给最终回答时按规则附追问。"}
         # opus 失败 → 退回把原文交给编排器自己总结
         return {"section_title": title, "page_range": [start, end], "truncated": total > 9000, "text": section_text,
                 "note": "(深度总结暂不可用)这是该章节正文,请你总结成:核心要点/关键定义/重要公式/易错点,标来源页。"}
@@ -959,50 +961,73 @@ def _parse_tool(raw):
         return None
 
 
-# 每用户「质量↔速度」偏好等级(感叹号反馈调它):>0 偏质量(更多问题走深档/总结用 opus)、<0 偏速度。
-_PREF_PATH = CLAUDE_DIR / "state" / "assistant-prefs.json"
-_pref_lock = threading.Lock()
+# 每用户「按动作」的模型/深度预设(感叹号弹窗的 ⚙ 设置 + 🐢 太慢/🎯 更强 写它)。
+# action ∈ {orchestrator(回答/解释), summarize(章节总结)};值 = {model, effort}。无 → 用默认。
+_AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
+_ap_lock = threading.Lock()
+_AP_MODELS = ("haiku", "sonnet", "opus")
+_AP_ACTIONS = ("orchestrator", "summarize")
 
 
-def _pref_load(uid):
+def _ap_all(uid):
     try:
-        return int((json.loads(_PREF_PATH.read_text("utf-8")) or {}).get(str(uid), 0))
+        return (json.loads(_AP_PATH.read_text("utf-8")) or {}).get(str(uid), {}) or {}
     except Exception:
-        return 0
+        return {}
 
 
-def _pref_bump(uid, delta):
-    with _pref_lock:
-        d = {}
+def _ap_get(uid, action):
+    """该用户给某动作设的预设 → (model, effort) 或 None(用默认)。"""
+    d = _ap_all(uid).get(action)
+    if isinstance(d, dict) and d.get("model") in _AP_MODELS and d.get("effort") in _EFFORTS:
+        return d["model"], d["effort"]
+    return None
+
+
+def _ap_set(uid, action, model, effort):
+    """设/清某动作预设(model/effort 非法 → 清除回默认)。返回保存后的 {model,effort} 或 None。"""
+    with _ap_lock:
         try:
-            if _PREF_PATH.exists():
-                d = json.loads(_PREF_PATH.read_text("utf-8")) or {}
+            full = json.loads(_AP_PATH.read_text("utf-8")) if _AP_PATH.exists() else {}
         except Exception:
-            d = {}
-        lvl = max(-2, min(2, int(d.get(str(uid), 0)) + delta))
-        d[str(uid)] = lvl
+            full = {}
+        if not isinstance(full, dict):
+            full = {}
+        u = full.setdefault(str(uid), {})
+        if model in _AP_MODELS and effort in _EFFORTS:
+            u[action] = {"model": model, "effort": effort}
+        else:
+            u.pop(action, None)
         try:
-            _PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _PREF_PATH.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+            _AP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _AP_PATH.write_text(json.dumps(full, ensure_ascii=False), "utf-8")
         except Exception:
             pass
-        return lvl
+        return u.get(action)
+
+
+# 路由正则(模块级,_is_quick / _effort_for 共用)
+_DEEP_RE = (r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|"
+            r"区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证")
+_QUICK_RE = r"跳到|翻到|打开第|第\s*\d+\s*页|高亮|制卡|做成卡|加生词|生词本|翻译这|译一下|查一下.{0,4}页"
+
+
+def _is_quick(message):
+    """导航/写动作(跳页/高亮/制卡…):恒走快档,不被预设拖慢(秒回)。"""
+    import re
+    m = message or ""
+    return bool(re.search(_QUICK_RE, m)) and not re.search(_DEEP_RE, m)
 
 
 def _effort_for(message, ctx, uid=None):
-    """按问题选思考深度。导航/工具动作恒 low(秒回);解释/推导/总结 + 钉了焦点 → high(深);
-    其余中间地带跟用户『质量↔速度』偏好(质量偏好→深、速度偏好→快)。"""
+    """无预设时按问题选思考深度:导航/写动作恒 low;解释/推导/总结 + 钉了焦点 → high;其余 low(快)。"""
     import re
     m = message or ""
-    DEEP = (r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|"
-            r"区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证")
-    QUICK = r"跳到|翻到|打开第|第\s*\d+\s*页|高亮|制卡|做成卡|加生词|生词本|翻译这|译一下|查一下.{0,4}页"
-    if re.search(QUICK, m) and not re.search(DEEP, m):
-        return "low"                                  # 导航/写动作:恒快(即便质量偏好也别拖慢)
-    if (isinstance(ctx, dict) and ctx.get("focus_sel")) or re.search(DEEP, m):
+    if _is_quick(m):
+        return "low"
+    if (isinstance(ctx, dict) and ctx.get("focus_sel")) or re.search(_DEEP_RE, m):
         return "high"
-    lvl = _pref_load(uid) if uid is not None else 0
-    return "high" if lvl >= 1 else "low"              # 中间地带:看偏好
+    return "low"
 
 
 _EFFORTS = ("low", "medium", "high", "xhigh", "max")   # claude CLI 合法 effort 枚举(无 "ultra")
@@ -1010,9 +1035,13 @@ _EFFORTS = ("low", "medium", "high", "xhigh", "max")   # claude CLI 合法 effor
 
 def _agent_run(message, ctx, history, force_effort=None, force_model=None):
     """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|trace|error。"""
-    eff = force_effort if force_effort in _EFFORTS else _effort_for(message, ctx, (ctx or {}).get("_uid"))
-    mdl = force_model if force_model in ("sonnet", "opus") else _AGENT_MODEL   # 感叹号「更强重答」沿梯子升模型
-    trace = [{"label": "编排+回答", "model": f"{mdl}·{eff}"}]   # 编排器(默认 sonnet/分档;升级时可到 opus·max);生成步工具各自追加强模型
+    uid = (ctx or {}).get("_uid")
+    fe = force_effort if force_effort in _EFFORTS else None   # 感叹号「更强重答」强制档(一次性)
+    fm = force_model if force_model in _AP_MODELS else None
+    ap = None if _is_quick(message) else _ap_get(uid, "orchestrator")   # 导航/写动作不套预设(保持秒回);否则用「回答」动作的用户预设(⚙/🐢/🎯 写的)
+    eff = fe or (ap[1] if ap else None) or _effort_for(message, ctx, uid)
+    mdl = fm or (ap[0] if ap else None) or _AGENT_MODEL
+    trace = [{"label": "编排+回答", "model": f"{mdl}·{eff}", "action": "orchestrator"}]   # 编排器档(默认 sonnet/分档,可被预设/重答改)
     p = _take_proc(eff, model=mdl)
     if not p:
         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
@@ -1070,7 +1099,8 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 _tool_sec = round(time.time() - _t_tool0, 1)   # 这步耗时(感叹号弹窗显示)
                 vision = res.pop("_vision", None) if isinstance(res, dict) else None   # 图片喂回大脑(sonnet 多模态)
                 _gm = res.pop("_gen_model", None) if isinstance(res, dict) else None   # 生成步工具用的强模型(如 summarize=opus)
-                trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec})   # 轨迹:这步用了什么(— = 取数据,无 AI 生成)+ 耗时
+                _ga = res.pop("_gen_action", None) if isinstance(res, dict) else None   # 生成步的动作键(可在 ⚙ 里调它的预设)
+                trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec, "action": _ga})   # 轨迹:任务名+模型+耗时(+ 可调预设的动作键)
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
@@ -1113,7 +1143,7 @@ def assistant_chat():
         return jsonify({"ok": False, "error": "empty"}), 400
     uid = session["user_id"]
     force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None   # 感叹号「更强重答」沿梯子升档
-    force_model = body.get("force_model") if body.get("force_model") in ("sonnet", "opus") else None
+    force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
     ctx["_uid"] = uid   # 写操作(制卡/笔记/高亮)记 owner=本用户 → 撤销只能撤自己的(防越权)
@@ -1146,9 +1176,9 @@ def assistant_chat():
             except Exception:
                 pass
         finally:
-            # 助手回答在 finally 落库:断连/出错时也保住已流式出来的部分(跨设备续上不断片)
+            # 助手回答在 finally 落库:断连/出错时也保住已流式出来的部分(跨设备续上不断片)+ 调用轨迹 trace(历史感叹号用)
             if final[0]:
-                _convo_append(uid, "assistant", str(final[0])[:1500])
+                _convo_append(uid, "assistant", str(final[0])[:1500], {"trace": tr[0]} if tr[0] else None)
 
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -1178,21 +1208,18 @@ def assistant_undo():
     return jsonify(voice._undo_do(undo_id, owner=session["user_id"]))   # owner 校验:只能撤自己的(防猜 id 删别人的)
 
 
-@bp.route("/feedback", methods=["POST"])
-def assistant_feedback():
-    """感叹号反馈:slow→偏好往速度推一格、quality→往质量推一格。影响以后的 effort 分档 + 生成步模型。"""
+@bp.route("/action-pref", methods=["POST"])
+def assistant_action_pref():
+    """按动作存「模型+深度」预设(感叹号弹窗的 ⚙ 设置 / 🐢 太慢调快 / 🎯 更强写它)。
+    body: {action, model, effort}。model/effort 非法(或空)→ 清除该动作预设、回默认。"""
     if not _logged_in():
         return jsonify({"ok": False}), 401
-    kind = (request.get_json(silent=True) or {}).get("kind")
-    uid = session["user_id"]
-    if kind == "slow":
-        lvl = _pref_bump(uid, -1)
-    elif kind == "quality":
-        lvl = _pref_bump(uid, +1)
-    else:
-        return jsonify({"ok": False, "error": "bad kind"}), 400
-    pref = {-2: "更偏速度", -1: "偏速度", 0: "平衡", 1: "偏质量", 2: "更偏质量"}.get(lvl, "平衡")
-    return jsonify({"ok": True, "level": lvl, "pref": pref})
+    b = request.get_json(silent=True) or {}
+    action = b.get("action")
+    if action not in _AP_ACTIONS:
+        return jsonify({"ok": False, "error": "bad action"}), 400
+    saved = _ap_set(session["user_id"], action, b.get("model"), b.get("effort"))
+    return jsonify({"ok": True, "pref": saved})   # saved=None → 已清除回默认
 
 
 @bp.route("/prewarm", methods=["POST"])

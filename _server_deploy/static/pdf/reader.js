@@ -1847,7 +1847,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-78';
+const READER_BUILD = 'reader-fix-79';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8101,11 +8101,18 @@ async function _connProbe() {
     '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end}' +
     '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid #2a3a63;background:#0e1525;color:#7c93c4;font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
     '.asst-fb-btn:active{background:#1a2540}' +
-    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:236px;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
+    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:262px;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
     '.afp-h{font-size:11px;color:#7c93c4;margin-bottom:2px}' +
-    '.afp-step{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:1.5}' +
-    '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.afp-step{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.5}' +
+    '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
     '.afp-m{color:#7c93c4;flex:none;font-variant-numeric:tabular-nums}' +
+    '.afp-gear-btn{flex:none;background:none;border:none;color:#6b7da0;font-size:13px;cursor:pointer;padding:0 1px;-webkit-tap-highlight-color:transparent}' +
+    '.afp-gear-btn:active{color:#bcd0ff}' +
+    '.afp-gear{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:1px 0 5px;padding:7px;background:#0a1322;border:1px solid #243152;border-radius:8px}' +
+    '.afp-glab{font-size:11px;color:#7c93c4;width:100%}' +
+    '.afp-sel{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:6px;padding:3px 5px;font-size:12px;flex:1 1 42%;min-width:0}' +
+    '.afp-gset{background:#16293a;border:1px solid #2a4a63;color:#bce0ff;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:1 1 auto}' +
+    '.afp-gdef{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.afp-foot{font-size:11px;color:#6b7da0;margin-top:5px;text-align:right;font-variant-numeric:tabular-nums}' +
     '.afp-acts{display:flex;flex-direction:column;gap:5px;margin-top:4px;border-top:1px solid #1d2742;padding-top:7px}' +
     '.afp-act{text-align:left;border:1px solid #2a3a63;border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:#dbe7ff}' +
@@ -8202,44 +8209,84 @@ async function _connProbe() {
     scrollDown();
   }
 
-  // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作 ──
-  //  · 🎯 答得不够好 → 沿「模型梯子」升一级重答本题(同时记一次「偏质量」,长期路由更强)
-  //  · 🐢 太慢了    → 记一次「偏速度」(长期更倾向快模型)
-  // 模型梯子(能力**严格递增**):每按一次「不够好」往上爬一级,顶端 opus·max。
-  //  (claude effort 枚举 = low/medium/high/xhigh/max,**没有 ultra**;只调 effort 不换模型 = 早先的 bug:sonnet·high 按了纹丝不动)
-  //  刻意不收的两类:① opus·low —— 实测质量 ≈ sonnet·深(横向不是向上),放进来会让"更强"按了反而更慢不更好;
-  //                  ② haiku —— 比 sonnet 弱,永远不是"更强";它只属于反方向(🐢 太慢→未来路由偏快),不进这个向上梯子。
-  var _ASST_LADDER = [
+  // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(任务名 + 模型 + 耗时),再给三种调控 ──
+  //  · 🎯 答得不够好 → 把「回答」动作的预设升一档 + 立刻用该档重答本题
+  //  · 🐢 太慢了    → 把「回答」动作的预设调到「同质量更快」的档(不重答,只影响以后)
+  //  · 每步 ⚙      → 直接给这个动作选 模型 + 深度(haiku/sonnet/opus × low…max),存为该动作预设
+  // 速度/质量谱(Pareto,实测:opus·low ≈ sonnet·high 质量但更快 → 取代 sonnet·high;haiku 在最快端)
+  var _MODELS = ['haiku', 'sonnet', 'opus'];
+  var _EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  var _SPEC = [
+    { model: 'haiku',  effort: 'low',   label: 'haiku·快' },
     { model: 'sonnet', effort: 'low',   label: 'sonnet·快' },
-    { model: 'sonnet', effort: 'high',  label: 'sonnet·深' },
+    { model: 'opus',   effort: 'low',   label: 'opus·快' },     // ≈sonnet·深 质量但实测更快 → 占这一档
     { model: 'opus',   effort: 'high',  label: 'opus·深' },
     { model: 'opus',   effort: 'xhigh', label: 'opus·更深' },
     { model: 'opus',   effort: 'max',   label: 'opus·max' }
   ];
-  function _curTier(trace) {   // 从 trace[0].model(如 "sonnet·high")解析本次编排器档位
+  function _specIdx(m, e) { for (var i = 0; i < _SPEC.length; i++) if (_SPEC[i].model === m && _SPEC[i].effort === e) return i; return -1; }
+  function _tierLabel(m, e) { var i = _specIdx(m, e); return i >= 0 ? _SPEC[i].label : (m + '·' + e); }
+  function _curTier(trace) {   // 从 trace[0].model(如 "sonnet·high")解析本次「回答」动作档位
     try {
       var mm = String((trace && trace[0] && trace[0].model) || '').match(/([a-z]+)[^a-z]+([a-z]+)/i);
       if (mm) return { model: mm[1].toLowerCase(), effort: mm[2].toLowerCase() };
     } catch (_) {}
     return null;
   }
-  function _nextTier(cur) {   // 比 cur 高一级的档;null=已在顶;cur 不在梯子(历史回答无 trace)→ 默认直升 opus·深
-    var i = -1;
-    for (var k = 0; cur && k < _ASST_LADDER.length; k++)
-      if (_ASST_LADDER[k].model === cur.model && _ASST_LADDER[k].effort === cur.effort) { i = k; break; }
-    if (i < 0) return { model: 'opus', effort: 'high', label: 'opus·深' };
-    return (i + 1 < _ASST_LADDER.length) ? _ASST_LADDER[i + 1] : null;
+  // 「更强」:质量↑一档。sonnet·深(默认深答,不在谱上)视作 opus·快 同质量 → 再上一档 = opus·深
+  function _strongerTier(cur) {
+    if (!cur) return _SPEC[3];                                                  // 历史无 trace → 默认 opus·深
+    if (cur.model === 'sonnet' && cur.effort === 'high') return _SPEC[3];       // sonnet·深 → opus·深
+    var i = _specIdx(cur.model, cur.effort);
+    if (i < 0) return _SPEC[3];
+    return (i + 1 < _SPEC.length) ? _SPEC[i + 1] : null;                        // null = 已 opus·max
+  }
+  // 「更快」:速度↑、尽量保质量。sonnet·深 → opus·快(同质量更快,你的洞见);否则谱上退一档
+  function _fasterTier(cur) {
+    if (!cur) return null;
+    if (cur.model === 'sonnet' && cur.effort === 'high') return _SPEC[2];       // sonnet·深 → opus·快
+    var i = _specIdx(cur.model, cur.effort);
+    if (i < 0) return _SPEC[1];                                                 // 不在谱上 → 退到 sonnet·快
+    return (i > 0) ? _SPEC[i - 1] : null;                                       // null = 已 haiku·快(最快)
   }
   var _fbOpenPop = null;
   function _fbClosePop() { if (_fbOpenPop) { try { _fbOpenPop.remove(); } catch (_) {} _fbOpenPop = null; } }
   document.addEventListener('click', function (e) {   // 点弹窗外任意处 → 收起
     if (_fbOpenPop && e.target && e.target.closest && !e.target.closest('.asst-fb-bar')) _fbClosePop();
   });
-  function _fb(kind) {   // 回报偏好;后端 _pref_bump 调整该用户的 质量↔速度 档位
-    fetch('/api/assistant/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: kind }) })
+  // 给某动作(orchestrator/summarize)存「模型+深度」预设;model 传 '' 清除回默认
+  function _setActionPref(action, model, effort, okMsg) {
+    return fetch('/api/assistant/action-pref', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action, model: model || '', effort: effort || '' }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast('已记录 · ' + (d.pref || '偏好已更新')); })
+      .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast(okMsg || '已设置'); return d; })
       .catch(function () {});
+  }
+  var _ACT_NAME = { orchestrator: '回答', summarize: '章节总结' };
+  // 某步的 ⚙ 小设置面板:模型 + 深度两个下拉 + 「默认」清除
+  function _buildGear(st, close) {
+    var box = document.createElement('div'); box.className = 'afp-gear';
+    var cur = _curTier([{ model: st.model }]) || { model: 'sonnet', effort: 'high' };
+    var mkSel = function (opts, val, names) {
+      var s = document.createElement('select'); s.className = 'afp-sel';
+      opts.forEach(function (o) { var op = document.createElement('option'); op.value = o; op.textContent = (names && names[o]) || o; if (o === val) op.selected = true; s.appendChild(op); });
+      return s;
+    };
+    var selM = mkSel(_MODELS, cur.model);
+    var selE = mkSel(_EFFORTS, cur.effort, { low: 'low(快)', high: 'high(深)', xhigh: 'xhigh', max: 'max(最强)' });
+    var apply = document.createElement('button'); apply.className = 'afp-gset'; apply.textContent = '设为预设';
+    apply.addEventListener('click', function () {
+      _setActionPref(st.action, selM.value, selE.value, '「' + (_ACT_NAME[st.action] || st.action) + '」以后用 ' + _tierLabel(selM.value, selE.value));
+      close();
+    });
+    var def = document.createElement('button'); def.className = 'afp-gdef'; def.textContent = '默认';
+    def.addEventListener('click', function () {
+      _setActionPref(st.action, '', '', '「' + (_ACT_NAME[st.action] || st.action) + '」恢复默认');
+      close();
+    });
+    var lab = document.createElement('span'); lab.className = 'afp-glab'; lab.textContent = '模型/深度:';
+    box.appendChild(lab); box.appendChild(selM); box.appendChild(selE); box.appendChild(apply); box.appendChild(def);
+    return box;
   }
   function _buildFbPop(question, trace, close, ts) {
     var pop = document.createElement('div'); pop.className = 'asst-fb-pop';
@@ -8253,7 +8300,19 @@ async function _connProbe() {
       var m = document.createElement('span'); m.className = 'afp-m';
       if (typeof st.sec === 'number') _tot += st.sec;
       m.textContent = (st.model || '—') + (typeof st.sec === 'number' ? ' · ' + st.sec + 's' : '');   // 模型 · 耗时
-      row.appendChild(l); row.appendChild(m); pop.appendChild(row);
+      row.appendChild(l); row.appendChild(m);
+      if (st.action) {   // 这一步是会调模型的动作 → 给个 ⚙ 直接设它的预设
+        var g = document.createElement('button'); g.className = 'afp-gear-btn'; g.textContent = '⚙'; g.title = '设这个动作的模型/深度';
+        g.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var ex = row.nextSibling;
+          if (ex && ex.classList && ex.classList.contains('afp-gear')) { ex.remove(); return; }   // 再点收起
+          var panel = _buildGear(st, _fbClosePop);
+          row.parentNode.insertBefore(panel, row.nextSibling);
+        });
+        row.appendChild(g);
+      }
+      pop.appendChild(row);
     });
     if ((trace && trace.length) && (ts || _tot)) {   // 页脚:完成时刻 + 总耗时
       var ft = document.createElement('div'); ft.className = 'afp-foot';
@@ -8263,21 +8322,28 @@ async function _connProbe() {
       ft.textContent = bits.join(' · '); pop.appendChild(ft);
     }
     var cur = _curTier(trace);
-    var nxt = _nextTier(cur);   // null = 已在梯子顶(opus·max)
+    var up = _strongerTier(cur);     // null = 已最强
+    var down = _fasterTier(cur);     // null = 已最快
     var acts = document.createElement('div'); acts.className = 'afp-acts';
+    // 🎯 不够好:把「回答」预设升一档 + 立刻重答
     var bQ = document.createElement('button'); bQ.className = 'afp-act afp-q';
-    if (!question) bQ.textContent = '🎯 以后这类问题用更强的';
-    else if (nxt) bQ.textContent = '🎯 不够好 · 升到「' + nxt.label + '」重答';
+    if (!question) bQ.textContent = '🎯 以后「回答」用更强的';
+    else if (up) bQ.textContent = '🎯 不够好 · 升到「' + up.label + '」重答';
     else bQ.textContent = '🎯 已是最强 · 用 opus·max 再答一次';
     bQ.addEventListener('click', function () {
-      close(); _fb('quality');
-      if (question && !streaming) {
-        var tgt = nxt || { model: 'opus', effort: 'max' };
-        send(question, { forceModel: tgt.model, forceEffort: tgt.effort });
-      }
+      close();
+      var tgt = up || { model: 'opus', effort: 'max' };
+      _setActionPref('orchestrator', tgt.model, tgt.effort, '「回答」以后用 ' + _tierLabel(tgt.model, tgt.effort));
+      if (question && !streaming) send(question, { forceModel: tgt.model, forceEffort: tgt.effort });
     });
-    var bS = document.createElement('button'); bS.className = 'afp-act afp-s'; bS.textContent = '🐢 太慢了 · 以后更快';
-    bS.addEventListener('click', function () { close(); _fb('slow'); });
+    // 🐢 太慢:把「回答」预设调到同质量更快的档(不重答)
+    var bS = document.createElement('button'); bS.className = 'afp-act afp-s';
+    bS.textContent = down ? ('🐢 太慢 · 以后「回答」用「' + down.label + '」') : '🐢 已是最快档';
+    bS.addEventListener('click', function () {
+      close();
+      if (down) _setActionPref('orchestrator', down.model, down.effort, '「回答」以后用 ' + down.label + '(更快)');
+      else if (typeof _toast === 'function') _toast('已经是最快档了');
+    });
     acts.appendChild(bQ); acts.appendChild(bS); pop.appendChild(acts);
     return pop;
   }
