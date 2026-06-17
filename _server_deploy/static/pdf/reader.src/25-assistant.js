@@ -244,10 +244,20 @@
   }
 
   async function send(text) {
+    if (streaming) return;
     text = (text || '').trim();
-    if (!text || streaming) return;
-    streaming = true; _setSendMode(true);
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
+    if (!text) {
+      // 空输入但有焦点上下文(带入的图 / 钉住的公式或段落 / 当前选中)→ 等于"就问这个",用默认问法直接发
+      var _hasFig = (sentCtx.figures && sentCtx.figures.length);
+      var _fs = sentCtx.focus_sel;
+      var _hasSel = (sentCtx.selection && sentCtx.selection.trim());
+      if (_hasFig) text = '讲讲这张图';
+      else if (_fs && _fs.text) text = (_fs.kind === 'formula') ? '讲讲这个公式' : '讲讲这段';
+      else if (_hasSel) text = '讲讲这段';
+      else return;   // 真·空(无任何上下文)→ 不发
+    }
+    streaming = true; _setSendMode(true);
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
