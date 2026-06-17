@@ -77,6 +77,7 @@ window.openSettings = () => {
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
   const gv = document.getElementById('set-grammar-view');
   if (gv) gv.value = _grammarViewMode;   // 长句结构显示模式
+  try { window._populatePageOffsetUI && window._populatePageOffsetUI(); } catch (_) {}   // 页码对齐:填当前页/偏移
   renderGrammarTrackList();   // 拉语法跟踪节点列表
   // 拉句子翻译配置
   fetch('/pdf/api/translate-config').then(r => r.json()).then(d => {
@@ -96,6 +97,7 @@ window.openSettings = () => {
     g('set-crop-l', _crop.l); g('set-crop-r', _crop.r); g('set-crop-t', _crop.t); g('set-crop-b', _crop.b); }
   // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
   document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
+  { const e = document.getElementById('set-figures'); if (e) e.checked = !!window.__figBookOn; }   // 本书插图描述开关(每本书独立)
   renderHlColorSetting();
   if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
   document.getElementById('settings-mask').style.display = 'flex';

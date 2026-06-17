@@ -809,6 +809,15 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
 
       <!-- ════ pane: 阅读 ════ -->
       <div class="set-pane" data-pane="read" style="display:none">
+        <div style="font-size:13px;color:#cfe6ff;margin-bottom:4px">📖 页码对齐</div>
+        <div style="font-size:11px;color:#7a8497;margin-bottom:8px;line-height:1.5">让阅读器显示的页码＝书上印的页码（PDF 前几页常是封面/目录）。翻到当前这页，把它在书上印的页码填进去点「对齐」即可。<b>每本书独立、自动跨设备同步</b>。</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;margin-bottom:6px;flex-wrap:wrap">
+          当前 PDF 第 <b id="set-pg-pdf">–</b> 页 ＝ 书上第
+          <input type="number" id="set-pg-printed" style="width:64px;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:5px 8px;font-size:13px"> 页
+          <button type="button" onclick="applyPageOffset()" style="background:#1f6feb;border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer">对齐</button>
+        </div>
+        <div style="font-size:11px;color:#7a8497;margin-bottom:14px"><span id="set-pg-cur-off">当前偏移：0</span> · <a href="javascript:void 0" onclick="applyPageOffset(0)" style="color:#7dd3fc">重置</a></div>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
           <input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）
         </label>

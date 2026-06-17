@@ -62,6 +62,39 @@ window.goToPage = async (n) => {
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
 
+// 页码对齐:每本书一个偏移(PDF 页 - 书上印的页),存 localStorage(pdf-* 前缀 → 自动跨设备同步)。
+// 显示处一律 _dispPage(pdf)=书上页码;跳页输入按书上页码 → _pdfFromDisp 转回 PDF 页。
+window._pageOffset = function () {
+  try { return parseInt(localStorage.getItem('pdf-page-offset:' + (typeof FILE_REL !== 'undefined' ? FILE_REL : '')) || '0', 10) || 0; } catch (_) { return 0; }
+};
+window._dispPage = function (pdf) {
+  pdf = parseInt(pdf, 10) || 0;
+  var off = window._pageOffset(), pr = pdf - off;
+  return (off && pr >= 1) ? pr : pdf;   // 前言区(印页<1)回退显示 PDF 页
+};
+window._pdfFromDisp = function (disp) { return (parseInt(disp, 10) || 0) + window._pageOffset(); };
+window._refreshPageCur = function () { var pc = document.getElementById('page-cur'); if (pc && typeof currentPage !== 'undefined') pc.textContent = window._dispPage(currentPage); };
+// 设置面板「页码对齐」:把当前页设为书上第 N 页 → 偏移=当前PDF页-N;applyPageOffset(0)=重置
+window.applyPageOffset = function (forceZero) {
+  var off;
+  if (forceZero === 0) off = 0;
+  else {
+    var pr = parseInt((document.getElementById('set-pg-printed') || {}).value, 10);
+    if (!pr) { if (typeof _toast === 'function') _toast('请先填书上的页码'); return; }
+    off = (currentPage || 1) - pr;
+  }
+  try { localStorage.setItem('pdf-page-offset:' + FILE_REL, String(off)); } catch (_) {}
+  window._refreshPageCur();
+  window._populatePageOffsetUI();
+  if (typeof _toast === 'function') _toast(off ? ('已对齐(PDF 比书页多 ' + off + ' 页)') : '已重置页码对齐');
+};
+window._populatePageOffsetUI = function () {
+  var cp = (typeof currentPage !== 'undefined' && currentPage) ? currentPage : 1;
+  var a = document.getElementById('set-pg-pdf'); if (a) a.textContent = cp;
+  var b = document.getElementById('set-pg-printed'); if (b) b.value = window._dispPage(cp);
+  var c = document.getElementById('set-pg-cur-off'); if (c) c.textContent = '当前偏移：' + window._pageOffset();
+};
+
 // ── 助手聊天里点页码 → 跳页 + PDF 底部「↩ 回到第 X 页」(多次跳转仍回最早那页)──
 window.__pageBackAnchor = null;
 window.jumpWithBack = function (target) {
@@ -97,7 +130,7 @@ function _showPageBackBar(p) {
       document.head.appendChild(st);
     }
   }
-  bar.textContent = '↩ 回到第 ' + p + ' 页';
+  bar.textContent = '↩ 回到第 ' + window._dispPage(p) + ' 页';
   bar.style.display = 'block';
 }
 function _hidePageBackBar() { const bar = document.getElementById('page-back-bar'); if (bar) bar.style.display = 'none'; }
@@ -125,9 +158,9 @@ function _setupPageScrub() {
     tgt = Math.max(1, Math.min(st.total, tgt));
     st.tgt = tgt;
     pop.style.display = 'flex';
-    numEl().textContent = tgt + ' / ' + st.total;
+    numEl().textContent = window._dispPage(tgt) + ' / ' + window._dispPage(st.total);
     fillEl().style.width = (tgt / st.total * 100) + '%';
-    const pc = document.getElementById('page-cur'); if (pc) pc.textContent = tgt;
+    const pc = document.getElementById('page-cur'); if (pc) pc.textContent = window._dispPage(tgt);
     e.preventDefault();
   });
   const end = () => {
@@ -136,10 +169,10 @@ function _setupPageScrub() {
     pop.style.display = 'none';
     if (s.moved) { goToPage(s.tgt); }
     else {
-      const n = prompt('跳到第几页 (1-' + s.total + ')', currentPage);
+      const n = prompt('跳到第几页(按书上印的页码,共 ' + window._dispPage(s.total) + ')', window._dispPage(currentPage));
       const v = parseInt(n);
-      if (v) goToPage(Math.max(1, Math.min(s.total, v)));
-      else { const pc = document.getElementById('page-cur'); if (pc) pc.textContent = currentPage; }
+      if (v) goToPage(Math.max(1, Math.min(s.total, window._pdfFromDisp(v))));   // 输入是书上页码 → 转回 PDF 页
+      else window._refreshPageCur();
     }
   };
   el.addEventListener('pointerup', end);
