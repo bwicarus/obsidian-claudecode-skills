@@ -941,7 +941,7 @@ def _agent_run(message, ctx, history):
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
         _repair_tries = 0
-        for step in range(8):   # 步数上限(原 6):多批高亮/查词 + 偶发 JSON 自愈重试会多吃几步,给点余量
+        for step in range(40):   # 步数放很高(40):真正的护栏是下面的总超时(200s),步数只当 runaway 兜底,别因步数砍掉复杂多工具任务
             if time.time() - _t_start > 200:   # 总超时:防卡死的 claude 占住 gunicorn worker(单轮60s×6步最坏拖垮整个 webapp)
                 yield {"event": "answer", "data": "(处理用时太久,先到这——可以再问我一次,或换个更具体的问法)"}
                 break
