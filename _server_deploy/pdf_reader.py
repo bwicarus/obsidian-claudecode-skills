@@ -5055,9 +5055,27 @@ def pdf_api_page_figures():
     return resp
 
 
-@bp.route("/api/figure-crop")
+@bp.route("/api/figure-crop", methods=["GET", "POST"])
 def pdf_api_figure_crop():
-    """GET ?file=&page=&box=x0,y0,x1,y1[&ink=1] → 图框区域 PNG(拖拽 ghost / 预览;ink=1 叠笔迹)。"""
+    """图框区域 PNG(拖拽 ghost / 缩略图 / 大图)。
+    GET  ?file=&page=&box=x0,y0,x1,y1[&ink=1] → ink=1 叠服务端保存的笔迹。
+    POST {file,page,box:[..],strokes:[..]} → 用**传入的当前笔迹**合成(缩略图/大图用,不依赖墨迹保存时机)。"""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        rel = (data.get("file") or "").strip()
+        abs_path = _safe_vault_path(rel)
+        try:
+            page = int(data.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        box = data.get("box"); strokes = data.get("strokes")
+        if not abs_path or page < 1 or not box:
+            return jsonify({"ok": False, "error": "invalid"}), 400
+        try:
+            png = _figure_crop_png(abs_path, page, box, with_ink=bool(strokes), rel=rel, strokes=strokes)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:120]}), 500
+        return Response(png, mimetype="image/png", headers={"Cache-Control": "no-store"})
     rel = request.args.get("file", "")
     abs_path = _safe_vault_path(rel)
     page = int(request.args.get("page", "0") or "0")

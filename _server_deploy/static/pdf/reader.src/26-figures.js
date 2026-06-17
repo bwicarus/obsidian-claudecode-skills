@@ -43,7 +43,10 @@
     'border:1px solid #2a3a63;border-radius:9px;max-width:100%}' +
     '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
     '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
-    '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}';
+    '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}' +
+    // 点缩略图看大图(合成图)
+    '.fig-lightbox{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}' +
+    '.fig-lightbox img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.6);background:#fff}';
   document.head.appendChild(css);
 
   var PHOTO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.7"/>' +
@@ -231,6 +234,25 @@
     return '/pdf/api/figure-crop?file=' + encodeURIComponent(a.file_rel) + '&page=' + a.page +
            '&box=' + a.box.map(function (v) { return (+v).toFixed(4); }).join(',') + (a.has_ink ? '&ink=1' : '');
   }
+  // 取该图的渲染图:有笔迹 → POST 当前笔迹让服务端合成(复用已对齐的管线),回 blob url;无笔迹 → 直接 GET url
+  function _fetchComposite(a, cb) {
+    var ink = (typeof _figInk === 'function') ? _figInk(a.page, a.box) : [];
+    if (!ink.length) { cb(_cropUrlOf(a)); return; }
+    fetch('/pdf/api/figure-crop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: a.file_rel, page: a.page, box: a.box, strokes: ink })
+    }).then(function (r) { return r.ok ? r.blob() : null; })
+      .then(function (b) { cb(b ? URL.createObjectURL(b) : _cropUrlOf(a)); })
+      .catch(function () { cb(_cropUrlOf(a)); });
+  }
+  // 点缩略图 → 看大图(合成图,实时取当前笔迹)
+  function _openFigLightbox(a) {
+    var mask = document.createElement('div'); mask.className = 'fig-lightbox';
+    var img = document.createElement('img'); img.alt = '';
+    mask.appendChild(img); document.body.appendChild(mask);
+    _fetchComposite(a, function (url) { img.src = url; });
+    mask.addEventListener('click', function () { mask.remove(); });
+  }
   // 助手对话上方「已带入的图」附件条列表:每张一个缩略图 + 图注 + ✕(可多张)
   function _renderChips() {
     try {
@@ -244,7 +266,9 @@
       wrap.innerHTML = '';
       list.forEach(function (a) {
         var chip = document.createElement('div'); chip.className = 'asst-fig-chip';
-        var img = document.createElement('img'); img.className = 'afc-thumb'; img.src = _cropUrlOf(a);
+        var img = document.createElement('img'); img.className = 'afc-thumb'; img.style.cursor = 'zoom-in';
+        _fetchComposite(a, function (url) { img.src = url; });       // 有笔迹 → 缩略图显示合成图
+        img.addEventListener('click', function () { _openFigLightbox(a); });   // 点缩略图 → 看大图
         var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + a.page;
         var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
         x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
