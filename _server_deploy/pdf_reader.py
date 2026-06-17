@@ -1660,6 +1660,58 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     return chars, pw, ph, furigana
 
 
+_FORMULA_INJECT_VER = 1   # 公式字符层注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
+
+
+def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
+    """把公式 OCR 的 LaTeX 注入字符层(用户要的"公式文字层直接替换为 OCR 结果")。
+    字符层是隐藏选择层(视觉靠页图),所以这一步只改"选中公式时拿到什么":
+      ① 删掉公式 bbox 内的原扫描乱码字符 + 落在框内的振假名;
+      ② 塞入 LaTeX 串(切片平铺满整框、同一词 id w、标 fml=1),单击选公式 → 直接得 $...$。
+    随 sidecar latex 改而变 → cv 已含 fig sidecar mtime,前端缓存自动失效。"""
+    try:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path:
+            return
+        data = _fig_load_abs(abs_path)
+    except Exception:
+        return
+    fmls = [f for f in (data.get("formulas") or [])
+            if f.get("page") == page and (f.get("latex") or "").strip()
+            and f.get("bbox") and len(f.get("bbox")) == 4]
+    if not fmls:
+        return
+    WID, BK = 950000000, 950000
+    for fi, f in enumerate(fmls):
+        x0n, y0n, x1n, y1n = f["bbox"]
+        fx0, fy0, fx1, fy1 = x0n * page_w, y0n * page_h, x1n * page_w, y1n * page_h
+
+        def _inside(bx0, by0, bx1, by1):
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            return fx0 <= cx <= fx1 and fy0 <= cy <= fy1
+        # 删原乱码字符 + 框内振假名
+        chars[:] = [c for c in chars if not _inside(c["x0"], c["y0"], c["x1"], c["y1"])]
+        if isinstance(furigana, list) and furigana:
+            furigana[:] = [r for r in furigana
+                           if not (all(k in r for k in ("x0", "y0", "x1", "y1"))
+                                   and _inside(r["x0"], r["y0"], r["x1"], r["y1"]))]
+        lx = f["latex"].strip()
+        wrapped = ("$$" + lx + "$$") if f.get("multiline") else ("$" + lx + "$")
+        n = len(wrapped)
+        if not n:
+            continue
+        slice_w = max(0.5, (fx1 - fx0) / n)
+        wid, bk = WID + fi, BK + fi
+        for i, cc in enumerate(wrapped):
+            sx0 = fx0 + i * slice_w
+            chars.append({
+                "c": cc, "x0": round(sx0, 2), "y0": round(fy0, 2),
+                "x1": round(sx0 + slice_w, 2), "y1": round(fy1, 2),
+                "sp": 0, "w": wid, "b": 0, "bk": bk,
+                "fml": 1, "flx": (lx if i == 0 else ""),
+            })
+
+
 @bp.route("/api/page-chars")
 def pdf_api_page_chars():
     """提取该页所有字符的精确 bbox（PDF 坐标）。
@@ -1684,6 +1736,7 @@ def pdf_api_page_chars():
         _apply_char_offset(chars, _char_offset_for(rel, page))   # 文字层校准:偏移 live 应用(不进磁盘缓存)
         _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）
         furigana = _merge_favorite_phrases_furigana(furigana)   # 收藏词组按整体读音合并振假名(一条 ruby)
+        _apply_formula_chars(chars, furigana, rel, page, page_w, page_h)   # 公式区域文字层替换为 OCR LaTeX(选中公式直接得 $...$)
         # **只回不变部分**(字 bbox/分词/振假名);可变的生词/句子框走 /page-overlay。
         # 可缓存:前端带 &cv=<内容版本>(偏移/重扫/PDF 改 → cv 变 → 换 key → 不会陈旧);
         # /pdf/sw.js 缓存命中即本地(读过的书秒开/离线),没命中才回 Pi。
@@ -1717,7 +1770,11 @@ def _page_content_version(abs_path, rel: str, page: int) -> str:
         pm = int(os.path.getmtime(str(_PHRASE_MARK_PATH)))   # 词组掌握态改 → chars 的 favm 变 → cv 也得变
     except Exception:
         pm = 0
-    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}"
+    try:
+        fm = int(os.path.getmtime(str(_fig_path_abs(abs_path))))   # 公式 sidecar 改(latex 填好/改) → 公式字符层变 → cv 必须变
+    except Exception:
+        fm = 0
+    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}"
     return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
 
 
