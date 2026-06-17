@@ -28,9 +28,7 @@
       '<button class="asst-learn" data-send="总结这页">📝 总结本页</button>' +
       '<button class="asst-learn" data-send="这页我还没掌握哪些词?逐个讲讲">📚 本页生词</button>' +
       '<button class="asst-learn" data-send="这页涉及哪些知识点?简要讲讲">🧩 这页知识点</button>' +
-      '<button data-q="prev">◀ 上页</button><button data-q="next">下页 ▶</button>' +
-      '<button data-q="fit">适应</button><button data-q="zin">A+</button><button data-q="zout">A-</button>' +
-      '<button data-q="ptrans">译页</button><button data-q="clear">🗑 清空</button>' +
+      '<button data-q="clear">🗑 清空</button>' +
     '</div>' +
     '<div id="asst-input">' +
       '<button id="asst-mic" title="语音输入"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V22h2v-3.07A7 7 0 0 0 19 12h-2z"/></svg></button>' +
