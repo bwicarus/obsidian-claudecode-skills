@@ -13,7 +13,7 @@
     'display:flex;align-items:center;justify-content:center;color:#fff;opacity:.5;' +
     'background:rgba(10,132,255,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);' +
     'box-shadow:0 2px 7px rgba(0,0,0,.2),inset 0 0 0 .5px rgba(255,255,255,.3);' +
-    '-webkit-tap-highlight-color:transparent;transition:transform .12s,opacity .12s}' +
+    '-webkit-tap-highlight-color:transparent;transition:transform .12s,opacity .12s;touch-action:none}' +
     '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:.95}' +
     '.fig-badge svg{width:15px;height:15px;display:block}' +
     '.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;' +
@@ -28,15 +28,21 @@
     'background:rgba(10,132,255,.10);border-radius:7px;box-shadow:0 0 0 2px rgba(10,132,255,.18);' +
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
-    // 图区命中层(透明可点)/ 拖拽 ghost / 助手栏 drop 区 + 「+」
-    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +
+    // 图区命中层(透明可点;touch-action:auto 不挡阅读滚动,拖拽改用徽标当把手)
+    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
     '.fig-drag-ghost{position:fixed;z-index:240;width:118px;max-height:150px;object-fit:contain;opacity:.6;' +
     'border:2px solid rgba(10,132,255,.85);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.55);' +
     'transform:translate(-50%,-50%);pointer-events:none;background:#fff}' +
     '#grammar-panel.fig-drop-ready{outline:2px dashed rgba(10,132,255,.5);outline-offset:-4px}' +
     '#grammar-panel.fig-drop-over{outline:3px solid rgba(10,132,255,.95);background:rgba(10,132,255,.07)}' +
     '#fig-drop-plus{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:131;' +
-    'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}';
+    'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}' +
+    // 助手对话里「已带入的图」附件条(缩略图 + 图注 + ✕)
+    '#asst-fig-chip{display:flex;align-items:center;gap:8px;padding:6px 8px;margin:0 10px 6px;background:#16203a;' +
+    'border:1px solid #2a3a63;border-radius:10px}' +
+    '#asst-fig-chip .afc-thumb{width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid #3b6db5;background:#fff;flex:none}' +
+    '#asst-fig-chip .afc-cap{flex:1;font-size:12px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '#asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:15px;cursor:pointer;flex:none;padding:0 4px}';
   document.head.appendChild(css);
 
   var PHOTO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.7"/>' +
@@ -159,7 +165,7 @@
       var b = document.createElement('div'); b.className = 'fig-badge'; b.innerHTML = PHOTO_SVG;
       b.style.left = pos[0] + 'px'; b.style.top = pos[1] + 'px'; b.style.pointerEvents = 'auto';
       b.title = f.caption || '图说明';
-      b.addEventListener('click', function (e) { e.stopPropagation(); openPop(b, f); });
+      _bindBadge(b, f, num);    // 轻点=描述浮层;长按=拖进助手对话(徽标当拖拽把手,小不挡滚动)
       layer.appendChild(b);
     });
   }
@@ -189,9 +195,38 @@
     var pw = (anchorEl && anchorEl.closest) ? anchorEl.closest('.page-wrap')
              : document.querySelector('.page-wrap[data-page-num="' + num + '"]');
     showHl(pw, fig);            // 只高亮范围,不弹描述
+    _setFigChip(fig, num);      // 助手对话里挂个缩略图附件条(看得见带了哪张图)
     if (typeof _toast === 'function') _toast(fig.group ? '已聚焦这个图组,问助手会带上它' : '已聚焦这张图,问助手会带上它');
   }
   window.__setFigFocus = setFigFocus;
+
+  // 助手对话上方「已带入的图」附件条:缩略图 + 图注 + ✕。__figFocus 是上下文真值,附件条是它的可视镜像
+  function _setFigChip(fig, num) {
+    try {
+      var pane = document.getElementById('side-pane-asst');
+      var input = pane && pane.querySelector('#asst-input');
+      if (!input) return;       // 助手还没建/没开 → 先不挂(开助手后 __figFocus 仍在上下文里)
+      var chip = document.getElementById('asst-fig-chip');
+      if (!chip) { chip = document.createElement('div'); chip.id = 'asst-fig-chip'; input.parentNode.insertBefore(chip, input); }
+      chip.innerHTML = '';
+      var img = document.createElement('img'); img.className = 'afc-thumb'; img.src = _figCropUrl(fig, num);
+      var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (fig.group ? '图组 · ' : '') + (fig.caption || '这张图');
+      var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
+      x.addEventListener('click', function () { _clearFigChip(); window.__figFocus = null; clearHl(); });
+      chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x);
+    } catch (_) {}
+  }
+  function _clearFigChip() { var c = document.getElementById('asst-fig-chip'); if (c) c.remove(); }
+  window.__clearFigFocus = function () { _clearFigChip(); window.__figFocus = null; clearHl(); };
+
+  // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
+  document.addEventListener('pointerdown', function (e) {
+    if (!_hlEl) return;
+    var t = e.target;
+    if (t && t.closest && (t.closest('.fig-hit') || t.closest('.fig-badge') || t.closest('.fig-pop') ||
+        t.closest('#side-pane-asst') || t.closest('#grammar-panel'))) return;
+    clearHl();
+  }, true);
 
   // ── 长按拖动 → ghost 跟手 + 右侧助手栏冒「+」→ 拖进去入上下文 ──
   var _drag = null;
@@ -244,24 +279,42 @@
     if (dp) { dp.classList.remove('fig-drop-ready'); dp.classList.remove('fig-drop-over'); var p = document.getElementById('fig-drop-plus'); if (p) p.remove(); }
   }
 
+  // 图区命中层:只管轻点 → 设焦点(放开滚动,不拦拖拽)。拖拽统一走徽标(_bindBadge)
   function _bindFigHit(hit, fig, num) {
-    var sx = 0, sy = 0, st = 0, lp = null, moved = false, dragging = false;
+    var sx = 0, sy = 0, st = 0, moved = false;
     hit.addEventListener('pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false; dragging = false;
-      lp = setTimeout(function () { if (!moved) { dragging = true; _dragStart(fig, num, e); } }, 430);
+      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false;
     });
     hit.addEventListener('pointermove', function (e) {
       if (!moved && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) moved = true;
+    });
+    hit.addEventListener('pointerup', function (e) {
+      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点/单击 → 设焦点
+    });
+  }
+
+  // 徽标:轻点 → 描述浮层;长按(380ms 不动)→ 拖拽进助手对话。徽标 touch-action:none + setPointerCapture → 拖拽稳,不会被滚动取消
+  function _bindBadge(b, fig, num) {
+    var sx = 0, sy = 0, st = 0, lp = null, moved = false, dragging = false, pid = null;
+    b.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false; dragging = false; pid = e.pointerId;
+      lp = setTimeout(function () {
+        if (!moved) { dragging = true; _dragStart(fig, num, e); try { b.setPointerCapture(pid); } catch (_) {} }
+      }, 380);
+    });
+    b.addEventListener('pointermove', function (e) {
+      if (!moved && (Math.abs(e.clientX - sx) > 7 || Math.abs(e.clientY - sy) > 7)) moved = true;
       if (dragging) { _dragMove(e); e.preventDefault(); }
       else if (moved && lp) { clearTimeout(lp); lp = null; }
     });
-    hit.addEventListener('pointerup', function (e) {
+    b.addEventListener('pointerup', function (e) {
       if (lp) { clearTimeout(lp); lp = null; }
-      if (dragging) { dragging = false; _dragEnd(fig, num, e); return; }
-      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点/单击 → 设焦点
+      if (dragging) { dragging = false; try { b.releasePointerCapture(pid); } catch (_) {} _dragEnd(fig, num, e); return; }
+      if (!moved && Date.now() - st < 500) { e.stopPropagation(); openPop(b, fig); }   // 轻点 → 描述
     });
-    hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } _dragCancel(); });
+    b.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } if (dragging) { dragging = false; _dragCancel(); } });
   }
 
   function _fetchFigs(pw, num) {
