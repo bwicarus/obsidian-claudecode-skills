@@ -4793,7 +4793,7 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
                 data["_none_pages"].append(pg)
             _fig_save_abs(abs_path, data)
 
-def _fig_badge_anchor(page, bbox, others=None):
+def _fig_badge_anchor(page, bbox, others=None, debug=False):
     """算徽标锚点(归一 [bx,by]=徽标中心):把徽标贴在**图本身的角**,不飘到图外/缝里。
     用 get_text words 减掉正文墨 → 图墨;搜索区从 AI bbox 扩张,但**被同页其它图的 bbox 夹住**
     (不串进隔壁、不跨过图与图之间的空白缝);锚点取图墨 bbox 的角,**优先右上**、挑够空的一个,
@@ -4902,23 +4902,26 @@ def _fig_badge_anchor(page, bbox, others=None):
             blx = aj - s + 1; bly = ai + s - 1            # 空白方块的左下角
             bcx = blx + bs / 2.0; bcy = bly - bs / 2.0    # 徽标放左下角(内缩半个,刚好嵌进方块)
         else:
-            # 右上方没有够大的空白 → 退:图墨 bbox 四角里占用最少者(优先右上)
-            bs0 = max(4, min(bs, max(2, (maxx - minx) // 2), max(2, (maxy - miny) // 2)))
-            best4 = None; least = 1e18
-            for cx0, cy0 in [(maxx - bs0, miny), (minx, miny), (maxx - bs0, maxy - bs0), (minx, maxy - bs0)]:
-                cx0 = max(0, min(pw - bs0, cx0)); cy0 = max(0, min(ph - bs0, cy0))
-                c = 0
-                for yy in range(cy0, cy0 + bs0):
-                    base = yy * pw
-                    for xx in range(cx0, cx0 + bs0):
-                        c += occ[base + xx]
-                if c < least:
-                    least = c; best4 = (cx0 + bs0 / 2.0, cy0 + bs0 / 2.0)
-            if best4 is None:
-                return None
-            bcx, bcy = best4
+            # 图被三面挤死、右上方放不下整块空白方块 → **不塞进图里**;把徽标贴在图**顶边正上方、
+            # 靠右**(图外那条窄缝里),哪怕压一点上方正文,也比落图内部强。
+            cx0 = max(0, min(pw - bs, maxx - bs + 1))
+            cy0 = max(0, min(ph - bs, miny - bs))     # 图墨顶边之上 = 图外(上方)
+            bcx = cx0 + bs / 2.0; bcy = cy0 + bs / 2.0
         bx = (sx0 * W + bcx / z) / W
         by = (sy0 * H + bcy / z) / H
+        if debug:
+            def gx(px): return round((sx0 * W + px / z) / W, 4)
+            def gy(py): return round((sy0 * H + py / z) / H, 4)
+            sq_box = None
+            if best is not None:
+                _ai, _aj, _s = best
+                sq_box = [gx(_aj - _s + 1), gy(_ai), gx(_aj + 1), gy(_ai + _s)]   # 找到的空白方块(归一)
+            return {
+                "badge": [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)],
+                "fig_ink_bbox": [gx(minx), gy(miny), gx(maxx + 1), gy(maxy + 1)],   # 图墨包围盒=障碍块
+                "empty_square": sq_box,                                            # 空白方块(其左下角=徽标)
+                "clip": [round(sx0, 4), round(sy0, 4), round(sx1, 4), round(sy1, 4)],
+            }
         return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
     except Exception:
         return None
