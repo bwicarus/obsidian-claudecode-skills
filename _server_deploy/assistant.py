@@ -104,7 +104,7 @@ def _spawn():
              # 沙盒:禁掉所有内建工具(本 agent 只走我们的 JSON 工具协议,从不调内建工具)→ 防 prompt injection
              # 诱导模型用 Bash/Read 读 .env(API key)/改脚本/读别人的 convo。user message 是不可信输入。
              "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-             "--verbose", "--model", _AGENT_MODEL, "--effort", "medium"],   # medium:工具路由+短答够用,比 high 快且省额度
+             "--verbose", "--model", _AGENT_MODEL, "--effort", "low"],   # low:聊天/工具路由不需要深思考 → 最影响首字延迟,用 low 最快(复杂任务靠多步工具补)
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, cwd=str(CLAUDE_DIR))
     except Exception:
@@ -149,7 +149,7 @@ def _send(p, content: str, timeout: float = 90.0):
     return None
 
 
-def _send_stream(p, content, timeout: float = 60.0):
+def _send_stream(p, content, timeout: float = 90.0):
     """发一轮 user 消息,**流式** yield:('delta', 累计文本) 每来一段 text_delta;最后 ('result', 完整文本/None)。
     供 _agent_run 把最终回答逐字吐给前端(tool 调用 JSON 不流式,见 _agent_run 的 startswith('{') 判别)。"""
     try:
@@ -943,7 +943,7 @@ def _agent_run(message, ctx, history):
         _t_start = time.time()
         _repair_tries = 0
         for step in range(40):   # 步数放很高(40):真正的护栏是下面的总超时(200s),步数只当 runaway 兜底,别因步数砍掉复杂多工具任务
-            if time.time() - _t_start > 200:   # 总超时:防卡死的 claude 占住 gunicorn worker(单轮60s×6步最坏拖垮整个 webapp)
+            if time.time() - _t_start > 240:   # 总超时:防卡死的 claude 占住 gunicorn worker
                 yield {"event": "answer", "data": "(处理用时太久,先到这——可以再问我一次,或换个更具体的问法)"}
                 break
             raw = None
