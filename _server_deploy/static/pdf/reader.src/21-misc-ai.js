@@ -655,7 +655,8 @@ window._clearReocr = async () => {
 
 // 键盘快捷键
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  // 焦点在任何可输入控件(含侧栏 AI 的 textarea / 可编辑区)时,左右键给光标用,别翻页
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
   if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); changePage(1); }
   else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); changePage(-1); }
   else if (e.key === 'Escape') { closeResult(); toolbar.classList.remove('open'); }

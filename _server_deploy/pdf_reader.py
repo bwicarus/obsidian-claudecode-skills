@@ -4793,18 +4793,117 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
                 data["_none_pages"].append(pg)
             _fig_save_abs(abs_path, data)
 
+def _fig_badge_anchor(page, bbox):
+    """算徽标锚点(归一 [bx,by]=徽标中心):像素分析,把徽标贴在**图本身的一个空白角**,而不是
+    飘在远处。AI 给的 bbox 常不准 → 用文字块(get_text words)减掉正文墨 → 得到图墨,在 AI bbox
+    周边(扩张)的搜索区里定位图墨真实范围,再在其四角里挑墨量最少(最空)的窗口放徽标。
+    纯 Python(无 numpy):渲染区缩到 ~140px 长边,几万像素迭代 < ~10ms。失败回 None(前端退回启发)。"""
+    try:
+        import fitz   # 本模块 fitz 都是函数内 import(非模块级),这里也得自取
+        pr = page.rect
+        W = float(pr.width); H = float(pr.height)
+        if W <= 0 or H <= 0:
+            return None
+        x0, y0, x1, y1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
+        if x1 <= x0 or y1 <= y0:
+            return None
+        ex = 0.10   # AI bbox 不准 → 适度扩张搜索区(太大反而把图旁边的空白也括进来,锚点漂走)
+        sx0 = max(0.0, x0 - ex); sy0 = max(0.0, y0 - ex)
+        sx1 = min(1.0, x1 + ex); sy1 = min(1.0, y1 + ex)
+        rw_pt = (sx1 - sx0) * W; rh_pt = (sy1 - sy0) * H
+        if rw_pt <= 1 or rh_pt <= 1:
+            return None
+        z = 140.0 / max(rw_pt, rh_pt)
+        z = max(0.2, min(z, 2.0))
+        clip = fitz.Rect(sx0 * W, sy0 * H, sx1 * W, sy1 * H)
+        pix = page.get_pixmap(matrix=fitz.Matrix(z, z), clip=clip, colorspace=fitz.csGRAY, alpha=False)
+        pw, ph = pix.width, pix.height
+        if pw < 4 or ph < 4:
+            return None
+        samp = pix.samples           # 灰度,pw*ph 字节
+        textmask = bytearray(pw * ph)  # 1=正文文字处(不算图墨)
+        for w in page.get_text("words"):
+            ax0 = int((w[0] - sx0 * W) * z); ay0 = int((w[1] - sy0 * H) * z)
+            ax1 = int((w[2] - sx0 * W) * z); ay1 = int((w[3] - sy0 * H) * z)
+            ax0 = max(0, ax0); ay0 = max(0, ay0); ax1 = min(pw, ax1); ay1 = min(ph, ay1)
+            for yy in range(ay0, ay1):
+                base = yy * pw
+                for xx in range(ax0, ax1):
+                    textmask[base + xx] = 1
+        TH = 160
+        minx = pw; miny = ph; maxx = -1; maxy = -1; ink = 0
+        for yy in range(ph):
+            base = yy * pw
+            for xx in range(pw):
+                if samp[base + xx] < TH and not textmask[base + xx]:
+                    ink += 1
+                    if xx < minx: minx = xx
+                    if xx > maxx: maxx = xx
+                    if yy < miny: miny = yy
+                    if yy > maxy: maxy = yy
+        if ink < 30 or maxx < minx or maxy < miny:
+            return None
+        fw = maxx - minx; fh = maxy - miny
+        bs = max(6, int(min(fw, fh) * 0.22))
+        bs = min(bs, max(6, fw // 2), max(6, fh // 2))
+
+        def win_ink(cx, cy):
+            cx = max(minx, min(maxx - bs, cx)); cy = max(miny, min(maxy - bs, cy))
+            c = 0
+            for yy in range(cy, min(cy + bs, ph)):
+                base = yy * pw
+                for xx in range(cx, min(cx + bs, pw)):
+                    if samp[base + xx] < TH and not textmask[base + xx]:
+                        c += 1
+            return c, (cx + bs / 2.0, cy + bs / 2.0)
+
+        cands = [(maxx - bs, miny), (minx, miny), (maxx - bs, maxy - bs), (minx, maxy - bs)]  # 右上 左上 右下 左下
+        best = None; best_ink = 1e18
+        for cx, cy in cands:
+            cnt, ctr = win_ink(cx, cy)
+            if cnt < best_ink:
+                best_ink = cnt; best = ctr
+        if not best:
+            return None
+        bcx, bcy = best
+        bx = (sx0 * W + bcx / z) / W
+        by = (sy0 * H + bcy / z) / H
+        return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
+    except Exception:
+        return None
+
+
 @bp.route("/api/page-figures")
 def pdf_api_page_figures():
-    """GET ?file=&page= → {ok, figures:[{caption,bbox,desc}…本页], pending}。
-    没描述过的页 → 后台触发描述(本页 + 预取后 2 页),返回 pending=true,前端稍后重取。"""
+    """GET ?file=&page= → {ok, figures:[{caption,bbox,desc,badge}…本页], pending}。
+    没描述过的页 → 后台触发描述(本页 + 预取后 2 页),返回 pending=true,前端稍后重取。
+    badge=[bx,by] 是服务端按像素算的徽标锚点(归一,徽标中心),缺则懒算 + 持久化(下次同位置)。"""
     rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
     abs_path = _safe_vault_path(rel)
     if not abs_path or page < 1:
         return jsonify({"ok": False, "error": "invalid"}), 400
     data = _fig_load_abs(abs_path)
-    figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"), "desc": f.get("desc", "")}
-            for f in data.get("figures", []) if f.get("page") == page]
+    page_figs = [f for f in data.get("figures", []) if f.get("page") == page]
+    # 懒算徽标锚点(纯像素,无 AI):缺 badge 的补上并持久化 → 跨加载位置一致
+    need = [f for f in page_figs if f.get("bbox") and not f.get("badge")]
+    if need:
+        try:
+            _doc = fitz.open(str(abs_path))
+            try:
+                _pg = _doc[page - 1]
+                for f in need:
+                    a = _fig_badge_anchor(_pg, f["bbox"])
+                    if a:
+                        f["badge"] = a
+            finally:
+                _doc.close()
+            _fig_save_abs(abs_path, data)
+        except Exception:
+            pass
+    figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"),
+             "desc": f.get("desc", ""), "badge": f.get("badge")}
+            for f in page_figs]
     done = _fig_done_page(data, page)
     if not done:
         _threading.Thread(target=_fig_describe_bg, args=(abs_path, page), daemon=True).start()

@@ -95,16 +95,21 @@
     function clampX(x) { return Math.max(1, Math.min(cssW - S - 1, x)); }
     function clampY(y) { return Math.max(1, Math.min(cssH - S - 1, y)); }
     rec.figs.forEach(function (f) {
-      var bb = (f.bbox && f.bbox.length === 4 && f.bbox[2] > f.bbox[0] && f.bbox[3] > f.bbox[1]) ? f.bbox : [0.02, 0.03, 0.1, 0.1];
-      var fx0 = bb[0] * cssW, fy0 = bb[1] * cssH, fx1 = bb[2] * cssW, fy1 = bb[3] * cssH;
-      // 四角候选(贴角内缩),优先 右上→左上→右下→左下;都离图心远
-      var cands = [[fx1 - S - M, fy0 + M], [fx0 + M, fy0 + M], [fx1 - S - M, fy1 - S - M], [fx0 + M, fy1 - S - M]];
       var pos = null;
-      for (var i = 0; i < cands.length; i++) {
-        var x = clampX(cands[i][0]), y = clampY(cands[i][1]);
-        if (!hitsText(x, y)) { pos = [x, y]; break; }
+      // 服务端预算好的锚点(归一,徽标中心)= 贴着图的空白角,跨加载位置一致 → 直接用
+      if (f.badge && f.badge.length === 2) {
+        pos = [clampX(f.badge[0] * cssW - S / 2), clampY(f.badge[1] * cssH - S / 2)];
+      } else {
+        // 回退:旧启发(AI bbox 四角避开正文)。badge 缺(后端还没算好)时临时用
+        var bb = (f.bbox && f.bbox.length === 4 && f.bbox[2] > f.bbox[0] && f.bbox[3] > f.bbox[1]) ? f.bbox : [0.02, 0.03, 0.1, 0.1];
+        var fx0 = bb[0] * cssW, fy0 = bb[1] * cssH, fx1 = bb[2] * cssW, fy1 = bb[3] * cssH;
+        var cands = [[fx1 - S - M, fy0 + M], [fx0 + M, fy0 + M], [fx1 - S - M, fy1 - S - M], [fx0 + M, fy1 - S - M]];
+        for (var i = 0; i < cands.length; i++) {
+          var x = clampX(cands[i][0]), y = clampY(cands[i][1]);
+          if (!hitsText(x, y)) { pos = [x, y]; break; }
+        }
+        if (!pos) { pos = [clampX((fx0 + fx1) / 2 - S / 2), clampY((fy0 + fy1) / 2 - S / 2)]; }
       }
-      if (!pos) { pos = [clampX((fx0 + fx1) / 2 - S / 2), clampY((fy0 + fy1) / 2 - S / 2)]; }   // 全压字 → 退图心(图区无字)
       var b = document.createElement('div'); b.className = 'fig-badge'; b.innerHTML = PHOTO_SVG;
       b.style.left = pos[0] + 'px'; b.style.top = pos[1] + 'px'; b.style.pointerEvents = 'auto';
       b.title = f.caption || '图说明';
