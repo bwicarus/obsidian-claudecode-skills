@@ -4854,32 +4854,52 @@ def _fig_badge_anchor(page, bbox, others=None):
                     if yy > maxy: maxy = yy
         if ink < 30 or maxx < minx or maxy < miny:
             return None
-        fw = maxx - minx; fh = maxy - miny
-        bs = max(6, int(min(fw, fh) * 0.22))
-        bs = min(bs, max(6, fw // 2), max(6, fh // 2))
+        fcx = (minx + maxx) / 2.0; fcy = (miny + maxy) / 2.0   # 图中心(图墨)
+        # 占用网格 = 图墨 ∪ 正文文字(徽标既不压图墨也不压文字 → 空白);积分图 O(1) 查窗口占用和。
+        occ = bytearray(pw * ph)
+        for k in range(pw * ph):
+            if samp[k] < TH or textmask[k]:
+                occ[k] = 1
+        IW = pw + 1
+        I = [0] * (IW * (ph + 1))
+        for i in range(ph):
+            rs = 0; row_i = i * pw; base_o = (i + 1) * IW; base_p = i * IW
+            for j in range(pw):
+                rs += occ[row_i + j]
+                I[base_o + j + 1] = I[base_p + j + 1] + rs
 
-        def win_ink(cx, cy):
-            cx = max(minx, min(maxx - bs, cx)); cy = max(miny, min(maxy - bs, cy))
-            c = 0
-            for yy in range(cy, min(cy + bs, ph)):
-                base = yy * pw
-                for xx in range(cx, min(cx + bs, pw)):
-                    if samp[base + xx] < TH and not textmask[base + xx]:
-                        c += 1
-            return c, (cx + bs / 2.0, cy + bs / 2.0)
+        def occ_sum(x, y, w, h):
+            return (I[(y + h) * IW + (x + w)] - I[y * IW + (x + w)]
+                    - I[(y + h) * IW + x] + I[y * IW + x])
 
-        # 候选 = 图墨 bbox 四角(图墨 bbox 已排除图外空白 → 角都在图自己范围内,不会掉缝)。
-        # 优先右上→左上→右下→左下,取第一个**够空**(墨 < 20%)的角;都不够空再取最空的。
-        cands = [(maxx - bs, miny), (minx, miny), (maxx - bs, maxy - bs), (minx, maxy - bs)]
-        thresh = bs * bs * 0.20
-        chosen = None
-        for cx, cy in cands:
-            cnt, ctr = win_ink(cx, cy)
-            if cnt < thresh:
-                chosen = ctr; break
-        if chosen is None:
-            chosen = min((win_ink(cx, cy) for cx, cy in cands), key=lambda t: t[0])[1]
-        bcx, bcy = chosen
+        bs = max(7, min(int(min(pw, ph) * 0.13), 18))   # 徽标空白窗口(grid 像素)
+        # 用户要的放法:以"图周围被正文/页边围出的空白区"为界,在**图的右上方**找一个全空白方块,
+        # 让它朝图的那个角(左下角)尽量贴近图的右上角(Tx,Ty)→ 徽标既在空白里、又紧挨图。
+        Tx = maxx; Ty = miny
+        best = None; bestd = 1e18
+        step = 1 if max(pw, ph) <= 170 else 2
+        for py in range(0, ph - bs + 1, step):
+            ccy = py + bs / 2.0
+            if ccy > fcy:           # 只要图心**上方**
+                continue
+            for px in range(0, pw - bs + 1, step):
+                if px + bs / 2.0 < fcx:    # 只要图心**右方**
+                    continue
+                if occ_sum(px, py, bs, bs) != 0:   # 非全空白 → 跳
+                    continue
+                blx = px; bly = py + bs            # 窗口左下角 = 朝图的角
+                d = (blx - Tx) ** 2 + (bly - Ty) ** 2
+                if d < bestd:
+                    bestd = d; best = (px + bs / 2.0, py + bs / 2.0)
+        if best is None:
+            # 右上方没有放得下徽标的空白 → 退:图墨 bbox 四角里取占用最少的(优先右上)
+            cands = [(maxx - bs, miny), (minx, miny), (maxx - bs, maxy - bs), (minx, maxy - bs)]
+            scored = []
+            for cx, cy in cands:
+                cx = max(0, min(pw - bs, cx)); cy = max(0, min(ph - bs, cy))
+                scored.append((occ_sum(cx, cy, bs, bs), (cx + bs / 2.0, cy + bs / 2.0)))
+            best = min(scored, key=lambda t: t[0])[1]
+        bcx, bcy = best
         bx = (sx0 * W + bcx / z) / W
         by = (sy0 * H + bcy / z) / H
         return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
