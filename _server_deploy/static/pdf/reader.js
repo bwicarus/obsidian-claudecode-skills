@@ -1814,7 +1814,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-70';
+const READER_BUILD = 'reader-fix-71';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -3616,11 +3616,19 @@ function _bindCharLayer(cl, pw) {
           }
           // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
           const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
+          // 母语(不需要翻译的语言)单击选词 = 毫无意义 → 单击中文汉字词(纯汉字无假名、本书非日语)不弹任何东西、清掉选中。
+          // 拖选/双击行/三击段仍照常弹(走别的分支)。
+          const isNativeHan = hasKanji(_t) && !hasKana(_t) && !(declared && BOOK_LANGS.includes('ja'));
           if (_t && _t.length <= 30 && (isJa || engOk)) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');
             setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+          } else if (isNativeHan) {
+            toolbar.classList.remove('open');
+            lastSelText = '';
+            _updateSelPreview('');
+            pw.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');   // 清掉单击中文词的高亮 → 单击=无操作
           }
         } else {
           // 双击选行 / 三击选段 → 右侧焦点显示这段
