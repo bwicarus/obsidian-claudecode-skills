@@ -61,6 +61,46 @@ window.goToPage = async (n) => {
   await renderPage(n);
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
+
+// ── 助手聊天里点页码 → 跳页 + PDF 底部「↩ 回到第 X 页」(多次跳转仍回最早那页)──
+window.__pageBackAnchor = null;
+window.jumpWithBack = function (target) {
+  target = parseInt(target, 10);
+  if (!target || target < 1) return;
+  const cur = (typeof currentPage !== 'undefined') ? currentPage : 1;
+  if (window.__pageBackAnchor == null && target !== cur) window.__pageBackAnchor = cur;  // 第一次跳:记最早的来处
+  goToPage(target);
+  if (window.__pageBackAnchor != null && window.__pageBackAnchor !== target) _showPageBackBar(window.__pageBackAnchor);
+  else _hidePageBackBar();
+};
+window.pageGoBack = function () {
+  const b = window.__pageBackAnchor;
+  window.__pageBackAnchor = null;
+  _hidePageBackBar();
+  if (b != null) goToPage(b);
+};
+function _showPageBackBar(p) {
+  let bar = document.getElementById('page-back-bar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'page-back-bar';
+    bar.addEventListener('click', function () { window.pageGoBack(); });
+    document.body.appendChild(bar);
+    if (!document.getElementById('page-back-bar-css')) {
+      const st = document.createElement('style'); st.id = 'page-back-bar-css';
+      st.textContent =
+        '#page-back-bar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:140;display:none;' +
+        'background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:20px;font-size:14px;' +
+        'cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.5);-webkit-tap-highlight-color:transparent;white-space:nowrap}' +
+        '#page-back-bar:active{transform:translateX(-50%) scale(.95)}' +
+        '.asst-pagelink{color:#7dd3fc;cursor:pointer;border-bottom:1px dashed rgba(125,211,252,.6);padding:0 1px}' +
+        '.asst-pagelink:active{color:#bae6fd}';
+      document.head.appendChild(st);
+    }
+  }
+  bar.textContent = '↩ 回到第 ' + p + ' 页';
+  bar.style.display = 'block';
+}
+function _hidePageBackBar() { const bar = document.getElementById('page-back-bar'); if (bar) bar.style.display = 'none'; }
 // 页码 scrubber:左右拖动快速跳页(全宽≈整本),实时预览;点击(没拖)→ 输入页码
 function _setupPageScrub() {
   const el = document.getElementById('page-scrub');

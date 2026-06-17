@@ -348,7 +348,7 @@ def _t_goto_page(args, ctx):
         n = int(args.get("page"))
     except (TypeError, ValueError):
         return {"error": "page 不是数字"}
-    return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "goToPage", "args": [n]}}
+    return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "jumpWithBack", "args": [n]}}
 
 
 def _bg_task(kind, params, ctx):

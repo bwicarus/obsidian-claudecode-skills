@@ -82,11 +82,41 @@
   var sendBtn = pane.querySelector('#asst-send');
 
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  // 把回答里的页码引用(「第40页」「40页」)变成可点链接 → 跳页 + 底部「回到」条
+  function _linkifyPages(el) {
+    try {
+      var total = (typeof pdfDoc !== 'undefined' && pdfDoc) ? pdfDoc.numPages : 99999;
+      var re = /第?\s*(\d{1,4})\s*页/g;
+      var nodes = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null), nd;
+      while ((nd = w.nextNode())) {
+        if (nd.nodeValue && /\d\s*页/.test(nd.nodeValue) && nd.parentNode &&
+            !nd.parentNode.closest('a,button,.asst-pagelink,code,pre')) nodes.push(nd);
+      }
+      nodes.forEach(function (node) {
+        var t = node.nodeValue, frag = document.createDocumentFragment(), last = 0, m; re.lastIndex = 0;
+        while ((m = re.exec(t))) {
+          var pn = parseInt(m[1], 10);
+          if (!pn || pn < 1 || pn > total) continue;
+          if (m.index > last) frag.appendChild(document.createTextNode(t.slice(last, m.index)));
+          var a = document.createElement('span'); a.className = 'asst-pagelink'; a.textContent = m[0]; a.dataset.page = pn;
+          frag.appendChild(a); last = m.index + m[0].length;
+        }
+        if (last) { if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last))); node.parentNode.replaceChild(frag, node); }
+      });
+    } catch (_) {}
+  }
   function renderMd(el, text) {
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
+    _linkifyPages(el);
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {}
   }
+  document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
+    var t = e.target;
+    if (t && t.classList && t.classList.contains('asst-pagelink') && t.dataset.page && typeof window.jumpWithBack === 'function') {
+      window.jumpWithBack(t.dataset.page);
+    }
+  });
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
   function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
 

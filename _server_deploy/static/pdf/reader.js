@@ -972,6 +972,46 @@ window.goToPage = async (n) => {
   await renderPage(n);
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
+
+// ── 助手聊天里点页码 → 跳页 + PDF 底部「↩ 回到第 X 页」(多次跳转仍回最早那页)──
+window.__pageBackAnchor = null;
+window.jumpWithBack = function (target) {
+  target = parseInt(target, 10);
+  if (!target || target < 1) return;
+  const cur = (typeof currentPage !== 'undefined') ? currentPage : 1;
+  if (window.__pageBackAnchor == null && target !== cur) window.__pageBackAnchor = cur;  // 第一次跳:记最早的来处
+  goToPage(target);
+  if (window.__pageBackAnchor != null && window.__pageBackAnchor !== target) _showPageBackBar(window.__pageBackAnchor);
+  else _hidePageBackBar();
+};
+window.pageGoBack = function () {
+  const b = window.__pageBackAnchor;
+  window.__pageBackAnchor = null;
+  _hidePageBackBar();
+  if (b != null) goToPage(b);
+};
+function _showPageBackBar(p) {
+  let bar = document.getElementById('page-back-bar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'page-back-bar';
+    bar.addEventListener('click', function () { window.pageGoBack(); });
+    document.body.appendChild(bar);
+    if (!document.getElementById('page-back-bar-css')) {
+      const st = document.createElement('style'); st.id = 'page-back-bar-css';
+      st.textContent =
+        '#page-back-bar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:140;display:none;' +
+        'background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:20px;font-size:14px;' +
+        'cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.5);-webkit-tap-highlight-color:transparent;white-space:nowrap}' +
+        '#page-back-bar:active{transform:translateX(-50%) scale(.95)}' +
+        '.asst-pagelink{color:#7dd3fc;cursor:pointer;border-bottom:1px dashed rgba(125,211,252,.6);padding:0 1px}' +
+        '.asst-pagelink:active{color:#bae6fd}';
+      document.head.appendChild(st);
+    }
+  }
+  bar.textContent = '↩ 回到第 ' + p + ' 页';
+  bar.style.display = 'block';
+}
+function _hidePageBackBar() { const bar = document.getElementById('page-back-bar'); if (bar) bar.style.display = 'none'; }
 // 页码 scrubber:左右拖动快速跳页(全宽≈整本),实时预览;点击(没拖)→ 输入页码
 function _setupPageScrub() {
   const el = document.getElementById('page-scrub');
@@ -1770,7 +1810,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-60';
+const READER_BUILD = 'reader-fix-61';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7889,11 +7929,41 @@ async function _connProbe() {
   var sendBtn = pane.querySelector('#asst-send');
 
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  // 把回答里的页码引用(「第40页」「40页」)变成可点链接 → 跳页 + 底部「回到」条
+  function _linkifyPages(el) {
+    try {
+      var total = (typeof pdfDoc !== 'undefined' && pdfDoc) ? pdfDoc.numPages : 99999;
+      var re = /第?\s*(\d{1,4})\s*页/g;
+      var nodes = [], w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null), nd;
+      while ((nd = w.nextNode())) {
+        if (nd.nodeValue && /\d\s*页/.test(nd.nodeValue) && nd.parentNode &&
+            !nd.parentNode.closest('a,button,.asst-pagelink,code,pre')) nodes.push(nd);
+      }
+      nodes.forEach(function (node) {
+        var t = node.nodeValue, frag = document.createDocumentFragment(), last = 0, m; re.lastIndex = 0;
+        while ((m = re.exec(t))) {
+          var pn = parseInt(m[1], 10);
+          if (!pn || pn < 1 || pn > total) continue;
+          if (m.index > last) frag.appendChild(document.createTextNode(t.slice(last, m.index)));
+          var a = document.createElement('span'); a.className = 'asst-pagelink'; a.textContent = m[0]; a.dataset.page = pn;
+          frag.appendChild(a); last = m.index + m[0].length;
+        }
+        if (last) { if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last))); node.parentNode.replaceChild(frag, node); }
+      });
+    } catch (_) {}
+  }
   function renderMd(el, text) {
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
+    _linkifyPages(el);
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {}
   }
+  document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
+    var t = e.target;
+    if (t && t.classList && t.classList.contains('asst-pagelink') && t.dataset.page && typeof window.jumpWithBack === 'function') {
+      window.jumpWithBack(t.dataset.page);
+    }
+  });
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
   function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
 
