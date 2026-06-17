@@ -1814,7 +1814,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-67';
+const READER_BUILD = 'reader-fix-68';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8153,13 +8153,22 @@ async function _connProbe() {
   window.openBookAt = function (fr, pg) { try { _jumpToCtx(fr, parseInt(pg, 10) || 1); } catch (_) {} };
   // 一条用户消息的上下文卡片:用过的图缩略图 + 选中的字段 + 涉及的页码,点任意一处都能跳过去
   // meta:{figures:[{file_rel,page,box,caption,group,has_ink}], selection, page, file_rel}; live=刚发的那条(图有笔迹走实时合成)
-  function _ctxCard(meta, live) {
+  // 问题是否跟「本页内容」相关:有选中/图(由它们承载跳转),或问题文字含本页指代 → 才给页码按钮;
+  // 跟本页无关的纯问题(如"什么是特征值")不带页码 chip
+  function _pageRefersToPage(msg) {
+    var m = msg || '';
+    return /这一?页|本页|此页|当前页|这段|这里|这张?图|这幅图|如[下图]图?|上面这?|这个公式|这道?题|本章|这一?章|这一?节|本节|页面|图里|图中|这部分/.test(m)
+        || /\bthis (page|figure|fig|section|paragraph|chapter|image|diagram|part)\b|\bhere\b/i.test(m);
+  }
+  function _ctxCard(meta, live, msg) {
     if (!meta) return null;
     var figs = (meta.figures || []).filter(function (f) { return f && f.box; });
     var sel = (meta.selection || '').trim();
     var page = parseInt(meta.page, 10) || 0;
     var bookRel = meta.file_rel || (typeof FILE_REL !== 'undefined' ? FILE_REL : '');
-    if (!figs.length && !sel && !page) return null;
+    // 页码 chip:有选中/图时由它们跳转(不重复给);否则仅当问题确实指向本页才给
+    var showPage = page && !figs.length && !sel && _pageRefersToPage(msg);
+    if (!figs.length && !sel && !showPage) return null;
     var card = document.createElement('div'); card.className = 'asst-ctx-card';
     if (figs.length) {
       var row = document.createElement('div'); row.className = 'actx-thumbs';
@@ -8188,7 +8197,7 @@ async function _connProbe() {
       s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(s);
     }
-    if (page) {
+    if (showPage) {
       var pg = document.createElement('span'); pg.className = 'actx-page';
       pg.textContent = '📄 第 ' + page + ' 页';
       pg.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
@@ -8224,7 +8233,7 @@ async function _connProbe() {
     streaming = true; _setSendMode(true);
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     var uMsg = addMsg('asst-u', esc(text));
-    try { var _cc = _ctxCard(sentCtx, true); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
+    try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
     var answer = '', acts = [], aborted = false;
@@ -8414,7 +8423,7 @@ async function _connProbe() {
         d.messages.forEach(function (m) {
           if (m.role === 'user') {
             var uel = addMsg('asst-u', esc(m.content));
-            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false); if (c) uel.appendChild(c); } catch (_) {}
+            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}
           }
           else { var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text); try { _renderFollowups(el, _pf.followups); } catch (_) {} }
         });
@@ -8455,7 +8464,8 @@ async function _connProbe() {
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
     // 图区命中层(透明可点;touch-action:auto 不挡阅读滚动,拖拽改用徽标当把手)
-    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +   // pan-y:竖向照常滚;长按才发起拖动(拖动时 preventDefault 抑制滚)
+    '.fig-hit.dragging{touch-action:none}' +
     '.fig-drag-ghost{position:fixed;z-index:240;width:118px;max-height:150px;object-fit:contain;opacity:.6;' +
     'border:2px solid rgba(10,132,255,.85);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.55);' +
     'transform:translate(-50%,-50%);pointer-events:none;background:#fff}' +
@@ -8820,18 +8830,28 @@ async function _connProbe() {
   }
 
   // 图区命中层:只管轻点 → 设焦点(放开滚动,不拦拖拽)。拖拽统一走徽标(_bindBadge)
+  // 整张图:轻点 → 设焦点;长按(380ms 不动)→ 拖进助手对话(整图当拖拽范围,不再只靠徽标)。
+  // touch-action:pan-y 让竖滑照常滚;长按门控 = 没长按就移动当滚动放掉,长按后 setPointerCapture+切 .dragging(touch-action:none)+preventDefault 稳拖。
   function _bindFigHit(hit, fig, num) {
-    var sx = 0, sy = 0, st = 0, moved = false;
+    var sx = 0, sy = 0, st = 0, lp = null, moved = false, dragging = false, pid = null;
     hit.addEventListener('pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false;
+      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false; dragging = false; pid = e.pointerId;
+      lp = setTimeout(function () {
+        if (!moved) { dragging = true; hit.classList.add('dragging'); _dragStart(fig, num, e); try { hit.setPointerCapture(pid); } catch (_) {} }
+      }, 380);
     });
     hit.addEventListener('pointermove', function (e) {
       if (!moved && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) moved = true;
+      if (dragging) { _dragMove(e); e.preventDefault(); }
+      else if (moved && lp) { clearTimeout(lp); lp = null; }   // 长按前就移动 = 滚动/划过 → 放弃拖动,让页面正常滚
     });
     hit.addEventListener('pointerup', function (e) {
-      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点/单击 → 设焦点
+      if (lp) { clearTimeout(lp); lp = null; }
+      if (dragging) { dragging = false; hit.classList.remove('dragging'); try { hit.releasePointerCapture(pid); } catch (_) {} _dragEnd(fig, num, e); return; }
+      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点 → 设焦点
     });
+    hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } if (dragging) { dragging = false; hit.classList.remove('dragging'); _dragCancel(); } });
   }
 
   // 徽标:轻点 → 描述浮层;长按(380ms 不动)→ 拖拽进助手对话。徽标 touch-action:none + setPointerCapture → 拖拽稳,不会被滚动取消

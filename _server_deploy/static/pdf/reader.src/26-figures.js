@@ -29,7 +29,8 @@
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
     // 图区命中层(透明可点;touch-action:auto 不挡阅读滚动,拖拽改用徽标当把手)
-    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+    '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +   // pan-y:竖向照常滚;长按才发起拖动(拖动时 preventDefault 抑制滚)
+    '.fig-hit.dragging{touch-action:none}' +
     '.fig-drag-ghost{position:fixed;z-index:240;width:118px;max-height:150px;object-fit:contain;opacity:.6;' +
     'border:2px solid rgba(10,132,255,.85);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.55);' +
     'transform:translate(-50%,-50%);pointer-events:none;background:#fff}' +
@@ -394,18 +395,28 @@
   }
 
   // 图区命中层:只管轻点 → 设焦点(放开滚动,不拦拖拽)。拖拽统一走徽标(_bindBadge)
+  // 整张图:轻点 → 设焦点;长按(380ms 不动)→ 拖进助手对话(整图当拖拽范围,不再只靠徽标)。
+  // touch-action:pan-y 让竖滑照常滚;长按门控 = 没长按就移动当滚动放掉,长按后 setPointerCapture+切 .dragging(touch-action:none)+preventDefault 稳拖。
   function _bindFigHit(hit, fig, num) {
-    var sx = 0, sy = 0, st = 0, moved = false;
+    var sx = 0, sy = 0, st = 0, lp = null, moved = false, dragging = false, pid = null;
     hit.addEventListener('pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false;
+      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false; dragging = false; pid = e.pointerId;
+      lp = setTimeout(function () {
+        if (!moved) { dragging = true; hit.classList.add('dragging'); _dragStart(fig, num, e); try { hit.setPointerCapture(pid); } catch (_) {} }
+      }, 380);
     });
     hit.addEventListener('pointermove', function (e) {
       if (!moved && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) moved = true;
+      if (dragging) { _dragMove(e); e.preventDefault(); }
+      else if (moved && lp) { clearTimeout(lp); lp = null; }   // 长按前就移动 = 滚动/划过 → 放弃拖动,让页面正常滚
     });
     hit.addEventListener('pointerup', function (e) {
-      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点/单击 → 设焦点
+      if (lp) { clearTimeout(lp); lp = null; }
+      if (dragging) { dragging = false; hit.classList.remove('dragging'); try { hit.releasePointerCapture(pid); } catch (_) {} _dragEnd(fig, num, e); return; }
+      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点 → 设焦点
     });
+    hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } if (dragging) { dragging = false; hit.classList.remove('dragging'); _dragCancel(); } });
   }
 
   // 徽标:轻点 → 描述浮层;长按(380ms 不动)→ 拖拽进助手对话。徽标 touch-action:none + setPointerCapture → 拖拽稳,不会被滚动取消

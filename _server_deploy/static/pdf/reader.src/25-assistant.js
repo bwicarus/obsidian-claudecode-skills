@@ -169,13 +169,22 @@
   window.openBookAt = function (fr, pg) { try { _jumpToCtx(fr, parseInt(pg, 10) || 1); } catch (_) {} };
   // 一条用户消息的上下文卡片:用过的图缩略图 + 选中的字段 + 涉及的页码,点任意一处都能跳过去
   // meta:{figures:[{file_rel,page,box,caption,group,has_ink}], selection, page, file_rel}; live=刚发的那条(图有笔迹走实时合成)
-  function _ctxCard(meta, live) {
+  // 问题是否跟「本页内容」相关:有选中/图(由它们承载跳转),或问题文字含本页指代 → 才给页码按钮;
+  // 跟本页无关的纯问题(如"什么是特征值")不带页码 chip
+  function _pageRefersToPage(msg) {
+    var m = msg || '';
+    return /这一?页|本页|此页|当前页|这段|这里|这张?图|这幅图|如[下图]图?|上面这?|这个公式|这道?题|本章|这一?章|这一?节|本节|页面|图里|图中|这部分/.test(m)
+        || /\bthis (page|figure|fig|section|paragraph|chapter|image|diagram|part)\b|\bhere\b/i.test(m);
+  }
+  function _ctxCard(meta, live, msg) {
     if (!meta) return null;
     var figs = (meta.figures || []).filter(function (f) { return f && f.box; });
     var sel = (meta.selection || '').trim();
     var page = parseInt(meta.page, 10) || 0;
     var bookRel = meta.file_rel || (typeof FILE_REL !== 'undefined' ? FILE_REL : '');
-    if (!figs.length && !sel && !page) return null;
+    // 页码 chip:有选中/图时由它们跳转(不重复给);否则仅当问题确实指向本页才给
+    var showPage = page && !figs.length && !sel && _pageRefersToPage(msg);
+    if (!figs.length && !sel && !showPage) return null;
     var card = document.createElement('div'); card.className = 'asst-ctx-card';
     if (figs.length) {
       var row = document.createElement('div'); row.className = 'actx-thumbs';
@@ -204,7 +213,7 @@
       s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(s);
     }
-    if (page) {
+    if (showPage) {
       var pg = document.createElement('span'); pg.className = 'actx-page';
       pg.textContent = '📄 第 ' + page + ' 页';
       pg.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
@@ -240,7 +249,7 @@
     streaming = true; _setSendMode(true);
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     var uMsg = addMsg('asst-u', esc(text));
-    try { var _cc = _ctxCard(sentCtx, true); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
+    try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
     var answer = '', acts = [], aborted = false;
@@ -430,7 +439,7 @@
         d.messages.forEach(function (m) {
           if (m.role === 'user') {
             var uel = addMsg('asst-u', esc(m.content));
-            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false); if (c) uel.appendChild(c); } catch (_) {}
+            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}
           }
           else { var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text); try { _renderFollowups(el, _pf.followups); } catch (_) {} }
         });
