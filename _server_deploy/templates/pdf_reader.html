@@ -141,7 +141,7 @@ body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #hea
 #side-tabs .si{width:15px;height:15px;vertical-align:-3px;margin-right:5px;flex:none}
 #side-tabs .side-icon-btn .si{margin-right:0;width:16px;height:16px}
 /* pane：默认隐藏，active 显示并撑满 */
-.side-pane{display:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0}
+.side-pane{display:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;overscroll-behavior:contain;touch-action:pan-y}
 .side-pane.active{display:block}
 #side-pane-kg{padding:14px}
 #side-pane-vocab{padding:12px}
