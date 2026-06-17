@@ -10,11 +10,11 @@
   css.textContent =
     // 苹果风格:磨砂玻璃圆形徽标,轻投影,极简「照片」符号
     '.fig-badge{position:absolute;width:26px;height:26px;border-radius:50%;z-index:6;cursor:pointer;' +
-    'display:flex;align-items:center;justify-content:center;color:#fff;opacity:.82;' +
-    'background:rgba(10,132,255,.9);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);' +
-    'box-shadow:0 2px 7px rgba(0,0,0,.26),inset 0 0 0 .5px rgba(255,255,255,.35);' +
+    'display:flex;align-items:center;justify-content:center;color:#fff;opacity:.5;' +
+    'background:rgba(10,132,255,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);' +
+    'box-shadow:0 2px 7px rgba(0,0,0,.2),inset 0 0 0 .5px rgba(255,255,255,.3);' +
     '-webkit-tap-highlight-color:transparent;transition:transform .12s,opacity .12s}' +
-    '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:1}' +
+    '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:.95}' +
     '.fig-badge svg{width:15px;height:15px;display:block}' +
     '.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;' +
     'border:1px solid #2a3a63;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
@@ -22,7 +22,12 @@
     '.fig-pop h4{margin:0 0 6px;font-size:14px;color:#7fb0ff;font-weight:600}' +
     '.fig-pop .fig-x{position:absolute;top:8px;right:10px;color:#8aa;cursor:pointer;font-size:16px;line-height:1}' +
     '.fig-pop p{margin:.35em 0}.fig-pop code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
-    '.fig-pop-mask{position:fixed;inset:0;z-index:129;background:transparent}';
+    '.fig-pop-mask{position:fixed;inset:0;z-index:129;background:transparent}' +
+    // 点徽标时高亮该图的 YOLO 框范围
+    '.fig-hl{position:absolute;z-index:5;pointer-events:none;border:2.5px solid rgba(10,132,255,.92);' +
+    'background:rgba(10,132,255,.10);border-radius:7px;box-shadow:0 0 0 2px rgba(10,132,255,.18);' +
+    'animation:figHlIn .22s ease-out}' +
+    '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}';
   document.head.appendChild(css);
 
   var PHOTO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.7"/>' +
@@ -34,17 +39,35 @@
   }
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
-  var _popTimer = null, _popRepos = null, _popBadge = null;
+  var _popTimer = null, _popRepos = null, _popBadge = null, _hlEl = null;
+  function clearHl() { if (_hlEl) { _hlEl.remove(); _hlEl = null; } }
+  function showHl(badge, fig) {           // 在页面上画出该图 YOLO 框(fbox)的范围
+    clearHl();
+    var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
+    if (!bb || bb.length !== 4) return;
+    var pw = badge.closest && badge.closest('.page-wrap'); if (!pw) return;
+    var layer = pw.querySelector('.fig-layer'); if (!layer) return;
+    var canvas = pw.querySelector('canvas');
+    var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
+    if (!cssW || !cssH) return;
+    var el = document.createElement('div'); el.className = 'fig-hl';
+    el.style.left = (bb[0] * cssW) + 'px'; el.style.top = (bb[1] * cssH) + 'px';
+    el.style.width = Math.max(2, (bb[2] - bb[0]) * cssW) + 'px';
+    el.style.height = Math.max(2, (bb[3] - bb[1]) * cssH) + 'px';
+    layer.appendChild(el); _hlEl = el;
+  }
   function closePop() {
     var p = document.getElementById('fig-pop'); if (p) p.remove();
     if (_popTimer) { clearTimeout(_popTimer); _popTimer = null; }
     if (_popRepos) { window.removeEventListener('scroll', _popRepos, true); window.removeEventListener('resize', _popRepos); _popRepos = null; }
+    clearHl();
     _popBadge = null;
   }
   function openPop(badge, fig) {
     if (_popBadge === badge) { closePop(); return; }   // 再点同一徽标 → 关
     closePop();
     _popBadge = badge;
+    showHl(badge, fig);                                // 高亮该图范围
     var pop = document.createElement('div'); pop.id = 'fig-pop'; pop.className = 'fig-pop';
     var body = md(fig.desc);
     pop.innerHTML = '<span class="fig-x">✕</span>' +

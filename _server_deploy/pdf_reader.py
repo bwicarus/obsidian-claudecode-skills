@@ -4875,6 +4875,15 @@ def _fig_refine_bbox(page, bbox, scale=2.0, pad=1.5, dark=205):
         return None
 
 
+def _fig_badge_topright(fbox):
+    """徽标中心 = 图框右上角顶点(中心与右上角重叠)。归一。与 yolo_figures.badge_topright 同口径。"""
+    try:
+        x0, y0, x1, y1 = [float(v) for v in fbox[:4]]
+        return [round(max(0.005, min(0.995, x1)), 4), round(max(0.005, min(0.995, y0)), 4)]
+    except Exception:
+        return None
+
+
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
     """徽标锚点:先把 AI bbox 收紧成真实图框(_fig_refine_bbox),邻图同样收紧,再交几何函数。
     供独立脚本(重算徽标)直接用 AI bbox 调用;路由侧已缓存 fbox 时走 _fig_badge_from_block。"""
@@ -4961,31 +4970,25 @@ def pdf_api_page_figures():
         resp.headers["Cache-Control"] = "no-store"
         return resp
     data = _fig_load_abs(abs_path)
-    page_figs = [f for f in data.get("figures", []) if f.get("page") == page]
-    # 懒算真实图框 fbox + 徽标锚点(纯像素,无 AI):缺的补上并持久化 → 跨加载位置一致
-    need_fbox = [f for f in page_figs if f.get("bbox") and not f.get("fbox")]
+    # 几何/图组层 = DocLayout-YOLO 离线写的 figures_geom(scripts/yolo_figures.py:嵌套去重 + 图组合并 + fbox)。
+    # 没跑过 YOLO 的书 → 回退 AI describe 原始 figures,临时用 AI bbox 当 fbox、徽标放右上角(开书后夜间/启用时 YOLO 细化)。
+    src_figs = data.get("figures_geom")
+    if src_figs is None:
+        src_figs = data.get("figures", [])
+    page_figs = [f for f in src_figs if f.get("page") == page]
     need_badge = [f for f in page_figs if f.get("bbox") and not f.get("badge")]
-    if need_fbox or need_badge:
+    if need_badge:
         try:
-            import fitz                       # ← 之前漏这行,fitz.open 一直 NameError 被 except 吞,懒算从未生效
-            _doc = fitz.open(str(abs_path))
-            try:
-                _pg = _doc[page - 1]
-                for f in need_fbox:           # 先把 AI bbox 收紧成真实图框(去掉溢出的正文/图题)
-                    f["fbox"] = _fig_refine_bbox(_pg, f["bbox"]) or f["bbox"]
-                for f in need_badge:          # 徽标几何用收紧后的图框(自己 + 邻图)
-                    others = [g.get("fbox") or g["bbox"] for g in page_figs
-                              if g is not f and (g.get("fbox") or g.get("bbox"))]
-                    a = _fig_badge_from_block(_pg, f.get("fbox") or f["bbox"], others)
-                    if a:
-                        f["badge"] = a
-            finally:
-                _doc.close()
+            for f in need_badge:
+                if not f.get("fbox"):
+                    f["fbox"] = f["bbox"]
+                f["badge"] = _fig_badge_topright(f["fbox"])
             _fig_save_abs(abs_path, data)
         except Exception:
             pass
     figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"), "fbox": f.get("fbox"),
-             "desc": f.get("desc", ""), "badge": f.get("badge")}
+             "desc": f.get("desc", ""), "badge": f.get("badge"),
+             "group": bool(f.get("group")), "members": f.get("members") or []}
             for f in page_figs]
     done = _fig_done_page(data, page)
     if not done:
