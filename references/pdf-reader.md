@@ -950,3 +950,15 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **验证**:`_sys_prompt` 句显示/抑制/注入剥离;额度阈值 5 档 + 过期快照(>1800s 作废);staleness 6 场景 Node 矩阵;真机 e2e(`test_client` + 强制告警)SSE 顺序 `notice→answer(多段流式)→done`,真 claude 正常作答 + 新 `selection_sentence` 字段不报错。
 
 **踩坑**:① `_sys_prompt` 自检别拿静态 prompt 里也出现的词(「用户当前选中」「选中所在句」)当断言依据——它们在固定指令文本里也有;用动态专属串(`用户当前选中:「` 带冒号引号、`(已给好的上下文`)。② 额度查询若内联进 `/chat` 同步跑会给首条消息加最多几秒延迟(`fetch_quota` 网络调用);改成后台线程刷快照、请求端只读 → 零延迟。③ 额度护栏查询本身**零 token**(走 OAuth usage 端点),不烧配额。
+
+### 40. 扫描书插图徽标:图区 📷 徽标 + AI bbox 像素收紧(2026-06-17,`reader-fix-50`,commit d38b762)
+
+**图徽标系统**(`reader.src/26-figures.js` + `pdf_reader.py` 的 `_fig_*`):扫描书插图无文字层,靠 AI(`describe_figures.py`,sonnet)**懒描述**——每页首次进视口 `GET /pdf/api/page-figures?file=&page=` 触发后台描述本页+预取后 2 页,结果写 sidecar `state/pdf-figures/<book-sha>.json`(`<book-sha>=_book_sha(abspath)`,跟 describe_figures 互通);每图 `{page,caption,bbox(归一),desc,fbox,badge}`。前端在图的右上外侧画一枚磨砂玻璃 📷 圆徽标(`.fig-badge`,`renderFiguresOnPage` 由 08-charlayer 建完字符层后调,模式无关),点开 `.fig-pop` 浮层看 caption+desc(Markdown+MathJax)。徽标锚点 `badge=[bx,by]` 服务端按像素算好持久化 → **跨加载位置一致**。
+
+**徽标几何(纯几何,用户算法)** `_fig_badge_from_block`:A = 以图中心为中心、四向各撞到最近文字框/页边/邻图围出的无文字矩形;B = 从 A 右上顶点沿 A 对角线(共线)缩到撞图为止的最大空白方块;徽标 = B 左下角再朝右上微退 0.022 落到图外。文字框来自 `page.get_text("words")`(精确,不碰像素)。
+
+**本次根因 — AI bbox 偏大致徽标偏**(用户:「红色区域包含了图以外的文字层」):Claude 给的 `bbox` 常上含正文、下含图题,徽标几何按错框算 → 位置飘。修法 = 新增 `_fig_refine_bbox(page,bbox)` 把 AI bbox **收紧成真实图框 fbox**:渲染该区灰度图(PyMuPDF `get_pixmap` clip+csGRAY)→ 二值化取墨迹(`<205`)→ 用 `get_text("words")` 精确框把文字层抹黑(PIL `ImageDraw.rectangle`,外扩 1.5pt)→ `ImageFilter.MedianFilter(3)` 去椒盐噪(关键:**保留分子小圆/点簇**,扫描书图常是稀疏圆点)→ `getbbox()` 求剩余墨迹外接框 = 图本身;归一化夹在原 bbox 内,退化(几乎全文字/空白)回退原 bbox。`_fig_badge_anchor` = refine(图+邻图)→ `_fig_badge_from_block`;路由懒算先存 fbox 再用 fbox 算 badge,前端回退启发优先用 fbox。验证:74 图(费曼/応用情報/料理1-2)逐图核验徽标落右上外侧 + fbox 只含图不含字。
+
+**顺修潜伏 bug**:`/api/page-figures` 懒算分支调 `fitz.open` 却没 `import fitz`(本模块所有 fitz 都函数内局部 import,无模块级全局),一直 `NameError` 被 `except` 吞 → **懒算徽标从未生效**(此前徽标只靠离线重算脚本才有,这也是早先「打开怎么没徽标」的根因)。补 `import fitz`。
+
+**踩坑**:① 像素收紧靠灰度阈值,对线稿/漫画/点阵/表格/数学图都行;彩色照片若大面积亮色只会被收到「暗墨迹」处——本项目几本书插图都是线稿/漫画,未遇到,真彩照书需另判。② MedianFilter 一开始以为会吃掉稀疏圆点,实测 3×3 中值对成簇圆点(每点≥若干像素)无碍,只杀孤立单像素椒盐;真正会误删的是「单像素噪声」不是「圆点」。③ 别信 AI bbox 当图框,但也别完全弃用——refine 退化时回退它兜底。
