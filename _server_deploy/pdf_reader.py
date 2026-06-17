@@ -4793,11 +4793,12 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
                 data["_none_pages"].append(pg)
             _fig_save_abs(abs_path, data)
 
-def _fig_badge_anchor(page, bbox):
-    """算徽标锚点(归一 [bx,by]=徽标中心):像素分析,把徽标贴在**图本身的一个空白角**,而不是
-    飘在远处。AI 给的 bbox 常不准 → 用文字块(get_text words)减掉正文墨 → 得到图墨,在 AI bbox
-    周边(扩张)的搜索区里定位图墨真实范围,再在其四角里挑墨量最少(最空)的窗口放徽标。
-    纯 Python(无 numpy):渲染区缩到 ~140px 长边,几万像素迭代 < ~10ms。失败回 None(前端退回启发)。"""
+def _fig_badge_anchor(page, bbox, others=None):
+    """算徽标锚点(归一 [bx,by]=徽标中心):把徽标贴在**图本身的角**,不飘到图外/缝里。
+    用 get_text words 减掉正文墨 → 图墨;搜索区从 AI bbox 扩张,但**被同页其它图的 bbox 夹住**
+    (不串进隔壁、不跨过图与图之间的空白缝);锚点取图墨 bbox 的角,**优先右上**、挑够空的一个,
+    而**不是全局最空**(全局最空会掉进图与图之间的缝——多图并排时的老 bug)。others=同页其它图 bbox。
+    纯 Python(无 numpy),渲染区 ~140px,几万像素 < ~10ms。失败回 None(前端退回启发)。"""
     try:
         import fitz   # 本模块 fitz 都是函数内 import(非模块级),这里也得自取
         pr = page.rect
@@ -4807,9 +4808,19 @@ def _fig_badge_anchor(page, bbox):
         x0, y0, x1, y1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
         if x1 <= x0 or y1 <= y0:
             return None
-        ex = 0.10   # AI bbox 不准 → 适度扩张搜索区(太大反而把图旁边的空白也括进来,锚点漂走)
+        ex = 0.12   # AI bbox 不准 → 扩张搜索区(下面再被邻图夹回,所以可以给大点)
         sx0 = max(0.0, x0 - ex); sy0 = max(0.0, y0 - ex)
         sx1 = min(1.0, x1 + ex); sy1 = min(1.0, y1 + ex)
+        # 被同页邻图夹回:搜索区不许进别的图(多图并排时防锚点串到隔壁 / 掉进缝)
+        for og in (others or []):
+            try:
+                ox0, oy0, ox1, oy1 = [float(v) for v in og[:4]]
+            except Exception:
+                continue
+            if ox0 >= x1 and ox0 < sx1: sx1 = min(sx1, (x1 + ox0) / 2.0)   # 邻图在右 → 夹右边
+            if ox1 <= x0 and ox1 > sx0: sx0 = max(sx0, (x0 + ox1) / 2.0)   # 邻图在左
+            if oy0 >= y1 and oy0 < sy1: sy1 = min(sy1, (y1 + oy0) / 2.0)   # 邻图在下
+            if oy1 <= y0 and oy1 > sy0: sy0 = max(sy0, (y0 + oy1) / 2.0)   # 邻图在上
         rw_pt = (sx1 - sx0) * W; rh_pt = (sy1 - sy0) * H
         if rw_pt <= 1 or rh_pt <= 1:
             return None
@@ -4857,15 +4868,18 @@ def _fig_badge_anchor(page, bbox):
                         c += 1
             return c, (cx + bs / 2.0, cy + bs / 2.0)
 
-        cands = [(maxx - bs, miny), (minx, miny), (maxx - bs, maxy - bs), (minx, maxy - bs)]  # 右上 左上 右下 左下
-        best = None; best_ink = 1e18
+        # 候选 = 图墨 bbox 四角(图墨 bbox 已排除图外空白 → 角都在图自己范围内,不会掉缝)。
+        # 优先右上→左上→右下→左下,取第一个**够空**(墨 < 20%)的角;都不够空再取最空的。
+        cands = [(maxx - bs, miny), (minx, miny), (maxx - bs, maxy - bs), (minx, maxy - bs)]
+        thresh = bs * bs * 0.20
+        chosen = None
         for cx, cy in cands:
             cnt, ctr = win_ink(cx, cy)
-            if cnt < best_ink:
-                best_ink = cnt; best = ctr
-        if not best:
-            return None
-        bcx, bcy = best
+            if cnt < thresh:
+                chosen = ctr; break
+        if chosen is None:
+            chosen = min((win_ink(cx, cy) for cx, cy in cands), key=lambda t: t[0])[1]
+        bcx, bcy = chosen
         bx = (sx0 * W + bcx / z) / W
         by = (sy0 * H + bcy / z) / H
         return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
@@ -4893,7 +4907,8 @@ def pdf_api_page_figures():
             try:
                 _pg = _doc[page - 1]
                 for f in need:
-                    a = _fig_badge_anchor(_pg, f["bbox"])
+                    others = [g["bbox"] for g in page_figs if g is not f and g.get("bbox")]
+                    a = _fig_badge_anchor(_pg, f["bbox"], others)
                     if a:
                         f["badge"] = a
             finally:
