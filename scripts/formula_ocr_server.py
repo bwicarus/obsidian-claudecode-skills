@@ -19,9 +19,9 @@ _lock = threading.Lock()
 _last_used = [0.0]                       # 末次用模型时刻 → 闲置卸载用
 API_KEY = os.environ.get("FORMULA_OCR_KEY", "")
 PORT = int(os.environ.get("FORMULA_OCR_PORT", "8765"))
-# 惰性加载:启动不预载,首次 /ocr 才加载模型 → 没点过 OCR 时几乎零占用(仅 Flask)。
-# IDLE_UNLOAD_SEC 默认 0 = 加载后常驻(首次 ~15s,之后秒回)。设 >0 则闲置该秒数后自动卸载释放内存/显存。
-IDLE_UNLOAD_SEC = int(os.environ.get("FORMULA_OCR_IDLE_SEC", "0"))
+# 惰性加载 + 闲置自动卸载:启动不预载;首次 /ocr 才加载模型(~15s);闲置 IDLE_UNLOAD_SEC 秒(默认 5min)
+# 没人点 OCR 就把模型从内存/显存卸掉 → 回到几乎零占用(仅 Flask)。下次点 OCR 再重新加载。设 0 = 关闭自动卸载(常驻)。
+IDLE_UNLOAD_SEC = int(os.environ.get("FORMULA_OCR_IDLE_SEC", "300"))
 
 
 def _get_model():
