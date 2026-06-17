@@ -9,15 +9,19 @@
   GET  /health            → {ok, model_loaded}
   POST /ocr  {crops:[{idx, png_b64}], key?} → {ok, results:[{idx, latex}]}
 """
-import os, io, base64, threading
+import os, io, gc, time, base64, threading
 from flask import Flask, request, jsonify
 from PIL import Image
 
 app = Flask(__name__)
 _model = None
 _lock = threading.Lock()
+_last_used = [0.0]                       # 末次用模型时刻 → 闲置卸载用
 API_KEY = os.environ.get("FORMULA_OCR_KEY", "")
 PORT = int(os.environ.get("FORMULA_OCR_PORT", "8765"))
+# 惰性加载:启动不预载,首次 /ocr 才加载模型 → 没点过 OCR 时几乎零占用(仅 Flask)。
+# IDLE_UNLOAD_SEC 默认 0 = 加载后常驻(首次 ~15s,之后秒回)。设 >0 则闲置该秒数后自动卸载释放内存/显存。
+IDLE_UNLOAD_SEC = int(os.environ.get("FORMULA_OCR_IDLE_SEC", "0"))
 
 
 def _get_model():
@@ -25,12 +29,36 @@ def _get_model():
     if _model is None:
         from pix2tex.cli import LatexOCR
         _model = LatexOCR()
+    _last_used[0] = time.time()
     return _model
+
+
+def _unload():
+    global _model
+    with _lock:
+        if _model is None:
+            return
+        _model = None
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        print("[idle] model unloaded, freed RAM/VRAM", flush=True)
+
+
+def _idle_watch():
+    while True:
+        time.sleep(30)
+        if IDLE_UNLOAD_SEC > 0 and _model is not None and (time.time() - _last_used[0]) > IDLE_UNLOAD_SEC:
+            _unload()
 
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "model_loaded": _model is not None})
+    return jsonify({"ok": True, "model_loaded": _model is not None, "idle_unload_sec": IDLE_UNLOAD_SEC})
 
 
 @app.post("/ocr")
@@ -42,6 +70,7 @@ def ocr():
     out = []
     with _lock:                      # pix2tex 模型非线程安全 → 串行
         m = _get_model()
+        _last_used[0] = time.time()
         for c in crops:
             latex = None
             try:
@@ -54,7 +83,8 @@ def ocr():
 
 
 if __name__ == "__main__":
-    print("preloading pix2tex model ...", flush=True)
-    _get_model()
-    print(f"formula-ocr server ready on 0.0.0.0:{PORT}", flush=True)
+    # 惰性加载:不在启动时预载模型 → 空闲(没人点 OCR)时几乎零占用(仅 Flask ~60MB,0 显存)。
+    # 首次 /ocr 才加载(~15s),闲置 IDLE_UNLOAD_SEC 后自动卸载释放内存/显存。
+    threading.Thread(target=_idle_watch, daemon=True).start()
+    print(f"formula-ocr server ready on 0.0.0.0:{PORT} (lazy-load, idle-unload={IDLE_UNLOAD_SEC}s)", flush=True)
     app.run(host="0.0.0.0", port=PORT, threaded=True)
