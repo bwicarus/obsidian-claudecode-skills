@@ -105,6 +105,29 @@ async function loadBookLangs() {
     if (d.ok) BOOK_LANGS = d.langs || [];
   } catch (e) {}
 }
+// 本书是否开启「插图 AI 描述 + 徽标」(默认关,每本书独立,server 端 by FILE_REL)。off → 不拉 page-figures、不画徽标、不烧 AI
+window.__figBookOn = false;
+async function loadBookFig() {
+  try {
+    const r = await fetch('/pdf/api/book-figures?file=' + encodeURIComponent(FILE_REL || ''));
+    const d = await r.json();
+    window.__figBookOn = !!(d && d.ok && d.enabled);
+  } catch (e) { window.__figBookOn = false; }
+}
+window.saveFigToggle = async function(on) {   // 设置面板「本书插图描述」开关,即时 POST
+  try {
+    const r = await fetch('/pdf/api/book-figures', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ file: FILE_REL, enabled: !!on }),
+    });
+    const d = await r.json();
+    window.__figBookOn = !!(d && d.ok && d.enabled);
+    (typeof _toast === 'function') && _toast(window.__figBookOn ? '已开启本书插图描述（翻页后逐页生成，首次需点 AI 几秒）' : '已关闭本书插图描述');
+    // 即时反映:开→重渲当前可见页的徽标;关→清掉已画的徽标
+    if (window.__figBookOn) { document.querySelectorAll('.page-wrap canvas').forEach(c => { const pw = c.closest('.page-wrap'); const pn = pw && +pw.dataset.page; if (pw && pn && window.renderFiguresOnPage) window.renderFiguresOnPage(pw, pn); }); }
+    else { document.querySelectorAll('.fig-layer').forEach(l => l.innerHTML = ''); }
+  } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
+};
 window.openLangPicker = function() { window.openSettings?.(); };   // 语言已并入设置面板,旧入口转开设置
 window.saveLangPicker = async function() {   // 设置面板「保存本书语言」按钮(每本书独立,POST book-langs by FILE_REL)
   const langs = Array.from(document.querySelectorAll('#lang-checks input:checked')).map(c => c.value);

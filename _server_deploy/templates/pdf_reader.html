@@ -809,6 +809,11 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
 
       <!-- ════ pane: 阅读 ════ -->
       <div class="set-pane" data-pane="read" style="display:none">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
+          <input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）
+        </label>
+        <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
           <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
         </label>

@@ -132,6 +132,7 @@
 
   window.renderFiguresOnPage = function (pw, num) {
     if (!pw || !num || typeof FILE_REL === 'undefined' || !FILE_REL) return;
+    if (!window.__figBookOn) return;   // 本书未开插图描述 → 不拉 page-figures、不画徽标、不烧 AI
     var rec = _cache[num];
     if (rec && !rec.pending) { draw(pw, num); return; }   // 已确定(有图/NONE)→ 直接画,不再打扰后端
     // 没拉过 或 还 pending(含上次描述失败的页)→ 重新拉,重置轮询给新机会(回看/重渲会重试)

@@ -1063,8 +1063,8 @@ def _migrate_book_sidecars(old_rel: str, new_rel: str, old_abs: Path, new_abs: P
                 _mv(f, cdir / (n16 + f.name[len(o16):]))
         except Exception:
             pass
-    # 共享 json:langs + crop 改 key
-    for path in (_BOOK_LANGS_PATH, _BOOK_CROP_PATH):
+    # 共享 json:langs + crop + 插图开关 改 key
+    for path in (_BOOK_LANGS_PATH, _BOOK_CROP_PATH, _BOOK_FIG_PATH):
         try:
             if path.exists():
                 m = json.loads(path.read_text("utf-8"))
@@ -3290,6 +3290,44 @@ def pdf_api_book_langs_set():
     return jsonify({"ok": True, "langs": langs})
 
 
+# ──────── 每本书:插图 AI 描述 + 徽标 开关(默认关) ────────
+# 不是每本书都需要这功能,且懒描述会逐页烧 AI 配额 → 默认关闭,在 PDF 设置「阅读」里逐本开。
+_BOOK_FIG_PATH = CLAUDE_DIR / "state" / "pdf-book-figures.json"
+
+
+def _load_book_fig() -> dict:
+    try:
+        return json.loads(_BOOK_FIG_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _book_fig_enabled(rel: str) -> bool:
+    return bool(_load_book_fig().get(rel, False))   # 默认 False
+
+
+@bp.route("/api/book-figures")
+def pdf_api_book_figures_get():
+    return jsonify({"ok": True, "enabled": _book_fig_enabled(request.args.get("file", ""))})
+
+
+@bp.route("/api/book-figures", methods=["POST"])
+def pdf_api_book_figures_set():
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    if not rel:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    enabled = bool(data.get("enabled"))
+    allm = _load_book_fig()
+    allm[rel] = enabled
+    try:
+        _BOOK_FIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BOOK_FIG_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "enabled": enabled})
+
+
 _BOOK_CROP_PATH = CLAUDE_DIR / "state" / "pdf-book-crop.json"
 
 
@@ -4918,6 +4956,10 @@ def pdf_api_page_figures():
     abs_path = _safe_vault_path(rel)
     if not abs_path or page < 1:
         return jsonify({"ok": False, "error": "invalid"}), 400
+    if not _book_fig_enabled(rel):              # 本书未开插图描述 → 不画徽标、不触发任何 AI 描述
+        resp = jsonify({"ok": True, "figures": [], "pending": False, "disabled": True})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     data = _fig_load_abs(abs_path)
     page_figs = [f for f in data.get("figures", []) if f.get("page") == page]
     # 懒算真实图框 fbox + 徽标锚点(纯像素,无 AI):缺的补上并持久化 → 跨加载位置一致
