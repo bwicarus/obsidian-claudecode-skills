@@ -61,6 +61,19 @@
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
     '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
     '.asst-fu:active{background:#1d3358}' +
+    // 每条回答右下角的「!」反馈按钮 + 弹出:显示这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作
+    '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end}' +
+    '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid #2a3a63;background:#0e1525;color:#7c93c4;font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
+    '.asst-fb-btn:active{background:#1a2540}' +
+    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:236px;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
+    '.afp-h{font-size:11px;color:#7c93c4;margin-bottom:2px}' +
+    '.afp-step{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:1.5}' +
+    '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.afp-m{color:#7c93c4;flex:none;font-variant-numeric:tabular-nums}' +
+    '.afp-acts{display:flex;flex-direction:column;gap:5px;margin-top:4px;border-top:1px solid #1d2742;padding-top:7px}' +
+    '.afp-act{text-align:left;border:1px solid #2a3a63;border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:#dbe7ff}' +
+    '.afp-q{background:#16293a;border-color:#2a4a63}.afp-q:active{background:#1d3a52}' +
+    '.afp-s{background:#1a2233}.afp-s:active{background:#222d44}' +
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #233156;align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
     '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
@@ -148,6 +161,56 @@
     });
     afterEl.appendChild(box); scrollDown();
   }
+
+  // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(各步用的模型),再给两个回报动作 ──
+  //  · 🎯 答得不够好 → 记一次「偏质量」(长期把同类问题路由到更强模型)+ 立刻用 high effort 重答本题
+  //  · 🐢 太慢了    → 记一次「偏速度」(长期更倾向快模型)
+  var _fbOpenPop = null;
+  function _fbClosePop() { if (_fbOpenPop) { try { _fbOpenPop.remove(); } catch (_) {} _fbOpenPop = null; } }
+  document.addEventListener('click', function (e) {   // 点弹窗外任意处 → 收起
+    if (_fbOpenPop && e.target && e.target.closest && !e.target.closest('.asst-fb-bar')) _fbClosePop();
+  });
+  function _fb(kind) {   // 回报偏好;后端 _pref_bump 调整该用户的 质量↔速度 档位
+    fetch('/api/assistant/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: kind }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast('已记录 · ' + (d.pref || '偏好已更新')); })
+      .catch(function () {});
+  }
+  function _buildFbPop(question, trace, close) {
+    var pop = document.createElement('div'); pop.className = 'asst-fb-pop';
+    var h = document.createElement('div'); h.className = 'afp-h';
+    h.textContent = (trace && trace.length) ? '这条回答经过的 AI 调用' : '对这条回答不满意?';
+    pop.appendChild(h);
+    (trace || []).forEach(function (st) {
+      var row = document.createElement('div'); row.className = 'afp-step';
+      var l = document.createElement('span'); l.className = 'afp-l'; l.textContent = st.label || '步骤';
+      var m = document.createElement('span'); m.className = 'afp-m'; m.textContent = st.model || '—';
+      row.appendChild(l); row.appendChild(m); pop.appendChild(row);
+    });
+    var acts = document.createElement('div'); acts.className = 'afp-acts';
+    var bQ = document.createElement('button'); bQ.className = 'afp-act afp-q';
+    bQ.textContent = question ? '🎯 答得不够好 · 用更强的重答' : '🎯 以后这类问题用更强的';
+    bQ.addEventListener('click', function () { close(); _fb('quality'); if (question && !streaming) send(question, { forceEffort: 'high' }); });
+    var bS = document.createElement('button'); bS.className = 'afp-act afp-s'; bS.textContent = '🐢 太慢了 · 以后更快';
+    bS.addEventListener('click', function () { close(); _fb('slow'); });
+    acts.appendChild(bQ); acts.appendChild(bS); pop.appendChild(acts);
+    return pop;
+  }
+  function _attachFeedback(bubble, question, trace) {
+    if (!bubble) return;
+    try { var old = bubble.querySelector('.asst-fb-bar'); if (old) old.remove(); } catch (_) {}   // 重渲时防重复挂
+    var bar = document.createElement('div'); bar.className = 'asst-fb-bar';
+    var btn = document.createElement('button'); btn.className = 'asst-fb-btn'; btn.textContent = '!'; btn.title = '对这条回答不满意?';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (_fbOpenPop && _fbOpenPop._owner === btn) { _fbClosePop(); return; }
+      _fbClosePop();
+      var pop = _buildFbPop(question, trace, _fbClosePop); pop._owner = btn;
+      bar.appendChild(pop); _fbOpenPop = pop; scrollDown();
+    });
+    bar.appendChild(btn); bubble.appendChild(bar);
+  }
+
   document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
     var t = e.target;
     if (t && t.classList && t.classList.contains('asst-pagelink') && t.dataset.page && typeof window.jumpWithBack === 'function') {
@@ -244,7 +307,7 @@
     sendBtn.disabled = false;
   }
 
-  async function send(text) {
+  async function send(text, opts) {
     if (streaming) return;
     text = (text || '').trim();
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
@@ -263,12 +326,12 @@
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
-    var answer = '', acts = [], aborted = false;
+    var answer = '', acts = [], aborted = false, traceData = null;
     _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     try {
       var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, context: sentCtx }),
+        body: JSON.stringify({ message: text, context: sentCtx, force_effort: (opts && opts.forceEffort) || undefined }),
         signal: _abort ? _abort.signal : undefined,
       });
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
@@ -288,6 +351,7 @@
           else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); scrollDown(); }   // 流式只轻量渲(不 MathJax) + 剥 FOLLOWUP 标记
           else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
           else if (ev === 'actions') { acts = parsed; }
+          else if (ev === 'trace') { traceData = parsed; }   // 这条回答经过的 AI 调用链(各步模型)→ 喂给「!」反馈弹窗
           else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
           else if (ev === 'undo' && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }
           else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
@@ -302,6 +366,7 @@
     if (pf.text) renderMd(aMsg, pf.text, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
+    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 可重答)
     runActions(acts);
     streaming = false; _abort = null; _setSendMode(false);
   }
@@ -447,12 +512,18 @@
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
+        var _lastQ = '';   // 历史回答的「!」反馈要带上「重答」用的原问题 → 记住上一条用户消息
         d.messages.forEach(function (m) {
           if (m.role === 'user') {
+            _lastQ = m.content || '';
             var uel = addMsg('asst-u', esc(m.content));
             try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}
           }
-          else { var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text); try { _renderFollowups(el, _pf.followups); } catch (_) {} }
+          else {
+            var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text);
+            try { _renderFollowups(el, _pf.followups); } catch (_) {}
+            try { _attachFeedback(el, _lastQ, null); } catch (_) {}   // 历史无逐步 trace → 仅给回报动作(质量回报会用 _lastQ 重答)
+          }
         });
         // 进面板自动滚到最新(最下方):渲完滚一次,再隔 250ms 补一次(图/MathJax 异步撑高后位置会漂)
         requestAnimationFrame(scrollDown);
