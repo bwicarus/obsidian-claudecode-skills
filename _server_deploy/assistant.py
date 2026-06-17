@@ -96,7 +96,7 @@ def _convo_clear(uid):
 
 
 # ──────────────────────── claude 进程(stream-json 多轮)────────────────────────
-def _spawn():
+def _spawn(effort="low"):
     try:
         return subprocess.Popen(
             [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -104,7 +104,7 @@ def _spawn():
              # 沙盒:禁掉所有内建工具(本 agent 只走我们的 JSON 工具协议,从不调内建工具)→ 防 prompt injection
              # 诱导模型用 Bash/Read 读 .env(API key)/改脚本/读别人的 convo。user message 是不可信输入。
              "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-             "--verbose", "--model", _AGENT_MODEL, "--effort", "low"],   # low:聊天/工具路由不需要深思考 → 最影响首字延迟,用 low 最快(复杂任务靠多步工具补)
+             "--verbose", "--model", _AGENT_MODEL, "--effort", effort],   # effort 按问题分档:快查/导航=low(秒回)、解释/推导=high(深思考)
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, cwd=str(CLAUDE_DIR))
     except Exception:
@@ -212,8 +212,11 @@ def _warm_reap():
     _kill(p)
 
 
-def _take_proc():
-    """取预热进程(没有就现起);用完调用方 _kill + _warm_respawn。"""
+def _take_proc(effort="low"):
+    """取进程。low(快查/导航)→ 用预热好的 low 进程(秒回);high(解释/推导等深思考)→ 现起一个 high 进程
+    (冷启动~几秒可接受,这类深答本来就慢)。预热池始终维持 low,给最常见的快路径。"""
+    if effort != "low":
+        return _spawn(effort)
     global _warm_p
     with _warm_lock:
         p, _warm_p = _warm_p, None
@@ -928,9 +931,21 @@ def _parse_tool(raw):
         return None
 
 
+def _effort_for(message, ctx):
+    """按问题选思考深度:解释/推导/比较/总结这类需要深思考 → high(慢但深);快查/导航/翻译/制卡这类 → low(秒回)。
+    钉了焦点公式/段落、或空输入(=就问这个选中)也当深思考。"""
+    import re
+    m = message or ""
+    if isinstance(ctx, dict) and ctx.get("focus_sel"):
+        return "high"
+    if re.search(r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证|为什么会|怎么理解", m):
+        return "high"
+    return "low"
+
+
 def _agent_run(message, ctx, history):
     """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|error。"""
-    p = _take_proc()
+    p = _take_proc(_effort_for(message, ctx))
     if not p:
         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
         return
