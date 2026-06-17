@@ -4884,8 +4884,10 @@ def _fig_badge_topright(fbox):
         return None
 
 
-def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None):
-    """裁出图框(归一 box)区域的 PNG。with_ink 且该页有手写笔迹 → 把落在框内的笔迹叠上去(给助手看合成图/拖拽 ghost)。"""
+def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None, strokes=None):
+    """裁出图框(归一 box)区域的 PNG。with_ink → 叠加手写笔迹合成(给助手看/拖拽 ghost)。
+    笔迹来源:优先用**传入的 strokes**(客户端随图带来的当前笔迹,不依赖服务端保存时机);
+    没传则回退读服务端 ink sidecar(_ink_load)。"""
     import io
     import fitz
     from PIL import Image, ImageDraw
@@ -4900,9 +4902,10 @@ def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None):
         im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     finally:
         doc.close()
-    if with_ink and rel:
+    if with_ink:
         try:
-            strokes = (_ink_load(rel).get("pages") or {}).get(str(int(page))) or []
+            if strokes is None:
+                strokes = (_ink_load(rel).get("pages") or {}).get(str(int(page))) or [] if rel else []
             if strokes:
                 import math
                 d = ImageDraw.Draw(im); cw, ch = im.width, im.height

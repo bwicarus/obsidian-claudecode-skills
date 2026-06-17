@@ -1254,13 +1254,18 @@ window.__voiceContext = function () {
     } catch (_) {}
     const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
     const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
-    // 带入的图(点/拖进来的 YOLO 图,可多张)。用户显式带入 → 保留到他点 ✕,不做跨页过期
+    // 带入的图(点/拖进来的 YOLO 图,可多张)。显式带入 → 保留到点 ✕,不做跨页过期。
+    // 笔迹**发消息时实时收集**(画在 attach 之后也算),随图带给助手做合成,不依赖服务端墨迹保存时机
     let figures = [];
     try {
-      figures = (window.__figAttached || []).filter(a => a && a.box).slice(0, 6).map(a => ({
-        page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
-        desc: (a.desc || '').slice(0, 500), group: !!a.group, has_ink: !!a.has_ink
-      }));
+      figures = (window.__figAttached || []).filter(a => a && a.box).slice(0, 6).map(a => {
+        const ink = (typeof window.__figInk === 'function') ? window.__figInk(a.page, a.box) : [];
+        return {
+          page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
+          desc: (a.desc || '').slice(0, 500), group: !!a.group,
+          has_ink: ink.length > 0, ink: ink
+        };
+      });
     } catch (_) {}
     return {
       page_type: 'pdf',
@@ -1765,7 +1770,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-58';
+const READER_BUILD = 'reader-fix-59';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8277,6 +8282,21 @@ async function _connProbe() {
     } catch (_) {}
     return false;
   }
+  function _figInk(num, bb) {   // 收集落在图框内的笔迹(归一坐标),随图带给助手 → 服务端按它合成,不依赖墨迹保存时机
+    var out = [];
+    try {
+      var sp = (window._ink && window._ink.byPage && window._ink.byPage[num]) || [];
+      for (var i = 0; i < sp.length && out.length < 30; i++) {
+        var s = sp[i], ps = s.p || [], inb = false;
+        for (var j = 0; j < ps.length; j++) {
+          if (ps[j][0] >= bb[0] && ps[j][0] <= bb[2] && ps[j][1] >= bb[1] && ps[j][1] <= bb[3]) { inb = true; break; }
+        }
+        if (inb) out.push({ t: s.t, c: s.c, w: s.w, p: ps.map(function (p) { return [+(+p[0]).toFixed(3), +(+p[1]).toFixed(3)]; }) });
+      }
+    } catch (_) {}
+    return out;
+  }
+  window.__figInk = _figInk;   // 给 __voiceContext 在发消息时**实时**收集图内笔迹(画在 attach 之后也算)
   // 焦点/带入:点图=高亮 + 加入「带入列表」;拖图=加入列表。列表(window.__figAttached)是助手上下文,可多张
   function _figId(fig, num) {
     var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;

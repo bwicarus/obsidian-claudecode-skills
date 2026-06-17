@@ -593,9 +593,11 @@ def _t_see_figure(args, ctx):
             box = fg.get("box") or fg.get("fbox"); page = fg.get("page") or ctx.get("page")
             if not box or not page:
                 continue
-            png = pdf._figure_crop_png(ap, int(page), box, with_ink=bool(fg.get("has_ink")), rel=file_rel)
+            ink_strokes = fg.get("ink")    # 客户端随图带来的当前笔迹(优先,不依赖服务端保存时机)
+            has_ink = bool(ink_strokes) or bool(fg.get("has_ink"))
+            png = pdf._figure_crop_png(ap, int(page), box, with_ink=has_ink, rel=file_rel, strokes=ink_strokes)
             vis.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
-            if fg.get("has_ink"):
+            if has_ink:
                 ink_any = True
         if not vis:
             return {"error": "图框无效"}

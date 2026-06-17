@@ -184,6 +184,21 @@
     } catch (_) {}
     return false;
   }
+  function _figInk(num, bb) {   // 收集落在图框内的笔迹(归一坐标),随图带给助手 → 服务端按它合成,不依赖墨迹保存时机
+    var out = [];
+    try {
+      var sp = (window._ink && window._ink.byPage && window._ink.byPage[num]) || [];
+      for (var i = 0; i < sp.length && out.length < 30; i++) {
+        var s = sp[i], ps = s.p || [], inb = false;
+        for (var j = 0; j < ps.length; j++) {
+          if (ps[j][0] >= bb[0] && ps[j][0] <= bb[2] && ps[j][1] >= bb[1] && ps[j][1] <= bb[3]) { inb = true; break; }
+        }
+        if (inb) out.push({ t: s.t, c: s.c, w: s.w, p: ps.map(function (p) { return [+(+p[0]).toFixed(3), +(+p[1]).toFixed(3)]; }) });
+      }
+    } catch (_) {}
+    return out;
+  }
+  window.__figInk = _figInk;   // 给 __voiceContext 在发消息时**实时**收集图内笔迹(画在 attach 之后也算)
   // 焦点/带入:点图=高亮 + 加入「带入列表」;拖图=加入列表。列表(window.__figAttached)是助手上下文,可多张
   function _figId(fig, num) {
     var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;

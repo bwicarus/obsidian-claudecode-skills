@@ -343,13 +343,18 @@ window.__voiceContext = function () {
     } catch (_) {}
     const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
     const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
-    // 带入的图(点/拖进来的 YOLO 图,可多张)。用户显式带入 → 保留到他点 ✕,不做跨页过期
+    // 带入的图(点/拖进来的 YOLO 图,可多张)。显式带入 → 保留到点 ✕,不做跨页过期。
+    // 笔迹**发消息时实时收集**(画在 attach 之后也算),随图带给助手做合成,不依赖服务端墨迹保存时机
     let figures = [];
     try {
-      figures = (window.__figAttached || []).filter(a => a && a.box).slice(0, 6).map(a => ({
-        page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
-        desc: (a.desc || '').slice(0, 500), group: !!a.group, has_ink: !!a.has_ink
-      }));
+      figures = (window.__figAttached || []).filter(a => a && a.box).slice(0, 6).map(a => {
+        const ink = (typeof window.__figInk === 'function') ? window.__figInk(a.page, a.box) : [];
+        return {
+          page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
+          desc: (a.desc || '').slice(0, 500), group: !!a.group,
+          has_ink: ink.length > 0, ink: ink
+        };
+      });
     } catch (_) {}
     return {
       page_type: 'pdf',
