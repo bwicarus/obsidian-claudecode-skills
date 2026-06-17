@@ -1244,6 +1244,16 @@ window.__voiceContext = function () {
     } catch (_) {}
     const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
     const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
+    // 焦点图(点/拖进来的那张 YOLO 图):只认当前页 + 10 分钟内的,防跨页陈旧
+    let figure = null;
+    try {
+      const ff = window.__figFocus;
+      const curP = (typeof currentPage !== 'undefined' ? currentPage : -1);
+      if (ff && ff.page === curP && (Date.now() - (ff.t || 0) < 600000) && ff.box) {
+        figure = { page: ff.page, box: ff.box, caption: (ff.caption || '').slice(0, 80),
+                   desc: (ff.desc || '').slice(0, 600), group: !!ff.group, has_ink: !!ff.has_ink };
+      }
+    } catch (_) {}
     return {
       page_type: 'pdf',
       file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
@@ -1265,6 +1275,7 @@ window.__voiceContext = function () {
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
       selection: sel,
       selection_sentence: selSentence,
+      figure: figure,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,
@@ -1746,7 +1757,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-53';
+const READER_BUILD = 'reader-fix-54';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8099,7 +8110,16 @@ async function _connProbe() {
     '.fig-hl{position:absolute;z-index:5;pointer-events:none;border:2.5px solid rgba(10,132,255,.92);' +
     'background:rgba(10,132,255,.10);border-radius:7px;box-shadow:0 0 0 2px rgba(10,132,255,.18);' +
     'animation:figHlIn .22s ease-out}' +
-    '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}';
+    '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
+    // 图区命中层(透明可点)/ 拖拽 ghost / 助手栏 drop 区 + 「+」
+    '.fig-hit{position:absolute;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +
+    '.fig-drag-ghost{position:fixed;z-index:240;width:118px;max-height:150px;object-fit:contain;opacity:.6;' +
+    'border:2px solid rgba(10,132,255,.85);border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.55);' +
+    'transform:translate(-50%,-50%);pointer-events:none;background:#fff}' +
+    '#grammar-panel.fig-drop-ready{outline:2px dashed rgba(10,132,255,.5);outline-offset:-4px}' +
+    '#grammar-panel.fig-drop-over{outline:3px solid rgba(10,132,255,.95);background:rgba(10,132,255,.07)}' +
+    '#fig-drop-plus{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:131;' +
+    'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}';
   document.head.appendChild(css);
 
   var PHOTO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.7"/>' +
@@ -8113,11 +8133,13 @@ async function _connProbe() {
 
   var _popTimer = null, _popRepos = null, _popBadge = null, _hlEl = null;
   function clearHl() { if (_hlEl) { _hlEl.remove(); _hlEl = null; } }
-  function showHl(badge, fig) {           // 在页面上画出该图 YOLO 框(fbox)的范围
+  function showHl(elOrPw, fig) {           // 在页面上画出该图 YOLO 框(fbox)的范围
     clearHl();
     var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
-    if (!bb || bb.length !== 4) return;
-    var pw = badge.closest && badge.closest('.page-wrap'); if (!pw) return;
+    if (!bb || bb.length !== 4 || !elOrPw) return;
+    var pw = (elOrPw.classList && elOrPw.classList.contains('page-wrap')) ? elOrPw
+             : (elOrPw.closest && elOrPw.closest('.page-wrap'));
+    if (!pw) return;
     var layer = pw.querySelector('.fig-layer'); if (!layer) return;
     var canvas = pw.querySelector('canvas');
     var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
@@ -8206,12 +8228,123 @@ async function _connProbe() {
         }
         if (!pos) { pos = [clampX((fx0 + fx1) / 2 - S / 2), clampY((fy0 + fy1) / 2 - S / 2)]; }
       }
+      // 图区命中层:点/长按图(非徽标)→ 设为「焦点图」+ 高亮范围(不弹描述);供助手据图回答 + 拖进对话
+      var hb = (f.fbox && f.fbox.length === 4) ? f.fbox : f.bbox;
+      if (hb && hb.length === 4 && hb[2] > hb[0] && hb[3] > hb[1]) {
+        var hit = document.createElement('div'); hit.className = 'fig-hit';
+        hit.style.left = (hb[0] * cssW) + 'px'; hit.style.top = (hb[1] * cssH) + 'px';
+        hit.style.width = Math.max(8, (hb[2] - hb[0]) * cssW) + 'px';
+        hit.style.height = Math.max(8, (hb[3] - hb[1]) * cssH) + 'px';
+        hit.style.pointerEvents = 'auto';
+        _bindFigHit(hit, f, num);
+        layer.appendChild(hit);
+      }
       var b = document.createElement('div'); b.className = 'fig-badge'; b.innerHTML = PHOTO_SVG;
       b.style.left = pos[0] + 'px'; b.style.top = pos[1] + 'px'; b.style.pointerEvents = 'auto';
       b.title = f.caption || '图说明';
       b.addEventListener('click', function (e) { e.stopPropagation(); openPop(b, f); });
       layer.appendChild(b);
     });
+  }
+
+  // ── 焦点图:点/长按图区 → 设 window.__figFocus + 高亮;长按拖动 → ghost 拖进右侧助手栏入上下文 ──
+  function _figHasInk(num, bb) {
+    try {
+      var sp = (window._ink && window._ink.byPage && window._ink.byPage[num]) || [];
+      for (var i = 0; i < sp.length; i++) {
+        var ps = sp[i].p || [];
+        for (var j = 0; j < ps.length; j++) {
+          if (ps[j][0] >= bb[0] && ps[j][0] <= bb[2] && ps[j][1] >= bb[1] && ps[j][1] <= bb[3]) return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+  function setFigFocus(fig, anchorEl, num) {
+    var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
+    if (!bb || bb.length !== 4) return;
+    window.__figFocus = {
+      file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''), page: num, box: bb,
+      caption: fig.caption || '', desc: fig.desc || '', group: !!fig.group,
+      has_ink: _figHasInk(num, bb), t: Date.now()
+    };
+    closePop();                 // 关掉可能开着的描述浮层
+    var pw = (anchorEl && anchorEl.closest) ? anchorEl.closest('.page-wrap')
+             : document.querySelector('.page-wrap[data-page-num="' + num + '"]');
+    showHl(pw, fig);            // 只高亮范围,不弹描述
+    if (typeof _toast === 'function') _toast(fig.group ? '已聚焦这个图组,问助手会带上它' : '已聚焦这张图,问助手会带上它');
+  }
+  window.__setFigFocus = setFigFocus;
+
+  // ── 长按拖动 → ghost 跟手 + 右侧助手栏冒「+」→ 拖进去入上下文 ──
+  var _drag = null;
+  function _figCropUrl(fig, num) {
+    var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
+    return '/pdf/api/figure-crop?file=' + encodeURIComponent(FILE_REL) + '&page=' + num +
+           '&box=' + bb.map(function (v) { return (+v).toFixed(4); }).join(',') +
+           (_figHasInk(num, bb) ? '&ink=1' : '');
+  }
+  function _asstPanel() { return document.getElementById('grammar-panel'); }
+  function _overAsst(x, y) {
+    var dp = _asstPanel(); if (!dp) return false;
+    var r = dp.getBoundingClientRect();
+    if (r.width < 10 || r.right < 10 || r.left > window.innerWidth - 4) return false;   // 抽屉没开
+    return x >= r.left - 24 && x <= r.right + 4 && y >= r.top && y <= r.bottom;
+  }
+  function _dragStart(fig, num, e) {
+    _dragCancel();
+    var g = document.createElement('img'); g.className = 'fig-drag-ghost';
+    g.src = _figCropUrl(fig, num); g.alt = '';
+    document.body.appendChild(g);
+    _drag = { fig: fig, num: num, ghost: g };
+    var dp = _asstPanel();
+    if (dp) {
+      dp.classList.add('fig-drop-ready');
+      var plus = document.createElement('div'); plus.id = 'fig-drop-plus'; plus.textContent = '＋';
+      dp.appendChild(plus);
+    }
+    _positionGhost(e);
+    if (navigator.vibrate) { try { navigator.vibrate(14); } catch (_) {} }
+  }
+  function _positionGhost(e) { if (_drag && _drag.ghost) { _drag.ghost.style.left = e.clientX + 'px'; _drag.ghost.style.top = e.clientY + 'px'; } }
+  function _dragMove(e) {
+    if (!_drag) return; _positionGhost(e);
+    var dp = _asstPanel(); if (dp) dp.classList.toggle('fig-drop-over', _overAsst(e.clientX, e.clientY));
+  }
+  function _dragEnd(fig, num, e) {
+    var over = _overAsst(e.clientX, e.clientY);
+    _dragCancel();
+    if (over) {
+      setFigFocus(fig, null, num);
+      try { if (window.switchSideTab) window.switchSideTab('asst'); } catch (_) {}
+      if (typeof _toast === 'function') _toast('📷 已把这张图带进助手对话');
+    }
+  }
+  function _dragCancel() {
+    if (_drag && _drag.ghost) _drag.ghost.remove();
+    _drag = null;
+    var dp = _asstPanel();
+    if (dp) { dp.classList.remove('fig-drop-ready'); dp.classList.remove('fig-drop-over'); var p = document.getElementById('fig-drop-plus'); if (p) p.remove(); }
+  }
+
+  function _bindFigHit(hit, fig, num) {
+    var sx = 0, sy = 0, st = 0, lp = null, moved = false, dragging = false;
+    hit.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      sx = e.clientX; sy = e.clientY; st = Date.now(); moved = false; dragging = false;
+      lp = setTimeout(function () { if (!moved) { dragging = true; _dragStart(fig, num, e); } }, 430);
+    });
+    hit.addEventListener('pointermove', function (e) {
+      if (!moved && (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8)) moved = true;
+      if (dragging) { _dragMove(e); e.preventDefault(); }
+      else if (moved && lp) { clearTimeout(lp); lp = null; }
+    });
+    hit.addEventListener('pointerup', function (e) {
+      if (lp) { clearTimeout(lp); lp = null; }
+      if (dragging) { dragging = false; _dragEnd(fig, num, e); return; }
+      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点/单击 → 设焦点
+    });
+    hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } _dragCancel(); });
   }
 
   function _fetchFigs(pw, num) {

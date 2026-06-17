@@ -567,6 +567,28 @@ def _t_highlight(args, ctx):
         return {"error": str(e)[:120]}
 
 
+def _t_see_figure(args, ctx):
+    """看用户**当前聚焦的那张图**(裁出图框区域的渲染图;若图上有手写笔迹则看叠加后的合成图)。
+    已给的图文字说明不够、要核对图像里的具体细节时用。返回 _vision 喂回大脑。"""
+    fig = ctx.get("figure") or {}
+    box = fig.get("box") or fig.get("fbox")
+    file_rel = ctx.get("file_rel") or ""
+    page = fig.get("page") or ctx.get("page")
+    if not file_rel or not box or not page:
+        return {"error": "当前没有聚焦的图(让用户先点一下要问的图)"}
+    try:
+        import base64
+        import pdf_reader as pdf
+        ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
+        png = pdf._figure_crop_png(ap, int(page), box, with_ink=bool(fig.get("has_ink")), rel=file_rel)
+        note = "这是用户聚焦那张图的裁剪渲染图,看图回答。"
+        if fig.get("has_ink"):
+            note = "这是用户聚焦的图 **+ 他自己手写的笔迹** 叠加后的合成图,结合笔迹(圈点/标注/问号等)理解他想问什么再回答。"
+        return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], "note": note}
+    except Exception as e:
+        return {"error": str(e)[:140]}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
@@ -584,6 +606,8 @@ TOOLS = {
                     "**读音/释义以它为准,别自己编读音**;你只结合上下文挑义项+讲解。args {word?}(不传用选中)", _t_lookup_word),
     "see_page": ("**真正看到**当前页(或指定页)的渲染图——图表/示意图/曲线/公式排版/手写等文字层读不到的东西。"
                  "read_page 只有文字层、看不见图形;用户问『这张图/这个图表/这页的图/看一下』时用 see_page。args {page?}", _t_see_page),
+    "see_figure": ("看用户**当前聚焦的那张图**的裁剪渲染图(他点选/拖进来的图;有手写笔迹则看合成图)。"
+                   "已给的图说明不够、要核对图里的具体细节/用户在图上的标注时用。args {}", _t_see_figure),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
@@ -592,7 +616,7 @@ def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
-            "lookup_word": "查词典", "see_page": "看页面图", "undo_last": "撤销"}.get(name, name)
+            "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -608,6 +632,15 @@ def _sys_prompt(ctx):
         sel_line = f"\n用户当前选中:「{sel[:200]}」"
         if sent and sent.replace(" ", "") != sel.replace(" ", ""):
             sel_line += f"\n选中所在句(已给好的上下文,可直接据此判读音/义项,**不必**再 read_page):「{sent[:300]}」"
+    # 焦点图(用户点/拖进来的那张图):带上它的 AI 描述当上下文,要核对图像细节才 see_figure
+    fig = ctx.get("figure") or {}
+    fig_line = ""
+    if fig.get("caption") or fig.get("desc"):
+        fcap = _clean_tag(fig.get("caption")); fdesc = _clean_tag(fig.get("desc"))
+        fig_line = f"\n用户当前聚焦一张图「{fcap[:50]}」,已有图说明:{fdesc[:450]}"
+        if fig.get("has_ink"):
+            fig_line += "(用户还在这张图上写了手写笔迹/圈点)"
+        fig_line += "。默认他在问这张图——先据这段说明回答;说明不够或需核对图里具体细节/用户的手写标注时,才 see_figure 看实际图。"
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -642,7 +675,7 @@ def _sys_prompt(ctx):
         "只有选中内容/它的上下文**确实涉及某张图**(如『图1-3』『如下图』指代某图),或用户明确说『这张图/这页的图/图里画的』,才 see_page。\n"
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n\n"
         f"【可用工具】\n{cat}\n\n"
-        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}"
+        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}"
     )
 
 

@@ -4884,6 +4884,60 @@ def _fig_badge_topright(fbox):
         return None
 
 
+def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None):
+    """裁出图框(归一 box)区域的 PNG。with_ink 且该页有手写笔迹 → 把落在框内的笔迹叠上去(给助手看合成图/拖拽 ghost)。"""
+    import io
+    import fitz
+    from PIL import Image, ImageDraw
+    doc = fitz.open(str(abs_path))
+    try:
+        pg = doc[int(page) - 1]; pr = pg.rect; W = float(pr.width); H = float(pr.height)
+        x0, y0, x1, y1 = [max(0.0, min(1.0, float(v))) for v in box[:4]]
+        if x1 - x0 < 1e-3 or y1 - y0 < 1e-3:
+            x0, y0, x1, y1 = 0.0, 0.0, 1.0, 1.0
+        pix = pg.get_pixmap(matrix=fitz.Matrix(scale, scale),
+                            clip=fitz.Rect(x0 * W, y0 * H, x1 * W, y1 * H), alpha=False)
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    finally:
+        doc.close()
+    if with_ink and rel:
+        try:
+            strokes = (_ink_load(rel).get("pages") or {}).get(str(int(page))) or []
+            if strokes:
+                import math
+                d = ImageDraw.Draw(im); cw, ch = im.width, im.height
+                bw = (x1 - x0) or 1e-6; bh = (y1 - y0) or 1e-6
+                def mp(p): return ((p[0] - x0) / bw * cw, (p[1] - y0) / bh * ch)
+                for s in strokes:
+                    try:
+                        pts = s.get("p") or []
+                        if not pts: continue
+                        col = s.get("c") or "#e74c3c"
+                        if isinstance(col, str) and col.startswith("rgb"): col = "#e74c3c"
+                        w = max(1, int(round((s.get("w") or 2.5) * scale)))
+                        t = s.get("t") or "pen"
+                        cp = [mp(p) for p in pts]
+                        if all(px < -5 or px > cw + 5 or py < -5 or py > ch + 5 for px, py in cp):
+                            continue
+                        if t == "rect" and len(cp) >= 2:
+                            d.rectangle([min(cp[0][0], cp[1][0]), min(cp[0][1], cp[1][1]),
+                                         max(cp[0][0], cp[1][0]), max(cp[0][1], cp[1][1])], outline=col, width=w)
+                        elif t == "arrow" and len(cp) >= 2:
+                            d.line([cp[0], cp[1]], fill=col, width=w)
+                            ang = math.atan2(cp[1][1] - cp[0][1], cp[1][0] - cp[0][0]); ah = max(8, w * 3)
+                            for sgn in (-0.42, 0.42):
+                                d.line([cp[1], (cp[1][0] - ah * math.cos(ang + sgn), cp[1][1] - ah * math.sin(ang + sgn))], fill=col, width=w)
+                        elif len(cp) >= 2:
+                            d.line(cp, fill=col, width=w, joint="curve")
+                        else:
+                            px, py = cp[0]; d.ellipse([px - w, py - w, px + w, py + w], fill=col)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+
+
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
     """徽标锚点:先把 AI bbox 收紧成真实图框(_fig_refine_bbox),邻图同样收紧,再交几何函数。
     供独立脚本(重算徽标)直接用 AI bbox 调用;路由侧已缓存 fbox 时走 _fig_badge_from_block。"""
@@ -4994,6 +5048,29 @@ def pdf_api_page_figures():
     if not done:
         _threading.Thread(target=_fig_describe_bg, args=(abs_path, page), daemon=True).start()
     resp = jsonify({"ok": True, "figures": figs, "pending": (not done)})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/api/figure-crop")
+def pdf_api_figure_crop():
+    """GET ?file=&page=&box=x0,y0,x1,y1[&ink=1] → 图框区域 PNG(拖拽 ghost / 预览;ink=1 叠笔迹)。"""
+    rel = request.args.get("file", "")
+    abs_path = _safe_vault_path(rel)
+    page = int(request.args.get("page", "0") or "0")
+    boxs = request.args.get("box", "")
+    if not abs_path or page < 1 or not boxs:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        box = [float(v) for v in boxs.split(",")][:4]
+    except Exception:
+        return jsonify({"ok": False, "error": "bad box"}), 400
+    try:
+        png = _figure_crop_png(abs_path, page, box,
+                               with_ink=(request.args.get("ink") in ("1", "true")), rel=rel)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:120]}), 500
+    resp = Response(png, mimetype="image/png")
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
