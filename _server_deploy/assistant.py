@@ -905,7 +905,9 @@ def _format_history(history):
 
 
 def _parse_tool(raw):
-    """整条消息是 {"tool":...} JSON → 工具调用;否则 None(当作给用户的回答)。容忍 ```json 围栏。"""
+    """开头是 {"tool":...} JSON → 工具调用;否则 None(当作给用户的回答)。
+    用 raw_decode 只解析**开头那个 JSON 对象**,容忍尾部多余内容(模型偶尔在工具 JSON 后跟了
+    [[FOLLOWUP]]/解释 → 整串 json.loads 会失败,导致工具 JSON 被当回答显示、工具不执行)。容忍 ```json 围栏。"""
     s = (raw or "").strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
@@ -914,8 +916,12 @@ def _parse_tool(raw):
         s = s.strip()
     if not s.startswith("{"):
         return None
+    # 字面控制字符(模型把多行 OCR 文本照抄进字符串值、没转义换行 → JSON 非法解析失败 → 工具不执行)→ 换空格。
+    # 合法 JSON 的控制字符必是 \n/\uXXXX 多字符转义,绝不会是字面 0x00-0x1f,故这步对合法 JSON 是 no-op。
+    import re
+    s = re.sub(r"[\x00-\x1f]", " ", s)
     try:
-        d = json.loads(s)
+        d, _end = json.JSONDecoder().raw_decode(s)   # 解析第一个 JSON 值,忽略其后任何内容
         return d if isinstance(d, dict) and "tool" in d else None
     except Exception:
         return None
@@ -934,7 +940,8 @@ def _agent_run(message, ctx, history):
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
-        for step in range(6):
+        _repair_tries = 0
+        for step in range(8):   # 步数上限(原 6):多批高亮/查词 + 偶发 JSON 自愈重试会多吃几步,给点余量
             if time.time() - _t_start > 200:   # 总超时:防卡死的 claude 占住 gunicorn worker(单轮60s×6步最坏拖垮整个 webapp)
                 yield {"event": "answer", "data": "(处理用时太久,先到这——可以再问我一次,或换个更具体的问法)"}
                 break
@@ -954,6 +961,16 @@ def _agent_run(message, ctx, history):
                 yield {"event": "error", "data": "助手没响应(超时)"}
                 return
             tool = _parse_tool(raw)
+            # 自愈:看着像工具调用却解析不出(texts 里常有没转义的引号/换行 → JSON 非法)→ 别当回答显示,
+            # 反馈给模型让它重出一条合法 JSON(最多 2 次),避免"工具 JSON 被当成回答、工具没执行"
+            rs = (raw or "").strip()
+            if tool is None and rs.startswith("{") and '"tool"' in rs[:400] and _repair_tries < 2:
+                _repair_tries += 1
+                yield {"event": "tool", "data": "整理指令"}
+                yield {"event": "tool-done", "data": "整理指令"}
+                content = ("你上一条像是工具调用,但 JSON 没解析成功(很可能字符串里有**没转义的双引号**或**换行**)。"
+                           "请重新只输出**一条合法的 JSON**工具调用:字符串里的引号一律换成中文引号「」、**不要带换行**、整条只输出 JSON 别加别的字。")
+                continue
             if tool and tool.get("tool") in TOOLS:
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
