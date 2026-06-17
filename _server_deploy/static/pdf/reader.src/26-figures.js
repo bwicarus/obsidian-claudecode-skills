@@ -37,12 +37,13 @@
     '#grammar-panel.fig-drop-over{outline:3px solid rgba(10,132,255,.95);background:rgba(10,132,255,.07)}' +
     '#fig-drop-plus{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:131;' +
     'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}' +
-    // 助手对话里「已带入的图」附件条(缩略图 + 图注 + ✕)
-    '#asst-fig-chip{display:flex;align-items:center;gap:8px;padding:6px 8px;margin:0 10px 6px;background:#16203a;' +
-    'border:1px solid #2a3a63;border-radius:10px}' +
-    '#asst-fig-chip .afc-thumb{width:46px;height:46px;object-fit:cover;border-radius:6px;border:1px solid #3b6db5;background:#fff;flex:none}' +
-    '#asst-fig-chip .afc-cap{flex:1;font-size:12px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-    '#asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:15px;cursor:pointer;flex:none;padding:0 4px}';
+    // 助手对话里「已带入的图」附件条列表(可多张,横向 wrap;每张 缩略图 + 图注 + ✕)
+    '#asst-fig-chips{display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 0}' +
+    '.asst-fig-chip{display:flex;align-items:center;gap:6px;padding:4px 6px;background:#16203a;' +
+    'border:1px solid #2a3a63;border-radius:9px;max-width:100%}' +
+    '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
+    '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
+    '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}';
   document.head.appendChild(css);
 
   var PHOTO_SVG = '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="1.7"/>' +
@@ -183,41 +184,61 @@
     } catch (_) {}
     return false;
   }
-  function setFigFocus(fig, anchorEl, num) {
+  // 焦点/带入:点图=高亮 + 加入「带入列表」;拖图=加入列表。列表(window.__figAttached)是助手上下文,可多张
+  function _figId(fig, num) {
+    var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
+    return num + ':' + bb.map(function (v) { return (+v).toFixed(3); }).join(',');
+  }
+  function _attachFig(fig, num) {
     var bb = (fig.fbox && fig.fbox.length === 4) ? fig.fbox : fig.bbox;
     if (!bb || bb.length !== 4) return;
-    window.__figFocus = {
-      file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''), page: num, box: bb,
-      caption: fig.caption || '', desc: fig.desc || '', group: !!fig.group,
-      has_ink: _figHasInk(num, bb), t: Date.now()
-    };
-    closePop();                 // 关掉可能开着的描述浮层
+    if (!window.__figAttached) window.__figAttached = [];
+    var id = _figId(fig, num);
+    if (!window.__figAttached.some(function (a) { return a.id === id; })) {
+      window.__figAttached.push({
+        id: id, file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''), page: num, box: bb,
+        caption: fig.caption || '', desc: fig.desc || '', group: !!fig.group, has_ink: _figHasInk(num, bb)
+      });
+    }
+    _renderChips();
+  }
+  function setFigFocus(fig, anchorEl, num) {
+    closePop();
     var pw = (anchorEl && anchorEl.closest) ? anchorEl.closest('.page-wrap')
              : document.querySelector('.page-wrap[data-page-num="' + num + '"]');
-    showHl(pw, fig);            // 只高亮范围,不弹描述
-    _setFigChip(fig, num);      // 助手对话里挂个缩略图附件条(看得见带了哪张图)
-    if (typeof _toast === 'function') _toast(fig.group ? '已聚焦这个图组,问助手会带上它' : '已聚焦这张图,问助手会带上它');
+    showHl(pw, fig);            // 高亮范围,不弹描述
+    _attachFig(fig, num);       // 加入带入列表(多张)
+    if (typeof _toast === 'function') _toast(fig.group ? '已带入这个图组' : '已带入这张图');
   }
   window.__setFigFocus = setFigFocus;
 
-  // 助手对话上方「已带入的图」附件条:缩略图 + 图注 + ✕。__figFocus 是上下文真值,附件条是它的可视镜像
-  function _setFigChip(fig, num) {
+  function _cropUrlOf(a) {
+    return '/pdf/api/figure-crop?file=' + encodeURIComponent(a.file_rel) + '&page=' + a.page +
+           '&box=' + a.box.map(function (v) { return (+v).toFixed(4); }).join(',') + (a.has_ink ? '&ink=1' : '');
+  }
+  // 助手对话上方「已带入的图」附件条列表:每张一个缩略图 + 图注 + ✕(可多张)
+  function _renderChips() {
     try {
       var pane = document.getElementById('side-pane-asst');
       var input = pane && pane.querySelector('#asst-input');
-      if (!input) return;       // 助手还没建/没开 → 先不挂(开助手后 __figFocus 仍在上下文里)
-      var chip = document.getElementById('asst-fig-chip');
-      if (!chip) { chip = document.createElement('div'); chip.id = 'asst-fig-chip'; input.parentNode.insertBefore(chip, input); }
-      chip.innerHTML = '';
-      var img = document.createElement('img'); img.className = 'afc-thumb'; img.src = _figCropUrl(fig, num);
-      var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (fig.group ? '图组 · ' : '') + (fig.caption || '这张图');
-      var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
-      x.addEventListener('click', function () { _clearFigChip(); window.__figFocus = null; clearHl(); });
-      chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x);
+      var list = window.__figAttached || [];
+      var wrap = document.getElementById('asst-fig-chips');
+      if (!list.length) { if (wrap) wrap.remove(); return; }
+      if (!input) return;       // 助手还没建/没开 → 列表仍在上下文里,开了再渲
+      if (!wrap) { wrap = document.createElement('div'); wrap.id = 'asst-fig-chips'; input.parentNode.insertBefore(wrap, input); }
+      wrap.innerHTML = '';
+      list.forEach(function (a) {
+        var chip = document.createElement('div'); chip.className = 'asst-fig-chip';
+        var img = document.createElement('img'); img.className = 'afc-thumb'; img.src = _cropUrlOf(a);
+        var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + a.page;
+        var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
+        x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
+        chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);
+      });
     } catch (_) {}
   }
-  function _clearFigChip() { var c = document.getElementById('asst-fig-chip'); if (c) c.remove(); }
-  window.__clearFigFocus = function () { _clearFigChip(); window.__figFocus = null; clearHl(); };
+  window.__renderFigChips = _renderChips;       // 助手打开时可调一次,补渲(点图在开助手前发生的情况)
+  window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); };
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)
   document.addEventListener('pointerdown', function (e) {
@@ -267,9 +288,10 @@
     var over = _overAsst(e.clientX, e.clientY);
     _dragCancel();
     if (over) {
-      setFigFocus(fig, null, num);
+      _attachFig(fig, num);     // 加入带入列表(支持多张)
       try { if (window.switchSideTab) window.switchSideTab('asst'); } catch (_) {}
-      if (typeof _toast === 'function') _toast('📷 已把这张图带进助手对话');
+      _renderChips();           // 切到助手 tab 后补渲一次(确保附件条出现)
+      if (typeof _toast === 'function') _toast('📷 已带进助手对话');
     }
   }
   function _dragCancel() {

@@ -278,10 +278,12 @@ _gpApplyAppearance();   // 载入即应用持久化设置
 window.toggleGrammarPanel = () => {
   const p = document.getElementById('grammar-panel');
   if (!p) return;
-  const onGr = document.querySelector('#side-tabs .side-tab[data-pane="grammar"]')?.classList.contains('active');
-  if (p.classList.contains('open') && onGr) { closeGrammarPanel(); return; }
+  // 默认开「助手」tab(用户要求):开着且已在助手 → 关;否则开 + 切到助手
+  const onAsst = document.querySelector('#side-tabs .side-tab[data-pane="asst"]')?.classList.contains('active');
+  if (p.classList.contains('open') && onAsst) { closeGrammarPanel(); return; }
   openGrammarPanel();
-  switchSideTab('grammar');
+  switchSideTab('asst');
+  try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
 };
 // 清空侧栏内全部分析卡
 window.clearGrammarBlocks = () => {

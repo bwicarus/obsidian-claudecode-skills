@@ -568,23 +568,41 @@ def _t_highlight(args, ctx):
 
 
 def _t_see_figure(args, ctx):
-    """看用户**当前聚焦的那张图**(裁出图框区域的渲染图;若图上有手写笔迹则看叠加后的合成图)。
+    """看用户**带入的图**(裁出图框区域的渲染图;有手写笔迹则看叠加合成图)。多张时 args{index}指定第几张(从1起),不传=全部(≤3)。
     已给的图文字说明不够、要核对图像里的具体细节时用。返回 _vision 喂回大脑。"""
-    fig = ctx.get("figure") or {}
-    box = fig.get("box") or fig.get("fbox")
+    figs = ctx.get("figures") or ([ctx["figure"]] if ctx.get("figure") else [])
+    figs = [f for f in figs if (f.get("box") or f.get("fbox"))]
+    if not figs:
+        return {"error": "当前没有带入的图(让用户先点/拖一张图进来)"}
     file_rel = ctx.get("file_rel") or ""
-    page = fig.get("page") or ctx.get("page")
-    if not file_rel or not box or not page:
-        return {"error": "当前没有聚焦的图(让用户先点一下要问的图)"}
+    if not file_rel:
+        return {"error": "不在 PDF 书里"}
+    idx = args.get("index")
+    if idx:
+        try:
+            figs = [figs[int(idx) - 1]]
+        except Exception:
+            pass
+    figs = figs[:3]
     try:
         import base64
         import pdf_reader as pdf
         ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
-        png = pdf._figure_crop_png(ap, int(page), box, with_ink=bool(fig.get("has_ink")), rel=file_rel)
-        note = "这是用户聚焦那张图的裁剪渲染图,看图回答。"
-        if fig.get("has_ink"):
-            note = "这是用户聚焦的图 **+ 他自己手写的笔迹** 叠加后的合成图,结合笔迹(圈点/标注/问号等)理解他想问什么再回答。"
-        return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], "note": note}
+        vis = []; ink_any = False
+        for fg in figs:
+            box = fg.get("box") or fg.get("fbox"); page = fg.get("page") or ctx.get("page")
+            if not box or not page:
+                continue
+            png = pdf._figure_crop_png(ap, int(page), box, with_ink=bool(fg.get("has_ink")), rel=file_rel)
+            vis.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+            if fg.get("has_ink"):
+                ink_any = True
+        if not vis:
+            return {"error": "图框无效"}
+        note = "下面是用户带入的图的裁剪渲染图,看图回答。"
+        if ink_any:
+            note += "（含用户手写笔迹的合成图,结合圈点/标注理解他想问什么）"
+        return {"_vision": vis, "note": note}
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -632,15 +650,21 @@ def _sys_prompt(ctx):
         sel_line = f"\n用户当前选中:「{sel[:200]}」"
         if sent and sent.replace(" ", "") != sel.replace(" ", ""):
             sel_line += f"\n选中所在句(已给好的上下文,可直接据此判读音/义项,**不必**再 read_page):「{sent[:300]}」"
-    # 焦点图(用户点/拖进来的那张图):带上它的 AI 描述当上下文,要核对图像细节才 see_figure
-    fig = ctx.get("figure") or {}
+    # 带入的图(用户点/拖进来的,可多张):带上各自 AI 描述当上下文,要核对图像细节才 see_figure
+    figs = ctx.get("figures") or ([ctx["figure"]] if ctx.get("figure") else [])
     fig_line = ""
-    if fig.get("caption") or fig.get("desc"):
-        fcap = _clean_tag(fig.get("caption")); fdesc = _clean_tag(fig.get("desc"))
-        fig_line = f"\n用户当前聚焦一张图「{fcap[:50]}」,已有图说明:{fdesc[:450]}"
-        if fig.get("has_ink"):
-            fig_line += "(用户还在这张图上写了手写笔迹/圈点)"
-        fig_line += "。默认他在问这张图——先据这段说明回答;说明不够或需核对图里具体细节/用户的手写标注时,才 see_figure 看实际图。"
+    if figs:
+        items = []
+        for i, fg in enumerate(figs):
+            fcap = _clean_tag(fg.get("caption")); fdesc = _clean_tag(fg.get("desc"))
+            ink = "(有手写笔迹/圈点)" if fg.get("has_ink") else ""
+            items.append(f"[{i + 1}] 「{fcap[:48]}」p{fg.get('page')}{ink}:{fdesc[:300]}")
+        if len(figs) == 1:
+            fig_line = "\n用户带入了一张图,默认在问它:\n" + items[0] + \
+                "。先据这段说明回答;说明不够或需核对图里细节/手写标注时才 see_figure(args {})。"
+        else:
+            fig_line = f"\n用户带入了 {len(figs)} 张图(默认在问/对比这些图):\n" + "\n".join(items) + \
+                "\n先据这些说明回答;要核对某张图的细节/手写标注时用 see_figure(args {index:第几张,从1起;不传=全部)。"
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"

@@ -343,15 +343,13 @@ window.__voiceContext = function () {
     } catch (_) {}
     const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
     const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
-    // 焦点图(点/拖进来的那张 YOLO 图):只认当前页 + 10 分钟内的,防跨页陈旧
-    let figure = null;
+    // 带入的图(点/拖进来的 YOLO 图,可多张)。用户显式带入 → 保留到他点 ✕,不做跨页过期
+    let figures = [];
     try {
-      const ff = window.__figFocus;
-      const curP = (typeof currentPage !== 'undefined' ? currentPage : -1);
-      if (ff && ff.page === curP && (Date.now() - (ff.t || 0) < 600000) && ff.box) {
-        figure = { page: ff.page, box: ff.box, caption: (ff.caption || '').slice(0, 80),
-                   desc: (ff.desc || '').slice(0, 600), group: !!ff.group, has_ink: !!ff.has_ink };
-      }
+      figures = (window.__figAttached || []).filter(a => a && a.box).slice(0, 6).map(a => ({
+        page: a.page, box: a.box, caption: (a.caption || '').slice(0, 80),
+        desc: (a.desc || '').slice(0, 500), group: !!a.group, has_ink: !!a.has_ink
+      }));
     } catch (_) {}
     return {
       page_type: 'pdf',
@@ -374,7 +372,7 @@ window.__voiceContext = function () {
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
       selection: sel,
       selection_sentence: selSentence,
-      figure: figure,
+      figures: figures,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,
