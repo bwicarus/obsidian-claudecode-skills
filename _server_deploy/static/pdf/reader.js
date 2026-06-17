@@ -107,11 +107,21 @@ async function loadBookLangs() {
 }
 // 本书是否开启「插图 AI 描述 + 徽标」(默认关,每本书独立,server 端 by FILE_REL)。off → 不拉 page-figures、不画徽标、不烧 AI
 window.__figBookOn = false;
+function _rerenderVisibleFigs() {   // 重渲所有已渲染页的徽标(开关切换/进书已开 时即时生效)
+  try {
+    document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(function (pw) {
+      var pn = +pw.dataset.pageNum;   // ← 属性是 data-page-num(之前误用 dataset.page=NaN → 开了不显示)
+      if (pn && window.renderFiguresOnPage) window.renderFiguresOnPage(pw, pn);
+    });
+  } catch (_) {}
+}
+window._rerenderVisibleFigs = _rerenderVisibleFigs;
 async function loadBookFig() {
   try {
     const r = await fetch('/pdf/api/book-figures?file=' + encodeURIComponent(FILE_REL || ''));
     const d = await r.json();
     window.__figBookOn = !!(d && d.ok && d.enabled);
+    if (window.__figBookOn) _rerenderVisibleFigs();   // 进书时本书已开 → 立刻把已渲染页的徽标画上(防 race)
   } catch (e) { window.__figBookOn = false; }
 }
 window.saveFigToggle = async function(on) {   // 设置面板「本书插图描述」开关,即时 POST
@@ -123,8 +133,8 @@ window.saveFigToggle = async function(on) {   // 设置面板「本书插图描�
     const d = await r.json();
     window.__figBookOn = !!(d && d.ok && d.enabled);
     (typeof _toast === 'function') && _toast(window.__figBookOn ? '已开启本书插图描述（翻页后逐页生成，首次需点 AI 几秒）' : '已关闭本书插图描述');
-    // 即时反映:开→重渲当前可见页的徽标;关→清掉已画的徽标
-    if (window.__figBookOn) { document.querySelectorAll('.page-wrap canvas').forEach(c => { const pw = c.closest('.page-wrap'); const pn = pw && +pw.dataset.page; if (pw && pn && window.renderFiguresOnPage) window.renderFiguresOnPage(pw, pn); }); }
+    // 即时反映:开→重渲已渲染页的徽标;关→清掉已画的徽标
+    if (window.__figBookOn) _rerenderVisibleFigs();
     else { document.querySelectorAll('.fig-layer').forEach(l => l.innerHTML = ''); }
   } catch (e) { (typeof _toast === 'function') && _toast('保存失败：' + e.message); }
 };
@@ -1757,7 +1767,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-54';
+const READER_BUILD = 'reader-fix-55';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
