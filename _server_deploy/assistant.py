@@ -91,7 +91,10 @@ def _spawn():
         return subprocess.Popen(
             [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
              "--include-partial-messages",   # 吐 text_delta → 最终回答可逐字流式
-             "--verbose", "--model", _AGENT_MODEL, "--effort", "high"],
+             # 沙盒:禁掉所有内建工具(本 agent 只走我们的 JSON 工具协议,从不调内建工具)→ 防 prompt injection
+             # 诱导模型用 Bash/Read 读 .env(API key)/改脚本/读别人的 convo。user message 是不可信输入。
+             "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
+             "--verbose", "--model", _AGENT_MODEL, "--effort", "medium"],   # medium:工具路由+短答够用,比 high 快且省额度
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, cwd=str(CLAUDE_DIR))
     except Exception:
@@ -136,7 +139,7 @@ def _send(p, content: str, timeout: float = 90.0):
     return None
 
 
-def _send_stream(p, content, timeout: float = 90.0):
+def _send_stream(p, content, timeout: float = 60.0):
     """发一轮 user 消息,**流式** yield:('delta', 累计文本) 每来一段 text_delta;最后 ('result', 完整文本/None)。
     供 _agent_run 把最终回答逐字吐给前端(tool 调用 JSON 不流式,见 _agent_run 的 startswith('{') 判别)。"""
     try:
@@ -162,12 +165,15 @@ def _send_stream(p, content, timeout: float = 90.0):
                         yield ("delta", acc)
                 except Exception:
                     pass
-            elif '"type":"result"' in ln:
+            elif '"result"' in ln:   # 可能是 result 事件 → 解析确认 type==result(避免回答文本里含 "type":"result" 子串被误判→提前收口截断)
+                o = None
                 try:
-                    full = (json.loads(ln).get("result") or "").strip()
+                    o = json.loads(ln)
                 except Exception:
-                    full = acc.strip()
-                yield ("result", full or acc.strip() or None); return
+                    pass
+                if isinstance(o, dict) and o.get("type") == "result":
+                    full = (o.get("result") or "").strip()
+                    yield ("result", full or acc.strip() or None); return
         if p.poll() is not None:
             break
     yield ("result", acc.strip() or None)
@@ -310,10 +316,11 @@ def _t_read_selection(args, ctx):
 def _t_search_book(args, ctx):
     q = (args.get("query") or "").strip()
     file_rel = ctx.get("file_rel", "")
-    if not q or not file_rel:
+    if not q or not file_rel or ".." in file_rel:
         return {"error": "缺 query 或没开书"}
     try:
         ap = (VAULT_ROOT / file_rel).resolve()
+        ap.relative_to(VAULT_ROOT.resolve())   # 容器校验:file_rel 来自前端不可信,挡 .. / 绝对路径越出 vault
         idx = _pdf()._book_text_index(str(ap), file_rel)
         ql = q.lower()
         hits = []
@@ -357,7 +364,7 @@ def _bg_task(kind, params, ctx):
         import voice
         tid = voice._vtask_new(kind)
         base = ctx.get("_base", "")
-        tctx = {k: ctx.get(k) for k in ("file_rel", "page", "book_name", "selection")}
+        tctx = {k: ctx.get(k) for k in ("file_rel", "page", "book_name", "selection", "_uid")}
         threading.Thread(target=voice._run_task, args=(tid, kind, params, tctx, base), daemon=True).start()
         return {"ok": True, "task_id": tid, "note": "已在后台开始,完成会弹系统通知。"}
     except Exception as e:
@@ -368,7 +375,9 @@ def _t_make_anki(args, ctx):
     text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
-    return _bg_task("anki", {"text": text}, ctx)
+    res = _bg_task("anki", {"text": text}, ctx)
+    _mark_source_highlight(ctx, "#b9f6ca")   # 双向回链:原文留绿色高亮"这段做过卡"
+    return res
 
 
 def _t_make_note(args, ctx):
@@ -376,7 +385,9 @@ def _t_make_note(args, ctx):
         or _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
     if not text:
         return {"error": "没有要整理的内容"}
-    return _bg_task("note", {"text": text}, ctx)
+    res = _bg_task("note", {"text": text}, ctx)
+    _mark_source_highlight(ctx, "#a7d8ff")   # 双向回链:原文留蓝色高亮"这段整理进笔记了"
+    return res
 
 
 def _t_add_vocab(args, ctx):
@@ -476,7 +487,7 @@ def _t_see_page(args, ctx):
 def _t_undo_last(args, ctx):
     try:
         import voice
-        return voice._undo_do(None)   # 撤销最近一次没撤过的写操作
+        return voice._undo_do(None, owner=ctx.get("_uid"))   # 撤销自己最近一次没撤过的写操作(隔离)
     except Exception as e:
         return {"error": str(e)[:120]}
 
@@ -561,7 +572,7 @@ def _t_highlight(args, ctx):
         res = {"highlighted": len(ids), "missed": miss, "client_action": {"fn": "_reloadHighlights", "args": []}}
         if ids:
             import voice
-            res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids})
+            res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids}, owner=ctx.get("_uid"))
         return res
     except Exception as e:
         return {"error": str(e)[:120]}
@@ -609,10 +620,121 @@ def _t_see_figure(args, ctx):
         return {"error": str(e)[:140]}
 
 
+def _t_search_all_books(args, ctx):
+    """跨『我所有的书』全文搜索(SQLite FTS5 全局索引)。用户问『我哪本书讲过 X / 别的书有没有 X / 之前在哪见过』时用。"""
+    import sqlite3
+    q = (args.get("query") or "").strip()
+    if not q:
+        return {"error": "缺 query"}
+    db = _pdf()._SEARCH_DB
+    if not db.exists():
+        return {"error": "全局搜索索引未建(scripts/build_search_index.py)"}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            names = dict(con.execute("SELECT file, name FROM meta").fetchall())
+            if len(q) >= 3:
+                fts = '"' + q.replace('"', '""') + '"'
+                rows = con.execute("SELECT d.file, d.page, d.body FROM pages_fts JOIN pages_data d ON d.id=pages_fts.rowid "
+                                   "WHERE pages_fts MATCH ? ORDER BY bm25(pages_fts) LIMIT 40", (fts,)).fetchall()
+            else:
+                like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                rows = con.execute("SELECT file, page, body FROM pages_data WHERE body LIKE ? ESCAPE '\\' LIMIT 40", (like,)).fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        return {"error": str(e)[:120]}
+    cur = ctx.get("file_rel", "")
+    hits = []
+    for file, page, body in rows[:15]:
+        low = (body or "").lower(); pos = low.find(q.lower())
+        snip = (body[max(0, pos - 15):pos + len(q) + 25] if pos >= 0 else (body or "")[:60]).replace("\n", " ").strip()
+        hits.append({"book": names.get(file, file), "file_rel": file, "page": page, "snippet": snip, "is_current_book": file == cur})
+    return {"total": len(rows), "hits": hits,
+            "note": "is_current_book=true 是用户正在读的书。要跳到别的书用 open_book(file_rel, page)。"}
+
+
+def _t_open_book(args, ctx):
+    """打开另一本书(可定位到页),前端导航。args {file_rel | book(书名,模糊匹配书架), page?}。"""
+    file_rel = (args.get("file_rel") or "").strip()
+    if not file_rel:
+        name = (args.get("book") or "").strip()
+        for b in (ctx.get("books") or []):
+            if name and (name in (b.get("name") or "") or (b.get("name") or "") in name):
+                file_rel = b.get("rel"); break
+    if not file_rel or ".." in file_rel:
+        return {"error": "没找到要打开的书(给 file_rel 或准确书名)"}
+    try:
+        page = int(args.get("page") or 1)
+    except Exception:
+        page = 1
+    return {"ok": True, "note": f"正在打开《{file_rel.split('/')[-1]}》第{page}页",
+            "client_action": {"fn": "openBookAt", "args": [file_rel, page]}}
+
+
+def _t_summarize_section(args, ctx):
+    """取『当前页所在章节』的正文(按 PDF 书签/TOC 切片,上限 ~9000 字)交给你总结。read_page 只逐页,『总结这一章/这一节』用这个。args {page?}"""
+    file_rel = ctx.get("file_rel", "")
+    if not file_rel or ".." in file_rel:
+        return {"error": "没开书"}
+    try:
+        page = int(args.get("page") or (ctx.get("pages") or [ctx.get("page")])[0] or 1)
+    except Exception:
+        page = 1
+    try:
+        import fitz
+        ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
+        doc = fitz.open(str(ap))
+        try:
+            toc = doc.get_toc() or []
+            n = doc.page_count
+            start, end, title = 1, n, ""
+            cands = [(t[2], t[1]) for t in toc if t[2] and t[2] <= page]
+            if cands:
+                start, title = max(cands, key=lambda x: x[0])
+            nexts = [t[2] for t in toc if t[2] and t[2] > start]
+            if nexts:
+                end = min(nexts) - 1
+            end = min(end, start + 30)   # 防超长章爆量(无 TOC 时退化为当前页起 30 页)
+            if not toc:
+                start, end = max(1, page - 2), min(n, page + 12)
+            parts, total = [], 0
+            for pg in range(start, end + 1):
+                t = (doc[pg - 1].get_text("text") or "").strip()
+                if t:
+                    parts.append(f"【第{pg}页】{t}")
+                    total += len(t)
+                if total > 9000:
+                    end = pg
+                    break
+        finally:
+            doc.close()
+        if not parts:
+            return {"error": "这一节没取到文字(可能纯扫描未OCR,可改用 see_page 逐页看)"}
+        return {"section_title": title, "page_range": [start, end], "truncated": total > 9000,
+                "text": "\n\n".join(parts)[:9000],
+                "note": "这是当前页所在章节的正文,请总结成:核心要点 / 关键定义 / 重要公式 / 易错点。引用具体内容时标注来源页(第N页)。"}
+    except Exception as e:
+        return {"error": str(e)[:140]}
+
+
+def _mark_source_highlight(ctx, color):
+    """双向回链:制卡/做笔记后,在 PDF 原文(用户选中的那段)留一个高亮 → 翻回去能看出『这段已沉淀』。"""
+    try:
+        sel = (ctx.get("selection") or "").strip()
+        if sel and len(sel) > 4 and ctx.get("file_rel"):
+            _t_highlight({"texts": [sel], "color": color}, ctx)
+    except Exception:
+        pass
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
+    "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用)。args {query}", _t_search_all_books),
+    "open_book": ("打开另一本书并可定位到页(跨书跳转)。args {file_rel | book(书名), page?}", _t_open_book),
+    "summarize_section": ("取当前页所在『整章/整节』正文交给你总结(read_page 只逐页,『总结这一章』用这个)。args {page?}", _t_summarize_section),
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
     "goto_page": ("翻到指定页(前端跳转)。args {page}", _t_goto_page),
     "make_anki": ("把内容做成 Anki 卡(后台,带原文链接,完成通知)。args {text?}(不传用选中)", _t_make_anki),
@@ -634,6 +756,7 @@ TOOLS = {
 
 def _tool_label(name, args):
     return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
+            "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
             "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "undo_last": "撤销"}.get(name, name)
@@ -644,6 +767,10 @@ def _sys_prompt(ctx):
     cat = "\n".join(f"- {n}: {d}" for n, (d, _) in TOOLS.items())
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
     meta = {"book": ctx.get("book_name"), "当前可见页": vis, "共": ctx.get("total")}
+    if ctx.get("langs"):
+        meta["书语言"] = ctx.get("langs")              # 让助手知道用 en/ja 处理,不必猜
+    if ctx.get("read_mode") and ctx.get("read_mode") != "continuous":
+        meta["排版"] = ctx.get("read_mode")            # spread=双页,知道在看哪两页
     meta = {k: v for k, v in meta.items() if v}
     sel = _clean_tag(ctx.get("selection"))
     sent = _clean_tag(ctx.get("selection_sentence"))
@@ -667,6 +794,23 @@ def _sys_prompt(ctx):
         else:
             fig_line = f"\n用户带入了 {len(figs)} 张图(默认在问/对比这些图):\n" + "\n".join(items) + \
                 "\n先据这些说明回答;要核对某张图的细节/手写标注时用 see_figure(args {index:第几张,从1起;不传=全部)。"
+    # 本页知识点 / 未掌握生词 / 用户钉住的焦点(前端 __voiceContext 已采集好,直接给 → 答这类问题免工具往返)
+    learn_bits = []
+    nodes = ctx.get("visible_kg_nodes") or []
+    if nodes:
+        nm = "、".join(_clean_tag(n.get("name")) for n in nodes[:20] if n.get("name"))
+        if nm:
+            learn_bits.append(f"本页知识点(技能图谱):{nm}")
+    vocab = ctx.get("visible_vocab") or []
+    if vocab:
+        vv = "、".join(_clean_tag(w) for w in vocab[:30] if w)
+        if vv:
+            learn_bits.append(f"本页『还没掌握』的生词(页面下划线词):{vv}")
+    fsel = ctx.get("focus_sel") or {}
+    if isinstance(fsel, dict) and fsel.get("text"):
+        fkind = "公式" if fsel.get("kind") == "formula" else "段落"
+        learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
+    learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -699,9 +843,14 @@ def _sys_prompt(ctx):
         "上下文优先用末尾已给好的『选中所在句』——**有它就别再 read_page**,只有所在句仍不足以定义项时才 read_page 拿更多段落。"
         "但**『页内有图』≠『要看图』**:选中只是文字、其上下文里并没有图时,**别 see_page**;"
         "只有选中内容/它的上下文**确实涉及某张图**(如『图1-3』『如下图』指代某图),或用户明确说『这张图/这页的图/图里画的』,才 see_page。\n"
-        "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n\n"
+        "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n"
+        "★『总结这一章/这一节/这部分』用 summarize_section(它按书签切出整章正文);只『总结这页』才用 read_page。\n"
+        "★『我哪本书讲过X/别的书有没有X/之前在哪见过』用 search_all_books;要跳到搜到的别的书用 open_book(file_rel,page)。\n"
+        "★可溯源:凡复述/引用书里的具体内容,在句末标来源页「(第N页)」,N 必须来自工具实际返回的页码(read_page/search_book/summarize_section 都带页码),**不许编页码**。前端会把『第N页』变成可点跳转。\n"
+        "★【追问建议】每次最终回答的正文之后,另起一行附 2-3 个贴合当前内容、能推进理解的下一步问题,"
+        "格式严格写成一行:[[FOLLOWUP]]问题1|问题2|问题3[[/FOLLOWUP]](前端会渲成可点按钮;问题要短、具体)。只在给最终回答时附,调工具的 JSON 里不要附。\n\n"
         f"【可用工具】\n{cat}\n\n"
-        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}"
+        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}{learn_line}"
     )
 
 
@@ -770,7 +919,11 @@ def _agent_run(message, ctx, history):
     client_actions = []
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
+        _t_start = time.time()
         for step in range(6):
+            if time.time() - _t_start > 200:   # 总超时:防卡死的 claude 占住 gunicorn worker(单轮60s×6步最坏拖垮整个 webapp)
+                yield {"event": "answer", "data": "(处理用时太久,先到这——可以再问我一次,或换个更具体的问法)"}
+                break
             raw = None
             _last_emit = 0.0
             for kind, val in _send_stream(p, content):
@@ -836,9 +989,18 @@ def assistant_chat():
     uid = session["user_id"]
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
-    # 服务端历史(含每轮所在页/书/选中句,让助手能定位"刚才那页")
+    ctx["_uid"] = uid   # 写操作(制卡/笔记/高亮)记 owner=本用户 → 撤销只能撤自己的(防越权)
+    # 服务端历史(含每轮所在页/书/选中句,让助手能定位"刚才那页")。先取(=本轮之前的),再早落库本轮用户消息。
     history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
                for m in _convo_load(uid)[-6:]]
+    # 用户消息**进入 agent 之前**就落库 → 移动端切后台/锁屏断连也不丢这轮,且保住"刚才那页"定位链
+    _convo_append(uid, "user", message, {
+        "page": ctx.get("page"), "pages": ctx.get("pages"),
+        "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
+        "selection": ctx.get("selection"),
+        "figures": [{k: f.get(k) for k in ("page", "box", "caption", "group", "has_ink", "file_rel")}
+                    for f in (ctx.get("figures") or [])][:6],
+    })
 
     def gen():
         final = ['']
@@ -847,20 +1009,16 @@ def assistant_chat():
                 if ev['event'] == 'answer':
                     final[0] = ev['data']
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"event: error\ndata: {json.dumps(str(e)[:160], ensure_ascii=False)}\n\n"
-        yield "event: done\ndata: {}\n\n"
-        # 存进服务端对话(跨设备),并记下这轮所在位置(书/页/选中句)→ 下次助手回看历史就知道"刚才那页"是第几页
-        _convo_append(uid, "user", message, {
-            "page": ctx.get("page"), "pages": ctx.get("pages"),
-            "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
-            "selection": ctx.get("selection"),
-            # 用过的图:只留渲染缩略图/跳转所需字段,丢掉 ink 笔迹与 desc(过重),历史卡片用 has_ink 走 GET 合成
-            "figures": [{k: f.get(k) for k in ("page", "box", "caption", "group", "has_ink", "file_rel")}
-                        for f in (ctx.get("figures") or [])][:6],
-        })
-        if final[0]:
-            _convo_append(uid, "assistant", str(final[0])[:1500])
+            yield "event: done\ndata: {}\n\n"
+        except Exception as e:   # 普通异常才回 error 事件;客户端断连是 GeneratorExit(BaseException,不被此捕获)→ 直接走 finally 落库
+            try:
+                yield f"event: error\ndata: {json.dumps(str(e)[:160], ensure_ascii=False)}\n\n"
+            except Exception:
+                pass
+        finally:
+            # 助手回答在 finally 落库:断连/出错时也保住已流式出来的部分(跨设备续上不断片)
+            if final[0]:
+                _convo_append(uid, "assistant", str(final[0])[:1500])
 
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -885,9 +1043,9 @@ def assistant_clear():
 def assistant_undo():
     if not _logged_in():
         return jsonify({"ok": False}), 401
-    uid = (request.get_json(silent=True) or {}).get("id")
+    undo_id = (request.get_json(silent=True) or {}).get("id")
     import voice
-    return jsonify(voice._undo_do(uid))
+    return jsonify(voice._undo_do(undo_id, owner=session["user_id"]))   # owner 校验:只能撤自己的(防猜 id 删别人的)
 
 
 @bp.route("/prewarm", methods=["POST"])

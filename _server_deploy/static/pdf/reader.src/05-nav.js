@@ -379,10 +379,10 @@ window.__voiceContext = function () {
     let books = [];
     try {
       const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
-      if (Array.isArray(c)) books = c.map(p => ({ name: p.name, rel: p.rel })).slice(0, 120);
+      if (Array.isArray(c)) books = c.map(p => ({ name: p.name, rel: p.rel })).slice(0, 80);
     } catch (_) {}
-    const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
-    const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
+    const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name })).slice(0, 40);
+    const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 50);
     // 带入的图(点/拖进来的 YOLO 图,可多张)。显式带入 → 保留到点 ✕,不做跨页过期。
     // 笔迹**发消息时实时收集**(画在 attach 之后也算),随图带给助手做合成,不依赖服务端墨迹保存时机
     let figures = [];
@@ -419,6 +419,9 @@ window.__voiceContext = function () {
       selection: sel,
       selection_sentence: selSentence,
       figures: figures,
+      // 用户钉住的焦点(公式/段落 chip):持久(选中过期也保留),助手据此知道"在专门问这个"
+      focus_sel: (window.__focusSel && window.__focusSel.text)
+        ? { text: String(window.__focusSel.text).slice(0, 400), kind: window.__focusSel.kind || 'text' } : null,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,

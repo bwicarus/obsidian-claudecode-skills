@@ -667,12 +667,13 @@ def _anki_req(action, params=None):
         return json.loads(r.read())
 
 
-def _undo_record(kind, label, handle):
+def _undo_record(kind, label, handle, owner=None):
     global _undo_seq
     with _undo_lock:
         _undo_seq += 1
         uid = f"u{_undo_seq}"
-        _undo_log.append({"id": uid, "kind": kind, "label": label, "handle": handle, "ts": time.time(), "undone": False})
+        _undo_log.append({"id": uid, "kind": kind, "label": label, "handle": handle,
+                          "owner": owner, "ts": time.time(), "undone": False})   # owner=用户隔离,防越权撤别人的写操作
         if len(_undo_log) > 80:
             del _undo_log[:-80]
     return uid
@@ -683,11 +684,13 @@ def _undo_list(n=12):
         return [{"id": e["id"], "kind": e["kind"], "label": e["label"], "undone": e["undone"]} for e in _undo_log[-n:][::-1]]
 
 
-def _undo_do(uid=None):
+def _undo_do(uid=None, owner=None):
     with _undo_lock:
         tgt = None
         for e in reversed(_undo_log):
             if e["undone"]:
+                continue
+            if owner is not None and e.get("owner") != owner:   # 用户隔离:传了 owner 就只撤销自己的(防越权删别人的卡/笔记/高亮)
                 continue
             if uid is None or e["id"] == uid:
                 tgt = e
@@ -793,7 +796,7 @@ def _task_note(tid, params, ctx, base):
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
     out = _pdf_mod()._run_snippets_to([{"text": content, "source": link}], True, False, title, "opus", "high")
     if out.get("ok"):
-        uid = _undo_record("note", f"笔记《{title}》", {"path": out.get("note_path")})
+        uid = _undo_record("note", f"笔记《{title}》", {"path": out.get("note_path")}, owner=ctx.get("_uid"))
         _vtask_set(tid, status="done", speak=f"整理好了，笔记叫《{title}》",
                    result={"note_path": out.get("note_path"), "obsidian_url": out.get("obsidian_url"), "undo_id": uid})
     else:
@@ -812,7 +815,7 @@ def _task_anki(tid, params, ctx, base):
         out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
     n = out.get("anki_added", 0)
     if out.get("ok") and n:
-        uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []})
+        uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []}, owner=ctx.get("_uid"))
         _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki", result={"undo_id": uid})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
@@ -836,7 +839,7 @@ def _task_vocab(tid, params, ctx, base):
         with _anki_lock:   # AnkiConnect 串行
             r = anki_from_word.make_card(word, force=False)
         if r.get("ok"):
-            uid = _undo_record("vocab", f"{word} 生词卡", {"card_id": r.get("note_id")})
+            uid = _undo_record("vocab", f"{word} 生词卡", {"card_id": r.get("note_id")}, owner=ctx.get("_uid"))
             _vtask_set(tid, status="done", speak=f"{word} 已加到生词本并制卡了", result={"undo_id": uid})
         else:
             _vtask_set(tid, status="done", speak=f"{word} 已加到生词本(制卡没成:{r.get('error', '?')})")

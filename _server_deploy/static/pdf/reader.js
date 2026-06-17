@@ -1290,10 +1290,10 @@ window.__voiceContext = function () {
     let books = [];
     try {
       const c = JSON.parse(localStorage.getItem('pdf-bookshelf-cache') || '[]');
-      if (Array.isArray(c)) books = c.map(p => ({ name: p.name, rel: p.rel })).slice(0, 120);
+      if (Array.isArray(c)) books = c.map(p => ({ name: p.name, rel: p.rel })).slice(0, 80);
     } catch (_) {}
-    const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name, book: n.book })).slice(0, 60);
-    const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 80);
+    const nodes = (window.__lastPageNodes || []).map(n => ({ id: n.id, name: n.name })).slice(0, 40);
+    const vocab = (window.__lastVocab || []).map(v => v.lemma).filter(Boolean).slice(0, 50);
     // 带入的图(点/拖进来的 YOLO 图,可多张)。显式带入 → 保留到点 ✕,不做跨页过期。
     // 笔迹**发消息时实时收集**(画在 attach 之后也算),随图带给助手做合成,不依赖服务端墨迹保存时机
     let figures = [];
@@ -1330,6 +1330,9 @@ window.__voiceContext = function () {
       selection: sel,
       selection_sentence: selSentence,
       figures: figures,
+      // 用户钉住的焦点(公式/段落 chip):持久(选中过期也保留),助手据此知道"在专门问这个"
+      focus_sel: (window.__focusSel && window.__focusSel.text)
+        ? { text: String(window.__focusSel.text).slice(0, 400), kind: window.__focusSel.kind || 'text' } : null,
       visible_kg_nodes: nodes,
       visible_vocab: vocab,
       books: books,
@@ -1811,7 +1814,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-65';
+const READER_BUILD = 'reader-fix-66';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -5558,6 +5561,7 @@ window.toggleGrammarPanel = () => {
   switchSideTab('asst');
   try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
   try { window.__renderFocusSel && window.__renderFocusSel(); } catch (_) {}   // 补渲焦点选区(公式/段落)chip
+  try { window.__asstPrewarm && window.__asstPrewarm(); } catch (_) {}         // 预热 claude 进程(减冷启动)
 };
 // 清空侧栏内全部分析卡
 window.clearGrammarBlocks = () => {
@@ -8005,6 +8009,9 @@ async function _connProbe() {
   pane.innerHTML =
     '<div id="asst-thread"></div>' +
     '<div id="asst-quick">' +
+      '<button class="asst-learn" data-send="总结这页">📝 总结本页</button>' +
+      '<button class="asst-learn" data-send="这页我还没掌握哪些词?逐个讲讲">📚 本页生词</button>' +
+      '<button class="asst-learn" data-send="这页涉及哪些知识点?简要讲讲">🧩 这页知识点</button>' +
       '<button data-q="prev">◀ 上页</button><button data-q="next">下页 ▶</button>' +
       '<button data-q="fit">适应</button><button data-q="zin">A+</button><button data-q="zout">A-</button>' +
       '<button data-q="ptrans">译页</button><button data-q="clear">🗑 清空</button>' +
@@ -8034,6 +8041,12 @@ async function _connProbe() {
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
     '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
+    '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
+    '#asst-send.stop{background:#b23b3b}' +   // 流式中:发送→停止(红)
+    // AI 答完的「追问建议」chip
+    '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
+    '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
+    '.asst-fu:active{background:#1d3358}' +
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #233156;align-items:flex-end}' +
     '#asst-ta{flex:1;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
     '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
@@ -8095,11 +8108,30 @@ async function _connProbe() {
       });
     } catch (_) {}
   }
-  function renderMd(el, text) {
+  function renderMd(el, text, withMath) {
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
     _linkifyPages(el);
-    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {}
+    // withMath===false(流式期间)跳过 MathJax:原先每 100ms 对整段重 typeset,长答案末段二次方卡顿 → 收尾只跑一次
+    if (withMath !== false) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
+  }
+  // 从回答里剥离 [[FOLLOWUP]]q1|q2|q3[[/FOLLOWUP]] 追问建议(容忍流式中途未闭合)
+  function _splitFollowups(text) {
+    var fu = [];
+    var clean = (text || '').replace(/\[\[FOLLOWUP\]\]([\s\S]*?)\[\[\/FOLLOWUP\]\]/g, function (m, body) {
+      body.split('|').forEach(function (q) { q = q.trim(); if (q) fu.push(q); }); return '';
+    }).replace(/\[\[FOLLOWUP\]\][\s\S]*$/, '').trim();
+    return { text: clean, followups: fu.slice(0, 4) };
+  }
+  function _renderFollowups(afterEl, fus) {
+    if (!fus || !fus.length) return;
+    var box = document.createElement('div'); box.className = 'asst-followups';
+    fus.forEach(function (q) {
+      var b = document.createElement('button'); b.className = 'asst-fu'; b.textContent = q;
+      b.addEventListener('click', function () { if (!streaming) send(q); });
+      box.appendChild(b);
+    });
+    afterEl.appendChild(box); scrollDown();
   }
   document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
     var t = e.target;
@@ -8116,9 +8148,11 @@ async function _connProbe() {
   function _jumpToCtx(file_rel, page) {
     page = parseInt(page, 10); if (!page || page < 1) return;
     var cur = (typeof FILE_REL !== 'undefined') ? FILE_REL : '';
-    if (file_rel && cur && file_rel !== cur) { location.href = '/pdf/?file=' + encodeURIComponent(file_rel) + '#page=' + page; return; }
+    if (file_rel && cur && file_rel !== cur) { location.href = '/pdf/view?file=' + encodeURIComponent(file_rel) + '&page=' + page; return; }   // 跨书:正确路由是 /pdf/view(/pdf/ 是书架)
     if (typeof window.jumpWithBack === 'function') window.jumpWithBack(page);
   }
+  // open_book 工具的 client_action 用:打开另一本书(可定位页)
+  window.openBookAt = function (fr, pg) { try { _jumpToCtx(fr, parseInt(pg, 10) || 1); } catch (_) {} };
   // 一条用户消息的上下文卡片:用过的图缩略图 + 选中的字段 + 涉及的页码,点任意一处都能跳过去
   // meta:{figures:[{file_rel,page,box,caption,group,has_ink}], selection, page, file_rel}; live=刚发的那条(图有笔迹走实时合成)
   function _ctxCard(meta, live) {
@@ -8179,20 +8213,29 @@ async function _connProbe() {
     } catch (_) {}
   };
 
+  var _abort = null;
+  function _setSendMode(stop) {   // 流式中:发送键→停止键(红 ■);否则发送(➤)
+    if (stop) { sendBtn.classList.add('stop'); sendBtn.textContent = '■'; sendBtn.title = '停止'; }
+    else { sendBtn.classList.remove('stop'); sendBtn.textContent = '➤'; sendBtn.title = '发送'; }
+    sendBtn.disabled = false;
+  }
+
   async function send(text) {
     text = (text || '').trim();
     if (!text || streaming) return;
-    streaming = true; sendBtn.disabled = true;
+    streaming = true; _setSendMode(true);
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
-    var answer = '', acts = [];
+    var answer = '', acts = [], aborted = false;
+    _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     try {
       var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, context: sentCtx }),
+        signal: _abort ? _abort.signal : undefined,
       });
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
       while (true) {
@@ -8208,7 +8251,7 @@ async function _connProbe() {
           });
           var parsed; try { parsed = JSON.parse(data); } catch (_) { parsed = data; }
           if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
-          else if (ev === 'answer') { answer = parsed; renderMd(aMsg, answer); scrollDown(); }
+          else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); scrollDown(); }   // 流式只轻量渲(不 MathJax) + 剥 FOLLOWUP 标记
           else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
           else if (ev === 'actions') { acts = parsed; }
           else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
@@ -8216,10 +8259,17 @@ async function _connProbe() {
           else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
         }
       }
-    } catch (e) { answer = '⚠️ ' + (e && e.message || '出错了'); aMsg.innerHTML = esc(answer); }
-    if (!answer && aMsg.innerHTML.indexOf('asst-tool') >= 0) { aMsg.innerHTML = esc('(没拿到回答)'); }
+    } catch (e) {
+      if (e && e.name === 'AbortError') aborted = true;             // 用户点停止 → 不报错,保留已生成的部分
+      else answer = answer || ('⚠️ ' + (e && e.message || '出错了'));
+    }
+    // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
+    var pf = _splitFollowups(answer);
+    if (pf.text) renderMd(aMsg, pf.text, true);
+    else if (aMsg.innerHTML.indexOf('asst-tool') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
+    if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
     runActions(acts);
-    streaming = false; sendBtn.disabled = false;
+    streaming = false; _abort = null; _setSendMode(false);
   }
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
@@ -8263,7 +8313,10 @@ async function _connProbe() {
 
   // 快捷按钮
   pane.querySelector('#asst-quick').addEventListener('click', function (e) {
-    var q = e.target && e.target.getAttribute('data-q'); if (!q) return;
+    var btn = e.target && e.target.closest ? e.target.closest('button') : e.target;
+    var ds = btn && btn.getAttribute('data-send');
+    if (ds) { if (!streaming) send(ds); return; }   // 学习类快捷按钮:直接发预设问题
+    var q = btn && btn.getAttribute('data-q'); if (!q) return;
     try {
       if (q === 'prev') window.changePage(-1);
       else if (q === 'next') window.changePage(1);
@@ -8279,7 +8332,10 @@ async function _connProbe() {
   function autorow() { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; }
   ta.addEventListener('input', autorow);
   ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (streaming) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
-  sendBtn.addEventListener('click', function () { if (streaming) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); });
+  sendBtn.addEventListener('click', function () {
+    if (streaming) { try { _abort && _abort.abort(); } catch (_) {} return; }   // 流式中点 ■ → 中止本轮
+    micStop(); var v = ta.value; ta.value = ''; autorow(); send(v);
+  });
 
   // ── 苹果风格语音按钮:持续聆听,只手动停(再点麦克风 / 点发送即停)。设备原生 STT(iOS=Siri 级)。
   //    iOS 的 SpeechRecognition 静默时会自己结束,所以只要用户没手动停,onend 就重启 = 真·持续聆听。
@@ -8352,6 +8408,7 @@ async function _connProbe() {
   micBtn.addEventListener('click', function () { micOn ? micStop() : micStart(); });
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
+  window.__asstPrewarm = function () { try { prewarm(false); } catch (_) {} };   // 切到助手 tab 时也预热(减第二条起的冷启动)
   function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
@@ -8361,7 +8418,7 @@ async function _connProbe() {
             var uel = addMsg('asst-u', esc(m.content));
             try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false); if (c) uel.appendChild(c); } catch (_) {}
           }
-          else { var el = addMsg('asst-a', ''); renderMd(el, m.content || ''); }
+          else { var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text); try { _renderFollowups(el, _pf.followups); } catch (_) {} }
         });
       } else greet();
     }).catch(greet);
