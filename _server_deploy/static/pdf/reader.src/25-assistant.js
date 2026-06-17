@@ -70,6 +70,7 @@
     '.actx-thumb:active{transform:scale(.94)}' +
     '.actx-sel{font-size:12px;color:#dbe7ff;background:rgba(255,255,255,.13);border-left:2px solid rgba(255,255,255,.5);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1.4}' +
     '.actx-sel:active{background:rgba(255,255,255,.22)}' +
+    '.actx-sel.actx-fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}';
   document.head.appendChild(css);
@@ -162,7 +163,15 @@
     }
     if (sel) {
       var s = document.createElement('div'); s.className = 'actx-sel';
-      s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
+      if (/^\$\$?[\s\S]+\$\$?$/.test(sel)) {   // 公式选区($..$/$$..$$)→ MathJax 渲染,不显示成裸 LaTeX
+        s.classList.add('actx-fml');
+        var _raw = sel.replace(/^\$\$?/, '').replace(/\$\$?$/, '');
+        var _block = /^\$\$/.test(sel) || /\\begin\{|\\\\/.test(_raw);
+        s.textContent = _block ? ('\\[' + _raw + '\\]') : ('\\(' + _raw + '\\)');   // 跟公式浮层一致,避免单 $ 行内未启用
+        if (window.MathJax && MathJax.typesetPromise) setTimeout(function () { try { MathJax.typesetPromise([s]); } catch (_) {} }, 0);
+      } else {
+        s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
+      }
       s.title = page ? ('跳到第 ' + page + ' 页') : '';
       s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(s);
