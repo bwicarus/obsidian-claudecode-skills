@@ -1814,7 +1814,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-69';
+const READER_BUILD = 'reader-fix-70';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8116,10 +8116,11 @@ async function _connProbe() {
   // 从回答里剥离 [[FOLLOWUP]]q1|q2|q3[[/FOLLOWUP]] 追问建议(容忍流式中途未闭合)
   function _splitFollowups(text) {
     var fu = [];
-    var clean = (text || '').replace(/\[\[FOLLOWUP\]\]([\s\S]*?)\[\[\/FOLLOWUP\]\]/g, function (m, body) {
-      body.split('|').forEach(function (q) { q = q.trim(); if (q) fu.push(q); }); return '';
-    }).replace(/\[\[FOLLOWUP\]\][\s\S]*$/, '').trim();
-    return { text: clean, followups: fu.slice(0, 4) };
+    var push = function (body) { body.split(/[|\n]+/).forEach(function (q) { q = q.trim().replace(/^[\-·•\d\.\s]+/, ''); if (q) fu.push(q); }); };
+    var clean = (text || '').replace(/\[\[FOLLOWUP\]\]([\s\S]*?)\[\[\/FOLLOWUP\]\]/g, function (m, body) { push(body); return ''; });
+    var open = clean.indexOf('[[FOLLOWUP]]');   // 模型常漏结束标记 → 未闭合:从 [[FOLLOWUP]] 到结尾都当追问
+    if (open >= 0) { push(clean.slice(open + 12).replace(/\[\[\/?FOLLOWUP\]\]/g, '')); clean = clean.slice(0, open); }
+    return { text: clean.trim(), followups: fu.slice(0, 4) };
   }
   function _renderFollowups(afterEl, fus) {
     if (!fus || !fus.length) return;
