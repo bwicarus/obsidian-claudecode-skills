@@ -4794,133 +4794,115 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
             _fig_save_abs(abs_path, data)
 
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
-    """算徽标锚点(归一 [bx,by]=徽标中心):把徽标贴在**图本身的角**,不飘到图外/缝里。
-    用 get_text words 减掉正文墨 → 图墨;搜索区从 AI bbox 扩张,但**被同页其它图的 bbox 夹住**
-    (不串进隔壁、不跨过图与图之间的空白缝);锚点取图墨 bbox 的角,**优先右上**、挑够空的一个,
-    而**不是全局最空**(全局最空会掉进图与图之间的缝——多图并排时的老 bug)。others=同页其它图 bbox。
-    纯 Python(无 numpy),渲染区 ~140px,几万像素 < ~10ms。失败回 None(前端退回启发)。"""
+    """算徽标锚点(归一 [bx,by]=徽标中心)。**纯几何,不碰像素**:
+    障碍 = 文字层的精确 word bbox(我们本来就有,准)∪ 图自己的 bbox ∪ 同页邻图 bbox;
+    在图**右上方**沿对角线找一个最大的全空白正方形(既无文字、又不压图),徽标 = 该方块**左下角**
+    (贴图右上、落图外的空白带)。挤死的图(右上放不下)→ 退到图顶边正上方。失败回 None。
+    (旧版用像素找图块,左边文字栏笔画被误当图墨、min/max 被离群点撑大 → 红块盖到正文,已弃。)"""
     try:
-        import fitz   # 本模块 fitz 都是函数内 import(非模块级),这里也得自取
         pr = page.rect
         W = float(pr.width); H = float(pr.height)
         if W <= 0 or H <= 0:
             return None
-        x0, y0, x1, y1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
-        if x1 <= x0 or y1 <= y0:
+        fx0, fy0, fx1, fy1 = [max(0.0, min(1.0, float(v))) for v in bbox[:4]]
+        if fx1 <= fx0 or fy1 <= fy0:
             return None
-        ex = 0.12   # AI bbox 不准 → 扩张搜索区(下面再被邻图夹回,所以可以给大点)
-        sx0 = max(0.0, x0 - ex); sy0 = max(0.0, y0 - ex)
-        sx1 = min(1.0, x1 + ex); sy1 = min(1.0, y1 + ex)
-        # 被同页邻图夹回:搜索区不许进别的图(多图并排时防锚点串到隔壁 / 掉进缝)
+        ngh = []
         for og in (others or []):
             try:
-                ox0, oy0, ox1, oy1 = [float(v) for v in og[:4]]
+                ngh.append([float(v) for v in og[:4]])
             except Exception:
-                continue
-            if ox0 >= x1 and ox0 < sx1: sx1 = min(sx1, (x1 + ox0) / 2.0)   # 邻图在右 → 夹右边
-            if ox1 <= x0 and ox1 > sx0: sx0 = max(sx0, (x0 + ox1) / 2.0)   # 邻图在左
-            if oy0 >= y1 and oy0 < sy1: sy1 = min(sy1, (y1 + oy0) / 2.0)   # 邻图在下
-            if oy1 <= y0 and oy1 > sy0: sy0 = max(sy0, (y0 + oy1) / 2.0)   # 邻图在上
-        rw_pt = (sx1 - sx0) * W; rh_pt = (sy1 - sy0) * H
-        if rw_pt <= 1 or rh_pt <= 1:
+                pass
+        # 工作区:图 bbox 外扩(给徽标留空间),夹在页边/邻图之外
+        ex = 0.12
+        rx0 = max(0.0, fx0 - ex); ry0 = max(0.0, fy0 - ex)
+        rx1 = min(1.0, fx1 + ex); ry1 = min(1.0, fy1 + ex)
+        for ox0, oy0, ox1, oy1 in ngh:
+            if ox0 >= fx1 and ox0 < rx1: rx1 = min(rx1, (fx1 + ox0) / 2.0)
+            if ox1 <= fx0 and ox1 > rx0: rx0 = max(rx0, (fx0 + ox1) / 2.0)
+            if oy0 >= fy1 and oy0 < ry1: ry1 = min(ry1, (fy1 + oy0) / 2.0)
+            if oy1 <= fy0 and oy1 > ry0: ry0 = max(ry0, (fy0 + oy1) / 2.0)
+        rw = rx1 - rx0; rh = ry1 - ry0
+        if rw <= 0 or rh <= 0:
             return None
-        z = 140.0 / max(rw_pt, rh_pt)
-        z = max(0.2, min(z, 2.0))
-        clip = fitz.Rect(sx0 * W, sy0 * H, sx1 * W, sy1 * H)
-        pix = page.get_pixmap(matrix=fitz.Matrix(z, z), clip=clip, colorspace=fitz.csGRAY, alpha=False)
-        pw, ph = pix.width, pix.height
-        if pw < 4 or ph < 4:
-            return None
-        samp = pix.samples           # 灰度,pw*ph 字节
-        textmask = bytearray(pw * ph)  # 1=正文文字处(不算图墨)
-        for w in page.get_text("words"):
-            ax0 = int((w[0] - sx0 * W) * z); ay0 = int((w[1] - sy0 * H) * z)
-            ax1 = int((w[2] - sx0 * W) * z); ay1 = int((w[3] - sy0 * H) * z)
-            ax0 = max(0, ax0); ay0 = max(0, ay0); ax1 = min(pw, ax1); ay1 = min(ph, ay1)
-            for yy in range(ay0, ay1):
-                base = yy * pw
-                for xx in range(ax0, ax1):
-                    textmask[base + xx] = 1
-        TH = 160
-        minx = pw; miny = ph; maxx = -1; maxy = -1; ink = 0
-        for yy in range(ph):
-            base = yy * pw
-            for xx in range(pw):
-                if samp[base + xx] < TH and not textmask[base + xx]:
-                    ink += 1
-                    if xx < minx: minx = xx
-                    if xx > maxx: maxx = xx
-                    if yy < miny: miny = yy
-                    if yy > maxy: maxy = yy
-        if ink < 30 or maxx < minx or maxy < miny:
-            return None
-        fcx = (minx + maxx) / 2.0; fcy = (miny + maxy) / 2.0   # 图中心(图墨)
-        # 占用网格 = 正文文字 ∪ **图的整块(图墨 bbox 填实)**。
-        # ⚠ 关键:不能只占"图墨像素"——点阵/线条图的笔画**之间**是空白,空白方块会从右上角顶点
-        # 顺着缝隙**钻进图内部**(徽标落到图里)。把整张图的包围盒当**实心障碍** → 空白方块只能停在
-        # 图**外面**(被页边/正文围出的空白带),其左下角落在图的外缘 → 徽标在图外。
-        dil = 2   # 图包围盒外扩几像素当障碍 → 徽标跟图之间留个小缝,明确"在图外面"
-        occ = bytearray(pw * ph)
-        for i in range(ph):
-            row = i * pw
-            in_y = (miny - dil <= i <= maxy + dil)
-            for j in range(pw):
-                if textmask[row + j] or (in_y and minx - dil <= j <= maxx + dil):
+        # 网格(工作区映射到 ~G 格,长边 G)
+        G = 130
+        gw = max(8, int(round(G * rw / max(rw, rh))))
+        gh = max(8, int(round(G * rh / max(rw, rh))))
+
+        def cj(nx): return int((nx - rx0) / rw * gw)   # 归一 x → 列
+        def ci(ny): return int((ny - ry0) / rh * gh)   # 归一 y → 行
+
+        occ = bytearray(gw * gh)
+
+        def fill(a0, b0, a1, b1):   # 归一矩形 → 占格
+            j0 = max(0, cj(a0)); j1 = min(gw, cj(a1) + 1)
+            i0 = max(0, ci(b0)); i1 = min(gh, ci(b1) + 1)
+            for i in range(i0, i1):
+                row = i * gw
+                for j in range(j0, j1):
                     occ[row + j] = 1
-        # 最大空白正方形 DP:sq[i][j] = 以(i,j)为**右上角**、向下+向左扩的最大全空白正方形边长。
-        sq = [0] * (pw * ph)
-        for i in range(ph - 1, -1, -1):
-            row = i * pw; below = (i + 1) * pw
-            for j in range(pw):
+
+        # 文字框(精确数据)= 障碍
+        for w in page.get_text("words"):
+            wx0, wy0, wx1, wy1 = w[0] / W, w[1] / H, w[2] / W, w[3] / H
+            if wx1 < rx0 or wx0 > rx1 or wy1 < ry0 or wy0 > ry1:
+                continue
+            fill(wx0, wy0, wx1, wy1)
+        fill(fx0, fy0, fx1, fy1)                     # 图自己 = 障碍(徽标要在图外)
+        for ox0, oy0, ox1, oy1 in ngh:               # 邻图 = 障碍
+            fill(ox0, oy0, ox1, oy1)
+
+        # 最大空白正方形 DP(以(i,j)为右上角向左下扩)
+        sq = [0] * (gw * gh)
+        for i in range(gh - 1, -1, -1):
+            row = i * gw; below = (i + 1) * gw
+            for j in range(gw):
                 if occ[row + j]:
                     sq[row + j] = 0
                 else:
-                    d = sq[below + j] if i + 1 < ph else 0
+                    d = sq[below + j] if i + 1 < gh else 0
                     l = sq[row + j - 1] if j - 1 >= 0 else 0
-                    dl = sq[below + j - 1] if (i + 1 < ph and j - 1 >= 0) else 0
+                    dl = sq[below + j - 1] if (i + 1 < gh and j - 1 >= 0) else 0
                     mm = d if d < l else l
                     if dl < mm: mm = dl
                     sq[row + j] = mm + 1
-        bs = max(6, min(int(min(pw, ph) * 0.12), 16))   # 徽标占位(grid 像素)
-        # 用户指定算法:**从框选区右上角出发、沿对角线**找空白正方形——即取右上角(i,j)**最靠近区域
-        # 右上顶点(0,pw-1)**(且放得下徽标 sq>=bs、在图心右上方)的那个方块;它的 sq 会一路向左下扩到
-        # 撞上图为止。徽标 = 该方块的**左下角**(朝图的角)→ 自然贴在图的右上边缘的空白里。
+        bs = max(3, int(min(gw, gh) * 0.14))         # 徽标占位(格)
+        fcj = cj((fx0 + fx1) / 2.0); fci = ci((fy0 + fy1) / 2.0)
+        # 从工作区右上角出发(对角线):取右上角最靠近区域右上顶点、放得下徽标、在图心右上方的空白方块
         best = None; best_rank = 1e18
-        for i in range(ph):
-            row = i * pw
-            for j in range(pw):
-                s = sq[row + j]
-                if s < bs:                   # 放不下徽标
+        for i in range(gh):
+            row = i * gw
+            for j in range(gw):
+                if sq[row + j] < bs:
                     continue
-                if j <= fcx or i >= fcy:     # 右上角须在图心的右上方
+                if j <= fcj or i >= fci:
                     continue
-                rank = i + (pw - 1 - j)      # 离区域右上顶点的反对角距离(越小越靠右上)
+                rank = i + (gw - 1 - j)
                 if rank < best_rank:
-                    best_rank = rank; best = (i, j, s)
+                    best_rank = rank; best = (i, j, sq[row + j])
+
+        def nx(jj): return rx0 + jj / gw * rw
+        def ny(ii): return ry0 + ii / gh * rh
+
         if best is not None:
             ai, aj, s = best
-            blx = aj - s + 1; bly = ai + s - 1            # 空白方块的左下角
-            bcx = blx + bs / 2.0; bcy = bly - bs / 2.0    # 徽标放左下角(内缩半个,刚好嵌进方块)
+            blj = aj - s + 1; bli = ai + s - 1           # 方块左下角(格)
+            bx = nx(blj + bs / 2.0); by = ny(bli - bs / 2.0)
         else:
-            # 图被三面挤死、右上方放不下整块空白方块 → **不塞进图里**;把徽标贴在图**顶边正上方、
-            # 靠右**(图外那条窄缝里),哪怕压一点上方正文,也比落图内部强。
-            cx0 = max(0, min(pw - bs, maxx - bs + 1))
-            cy0 = max(0, min(ph - bs, miny - bs))     # 图墨顶边之上 = 图外(上方)
-            bcx = cx0 + bs / 2.0; bcy = cy0 + bs / 2.0
-        bx = (sx0 * W + bcx / z) / W
-        by = (sy0 * H + bcy / z) / H
+            # 右上方放不下整块空白方块 → 贴图顶边正上方靠右(图外)
+            jj = max(0, min(gw - bs, cj(fx1) - bs)); ii = max(0, min(gh - bs, ci(fy0) - bs))
+            bx = nx(jj + bs / 2.0); by = ny(ii + bs / 2.0)
         if debug:
-            def gx(px): return round((sx0 * W + px / z) / W, 4)
-            def gy(py): return round((sy0 * H + py / z) / H, 4)
             sq_box = None
             if best is not None:
-                _ai, _aj, _s = best
-                sq_box = [gx(_aj - _s + 1), gy(_ai), gx(_aj + 1), gy(_ai + _s)]   # 找到的空白方块(归一)
+                ai, aj, s = best
+                sq_box = [round(nx(aj - s + 1), 4), round(ny(ai), 4), round(nx(aj + 1), 4), round(ny(ai + s), 4)]
             return {
                 "badge": [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)],
-                "fig_ink_bbox": [gx(minx), gy(miny), gx(maxx + 1), gy(maxy + 1)],   # 图墨包围盒=障碍块
-                "empty_square": sq_box,                                            # 空白方块(其左下角=徽标)
-                "clip": [round(sx0, 4), round(sy0, 4), round(sx1, 4), round(sy1, 4)],
+                "fig_block": [round(fx0, 4), round(fy0, 4), round(fx1, 4), round(fy1, 4)],   # 障碍=图 bbox
+                "empty_square": sq_box,
+                "region": [round(rx0, 4), round(ry0, 4), round(rx1, 4), round(ry1, 4)],
             }
         return [round(max(0.0, min(1.0, bx)), 4), round(max(0.0, min(1.0, by)), 4)]
     except Exception:
