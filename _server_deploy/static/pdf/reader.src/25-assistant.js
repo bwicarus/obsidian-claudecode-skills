@@ -454,6 +454,9 @@
           }
           else { var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text); try { _renderFollowups(el, _pf.followups); } catch (_) {} }
         });
+        // 进面板自动滚到最新(最下方):渲完滚一次,再隔 250ms 补一次(图/MathJax 异步撑高后位置会漂)
+        requestAnimationFrame(scrollDown);
+        setTimeout(scrollDown, 250);
       } else greet();
     }).catch(greet);
   }

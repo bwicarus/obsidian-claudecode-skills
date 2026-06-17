@@ -96,7 +96,7 @@ def _convo_clear(uid):
 
 
 # ──────────────────────── claude 进程(stream-json 多轮)────────────────────────
-def _spawn(effort="low"):
+def _spawn(effort="low", model=None):
     try:
         return subprocess.Popen(
             [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -104,11 +104,23 @@ def _spawn(effort="low"):
              # 沙盒:禁掉所有内建工具(本 agent 只走我们的 JSON 工具协议,从不调内建工具)→ 防 prompt injection
              # 诱导模型用 Bash/Read 读 .env(API key)/改脚本/读别人的 convo。user message 是不可信输入。
              "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-             "--verbose", "--model", _AGENT_MODEL, "--effort", effort],   # effort 按问题分档:快查/导航=low(秒回)、解释/推导=high(深思考)
+             "--verbose", "--model", (model or _AGENT_MODEL), "--effort", effort],   # 编排器=sonnet/分档;生成步工具可传 opus+high
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1, cwd=str(CLAUDE_DIR))
     except Exception:
         return None
+
+
+def _deep_ask(prompt, model="opus", effort="high", timeout=150):
+    """一次性深度生成(给"生成步"工具用:总结/深度解释等真正需要强模型的活)。
+    编排器保持快模型,这里现起一个 opus+high 进程出高质量结果再退。返回文本或 None。"""
+    p = _spawn(effort=effort, model=model)
+    if not p:
+        return None
+    try:
+        return _send(p, prompt, timeout=timeout)
+    finally:
+        _kill(p)
 
 
 def _kill(p):
@@ -728,9 +740,21 @@ def _t_summarize_section(args, ctx):
             doc.close()
         if not parts:
             return {"error": "这一节没取到文字(可能纯扫描未OCR,可改用 see_page 逐页看)"}
-        return {"section_title": title, "page_range": [start, end], "truncated": total > 9000,
-                "text": "\n\n".join(parts)[:9000],
-                "note": "这是当前页所在章节的正文,请总结成:核心要点 / 关键定义 / 重要公式 / 易错点。引用具体内容时标注来源页(第N页)。"}
+        section_text = "\n\n".join(parts)[:9000]
+        # 生成步:章节总结是真正需要强模型的活 → 现起强模型出高质量总结(编排器保持快模型)。
+        # 模型跟用户偏好:质量/平衡→opus,速度偏好→sonnet+high(更快)
+        _dm = "opus" if _pref_load(ctx.get("_uid")) >= 0 else _AGENT_MODEL
+        gen = _deep_ask(
+            f"下面是《{ctx.get('book_name', '')}》「{title}」(第{start}-{end}页)的正文。"
+            "请用中文给出**结构化总结**:① 核心要点(分条)② 关键定义 ③ 重要公式(用 $...$)④ 易错点。"
+            "引用具体内容时句末标来源页「(第N页)」。简洁但完整,别遗漏主线。\n\n正文:\n" + section_text,
+            model=_dm, effort="high")
+        if gen and gen.strip():
+            return {"section_title": title, "page_range": [start, end], "summary": gen.strip(), "_gen_model": _dm + "·high",
+                    "note": "这是 opus 深度总结好的章节内容,**直接原样转达给用户**(可微调排版,别再大改/精简),保留来源页标注。给最终回答时按规则附追问。"}
+        # opus 失败 → 退回把原文交给编排器自己总结
+        return {"section_title": title, "page_range": [start, end], "truncated": total > 9000, "text": section_text,
+                "note": "(深度总结暂不可用)这是该章节正文,请你总结成:核心要点/关键定义/重要公式/易错点,标来源页。"}
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -931,21 +955,57 @@ def _parse_tool(raw):
         return None
 
 
-def _effort_for(message, ctx):
-    """按问题选思考深度:解释/推导/比较/总结这类需要深思考 → high(慢但深);快查/导航/翻译/制卡这类 → low(秒回)。
-    钉了焦点公式/段落、或空输入(=就问这个选中)也当深思考。"""
+# 每用户「质量↔速度」偏好等级(感叹号反馈调它):>0 偏质量(更多问题走深档/总结用 opus)、<0 偏速度。
+_PREF_PATH = CLAUDE_DIR / "state" / "assistant-prefs.json"
+_pref_lock = threading.Lock()
+
+
+def _pref_load(uid):
+    try:
+        return int((json.loads(_PREF_PATH.read_text("utf-8")) or {}).get(str(uid), 0))
+    except Exception:
+        return 0
+
+
+def _pref_bump(uid, delta):
+    with _pref_lock:
+        d = {}
+        try:
+            if _PREF_PATH.exists():
+                d = json.loads(_PREF_PATH.read_text("utf-8")) or {}
+        except Exception:
+            d = {}
+        lvl = max(-2, min(2, int(d.get(str(uid), 0)) + delta))
+        d[str(uid)] = lvl
+        try:
+            _PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _PREF_PATH.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
+        return lvl
+
+
+def _effort_for(message, ctx, uid=None):
+    """按问题选思考深度。导航/工具动作恒 low(秒回);解释/推导/总结 + 钉了焦点 → high(深);
+    其余中间地带跟用户『质量↔速度』偏好(质量偏好→深、速度偏好→快)。"""
     import re
     m = message or ""
-    if isinstance(ctx, dict) and ctx.get("focus_sel"):
+    DEEP = (r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|"
+            r"区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证")
+    QUICK = r"跳到|翻到|打开第|第\s*\d+\s*页|高亮|制卡|做成卡|加生词|生词本|翻译这|译一下|查一下.{0,4}页"
+    if re.search(QUICK, m) and not re.search(DEEP, m):
+        return "low"                                  # 导航/写动作:恒快(即便质量偏好也别拖慢)
+    if (isinstance(ctx, dict) and ctx.get("focus_sel")) or re.search(DEEP, m):
         return "high"
-    if re.search(r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证|为什么会|怎么理解", m):
-        return "high"
-    return "low"
+    lvl = _pref_load(uid) if uid is not None else 0
+    return "high" if lvl >= 1 else "low"              # 中间地带:看偏好
 
 
-def _agent_run(message, ctx, history):
-    """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|error。"""
-    p = _take_proc(_effort_for(message, ctx))
+def _agent_run(message, ctx, history, force_effort=None):
+    """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|trace|error。"""
+    eff = force_effort if force_effort in ("low", "medium", "high") else _effort_for(message, ctx, (ctx or {}).get("_uid"))
+    trace = [{"label": "编排+回答", "model": f"{_AGENT_MODEL}·{eff}"}]   # 编排器(快/分档);生成步工具会各自追加它们用的强模型
+    p = _take_proc(eff)
     if not p:
         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
         return
@@ -996,6 +1056,8 @@ def _agent_run(message, ctx, history):
                 except Exception as e:
                     res = {"error": str(e)[:160]}
                 vision = res.pop("_vision", None) if isinstance(res, dict) else None   # 图片喂回大脑(sonnet 多模态)
+                _gm = res.pop("_gen_model", None) if isinstance(res, dict) else None   # 生成步工具用的强模型(如 summarize=opus)
+                trace.append({"label": _tool_label(name, targs), "model": _gm or "—"})   # 轨迹:这步用了什么(— = 取数据,无 AI 生成)
                 if isinstance(res, dict) and res.get("client_action"):
                     client_actions.append(res.pop("client_action"))
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
@@ -1019,6 +1081,7 @@ def _agent_run(message, ctx, history):
             yield {"event": "answer", "data": "(想了太多步,先到这吧)"}
         if client_actions:
             yield {"event": "actions", "data": client_actions}
+        yield {"event": "trace", "data": trace}   # 调用轨迹(感叹号里展示:经过了哪些步、谁用了强模型)
     finally:
         _kill(p)
         threading.Thread(target=_warm_respawn, daemon=True).start()
@@ -1034,6 +1097,7 @@ def assistant_chat():
     if not message:
         return jsonify({"ok": False, "error": "empty"}), 400
     uid = session["user_id"]
+    force_effort = body.get("force_effort") if body.get("force_effort") in ("low", "medium", "high") else None   # "重答更强"=high
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
     ctx["_uid"] = uid   # 写操作(制卡/笔记/高亮)记 owner=本用户 → 撤销只能撤自己的(防越权)
@@ -1052,7 +1116,7 @@ def assistant_chat():
     def gen():
         final = ['']
         try:
-            for ev in _agent_run(message, ctx, history):
+            for ev in _agent_run(message, ctx, history, force_effort=force_effort):
                 if ev['event'] == 'answer':
                     final[0] = ev['data']
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
@@ -1093,6 +1157,23 @@ def assistant_undo():
     undo_id = (request.get_json(silent=True) or {}).get("id")
     import voice
     return jsonify(voice._undo_do(undo_id, owner=session["user_id"]))   # owner 校验:只能撤自己的(防猜 id 删别人的)
+
+
+@bp.route("/feedback", methods=["POST"])
+def assistant_feedback():
+    """感叹号反馈:slow→偏好往速度推一格、quality→往质量推一格。影响以后的 effort 分档 + 生成步模型。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    kind = (request.get_json(silent=True) or {}).get("kind")
+    uid = session["user_id"]
+    if kind == "slow":
+        lvl = _pref_bump(uid, -1)
+    elif kind == "quality":
+        lvl = _pref_bump(uid, +1)
+    else:
+        return jsonify({"ok": False, "error": "bad kind"}), 400
+    pref = {-2: "更偏速度", -1: "偏速度", 0: "平衡", 1: "偏质量", 2: "更偏质量"}.get(lvl, "平衡")
+    return jsonify({"ok": True, "level": lvl, "pref": pref})
 
 
 @bp.route("/prewarm", methods=["POST"])
