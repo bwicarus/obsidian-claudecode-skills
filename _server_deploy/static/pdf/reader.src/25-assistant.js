@@ -162,9 +162,34 @@
     afterEl.appendChild(box); scrollDown();
   }
 
-  // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(各步用的模型),再给两个回报动作 ──
-  //  · 🎯 答得不够好 → 记一次「偏质量」(长期把同类问题路由到更强模型)+ 立刻用 high effort 重答本题
+  // ── 每条回答的「!」反馈:点开看这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作 ──
+  //  · 🎯 答得不够好 → 沿「模型梯子」升一级重答本题(同时记一次「偏质量」,长期路由更强)
   //  · 🐢 太慢了    → 记一次「偏速度」(长期更倾向快模型)
+  // 模型梯子(能力**严格递增**):每按一次「不够好」往上爬一级,顶端 opus·max。
+  //  (claude effort 枚举 = low/medium/high/xhigh/max,**没有 ultra**;只调 effort 不换模型 = 早先的 bug:sonnet·high 按了纹丝不动)
+  //  刻意不收的两类:① opus·low —— 实测质量 ≈ sonnet·深(横向不是向上),放进来会让"更强"按了反而更慢不更好;
+  //                  ② haiku —— 比 sonnet 弱,永远不是"更强";它只属于反方向(🐢 太慢→未来路由偏快),不进这个向上梯子。
+  var _ASST_LADDER = [
+    { model: 'sonnet', effort: 'low',   label: 'sonnet·快' },
+    { model: 'sonnet', effort: 'high',  label: 'sonnet·深' },
+    { model: 'opus',   effort: 'high',  label: 'opus·深' },
+    { model: 'opus',   effort: 'xhigh', label: 'opus·更深' },
+    { model: 'opus',   effort: 'max',   label: 'opus·max' }
+  ];
+  function _curTier(trace) {   // 从 trace[0].model(如 "sonnet·high")解析本次编排器档位
+    try {
+      var mm = String((trace && trace[0] && trace[0].model) || '').match(/([a-z]+)[^a-z]+([a-z]+)/i);
+      if (mm) return { model: mm[1].toLowerCase(), effort: mm[2].toLowerCase() };
+    } catch (_) {}
+    return null;
+  }
+  function _nextTier(cur) {   // 比 cur 高一级的档;null=已在顶;cur 不在梯子(历史回答无 trace)→ 默认直升 opus·深
+    var i = -1;
+    for (var k = 0; cur && k < _ASST_LADDER.length; k++)
+      if (_ASST_LADDER[k].model === cur.model && _ASST_LADDER[k].effort === cur.effort) { i = k; break; }
+    if (i < 0) return { model: 'opus', effort: 'high', label: 'opus·深' };
+    return (i + 1 < _ASST_LADDER.length) ? _ASST_LADDER[i + 1] : null;
+  }
   var _fbOpenPop = null;
   function _fbClosePop() { if (_fbOpenPop) { try { _fbOpenPop.remove(); } catch (_) {} _fbOpenPop = null; } }
   document.addEventListener('click', function (e) {   // 点弹窗外任意处 → 收起
@@ -187,10 +212,20 @@
       var m = document.createElement('span'); m.className = 'afp-m'; m.textContent = st.model || '—';
       row.appendChild(l); row.appendChild(m); pop.appendChild(row);
     });
+    var cur = _curTier(trace);
+    var nxt = _nextTier(cur);   // null = 已在梯子顶(opus·max)
     var acts = document.createElement('div'); acts.className = 'afp-acts';
     var bQ = document.createElement('button'); bQ.className = 'afp-act afp-q';
-    bQ.textContent = question ? '🎯 答得不够好 · 用更强的重答' : '🎯 以后这类问题用更强的';
-    bQ.addEventListener('click', function () { close(); _fb('quality'); if (question && !streaming) send(question, { forceEffort: 'high' }); });
+    if (!question) bQ.textContent = '🎯 以后这类问题用更强的';
+    else if (nxt) bQ.textContent = '🎯 不够好 · 升到「' + nxt.label + '」重答';
+    else bQ.textContent = '🎯 已是最强 · 用 opus·max 再答一次';
+    bQ.addEventListener('click', function () {
+      close(); _fb('quality');
+      if (question && !streaming) {
+        var tgt = nxt || { model: 'opus', effort: 'max' };
+        send(question, { forceModel: tgt.model, forceEffort: tgt.effort });
+      }
+    });
     var bS = document.createElement('button'); bS.className = 'afp-act afp-s'; bS.textContent = '🐢 太慢了 · 以后更快';
     bS.addEventListener('click', function () { close(); _fb('slow'); });
     acts.appendChild(bQ); acts.appendChild(bS); pop.appendChild(acts);
@@ -331,7 +366,7 @@
     try {
       var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, context: sentCtx, force_effort: (opts && opts.forceEffort) || undefined }),
+        body: JSON.stringify({ message: text, context: sentCtx, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }),
         signal: _abort ? _abort.signal : undefined,
       });
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';

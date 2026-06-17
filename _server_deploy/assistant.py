@@ -224,11 +224,12 @@ def _warm_reap():
     _kill(p)
 
 
-def _take_proc(effort="low"):
-    """取进程。low(快查/导航)→ 用预热好的 low 进程(秒回);high(解释/推导等深思考)→ 现起一个 high 进程
-    (冷启动~几秒可接受,这类深答本来就慢)。预热池始终维持 low,给最常见的快路径。"""
-    if effort != "low":
-        return _spawn(effort)
+def _take_proc(effort="low", model=None):
+    """取进程。sonnet·low(快查/导航)→ 用预热好的 low 进程(秒回);其余(深 effort 或升到 opus 等更强模型,
+    如感叹号「更强重答」沿梯子升档)→ 现起对应 模型×effort 的进程(冷启动~几秒可接受,深答本来就慢)。
+    预热池只维持 sonnet·low——给最常见的快路径。"""
+    if effort != "low" or (model and model != _AGENT_MODEL):
+        return _spawn(effort, model=model)
     global _warm_p
     with _warm_lock:
         p, _warm_p = _warm_p, None
@@ -1004,11 +1005,15 @@ def _effort_for(message, ctx, uid=None):
     return "high" if lvl >= 1 else "low"              # 中间地带:看偏好
 
 
-def _agent_run(message, ctx, history, force_effort=None):
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")   # claude CLI 合法 effort 枚举(无 "ultra")
+
+
+def _agent_run(message, ctx, history, force_effort=None, force_model=None):
     """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|trace|error。"""
-    eff = force_effort if force_effort in ("low", "medium", "high") else _effort_for(message, ctx, (ctx or {}).get("_uid"))
-    trace = [{"label": "编排+回答", "model": f"{_AGENT_MODEL}·{eff}"}]   # 编排器(快/分档);生成步工具会各自追加它们用的强模型
-    p = _take_proc(eff)
+    eff = force_effort if force_effort in _EFFORTS else _effort_for(message, ctx, (ctx or {}).get("_uid"))
+    mdl = force_model if force_model in ("sonnet", "opus") else _AGENT_MODEL   # 感叹号「更强重答」沿梯子升模型
+    trace = [{"label": "编排+回答", "model": f"{mdl}·{eff}"}]   # 编排器(默认 sonnet/分档;升级时可到 opus·max);生成步工具各自追加强模型
+    p = _take_proc(eff, model=mdl)
     if not p:
         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
         return
@@ -1020,13 +1025,16 @@ def _agent_run(message, ctx, history, force_effort=None):
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
         _repair_tries = 0
-        for step in range(40):   # 步数放很高(40):真正的护栏是下面的总超时(200s),步数只当 runaway 兜底,别因步数砍掉复杂多工具任务
-            if time.time() - _t_start > 240:   # 总超时:防卡死的 claude 占住 gunicorn worker
+        _heavy = eff in ("xhigh", "max")   # 高档位(尤其 opus·max)思考久 → 放宽单轮/总超时,否则深答被腰斩成"没响应"
+        _round_to = 180.0 if _heavy else 90.0
+        _total_to = 320.0 if _heavy else 240.0
+        for step in range(40):   # 步数放很高(40):真正的护栏是下面的总超时,步数只当 runaway 兜底,别因步数砍掉复杂多工具任务
+            if time.time() - _t_start > _total_to:   # 总超时:防卡死的 claude 占住 gunicorn worker
                 yield {"event": "answer", "data": "(处理用时太久,先到这——可以再问我一次,或换个更具体的问法)"}
                 break
             raw = None
             _last_emit = 0.0
-            for kind, val in _send_stream(p, content):
+            for kind, val in _send_stream(p, content, timeout=_round_to):
                 if kind == "delta":
                     # tool 调用是裸 JSON(以 { 开头)→ 不流式;最终回答是文字 → 逐字吐 answer(前端边接边渲染)
                     if val and not val.lstrip().startswith("{"):
@@ -1100,7 +1108,8 @@ def assistant_chat():
     if not message:
         return jsonify({"ok": False, "error": "empty"}), 400
     uid = session["user_id"]
-    force_effort = body.get("force_effort") if body.get("force_effort") in ("low", "medium", "high") else None   # "重答更强"=high
+    force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None   # 感叹号「更强重答」沿梯子升档
+    force_model = body.get("force_model") if body.get("force_model") in ("sonnet", "opus") else None
     ctx = body.get("context") or {}
     ctx["_base"] = request.host_url.rstrip("/")
     ctx["_uid"] = uid   # 写操作(制卡/笔记/高亮)记 owner=本用户 → 撤销只能撤自己的(防越权)
@@ -1119,7 +1128,7 @@ def assistant_chat():
     def gen():
         final = ['']
         try:
-            for ev in _agent_run(message, ctx, history, force_effort=force_effort):
+            for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model):
                 if ev['event'] == 'answer':
                     final[0] = ev['data']
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
