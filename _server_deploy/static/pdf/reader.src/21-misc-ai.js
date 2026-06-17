@@ -1,15 +1,25 @@
 function md(s) {
+  s = String(s == null ? '' : s);
   if (window.marked && marked.parse) {
     try {
-      // CJK 与 markdown 强调标记紧贴时 marked 不识别(如 接**-ing**) → 之间插零宽空格，
-      // 让 ** / * / ` 有空白边界。不动 $（留给 MathJax 渲染行内/块公式）
-      const t = String(s == null ? '' : s)
+      // ① 先把数学公式整段抠出来换占位符再跑 marked,否则 marked 会把 $P(A_1)P(A_2)$ 里的
+      //    _ 当斜体、* 当强调、\ 当转义拆坏 → 即便模型写了 $...$ 也渲染失败(本 bug 根因之一)。
+      //    占位符 @@MJX{n}@@ 纯字母数字,marked 原样保留;渲染后再换回原公式交给 MathJax。
+      const math = [];
+      const hold = (m) => '@@MJX' + (math.push(m) - 1) + '@@';
+      // ② CJK 与 markdown 强调标记紧贴时 marked 不识别(如 接**-ing**) → 插零宽空格给 ** / * / ` 留边界
+      const t = s
+        .replace(/\$\$[\s\S]+?\$\$/g, hold)               // 块级 $$..$$
+        .replace(/\\\[[\s\S]+?\\\]/g, hold)               // 块级 \[..\]
+        .replace(/\$(?!\s)(?:\\\$|[^$\n])+?\$/g, hold)     // 行内 $..$(去掉 $$ 后剩的;$ 后须非空白,避开 "$ 5")
+        .replace(/\\\([\s\S]+?\\\)/g, hold)                // 行内 \(..\)
         .replace(/([一-鿿　-〿＀-￯])([*`])/g, '$1\u200b$2')
         .replace(/([*`])([一-鿿　-〿＀-￯])/g, '$1\u200b$2');
-      return marked.parse(t);
+      let html = marked.parse(t);
+      return html.replace(/@@MJX(\d+)@@/g, (_, i) => (math[+i] != null ? math[+i] : ''));   // ③ 还原公式
     } catch(_) {}
   }
-  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
 
 // ── 查询结果历史（per-book localStorage；openResult/closeResult 快照，📜 历史 tab 回看）──
