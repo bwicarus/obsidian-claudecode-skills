@@ -951,6 +951,13 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 
 **踩坑**:① `_sys_prompt` 自检别拿静态 prompt 里也出现的词(「用户当前选中」「选中所在句」)当断言依据——它们在固定指令文本里也有;用动态专属串(`用户当前选中:「` 带冒号引号、`(已给好的上下文`)。② 额度查询若内联进 `/chat` 同步跑会给首条消息加最多几秒延迟(`fetch_quota` 网络调用);改成后台线程刷快照、请求端只读 → 零延迟。③ 额度护栏查询本身**零 token**(走 OAuth usage 端点),不烧配额。
 
+### 39b. AI 回答公式不渲染:两个叠加根因(2026-06-18,`reader-fix-76`,commit 6726db8)
+
+**现象**:助手/解释/翻译等 AI 回答里的数学不显示成公式,而是裸 `$...$` 文本或乱码上标。**纵深修复(两端都补)**:
+- **根因① 模型侧**:`assistant.py` `_sys_prompt`(`能回答用户时` 段后)原**没要求数学用 LaTeX、没禁反引号** → 在「用简洁中文口语聊天」语气下模型常把公式写成纯文本 / 反引号 `` `x^2` `` / Unicode 上标(x²)→ MathJax 无从渲染。加硬规则:数学一律 `$...$`/`$$..$$`;**禁反引号包数学**(会被渲成 `<code>`,而 MathJax 配置 `skipHtmlTags` 含 `code` → 跳过)、**禁 Unicode 上下标**。
+- **根因② 渲染侧**:`md()`(`21-misc-ai.js`,全局函数,被 25-assistant `renderMd` / dict / grammar / draft 共用)把整串丢给 `marked.parse`,**marked 会把 `$P(A_1)P(A_2)$` 里的 `_` 当斜体、`*` 当强调、`\` 当转义拆坏** → 即便模型写对了 `$...$` 也渲染失败。改为**占位符法**:先把 `$$..$$`/`\[..\]`/`$..$`/`\(..\)` 整段抠成 `@@MJX{n}@@`(纯字母数字,marked 原样保留),marked 跑完再换回原公式交给 MathJax。行内 `$..$` 正则用 `\$(?!\s)(?:\\\$|[^$\n])+?\$`($ 后须非空白以避开「$ 5」、`\$` 转义豁免)。
+- **要点**:此修复对**历史回答 retroactive**——任何过去含 `$...$` 但被 marked 拆坏的答案,重载历史即正确渲染。单测验证:数学内 `_` 受保护、数学外真 markdown `a_i_b` 仍正常变斜体。
+
 ### 40. 扫描书插图徽标:图区 📷 徽标 + AI bbox 像素收紧(2026-06-17,`reader-fix-50`,commit d38b762)
 
 **图徽标系统**(`reader.src/26-figures.js` + `pdf_reader.py` 的 `_fig_*`):扫描书插图无文字层,靠 AI(`describe_figures.py`,sonnet)**懒描述**——每页首次进视口 `GET /pdf/api/page-figures?file=&page=` 触发后台描述本页+预取后 2 页,结果写 sidecar `state/pdf-figures/<book-sha>.json`(`<book-sha>=_book_sha(abspath)`,跟 describe_figures 互通);每图 `{page,caption,bbox(归一),desc,fbox,badge}`。前端在图的右上外侧画一枚磨砂玻璃 📷 圆徽标(`.fig-badge`,`renderFiguresOnPage` 由 08-charlayer 建完字符层后调,模式无关),点开 `.fig-pop` 浮层看 caption+desc(Markdown+MathJax)。徽标锚点 `badge=[bx,by]` 服务端按像素算好持久化 → **跨加载位置一致**。
