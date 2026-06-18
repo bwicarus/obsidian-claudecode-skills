@@ -423,7 +423,31 @@
     } catch (_) {}
   };
 
-  var _abort = null;
+  var _abort = null, _recovering = false, _lastProgressTs = 0;
+  // 切后台→回前台:iOS 常把进行中的 SSE fetch 掐死/僵死 → 回来报 "Load failed" 或永远卡在「思考中」。
+  // 回前台后给 3s 看有无新进度,没有就主动 abort 这条死流 → 走「从服务端历史恢复本轮回答」(服务端 finally 已落库)。
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible' || !streaming) return;
+    setTimeout(function () {
+      if (streaming && !_recovering && (Date.now() - _lastProgressTs > 3000)) {
+        _recovering = true; try { _abort && _abort.abort(); } catch (_) {}
+      }
+    }, 3000);
+  });
+  // 流断/掐死后:服务端早把用户消息落了库、并在 finally 落了助手回答(可能完整也可能到断点)→ 拉回来补上
+  async function _recoverFromHistory(tries) {
+    tries = tries || 0;
+    try {
+      var r = await fetch('/api/assistant/history');
+      var d = await r.json();
+      if (d && d.ok && d.messages && d.messages.length) {
+        var last = d.messages[d.messages.length - 1];
+        if (last && last.role === 'assistant' && last.content) return last;
+        if (tries < 2) { await new Promise(function (rs) { setTimeout(rs, 800); }); return _recoverFromHistory(tries + 1); }   // 服务端 finally 还没落库 → 等等再试
+      }
+    } catch (_) {}
+    return null;
+  }
   function _setSendMode(stop) {   // 流式中:发送键→停止键(红 ■);否则发送(➤)
     if (stop) { sendBtn.classList.add('stop'); sendBtn.textContent = '■'; sendBtn.title = '停止'; }
     else { sendBtn.classList.remove('stop'); sendBtn.textContent = '➤'; sendBtn.title = '发送'; }
@@ -449,8 +473,9 @@
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
-    var answer = '', acts = [], aborted = false, traceData = null;
+    var answer = '', acts = [], aborted = false, traceData = null, netFail = false, _recTs = 0;
     _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    _recovering = false; _lastProgressTs = Date.now();
     try {
       var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -460,6 +485,7 @@
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
       while (true) {
         var rd = await reader.read(); if (rd.done) break;
+        _lastProgressTs = Date.now();   // 有数据进来 = 流活着(回前台看门狗据此判断是否掐死重连)
         buf += dec.decode(rd.value, { stream: true });
         var idx;
         while ((idx = buf.indexOf('\n\n')) >= 0) {
@@ -481,17 +507,27 @@
         }
       }
     } catch (e) {
-      if (e && e.name === 'AbortError') aborted = true;             // 用户点停止 → 不报错,保留已生成的部分
-      else answer = answer || ('⚠️ ' + (e && e.message || '出错了'));
+      if (e && e.name === 'AbortError') {
+        if (_recovering) netFail = true;      // 我们(看门狗)主动掐死僵死流 → 当网络中断,走恢复
+        else aborted = true;                  // 用户点停止 → 不报错,保留已生成的部分
+      } else netFail = true;                   // Load failed / TypeError / 后台掐网
+    }
+    // 后台/掉线中断:服务端 finally 已把本轮回答落库 → 拉历史补回(常比前端拿到的更全)
+    if (netFail) {
+      try { aMsg.innerHTML = '<span class="asst-tool">连接断了,正在恢复…</span>'; } catch (_) {}
+      var rec = await _recoverFromHistory();
+      var got = _splitFollowups(answer).text || '';
+      if (rec && rec.content && rec.content.length >= got.length) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
+      else if (!got) answer = '⚠️ 切到后台时连接断了。下拉刷新或重问一次都行(你的提问已存,不会丢)。';
     }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
     var pf = _splitFollowups(answer);
     if (pf.text) renderMd(aMsg, pf.text, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
-    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
+    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
     runActions(acts);
-    streaming = false; _abort = null; _setSendMode(false);
+    streaming = false; _abort = null; _recovering = false; _setSendMode(false);
   }
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
