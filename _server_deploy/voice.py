@@ -658,6 +658,34 @@ import urllib.request as _ur
 _undo_log = []
 _undo_lock = threading.Lock()
 _undo_seq = 0
+_UNDO_FILE = CLAUDE_DIR / "state" / "assistant-undo-log.json"
+
+
+def _undo_save():
+    """把撤销记录落盘:webapp 重启(部署/凌晨 daily/崩溃)后『撤销』仍有效。
+    卡/笔记的 id·路径在 Anki/vault 里本就是持久的,内存里丢的只是这张『记得删哪几张』的映射表,落盘即补上。
+    须在 _undo_lock 内调(读 _undo_log/_undo_seq)。"""
+    try:
+        _UNDO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _UNDO_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"seq": _undo_seq, "log": _undo_log[-80:]}, ensure_ascii=False), "utf-8")
+        tmp.replace(_UNDO_FILE)   # 原子替换,防写一半被读到
+    except Exception:
+        pass
+
+
+def _undo_load():
+    """进程启动时从盘里恢复撤销记录 + seq(seq 续上,旧 undo_id 仍能对上号)。"""
+    global _undo_seq, _undo_log
+    try:
+        d = json.loads(_UNDO_FILE.read_text("utf-8"))
+        _undo_log = d.get("log") or []
+        _undo_seq = int(d.get("seq") or 0)
+    except Exception:
+        pass
+
+
+_undo_load()
 
 
 def _anki_req(action, params=None):
@@ -676,6 +704,7 @@ def _undo_record(kind, label, handle, owner=None):
                           "owner": owner, "ts": time.time(), "undone": False})   # owner=用户隔离,防越权撤别人的写操作
         if len(_undo_log) > 80:
             del _undo_log[:-80]
+        _undo_save()   # 落盘:重启后仍能按 note_ids 删卡
     return uid
 
 
@@ -698,6 +727,7 @@ def _undo_do(uid=None, owner=None):
         if not tgt:
             return {"ok": False, "error": "没有可撤销的操作了"}
         tgt["undone"] = True
+        _undo_save()   # 先记下『已撤销』(防删卡途中崩溃后重启又被当可撤销重删)
         kind, handle, label = tgt["kind"], tgt["handle"], tgt["label"]
     try:
         if kind in ("anki", "vocab"):
@@ -727,6 +757,7 @@ def _undo_do(uid=None, owner=None):
     except Exception as e:
         with _undo_lock:
             tgt["undone"] = False   # 撤销失败 → 恢复可撤销
+            _undo_save()
         return {"ok": False, "error": str(e)[:120]}
 
 
