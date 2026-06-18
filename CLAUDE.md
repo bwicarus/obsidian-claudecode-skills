@@ -83,6 +83,7 @@
 - `references/google-cloud-apis.md` — GCP API 集成（Vision/YouTube/STT/Gemini）+ ¥47867 Free Trial 赠金管理、双 API key 隔离（`AIzaSy*` GCP 服务 vs `AQ.Ab*` Gemini service-account 绑定）、**计费分流大坑**（Gemini API 走 AI Studio 独立 billing 跟 GCP 赠金不通）、本地配额计数器（`scripts/google_api_quota.py` + SQLite `state/google_api_quota.db`）、YouTube 每日 10k units 硬上限（耗尽走本地 reorder）、PT 重置时区、key regenerate 流程、**Cloud Translation API**（PDF 句子翻译 `_gtranslate`、`API_KEY_SERVICE_BLOCKED` 放行步骤+刚放行传播抖动、翻译质量评审结论 Google 3.9/4.5<AI、auto 链 `gtranslate→deepl→ai→mymemory`、CLI 冷启动~5s/热进程实验不值得的结论）
 - `references/claude-code-quota-api.md` — Claude Code 额度查询 API（/claude-quota skill 的实现参考：端点 / 认证 header / 响应格式 + 共享模块 `scripts/lib/claude_quota.py`）
 - `references/book-ocr-pipeline.md` — 日文扫描 PDF 双 OCR 流水线：mokuro manga-ocr + Google Vision 两条路径、`state/mokuro-ocr/<sha>/` 断点续传、不可见文字层 embed、book-ocr / book-ocr-watchdog systemd
+- `references/ai-assistant-webapp-patterns.md` — **「网页里集成 AI 助手」可迁移架构要点**(独立蓝本,可喂给做别的 AI 网页的人/AI):⭐生成与请求解耦(detached worker + rid 重连,切后台不丢)/ 全站 fetch 韧性 / 对话服务端持久化 / Markdown×MathJax 占位符共存 / 模型分档+反馈梯子(Pareto)/ agentic 工具循环(沙盒+顽强JSON)/ 上下文只在助手开着时收集 / 后台长任务+进度 / 额度护栏 / iOS 坑 / 系统prompt清单 + 落地 checklist
 - `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv，`spacy_parse.py --server` 常驻模式免每次加载模型，pdf_reader 经 `_spacy_worker_request` 锁串行+超时自愈调用）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析；spaCy 结果存 sentence-only 缓存键、grammar-stream 有回放缓存）
 
 **脚本**
