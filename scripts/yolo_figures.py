@@ -179,20 +179,42 @@ def process_sidecar(path, dry=False, force=False):
     formulas_all = []
     new_figs = list(no_bbox)
     nyolo = ngrp = nsingle = nfa = 0
-    for pn in sorted(by_page):
+    # 图框出界的页(罕见)原样保留,从 by_page 摘出去
+    for pn in list(by_page):
         if pn < 1 or pn > doc.page_count:
-            new_figs.extend(by_page[pn]); continue
+            new_figs.extend(by_page.pop(pn))
+    # ⚠ 公式检测**跑全书每一页**:原来只在"有 AI 图注的页"上跑 YOLO → 无图的纯公式页永远检测不到
+    #   = 整本绝大多数公式被漏(费曼全本 588 页只识出 21 个,全在第 7 章有图的页)。
+    #   图/图组重排仍只在有图注的页做(regroup 依赖 AI figures);公式框则全页扫。
+    fig_pages = set(by_page)
+    for pn in range(1, doc.page_count + 1):
         det = detect_page(doc[pn - 1])
-        nyolo += len(det["fig"])
-        entries = regroup_page(pn, by_page[pn], det["fig"])
-        for e in entries:
-            if e.get("group"): ngrp += 1
-            elif e.get("fsrc") == "yolo": nsingle += 1
-            else: nfa += 1
-        new_figs.extend(entries)
+        if pn in fig_pages:
+            nyolo += len(det["fig"])
+            entries = regroup_page(pn, by_page[pn], det["fig"])
+            for e in entries:
+                if e.get("group"): ngrp += 1
+                elif e.get("fsrc") == "yolo": nsingle += 1
+                else: nfa += 1
+            new_figs.extend(entries)
         for (fb, fc) in det["formula"]:
             formulas_all.append({"page": pn, "bbox": fb, "conf": fc, "latex": None})
     doc.close()
+    # 保留旧 latex:重跑会重建 formulas 列表(全 latex=None)→ 会抹掉已 OCR/Claude 校正过的结果。
+    # 新框跟旧框(同页 + IoU≥0.6)匹配上 → 搬运旧 latex/engine,免得重测+重校正。
+    old_fmls = data.get("formulas") or []
+    for nf in formulas_all:
+        best, bi = 0.0, -1
+        for j, of in enumerate(old_fmls):
+            if of.get("page") != nf["page"] or not (of.get("latex") or "").strip():
+                continue
+            ov = _iou(nf["bbox"], of.get("bbox") or [0, 0, 0, 0])
+            if ov > best: best, bi = ov, j
+        if bi >= 0 and best >= 0.6:
+            nf["latex"] = old_fmls[bi].get("latex")
+            if old_fmls[bi].get("latex_engine"):
+                nf["latex_engine"] = old_fmls[bi]["latex_engine"]
+    n_kept = sum(1 for f in formulas_all if (f.get("latex") or "").strip())
     data["figures_geom"] = new_figs            # 派生层:几何+图组(从干净的 AI figures 重算,幂等);不动 data["figures"]
     data["formulas"] = formulas_all
     data["geom"] = "yolo"
@@ -201,7 +223,7 @@ def process_sidecar(path, dry=False, force=False):
         tmp = path + ".tmp"
         open(tmp, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=1))
         os.replace(tmp, path)
-    print(f"  {os.path.basename(path)}: in={len(figs)} yolo_boxes={nyolo} → out={len(new_figs)} (单图yolo:{nsingle} 图组:{ngrp} 回退ai:{nfa}) formulas={len(formulas_all)}")
+    print(f"  {os.path.basename(path)}: in={len(figs)} yolo_boxes={nyolo} → out={len(new_figs)} (单图yolo:{nsingle} 图组:{ngrp} 回退ai:{nfa}) formulas={len(formulas_all)}(沿用旧latex {n_kept})")
 
 
 def main():
