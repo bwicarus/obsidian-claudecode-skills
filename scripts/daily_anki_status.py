@@ -406,6 +406,12 @@ def rotate_backups() -> None:
 
 def main() -> int:
     print(f"=== Linux daily 编排开始 {RUN_START.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    # 总开关:控制面板「凌晨定时」→「启用每日凌晨任务」。关掉则 timer 照常触发但本脚本立即空跑退出
+    # (不碰 Anki / vault / dashboard / AI)。默认 True(缺字段=开,保持原行为)。
+    if not server_cfg().get("daily", {}).get("enabled", True):
+        print("⏸ daily 总开关已关闭(server-config daily.enabled=false),跳过本次运行。", flush=True)
+        write_run("skipped")
+        return 0
     write_run("running")
     rotate_backups()
 

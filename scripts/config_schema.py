@@ -39,6 +39,7 @@ SCHEMA: dict[str, type] = {
     "auto_upload_after_register":      bool,
 
     # 凌晨 daily 定时
+    "daily.enabled":                   bool,   # 总开关:整套凌晨 daily 跑不跑(Pi 的 daily_anki_status.py 顶部读)
     "scheduled_register.enabled":      bool,
     "scheduled_register.time":         str,
     "scheduled_register.wake_anki":    bool,
@@ -100,6 +101,10 @@ FIELD_META: dict[str, dict] = {
     "auto_upload_after_register": {
         "group": "笔记登记",
         "label": "登记完成后自动「刷新并上传网页」",
+    },
+    "daily.enabled": {
+        "group": "凌晨定时",
+        "label": "★ 总开关:启用每日凌晨任务(关掉则整套 daily 不跑;timer 仍触发但脚本立即空跑退出)",
     },
     "scheduled_register.wake_anki": {
         "group": "凌晨定时",
