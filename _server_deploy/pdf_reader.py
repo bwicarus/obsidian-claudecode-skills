@@ -5007,6 +5007,58 @@ def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None, s
     buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
 
 
+def _overlay_ink_on_page_png(png_bytes, strokes, scale=2.0):
+    """把整页归一化笔画(0-1)叠加到**已渲染的整页 PNG** 上,返回新 PNG bytes。
+    给助手 see_page 用:页面有手写批注时发『页面+手写』合成图。画线逻辑与 _figure_crop_png 一致,
+    只是按全页映射(box=(0,0,1,1),mp(p)=(x*cw,y*ch));scale=整页渲染倍率(决定线宽,跟 w*matrix_scale 同口径)。
+    任何异常都回退原图,绝不让『叠墨迹失败』把『看页面』整个搞挂。"""
+    if not strokes:
+        return png_bytes
+    try:
+        import io, math
+        from PIL import Image, ImageDraw
+        im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        cw, ch = im.width, im.height
+        d = ImageDraw.Draw(im)
+        def mp(p): return (p[0] * cw, p[1] * ch)
+        for s in strokes:
+            try:
+                pts = s.get("p") or []
+                if not pts:
+                    continue
+                col = s.get("c") or "#e74c3c"
+                if isinstance(col, str) and col.startswith("rgb"):
+                    col = "#e74c3c"
+                w = max(1, int(round((s.get("w") or 2.5) * scale)))
+                t = s.get("t") or "pen"
+                cp = [mp(p) for p in pts]
+                if t == "rect" and len(cp) >= 2:
+                    d.rectangle([min(cp[0][0], cp[1][0]), min(cp[0][1], cp[1][1]),
+                                 max(cp[0][0], cp[1][0]), max(cp[0][1], cp[1][1])], outline=col, width=w)
+                elif t == "arrow" and len(cp) >= 2:
+                    d.line([cp[0], cp[1]], fill=col, width=w)
+                    ang = math.atan2(cp[1][1] - cp[0][1], cp[1][0] - cp[0][0]); ah = max(8, w * 3)
+                    for sgn in (-0.42, 0.42):
+                        d.line([cp[1], (cp[1][0] - ah * math.cos(ang + sgn), cp[1][1] - ah * math.sin(ang + sgn))], fill=col, width=w)
+                elif len(cp) >= 2:
+                    d.line(cp, fill=col, width=w, joint="curve")
+                else:
+                    px, py = cp[0]; d.ellipse([px - w, py - w, px + w, py + w], fill=col)
+            except Exception:
+                continue
+        buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+    except Exception:
+        return png_bytes
+
+
+def _page_ink_strokes(rel, page):
+    """读服务端 ink sidecar 里某 PDF 页(1-based)的笔画列表;无则空 list。给 see_page / 系统 prompt 探测用。"""
+    try:
+        return (_ink_load(rel).get("pages") or {}).get(str(int(page))) or []
+    except Exception:
+        return []
+
+
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
     """徽标锚点:先把 AI bbox 收紧成真实图框(_fig_refine_bbox),邻图同样收紧,再交几何函数。
     供独立脚本(重算徽标)直接用 AI bbox 调用;路由侧已缓存 fbox 时走 _fig_badge_from_block。"""

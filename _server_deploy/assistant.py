@@ -505,10 +505,11 @@ def _t_see_page(args, ctx):
     try:
         import base64
         import fitz
+        import pdf_reader as pdf
         ap = (VAULT_ROOT / file_rel).resolve()
         ap.relative_to(VAULT_ROOT.resolve())
         doc = fitz.open(str(ap))
-        vis, done = [], []
+        vis, done, inked = [], [], []
         try:
             for pg in pages:
                 if pg < 1 or pg > doc.page_count:
@@ -517,18 +518,25 @@ def _t_see_page(args, ctx):
                 longside = max(page.rect.width, page.rect.height) or 1.0
                 scale = min(2.0, 1540.0 / longside) or 1.0   # 长边 ~1540px(Claude 视觉甜区),封顶 2x
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-                png = pix.tobytes("png")
+                png = pix.tobytes("png"); eff = scale
                 if len(png) > 3_000_000:   # 超大页(扫描大开本)降一档再渲 → 防喂回 stdin 过大 / Pi 8GB OOM
-                    pix = page.get_pixmap(matrix=fitz.Matrix(scale * 0.6, scale * 0.6), alpha=False)
+                    eff = scale * 0.6
+                    pix = page.get_pixmap(matrix=fitz.Matrix(eff, eff), alpha=False)
                     png = pix.tobytes("png")
+                strokes = pdf._page_ink_strokes(file_rel, pg)   # 本页手写批注 → 合成进图,让 AI 看到用户画/写了什么
+                if strokes:
+                    png = pdf._overlay_ink_on_page_png(png, strokes, eff)
+                    inked.append(pg)
                 vis.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
                 done.append(pg)
         finally:
             doc.close()
         if not vis:
             return {"error": "页码超出范围"}
-        return {"_vision": vis, "rendered_pages": done,
-                "note": "下面是这些页的渲染图。看图回答用户(图表/示意图/公式排版/手写等文字层读不到的内容)。"}
+        note = "下面是这些页的渲染图。看图回答用户(图表/示意图/公式排版/手写等文字层读不到的内容)。"
+        if inked:
+            note += f" 注意:这些图**已叠加用户的手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked))} 页有手写),用户问的多半就是他写/圈的内容,务必结合手写笔迹回答。"
+        return {"_vision": vis, "rendered_pages": done, "inked_pages": inked, "note": note}
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -811,7 +819,8 @@ TOOLS = {
     "lookup_word": ("查词典:英→ECDICT(音标+中文释义+原形)、日→unidic **权威读音+声调**。"
                     "**读音/释义以它为准,别自己编读音**;你只结合上下文挑义项+讲解。args {word?}(不传用选中)", _t_lookup_word),
     "see_page": ("**真正看到**当前页(或指定页)的渲染图——图表/示意图/曲线/公式排版/手写等文字层读不到的东西。"
-                 "read_page 只有文字层、看不见图形;用户问『这张图/这个图表/这页的图/看一下』时用 see_page。args {page?}", _t_see_page),
+                 "**本页有手写批注时会自动把『页面+手写笔迹』合成进图**(读不到手写就靠它)。"
+                 "read_page 只有文字层、看不见图形/手写;用户问『这张图/这个图表/这页的图/我写的/我圈的/看一下』时用 see_page。args {page?}", _t_see_page),
     "see_figure": ("看用户**当前聚焦的那张图**的裁剪渲染图(他点选/拖进来的图;有手写笔迹则看合成图)。"
                    "已给的图说明不够、要核对图里的具体细节/用户在图上的标注时用。args {}", _t_see_figure),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
@@ -876,6 +885,18 @@ def _sys_prompt(ctx):
     if isinstance(fsel, dict) and fsel.get("text"):
         fkind = "公式" if fsel.get("kind") == "formula" else "段落"
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
+    # 本页是否有手写批注 → 提示编排器:这种时候多半在问手写的东西,用 see_page(会发『页面+手写』合成图)
+    if ctx.get("file_rel"):
+        try:
+            import pdf_reader as _pdfm
+            inked_disp = [_to_disp(ctx, int(p)) for p in vis if p and _pdfm._page_ink_strokes(ctx["file_rel"], int(p))]
+        except Exception:
+            inked_disp = []
+        if inked_disp:
+            learn_bits.append(
+                f"★本页有用户的**手写批注**(第 {('、'.join(str(d) for d in inked_disp))} 页)。"
+                "用户问这页/问他写的圈的画的东西时,**用 see_page**——它会把『页面+手写笔迹』合成图发给你看,"
+                "据手写内容回答(别只看文字层,文字层读不到手写)。")
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
