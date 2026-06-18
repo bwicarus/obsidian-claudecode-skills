@@ -423,7 +423,14 @@
     } catch (_) {}
   };
 
-  var _abort = null, _recovering = false, _lastProgressTs = 0;
+  var _abort = null, _recovering = false, _lastProgressTs = 0, _ridCtr = 0;
+  function _whenVisibleAsst() {   // 在后台 → 等回到前台再继续(重连前先回前台,后台重连也会被掐)
+    return new Promise(function (res) {
+      if (document.visibilityState !== 'hidden') return res();
+      var h = function () { if (document.visibilityState !== 'hidden') { document.removeEventListener('visibilitychange', h); res(); } };
+      document.addEventListener('visibilitychange', h);
+    });
+  }
   // 切后台→回前台:iOS 常把进行中的 SSE fetch 掐死/僵死 → 回来报 "Load failed" 或永远卡在「思考中」。
   // 回前台后给 3s 看有无新进度,没有就主动 abort 这条死流 → 走「从服务端历史恢复本轮回答」(服务端 finally 已落库)。
   document.addEventListener('visibilitychange', function () {
@@ -473,19 +480,35 @@
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
-    var answer = '', acts = [], aborted = false, traceData = null, netFail = false, _recTs = 0;
-    _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    _recovering = false; _lastProgressTs = Date.now();
-    try {
-      var r = await fetch('/api/assistant/chat', {     // 历史由服务端保存(跨设备),前端不再传
+    var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
+    var rid = 'c' + Date.now() + '_' + (_ridCtr++);   // 本轮任务 id:断线用它重连续读(服务端 detached 跑,不绑请求)
+    var evSeen = 0, done = false;                      // 已消费的缓冲事件数(重连用 from=evSeen 续传)
+    function _handleEv(ev, parsed) {
+      if (ev === 'meta') return;                       // rid 确认,不计数
+      evSeen++;
+      if (ev === 'done') { done = true; return; }
+      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
+      else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); scrollDown(); }   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP
+      else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
+      else if (ev === 'actions') { acts = parsed; }
+      else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
+      else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
+      else if (ev === 'undo' && parsed && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }
+      else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
+    }
+    // 开一条 SSE 读到自然结束/断开。首连带 message+context;重连只带 rid+from(服务端按 rid 续发缓冲事件)。
+    async function _stream(body) {
+      _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var r = await fetch('/api/assistant/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, context: sentCtx, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }),
-        signal: _abort ? _abort.signal : undefined,
+        body: JSON.stringify(body), signal: _abort ? _abort.signal : undefined,
       });
+      if (r.status === 410) { done = 'gone'; return; }   // 任务已过期(>3min)→ 走历史恢复
+      if (!r.ok || !r.body) throw new Error('http ' + r.status);
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = '';
       while (true) {
         var rd = await reader.read(); if (rd.done) break;
-        _lastProgressTs = Date.now();   // 有数据进来 = 流活着(回前台看门狗据此判断是否掐死重连)
+        _lastProgressTs = Date.now();   // 有数据 = 流活着(回前台看门狗据此判断僵死)
         buf += dec.decode(rd.value, { stream: true });
         var idx;
         while ((idx = buf.indexOf('\n\n')) >= 0) {
@@ -496,29 +519,36 @@
             else if (ln.indexOf('data:') === 0) data += ln.slice(5).trim();
           });
           var parsed; try { parsed = JSON.parse(data); } catch (_) { parsed = data; }
-          if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
-          else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); scrollDown(); }   // 流式只轻量渲(不 MathJax) + 剥 FOLLOWUP 标记
-          else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
-          else if (ev === 'actions') { acts = parsed; }
-          else if (ev === 'trace') { traceData = parsed; }   // 这条回答经过的 AI 调用链(各步模型)→ 喂给「!」反馈弹窗
-          else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
-          else if (ev === 'undo' && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }
-          else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
+          _handleEv(ev, parsed);
+          if (done) return;
         }
       }
-    } catch (e) {
-      if (e && e.name === 'AbortError') {
-        if (_recovering) netFail = true;      // 我们(看门狗)主动掐死僵死流 → 当网络中断,走恢复
-        else aborted = true;                  // 用户点停止 → 不报错,保留已生成的部分
-      } else netFail = true;                   // Load failed / TypeError / 后台掐网
     }
-    // 后台/掉线中断:服务端 finally 已把本轮回答落库 → 拉历史补回(常比前端拿到的更全)
-    if (netFail) {
-      try { aMsg.innerHTML = '<span class="asst-tool">连接断了,正在恢复…</span>'; } catch (_) {}
+    _recovering = false; _lastProgressTs = Date.now();
+    var tries = 0;
+    while (!done && !aborted) {
+      try {
+        await _stream(tries === 0
+          ? { message: text, context: sentCtx, rid: rid, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
+          : { rid: rid, from: evSeen });
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          if (_recovering) { _recovering = false; }   // 看门狗掐死僵死流 → 当断线,重连续传
+          else { aborted = true; break; }             // 用户点停止 → 保留已生成部分
+        }
+        // 其它(Load failed / 网络断)→ 落到下面重连
+      }
+      if (done || done === 'gone' || aborted) break;
+      if (++tries > 40) break;                          // 兜底:worker 6min 内必完成;真连不上才放弃
+      try { aMsg.innerHTML = '<span class="asst-tool">连接断开,正在续传…</span>'; scrollDown(); } catch (_) {}
+      await _whenVisibleAsst();                         // 等回到前台再重连
+      await new Promise(function (rs) { setTimeout(rs, Math.min(400 * tries, 2000)); });
+    }
+    // 任务过期 / 兜底没续上 → 从服务端历史恢复(worker 跑完已落库,绝不丢)
+    if ((done === 'gone' || (!done && !aborted)) && !answer) {
+      try { aMsg.innerHTML = '<span class="asst-tool">正在恢复…</span>'; } catch (_) {}
       var rec = await _recoverFromHistory();
-      var got = _splitFollowups(answer).text || '';
-      if (rec && rec.content && rec.content.length >= got.length) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
-      else if (!got) answer = '⚠️ 切到后台时连接断了。下拉刷新或重问一次都行(你的提问已存,不会丢)。';
+      if (rec && rec.content) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
     }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
     var pf = _splitFollowups(answer);

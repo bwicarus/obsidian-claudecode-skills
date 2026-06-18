@@ -1132,53 +1132,97 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
         threading.Thread(target=_warm_respawn, daemon=True).start()
 
 
+# ── 助手生成任务:detached(后台线程跑到完,客户端断了也不杀、跑完照样落库)+ 按 rid 缓冲事件供重连续读 ──
+# 根治「切后台→连接断→只能叫你刷新」:生成不再绑请求生命周期,客户端拿同一个 rid 接着读即可,全程零操作。
+_chat_jobs = {}
+_chat_jobs_lock = threading.Lock()
+
+
+def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
+    job = _chat_jobs[rid]
+    try:
+        for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model):
+            with job["lock"]:
+                job["events"].append(ev)
+                if ev["event"] == "answer":
+                    job["answer"] = ev["data"]
+                elif ev["event"] == "trace":
+                    job["trace"] = ev["data"]
+    except Exception as e:
+        with job["lock"]:
+            job["events"].append({"event": "error", "data": str(e)[:160]})
+    finally:
+        with job["lock"]:
+            job["events"].append({"event": "done", "data": {}})
+            job["done"] = True
+        if job.get("answer"):   # 不管客户端在不在,跑完就落库(断连也不丢;历史/感叹号都用得上)
+            _convo_append(uid, "assistant", str(job["answer"])[:1500], {"trace": job.get("trace")} if job.get("trace") else None)
+        def _cleanup():
+            with _chat_jobs_lock:
+                _chat_jobs.pop(rid, None)
+        t = threading.Timer(180, _cleanup); t.daemon = True; t.start()   # 留 3min 给重连续读,之后清
+
+
 # ──────────────────────── 路由 ────────────────────────
 @bp.route("/chat", methods=["POST"])
 def assistant_chat():
     if not _logged_in():
         return jsonify({"ok": False, "error": "auth"}), 401
     body = request.get_json(silent=True) or {}
-    message = (body.get("message") or "").strip()
-    if not message:
-        return jsonify({"ok": False, "error": "empty"}), 400
     uid = session["user_id"]
-    force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None   # 感叹号「更强重答」沿梯子升档
-    force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
-    ctx = body.get("context") or {}
-    ctx["_base"] = request.host_url.rstrip("/")
-    ctx["_uid"] = uid   # 写操作(制卡/笔记/高亮)记 owner=本用户 → 撤销只能撤自己的(防越权)
-    # 服务端历史(含每轮所在页/书/选中句,让助手能定位"刚才那页")。先取(=本轮之前的),再早落库本轮用户消息。
-    history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
-               for m in _convo_load(uid)[-6:]]
-    # 用户消息**进入 agent 之前**就落库 → 移动端切后台/锁屏断连也不丢这轮,且保住"刚才那页"定位链
-    _convo_append(uid, "user", message, {
-        "page": ctx.get("page"), "pages": ctx.get("pages"),
-        "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
-        "selection": ctx.get("selection"),
-        "figures": [{k: f.get(k) for k in ("page", "box", "caption", "group", "has_ink", "file_rel")}
-                    for f in (ctx.get("figures") or [])][:6],
-    })
+    rid = (str(body.get("rid") or "").strip())[:64] or f"c{int(time.time() * 1000)}-{len(_chat_jobs)}"
+    try:
+        frm = max(0, int(body.get("from") or 0))   # 重连:从第几个缓冲事件接着读
+    except Exception:
+        frm = 0
+    with _chat_jobs_lock:
+        job = _chat_jobs.get(rid)
+        if job is None:
+            message = (body.get("message") or "").strip()
+            if not message:
+                # rid 给了但任务已不在(>3min 被清)→ 让前端走历史恢复(答案早落库了),而不是报错
+                if body.get("rid"):
+                    return jsonify({"ok": False, "error": "gone"}), 410
+                return jsonify({"ok": False, "error": "empty"}), 400
+            force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None
+            force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
+            ctx = body.get("context") or {}
+            ctx["_base"] = request.host_url.rstrip("/")
+            ctx["_uid"] = uid   # 写操作记 owner=本用户 → 撤销只能撤自己的
+            history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
+                       for m in _convo_load(uid)[-6:]]
+            _convo_append(uid, "user", message, {   # 用户消息进 agent 前就落库 → 断连也不丢这轮 + 保住"刚才那页"链
+                "page": ctx.get("page"), "pages": ctx.get("pages"),
+                "book": ctx.get("book_name"), "file_rel": ctx.get("file_rel"),
+                "selection": ctx.get("selection"),
+                "figures": [{k: f.get(k) for k in ("page", "box", "caption", "group", "has_ink", "file_rel")}
+                            for f in (ctx.get("figures") or [])][:6],
+            })
+            job = _chat_jobs[rid] = {"events": [], "answer": "", "trace": None, "done": False,
+                                     "lock": threading.Lock(), "uid": uid}
+            threading.Thread(target=_chat_worker, daemon=True,
+                             args=(rid, message, ctx, history, force_effort, force_model, uid)).start()
+        elif job.get("uid") != uid:
+            return jsonify({"ok": False, "error": "forbidden"}), 403   # 别人的 rid 不给读
 
     def gen():
-        final = ['']
-        tr = [None]
-        try:
-            for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model):
-                if ev['event'] == 'answer':
-                    final[0] = ev['data']
-                elif ev['event'] == 'trace':
-                    tr[0] = ev['data']   # 存进历史 → 历史回答的感叹号也能显示步骤/模型/耗时
+        yield f"event: meta\ndata: {json.dumps({'rid': rid})}\n\n"   # 回 rid 给前端(断线用它重连);meta 不进缓冲计数
+        i = frm
+        idle = 0
+        while True:
+            with job["lock"]:
+                n = len(job["events"])
+                evs = list(job["events"][i:n])
+                done = job["done"]
+            for ev in evs:
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'], ensure_ascii=False)}\n\n"
-            yield "event: done\ndata: {}\n\n"
-        except Exception as e:   # 普通异常才回 error 事件;客户端断连是 GeneratorExit(BaseException,不被此捕获)→ 直接走 finally 落库
-            try:
-                yield f"event: error\ndata: {json.dumps(str(e)[:160], ensure_ascii=False)}\n\n"
-            except Exception:
-                pass
-        finally:
-            # 助手回答在 finally 落库:断连/出错时也保住已流式出来的部分(跨设备续上不断片)+ 调用轨迹 trace(历史感叹号用)
-            if final[0]:
-                _convo_append(uid, "assistant", str(final[0])[:1500], {"trace": tr[0]} if tr[0] else None)
+            i = n
+            if done and i >= len(job["events"]):
+                return
+            idle = 0 if evs else idle + 1
+            if idle > 2400:   # ~6min 没动静(worker 卡死)兜底收
+                return
+            time.sleep(0.1)
 
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
