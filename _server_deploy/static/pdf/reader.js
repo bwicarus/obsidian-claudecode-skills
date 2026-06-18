@@ -1847,7 +1847,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-79';
+const READER_BUILD = 'reader-fix-80';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8216,13 +8216,16 @@ async function _connProbe() {
   // 速度/质量谱(Pareto,实测:opus·low ≈ sonnet·high 质量但更快 → 取代 sonnet·high;haiku 在最快端)
   var _MODELS = ['haiku', 'sonnet', 'opus'];
   var _EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+  // Pareto 清洗后的自动谱:每档=该质量下最快的配置。快端粗(haiku/sonnet·快不需要细分 effort);
+  // 深端(opus)给全 effort 范围 low→max(含 medium)。sonnet·medium/high 被 opus·low 支配,故不入谱(⚙ 里仍可手选)。
   var _SPEC = [
-    { model: 'haiku',  effort: 'low',   label: 'haiku·快' },
-    { model: 'sonnet', effort: 'low',   label: 'sonnet·快' },
-    { model: 'opus',   effort: 'low',   label: 'opus·快' },     // ≈sonnet·深 质量但实测更快 → 占这一档
-    { model: 'opus',   effort: 'high',  label: 'opus·深' },
-    { model: 'opus',   effort: 'xhigh', label: 'opus·更深' },
-    { model: 'opus',   effort: 'max',   label: 'opus·max' }
+    { model: 'haiku',  effort: 'low',    label: 'haiku·快' },
+    { model: 'sonnet', effort: 'low',    label: 'sonnet·快' },
+    { model: 'opus',   effort: 'low',    label: 'opus·快' },      // ≈sonnet·深 质量但实测更快 → 占这一档
+    { model: 'opus',   effort: 'medium', label: 'opus·中' },
+    { model: 'opus',   effort: 'high',   label: 'opus·深' },
+    { model: 'opus',   effort: 'xhigh',  label: 'opus·更深' },
+    { model: 'opus',   effort: 'max',    label: 'opus·max' }
   ];
   function _specIdx(m, e) { for (var i = 0; i < _SPEC.length; i++) if (_SPEC[i].model === m && _SPEC[i].effort === e) return i; return -1; }
   function _tierLabel(m, e) { var i = _specIdx(m, e); return i >= 0 ? _SPEC[i].label : (m + '·' + e); }
@@ -8233,21 +8236,23 @@ async function _connProbe() {
     } catch (_) {}
     return null;
   }
-  // 「更强」:质量↑一档。sonnet·深(默认深答,不在谱上)视作 opus·快 同质量 → 再上一档 = opus·深
-  function _strongerTier(cur) {
-    if (!cur) return _SPEC[3];                                                  // 历史无 trace → 默认 opus·深
-    if (cur.model === 'sonnet' && cur.effort === 'high') return _SPEC[3];       // sonnet·深 → opus·深
-    var i = _specIdx(cur.model, cur.effort);
-    if (i < 0) return _SPEC[3];
-    return (i + 1 < _SPEC.length) ? _SPEC[i + 1] : null;                        // null = 已 opus·max
+  // cur 在谱上的下标。sonnet·深(默认深答,不在谱上)按"质量≈opus·快"映射到 opus·快 的位置,使升/降一致。
+  function _ladderIdxOf(cur) {
+    if (!cur) return -1;
+    if (cur.model === 'sonnet' && cur.effort === 'high') return _specIdx('opus', 'low');
+    return _specIdx(cur.model, cur.effort);
   }
-  // 「更快」:速度↑、尽量保质量。sonnet·深 → opus·快(同质量更快,你的洞见);否则谱上退一档
-  function _fasterTier(cur) {
-    if (!cur) return null;
-    if (cur.model === 'sonnet' && cur.effort === 'high') return _SPEC[2];       // sonnet·深 → opus·快
-    var i = _specIdx(cur.model, cur.effort);
-    if (i < 0) return _SPEC[1];                                                 // 不在谱上 → 退到 sonnet·快
-    return (i > 0) ? _SPEC[i - 1] : null;                                       // null = 已 haiku·快(最快)
+  function _strongerTier(cur) {   // 质量↑一档;null=已 opus·max;未知→默认 opus·深
+    var i = _ladderIdxOf(cur);
+    if (i < 0) { var d = _specIdx('opus', 'high'); return d >= 0 ? _SPEC[d] : _SPEC[_SPEC.length - 1]; }
+    return (i + 1 < _SPEC.length) ? _SPEC[i + 1] : null;
+  }
+  function _fasterTier(cur) {   // 速度↑、尽量保质量;null=已 haiku·快;未知→sonnet·快
+    // sonnet·深:同质量的更快档 = 直接换 opus·快(横向 Pareto 改进,你的洞见),不降质量
+    if (cur && cur.model === 'sonnet' && cur.effort === 'high') { var o = _specIdx('opus', 'low'); return o >= 0 ? _SPEC[o] : _SPEC[1]; }
+    var i = _ladderIdxOf(cur);
+    if (i < 0) return _SPEC[1];
+    return (i > 0) ? _SPEC[i - 1] : null;
   }
   var _fbOpenPop = null;
   function _fbClosePop() { if (_fbOpenPop) { try { _fbOpenPop.remove(); } catch (_) {} _fbOpenPop = null; } }
