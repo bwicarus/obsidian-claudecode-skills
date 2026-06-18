@@ -5136,10 +5136,15 @@ def _formula_ocr_url():
     return "http://100.99.9.124:8765"
 
 
+_FML_OCR_DIR = CLAUDE_DIR / "state" / "formula-ocr"   # 公式 OCR 后台任务 pid 文件(防重复启 + 查在跑)
+
+
 @bp.route("/api/formula-ocr", methods=["POST"])
 def pdf_api_formula_ocr():
-    """本地公式 OCR:渲染本书"还没 latex"的公式框 → 发到 PC 的 pix2tex 服务 → 写回 sidecar。
-    幂等(只补缺 latex 的,不覆盖已有,如已 AI 校正过的费曼)。需 PC 跑 scripts/formula_ocr_server.py。"""
+    """公式 OCR(**Claude 视觉,服务端,无需 PC**):后台跑 scripts/formula_ocr_claude.py 给"还没 latex"的
+    公式框补 LaTeX(中文混排出 \\text{})。detached 子进程(关网页/重启不中断;在跑则不重复启)。
+    幂等(只补缺 latex 的,不覆盖已校正的)。进度查 /api/formula-ocr-status。"""
+    import subprocess, time
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
     abs_path = _safe_vault_path(rel)
@@ -5148,44 +5153,57 @@ def pdf_api_formula_ocr():
     data = _fig_load_abs(abs_path)
     formulas = data.get("formulas") or []
     if not formulas:
-        return jsonify({"ok": False, "error": "no_boxes", "msg": "本书还没检测到公式框(YOLO 公式检测未跑)"}), 200
-    todo = [(i, f) for i, f in enumerate(formulas)
-            if not (f.get("latex") or "").strip() and f.get("bbox") and len(f.get("bbox")) == 4]
+        return jsonify({"ok": False, "error": "no_boxes", "msg": "本书还没检测到公式框(先跑 YOLO 公式检测)"}), 200
+    todo = [f for f in formulas if not (f.get("latex") or "").strip() and f.get("bbox") and len(f.get("bbox")) == 4]
+    total = len(formulas); have = total - len(todo)
     if not todo:
-        return jsonify({"ok": True, "count": 0, "total": len(formulas), "msg": "所有公式都已 OCR"}), 200
-    import fitz, base64 as _b64
-    import requests as _rq
-    doc = fitz.open(str(abs_path))
-    crops = []
+        return jsonify({"ok": True, "started": False, "done": True, "total": total, "have": have, "msg": "所有公式都已识别"}), 200
+    sha = _book_sha(abs_path)
+    _FML_OCR_DIR.mkdir(parents=True, exist_ok=True)
+    sp = _FML_OCR_DIR / f"{sha}.json"
+    try:                                  # 已在跑 → 不重复启
+        st = json.loads(sp.read_text("utf-8"))
+        if st.get("pid") and _pid_alive(st["pid"]):
+            return jsonify({"ok": True, "already_running": True, "total": total, "have": have, "remaining": len(todo)})
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "formula_ocr_claude.py"),
+           "--book", str(abs_path), "--model", "sonnet", "--effort", "low", "--batch", "8"]
+    popen_kw = dict(cwd=str(CLAUDE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = 0x00004000 | 0x08000000   # BELOW_NORMAL + CREATE_NO_WINDOW
+    else:
+        popen_kw["start_new_session"] = True
+        cmd = ["nice", "-n", "10"] + cmd
     try:
-        mat = fitz.Matrix(4, 4)
-        for i, f in todo:
-            page = doc[int(f["page"]) - 1]
-            W, H = page.rect.width, page.rect.height
-            x0, y0, x1, y1 = f["bbox"]
-            bx0, by0, bx1, by1 = x0 * W, y0 * H, x1 * W, y1 * H
-            padh = max(4.0, 0.02 * (bx1 - bx0)); padv = max(4.0, 0.06 * (by1 - by0))
-            clip = fitz.Rect(max(0, bx0 - padh), max(0, by0 - padv), min(W, bx1 + padh), min(H, by1 + padv))
-            pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
-            crops.append({"idx": i, "png_b64": _b64.b64encode(pix.tobytes("png")).decode("ascii")})
-    finally:
-        doc.close()
-    url = _formula_ocr_url()
+        p = subprocess.Popen(cmd, **popen_kw)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败:{ex}"}), 500
     try:
-        r = _rq.post(url + "/ocr", json={"crops": crops, "key": os.environ.get("FORMULA_OCR_KEY", "")}, timeout=300)
-        res = (r.json() or {}).get("results", [])
-    except Exception as e:
-        return jsonify({"ok": False, "error": "service",
-                        "msg": f"连不上本地 OCR 服务({url}):{str(e)[:90]}。请确认 PC 已启动 formula_ocr_server.py"}), 200
-    n = 0
-    for item in res:
-        idx = item.get("idx"); lx = item.get("latex")
-        if isinstance(idx, int) and 0 <= idx < len(formulas) and lx and str(lx).strip():
-            formulas[idx]["latex"] = str(lx).strip()
-            formulas[idx]["latex_engine"] = "pix2tex-local"
-            n += 1
-    _fig_save_abs(abs_path, data)
-    return jsonify({"ok": True, "count": n, "total": len(todo), "engine": "pix2tex-local"})
+        sp.write_text(json.dumps({"pid": p.pid, "ts": int(time.time())}), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "started": True, "pid": p.pid, "total": total, "have": have, "remaining": len(todo)})
+
+
+@bp.route("/api/formula-ocr-status")
+def pdf_api_formula_ocr_status():
+    """公式 OCR 进度:从 sidecar 实时统计 有latex/总框 + 后台进程是否在跑。"""
+    rel = (request.args.get("file") or "").strip()
+    abs_path = _safe_vault_path(rel)
+    if not abs_path:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    formulas = (_fig_load_abs(abs_path).get("formulas") or [])
+    total = len(formulas)
+    have = sum(1 for f in formulas if (f.get("latex") or "").strip())
+    running = False
+    try:
+        st = json.loads((_FML_OCR_DIR / f"{_book_sha(abs_path)}.json").read_text("utf-8"))
+        running = bool(st.get("pid") and _pid_alive(st["pid"]))
+    except Exception:
+        pass
+    return jsonify({"ok": True, "total": total, "have": have, "remaining": total - have, "running": running})
 
 
 @bp.route("/api/figure-crop", methods=["GET", "POST"])

@@ -1892,7 +1892,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-84';
+const READER_BUILD = 'reader-fix-85';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7964,7 +7964,7 @@ function _openBookshelf() {
         '<span class="bs-name">' + _esc(p.name) + (here ? '　←当前' : '') + '</span>' +
         '<span class="bs-meta">' + _esc(p.dir && p.dir !== '.' ? p.dir : '') + (p.dir && p.dir !== '.' ? ' · ' : '') + mb + ' MB' +
         (p.comp_exists ? ' · 🗜有压缩版' : '') + '</span></a>' +
-        '<button class="bs-ocr" title="本地公式 OCR(需 PC 启动 formula_ocr_server.py)" data-rel="' + encodeURIComponent(p.rel) + '" onclick="_bsFormulaOCR(this)">🧮</button>' +
+        '<button class="bs-ocr" title="公式识别(Claude 视觉,后台跑,无需 PC)" data-rel="' + encodeURIComponent(p.rel) + '" onclick="_bsFormulaOCR(this)">🧮</button>' +
         '</div>';
     }).join('');
   };
@@ -7978,7 +7978,7 @@ function _openBookshelf() {
 }
 window._openBookshelf = _openBookshelf;
 
-// 书架每本书的「🧮 本地公式 OCR」:渲染缺 latex 的公式框 → 发到 PC pix2tex 服务 → 写回 sidecar(幂等)。
+// 书架每本书的「🧮 公式识别」:后台跑 Claude 视觉给缺 latex 的公式框补 LaTeX(无需 PC,中文混排也准)。
 if (!document.getElementById('bs-ocr-css')) {
   const _st = document.createElement('style'); _st.id = 'bs-ocr-css';
   _st.textContent = '.bs-row{display:flex;align-items:stretch;border-bottom:1px solid #151d27}' +
@@ -7990,14 +7990,22 @@ if (!document.getElementById('bs-ocr-css')) {
 window._bsFormulaOCR = async function (btn) {
   const rel = decodeURIComponent(btn.dataset.rel || '');
   if (!rel || btn._busy) return;
+  const tip = (m) => { if (window._toast) window._toast(m); };
   btn._busy = true; const old = btn.textContent; btn.disabled = true; btn.textContent = '⏳';
-  const done = (txt, msg) => { btn.textContent = txt; if (msg) { if (window._toast) window._toast(msg); else alert(msg); } setTimeout(() => { btn.textContent = old; btn.disabled = false; btn._busy = false; }, 4500); };
+  const finish = (txt) => { if (btn._t) { clearInterval(btn._t); btn._t = null; } btn.textContent = txt; setTimeout(() => { btn.textContent = old; btn.disabled = false; btn._busy = false; }, 4000); };
   try {
-    const r = await fetch('/pdf/api/formula-ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rel }) });
-    const d = await r.json();
-    if (d.ok) done(d.count > 0 ? '✅' : '✓', d.count > 0 ? ('公式 OCR 完成:' + d.count + '/' + d.total + ' 条') : (d.msg || '没有待 OCR 的公式'));
-    else done('⚠', d.msg || '失败');
-  } catch (e) { done('⚠', '请求失败:' + (e && e.message || e)); }
+    const d = await (await fetch('/pdf/api/formula-ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rel }) })).json();
+    if (!d.ok) { finish('⚠'); tip(d.msg || '启动失败'); return; }
+    if (d.done) { finish('✅'); tip('公式都已识别(' + d.have + '/' + d.total + ')'); return; }
+    tip('公式识别已在后台开始(' + d.have + '/' + d.total + ' 已好),完成后即可点选公式');
+    btn._t = setInterval(async () => {   // 轮询直到后台进程结束(几分钟~半小时,取决于公式数)
+      try {
+        const s = await (await fetch('/pdf/api/formula-ocr-status?file=' + encodeURIComponent(rel))).json();
+        if (s && s.ok) { btn.textContent = '🧮' + Math.round(100 * s.have / Math.max(1, s.total)) + '%';
+          if (!s.running) { finish('✅'); tip('公式识别完成 ' + s.have + '/' + s.total); } }
+      } catch (_) {}
+    }, 8000);
+  } catch (e) { finish('⚠'); tip('请求失败:' + (e && e.message || e)); }
 };
 
 // 点书:**立即给行内反馈**(⏳打开中,iPad 上整页导航首绘前老页面冻住,没反馈像死机),
