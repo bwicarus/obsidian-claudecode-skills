@@ -21,12 +21,9 @@ function pdfLoadHide() {
   const box=document.getElementById('pdf-loading');
   if(box) box.style.display='none';
 }
-// 返回书架:**阅读器内浮层秒开**(23-bookshelf.js),不再整页跳 /pdf/(慢到要靠过场动画硬撑)。
-// 浮层挂了/异常 → 退回老的整页跳转。module 作用域,挂 window 供 h1/链接的内联 onclick 调用。
-window.goPdfList = function () {
-  try { _openBookshelf(); return; } catch (_) {}
-  location.href = '/pdf/';
-};
+// 返回书架:直接进**完整书架页 /pdf/**(用户要的正经书库:压缩/预处理/预热/公式识别都在那)。
+// (原来弹的"浮层临时书单"已弃用——用户嫌临时;换书统一回完整书架。)module 作用域,挂 window 供内联 onclick 调用。
+window.goPdfList = function () { location.href = '/pdf/'; };
 
 // ── PDF 整本本地缓存（IndexedDB）──
 // 首次打开走流式(线性化后首页秒出)+ 后台把整本下到设备 IndexedDB;第 2 次起直接读本地缓存

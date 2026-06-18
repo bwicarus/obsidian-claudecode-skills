@@ -69,6 +69,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
           <button class="comp-toggle" onclick="compToggle(event,this)" title="压缩版：体积更小、慢网更快。开启后打开本书传压缩版；原书不动（OCR/好网仍用原书）。无压缩版时灰色，点一下生成（呼吸=压缩中）。">🗜 压缩版</button>
           <button class="prep-btn" onclick="prewarmFromList(event,this)" title="预热整本：按页原生宽度把全书所有页（背景图 + 字符/振假名）一次渲好缓存 → 之后翻页秒开。本地实例尤其推荐（本地直接全本渲好、零等待）。">📥 预热</button>
+          <button class="prep-btn" onclick="formulaOCR(event,this)" title="公式识别：Claude 视觉给本书的独立公式补 LaTeX（中文混排也准，后台跑，无需 PC）。完成后阅读时点公式直接得 $...$，可复制/问AI/制卡。">🧮 公式</button>
         </div>
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
@@ -258,6 +259,30 @@ async function prewarmFromList(ev, btn) {
       setTimeout(() => { prog.style.display = 'none'; }, 4000);
     }
   }, 2000);
+}
+
+// ── 公式识别（Claude 视觉，后台 detached + 进度轮询；复用同一进度条）──
+async function formulaOCR(ev, btn) {
+  ev.stopPropagation();
+  const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
+  prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '公式识别启动中…';
+  try {
+    const d = await (await fetch('/pdf/api/formula-ocr', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:rel})})).json();
+    if (!d.ok) { msg.textContent = '✗ ' + (d.msg || '启动失败'); return; }
+    if (d.done) { bar.style.width='100%'; msg.textContent = '✓ 公式都已识别（'+d.have+'/'+d.total+'）'; setTimeout(()=>{prog.style.display='none';},4000); return; }
+    msg.textContent = '公式识别中（后台，可关页面）… ' + d.have + '/' + d.total;
+  } catch (e) { msg.textContent = '✗ ' + e.message; return; }
+  const iv = setInterval(async () => {
+    let st;
+    try { st = await (await fetch('/pdf/api/formula-ocr-status?file=' + encodeURIComponent(rel))).json(); }
+    catch (_) { return; }
+    if (!st || !st.ok) return;
+    const pct = st.total ? Math.round(100 * st.have / st.total) : 0;
+    bar.style.width = pct + '%';
+    msg.textContent = st.running ? ('公式识别中… ' + st.have + '/' + st.total) : ('✓ 公式识别完成 ' + st.have + '/' + st.total + '（点公式可选成 $...$）');
+    if (!st.running) { clearInterval(iv); bar.style.width = '100%'; setTimeout(() => { prog.style.display = 'none'; }, 5000); }
+  }, 3000);
 }
 
 // ── 智能压缩（gs 降采样图像+保留文字层）：复用同一进度条/轮询 ──
