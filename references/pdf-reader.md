@@ -958,6 +958,13 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - **根因② 渲染侧**:`md()`(`21-misc-ai.js`,全局函数,被 25-assistant `renderMd` / dict / grammar / draft 共用)把整串丢给 `marked.parse`,**marked 会把 `$P(A_1)P(A_2)$` 里的 `_` 当斜体、`*` 当强调、`\` 当转义拆坏** → 即便模型写对了 `$...$` 也渲染失败。改为**占位符法**:先把 `$$..$$`/`\[..\]`/`$..$`/`\(..\)` 整段抠成 `@@MJX{n}@@`(纯字母数字,marked 原样保留),marked 跑完再换回原公式交给 MathJax。行内 `$..$` 正则用 `\$(?!\s)(?:\\\$|[^$\n])+?\$`($ 后须非空白以避开「$ 5」、`\$` 转义豁免)。
 - **要点**:此修复对**历史回答 retroactive**——任何过去含 `$...$` 但被 marked 拆坏的答案,重载历史即正确渲染。单测验证:数学内 `_` 受保护、数学外真 markdown `a_i_b` 仍正常变斜体。
 
+### 39c. 切后台 Load failed:全站网络韧性(2026-06-18,`reader-fix-82/83`,commit f9120ef/25e9f26)
+
+**现象**:iOS 切后台/锁屏会**掐死进行中的请求**,回前台后该 fetch reject `TypeError: Load failed`,直接显示成报错。**两层兜底**(关键边界:`fetch()` 只在「还没收到响应」时 reject;一旦返回 Response 就交还调用方,**流式 body 读到一半断了不归 fetch 层管**):
+- **底层(连接没建成就被掐)`00-resilient-fetch.js`**:最先加载,包 `window.fetch`——**GET/HEAD(幂等读)瞬断 → 等回到前台 + 退避后自动重试(≤3 次)**;**POST(写)maxRetry=0 不自动重试**(防重复提交);**AbortError(主动取消)不重试**。另暴露 `window.__safeFetch(url,opts,{retries})` 给「幂等但用 POST 的计算类」(grammar-analyze / translate-sentence 已改用)。覆盖「点一下就切后台→回来 Load failed」的绝大多数场景,且对 PDF.js 的 range GET 也自动生效。
+- **流式 body 中途断**(fetch 已返回 Response,reader.read() 才抛):**各功能自恢复**——助手 `/chat`(25-assistant `send()`):`visibilitychange` 看门狗(回前台 3s 无新进度→主动 abort 死流)+ `_recoverFromHistory()` 拉 `/api/assistant/history`(服务端早落了用户消息、`finally` 落了助手回答,完整或到断点),`_lastProgressTs` 区分「流还活着的慢回答」vs「僵死」;`_aiStream`(翻译/解释/语法)早有 `rid` + `/pdf/api/ai-stream-result` 轮询兜底。
+- **约定**:以后**新的「需要等待」任务**——读类直接用 fetch(自动韧性);幂等计算 POST 用 `__safeFetch`;有持久副作用的写 / 流式,走「提交→job id→轮询」或「服务端落库→失败后拉回」,别裸 `await fetch` 然后 `catch 显示 e.message`。
+
 ### 40. 扫描书插图徽标:图区 📷 徽标 + AI bbox 像素收紧(2026-06-17,`reader-fix-50`,commit d38b762)
 
 **图徽标系统**(`reader.src/26-figures.js` + `pdf_reader.py` 的 `_fig_*`):扫描书插图无文字层,靠 AI(`describe_figures.py`,sonnet)**懒描述**——每页首次进视口 `GET /pdf/api/page-figures?file=&page=` 触发后台描述本页+预取后 2 页,结果写 sidecar `state/pdf-figures/<book-sha>.json`(`<book-sha>=_book_sha(abspath)`,跟 describe_figures 互通);每图 `{page,caption,bbox(归一),desc,fbox,badge}`。前端在图的右上外侧画一枚磨砂玻璃 📷 圆徽标(`.fig-badge`,`renderFiguresOnPage` 由 08-charlayer 建完字符层后调,模式无关),点开 `.fig-pop` 浮层看 caption+desc(Markdown+MathJax)。徽标锚点 `badge=[bx,by]` 服务端按像素算好持久化 → **跨加载位置一致**。
