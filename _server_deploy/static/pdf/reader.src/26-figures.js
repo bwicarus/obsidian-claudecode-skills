@@ -233,7 +233,8 @@
     closePop();
     var pw = (anchorEl && anchorEl.closest) ? anchorEl.closest('.page-wrap')
              : document.querySelector('.page-wrap[data-page-num="' + num + '"]');
-    showHl(pw, fig);            // 高亮范围,不弹描述
+    showHl(pw, fig);            // 高亮范围(纯视觉,跟 AI 无关,保留)
+    if (!window.__asstOpen()) return;   // 助手没开 → 不带入对话(拖图进面板那条本就要面板开,不受影响)
     _attachFig(fig, num);       // 加入带入列表(多张)
     if (typeof _toast === 'function') _toast(fig.group ? '已带入这个图组' : '已带入这张图');
   }
@@ -324,7 +325,17 @@
       if (fs.kind === 'formula' && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([body]).catch(function () {});
     } catch (_) {}
   }
+  // AI 对话栏(右侧助手 tab)是否开着:开了才允许「点选/多选 → 加入对话上下文」
+  // (用户要求:没开 AI 栏时点选/多选只做查词/翻译/高亮,别悄悄往对话塞焦点/带入图)
+  window.__asstOpen = function () {
+    try {
+      var p = document.getElementById('grammar-panel');
+      var a = document.getElementById('side-pane-asst');
+      return !!(p && p.classList.contains('open') && a && a.classList.contains('active'));
+    } catch (_) { return false; }
+  };
   window.__setFocusSel = function (text, kind) {
+    if (!window.__asstOpen()) return;   // 助手没开 → 不钉焦点入对话(选中本身仍能查词/翻译/高亮)
     text = (text || '').trim();
     if (!text) { window.__clearFocusSel(); return; }
     window.__focusSel = { text: text, kind: kind || 'text' };
