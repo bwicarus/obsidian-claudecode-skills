@@ -1847,7 +1847,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-80';
+const READER_BUILD = 'reader-fix-81';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8299,12 +8299,15 @@ async function _connProbe() {
     h.textContent = (trace && trace.length) ? '这条回答经过的 AI 调用' : '对这条回答不满意?';
     pop.appendChild(h);
     var _tot = 0;
-    (trace || []).forEach(function (st) {
+    // 无 trace(早期回答没存调用轨迹)→ 兜底合成一个「回答」步,保证每条都至少有「回答」动作的 ⚙
+    var steps = (trace && trace.length) ? trace : [{ label: '回答', model: '', action: 'orchestrator' }];
+    steps.forEach(function (st) {
       var row = document.createElement('div'); row.className = 'afp-step';
       var l = document.createElement('span'); l.className = 'afp-l'; l.textContent = st.label || '步骤';   // 任务名
       var m = document.createElement('span'); m.className = 'afp-m';
       if (typeof st.sec === 'number') _tot += st.sec;
-      m.textContent = (st.model || '—') + (typeof st.sec === 'number' ? ' · ' + st.sec + 's' : '');   // 模型 · 耗时
+      var mt = st.model || '';
+      m.textContent = mt + (typeof st.sec === 'number' ? (mt ? ' · ' : '') + st.sec + 's' : '');   // 模型 · 耗时(老回答可能都没有)
       row.appendChild(l); row.appendChild(m);
       if (st.action) {   // 这一步是会调模型的动作 → 给个 ⚙ 直接设它的预设
         var g = document.createElement('button'); g.className = 'afp-gear-btn'; g.textContent = '⚙'; g.title = '设这个动作的模型/深度';
@@ -8319,12 +8322,12 @@ async function _connProbe() {
       }
       pop.appendChild(row);
     });
-    if ((trace && trace.length) && (ts || _tot)) {   // 页脚:完成时刻 + 总耗时
+    if (ts || _tot) {   // 页脚:完成时刻 + 总耗时(时间只要有 ts 就显示,不依赖 trace)
       var ft = document.createElement('div'); ft.className = 'afp-foot';
       var bits = [];
       if (ts && typeof _qhFmtTime === 'function') { try { bits.push('🕐 ' + _qhFmtTime(ts * 1000)); } catch (_) {} }
       if (_tot) bits.push('共 ' + (Math.round(_tot * 10) / 10) + 's');
-      ft.textContent = bits.join(' · '); pop.appendChild(ft);
+      if (bits.length) { ft.textContent = bits.join(' · '); pop.appendChild(ft); }
     }
     var cur = _curTier(trace);
     var up = _strongerTier(cur);     // null = 已最强
@@ -8362,7 +8365,7 @@ async function _connProbe() {
       if (_fbOpenPop && _fbOpenPop._owner === btn) { _fbClosePop(); return; }
       _fbClosePop();
       var pop = _buildFbPop(question, trace, _fbClosePop, ts); pop._owner = btn;
-      bar.appendChild(pop); _fbOpenPop = pop; scrollDown();
+      bar.appendChild(pop); _fbOpenPop = pop;   // 不再 scrollDown:历史回答在中间时,点开不该把视图拽到底
     });
     bar.appendChild(btn); bubble.appendChild(bar);
   }
