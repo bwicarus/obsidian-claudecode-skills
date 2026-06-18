@@ -372,13 +372,13 @@ window.onTranslate = async () => {
   renderVocabSentences(pw, pw.__vocabSentences);   // 呼吸 box
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/translate-sentence', {
+    const r = await __safeFetch('/pdf/api/translate-sentence', {   // 幂等翻译:切后台被掐→回前台自动重试
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         text: sent.text, model: ov.model || '', effort: ov.effort || '',
         file: FILE_REL, sentence: {rects: sent.rects, first_char: sent.first_char, last_char: sent.last_char, page: currentPage},
       }),
-    });
+    }, {retries: 2});
     const d = await r.json();
     sent.__translating = false;
     if (d.ok && d.zh) {

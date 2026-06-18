@@ -93,10 +93,10 @@ window.onGrammarAnalyze = async () => {
   const blockId = 'gb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const block = _addLoadingBlock(blockId, sentence, text);
   try {
-    const r = await fetch('/pdf/api/grammar-analyze', {
+    const r = await __safeFetch('/pdf/api/grammar-analyze', {   // 幂等计算:切后台被掐→回前台自动重试(不重复副作用)
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
-    });
+    }, {retries: 2});
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
       try { const err = await r.json(); if (err?.error) msg = err.error; } catch {}

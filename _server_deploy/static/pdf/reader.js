@@ -1,3 +1,48 @@
+// ── 00-resilient-fetch.js:全站网络韧性(最先加载,最底层兜住「切后台 Load failed」)──
+// iOS 切后台/锁屏会掐死进行中的请求,回前台后该请求 reject「TypeError: Load failed」。这里在 fetch 层统一兜:
+//   ① 包装 window.fetch:GET/HEAD(幂等读)瞬断时**先等回到前台、再退避重试**(写请求不自动重试,防重复提交);
+//   ② 暴露 window.__safeFetch:给「幂等但用 POST 的计算类请求」(如 AI 分析)显式开启重试。
+// 重要边界:fetch() 只在「还没收到响应(连接失败/被掐)」时 reject;一旦返回 Response 就交还调用方,
+//   所以**流式响应 body 读到一半断了不归这里管**——那是各功能各自的恢复(助手=拉历史补全、_aiStream=rid 轮询)。
+(function () {
+  if (window.__resilientFetch || !window.fetch) return;
+  window.__resilientFetch = true;
+  var _orig = window.fetch.bind(window);
+
+  function whenVisible() {   // 当前在后台 → 等回到前台再继续(后台发请求多半也被掐)
+    return new Promise(function (res) {
+      if (document.visibilityState !== 'hidden') return res();
+      var h = function () { if (document.visibilityState !== 'hidden') { document.removeEventListener('visibilitychange', h); res(); } };
+      document.addEventListener('visibilitychange', h);
+    });
+  }
+  function methodOf(input, init) {
+    if (init && init.method) return String(init.method).toUpperCase();
+    if (input && typeof input === 'object' && input.method) return String(input.method).toUpperCase();
+    return 'GET';
+  }
+  async function run(input, init, maxRetry) {
+    var i = 0;
+    while (true) {
+      try { return await _orig(input, init); }
+      catch (e) {
+        if (e && e.name === 'AbortError') throw e;     // 主动取消(用户停止 / 代码 abort)→ 不重试
+        if (i++ >= maxRetry) throw e;                  // 重试用尽 → 抛回调用方(各自的 catch 兜底)
+        await whenVisible();                           // 先回前台
+        await new Promise(function (r) { setTimeout(r, Math.min(300 * i, 1200)); });   // 退避
+      }
+    }
+  }
+  window.fetch = function (input, init) {
+    var m = methodOf(input, init);
+    return run(input, init, (m === 'GET' || m === 'HEAD') ? 3 : 0);   // 写请求 maxRetry=0:只跑一次
+  };
+  // 幂等计算类(POST 但无持久副作用,如 grammar-analyze/translate)可显式要重试
+  window.__safeFetch = function (input, init, conf) {
+    conf = conf || {};
+    return run(input, init, conf.retries == null ? 3 : conf.retries);
+  };
+})();
 // PDF 阅读器主模块(从 pdf_reader.html 内联 <script type="module"> 抽出,2026-06)。
 // 配置经 window.__PDF_CFG(模板内联 script 注入:pdf_url/file_rel/page)。架构/全局未变,纯物理拆分。
 window.dlog('module script 开始执行（ES module 加载 OK）');
@@ -1847,7 +1892,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-82';
+const READER_BUILD = 'reader-fix-83';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -5410,10 +5455,10 @@ window.onGrammarAnalyze = async () => {
   const blockId = 'gb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
   const block = _addLoadingBlock(blockId, sentence, text);
   try {
-    const r = await fetch('/pdf/api/grammar-analyze', {
+    const r = await __safeFetch('/pdf/api/grammar-analyze', {   // 幂等计算:切后台被掐→回前台自动重试(不重复副作用)
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({text, sentence, file: FILE_REL, enabled_books: _grammarEnabledBooks}),
-    });
+    }, {retries: 2});
     if (!r.ok) {
       let msg = `HTTP ${r.status}`;
       try { const err = await r.json(); if (err?.error) msg = err.error; } catch {}
@@ -7524,13 +7569,13 @@ window.onTranslate = async () => {
   renderVocabSentences(pw, pw.__vocabSentences);   // 呼吸 box
   try {
     const ov = _getAiOverrides();
-    const r = await fetch('/pdf/api/translate-sentence', {
+    const r = await __safeFetch('/pdf/api/translate-sentence', {   // 幂等翻译:切后台被掐→回前台自动重试
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         text: sent.text, model: ov.model || '', effort: ov.effort || '',
         file: FILE_REL, sentence: {rects: sent.rects, first_char: sent.first_char, last_char: sent.last_char, page: currentPage},
       }),
-    });
+    }, {retries: 2});
     const d = await r.json();
     sent.__translating = false;
     if (d.ok && d.zh) {
