@@ -1078,6 +1078,8 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
         _repair_tries = 0
+        _resp_retry = 0          # 首轮无响应(预热进程失效)→ 换新进程重试一次
+        _tools_ran = False       # 调过工具后进程里有对话上下文,不能再随意换进程
         _heavy = eff in ("xhigh", "max")   # 高档位(尤其 opus·max)思考久 → 放宽单轮/总超时,否则深答被腰斩成"没响应"
         _round_to = 180.0 if _heavy else 90.0
         _total_to = 320.0 if _heavy else 240.0
@@ -1098,7 +1100,21 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 else:
                     raw = val
             if not raw:
-                yield {"event": "error", "data": "助手没响应(超时)"}
+                # 模型这轮没吐字。常见原因:预热池那个 claude 进程放久了、底层会话失效 → 发过去就卡到超时。
+                # 还没调过工具(进程里没对话上下文要保)→ 杀掉它、**现起一个全新进程**重试一次(绕开失效的预热进程)。
+                if not _tools_ran and _resp_retry < 1:
+                    _resp_retry += 1
+                    try: _kill(p)
+                    except Exception: pass
+                    p = _spawn(effort=eff, model=mdl)   # 强制全新进程(不取可能也失效的预热池)
+                    if not p:
+                        yield {"event": "error", "data": "助手起不来(claude 起不来)"}
+                        return
+                    _t_start = time.time()   # 重起算新开始,重置总超时计时
+                    yield {"event": "tool", "data": "重连助手"}
+                    yield {"event": "tool-done", "data": "重连助手"}
+                    continue                 # 用同样的 content 重发
+                yield {"event": "error", "data": "助手没响应(超时)。再问我一次试试。"}
                 return
             tool = _parse_tool(raw)
             # 自愈:看着像工具调用却解析不出(texts 里常有没转义的引号/换行 → JSON 非法)→ 别当回答显示,
@@ -1112,6 +1128,7 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                            "请重新只输出**一条合法的 JSON**工具调用:字符串里的引号一律换成中文引号「」、**不要带换行**、整条只输出 JSON 别加别的字。")
                 continue
             if tool and tool.get("tool") in TOOLS:
+                _tools_ran = True   # 进程里已有对话上下文 → 之后无响应不能再换进程(会丢上下文)
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
