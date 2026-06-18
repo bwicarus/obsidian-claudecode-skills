@@ -447,6 +447,7 @@ window.__voiceContext = function () {
         } catch (_) { return [currentPage]; }
       })(),
       total: (typeof pdfDoc !== 'undefined' && pdfDoc) ? pdfDoc.numPages : 0,
+      page_offset: (typeof window._pageOffset === 'function' ? window._pageOffset() : 0),   // PDF页-印刷页:助手据此把页码转成书上印刷页(跟用户一致)
       read_mode: (typeof readMode !== 'undefined' ? readMode : ''),
       langs: (typeof BOOK_LANGS !== 'undefined' ? BOOK_LANGS : []),
       selection: sel,

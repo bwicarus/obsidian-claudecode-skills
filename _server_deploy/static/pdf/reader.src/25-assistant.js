@@ -337,7 +337,9 @@
   document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
     var t = e.target;
     if (t && t.classList && t.classList.contains('asst-pagelink') && t.dataset.page && typeof window.jumpWithBack === 'function') {
-      window.jumpWithBack(t.dataset.page);
+      // AI 写的「第N页」是**书上印刷页码** → 跳转前转回 PDF 页索引(过本书页码对齐偏移)
+      var _pg = (typeof window._pdfFromDisp === 'function') ? window._pdfFromDisp(t.dataset.page) : parseInt(t.dataset.page, 10);
+      window.jumpWithBack(_pg);
     }
   });
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
@@ -396,13 +398,13 @@
       } else {
         s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
       }
-      s.title = page ? ('跳到第 ' + page + ' 页') : '';
+      s.title = page ? ('跳到第 ' + ((typeof window._dispPage === 'function') ? window._dispPage(page) : page) + ' 页') : '';
       s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(s);
     }
     if (showPage) {
       var pg = document.createElement('span'); pg.className = 'actx-page';
-      pg.textContent = '📄 第 ' + page + ' 页';
+      pg.textContent = '📄 第 ' + ((typeof window._dispPage === 'function') ? window._dispPage(page) : page) + ' 页';   // 存的是 PDF 页 → 显印刷页
       pg.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(pg);
     }

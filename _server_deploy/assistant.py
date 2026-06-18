@@ -320,18 +320,36 @@ def _deep_link(base, file_rel, page):
 
 
 # ──────────────────────── 工具(沙盒:PDF 页可用)────────────────────────
+# ── 页码对齐:阅读器 UI / 用户 / AI 都用**书上印刷页码**;PyMuPDF / 跳转用 **PDF 页索引**。
+# ctx.page_offset(前端按本书的对齐设置传来)= PDF页 - 印刷页。两边在边界转换,内部数据(图/历史)仍存 PDF 页。
+def _to_disp(ctx, pdf):   # PDF 页 → 书上印刷页(吐给 AI / 报给用户)
+    try:
+        return int(pdf) - int((ctx or {}).get("page_offset") or 0)
+    except Exception:
+        return pdf
+
+
+def _to_pdf(ctx, disp):   # 书上印刷页 → PDF 页(读页 / 跳转用)
+    try:
+        return int(disp) + int((ctx or {}).get("page_offset") or 0)
+    except Exception:
+        return disp
+
+
 def _t_read_page(args, ctx):
-    # 双页模式下读全部可见页(ctx.pages),不传 page 时默认所有可见页
+    # 双页模式下读全部可见页(ctx.pages,PDF 索引),不传 page 时默认所有可见页;
+    # 传 page 时那是**印刷页码**(AI/用户语言)→ 转成 PDF 页读。
     if args.get("page"):
-        pages = [args["page"]]
+        pages = [_to_pdf(ctx, args["page"])]
     else:
         pages = ctx.get("pages") or [ctx.get("page", 0)]
     parts = []
     for pg in pages:
         t = _page_text(ctx.get("file_rel", ""), pg)
         if t:
-            parts.append(f"【第{pg}页】\n{t[:2800]}")
-    return {"pages": pages, "text": "\n\n".join(parts)} if parts else {"error": "这些页没取到文字(可能纯图/未OCR)"}
+            parts.append(f"【第{_to_disp(ctx, pg)}页】\n{t[:2800]}")   # 标签报印刷页
+    return ({"pages": [_to_disp(ctx, p) for p in pages], "text": "\n\n".join(parts)}
+            if parts else {"error": "这些页没取到文字(可能纯图/未OCR)"})
 
 
 def _t_read_selection(args, ctx):
@@ -354,7 +372,7 @@ def _t_search_book(args, ctx):
             low = (txt or "").lower()
             pos = low.find(ql)
             if pos >= 0:
-                hits.append({"page": int(ps),
+                hits.append({"page": _to_disp(ctx, int(ps)),   # 报印刷页给 AI
                              "snippet": (txt[max(0, pos - 15):pos + len(q) + 25] or "").replace("\n", " ").strip()})
         hits.sort(key=lambda x: x["page"])
         return {"total": len(hits), "hits": hits[:10]}
@@ -378,10 +396,11 @@ def _t_translate(args, ctx):
 
 def _t_goto_page(args, ctx):
     try:
-        n = int(args.get("page"))
+        n = int(args.get("page"))   # AI/用户给的是**印刷页码**
     except (TypeError, ValueError):
         return {"error": "page 不是数字"}
-    return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "jumpWithBack", "args": [n]}}
+    pdf_n = _to_pdf(ctx, n)         # 转成 PDF 页索引再跳(jumpWithBack 收 PDF 页)
+    return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "jumpWithBack", "args": [pdf_n]}}
 
 
 def _bg_task(kind, params, ctx):
@@ -708,7 +727,8 @@ def _t_summarize_section(args, ctx):
     if not file_rel or ".." in file_rel:
         return {"error": "没开书"}
     try:
-        page = int(args.get("page") or (ctx.get("pages") or [ctx.get("page")])[0] or 1)
+        page = (_to_pdf(ctx, args["page"]) if args.get("page")           # args.page 是印刷页→转 PDF 找章节
+                else int((ctx.get("pages") or [ctx.get("page")])[0] or 1))   # ctx 已是 PDF 页
     except Exception:
         page = 1
     try:
@@ -732,7 +752,7 @@ def _t_summarize_section(args, ctx):
             for pg in range(start, end + 1):
                 t = (doc[pg - 1].get_text("text") or "").strip()
                 if t:
-                    parts.append(f"【第{pg}页】{t}")
+                    parts.append(f"【第{_to_disp(ctx, pg)}页】{t}")
                     total += len(t)
                 if total > 9000:
                     end = pg
@@ -747,16 +767,16 @@ def _t_summarize_section(args, ctx):
         _ap = _ap_get(ctx.get("_uid"), "summarize")
         _dm, _de = _ap if _ap else ("opus", "high")
         gen = _deep_ask(
-            f"下面是《{ctx.get('book_name', '')}》「{title}」(第{start}-{end}页)的正文。"
+            f"下面是《{ctx.get('book_name', '')}》「{title}」(第{_to_disp(ctx, start)}-{_to_disp(ctx, end)}页)的正文。"
             "请用中文给出**结构化总结**:① 核心要点(分条)② 关键定义 ③ 重要公式(用 $...$)④ 易错点。"
             "引用具体内容时句末标来源页「(第N页)」。简洁但完整,别遗漏主线。\n\n正文:\n" + section_text,
             model=_dm, effort=_de)
         if gen and gen.strip():
-            return {"section_title": title, "page_range": [start, end], "summary": gen.strip(),
+            return {"section_title": title, "page_range": [_to_disp(ctx, start), _to_disp(ctx, end)], "summary": gen.strip(),
                     "_gen_model": f"{_dm}·{_de}", "_gen_action": "summarize",
                     "note": "这是深度总结好的章节内容,**直接原样转达给用户**(可微调排版,别再大改/精简),保留来源页标注。给最终回答时按规则附追问。"}
         # opus 失败 → 退回把原文交给编排器自己总结
-        return {"section_title": title, "page_range": [start, end], "truncated": total > 9000, "text": section_text,
+        return {"section_title": title, "page_range": [_to_disp(ctx, start), _to_disp(ctx, end)], "truncated": total > 9000, "text": section_text,
                 "note": "(深度总结暂不可用)这是该章节正文,请你总结成:核心要点/关键定义/重要公式/易错点,标来源页。"}
     except Exception as e:
         return {"error": str(e)[:140]}
@@ -809,8 +829,10 @@ def _tool_label(name, args):
 # ──────────────────────── agent 循环 ────────────────────────
 def _sys_prompt(ctx):
     cat = "\n".join(f"- {n}: {d}" for n, (d, _) in TOOLS.items())
+    _off = int(ctx.get("page_offset") or 0)   # PDF页 - 印刷页;给 AI 看的页码一律转成书上印刷页(跟用户一致)
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
-    meta = {"book": ctx.get("book_name"), "当前可见页": vis, "共": ctx.get("total")}
+    meta = {"book": ctx.get("book_name"), "当前可见页": [int(p) - _off for p in vis if p],
+            "共": (int(ctx["total"]) - _off) if ctx.get("total") else ctx.get("total")}
     if ctx.get("langs"):
         meta["书语言"] = ctx.get("langs")              # 让助手知道用 en/ja 处理,不必猜
     if ctx.get("read_mode") and ctx.get("read_mode") != "continuous":
@@ -893,6 +915,7 @@ def _sys_prompt(ctx):
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n"
         "★『总结这一章/这一节/这部分』用 summarize_section(它按书签切出整章正文);只『总结这页』才用 read_page。\n"
         "★『我哪本书讲过X/别的书有没有X/之前在哪见过』用 search_all_books;要跳到搜到的别的书用 open_book(file_rel,page)。\n"
+        "★页码口径:所有页码(你看到的当前页、工具返回的页、你说的页、goto_page 传的页)**一律是书上印刷页码**(跟用户看到的、跟书页角标一致),系统已自动跟 PDF 索引对齐,你**只管用印刷页码**别自己换算。\n"
         "★可溯源:凡复述/引用书里的具体内容,在句末标来源页「(第N页)」,N 必须来自工具实际返回的页码(read_page/search_book/summarize_section 都带页码),**不许编页码**。前端会把『第N页』变成可点跳转。\n"
         "★【追问建议】每次给最终回答时,在正文最后**另起一行**写 2-3 个贴合当前内容、能推进理解的下一步问题,"
         "格式就一行:[[FOLLOWUP]]问题1|问题2|问题3(用 | 分隔,放在整条回答末尾,前端会渲成可点按钮;问题要短、具体)。"
@@ -909,12 +932,13 @@ def _clean_tag(s):
     return s.translate({ord(c): None for c in "【】「」"})
 
 
-def _loc_tag(h):
-    """把某轮对话发生时的位置(书/页/选中句)拼成一小段标注,供助手定位『刚才那页』。"""
+def _loc_tag(h, offset=0):
+    """把某轮对话发生时的位置(书/页/选中句)拼成一小段标注,供助手定位『刚才那页』。
+    历史存的 page 是 PDF 索引 → 报给 AI 时减 offset 转成书上印刷页(跟 AI 整体口径一致)。"""
     bits = []
     book = _clean_tag(h.get("book"))
     pages = h.get("pages") or ([h.get("page")] if h.get("page") else [])
-    pages = [p for p in pages if p]
+    pages = [int(p) - offset for p in pages if p]
     if book:
         bits.append(book)
     if pages:
@@ -925,11 +949,11 @@ def _loc_tag(h):
     return ("(" + "，".join(bits) + ")") if bits else ""
 
 
-def _format_history(history):
+def _format_history(history, offset=0):
     out = []
     for h in (history or [])[-6:]:
         if h.get("role") == "user":
-            role, tag = "用户", _loc_tag(h)   # 用户那轮标上当时所在页/书/选中句
+            role, tag = "用户", _loc_tag(h, offset)   # 用户那轮标上当时所在页(印刷)/书/选中句
         else:
             role, tag = "助手", ""
         c = (h.get("content") or "").strip()
@@ -1051,7 +1075,7 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
         yield {"event": "notice", "data": _qw}
     client_actions = []
     try:
-        content = f"{_sys_prompt(ctx)}\n\n{_format_history(history)}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
+        content = f"{_sys_prompt(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
         _repair_tries = 0
         _heavy = eff in ("xhigh", "max")   # 高档位(尤其 opus·max)思考久 → 放宽单轮/总超时,否则深答被腰斩成"没响应"
