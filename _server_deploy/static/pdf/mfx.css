@@ -172,7 +172,10 @@ h1,h3,.gb-title,.wp-word,.vi-word,.kg-node-main,.bs-item>*:first-child{text-wrap
   background:linear-gradient(var(--c-accent-br),var(--c-cyan));box-shadow:0 0 6px rgba(96,165,250,.7)}
 /* 流式期间整条回答微微提亮,强调"正在生成" */
 .asst-a.mfx-streaming{box-shadow:0 0 0 1px rgba(96,165,250,.28),0 0 16px rgba(96,165,250,.14)}
-/* 完成后渐入的后续部分(追问 chip / 「!」反馈条) */
+/* 逐字浮现(Design 改:CSS 动画驱动,走合成器时间线,不受 JS 定时器节流影响,始终顺滑)。
+   每字 .mfx-w 由 25-assistant.js 在每个 SSE delta 重渲后包出 + 累加 animation-delay。
+   .mfx-shown=本集成的"前缀跳过"标记:上轮已显示过的字即时显示,不重播(整段重渲下防闪)。 */
+.mfx-w{opacity:1}
 .mfx-after{opacity:0;transform:translateY(6px)}
 .mfx-after.on{opacity:1;transform:none;transition:opacity .4s ease,transform .4s cubic-bezier(.22,1,.36,1)}
 @media (prefers-reduced-motion:no-preference){
@@ -182,4 +185,7 @@ h1,h3,.gb-title,.wp-word,.vi-word,.kg-node-main,.bs-item>*:first-child{text-wrap
   .mfx-typing i:nth-child(3){animation-delay:.32s}
   @keyframes mfx-blink{0%,45%{opacity:1}55%,100%{opacity:0}}
   .mfx-caret{animation:mfx-blink 1s steps(1) infinite}
+  @keyframes mfx-char{from{opacity:0;filter:blur(4px)}to{opacity:1;filter:none}}
+  .asst-a.mfx-streaming .mfx-w{opacity:0;animation:mfx-char .34s ease both}
+  .asst-a.mfx-streaming .mfx-w.mfx-shown{animation:none;opacity:1;filter:none}   /* 前缀已显示:即时,不重播 */
 }
