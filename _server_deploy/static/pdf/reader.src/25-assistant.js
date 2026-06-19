@@ -152,13 +152,13 @@
   }
   // stream-fx(mfx):流式期间在回答末尾挂一个闪烁光标(renderMd 每 delta 重渲 innerHTML,故每次都补挂)
   function _appendCaret(el) { try { var c = document.createElement('span'); c.className = 'mfx-caret'; el.appendChild(c); } catch (_) {} }
-  // 逐字浮现(Design CSS 动画驱动版):把 el 正文按 字/词 包进 .mfx-w;
-  //   下标 < shownN 的字标记 mfx-shown(上轮已显示,即时不重播) → 防整段重渲下闪;
-  //   下标 ≥ shownN 的"新尾巴"累加 animation-delay 错峰淡入(CSS @keyframes mfx-char,走合成器,不受 JS 节流)。
-  //   光标插在最后一个字后面。返回本次总字数(作为下轮 shownN)。长答案(>5000 字)跳过逐字以保性能。
-  var _STREAM_STEP = 22;   // 每个新字的错峰间隔(ms)
-  function _streamWrap(el, shownN) {
-    var idx = 0, last = null;
+  // 逐字浮现 —— 把 el 正文按 字/词 切片包进 .mfx-w(返回 {spans,total})。
+  //   下标 < revN(揭示游标,已揭示)的字打 .mfx-shown → 即时显示,不重播(整段重渲下防闪);
+  //   下标 ≥ revN 的字默认隐藏(CSS),由 _revealTick 揭示游标连续推进时逐个加 .mfx-reveal 淡入。
+  //   这样"揭示节奏"由稳定速度的游标驱动,跟 SSE delta 的到达节奏解耦 → 真·连续逐字(不是段一段)。
+  //   光标放在揭示 frontier(第 revN-1 个)后面。长答案(>5000 字)外层跳过逐字以保性能。
+  function _streamWrap(el, revN) {
+    var idx = 0, spans = [];
     function walk(node) {
       var kids = Array.prototype.slice.call(node.childNodes);
       for (var i = 0; i < kids.length; i++) {
@@ -170,9 +170,8 @@
           toks.forEach(function (p) {
             if (/^\s+$/.test(p)) { frag.appendChild(document.createTextNode(p)); return; }
             var s = document.createElement('span'); s.className = 'mfx-w'; s.textContent = p;
-            if (idx < shownN) { s.classList.add('mfx-shown'); }
-            else { s.style.animationDelay = ((idx - shownN) * _STREAM_STEP) + 'ms'; }
-            frag.appendChild(s); last = s; idx++;
+            if (idx < revN) { s.classList.add('mfx-shown'); }   // 已揭示:即时
+            frag.appendChild(s); spans.push(s); idx++;
           });
           node.replaceChild(frag, n);
         } else if (n.nodeType === 1 && n.className !== 'mfx-caret') {
@@ -180,10 +179,11 @@
         }
       }
     }
-    try { walk(el); } catch (_) { return shownN; }
-    if (last && last.parentNode) { var c = document.createElement('span'); c.className = 'mfx-caret'; last.parentNode.insertBefore(c, last.nextSibling); }
-    else { _appendCaret(el); }
-    return idx;
+    try { walk(el); } catch (_) { return { spans: [], total: idx }; }
+    var f = spans[Math.min(revN, spans.length) - 1];
+    var c = document.createElement('span'); c.className = 'mfx-caret';
+    if (f && f.parentNode) { f.parentNode.insertBefore(c, f.nextSibling); } else { el.appendChild(c); }
+    return { spans: spans, total: idx };
   }
   // 收尾:把追问 chip / 「!」反馈条做一次淡入(逐个错峰)
   function _fadeInAfter(el) {
@@ -527,7 +527,30 @@
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
-    var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0, _revealN = 0;   // _revealN:已逐字浮现过的字数(本轮),给 _streamWrap 做前缀跳过
+    var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
+    // 逐字浮现的"揭示游标":跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)
+    var _revN = 0, _spans = [], _tot = 0, _raf = null, _lastTs = 0, _acc = 0, _noChar = false;
+    function _revealTick(ts) {
+      _raf = null;
+      if (!streaming) return;
+      if (!_lastTs) _lastTs = ts;
+      var dt = Math.min(ts - _lastTs, 120); _lastTs = ts;   // clamp:切后台回来 dt 巨大,别一次灌完
+      var backlog = _tot - _revN;
+      if (backlog > 0) {
+        var rate = 0.05 * (1 + backlog / 40);               // 字/ms:落后越多揭示越快,追上自然放慢
+        _acc += dt * rate;
+        var n = Math.min(backlog, Math.floor(_acc), 6);     // 每帧上限 6,防一次性灌入又变"段"
+        if (n > 0) {
+          _acc -= n;
+          for (var k = 0; k < n; k++) { var s = _spans[_revN]; if (s) s.classList.add('mfx-reveal'); _revN++; }
+          var c = aMsg.querySelector('.mfx-caret'), f = _spans[_revN - 1];
+          if (c && f && f.parentNode) f.parentNode.insertBefore(c, f.nextSibling);
+          scrollDown();
+        }
+      }
+      if (streaming) _raf = requestAnimationFrame(_revealTick);
+    }
+    function _stopReveal() { if (_raf) { try { cancelAnimationFrame(_raf); } catch (_) {} _raf = null; } }
     var rid = 'c' + Date.now() + '_' + (_ridCtr++);   // 本轮任务 id:断线用它重连续读(服务端 detached 跑,不绑请求)
     var evSeen = 0, done = false;                      // 已消费的缓冲事件数(重连用 from=evSeen 续传)
     function _handleEv(ev, parsed) {
@@ -535,7 +558,18 @@
       evSeen++;
       if (ev === 'done') { done = true; return; }
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
-      else if (ev === 'answer') { answer = parsed; var _at = _splitFollowups(answer).text; renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming'); if (_at.length <= 5000) { _revealN = _streamWrap(aMsg, _revealN); } else { _appendCaret(aMsg); } scrollDown(); }   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现+光标(mfx);长答案跳过逐字保性能
+      else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
+        answer = parsed; var _at = _splitFollowups(answer).text;
+        renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
+        if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
+        if (_noChar) { _appendCaret(aMsg); }
+        else {
+          var w = _streamWrap(aMsg, _revN); _spans = w.spans; _tot = w.total;   // 重渲后重包:已揭示打 mfx-shown,新字等游标
+          if (_revN > _tot) _revN = _tot;
+          if (!_raf) { _lastTs = 0; _raf = requestAnimationFrame(_revealTick); }   // 启动/续跑揭示循环
+        }
+        scrollDown();
+      }
       else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
       else if (ev === 'actions') { acts = parsed; }
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
@@ -598,7 +632,8 @@
       if (rec && rec.content) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
     }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
-    aMsg.classList.remove('mfx-streaming');   // stream-fx:停止提亮(renderMd/fallback 会把光标一并清掉)
+    _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
+    aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
     if (pf.text) renderMd(aMsg, pf.text, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');

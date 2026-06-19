@@ -186,6 +186,7 @@ h1,h3,.gb-title,.wp-word,.vi-word,.kg-node-main,.bs-item>*:first-child{text-wrap
   @keyframes mfx-blink{0%,45%{opacity:1}55%,100%{opacity:0}}
   .mfx-caret{animation:mfx-blink 1s steps(1) infinite}
   @keyframes mfx-char{from{opacity:0;filter:blur(4px)}to{opacity:1;filter:none}}
-  .asst-a.mfx-streaming .mfx-w{opacity:0;animation:mfx-char .34s ease both}
-  .asst-a.mfx-streaming .mfx-w.mfx-shown{animation:none;opacity:1;filter:none}   /* 前缀已显示:即时,不重播 */
+  .asst-a.mfx-streaming .mfx-w{opacity:0}                                        /* 流式态默认隐藏,等揭示游标推进 */
+  .asst-a.mfx-streaming .mfx-w.mfx-shown{opacity:1}                              /* 上轮已揭示(重渲后即时,不重播) */
+  .asst-a.mfx-streaming .mfx-w.mfx-reveal{animation:mfx-char .34s ease both}     /* 游标刚揭示这一字:淡入 */
 }
