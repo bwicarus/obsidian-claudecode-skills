@@ -1792,8 +1792,8 @@ def pdf_api_ocr_selection():
         text = _claude_ocr_crop(png, model, effort)
         if not text:
             return jsonify({"ok": False, "error": "OCR 没结果,再试一次"}), 502
-        text = _re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
-        text = _re.sub(r"\n?```$", "", text).strip()
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
+        text = re.sub(r"\n?```$", "", text).strip()
         # 持久化:用**原始选区 bbox**(不含 padding)归一化存校正 → 注入字符层,重选/复制/翻译永久生效
         cv = None
         try:
