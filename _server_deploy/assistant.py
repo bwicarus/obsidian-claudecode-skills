@@ -740,6 +740,75 @@ def _t_search_all_books(args, ctx):
             "note": "is_current_book=true 是用户正在读的书。要跳到别的书用 open_book(file_rel, page)。"}
 
 
+def _t_recall_notes(args, ctx):
+    """**本地召回**用户已学/已记的相关笔记:先查『知识索引』(index/*.md,带关键词+摘要),命中少时
+    grep vault markdown 笔记全文兜底。纯本地查(读文件 / grep),**不调 AI**,几百毫秒。
+    把用户已有的知识拉进来辅助回答(像 references/skill 那样按需召回),让助手结合他的知识体系而非只看当前页。"""
+    q = (args.get("query") or "").strip()
+    if not q:                                   # 没给主题 → 用选中/焦点兜底
+        q = (ctx.get("selection") or "").strip()
+        fs = ctx.get("focus_sel") or {}
+        if not q and isinstance(fs, dict):
+            q = (fs.get("text") or "").strip()
+    if not q:
+        return {"error": "没给要召回的主题(query)"}
+    import re
+    q = q[:80]
+    terms = [t for t in re.split(r"[\s,，、；;。.()（）/\\]+", q) if len(t) >= 2][:8] or [q]
+    hits = []
+    seen = set()
+    # 1) 知识索引(带摘要,最有价值)
+    try:
+        for f in (CLAUDE_DIR / "index").glob("*.md"):
+            if f.name == "knowledge-index.md":
+                continue
+            subj = f.stem
+            for line in f.read_text("utf-8", errors="ignore").splitlines():
+                m = re.match(r"^\s*-\s*\[\[([^\]]+)\]\]\s*`([^`]*)`\s*[—–-]\s*(.*)$", line)
+                if not m:
+                    continue
+                name, kw, summ = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+                blob = name + " " + kw + " " + summ
+                score = sum(1 for t in terms if t in blob)
+                if score and name not in seen:
+                    seen.add(name)
+                    hits.append({"_s": score + 1, "note": name, "subject": subj,
+                                 "keywords": kw[:120], "summary": summ[:220], "src": "知识索引"})
+    except Exception:
+        pass
+    # 2) 索引命中少 → grep vault 笔记全文(快,C 实现;用最长的 term 当主键)
+    if len(hits) < 3:
+        try:
+            import subprocess
+            key = max(terms, key=len)
+            r = subprocess.run(["grep", "-rIl", "--include=*.md", "-m1", "-F", key, str(VAULT_ROOT)],
+                               capture_output=True, text=True, timeout=6)
+            for path in (r.stdout or "").splitlines()[:8]:
+                name = Path(path).stem
+                if name in seen:
+                    continue
+                seen.add(name)
+                try:
+                    body = Path(path).read_text("utf-8", errors="ignore")
+                except Exception:
+                    continue
+                pos = body.find(key)
+                snip = body[max(0, pos - 20):pos + 80].replace("\n", " ").strip() if pos >= 0 else body[:100].replace("\n", " ").strip()
+                score = sum(1 for t in terms if t in body)
+                hits.append({"_s": score, "note": name, "subject": "", "keywords": "",
+                             "summary": snip[:220], "src": "笔记全文"})
+        except Exception:
+            pass
+    hits.sort(key=lambda h: -h["_s"])
+    top = hits[:6]
+    for h in top:
+        h.pop("_s", None)
+    if not top:
+        return {"results": [], "note": f"你的笔记/知识索引里**没找到**跟『{q}』明显相关的(这块可能还没记过笔记)。就按通用知识回答即可,别硬扯。"}
+    return {"results": top, "note": "下面是你**自己笔记里**相关的条目(带摘要/片段)。结合你已学过/记过的内容回答,"
+            "可以点出『你在《X》笔记里记过…』帮你串起来;笔记名用 [[名]] 提及。别照搬,按理解讲。"}
+
+
 def _t_open_book(args, ctx):
     """打开另一本书(可定位到页),前端导航。args {file_rel | book(书名,模糊匹配书架), page?}。"""
     file_rel = (args.get("file_rel") or "").strip()
@@ -834,6 +903,9 @@ TOOLS = {
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
     "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用)。args {query}", _t_search_all_books),
+    "recall_notes": ("**召回用户自己的笔记/知识索引**里跟某主题相关的(带关键词+摘要,本地查不耗时)。"
+                     "想把当前内容跟『用户已学过/已记过的』串起来、用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关吗』、"
+                     "或要结合他的知识体系深入讲时用。args {query:主题词}(不传用选中/焦点)", _t_recall_notes),
     "open_book": ("打开另一本书并可定位到页(跨书跳转)。args {file_rel | book(书名), page?}", _t_open_book),
     "summarize_section": ("取当前页所在『整章/整节』正文交给你总结(read_page 只逐页,『总结这一章』用这个)。args {page?}", _t_summarize_section),
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
@@ -863,7 +935,8 @@ def _tool_label(name, args):
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
-            "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "see_ink": "看笔迹标注", "undo_last": "撤销"}.get(name, name)
+            "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "see_ink": "看笔迹标注",
+            "recall_notes": "召回我的笔记", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -992,6 +1065,9 @@ def _sys_prompt(ctx):
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。\n"
         "★『总结这一章/这一节/这部分』用 summarize_section(它按书签切出整章正文);只『总结这页』才用 read_page。\n"
         "★『我哪本书讲过X/别的书有没有X/之前在哪见过』用 search_all_books;要跳到搜到的别的书用 open_book(file_rel,page)。\n"
+        "★想把当前内容跟用户**已学过/已记过的笔记**串起来(用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关』,"
+        "或你要结合他的知识体系深入讲)→ 用 recall_notes(query=主题)召回他自己的笔记(本地查不耗时);"
+        "召回到就点出『你在《X》笔记里记过…』帮他连点成线,没召回到就按通用知识答、别硬扯。\n"
         "★页码口径:所有页码(你看到的当前页、工具返回的页、你说的页、goto_page 传的页)**一律是书上印刷页码**(跟用户看到的、跟书页角标一致),系统已自动跟 PDF 索引对齐,你**只管用印刷页码**别自己换算。\n"
         "★可溯源:凡复述/引用书里的具体内容,在句末标来源页「(第N页)」,N 必须来自工具实际返回的页码(read_page/search_book/summarize_section 都带页码),**不许编页码**。前端会把『第N页』变成可点跳转。\n"
         "★【追问建议】每次给最终回答时,在正文最后**另起一行**写 2-3 个贴合当前内容、能推进理解的下一步问题,"

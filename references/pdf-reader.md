@@ -1025,3 +1025,11 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
    - `_text_under_ink(rel,page,strokes=)` 几何提取(圈=框内、扁笔画=线上方一行)当便宜 hint,纯涂画就只靠 see_ink 合成图。
    - ⚠ **撤掉了一开始的"无条件自动附图"版**(每条都附 → 费/慢/可能跟问题无关)。
 **坑/边界**:① ink 坐标是归一化 0-1(跟 sidecar 一致),`_figure_crop_png`/`_text_under_ink` 都按归一化 ×页宽高转 PDF pt。② 有笔迹的每条提问都附图(小图~17KB,token 可控),满页涂画时焦点框≈整页(退化成 see_page,可接受)。③ `_ink_focus_image` >3MB 自动降档。
+
+### 44. 按需召回 recall_notes:编排器把当前内容跟"用户已记的笔记"串起来(2026-06-19)
+
+**思路**(用户类比 Claude Code skills/references 渐进式加载):助手的工具循环本就是"router + 按需拉"的模式;补一个**召回用户自己知识**的工具,从"只看当前页"升级到"结合他的知识库"。
+- `assistant._t_recall_notes(args{query})`:**纯本地查、不调 AI**。① 先扫知识索引 `index/*.md`(`- [[名]] \`关键词\` — 摘要` 格式,带摘要最有价值)按 query 词重叠打分;② 命中 <3 条 → `grep -rIl -F` vault markdown 笔记全文兜底(C 实现快)。返回 top6 {note,subject,keywords,summary,src}。
+- 注册进 TOOLS + sys prompt 路由规则:『想把当前内容跟用户已学过/已记过串起来,或用户问"我之前记过吗/我笔记里有没有X"→ recall_notes;召回到就点出"你在《X》笔记里记过…",没召回到就按通用知识答别硬扯』。
+- **延迟实测**:知识索引命中 ~0–1ms,grep 兜底 ~200ms(扫 1902 篇),无 AI 调用 → 真正成本只是"多一个 agentic 回合"(几秒,跟 read_page/see_ink 同量级),且只在编排器判断需要时才花。
+**设计要点**:① 召回必须**本地查不碰 AI**(否则多一次模型调用才会显著加时);② 知识索引是 curated 摘要层(最有价值),vault 全文 grep 当兜底;③ 没命中如实返回"没相关笔记"让 AI 别硬扯。**架构注记**:这是"工具=能力注册表 + 编排器按需调"模式的延伸(同 Claude Code 渐进式加载);当前 ~20 工具全列进 prompt 没问题,涨到 ~30+ 再考虑 deferred/可搜索工具注册表(Claude Code ToolSearch 那套)。
