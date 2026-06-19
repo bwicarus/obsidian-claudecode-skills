@@ -1892,7 +1892,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-inkfocus-93';
+const READER_BUILD = 'reader-inkselfix-94';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -3574,6 +3574,7 @@ function _bindCharLayer(cl, pw) {
     return -1;
   };
   const onStart = (x, y) => {
+    if (window._ink && (_ink.mode || _ink.drawing)) return false;   // 手写模式/正在画 → 不选字(防御:各入口都兜住)
     _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
     _hideFmlPop();           // 任何新按下先关掉旧公式浮层(若新点中公式,onEnd 会重新弹)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
@@ -3718,6 +3719,7 @@ function _bindCharLayer(cl, pw) {
 
   cl.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (window._ink && (_ink.mode || _ink.drawing)) return;        // 桌面手写模式/正在画 → 鼠标用于画,不选字
     if (Date.now() - (window._clLastTouchAt || 0) < 700) return;   // 忽略 touch 后 iOS 合成的 mousedown（否则 onStart 双触发→假双击→刚弹的小框被冲掉）
     e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
     const p = ptToLocal(e.clientX, e.clientY);
@@ -3726,6 +3728,11 @@ function _bindCharLayer(cl, pw) {
   // document 级 mousemove/mouseup 移到模块顶层单 dispatcher(经 pw.__charDrag 分发),不再每次绑定泄漏
   cl.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
+    // Apple Pencil(touchType='stylus')或手写模式/正在画 → 让墨迹层处理,**不选字**
+    // (墨迹绘制在 wrap 的 pointerdown,跟这条 touchstart 是不同类事件,pointerdown 的 stopPropagation 挡不住它)
+    if ((e.touches[0] && e.touches[0].touchType === 'stylus') || (window._ink && (_ink.mode || _ink.drawing))) {
+      _dragStartCharIdx = null; _swipeStart = null; return;
+    }
     window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
     e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];

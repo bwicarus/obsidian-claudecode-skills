@@ -1040,3 +1040,9 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - 实测:向量空间→7索引+1图谱;泰勒级数→索引+2 Anki卡;`present past`→0(EGIU 那个节点没 mastered 故正确排除);全 ~17ms 无 AI。
 
 **实测踩坑(2026-06-19,端到端验证)**:① 编排器会把短语 query 传成**去虚词的复合词**(『向量空间的定义』→`向量空间定义`),整串子串匹配不到索引(索引是『向量空间』+『定义』分开)→ 命中 0。修:匹配信号 = 实词(权重2)+ **CJK 二元组 bigram**(权重1,`向量/量空/空间/间定/定义`),真词条命中多个 bigram 自然排前;阈值『score≥2 或 含≥3字实词』滤掉单 bigram 噪声。② Anki grep 预筛主键不能用整复合词(卡里拆开的),改 `grep -rIlE 实词|bigram` 宽召回再 `_score` 精筛。③ 验证:`向量空间定义`→8(6索引+2图谱)、`链式法则`→索引+2Anki卡、`present past`→0、端到端 AI 真引用 [[000-向量空间]]/[[F^s]]/图谱已掌握节点。`_send_stream` 吐的是**累积文本**(前端替换显示),别在测试里 += 累积(会平方级重复,虚惊)。
+
+### 45. 手写时下方文字被选中:墨迹(pointerdown)与选字(touchstart/mousedown)是不同类事件(2026-06-19,`reader-inkselfix-94`)
+
+**问题**(用户:手写笔画字时下方文字也被选中):墨迹绘制绑在 `wrap` 的 **`pointerdown`**(`_inkPointerDown`,模板内联脚本),笔落下时它 `stopPropagation` 想挡选字;但字符层选字绑的是 **`cl.mousedown` / `cl.touchstart`**(`13-selection.js`)——**不同类事件**,pointerdown 的 stopPropagation 拦不住它,且 Apple Pencil 在 iOS 上会同时派发 touchstart → 照样 `onStart` 选字。
+**修**:字符层 touchstart/mousedown + onStart 加墨迹门控:① touchstart:`e.touches[0].touchType === 'stylus'`(Apple Pencil)→ 直接 return,不选字(直接在 touchstart 层识别铁笔,不依赖事件顺序);② mousedown + touchstart + onStart 都加 `if (window._ink && (_ink.mode || _ink.drawing)) return`(桌面手写模式 / 正在画)。墨迹层照常画(wrap pointerdown 不动),只挡字符层选中。
+**注**:`_ink` 全局在模板内联脚本(`window._ink`),手写整模块(inkToggle/_inkPointerDown/_inkRedraw…)都在模板 `<script>` 里、不在 reader.js;reader.src 只能 `window._ink && ...` 防御性引用。
