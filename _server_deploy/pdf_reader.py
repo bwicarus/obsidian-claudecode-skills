@@ -4918,7 +4918,7 @@ def _fig_done_page(data: dict, page: int) -> bool:
 
 # ─── 选区 OCR 校正 sidecar：坏文字层的『选区重新识别』结果持久化，注入字符层永久生效 ───
 _OCRFIX_DIR = CLAUDE_DIR / "state" / "pdf-ocr-fix"
-_OCRFIX_INJECT_VER = 6   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
+_OCRFIX_INJECT_VER = 7   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
 
 
 def _ocrfix_path_abs(abs_path) -> Path:
@@ -5002,25 +5002,62 @@ def _ocr_token_ids(txt):
     return ids
 
 
-def _ocr_visual_weights(txt):
-    """每个字符的『视觉宽度权重』:LaTeX 标记($ ^ _ {} 命令名字母)几乎不占视觉宽度 → 权重 0;
-    `\\` 命令本身(\\times→× / \\sim→~)≈ 0.8 代表它渲染出的那个符号;空格 0.3;其余可见字符 1。
-    用累积权重做位置映射(而非字符数),避免 LaTeX 源码膨胀把数学段撑得过宽、盖住后文。"""
-    w = [0.0] * len(txt); cmd = False
-    for i, ch in enumerate(txt):
-        if ch == "$":
-            w[i] = 0.0; cmd = False
-        elif ch == "\\":
-            w[i] = 0.8; cmd = True            # 命令渲染出 ~1 个符号
-        elif cmd and ch.isalpha():
-            w[i] = 0.0                          # 命令名字母(times/sim…)不占宽
-        elif ch in "^_{}":
-            w[i] = 0.0; cmd = False
-        elif ch.isspace():
-            w[i] = 0.3; cmd = False
+def _ocr_align_positions(txt, orig, fx0, fy0, fx1, fy1):
+    """把校正文字 txt 对齐到原字形真实位置:**LCS 找 txt 跟原字形串的公共子序列当锚点**
+    (相同字 = 原字形坏文字层里也对、位置也对),锚点用原字形精确 x/y;不同的字(数学/Å/LaTeX 标记)
+    在相邻锚点间按 index 线性插值。返回每个 txt 字符的 (x0,y0,x1,y1)。
+    这是用户的思路:相同字符作对照,不同字符的 OCR 结果放中间。"""
+    N = len(txt); M = len(orig)
+    if M == 0 or N == 0:
+        sw = (fx1 - fx0) / max(1, N)
+        return [(fx0 + i * sw, fy0, fx0 + (i + 1) * sw, fy1) for i in range(N)]
+    o = [c["c"] for c in orig]
+    # LCS DP(自底向上)
+    dp = [[0] * (M + 1) for _ in range(N + 1)]
+    for i in range(N - 1, -1, -1):
+        di, di1 = dp[i], dp[i + 1]
+        ti = txt[i]
+        for j in range(M - 1, -1, -1):
+            di[j] = di1[j + 1] + 1 if ti == o[j] else (di1[j] if di1[j] >= di[j + 1] else di[j + 1])
+    # 回溯出锚点 (txt 下标, x 中心, y0, y1)
+    anc = []
+    i = j = 0
+    while i < N and j < M:
+        if txt[i] == o[j]:
+            anc.append((i, (orig[j]["x0"] + orig[j]["x1"]) / 2.0, orig[j]["y0"], orig[j]["y1"]))
+            i += 1; j += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            i += 1
         else:
-            w[i] = 1.0; cmd = False
-    return w
+            j += 1
+    if not anc:                                  # 无公共字 → 退回 bbox 内均匀
+        sw = (fx1 - fx0) / N
+        return [(fx0 + k * sw, fy0, fx0 + (k + 1) * sw, fy1) for k in range(N)]
+    # 控制点 = 两端(bbox 边,y 借最近锚点)+ 各锚点;每个 txt 字符的中心 x 按 index 在控制点间线性插值
+    ctrl = [(-1.0, fx0, anc[0][2], anc[0][3])] + [(float(a[0]), a[1], a[2], a[3]) for a in anc] \
+        + [(float(N), fx1, anc[-1][2], anc[-1][3])]
+    cen = []
+    p = 0
+    for k in range(N):
+        while p + 1 < len(ctrl) - 1 and ctrl[p + 1][0] <= k:
+            p += 1
+        a, b = ctrl[p], ctrl[p + 1]
+        fr = 0.0 if b[0] == a[0] else (k - a[0]) / (b[0] - a[0])
+        fr = min(1.0, max(0.0, fr))
+        cx = a[1] * (1 - fr) + b[1] * fr
+        gy0, gy1 = (a[2], a[3]) if fr < 0.5 else (b[2], b[3])
+        cen.append((cx, gy0, gy1))
+    # 中心 x → [x0,x1]:取到左右邻居中心的中点,得连续不重叠的格子
+    out = []
+    for k in range(N):
+        cx, gy0, gy1 = cen[k]
+        lx = cen[k - 1][0] if k > 0 else fx0
+        rx = cen[k + 1][0] if k < N - 1 else fx1
+        x0 = (lx + cx) / 2.0; x1 = (cx + rx) / 2.0
+        if x1 - x0 < 0.2:
+            x1 = x0 + 0.2
+        out.append((round(x0, 2), round(gy0, 2), round(x1, 2), round(gy1, 2)))
+    return out
 
 
 def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
@@ -5072,33 +5109,11 @@ def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
             continue
         tok = _ocr_token_ids(txt)            # 每字符所属 token 号 → 词 id 按 token 分,可分开点/选
         wbase, bk = WID + fi * 100000, BK + fi
-        M = len(orig)
-        # 按**累积视觉权重**比例插值到原字形真实 x 边界(保单调=阅读序对、跟真实字距走、且 LaTeX 标记被压扁
-        # 不占宽 → 数学段不会被源码膨胀撑过宽盖住后文)。y 跟所映射到的原字形(多行也对)。
-        vw = _ocr_visual_weights(txt)
-        cum = [0.0]
-        for x in vw:
-            cum.append(cum[-1] + x)
-        tot = cum[-1] or 1.0
-        edges = ([c["x0"] for c in orig] + [orig[-1]["x1"]]) if M else None   # M+1 个 x 边界
-
-        def _xat(p):                         # 比例 p∈[0,1] → 原字形边界上插值的 x
-            fp = p * M; lo = int(fp)
-            if lo >= M:
-                return edges[M]
-            return edges[lo] * (1 - (fp - lo)) + edges[lo + 1] * (fp - lo)
+        pos = _ocr_align_positions(txt, orig, fx0, fy0, fx1, fy1)   # LCS 锚点对齐:相同字用原字形精确位置,不同字插值
         for i, cc in enumerate(txt):
-            if M:
-                sx0 = _xat(cum[i] / tot); sx1 = _xat(cum[i + 1] / tot)
-                gm = min(int((cum[i] / tot) * M), M - 1)
-                gy0, gy1 = orig[gm]["y0"], orig[gm]["y1"]
-            else:                            # 没捕到原字形(罕见)→ 退回 bbox 内均匀
-                sw0 = (fx1 - fx0) / N; sx0 = fx0 + i * sw0; sx1 = sx0 + sw0; gy0, gy1 = fy0, fy1
-            if sx1 - sx0 < 0.2:
-                sx1 = sx0 + 0.2                # 0 宽字符(LaTeX 标记)给极小宽度,不参与视觉但仍可被选进
+            px0, py0, px1, py1 = pos[i]
             chars.append({
-                "c": cc, "x0": round(sx0, 2), "y0": round(gy0, 2),
-                "x1": round(sx1, 2), "y1": round(gy1, 2),
+                "c": cc, "x0": px0, "y0": py0, "x1": px1, "y1": py1,
                 "sp": 1 if cc.isspace() else 0, "w": wbase + tok[i], "b": 0, "bk": bk, "ocrfix": 1,
             })
 
