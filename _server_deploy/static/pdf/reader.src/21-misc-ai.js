@@ -322,6 +322,9 @@ window.onOcrSel = async () => {
     x1 = Math.max(x1, c._x1); y1 = Math.max(y1, c._y1); n++;
   }
   if (!n) { (typeof _toast === 'function') && _toast('选区无效'); return; }
+  // ★用**选中所在页**(选区 char 层属于哪个 page-wrap),不能用 currentPage:连续滚动下视口居中页 ≠ 选中页,
+  //   否则后端拿错页去裁选区坐标 → OCR 到别的内容、校正还存到错页(重选永远修不上)。
+  const selPage = parseInt((pw.dataset && pw.dataset.pageNum) || currentPage, 10) || currentPage;
   const prev = document.getElementById('sel-preview');
   const old = prev ? prev.innerHTML : '';
   if (prev) prev.innerHTML = '🔎 OCR 识别中…';
@@ -329,7 +332,7 @@ window.onOcrSel = async () => {
     const ov = _getAiOverrides();
     const r = await __safeFetch('/pdf/api/ocr-selection', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file: FILE_REL, page: currentPage, bbox: [x0, y0, x1, y1],
+      body: JSON.stringify({file: FILE_REL, page: selPage, bbox: [x0, y0, x1, y1],
                             model: ov.model || '', effort: ov.effort || ''}),
     });
     const j = await r.json();
@@ -337,7 +340,7 @@ window.onOcrSel = async () => {
       lastSelText = j.text;                     // 校正后的文字回填,下游(复制/翻译/解释/对话)全用它
       if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓ 已写入</span>';
       // 持久化已落库:更新本页 cv(让重渲第一拉就命中新版)+ 立即重渲本页 → 校正注入字符层、永久生效
-      if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, j.cv); } catch (_) {} }
+      if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + selPage, j.cv); } catch (_) {} }
       if (typeof _rerenderLoadedPages === 'function') { try { _rerenderLoadedPages(); } catch (_) {} }
       (typeof _toast === 'function') && _toast('已 OCR 校正并永久写入页面');
     } else {
