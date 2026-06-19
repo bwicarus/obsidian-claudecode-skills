@@ -776,37 +776,67 @@ def _t_recall_notes(args, ctx):
                                  "keywords": kw[:120], "summary": summ[:220], "src": "知识索引"})
     except Exception:
         pass
-    # 2) 索引命中少 → grep vault 笔记全文(快,C 实现;用最长的 term 当主键)
-    if len(hits) < 3:
-        try:
-            import subprocess
-            key = max(terms, key=len)
-            r = subprocess.run(["grep", "-rIl", "--include=*.md", "-m1", "-F", key, str(VAULT_ROOT)],
-                               capture_output=True, text=True, timeout=6)
-            for path in (r.stdout or "").splitlines()[:8]:
-                name = Path(path).stem
-                if name in seen:
+    # (不做 raw vault 全文 grep:短/拉丁词子串会匹配到 base64 附件、represent⊃present 等噪声,
+    #  把没学过的笔记误当"学过"——违背"只算真学过的"。只用下面三个 curated/用户亲手做的高精度来源。)
+    # 3) 知识图谱节点 —— **只召回真学过的**(mastered / 有 containing_notes 笔记 / mastery>0),
+    #    没学过的节点(book 结构自动生成、大量 locked)绝不算"已学",免得 AI 误以为用户掌握了。
+    try:
+        ql = q.lower()
+        for f in (CLAUDE_DIR / "knowledge_graph").glob("*.json"):
+            if any(x in f.name for x in (".bak", ".pre", ".scan")) or f.name == "kg_audit.json":
+                continue
+            try:
+                kg = json.loads(f.read_text("utf-8", errors="ignore"))
+            except Exception:
+                continue
+            book = kg.get("title") or kg.get("book") or f.stem
+            for nd in (kg.get("nodes") or []):
+                nm = (nd.get("name") or "").strip()
+                if not nm:
                     continue
-                seen.add(name)
-                try:
-                    body = Path(path).read_text("utf-8", errors="ignore")
-                except Exception:
+                learned = bool(nd.get("mastered")) or bool(nd.get("containing_notes")) or bool(nd.get("mastery"))
+                if not learned:
                     continue
-                pos = body.find(key)
-                snip = body[max(0, pos - 20):pos + 80].replace("\n", " ").strip() if pos >= 0 else body[:100].replace("\n", " ").strip()
-                score = sum(1 for t in terms if t in body)
-                hits.append({"_s": score, "note": name, "subject": "", "keywords": "",
-                             "summary": snip[:220], "src": "笔记全文"})
-        except Exception:
-            pass
+                low = nm.lower()
+                score = sum(1 for t in terms if t.lower() in low)
+                if score:
+                    cn = nd.get("containing_notes") or []
+                    why = ("已掌握" if nd.get("mastered") else "") + (f"·记过{len(cn)}篇笔记" if cn else "")
+                    hits.append({"_s": score + 1, "note": nm, "subject": f"{book}·图谱", "keywords": "",
+                                 "summary": f"你学过的知识点({why or '有进度'}),第{nd.get('pages') or '?'}页", "src": "图谱(已学)"})
+    except Exception:
+        pass
+    # 4) Anki 卡(你亲手做的=真学过)。grep records 目录拿命中文件,再抽匹配的卡正面
+    try:
+        import subprocess
+        key = max(terms, key=len)
+        adir = CLAUDE_DIR / "anki" / "records"
+        r = subprocess.run(["grep", "-rIl", "-F", key, str(adir)], capture_output=True, text=True, timeout=5)
+        for path in (r.stdout or "").splitlines()[:6]:
+            try:
+                rec = json.loads(Path(path).read_text("utf-8", errors="ignore"))
+            except Exception:
+                continue
+            src_note = rec.get("source_note") or Path(path).stem
+            for card in (rec.get("cards") or []):
+                txt = (card.get("front") or "") + " " + (card.get("back") or "") + " " + " ".join(card.get("tags") or [])
+                score = sum(1 for t in terms if t in txt)
+                if score:
+                    front = re.sub(r"\s+", " ", (card.get("front") or "")).strip()
+                    hits.append({"_s": score, "note": Path(src_note).stem, "subject": card.get("deck") or "", "keywords": "",
+                                 "summary": "Anki 卡:" + front[:110], "src": "Anki卡"})
+                    break   # 每个 note 出一张代表卡就够,别刷屏
+    except Exception:
+        pass
     hits.sort(key=lambda h: -h["_s"])
-    top = hits[:6]
+    top = hits[:8]
     for h in top:
         h.pop("_s", None)
     if not top:
-        return {"results": [], "note": f"你的笔记/知识索引里**没找到**跟『{q}』明显相关的(这块可能还没记过笔记)。就按通用知识回答即可,别硬扯。"}
-    return {"results": top, "note": "下面是你**自己笔记里**相关的条目(带摘要/片段)。结合你已学过/记过的内容回答,"
-            "可以点出『你在《X》笔记里记过…』帮你串起来;笔记名用 [[名]] 提及。别照搬,按理解讲。"}
+        return {"results": [], "note": f"你的笔记/图谱/Anki 里**没找到**跟『{q}』明显相关的(这块可能还没学过/记过)。就按通用知识回答即可,**别假装他学过、别硬扯**。"}
+    return {"results": top, "note": "下面是用户**自己学过/记过**的相关条目(src=来源:知识索引带摘要 / 笔记全文 / 图谱(已学=他真掌握或记过笔记的节点) / Anki卡=他亲手做的卡)。"
+            "结合这些他**已学过**的内容回答、帮他串起来(『你在《X》笔记记过…』『这跟你做过的那张卡…』);笔记名用 [[名]] 提及。"
+            "**只有这里列出的才算他学过**,没列的别假设他会;别照搬,按理解讲。"}
 
 
 def _t_open_book(args, ctx):
@@ -903,9 +933,9 @@ TOOLS = {
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
     "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用)。args {query}", _t_search_all_books),
-    "recall_notes": ("**召回用户自己的笔记/知识索引**里跟某主题相关的(带关键词+摘要,本地查不耗时)。"
-                     "想把当前内容跟『用户已学过/已记过的』串起来、用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关吗』、"
-                     "或要结合他的知识体系深入讲时用。args {query:主题词}(不传用选中/焦点)", _t_recall_notes),
+    "recall_notes": ("**召回用户自己学过/记过的**相关内容:知识索引(带摘要)+ vault 笔记全文 + 知识图谱**已学**节点 + Anki 卡(本地查不耗时)。"
+                     "想把当前内容跟『他已学过/记过的』串起来、用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关吗』、或要结合他知识体系深入讲时用。"
+                     "**注意:只有召回到的才算他学过**(图谱里没学的节点不会返回);没召回到就别假设他会。args {query:主题词}(不传用选中/焦点)", _t_recall_notes),
     "open_book": ("打开另一本书并可定位到页(跨书跳转)。args {file_rel | book(书名), page?}", _t_open_book),
     "summarize_section": ("取当前页所在『整章/整节』正文交给你总结(read_page 只逐页,『总结这一章』用这个)。args {page?}", _t_summarize_section),
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),

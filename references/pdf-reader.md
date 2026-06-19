@@ -1033,3 +1033,8 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - 注册进 TOOLS + sys prompt 路由规则:『想把当前内容跟用户已学过/已记过串起来,或用户问"我之前记过吗/我笔记里有没有X"→ recall_notes;召回到就点出"你在《X》笔记里记过…",没召回到就按通用知识答别硬扯』。
 - **延迟实测**:知识索引命中 ~0–1ms,grep 兜底 ~200ms(扫 1902 篇),无 AI 调用 → 真正成本只是"多一个 agentic 回合"(几秒,跟 read_page/see_ink 同量级),且只在编排器判断需要时才花。
 **设计要点**:① 召回必须**本地查不碰 AI**(否则多一次模型调用才会显著加时);② 知识索引是 curated 摘要层(最有价值),vault 全文 grep 当兜底;③ 没命中如实返回"没相关笔记"让 AI 别硬扯。**架构注记**:这是"工具=能力注册表 + 编排器按需调"模式的延伸(同 Claude Code 渐进式加载);当前 ~20 工具全列进 prompt 没问题,涨到 ~30+ 再考虑 deferred/可搜索工具注册表(Claude Code ToolSearch 那套)。
+
+**多源扩展(2026-06-19,用户:KG/Anki 也接进来)**:`recall_notes` 现合并 4 个**高精度**来源,全本地查:
+1. 知识索引 `index/*.md`(curated 摘要,最优);2. **KG 图谱节点——只召回真学过的**(`mastered` / 有 `containing_notes` / `mastery>0`;⚠ 用户强调"节点存在≠学过":book 结构自动生成大量 locked 节点,绝不能当"已学",否则 AI 误判用户掌握);3. **Anki 卡**(grep `anki/records/*.json` → 匹配 front/back/tags,用户亲手做的=真学过);4. ~~raw vault 全文 grep~~ **已砍**:短/拉丁词子串会匹配 base64 附件、`represent⊃present` 等噪声,把没学的笔记误当"学过"——违背"只算真学过的"原则。
+- sys prompt + tool desc 强调:**只有召回到的才算他学过**,没召回到别假设、别硬扯。
+- 实测:向量空间→7索引+1图谱;泰勒级数→索引+2 Anki卡;`present past`→0(EGIU 那个节点没 mastered 故正确排除);全 ~17ms 无 AI。
