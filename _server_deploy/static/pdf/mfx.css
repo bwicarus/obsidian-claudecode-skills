@@ -162,3 +162,24 @@ h1,h3,.gb-title,.wp-word,.vi-word,.kg-node-main,.bs-item>*:first-child{text-wrap
   background:radial-gradient(300px circle at var(--mx) var(--my),rgba(96,165,250,.12),transparent 62%)}
 #result-modal:hover::after{opacity:1}
 }
+
+/* ===== 助手流式输出 · stream-fx (injected) =====
+   接 25-assistant.js 真 SSE:思考三点(占位)→ 流式提亮气泡 + 闪烁光标 → 完成后 followups/反馈条淡入。
+   .mfx-typing 内嵌在 .asst-a 气泡里(气泡已有底/边/内距),故本身不再带底色,避免双气泡。 */
+.mfx-typing{display:inline-flex;align-items:center;gap:5px;padding:2px 2px;vertical-align:middle}
+.mfx-typing i{width:7px;height:7px;border-radius:50%;background:var(--c-accent-br);display:block;opacity:.4}
+.mfx-caret{display:inline-block;width:2px;height:1.05em;margin-left:1px;vertical-align:-0.18em;border-radius:1px;
+  background:linear-gradient(var(--c-accent-br),var(--c-cyan));box-shadow:0 0 6px rgba(96,165,250,.7)}
+/* 流式期间整条回答微微提亮,强调"正在生成" */
+.asst-a.mfx-streaming{box-shadow:0 0 0 1px rgba(96,165,250,.28),0 0 16px rgba(96,165,250,.14)}
+/* 完成后渐入的后续部分(追问 chip / 「!」反馈条) */
+.mfx-after{opacity:0;transform:translateY(6px)}
+.mfx-after.on{opacity:1;transform:none;transition:opacity .4s ease,transform .4s cubic-bezier(.22,1,.36,1)}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes mfx-bounce{0%,80%,100%{transform:translateY(0);opacity:.35}40%{transform:translateY(-5px);opacity:1}}
+  .mfx-typing i{animation:mfx-bounce 1.2s ease-in-out infinite}
+  .mfx-typing i:nth-child(2){animation-delay:.16s}
+  .mfx-typing i:nth-child(3){animation-delay:.32s}
+  @keyframes mfx-blink{0%,45%{opacity:1}55%,100%{opacity:0}}
+  .mfx-caret{animation:mfx-blink 1s steps(1) infinite}
+}

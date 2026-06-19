@@ -150,6 +150,18 @@
     // withMath===false(流式期间)跳过 MathJax:原先每 100ms 对整段重 typeset,长答案末段二次方卡顿 → 收尾只跑一次
     if (withMath !== false) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
   }
+  // stream-fx(mfx):流式期间在回答末尾挂一个闪烁光标(renderMd 每 delta 重渲 innerHTML,故每次都补挂)
+  function _appendCaret(el) { try { var c = document.createElement('span'); c.className = 'mfx-caret'; el.appendChild(c); } catch (_) {} }
+  // 收尾:把追问 chip / 「!」反馈条做一次淡入(逐个错峰)
+  function _fadeInAfter(el) {
+    try {
+      var xs = el.querySelectorAll('.asst-followups,.asst-fb-bar');
+      Array.prototype.forEach.call(xs, function (x, k) {
+        x.classList.add('mfx-after');
+        setTimeout(function () { x.classList.add('on'); }, 80 + k * 120);
+      });
+    } catch (_) {}
+  }
   // 从回答里剥离 [[FOLLOWUP]]q1|q2|q3[[/FOLLOWUP]] 追问建议(容忍流式中途未闭合)
   function _splitFollowups(text) {
     var fu = [];
@@ -481,7 +493,7 @@
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
-    var aMsg = addMsg('asst-a', '<span class="asst-tool">思考中…</span>');
+    var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
     var rid = 'c' + Date.now() + '_' + (_ridCtr++);   // 本轮任务 id:断线用它重连续读(服务端 detached 跑,不绑请求)
     var evSeen = 0, done = false;                      // 已消费的缓冲事件数(重连用 from=evSeen 续传)
@@ -490,7 +502,7 @@
       evSeen++;
       if (ev === 'done') { done = true; return; }
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
-      else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); scrollDown(); }   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP
+      else if (ev === 'answer') { answer = parsed; renderMd(aMsg, _splitFollowups(answer).text, false); aMsg.classList.add('mfx-streaming'); _appendCaret(aMsg); scrollDown(); }   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&光标(mfx)
       else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
       else if (ev === 'actions') { acts = parsed; }
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
@@ -553,11 +565,13 @@
       if (rec && rec.content) { answer = rec.content; traceData = rec.trace || traceData; _recTs = rec.ts || 0; }
     }
     // 收尾:剥 FOLLOWUP → 完整渲染(MathJax 这一次)→ 追问 chip
+    aMsg.classList.remove('mfx-streaming');   // stream-fx:停止提亮(renderMd/fallback 会把光标一并清掉)
     var pf = _splitFollowups(answer);
     if (pf.text) renderMd(aMsg, pf.text, true);
-    else if (aMsg.innerHTML.indexOf('asst-tool') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
+    else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
     if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
+    if (!aborted) { try { _fadeInAfter(aMsg); } catch (_) {} }   // stream-fx:追问/反馈条错峰淡入
     runActions(acts);
     streaming = false; _abort = null; _recovering = false; _setSendMode(false);
   }
