@@ -1038,3 +1038,5 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 1. 知识索引 `index/*.md`(curated 摘要,最优);2. **KG 图谱节点——只召回真学过的**(`mastered` / 有 `containing_notes` / `mastery>0`;⚠ 用户强调"节点存在≠学过":book 结构自动生成大量 locked 节点,绝不能当"已学",否则 AI 误判用户掌握);3. **Anki 卡**(grep `anki/records/*.json` → 匹配 front/back/tags,用户亲手做的=真学过);4. ~~raw vault 全文 grep~~ **已砍**:短/拉丁词子串会匹配 base64 附件、`represent⊃present` 等噪声,把没学的笔记误当"学过"——违背"只算真学过的"原则。
 - sys prompt + tool desc 强调:**只有召回到的才算他学过**,没召回到别假设、别硬扯。
 - 实测:向量空间→7索引+1图谱;泰勒级数→索引+2 Anki卡;`present past`→0(EGIU 那个节点没 mastered 故正确排除);全 ~17ms 无 AI。
+
+**实测踩坑(2026-06-19,端到端验证)**:① 编排器会把短语 query 传成**去虚词的复合词**(『向量空间的定义』→`向量空间定义`),整串子串匹配不到索引(索引是『向量空间』+『定义』分开)→ 命中 0。修:匹配信号 = 实词(权重2)+ **CJK 二元组 bigram**(权重1,`向量/量空/空间/间定/定义`),真词条命中多个 bigram 自然排前;阈值『score≥2 或 含≥3字实词』滤掉单 bigram 噪声。② Anki grep 预筛主键不能用整复合词(卡里拆开的),改 `grep -rIlE 实词|bigram` 宽召回再 `_score` 精筛。③ 验证:`向量空间定义`→8(6索引+2图谱)、`链式法则`→索引+2Anki卡、`present past`→0、端到端 AI 真引用 [[000-向量空间]]/[[F^s]]/图谱已掌握节点。`_send_stream` 吐的是**累积文本**(前端替换显示),别在测试里 += 累积(会平方级重复,虚惊)。

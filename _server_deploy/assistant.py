@@ -754,7 +754,27 @@ def _t_recall_notes(args, ctx):
         return {"error": "没给要召回的主题(query)"}
     import re
     q = q[:80]
-    terms = [t for t in re.split(r"[\s,，、；;。.()（）/\\]+", q) if len(t) >= 2][:8] or [q]
+    # 匹配信号:① 整词/虚词拆的子词(实词,权重 2);② CJK 二元组 bigram(模糊,权重 1)——
+    # 编排器常把『向量空间的定义』传成『向量空间定义』,整串子串匹配不到索引(索引是『向量空间』+『定义』分开),
+    # bigram(向量/量空/空间/间定/定义)能跟真词条重叠命中多个 → 真相关条目自然排前。
+    words, grams = [], set()
+    for t in re.split(r"[\s,，、；;。.()（）/\\]+", q):
+        if len(t) < 2:
+            continue
+        for part in [t] + re.split(r"[的是了与和及在之地得着把被让对从向到]", t):
+            if len(part) >= 2 and part not in words:
+                words.append(part)
+        for run in re.findall(r"[一-鿿぀-ヿ]{2,}", t):   # CJK 连续段拆 2-gram
+            for i in range(len(run) - 1):
+                grams.add(run[i:i + 2])
+    words = words[:12]
+
+    def _score(blob):
+        b = blob or ""
+        bl = b.lower()
+        s = sum(2 for w in words if (w.lower() in bl))          # 实词命中 *2
+        s += sum(1 for g in grams if g in b)                    # bigram 命中 *1
+        return s if (s >= 2 or any(len(w) >= 3 and w.lower() in bl for w in words)) else 0   # 阈值:单 bigram 噪声不算
     hits = []
     seen = set()
     # 1) 知识索引(带摘要,最有价值)
@@ -769,7 +789,7 @@ def _t_recall_notes(args, ctx):
                     continue
                 name, kw, summ = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
                 blob = name + " " + kw + " " + summ
-                score = sum(1 for t in terms if t in blob)
+                score = _score(blob)
                 if score and name not in seen:
                     seen.add(name)
                     hits.append({"_s": score + 1, "note": name, "subject": subj,
@@ -797,8 +817,7 @@ def _t_recall_notes(args, ctx):
                 learned = bool(nd.get("mastered")) or bool(nd.get("containing_notes")) or bool(nd.get("mastery"))
                 if not learned:
                     continue
-                low = nm.lower()
-                score = sum(1 for t in terms if t.lower() in low)
+                score = _score(nm)
                 if score:
                     cn = nd.get("containing_notes") or []
                     why = ("已掌握" if nd.get("mastered") else "") + (f"·记过{len(cn)}篇笔记" if cn else "")
@@ -809,10 +828,11 @@ def _t_recall_notes(args, ctx):
     # 4) Anki 卡(你亲手做的=真学过)。grep records 目录拿命中文件,再抽匹配的卡正面
     try:
         import subprocess
-        key = max(terms, key=len)
+        # 宽召回:grep -E 用 实词+bigram 的 OR 模式(复合词卡里是拆开的,单整词 grep 找不到)→ 再用 _score 精筛
+        pat = "|".join(re.escape(x) for x in (words + sorted(grams)) if x) or re.escape(q)
         adir = CLAUDE_DIR / "anki" / "records"
-        r = subprocess.run(["grep", "-rIl", "-F", key, str(adir)], capture_output=True, text=True, timeout=5)
-        for path in (r.stdout or "").splitlines()[:6]:
+        r = subprocess.run(["grep", "-rIlE", pat[:400], str(adir)], capture_output=True, text=True, timeout=5)
+        for path in (r.stdout or "").splitlines()[:12]:
             try:
                 rec = json.loads(Path(path).read_text("utf-8", errors="ignore"))
             except Exception:
@@ -820,7 +840,7 @@ def _t_recall_notes(args, ctx):
             src_note = rec.get("source_note") or Path(path).stem
             for card in (rec.get("cards") or []):
                 txt = (card.get("front") or "") + " " + (card.get("back") or "") + " " + " ".join(card.get("tags") or [])
-                score = sum(1 for t in terms if t in txt)
+                score = _score(txt)
                 if score:
                     front = re.sub(r"\s+", " ", (card.get("front") or "")).strip()
                     hits.append({"_s": score, "note": Path(src_note).stem, "subject": card.get("deck") or "", "keywords": "",
