@@ -1890,7 +1890,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-ocr-pg-91';
+const READER_BUILD = 'reader-selpage-92';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -4556,7 +4556,7 @@ function _wordHlClick(hl) {
 }
 async function _lookupWordFetch(word, ctx) {
   const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
-    '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
+    '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + ((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
     '&context=' + encodeURIComponent(ctx || '') +
     '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
   return await r.json();
@@ -6146,7 +6146,7 @@ function _hideDepTip(){ if (_depTipEl) _depTipEl.style.display='none'; }
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
   const params = new URLSearchParams({
-    word, file: FILE_REL || '', page: String(currentPage || 0), context: ctx || '',
+    word, file: FILE_REL || '', page: String((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0), context: ctx || '',
   });
   window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等
@@ -7505,6 +7505,15 @@ window.onCopySel = async () => {
 };
 // 选区重新识别：文字层坏掉(乱码/上标错/缺符号)时，把选区裁图发 Claude 视觉，拿回正确文字，
 // 回填到 lastSelText + 预览 → 之后 复制/翻译/解释/对话 全用校正后的正确文字。
+// 选中所在页(选区 char 层属于哪个 page-wrap)。连续滚动下视口居中页 currentPage ≠ 选中页,
+// 凡「拿选中位置做事」(翻译浮层贴页/OCR 校正存页/笔记深链/查词日志页)都该用它,否则跨页选时定位到错页。
+function _selPageNum() {
+  const pw = _charSel && _charSel.pw;
+  const n = pw && pw.dataset && parseInt(pw.dataset.pageNum, 10);
+  return (n && n > 0) ? n : currentPage;
+}
+window._selPageNum = _selPageNum;
+
 window.onOcrSel = async () => {
   const pw = _charSel && _charSel.pw;
   if (!pw || !pw.__charBoxes || !lastSelText) { (typeof _toast === 'function') && _toast('先选中文字'); return; }
@@ -7517,9 +7526,7 @@ window.onOcrSel = async () => {
     x1 = Math.max(x1, c._x1); y1 = Math.max(y1, c._y1); n++;
   }
   if (!n) { (typeof _toast === 'function') && _toast('选区无效'); return; }
-  // ★用**选中所在页**(选区 char 层属于哪个 page-wrap),不能用 currentPage:连续滚动下视口居中页 ≠ 选中页,
-  //   否则后端拿错页去裁选区坐标 → OCR 到别的内容、校正还存到错页(重选永远修不上)。
-  const selPage = parseInt((pw.dataset && pw.dataset.pageNum) || currentPage, 10) || currentPage;
+  const selPage = _selPageNum();   // 选中所在页(不能用 currentPage,见 _selPageNum 注释)
   const prev = document.getElementById('sel-preview');
   const old = prev ? prev.innerHTML : '';
   if (prev) prev.innerHTML = '🔎 OCR 识别中…';
@@ -7616,7 +7623,7 @@ window.onTranslate = async () => {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         text: sent.text, model: ov.model || '', effort: ov.effort || '',
-        file: FILE_REL, sentence: {rects: sent.rects, first_char: sent.first_char, last_char: sent.last_char, page: currentPage},
+        file: FILE_REL, sentence: {rects: sent.rects, first_char: sent.first_char, last_char: sent.last_char, page: _selPageNum()},
       }),
     }, {retries: 2});
     const d = await r.json();
@@ -7775,7 +7782,7 @@ window.onToNote = async () => {
   try {
     const r = await fetch('/pdf/api/to-note', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({text: lastSelText, name: trimmed, file: FILE_REL, page: currentPage}),
+      body: JSON.stringify({text: lastSelText, name: trimmed, file: FILE_REL, page: _selPageNum()}),
     });
     const d = await r.json();
     if (d.ok) {

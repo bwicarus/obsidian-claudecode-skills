@@ -1,7 +1,7 @@
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
   const params = new URLSearchParams({
-    word, file: FILE_REL || '', page: String(currentPage || 0), context: ctx || '',
+    word, file: FILE_REL || '', page: String((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0), context: ctx || '',
   });
   window.dlog?.(`dictStream word="${word}" file=${FILE_REL?'Y':'N'} page=${currentPage} ctxLen=${ctx?.length||0}`);
   // 立刻 openResult 占位，避免空等

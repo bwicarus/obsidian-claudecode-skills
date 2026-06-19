@@ -976,3 +976,21 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **顺修潜伏 bug**:`/api/page-figures` 懒算分支调 `fitz.open` 却没 `import fitz`(本模块所有 fitz 都函数内局部 import,无模块级全局),一直 `NameError` 被 `except` 吞 → **懒算徽标从未生效**(此前徽标只靠离线重算脚本才有,这也是早先「打开怎么没徽标」的根因)。补 `import fitz`。
 
 **踩坑**:① 像素收紧靠灰度阈值,对线稿/漫画/点阵/表格/数学图都行;彩色照片若大面积亮色只会被收到「暗墨迹」处——本项目几本书插图都是线稿/漫画,未遇到,真彩照书需另判。② MedianFilter 一开始以为会吃掉稀疏圆点,实测 3×3 中值对成簇圆点(每点≥若干像素)无碍,只杀孤立单像素椒盐;真正会误删的是「单像素噪声」不是「圆点」。③ 别信 AI bbox 当图框,但也别完全弃用——refine 退化时回退它兜底。
+
+### 41. 坏文字层「选区 OCR 校正」:on-demand 视觉转写 + 持久化注入字符层(2026-06-19,`reader-fix-89`→`selpage-92`,commits c41d5af 一带)
+
+**问题**:有些 PDF(如 Z-Library 抓的费曼)**文字层 ToUnicode 是坏的**——渲染图视觉正确,但可选中/可复制的文字错。典型:上标 `10⁻⁸` 在文字层里被编码成字面 `10-6`/`10-8`(指数都错)、`Å` 无 ToUnicode 映射被 PyMuPDF 直接丢弃、`10` 中间被插空格成 `1 0`。PyMuPDF 忠实抽取 = 垃圾,选中/复制/翻译/查词全错。**唯一可靠源是渲染图**(图是对的)。公式 OCR 没救到,是因为这种是夹在中文里的行内数学,没被检测成独立公式框。
+
+**方案**(用户拍板:选中工具栏加「🔎 OCR」按钮,选区位置+截图发 Claude 视觉,且**永久生效**):
+- **后端 `_claude_ocr_crop(png,model,effort)`**(`pdf_reader.py`):裁图发 `claude` CLI `--input-format stream-json` 视觉(同 `scripts/formula_ocr_claude.py::ask_vision`),禁所有工具,prompt 要求精确逐字转写、数学进 `$...$`、特殊符号照写(Å)、**忽略图像左右边缘被裁一半的不完整字符**(防把"径"尾认成"金")、绝不臆造。`_claude_bin()` 稳健解析 claude 路径(env `APP_CLAUDE`>which>常见位)。
+- **路由 `POST /pdf/api/ocr-selection`** `{file,page,bbox(PDF pt),model?,effort?}`:按 bbox 裁图(`padx=1.0` 极小横向留白防吃邻字 / `pady=(h*0.12)+2` 纵向防切上标 + 防圈进相邻行;长边目标 ~1500px 算 scale)→ `_figure_crop_png` 渲 → `_claude_ocr_crop` 识别 → 去代码围栏(用模块级 `re` **不是** `_re`!`_re` 只在个别函数内局部 import,路由里用 `_re` 会 NameError 500)→ **持久化** `_ocrfix_add` + 返回新 `cv`。
+- **校正 sidecar** `state/pdf-ocr-fix/<book-sha>.json` = `{pdf,book_mtime,fixes:[{page,bbox(归一),text,ts}]}`,书 mtime 变则清空(坐标可能失效)。`_ocrfix_add` 同页**重叠过半**的旧校正覆盖(重 OCR 同一处=替换不堆叠,可纠正上次 OCR 错)。
+- **注入 `_apply_ocr_corrections(chars,furigana,rel,page,pw,ph)`**(同 `_apply_formula_chars` 那套,在 `pdf_api_page_chars` 公式注入后调):删 bbox 内原坏字符+框内振假名 → 把校正文字平铺满框宽塞入(`WID=960000000`,标 `ocrfix=1`)。**词 id 按 token 分**(`_ocr_token_ids`:`$...$`/`$$` 数学整块一个、连续 ASCII 词一个、中日文/标点各自一个)→ `w=wbase+token号` → 校正文字能**分开点/选**(否则整块 65 字一起选,用户嫌);`bk` 仍同块(整段预览/翻译不受影响)。
+- **cv** `_page_content_version` 并入 `o{_OCRFIX_INJECT_VER}:{sidecar mtime}` → 存校正后 cv 变 → 前端缓存自动失效,跨设备下次打开也是校正后的。
+- **前端 `onOcrSel`**(`reader.src/21-misc-ai.js`):算选区并集 bbox(`c._x0.._y1` 是 PDF 点)→ POST → 成功后回填 `lastSelText`+预览(badge「OCR ✓ 已写入」)+ 更新本页 `localStorage pdf-cv:` + `_rerenderLoadedPages()` 立即重渲注入字符层。之后重选/复制/翻译/查词永久用正确文字。改注入逻辑(token 分词)bump `_OCRFIX_INJECT_VER` → 已存校正自动按新规则重注入,用户刷新即生效不必重 OCR。
+
+**两个真踩坑(用户实测揪出)**:
+1. **路由 `_re` 未定义 500**:`_re` 不是模块级别名(`re` 才是,line 17),路由里 `_re.sub` → NameError → 点 OCR 一直失败、预览回退坏文字。教训:**带鉴权的新路由必须 test_client 走完整 HTTP 链路验证**(`set -a; . webapp/.env`,`session_transaction` 设 `user_id=1`),只测内部函数会漏掉路由级 bug。
+2. **发错页号**(用户「没有变化」):`onOcrSel` 原用 `page=currentPage`,但**连续滚动下视口居中页 ≠ 选中页**。在 p24 选、currentPage 是 23 → 后端拿 p23 裁 p24 坐标 → OCR 到别处乱码 → 还存到 p23 → 重选 p24 永远没校正。修:`_selPageNum()` = `_charSel.pw.dataset.pageNum||currentPage`。**同类隐患一并修**:`onTranslate`(译文浮层贴页)/`onToNote`(笔记深链)/`dictStream`+`_lookupWordFetch`(查词日志页)全改用 `_selPageNum()`。
+
+**边界**:① 被丢的 `Å` 这类符号要被收进校正,拖选范围须**带过它的位置**(选到后面字),否则裁图不含它。② OCR 仍可能错(如边缘吃字"金为");靠"你看过结果才存"+ 重 OCR 覆盖 + ⚙ 切 opus 兜底,不焊死。③ 注入字符是**均匀平铺**满 bbox,不在真实字形位置 → 局部选中是近似的(整块/逐 token 选都行,但拖到精确某字可能差一两格);whole-region 用途(复制/翻译)不受影响。④ 多行选区的 bbox 是大矩形,会含行首尾非选中字——单行选最干净。

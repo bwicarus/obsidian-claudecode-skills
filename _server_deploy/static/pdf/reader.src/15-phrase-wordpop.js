@@ -461,7 +461,7 @@ function _wordHlClick(hl) {
 }
 async function _lookupWordFetch(word, ctx) {
   const r = await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
-    '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 0) +
+    '&file=' + encodeURIComponent(FILE_REL || '') + '&page=' + ((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
     '&context=' + encodeURIComponent(ctx || '') +
     '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
   return await r.json();
