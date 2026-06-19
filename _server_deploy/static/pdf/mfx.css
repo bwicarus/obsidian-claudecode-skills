@@ -1,0 +1,164 @@
+/* ===========================================================
+   mfx —— 在 Claude Design 里设计的动效+美化层(由 reader 组件库导出回写)
+   tokens + motion-fx/polish-fx/polish-fx2/gestures-fx/effects-fx。
+   pdf_reader.html / pdf_index.html 都 <link> 它。撤销=去掉两个 link/script。
+   =========================================================== */
+/* mfx-tokens */
+:root{--c-e3a:#162045;--c-accent-deep:#244470;--c-text:#cfe6ff;--c-text-strong:#e6e6f0;--c-text-blue:#a8cdff;--c-muted:#7a8497;--c-muted2:#8a9bb4;--c-faint:#5a6680;--c-accent:#3b6db5;--c-accent-br:#60a5fa;--c-cyan:#7dd3fc;--c-pick:#0078d4;--c-e1:#0d1322;--c-e2:#10162a;--c-e3:#1a2540;--c-border:#2a3550;--c-border2:#1f2740;--c-border3:#2a3a63;--c-e3b:#2c3e6a;--c-e2a:#141d33;--c-ok:#34d399;--c-ok2:#22c55e;--c-warn:#fbbf24;--c-err:#f87171;}
+
+/* ===== 整体动效层 · motion-fx (injected) ===== */
+@media (prefers-reduced-motion:no-preference){
+@keyframes mfx-pop{from{transform:translateY(12px) scale(.985)}to{transform:none}}
+@keyframes mfx-rise{from{transform:translateY(10px)}to{transform:none}}
+@keyframes mfx-fade{from{opacity:0}to{opacity:1}}
+/* 卡片根入场 */
+.stage>*,.panel{animation:mfx-pop .5s cubic-bezier(.22,1,.36,1) both}
+/* 列表/堆叠子项级联入场 */
+.pdf-list>*,.bs-list>*,#asst-thread>*,#draft-list>*,#search-results>*,#side-pane-vocab>*,#side-pane-kg>*,.comp-blocks>*,#hl-color-picker>*,.set-tabs>*,#side-tabs>*,#asst-quick>*,.asst-followups>*,#grammar-panel-body>*,.afp-acts>*,#vocab-scope-row>*{animation:mfx-rise .45s cubic-bezier(.22,1,.36,1) both}
+.pdf-list>*:nth-child(2),.bs-list>*:nth-child(2),#asst-thread>*:nth-child(2),#draft-list>*:nth-child(2),#search-results>*:nth-child(2),#side-pane-vocab>*:nth-child(2),#side-pane-kg>*:nth-child(2),.comp-blocks>*:nth-child(2),#hl-color-picker>*:nth-child(2),.set-tabs>*:nth-child(2),#side-tabs>*:nth-child(2),#asst-quick>*:nth-child(2),.asst-followups>*:nth-child(2),#grammar-panel-body>*:nth-child(2),.afp-acts>*:nth-child(2),#vocab-scope-row>*:nth-child(2){animation-delay:0.05s}
+.pdf-list>*:nth-child(3),.bs-list>*:nth-child(3),#asst-thread>*:nth-child(3),#draft-list>*:nth-child(3),#search-results>*:nth-child(3),#side-pane-vocab>*:nth-child(3),#side-pane-kg>*:nth-child(3),.comp-blocks>*:nth-child(3),#hl-color-picker>*:nth-child(3),.set-tabs>*:nth-child(3),#side-tabs>*:nth-child(3),#asst-quick>*:nth-child(3),.asst-followups>*:nth-child(3),#grammar-panel-body>*:nth-child(3),.afp-acts>*:nth-child(3),#vocab-scope-row>*:nth-child(3){animation-delay:0.10s}
+.pdf-list>*:nth-child(4),.bs-list>*:nth-child(4),#asst-thread>*:nth-child(4),#draft-list>*:nth-child(4),#search-results>*:nth-child(4),#side-pane-vocab>*:nth-child(4),#side-pane-kg>*:nth-child(4),.comp-blocks>*:nth-child(4),#hl-color-picker>*:nth-child(4),.set-tabs>*:nth-child(4),#side-tabs>*:nth-child(4),#asst-quick>*:nth-child(4),.asst-followups>*:nth-child(4),#grammar-panel-body>*:nth-child(4),.afp-acts>*:nth-child(4),#vocab-scope-row>*:nth-child(4){animation-delay:0.15s}
+.pdf-list>*:nth-child(5),.bs-list>*:nth-child(5),#asst-thread>*:nth-child(5),#draft-list>*:nth-child(5),#search-results>*:nth-child(5),#side-pane-vocab>*:nth-child(5),#side-pane-kg>*:nth-child(5),.comp-blocks>*:nth-child(5),#hl-color-picker>*:nth-child(5),.set-tabs>*:nth-child(5),#side-tabs>*:nth-child(5),#asst-quick>*:nth-child(5),.asst-followups>*:nth-child(5),#grammar-panel-body>*:nth-child(5),.afp-acts>*:nth-child(5),#vocab-scope-row>*:nth-child(5){animation-delay:0.20s}
+.pdf-list>*:nth-child(6),.bs-list>*:nth-child(6),#asst-thread>*:nth-child(6),#draft-list>*:nth-child(6),#search-results>*:nth-child(6),#side-pane-vocab>*:nth-child(6),#side-pane-kg>*:nth-child(6),.comp-blocks>*:nth-child(6),#hl-color-picker>*:nth-child(6),.set-tabs>*:nth-child(6),#side-tabs>*:nth-child(6),#asst-quick>*:nth-child(6),.asst-followups>*:nth-child(6),#grammar-panel-body>*:nth-child(6),.afp-acts>*:nth-child(6),#vocab-scope-row>*:nth-child(6){animation-delay:0.25s}
+.pdf-list>*:nth-child(7),.bs-list>*:nth-child(7),#asst-thread>*:nth-child(7),#draft-list>*:nth-child(7),#search-results>*:nth-child(7),#side-pane-vocab>*:nth-child(7),#side-pane-kg>*:nth-child(7),.comp-blocks>*:nth-child(7),#hl-color-picker>*:nth-child(7),.set-tabs>*:nth-child(7),#side-tabs>*:nth-child(7),#asst-quick>*:nth-child(7),.asst-followups>*:nth-child(7),#grammar-panel-body>*:nth-child(7),.afp-acts>*:nth-child(7),#vocab-scope-row>*:nth-child(7){animation-delay:0.30s}
+.pdf-list>*:nth-child(8),.bs-list>*:nth-child(8),#asst-thread>*:nth-child(8),#draft-list>*:nth-child(8),#search-results>*:nth-child(8),#side-pane-vocab>*:nth-child(8),#side-pane-kg>*:nth-child(8),.comp-blocks>*:nth-child(8),#hl-color-picker>*:nth-child(8),.set-tabs>*:nth-child(8),#side-tabs>*:nth-child(8),#asst-quick>*:nth-child(8),.asst-followups>*:nth-child(8),#grammar-panel-body>*:nth-child(8),.afp-acts>*:nth-child(8),#vocab-scope-row>*:nth-child(8){animation-delay:0.35s}
+.pdf-list>*:nth-child(9),.bs-list>*:nth-child(9),#asst-thread>*:nth-child(9),#draft-list>*:nth-child(9),#search-results>*:nth-child(9),#side-pane-vocab>*:nth-child(9),#side-pane-kg>*:nth-child(9),.comp-blocks>*:nth-child(9),#hl-color-picker>*:nth-child(9),.set-tabs>*:nth-child(9),#side-tabs>*:nth-child(9),#asst-quick>*:nth-child(9),.asst-followups>*:nth-child(9),#grammar-panel-body>*:nth-child(9),.afp-acts>*:nth-child(9),#vocab-scope-row>*:nth-child(9){animation-delay:0.40s}
+/* 交互平滑过渡 */
+button,a,.swatch,.bs-item,.pdf-item,.vocab-item,.kg-node,.side-tab,.set-tab,.asst-fu,.sr-item,
+.kg-track-btn,.vi-anki,.gb-ana,.prep-btn,.comp-toggle,.draft-item,.actx-thumb,.jp-kanji-chip,
+.pick-btn,.afp-act,.afp-gset,.afp-gdef,.afp-gear-btn,.conn-dot,.vi-audio,.wp-speak,.ink-color,
+#asst-send,#asst-mic,.sel-circle,.fig-badge{
+  transition:background .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease,transform .14s ease}
+/* 按压反馈 */
+button:active,.swatch:active,.actx-thumb:active,.jp-kanji-chip:active,.conn-dot:active{transform:scale(.94)}
+/* 行悬浮微抬 */
+.pdf-item:hover,.bs-item:hover,.vocab-item:hover,.kg-node:hover,.sr-item:hover,.qhist-item:hover,
+.draft-item:hover,.gb-ana:hover{transform:translateY(-1px)}
+/* 图标按钮悬浮放大 */
+.vi-audio:hover,.wp-speak:hover,.afp-gear-btn:hover,.fig-badge:hover{transform:scale(1.12)}
+/* 主按钮悬浮轻微发光 */
+#asst-send:hover,.prep-btn:hover,#result-followup button:hover{box-shadow:0 0 0 3px rgba(96,165,250,.18)}
+}
+
+/* ===== 整体美化层 · polish-fx (injected) ===== */
+/* (8) 键盘焦点态 a11y —— 始终生效 */
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,
+.swatch:focus-visible,.side-tab:focus-visible,[tabindex]:focus-visible{
+  outline:2px solid var(--c-accent-br);outline-offset:2px;border-radius:6px}
+button::-moz-focus-inner{border:0}
+/* (1) 弹层层级感 —— 更深的投影 + 内描边，始终生效 */
+#word-pop,#sent-popover,#side-settings,.ctx-menu,.asst-fb-pop,#search-panel,
+#page-scrub-pop,#result-modal,#sel-toolbar,.dict-pop,.dict-popover{
+  box-shadow:0 12px 34px rgba(0,0,0,.62),0 2px 8px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.05)!important}
+/* (4) 加载态 shimmer —— 始终生效（不依赖动画偏好也能看出加载） */
+@keyframes mfx-shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.gb-loading,#result-modal .loading,.sent-zh.loading,.gb-pending{
+  background:linear-gradient(100deg,var(--c-muted) 30%,var(--c-text) 50%,var(--c-muted) 70%);
+  background-size:200% 100%;-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;animation:mfx-shimmer 1.6s linear infinite}
+/* 通用骨架块工具类 */
+.mfx-skel{border-radius:6px;background:linear-gradient(100deg,var(--c-e2a) 30%,#23304f 50%,var(--c-e2a) 70%);
+  background-size:200% 100%;animation:mfx-shimmer 1.5s linear infinite;color:transparent!important}
+/* (7) 空状态：淡入 + 透气 */
+.empty{animation:mfx-fade .5s ease both;letter-spacing:.5px}
+
+@media (prefers-reduced-motion:no-preference){
+/* (3) 弹层带方向感入场 */
+@keyframes mfx-drop{from{opacity:0;transform:translateX(-50%) translateY(-12px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+@keyframes mfx-zoom{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:scale(1)}}
+@keyframes mfx-up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes mfx-modal{from{opacity:0;transform:translateY(16px) scale(.97)}to{opacity:1;transform:none}}
+/* 顶部下拉类（自带 translateX(-50%) 居中，保持不被覆盖） */
+#search-panel.open,#sent-popover.open,#page-scrub-pop{animation:mfx-drop .32s cubic-bezier(.22,1,.36,1)}
+/* 锚定小弹层：从原点缩放弹出 */
+#word-pop,#side-settings,.ctx-menu,.asst-fb-pop,.dict-pop,.dict-popover{
+  animation:mfx-zoom .26s cubic-bezier(.22,1,.36,1);transform-origin:top center}
+/* 选区工具条：向上浮出 */
+#sel-toolbar.open{animation:mfx-up .24s cubic-bezier(.22,1,.36,1)}
+/* 模态：底部轻微上浮 + 缩放 */
+#result-mask.open #result-modal{animation:mfx-modal .34s cubic-bezier(.22,1,.36,1)}
+/* (5) 计数/进度数字变化时的轻微跳动反馈 */
+.vocab-count,#page-cur,.psp-num,.vi-mastery-badge{transition:color .25s ease,transform .25s cubic-bezier(.34,1.56,.64,1);font-variant-numeric:tabular-nums}
+/* 进度条平滑增长 */
+.vi-bar>div,.psp-track>div,.prep-bar>div{transition:width .45s cubic-bezier(.22,1,.36,1)}
+}
+
+/* ===== 整体美化层 · polish-fx2 (injected) ===== */
+/* 色彩/层级 token（供本层使用；全局迁移见交付说明） */
+:root{
+  --mfx-accent:var(--c-accent-br);--mfx-accent-soft:rgba(96,165,250,.22);
+  --mfx-ok:var(--c-ok);--mfx-warn:var(--c-warn);--mfx-err:var(--c-err);
+  --mfx-e1:var(--c-e1);--mfx-e2:var(--c-e2);--mfx-e3:var(--c-e3);--mfx-e4:#22304f;
+}
+/* (1) 弹层玻璃质感 + 极淡噪点 —— 统一各弹层底色，消除纯色死板 */
+#word-pop,#sent-popover,#side-settings,.ctx-menu,.asst-fb-pop,#search-panel,
+#result-modal,#sel-toolbar,#page-scrub-pop,.dict-pop,.dict-popover{
+  background:rgba(15,21,40,.80) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E")!important;
+  background-blend-mode:overlay!important;
+  -webkit-backdrop-filter:blur(16px) saturate(140%);backdrop-filter:blur(16px) saturate(140%);
+}
+/* (2) 选中/激活态发光描边 —— 替代生硬纯色边 */
+.bs-item.cur,.vocab-item.cur,.kg-node:hover,.side-tab.active,.set-tab.active,
+.grammar-block.focus,.swatch.active,#vocab-scope-row button.active,.pick-btn.on{
+  box-shadow:0 0 0 1px var(--mfx-accent),0 0 14px var(--mfx-accent-soft)!important}
+/* (11) 数字等宽全局化 */
+.vocab-count,#page-cur,.psp-num,.vi-mastery-badge,.gb-badge,.len,
+.vi-pages,.bs-item .meta,.sr-count{font-variant-numeric:tabular-nums}
+/* (12) 排版精修：标题平衡换行，正文优雅断字 */
+h1,h3,.gb-title,.wp-word,.vi-word,.kg-node-main,.bs-item>*:first-child{text-wrap:balance}
+.vi-zh,.sent-zh,.wp-zh,#result-modal .content p,.kg-def,.afp-step{text-wrap:pretty}
+/* (7) Toast 反馈 */
+#mfx-toast-host{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:9999;
+  display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.mfx-toast{pointer-events:auto;min-width:120px;max-width:78vw;padding:10px 16px;border-radius:10px;
+  font-size:13px;color:#eaf2ff;background:rgba(20,28,50,.92);border:1px solid var(--c-border3);
+  box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);
+  display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(12px) scale(.96);
+  transition:opacity .26s ease,transform .26s cubic-bezier(.22,1,.36,1)}
+.mfx-toast.in{opacity:1;transform:none}
+.mfx-toast::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--mfx-accent);flex:none}
+.mfx-toast[data-type="success"]::before{background:var(--mfx-ok)}
+.mfx-toast[data-type="error"]::before{background:var(--mfx-err)}
+.mfx-toast[data-type="warn"]::before{background:var(--mfx-warn)}
+
+/* ===== 手势交互层 · gestures-fx (injected) ===== */
+#mfx-kg-preview{position:fixed;z-index:9998;width:240px;max-width:80vw;padding:11px 13px;border-radius:10px;
+  background:rgba(15,21,40,.92);border:1px solid var(--c-border3);box-shadow:0 12px 30px rgba(0,0,0,.6);
+  color:var(--c-text);pointer-events:none;opacity:0;transform:translateY(6px) scale(.98);
+  transition:opacity .18s ease,transform .18s cubic-bezier(.22,1,.36,1);
+  -webkit-backdrop-filter:blur(14px) saturate(140%);backdrop-filter:blur(14px) saturate(140%)}
+#mfx-kg-preview.show{opacity:1;transform:none}
+#mfx-kg-preview .mk-t{font-size:13px;font-weight:600;color:var(--c-cyan);margin-bottom:4px;text-wrap:balance}
+#mfx-kg-preview .mk-b{font-size:11.5px;line-height:1.5;color:var(--c-muted2);text-wrap:pretty}
+.vocab-item{will-change:transform}
+/* 模态拖拽把手提示 */
+#result-modal{will-change:transform}
+
+/* ===== 特效层 · effects-fx (injected) ===== */
+.mfx-burst{position:fixed;z-index:9999;pointer-events:none;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%}
+@keyframes mfx-ring{0%{transform:scale(.25);opacity:.9}100%{transform:scale(2.7);opacity:0}}
+@media (prefers-reduced-motion:no-preference){
+/* 主按钮流光扫过 */
+@keyframes mfx-sheen{0%{transform:translateX(-130%) skewX(-18deg)}100%{transform:translateX(240%) skewX(-18deg)}}
+#asst-send,.prep-btn,.gb-followup button,#result-followup button,.reply-pick-all{position:relative;overflow:hidden}
+#asst-send::after,.prep-btn::after,.gb-followup button::after,#result-followup button::after{
+  content:'';position:absolute;top:0;left:0;width:45%;height:100%;pointer-events:none;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent);
+  transform:translateX(-130%) skewX(-18deg)}
+#asst-send:hover::after,.prep-btn:hover::after,.gb-followup button:hover::after,#result-followup button:hover::after{animation:mfx-sheen .7s ease}
+/* 聚焦语法卡呼吸光晕 */
+@keyframes mfx-breathe{0%,100%{box-shadow:0 0 0 1px var(--c-accent-br),0 0 10px rgba(96,165,250,.22)}50%{box-shadow:0 0 0 1px var(--c-accent-br),0 0 22px rgba(96,165,250,.42)}}
+.grammar-block.focus{animation:mfx-breathe 2.6s ease-in-out infinite}
+/* 空状态极光氛围 */
+.empty{position:relative;overflow:hidden;z-index:0}
+@keyframes mfx-aurora{0%{transform:translate(-4%,-3%) scale(1)}100%{transform:translate(5%,4%) scale(1.12)}}
+.empty::before{content:'';position:absolute;inset:-40% -12%;z-index:-1;filter:blur(10px);
+  background:radial-gradient(42% 52% at 30% 32%,rgba(96,165,250,.13),transparent 70%),radial-gradient(40% 50% at 70% 62%,rgba(52,211,153,.10),transparent 70%);
+  animation:mfx-aurora 9s ease-in-out infinite alternate}
+/* 结果模态光标聚光 */
+#result-modal{--mx:50%;--my:0%}
+#result-modal>*{position:relative;z-index:1}
+#result-modal::after{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;opacity:0;transition:opacity .35s ease;
+  background:radial-gradient(300px circle at var(--mx) var(--my),rgba(96,165,250,.12),transparent 62%)}
+#result-modal:hover::after{opacity:1}
+}

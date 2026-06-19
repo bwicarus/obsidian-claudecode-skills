@@ -1046,3 +1046,12 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **问题**(用户:手写笔画字时下方文字也被选中):墨迹绘制绑在 `wrap` 的 **`pointerdown`**(`_inkPointerDown`,模板内联脚本),笔落下时它 `stopPropagation` 想挡选字;但字符层选字绑的是 **`cl.mousedown` / `cl.touchstart`**(`13-selection.js`)——**不同类事件**,pointerdown 的 stopPropagation 拦不住它,且 Apple Pencil 在 iOS 上会同时派发 touchstart → 照样 `onStart` 选字。
 **修**:字符层 touchstart/mousedown + onStart 加墨迹门控:① touchstart:`e.touches[0].touchType === 'stylus'`(Apple Pencil)→ 直接 return,不选字(直接在 touchstart 层识别铁笔,不依赖事件顺序);② mousedown + touchstart + onStart 都加 `if (window._ink && (_ink.mode || _ink.drawing)) return`(桌面手写模式 / 正在画)。墨迹层照常画(wrap pointerdown 不动),只挡字符层选中。
 **注**:`_ink` 全局在模板内联脚本(`window._ink`),手写整模块(inkToggle/_inkPointerDown/_inkRedraw…)都在模板 `<script>` 里、不在 reader.js;reader.src 只能 `window._ink && ...` 防御性引用。
+
+### 46. 应用 Claude Design 的设计回写:mfx 动效+美化层(2026-06-20)
+
+**来源**:把 reader 组件库(`scripts/build_design_kit.py` 导出的 15 个组件)上传到 claude.ai/design,用户在那做了设计,**导出回写**到线上。
+**改动性质**:Claude Design 给**每个组件全局注入了同一套 mfx 层**(所以 15 个"全部"都变;去 token 化后正文跟原始一致=**没改配色**,纯加层)。
+**应用方式**(可一键撤):抽成 `_server_deploy/static/pdf/mfx.css`(14.5KB)+ `mfx.js`(7.4KB),`pdf_reader.html` + `pdf_index.html` 各 `<link>`+`<script defer>` 引入(→ `/var/www/html/static/pdf/`,nginx 服务)。**撤销 = 删模板里那两行**。
+**mfx 6 个 CSS 层 + 3 个 JS**:`mfx-tokens`(--c-* 颜色 token,值=原色)/ `motion-fx`(入场 pop·级联 rise·按压 scale·悬浮抬,全在 `prefers-reduced-motion`)/ `polish-fx`(focus-visible 焦点环·弹层深影·加载 shimmer·弹层方向入场)/ `polish-fx2`(弹层毛玻璃+噪点·选中发光边·tabular-nums·text-wrap balance/pretty·Toast)/ `gestures-fx`(JS:生词左滑删除·KG hover 预览·模态下拉关)/ `effects-fx`(JS:成功爆点·按钮流光·语法卡呼吸·空状态极光·模态光标聚光)。JS 全 idempotent(`window.__mfx*` 守卫)。
+**⚠ 已知半成品**:gestures-fx 的"生词左滑删除"是**纯视觉**(只划走+toast,没调后端删除)→ 刷新会回来。待决定:接真删除 / 禁掉该手势。
+**抽取法**:DesignSync `get_file` 大文件**持久化到 `tool-results/*.txt`**(只 2KB 预览进上下文)→ 脚本在磁盘上 parse JSON `content` + diff/抽块,避免 15×70KB 撑爆上下文。
