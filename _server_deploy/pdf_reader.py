@@ -1339,6 +1339,16 @@ def _stitch_latin_words(chars: list[dict]) -> None:
         chars[:] = [c for i, c in enumerate(chars) if i not in drop]
 
 
+def _apply_cjk_singleton(seg: list, block_i: int, col_i: int) -> None:
+    """非日语 CJK(中文 / 未设语言)书:给每个 CJK 字一个**独立** word id → 单击选一字、拖选任意范围,
+    不被日语分词器(fugashi/unidic)按日语词典把两个汉字强行粘成一个词。非 CJK(英文词)保持原 _word_id 成组。"""
+    if not seg:
+        return
+    for n, c in enumerate(seg):
+        if not c.get("sp") and _is_cjk_char(c.get("c", "")):
+            c["w"] = block_i * 1000000 + col_i * 1000 + n
+
+
 def _apply_jp_tokenize(seg: list, block_i: int, col_i: int,
                        furigana_out: list | None = None) -> None:
     """对一列(块内 gutter 切出的列,如漫画一个气泡)的 chars 用 fugashi 分词,覆盖其 w 字段。
@@ -1534,10 +1544,11 @@ def _build_en_furigana(chars: list) -> list:
     return out
 
 
-def _compute_page_chars(abs_path, page: int):
-    """提取该页所有字符 bbox + 词 id(rawdict + PyMuPDF words + fugashi 分词)。
-    只依赖 (文件内容, 页码) → 可缓存。返回 (chars, page_w, page_h, furigana) 或 None(越界)。
-    furigana = 振假名/音标叠加条目(日语 unidic 读音 + 英文 ECDICT 音标)。"""
+def _compute_page_chars(abs_path, page: int, is_ja: bool = True):
+    """提取该页所有字符 bbox + 词 id(rawdict + PyMuPDF words + 分词)。
+    只依赖 (文件内容, 页码, is_ja) → 可缓存。返回 (chars, page_w, page_h, furigana) 或 None(越界)。
+    is_ja=True(日语书):fugashi 分词 + 振假名;is_ja=False(中文/无语言书):每个汉字独立词 id(自由选,
+    不被日语词典强行把两个汉字粘成一个词)。furigana = 振假名/音标叠加(日语 unidic 读音 + 英文 ECDICT 音标)。"""
     import fitz
     doc = fitz.open(str(abs_path))
     try:
@@ -1592,7 +1603,10 @@ def _compute_page_chars(abs_path, page: int):
                 _col_seq += 1
                 for c in _col:
                     c["bk"] = cur_bk
-                _apply_jp_tokenize(_col, _block_i, cur_bk % 1000, furigana)
+                if is_ja:
+                    _apply_jp_tokenize(_col, _block_i, cur_bk % 1000, furigana)
+                else:
+                    _apply_cjk_singleton(_col, _block_i, cur_bk % 1000)   # 中文书:每汉字独立词 → 自由选
         # 西文词内合成空格清理(字距拉开 → "Web" 被切成 surface "W eb")。须在分词后、furigana 前。
         _stitch_latin_words(chars)
         # 英文词音标叠加（单连接直查 ECDICT；日语为主的书几乎无开销）
@@ -1605,10 +1619,11 @@ def _compute_page_chars(abs_path, page: int):
         doc.close()
 
 
-_CHAR_CACHE_VER = 9   # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+_CHAR_CACHE_VER = 10  # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
                       # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx;
                       #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段;
-                      #  v8:块内 gutter 切列[漫画并排气泡分开 bk]→ 选中/分词不串气泡)
+                      #  v8:块内 gutter 切列[漫画并排气泡分开 bk]→ 选中/分词不串气泡;
+                      #  v10:中文/无语言书每汉字独立词 id[不再套日语分词把两字粘一起],日语书才走 fugashi)
 
 
 def _page_chars_cached(abs_path, rel: str, page: int):
@@ -1625,9 +1640,10 @@ def _page_chars_cached(abs_path, rel: str, page: int):
         mtime = int(os.path.getmtime(str(abs_path)))
     except Exception:
         mtime = 0
+    is_ja = "ja" in (_book_langs_for(rel) or [])   # 日语书才走 fugashi 分词;中文/无语言书每汉字独立选
     cdir = CLAUDE_DIR / "state" / "pdf-char-cache"
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
-    cpath = cdir / f"{sha}-p{page}-{mtime}.json"
+    cpath = cdir / f"{sha}-p{page}-{mtime}-{'ja' if is_ja else 'zh'}.json"   # 语言进缓存键:改书语言→换 key 重算
     if cpath.exists():
         try:
             d = json.loads(cpath.read_text("utf-8"))
@@ -1637,19 +1653,21 @@ def _page_chars_cached(abs_path, rel: str, page: int):
         except Exception:
             pass   # 缓存损坏 → 重算
     _cstat("page_chars.compute")
-    res = _compute_page_chars(abs_path, page)
+    res = _compute_page_chars(abs_path, page, is_ja=is_ja)
     if res is None:
         return None
     chars, pw, ph, furigana = res
     # 安全阀:别缓存「分词失败」的结果。fugashi 不可用(tagger None) → 该页 CJK 全 w=-1;
     # 或有汉字却没产出振假名 = 分词没跑成。否则 fugashi 临时挂掉时写的坏缓存(全 w=-1)会被
     # 之后一直命中 → 整页单字选中(本次 bug 根因)。纯假名页(无汉字)无振假名属正常,不拦。
-    tagger_down = _get_jp_tagger() is None
-    has_kanji = any(_is_kanji_ch(c.get("c", "")) for c in chars if not c.get("sp"))
-    has_cjk = any(_is_cjk_char(c.get("c", "")) for c in chars if not c.get("sp"))
-    if (tagger_down and has_cjk) or (has_kanji and not furigana):
-        sys.stderr.write(f"[page-chars] p{page} 分词未成(tagger_down={tagger_down}),跳过缓存等 fugashi 恢复\n")
-        return chars, pw, ph, furigana
+    # 安全阀只对日语书有意义(非日语书不跑 fugashi,tagger 挂不挂都不影响选中)
+    if is_ja:
+        tagger_down = _get_jp_tagger() is None
+        has_kanji = any(_is_kanji_ch(c.get("c", "")) for c in chars if not c.get("sp"))
+        has_cjk = any(_is_cjk_char(c.get("c", "")) for c in chars if not c.get("sp"))
+        if (tagger_down and has_cjk) or (has_kanji and not furigana):
+            sys.stderr.write(f"[page-chars] p{page} 分词未成(tagger_down={tagger_down}),跳过缓存等 fugashi 恢复\n")
+            return chars, pw, ph, furigana
     try:
         cdir.mkdir(parents=True, exist_ok=True)
         cpath.write_text(json.dumps({"chars": chars, "page_w": pw, "page_h": ph,
@@ -1832,7 +1850,11 @@ def _page_content_version(abs_path, rel: str, page: int) -> str:
         om = int(os.path.getmtime(str(_ocrfix_path_abs(abs_path))))   # 选区 OCR 校正 sidecar 改 → 注入字符变 → cv 必须变
     except Exception:
         om = 0
-    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}|o{_OCRFIX_INJECT_VER}:{om}"
+    try:
+        lm = int(os.path.getmtime(str(_BOOK_LANGS_PATH)))   # 书语言改(中文↔日语)→ 分词粒度变 → cv 必须变
+    except Exception:
+        lm = 0
+    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}|o{_OCRFIX_INJECT_VER}:{om}|l{lm}"
     return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
 
 
