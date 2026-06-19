@@ -1018,8 +1018,10 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **问题**(用户:用笔圈了词问"这是什么",助手没理会、还答成别的):手写墨迹只画在 canvas 上,助手上下文里**没有"用户圈了什么"**;而且服务端 ink sidecar 常是空的(autosave 没触发),`see_page` 也看不到。
 **两层修法**:
 1. **前端把当前页内存墨迹随上下文发**:`__voiceContext` 加 `ink: window._ink.byPage[currentPage]`(实时,不依赖服务端保存时机)。
-2. **服务端有笔迹就自动看**(用户思路:笔迹不一定是圈/线,箭头/勾/波浪都行,**让 AI 直接看叠加图最稳**):
-   - `pdf_reader._ink_focus_image(rel,page,strokes)`:裁出笔迹外接框 + 留白(带上下文行/邻词)+ `_figure_crop_png(with_ink=True)` 叠笔迹 → PNG。
-   - `assistant._agent_run`:`ctx["ink"]` 非空 → **首轮 content 自动改成 `[文字, 笔迹合成图]` 列表**(复用 vision 回喂同一机制),提示"下图=用户标注区域,他问的就是他标/圈/划/箭头指的地方"。不靠 AI 自己决定去 see_page。
-   - 补充:`_text_under_ink(rel,page,strokes=)` 几何提取圈住/划下的文字(圈=框内、扁笔画=线上方一行)当**便宜的文字 hint** 进 sys prompt(`★★用户用笔圈/划出了「…」`);拿不到(纯涂画)就只靠合成图。
+2. **`see_ink` 工具,由编排器(sonnet·low)判断要不要看**(用户二次优化:无条件每条都附图费 token 又慢,且问题可能跟笔迹无关 → 交给快速编排器路由,不是无脑附):
+   - `pdf_reader._ink_focus_image(rel,page,strokes)`:裁笔迹外接框 + 留白(带上下文行/邻词)+ `_figure_crop_png(with_ink=True)` 叠笔迹 → PNG;>3MB 自动降档。
+   - `assistant._t_see_ink`(注册进 TOOLS):读 `ctx["ink"]` → `_ink_focus_image` → 返回 `_vision`(复用看图回喂机制)+ note(附 `_text_under_ink` 几何标注文字当参考)。
+   - **sys prompt 把判断权交给编排器**:本页有笔迹时提示『**你来判断**:跟标注有关(这是什么/我圈的/这里/指代不清)**或** 没说具体但有笔迹 → 先 `see_ink`;明显无关(下一页/总结章/翻译/查词)→ 别看图,直接答更快』。
+   - `_text_under_ink(rel,page,strokes=)` 几何提取(圈=框内、扁笔画=线上方一行)当便宜 hint,纯涂画就只靠 see_ink 合成图。
+   - ⚠ **撤掉了一开始的"无条件自动附图"版**(每条都附 → 费/慢/可能跟问题无关)。
 **坑/边界**:① ink 坐标是归一化 0-1(跟 sidecar 一致),`_figure_crop_png`/`_text_under_ink` 都按归一化 ×页宽高转 PDF pt。② 有笔迹的每条提问都附图(小图~17KB,token 可控),满页涂画时焦点框≈整页(退化成 see_page,可接受)。③ `_ink_focus_image` >3MB 自动降档。

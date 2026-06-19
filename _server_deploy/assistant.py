@@ -541,6 +541,35 @@ def _t_see_page(args, ctx):
         return {"error": str(e)[:140]}
 
 
+def _t_see_ink(args, ctx):
+    """看用户**用笔标注的那块区域的合成图**(裁笔迹附近 + 叠上手写笔迹)。
+    用户用笔圈/划/打勾/画箭头标了东西、问『这是什么/我圈的/什么意思/这里』,或没说具体但页面有笔迹时用。返回 _vision 喂回大脑。"""
+    file_rel = ctx.get("file_rel") or ""
+    strokes = ctx.get("ink") or []
+    page = int(ctx.get("page") or 0)
+    if not file_rel or not page:
+        return {"error": "不在 PDF 书里 / 不知道哪页"}
+    if not strokes:
+        return {"error": "本页没有手写笔迹(用户没用笔标注,或还没画)"}
+    try:
+        import base64
+        import pdf_reader as pdf
+        png = pdf._ink_focus_image(file_rel, page, strokes)
+        if not png:
+            return {"error": "裁不出笔迹区域"}
+        marked = ""
+        try:
+            marked = pdf._text_under_ink(file_rel, page, strokes=strokes)
+        except Exception:
+            marked = ""
+        note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,看他到底圈/划/指的是什么,针对那个回答。")
+        if marked:
+            note += f" 几何上他大概标的是:「{_clean_tag(marked)[:120]}」(仅参考,以图为准)。"
+        return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], "note": note}
+    except Exception as e:
+        return {"error": str(e)[:140]}
+
+
 def _t_undo_last(args, ctx):
     try:
         import voice
@@ -823,6 +852,8 @@ TOOLS = {
                  "read_page 只有文字层、看不见图形/手写;用户问『这张图/这个图表/这页的图/我写的/我圈的/看一下』时用 see_page。args {page?}", _t_see_page),
     "see_figure": ("看用户**当前聚焦的那张图**的裁剪渲染图(他点选/拖进来的图;有手写笔迹则看合成图)。"
                    "已给的图说明不够、要核对图里的具体细节/用户在图上的标注时用。args {}", _t_see_figure),
+    "see_ink": ("看用户**用笔标注的那块区域合成图**(裁笔迹附近 + 叠手写笔迹)。比 see_page 聚焦、只看标注那块、更省更快。"
+                "用户用笔圈/划/打勾/画箭头标了东西后问『这是什么/我圈的/这里/什么意思』,或没说具体指什么但本页有笔迹时用。args {}", _t_see_ink),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
 }
 
@@ -832,7 +863,7 @@ def _tool_label(name, args):
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "page_vocab": "查掌握度",
-            "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "undo_last": "撤销"}.get(name, name)
+            "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "see_ink": "看笔迹标注", "undo_last": "撤销"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
@@ -908,14 +939,16 @@ def _sys_prompt(ctx):
                         circled = _clean_tag(_pdfm._text_under_ink(ctx["file_rel"], p))
         except Exception:
             pass
-        if circled:
-            learn_bits.append(
-                f"★★用户**用笔在页面上圈/划出了**:「{circled[:160]}」——他这条问的**就是这个**(『这是什么/讲讲/什么意思』都指它)。"
-                "优先针对这段圈出的内容回答/解释,别跑去答页面里别的东西。")
-        elif inked_pages:
-            learn_bits.append(
-                f"★本页有用户的**手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked_pages))} 页)。"
-                "用户问这页/问他写的圈的画的东西时,**用 see_page**——它会把『页面+手写笔迹』合成图发给你看,据手写内容回答。")
+        has_fe_ink = bool(ctx.get("ink"))
+        if inked_pages or has_fe_ink:
+            tip = f"★本页有用户的**手写笔迹/标注**"
+            if circled:
+                tip += f"(几何上大概标在「{circled[:120]}」附近,仅参考)"
+            tip += ("。**你来判断**这条问的跟他的标注有没有关:\n"
+                    "  · 跟标注有关(『这是什么/我圈的/这里/什么意思/解释下』等指代不清、或明显在问他标的东西),"
+                    "**或** 他没说具体指什么但本页有笔迹 → **先调 see_ink**(看『笔迹区域合成图』,据笔迹位置/形状/指向判断他标了啥再答,任意涂画/箭头/勾都行);\n"
+                    "  · 问的**明显跟标注无关**(如『下一页讲什么』『总结整章』『翻译某段』『查某词』)→ **别看图**,直接按常规答(更快省额度)。")
+            learn_bits.append(tip)
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
@@ -1120,23 +1153,6 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
     client_actions = []
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
-        # 有手写笔迹 → **自动附上"笔迹区域合成图"**(原文+笔迹叠加)随首轮一起喂给大脑。
-        # 笔迹不一定是圈/线(箭头/勾/波浪/随手涂都行)→ 让 AI 直接看他标注了什么,比几何提取/让它自己 see_page 靠谱。
-        try:
-            _fe_ink = (ctx or {}).get("ink") or []
-            _ink_pg = int((ctx or {}).get("page") or 0)
-            if _fe_ink and _ink_pg and (ctx or {}).get("file_rel"):
-                import pdf_reader as _pdfm, base64 as _b64
-                _png = _pdfm._ink_focus_image(ctx["file_rel"], _ink_pg, _fe_ink)
-                if _png:
-                    content = [
-                        {"type": "text", "text": content +
-                         "\n\n【下图=用户用笔在页面上标注的区域,已把他的手写笔迹叠加上去。他这条问的多半就是他标/圈/划/箭头指的地方——"
-                         "结合笔迹的位置和指向 + 图里的文字回答,别跑去答页面别的内容。】"},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64.b64encode(_png).decode()}},
-                    ]
-        except Exception:
-            pass
         _t_start = time.time()
         _repair_tries = 0
         _resp_retry = 0          # 首轮无响应(预热进程失效)→ 换新进程重试一次
