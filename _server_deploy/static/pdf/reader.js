@@ -1406,6 +1406,8 @@ window.__voiceContext = function () {
       selection: sel,
       selection_sentence: selSentence,
       figures: figures,
+      // 当前页手写墨迹(内存里实时,不依赖服务端保存时机)→ 服务端据此算"用笔圈/划下的文字"当焦点。
+      ink: (function () { try { return (window._ink && window._ink.byPage && window._ink.byPage[currentPage]) ? window._ink.byPage[currentPage].slice(0, 60) : []; } catch (_) { return []; } })(),
       // 用户钉住的焦点(公式/段落 chip):持久(选中过期也保留),助手据此知道"在专门问这个"
       focus_sel: (window.__focusSel && window.__focusSel.text)
         ? { text: String(window.__focusSel.text).slice(0, 400), kind: window.__focusSel.kind || 'text' } : null,
@@ -1890,7 +1892,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-selpage-92';
+const READER_BUILD = 'reader-inkfocus-93';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];

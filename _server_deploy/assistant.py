@@ -885,18 +885,37 @@ def _sys_prompt(ctx):
     if isinstance(fsel, dict) and fsel.get("text"):
         fkind = "公式" if fsel.get("kind") == "formula" else "段落"
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
-    # 本页是否有手写批注 → 提示编排器:这种时候多半在问手写的东西,用 see_page(会发『页面+手写』合成图)
+    # 本页是否有手写批注:① 先尝试**提取圈/划下的文字**直接当焦点(用户用笔圈词=就问这个词,最强信号);
+    #                      ② 拿不到文字(纯涂画/箭头)再提示用 see_page 看合成图。
     if ctx.get("file_rel"):
+        circled = ""; inked_pages = []
         try:
             import pdf_reader as _pdfm
-            inked_disp = [_to_disp(ctx, int(p)) for p in vis if p and _pdfm._page_ink_strokes(ctx["file_rel"], int(p))]
+            # 前端把当前页内存墨迹放在 ctx["ink"](实时,不靠服务端保存时机)→ 优先用它算圈下文字
+            fe_ink = ctx.get("ink") or []
+            cur_p = int(ctx.get("page") or (vis[0] if vis else 0) or 0)
+            if fe_ink and cur_p:
+                inked_pages.append(cur_p)
+                circled = _clean_tag(_pdfm._text_under_ink(ctx["file_rel"], cur_p, strokes=fe_ink))
+            # 其余可见页 / 没拿到时回退服务端 sidecar
+            for p in vis:
+                p = int(p) if p else 0
+                if not p or p == cur_p:
+                    continue
+                if _pdfm._page_ink_strokes(ctx["file_rel"], p):
+                    inked_pages.append(p)
+                    if not circled:
+                        circled = _clean_tag(_pdfm._text_under_ink(ctx["file_rel"], p))
         except Exception:
-            inked_disp = []
-        if inked_disp:
+            pass
+        if circled:
             learn_bits.append(
-                f"★本页有用户的**手写批注**(第 {('、'.join(str(d) for d in inked_disp))} 页)。"
-                "用户问这页/问他写的圈的画的东西时,**用 see_page**——它会把『页面+手写笔迹』合成图发给你看,"
-                "据手写内容回答(别只看文字层,文字层读不到手写)。")
+                f"★★用户**用笔在页面上圈/划出了**:「{circled[:160]}」——他这条问的**就是这个**(『这是什么/讲讲/什么意思』都指它)。"
+                "优先针对这段圈出的内容回答/解释,别跑去答页面里别的东西。")
+        elif inked_pages:
+            learn_bits.append(
+                f"★本页有用户的**手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked_pages))} 页)。"
+                "用户问这页/问他写的圈的画的东西时,**用 see_page**——它会把『页面+手写笔迹』合成图发给你看,据手写内容回答。")
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
@@ -1101,6 +1120,23 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
     client_actions = []
     try:
         content = f"{_sys_prompt(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
+        # 有手写笔迹 → **自动附上"笔迹区域合成图"**(原文+笔迹叠加)随首轮一起喂给大脑。
+        # 笔迹不一定是圈/线(箭头/勾/波浪/随手涂都行)→ 让 AI 直接看他标注了什么,比几何提取/让它自己 see_page 靠谱。
+        try:
+            _fe_ink = (ctx or {}).get("ink") or []
+            _ink_pg = int((ctx or {}).get("page") or 0)
+            if _fe_ink and _ink_pg and (ctx or {}).get("file_rel"):
+                import pdf_reader as _pdfm, base64 as _b64
+                _png = _pdfm._ink_focus_image(ctx["file_rel"], _ink_pg, _fe_ink)
+                if _png:
+                    content = [
+                        {"type": "text", "text": content +
+                         "\n\n【下图=用户用笔在页面上标注的区域,已把他的手写笔迹叠加上去。他这条问的多半就是他标/圈/划/箭头指的地方——"
+                         "结合笔迹的位置和指向 + 图里的文字回答,别跑去答页面别的内容。】"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64.b64encode(_png).decode()}},
+                    ]
+        except Exception:
+            pass
         _t_start = time.time()
         _repair_tries = 0
         _resp_retry = 0          # 首轮无响应(预热进程失效)→ 换新进程重试一次

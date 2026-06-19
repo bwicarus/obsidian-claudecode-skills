@@ -5341,6 +5341,74 @@ def _page_ink_strokes(rel, page):
         return []
 
 
+def _text_under_ink(rel, page, strokes=None):
+    """检测某页**墨迹圈住/划下的文字**,按阅读序返回(给助手当焦点:用户用笔圈了啥就问啥)。
+    圈/方框 → 框内的字;下划线/横线(扁笔画)→ 线正上方一行内的字。墨迹归一化坐标 → ×页宽高转 PDF pt 跟字符层同系。
+    strokes 传了用传入的(前端内存实时墨迹,不依赖服务端保存时机);没传则读 sidecar。"""
+    try:
+        if strokes is None:
+            strokes = _page_ink_strokes(rel, page)
+        if not strokes:
+            return ""
+        abs_path = _safe_vault_path(rel)
+        if not abs_path:
+            return ""
+        res = _page_chars_cached(abs_path, rel, page)
+        if not res:
+            return ""
+        chars, pw, ph = res[0], res[1], res[2]
+    except Exception:
+        return ""
+    picked = {}
+    for s in strokes:
+        pts = s.get("p") or []
+        if not pts:
+            continue
+        xs = [p[0] * pw for p in pts]; ys = [p[1] * ph for p in pts]
+        bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+        h = by1 - by0; w = bx1 - bx0
+        flat = h < max(6.0, w * 0.18)          # 又扁又宽 → 当下划线/横线(文字在它上方)
+        for i, c in enumerate(chars):
+            if c.get("sp"):
+                continue
+            cx = (c["x0"] + c["x1"]) / 2; cy = (c["y0"] + c["y1"]) / 2
+            chh = (c["y1"] - c["y0"]) or 10.0
+            inside = (bx0 - 2 <= cx <= bx1 + 2) and (by0 - 2 <= cy <= by1 + 2)
+            under = flat and (bx0 - 2 <= cx <= bx1 + 2) and (by0 - chh * 1.3 <= cy <= by0 + chh * 0.3)
+            if inside or under:
+                picked[i] = c["c"]
+    if not picked:
+        return ""
+    return "".join(picked[i] for i in sorted(picked))[:200]   # i = reading order(chars 已按阅读序)
+
+
+def _ink_focus_image(rel, page, strokes, scale=2.6):
+    """裁出**笔迹附近区域**(笔迹外接框 + 留白带上下文)并把笔迹叠加上去 → PNG。
+    给助手:用户笔迹不一定是圈/线(箭头/勾/波浪/随手涂都行),直接看『原文+笔迹』合成图最稳。返回 PNG bytes 或 None。"""
+    try:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path or not strokes:
+            return None
+        xs, ys = [], []
+        for s in strokes:
+            for p in (s.get("p") or []):
+                if len(p) >= 2:
+                    xs.append(float(p[0])); ys.append(float(p[1]))
+        if not xs:
+            return None
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        bw = x1 - x0; bh = y1 - y0
+        padx = max(0.07, bw * 0.45)            # 横向多留点(把整行/邻词带进来)
+        pady = max(0.05, bh * 0.7)             # 纵向带上下文行
+        box = [max(0.0, x0 - padx), max(0.0, y0 - pady), min(1.0, x1 + padx), min(1.0, y1 + pady)]
+        png = _figure_crop_png(abs_path, page, box, scale=scale, with_ink=True, rel=rel, strokes=strokes)
+        if png and len(png) > 3_000_000:       # 太大降一档(防喂回 stdin 过大)
+            png = _figure_crop_png(abs_path, page, box, scale=scale * 0.6, with_ink=True, rel=rel, strokes=strokes)
+        return png
+    except Exception:
+        return None
+
+
 def _claude_bin():
     """稳健解析 claude CLI 路径:env APP_CLAUDE > which > 常见安装位。"""
     import shutil

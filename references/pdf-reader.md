@@ -1012,3 +1012,14 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 - 缓存:`is_ja` 进磁盘缓存键(`{sha}-p{page}-{mtime}-{ja|zh}.json`)+ `_CHAR_CACHE_VER` 9→10 + cv 并入 `_BOOK_LANGS_PATH` mtime(改书语言→cv 变→前端重取)。安全阀(tagger 挂跳过缓存)只对 is_ja 生效。
 
 **验证**:费曼(中文,无 langs)1095 汉字 0 个多字共享 w 组(全独立);応用情報(ja)827 字 218 组(重要/共通/フレーム,fugashi 正常)。**注**:中文按字独立是有意为之(用户母语,主要诉求是自由选任意片段喂 AI);若以后想要中文按词分(粒子=一词),可装 jieba 再加一条 `_apply_zh_tokenize` 分支(当前未装 jieba)。
+
+### 43. 笔迹焦点:用笔圈/划/箭头标注 → 自动把"笔迹区域合成图+附近文字"喂给助手(2026-06-19,`reader-inkfocus-93`)
+
+**问题**(用户:用笔圈了词问"这是什么",助手没理会、还答成别的):手写墨迹只画在 canvas 上,助手上下文里**没有"用户圈了什么"**;而且服务端 ink sidecar 常是空的(autosave 没触发),`see_page` 也看不到。
+**两层修法**:
+1. **前端把当前页内存墨迹随上下文发**:`__voiceContext` 加 `ink: window._ink.byPage[currentPage]`(实时,不依赖服务端保存时机)。
+2. **服务端有笔迹就自动看**(用户思路:笔迹不一定是圈/线,箭头/勾/波浪都行,**让 AI 直接看叠加图最稳**):
+   - `pdf_reader._ink_focus_image(rel,page,strokes)`:裁出笔迹外接框 + 留白(带上下文行/邻词)+ `_figure_crop_png(with_ink=True)` 叠笔迹 → PNG。
+   - `assistant._agent_run`:`ctx["ink"]` 非空 → **首轮 content 自动改成 `[文字, 笔迹合成图]` 列表**(复用 vision 回喂同一机制),提示"下图=用户标注区域,他问的就是他标/圈/划/箭头指的地方"。不靠 AI 自己决定去 see_page。
+   - 补充:`_text_under_ink(rel,page,strokes=)` 几何提取圈住/划下的文字(圈=框内、扁笔画=线上方一行)当**便宜的文字 hint** 进 sys prompt(`★★用户用笔圈/划出了「…」`);拿不到(纯涂画)就只靠合成图。
+**坑/边界**:① ink 坐标是归一化 0-1(跟 sidecar 一致),`_figure_crop_png`/`_text_under_ink` 都按归一化 ×页宽高转 PDF pt。② 有笔迹的每条提问都附图(小图~17KB,token 可控),满页涂画时焦点框≈整页(退化成 see_page,可接受)。③ `_ink_focus_image` >3MB 自动降档。
