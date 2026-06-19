@@ -4918,7 +4918,7 @@ def _fig_done_page(data: dict, page: int) -> bool:
 
 # ─── 选区 OCR 校正 sidecar：坏文字层的『选区重新识别』结果持久化，注入字符层永久生效 ───
 _OCRFIX_DIR = CLAUDE_DIR / "state" / "pdf-ocr-fix"
-_OCRFIX_INJECT_VER = 2   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
+_OCRFIX_INJECT_VER = 6   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
 
 
 def _ocrfix_path_abs(abs_path) -> Path:
@@ -5002,6 +5002,27 @@ def _ocr_token_ids(txt):
     return ids
 
 
+def _ocr_visual_weights(txt):
+    """每个字符的『视觉宽度权重』:LaTeX 标记($ ^ _ {} 命令名字母)几乎不占视觉宽度 → 权重 0;
+    `\\` 命令本身(\\times→× / \\sim→~)≈ 0.8 代表它渲染出的那个符号;空格 0.3;其余可见字符 1。
+    用累积权重做位置映射(而非字符数),避免 LaTeX 源码膨胀把数学段撑得过宽、盖住后文。"""
+    w = [0.0] * len(txt); cmd = False
+    for i, ch in enumerate(txt):
+        if ch == "$":
+            w[i] = 0.0; cmd = False
+        elif ch == "\\":
+            w[i] = 0.8; cmd = True            # 命令渲染出 ~1 个符号
+        elif cmd and ch.isalpha():
+            w[i] = 0.0                          # 命令名字母(times/sim…)不占宽
+        elif ch in "^_{}":
+            w[i] = 0.0; cmd = False
+        elif ch.isspace():
+            w[i] = 0.3; cmd = False
+        else:
+            w[i] = 1.0; cmd = False
+    return w
+
+
 def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
     """把『选区 OCR 校正』的正确文字注入字符层(坏文字层永久修正)。
     同 _apply_formula_chars:删掉校正 bbox 内的原坏字符 + 框内振假名,塞入校正文字(平铺满框宽、标 ocrfix=1)。
@@ -5026,23 +5047,58 @@ def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
         def _inside(bx0, by0, bx1, by1):
             cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
             return fx0 <= cx <= fx1 and fy0 <= cy <= fy1
+        # ★关键:删原字符前先**捕获它们的真实坐标**。坏文字层只是 ToUnicode 把字符『值』映射错了,
+        #   bbox『位置』是对的(PDF 渲染就靠它)。把校正文字按真实字形位置注入 → 选中框/点选跟图对齐。
+        # 排序按**行聚类**(y 中心差 >7pt 才换行;上标 `⁻⁸` y 抬高但 <7 仍算同行,否则会被分到别桶把 x 序打乱)
+        # + 行内按 x;得到正确阅读序(单行=单调 x)。
+        ins = [c for c in chars if _inside(c["x0"], c["y0"], c["x1"], c["y1"])]
+        ins.sort(key=lambda c: ((c["y0"] + c["y1"]) / 2.0, c["x0"]))
+        orig, _line, _lasty = [], [], None
+        for c in ins:
+            yc = (c["y0"] + c["y1"]) / 2.0
+            if _lasty is not None and yc - _lasty > 7.0:
+                _line.sort(key=lambda c: c["x0"]); orig.extend(_line); _line = []
+            _line.append(c); _lasty = yc
+        if _line:
+            _line.sort(key=lambda c: c["x0"]); orig.extend(_line)
         chars[:] = [c for c in chars if not _inside(c["x0"], c["y0"], c["x1"], c["y1"])]
         if isinstance(furigana, list) and furigana:
             furigana[:] = [r for r in furigana
                            if not (all(k in r for k in ("x0", "y0", "x1", "y1"))
                                    and _inside(r["x0"], r["y0"], r["x1"], r["y1"]))]
         txt = f["text"].strip()
-        n = len(txt)
-        if not n:
+        N = len(txt)
+        if not N:
             continue
-        slice_w = max(0.5, (fx1 - fx0) / n)
         tok = _ocr_token_ids(txt)            # 每字符所属 token 号 → 词 id 按 token 分,可分开点/选
         wbase, bk = WID + fi * 100000, BK + fi
+        M = len(orig)
+        # 按**累积视觉权重**比例插值到原字形真实 x 边界(保单调=阅读序对、跟真实字距走、且 LaTeX 标记被压扁
+        # 不占宽 → 数学段不会被源码膨胀撑过宽盖住后文)。y 跟所映射到的原字形(多行也对)。
+        vw = _ocr_visual_weights(txt)
+        cum = [0.0]
+        for x in vw:
+            cum.append(cum[-1] + x)
+        tot = cum[-1] or 1.0
+        edges = ([c["x0"] for c in orig] + [orig[-1]["x1"]]) if M else None   # M+1 个 x 边界
+
+        def _xat(p):                         # 比例 p∈[0,1] → 原字形边界上插值的 x
+            fp = p * M; lo = int(fp)
+            if lo >= M:
+                return edges[M]
+            return edges[lo] * (1 - (fp - lo)) + edges[lo + 1] * (fp - lo)
         for i, cc in enumerate(txt):
-            sx0 = fx0 + i * slice_w
+            if M:
+                sx0 = _xat(cum[i] / tot); sx1 = _xat(cum[i + 1] / tot)
+                gm = min(int((cum[i] / tot) * M), M - 1)
+                gy0, gy1 = orig[gm]["y0"], orig[gm]["y1"]
+            else:                            # 没捕到原字形(罕见)→ 退回 bbox 内均匀
+                sw0 = (fx1 - fx0) / N; sx0 = fx0 + i * sw0; sx1 = sx0 + sw0; gy0, gy1 = fy0, fy1
+            if sx1 - sx0 < 0.2:
+                sx1 = sx0 + 0.2                # 0 宽字符(LaTeX 标记)给极小宽度,不参与视觉但仍可被选进
             chars.append({
-                "c": cc, "x0": round(sx0, 2), "y0": round(fy0, 2),
-                "x1": round(sx0 + slice_w, 2), "y1": round(fy1, 2),
+                "c": cc, "x0": round(sx0, 2), "y0": round(gy0, 2),
+                "x1": round(sx1, 2), "y1": round(gy1, 2),
                 "sp": 1 if cc.isspace() else 0, "w": wbase + tok[i], "b": 0, "bk": bk, "ocrfix": 1,
             })
 
