@@ -47,8 +47,20 @@
       if(!active)return;
       item.style.transition='transform .3s cubic-bezier(.22,1,.36,1),opacity .3s ease,background .3s';
       if(dx<-90){
+        /* 接真后端:左滑=「这词我会了」→ 标记掌握(锁 mastery 100%),英→vocab-mark / 日→jp-vocab-mark;
+           标后该词不再当生词(下划线消失、刷新不回来)。语义非破坏、可逆(字典框「✓已掌握」可取消)。 */
+        var wEl=item.querySelector('.vi-word'); var w=wEl?(wEl.textContent||'').trim():'';
+        var jp=/[぀-ヿ㐀-鿿]/.test(w);
+        if(w){
+          fetch(jp?'/pdf/api/jp-vocab-mark':'/pdf/api/vocab-mark',{method:'POST',
+            headers:{'Content-Type':'application/json'},body:JSON.stringify({word:w,mark:'known'})})
+            .then(function(r){return r.json();}).then(function(d){
+              if(d&&d.ok===false){if(window.mfxToast)window.mfxToast('标记失败:'+(d.error||''),{type:'error'});return;}
+              try{window.refreshVocabUnderlinesForAllPages&&window.refreshVocabUnderlinesForAllPages();}catch(_){}
+            }).catch(function(){if(window.mfxToast)window.mfxToast('标记失败(网络)',{type:'error'});});
+        }
         item.style.transform='translateX(-110%)';item.style.opacity='0';
-        if(window.mfxToast)window.mfxToast('已移除生词',{type:'error'});
+        if(window.mfxToast)window.mfxToast(w?('已掌握「'+w+'」,移出生词本'):'已移出生词本',{type:'success'});
         setTimeout(function(){
           var h=item.offsetHeight;item.style.maxHeight=h+'px';item.style.overflow='hidden';
           requestAnimationFrame(function(){
