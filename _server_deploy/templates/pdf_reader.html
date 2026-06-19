@@ -667,11 +667,13 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
         <div class="btns" id="sel-btns-word" style="display:none">
           <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
           <button onclick="onLookupWord()" title="查词典">🔍 查词</button>
+          <button onclick="onOcrSel()" title="文字层坏掉(乱码/上标错/缺符号)时,用 Claude 视觉重新识别这块为正确文字">🔎 OCR</button>
         </div>
         <!-- 多词/句子选中：翻译 + 解释；短词组额外显示「词组」按钮 -->
         <div class="btns" id="sel-btns-multi" style="display:none">
           <button id="sel-phrase-btn" onclick="onPhrase()" title="当作词组：看释义/翻译 + 收藏作分词依据" style="display:none">📘 词组</button>
           <button onclick="onCopySel()" title="复制选中文本">📋 复制</button>
+          <button onclick="onOcrSel()" title="文字层坏掉(选中是乱码/上标错/缺符号)时,用 Claude 视觉把选区重新识别成正确文字,之后复制/翻译/解释都用校正后的">🔎 OCR</button>
           <button onclick="onTranslate()">🌐 翻译</button>
           <button onclick="onExplain()">💡 解释</button>
           <button onclick="onChat()">💬 对话</button>

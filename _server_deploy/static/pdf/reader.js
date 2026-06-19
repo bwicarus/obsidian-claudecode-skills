@@ -1890,7 +1890,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-fix-88';
+const READER_BUILD = 'reader-ocr-sel-89';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7503,6 +7503,45 @@ window.onCopySel = async () => {
     } catch (e2) { _toast?.('复制失败'); }
   }
 };
+// 选区重新识别：文字层坏掉(乱码/上标错/缺符号)时，把选区裁图发 Claude 视觉，拿回正确文字，
+// 回填到 lastSelText + 预览 → 之后 复制/翻译/解释/对话 全用校正后的正确文字。
+window.onOcrSel = async () => {
+  const pw = _charSel && _charSel.pw;
+  if (!pw || !pw.__charBoxes || !lastSelText) { (typeof _toast === 'function') && _toast('先选中文字'); return; }
+  const chars = pw.__charBoxes;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, n = 0;   // 选区并集 bbox(PDF pt)
+  for (let i = _charSel.startIdx; i <= _charSel.endIdx; i++) {
+    const c = chars[i];
+    if (!c || c.sp || c._x0 == null) continue;
+    x0 = Math.min(x0, c._x0); y0 = Math.min(y0, c._y0);
+    x1 = Math.max(x1, c._x1); y1 = Math.max(y1, c._y1); n++;
+  }
+  if (!n) { (typeof _toast === 'function') && _toast('选区无效'); return; }
+  const prev = document.getElementById('sel-preview');
+  const old = prev ? prev.innerHTML : '';
+  if (prev) prev.innerHTML = '🔎 OCR 识别中…';
+  try {
+    const ov = _getAiOverrides();
+    const r = await __safeFetch('/pdf/api/ocr-selection', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, page: currentPage, bbox: [x0, y0, x1, y1],
+                            model: ov.model || '', effort: ov.effort || ''}),
+    });
+    const j = await r.json();
+    if (j && j.ok && j.text) {
+      lastSelText = j.text;                     // 关键:校正后的文字回填,下游全用它
+      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓</span>';
+      (typeof _toast === 'function') && _toast('已用 OCR 校正选中文本');
+    } else {
+      if (prev) prev.innerHTML = old;
+      (typeof _toast === 'function') && _toast((j && j.error) || 'OCR 失败');
+    }
+  } catch (e) {
+    if (prev) prev.innerHTML = old;
+    (typeof _toast === 'function') && _toast('OCR 失败:' + (e && e.message || e));
+  }
+};
+
 // Ctrl/Cmd+C：char-layer 有选中时，把选中文本写进剪贴板（绕过空的原生 selection）
 document.addEventListener('copy', (e) => {
   const t = (lastSelText || '').trim();

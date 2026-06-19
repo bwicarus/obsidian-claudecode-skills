@@ -1753,6 +1753,51 @@ def pdf_api_page_chars():
         return jsonify({"ok": False, "error": str(ex)}), 500
 
 
+@bp.route("/api/ocr-selection", methods=["POST"])
+def pdf_api_ocr_selection():
+    """选区重新识别:坏文字层时,把选区裁成图发 Claude 视觉精确转写,回正确文字。
+    body {file, page(PDF页), bbox:[x0,y0,x1,y1](PDF pt), model?, effort?}。只读图回字,不落库。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    page = int(body.get("page") or 0)
+    bbox = body.get("bbox") or []
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1 or len(bbox) != 4:
+        return jsonify({"ok": False, "error": "参数缺失"}), 400
+    try:
+        import fitz
+        doc = fitz.open(str(abs_path))
+        try:
+            if page > len(doc):
+                return jsonify({"ok": False, "error": "页码越界"}), 400
+            pr = doc[page - 1].rect; W = float(pr.width); H = float(pr.height)
+        finally:
+            doc.close()
+        x0, y0, x1, y1 = [float(v) for v in bbox]
+        if x1 - x0 < 0.5 or y1 - y0 < 0.5:
+            return jsonify({"ok": False, "error": "选区太小"}), 400
+        # padding:选区并集已含上标/下标字符的 bbox,只需很小留白防边缘字形被切;
+        # 留太多会把上下相邻行也圈进图 → Claude 把别的行也转写了。
+        padx = 2.5
+        pady = (y1 - y0) * 0.12 + 2.0
+        nb = [max(0.0, (x0 - padx) / W), max(0.0, (y0 - pady) / H),
+              min(1.0, (x1 + padx) / W), min(1.0, (y1 + pady) / H)]
+        # 小区域高 DPI、大选区降档:让裁图长边 ~1500px(视觉甜区,又不至于过大)
+        longpt = max((nb[2] - nb[0]) * W, (nb[3] - nb[1]) * H) or 1.0
+        scale = max(2.0, min(5.0, 1500.0 / longpt))
+        png = _figure_crop_png(abs_path, page, nb, scale=scale)
+        model = (body.get("model") or "sonnet").strip() or "sonnet"
+        effort = (body.get("effort") or "low").strip() or "low"
+        text = _claude_ocr_crop(png, model, effort)
+        if not text:
+            return jsonify({"ok": False, "error": "OCR 没结果,再试一次"}), 502
+        text = _re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
+        text = _re.sub(r"\n?```$", "", text).strip()
+        return jsonify({"ok": True, "text": text, "model": model, "effort": effort})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:160]}), 500
+
+
 def _page_content_version(abs_path, rel: str, page: int) -> str:
     """该页内容版本签名:PDF mtime + 分词版本 + 偏移 + 单页重扫覆盖。任一变 → cv 变 → 前端换缓存 key。"""
     import hashlib
@@ -5057,6 +5102,61 @@ def _page_ink_strokes(rel, page):
         return (_ink_load(rel).get("pages") or {}).get(str(int(page))) or []
     except Exception:
         return []
+
+
+def _claude_bin():
+    """稳健解析 claude CLI 路径:env APP_CLAUDE > which > 常见安装位。"""
+    import shutil
+    c = (os.environ.get("APP_CLAUDE") or "").strip()
+    if c and os.path.exists(c):
+        return c
+    return shutil.which("claude") or "/home/bwicarus/.local/bin/claude"
+
+
+def _claude_ocr_crop(png_bytes, model="sonnet", effort="low", timeout=140):
+    """把一小块裁图发给 Claude 视觉,精确转写其中文字(修坏文字层用)。返回纯转写文本或 None。
+    走 claude CLI stream-json(同 formula_ocr_claude.ask_vision),禁所有工具(纯看图回字,不让它瞎跑)。"""
+    import base64, json as _json, subprocess, select, time
+    prompt = (
+        "这是从 PDF 裁出的一小块文字图。请**精确逐字转写**图中文字,原样输出,"
+        "**不要翻译、不要解释、不要补全、不要加引号或代码围栏**。规则:"
+        "① 数学/上标/下标/分式/根号/求和积分一律用 LaTeX 写进 $...$(例:$10^{-8}$、$x_i$、$\\frac{a}{b}$);"
+        "② 特殊符号照原样保留(如 Å、±、≈、×、希腊字母 α β λ);"
+        "③ 多行的话用空格连接成一段;④ 图里没有的内容绝不臆造。"
+        "只输出转写出来的文字本身,别的什么都别说。")
+    blocks = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": base64.b64encode(png_bytes).decode("ascii")}},
+        {"type": "text", "text": prompt},
+    ]
+    p = subprocess.Popen(
+        [_claude_bin(), "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+         "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
+         "--verbose", "--model", model or "sonnet", "--effort", effort or "low"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    try:
+        p.stdin.write(_json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}) + "\n")
+        p.stdin.flush()
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            r, _, _ = select.select([p.stdout], [], [], 0.5)
+            if r:
+                ln = p.stdout.readline()
+                if not ln:
+                    break
+                if '"type":"result"' in ln:
+                    try:
+                        return (_json.loads(ln).get("result") or "").strip()
+                    except Exception:
+                        return None
+            if p.poll() is not None:
+                break
+        return None
+    finally:
+        try:
+            p.kill()
+        except Exception:
+            pass
 
 
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
