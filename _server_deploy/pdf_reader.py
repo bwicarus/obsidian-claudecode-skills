@@ -4917,7 +4917,7 @@ def _fig_done_page(data: dict, page: int) -> bool:
 
 # ─── 选区 OCR 校正 sidecar：坏文字层的『选区重新识别』结果持久化，注入字符层永久生效 ───
 _OCRFIX_DIR = CLAUDE_DIR / "state" / "pdf-ocr-fix"
-_OCRFIX_INJECT_VER = 1   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
+_OCRFIX_INJECT_VER = 2   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
 
 
 def _ocrfix_path_abs(abs_path) -> Path:
@@ -4975,10 +4975,36 @@ def _ocrfix_add(abs_path, page: int, bbox_norm, text: str):
     _ocrfix_save_abs(abs_path, data)
 
 
+def _ocr_token_ids(txt):
+    """给注入文字按 token 切分 → 每 token 一个相对编号(同 token 同号),让校正文字能**分开点/选**:
+    $...$/$$...$$ 数学整块算一个 token、连续 ASCII 字母数字(如 cm/Å 旁的词)算一个、其余每个字符(中日文/标点)各自一个。
+    返回 len==len(txt) 的编号列表。"""
+    ids = [0] * len(txt); t = 0; i = 0; n = len(txt)
+    while i < n:
+        ch = txt[i]
+        if ch == "$":                                   # 数学跨度整块一个 token
+            two = i + 1 < n and txt[i + 1] == "$"
+            close = "$$" if two else "$"
+            k = txt.find(close, i + (2 if two else 1))
+            end = (k + len(close)) if k >= 0 else n
+            for p in range(i, end):
+                ids[p] = t
+            t += 1; i = end; continue
+        if ch.isascii() and ch.isalnum():               # 连续 ASCII 词(cm/10 等)一个 token
+            j = i
+            while j < n and txt[j].isascii() and txt[j].isalnum():
+                j += 1
+            for p in range(i, j):
+                ids[p] = t
+            t += 1; i = j; continue
+        ids[i] = t; t += 1; i += 1                       # 中日文字/标点/符号 → 各自一个 token
+    return ids
+
+
 def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
     """把『选区 OCR 校正』的正确文字注入字符层(坏文字层永久修正)。
-    同 _apply_formula_chars:删掉校正 bbox 内的原坏字符 + 框内振假名,塞入校正文字
-    (平铺满框宽、同一词 id、标 ocrfix=1 给前端可视提示)。cv 已含本 sidecar mtime,改了前端缓存自动失效。"""
+    同 _apply_formula_chars:删掉校正 bbox 内的原坏字符 + 框内振假名,塞入校正文字(平铺满框宽、标 ocrfix=1)。
+    词 id **按 token 分**(不是整块一个)→ 校正文字可分开点/选;cv 已含本 sidecar mtime,改了前端缓存自动失效。"""
     try:
         abs_path = _safe_vault_path(rel)
         if not abs_path:
@@ -5009,13 +5035,14 @@ def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
         if not n:
             continue
         slice_w = max(0.5, (fx1 - fx0) / n)
-        wid, bk = WID + fi, BK + fi
+        tok = _ocr_token_ids(txt)            # 每字符所属 token 号 → 词 id 按 token 分,可分开点/选
+        wbase, bk = WID + fi * 100000, BK + fi
         for i, cc in enumerate(txt):
             sx0 = fx0 + i * slice_w
             chars.append({
                 "c": cc, "x0": round(sx0, 2), "y0": round(fy0, 2),
                 "x1": round(sx0 + slice_w, 2), "y1": round(fy1, 2),
-                "sp": 1 if cc.isspace() else 0, "w": wid, "b": 0, "bk": bk, "ocrfix": 1,
+                "sp": 1 if cc.isspace() else 0, "w": wbase + tok[i], "b": 0, "bk": bk, "ocrfix": 1,
             })
 
 def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int = 2):
