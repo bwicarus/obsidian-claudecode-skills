@@ -334,9 +334,12 @@ window.onOcrSel = async () => {
     });
     const j = await r.json();
     if (j && j.ok && j.text) {
-      lastSelText = j.text;                     // 关键:校正后的文字回填,下游全用它
-      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓</span>';
-      (typeof _toast === 'function') && _toast('已用 OCR 校正选中文本');
+      lastSelText = j.text;                     // 校正后的文字回填,下游(复制/翻译/解释/对话)全用它
+      if (prev) prev.innerHTML = _esc(j.text) + ' <span class="len">OCR ✓ 已写入</span>';
+      // 持久化已落库:更新本页 cv(让重渲第一拉就命中新版)+ 立即重渲本页 → 校正注入字符层、永久生效
+      if (j.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, j.cv); } catch (_) {} }
+      if (typeof _rerenderLoadedPages === 'function') { try { _rerenderLoadedPages(); } catch (_) {} }
+      (typeof _toast === 'function') && _toast('已 OCR 校正并永久写入页面');
     } else {
       if (prev) prev.innerHTML = old;
       (typeof _toast === 'function') && _toast((j && j.error) || 'OCR 失败');

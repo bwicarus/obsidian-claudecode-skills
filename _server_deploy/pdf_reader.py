@@ -1737,6 +1737,7 @@ def pdf_api_page_chars():
         _merge_favorite_phrases(chars)   # 收藏词组合并 w（单击选中整词组）
         furigana = _merge_favorite_phrases_furigana(furigana)   # 收藏词组按整体读音合并振假名(一条 ruby)
         _apply_formula_chars(chars, furigana, rel, page, page_w, page_h)   # 公式区域文字层替换为 OCR LaTeX(选中公式直接得 $...$)
+        _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h)   # 选区 OCR 校正:坏文字层永久修正(注入正确文字)
         # **只回不变部分**(字 bbox/分词/振假名);可变的生词/句子框走 /page-overlay。
         # 可缓存:前端带 &cv=<内容版本>(偏移/重扫/PDF 改 → cv 变 → 换 key → 不会陈旧);
         # /pdf/sw.js 缓存命中即本地(读过的书秒开/离线),没命中才回 Pi。
@@ -1793,7 +1794,14 @@ def pdf_api_ocr_selection():
             return jsonify({"ok": False, "error": "OCR 没结果,再试一次"}), 502
         text = _re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
         text = _re.sub(r"\n?```$", "", text).strip()
-        return jsonify({"ok": True, "text": text, "model": model, "effort": effort})
+        # 持久化:用**原始选区 bbox**(不含 padding)归一化存校正 → 注入字符层,重选/复制/翻译永久生效
+        cv = None
+        try:
+            _ocrfix_add(abs_path, page, [x0 / W, y0 / H, x1 / W, y1 / H], text)
+            cv = _page_content_version(abs_path, rel, page)   # 新 cv → 前端据此立即重载本页字符层
+        except Exception as ex:
+            sys.stderr.write(f"[ocr-fix] save fail p{page}: {ex}\n")
+        return jsonify({"ok": True, "text": text, "cv": cv, "model": model, "effort": effort})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:160]}), 500
 
@@ -1819,7 +1827,11 @@ def _page_content_version(abs_path, rel: str, page: int) -> str:
         fm = int(os.path.getmtime(str(_fig_path_abs(abs_path))))   # 公式 sidecar 改(latex 填好/改) → 公式字符层变 → cv 必须变
     except Exception:
         fm = 0
-    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}"
+    try:
+        om = int(os.path.getmtime(str(_ocrfix_path_abs(abs_path))))   # 选区 OCR 校正 sidecar 改 → 注入字符变 → cv 必须变
+    except Exception:
+        om = 0
+    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}|o{_OCRFIX_INJECT_VER}:{om}"
     return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
 
 
@@ -4901,6 +4913,110 @@ def _fig_save_abs(abs_path, data: dict):
 
 def _fig_done_page(data: dict, page: int) -> bool:
     return any(f.get("page") == page for f in data.get("figures", [])) or page in set(data.get("_none_pages", []))
+
+
+# ─── 选区 OCR 校正 sidecar：坏文字层的『选区重新识别』结果持久化，注入字符层永久生效 ───
+_OCRFIX_DIR = CLAUDE_DIR / "state" / "pdf-ocr-fix"
+_OCRFIX_INJECT_VER = 1   # 注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
+
+
+def _ocrfix_path_abs(abs_path) -> Path:
+    _OCRFIX_DIR.mkdir(parents=True, exist_ok=True)
+    return _OCRFIX_DIR / f"{_book_sha(abs_path)}.json"
+
+
+def _ocrfix_load_abs(abs_path) -> dict:
+    p = _ocrfix_path_abs(abs_path)
+    try:
+        cur_mt = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        cur_mt = 0
+    if not p.exists():
+        return {"pdf": str(abs_path), "book_mtime": cur_mt, "fixes": []}
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        d.setdefault("fixes", [])
+        if cur_mt and d.get("book_mtime") and d["book_mtime"] != cur_mt:
+            d["fixes"] = []   # 书重建(mtime 变)→ 旧校正坐标可能失效 → 清空
+        d["book_mtime"] = cur_mt
+        return d
+    except Exception:
+        return {"pdf": str(abs_path), "book_mtime": cur_mt, "fixes": []}
+
+
+def _ocrfix_save_abs(abs_path, data: dict):
+    p = _ocrfix_path_abs(abs_path)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    tmp.replace(p)
+
+
+def _ocrfix_add(abs_path, page: int, bbox_norm, text: str):
+    """加一条校正(归一化 bbox)。同页『重叠过半』的旧校正替换掉(重 OCR 同一处=覆盖,不堆叠)。"""
+    data = _ocrfix_load_abs(abs_path)
+    nx0, ny0, nx1, ny1 = bbox_norm
+
+    def _overlap(f):
+        if f.get("page") != page:
+            return False
+        b = f.get("bbox") or [0, 0, 0, 0]
+        ix0, iy0, ix1, iy1 = max(nx0, b[0]), max(ny0, b[1]), min(nx1, b[2]), min(ny1, b[3])
+        if ix1 <= ix0 or iy1 <= iy0:
+            return False
+        inter = (ix1 - ix0) * (iy1 - iy0)
+        a1 = (nx1 - nx0) * (ny1 - ny0); a2 = (b[2] - b[0]) * (b[3] - b[1])
+        return inter > 0.5 * max(1e-9, min(a1, a2))
+
+    data["fixes"] = [f for f in data["fixes"] if not _overlap(f)]
+    data["fixes"].append({"page": int(page), "bbox": [round(float(v), 4) for v in bbox_norm],
+                          "text": text, "ts": int(time.time())})
+    if len(data["fixes"]) > 2000:
+        data["fixes"] = data["fixes"][-2000:]
+    _ocrfix_save_abs(abs_path, data)
+
+
+def _apply_ocr_corrections(chars, furigana, rel, page, page_w, page_h):
+    """把『选区 OCR 校正』的正确文字注入字符层(坏文字层永久修正)。
+    同 _apply_formula_chars:删掉校正 bbox 内的原坏字符 + 框内振假名,塞入校正文字
+    (平铺满框宽、同一词 id、标 ocrfix=1 给前端可视提示)。cv 已含本 sidecar mtime,改了前端缓存自动失效。"""
+    try:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path:
+            return
+        data = _ocrfix_load_abs(abs_path)
+    except Exception:
+        return
+    fixes = [f for f in (data.get("fixes") or [])
+             if f.get("page") == page and (f.get("text") or "").strip()
+             and f.get("bbox") and len(f.get("bbox")) == 4]
+    if not fixes:
+        return
+    WID, BK = 960000000, 960000
+    for fi, f in enumerate(fixes):
+        x0n, y0n, x1n, y1n = f["bbox"]
+        fx0, fy0, fx1, fy1 = x0n * page_w, y0n * page_h, x1n * page_w, y1n * page_h
+
+        def _inside(bx0, by0, bx1, by1):
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            return fx0 <= cx <= fx1 and fy0 <= cy <= fy1
+        chars[:] = [c for c in chars if not _inside(c["x0"], c["y0"], c["x1"], c["y1"])]
+        if isinstance(furigana, list) and furigana:
+            furigana[:] = [r for r in furigana
+                           if not (all(k in r for k in ("x0", "y0", "x1", "y1"))
+                                   and _inside(r["x0"], r["y0"], r["x1"], r["y1"]))]
+        txt = f["text"].strip()
+        n = len(txt)
+        if not n:
+            continue
+        slice_w = max(0.5, (fx1 - fx0) / n)
+        wid, bk = WID + fi, BK + fi
+        for i, cc in enumerate(txt):
+            sx0 = fx0 + i * slice_w
+            chars.append({
+                "c": cc, "x0": round(sx0, 2), "y0": round(fy0, 2),
+                "x1": round(sx0 + slice_w, 2), "y1": round(fy1, 2),
+                "sp": 1 if cc.isspace() else 0, "w": wid, "b": 0, "bk": bk, "ocrfix": 1,
+            })
 
 def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int = 2):
     """后台:描述本页(+预取后 prefetch 页)插图,写 sidecar。in-flight 去重,失败不记(下次重试)。"""
