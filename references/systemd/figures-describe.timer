@@ -1,0 +1,11 @@
+[Unit]
+Description=Run figure crop-describe batch nightly (02:30, off-peak AI quota)
+
+[Timer]
+# 凌晨 02:30 跑(off-peak 额度;YOLO 框图由 yolo-figures.timer 每 6h 先填好)。
+# Persistent=true:错过(关机)开机后补跑一次。
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

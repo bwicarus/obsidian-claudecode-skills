@@ -1,0 +1,28 @@
+[Unit]
+Description=Nightly figure crop-describe batch (off-peak AI quota)
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=bwicarus
+Group=bwicarus
+WorkingDirectory=/home/bwicarus/claude
+Environment="CLAUDE_PROJECT=/home/bwicarus/claude"
+Environment="OBSIDIAN_VAULT=/home/bwicarus/obsidian"
+Environment="HOME=/home/bwicarus"
+Environment="APP_CLAUDE=/home/bwicarus/.local/bin/claude"
+
+# 低优先级:夜间裁图描述用 off-peak 额度,读 YOLO 框做 gate(0跳过/1裁图/≥2整页)
+Nice=15
+CPUWeight=30
+
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/describe_figures_batch.py --all
+
+Restart=on-failure
+RestartSec=120
+RemainAfterExit=no
+
+StandardOutput=append:/home/bwicarus/claude/state/logs/figures-describe.log
+StandardError=append:/home/bwicarus/claude/state/logs/figures-describe.log

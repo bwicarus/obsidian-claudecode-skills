@@ -3494,6 +3494,7 @@ def pdf_api_book_figures_set():
     if not rel:
         return jsonify({"ok": False, "error": "no file"}), 400
     enabled = bool(data.get("enabled"))
+    was = _load_book_fig().get(rel, False)
     allm = _load_book_fig()
     allm[rel] = enabled
     try:
@@ -3501,7 +3502,31 @@ def pdf_api_book_figures_set():
         _BOOK_FIG_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+    if enabled and not was:                      # 刚开启 → 后台立刻跑一轮 YOLO 框图 + 裁图描述(不必等夜间)
+        ap = _safe_vault_path(rel)
+        if ap:
+            _threading.Thread(target=_run_figures_pipeline, args=(str(ap),), daemon=True).start()
     return jsonify({"ok": True, "enabled": enabled})
+
+
+def _run_figures_pipeline(abs_path: str):
+    """后台:对一本书顺序跑 YOLO 框图(doclayout-venv)→ 裁图描述(主 python)。开书启用/夜间 timer 都走它。
+    YOLO 在 Pi CPU 慢(~6.7s/页),整本可能几十分钟;低优先级(nice)别影响 webapp。"""
+    import subprocess
+    sp = str(CLAUDE_DIR / "scripts")
+    env = dict(os.environ)
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    try:
+        subprocess.run(["nice", "-n", "19", "/home/bwicarus/doclayout-venv/bin/python",
+                        f"{sp}/yolo_figures.py", "--book", abs_path],
+                       timeout=7200, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["nice", "-n", "19", py, f"{sp}/describe_figures_batch.py", "--book", abs_path],
+                       timeout=7200, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 _BOOK_CROP_PATH = CLAUDE_DIR / "state" / "pdf-book-crop.json"
@@ -5856,14 +5881,15 @@ def pdf_api_page_figures():
             _fig_save_abs(abs_path, data)
         except Exception:
             pass
+    # 只回**已描述**的图(desc 非空):YOLO 框好但夜间还没描述的 standalone 框先不显示(避免空徽标),
+    #   等夜间裁图描述批处理(describe_figures_batch.py)填了 desc 下次自然出现。
     figs = [{"caption": f.get("caption", ""), "bbox": f.get("bbox"), "fbox": f.get("fbox"),
              "desc": f.get("desc", ""), "badge": f.get("badge"),
              "group": bool(f.get("group")), "members": f.get("members") or []}
-            for f in page_figs]
-    done = _fig_done_page(data, page)
-    if not done:
-        _threading.Thread(target=_fig_describe_bg, args=(abs_path, page), daemon=True).start()
-    resp = jsonify({"ok": True, "figures": figs, "pending": (not done)})
+            for f in page_figs if (f.get("desc") or "").strip() or (f.get("caption") or "").strip()]
+    # 只读:描述由 YOLO 闲时框图(yolo-figures.timer)+ 夜间裁图描述(figures-describe.timer)离线生成,
+    #   阅读时不再即时触发 AI(_fig_describe_bg 已退役)。pending 恒 False → 前端不再轮询。
+    resp = jsonify({"ok": True, "figures": figs, "pending": False})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

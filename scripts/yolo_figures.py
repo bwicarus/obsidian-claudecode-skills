@@ -187,6 +187,7 @@ def process_sidecar(path, dry=False, force=False):
     #   = 整本绝大多数公式被漏(费曼全本 588 页只识出 21 个,全在第 7 章有图的页)。
     #   图/图组重排仍只在有图注的页做(regroup 依赖 AI figures);公式框则全页扫。
     fig_pages = set(by_page)
+    nstand = 0
     for pn in range(1, doc.page_count + 1):
         det = detect_page(doc[pn - 1])
         if pn in fig_pages:
@@ -197,6 +198,14 @@ def process_sidecar(path, dry=False, force=False):
                 elif e.get("fsrc") == "yolo": nsingle += 1
                 else: nfa += 1
             new_figs.extend(entries)
+        elif det["fig"]:
+            # ⭐ YOLO-gate:无 AI 图注、但 YOLO 框到了图的页 → 也记 geom 条目(desc 留空待夜间描述批处理填)。
+            # 这让「YOLO 当 gate→裁图描述」成立:figures_geom 现在覆盖所有有图的页(不只 AI 描述过的)。
+            for (nb, cf, cls) in dedup_outer(det["fig"]):
+                nstand += 1; nyolo += 1
+                new_figs.append({"page": pn, "bbox": nb, "fbox": nb, "fsrc": "yolo",
+                                 "fconf": cf, "fcls": cls, "caption": "", "desc": "",
+                                 "needs_describe": True})
         for (fb, fc) in det["formula"]:
             formulas_all.append({"page": pn, "bbox": fb, "conf": fc, "latex": None})
     doc.close()
@@ -215,6 +224,23 @@ def process_sidecar(path, dry=False, force=False):
             if old_fmls[bi].get("latex_engine"):
                 nf["latex_engine"] = old_fmls[bi]["latex_engine"]
     n_kept = sum(1 for f in formulas_all if (f.get("latex") or "").strip())
+    # 保留旧 geom 的描述:重建会把 standalone yolo 条目 desc 清空 → 抹掉描述批处理填好的结果。
+    # 新框跟旧框(同页 + IoU≥0.6 + 旧有 desc)匹配 → 搬运 desc/caption,免得夜间白描述一遍。
+    old_geom = data.get("figures_geom") or []
+    n_desc_kept = 0
+    for nf in new_figs:
+        if (nf.get("desc") or "").strip():
+            continue
+        best, bi = 0.0, -1
+        for j, og in enumerate(old_geom):
+            if og.get("page") != nf.get("page") or not (og.get("desc") or "").strip():
+                continue
+            ov = _iou(nf.get("bbox") or nf.get("fbox") or [0, 0, 0, 0], og.get("bbox") or og.get("fbox") or [0, 0, 0, 0])
+            if ov > best: best, bi = ov, j
+        if bi >= 0 and best >= 0.6:
+            nf["desc"] = old_geom[bi].get("desc", "")
+            if old_geom[bi].get("caption"): nf["caption"] = old_geom[bi]["caption"]
+            nf.pop("needs_describe", None); n_desc_kept += 1
     data["figures_geom"] = new_figs            # 派生层:几何+图组(从干净的 AI figures 重算,幂等);不动 data["figures"]
     data["formulas"] = formulas_all
     data["geom"] = "yolo"
@@ -223,7 +249,7 @@ def process_sidecar(path, dry=False, force=False):
         tmp = path + ".tmp"
         open(tmp, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=1))
         os.replace(tmp, path)
-    print(f"  {os.path.basename(path)}: in={len(figs)} yolo_boxes={nyolo} → out={len(new_figs)} (单图yolo:{nsingle} 图组:{ngrp} 回退ai:{nfa}) formulas={len(formulas_all)}(沿用旧latex {n_kept})")
+    print(f"  {os.path.basename(path)}: in={len(figs)} yolo_boxes={nyolo} → out={len(new_figs)} (单图yolo:{nsingle} 图组:{ngrp} 回退ai:{nfa} 无AI注的YOLO框:{nstand}) formulas={len(formulas_all)}(沿用旧latex {n_kept}) 沿用旧desc {n_desc_kept}")
 
 
 def main():
