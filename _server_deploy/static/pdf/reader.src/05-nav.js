@@ -84,6 +84,8 @@ window.applyPageOffset = function (forceZero) {
     off = (currentPage || 1) - pr;
   }
   try { localStorage.setItem('pdf-page-offset:' + FILE_REL, String(off)); } catch (_) {}
+  // 镜像到服务端:后台 describe/provenance 要靠它把目录的印刷页对齐(前端 localStorage 它读不到)
+  try { fetch('/pdf/api/page-offset', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({file: FILE_REL, offset: off})}).catch(function(){}); } catch (_) {}
   window._refreshPageCur();
   window._populatePageOffsetUI();
   if (typeof _toast === 'function') _toast(off ? ('已对齐(PDF 比书页多 ' + off + ' 页)') : '已重置页码对齐');

@@ -3559,6 +3559,249 @@ def pdf_api_book_crop_set():
     return jsonify({"ok": True, "crop": crop})
 
 
+# ──────── 书籍目录(TOC):有原生目录默认用原生;「建立目录」AI 整页识图抽出可覆盖 ────────
+# 目录是 provenance(图描述/助手都要知道「书的哪一章节」)的权威来源,也补「书没标准化分段」缺口。
+# sidecar: state/pdf-toc/<book-sha>.json = {range:{start,end}, entries:[{title,page,level}], built_at}
+_BOOK_TOC_DIR = CLAUDE_DIR / "state" / "pdf-toc"
+
+def _toc_path_abs(abs_path) -> Path:
+    return _BOOK_TOC_DIR / f"{_book_sha(abs_path)}.json"
+
+def _toc_load_abs(abs_path) -> dict:
+    try:
+        p = _toc_path_abs(abs_path)
+        return json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except Exception:
+        return {}
+
+def _toc_save_abs(abs_path, data: dict):
+    _BOOK_TOC_DIR.mkdir(parents=True, exist_ok=True)
+    p = _toc_path_abs(abs_path)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(p)
+
+def _native_toc_entries(abs_path) -> list:
+    """PDF 自带目录 → [{title,page(印刷不可知→PDF页),level}]。get_toc 的 page 是 PDF 页(1基)。"""
+    try:
+        import fitz
+        doc = fitz.open(str(abs_path))
+        try:
+            toc = doc.get_toc() or []
+        finally:
+            doc.close()
+        return [{"title": str(t[1]).strip(), "page": int(t[2]), "level": int(t[0])} for t in toc if t[2]]
+    except Exception:
+        return []
+
+# 页偏移 PDF页-印刷页(前端 localStorage 的服务端镜像,供后台 describe/provenance 把目录印刷页对齐)
+_BOOK_OFFSET_PATH = CLAUDE_DIR / "state" / "pdf-book-offset.json"
+def _page_offset_for(rel: str) -> int:
+    try:
+        return int(json.loads(_BOOK_OFFSET_PATH.read_text("utf-8")).get(rel, 0) or 0)
+    except Exception:
+        return 0
+
+def _effective_toc(abs_path, rel: str = "") -> tuple[list, str]:
+    """有效目录(page 归一到**印刷页**):自定义(建过的,page 本就是印刷页)优先覆盖原生(get_toc 是 PDF 页→减 offset)。"""
+    cust = _toc_load_abs(abs_path).get("entries")
+    if cust:
+        return cust, "custom"
+    nat = _native_toc_entries(abs_path)
+    if nat:
+        off = _page_offset_for(rel) if rel else 0
+        return [{**e, "page": e["page"] - off} for e in nat], "native"
+    return [], "none"
+
+def _book_location(abs_path, printed_page: int, rel: str = "") -> str:
+    """provenance:该**印刷页**所属章节标题(取 page ≤ 当前的最深一条)。无目录 → 空串。"""
+    entries, _ = _effective_toc(abs_path, rel)
+    cands = [e for e in entries if e.get("page") and e["page"] <= printed_page]
+    if not cands:
+        return ""
+    return (max(cands, key=lambda e: e["page"]).get("title") or "").strip()
+
+
+def _claude_vision_pages(pngs: list, prompt: str, model="sonnet", effort="low", timeout=240):
+    """把多张页面图 + 一段 prompt 发给 Claude 视觉,返回结果文本(禁所有工具,纯看图回字)。建目录用。"""
+    import base64, json as _json, subprocess, select, time
+    blocks = []
+    for png in pngs:
+        blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                    "data": base64.b64encode(png).decode("ascii")}})
+    blocks.append({"type": "text", "text": prompt})
+    p = subprocess.Popen(
+        [_claude_bin(), "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+         "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
+         "--verbose", "--model", model or "sonnet", "--effort", effort or "low"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    try:
+        p.stdin.write(_json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}) + "\n")
+        p.stdin.flush()
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            r, _, _ = select.select([p.stdout], [], [], 0.5)
+            if r:
+                ln = p.stdout.readline()
+                if not ln:
+                    break
+                if '"type":"result"' in ln:
+                    try:
+                        return (_json.loads(ln).get("result") or "").strip()
+                    except Exception:
+                        return None
+            if p.poll() is not None:
+                break
+        return None
+    finally:
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+def _build_toc_job(jid: str, abs_path, rel: str, start: int, end: int, model="sonnet"):
+    """后台:渲染目录页(start..end,PDF 页)→ 整页图 + 文字层 → AI 抽目录 → 存 sidecar。"""
+    import fitz
+    try:
+        doc = fitz.open(str(abs_path))
+        npages = doc.page_count
+        s, e = max(1, start), min(npages, end)
+        pngs, texts = [], []
+        for pg in range(s, e + 1):
+            p = doc[pg - 1]
+            z = min(2.0, 1600.0 / (max(p.rect.width, p.rect.height) or 1.0))
+            pngs.append(p.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False).tobytes("png"))
+            texts.append(f"[PDF第{pg}页文字层] " + " ".join((p.get_text("text") or "").split())[:1200])
+        doc.close()
+        _job_set(jid, status="running", step="AI 识别目录中…")
+        prompt = (
+            "下面是一本书**目录页**的扫描图(可能多张),附带各页 OCR 文字层(可能有错,以图为准)。\n"
+            + "\n".join(texts) + "\n\n"
+            "请把整个**目录(章节/小节标题 + 对应页码)**完整抽取出来。注意:\n"
+            "- page 用目录里印的**书页码(印刷页码)**,原样填数字;\n"
+            "- level 用层级(章=1,节=2,小节=3…,看缩进/编号判断);\n"
+            "- 标题保留原文(含编号,如「1-1-2 共通フレーム」);别漏条目、别合并、别翻译。\n"
+            "**只输出一个 JSON 数组**,每条 {\"title\":\"...\",\"page\":数字,\"level\":数字};"
+            "不要 ``` 围栏、不要数组以外任何文字。"
+        )
+        raw = _claude_vision_pages(pngs, prompt, model=model, effort="low")
+        entries = _parse_toc(raw)
+        if not entries:
+            _job_set(jid, status="error", error="AI 没抽出目录(可识别页范围/换强模型重试)")
+            return
+        data = _toc_load_abs(abs_path)
+        data.update({"entries": entries, "range": {"start": s, "end": e},
+                     "built_at": int(time.time()), "source": "custom"})
+        _toc_save_abs(abs_path, data)
+        _job_set(jid, status="done", count=len(entries))
+    except Exception as ex:
+        _job_set(jid, status="error", error=str(ex))
+
+def _parse_toc(raw):
+    """解析 AI 回的目录 JSON 数组 → [{title,page,level}]。失败/空 → []。"""
+    if not raw:
+        return []
+    s = raw.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else ""
+        if s.endswith("```"):
+            s = s[:-3]
+    i, j = s.find("["), s.rfind("]")
+    if i < 0 or j < 0:
+        return []
+    try:
+        arr = json.loads(s[i:j + 1])
+    except Exception:
+        return []
+    out = []
+    for e in (arr if isinstance(arr, list) else []):
+        if not isinstance(e, dict):
+            continue
+        title = str(e.get("title") or "").strip()
+        try:
+            page = int(e.get("page"))
+        except Exception:
+            continue
+        if not title or page < 1:
+            continue
+        try:
+            level = max(1, int(e.get("level") or 1))
+        except Exception:
+            level = 1
+        out.append({"title": title, "page": page, "level": level})
+    return out
+
+
+@bp.route("/api/toc")
+def pdf_api_toc_get():
+    """GET ?file= → {ok, exists, source(custom|native|none), count, range}。前端据此显示『已存在目录』。"""
+    rel = request.args.get("file", "")
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    entries, source = _effective_toc(ap, rel)
+    rng = (_toc_load_abs(ap).get("range")) or {}
+    return jsonify({"ok": True, "exists": bool(entries), "source": source,
+                    "count": len(entries), "range": rng})
+
+
+@bp.route("/api/page-offset", methods=["POST"])
+def pdf_api_page_offset_set():
+    """前端页码对齐时把 PDF页-印刷页 偏移镜像到服务端(供后台 describe/provenance 用)。{file, offset}。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    if not rel:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    try:
+        off = int(data.get("offset") or 0)
+    except Exception:
+        off = 0
+    try:
+        m = json.loads(_BOOK_OFFSET_PATH.read_text("utf-8")) if _BOOK_OFFSET_PATH.exists() else {}
+    except Exception:
+        m = {}
+    m[rel] = off
+    try:
+        _BOOK_OFFSET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _BOOK_OFFSET_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(m, ensure_ascii=False), "utf-8")
+        tmp.replace(_BOOK_OFFSET_PATH)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/build-toc", methods=["POST"])
+def pdf_api_build_toc():
+    """POST {file, start, end} → 后台 AI 整页识图建目录(覆盖原生)。返回 {ok, jid} 供轮询。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    try:
+        start = int(data.get("start")); end = int(data.get("end"))
+    except Exception:
+        return jsonify({"ok": False, "error": "目录起止页要填数字"}), 400
+    if start < 1 or end < start or (end - start) > 30:
+        return jsonify({"ok": False, "error": "起止页不合法(end≥start,且范围≤30页)"}), 400
+    import time as _t
+    jid = "toc" + str(int(_t.time() * 1000))
+    _job_set(jid, status="running", step="渲染目录页…", ts=int(_t.time()))
+    _threading.Thread(target=_build_toc_job, args=(jid, ap, rel, start, end), daemon=True).start()
+    return jsonify({"ok": True, "jid": jid})
+
+
+@bp.route("/api/build-toc-status")
+def pdf_api_build_toc_status():
+    """GET ?jid= → {status:running|done|error, step?, count?, error?}。"""
+    j = dict(_JOBS.get(request.args.get("jid", "")) or {})
+    if not j:
+        return jsonify({"ok": False, "error": "no job"}), 404
+    return jsonify({"ok": True, **{k: j.get(k) for k in ("status", "step", "count", "error")}})
+
+
 # ──────── 文字层校准:per-book per-page 偏移(扫描/OCR 书文字层没对齐时手动微调) ────────
 _CHAR_OFFSET_PATH = CLAUDE_DIR / "state" / "pdf-char-offset.json"
 

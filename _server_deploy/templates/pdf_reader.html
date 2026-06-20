@@ -836,6 +836,17 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
         </label>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
+        <label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">📖 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>
+        <div id="set-toc-status" style="font-size:11px;color:#7a8497;margin-bottom:8px;line-height:1.5">检查中…</div>
+        <div id="set-toc-build" style="display:none">
+          <div style="font-size:11px;color:#8a9bb4;margin-bottom:6px;line-height:1.5">填目录所在的 PDF 页范围（不是书上印的页码，是阅读器顶部显示的 PDF 第几页），AI 整页识图抽出目录（覆盖原生目录）。</div>
+          <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+            <label style="flex:1;font-size:11px;color:#8a9bb4">起始 PDF 页<input type="number" id="set-toc-start" min="1" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+            <label style="flex:1;font-size:11px;color:#8a9bb4">结束 PDF 页<input type="number" id="set-toc-end" min="1" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>
+          </div>
+          <button id="set-toc-btn" onclick="buildToc()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">建立目录</button>
+        </div>
+        <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">
           <input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）
         </label>

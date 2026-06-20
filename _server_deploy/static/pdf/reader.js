@@ -1037,6 +1037,8 @@ window.applyPageOffset = function (forceZero) {
     off = (currentPage || 1) - pr;
   }
   try { localStorage.setItem('pdf-page-offset:' + FILE_REL, String(off)); } catch (_) {}
+  // 镜像到服务端:后台 describe/provenance 要靠它把目录的印刷页对齐(前端 localStorage 它读不到)
+  try { fetch('/pdf/api/page-offset', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({file: FILE_REL, offset: off})}).catch(function(){}); } catch (_) {}
   window._refreshPageCur();
   window._populatePageOffsetUI();
   if (typeof _toast === 'function') _toast(off ? ('已对齐(PDF 比书页多 ' + off + ' 页)') : '已重置页码对齐');
@@ -1892,7 +1894,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-figcrop-96';
+const READER_BUILD = 'reader-toc-97';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -7312,6 +7314,7 @@ window.openSettings = () => {
   // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
   document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   { const e = document.getElementById('set-figures'); if (e) e.checked = !!window.__figBookOn; }   // 本书插图描述开关(每本书独立)
+  try { loadTocStatus(); } catch (_) {}   // 书籍目录:已有→显示「已存在」,无→显示建立目录输入
   renderHlColorSetting();
   if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
   document.getElementById('settings-mask').style.display = 'flex';
@@ -7322,6 +7325,63 @@ window._applyCropSettings = () => {
   saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
   closeSettings();
   _toast?.('去边已应用');
+};
+// ── 书籍目录(provenance)：已有→显示「已存在」，无→给建立目录的页范围输入 ──
+window.loadTocStatus = async () => {
+  const st = document.getElementById('set-toc-status'), box = document.getElementById('set-toc-build');
+  if (!st) return;
+  st.textContent = '检查中…'; if (box) box.style.display = 'none';
+  try {
+    const d = await (await fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL))).json();
+    if (d.ok && d.exists) {
+      const src = d.source === 'native' ? '书籍自带' : 'AI 建立';
+      st.innerHTML = '✓ 已存在目录（' + src + '，' + d.count + ' 条）<a href="javascript:void 0" onclick="showTocBuild()" style="color:#7dd3fc;margin-left:8px">重建/覆盖</a>';
+      if (box) box.style.display = 'none';
+    } else {
+      st.textContent = '本书暂无目录。可指定目录页范围让 AI 抽取：';
+      showTocBuild();
+    }
+  } catch (_) { st.textContent = '（目录状态获取失败）'; }
+};
+window.showTocBuild = () => {
+  const box = document.getElementById('set-toc-build'); if (box) box.style.display = 'block';
+  // 默认把当前页填进起始，方便用户翻到目录页时直接建
+  try { const s = document.getElementById('set-toc-start'); if (s && !s.value) s.value = currentPage; } catch (_) {}
+};
+window.buildToc = async () => {
+  const s = parseInt(document.getElementById('set-toc-start')?.value),
+        e = parseInt(document.getElementById('set-toc-end')?.value);
+  const btn = document.getElementById('set-toc-btn'), st = document.getElementById('set-toc-status');
+  if (!(s >= 1) || !(e >= s)) { _toast?.('请填合法的起止 PDF 页（end ≥ start）'); return; }
+  if (e - s > 30) { _toast?.('目录范围最多 30 页'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = '识别中…（约几十秒）'; }
+  try {
+    const r = await (await fetch('/pdf/api/build-toc', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file: FILE_REL, start: s, end: e})
+    })).json();
+    if (!r.ok) { _toast?.('建立失败：' + (r.error || '')); if (btn) { btn.disabled = false; btn.textContent = '建立目录'; } return; }
+    // 轮询 job 状态
+    let tries = 0;
+    const poll = async () => {
+      tries++;
+      try {
+        const d = await (await fetch('/pdf/api/build-toc-status?jid=' + r.jid)).json();
+        if (d.status === 'done') {
+          if (btn) { btn.disabled = false; btn.textContent = '建立目录'; }
+          _toast?.('目录已建立（' + d.count + ' 条）'); loadTocStatus(); return;
+        }
+        if (d.status === 'error') {
+          if (btn) { btn.disabled = false; btn.textContent = '建立目录'; }
+          if (st) st.textContent = '建立失败：' + (d.error || ''); return;
+        }
+        if (st) st.textContent = (d.step || '处理中…') + '（' + tries + '）';
+      } catch (_) {}
+      if (tries < 90) setTimeout(poll, 2000);
+      else { if (btn) { btn.disabled = false; btn.textContent = '建立目录'; } if (st) st.textContent = '超时，请重试'; }
+    };
+    setTimeout(poll, 2000);
+  } catch (ex) { _toast?.('建立失败：' + ex.message); if (btn) { btn.disabled = false; btn.textContent = '建立目录'; } }
 };
 window.closeSettings = () => { document.getElementById('settings-mask').style.display = 'none'; };
 window.saveSettings = async () => {
