@@ -5582,11 +5582,17 @@ def pdf_api_page_figures():
         return resp
     data = _fig_load_abs(abs_path)
     # 几何/图组层 = DocLayout-YOLO 离线写的 figures_geom(scripts/yolo_figures.py:嵌套去重 + 图组合并 + fbox)。
-    # 没跑过 YOLO 的书 → 回退 AI describe 原始 figures,临时用 AI bbox 当 fbox、徽标放右上角(开书后夜间/启用时 YOLO 细化)。
-    src_figs = data.get("figures_geom")
-    if src_figs is None:
-        src_figs = data.get("figures", [])
-    page_figs = [f for f in src_figs if f.get("page") == page]
+    # 优先用 DocLayout-YOLO 的 figures_geom(精确 fbox + 去重 + 图组);但 **per-page 回退**:
+    # YOLO 召回率比 AI describe 低,有些页 AI 已描述了插图、YOLO 却漏检 → 这些页回退到 AI 原始 figures,
+    # 否则「开了插图描述却整页不出徽标」(临时用 AI bbox 当 fbox、徽标放右上角,夜间 YOLO 再细化)。
+    geom = data.get("figures_geom")
+    raw = data.get("figures", [])
+    if geom is None:                                    # 整本没跑过 YOLO → 全用 AI figures
+        page_figs = [f for f in raw if f.get("page") == page]
+    else:
+        page_figs = [f for f in geom if f.get("page") == page]
+        if not page_figs:                               # 这页 YOLO 没覆盖 → 回退 AI describe(漏检页也出图)
+            page_figs = [f for f in raw if f.get("page") == page]
     need_badge = [f for f in page_figs if f.get("bbox") and not f.get("badge")]
     if need_badge:
         try:
