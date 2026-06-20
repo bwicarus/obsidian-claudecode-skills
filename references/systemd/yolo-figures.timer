@@ -1,0 +1,12 @@
+[Unit]
+Description=Run DocLayout-YOLO figure detection during idle time (every 6h)
+
+[Timer]
+# 开机 20min 后首跑(避开启动高峰),之后每 6h 一轮。YOLO 低优先级,真闲时才占满 CPU。
+OnBootSec=20min
+OnActiveSec=20min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
