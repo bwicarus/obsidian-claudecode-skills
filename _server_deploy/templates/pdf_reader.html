@@ -89,6 +89,9 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 .sel-overlay .hl{position:absolute;background:rgba(59,109,181,.65);border-radius:2px;mix-blend-mode:multiply}
 /* char layer：透明覆盖 PDF，接管所有选中事件（绕开 PDF.js textLayer 字符位置误差）*/
 .char-layer{position:absolute;inset:0;z-index:4;cursor:text;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+/* 插图徽标层:必须和其它叠层一样 absolute+inset:0(原来漏了 → 去边模式 .crop-on>* 的 transform 把它当定位上下文,
+   静态块锚点跑飞、徽标被 overflow:hidden 裁没=整页不出徽标)。带 page-layer 类→ 去边时也吃 --full-w/h 撑满整图。 */
+.fig-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 

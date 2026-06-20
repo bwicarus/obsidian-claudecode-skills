@@ -1892,7 +1892,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-streamfx-95';
+const READER_BUILD = 'reader-figcrop-96';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8994,6 +8994,12 @@ async function _connProbe() {
     layer.innerHTML = '';
     var canvas = pw.querySelector('canvas');
     var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
+    // 去边模式:fig-layer(带 page-layer 类)被撑成**整张位图** --full-w/h 并 translate(-cropL,-cropT);
+    // 徽标归一坐标也是整图基准 → 必须用整图尺寸定位,别用裁后的 clientWidth(否则错位/落到裁掉区被 overflow 裁没)。
+    if (pw.classList.contains('crop-on')) {
+      var fw = parseFloat(pw.style.getPropertyValue('--full-w')), fh = parseFloat(pw.style.getPropertyValue('--full-h'));
+      if (fw > 0 && fh > 0) { cssW = fw; cssH = fh; }
+    }
     if (!cssW || !cssH) return;
     // 徽标贴在**图自己的某个角**(离图心远、在图上而非正文上),用 char boxes 选一个**不压字**的角。
     // 图区本身没有 OCR 文字 → 图内的角天然空;text 检查主要挡 bbox 略大溢到邻近正文的情况。
