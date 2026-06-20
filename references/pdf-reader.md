@@ -1058,3 +1058,13 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 **逐字浮现接整段重渲(Design 第二轮,2026-06-20)**:Design 把逐字浮现从 JS 定时器逐个 `.on` 改成 **CSS 动画驱动**(`@keyframes mfx-char` blur(4px)→清晰,走合成器,不受 JS 节流)——冲着"整段重渲冲突"来的。`_streamWrap(el, revN)`:每个 `answer` delta 重渲后把正文按 `字/词` 切片包成 `.mfx-w`,下标 < revN 的打 `.mfx-shown`(即时不重播),≥ revN 的默认隐藏等揭示。前缀稳定性已验证(累加 delta 下 token 单调增、前缀不变 → prefix-skip 对齐成立)。
 **⚠ 第一版踩坑"段一段"→ 揭示游标解耦**:第一版用"每 delta 把新尾巴 `animation-delay` 错峰扫入" → 揭示节奏被 **SSE delta 到达节奏**绑死(后端 `answer` 事件大块大块到),每块快速扫完就**等下一块** = 用户看到"段一段"。根治:**揭示游标 `_revN` 跟到达解耦**,由 `requestAnimationFrame` 稳定速度推进(`_revealTick`):`rate=0.05*(1+backlog/40)` 字/ms(**落后越多揭示越快,追上自然放慢**),每帧上限 6 字、`dt` clamp 120ms(防切后台回来一次灌完)。游标推进时给 `_spans[_revN]` 加 `.mfx-reveal`(淡入)+ 移光标到 frontier。这就是"打字机+缓冲":文字到得快就排队,揭示始终连续逐字。`mfx-streaming` 下三态:默认 `opacity:0`(等揭示)/ `.mfx-shown` 即时 / `.mfx-reveal` 淡入。保护:`>5000` 字 `_noChar` 停游标走普通;收尾 `_stopReveal()` + `renderMd(...,true)` 重渲成干净 markdown+MathJax(无 span/光标);reduced-motion 下隐藏规则不生效=文字随流式正常出现。
 **抽取法**:DesignSync `get_file` 大文件**持久化到 `tool-results/*.txt`**(只 2KB 预览进上下文)→ 脚本在磁盘上 parse JSON `content` + diff/抽块,避免 15×70KB 撑爆上下文。
+
+### 47. 手写双击「临时橡皮」:空闲自动回笔 + FAB 常驻指示(2026-06-20,模板内联 `_ink`)
+手指双击画布切橡皮(替代浏览器拿不到的 Apple Pencil 双击笔身),原来是**永久切换**、无自动回笔、且工具栏隐藏时(纯 Pencil 用户 `_ink.mode=false`)看不到当前工具。改成「临时快速擦除」:
+- **双击进的橡皮 = 临时**(`_ink.quickErase=true`),**空闲自动回笔**:`_inkArmRevert(ms)` 定时器,**没擦过给 2500ms**(进橡皮即武装,让你把笔移到目标)、**擦完抬笔给 900ms**(`_inkPointerUp` eraser 分支重新武装,每次抬笔重置)。落笔擦时 `_inkPointerDown` `clearTimeout` 暂停计时,**只在抬笔空闲时回笔、绝不中途打断**(`_ink.drawing.eraser` 时定时器到点也再顺延 400ms)。回笔还原**进橡皮前那支工具**(`_prevTool`,非死板回 pen)。
+- **工具栏手动点橡皮 = 长期**(用户选的):`inkSetTool` 里清 `quickErase`+定时器,不自动回(适合一次擦很多)。两种意图分开。
+- **下方指示**:`_inkUpdateToolUI()` 统一更新——工具栏按钮 `.on` + **FAB 图标 ✏️/🧹(持久,工具栏隐藏也看得到)** + 临时橡皮时 FAB 加 `.ink-erasing`(琥珀脉冲环)。自动回笔时 `window.mfxToast('✏️ 已回到笔')` 明确提示,**防"悄悄回笔后又画上线"**。
+- 状态:`_ink.{quickErase,_revertT,_prevTool}`。改的都在 `pdf_reader.html` 内联脚本(`/view` 设 `no-store`,模板即时生效,**不用 bump reader.js**;校验法=抽该 `<script>` 块去 Jinja `node --check`)。
+
+### 48. 书架「最近打开置顶」(MRU 排序,2026-06-20,`pdf_reader.py`)
+原 `_list_vault_pdfs` 按文件 `mtime` 倒序。改成**最近打开过的在最上**:`/view` 打开书时 `_lastopen_touch(rel_clean)` 戳时间戳,排序 key 改 `(-lastopen, -mtime)`(用过的按打开时间近→远,没打开过的退回文件时间)。**按用户存**(`state/pdf-lastopen/<user>.json`,user=`session.username`,跟 `_prefs_path` 一套口径,原子写 `.tmp`→`replace`)。书架是**服务端渲染**(`pdf_index` 把 `pdfs` 传模板 `{% for p in pdfs %}`,23-bookshelf.js 不再排序),所以纯后端改 + 模板副标题文案。`/view` 的 `rel_clean`(规范化相对路径)跟 `_list_vault_pdfs` 的 key 一致才对得上。

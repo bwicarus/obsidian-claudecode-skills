@@ -88,7 +88,9 @@ def _compressed_info(rel: str) -> dict:
 
 
 def _list_vault_pdfs() -> list[dict]:
-    """扫 vault 下所有 PDF。返回 [{rel, name, size_kb, mtime, comp_*}, ...]，按修改时间倒序。"""
+    """扫 vault 下所有 PDF。返回 [{rel, name, size_kb, mtime, lastopen, comp_*}, ...]。
+    排序:最近打开过的在最上(按打开时间倒序);没打开过的退回按文件修改时间倒序。"""
+    lo = _lastopen_load()
     out = []
     for p in OBSIDIAN_ROOT.rglob("*.pdf"):
         if p.name.endswith((".orig.pdf", ".compressed.pdf")):
@@ -103,13 +105,14 @@ def _list_vault_pdfs() -> list[dict]:
                 "dir": str(Path(rel).parent),
                 "size_kb": round(st.st_size / 1024, 1),
                 "mtime": int(st.st_mtime),
+                "lastopen": int(lo.get(rel, 0)),   # 该用户最近打开时间(0=没打开过)
                 "comp_exists": ci["exists"],
                 "comp_compressing": ci["compressing"],
                 "comp_percent": ci["percent"],
             })
         except OSError:
             continue
-    out.sort(key=lambda x: -x["mtime"])
+    out.sort(key=lambda x: (-x["lastopen"], -x["mtime"]))   # 用过的置顶(近→远),其余按文件时间
     return out
 
 
@@ -538,6 +541,32 @@ def _prefs_path():
     safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(user))[:64] or "anon"
     return _PDF_PREFS_DIR / f"{safe}.json"
 
+# ── 「最近打开」按用户记录（书架置顶用过的书）──
+_PDF_LASTOPEN_DIR = CLAUDE_DIR / "state" / "pdf-lastopen"
+def _lastopen_path():
+    import re as _re
+    user = (session.get("username") or "anon")
+    safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(user))[:64] or "anon"
+    return _PDF_LASTOPEN_DIR / f"{safe}.json"
+def _lastopen_load() -> dict:
+    try:
+        p = _lastopen_path()
+        return json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except Exception:
+        return {}
+def _lastopen_touch(rel: str):
+    """打开一本书时戳一下时间（原子写）。rel 用规范化相对路径，跟 _list_vault_pdfs 的 key 一致。"""
+    try:
+        m = _lastopen_load()
+        m[rel] = int(time.time())
+        _PDF_LASTOPEN_DIR.mkdir(parents=True, exist_ok=True)
+        p = _lastopen_path()
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(m, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
 @bp.route("/api/prefs", methods=["GET", "POST"])
 def pdf_api_prefs():
     """GET → {ok, prefs:{key:value}}; POST {patch:{k:v|null}} 合并(null=删) → {ok}。键为前端 localStorage 的 pdf-*。"""
@@ -689,6 +718,7 @@ def pdf_view():
         mtime = 0
     # 压缩版:?compressed=1 且压缩版存在 → 传压缩版(pdf_url 带 &compressed=1 + pdf_size 用压缩版)
     rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    _lastopen_touch(rel_clean)   # 戳「最近打开」→ 书架把这本置顶
     comp_file, _ = _compressed_paths(rel_clean)
     comp_avail = comp_file.exists()
     use_comp = (request.args.get("compressed", "") == "1") and comp_avail

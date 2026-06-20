@@ -472,6 +472,12 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .search-hl{position:absolute;background:rgba(250,204,21,.45);border-radius:2px;mix-blend-mode:multiply;box-shadow:0 0 0 1px rgba(234,179,8,.65)}
 #ink-fab{position:fixed;left:16px;bottom:78px;width:46px;height:46px;border-radius:50%;background:#1a2540;border:2px solid #3b6db5;color:#cfe6ff;font-size:19px;cursor:pointer;z-index:175;box-shadow:0 4px 14px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
 #ink-fab.on{background:#13351f;border-color:#34d399;color:#7ee2b8}
+/* 临时橡皮(双击进入,空闲自动回笔):FAB 显 🧹 + 琥珀脉冲环,跟「长期工具」区分,且工具栏隐藏时也看得到 */
+#ink-fab.ink-erasing{background:#3a2a10;border-color:#fbbf24;color:#ffe9b0}
+@media (prefers-reduced-motion:no-preference){
+  @keyframes ink-erase-pulse{0%,100%{box-shadow:0 4px 14px rgba(0,0,0,.5),0 0 0 0 rgba(251,191,36,.5)}50%{box-shadow:0 4px 14px rgba(0,0,0,.5),0 0 0 6px rgba(251,191,36,0)}}
+  #ink-fab.ink-erasing{animation:ink-erase-pulse 1.4s ease-in-out infinite}
+}
 #ink-toolbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;gap:3px;background:#10162a;border:1px solid #2a3550;border-radius:12px;padding:6px 8px;z-index:180;box-shadow:0 6px 20px rgba(0,0,0,.55);align-items:center;flex-wrap:wrap;max-width:94vw}
 #ink-toolbar.show{display:flex}
 #ink-toolbar button{background:transparent;border:1px solid transparent;color:#cfe6ff;border-radius:8px;padding:6px 9px;cursor:pointer;font-size:15px;line-height:1}
@@ -1003,6 +1009,9 @@ const _ink = {
   lastPw: null,         // 最近绘制的页（撤销/清空作用对象）
   saveTimers: {},
   _lastTap: null,       // 上一下「极短 tap」的时间/位置（Pencil 双击切换检测用）
+  quickErase: false,    // 双击进入的「临时橡皮」：空闲自动回笔（区别于工具栏手动点的长期橡皮）
+  _revertT: null,       // 临时橡皮的自动回笔定时器
+  _prevTool: 'pen',     // 进临时橡皮前的工具（回笔时还原它，而非死板回 pen）
 };
 window._ink = _ink;
 
@@ -1115,7 +1124,38 @@ function _inkDrawCurrentOnSnap(d) {
   _inkDrawStroke(ctx, d.stroke, cv.width, cv.height, dpr);
 }
 
-// 手指快速双击画布切换 笔 ↔ 橡皮（替代浏览器拿不到的 Apple Pencil 双击笔身手势）
+// 工具变更后同步「下方指示」：工具栏按钮高亮 + FAB 图标(✏️/🧹,工具栏隐藏时也看得到) + 临时橡皮脉冲环
+function _inkUpdateToolUI() {
+  const t = _ink.tool;
+  document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
+  const fb = document.getElementById('ink-fab');
+  if (fb) {
+    if (fb.__t) { clearTimeout(fb.__t); fb.__t = null; }     // 退场旧的瞬时反馈逻辑：现在是持久指示
+    fb.textContent = (t === 'eraser') ? '🧹' : '✏️';
+    fb.classList.toggle('ink-erasing', t === 'eraser' && _ink.quickErase);
+  }
+}
+// 临时橡皮的自动回笔定时器：ms 后若不在擦(已抬笔)就回笔；正在擦则稍后再判
+function _inkArmRevert(ms) {
+  clearTimeout(_ink._revertT);
+  _ink._revertT = setTimeout(() => {
+    if (_ink.drawing && _ink.drawing.eraser) { _inkArmRevert(400); return; }   // 正擦中 → 不打断,稍后重判
+    _inkExitQuickErase(true, true);
+  }, ms);
+}
+// 退出临时橡皮。toPen=是否回到上一支工具；notify=自动回笔时给个明确提示(防「悄悄回笔又画上线」)
+function _inkExitQuickErase(toPen, notify) {
+  clearTimeout(_ink._revertT); _ink._revertT = null;
+  const was = _ink.quickErase;
+  _ink.quickErase = false;
+  if (toPen) {
+    _ink.tool = _ink._prevTool || 'pen';
+    _inkUpdateToolUI();
+    if (was && notify) { try { window.mfxToast && window.mfxToast('✏️ 已回到笔', { duration: 1100 }); } catch (_) {} }
+    window.dlog && window.dlog('临时橡皮空闲 → 自动回笔 ' + _ink.tool);
+  } else { _inkUpdateToolUI(); }
+}
+// 手指快速双击画布切换 笔 ↔ 临时橡皮（替代浏览器拿不到的 Apple Pencil 双击笔身手势）
 function _inkDoubleTapSwitch(pw, skipUndo) {
   if (!skipUndo && _ink.tool !== 'eraser') {   // 仅笔模式 pen 误点才需撤销；手指双击无误点
     const arr = pw.__inkStrokes || [];
@@ -1123,12 +1163,17 @@ function _inkDoubleTapSwitch(pw, skipUndo) {
     _inkRedraw(pw);
     _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
   }
-  const next = (_ink.tool === 'eraser') ? 'pen' : 'eraser';
-  _ink.tool = next;
-  document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === next));
-  window.dlog && window.dlog('双击切换 → ' + (next === 'eraser' ? '🧹 橡皮' : '✒️ 笔'));
-  const fb = document.getElementById('ink-fab');
-  if (fb) { fb.textContent = next === 'eraser' ? '🧹' : '✏️'; clearTimeout(fb.__t); fb.__t = setTimeout(() => { fb.textContent = '✏️'; }, 1300); }
+  if (_ink.tool === 'eraser') {                 // 再次双击 → 立刻回笔(还原上一支工具)
+    _inkExitQuickErase(true, false);
+    window.dlog && window.dlog('双击 → 回笔 ' + _ink.tool);
+  } else {                                       // 进入临时橡皮:记住上一支工具,亮起指示,武装「没擦 2.5s 回笔」
+    _ink._prevTool = _ink.tool;
+    _ink.tool = 'eraser';
+    _ink.quickErase = true;
+    _inkUpdateToolUI();
+    _inkArmRevert(2500);
+    window.dlog && window.dlog('双击 → 🧹 临时橡皮(空闲自动回笔)');
+  }
 }
 
 function _inkPointerDown(e) {
@@ -1154,6 +1199,7 @@ function _inkPointerDown(e) {
   _ink.lastPw = pw;
   const pt = _inkNorm(pw, e.clientX, e.clientY); if (!pt) return;
   if (_ink.tool === 'eraser') {
+    if (_ink.quickErase) clearTimeout(_ink._revertT);    // 正在擦 → 暂停自动回笔计时(抬笔再重启)
     _inkPushUndo(pw); _inkEraseAt(pw, pt);
     _ink.drawing = { pw, num, eraser: true };
   } else {
@@ -1203,10 +1249,12 @@ function _inkPointerUp(e) {
       const arr = _inkStrokesOf(d.pw), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1);
     }
   }
+  const wasEraser = d.eraser;
   d.snap = null;
   _ink.drawing = null;
   _inkRedraw(d.pw);              // 最终全量平滑重绘
   _inkScheduleSave(d.pw, d.num);
+  if (wasEraser && _ink.quickErase) _inkArmRevert(900);   // 临时橡皮:擦完抬笔,停 0.9s 没再擦 → 自动回笔
 }
 window._inkPointerDown = _inkPointerDown;
 
@@ -1250,8 +1298,10 @@ window.inkToggle = () => {
   document.getElementById('ink-toolbar').classList.toggle('show', _ink.mode);
 };
 window.inkSetTool = (t, btn) => {
+  // 工具栏手动选 = 长期工具(含手动点橡皮):清掉临时橡皮态 + 自动回笔计时器,不自动回笔
+  clearTimeout(_ink._revertT); _ink._revertT = null; _ink.quickErase = false;
   _ink.tool = t;
-  document.querySelectorAll('#ink-toolbar button[data-tool]').forEach(b => b.classList.toggle('on', b === btn));
+  _inkUpdateToolUI();
 };
 window.inkSetColor = (c, btn) => {
   _ink.color = c;
