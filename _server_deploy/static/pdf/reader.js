@@ -1894,7 +1894,7 @@ function _remodeListInPlace() {
 window._remodeListInPlace = _remodeListInPlace;
 
 // ── 缩放/切模式诊断:列出每页 __renderScale + 图宽分布,定位"哪些页停在旧 scale"。debug 开时打到 #debug-log。──
-const READER_BUILD = 'reader-toc-97';
+const READER_BUILD = 'reader-figpop-98';
 window._auditScales = function (tag) {
   try {
     const wraps = [...document.querySelectorAll('.page-wrap')];
@@ -8988,7 +8988,7 @@ async function _connProbe() {
   }
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
-  var _popTimer = null, _popRepos = null, _popBadge = null, _hlEl = null;
+  var _popTimer = null, _popRepos = null, _popBadge = null, _hlEl = null, _popOutside = null;
   function clearHl() { if (_hlEl) { _hlEl.remove(); _hlEl = null; } }
   function showHl(elOrPw, fig) {           // 在页面上画出该图 YOLO 框(fbox)的范围
     clearHl();
@@ -9011,6 +9011,7 @@ async function _connProbe() {
     var p = document.getElementById('fig-pop'); if (p) p.remove();
     if (_popTimer) { clearTimeout(_popTimer); _popTimer = null; }
     if (_popRepos) { window.removeEventListener('scroll', _popRepos, true); window.removeEventListener('resize', _popRepos); _popRepos = null; }
+    if (_popOutside) { document.removeEventListener('pointerdown', _popOutside, true); _popOutside = null; }
     clearHl();
     _popBadge = null;
   }
@@ -9026,6 +9027,14 @@ async function _connProbe() {
       '<div class="fig-body">' + (body != null ? body : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>')) + '</div>';
     document.body.appendChild(pop);
     pop.querySelector('.fig-x').addEventListener('click', closePop);
+    // 点浮层 / 徽标 / 图区命中层 之外 → 关(点空白处自动消失)。capture 在 pointerdown 早于各页 handler。
+    // openPop 由徽标 pointerup 触发,本监听挂上时开启的那次 pointerdown 已过,不会自关。
+    _popOutside = function (ev) {
+      var t = ev.target;
+      if (t.closest && (t.closest('#fig-pop') || t.closest('.fig-badge') || t.closest('.fig-hit'))) return;
+      closePop();
+    };
+    document.addEventListener('pointerdown', _popOutside, true);
     // 上下方定一次(防滚动时反复翻转抖动);左右跟徽标(夹进视口)
     var ph = pop.getBoundingClientRect().height;
     var placeBelow = (badge.getBoundingClientRect().bottom + 8 + ph) <= (window.innerHeight - 8);
