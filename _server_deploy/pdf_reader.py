@@ -5435,7 +5435,17 @@ def _fig_describe_bg(abs_path, page: int, model: str = "sonnet", prefetch: int =
                 continue
             _fig_inflight.add(key)
         try:
-            figs = DF.describe_page_figures(str(abs_path), pg - 1, model)
+            # provenance:这页(印刷页=PDF页-offset)所属章节,喂给描述让 AI 把图放进语境
+            _rel = ""
+            try:
+                _rel = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+            except Exception:
+                pass
+            _printed = pg - _page_offset_for(_rel)
+            _sec = _book_location(abs_path, _printed, _rel)
+            _bn = Path(abs_path).stem
+            _loc = (f"《{_bn}》" + (f"「{_sec}」" if _sec else "")) if _bn else _sec
+            figs = DF.describe_page_figures(str(abs_path), pg - 1, model, location=_loc)
         except Exception:
             figs = None
         with _fig_lock:

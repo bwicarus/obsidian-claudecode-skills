@@ -30,6 +30,7 @@ CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 
 PROMPT = (
     "你在看一页教材的扫描页(第 {page} 页)。结合上下文判图、写描述。\n"
+    "{loc}"
     "【本页正文】{ctx}\n"
     "【上一页结尾】{prev}\n"
     "【下一页开头】{nxt}\n\n"
@@ -114,9 +115,10 @@ def _parse_figs(raw):
     return out
 
 
-def describe_page_figures(pdf_path: str, page_idx: int, model: str = "sonnet"):
+def describe_page_figures(pdf_path: str, page_idx: int, model: str = "sonnet", location: str = ""):
     """渲染一页 + 前后页正文作上下文 → Claude 视觉 → 结构化图注 list[{caption,bbox,desc}]。
-    [] = 无图;None = 失败(留待重试)。装饰性卡通吉祥物/角色由 PROMPT 在源头判掉(语义,不是像素去重)。"""
+    [] = 无图;None = 失败(留待重试)。装饰性卡通吉祥物/角色由 PROMPT 在源头判掉(语义,不是像素去重)。
+    location = provenance(书名/章节,如『《応用情報》「超上流工程」』),帮 AI 把图放进语境、描述更准。"""
     try:
         doc = fitz.open(pdf_path)
         try:
@@ -129,7 +131,8 @@ def describe_page_figures(pdf_path: str, page_idx: int, model: str = "sonnet"):
             png = p.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False).tobytes("png")
         finally:
             doc.close()
-        prompt = PROMPT.format(page=page_idx + 1, ctx=ctx, prev=prev, nxt=nxt)
+        loc = (f"【这页在书里的位置】{location}\n" if location else "")
+        prompt = PROMPT.format(page=page_idx + 1, ctx=ctx, prev=prev, nxt=nxt, loc=loc)
         return _parse_figs(_claude_vision(prompt, png, model))
     except Exception:
         return None
