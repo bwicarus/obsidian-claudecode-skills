@@ -941,8 +941,11 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 
 **侧栏 Copilot = 带工具的对话 agent**(右侧抽屉「助手」tab)。后端 `_server_deploy/assistant.py`(部署 `/home/bwicarus/webapp/assistant.py`——**不在 deploy_reader.sh 清单里,改它要单独 `cp`+`py_compile`+`systemctl restart webapp`**),前端 `reader.src/25-assistant.js`。大脑 = 预热常驻的 `claude --print --input-format stream-json --output-format stream-json --include-partial-messages --model sonnet --effort high`;**自管工具循环**(agent 吐一行 `{"tool","args"}` JSON → 服务端执行 Python → 喂回 `【工具结果】` → 循环到 final answer),不上 MCP。工具:`read_page / read_selection / search_book / translate / make_anki / make_note / add_vocab / goto_page / lookup_word / see_page / page_vocab / highlight / undo_last`。SSE 事件:`tool / tool-done / answer(流式) / task / undo / notice / actions / error`。前端 `ctx()` = `window.__voiceContext()`(05-nav.js),POST `/api/assistant/chat`。对话历史服务端持久化(跨设备)`state/assistant-convo/<uid>.json`,每轮带所在书/页/选中句标注,让助手懂「刚才那页」。
 
-**跨页续读(2026-06-20,prompt 补强)**:用户问得模糊、且书中相关内容跨页时,助手原来只看本页就答(本页讲到一半/答不全)。能力其实早有(`read_page` 支持 `{page:N}` 读任意印刷页,`_sys_prompt` 的 `meta` 已给 AI『当前可见页』+『共N页』,能算相邻页)——缺的是**没教它什么时候该翻页**。修法纯 prompt:`_sys_prompt` 加「★【跨页续读】」规则——read_page 拿到本页后若**不足以完整回答**(被截断/主题没讲完/答不全,尤其用户问得宽泛),**主动 read_page 相邻页**(『当前可见页』±1,别超『共』N 页,通常补下一页),拼起来再答;够答即止(补 1 页、最多再补 1)。无需改任何工具代码。
-**第二轮加固(仍漏下页项,如 V 字模型只列一侧)**:用户实测「讲讲这页(V 字模型)」仍漏掉下一页的两个测试阶段。三处互补加固:① **`read_page` 每页截断 2800→4800 字**(密集页防被截断漏尾部内容);② 跨页规则补「**列举/枚举型**问题(让讲某流程/模型/分类/几种步骤的**全部**阶段)最易漏下页项:本页列到页尾还没收束、后面明显还有并列项 → **务必续读下一页把同类项列全**,别在跨页处中途收尾」;③ **`see_page 收紧`开例外**:问的是**流程图/模型图/结构图的整体结构**、而图把完整结构都画在图上(标签都在图里、文字却只描述一部分或跨页)→ **see_page 看整张图最能一次拿全结构**(如 V 字模型整张图含左右两侧全部阶段标签),比逐页啃文字更不漏项。仍纯 prompt + 一个常量,不改工具逻辑。
+**跨页漏读 → 综合方案(2026-06-20,最终,用户设计)**:用户问得模糊、内容跨页(如「讲讲这页 V 字模型」漏掉下页测试阶段)时助手只看本页答不全。**前两轮纯 prompt 提示(「答不全就翻下一页」「列举型读全」「结构图 see_page」)是打地鼠、针对个例,已废弃**(用户:"针对个例没意义")。根因:**页是排版切割不是意义单位,喂一页本身有损;靠模型『察觉不全→多读』不可靠**。最终改成**结构性地把范围给够**(改 `_t_read_page` + 一条干净 prompt 规则,删掉所有个例补丁):
+- **`read_page`(不带 page=读当前页)现在返回**:本页正文(截 4800) + **本页及下一页的插图描述**(`_figdescs_for`:本书开了插图描述时,从 figure sidecar 取 caption+desc **纯文本**) + **下一页正文预览**(截 3200,标「【下一页·第N页(预览)】」)。`_read_one` 抽出「渲一页=正文+图描述」。显式 `{page:N}` 只给那页(不自动带下页)。
+- **关键洞察**:V 字模型这类图,**完整结构(上下流各阶段)本就画在图里**,而 describe_figures 早把它转成了完整文字描述——把这段图描述当文本喂进去,跨页/图里的结构一次拿全,**不必读视觉、不靠模型翻页判断**。这是治本(用户开了插图描述却没被助手用上)。
+- **prompt 规则(一条替掉三条补丁)**:「【上下文范围·跨页】read_page 已给本页+下页正文+图描述;问题模糊/范围大仍不够 → 继续 read_page 往下,**最多读到本小节结束**(下一标题/约+1~2 页);**非当前页只有文字+图描述进上下文,实际图像(see_page/see_figure)只看当前页**」。最后一条正是用户的约束:非当前页不进视觉、只进图描述层,省 token/额度。
+- 改 `assistant.py`(部署单独 cp+restart),不动前端。验证:応用情報 p31 read_page 返回里含 V 模型完整图描述(左右两侧+全部测试阶段)+ p32 预览。
 
 本次 3 项加固(用户「除了 gemini 其他全做」中剩余 3 项,均不碰 Gemini):
 

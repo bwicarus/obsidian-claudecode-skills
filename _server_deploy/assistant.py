@@ -336,19 +336,65 @@ def _to_pdf(ctx, disp):   # 书上印刷页 → PDF 页(读页 / 跳转用)
         return disp
 
 
+def _figdescs_for(file_rel, printed_pages):
+    """本书开了『插图描述』时,取这些**印刷页**的图 caption+desc(纯文本,非视觉)。{印刷页: [(cap,desc),…]}。
+    这样跨页/图里的结构(如 V 字模型整张图把上下流各阶段都画在图上)用现成描述就能进上下文,不必读视觉。"""
+    try:
+        import pdf_reader as _pdfm
+        if not (file_rel and _pdfm._book_fig_enabled(file_rel)):
+            return {}
+        ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
+        data = _pdfm._fig_load_abs(ap)
+        figs = data.get("figures") or []          # 用带描述的 figures(geom 可能缺页,描述都在这)
+        want = set(printed_pages); out = {}
+        for f in figs:
+            pg = f.get("page")
+            if pg in want and (f.get("desc") or f.get("caption")):
+                out.setdefault(pg, []).append((f.get("caption") or "", f.get("desc") or ""))
+        return out
+    except Exception:
+        return {}
+
+
+def _read_one(file_rel, ctx, pg, figd, cap_txt=4800, cap_fig=600, label=None):
+    """渲一页进上下文:正文(截 cap_txt) + 该页图描述(纯文本)。label 覆盖默认「第N页」标签。"""
+    dp = _to_disp(ctx, pg)
+    t = _page_text(file_rel, pg)
+    figs = figd.get(dp, [])
+    if not t and not figs:
+        return None
+    block = (label or f"【第{dp}页】") + "\n" + (t[:cap_txt] if t else "(本页无文字层)")
+    for cap, desc in figs:
+        block += f"\n[本页插图「{cap[:40]}」] {desc[:cap_fig]}"
+    return block
+
+
 def _t_read_page(args, ctx):
     # 双页模式下读全部可见页(ctx.pages,PDF 索引),不传 page 时默认所有可见页;
     # 传 page 时那是**印刷页码**(AI/用户语言)→ 转成 PDF 页读。
+    file_rel = ctx.get("file_rel", "")
     if args.get("page"):
         pages = [_to_pdf(ctx, args["page"])]
+        want_next = False                              # 显式指定某页 → 只给那页(AI 自己决定要不要再往下)
     else:
         pages = ctx.get("pages") or [ctx.get("page", 0)]
+        want_next = True                               # 默认读当前页:顺带把下一页(文字+图描述)带上,省得漏跨页
+    # 本页 + 下一页 的图描述一次取(纯文本,非视觉)
+    printed = [_to_disp(ctx, p) for p in pages]
+    nxt = (max(pages) + 1) if (want_next and pages) else None
+    figd = _figdescs_for(file_rel, printed + ([_to_disp(ctx, nxt)] if nxt else []))
     parts = []
     for pg in pages:
-        t = _page_text(ctx.get("file_rel", ""), pg)
-        if t:
-            parts.append(f"【第{_to_disp(ctx, pg)}页】\n{t[:4800]}")   # 标签报印刷页;给够字数防密集页被截断漏内容
-    return ({"pages": [_to_disp(ctx, p) for p in pages], "text": "\n\n".join(parts)}
+        b = _read_one(file_rel, ctx, pg, figd)
+        if b:
+            parts.append(b)
+    # 下一页:**只给文字+图描述**(非当前页不进视觉),标「下一页」供 AI 判断是否要据此续答/再往下读
+    if nxt:
+        nb = _read_one(file_rel, ctx, nxt, figd, cap_txt=3200,
+                       label=f"【下一页·第{_to_disp(ctx, nxt)}页(预览,供判断是否需要)】")
+        if nb:
+            parts.append(nb)
+    return ({"pages": printed, "text": "\n\n".join(parts)}
             if parts else {"error": "这些页没取到文字(可能纯图/未OCR)"})
 
 
@@ -1088,15 +1134,10 @@ def _sys_prompt(ctx):
         "**严禁**用反引号包数学(`x^2` 会被当代码块,公式不渲染)、**严禁**用纯文本或 Unicode 上下标(要写 $x^2$ 不是 x²、$a_i$ 不是 aᵢ);"
         "凡变量、希腊字母、下标、分式、根号、求和/积分一律进 $...$,否则前端显示成乱码而非公式。\n"
         "需要页面内容/选中文字时务必先用 read_page / read_selection 拿,别凭空编。\n"
-        "★【跨页续读·尤其列举型问题】书的内容常跨页:本页正文可能是上页的延续,或讲到一半续到下页"
-        "(开头/结尾是半句、某个小节/列表/步骤/定义没列完、用户问的点本页只覆盖了一部分)。"
-        "read_page 拿到本页后,若**不足以完整回答**(明显被截断、主题没讲完、答不全用户的问题)——尤其用户问得**模糊/宽泛**时——"
-        "**主动 read_page 相邻页补全**(页码从【当前页面】的『当前可见页』±1 取,别超出『共』N 页;通常补下一页,必要时再补上一页),"
-        "把跨页内容拼起来再答。宁可多读一页,也别拿半截信息硬答或只说『本页只讲了一部分』。"
-        "★**列举/枚举型**问题最容易漏下一页的项(让你讲『某流程/某模型(如 V 字模型)/某分类/某些步骤/某几种…』的全部阶段或要素时):"
-        "若本页**列到页尾还没收束、后面明显还有并列项**(如流程只讲了前半段、模型只描述了一侧/一半阶段、列表在页底戛然而止)——"
-        "**务必继续 read_page 下一页把同类项列全**,直到这一组枚举在文中自然结束,别在跨页处中途收尾导致漏项。"
-        "够答即止:一般补 1 页,最多再补 1-2 页,别无脑翻一堆。\n"
+        "★【上下文范围·跨页】read_page(不带 page,读当前页)返回的是:**本页正文 + 本页及下一页的插图描述(若本书开了插图描述,纯文本) + 下一页正文预览**(已标「下一页」)。"
+        "默认就据这些回答——书的内容常跨页(主题/列表/步骤/某模型各阶段续到下页),所以下一页已先给你了。"
+        "**问题模糊、范围较大、本页+下页仍不足以答全**时,继续 read_page(page=再下一页码)往下读,**最多读到本小节结束**(到下一个标题、约再 +1~2 页为止),别无限翻;够答即止。"
+        "**非当前页只有文字+图描述进上下文**——要看**实际图像**(图表细节/排版/手写)只能看**当前页**(see_page/see_figure),别对下一页/更远页用视觉工具。\n"
         "★复合请求(含多个动作,如『总结再做成卡』『翻译并制卡』『找到X页并跳过去』)必须把每个动作都执行完——"
         "逐个调工具,做完一个再做下一个,全部完成后才给最终回答,**别只做第一步就停**。\n"
         "★用户说『跳过去/打开/翻到』且目标明确(或搜索只有一个最相关命中)时,直接调 goto_page,别反问;"
@@ -1122,7 +1163,7 @@ def _sys_prompt(ctx):
         "但**『页内有图』≠『要看图』**:选中只是文字、其上下文里并没有图时,**别 see_page**;"
         "只有选中内容/它的上下文**确实涉及某张图**(如『图1-3』『如下图』指代某图),或用户明确说『这张图/这页的图/图里画的』,才 see_page。\n"
         "★see_page 收紧:**别因为『页面里有图』就主动去看图**(漫画/插图书每页都有图,但用户多半在问文字/选中)。"
-        "**例外**:用户问的是某张**流程图/模型图/结构示意图(如 V 字模型、架构图、流程图)的整体结构**,而该图把**完整结构都画在图上**(各阶段/分支/要素的标签都标在图里,文字却只描述了其中一部分、或描述跨页)→ 这时 **see_page 看整张图**最能**一次拿全结构**,比逐页啃文字更不容易漏项;可结合 read_page 文字补细节。\n"
+        "本页插图的内容多数已在 read_page 给的『本页插图…』描述里(含图里跨页的结构,如某模型图把各阶段都画在图上)——**先用那段文字描述**;只有描述不够、要核对图里具体细节/排版/手写时,才对**当前页** see_page。\n"
         "★『总结这一章/这一节/这部分』用 summarize_section(它按书签切出整章正文);只『总结这页』才用 read_page。\n"
         "★『我哪本书讲过X/别的书有没有X/之前在哪见过』用 search_all_books;要跳到搜到的别的书用 open_book(file_rel,page)。\n"
         "★想把当前内容跟用户**已学过/已记过的笔记**串起来(用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关』,"
