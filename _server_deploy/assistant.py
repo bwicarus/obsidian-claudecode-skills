@@ -140,6 +140,29 @@ def _deep_ask(prompt, model="opus", effort="high", timeout=150):
         _kill(p)
 
 
+_VIS_SYS = ("你看到的是 PDF 页面/插图的渲染图。用简洁中文描述图里**文字层读不到的视觉内容**"
+            "(图表/示意图/曲线/电路/几何/物理装置/数据表/公式排版/手写批注/版面结构):它画的是什么、"
+            "关键要素/结构/数值、在表达什么。抓重点、别冗长、别复述能从文字层读到的普通段落。数学用 $...$。")
+
+def _vision_describe(images, note="", timeout=90):
+    """对一组渲染图做**一次精简视觉调用**返回纯文字描述。
+    关键省 token:图只在这个**一次性进程**里看一眼 → 主编排循环全程**只走文字、永不背图**
+    (否则图留在多轮对话里每轮重读;且这里用精简系统提示,不背 5102 编排壳)。images=[{media_type,b64}]。"""
+    if not images:
+        return None
+    p = _spawn(effort="low", model="sonnet", system=_VIS_SYS)
+    if not p:
+        return None
+    try:
+        blocks = [{"type": "text", "text": (note or "描述这些图里文字层读不到的内容。")}]
+        for v in images[:3]:
+            blocks.append({"type": "image", "source": {"type": "base64",
+                          "media_type": v.get("media_type", "image/png"), "data": v["b64"]}})
+        return _send(p, blocks, timeout=timeout)
+    finally:
+        _kill(p)
+
+
 def _kill(p):
     if not p:
         return
@@ -405,10 +428,11 @@ def _t_read_page(args, ctx):
         b = _read_one(file_rel, ctx, pg, figd)
         if b:
             parts.append(b)
-    # 下一页:**只给文字+图描述**(非当前页不进视觉),标「下一页」供 AI 判断是否要据此续答/再往下读
+    # 下一页:只给**短预览**(开头 1000 字 + 图描述)——多数问题在本页就答完,下页预览只是「够不够、要不要续读」的线索;
+    # 不需要整页(那会让每次 read_page 都多背几千字、推高每题成本)。真要看全下页,AI 再 read_page(page=下页)。
     if nxt:
-        nb = _read_one(file_rel, ctx, nxt, figd, cap_txt=3200,
-                       label=f"【下一页·第{_to_disp(ctx, nxt)}页(预览,供判断是否需要)】")
+        nb = _read_one(file_rel, ctx, nxt, figd, cap_txt=1000,
+                       label=f"【下一页·第{_to_disp(ctx, nxt)}页(开头预览,要看全文再 read_page 它)】")
         if nb:
             parts.append(nb)
     return ({"pages": printed, "text": "\n\n".join(parts)}
@@ -553,8 +577,9 @@ def _t_lookup_word(args, ctx):
 
 
 def _t_see_page(args, ctx):
-    """把当前页(或指定页)渲染成图片让 agent **真正看到**(图表/示意图/公式排版/手写等文字层拿不到的)。
-    返回 `_vision`(image block 列表),_agent_run 会把它作为图片喂回大脑(sonnet 多模态)。"""
+    """看当前页(或指定页)的视觉内容(图表/示意图/公式排版/手写等文字层拿不到的)。
+    ★优先复用**已存的离线图描述**(夜间管线生成、read_page 也注入过)——**不重复识别**;
+    只有 ① 本页有手写笔迹(离线描述里没有) 或 ② 本书没生成离线描述 时,才现场渲图做一次视觉识别。"""
     file_rel = ctx.get("file_rel") or ""
     if not file_rel:
         return {"error": "当前不在 PDF 书里,没法看页面"}
@@ -565,6 +590,29 @@ def _t_see_page(args, ctx):
     pages = pages[:2]   # 双页最多 2 张
     if not pages:
         return {"error": "不知道看哪页"}
+    # 本页有没有手写笔迹?(ctx 实时墨迹 或 服务端 sidecar)→ 有则必须现场看(离线描述里没这些)
+    has_ink = bool(ctx.get("ink"))
+    if not has_ink:
+        try:
+            import pdf_reader as _pdfm
+            for pg in pages:
+                if _pdfm._page_ink_strokes(file_rel, pg):
+                    has_ink = True; break
+        except Exception:
+            pass
+    # 没手写 → 先复用已存的离线图描述,有就直接给(省一次视觉调用,也不重复识别)
+    if not has_ink:
+        printed = [_to_disp(ctx, p) for p in pages]
+        figd = _figdescs_for(file_rel, printed)
+        if figd:
+            parts = []
+            for dp in printed:
+                for cap, desc in figd.get(dp, []):
+                    parts.append(f"[第{dp}页 插图「{cap[:40]}」] {desc}")
+            if parts:
+                return {"页面图像描述(已存离线描述,无需重新识别)": "\n".join(parts),
+                        "note": "这是已生成好的图描述;若用户要的是图里更细节(具体数值/精确排版)而这里没有,请他说具体点。"}
+    # 有手写 / 没离线描述 → 现场渲图 + 一次性视觉识别
     try:
         import base64
         import fitz
@@ -596,10 +644,11 @@ def _t_see_page(args, ctx):
             doc.close()
         if not vis:
             return {"error": "页码超出范围"}
-        note = "下面是这些页的渲染图。看图回答用户(图表/示意图/公式排版/手写等文字层读不到的内容)。"
+        note = "描述这" + ("几" if len(vis) > 1 else "") + "页里文字层读不到的视觉内容(图表/示意图/公式排版/手写等)。"
         if inked:
-            note += f" 注意:这些图**已叠加用户的手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked))} 页有手写),用户问的多半就是他写/圈的内容,务必结合手写笔迹回答。"
-        return {"_vision": vis, "rendered_pages": done, "inked_pages": inked, "note": note}
+            note += f" 这些图**已叠加用户的手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked))} 页有手写),重点描述他写/圈/画了什么、标在哪。"
+        desc = _vision_describe(vis, note)   # 一次性看图 → 返回文字;主循环不背图
+        return {"页面图像描述": desc or "(看图失败,可重试)", "rendered_pages": done, "inked_pages": inked}
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -625,10 +674,11 @@ def _t_see_ink(args, ctx):
             marked = pdf._text_under_ink(file_rel, page, strokes=strokes)
         except Exception:
             marked = ""
-        note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,看他到底圈/划/指的是什么,针对那个回答。")
+        note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,描述他到底圈/划/指/写了什么。")
         if marked:
             note += f" 几何上他大概标的是:「{_clean_tag(marked)[:120]}」(仅参考,以图为准)。"
-        return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], "note": note}
+        desc = _vision_describe([{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], note)
+        return {"笔迹标注描述": desc or "(看图失败,可重试)"}
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -761,10 +811,10 @@ def _t_see_figure(args, ctx):
                 ink_any = True
         if not vis:
             return {"error": "图框无效"}
-        note = "下面是用户带入的图的裁剪渲染图,看图回答。"
+        note = "下面是用户带入的图的裁剪渲染图,描述图里的内容。"
         if ink_any:
-            note += "（含用户手写笔迹的合成图,结合圈点/标注理解他想问什么）"
-        return {"_vision": vis, "note": note}
+            note += "（含用户手写笔迹的合成图,重点描述他圈点/标注了什么）"
+        return {"图像描述": _vision_describe(vis, note) or "(看图失败,可重试)"}
     except Exception as e:
         return {"error": str(e)[:140]}
 
