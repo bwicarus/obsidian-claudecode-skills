@@ -113,6 +113,51 @@ def report(service: str = "youtube") -> dict:
     }
 
 
+# Gemini 单价(USD / 1M tokens),(输入, 输出)。付费档,粗略;改价直接改这表。
+# 助手日志 note 里带 model=,按这表逐条算钱;未知模型回退 flash 价。
+GEMINI_PRICES = {
+    "gemini-2.5-flash":      (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-pro":        (1.25, 10.00),   # ≤200k 上下文档;超大上下文更贵,这里不细分
+    "gemini-2.0-flash":      (0.10, 0.40),
+}
+_GEM_DEFAULT_PRICE = (0.30, 2.50)
+
+def _parse_note(note: str) -> dict:
+    """从 note 'model=X in=N out=M status=...' 解析。"""
+    d = {}
+    for tok in (note or "").split():
+        if "=" in tok:
+            k, v = tok.split("=", 1); d[k] = v
+    return d
+
+def gemini_cost(days: int = 0) -> dict:
+    """累计 Gemini 估算花费(USD),**按每条记录的 model 单价分别算输入/输出**。
+    days>0 只统计近 days 天;0=全部历史。返回 {usd, in_tokens, out_tokens, calls, by_model}。"""
+    db = _db()
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = db.execute("SELECT note FROM quota_log WHERE service='gemini' AND ts_utc>=?", (since,)).fetchall()
+    else:
+        rows = db.execute("SELECT note FROM quota_log WHERE service='gemini'").fetchall()
+    db.close()
+    usd = 0.0; tin = tout = calls = 0; by_model = {}
+    for (note,) in rows:
+        d = _parse_note(note)
+        ti = int(d.get("in", 0) or 0); to = int(d.get("out", 0) or 0)
+        if ti == 0 and to == 0:   # 旧记录/失败行没 token → 跳过(不计费)
+            continue
+        mdl = d.get("model", "") or "gemini-2.5-flash"
+        pin, pout = GEMINI_PRICES.get(mdl, _GEM_DEFAULT_PRICE)
+        c = ti / 1e6 * pin + to / 1e6 * pout
+        usd += c; tin += ti; tout += to; calls += 1
+        m = by_model.setdefault(mdl, {"usd": 0.0, "in": 0, "out": 0, "calls": 0})
+        m["usd"] += c; m["in"] += ti; m["out"] += to; m["calls"] += 1
+    for m in by_model.values():
+        m["usd"] = round(m["usd"], 4)
+    return {"usd": round(usd, 4), "in_tokens": tin, "out_tokens": tout, "calls": calls, "by_model": by_model}
+
+
 def fmt_secs(s: int) -> str:
     if s < 0: return "已重置(刷一下脚本)"
     h, rem = divmod(s, 3600)

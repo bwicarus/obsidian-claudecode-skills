@@ -666,15 +666,31 @@ async function openQuotaLog(){
 function closeQuotaLog(){
   document.getElementById("quota-log-mask").style.display = "none";
 }
+async function loadGeminiCost(){
+  // Gemini 估算花费(无查余额 API,按累计 token×模型单价估;真余额去 AI Studio billing 控制台)
+  try{
+    const d = await (await fetch("/control/api/gemini-cost")).json();
+    if(!d.ok || !d.total) return "";
+    const t = d.total, l = d.last30d || {};
+    const bm = Object.entries(t.by_model||{}).map(([m,v])=>`${m.replace('gemini-','')}: $${v.usd} (${v.calls}次)`).join(" · ") || "暂无";
+    return `<div style="padding:8px 10px;margin-bottom:10px;background:#0e1a2e;border:1px solid #2a3550;border-radius:8px;font-family:inherit">
+      <div style="color:#7dd3fc;font-weight:700;margin-bottom:4px">🔷 Gemini 累计估算花费(助手:深度解释/看图)</div>
+      <div style="font-size:13px">总计 <b style="color:#fbbf24">$${t.usd}</b> · 近30天 $${l.usd||0} · ${t.calls} 次 · 输入 ${(t.in_tokens||0).toLocaleString()} / 输出 ${(t.out_tokens||0).toLocaleString()} token</div>
+      <div style="font-size:11px;color:#8a9bb4;margin-top:3px">${bm}</div>
+      <div style="font-size:11px;color:#6b7688;margin-top:3px">※ 估算值(按模型单价×token);真实余额请去 AI Studio billing 控制台</div>
+    </div>`;
+  }catch(_){ return ""; }
+}
 async function loadQuotaLog(){
   const body = document.getElementById("quota-log-body");
   body.textContent = "加载中…";
   const aiOnly = document.getElementById("quota-log-ai-only").checked;
+  const gemHtml = await loadGeminiCost();
   try{
     const r = await fetch(`/control/api/quota-log?limit=150&ai_only=${aiOnly}`);
     const d = await r.json();
     if(!d.entries || !d.entries.length){
-      body.innerHTML = '<p class="meta">还没有 quota 日志（下一次 daily 跑会开始记录）</p>'; return;
+      body.innerHTML = gemHtml + '<p class="meta">还没有 Claude quota 日志（下次 daily 跑会记录）</p>'; return;
     }
     const header = `<div style="display:grid;grid-template-columns:140px 1fr 70px 90px 90px 90px;gap:8px;padding:6px 8px;background:#0a0e1a;font-weight:700;color:#7dd3fc;border-bottom:1px solid #2a3550">
       <span>时间</span><span>step</span><span>耗时</span><span>Δ5h</span><span>Δ7d</span><span>ΔSonnet</span>
@@ -698,7 +714,7 @@ async function loadQuotaLog(){
         <span>${fmt(ds.seven_day_sonnet)}</span>
       </div>`;
     }).join("");
-    body.innerHTML = header + rows + `<p class="meta" style="margin-top:10px">显示 ${d.count}/${d.total} 条</p>`;
+    body.innerHTML = gemHtml + header + rows + `<p class="meta" style="margin-top:10px">显示 ${d.count}/${d.total} 条</p>`;
   }catch(ex){
     body.innerHTML = '<p class="meta">加载失败: ' + ex.message + '</p>';
   }

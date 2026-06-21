@@ -60,13 +60,14 @@ def _gemini_cooldown(secs=300):
     global _gemini_off_until
     _gemini_off_until = time.time() + secs
 
-def _gemini_log(label, status, tokens=0):
-    """记进额度日志:units=本次 token 数(Gemini 没有查余额的 API,只能靠累计 token 估花费)。
-    note 带 prompt/output token 拆分;真实余额仍需去 AI Studio billing 控制台看。"""
+def _gemini_log(label, status, model="", tokens=0, tin=0, tout=0):
+    """记进额度日志:units=本次总 token。note 带 model + 输入/输出 token 拆分——算钱**按每次用的模型单价**
+    (Flash/Pro 差好几倍、输入输出也差很多);Gemini 没有查余额的 API,真余额去 AI Studio billing 控制台看。"""
     try:
         sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
         from google_api_quota import log_usage
-        log_usage("gemini", int(tokens or 0), label, note=f"tok={tokens} status={status}")
+        log_usage("gemini", int(tokens or 0), label,
+                  note=f"model={model} in={int(tin)} out={int(tout)} status={status}")
     except Exception:
         pass
 
@@ -76,52 +77,54 @@ def _gemini_usage(j):
     return {"total": u.get("totalTokenCount", 0), "prompt": u.get("promptTokenCount", 0),
             "out": u.get("candidatesTokenCount", 0)}
 
-def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90):
-    """Gemini Flash 出文本(深度解释/总结)。失败/空 → None(调用方回退 Claude)。"""
+def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90, model=None):
+    """Gemini 出文本(深度解释/总结)。model 可指定(默认 _GEMINI_MODEL);失败/空 → None(调用方回退 Claude)。"""
     key = _gemini_key()
     if not key:
         return None
+    mdl = model or _GEMINI_MODEL
     try:
         import requests
         cfg = {"temperature": 0.4, "maxOutputTokens": max_tokens}
         if not think:
             cfg["thinkingConfig"] = {"thinkingBudget": 0}
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent?key={key}")
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={key}")
         r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg}, timeout=timeout)
         if r.status_code != 200:
-            _gemini_log("assistant:text", r.status_code)
+            _gemini_log("assistant:text", r.status_code, mdl)
             if r.status_code in (429, 403):   # 额度耗尽/被拒 → 冷却,别每次白打
                 _gemini_cooldown()
             return None
-        j = r.json()
-        _gemini_log("assistant:text", 200, _gemini_usage(j)["total"])
+        j = r.json(); us = _gemini_usage(j)
+        _gemini_log("assistant:text", 200, mdl, us["total"], us["prompt"], us["out"])
         cand = (j.get("candidates") or [{}])[0]
         out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
         return out.strip() or None
     except Exception:
         return None
 
-def _gemini_vision(prompt, images, max_tokens=1500, timeout=90):
-    """Gemini Flash 看图出文字描述。images=[{media_type,b64}]。失败/空 → None(回退 Claude)。"""
+def _gemini_vision(prompt, images, max_tokens=1500, timeout=90, model=None):
+    """Gemini 看图出文字描述。model 可指定(默认 _GEMINI_MODEL)。images=[{media_type,b64}]。失败/空 → None(回退 Claude)。"""
     key = _gemini_key()
     if not key or not images:
         return None
+    mdl = model or _GEMINI_MODEL
     try:
         import requests
         parts = [{"text": prompt}]
         for v in images[:3]:
             parts.append({"inlineData": {"mimeType": v.get("media_type", "image/png"), "data": v["b64"]}})
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent?key={key}")
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={key}")
         r = requests.post(url, json={"contents": [{"parts": parts}],
                                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
                                                           "thinkingConfig": {"thinkingBudget": 0}}}, timeout=timeout)
         if r.status_code != 200:
-            _gemini_log("assistant:vision", r.status_code)
+            _gemini_log("assistant:vision", r.status_code, mdl)
             if r.status_code in (429, 403):
                 _gemini_cooldown()
             return None
-        j = r.json()
-        _gemini_log("assistant:vision", 200, _gemini_usage(j)["total"])
+        j = r.json(); us = _gemini_usage(j)
+        _gemini_log("assistant:vision", 200, mdl, us["total"], us["prompt"], us["out"])
         cand = (j.get("candidates") or [{}])[0]
         out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
         return out.strip() or None

@@ -344,6 +344,18 @@ def register_control(app):
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
 
+    @app.route("/control/api/gemini-cost")
+    def control_gemini_cost():
+        """Gemini 累计估算花费(USD,按每条记录的模型单价算输入/输出)。Gemini 无查余额 API,这是用量估算。"""
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+            import importlib, google_api_quota as _q
+            importlib.reload(_q)
+            return jsonify({"ok": True, "total": _q.gemini_cost(0), "last30d": _q.gemini_cost(30)})
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
     @app.route("/control/api/trigger-log")
     def control_trigger_log():
         """返回 webapp_trigger.log 末 N 行（追踪 trigger 子进程的实时输出）。"""
