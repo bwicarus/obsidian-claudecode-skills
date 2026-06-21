@@ -106,17 +106,24 @@ def _convo_clear(uid):
 
 
 # ──────────────────────── claude 进程(stream-json 多轮)────────────────────────
-def _spawn(effort="low", model=None):
+def _spawn(effort="low", model=None, system=None):
     try:
+        cmd = [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+               "--include-partial-messages",   # 吐 text_delta → 最终回答可逐字流式
+               # ── 省 token:本 agent 只走我们自管的 JSON 工具协议,完全不用 Claude Code 那套壳 ──
+               # ① cwd=项目树外空目录(上面 _ASST_CWD)→ 不加载 CLAUDE.md;
+               # ② --setting-sources ""    → 不加载 user/project 设置 + engineering 插件(登录不受影响);
+               # ③ --tools TodoWrite + 全禁 → 只留 1 个工具 schema(原来 21 个内建工具 schema 白占上下文);
+               #    沙盒仍在:--disallowedTools 全禁,模型一个内建工具都用不了(防 prompt injection 读 .env/改脚本)。
+               "--setting-sources", "",
+               "--tools", "TodoWrite",
+               "--disallowedTools", "TodoWrite Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task"]
+        if system:                              # ④ --system-prompt 替换默认 agent 提示(我们自带完整系统提示)
+            cmd += ["--system-prompt", system, "--exclude-dynamic-system-prompt-sections"]
+        cmd += ["--verbose", "--model", (model or _AGENT_MODEL), "--effort", effort]
         return subprocess.Popen(
-            [_APP_CLAUDE, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
-             "--include-partial-messages",   # 吐 text_delta → 最终回答可逐字流式
-             # 沙盒:禁掉所有内建工具(本 agent 只走我们的 JSON 工具协议,从不调内建工具)→ 防 prompt injection
-             # 诱导模型用 Bash/Read 读 .env(API key)/改脚本/读别人的 convo。user message 是不可信输入。
-             "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-             "--verbose", "--model", (model or _AGENT_MODEL), "--effort", effort],   # 编排器=sonnet/分档;生成步工具可传 opus+high
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, cwd=_ASST_CWD)   # 项目树外空目录 → 不加载 CLAUDE.md/settings/MCP,省每轮前缀
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, cwd=_ASST_CWD)
     except Exception:
         return None
 
