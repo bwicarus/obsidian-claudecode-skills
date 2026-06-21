@@ -32,7 +32,7 @@ DB_PATH = Path(os.environ.get(
 DAILY_LIMITS = {
     "youtube": 10_000,      # search.list 每次 100 units
     "vision":  1_000,       # 我们 OCR 用的
-    "gemini":  250,         # Gemini 2.5 Flash free tier 约 250 请求/天
+    "gemini":  None,        # 付费(prepay)按 token 计费、无固定日限;助手侧 units 记的是 token 数(只累计用量,真余额去 AI Studio billing 控制台看)
     "stt":     None,        # Cloud Speech-to-Text 无固定免费日限(按 Free Trial 赠金计费)
 }
 

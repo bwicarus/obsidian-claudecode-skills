@@ -60,13 +60,21 @@ def _gemini_cooldown(secs=300):
     global _gemini_off_until
     _gemini_off_until = time.time() + secs
 
-def _gemini_log(label, status):
+def _gemini_log(label, status, tokens=0):
+    """记进额度日志:units=本次 token 数(Gemini 没有查余额的 API,只能靠累计 token 估花费)。
+    note 带 prompt/output token 拆分;真实余额仍需去 AI Studio billing 控制台看。"""
     try:
         sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
         from google_api_quota import log_usage
-        log_usage("gemini", 1, label, note=f"status={status}")
+        log_usage("gemini", int(tokens or 0), label, note=f"tok={tokens} status={status}")
     except Exception:
         pass
+
+def _gemini_usage(j):
+    """从 Gemini 响应 json 取 token 用量 {total, prompt, out}。"""
+    u = (j or {}).get("usageMetadata") or {}
+    return {"total": u.get("totalTokenCount", 0), "prompt": u.get("promptTokenCount", 0),
+            "out": u.get("candidatesTokenCount", 0)}
 
 def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90):
     """Gemini Flash 出文本(深度解释/总结)。失败/空 → None(调用方回退 Claude)。"""
@@ -80,12 +88,14 @@ def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90):
             cfg["thinkingConfig"] = {"thinkingBudget": 0}
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent?key={key}")
         r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg}, timeout=timeout)
-        _gemini_log("assistant:text", r.status_code)
         if r.status_code != 200:
+            _gemini_log("assistant:text", r.status_code)
             if r.status_code in (429, 403):   # 额度耗尽/被拒 → 冷却,别每次白打
                 _gemini_cooldown()
             return None
-        cand = (r.json().get("candidates") or [{}])[0]
+        j = r.json()
+        _gemini_log("assistant:text", 200, _gemini_usage(j)["total"])
+        cand = (j.get("candidates") or [{}])[0]
         out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
         return out.strip() or None
     except Exception:
@@ -105,12 +115,14 @@ def _gemini_vision(prompt, images, max_tokens=1500, timeout=90):
         r = requests.post(url, json={"contents": [{"parts": parts}],
                                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
                                                           "thinkingConfig": {"thinkingBudget": 0}}}, timeout=timeout)
-        _gemini_log("assistant:vision", r.status_code)
         if r.status_code != 200:
+            _gemini_log("assistant:vision", r.status_code)
             if r.status_code in (429, 403):
                 _gemini_cooldown()
             return None
-        cand = (r.json().get("candidates") or [{}])[0]
+        j = r.json()
+        _gemini_log("assistant:vision", 200, _gemini_usage(j)["total"])
+        cand = (j.get("candidates") or [{}])[0]
         out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
         return out.strip() or None
     except Exception:
