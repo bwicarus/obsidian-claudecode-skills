@@ -29,6 +29,16 @@ VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 _APP_CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 _AGENT_MODEL = "sonnet"   # 推理 + 工具决策:sonnet 平衡(快+好用);重内容生成的工具内部各用 opus
 
+# claude CLI 的 cwd 决定它加载哪份 CLAUDE.md(从 cwd 向上遍历父目录找)+ 项目 .claude/settings、.mcp.json。
+# 本助手只走我们自管的 JSON 工具协议、禁了所有内建工具,**完全不需要项目 memory/settings/MCP**,
+# 却因 cwd=项目根 每轮白背整份 CLAUDE.md(~15K token)+ agent 壳。指到**项目树外**的空目录 → 都不加载 → 每轮省一大块。
+# ⚠ 必须在 CLAUDE_DIR 之外:子目录会被父目录遍历命中 CLAUDE_DIR/CLAUDE.md。我们工具全用绝对路径,cwd 对功能零影响。
+_ASST_CWD = "/tmp/bwicarus-asst-cwd"
+try:
+    os.makedirs(_ASST_CWD, exist_ok=True)
+except Exception:
+    _ASST_CWD = "/tmp"
+
 
 def _logged_in() -> bool:
     return bool(session.get("user_id"))
@@ -106,7 +116,7 @@ def _spawn(effort="low", model=None):
              "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
              "--verbose", "--model", (model or _AGENT_MODEL), "--effort", effort],   # 编排器=sonnet/分档;生成步工具可传 opus+high
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1, cwd=str(CLAUDE_DIR))
+            text=True, bufsize=1, cwd=_ASST_CWD)   # 项目树外空目录 → 不加载 CLAUDE.md/settings/MCP,省每轮前缀
     except Exception:
         return None
 
