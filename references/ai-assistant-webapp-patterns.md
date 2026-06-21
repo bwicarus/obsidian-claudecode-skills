@@ -260,6 +260,17 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 
 后台周期查实时额度(**非阻塞**:守在快照里,请求端只读),近上限时给前端一句提醒条(不覆盖回答),**绝不自动降级到别的后端 / 不打断**——除非用户明确要。把"省钱"做成可选,别擅自降质量。
 
+### 10b. ⭐ 用 `claude` CLI 当后端时,每轮先剥掉 Claude Code 那套壳(实测省 87% 输入 token)
+
+把 `claude --print` 当 agent 后端(走 stream-json + 自管 JSON 工具协议)时,它**默认会在系统前缀塞一大堆你根本用不到的东西**:项目 CLAUDE.md、默认 agent 系统提示、21 个内建工具 schema、user/project 设置 + 插件、动态 env 段。本助手只走自管协议、禁了所有内建工具,这些全是白付。实测(同句 "hi",sonnet)逐项剥:
+- **`cwd=项目树外空目录`**(不是项目根)→ 不加载 CLAUDE.md(从 cwd 向上遍历父目录找,所以空目录**必须在项目外**,子目录照样命中):33768 → 12249。
+- **`--setting-sources ""`** → 不加载 user/project 设置 + 插件(**登录不受影响**,OAuth 另走):→ 10981。
+- **`--tools <一个无害的>` + `--disallowedTools 全禁`** → 把 21 个内建工具 schema 砍到 1 个(模型一个都用不了,沙盒仍在):→ 6965。
+- **`--system-prompt <你自己的系统提示>` + `--exclude-dynamic-system-prompt-sections`** → **替换**默认 agent 壳(~6.8K)+ 去掉动态 env 段:→ **4468**,其中 4465 就是你自己的提示(必要),Claude Code 开销≈0。
+- 拆法零风险:你的系统提示本就分「静态规则 + 动态上下文」,把静态走 `--system-prompt`(恒定→可缓存、预热进程也能预设)、动态留 user message。我们按唯一锚 `rfind("【当前页面】")` 切现成的 prompt 输出,不挪文本。
+- ⚠ `--bare` 会一并跳过 OAuth → "Not logged in",**别用**;auth 要留着。`--deep_ask` 那种「生成步」调用不传 system(各有自己的 prompt),也顺带免掉 agent 壳。
+- 见 `_server_deploy/assistant.py::_spawn`(commits a4071fb/4a06619/aba9273)。
+
 ---
 
 ## 11. 移动端(iOS Safari)专项坑
