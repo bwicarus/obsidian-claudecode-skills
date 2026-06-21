@@ -40,6 +40,83 @@ except Exception:
     _ASST_CWD = "/tmp"
 
 
+# ──────────────── Gemini(给交互时的「深度解释/总结」+「现场看图」用,省 Claude 额度)────────────────
+# 编排器仍是 Claude(工具循环不动);只有这两个**叶子调用**(单次、不需 agentic 循环)优先走 Gemini Flash,
+# 失败/空/限额 → 自动回退 Claude(主助手永不因 Gemini 断而挂)。夜间批处理仍 Claude(按用户要求,不烧 Gemini)。
+_GEMINI_KEY_FILE = Path("/home/bwicarus/.config/gemini-api-key")
+_GEMINI_MODEL = "gemini-2.5-flash"
+
+_gemini_off_until = 0.0   # 遇 429/失败设冷却,避免每次都白打失败请求(多几百ms延迟)再回退 Claude
+
+def _gemini_key():
+    if time.time() < _gemini_off_until:   # 冷却中(上次额度耗尽/失败)→ 直接跳过,走 Claude
+        return None
+    try:
+        return _GEMINI_KEY_FILE.read_text().strip() or None
+    except Exception:
+        return None
+
+def _gemini_cooldown(secs=300):
+    global _gemini_off_until
+    _gemini_off_until = time.time() + secs
+
+def _gemini_log(label, status):
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+        from google_api_quota import log_usage
+        log_usage("gemini", 1, label, note=f"status={status}")
+    except Exception:
+        pass
+
+def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90):
+    """Gemini Flash 出文本(深度解释/总结)。失败/空 → None(调用方回退 Claude)。"""
+    key = _gemini_key()
+    if not key:
+        return None
+    try:
+        import requests
+        cfg = {"temperature": 0.4, "maxOutputTokens": max_tokens}
+        if not think:
+            cfg["thinkingConfig"] = {"thinkingBudget": 0}
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent?key={key}")
+        r = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg}, timeout=timeout)
+        _gemini_log("assistant:text", r.status_code)
+        if r.status_code != 200:
+            if r.status_code in (429, 403):   # 额度耗尽/被拒 → 冷却,别每次白打
+                _gemini_cooldown()
+            return None
+        cand = (r.json().get("candidates") or [{}])[0]
+        out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
+        return out.strip() or None
+    except Exception:
+        return None
+
+def _gemini_vision(prompt, images, max_tokens=1500, timeout=90):
+    """Gemini Flash 看图出文字描述。images=[{media_type,b64}]。失败/空 → None(回退 Claude)。"""
+    key = _gemini_key()
+    if not key or not images:
+        return None
+    try:
+        import requests
+        parts = [{"text": prompt}]
+        for v in images[:3]:
+            parts.append({"inlineData": {"mimeType": v.get("media_type", "image/png"), "data": v["b64"]}})
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:generateContent?key={key}")
+        r = requests.post(url, json={"contents": [{"parts": parts}],
+                                     "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
+                                                          "thinkingConfig": {"thinkingBudget": 0}}}, timeout=timeout)
+        _gemini_log("assistant:vision", r.status_code)
+        if r.status_code != 200:
+            if r.status_code in (429, 403):
+                _gemini_cooldown()
+            return None
+        cand = (r.json().get("candidates") or [{}])[0]
+        out = "".join(p.get("text", "") for p in (cand.get("content") or {}).get("parts", []))
+        return out.strip() or None
+    except Exception:
+        return None
+
+
 def _logged_in() -> bool:
     return bool(session.get("user_id"))
 
@@ -130,7 +207,10 @@ def _spawn(effort="low", model=None, system=None):
 
 def _deep_ask(prompt, model="opus", effort="high", timeout=150):
     """一次性深度生成(给"生成步"工具用:总结/深度解释等真正需要强模型的活)。
-    编排器保持快模型,这里现起一个 opus+high 进程出高质量结果再退。返回文本或 None。"""
+    **优先 Gemini Flash(省 Claude 额度),失败/空 → 回退 Claude opus·high**。返回文本或 None。"""
+    g = _gemini_text(prompt, max_tokens=4000, think=True, timeout=min(timeout, 100))
+    if g:
+        return g
     p = _spawn(effort=effort, model=model)
     if not p:
         return None
@@ -150,6 +230,10 @@ def _vision_describe(images, note="", timeout=90):
     (否则图留在多轮对话里每轮重读;且这里用精简系统提示,不背 5102 编排壳)。images=[{media_type,b64}]。"""
     if not images:
         return None
+    # 优先 Gemini Flash 看图(省 Claude 额度),失败/空 → 回退 Claude 精简视觉
+    g = _gemini_vision(_VIS_SYS + "\n" + (note or "描述这些图里文字层读不到的内容。"), images, timeout=min(timeout, 80))
+    if g:
+        return g
     p = _spawn(effort="low", model="sonnet", system=_VIS_SYS)
     if not p:
         return None
