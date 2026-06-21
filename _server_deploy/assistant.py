@@ -230,7 +230,7 @@ def _warm_prewarm():
         _warm_on = True
         if _warm_p is not None and _warm_p.poll() is None:
             return
-        _warm_p = _spawn()
+        _warm_p = _spawn(system=_sys_static())   # 预热进程也带静态系统提示(替换默认壳,跟真请求一致)
 
 
 def _warm_reap():
@@ -246,13 +246,13 @@ def _take_proc(effort="low", model=None):
     如感叹号「更强重答」沿梯子升档)→ 现起对应 模型×effort 的进程(冷启动~几秒可接受,深答本来就慢)。
     预热池只维持 sonnet·low——给最常见的快路径。"""
     if effort != "low" or (model and model != _AGENT_MODEL):
-        return _spawn(effort, model=model)
+        return _spawn(effort, model=model, system=_sys_static())
     global _warm_p
     with _warm_lock:
         p, _warm_p = _warm_p, None
     if p is None or p.poll() is not None:
         _kill(p)
-        p = _spawn()
+        p = _spawn(system=_sys_static())
     return p
 
 
@@ -263,7 +263,7 @@ def _warm_respawn():
             return
         if _warm_p is not None and _warm_p.poll() is None:
             return
-        _warm_p = _spawn()
+        _warm_p = _spawn(system=_sys_static())
 
 
 # ──────────────────────── 额度护栏(只告警,不降级/不阻断)────────────────────────
@@ -1196,6 +1196,25 @@ def _sys_prompt(ctx):
     )
 
 
+# 把 _sys_prompt 拆成 (静态规则+工具目录, 动态【当前页面】块):静态恒定 → 走 --system-prompt 替换 Claude Code
+# 默认提示(省每轮那 ~6.8K 默认壳);动态随 ctx → 留 user message。按唯一锚 "【当前页面】" 切,不挪文本、零风险。
+_SYS_STATIC_CACHE = None
+def _sys_static():
+    """静态系统提示(规则+工具目录),恒定 → 缓存。给 --system-prompt(替换默认),预热池无 ctx 也能取。"""
+    global _SYS_STATIC_CACHE
+    if _SYS_STATIC_CACHE is None:
+        full = _sys_prompt({})                       # 空 ctx:静态前缀跟任何真 ctx 一致,动态部分丢弃
+        i = full.rfind("【当前页面】")
+        _SYS_STATIC_CACHE = (full[:i].rstrip() if i >= 0 else full)
+    return _SYS_STATIC_CACHE
+
+def _ctx_block(ctx):
+    """动态部分(【当前页面】+ 选中/图/知识点/笔迹),每轮随 ctx 变 → 拼进 user message。"""
+    full = _sys_prompt(ctx)
+    i = full.rfind("【当前页面】")
+    return full[i:] if i >= 0 else ""
+
+
 def _clean_tag(s):
     """规整用户内容(选中句/书名)再拼进 prompt:折叠所有空白(含换行)成单空格 +
     去掉 【】「」(它们是 _agent_run 切分 turn/【最近对话】分段的标签,裸拼会破坏结构甚至被注入伪造段)。"""
@@ -1346,7 +1365,8 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
         yield {"event": "notice", "data": _qw}
     client_actions = []
     try:
-        content = f"{_sys_prompt(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
+        # 静态规则已走 --system-prompt(_take_proc spawn 时设),这里只发 动态【当前页面】块 + 历史 + 用户消息
+        content = f"{_ctx_block(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):"
         _t_start = time.time()
         _repair_tries = 0
         _resp_retry = 0          # 首轮无响应(预热进程失效)→ 换新进程重试一次
@@ -1377,7 +1397,7 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                     _resp_retry += 1
                     try: _kill(p)
                     except Exception: pass
-                    p = _spawn(effort=eff, model=mdl)   # 强制全新进程(不取可能也失效的预热池)
+                    p = _spawn(effort=eff, model=mdl, system=_sys_static())   # 强制全新进程(不取可能也失效的预热池)
                     if not p:
                         yield {"event": "error", "data": "助手起不来(claude 起不来)"}
                         return
