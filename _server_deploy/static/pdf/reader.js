@@ -229,7 +229,8 @@ let readMode = (() => {
   return v;
 })();   // 'continuous' | 'spread'（不再有 'single'）
 let _contIO = null;   // IntersectionObserver for 连续模式
-let _pendingScrollY = 0;   // 上次位置恢复用
+let _pendingScrollY = 0;   // 上次位置恢复用(绝对像素,旧记录兜底)
+let _pendingFrac = 0;      // 上次位置恢复用(页内比例 0-1,布局无关,优先于 scrollY)
 let _scrollSaveTimer = null;
 
 
@@ -304,27 +305,48 @@ function _maybeRestoreLastPos() {
   const urlPage = parseInt(u.searchParams.get('page') || '0');
   if (urlPage > 1 || u.searchParams.get('mode')) return;   // URL 显式带 page/mode 时尊重 URL，不恢复上次位置
   const pos = _getLastPosition();
-  if (!pos) return;
-  if (pos.mode && pos.mode !== readMode) {
+  // 排版模式是设备偏好:无论哪边胜都沿用本机上次的 mode(不影响页码仲裁)
+  if (pos && pos.mode && pos.mode !== readMode) {
     localStorage.setItem('pdf-read-mode', pos.mode);
     readMode = pos.mode;
   }
-  if (pos.page && pos.page > 0) currentPage = pos.page;
+  // ── 单真相源仲裁(2026-07-06,大厂 Kindle/Books 模型;修「每次开在固定位置」):服务端续读(CFG.page/page_ts)
+  //   与本地 localStorage 记录**按时间戳取新者**。此前两套系统无仲裁、LS 总是无条件覆盖 → 冻结的旧 LS 每次都赢。
+  const srvTs = ((window.__PDF_CFG && +__PDF_CFG.page_ts) || 0) * 1000;   // 服务端 epoch秒 → ms
+  if (!pos || !pos.page || (srvTs && srvTs >= (pos.ts || 0))) {
+    // 服务端更新鲜(或无本地记录)→ 信服务端(currentPage 已=CFG.page);本地记录对齐,防下次再打架
+    if (srvTs) { try { _saveLastPosition({ page: currentPage, scrollY: 0, frac: 0, mode: readMode }); } catch (_) {} }
+    window.dlog?.('续读仲裁:server 胜 p.' + currentPage);
+    return;
+  }
+  // 本地更新鲜(离线读过/上报失败过)→ 用本地,并把服务端记录「治愈」到本地页(别的设备才拿得到新进度)
+  currentPage = pos.page;
+  _pendingFrac = (pos.frac > 0 && pos.frac <= 1) ? pos.frac : 0;
   _pendingScrollY = pos.scrollY || 0;
-  window.dlog?.('恢复上次位置 p.' + currentPage + (pos.scrollY ? ' scrollY=' + pos.scrollY : ''));
+  try {
+    fetch('/pdf/api/reading-pos', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: FILE_REL, kind: 'pdf', pos: pos.page }), keepalive: true }).catch(() => {});
+  } catch (_) {}
+  window.dlog?.('续读仲裁:local 胜 p.' + currentPage + (pos.frac ? ' frac=' + pos.frac.toFixed(3) : (pos.scrollY ? ' scrollY=' + pos.scrollY : '')));
   _toast?.('⏯ 已恢复到上次位置 p.' + currentPage);
 }
 function _restoreScrollAfterRender() {
-  if (!_pendingScrollY) return;
+  if (!_pendingScrollY && !_pendingFrac) return;
   const main = document.getElementById('main');
   if (!main) return;
-  const target = _pendingScrollY;
+  // 页内比例优先(布局无关:scale/旋转/占位高度变化都不跑偏);老记录无 frac 才退回绝对 scrollY
+  const apply = () => {
+    if (_pendingFrac > 0) {
+      const pw = document.querySelector(`.page-wrap[data-page-num="${currentPage}"]`);
+      if (pw && pw.offsetHeight) { main.scrollTop = pw.offsetTop + _pendingFrac * pw.offsetHeight; return; }
+    }
+    if (_pendingScrollY) main.scrollTop = _pendingScrollY;
+  };
   // 多次 apply 直到稳定（连续模式占位高度逐步算准 / 真渲染替换占位时高度可能变）
-  const apply = () => { main.scrollTop = target; };
   setTimeout(apply, 100);
   setTimeout(apply, 400);
   setTimeout(apply, 1000);
-  setTimeout(() => { _pendingScrollY = 0; }, 1100);   // 最后一次后清空（避免重复 apply 干扰用户主动滚动）
+  setTimeout(() => { _pendingScrollY = 0; _pendingFrac = 0; }, 1100);   // 最后一次后清空（避免重复 apply 干扰用户主动滚动）
 }
 function _attachScrollSaver() {
   const main = document.getElementById('main');
@@ -333,7 +355,12 @@ function _attachScrollSaver() {
   main.addEventListener('scroll', () => {
     if (_scrollSaveTimer) clearTimeout(_scrollSaveTimer);
     _scrollSaveTimer = setTimeout(() => {
-      _saveLastPosition({page: currentPage, scrollY: main.scrollTop, mode: readMode, scale});
+      let frac = 0;   // 页内比例(布局无关);算不出(页未渲)存 0,恢复时退回 scrollY
+      try {
+        const pw = document.querySelector(`.page-wrap[data-page-num="${currentPage}"]`);
+        if (pw && pw.offsetHeight) frac = Math.max(0, Math.min(1, (main.scrollTop - pw.offsetTop) / pw.offsetHeight));
+      } catch (_) {}
+      _saveLastPosition({page: currentPage, scrollY: main.scrollTop, frac, mode: readMode, scale});
     }, 600);
   }, {passive: true});
 }

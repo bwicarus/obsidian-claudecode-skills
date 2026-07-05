@@ -52,6 +52,18 @@
   // 初始定位守护期(2026-07-05):冷加载后浏览器(iOS Safari 尤甚)可能迟到把内层滚动容器 content 的 scrollTop 还原到
   // 上次停留处 = 首开跳末尾 927 根因(scrollRestoration='manual' 只管文档滚动,管不住内层容器)。期内无用户交互时的
   // 任何滚动都判为浏览器乱还原 → 钉回目标;用户一交互(触摸/滚轮/按键)即失效,之后正常阅读不再干预。
+  // 开书「幕后定位」(2026-07-06,用户要求"直接转到记录位置"):定位到续读位置并等目标章真实加载完之前,
+  // 正文 opacity:0 遮住(顶栏/抽屉照常可用)——不再看到「先落错误位置→再被拉回」的滚动舞;
+  // jumpTo 重试/927 守护全在幕后进行,就位后正文直接呈现在记录位置。2.5s 硬兜底必揭幕(目标章拉不下来也不困人)。
+  var _settled = false;
+  function _settleReveal() { if (_settled) return; _settled = true; try { document.body.classList.remove('ep-settling'); } catch (e) {} }
+  try {
+    var _svl = document.createElement('style');
+    _svl.textContent = '#ep-col{transition:opacity .18s}body.ep-settling #ep-col{opacity:0}';
+    (document.head || document.documentElement).appendChild(_svl);
+    document.body.classList.add('ep-settling');
+    setTimeout(_settleReveal, 2500);
+  } catch (e) { _settled = true; }
   var _initGuard = ((window.matchMedia && matchMedia('(pointer: coarse)').matches) || ('ontouchstart' in window));   // 927 守护只在触摸设备启用(iOS Safari 内层滚动还原=此 bug 源头);桌面鼠标拖滚动条不触发任何"用户交互"事件、会被 _reassertInitial 拉回(审查确认),故桌面不守护
   // 旋转(横↔竖)后残留的横向偏移归零:reflow 阅读器宽度本就随视口自适应(--colw em 上限),但旋转瞬间旧坐标的
   // 绝对定位元素/canvas 可能把滚动区短暂撑宽 → 归零 scrollLeft(配合 #ep-content overflow-x:hidden 根治左右晃动)
@@ -156,6 +168,17 @@
     // 在若干时刻重钉回目标 pos(含 pos=0 顶部);_reassertInitial 内 _initGuard 保证用户一交互即停,不误伤正常浏览。
     [150, 350, 650, 1000, 1500, 2200, 3200].forEach(function (ms) { setTimeout(function () { _reassertInitial(pos); }, ms); });
     setTimeout(function () { _initGuard = false; }, 3600);   // 守护期硬上限(即便用户一直不交互也放行)
+    // 幕后定位完成(目标章真实加载)→ 最后钉一次 → 揭幕:正文直接呈现在记录位置(不透出中间的错误位置)
+    (function _waitSettle(n) {
+      if (_settled) return;
+      if (loaded[pos] === true) {
+        try { var el2 = secEls[pos]; if (el2) { var cr2 = content.getBoundingClientRect(), r2 = el2.getBoundingClientRect(); var dy2 = r2.top - cr2.top; if (Math.abs(dy2) > 4) content.scrollTop += dy2; } } catch (e) {}
+        requestAnimationFrame(function () { requestAnimationFrame(_settleReveal); });
+        return;
+      }
+      if (n >= 22) { _settleReveal(); return; }
+      setTimeout(function () { _waitSettle(n + 1); }, 100);
+    })(0);
     // 用户页(插入页):占位全建好(secEls 齐)后再加载插入——.ep-usec 是 .ep-sec 的兄弟节点,不进 secEls,
     // 原书章序/锚零影响;jumpTo 的重试循环会持续钉住目标章,插入引起的高度变化被自动吸收。
     try { if (window.RC && RC.userpages) RC.userpages.load(); } catch (e) {}
@@ -2967,7 +2990,7 @@
   }
   var _tT;
   function toast(msg) { var el = $('ep-toast'); if (!el) { el = document.createElement('div'); el.id = 'ep-toast'; el.style.cssText = 'position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:8px 16px;border-radius:8px;font-size:13px;z-index:95;box-shadow:0 6px 16px rgba(0,0,0,.6);transition:opacity .2s'; document.body.appendChild(el); } el.textContent = msg; el.style.opacity = '1'; clearTimeout(_tT); _tT = setTimeout(function () { el.style.opacity = '0'; }, 1400); }
-  function showErr(m) { var el = $('ep-load'); if (el) el.innerHTML = '<div style="color:#ff9a9a">✗ ' + m + '</div><a href="/pdf/">← 返回书架</a>'; }
+  function showErr(m) { try { _settleReveal(); } catch (e) {} var el = $('ep-load'); if (el) el.innerHTML = '<div style="color:#ff9a9a">✗ ' + m + '</div><a href="/pdf/">← 返回书架</a>'; }
   function hideLoad() { var el = $('ep-load'); if (el) el.style.display = 'none'; }
 
   var DBG = location.search.indexOf('dbg=1') >= 0 || localStorage.getItem('eph-debug') === '1';   // ?dbg=1 或设置面板 debug 开关

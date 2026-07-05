@@ -411,7 +411,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}};</script>
 <script>
 // 📍 续读位置服务端上报(2026-07-03,ui=shared/legacy 通用,不动 reader.src):每 5s 检测当前页
 //   (与视口交叠最多的 .page-wrap[data-page-num],同 _favCurTarget 口径;翻页按钮/横滑/滚动通吃),

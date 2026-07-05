@@ -932,8 +932,18 @@ def pdf_view():
     _is_fav_book = rel_clean.startswith(_FAV_BOOK_PREFIX)   # 收藏夹物化书:零进度(规格 D)
     if not _is_fav_book:
         _lastopen_touch(rel_clean)   # 戳「最近打开」→ 书架把这本置顶(收藏夹书不进「最近打开」)
+    page_ts = 0   # 服务端续读记录的时间戳(epoch 秒;前端跟 localStorage 记录按时间戳仲裁,新者胜——大厂 Kindle/Books 模型)
     if page < 1 and not _is_fav_book:
-        page = _reading_pos_get(rel_clean) or 1   # 无 ?page= → 服务端续读位置作初始页(有 ?page= 的深链优先,不受影响)
+        _rp = _reading_pos_load().get(rel_clean) or {}
+        try:
+            _pp = int(_rp.get("pos"))
+            if _pp >= 1:
+                page = _pp
+                page_ts = int(_rp.get("ts") or 0)
+        except (TypeError, ValueError):
+            pass
+        if page < 1:
+            page = 1
     elif page < 1:
         page = 1   # 收藏夹书:不注入 serverPos(不记录停留位置)
     comp_file, _ = _compressed_paths(rel_clean)
@@ -951,6 +961,7 @@ def pdf_view():
         file_rel=rel,
         file_name=Path(rel).name,
         page=page,
+        page_ts=page_ts,   # 续读仲裁时间戳(0=无服务端记录/深链)
         pdf_url=pdf_url,
         pdf_size=pdf_size_val,   # 字节数:前端据此决定小文件整本取/大文件 range
         compressed=(1 if use_comp else 0),     # 当前是否在用压缩版
