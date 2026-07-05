@@ -11,11 +11,26 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 [nginx :443/:80] → location 路由
         ↓ /control, /dashboard, /profile, /admin, /history, /api, /auth, /login, /register, /logout
         ↓
-[Flask webapp :5000]  ←  /root/webapp/app.py（systemd webapp.service）
-        ├── control.py blueprint（控制面板）
+[Flask webapp :5000]  ←  webapp/app.py（systemd webapp.service，Pi 上是 gunicorn）
+        ├── 7 个 blueprint：control / skilltree / pdf_reader / fitness / insights / voice / assistant（+ pdf 蓝图上再挂 epub_assistant）
         ├── templates/*.html
         └── data/users/<u>/* + data/{dashboard,history}_template/
 ```
+
+## ⚠ 静态文件由 nginx 直服，不经 gunicorn（改前端静态必读）
+
+**`/static/*`（含 `/static/pdf/*`、`/static/pdfjs/*`、`nav.js`、`voice.js`、`fitness/`、`qa/` 等）全部由 nginx 从 `/var/www/html/static/` 直接 serve，永远不走 gunicorn。** 实测（Pi）：
+
+```
+curl http://127.0.0.1:5000/static/pdf/reader.js   → 404   （gunicorn 自带 static_folder = webapp/static，是另一个空/不同目录，根本没有这些文件）
+curl https://<host>/static/pdf/reader.js          → 200 application/javascript   （nginx 从 /var/www/html/static/pdf/reader.js 直服）
+```
+
+nginx 两个 server 块各有 `location ^~ /static/pdf/ { … try_files $uri =404; }` + `^~ /static/pdfjs/`，`^~` 前缀优先级压过 proxy，其余 `/static/*` 落 `location / { try_files … }` 也从 `/var/www/html` 出。**含义**：
+
+- 前端静态改动（`_server_deploy/static/pdf/reader.js`、`reader.src/*` 等）**部署目标是 `/var/www/html/static/`**，不是 `webapp/` 下的 Flask static。
+- **验证静态改动别用 `:5000`**（那里恒 404），要走 **nginx base**（`https://<host>/static/...`）或直接 diff 部署目标文件 `/var/www/html/static/...`。
+- 源码在 git `_server_deploy/static/`（`reader.js` 由 `reader.src/*.js` 拼），部署 = `sudo cp` 到 `/var/www/html/static/`（qa CDN 镜像、nav.js 同理，见 CLAUDE.md「服务器侧自动化」）。
 
 ## 源码位置
 
@@ -23,12 +38,14 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 
 | 路径 | 部署到服务器 |
 |---|---|
-| `_server_deploy/app.py` | `/root/webapp/app.py`（git tracked，765 行，scp 部署） |
-| `_server_deploy/control.py` | `/root/webapp/control.py` |
-| `_server_deploy/templates/control.html` | `/root/webapp/templates/control.html` |
-| `_server_deploy/qa_server.py` | `/root/claude/_server_deploy/qa_server.py`（git pull 拿到）|
+| `_server_deploy/app.py` | `webapp/app.py`（git tracked，~1020 行，cp/scp 部署） |
+| `_server_deploy/control.py` | `webapp/control.py` |
+| `_server_deploy/templates/control.html` | `webapp/templates/control.html` |
+| `_server_deploy/qa_server.py` | `claude/_server_deploy/qa_server.py`（git pull 拿到）|
+| `_server_deploy/{skilltree,pdf_reader,fitness,fitness_coach,insights,voice,assistant,epub_assistant,youtube_*}.py` | `webapp/`（各 blueprint，app.py 末尾 `register_*` 挂载）|
+| `_server_deploy/static/*` | **`/var/www/html/static/`**（nginx 直服，不进 `webapp/`，见上「静态文件由 nginx 直服」）|
 
-> 注：`_server_deploy/app.py` 是 Flask 主入口，**完全在版本控制下**，可像 control.py 一样 scp 部署。仓库里另有一个废弃的 `webapp/app.py`（旧 stub，~3.7KB）应清理删除。
+> 部署根按环境换：Pi = `/home/bwicarus/webapp/`（**当前主力**）、VPS = `/root/webapp/`（⏸ 暂停）。下文沿用 VPS `/root/...` 视角写，Pi 换 `/home/bwicarus/...`。`_server_deploy/app.py` 是 Flask 主入口，**完全在版本控制下**，可像 control.py 一样 cp/scp 部署。
 
 ### 服务器（真实部署路径）
 
@@ -78,7 +95,9 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/control/api/ipad-config` | GET | iPad 端配置（cmd_server key / 端点等）|
 | `/control/api/quota-log` | GET | 额度消耗日志（state/quota_log.json）|
 | `/control/api/quota-now` | GET | 当前额度快照 |
-| `/control/api/trigger/<action>` | POST | 触发 register/daily/anki-restart/ankiweb-sync/switch-ai |
+| `/control/api/gemini-cost` | GET | Gemini 估算花费（按各次实际用的模型单价累计，AI Studio 无余额查询 API 只能本地累计）|
+| `/control/api/kg-audit` | GET | KG 审查配置/状态（读 server-config `kg_audit.*` + `state/kg_audit.json`）|
+| `/control/api/trigger/<action>` | POST | 触发 register/daily/upload/anki-restart/ankiweb-sync/switch-ai |
 | `/control/api/trigger-log` | GET | webapp_trigger.log 末 N 行 |
 | `/control/api/config` | GET/POST | 读写 server-config.json |
 | `/control/api/kg-build` | POST | 新建书本（spawn `scripts/kg/build_nodes.py` + `scripts/kg/extract_edges.py` 后台任务） |
@@ -100,7 +119,7 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
 | `/qa/` `/qa` | GET | 渲染 `qa.html`（旧 qa 流程，读 `data/qa.json`）|
 | `/qa/update` | POST | 旧 relay 写 qa.json（X-API-Key = RELAY_KEY）|
 
-> **PDF reader 完整路由**：pdf_reader.py（url_prefix=`/pdf`）实际有约 30+ 路由，上表只列了核心几条。手写笔（`/api/ink`）、生词系统（`/api/vocab-*`、`/api/page-vocab-marks`、`/api/dict-quick`）、语法分析（`/api/grammar-*` 7 条）、句子翻译（`/api/translate-sentence`/`-config`/`-dismiss`）、异步草稿（`/api/snippets-to-async`+`/api/job-status`）等新功能未在此罗列，完整清单见 pdf_reader.py / [`pdf-reader.md`](pdf-reader.md)。
+> **PDF reader 完整路由**：pdf_reader.py（url_prefix=`/pdf`）现已有 **150+ 路由**（含 EPUB/HTML 阅读器、收藏夹、笔记页等），上表只列核心几条。未罗列的大类：阅读进度（`/api/reading-pos`）、收藏夹（`/api/favorites` CRUD + `/fav/open`↔`/fav/view` 打开跳转）、自建笔记页（`/api/userpages` CRUD + `/api/notes`/`/api/note-composite`）、EPUB 阅读器（`/epub/view`、`/api/epub-*` 一大批）、HTML 阅读器（`/html/view`、`/api/html-highlights`）、手写笔（`/api/ink`、`/api/epub-ink`）、生词系统（`/api/vocab-*`、`/api/page-vocab-marks`、`/api/dict-quick`、中日词典 `/api/dict-jp*`）、语法分析（`/api/grammar-*`）、句子翻译（`/api/translate-sentence`/`-config`/`-dismiss`）、OCR/预处理编排（`/api/preprocess-*`、`/api/compress-*`、`/api/reocr-page`）、图/公式（`/api/page-figures`、`/api/figure-crop`、`/api/formula-ocr`）、异步草稿（`/api/snippets-to-async`+`/api/job-status`）。**PDF 侧栏 Copilot** 由 `assistant.py`（`/pdf/chat`/`/history`/`/clear`/`/undo`/`/action-pref(s)`/`/prewarm`）提供；**EPUB Copilot** 由 `epub_assistant.py` 把 `/api/epub-assistant`、`/api/epub-convo[/append|/clear|/update-action]`、`/api/epub-action` 挂到同一 pdf 蓝图上。完整清单见 pdf_reader.py / [`pdf-reader.md`](pdf-reader.md)。
 
 > **`/qa` 注意**：路由代码在 app.py 里仍 active（非废弃），iPad 现走 Tailscale 直连 qa-server :9091 不经 webapp（nginx `/qa` 反代 2026-05-11 已删，外部不可达）。但 `qa.html` 模板**不在**部署源目录 `_server_deploy/templates/`，只在废弃的 `webapp/templates/qa.html`，所以真机访问 `/qa` 会 TemplateNotFound。要么把模板加进部署源目录，要么真正删掉 `/qa`/`/qa/update` 两条路由。
 
@@ -208,20 +227,22 @@ nvim /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 ```
 
-## webapp.service 配置
+## webapp.service 配置（Pi 实机 = gunicorn）
 
 ```ini
-# /etc/systemd/system/webapp.service
+# /etc/systemd/system/webapp.service（Pi）；副本在 references/systemd/webapp.service
 [Unit]
-Description=bwicarus.space Flask webapp
+Description=bwicarus webapp (Pi instance, gunicorn)
 After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/webapp
-EnvironmentFile=/root/webapp/.env
-ExecStart=/usr/bin/python3 /root/webapp/app.py
+User=bwicarus
+WorkingDirectory=/home/bwicarus/webapp
+EnvironmentFile=/home/bwicarus/webapp/.env
+# 生产 WSGI：单 worker（保住进程内 _JOBS 断连恢复 + 后台线程共享内存）+ gthread 多线程并发 + timeout 600
+ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 8 --worker-class gthread --timeout 600 --graceful-timeout 30 --bind 127.0.0.1:5000 --access-logfile - --error-logfile - app:app
+ExecReload=/bin/kill -s HUP $MAINPID
 Restart=always
 RestartSec=5
 
@@ -229,21 +250,18 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-**注意**：`app.py` 末尾 `if __name__ == "__main__": app.run(host="127.0.0.1", port=5000, threaded=True)` 是阻塞调用 —— 任何 `if __name__` 之后的代码**永远不会执行**。所以 `control.py` import 必须在 `if __name__` **之前**：
+> 早期 VPS 版曾用 Flask dev server（`ExecStart=/usr/bin/python3 app.py`，User=root）；2026-06 起改 gunicorn（见下「生产 WSGI」节）。gunicorn 以 `app:app` 导入模块，`if __name__ == "__main__"` 块**不执行**，所以所有 `register_*(app)`（control/skilltree/pdf_reader/fitness/insights/voice/assistant）必须是**模块级**语句（在 `if __name__` 之前，app.py:993-1016 即如此）：
 
 ```python
 # ... 所有 routes 定义
-
-# 控制面板
 from control import register_control
 register_control(app)
-
+# ... skilltree / pdf_reader / fitness / insights / voice / assistant 依次 register
 if __name__ == "__main__":
-    # threaded=True：慢的 AI 请求（语法分析/翻译走 claude_cli）不再阻塞其他请求
-    app.run(host="127.0.0.1", port=5000, threaded=True)
+    app.run(host="127.0.0.1", port=5000, threaded=True)   # 仅本机裸跑调试用；生产走上面 gunicorn
 ```
 
-> `webapp.service` 的 systemd unit 文件**未**纳入 `references/systemd/` 副本（那目录只有 anki / qa-server / xvfb / obsidian-sync / bwicarus-daily 等），上面的 ini 是手抄，无法跟真机 unit 对照。
+> `webapp.service` 的 unit 文件**已**纳入 `references/systemd/webapp.service`，可跟真机对照。
 
 ## 本地实例（Windows）
 

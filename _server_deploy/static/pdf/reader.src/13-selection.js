@@ -206,6 +206,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
     }
   } catch (_) {}
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  try { window.__lastSelMeta = { page: (typeof _selPageNum === 'function' ? _selPageNum() : (typeof currentPage !== 'undefined' ? currentPage : 0)), t: Date.now() }; } catch (_) {}   // char 层选中也记 meta(页+时间);否则 __voiceContext 新鲜度校验(meta.page===curP && <10min)失败 → 助手拿到空选中
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
@@ -639,7 +640,11 @@ function _bindCharLayer(cl, pw) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');
-            setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+            if (window.__uiShared && window.PdfAdapter) {
+              PdfAdapter.lookupWord({ word: _t, context: _ctx, page: _selPageNum(), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+            } else {
+              setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+            }
           } else if (isNativeHan) {
             toolbar.classList.remove('open');
             lastSelText = '';

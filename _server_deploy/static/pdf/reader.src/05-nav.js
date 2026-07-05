@@ -1,4 +1,18 @@
-async function loadPageNodes(num) {
+function loadPageNodes(num) {
+  // 共享模式(__uiShared)→ PdfAdapter.renderPageNodes → rc-knowledge.renderInto(知识点卡统一)。
+  //   取数(page-nodes,页作用域)+ __lastPageNodes(语音上下文)+ 容器 #kg-nodes 都由 adapter 处理;
+  //   点开 skilltree / ☆跟踪 用 rc-knowledge 默认行为(与 PDF toggleNodeTrack 逐字一致);抽屉本体本阶段不迁,留 PDF 原版。
+  //   RC 不可用 / 容器缺 → fallback 回 _loadPageNodesNative(原逻辑逐字不变)。
+  if (window.__uiShared && window.PdfAdapter && PdfAdapter.renderPageNodes) {
+    return PdfAdapter.renderPageNodes({
+      file: FILE_REL, page: num, container: 'kg-nodes',
+      onAfter: () => { try { window._refreshVocabIfPage?.(); } catch (_) {} },   // 等价原尾部
+      fallback: () => _loadPageNodesNative(num),
+    });
+  }
+  return _loadPageNodesNative(num);
+}
+async function _loadPageNodesNative(num) {
   try {
     const r = await fetch(`/pdf/api/page-nodes?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
     const d = await r.json();
@@ -213,8 +227,20 @@ window.switchSideTab = (pane) => {
 };
 // 语法分析历史：按书本持久，新旧倒序（最新在上）
 let _grammarHistLoaded = false;
+// ── 阶段6 门控:ui=shared → RC.grammar.loadHistory 渲进同一个 #grammar-panel-body(跟 EPUB 共用);
+//   else 走原生逐字(_addHistoryBlock)。──
 window.loadGrammarHistory = async () => {
   _grammarHistLoaded = true;
+  if (window.__uiShared && window.RC && RC.grammar) {
+    try {
+      await RC.grammar.loadHistory('grammar-panel-body', FILE_REL, {
+        aiParams: (typeof _getAiOverrides === 'function') ? _getAiOverrides : undefined,
+        sourceUrl: () => FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '',
+        viewModeKey: 'pdf-grammar-view',
+      });
+    } catch (e) { window.dlog?.('grammar history load fail: ' + (e && e.message)); }
+    return;
+  }
   try {
     const r = await fetch('/pdf/api/grammar-history?file=' + encodeURIComponent(FILE_REL || ''));
     const d = await r.json();

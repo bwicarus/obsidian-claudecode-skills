@@ -120,7 +120,7 @@ POST /api/create-note  body={name, pairs, image_b64}
 你是一个截图问答助手。根据随附截图和对话历史回答用户问题。
 只回答问题本身，不要修改文件，不要运行命令，不要描述你的系统环境。
 **数学公式严格用 Markdown 数学语法**：行内公式 $...$，行间公式 $$...$$；
-**不要**用反引号 ` 包裹数学表达式（前端会被当 inline code 灰底显示而非渲染公式），
+**不要**用反引号 ` 包裹数学表达式（这样在前端会被当成代码块灰底显示而非公式），
 也不要用 \(...\) 或 \[...\]。
 例如：要写 $F^S$ 而不是 `F^S`，要写 $a_1, \ldots, a_n$ 而不是 `a_1,...,a_n`。
 ```
@@ -258,7 +258,7 @@ function maybeRender() {
 
 | backend_name | 实现 | 特点 |
 |---|---|---|
-| `claude_cli` | 调 `claude` CLI（走 PATH，`default_command="claude"`，subprocess） | 服务器侧默认；`--allowedTools Read`（防 AI 乱改文件）现已**硬编码**进 ai_backends.py 的 chat/chat_stream，源码里已无 `--dangerously-skip-permissions` 字面量。qa-server.service 那条 sed patch 现在是历史残留/幂等兜底，命中目标串已不存在 |
+| `claude_cli` | 调 `claude` CLI（走 PATH，`default_command="claude"`，subprocess） | 服务器侧默认；**脱壳**跑：`--setting-sources ""` + `cwd=_STRIP_CWD`（项目树外）→ 不加载 CLAUDE.md/插件（省 token）。`--allowedTools Read`（带图时模型需 Read 落盘图片）现已**硬编码**进 ai_backends.py 的 chat/chat_stream，源码里已无 `--dangerously-skip-permissions` 字面量。qa-server.service 那条 sed patch 现在是历史残留/幂等兜底，命中目标串已不存在。**Gemini 兜底**：claude 失败/限流/一个字都没吐 → `_gemini_chat(...)` 整段一次性返回（chat_stream 里也是流末补一段），省额度 + 防单边挂 |
 | `codex_cli` | 调 `/usr/bin/codex` CLI | OpenAI 的本地 CLI |
 | `claude_api` | Anthropic API direct（不经 CLI） | 需 API key |
 | `openai_api` | OpenAI API direct | 需 API key |

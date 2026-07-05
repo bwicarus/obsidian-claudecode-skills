@@ -1,0 +1,117 @@
+/* rc-snippets.js — 统一控制层:选段 → 建笔记 / Anki 制卡(共享,PDF/EPUB 通用)。
+ * 抽自 epub-html.js 的 makeNote + makeAnki(并参考 reader.src/20-result-draft.js 的 _pollJob 失败恢复)。
+ * 内容无关部分在这里:笔记名取值编排 + 后端调用 + 结果/进度渲染 + job 轮询(running/done/error/unknown + 网络抖动容忍 + 超时兜底)。
+ * 底座耦合走 opts(适配器):text(选中文本)、file/page/source(来源)、getNoteName()->prompt 出笔记名、
+ *   showCard(head,sub)->cardEl(开结果区+建卡,返回可写内容元素;EPUB=openAi+addCard)、endpoints(可覆盖后端 URL)。
+ * 自带 CSS(rc-snip-* 独立类名,只注入一次):仅一个 spinner,不跟 PDF/EPUB 现有类冲突。
+ * 用 RC.esc/RC.reqJson 渲染与请求,不重写。纯 ES5(var/function)。
+ */
+(function () {
+  if (!window.RC) window.RC = {};
+  if (window.RC.snippets) return;
+
+  var injected = false;
+  function injectCss() {
+    if (injected) return; injected = true;
+    var css = document.createElement('style'); css.id = 'rc-snip-css';
+    css.textContent =
+      '.rc-snip-spin{display:inline-block;width:13px;height:13px;border:2px solid #2b3f6e;border-top-color:#7dd3fc;border-radius:50%;animation:rcSnipSpin .8s linear infinite;vertical-align:-2px}' +
+      '@keyframes rcSnipSpin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(css);
+  }
+  var esc = (window.RC && RC.esc) || function (s) { return s == null ? '' : String(s); };
+
+  // 端点解析:opts.endpoints 覆盖 → RC.endpoints() → /pdf/api/* 默认(EPUB 原值)
+  function endpoints(opts) {
+    var e = (opts && opts.endpoints) || {};
+    var g = (window.RC && RC.endpoints && RC.endpoints()) || {};
+    return {
+      toNote: e.toNote || g.toNote || '/pdf/api/to-note',
+      snippetsTo: e.snippetsTo || g.snippetsTo || '/pdf/api/snippets-to-async',
+      jobStatus: e.jobStatus || g.jobStatus || '/pdf/api/job-status'
+    };
+  }
+
+  // 轮询后台 job:running 继续;done→渲染;error→报错;unknown 连续 3 次→任务丢失;
+  // 网络瞬断(切后台/网抖)不立即失败,继续轮询,超 ~5 分钟才放弃(对照 20-result-draft.js::_pollJob)。
+  function pollJob(card, jobStatusUrl, jobId) {
+    var tries = 0, unknown = 0;
+    var url = jobStatusUrl + (jobStatusUrl.indexOf('?') >= 0 ? '&' : '?') + 'id=' + encodeURIComponent(jobId);
+    var iv = setInterval(function () {
+      tries++;
+      RC.reqJson('GET', url).then(function (j) {
+        if (!j) return;
+        if (j.status === 'done') {
+          clearInterval(iv);
+          var r = j.result || {};
+          card.innerHTML = r.ok
+            ? ('✓ 已制卡' + (r.anki_added ? ' ×' + esc(r.anki_added) : ''))
+            : ('✗ ' + esc(r.error || '失败'));
+        } else if (j.status === 'error') {
+          clearInterval(iv); card.textContent = '✗ ' + (j.error || '失败');
+        } else if (j.status === 'unknown') {
+          if (++unknown >= 3) { clearInterval(iv); card.textContent = '✗ 任务丢失(服务重启?)'; }
+        }
+        // running → 继续轮询
+      }).catch(function () {
+        if (tries > 200) { clearInterval(iv); card.textContent = '✗ 轮询超时'; }
+      });
+    }, 1500);
+  }
+
+  window.RC.snippets = {
+    // 选段 → 建笔记。opts:{text, file?, page?, getNoteName()->string|null|Promise, showCard(head,sub)->cardEl, endpoints?}
+    // 取消(getNoteName 返回 null)或空名 → 不建卡、不请求,直接返回(与原 makeNote 一致:openAi/addCard 在名字确认后才发生)。
+    toNote: function (opts) {
+      opts = opts || {};
+      var text = (opts.text || '').trim();
+      if (!text) return;
+      Promise.resolve(opts.getNoteName ? opts.getNoteName() : '').then(function (name) {
+        if (name === null || name === undefined) return;   // prompt 取消
+        name = String(name).trim();
+        if (!name) return;
+        injectCss();
+        var card = opts.showCard('📝 建笔记', text);
+        if (!card) return;
+        var ep = endpoints(opts);
+        var body = { text: text, name: name };
+        if (opts.file != null) body.file = opts.file;
+        if (opts.page) body.page = opts.page;
+        RC.reqJson('POST', ep.toNote, body).then(function (d) {
+          if (d && d.ok) {
+            card.innerHTML = '已创建笔记 <b>' + esc(d.note_path || name) + '</b>' +
+              (d.obsidian_url ? ' · <a href="' + esc(d.obsidian_url) + '" style="color:#7dd3fc">在 Obsidian 打开</a>' : '');
+          } else {
+            card.textContent = '✗ ' + ((d && d.error) || '失败');
+          }
+        }).catch(function (er) {
+          card.textContent = '✗ ' + ((er && er.message) || '网络错误');
+        });
+      });
+    },
+
+    // 选段 → Anki 制卡(异步 job + 轮询)。opts:{text, file?, source?, model?, effort?, showCard(head,sub)->cardEl, endpoints?}
+    toAnki: function (opts) {
+      opts = opts || {};
+      var text = (opts.text || '').trim();
+      if (!text) return;
+      injectCss();
+      var card = opts.showCard('🎴 制卡', text);
+      if (!card) return;
+      card.innerHTML = '<span class="rc-snip-spin"></span> AI 整理成卡片…';
+      var ep = endpoints(opts);
+      var snip = { text: text, file: (opts.file != null ? opts.file : '') };
+      if (opts.source) snip.source = opts.source;
+      var body = { snippets: [snip], make_anki: true, make_note: false };
+      if (opts.model) body.model = opts.model;
+      if (opts.effort) body.effort = opts.effort;
+      RC.reqJson('POST', ep.snippetsTo, body).then(function (d) {
+        if (!d || !d.ok) { card.textContent = '✗ ' + ((d && d.error) || '失败'); return; }
+        if (!d.job_id) { card.textContent = '✗ 启动失败'; return; }
+        pollJob(card, ep.jobStatus, d.job_id);
+      }).catch(function (er) {
+        card.textContent = '✗ ' + ((er && er.message) || '网络错误');
+      });
+    }
+  };
+})();

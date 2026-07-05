@@ -109,13 +109,15 @@ hashlib.sha1(str(pdf_path.resolve()).encode()).hexdigest()[:16]
 ```python
 page.insert_text(
     fitz.Point(x_pdf, baseline_pdf), c,
-    fontname="japan",        # PyMuPDF 内置 CJK 字体
-    fontsize=fs,
+    fontname="china-s",      # Vision 路径现用 china-s(pan-CJK 超集,中日繁通吃,不丢简体;见踩坑 20)
+    fontsize=fs,             # ⚠ mokuro 路径(embed_ocr_to_pdf.py)仍用 "japan"
     color=(0,0,0), fill=(0,0,0),
     render_mode=0,           # 注意:是 0 + 双 opacity=0,不是 render_mode=3
     fill_opacity=0, stroke_opacity=0,
 )
 ```
+
+> 字体现状:`embed_google_ocr_to_pdf.py` 已从 `"japan"` 改成 **`"china-s"`**(内置 pan-CJK 超集:简/繁/假名/和制汉字全覆盖,日语书也不退化,根治简体专用字被静默丢字,详见踩坑 20);`embed_ocr_to_pdf.py`(mokuro)仍 `"japan"`。旋转页用 `page.derotation_matrix` + `rotate=page.rotation`(踩坑 17)。
 
 > 用 `render_mode=0` + `fill_opacity=0` + `stroke_opacity=0` 而非 `render_mode=3`（PDF 标准的 invisible），是因为前者兼容性更好——iOS Files / Safari 等也能正确识别为可选文字。
 
@@ -181,7 +183,7 @@ unit 文件副本在 `references/systemd/`（部署到 `/etc/systemd/system/`）
 ### `book-ocr-watchdog.service` + `.timer` — 健康度自检
 
 - watchdog 是 `Type=oneshot`，`User=root`，跑 `book_ocr_watchdog.py`
-- timer：`OnBootSec=5min` + `OnUnitActiveSec=15min` + `Persistent=true` → 开机 5 分钟后首跑，之后每 **15 分钟**一次
+- timer：`OnBootSec=5min` + **`OnActiveSec=15min`** + `OnUnitActiveSec=15min` + `Persistent=true` → 开机 5 分钟后首跑，之后每 **15 分钟**一次。`OnActiveSec`（2026-06-10 加）保证「开机很久后才 (re)start timer」也必有首跑，修 monotonic-timer `Trigger:n/a` 永不触发坑（详见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)）
 - `book_ocr_watchdog.py` 检查（针对固定 sidecar `state/mokuro-ocr/4eda8f8cdc69834f`）：
   - service active 但 `progress.json` > 30 分钟没更新 → 卡死
   - service active 但 progress.json 不存在

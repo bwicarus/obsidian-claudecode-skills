@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>{{ file_name }} · HTML 阅读器</title>
+<style>
+  *{box-sizing:border-box}
+  button,[role=button],select,input[type=checkbox]{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#0a0e1a;color:#e6edf3;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-text-size-adjust:100%}
+  body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  /* ── 顶栏(镜像 epub_reader.html #ep-top,精简:标题 / ⚙ 设置)── */
+  #html-top{flex:0 0 auto;height:calc(48px + env(safe-area-inset-top));z-index:50;display:flex;align-items:center;gap:8px;
+    padding:0 10px;padding-top:env(safe-area-inset-top);background:#10162a;border-bottom:1px solid #2a3550}
+  #html-top button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:7px;height:36px;min-width:38px;padding:0 12px;font-size:15px;cursor:pointer;white-space:nowrap;flex:none;display:inline-flex;align-items:center;justify-content:center}
+  #html-top button:hover{background:#2c3e6a;border-color:#3b6db5}
+  #html-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#cfe6ff;cursor:pointer}
+
+  /* ── 阅读区:HTML 内容渲进主文档(无 iframe)── */
+  #html-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--paper,#f6f3ea)}
+  #html-content{max-width:760px;margin:0 auto;padding:28px 22px 120px;color:#1b1b1b;font-size:var(--reader-fs,18px);line-height:var(--reader-lh,1.75);word-break:break-word}
+  #html-content h1{font-size:1.55em;margin:.6em 0 .4em}
+  #html-content h2{font-size:1.28em;margin:1.1em 0 .4em}
+  #html-content h3{font-size:1.12em;margin:1em 0 .35em}
+  #html-content p{margin:.7em 0}
+  #html-content code{background:rgba(0,0,0,.07);border-radius:4px;padding:1px 5px;font-size:.92em}
+  #html-content pre{background:rgba(0,0,0,.07);border-radius:8px;padding:10px 12px;overflow:auto}
+  #html-content blockquote{border-left:3px solid #9bb4d6;margin:.7em 0;padding:.2em 0 .2em 12px;color:#33415a}
+  #html-content img{max-width:100%;height:auto}
+  #html-content a{color:#2563eb}
+  /* 高亮 mark(字符偏移锚渲染) */
+  #html-content mark.rc-html-hl{border-radius:2px;padding:0 1px;cursor:pointer;color:inherit;background:#fff59d}
+  /* 单击词临时标记 */
+  #html-content .rc-html-tapmark{background:rgba(120,170,255,.45);border-radius:2px}
+
+  /* ── 收藏夹流式视图(v4):/pdf/fav/open 复用本阅读器;类名 fav-* 只在收藏夹内容出现,普通 HTML/MD 文档零影响 ── */
+  #html-content .fav-sep{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:30px 0 12px;padding:8px 13px;background:rgba(107,143,214,.14);border-left:3px solid #6b8fd6;border-radius:7px;font-size:13px;user-select:none;-webkit-user-select:none}
+  #html-content .fav-sep:first-child{margin-top:4px}
+  #html-content .fav-sep-t{font-weight:600;color:#33507c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}
+  #html-content .fav-open-src{flex:0 0 auto;color:#2563eb;text-decoration:none;font-size:12px;white-space:nowrap}
+  body[data-theme=night] #html-content .fav-sep{background:rgba(120,150,210,.16)}
+  body[data-theme=night] #html-content .fav-sep-t{color:#a9c2ef}
+  body[data-theme=night] #html-content .fav-open-src{color:#7db3ff}
+  body[data-theme=sepia] #html-content .fav-sep-t{color:#5a4a30}
+  #html-content .fav-item{margin:0 0 10px}
+  /* PDF 条目:原分辨率页图 + 透明可选文字层(page-chars 叠层,native selection 选词/查词/AI)。
+     container-type:size + cqh → 透明词层随页图等比缩放,免 JS 响应式 */
+  #html-content .fav-pdf-page{position:relative;container-type:size;width:100%;margin:0 auto;background:#fff;border-radius:5px;overflow:hidden;box-shadow:0 1px 5px rgba(0,0,0,.18)}
+  #html-content .fav-pdf-img{display:block;width:100%;height:auto}
+  #html-content .fav-pdf-txt{position:absolute;inset:0;color:transparent;-webkit-user-select:text;user-select:text}
+  #html-content .fav-pdf-txt span{position:absolute;line-height:1;white-space:pre;overflow:hidden;color:transparent;cursor:text}
+  #html-content .fav-missing{padding:22px;text-align:center;color:#b04040;background:rgba(176,64,64,.09);border-radius:7px}
+
+  /* ── 主题(paper / sepia / night,rc-settings 面板的 data-th 值)── */
+  body[data-theme=night] #html-scroll{background:#11151d}
+  body[data-theme=night] #html-content{color:#dce4ef}
+  body[data-theme=night] #html-content blockquote{color:#9fb0cc}
+  body[data-theme=night] #html-content code,body[data-theme=night] #html-content pre{background:rgba(255,255,255,.08)}
+  body[data-theme=sepia] #html-scroll{background:#f4ecd8}
+  body[data-theme=sepia] #html-content{color:#4a3f2e}
+
+  /* ── 选中工具栏(data-act/data-grp 与 epub_reader.html 一致;word=单词 / multi=多词 / both)── */
+  #html-sel{position:fixed;z-index:78;display:none;flex-direction:column;align-items:stretch;max-width:96vw;
+    background:#1a2540;border:1px solid #3b6db5;border-radius:9px;padding:6px;box-shadow:0 6px 18px rgba(0,0,0,.6);gap:5px}
+  #html-sel.open{display:flex}
+  #html-sel .html-preview{color:#a8cdff;font-size:11px;line-height:1.5;background:rgba(0,0,0,.3);border-radius:4px;
+    padding:5px 9px;max-height:54px;overflow:hidden;word-break:break-word;border-left:2px solid #60a5fa}
+  #html-sel .html-preview .len{color:#7a8497;font-size:10px;margin-left:6px}
+  #html-sel .html-btns{display:flex;gap:4px;flex-wrap:wrap}
+  #html-sel button{background:transparent;border:none;color:#cfe6ff;cursor:pointer;padding:6px 9px;border-radius:6px;
+    font-size:12.5px;white-space:nowrap}
+  #html-sel button:hover{background:#2c3e6a;color:#fff}
+
+  /* ── 统一抽屉「助手」pane 内容(snippets 结果卡;CSS 与 epub 版一致;抽屉本体/把手/tab 由 rc-sidedrawer 注入)── */
+  #ep-ai-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px;display:flex;flex-direction:column;gap:10px}
+  .ep-card{background:#11192c;border:1px solid #243056;border-radius:11px;padding:10px 12px}
+  .ep-card .h{font-size:11px;color:#7c93c4;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;display:flex;gap:6px;align-items:center}
+  .ep-card .c{font-size:14px;line-height:1.65;color:#e6edf3;word-break:break-word}
+  .ep-sel-chip{font-size:11px;color:#8fb0e8;background:#0e1a30;border:1px solid #234;border-radius:6px;padding:2px 7px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block}
+  .ep-spin{display:inline-block;width:13px;height:13px;border:2px solid #2b3f6e;border-top-color:#7dd3fc;border-radius:50%;animation:eps .8s linear infinite;vertical-align:-2px}
+  @keyframes eps{to{transform:rotate(360deg)}}
+  .ep-empty{color:#7c93c4;font-size:13px;text-align:center;padding:20px}
+  #html-asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}
+  #html-asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}
+</style>
+</head>
+<body data-theme="paper">
+  <div id="html-top">
+    <div id="html-title" onclick="location.href='/pdf/'" title="点击返回书架">{{ file_name }}</div>
+    <button id="html-set-btn" title="设置">⚙️</button>
+  </div>
+
+  <div id="html-scroll">
+    <article id="html-content">{{ html_content|safe }}</article>
+  </div>
+
+  <!-- 选中工具栏(分流由 html-reader.js showSel 控制 display) -->
+  <div id="html-sel">
+    <div class="html-preview" id="html-preview">—</div>
+    <div class="html-btns">
+      <button data-act="copy" data-grp="both">📋 复制</button>
+      <button data-act="dict" data-grp="word">🔍 查词</button>
+      <button data-act="translate" data-grp="multi">🌐 翻译</button>
+      <button data-act="explain" data-grp="multi">💡 解释</button>
+      <button data-act="chat" data-grp="multi">💬 对话</button>
+      <button data-act="highlight" data-grp="both">🖍 高亮</button>
+      <button data-act="note" data-grp="both">📝 笔记</button>
+      <button data-act="anki" data-grp="both">🎴 制卡</button>
+    </div>
+  </div>
+
+  <!-- 右侧统一抽屉(rc-sidedrawer 要求 #ep-side + .ep-side-pane[data-pane];把手/tab 由它注入) -->
+  <aside id="ep-side">
+    <div class="ep-side-pane active" data-pane="asst" id="ep-side-asst">
+      <div id="ep-ai-body"></div>
+      <div id="html-asst-quick">
+        <button data-q="clear">🗑 清空</button>
+      </div>
+    </div>
+    <div class="ep-side-pane" data-pane="hl" id="ep-side-hl"><div class="ep-empty">点开载入高亮…</div></div>
+  </aside>
+
+  <!-- AI 结果模态 + 草稿系统(rc-result.js;DOM 骨架与 epub_reader.html 一致,UI/CSS 由 rc-result 自注入) -->
+  <div id="result-mask" onclick="if(event.target===this) closeResult()">
+    <div id="result-modal">
+      <h3 id="result-title">结果</h3>
+      <div class="src" id="result-src"></div>
+      <div class="content" id="result-content"></div>
+      <div id="result-followup">
+        <input id="result-followup-input" placeholder="继续追问…（基于上面的解释）" onkeydown="if(event.key==='Enter'){event.preventDefault();_followupAsk();}">
+        <button onclick="_followupAsk()">追问</button>
+      </div>
+      <div class="actions">
+        <div id="vocab-actions"></div>
+        <button id="result-anki-btn" onclick="ankiFromResult()" title="把「选中原文 + 这条解释」做成 Anki 卡片（后台）" style="background:#13351f;color:#7ee2b8;border-color:#34d399">🎴 制 Anki</button>
+        <button onclick="closeResult()">关闭</button>
+      </div>
+    </div>
+  </div>
+  <div id="draft-badge" onclick="openDraftModal()" title="已选段落">
+    <div style="display:flex;flex-direction:column;align-items:center;line-height:1.1"><span class="icon">📋</span><span class="count" id="draft-count">0</span></div>
+  </div>
+  <div id="draft-mask" onclick="if(event.target===this) closeDraftModal()">
+    <div id="draft-modal">
+      <h3><span>📋 已选段落 <span id="draft-modal-count" style="color:#7a8497;font-size:12px;font-weight:400"></span></span><button class="clear-all" onclick="clearAllDrafts()">全部清空</button></h3>
+      <div id="draft-list"></div>
+      <div id="draft-actions">
+        <button class="primary" onclick="createNoteFromDrafts()">📝 创建笔记</button>
+        <button onclick="createAnkiFromDrafts()">🎴 创建 Anki</button>
+        <button onclick="createBothFromDrafts()">📚 笔记 + Anki</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  window.HTML_CFG = {
+    fileRel: {{ file_rel|tojson }},
+    fileName: {{ file_name|tojson }}
+  };
+</script>
+<script src="/static/qa/marked.js"></script>
+<!-- 必须在 mathjax.js 前配 $...$ 行内分隔符(同 epub_reader.html / pdf_reader.html);rc-result/rc-wordpop 流式渲染靠它 -->
+<script>window.MathJax={tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']]},options:{skipHtmlTags:['script','noscript','style','textarea','pre','code']}};</script>
+<script src="/static/qa/mathjax.js" async></script>
+<!-- 统一控制层(window.RC):PDF/EPUB/HTML 共用一份。本页接 dict / result(含草稿) / wordpop / snippets / settings / sidedrawer / highlight -->
+<script src="/static/pdf/rc-core.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-md.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-highlight.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-snippets.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-result.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-wordpop.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-assistant.js?v={{ reader_js_v }}"></script><!-- 设置面板 AI tab 内嵌模型配置表(renderModelSettings)依赖 -->
+<script src="/static/pdf/rc-settings.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-sidedrawer.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-phrasepop.js?v={{ reader_js_v }}"></script>
+<!-- 新阅读器驱动 + HtmlAdapter(架构验收:给新阅读器写个 adapter,共享功能就全有) -->
+<script src="/static/pdf/html-reader.js?v={{ reader_js_v }}"></script>
+</body>
+</html>

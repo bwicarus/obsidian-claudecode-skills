@@ -162,6 +162,10 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时按比例 zoom 现有位图(过渡期补偿)
   wrap.style.zoom = '';   // 本页位图已是当前 scale 原生像素 → 撤掉缩放过渡期的补偿 zoom(回到 1)
   wrap.dataset.loaded = '1';
+  try { if (window.__uiShared && window.RC && RC.stickynote) RC.stickynote.mountPending(); } catch (_) {}   // 本页便签补挂(幂等;重渲 innerHTML='' 会清掉便签,这里自愈)
+  try { if (window.__uiShared && window._userpagesMount) window._userpagesMount(); } catch (_) {}   // 用户页(插入页)补挂(幂等;hook 实现在模板 ui_shared 块,legacy 无感)
+  // 服务端回的图比请求宽小 = 宽度容差「放大近似图」(模糊),它已在后台补渲精确宽 → 稍后换成清晰图
+  if (img.naturalWidth < reqW - 2) _scheduleSharpen(num, wrap, reqW, mt, _gen, 0);
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
   if (window._maybeAutoPrewarm) window._maybeAutoPrewarm();   // 首页渲完(scale/宽度已定)→ 自动后台预热整本(只触发一次)
@@ -169,6 +173,22 @@ async function _renderPageImg(num, wrap, viewport) {
     const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
     loadPageNodes(num);
   }
+}
+// 拿到「模糊近似图」后,等服务端后台补渲精确宽完成,再把这一页的 <img> 原地换成清晰图(只换图、不重渲整页)。
+// cache-bust 绕开浏览器缓存(近似图返回 no-store,本就不缓存;busted url 取磁盘上已渲好的精确图)。最多重试 3 次。
+async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
+  tries = tries || 0;
+  if (tries > 3) return;
+  setTimeout(async () => {
+    if (!wrap.isConnected || wrap.__imgGen !== gen) return;   // 页已释放 / 已有更新渲染 → 放弃
+    const im = document.createElement('img'); im.decoding = 'async';
+    im.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt + '&sharp=' + Date.now();
+    try { await im.decode(); } catch (_) { return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1); }
+    if (!wrap.isConnected || wrap.__imgGen !== gen) return;
+    if (im.naturalWidth < reqW - 2) return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1);   // 后台还没渲好 → 再等
+    const cur = wrap.querySelector('img.page-img');
+    if (cur) { im.className = 'page-img'; im.style.width = cur.style.width; im.style.height = cur.style.height; im.style.display = 'block'; cur.replaceWith(im); }
+  }, 1600 + tries * 1600);
 }
 async function _renderPageInto(num, wrap) {
   if (!pdfDoc) return;
@@ -325,6 +345,8 @@ async function _renderPageInto(num, wrap) {
   wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排按比例 zoom 现有位图(过渡期补偿)
   wrap.style.zoom = '';   // 本页已是当前 scale 原生像素 → 撤掉补偿 zoom(回到 1),canvas 模式同样
   wrap.dataset.loaded = '1';
+  try { if (window.__uiShared && window.RC && RC.stickynote) RC.stickynote.mountPending(); } catch (_) {}   // 本页便签补挂(幂等;重渲 innerHTML='' 会清掉便签,这里自愈)
+  try { if (window.__uiShared && window._userpagesMount) window._userpagesMount(); } catch (_) {}   // 用户页(插入页)补挂(幂等;hook 实现在模板 ui_shared 块,legacy 无感)
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
   // 同步 URL + 拉 KG 节点：只在单页模式做

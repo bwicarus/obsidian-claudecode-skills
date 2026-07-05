@@ -130,21 +130,36 @@ function _showExplainHighlight(pw, text) {
 function _reopenExplain() {
   const a = _activeExplainHl;
   if (!a) return;
+  // 共享模式(__uiShared):结果框改走 rc-result,须用它暴露的 openResult/addResultPickers/_resultReqId
+  // (window.openResult 已是 rc-result 版本;window.addResultPickers 需 rc-result 显式导出),否则本文件
+  // 模块作用域内的裸 openResult/addResultPickers/_resultReqId 是 reader.js 自己另一份计数器/实现,
+  // 两边互不作废对方的在途请求,会有极小概率的"旧结果覆盖新结果"竞态。非共享模式逐字不变。
+  const shared = window.__uiShared && window.PdfAdapter;
+  const _open = shared ? window.openResult : openResult;
+  const _pickers = shared ? window.addResultPickers : addResultPickers;
   if (a.html) {
     // 已就绪 → 直接显缓存
-    openResult(a.title || '💡 AI 解释', a.src || a.text, a.html);
+    _open(a.title || '💡 AI 解释', a.src || a.text, a.html);
     try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}
-    try { addResultPickers(); } catch (_) {}
+    try { _pickers && _pickers(); } catch (_) {}
   } else {
     // 还在后台跑 → 开加载面板,登记 reqId,完成时由 _runExplainBg 填充(并补 pickers)
-    openResult(a.title || '💡 AI 解释', a.src || a.text, '<div class="loading">⏳ AI 处理中…</div>');
-    a.panelReqId = _resultReqId;   // openResult 已自增 _resultReqId,这里取新值
+    _open(a.title || '💡 AI 解释', a.src || a.text, '<div class="loading">⏳ AI 处理中…</div>');
+    a.panelReqId = shared ? window._resultReqId : _resultReqId;   // openResult 已自增对应计数器,这里取新值
   }
   // 点高亮=打开页面 → 一次点击即移除高亮(后台 job 仍持自身引用,未 canceled 时继续填面板)
   document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
   _activeExplainHl = null;
 }
 window.showPhrasePopover = async (text, opts) => {
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
+    toolbar.classList.remove('open');
+    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, fallback: () => _showPhrasePopoverNative(text, opts) });
+    return;
+  }
+  return _showPhrasePopoverNative(text, opts);
+};
+async function _showPhrasePopoverNative(text, opts) {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
   _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false,
@@ -192,7 +207,7 @@ window.showPhrasePopover = async (text, opts) => {
     (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
-};
+}
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
   const t = s.word;
@@ -582,16 +597,34 @@ function _isJaWord(w) {
   const declared = (BOOK_LANGS || []).length > 0;
   return declared ? BOOK_LANGS.includes('ja') : true;
 }
+// 共享模式(__uiShared)下点词已直连 RC.wordpop.show(rc-wordpop.js 自己的 _expandWordFull 读它自己的 _wordPopState,
+//   已正确接线);本文件(reader.js 拼接产物,最后加载)若无条件也赋值 window._expandWordFull,会覆盖掉 rc-wordpop.js
+//   的版本——而这份读的是 reader.src 自己的 _wordPopState(共享模式下从未被填,PDF 早已不走原生 showWordPopover 那条路),
+//   于是 word 恒为 undefined,`if (!word) return;` 直接短路退出,「展开完整词典」按钮点了没反应(比 _wordPopMaster/
+//   _wordPopGrammar/_speakCurWord 那三个更隐蔽——内部本有 __uiShared 分支,但 word 校验在分支之前就已经 return 了)。
+//   门控:共享模式下别赋值;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._expandWordFull = (w, c) => {
   const s = _wordPopState;
   const word = w || (s && s.word);
   const ctx = (c != null ? c : (s && s.ctx)) || '';
   const pop = document.getElementById('word-pop'); if (pop) pop.style.display = 'none';
   if (!word) return;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:全词典大框 → rc-wordpop(共享模式;else 为原 dictStreamJP/dictStream,逐字不变)
+    PdfAdapter.openFullDict({ word, context: ctx, jp: _isJaWord(word), file: FILE_REL,
+      page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), langs: BOOK_LANGS,
+      fallback: () => { if (_isJaWord(word)) dictStreamJP(word, ctx); else dictStream(word, ctx); } });
+    return;
+  }
   if (_isJaWord(word)) dictStreamJP(word, ctx);   // 日语完整字典(离线富内容+按需AI)
   else dictStream(word, ctx);                     // 英语三源大框(ecdict+free+mw+例句)
 };
+}
 // 小框喇叭：读当前词（避开 onclick 内联传参的引号冲突），同步播有道(手势栈内)
+// 共享模式(__uiShared)下 rc-wordpop.js 核心框的按钮 onclick 写死调这几个全局名,但本文件(reader.js 拼接产物,
+//   最后加载)若无条件也赋值,会覆盖 rc-wordpop.js 刚设好的版本(读的是不同的 _wordPopState,导致按钮静默失效)。
+//   门控:共享模式下别赋值,让 rc-wordpop.js 自己的版本生效;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._speakCurWord = () => {
   const s = _wordPopState;
   if (!s) return;
@@ -599,6 +632,7 @@ window._speakCurWord = () => {
   const w = s.lemma || s.word;
   if (w) _speakOnline(w);
 };
+}
 // 小框「掌握」toggle（日英统一）：未掌握 ↔ 掌握 100 来回切，不关框。
 // 掌握 → 该词不再标生词下划线；按语言走不同 store：日语 jp-vocab-mark(mastered/unknown)，
 // 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
@@ -617,6 +651,7 @@ function _dropVocabUnderlineOptimistic(s) {
   });
 }
 
+if (!window.__uiShared) {
 window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
   const next = !s.mastered;
@@ -678,11 +713,14 @@ window._wordPopMaster = (btn) => {
     _toast?.(s.mastered ? '已掌握 100，下划线消失' : '已设为未掌握');
   }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
 };
+}
 // 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
+if (!window.__uiShared) {
 window._wordPopGrammar = () => {
   const p = document.getElementById('word-pop'); if (p) p.style.display = 'none';
   try { onGrammarAnalyze(); } catch (e) { window.dlog && window.dlog('grammar from word-pop fail: ' + (e && e.message)); }
 };
+}
 // 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
   if (!lastSelText) return;
@@ -692,7 +730,11 @@ window.onLookupWord = () => {
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
     if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
   }
-  showWordPopover(lastSelText, ctx);
+  if (window.__uiShared && window.PdfAdapter) {
+    PdfAdapter.lookupWord({ word: lastSelText, context: ctx, page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+  } else {
+    showWordPopover(lastSelText, ctx);
+  }
 };
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span

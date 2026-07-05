@@ -46,10 +46,14 @@ youtube_speech.py ── Cloud STT  ──  GCP API key
 |---|---|---|
 | `fitness_log` | 每组训练记录(autosave 落地)| `(date, exercise_id, set_no)` UNIQUE,weight_kg / reps / day_id |
 | `fitness_video_override` | 用户自定义视频列表(覆盖 plan.json)| exercise_id PK,videos_json |
-| `fitness_exercise_override` | AI 调整后的 prescribed 覆盖 | exercise_id PK,prescribed_json,source(ai/manual),reasoning,change_summary |
+| `fitness_video_favorite` | 用户收藏的视频(列表里置顶)| (exercise_id, video_id) PK |
+| `fitness_exercise_override` | AI 调整后的 prescribed 覆盖 | exercise_id PK,prescribed_json,source(ai/manual/ai_chat),reasoning,change_summary |
 | `fitness_session_analysis` | 每次完成训练 AI 分析 | (date, day_id) PK,analysis_json |
 | `fitness_settings` | 用户级设置(AI 模型 / 自动开关) | key/value pairs |
-| `fitness_ai_job` | AI 后台 job(异步,关页面不丢) | id PK,kind(suggest_plan/analyze_session),day_id,date,status(running/done/error),result_json,error |
+| `fitness_ai_job` | AI 后台 job(异步,关页面不丢) | id PK,kind(suggest_plan/analyze_session/balance_check/coach_chat),day_id,date,status(running/done/error),result_json,error |
+| `fitness_coach_chat` | 教练复盘对话(一次训练=一会话)| (date, day_id) 标识,一行一消息,role/content/proposal_json |
+
+> 共 **8 张 per-user 表**(都在 `fitness.db`)。字幕/要点缓存是**全局共享**的独立库(`youtube_subtitles.db` 的 `youtube_subtitles` + `youtube_summaries` 两表),不在此列。
 
 ### fitness_settings 默认值
 
@@ -169,7 +173,7 @@ PPL 3 天循环 + 20 个动作(2026-05-30 升级 v2)。每动作:
 - `balance_check()`:profile(客观数字)→ `BALANCE_PROMPT`(opus+max + LITERATURE_REF)→ AI 出
   `{overall_balance_grade, summary, imbalances[], corrective_actions[], do_not_overcorrect}`。
 - 前端主页自包含轮询(非 log.html 的药丸框架):六比彩色圆点 + 失衡卡 + 纠正建议;关页面回来自动续接 running job。
-- **3D 肌群图(2026-06-04,用户选真 3D 而非 2D)**:`/private/fitness/body`(`body.html`)用 **Three.js(自托管 `/var/www/html/static/three/three.module.min.js` + `OrbitControls.js`,r0.160;OrbitControls 内 `import 'three'` 已 sed 改相对路径)**程序化建半透明人体(头/躯干/四肢 capsule 外壳)+ 12 块独立肌群网格(胸/前中后束/二头三头/背/核心/臀/股四/腘绳/小腿,左右镜像),按强弱**上色**(green/yellow/red/gray)。OrbitControls 旋转+缩放、正/背面按钮、raycast 点肌肉看详情、图例。颜色数据走 `_muscle_status(profile)`(把六比+桶翻成每肌强弱:比值弱侧取比值 status,无拮抗肌按绝对周容量判)→ 同步快端点 `GET /api/fitness/balance_profile`(0.02s,无 AI,秒上色)。**没用真实解剖 GLB**(免费且分肌群可选中的难找+体积大+远端慢网吃力)→ 程序化几何体,轻、离线、零外部素材。换动作要同步 `MUSCLE_MAP` 才纳入聚合。
+- **3D 肌群图(2026-06-04,用户选真 3D 而非 2D)**:`/private/fitness/body`(`body.html`)用 **Three.js(自托管 `/var/www/html/static/three/three.module.min.js` + `OrbitControls.js`,r0.160;OrbitControls 内 `import 'three'` 已 sed 改相对路径)**程序化建半透明人体(头/躯干/四肢 capsule 外壳)+ 12 块独立肌群网格(胸/前中后束/二头三头/背/核心/臀/股四/腘绳/小腿,左右镜像),按强弱**上色**(green/yellow/red/gray)。OrbitControls 旋转+缩放、正/背面按钮、raycast 点肌肉看详情、图例。颜色数据走 `_muscle_status(profile)`(**主信号=力量比**:`_STRENGTH_PAIRS` 同模态 est-1RM 拮抗对,弱侧取比值 status、强侧绿;力量比 insufficient/未覆盖的肌肉才回退绝对周容量兜底——早期"六比+桶翻每肌强弱"的说法已在 2026-06-07 节改为力量比主信号)→ 同步快端点 `GET /api/fitness/balance_profile`(0.02s,无 AI,秒上色)。**没用真实解剖 GLB**(免费且分肌群可选中的难找+体积大+远端慢网吃力)→ 程序化几何体,轻、离线、零外部素材。换动作要同步 `MUSCLE_MAP` 才纳入聚合。
   - ⚠ Three.js 是 ES module:页面用 `<script type="module">` import 自托管路径;nginx `/static/three/*.js` 经 `location /` try_files 直供(mime application/javascript 正常)。
 
 **教练复盘对话(2026-06-04)**:完成训练 modal 里「💬 跟教练聊聊这次训练」(`<details>` 折叠) →
@@ -466,7 +470,7 @@ register_fitness(app)
 |---|---|---|
 | `youtube-transcript-api` 1.2.4 | `pip --break-system-packages` | YT auto-caption |
 | `yt-dlp` 2026.3.17+ | pip | 下载视频 audio |
-| `ffmpeg` 7.x | apt | 切 chunk + FLAC 转码 |
+| `ffmpeg` 7.x | apt | 切 chunk + WAV(LINEAR16 / pcm_s16le)转码(**不是** FLAC,见踩坑#7)|
 | `requests` | 已有 | STT / Gemini REST |
 
 ---

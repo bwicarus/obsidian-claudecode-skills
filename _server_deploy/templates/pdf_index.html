@@ -33,6 +33,11 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
 .ctx-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:#cfe6ff;padding:12px 16px;font-size:14px;cursor:pointer}
 .ctx-menu button:active,.ctx-menu button:hover{background:#1a2540}
 .ctx-menu button.danger{color:#ff8a8a}
+/* ── tab 栏(书架 / 收藏夹)── */
+.tabbar{display:flex;gap:8px;margin-bottom:16px}
+.tabbar .tab{background:#141a2e;border:1px solid #2a3550;color:#8a9bb4;border-radius:8px;padding:8px 18px;font-size:13.5px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.tabbar .tab.active{background:#244470;border-color:#3b6db5;color:#cfe6ff;font-weight:600}
+.fav-actions{display:flex;gap:6px;flex-shrink:0}
 </style>
 <!-- mfx:Claude Design 动效+美化层(同阅读器),书架的卡片/行/按钮也享受入场动画/悬浮/玻璃质感 -->
 <link rel="stylesheet" href="/static/pdf/mfx.css?v=mfx-5">
@@ -41,10 +46,15 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
 <div class="container">
   <h1>📚 PDF 阅读器</h1>
   <div class="sub">vault 里所有 PDF（{{ pdfs|length }} 个），最近打开的在最上 · 长按一本可重命名/删除 · 🔧 预处理给扫描书补文字层</div>
+  <div class="tabbar">
+    <button class="tab active" data-tab="books" onclick="switchTab('books')">📖 书架</button>
+    <button class="tab" data-tab="fav" onclick="switchTab('fav')">⭐ 收藏夹</button>
+  </div>
+  <div id="books-pane">
   <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
-    <label style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px">
-      ⬆️ 上传 PDF
-      <input type="file" accept="application/pdf" style="display:none" onchange="uploadPdf(this)">
+    <label style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px" title="支持 PDF / EPUB / MOBI / FB2 / XPS / CBZ。非 PDF 的电子书上传时自动转成 PDF（带文字层，可选词/查词/高亮）。">
+      ⬆️ 上传书
+      <input type="file" accept=".pdf,.epub,.mobi,.fb2,.xps,.cbz,application/pdf,application/epub+zip" style="display:none" onchange="uploadPdf(this)">
     </label>
     <input type="text" id="upload-dir" placeholder="目标目录（默认 资源/uploads）" style="background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:8px 12px;font-size:13px;flex:1;min-width:200px">
     <span id="upload-status" style="color:#8a9bb4;font-size:12px"></span>
@@ -55,16 +65,17 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
   </div>
   <div class="pdf-list" id="list">
     {% for p in pdfs %}
-    <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}"
+    <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}" data-kind="{{ p.kind }}"
          data-comp-exists="{{ '1' if p.comp_exists else '' }}" data-comp-compressing="{{ '1' if p.comp_compressing else '' }}"
          ontouchstart="lpStart(event,this)" ontouchend="lpEnd()" ontouchmove="lpEnd()"
          onmousedown="lpStart(event,this)" onmouseup="lpEnd()" onmouseleave="lpEnd()"
          oncontextmenu="return ctxDel(event,this)">
       <div class="pdf-row" onclick="openBook(event,this)">
         <div style="flex:1;min-width:0">
-          <div class="pdf-name">{{ p.name }}</div>
-          <div class="pdf-meta"><span class="pdf-dir">{{ p.dir }}</span> · {{ p.size_kb }} KB</div>
+          <div class="pdf-name">{% if p.kind == 'epub' %}<span style="display:inline-block;font-size:10px;background:#2b3f6e;color:#bcd2ff;border-radius:4px;padding:1px 5px;margin-right:6px;vertical-align:1px">EPUB</span>{% endif %}{{ p.name }}</div>
+          <div class="pdf-meta"><span class="pdf-dir">{{ p.dir }}</span> · {{ p.size_kb }} KB{% if p.kind == 'epub' %} · 原生 reflow{% endif %}</div>
         </div>
+        {% if p.kind != 'epub' %}
         <div style="display:flex;gap:6px;flex-shrink:0">
           <button class="prep-btn" onclick="preprocess(event,this,'vision')" title="印刷/文档书：Google Vision OCR，快（~2s/页）。已有文字层秒判跳过">📄 文档</button>
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
@@ -72,13 +83,20 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="comp-toggle" onclick="compToggle(event,this)" title="压缩版：体积更小、慢网更快。开启后打开本书传压缩版；原书不动（OCR/好网仍用原书）。无压缩版时灰色，点一下生成（呼吸=压缩中）。">🗜 压缩版</button>
           <button class="prep-btn" onclick="prewarmFromList(event,this)" title="预热整本：按页原生宽度把全书所有页（背景图 + 字符/振假名）一次渲好缓存 → 之后翻页秒开。本地实例尤其推荐（本地直接全本渲好、零等待）。">📥 预热</button>
           <button class="prep-btn" onclick="formulaOCR(event,this)" title="公式识别：Claude 视觉给本书的独立公式补 LaTeX（中文混排也准，后台跑，无需 PC）。完成后阅读时点公式直接得 $...$，可复制/问AI/制卡。">🧮 公式</button>
+          <button class="prep-btn" onclick="genEreader(event,this)" title="生成电子版：把扫描书重排成「纯文字 + 图/公式裁图」的正常排版 PDF（成段流式、字号统一、体积小、打开快）。产物 <名>.电子版.pdf 落同目录，不自动优先打开——想用时手动选它。后台跑，关页面不中断。">📖 电子版</button>
         </div>
+        {% endif %}
       </div>
       <div class="prep-prog" style="display:none"><div class="prep-track"><div class="prep-bar"></div></div><span class="prep-msg"></span></div>
     </div>
     {% else %}
     <div class="empty">vault 里没找到 PDF</div>
     {% endfor %}
+  </div>
+  </div><!-- /books-pane -->
+  <!-- ⭐ 收藏夹 tab(规格 v3):列各夹(名字+条目数+改名/删除),点击进 /pdf/fav/open?id=(物化成真 PDF 用标准阅读器打开);数据来自 /pdf/api/favorites -->
+  <div id="fav-pane" style="display:none">
+    <div class="pdf-list" id="fav-list"><div class="empty">加载中…</div></div>
   </div>
 </div>
 <div class="ctx-menu" id="ctx-menu">
@@ -89,8 +107,65 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
 <script>
 function filter() {
   const q = document.getElementById('search').value.toLowerCase();
-  document.querySelectorAll('.pdf-item').forEach(el => {
+  document.querySelectorAll('#list .pdf-item').forEach(el => {
     el.style.display = el.dataset.name.includes(q) ? '' : 'none';
+  });
+}
+
+// ── ⭐ 收藏夹 tab(规格 v3:列各夹 + 改名/删除;点击进 /pdf/fav/open?id= → 物化真 PDF + 标准阅读器)──
+function switchTab(name) {
+  document.querySelectorAll('.tabbar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.getElementById('books-pane').style.display = name === 'books' ? '' : 'none';
+  document.getElementById('fav-pane').style.display = name === 'fav' ? '' : 'none';
+  if (name === 'fav') loadFavFolders();
+}
+async function loadFavFolders() {
+  const box = document.getElementById('fav-list');
+  let d;
+  try { d = await (await fetch('/pdf/api/favorites')).json(); }
+  catch (e) { box.innerHTML = '<div class="empty">网络错误,加载失败</div>'; return; }
+  const folders = (d && d.ok && d.folders) || [];
+  if (!folders.length) {
+    box.innerHTML = '<div class="empty">还没有收藏夹。<br>在阅读器顶栏点 ⭐ 收藏当前页,即可新建。</div>';
+    return;
+  }
+  box.innerHTML = '';
+  folders.forEach(f => {
+    const item = document.createElement('div');
+    item.className = 'pdf-item';
+    const n = (f.items || []).length;
+    item.innerHTML =
+      '<div class="pdf-row">' +
+        '<div style="flex:1;min-width:0"><div class="pdf-name">⭐ </div>' +
+        '<div class="pdf-meta">' + n + ' 条收藏 · 点击打开(不影响任何阅读进度)</div></div>' +
+        '<div class="fav-actions">' +
+          '<button class="prep-btn fav-rename" title="重命名">✏️ 改名</button>' +
+          '<button class="prep-btn fav-del" title="删除整个收藏夹(不影响原书)" style="color:#ff8a8a">🗑 删除</button>' +
+        '</div></div>';
+    item.querySelector('.pdf-name').appendChild(document.createTextNode(f.name || '(未命名)'));   // textNode 防注入
+    item.querySelector('.pdf-row').addEventListener('click', (e) => {
+      if (e.target.closest('.fav-actions')) return;
+      // 规格 v3:收藏夹物化成真 PDF → 标准阅读器全功能打开(/fav/open 脏则先建再跳,不脏直接 302)
+      location.href = '/pdf/fav/open?id=' + encodeURIComponent(f.id);
+    });
+    item.querySelector('.fav-rename').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const nn = prompt('重命名收藏夹:', f.name || '');
+      if (nn === null || !nn.trim() || nn.trim() === f.name) return;
+      try {
+        const r = await (await fetch('/pdf/api/favorites', {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({folder: f.id, name: nn.trim()})})).json();
+        if (r.ok) loadFavFolders(); else alert('改名失败:' + (r.error || ''));
+      } catch (er) { alert('改名失败:' + er.message); }
+    });
+    item.querySelector('.fav-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('删除收藏夹「' + (f.name || '') + '」?\n只删收藏清单,原书和书内标注都不受影响。')) return;
+      try {
+        const r = await (await fetch('/pdf/api/favorites?id=' + encodeURIComponent(f.id), {method:'DELETE'})).json();
+        if (r.ok) loadFavFolders(); else alert('删除失败:' + (r.error || ''));
+      } catch (er) { alert('删除失败:' + er.message); }
+    });
+    box.appendChild(item);
   });
 }
 
@@ -142,6 +217,11 @@ async function ctxRename() {
 function openBook(ev, row) {
   if (_lpFired) { _lpFired = false; return; }   // 长按刚弹过菜单 → 不导航
   const item = row.closest('.pdf-item');
+  // EPUB → 原生 reflow 阅读器(不转 PDF)
+  if (item.dataset.kind === 'epub') {
+    location.href = '/pdf/epub/view?file=' + encodeURIComponent(item.dataset.rel);
+    return;
+  }
   let url = '/pdf/view?file=' + encodeURIComponent(item.dataset.rel);
   // 压缩版开关开着 → 带 &compressed=1(打开时传压缩版)
   if (item.dataset.compExists === '1' && localStorage.getItem(_compKey(item.dataset.rel)) === '1') url += '&compressed=1';
@@ -287,6 +367,36 @@ async function formulaOCR(ev, btn) {
   }, 3000);
 }
 
+// ── 生成电子版（纯文字重排 + 图/公式裁图）：后台跑，复用进度条/轮询 ──
+async function genEreader(ev, btn) {
+  ev.stopPropagation();
+  const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
+  if (!confirm('生成《' + item.dataset.disp + '》的电子版？\n把扫描书重排成「纯文字 + 图/公式裁图」的正常排版 PDF（成段、字号统一、体积小、打开快）。\n产物 <名>.电子版.pdf 落同目录，不自动优先打开——你想用时在列表里手动点它。\n后台跑，关页面不中断。')) return;
+  prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '电子版生成启动中…';
+  try {
+    const d = await (await fetch('/pdf/api/ereader-async', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:rel})})).json();
+    if (!d.ok) { msg.textContent = '✗ ' + (d.error || '启动失败'); return; }
+    msg.textContent = '电子版生成中（后台，可关页面）…';
+  } catch (e) { msg.textContent = '✗ ' + e.message; return; }
+  const iv = setInterval(async () => {
+    let st;
+    try { st = await (await fetch('/pdf/api/ereader-status?file=' + encodeURIComponent(rel))).json(); }
+    catch (_) { return; }
+    if (!st || !st.ok) return;
+    if (st.status === 'error') { clearInterval(iv); msg.textContent = '✗ 生成失败：' + (st.error || ''); return; }
+    bar.style.width = (st.percent || 0) + '%';
+    if (st.running) {
+      const ph = {extract:'读取页面', layout:'排版重组', finalize:'字体子集+输出'}[st.phase] || '处理';
+      msg.textContent = '电子版生成中（' + ph + '）… ' + (st.percent || 0) + '%';
+    } else if (st.exists) {
+      clearInterval(iv); bar.style.width = '100%';
+      msg.textContent = '✓ 已生成「' + st.out_name + '」（刷新列表后可打开）';
+      setTimeout(() => { prog.style.display = 'none'; location.reload(); }, 3500);
+    }
+  }, 3000);
+}
+
 // ── 智能压缩（gs 降采样图像+保留文字层）：复用同一进度条/轮询 ──
 async function compress(ev, btn) {
   ev.stopPropagation();
@@ -334,14 +444,21 @@ async function uploadPdf(input) {
   if (!file) return;
   const status = document.getElementById('upload-status');
   const dir = document.getElementById('upload-dir').value.trim() || '资源/uploads';
-  status.textContent = '⏳ 上传中…' + (file.size > 1024*1024 ? ` (${(file.size/1024/1024).toFixed(1)} MB)` : '');
+  const isEpub = /\.epub$/i.test(file.name);
+  const isConvEbook = /\.(mobi|fb2|xps|cbz)$/i.test(file.name);
+  status.textContent = (isEpub ? '⏳ 上传 EPUB（原生阅读，不转换）…' : isConvEbook ? '⏳ 上传并转换为 PDF…' : '⏳ 上传中…') + (file.size > 1024*1024 ? ` (${(file.size/1024/1024).toFixed(1)} MB)` : '');
   const fd = new FormData();
   fd.append('file', file);
   fd.append('target_dir', dir);
   try {
     const r = await fetch('/pdf/api/upload', {method:'POST', body: fd});
-    const d = await r.json();
-    if (d.ok) {
+    const txt = await r.text();
+    let d; try { d = JSON.parse(txt); } catch (_) { d = {ok:false, error:'服务器返回异常（HTTP ' + r.status + '）'}; }
+    if (d.ok && d.converting) {
+      // 电子书后台转 PDF（多卷集/大书要几分钟）→ 轮询，不阻塞、不会超时
+      status.innerHTML = `⏳ 已上传，正在转换为 PDF（后台，大书/多卷集可能要几分钟，可关页面）…`;
+      pollEbookConvert(d.job, status);
+    } else if (d.ok) {
       status.innerHTML = `✓ 已上传 → <a href="${d.view_url}" style="color:#60a5fa">${d.rel}</a>`;
       setTimeout(() => location.href = d.view_url, 800);
     } else {
@@ -351,6 +468,26 @@ async function uploadPdf(input) {
     status.innerHTML = `<span style="color:#c00">✗ ${e.message}</span>`;
   }
   input.value = '';
+}
+function pollEbookConvert(job, status) {
+  let tries = 0;
+  const iv = setInterval(async () => {
+    tries++;
+    try {
+      const st = await (await fetch('/pdf/api/ebook-convert-status?job=' + encodeURIComponent(job))).json();
+      if (st.status === 'done') {
+        clearInterval(iv);
+        status.innerHTML = `✓ 转换完成 → <a href="${st.view_url}" style="color:#60a5fa">打开</a>`;
+        setTimeout(() => location.href = st.view_url, 1000);
+      } else if (st.status === 'error') {
+        clearInterval(iv);
+        status.innerHTML = `<span style="color:#c00">✗ 转换失败：${st.error || ''}</span>`;
+      } else {
+        status.innerHTML = `⏳ 转换中（后台，可关页面）… ${tries * 3}s`;
+      }
+    } catch (_) {}
+    if (tries > 300) clearInterval(iv);   // 15 分钟封顶
+  }, 3000);
 }
 
 // ── 刷新后恢复进行中的预处理/OCR 任务（后端进度文件驱动，进程没停 → 重新挂进度条+轮询）──

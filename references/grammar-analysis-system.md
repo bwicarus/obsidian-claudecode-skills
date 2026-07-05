@@ -191,15 +191,15 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 
 ## 5. `pdf_reader.py` grammar 路由清单
 
-全部在 `pdf_reader.py` 约 L4759–5475（`bp` blueprint，挂在 `/pdf` 前缀下；行号随版本漂移，按路由名 grep）。
+全部在 `pdf_reader.py` 约 L10476–11222（`bp` blueprint，挂在 `/pdf` 前缀下；行号随版本漂移，按路由名 grep）。
 
 | 路由 | 方法 | body / query | 返回 / 行为 |
 |---|---|---|---|
 | `/api/grammar-nodes` | GET | — | 旧 demo 扁平节点 list（读 `grammar-nodes.json`，保留兼容，前端已不用）|
 | `/api/grammar-books` | GET | — | 所有 `kind=grammar` KG：`[{book, title, total_l2, tracked_count}]`（扫 `knowledge_graph/*.json`，跳 `.bak.json`）|
 | `/api/grammar-tracked` | GET/POST | GET `?file=<rel>` / POST `{file, enabled_books:[...]}` | **per-PDF 启用的 grammar KG 书列表**（不是节点 id！）。存 `state/grammar-tracked/<sha1(file_rel)[:16]>.json`，格式 `{pdf_rel, enabled_books}` |
-| `/api/grammar-analyze` | POST | `{text, sentence?, file, enabled_books?, model?, effort?}` | 句子结构分析。**优先 spaCy**（`engine:"spacy"`，返回 tokens/deps/clauses/components/clause_tree），spaCy 不可达才 AI 兜底。**双键缓存**（`state/grammar-cache/`，2026-06-10）：spaCy 结果存 **sentence-only 键** `sha1("spacy||"+sentence)[:20]`（spaCy 输出不看 text/tracked_ids → 换焦点词 / toggle 跟踪节点不再全量重付分析）；AI 兜底结果存**全键** `sha1(sentence‖text‖sorted(tracked_ids))[:20]`。查找顺序：全键（兼容存量，命中须含 tokens/analyses 真内容——见踩坑 9）→ sp 键 |
-| `/api/grammar-stream` | POST | `{sentence, text, file, enabled_books?, model?, effort?, rid?}` | **SSE 流式**。先 `[[TRANS]]整句翻译[[/TRANS]]`（先到先显示），再 `[[POINTS]]JSON 数组[[/POINTS]]`（命中的跟踪语法点讲解）。配合 spaCy 出的依存图用——依存图不在这里出。**服务端回放缓存**（2026-06-10）：完整输出存进**全键**文件的 `ai_stream_full` + `ai_v:1`，命中 → 一次性 SSE 回放全文（见 §5.1）|
+| `/api/grammar-analyze` | POST | `{text, sentence?, file, enabled_books?}` | 句子结构分析。**优先 spaCy**（`engine:"spacy"`，返回 tokens/deps/clauses/components/clause_tree），spaCy 不可达才 AI 兜底。**双键缓存**（`state/grammar-cache/`，2026-06-10）：spaCy 结果存 **sentence-only 键** `sha1("spacy||"+sentence)[:20]`（spaCy 输出不看 text/tracked_ids → 换焦点词 / toggle 跟踪节点不再全量重付分析）；AI 兜底结果存**全键** `sha1(sentence‖text‖sorted(tracked_ids))[:20]`。查找顺序：全键（兼容存量，命中须含 tokens/analyses 真内容——见踩坑 9）→ sp 键 |
+| `/api/grammar-stream` | POST | `{sentence, text, file, enabled_books?, rid?}` | **SSE 流式**。先 `[[TRANS]]整句翻译[[/TRANS]]`（先到先显示），再 `[[POINTS]]JSON 数组[[/POINTS]]`（命中的跟踪语法点讲解）。配合 spaCy 出的依存图用——依存图不在这里出。**服务端回放缓存**（2026-06-10）：完整输出存进**全键**文件的 `ai_stream_full` + `ai_v:1`，命中 → 一次性 SSE 回放全文（见 §5.1）|
 | `/api/grammar-history` | GET | `?file=<rel>` | 该 PDF 的分析历史，按 `ts` 倒序（新在前）|
 | `/api/grammar-history-save` | POST | `{file, item}` | 保存一条结果（同句去重更新，限 200 条）。`item` 含 sentence/text/sentence_zh/tokens/deps/clauses/components/clause_tree/analyses。存 `state/grammar-history/<sha1(file_rel)[:16]>.json` |
 | `/api/grammar-forget` | POST | `{sentence, text, file, enabled_books?}` | 删该句缓存 + 历史（删卡 / 删块时调）。**级联删两键**：全键（跟 grammar-analyze 完全一致的 cache_key 算法，连带 grammar-stream 存在同文件里的 `ai_stream_full` 一起删，回放缓存级联免费）+ spaCy sentence-only 键（保住「删卡 → 同句从头生成」语义）|
@@ -208,8 +208,9 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 
 ### 5.1 整句翻译 + 语法点讲解的 SSE 流式
 
-`/api/grammar-stream` 用 `_start_ai_stream(prompt, model, effort, rid, on_done=_gs_save)`（与 PDF 阅读器其它
-AI 路由共用：带 `rid` 时后台线程跑完 + tail SSE 推送，断连可按 rid 轮询恢复；`on_done` 钩子在生成成功后回调）。
+`/api/grammar-stream` 用 `_start_ai_stream(prompt, "grammar", _reader_uid(), rid, on_done=_gs_save)`
+（签名 `(prompt, action, uid, rid, on_done)`；与 PDF 阅读器其它 AI 路由共用：带 `rid` 时后台线程跑完 +
+tail SSE 推送，断连可按 rid 轮询恢复；`on_done` 钩子在生成成功后回调）。`action="grammar"` 决定后端/型号（见下）。
 prompt 强制 AI **按顺序、用标志输出两部分**，标志原样出现、不加代码块围栏：
 
 ```
@@ -219,7 +220,10 @@ prompt 强制 AI **按顺序、用标志输出两部分**，标志原样出现�
 
 前端 `_streamGrammar`（`static/pdf/reader.src/18-grammar.js`，构建进 `reader.js`）经 `_aiStream` 边收边正则抠：
 翻译标志一闭合就立刻填到常驻翻译行（`.gb-trans`），语法点标志闭合再 parse JSON 渲染。流中断有兜底
-（从残文里抠未闭合的标志）。默认 `model=sonnet, effort=low`（后端缺省，前端 grammar-stream 不传 override）。
+（从残文里抠未闭合的标志）。语法分析走**独立 AI action `grammar`**（2026-07 从 `explain` 拆出；grammar-analyze
+的 AI 兜底 `_ai_call(prompt, "grammar")` 和 grammar-stream 都用它）：后端/型号/深度由 `assistant.py` 的
+per-action 预设决定（`_AP_DEFAULTS["grammar"]` 出厂默认 **Gemini 3.5 Flash / depth=think**），PDF 设置面板
+「语法分析」可单独配；前端不传 model/effort override。
 命中语料只取 `_collect_grammar_tracked_nodes` 给的 tracked 节点，
 无跟踪点则 prompt 让 AI 直接输出 `[[POINTS]][][[/POINTS]]`。
 

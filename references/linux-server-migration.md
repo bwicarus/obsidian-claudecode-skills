@@ -53,8 +53,12 @@ QA_PUBLIC_URL=https://bwicarus.space/qa
 | `anki-sync-refresh.service`/`.timer` | review 数据变动时 AnkiWeb sync + dashboard refresh（后续新增） |
 | `bwicarus-quick-sync.service`/`.timer` | vault 快速 sync + cleanup + KG prune，无 AI / 无 Anki（后续新增） |
 | `book-ocr.service` + `book-ocr-watchdog.service`/`.timer` | Mokuro 日文教材 OCR 后台（后续新增） |
+| `webapp.service` | Flask webapp（VPS 曾用 dev server；Pi 现为 gunicorn，见 `webapp-development.md`） |
+| `qa-server.service` | iPad 截图问答 daemon :9091 + cmd_server :9090 |
 
 所有 unit 文件源码在 `references/systemd/`（OCR / quick-sync / sync-refresh 这几套是 2026-05-14 之后新增的，文件都已纳入该目录）。`systemctl enable` 后开机自启。
+
+> ⚠ **VPS 代码/部署冻结在 2026-05-28**，所以 VPS 上**没有**之后新增的这几套 unit（都只在 Pi 跑，副本仍在 `references/systemd/`）：`bwicarus-backup.{service,timer}`（每日 03:30 备份）、`yolo-figures.{service,timer}`（6h 闲时 DocLayout-YOLO 框图）、`figures-describe.{service,timer}`（夜间裁图描述）、`push-big-files.{service,timer}`（仅 Pi，4h 推 >200MB 文件到 PC）。完整清单以 Pi 为准，见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 
 ## webapp 控制面板
 
@@ -213,4 +217,4 @@ sed -i 's|"--dangerously-skip-permissions"|"--allowedTools", "Read"|g' ai_backen
 ### 在服务器侧继续这个项目
 见独立 reference [`server-side-claude-code.md`](server-side-claude-code.md)。
 - 在服务器 ssh + tmux + claude 模式
-- memory 通过 `scp -r ~/.claude/projects/C--claude/memory/ root@...:/root/.claude/projects/root--claude/` 同步
+- memory 通过 `scp -r` 同步（新版 Claude Code 用**单横杠** project key，memory 与 transcripts 同目录：VPS=`-root-claude`、Pi=`-home-bwicarus-claude`；旧「双横杠」目录已废弃。同步前 `ls -td ~/.claude/projects/*/memory | head -1` 确认活跃目录）

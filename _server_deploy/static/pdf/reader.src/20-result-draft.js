@@ -177,8 +177,13 @@ try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch 
 function _persistDrafts() {
   try { localStorage.setItem('pdf-drafts', JSON.stringify(_drafts)); } catch (_) {}
 }
+function _syncDraftsLS() {   // 共享模式(?ui=shared):reader.js 与 rc-result 各有 _drafts 内存副本,读前从 localStorage 重载,rc-result 的「+选段」才对 reader.js 的草稿框/制卡可见;默认路径(__uiShared 未定义)early-return 零改动
+  if (!window.__uiShared) return;
+  try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch (_) {}
+}
 // 直接把一段文本(如公式 LaTeX)加进草稿,供「制卡/笔记」用(公式浮层等外部调用)
 window.addDraftText = (text, source, src) => {
+  _syncDraftsLS();   // 共享模式:先从 localStorage 重载,别用陈旧 _drafts 覆盖掉 rc-result「+选段」刚写入的草稿
   const t = (text || '').trim();
   if (!t) return false;
   if (_drafts.some(d => d.text === t)) { _updateDraftBadge(); return true; }
@@ -188,11 +193,13 @@ window.addDraftText = (text, source, src) => {
   return true;
 };
 function _updateDraftBadge() {
+  _syncDraftsLS();
   const b = document.getElementById('draft-badge');
   document.getElementById('draft-count').textContent = _drafts.length;
   b.classList.toggle('show', _drafts.length > 0);
 }
 window.openDraftModal = () => {
+  _syncDraftsLS();
   const list = document.getElementById('draft-list');
   const cnt = document.getElementById('draft-modal-count');
   cnt.textContent = `（共 ${_drafts.length} 段，已选 ${_drafts.filter(d => d.selected).length}）`;
@@ -404,6 +411,7 @@ function _pollJob(jobId, jobUi, restoreOnFail) {
 }
 
 async function _doCreate(makeNote, makeAnki) {
+  _syncDraftsLS();
   const picked = _drafts.filter(d => d.selected);
   if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
   let noteName = '';

@@ -16,10 +16,10 @@
 - `data/ecdict.db` — ECDICT 离线英汉字典 ~850MB（单张 `stardict` 表，含 `word/phonetic/translation/definition/exchange` 等列；`exchange` 是列里的屈折数据，不是独立表）
 
 前端（2026-06 起 HTML 与主逻辑 JS 分离）：
-- `_server_deploy/templates/pdf_reader.html` — 阅读器主页**模板**（~1116 行：HTML 标记 + 全部 CSS + 两段经典 `<script>`：① `window.dlog`/错误监听 ② 手写墨迹 `_ink`）。主逻辑模块已抽出，模板里只剩：`<script>window.__PDF_CFG={pdf_url,file_rel,page}</script>` + `<script type="module" src="/static/pdf/reader.js?v={{reader_js_v}}">`
-- **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~5831 行，运行时是**一个 ES module**；配置走 `window.__PDF_CFG`，架构/全局未变）。**它是构建产物**：由下面的分块源 `cat` 拼接而成
-- **`_server_deploy/static/pdf/reader.src/NN-*.js`** — 按功能分块的源（2026-06，21 个文件 60~730 行）。**改前端 = 改这里对应的功能文件**，不是改 reader.js。拼接成单文件运行 → 所有现有交叉调用/全局原样工作（**不是** import/export 强边界，是「分文件、共享同一模块作用域」，故拆分零运行时风险，diff 拼接结果 vs 原 reader.js = 0）。分块清单：
-  `01-boot`(PDFJS import/配置/langs) `02-position`(位置记忆) `03-loader`(loadPdf) `04-render`(renderPage) `05-nav`(页导航/缩放/侧栏/vocab-list/tts) `06-layout`(阅读模式/适宽/pinch) `07-continuous`(连续滚动) `08-charlayer`(char-layer绑定/生词下划线) `09-ruby`(振假名) `10-pagetranslate`(整页翻译/行间对照) `11-search`(全文搜索) `12-vocab-sentences`(句子虚框/翻译浮层) `13-selection`(char选中核心) `14-textlayer-legacy`(旧textLayer+工具栏/preview) `15-phrase-wordpop`(F6词组+单词小框) `16-caret-select`(caret/bindTextLayerClick) `17-highlight`(高亮sidecar+markFromResult) `18-grammar`(语法分析+依存图) `19-dict`(字典SSE+hl popover+日语AI) `20-result-draft`(结果modal/草稿/后台job) `21-misc-ai`(md/设置/`_aiStream`/aiCall/onTranslate等)
+- `_server_deploy/templates/pdf_reader.html` — 阅读器主页**模板**（~2622 行：HTML 标记 + 全部 CSS + 内联 `<script>`：① `window.dlog`/错误监听 ② 手写墨迹 `_ink`（PDF 页面 ink 在模板内联，**不在 reader.src**）③ **`{% if ui_shared %}` 共享层内联块**（插入页 overlay `_up*`/`_ov*`、收藏 ⭐、便签接线，详见下「共享控制层」）。主逻辑模块已抽出，模板里只剩：`window.__PDF_CFG={pdf_url,file_rel,page,ui_shared,…}` + `<script type="module" src="/static/pdf/reader.js?v={{reader_js_v}}">`（deferred，共享 rc-* 与 pdf-adapter 先占全局）
+- **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~10262 行，运行时是**一个 ES module**；配置走 `window.__PDF_CFG`）。**它是构建产物**：由下面的分块源 `cat` 拼接而成
+- **`_server_deploy/static/pdf/reader.src/NN-*.js`** — 按功能分块的源（**28 个文件 00~27**，60~730 行）。**改前端 = 改这里对应的功能文件**，不是改 reader.js。拼接成单文件运行 → 所有现有交叉调用/全局原样工作（**不是** import/export 强边界，是「分文件、共享同一模块作用域」，故拆分零运行时风险，diff 拼接结果 vs 原 reader.js = 0）。分块清单：
+  `00-resilient-fetch`(全站网络韧性) `01-boot`(PDFJS import/配置/langs) `02-position`(位置记忆) `03-loader`(loadPdf) `04-render`(renderPage) `05-nav`(页导航/缩放/侧栏/vocab-list/tts) `06-layout`(阅读模式/适宽/pinch) `07-continuous`(连续滚动) `08-charlayer`(char-layer绑定/生词下划线) `09-ruby`(振假名) `10-pagetranslate`(整页翻译/行间对照) `11-search`(全文搜索) `12-vocab-sentences`(句子虚框/翻译浮层) `13-selection`(char选中核心) `14-textlayer-legacy`(旧textLayer+工具栏/preview) `15-phrase-wordpop`(F6词组+单词小框) `16-caret-select`(caret/bindTextLayerClick) `17-highlight`(高亮sidecar+markFromResult) `18-grammar`(语法分析+依存图) `19-dict`(字典SSE+hl popover+日语AI) `20-result-draft`(结果modal/草稿/后台job) `21-misc-ai`(md/设置/`_aiStream`/aiCall/onTranslate等) `22-prewarm`(整本预热) `23-bookshelf`(书架) `24-connquality`(连接质量探针) `25-assistant`(侧栏 Copilot 助手) `26-figures`(插图徽标) `27-rc-adapter`(PdfAdapter：把 reader.src 内部桥进共享 rc-* 层)
   - **构建**：`bash scripts/build_pdf_reader_js.sh`（= `cat reader.src/*.js > reader.js`，NN- 前缀保序）。`check_pdf_reader_js.sh` 会**先自动重建再校验**，所以正常流程 `改 src → bash scripts/check_pdf_reader_js.sh（顺带重建）→ cp reader.js → 部署`
   - 进一步要做 import/export 强边界 = 逐个模块迁移（拆全局状态，风险高、无运行时测试，须小步 + 真机验证），目前**未做**
 - `_server_deploy/templates/pdf_index.html` — PDF 列表页（GET `/` render）
@@ -36,7 +36,25 @@ _server_deploy/templates/pdf_reader.html → <webapp>/templates/pdf_reader.html
 _server_deploy/static/pdf/reader.js     → /var/www/html/static/pdf/reader.js   ★ 新增,改前端必带,漏了阅读器白屏
 data/ecdict.db                           → <webapp>/data/ecdict.db
 ```
-改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.src/NN-*.js`,不是 html、也不是直接改 reader.js**；流程：`改 reader.src/ → bash scripts/check_pdf_reader_js.sh（自动重建 reader.js + 校验）→ cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。restart webapp 只为 py/html 改动；纯 JS 改动只需 cp reader.js（前端 ?v=mtime 自动失效缓存）。
+改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.src/NN-*.js`,不是 html、也不是直接改 reader.js**；流程：`改 reader.src/ → bash scripts/check_pdf_reader_js.sh（自动重建 reader.js + 校验）→ cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。restart webapp 只为 py/html 改动；纯 JS 改动只需 cp reader.js（前端 ?v=mtime 自动失效缓存）。**部署 static JS 由 nginx/443 从 `/var/www/html/static` 服务，Flask `:5000` 的 static 是陈旧副本**——真机/Playwright 验证务必走 nginx。
+
+### 1.1 共享控制层（rc-*）+ ui_shared 默认模式（2026-07）
+
+PDF 阅读器现**默认加载共享控制层 `rc-*.js` + `pdf-adapter.js`**（`ui_shared=1`；`pdf_view` 里 `ui_shared = 0 if request.args.get("ui")=="legacy" else 1`）。`?ui=legacy` 是逃生口：不加载 rc-*，回落纯 reader.src + 模板原生面板（逐字保留）。
+
+- **加载清单**（`_pdf_shared_js_v()`，模板 `{% if ui_shared %}` 块）：`rc-core / rc-md / rc-result / rc-wordpop / rc-phrasepop / rc-figures / rc-highlight / rc-knowledge / rc-assistant / rc-grammar / rc-settings / rc-stickynote / rc-favorites / rc-userpages / pdf-adapter.js`（**不载 rc-dict**〔已删，字典走 rc-wordpop〕、**不载 rc-sidedrawer**〔PDF 助手抽屉留自己的〕）。
+- **PdfAdapter 已建 + 全接线**（`pdf-adapter.js` + `reader.src/27-rc-adapter.js` 经 `PdfAdapter.bind({...})` 把 reader.src 模块内部桥进去）。**已走共享 rc-***：字典/查词（`RC.wordpop`）、翻译/解释/对话（`RC.result`）、词组（`RC.phrasepop`）、图徽标（`RC.figures`）、知识点（`RC.knowledge.renderInto` 渲进自己的 `#kg-nodes`）、语法（`RC.grammar`）、设置面板（`RC.settings.open`，复用原生 `settings-mask`/`lang-checks` id → 原生 fill/save 零改动直接工作）、便签（`RC.stickynote`）、收藏（`RC.favorites`）、插入页（`RC.userpages`）、助手薄增量（`openModelSettings`+`splitFollowups` 路由 `RC.assistant`）。
+- **仍留 reader.src（未迁）**：选区/工具栏底座（`#sel-toolbar` + char-layer `_charSel`/`lastSelText`，adapter 只经 `captureSelection`/`clearSelection` 桥接）、高亮**叠层渲染**（留 char-layer 像素几何，`renderHighlightList` 等钩子已就位但暂无 live 调用方）、助手主体（`25-assistant.js`，只有型号设置/追问路由到 rc-）。共享架构全景见 [`unified-control-layer.md`](unified-control-layer.md)。
+
+### 1.2 顶栏三入口（ui_shared 专属）+ 便签/插入页/收藏夹
+
+顶栏（`{% if ui_shared %}` 门控）多出三个按钮，各自对接一套独立子系统，**完整设计与踩坑在专门 reference，本文不重复**：
+
+| 入口 | 触发 | 子系统 | 文档 |
+|---|---|---|---|
+| **⭐ 收藏** | `_favOpenPicker()` | 收藏夹（当前页/章 → 多选夹弹窗；收藏夹物化成真 EPUB 用完整阅读器打开） | [`reader-userpages-favorites.md`](reader-userpages-favorites.md) 「二、收藏夹」 |
+| **🗒 便签** | `_noteCreateAtCenter()` | 便签（视野中央新建，磨砂/手写/双击注入 AI；`rc-stickynote.js`） | [`sticky-notes-design.md`](sticky-notes-design.md) |
+| **➕ 插入页** | `_upCreate()` | 插入页（真写进 PDF 空白页 + 边车 md 即时编辑 + 覆盖层全功能；页角 📝 编辑/删除） | [`reader-userpages-favorites.md`](reader-userpages-favorites.md) 「一、插入页」 |
 
 ---
 
@@ -62,6 +80,7 @@ data/ecdict.db                           → <webapp>/data/ecdict.db
 | POST | `/api/snippets-to` body:`{snippets, make_note(bool), make_anki(bool), note_name?, model?, effort?}` | 草稿 → 笔记 / Anki（同步版，兼容） |
 | POST | `/api/snippets-to-async` | 同上 body，后台线程跑，立即返回 `{job_id}`；防 iPad 切后台掐断长请求 |
 | GET | `/api/job-status?id=<job_id>` | 轮询后台 job：`{status: running\|done\|error\|unknown, result?, error?}` |
+| POST | `/api/reading-pos` body:`{file, kind:'pdf'\|'epub', pos}` | 续读位置上报（服务端记录，跨设备同步；读取无 GET——view 路由渲染时注入，见 §56） |
 | GET | `/api/highlights?file=<rel>` | 列出该 PDF 的所有高亮 |
 | POST | `/api/highlights` body:`{file,page,rects,color,text,kind?,sentence?,body?,note?,page_w?,page_h?}` | 新增高亮 |
 | PATCH | `/api/highlights` body:`{file,id,color?,note?,sentence?,body?}` | 修改 |
@@ -420,16 +439,38 @@ swipe 检测：
 `onToNote`：
 - prompt 笔记名 → POST `/api/to-note` → 返回 `obsidian://` URL
 
-### AI 设置 modal
+### AI 模型设置（2026-07 全面重设计，唯一真源 = 服务端 action 预设）
 
-`localStorage['pdf-ai-overrides']` JSON `{model, effort}`：
-- model：'' / haiku / sonnet / opus / gpt-5 / gpt-5.5
-- effort：'' / low / medium / high / max
-- 空 = 用 server-config 默认
+**旧体系已废弃**：`localStorage['pdf-ai-overrides']`（per-request `{model, effort}` 覆盖）不再读写——
+`_getAiOverrides()` 恒返 `{}`（reader.src/21-misc-ai.js，一处收口全部 12 个消费点），`saveSettings` 顺手
+`removeItem` 清存量旧键；`RC.settings.aiParams()` / `PdfAdapter._aiParams` 同样恒返 `{}`（签名保留给存量
+调用点）。**后端各端点也不再读 request 的 model/effort**（grammar-analyze/grammar-stream 原是死变量已删、
+ocr-selection 死参数链已删、translate-sentence 改走 translate-config 配置）。`?ui=legacy` 原生模板的
+model/effort 下拉仍显示但已无效果（模板按约定不动）。
 
-后端 `_ai_backend(override_model, override_effort)` 同时读 server-config + override 拼出 settings 给 ai_backends adapter。
+**现体系**：assistant.py 的 action 预设（`state/assistant-action-prefs.json`，按 uid+action，服务端存储
+全设备生效）。action = orchestrator / summarize / vision / explain / translate / dict / **grammar**
+（2026-07 语法分析从 explain 拆出，默认 gemini-3.5-flash·think），每个 = `{backend, variant, depth}`，
+`_resolve` 优先级 = 感叹号 force > 用户预设 > `_AP_DEFAULTS`。
+
+**入口两处、同一实现**（`RC.assistant.renderModelSettings(container)`）：
+- 设置面板 AI tab **内嵌**配置表（rc-settings.js `_renderAiInline`，每次打开重渲）；
+- 助手侧边栏 ⚙ / trace 步骤 ⚙ 的浮层（`RC.assistant.openModelSettings`，PDF 共享模式经 PdfAdapter 路由到它；legacy 用 25-assistant.js 原生副本，两处 action 清单/💰标记保持同步）。
+
+**Gemini 型号清单**（assistant.py `_gemini_models()`）：合并 **free+paid 两把 key** 的 ListModels（以前只用
+free key → paid-only 型号如 3.1-pro 被「免费不支持→隐藏」逻辑吞掉，面板永远选不到）。「仅付费」判定两信号
+（`_is_paid_only`）：① free 清单里根本没有；② **paid 清单有 + 免费档已验证不支持**（实测②才是 3.1-pro 常态：
+免费 ListModels 会「列出」它但 generateContent 必吃伪 429 `free_tier…limit: 0`）。持久化
+`state/gemini-paid-only.json`（{"only","paid"}，6h 随 ListModels 刷新）；面板标「💰仅付费」不再隐藏；
+`_gemini_keys` 对这些型号**直接跳过 free key**（不白吃伪 429），覆盖 text/vision/stream 三条路。
 
 debug 日志（左下 `#debug-log`）：`localStorage['pdf-debug']='1'` 切换。
+
+### 建目录（`/api/build-toc` → `_build_toc_job` → `_claude_vision_pages` → `_parse_toc`）
+
+AI 整页识图把目录页（PDF 页范围 ≤30）抽成 `[{title,page(印刷页),level}]` 存 sidecar（`state/pdf-toc/<sha>.json`，custom 覆盖 native）。
+
+⚠ **踩坑：一条坏目录项别毁掉整本目录**。`_parse_toc` 旧实现对整个数组做**一次** `json.loads`——AI 偶尔会吐出 title 里带**未转义引号**的条目（实测费曼 344 条里 `§34-2 求"表观"运动` 一条就让整次 `json.loads` 报 `Expecting ',' delimiter`，**344 条全丢 → 报「AI 没抽出目录」建目录失败**）。修复：整体解析失败 → 退化到**逐对象** `\{[^{}]*\}` 解析，单对象再坏就正则硬抠 `title/page/level`（贪婪匹配到 `","page"` 前最后一个引号，容忍 title 内裸引号）→ 344 条全救回。**这是「顽强 JSON 解析」原则在 build-toc 上的复用**（同 assistant 工具循环的 `_parse_tool`）。
 
 ---
 
@@ -529,6 +570,11 @@ v1：点色仅设 `h._pendingColor`，[保存] 按钮才 PATCH → 用户报"无
 点 cur 色：
 - 没备注（note/body/sentence 都空）→ 删整条
 - 有备注 → `_hlUpdate({color: ''})`，hl-saved 切换为 `.no-color` 虚线边框
+
+### 10.18 选中工具栏被助手抽屉挡住（2026-06-26）
+现象：助手/语法抽屉 `#grammar-panel`(z-index:120) 开着时选中文字，`#sel-toolbar`(复制/OCR/对话/色板) 弹出但被抽屉压在后面（截图里只露左半）。
+根因：`#sel-toolbar` z-index 只有 **99** < 抽屉 120。`#sel-toolbar` 是 `#main` 的子元素，而 `#main` 只有 `position:relative`、**无 z-index → 不形成新层叠上下文**，所以工具栏(99)和抽屉(120)在**同一根层叠上下文**里直接比较 → 抽屉赢。
+修复：`#sel-toolbar` z-index `99 → 135`（> 抽屉 120 + `#side-handle` 130，< `#result-mask` 200）。因同根上下文，单纯抬高即生效，不用动 `#main` 的层叠。
 
 ---
 
@@ -1087,3 +1133,43 @@ margin → 被切掉,L 只剩一条边。修:① CSS 两个按钮 `content-box`�
 
 ### 48. 书架「最近打开置顶」(MRU 排序,2026-06-20,`pdf_reader.py`)
 原 `_list_vault_pdfs` 按文件 `mtime` 倒序。改成**最近打开过的在最上**:`/view` 打开书时 `_lastopen_touch(rel_clean)` 戳时间戳,排序 key 改 `(-lastopen, -mtime)`(用过的按打开时间近→远,没打开过的退回文件时间)。**按用户存**(`state/pdf-lastopen/<user>.json`,user=`session.username`,跟 `_prefs_path` 一套口径,原子写 `.tmp`→`replace`)。书架是**服务端渲染**(`pdf_index` 把 `pdfs` 传模板 `{% for p in pdfs %}`,23-bookshelf.js 不再排序),所以纯后端改 + 模板副标题文案。`/view` 的 `rel_clean`(规范化相对路径)跟 `_list_vault_pdfs` 的 key 一致才对得上。
+
+### 49. 「生成电子版」:扫描书→纯文字重排 PDF(2026-06-26,`scripts/make_ereader_pdf.py` + `pdf_reader.py` + `pdf_index.html`)
+扫描书打开慢(整本图)。利用已有的 OCR 文字层 + YOLO 图/公式框,**重排成正常排版的「纯文字 + 图/公式裁图」PDF**(体积小、打开快)。书架每本一个「📖 电子版」按钮 → 后台 detached `nice -n19` 跑 `make_ereader_pdf.py` 整本 → 产物 `<名>.电子版.pdf` 落**原书同目录**(`_ereader_out_path`)。**不自动优先打开**(用户手动选);进度文件 `state/pdf-ereader/<sha>.json`,前端 3s 轮询 `/api/ereader-status`(pid 活+status 判 running、`exists` 判产物)。路由 `/api/ereader-async`(双跑守卫:pid alive+status==running)/ `/api/ereader-status`。
+- **排版引擎=MuPDF 内置 `fitz.Story`**(HTML/CSS 流式分页,引擎保证不重叠/不丢字,行距 CSS 自由)。**别手摆文本框**——上一版手算坐标导致溢出截断/重叠,根因就是手摆。
+- **字号归档**:`collect_tiers` 全书字号按字数加权聚成几档(相邻 ≤8% 合并、占比 <1.5% 丢),`tag()` 映射 `<h1>/<h2>/<p>`,正文档=占比最大档。统一字号,不抖。
+- **自然段重建**:OCR 把一段切成多块(常一行一块)→ 按「上一块**最后一行右边**是否顶到正文右边距」判续行(`block_info` 返回 `last_x1`),续行直接拼接不留空行,只标题/图/公式断段;`nl<=1 且短 且 y 在页眉/页脚带` → 丢页眉页脚。
+- **简体字形**:Noto CJK TTC **face 2=SC**(0=JP 会显示成日式/类繁体!`SC_FACE=2`)。**子集化必须 `pyftsubset --retain-gids`**(MuPDF Story 按**原始 GID** 取字,不保留 GID 会字形全错位;`--desubroutinize` 修 CFF subroutine);整套 16MB→本书 ~1MB。venv:`.venvs/fonttools/bin/pyftsubset`。
+- **去杂空格**:`clean_text` 只保留**两侧都是英文字母**的空格(免 the box→thebox),其余(中文间、中文↔数字/字母、数字↔符号)全删。
+- **公式/数字**:整块非中文占比高(`cjk_ratio<0.5`)→ 整行裁原图;**行内**数学符号(`segment_block` 逐字切,非中文 run 含 `_MATH`/希腊字母/上下标特征 `_run_is_formula`)→ 单独裁原图内联(绕开 OCR 错)。
+- **行内裁图三连坑(逐字调出来的)**:① OCR 文字层 bbox 常比真实墨迹**偏低**→直接裁切顶;② 顶部死扩边距又**抓到上一行下半截**;③ 用 OCR 字号缩放**忽大忽小**。根治=`crop_inline`:四周大扩渲染→PIL 行墨迹密度 profile(二值化 `resize((1,H))` 压成 1 列,C 实现快)→从公式中心**上下都找邻行间空白间隙**裁到本行墨迹→显示高按裁后墨迹高定到 `OUT_BODY*0.74`(≈正文数字高,不靠 OCR 字号)。`img.m{vertical-align:-0.12em}`。
+- **进度三段**:`_prog(done,total,phase)` 综合百分比 抽取 0-45%(pass1 抽页)/排版 45-90%(pass2 stream 循环,大书这里最久)/收尾 90-100%(子集化+Story+save)。status 端点优先回 `st['percent']`。⚠ 588 页大书 pass2 的逐 crop PIL trim 较慢(分钟级),属一次性后台任务可接受。
+
+### 50. 上传支持 EPUB 等电子书格式(2026-06-26,`pdf_reader.py` `/api/upload` + `pdf_index.html`)
+书架上传从「仅 PDF」扩到 **PDF / EPUB / MOBI / FB2 / XPS / CBZ**。阅读器整条管线(字符层/页图/公式裁图/高亮…)都基于 PDF,所以非 PDF 的电子书**上传时服务端转成 PDF**(`_convert_ebook_to_pdf`:`fitz.open(src)` → 可重排格式 `is_reflowable` 先 `layout(a4, fontsize=11)` 定页面+字号再分页 → `convert_to_pdf()` 出带**文字层**的分页 PDF;固定版式 xps/cbz 直接转)。产物一律 `<stem>.pdf` 落 `资源/uploads`(或指定目录),原文件不保留。MuPDF 自带 CJK 字体,中文/数字/拉丁字形都正常渲染、文字可选可查。前端 `accept` 加各扩展名 + 转换中文案「⏳ 上传并转换为 PDF…」、成功标「已转换并上传」。同步转换(epub 通常秒级);`_EBOOK_EXTS` 集合控制白名单。
+
+### 51. EPUB 转换升级 Calibre + 原生数字书图描述(免 YOLO) + 跨书图像去重(2026-06-26)
+**① EPUB→PDF 改用 Calibre `ebook-convert`(业界标准)**(`pdf_reader.py::_convert_ebook_to_pdf`):之前 PyMuPDF `convert_to_pdf` 分页糙(图被拦腰切两页)。改首选 Calibre(`QT_QPA_PLATFORM=offscreen` headless,`--paper-size a4` + 边距),HTML/CSS 完整渲染 + 智能分页(图不切断)+ 字体子集,CJK 自带 fallback 渲染正常;没装/失败回退 PyMuPDF。`apt install calibre`(装在 Pi)。
+**② 原生数字 PDF 图描述走嵌入图提取,跳过 YOLO**(`scripts/extract_pdf_figures.py`):转换自 epub 的书 / 出版社数字版 —— 图和文字本就分开(真矢量文字 + 独立栅格图),`page.get_image_info()` 直接给每张嵌入图的精确位置,**比扫描书靠 YOLO/视觉找图简单可靠得多、且秒级**。`is_born_digital(doc)` 采样判定(多数页有真文字层 + 无占满整页大图);`page_figures()` 过滤整页底图/图标/分隔线 → 写同一 sidecar 的 `figures_geom`(`fsrc=embedded`,needs_describe)。`pdf_reader.py::_run_figures_pipeline` 据 `_is_born_digital` 分流:原生数字→`extract_pdf_figures`(秒级)、扫描书→DocLayout-YOLO(~6.7s/页)。
+**③ 跨书图像去重缓存:同/极相似图只描述一次**(`scripts/figure_dedup.py`):**dHash**(差分感知哈希,64-bit,对缩放/重压缩鲁棒 → 同书多版本、不同书引同一经典图都命中)+ SQLite `state/figure-desc-cache.db`(hash→description)。`describe_figures_batch.py::process_book` 描述前先 `lookup`(汉明距离 ≤5 算近邻)命中就复用、不调 AI;描述完 `store`。日志加「复用缓存 N」。无新依赖(纯 PIL)。
+
+### 52. 电子书转换改**后台异步**(2026-06-26,修「上传大 epub 报 The string did not match the expected pattern」)
+根因:5 卷套 epub Calibre 转成 186MB PDF 要几分钟,而 `/api/upload` **同步**转 → iOS Safari fetch 等不及超时报 WebKit 错(其实服务端在转、最后也成功落地了,用户误以为失败)。改:PDF 仍同步存;**电子书 → 后台 detached 跑 `scripts/convert_ebook.py`**(Calibre→PyMuPDF 兜底,写进度 `state/pdf-ebook-convert/<job>.json`),`/api/upload` 立即返回 `{converting:true, job}`;新 `/api/ebook-convert-status?job=` 轮询(status converting/done/error + 产物 exists 才算 done,done 后清 staging)。前端 `uploadPdf` 收到 converting 就轮询显示「转换中(可关页面)…Ns」,done 再给打开链接。`r.json()` 改 `r.text()`+try-parse 防服务器异常返回时报 cryptic 错。
+
+### 53. EPUB 转 PDF **图不跨页**:Calibre --extra-css 防裁(2026-06-26,`convert_ebook.py`)
+用户反馈转出的 PDF 里很多图跨两页(实证:费曼 5 卷套 图1-3 气缸图被切 p27/p28)。根因:**EPUB 是可重排格式**,塞进固定页 PDF 本就会裁;且某些 epub 自带 CSS 把图尺寸写死成比页高大 → Calibre 默认保留 → 拦腰切。**业界标准缓解**=给 Calibre 注 `--extra-css`:`img,svg,figure,table{page-break-inside:avoid !important}`(放不下整块图推到下一页)+ `img,svg{max-height:86vh !important;height:auto !important}`(**!important 覆盖 epub 写死的尺寸**,比页高的图缩到一页内)。⚠ 纯净 epub 复现不出跨页(Calibre 默认就缩放 bare `<img>`);只有 epub 自带 CSS 撑大图时才裁,而 `!important` extra-css 正好压过它。已转好的旧书需**重新上传**才走新 CSS。彻底零跨页只有「可重排阅读(无固定页)」,PDF 阅读器做不到——这是 EPUB→PDF 的固有取舍。
+
+### 54. 助手:快速动作尊重型号预设 + 高亮改动自动「跳转/撤销·重做」卡片(2026-06-26,`assistant.py`+`25-assistant.js`)
+**① 模型 bug**:`_agent_run` 里 `_is_quick`(导航/写动作含「高亮/制卡/跳页」)分支硬写 `mdl=_AGENT_MODEL`(sonnet)「保秒回」→ 用户设了 opus 也被覆盖成 sonnet。改 `mdl = rr["variant"] or _AGENT_MODEL`:**尊重用户设的型号**(只把 effort 压低保速度)。
+**② 改动自动生成跳转/撤销·重做卡片**(用户要:按钮在改动发生时**系统自动**生成、非 AI 文本;撤销键按下变重做、再按重做):`_t_highlight` 收集创建的高亮对象 `_created`[{id,pdf_page,disp_page,color,text,rects}],client_action 从 `_reloadHighlights` 升级为 **`_assistEdit`**(携带 items);`_t_auto_highlight` 汇总各页 `_created` 发一张卡。前端 `window._assistEdit(d)` 自动渲染卡片:概要 +「→ 第X页」跳转 chips(jumpWithBack 用 PDF 索引)+「↩ 撤销」按钮。撤销=对所有 id 调 DELETE /pdf/api/highlights;**按钮切「↪ 重做」**;重做=用存的 {page=pdf_page,rects,color,text} 调 POST 重建(拿新 id 回存)→ 按钮切回「撤销」,来回切换。`_assistEdits` map 按卡片 id 存 {file,items,ids,undone}。
+
+### 55. webapp 后台长任务**重启不被杀**:放进用户级 systemd scope(2026-06-26,`pdf_reader.py::_spawn_survivable`)
+踩坑:电子书转换(大书/多卷集 Calibre ~半小时)用 `subprocess.Popen(start_new_session=True)` 起,但仍在 `webapp.service` 的 cgroup 里 → `systemctl restart webapp`(部署/崩溃自愈)会**连同子进程一起 SIGKILL**(默认 KillMode=control-group)→ 转换中途死、产物不落、进度卡 converting。实证:5 卷费曼转了 28min 被一次部署杀掉。修:`_spawn_survivable(cmd,cwd)` 用 **`systemd-run --user --scope --quiet --collect`** 把任务塞进用户级 transient scope(`user@1000.service` 下独立 cgroup,与 webapp.service 无关 → 重启不杀);前提 `loginctl enable-linger`(已开)+ 传 `XDG_RUNTIME_DIR=/run/user/<uid>`;systemd-run 不可用回退普通 detached。已用于 ebook 上传转换;e-version 生成等其它长任务可同样改。**注**:setsid/start_new_session 只新建会话,**不脱离 cgroup**,治不了这个。
+
+### 56. 续读位置改**服务端记录**(2026-07-03,`pdf_reader.py` + `epub-html.js` + `pdf_reader.html`)
+EPUB 开书跳书尾 bug 两轮修复(v2 前缀 / scrollRestoration=manual)后,根治方案=位置存服务端,顺带跨设备同步(iPad 读到哪,PC 打开就在哪)。
+- **存储**:`state/reader-positions.json` 全局单文件 sidecar(键=vault 相对路径,值=`{kind,pos,ts}`;同 highlights/favorites 不分用户;原子写 tmp+replace + 进程内锁)。
+- **上报** `POST /pdf/api/reading-pos`:EPUB=onScroll 的**已校验保存点**(过了 `_jumping`+`loaded` 校验才可信)→ ≥5s 节流 trailing;PDF=模板内联 script(不动 reader.src)每 5s 检测当前页(视口交叠最多的 `.page-wrap`,同 `_favCurTarget` 口径,翻页/横滑/滚动通吃)变了才 POST。两边都有 pagehide/切后台 `sendBeacon` 兜底(卸载中 fetch 会被砍;Blob 带 `application/json` 才能被 `get_json` 读到)。
+- **读取零轮询**:`/pdf/view` 无 `?page=` 时把记录**折进模板 `page`**(reader.js 读 `__PDF_CFG.page`,前端零改动;有 `?page=` 深链优先);`/pdf/epub/view` 注入 `EPUB_CFG.serverPos`,onBuilt 恢复优先级=`?sec=` 深链 > serverPos > LS v2 > 0。
+- **关键语义**:①「末章当脏值回 0」守卫只适用 LS 旧值——服务端值写入端已校验,可信,不走该守卫;②上报端 `sent` 初值=开局注入位置 → 闲置标签页不上报,不会用旧值盖掉别的设备刚写的新进度(副作用:`?page=` 深链页要翻页后才入记录,接受);③ localStorage 照写,当离线兜底;④ fav 查看页零进度状态是既定设计,不接此系统。
+- 残留风险:服务端 pos 不 clamp 页数上限(pdf_view 不开文档;书被删页后记录可能越界,同收藏夹深链既有暴露面)。

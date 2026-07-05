@@ -1,0 +1,121 @@
+// 27-rc-adapter.js — 把模块作用域内部量喂给独立的 pdf-adapter.js。
+// 仅 ui=shared 加载了 pdf-adapter.js → window.PdfAdapter 存在时执行;默认无 flag 时整段跳过。
+// 阶段1 的 lookupWord 由门控点直接传 opts,不依赖此 bind;此段只为 captureSelection/clearSelection(阶段2)就位。
+if (window.PdfAdapter && PdfAdapter.bind) {
+  // PDF 也接进统一中间层 RC._adapter(设计见 /reader-middlelayer-design.md);助手经 RC.adapter().getContext() 取上下文,
+  // 与 EPUB 用完全一样的方式。仅 ui=shared(window.PdfAdapter 存在)时执行;legacy 模式整段跳过 → RC._adapter 保持空、ctx() 回退直连 __voiceContext。
+  try { if (window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  PdfAdapter.bind({
+    charSel: () => _charSel,
+    lastSelText: () => lastSelText,
+    selPageNum: () => (typeof _selPageNum === 'function' ? _selPageNum() : currentPage),
+    fileRel: () => FILE_REL,
+    bookLangs: () => BOOK_LANGS,
+    sentence: (cs) => {
+      try { const ch = cs.pw.__charBoxes; const r = _expandSentenceFromRange(ch, cs.startIdx, cs.endIdx); return r ? _charsRangeToText(ch, r.start, r.end).slice(0, 600) : ''; }
+      catch (_) { return ''; }
+    },
+    clear: () => {
+      try { _charSel = null; lastSelText = ''; _updateSelPreview(''); document.querySelectorAll('.sel-overlay').forEach(o => o.innerHTML = ''); toolbar.classList.remove('open'); }
+      catch (_) {}
+    },
+    // 查词呼吸高亮(rc-wordpop opts.breathe):照抄原生 _materializeWordHl+renderWordHl 单个 hl 的渲染路径——
+    // 页面坐标系 rects 渲进 pw 内的 .word-hl-layer(pw 随 #main 滚动,层天然跟滚零漂移,这正是原生不会错位的原因;
+    // 共享层此前用 position:fixed 兜底,滚动手动平移必有窗口期漂移)。cap=查词时捕获的 {pw,startIdx,endIdx}
+    // (对象字段不会被后续选中改写,_charSel 变化是换引用)。呼吸/常亮由共享层切 layer 的 .breathe class,
+    // 正好对齐原生 CSS `.word-hl-layer.breathe .hl`(renderWordHl 的 `h.ready ? '' : ' breathe'` 同一套类名)。
+    // furigana 注音(原生 renderWordHl 426-433:等待时把日读音/英音标标在词上方)一并照搬。不进原生 _wordHls
+    // 数组(生命周期由共享层 _wordHls 管),原生数组在共享模式下保持空,互不冲突。
+    wordHlWrap: (cap) => {
+      try {
+        const pw = cap && cap.pw;
+        if (!pw || !pw.__charBoxes) return null;
+        const rects = _charRangeToPtRects(pw.__charBoxes, cap.startIdx, cap.endIdx);
+        if (!rects.length) return null;
+        const canvas = pw.querySelector('canvas');
+        const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+        const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+        if (!cssW || !cssH || !pageWPt || !pageHPt) return null;
+        const sx = cssW / pageWPt, sy = cssH / pageHPt;
+        const layer = document.createElement('div');
+        layer.className = 'word-hl-layer';
+        for (const r of rects) {
+          const d = document.createElement('div'); d.className = 'hl';
+          d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+          d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+          layer.appendChild(d);
+        }
+        const _hits = _furiHitsForRects(pw, rects);
+        if (_hits.length) {
+          const rl = document.createElement('div');
+          rl.className = 'ruby-layer';
+          for (const it of _hits) { const sp = _makeRubySpan(it, sx, sy); if (sp) rl.appendChild(sp); }
+          layer.appendChild(rl);
+        }
+        const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层(蓝选区→呼吸高亮,原生 456)
+        pw.appendChild(layer);
+        return layer;
+      } catch (_) { return null; }
+    },
+    // 查词小框定位:直接复用原生 _positionWordPop(absolute-in-#main,随内容滚动;fixed 视口定位不跟滚)。
+    // cs = 查词时捕获的 charSel 快照(pdf-adapter 的 positionPop hook 闭包传入)。
+    positionWordPop: (pop, cs) => { try { _positionWordPop(pop, cs); } catch (_) {} },
+    // 便签(rc-stickynote,设计见 references/sticky-notes-design.md「规格 v4」):挂载/锚定 per-reader——
+    // mount=对应 pw(页未渲染→null,由 04-render 渲染完成点 mountPending 补挂);锚点=page+归一化 x/y(PDF 不改)。
+    // v4 契约:mount 返回容器内**像素** left/top(定位机制归 host,组件只应用)。PDF=x·clientWidth/y·clientHeight,
+    // 行为等价旧组件自算 %;页面重渲/缩放后 04-render 两处 mountPending → ensureMounted 用新 clientWidth 重算。
+    noteMount: (anchor) => {
+      if (!anchor || anchor.kind !== 'pdf') return null;
+      const pw = document.querySelector('.page-wrap[data-page-num="' + anchor.page + '"]');
+      if (!pw || pw.dataset.loaded !== '1') return null;
+      const x = Math.max(0, Math.min(1, anchor.x || 0)), y = Math.max(0, Math.min(1, anchor.y || 0));
+      return { el: pw, left: x * pw.clientWidth, top: y * pw.clientHeight };
+    },
+    noteAnchorFromPoint: (x, y) => {
+      const t = document.elementFromPoint(x, y);
+      const pw = t && t.closest ? t.closest('.page-wrap') : null;
+      if (!pw || pw.dataset.loaded !== '1') return null;
+      const r = pw.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0, x: (x - r.left) / r.width, y: (y - r.top) / r.height };
+    },
+    // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
+    phraseHighlight: () => { try { _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) {} },
+    phraseSolid: () => { try { if (_activePhraseHl) { _activePhraseHl.solid = true; document.querySelector('.phrase-hl-layer')?.classList.remove('breathe'); } } catch (_) {} },
+    phraseRefresh: () => { try { refreshCharsWForAllPages(); } catch (_) {} },
+    removePhraseHighlight: () => { try { _removePhraseHighlight(); } catch (_) {} },
+    // 词组框「💡 解释」→ 复用 PDF onExplain(它自身也被门控,共享模式下转 rc-result)。
+    onExplain: () => { try { window.onExplain && window.onExplain(); } catch (_) {} },
+    // 阶段2(补丁):「解释」的琥珀色呼吸高亮 + 后台跑 + 点高亮才开面板 —— 100% 原样复用 PDF 原生
+    //   _showExplainHighlight/_runExplainBg(15-phrase-wordpop.js / 21-misc-ai.js,函数体一字未改;
+    //   两者内部已按 __uiShared 分流到 rc-result 的 openResult/addResultPickers/_resultReqId)。
+    //   这层只是把 PdfAdapter.explain 的调用点接过去,等价 native onExplain 共享分支之前本该执行的那两行。
+    explainHighlight: (text) => {
+      try {
+        const ehl = _showExplainHighlight(_charSel && _charSel.pw, text);
+        if (ehl) { ehl.title = '💡 AI 解释'; ehl.src = text; ehl.resultContext = _resultContext; }
+        return ehl;
+      } catch (_) { return null; }
+    },
+    runExplainBg: (hl, text, context) => { try { _runExplainBg(hl, text, context); } catch (_) {} },
+    // 阶段3 高亮列表(PdfAdapter.renderHighlightList)就位:数据/跳转/删除经底座(高亮叠层渲染本身留 PDF 字符层几何,不迁;
+    //   PDF 暂无「高亮抽屉」UI → 这几个钩子目前无 live 调用方,先就位)。编辑/图描述浮层走 per-call opts,不依赖此 bind。
+    allHighlights: () => (typeof _allHighlights !== 'undefined' ? _allHighlights : []),
+    jumpToHl: (hl) => { try { if (hl && hl.page && window.goToPage) window.goToPage(hl.page); } catch (_) {} },
+    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} }
+  });
+  // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)
+  try {
+    if (window.RC && RC.stickynote) {
+      RC.stickynote.init({
+        file: FILE_REL,
+        mount: (a) => PdfAdapter._host.noteMount(a),
+        anchorFromPoint: (x, y) => PdfAdapter._host.noteAnchorFromPoint(x, y),
+        // 阶段3 AI 注入:双击便签 → 25-assistant __noteInject(助手开着才处理:无笔画走文本通道,有笔画走合成图/视觉通道)
+        onDoubleTap: (note) => { try { return !!(window.__noteInject && window.__noteInject(note)); } catch (_) { return false; } },
+        toast: (m) => { try { _toast?.(m); } catch (_) {} }
+      });
+      window._noteCreateAtCenter = () => { try { RC.stickynote.createAtCenter(); } catch (_) {} };
+    }
+  } catch (_) {}
+}

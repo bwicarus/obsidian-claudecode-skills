@@ -365,6 +365,10 @@ def require_login_global():
     for prefix in PROTECTED_PREFIXES:
         if p.startswith(prefix):
             if not session.get("user_id"):
+                bu = _bearer_user()   # 外部 agent(Claude Code skill)带 API token → 认证为该用户,放行(无需浏览器 session)
+                if bu:
+                    session["user_id"], session["username"] = bu
+                    return
                 return redirect(url_for("login", next=p))
             return
 
@@ -885,6 +889,24 @@ def _authenticate_api():
     db.execute("UPDATE api_tokens SET last_used_at=datetime('now') WHERE token=?", (token,))
     db.commit()
     return row["username"]
+
+
+def _bearer_user():
+    """从 Bearer token → (user_id, username) 或 None。给 require_login_global:让外部 agent(Claude Code skill)
+    用 API token 调受保护 API,无需浏览器 session(Bearer token 等价于该用户程序化登录)。"""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    token = auth[7:].strip()
+    if not token:
+        return None
+    row = get_db().execute(
+        "SELECT t.user_id, u.username FROM api_tokens t JOIN users u ON t.user_id = u.id WHERE t.token = ?",
+        (token,),
+    ).fetchone()
+    if not row:
+        return None
+    return row["user_id"], row["username"]
 
 
 @app.route("/api/upload/<dataset>", methods=["POST"])

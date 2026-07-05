@@ -753,7 +753,27 @@ def _undo_do(uid=None, owner=None):
                 db = pdf_reader._hl_load(fr)
                 db["highlights"] = [h for h in db.get("highlights", []) if h.get("id") not in ids]
                 pdf_reader._hl_save(fr, db)
-        return {"ok": True, "label": label, "kind": kind}   # kind 给前端:highlight 撤销后要重渲页面才能视觉清掉
+        elif kind == "sticky":   # AI 建的便签:撤销=删掉(notes sidecar,PDF/EPUB 同一套)
+            fr = (handle.get("file_rel") or "").strip()
+            ids = set(handle.get("ids") or [])
+            if fr and ids:
+                import pdf_reader
+                pdf_reader._notes_save(fr, [n for n in pdf_reader._notes_load(fr) if n.get("id") not in ids])
+        elif kind == "sticky_edit":   # AI 改的便签文字/颜色:撤销=恢复旧值快照(绝不动 strokes/anchor/尺寸)
+            fr = (handle.get("file_rel") or "").strip()
+            nid = handle.get("id")
+            old = handle.get("old") or {}
+            if fr and nid:
+                import pdf_reader
+                items = pdf_reader._notes_load(fr)
+                n = next((x for x in items if x.get("id") == nid), None)
+                if n:
+                    for k in ("text", "color"):
+                        if k in old:
+                            n[k] = old[k]
+                    n["updated"] = int(time.time())
+                    pdf_reader._notes_save(fr, items)
+        return {"ok": True, "label": label, "kind": kind}   # kind 给前端:highlight/sticky 撤销后要重渲页面才能视觉清掉
     except Exception as e:
         with _undo_lock:
             tgt["undone"] = False   # 撤销失败 → 恢复可撤销
@@ -842,8 +862,10 @@ def _task_anki(tid, params, ctx, base):
     _vtask_set(tid, step="AI 制卡中")
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
     text = content + f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
+    image_url = (params.get("image_url") or "").strip()   # 助手 search_image 找到的图,若也要放进卡片就一并透传
     with _anki_lock:   # AnkiConnect 串行
-        out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high")
+        out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
+                                          image_url=image_url or None)
     n = out.get("anki_added", 0)
     if out.get("ok") and n:
         uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []}, owner=ctx.get("_uid"))

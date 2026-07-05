@@ -105,4 +105,4 @@ ssh root@bwicarus.space 'cat /root/claude/state/qa-server-data/cmd_server_key.tx
 | `obsidian-sync` | vault 持续同步 |
 | `qa-server` | iPad 截图问答 daemon :9091 + cmd_server :9090 |
 | `webapp` | Flask + 控制面板 |
-| `bwicarus-daily.timer` | 每天 04:00 自动 daily |
+| `bwicarus-daily.timer` | 每天 01:00 自动 daily（原 04:00，73d8eb6 起提前到用户不用 AI 的空闲时段）|

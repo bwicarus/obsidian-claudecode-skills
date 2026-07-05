@@ -214,6 +214,19 @@ function md(s){
 
 **坑**:墙钟时延会被"输出长度"和"进程冷启动"双重污染,**比快慢别只看单次墙钟**——要么固定输出长度、要么量吞吐(字/秒);"大模型在硬推理题上即便低思考也想得更久"是常态。
 
+**多后端 × 三维(后端/型号/深度)可配置**(把"要不要换别家模型"做成设置而非写死):每个 AI 任务(编排 agent / 章节总结 / 看图)各存 `{backend, variant, depth}`——**后端决定后两维的可选集**(Claude=haiku/sonnet/opus × effort low..max;Gemini=flash/lite/pro × 思考开/关)。
+- **叶子调用**(单次、无工具循环:总结/看图)切后端**几乎零成本**——两条后端路本就都在,改成"按配置选主后端 + 另一后端兜底"即可(主后端 429/故障自动用另一边,功能不中断)。
+- ⚠ **同后端双 key failover 要"穷尽本后端再回退"**:Gemini 免费+付费两把 key,免费失败时**任何错误(限流 429/403、5xx 临时高负载、网络超时、构造错 400)都必须先切付费 key**,只有付费也挂才回退 Claude。**别只对 429/403 切、其它 `return None`**——实测默认型号 `gemini-3.5-flash` 会撞 `503`(high demand),若 503 直接回退 Claude 就等于付费 key 永远没机会(用户原话"免费不可用时应该用付费而不是直接跳 Claude")。① 非流式:循环里**任何非 200 都 `continue` 试下一把**,网络异常也 `continue` 不 `return`;② 流式:加 `emitted` 标志——**只在还没 yield 过任何 delta 时**才换 key 重试(已吐内容再换 key 会重复输出),已吐则只能 `yield err` 收尾;③ 5xx/网络异常**不给整把 key 设冷却**(是型号临时问题不是 key 坏),只有真限流(429/403)才 cooldown 整把。见 `_gemini_text`/`_gemini_vision`/`_gemini_stream`。
+- **根 orchestrator** 换后端要把**整条工具循环**搬过去:系统提示/工具协议(裸 JSON)/SSE 事件/trace **全复用**,只把"Claude 进程多轮(进程内保历史)"换成"Gemini 无状态多轮 `contents`(每轮带完整历史数组)";看图工具的图用 `inlineData` 喂回;首轮失败回退另一后端保不挂。
+- **换后端前先低成本验证**新模型在你那套手搓 JSON 工具协议上的稳定性:① JSON 工具调用格式正确率 ② 工具选对 ③ 多轮收敛 ④ 复合任务分解。实测 Gemini Flash·thinking 这四项全过(JSON 0 坏、复合"总结再做笔记"正确拆两步)才放心铺开。**复用生产的系统提示/解析/工具表写个离线验证脚本**(写类工具 stub 掉防副作用),别直接拿生产开刀。
+- **向后兼容**:旧的两维 `{model, effort}`(无 `backend`)读出时视作默认厂商(claude);感叹号「更强重答」= 一次性强制升档,跟设置面板的常设默认**共用同一套 resolve**(优先级:强制 > 预设 > 出厂默认)。
+- ⚠ **坑(Gemini Pro)**:`gemini-2.5-pro` 是 **thinking-only**,发 `thinkingConfig.thinkingBudget=0`(关思考)直接 **400**。底层构造 generationConfig 处必须守卫「型号含 `pro` → 永不发 `thinkingBudget=0`」(只有 Flash/Lite 能关思考)。否则一旦"看图"(常写死关思考省 token)或"导航/简单问题"(自动关思考)用了 Pro 就挂。Pro 还慢且贵,日常 orchestrator 用 Flash,Pro 留给偶尔要最强推理。
+- ⚠ **坑(免费档"不支持"被伪装成临时 429)**:用 ListModels 动态列型号时,**别假设列出来的免费 key 都能用**。Google 对"免费档根本不含此型号"(全部 `*pro*`、连 `2.0-flash` 系)返回的不是干净的 404/403,而是**伪 429**——正文写「Please retry in 49s」装成临时限流,但 quota 明细里写死 `generate_content_free_tier_requests, limit: 0`(每日上限就是 0,重试永远没用)。① 判"永久不支持"的函数必须识别 `free_tier` + `limit: 0`(否则当临时冷却,面板永远把 pro 标"免费可用");② 真·RPM 限流的 limit 是非 0(如 `limit: 5`)→ 才走临时冷却;③ 别盲信 404(网关/URL 问题也会 404),判定以**正文语义**为准。
+- ⚠ **主动探测免费档支持**(别等用户点了才发现):面板列型号前对"没探过"的型号各发一个 `maxOutputTokens:1` 的免费 key 试探请求(并发 + 持久缓存 30 天 → 之后命中缓存 0 请求),200=可用、`free_tier limit:0`=隐藏、503/限流=保持 unknown 下次再探。免费档不计费,1 token 即便被截断只要 200 也证明"放行了该型号"。**实测 17 个型号里 9 个免费 limit:0**(5 个 pro + 4 个 2.0-flash 系)被正确隐藏;flash 系若撞 503(high demand)保持 unknown→乐观显示"免费",下次探测确认。见 `_probe_free`/`_probe_free_batch`/`_free_state` + `state/gemini-free-ok.json`/`gemini-unsupported.json`。
+- ⚠ **trace 要记「实际用了哪档」,不是「设了哪档」**:多 key/多后端下,设的是免费 Gemini 但可能实际走了付费(免费限流时切付费)或回退了 Claude。① 流式函数成功放行时 `yield ("tier", tier)`,编排器收到写进 `trace[0].tier`(free/paid)→ 感叹号弹窗给模型名旁标「免费/付费」彩色 chip,用户一眼知道这条到底烧没烧钱;② 回退到另一后端时 trace 写明「A→B」(见上条 fallback_from)。**别让前端拿"当前设置/当前状态"去推断**——那反映的是现在、不是这条回答当时实际发生的。
+- ⚠ **每个动作的「调档入口」只留一个统一面板**:别同时存在「行内简易快捷档(只列某后端)」+「完整三维设置面板」两套——简易档迟早跟多后端打架(本例行内 ⚙ 只列 Claude haiku/sonnet,用户设了 Gemini 进去却只能选 Claude,且把 `3.5-flash·think` 误解析成 haiku)。统一成:行内 ⚙ 直接打开那个完整面板并**定位/高亮到对应动作**(`openModelSettings(focusAction)` + `scrollIntoView`)。一处真相,自动支持新后端 + 免费/付费标。
+- 见 `_server_deploy/assistant.py`:`_resolve` / `_deep_ask` / `_vision_describe`(叶子)+ `_agent_run`→`_agent_run_claude`/`_agent_run_gemini`(根)+ `_gemini_stream` 的 `("tier",tier)` 上报 + `scripts/verify_gemini_orchestrator.py`(验证脚本);前端 `static/pdf/reader.src/25-assistant.js` 的 `_buildFbPop`(感叹号弹窗 trace+tier chip)/ `openModelSettings(focusAction)`。
+
 ---
 
 ## 7. Agentic 工具循环(若助手要"能做事"而不仅聊天)
@@ -228,6 +241,8 @@ function md(s){
 - **JSON 解析要顽强**:用 `raw_decode` 只取开头那个 JSON(容忍尾部多余字)+ 把字面控制字符(没转义的换行)换空格 + **自愈重试**(看着像工具调用却解析失败 → 反馈给模型让它重出一条合法 JSON,≤2 次)。否则"工具 JSON 被当成回答显示、工具没执行"。
 - **步数上限设很高当 runaway 兜底,真正的护栏是总超时**(防卡死的模型进程占住 worker)。高思考档要**放宽单轮/总超时**,否则深答被腰斩成"没响应"。
 - 写操作(制卡/存笔记/改高亮)给**撤销**:记 `owner=用户id`,撤销只能撤自己的。
+- ⚠ **破坏性/批量操作 → 不让 AI 直接执行,改「列清单 + 每项带按钮,人来点」**:用户说"把这章高亮全删了",别真让模型批量删(误删难恢复、模型可能删错范围)。做法:工具只**查出匹配项**返回给模型(让它措辞),同时附一个 `client_action` 让前端把每项**逐条渲染成可操作行**(本例每条高亮一行:色块+文字+「↗跳转」+「🗑删除」),用户**自己点删/点跳转去看**——human-in-the-loop。复用已有的「撤销项」渲染/点击委托机制(同一个 thread 级事件代理认 `.asst-jump`/`.asst-xxx-del`),删完即时 `_reloadHighlights` 视觉移除。比"AI 直接删 + 给个总撤销"更安全可控,也省得模型纠结"我有没有这个工具"。见 `_t_find_highlights`(后端列清单)+ `window._showHlPicker`(前端渲染)+ `DELETE /pdf/api/highlights`。配套:工具描述里**明确写「这就是删X的工具,别说没有」**,并在系统 prompt 加一条对应规则,否则模型会答"我没有批量删除的工具"。
+- ⭐ **助手操作『多来源拼接的合集』(collection/收藏集)时:给它「翻回原书」的工具 + 条件注入**。合集(如从不同书/位置精选的页面物化成的一本文档)条目间**不连续、各有原书出处**,普通「前后 section 连续」假设失效。做法:① 系统提示动态块声明它是合集 + 给目录概览(每条**出处/首句/相邻标记**,让 AI 别把邻条当连续正文);② 给一个 `read_source_page` 工具让助手**翻回原书**读任意页/节补前后文/查证(按合集条目 idx 或 book+page 定位、offset 读前后)。**该工具只在当前确实是合集时才并入执行注册表 + 在系统提示里广告**(普通文档模型压根看不到 → 零影响、也不稀释选工具注意力),跟 §12「按前置条件才暴露」同源——把它推广到**工具**层,不只 prompt 规则。见 `epub_assistant.py::_t_read_source_page` / `_fav_meta_for` / `_fav_sys_block` / `_tool_fn`(合集判定 `_fav_fid`)。
 
 ---
 
@@ -236,6 +251,8 @@ function md(s){
 **原则**:网页里的选区/图/当前页/钉住的焦点,**汇总成一个 context 对象**随消息发给后端,系统 prompt 里说明这些字段(如"用户当前选中:「…」""本页知识点:…")。
 
 **关键门控(用户体验)**:**只在 AI 对话栏真正打开时,才把"点选/多选/带入图"加进上下文**。没开 AI 栏时点选只做查词/翻译/高亮,**别悄悄往对话攒东西**(否则用户一打开助手发现一堆没要的上下文)。
+
+⚠ **页码/坐标在边界统一换算,且「每一个」吃页码或吐页码的工具都要做**:内部数据(高亮/图/历史)按 PDF 原始页存,但给 AI 看 + 用户看的是**印刷页**(差一个 `page_offset`)。系统 prompt 把可见页转成印刷页喂给 AI → AI 之后所有 `page=N` 都是印刷页。**漏一个工具没转就出诡异 bug**:本例 `highlight`/`goto` 转了、`read_highlights`/`find_highlights` 没转 → 用户明明看到高亮、AI 却说"这章没有高亮"(AI 拿印刷页 4 去比 PDF 页 24)。规则:**输入** AI 的 `page`→`_to_pdf` 转 PDF 再比/查;**输出**给 AI/显示的 `page`→`_to_disp` 转印刷页;但**跳转/定位**要的仍是 PDF 页(`jumpWithBack` 收 PDF 页)→ 列表项同时带 `page`(印刷,显示)+`pdf_page`(原始,跳转)。默认"当前页"用 `ctx.pages`(已是 PDF 页)不转。写新工具时:**只要签名里有 page,就先想清楚它是哪种页**。
 ```js
 function asstOpen(){ const p=document.getElementById('panel'), a=document.getElementById('asst-pane');
   return !!(p?.classList.contains('open') && a?.classList.contains('active')); }
@@ -270,6 +287,18 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 - 拆法零风险:你的系统提示本就分「静态规则 + 动态上下文」,把静态走 `--system-prompt`(恒定→可缓存、预热进程也能预设)、动态留 user message。我们按唯一锚 `rfind("【当前页面】")` 切现成的 prompt 输出,不挪文本。
 - ⚠ `--bare` 会一并跳过 OAuth → "Not logged in",**别用**;auth 要留着。`--deep_ask` 那种「生成步」调用不传 system(各有自己的 prompt),也顺带免掉 agent 壳。
 - 见 `_server_deploy/assistant.py::_spawn`(commits a4071fb/4a06619/aba9273)。
+
+**纯净隔离复测(2026-06,别被上面逐 flag 链的数字误导)**：上面那条链是「逐项剥」的增量，且会被你机器上装的插件/skills 污染。用全新空 `CLAUDE_CONFIG_DIR`（只复制登录凭证、不带任何 settings/插件/skills）+ 空 cwd 重测，拿到干净的「地板」：
+- **纯净·零配置默认壳 = 17534 token**（Claude Code 核心系统提示 11507 + 默认 agent 提示 & 21 个内建工具 schema 6024）。我机器上带 engineering 插件 + 5 个 user skills 时测出来是 19038 → **污染约 1504**（量壳大小前务必隔离 config 目录，否则把自己的插件算进去）。
+- **剥壳骨架 = 132 token**（占位短系统提示 + 那句消息；< prompt cache 1024 阈值故全 `input`、无隐藏 cache）→ 即剥壳几乎把整个 17534 的壳**清零**，助手的 ~4468 几乎 100% 是你自己的必要提示，Claude Code 开销≈0。
+- **怎么量**：`claude --print "Reply: ok" --output-format json` 回的 `usage` 里 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` 之和 = 这轮喂进模型的总上下文（API 官方计费数，非估算）；发极短消息把 output 压到≈0，差值就是壳。`env -C <cwd>` 控 CLAUDE.md、`CLAUDE_CONFIG_DIR` 控 skills/插件，每次只动一个变量干净归因。
+- **为什么不能改用 Claude Code 的 Skill 来「省 token」**：skill 的渐进披露省的是「在那 17534 默认壳**之上**多挂能力的边际」，它**必须活在那个壳里**（靠 settings 被发现 + 默认 agent 壳承载渐进披露逻辑 + 内建工具执行步骤）；我们恰恰把那 17534 整个剥成 132，两者**互斥**。skill 的省≈在大房子里省电，我们的省=直接搬进小屋。且 skill 靠模型用 Bash/Read 自执行，跟我们「服务端 Python 执行 JSON 工具 + 全禁内建工具」的沙盒**不兼容**。**剥壳那几个 flag 本就是 Claude Code 官方为「当后端调用」(Agent SDK/headless) 留的口子——我们用的是它的「后端人格」，不是 hack**；它作为交互编程产品时必须背全壳（通用 agent 的刚性成本，拆了就不是 Claude Code），被代码调用时本来就支持剥成 132。
+
+**2026-06-26：脱壳从 PDF 助手扩到全项目所有 `claude` CLI 调用点 + 加 Gemini 兜底**。此前只有 `assistant.py::_spawn`(PDF 阅读器助手)脱了壳，其余两个 claude 入口仍背全壳每次白吃 CLAUDE.md：
+- **`_client/core/ai_backends.py::ClaudeCli`**（QA 截图问答 创建笔记/Anki 制卡询问/对话 + KG 脚本 + vocab 翻译 + skilltree 共用）：原 `cwd` 继承服务 `WorkingDirectory=…/claude`（吃整本 CLAUDE.md）、无 `--setting-sources`。改：`cwd=_STRIP_CWD`（`/tmp/bwicarus-cli-cwd`，项目树外空目录）+ `--setting-sources ""`。**带图仍保留 `--allowedTools Read`**（图是按路径让模型 Read 的，去了读不到图）→ 不做工具/system-prompt 那两步剥，只吃 cwd+setting-sources 这 ~64% 的大头，零风险。`chat`/`chat_stream` 末尾加 **Gemini 兜底**：claude 失败/限流/空 → `_gemini_chat()`（纯 stdlib urllib，免费 key 优先付费兜底，含图 inline base64，型号 `settings.gemini_model` 默认 `gemini-3.5-flash`）。
+- **`scripts/ai_client.py::claude_raw`**（Anki 制卡/summarize/connect/薄弱卡改写 + nightly daily 共用，唯一 claude 入口）：原 `cwd=PROJECT`。改 `cwd=CLI_CWD`（同 `/tmp/bwicarus-cli-cwd`）+ `--setting-sources ""`。**`--continue`(多轮)按 cwd 维护会话，cwd 固定不变故续写照常**。这些 prompt 全自带所需内容、不依赖项目记忆，故剥 CLAUDE.md 零损失。未加 Gemini 兜底（已有 codex `auto-claude→codex` 路由兜底，且多轮 `--continue` 与无状态 Gemini 不对应）。
+- 为何不强剥 `--tools`/`--system-prompt`：这两条入口是「通用问答/制卡」，依赖 Claude **默认**系统提示与（带图时的）Read 工具，不像 PDF 助手有自管 JSON 协议可整壳替换。只做 cwd+setting-sources 是「安全大头」。
+- `_STRIP_CWD`/`CLI_CWD` 都解析到 `/tmp/bwicarus-cli-cwd`（`tempfile.gettempdir()` 派生，跨平台）。Gemini key 文件复用 PDF 助手那组 `~/.config/gemini-api-key{,-free}`。
 
 ---
 

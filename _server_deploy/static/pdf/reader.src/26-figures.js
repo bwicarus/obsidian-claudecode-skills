@@ -94,7 +94,23 @@
     clearHl();
     _popBadge = null;
   }
+  // 轻点徽标=描述浮层。共享模式(__uiShared)→ 走 PdfAdapter.figurePop → RC.figures.openPop(描述弹层 chrome 统一);
+  //   YOLO 框高亮 showHl 是纯几何 → 两路都画,保留底座;RC 不可用 → fallback 回 _openFigPopNative(原逻辑逐字不变)。
   function openPop(badge, fig) {
+    if (window.__uiShared && window.PdfAdapter) {
+      showHl(badge, fig);                              // YOLO 框高亮 = 纯几何,保留底座
+      var _bodyHtml = md(fig.desc);
+      PdfAdapter.figurePop({
+        badge: badge, caption: fig.caption || '图',
+        body: _bodyHtml != null ? _bodyHtml : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>'),
+        ignoreSelector: '.fig-badge, .fig-hit',        // PDF 徽标/命中层放行,再点同徽标正常 toggle
+        fallback: function () { _openFigPopNative(badge, fig); }
+      });
+      return;
+    }
+    return _openFigPopNative(badge, fig);
+  }
+  function _openFigPopNative(badge, fig) {
     if (_popBadge === badge) { closePop(); return; }   // 再点同一徽标 → 关
     closePop();
     _popBadge = badge;
@@ -364,6 +380,7 @@
     if (!_hlEl) return;
     var t = e.target;
     if (t && t.closest && (t.closest('.fig-hit') || t.closest('.fig-badge') || t.closest('.fig-pop') ||
+        t.closest('.rc-fig-pop') || t.closest('#rc-fig-pop') ||   // 共享模式:图描述浮层是 rc-figures 的 #rc-fig-pop/.rc-fig-pop,内部交互(选字/滚动)别清蓝框
         t.closest('#side-pane-asst') || t.closest('#grammar-panel'))) return;
     clearHl();
   }, true);

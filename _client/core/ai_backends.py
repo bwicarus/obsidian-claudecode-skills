@@ -120,6 +120,77 @@ def _run_hidden(cmd, **kwargs):
     return subprocess.run(cmd, **kwargs)
 
 
+# ── 脱壳 cwd ───────────────────────────────────────────────────────
+# claude CLI 会从 cwd 沿目录树向上找 CLAUDE.md(项目记忆,本项目这份巨大),把 cwd 钉在
+# 项目树外的空目录 → 不加载 CLAUDE.md;再配 `--setting-sources ""` → 不加载 user/project
+# 设置 + engineering 插件 MCP。两者合计省掉每次调用的大头 token(登录/凭证另存,不受影响)。
+# 跟 _server_deploy/assistant.py 的 _ASST_CWD 同一思路。Windows 客户端进程一般在项目外起,
+# 影响小,但仍指向稳定空目录无害。
+def _strip_cwd() -> str:
+    d = os.path.join(tempfile.gettempdir(), "bwicarus-cli-cwd")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return tempfile.gettempdir()
+
+
+_STRIP_CWD = _strip_cwd()
+
+
+# ── Gemini 兜底 ────────────────────────────────────────────────────
+# claude CLI 失败/限流/返回空时用 Gemini 顶上(省 Claude 额度 + 防单边挂)。纯 stdlib urllib。
+# key 文件跟 PDF 助手(assistant.py)同一组:免费档优先,付费档兜底。失败一律返回 ""。
+def _gemini_keys() -> list[str]:
+    out: list[str] = []
+    for p in ("~/.config/gemini-api-key-free", "~/.config/gemini-api-key"):
+        try:
+            k = Path(os.path.expanduser(p)).read_text(encoding="utf-8").strip()
+            if k and k not in out:
+                out.append(k)
+        except Exception:
+            pass
+    return out
+
+
+def _gemini_chat(prompt: str, image_path: str | None = None, model: str = "",
+                 timeout: int = 120) -> str:
+    keys = _gemini_keys()
+    if not keys or not (prompt or "").strip():
+        return ""
+    mdl = (model or "").strip() or "gemini-3.5-flash"
+    parts: list[dict] = [{"text": prompt}]
+    if image_path:
+        try:
+            raw = Path(image_path).read_bytes()
+            ext = (Path(image_path).suffix or ".png").lower().lstrip(".")
+            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                    "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/png")
+            parts.append({"inline_data": {"mime_type": mime,
+                          "data": base64.b64encode(raw).decode("ascii")}})
+        except Exception:
+            pass
+    body = json.dumps({"contents": [{"role": "user", "parts": parts}]}).encode("utf-8")
+    for key in keys:
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               + mdl + ":generateContent?key=" + key)
+        try:
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                d = json.loads(resp.read().decode("utf-8"))
+            cands = d.get("candidates") or []
+            if cands:
+                txt = "".join(
+                    p.get("text", "")
+                    for p in ((cands[0].get("content") or {}).get("parts") or []))
+                if txt.strip():
+                    return txt.strip()
+        except Exception:
+            continue
+    return ""
+
+
 # ── CLI 类 ─────────────────────────────────────────────────────────
 class CliBackend(BackendAdapter):
     """通用 CLI adapter：执行 `<command> --version` 验证可用性。"""
@@ -179,16 +250,28 @@ class ClaudeCli(CliBackend):
         image_path = _spool_image(image) if image else None
         try:
             prompt = _flatten_messages(messages, image_path=image_path)
-            full = [cmd, "--allowedTools", "Read", *self._model_effort_flags(),
-                    "--output-format", "text", "-p", prompt]
-            r = _run_hidden(full, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace",
-                            timeout=int(self.settings.get("timeout", 180)))
-            out = (r.stdout or "").strip()
-            if not out:
-                err = (r.stderr or "").strip()
-                raise RuntimeError(err[:300] or f"claude_cli 返回空（exit {r.returncode}）")
-            return out
+            claude_err = ""
+            try:
+                # 脱壳:--setting-sources "" 不加载设置/插件,cwd=项目树外 → 不加载 CLAUDE.md;
+                # --allowedTools Read 保留(带图时模型需 Read 落盘图片)。
+                full = [cmd, "--allowedTools", "Read", "--setting-sources", "",
+                        *self._model_effort_flags(),
+                        "--output-format", "text", "-p", prompt]
+                r = _run_hidden(full, cwd=_STRIP_CWD, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
+                                timeout=int(self.settings.get("timeout", 180)))
+                out = (r.stdout or "").strip()
+                if out:
+                    return out
+                claude_err = (r.stderr or "").strip()[:300] or f"claude_cli 空(exit {r.returncode})"
+            except Exception as e:
+                claude_err = str(e)[:300]
+            # ── claude 失败/限流/空 → Gemini 兜底(省额度 + 防单边挂)──
+            g = _gemini_chat(_flatten_messages(messages), image_path=image_path,
+                             model=(self.settings.get("gemini_model") or ""))
+            if g:
+                return g
+            raise RuntimeError(claude_err or "claude_cli 与 Gemini 兜底均失败")
         finally:
             if image_path:
                 try: Path(image_path).unlink(missing_ok=True)
@@ -198,7 +281,9 @@ class ClaudeCli(CliBackend):
         cmd = self._command()
         image_path = _spool_image(image) if image else None
         prompt = _flatten_messages(messages, image_path=image_path)
-        full = [cmd, "--allowedTools", "Read", *self._model_effort_flags(),
+        # 脱壳:同 chat() —— --setting-sources "" + cwd 项目树外,不加载 CLAUDE.md/插件。
+        full = [cmd, "--allowedTools", "Read", "--setting-sources", "",
+                *self._model_effort_flags(),
                 "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages", "-p", prompt]
         popen_kw = {
@@ -208,6 +293,7 @@ class ClaudeCli(CliBackend):
             "encoding": "utf-8",
             "errors": "replace",
             "bufsize": 1,
+            "cwd": _STRIP_CWD,
         }
         if os.name == "nt":
             si = subprocess.STARTUPINFO()
@@ -239,9 +325,15 @@ class ClaudeCli(CliBackend):
                     emitted_any = True
                     yield txt
             rc = proc.wait()
-            if rc != 0 and not emitted_any:
-                err = (proc.stderr.read() or "").strip()[:300]
-                raise RuntimeError(err or f"claude_cli exit {rc}")
+            if not emitted_any:
+                # claude 一个字都没吐(失败/限流/空)→ Gemini 兜底,整段一次性 yield。
+                g = _gemini_chat(_flatten_messages(messages), image_path=image_path,
+                                 model=(self.settings.get("gemini_model") or ""))
+                if g:
+                    yield g
+                elif rc != 0:
+                    err = (proc.stderr.read() or "").strip()[:300]
+                    raise RuntimeError(err or f"claude_cli exit {rc}")
         except GeneratorExit:
             # 客户端中途断开
             try: proc.terminate(); proc.wait(timeout=2)
@@ -713,7 +805,7 @@ def make_backend(name: str, settings: dict | None = None) -> BackendAdapter:
 def backend_default_settings(name: str) -> dict:
     """每个 backend 的默认 settings，给 GUI 渲染用。"""
     return {
-        "claude_cli":  {"command": "claude"},
+        "claude_cli":  {"command": "claude", "gemini_model": "gemini-3.5-flash"},
         "codex_cli":   {"command": "codex"},
         "claude_api":  {"api_key": "", "model": "claude-opus-4-7"},
         "openai_api":  {"api_key": "", "model": "gpt-5", "base_url": "https://api.openai.com/v1"},
@@ -724,7 +816,7 @@ def backend_default_settings(name: str) -> dict:
 def backend_setting_fields(name: str) -> list[tuple[str, str, bool]]:
     """GUI 展示给每个 backend 的字段：[(key, label, secret), ...]"""
     return {
-        "claude_cli":  [("command", "claude 命令", False)],
+        "claude_cli":  [("command", "claude 命令", False), ("gemini_model", "Gemini 兜底型号", False)],
         "codex_cli":   [("command", "codex 命令", False)],
         "claude_api":  [("api_key", "API key", True), ("model", "model", False)],
         "openai_api":  [("api_key", "API key", True), ("model", "model", False), ("base_url", "base URL", False)],

@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/root/claude/.env
-WorkingDirectory=/root/obsidian
-ExecStart=/usr/bin/ob sync --path /root/obsidian --continuous
+EnvironmentFile=/home/bwicarus/claude/.env
+WorkingDirectory=/home/bwicarus/obsidian
+ExecStart=/usr/bin/ob sync --path /home/bwicarus/obsidian --continuous
 Restart=on-failure
 RestartSec=30
-User=root
+User=bwicarus
 
 [Install]
 WantedBy=multi-user.target

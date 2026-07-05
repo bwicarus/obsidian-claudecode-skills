@@ -1,0 +1,855 @@
+/* rc-result.js — 统一控制层:AI 结果模态 + 草稿系统 + 选段 picker(共享,PDF/EPUB 通用)。
+ * 逐条照搬 PDF 阅读器 reader.src/{20-result-draft.js, 21-misc-ai.js::{_aiStream,aiCall}, 17-highlight.js::{markFromResult,ankiFromResult,_followupAsk}}。
+ * UI 与 PDF 完全一致(沿用 #result-mask/#result-modal/#draft-* 等原类名),CSS 自带注入(injectCss),HTML 由调用端贴模板。
+ *
+ * 底座耦合全部走 opts(适配器,由各 reader 传入 aiCall/openChat),模块本身不写死任何 reader 专属的东西:
+ *   opts.markHighlight(text, body, sentence, kind) — 整条回答 → 高亮(EPUB 用 saveHl + note;PDF 用 charSel)。
+ *   opts.ankiSource() → {file, sourceUrl, sentence} — ankiFromResult 出处链接。
+ *   opts.aiParams() → {model, effort}(EPUB 返 {} 走后端默认)。
+ *   opts.snippetsEndpoint / opts.jobStatusEndpoint / opts.toNoteEndpoint / opts.streamResultEndpoint / opts.followupEndpoint
+ *     — 缺省走 /pdf/api/{snippets-to-async,job-status,to-note,ai-stream-result,explain}。
+ *   opts.draftKey — 草稿 localStorage key,默认 'epub-drafts'(PDF 用 'pdf-drafts',别串)。
+ *   opts.kind — 标记高亮的 kind('explain'/'note'),默认 'note'。
+ * 用 RC.md/RC.typeset/RC.esc/RC.reqJson/RC.toast,不重写这些。挂 window.RC.result;HTML onclick 用到的函数挂 window.*。
+ */
+(function () {
+  if (!window.RC) window.RC = {};
+  if (window.RC.result) return;
+
+  // ── 模块级配置(端点 + 草稿 key + 适配器);aiCall/openChat 每次 _applyOpts(opts) 覆盖,
+  //    让全局函数(_doCreate/_followupAsk/markFromResult/ankiFromResult)读到最近一次的适配器 ──
+  var _cfg = {
+    draftKey: 'epub-drafts',
+    snippetsEndpoint: '/pdf/api/snippets-to-async',
+    jobStatusEndpoint: '/pdf/api/job-status',
+    toNoteEndpoint: '/pdf/api/to-note',
+    streamResultEndpoint: '/pdf/api/ai-stream-result',
+    followupEndpoint: '/pdf/api/explain',
+    aiParams: function () { return {}; },
+    markHighlight: null,
+    ankiSource: null,
+    beforeOpen: null,   // 可选钩子:每次 openResult 前调(PDF 用它把上一条结果快照进「📜 历史」);EPUB 不传 → no-op
+  };
+  // 当前结果框(由 aiCall/openChat 设)对应的「选中原文 / 上下文 / kind」,供 markFromResult/ankiFromResult 用
+  var _curMeta = { text: '', sentence: '', kind: 'note' };
+
+  function _applyOpts(opts) {
+    if (!opts) return;
+    ['snippetsEndpoint', 'jobStatusEndpoint', 'toNoteEndpoint', 'streamResultEndpoint', 'followupEndpoint', 'draftKey']
+      .forEach(function (k) { if (opts[k]) _cfg[k] = opts[k]; });
+    if (typeof opts.aiParams === 'function') _cfg.aiParams = opts.aiParams;
+    if (typeof opts.markHighlight === 'function') _cfg.markHighlight = opts.markHighlight;
+    if (typeof opts.ankiSource === 'function') _cfg.ankiSource = opts.ankiSource;
+    if (typeof opts.beforeOpen === 'function') _cfg.beforeOpen = opts.beforeOpen;
+  }
+  function aiParams() { try { return _cfg.aiParams() || {}; } catch (_) { return {}; } }
+  var _esc = function (s) { return (window.RC && RC.esc) ? RC.esc(s) : String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  var _md = function (s) { return (window.RC && RC.md) ? RC.md(s) : String(s == null ? '' : s); };
+  var _typeset = function (el) { if (window.RC && RC.typeset) RC.typeset(el); };
+  var _toast = function (m) { if (window.RC && RC.toast) RC.toast(m); };
+
+  // ──────── CSS 注入(逐字搬自 pdf_reader.html,沿用原类名 → 视觉与 PDF 一致) ────────
+  var _cssInjected = false;
+  function injectCss() {
+    if (_cssInjected) return; _cssInjected = true;
+    var s = document.createElement('style'); s.id = 'rc-result-css';
+    s.textContent =
+      /* 结果浮层 */
+      '#result-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}' +
+      '#result-mask.open{display:flex}' +
+      '#result-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:640px;max-width:92vw;height:80vh;max-height:80vh;display:flex;flex-direction:column;line-height:1.7;position:relative}' +
+      '#result-modal h3{margin:0 0 10px;font-size:15px;color:#cfe6ff;flex-shrink:0;padding-right:36px}' +
+      '#result-modal .src{color:#8a9bb4;font-size:12px;border-left:3px solid #3b6db5;padding:8px 12px;margin-bottom:14px;background:#0d1322;border-radius:0 6px 6px 0;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto;flex-shrink:0}' +
+      '#result-modal .content{font-size:13px;color:#e6e6f0;flex:1 1 auto;overflow-y:auto;min-height:0;padding-right:4px}' +
+      '#result-modal .content p{margin:6px 0}' +
+      '#result-modal .content code{background:#0d1322;padding:2px 5px;border-radius:3px}' +
+      '#result-modal .actions{flex-shrink:0;margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;align-items:center}' +
+      '#result-followup{flex-shrink:0;display:flex;gap:6px;margin-top:10px}' +
+      '#result-followup input{flex:1;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 11px;font-size:12.5px}' +
+      '#result-followup input:focus{outline:none;border-color:#3b6db5}' +
+      '#result-followup button{background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:12.5px;white-space:nowrap}' +
+      '#result-followup button:hover{background:#2c4f86}' +
+      '#result-modal .actions #vocab-actions{display:none;flex:1;align-items:center;gap:8px;flex-wrap:wrap}' +
+      '#result-modal .actions #vocab-actions.show{display:flex}' +
+      '#result-modal .actions button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px}' +
+      '#result-modal .actions button:hover{background:#2c3e6a;border-color:#3b6db5}' +
+      '#result-modal .loading{color:#8a9bb4;font-style:italic}' +
+      /* AI 回答里的加号选中按钮 */
+      '#result-content h1,#result-content h2,#result-content h3,#result-content h4,#result-content h5,#result-content h6{position:relative}' +
+      '#result-content h1.has-pick,#result-content h2.has-pick,#result-content h3.has-pick,#result-content h4.has-pick,#result-content h5.has-pick,#result-content h6.has-pick,#result-content p.fake-head.has-pick,#result-content li.fake-head.has-pick{padding-right:30px}' +
+      '.pick-btn{flex-shrink:0;width:20px;height:20px;line-height:18px;text-align:center;border:1.5px solid #5b6a85;border-radius:50%;background:transparent;color:#a8cdff;font-size:14px;cursor:pointer;user-select:none;transition:all .12s;padding:0;font-family:inherit}' +
+      '.pick-btn:hover{border-color:#60a5fa;color:#60a5fa}' +
+      '.pick-btn.on{background:#0078d4;border-color:#0078d4;color:#fff;font-weight:700}' +
+      '#result-content .head-pick{position:absolute;right:0;top:50%;transform:translateY(-50%)}' +
+      '.reply-pick-all{align-self:flex-start;margin-top:8px;font-size:11px;color:#a8cdff;background:transparent;border:1px dashed #5b6a85;border-radius:12px;padding:3px 12px;cursor:pointer;user-select:none;transition:all .12s}' +
+      '.reply-pick-all:hover{border-color:#60a5fa;color:#60a5fa}' +
+      '.reply-pick-all.on{background:#0078d4;border-color:#0078d4;border-style:solid;color:#fff;font-weight:600}' +
+      '#result-content .hsec-picked,#result-content .hsec-picked-body{background:rgba(96,165,250,.08);box-shadow:-3px 0 0 #60a5fa}' +
+      '#result-content .hsec-picked{border-top-left-radius:4px;border-top-right-radius:4px;padding-top:2px}' +
+      '#result-content .picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:rgba(96,165,250,.06);border-radius:6px;padding:4px}' +
+      /* 右下角草稿 badge */
+      '#draft-badge{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;background:#244470;border:2px solid #3b6db5;color:#fff;font-size:18px;font-weight:700;cursor:pointer;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;user-select:none}' +
+      '#draft-badge.show{display:flex}' +
+      '#draft-badge:hover{background:#2c5188;border-color:#60a5fa}' +
+      '#draft-badge .count{font-size:13px;font-weight:600;line-height:1}' +
+      '#draft-badge .icon{font-size:18px;line-height:1}' +
+      /* 草稿列表 modal */
+      '#draft-mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:300}' +
+      '#draft-mask.open{display:flex}' +
+      '#draft-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:18px 22px;width:min(640px,92vw);max-height:84vh;display:flex;flex-direction:column}' +
+      '#draft-modal h3{margin:0 0 12px;font-size:15px;color:#cfe6ff;display:flex;align-items:center;gap:10px}' +
+      '#draft-modal h3 .clear-all{margin-left:auto;font-size:11px;color:#7a8497;background:transparent;border:1px solid #2a3550;border-radius:4px;padding:3px 8px;cursor:pointer}' +
+      '#draft-list{flex:1;overflow-y:auto;margin:0 -6px;padding:0 6px}' +
+      '.draft-item-wrap{position:relative;border-bottom:1px solid #1f2740;overflow:hidden;box-sizing:border-box}' +
+      '.draft-item{position:relative;z-index:2;background:#10162a;display:flex;gap:10px;align-items:flex-start;padding:10px 8px;cursor:pointer;transition:transform .15s,background .15s;will-change:transform;width:100%;box-sizing:border-box}' +
+      '.draft-item:hover{background:#0d1322}' +
+      '.draft-item .body{flex:1;min-width:0}' +
+      '.draft-item .src{color:#7a8497;font-size:10px;margin-bottom:3px}' +
+      '.draft-item .text{color:#cfe6ff;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden}' +
+      '.draft-item .text.full{max-height:none}' +
+      '.draft-item .sel-circle{flex-shrink:0;width:20px;height:20px;border-radius:50%;border:2px solid #5b6a85;cursor:pointer;margin-top:2px;transition:all .15s;touch-action:pan-y;align-self:center}' +
+      '.draft-item .sel-circle:hover{border-color:#60a5fa}' +
+      '.draft-item.selected .sel-circle{background:#34d399;border-color:#34d399;box-shadow:inset 0 0 0 3px #10162a}' +
+      '.draft-item-wrap.swiped .draft-item .sel-circle{border-color:#7a2828}' +
+      '.draft-item-del-row{position:absolute;right:0;top:0;bottom:0;width:64px;background:#7a2828;color:#fff;border:none;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}' +
+      '.draft-item-del-row:hover{background:#9a3232}' +
+      '.draft-item-wrap.swiped .draft-item-del-row{visibility:visible}' +
+      '.draft-item-wrap.swiped .draft-item{transform:translateX(-64px)}' +
+      '.draft-empty{text-align:center;color:#5a6680;padding:40px 20px;font-size:13px}' +
+      '#draft-actions{margin-top:14px;padding-top:14px;border-top:1px solid #2a3550;display:flex;gap:8px;flex-wrap:wrap}' +
+      '#draft-actions button{flex:1;min-width:0;background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:9px 12px;font-size:12px;cursor:pointer;transition:background .15s}' +
+      '#draft-actions button:hover{background:#2c3e6a}' +
+      '#draft-actions button.primary{background:#244470;color:#fff;border-color:#3b6db5}' +
+      '#draft-actions button.primary:hover{background:#2c5188}' +
+      '#draft-actions button:disabled{opacity:.5;cursor:not-allowed}';
+    document.head.appendChild(s);
+  }
+
+  // ════════════════════ 结果模态 ════════════════════
+  var _resultReqId = 0;   // 结果框请求序号:每开新框 +1,异步回调写入前比对,过期(被新任务覆盖)就丢弃
+  try { window._resultReqId = 0; } catch (e) {}   // 暴露全局:rc-wordpop 的查词框跨「翻译/解释/对话」共享同一序号防串台(H1)
+
+  function openResult(title, src, contentHtml) {
+    if (typeof _cfg.beforeOpen === 'function') { try { _cfg.beforeOpen(); } catch (_) {} }   // 开新框前先快照上一条(PDF:📜 历史)
+    _resultReqId++; try { window._resultReqId = _resultReqId; } catch (e) {}   // 新结果框 → 作废所有进行中的旧异步任务(含 rc-wordpop 查词流)
+    var t = document.getElementById('result-title'); if (t) t.textContent = title;
+    var s = document.getElementById('result-src'); if (s) s.textContent = src;
+    var c = document.getElementById('result-content');
+    if (c) {
+      c.innerHTML = contentHtml;
+      c.scrollTop = 0;
+      c.dataset.title = title;
+      c.dataset.src = src;
+      _typeset(c);
+    }
+    // 清掉上次 vocab-actions(翻译/解释/AI 调用不需要它)
+    var va = document.getElementById('vocab-actions');
+    if (va) { va.className = ''; va.innerHTML = ''; }
+    var m = document.getElementById('result-mask'); if (m) m.classList.add('open');
+  }
+  function closeResult() {
+    // 照抄 PDF 原生 window.closeResult(reader.src/20-result-draft.js):关闭前也要把当前结果快照进
+    // 「📜 历史」,不是只有 openResult 才快照(用户点「关闭」/点遮罩空白处,不再开新结果的话,这条内容
+    // 之前会漏记)。native 直接调 _pushQueryHistory();这里走同一个 beforeOpen 钩子(PDF 侧就是接的
+    // _pushQueryHistory,见 pdf-adapter.js::_ensureResultCfg),不新增第二套命名。
+    if (typeof _cfg.beforeOpen === 'function') { try { _cfg.beforeOpen(); } catch (_) {} }
+    var m = document.getElementById('result-mask'); if (m) m.classList.remove('open');
+  }
+
+  // ──────── AI 回答里的加号选中(同 QA browser 风格) ────────
+  function _headLevel(h) { return parseInt(h.tagName.slice(1), 10); }
+  function _isFakeHead(h) { return h.classList && h.classList.contains('fake-head'); }
+  function addResultPickers() {
+    var md = document.getElementById('result-content');
+    if (!md) return;
+    // 先清掉旧的(流式过程中会被多次 marked.parse 覆盖)
+    md.querySelectorAll('.head-pick').forEach(function (b) { b.remove(); });
+    md.querySelectorAll('.has-pick').forEach(function (el) { el.classList.remove('has-pick'); });
+    var existingAll = document.querySelector('.reply-pick-all-result');
+    if (existingAll) existingAll.remove();
+
+    var realHeads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+    // 粗体段落假标题(AI 常用 **标题** 而非 ## 标题)
+    var fakeHeads = [];
+    md.querySelectorAll('p, li').forEach(function (el) {
+      if (el.closest('h1,h2,h3,h4,h5,h6')) return;
+      var strongs = el.querySelectorAll('strong');
+      if (strongs.length !== 1) return;
+      var t = (el.textContent || '').trim();
+      var stt = (strongs[0].textContent || '').trim();
+      if (t.length >= 3 && stt.length >= 2 && stt.length / t.length >= 0.85) {
+        el.classList.add('fake-head');
+        fakeHeads.push(el);
+      }
+    });
+    var heads = realHeads.concat(fakeHeads);
+
+    // 右上角小加号(选用整条回答),定位在 result-modal 标题旁
+    var modal = document.getElementById('result-modal');
+    if (!modal) return;
+    var all = modal.querySelector('.reply-pick-all-result');
+    if (!all) {
+      all = document.createElement('button');
+      all.className = 'pick-btn reply-pick-all-result';
+      all.title = '选用整条回答（加入草稿）';
+      all.style.position = 'absolute';
+      all.style.right = '22px';
+      all.style.top = '20px';
+      modal.style.position = 'relative';
+      modal.appendChild(all);
+    }
+    all.textContent = '+';
+    all.classList.remove('on');
+    all.onclick = function (e) {
+      e.stopPropagation();
+      var on = all.classList.toggle('on');
+      all.textContent = on ? '✓' : '+';
+      md.classList.toggle('picked-all', on);
+      var fullText = (md.dataset.raw || md.textContent || '').trim();
+      if (on) {
+        if (fullText && !_drafts.some(function (d) { return d.text === fullText; })) {
+          _drafts.push({
+            id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            text: fullText,
+            source: md.dataset.title || '',
+            src: md.dataset.src || '',
+            time: Date.now(),
+            selected: true,
+          });
+          _persistDrafts();
+          _updateDraftBadge();
+        }
+      } else {
+        _drafts = _drafts.filter(function (d) { return d.text !== fullText; });
+        _persistDrafts();
+        _updateDraftBadge();
+      }
+    };
+    md.dataset.raw = md.textContent || '';
+
+    if (!heads.length) return;
+    var singleTopCovers = false, singleTop = null;
+    if (realHeads.length) {
+      var minLvl = Math.min.apply(null, realHeads.map(_headLevel));
+      var tops = realHeads.filter(function (h) { return _headLevel(h) === minLvl; });
+      if (tops.length === 1 && md.firstElementChild === tops[0]) {
+        singleTopCovers = true; singleTop = tops[0];
+      }
+    }
+    heads.forEach(function (h) {
+      if (singleTopCovers && h === singleTop) return;
+      if (h.querySelector('.head-pick')) return;
+      h.classList.add('has-pick');
+      var btn = document.createElement('button');
+      btn.className = 'pick-btn head-pick';
+      btn.textContent = '+';
+      btn.onclick = function (e) { e.stopPropagation(); _toggleResultPick(h, md); };
+      h.appendChild(btn);
+    });
+  }
+  function _toggleResultPick(h, md) {
+    var newOn = !h.querySelector('.head-pick').classList.contains('on');
+    if (!_isFakeHead(h) && /^H[1-6]$/.test(h.tagName)) {
+      var heads = Array.from(md.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+      var i = heads.indexOf(h);
+      var lvl = _headLevel(h);
+      _setResultPick(h, newOn);
+      for (var j = i + 1; j < heads.length; j++) {
+        if (_headLevel(heads[j]) <= lvl) break;
+        _setResultPick(heads[j], newOn);
+      }
+    } else {
+      _setResultPick(h, newOn);
+    }
+    _collectAndPersistResultSelection();
+  }
+  function _setResultPick(h, on) {
+    var btn = h.querySelector('.head-pick');
+    if (btn) btn.classList.toggle('on', on);
+    h.classList.toggle('hsec-picked', on);
+    var sib = h.nextElementSibling;
+    while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
+      sib.classList.toggle('hsec-picked-body', on);
+      sib = sib.nextElementSibling;
+    }
+  }
+  function _collectSelectedSectionTexts() {
+    var md = document.getElementById('result-content');
+    if (!md) return [];
+    var parts = [];
+    md.querySelectorAll('h1,h2,h3,h4,h5,h6,p.fake-head,li.fake-head').forEach(function (h) {
+      var btn = h.querySelector('.head-pick');
+      if (!btn || !btn.classList.contains('on')) return;
+      var txt;
+      if (/^H[1-6]$/.test(h.tagName)) {
+        txt = '#'.repeat(_headLevel(h)) + ' ' + (h.textContent || '').replace(/\+\s*$/, '').trim();
+      } else {
+        txt = (h.textContent || '').replace(/\+\s*$/, '').trim();
+      }
+      var sib = h.nextElementSibling;
+      while (sib && !/^H[1-6]$/.test(sib.tagName) && !(sib.classList && sib.classList.contains('fake-head'))) {
+        var t = (sib.textContent || '').trim();
+        if (t) txt += '\n' + t;
+        sib = sib.nextElementSibling;
+      }
+      parts.push(txt.trim());
+    });
+    return parts;
+  }
+  function _collectAndPersistResultSelection() {
+    // 收集当前 modal 内已选段,去重 push 到 _drafts
+    var texts = _collectSelectedSectionTexts();
+    var rc = document.getElementById('result-content');
+    var title = (rc && rc.dataset.title) || '';
+    var src = (rc && rc.dataset.src) || '';
+    for (var i = 0; i < texts.length; i++) {
+      var t = texts[i];
+      if (!t) continue;
+      if (!_drafts.some(function (d) { return d.text === t; })) {
+        _drafts.push({ id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), text: t, source: title, src: src, time: Date.now(), selected: true });
+      }
+    }
+    _persistDrafts();
+    _updateDraftBadge();
+  }
+
+  // ──────── 草稿列表(多个 AI 回答的勾选段累积) ────────
+  var _drafts = [];
+  function _loadDrafts() { try { _drafts = JSON.parse(localStorage.getItem(_cfg.draftKey) || '[]'); } catch (_) { _drafts = []; } }
+  function _persistDrafts() { try { localStorage.setItem(_cfg.draftKey, JSON.stringify(_drafts)); } catch (_) {} }
+  _loadDrafts();
+  // 直接把一段文本(如公式 LaTeX)加进草稿,供「制卡/笔记」用(公式浮层等外部调用)
+  function addDraftText(text, source, src) {
+    var t = (text || '').trim();
+    if (!t) return false;
+    if (_drafts.some(function (d) { return d.text === t; })) { _updateDraftBadge(); return true; }
+    _drafts.push({ id: 'd_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      text: t, source: source || '公式', src: src || '', time: Date.now(), selected: true });
+    _persistDrafts(); _updateDraftBadge();
+    return true;
+  }
+  function _updateDraftBadge() {
+    var b = document.getElementById('draft-badge');
+    var c = document.getElementById('draft-count');
+    if (c) c.textContent = _drafts.length;
+    if (b) b.classList.toggle('show', _drafts.length > 0);
+  }
+  function openDraftModal() {
+    var list = document.getElementById('draft-list');
+    var cnt = document.getElementById('draft-modal-count');
+    if (!list) return;
+    if (cnt) cnt.textContent = '（共 ' + _drafts.length + ' 段，已选 ' + _drafts.filter(function (d) { return d.selected; }).length + '）';
+    if (!_drafts.length) {
+      list.innerHTML = '<div class="draft-empty">还没有勾选任何段落。<br>在 AI 回答里点 + 按钮收集段落。</div>';
+    } else {
+      list.innerHTML = _drafts.map(function (d) {
+        return '\n      <div class="draft-item-wrap" data-id="' + d.id + '">\n' +
+          '        <div class="draft-item ' + (d.selected ? 'selected' : '') + '">\n' +
+          '          <div class="body">\n' +
+          '            <div class="src">' + (d.source || '').replace(/&/g, '&amp;').replace(/</g, '&lt;') + ' · ' + new Date(d.time).toLocaleString().slice(5, 16) + '</div>\n' +
+          '            <div class="text" id="dt-' + d.id + '">' + d.text.slice(0, 200).replace(/&/g, '&amp;').replace(/</g, '&lt;') + (d.text.length > 200 ? '…' : '') + '</div>\n' +
+          '          </div>\n' +
+          '          <div class="sel-circle" title="' + (d.selected ? '已选（点击取消）' : '未选（点击勾选）') + '"></div>\n' +
+          '        </div>\n' +
+          '        <button class="draft-item-del-row" type="button" title="删除">🗑</button>\n' +
+          '      </div>\n    ';
+      }).join('');
+      // 绑定每条 draft 的交互
+      list.querySelectorAll('.draft-item-wrap').forEach(function (w) { _bindDraftItem(w); });
+    }
+    var m = document.getElementById('draft-mask'); if (m) m.classList.add('open');
+  }
+  function closeDraftModal() { var m = document.getElementById('draft-mask'); if (m) m.classList.remove('open'); }
+
+  // 草稿项交互:圆圈右侧(单击=切换 selected);body 单击=展开;触屏左滑 / 鼠标 body 拖 = 下方滑出删除栏
+  function _bindDraftItem(wrap) {
+    var id = wrap.dataset.id;
+    var item = wrap.querySelector('.draft-item');
+    var body = wrap.querySelector('.body');
+    var circle = wrap.querySelector('.sel-circle');
+    var delBtn = wrap.querySelector('.draft-item-del-row');
+    if (!item || !circle) return;
+    var reveal = function () { wrap.classList.add('swiped'); item.style.transform = ''; };
+    var reset = function () { wrap.classList.remove('swiped'); item.style.transform = ''; };
+
+    delBtn.onclick = function (e) { e.stopPropagation(); deleteDraft(id); };
+
+    // 圆圈单击 = 切换 selected(如果当前 swiped 态先复位)
+    circle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (wrap.classList.contains('swiped')) { reset(); return; }
+      toggleDraftSel(id);
+    });
+
+    // 触屏:item 整体左滑揭示删除
+    var sx = 0, sy = 0, dx = 0, dy = 0, swiping = false, axis = '';
+    item.addEventListener('touchstart', function (e) {
+      var t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = dy = 0; swiping = true; axis = '';
+    }, { passive: true });
+    item.addEventListener('touchmove', function (e) {
+      if (!swiping) return;
+      var t = e.touches[0];
+      dx = t.clientX - sx; dy = t.clientY - sy;
+      if (!axis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+        axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      }
+      if (axis === 'x') {
+        if (dx < 0) item.style.transform = 'translateX(' + Math.max(dx, -80) + 'px)';
+        else if (wrap.classList.contains('swiped')) item.style.transform = 'translateX(' + Math.min(dx, 30) + 'px)';
+      }
+    }, { passive: true });
+    item.addEventListener('touchend', function () {
+      swiping = false;
+      if (axis === 'x') {
+        if (dx < -40) reveal();
+        else if (dx > 30 || !wrap.classList.contains('swiped')) reset();
+      }
+      dx = dy = 0; axis = '';
+    });
+
+    // 鼠标:在 body 区域水平拖 → swipe;纯点击 = 展开
+    var mdn = false, mx = 0, mdx = 0, dragged = false;
+    body.addEventListener('mousedown', function (e) {
+      mdn = true; mx = e.clientX; mdx = 0; dragged = false;
+    });
+    var onMove = function (e) {
+      if (!mdn) return;
+      mdx = e.clientX - mx;
+      if (Math.abs(mdx) > 4) dragged = true;
+      if (mdx < 0) item.style.transform = 'translateX(' + Math.max(mdx, -80) + 'px)';
+      else if (wrap.classList.contains('swiped')) item.style.transform = 'translateX(' + Math.min(mdx, 30) + 'px)';
+    };
+    var onUp = function () {
+      if (!mdn) return;
+      mdn = false;
+      if (dragged) {
+        if (mdx < -40) reveal();
+        else if (mdx > 30 || !wrap.classList.contains('swiped')) reset();
+      }
+      mdx = 0;
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+
+    // body 单击 = 展开/收起;处于 swiped 态则先复位
+    body.addEventListener('click', function (e) {
+      if (dragged) { dragged = false; e.stopPropagation(); return; }
+      if (wrap.classList.contains('swiped')) { reset(); return; }
+      expandDraft(id);
+    });
+    // 清理:每次 openDraftModal 重写 innerHTML,旧 DOM listener 随之 GC(对照 PDF 原注释)
+  }
+  function toggleDraftSel(id) {
+    var d = _drafts.find(function (x) { return x.id === id; });
+    if (!d) return;
+    d.selected = !d.selected;
+    _persistDrafts();
+    openDraftModal();
+  }
+  function expandDraft(id) {
+    var el = document.getElementById('dt-' + id);
+    var d = _drafts.find(function (x) { return x.id === id; });
+    if (!el || !d) return;
+    // 切换全文/截断显示
+    if (el.dataset.full === '1') {
+      el.textContent = d.text.slice(0, 200) + (d.text.length > 200 ? '…' : '');
+      el.dataset.full = '0';
+      el.style.maxHeight = '80px';
+    } else {
+      el.textContent = d.text;
+      el.dataset.full = '1';
+      el.style.maxHeight = 'none';
+    }
+  }
+  function deleteDraft(id) {
+    _drafts = _drafts.filter(function (d) { return d.id !== id; });
+    _persistDrafts();
+    _updateDraftBadge();
+    openDraftModal();
+  }
+  function clearAllDrafts() {
+    if (!confirm('清空所有 ' + _drafts.length + ' 段已选内容？')) return;
+    _drafts = [];
+    _persistDrafts();
+    _updateDraftBadge();
+    closeDraftModal();
+  }
+
+  // ── 后台任务进度条(右下角堆叠):AI 创建笔记/Anki 不阻塞阅读器 ──
+  var _bgJobSeq = 0;
+  function _ensureBgJobsEl() {
+    var c = document.getElementById('bg-jobs');
+    if (!c) {
+      c = document.createElement('div'); c.id = 'bg-jobs';
+      c.style.cssText = 'position:fixed;right:18px;bottom:80px;display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
+      document.body.appendChild(c);
+    }
+    return c;
+  }
+  function _startBgJob(text) {
+    var id = 'bgj' + (++_bgJobSeq);
+    var el = document.createElement('div'); el.id = id;
+    el.style.cssText = 'background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
+    el.textContent = '⏳ ' + text;
+    _ensureBgJobsEl().appendChild(el);
+    return id;
+  }
+  function _finishBgJob(id, text, openUrl) {
+    var el = document.getElementById(id); if (!el) return;
+    el.style.borderColor = '#34d399'; el.style.color = '#34d399';
+    el.textContent = '✓ ' + text + (openUrl ? ' · 点击打开' : '');
+    if (openUrl) { el.style.cursor = 'pointer'; el.onclick = function () { location.href = openUrl; }; }
+    setTimeout(function () { el.style.transition = 'opacity .4s'; el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 400); }, openUrl ? 8000 : 4500);
+  }
+  function _failBgJob(id, text, restore) {
+    var el = document.getElementById(id); if (!el) return;
+    el.style.borderColor = '#f87171'; el.style.color = '#f87171'; el.style.cursor = 'pointer';
+    el.textContent = '✗ ' + text + ' · 点关闭';
+    el.onclick = function () { el.remove(); };
+    // 失败 → 把段落放回草稿,方便重试
+    if (restore && restore.length) {
+      for (var i = 0; i < restore.length; i++) {
+        var d = restore[i];
+        if (!_drafts.some(function (x) { return x.text === d.text; })) { d.selected = true; _drafts.push(d); }
+      }
+      _persistDrafts(); _updateDraftBadge();
+    }
+  }
+
+  // 轮询后台 job:网页切后台时轮询暂停、回来继续;job 在服务器跑完结果存着,不丢
+  function _pollJob(jobId, jobUi, restoreOnFail) {
+    var tries = 0, unknownTries = 0;
+    var base = _cfg.jobStatusEndpoint;
+    var url = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'id=' + encodeURIComponent(jobId);
+    var iv = setInterval(function () {
+      tries++;
+      fetch(url).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.status === 'done') {
+          clearInterval(iv);
+          var out = d.result || {};
+          if (out.ok) {
+            var parts = [];
+            if (out.note_path) parts.push('笔记已建');
+            if (out.anki_added) parts.push('Anki ' + out.anki_added + ' 张');
+            _finishBgJob(jobUi, parts.join(' · ') || '完成', out.obsidian_url || '');
+          } else { _failBgJob(jobUi, out.error || '失败', restoreOnFail); }
+        } else if (d.status === 'error') {
+          clearInterval(iv); _failBgJob(jobUi, d.error || '失败', restoreOnFail);
+        } else if (d.status === 'unknown') {
+          if (++unknownTries >= 3) { clearInterval(iv); _failBgJob(jobUi, '任务丢失(服务重启?)', restoreOnFail); }
+        }
+        // running → 继续轮询
+      }).catch(function () {
+        // 网络瞬断/网页在后台 → 不立即失败,继续轮询;超 6 分钟才放弃
+        if (tries > 180) { clearInterval(iv); _failBgJob(jobUi, '轮询超时', restoreOnFail); }
+      });
+    }, 2000);
+  }
+
+  function _doCreate(makeNote, makeAnki) {
+    var picked = _drafts.filter(function (d) { return d.selected; });
+    if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
+    var noteName = '';
+    if (makeNote) {
+      noteName = prompt('请输入笔记名（不含 .md）：', '');
+      if (noteName === null) return;
+      noteName = (noteName || '').trim();
+      if (!noteName) { alert('未输入笔记名'); return; }
+    }
+    // 立即关 modal + 乐观移除已选段(失败再放回),任务丢后台跑,不挡着阅读器
+    var used = picked.slice();
+    _drafts = _drafts.filter(function (x) { return !x.selected; });
+    _persistDrafts(); _updateDraftBadge(); closeDraftModal();
+    var label = (makeNote && makeAnki) ? '笔记+Anki' : (makeNote ? '笔记' : 'Anki');
+    var jobUi = _startBgJob('创建' + label + '中…（' + used.length + ' 段）');
+    var ov = aiParams();
+    // 提交到服务器后台 job(短请求,立即返回 job_id),再轮询;任务在服务器跑,网页切后台也不中断
+    fetch(_cfg.snippetsEndpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        snippets: used.map(function (d) { return { text: d.text, source: d.source }; }),
+        make_note: makeNote, make_anki: makeAnki,
+        note_name: noteName,
+        model: ov.model || '', effort: ov.effort || '',
+      }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', used); return; }
+      _pollJob(d.job_id, jobUi, used);
+    }).catch(function (e) {
+      _failBgJob(jobUi, e.message, used);
+    });
+  }
+  function createNoteFromDrafts() { _doCreate(true, false); }
+  function createAnkiFromDrafts() { _doCreate(false, true); }
+  function createBothFromDrafts() { _doCreate(true, true); }
+
+  // ════════════════════ 抗断连流式 AI ════════════════════
+  // SSE 主路(桌面端流式打字),iPad 切后台/网抖断了 → 回退轮询 streamResultEndpoint?id=rid
+  // 拿后台线程已生成的完整文本(断点不丢)。onText(累计全文) 实时回调(内部 ~80ms 节流)。返回 {ok,text,error}。
+  // 后端 rid 路由:translate/explain/grammar POST body.rid。
+  function _aiStream(url, opts) {
+    opts = opts || {};
+    var method = (opts.method || 'GET').toUpperCase();
+    var rid = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    var furl = url, body = null;
+    var headers = { 'Accept': 'text/event-stream' };
+    if (method === 'GET') {
+      furl += (url.indexOf('?') >= 0 ? '&' : '?') + 'rid=' + encodeURIComponent(rid);
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify(Object.assign({}, opts.body || {}, { rid: rid }));
+    }
+    var onTextRaw = opts.onText || function () {};
+    var acc = '', finished = false, usingPoll = false, lastCb = 0, cbTimer = null;
+    var ctrl = new AbortController();
+    return new Promise(function (resolve) {
+      var emit = function (force) {                  // onText 节流(~80ms),结束时强制
+        if (finished && !force) return;
+        var now = Date.now();
+        if (force || now - lastCb >= 80) { lastCb = now; if (cbTimer) { clearTimeout(cbTimer); cbTimer = null; } try { onTextRaw(acc); } catch (_) {} }
+        else if (!cbTimer) cbTimer = setTimeout(function () { cbTimer = null; lastCb = Date.now(); try { onTextRaw(acc); } catch (_) {} }, 80 - (now - lastCb));
+      };
+      var cleanup = function () { document.removeEventListener('visibilitychange', onVis); if (cbTimer) clearTimeout(cbTimer); try { ctrl.abort(); } catch (_) {} };
+      var finish = function (ok, error) { if (finished) return; finished = true; try { onTextRaw(acc); } catch (_) {} cleanup(); resolve({ ok: ok, text: acc, error: error || '' }); };
+      // 回退轮询:后台线程仍在跑,拉它已生成的完整文本
+      var pollN = 0;
+      var poll = function () {
+        if (finished) return;
+        pollN++;
+        fetch(_cfg.streamResultEndpoint + (_cfg.streamResultEndpoint.indexOf('?') >= 0 ? '&' : '?') + 'id=' + encodeURIComponent(rid)).then(function (r) { return r.json(); }).then(function (d) {
+          if (typeof d.full === 'string' && d.full.length > acc.length) { acc = d.full; emit(); }
+          if (d.status === 'done') return finish(true);
+          if (d.status === 'error') return finish(false, d.error || 'AI 失败');
+          if (d.status === 'unknown' && pollN > 3) return finish(!!acc, acc ? '' : '任务丢失(服务重启?)');
+          if (pollN > 240) return finish(!!acc, acc ? '' : '轮询超时');   // ~5min 兜底
+          setTimeout(poll, 1200);
+        }).catch(function () {
+          if (pollN > 240) return finish(!!acc, acc ? '' : '轮询超时');
+          setTimeout(poll, 1200);
+        });
+      };
+      var startPoll = function () { if (usingPoll || finished) return; usingPoll = true; try { ctrl.abort(); } catch (_) {} poll(); };
+      // 切后台→回前台:iOS 挂起 JS 会让 SSE reader 卡死,主动转轮询
+      var onVis = function () { if (document.visibilityState === 'visible' && !finished) startPoll(); };
+      document.addEventListener('visibilitychange', onVis);
+      // SSE 主路
+      (function () {
+        fetch(furl, { method: method, headers: headers, body: body, signal: ctrl.signal }).then(function (r) {
+          var ct = r.headers.get('content-type') || '';
+          if (!r.ok || !ct.includes('event-stream')) {   // 服务端没流式(多半错误 JSON) → 当普通 JSON
+            return r.json().catch(function () { return {}; }).then(function (d) {
+              if (d && d.ok && (d.translation || d.explanation)) { acc = d.translation || d.explanation; return finish(true); }
+              return finish(false, (d && d.error) || ('HTTP ' + r.status));
+            });
+          }
+          var reader = r.body.getReader(), dec = new TextDecoder();
+          var buf = '';
+          var pump = function () {
+            return reader.read().then(function (res) {
+              if (res.done) { if (!finished && !usingPoll) startPoll(); return; }   // 流断了没收到 done → 转轮询补全
+              if (usingPoll || finished) return;
+              buf += dec.decode(res.value, { stream: true });
+              var idx;
+              while ((idx = buf.indexOf('\n\n')) >= 0) {
+                if (usingPoll || finished) return;
+                var ev = buf.slice(0, idx); buf = buf.slice(idx + 2);
+                if (/^event:\s*error/m.test(ev)) { var er = ''; var me = ev.match(/^data:\s*(.*)/m); try { er = JSON.parse(me[1]).error; } catch (_) {} return finish(false, er || 'AI 失败'); }
+                if (/^event:\s*done/m.test(ev)) return finish(true);
+                var m = ev.match(/^data:\s*(.*)/m);
+                if (m) { try { var j = JSON.parse(m[1]); if (j.text) { acc += j.text; emit(); } } catch (_) {} }
+              }
+              return pump();
+            });
+          };
+          return pump();
+        }).catch(function () {
+          if (!finished && !usingPoll) startPoll();    // SSE 出错/abort → 后台线程仍在跑,转轮询
+        });
+      })();
+    });
+  }
+
+  // ════════════════════ 核心 API ════════════════════
+  // aiCall(url, body, title, opts) — 打开结果模态、预览原文、SSE 流式渲染(RC.md + RC.typeset)、
+  //   底部追问、整条→草稿、子标题真/假标题级联加号→草稿。
+  function aiCall(url, body, title, opts) {
+    body = body || {};
+    _applyOpts(opts);
+    var ov = aiParams();
+    if (ov.model) body.model = ov.model;
+    if (ov.effort) body.effort = ov.effort;
+    // 记当前框的「原文 / 上下文 / kind」,供 markFromResult/ankiFromResult
+    _curMeta = {
+      text: body.text || body.sentence || '',
+      sentence: body.context || body.sentence || '',
+      kind: (opts && opts.kind) || 'note',
+    };
+    // 预览框显示「实际要处理的文本」(body.text) → 预览=输入,所见即所处理
+    openResult(title, body.text || body.sentence || '', '<div class="loading">⏳ AI 处理中…</div>');
+    var myReq = _resultReqId;   // 本次 AI 调用的请求序号;被新结果框作废后渲染一律丢弃
+    var contentEl = document.getElementById('result-content');
+    var render = function (text) {              // 渲染累计全文(marked + MathJax)
+      if (myReq !== _resultReqId) return;       // 已被新结果框作废 → 不写回(防延迟流式覆盖新结果)
+      if (!contentEl) return;
+      contentEl.innerHTML = _md(text || ' ');
+      _typeset(contentEl);
+    };
+    // 抗断连:SSE 主路 + 切后台/网抖回退轮询(后台线程跑完,结果不丢)
+    return _aiStream(url, { method: 'POST', body: body, onText: render }).then(function (res) {
+      if (myReq !== _resultReqId) return;
+      render(res.text);
+      if (!res.ok && contentEl) contentEl.innerHTML += '<div style="color:#c00;margin-top:8px">✗ ' + (res.error || '失败') + '</div>';
+      addResultPickers();   // 完成后给标题加 +
+    }).catch(function (e) {
+      if (myReq === _resultReqId && contentEl) contentEl.innerHTML = '<div style="color:#c00">✗ ' + e.message + '</div>';
+    });
+  }
+
+  // openChat(text, ctx, opts) — 开模态预填原文+上下文并 focus 追问框(对应 PDF onChat)。
+  function openChat(text, ctx, opts) {
+    text = text || ''; ctx = ctx || '';
+    _applyOpts(opts);
+    _curMeta = { text: text, sentence: ctx || text, kind: (opts && opts.kind) || 'note' };
+    var html = '<div style="font-size:12.5px;line-height:1.65">' +
+      '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>' +
+      '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(text) + '</div>';
+    if (ctx && ctx.trim() !== text.trim()) {
+      html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>' +
+        '<div style="color:#8a9bb4;white-space:pre-wrap">' + _esc(ctx) + '</div>';
+    }
+    html += '<div style="margin-top:12px;color:#5a6680">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
+    openResult('💬 AI 对话', text, html);
+    setTimeout(function () {
+      var i = document.getElementById('result-followup-input');
+      if (i) { i.placeholder = '问 AI（已带原文 + 上下文）…'; i.focus(); }
+    }, 120);
+  }
+
+  // 结果框底部「追问」:基于已有内容继续问 AI,流式追加到同一框(多轮对话)
+  function _followupAsk() {
+    var inp = document.getElementById('result-followup-input');
+    if (!inp) return;
+    var q = (inp.value || '').trim();
+    if (!q) return;
+    inp.value = '';
+    var contentEl = document.getElementById('result-content');
+    if (!contentEl) return;
+    var history = (contentEl.textContent || '').slice(0, 4000);
+    var qDiv = document.createElement('div');
+    qDiv.style.cssText = 'margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#a8cdff;font-size:12px;font-weight:600';
+    qDiv.textContent = '问：' + q;
+    contentEl.appendChild(qDiv);
+    var aDiv = document.createElement('div');
+    aDiv.style.cssText = 'margin-top:6px;color:#e6e6f0';
+    aDiv.innerHTML = '<span class="loading">⏳</span>';
+    contentEl.appendChild(aDiv);
+    contentEl.scrollTop = contentEl.scrollHeight;
+    var myReq = _resultReqId;
+    var ov = aiParams();
+    var render = function (text) {
+      if (myReq !== _resultReqId) return;   // 结果框已被新内容作废
+      aDiv.innerHTML = _md(text || ' ');
+      _typeset(aDiv);
+      contentEl.scrollTop = contentEl.scrollHeight;
+    };
+    _aiStream(_cfg.followupEndpoint, {
+      method: 'POST', onText: render,
+      body: { text: q, context: '基于之前的解释/对话继续回答：\n' + history, model: ov.model || '', effort: ov.effort || '' },
+    }).then(function (res) {
+      if (myReq !== _resultReqId) return;
+      if (res.ok && res.text) render(res.text);
+      else if (!res.ok) aDiv.innerHTML = '<span style="color:#c00">✗ ' + (res.error || '失败') + '</span>';
+      else aDiv.innerHTML = '(无回答)';
+      contentEl.scrollTop = contentEl.scrollHeight;
+      try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」,制 Anki 含全框选中
+    }).catch(function (e) {
+      aDiv.innerHTML = '<span style="color:#c00">✗ ' + e.message + '</span>';
+      contentEl.scrollTop = contentEl.scrollHeight;
+      // 照抄 native _followupAsk:native 用 try/catch,「+选段」补挂这行在 try/catch 之后必跑(含异常路径);
+      // 这里是 promise 链,.catch() 分支之前漏了这行,补齐(_aiStream 本身从不 reject,实际触发概率极低,
+      // 但要跟 native 行为一致)。
+      try { addResultPickers(); } catch (_) {}
+    });
+  }
+
+  // 从 result-modal「🖌 标记」入口:整条回答 → 高亮(底座经 opts.markHighlight 抽象;EPUB 用当前选区 anchor)
+  function markFromResult() {
+    var mh = _cfg.markHighlight;
+    if (typeof mh !== 'function') { _toast('无法标记（缺少高亮适配器）'); return; }
+    var md = document.getElementById('result-content');
+    if (!md) return;
+    var clone = md.cloneNode(true);
+    clone.querySelectorAll('.head-pick,.reply-pick-all-result,.pick-btn').forEach(function (b) { b.remove(); });
+    var body = (clone.dataset.raw || clone.textContent || '').trim();
+    Promise.resolve(mh(_curMeta.text, body, _curMeta.sentence, _curMeta.kind)).then(function (ok) {
+      if (ok !== false) { closeResult(); _toast('已加标记 🖌'); }
+    }).catch(function () {});
+  }
+
+  // 从 result-modal「🎴 制 Anki」:把「选中原文 + 上下文 + 这条解释」做成 Anki 卡(后台,复用进度条)
+  function ankiFromResult() {
+    var srcInfo = (typeof _cfg.ankiSource === 'function' ? _cfg.ankiSource() : null) || {};
+    var sel = _curMeta.text || '';
+    var md = document.getElementById('result-content');
+    if (!md) return;
+    var clone = md.cloneNode(true);
+    clone.querySelectorAll('.head-pick,.reply-pick-all-result,.pick-btn').forEach(function (b) { b.remove(); });
+    var body = (clone.dataset.raw || clone.textContent || '').trim();
+    if (!sel && !body) { _toast('没有可制卡的内容'); return; }
+    var sentence = srcInfo.sentence || _curMeta.sentence || '';
+    var srcUrl = srcInfo.sourceUrl || '';   // 原句导航链接:卡片背面可点回到原文页
+    var text = '【原文】' + sel +
+      (sentence && sentence !== sel ? '\n【上下文】' + sentence : '') +
+      '\n【解释】' + body +
+      (srcUrl ? '\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】' + srcUrl : '');
+    closeResult();
+    var jobUi = _startBgJob('制 Anki 中…');
+    var ov = aiParams();
+    fetch(_cfg.snippetsEndpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        snippets: [{ text: text, source: sel || sentence, file: srcInfo.file || '' }],
+        make_note: false, make_anki: true, note_name: '',
+        model: ov.model || '', effort: ov.effort || '',
+      }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', null); return; }
+      _pollJob(d.job_id, jobUi, null);
+    }).catch(function (e) { _failBgJob(jobUi, e.message, null); });
+  }
+
+  // ════════════════════ 暴露 ════════════════════
+  injectCss();
+  // 启动时刷新 badge
+  setTimeout(_updateDraftBadge, 200);
+
+  window.RC.result = {
+    aiCall: aiCall,
+    openChat: openChat,
+    openResult: openResult,
+    closeResult: closeResult,
+    addDraftText: addDraftText,
+    aiStream: _aiStream,   // 暴露 SSE 流式基元(抗断连 rid 轮询兜底);grammar 等需解析自定义流标志的功能复用
+    config: function (opts) { _applyOpts(opts); if (opts && opts.draftKey) { _loadDrafts(); _updateDraftBadge(); } return window.RC.result; },
+  };
+
+  // HTML onclick 用到的函数挂 window.*
+  window.openResult = openResult;
+  window.closeResult = closeResult;
+  // 供 host(reader.src)桥接「解释」琥珀高亮点击重开用(native _reopenExplain/_runExplainBg 共享模式分支
+  // 需要调 rc-result 自己的 addResultPickers,不是 reader.js 模块作用域里那份裸声明,见 H1 系列注释)。
+  window.addResultPickers = addResultPickers;
+  window.openDraftModal = openDraftModal;
+  window.closeDraftModal = closeDraftModal;
+  window.toggleDraftSel = toggleDraftSel;
+  window.expandDraft = expandDraft;
+  window.deleteDraft = deleteDraft;
+  window.clearAllDrafts = clearAllDrafts;
+  window.createNoteFromDrafts = createNoteFromDrafts;
+  window.createAnkiFromDrafts = createAnkiFromDrafts;
+  window.createBothFromDrafts = createBothFromDrafts;
+  window.addDraftText = addDraftText;
+  window.markFromResult = markFromResult;
+  window.ankiFromResult = ankiFromResult;
+  window._followupAsk = _followupAsk;
+})();

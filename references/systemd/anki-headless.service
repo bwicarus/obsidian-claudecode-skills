@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/root/claude/.env
+EnvironmentFile=/home/bwicarus/claude/.env
 Environment=DISPLAY=:99
 Environment=QTWEBENGINE_DISABLE_SANDBOX=1
 Environment=QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox
@@ -14,7 +14,7 @@ ExecStartPre=/bin/sleep 3
 ExecStart=/opt/anki-venv/bin/anki -p User\x201 -l en
 Restart=on-failure
 RestartSec=10
-User=root
+User=bwicarus
 
 [Install]
 WantedBy=multi-user.target

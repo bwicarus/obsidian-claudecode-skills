@@ -188,6 +188,13 @@ EOF
   vault 快速同步（清理 + KG prune，不跑 AI / 不动 Anki）。
 - `push-big-files.{service,timer}`（2026-06-08）—— 每 4 小时把 vault 里 >200MB 的文件推到 PC，
   绕过 Obsidian Sync 单文件 200MB 上限。详见「大文件跨设备」一节。
+- `bwicarus-backup.{service,timer}`（2026-06-07）—— 每日 **03:30** 跑 `scripts/backup_data.sh`，
+  把 webapp/data 账号数据（app.db/fitness/youtube DB 走 `sqlite3 .backup` 在线一致备份 + 用户 json）
+  + claude/state 学习状态备份到 `~/backups`（保留 14 份，排除可再生的 page-img/OCR/模型/搜索索引大缓存）。
+- `yolo-figures.{service,timer}`（2026-06-20）—— 每 **6h** 闲时跑 `doclayout-venv/bin/python scripts/yolo_figures.py --all`，
+  DocLayout-YOLO 给开了「插图描述」的书框图、写 `figures_geom`（Nice=19/CPUWeight=20 低优先级，Pi CPU ~6.7s/页，幂等）。
+- `figures-describe.{service,timer}`（2026-06-20）—— 夜间跑 `scripts/describe_figures_batch.py --all`，
+  读 YOLO 框做 gate（0 跳过 / 1 裁图 / ≥2 整页）用 off-peak AI 额度生成插图描述。
 - `book-ocr.service` + `book-ocr-watchdog.{service,timer}`（2026-05-30）—— 日文扫描书后台 OCR
   （低优先级长任务）+ 每 15 分钟健康自检（详见 [`book-ocr-pipeline.md`](book-ocr-pipeline.md)）。
   这套 unit 踩过两个 **systemd 通用坑**（都 2026-06-10 修，写 timer/unit 时通用）：
@@ -307,7 +314,8 @@ codex --version
 ```bash
 sudo systemctl enable --now xvfb-99 anki-headless obsidian-sync qa-server webapp nginx
 sudo systemctl enable --now bwicarus-daily.timer
-sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer push-big-files.timer   # 增量 timer（后续新增）
+sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer push-big-files.timer \
+     bwicarus-backup.timer yolo-figures.timer figures-describe.timer book-ocr-watchdog.timer   # 增量 timer（后续陆续新增）
 sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
 ```
 

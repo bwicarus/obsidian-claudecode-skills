@@ -225,6 +225,31 @@ function closeHlPopover() {
 }
 window.closeHlPopover = closeHlPopover;
 function openHlPopover(h, anchorDiv, pw) {
+  // 共享模式(__uiShared)→ 走 PdfAdapter.openHlEditor → RC.highlight.openEditor(编辑浮层统一)。
+  //   改色/备注/删除回调复用底座 _hlUpdate/_hlDelete(取消颜色语义照搬下方 268-277);RC 不可用 → fallback 回 _openHlPopoverNative(原逻辑逐字不变)。
+  if (window.__uiShared && window.PdfAdapter) {
+    document.getElementById('hl-popover')?.classList.remove('open');   // 防原生小框残留
+    PdfAdapter.openHlEditor({
+      colors: getHlColors(), current: h.color, note: h.note || '',
+      preview: h.text || '', sentence: h.sentence || '', body: h.body || '', kind: h.kind,
+      anchorEl: anchorDiv, anchorSelector: '.hl-saved', placeBelow: true,
+      silent: true,   // _hlUpdate 会弹「已保存」→ 抑制 rc-highlight 的重复 toast(M5)
+      onColor: (c) => {
+        if (!c) {                                       // 取消颜色:照搬下方 268-277 语义
+          const hasNote = (h.note || '').trim() || (h.body || '').trim() || (h.sentence || '').trim();
+          if (!hasNote) _hlDelete(h, pw);
+          else { _hlUpdate(h, pw, { color: '' }); _toast('已取消颜色（备注保留）'); }
+        } else _hlUpdate(h, pw, { color: c });
+      },
+      onNote: (t) => _hlUpdate(h, pw, { note: t }),
+      onDelete: () => _hlDelete(h, pw),
+      fallback: () => _openHlPopoverNative(h, anchorDiv, pw),
+    });
+    return;
+  }
+  return _openHlPopoverNative(h, anchorDiv, pw);
+}
+function _openHlPopoverNative(h, anchorDiv, pw) {
   _popoverHL = h;
   const pop = document.getElementById('hl-popover');
   window.dlog?.('openHlPopover: pop=' + (pop ? 'OK' : 'MISSING'));
@@ -318,7 +343,7 @@ async function _hlUpdate(h, pw, patch) {
   } catch (e) { alert('保存异常：' + e.message); }
 }
 async function _hlDelete(h, pw) {
-  if (!confirm('删除这条高亮？')) return;
+  if (!confirm('删除这条高亮？')) return false;   // 取消 → 返回 false，让 rc-highlight 编辑浮层保持打开(M6)
   try {
     const r = await fetch('/pdf/api/highlights', {
       method: 'DELETE', headers: {'Content-Type':'application/json'},
@@ -561,6 +586,10 @@ async function dictStreamJP(word, ctx) {
   }
   return true;
 }
+// 共享模式(__uiShared)下 rc-wordpop.js 自己的日语汉字拆解 chip 已改用 addEventListener+本模块闭包(H1修复,不依赖全局);
+//   本文件无条件赋值会覆盖 rc-wordpop.js 留的兼容导出,且读的是本文件自己的 _jpKanjiData(共享模式下从未被填,恒空数组)。
+//   门控:共享模式下别赋值;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._jpKanjiTap = (i) => {
   const k = _jpKanjiData[i]; if (!k) return;
   document.querySelectorAll('.jp-kanji-chip').forEach((c, j) => c.classList.toggle('active', j === i));
@@ -575,6 +604,8 @@ window._jpKanjiTap = (i) => {
   h += '</div>';
   det.innerHTML = h;
 };
+}
+if (!window.__uiShared) {
 window._jpAiDeep = async (word) => {
   const btn = document.getElementById('jp-ai-btn');
   const out = document.getElementById('jp-ai-out');
@@ -599,5 +630,6 @@ window._jpAiDeep = async (word) => {
   }
   if (btn) btn.style.display = 'none';
 };
+}
 
 // 结果 modal

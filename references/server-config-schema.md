@@ -4,6 +4,9 @@
 
 `_server_deploy/qa_server.py::DEFAULT_CONFIG` 是默认值（注意：Python 文件是下划线 `qa_server.py`，systemd 服务名才是连字符 `qa-server.service`）；用户改的部分通过 `_deep_merge` 深度合并覆盖到默认上。
 
+**权威字段清单 = `scripts/config_schema.py::SCHEMA`**（dot-path → 类型）。控制面板 `POST /control/api/config` 经 `validate_partial()` 用它过滤：**未声明字段 / 类型不匹配一律拒绝**（防「字段名打错静默生效」），合法部分仍写入、errors 回前端提示。设置 panel 的可见字段与顺序来自同文件 `FIELD_META`（不在 FIELD_META 的 SCHEMA 字段仍走校验，只是 UI 不显示，如 AI cli command）。`kg_audit.books.*` 用 `*` 通配支持任意书名动态键。
+> ⚠ **`dict.*` / `vocab.*` 既不在 DEFAULT_CONFIG 也不在 SCHEMA** → 控制面板会当「未知字段」拒绝，只能**手工编辑** `state/server-config.json`（各处代码靠 `.get()` 兜底读，见下）。
+
 ## 顶层字段
 
 ### `qa_*` —— QA browser 配置
@@ -23,14 +26,13 @@
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `ai_backend` | `claude_cli` | 当前激活的 backend 名 |
-| `ai.claude_cli.command` | `/usr/bin/claude` | Claude CLI 路径 |
-| `ai.claude_cli.model` | `opus` / `sonnet` | 模型（影响 max output / context）|
-| `ai.claude_cli.effort` | `medium` / `high` / `max` | reasoning effort |
+| `ai.claude_cli.command` | `/usr/bin/claude` | Claude CLI 路径（Pi 实际是 `~/.local/bin/claude`）|
+| `ai.claude_cli.model` | 无默认（留空=CLI 默认） | 模型：`opus`/`sonnet`/或完整名 `claude-opus-4-7`（SCHEMA 有此键，UI 可填）|
+| `ai.claude_cli.effort` | 无默认（留空=默认） | reasoning effort：`low`/`medium`/`high`/`xhigh`/`max` |
 | `ai.codex_cli.command` | `/usr/bin/codex` | OpenAI CLI |
-| `ai.codex_cli.model` | `""` | 模型名（gpt-5 / gpt-5.5 等） |
-| `ai.claude_api.api_key` / `.model` | `""` | Anthropic API 直连参数 |
-| `ai.openai_api.api_key` / `.model` | `""` | OpenAI API 直连参数 |
 | `ai.ollama.{api_key,model,base_url}` | `""` | 本机 ollama HTTP |
+
+> **DEFAULT_CONFIG + SCHEMA 只覆盖 `claude_cli` / `codex_cli` / `ollama` 三档**（DEFAULT 的 `ai.claude_cli` 只有 `command` 键，`model`/`effort` 靠 SCHEMA 声明、用户填）。`claude_api` / `openai_api` 是 **客户端（bwicarus-client）**的 5 个 adapter 里的两个，服务端 config 不 seed、SCHEMA 不含 → 服务端不用直连 API 后端。
 
 切 backend 不重启：`_AdapterSession.send()` 每次读 cfg。
 
@@ -41,6 +43,12 @@
 | `anki.exe_path` | `/opt/anki-venv/bin/anki` | Anki 可执行（Linux/服务端是 venv 内）|
 | `anki.connect_url` | `http://127.0.0.1:8765` | AnkiConnect 监听 |
 | `anki.auto_restart` | `false`（手动按钮）/ `true`（服务端 daily）| AnkiConnect 不可达时是否自动 force_restart Anki（杀进程 + 启动 + 等 ≤180s） |
+
+### `daily.*` —— 凌晨 daily 总开关
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `daily.enabled` | `true`（`.get("daily",{}).get("enabled",True)`） | **整套凌晨 daily 的总开关**。`scripts/daily_anki_status.py` 顶部先读它：`false` 则 timer 仍触发但脚本立即空跑退出（`⏸ daily 总开关已关闭`）。控制面板「凌晨定时」组的 ★ 主开关 |
 
 ### `scheduled_register.*` —— 凌晨定时任务
 
@@ -102,7 +110,18 @@
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `card_qa.delete_original` | `false`（不在 DEFAULT_CONFIG，`.get(..., False)` 兜底） | QA cardCtx 模式「修改 Anki」时，AI 生成新卡后是否删原卡（关掉则原 + 新都留）|
+| `card_qa.delete_original` | `false`（不在 DEFAULT_CONFIG，但**在 `config_schema.py` SCHEMA + FIELD_META** → 控制面板「卡片 QA 改进」组可勾） | QA cardCtx 模式「修改 Anki」时，AI 生成新卡后是否删原卡（关掉则原 + 新都留）|
+
+### `kg_audit.*` —— KG 节点审查（每本书可单独开关）
+
+凌晨 daily 的 `audit_kg` 步骤读它决定审哪些书。控制面板有独立 `/control/api/kg-audit`；`books.*` 是通配键（任意书名一个 bool），SCHEMA 用 `kg_audit.books.*` 放行。
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `kg_audit.enabled` | `false` | 全局总开关：跑不跑 KG 审查 |
+| `kg_audit.incremental` | `false` | 只审新增/改过的节点（增量）|
+| `kg_audit.default` | `true` | 未在 `books` 里列出的书默认开/关 |
+| `kg_audit.books.<书名>` | 按 `default` | 每本书单独开关（如 `books.EGIU`/`books.LADR`）|
 
 ### `sidebar_links` —— 控制面板侧边栏自定义链接
 

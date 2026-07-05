@@ -1,0 +1,384 @@
+/* html-reader.js — 统一 HTML 阅读器驱动 + HtmlAdapter（架构验收）。
+ *
+ * 目标:证明「给一个新阅读器写个 adapter,共享功能就全有」。HTML 内容直接渲在主文档(#html-content,无 iframe),
+ *   通过 HtmlAdapter 接入共享控制层 rc-*.js,于是 选区/查词/翻译/解释/对话/笔记/制卡/高亮 全部可用——
+ *   业务逻辑零重写(全部走 RC.wordpop / RC.result / RC.snippets / RC.highlight / RC.sidedrawer / RC.settings)。
+ *
+ * 比 EPUB(epub2.js)简单:无 iframe → 原生 window.getSelection() 就行,坐标无需跨 iframe 换算,
+ *   不必搞 EPUB 那套折叠光标轮询 / 父文档分词浮层(那是 iframe 专属坑)。
+ *
+ * 锚:字符偏移(相对 #html-content 的文本偏移,用 Range 计长 + TreeWalker 还原)。
+ *   高亮存独立 sidecar(/pdf/api/html-highlights → state/html-highlights/<sha>.json)。
+ *
+ * 纯新增,不碰 PDF/EPUB 阅读器,不改 rc-*.js。ES5。
+ */
+(function () {
+  'use strict';
+  function ready(fn) {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn);
+    else fn();
+  }
+  ready(init);
+
+  function init() {
+    var CFG = window.HTML_CFG || {};
+    var FREL = CFG.fileRel || '';
+    var $ = function (id) { return document.getElementById(id); };
+    var elContent = $('html-content');
+    var selBar = $('html-sel');
+    if (!elContent || !selBar) return;
+
+    function esc(s) { return (window.RC && RC.esc) ? RC.esc(s) : String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function toast(m) { if (window.RC && RC.toast) RC.toast(m); }
+    function aiParams() { return (window.RC && RC.settings && RC.settings.aiParams) ? RC.settings.aiParams() : {}; }
+    function hlColors() { return (window.RC && RC.settings && RC.settings.hlColors) ? RC.settings.hlColors() : ['#fff59d', '#a7f3d0', '#a3d4ff', '#fda4af']; }
+
+    // 当前选区快照(cur=最近一次;_lastSel=供结果模态「🖌 标记」事后取锚)。rect 为视口坐标。
+    var cur = { text: '', ctx: '', anchor: null, rect: null };
+    var _lastSel = null;
+    var _hls = [];   // 高亮列表 [{id,start,end,text,color,note,sentence}]
+
+    // ════════════ 端点(AI 端点内容无关,直接复用 PDF/EPUB 那套;highlights 用新建的 html sidecar)════════════
+    var EP = {
+      dict: '/pdf/api/dict', dictJp: '/pdf/api/dict-jp', dictJpAi: '/pdf/api/dict-jp-ai',
+      translate: '/pdf/api/translate', explain: '/pdf/api/explain',
+      highlights: '/pdf/api/html-highlights', vocabMap: '/pdf/api/vocab-mastery-map', vocabAnki: '/pdf/api/vocab-anki',
+      toNote: '/pdf/api/to-note', snippetsTo: '/pdf/api/snippets-to-async', jobStatus: '/pdf/api/job-status'
+    };
+
+    // ════════════ HtmlAdapter:把 HTML 主文档底座收敛成统一 RC.adapter 契约(架构 P2)════════════
+    var HtmlAdapter = {
+      kind: 'html',
+      config: { isPDF: false, reflow: true, hasFigures: false, hasFormula: true, dictMode: 'sse', popupMode: 'fixed', clickWordDetect: true, anchorKind: 'offset' },
+      getEndpoints: function () { return EP; },
+      fileInfo: function () { return { file: FREL, langs: [] }; },
+      captureSelection: function () { return captureFromSelection(); },
+      clearSelection: function () { clearNativeSel(); },
+      jumpToAnchor: function (a) {
+        try {
+          if (a && typeof a.start === 'number') {
+            var r = _rangeFromOffsets(a.start, a.end || a.start);
+            if (r) { var el = r.startContainer.nodeType === 3 ? r.startContainer.parentElement : r.startContainer; if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }); }
+          }
+        } catch (e) {}
+      },
+      currentChapterText: function () { try { return (elContent.innerText || '').slice(0, 8000); } catch (e) { return ''; } }
+    };
+    try { if (window.RC && RC.use) RC.use(HtmlAdapter); window.__htmlAdapter = HtmlAdapter; } catch (e) {}
+
+    // ════════════ 字符偏移工具(相对 #html-content)════════════
+    // 偏移 = 从容器起点到边界的文本字符数(Range.toString().length,= 包含文本节点的 textContent);
+    // 还原 = TreeWalker 累计 text 节点 nodeValue 长度,二者口径一致(都基于 textContent)。
+    function _charOffset(node, offset) {
+      try {
+        var r = document.createRange();
+        r.setStart(elContent, 0);
+        r.setEnd(node, offset);
+        return r.toString().length;
+      } catch (e) { return 0; }
+    }
+    function _rangeFromOffsets(start, end) {
+      var walker = document.createTreeWalker(elContent, NodeFilter.SHOW_TEXT, null);
+      var pos = 0, tn, sNode = null, sOff = 0, eNode = null, eOff = 0;
+      while ((tn = walker.nextNode())) {
+        var len = tn.nodeValue.length;
+        if (sNode === null && pos + len >= start) { sNode = tn; sOff = start - pos; }
+        if (pos + len >= end) { eNode = tn; eOff = end - pos; break; }
+        pos += len;
+      }
+      if (sNode === null || eNode === null) return null;
+      try { var r = document.createRange(); r.setStart(sNode, sOff); r.setEnd(eNode, eOff); return r; } catch (e) { return null; }
+    }
+    // 把 [start,end) 区间内的每个文本节点片段包进 <mark>(跨多节点也行;splitText 逐段切)。
+    function _markRange(start, end, h) {
+      if (end <= start) return;
+      var walker = document.createTreeWalker(elContent, NodeFilter.SHOW_TEXT, null);
+      var pos = 0, tn, segs = [];
+      while ((tn = walker.nextNode())) {
+        var len = tn.nodeValue.length, a = pos, b = pos + len;
+        if (b > start && a < end) segs.push({ node: tn, s: Math.max(0, start - a), e: Math.min(len, end - a) });
+        pos = b;
+        if (pos >= end) break;
+      }
+      segs.forEach(function (seg) {
+        var node = seg.node, s = seg.s, e = seg.e;
+        if (e <= s) return;
+        try {
+          var mid = (s > 0) ? node.splitText(s) : node;
+          if ((e - s) < mid.nodeValue.length) mid.splitText(e - s);
+          var mk = document.createElement('mark');
+          mk.className = 'rc-html-hl'; mk.setAttribute('data-hid', h.id);
+          if (h.color) mk.style.background = h.color;
+          mid.parentNode.insertBefore(mk, mid); mk.appendChild(mid);
+        } catch (er) {}
+      });
+    }
+    function _marksOf(hid) { return elContent.querySelectorAll('mark.rc-html-hl[data-hid="' + hid + '"]'); }
+    function _unwrapMarks(hid) {
+      var ms = _marksOf(hid);
+      Array.prototype.forEach.call(ms, function (m) { var p = m.parentNode; if (!p) return; while (m.firstChild) p.insertBefore(m.firstChild, m); p.removeChild(m); try { p.normalize(); } catch (e) {} });
+    }
+    function _hlById(id) { for (var i = 0; i < _hls.length; i++) if (_hls[i].id === id) return _hls[i]; return null; }
+
+    // ════════════ 选区桥接(原生主文档:mouseup/touchend → 选区/单击词分流)════════════
+    function captureFromSelection() {
+      try {
+        var sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return null;
+        var rng = sel.getRangeAt(0);
+        if (!elContent.contains(rng.commonAncestorContainer)) return null;
+        var txt = (sel.toString() || '').trim();
+        if (!txt) return null;
+        var rect = rng.getBoundingClientRect();
+        var start = _charOffset(rng.startContainer, rng.startOffset);
+        var end = _charOffset(rng.endContainer, rng.endOffset);
+        if (end < start) { var t = start; start = end; end = t; }
+        var blk = rng.startContainer.nodeType === 3 ? rng.startContainer.parentElement : rng.startContainer;
+        blk = blk && blk.closest ? blk.closest('p,li,td,blockquote,div,section,h1,h2,h3,h4') : null;
+        return {
+          text: txt, context: (blk ? (blk.textContent || '') : '').trim().slice(0, 1200), ctx: (blk ? (blk.textContent || '') : '').trim().slice(0, 1200),
+          anchor: { start: start, end: end },
+          rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+        };
+      } catch (e) { return null; }
+    }
+    function clearNativeSel() { try { var s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {} hideSel(); }
+
+    function captureAndShow() { var c = captureFromSelection(); if (!c) { hideSel(); return; } cur = c; _lastSel = c; showSel(); }
+
+    var _lastDictTs = 0;
+    function _dictGate() { var now = Date.now(); if (now - _lastDictTs < 500) return false; _lastDictTs = now; return true; }
+
+    function pointFromEvent(e) {
+      if (e.changedTouches && e.changedTouches[0]) { var t = e.changedTouches[0]; return { x: t.clientX, y: t.clientY }; }
+      if (typeof e.clientX === 'number') return { x: e.clientX, y: e.clientY };
+      return null;
+    }
+    function onPointerUp(e) { var pt = pointFromEvent(e); setTimeout(function () { handleUp(pt); }, 10); }
+    function handleUp(pt) {
+      var sel = window.getSelection();
+      var txt = (sel && !sel.isCollapsed) ? (sel.toString() || '').trim() : '';
+      if (txt) { captureAndShow(); return; }            // 拖选多词/句 → 工具栏
+      hideSel();
+      if (!pt) return;
+      var tgt = document.elementFromPoint(pt.x, pt.y);
+      if (tgt && tgt.closest && tgt.closest('mark.rc-html-hl')) return;   // 点高亮 → 由 mark click 开编辑浮层
+      clickWord(pt.x, pt.y);                            // 单击词 → 直弹字典
+    }
+    elContent.addEventListener('mouseup', onPointerUp);
+    elContent.addEventListener('touchend', onPointerUp);
+
+    // 单击词查词:caretRangeFromPoint 取词 → RC.wordpop.show(英/日);纯中文等 → 关浮层
+    function caretFromPoint(x, y) {
+      if (document.caretRangeFromPoint) { var r = document.caretRangeFromPoint(x, y); return r ? { node: r.startContainer, offset: r.startOffset } : null; }
+      if (document.caretPositionFromPoint) { var p = document.caretPositionFromPoint(x, y); return p ? { node: p.offsetNode, offset: p.offset } : null; }
+      return null;
+    }
+    function wordAt(node, off) {
+      var s = node.nodeValue || ''; if (!s) return null;
+      var isW = function (c) { return /[A-Za-z0-9'’\-]/.test(c) || /[぀-ヿ㐀-鿿가-힯一-鿿]/.test(c); };
+      var i = off; if (i >= s.length) i = s.length - 1; if (i < 0) return null;
+      if (!isW(s[i])) { if (i > 0 && isW(s[i - 1])) i--; else return null; }
+      var lo = i, hi = i + 1;
+      while (lo > 0 && isW(s[lo - 1])) lo--;
+      while (hi < s.length && isW(s[hi])) hi++;
+      return { node: node, start: lo, end: hi, text: s.slice(lo, hi) };
+    }
+    function clickWord(x, y) {
+      if (!(window.RC && RC.wordpop)) return;
+      if (!_dictGate()) return;
+      var pos = caretFromPoint(x, y);
+      if (!pos || !pos.node || pos.node.nodeType !== 3) { _closeWordPop(); return; }
+      var w = wordAt(pos.node, pos.offset);
+      if (!w || !w.text) { _closeWordPop(); return; }
+      var t = w.text, isEn = /^[A-Za-z][A-Za-z'’\-]*$/.test(t), isJa = /[぀-ヿ]/.test(t);
+      if (!isEn && !isJa) { _closeWordPop(); return; }   // 纯中文等 → 不查
+      var rng = document.createRange();
+      try { rng.setStart(w.node, w.start); rng.setEnd(w.node, w.end); } catch (e) { return; }
+      var rr = rng.getBoundingClientRect();
+      var rect = { left: rr.left, top: rr.top, right: rr.right, bottom: rr.bottom };
+      var pblk = w.node.parentElement && w.node.parentElement.closest ? w.node.parentElement.closest('p,li,td,blockquote,h1,h2,h3,h4,div') : null;
+      var pctx = (pblk ? (pblk.textContent || '') : '').trim().slice(0, 1200);
+      hideSel();
+      RC.wordpop.show({
+        word: t, rect: rect, ctx: pctx, file: FREL, langs: [],
+        onFallback: function (word) { RC.result.aiCall(EP.translate, { text: word, target_lang: '中文' }, '🌐 翻译', mkResultOpts('note', pctx)); }
+      });
+    }
+    function _closeWordPop() { try { var wp = document.getElementById('word-pop'); if (wp && wp.style.display !== 'none') wp.style.display = 'none'; } catch (e) {} }
+
+    // ════════════ 选区工具栏分流(照搬 epub2.js 的 selBar handler)════════════
+    function isWordSel(t) { t = t || ''; return t.length <= 30 && !/\s/.test(t) && (/^[A-Za-z][A-Za-z'’\-]*$/.test(t) || /[぀-ヿ]/.test(t)); }
+    function showSel() {
+      var word = isWordSel(cur.text);
+      selBar.querySelectorAll('[data-grp]').forEach(function (b) {
+        var g = b.dataset.grp, show = (g === 'both') || (word ? g === 'word' : g === 'multi');
+        b.style.display = show ? '' : 'none';
+      });
+      var pv = $('html-preview');
+      if (pv) {
+        var t = cur.text || '', disp = t.length > 120 ? (t.slice(0, 60) + '…' + t.slice(-40)) : t;
+        var cnt = (/[A-Za-z]/.test(t) && /\s/.test(t)) ? (t.trim().split(/\s+/).filter(Boolean).length + ' 词') : (t.length + ' 字');
+        pv.innerHTML = esc(disp) + '<span class="len">' + cnt + '</span>';
+      }
+      selBar.classList.add('open');
+      selBar.style.left = '50%'; selBar.style.right = 'auto'; selBar.style.top = 'auto';
+      selBar.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 20px)'; selBar.style.transform = 'translateX(-50%)';
+    }
+    function hideSel() { selBar.classList.remove('open'); }
+
+    function mkResultOpts(kind, sentence) {
+      return {
+        kind: kind, aiParams: aiParams,
+        ankiSource: function () { return { file: FREL, sentence: sentence || '', sourceUrl: location.origin + '/pdf/html/view' + (FREL ? ('?file=' + encodeURIComponent(FREL)) : '') }; },
+        // 结果模态「🖌 标记」整条回答 → 按上一次选区锚建高亮 + 备注塞 AI 正文
+        markHighlight: function (text, body, sent, k) { if (_lastSel && _lastSel.anchor) createHighlight(_lastSel.anchor, _lastSel.text, _lastSel.ctx, (body || sent || '').slice(0, 400)); else toast('请先选中要标记的文字'); }
+      };
+    }
+    function snipOpts(txt) {
+      return {
+        text: txt, file: FREL,
+        getNoteName: function () { return prompt('新笔记名(可不带 .md):', (txt || '').slice(0, 18).replace(/\s+/g, ' ')); },
+        showCard: function (head, sub) { if (window.RC && RC.sidedrawer) RC.sidedrawer.open('asst'); return addCard(head, sub); }
+      };
+    }
+    function addCard(head, sub) {
+      var body = $('ep-ai-body'); if (!body) return null;
+      var card = document.createElement('div'); card.className = 'ep-card';
+      card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>';
+      body.appendChild(card); body.scrollTop = body.scrollHeight;
+      return card.querySelector('.c');
+    }
+    function _execCopy(s) { try { var ta = document.createElement('textarea'); ta.value = s; ta.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); document.body.removeChild(ta); return ok; } catch (e) { return false; } }
+    function doCopy(txt) { var done = function (ok) { toast(ok ? '已复制' : '复制失败'); }; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(function () { done(true); }, function () { done(_execCopy(txt)); }); else done(_execCopy(txt)); }
+
+    selBar.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      var act = b.dataset.act, txt = cur.text; if (!txt) return;
+      var selTxt = cur.text, selCtx = cur.ctx, selRect = cur.rect, selAnchor = cur.anchor;
+      hideSel();
+      if (act === 'copy') doCopy(selTxt);
+      else if (act === 'dict') RC.wordpop.show({ word: selTxt, rect: selRect, ctx: selCtx, file: FREL, langs: [], onFallback: function (w) { RC.result.aiCall(EP.translate, { text: w, target_lang: '中文' }, '🌐 翻译', mkResultOpts('note', selCtx)); } });
+      else if (act === 'translate') RC.result.aiCall(EP.translate, { text: selTxt, target_lang: '中文' }, '🌐 翻译', mkResultOpts('note', selCtx));
+      else if (act === 'explain') RC.result.aiCall(EP.explain, { text: selTxt, context: selCtx }, '💡 AI 解释', mkResultOpts('explain', selCtx));
+      else if (act === 'chat') RC.result.openChat(selTxt, selCtx, mkResultOpts('note', selCtx));
+      else if (act === 'note') RC.snippets.toNote(snipOpts(selTxt));
+      else if (act === 'anki') RC.snippets.toAnki(snipOpts(selTxt));
+      else if (act === 'highlight') createHighlight(selAnchor, selTxt, selCtx, '');
+    });
+
+    // ════════════ 高亮 CRUD(offset sidecar)════════════
+    function createHighlight(anchor, text, sentence, note) {
+      if (!anchor || typeof anchor.start !== 'number') { toast('无法定位选区'); return; }
+      var color = localStorage.getItem('html-hl-color') || hlColors()[0];
+      try { localStorage.setItem('html-hl-color', color); } catch (e) {}
+      RC.reqJson('POST', EP.highlights, { file: FREL, start: anchor.start, end: anchor.end, text: text || '', color: color, sentence: sentence || '', note: note || '' })
+        .then(function (d) {
+          if (d && d.ok && d.highlight) { _hls.push(d.highlight); _markRange(d.highlight.start, d.highlight.end, d.highlight); toast('已高亮'); clearNativeSel(); }
+          else toast('高亮失败:' + ((d && d.error) || '?'));
+        }).catch(function () { toast('高亮失败'); });
+    }
+    function patchHl(h, f) {
+      RC.reqJson('PATCH', EP.highlights, Object.assign({ file: FREL, id: h.id }, f)).then(function (d) {
+        if (!d || !d.ok || !d.highlight) return;
+        if ('color' in f) { h.color = d.highlight.color; Array.prototype.forEach.call(_marksOf(h.id), function (m) { m.style.background = h.color; }); }
+        if ('note' in f) h.note = d.highlight.note;
+      }).catch(function () {});
+    }
+    function delHl(h) {
+      RC.reqJson('DELETE', EP.highlights + '?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(h.id), null)
+        .then(function () { _unwrapMarks(h.id); _hls = _hls.filter(function (x) { return x.id !== h.id; }); toast('已删除'); }).catch(function () {});
+    }
+    function openHlEditor(h) {
+      if (!(window.RC && RC.highlight)) { toast('编辑层未就绪'); return; }
+      RC.highlight.openEditor({
+        colors: hlColors(), current: h.color, note: h.note || '', preview: h.text || '', sentence: h.sentence || '',
+        onColor: function (c) { patchHl(h, { color: c }); }, onNote: function (t) { patchHl(h, { note: t }); }, onDelete: function () { delHl(h); }
+      });
+    }
+    // 点高亮 → 编辑浮层
+    elContent.addEventListener('click', function (e) {
+      var mk = e.target && e.target.closest && e.target.closest('mark.rc-html-hl'); if (!mk) return;
+      var h = _hlById(mk.getAttribute('data-hid')); if (h) openHlEditor(h);
+    });
+    // 抽屉「高亮」pane:列表(点跳转 + 删除)
+    function loadHlPane() {
+      var box = $('ep-side-hl'); if (!box) return;
+      if (!(window.RC && RC.highlight)) { box.innerHTML = '<div class="ep-empty">编辑层未就绪</div>'; return; }
+      RC.highlight.renderList(box, _hls.slice(), {
+        reverse: true, emptyHtml: '还没有高亮。<br>选中文字 → 底部「🖍 高亮」',
+        onJump: function (h) { var m = _marksOf(h.id)[0]; if (m && m.scrollIntoView) m.scrollIntoView({ block: 'center' }); if (window.RC && RC.sidedrawer) RC.sidedrawer.close(); },
+        onDelete: function (h) { delHl(h); }
+      });
+    }
+    function loadHighlights() {
+      RC.reqJson('GET', EP.highlights + '?file=' + encodeURIComponent(FREL)).then(function (d) {
+        _hls = (d && d.highlights) || [];
+        _hls.slice().sort(function (a, b) { return a.start - b.start; }).forEach(function (h) { try { _markRange(h.start, h.end, h); } catch (e) {} });
+      }).catch(function () {});
+    }
+
+    // ════════════ 设置面板(RC.settings:字号/行距/主题 → #html-content;model/effort 落 localStorage)════════════
+    function _readState() {
+      return {
+        fs: parseInt(localStorage.getItem('html-fs-pct') || '100', 10),
+        lh: parseFloat(localStorage.getItem('html-lh') || '1.75'),
+        th: localStorage.getItem('html-th') || 'paper'
+      };
+    }
+    function _applyRead() {
+      var s = _readState();
+      elContent.style.fontSize = (18 * s.fs / 100).toFixed(1) + 'px';
+      elContent.style.lineHeight = String(s.lh);
+      document.body.setAttribute('data-theme', s.th);
+    }
+    function openSettings() {
+      if (!(window.RC && RC.settings)) { toast('设置未就绪,刷新重试'); return; }
+      RC.settings.open({
+        getReadState: _readState,
+        onFontSize: function (d) { var v = Math.max(60, Math.min(220, _readState().fs + d)); try { localStorage.setItem('html-fs-pct', String(v)); } catch (e) {} _applyRead(); },
+        onLineHeight: function (d) { var v = Math.max(1.2, Math.min(2.6, Math.round((_readState().lh + d) * 10) / 10)); try { localStorage.setItem('html-lh', String(v)); } catch (e) {} _applyRead(); },
+        onTheme: function (th) { try { localStorage.setItem('html-th', th); } catch (e) {} _applyRead(); },
+        getBookLangs: function () { return []; },
+        onHlColors: function () {}
+      });
+    }
+    var _setBtn = $('html-set-btn'); if (_setBtn) _setBtn.addEventListener('click', openSettings);
+
+    // ════════════ 接共享层:result 配置 + 统一抽屉 ════════════
+    if (window.RC && RC.result && RC.result.config) {
+      RC.result.config({
+        draftKey: 'html-drafts',
+        snippetsEndpoint: EP.snippetsTo, jobStatusEndpoint: EP.jobStatus, toNoteEndpoint: EP.toNote,
+        aiParams: aiParams
+      });
+    }
+    if (window.RC && RC.sidedrawer && RC.sidedrawer.init) {
+      RC.sidedrawer.init({
+        handleLabel: '助手 · 高亮', defaultTab: 'asst',
+        tabs: [
+          { name: 'asst', label: '助手', icon: '✦ ' },
+          { name: 'hl', label: '高亮', icon: '🖍 ' }
+        ],
+        onTab: function (name) { if (name === 'hl') loadHlPane(); }
+      });
+    }
+    // 助手 pane 的「🗑 清空」按钮
+    var _quick = $('html-asst-quick');
+    if (_quick) _quick.addEventListener('click', function (e) { var b = e.target.closest('button'); if (b && b.dataset.q === 'clear') { var body = $('ep-ai-body'); if (body) body.innerHTML = ''; } });
+
+    _applyRead();
+
+    // ════════════ 启动:等 MathJax 首次排版完(公式把 $..$ 文本换成容器,会改字符偏移口径)再加载高亮,
+    //   保证「存高亮时」和「重渲高亮时」的 DOM 文本口径一致(都在 MathJax 排版后)。无公式的文档 ~即时。
+    function whenMathReady(cb) {
+      var t0 = Date.now();
+      (function poll() {
+        try { if (window.MathJax && MathJax.startup && MathJax.startup.promise) { MathJax.startup.promise.then(cb).catch(cb); return; } } catch (e) {}
+        if (Date.now() - t0 > 4000) { cb(); return; }
+        setTimeout(poll, 100);
+      })();
+    }
+    whenMathReady(loadHighlights);
+  }
+})();

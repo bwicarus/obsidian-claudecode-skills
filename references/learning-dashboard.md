@@ -5,7 +5,7 @@
 创建于 2026-06-03（任务「学习数据看板」3/4）。
 
 ## 架构
-自包含 blueprint(`register_insights(app)` 风格,同 control/skilltree/pdf_reader/fitness)，**请求时实时聚合 + 120s 进程缓存**(不耦合 daily 流水线 → 永远新鲜、不拖垮夜间任务)。所有数据本机文件/SQLite，聚合 ~0.3s，缓存后秒开。
+自包含 blueprint(`register_insights(app)` 风格,同 control/skilltree/pdf_reader/fitness)，**请求时实时聚合 + 120s 进程缓存**(不耦合 daily 流水线 → 永远新鲜、不拖垮夜间任务)。所有数据本机文件/SQLite，聚合 ~1-2s，缓存后秒开。
 
 - 后端 `_server_deploy/insights.py` → 部署 `/home/bwicarus/webapp/insights.py`
 - 前端 `_server_deploy/templates/insights.html`(暗色、移动优先、**手搓 SVG 图表**不依赖 CDN，契合离线 PWA 方向)→ 部署 `/home/bwicarus/webapp/templates/insights.html`

@@ -76,7 +76,7 @@ Google 故意把 `generativelanguage.googleapis.com` 跟 GCP billing 隔离 — 
 
 - SQLite `state/google_api_quota.db` 表 `quota_log`,记每次调用 (id 自增主键, service, units, action, note, ts_utc)
 - 各调用脚本(find_jeff_videos / google_vision_ocr / youtube_speech / youtube_subtitles)都接了 `log_usage()`
-- CLI:`python scripts/google_api_quota.py [youtube|vision]`(只 youtube/vision 有 `DAILY_LIMITS`;传 stt/gemini 会因 `used/limit*100` 除零崩溃,这俩只能在脚本里用 `report()`)
+- CLI:`python scripts/google_api_quota.py [youtube|vision|gemini|stt|translate]`。**只有 youtube/vision 有固定日限**;`gemini`/`stt` 在 `DAILY_LIMITS` 里是 `None`(付费按量、无固定日限),`report()` 里 `limit = DAILY_LIMITS.get(...) or 0`→None 归一成 0→`remaining=None`,**不再除零崩溃**(旧版才会);其它 service(如 `translate`)缺省 limit=0 同样安全,只是不显示 remaining。
 
 ### 当前已知配额(各 service)
 
@@ -84,8 +84,11 @@ Google 故意把 `generativelanguage.googleapis.com` 跟 GCP billing 隔离 — 
 DAILY_LIMITS = {
     "youtube": 10_000,    # search.list 每次 100 units;实际硬上限
     "vision":  1_000,     # 免费/月;超出 $1.50/1000(走赠金)
+    "gemini":  None,      # 付费(prepay)按 token 计费、无固定日限;助手侧 units 记的是 token 数(只累计用量)
+    "stt":     None,      # Cloud Speech-to-Text 无固定免费日限(按 Free Trial 赠金计费)
 }
 ```
+（`translate` service 不在 DAILY_LIMITS，但 `youtube_subtitles._translate_all` 会 `log_usage("translate", …)` 记账，供累计看；Gemini 估算花费另见控制面板 `/control/api/gemini-cost`。）
 
 YouTube 重置:Pacific Time 午夜 = UTC 08:00。脚本里默认取 UTC 08:00 安全(PST 准 / PDT 早 1h)。
 

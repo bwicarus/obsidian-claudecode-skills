@@ -777,6 +777,10 @@ async function _renderPageImg(num, wrap, viewport) {
   wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时按比例 zoom 现有位图(过渡期补偿)
   wrap.style.zoom = '';   // 本页位图已是当前 scale 原生像素 → 撤掉缩放过渡期的补偿 zoom(回到 1)
   wrap.dataset.loaded = '1';
+  try { if (window.__uiShared && window.RC && RC.stickynote) RC.stickynote.mountPending(); } catch (_) {}   // 本页便签补挂(幂等;重渲 innerHTML='' 会清掉便签,这里自愈)
+  try { if (window.__uiShared && window._userpagesMount) window._userpagesMount(); } catch (_) {}   // 用户页(插入页)补挂(幂等;hook 实现在模板 ui_shared 块,legacy 无感)
+  // 服务端回的图比请求宽小 = 宽度容差「放大近似图」(模糊),它已在后台补渲精确宽 → 稍后换成清晰图
+  if (img.naturalWidth < reqW - 2) _scheduleSharpen(num, wrap, reqW, mt, _gen, 0);
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);
   setTimeout(() => _prefetchAround(num), 400);   // 渲染完当前页 → 后台预取前后页(延后,先让当前页图到位)
   if (window._maybeAutoPrewarm) window._maybeAutoPrewarm();   // 首页渲完(scale/宽度已定)→ 自动后台预热整本(只触发一次)
@@ -784,6 +788,22 @@ async function _renderPageImg(num, wrap, viewport) {
     const u = new URL(location.href); u.searchParams.set('page', num); history.replaceState(null, '', u);
     loadPageNodes(num);
   }
+}
+// 拿到「模糊近似图」后,等服务端后台补渲精确宽完成,再把这一页的 <img> 原地换成清晰图(只换图、不重渲整页)。
+// cache-bust 绕开浏览器缓存(近似图返回 no-store,本就不缓存;busted url 取磁盘上已渲好的精确图)。最多重试 3 次。
+async function _scheduleSharpen(num, wrap, reqW, mt, gen, tries) {
+  tries = tries || 0;
+  if (tries > 3) return;
+  setTimeout(async () => {
+    if (!wrap.isConnected || wrap.__imgGen !== gen) return;   // 页已释放 / 已有更新渲染 → 放弃
+    const im = document.createElement('img'); im.decoding = 'async';
+    im.src = '/pdf/api/page-image?file=' + encodeURIComponent(FILE_REL) + '&page=' + num + '&w=' + reqW + '&v=' + mt + '&sharp=' + Date.now();
+    try { await im.decode(); } catch (_) { return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1); }
+    if (!wrap.isConnected || wrap.__imgGen !== gen) return;
+    if (im.naturalWidth < reqW - 2) return _scheduleSharpen(num, wrap, reqW, mt, gen, tries + 1);   // 后台还没渲好 → 再等
+    const cur = wrap.querySelector('img.page-img');
+    if (cur) { im.className = 'page-img'; im.style.width = cur.style.width; im.style.height = cur.style.height; im.style.display = 'block'; cur.replaceWith(im); }
+  }, 1600 + tries * 1600);
 }
 async function _renderPageInto(num, wrap) {
   if (!pdfDoc) return;
@@ -940,6 +960,8 @@ async function _renderPageInto(num, wrap) {
   wrap.__renderScale = scale;   // 记录渲染时 scale → 缩放重排按比例 zoom 现有位图(过渡期补偿)
   wrap.style.zoom = '';   // 本页已是当前 scale 原生像素 → 撤掉补偿 zoom(回到 1),canvas 模式同样
   wrap.dataset.loaded = '1';
+  try { if (window.__uiShared && window.RC && RC.stickynote) RC.stickynote.mountPending(); } catch (_) {}   // 本页便签补挂(幂等;重渲 innerHTML='' 会清掉便签,这里自愈)
+  try { if (window.__uiShared && window._userpagesMount) window._userpagesMount(); } catch (_) {}   // 用户页(插入页)补挂(幂等;hook 实现在模板 ui_shared 块,legacy 无感)
   if (window._updateMainOverflowX) requestAnimationFrame(window._updateMainOverflowX);   // 渲染后据实测内容宽锁/放横向滚动
 
   // 同步 URL + 拉 KG 节点：只在单页模式做
@@ -951,7 +973,21 @@ async function _renderPageInto(num, wrap) {
   }
 }
 
-async function loadPageNodes(num) {
+function loadPageNodes(num) {
+  // 共享模式(__uiShared)→ PdfAdapter.renderPageNodes → rc-knowledge.renderInto(知识点卡统一)。
+  //   取数(page-nodes,页作用域)+ __lastPageNodes(语音上下文)+ 容器 #kg-nodes 都由 adapter 处理;
+  //   点开 skilltree / ☆跟踪 用 rc-knowledge 默认行为(与 PDF toggleNodeTrack 逐字一致);抽屉本体本阶段不迁,留 PDF 原版。
+  //   RC 不可用 / 容器缺 → fallback 回 _loadPageNodesNative(原逻辑逐字不变)。
+  if (window.__uiShared && window.PdfAdapter && PdfAdapter.renderPageNodes) {
+    return PdfAdapter.renderPageNodes({
+      file: FILE_REL, page: num, container: 'kg-nodes',
+      onAfter: () => { try { window._refreshVocabIfPage?.(); } catch (_) {} },   // 等价原尾部
+      fallback: () => _loadPageNodesNative(num),
+    });
+  }
+  return _loadPageNodesNative(num);
+}
+async function _loadPageNodesNative(num) {
   try {
     const r = await fetch(`/pdf/api/page-nodes?file=${encodeURIComponent(FILE_REL)}&page=${num}`);
     const d = await r.json();
@@ -1166,8 +1202,20 @@ window.switchSideTab = (pane) => {
 };
 // 语法分析历史：按书本持久，新旧倒序（最新在上）
 let _grammarHistLoaded = false;
+// ── 阶段6 门控:ui=shared → RC.grammar.loadHistory 渲进同一个 #grammar-panel-body(跟 EPUB 共用);
+//   else 走原生逐字(_addHistoryBlock)。──
 window.loadGrammarHistory = async () => {
   _grammarHistLoaded = true;
+  if (window.__uiShared && window.RC && RC.grammar) {
+    try {
+      await RC.grammar.loadHistory('grammar-panel-body', FILE_REL, {
+        aiParams: (typeof _getAiOverrides === 'function') ? _getAiOverrides : undefined,
+        sourceUrl: () => FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '',
+        viewModeKey: 'pdf-grammar-view',
+      });
+    } catch (e) { window.dlog?.('grammar history load fail: ' + (e && e.message)); }
+    return;
+  }
   try {
     const r = await fetch('/pdf/api/grammar-history?file=' + encodeURIComponent(FILE_REL || ''));
     const d = await r.json();
@@ -3271,6 +3319,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
     }
   } catch (_) {}
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  try { window.__lastSelMeta = { page: (typeof _selPageNum === 'function' ? _selPageNum() : (typeof currentPage !== 'undefined' ? currentPage : 0)), t: Date.now() }; } catch (_) {}   // char 层选中也记 meta(页+时间);否则 __voiceContext 新鲜度校验(meta.page===curP && <10min)失败 → 助手拿到空选中
   // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
@@ -3704,7 +3753,11 @@ function _bindCharLayer(cl, pw) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');
-            setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+            if (window.__uiShared && window.PdfAdapter) {
+              PdfAdapter.lookupWord({ word: _t, context: _ctx, page: _selPageNum(), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+            } else {
+              setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
+            }
           } else if (isNativeHan) {
             toolbar.classList.remove('open');
             lastSelText = '';
@@ -4236,21 +4289,36 @@ function _showExplainHighlight(pw, text) {
 function _reopenExplain() {
   const a = _activeExplainHl;
   if (!a) return;
+  // 共享模式(__uiShared):结果框改走 rc-result,须用它暴露的 openResult/addResultPickers/_resultReqId
+  // (window.openResult 已是 rc-result 版本;window.addResultPickers 需 rc-result 显式导出),否则本文件
+  // 模块作用域内的裸 openResult/addResultPickers/_resultReqId 是 reader.js 自己另一份计数器/实现,
+  // 两边互不作废对方的在途请求,会有极小概率的"旧结果覆盖新结果"竞态。非共享模式逐字不变。
+  const shared = window.__uiShared && window.PdfAdapter;
+  const _open = shared ? window.openResult : openResult;
+  const _pickers = shared ? window.addResultPickers : addResultPickers;
   if (a.html) {
     // 已就绪 → 直接显缓存
-    openResult(a.title || '💡 AI 解释', a.src || a.text, a.html);
+    _open(a.title || '💡 AI 解释', a.src || a.text, a.html);
     try { if (a.resultContext) _resultContext = a.resultContext; } catch (_) {}
-    try { addResultPickers(); } catch (_) {}
+    try { _pickers && _pickers(); } catch (_) {}
   } else {
     // 还在后台跑 → 开加载面板,登记 reqId,完成时由 _runExplainBg 填充(并补 pickers)
-    openResult(a.title || '💡 AI 解释', a.src || a.text, '<div class="loading">⏳ AI 处理中…</div>');
-    a.panelReqId = _resultReqId;   // openResult 已自增 _resultReqId,这里取新值
+    _open(a.title || '💡 AI 解释', a.src || a.text, '<div class="loading">⏳ AI 处理中…</div>');
+    a.panelReqId = shared ? window._resultReqId : _resultReqId;   // openResult 已自增对应计数器,这里取新值
   }
   // 点高亮=打开页面 → 一次点击即移除高亮(后台 job 仍持自身引用,未 canceled 时继续填面板)
   document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
   _activeExplainHl = null;
 }
 window.showPhrasePopover = async (text, opts) => {
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
+    toolbar.classList.remove('open');
+    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, fallback: () => _showPhrasePopoverNative(text, opts) });
+    return;
+  }
+  return _showPhrasePopoverNative(text, opts);
+};
+async function _showPhrasePopoverNative(text, opts) {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
   _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false,
@@ -4298,7 +4366,7 @@ window.showPhrasePopover = async (text, opts) => {
     (_wordPopState.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
-};
+}
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
   const t = s.word;
@@ -4688,16 +4756,34 @@ function _isJaWord(w) {
   const declared = (BOOK_LANGS || []).length > 0;
   return declared ? BOOK_LANGS.includes('ja') : true;
 }
+// 共享模式(__uiShared)下点词已直连 RC.wordpop.show(rc-wordpop.js 自己的 _expandWordFull 读它自己的 _wordPopState,
+//   已正确接线);本文件(reader.js 拼接产物,最后加载)若无条件也赋值 window._expandWordFull,会覆盖掉 rc-wordpop.js
+//   的版本——而这份读的是 reader.src 自己的 _wordPopState(共享模式下从未被填,PDF 早已不走原生 showWordPopover 那条路),
+//   于是 word 恒为 undefined,`if (!word) return;` 直接短路退出,「展开完整词典」按钮点了没反应(比 _wordPopMaster/
+//   _wordPopGrammar/_speakCurWord 那三个更隐蔽——内部本有 __uiShared 分支,但 word 校验在分支之前就已经 return 了)。
+//   门控:共享模式下别赋值;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._expandWordFull = (w, c) => {
   const s = _wordPopState;
   const word = w || (s && s.word);
   const ctx = (c != null ? c : (s && s.ctx)) || '';
   const pop = document.getElementById('word-pop'); if (pop) pop.style.display = 'none';
   if (!word) return;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:全词典大框 → rc-wordpop(共享模式;else 为原 dictStreamJP/dictStream,逐字不变)
+    PdfAdapter.openFullDict({ word, context: ctx, jp: _isJaWord(word), file: FILE_REL,
+      page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), langs: BOOK_LANGS,
+      fallback: () => { if (_isJaWord(word)) dictStreamJP(word, ctx); else dictStream(word, ctx); } });
+    return;
+  }
   if (_isJaWord(word)) dictStreamJP(word, ctx);   // 日语完整字典(离线富内容+按需AI)
   else dictStream(word, ctx);                     // 英语三源大框(ecdict+free+mw+例句)
 };
+}
 // 小框喇叭：读当前词（避开 onclick 内联传参的引号冲突），同步播有道(手势栈内)
+// 共享模式(__uiShared)下 rc-wordpop.js 核心框的按钮 onclick 写死调这几个全局名,但本文件(reader.js 拼接产物,
+//   最后加载)若无条件也赋值,会覆盖 rc-wordpop.js 刚设好的版本(读的是不同的 _wordPopState,导致按钮静默失效)。
+//   门控:共享模式下别赋值,让 rc-wordpop.js 自己的版本生效;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._speakCurWord = () => {
   const s = _wordPopState;
   if (!s) return;
@@ -4705,6 +4791,7 @@ window._speakCurWord = () => {
   const w = s.lemma || s.word;
   if (w) _speakOnline(w);
 };
+}
 // 小框「掌握」toggle（日英统一）：未掌握 ↔ 掌握 100 来回切，不关框。
 // 掌握 → 该词不再标生词下划线；按语言走不同 store：日语 jp-vocab-mark(mastered/unknown)，
 // 英语 vocab-mark(known/unknown，写 vocab 笔记 frontmatter.user_mark + 锁 mastery)。
@@ -4723,6 +4810,7 @@ function _dropVocabUnderlineOptimistic(s) {
   });
 }
 
+if (!window.__uiShared) {
 window._wordPopMaster = (btn) => {
   const s = _wordPopState; if (!s) return;
   const next = !s.mastered;
@@ -4784,11 +4872,14 @@ window._wordPopMaster = (btn) => {
     _toast?.(s.mastered ? '已掌握 100，下划线消失' : '已设为未掌握');
   }).catch(() => { if (btn) btn.disabled = false; _toast?.('标记失败'); });
 };
+}
 // 小框「📊 语法」：对该词所在整句做语法分析（复用 onGrammarAnalyze：当前 _charSel=单词→自动扩成整句）
+if (!window.__uiShared) {
 window._wordPopGrammar = () => {
   const p = document.getElementById('word-pop'); if (p) p.style.display = 'none';
   try { onGrammarAnalyze(); } catch (e) { window.dlog && window.dlog('grammar from word-pop fail: ' + (e && e.message)); }
 };
+}
 // 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
   if (!lastSelText) return;
@@ -4798,7 +4889,11 @@ window.onLookupWord = () => {
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
     if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
   }
-  showWordPopover(lastSelText, ctx);
+  if (window.__uiShared && window.PdfAdapter) {
+    PdfAdapter.lookupWord({ word: lastSelText, context: ctx, page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+  } else {
+    showWordPopover(lastSelText, ctx);
+  }
 };
 
 // 拿点击/触摸位置对应的 (node, offset)，可跨 span
@@ -5112,7 +5207,7 @@ function _toast(msg) {
 
 async function loadAllHighlights() {
   try {
-    const r = await fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL));
+    const r = await fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL), { cache: 'no-store' });   // no-store:撤销/改高亮后必须拿最新,否则命中浏览器缓存看不到变化
     const d = await r.json();
     if (!d.ok) return;
     _allHighlights = d.highlights || [];
@@ -5126,6 +5221,14 @@ async function loadAllHighlights() {
   } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff6b6b'); }
 }
 
+// 高亮底色用**半透明** rgba(不是实色):字一定透得出来(不被实色块盖死);配合 .hl-saved 的 mix-blend-mode:multiply,
+// 能 multiply 到页图上时字更锐(黄×黑字=黑),万一某些页 multiply 被隔离也只是「半透明色」不会糊死/盖死正文。
+function _hlRgba(hex, a) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec((hex || '').trim());
+  if (!m) return hex;   // 非 #rrggbb(已是 rgba/命名色)→ 原样
+  const n = parseInt(m[1], 16);
+  return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')';
+}
 function renderHighlightsOnPage(pw, pageNum) {
   if (!pw) return;
   const layer = ensurePageLayer(pw, 'hl-layer');
@@ -5156,7 +5259,7 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.style.top = (y0 * sy) + 'px';
       div.style.width = ((x1 - x0) * sx) + 'px';
       div.style.height = ((y1 - y0) * sy) + 'px';
-      if (hasColor) div.style.background = h.color;
+      if (hasColor) div.style.background = _hlRgba(h.color, 0.4);   // 半透明底色:字透出来,不被实色盖死
       div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
       // 用 capture phase 拦事件，确保不被 char-layer 拖选逻辑捕获
       const stop = (e) => { e.stopPropagation(); };
@@ -5164,14 +5267,33 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.addEventListener('mouseup',    stop, true);
       div.addEventListener('touchstart', stop, {passive:true, capture:true});
       div.addEventListener('touchend',   stop, {passive:true, capture:true});
-      div.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.dlog?.('hl-saved click → openHlPopover id=' + h.id);
-        openHlPopover(h, div, pw);
-      }, true);
+      // 交互(2026-07-05,用户要求):长按 → 高亮弹框;助手开着时双击 → 高亮内容加入对话上下文。单击不再开框。
+      // 走共享 RC.highlight.gesture(与 EPUB 一致);RC 未加载(legacy)则兜底回原单击开框。
+      const _hg = (window.RC && RC.highlight && RC.highlight.gesture) ? RC.highlight.gesture({
+        onLongPress: () => openHlPopover(h, div, pw),
+        onDoubleTap: () => { if (window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h); }
+      }) : null;
+      if (_hg) {
+        div.addEventListener('pointerdown',   (e) => { e.stopPropagation(); _hg.down(h.id, e.clientX, e.clientY); }, true);
+        div.addEventListener('pointermove',   (e) => { _hg.move(e.clientX, e.clientY); }, true);
+        div.addEventListener('pointerup',     (e) => { e.stopPropagation(); _hg.up(h.id); }, true);
+        div.addEventListener('pointercancel', () => _hg.cancel(), true);
+      } else {
+        div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); }, true);
+      }
       layer.appendChild(div);
     }
   }
+}
+
+// 双击高亮(助手开着)→ 复用助手输入框上方的「焦点选中」chip(window.__setFocusSel:带 ✕、可随时取消、一眼看到已选中),
+// 不弹 toast。__focusSel 经 __voiceContext.focus_sel 带给助手。跟公式/段落焦点选区同一套 UI。
+function _pdfHlToAsst(h) {
+  try {
+    const txt = ((h.text || h.body || h.sentence || '') + '').trim(); if (!txt) return;
+    // 复用助手输入框上方的「焦点选中」chip(带 ✕,可随时取消 + 一眼看到已选中),不弹 toast。__focusSel 进 __voiceContext.focus_sel。
+    if (window.__setFocusSel) window.__setFocusSel(txt.slice(0, 400), 'text');
+  } catch (e) {}
 }
 
 // 把 chars[s..e] 合并成连续 PDF pt rects（同行合并）
@@ -5408,7 +5530,18 @@ function _updateGrammarBtnVisibility() {
   if (!row) return;
   row.style.display = (_grammarHasTracked && lastSelText) ? '' : 'none';
 }
+// ── 阶段6 门控:ui=shared → RC.grammar.renderTrackList 渲进同一个 #set-grammar-list 容器(跟 EPUB 共用);
+//   else 走原生逐字(_renderGrammarTrackListNative)。──
 async function renderGrammarTrackList() {
+  if (window.__uiShared && window.RC && RC.grammar) {
+    return RC.grammar.renderTrackList('set-grammar-list', {
+      file: FILE_REL,
+      onAfterChange: () => { loadGrammarTracked(); },   // 保持工具栏「📊 语法」按钮可见性用的原生缓存同步
+    });
+  }
+  return _renderGrammarTrackListNative();
+}
+async function _renderGrammarTrackListNative() {
   const wrap = document.getElementById('set-grammar-list');
   if (!wrap) return;
   let books = [];
@@ -5446,7 +5579,32 @@ window._onGrammarBookToggle = function() {
 };
 
 // 选中工具栏的「📊 分析」按钮 → 分析所在完整句子，结果放右侧抽屉
+// ── 阶段6 门控:ui=shared → 用 PDF 字符层抽出 sentence/text(char-layer host-bind,不迁进共享层)后交给
+//   RC.grammar.analyze 统一渲染(块/结构图/流式/制卡/追问全走共享核心,跟 EPUB 同一套代码);
+//   else 走原生逐字(_onGrammarAnalyzeNative)。RC 不可用 → 落回原生,绝不吞功能。──
 window.onGrammarAnalyze = async () => {
+  if (window.__uiShared && window.RC && RC.grammar) return _onGrammarAnalyzeShared();
+  return _onGrammarAnalyzeNative();
+};
+async function _onGrammarAnalyzeShared() {
+  if (!lastSelText) return;
+  if (!_charSel || !_charSel.pw || !_charSel.pw.__charBoxes) { _toast?.('找不到选中位置'); return; }
+  const pw = _charSel.pw;
+  const chars = pw.__charBoxes;
+  const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+  if (!ctxRange) { _toast?.('无法识别完整句子'); return; }
+  const sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
+  const text = lastSelText.trim();   // 用户选中的子串（焦点）
+  toolbar.classList.remove('open');
+  RC.grammar.analyze({
+    file: FILE_REL, sentence, text, container: 'grammar-panel-body',
+    aiParams: _getAiOverrides, viewModeKey: 'pdf-grammar-view',
+    sourceUrl: () => FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '',
+    onOpenPanel: () => { openGrammarPanel(); switchSideTab('grammar'); },
+    onToast: (m) => _toast?.(m),
+  });
+}
+async function _onGrammarAnalyzeNative() {
   if (!lastSelText) return;
   if (!_grammarEnabledBooks.length) { _toast?.('请在 PDF 设置中启用至少一个语法 KG'); return; }
   if (!_grammarHasTracked) { _toast?.('已启用的 KG 中没有节点被跟踪，去技能树详情面板点「👁 跟踪」'); return; }
@@ -5655,6 +5813,7 @@ window.toggleGrammarPanel = () => {
   openGrammarPanel();
   switchSideTab('asst');
   try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
+  try { window.__renderNoteChips && window.__renderNoteChips(); } catch (_) {}  // 补渲便签 chip(双击便签带进来的)
   try { window.__renderFocusSel && window.__renderFocusSel(); } catch (_) {}   // 补渲焦点选区(公式/段落)chip
   try { window.__asstPrewarm && window.__asstPrewarm(); } catch (_) {}         // 预热 claude 进程(减冷启动)
 };
@@ -5840,7 +5999,15 @@ function _fillGrammarBlock(block, d, sentence) {
 // 长句结构显示模式：'components' 成分分块 / 'deps' 依存弧线图
 const GV_MODES = [['tree', '树'], ['components', '块'], ['skeleton', '主干'], ['deps', '弧线']];
 let _grammarViewMode = localStorage.getItem('pdf-grammar-view') || 'components';
+// ── 阶段6 门控:ui=shared → 分析块由 RC.grammar 渲染,gv-switch 按钮已直接闭包调 RC.grammar.setViewMode,
+//   这里只需处理"设置面板下拉改值"这一条剩余入口,转调同一份共享逻辑;else 走原生逐字。──
 window.setGrammarView = (mode) => {
+  if (window.__uiShared && window.RC && RC.grammar) {
+    RC.grammar.setViewMode('grammar-panel-body', mode, 'pdf-grammar-view');
+    const sel = document.getElementById('set-grammar-view');
+    if (sel) sel.value = RC.grammar.getViewMode('pdf-grammar-view');
+    return;
+  }
   _grammarViewMode = ['deps', 'skeleton', 'components', 'tree'].includes(mode) ? mode : 'components';
   try { localStorage.setItem('pdf-grammar-view', _grammarViewMode); } catch (_) {}
   // 立即用新模式重渲染已显示的所有语法卡的结构区
@@ -6381,6 +6548,31 @@ function closeHlPopover() {
 }
 window.closeHlPopover = closeHlPopover;
 function openHlPopover(h, anchorDiv, pw) {
+  // 共享模式(__uiShared)→ 走 PdfAdapter.openHlEditor → RC.highlight.openEditor(编辑浮层统一)。
+  //   改色/备注/删除回调复用底座 _hlUpdate/_hlDelete(取消颜色语义照搬下方 268-277);RC 不可用 → fallback 回 _openHlPopoverNative(原逻辑逐字不变)。
+  if (window.__uiShared && window.PdfAdapter) {
+    document.getElementById('hl-popover')?.classList.remove('open');   // 防原生小框残留
+    PdfAdapter.openHlEditor({
+      colors: getHlColors(), current: h.color, note: h.note || '',
+      preview: h.text || '', sentence: h.sentence || '', body: h.body || '', kind: h.kind,
+      anchorEl: anchorDiv, anchorSelector: '.hl-saved', placeBelow: true,
+      silent: true,   // _hlUpdate 会弹「已保存」→ 抑制 rc-highlight 的重复 toast(M5)
+      onColor: (c) => {
+        if (!c) {                                       // 取消颜色:照搬下方 268-277 语义
+          const hasNote = (h.note || '').trim() || (h.body || '').trim() || (h.sentence || '').trim();
+          if (!hasNote) _hlDelete(h, pw);
+          else { _hlUpdate(h, pw, { color: '' }); _toast('已取消颜色（备注保留）'); }
+        } else _hlUpdate(h, pw, { color: c });
+      },
+      onNote: (t) => _hlUpdate(h, pw, { note: t }),
+      onDelete: () => _hlDelete(h, pw),
+      fallback: () => _openHlPopoverNative(h, anchorDiv, pw),
+    });
+    return;
+  }
+  return _openHlPopoverNative(h, anchorDiv, pw);
+}
+function _openHlPopoverNative(h, anchorDiv, pw) {
   _popoverHL = h;
   const pop = document.getElementById('hl-popover');
   window.dlog?.('openHlPopover: pop=' + (pop ? 'OK' : 'MISSING'));
@@ -6474,7 +6666,7 @@ async function _hlUpdate(h, pw, patch) {
   } catch (e) { alert('保存异常：' + e.message); }
 }
 async function _hlDelete(h, pw) {
-  if (!confirm('删除这条高亮？')) return;
+  if (!confirm('删除这条高亮？')) return false;   // 取消 → 返回 false，让 rc-highlight 编辑浮层保持打开(M6)
   try {
     const r = await fetch('/pdf/api/highlights', {
       method: 'DELETE', headers: {'Content-Type':'application/json'},
@@ -6717,6 +6909,10 @@ async function dictStreamJP(word, ctx) {
   }
   return true;
 }
+// 共享模式(__uiShared)下 rc-wordpop.js 自己的日语汉字拆解 chip 已改用 addEventListener+本模块闭包(H1修复,不依赖全局);
+//   本文件无条件赋值会覆盖 rc-wordpop.js 留的兼容导出,且读的是本文件自己的 _jpKanjiData(共享模式下从未被填,恒空数组)。
+//   门控:共享模式下别赋值;legacy 模式(!__uiShared)保留原生行为不变。
+if (!window.__uiShared) {
 window._jpKanjiTap = (i) => {
   const k = _jpKanjiData[i]; if (!k) return;
   document.querySelectorAll('.jp-kanji-chip').forEach((c, j) => c.classList.toggle('active', j === i));
@@ -6731,6 +6927,8 @@ window._jpKanjiTap = (i) => {
   h += '</div>';
   det.innerHTML = h;
 };
+}
+if (!window.__uiShared) {
 window._jpAiDeep = async (word) => {
   const btn = document.getElementById('jp-ai-btn');
   const out = document.getElementById('jp-ai-out');
@@ -6755,6 +6953,7 @@ window._jpAiDeep = async (word) => {
   }
   if (btn) btn.style.display = 'none';
 };
+}
 
 // 结果 modal
 function openResult(title, src, contentHtml) {
@@ -6936,8 +7135,13 @@ try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch 
 function _persistDrafts() {
   try { localStorage.setItem('pdf-drafts', JSON.stringify(_drafts)); } catch (_) {}
 }
+function _syncDraftsLS() {   // 共享模式(?ui=shared):reader.js 与 rc-result 各有 _drafts 内存副本,读前从 localStorage 重载,rc-result 的「+选段」才对 reader.js 的草稿框/制卡可见;默认路径(__uiShared 未定义)early-return 零改动
+  if (!window.__uiShared) return;
+  try { _drafts = JSON.parse(localStorage.getItem('pdf-drafts') || '[]'); } catch (_) {}
+}
 // 直接把一段文本(如公式 LaTeX)加进草稿,供「制卡/笔记」用(公式浮层等外部调用)
 window.addDraftText = (text, source, src) => {
+  _syncDraftsLS();   // 共享模式:先从 localStorage 重载,别用陈旧 _drafts 覆盖掉 rc-result「+选段」刚写入的草稿
   const t = (text || '').trim();
   if (!t) return false;
   if (_drafts.some(d => d.text === t)) { _updateDraftBadge(); return true; }
@@ -6947,11 +7151,13 @@ window.addDraftText = (text, source, src) => {
   return true;
 };
 function _updateDraftBadge() {
+  _syncDraftsLS();
   const b = document.getElementById('draft-badge');
   document.getElementById('draft-count').textContent = _drafts.length;
   b.classList.toggle('show', _drafts.length > 0);
 }
 window.openDraftModal = () => {
+  _syncDraftsLS();
   const list = document.getElementById('draft-list');
   const cnt = document.getElementById('draft-modal-count');
   cnt.textContent = `（共 ${_drafts.length} 段，已选 ${_drafts.filter(d => d.selected).length}）`;
@@ -7163,6 +7369,7 @@ function _pollJob(jobId, jobUi, restoreOnFail) {
 }
 
 async function _doCreate(makeNote, makeAnki) {
+  _syncDraftsLS();
   const picked = _drafts.filter(d => d.selected);
   if (!picked.length) { alert('请先勾选 (圆圈) 要使用的段落'); return; }
   let noteName = '';
@@ -7247,6 +7454,8 @@ function _pushQueryHistory() {
   _saveQueryHistory(h.slice(0, 40));
   if (document.querySelector('#side-tabs .side-tab[data-pane="hist"].active')) renderQueryHistory();
 }
+// 暴露给 rc-result 的 beforeOpen 钩子(共享模式:rc-result.openResult 每次开框前调 → 快照上一条进「📜 历史」)
+try { window._pushQueryHistory = _pushQueryHistory; } catch (_) {}
 function _qhFmtTime(t) {
   const d = new Date(t), n = new Date();
   const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -7268,11 +7477,12 @@ window.renderQueryHistory = () => {
   }));
 };
 
-// AI 设置（per-browser localStorage，不动 server-config）
-function _getAiOverrides() {
-  try { return JSON.parse(localStorage.getItem('pdf-ai-overrides') || '{}'); }
-  catch (_) { return {}; }
-}
+// AI 设置:旧 per-request model/effort 覆盖(localStorage 'pdf-ai-overrides')已废弃(2026-07 收口)——
+// 模型选择唯一真源 = 服务端按功能 action 预设(⚙ AI 模型设置,/api/assistant/action-pref[s])。
+// 保留函数给全部下游消费点(aiCall / onOcrSel / onTranslate / _runExplainBg / 17-highlight /
+// 18-grammar / 20-result-draft / 05-nav),恒返 {} → 请求体不再带 model/effort(后端各端点也已不读)。
+// ?ui=legacy 原生模板的 set-model/set-effort 下拉仍显示但已无效果(模板按约定不动)。
+function _getAiOverrides() { return {}; }
 function _toggleAiModelRow() {
   const v = document.getElementById('set-sent-backend').value;
   document.getElementById('set-sent-ai-row').style.display = (v === 'ai') ? '' : 'none';
@@ -7285,14 +7495,19 @@ window._setSettingsTab = (name) => {
   document.querySelectorAll('#settings-mask .set-pane').forEach(p => { p.style.display = (p.dataset.pane === name) ? '' : 'none'; });
   try { localStorage.setItem('pdf-set-tab', name); } catch (_) {}
 };
-window.openSettings = () => {
+// 设置面板回填(原 openSettings 函数体,除最后"显示 mask"一行,逐字不动)。ui=shared 时 rc-settings 建的
+// 统一面板用同一套原生 id(mask 也叫 settings-mask,原模板 mask 已被 pdf-adapter 移除),所以这里的回填 +
+// renderHlColorSetting / loadTocStatus / renderGrammarTrackList / _populatePageOffsetUI / _initCharOfsPanel
+// 原样复用零重写(saveSettings / closeSettings / _setSettingsTab 同理,都按 id 找元素)。
+function _fillSettings() {
   try { _setSettingsTab(localStorage.getItem('pdf-set-tab') || 'ai'); } catch (_) {}
-  const ov = _getAiOverrides();
-  document.getElementById('set-model').value = ov.model || '';
-  document.getElementById('set-effort').value = ov.effort || '';
+  // set-model/set-effort:仅 ?ui=legacy 原生模板还有(共享面板 rc-settings 已删该下拉)→ 空值保护
+  { const _sm = document.getElementById('set-model'); if (_sm) _sm.value = ''; }
+  { const _se = document.getElementById('set-effort'); if (_se) _se.value = ''; }
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
   const gv = document.getElementById('set-grammar-view');
-  if (gv) gv.value = _grammarViewMode;   // 长句结构显示模式
+  // ui=shared:显示模式状态存在 RC.grammar 里(块渲染已转交它),读它的而不是原生 _grammarViewMode(会跟共享模式下的实际改动脱节)
+  if (gv) gv.value = (window.__uiShared && window.RC && RC.grammar) ? RC.grammar.getViewMode('pdf-grammar-view') : _grammarViewMode;
   try { window._populatePageOffsetUI && window._populatePageOffsetUI(); } catch (_) {}   // 页码对齐:填当前页/偏移
   renderGrammarTrackList();   // 拉语法跟踪节点列表
   // 拉句子翻译配置
@@ -7317,7 +7532,19 @@ window.openSettings = () => {
   try { loadTocStatus(); } catch (_) {}   // 书籍目录:已有→显示「已存在」,无→显示建立目录输入
   renderHlColorSetting();
   if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
+}
+function _openSettingsNative() {
+  _fillSettings();
   document.getElementById('settings-mask').style.display = 'flex';
+}
+// ── 门控:ui=shared → PdfAdapter.openSettings → RC.settings.open(rc-settings 统一面板,内容/行为跟 EPUB
+//   一致;onFill/onSave/onCancel 直传原生 _fillSettings/saveSettings/closeSettings,机制零重写);
+//   RC 不可用 / ?ui=legacy → 原生模板面板逐字不变。──
+window.openSettings = () => {
+  if (window.__uiShared && window.PdfAdapter && PdfAdapter.openSettings) {
+    return PdfAdapter.openSettings({ fill: _fillSettings, fallback: _openSettingsNative });
+  }
+  return _openSettingsNative();
 };
 window._applyCropSettings = () => {
   const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
@@ -7387,11 +7614,8 @@ window.closeSettings = () => { document.getElementById('settings-mask').style.di
 window.saveSettings = async () => {
   window.dlog?.('saveSettings 开始');
   try {
-    const ov = {
-      model:  document.getElementById('set-model')?.value || '',
-      effort: document.getElementById('set-effort')?.value || '',
-    };
-    try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
+    // (2026-07 收口)不再写 'pdf-ai-overrides':模型选择统一走服务端 action 预设;顺手清掉存量旧键
+    try { localStorage.removeItem('pdf-ai-overrides'); } catch (_) {}
     const dbg = document.getElementById('set-debug')?.checked || false;
     try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
     const vu = document.getElementById('set-vocab-underline')?.checked;
@@ -7572,6 +7796,12 @@ window.onCopySel = async () => {
     } catch (e2) { _toast?.('复制失败'); }
   }
 };
+// 通用网页搜索：选中内容开新标签页搜(不占 AI 额度、不需要后端参与)
+window.onSearchSel = () => {
+  const t = (lastSelText || '').trim();
+  if (!t) { _toast?.('没有选中内容'); return; }
+  window.open('https://www.bing.com/search?q=' + encodeURIComponent(t), '_blank');
+};
 // 选区重新识别：文字层坏掉(乱码/上标错/缺符号)时，把选区裁图发 Claude 视觉，拿回正确文字，
 // 回填到 lastSelText + 预览 → 之后 复制/翻译/解释/对话 全用校正后的正确文字。
 // 选中所在页(选区 char 层属于哪个 page-wrap)。连续滚动下视口居中页 currentPage ≠ 选中页,
@@ -7669,6 +7899,12 @@ function _buildSentenceFromSel(pw, sIdx, eIdx) {
 
 window.onTranslate = async () => {
   if (!lastSelText) return;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:翻译 → rc-result 大框(共享模式;else 为原就地浮层逻辑,逐字不变)
+    toolbar.classList.remove('open');
+    _resultContext = _charSel ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: lastSelText, sentence: lastSelText, kind: 'translate' } : null;
+    PdfAdapter.translate({ text: lastSelText, fallback: () => aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译') });
+    return;
+  }
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   // 无 char 信息(罕见) → 退回大框 AI 翻译
@@ -7759,6 +7995,10 @@ window.onExplain = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:解释 → rc-result 大框(共享模式;else 为原琥珀高亮+后台流式逻辑,逐字不变)
+    PdfAdapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
+    return;
+  }
   // 解释**不开面板**:选区建一个一直闪烁的琥珀高亮,AI 后台跑;点高亮才开解释页 + 移除高亮(一次点击)。
   const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
   if (!_ehl) { aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释'); return; }   // 建不了高亮(罕见)→退回旧式直接开面板
@@ -7771,12 +8011,17 @@ async function _runExplainBg(hl, text, context) {
   const body = {text, context};
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
+  // 共享模式(__uiShared):结果框由 rc-result 管,须比对它自己的计数器(window._resultReqId)+ 调它导出的
+  // addResultPickers,否则本文件裸的 _resultReqId/addResultPickers 是另一份独立状态,两边互不作废
+  // 对方在途请求(见 _reopenExplain 同一处注释)。非共享模式逐字不变。
+  const _shared = window.__uiShared && window.PdfAdapter;
+  const _curReqId = () => (_shared ? window._resultReqId : _resultReqId);
   const _fillPanel = (innerHtml, pickers) => {
-    if (hl.panelReqId == null || hl.panelReqId !== _resultReqId) return;   // 用户没点开等 / 已开别的结果 → 不填
+    if (hl.panelReqId == null || hl.panelReqId !== _curReqId()) return;   // 用户没点开等 / 已开别的结果 → 不填
     const el = document.getElementById('result-content'); if (!el) return;
     el.innerHTML = innerHtml;
     if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
-    if (pickers) { try { _resultContext = hl.resultContext; } catch (_) {} try { addResultPickers(); } catch (_) {} }
+    if (pickers) { try { _resultContext = hl.resultContext; } catch (_) {} try { (_shared ? window.addResultPickers : addResultPickers)?.(); } catch (_) {} }
   };
   let acc = '';
   try {
@@ -7811,6 +8056,14 @@ window.onChat = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: context || lastSelText, kind: 'chat',
   } : null;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:对话 → rc-result.openChat(共享模式;else 为下方 _openChat 原逻辑,逐字不变)
+    PdfAdapter.chat({ text: lastSelText, context, fallback: () => _openChat(lastSelText, context) });
+    return;
+  }
+  _openChat(lastSelText, context);
+};
+// 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
+function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
     + '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>'
     + '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
@@ -7824,7 +8077,7 @@ window.onChat = () => {
     const i = document.getElementById('result-followup-input');
     if (i) { i.placeholder = '问 AI（已带原文 + 上下文）…'; i.focus(); }
   }, 120);
-};
+}
 window.onToQA = () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');
@@ -8141,6 +8394,7 @@ async function _connProbe() {
       '<button class="asst-learn" data-send="这页我还没掌握哪些词?逐个讲讲">📚 本页生词</button>' +
       '<button class="asst-learn" data-send="这页涉及哪些知识点?简要讲讲">🧩 这页知识点</button>' +
       '<button data-q="clear">🗑 清空</button>' +
+      '<button data-q="models">⚙ 模型</button>' +
     '</div>' +
     '<div id="asst-input">' +
       '<button id="asst-mic" title="语音输入"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V22h2v-3.07A7 7 0 0 0 19 12h-2z"/></svg></button>' +
@@ -8160,10 +8414,23 @@ async function _connProbe() {
     '.asst-a{align-self:flex-start;background:#161d31;border:1px solid #243152;border-bottom-left-radius:4px}' +
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
     '.asst-a h1,.asst-a h2,.asst-a h3{font-size:1em;margin:.5em 0 .2em}' +
+    '.asst-a img{max-width:100%;height:auto;border-radius:8px;display:block;margin:.4em 0;cursor:zoom-in}' +
     '.asst-tool{align-self:flex-start;color:#7c93c4;font-size:12px;padding:2px 6px;font-style:italic}' +
     '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
+    '.asst-jump{background:#16293a;border:1px solid #2a4a63;color:#bce0ff;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
+    '.asst-jump:active{background:#1d3a52}' +
+    '.asst-hl-row{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:8px;margin-top:5px;background:#161d33}' +
+    '.asst-hl-sw{flex:0 0 auto;width:12px;height:12px;border-radius:3px;border:1px solid #ffffff33}' +
+    '.asst-hl-tx{flex:1 1 auto;min-width:0;font-size:12.5px;color:#cdd8f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+    '.asst-hl-del{flex:0 0 auto;background:#3a1d1d;border:1px solid #6b3535;color:#ffd0d0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}' +
+    '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
+    '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
+    '.asst-edit-h{font-size:12.5px;color:#bfe0c8}' +
+    '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
+    '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:#dbe7ff;border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
+    '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
     '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
@@ -8174,10 +8441,14 @@ async function _connProbe() {
     '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
     '.asst-fu:active{background:#1d3358}' +
     // 每条回答右下角的「!」反馈按钮 + 弹出:显示这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作
-    '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end}' +
+    '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end;align-items:center}' +
+    '.asst-tok{margin-right:auto;font-size:11px;color:#6f7fa3;background:#121a2e;border:1px solid #233156;border-radius:8px;padding:1px 7px}' +
     '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid #2a3a63;background:#0e1525;color:#7c93c4;font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
     '.asst-fb-btn:active{background:#1a2540}' +
-    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:262px;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
+    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:320px;max-width:88vw;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
+    '.afp-l-btn{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;-webkit-tap-highlight-color:transparent}' +
+    '.afp-l-btn:active{opacity:.7}' +
+    '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid #233156;border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11.5px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
     '.afp-h{font-size:11px;color:#7c93c4;margin-bottom:2px}' +
     '.afp-step{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.5}' +
     '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
@@ -8212,7 +8483,23 @@ async function _connProbe() {
     '.actx-sel:active{background:rgba(255,255,255,.22)}' +
     '.actx-sel.actx-fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
-    '.actx-page:active{background:rgba(255,255,255,.28)}';
+    '.actx-page:active{background:rgba(255,255,255,.28)}' +
+    // ⚙ 模型设置面板(每任务 后端/型号/深度)
+    '.ams-mask{position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
+    '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
+    '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
+    '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
+    '.ams-sub{font-size:11px;color:#6b7da0;margin-bottom:10px;line-height:1.5}' +
+    '.ams-task{background:#0a1322;border:1px solid #243152;border-radius:10px;padding:10px;margin-bottom:9px}' +
+    '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
+    '.ams-tdef{font-size:11px;color:#6b7da0;margin-bottom:7px}' +
+    '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
+    '.ams-sel{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:7px;padding:5px 6px;font-size:12px;flex:1 1 28%;min-width:0}' +
+    '.ams-sel:disabled{opacity:.45}' +
+    '.ams-rst{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
+    '.ams-rst:active{background:#222d44}' +
+    '.ams-cur{font-size:11px;color:#7c93c4;margin-top:6px}' +
+    '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
   document.head.appendChild(css);
 
   // 🤖 fab:一键开抽屉到助手 tab
@@ -8308,7 +8595,15 @@ async function _connProbe() {
     } catch (_) {}
   }
   // 从回答里剥离 [[FOLLOWUP]]q1|q2|q3[[/FOLLOWUP]] 追问建议(容忍流式中途未闭合)
+  // ── 阶段5 门控:ui=shared → PdfAdapter.splitFollowups → rc-assistant.splitFollowups(纯解析,逐字等价);
+  //   else 原逻辑逐字(_splitFollowupsNative)。只迁解析(纯函数无 DOM);渲染 _renderFollowups 留 native
+  //   (PDF 的 _fadeInAfter 错峰淡入绑死 .asst-followups class,rc 版产出 .rc-fu-box → 迁渲染会丢淡入)。──
   function _splitFollowups(text) {
+    if (window.__uiShared && window.PdfAdapter && PdfAdapter.splitFollowups)
+      return PdfAdapter.splitFollowups(text, _splitFollowupsNative);
+    return _splitFollowupsNative(text);
+  }
+  function _splitFollowupsNative(text) {
     var fu = [];
     var push = function (body) { body.split(/[|\n]+/).forEach(function (q) { q = q.trim().replace(/^[\-·•\d\.\s]+/, ''); if (q) fu.push(q); }); };
     var clean = (text || '').replace(/\[\[FOLLOWUP\]\]([\s\S]*?)\[\[\/FOLLOWUP\]\]/g, function (m, body) { push(body); return ''; });
@@ -8335,8 +8630,6 @@ async function _connProbe() {
   //  · 🐢 太慢了    → 把「回答」动作的预设调到「同质量更快」的档(不重答,只影响以后)
   //  · 每步 ⚙      → 直接给这个动作选 模型 + 深度(haiku/sonnet/opus × low…max),存为该动作预设
   // 速度/质量谱(Pareto,实测:opus·low ≈ sonnet·high 质量但更快 → 取代 sonnet·high;haiku 在最快端)
-  var _MODELS = ['haiku', 'sonnet', 'opus'];
-  var _EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
   // Pareto 清洗后的自动谱:每档=该质量下最快的配置。快端粗(haiku/sonnet·快不需要细分 effort);
   // 深端(opus)给全 effort 范围 low→max(含 medium)。sonnet·medium/high 被 opus·low 支配,故不入谱(⚙ 里仍可手选)。
   var _SPEC = [
@@ -8380,40 +8673,133 @@ async function _connProbe() {
   document.addEventListener('click', function (e) {   // 点弹窗外任意处 → 收起
     if (_fbOpenPop && e.target && e.target.closest && !e.target.closest('.asst-fb-bar')) _fbClosePop();
   });
-  // 给某动作(orchestrator/summarize)存「模型+深度」预设;model 传 '' 清除回默认
-  function _setActionPref(action, model, effort, okMsg) {
+  // 给某动作存 (后端/型号/深度) 预设;backend 传 '' 清除回默认。跟感叹号「更强重答」共用此预设。
+  function _setActionPref(action, backend, variant, depth, okMsg) {
     return fetch('/api/assistant/action-pref', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: action, model: model || '', effort: effort || '' }) })
+      body: JSON.stringify({ action: action, backend: backend || '', variant: variant || '', depth: depth || '' }) })
       .then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.ok && typeof _toast === 'function') _toast(okMsg || '已设置'); return d; })
       .catch(function () {});
   }
-  var _ACT_NAME = { orchestrator: '回答', summarize: '章节总结' };
-  // 某步的 ⚙ 小设置面板:模型 + 深度两个下拉 + 「默认」清除
-  function _buildGear(st, close) {
-    var box = document.createElement('div'); box.className = 'afp-gear';
-    var cur = _curTier([{ model: st.model }]) || { model: 'sonnet', effort: 'high' };
-    var mkSel = function (opts, val, names) {
-      var s = document.createElement('select'); s.className = 'afp-sel';
-      opts.forEach(function (o) { var op = document.createElement('option'); op.value = o; op.textContent = (names && names[o]) || o; if (o === val) op.selected = true; s.appendChild(op); });
-      return s;
-    };
-    var selM = mkSel(_MODELS, cur.model);
-    var selE = mkSel(_EFFORTS, cur.effort, { low: 'low(快)', high: 'high(深)', xhigh: 'xhigh', max: 'max(最强)' });
-    var apply = document.createElement('button'); apply.className = 'afp-gset'; apply.textContent = '设为预设';
-    apply.addEventListener('click', function () {
-      _setActionPref(st.action, selM.value, selE.value, '「' + (_ACT_NAME[st.action] || st.action) + '」以后用 ' + _tierLabel(selM.value, selE.value));
-      close();
+  var _ACT_NAME = { orchestrator: '回答', summarize: '章节总结', vision: '看图' };
+  // ── ⚙ 模型设置面板:列出各 AI 任务,每个可设 后端/型号/深度 ──
+  var _DEPTH_LABEL = { auto: '自动(按问题)', low: 'low(快)', medium: 'medium', high: 'high(深)', xhigh: 'xhigh', max: 'max(最强)', none: '不思考', think: '思考' };
+  var _BACKEND_LABEL = { claude: 'Claude', gemini: 'Gemini' };
+  function _msMkSel(opts, val, labels, disabledSet) {
+    var s = document.createElement('select'); s.className = 'ams-sel';
+    (opts || []).forEach(function (o) {
+      var op = document.createElement('option'); op.value = o;
+      op.textContent = (labels && labels[o]) || o;
+      if (disabledSet && disabledSet.indexOf(o) >= 0) op.disabled = true;
+      if (o === val) op.selected = true;
+      s.appendChild(op);
     });
-    var def = document.createElement('button'); def.className = 'afp-gdef'; def.textContent = '默认';
-    def.addEventListener('click', function () {
-      _setActionPref(st.action, '', '', '「' + (_ACT_NAME[st.action] || st.action) + '」恢复默认');
-      close();
-    });
-    var lab = document.createElement('span'); lab.className = 'afp-glab'; lab.textContent = '模型/深度:';
-    box.appendChild(lab); box.appendChild(selM); box.appendChild(selE); box.appendChild(apply); box.appendChild(def);
-    return box;
+    return s;
   }
+  function _buildMsTask(action, info, cat, names, locked) {
+    var def = info.def, cur = info.pref || def;
+    var card = document.createElement('div'); card.className = 'ams-task';
+    var nm = document.createElement('div'); nm.className = 'ams-tname'; nm.textContent = names[action] || action;
+    var df = document.createElement('div'); df.className = 'ams-tdef';
+    df.textContent = '默认:' + (_BACKEND_LABEL[def.backend] || def.backend) + ' · ' + (cat.variant_short[def.variant] || def.variant) + ' · ' + (_DEPTH_LABEL[def.depth] || def.depth);
+    var row = document.createElement('div'); row.className = 'ams-row';
+    var gstat = cat.gemini_status || {};
+    function _fmtRetry(s) { if (!s) return ''; if (s < 90) return s + '秒'; if (s < 5400) return Math.round(s / 60) + '分'; return Math.round(s / 3600) + '小时'; }
+    var varLabels = {}; (cat.variants.gemini || []).forEach(function (v) {
+      var st = gstat[v], tag = ' · 免费';
+      if (st && st.paid_only) { tag = ' · 💰仅付费'; }   // ListModels 证实只在付费清单(如 3.1-pro):恒计费,非临时状态
+      else if (st && st.free === false) { tag = ' · 付费(' + (st.reason || '免费不可用') + (st.retry ? ',还需' + _fmtRetry(st.retry) : '') + ')'; }
+      varLabels[v] = (cat.variant_short[v] || v) + tag;
+    });
+    var lockB = locked[action] || [];
+    // 用户存的 variant 带 '@paid'(直连付费)不在 ListModels 清单里 → 插到对应裸型号后并给可读 label(同 rc-assistant)
+    function _vlist(backend, val) {
+      var l = (cat.variants[backend] || []).slice();
+      if (val && l.indexOf(val) < 0 && /@paid$/.test(String(val))) {
+        var bare = String(val).replace(/@paid$/, '');
+        var i = l.indexOf(bare);
+        l.splice(i >= 0 ? i + 1 : l.length, 0, val);
+        varLabels[val] = (cat.variant_short[bare] || bare) + ' · 💰直连付费';
+      }
+      return l;
+    }
+    var selB = _msMkSel(cat.backends, cur.backend, _BACKEND_LABEL, lockB);
+    var selV = _msMkSel(_vlist(cur.backend, cur.variant), cur.variant, varLabels);
+    var selD = _msMkSel(cat.depths[cur.backend] || [], cur.depth, _DEPTH_LABEL);
+    function save() {
+      _setActionPref(action, selB.value, selV.value, selD.value,
+        '「' + (names[action] || action) + '」已设为 ' + (cat.variant_short[selV.value] || selV.value) + '·' + (_DEPTH_LABEL[selD.value] || selD.value));
+    }
+    function rebindVD(backend, keepVal, vv, dv) {
+      var nv = _msMkSel(_vlist(backend, keepVal ? vv : null), keepVal ? vv : (cat.variants[backend] || [])[0], varLabels);
+      var nd = _msMkSel(cat.depths[backend] || [], keepVal ? dv : (cat.depths[backend] || [])[0], _DEPTH_LABEL);
+      row.replaceChild(nv, selV); row.replaceChild(nd, selD); selV = nv; selD = nd;
+      selV.addEventListener('change', save); selD.addEventListener('change', save);
+    }
+    selB.addEventListener('change', function () { rebindVD(selB.value, false); save(); });
+    selV.addEventListener('change', save); selD.addEventListener('change', save);
+    var rst = document.createElement('button'); rst.className = 'ams-rst'; rst.textContent = '默认';
+    rst.addEventListener('click', function () {
+      _setActionPref(action, '', '', '', '「' + (names[action] || action) + '」恢复默认');
+      selB.value = def.backend; rebindVD(def.backend, true, def.variant, def.depth);
+    });
+    row.appendChild(selB); row.appendChild(selV); row.appendChild(selD); row.appendChild(rst);
+    card.appendChild(nm); card.appendChild(df); card.appendChild(row);
+    if (lockB.indexOf('gemini') >= 0) {
+      var lk = document.createElement('div'); lk.className = 'ams-cur'; lk.textContent = '(根 agent 切 Gemini 需二期工具循环,暂锁)';
+      card.appendChild(lk);
+    }
+    return card;
+  }
+  // ── 阶段5 门控:ui=shared → PdfAdapter.openModelSettings → rc-assistant.openModelSettings
+  //   (同组端点 /api/assistant/action-pref[s] + 同组 action 名,消 ~140 行逐字重复);
+  //   else 原逻辑逐字(_openModelSettingsNative);RC 不可用 → fallback 回 native,绝不吞功能。──
+  function openModelSettings(focusAction) {
+    if (window.__uiShared && window.PdfAdapter && PdfAdapter.openModelSettings) {
+      return PdfAdapter.openModelSettings({ focusAction: focusAction, fallback: function () { _openModelSettingsNative(focusAction); } });
+    }
+    return _openModelSettingsNative(focusAction);
+  }
+  function _openModelSettingsNative(focusAction) {
+    fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.ok) { if (typeof _toast === 'function') _toast('拉取设置失败'); return; }
+      var mask = document.createElement('div'); mask.className = 'ams-mask';
+      mask.addEventListener('click', function (e) { if (e.target === mask) mask.remove(); });
+      var box = document.createElement('div'); box.className = 'ams-box';
+      var h = document.createElement('div'); h.className = 'ams-h';
+      var ht = document.createElement('span'); ht.textContent = '⚙ AI 模型设置';
+      var x = document.createElement('button'); x.className = 'ams-x'; x.textContent = '×';
+      x.addEventListener('click', function () { mask.remove(); });
+      h.appendChild(ht); h.appendChild(x); box.appendChild(h);
+      var sub = document.createElement('div'); sub.className = 'ams-sub';
+      sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效。跟感叹号「更强重答」共用同一套预设。';
+      box.appendChild(sub);
+      var _focusCard = null;
+      function _renderActs(list) {
+        list.forEach(function (a) {
+          var ai = d.actions[a]; if (!ai) return;
+          var c = _buildMsTask(a, { pref: ai.pref, def: ai.default }, d.catalog, d.names, d.locked || {});
+          if (a === focusAction) _focusCard = c;   // 从某步⚙进来 → 定位到对应任务卡
+          box.appendChild(c);
+        });
+      }
+      _renderActs(['orchestrator', 'summarize', 'vision']);
+      // PDF 阅读器其它 AI 入口(解释/翻译/字典/语法),跟助手共用同一套脱壳 Claude + Gemini 双后端预设
+      var _rh = document.createElement('div'); _rh.className = 'ams-sub';
+      _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+      _rh.textContent = '— PDF 阅读器其它 AI —';
+      box.appendChild(_rh);
+      _renderActs(['explain', 'translate', 'dict', 'grammar']);
+      var note = document.createElement('div'); note.className = 'ams-note';
+      note.textContent = '标「免费」= 免费档支持该型号;但免费是**共享算力**,高峰常过载(503)或限流时会自动落付费保不中断——'
+        + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
+        + '选它每次调用都按量计费。flash 高峰过载较多;想更稳的免费可试 flash-lite 系。';
+      box.appendChild(note);
+      mask.appendChild(box); document.body.appendChild(mask);
+      if (_focusCard) { try { _focusCard.style.outline = '2px solid #6aa3ff'; _focusCard.style.borderRadius = '8px'; _focusCard.scrollIntoView({ block: 'center' }); } catch (_) {} }
+    }).catch(function () { if (typeof _toast === 'function') _toast('拉取设置失败'); });
+  }
+  try { window.openModelSettings = openModelSettings; } catch (_) {}   // 供 PDF 总设置面板调起
   function _buildFbPop(question, trace, close, ts) {
     var pop = document.createElement('div'); pop.className = 'asst-fb-pop';
     var h = document.createElement('div'); h.className = 'afp-h';
@@ -8425,19 +8811,34 @@ async function _connProbe() {
     steps.forEach(function (st) {
       var row = document.createElement('div'); row.className = 'afp-step';
       var l = document.createElement('span'); l.className = 'afp-l'; l.textContent = st.label || '步骤';   // 任务名
+      if (st.detail) {   // 这步有完整内容 → 步骤名变可点按钮,点开/收起显示该步的完整 AI 产出
+        l.classList.add('afp-l-btn'); l.title = '点开看这一步的完整内容';
+        l.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var ex = row.nextSibling;
+          if (ex && ex.classList && ex.classList.contains('afp-detail')) { ex.remove(); return; }   // 再点收起
+          var dt = document.createElement('div'); dt.className = 'afp-detail'; dt.textContent = st.detail;
+          row.parentNode.insertBefore(dt, row.nextSibling);
+        });
+      }
       var m = document.createElement('span'); m.className = 'afp-m';
       if (typeof st.sec === 'number') _tot += st.sec;
       var mt = st.model || '';
       m.textContent = mt + (typeof st.sec === 'number' ? (mt ? ' · ' : '') + st.sec + 's' : '');   // 模型 · 耗时(老回答可能都没有)
+      if (st.tier === 'free' || st.tier === 'paid') {   // Gemini 实际服务这条用了哪档 → 标「免费/付费」
+        var tg = document.createElement('span'); tg.textContent = st.tier === 'paid' ? '付费' : '免费';
+        tg.style.cssText = 'margin-left:6px;padding:0 6px;border-radius:6px;font-size:11px;vertical-align:middle;'
+          + (st.tier === 'paid' ? 'background:#5a3a1a;color:#ffcf8f;' : 'background:#1f4a2e;color:#8fe3a8;');
+        m.appendChild(tg);
+      }
       row.appendChild(l); row.appendChild(m);
       if (st.action) {   // 这一步是会调模型的动作 → 给个 ⚙ 直接设它的预设
         var g = document.createElement('button'); g.className = 'afp-gear-btn'; g.textContent = '⚙'; g.title = '设这个动作的模型/深度';
         g.addEventListener('click', function (e) {
           e.stopPropagation();
-          var ex = row.nextSibling;
-          if (ex && ex.classList && ex.classList.contains('afp-gear')) { ex.remove(); return; }   // 再点收起
-          var panel = _buildGear(st, _fbClosePop);
-          row.parentNode.insertBefore(panel, row.nextSibling);
+          _fbClosePop();   // 收起感叹号弹窗
+          // 打开统一三维设置面板(支持 Claude/Gemini + 免费/付费标),定位到本动作 —— 不再是只有 Claude 的简易档
+          try { openModelSettings(st.action); } catch (_) {}
         });
         row.appendChild(g);
       }
@@ -8454,32 +8855,24 @@ async function _connProbe() {
     var up = _strongerTier(cur);     // null = 已最强
     var down = _fasterTier(cur);     // null = 已最快
     var acts = document.createElement('div'); acts.className = 'afp-acts';
-    // 🎯 不够好:把「回答」预设升一档 + 立刻重答
-    var bQ = document.createElement('button'); bQ.className = 'afp-act afp-q';
-    if (!question) bQ.textContent = '🎯 以后「回答」用更强的';
-    else if (up) bQ.textContent = '🎯 不够好 · 升到「' + up.label + '」重答';
-    else bQ.textContent = '🎯 已是最强 · 用 opus·max 再答一次';
-    bQ.addEventListener('click', function () {
-      close();
-      var tgt = up || { model: 'opus', effort: 'max' };
-      _setActionPref('orchestrator', tgt.model, tgt.effort, '「回答」以后用 ' + _tierLabel(tgt.model, tgt.effort));
-      if (question && !streaming) send(question, { forceModel: tgt.model, forceEffort: tgt.effort });
-    });
-    // 🐢 太慢:把「回答」预设调到同质量更快的档(不重答)
-    var bS = document.createElement('button'); bS.className = 'afp-act afp-s';
-    bS.textContent = down ? ('🐢 太慢 · 以后「回答」用「' + down.label + '」') : '🐢 已是最快档';
-    bS.addEventListener('click', function () {
-      close();
-      if (down) _setActionPref('orchestrator', down.model, down.effort, '「回答」以后用 ' + down.label + '(更快)');
-      else if (typeof _toast === 'function') _toast('已经是最快档了');
-    });
-    acts.appendChild(bQ); acts.appendChild(bS); pop.appendChild(acts);
+    // 去掉了🎯升档/🐢调快的爬梯子;只留一个「模型设置」按钮 → 打开统一三维设置面板(后端/型号/深度)
+    var bSet = document.createElement('button'); bSet.className = 'afp-act afp-q';
+    bSet.textContent = '⚙ 模型设置';
+    bSet.addEventListener('click', function () { close(); try { openModelSettings(); } catch (_) {} });
+    acts.appendChild(bSet); pop.appendChild(acts);
     return pop;
   }
   function _attachFeedback(bubble, question, trace, ts) {
     if (!bubble) return;
     try { var old = bubble.querySelector('.asst-fb-bar'); if (old) old.remove(); } catch (_) {}   // 重渲时防重复挂
     var bar = document.createElement('div'); bar.className = 'asst-fb-bar';
+    var _tok = trace && trace[0] && trace[0].tok;   // 本轮累计 token → 显示「3.6k tok」
+    if (_tok) {
+      var tk = document.createElement('span'); tk.className = 'asst-tok';
+      tk.textContent = (_tok >= 1000 ? (_tok / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : _tok) + ' tok';
+      tk.title = '这条回答累计消耗 token：' + _tok;
+      bar.appendChild(tk);
+    }
     var btn = document.createElement('button'); btn.className = 'asst-fb-btn'; btn.textContent = '!'; btn.title = '对这条回答不满意?';
     btn.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -8502,7 +8895,129 @@ async function _connProbe() {
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
   function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
 
-  function ctx() { try { if (typeof window.__voiceContext === 'function') return window.__voiceContext(); } catch (_) {} return { page_type: 'pdf' }; }
+  function ctx() {
+    var c = { page_type: 'pdf' };
+    // 取阅读器当前上下文经统一中间层 RC.adapter().getContext()(PdfAdapter 只读包 __voiceContext);
+    // 中间层不可用(legacy 无 adapter / RC 未加载)→ 回退直连 __voiceContext。便签合并见下方(消费侧,不变)。
+    try {
+      var g = (window.RC && RC.adapter && RC.adapter().getContext) ? RC.adapter().getContext() : null;
+      c = g || ((typeof window.__voiceContext === 'function') ? (window.__voiceContext() || c) : c);
+    } catch (_) {}
+    // 便签注入(双击便签 → __noteAttached,见下方注入块):无笔画=文字+锚点附近正文走 context.notes 文本通道;
+    // 有笔画=kind:'note' 条目并入 figures 走视觉通道(服务端 see_figure 认 note_id → _note_composite_png 现场合成)
+    try {
+      var atts = window.__noteAttached || [];
+      var txtNotes = [], inkNotes = [];
+      atts.forEach(function (n) {
+        if (n.has_ink) {
+          inkNotes.push({ kind: 'note', note_id: n.id, page: n.page || 0, caption: '手写便签',
+                          desc: String(n.text || '').slice(0, 300), near: String(n.near || '').slice(0, 600),
+                          file_rel: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''), has_ink: true });
+        } else {
+          txtNotes.push({ id: n.id, text: String(n.text || '').slice(0, 2000), near: String(n.near || '').slice(0, 1200), page: n.page || 0 });
+        }
+      });
+      if (txtNotes.length) c.notes = txtNotes.slice(0, 4);
+      if (inkNotes.length) c.figures = ((c.figures || []).concat(inkNotes.slice(0, 4))).slice(0, 6);
+    } catch (_) {}
+    return c;
+  }
+
+  // ── 便签注入(阶段3,设计见 references/sticky-notes-design.md 用户规格8):双击便签(rc-stickynote onDoubleTap,
+  //   经 27-rc-adapter 接到这里)→ 加入 __noteAttached + 输入框上方 chip(挨图附件条,同款视觉,✕ 移除)。
+  //   chip 生命周期同图附件条:发送时定格进 ctx、发完即清。──
+  window.__noteAttached = [];   // [{id,text,near,page,has_ink,_thumb}](_thumb=合成图 data_url,仅前端显示不随请求发)
+  function _renderNoteChips() {
+    try {
+      var paneEl = document.getElementById('side-pane-asst');
+      var input = paneEl && paneEl.querySelector('#asst-input');
+      var list = window.__noteAttached || [];
+      var wrap = document.getElementById('asst-note-chips');
+      if (!list.length) { if (wrap) wrap.remove(); return; }
+      if (!input) return;   // 助手还没建 → 数据仍在,开了再渲
+      if (!wrap) {
+        wrap = document.createElement('div'); wrap.id = 'asst-note-chips';
+        wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 0';
+        input.parentNode.insertBefore(wrap, input);
+      }
+      wrap.innerHTML = '';
+      list.forEach(function (n) {
+        var chip = document.createElement('div'); chip.className = 'asst-fig-chip';
+        if (n.has_ink) {
+          var img = document.createElement('img'); img.className = 'afc-thumb'; img.alt = '';
+          if (n._thumb) {
+            img.src = n._thumb; img.style.cursor = 'zoom-in';
+            img.addEventListener('click', function () {   // 点缩略图看大图(复用 26-figures 的 .fig-lightbox 样式)
+              var mask = document.createElement('div'); mask.className = 'fig-lightbox';
+              var big = document.createElement('img'); big.src = n._thumb; big.alt = '';
+              mask.appendChild(big); document.body.appendChild(mask);
+              mask.addEventListener('click', function () { mask.remove(); });
+            });
+          }
+          chip.appendChild(img);
+        } else {
+          var ic = document.createElement('span'); ic.textContent = '🗒'; ic.style.cssText = 'flex:none;font-size:15px'; chip.appendChild(ic);
+        }
+        var t = String(n.text || '').replace(/\s+/g, ' ').trim();
+        var cap = document.createElement('span'); cap.className = 'afc-cap';
+        cap.textContent = n.has_ink ? ('手写便签' + (t ? ' · ' + t.slice(0, 14) : '')) : (t.slice(0, 20) || '便签');
+        var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
+        x.addEventListener('click', function () { window.__noteAttached = (window.__noteAttached || []).filter(function (z) { return z.id !== n.id; }); _renderNoteChips(); });
+        chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);
+      });
+    } catch (_) {}
+  }
+  window.__renderNoteChips = _renderNoteChips;
+  window.__clearNoteAttached = function () { window.__noteAttached = []; _renderNoteChips(); };
+  function _noteFetchThumb(entry) {
+    setTimeout(function () {   // 稍等 rc-stickynote 的文字/笔画 PATCH 先落库,合成图才含最新内容
+      fetch('/pdf/api/note-composite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: (typeof FILE_REL !== 'undefined' ? FILE_REL : ''), id: entry.id }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.ok && d.data_url) { entry._thumb = d.data_url; _renderNoteChips(); } })
+        .catch(function () {});
+    }, 350);
+  }
+  // 锚点附近正文(contextAt):便签所在页字符层里,离锚点 y 最近的字符前后各 ±600 字
+  function _noteNearText(anchor) {
+    try {
+      if (!anchor || anchor.kind !== 'pdf') return '';
+      var pw = document.querySelector('.page-wrap[data-page-num="' + anchor.page + '"]');
+      var ch = pw && pw.__charBoxes;
+      if (!ch || !ch.length) return '';
+      var yPx = Math.max(0, Math.min(1, anchor.y || 0)) * (pw.clientHeight || 1);
+      var best = 0, bestD = Infinity;
+      for (var i = 0; i < ch.length; i++) {
+        var d = Math.abs((ch[i].top + ch[i].height / 2) - yPx);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      return _charsRangeToText(ch, Math.max(0, best - 600), Math.min(ch.length - 1, best + 600)).slice(0, 1300);
+    } catch (_) { return ''; }
+  }
+  window.__noteInject = function (note) {
+    try {
+      if (!note || !window.__asstOpen || !window.__asstOpen()) return false;   // 助手没开 → 维持现状(不注入)
+      var list = window.__noteAttached = window.__noteAttached || [];
+      var hasInk = !!(note.strokes && note.strokes.length);
+      var old = null;
+      for (var i = 0; i < list.length; i++) if (list[i].id === note.id) old = list[i];
+      if (old) {   // 已在附件条 → 只刷新内容(文字/笔画可能变了),不重复加
+        old.text = note.text || '';
+        if (hasInk && !old.has_ink) { old.has_ink = true; old._thumb = ''; }
+        if (old.has_ink) _noteFetchThumb(old);
+        _renderNoteChips();
+        if (typeof _toast === 'function') _toast('已在对话上下文');
+        return true;
+      }
+      var entry = { id: note.id, text: note.text || '', near: _noteNearText(note.anchor),
+                    page: (note.anchor && note.anchor.page) || 0, has_ink: hasInk, _thumb: '' };
+      list.push(entry);
+      _renderNoteChips();
+      if (entry.has_ink) _noteFetchThumb(entry);
+      if (typeof _toast === 'function') _toast('🗒 便签已带进对话');
+      return true;
+    } catch (_) { return false; }
+  };
 
   // 点击历史/上下文卡片 → 跳到那一页(同书走 jumpWithBack 带「回到」条;跨书则打开那本书定位到页)
   function _jumpToCtx(file_rel, page) {
@@ -8510,6 +9025,38 @@ async function _connProbe() {
     var cur = (typeof FILE_REL !== 'undefined') ? FILE_REL : '';
     if (file_rel && cur && file_rel !== cur) { location.href = '/pdf/view?file=' + encodeURIComponent(file_rel) + '&page=' + page; return; }   // 跨书:正确路由是 /pdf/view(/pdf/ 是书架)
     if (typeof window.jumpWithBack === 'function') window.jumpWithBack(page);
+  }
+  // ③ 上下文卡「选中」跳页后:目标页字符层里找到这段文字 → 临时呼吸高亮几秒后自动移除。
+  // 机制**复用不重写**:高亮走 15-phrase 的 _activePhraseHl 状态 + renderPhraseHl 渲染管线
+  // (绝对定位进 page-wrap 内容坐标系随页滚动,08-charlayer 页重渲还会自动补画,铁律2/3);
+  // 等页字符层就绪的重试节奏照搬 11-search 的 _applyPendingSearchHighlight。找不到文字(公式
+  // 选区/OCR 差异)就只跳页不闪。定时移除前校验高亮仍是本次的,不误删用户随后发起的词组查询高亮。
+  var _ctxSelFlashT = null;
+  function _flashSelOnPage(page, text, tries) {
+    page = parseInt(page, 10); text = String(text || '').trim();
+    if (!page || !text) return;
+    tries = tries || 0;
+    var wrap = document.querySelector('[data-page-num="' + page + '"]');
+    if (!(wrap && wrap.dataset.loaded === '1' && wrap.__charBoxes && wrap.__charBoxes.length)) {
+      if (tries < 30) setTimeout(function () { _flashSelOnPage(page, text, tries + 1); }, 160);   // 最多 ~4.8s(同搜索)
+      return;
+    }
+    try {
+      var chars = wrap.__charBoxes;
+      var full = chars.map(function (c) { return c.c || ''; }).join('').toLowerCase();
+      var i = full.indexOf(text.toLowerCase());
+      if (i < 0) return;
+      var rects = _charRangeToPtRects(chars, i, i + text.length - 1);   // 起止含端点(同 _showPhraseHighlight 的 startIdx..endIdx)
+      if (!rects.length) return;
+      document.querySelectorAll('.phrase-hl-layer').forEach(function (l) { l.remove(); });   // 清别页残留(同 _showPhraseHighlight)
+      _activePhraseHl = { page: page, text: text, rects: rects, solid: false };
+      renderPhraseHl(wrap);
+      var mine = _activePhraseHl;
+      var first = wrap.querySelector('.phrase-hl-layer .hl');
+      if (first) { try { first.scrollIntoView({ block: 'center' }); } catch (_) {} }
+      clearTimeout(_ctxSelFlashT);
+      _ctxSelFlashT = setTimeout(function () { if (_activePhraseHl === mine) { try { _removePhraseHighlight(); } catch (_) {} } }, 5000);
+    } catch (_) {}
   }
   // open_book 工具的 client_action 用:打开另一本书(可定位页)
   window.openBookAt = function (fr, pg) { try { _jumpToCtx(fr, parseInt(pg, 10) || 1); } catch (_) {} };
@@ -8556,7 +9103,11 @@ async function _connProbe() {
         s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
       }
       s.title = page ? ('跳到第 ' + ((typeof window._dispPage === 'function') ? window._dispPage(page) : page) + ' 页') : '';
-      s.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
+      s.addEventListener('click', function () {   // ③ 跳页后把这段选中在页上临时呼吸高亮(跨书整页跳走,不闪)
+        _jumpToCtx(bookRel, page);
+        var curF = (typeof FILE_REL !== 'undefined') ? FILE_REL : '';
+        if (page && (!bookRel || !curF || bookRel === curF)) _flashSelOnPage(page, sel);
+      });
       card.appendChild(s);
     }
     if (showPage) {
@@ -8572,6 +9123,31 @@ async function _connProbe() {
     if (!actions || !actions.length) return;
     actions.forEach(function (a) { try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {} });
   }
+  // 助手「列出可删高亮」工具产生 → 在对话里逐条渲染:色块 + 文字 + 「↗跳转」+「🗑删除」。用户点跳转看/点删除移除(不替他删)。
+  window._showHlPicker = function (d) {
+    try {
+      if (!d || !Array.isArray(d.items) || !d.items.length) return;
+      var fileRel = d.file_rel || '';
+      var box = document.createElement('div'); box.className = 'asst-msg asst-a';
+      var head = document.createElement('div'); head.style.cssText = 'margin-bottom:4px;opacity:.85;font-size:12.5px';
+      head.textContent = '共 ' + d.items.length + ' 处高亮 —— 点「跳转」去看,点「删除」移除:';
+      box.appendChild(head);
+      d.items.forEach(function (it) {
+        var row = document.createElement('div'); row.className = 'asst-hl-row';
+        var sw = document.createElement('span'); sw.className = 'asst-hl-sw'; sw.style.background = it.color || '#fff59d';
+        var tx = document.createElement('span'); tx.className = 'asst-hl-tx';
+        tx.textContent = '第' + it.page + '页 · ' + (it.text || '(无文字)');   // it.page=印刷页(显示)
+        tx.title = it.text || '';
+        var _jp = (it.pdf_page != null) ? it.pdf_page : it.page;   // 跳转用 PDF 页(jumpWithBack 收 PDF 页)
+        var jb = document.createElement('button'); jb.className = 'asst-jump'; jb.setAttribute('data-page', _jp); jb.textContent = '↗ 跳转';
+        var db2 = document.createElement('button'); db2.className = 'asst-hl-del';
+        db2.setAttribute('data-id', it.id); db2.setAttribute('data-file', fileRel); db2.textContent = '🗑 删除';
+        row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(db2);
+        box.appendChild(row);
+      });
+      thread.appendChild(box); scrollDown();
+    } catch (_) {}
+  };
   // agent 画完高亮后:重新拉高亮 + 重渲所有可见页(复用 17-highlight 的模块函数,本模块同作用域可调)
   window._reloadHighlights = async function () {
     try {
@@ -8581,6 +9157,100 @@ async function _connProbe() {
       });
     } catch (_) {}
   };
+  // AI 建/改便签、撤销/重做后:重挂页面便签(rc-stickynote.loadAll 幂等全量;legacy 模式无 RC 则静默跳过)。
+  // 后端 notes_create/notes_edit/undo_last 的 client_action {fn:'notesReload'} 也走这里(runActions → window[fn])。
+  window.notesReload = function () {
+    try { if (window.RC && RC.stickynote && RC.stickynote.loadAll) RC.stickynote.loadAll(); } catch (_) {}
+  };
+  // ── 改动发生时**自动**生成「跳转 + 撤销/重做」卡片(系统在高亮/便签写入时生成,非 AI 文本生成)──
+  var _assistEdits = {}, _aeCtr = 0;
+  window._assistEdit = function (d) {
+    try {
+      if (!d || !Array.isArray(d.items) || !d.items.length) return;
+      if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
+      if (d.type !== 'highlight') return;
+      try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}   // 先把刚画的高亮渲出来
+      var eid = 'ae' + (++_aeCtr);
+      _assistEdits[eid] = { file: d.file || '', items: d.items.slice(),
+                            ids: d.items.map(function (it) { return it.id; }).filter(Boolean), undone: false };
+      var pages = [], seen = {};
+      d.items.forEach(function (it) {
+        var dp = (it.disp_page != null) ? it.disp_page : it.pdf_page;
+        if (dp != null && !seen[dp]) { seen[dp] = 1; pages.push({ disp: dp, pdf: (it.pdf_page != null ? it.pdf_page : dp) }); }
+      });
+      var card = document.createElement('div'); card.className = 'asst-edit-card';
+      var head = document.createElement('div'); head.className = 'asst-edit-h';
+      head.textContent = '✏️ 已高亮 ' + d.items.length + ' 处' + (pages.length ? '（第 ' + pages.map(function (p) { return p.disp; }).join('、') + ' 页）' : '');
+      card.appendChild(head);
+      if (pages.length) {
+        var chips = document.createElement('div'); chips.className = 'asst-edit-chips';
+        pages.forEach(function (p) {
+          var c = document.createElement('button'); c.className = 'asst-jump';
+          c.setAttribute('data-page', p.pdf); c.textContent = '→ 第' + p.disp + '页'; chips.appendChild(c);
+        });
+        card.appendChild(chips);
+      }
+      var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
+      btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
+      card.appendChild(btn);
+      thread.appendChild(card); scrollDown();
+    } catch (_) {}
+  };
+  // 便签写操作的「跳转 + 撤销⇄重做」卡(同高亮卡形态;后端 notes_create/notes_edit 的 client_action 触发):
+  //   create:撤销=DELETE 该便签,重做=POST 快照重建(拿新 id 接管撤销);edit:撤销=PATCH 旧 text/color,重做=PATCH 新值。
+  //   任何一步都只碰 text/color/整条,绝不动 strokes/anchor/尺寸。
+  function _assistNoteCard(d) {
+    try {
+      window.notesReload();   // 先把刚建/改的便签渲出来
+      var eid = 'ae' + (++_aeCtr);
+      _assistEdits[eid] = { ntype: 'note', op: d.op || 'create', file: d.file || '', items: d.items.slice(), undone: false };
+      var it0 = d.items[0] || {};
+      var card = document.createElement('div'); card.className = 'asst-edit-card';
+      var head = document.createElement('div'); head.className = 'asst-edit-h';
+      head.textContent = '🗒 ' + (d.op === 'edit' ? '已修改便签' : '已创建便签') + (it0.disp_page ? '（第 ' + it0.disp_page + ' 页）' : '');
+      card.appendChild(head);
+      if (it0.pdf_page) {
+        var chips = document.createElement('div'); chips.className = 'asst-edit-chips';
+        var c = document.createElement('button'); c.className = 'asst-jump';
+        c.setAttribute('data-page', it0.pdf_page); c.textContent = '→ 第' + (it0.disp_page || it0.pdf_page) + '页';
+        chips.appendChild(c); card.appendChild(chips);
+      }
+      var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
+      btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
+      card.appendChild(btn);
+      thread.appendChild(card); scrollDown();
+    } catch (_) {}
+  }
+  // 便签卡的撤销⇄重做执行(点 .asst-edit-undo 且 st.ntype==='note' 时走这;完成后重挂页面便签)
+  function _noteEditToggle(st, eb) {
+    var API = '/pdf/api/notes';
+    function fin(undone) { st.undone = undone; eb.disabled = false; eb.textContent = undone ? '↪ 重做' : '↩ 撤销'; window.notesReload(); }
+    function patchAll(vals, undone) {
+      Promise.all((st.items || []).map(function (it) {
+        var v = it[vals] || {};
+        return fetch(API, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: st.file, id: it.id, text: v.text, color: v.color }) }).catch(function () {});
+      })).then(function () { fin(undone); });
+    }
+    if (!st.undone) {
+      eb.textContent = '撤销中…';
+      if (st.op === 'edit') { patchAll('old', true); return; }
+      Promise.all((st.items || []).map(function (it) {
+        return fetch(API + '?file=' + encodeURIComponent(st.file) + '&id=' + encodeURIComponent(it.id), { method: 'DELETE' }).catch(function () {});
+      })).then(function () { fin(true); });
+    } else {
+      eb.textContent = '重做中…';
+      if (st.op === 'edit') { patchAll('new', false); return; }
+      Promise.all((st.items || []).map(function (it) {
+        var n = it.note || {};
+        return fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: st.file, anchor: n.anchor, text: n.text, color: n.color, w: n.w, h: n.h, collapsed: n.collapsed, strokes: n.strokes }) })
+          .then(function (r) { return r.json(); })
+          .then(function (dd) { if (dd && dd.ok) { it.id = dd.id; it.note = dd.note || n; } })
+          .catch(function () {});
+      })).then(function () { fin(false); });
+    }
+  }
 
   var _abort = null, _recovering = false, _lastProgressTs = 0, _ridCtr = 0;
   function _whenVisibleAsst() {   // 在后台 → 等回到前台再继续(重连前先回前台,后台重连也会被掐)
@@ -8627,9 +9297,11 @@ async function _connProbe() {
     if (!text) {
       // 空输入但有焦点上下文(带入的图 / 钉住的公式或段落 / 当前选中)→ 等于"就问这个",用默认问法直接发
       var _hasFig = (sentCtx.figures && sentCtx.figures.length);
+      var _hasNote = (sentCtx.notes && sentCtx.notes.length);
       var _fs = sentCtx.focus_sel;
       var _hasSel = (sentCtx.selection && sentCtx.selection.trim());
-      if (_hasFig) text = '讲讲这张图';
+      if (_hasFig) text = (sentCtx.figures.every(function (f) { return f && f.kind === 'note'; })) ? '讲讲这个便签' : '讲讲这张图';
+      else if (_hasNote) text = '讲讲这个便签';
       else if (_fs && _fs.text) text = (_fs.kind === 'formula') ? '讲讲这个公式' : '讲讲这段';
       else if (_hasSel) text = '讲讲这段';
       else return;   // 真·空(无任何上下文)→ 不发
@@ -8638,6 +9310,7 @@ async function _connProbe() {
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
+    try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
     // 逐字浮现的"揭示游标":跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)
@@ -8683,10 +9356,20 @@ async function _connProbe() {
         scrollDown();
       }
       else if (ev === 'notice') { addMsg('asst-note', esc(parsed)); scrollDown(); }
-      else if (ev === 'actions') { acts = parsed; }
+      else if (ev === 'gemini-paid') {   // ② 免费 Gemini 受限→本次已用付费:提示条 + 一键「以后直接用付费」(渲染器在 rc-assistant,legacy 模式退纯文字)
+        try {
+          var _pn = (window.RC && RC.assistant && RC.assistant.paidNotice) ? RC.assistant.paidNotice(parsed) : null;
+          if (_pn) { thread.appendChild(_pn); scrollDown(); }
+          else if (!window.__paidNoted) { window.__paidNoted = true; addMsg('asst-note', esc((parsed && parsed.text) || '免费 Gemini 额度受限,本次已使用付费档。')); scrollDown(); }
+        } catch (_) {}
+      }
+      else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
-      else if (ev === 'undo' && parsed && parsed.undo_id) { addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>'); }
+      else if (ev === 'undo' && parsed && parsed.undo_id) {
+        var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
+        addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
+      }
       else if (ev === 'error') { answer = '⚠️ ' + parsed; aMsg.innerHTML = esc(answer); }
     }
     // 开一条 SSE 读到自然结束/断开。首连带 message+context;重连只带 rid+from(服务端按 rid 续发缓冲事件)。
@@ -8776,6 +9459,55 @@ async function _connProbe() {
     })();
   }
   thread.addEventListener('click', function (e) {
+    var jb = e.target && e.target.closest && e.target.closest('.asst-jump');
+    if (jb) { var jp = parseInt(jb.getAttribute('data-page'), 10); if (jp && typeof window.jumpWithBack === 'function') window.jumpWithBack(jp); return; }
+    var del = e.target && e.target.closest && e.target.closest('.asst-hl-del');   // 「列出可删高亮」里的删除按钮
+    if (del) {
+      var hid = del.getAttribute('data-id'), hfile = del.getAttribute('data-file');
+      del.disabled = true; del.textContent = '删除中…';
+      fetch('/pdf/api/highlights', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: hfile, id: hid }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.ok) {
+            try {   // 立刻把这条高亮的 DOM 元素(.hl-saved[data-id])抹掉 → 不等重拉就即时反映在页面
+              var esc2 = (window.CSS && CSS.escape) ? CSS.escape(hid) : hid;
+              document.querySelectorAll('.hl-saved[data-id="' + esc2 + '"]').forEach(function (el) { el.remove(); });
+            } catch (_) {}
+            try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}   // 再重拉,同步 _hlByPage,翻页回来不复现
+            var row = del.closest('.asst-hl-row');
+            if (row) { row.style.opacity = '.45'; var tx = row.querySelector('.asst-hl-tx'); if (tx) tx.style.textDecoration = 'line-through'; }
+            del.outerHTML = '<span class="asst-tool">🗑 已删</span>';
+          } else { del.disabled = false; del.textContent = '🗑 删除'; if (typeof _toast === 'function') _toast('删除失败:' + ((d && d.error) || '')); }
+        })
+        .catch(function () { del.disabled = false; del.textContent = '🗑 删除'; });
+      return;
+    }
+    // 自动卡片的「撤销 ⇄ 重做」切换:撤销=删全部 id,重做=用存的字段重建(拿新 id),按钮文字来回切
+    var eb = e.target && e.target.closest && e.target.closest('.asst-edit-undo');
+    if (eb) {
+      var eid2 = eb.getAttribute('data-eid'); var st = _assistEdits[eid2]; if (!st) return;
+      eb.disabled = true;
+      if (st.ntype === 'note') { _noteEditToggle(st, eb); return; }   // 便签卡:走便签版撤销⇄重做
+      if (!st.undone) {
+        eb.textContent = '撤销中…';
+        Promise.all((st.ids || []).map(function (id) {
+          return fetch('/pdf/api/highlights', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, id: id }) }).then(function (r) { return r.json(); }).catch(function () { return { ok: false }; });
+        })).then(function () {
+          try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+          st.undone = true; eb.disabled = false; eb.textContent = '↪ 重做';
+        });
+      } else {
+        eb.textContent = '重做中…';
+        Promise.all((st.items || []).map(function (it) {
+          return fetch('/pdf/api/highlights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text }) }).then(function (r) { return r.json(); }).then(function (d) { return (d && d.ok) ? d.id : null; }).catch(function () { return null; });
+        })).then(function (nids) {
+          st.ids = nids.filter(Boolean);
+          try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+          st.undone = false; eb.disabled = false; eb.textContent = '↩ 撤销';
+        });
+      }
+      return;
+    }
     var btn = e.target && e.target.closest && e.target.closest('.asst-undo'); if (!btn) return;
     var uid = btn.getAttribute('data-uid'); btn.disabled = true; btn.textContent = '撤销中…';
     fetch('/api/assistant/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: uid }) })
@@ -8809,6 +9541,7 @@ async function _connProbe() {
       else if (q === 'zout') window.zoomChange(-0.15);
       else if (q === 'ptrans') window.togglePageTranslate();
       else if (q === 'clear') { thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }
+      else if (q === 'models') { openModelSettings(); }
     } catch (_) {}
   });
 
@@ -9015,7 +9748,23 @@ async function _connProbe() {
     clearHl();
     _popBadge = null;
   }
+  // 轻点徽标=描述浮层。共享模式(__uiShared)→ 走 PdfAdapter.figurePop → RC.figures.openPop(描述弹层 chrome 统一);
+  //   YOLO 框高亮 showHl 是纯几何 → 两路都画,保留底座;RC 不可用 → fallback 回 _openFigPopNative(原逻辑逐字不变)。
   function openPop(badge, fig) {
+    if (window.__uiShared && window.PdfAdapter) {
+      showHl(badge, fig);                              // YOLO 框高亮 = 纯几何,保留底座
+      var _bodyHtml = md(fig.desc);
+      PdfAdapter.figurePop({
+        badge: badge, caption: fig.caption || '图',
+        body: _bodyHtml != null ? _bodyHtml : ('<p>' + esc(fig.desc).replace(/\n/g, '<br>') + '</p>'),
+        ignoreSelector: '.fig-badge, .fig-hit',        // PDF 徽标/命中层放行,再点同徽标正常 toggle
+        fallback: function () { _openFigPopNative(badge, fig); }
+      });
+      return;
+    }
+    return _openFigPopNative(badge, fig);
+  }
+  function _openFigPopNative(badge, fig) {
     if (_popBadge === badge) { closePop(); return; }   // 再点同一徽标 → 关
     closePop();
     _popBadge = badge;
@@ -9285,6 +10034,7 @@ async function _connProbe() {
     if (!_hlEl) return;
     var t = e.target;
     if (t && t.closest && (t.closest('.fig-hit') || t.closest('.fig-badge') || t.closest('.fig-pop') ||
+        t.closest('.rc-fig-pop') || t.closest('#rc-fig-pop') ||   // 共享模式:图描述浮层是 rc-figures 的 #rc-fig-pop/.rc-fig-pop,内部交互(选字/滚动)别清蓝框
         t.closest('#side-pane-asst') || t.closest('#grammar-panel'))) return;
     clearHl();
   }, true);
@@ -9416,3 +10166,124 @@ async function _connProbe() {
     setTimeout(function () { if (pw.isConnected) _fetchFigs(pw, num); }, 4500);
   }
 })();
+// 27-rc-adapter.js — 把模块作用域内部量喂给独立的 pdf-adapter.js。
+// 仅 ui=shared 加载了 pdf-adapter.js → window.PdfAdapter 存在时执行;默认无 flag 时整段跳过。
+// 阶段1 的 lookupWord 由门控点直接传 opts,不依赖此 bind;此段只为 captureSelection/clearSelection(阶段2)就位。
+if (window.PdfAdapter && PdfAdapter.bind) {
+  // PDF 也接进统一中间层 RC._adapter(设计见 /reader-middlelayer-design.md);助手经 RC.adapter().getContext() 取上下文,
+  // 与 EPUB 用完全一样的方式。仅 ui=shared(window.PdfAdapter 存在)时执行;legacy 模式整段跳过 → RC._adapter 保持空、ctx() 回退直连 __voiceContext。
+  try { if (window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  PdfAdapter.bind({
+    charSel: () => _charSel,
+    lastSelText: () => lastSelText,
+    selPageNum: () => (typeof _selPageNum === 'function' ? _selPageNum() : currentPage),
+    fileRel: () => FILE_REL,
+    bookLangs: () => BOOK_LANGS,
+    sentence: (cs) => {
+      try { const ch = cs.pw.__charBoxes; const r = _expandSentenceFromRange(ch, cs.startIdx, cs.endIdx); return r ? _charsRangeToText(ch, r.start, r.end).slice(0, 600) : ''; }
+      catch (_) { return ''; }
+    },
+    clear: () => {
+      try { _charSel = null; lastSelText = ''; _updateSelPreview(''); document.querySelectorAll('.sel-overlay').forEach(o => o.innerHTML = ''); toolbar.classList.remove('open'); }
+      catch (_) {}
+    },
+    // 查词呼吸高亮(rc-wordpop opts.breathe):照抄原生 _materializeWordHl+renderWordHl 单个 hl 的渲染路径——
+    // 页面坐标系 rects 渲进 pw 内的 .word-hl-layer(pw 随 #main 滚动,层天然跟滚零漂移,这正是原生不会错位的原因;
+    // 共享层此前用 position:fixed 兜底,滚动手动平移必有窗口期漂移)。cap=查词时捕获的 {pw,startIdx,endIdx}
+    // (对象字段不会被后续选中改写,_charSel 变化是换引用)。呼吸/常亮由共享层切 layer 的 .breathe class,
+    // 正好对齐原生 CSS `.word-hl-layer.breathe .hl`(renderWordHl 的 `h.ready ? '' : ' breathe'` 同一套类名)。
+    // furigana 注音(原生 renderWordHl 426-433:等待时把日读音/英音标标在词上方)一并照搬。不进原生 _wordHls
+    // 数组(生命周期由共享层 _wordHls 管),原生数组在共享模式下保持空,互不冲突。
+    wordHlWrap: (cap) => {
+      try {
+        const pw = cap && cap.pw;
+        if (!pw || !pw.__charBoxes) return null;
+        const rects = _charRangeToPtRects(pw.__charBoxes, cap.startIdx, cap.endIdx);
+        if (!rects.length) return null;
+        const canvas = pw.querySelector('canvas');
+        const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
+        const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
+        if (!cssW || !cssH || !pageWPt || !pageHPt) return null;
+        const sx = cssW / pageWPt, sy = cssH / pageHPt;
+        const layer = document.createElement('div');
+        layer.className = 'word-hl-layer';
+        for (const r of rects) {
+          const d = document.createElement('div'); d.className = 'hl';
+          d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+          d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+          layer.appendChild(d);
+        }
+        const _hits = _furiHitsForRects(pw, rects);
+        if (_hits.length) {
+          const rl = document.createElement('div');
+          rl.className = 'ruby-layer';
+          for (const it of _hits) { const sp = _makeRubySpan(it, sx, sy); if (sp) rl.appendChild(sp); }
+          layer.appendChild(rl);
+        }
+        const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层(蓝选区→呼吸高亮,原生 456)
+        pw.appendChild(layer);
+        return layer;
+      } catch (_) { return null; }
+    },
+    // 查词小框定位:直接复用原生 _positionWordPop(absolute-in-#main,随内容滚动;fixed 视口定位不跟滚)。
+    // cs = 查词时捕获的 charSel 快照(pdf-adapter 的 positionPop hook 闭包传入)。
+    positionWordPop: (pop, cs) => { try { _positionWordPop(pop, cs); } catch (_) {} },
+    // 便签(rc-stickynote,设计见 references/sticky-notes-design.md「规格 v4」):挂载/锚定 per-reader——
+    // mount=对应 pw(页未渲染→null,由 04-render 渲染完成点 mountPending 补挂);锚点=page+归一化 x/y(PDF 不改)。
+    // v4 契约:mount 返回容器内**像素** left/top(定位机制归 host,组件只应用)。PDF=x·clientWidth/y·clientHeight,
+    // 行为等价旧组件自算 %;页面重渲/缩放后 04-render 两处 mountPending → ensureMounted 用新 clientWidth 重算。
+    noteMount: (anchor) => {
+      if (!anchor || anchor.kind !== 'pdf') return null;
+      const pw = document.querySelector('.page-wrap[data-page-num="' + anchor.page + '"]');
+      if (!pw || pw.dataset.loaded !== '1') return null;
+      const x = Math.max(0, Math.min(1, anchor.x || 0)), y = Math.max(0, Math.min(1, anchor.y || 0));
+      return { el: pw, left: x * pw.clientWidth, top: y * pw.clientHeight };
+    },
+    noteAnchorFromPoint: (x, y) => {
+      const t = document.elementFromPoint(x, y);
+      const pw = t && t.closest ? t.closest('.page-wrap') : null;
+      if (!pw || pw.dataset.loaded !== '1') return null;
+      const r = pw.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0, x: (x - r.left) / r.width, y: (y - r.top) / r.height };
+    },
+    // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
+    phraseHighlight: () => { try { _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) {} },
+    phraseSolid: () => { try { if (_activePhraseHl) { _activePhraseHl.solid = true; document.querySelector('.phrase-hl-layer')?.classList.remove('breathe'); } } catch (_) {} },
+    phraseRefresh: () => { try { refreshCharsWForAllPages(); } catch (_) {} },
+    removePhraseHighlight: () => { try { _removePhraseHighlight(); } catch (_) {} },
+    // 词组框「💡 解释」→ 复用 PDF onExplain(它自身也被门控,共享模式下转 rc-result)。
+    onExplain: () => { try { window.onExplain && window.onExplain(); } catch (_) {} },
+    // 阶段2(补丁):「解释」的琥珀色呼吸高亮 + 后台跑 + 点高亮才开面板 —— 100% 原样复用 PDF 原生
+    //   _showExplainHighlight/_runExplainBg(15-phrase-wordpop.js / 21-misc-ai.js,函数体一字未改;
+    //   两者内部已按 __uiShared 分流到 rc-result 的 openResult/addResultPickers/_resultReqId)。
+    //   这层只是把 PdfAdapter.explain 的调用点接过去,等价 native onExplain 共享分支之前本该执行的那两行。
+    explainHighlight: (text) => {
+      try {
+        const ehl = _showExplainHighlight(_charSel && _charSel.pw, text);
+        if (ehl) { ehl.title = '💡 AI 解释'; ehl.src = text; ehl.resultContext = _resultContext; }
+        return ehl;
+      } catch (_) { return null; }
+    },
+    runExplainBg: (hl, text, context) => { try { _runExplainBg(hl, text, context); } catch (_) {} },
+    // 阶段3 高亮列表(PdfAdapter.renderHighlightList)就位:数据/跳转/删除经底座(高亮叠层渲染本身留 PDF 字符层几何,不迁;
+    //   PDF 暂无「高亮抽屉」UI → 这几个钩子目前无 live 调用方,先就位)。编辑/图描述浮层走 per-call opts,不依赖此 bind。
+    allHighlights: () => (typeof _allHighlights !== 'undefined' ? _allHighlights : []),
+    jumpToHl: (hl) => { try { if (hl && hl.page && window.goToPage) window.goToPage(hl.page); } catch (_) {} },
+    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} }
+  });
+  // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)
+  try {
+    if (window.RC && RC.stickynote) {
+      RC.stickynote.init({
+        file: FILE_REL,
+        mount: (a) => PdfAdapter._host.noteMount(a),
+        anchorFromPoint: (x, y) => PdfAdapter._host.noteAnchorFromPoint(x, y),
+        // 阶段3 AI 注入:双击便签 → 25-assistant __noteInject(助手开着才处理:无笔画走文本通道,有笔画走合成图/视觉通道)
+        onDoubleTap: (note) => { try { return !!(window.__noteInject && window.__noteInject(note)); } catch (_) { return false; } },
+        toast: (m) => { try { _toast?.(m); } catch (_) {} }
+      });
+      window._noteCreateAtCenter = () => { try { RC.stickynote.createAtCenter(); } catch (_) {} };
+    }
+  } catch (_) {}
+}

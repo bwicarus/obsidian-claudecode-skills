@@ -37,7 +37,18 @@ function _updateGrammarBtnVisibility() {
   if (!row) return;
   row.style.display = (_grammarHasTracked && lastSelText) ? '' : 'none';
 }
+// ── 阶段6 门控:ui=shared → RC.grammar.renderTrackList 渲进同一个 #set-grammar-list 容器(跟 EPUB 共用);
+//   else 走原生逐字(_renderGrammarTrackListNative)。──
 async function renderGrammarTrackList() {
+  if (window.__uiShared && window.RC && RC.grammar) {
+    return RC.grammar.renderTrackList('set-grammar-list', {
+      file: FILE_REL,
+      onAfterChange: () => { loadGrammarTracked(); },   // 保持工具栏「📊 语法」按钮可见性用的原生缓存同步
+    });
+  }
+  return _renderGrammarTrackListNative();
+}
+async function _renderGrammarTrackListNative() {
   const wrap = document.getElementById('set-grammar-list');
   if (!wrap) return;
   let books = [];
@@ -75,7 +86,32 @@ window._onGrammarBookToggle = function() {
 };
 
 // 选中工具栏的「📊 分析」按钮 → 分析所在完整句子，结果放右侧抽屉
+// ── 阶段6 门控:ui=shared → 用 PDF 字符层抽出 sentence/text(char-layer host-bind,不迁进共享层)后交给
+//   RC.grammar.analyze 统一渲染(块/结构图/流式/制卡/追问全走共享核心,跟 EPUB 同一套代码);
+//   else 走原生逐字(_onGrammarAnalyzeNative)。RC 不可用 → 落回原生,绝不吞功能。──
 window.onGrammarAnalyze = async () => {
+  if (window.__uiShared && window.RC && RC.grammar) return _onGrammarAnalyzeShared();
+  return _onGrammarAnalyzeNative();
+};
+async function _onGrammarAnalyzeShared() {
+  if (!lastSelText) return;
+  if (!_charSel || !_charSel.pw || !_charSel.pw.__charBoxes) { _toast?.('找不到选中位置'); return; }
+  const pw = _charSel.pw;
+  const chars = pw.__charBoxes;
+  const ctxRange = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
+  if (!ctxRange) { _toast?.('无法识别完整句子'); return; }
+  const sentence = _charsRangeToText(chars, ctxRange.start, ctxRange.end);
+  const text = lastSelText.trim();   // 用户选中的子串（焦点）
+  toolbar.classList.remove('open');
+  RC.grammar.analyze({
+    file: FILE_REL, sentence, text, container: 'grammar-panel-body',
+    aiParams: _getAiOverrides, viewModeKey: 'pdf-grammar-view',
+    sourceUrl: () => FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '',
+    onOpenPanel: () => { openGrammarPanel(); switchSideTab('grammar'); },
+    onToast: (m) => _toast?.(m),
+  });
+}
+async function _onGrammarAnalyzeNative() {
   if (!lastSelText) return;
   if (!_grammarEnabledBooks.length) { _toast?.('请在 PDF 设置中启用至少一个语法 KG'); return; }
   if (!_grammarHasTracked) { _toast?.('已启用的 KG 中没有节点被跟踪，去技能树详情面板点「👁 跟踪」'); return; }
@@ -284,6 +320,7 @@ window.toggleGrammarPanel = () => {
   openGrammarPanel();
   switchSideTab('asst');
   try { window.__renderFigChips && window.__renderFigChips(); } catch (_) {}   // 补渲已带入的图附件条
+  try { window.__renderNoteChips && window.__renderNoteChips(); } catch (_) {}  // 补渲便签 chip(双击便签带进来的)
   try { window.__renderFocusSel && window.__renderFocusSel(); } catch (_) {}   // 补渲焦点选区(公式/段落)chip
   try { window.__asstPrewarm && window.__asstPrewarm(); } catch (_) {}         // 预热 claude 进程(减冷启动)
 };
@@ -469,7 +506,15 @@ function _fillGrammarBlock(block, d, sentence) {
 // 长句结构显示模式：'components' 成分分块 / 'deps' 依存弧线图
 const GV_MODES = [['tree', '树'], ['components', '块'], ['skeleton', '主干'], ['deps', '弧线']];
 let _grammarViewMode = localStorage.getItem('pdf-grammar-view') || 'components';
+// ── 阶段6 门控:ui=shared → 分析块由 RC.grammar 渲染,gv-switch 按钮已直接闭包调 RC.grammar.setViewMode,
+//   这里只需处理"设置面板下拉改值"这一条剩余入口,转调同一份共享逻辑;else 走原生逐字。──
 window.setGrammarView = (mode) => {
+  if (window.__uiShared && window.RC && RC.grammar) {
+    RC.grammar.setViewMode('grammar-panel-body', mode, 'pdf-grammar-view');
+    const sel = document.getElementById('set-grammar-view');
+    if (sel) sel.value = RC.grammar.getViewMode('pdf-grammar-view');
+    return;
+  }
   _grammarViewMode = ['deps', 'skeleton', 'components', 'tree'].includes(mode) ? mode : 'components';
   try { localStorage.setItem('pdf-grammar-view', _grammarViewMode); } catch (_) {}
   // 立即用新模式重渲染已显示的所有语法卡的结构区

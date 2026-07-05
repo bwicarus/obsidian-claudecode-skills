@@ -22,7 +22,7 @@ import urllib.parse
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, abort, jsonify, render_template, request,
+    Blueprint, Response, abort, jsonify, redirect, render_template, request,
     send_file, session,
 )
 
@@ -42,6 +42,13 @@ def _spacy_available() -> bool:
     return SPACY_PY.exists() and SPACY_SCRIPT.exists()
 
 bp = Blueprint("pdf_reader", __name__, url_prefix="/pdf")
+
+# 收藏夹统一化(规格 v5):收藏夹物化成**一本真 EPUB**(state/reader-fav-epub/<fid>.epub),用**完整 EPUB 阅读器**
+# (/pdf/fav/open → epub_html_reader.html + epub-html.js)打开 → 手写/侧栏AI助手/高亮/生词/振假名/语法/查词/翻译/插入页
+# 全功能天然可用。EPUB 条目=原 section 消毒 HTML(图打包)、PDF 条目=原分辨率页图(打包)+透明可选词层。
+# _FAV_BOOK_PREFIX 前缀语义:合成 EPUB rel「资源/收藏夹/<fid>.epub」(_resolve_epub_book 解析回 state 那本)+ 各扫 vault
+# 系统对残留 .pdf/.epub 的排除/特判(书架列表/全文搜索排除;pdf_view/reading-pos 零进度;禁自我收藏)。见 references/reader-userpages-favorites.md。
+_FAV_BOOK_PREFIX = "资源/收藏夹/"
 
 
 def _safe_vault_path(rel: str) -> Path | None:
@@ -88,7 +95,8 @@ def _compressed_info(rel: str) -> dict:
 
 
 def _list_vault_pdfs() -> list[dict]:
-    """扫 vault 下所有 PDF。返回 [{rel, name, size_kb, mtime, lastopen, comp_*}, ...]。
+    """扫 vault 下所有书:PDF + EPUB。返回 [{rel, name, kind, size_kb, mtime, lastopen, comp_*}, ...]。
+    kind: "pdf"(分页阅读器) | "epub"(原生 reflow 阅读器,不转换)。
     排序:最近打开过的在最上(按打开时间倒序);没打开过的退回按文件修改时间倒序。"""
     lo = _lastopen_load()
     out = []
@@ -97,11 +105,14 @@ def _list_vault_pdfs() -> list[dict]:
             continue   # 备份/旧式压缩版残留,不当独立书列出
         try:
             rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
+            if rel.startswith(_FAV_BOOK_PREFIX):
+                continue   # 收藏夹物化书只该出现在「⭐收藏夹」tab,不进「📖书架」普通列表(规格 E)
             st = p.stat()
             ci = _compressed_info(rel)
             out.append({
                 "rel": rel,
                 "name": p.name,
+                "kind": "pdf",
                 "dir": str(Path(rel).parent),
                 "size_kb": round(st.st_size / 1024, 1),
                 "mtime": int(st.st_mtime),
@@ -109,6 +120,23 @@ def _list_vault_pdfs() -> list[dict]:
                 "comp_exists": ci["exists"],
                 "comp_compressing": ci["compressing"],
                 "comp_percent": ci["percent"],
+            })
+        except OSError:
+            continue
+    for p in OBSIDIAN_ROOT.rglob("*.epub"):
+        # EPUB 原生 reflow 阅读:不转 PDF,直接列出,开到 /pdf/epub/view。压缩/预处理等 PDF 专属功能不适用。
+        try:
+            rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
+            st = p.stat()
+            out.append({
+                "rel": rel,
+                "name": p.name,
+                "kind": "epub",
+                "dir": str(Path(rel).parent),
+                "size_kb": round(st.st_size / 1024, 1),
+                "mtime": int(st.st_mtime),
+                "lastopen": int(lo.get(rel, 0)),
+                "comp_exists": False, "comp_compressing": False, "comp_percent": 0,
             })
         except OSError:
             continue
@@ -164,48 +192,112 @@ def _find_kg_nodes_for_page(file_rel: str, page: int) -> list[dict]:
     return out
 
 
-def _ai_backend(override_model: str = "", override_effort: str = ""):
-    """初始化 AI backend + 可选 model/effort 覆盖。返回 (backend, msgs_head)"""
-    sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
-    from ai_backends import make_backend  # type: ignore
-    sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-    sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
-    try:
-        from qa_server import get_cfg
-        cfg = get_cfg()
-    except Exception:
-        cfg = {"ai_backend": "claude_cli", "ai": {"claude_cli": {"command": "/usr/bin/claude"}}}
-    backend_name = cfg.get("ai_backend", "claude_cli")
-    settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
-    if override_model:  settings["model"] = override_model
-    if override_effort: settings["effort"] = override_effort
-    ad = make_backend(backend_name, settings)
-    sys_msg = {"role": "system", "content": "你是一个学习辅助助手。回答简洁、准确。数学公式用 $...$ 或 $$...$$，不要用反引号包数学。"}
-    return ad, sys_msg
+def _norm_book_key(s: str) -> str:
+    """书名/文件名归一化(给 EPUB↔KG 模糊匹配用):小写 + 去登记前缀(000-/十六进制-)+ 去空白标点。"""
+    import re as _re
+    s = (s or "").strip().lower()
+    s = _re.sub(r"^[0-9a-f]{2,4}[-_ ]+", "", s)   # 去 000- / 1a- 之类登记前缀
+    s = _re.sub(r"[\s\-_.]+", "", s)              # 去空白/连字符/下划线/点
+    return s
 
 
-def _ai_call(prompt: str, override_model: str = "", override_effort: str = "") -> str:
-    """同步调用 AI，返回完整字符串。"""
-    ad, sys_msg = _ai_backend(override_model, override_effort)
-    return ad.chat([sys_msg, {"role": "user", "content": prompt}])
+def _find_kg_nodes_for_book(file_rel: str) -> list[dict]:
+    """按「书归属」匹配 KG(给 EPUB 用)。
 
-
-def _ai_call_stream(prompt: str, override_model: str = "", override_effort: str = ""):
-    """流式调用 AI，yield text chunks。"""
-    ad, sys_msg = _ai_backend(override_model, override_effort)
-    msgs = [sys_msg, {"role": "user", "content": prompt}]
-    if hasattr(ad, "chat_stream"):
-        gen = ad.chat_stream(msgs)
+    _find_kg_nodes_for_page 是按 obsidian 路径精确匹配 kg.pdf —— EPUB 路径不会进 kg.pdf 字段,
+    永远匹配不到。这里改成模糊匹配:用 EPUB 文件名 stem / 所在目录名,跟 kg.get("book")、kg 文件 stem、
+    以及 KG 里 pdf 的 stem/目录名 比对(同名书的 PDF/EPUB 通常同目录、book 名一致)。
+    匹配到 → 返回该书**整本** level-2 KG 节点(不按页/章);匹配不到 → []。
+    节点结构同 _find_kg_nodes_for_page,额外带 is_grammar 布尔。"""
+    kg_dir = CLAUDE_DIR / "knowledge_graph"
+    if not kg_dir.exists():
+        return []
+    from pathlib import PurePosixPath
+    ep = PurePosixPath(file_rel or "")
+    ep_stem = _norm_book_key(ep.stem)
+    ep_dir = _norm_book_key(ep.parent.name)
+    if not ep_stem and not ep_dir:
+        return []
+    for kg_f in sorted(kg_dir.glob("*.json")):
+        if kg_f.name.endswith(".bak.json"):
+            continue
         try:
-            for chunk in gen:
-                if chunk:
-                    yield chunk
-        finally:
-            try: gen.close()
-            except Exception: pass
-    else:
-        # 后端不支持流式 → 一次性 yield
-        yield ad.chat(msgs)
+            kg = json.loads(kg_f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        book = (kg.get("book") or kg_f.stem or "").strip()
+        keys = {_norm_book_key(book), _norm_book_key(kg_f.stem)}
+        kg_pdf = (kg.get("pdf") or "").strip()
+        if kg_pdf:
+            pp = PurePosixPath(kg_pdf)
+            keys.add(_norm_book_key(pp.stem))         # 同书 PDF 文件名
+            keys.add(_norm_book_key(pp.parent.name))  # 同书 PDF 所在目录
+        keys.discard("")
+        # 命中:EPUB 文件名或所在目录 == 任一 key;或 book(>=3 字)与 EPUB stem 互为子串
+        hit = (ep_stem in keys) or (ep_dir in keys)
+        if not hit:
+            bk = _norm_book_key(book)
+            if len(bk) >= 3 and ep_stem and (bk in ep_stem or ep_stem in bk):
+                hit = True
+        if not hit:
+            continue
+        is_grammar = (kg.get("kind") == "grammar")
+        out = []
+        for n in kg.get("nodes", []):
+            if n.get("level") != 2:
+                continue
+            out.append({
+                "id": n["id"],
+                "name": n.get("name", ""),
+                "numeric_label": n.get("numeric_label", ""),
+                "state": n.get("state", "locked"),
+                "mastery_level": n.get("mastery_level", 0),
+                "summary": (n.get("summary") or "")[:120],
+                "book": book or kg_f.stem,
+                "kg_file": kg_f.name,
+                "kind": kg.get("kind", ""),       # grammar KG 才允许跟踪
+                "is_grammar": is_grammar,
+                "tracked": bool(n.get("tracked", False)),
+            })
+        out.sort(key=lambda x: x["numeric_label"] or "z")
+        return out   # 一本 EPUB 对一本 KG,第一本命中即返回
+    return []
+
+
+_ASSIST_MOD = None
+def _assistant():
+    """懒加载侧边栏助手模块(脱壳 claude CLI + Gemini 双后端 + 按动作预设)。所有阅读器 AI 调用复用它,
+    口径跟助手一致:claude/Gemini 互为兜底 + 用户在 PDF 设置里按功能选后端/型号/深度。"""
+    global _ASSIST_MOD
+    if _ASSIST_MOD is None:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+        sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
+        import assistant as _A  # type: ignore
+        _ASSIST_MOD = _A
+    return _ASSIST_MOD
+
+
+def _reader_uid() -> str:
+    """当前用户 id(跟助手 action-pref 同口径:user_id 优先,回落 username)。非请求上下文 → ''(用出厂默认)。"""
+    try:
+        from flask import session
+        return session.get("user_id") or session.get("username") or ""
+    except Exception:
+        return ""
+
+
+def _ai_call(prompt: str, action: str = "explain", uid=None) -> str:
+    """同步调用 AI(脱壳 claude / Gemini,按 action 预设 + 互为兜底),返回完整字符串。
+    action ∈ {explain, translate, dict}(在 PDF 设置面板可分别配后端/型号/深度)。"""
+    A = _assistant()
+    return A.reader_ask(prompt, action=action, uid=(_reader_uid() if uid is None else uid))
+
+
+def _ai_call_stream(prompt: str, action: str = "explain", uid=None):
+    """流式版:按 action 预设选后端 yield 文本块(主后端失败→兜底另一边)。
+    注意:后台线程(无请求上下文)必须显式传 uid,否则取不到用户预设只能用默认。"""
+    A = _assistant()
+    yield from A.reader_stream(prompt, action=action, uid=(_reader_uid() if uid is None else uid))
 
 
 def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str = ""):
@@ -378,7 +470,7 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
                         except Exception: pass
                         return f"event: translate\ndata: {_json.dumps({'en': pending[idx-1], 'zh': zh}, ensure_ascii=False)}\n\n"
                     _buf = ""
-                    for _chunk in _ai_call_stream(_prompt, _tmodel, _teffort):
+                    for _chunk in _ai_call_stream(_prompt, "translate"):
                         _buf += _chunk
                         while "\n" in _buf:
                             _line, _buf = _buf.split("\n", 1)
@@ -410,12 +502,12 @@ def _dict_sse_stream(word: str, pdf_rel: str = "", page: int = 0, context: str =
         yield f"event: error\ndata: {_json.dumps({'error': str(e)})}\n\n"
 
 
-def _sse_stream(prompt, model, effort):
+def _sse_stream(prompt, action="explain", uid=""):
     """SSE generator：把 AI chunks 包成 SSE event 流。"""
     import json as _json
     try:
         yield "event: start\ndata: {}\n\n"
-        for chunk in _ai_call_stream(prompt, model, effort):
+        for chunk in _ai_call_stream(prompt, action, uid):
             yield f"data: {_json.dumps({'text': chunk})}\n\n"
         yield "event: done\ndata: {}\n\n"
     except Exception as e:
@@ -440,6 +532,62 @@ def _reader_js_v():
         except Exception:
             continue
     return "1"
+
+
+def _epub_js_v():
+    """EPUB 阅读器静态(epub-reader.js + epub-ai.js)的 cache-bust 版本 = 两者 mtime 最大值。
+    跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
+    mt = 0
+    for name in ("epub-reader.js", "epub-ai.js", "epub2.js", "epub2-highlight.js", "epub2-deco.js", "epub2-sentences.js", "epub2-assist.js", "epub2-extra.js", "epub2-grammar.js", "epub-html.js", "rc-core.js", "rc-md.js",
+                 "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js"):
+        for base in ("/var/www/html/static/pdf",
+                     str(Path(__file__).resolve().parent / "static" / "pdf")):
+            try:
+                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
+            except Exception:
+                continue
+    return str(mt or 1)
+
+
+def _html_js_v():
+    """统一 HTML 阅读器静态(html-reader.js + 全套 rc-*)的 cache-bust 版本 = 各文件 mtime 最大值。
+    跟 _epub_js_v 同构,只是把 epub 驱动换成 html-reader.js;rc-* 共享层任一改动也会 bust。"""
+    mt = 0
+    for name in ("html-reader.js", "rc-core.js", "rc-md.js", "rc-highlight.js",
+                 "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-settings.js",
+                 "rc-sidedrawer.js", "rc-phrasepop.js"):
+        for base in ("/var/www/html/static/pdf",
+                     str(Path(__file__).resolve().parent / "static" / "pdf")):
+            try:
+                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
+            except Exception:
+                continue
+    return str(mt or 1)
+
+
+def _pdf_shared_js_v():
+    """ui=shared 下条件加载的共享层 cache-bust = 各文件 mtime 最大值。
+    不能用 _reader_js_v()(只看 reader.js mtime,改 rc-*/adapter 不 bust)。
+    阶段2:加 rc-md/rc-result/rc-wordpop/rc-phrasepop(解释/翻译/对话→rc-result、全词典→rc-wordpop、词组→rc-phrasepop)。
+    阶段3:加 rc-figures/rc-highlight(图描述浮层→rc-figures、高亮编辑→rc-highlight)。
+    阶段4:加 rc-knowledge(知识点面板→rc-knowledge.renderInto,渲进 PDF 自己的 #kg-nodes,抽屉本体不迁)。
+    阶段5:加 rc-assistant(助手 openModelSettings + splitFollowups 分流;renderFollowups/contextCard/抽屉 chrome 推迟,
+           故不加 rc-sidedrawer——无 live 消费方,避免死模块)。
+    阶段6:加 rc-grammar(语法分析 onGrammarAnalyze/renderGrammarTrackList/loadGrammarHistory/setGrammarView
+           四个入口分流到 RC.grammar,跟 EPUB 共用同一套渲染核心,见 18-grammar.js 里的 __uiShared 分支)。
+    阶段7:加 rc-settings(⚙ 总设置面板→统一面板,跟 EPUB 同一份内容/行为;openSettings 按 __uiShared 分流,
+           原生回填/保存函数经 PdfAdapter.openSettings 的 onFill/onSave 复用,见 21-misc-ai.js)。"""
+    mt = 0
+    for name in ("rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
+                 "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
+                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "pdf-adapter.js"):
+        for base in ("/var/www/html/static/pdf",
+                     str(Path(__file__).resolve().parent / "static" / "pdf")):
+            try:
+                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
+            except Exception:
+                continue
+    return str(mt or 1)
 
 
 # ── 图片模式(大型文档网站成熟方案:服务端按页出图,客户端只按需取看到的页,不下载整本 PDF)──
@@ -567,6 +715,63 @@ def _lastopen_touch(rel: str):
     except Exception:
         pass
 
+# ── 续读位置(服务端记录,2026-07-03):前端"随时上传现在正在看的页/章"→ 开书跨设备接续 ──
+# 全局单文件 sidecar(键=vault 相对路径,值={kind:'pdf'|'epub', pos:int, ts};跟 highlights/favorites
+# 等阅读器 sidecar 一样不分用户)。读取不设 GET 轮询:/pdf/view 把记录折进模板 page(__PDF_CFG.page)、
+# /pdf/epub/view 注入 EPUB_CFG.serverPos,前端零异步等待。fav 查看页(/pdf/fav/view)零进度状态是既定设计,不接此系统。
+_READER_POS_FILE = CLAUDE_DIR / "state" / "reader-positions.json"
+_READER_POS_LOCK = __import__("threading").Lock()
+
+def _reading_pos_load() -> dict:
+    try:
+        d = json.loads(_READER_POS_FILE.read_text("utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def _reading_pos_get(rel: str):
+    """rel(vault 相对路径)的服务端续读位置(int:PDF=页码 1-based / EPUB=节 idx 0-based);无记录/不合法 → None。"""
+    rec = _reading_pos_load().get(rel)
+    try:
+        pos = int(rec.get("pos"))
+        return pos if pos >= 0 else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+@bp.route("/api/reading-pos", methods=["POST"])
+def pdf_api_reading_pos():
+    """前端节流上报当前阅读位置 {file, kind:'pdf'|'epub', pos:int}。原子写(tmp+os.replace)+ 进程内锁。
+    写入端已各自过校验(EPUB=_jumping+loaded 校验后的 topIdx / PDF=视口交叠最多页),服务端只做基本合法性。"""
+    body = request.get_json(silent=True) or {}
+    _rel_in = (body.get("file") or "").strip()
+    if _rel_in.lstrip("/").startswith(_FAV_BOOK_PREFIX):
+        return jsonify({"ok": True, "skipped": "fav"})   # 收藏夹物化书(合成 rel,非 vault 文件):零进度,提前拒收(免 404 刷屏)
+    ap = _safe_vault_path(_rel_in)
+    if not ap:
+        return jsonify({"ok": False, "error": "bad file"}), 404
+    kind = "epub" if body.get("kind") == "epub" else "pdf"
+    try:
+        pos = int(body.get("pos"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad pos"}), 400
+    if pos < 0 or pos > 10_000_000:
+        return jsonify({"ok": False, "error": "bad pos"}), 400
+    rel_clean = ap.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    if rel_clean.startswith(_FAV_BOOK_PREFIX):
+        return jsonify({"ok": True, "skipped": "fav"})   # 收藏夹物化书不记续读位置(规格 D:零进度,服务端拒收更稳)
+    try:
+        with _READER_POS_LOCK:
+            m = _reading_pos_load()
+            m[rel_clean] = {"kind": kind, "pos": pos, "ts": int(time.time())}
+            _READER_POS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _READER_POS_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(m, ensure_ascii=False), "utf-8")
+            tmp.replace(_READER_POS_FILE)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "pos": pos})
+
+
 @bp.route("/api/prefs", methods=["GET", "POST"])
 def pdf_api_prefs():
     """GET → {ok, prefs:{key:value}}; POST {patch:{k:v|null}} 合并(null=删) → {ok}。键为前端 localStorage 的 pdf-*。"""
@@ -689,9 +894,10 @@ def pdf_api_page_image():
         if best is not None:
             _cstat("page_img.fallback_ge" if best[0] >= w else "page_img.fallback_lt")
             resp = send_file(str(best[1]), mimetype="image/jpeg", conditional=True)
-            # ≥请求宽=终态可长缓存;放大回退=临时图,短缓存(后台正在补精确图)
+            # ≥请求宽=终态可长缓存;放大回退=临时**模糊**图 → no-store(别让浏览器缓存它,否则精确图渲好后
+            # 再请求仍被浏览器缓存的模糊图顶掉;前端也会主动补拉清晰图,见 _renderPageImg 的 _scheduleSharpen)
             resp.headers["Cache-Control"] = ("private, max-age=31536000, immutable"
-                                             if best[0] >= w else "private, max-age=3600")
+                                             if best[0] >= w else "no-store")
             resp.headers["X-PageImg-Fallback"] = str(best[0])
             return resp
         _cstat("page_img.render_sync")
@@ -707,7 +913,11 @@ def pdf_api_page_image():
 @bp.route("/view")
 def pdf_view():
     rel = request.args.get("file", "")
-    page = int(request.args.get("page", "1") or "1")
+    try:
+        page = int(request.args.get("page") or 0)   # 无 ?page= 深链 → 0,下面折入服务端续读记录
+    except ValueError:
+        page = 0
+    ui_shared = 0 if request.args.get("ui", "") == "legacy" else 1   # 上线:默认走共享 rc-* 层;?ui=legacy 一键回落老 reader.src(逃生口)
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         abort(404)
@@ -718,7 +928,13 @@ def pdf_view():
         mtime = 0
     # 压缩版:?compressed=1 且压缩版存在 → 传压缩版(pdf_url 带 &compressed=1 + pdf_size 用压缩版)
     rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
-    _lastopen_touch(rel_clean)   # 戳「最近打开」→ 书架把这本置顶
+    _is_fav_book = rel_clean.startswith(_FAV_BOOK_PREFIX)   # 收藏夹物化书:零进度(规格 D)
+    if not _is_fav_book:
+        _lastopen_touch(rel_clean)   # 戳「最近打开」→ 书架把这本置顶(收藏夹书不进「最近打开」)
+    if page < 1 and not _is_fav_book:
+        page = _reading_pos_get(rel_clean) or 1   # 无 ?page= → 服务端续读位置作初始页(有 ?page= 的深链优先,不受影响)
+    elif page < 1:
+        page = 1   # 收藏夹书:不注入 serverPos(不记录停留位置)
     comp_file, _ = _compressed_paths(rel_clean)
     comp_avail = comp_file.exists()
     use_comp = (request.args.get("compressed", "") == "1") and comp_avail
@@ -740,6 +956,8 @@ def pdf_view():
         comp_avail=(1 if comp_avail else 0),   # 是否存在压缩版(供"加载慢→切压缩版"提示)
         reader_js_v=_reader_js_v(),
         chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
+        ui_shared=ui_shared,         # 默认 1(共享 rc-* 层,已上线);?ui=legacy → 回落老 reader.src(逃生口)
+        shared_js_v=_pdf_shared_js_v(),
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -889,6 +1107,7 @@ def pdf_api_preprocess_async():
 # ── 整本预热(页图 + 字符层/振假名)：本地实例后台一次渲好全书 → 之后任意翻页秒开。──
 # 按当前显示宽度渲(width-specific),detached 子进程(关网页/翻页不中断),状态文件去重防重复启。
 _PREWARM_DIR = CLAUDE_DIR / "state" / "pdf-prewarm"
+_EREADER_DIR = CLAUDE_DIR / "state" / "pdf-ereader"   # 电子版生成进度文件
 
 
 def _prewarm_status_path(sha: str, w: int):
@@ -964,6 +1183,86 @@ def pdf_api_prewarm_status():
         pass
     pct = round(100.0 * done / total, 1) if total else 0
     return jsonify({"ok": True, "total": total, "done": done, "percent": pct, "running": running, "width": w})
+
+
+def _ereader_out_path(ap: Path) -> Path:
+    """电子版输出路径:跟原书**同目录**、名字加 `.电子版`(不自动优先打开,用户手动选)。"""
+    return ap.parent / (ap.stem + ".电子版.pdf")
+
+
+@bp.route("/api/ereader-async", methods=["POST"])
+def pdf_api_ereader_async():
+    """生成「电子版」PDF:后台 detached 低优先级跑 scripts/make_ereader_pdf.py(整本)。
+    产物落原书同目录 `<名>.电子版.pdf`(纯文字重排 + 图/公式裁图,打开快;不自动优先打开)。在跑则不重复启。"""
+    import subprocess, time
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    if ap.stem.endswith(".电子版"):
+        return jsonify({"ok": False, "error": "这已经是电子版了"}), 400
+    out = _ereader_out_path(ap)
+    sha = _book_sha(ap)
+    _EREADER_DIR.mkdir(parents=True, exist_ok=True)
+    sp = _EREADER_DIR / f"{sha}.json"
+    try:                                  # 已在跑 → 不重复启
+        st = json.loads(sp.read_text("utf-8"))
+        if st.get("pid") and _pid_alive(st["pid"]) and st.get("status") == "running":
+            return jsonify({"ok": True, "already_running": True})
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "make_ereader_pdf.py"),
+           str(ap), str(out), "--progress", str(sp)]
+    popen_kw = dict(cwd=str(CLAUDE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = 0x00004000 | 0x08000000   # BELOW_NORMAL | NO_WINDOW
+    else:
+        popen_kw["start_new_session"] = True
+        cmd = ["nice", "-n", "19"] + cmd
+    try:
+        p = subprocess.Popen(cmd, **popen_kw)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    try:
+        sp.write_text(json.dumps({"pid": p.pid, "status": "running", "done": 0, "total": 0,
+                                  "ts": int(time.time())}), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "started": True, "pid": p.pid})
+
+
+@bp.route("/api/ereader-status")
+def pdf_api_ereader_status():
+    """电子版生成进度:读进度文件(done/total/status) + 产物是否已生成。"""
+    rel = (request.args.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not ap:
+        return jsonify({"ok": False, "error": "文件不存在"}), 400
+    out = _ereader_out_path(ap)
+    sha = _book_sha(ap)
+    st = {}
+    try:
+        st = json.loads((_EREADER_DIR / f"{sha}.json").read_text("utf-8"))
+    except Exception:
+        pass
+    done, total = int(st.get("done") or 0), int(st.get("total") or 0)
+    status = st.get("status") or ""
+    running = bool(st.get("pid") and _pid_alive(st["pid"]) and status == "running")
+    pct = st.get("percent")                          # 脚本算好的综合百分比(抽取/排版/收尾三段)
+    if pct is None:
+        pct = round(100.0 * done / total, 1) if total else 0
+    exists = out.exists()
+    out_rel = ""
+    if exists:
+        try:
+            out_rel = out.relative_to(OBSIDIAN_ROOT).as_posix()
+        except Exception:
+            out_rel = out.name
+    return jsonify({"ok": True, "running": running, "status": status, "percent": pct,
+                    "done": done, "total": total, "phase": st.get("phase", ""), "error": st.get("error", ""),
+                    "exists": exists, "out_name": out.name, "out_rel": out_rel})
 
 
 @bp.route("/api/compress-async", methods=["POST"])
@@ -1836,9 +2135,8 @@ def pdf_api_ocr_selection():
         longpt = max((nb[2] - nb[0]) * W, (nb[3] - nb[1]) * H) or 1.0
         scale = max(2.0, min(5.0, 1500.0 / longpt))
         png = _figure_crop_png(abs_path, page, nb, scale=scale)
-        model = (body.get("model") or "sonnet").strip() or "sonnet"
-        effort = (body.get("effort") or "low").strip() or "low"
-        text = _claude_ocr_crop(png, model, effort)
+        # 2026-07 收口:不再收 request 的 model/effort 覆盖(以前也只是死参数)。模型走「看图」action 预设。
+        text = _claude_ocr_crop(png)
         if not text:
             return jsonify({"ok": False, "error": "OCR 没结果,再试一次"}), 502
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text.strip())
@@ -1850,7 +2148,7 @@ def pdf_api_ocr_selection():
             cv = _page_content_version(abs_path, rel, page)   # 新 cv → 前端据此立即重载本页字符层
         except Exception as ex:
             sys.stderr.write(f"[ocr-fix] save fail p{page}: {ex}\n")
-        return jsonify({"ok": True, "text": text, "cv": cv, "model": model, "effort": effort})
+        return jsonify({"ok": True, "text": text, "cv": cv})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:160]}), 500
 
@@ -3055,6 +3353,16 @@ def pdf_api_page_nodes():
     return jsonify({"nodes": _find_kg_nodes_for_page(rel, page)})
 
 
+@bp.route("/api/epub-nodes")
+def pdf_api_epub_nodes():
+    """EPUB「本书知识点」:按书归属匹配 KG(EPUB 路径不进 kg.pdf 精确匹配),返回整本 level-2 节点。
+    结构同 /api/page-nodes(id/name/numeric_label/state/book/kind/is_grammar/tracked…)。匹配不到 → 优雅空。"""
+    rel = (request.args.get("file", "") or "").strip()
+    if not rel:
+        return jsonify({"ok": True, "nodes": []})
+    return jsonify({"ok": True, "nodes": _find_kg_nodes_for_book(rel)})
+
+
 _DICT_DB_PATH = CLAUDE_DIR / "data" / "ecdict.db"
 
 # vocab 系统脚本（按需懒加载）
@@ -3502,26 +3810,51 @@ def pdf_api_book_figures_set():
         _BOOK_FIG_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    if enabled and not was:                      # 刚开启 → 后台立刻跑一轮 YOLO 框图 + 裁图描述(不必等夜间)
+    # 刚开启 → 后台立刻跑一轮 YOLO 框图 + 裁图描述(不必等夜间)。仅 PDF:EPUB 图是嵌入资源,
+    # 按需走 /api/epub-img-describe 描述,不需要(也不能)跑 PDF 页面的 YOLO/裁图管线。
+    if enabled and not was and rel.lower().endswith(".pdf"):
         ap = _safe_vault_path(rel)
         if ap:
             _threading.Thread(target=_run_figures_pipeline, args=(str(ap),), daemon=True).start()
     return jsonify({"ok": True, "enabled": enabled})
 
 
+def _is_born_digital(abs_path: str) -> bool:
+    """原生数字 PDF(转换自 epub / 出版社数字版):图和文字本就分开,图描述走嵌入图提取而非 YOLO。"""
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+        import extract_pdf_figures as EF  # type: ignore
+        import fitz
+        d = fitz.open(abs_path)
+        try:
+            return EF.is_born_digital(d)
+        finally:
+            d.close()
+    except Exception:
+        return False
+
+
 def _run_figures_pipeline(abs_path: str):
-    """后台:对一本书顺序跑 YOLO 框图(doclayout-venv)→ 裁图描述(主 python)。开书启用/夜间 timer 都走它。
-    YOLO 在 Pi CPU 慢(~6.7s/页),整本可能几十分钟;低优先级(nice)别影响 webapp。"""
+    """后台:框图 → 裁图描述(主 python)。开书启用/夜间 timer 都走它。低优先级(nice)别影响 webapp。
+    **原生数字书(epub 转来的/数字版)**:直接拿嵌入图位置(`extract_pdf_figures`,秒级),**跳过 YOLO**;
+    **扫描书**:跑 DocLayout-YOLO 框图(Pi CPU 慢 ~6.7s/页,整本可能几十分钟)。"""
     import subprocess
     sp = str(CLAUDE_DIR / "scripts")
     env = dict(os.environ)
     py = os.environ.get("APP_PYTHON") or sys.executable
-    try:
-        subprocess.run(["nice", "-n", "19", "/home/bwicarus/doclayout-venv/bin/python",
-                        f"{sp}/yolo_figures.py", "--book", abs_path],
-                       timeout=7200, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    if _is_born_digital(abs_path):
+        try:                                    # 原生数字:嵌入图提取(主 python,无需 YOLO)
+            subprocess.run([py, f"{sp}/extract_pdf_figures.py", "--book", abs_path],
+                           timeout=600, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    else:
+        try:                                    # 扫描书:DocLayout-YOLO 框图
+            subprocess.run(["nice", "-n", "19", "/home/bwicarus/doclayout-venv/bin/python",
+                            f"{sp}/yolo_figures.py", "--book", abs_path],
+                           timeout=7200, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
     try:
         subprocess.run(["nice", "-n", "19", py, f"{sp}/describe_figures_batch.py", "--book", abs_path],
                        timeout=7200, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -3647,45 +3980,17 @@ def _book_location(abs_path, printed_page: int, rel: str = "") -> str:
     return (max(cands, key=lambda e: e["page"]).get("title") or "").strip()
 
 
-def _claude_vision_pages(pngs: list, prompt: str, model="sonnet", effort="low", timeout=240):
-    """把多张页面图 + 一段 prompt 发给 Claude 视觉,返回结果文本(禁所有工具,纯看图回字)。建目录用。"""
-    import base64, json as _json, subprocess, select, time
-    blocks = []
-    for png in pngs:
-        blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                                    "data": base64.b64encode(png).decode("ascii")}})
-    blocks.append({"type": "text", "text": prompt})
-    p = subprocess.Popen(
-        [_claude_bin(), "--print", "--input-format", "stream-json", "--output-format", "stream-json",
-         "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-         "--verbose", "--model", model or "sonnet", "--effort", effort or "low"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
-    try:
-        p.stdin.write(_json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}) + "\n")
-        p.stdin.flush()
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            r, _, _ = select.select([p.stdout], [], [], 0.5)
-            if r:
-                ln = p.stdout.readline()
-                if not ln:
-                    break
-                if '"type":"result"' in ln:
-                    try:
-                        return (_json.loads(ln).get("result") or "").strip()
-                    except Exception:
-                        return None
-            if p.poll() is not None:
-                break
-        return None
-    finally:
-        try:
-            p.kill()
-        except Exception:
-            pass
+def _claude_vision_pages(pngs: list, prompt: str, timeout=240):
+    """把多张页面图 + 一段 prompt 发给视觉模型(脱壳 claude + Gemini 双后端,按「看图」预设 + 互为兜底),
+    返回结果文本。建目录用。prompt 自包含 → 不另加系统提示(system="")。
+    (2026-07:删掉从未生效的 model/effort 死参数,模型统一由「看图」action 预设决定。)"""
+    import base64
+    A = _assistant()
+    images = [{"media_type": "image/png", "b64": base64.b64encode(png).decode("ascii")} for png in pngs]
+    return A.reader_vision(images, prompt, action="vision", uid=_reader_uid(), system="", timeout=timeout)
 
 
-def _build_toc_job(jid: str, abs_path, rel: str, start: int, end: int, model="sonnet"):
+def _build_toc_job(jid: str, abs_path, rel: str, start: int, end: int):
     """后台:渲染目录页(start..end,PDF 页)→ 整页图 + 文字层 → AI 抽目录 → 存 sidecar。"""
     import fitz
     try:
@@ -3710,7 +4015,7 @@ def _build_toc_job(jid: str, abs_path, rel: str, start: int, end: int, model="so
             "**只输出一个 JSON 数组**,每条 {\"title\":\"...\",\"page\":数字,\"level\":数字};"
             "不要 ``` 围栏、不要数组以外任何文字。"
         )
-        raw = _claude_vision_pages(pngs, prompt, model=model, effort="low")
+        raw = _claude_vision_pages(pngs, prompt)
         entries = _parse_toc(raw)
         if not entries:
             _job_set(jid, status="error", error="AI 没抽出目录(可识别页范围/换强模型重试)")
@@ -3724,7 +4029,10 @@ def _build_toc_job(jid: str, abs_path, rel: str, start: int, end: int, model="so
         _job_set(jid, status="error", error=str(ex))
 
 def _parse_toc(raw):
-    """解析 AI 回的目录 JSON 数组 → [{title,page,level}]。失败/空 → []。"""
+    """解析 AI 回的目录 JSON 数组 → [{title,page,level}]。失败/空 → []。
+    **顽强解析**:整体 json.loads 一旦因某一条目坏掉(最常见:title 里有未转义引号,如「§34-2 求"表观"运动」)就会全军覆没,
+    所以坏了就退化到**逐对象**解析——单条坏的再用正则硬抠 title/page/level,一条坏数据绝不毁掉整本目录(实测 344 条只 1 条坏,旧逻辑 0 存活)。"""
+    import re
     if not raw:
         return []
     s = raw.strip()
@@ -3735,10 +4043,25 @@ def _parse_toc(raw):
     i, j = s.find("["), s.rfind("]")
     if i < 0 or j < 0:
         return []
+    body = s[i:j + 1]
+    arr = None
     try:
-        arr = json.loads(s[i:j + 1])
+        arr = json.loads(body)
     except Exception:
-        return []
+        arr = None
+    if not isinstance(arr, list):   # 整体坏 → 逐对象救
+        arr = []
+        for m in re.finditer(r'\{[^{}]*\}', body):
+            o = m.group(0)
+            try:
+                arr.append(json.loads(o))
+            except Exception:
+                pm = re.search(r'"page"\s*:\s*(\d+)', o)
+                lm = re.search(r'"level"\s*:\s*(\d+)', o)
+                tm = re.search(r'"title"\s*:\s*"(.*)"\s*,\s*"page"', o, re.S)   # 贪婪到最后一个引号→容忍 title 内裸引号
+                if pm and tm:
+                    arr.append({"title": tm.group(1), "page": int(pm.group(1)),
+                                "level": int(lm.group(1)) if lm else 1})
     out = []
     for e in (arr if isinstance(arr, list) else []):
         if not isinstance(e, dict):
@@ -4326,7 +4649,7 @@ def pdf_api_furigana_verify():
     )
     fixes = []
     try:
-        raw = _ai_call(prompt, "haiku", "low")
+        raw = _ai_call(prompt, "dict")
         m = re.search(r"\[.*\]", raw or "", re.DOTALL)
         if m:
             arr = json.loads(m.group(0))
@@ -4494,7 +4817,7 @@ def pdf_api_dict_jp_ai():
         "4. **汉字记忆** — 各汉字音读/训读怎么记、构词规律\n"
         "不要寒暄,不要重复词本身的读音表格(前面已显示)。"
     )
-    return _start_ai_stream(prompt, "", "", (request.args.get("rid") or "").strip(),
+    return _start_ai_stream(prompt, "dict", _reader_uid(), (request.args.get("rid") or "").strip(),
                             on_done=_save_explain)
 
 
@@ -4617,12 +4940,11 @@ def pdf_api_translate():
         f"数学公式（$...$）保留原样不翻译。\n\n"
         f"原文：\n{text}"
     )
-    model = (body.get("model") or "").strip()
-    effort = (body.get("effort") or "").strip()
+    uid = _reader_uid()
     if "text/event-stream" in (request.headers.get("Accept") or ""):
-        return _start_ai_stream(prompt, model, effort, (body.get("rid") or "").strip())
+        return _start_ai_stream(prompt, "translate", uid, (body.get("rid") or "").strip())
     try:
-        out = _ai_call(prompt, model, effort).strip()
+        out = _ai_call(prompt, "translate", uid).strip()
         return jsonify({"ok": True, "translation": out})
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI 翻译失败：{ex}"}), 500
@@ -4669,40 +4991,4018 @@ def pdf_api_to_note():
     return jsonify({"ok": True, "note_path": rel, "obsidian_url": obsidian_url})
 
 
+# 非 PDF 但 MuPDF 能读的电子书格式 → 上传时**转成 PDF**(阅读器整条管线都基于 PDF:字符层/页图/公式裁图)
+_EBOOK_EXTS = {".epub", ".mobi", ".fb2", ".xps", ".cbz"}
+
+
+def _ebook_convert_bin():
+    import shutil
+    return shutil.which("ebook-convert")
+
+
+def _spawn_survivable(cmd, cwd):
+    """长后台任务放进**用户级 systemd transient scope**(独立 cgroup)→ 不随 webapp.service 重启/部署被 SIGKILL
+    (默认 KillMode=control-group 会连同子进程一起杀,大书转换/电子版生成动辄几分钟,正好撞上部署就废)。
+    需 linger(已 enable)+ XDG_RUNTIME_DIR;systemd-run 不可用则回退普通 detached(会被重启杀,但至少能跑)。"""
+    import subprocess, shutil
+    env = dict(os.environ); env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    kw = dict(cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sr = shutil.which("systemd-run")
+    if sr and os.path.isdir(env["XDG_RUNTIME_DIR"]):
+        try:
+            return subprocess.Popen([sr, "--user", "--scope", "--quiet", "--collect"] + list(cmd), **kw)
+        except Exception:
+            pass
+    return subprocess.Popen(list(cmd), start_new_session=True, **kw)
+
+
+def _convert_ebook_to_pdf(src_file: Path, out_pdf: Path):
+    """电子书(epub/mobi/fb2/xps/cbz) → 带文字层的分页 PDF。
+    **首选 Calibre `ebook-convert`(业界标准)**:HTML/CSS 完整渲染 + 智能分页(图不被拦腰切两页)+ 字体子集化;
+    没装/失败 → 回退 PyMuPDF `convert_to_pdf`(轻量但分页较糙)。"""
+    import subprocess
+    eb = _ebook_convert_bin()
+    if eb:
+        env = dict(os.environ)
+        env["QT_QPA_PLATFORM"] = "offscreen"   # headless(Pi 无显示)
+        cmd = [eb, str(src_file), str(out_pdf),
+               "--paper-size", "a4",
+               "--pdf-default-font-size", "16",
+               "--margin-top", "40", "--margin-bottom", "40",
+               "--margin-left", "48", "--margin-right", "48",
+               "--pdf-page-margin-top", "40"]
+        try:
+            r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and out_pdf.exists() and out_pdf.stat().st_size > 1000:
+                return
+        except Exception:
+            pass
+        # ebook-convert 失败 → 落到 PyMuPDF 兜底
+    import fitz
+    d = fitz.open(str(src_file))
+    try:
+        if getattr(d, "is_reflowable", False):
+            d.layout(rect=fitz.paper_rect("a4"), fontsize=11)
+        pdfbytes = d.convert_to_pdf()
+    finally:
+        d.close()
+    out_pdf.write_bytes(pdfbytes)
+
+
+# ════════════════════ EPUB 原生 reflow 阅读器 ════════════════════
+# EPUB 本就是可重排文本,转固定页 PDF 是逆其本性(慢/图跨页/大书 OOM)。这里直接渲染:
+# 服务端把 .epub 解包到 state/epub-extract/<sha>/(一次,按 mtime 缓存),epub.js 指向解包目录
+# **按章/按图懒加载**(不把 155MB 整包塞进浏览器,iPad 不会崩)。AI 端点全复用(只要 text+context,
+# 不需要 page)。坐标锚用 EPUB CFI 而非 page+rect。
+_EPUB_EXTRACT_DIR = CLAUDE_DIR / "state" / "epub-extract"
+
+
+def _epub_sha(rel: str) -> str:
+    import hashlib
+    return hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _ensure_epub_extracted(abs_path: Path, rel: str) -> Path | None:
+    """把 epub(zip)解包到 state/epub-extract/<sha>/。按源文件 mtime 缓存:没变就复用。
+    返回解包根目录(含 META-INF/container.xml),失败返回 None。防 zip-slip。"""
+    import zipfile
+    sha = _epub_sha(rel)
+    root = _EPUB_EXTRACT_DIR / sha
+    marker = root / ".extracted"
+    try:
+        src_mt = int(abs_path.stat().st_mtime)
+    except OSError:
+        return None
+    # 已解包且源文件没更新 → 直接用
+    if marker.exists():
+        try:
+            if int(marker.read_text("utf-8").strip() or "0") == src_mt and (root / "META-INF" / "container.xml").exists():
+                return root
+        except Exception:
+            pass
+        # 源变了 → 清旧解包
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(str(abs_path)) as z:
+            root_resolved = root.resolve()
+            for member in z.namelist():
+                if member.endswith("/"):
+                    continue
+                # zip-slip 防护:解析后必须仍在 root 内
+                dest = (root / member).resolve()
+                try:
+                    dest.relative_to(root_resolved)
+                except ValueError:
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as srcf, open(dest, "wb") as outf:
+                    outf.write(srcf.read())
+    except Exception:
+        return None
+    if not (root / "META-INF" / "container.xml").exists():
+        return None   # 不是合法 epub
+    try:
+        marker.write_text(str(src_mt), "utf-8")
+    except Exception:
+        pass
+    return root
+
+
+# ── 收藏夹 EPUB 物化(规格 v5):收藏夹 = 一本真 EPUB(state/reader-fav-epub/<fid>.epub),用**完整 EPUB 阅读器**
+#   (epub-html.js)打开 → 手写/侧栏AI助手/高亮/生词/振假名/语法/查词/翻译/插入页 全功能天然可用。
+#   产物放 state(非 vault → 无 Obsidian Sync churn、天然不进书架/搜索);EPUB 阅读器各端点用 _resolve_epub_book
+#   把「资源/收藏夹/<fid>.epub」这个合成 rel 解析回 state 里的真 .epub。epub-html.js / epub_html_reader.html 零改动。
+_FAV_EPUB_DIR = CLAUDE_DIR / "state" / "reader-fav-epub"
+
+
+def _resolve_epub_book(rel: str) -> Path | None:
+    """把 epub rel 解析成绝对路径。**收藏夹物化 EPUB**(资源/收藏夹/<fid>.epub)住在 state/reader-fav-epub/
+    (不在 vault);其余一律走 vault 的 _safe_vault_path。让 EPUB 阅读器各端点(manifest/section/css/search/
+    section-paragraphs/助手 _eroot)无需分别改判定,只需把 _safe_vault_path 换成本函数即可支持收藏夹书。"""
+    rel = (rel or "").lstrip("/")
+    m = re.match(r"^资源/收藏夹/(f_[0-9a-zA-Z]+)\.epub$", rel)
+    if m:
+        p = _FAV_EPUB_DIR / (m.group(1) + ".epub")
+        try:
+            return p if p.is_file() else None
+        except OSError:
+            return None
+    return _safe_vault_path(rel)
+
+
+@bp.route("/epub/view")
+def epub_view():
+    """EPUB 原生 reflow 阅读器主页。?file=<vault-rel-of-.epub>。"""
+    rel = request.args.get("file", "")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        abort(404)
+    rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    root = _ensure_epub_extracted(abs_path, rel_clean)
+    if not root:
+        abort(500)
+    try:
+        _epub_opf_info(root)   # 预热 OPF 缓存:浏览器随后并发发 section 请求时直接命中,不再每个 490ms 堵 worker
+    except Exception:
+        pass
+    _lastopen_touch(rel_clean)
+    sha = _epub_sha(rel_clean)
+    from flask import make_response
+    # 默认仍走功能齐全的「统一 HTML 阅读器」(生词/振假名/词组/语法/单词本/AI 全在);
+    # ?engine=epubjs 走成熟 epub.js 引擎(渲染稳,功能正逐步移植到这条上,完成前不当默认)
+    if (request.args.get("engine") or "") == "epubjs":
+        resp = make_response(render_template(
+            "epub_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
+            epub_base=f"/pdf/epub/file/{sha}/", reader_js_v=_epub_js_v()))
+    else:
+        resp = make_response(render_template(
+            "epub_html_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
+            sha=sha, reader_js_v=_epub_js_v(),
+            server_pos=_reading_pos_get(rel_clean)))   # 服务端续读位置(节 idx;无记录=None→null),epub-html.js onBuilt 消费
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
+
+# ── 统一 HTML 阅读器(第一步:EPUB → 服务端消毒 HTML → 渲进主文档,不用 iframe)──
+# 控制层得以像 PDF 字符层一样在同一文档里直接够到内容(选中/高亮/工具栏无 iframe 摩擦)。
+_EPUB_OPF_CACHE = {}
+_EPUB_OPF_LOCK = __import__("threading").Lock()
+
+
+def _epub_opf_info(root: Path) -> dict:
+    """带缓存:解析 OPF(677KB)+nav 很贵(~490ms,BeautifulSoup,CPU 密集 GIL 下不并行),
+    而 section/search/manifest 每次都要它 → 开书并发涌入会把单 worker 堵死(图片/高亮 POST 超时失败)。
+    按 sha+解包 mtime 缓存,解析一次永久复用。"""
+    key = str(root)
+    try:
+        mt = int((root / ".extracted").stat().st_mtime)
+    except Exception:
+        mt = 0
+    c = _EPUB_OPF_CACHE.get(key)
+    if c and c[0] == mt:
+        return c[1]
+    with _EPUB_OPF_LOCK:
+        c = _EPUB_OPF_CACHE.get(key)   # 双检:等锁时别人可能已解析好
+        if c and c[0] == mt:
+            return c[1]
+        info = _epub_opf_info_uncached(root)
+        _EPUB_OPF_CACHE[key] = (mt, info)
+        return info
+
+
+def _epub_opf_info_uncached(root: Path) -> dict:
+    """解析 epub:返回 {title, opf_dir, sections:[Path](spine 顺序), toc:[{label, idx}]}。"""
+    from bs4 import BeautifulSoup
+    info = {"title": "", "opf_dir": root, "sections": [], "toc": []}
+    try:
+        cont = (root / "META-INF" / "container.xml").read_text("utf-8", "ignore")
+        opf_rel = BeautifulSoup(cont, "xml").find("rootfile")["full-path"]
+    except Exception:
+        return info
+    opf_path = (root / opf_rel)
+    opf_dir = opf_path.parent
+    info["opf_dir"] = opf_dir
+    try:
+        soup = BeautifulSoup(opf_path.read_text("utf-8", "ignore"), "xml")
+    except Exception:
+        return info
+    t = soup.find("title")
+    if t:
+        info["title"] = t.get_text(" ", strip=True)
+    manifest = {}
+    for it in soup.find_all("item"):
+        if it.get("id") and it.get("href"):
+            manifest[it["id"]] = {"href": it["href"], "mt": (it.get("media-type") or "")}
+    sections = []
+    spine = soup.find("spine")
+    if spine:
+        for ir in spine.find_all("itemref"):
+            it = manifest.get(ir.get("idref"))
+            if it and it["href"].lower().endswith((".xhtml", ".html", ".htm")):
+                sections.append((opf_dir / it["href"]).resolve())
+    info["sections"] = sections
+    idx_by_path = {str(p): i for i, p in enumerate(sections)}
+    # TOC:nav(epub3)优先,其次 ncx(epub2);href 相对 nav 文件目录
+    toc = []
+    nav = next((manifest[m] for m in manifest if "nav" in (manifest[m]["mt"] or "")
+                or manifest[m]["href"].lower().endswith("nav.xhtml")), None)
+    if nav:
+        try:
+            navp = (opf_dir / nav["href"])
+            nsoup = BeautifulSoup(navp.read_text("utf-8", "ignore"), "html.parser")
+            navel = nsoup.find("nav") or nsoup
+            for a in navel.find_all("a"):
+                href = (a.get("href") or "").split("#")[0]
+                label = a.get_text(" ", strip=True)
+                if not href or not label:
+                    continue
+                tgt = str((navp.parent / href).resolve())
+                if tgt in idx_by_path:
+                    toc.append({"label": label[:80], "idx": idx_by_path[tgt]})
+        except Exception:
+            pass
+    if not toc:
+        ncx = next((manifest[m] for m in manifest if "ncx" in (manifest[m]["mt"] or "")
+                    or manifest[m]["href"].lower().endswith(".ncx")), None)
+        if ncx:
+            try:
+                ncxp = (opf_dir / ncx["href"])
+                xs = BeautifulSoup(ncxp.read_text("utf-8", "ignore"), "xml")
+                for np in xs.find_all("navPoint"):
+                    lab = np.find("text"); src = np.find("content")
+                    if not lab or not src or not src.get("src"):
+                        continue
+                    href = src["src"].split("#")[0]
+                    tgt = str((ncxp.parent / href).resolve())
+                    if tgt in idx_by_path:
+                        toc.append({"label": lab.get_text(" ", strip=True)[:80], "idx": idx_by_path[tgt]})
+            except Exception:
+                pass
+    info["toc"] = toc
+    return info
+
+
+_EPUB_ALLOWED = {"p", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6", "img", "a", "br", "hr",
+                 "ul", "ol", "li", "blockquote", "table", "thead", "tbody", "tr", "td", "th",
+                 "caption", "em", "strong", "b", "i", "u", "s", "sup", "sub", "small", "figure",
+                 "figcaption", "ruby", "rt", "rp", "section", "article", "dl", "dt", "dd",
+                 "pre", "code", "mark", "cite", "q"}
+_EPUB_DROP = {"script", "style", "link", "iframe", "object", "embed", "title", "head", "meta", "base", "form", "input", "button"}
+
+
+def _epub_rewrite_url(url, sec_dir, root, sha):
+    if not url or url.startswith(("http://", "https://", "data:", "/", "#", "mailto:")):
+        return url
+    try:
+        target = (sec_dir / url.split("#")[0]).resolve()
+        relp = target.relative_to(root.resolve()).as_posix()
+        return f"/pdf/epub/file/{sha}/{relp}"
+    except Exception:
+        return url
+
+
+def _sanitize_epub_section(section_path: Path, root: Path, sha: str) -> str:
+    """章节 XHTML → 安全 HTML(剥脚本/书 CSS/所有 class,套我们自己的主题);图 src 改服务 URL。"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(section_path.read_text("utf-8", "ignore"), "html.parser")
+    body = soup.find("body") or soup
+    sec_dir = section_path.parent
+    # svg>image(封面/整页图常用)→ 转普通 img(svg 随后 unwrap,img 留下);避开 svg 命名空间/大小写麻烦
+    for im in body.find_all("image"):
+        src = im.get("xlink:href") or im.get("href") or ""
+        ni = soup.new_tag("img")
+        ni["src"] = _epub_rewrite_url(src, sec_dir, root, sha)
+        im.replace_with(ni)
+    # 先删危险/无用标签(含内容)
+    for tag in body.find_all(_EPUB_DROP):
+        tag.decompose()
+    # 再处理剩余:剥属性、改 url、未知标签拆壳保留文字
+    for tag in list(body.find_all(True)):
+        if not tag.name or tag.parent is None:
+            continue   # 已被上一步祖先 decompose/unwrap 带走
+        name = tag.name.lower()
+        if name not in _EPUB_ALLOWED:
+            tag.unwrap(); continue
+        # 保留 class(书靠 class 定排版:标题/加粗/行内 vs 块级图/居中)→ 配合 scoped 书 CSS 还原忠实排版
+        keep = {"class"}
+        if name == "img":
+            keep |= {"src", "alt"}
+        elif name == "a":
+            keep |= {"href"}
+        elif name in ("td", "th"):
+            keep |= {"colspan", "rowspan"}
+        for attr in list(tag.attrs):
+            if attr not in keep:
+                del tag[attr]
+        if name == "img" and tag.get("src"):
+            tag["src"] = _epub_rewrite_url(tag["src"], sec_dir, root, sha)
+            tag["loading"] = "lazy"
+        if name == "a":
+            href = tag.get("href") or ""
+            if not (href.startswith("#") or href.startswith(("http://", "https://"))):
+                del tag["href"]   # 站内跨章链接暂时拆掉(防跳出阅读器),保留文字
+    return body.decode_contents()
+
+
+_EPUB_SEC_CACHE_DIR = CLAUDE_DIR / "state" / "epub-section-cache"   # 章节消毒 HTML 磁盘缓存:避免每次现 BeautifulSoup 解析吃满 GIL → 堵住用户操作请求
+
+
+def _epub_section_cached(secs, idx: int, root: Path, sha: str) -> str:
+    """消毒章节 HTML,落磁盘缓存(按 sha/idx/源文件 mtime)。命中则秒回不吃 GIL。"""
+    sp = secs[idx]
+    cache = _EPUB_SEC_CACHE_DIR / sha / (str(idx) + ".html")
+    try:
+        if cache.is_file() and cache.stat().st_mtime >= sp.stat().st_mtime:
+            return cache.read_text("utf-8")
+    except Exception:
+        pass
+    html = _sanitize_epub_section(sp, root, sha)
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(html, "utf-8")
+    except Exception:
+        pass
+    return html
+
+
+def _scope_css(css: str) -> str:
+    """把书的 CSS 每条规则 scope 到 #ep-col(不污染 app UI);丢 @page/@font-face/@import 等 @ 规则。
+    calibre 生成的 CSS 选择器简单(.calibre_xx / p.calibre),足够用这个轻量解析。"""
+    import re
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    out = []
+    i, n = 0, len(css)
+    while i < n:
+        brace = css.find("{", i)
+        if brace < 0:
+            break
+        sel = css[i:brace].strip()
+        depth, j = 1, brace + 1
+        while j < n and depth:
+            if css[j] == "{":
+                depth += 1
+            elif css[j] == "}":
+                depth -= 1
+            j += 1
+        block = css[brace + 1:j - 1].strip()
+        i = j
+        if not sel or sel.startswith("@"):
+            continue   # @page(屏幕无用)/@font-face(用系统字体)/@media 等一律丢
+        parts = []
+        for s in (x.strip() for x in sel.split(",")):
+            if not s:
+                continue
+            if s in ("body", "html", "*"):
+                parts.append("#ep-col")
+            elif s.startswith(("body ", "html ")):
+                parts.append("#ep-col " + s.split(" ", 1)[1])
+            else:
+                parts.append("#ep-col " + s)
+        if parts and block:
+            out.append(", ".join(parts) + "{" + block + "}")
+    return "\n".join(out)
+
+
+@bp.route("/api/epub-css")
+def pdf_api_epub_css():
+    """书自带 CSS,scope 到 #ep-col 后返回(还原忠实排版,又不污染 app UI)。"""
+    from flask import Response
+    rel = (request.args.get("file") or "").strip()
+    abs_path = _resolve_epub_book(rel)   # 收藏夹物化 EPUB 也可查(state 里那本;fav.css 由此 scope 出去)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return Response("", mimetype="text/css")
+    root = _ensure_epub_extracted(abs_path, rel)
+    if not root:
+        return Response("", mimetype="text/css")
+    chunks = []
+    for cssf in sorted(root.rglob("*.css")):
+        try:
+            chunks.append(_scope_css(cssf.read_text("utf-8", "ignore")))
+        except Exception:
+            continue
+    resp = Response("\n".join(chunks), mimetype="text/css")
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
+_EPUB_IMGDESC_DIR = CLAUDE_DIR / "state" / "epub-imgdesc"
+
+
+@bp.route("/api/epub-img-describe", methods=["POST"])
+def pdf_api_epub_img_describe():
+    """点图 → AI 看图描述(物理示意图/公式排版等)。按图内容 sha1 缓存(同图只描述一次,跨书复用)。"""
+    import hashlib, base64, mimetypes
+    body = request.get_json(silent=True) or {}
+    sha = (body.get("sha") or "").strip()
+    sub = (body.get("path") or "").strip().lstrip("/")
+    if not sha.isalnum() or not sub or ".." in sub.split("/"):
+        return jsonify({"ok": False, "error": "bad"}), 400
+    root = (_EPUB_EXTRACT_DIR / sha).resolve()
+    target = (root / sub).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return jsonify({"ok": False, "error": "越界"}), 404
+    if not target.is_file():
+        return jsonify({"ok": False, "error": "无此图"}), 404
+    raw = target.read_bytes()
+    ih = hashlib.sha1(raw).hexdigest()[:16]
+    cache = _EPUB_IMGDESC_DIR / f"{ih}.txt"
+    if cache.exists():
+        try:
+            return jsonify({"ok": True, "desc": cache.read_text("utf-8"), "cached": True})
+        except Exception:
+            pass
+    caption = (body.get("caption") or "").strip()[:200]
+    context = (body.get("context") or "").strip()[:2000]
+    mt = mimetypes.guess_type(str(target))[0] or "image/jpeg"
+    A = _assistant()
+    prompt = (
+        (f"【图注】{caption}\n\n" if caption else "")
+        + (f"【这段正文(帮你理解上下文)】{context}\n\n" if context else "")
+        + "**结合上下文**用中文描述这张图:它是什么图、关键要素/结构/数值、在讲什么概念,2~4 句,抓重点别冗长。数学用 $...$。"
+    )
+    desc = A.reader_vision(
+        [{"media_type": mt, "b64": base64.b64encode(raw).decode("ascii")}],
+        prompt, action="vision", uid=_reader_uid(), system="")
+    desc = (desc or "").strip()
+    if desc:
+        try:
+            _EPUB_IMGDESC_DIR.mkdir(parents=True, exist_ok=True)
+            cache.write_text(desc, "utf-8")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "desc": desc})
+
+
+@bp.route("/api/epub-manifest")
+def pdf_api_epub_manifest():
+    """EPUB 结构清单(给统一 HTML 阅读器)。?file= → {ok, title, count, toc:[{label,idx}]}。"""
+    rel = (request.args.get("file") or "").strip()
+    abs_path = _resolve_epub_book(rel)   # 收藏夹物化 EPUB 也可列清单(state 里那本)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    root = _ensure_epub_extracted(abs_path, rel)
+    if not root:
+        return jsonify({"ok": False, "error": "解包失败"}), 500
+    info = _epub_opf_info(root)
+    return jsonify({"ok": True, "title": info["title"], "count": len(info["sections"]),
+                    "toc": info["toc"], "sha": _epub_sha(rel)})
+
+
+@bp.route("/api/epub-section")
+def pdf_api_epub_section():
+    """某个 spine 章节的消毒 HTML。?file=&idx=N → {ok, html, idx}。"""
+    rel = (request.args.get("file") or "").strip()
+    try:
+        idx = int(request.args.get("idx") or "0")
+    except Exception:
+        idx = 0
+    abs_path = _resolve_epub_book(rel)   # 收藏夹物化 EPUB 也可取章节(state 里那本)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    root = _ensure_epub_extracted(abs_path, rel)
+    if not root:
+        return jsonify({"ok": False, "error": "解包失败"}), 500
+    info = _epub_opf_info(root)
+    secs = info["sections"]
+    if idx < 0 or idx >= len(secs):
+        return jsonify({"ok": False, "error": "idx 越界"}), 400
+    _fav_sha = _epub_sha(rel)
+    try:
+        # 收藏夹物化 EPUB 的章节由服务端亲手生成(可信),**不再消毒**:保留 PDF 页透明词层的行内定位
+        # style 与「打开原书」站内链接(_sanitize_epub_section 会剥掉两者)→ 选词/跳原书都可用。
+        if rel.lstrip("/").startswith(_FAV_BOOK_PREFIX):
+            html = _fav_epub_raw_section(secs[idx], root, _fav_sha)
+        else:
+            html = _epub_section_cached(secs, idx, root, _fav_sha)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"消毒失败：{ex}"}), 500
+    return jsonify({"ok": True, "html": html, "idx": idx})
+
+
+_EPUB_HTML_DIMS_CACHE: dict = {}   # {str(path): (mtime, processed_html)} 给章节 HTML 的 <img> 注入真实尺寸(防图片加载回流→连续模式抽搐)
+
+
+def _epub_inject_img_dims(html: str, html_file: Path, root: Path) -> str:
+    """给 HTML 里缺 width/height 的 <img> 补上图片真实像素尺寸(从解包目录读图)。
+    浏览器据 width/height 算 aspect-ratio 预留空间(即便 CSS height:auto),图片加载前就占好位,
+    连续滚动模式下不再每张图加载完就重排重渲(根治『左侧文本抽搐』)。"""
+    try:
+        from PIL import Image
+    except Exception:
+        return html
+    base = html_file.parent
+
+    def _repl(m):
+        tag = m.group(0)
+        if re.search(r"\bwidth\s*=", tag, re.I) and re.search(r"\bheight\s*=", tag, re.I):
+            return tag
+        sm = re.search(r"""src\s*=\s*["']([^"']+)["']""", tag, re.I)
+        if not sm:
+            return tag
+        src = sm.group(1).split("#")[0].split("?")[0]
+        if src.startswith("data:") or src.lower().endswith((".svg",)):
+            return tag
+        try:
+            from urllib.parse import unquote
+            ip = (base / unquote(src)).resolve()
+            ip.relative_to(root)
+            with Image.open(ip) as im:
+                w, h = im.size
+            if w and h:
+                return tag[:4] + ' width="%d" height="%d"' % (int(w), int(h)) + tag[4:]
+        except Exception:
+            pass
+        return tag
+
+    try:
+        return re.sub(r"<img\b[^>]*>", _repl, html, flags=re.I)
+    except Exception:
+        return html
+
+
+_EPUB_IMG_CACHE_DIR = CLAUDE_DIR / "state" / "epub-img-cache"   # 大图降采样缓存(减 iOS 解码内存,防大图书内存压力→Safari 重载标签页)
+
+
+def _epub_downscale_img(target: Path, sha: str, subpath: str, max_w: int = 1100):
+    """超 max_w 宽的图降采样到 max_w(保持格式与宽高比),缓存到磁盘。返回缓存路径或 None(不用缩/失败)。"""
+    try:
+        from PIL import Image
+        ext = target.suffix.lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+            return None
+        cache = _EPUB_IMG_CACHE_DIR / sha / (subpath + ".w%d%s" % (max_w, ext))
+        if cache.is_file() and cache.stat().st_mtime >= target.stat().st_mtime:
+            return cache
+        with Image.open(target) as im:
+            if im.width <= max_w:
+                return None
+            r = max_w / float(im.width)
+            im2 = im.resize((max_w, max(1, int(im.height * r))), Image.LANCZOS)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            if ext in (".jpg", ".jpeg"):
+                im2.convert("RGB").save(cache, "JPEG", quality=84)
+            elif ext == ".png":
+                im2.save(cache, "PNG", optimize=True)
+            else:
+                im2.save(cache, "WEBP", quality=84)
+        return cache
+    except Exception:
+        return None
+
+
+@bp.route("/epub/file/<sha>/<path:subpath>")
+def epub_file(sha, subpath):
+    """服务 epub 解包目录里的文件(章节 XHTML / 图片 / CSS / 字体),供 epub.js 懒加载。"""
+    if not sha.isalnum():
+        abort(404)
+    root = (_EPUB_EXTRACT_DIR / sha).resolve()
+    if not root.is_dir():
+        abort(404)
+    target = (root / subpath).resolve()
+    try:
+        target.relative_to(root)   # 防越界
+    except ValueError:
+        abort(404)
+    if not target.is_file():
+        abort(404)
+    from flask import send_file
+    import mimetypes
+    mt = mimetypes.guess_type(str(target))[0]
+    # epub 章节常见后缀
+    if target.suffix.lower() in (".xhtml", ".html", ".htm"):
+        mt = "application/xhtml+xml"
+        # 给章节 HTML 的 <img> 注入真实尺寸(缓存按 mtime)→ 防图片加载回流抽搐
+        try:
+            mtime = target.stat().st_mtime
+            ck = str(target)
+            cached = _EPUB_HTML_DIMS_CACHE.get(ck)
+            if cached and cached[0] == mtime:
+                processed = cached[1]
+            else:
+                raw = target.read_text("utf-8", errors="replace")
+                processed = _epub_inject_img_dims(raw, target, root)
+                if len(_EPUB_HTML_DIMS_CACHE) > 4000:
+                    _EPUB_HTML_DIMS_CACHE.clear()
+                _EPUB_HTML_DIMS_CACHE[ck] = (mtime, processed)
+            resp = Response(processed, mimetype=mt)
+            resp.headers["Cache-Control"] = "no-cache"   # 章节 HTML 每次重新取(注入的 img 尺寸要即时生效;服务端已缓存处理结果,快)
+            return resp
+        except Exception:
+            pass   # 出错回退原始 send_file
+    elif target.suffix.lower() == ".opf":
+        mt = "application/oebps-package+xml"
+    elif target.suffix.lower() == ".ncx":
+        mt = "application/x-dtbncx+xml"
+    elif target.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+        _ds = _epub_downscale_img(target, sha, subpath)   # 大图降采样省内存
+        if _ds is not None:
+            resp = send_file(str(_ds), mimetype=mt or "image/jpeg", conditional=True)
+            resp.headers["Cache-Control"] = "public, max-age=86400"
+            return resp
+    resp = send_file(str(target), mimetype=mt or "application/octet-stream", conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=86400"   # 解包文件内容稳定,可缓存
+    return resp
+
+
+_EPUB_HL_DIR = CLAUDE_DIR / "state" / "epub-highlights"
+
+
+def _epub_hl_path(rel: str) -> Path:
+    import hashlib
+    return _EPUB_HL_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _epub_hl_load(rel: str) -> list:
+    try:
+        return json.loads(_epub_hl_path(rel).read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _epub_hl_save(rel: str, items: list):
+    _EPUB_HL_DIR.mkdir(parents=True, exist_ok=True)
+    _epub_hl_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+
+
+@bp.route("/api/epub-highlights", methods=["GET", "POST", "PATCH", "DELETE"])
+def pdf_api_epub_highlights():
+    """EPUB 高亮 CRUD(CFI 文本锚,独立 sidecar:state/epub-highlights/<sha>.json)。
+    GET ?file= → 列;POST {file,cfi,text,color,note,body?,kind?} → 建;PATCH {file,id,color?,note?,body?,kind?} → 改;DELETE ?file=&id= → 删。
+    body=AI 译文/解释正文(高亮带的整段内容),kind=类型标签(译文/解释/笔记);跟 PDF 高亮的 sentence/body/note 四字段对齐。"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        return jsonify({"ok": True, "highlights": _epub_hl_load(rel)})
+    if request.method == "DELETE":
+        rel = (request.args.get("file") or "").strip()
+        hid = (request.args.get("id") or "").strip()
+        items = [h for h in _epub_hl_load(rel) if h.get("id") != hid]
+        _epub_hl_save(rel, items)
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    if not rel:
+        return jsonify({"ok": False, "error": "缺少 file"}), 400
+    items = _epub_hl_load(rel)
+    if request.method == "POST":
+        cfi = (body.get("cfi") or "").strip()
+        anchor = body.get("anchor")   # 新 HTML 阅读器用偏移锚 {section,start,end};老 epub.js 版用 cfi
+        if not cfi and not anchor:
+            return jsonify({"ok": False, "error": "缺少 cfi/anchor"}), 400
+        import uuid as _u
+        h = {"id": "e" + _u.uuid4().hex[:11], "cfi": cfi, "anchor": anchor,
+             "text": (body.get("text") or "")[:2000], "color": (body.get("color") or "#ffd54a"),
+             "note": (body.get("note") or "")[:2000],
+             "sentence": (body.get("sentence") or "")[:2000],   # epub.js 版高亮存所在句(编辑浮层只读预览;HTML 版不传则空)
+             "body": (body.get("body") or "")[:8000],   # AI 译文/解释正文(高亮带的整段内容;preview 渲)
+             "kind": (body.get("kind") or "")[:32],     # 类型标签:译文/解释/笔记
+             "time": int(__import__("time").time())}
+        items.append(h); _epub_hl_save(rel, items)
+        return jsonify({"ok": True, "id": h["id"], "highlight": h})
+    # PATCH
+    hid = (body.get("id") or "").strip()
+    h = next((x for x in items if x.get("id") == hid), None)
+    if not h:
+        return jsonify({"ok": False, "error": "未找到"}), 404
+    if "color" in body:
+        # 允许置空("" → no-color 虚框模式:保留备注/原文但不上色,前端渲成虚线框)
+        h["color"] = (body.get("color") or "")
+    if "note" in body:
+        h["note"] = (body.get("note") or "")[:2000]
+    if "sentence" in body:
+        h["sentence"] = (body.get("sentence") or "")[:2000]
+    if "body" in body:
+        h["body"] = (body.get("body") or "")[:8000]
+    if "kind" in body:
+        h["kind"] = (body.get("kind") or "")[:32]
+    _epub_hl_save(rel, items)
+    return jsonify({"ok": True, "highlight": h})
+
+
+# ── 便签(sticky notes)sidecar:PDF/EPUB 共用一套路由,anchor 不透明存储(设计见 references/sticky-notes-design.md)。
+# anchor = {"kind":"pdf","page":N,"x":0-1,"y":0-1} | {"kind":"epub","section":N,"x":0-1,"y":0-1}(挂进内容容器随滚动)。
+# strokes = [{c,w,pts:[[x,y],...]}](归一化到便签 body 宽高;只能前端笔擦改,AI 工具不许动)。
+_NOTES_DIR = CLAUDE_DIR / "state" / "reader-notes"
+
+
+def _notes_path(rel: str) -> Path:
+    import hashlib
+    return _NOTES_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _notes_load(rel: str) -> list:
+    try:
+        return json.loads(_notes_path(rel).read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _notes_save(rel: str, items: list):
+    _NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    _notes_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+
+
+@bp.route("/api/notes", methods=["GET", "POST", "PATCH", "DELETE"])
+def pdf_api_notes():
+    """便签 CRUD(sidecar:state/reader-notes/<sha>.json,PDF/EPUB 同一套)。
+    GET ?file= → 列;POST {file,anchor,text?,color?,w?,h?,collapsed?,strokes?} → 建;
+    PATCH {file,id,anchor?/text?/color?/w?/h?/collapsed?/strokes?} → 改(字段级合并);DELETE ?file=&id= → 删。"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        return jsonify({"ok": True, "notes": _notes_load(rel)})
+    if request.method == "DELETE":
+        rel = (request.args.get("file") or "").strip()
+        nid = (request.args.get("id") or "").strip()
+        items = [n for n in _notes_load(rel) if n.get("id") != nid]
+        _notes_save(rel, items)
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    if not rel:
+        return jsonify({"ok": False, "error": "缺少 file"}), 400
+    items = _notes_load(rel)
+    now = int(__import__("time").time())
+    if request.method == "POST":
+        anchor = body.get("anchor")
+        if not isinstance(anchor, dict) or anchor.get("kind") not in ("pdf", "epub"):
+            return jsonify({"ok": False, "error": "缺少/非法 anchor"}), 400
+        import uuid as _u
+        n = {"id": "n" + _u.uuid4().hex[:11], "anchor": anchor,
+             "text": (body.get("text") or "")[:8000],
+             "color": (body.get("color") or "#fff8c5"),
+             "w": int(body.get("w") or 260), "h": int(body.get("h") or 180),
+             "collapsed": bool(body.get("collapsed", False)),
+             "strokes": body.get("strokes") if isinstance(body.get("strokes"), list) else [],
+             "created": now, "updated": now}
+        items.append(n); _notes_save(rel, items)
+        return jsonify({"ok": True, "id": n["id"], "note": n})
+    # PATCH:字段级合并(anchor 移动/text 编辑/颜色/尺寸/折叠态/笔画 各自独立更新)
+    nid = (body.get("id") or "").strip()
+    n = next((x for x in items if x.get("id") == nid), None)
+    if not n:
+        return jsonify({"ok": False, "error": "未找到"}), 404
+    if isinstance(body.get("anchor"), dict) and body["anchor"].get("kind") in ("pdf", "epub"):
+        n["anchor"] = body["anchor"]
+    if "text" in body:
+        n["text"] = (body.get("text") or "")[:8000]
+    if "color" in body:
+        n["color"] = (body.get("color") or "#fff8c5")
+    if "w" in body:
+        n["w"] = int(body.get("w") or 260)
+    if "h" in body:
+        n["h"] = int(body.get("h") or 180)
+    if "collapsed" in body:
+        n["collapsed"] = bool(body.get("collapsed"))
+    if isinstance(body.get("strokes"), list):
+        n["strokes"] = body["strokes"]
+    n["updated"] = now
+    _notes_save(rel, items)
+    return jsonify({"ok": True, "note": n})
+
+
+def _note_composite_png(rel: str, nid: str):
+    """便签合成图 PNG bytes(有手写笔画时把 文字+笔画 整体画成一张图;PIL 重绘:便签色底+文字排版+笔画)。
+    /api/note-composite 路由与 assistant/epub_assistant 的 see_figure(kind:'note')共用。找不到便签 → None。"""
+    n = next((x for x in _notes_load(rel) if x.get("id") == nid), None)
+    if not n:
+        return None
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+    scale = 2   # 2x 渲染,AI 看得清小字
+    w, h = max(120, int(n.get("w") or 260)) * scale, max(80, int(n.get("h") or 180)) * scale
+    img = Image.new("RGB", (w, h), n.get("color") or "#fff8c5")
+    dr = ImageDraw.Draw(img)
+    font = None
+    for fp in ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+               "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+               "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        try:
+            font = ImageFont.truetype(fp, 15 * scale); break
+        except Exception:
+            continue
+    # 文字:简单折行排版(便签内容短,逐字宽度累加折行足够)
+    text = n.get("text") or ""
+    if text:
+        x0, y0, line, yy = 10 * scale, 8 * scale, "", 8 * scale
+        maxw = w - 20 * scale
+        lh = int(15 * scale * 1.5)
+        for ch in text:
+            if ch == "\n" or (font and dr.textlength(line + ch, font=font) > maxw):
+                dr.text((x0, yy), line, fill="#1b1b1b", font=font)
+                yy += lh; line = "" if ch == "\n" else ch
+                if yy > h - lh:
+                    break
+            else:
+                line += ch
+        if line and yy <= h - lh:
+            dr.text((x0, yy), line, fill="#1b1b1b", font=font)
+    # 笔画:归一化坐标 × 便签尺寸
+    for s in (n.get("strokes") or []):
+        pts = [(float(p[0]) * w, float(p[1]) * h) for p in (s.get("pts") or []) if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if len(pts) >= 2:
+            dr.line(pts, fill=s.get("c") or "#e33", width=max(1, int(float(s.get("w") or 2) * scale)), joint="curve")
+    buf = io.BytesIO(); img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+@bp.route("/api/note-composite", methods=["POST"])
+def pdf_api_note_composite():
+    """便签合成图(双击注入 AI 用)。body: {file, id} → {ok, data_url}。
+    服务端 PIL 重绘(_note_composite_png),避免前端 html2canvas 依赖。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    nid = (body.get("id") or "").strip()
+    try:
+        png = _note_composite_png(rel, nid)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"合成失败: {ex}"}), 500
+    if png is None:
+        return jsonify({"ok": False, "error": "未找到便签"}), 404
+    import base64
+    return jsonify({"ok": True, "data_url": "data:image/png;base64," + base64.b64encode(png).decode()})
+
+
+# ── 插入页(用户页)sidecar:state/reader-userpages/<sha>.json(按书;设计:references/reader-userpages-favorites.md「一、插入页设计」阶段A)──
+# 锚定铁律:用户页 id=u_<8hex>(独立编号空间),插入位置只存 {after:N}——N=原书 PDF 页(1-based)/EPUB 章序(1-based,=idx+1);
+# 0=书首。**绝不挤占原书 page/section 编号**:前端把用户页渲成原书页/章元素的兄弟节点,原书已有高亮/便签/墨迹锚零影响。
+_UPAGES_DIR = CLAUDE_DIR / "state" / "reader-userpages"
+
+
+def _upages_path(rel: str) -> Path:
+    import hashlib
+    return _UPAGES_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _upages_load(rel: str) -> list:
+    try:
+        items = json.loads(_upages_path(rel).read_text("utf-8"))
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _upages_save(rel: str, items: list):
+    _UPAGES_DIR.mkdir(parents=True, exist_ok=True)
+    p = _upages_path(rel)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+    tmp.replace(p)
+
+
+def _upages_sorted(items: list) -> list:
+    return sorted(items, key=lambda x: (int(x.get("after") or 0), int(x.get("created") or 0), str(x.get("id") or "")))
+
+
+@bp.route("/api/userpages", methods=["GET", "POST", "PATCH", "DELETE"])
+def pdf_api_userpages():
+    """用户页 CRUD(sidecar:state/reader-userpages/<sha>.json,PDF/EPUB 同一套,照 notes 模式)。
+    GET ?file= → {ok, pages}(按 after,created 排序);POST {file, after, title?, md?} → 建(id=u_<8hex>);
+    PATCH {file, id, title?/md?/after?} → 字段级合并;DELETE ?file=&id= → 删。"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        r = jsonify({"ok": True, "pages": _upages_sorted(_upages_load(rel))})
+        r.headers["Cache-Control"] = "no-store"
+        return r
+    if request.method == "DELETE":
+        rel = (request.args.get("file") or "").strip()
+        uid = (request.args.get("id") or "").strip()
+        with _upages_lock(rel):   # 与后台同步 job 的迁移事务互斥(blocker③)
+            items = _upages_load(rel)
+            hit = next((x for x in items if x.get("id") == uid), None)
+            if hit and isinstance(hit.get("page"), int):   # 真插入页:必须走 /api/pdf-insert-page(要改 PDF+迁锚)
+                return jsonify({"ok": False, "error": "真实插入页请用 /api/pdf-insert-page 删除"}), 400
+            _upages_save(rel, [x for x in items if x.get("id") != uid])
+        try:
+            _fav_cascade_userpage_delete(rel, uid)   # 同一张纸:页没了 → 各收藏夹里指向它的条目一并移除(不留墓碑)+ 后台重建 + 推事件
+        except Exception:
+            pass
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    if not rel:
+        return jsonify({"ok": False, "error": "缺少 file"}), 400
+    now = int(__import__("time").time())
+
+    def _norm_after(v):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+    _up_lk = _upages_lock(rel)   # POST/PATCH 全程持锁 RMW(与后台同步 job 迁移事务互斥,blocker③)
+    _up_lk.acquire()
+    try:
+        items = _upages_load(rel)
+        if request.method == "POST":
+            import uuid as _u
+            p = {"id": "u_" + _u.uuid4().hex[:8], "after": _norm_after(body.get("after")),
+                 "title": (body.get("title") or "")[:120],
+                 "md": (body.get("md") or "")[:100000],
+                 "created": now, "updated": now}
+            items.append(p)
+            _upages_save(rel, items)
+            return jsonify({"ok": True, "id": p["id"], "page": p})
+        # PATCH:字段级合并(title/md/after 各自独立更新)
+        uid = (body.get("id") or "").strip()
+        p = next((x for x in items if x.get("id") == uid), None)
+        if not p:
+            return jsonify({"ok": False, "error": "未找到"}), 404
+        if isinstance(p.get("page"), int):   # 真插入页
+            if p.get("mode") == "overlay":   # v4 overlay:文字即时存 sidecar,不碰 PDF(设计 v4 §C;后台同步另走 edit job=批次2)
+                changed = False
+                if "title" in body:
+                    p["title"] = (body.get("title") or "")[:120]; changed = True
+                if "md" in body:
+                    p["md"] = (body.get("md") or "")[:100000]; changed = True
+                if changed:
+                    p["md_ver"] = int(p.get("md_ver", 0)) + 1   # 脏标记版本戳:md_ver > synced_ver = 待写回 PDF
+                p["updated"] = now
+                _upages_save(rel, items)
+                return jsonify({"ok": True, "page": p, "md_ver": int(p.get("md_ver", 0))})
+            # baked 真实页(内容已烧进 PDF):改动仍须重排,走 /api/pdf-insert-page
+            return jsonify({"ok": False, "error": "真实插入页请用 /api/pdf-insert-page 编辑"}), 400
+        if "title" in body:
+            p["title"] = (body.get("title") or "")[:120]
+        if "md" in body:
+            p["md"] = (body.get("md") or "")[:100000]
+        if "after" in body:
+            p["after"] = _norm_after(body.get("after"))
+        if "h" in body:   # EPUB 插入页手动高度(px;下边缘拖动手柄,设计见 references「插入页高度」)
+            try:
+                hv = float(body.get("h"))
+            except (TypeError, ValueError):
+                hv = 0.0
+            if hv > 0:
+                p["h"] = int(max(60, min(30000, hv)))   # 服务端宽松 clamp(前端另有 120..300vh 交互 clamp)
+            else:
+                p.pop("h", None)   # h<=0 → 复位为默认(keepRatio 等比)
+        p["updated"] = now
+        _upages_save(rel, items)
+        try:
+            _reader_publish("text", rel, p.get("id"))   # 推「正文变了」给其它客户端(实时同步)
+        except Exception:
+            pass
+        return jsonify({"ok": True, "page": p})
+    finally:
+        _up_lk.release()
+
+
+# ═══════════ PDF 真插入页(规格 v2):PyMuPDF 修改 PDF 文件本身 + 锚迁移注册表 ═══════════
+# 设计:references/reader-userpages-favorites.md「⚠️ 规格 v2」。用户明确要求:插入的页真正写进 PDF
+# (页数改变,任何阅读器可见),错位由系统全部解决。EPUB 虚拟章节(.ep-usec)不受影响。
+#
+# 异步 job(复用 _JOBS/_job_set + /api/job-status 轮询,单 worker gunicorn 内存表够用):
+#   磁盘守卫 → 备份(state/pdf-page-backups/<sha>/<ts>.pdf,留最近2份)→ PyMuPDF 改页 → tmp 同目录全量
+#   save(小书 garbage=3 / 大书 garbage=1,照 embed_google_ocr_to_pdf 取舍)→ 重开断言页数 → journal →
+#   os.replace 原子替换 → 锚迁移注册表(两阶段事务,见下)→ 用户页表记录 → done → 前端整页 reload。
+#
+# 安全红线:
+#   · 原书永不损坏:替换前任何异常 = 删 tmp,原书分毫不动;迁移阶段任何异常 = 恢复 PDF 备份 + 回滚已写
+#     sidecar(全成或全不成)。
+#   · 事务实现:阶段1把所有 sidecar 读进内存、算好新内容(纯内存,零写盘);阶段2统一写回
+#     (每个文件 tmp+replace 原子),任何一步失败 → 用留存的原始 bytes 逆序还原已写文件 + copy 备份恢复 PDF。
+#   · journal(pdf-page-backups/<sha>/journal.json):写在 os.replace 之前、迁移全部完成后删。进程在
+#     替换与迁移之间死掉 → journal 残留 → 后续操作一律 409 拒绝并提示从备份恢复(防带着错位继续写)。
+#
+# ⚠ 未来任何新增「按 PDF 页号锚定」的存储,必须在 PAGE_ANCHOR_MIGRATIONS 登记迁移器(设计文档铁律)。
+import threading as _upthr
+
+_PAGE_BACKUP_DIR = CLAUDE_DIR / "state" / "pdf-page-backups"
+_INSPAGE_ACTIVE: set = set()          # 正在改页的 rel(单 worker,进程内互斥即可)
+_INSPAGE_MUTEX = _upthr.Lock()
+
+# 🔴 v4 批次2 BLOCKER 修法③:userpages sidecar 的所有「读改写」必须经一把 per-rel 锁串行化。
+#   单 worker gunicorn 里,前端即时编辑 PATCH(/api/userpages)与后台同步 job 的锚迁移事务(_pam_userpages
+#   phase1 读 → phase2 写)是**独立线程并发**;不加锁 → job 用旧内存快照 phase2 落盘会覆盖 PATCH 刚写的新编辑
+#   = 静默丢字。锁范围:PATCH/POST/DELETE 的 RMW + job 的 collect_plans→apply_plans。per-rel(不同书不互斥)。
+_UPAGES_LOCKS: dict = {}
+_UPAGES_LOCKS_GUARD = _upthr.Lock()
+
+
+def _upages_lock(rel: str):
+    with _UPAGES_LOCKS_GUARD:
+        lk = _UPAGES_LOCKS.get(rel)
+        if lk is None:
+            lk = _upthr.Lock()
+            _UPAGES_LOCKS[rel] = lk
+        return lk
+
+
+def _up_journal_path(sha: str) -> Path:
+    return _PAGE_BACKUP_DIR / sha / "journal.json"
+
+
+# ── markdown → 简单 HTML(insert_htmlbox 用):标题/段落/列表/粗斜体/行内代码。
+#    $..$ 公式不渲染、原文保留(阶段1降级,如实告知);全文先 HTML 转义再放行有限标记。
+def _up_md_html(title: str, md: str) -> str:
+    import html as _html
+    def _inline(s: str) -> str:
+        s = _html.escape(s, quote=False)
+        s = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<i>\1</i>", s)
+        s = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", s)
+        return s
+    out, para, lmode = [], [], None   # lmode: None|'ul'|'ol'
+    def _flush():
+        nonlocal para
+        if para:
+            out.append("<p>" + "<br>".join(_inline(x) for x in para) + "</p>")
+            para = []
+    def _close():
+        nonlocal lmode
+        if lmode:
+            out.append("</" + lmode + ">"); lmode = None
+    if (title or "").strip():
+        out.append("<h2>" + _inline(title.strip()) + "</h2>")
+    for ln in (md or "").replace("\r\n", "\n").split("\n"):
+        t = ln.strip()
+        if not t:
+            _flush(); _close(); continue
+        m = re.match(r"^(#{1,4})\s+(.*)$", t)
+        if m:
+            _flush(); _close()
+            lv = min(4, len(m.group(1)) + 1)   # '#'→h2(h1 留给页标题层级感)
+            out.append("<h%d>%s</h%d>" % (lv, _inline(m.group(2)), lv)); continue
+        m = re.match(r"^[-*+]\s+(.*)$", t)
+        if m:
+            _flush()
+            if lmode != "ul": _close(); out.append("<ul>"); lmode = "ul"
+            out.append("<li>" + _inline(m.group(1)) + "</li>"); continue
+        m = re.match(r"^\d+[.)]\s+(.*)$", t)
+        if m:
+            _flush()
+            if lmode != "ol": _close(); out.append("<ol>"); lmode = "ol"
+            out.append("<li>" + _inline(m.group(1)) + "</li>"); continue
+        para.append(t)
+    _flush(); _close()
+    return "".join(out) or "<p></p>"
+
+
+_UP_PAGE_CSS = ("h2{font-size:16pt;margin:0 0 10pt}h3{font-size:13pt}h4{font-size:11.5pt}"
+                "p,li{font-size:10.5pt;line-height:1.55}code{background:#eeeeee}"
+                "*{font-family:sans-serif}")
+
+
+def _up_render_page(page, title: str, md: str) -> list:
+    """标题+markdown 排进新页(insert_htmlbox;CJK 走 MuPDF 内置 fallback 字体,文字可选中=字符层可用)。
+    返回 warnings(内容放不下被整体缩小/截断时告知)。"""
+    import fitz
+    warns = []
+    r = page.rect
+    margin = max(24.0, min(r.width, r.height) * 0.06)
+    box = fitz.Rect(r.x0 + margin, r.y0 + margin, r.x1 - margin, r.y1 - margin * 1.8)
+    try:
+        spare, scale = page.insert_htmlbox(box, _up_md_html(title, md), css=_UP_PAGE_CSS, scale_low=0.25)
+        if scale < 0.999:
+            warns.append("内容较多,排版整体缩小到 %d%% 以放进一页" % int(scale * 100))
+        if spare < 0:
+            warns.append("内容超长,已按最小缩放排版,末尾可能被截断")
+    except Exception as ex:
+        # 兜底:纯文本(china-s 内置 CJK 字体),不至于替换出一张空页
+        try:
+            page.insert_textbox(box, ((title or "") + "\n\n" + (md or ""))[:4000],
+                                fontsize=10.5, fontname="china-s")
+        except Exception:
+            pass
+        warns.append("富文本排版失败已降级纯文本:%s" % ex)
+    try:
+        fr = fitz.Rect(r.x0 + margin, r.y1 - margin * 1.4, r.x1 - margin, r.y1 - margin * 0.2)
+        page.insert_htmlbox(fr, '<p style="text-align:center;color:#999999;font-size:8pt">— 用户插入页 —</p>')
+    except Exception:
+        pass
+    return warns
+
+
+# ── 页号映射(mv):插入=+1 / 删除=-1(被删页上的锚 → None=丢弃)/ 编辑=不动,同一套走全部迁移器 ──
+def _up_mv_insert(after: int):
+    return lambda p: (p + 1) if p > after else p
+
+
+def _up_mv_delete(pno: int):
+    return lambda p: None if p == pno else ((p - 1) if p > pno else p)
+
+
+def _up_mv_keep():
+    return lambda p: p
+
+
+def _up_mv_droponly(pno: int):
+    """编辑模式给「机器派生」存储用:被重写那页的派生数据(图框/公式/OCR校正)已过期 → 丢,其余不动。"""
+    return lambda p: None if p == pno else p
+
+
+def _up_json_plan(path: Path, mutate):
+    """读 sidecar 原始 JSON(⚠ 不经业务 loader——_fig_load_abs/_ocrfix_load_abs 有 mtime 清空守卫,迁移必须
+    绕过它拿到原始数据)→ mutate(data)->bool → 有改动出 write plan。不存在→无事;损坏→跳过+警告
+    (业务 loader 对损坏文件本就按空处理,不因此中止整个事务)。返回 (plan|None, warn|None)。"""
+    if not path.exists():
+        return None, None
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None, "sidecar %s 损坏,跳过迁移(业务上视为空)" % path.name
+    if not mutate(data):
+        return None, None
+    return ("write", path, json.dumps(data, ensure_ascii=False).encode("utf-8"), raw), None
+
+
+def _up_shift_pagelist(arr, mv, key="page") -> tuple:
+    """列表元素按 key 迁页号(int 才动;u_* 等字符串跳过);mv→None 的条目丢弃。返回 (新列表, changed)。"""
+    out, changed = [], False
+    for it in (arr or []):
+        if not isinstance(it, dict):
+            out.append(it); continue
+        p = it.get(key)
+        if isinstance(p, bool) or not isinstance(p, int):
+            out.append(it); continue
+        np = mv(p)
+        if np is None:
+            changed = True; continue
+        if np != p:
+            it[key] = np; changed = True
+        out.append(it)
+    return out, changed
+
+
+# ── 迁移器们:fn(ctx) -> (plans, warns)。ctx = {rel, ap, sha, mv, mvd, new_mtime, mode, pivot, record_op}
+#    mv=用户数据映射;mvd=机器派生数据映射(编辑模式丢被重写页);plans 见 _up_apply_plans。
+def _pam_highlights(ctx):
+    def mut(d):
+        arr, ch = _up_shift_pagelist(d.get("highlights"), ctx["mv"])
+        if ch: d["highlights"] = arr
+        return ch
+    plan, warn = _up_json_plan(_hl_path(ctx["rel"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_notes(ctx):
+    def mut(d):
+        if not isinstance(d, list):
+            return False
+        changed = False
+        keep = []
+        for n in d:
+            a = (n or {}).get("anchor") or {}
+            p = a.get("page")
+            if a.get("kind") == "pdf" and isinstance(p, int) and not isinstance(p, bool):
+                np = ctx["mv"](p)
+                if np is None:
+                    changed = True; continue
+                if np != p:
+                    a["page"] = np; changed = True
+            keep.append(n)
+        if changed:
+            d[:] = keep
+        return changed
+    plan, warn = _up_json_plan(_notes_path(ctx["rel"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_ink(ctx):
+    def mut(d):
+        pages = d.get("pages")
+        if not isinstance(pages, dict):
+            return False
+        out, changed = {}, False
+        for k, v in pages.items():
+            try:
+                p = int(k)
+            except (TypeError, ValueError):
+                out[k] = v; continue
+            np = ctx["mv"](p)
+            if np is None:
+                changed = True; continue
+            if np != p:
+                changed = True
+            out[str(np)] = v
+        if changed:
+            d["pages"] = out
+        return changed
+    plan, warn = _up_json_plan(_ink_path(ctx["rel"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_favorites(ctx):
+    def mut(d):
+        changed = False
+        for f in (d.get("folders") or []):
+            items, keep = f.get("items") or [], []
+            for it in items:
+                if (it or {}).get("file") == ctx["rel"] and it.get("kind") == "pdf" \
+                        and isinstance(it.get("page"), int) and not isinstance(it.get("page"), bool):
+                    np = ctx["mv"](it["page"])
+                    if np is None:
+                        changed = True; continue
+                    if np != it["page"]:
+                        it["page"] = np; changed = True
+                keep.append(it)
+            if len(keep) != len(items):
+                f["items"] = keep
+        return changed
+    plan, warn = _up_json_plan(_FAV_FILE, mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_userpages(ctx):
+    """用户页表自身:真实页记录(page)按 mv 迁;旧虚拟页(after=边界语义)插入>pivot→+1、删除>=pivot→-1;
+    最后应用本次 record_op(add/update/remove)。此表必写(record_op 总有事做)。"""
+    path = _upages_path(ctx["rel"])
+    raw, items = None, []
+    if path.exists():
+        try:
+            raw = path.read_bytes()
+            items = json.loads(raw.decode("utf-8"))
+            if not isinstance(items, list):
+                items = []
+        except Exception:
+            items, raw = [], None
+    mode, pivot = ctx["mode"], ctx["pivot"]
+    out = []
+    for p in items:
+        if isinstance(p.get("page"), int):          # 真实插入页记录
+            np = ctx["mv"](p["page"])
+            if np is None:                          # 只可能是 delete 目标页自身;它由 record_op remove 处理,防御性跳过
+                out.append(p); continue
+            p["page"] = np
+        else:                                        # 旧虚拟页:after 是"页边界"(0=书首)
+            a = int(p.get("after") or 0)
+            if mode == "insert" and a > pivot:
+                p["after"] = a + 1
+            elif mode == "delete" and a >= pivot:
+                p["after"] = max(0, a - 1)
+        out.append(p)
+    op = ctx["record_op"]
+    now = int(_time.time())
+    if op["op"] == "add":
+        rec = {"id": op["id"], "page": op["page"], "title": op.get("title") or "",
+               "md": op.get("md") or "", "real": True, "created": now, "updated": now}
+        if op.get("mode") == "overlay":   # v4:空白真页 + sidecar 文字(md 即时编辑,后台同步回 PDF;设计 v4 §A/§B)
+            rec["mode"] = "overlay"; rec["md_ver"] = 0; rec["synced_ver"] = 0
+        out.append(rec)
+    elif op["op"] == "update":
+        for p in out:
+            if p.get("id") == op["id"]:
+                if p.get("mode") == "overlay":
+                    # 🔴 BLOCKER①:overlay 的 md 真源在 sidecar,后台同步 job 绝不回写 md/title
+                    #   (否则用触发同步时的旧快照覆盖掉同步期间的新编辑 = 静默丢字)。这里 out 是**本次
+                    #   刚从磁盘读回的最新 sidecar**(含同步期间用户新写的 md),原样保留。只把 synced_ver
+                    #   抬到本次写进 PDF 的 base_ver(单调 max);base_ver < 当前 md_ver 则仍脏、下次再同步。
+                    bv = op.get("base_ver")
+                    if bv is not None:
+                        p["synced_ver"] = max(int(p.get("synced_ver", 0)), int(bv))
+                    p["updated"] = now
+                else:
+                    p["title"] = op.get("title") or ""
+                    p["md"] = op.get("md") or ""
+                    p["updated"] = now
+    elif op["op"] == "remove":
+        out = [p for p in out if p.get("id") != op["id"]]
+    return [("write", path, json.dumps(out, ensure_ascii=False).encode("utf-8"), raw)], []
+
+
+def _pam_tr_sentences(ctx):
+    def mut(d):
+        arr, ch = _up_shift_pagelist(d.get("sentences"), ctx["mv"])
+        if ch: d["sentences"] = arr
+        return ch
+    plan, warn = _up_json_plan(_tr_path(ctx["rel"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_char_offset(ctx):
+    def mut(d):
+        m = d.get(ctx["rel"])
+        if not isinstance(m, dict):
+            return False
+        out, changed = {}, False
+        for k, v in m.items():
+            try:
+                p = int(k)
+            except (TypeError, ValueError):
+                out[k] = v; continue
+            np = ctx["mv"](p)
+            if np is None:
+                changed = True; continue
+            if np != p:
+                changed = True
+            out[str(np)] = v
+        if changed:
+            d[ctx["rel"]] = out
+        return changed
+    plan, warn = _up_json_plan(_CHAR_OFFSET_PATH, mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_toc(ctx):
+    """自定义目录:entries[].page 是**印刷页**(物理插页不动它);range{start,end} 是 PDF 页 → 迁。
+    原生书签(PDF outline)指向页对象引用,PyMuPDF 插/删页自动跟随,无需处理。"""
+    def mut(d):
+        rng = d.get("range")
+        if not isinstance(rng, dict):
+            return False
+        changed = False
+        for k in ("start", "end"):
+            v = rng.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                nv = ctx["mv"](v)
+                if nv is None:
+                    nv = max(1, v - 1)   # 目录页本身被删(不太可能):范围端点退一格
+                if nv != v:
+                    rng[k] = nv; changed = True
+        return changed
+    plan, warn = _up_json_plan(_toc_path_abs(ctx["ap"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_sentence_cards(ctx):
+    """自动例句卡登记表(全局):key=sha1(rel|page|text)[:16] 含页号 → 重键,值里的 page 同步迁
+    (不迁的话页移位后同句生成新 key → 重复建 Anki 卡)。"""
+    import hashlib
+    path = CLAUDE_DIR / "state" / "sentence-cards.json"
+    def mut(d):
+        if not isinstance(d, dict):
+            return False
+        changed = False
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, dict) and v.get("file") == ctx["rel"] \
+                    and isinstance(v.get("page"), int) and not isinstance(v.get("page"), bool):
+                np = ctx["mv"](v["page"])
+                if np is None:
+                    changed = True; continue
+                if np != v["page"]:
+                    v["page"] = np
+                    k = hashlib.sha1(("%s|%d|%s" % (ctx["rel"], np, v.get("text") or "")).encode("utf-8")).hexdigest()[:16]
+                    changed = True
+            out[k] = v
+        if changed:
+            d.clear(); d.update(out)
+        return changed
+    plan, warn = _up_json_plan(path, mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_vocab_exposure(ctx):
+    """生词暴露反向索引(全局,scripts/vocab/build_exposure.py 产物,可重建;迁移保正确性)。"""
+    path = CLAUDE_DIR / "state" / "vocab-exposure.json"
+    def mut(d):
+        if not isinstance(d, dict):
+            return False
+        changed = False
+        for lemma, info in d.items():
+            if not isinstance(info, dict):
+                continue
+            pages = info.get("pages")
+            if not isinstance(pages, list):
+                continue
+            keep, ch = [], False
+            for e in pages:
+                if isinstance(e, dict) and e.get("pdf") == ctx["rel"] \
+                        and isinstance(e.get("page"), int) and not isinstance(e.get("page"), bool):
+                    np = ctx["mv"](e["page"])
+                    if np is None:
+                        ch = True; continue
+                    if np != e["page"]:
+                        e["page"] = np; ch = True
+                keep.append(e)
+            if ch:
+                info["pages"] = keep
+                if isinstance(info.get("total_pages"), int):
+                    info["total_pages"] = len(keep)
+                changed = True
+        return changed
+    plan, warn = _up_json_plan(path, mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_figures(ctx):
+    """pdf-figures/<book_sha>.json(figures/figures_geom/formulas 各带 page + _none_pages)——机器派生,
+    按 mvd 迁 + **book_mtime 刷成新值**:_fig_load_abs 的 mtime 守卫本会在书 mtime 变化时清空 figures,
+    但我们精确知道这次只是页号移位 → 迁移页号 + 刷 mtime,贵的 AI 图描述/YOLO 框/公式 latex 全保留。"""
+    def mut(d):
+        changed = False
+        for key in ("figures", "figures_geom", "formulas"):
+            arr, ch = _up_shift_pagelist(d.get(key), ctx["mvd"])
+            if ch:
+                d[key] = arr; changed = True
+        np_list, ch2 = [], False
+        for p in (d.get("_none_pages") or []):
+            if isinstance(p, int) and not isinstance(p, bool):
+                np = ctx["mvd"](p)
+                if np is None:
+                    ch2 = True; continue
+                if np != p:
+                    ch2 = True
+                np_list.append(np)
+            else:
+                np_list.append(p)
+        if ch2:
+            d["_none_pages"] = np_list; changed = True
+        if d.get("book_mtime") != ctx["new_mtime"]:
+            d["book_mtime"] = ctx["new_mtime"]; changed = True
+        return changed
+    plan, warn = _up_json_plan(_fig_path_abs(ctx["ap"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_ocrfix(ctx):
+    """pdf-ocr-fix/<book_sha>.json(选区重新识别校正,fixes[].page)——同 _pam_figures:迁页号+刷 book_mtime
+    保住用户手动重扫的成果(否则 loader 的 mtime 守卫会整册清空)。"""
+    def mut(d):
+        arr, ch = _up_shift_pagelist(d.get("fixes"), ctx["mvd"])
+        if ch:
+            d["fixes"] = arr
+        changed = ch
+        if d.get("book_mtime") != ctx["new_mtime"]:
+            d["book_mtime"] = ctx["new_mtime"]; changed = True
+        return changed
+    plan, warn = _up_json_plan(_ocrfix_path_abs(ctx["ap"]), mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _up_rename_plans(dirpath: Path, pat, namer, mv, one_based: bool) -> list:
+    """按页命名的文件簇改名迁移(pdf-page-ocr/<sha16>-p{N}.json、mokuro/vision p%04d.*)。
+    pat(name)->页标识 int|None;namer(n)->新文件名。+1 方向按页号降序改名(不撞名)、-1 升序;删除的页先出 unlink plan。"""
+    if not dirpath.exists():
+        return []
+    moves, drops = [], []
+    for f in dirpath.iterdir():
+        n = pat(f.name)
+        if n is None:
+            continue
+        page1 = n + 1 if not one_based else n     # 统一成 1-based 页号喂 mv
+        np1 = mv(page1)
+        if np1 is None:
+            drops.append(f)
+        elif np1 != page1:
+            nn = np1 - 1 if not one_based else np1
+            moves.append((page1, f, dirpath / namer(nn, f.name)))
+    plans = []
+    for f in drops:
+        try:
+            plans.append(("unlink", f, f.read_bytes()))
+        except Exception:
+            pass
+    up = all(mv(p) >= p for p, _, _ in moves) if moves else True   # 全 +1 → 降序;全 -1 → 升序
+    for _, src, dst in sorted(moves, key=lambda x: x[0], reverse=up):
+        plans.append(("rename", src, dst))
+    return plans
+
+
+def _pam_page_ocr(ctx):
+    """单页重扫覆盖 sidecar:页号在文件名(<sha16(rel)>-p{N}.json,1-based)→ 改名迁移。内容跟页绑定 → mvd。"""
+    import hashlib
+    sha = hashlib.sha1(ctx["rel"].encode("utf-8")).hexdigest()[:16]
+    rx = re.compile(r"^" + re.escape(sha) + r"-p(\d+)\.json$")
+    def pat(name):
+        m = rx.match(name)
+        return int(m.group(1)) if m else None
+    def namer(n, _old):
+        return "%s-p%d.json" % (sha, n)
+    return _up_rename_plans(_PAGE_OCR_DIR, pat, namer, ctx["mvd"], one_based=True), []
+
+
+def _pam_ocr_checkpoints(ctx):
+    """mokuro/google-vision OCR 按页 checkpoint(p%04d.json/.png,0-based idx)→ 改名迁移,
+    防未来重跑 OCR 时旧 checkpoint 按页复用串位(embed 脚本按文件名 glob 消费,json 内 _page 字段仅 provenance)。"""
+    plans = []
+    rx = re.compile(r"^p(\d{4})\.(json|png)$")
+    def pat(name):
+        m = rx.match(name)
+        return int(m.group(1)) if m else None
+    for base in (CLAUDE_DIR / "state" / "mokuro-ocr", CLAUDE_DIR / "state" / "google-vision-ocr"):
+        d = base / ctx["sha"]
+        def namer(n, old, _d=d):
+            return "p%04d.%s" % (n, old.rsplit(".", 1)[1])
+        plans += _up_rename_plans(d, pat, namer, ctx["mvd"], one_based=False)
+    return plans, []
+
+
+# ⚠ 注册表:所有「按 PDF 页号锚定」的存储在此穷尽登记(盘点结论 2026-07-03,详见设计文档规格 v2)。
+#   免迁(天然失效)不进表:页图/字符层/振假名/整本文本缓存(文件名含 mtime)、FTS 搜索库(meta.mtime,
+#   quick_sync ≤15min 自动整书重建)、pdf-sent-dismissed(按句文本)、lastopen(无页号)、
+#   grammar-tracked/history + spacy 缓存(按节点/句文本)、assistant 会话(历史上下文,印刷页语义)、
+#   vocab-lookups.jsonl(追加日志,只做近期活跃页启发)、pdf-prefs 阅读位置(客户端 LS 为真源,±1 接受)、
+#   book-preprocess 状态(一次性流水线)、pdf-book-{langs,crop,figures,offset}(无页号/印刷页偏移标量,
+#   偏移在插入点之后差 1 属已知妥协,可在设置里重新对齐)。
+PAGE_ANCHOR_MIGRATIONS = [
+    ("pdf-highlights", _pam_highlights),
+    ("reader-notes", _pam_notes),
+    ("pdf-ink", _pam_ink),
+    ("reader-favorites", _pam_favorites),
+    ("reader-userpages", _pam_userpages),
+    ("pdf-tr-sentences", _pam_tr_sentences),
+    ("pdf-char-offset", _pam_char_offset),
+    ("pdf-toc-range", _pam_toc),
+    ("sentence-cards", _pam_sentence_cards),
+    ("vocab-exposure", _pam_vocab_exposure),
+    ("pdf-figures", _pam_figures),
+    ("pdf-ocr-fix", _pam_ocrfix),
+    ("pdf-page-ocr", _pam_page_ocr),
+    ("ocr-checkpoints", _pam_ocr_checkpoints),
+]
+
+
+def _up_collect_plans(ctx) -> tuple:
+    """阶段1:纯内存跑全部迁移器,收集写盘/改名/删除计划。任何迁移器抛异常 → 整体中止(调用方恢复 PDF 备份)。"""
+    plans, warns = [], []
+    for name, fn in PAGE_ANCHOR_MIGRATIONS:
+        try:
+            p, w = fn(ctx)
+        except Exception as ex:
+            raise RuntimeError("迁移器 %s 失败:%s" % (name, ex))
+        plans += p or []
+        warns += w or []
+    return plans, warns
+
+
+def _up_apply_plans(plans):
+    """阶段2:统一落盘。write=tmp+原子替换;rename/unlink 直接执行。任何失败 → 逆序回滚已完成项后抛出。"""
+    done = []
+    try:
+        for pl in plans:
+            if pl[0] == "write":
+                _, path, nb, _ob = pl
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".migtmp")
+                tmp.write_bytes(nb)
+                tmp.replace(path)
+            elif pl[0] == "rename":
+                _, src, dst = pl
+                src.replace(dst)
+            elif pl[0] == "unlink":
+                _, path, _ob = pl
+                path.unlink()
+            done.append(pl)
+    except Exception:
+        for pl in reversed(done):
+            try:
+                if pl[0] == "write":
+                    _, path, _nb, ob = pl
+                    if ob is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(ob)
+                elif pl[0] == "rename":
+                    _, src, dst = pl
+                    dst.replace(src)
+                elif pl[0] == "unlink":
+                    _, path, ob = pl
+                    path.write_bytes(ob)
+            except Exception:
+                pass
+        raise
+
+
+def _up_backup_book(ap: Path, sha: str) -> Path:
+    import shutil
+    bdir = _PAGE_BACKUP_DIR / sha
+    bdir.mkdir(parents=True, exist_ok=True)
+    dst = bdir / (_time.strftime("%Y%m%d-%H%M%S") + ".pdf")
+    shutil.copy2(str(ap), str(dst))
+    if dst.stat().st_size != ap.stat().st_size:
+        raise RuntimeError("备份文件大小与原书不一致")
+    return dst
+
+
+def _up_prune_backups(sha: str, keep: int = 2):
+    try:
+        fs = sorted((_PAGE_BACKUP_DIR / sha).glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in fs[keep:]:
+            f.unlink()
+    except Exception:
+        pass
+
+
+def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
+    """后台 job:insert/edit/delete 三种操作同一套安全流程。"""
+    import fitz, shutil
+    sha = _book_sha(ap)
+    tmp = None
+    try:
+        _job_set(jid, status="running", kind="pdf-inspage", step="备份原书…", ts=_time.time())
+        size = ap.stat().st_size
+        if hasattr(os, "statvfs"):   # Windows 本地实例没有 statvfs,跳过守卫
+            st = os.statvfs(str(ap.parent))
+            if st.f_bavail * st.f_frsize < size * 2 + (100 << 20):
+                raise RuntimeError("磁盘空间不足(备份+临时文件需要约 2×书大小)")
+        backup = _up_backup_book(ap, sha)
+        _job_set(jid, step="改写 PDF…")
+        doc = fitz.open(str(ap))
+        n0 = doc.page_count
+        warns = []
+        if mode == "insert":
+            after = int(payload["after"])
+            if not (0 <= after <= n0):
+                raise RuntimeError("插入位置越界(书共 %d 页)" % n0)
+            ref = doc[min(max(after - 1, 0), n0 - 1)].rect   # 尺寸=邻页(after=0 取第1页)
+            pg = doc.new_page(pno=(after if after < n0 else -1), width=ref.width, height=ref.height)
+            warns += _up_render_page(pg, payload.get("title") or "", payload.get("md") or "")
+            expect, pivot = n0 + 1, after
+            mv = mvd = _up_mv_insert(after)
+        elif mode == "edit":
+            pno = int(payload["page"])
+            if not (1 <= pno <= n0):
+                raise RuntimeError("页号越界")
+            ref = doc[pno - 1].rect
+            doc.delete_page(pno - 1)
+            pg = doc.new_page(pno=(pno - 1 if pno - 1 < doc.page_count else -1), width=ref.width, height=ref.height)
+            warns += _up_render_page(pg, payload.get("title") or "", payload.get("md") or "")
+            expect, pivot = n0, pno
+            mv, mvd = _up_mv_keep(), _up_mv_droponly(pno)
+        else:   # delete
+            pno = int(payload["page"])
+            if not (1 <= pno <= n0):
+                raise RuntimeError("页号越界")
+            if n0 <= 1:
+                raise RuntimeError("整本书只剩这一页,不能删")
+            doc.delete_page(pno - 1)
+            expect, pivot = n0 - 1, pno
+            mv = mvd = _up_mv_delete(pno)
+        _job_set(jid, step="保存新文件…(大书要一会)")
+        tmp = ap.with_name(".instmp-" + _uuid.uuid4().hex[:8] + ".pdf")   # 同目录(同文件系统才能原子替换);点开头避开 Obsidian Sync
+        doc.save(str(tmp), garbage=(3 if size < (40 << 20) else 1), deflate=True)
+        doc.close()
+        _job_set(jid, step="校验新文件…")
+        d2 = fitz.open(str(tmp))
+        got = d2.page_count
+        d2.close()
+        if got != expect:
+            raise RuntimeError("页数断言失败:期望 %d 得到 %d,原书未动" % (expect, got))
+        # journal:写在替换前、迁移全部完成后删。中间进程死掉 → 残留 → 后续操作 409(防错位继续写)
+        jp = _up_journal_path(sha)
+        jp.write_text(json.dumps({"mode": mode, "rel": rel, "backup": str(backup),
+                                  "ts": int(_time.time())}, ensure_ascii=False), "utf-8")
+        os.replace(str(tmp), str(ap))
+        tmp = None
+        _job_set(jid, step="迁移页锚(高亮/便签/墨迹/图注等)…")
+        new_mtime = int(os.path.getmtime(str(ap)))
+        try:
+            ctx = {"rel": rel, "ap": ap, "sha": sha, "mv": mv, "mvd": mvd, "mode": mode, "pivot": pivot,
+                   "new_mtime": new_mtime, "record_op": payload["record_op"]}
+            # 🔴 BLOCKER③:持 per-rel userpages 锁跨「phase1 读所有 sidecar → phase2 落盘」整个事务,
+            #   期间前端 PATCH(/api/userpages)阻塞 → 迁移读到的 userpages 快照与落盘之间不会被 PATCH 插入 →
+            #   phase2 不会覆盖 PATCH 刚写的新编辑。doc.save(慢,几秒)在此之前,锁只压这段几毫秒的迁移。
+            with _upages_lock(rel):
+                plans, w2 = _up_collect_plans(ctx)
+                warns += w2
+                _up_apply_plans(plans)
+        except Exception as ex:
+            shutil.copy2(str(backup), str(ap))   # 全不成:恢复原书,不写任何 sidecar
+            jp.unlink(missing_ok=True)
+            raise RuntimeError("锚迁移失败,已从备份恢复原书、未改任何数据:%s" % ex)
+        jp.unlink(missing_ok=True)
+        _up_prune_backups(sha)
+        result = {"ok": True, "mode": mode, "warnings": warns, "mtime": new_mtime}
+        if mode == "insert":
+            result["page"] = pivot + 1
+        _job_set(jid, status="done", result=result, ts=_time.time())
+    except Exception as ex:
+        try:
+            if tmp and tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        _job_set(jid, status="error", error=str(ex), ts=_time.time())
+    finally:
+        with _INSPAGE_MUTEX:
+            _INSPAGE_ACTIVE.discard(rel)
+
+
+@bp.route("/api/pdf-insert-page", methods=["POST", "PATCH", "DELETE"])
+def pdf_api_pdf_insert_page():
+    """真插入页(异步 job,轮询 /pdf/api/job-status?id=):
+    POST {file, after, title?, md?} → 在 after(1-based;0=书首)后插入真实页;
+    PATCH {file, id, title?, md?} → 重排该用户页内容(delete_page+同位重插,页号不变);
+    DELETE ?file=&id= → 删除该用户页(后续页锚 -1)。均返回 {ok, job_id}。"""
+    if request.method == "DELETE":
+        body = {"file": request.args.get("file", ""), "id": request.args.get("id", "")}
+    else:
+        body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not ap or not ap.exists() or ap.suffix.lower() != ".pdf":
+        return jsonify({"ok": False, "error": "文件不存在或不是 PDF"}), 400
+    sha = _book_sha(ap)
+    if _up_journal_path(sha).exists():
+        return jsonify({"ok": False, "error": "检测到上次改页中断(journal 残留),数据可能不一致。"
+                                              "请先人工核对 state/pdf-page-backups/%s/ 下的备份后删除 journal.json 再操作" % sha}), 409
+    # 预处理(OCR/嵌入)进行中不许改页(流水线按页写 checkpoint,并发改页必串位)
+    try:
+        pst = json.loads((_BOOK_PREPROCESS_DIR / (sha + ".json")).read_text("utf-8"))
+        if pst.get("phase") in ("detecting", "normalizing", "ocr", "embedding", "compressing") and _pid_alive(pst.get("pid")):
+            return jsonify({"ok": False, "error": "本书正在预处理(OCR/嵌入),完成后再插页"}), 409
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    import fitz
+    if request.method == "POST":
+        try:
+            after = int(body.get("after"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "缺少 after"}), 400
+        try:
+            n = fitz.open(str(ap)).page_count
+        except Exception as ex:
+            return jsonify({"ok": False, "error": "打不开 PDF:%s" % ex}), 500
+        if not (0 <= after <= n):
+            return jsonify({"ok": False, "error": "after 越界(书共 %d 页)" % n}), 400
+        rid = "u_" + _uuid.uuid4().hex[:8]
+        # v4:新建一律 overlay 模式(空白真页 + sidecar 文字即时编辑)。md 通常空(前端先建空白再即时编辑);
+        #     即便带初始 md,job 渲进 PDF + record_op md_ver=0/synced_ver=0=已同步态,之后编辑 PATCH 才转脏。
+        payload = {"after": after, "title": (body.get("title") or "")[:120], "md": (body.get("md") or "")[:100000],
+                   "record_op": {"op": "add", "id": rid, "page": after + 1, "mode": "overlay",
+                                 "title": (body.get("title") or "")[:120], "md": (body.get("md") or "")[:100000]}}
+        mode = "insert"
+    else:
+        uid = (body.get("id") or "").strip()
+        rec = next((x for x in _upages_load(rel) if x.get("id") == uid), None)
+        if not rec:
+            return jsonify({"ok": False, "error": "未找到该用户页记录"}), 404
+        if not isinstance(rec.get("page"), int):
+            return jsonify({"ok": False, "error": "这是旧版虚拟页,请用页面上的 ✏️/🗑 直接编辑(不改 PDF)"}), 400
+        if request.method == "PATCH":
+            if rec.get("mode") == "overlay":
+                # v4 批次2:overlay 后台同步 = 把 sidecar 当前 md 写进那张(空白/旧)真页(edit job:delete_page+同位
+                #   重插,页号不变 → 零页号锚迁移)。在 per-rel 锁下**原子快照** md+md_ver(与前端 PATCH 串行,防读到半写);
+                #   不脏(md_ver<=synced_ver)直接免同步(省一次昂贵 doc.save);record_op **只带 base_ver,绝不带 md/title**
+                #   (blocker②:job 不回写 sidecar)。base_ver = 服务端权威快照的 md_ver(不信客户端)。
+                with _upages_lock(rel):
+                    rec2 = next((x for x in _upages_load(rel) if x.get("id") == uid), None) or rec
+                    md_ver = int(rec2.get("md_ver", 0)); synced_ver = int(rec2.get("synced_ver", 0))
+                    snap_md = (rec2.get("md") or "")[:100000]; snap_title = (rec2.get("title") or "")[:120]
+                    page_no = rec2.get("page")
+                if md_ver <= synced_ver:
+                    return jsonify({"ok": True, "clean": True, "md_ver": md_ver, "synced_ver": synced_ver})
+                payload = {"page": page_no, "title": snap_title, "md": snap_md,
+                           "record_op": {"op": "update", "id": uid, "base_ver": md_ver}}
+                mode = "edit"
+            else:
+                title = (body.get("title") if "title" in body else rec.get("title") or "")[:120]
+                md = (body.get("md") if "md" in body else rec.get("md") or "")[:100000]
+                payload = {"page": rec["page"], "title": title, "md": md,
+                           "record_op": {"op": "update", "id": uid, "title": title, "md": md}}
+                mode = "edit"
+        else:
+            payload = {"page": rec["page"], "record_op": {"op": "remove", "id": uid}}
+            mode = "delete"
+    with _INSPAGE_MUTEX:
+        if rel in _INSPAGE_ACTIVE:
+            return jsonify({"ok": False, "error": "本书已有改页任务进行中"}), 409
+        _INSPAGE_ACTIVE.add(rel)
+    jid = _uuid.uuid4().hex[:12]
+    _job_set(jid, status="running", kind="pdf-inspage", step="排队中…", ts=_time.time())
+    _upthr.Thread(target=_inspage_job, args=(jid, mode, rel, ap, payload), daemon=True).start()
+    return jsonify({"ok": True, "job_id": jid})
+
+
+# ── 收藏夹(全局 sidecar:state/reader-favorites.json;设计:references/reader-userpages-favorites.md「二、收藏夹设计」)──
+# 收藏夹 = 一本"虚拟书":夹内条目指向各原书的某页(PDF)/某章(EPUB);查看页(/pdf/fav/view)只读原书资源,
+# **零进度状态**(不 _lastopen_touch、不写 LS.pos)。阶段A:数据模型 + CRUD + ⭐picker + 书架 tab + 查看页(即时类功能)。
+_FAV_FILE = CLAUDE_DIR / "state" / "reader-favorites.json"
+
+
+def _fav_load() -> dict:
+    try:
+        d = json.loads(_FAV_FILE.read_text("utf-8"))
+        if not isinstance(d, dict) or not isinstance(d.get("folders"), list):
+            return {"folders": []}
+        return d
+    except Exception:
+        return {"folders": []}
+
+
+def _fav_save(d: dict):
+    _FAV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _FAV_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+    tmp.replace(_FAV_FILE)
+
+
+def _fav_folder(d: dict, fid: str):
+    return next((f for f in (d.get("folders") or []) if f.get("id") == fid), None)
+
+
+def _fav_norm_item(raw):
+    """规整条目 {file, kind:'pdf'|'epub'|'userpage', page|section|id};非法 → None。
+    page=PDF 页(1-based)/section=spine idx(0-based)/id=用户页(插入页)记录 id(u_<hex>,file=该插入页所属书 rel)。"""
+    if not isinstance(raw, dict):
+        return None
+    rel = (raw.get("file") or "").strip()
+    kind = (raw.get("kind") or "").strip()
+    if not rel or ".." in rel or kind not in ("pdf", "epub", "userpage"):
+        return None
+    if rel.startswith(_FAV_BOOK_PREFIX):
+        return None   # 禁止收藏「收藏夹物化书」自身/其内插入页(防收藏集套收藏集递归;规格 D 后端双保险)
+    it = {"file": rel, "kind": kind}
+    try:
+        if kind == "pdf":
+            it["page"] = max(1, int(raw.get("page")))
+        elif kind == "epub":
+            it["section"] = max(0, int(raw.get("section")))
+        else:   # userpage:自己创建的插入页(userpages sidecar 该 id 的正文 md 会被物化成一个 section)
+            uid = (raw.get("id") or "").strip()
+            if not re.match(r"^u_[0-9a-zA-Z]+$", uid):
+                return None
+            it["id"] = uid
+    except (TypeError, ValueError):
+        return None
+    return it
+
+
+def _fav_same_item(a: dict, b: dict) -> bool:
+    return (a.get("file") == b.get("file") and a.get("kind") == b.get("kind")
+            and a.get("page") == b.get("page") and a.get("section") == b.get("section")
+            and a.get("id") == b.get("id"))   # userpage 用 id 判重(pdf/epub 的 id 恒 None → 不影响原判重)
+
+
+# ── 收藏夹统一化 规格 v5:物化成「一本真 EPUB」(state/reader-fav-epub/<fid>.epub),用**完整 EPUB 阅读器**打开 ──
+#   【重大调整 2026-07-04·用户拍板「要全功能」】v4 曾物化成流式 HTML 片段(state/reader-fav-html/<fid>.html)+
+#   轻量 html-reader.js —— 功能少(无手写/侧栏AI助手/图徽标/语法/生词)。改为**收藏夹=一本真 EPUB**:标准 zip
+#   (mimetype+container.xml+OPF(manifest/spine)+各条目一个 XHTML section+图片打包),epub-html.js 当普通 EPUB 打开
+#   → 选词/查词/AI/侧栏助手/高亮/手写/生词/振假名/语法/插入页 **全功能天然可用**(对它就是一本 EPUB)。
+#   · EPUB 条目 = 原 section 消毒 HTML(图打包进 zip,img src 指 zip 内相对路径);
+#   · PDF  条目 = 原分辨率页图(打包)+ 透明可选文字层(复用 _fav_pdf_overlay_spans %定位/cqh → EPUB reflow 里也能选词);
+#   · 条目间分隔条(《书名》·页/章 + 打开原书深链)。
+#   产物放 state(非 vault → 无 Obsidian Sync churn、天然不进书架/搜索);epub 端点用 _resolve_epub_book 把合成 rel
+#   「资源/收藏夹/<fid>.epub」解析回 state 那本;section 端点对收藏夹前缀走 raw(不消毒,保住透明词层行内 style + 站内链接)。
+#   真源仍是 favorites.json 的 item 列表;加/删/改 item → content_sig 变 → 脏 → CRUD 后台自动重建 +(打开时兜底)。
+#   命名按 fid:改名只改 name(高亮/墨迹 sidecar 键=合成 rel 资源/收藏夹/<fid>.epub 的 sha,与 fid 绑死,零孤儿)。
+_FAV_LOCK = _upthr.Lock()               # favorites.json 的 RMW 串行化(CRUD ⇄ build job 写 built_sig 防丢更新)
+_FAV_BUILD_ACTIVE: dict = {}            # fid -> jid(同夹重建进行中复用同一 job,去重)
+_FAV_BUILD_VER = 12                      # v12(2026-07-05):EPUB 收藏的插入页正文也双向——md 显示层包 .fav-up-disp,前端「✏️ 编辑」拉原书 md → textarea → PATCH /api/userpages 写回原书 → 就地重渲(原书→fav 经 content_sig 折 md 触发重建)。v11:墨迹实时绑定原书(data-uid+data-ink-file 双向读写)。v9:PDF 页图 per-figure 徽标(.fav-pdf-page 带 data-favpdf-*,前端 fetch page-figures)。v5=真 EPUB + 完整 EPUB 阅读器;bump → 存量夹视为脏,下次打开/变更自动重建
+                                         # v6(2026-07-04):PDF 条目透明词层从「散布 absolute span」改「按视觉行分组 .fav-pdf-line 行盒 + 行内 inline-block 词」→ 修收藏夹长按选中乱跨上下多行(存量夹重建;文字节点顺序不变 → 高亮/便签 offset 锚不受影响)
+                                         # v7(2026-07-04):PDF 条目透明词层从「原生 DOM Selection」改「char-layer 式自定义选择」——逐字照搬 PDF 阅读器 reader.src/13-selection.js::_bindCharLayer:词层 user-select:none 彻底关原生选区(iOS 长按拖选引擎压根不启动 → 根治乱跨行),epub-html.js 自建"拖选=按词 bbox 圈范围 → 自绘高亮 .fav-pdf-sel → 手动组 cur + showSel"(与 char-layer 手动开 toolbar 同构;⚠ user-select:none 下 addRange 后 getSelection 恒空,故手动 cur,text/anchor 用既有 offsetOf/_countableText 算=高亮/便签同口径;document capture 相拦 content 的 mouseup/touchend→captureSel 防误清 toolbar,零改 captureSel)。CSS 加 .fav-pdf-sel 自绘高亮层 + 词层 user-select:none(存量夹重建;HTML 结构不变 → offset 锚不受影响)
+                                         # v8(2026-07-04):build 顺带写 state/reader-fav-meta/<fid>.json(每条目=一 section:出处 src_file/src_name/src_page|src_section + 首句 snippet + 相邻 adj_prev + missing)。给 EPUB 侧栏助手「认收藏集(system prompt 声明)+ 目录概览 + 相邻性(不把无关两条当连续上下文)+ read_source_page 翻原书」用(见 epub_assistant.py + references/reader-userpages-favorites.md「C. AI 集成」)。EPUB 产物字节不变、offset 锚不受影响,bump 仅为存量夹重建补 meta。
+_FAV_HTML_DIR = CLAUDE_DIR / "state" / "reader-fav-html"   # 【退役】v4 流式 HTML 产物(仅用于重建/删夹时清理残留)
+
+
+def _fav_html_path(fid: str) -> Path:
+    """【退役】v4 流式 HTML 产物路径(仅用于重建/删夹时清理残留)。"""
+    return _FAV_HTML_DIR / (fid + ".html")
+
+
+def _fav_epub_path(fid: str) -> Path:
+    """v5 物化产物:一本真 EPUB(state,非 vault)。"""
+    return _FAV_EPUB_DIR / (fid + ".epub")
+
+
+# ── 收藏集 AI 元数据(v8):build 顺带写,给 EPUB 侧栏助手认收藏集 + 目录概览 + 相邻性 + 翻原书 ──
+_FAV_META_DIR = CLAUDE_DIR / "state" / "reader-fav-meta"
+
+
+def _fav_meta_path(fid: str) -> Path:
+    return _FAV_META_DIR / (fid + ".json")
+
+
+def _fav_meta_load(fid: str) -> dict:
+    """读收藏集 AI 元数据(每条目=一 section:出处/首句/相邻 adj_prev/missing)。缺失/损坏 → {}。
+    epub_assistant.py 经 _pdf()._fav_meta_load(fid) 取用:识别收藏集、组目录概览、判相邻、read_source_page 翻原书。"""
+    try:
+        m = json.loads(_fav_meta_path(fid).read_text("utf-8"))
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+def _fav_epub_rel(fid: str) -> str:
+    """EPUB 阅读器/高亮/墨迹 sidecar 用的**合成 rel 键**(资源/收藏夹/<fid>.epub;不是 vault 文件)。
+    _resolve_epub_book 认这个前缀 → 解析回 state 里的真 .epub;与 fid 绑死(改名零孤儿)。"""
+    return _FAV_BOOK_PREFIX + fid + ".epub"
+
+
+def _fav_view_rel(fid: str) -> str:
+    """收藏夹书打开时传给 epub_html_reader.html 的 file_rel = 合成 EPUB rel。"""
+    return _fav_epub_rel(fid)
+
+
+def _fav_book_rel(fid: str) -> str:
+    """【退役】旧 v3 固定页 PDF 产物路径(仅用于重建时删除残留 + 删夹清理)。"""
+    return _FAV_BOOK_PREFIX + fid + ".pdf"
+
+
+def _fav_book_abs(fid: str) -> Path:
+    return OBSIDIAN_ROOT / _fav_book_rel(fid)
+
+
+def _fav_content_sig(items) -> str:
+    """items 列表的稳定哈希(收藏内容指纹)。sort_keys 保证字段序无关,内容不变则 sig 不变。
+    userpage 条目**额外**把该插入页当前 md/title 版本折进指纹 → 用户编辑了收藏的插入页,sig 变 → 下次打开脏重建
+    (userpage 编辑不经收藏夹 CRUD,靠 /fav/open 的 _fav_is_dirty 兜底重建)。**非 userpage 折算前后字节完全一致**
+    (enriched==items)→ 存量夹 built_sig 不受影响,零无谓重建。"""
+    import hashlib
+    enriched = []
+    _cache: dict = {}
+    for it in (items or []):
+        if isinstance(it, dict) and it.get("kind") == "userpage":
+            rel = it.get("file") or ""
+            uid = it.get("id") or ""
+            recs = _cache.get(rel)
+            if recs is None:
+                recs = {r.get("id"): r for r in _upages_load(rel) if isinstance(r, dict)}
+                _cache[rel] = recs
+            r = recs.get(uid) or {}
+            enriched.append({"file": rel, "kind": "userpage", "id": uid,
+                             "v": [r.get("md_ver"), r.get("updated"), r.get("title"), r.get("md")]})
+        else:
+            enriched.append(it)
+    try:
+        s = json.dumps(enriched, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        s = repr(enriched)
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def _fav_mark_dirty(folder: dict):
+    """items 变更后调:刷新 content_sig(!= built_sig 即脏)。不立即 build(打开时兜底重建,零无谓 churn)。"""
+    folder["content_sig"] = _fav_content_sig(folder.get("items") or [])
+
+
+def _fav_is_dirty(folder: dict, fid: str) -> bool:
+    """脏 = 内容指纹 != 上次 build 用的指纹,或物化逻辑版本升级(v4 流式 HTML → v5 真 EPUB),
+    或 EPUB 产物不存在(首次打开)。"""
+    if _fav_content_sig(folder.get("items") or []) != folder.get("built_sig"):
+        return True
+    if folder.get("built_ver") != _FAV_BUILD_VER:   # 物化逻辑升级 → 旧产物视为脏(下次打开/变更时重建成 EPUB)
+        return True
+    return not _fav_epub_path(fid).exists()
+
+
+def _fav_epub_label(toc: list, section: int) -> str:
+    """EPUB 章名:toc 里 idx<=section 的最近 label(照阶段A fav-reader 逻辑)。"""
+    best = ""
+    for e in (toc or []):
+        try:
+            if int(e.get("idx")) <= section:
+                best = e.get("label") or best
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
+# ── 收藏夹 EPUB 装配(v5)──────────────────────────────────────────────────────────────
+# 产物 = 一本真 EPUB(zip:mimetype+container.xml+OPF+nav+各条目一 XHTML section+图片打包)。分隔条 + 内容原大小流式。
+# EPUB 阅读器(epub-html.js)当普通 EPUB 打开;section 端点对收藏夹前缀走 raw(不消毒,保住透明词层行内 style + 站内链接)。
+_FAV_PDF_IMG_W = 1520   # PDF 页图渲染宽度(px,~2× 阅读列宽,清晰;显示按列宽等比缩,高度自然不压)
+
+
+def _fav_esc(s) -> str:
+    import html as _h
+    return _h.escape("" if s is None else str(s))
+
+
+def _fav_sep_html(label: str, href: str) -> str:
+    """条目分隔条:来源标签 + 「打开原书 ↗」深链。fav.css 给 .fav-sep 上 user-select:none(不误建高亮);
+    「打开原书」是站内 <a>(epub-html tap 处理器对 closest('a') 让位 → 正常导航,不触发单击查词)。"""
+    return ('<div class="fav-sep"><span class="fav-sep-t">%s</span>'
+            '<a class="fav-open-src" href="%s">打开原书 ↗</a></div>'
+            % (_fav_esc(label), _fav_esc(href)))
+
+
+def _fav_pdf_overlay_spans(chars, page_w, page_h) -> str:
+    """把 page-chars(PDF 点坐标)转成透明可选词层。**按视觉行分组**(2026-07-04 修「长按选中乱跨上下多行」):
+    先把相邻同 w 字合成词,再把同一视觉行(同 bk 块/列 + 竖直中心相近)的词包进一个 `.fav-pdf-line` 行容器
+    (absolute 定位在行 bbox);行内各词用 `display:inline-block` + margin-left(词间距)/ width(词宽)按**行宽百分比
+    在正常行内流里**排布 → 浏览器建出真实行盒,原生选区(尤其 iOS Safari 长按/拖选)按行自然收敛,
+    不再像**散布 absolute span**(旧实现:每词一个 position:absolute 直挂 .fav-pdf-txt,无行结构)那样整块乱选
+    上下多行(iOS 对嵌套 absolute span 的选区引擎尤其脆弱,同 pdf.js #14243/#20017;`-webkit-text-size-adjust:none` 亦是其官方缓解)。
+    行容器 left/top/width/height 用 %(随页图等比缩放),font-size 用 cqh(容器高度 %)→ 免 JS 响应式;
+    词 margin-left/width 用 %(相对行宽,即行容器宽)→ 与页图逐词对齐(选中高亮贴合原字)。
+    英/数字词加尾随空格(多词选中拼出空格,copy/翻译干净);CJK 无空格。
+    v7:词层 user-select:none,拖选走 epub-html.js 自建 char-layer 式自定义选择(按 span bbox 圈范围→自绘 .fav-pdf-sel 高亮
+    →手动 cur+showSel,照 reader.src/13-selection.js;根治 iOS 长按乱跨行);单击查词仍走 caretRangeFromPoint(none 下照常)。
+    文字节点顺序仍是 reading order(行序×词序)→ EPUB 侧 offset 锚/分词/高亮口径与旧实现一致(存量夹重建后偏移不变)。"""
+    if not chars or not page_w or not page_h or page_w <= 0 or page_h <= 0:
+        return ""
+    # 1) 相邻同 w 合并为词(英文单词/日语 fugashi token;CJK 单字各自 w → 单字词可独立选)——保留 bk(块/列)+ bbox
+    words = []
+    i, n = 0, len(chars)
+    while i < n:
+        c = chars[i]
+        if c.get("sp"):
+            i += 1
+            continue
+        w = c.get("w"); bk = c.get("bk")
+        text = c.get("c") or ""
+        x0 = c.get("x0"); y0 = c.get("y0"); x1 = c.get("x1"); y1 = c.get("y1")
+        j = i + 1
+        while j < n and (not chars[j].get("sp")) and chars[j].get("w") == w:
+            cj = chars[j]
+            # 行感知合并:同 w 但下一字竖直中心明显错开当前词的 y 带 → 断开(不让词跨行)。
+            # 防 w 退化成 -1(word-id 查不中,如某些符号/退化提取)时把上一行末词与下一行首词粘成一个跨行 token
+            # → 撑高行盒、行盒相互重叠 → 选区又跨行(旧散布 span 版同 bug,一并根治)。真实词各字同行,此 guard 从不误伤。
+            try:
+                cyc = (float(cj.get("y0")) + float(cj.get("y1"))) / 2.0
+                if y0 is not None and y1 is not None and (cyc < float(y0) - 0.5 or cyc > float(y1) + 0.5):
+                    break
+            except (TypeError, ValueError):
+                pass
+            text += cj.get("c") or ""
+            try:
+                x0 = min(x0, cj.get("x0")); y0 = min(y0, cj.get("y0"))
+                x1 = max(x1, cj.get("x1")); y1 = max(y1, cj.get("y1"))
+            except (TypeError, ValueError):
+                pass
+            j += 1
+        i = j
+        text = (text or "").strip()
+        if not text or x0 is None or y0 is None or x1 is None or y1 is None:
+            continue
+        try:
+            words.append({"t": text, "x0": float(x0), "y0": float(y0),
+                          "x1": float(x1), "y1": float(y1), "bk": bk})
+        except (TypeError, ValueError):
+            continue
+    if not words:
+        return ""
+    # 2) 按视觉行分组(reading order):同 bk 且竖直中心落在当前行带内(±0.6×行高)→ 同一行;否则起新行
+    #    (bk 隔开并排气泡/多列;竖直中心避免上下行合并)
+    lines = []
+    cur = None
+    for wd in words:
+        cy = (wd["y0"] + wd["y1"]) / 2.0
+        h = wd["y1"] - wd["y0"]
+        if cur is not None and wd["bk"] == cur["bk"] and abs(cy - cur["cy"]) <= max(h, cur["h"]) * 0.6:
+            cur["words"].append(wd)
+            cur["cy"] = (cur["cy"] * cur["n"] + cy) / (cur["n"] + 1)
+            cur["n"] += 1
+            cur["h"] = max(cur["h"], h)
+        else:
+            cur = {"bk": wd["bk"], "cy": cy, "h": h, "n": 1, "words": [wd]}
+            lines.append(cur)
+    # 3) 每行一个 .fav-pdf-line 行盒(absolute 定位在行 bbox);行内词 inline-block 在正常行内流里排(真实行盒 → 选区按行收敛)
+    out = []
+    for ln in lines:
+        ws = ln["words"]
+        Lx = min(wd["x0"] for wd in ws); Rx = max(wd["x1"] for wd in ws)
+        Ty = min(wd["y0"] for wd in ws); By = max(wd["y1"] for wd in ws)
+        lw = Rx - Lx; lh = By - Ty
+        if lw <= 0 or lh <= 0:
+            continue
+        Lp = Lx / page_w * 100.0; Tp = Ty / page_h * 100.0
+        Wp = lw / page_w * 100.0; Hp = lh / page_h * 100.0
+        fs = max(Hp, 0.4)
+        inner = []
+        prev_r = Lx
+        for wd in ws:
+            gap = (wd["x0"] - prev_r) / lw * 100.0   # 与前一词的间距(相对行宽)= inline-block margin-left
+            if gap < 0:
+                gap = 0.0
+            ww = (wd["x1"] - wd["x0"]) / lw * 100.0   # 词宽(相对行宽)= inline-block width → 逐词与页图对齐
+            prev_r = wd["x1"]
+            t = wd["t"]
+            # 拉丁词/数字加**span 内尾随空格**(overflow:hidden 下不撑宽 → 视觉不动,但多词选中/copy 拼出空格,翻译干净);CJK 不加
+            if re.search(r"[A-Za-z0-9]", t):
+                t = t + " "
+            inner.append('<span style="margin-left:%.3f%%;width:%.3f%%">%s</span>'
+                         % (gap, ww, _fav_esc(t)))
+        out.append('<div class="fav-pdf-line" style="left:%.3f%%;top:%.3f%%;width:%.3f%%;height:%.3f%%;font-size:%.3fcqh">%s</div>'
+                   % (Lp, Tp, Wp, Hp, fs, "".join(inner)))
+    return "".join(out)
+
+
+# ── v5 真 EPUB 装配原语 ──────────────────────────────────────────────────────────────
+_FAV_CONTAINER_XML = (
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+    '  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>\n'
+    '</container>\n')
+
+# 收藏夹 EPUB 自带 CSS(打包进 zip,/api/epub-css scope 到 #ep-col 后注入 #ep-book-css)。分隔条 + PDF 透明词层。
+_FAV_EPUB_CSS = (
+    ".fav-sep{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:22px 0 14px;padding:6px 10px;"
+    "border-radius:8px;background:rgba(120,150,200,.10);border:1px solid rgba(120,150,200,.22);"
+    "font-size:.82em;color:#5a6a86;user-select:none;-webkit-user-select:none}\n"
+    ".fav-sep-t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}\n"
+    ".fav-open-src{flex:none;text-decoration:none;white-space:nowrap;font-weight:600}\n"
+    ".fav-item{margin:0 0 8px}\n"
+    ".fav-pdf-page{position:relative;container-type:size;width:100%;margin:0 auto;background:#fff;"
+    "border:1px solid rgba(0,0,0,.10);border-radius:4px;overflow:hidden}\n"
+    ".fav-pdf-img{display:block;width:100%;height:auto}\n"
+    ".fav-pdf-txt{position:absolute;left:0;top:0;right:0;bottom:0}\n"
+    # 行盒:absolute 定位在视觉行 bbox;white-space:nowrap 让行内词单行排布(词层与页图逐词对齐);
+    # v7:词层 user-select:none 关掉原生选区(iOS 长按拖选引擎对绝对/嵌套词层乱跨行的根因)→ epub-html.js
+    #   自建 char-layer 式自定义拖选(自绘高亮 + 手动组 cur+showSel,照 reader.src/13-selection.js)。单击查词仍走 caretRangeFromPoint(none 下照常)
+    ".fav-pdf-txt .fav-pdf-line{position:absolute;white-space:nowrap;color:transparent;line-height:1;"
+    "cursor:text;user-select:none;-webkit-user-select:none;-webkit-text-size-adjust:none}\n"
+    # 词:inline-block 在行内正常流里,width=词宽 / margin-left=词间距(均相对行宽)→ 逐词与页图对齐;overflow:hidden 裁掉尾随空格视觉
+    ".fav-pdf-txt .fav-pdf-line span{display:inline-block;overflow:hidden;vertical-align:top;white-space:pre;"
+    "cursor:text;user-select:none;-webkit-user-select:none}\n"
+    # v7 自绘选中高亮层(char-layer 的 .sel-overlay 等价物):pointer-events:none 让单击 caretRangeFromPoint 穿透到词层;
+    #   epub-html.js 拖选时按选中词 bbox 画 .hl,起新选/点别处清空
+    ".fav-pdf-page .fav-pdf-sel{position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:4}\n"
+    ".fav-pdf-page .fav-pdf-sel .hl{position:absolute;background:rgba(90,150,255,.32);border-radius:2px}\n"
+    ".fav-fig-badge{position:absolute;transform:translate(-50%,-50%);width:26px;height:26px;border-radius:50%;z-index:6;cursor:pointer;display:flex;align-items:center;justify-content:center;background:rgba(28,28,38,.5);color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.35);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}\n"
+    ".fav-fig-badge:active{transform:translate(-50%,-50%) scale(.88)}\n"
+    ".fav-fig-badge svg{width:15px;height:15px;display:block}\n"
+    ".fav-item-userpage.fav-up-hasink{position:relative;min-height:86vh}\n"   # 与阅读器 .ep-usec 同高 → 手写不竖向失真
+    ".fav-up-ink{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;overflow:visible}\n"
+    ".fav-up-content{position:relative;z-index:1}\n"
+    ".fav-item-userpage[data-uid]{position:relative;min-height:86vh}\n"   # EPUB 实时绑定原书墨迹的自建页:页体 = 原书 .ep-usec 同 86vh 几何(墨迹坐标对齐)+ position:relative 给墨迹 canvas 定位
+    # 收藏夹自建页正文双向:✏️ 编辑按钮 + 全屏 textarea 覆盖层(iOS:整条链 user-select:text)
+    ".fav-up-editbtn{position:absolute;left:10px;top:10px;z-index:13;height:28px;padding:0 12px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,.8);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);border:.5px solid rgba(0,0,0,.16);border-radius:9px;font:600 13px/1 -apple-system,system-ui,sans-serif;color:#1d1d1f;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.12);-webkit-user-select:none;user-select:none;touch-action:manipulation}\n"
+    ".fav-up-editbtn:active{transform:scale(.95)}\n"
+    ".fav-item-userpage.fav-up-editing .fav-up-disp{display:none}\n"
+    ".fav-up-edit{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:var(--pa,#f6f3ea);border-radius:9px;-webkit-user-select:text;user-select:text}\n"
+    ".fav-up-edit .fav-up-ta{flex:1 1 auto;width:100%;box-sizing:border-box;border:none;outline:none;resize:none;padding:16px 8%;font:15px/1.7 ui-monospace,Menlo,Consolas,monospace;background:var(--pa,#f6f3ea);color:var(--ink,#1b1b1b);-webkit-text-fill-color:var(--ink,#1b1b1b);caret-color:var(--lnk,#2a5db0);-webkit-user-select:text;user-select:text;-webkit-appearance:none;appearance:none}\n"
+    ".fav-up-editbar{flex:0 0 auto;display:flex;justify-content:flex-end;gap:10px;padding:8px 8% 12px;-webkit-user-select:none;user-select:none}\n"
+    ".fav-up-editbar button{background:var(--lnk,#2a5db0);color:#fff;border:none;border-radius:8px;padding:6px 16px;font-size:14px;cursor:pointer;touch-action:manipulation}\n"
+
+    ".fav-missing{padding:14px 16px;border-radius:8px;background:rgba(200,120,120,.10);"
+    "border:1px dashed rgba(200,120,120,.35);color:#8a5a5a;font-size:.9em}\n"
+    ".fav-item-userpage{padding:2px 0 6px}\n"                       # 「我的页」正文 = 用户 markdown 渲染(公式/列表/标题)
+    ".fav-item-userpage img{max-width:100%;height:auto}\n"
+    ".fav-up-empty{opacity:.5;font-style:italic}\n")
+
+
+def _fav_img_mt(ext: str) -> str:
+    e = (ext or "").lower().lstrip(".")
+    return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+            "webp": "image/webp", "svg": "image/svg+xml"}.get(e, "application/octet-stream")
+
+
+def _fav_img_wh(data: bytes):
+    """图片真实像素尺寸(补进 <img> width/height 防 reflow 抽搐)。无 PIL / 失败 → None。"""
+    try:
+        from PIL import Image
+        import io as _io
+        with Image.open(_io.BytesIO(data)) as im:
+            return (int(im.width), int(im.height)) if (im.width and im.height) else None
+    except Exception:
+        return None
+
+
+def _fav_xhtml(title: str, body: str) -> str:
+    """一条目 → 一个 XHTML section(body 含分隔条 + 内容;body 里有 PDF 透明词层的行内 % 定位 → 必须用
+    字符串拼接,**不能** %-format,否则 % 被当格式符)。link 引 fav.css 供其它阅读器用(本站 CSS 走 /api/epub-css)。"""
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/><title>'
+            + _fav_esc(title) + '</title><link rel="stylesheet" type="text/css" href="style/fav.css"/></head><body>'
+            + (body or "") + '</body></html>\n')
+
+
+def _fav_epub_raw_section(sp: Path, root: Path, sha: str) -> str:
+    """收藏夹物化 EPUB 的章节读取:服务端亲手生成的可信 HTML,**不消毒**——保住 PDF 透明词层的行内 style
+    与「打开原书」站内链接(_sanitize_epub_section 会剥掉);只把 zip 内相对 img src 改写成 /pdf/epub/file/<sha>/… 代理 URL。"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(sp.read_text("utf-8", "ignore"), "html.parser")
+    body = soup.find("body") or soup
+    sec_dir = sp.parent
+    for im in body.find_all("img"):
+        s = im.get("src")
+        if s:
+            im["src"] = _epub_rewrite_url(s, sec_dir, root, sha)
+    return body.decode_contents()
+
+
+def _fav_pdf_page_jpg(ap: Path, page: int, w: int):
+    """渲原书某页为 JPEG 字节(打包进收藏夹 EPUB)。只读原书。失败/越界 → None。"""
+    import fitz
+    d = None
+    try:
+        d = fitz.open(str(ap))
+        if page < 1 or page > d.page_count:
+            return None
+        p = d[page - 1]
+        zoom = w / max(1.0, p.rect.width)
+        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return pix.tobytes("jpg", jpg_quality=82)
+    except Exception:
+        return None
+    finally:
+        try:
+            if d:
+                d.close()
+        except Exception:
+            pass
+
+
+def _fav_epub_pack_item(i: int, html: str, source_root: Path, source_sha: str):
+    """EPUB 条目消毒 HTML 里的 <img>(代理 URL 指向 source 解包目录)→ 读字节打包,src 改成 zip 内相对路径 img/…。
+    返回 (rewritten_html, [(arc_under_OEBPS, bytes, media_type), …])。读不到的图 decompose 跳过(不中断)。"""
+    from bs4 import BeautifulSoup
+    from urllib.parse import unquote
+    soup = BeautifulSoup(html or "", "html.parser")
+    imgs_out = []
+    n = 0
+    prefix = "/pdf/epub/file/%s/" % source_sha
+    src_root_res = source_root.resolve()
+    for im in list(soup.find_all("img")):
+        src = im.get("src") or ""
+        data = None
+        ext = ".img"
+        if src.startswith(prefix):
+            relp = unquote(src[len(prefix):].split("?")[0].split("#")[0])
+            try:
+                ip = (source_root / relp).resolve()
+                ip.relative_to(src_root_res)   # 防越界
+                if ip.is_file() and ip.stat().st_size <= 12 * 1024 * 1024:
+                    data = ip.read_bytes()
+                    ext = ip.suffix.lower() or ".img"
+            except Exception:
+                data = None
+        if data is None:
+            im.decompose()   # data: URI / http / 读不到 → 跳过(收藏夹 EPUB 自包含,只打包能读到的本地图)
+            continue
+        n += 1
+        arc = "img/ep%03d_%02d%s" % (i, n, ext if ext.startswith(".") else "." + ext)
+        imgs_out.append((arc, data, _fav_img_mt(ext)))
+        im["src"] = arc                 # zip 内相对路径(相对 OEBPS/sec_N.xhtml)
+        wh = _fav_img_wh(data)
+        if wh:
+            im["width"] = str(wh[0])
+            im["height"] = str(wh[1])
+    return soup.decode_contents(), imgs_out
+
+
+def _fav_pdf_item(i: int, it: dict, src_name: str, warns: list):
+    """PDF 条目 → (label, section_body_html, [(img_arc, bytes, mt)])。原书只读:字符层 + 页图。"""
+    frel = it.get("file") or ""
+    pno = int(it.get("page") or 1)
+    label = "《%s》 · 第 %d 页" % (src_name, pno)
+    href = "/pdf/view?file=" + urllib.parse.quote(frel) + "&page=%d" % pno
+    sep = _fav_sep_html(label, href)
+    ap = _safe_vault_path(frel)
+    imgs = []
+    body_inner = None
+    if ap and ap.suffix.lower() == ".pdf":
+        try:
+            res = _page_chars_cached(ap, frel, pno)   # 只读原书:字符层 + 页尺寸(pt)
+            jpg = _fav_pdf_page_jpg(ap, pno, _FAV_PDF_IMG_W)   # 只读原书:渲页图字节 → 打包
+            if res is not None and jpg:
+                chars, pw, ph, _fg = res
+                if pw and ph and pw > 0 and ph > 0:
+                    arc = "img/pdf_%03d.jpg" % i
+                    imgs.append((arc, jpg, "image/jpeg"))
+                    spans = _fav_pdf_overlay_spans(chars, pw, ph)
+                    # aspect-ratio 用 page-chars 页尺寸(与页图同坐标系)→ 透明词层与图对齐;reflow 里随列宽等比缩
+                    body_inner = ('<div class="fav-item fav-item-pdf"><div class="fav-pdf-page tex2jax_ignore" data-favpdf-file="%s" data-favpdf-page="%d" style="aspect-ratio:%g/%g">'
+                                  '<img class="fav-pdf-img" alt="第%d页" src="%s"/><div class="fav-pdf-txt">%s</div></div></div>'
+                                  % (_fav_esc(frel), pno, pw, ph, pno, arc, spans))   # data-favpdf-*:前端据此 fetch 原书 page-figures 渲 per-figure 徽标(复用原本判定+内容)
+                    if not spans:
+                        warns.append("第 %d 条(%s 第%d页)无字符层,选词不可用(可点『打开原书』)" % (i + 1, src_name, pno))
+        except Exception:
+            body_inner = None
+    if body_inner is None:
+        body_inner = ('<div class="fav-item fav-missing">《%s》第 %d 页:原书已移动/删除或页码越界。'
+                      '<br>点上方「打开原书 ↗」可查看。</div>' % (_fav_esc(src_name), pno))
+        warns.append("第 %d 条(%s 第%d页)原书不可用" % (i + 1, src_name, pno))
+    return label, sep + body_inner, imgs
+
+
+def _fav_epub_item(i: int, it: dict, src_name: str, warns: list):
+    """EPUB 条目 → (label, section_body_html, [(img_arc, bytes, mt)])。原书只读:消毒 HTML + 打包图。"""
+    frel = it.get("file") or ""
+    idx = int(it.get("section") or 0)
+    ap = _safe_vault_path(frel)
+    html = None
+    label = ""
+    imgs = []
+    if ap and ap.suffix.lower() == ".epub":
+        try:
+            root = _ensure_epub_extracted(ap, frel)
+            if root:
+                info = _epub_opf_info(root)
+                secs = info["sections"]
+                label = _fav_epub_label(info.get("toc") or [], idx)
+                if 0 <= idx < len(secs):
+                    src_sha = _epub_sha(frel)
+                    src_html = _epub_section_cached(secs, idx, root, src_sha)   # 只读原书:消毒章节
+                    html, imgs = _fav_epub_pack_item(i, src_html, root, src_sha)
+        except Exception:
+            html = None
+            imgs = []
+    if not label:
+        label = "《%s》 · 第 %d 节" % (src_name, idx + 1)
+    else:
+        label = "《%s》 · %s" % (src_name, label)
+    href = "/pdf/epub/view?file=" + urllib.parse.quote(frel) + "&sec=%d" % idx
+    sep = _fav_sep_html(label, href)
+    if html is not None:
+        body_inner = '<div class="fav-item fav-item-epub">' + html + "</div>"
+    else:
+        body_inner = ('<div class="fav-item fav-missing">《%s》第 %d 节:原书已移动/删除或章节越界。</div>'
+                      % (_fav_esc(src_name), idx + 1))
+        warns.append("第 %d 条(%s 第%d节)不可用" % (i + 1, src_name, idx + 1))
+    return label, sep + body_inner, imgs
+
+
+# ── 用户页(自己创建的插入页)条目物化 ─────────────────────────────────────────────────
+#   收藏条目 {file, kind:'userpage', id} → 读 file 所属书的 userpages sidecar 该 id 的**正文 md**(只读,不改插入页)
+#   → RC.md 式 markdown→HTML(公式 $..$ 留给 MathJax、列表/标题/图/链接)→ 一个 section。手写墨迹本批不收
+#   (canvas 运行时数据嵌静态 EPUB 困难);只物化正文 md(文字/公式/图)。记录不存在(被删)→ 占位 section 不中断。
+def _fav_userpage_href(rel: str, rec: dict) -> str:
+    """「打开原书」深链:插入页所属书 + 插入位置(PDF=page / EPUB=章序 after)。"""
+    low = (rel or "").lower()
+    if low.endswith(".pdf"):
+        pg = rec.get("page")
+        if isinstance(pg, int) and pg > 0:
+            return "/pdf/view?file=" + urllib.parse.quote(rel) + "&page=%d" % pg
+        return "/pdf/view?file=" + urllib.parse.quote(rel)
+    if low.endswith(".epub"):
+        af = rec.get("after")
+        sec = max(0, int(af) - 1) if isinstance(af, int) and af > 0 else 0
+        return "/pdf/epub/view?file=" + urllib.parse.quote(rel) + "&sec=%d" % sec
+    return "/pdf/"
+
+
+def _fav_render_userpage_md(md: str) -> str:
+    """用户页 markdown → EPUB section HTML(RC.md 式:公式/列表/标题/图/链接;复用 PDF 插页同款行内渲染 _up_md_html)。
+    数学/图片/链接**先抠成占位符**(用原文,零重复转义)再渲染;数学还原时 HTML 转义(html.parser 安全,MathJax 读
+    textContent 仍是原式);标题空 → 不加 h2(标题走分隔条)。"""
+    import html as _h
+    ph = []   # 占位符 → 还原用的 raw HTML 片段
+
+    def _hold(frag):
+        ph.append(frag)
+        return "@@FAVPH%d@@" % (len(ph) - 1)
+
+    t = md or ""
+    # ① 数学(整段抠出防被 markdown/escape 拆坏;还原时转义:$a<b$ → $a&lt;b$,html.parser 安全,MathJax 读回 $a<b$)
+    t = re.sub(r"\$\$[\s\S]+?\$\$", lambda m: _hold(_h.escape(m.group(0), quote=False)), t)
+    t = re.sub(r"\\\[[\s\S]+?\\\]", lambda m: _hold(_h.escape(m.group(0), quote=False)), t)
+    t = re.sub(r"\$(?!\s)(?:\\\$|[^$\n])+?\$", lambda m: _hold(_h.escape(m.group(0), quote=False)), t)
+    t = re.sub(r"\\\([\s\S]+?\\\)", lambda m: _hold(_h.escape(m.group(0), quote=False)), t)
+    # ② 图片 ![alt](src)(src/alt 取原文,转义一次)③ 链接 [text](url)(图片先于链接,避免 ![..](..) 被链接规则截半)
+    t = re.sub(r"!\[([^\]]*)\]\(\s*([^)\s]+)[^)]*\)",
+               lambda m: _hold('<img alt="%s" src="%s"/>' % (_fav_esc(m.group(1)), _fav_esc(m.group(2)))), t)
+    t = re.sub(r"\[([^\]]+)\]\(\s*([^)\s]+)[^)]*\)",
+               lambda m: _hold('<a href="%s">%s</a>' % (_fav_esc(m.group(2)), _fav_esc(m.group(1)))), t)
+    html = _up_md_html("", t)   # 复用 PDF 插页同款(标题/列表/加粗/斜体/行内 code);占位符纯字母数字,穿过 escape+inline 不变
+    return re.sub(r"@@FAVPH(\d+)@@", lambda m: ph[int(m.group(1))] if int(m.group(1)) < len(ph) else "", html)
+
+
+def _fav_pack_userpage_imgs(i: int, html: str):
+    """用户页正文里的 <img>:vault 本地文件 → 读字节打包进 zip(src 改相对路径);远程/内联(http/data)原样留
+    (在线阅读器能直接加载);解析不到本地文件也原样留(可能是站内代理 URL)。返回 (rewritten_html, imgs_out)。"""
+    from bs4 import BeautifulSoup
+    from urllib.parse import unquote
+    soup = BeautifulSoup(html or "", "html.parser")
+    imgs_out = []
+    n = 0
+    root_res = OBSIDIAN_ROOT.resolve()
+    for im in list(soup.find_all("img")):
+        src = (im.get("src") or "").strip()
+        if not src or src.startswith(("http://", "https://", "data:", "//")):
+            continue   # 远程/内联图:原样保留(不打包、不丢)
+        data = None
+        ext = ".img"
+        try:
+            rp = unquote(src.split("?")[0].split("#")[0]).lstrip("/")
+            if ".." not in rp:
+                ip = (OBSIDIAN_ROOT / rp).resolve()
+                ip.relative_to(root_res)   # 防越界
+                if ip.is_file() and ip.stat().st_size <= 12 * 1024 * 1024:
+                    data = ip.read_bytes()
+                    ext = ip.suffix.lower() or ".img"
+        except Exception:
+            data = None
+        if data is None:
+            continue   # 解析不到本地文件:保留原 src
+        n += 1
+        arc = "img/up%03d_%02d%s" % (i, n, ext if ext.startswith(".") else "." + ext)
+        imgs_out.append((arc, data, _fav_img_mt(ext)))
+        im["src"] = arc                 # zip 内相对路径(相对 OEBPS/sec_N.xhtml)
+        wh = _fav_img_wh(data)
+        if wh:
+            im["width"] = str(wh[0])
+            im["height"] = str(wh[1])
+    return soup.decode_contents(), imgs_out
+
+
+def _ink_strokes_to_svg(strokes, vb: int = 1000) -> str:
+    """墨迹笔画 [{t,c,w,p:[[x,y]...]}](x/宽、y/高 各自归一化到所在页)→ SVG 元素串。
+    收藏夹里插入页无 canvas,用 <svg viewBox=0 0 vb vb preserveAspectRatio=none> 拉满 block 复现相对位置;
+    stroke-width 用 vector-effect=non-scaling-stroke 保持 w px 常宽(不随拉伸变粗)。形状照搬前端 _inkDrawStroke。"""
+    import html as _html
+    import math
+    out = []
+    for s in (strokes or []):
+        if not isinstance(s, dict):
+            continue
+        pts = s.get("p") or []
+        if not pts:
+            continue
+        col = _html.escape(str(s.get("c") or "#e74c3c"), quote=True)
+        w = float(s.get("w") or 2.5)
+        t = s.get("t") or "pen"
+        common = ('stroke="%s" stroke-width="%g" fill="none" stroke-linecap="round" '
+                  'stroke-linejoin="round" vector-effect="non-scaling-stroke"' % (col, w))
+        def X(i, _p=pts): return round(_p[i][0] * vb, 1)
+        def Y(i, _p=pts): return round(_p[i][1] * vb, 1)
+        n = len(pts)
+        if t == "line":
+            out.append('<line x1="%g" y1="%g" x2="%g" y2="%g" %s/>' % (X(0), Y(0), X(n - 1), Y(n - 1), common))
+        elif t == "rect":
+            x0, y0, x1, y1 = X(0), Y(0), X(n - 1), Y(n - 1)
+            out.append('<rect x="%g" y="%g" width="%g" height="%g" %s/>' % (min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0), common))
+        elif t == "arrow":
+            ex, ey = X(n - 1), Y(n - 1)
+            px, py = (X(n - 2), Y(n - 2)) if n > 1 else (X(0), Y(0))
+            out.append('<line x1="%g" y1="%g" x2="%g" y2="%g" %s/>' % (X(0), Y(0), ex, ey, common))
+            ang = math.atan2(ey - py, ex - px); ah = vb * 0.022
+            out.append('<line x1="%g" y1="%g" x2="%g" y2="%g" %s/>' % (ex, ey, ex - ah * math.cos(ang - 0.42), ey - ah * math.sin(ang - 0.42), common))
+            out.append('<line x1="%g" y1="%g" x2="%g" y2="%g" %s/>' % (ex, ey, ex - ah * math.cos(ang + 0.42), ey - ah * math.sin(ang + 0.42), common))
+        else:  # pen:折线(点够密,直连即平滑)
+            d = "M" + " L".join("%g,%g" % (X(i), Y(i)) for i in range(n))
+            out.append('<path d="%s" %s/>' % (d, common))
+    return "".join(out)
+
+
+def _fav_userpage_item(i: int, it: dict, warns: list):
+    """用户页(插入页)条目 → (label, section_body_html, [(img_arc, bytes, mt)])。userpages sidecar 全程只读。"""
+    rel = it.get("file") or ""
+    uid = it.get("id") or ""
+    src_name = rel.split("/")[-1] or "?"
+    rec = next((x for x in _upages_load(rel) if isinstance(x, dict) and x.get("id") == uid), None)
+    if rec is None:
+        low = rel.lower()
+        href = ("/pdf/view?file=" + urllib.parse.quote(rel)) if low.endswith(".pdf") else \
+               (("/pdf/epub/view?file=" + urllib.parse.quote(rel)) if low.endswith(".epub") else "/pdf/")
+        label = "📝 我的页 · 出自《%s》" % src_name
+        warns.append("第 %d 条(我的页 %s)记录不存在(可能已删除)" % (i + 1, uid))
+        return label, (_fav_sep_html(label, href)
+                       + '<div class="fav-item fav-missing">这条「我的页」已被删除或找不到了。</div>'), []
+    title = (rec.get("title") or "").strip()
+    label = "📝 我的页" + ((" · " + title) if title else "") + " · 出自《%s》" % src_name
+    href = _fav_userpage_href(rel, rec)
+    md = rec.get("md") or ""
+    imgs = []
+    if md.strip():
+        inner = _fav_render_userpage_md(md)
+        inner, imgs = _fav_pack_userpage_imgs(i, inner)
+    else:
+        inner = '<p class="fav-up-empty">（这一页还没有文字内容）</p>'
+    # 手写墨迹双向(2026-07-05):把收藏的自建页做成**原书那页的实时编辑器**。
+    #   EPUB:.fav-item-userpage 带 data-uid(原书 userpage id)+ data-ink-file(原书文件)→ 前端把墨迹画在页体(与原书
+    #     .ep-usec 同 86vh 几何 → 坐标对齐),并按「原书文件+uid」读写 /api/epub-ink(fav 里画=写进原书,原书画了 fav 也同步)。
+    #   PDF:墨迹按页号存 /api/ink,epub-ink 端点管不到 → 暂以只读 SVG 快照显示原墨迹(不双向)。
+    if rel.lower().endswith(".epub") and uid:
+        # .fav-up-disp 包住 md 显示层:前端「✏️ 编辑」保存后就地替换它(正文双向 → PATCH /api/userpages 写回原书);
+        # data-uid/data-ink-file 供墨迹+正文都定址原书。
+        body_inner = ('<div class="fav-item fav-item-userpage" data-uid="%s" data-ink-file="%s"><div class="fav-up-disp">%s</div></div>'
+                      % (_fav_esc(uid), _fav_esc(rel), inner))
+    else:
+        ink = []
+        try:
+            pg = rec.get("page"); pgs = _ink_load(rel).get("pages") or {}
+            ink = (pgs.get(str(pg)) if pg is not None else None) or pgs.get(uid) or []
+        except Exception:
+            ink = []
+        ink_svg = _ink_strokes_to_svg(ink) if isinstance(ink, list) and ink else ""
+        if ink_svg:
+            body_inner = ('<div class="fav-item fav-item-userpage fav-up-hasink">'
+                          '<svg class="fav-up-ink" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">'
+                          + ink_svg + '</svg><div class="fav-up-content">' + inner + '</div></div>')
+        else:
+            body_inner = '<div class="fav-item fav-item-userpage">' + inner + "</div>"
+    return label, _fav_sep_html(label, href) + body_inner, imgs
+
+
+def _fav_item_snippet(body: str, limit: int = 80) -> str:
+    """从条目 section body 抠出**内容首句**(≤limit 字,供 AI 目录概览)。只取 .fav-item 内容块(排除分隔条
+    《书名》·页/『打开原书 ↗』),PDF 透明词层/EPUB 正文/用户页 md 皆命中;失败/缺失 → 空串。"""
+    try:
+        from bs4 import BeautifulSoup
+        el = BeautifulSoup(body or "", "html.parser").find(class_="fav-item")
+        if not el:
+            return ""
+        t = re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip()
+        return t[:limit]
+    except Exception:
+        return ""
+
+
+def _fav_write_epub(out_path: Path, fid: str, name: str, items: list, warns: list) -> list:
+    """按 items 顺序装配一本**真 EPUB**(标准 zip:mimetype+container.xml+OPF+nav+各条目一个 XHTML+图片打包)写到 out_path。
+    严格 1 item=1 section(=1 spine)。原书全程只读;只往 out_path 写。
+    返回 **AI 元数据 meta_items**(每条目一条,section idx 对齐:出处 src_file/src_name/src_page|src_section + label
+    + 首句 snippet + 相邻 adj_prev + missing),供 _fav_build_job 落 state/reader-fav-meta/<fid>.json。"""
+    import zipfile
+    sections = []   # (sec_href, xhtml_str)
+    images = []     # (arc_under_OEBPS, bytes, media_type)
+    nav = []        # (label, sec_href)
+    meta_items = []  # 每条目 AI 元数据(出处/首句/相邻/missing),section idx 对齐 spine
+    for i, it in enumerate(items):
+        sec_href = "sec_%04d.xhtml" % i
+        kind = it.get("kind")
+        frel = it.get("file") or ""
+        src_name = frel.split("/")[-1] or "?"
+        if kind == "pdf":
+            label, body, imgs = _fav_pdf_item(i, it, src_name, warns)
+        elif kind == "epub":
+            label, body, imgs = _fav_epub_item(i, it, src_name, warns)
+        elif kind == "userpage":
+            label, body, imgs = _fav_userpage_item(i, it, warns)   # 自己创建的插入页:物化正文 md 成一节
+        else:
+            label = "未知条目"
+            body = _fav_sep_html("未知条目", "/pdf/") + '<div class="fav-item fav-missing">无法识别的收藏条目。</div>'
+            imgs = []
+        images.extend(imgs)
+        sections.append((sec_href, _fav_xhtml(label or name, body)))
+        nav.append((label or ("第 %d 条" % (i + 1)), sec_href))
+        # ── AI 元数据:出处 + 首句 + 相邻性(同书连续)+ missing ──
+        missing = "fav-missing" in (body or "")
+        rec = {"section": i, "kind": kind, "src_file": frel, "src_name": src_name,
+               "label": label or "", "snippet": ("" if missing else _fav_item_snippet(body)),
+               "missing": missing}
+        if kind == "pdf":
+            rec["src_page"] = it.get("page")
+        elif kind == "epub":
+            rec["src_section"] = it.get("section")
+        elif kind == "userpage":
+            rec["id"] = it.get("id")
+        # adj_prev:与上一条**同书且页/章连续**(PDF page==prev+1 / EPUB section==prev+1;跨书/逆序/重复/跳页/userpage 一律 False)
+        adj = False
+        if i > 0 and kind in ("pdf", "epub"):
+            pv = items[i - 1]
+            if pv.get("kind") == kind and (pv.get("file") or "") == frel:
+                if kind == "pdf":
+                    cp, pp = it.get("page"), pv.get("page")
+                    adj = isinstance(cp, int) and isinstance(pp, int) and cp == pp + 1
+                else:
+                    cs, ps = it.get("section"), pv.get("section")
+                    adj = isinstance(cs, int) and isinstance(ps, int) and cs == ps + 1
+        rec["adj_prev"] = adj
+        meta_items.append(rec)
+    if not items:                     # 空收藏夹:一张说明页(空 spine 的 EPUB 不合法)
+        sec_href = "sec_0000.xhtml"
+        body = ('<div class="fav-item fav-missing">这个收藏夹还没有内容。<br>在阅读器里点 ⭐ 收藏页面/章节即可。</div>')
+        sections.append((sec_href, _fav_xhtml(name, body)))
+        nav.append(("(空)", sec_href))
+    # OPF manifest + spine(拼接,不用 %-format:label/name 可能含 %)
+    man = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+           '<item id="css" href="style/fav.css" media-type="text/css"/>']
+    spine = []
+    for i, (sec_href, _b) in enumerate(sections):
+        man.append('<item id="sec%d" href="%s" media-type="application/xhtml+xml"/>' % (i, sec_href))
+        spine.append('<itemref idref="sec%d"/>' % i)
+    for j, (arc, _d, mt) in enumerate(images):
+        man.append('<item id="img%d" href="%s" media-type="%s"/>' % (j, arc, mt))
+    opf = ('<?xml version="1.0" encoding="utf-8"?>\n'
+           '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">\n'
+           '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+           '    <dc:identifier id="bookid">fav-' + _fav_esc(fid) + '</dc:identifier>\n'
+           '    <dc:title>' + _fav_esc(name) + '</dc:title>\n'
+           '    <dc:language>zh</dc:language>\n'
+           '    <dc:creator>bwicarus 收藏夹</dc:creator>\n'
+           '  </metadata>\n  <manifest>\n    ' + "\n    ".join(man) + '\n  </manifest>\n'
+           '  <spine>\n    ' + "\n    ".join(spine) + '\n  </spine>\n</package>\n')
+    nav_lis = "\n      ".join('<li><a href="' + h + '">' + _fav_esc(l) + '</a></li>' for (l, h) in nav)
+    nav_xhtml = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                 '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head>'
+                 '<meta charset="utf-8"/><title>目录</title></head><body>'
+                 '<nav epub:type="toc" id="toc"><ol>\n      ' + nav_lis + '\n    </ol></nav></body></html>\n')
+    with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo("mimetype")   # mimetype 必须**第一个 + 不压缩**(EPUB 规范)
+        zi.compress_type = zipfile.ZIP_STORED
+        z.writestr(zi, b"application/epub+zip")
+        z.writestr("META-INF/container.xml", _FAV_CONTAINER_XML)
+        z.writestr("OEBPS/content.opf", opf.encode("utf-8"))
+        z.writestr("OEBPS/nav.xhtml", nav_xhtml.encode("utf-8"))
+        z.writestr("OEBPS/style/fav.css", _FAV_EPUB_CSS.encode("utf-8"))
+        for sec_href, data in sections:
+            z.writestr("OEBPS/" + sec_href, data.encode("utf-8"))
+        for arc, data, _mt in images:
+            z.writestr("OEBPS/" + arc, data)
+    return meta_items
+
+
+def _fav_build_job(jid: str, fid: str):
+    """收藏夹物化 job(v5=真 EPUB):按 items 顺序装配一本真 EPUB(state/reader-fav-epub/<fid>.epub),用完整 EPUB
+    阅读器(epub-html.js)打开 → 全功能天然可用。原书全程只读(page-chars/page-image/epub-section 只读);
+    只往 state/reader-fav-epub/<fid>.epub 写(tmp+原子替换)。并退役旧 v4 流式 HTML(.html)/ v3 固定页 PDF(.pdf)产物。"""
+    tmp = None
+    built_ok = False                      # 成功且未被删 → finally re-check 合并(期间又变脏则再起一次)
+    fav_rel = _fav_book_rel(fid)          # 旧 .pdf rel(占 _INSPAGE_ACTIVE / 退役删除用)
+    epub_path = _fav_epub_path(fid)
+    html_path = _fav_html_path(fid)       # 旧 v4 流式 HTML(退役清理)
+    try:
+        _job_set(jid, status="running", kind="fav-build", step="读取收藏清单…", ts=_time.time())
+        folder = _fav_folder(_fav_load(), fid)
+        if not folder:
+            raise RuntimeError("收藏夹不存在")
+        items = folder.get("items") or []
+        name = folder.get("name") or "收藏夹"
+        content_sig = _fav_content_sig(items)
+        warns = []
+        _job_set(jid, step="装配收藏 EPUB…(共 %d 条)" % len(items))
+        _FAV_EPUB_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = epub_path.with_name(".favtmp-" + _uuid.uuid4().hex[:8] + ".epub")   # 同目录原子替换
+        meta_items = _fav_write_epub(tmp, fid, name, items, warns)
+        _job_set(jid, step="写入收藏夹产物…")
+        os.replace(str(tmp), str(epub_path))
+        tmp = None
+        # 换 .epub → mtime 变 → _ensure_epub_extracted 下次自动重解包(旧解包目录会被清并重建);为保险主动失效 OPF 缓存
+        try:
+            _EPUB_OPF_CACHE.pop(str(_EPUB_EXTRACT_DIR / _epub_sha(_fav_epub_rel(fid))), None)
+        except Exception:
+            pass
+        # AI 元数据(出处/首句/相邻/missing)→ state/reader-fav-meta/<fid>.json(tmp+原子替换);夹被删则下面 deleted 分支清
+        try:
+            _FAV_META_DIR.mkdir(parents=True, exist_ok=True)
+            mtmp = _fav_meta_path(fid).with_name(".favmeta-" + _uuid.uuid4().hex[:8] + ".json")
+            mtmp.write_text(json.dumps({"fid": fid, "name": name, "built_ver": _FAV_BUILD_VER,
+                                        "content_sig": content_sig, "built_ts": int(_time.time()),
+                                        "items": meta_items}, ensure_ascii=False), "utf-8")
+            os.replace(str(mtmp), str(_fav_meta_path(fid)))
+        except Exception:
+            pass
+        # 退役旧 v4 流式 HTML + v3 固定页 PDF 产物(派生物,删了不影响任何原书;别删原书)
+        for _old in (html_path, _fav_book_abs(fid)):
+            try:
+                _old.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # built_sig 落定(标记已构建到当前 content_sig)。持 _FAV_LOCK 与 CRUD 串行,防丢更新。
+        deleted = False
+        with _FAV_LOCK:
+            d3 = _fav_load()
+            f3 = _fav_folder(d3, fid)
+            if f3:
+                f3["built_sig"] = content_sig
+                f3["built_ver"] = _FAV_BUILD_VER
+                f3.setdefault("content_sig", content_sig)
+                f3["built_ts"] = int(_time.time())
+                _fav_save(d3)
+            else:
+                deleted = True               # 夹在 build 期间被删 → 别留孤儿产物
+        if deleted:
+            try:
+                epub_path.unlink(missing_ok=True)   # 夹在 build 期间被删 → 清掉刚落盘的孤儿 EPUB
+            except Exception:
+                pass
+            try:
+                _fav_meta_path(fid).unlink(missing_ok=True)   # 同步清孤儿 AI 元数据
+            except Exception:
+                pass
+            _job_set(jid, status="done", ts=_time.time(),
+                     result={"ok": True, "deleted": True, "fid": fid})
+        else:
+            built_ok = True
+            _job_set(jid, status="done", ts=_time.time(),
+                     result={"ok": True, "fid": fid, "items": len(items), "warnings": warns[:20],
+                             "view": "/pdf/fav/open?id=" + urllib.parse.quote(fid)})
+    except Exception as ex:
+        try:
+            if tmp and Path(tmp).exists():
+                Path(tmp).unlink()
+        except Exception:
+            pass
+        _job_set(jid, status="error", error=str(ex), ts=_time.time())
+    finally:
+        with _INSPAGE_MUTEX:
+            _FAV_BUILD_ACTIVE.pop(fid, None)
+            _INSPAGE_ACTIVE.discard(fav_rel)
+        # 合并(last-write-wins):build 成功且期间 CRUD 又改了条目(content_sig != built_sig)→ 再起一次后台 build。
+        # 失败/夹被删不自动重试(防死循环 / 别复活已删夹)。_fav_trigger_build 自带脏检查+去重。
+        if built_ok:
+            try:
+                _fav_trigger_build(fid)
+            except Exception:
+                pass
+
+
+def _fav_trigger_build(fid: str, folder=None):
+    """收藏夹内容变更 → 后台 fire-and-forget 起 build(daemon 线程,不阻塞 CRUD 响应、不等 job)。
+    去重:同夹已有 build 在跑 → 复用其 jid,不重复起(短时多次改条目自动合并——那个 job 收尾会 re-check dirty 再起)。
+    脏才起(不脏 / 夹不存在 → 不起,返回 jid=None)。返回 (jid or None, started:bool)。"""
+    if folder is None:
+        folder = _fav_folder(_fav_load(), fid)
+    if not folder:
+        return None, False
+    with _INSPAGE_MUTEX:                          # 与 job finally 的 pop / /fav/open 去重共用同一把锁,原子判定
+        jid = _FAV_BUILD_ACTIVE.get(fid)
+        if jid:
+            return jid, False                    # 已在建 → 复用(合并靠该 job 收尾 re-check)
+        if not _fav_is_dirty(folder, fid):
+            return None, False                   # 不脏,免建
+        jid = _uuid.uuid4().hex[:12]
+        _FAV_BUILD_ACTIVE[fid] = jid
+        _INSPAGE_ACTIVE.add(_fav_book_rel(fid))   # 重建期间占住派生书 rel(拦对它的插页 job)
+    _job_set(jid, status="running", kind="fav-build", step="排队中…", ts=_time.time())
+    try:
+        _upthr.Thread(target=_fav_build_job, args=(jid, fid), daemon=True).start()
+    except Exception:
+        with _INSPAGE_MUTEX:   # 起线程失败(线程/内存耗尽)→ 回滚 _FAV_BUILD_ACTIVE/_INSPAGE_ACTIVE 占位,否则该夹永久卡在"building"打不开(审查确认)
+            _FAV_BUILD_ACTIVE.pop(fid, None)
+            _INSPAGE_ACTIVE.discard(_fav_book_rel(fid))
+        return None, False
+    return jid, True
+
+
+def _fav_cascade_userpage_delete(rel: str, uid: str):
+    """自建页被删(任一阅读器的 🗑,同一张纸)→ 级联移除各收藏夹里指向它的条目(kind:userpage 同 file+id),
+    标脏 + 后台重建 + 推 SSE 事件。双向同步:收藏夹不留「已删除」墓碑。"""
+    changed = []
+    with _FAV_LOCK:
+        d = _fav_load()
+        for f in d.get("folders") or []:
+            items = f.get("items") or []
+            keep = [it for it in items
+                    if not (isinstance(it, dict) and it.get("kind") == "userpage"
+                            and it.get("file") == rel and it.get("id") == uid)]
+            if len(keep) != len(items):
+                f["items"] = keep
+                _fav_mark_dirty(f)
+                changed.append(f.get("id"))
+        if changed:
+            _fav_save(d)
+    for fid in changed:
+        try:
+            _fav_trigger_build(fid)
+        except Exception:
+            pass
+    if changed:
+        try:
+            _reader_publish("fav", rel, uid)   # 已打开的收藏夹/原书据此感知结构变化
+        except Exception:
+            pass
+
+
+def _fav_prebuild_all():
+    """服务器空闲时把所有『脏』收藏夹提前重建好(版本 bump / userpage 正文编辑后自动变脏)→ 用户打开即秒开、不再前台等重建。
+    串行(一次一本,复用 _fav_trigger_build 的脏检查+去重),避免同时建多本大 EPUB 压垮 Pi;每本最多等 5min。"""
+    try:
+        folders = list(_fav_load().get("folders") or [])
+    except Exception:
+        return
+    for f in folders:
+        fid = f.get("id")
+        if not fid:
+            continue
+        try:
+            jid, started = _fav_trigger_build(fid, f)   # 脏才建;不脏/在建 → 跳
+        except Exception:
+            continue
+        if not jid:
+            continue                # 不脏 / 触发失败 → 跳
+        for _ in range(600):        # 串行等这本(含用户 /fav/open 触发的同一本,jid 已在建也等它)建完 ≤300s 再下一本,别并发建多本大 EPUB 压垮 Pi(审查确认)
+            with _INSPAGE_MUTEX:
+                if _FAV_BUILD_ACTIVE.get(fid) != jid:
+                    break
+            _time.sleep(0.5)
+
+
+def _fav_prebuild_loop():
+    """启动后台预建 + 定期复扫(catch userpage 正文编辑等运行期新脏)。daemon;只在 webapp(register_pdf_reader)里起,裸 import 不跑。"""
+    _time.sleep(45)     # 让 app 启动稳定 + 避开启动高峰
+    while True:
+        try:
+            _fav_prebuild_all()
+        except Exception:
+            pass
+        _time.sleep(900)   # 每 15min 复扫一次
+
+
+@bp.route("/api/favorites", methods=["GET", "POST", "PATCH", "DELETE"])
+def pdf_api_favorites():
+    """收藏夹 CRUD(全局 sidecar,照 notes 模式)。
+    GET → {ok, folders:[{id,name,items:[{file,kind,page|section}],created}]}(⭐picker 端自行判断当前页在哪些夹);
+    POST {name, item?} → 建夹(可顺带收一条,picker「新建即勾选」一步到位);POST {folder, item} → 加条目(同夹同页去重,幂等);
+    PATCH {folder, name?} → 改名;PATCH {folder, remove_item:{...}} → 移出条目;
+    DELETE ?id=f_xxx → 删整夹。"""
+    if request.method == "GET":
+        r = jsonify({"ok": True, "folders": _fav_load().get("folders") or []})
+        r.headers["Cache-Control"] = "no-store"
+        return r
+    # 变更(建/加/改名/移出/删)全串行化(_FAV_LOCK:防与 build job 写 built_sig 丢更新)。
+    # 加/删/改条目 → _fav_mark_dirty 刷 content_sig(!= built_sig 即脏 → 下次 /fav/open 兜底重建)。
+    if request.method == "DELETE":
+        fid = (request.args.get("id") or "").strip()
+        with _FAV_LOCK:
+            d = _fav_load()
+            n0 = len(d["folders"])
+            d["folders"] = [f for f in d["folders"] if f.get("id") != fid]
+            if len(d["folders"]) != n0:
+                _fav_save(d)
+        if fid and re.match(r"^f_[0-9a-zA-Z]+$", fid):   # 删夹后顺手删派生产物(EPUB + 解包目录 + 退役 .html/.pdf;派生物,失败无碍)
+            try:
+                _fav_epub_path(fid).unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                import shutil as _sh
+                _sh.rmtree(_EPUB_EXTRACT_DIR / _epub_sha(_fav_epub_rel(fid)), ignore_errors=True)
+            except Exception:
+                pass
+            for _old in (_fav_html_path(fid), _fav_book_abs(fid), _fav_meta_path(fid)):
+                try:
+                    _old.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    with _FAV_LOCK:
+        d = _fav_load()
+        if request.method == "POST":
+            fid = (body.get("folder") or "").strip()
+            if not fid:                                        # 建夹
+                name = (body.get("name") or "").strip()[:80]
+                if not name:
+                    return jsonify({"ok": False, "error": "缺少 name"}), 400
+                import uuid as _u
+                f = {"id": "f_" + _u.uuid4().hex[:8], "name": name, "items": [],
+                     "created": int(__import__("time").time())}
+                it = _fav_norm_item(body.get("item"))
+                if it:
+                    f["items"].append(it)
+                _fav_mark_dirty(f)
+                d["folders"].append(f)
+                _fav_save(d)
+                if f["items"]:
+                    _fav_trigger_build(f["id"], f)   # 建夹带条目 → 立即后台物化(打开时通常已好、秒开)
+                return jsonify({"ok": True, "folder": f})
+            f = _fav_folder(d, fid)
+            if not f:
+                return jsonify({"ok": False, "error": "未找到收藏夹"}), 404
+            it = _fav_norm_item(body.get("item"))
+            if not it:
+                return jsonify({"ok": False, "error": "缺少/非法 item"}), 400
+            if not isinstance(f.get("items"), list):
+                f["items"] = []
+            if not any(_fav_same_item(x, it) for x in f["items"]):   # 同夹同页不重复
+                f["items"].append(it)
+                _fav_mark_dirty(f)
+                _fav_save(d)
+                _fav_trigger_build(fid, f)          # 加条目 → 立即后台重建(不阻塞本次响应)
+            return jsonify({"ok": True, "folder": f})
+        # PATCH:改名 / 移出条目
+        fid = (body.get("folder") or "").strip()
+        f = _fav_folder(d, fid)
+        if not f:
+            return jsonify({"ok": False, "error": "未找到收藏夹"}), 404
+        changed = False
+        if (body.get("name") or "").strip():
+            f["name"] = str(body["name"]).strip()[:80]   # 改名只改 name(+PDF title,重建时刷),不动 items/sig,不触发重建
+            changed = True
+        items_changed = False
+        ri = _fav_norm_item(body.get("remove_item"))
+        if ri:
+            n0 = len(f.get("items") or [])
+            f["items"] = [x for x in (f.get("items") or []) if not _fav_same_item(x, ri)]
+            items_changed = len(f["items"]) != n0
+            if items_changed:
+                _fav_mark_dirty(f)                 # 条目变了才标脏(改名不算)
+            changed = changed or items_changed
+        if changed:
+            _fav_save(d)
+        if items_changed:
+            _fav_trigger_build(fid, f)             # 移出条目 → 立即后台重建(改名不触发)
+        return jsonify({"ok": True, "folder": f})
+
+
+def _fav_js_v():
+    """【已退役 2026-07-04·规格 v3】收藏夹精简查看页(fav_reader.html + fav-reader.js)的 cache-bust。
+    收藏夹统一化后改为「物化成真 PDF + 标准阅读器打开」(/fav/open),精简页退役,本函数不再被调用
+    (fav_reader.html / fav-reader.js 保留在盘上防外部书签,书架不再链接)。"""
+    mt = 0
+    for name in ("fav-reader.js", "rc-core.js", "rc-md.js", "rc-snippets.js",
+                 "rc-result.js", "rc-wordpop.js", "rc-favorites.js"):
+        for base in ("/var/www/html/static/pdf",
+                     str(Path(__file__).resolve().parent / "static" / "pdf")):
+            try:
+                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
+            except Exception:
+                continue
+    return str(mt or 1)
+
+
+# 等待页:脏收藏夹首访触发 build,轮询 job-status,done 后 reload /fav/open(届时不脏 → 渲染流式阅读器)。
+_FAV_WAIT_HTML = (
+    '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>正在生成收藏夹…</title>'
+    '<style>body{margin:0;background:#0b0f1a;color:#dce6ff;font-family:sans-serif;display:flex;'
+    'align-items:center;justify-content:center;min-height:100vh}.card{text-align:center;padding:28px 34px;max-width:82vw}'
+    '.sp{width:34px;height:34px;border:3px solid #24406e;border-top-color:#7dd3fc;border-radius:50%;'
+    'animation:s 1s linear infinite;margin:0 auto 16px}@keyframes s{to{transform:rotate(360deg)}}'
+    '.nm{font-size:15px;color:#9fcbff;font-weight:600;margin-bottom:6px}'
+    '.st{font-size:13px;color:#8fa4cc;min-height:18px}.er{color:#ff9a9a;font-size:13px}a{color:#7dd3fc}</style></head>'
+    '<body><div class="card"><div class="sp" id="sp"></div>'
+    '<div class="nm">正在整理「__NAME__」…</div>'
+    '<div class="st" id="st">首次打开或有新收藏,需要生成一次(之后秒开)。</div></div>'
+    '<script>var JID="__JID__",VIEW="__VIEW__";function poll(){'
+    "fetch('/pdf/api/job-status?id='+encodeURIComponent(JID),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){"
+    "var st=document.getElementById('st');"
+    "if(j.status==='done'){st.textContent='完成,正在打开…';location.replace(VIEW);return;}"
+    "if(j.status==='error'){document.getElementById('sp').style.display='none';st.className='er';"
+    "st.textContent='生成失败:'+(j.error||'未知错误')+'(原书未受影响)';return;}"
+    "if(j.step)st.textContent=j.step;setTimeout(poll,900);"
+    "}).catch(function(){setTimeout(poll,1500);});}poll();</script></body></html>"
+)
+
+
+def _fav_serve_reader(fid: str, folder: dict):
+    """把已就绪的收藏夹 **真 EPUB** 用**完整 EPUB 阅读器**(epub_html_reader.html + epub-html.js)打开渲染。
+    file_rel=合成 EPUB rel(资源/收藏夹/<fid>.epub,_resolve_epub_book 解析回 state 那本;高亮/墨迹 sidecar 键与 fid 绑死)。
+    · 先确保解包(预热 OPF 缓存)——浏览器随后并发发 manifest/section 请求直接命中,不各自 490ms 堵 worker(见 epub_view 先例)。
+    · server_pos=None + 不调 _lastopen_touch → **零进度**(不记停留位置、不进「最近打开」;规格 D)。读/解包失败返回 None。"""
+    ep = _fav_epub_path(fid)
+    if not ep.is_file():
+        return None
+    rel = _fav_epub_rel(fid)
+    try:
+        root = _ensure_epub_extracted(ep, rel)
+        if not root:
+            return None
+        _epub_opf_info(root)   # 预热 OPF 缓存(照 epub_view)
+    except Exception:
+        return None
+    from flask import make_response
+    resp = make_response(render_template(
+        "epub_html_reader.html", file_rel=rel, file_name=(folder.get("name") or "收藏夹"),
+        sha=_epub_sha(rel), reader_js_v=_epub_js_v(), server_pos=None,
+        is_fav=True, fav_id=fid))   # is_fav → 模板注入收藏夹专属 PWA manifest/apple 标签(独立 app 入口)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
+
+@bp.route("/fav/open")
+def pdf_fav_open():
+    """收藏夹统一化(规格 v5:真 EPUB):收藏夹 = 物化成的一本真 EPUB,用**完整 EPUB 阅读器**打开(全功能)。
+    不脏(产物就绪)→ 直接渲染 EPUB 阅读器(秒开);脏(items 变过 / 产物不存在 / 版本升级)→ 触发后台
+    _fav_build_job + 返回轮询等待页,done 后 reload /fav/open(届时不脏 → 渲染阅读器)。"""
+    fid = (request.args.get("id") or "").strip()
+    if not re.match(r"^f_[0-9a-zA-Z]+$", fid):
+        abort(404)
+    folder = _fav_folder(_fav_load(), fid)
+    if not folder:
+        abort(404)
+    # 常态:内容一变 CRUD 已自动后台 build,这里通常不脏。_fav_trigger_build 脏才起(不脏返回 None)。
+    jid, _started = _fav_trigger_build(fid, folder)
+    if jid is None:                      # 不脏 = 产物就绪 → 秒开渲染
+        resp = _fav_serve_reader(fid, folder)
+        if resp is not None:
+            return resp
+        # 产物读/解包失败(极罕见)→ 删掉标脏 + 重新触发,走等待页重建
+        try:
+            _fav_epub_path(fid).unlink(missing_ok=True)
+        except Exception:
+            pass
+        jid, _started = _fav_trigger_build(fid, folder)
+    if jid is None:
+        abort(503)
+    import html as _htmlmod
+    reload_url = "/pdf/fav/open?id=" + urllib.parse.quote(fid)
+    page_html = (_FAV_WAIT_HTML.replace("__JID__", jid).replace("__VIEW__", reload_url)
+                 .replace("__NAME__", _htmlmod.escape(folder.get("name") or "收藏夹")))
+    resp = Response(page_html, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/fav/view")
+def pdf_fav_view():
+    """【已退役·规格 v3/v4】旧精简查看页 → 302 到 /fav/open(现=流式 HTML 阅读器)。
+    路由保留只为兼容旧书签/外部链接;书架已改指 /fav/open。"""
+    fid = (request.args.get("id") or "").strip()
+    return redirect("/pdf/fav/open?id=" + urllib.parse.quote(fid))
+
+
+@bp.route("/fav/manifest")
+def pdf_fav_manifest():
+    """收藏夹 PWA manifest(每个夹一份:start_url 固定打开该夹、独立 name/scope/图标)→ iOS/安卓把收藏夹装成
+    跟通用阅读器**独立**的 app;start_url 走 /fav/open(零状态、不进「最近打开」),不受「最后打开的书」影响。"""
+    fid = (request.args.get("id") or "").strip()
+    folder = _fav_folder(_fav_load(), fid) if re.match(r"^f_[0-9a-zA-Z]+$", fid) else None
+    name = (((folder or {}).get("name")) or "收藏夹").strip() or "收藏夹"
+    start = "/pdf/fav/open?id=" + urllib.parse.quote(fid)
+    m = {
+        "id": "fav-" + fid, "name": name, "short_name": name[:12],
+        "start_url": start, "scope": "/pdf/fav/",
+        "display": "standalone", "orientation": "portrait",
+        "background_color": "#0a0e1a", "theme_color": "#10162a",
+        "icons": [
+            {"src": "/pdf/fav/icon?sz=192", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/pdf/fav/icon?sz=512", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    }
+    resp = jsonify(m)
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
+@bp.route("/fav/icon")
+def pdf_fav_icon():
+    """收藏夹 PWA 图标:深底 + 金色五角星(⭐ 语义),即时生成 PNG(apple-touch-icon / manifest icons 共用)。"""
+    try:
+        sz = max(48, min(512, int(request.args.get("sz", "180") or "180")))
+    except Exception:
+        sz = 180
+    import io
+    import math
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (sz, sz), "#10162a")
+    dr = ImageDraw.Draw(im)
+    cx = cy = sz / 2.0
+    R = sz * 0.36
+    r = R * 0.42
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rad = R if (i % 2 == 0) else r
+        pts.append((cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
+    dr.polygon(pts, fill="#f2c14e")
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    resp = Response(buf.getvalue(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+# ── EPUB 手写墨迹 sidecar(按 section idx 存归一化笔画;独立 state/epub-ink/<sha>.json)──
+# 照搬 PDF /api/ink(state/pdf-ink),把锚从「页码」换成「EPUB section 索引」(reflow 无固定页)。
+# stroke = {t:'pen'|'line'|'arrow'|'rect', c, w, p:[[x,y],...]},坐标归一化 0-1(相对 section 内容盒)。
+_EPUB_INK_DIR = CLAUDE_DIR / "state" / "epub-ink"
+
+
+def _epub_ink_path(rel: str) -> Path:
+    import hashlib
+    return _EPUB_INK_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _epub_ink_load(rel: str) -> dict:
+    try:
+        data = json.loads(_epub_ink_path(rel).read_text("utf-8"))
+        if not isinstance(data.get("sections"), dict):
+            data["sections"] = {}
+        data["file_rel"] = rel
+        return data
+    except Exception:
+        return {"file_rel": rel, "sections": {}}
+
+
+def _epub_ink_save(rel: str, data: dict):
+    _EPUB_INK_DIR.mkdir(parents=True, exist_ok=True)
+    p = _epub_ink_path(rel)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    tmp.replace(p)
+
+
+@bp.route("/api/epub-ink", methods=["GET", "POST"])
+def pdf_api_epub_ink():
+    """EPUB 手写墨迹(按 section idx 存,独立 sidecar:state/epub-ink/<sha>.json)。
+    GET ?file= → {ok, sections:{"<idx>":[stroke,...]}};
+    POST {file, idx, strokes:[...]} → 整段替换该 section 墨迹(strokes 空则删该段)。"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        if not rel:
+            return jsonify({"ok": False, "error": "缺少 file"}), 400
+        return jsonify({"ok": True, **_epub_ink_load(rel)})
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    if not rel:
+        return jsonify({"ok": False, "error": "缺少 file"}), 400
+    # idx = 正文章节序(非负整数) 或 插入页(.ep-usec)id(字符串 u_<8hex>,独立编号空间,不是章序)。
+    # sections dict 本就以字符串为键,两类共存互不干扰;用户页墨迹随插入页一起持久化(设计见 reader-userpages-favorites.md「EPUB 插入页·手写」)。
+    raw_idx = data.get("idx")
+    if isinstance(raw_idx, str) and re.fullmatch(r"u_[0-9a-fA-F]{4,16}", raw_idx):
+        key = raw_idx
+    else:
+        try:
+            n = int(raw_idx)
+        except (TypeError, ValueError):
+            n = -1
+        key = str(n) if n >= 0 else None
+    if key is None:
+        return jsonify({"ok": False, "error": "invalid idx"}), 400
+    strokes = data.get("strokes")
+    if not isinstance(strokes, list):
+        return jsonify({"ok": False, "error": "invalid strokes"}), 400
+    if len(strokes) > 5000:
+        return jsonify({"ok": False, "error": "too many strokes"}), 400
+    doc = _epub_ink_load(rel)
+    if strokes:
+        doc["sections"][key] = strokes
+    else:
+        doc["sections"].pop(key, None)
+    _epub_ink_save(rel, doc)
+    try:
+        _reader_publish("ink", rel, key)   # 推「墨迹变了」给其它打开着的客户端(实时同步)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "count": len(strokes)})
+
+
+# ── 阅读器实时事件推送(SSE pub/sub;2026-07-05):自建页墨迹/正文一存 → 推「变了」给其它打开着的客户端 →
+#   活跃侧收到即重拉+就地重渲(~1s,取代 7s 轮询);不活跃侧忽略(后端已更新,回来 visibility 再同步)。
+#   webapp = 单 worker gthread(见 systemd)→ 进程内 pub/sub 直接通,无需跨进程总线;长连接占 1 线程、余 7 个照常服务。
+import queue as _rq
+_READER_SUBS = set()          # set[queue.Queue]:每个订阅的 SSE 连接一个队列
+_READER_SUBS_LOCK = _upthr.Lock()
+
+
+def _reader_publish(kind: str, file: str, uid):
+    ev = {"kind": kind, "file": file, "uid": (str(uid) if uid is not None else None), "t": int(_time.time())}
+    with _READER_SUBS_LOCK:
+        subs = list(_READER_SUBS)
+    for q in subs:
+        try:
+            q.put_nowait(ev)
+        except Exception:
+            pass
+
+
+@bp.route("/api/reader-events")
+def pdf_reader_events():
+    """阅读器变更事件流(SSE):客户端订阅,服务端在墨迹/正文保存后推 {kind,file,uid}。EventSource 自带断线重连。"""
+    q = _rq.Queue(maxsize=128)
+    with _READER_SUBS_LOCK:
+        _READER_SUBS.add(q)
+
+    def gen():
+        try:
+            yield "retry: 3000\n\n"          # EventSource 重连间隔 3s
+            yield ": connected\n\n"
+            t0 = _time.time()
+            while _time.time() - t0 < 300:    # 5min 回收连接(gunicorn timeout 600 前),EventSource 自动重连、连接常新
+                try:
+                    ev = q.get(timeout=15)
+                    yield "event: change\ndata: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
+                except _rq.Empty:
+                    yield ": ka\n\n"          # 心跳(保活 + 检测死连接)
+        except GeneratorExit:
+            pass
+        finally:
+            with _READER_SUBS_LOCK:
+                _READER_SUBS.discard(q)
+    resp = Response(gen(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 统一 HTML 阅读器(架构验收)—— HTML 内容渲进主文档 + HtmlAdapter + 共享 rc-*.js。
+# 证明「给一个新阅读器写个 adapter,共享功能(选区/查词/翻译/解释/对话/笔记/制卡/高亮)就全有」。
+# 纯新增,零碰 PDF/EPUB 现有路由。AI 端点(translate/explain/dict)内容无关,直接复用。
+# ════════════════════════════════════════════════════════════════════════════
+
+# 内置 sample(无 file 时渲它,方便验收):中英文混排 + 若干英文词够测选区/查词/翻译/高亮。
+_HTML_SAMPLE = """
+<h1>统一 HTML 阅读器 · 架构验收 Demo</h1>
+<p>这是一个<strong>最小 HTML 阅读器</strong>，用来证明统一控制层架构：HTML 内容直接渲在主文档里，
+通过一个 <code>HtmlAdapter</code> 接入共享的 <code>rc-*.js</code> 控制层，于是
+<em>选区 / 查词 / 翻译 / 解释 / 对话 / 笔记 / 制卡 / 高亮</em> 这些功能就全部可用——一行业务逻辑都不用重写。</p>
+<h2>English paragraph for word lookup</h2>
+<p>The fundamental theorem of calculus connects differentiation and integration. Select any
+<b>sentence</b> here and tap translate or explain. Tap a single word like <i>derivative</i>,
+<i>convergence</i>, or <i>eigenvalue</i> to open the offline dictionary popup.</p>
+<p>You can also drag-select several words to get the multi-word toolbar (copy / translate / explain /
+chat / note / anki / highlight). Highlights are persisted server-side by character offset.</p>
+<h2>数学公式渲染</h2>
+<p>行内公式如 $E = mc^2$ 与 $\\int_0^1 x^2\\,dx = \\tfrac{1}{3}$ 会被 MathJax 渲染。
+选中一句中文也可以直接翻译或问 AI。</p>
+<h2>段落选区与高亮</h2>
+<p>选中这一段任意文字，底部会弹出工具栏；点「🖍 高亮」即按字符偏移存进
+<code>state/html-highlights/</code> 的 sidecar，刷新后仍在。点已存在的高亮块可改色 / 加备注 / 删除。</p>
+"""
+
+# 仅最小白名单消毒所需的标签集(剥脚本/样式/事件,只留正文结构);允许的内联标签足够还原文档结构。
+_HTML_ALLOWED = {
+    "p", "div", "span", "section", "article", "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "blockquote", "pre", "code", "em", "strong", "b", "i", "u",
+    "a", "img", "br", "hr", "table", "thead", "tbody", "tr", "td", "th",
+    "figure", "figcaption", "sup", "sub", "mark", "ruby", "rt", "rp", "small",
+}
+_HTML_DROP = ["script", "style", "iframe", "object", "embed", "link", "meta",
+              "noscript", "head", "form", "input", "button", "svg", "video", "audio"]
+
+
+def _md_to_html(text: str) -> str:
+    """markdown → HTML(项目已装 markdown 3.x;装不上则 <pre> 包原文兜底)。"""
+    try:
+        import markdown
+        return markdown.markdown(text, extensions=["extra", "sane_lists", "nl2br"])
+    except Exception:
+        import html as _h
+        return "<pre style='white-space:pre-wrap;word-break:break-word'>" + _h.escape(text) + "</pre>"
+
+
+def _sanitize_html_doc(raw: str) -> str:
+    """最小白名单消毒(借鉴 _sanitize_epub_section 思路):剥危险标签 + 去事件/内联样式属性,
+    未知标签拆壳保留文字。站内相对 href/src 去掉(最小版不解析相对路径),保留 http(s)/锚点/data:。"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(raw or "", "html.parser")
+    body = soup.find("body") or soup
+    for tag in body.find_all(_HTML_DROP):
+        tag.decompose()
+    for tag in list(body.find_all(True)):
+        if not tag.name or tag.parent is None:
+            continue
+        name = tag.name.lower()
+        if name not in _HTML_ALLOWED:
+            tag.unwrap(); continue
+        for attr in list(tag.attrs):
+            al = attr.lower()
+            if al.startswith("on") or al == "style":
+                del tag[attr]
+            elif al == "href":
+                href = tag.get("href") or ""
+                if not (href.startswith("#") or href.startswith(("http://", "https://"))):
+                    del tag["href"]
+            elif al == "src":
+                src = tag.get("src") or ""
+                if not src.startswith(("http://", "https://", "data:")):
+                    del tag["src"]
+            elif al not in ("alt", "colspan", "rowspan", "class"):
+                del tag[attr]
+    return body.decode_contents()
+
+
+@bp.route("/html/view")
+def html_view():
+    """统一 HTML 阅读器主页(架构验收)。?file=<vault-rel .html/.md>;无 file → 内置 sample。"""
+    from flask import make_response
+    rel = (request.args.get("file") or "").strip()
+    if rel:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path or abs_path.suffix.lower() not in (".html", ".htm", ".md", ".markdown"):
+            abort(404)
+        rel_clean = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+        raw = abs_path.read_text("utf-8", "ignore")
+        if abs_path.suffix.lower() in (".md", ".markdown"):
+            html_content = _md_to_html(raw)
+        else:
+            html_content = _sanitize_html_doc(raw)
+        title = Path(rel_clean).name
+    else:
+        rel_clean = ""
+        html_content = _HTML_SAMPLE
+        title = "HTML 阅读器(示例)"
+    resp = make_response(render_template(
+        "html_reader.html", html_content=html_content, file_rel=rel_clean,
+        file_name=title, reader_js_v=_html_js_v()))
+    return resp
+
+
+# ── HTML 阅读器高亮 sidecar(字符偏移锚,独立 state/html-highlights/<sha>.json;照搬 epub-highlights 形态)──
+_HTML_HL_DIR = CLAUDE_DIR / "state" / "html-highlights"
+
+
+def _html_hl_path(rel: str) -> Path:
+    import hashlib
+    key = rel or "__html_sample__"
+    return _HTML_HL_DIR / (hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _html_hl_load(rel: str) -> list:
+    try:
+        return json.loads(_html_hl_path(rel).read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _html_hl_save(rel: str, items: list):
+    _HTML_HL_DIR.mkdir(parents=True, exist_ok=True)
+    _html_hl_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+
+
+@bp.route("/api/html-highlights", methods=["GET", "POST", "PATCH", "DELETE"])
+def pdf_api_html_highlights():
+    """HTML 阅读器高亮 CRUD(字符偏移锚 {start,end};独立 sidecar:state/html-highlights/<sha>.json)。
+    GET ?file= → 列;POST {file,start,end,text,color,note?,sentence?} → 建;
+    PATCH {file,id,color?,note?} → 改;DELETE ?file=&id= → 删。file 可空(走内置 sample 键)。"""
+    if request.method == "GET":
+        rel = (request.args.get("file") or "").strip()
+        return jsonify({"ok": True, "highlights": _html_hl_load(rel)})
+    if request.method == "DELETE":
+        rel = (request.args.get("file") or "").strip()
+        hid = (request.args.get("id") or "").strip()
+        items = [h for h in _html_hl_load(rel) if h.get("id") != hid]
+        _html_hl_save(rel, items)
+        return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    items = _html_hl_load(rel)
+    if request.method == "POST":
+        try:
+            start = int(body.get("start"))
+            end = int(body.get("end"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "缺少 start/end"}), 400
+        if end <= start:
+            return jsonify({"ok": False, "error": "无效区间"}), 400
+        import uuid as _u
+        h = {"id": "h" + _u.uuid4().hex[:11], "start": start, "end": end,
+             "text": (body.get("text") or "")[:2000], "color": (body.get("color") or "#fff59d"),
+             "note": (body.get("note") or "")[:2000], "sentence": (body.get("sentence") or "")[:2000],
+             "time": int(time.time())}
+        items.append(h); _html_hl_save(rel, items)
+        return jsonify({"ok": True, "id": h["id"], "highlight": h})
+    # PATCH
+    hid = (body.get("id") or "").strip()
+    h = next((x for x in items if x.get("id") == hid), None)
+    if not h:
+        return jsonify({"ok": False, "error": "未找到"}), 404
+    if "color" in body:
+        h["color"] = body.get("color") or h["color"]
+    if "note" in body:
+        h["note"] = (body.get("note") or "")[:2000]
+    _html_hl_save(rel, items)
+    return jsonify({"ok": True, "highlight": h})
+
+
+@bp.route("/api/epub-to-full", methods=["POST"])
+def pdf_api_epub_to_full():
+    """把 vault 里某本 .epub 后台转成同名 .pdf(Calibre 防跨页),用现有 PDF 阅读器打开 = 全套控制层。
+    产物已存在 → 直接回 view_url;否则起后台转换(survivable),前端轮询 /api/ebook-convert-status。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    out_pdf = abs_path.with_suffix(".pdf")
+    out_rel = out_pdf.relative_to(OBSIDIAN_ROOT).as_posix()
+    out_url = f"/pdf/view?file={urllib.parse.quote(out_rel, safe='/')}"
+    if out_pdf.exists() and out_pdf.stat().st_size > 1000:
+        return jsonify({"ok": True, "ready": True, "rel": out_rel, "view_url": out_url})
+    import uuid
+    job = uuid.uuid4().hex[:12]
+    _EBOOK_CONV_DIR.mkdir(parents=True, exist_ok=True)
+    prog = _EBOOK_CONV_DIR / f"{job}.json"
+    try:
+        prog.write_text(json.dumps({"status": "converting", "rel": out_rel, "ts": int(__import__("time").time())}), "utf-8")
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = ["nice", "-n", "15", py, str(CLAUDE_DIR / "scripts" / "convert_ebook.py"),
+           str(abs_path), str(out_pdf), "--progress", str(prog)]
+    try:
+        _spawn_survivable(cmd, str(CLAUDE_DIR))
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动转换失败：{ex}"}), 500
+    return jsonify({"ok": True, "converting": True, "job": job, "rel": out_rel, "view_url": out_url})
+
+
+@bp.route("/api/epub-search")
+def pdf_api_epub_search():
+    """EPUB 全文搜索:服务端 grep 解包出的 XHTML(快,不用浏览器加载几千章)。
+    GET ?file=<rel>&q=<词> → {ok, results:[{href, loc, excerpt}]}。href 相对 OPF 目录 → epub.js display(href) 可跳。"""
+    rel = (request.args.get("file") or "").strip()
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": True, "results": []})
+    abs_path = _resolve_epub_book(rel)   # 收藏夹物化 EPUB 也可全文搜索
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    root = _ensure_epub_extracted(abs_path, rel)
+    if not root:
+        return jsonify({"ok": False, "error": "解包失败"}), 500
+    import re
+    # OPF 目录(算 href 相对路径用)
+    try:
+        cont = (root / "META-INF" / "container.xml").read_text("utf-8", "ignore")
+        opf_rel = re.search(r'full-path="([^"]+)"', cont).group(1)
+        opf_dir = (root / opf_rel).parent
+    except Exception:
+        opf_dir = root
+    ql = q.lower()
+    tag_re = re.compile(r"<[^>]+>")
+    results = []
+    sections = _epub_opf_info(root)["sections"]   # spine 顺序 → idx 直接给前端精确跳转
+    for idx, fp in enumerate(sections):
+        if len(results) >= 80:
+            break
+        try:
+            raw = fp.read_text("utf-8", "ignore")
+        except Exception:
+            continue
+        # 去标签 → 纯文本
+        body = raw.split("<body", 1)[-1]
+        text = tag_re.sub(" ", body)
+        text = re.sub(r"&[a-zA-Z#0-9]+;", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        low = text.lower()
+        if ql not in low:
+            continue
+        start = 0
+        cnt = 0
+        while cnt < 3:
+            i = low.find(ql, start)
+            if i < 0:
+                break
+            a = max(0, i - 40); b = min(len(text), i + len(q) + 50)
+            excerpt = ("…" if a > 0 else "") + text[a:i] + "" + text[i:i + len(q)] + "" + text[i + len(q):b] + ("…" if b < len(text) else "")
+            results.append({"idx": idx, "loc": fp.stem, "excerpt": excerpt})
+            start = i + len(q); cnt += 1
+            if len(results) >= 80:
+                break
+    return jsonify({"ok": True, "results": results, "truncated": len(results) >= 80})
+
+
+# ── Phase G EPUB 数据源：振假名/音标、整段翻译、生词掌握度查找表 ──────────────────
+# 纯新增；复用 PDF 阅读器现成实现（unidic 分词 _apply_jp_tokenize / ECDICT 音标
+# _build_en_furigana / Google 批量翻译 gtranslate_batch + sidecar 缓存 / vocab_index）。
+# EPUB 只有纯文本（无 char bbox）→ 用「合成 char dict」把字符索引当 x 坐标喂给那两个按
+# bbox 出读音的函数，返回 furigana item 的 x0/x1 即字符 start/end 偏移（code point 计）。
+
+_EPUB_FURI_CACHE_DIR = CLAUDE_DIR / "state" / "epub-furigana-cache"
+
+
+def _epub_text_chars(text: str) -> list:
+    """把纯文本转成「合成 char dict」（x0=字符在 text 中的偏移、宽 1、单行 y0=0/y1=1）。
+    好让 _apply_jp_tokenize / _build_en_furigana 直接复用——它们按 char bbox 出读音/音标，
+    这里「索引当 x 坐标」→ 返回 furigana item 的 x0/x1 即字符 start/end 偏移（end 不含）。
+    whitespace 标 sp=True（跟 PDF chars 一致，分词/拼词跳过且不破坏分组对齐）。"""
+    out: list = []
+    for k, ch in enumerate(text or ""):
+        out.append({"c": ch, "x0": float(k), "x1": float(k + 1),
+                    "y0": 0.0, "y1": 1.0, "sp": ch.isspace()})
+    return out
+
+
+def _epub_furigana_tokens(text: str) -> list:
+    """对一段文本算振假名/音标 token。
+    日语含汉字 token → 平假名读音（unidic）；英文连续字母词 → IPA 音标（ECDICT）。
+    返回 [{start,end,reading,kind}]，start/end=字符偏移（end 不含），kind='jp'|'en'。
+    纯假名/无音标词不产 token（前端无需注音）。"""
+    text = text or ""
+    if not text.strip():
+        return []
+    chars = _epub_text_chars(text)
+    toks: list = []
+    # 日语：仅含汉字的 token 出读音（_apply_jp_tokenize 内部还会再判一次 CJK，纯英文段直接 return）
+    try:
+        furi: list = []
+        _apply_jp_tokenize(chars, 0, 0, furigana_out=furi)
+        for it in furi:
+            try:
+                toks.append({"start": int(round(it["x0"])), "end": int(round(it["x1"])),
+                             "reading": it.get("rt", ""), "kind": "jp"})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # 英文：连续字母词查 ECDICT phonetic（x0/x1 即偏移）
+    try:
+        for it in _build_en_furigana(chars):
+            try:
+                toks.append({"start": int(round(it["x0"])), "end": int(round(it["x1"])),
+                             "reading": it.get("rt", ""), "kind": "en"})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    toks.sort(key=lambda t: t["start"])
+    return toks
+
+
+def _epub_furi_cache_path(text: str) -> Path:
+    import hashlib
+    sha = hashlib.sha1(("furi::" + (text or "")).encode("utf-8")).hexdigest()[:16]
+    return _EPUB_FURI_CACHE_DIR / f"{sha}.json"
+
+
+def _epub_furi_cache_get(text: str):
+    p = _epub_furi_cache_path(text)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _epub_furi_cache_put(text: str, tokens: list):
+    try:
+        _EPUB_FURI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _epub_furi_cache_path(text).write_text(
+            json.dumps(tokens, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+def _epub_section_paragraphs(rel: str, idx: int) -> list:
+    """取 EPUB 某 section 的纯文本段落（给 {file,idx} 模式）。
+    复用 _sanitize_epub_section 出的 HTML，块级标签换行 → 去标签 → 按非空行切段。"""
+    abs_path = _resolve_epub_book(rel)   # 收藏夹物化 EPUB 也可取段落(振假名 by-idx / 助手 read_section)
+    if not abs_path or abs_path.suffix.lower() != ".epub":
+        return []
+    root = _ensure_epub_extracted(abs_path, rel)
+    if not root:
+        return []
+    secs = _epub_opf_info(root)["sections"]
+    if idx < 0 or idx >= len(secs):
+        return []
+    try:
+        html = _epub_section_cached(secs, idx, root, _epub_sha(rel))
+    except Exception:
+        return []
+    import re as _re
+    h = _re.sub(r"(?is)<(?:p|div|h[1-6]|li|br|section|article|blockquote|tr)[^>]*>", "\n", html)
+    h = _re.sub(r"(?is)</(?:p|div|h[1-6]|li|section|article|blockquote|tr)>", "\n", h)
+    h = _re.sub(r"(?is)<[^>]+>", "", h)
+    h = (h.replace("&nbsp;", " ").replace("&amp;", "&")
+         .replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"'))
+    out: list = []
+    for line in h.split("\n"):
+        s = line.strip()
+        if s:
+            out.append(s)
+    return out
+
+
+@bp.route("/api/epub-furigana", methods=["POST"])
+def pdf_api_epub_furigana():
+    """EPUB 段落振假名/音标。
+    body: {file, texts:[...]}（一组段落纯文本）或 {file, idx}（按 section 取章节段落）。
+    每段:含汉字 → unidic 分词出 token offset + 平假名读音;英文词 → ECDICT 音标。
+    返回 {ok, items:[{text, tokens:[{start,end,reading,kind}]}]}。按文本哈希 sidecar 缓存
+    （避免每次重算 unidic；fugashi tagger 进程内常驻，只首段加载一次）。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    texts = body.get("texts")
+    if not isinstance(texts, list):
+        try:
+            idx = int(body.get("idx") or 0)
+        except Exception:
+            idx = 0
+        texts = _epub_section_paragraphs(rel, idx)
+    items: list = []
+    for t in texts[:4000]:
+        t = "" if t is None else str(t)
+        toks = _epub_furi_cache_get(t)
+        if toks is None:
+            toks = _epub_furigana_tokens(t)
+            _epub_furi_cache_put(t, toks)
+        items.append({"text": t, "tokens": toks})
+    return jsonify({"ok": True, "items": items})
+
+
+_EPUB_FURIFIX_DIR = CLAUDE_DIR / "state" / "epub-furigana-fix"
+
+
+def _epub_furifix_path(text: str, readings: list) -> Path:
+    import hashlib
+    key = "epubfurifix::" + (text or "") + "||" + json.dumps(readings or [], ensure_ascii=False, sort_keys=True)
+    sha = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+    _EPUB_FURIFIX_DIR.mkdir(parents=True, exist_ok=True)
+    return _EPUB_FURIFIX_DIR / f"{sha}.json"
+
+
+@bp.route("/api/epub-furigana-verify", methods=["POST"])
+def pdf_api_epub_furigana_verify():
+    """EPUB 振假名读音**按整段上下文 AI 校正**(复用 PDF /api/furigana-verify 同款做法,
+    通用解决日语量词/熟字訓/多音字读错,不硬编码)。
+    POST {text, readings:[{wd,rt}|{word,reading}|{start,end,reading}]} → {ok, fixes:[{i,r}], readings:[...纠正后...]}。
+    i=readings 下标、r=纠正后平假名(只列改了的)。按 (text+readings) 哈希永久缓存;
+    前端 epub2-deco rubyApply 后台调一次,拿 fixes 原地替换 rt。"""
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "")
+    readings = body.get("readings")
+    if not isinstance(readings, list) or not readings:
+        return jsonify({"ok": False, "error": "缺少 readings"}), 400
+
+    def _is_kana_rt(s):
+        return bool(s) and all(("぀" <= ch <= "ヿ") or ch == "ー" for ch in s)
+
+    def _word_of(it):
+        if not isinstance(it, dict):
+            return ""
+        w = it.get("wd") or it.get("word") or it.get("text") or ""
+        if not w and ("start" in it and "end" in it):
+            try:
+                w = text[int(it["start"]):int(it["end"])]
+            except Exception:
+                w = ""
+        return w or ""
+
+    def _rt_of(it):
+        if not isinstance(it, dict):
+            return ""
+        return it.get("rt") or it.get("reading") or ""
+
+    # 只校「日语假名读音」项(rt 全是假名)且词里含汉字(纯假名词无校正空间)→ prompt 小而集中
+    cand = []
+    for i, it in enumerate(readings[:60]):
+        rt = _rt_of(it)
+        wd = _word_of(it)
+        if not _is_kana_rt(rt) or not wd:
+            continue
+        if not any("一" <= ch <= "鿿" for ch in wd):   # 含汉字才校(熟字訓/多音字/量词)
+            continue
+        cand.append((i, wd, rt))
+
+    # 输出 readings:在原 readings 上把 rt/reading 替换为纠正后值
+    def _build_out(fixes):
+        fix_map = {f["i"]: f["r"] for f in fixes}
+        out = []
+        for i, it in enumerate(readings):
+            if isinstance(it, dict) and i in fix_map:
+                nit = dict(it)
+                if "reading" in nit:
+                    nit["reading"] = fix_map[i]
+                else:
+                    nit["rt"] = fix_map[i]
+                out.append(nit)
+            else:
+                out.append(it)
+        return out
+
+    fpath = _epub_furifix_path(text, readings)
+    if fpath.exists():
+        try:
+            fixes = json.loads(fpath.read_text("utf-8"))
+            return jsonify({"ok": True, "cached": True, "fixes": fixes, "readings": _build_out(fixes)})
+        except Exception:
+            pass
+
+    if not cand:
+        try: fpath.write_text("[]", "utf-8")
+        except Exception: pass
+        return jsonify({"ok": True, "fixes": [], "readings": readings})
+
+    ctx_text = (text or "").strip()[:600]
+    listing = "\n".join(f"{i}. 「{wd}」(当前注 {rt})" for i, wd, rt in cand)
+    prompt = (
+        "下面是日语句子里的若干词及其假名注音,注音可能有误"
+        "(常见错因:量词读音如 365日→にち、14日→か、3人→にん;熟字訓如 大人→おとな、今日→きょう;"
+        "多音字按上下文不同读音如 行く→いく vs 行う→おこなう)。"
+        "请结合句子上下文,给出每个词在该处的**正确平假名读音**。\n"
+        + (f"句子上下文:「{ctx_text}」\n" if ctx_text else "")
+        + listing + "\n\n"
+        '严格只输出 JSON 数组,每项 {"i":序号,"r":"正确平假名"};每行都要给(即使本来就对)。不要解释。'
+    )
+    fixes = []
+    try:
+        raw = _ai_call(prompt, "dict")
+        m = re.search(r"\[.*\]", raw or "", re.DOTALL)
+        if m:
+            arr = json.loads(m.group(0))
+            cand_rt = {i: rt for i, _wd, rt in cand}
+            for it in arr:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    i = int(it.get("i"))
+                except (TypeError, ValueError):
+                    continue
+                r = (it.get("r") or "").strip()
+                if i in cand_rt and r and _is_kana_rt(r) and len(r) <= 16 and r != cand_rt[i]:
+                    fixes.append({"i": i, "r": r})
+    except Exception as ex:
+        sys.stderr.write(f"[epub-furigana-verify] {ex}\n")
+    try:
+        fpath.write_text(json.dumps(fixes, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "fixes": fixes, "readings": _build_out(fixes)})
+
+
+# ── EPUB 跨设备 prefs(独立命名空间,跟 PDF 的 /api/prefs 同款 patch 存,按登录用户)──
+# 存:续读 cfi / 字号 / 主题 / 行距 / ruby 开关 等 epub-* 键。iOS PWA↔Safari localStorage 不互通 → 存服务端同步。
+_EPUB_PREFS_DIR = CLAUDE_DIR / "state" / "epub-prefs"
+
+
+def _epub_prefs_path():
+    import re as _re
+    user = (session.get("username") or "anon")
+    safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(user))[:64] or "anon"
+    return _EPUB_PREFS_DIR / f"{safe}.json"
+
+
+@bp.route("/api/epub-prefs", methods=["GET", "POST"])
+def pdf_api_epub_prefs():
+    """GET → {ok, prefs:{key:value}}; POST {patch:{k:v|null}} 合并(null=删) → {ok}。
+    键为前端 localStorage 的 epub-*(续读 cfi / 字号 / 主题 / 行距 / ruby 开关)。"""
+    p = _epub_prefs_path()
+    try:
+        cur = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except Exception:
+        cur = {}
+    if request.method == "GET":
+        return jsonify({"ok": True, "prefs": cur})
+    body = request.get_json(silent=True) or {}
+    patch = body.get("patch") or {}
+    if not isinstance(patch, dict):
+        return jsonify({"ok": False, "error": "bad patch"}), 400
+    for k, v in patch.items():
+        if not isinstance(k, str):
+            continue
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[str(k)] = v
+    try:
+        _EPUB_PREFS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cur, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True})
+
+
+def _epub_ja_tokens(text: str) -> list:
+    """全分词:fugashi 把日语文本切成**全部**词 token(含纯假名/助词,不像 furigana 只给汉字词),
+    返回 [{start,end}](字符偏移,end 不含)。供 EPUB 分词浮层给每个日语词盖可点按钮。
+    含 CJK 才分;纯非 CJK 段返回 [](英文由前端按拉丁词自行包)。"""
+    text = text or ""
+    if not text.strip() or not any(_is_cjk_char(c) for c in text):
+        return []
+    tagger = _get_jp_tagger()
+    if not tagger:
+        return []
+    toks: list = []
+    pos = 0
+    try:
+        for w in tagger(text):
+            surf = getattr(w, "surface", "") or ""
+            if not surf:
+                continue
+            i = text.find(surf, pos)
+            if i < 0:
+                i = text.find(surf)
+            if i < 0:
+                continue
+            toks.append({"start": i, "end": i + len(surf)})
+            pos = i + len(surf)
+    except Exception:
+        return []
+    return toks
+
+
+def _epub_jatok_cache_path(text: str) -> Path:
+    import hashlib
+    sha = hashlib.sha1(("jatok::" + (text or "")).encode("utf-8")).hexdigest()[:16]
+    return _EPUB_FURI_CACHE_DIR / f"jt-{sha}.json"
+
+
+def _epub_jatok_cache_get(text: str):
+    p = _epub_jatok_cache_path(text)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _epub_jatok_cache_put(text: str, tokens: list):
+    try:
+        _EPUB_FURI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _epub_jatok_cache_path(text).write_text(json.dumps(tokens, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+@bp.route("/api/epub-tokenize", methods=["POST"])
+def pdf_api_epub_tokenize():
+    """EPUB 日语全分词(给分词浮层用)。body: {file?, texts:[...]} → {ok, items:[{text, tokens:[{start,end}]}]}。
+    按文本哈希缓存;纯非 CJK 段 tokens=[]。"""
+    body = request.get_json(silent=True) or {}
+    texts = body.get("texts")
+    if not isinstance(texts, list):
+        return jsonify({"ok": False, "error": "no texts"}), 400
+    items: list = []
+    for t in texts[:4000]:
+        t = "" if t is None else str(t)
+        toks = _epub_jatok_cache_get(t)
+        if toks is None:
+            toks = _epub_ja_tokens(t)
+            _epub_jatok_cache_put(t, toks)
+        items.append({"text": t, "tokens": toks})
+    return jsonify({"ok": True, "items": items})
+
+
+@bp.route("/api/epub-translate-section", methods=["POST"])
+def pdf_api_epub_translate_section():
+    """EPUB 段落批量翻译（中文）。body: {file, texts:[...]}。
+    Google 批量翻译（gtranslate_batch）+ sidecar 永久缓存,未命中逐段 no_ai 兜底
+    （gtranslate→deepl→mymemory，**绝不调 AI CLI**；10s 墙钟预算）。
+    返回 {ok, translations:[zh,...]}（顺序对应 texts，未译留空串）。"""
+    body = request.get_json(silent=True) or {}
+    texts_in = body.get("texts")
+    if not isinstance(texts_in, list):
+        return jsonify({"ok": False, "error": "texts 必须是数组"}), 400
+    texts = ["" if t is None else str(t) for t in texts_in][:4000]
+    import sys as _sys
+    vp = CLAUDE_DIR / "scripts" / "vocab"
+    if str(vp) not in _sys.path:
+        _sys.path.insert(0, str(vp))
+    try:
+        from translate import (gtranslate_batch as _gb, translate as _tr,
+                               _cache_get as _cg, _cache_put as _cp)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"translate load fail: {ex}"}), 500
+    # 1) 先吃缓存（空文本视为已译空串）
+    zhs = [((_cg(t, "zh-CN") or "") if t.strip() else "") for t in texts]
+    miss_idx = [i for i, t in enumerate(texts) if t.strip() and not zhs[i]]
+    # 2) 未命中批量 Google
+    if miss_idx:
+        miss_texts = [texts[i] for i in miss_idx]
+        batch = None
+        try:
+            batch = _gb(miss_texts)
+        except Exception:
+            batch = None
+        if batch and len(batch) == len(miss_texts):
+            for k, i in enumerate(miss_idx):
+                if batch[k]:
+                    zhs[i] = batch[k]
+                    try: _cp(texts[i], "zh-CN", batch[k], "gtranslate")
+                    except Exception: pass
+        # 3) 仍缺 → 逐段 no_ai 兜底（translate() 内部自带缓存读写），10s 墙钟预算
+        still = [i for i in miss_idx if not zhs[i]]
+        _deadline = time.monotonic() + 10
+        for i in still[:60]:
+            if time.monotonic() > _deadline:
+                break
+            try:
+                z = _tr(texts[i], backend="no_ai")
+                if z:
+                    zhs[i] = z
+            except Exception:
+                pass
+    done = sum(1 for z in zhs if z)
+    return jsonify({"ok": True, "translations": zhs, "translated": done, "total": len(texts)})
+
+
+@bp.route("/api/vocab-mastery-map")
+def pdf_api_vocab_mastery_map():
+    """整本一次返回生词掌握度查找表（给 EPUB 前端画下划线着色，客户端缓存）。
+    英文取 vocab_index（lemma + 所有 forms → mastery/label_slug）；日语取 jp-vocab trackable
+    词（按熟悉度算 slug）。已掌握(mastered)的不返回（=不画下划线，跟 PDF 一致）。
+    ?file= 保留参数（当前不分书，前端只对文本里出现的词查表，多余条目无害）。
+    返回 {ok, map:{word_lower:{label, mastery}}, count}。"""
+    out: dict = {}
+    # 英文（及统一库里已并入的词）
+    try:
+        for w, info in (_vocab_idx() or {}).items():
+            slug = info.get("label_slug") or ""
+            if not slug or slug == "mastered":
+                continue
+            out[w] = {"label": slug, "mastery": round(float(info.get("mastery", 0) or 0), 3)}
+    except Exception:
+        pass
+    # 日语 jp-vocab（查过的词，按熟悉度算 slug；mastered → _jp_vocab_slug 返回 None 跳过）
+    try:
+        for w, e in (_jp_vocab_load() or {}).items():
+            if not _jp_vocab_is_trackable(w):
+                continue
+            slug = _jp_vocab_slug(e)
+            if not slug:
+                continue
+            wl = w.lower()
+            if wl not in out:   # vocab_index 已有则不覆盖（统一库优先）
+                out[wl] = {"label": slug, "mastery": round(_jp_mastery(e), 3)}
+    except Exception:
+        pass
+    return jsonify({"ok": True, "map": out, "count": len(out)})
+
+
+_EPUB_DBG_LOG = CLAUDE_DIR / "state" / "epub-dbg.log"
+
+
+@bp.route("/api/epub-dbg", methods=["POST"])
+def pdf_api_epub_dbg():
+    """EPUB 阅读器前端调试日志回传(临时诊断用):前端 dbg() 把每行 POST 来,服务端追加到 state/epub-dbg.log。
+    这样不靠截图也能远程定位「选中不弹工具栏」卡在哪一步。"""
+    body = request.get_json(silent=True) or {}
+    msg = str(body.get("msg") or "")[:500]
+    try:
+        _EPUB_DBG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        # 控制大小:超过 64KB 截断重来
+        if _EPUB_DBG_LOG.exists() and _EPUB_DBG_LOG.stat().st_size > 64 * 1024:
+            _EPUB_DBG_LOG.write_text("", "utf-8")
+        with _EPUB_DBG_LOG.open("a", encoding="utf-8") as f:
+            f.write(__import__("time").strftime("%H:%M:%S") + "  " + msg + "\n")
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
 @bp.route("/api/upload", methods=["POST"])
 def pdf_api_upload():
-    """上传 PDF 到 vault 子目录。multipart form：file + target_dir（默认 资源/uploads/）。"""
+    """上传书到 vault 子目录。multipart form：file + target_dir（默认 资源/uploads/）。
+    PDF 直存;**EPUB 直存(原生 reflow 阅读,不转换)**;MOBI/FB2/XPS/CBZ 仍服务端转 PDF。"""
     f = request.files.get("file")
     target_dir = (request.form.get("target_dir") or "资源/uploads").strip().strip("/")
     if not f:
         return jsonify({"ok": False, "error": "未选择文件"}), 400
     fname = f.filename or ""
-    if not fname.lower().endswith(".pdf"):
-        return jsonify({"ok": False, "error": "仅支持 PDF 文件"}), 400
+    ext = Path(fname).suffix.lower()
+    if ext != ".pdf" and ext not in _EBOOK_EXTS:
+        return jsonify({"ok": False, "error": "支持的格式：PDF / EPUB / MOBI / FB2 / XPS / CBZ"}), 400
     # 防 path traversal
     if ".." in target_dir.split("/") or target_dir.startswith("/"):
         return jsonify({"ok": False, "error": "目标目录非法"}), 400
-    # 清理文件名
-    safe_name = _sanitize_filename(Path(fname).stem) + ".pdf"
     dest_dir = (OBSIDIAN_ROOT / target_dir).resolve()
     try:
         dest_dir.relative_to(OBSIDIAN_ROOT.resolve())
     except ValueError:
         return jsonify({"ok": False, "error": "目标目录超出 vault"}), 400
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # PDF 存 .pdf;EPUB 原生存 .epub;其余电子书转换后产物叫 .pdf
+    out_ext = ".epub" if ext == ".epub" else ".pdf"
+    safe_name = _sanitize_filename(Path(fname).stem) + out_ext
     dest = dest_dir / safe_name
     if dest.exists():
-        stem = safe_name[:-4]
+        stem = safe_name[: -len(out_ext)]
         for i in range(1, 200):
-            cand = dest_dir / f"{stem}-{i}.pdf"
+            cand = dest_dir / f"{stem}-{i}{out_ext}"
             if not cand.exists():
                 dest = cand; break
+    if ext == ".pdf":
+        try:
+            f.save(str(dest))
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"保存失败：{ex}"}), 500
+        rel = dest.relative_to(OBSIDIAN_ROOT).as_posix()
+        return jsonify({"ok": True, "rel": rel, "converted": False, "kind": "pdf",
+                        "view_url": f"/pdf/view?file={urllib.parse.quote(rel, safe='/')}"})
+    if ext == ".epub":
+        # 原生 reflow:直接存 .epub,开到 epub 阅读器(不转换、不阻塞)
+        try:
+            f.save(str(dest))
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"保存失败：{ex}"}), 500
+        rel = dest.relative_to(OBSIDIAN_ROOT).as_posix()
+        return jsonify({"ok": True, "rel": rel, "converted": False, "kind": "epub",
+                        "view_url": f"/pdf/epub/view?file={urllib.parse.quote(rel, safe='/')}"})
+    # ── 电子书 → **后台转 PDF**(多卷集/大书 Calibre 要几分钟,同步会让手机端 fetch 超时报错)──
+    import uuid, subprocess
+    job = uuid.uuid4().hex[:12]
+    _EBOOK_CONV_DIR.mkdir(parents=True, exist_ok=True)
+    staging = _EBOOK_CONV_DIR / f"{job}{ext}"
     try:
-        f.save(str(dest))
+        f.save(str(staging))
     except Exception as ex:
         return jsonify({"ok": False, "error": f"保存失败：{ex}"}), 500
     rel = dest.relative_to(OBSIDIAN_ROOT).as_posix()
-    return jsonify({"ok": True, "rel": rel, "view_url": f"/pdf/view?file={urllib.parse.quote(rel, safe='/')}"})
+    prog = _EBOOK_CONV_DIR / f"{job}.json"
+    try:
+        prog.write_text(json.dumps({"status": "converting", "rel": rel, "ts": int(__import__("time").time())}), "utf-8")
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    cmd = ["nice", "-n", "15", py, str(CLAUDE_DIR / "scripts" / "convert_ebook.py"),
+           str(staging), str(dest), "--progress", str(prog)]
+    try:
+        _spawn_survivable(cmd, str(CLAUDE_DIR))   # 放进用户级 scope:webapp 重启/部署不会杀掉长转换
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动转换失败：{ex}"}), 500
+    return jsonify({"ok": True, "converting": True, "job": job, "rel": rel, "name": dest.name,
+                    "view_url": f"/pdf/view?file={urllib.parse.quote(rel, safe='/')}"})
+
+
+_EBOOK_CONV_DIR = CLAUDE_DIR / "state" / "pdf-ebook-convert"
+
+
+@bp.route("/api/ebook-convert-status")
+def pdf_api_ebook_convert_status():
+    """电子书后台转换进度。GET ?job=<id> → {status: converting|done|error, rel, view_url, error}。"""
+    job = (request.args.get("job") or "").strip()
+    if not job or not job.isalnum():
+        return jsonify({"ok": False, "error": "bad job"}), 400
+    prog = _EBOOK_CONV_DIR / f"{job}.json"
+    st = {}
+    try:
+        st = json.loads(prog.read_text("utf-8"))
+    except Exception:
+        return jsonify({"ok": True, "status": "converting"})   # 文件还没写出 → 当转换中
+    rel = st.get("rel", "")
+    # 产物真生成了才算 done(防进度文件先写但文件没落)
+    if st.get("status") == "done" and rel:
+        ap = OBSIDIAN_ROOT / rel
+        if ap.exists():
+            # 清掉 staging 临时电子书
+            for f in _EBOOK_CONV_DIR.glob(f"{job}.*"):
+                if not f.name.endswith(".json"):
+                    try: f.unlink()
+                    except Exception: pass
+            return jsonify({"ok": True, "status": "done", "rel": rel,
+                            "view_url": f"/pdf/view?file={urllib.parse.quote(rel, safe='/')}"})
+    if st.get("status") == "error":
+        return jsonify({"ok": True, "status": "error", "error": st.get("error", "转换失败")})
+    return jsonify({"ok": True, "status": "converting"})
 
 
 def _sanitize_filename(s: str) -> str:
@@ -4711,6 +9011,43 @@ def _sanitize_filename(s: str) -> str:
     s = (s or "").strip().strip(".")
     s = _re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', s)
     return s[:120] or "untitled"
+
+
+@bp.route("/api/epub-chat", methods=["POST"])
+def pdf_api_epub_chat():
+    """EPUB 阅读器侧栏对话(解耦,不走 PDF agentic 工具循环):带书名 + 选中文 + 所在章 + 近几轮历史
+    拼 prompt → reader_ask/stream(explain 档:claude/Gemini 互兜底)。SSE 优先,JSON 兜底。"""
+    body = request.get_json(silent=True) or {}
+    msg = (body.get("message") or "").strip()
+    if not msg:
+        return jsonify({"ok": False, "error": "空消息"}), 400
+    sel = (body.get("selection") or "").strip()
+    chap = (body.get("chapter") or "").strip()      # 当前章节纯文本(可截断)
+    book = (body.get("book") or "").strip()
+    history = body.get("history") or []             # [{role, content}, ...] 近几轮
+    parts = ["你是阅读助手,正在帮用户读一本电子书。用简洁中文回答。"
+             "用 Markdown;数学公式严格用 $...$ 或 $$...$$,禁止用反引号包数学。"
+             "回答完后另起一行,用 [[FOLLOWUP]]问题1|问题2|问题3[[/FOLLOWUP]] 给最多 3 条用户可能想继续追问的简短问题(没有就不给)。"]
+    if book:
+        parts.append(f"【书】{book}")
+    if chap:
+        parts.append(f"【当前章节节选】\n{chap[:3000]}")
+    if sel:
+        parts.append(f"【用户选中的文字】\n{sel[:2000]}")
+    if history:
+        h = "\n".join(f"{'用户' if m.get('role')=='user' else '助手'}：{(m.get('content') or '')[:600]}"
+                      for m in history[-6:] if m.get('content'))
+        if h:
+            parts.append(f"【最近对话】\n{h}")
+    parts.append(f"【用户问】\n{msg}")
+    prompt = "\n\n".join(parts)
+    uid = _reader_uid()
+    if "text/event-stream" in (request.headers.get("Accept") or ""):
+        return _start_ai_stream(prompt, "explain", uid, (body.get("rid") or "").strip())
+    try:
+        return jsonify({"ok": True, "answer": _ai_call(prompt, "explain", uid).strip()})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"AI 失败：{ex}"}), 500
 
 
 @bp.route("/api/explain", methods=["POST"])
@@ -4749,12 +9086,11 @@ def pdf_api_explain():
     if ctx:
         prompt += f"=== 上下文 ===\n{ctx[:3000]}\n\n"
     prompt += f"=== 待解释 ===\n{text}"
-    model = (body.get("model") or "").strip()
-    effort = (body.get("effort") or "").strip()
+    uid = _reader_uid()
     if "text/event-stream" in (request.headers.get("Accept") or ""):
-        return _start_ai_stream(prompt, model, effort, (body.get("rid") or "").strip())
+        return _start_ai_stream(prompt, "explain", uid, (body.get("rid") or "").strip())
     try:
-        out = _ai_call(prompt, model, effort).strip()
+        out = _ai_call(prompt, "explain", uid).strip()
         return jsonify({"ok": True, "explanation": out})
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI 解释失败：{ex}"}), 500
@@ -4803,10 +9139,10 @@ def _aistream_update(rid: str, full: str, status: str = "", error: str = ""):
         if error:
             j["error"] = error
 
-def _ai_stream_worker(rid: str, prompt: str, model: str, effort: str):
+def _ai_stream_worker(rid: str, prompt: str, action: str = "explain", uid: str = ""):
     acc = []
     try:
-        for chunk in _ai_call_stream(prompt, model, effort):
+        for chunk in _ai_call_stream(prompt, action, uid):
             if chunk:
                 acc.append(chunk)
                 _aistream_update(rid, "".join(acc))
@@ -4814,20 +9150,21 @@ def _ai_stream_worker(rid: str, prompt: str, model: str, effort: str):
     except Exception as e:
         _aistream_update(rid, "".join(acc), status="error", error=str(e))
 
-def _start_ai_stream(prompt: str, model: str = "", effort: str = "", rid: str = "", on_done=None):
+def _start_ai_stream(prompt: str, action: str = "explain", uid: str = "", rid: str = "", on_done=None):
     """启动后台 AI 生成线程 + 返回「tail」SSE Response（边生成边推，且断连后线程继续跑完）。
     rid 为空 → 退化成原行内 _sse_stream（不抗断，兼容老前端）。
-    on_done(full_text):生成成功后回调(写服务端缓存等);仅 rid 路径生效。"""
+    on_done(full_text):生成成功后回调(写服务端缓存等);仅 rid 路径生效。
+    ⚠ uid 须在请求上下文里取好传进来(后台线程没有 session,否则只能用出厂默认预设)。"""
     from flask import Response, stream_with_context
     if not rid:
-        return Response(stream_with_context(_sse_stream(prompt, model, effort)),
+        return Response(stream_with_context(_sse_stream(prompt, action, uid)),
                         mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     import json as _json
     _aistream_init(rid)
 
     def _worker():
-        _ai_stream_worker(rid, prompt, model, effort)
+        _ai_stream_worker(rid, prompt, action, uid)
         if on_done:
             with _JOBS_LOCK:
                 j = _JOBS.get(rid) or {}
@@ -4872,11 +9209,47 @@ def _validate_snippets_body(body):
         return None, ("笔记名不能为空", 400)
     return {
         "snippets": snippets, "make_note": make_note, "make_anki": make_anki,
-        "note_name": note_name, "model": body.get("model") or "", "effort": body.get("effort") or "",
+        "note_name": note_name, "action": "explain", "uid": _reader_uid(),   # uid 在请求里取好(异步线程没 session)
     }, None
 
 
-def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -> dict:
+_ANKI_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+def _anki_md_links(text):
+    """Anki 卡按 HTML 渲染:AI 生成的 markdown 链接 [文本](url) 转成可点的 <a href>(否则整串显示成字面文本)。"""
+    if not text:
+        return text
+    return _ANKI_MD_LINK_RE.sub(r'<a href="\2">\1</a>', text)
+
+
+def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
+    """下载一张图片准备存进 Anki 媒体库(限时限型限大小,失败静默返回 None,不拖垮制卡流程)。
+    返回 (filename, b64data) 或 None。filename 用 url 的 md5 短哈希 + 猜出的扩展名,避免跟已有媒体重名/路径穿越。"""
+    if not url or not str(url).lower().startswith(("http://", "https://")):
+        return None
+    try:
+        import urllib.request as _ureq
+        req = _ureq.Request(url, headers={"User-Agent": "bwicarus-claude-assistant/1.0"})
+        with _ureq.urlopen(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                return None
+            data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                return None
+        ext_map = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+                   "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}
+        ext = ext_map.get(ctype, "")
+        if not ext:
+            url_ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+            ext = url_ext if url_ext in (".jpg", ".jpeg", ".png", ".gif", ".webp") else ".jpg"
+        import hashlib, base64
+        fname = "asst-img-" + hashlib.md5(url.encode("utf-8")).hexdigest()[:16] + ext
+        return fname, base64.b64encode(data).decode("ascii")
+    except Exception:
+        return None
+
+
+def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None) -> dict:
     """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。"""
     out = {"ok": True}
     # ── 创建笔记 ──
@@ -4909,7 +9282,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
             f"=== 收集内容 ===\n{snippets_text}"
         )
         try:
-            content = _ai_call(prompt, model or "", effort or "").strip()
+            content = _ai_call(prompt, action, uid).strip()
             if content.startswith("```"):
                 import re as _re
                 content = _re.sub(r'^```[a-zA-Z]*\n', '', content)
@@ -4928,12 +9301,6 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
     # ── 创建 Anki 卡 ──
     if make_anki:
         try:
-            sys.path.insert(0, str(CLAUDE_DIR / "_client" / "core"))
-            from ai_backends import make_backend  # type: ignore
-            sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
-            sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
-            from qa_server import get_cfg
-            cfg = get_cfg()
             # AI 把 snippets 转 Anki 卡片 JSON
             snippets_text = "\n\n".join([
                 f"段 {i+1}：{s.get('text','')}"
@@ -4950,15 +9317,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
                 "3. 数学公式 $...$ 或 $$...$$\n\n"
                 f"=== 学习内容 ===\n{snippets_text}"
             )
-            backend_name = cfg.get("ai_backend", "claude_cli")
-            settings = dict((cfg.get("ai") or {}).get(backend_name, {}))
-            if model:  settings["model"] = model
-            if effort: settings["effort"] = effort
-            ad = make_backend(backend_name, settings)
-            raw = ad.chat([
-                {"role": "system", "content": "你是 Anki 卡片生成器，严格只输出 JSON。"},
-                {"role": "user", "content": prompt},
-            ])
+            raw = _ai_call(prompt, action, uid)
             # 提取 JSON
             s_idx = raw.find("{"); e_idx = raw.rfind("}")
             cards_data = json.loads(raw[s_idx:e_idx+1]) if s_idx >= 0 else {"cards": []}
@@ -4997,15 +9356,34 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, model, effort) -
                 _ank("createDeck", {"deck": "QA"})   # 幂等,确保牌组在(headless addNote 偶尔落系统默认)
             except Exception:
                 pass
+            # 助手 search_image 找到的图,若一并要求做卡 → 真下载 + 存进 Anki 媒体库(不是外链,以后链接失效卡片也不烂)。
+            # 下载/存媒体任一步失败都静默跳过,不影响卡片本身正常生成。
+            img_tag = ""
+            if image_url:
+                try:
+                    dl = _download_image_for_anki(image_url)
+                    if dl:
+                        fname, b64data = dl
+                        mres = _ank("storeMediaFile", {"filename": fname, "data": b64data})
+                        if not mres.get("error"):
+                            img_tag = f'<br><img src="{fname}">'
+                except Exception:
+                    pass
             added = 0
             note_ids = []
-            for c in cards:
+            for idx, c in enumerate(cards):
                 ctype = (c.get("type") or "basic").lower()
                 if ctype == "cloze":
-                    fields = {c_text: c.get("text", "")}
+                    text_val = _anki_md_links(c.get("text", ""))
+                    if idx == 0 and img_tag:   # 只贴进本次生成的第一张卡,避免多卡重复贴同一张图
+                        text_val += img_tag
+                    fields = {c_text: text_val}
                     model_name = cloze_m
                 else:
-                    fields = {b_front: c.get("front", ""), b_back: c.get("back", "")}
+                    back_val = _anki_md_links(c.get("back", ""))
+                    if idx == 0 and img_tag:
+                        back_val += img_tag
+                    fields = {b_front: _anki_md_links(c.get("front", "")), b_back: back_val}
                     model_name = basic_m
                 req = json.dumps({
                     "action": "addNote", "version": 6,
@@ -5540,6 +9918,58 @@ def _fig_badge_topright(fbox):
         return None
 
 
+def _draw_ink(im, strokes, mp, scale):
+    """共享画笔循环:把 strokes 逐笔画到 PIL 图 im 上,每点经 mp(point)->(px,py) 映射到图像素;scale=线宽放大(w*scale)。
+    三处合成(figure 裁图 _figure_crop_png / epub 图 _epub_figure_ink_png / 整页 _overlay_ink_on_page_png)共用同一套 pen/line/arrow/rect 绘制。
+    坐标差异全在 mp 里,本函数只管画。任何单笔异常都跳过,绝不让一笔画崩整图。"""
+    import math
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(im); cw, ch = im.width, im.height
+    for s in (strokes or []):
+        try:
+            pts = s.get("p") or []
+            if not pts: continue
+            col = s.get("c") or "#e74c3c"
+            if isinstance(col, str) and col.startswith("rgb"): col = "#e74c3c"
+            w = max(1, int(round((s.get("w") or 2.5) * scale)))
+            t = s.get("t") or "pen"
+            cp = [mp(p) for p in pts]
+            if all(px < -5 or px > cw + 5 or py < -5 or py > ch + 5 for px, py in cp):
+                continue
+            if t == "rect" and len(cp) >= 2:
+                d.rectangle([min(cp[0][0], cp[1][0]), min(cp[0][1], cp[1][1]),
+                             max(cp[0][0], cp[1][0]), max(cp[0][1], cp[1][1])], outline=col, width=w)
+            elif t == "arrow" and len(cp) >= 2:
+                d.line([cp[0], cp[1]], fill=col, width=w)
+                ang = math.atan2(cp[1][1] - cp[0][1], cp[1][0] - cp[0][0]); ah = max(8, w * 3)
+                for sgn in (-0.42, 0.42):
+                    d.line([cp[1], (cp[1][0] - ah * math.cos(ang + sgn), cp[1][1] - ah * math.sin(ang + sgn))], fill=col, width=w)
+            elif len(cp) >= 2:
+                d.line(cp, fill=col, width=w, joint="curve")
+            else:
+                px, py = cp[0]; d.ellipse([px - w, py - w, px + w, py + w], fill=col)
+        except Exception:
+            continue
+    return im
+
+
+def resolve_figure_image(ref, ink=None):
+    """统一 Figure 图像解析入口(中间层设计 §8 步骤4):按 ref.kind 分发到各格式的合成函数。
+    加一种阅读格式 = 加一个 kind 分支,助手/see_figure 只透传 opaque ref、不 branch。
+    ref 至少含 kind + path(调用方已解析好的图/PDF 绝对路径)+ 该格式定位字段;ink=手写墨迹(坐标口径由各分支既有函数处理)。"""
+    kind = (ref or {}).get("kind")
+    try:
+        if kind == "pdf":
+            has_ink = bool(ink) or bool(ref.get("has_ink"))   # ink 空但标了 has_ink → _figure_crop_png 回退读服务端 ink sidecar(保留原行为)
+            return _figure_crop_png(ref.get("path"), ref.get("page"), ref.get("box"),
+                                    with_ink=has_ink, rel=ref.get("rel"), strokes=ink)
+        if kind == "epub":
+            return _epub_figure_ink_png(ref.get("path"), ref.get("imgbox"), ink, ref.get("imgsw"))
+    except Exception:
+        return None
+    return None
+
+
 def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None, strokes=None):
     """裁出图框(归一 box)区域的 PNG。with_ink → 叠加手写笔迹合成(给助手看/拖拽 ghost)。
     笔迹来源:优先用**传入的 strokes**(客户端随图带来的当前笔迹,不依赖服务端保存时机);
@@ -5563,37 +9993,37 @@ def _figure_crop_png(abs_path, page, box, scale=2.4, with_ink=False, rel=None, s
             if strokes is None:
                 strokes = (_ink_load(rel).get("pages") or {}).get(str(int(page))) or [] if rel else []
             if strokes:
-                import math
-                d = ImageDraw.Draw(im); cw, ch = im.width, im.height
+                cw, ch = im.width, im.height
                 bw = (x1 - x0) or 1e-6; bh = (y1 - y0) or 1e-6
-                def mp(p): return ((p[0] - x0) / bw * cw, (p[1] - y0) / bh * ch)
-                for s in strokes:
-                    try:
-                        pts = s.get("p") or []
-                        if not pts: continue
-                        col = s.get("c") or "#e74c3c"
-                        if isinstance(col, str) and col.startswith("rgb"): col = "#e74c3c"
-                        w = max(1, int(round((s.get("w") or 2.5) * scale)))
-                        t = s.get("t") or "pen"
-                        cp = [mp(p) for p in pts]
-                        if all(px < -5 or px > cw + 5 or py < -5 or py > ch + 5 for px, py in cp):
-                            continue
-                        if t == "rect" and len(cp) >= 2:
-                            d.rectangle([min(cp[0][0], cp[1][0]), min(cp[0][1], cp[1][1]),
-                                         max(cp[0][0], cp[1][0]), max(cp[0][1], cp[1][1])], outline=col, width=w)
-                        elif t == "arrow" and len(cp) >= 2:
-                            d.line([cp[0], cp[1]], fill=col, width=w)
-                            ang = math.atan2(cp[1][1] - cp[0][1], cp[1][0] - cp[0][0]); ah = max(8, w * 3)
-                            for sgn in (-0.42, 0.42):
-                                d.line([cp[1], (cp[1][0] - ah * math.cos(ang + sgn), cp[1][1] - ah * math.sin(ang + sgn))], fill=col, width=w)
-                        elif len(cp) >= 2:
-                            d.line(cp, fill=col, width=w, joint="curve")
-                        else:
-                            px, py = cp[0]; d.ellipse([px - w, py - w, px + w, py + w], fill=col)
-                    except Exception:
-                        continue
+                def mp(p): return ((p[0] - x0) / bw * cw, (p[1] - y0) / bh * ch)   # 页归一 → 裁图内像素
+                _draw_ink(im, strokes, mp, scale)
         except Exception:
             pass
+    buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+
+
+def _epub_figure_ink_png(img_path, imgbox, strokes, sw=None):
+    """EPUB 版 see_figure「图 + 手写墨迹」合成(照搬 _figure_crop_png with_ink 的绘制循环)。
+    EPUB 图是完整图片文件、无需裁 PDF 页;墨迹是**相对 .ep-sec 章内容盒**的归一化 0-1,
+    imgbox=[ix0,iy0,ix1,iy1] 是该 <img> 在章内的归一化矩形(前端 getBoundingClientRect 量)。
+    换算:章坐标先减 imgbox 原点、除 imgbox 宽高 → 图内 0-1 → ×图像素。
+    sw=该图在屏幕上的 CSS 宽度 px(前端传),线宽放大 = 图自然宽/屏幕宽;不传回退 2.0。异常回退原图字节。"""
+    import io
+    import math
+    from PIL import Image, ImageDraw
+    im = Image.open(str(img_path)).convert("RGB")
+    cw, ch = im.width, im.height
+    try:
+        ix0, iy0, ix1, iy1 = [float(v) for v in imgbox[:4]]
+    except Exception:
+        ix0, iy0, ix1, iy1 = 0.0, 0.0, 1.0, 1.0
+    bw = (ix1 - ix0) or 1e-6; bh = (iy1 - iy0) or 1e-6
+    try:
+        wscale = (cw / float(sw)) if (sw and float(sw) > 0) else 2.0
+    except Exception:
+        wscale = 2.0
+    def mp(p): return ((p[0] - ix0) / bw * cw, (p[1] - iy0) / bh * ch)   # 章归一 → 图内像素
+    _draw_ink(im, strokes, mp, wscale)
     buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
 
 
@@ -5726,10 +10156,12 @@ def _claude_bin():
     return shutil.which("claude") or "/home/bwicarus/.local/bin/claude"
 
 
-def _claude_ocr_crop(png_bytes, model="sonnet", effort="low", timeout=140):
-    """把一小块裁图发给 Claude 视觉,精确转写其中文字(修坏文字层用)。返回纯转写文本或 None。
-    走 claude CLI stream-json(同 formula_ocr_claude.ask_vision),禁所有工具(纯看图回字,不让它瞎跑)。"""
-    import base64, json as _json, subprocess, select, time
+def _claude_ocr_crop(png_bytes, timeout=140):
+    """把一小块裁图发给视觉模型,精确转写其中文字(修坏文字层用)。返回纯转写文本或 None。
+    走脱壳 claude + Gemini 双后端(按「看图」预设 + 互为兜底);prompt 自包含 → system=""。
+    (2026-07:删掉从未生效的 model/effort 死参数,模型统一由「看图」action 预设决定。)"""
+    import base64
+    A = _assistant()
     prompt = (
         "这是从 PDF 裁出的一小块文字图。请**精确逐字转写**图中文字,原样输出,"
         "**不要翻译、不要解释、不要补全、不要加引号或代码围栏**。规则:"
@@ -5738,39 +10170,8 @@ def _claude_ocr_crop(png_bytes, model="sonnet", effort="low", timeout=140):
         "③ 多行的话用空格连接成一段;④ 图里没有的内容绝不臆造;"
         "⑤ 图像**左右边缘**若有被裁掉一半、不完整的字符(只露出偏旁/半个字),**忽略它**,只转写完整的字。"
         "只输出转写出来的文字本身,别的什么都别说。")
-    blocks = [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                     "data": base64.b64encode(png_bytes).decode("ascii")}},
-        {"type": "text", "text": prompt},
-    ]
-    p = subprocess.Popen(
-        [_claude_bin(), "--print", "--input-format", "stream-json", "--output-format", "stream-json",
-         "--disallowedTools", "Bash Edit Write Read NotebookEdit WebFetch WebSearch Glob Grep Task",
-         "--verbose", "--model", model or "sonnet", "--effort", effort or "low"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
-    try:
-        p.stdin.write(_json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}) + "\n")
-        p.stdin.flush()
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            r, _, _ = select.select([p.stdout], [], [], 0.5)
-            if r:
-                ln = p.stdout.readline()
-                if not ln:
-                    break
-                if '"type":"result"' in ln:
-                    try:
-                        return (_json.loads(ln).get("result") or "").strip()
-                    except Exception:
-                        return None
-            if p.poll() is not None:
-                break
-        return None
-    finally:
-        try:
-            p.kill()
-        except Exception:
-            pass
+    images = [{"media_type": "image/png", "b64": base64.b64encode(png_bytes).decode("ascii")}]
+    return A.reader_vision(images, prompt, action="vision", uid=_reader_uid(), system="", timeout=timeout)
 
 
 def _fig_badge_anchor(page, bbox, others=None, debug=False):
@@ -6085,6 +10486,43 @@ def pdf_api_highlights_create():
     return jsonify({"ok": True, "id": obj["id"], "highlight": obj})
 
 
+@bp.route("/api/highlight-text", methods=["POST"])
+def pdf_api_highlight_text():
+    """给 agent(Claude Code skill)用的高层高亮:只传文字,服务端 PyMuPDF search_for 自己找坐标,无需 agent 处理 bbox。
+    POST {file, page, text, color?, note?} → {ok, id, found}。text 在该页找不到 → {ok:False, found:0}。"""
+    import time as _t, os
+    import fitz
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    ap = _safe_vault_path(rel)
+    if not rel or ap is None:
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    page = int(data.get("page") or 0)
+    text = (data.get("text") or "").strip()
+    color = (data.get("color") or "#fff59d").strip()
+    note = (data.get("note") or "").strip()
+    if page < 1 or not text:
+        return jsonify({"ok": False, "error": "missing page/text"}), 400
+    try:
+        doc = fitz.open(str(ap))
+        pg = doc[page - 1]
+        found = pg.search_for(text)   # Rect 列表(pt,topleft 原点,跟 page-chars/highlights 同坐标系)
+        pw, ph = pg.rect.width, pg.rect.height
+        doc.close()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:140]}), 500
+    if not found:
+        return jsonify({"ok": False, "error": "text not found on page", "found": 0})
+    rects = [[round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)] for r in found]
+    obj = {"id": "h_" + os.urandom(6).hex(), "page": page, "rects": rects, "color": color,
+           "text": text[:2000], "note": note[:2000], "kind": "note", "sentence": "", "body": "",
+           "time": int(_t.time()), "page_w": pw, "page_h": ph}
+    db = _hl_load(rel)
+    db["highlights"].append(obj)
+    _hl_save(rel, db)
+    return jsonify({"ok": True, "id": obj["id"], "found": len(rects)})
+
+
 @bp.route("/api/highlights", methods=["PATCH"])
 def pdf_api_highlights_update():
     """PATCH {file, id, color?, note?} → {ok}"""
@@ -6211,8 +10649,10 @@ def pdf_api_translate_sentence():
     if not text or len(text) > 2000:
         return jsonify({"ok": False, "error": "no text / too long"}), 400
     backend = (data.get("backend") or "").strip()
-    model = (data.get("model") or "").strip()
-    effort = (data.get("effort") or "").strip()
+    # 2026-07 收口:不再收 request 的 model/effort 覆盖(以前来自已废弃的 pdf-ai-overrides localStorage)。
+    # 传空 → translate.py 自动回退 server-config dict.translate_model/effort(设置面板「句子翻译源」)。
+    model = ""
+    effort = ""
     no_cache = bool(data.get("fresh"))   # 「重新翻译」绕缓存,必出新结果(覆盖旧/坏译文如 AI 拒绝)
     import sys
     vp = CLAUDE_DIR / "scripts" / "vocab"
@@ -6698,11 +11138,9 @@ def pdf_api_grammar_analyze():
   "analyses": [{{"node_id": "<id>", "phrase": "<语法实例>", "explanation": "<简明解释>", "examples": ["..."]}}]
 }}
 """
-    model = (data.get("model") or "sonnet").strip()
-    effort = (data.get("effort") or "low").strip()
     _cstat("grammar.ai_run")
     try:
-        zh = _ai_call(prompt, override_model=model, override_effort=effort)
+        zh = _ai_call(prompt, "grammar")   # 2026-07:语法分析拆出独立 action(原并在 explain 里)
     except Exception as ex:
         return jsonify({"ok": False, "error": f"AI call failed: {ex}"}), 500
     # 解析 JSON（AI 可能裹在 ```json 或夹解释文字里）
@@ -6815,8 +11253,6 @@ def pdf_api_grammar_stream():
 {nodes_block}
 
 只输出上面两段（含标志），先翻译后语法点，不要任何额外说明。"""
-    model = (data.get("model") or "sonnet").strip()
-    effort = (data.get("effort") or "low").strip()
 
     def _gs_save(full, _p=_gs_p):
         # 只缓存完整输出(两个闭合标志都在,防报错/截断永久缓存);merge 不覆盖同键已有字段(AI 依存分析)
@@ -6833,7 +11269,7 @@ def pdf_api_grammar_stream():
         except Exception:
             pass
 
-    return _start_ai_stream(prompt, model, effort, (data.get("rid") or "").strip(), on_done=_gs_save)
+    return _start_ai_stream(prompt, "grammar", _reader_uid(), (data.get("rid") or "").strip(), on_done=_gs_save)   # 2026-07:语法分析独立 action
 
 
 # ─────────────────── 单词本 tab ───────────────────
@@ -7098,4 +11534,13 @@ def pdf_api_grammar_forget():
 
 
 def register_pdf_reader(app):
+    try:
+        from epub_assistant import register_epub_assistant
+        register_epub_assistant(bp)   # Phase H:EPUB section 级 agentic 助手 + 对话历史(挂到 /pdf bp)
+    except Exception as _ea_err:
+        import logging; logging.getLogger(__name__).warning("epub_assistant 未注册: %s", _ea_err)
     app.register_blueprint(bp)
+    try:
+        _upthr.Thread(target=_fav_prebuild_loop, daemon=True).start()   # 空闲把脏收藏夹提前重建好 → 打开即秒开(不再前台等)
+    except Exception:
+        pass

@@ -32,7 +32,7 @@ function _toast(msg) {
 
 async function loadAllHighlights() {
   try {
-    const r = await fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL));
+    const r = await fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL), { cache: 'no-store' });   // no-store:撤销/改高亮后必须拿最新,否则命中浏览器缓存看不到变化
     const d = await r.json();
     if (!d.ok) return;
     _allHighlights = d.highlights || [];
@@ -46,6 +46,14 @@ async function loadAllHighlights() {
   } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff6b6b'); }
 }
 
+// 高亮底色用**半透明** rgba(不是实色):字一定透得出来(不被实色块盖死);配合 .hl-saved 的 mix-blend-mode:multiply,
+// 能 multiply 到页图上时字更锐(黄×黑字=黑),万一某些页 multiply 被隔离也只是「半透明色」不会糊死/盖死正文。
+function _hlRgba(hex, a) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec((hex || '').trim());
+  if (!m) return hex;   // 非 #rrggbb(已是 rgba/命名色)→ 原样
+  const n = parseInt(m[1], 16);
+  return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')';
+}
 function renderHighlightsOnPage(pw, pageNum) {
   if (!pw) return;
   const layer = ensurePageLayer(pw, 'hl-layer');
@@ -76,7 +84,7 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.style.top = (y0 * sy) + 'px';
       div.style.width = ((x1 - x0) * sx) + 'px';
       div.style.height = ((y1 - y0) * sy) + 'px';
-      if (hasColor) div.style.background = h.color;
+      if (hasColor) div.style.background = _hlRgba(h.color, 0.4);   // 半透明底色:字透出来,不被实色盖死
       div.title = (h.note || h.body || h.sentence || h.text || '').slice(0, 200);
       // 用 capture phase 拦事件，确保不被 char-layer 拖选逻辑捕获
       const stop = (e) => { e.stopPropagation(); };
@@ -84,14 +92,33 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.addEventListener('mouseup',    stop, true);
       div.addEventListener('touchstart', stop, {passive:true, capture:true});
       div.addEventListener('touchend',   stop, {passive:true, capture:true});
-      div.addEventListener('click', (e) => {
-        e.stopPropagation();
-        window.dlog?.('hl-saved click → openHlPopover id=' + h.id);
-        openHlPopover(h, div, pw);
-      }, true);
+      // 交互(2026-07-05,用户要求):长按 → 高亮弹框;助手开着时双击 → 高亮内容加入对话上下文。单击不再开框。
+      // 走共享 RC.highlight.gesture(与 EPUB 一致);RC 未加载(legacy)则兜底回原单击开框。
+      const _hg = (window.RC && RC.highlight && RC.highlight.gesture) ? RC.highlight.gesture({
+        onLongPress: () => openHlPopover(h, div, pw),
+        onDoubleTap: () => { if (window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h); }
+      }) : null;
+      if (_hg) {
+        div.addEventListener('pointerdown',   (e) => { e.stopPropagation(); _hg.down(h.id, e.clientX, e.clientY); }, true);
+        div.addEventListener('pointermove',   (e) => { _hg.move(e.clientX, e.clientY); }, true);
+        div.addEventListener('pointerup',     (e) => { e.stopPropagation(); _hg.up(h.id); }, true);
+        div.addEventListener('pointercancel', () => _hg.cancel(), true);
+      } else {
+        div.addEventListener('click', (e) => { e.stopPropagation(); openHlPopover(h, div, pw); }, true);
+      }
       layer.appendChild(div);
     }
   }
+}
+
+// 双击高亮(助手开着)→ 复用助手输入框上方的「焦点选中」chip(window.__setFocusSel:带 ✕、可随时取消、一眼看到已选中),
+// 不弹 toast。__focusSel 经 __voiceContext.focus_sel 带给助手。跟公式/段落焦点选区同一套 UI。
+function _pdfHlToAsst(h) {
+  try {
+    const txt = ((h.text || h.body || h.sentence || '') + '').trim(); if (!txt) return;
+    // 复用助手输入框上方的「焦点选中」chip(带 ✕,可随时取消 + 一眼看到已选中),不弹 toast。__focusSel 进 __voiceContext.focus_sel。
+    if (window.__setFocusSel) window.__setFocusSel(txt.slice(0, 400), 'text');
+  } catch (e) {}
 }
 
 // 把 chars[s..e] 合并成连续 PDF pt rects（同行合并）

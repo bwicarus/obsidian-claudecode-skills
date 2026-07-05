@@ -41,6 +41,8 @@ function _pushQueryHistory() {
   _saveQueryHistory(h.slice(0, 40));
   if (document.querySelector('#side-tabs .side-tab[data-pane="hist"].active')) renderQueryHistory();
 }
+// 暴露给 rc-result 的 beforeOpen 钩子(共享模式:rc-result.openResult 每次开框前调 → 快照上一条进「📜 历史」)
+try { window._pushQueryHistory = _pushQueryHistory; } catch (_) {}
 function _qhFmtTime(t) {
   const d = new Date(t), n = new Date();
   const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -62,11 +64,12 @@ window.renderQueryHistory = () => {
   }));
 };
 
-// AI 设置（per-browser localStorage，不动 server-config）
-function _getAiOverrides() {
-  try { return JSON.parse(localStorage.getItem('pdf-ai-overrides') || '{}'); }
-  catch (_) { return {}; }
-}
+// AI 设置:旧 per-request model/effort 覆盖(localStorage 'pdf-ai-overrides')已废弃(2026-07 收口)——
+// 模型选择唯一真源 = 服务端按功能 action 预设(⚙ AI 模型设置,/api/assistant/action-pref[s])。
+// 保留函数给全部下游消费点(aiCall / onOcrSel / onTranslate / _runExplainBg / 17-highlight /
+// 18-grammar / 20-result-draft / 05-nav),恒返 {} → 请求体不再带 model/effort(后端各端点也已不读)。
+// ?ui=legacy 原生模板的 set-model/set-effort 下拉仍显示但已无效果(模板按约定不动)。
+function _getAiOverrides() { return {}; }
 function _toggleAiModelRow() {
   const v = document.getElementById('set-sent-backend').value;
   document.getElementById('set-sent-ai-row').style.display = (v === 'ai') ? '' : 'none';
@@ -79,14 +82,19 @@ window._setSettingsTab = (name) => {
   document.querySelectorAll('#settings-mask .set-pane').forEach(p => { p.style.display = (p.dataset.pane === name) ? '' : 'none'; });
   try { localStorage.setItem('pdf-set-tab', name); } catch (_) {}
 };
-window.openSettings = () => {
+// 设置面板回填(原 openSettings 函数体,除最后"显示 mask"一行,逐字不动)。ui=shared 时 rc-settings 建的
+// 统一面板用同一套原生 id(mask 也叫 settings-mask,原模板 mask 已被 pdf-adapter 移除),所以这里的回填 +
+// renderHlColorSetting / loadTocStatus / renderGrammarTrackList / _populatePageOffsetUI / _initCharOfsPanel
+// 原样复用零重写(saveSettings / closeSettings / _setSettingsTab 同理,都按 id 找元素)。
+function _fillSettings() {
   try { _setSettingsTab(localStorage.getItem('pdf-set-tab') || 'ai'); } catch (_) {}
-  const ov = _getAiOverrides();
-  document.getElementById('set-model').value = ov.model || '';
-  document.getElementById('set-effort').value = ov.effort || '';
+  // set-model/set-effort:仅 ?ui=legacy 原生模板还有(共享面板 rc-settings 已删该下拉)→ 空值保护
+  { const _sm = document.getElementById('set-model'); if (_sm) _sm.value = ''; }
+  { const _se = document.getElementById('set-effort'); if (_se) _se.value = ''; }
   document.getElementById('set-debug').checked = (localStorage.getItem('pdf-debug') === '1');
   const gv = document.getElementById('set-grammar-view');
-  if (gv) gv.value = _grammarViewMode;   // 长句结构显示模式
+  // ui=shared:显示模式状态存在 RC.grammar 里(块渲染已转交它),读它的而不是原生 _grammarViewMode(会跟共享模式下的实际改动脱节)
+  if (gv) gv.value = (window.__uiShared && window.RC && RC.grammar) ? RC.grammar.getViewMode('pdf-grammar-view') : _grammarViewMode;
   try { window._populatePageOffsetUI && window._populatePageOffsetUI(); } catch (_) {}   // 页码对齐:填当前页/偏移
   renderGrammarTrackList();   // 拉语法跟踪节点列表
   // 拉句子翻译配置
@@ -111,7 +119,19 @@ window.openSettings = () => {
   try { loadTocStatus(); } catch (_) {}   // 书籍目录:已有→显示「已存在」,无→显示建立目录输入
   renderHlColorSetting();
   if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态
+}
+function _openSettingsNative() {
+  _fillSettings();
   document.getElementById('settings-mask').style.display = 'flex';
+}
+// ── 门控:ui=shared → PdfAdapter.openSettings → RC.settings.open(rc-settings 统一面板,内容/行为跟 EPUB
+//   一致;onFill/onSave/onCancel 直传原生 _fillSettings/saveSettings/closeSettings,机制零重写);
+//   RC 不可用 / ?ui=legacy → 原生模板面板逐字不变。──
+window.openSettings = () => {
+  if (window.__uiShared && window.PdfAdapter && PdfAdapter.openSettings) {
+    return PdfAdapter.openSettings({ fill: _fillSettings, fallback: _openSettingsNative });
+  }
+  return _openSettingsNative();
 };
 window._applyCropSettings = () => {
   const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
@@ -181,11 +201,8 @@ window.closeSettings = () => { document.getElementById('settings-mask').style.di
 window.saveSettings = async () => {
   window.dlog?.('saveSettings 开始');
   try {
-    const ov = {
-      model:  document.getElementById('set-model')?.value || '',
-      effort: document.getElementById('set-effort')?.value || '',
-    };
-    try { localStorage.setItem('pdf-ai-overrides', JSON.stringify(ov)); } catch (_) {}
+    // (2026-07 收口)不再写 'pdf-ai-overrides':模型选择统一走服务端 action 预设;顺手清掉存量旧键
+    try { localStorage.removeItem('pdf-ai-overrides'); } catch (_) {}
     const dbg = document.getElementById('set-debug')?.checked || false;
     try { localStorage.setItem('pdf-debug', dbg ? '1' : '0'); } catch (_) {}
     const vu = document.getElementById('set-vocab-underline')?.checked;
@@ -366,6 +383,12 @@ window.onCopySel = async () => {
     } catch (e2) { _toast?.('复制失败'); }
   }
 };
+// 通用网页搜索：选中内容开新标签页搜(不占 AI 额度、不需要后端参与)
+window.onSearchSel = () => {
+  const t = (lastSelText || '').trim();
+  if (!t) { _toast?.('没有选中内容'); return; }
+  window.open('https://www.bing.com/search?q=' + encodeURIComponent(t), '_blank');
+};
 // 选区重新识别：文字层坏掉(乱码/上标错/缺符号)时，把选区裁图发 Claude 视觉，拿回正确文字，
 // 回填到 lastSelText + 预览 → 之后 复制/翻译/解释/对话 全用校正后的正确文字。
 // 选中所在页(选区 char 层属于哪个 page-wrap)。连续滚动下视口居中页 currentPage ≠ 选中页,
@@ -463,6 +486,12 @@ function _buildSentenceFromSel(pw, sIdx, eIdx) {
 
 window.onTranslate = async () => {
   if (!lastSelText) return;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:翻译 → rc-result 大框(共享模式;else 为原就地浮层逻辑,逐字不变)
+    toolbar.classList.remove('open');
+    _resultContext = _charSel ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: lastSelText, sentence: lastSelText, kind: 'translate' } : null;
+    PdfAdapter.translate({ text: lastSelText, fallback: () => aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译') });
+    return;
+  }
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   // 无 char 信息(罕见) → 退回大框 AI 翻译
@@ -553,6 +582,10 @@ window.onExplain = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: explainText, kind: 'explain',
   } : null;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:解释 → rc-result 大框(共享模式;else 为原琥珀高亮+后台流式逻辑,逐字不变)
+    PdfAdapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
+    return;
+  }
   // 解释**不开面板**:选区建一个一直闪烁的琥珀高亮,AI 后台跑;点高亮才开解释页 + 移除高亮(一次点击)。
   const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
   if (!_ehl) { aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释'); return; }   // 建不了高亮(罕见)→退回旧式直接开面板
@@ -565,12 +598,17 @@ async function _runExplainBg(hl, text, context) {
   const body = {text, context};
   if (ov.model)  body.model  = ov.model;
   if (ov.effort) body.effort = ov.effort;
+  // 共享模式(__uiShared):结果框由 rc-result 管,须比对它自己的计数器(window._resultReqId)+ 调它导出的
+  // addResultPickers,否则本文件裸的 _resultReqId/addResultPickers 是另一份独立状态,两边互不作废
+  // 对方在途请求(见 _reopenExplain 同一处注释)。非共享模式逐字不变。
+  const _shared = window.__uiShared && window.PdfAdapter;
+  const _curReqId = () => (_shared ? window._resultReqId : _resultReqId);
   const _fillPanel = (innerHtml, pickers) => {
-    if (hl.panelReqId == null || hl.panelReqId !== _resultReqId) return;   // 用户没点开等 / 已开别的结果 → 不填
+    if (hl.panelReqId == null || hl.panelReqId !== _curReqId()) return;   // 用户没点开等 / 已开别的结果 → 不填
     const el = document.getElementById('result-content'); if (!el) return;
     el.innerHTML = innerHtml;
     if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
-    if (pickers) { try { _resultContext = hl.resultContext; } catch (_) {} try { addResultPickers(); } catch (_) {} }
+    if (pickers) { try { _resultContext = hl.resultContext; } catch (_) {} try { (_shared ? window.addResultPickers : addResultPickers)?.(); } catch (_) {} }
   };
   let acc = '';
   try {
@@ -605,6 +643,14 @@ window.onChat = () => {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
     text: lastSelText, sentence: context || lastSelText, kind: 'chat',
   } : null;
+  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:对话 → rc-result.openChat(共享模式;else 为下方 _openChat 原逻辑,逐字不变)
+    PdfAdapter.chat({ text: lastSelText, context, fallback: () => _openChat(lastSelText, context) });
+    return;
+  }
+  _openChat(lastSelText, context);
+};
+// 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
+function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
     + '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>'
     + '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
@@ -618,7 +664,7 @@ window.onChat = () => {
     const i = document.getElementById('result-followup-input');
     if (i) { i.placeholder = '问 AI（已带原文 + 上下文）…'; i.focus(); }
   }, 120);
-};
+}
 window.onToQA = () => {
   if (!lastSelText) return;
   toolbar.classList.remove('open');

@@ -1,26 +1,24 @@
 [Unit]
-Description=iPad 截图问答 daemon + cmd_server (服务器侧)
+Description=iPad 截图问答 daemon + cmd_server (Pi 侧)
 After=anki-headless.service network-online.target
 Wants=anki-headless.service
 
 [Service]
 Type=simple
-EnvironmentFile=/root/claude/.env
-Environment=BWICARUS_APP_DIR=/root/claude/state/qa-server-data
-WorkingDirectory=/root/claude
-# qa_browser 模板默认引 jsdelivr CDN，iPad 网络可能慢/不通。
-# 每次启动重新 patch 成本机 nginx 服务的副本（git pull 覆盖原文件也无影响）。
-# 副本位置: /var/www/html/static/qa/{mathjax,marked}.js
-ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|https://bwicarus.space/static/qa/mathjax.js|g" /root/claude/_client/core/qa_browser.py
-ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|https://bwicarus.space/static/qa/marked.js|g" /root/claude/_client/core/qa_browser.py
-# Claude CLI 拒绝 root 用 --dangerously-skip-permissions（"cannot be used with root/sudo"），
-# 直接替换成 --allowedTools Read（让它能读注入的图片但其它工具走默认询问/拒绝）。
-# 单次替换保证幂等：替换后字串里没有 --dangerously-skip-permissions，sed 再跑也是 no-op。
-ExecStartPre=/bin/sed -i 's|"--dangerously-skip-permissions"|"--allowedTools", "Read"|g' /root/claude/_client/core/ai_backends.py
-ExecStart=/usr/bin/python3 /root/claude/_server_deploy/qa_server.py
+EnvironmentFile=/home/bwicarus/claude/.env
+Environment=BWICARUS_APP_DIR=/home/bwicarus/claude/state/qa-server-data
+Environment=WEBAPP_HISTORY_DIR=/home/bwicarus/webapp/data/users/bwicarus/history
+WorkingDirectory=/home/bwicarus/claude
+# qa_browser 默认引 jsdelivr CDN，Pi 上替换成本机 nginx 服务的副本
+# （Tailscale 内网 hostname，iPad 走 Tailscale 直接拿）。
+ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|http://bwicarus.taile44d0c.ts.net/static/qa/mathjax.js|g" /home/bwicarus/claude/_client/core/qa_browser.py
+ExecStartPre=/bin/sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|http://bwicarus.taile44d0c.ts.net/static/qa/marked.js|g" /home/bwicarus/claude/_client/core/qa_browser.py
+# 服务器侧 Claude CLI 拒绝 root 用 --dangerously-skip-permissions；Pi 用 bwicarus 非 root，但仍替换成 --allowedTools Read 跟服务器保持一致行为
+ExecStartPre=/bin/sed -i "s|\"--dangerously-skip-permissions\"|\"--allowedTools\", \"Read\"|g" /home/bwicarus/claude/_client/core/ai_backends.py
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/_server_deploy/qa_server.py
 Restart=on-failure
 RestartSec=10
-User=root
+User=bwicarus
 StandardOutput=journal
 StandardError=journal
 

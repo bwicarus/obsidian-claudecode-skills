@@ -562,6 +562,12 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 
 **判定**：`is_japanese(w)` — 含假名→是；纯汉字无拉丁→是（日中共用汉字交给 AI 出中文）。PDF 阅读器按**本书语言声明**(`state/pdf-book-langs.json`，🌐 按钮选 en/ja)路由查哪本词典。
 
+**入统一 vocab 库（英日同库，2026-06 起）**：查日语词跟英语**共用同一套 vault 笔记 / vocab_index / compute_mastery / paragraph_exposure**。
+- 查词后台 `_trigger_jp_note_async(lemma, reading, meaning, examples, forms, ...)` 建/更新 `资源/vocab/<首字>/<lemma>.md`（**原形为键**，表层活用形入 `forms`）+ 句子暴露；镜像英语 `_trigger_vocab_note_async`。
+- 生词下划线：`state/jp-vocab.json`（`_jp_vocab_bump` 查过即记、`_jp_vocab_is_trackable` 过滤跨行残片/单假名助词）→ `_build_jp_vocab_marks` 画下划线，`/api/page-chars` / `/api/page-vocab-marks` 在本书含 `ja` 时叠加（跟英语 `_build_vocab_marks` 同一层）。
+- 掌握标记：`POST /api/jp-vocab-mark {word, mark}` 走跟英语**完全同一条** `compute_mastery.apply_user_mark`（写 vault 笔记 user_mark + 锁 mastery）；⚠ 按**下划线实际命中的那个笔记**标（先查表层再查原形），避免迁移来的按活用形为键的旧笔记标不掉。
+- 一次性迁移 `scripts/vocab/migrate_jp_vocab.py`：旧 jp-vocab store → vault vocab 笔记（非破坏、幂等、`--dry-run`）。
+
 **词义** `lookup_jp(word, context, model="sonnet", langs=None)`：AI（Claude）出 `{reading, romaji, pos, zh, examples}`，**永久本地缓存**（`state/dict-cache/jp-*.json`，ttl 10 年）——等于边读边攒自己的中日词典，命中缓存离线秒回。
 - **防中日同形异义（伪朋友，2026-06-04）**：prompt 显式声明「这是**日语词**，给它在日语里的实际含义」并带 `langs`（本书语言设置，dict-quick/dict-jp 透传 `state/pdf-book-langs.json`；纯 `ja` → 强调「整本日语、所有汉字都是日语」），举例警告勿套中文同形词语感（下流(かりゅう)=下游/下层 ≠ 中文猥琐；勉強=学习；検討=研究 等）。修前 `下流` 被误标「下游;下流;低级;粗俗」。
 - **两类伪朋友错都防（18 词对抗核验迭代出来的，pv=4）**：
@@ -580,13 +586,14 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 - `lookup_jp` 自带例句为空时自动挂 Tanaka 例句。
 - 预建：`scripts/vocab/prebuild_jp_examples.py <pdf>|--all-cached` 批量预翻全书例句（73% 词能匹配到母语例句）。
 
-**汉字拆解** KANJIDIC2（EDRDG 免费）：`build_kanjidic.py` → `data/kanjidic.json`（12633 字：音読み/訓読み/字义）。`kanji_info(ch)` / `word_kanji_breakdown(word)`。字义是英文（读音才是学习重点，汉字本身中文母语者看得懂）。
+**汉字拆解** KANJIDIC2（EDRDG 免费）：`build_kanjidic.py` → `data/kanjidic.json`（12633 字：音読み/訓読み/字义）。`kanji_info(ch)` / `word_kanji_breakdown(word)`。字义原文是英文，**首屏先回英文**，同时后台 `_kanji_fill_zh(translate=True)` 译成中文落缓存（跟例句中译共用 `_jp_dict_bg_translate` 后台链路），前端轮询 `/api/dict-jp-zh` 原地替换。
 
 **预建词库**：`prebuild_jp_dict.py <pdf>`（fugashi 全文分词 → 批量 AI 查词义，跳助词/标点；幂等续传）。
 
 **后端路由**（`_server_deploy/pdf_reader.py`）：
-- `/api/dict-quick`（小框秒回）JP 分支 = lookup_jp + unidic 读音音调 overlay，返回 `reading/accent/mora/examples`。
-- `/api/dict-jp`（完整字典页 JSON）= 读音+音调+罗马字+词性+完整中文 + 5 句 Tanaka 例句 + 汉字拆解；未译例句后台线程补译。
+- `/api/dict-quick`（小框秒回）JP 分支 = lookup_jp + unidic 读音音调 overlay，返回 `reading/accent/mora/inflect/examples`，并 `_trigger_jp_note_async` 入统一 vocab 库。
+- `/api/dict-jp`（完整字典页 JSON，**秒回**）= 读音+音调+罗马字+词性+完整中文 + 5 句 Tanaka 例句 + 汉字拆解 + `inflect` 变形分析（原形+中文语法标签）。首屏例句/汉字字义只取**已缓存**中文、没翻的先回退英文，同时 `_jp_dict_bg_translate` 后台补译（按原形落缓存）。
+- `/api/dict-jp-zh`（轮询用）= 只读缓存返回该词例句中译 + 汉字字义中译（后台翻完即有），前端拿来原地替换英文；按**原形**查（跟 dict-jp 一致，否则例句/汉字集不一致→按 index 替换错位）。
 - `/api/dict-jp-ai`（SSE）= 按需「✨AI 深入讲解」（核心义/用法语感/近义辨析/汉字记忆）。**服务端永久缓存（2026-06-10）**：按**原形**为键（`_jp_inflection` 活用还原，確認します/確認した → 確認する 共用一份）存 dict-cache `jp-explain`（ttl 10 年）；命中且 `v == _JP_EXPLAIN_VER`（当前 =1，改 prompt 就 +1 → 旧缓存自动重生成）→ 按同 SSE 格式一次性回放全文（start/data/done，前端零改动），**任何设备**再点都秒回。写入走 `_start_ai_stream` 的 `on_done` 钩子，全文 ≤40 字不缓存（多半是报错文本）。
 
 **句子翻译**（多选 🌐）：见 `scripts/vocab/translate.py`，`translate(text, backend=...)` 的 auto 链路 `gtranslate(Google,赠金)→deepl→ai→mymemory`。
