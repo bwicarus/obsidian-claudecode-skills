@@ -580,7 +580,8 @@ def _pdf_shared_js_v():
     mt = 0
     for name in ("rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
                  "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
-                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "pdf-adapter.js"):
+                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "pdf-adapter.js",
+                 "pdf-uishared.js", "pdf-tail.js"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
             try:
@@ -11630,5 +11631,20 @@ def register_pdf_reader(app):
     app.register_blueprint(bp)
     try:
         _upthr.Thread(target=_fav_prebuild_loop, daemon=True).start()   # 空闲把脏收藏夹提前重建好 → 打开即秒开(不再前台等)
+    except Exception:
+        pass
+    def _warm_templates():
+        # 预编译大模板(实测:重启后首个开书请求要 ~1s,全是 Jinja 首次编译;预热后 ~15ms)。后台线程,不阻塞启动。
+        try:
+            with app.app_context():
+                for t in ("pdf_reader.html", "epub_html_reader.html", "pdf_index.html"):
+                    try:
+                        app.jinja_env.get_template(t)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    try:
+        _upthr.Thread(target=_warm_templates, daemon=True).start()
     except Exception:
         pass

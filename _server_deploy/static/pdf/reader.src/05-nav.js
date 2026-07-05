@@ -204,7 +204,7 @@ window.zoomChange = async (delta) => {
   if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
-window.fitWidth = async () => { await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 适应也记进当前方向
+window.fitWidth = async () => { window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向
 // 「📋 知识点」按钮：打开统一面板并切到知识点 tab（再点同 tab 则关闭）
 window.toggleSidebar = () => {
   const p = document.getElementById('grammar-panel');

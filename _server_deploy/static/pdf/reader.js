@@ -1179,7 +1179,7 @@ window.zoomChange = async (delta) => {
   if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
-window.fitWidth = async () => { await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 适应也记进当前方向
+window.fitWidth = async () => { window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向
 // 「📋 知识点」按钮：打开统一面板并切到知识点 tab（再点同 tab 则关闭）
 window.toggleSidebar = () => {
   const p = document.getElementById('grammar-panel');
@@ -1563,6 +1563,10 @@ function _scheduleRefit(force) {
 // (已删除「适应溢出兜底 _runFitOverflowGuard」)它测 main.scrollWidth 来「兜底再缩」,但会把**非页面元素**
 // 的假溢出(如错位的 vocab 下划线、知识点抽屉)当真,于是把页面缩到 fit 以下 → 用户报的「适应后瞬间填满
 // 又回弹」就是它干的。_computeFitScale 本身精确(去边时也按可见宽算到正好填满),不需要这个投机性兜底。
+// 宽度适应态(粘性用户意图):开书默认=适应;只有**用户手动缩放**(_applyZoom:双指/单页缩放)才离开;
+// 点「适应」(fitWidth)回到适应。旋转时若处于适应态 → 新方向强制重算适应,不还原该方向旧的手动缩放
+// (用户拍板:自适应开着就无论怎么转都自动适应)。自动 refit(ResizeObserver)不改此意图标志。
+window._atFitWidth = true;
 async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
@@ -1683,11 +1687,14 @@ async function _onOrientChange() {
     _lastOrient = now;
     const lay = _loadOrientLayout(now);
     if (!lay) { window.dlog && window.dlog('orient: ' + now + ' 无存档,保持当前'); return; }
+    const keepFit = window._atFitWidth !== false;   // 旋转前正处宽度适应 → 新方向保持适应(用户拍板),忽略该方向旧的手动缩放存档
     if (_applyOrientLayoutVars(lay)) {
-      window.dlog && window.dlog('orient: 套用 ' + now + ' = ' + JSON.stringify(lay));
+      if (keepFit) _orientPendingScale = 0;
+      window.dlog && window.dlog('orient: 套用 ' + now + ' = ' + JSON.stringify(lay) + (keepFit ? ' (保持适应)' : ''));
       _updateModeButtons(); _updateCropBtn();
       await _applyModeChange(currentPage);
       await _applyPendingOrientScale();  // 还原该方向上次的缩放(宽度适应/手动放大)
+      if (keepFit) { await _refitToWidth(true); window._atFitWidth = true; }   // 强制按新方向宽度重算适应
     }
   } finally { _orientBusy = false; }
 }
@@ -1712,6 +1719,7 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
+    window._atFitWidth = false;            // 手动缩放 → 离开宽度适应态(旋转不再强制适应,还原各方向记忆)
     // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
     if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {
@@ -9294,6 +9302,9 @@ async function _connProbe() {
     if (streaming) return;
     text = (text || '').trim();
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
+    // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
+    // (用户反馈:选中悄悄跟着每条消息发,但上方没有那个带 x 的框,无法取消)
+    try { if (!(window.__focusSel && window.__focusSel.text) && sentCtx.selection && sentCtx.selection.trim() && window.__setFocusSel) window.__setFocusSel(sentCtx.selection, 'text'); } catch (_) {}
     if (!text) {
       // 空输入但有焦点上下文(带入的图 / 钉住的公式或段落 / 当前选中)→ 等于"就问这个",用默认问法直接发
       var _hasFig = (sentCtx.figures && sentCtx.figures.length);
@@ -10026,7 +10037,11 @@ async function _connProbe() {
     window.__focusSel = { text: text, kind: kind || 'text' };
     _renderFocusSel();
   };
-  window.__clearFocusSel = function () { window.__focusSel = null; _renderFocusSel(); };
+  window.__clearFocusSel = function () {
+    window.__focusSel = null; _renderFocusSel();
+    // ✕ = "这个上下文别再带":连隐式选中兜底(lastSelText,10min 新鲜期)一起清,否则下条消息又悄悄带上(用户反馈)
+    try { lastSelText = ''; window.__lastSelSentence = ''; window.__lastSelMeta = null; } catch (_) {}
+  };
   window.__renderFocusSel = _renderFocusSel;
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)

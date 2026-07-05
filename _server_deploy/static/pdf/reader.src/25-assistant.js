@@ -929,6 +929,9 @@
     if (streaming) return;
     text = (text || '').trim();
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
+    // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
+    // (用户反馈:选中悄悄跟着每条消息发,但上方没有那个带 x 的框,无法取消)
+    try { if (!(window.__focusSel && window.__focusSel.text) && sentCtx.selection && sentCtx.selection.trim() && window.__setFocusSel) window.__setFocusSel(sentCtx.selection, 'text'); } catch (_) {}
     if (!text) {
       // 空输入但有焦点上下文(带入的图 / 钉住的公式或段落 / 当前选中)→ 等于"就问这个",用默认问法直接发
       var _hasFig = (sentCtx.figures && sentCtx.figures.length);

@@ -94,6 +94,10 @@ function _scheduleRefit(force) {
 // (已删除「适应溢出兜底 _runFitOverflowGuard」)它测 main.scrollWidth 来「兜底再缩」,但会把**非页面元素**
 // 的假溢出(如错位的 vocab 下划线、知识点抽屉)当真,于是把页面缩到 fit 以下 → 用户报的「适应后瞬间填满
 // 又回弹」就是它干的。_computeFitScale 本身精确(去边时也按可见宽算到正好填满),不需要这个投机性兜底。
+// 宽度适应态(粘性用户意图):开书默认=适应;只有**用户手动缩放**(_applyZoom:双指/单页缩放)才离开;
+// 点「适应」(fitWidth)回到适应。旋转时若处于适应态 → 新方向强制重算适应,不还原该方向旧的手动缩放
+// (用户拍板:自适应开着就无论怎么转都自动适应)。自动 refit(ResizeObserver)不改此意图标志。
+window._atFitWidth = true;
 async function _refitToWidth(force, rebuild) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
@@ -214,11 +218,14 @@ async function _onOrientChange() {
     _lastOrient = now;
     const lay = _loadOrientLayout(now);
     if (!lay) { window.dlog && window.dlog('orient: ' + now + ' 无存档,保持当前'); return; }
+    const keepFit = window._atFitWidth !== false;   // 旋转前正处宽度适应 → 新方向保持适应(用户拍板),忽略该方向旧的手动缩放存档
     if (_applyOrientLayoutVars(lay)) {
-      window.dlog && window.dlog('orient: 套用 ' + now + ' = ' + JSON.stringify(lay));
+      if (keepFit) _orientPendingScale = 0;
+      window.dlog && window.dlog('orient: 套用 ' + now + ' = ' + JSON.stringify(lay) + (keepFit ? ' (保持适应)' : ''));
       _updateModeButtons(); _updateCropBtn();
       await _applyModeChange(currentPage);
       await _applyPendingOrientScale();  // 还原该方向上次的缩放(宽度适应/手动放大)
+      if (keepFit) { await _refitToWidth(true); window._atFitWidth = true; }   // 强制按新方向宽度重算适应
     }
   } finally { _orientBusy = false; }
 }
@@ -243,6 +250,7 @@ async function _applyZoom(newScale, focal) {
     const ratio = container && container.offsetHeight ? main.scrollTop / Math.max(1, container.offsetHeight) : 0;
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
+    window._atFitWidth = false;            // 手动缩放 → 离开宽度适应态(旋转不再强制适应,还原各方向记忆)
     // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
     if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {

@@ -372,7 +372,11 @@
     window.__focusSel = { text: text, kind: kind || 'text' };
     _renderFocusSel();
   };
-  window.__clearFocusSel = function () { window.__focusSel = null; _renderFocusSel(); };
+  window.__clearFocusSel = function () {
+    window.__focusSel = null; _renderFocusSel();
+    // ✕ = "这个上下文别再带":连隐式选中兜底(lastSelText,10min 新鲜期)一起清,否则下条消息又悄悄带上(用户反馈)
+    try { lastSelText = ''; window.__lastSelSentence = ''; window.__lastSelMeta = null; } catch (_) {}
+  };
   window.__renderFocusSel = _renderFocusSel;
 
   // 点图/徽标/浮层/助手栏 之外 → 取消高亮框(__figFocus 上下文保留,由附件条 ✕ 才清)

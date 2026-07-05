@@ -53,6 +53,9 @@
   // 上次停留处 = 首开跳末尾 927 根因(scrollRestoration='manual' 只管文档滚动,管不住内层容器)。期内无用户交互时的
   // 任何滚动都判为浏览器乱还原 → 钉回目标;用户一交互(触摸/滚轮/按键)即失效,之后正常阅读不再干预。
   var _initGuard = ((window.matchMedia && matchMedia('(pointer: coarse)').matches) || ('ontouchstart' in window));   // 927 守护只在触摸设备启用(iOS Safari 内层滚动还原=此 bug 源头);桌面鼠标拖滚动条不触发任何"用户交互"事件、会被 _reassertInitial 拉回(审查确认),故桌面不守护
+  // 旋转(横↔竖)后残留的横向偏移归零:reflow 阅读器宽度本就随视口自适应(--colw em 上限),但旋转瞬间旧坐标的
+  // 绝对定位元素/canvas 可能把滚动区短暂撑宽 → 归零 scrollLeft(配合 #ep-content overflow-x:hidden 根治左右晃动)
+  try { window.addEventListener('resize', function () { setTimeout(function () { try { content.scrollLeft = 0; } catch (e) {} }, 120); }); } catch (e) {}
   ['touchstart', 'wheel', 'pointerdown', 'keydown'].forEach(function (ev) {
     try { document.addEventListener(ev, function () { _initGuard = false; }, { once: true, passive: true, capture: true }); } catch (e) {}
   });
@@ -1325,7 +1328,11 @@
     window.__focusSel = { text: text, kind: kind || 'text' };
     _renderFocusSel();
   };
-  window.__clearFocusSel = function () { window.__focusSel = null; _renderFocusSel(); };
+  window.__clearFocusSel = function () {
+    window.__focusSel = null; _renderFocusSel();
+    // ✕ = "这个上下文别再带":连隐式选中兜底(cur.text,10min 新鲜期)一起清,否则下条消息又悄悄带上(用户反馈)
+    try { cur = { text: '', ctx: '', rect: null, anchor: null }; } catch (e) {}
+  };
   window.__renderFocusSel = _renderFocusSel;
 
   // ── 便签注入(阶段3,设计见 references/sticky-notes-design.md 用户规格8):双击便签(rc-stickynote onDoubleTap,
@@ -2356,6 +2363,7 @@
     var ta = $('ep-ai-ta'), msg = (ta.value || '').trim();
     var selInfo = curSelection();
     if (window.__focusSel && window.__focusSel.text) { selInfo = { sel: window.__focusSel.text, sent: selInfo.sent || '' }; }   // 钉住的焦点(chip 显示的内容)优先于隐式选中,所见即所得
+    else if (selInfo && selInfo.sel && window.__setFocusSel) { try { window.__setFocusSel(selInfo.sel, 'text'); } catch (e) {} }   // 隐式选中升格为可见 chip(带✕)→ 之后每条都看得见、随时可取消(用户反馈:选中隐形跟着发)
     var _figs = (window.__figAttached || []);
     if (!msg) {   // 空输入但有选中/带入图/带入便签 → 等于"就问这个",用默认问法直接发(照搬 epub2-assist 空文本分支)
       if (_figs.length) msg = '讲讲这张图';
