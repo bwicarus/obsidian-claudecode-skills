@@ -186,6 +186,7 @@ let readMode = (() => {
 let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用(绝对像素,旧记录兜底)
 let _pendingFrac = 0;      // 上次位置恢复用(页内比例 0-1,布局无关,优先于 scrollY)
+let _pendingPage = 0;      // 恢复目标页(闭包捕获;三连 apply 不读活的 currentPage——它会被滚动处理器反馈式改掉,审计 BUG#3)
 let _scrollSaveTimer = null;
 
 

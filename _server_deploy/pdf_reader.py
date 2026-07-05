@@ -5169,10 +5169,12 @@ def epub_view():
             "epub_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
             epub_base=f"/pdf/epub/file/{sha}/", reader_js_v=_epub_js_v()))
     else:
+        _rp2 = _reading_pos_load().get(rel_clean) or {}
         resp = make_response(render_template(
             "epub_html_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
             sha=sha, reader_js_v=_epub_js_v(),
-            server_pos=_reading_pos_get(rel_clean)))   # 服务端续读位置(节 idx;无记录=None→null),epub-html.js onBuilt 消费
+            server_pos=_reading_pos_get(rel_clean),      # 服务端续读位置(节 idx;无记录=None→null),epub-html.js onBuilt 消费
+            server_pos_ts=int(_rp2.get("ts") or 0)))     # 记录时间戳(秒):前端跟 LS v3 按新者胜仲裁(同 PDF 模型;审计 BUG#5)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp
 

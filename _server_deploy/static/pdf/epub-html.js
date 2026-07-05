@@ -151,15 +151,22 @@
     // (见 onScroll 保存处);读到旧格式纯数字 = 修复前存的 = 一律不可信回开头。真实位置滚动后即以新格式重存。
     try { content.scrollTop = 0; } catch (e) {}   // 掐掉浏览器/bfcache 可能残留的滚动恢复,位置只由下面自己的逻辑决定
     var raw = localStorage.getItem(LS.pos) || '';
-    var pos = 0;
-    if (raw.indexOf('v2:') === 0) pos = parseInt(raw.slice(3), 10) || 0;
+    var pos = 0, lsTs = 0;
+    if (raw.indexOf('v3:') === 0) { var _p3 = raw.slice(3).split(':'); pos = parseInt(_p3[0], 10) || 0; lsTs = parseInt(_p3[1], 10) || 0; }
+    else if (raw.indexOf('v2:') === 0) pos = parseInt(raw.slice(3), 10) || 0;   // 旧格式无 ts → 当最旧(服务端有记录就让位)
     pos = Math.min(Math.max(0, pos), COUNT - 1);
     if (pos >= COUNT - 1) pos = 0;   // 正好末章仍当脏值,回开头(双保险)——只适用 LS 旧值,服务端值不走此守卫
     // 服务端续读记录优先于 LS(2026-07-03,跨设备真源:iPad 读到哪,PC 打开就在哪;由 /pdf/epub/view 注入
     // EPUB_CFG.serverPos,零异步等待)。写入端(onScroll 保存点)已过 _jumping+loaded 校验才上报 → 可信,
     // 不做「末章当脏值」回退;服务端没记录(null→NaN)→ 用上面的 LS v2 当离线兜底。
     var _sp = parseInt(CFG.serverPos, 10);
-    if (!isNaN(_sp) && _sp >= 0) pos = Math.min(_sp, COUNT - 1);
+    var _spTs = (parseInt(CFG.serverPosTs, 10) || 0) * 1000;   // 服务端 epoch秒 → ms
+    if (!isNaN(_sp) && _sp >= 0 && (_spTs >= lsTs || pos <= 0)) {
+      pos = Math.min(_sp, COUNT - 1);   // 时间戳仲裁:服务端新(或本地无有效记录)→ 服务端胜(同 PDF 模型;修 BUG#5 下半:旧 serverPos 无条件压过更新的 LS)
+    } else if (pos > 0 && !isNaN(_sp) && _sp >= 0) {
+      // 本地更新鲜(上报失败过/离线读过)→ 用本地,并治愈服务端记录(别的设备才拿得到新进度)
+      try { fetch('/pdf/api/reading-pos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FREL, kind: 'epub', pos: pos }), keepalive: true }).catch(function () {}); } catch (e) {}
+    }
     // ?sec=N 深链(收藏夹查看页「打开原书↗」等):本次初始定位优先用它;只影响这次打开,LS.pos 记忆照常
     var _m = location.search.match(/[?&]sec=(\d+)/);
     if (_m) pos = Math.min(Math.max(0, parseInt(_m[1], 10) || 0), COUNT - 1);   // 深链不做"末章当脏值"回退(用户就是要去那)
@@ -174,6 +181,13 @@
       if (loaded[pos] === true) {
         try { var el2 = secEls[pos]; if (el2) { var cr2 = content.getBoundingClientRect(), r2 = el2.getBoundingClientRect(); var dy2 = r2.top - cr2.top; if (Math.abs(dy2) > 4) content.scrollTop += dy2; } } catch (e) {}
         requestAnimationFrame(function () { requestAnimationFrame(_settleReveal); });
+        // 揭幕后温和补钉(审计 BUG#7:上方预载章图片解码/idle 装饰迟到改高 → 桌面无 927 守护会再跳一下);用户一交互即停
+        var pin = true;
+        ['touchstart', 'wheel', 'pointerdown', 'keydown'].forEach(function (ev) { try { document.addEventListener(ev, function () { pin = false; }, { once: true, passive: true, capture: true }); } catch (e) {} });
+        [300, 800, 1600].forEach(function (ms) { setTimeout(function () {
+          if (!pin) return;
+          try { var e3 = secEls[pos]; if (e3) { var c3 = content.getBoundingClientRect(), r3 = e3.getBoundingClientRect(), d3 = r3.top - c3.top; if (Math.abs(d3) > 4) content.scrollTop += d3; } } catch (e) {}
+        }, ms); });
         return;
       }
       if (n >= 22) { _settleReveal(); return; }
@@ -187,7 +201,7 @@
   function onIntersect(entries) {
     entries.forEach(function (en) { if (en.isIntersecting) loadSection(parseInt(en.target.dataset.idx, 10)); });
   }
-  var _secInflight = 0, _secWait = [], SEC_MAX = 4;   // 章节请求并发上限:留出连接槽给用户操作(模型设置/查词/AI),防书本加载占满浏览器连接池→按钮请求被堵几秒
+  var _secInflight = 0, _secWait = [], SEC_MAX = 4, _secGen = 0;   // 章节请求并发上限 + 章节代号(_secGen:收藏夹 reconcile 重排=换代,旧代在途响应作废;审计 BUG#1)
   function _secDone() { if (_secInflight > 0) _secInflight--; if (_secWait.length && _secInflight < SEC_MAX) _fetchSection(_secWait.shift()); }
   function loadSection(idx) {
     if (loaded[idx]) return; loaded[idx] = 'loading';
@@ -196,9 +210,11 @@
   }
   function _fetchSection(idx) {
     _secInflight++;
+    var gen = _secGen;   // 捕获代号:重排后 idx→元素映射失效,旧响应写入会错位内容+误标 loaded 永久卡占位(BUG#1)
     var el = secEls[idx]; if (!el) { _secDone(); return; }
     fetch('/pdf/api/epub-section?file=' + encodeURIComponent(FREL) + '&idx=' + idx).then(function (r) { return r.json(); }).then(function (d) {
       _secDone();   // 响应到手、连接释放 → 立刻放行下一个章节请求(渲染在本帧继续,不占连接)
+      if (gen !== _secGen) return;   // 已换代:丢弃(新代按新 idx 重拉;loaded 已被 reconcile 重建,不动)
       if (!d || !d.ok) { el.textContent = ''; el.classList.remove('ph'); loaded[idx] = true; return; }
       // 上方加载 → 记录高度差,加载后补 scrollTop 防跳动
       var aboveTop = el.getBoundingClientRect().bottom < 0;
@@ -232,7 +248,7 @@
           } catch (e) {}
         }, { timeout: 1000 });
       } catch (e) { setTimeout(function () { throw e; }, 0); }
-    }).catch(function () { loaded[idx] = false; _secDone(); });
+    }).catch(function () { if (gen === _secGen) loaded[idx] = false; _secDone(); });
   }
 
   // ── 进度 + 续读位置 ──
@@ -259,7 +275,7 @@
     clearTimeout(_saveT); _saveT = setTimeout(function () {
       // ⑤ 400ms 后再校一次:期间开始了新跳转、或顶部节还是未加载占位(占位高度≠真实高度,topIdx 不可信)→ 不存
       if (_jumping || loaded[topIdx] !== true) return;
-      localStorage.setItem(LS.pos, 'v2:' + topIdx);   // v2 前缀=写入端已过脏值防护;onBuilt 只信任此格式
+      localStorage.setItem(LS.pos, 'v3:' + topIdx + ':' + Date.now());   // v3=idx:ts(ms)。ts 供 onBuilt 与服务端记录按新者胜仲裁(同 PDF 模型);v2 旧格式仍可读(ts 当 0)
       _reportPos(topIdx);   // 服务端同记一份(≥5s 节流;跨设备续读真源,LS 只是本机离线兜底)
     }, 400);
   }
@@ -276,10 +292,12 @@
   function _posFlush() {
     _srvPos.timer = null;
     if (_srvPos.val < 0 || _srvPos.val === _srvPos.sent) return;
-    _srvPos.t = Date.now(); _srvPos.sent = _srvPos.val;
+    _srvPos.t = Date.now();
+    var v = _srvPos.val;   // POST 成功才记 sent(审计 BUG#5:乐观置 sent 后一次瞬断 → 同位置永不重试,beacon 也被 val===sent 拦)
     try {
       fetch('/pdf/api/reading-pos', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: FREL, kind: 'epub', pos: _srvPos.val }), keepalive: true }).catch(function () {});
+        body: JSON.stringify({ file: FREL, kind: 'epub', pos: v }), keepalive: true })
+        .then(function (r) { if (r && r.ok) _srvPos.sent = v; }).catch(function () {});
     } catch (e) {}
   }
   function _posBeacon() {
@@ -3641,7 +3659,16 @@
       _epInk.fileOf[el.dataset.uid] = el.dataset.inkFile;   // 确保墨迹写回原书文件(即便 _favUpInkLoad 还没跑)
       if (el.classList.contains('fav-up-editing') || (e.target.closest && e.target.closest('.fav-up-editbtn, .fav-up-edit'))) return;   // 正文编辑态 / 点编辑按钮 → 不画
     }
-    if (el.dataset && el.dataset.favpdfFile && !(_epInk.favPdfLoaded && _epInk.favPdfLoaded[el.dataset.favpdfFile])) { try { _favPdfInkLoad(); toast('原书墨迹加载中,请稍候再画'); } catch (x) {} return; }   // 原书墨迹没落地前禁画(整页替换会盖掉旧墨迹,审查 high)
+    if (el.dataset && el.dataset.favpdfFile && !(_epInk.favPdfLoaded && _epInk.favPdfLoaded[el.dataset.favpdfFile])) {   // 原书墨迹没落地前禁画(整页替换会盖掉旧墨迹,审查 high)
+      var _fpf = el.dataset.favpdfFile;
+      if (_epInk.favPdfDead && _epInk.favPdfDead[_fpf]) {   // 终态:原书不可用 → 一次性提示,不再拉不再刷屏(BUG#6)
+        if (!_epInk._deadToastT || Date.now() - _epInk._deadToastT > 5000) { _epInk._deadToastT = Date.now(); try { toast('这页的原书不可用(可能已移动/删除),暂不能画'); } catch (x) {} }
+        return;
+      }
+      try { _favPdfInkLoad(); } catch (x) {}
+      if (!_epInk._gateToastT || Date.now() - _epInk._gateToastT > 3000) { _epInk._gateToastT = Date.now(); try { toast('原书墨迹加载中,请稍候再画'); } catch (x) {} }   // 3s 节流,慢网连续落笔不刷屏
+      return;
+    }
     if (el.classList.contains('ep-usec')) {   // 插入页:编辑态禁手写;点在 Aa/编辑区 → 让按钮处理不画
       if (el.classList.contains('editing') || document.body.classList.contains('ep-up-editing')) return;
       if (e.target.closest('.ep-up-editbtn, .rc-up-edit, .rc-up-bar')) return;
@@ -3991,7 +4018,7 @@
     if (!confirm('取消收藏这一页?(不影响原书内容)')) return;
     reqJson('PATCH', '/pdf/api/favorites', { folder: _FAV_FID, remove_item: it }, function (d) {
       if (!(d && d.ok)) { toast('取消失败:' + ((d && d.error) || '?')); return; }
-      var s = b.closest('.ep-sec'); if (s) s.style.display = 'none';
+      var s = b.closest('.ep-sec'); if (s) { s.style.display = 'none'; s.dataset.unfav = '1'; }   // 标记乐观隐藏:reconcile 发现条目仍在(重新收藏)会复原(BUG#2)
       toast('已取消收藏');
     }, function () { toast('网络错误,没取消上'); });
   }, true);
@@ -4014,14 +4041,20 @@
       var oldByKey = {};
       for (var i = 0; i < _favMetaItems.length; i++) oldByKey[_favItemKey(_favMetaItems[i])] = i;
       var same = items.length === _favMetaItems.length && items.every(function (it, j) { return oldByKey[_favItemKey(it)] === j; });
-      if (same) { _favMetaItems = items; return; }   // 结构没变(纯内容重建)→ 不动 DOM
+      if (same) {
+        _favMetaItems = items;
+        // 曾被「☆取消收藏」乐观隐藏、但条目仍在(期间又被重新收藏)→ 复原可见(审计 BUG#2:否则复活成不可见)
+        try { secEls.forEach(function (se) { if (se && se.dataset && se.dataset.unfav) { delete se.dataset.unfav; se.style.display = ''; } }); } catch (e) {}
+        return;   // 结构没变(纯内容重建)→ 不动 DOM
+      }
       var newEls = [], newLoaded = {}, usedOld = {};
       for (var j = 0; j < items.length; j++) {
         var oi = oldByKey[_favItemKey(items[j])];
         if (oi != null && !usedOld[oi] && secEls[oi]) {
           usedOld[oi] = 1;
           var el = secEls[oi]; el.dataset.idx = j;
-          newEls.push(el); newLoaded[j] = loaded[oi];
+          if (el.dataset.unfav) { delete el.dataset.unfav; el.style.display = ''; }   // 乐观隐藏过但条目仍在 → 复原可见(BUG#2)
+          newEls.push(el); newLoaded[j] = (loaded[oi] === true);   // 'loading' 不搬:旧代在途响应已作废,置 false 让新代重拉(BUG#1)
         } else {
           var ph = document.createElement('div'); ph.className = 'ep-sec ph'; ph.dataset.idx = j; ph.textContent = '…';
           newEls.push(ph); newLoaded[j] = false;
@@ -4029,6 +4062,7 @@
       }
       for (var r = 0; r < secEls.length; r++) { if (!usedOld[r] && secEls[r]) { try { secEls[r].remove(); } catch (e) {} } }   // 被移除的节当场消失
       for (var m = 0; m < newEls.length; m++) { try { col.appendChild(newEls[m]); } catch (e) {} }   // 按新顺序落位(同序同内容 → 布局/滚动不跳)
+      _secGen++; _secWait.length = 0;   // 换代:作废在途旧 idx 章节请求 + 清排队(BUG#1)
       secEls = newEls; loaded = newLoaded; COUNT = items.length; _favMetaItems = items;
       try { newEls.forEach(function (el) { if (el.classList.contains('ph')) observer.observe(el); }); } catch (e) {}   // 新节交给懒加载(从重建后的新 EPUB 拉)
       try { $('ep-page-total').textContent = '/ ' + (COUNT || '–'); onScroll(); } catch (e) {}
@@ -4091,7 +4125,7 @@
     ks.forEach(function (f) {
       _epInk.favPdfFetched[f] = true;
       fetch('/pdf/api/ink?file=' + encodeURIComponent(f)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!(d && d.ok)) { delete _epInk.favPdfFetched[f]; return; }
+        if (!(d && d.ok)) { (_epInk.favPdfDead = _epInk.favPdfDead || {})[f] = 1; return; }   // 服务端明确拒绝(原书没了/改名)→ 终态,不再重试也不放行(网络错走 catch 保留重试;审计 BUG#6)
         var pgs = d.pages || {};
         Object.keys(pgs).forEach(function (pg) { var k2 = 'pdf|' + f + '|' + pg; if (!(_epInk.dirty && _epInk.dirty[k2])) _epInk.data[k2] = JSON.parse(JSON.stringify(pgs[pg])); });   // dirty 不覆盖防丢新笔
         _epInk.favPdfLoaded[f] = true;   // 落地 → 放行起笔

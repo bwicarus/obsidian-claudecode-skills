@@ -231,6 +231,7 @@ let readMode = (() => {
 let _contIO = null;   // IntersectionObserver for 连续模式
 let _pendingScrollY = 0;   // 上次位置恢复用(绝对像素,旧记录兜底)
 let _pendingFrac = 0;      // 上次位置恢复用(页内比例 0-1,布局无关,优先于 scrollY)
+let _pendingPage = 0;      // 恢复目标页(闭包捕获;三连 apply 不读活的 currentPage——它会被滚动处理器反馈式改掉,审计 BUG#3)
 let _scrollSaveTimer = null;
 
 
@@ -314,13 +315,22 @@ function _maybeRestoreLastPos() {
   //   与本地 localStorage 记录**按时间戳取新者**。此前两套系统无仲裁、LS 总是无条件覆盖 → 冻结的旧 LS 每次都赢。
   const srvTs = ((window.__PDF_CFG && +__PDF_CFG.page_ts) || 0) * 1000;   // 服务端 epoch秒 → ms
   if (!pos || !pos.page || (srvTs && srvTs >= (pos.ts || 0))) {
-    // 服务端更新鲜(或无本地记录)→ 信服务端(currentPage 已=CFG.page);本地记录对齐,防下次再打架
-    if (srvTs) { try { _saveLastPosition({ page: currentPage, scrollY: 0, frac: 0, mode: readMode }); } catch (_) {} }
-    window.dlog?.('续读仲裁:server 胜 p.' + currentPage);
+    // 服务端更新鲜(或无本地记录)→ 页码信服务端(currentPage 已=CFG.page)。
+    // 但**同页时仍用本地的页内偏移**(审计 BUG#4:服务端只存页码不存 frac;5s 上报常晚于 600ms LS 存,
+    // server 胜是常态——若因此把 frac 丢掉,每次都开在页顶,反而比仲裁前更差):页码用仲裁、页内偏移用本地。
+    if (pos && pos.page === currentPage) {
+      _pendingPage = currentPage;
+      _pendingFrac = (pos.frac > 0 && pos.frac <= 1) ? pos.frac : 0;
+      _pendingScrollY = pos.scrollY || 0;
+    } else if (srvTs) {
+      try { _saveLastPosition({ page: currentPage, scrollY: 0, frac: 0, mode: readMode }); } catch (_) {}   // 换页了才对齐本地(防旧 frac 錯页套用)
+    }
+    window.dlog?.('续读仲裁:server 胜 p.' + currentPage + (_pendingFrac ? ' (+本地frac)' : ''));
     return;
   }
   // 本地更新鲜(离线读过/上报失败过)→ 用本地,并把服务端记录「治愈」到本地页(别的设备才拿得到新进度)
   currentPage = pos.page;
+  _pendingPage = pos.page;   // 闭包捕获目标页:三连 apply 不读活的 currentPage(会被滚动处理器反馈式改掉 → 恢复位置逐次后爬,审计 BUG#3)
   _pendingFrac = (pos.frac > 0 && pos.frac <= 1) ? pos.frac : 0;
   _pendingScrollY = pos.scrollY || 0;
   try {
@@ -335,9 +345,10 @@ function _restoreScrollAfterRender() {
   const main = document.getElementById('main');
   if (!main) return;
   // 页内比例优先(布局无关:scale/旋转/占位高度变化都不跑偏);老记录无 frac 才退回绝对 scrollY
+  const tgtPage = _pendingPage || currentPage;   // 捕获目标页(BUG#3:活的 currentPage 会被滚动处理器按视口中线改掉,三连 apply 逐次后爬)
   const apply = () => {
     if (_pendingFrac > 0) {
-      const pw = document.querySelector(`.page-wrap[data-page-num="${currentPage}"]`);
+      const pw = document.querySelector(`.page-wrap[data-page-num="${tgtPage}"]`);
       if (pw && pw.offsetHeight) { main.scrollTop = pw.offsetTop + _pendingFrac * pw.offsetHeight; return; }
     }
     if (_pendingScrollY) main.scrollTop = _pendingScrollY;
@@ -346,7 +357,7 @@ function _restoreScrollAfterRender() {
   setTimeout(apply, 100);
   setTimeout(apply, 400);
   setTimeout(apply, 1000);
-  setTimeout(() => { _pendingScrollY = 0; _pendingFrac = 0; }, 1100);   // 最后一次后清空（避免重复 apply 干扰用户主动滚动）
+  setTimeout(() => { _pendingScrollY = 0; _pendingFrac = 0; _pendingPage = 0; }, 1100);   // 最后一次后清空（避免重复 apply 干扰用户主动滚动）
 }
 function _attachScrollSaver() {
   const main = document.getElementById('main');

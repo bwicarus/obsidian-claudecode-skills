@@ -418,7 +418,7 @@
   </div>
 
 <script>
-  window.EPUB_CFG = { fileRel: {{ file_rel|tojson }}, fileName: {{ file_name|tojson }}, sha: {{ sha|tojson }}, serverPos: {{ server_pos|default(None)|tojson }} };
+  window.EPUB_CFG = { fileRel: {{ file_rel|tojson }}, fileName: {{ file_name|tojson }}, sha: {{ sha|tojson }}, serverPos: {{ server_pos|default(None)|tojson }}, serverPosTs: {{ server_pos_ts|default(0) }} };
 </script>
 <script src="/static/qa/marked.js"></script>
 <!-- 必须在 mathjax.js 前配 $...$ 行内分隔符(照搬 pdf_reader.html;MathJax v3 默认只认 \(...\)) -->
