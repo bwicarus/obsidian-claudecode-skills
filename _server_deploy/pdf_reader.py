@@ -581,7 +581,7 @@ def _pdf_shared_js_v():
     for name in ("rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
                  "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
                  "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "pdf-adapter.js",
-                 "pdf-uishared.js", "pdf-tail.js"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS(改它们 → ?v 跳变)
+                 "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
             try:
@@ -5618,13 +5618,28 @@ def epub_file(sha, subpath):
         mt = "application/oebps-package+xml"
     elif target.suffix.lower() == ".ncx":
         mt = "application/x-dtbncx+xml"
-    elif target.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+    serve = target
+    if target.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
         _ds = _epub_downscale_img(target, sha, subpath)   # 大图降采样省内存
         if _ds is not None:
-            resp = send_file(str(_ds), mimetype=mt or "image/jpeg", conditional=True)
-            resp.headers["Cache-Control"] = "public, max-age=86400"
-            return resp
-    resp = send_file(str(target), mimetype=mt or "application/octet-stream", conditional=True)
+            serve = _ds
+    # 2026-07-06 性能:图片/字体/CSS 走 X-Accel-Redirect(Flask 只鉴权,nginx 原生 sendfile 发)——插图书翻页
+    # 不再占 gunicorn 线程(单 worker 8 线程,几百 KB 图片串行发会拖慢所有请求)。同 /pdf/file 的 _PDF_XACCEL 模式;
+    # 需 nginx internal /_epub_extract/ + /_epub_imgcache/。任何异常回落 send_file。
+    if _PDF_XACCEL:
+        try:
+            if serve is not target:
+                xac = "/_epub_imgcache/" + urllib.parse.quote(str(serve.relative_to(_EPUB_IMG_CACHE_DIR)))
+            else:
+                xac = "/_epub_extract/" + urllib.parse.quote(sha + "/" + subpath)
+            rx = Response()
+            rx.headers["X-Accel-Redirect"] = xac
+            rx.headers["Content-Type"] = mt or "application/octet-stream"
+            rx.headers["Cache-Control"] = "public, max-age=86400"
+            return rx
+        except Exception:
+            pass
+    resp = send_file(str(serve), mimetype=mt or "application/octet-stream", conditional=True)
     resp.headers["Cache-Control"] = "public, max-age=86400"   # 解包文件内容稳定,可缓存
     return resp
 

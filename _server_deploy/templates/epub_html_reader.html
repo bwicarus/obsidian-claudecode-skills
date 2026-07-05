@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>{% if is_fav %}{{ file_name }}{% else %}{{ file_name }} · EPUB{% endif %}</title>
+<link rel="preload" as="script" href="/static/pdf/epub-html.js?v={{ reader_js_v }}"><!-- 主脚本 317KB 在 body 尾,head 先开拉(HTTP/2 并行) -->
 {% if is_fav %}<!-- 收藏夹 PWA:装成跟通用阅读器独立的 app,start_url 固定打开本夹(零状态,不受「最近打开的书」影响) -->
 <link rel="manifest" href="/pdf/fav/manifest?id={{ fav_id }}">
 <meta name="apple-mobile-web-app-capable" content="yes">
