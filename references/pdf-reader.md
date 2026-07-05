@@ -1173,3 +1173,27 @@ EPUB 开书跳书尾 bug 两轮修复(v2 前缀 / scrollRestoration=manual)后,�
 - **读取零轮询**:`/pdf/view` 无 `?page=` 时把记录**折进模板 `page`**(reader.js 读 `__PDF_CFG.page`,前端零改动;有 `?page=` 深链优先);`/pdf/epub/view` 注入 `EPUB_CFG.serverPos`,onBuilt 恢复优先级=`?sec=` 深链 > serverPos > LS v2 > 0。
 - **关键语义**:①「末章当脏值回 0」守卫只适用 LS 旧值——服务端值写入端已校验,可信,不走该守卫;②上报端 `sent` 初值=开局注入位置 → 闲置标签页不上报,不会用旧值盖掉别的设备刚写的新进度(副作用:`?page=` 深链页要翻页后才入记录,接受);③ localStorage 照写,当离线兜底;④ fav 查看页零进度状态是既定设计,不接此系统。
 - 残留风险:服务端 pos 不 clamp 页数上限(pdf_view 不开文档;书被删页后记录可能越界,同收藏夹深链既有暴露面)。
+
+## §16 2026-07-05/06 架构批次(性能/统一/续读)——新 session 必读
+
+**前端交付架构(开书链路)**
+- `pdf_reader.html` 只剩 ~40KB 动态壳:原 27 个内联 script 中纯 JS 两大块抽成 `static/pdf/pdf-uishared.js`(ui_shared 区:收藏 picker 胶水+插入页 host 等)+ `pdf-tail.js`(墨迹引擎/续读上报/SSE 等尾部);53KB 纯 CSS 抽成 `pdf-styles.css`。三者进 `_pdf_shared_js_v` 的 mtime 扫描表(改了 → ?v 跳变)。**动态值只走 `window.__PDF_CFG`,抽出文件里严禁 Jinja**。
+- head 有 `modulepreload reader.js` + `preload uishared/tail`;EPUB 模板同法 preload `epub-html.js`。
+- Jinja 大模板在 `register_pdf_reader` 起后台线程预编译(重启后首开 1048ms→15ms 的根因就是首次编译)。
+- 大文件全走 nginx X-Accel(`PDF_XACCEL=1`):PDF 本体 `/_vault_pdf/`+`/_compressed_pdf/`,**EPUB 解包图片/字体 `/_epub_extract/`+降采样 `/_epub_imgcache/`**(epub_file 里 X-Accel 分支,任何异常回落 send_file)。nginx sites-available/bwicarus 手管,这四条 internal location 在两个 server 块各一份。
+- 右栏把手早期兜底:`toggleGrammarPanel` 真身在 module reader.js(整包执行完才有),模板早期内联块里有极简同类名开关兜底,就绪后被覆盖。
+
+**续读位置=单真相源仲裁(Kindle 模型;修「每次开在固定位置」)**
+- 服务端 `state/reader-positions.json` 为真相源;`/pdf/view` 注入 `page`+`page_ts`(epoch 秒)。
+- `02-position.js::_maybeRestoreLastPos`:LS(`pdf-last-positions`,ms 时间戳)与服务端**按时间戳新者胜**;server 胜→LS 对齐;LS 胜→立即 POST reading-pos「治愈」服务端。页内位置存 `frac`(页内比例,布局无关),绝对 `scrollY` 仅旧记录兜底。深链 `?page=` 优先不仲裁;`mode` 是设备偏好不参与。
+- EPUB 侧本就 serverPos 优先 + LS v2 兜底;另加「幕后定位」:开书 `body.ep-settling` 把 `#ep-col` opacity:0,等目标章 loaded 后钉一次→淡入直接呈现记录位置(2.5s 硬兜底、showErr 立即揭幕)。927 守护(`_initGuard`,仅触摸设备)照常在幕后跑。
+
+**SSE 实时事件总线(单 worker gthread=进程内 pub/sub)**
+- `/pdf/api/reader-events`(SSE,5min 自动回收+EventSource 自愈)+ `_reader_publish(kind,file,uid)`。
+- 事件:`ink`(PDF /api/ink 与 epub-ink 存盘后)、`text`(userpages PATCH)、`userpage-del`、`fav-changed`/`fav-built`。
+- 消费:PDF 模板 SSE 块(该页重拉+重绘,250ms/页合并,**响应落地时复查 drawing/dirty**);epub-html `_liveSyncSoon`→`_userpageLiveSync`(20s 慢轮询+visibility 兜底)。两份墨迹 GET 均 no-store。
+- 防丢笔套路(审查修完的血泪):dirty 在 schedule 设、**POST 落地才清**(pend 标记防期间又画);beacon **sendBeacon 返回 true 才清**;回前台全量重拉**保留 dirty 页**;数据 clobber 一律跳过 dirty 键;beacon 读 live `el.__inkStrokes`(elOf 映射)不读可被覆盖的 data map。
+
+**顶栏/图标/旋转**
+- PDF `#header` 对齐 EPUB 规格(36px 按钮/15px 字/7px 圆角/safe-area);⭐🔍⚙ 与手写/便签/新建页统一 SF 线条 SVG(`svg.rc-tbi`,⚙ 复用 rc-sidedrawer 齿轮路径)。
+- 旋转保持宽度适应:`window._atFitWidth` 粘性意图(开书 true;仅 `_applyZoom` 置 false;`fitWidth()` 置 true);`_onOrientChange` 里 keepFit 时忽略该方向旧 scale 存档并 `_refitToWidth(true)`。EPUB:`#ep-content overflow-x:hidden` + resize 归零 scrollLeft。

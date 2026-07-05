@@ -180,3 +180,15 @@ EPUB 插入段本就是 `#ep-col` 内的 DOM 文本 → 选词/查词/AI/高亮*
 ## 附录:Gemini 免费额度恢复自动切回(小功能,已实现)
 
 免费 429 的临时冷却(`_gemini_off`)到期本就自动回免费;用户点过 `@paid` 的 action 预设是永久直连。设计:调用路径上**节流探测**(30min 至多一次)——`assistant.py::_paid_probe_due`(ts 持久化 `state/gemini-paid-probe.json`)+ `_paid_recover_check(uid, action)`:free key **1-token generateContent、3s 超时同步**(不用 countTokens——它是独立配额桶,generate 免费耗尽时照样 200,必然误判)。成功 → `_ap_set` 原地存回裸 variant(摘 `@paid`)+ 记 `ok_at` 短窗(5min,其它 @paid action 免请求一起切回)+ 本次回复附一次 `gemini-paid {recovered:true}` 事件;失败 → 429/403 顺手 `_gemini_cooldown("free")` 静默继续付费。接线:`_agent_run`/`_eagent_run`(有 SSE 通道 → 绿色提示条「✅ 免费额度已恢复」)+ reader_ask/stream/vision + 4 处 summarize 叶子(无 SSE,静默切回)。前端 rc-assistant.js `paidNotice` 认 `data.recovered`。
+
+## 「同一张纸」终局(2026-07-05/06)——收藏夹⇄原书全双向,唯一代码
+
+**模型**:插入页/收藏页=中间层里带 uid 的共享对象,PDF/EPUB/收藏夹都是**视图**;谁编辑都写同一份数据,SSE 让所有打开的视图实时收敛。
+
+- **正文+编辑器唯一代码**:`rc-userpages.js` 加 `_fileOf(p)=(p.__file)||O.file`(per-page 文件路由:存/删/改高/beacon 全走它)+ `mountOne(container,{file,id})`(把单页挂成真 `.ep-usec`,复用 buildInstant 全套:Aa 即时编辑/下边缘改高/keepRatio/自动保存)。收藏夹 `_favUpMount` 对 `.fav-item-userpage[data-uid][data-ink-file]` 调 mountOne;`load()` 保留 `__mounted` 页;`mountAll` 跳过它们。
+- **墨迹**:EPUB 自建页键=uid(fileOf[uid]=原书);**收藏的 PDF 页键=`pdf|原书|页号`**,存取自动路由 `/api/ink`(画/存/beacon/清空/撤销全链)。收藏夹打开自动拉原书墨迹(`_favUpInkLoad`/`_favPdfInkLoad`,dirty 不覆盖);**favPdfLoaded 起笔门槛**(整页替换语义下,原书墨迹没落地前禁画,防空底覆盖)。工具栏目标 `_favUpElIn` 认内层 `.ep-usec`/`.fav-pdf-page`。
+- **删除闭环**:统一 🗑(收藏夹删=删原书那页,确认文案明示)→ 后端 `_fav_cascade_userpage_delete` 级联清各收藏夹条目 + `userpage-del` SSE(所有视图当场移除元素)+ `_fav_prune_dead_userpages`(open/预建时清存量墓碑;sidecar 存在且查无 id 才删)。
+- **结构真·增量**:fav CRUD→`fav-changed`;重建完→`fav-built`;打开着的收藏夹 `_favReconcile` 拉 `/api/fav-meta` 按条目 key diff:保留节复用 DOM 只改 idx、移除节消失、新增节建占位懒加载(滚动/墨迹 canvas 不动)。
+- **来源条**(v13):`《书名》·页/节 | 打开原书↗ | ☆取消收藏`(`_fav_sep_html3` 带 data-fitem→PATCH remove_item,乐观隐藏+reconcile 收尾);间距紧凑(sep 8/5、item 2)。
+- **收藏夹工程**:后台预建(`_fav_prebuild_loop` 45s 后+每 15min,串行防并发压 Pi;线程起失败回滚占位);独立 PWA(`/fav/manifest`+`/fav/icon` 金星,start_url 固定本夹,零状态不进「最近打开」)。
+- **实时同步**:内容 ~1s(SSE)、结构=重建耗时(几秒);正在画/编辑的页永不被打断/覆盖(drawing/dirty 守卫,响应落地复查)。
