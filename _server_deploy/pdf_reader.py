@@ -5899,6 +5899,10 @@ def pdf_api_userpages():
             _fav_cascade_userpage_delete(rel, uid)   # 同一张纸:页没了 → 各收藏夹里指向它的条目一并移除(不留墓碑)+ 后台重建 + 推事件
         except Exception:
             pass
+        try:
+            _reader_publish("userpage-del", rel, uid)   # 推给所有打开着的视图(原书/收藏夹):当场移除该页元素
+        except Exception:
+            pass
         return jsonify({"ok": True})
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
@@ -6855,7 +6859,7 @@ def _fav_same_item(a: dict, b: dict) -> bool:
 #   命名按 fid:改名只改 name(高亮/墨迹 sidecar 键=合成 rel 资源/收藏夹/<fid>.epub 的 sha,与 fid 绑死,零孤儿)。
 _FAV_LOCK = _upthr.Lock()               # favorites.json 的 RMW 串行化(CRUD ⇄ build job 写 built_sig 防丢更新)
 _FAV_BUILD_ACTIVE: dict = {}            # fid -> jid(同夹重建进行中复用同一 job,去重)
-_FAV_BUILD_VER = 12                      # v12(2026-07-05):EPUB 收藏的插入页正文也双向——md 显示层包 .fav-up-disp,前端「✏️ 编辑」拉原书 md → textarea → PATCH /api/userpages 写回原书 → 就地重渲(原书→fav 经 content_sig 折 md 触发重建)。v11:墨迹实时绑定原书(data-uid+data-ink-file 双向读写)。v9:PDF 页图 per-figure 徽标(.fav-pdf-page 带 data-favpdf-*,前端 fetch page-figures)。v5=真 EPUB + 完整 EPUB 阅读器;bump → 存量夹视为脏,下次打开/变更自动重建
+_FAV_BUILD_VER = 13                      # v13(2026-07-05):来源条加「☆ 取消收藏」按钮(data-fitem → PATCH remove_item)+ 页间距紧凑(.fav-sep margin 22/14→8/5、.fav-item 8→2)。v12(2026-07-05):EPUB 收藏的插入页正文也双向——md 显示层包 .fav-up-disp,前端「✏️ 编辑」拉原书 md → textarea → PATCH /api/userpages 写回原书 → 就地重渲(原书→fav 经 content_sig 折 md 触发重建)。v11:墨迹实时绑定原书(data-uid+data-ink-file 双向读写)。v9:PDF 页图 per-figure 徽标(.fav-pdf-page 带 data-favpdf-*,前端 fetch page-figures)。v5=真 EPUB + 完整 EPUB 阅读器;bump → 存量夹视为脏,下次打开/变更自动重建
                                          # v6(2026-07-04):PDF 条目透明词层从「散布 absolute span」改「按视觉行分组 .fav-pdf-line 行盒 + 行内 inline-block 词」→ 修收藏夹长按选中乱跨上下多行(存量夹重建;文字节点顺序不变 → 高亮/便签 offset 锚不受影响)
                                          # v7(2026-07-04):PDF 条目透明词层从「原生 DOM Selection」改「char-layer 式自定义选择」——逐字照搬 PDF 阅读器 reader.src/13-selection.js::_bindCharLayer:词层 user-select:none 彻底关原生选区(iOS 长按拖选引擎压根不启动 → 根治乱跨行),epub-html.js 自建"拖选=按词 bbox 圈范围 → 自绘高亮 .fav-pdf-sel → 手动组 cur + showSel"(与 char-layer 手动开 toolbar 同构;⚠ user-select:none 下 addRange 后 getSelection 恒空,故手动 cur,text/anchor 用既有 offsetOf/_countableText 算=高亮/便签同口径;document capture 相拦 content 的 mouseup/touchend→captureSel 防误清 toolbar,零改 captureSel)。CSS 加 .fav-pdf-sel 自绘高亮层 + 词层 user-select:none(存量夹重建;HTML 结构不变 → offset 锚不受影响)
                                          # v8(2026-07-04):build 顺带写 state/reader-fav-meta/<fid>.json(每条目=一 section:出处 src_file/src_name/src_page|src_section + 首句 snippet + 相邻 adj_prev + missing)。给 EPUB 侧栏助手「认收藏集(system prompt 声明)+ 目录概览 + 相邻性(不把无关两条当连续上下文)+ read_source_page 翻原书」用(见 epub_assistant.py + references/reader-userpages-favorites.md「C. AI 集成」)。EPUB 产物字节不变、offset 锚不受影响,bump 仅为存量夹重建补 meta。
@@ -6979,9 +6983,23 @@ def _fav_esc(s) -> str:
 def _fav_sep_html(label: str, href: str) -> str:
     """条目分隔条:来源标签 + 「打开原书 ↗」深链。fav.css 给 .fav-sep 上 user-select:none(不误建高亮);
     「打开原书」是站内 <a>(epub-html tap 处理器对 closest('a') 让位 → 正常导航,不触发单击查词)。"""
+    return _fav_sep_html3(label, href, None)
+
+
+def _fav_sep_html3(label: str, href: str, item) -> str:
+    """同 _fav_sep_html,多传原始收藏条目 → 来源条尾部加「☆ 取消收藏」按钮(data-fitem=条目 JSON,
+    前端 PATCH remove_item → 乐观隐藏本节 + 后台重建 reconcile 收尾)。item=None 则不加按钮。"""
+    btn = ""
+    if isinstance(item, dict):
+        try:
+            btn = '<button type="button" class="fav-unfav" data-fitem="%s" title="取消收藏这一页(不影响原书)">☆ 取消收藏</button>' \
+                  % _fav_esc(json.dumps({k: item.get(k) for k in ("file", "kind", "page", "section", "id") if item.get(k) is not None},
+                                        ensure_ascii=False))
+        except Exception:
+            btn = ""
     return ('<div class="fav-sep"><span class="fav-sep-t">%s</span>'
-            '<a class="fav-open-src" href="%s">打开原书 ↗</a></div>'
-            % (_fav_esc(label), _fav_esc(href)))
+            '<a class="fav-open-src" href="%s">打开原书 ↗</a>%s</div>'
+            % (_fav_esc(label), _fav_esc(href), btn))
 
 
 def _fav_pdf_overlay_spans(chars, page_w, page_h) -> str:
@@ -7095,12 +7113,14 @@ _FAV_CONTAINER_XML = (
 
 # 收藏夹 EPUB 自带 CSS(打包进 zip,/api/epub-css scope 到 #ep-col 后注入 #ep-book-css)。分隔条 + PDF 透明词层。
 _FAV_EPUB_CSS = (
-    ".fav-sep{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:22px 0 14px;padding:6px 10px;"
+    ".fav-sep{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 5px;padding:4px 10px;"
     "border-radius:8px;background:rgba(120,150,200,.10);border:1px solid rgba(120,150,200,.22);"
     "font-size:.82em;color:#5a6a86;user-select:none;-webkit-user-select:none}\n"
     ".fav-sep-t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}\n"
     ".fav-open-src{flex:none;text-decoration:none;white-space:nowrap;font-weight:600}\n"
-    ".fav-item{margin:0 0 8px}\n"
+    ".fav-item{margin:0 0 2px}\n"
+    ".fav-unfav{flex:none;background:transparent;border:1px solid rgba(120,140,190,.45);border-radius:999px;padding:2px 10px;font-size:11px;color:inherit;opacity:.75;cursor:pointer;white-space:nowrap;-webkit-user-select:none;user-select:none;touch-action:manipulation}\n"
+    ".fav-unfav:active{opacity:1;transform:scale(.95)}\n"
     ".fav-pdf-page{position:relative;container-type:size;width:100%;margin:0 auto;background:#fff;"
     "border:1px solid rgba(0,0,0,.10);border-radius:4px;overflow:hidden}\n"
     ".fav-pdf-img{display:block;width:100%;height:auto}\n"
@@ -7246,7 +7266,7 @@ def _fav_pdf_item(i: int, it: dict, src_name: str, warns: list):
     pno = int(it.get("page") or 1)
     label = "《%s》 · 第 %d 页" % (src_name, pno)
     href = "/pdf/view?file=" + urllib.parse.quote(frel) + "&page=%d" % pno
-    sep = _fav_sep_html(label, href)
+    sep = _fav_sep_html3(label, href, it)
     ap = _safe_vault_path(frel)
     imgs = []
     body_inner = None
@@ -7302,7 +7322,7 @@ def _fav_epub_item(i: int, it: dict, src_name: str, warns: list):
     else:
         label = "《%s》 · %s" % (src_name, label)
     href = "/pdf/epub/view?file=" + urllib.parse.quote(frel) + "&sec=%d" % idx
-    sep = _fav_sep_html(label, href)
+    sep = _fav_sep_html3(label, href, it)
     if html is not None:
         body_inner = '<div class="fav-item fav-item-epub">' + html + "</div>"
     else:
@@ -7446,7 +7466,7 @@ def _fav_userpage_item(i: int, it: dict, warns: list):
                (("/pdf/epub/view?file=" + urllib.parse.quote(rel)) if low.endswith(".epub") else "/pdf/")
         label = "📝 我的页 · 出自《%s》" % src_name
         warns.append("第 %d 条(我的页 %s)记录不存在(可能已删除)" % (i + 1, uid))
-        return label, (_fav_sep_html(label, href)
+        return label, (_fav_sep_html3(label, href, it)
                        + '<div class="fav-item fav-missing">这条「我的页」已被删除或找不到了。</div>'), []
     title = (rec.get("title") or "").strip()
     label = "📝 我的页" + ((" · " + title) if title else "") + " · 出自《%s》" % src_name
@@ -7481,7 +7501,7 @@ def _fav_userpage_item(i: int, it: dict, warns: list):
                           + ink_svg + '</svg><div class="fav-up-content">' + inner + '</div></div>')
         else:
             body_inner = '<div class="fav-item fav-item-userpage">' + inner + "</div>"
-    return label, _fav_sep_html(label, href) + body_inner, imgs
+    return label, _fav_sep_html3(label, href, it) + body_inner, imgs
 
 
 def _fav_item_snippet(body: str, limit: int = 80) -> str:
@@ -7668,6 +7688,10 @@ def _fav_build_job(jid: str, fid: str):
             _job_set(jid, status="done", ts=_time.time(),
                      result={"ok": True, "fid": fid, "items": len(items), "warnings": warns[:20],
                              "view": "/pdf/fav/open?id=" + urllib.parse.quote(fid)})
+            try:
+                _reader_publish("fav-built", "fav:" + fid, None)   # 新产物就绪 → 已打开的收藏夹阅读器增量重排(结构真·增量)
+            except Exception:
+                pass
     except Exception as ex:
         try:
             if tmp and Path(tmp).exists():
@@ -7745,6 +7769,35 @@ def _fav_cascade_userpage_delete(rel: str, uid: str):
             pass
 
 
+def _fav_prune_dead_userpages(fid: str) -> bool:
+    """清掉指向**已删除自建页**的收藏条目(同一张纸:页没了条目就该没;修级联上线前删的存量墓碑)。
+    谨慎:仅当原书 userpages sidecar 文件确实存在、且查无此 id 才删;sidecar 缺失(改名/迁移)→ 保留不动。
+    ⚠ 调用方不得持 _FAV_LOCK(普通 Lock 非重入;CRUD 在锁内调 trigger 的路径不要来这)。返回是否有清理。"""
+    changed = False
+    with _FAV_LOCK:
+        d = _fav_load()
+        f = _fav_folder(d, fid)
+        if not f:
+            return False
+        keep = []
+        for it in (f.get("items") or []):
+            if isinstance(it, dict) and it.get("kind") == "userpage":
+                rel2, uid2 = (it.get("file") or ""), (it.get("id") or "")
+                try:
+                    if uid2 and _upages_path(rel2).exists() \
+                            and not any(x.get("id") == uid2 for x in _upages_load(rel2) if isinstance(x, dict)):
+                        changed = True
+                        continue   # 死条目 → 丢弃
+                except Exception:
+                    pass
+            keep.append(it)
+        if changed:
+            f["items"] = keep
+            _fav_mark_dirty(f)
+            _fav_save(d)
+    return changed
+
+
 def _fav_prebuild_all():
     """服务器空闲时把所有『脏』收藏夹提前重建好(版本 bump / userpage 正文编辑后自动变脏)→ 用户打开即秒开、不再前台等重建。
     串行(一次一本,复用 _fav_trigger_build 的脏检查+去重),避免同时建多本大 EPUB 压垮 Pi;每本最多等 5min。"""
@@ -7757,6 +7810,8 @@ def _fav_prebuild_all():
         if not fid:
             continue
         try:
+            if _fav_prune_dead_userpages(fid):   # 顺带清存量墓碑条目(指向已删自建页)→ 变脏本轮就重建掉
+                f = None                          # items 变了 → 让 trigger 重新加载
             jid, started = _fav_trigger_build(fid, f)   # 脏才建;不脏/在建 → 跳
         except Exception:
             continue
@@ -7851,6 +7906,10 @@ def pdf_api_favorites():
                 _fav_mark_dirty(f)
                 _fav_save(d)
                 _fav_trigger_build(fid, f)          # 加条目 → 立即后台重建(不阻塞本次响应)
+                try:
+                    _reader_publish("fav-changed", "fav:" + fid, None)   # 结构变了(已打开的收藏夹等 fav-built 再增量重排)
+                except Exception:
+                    pass
             return jsonify({"ok": True, "folder": f})
         # PATCH:改名 / 移出条目
         fid = (body.get("folder") or "").strip()
@@ -7874,7 +7933,23 @@ def pdf_api_favorites():
             _fav_save(d)
         if items_changed:
             _fav_trigger_build(fid, f)             # 移出条目 → 立即后台重建(改名不触发)
+            try:
+                _reader_publish("fav-changed", "fav:" + fid, None)
+            except Exception:
+                pass
         return jsonify({"ok": True, "folder": f})
+
+
+@bp.route("/api/fav-meta")
+def pdf_api_fav_meta():
+    """收藏夹 AI 元数据(section↔条目映射,build 时落 state/reader-fav-meta/<fid>.json)。
+    已打开的收藏夹阅读器用它做**结构真·增量重排**(fav-built 事件后 diff 新旧 items,新增长出来/移除当场消失,不刷新)。"""
+    fid = (request.args.get("id") or "").strip()
+    if not re.match(r"^f_[0-9a-zA-Z]+$", fid):
+        abort(404)
+    r = jsonify({"ok": True, "meta": _fav_meta_load(fid)})
+    r.headers["Cache-Control"] = "no-store"
+    return r
 
 
 def _fav_js_v():
@@ -7953,6 +8028,11 @@ def pdf_fav_open():
     folder = _fav_folder(_fav_load(), fid)
     if not folder:
         abort(404)
+    try:
+        if _fav_prune_dead_userpages(fid):    # 清存量墓碑(指向已删自建页的条目)→ 变脏走等待页重建,打开即干净
+            folder = _fav_folder(_fav_load(), fid) or folder
+    except Exception:
+        pass
     # 常态:内容一变 CRUD 已自动后台 build,这里通常不脏。_fav_trigger_build 脏才起(不脏返回 None)。
     jid, _started = _fav_trigger_build(fid, folder)
     if jid is None:                      # 不脏 = 产物就绪 → 秒开渲染
@@ -8074,7 +8154,9 @@ def pdf_api_epub_ink():
         rel = (request.args.get("file") or "").strip()
         if not rel:
             return jsonify({"ok": False, "error": "缺少 file"}), 400
-        return jsonify({"ok": True, **_epub_ink_load(rel)})
+        r = jsonify({"ok": True, **_epub_ink_load(rel)})
+        r.headers["Cache-Control"] = "no-store"   # 同 /api/ink:实时同步读源禁缓存
+        return r
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     if not rel:
@@ -9513,7 +9595,9 @@ def pdf_api_ink_list():
     rel = request.args.get("file", "")
     if not rel or _safe_vault_path(rel) is None:
         return jsonify({"ok": False, "error": "invalid file"}), 400
-    return jsonify({"ok": True, **_ink_load(rel)})
+    r = jsonify({"ok": True, **_ink_load(rel)})
+    r.headers["Cache-Control"] = "no-store"   # 实时同步的读源(SSE 触发重拉):iOS Safari 缓存旧响应会把画面回退到陈旧墨迹
+    return r
 
 
 @bp.route("/api/ink", methods=["POST"])
@@ -9540,6 +9624,10 @@ def pdf_api_ink_save():
     else:
         doc["pages"].pop(str(page), None)
     _ink_save(rel, doc)
+    try:
+        _reader_publish("ink", rel, str(page))   # 推给其它打开着的视图(PDF 阅读器/收藏夹):同一张纸,~1s 同步
+    except Exception:
+        pass
     return jsonify({"ok": True, "count": len(strokes)})
 
 

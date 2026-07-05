@@ -3359,7 +3359,7 @@
   _epInk.fileOf = {};   // idx(uid) → 原书文件(收藏夹自建页跨书写原书墨迹);缺省 = FREL
 
   // 收藏夹自建页:墨迹画在 .fav-item-userpage 页体(与原书 .ep-usec 同 86vh 几何 → 坐标对齐 + 跨书写原书),不画在整个 fav 章
-  function _favUpElIn(secEl) { return (secEl && secEl.querySelector) ? secEl.querySelector('.ep-usec[data-uid]') : null; }   // 收藏夹自建页挂成内层 .ep-usec(ink canvas 在它上)→ Clear/Undo/_inkActiveEl 拿它,不是外层容器(审查:否则清空会写空覆盖原书墨迹)
+  function _favUpElIn(secEl) { return (secEl && secEl.querySelector) ? secEl.querySelector('.ep-usec[data-uid], .fav-pdf-page[data-favpdf-file]') : null; }   // 收藏夹自建页(.ep-usec)/PDF 页(.fav-pdf-page):ink canvas 在它上 → Clear/Undo/_inkActiveEl 拿它,不是外层容器(审查:否则清空会写空覆盖原书墨迹)
   function _inkActiveEl() {
     if (_epInk.lastEl && document.body.contains(_epInk.lastEl)) return _epInk.lastEl;
     var vh = window.innerHeight || 800, mid = vh / 2;
@@ -3375,7 +3375,10 @@
   // 墨迹 idx:正文章节 = dataset.idx(非负整数);插入页(.ep-usec)/收藏夹自建页(.fav-item-userpage)= dataset.uid(u_* 字符串,独立编号空间)。
   //   _epInk.data/saveTimers/dirty 都以此为对象键(字符串键天然共存),/api/epub-ink 后端已放行 u_* 字符串 idx。
   function _inkFileOf(idx) { return (_epInk.fileOf && _epInk.fileOf[idx]) || FREL; }   // 收藏夹自建页:该 uid 绑原书文件 → 墨迹读写落原书(双向);其余走 FREL
-  function _inkIdxOf(el) { return (el && el.dataset && el.dataset.uid) ? el.dataset.uid : parseInt(el.dataset.idx, 10); }
+  function _inkIdxOf(el) {
+    if (el && el.dataset && el.dataset.favpdfFile) return 'pdf|' + el.dataset.favpdfFile + '|' + el.dataset.favpdfPage;   // 收藏夹 PDF 页:键=pdf|原书|页号 → 存取路由原书 /api/ink(同一张纸)
+    return (el && el.dataset && el.dataset.uid) ? el.dataset.uid : parseInt(el.dataset.idx, 10);
+  }
   // 插入页存档墨迹复原(onRender 时调):建 canvas + 重绘(_inkLoadAll 若还没回来,_inkApplyVisibleSaved 兜底)
   function _epUpApplyInk(usecEl, uid) {
     var d = _epInk.data[uid];
@@ -3579,8 +3582,9 @@
   // 页面开新段(出便签后):按当前点重新找章锚(可能已跨章);不在任何已加载章上 → 悬空(dangling),后续 move 再试。
   function _inkBeginPageSegAt(d, e) {
     var t = document.elementFromPoint(e.clientX, e.clientY);
-    var el = t && t.closest ? t.closest('.fav-item-userpage[data-uid], .ep-usec, .ep-sec') : null;   // 收藏夹自建页:优先命中页体子元素(uid 键 → 墨迹写回原书)
+    var el = t && t.closest ? t.closest('.fav-item-userpage[data-uid], .fav-pdf-page[data-favpdf-file], .ep-usec, .ep-sec') : null;   // 收藏夹自建页/PDF 页:优先命中页体子元素(键 → 墨迹写回原书)
     if (!el || el.classList.contains('ph')) { d.dangling = true; return false; }
+    if (el.dataset && el.dataset.favpdfFile && !(_epInk.favPdfLoaded && _epInk.favPdfLoaded[el.dataset.favpdfFile])) { try { _favPdfInkLoad(); } catch (x) {} d.dangling = true; return false; }   // 原书墨迹没落地前禁画(整页替换会盖掉旧墨迹,审查 high)
     if (el.dataset.uid && el.dataset.inkFile) { _epInk.fileOf[el.dataset.uid] = el.dataset.inkFile; if (el.classList.contains('fav-up-editing')) { d.dangling = true; return false; } }   // 确保墨迹写回原书;正文编辑态不画
     var idx = _inkIdxOf(el);
     _inkEnsure(el, idx);
@@ -3600,12 +3604,13 @@
 
   // ── 指针绘制(委托在 #ep-col 上,capture 拦截 → 找到 .ep-sec 当锚)──
   function _inkPointerDown(e) {
-    var el = e.target && e.target.closest ? e.target.closest('.fav-item-userpage[data-uid], .ep-usec, .ep-sec') : null;   // 收藏夹自建页:优先命中页体子元素(uid 键 → 墨迹写回原书)
+    var el = e.target && e.target.closest ? e.target.closest('.fav-item-userpage[data-uid], .fav-pdf-page[data-favpdf-file], .ep-usec, .ep-sec') : null;   // 收藏夹自建页/PDF 页:优先命中页体子元素(键 → 墨迹写回原书)
     if (!el || el.classList.contains('ph')) return;
     if (el.dataset.uid && el.dataset.inkFile) {
       _epInk.fileOf[el.dataset.uid] = el.dataset.inkFile;   // 确保墨迹写回原书文件(即便 _favUpInkLoad 还没跑)
       if (el.classList.contains('fav-up-editing') || (e.target.closest && e.target.closest('.fav-up-editbtn, .fav-up-edit'))) return;   // 正文编辑态 / 点编辑按钮 → 不画
     }
+    if (el.dataset && el.dataset.favpdfFile && !(_epInk.favPdfLoaded && _epInk.favPdfLoaded[el.dataset.favpdfFile])) { try { _favPdfInkLoad(); toast('原书墨迹加载中,请稍候再画'); } catch (x) {} return; }   // 原书墨迹没落地前禁画(整页替换会盖掉旧墨迹,审查 high)
     if (el.classList.contains('ep-usec')) {   // 插入页:编辑态禁手写;点在 Aa/编辑区 → 让按钮处理不画
       if (el.classList.contains('editing') || document.body.classList.contains('ep-up-editing')) return;
       if (e.target.closest('.ep-up-editbtn, .rc-up-edit, .rc-up-bar')) return;
@@ -3738,14 +3743,22 @@
     var strokes = el.__inkStrokes;
     _epInk.data[idx] = strokes;
     (_epInk.dirty = _epInk.dirty || {})[idx] = true;
+    (_epInk.pend = _epInk.pend || {})[idx] = 1;   // 有新一批待存(save 成功清 dirty 前查它:期间又画了 → 保持 dirty)
     clearTimeout(_epInk.saveTimers[idx]);
-    _epInk.saveTimers[idx] = setTimeout(function () { _inkSave(idx, strokes); }, 900);
+    _epInk.saveTimers[idx] = setTimeout(function () { if (_epInk.pend) delete _epInk.pend[idx]; _inkSave(idx, strokes); }, 900);
   }
   function _inkSave(idx, strokes) {
     if (!FREL) return;
-    if (_epInk.dirty) delete _epInk.dirty[idx];
-    reqJson('POST', '/pdf/api/epub-ink', { file: _inkFileOf(idx), idx: idx, strokes: strokes || [] }, function () {},
-      function () { (_epInk.dirty = _epInk.dirty || {})[idx] = true; });   // 失败重标脏,flush 兜底还有机会补
+    // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧同步用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
+    var done = function () { if (_epInk.dirty && !(_epInk.pend && _epInk.pend[idx])) delete _epInk.dirty[idx]; };
+    var fail = function () { (_epInk.dirty = _epInk.dirty || {})[idx] = true; };   // 失败重标脏,flush 兜底还有机会补
+    var k = String(idx);
+    if (k.indexOf('pdf|') === 0) {   // 收藏夹 PDF 页:写回原书 PDF 墨迹(/api/ink 按页号;同一张纸)
+      var sg = k.split('|');
+      reqJson('POST', '/pdf/api/ink', { file: sg[1], page: parseInt(sg[2], 10), strokes: strokes || [] }, done, fail);
+      return;
+    }
+    reqJson('POST', '/pdf/api/epub-ink', { file: _inkFileOf(idx), idx: idx, strokes: strokes || [] }, done, fail);
   }
   // 自建页拖拽改高 → 墨迹按 startH/新H 重归一化 y,保持像素位置不变(空间加到下方,不整体拉伸)。
   //   墨迹 y 归一到 section 高度(见 _inkNorm/_inkDrawStroke),高度一变 y*H 就竖向拉伸——resize 时反向补偿即抵消。
@@ -3775,12 +3788,20 @@
     if (!FREL || !_epInk.dirty) return;
     for (var k in _epInk.dirty) {
       clearTimeout(_epInk.saveTimers[k]);   // 用字符串键 k(原 parseInt(k) 对 u_* 插入页键=NaN,beacon 送错;顺手修)
+      var sent = false;
       try {
-        navigator.sendBeacon && navigator.sendBeacon('/pdf/api/epub-ink',
-          new Blob([JSON.stringify({ file: _inkFileOf(k), idx: k, strokes: ((_epInk.elOf && _epInk.elOf[k] && _epInk.elOf[k].__inkStrokes) || _epInk.data[k] || []) })], { type: 'application/json' }));   // 读 live el.__inkStrokes 为准(_epInk.data 可能被跨书拉取/实时同步 clobber 成陈旧)
+        var st = ((_epInk.elOf && _epInk.elOf[k] && _epInk.elOf[k].__inkStrokes) || _epInk.data[k] || []);   // 读 live el.__inkStrokes 为准(_epInk.data 可能被跨书拉取/实时同步 clobber 成陈旧)
+        if (String(k).indexOf('pdf|') === 0) {   // 收藏夹 PDF 页 → /api/ink(按页号)
+          var sg2 = String(k).split('|');
+          sent = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/ink',
+            new Blob([JSON.stringify({ file: sg2[1], page: parseInt(sg2[2], 10), strokes: st })], { type: 'application/json' })));
+        } else {
+          sent = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/epub-ink',
+            new Blob([JSON.stringify({ file: _inkFileOf(k), idx: k, strokes: st })], { type: 'application/json' })));
+        }
       } catch (e) {}
+      if (sent) delete _epInk.dirty[k];   // 送出去了才清(sendBeacon false=没发出,保 dirty 兜底,防被同步旧值覆盖)
     }
-    _epInk.dirty = {};
   }
   window.addEventListener('pagehide', _inkFlushBeacon);
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') _inkFlushBeacon(); });
@@ -3848,6 +3869,29 @@
   //   正在画/编辑的那页跳过(不打断);首次只记基线不重渲(免闪);跨设备靠服务端同一份边车收敛。
   function _userpageLiveSync() {
     if (document.visibilityState !== 'visible') return;
+    // 收藏夹 PDF 页墨迹(同一张纸:原书 /api/ink):按原书文件分组拉,变了就重绘(先跑,不依赖下面 userpage targets)
+    var pdfByFile = {};
+    document.querySelectorAll('.fav-pdf-page[data-favpdf-file]').forEach(function (el) {
+      if (el.isConnected && el.dataset.favpdfFile) (pdfByFile[el.dataset.favpdfFile] = pdfByFile[el.dataset.favpdfFile] || []).push(el);
+    });
+    Object.keys(pdfByFile).forEach(function (f) {
+      fetch('/pdf/api/ink?file=' + encodeURIComponent(f)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!(d && d.ok)) return;
+        var pgs = d.pages || {};
+        pdfByFile[f].forEach(function (el) {
+          if (_epInk.drawing && _epInk.drawing.el === el) return;   // 正在这页画 → 不打断
+          var k = 'pdf|' + f + '|' + el.dataset.favpdfPage;
+          if (_epInk.dirty && _epInk.dirty[k]) return;              // 本地有待存 → 别覆盖
+          var fresh = pgs[String(el.dataset.favpdfPage)] || [];
+          if (JSON.stringify(fresh) !== JSON.stringify(_epInk.data[k] || [])) {
+            _epInk.data[k] = JSON.parse(JSON.stringify(fresh));
+            el.__inkStrokes = JSON.parse(JSON.stringify(fresh));
+            if (fresh.length) _inkEnsure(el, k);
+            if (el.__inkCv) _inkRedraw(el);
+          }
+        });
+      }).catch(function () {});
+    });
     var targets = [];
     var upPages = (window.RC && RC.userpages && RC.userpages.pages) ? RC.userpages.pages() : [];
     // 原书插入页(file=FREL)+ 收藏夹挂载页(mountOne 出来的 .ep-usec,file=data-ink-file 原书)统一走同一套(.ep-usec)
@@ -3876,11 +3920,12 @@
         });
       }).catch(function () {});
       fetch('/pdf/api/userpages?file=' + encodeURIComponent(f)).then(function (r) { return r.json(); }).then(function (d) {
-        var pages = (d && d.pages) || [];
+        if (!(d && d.ok)) return;   // 出错别当"页没了"误删
+        var pages = d.pages || [];
         byFile[f].forEach(function (t) {
           if (t.editing || !t.disp) return;
           var rec = pages.filter(function (p) { return p.id === t.uid; })[0];
-          if (!rec) return;
+          if (!rec) { _upageRemoveLive(f, t.uid); return; }   // 页在别处被删(切后台错过事件)→ 移除本视图元素
           var newMd = rec.md || '';
           if (t.disp.__syncMd == null) { t.disp.__syncMd = newMd; if (t.page) t.page.md = newMd; return; }   // 首次:记基线,不重渲(免闪)
           if (newMd !== t.disp.__syncMd) {
@@ -3892,12 +3937,80 @@
       }).catch(function () {});
     });
   }
+  // ── 收藏夹结构真·增量(2026-07-05,用户拍板):新收藏 → 已打开的收藏夹几秒内长出新节;取消收藏/删页 → 当场消失,不刷新。
+  //   机制:fav CRUD → 后台重建 → 'fav-built' 事件 → 拉 /api/fav-meta 按条目 key diff 新旧 items:
+  //   保留的节(每条目内容确定性生成,没变)复用 DOM 只改 idx;移除的节删掉;新增的节建占位交给懒加载(从新 EPUB 拉对应 idx)。
+  var _FAV_FID = (typeof IS_FAV_BOOK !== 'undefined' && IS_FAV_BOOK) ? ((FREL.replace(/^\//, '').split('/').pop() || '').replace(/\.epub$/, '')) : '';
+  var _favMetaItems = null;   // 上次已知 items(下标=section idx);首拉当基线
+  function _favItemKey(it) { return (it.kind || '') + '|' + (it.src_file || '') + '|' + (it.kind === 'pdf' ? it.src_page : (it.kind === 'epub' ? it.src_section : it.id)); }
+  function _favMetaFetch(cb) {
+    if (!_FAV_FID) return;
+    fetch('/pdf/api/fav-meta?id=' + encodeURIComponent(_FAV_FID)).then(function (r) { return r.json(); }).then(function (d) {
+      var items = (d && d.meta && d.meta.items) || null;
+      if (items) cb(items);
+    }).catch(function () {});
+  }
+  if (_FAV_FID) _favMetaFetch(function (items) { if (!_favMetaItems) _favMetaItems = items; });   // 开书记基线
+  // 来源条「☆ 取消收藏」:PATCH remove_item(只动收藏夹条目,不碰原书)→ 本节乐观隐藏;后台重建 fav-built → reconcile 收尾
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('.fav-unfav') : null;
+    if (!b || !_FAV_FID) return;
+    e.preventDefault(); e.stopPropagation();
+    var it; try { it = JSON.parse(b.dataset.fitem || ''); } catch (x) { return; }
+    if (!confirm('取消收藏这一页?(不影响原书内容)')) return;
+    reqJson('PATCH', '/pdf/api/favorites', { folder: _FAV_FID, remove_item: it }, function (d) {
+      if (!(d && d.ok)) { toast('取消失败:' + ((d && d.error) || '?')); return; }
+      var s = b.closest('.ep-sec'); if (s) s.style.display = 'none';
+      toast('已取消收藏');
+    }, function () { toast('网络错误,没取消上'); });
+  }, true);
+  // 自建页被删(任一视图的 🗑)→ 所有打开着的视图当场移除该页元素(原书=.ep-usec 本体;收藏夹=整节隐藏,fav-built 后 reconcile 收尾)
+  function _upageRemoveLive(file, uid) {
+    if (!uid) return;
+    try {
+      var el = document.querySelector('.ep-usec[data-uid="' + uid + '"]');
+      if (el && (file === FREL || el.dataset.inkFile === file)) el.remove();
+      var fc = document.querySelector('.fav-item-userpage[data-uid="' + uid + '"]');
+      if (fc && fc.dataset.inkFile === file) { var fs = fc.closest('.ep-sec'); ((fs || fc)).style.display = 'none'; }
+    } catch (e) {}
+  }
+  var _favReconT = null;
+  function _favReconcile() {
+    if (!_FAV_FID) return;
+    if (document.body.classList.contains('ep-up-editing') || (_epInk && _epInk.drawing)) { clearTimeout(_favReconT); _favReconT = setTimeout(_favReconcile, 2000); return; }   // 正在编辑/画 → 稍后再排
+    _favMetaFetch(function (items) {
+      if (!_favMetaItems) { _favMetaItems = items; return; }
+      var oldByKey = {};
+      for (var i = 0; i < _favMetaItems.length; i++) oldByKey[_favItemKey(_favMetaItems[i])] = i;
+      var same = items.length === _favMetaItems.length && items.every(function (it, j) { return oldByKey[_favItemKey(it)] === j; });
+      if (same) { _favMetaItems = items; return; }   // 结构没变(纯内容重建)→ 不动 DOM
+      var newEls = [], newLoaded = {}, usedOld = {};
+      for (var j = 0; j < items.length; j++) {
+        var oi = oldByKey[_favItemKey(items[j])];
+        if (oi != null && !usedOld[oi] && secEls[oi]) {
+          usedOld[oi] = 1;
+          var el = secEls[oi]; el.dataset.idx = j;
+          newEls.push(el); newLoaded[j] = loaded[oi];
+        } else {
+          var ph = document.createElement('div'); ph.className = 'ep-sec ph'; ph.dataset.idx = j; ph.textContent = '…';
+          newEls.push(ph); newLoaded[j] = false;
+        }
+      }
+      for (var r = 0; r < secEls.length; r++) { if (!usedOld[r] && secEls[r]) { try { secEls[r].remove(); } catch (e) {} } }   // 被移除的节当场消失
+      for (var m = 0; m < newEls.length; m++) { try { col.appendChild(newEls[m]); } catch (e) {} }   // 按新顺序落位(同序同内容 → 布局/滚动不跳)
+      secEls = newEls; loaded = newLoaded; COUNT = items.length; _favMetaItems = items;
+      try { newEls.forEach(function (el) { if (el.classList.contains('ph')) observer.observe(el); }); } catch (e) {}   // 新节交给懒加载(从重建后的新 EPUB 拉)
+      try { $('ep-page-total').textContent = '/ ' + (COUNT || '–'); onScroll(); } catch (e) {}
+      try { toast('收藏夹已同步更新'); } catch (e) {}
+    });
+  }
   // 实时同步:SSE 事件推送为主(墨迹/正文一存,另一侧 ~1s 收到即重拉重渲);visibilitychange + 慢轮询兜底(断线/漏事件)。
   var _readerES = null, _liveSyncT = null;
   function _liveSyncSoon() { clearTimeout(_liveSyncT); _liveSyncT = setTimeout(function () { try { _userpageLiveSync(); } catch (e) {} }, 120); }
   function _favUpFiles() {
     var s = {};
     document.querySelectorAll('.fav-item-userpage[data-ink-file]').forEach(function (el) { if (el.dataset.inkFile) s[el.dataset.inkFile] = 1; });
+    document.querySelectorAll('.fav-pdf-page[data-favpdf-file]').forEach(function (el) { if (el.dataset.favpdfFile) s[el.dataset.favpdfFile] = 1; });   // 收藏夹 PDF 页:原书 ink 事件也触发同步
     if (document.querySelector('.ep-usec[data-uid]')) s[FREL] = 1;
     return Object.keys(s);
   }
@@ -3908,6 +4021,8 @@
       _readerES.addEventListener('change', function (e) {
         if (document.visibilityState !== 'visible') return;   // 不活跃 → 忽略(后端已更新,回来 visibility 同步)
         var ev; try { ev = JSON.parse(e.data); } catch (x) { return; }
+        if (ev && ev.kind === 'fav-built' && _FAV_FID && ev.file === ('fav:' + _FAV_FID)) { _favReconcile(); return; }   // 本收藏夹重建完 → 结构增量重排
+        if (ev && ev.kind === 'userpage-del') { _upageRemoveLive(ev.file, ev.uid); return; }   // 别处删了这张纸 → 本视图当场移除
         if (ev && ev.file && _favUpFiles().indexOf(ev.file) >= 0) _liveSyncSoon();   // 事件跟本阅读器某自建页来源匹配才同步
       });
       _readerES.onerror = function () { if (_readerES && _readerES.readyState === 2) { _readerES = null; setTimeout(_readerEventsConnect, 3000); } };   // 永久关 → 3s 后重连(瞬断 EventSource 自愈)
@@ -3915,23 +4030,59 @@
   }
   try {
     _readerEventsConnect();
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { try { _userpageLiveSync(); } catch (e) {} _readerEventsConnect(); } });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { try { _userpageLiveSync(); } catch (e) {} try { _favReconcile(); } catch (e) {} _readerEventsConnect(); } });
     setInterval(function () { try { _userpageLiveSync(); } catch (e) {} }, 20000);   // 慢轮询兜底(SSE 为主;可见时 gate + 无自建页早退,普通书近零开销)
   } catch (e) {}
+  // 收藏夹 PDF 页墨迹:按原书文件拉 /api/ink(每文件一次),填 _epInk.data['pdf|文件|页'],挂 canvas 到 .fav-pdf-page(同一张纸)
+  function _favPdfInkLoad() {
+    var els = document.querySelectorAll('.fav-pdf-page[data-favpdf-file]');
+    if (!els.length) return;
+    _epInk.favPdfFetched = _epInk.favPdfFetched || {};
+    _epInk.favPdfLoaded = _epInk.favPdfLoaded || {};   // fetch 成功落地的文件。起笔门槛用它:没 loaded 前禁画(整页替换语义下,空底起笔会把原书旧墨迹整页盖掉——审查 high)
+    var apply = function () {
+      // 现查而非快照(审查:fetch 在途期间懒加载出的页也要覆盖);canvas 已预建(手写模式)也补数据,不跳
+      document.querySelectorAll('.fav-pdf-page[data-favpdf-file]').forEach(function (el) {
+        if (!el.isConnected) return;
+        var k = 'pdf|' + el.dataset.favpdfFile + '|' + el.dataset.favpdfPage;
+        if (_epInk.drawing && _epInk.drawing.el === el) return;
+        if (_epInk.dirty && _epInk.dirty[k]) return;
+        var d = _epInk.data[k];
+        if (d && d.length) {
+          if (!el.__inkStrokes || !el.__inkStrokes.length) el.__inkStrokes = JSON.parse(JSON.stringify(d));
+          _inkEnsure(el, k); _inkRedraw(el);
+        } else if (_epInk.mode && !el.__inkCv) { _inkEnsure(el, k); }
+      });
+    };
+    var need = {};
+    els.forEach(function (el) { var f = el.dataset.favpdfFile; if (f && !_epInk.favPdfFetched[f]) need[f] = 1; });
+    var ks = Object.keys(need);
+    if (!ks.length) { apply(); return; }
+    ks.forEach(function (f) {
+      _epInk.favPdfFetched[f] = true;
+      fetch('/pdf/api/ink?file=' + encodeURIComponent(f)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!(d && d.ok)) { delete _epInk.favPdfFetched[f]; return; }
+        var pgs = d.pages || {};
+        Object.keys(pgs).forEach(function (pg) { var k2 = 'pdf|' + f + '|' + pg; if (!(_epInk.dirty && _epInk.dirty[k2])) _epInk.data[k2] = JSON.parse(JSON.stringify(pgs[pg])); });   // dirty 不覆盖防丢新笔
+        _epInk.favPdfLoaded[f] = true;   // 落地 → 放行起笔
+        apply();
+      }).catch(function () { delete _epInk.favPdfFetched[f]; });
+    });
+  }
   function _inkOnSectionLoaded(el, idx) {
     var d = _epInk.data[idx];
     if ((d && d.length) || _epInk.mode) { if (d && d.length) el.__inkStrokes = JSON.parse(JSON.stringify(d)); _inkEnsure(el, idx); }
     try { _favUpMount(); } catch (e) {}     // 收藏夹自建页:挂成真 .ep-usec(复用原书编辑器/改高;幂等)
     try { _favUpInkLoad(); } catch (e) {}   // 收藏夹自建页:复原原书墨迹到挂载的 .ep-usec(幂等)
+    try { _favPdfInkLoad(); } catch (e) {}  // 收藏夹 PDF 页:复原原书 PDF 墨迹(幂等)
   }
   function _inkLoadAll() {
     if (!FREL) return;
     fetch('/pdf/api/epub-ink?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
       if (!d || !d.ok || !d.sections) return;
       _epInk.data = {};
-      _epInk.favFetched = {};   // 本书墨迹重载 → 收藏夹自建页跨书拉取缓存一并重置(_epInk.data 已清,须重拉原书墨迹)
+      _epInk.favFetched = {}; _epInk.favPdfFetched = {};   // 本书墨迹重载 → 收藏夹跨书拉取缓存一并重置(_epInk.data 已清,须重拉原书墨迹)
       Object.keys(d.sections).forEach(function (k) { _epInk.data[/^\d+$/.test(k) ? parseInt(k, 10) : k] = d.sections[k]; });   // 正文=整数键;插入页=u_* 字符串键(保留原样)
-      (window.requestIdleCallback || function (f) { return setTimeout(f, 0); })(function () { try { _inkApplyVisibleSaved(); _favUpInkLoad(); } catch (e) {} }, { timeout: 1500 });
+      (window.requestIdleCallback || function (f) { return setTimeout(f, 0); })(function () { try { _inkApplyVisibleSaved(); _favUpInkLoad(); _favPdfInkLoad(); } catch (e) {} }, { timeout: 1500 });
     }).catch(function () {});
   }
 

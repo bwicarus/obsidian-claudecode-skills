@@ -2537,17 +2537,20 @@ function _inkScheduleSave(pw, num) {
   const strokes = pw.__inkStrokes;
   _ink.byPage[num] = strokes;
   (_ink.dirty = _ink.dirty || {})[num] = true;
+  (_ink.pend = _ink.pend || {})[num] = 1;   // 有新一批待存(save 成功清 dirty 前检查它:期间又画了 → 保持 dirty,防同步覆盖)
   clearTimeout(_ink.saveTimers[num]);
-  _ink.saveTimers[num] = setTimeout(() => _inkSave(num, strokes), 900);
+  _ink.saveTimers[num] = setTimeout(() => { if (_ink.pend) delete _ink.pend[num]; _inkSave(num, strokes); }, 900);
 }
 async function _inkSave(num, strokes) {
   if (!FILE_REL) return;
-  if (_ink.dirty) delete _ink.dirty[num];
   try {
-    await fetch('/pdf/api/ink', {
+    const r = await fetch('/pdf/api/ink', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file: FILE_REL, page: num, strokes: strokes || [] }),
     });
+    // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧事件用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
+    if (r && r.ok && _ink.dirty && !(_ink.pend && _ink.pend[num])) delete _ink.dirty[num];
+    if (!(r && r.ok)) (_ink.dirty = _ink.dirty || {})[num] = true;
   } catch (_) { (_ink.dirty = _ink.dirty || {})[num] = true; }   // 失败重标脏,flush 兜底还有机会补
 }
 function _inkFlushBeacon() {
@@ -2555,12 +2558,13 @@ function _inkFlushBeacon() {
   for (const k in _ink.dirty) {
     const num = parseInt(k, 10);
     clearTimeout(_ink.saveTimers[num]);
+    let ok = false;
     try {
-      navigator.sendBeacon && navigator.sendBeacon('/pdf/api/ink',
-        new Blob([JSON.stringify({ file: FILE_REL, page: num, strokes: _ink.byPage[num] || [] })], { type: 'application/json' }));
+      ok = !!(navigator.sendBeacon && navigator.sendBeacon('/pdf/api/ink',
+        new Blob([JSON.stringify({ file: FILE_REL, page: num, strokes: _ink.byPage[num] || [] })], { type: 'application/json' })));
     } catch (_) {}
+    if (ok) delete _ink.dirty[k];   // 送出去了才清(审查:sendBeacon 返回 false=没发出,清了 dirty 就没兜底、回前台还会被旧值覆盖)
   }
-  _ink.dirty = {};
 }
 window.addEventListener('pagehide', _inkFlushBeacon);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') _inkFlushBeacon(); });
@@ -2570,16 +2574,57 @@ async function _inkLoadAll() {
     const r = await fetch('/pdf/api/ink?file=' + encodeURIComponent(FILE_REL));
     const d = await r.json();
     if (d.ok && d.pages) {
+      const hold = {};   // 本地有待存的页 → 保留本地值(审查:回前台全量重拉会用服务端旧值盖掉 pending 笔画)
+      if (_ink.dirty) for (const dk in _ink.dirty) if (_ink.byPage[dk]) hold[dk] = _ink.byPage[dk];
       _ink.byPage = {};
       for (const k in d.pages) _ink.byPage[parseInt(k)] = d.pages[k];
+      for (const dk in hold) _ink.byPage[parseInt(dk, 10)] = hold[dk];
       document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(pw => {
         const n = parseInt(pw.dataset.pageNum);
+        if (_ink.dirty && _ink.dirty[n]) return;   // 待存页:画面保持本地
         if (_ink.byPage[n]) { pw.__inkStrokes = JSON.parse(JSON.stringify(_ink.byPage[n])); _inkRedraw(pw); }
       });
     }
   } catch (_) {}
 }
 window._inkLoadAll = _inkLoadAll;
+// ── 阅读器实时事件(SSE):别的视图(收藏夹/其它设备)画了本书墨迹 → ~1s 更新该页(同一张纸,与 EPUB 侧同一事件总线)──
+(function () {
+  if (typeof EventSource === 'undefined' || !FILE_REL) return;
+  var es = null;
+  function connect() {
+    if (es) return;
+    try {
+      es = new EventSource('/pdf/api/reader-events');
+      es.addEventListener('change', function (e) {
+        if (document.visibilityState !== 'visible') return;
+        var ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+        if (!ev || ev.kind !== 'ink' || ev.file !== FILE_REL) return;
+        var num = parseInt(ev.uid, 10); if (!num) return;
+        if (_ink.drawing && _ink.drawing.num === num) return;               // 正在画这页 → 不打断
+        if (_ink.dirty && _ink.dirty[num]) return;                          // 本地有待存 → 别用服务端旧值覆盖
+        _ink._sseT = _ink._sseT || {};
+        clearTimeout(_ink._sseT[num]);                                       // 每页 250ms 合并(防事件风暴每笔一次全书 GET)
+        _ink._sseT[num] = setTimeout(function () {
+          fetch('/pdf/api/ink?file=' + encodeURIComponent(FILE_REL)).then(function (r) { return r.json(); }).then(function (d) {
+            if (!(d && d.ok)) return;
+            // ⚠ 响应落地时**复查**守卫(审查 high:fetch 在途用户可能起笔,只在事件到达时查会把进行中笔画覆盖丢掉)
+            if (_ink.drawing && _ink.drawing.num === num) return;
+            if (_ink.dirty && _ink.dirty[num]) return;
+            var fresh = (d.pages || {})[String(num)] || [];
+            if (JSON.stringify(fresh) === JSON.stringify(_ink.byPage[num] || [])) return;
+            _ink.byPage[num] = JSON.parse(JSON.stringify(fresh));
+            var pw = document.querySelector('.page-wrap[data-page-num="' + num + '"]');
+            if (pw) { pw.__inkStrokes = JSON.parse(JSON.stringify(fresh)); if (pw.__inkCanvas) _inkRedraw(pw); }
+          }).catch(function () {});
+        }, 250);
+      });
+      es.onerror = function () { if (es && es.readyState === 2) { es = null; setTimeout(connect, 3000); } };
+    } catch (_) { es = null; }
+  }
+  connect();
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { connect(); try { _inkLoadAll(); } catch (_) {} } });
+})();
 
 // ── 工具栏 ──
 window.inkToggle = () => {
