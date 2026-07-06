@@ -4030,7 +4030,12 @@
   try {
     _readerEventsConnect();
     document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { try { _userpageLiveSync(); } catch (e) {} try { _favReconcile(); } catch (e) {} _readerEventsConnect(); } });
-    setInterval(function () { try { _userpageLiveSync(); } catch (e) {} }, 20000);   // 慢轮询兜底(SSE 为主;可见时 gate + 无自建页早退,普通书近零开销)
+    var _lsTick = 0;
+    setInterval(function () { try {
+      _lsTick++;
+      if (_readerES && _readerES.readyState === 1 && (_lsTick % 3)) return;   // SSE 健康 → 兜底降频到 60s;断线/未连 → 保持 20s
+      _userpageLiveSync();
+    } catch (e) {} }, 20000);   // 慢轮询兜底(SSE 为主;可见时 gate + 无自建页早退,普通书近零开销)
   } catch (e) {}
   // 收藏夹 PDF 页墨迹:按原书文件拉 /api/ink(每文件一次),填 _epInk.data['pdf|文件|页'],挂 canvas 到 .fav-pdf-page(同一张纸)
   function _favPdfInkLoad() {
