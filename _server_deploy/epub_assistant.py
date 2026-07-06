@@ -433,7 +433,7 @@ def _t_read_highlights(args, ctx):
 
 
 def _t_make_anki(args, ctx):
-    """把内容做成 Anki 卡(后台,完成发通知)。复用 assistant 的后台任务框架,**不**写 PDF 高亮回链(epub 锚不同)。"""
+    """把内容做成 Anki 卡(后台,完成发通知)。复用 assistant 后台任务框架;M5:选中源文在当前章标**绿色回链高亮**(前端按文本定位,和 PDF 制卡回链一致)。"""
     text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
@@ -441,15 +441,30 @@ def _t_make_anki(args, ctx):
     img = (args.get("image_url") or "").strip()
     if img:
         params["image_url"] = img   # 刚 search_image 过、这张图也该进卡片 → 透传到 _run_snippets_to 真下载存进 Anki 媒体库
-    return _A()._bg_task("anki", params, ctx)
+    res = _A()._bg_task("anki", params, ctx)
+    sel = (ctx.get("selection") or "").strip()   # M5:回链高亮源文=选中原文(可定位);AI 改写后的 text 不一定在正文里,不用它
+    if isinstance(res, dict) and not res.get("error") and sel:
+        res["client_action"] = {"fn": "epubHighlight", "args": [{"section": _cur_idx(ctx, args, key="section"), "texts": [sel[:400]], "color": "#a5d6a7"}]}
+    return res
 
 
 def _t_make_note(args, ctx):
-    """把内容整理成 Obsidian 笔记(后台)。复用 assistant 后台任务框架,不写 PDF 高亮回链。"""
+    """把内容整理成 Obsidian 笔记(后台)。复用 assistant 后台任务框架;M6:无选中/text 时回退当前章正文;选中源文标**蓝色回链高亮**。"""
     text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
+    if not text:   # M6:无选中/无 text → 回退当前章正文(镜像 PDF make_note 无选中回退整页)
+        try:
+            r = _eroot(ctx.get("file_rel") or "")
+            if r:
+                text = (_section_plain_text(r[1], _cur_idx(ctx)) or "").strip()[:4000]
+        except Exception:
+            text = ""
     if not text:
         return {"error": "缺要整理的内容(给 text 或先选中)"}
-    return _A()._bg_task("note", {"text": text}, ctx)
+    res = _A()._bg_task("note", {"text": text}, ctx)
+    sel = (ctx.get("selection") or "").strip()   # M6:选中源文标蓝色回链
+    if isinstance(res, dict) and not res.get("error") and sel:
+        res["client_action"] = {"fn": "epubHighlight", "args": [{"section": _cur_idx(ctx, args, key="section"), "texts": [sel[:400]], "color": "#90caf9"}]}
+    return res
 
 
 def _vocab_mastery_map() -> dict:
@@ -640,13 +655,29 @@ def _t_find_highlights(args, ctx):
             want = int(sv)
         except (TypeError, ValueError):
             want = None
+    # M7:除单章 section 外,支持 sections=[..] 列表 + from/to 章区间(对齐 PDF 多页/区间)
+    def _ai(x):
+        try:
+            return int(x)
+        except (TypeError, ValueError):
+            return None
+    allowed = {want} if want is not None else None
+    _secs = args.get("sections")
+    if isinstance(_secs, list):
+        _s = {v for v in (_ai(x) for x in _secs) if v is not None}
+        allowed = _s if allowed is None else (allowed | _s)
+    _fr, _to = _ai(args.get("from")), _ai(args.get("to"))
+    if _fr is not None or _to is not None:
+        _lo, _hi = (_fr if _fr is not None else 0), (_to if _to is not None else 10 ** 9)
+        _r = set(range(min(_lo, _hi), max(_lo, _hi) + 1))
+        allowed = _r if allowed is None else (allowed | _r)
     items = []
     for h in hls:
         if not h.get("id"):
             continue
         sec = (h.get("anchor") or {}).get("section")
-        # section 已知且不等 → 排除;section 未知(纯 CFI 手动高亮)→ 保留(后端没法从 CFI 反推章号,留给前端 cfi 跳转)
-        if want is not None and sec is not None and sec != want:
+        # section 已知且不在允许集 → 排除;section 未知(纯 CFI 手动高亮)→ 保留(后端没法从 CFI 反推章号,留给前端 cfi 跳转)
+        if allowed is not None and sec is not None and sec not in allowed:
             continue
         items.append({"id": h.get("id"), "section": sec, "cfi": h.get("cfi") or "",
                       "text": (h.get("text") or "")[:120], "color": h.get("color")})
@@ -926,7 +957,7 @@ _etools = {
     "read_highlights": ("读已有的 EPUB 高亮(标了哪些内容/颜色/备注)。批量标注前先看可避免重复标;也答『这章/这本书我高亮了啥』。"
                         "不传 section=全书,section=数字=该章。args {section?}", _t_read_highlights),
     "find_highlights": ("用户要**删除/取消/清理/去掉**某些高亮时用:把匹配的高亮**逐条列在对话里**,每条带「↗跳转」+「🗑删除」按钮,"
-                        "用户自己点(**别替删**)。**这就是删除高亮的入口——别说没有**。不传=全书;section=数字=某章;section=\"all\"=全书。args {section?}", _t_find_highlights),
+                        "用户自己点(**别替删**)。**这就是删除高亮的入口——别说没有**。不传=全书;section=数字=某章;section=\"all\"=全书;也可 sections=[1,3,5] 多章 或 from/to 章区间。args {section?,sections?,from?,to?}", _t_find_highlights),
     "section_vocab": ("查掌握度数据库:不传 words=当前/指定章『还没掌握』的生词(权威,跟本章下划线一致);"
                       "传 words(数组)=逐词查掌握度(英+日)。问『我没掌握哪些词/这章生词/某词我会不会』时用,别自己猜。args {idx?, words?:[...]}", _t_section_vocab),
     "see_figure": ("看用户**带入的那张图**(他点选/拖进来的章节插图;前端随请求带 src)。"
