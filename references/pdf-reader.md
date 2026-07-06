@@ -1227,3 +1227,9 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 - **页图宽度两档制**(`_bucketReqW`,04-render.js):单书实测 87 个 distinct 宽度档(放大分支任意 cw×dpr;iPad dpr2 竖 2048/横 2400/捏合每级新值)→ 预热/SW/HTTP 缓存全 miss、Pi 反复冷渲染。参照 Next.js Image/CDN srcset 固定桶:需求≤natW → natW 档,超过 → 2400 一步到顶。显示尺寸仍由 CSS 缩放(浏览器降采样,不糊)。预取与渲染同一公式。⚠ 改宽度逻辑必须同时想预热(natW 档)与 SW URL 稳定性。
 - **SW v3**:epub-manifest/epub-section 进 SWR(排除 `资源/收藏夹/`——物化 EPUB 会整本重建);**epub-html.js 也注册 SW**(此前只有 PDF 01-boot 注册,只读 EPUB 场景 SW 从未激活)。SW 源在 pdf_reader.py `_SW_JS`,bump CACHE 名即整体失效重建。
 - 旧宽度碎片(state/pdf-page-img 2.6G)保留:是 2400 档收敛期的容差近似图来源;要清理只能删"非 natW 且非 2400"且超过 N 天未访问的。
+
+### §17.2 2026-07-06 AI 回答内容图暗底看不清 → 浅色画布 matte
+- **现象**:助手/结果卡里 AI 输出的示意图(内联 `<svg>`,marked 默认透传 raw HTML)在深底容器上,黑色坐标轴/文字看不清(红曲线尚可)。容器 `#result-modal` **恒深底 #10162a**(不跟随 paper/sepia/night 主题)→ 问题与主题无关,任何时候都有。
+- **方案取舍**:用户设想"算 stroke 与背景对比度→替换对比色"。可行但脆:①只对内联 SVG 有效(图片无解);②SVG 颜色形式多样(currentColor/类/渐变/图案)难逐一算;③易误伤有意颜色(红曲线对比其实够)。**采用大厂通行做法**(GitHub/Notion/arXiv 暗色模式看图):给内容图**浅色画布 matte**(`background:#fff;padding;border-radius`)——SVG+PNG 一招通杀、不改写任何颜色、零误伤。
+- **三处 AI markdown 容器**(都加 `img,svg` matte):`#result-content`(rc-result 结果卡,共享)、`.asst-a`(PDF 助手气泡,reader.src/25-assistant.js 注入 CSS)、`.ep-msg.a`(EPUB 助手气泡,epub-styles.css)。
+- **不误伤公式**:MathJax=tex-chtml-full 构建(CHTML 输出,**无 `<svg>`**),故 `容器 svg` 只会命中内容图。改 tex-svg 输出的话此规则要排除 `mjx-container svg`。

@@ -63,6 +63,10 @@
       '#result-modal .content{font-size:13px;color:#e6e6f0;flex:1 1 auto;overflow-y:auto;min-height:0;padding-right:4px}' +
       '#result-modal .content p{margin:6px 0}' +
       '#result-modal .content code{background:#0d1322;padding:2px 5px;border-radius:3px}' +
+      /* AI 回答里的内容图(SVG 示意图 / 图片):结果卡恒深底(#10162a),透明底图的黑色轴/文字看不清。
+         参照 GitHub/Notion/arXiv 暗色模式看图的通行做法——给浅色画布 matte(不逐色改写、不破坏红曲线等
+         有意颜色,SVG+PNG 一招通杀)。MathJax=tex-chtml 输出无 <svg>,故 #result-content svg 只会是内容图,不误伤公式。 */
+      '#result-content img,#result-content svg{background:#fff;border-radius:8px;padding:10px;max-width:100%;height:auto;box-sizing:border-box;display:block;margin:12px auto}' +
       '#result-modal .actions{flex-shrink:0;margin-top:14px;padding-top:10px;border-top:1px solid #2a3550;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;align-items:center}' +
       '#result-followup{flex-shrink:0;display:flex;gap:6px;margin-top:10px}' +
       '#result-followup input{flex:1;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 11px;font-size:12.5px}' +
