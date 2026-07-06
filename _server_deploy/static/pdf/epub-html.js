@@ -4029,6 +4029,9 @@
   }
   try {
     _readerEventsConnect();
+    // Service Worker(同 PDF 01-boot):EPUB 只从这进也能激活 /pdf/ 域 SW → manifest/section SWR 秒开
+    if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' }).catch(function () {}); } catch (e) {} }
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
     document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') { try { _userpageLiveSync(); } catch (e) {} try { _favReconcile(); } catch (e) {} _readerEventsConnect(); } });
     var _lsTick = 0;
     setInterval(function () { try {

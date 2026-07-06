@@ -74,13 +74,22 @@ function _ratchetReqW(page, w) {
   _imgRasterW[page] = rw;
   return rw;
 }
+// 宽度两档制(2026-07-06,参照 CDN/Next.js Image 的 srcset 桶化):需求 ≤原生宽 → natW 档;
+// 超过(高 DPR 屏/手动放大)→ 2400 一步到顶档。此前放大分支直接用任意 cw×dpr
+// (iPad dpr2 竖屏 2048/横屏 2400/捏合缩放每级一个新值)→ 单书实测 87 个宽度档,
+// natW 预热/Service Worker/HTTP 缓存全 miss、Pi 对同一页反复冷渲染。两档后 URL 稳定、
+// 缓存必中,每页每档最多冷渲染一次;显示尺寸仍由 CSS 缩放决定(浏览器降采样,清晰不糊)。
+function _bucketReqW(cw) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const natW = Math.max(400, Math.min(2400, Math.round((window.__imgMeta && window.__imgMeta.page_w) || cw)));
+  return (Math.round(cw * dpr) <= natW) ? natW : 2400;
+}
 const _prefetched = new Set();
 function _prefetchAround(num, radius) {
   if (!_imgMode) return;
   const meta = window.__imgMeta; if (!meta) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cw = Math.floor(meta.page_w * scale);
-  const baseW = Math.max(400, Math.min(2400, Math.round(cw * dpr)));
+  const baseW = _bucketReqW(cw);   // 跟 _renderPageImg 同一公式(此前预取用 cw×dpr、渲染用 max(natW,…),首次预取会取错档)
   const R = radius || 3;
   const want = [];
   for (let d = 1; d <= R; d++) { want.push(num + d); if (num - d >= 1) want.push(num - d); }   // 偏向后页(顺序阅读)
@@ -105,10 +114,8 @@ async function _renderPageImg(num, wrap, viewport) {
   let ch = Math.floor(viewport.height);   // 初值用 meta(page1)高,decode 后改用本页图的真实宽高比(见下)
   // **渲染分辨率与显示宽度解耦**:基准=页**原生点宽**(扫描书=原生像素宽),显示多大由客户端 CSS 缩放决定。
   // → 适应阅读时 reqW=原生宽(与窗口/缩放级别无关) → 预热一次即覆盖任意窗口大小,不会"换窗口就没命中"。
-  //   只有手动放大到超过原生(cw×dpr>原生)才按 dpr 提分辨率防糊。reqW 只增不减(缩小复用大图→不闪)。封顶 2400。
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const _natW = Math.round((window.__imgMeta && window.__imgMeta.page_w) || cw);
-  const reqW = _ratchetReqW(num, Math.max(400, Math.min(2400, Math.max(_natW, Math.round(cw * dpr)))));
+  //   超过原生(高 DPR/手动放大)→ 2400 一步到顶(两档制,见 _bucketReqW)。reqW 只增不减(缩小复用大图→不闪)。
+  const reqW = _ratchetReqW(num, _bucketReqW(cw));
   const mt = (window.__imgMeta && window.__imgMeta.mtime) || 0;
   const img = document.createElement('img');
   img.className = 'page-img'; img.decoding = 'async';

@@ -623,9 +623,11 @@ def pdf_api_book_meta():
 
 _SW_JS = r"""// PDF 阅读器 Service Worker(作用域 /pdf/,只拦 /pdf/*):
 //   页图 + 文字层 → cache-first(命中零网络,秒开/离线、抗 iOS 清缓存);
-//   徽标 page-figures → stale-while-revalidate(秒回缓存 + 后台刷,解决每次重开都要等网络拉徽标)。
+//   徽标 page-figures + EPUB manifest/section → stale-while-revalidate(秒回缓存 + 后台刷;
+//     v3 新增 EPUB 两端点——正文 section 静态且 ETag 版本化,SWR 让重开书/翻章零等待;
+//     收藏夹物化 EPUB(资源/收藏夹/)会整本重建,内容会变 → 排除,始终走网络)。
 //   静态 JS(reader.js / pdf.mjs 在 /static/,超出本 SW 作用域)→ 靠浏览器 HTTP 缓存(nginx immutable)。
-const CACHE = 'pdf-cache-v2';
+const CACHE = 'pdf-cache-v3';
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
@@ -661,6 +663,10 @@ self.addEventListener('fetch', (e) => {
   const p = url.pathname;
   if (p === '/pdf/api/page-image' || p === '/pdf/api/page-chars') { e.respondWith(_cacheFirst(e.request)); return; }
   if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
+  if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
+    const f = url.searchParams.get('file') || '';
+    if (f.indexOf('收藏夹') === -1) { e.respondWith(_swr(e.request)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存
+  }
 });
 """
 
