@@ -94,7 +94,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
     {% endfor %}
   </div>
   </div><!-- /books-pane -->
-  <!-- ⭐ 收藏夹 tab(规格 v3):列各夹(名字+条目数+改名/删除),点击进 /pdf/fav/open?id=(物化成真 PDF 用标准阅读器打开);数据来自 /pdf/api/favorites -->
+  <!-- ⭐ 收藏夹 tab(规格 v5):列各夹(名字+条目数+改名/删除),点击进 /pdf/fav/open?id=(物化成真 PDF 用标准阅读器打开);数据来自 /pdf/api/favorites -->
   <div id="fav-pane" style="display:none">
     <div class="pdf-list" id="fav-list"><div class="empty">加载中…</div></div>
   </div>
@@ -112,7 +112,7 @@ function filter() {
   });
 }
 
-// ── ⭐ 收藏夹 tab(规格 v3:列各夹 + 改名/删除;点击进 /pdf/fav/open?id= → 物化真 PDF + 标准阅读器)──
+// ── ⭐ 收藏夹 tab(规格 v5:列各夹 + 改名/删除;点击进 /pdf/fav/open?id= → 物化真 PDF + 标准阅读器)──
 function switchTab(name) {
   document.querySelectorAll('.tabbar .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('books-pane').style.display = name === 'books' ? '' : 'none';
@@ -145,7 +145,7 @@ async function loadFavFolders() {
     item.querySelector('.pdf-name').appendChild(document.createTextNode(f.name || '(未命名)'));   // textNode 防注入
     item.querySelector('.pdf-row').addEventListener('click', (e) => {
       if (e.target.closest('.fav-actions')) return;
-      // 规格 v3:收藏夹物化成真 PDF → 标准阅读器全功能打开(/fav/open 脏则先建再跳,不脏直接 302)
+      // 规格 v5:收藏夹物化成真 EPUB → 完整 EPUB 阅读器全功能打开(/fav/open 脏则先建再跳,不脏直接 302)
       location.href = '/pdf/fav/open?id=' + encodeURIComponent(f.id);
     });
     item.querySelector('.fav-rename').addEventListener('click', async (e) => {

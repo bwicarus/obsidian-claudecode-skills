@@ -15,7 +15,7 @@
  *     onSave = 原生 saveSettings(写 pdf-debug / … + POST translate-config + closeSettings),
  *     onCancel = 原生 closeSettings。原生模板 #settings-mask 由 pdf-adapter 在共享模式下移除(防 id 撞车),
  *     ?ui=legacy 不加载本文件,走原生模板面板逃生。
- *   EPUB / HTML(默认 host):mask id 'ep-settings-mask'(epub2-extra.js 的 MutationObserver 靠它注入
+ *   EPUB / HTML(默认 host):mask id 'ep-settings-mask'(历史:退役已删除的 epub2-extra.js 曾靠它注入
  *     epubjs 版插图开关,勿改),内部实现读写 eph-* 键(eph-debug / eph-hl-colors /
  *     eph-vocab-underline / eph-click-translate / eph-grammar-view / eph-set-tab)。
  *     保存语义对齐 PDF 原生:debug / 生词下划线 / 点词翻译 / 句子翻译源 在「保存」时才落盘

@@ -538,7 +538,7 @@ def _epub_js_v():
     """EPUB 阅读器静态(epub-reader.js + epub-ai.js)的 cache-bust 版本 = 两者 mtime 最大值。
     跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
     mt = 0
-    for name in ("epub-reader.js", "epub-ai.js", "epub2.js", "epub2-highlight.js", "epub2-deco.js", "epub2-sentences.js", "epub2-assist.js", "epub2-extra.js", "epub2-grammar.js", "epub-html.js", "rc-core.js", "rc-md.js",
+    for name in ("epub-html.js", "rc-core.js", "rc-md.js",
                  "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js"):
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -719,7 +719,7 @@ def _lastopen_touch(rel: str):
 # ── 续读位置(服务端记录,2026-07-03):前端"随时上传现在正在看的页/章"→ 开书跨设备接续 ──
 # 全局单文件 sidecar(键=vault 相对路径,值={kind:'pdf'|'epub', pos:int, ts};跟 highlights/favorites
 # 等阅读器 sidecar 一样不分用户)。读取不设 GET 轮询:/pdf/view 把记录折进模板 page(__PDF_CFG.page)、
-# /pdf/epub/view 注入 EPUB_CFG.serverPos,前端零异步等待。fav 查看页(/pdf/fav/view)零进度状态是既定设计,不接此系统。
+# /pdf/epub/view 注入 EPUB_CFG.serverPos+serverPosTs,前端零异步等待。收藏夹书(/pdf/fav/open)零进度是既定设计,不接此系统。
 _READER_POS_FILE = CLAUDE_DIR / "state" / "reader-positions.json"
 _READER_POS_LOCK = __import__("threading").Lock()
 
@@ -5162,13 +5162,9 @@ def epub_view():
     _lastopen_touch(rel_clean)
     sha = _epub_sha(rel_clean)
     from flask import make_response
-    # 默认仍走功能齐全的「统一 HTML 阅读器」(生词/振假名/词组/语法/单词本/AI 全在);
-    # ?engine=epubjs 走成熟 epub.js 引擎(渲染稳,功能正逐步移植到这条上,完成前不当默认)
-    if (request.args.get("engine") or "") == "epubjs":
-        resp = make_response(render_template(
-            "epub_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
-            epub_base=f"/pdf/epub/file/{sha}/", reader_js_v=_epub_js_v()))
-    else:
+    # 2026-07-06 清理:epub.js 逃生分支(?engine=epubjs → epub_reader.html + epub2*.js 套件)整线删除。
+    # 主文档版(epub-html.js)早已是正主且功能超集;退役套件停更于 6-28,全站无入口(体检审计确认)。
+    if True:
         _rp2 = _reading_pos_load().get(rel_clean) or {}
         resp = make_response(render_template(
             "epub_html_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
@@ -5343,10 +5339,13 @@ def _sanitize_epub_section(section_path: Path, root: Path, sha: str) -> str:
 _EPUB_SEC_CACHE_DIR = CLAUDE_DIR / "state" / "epub-section-cache"   # 章节消毒 HTML 磁盘缓存:避免每次现 BeautifulSoup 解析吃满 GIL → 堵住用户操作请求
 
 
+_EPUB_SECT_VER = 2   # 消毒/抽取逻辑版本:改 _sanitize_epub_section 等就 +1 → 旧磁盘缓存全失效(照 _CHAR_CACHE_VER 模式;体检 perf#3:原缓存键只有 mtime,改逻辑后静态书永远吃旧缓存)
+
+
 def _epub_section_cached(secs, idx: int, root: Path, sha: str) -> str:
-    """消毒章节 HTML,落磁盘缓存(按 sha/idx/源文件 mtime)。命中则秒回不吃 GIL。"""
+    """消毒章节 HTML,落磁盘缓存(按 sha/idx/源文件 mtime/逻辑版本)。命中则秒回不吃 GIL。"""
     sp = secs[idx]
-    cache = _EPUB_SEC_CACHE_DIR / sha / (str(idx) + ".html")
+    cache = _EPUB_SEC_CACHE_DIR / sha / ("%d.v%d.html" % (idx, _EPUB_SECT_VER))
     try:
         if cache.is_file() and cache.stat().st_mtime >= sp.stat().st_mtime:
             return cache.read_text("utf-8")
@@ -5482,8 +5481,16 @@ def pdf_api_epub_manifest():
     if not root:
         return jsonify({"ok": False, "error": "解包失败"}), 500
     info = _epub_opf_info(root)
-    return jsonify({"ok": True, "title": info["title"], "count": len(info["sections"]),
-                    "toc": info["toc"], "sha": _epub_sha(rel)})
+    # ETag/304(体检 perf#1):清单只随源文件变 → 重复开书省 60KB+ JSON 重传
+    _etag = 'W/"m-%s-%d"' % (_epub_sha(rel), int(abs_path.stat().st_mtime))
+    if request.headers.get("If-None-Match") == _etag:
+        r304 = Response(status=304); r304.headers["ETag"] = _etag
+        return r304
+    r = jsonify({"ok": True, "title": info["title"], "count": len(info["sections"]),
+                 "toc": info["toc"], "sha": _epub_sha(rel)})
+    r.headers["ETag"] = _etag
+    r.headers["Cache-Control"] = "private, no-cache"   # 每次校验(304 便宜),不盲缓存
+    return r
 
 
 @bp.route("/api/epub-section")
@@ -5505,6 +5512,14 @@ def pdf_api_epub_section():
     if idx < 0 or idx >= len(secs):
         return jsonify({"ok": False, "error": "idx 越界"}), 400
     _fav_sha = _epub_sha(rel)
+    # ETag/304(体检 perf#1):章节只随 源文件 mtime + 消毒逻辑版本 变 → 重复开书大量章节请求变 304
+    try:
+        _etag = 'W/"s-%s-%d-%d-v%d"' % (_fav_sha, idx, int(secs[idx].stat().st_mtime), _EPUB_SECT_VER)
+    except Exception:
+        _etag = None
+    if _etag and request.headers.get("If-None-Match") == _etag:
+        r304 = Response(status=304); r304.headers["ETag"] = _etag
+        return r304
     try:
         # 收藏夹物化 EPUB 的章节由服务端亲手生成(可信),**不再消毒**:保留 PDF 页透明词层的行内定位
         # style 与「打开原书」站内链接(_sanitize_epub_section 会剥掉两者)→ 选词/跳原书都可用。
@@ -5514,7 +5529,11 @@ def pdf_api_epub_section():
             html = _epub_section_cached(secs, idx, root, _fav_sha)
     except Exception as ex:
         return jsonify({"ok": False, "error": f"消毒失败：{ex}"}), 500
-    return jsonify({"ok": True, "html": html, "idx": idx})
+    r = jsonify({"ok": True, "html": html, "idx": idx})
+    if _etag:
+        r.headers["ETag"] = _etag
+        r.headers["Cache-Control"] = "private, no-cache"
+    return r
 
 
 _EPUB_HTML_DIMS_CACHE: dict = {}   # {str(path): (mtime, processed_html)} 给章节 HTML 的 <img> 注入真实尺寸(防图片加载回流→连续模式抽搐)
@@ -7009,15 +7028,11 @@ def _fav_esc(s) -> str:
     return _h.escape("" if s is None else str(s))
 
 
-def _fav_sep_html(label: str, href: str) -> str:
-    """条目分隔条:来源标签 + 「打开原书 ↗」深链。fav.css 给 .fav-sep 上 user-select:none(不误建高亮);
-    「打开原书」是站内 <a>(epub-html tap 处理器对 closest('a') 让位 → 正常导航,不触发单击查词)。"""
-    return _fav_sep_html3(label, href, None)
-
-
-def _fav_sep_html3(label: str, href: str, item) -> str:
-    """同 _fav_sep_html,多传原始收藏条目 → 来源条尾部加「☆ 取消收藏」按钮(data-fitem=条目 JSON,
-    前端 PATCH remove_item → 乐观隐藏本节 + 后台重建 reconcile 收尾)。item=None 则不加按钮。"""
+def _fav_sep_html(label: str, href: str, item=None) -> str:
+    """条目分隔条:来源标签 + 「打开原书 ↗」深链 + (item 非 None 时)「☆ 取消收藏」按钮
+    (data-fitem=条目 JSON,前端 PATCH remove_item → 乐观隐藏本节 + 后台重建 reconcile 收尾)。
+    fav.css 给 .fav-sep 上 user-select:none;「打开原书」是站内 <a>(tap 处理器对 closest('a') 让位)。
+    (2026-07-06 清理:原 _fav_sep_html3 更名回来,两行包装删除)"""
     btn = ""
     if isinstance(item, dict):
         try:
@@ -7295,7 +7310,7 @@ def _fav_pdf_item(i: int, it: dict, src_name: str, warns: list):
     pno = int(it.get("page") or 1)
     label = "《%s》 · 第 %d 页" % (src_name, pno)
     href = "/pdf/view?file=" + urllib.parse.quote(frel) + "&page=%d" % pno
-    sep = _fav_sep_html3(label, href, it)
+    sep = _fav_sep_html(label, href, it)
     ap = _safe_vault_path(frel)
     imgs = []
     body_inner = None
@@ -7351,7 +7366,7 @@ def _fav_epub_item(i: int, it: dict, src_name: str, warns: list):
     else:
         label = "《%s》 · %s" % (src_name, label)
     href = "/pdf/epub/view?file=" + urllib.parse.quote(frel) + "&sec=%d" % idx
-    sep = _fav_sep_html3(label, href, it)
+    sep = _fav_sep_html(label, href, it)
     if html is not None:
         body_inner = '<div class="fav-item fav-item-epub">' + html + "</div>"
     else:
@@ -7495,7 +7510,7 @@ def _fav_userpage_item(i: int, it: dict, warns: list):
                (("/pdf/epub/view?file=" + urllib.parse.quote(rel)) if low.endswith(".epub") else "/pdf/")
         label = "📝 我的页 · 出自《%s》" % src_name
         warns.append("第 %d 条(我的页 %s)记录不存在(可能已删除)" % (i + 1, uid))
-        return label, (_fav_sep_html3(label, href, it)
+        return label, (_fav_sep_html(label, href, it)
                        + '<div class="fav-item fav-missing">这条「我的页」已被删除或找不到了。</div>'), []
     title = (rec.get("title") or "").strip()
     label = "📝 我的页" + ((" · " + title) if title else "") + " · 出自《%s》" % src_name
@@ -7530,7 +7545,7 @@ def _fav_userpage_item(i: int, it: dict, warns: list):
                           + ink_svg + '</svg><div class="fav-up-content">' + inner + '</div></div>')
         else:
             body_inner = '<div class="fav-item fav-item-userpage">' + inner + "</div>"
-    return label, _fav_sep_html3(label, href, it) + body_inner, imgs
+    return label, _fav_sep_html(label, href, it) + body_inner, imgs
 
 
 def _fav_item_snippet(body: str, limit: int = 80) -> str:
@@ -7980,45 +7995,6 @@ def pdf_api_fav_meta():
     r.headers["Cache-Control"] = "no-store"
     return r
 
-
-def _fav_js_v():
-    """【已退役 2026-07-04·规格 v3】收藏夹精简查看页(fav_reader.html + fav-reader.js)的 cache-bust。
-    收藏夹统一化后改为「物化成真 PDF + 标准阅读器打开」(/fav/open),精简页退役,本函数不再被调用
-    (fav_reader.html / fav-reader.js 保留在盘上防外部书签,书架不再链接)。"""
-    mt = 0
-    for name in ("fav-reader.js", "rc-core.js", "rc-md.js", "rc-snippets.js",
-                 "rc-result.js", "rc-wordpop.js", "rc-favorites.js"):
-        for base in ("/var/www/html/static/pdf",
-                     str(Path(__file__).resolve().parent / "static" / "pdf")):
-            try:
-                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
-            except Exception:
-                continue
-    return str(mt or 1)
-
-
-# 等待页:脏收藏夹首访触发 build,轮询 job-status,done 后 reload /fav/open(届时不脏 → 渲染流式阅读器)。
-_FAV_WAIT_HTML = (
-    '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
-    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>正在生成收藏夹…</title>'
-    '<style>body{margin:0;background:#0b0f1a;color:#dce6ff;font-family:sans-serif;display:flex;'
-    'align-items:center;justify-content:center;min-height:100vh}.card{text-align:center;padding:28px 34px;max-width:82vw}'
-    '.sp{width:34px;height:34px;border:3px solid #24406e;border-top-color:#7dd3fc;border-radius:50%;'
-    'animation:s 1s linear infinite;margin:0 auto 16px}@keyframes s{to{transform:rotate(360deg)}}'
-    '.nm{font-size:15px;color:#9fcbff;font-weight:600;margin-bottom:6px}'
-    '.st{font-size:13px;color:#8fa4cc;min-height:18px}.er{color:#ff9a9a;font-size:13px}a{color:#7dd3fc}</style></head>'
-    '<body><div class="card"><div class="sp" id="sp"></div>'
-    '<div class="nm">正在整理「__NAME__」…</div>'
-    '<div class="st" id="st">首次打开或有新收藏,需要生成一次(之后秒开)。</div></div>'
-    '<script>var JID="__JID__",VIEW="__VIEW__";function poll(){'
-    "fetch('/pdf/api/job-status?id='+encodeURIComponent(JID),{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){"
-    "var st=document.getElementById('st');"
-    "if(j.status==='done'){st.textContent='完成,正在打开…';location.replace(VIEW);return;}"
-    "if(j.status==='error'){document.getElementById('sp').style.display='none';st.className='er';"
-    "st.textContent='生成失败:'+(j.error||'未知错误')+'(原书未受影响)';return;}"
-    "if(j.step)st.textContent=j.step;setTimeout(poll,900);"
-    "}).catch(function(){setTimeout(poll,1500);});}poll();</script></body></html>"
-)
 
 
 def _fav_serve_reader(fid: str, folder: dict):
@@ -8684,7 +8660,7 @@ def pdf_api_epub_furigana_verify():
     通用解决日语量词/熟字訓/多音字读错,不硬编码)。
     POST {text, readings:[{wd,rt}|{word,reading}|{start,end,reading}]} → {ok, fixes:[{i,r}], readings:[...纠正后...]}。
     i=readings 下标、r=纠正后平假名(只列改了的)。按 (text+readings) 哈希永久缓存;
-    前端 epub2-deco rubyApply 后台调一次,拿 fixes 原地替换 rt。"""
+    前端 epub-html.js 的振假名校正(_rubyVerifyS)后台调一次,拿 fixes 原地替换 rt。(原消费者 epub2-deco 已随 epub.js 线退役删除)"""
     body = request.get_json(silent=True) or {}
     text = (body.get("text") or "")
     readings = body.get("readings")

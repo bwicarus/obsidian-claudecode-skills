@@ -3389,7 +3389,7 @@
   }
 
   // ════════════════ 手写墨迹层 ════════════════
-  // 照搬 PDF 阅读器(pdf_reader.html 的 _ink*)。reflow 适配:墨迹**按章节 .ep-sec 锚定**——
+  // 照搬 PDF 阅读器(static/pdf/pdf-tail.js 的 _ink*;2026-07-06 起从模板内联抽出到该文件)
   // 每章一块 canvas(absolute 填满本章),坐标归一化 0-1(相对本章内容盒)。改字号/行距 → 本章盒尺寸变 →
   // ResizeObserver 触发按比例重绘(墨迹随盒等比缩放;font-size 变了对齐有偏移是 reflow 固有限制,可接受)。
   // canvas 永远 pointer-events:none(纯显示);绘制靠 #ep-col 上的 capture pointerdown 委托拦截。
