@@ -4620,7 +4620,7 @@
   //         ③ 把共享 tab/pane 的 PDF class(side-tab/side-pane)补成 EPUB 抽屉 class → setTab() 认得
   //   首次开抽屉时 open()→setTab(_lastTab) 会正确激活共享 pane(class/data-pane 已就位),无需手动同步初始态。
   try {
-    var _uSh = (location.search || '').indexOf('asst=shared') >= 0;
+    var _uSh = ((location.search || '') + (location.hash || '')).indexOf('asst=shared') >= 0;   // ?…&asst=shared 或 #asst=shared 都认(URL 已有 ?file= 时第二个 ? 会并进 file 值→404,hash 追加更不易错)
     if (_uSh && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {
       var _op = document.getElementById('ep-side-asst');                                   // 内联 asst pane(模板)
       if (_op && _op.parentNode) _op.parentNode.removeChild(_op);
