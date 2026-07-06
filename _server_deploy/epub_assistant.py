@@ -968,6 +968,9 @@ _etools = {
                      "拿到图后在回答里用标准 markdown ![简短说明](image_url) 插入;没搜到就 ok:false,**别自己编图片链接**。"
                      "刚好这次还要制卡、这张图也想放进卡片,就把 image_url 一并传给 make_anki。args {query:要搜的词/概念}",
                      lambda a, c: _A()._t_search_image(a, c)),
+    "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**卡片。用户明确要『找/看视频、有没有视频讲解』时用,"
+                     "别对每个概念都配视频。拿到结果只需简短说一句『给你找到这些视频』,**别复述标题/链接**(卡片已能直接播放)。args {query?}(不传用选中)",
+                     lambda a, c: _A()._t_search_video(a, c)),
     "lookup_word": ("查词典:英→ECDICT(音标+中文释义+原形)、日→unidic **权威读音+声调**。"
                     "**读音/释义以它为准,别自己编**;你只结合上下文挑义项+讲解。args {word?}(不传用选中)",
                     lambda a, c: _A()._t_lookup_word(a, c)),
@@ -986,7 +989,7 @@ _ELABELS = {
     "notes_query": "查便签", "notes_read": "读便签", "notes_create": "新建便签", "notes_edit": "修改便签",
     "search_all_books": "跨书搜索", "recall_notes": "召回我的笔记", "make_anki": "制卡",
     "make_note": "整理笔记", "add_vocab": "加生词本", "lookup_word": "查词典",
-    "translate": "翻译", "open_book": "打开书", "undo_last": "撤销", "search_image": "配图搜索",
+    "translate": "翻译", "open_book": "打开书", "undo_last": "撤销", "search_image": "配图搜索", "search_video": "找视频",
     "read_source_page": "翻原书",
 }
 

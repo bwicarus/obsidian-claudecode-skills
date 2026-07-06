@@ -1189,6 +1189,27 @@ def _t_search_image(args, ctx):
             "image_url": res["image_url"], "page_url": res.get("page_url", "")}
 
 
+def _t_search_video(args, ctx):
+    """搜教学视频(YouTube)并在对话里渲染**可播放**卡片。只在用户明确要『找视频/看视频讲解/有没有视频』时用,
+    别对每个概念都配视频。args {query?}(不传用选中/焦点)。结果卡由 client_action renderVideos 渲染。"""
+    q = (args.get("query") or "").strip() or (ctx.get("selection") or "").strip() or (ctx.get("focus_text") or "").strip()
+    if not q:
+        return {"error": "缺 query(要搜什么视频)"}
+    try:
+        import youtube_search
+        res = youtube_search.search(q[:120], max_results=6)
+    except Exception as e:
+        return {"error": str(e)[:120]}
+    if not res.get("ok"):
+        return {"error": res.get("error") or "没搜到视频"}
+    vids = res["videos"]
+    return {"ok": True, "count": len(vids),
+            # 只把标题/频道回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
+            "videos": [{"title": v.get("title", ""), "channel": v.get("channel", "")} for v in vids],
+            "client_action": {"fn": "renderVideos", "args": [vids]},
+            "_note": "视频卡片已在对话里渲染、用户可直接点开播放。你只需简短说一句『给你找到这些视频』,别复述标题/链接。"}
+
+
 def _t_lookup_word(args, ctx):
     """查词:走现成确定性词典 + unidic 权威读音(读音/释义以此为准,LLM 别自己编)。
     英文→ECDICT(音标+中文释义+原形);日语→unidic 离线读音+声调(权威,毫秒级)。args {word?}(不传用选中)。"""
@@ -2186,6 +2207,9 @@ TOOLS = {
                      "**别对**『力/能量/速度』这类基础常见词、**也别对**抽象理论/数学推导配图——大多数回答根本不需要图,别每个词都调。"
                      "拿到图后在回答里用标准 markdown ![简短说明](image_url) 插入;没搜到就 ok:false,**别自己编图片链接**。"
                      "刚好这次还要制卡、这张图也想放进卡片,就把 image_url 一并传给 make_anki。args {query:要搜的词/概念}", _t_search_image),
+    "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**的视频卡片。用户明确要『找/看视频、有没有视频讲解、放个视频』时用,"
+                     "别对每个概念都配视频(大多数回答不需要)。拿到结果只需简短说一句『给你找到这些视频』,"
+                     "**别复述标题/链接**(卡片已经显示了、能直接点开播放)。args {query?}(不传用选中/焦点)", _t_search_video),
     "highlight": ("在 PDF 上把**你已经选定的**重点句子画高亮(可撤销)。args {texts:[\"原句1\",\"原句2\"], color?, page?}。"
                   "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到。"
                   "page 不传=当前页。**适合标当前页你已读到的几句**;要标整章/多页用 auto_highlight(别自己逐页 read+highlight)", _t_highlight),
@@ -2245,7 +2269,7 @@ def _tool_label(name, args):
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",
             "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "see_ink": "看笔迹标注",
             "notes_query": "查便签", "notes_read": "读便签", "notes_create": "新建便签", "notes_edit": "修改便签",
-            "recall_notes": "召回我的笔记", "undo_last": "撤销", "search_image": "配图搜索"}.get(name, name)
+            "recall_notes": "召回我的笔记", "undo_last": "撤销", "search_image": "配图搜索", "search_video": "找视频"}.get(name, name)
 
 
 # ──────────────────────── agent 循环 ────────────────────────
