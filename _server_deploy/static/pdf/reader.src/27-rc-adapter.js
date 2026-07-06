@@ -168,9 +168,9 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       window._noteCreateAtCenter = () => { try { RC.stickynote.createAtCenter(); } catch (_) {} };
     }
   } catch (_) {}
-  // ②b:共享侧栏模式(?asst=shared)→ bind 完(HOST 就绪)后挂 rc-assistant 的共享侧栏(老 25-assistant 已在 flag 下自退);
-  //     默认无 flag 不调 → 仍走老 25-assistant,零风险。验证通过后再翻默认。
+  // ②b 收尾:shared 模式(本块只在 ui=shared 下执行)bind 完(HOST 就绪)后**无条件**挂 rc-assistant 的共享侧栏;
+  //     老 25-assistant 已在 __uiShared 下自退,不会双挂。legacy(?ui=legacy)本块不执行 → 走老 25-assistant 兜底。
   try {
-    if (/[?&]asst=shared/.test(location.search) && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) RC.assistant.mountPdfSidebar();
+    if (window.RC && RC.assistant && RC.assistant.mountPdfSidebar) RC.assistant.mountPdfSidebar();
   } catch (_) {}
 }

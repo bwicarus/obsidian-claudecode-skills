@@ -8453,7 +8453,7 @@ async function _connProbe() {
 // 🤖 fab 一键开抽屉到「助手」tab;快捷按钮(翻页/缩放)直调 window 函数 0 延迟。
 (function () {
   if (window.__asstLoaded) return;
-  if (/[?&]asst=shared/.test(location.search)) return;   // ②b:共享侧栏模式 → 交给 rc-assistant.js 的 mountPdfSidebar 接管,老版不挂(默认无 flag 仍走这里)
+  if (window.__uiShared) return;   // ②b 收尾:shared 模式(默认)侧栏由 rc-assistant.js 的 mountPdfSidebar 接管;这份老实现只在 legacy(?ui=legacy,无 __uiShared)兜底
   var panelEl = document.getElementById('grammar-panel');
   var tabsEl = document.getElementById('side-tabs');
   if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
@@ -10489,9 +10489,9 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       window._noteCreateAtCenter = () => { try { RC.stickynote.createAtCenter(); } catch (_) {} };
     }
   } catch (_) {}
-  // ②b:共享侧栏模式(?asst=shared)→ bind 完(HOST 就绪)后挂 rc-assistant 的共享侧栏(老 25-assistant 已在 flag 下自退);
-  //     默认无 flag 不调 → 仍走老 25-assistant,零风险。验证通过后再翻默认。
+  // ②b 收尾:shared 模式(本块只在 ui=shared 下执行)bind 完(HOST 就绪)后**无条件**挂 rc-assistant 的共享侧栏;
+  //     老 25-assistant 已在 __uiShared 下自退,不会双挂。legacy(?ui=legacy)本块不执行 → 走老 25-assistant 兜底。
   try {
-    if (/[?&]asst=shared/.test(location.search) && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) RC.assistant.mountPdfSidebar();
+    if (window.RC && RC.assistant && RC.assistant.mountPdfSidebar) RC.assistant.mountPdfSidebar();
   } catch (_) {}
 }

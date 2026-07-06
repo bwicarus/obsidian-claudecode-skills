@@ -4,7 +4,7 @@
 // 🤖 fab 一键开抽屉到「助手」tab;快捷按钮(翻页/缩放)直调 window 函数 0 延迟。
 (function () {
   if (window.__asstLoaded) return;
-  if (/[?&]asst=shared/.test(location.search)) return;   // ②b:共享侧栏模式 → 交给 rc-assistant.js 的 mountPdfSidebar 接管,老版不挂(默认无 flag 仍走这里)
+  if (window.__uiShared) return;   // ②b 收尾:shared 模式(默认)侧栏由 rc-assistant.js 的 mountPdfSidebar 接管;这份老实现只在 legacy(?ui=legacy,无 __uiShared)兜底
   var panelEl = document.getElementById('grammar-panel');
   var tabsEl = document.getElementById('side-tabs');
   if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
