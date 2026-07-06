@@ -426,6 +426,7 @@
 <!-- tex-chtml-full 构建:全部 TeX 扩展内置,零运行时 autoload(同 pdf_reader.html,\boldsymbol 红字根因修复) -->
 <script src="/static/qa/mathjax-full.js" async></script>
 <!-- 统一控制层(window.RC):PDF/EPUB 共用。本次只接 rc-core + rc-md(零底座耦合),PDF 阅读器不受影响 -->
+<script src="/static/pdf/rc-ink.js?v={{ reader_js_v }}"></script><!-- 墨迹共享核心(epub-html/rc-stickynote 依赖) -->
 <script src="/static/pdf/rc-core.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-md.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-figures.js?v={{ reader_js_v }}"></script>

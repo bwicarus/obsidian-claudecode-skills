@@ -3470,90 +3470,24 @@
     _inkRedraw(el);
     return cv;
   }
-  // viewport client 坐标 → 该章归一化 [x,y]
-  function _inkNorm(el, cx, cy) {
-    var cv = el.__inkCv; if (!cv) return null;
-    var r = cv.getBoundingClientRect();
-    if (!r.width || !r.height) return null;
-    return [(cx - r.left) / r.width, (cy - r.top) / r.height];
-  }
+  // 几何/渲染/命中/撤销栈 = 共享核心 rc-ink.js(RCInk,三阅读器唯一实现);这里只留绑定本阅读器
+  // canvas 属性(__inkCv)与状态(_epInk.visible)的薄 wrapper,函数名/签名不变。
+  function _inkNorm(el, cx, cy) { return RCInk.norm(el.__inkCv, cx, cy); }
   function _inkRedraw(el) {
-    var cv = el && el.__inkCv; if (!cv) return;
-    var ctx = cv.getContext('2d');
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    if (!_epInk.visible) return;
-    var cssW = parseFloat(cv.style.width) || cv.width;
-    var dpr = (cv.width / cssW) || 1;
-    var arr = el.__inkStrokes || [];
-    for (var i = 0; i < arr.length; i++) _inkDrawStroke(ctx, arr[i], cv.width, cv.height, dpr);
+    if (!el || !el.__inkCv) return;
+    RCInk.redraw(el.__inkCv, el.__inkStrokes, _epInk.visible);
   }
-  // ── 画一条笔画(照搬 PDF _inkDrawStroke:pen=平滑 quadratic / line / arrow / rect)──
-  function _inkDrawStroke(ctx, s, W, H, dpr) {
-    var pts = s.p || []; if (!pts.length) return;
-    ctx.strokeStyle = s.c || '#e74c3c';
-    ctx.lineWidth = Math.max(0.6, (s.w || 2.5) * dpr);
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    var X = function (i) { return pts[i][0] * W; }, Y = function (i) { return pts[i][1] * H; };
-    if (s.t === 'pen') {
-      ctx.beginPath(); ctx.moveTo(X(0), Y(0));
-      if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
-      else {
-        for (var i = 1; i < pts.length - 1; i++) {
-          var mx = (X(i) + X(i + 1)) / 2, my = (Y(i) + Y(i + 1)) / 2;
-          ctx.quadraticCurveTo(X(i), Y(i), mx, my);
-        }
-        ctx.lineTo(X(pts.length - 1), Y(pts.length - 1));
-      }
-      ctx.stroke();
-    } else if (s.t === 'line' && pts.length >= 2) {
-      ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
-    } else if (s.t === 'arrow' && pts.length >= 2) {
-      ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
-      var ang = Math.atan2(Y(1) - Y(0), X(1) - X(0)), ah = Math.max(9, ctx.lineWidth * 3.5);
-      ctx.beginPath(); ctx.moveTo(X(1), Y(1));
-      ctx.lineTo(X(1) - ah * Math.cos(ang - 0.42), Y(1) - ah * Math.sin(ang - 0.42));
-      ctx.moveTo(X(1), Y(1));
-      ctx.lineTo(X(1) - ah * Math.cos(ang + 0.42), Y(1) - ah * Math.sin(ang + 0.42));
-      ctx.stroke();
-    } else if (s.t === 'rect' && pts.length >= 2) {
-      var x0 = X(0), y0 = Y(0), x1 = X(1), y1 = Y(1);
-      ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
-    }
-  }
-  // ── 橡皮命中检测(归一化坐标,照搬 PDF)──
-  function _inkPtSeg(p, a, b) {
-    var dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
-    if (l2 === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
-    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
-  }
-  function _inkHit(s, pt, thr) {
-    var pts = s.p || []; if (!pts.length) return false;
-    if (s.t === 'rect' && pts.length >= 2) {
-      var x0 = Math.min(pts[0][0], pts[1][0]), x1 = Math.max(pts[0][0], pts[1][0]);
-      var y0 = Math.min(pts[0][1], pts[1][1]), y1 = Math.max(pts[0][1], pts[1][1]);
-      var nx = (Math.abs(pt[0] - x0) < thr || Math.abs(pt[0] - x1) < thr) && pt[1] > y0 - thr && pt[1] < y1 + thr;
-      var ny = (Math.abs(pt[1] - y0) < thr || Math.abs(pt[1] - y1) < thr) && pt[0] > x0 - thr && pt[0] < x1 + thr;
-      return nx || ny;
-    }
-    for (var i = 0; i < pts.length - 1; i++) if (_inkPtSeg(pt, pts[i], pts[i + 1]) < thr) return true;
-    if (pts.length === 1) return Math.hypot(pt[0] - pts[0][0], pt[1] - pts[0][1]) < thr;
-    return false;
-  }
+  function _inkDrawStroke(ctx, s, W, H, dpr) { RCInk.drawStroke(ctx, s, W, H, dpr); }
+  // ── 橡皮命中检测(归一化坐标)──
+  function _inkPtSeg(p, a, b) { return RCInk.ptSeg(p, a, b); }
+  function _inkHit(s, pt, thr) { return RCInk.hit(s, pt, thr); }
   function _inkEraseAt(el, pt) {
-    var arr = _inkStrokesOf(el), removed = false;
-    for (var i = arr.length - 1; i >= 0; i--) if (_inkHit(arr[i], pt, 0.014)) { arr.splice(i, 1); removed = true; }
+    var removed = RCInk.eraseAt(_inkStrokesOf(el), pt, 0.014);
     if (removed) _inkRedraw(el);
     return removed;
   }
   // ── undo / redo(每章)──
-  function _inkPushUndo(el) {
-    if (!el.__inkUndo) el.__inkUndo = [];
-    el.__inkUndo.push(JSON.stringify(el.__inkStrokes || []));
-    if (el.__inkUndo.length > 40) el.__inkUndo.shift();
-    el.__inkRedo = [];
-  }
+  function _inkPushUndo(el) { RCInk.pushUndo(el); }
   // ── 高性能 live stroke ──────────────────────────────────────────────────────
   // 已提交笔画留在各章主 canvas 不动;正在画的这一条只画在「视口固定」叠加 canvas 上(永远只视口大小→clearRect 极廉价),
   // 松手才 _inkRedraw 一次性把含新笔画的全部平滑落到主 canvas。

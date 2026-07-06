@@ -214,23 +214,10 @@
     req('PATCH', b, cb);
   }
 
-  // ─────────────────────────── 笔画绘制/命中(照搬 _epInk 的 pen 分支 + _inkPtSeg/_inkHit)───────────────────────────
+  // ─────────────────────────── 笔画绘制/命中 = 共享核心 rc-ink.js(RCInk)───────────────────────────
+  // 便签笔画字段 pts、无 t(RCInk 按 pen 处理);默认色/宽经 defs 跟随用户当前 INK 选择,行为与原实现一致。
   function drawStroke(ctx, s, W, H, dpr) {
-    var pts = s.pts || []; if (!pts.length) return;
-    ctx.strokeStyle = s.c || INK.color;
-    ctx.lineWidth = Math.max(0.6, (s.w || INK.width) * dpr);
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    var X = function (i) { return pts[i][0] * W; }, Y = function (i) { return pts[i][1] * H; };
-    ctx.beginPath(); ctx.moveTo(X(0), Y(0));
-    if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
-    else {
-      for (var i = 1; i < pts.length - 1; i++) {
-        var mx = (X(i) + X(i + 1)) / 2, my = (Y(i) + Y(i + 1)) / 2;
-        ctx.quadraticCurveTo(X(i), Y(i), mx, my);
-      }
-      ctx.lineTo(X(pts.length - 1), Y(pts.length - 1));
-    }
-    ctx.stroke();
+    RCInk.drawStroke(ctx, s, W, H, dpr, { color: INK.color, width: INK.width });
   }
   function redrawInk(ctl) {
     var cv = ctl.cv, ctx = cv.getContext('2d');
@@ -239,18 +226,7 @@
     var arr = ctl.note.strokes || [], dpr = window.devicePixelRatio || 1;
     for (var i = 0; i < arr.length; i++) drawStroke(ctx, arr[i], cv.width, cv.height, dpr);
   }
-  function ptSeg(p, a, b) {
-    var dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
-    if (l2 === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
-    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2; t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
-  }
-  function strokeHit(s, pt, thr) {
-    var pts = s.pts || []; if (!pts.length) return false;
-    for (var i = 0; i < pts.length - 1; i++) if (ptSeg(pt, pts[i], pts[i + 1]) < thr) return true;
-    if (pts.length === 1) return Math.hypot(pt[0] - pts[0][0], pt[1] - pts[0][1]) < thr;
-    return false;
-  }
+  function strokeHit(s, pt, thr) { return RCInk.hit(s, pt, thr); }
 
   // ─────────────────────────── controller 构建 ───────────────────────────
   function buildCtl(note) {

@@ -11,6 +11,7 @@
 <!-- 预加载提示:大 JS 在 head 就开始并行拉(它们的 <script> 在 body 尾;HTTP/2 下省一段串行等待) -->
 <link rel="modulepreload" href="/static/pdf/reader.js?v={{ reader_js_v }}">
 {% if ui_shared %}<link rel="preload" as="script" href="/static/pdf/pdf-uishared.js?v={{ shared_js_v }}">{% endif %}
+<link rel="preload" as="script" href="/static/pdf/rc-ink.js?v={{ shared_js_v }}">
 <link rel="preload" as="script" href="/static/pdf/pdf-tail.js?v={{ shared_js_v }}">
 <!-- mfx:在 Claude Design 里设计的动效+美化层(导出回写),tokens+motion/polish/gestures/effects。撤销=删这两行 -->
 <link rel="stylesheet" href="/static/pdf/mfx.css?v=mfx-5">
@@ -457,6 +458,7 @@ window.toggleGrammarPanel = function () {
   document.body.classList.toggle('grammar-open', open);
 };
 </script>
+<script src="/static/pdf/rc-ink.js?v={{ shared_js_v }}"></script><!-- 墨迹共享核心:pdf-tail(无条件加载)依赖 → 必须在 ui_shared 条件块外 -->
 {% if ui_shared %}
 <!-- ui=shared:统一控制层(rc-*)+ PdfAdapter。classic 脚本 → 在 deferred 的 module reader.js 前执行,
      reader.js 运行时 window.RC / RC.* / PdfAdapter / __uiShared 必已就绪。默认无 flag 时完全不引入。
