@@ -8986,6 +8986,26 @@ async function _connProbe() {
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
   function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
 
+  // 视口焦点:当前与 #main 视口相交的页的字符层文字(镜像 EPUB _visibleText)。让 AI 回答/找视频/配图/拟搜索词
+  // 都紧扣"用户此刻在看的这段",而非泛泛的整页/整章主题(后端 _sys_prompt 的「紧扣可见段落」指引靠它才生效)。
+  function _visibleText() {
+    try {
+      var main = document.getElementById('main'); if (!main) return '';
+      var mr = main.getBoundingClientRect(), top = mr.top, bot = mr.bottom;
+      var pws = document.querySelectorAll('.page-wrap[data-page-num]'), parts = [];
+      for (var i = 0; i < pws.length; i++) {
+        var pw = pws[i], r = pw.getBoundingClientRect();
+        if (r.height && r.bottom > top + 8 && r.top < bot - 8 && pw.__charBoxes && pw.__charBoxes.length) {   // 与视口相交
+          var t = ''; try { t = _charsRangeToText(pw.__charBoxes, 0, pw.__charBoxes.length - 1); } catch (e) {}
+          t = (t || '').replace(/\s+/g, ' ').trim();
+          if (t) parts.push(t);
+        }
+      }
+      var txt = parts.join('\n');
+      return txt.length > 1000 ? txt.slice(0, 1000) + '…' : txt;
+    } catch (e) { return ''; }
+  }
+
   function ctx() {
     var c = { page_type: 'pdf' };
     // 取阅读器当前上下文经统一中间层 RC.adapter().getContext()(PdfAdapter 只读包 __voiceContext);
@@ -8994,6 +9014,7 @@ async function _connProbe() {
       var g = (window.RC && RC.adapter && RC.adapter().getContext) ? RC.adapter().getContext() : null;
       c = g || ((typeof window.__voiceContext === 'function') ? (window.__voiceContext() || c) : c);
     } catch (_) {}
+    try { if (c && !c.visible_text) c.visible_text = _visibleText(); } catch (_) {}   // 视口焦点(镜像 EPUB 2516):AI 找视频/配图/回答紧扣当前屏幕,不退回泛章节
     // 便签注入(双击便签 → __noteAttached,见下方注入块):无笔画=文字+锚点附近正文走 context.notes 文本通道;
     // 有笔画=kind:'note' 条目并入 figures 走视觉通道(服务端 see_figure 认 note_id → _note_composite_png 现场合成)
     try {
