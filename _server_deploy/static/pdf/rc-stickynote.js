@@ -217,9 +217,10 @@
       '.rc-vid-ctrls{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:5px 8px;font-size:11.5px;color:#2a2a2a;background:rgba(255,255,255,.42);border-top:1px solid rgba(0,0,0,.08)}',
       '.rc-note-darkbg .rc-vid-ctrls{color:#e8eefc;background:rgba(0,0,0,.22);border-top-color:rgba(255,255,255,.12)}',
       '.rc-vid-ctrls label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}',
-      '.rc-vid-ctrls .rc-vc-start,.rc-vid-ctrls .rc-vc-end{width:46px;border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:2px 4px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
+      '.rc-vid-ctrls .rc-vc-sm,.rc-vid-ctrls .rc-vc-ss,.rc-vid-ctrls .rc-vc-em,.rc-vid-ctrls .rc-vc-es{width:26px;text-align:center;border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:2px 3px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
+      '.rc-vid-ctrls .rc-vc-cn{margin:0 1px;opacity:.6}',
       '.rc-vid-ctrls select{border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:1px 3px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
-      '.rc-note-darkbg .rc-vid-ctrls .rc-vc-start,.rc-note-darkbg .rc-vid-ctrls .rc-vc-end,.rc-note-darkbg .rc-vid-ctrls select{background:rgba(255,255,255,.14);color:#eef;border-color:rgba(255,255,255,.24)}',
+      '.rc-note-darkbg .rc-vid-ctrls .rc-vc-sm,.rc-note-darkbg .rc-vid-ctrls .rc-vc-ss,.rc-note-darkbg .rc-vid-ctrls .rc-vc-em,.rc-note-darkbg .rc-vid-ctrls .rc-vc-es,.rc-note-darkbg .rc-vid-ctrls select{background:rgba(255,255,255,.14);color:#eef;border-color:rgba(255,255,255,.24)}',
       '.rc-vc-ck input{margin:0 2px 0 0}'
     ].join('\n');
     document.head.appendChild(css);
@@ -339,16 +340,17 @@
     box.innerHTML =
       '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>' +
       '<div class="rc-vid-ctrls">' +
-        '<label>起<input class="rc-vc-start" inputmode="numeric" placeholder="0:00"></label>' +
-        '<label>止<input class="rc-vc-end" inputmode="numeric" placeholder="结尾"></label>' +
+        '<label>起<input class="rc-vc-sm" inputmode="numeric" maxlength="3" placeholder="0">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-ss" inputmode="numeric" maxlength="2" placeholder="00"></label>' +
+        '<label>止<input class="rc-vc-em" inputmode="numeric" maxlength="3" placeholder="—">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-es" inputmode="numeric" maxlength="2" placeholder="00"></label>' +
         '<label>速<select class="rc-vc-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-loop">循环</label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-cc">字幕</label>' +
         '<button class="rc-vc-rm" title="移除视频(变回普通便签)">✕</button>' +
       '</div>';
     var emb = box.querySelector('.rc-vid-embed');
-    box.querySelector('.rc-vc-start').value = v.start ? secToMMSS(v.start) : '';
-    box.querySelector('.rc-vc-end').value = v.end ? secToMMSS(v.end) : '';
+    var _fillT = function (mSel, sSel, secs) { box.querySelector(mSel).value = secs ? Math.floor(secs / 60) : ''; box.querySelector(sSel).value = secs ? ('0' + (secs % 60)).slice(-2) : ''; };
+    _fillT('.rc-vc-sm', '.rc-vc-ss', v.start || 0);
+    _fillT('.rc-vc-em', '.rc-vc-es', v.end || 0);
     box.querySelector('.rc-vc-rate').value = String(v.rate || 1);
     box.querySelector('.rc-vc-loop').checked = !!v.loop;
     box.querySelector('.rc-vc-cc').checked = v.cc !== false;
@@ -368,8 +370,11 @@
       patchNote(ctl.note, { video: v });
       if (needReload && ctl.__vif) { ctl.__vif.src = vEmbedSrc(v); ctl.__vif.addEventListener('load', function () { setRate(ctl, v.rate || 1); }, { once: true }); }
     };
-    box.querySelector('.rc-vc-start').addEventListener('change', function () { applyPatch({ start: mmssToSec(this.value) }, true); });
-    box.querySelector('.rc-vc-end').addEventListener('change', function () { applyPatch({ end: mmssToSec(this.value) }, true); });
+    var _readT = function (mSel, sSel) { var m = parseInt(box.querySelector(mSel).value || '0', 10) || 0; var s2 = parseInt(box.querySelector(sSel).value || '0', 10) || 0; return m * 60 + Math.max(0, Math.min(59, s2)); };
+    box.querySelector('.rc-vc-sm').addEventListener('change', function () { applyPatch({ start: _readT('.rc-vc-sm', '.rc-vc-ss') }, true); });
+    box.querySelector('.rc-vc-ss').addEventListener('change', function () { applyPatch({ start: _readT('.rc-vc-sm', '.rc-vc-ss') }, true); });
+    box.querySelector('.rc-vc-em').addEventListener('change', function () { applyPatch({ end: _readT('.rc-vc-em', '.rc-vc-es') }, true); });
+    box.querySelector('.rc-vc-es').addEventListener('change', function () { applyPatch({ end: _readT('.rc-vc-em', '.rc-vc-es') }, true); });
     box.querySelector('.rc-vc-rate').addEventListener('change', function () { var r = parseFloat(this.value) || 1; applyPatch({ rate: r }, false); setRate(ctl, r); });
     box.querySelector('.rc-vc-loop').addEventListener('change', function () { applyPatch({ loop: this.checked }, true); });
     box.querySelector('.rc-vc-cc').addEventListener('change', function () { applyPatch({ cc: this.checked }, true); });
