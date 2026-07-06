@@ -59,13 +59,19 @@
     }).catch(function () {});
   }
 
-  // 阶段 B:长按视频卡 → 拖到左侧书页松手 → RC.stickynote.createVideoAt 建视频便签。
-  // 长按 340ms 进入拖动(短按/移动=点击播放/滚动);全局 move/up 监听(拖出卡范围仍跟手),松手点不在助手面板内=书页。
+  // 阶段 B(手柄式,根治触摸冲突):缩略图角上一个**拖动手柄** ⠿,只在手柄上 pointerdown 才拖 → 建视频便签。
+  //   避开触摸设备三大冲突:①缩略图 click=播放 ②列表滚动 ③iOS 长按图片弹「存储图像」菜单。
+  //   手柄 pointerdown 立即拖(不长按计时)+ preventDefault/stopPropagation(不触发播放/菜单)+ touch-action:none。
   function _bindDragToBook(el, v) {
-    var lp = null, dragging = false, ghost = null, sx = 0, sy = 0, onMove, onUp;
+    var thumb = el.querySelector('.rc-vid-thumb'); if (!thumb) return;
+    var handle = document.createElement('button');
+    handle.className = 'rc-vid-drag'; handle.type = 'button';
+    handle.title = '按住我拖到书页,放成视频便签'; handle.setAttribute('aria-label', '拖到书页');
+    handle.innerHTML = '⠿';   // ⠿ 抓取点
+    thumb.appendChild(handle);
+    var dragging = false, ghost = null, onMove, onUp;
     var moveGhost = function (x, y) { if (ghost) { ghost.style.left = (x + 12) + 'px'; ghost.style.top = (y + 14) + 'px'; } };
     var endDrag = function (e, drop) {
-      if (lp) { clearTimeout(lp); lp = null; }
       document.removeEventListener('pointermove', onMove, true);
       document.removeEventListener('pointerup', onUp, true);
       document.removeEventListener('pointercancel', onUp, true);
@@ -79,23 +85,19 @@
     };
     onMove = function (e) { if (dragging) { e.preventDefault(); moveGhost(e.clientX, e.clientY); } };
     onUp = function (e) { endDrag(e, true); };
-    el.addEventListener('pointerdown', function (e) {
+    handle.addEventListener('pointerdown', function (e) {
       if (e.button && e.button !== 0) return;
-      sx = e.clientX; sy = e.clientY;
-      lp = setTimeout(function () {
-        lp = null; dragging = true;
-        ghost = document.createElement('div'); ghost.className = 'rc-vid-ghost'; ghost.textContent = '🎬 拖到书页放置';
-        document.body.appendChild(ghost); moveGhost(sx, sy);
-        try { navigator.vibrate && navigator.vibrate(15); } catch (_) {}
-        document.addEventListener('pointermove', onMove, true);
-        document.addEventListener('pointerup', onUp, true);
-        document.addEventListener('pointercancel', onUp, true);
-      }, 340);
+      e.preventDefault(); e.stopPropagation();   // 手柄=明确拖动:阻止冒泡到缩略图 click(播放)+ 阻止 iOS 长按菜单
+      dragging = true;
+      ghost = document.createElement('div'); ghost.className = 'rc-vid-ghost'; ghost.textContent = '🎬 拖到书页放置';
+      document.body.appendChild(ghost); moveGhost(e.clientX, e.clientY);
+      try { navigator.vibrate && navigator.vibrate(12); } catch (_) {}
+      document.addEventListener('pointermove', onMove, true);
+      document.addEventListener('pointerup', onUp, true);
+      document.addEventListener('pointercancel', onUp, true);
     });
-    el.addEventListener('pointermove', function (e) {   // 长按计时内移动超阈值 = 滚动,取消长按
-      if (lp && (Math.abs(e.clientX - sx) > 9 || Math.abs(e.clientY - sy) > 9)) { clearTimeout(lp); lp = null; }
-    });
-    el.addEventListener('pointerup', function () { if (lp) { clearTimeout(lp); lp = null; } });
+    handle.addEventListener('contextmenu', function (e) { e.preventDefault(); });   // 长按不弹菜单
+    handle.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); });   // 手柄单击不误播放
   }
 
   window.renderVideos = function (videos) {
@@ -186,8 +188,10 @@
       '.rc-vids{display:grid;grid-template-columns:1fr;gap:8px;margin:8px 0 4px;align-self:stretch}' +
       '@media(min-width:440px){.rc-vids{grid-template-columns:1fr 1fr}}' +
       '.rc-vid{background:#0d1322;border:1px solid #263255;border-radius:10px;overflow:hidden}' +
-      '.rc-vid-thumb{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer}' +
-      '.rc-vid-thumb img{width:100%;height:100%;object-fit:cover;display:block}' +
+      '.rc-vid-thumb{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer;-webkit-touch-callout:none}' +
+      '.rc-vid-thumb img{width:100%;height:100%;object-fit:cover;display:block;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;pointer-events:none}' +
+      '.rc-vid-drag{position:absolute;left:6px;bottom:6px;z-index:4;width:30px;height:30px;border-radius:8px;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:16px;line-height:1;cursor:grab;display:flex;align-items:center;justify-content:center;padding:0;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}' +
+      '.rc-vid-drag:active{cursor:grabbing;background:rgba(59,109,181,.92);transform:scale(1.08)}' +
       '.rc-vid-frame{width:100%;aspect-ratio:16/9;border:0;display:block}' +
       '.rc-vid-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:46px;height:46px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:2px}' +
       '.rc-vid-thumb:hover .rc-vid-play{background:rgba(220,40,40,.92)}' +
