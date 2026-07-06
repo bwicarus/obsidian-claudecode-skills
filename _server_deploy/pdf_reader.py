@@ -618,7 +618,35 @@ def pdf_api_img_proxy():
     import requests as _rq
     import urllib.parse as _up
     import re as _re
+    import hashlib as _hl
+    import threading as _th
     UA = {"User-Agent": "Mozilla/5.0 (reader-img-proxy)"}
+
+    # ★磁盘缓存 + 同 URL single-flight:助手流式重渲曾对同一张图打出十几个并发请求,每个都现抓维基(慢)
+    #   → gunicorn worker 全被占住 → nginx 502。首个请求抓完落盘;同 URL 并发在锁上排队,醒来直接吃缓存。
+    _cdir = CLAUDE_DIR / "state" / "img-proxy-cache"
+    _key = _hl.md5(url.encode("utf-8")).hexdigest()
+    _fbin, _fct = _cdir / (_key + ".bin"), _cdir / (_key + ".ct")
+
+    def _serve_cache():
+        try:
+            if _fbin.exists() and _fbin.stat().st_size:
+                _ct = _fct.read_text("utf-8").strip() if _fct.exists() else "image/png"
+                _r = Response(_fbin.read_bytes(), mimetype=_ct)
+                _r.headers["Cache-Control"] = "public, max-age=604800, immutable"
+                return _r
+        except Exception:
+            pass
+        return None
+
+    hit = _serve_cache()
+    if hit is not None:
+        return hit
+    if not hasattr(pdf_api_img_proxy, "_locks"):
+        pdf_api_img_proxy._locks = {}
+        pdf_api_img_proxy._locks_g = _th.Lock()
+    with pdf_api_img_proxy._locks_g:
+        lk = pdf_api_img_proxy._locks.setdefault(_key, _th.Lock())
 
     def _fetch(u):
         try:
@@ -626,31 +654,50 @@ def pdf_api_img_proxy():
         except Exception:
             return None
 
-    rr = _fetch(url)
-    if (rr is None or rr.status_code == 404) and "/thumb/" in url:
-        m = _re.search(r"/thumb/[0-9a-fA-F]/[0-9a-fA-F]{2}/([^/]+)/(\d+)px-", url)
-        if m:
-            fname = _up.unquote(m.group(1))
-            w = m.group(2)
-            try:
-                api = ("https://commons.wikimedia.org/w/api.php?action=query&titles=File:"
-                       + _up.quote(fname) + "&prop=imageinfo&iiprop=url&iiurlwidth=" + w + "&format=json")
-                j = _rq.get(api, timeout=10, headers=UA).json()
-                for _p in ((j.get("query") or {}).get("pages") or {}).values():
-                    tu = ((_p.get("imageinfo") or [{}])[0]).get("thumburl")
-                    if tu:
-                        rr = _fetch(tu)
-                        break
-            except Exception:
-                pass
-    if rr is None or rr.status_code != 200 or not rr.content:
-        abort(502)
-    ct = rr.headers.get("Content-Type", "image/png")
-    if not ct.startswith("image/"):
-        abort(415)
-    resp = Response(rr.content, mimetype=ct)
-    resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
-    return resp
+    with lk:
+        hit = _serve_cache()   # 排队醒来:多半已被第一个请求填好
+        if hit is not None:
+            return hit
+        rr = _fetch(url)
+        if rr is None or rr.status_code == 404:
+            # hash 目录修复:thumb URL(带 px 宽)和**原图 URL**都要管——上次只修了 thumb,
+            # AI 这次编的是原图路径的错 hash(写 1/1f 真实 0/0b)→ 404 直穿 502。
+            fname = w = None
+            m = _re.search(r"/thumb/[0-9a-fA-F]/[0-9a-fA-F]{2}/([^/]+)/(\d+)px-", url)
+            if m:
+                fname, w = _up.unquote(m.group(1)), m.group(2)
+            else:
+                m2 = _re.search(r"/[0-9a-fA-F]/[0-9a-fA-F]{2}/([^/?#]+)$", url)
+                if m2:
+                    fname = _up.unquote(m2.group(1))
+            if fname:
+                try:
+                    api = ("https://commons.wikimedia.org/w/api.php?action=query&titles=File:"
+                           + _up.quote(fname) + "&prop=imageinfo&iiprop=url"
+                           + ("&iiurlwidth=" + w if w else "") + "&format=json")
+                    j = _rq.get(api, timeout=10, headers=UA).json()
+                    for _p in ((j.get("query") or {}).get("pages") or {}).values():
+                        _ii = (_p.get("imageinfo") or [{}])[0]
+                        tu = _ii.get("thumburl") or _ii.get("url")
+                        if tu:
+                            rr = _fetch(tu)
+                            break
+                except Exception:
+                    pass
+        if rr is None or rr.status_code != 200 or not rr.content:
+            abort(502)
+        ct = rr.headers.get("Content-Type", "image/png")
+        if not ct.startswith("image/"):
+            abort(415)
+        try:
+            _cdir.mkdir(parents=True, exist_ok=True)
+            _fbin.write_bytes(rr.content)
+            _fct.write_text(ct, "utf-8")
+        except Exception:
+            pass
+        resp = Response(rr.content, mimetype=ct)
+        resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+        return resp
 
 
 @bp.route("/api/book-meta")

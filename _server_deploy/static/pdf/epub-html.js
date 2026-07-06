@@ -1264,7 +1264,7 @@
   }
   function renderFigChips() {
     try {
-      var input = $('ep-ai-input'), list = window.__figAttached || [], wrap = $('ep-asst-fig-chips');
+      var input = $('ep-ai-input') || $('asst-input'), list = window.__figAttached || [], wrap = $('ep-asst-fig-chips');   // ③-4b:共享侧栏输入行 id=asst-input
       if (!list.length) { if (wrap) wrap.remove(); return; }
       if (!input) return;       // 助手输入行还没建 → 列表仍在上下文里,开了再渲
       if (!wrap) { wrap = document.createElement('div'); wrap.id = 'ep-asst-fig-chips'; input.parentNode.insertBefore(wrap, input); }
@@ -1355,7 +1355,7 @@
   window.__focusSel = null;   // {text, kind}
   function _renderFocusSel() {
     try {
-      var input = $('ep-ai-input');
+      var input = $('ep-ai-input') || $('asst-input');   // ③-4b:共享侧栏输入行 id=asst-input
       var wrap = $('ep-asst-sel-chip');
       var fs = window.__focusSel;
       if (!fs || !fs.text) { if (wrap) wrap.remove(); return; }
@@ -1381,7 +1381,7 @@
   window.__asstOpen = function () {
     try {
       var s = document.getElementById('ep-side');
-      var a = document.getElementById('ep-side-asst');
+      var a = document.getElementById('ep-side-asst') || document.getElementById('side-pane-asst');   // ③-4b:共享侧栏 pane(内联 pane 已摘)也认,否则 __setFocusSel 恒短路=选中 chip 永不钉
       return !!(s && s.classList.contains('open') && a && a.classList.contains('active'));
     } catch (e) { return false; }
   };
@@ -1406,7 +1406,7 @@
   window.__noteAttached = [];   // [{id,text,near,section,has_ink,_thumb}](_thumb=合成图 data_url,仅前端显示不随请求发)
   function renderNoteChips() {
     try {
-      var input = $('ep-ai-input'), list = window.__noteAttached || [], wrap = $('ep-asst-note-chips');
+      var input = $('ep-ai-input') || $('asst-input'), list = window.__noteAttached || [], wrap = $('ep-asst-note-chips');   // ③-4b:共享侧栏输入行 id=asst-input
       if (!list.length) { if (wrap) wrap.remove(); return; }
       if (!input) return;   // 助手输入行还没建 → 数据仍在,开了再渲
       if (!wrap) {
@@ -4533,9 +4533,21 @@
     // 助手上下文(章 idx/toc/选区/图/便签)——收口自 runAssistant 内联组装,产出该阅读器后端(epub_assistant.py)所需形状
     getContext: function (opts) {
       opts = opts || {}; var sel = opts.selection || {};
+      // ③-4b:共享侧栏 ctx() 无参调用 → 这里自采选中(镜像 sendChat:钉住焦点 chip 优先于隐式选中,
+      //   选区来自 cur 时定格偏移锚)。内联 runAssistant 传 opts.selection 时不进此分支(零回归)。
+      if (!sel.sel) {
+        try {
+          var _si = curSelection() || {};
+          if (window.__focusSel && window.__focusSel.text) _si = { sel: window.__focusSel.text, sent: _si.sent || '' };
+          if (_si.sel && cur.anchor && (cur.text || '').trim() === _si.sel.trim())
+            _si.anchor = { section: cur.anchor.section, start: cur.anchor.start, end: cur.anchor.end };
+          if (_si.sel) sel = _si;
+        } catch (e) {}
+      }
       return {
         file: FREL, book: (CFG && CFG.fileName) || '',
         langs: bookLangsArr(),   // M1:书语言(en/ja…)→ 后端 meta「书语言」,AI 不必猜语言(镜像 PDF)
+        visible_text: (function () { try { return _visibleText(); } catch (e) { return ''; } })(),   // ③-4b:视口焦点收进 adapter——共享侧栏 ctx() 的本地 _visibleText 是 PDF page-wrap 版,EPUB 上为空(726df1 视口焦点修复会丢);内联路径有 !visible_text 守卫不双填
         visible_vocab: (window.__lastVocab || []).map(function (v) { return v.lemma; }).filter(Boolean).slice(0, 50),   // M2:本页下划线生词(镜像 PDF 05-nav:446)
         current_section_idx: _curTopIdx, total_sections: COUNT, toc: TOC,
         selection: sel.sel || '', selection_sentence: sel.sent || '', selection_anchor: sel.anchor || undefined,
@@ -4571,10 +4583,11 @@
         switchTab: function (n) { try { if (window.RC && RC.sidedrawer) RC.sidedrawer.open(n); } catch (_) {} },
         asstOpen: function () { try { var s = document.getElementById('ep-side'); var pane = s && s.querySelector('.ep-side-pane[data-pane="asst"]'); return !!(pane && pane.classList.contains('active')); } catch (_) { return false; } },
         voiceContext: function () { return null; },
-        setFocusSel: function () {},
-        focusSel: function () { return null; },
-        clearFigFocus: function () {},
+        setFocusSel: function (t, k) { try { window.__setFocusSel && window.__setFocusSel(t, k); } catch (_) {} },
+        focusSel: function () { return window.__focusSel || null; },
+        clearFigFocus: function () { try { window.__clearFigAttached && window.__clearFigAttached(); } catch (_) {} },
         figThumb: function () {},
+        locLabel: function (idx) { try { return chapLabelOf(parseInt(idx, 10) || 0) || ''; } catch (_) { return ''; } },
         noteAttached: function () { return window.__noteAttached || []; },
         clearNoteAttached: function () { try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {} },
         renderNoteChips: function () { try { if (typeof renderNoteChips === 'function') renderNoteChips(); } catch (_) {} },

@@ -519,7 +519,29 @@
     '.ams-rst{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-rst:active{background:#222d44}' +
     '.ams-cur{font-size:11px;color:#7c93c4;margin-top:6px}' +
-    '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
+    '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
+    '.asst-imgph{display:inline-block;font-size:12px;color:#7c93c4;background:#121a2e;border:1px dashed #2a3a63;border-radius:8px;padding:3px 9px;margin:.3em 0}';
+  // EPUB 页没有 mfx.css(只有 PDF 模板引它)→ 揭示游标/流光/闪烁光标全无样式 = 流式动效消失。
+  // 检测不到 mfx.css 时补注入等价规则(颜色取 mfx tokens 实值,不依赖 var(--c-*);PDF 上有 mfx.css → 不注入,零重复)。
+  if (!document.querySelector('link[href*="mfx.css"]')) {
+    css.textContent +=
+      '.mfx-typing{display:inline-flex;align-items:center;gap:5px;padding:2px 2px;vertical-align:middle}' +
+      '.mfx-typing i{width:7px;height:7px;border-radius:50%;background:#60a5fa;display:block;opacity:.4}' +
+      '.mfx-caret{display:inline-block;width:2px;height:1.05em;margin-left:1px;vertical-align:-0.18em;border-radius:1px;background:linear-gradient(#60a5fa,#22d3ee);box-shadow:0 0 6px rgba(96,165,250,.7)}' +
+      '.asst-a.mfx-streaming{box-shadow:0 0 0 1px rgba(96,165,250,.28),0 0 16px rgba(96,165,250,.14)}' +
+      '.mfx-w{opacity:1}' +
+      '@media (prefers-reduced-motion:no-preference){' +
+        '@keyframes mfx-bounce{0%,80%,100%{transform:translateY(0);opacity:.35}40%{transform:translateY(-5px);opacity:1}}' +
+        '.mfx-typing i{animation:mfx-bounce 1.2s ease-in-out infinite}' +
+        '.mfx-typing i:nth-child(2){animation-delay:.16s}.mfx-typing i:nth-child(3){animation-delay:.32s}' +
+        '@keyframes mfx-blink{0%,45%{opacity:1}55%,100%{opacity:0}}' +
+        '.mfx-caret{animation:mfx-blink 1s steps(1) infinite}' +
+        '@keyframes mfx-char{from{opacity:0;filter:blur(4px)}to{opacity:1;filter:none}}' +
+        '.asst-a.mfx-streaming .mfx-w{opacity:0}' +
+        '.asst-a.mfx-streaming .mfx-w.mfx-shown{opacity:1}' +
+        '.asst-a.mfx-streaming .mfx-w.mfx-reveal{animation:mfx-char .34s ease both}' +
+      '}';
+  }
   document.head.appendChild(css);
 
   // 🤖 fab:一键开抽屉到助手 tab
@@ -568,6 +590,14 @@
     _linkifyPages(el);
     // withMath===false(流式期间)跳过 MathJax:原先每 100ms 对整段重 typeset,长答案末段二次方卡顿 → 收尾只跑一次
     if (withMath !== false) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
+    // 图片策略:流式期间不实例化 <img>——每个 delta 全量重渲会把图元素反复销毁重建,同一 URL 洪泛请求
+    // (旧 img 上的 __proxied 防重标记随元素一起死)把后端 worker 打满 → 502;收尾/历史那次才真渲图,一图一请求。
+    // 真渲时先过 rcImgStabilize(rc-video.js):已知失败的维基图直接换代理 URL,不再先撞一次墙。
+    if (withMath === false) {
+      try { el.querySelectorAll('img').forEach(function (im) { var ph = document.createElement('span'); ph.className = 'asst-imgph'; ph.textContent = '🖼 图片将在回答完成后显示'; if (im.parentNode) im.parentNode.replaceChild(ph, im); }); } catch (_) {}
+    } else {
+      try { window.rcImgStabilize && window.rcImgStabilize(el); } catch (_) {}
+    }
   }
   // stream-fx(mfx):流式期间在回答末尾挂一个闪烁光标(renderMd 每 delta 重渲 innerHTML,故每次都补挂)
   function _appendCaret(el) { try { var c = document.createElement('span'); c.className = 'mfx-caret'; el.appendChild(c); } catch (_) {} }
@@ -1118,8 +1148,19 @@
     var bookRel = meta.file_rel || (typeof HOST.fileRel() !== 'undefined' ? HOST.fileRel() : '');
     // 页码 chip:有选中/图时由它们跳转(不重复给);否则仅当问题确实指向本页才给
     var showPage = page && !figs.length && !sel && _pageRefersToPage(msg);
-    if (!figs.length && !sel && !showPage) return null;
+    // 章 chip(EPUB 路径):host 有 locLabel 且 meta 带节 idx(发送=current_section_idx / 历史=section)→
+    // 恒显「正在看:章名」可点跳回(镜像旧内联 UX;PDF 无 locLabel → 走原 page 路径零变化)
+    var secIdx = (!page && HOST.locLabel)
+      ? (meta.section != null ? meta.section : (meta.current_section_idx != null ? meta.current_section_idx : null)) : null;
+    if (!figs.length && !sel && !showPage && secIdx == null) return null;
     var card = document.createElement('div'); card.className = 'asst-ctx-card';
+    if (secIdx != null) {
+      var sc = document.createElement('span'); sc.className = 'actx-page';
+      sc.textContent = '📖 正在看:' + (HOST.locLabel(secIdx) || ('第 ' + (secIdx + 1) + ' 节'));
+      sc.title = '点击跳到该章节';
+      sc.addEventListener('click', function () { try { HOST.goTo(secIdx); } catch (_) {} });
+      card.appendChild(sc);
+    }
     if (figs.length) {
       var row = document.createElement('div'); row.className = 'actx-thumbs';
       figs.forEach(function (f) {
@@ -1145,6 +1186,12 @@
       }
       s.title = page ? ('跳到第 ' + ((typeof window._dispPage === 'function') ? HOST.dispPage(page) : page) + ' 页') : '';
       s.addEventListener('click', function () {   // ③ 跳页后把这段选中在页上临时呼吸高亮(跨书整页跳走,不闪)
+        // EPUB 路径(无 page):选区锚(selection_anchor.section)/当前节 → host flashSelOnPage(跳节+呼吸高亮)
+        if (!page && secIdx != null && HOST.flashSelOnPage) {
+          var _ss = (meta.selection_anchor && meta.selection_anchor.section != null) ? meta.selection_anchor.section : secIdx;
+          try { HOST.flashSelOnPage(_ss, sel); } catch (_) {}
+          return;
+        }
         _jumpToCtx(bookRel, page);
         var curF = (typeof HOST.fileRel() !== 'undefined') ? HOST.fileRel() : '';
         if (page && (!bookRel || !curF || bookRel === curF)) _flashSelOnPage(page, sel);
@@ -1355,7 +1402,7 @@
     streaming = true; _setSendMode(true);
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
-    try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
+    try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
@@ -1705,7 +1752,7 @@
           if (m.role === 'user') {
             _lastQ = m.content || '';
             var uel = addMsg('asst-u', esc(m.content));
-            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}
+            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
           }
           else {
             var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text);

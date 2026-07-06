@@ -174,6 +174,7 @@
       if (!(t.closest && t.closest('.ep-msg.a, .asst-a, #result-content'))) return;
       var src = t.getAttribute('src') || '';
       if (!t.__proxied && /wikimedia\.org|wikipedia\.org/.test(src) && src.indexOf('/api/img-proxy') < 0) {
+        (window.__rcImgFail = window.__rcImgFail || {})[src] = 1;   // 记全局失败表:重渲新建的同图由 rcImgStabilize 直接换代理,不再先撞一次墙
         t.__proxied = 1; t.src = '/pdf/api/img-proxy?url=' + encodeURIComponent(src); return;   // iPad 直连维基常被挡 → 走服务器代理重试
       }
       t.__brk = 1; t.style.display = 'none';
@@ -181,6 +182,20 @@
       if (t.parentNode) t.parentNode.insertBefore(s, t);
     }, true);
   }
+  // 渲染时稳定图 src:全局失败表(__rcImgFail,上面错误钩子填)里的维基图直接换成代理 URL。
+  // 错误钩子只救"已插入且失败的那一个 img";重渲(流式收尾/历史回放)每次都新建 img 元素,
+  // 不在渲染时换 src 就会每张都先撞一次墙再走代理 → 由共享侧栏 renderMd 收尾时调用。
+  window.rcImgStabilize = function (root) {
+    try {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('img').forEach(function (im) {
+        var s = im.getAttribute('src') || '';
+        if (s && (window.__rcImgFail || {})[s] && s.indexOf('/api/img-proxy') < 0) {
+          im.__proxied = 1; im.src = '/pdf/api/img-proxy?url=' + encodeURIComponent(s);
+        }
+      });
+    } catch (e) {}
+  };
 
   if (!document.getElementById('rc-video-css')) {
     var s = document.createElement('style'); s.id = 'rc-video-css';
