@@ -1150,6 +1150,8 @@ def _esys_prompt(ctx):
         cur = None
     meta = {"book": ctx.get("book") or ctx.get("book_name"),
             "当前章节idx": cur, "共章节数": ctx.get("total_sections")}
+    if ctx.get("langs"):
+        meta["书语言"] = ctx.get("langs")   # M1:让助手知道用 en/ja 处理,不必猜(镜像 assistant.py:2308)
     meta = {k: v for k, v in meta.items() if v not in (None, "")}
     sel = A._clean_tag(ctx.get("selection"))
     sent = A._clean_tag(ctx.get("selection_sentence"))

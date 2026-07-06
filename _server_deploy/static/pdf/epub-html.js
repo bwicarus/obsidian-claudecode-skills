@@ -2656,10 +2656,15 @@
   });
 
   // ── 历史:开助手 pane 时回灌服务端保存的对话(跨设备续上;一次性 guard)──
+  function greet() {   // M10:空/清空后欢迎语(镜像 PDF greet();「这页」→「这一章」)
+    var am = document.createElement('div'); am.className = 'ep-msg a';
+    am.innerHTML = '我是这本书的阅读助手。试试:<br>· 这一章讲什么 / 总结这一章<br>· 翻译这段(先选中)<br>· 找讲XX的章跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>';
+    aiBody.appendChild(am);
+  }
   function loadHistory() {
     if (_histLoaded) return; _histLoaded = true;
     fetch('/pdf/api/epub-convo?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || !d.ok || !d.messages || !d.messages.length) return;
+      if (!d || !d.ok || !d.messages || !d.messages.length) { greet(); return; }
       aiBody.innerHTML = ''; chat = [];
       d.messages.forEach(function (m) {
         if (m.role === 'user') {
@@ -2938,6 +2943,7 @@
     if (_streaming) return;
     if (b.dataset.q === 'clear') {
       aiBody.innerHTML = ''; chat = []; _histLoaded = true;   // 别再回灌
+      greet();   // M10:清空后给欢迎语(镜像 PDF)
       reqJson('POST', '/pdf/api/epub-convo/clear', { file: FREL }, function () {}, function () {});
       return;
     }
@@ -4527,6 +4533,7 @@
       opts = opts || {}; var sel = opts.selection || {};
       return {
         file: FREL, book: (CFG && CFG.fileName) || '',
+        langs: bookLangsArr(),   // M1:书语言(en/ja…)→ 后端 meta「书语言」,AI 不必猜语言(镜像 PDF)
         current_section_idx: _curTopIdx, total_sections: COUNT, toc: TOC,
         selection: sel.sel || '', selection_sentence: sel.sent || '', selection_anchor: sel.anchor || undefined,
         figures: _epCollectFigures(),
