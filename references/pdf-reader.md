@@ -1197,3 +1197,27 @@ EPUB 开书跳书尾 bug 两轮修复(v2 前缀 / scrollRestoration=manual)后,�
 **顶栏/图标/旋转**
 - PDF `#header` 对齐 EPUB 规格(36px 按钮/15px 字/7px 圆角/safe-area);⭐🔍⚙ 与手写/便签/新建页统一 SF 线条 SVG(`svg.rc-tbi`,⚙ 复用 rc-sidedrawer 齿轮路径)。
 - 旋转保持宽度适应:`window._atFitWidth` 粘性意图(开书 true;仅 `_applyZoom` 置 false;`fitWidth()` 置 true);`_onOrientChange` 里 keepFit 时忽略该方向旧 scale 存档并 `_refitToWidth(true)`。EPUB:`#ep-content overflow-x:hidden` + resize 归零 scrollLeft。
+
+## §17 2026-07-06 后端结构拆分(五刀)——pdf_reader.py 域模块化
+
+pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部署时必须跟 pdf_reader.py 一起 cp 到 `/home/bwicarus/webapp/`**):
+
+| 模块 | 域 | 路由 | 注入依赖 |
+|---|---|---|---|
+| `reader_events.py` | SSE 实时事件总线 | `/api/reader-events` | 无(零业务依赖);`publish(kind,file,uid)` 供各域 import |
+| `html_reader.py` | 统一 HTML 阅读器 | `/html/view`、`/api/html-highlights` | safe_vault_path/obsidian_root/claude_dir |
+| `book_toc.py` | 书籍目录/AI 建目录/页偏移/provenance | `/api/toc`、`/api/page-offset`、`/api/build-toc(-status)` | +book_sha/assistant/reader_uid/job_set/jobs |
+| `grammar_reader.py` | 英语语法分析全域(spacy worker/analyze/stream/历史) | 8 条 `/api/grammar-*` | +SPACY_PY/SPACY_SCRIPT/_ai_call/_cstat/_spacy_available/_start_ai_stream |
+| `favorites_reader.py` | 收藏夹全域(CRUD/EPUB 物化/预建/PWA) | `/api/favorites`、`/api/fav-meta`、`/fav/open|view|manifest|icon` | 21 个(EPUB 域 8+userpages 域 5+常量+ink/chars/job) |
+
+**统一模式(后续再拆照抄)**:
+1. **机械抽取**:函数体从 pdf_reader.py 逐行原样搬(不重写),`@bp.route` 装饰器行剥掉→模块尾 `register_*()` 里 `bp.add_url_rule(rule, view_func, methods)` 挂同一个 bp → **endpoint 名不变**(view 函数名),前端/url_for 零感知。
+2. **同名显式注入**:模块头列占位 `_xxx = None` + 注释,`register_*(bp, *, ...)` 里 `global` 赋值——函数体引用名完全不变。共享**可变对象**(如 `_EPUB_OPF_CACHE` dict、`_INSPAGE_MUTEX` 锁)传引用,天然同一份(验证:`fav._X is pdf._X`)。
+3. **回导入**:块外仍在用的符号由 pdf_reader `from 模块 import ...`(在 register 调用**之后**,值已注入)——外部模块经 `pdf._effective_toc` 之类属性访问的全部照旧。
+4. **⚠ 注入顺序坑**:register 调用位置必须在**所有被注入符号定义之后**。`_job_set`/`_JOBS`(job 基建)和 `_ink_load` 定义在源文件靠后 → book_toc/favorites 的 register 接线不在原块位置,而在这些符号之后(原块位置只留指路注释)。pyflakes 会把 use-before-def 报成 undefined name——**每刀必跑 `python3 -m pyflakes`**。
+5. **验证套路**:ast.parse 双文件 → pyflakes 双文件 → test_client 全路由回路(测试键用完删 sidecar)→ 外部消费者普查(grep 其它 py 的 `pdf.X` 属性访问逐个 hasattr;templates url_for;scripts import)→ 部署 diff -q + restart + curl 302。
+6. **手术脚本坑**:python 行号手术**一律 0-based idx=行号-1**,每个刀口先 assert 锚点内容再动手;bash 改写文件后必须重新 Read 才能 Edit。
+
+**顺带修复**:pyflakes 抓出 4d475c7(体检清理)误删 `_FAV_WAIT_HTML` 定义留使用(收藏夹在建等待页 NameError)→ 从 c39a499 原样找回。教训:**删除"死代码"前 pyflakes 全文件跑一遍**,grep 单符号会漏字符串模板这类定义与使用距离远的对子。
+
+**拆分禁区(记账)**:vocab 域(5 段碎,含单词本 tab 夹在语法域中间)、`_pam_*` 页锚迁移框架(跨全部 sidecar 域)。挂账:rc-ink.js 墨迹引擎三份合并(pdf-tail/epub-html/rc-stickynote)。

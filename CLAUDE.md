@@ -294,7 +294,8 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 - `_server_deploy/static/nav.js` → 部署到 `/var/www/html/static/nav.js`（全站通用左侧导航 + per-user 链接持久化）
 
 **阅读器 / AI 助手 / 语音源码**（都在 git，同 webapp 部署对应文件 + restart）：
-- `_server_deploy/pdf_reader.py` → PDF **和** EPUB 阅读器后端总入口（`register_pdf_reader`，url_prefix `/pdf`）：`/pdf/`、`/pdf/epub/view`、`/pdf/fav/view`、`/api/reading-pos`、`/api/userpages`、`/api/pdf-insert-page`、`/api/favorites`、`/api/notes`、`/api/epub-*` 等
+- `_server_deploy/pdf_reader.py` → PDF **和** EPUB 阅读器后端总入口（`register_pdf_reader`，url_prefix `/pdf`）：`/pdf/`、`/pdf/epub/view`、`/pdf/fav/view`、`/api/reading-pos`、`/api/userpages`、`/api/pdf-insert-page`、`/api/notes`、`/api/epub-*` 等
+- **pdf_reader 拆分模块**（2026-07-06 结构拆分五刀，⚠ 部署时必须跟 pdf_reader.py 一起 cp 到 webapp）：`reader_events.py`（SSE 事件总线 `/api/reader-events`+`publish`）、`html_reader.py`（统一 HTML 阅读器 `/html/view`+html-highlights）、`book_toc.py`（书籍目录/AI 建目录/页偏移/章节 provenance）、`grammar_reader.py`（英语语法分析全域 8 路由+spacy 常驻 worker）、`favorites_reader.py`（收藏夹全域：CRUD/EPUB 物化/预建/PWA，6 路由）。模式统一：依赖经 `register_*(bp, …)` 同名显式注入（函数体机械原样搬，pyflakes 验零漂移）、路由 `add_url_rule` 挂同一个 bp（endpoint 名不变）、块外仍用的符号由 pdf_reader 回导入（如 `pdf._effective_toc` 供 assistant.py）；⚠ 注入 `_job_set`/`_ink_load` 等靠后定义的符号时，register 调用必须放它们定义之后
 - `_server_deploy/assistant.py` → PDF 侧栏 Copilot（沙盒 agent + 工具循环，`register_assistant`）
 - `_server_deploy/epub_assistant.py` → EPUB 侧栏助手 + **收藏集语境**分支（复用 assistant.py 骨架，section 级工具，独立对话历史命名空间）
 - `_server_deploy/voice.py` → 全站语音助手后端（`/api/voice/*`，Cloud STT + agent；架构见 memory `voice-assistant-arch`）
