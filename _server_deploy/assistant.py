@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import subprocess
 import sys
@@ -1197,9 +1198,11 @@ def _optimize_video_query(topic):
         prompt = (
             "用户在读书,想在 YouTube 找**讲解**下面这个主题的视频:\n「" + str(topic)[:200] + "」\n\n"
             "请给出**一个**最能搜到**高质量讲解视频**的 YouTube 搜索关键词。规则:\n"
-            "- 学术/科学/技术/机制/数学类主题 → **优先英文**(英文讲解视频质量远高,如物理/生物/数学的机制动画),"
+            "- **某国专属的历史/文化/料理/地理/人物/传统**(如日本史、法国料理、意大利艺术)→ **用该国母语搜**"
+            "(日→日文、法→法文、德→德文…),母语频道讲本国题材质量与数量都远高;\n"
+            "- 学术/科学/技术/机制/数学类(不特定于某国)→ **优先英文**(英文讲解视频质量远高,如物理/生物/数学的机制动画),"
             "加上 explained / animation / lecture / how it works 之类教学向词;\n"
-            "- 通俗/文化/历史/中文特定主题 → 用中文,加 讲解/原理/教程 之类;\n"
+            "- 其它通俗/中文特定主题 → 用中文,加 讲解/原理/教程 之类;\n"
             "- 只保留**核心概念**,别照抄整句、别加书名/章节号/作者名。\n"
             "**只输出这一个关键词本身(一行),不要引号、不要解释、不要给多个选项。**"
         )
@@ -2559,10 +2562,28 @@ def _format_history(history, offset=0):
     return ("【最近对话】\n" + "\n".join(out) + "\n") if out else ""
 
 
+_TOOL_START_RE = re.compile(r'\{\s*"tool"')
+
+
+def _display_prefix(acc):
+    """流式:accumulated 文本里**工具调用 JSON 起点之前**的可显示散文(工具 JSON 不吐给前端)。
+    模型有时在工具 JSON 前先写几句(如"好的,我来找视频")→ 只显示到 {"tool" 前,JSON 藏起来由 _parse_tool 执行;
+    整串以 { 开头但 tool 键还没成形 → 返回 ''(全隐,等成形/收尾)。用户报的『{}泄漏到流式输出』根治。"""
+    if not acc:
+        return acc
+    m = _TOOL_START_RE.search(acc)
+    if m is not None:
+        return acc[:m.start()]
+    if acc.lstrip().startswith("{"):
+        return ""
+    return acc
+
+
 def _parse_tool(raw):
     """开头是 {"tool":...} JSON → 工具调用;否则 None(当作给用户的回答)。
     用 raw_decode 只解析**开头那个 JSON 对象**,容忍尾部多余内容(模型偶尔在工具 JSON 后跟了
     [[FOLLOWUP]]/解释 → 整串 json.loads 会失败,导致工具 JSON 被当回答显示、工具不执行)。容忍 ```json 围栏。"""
+    import re
     s = (raw or "").strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
@@ -2570,7 +2591,12 @@ def _parse_tool(raw):
             s = s[:-3]
         s = s.strip()
     if not s.startswith("{"):
-        return None
+        # 前导散文容错:模型偶尔在工具 JSON 前先写几句(如"好的,我来找视频")→ 从第一个 {"tool" 处起解析,
+        #   否则整串被当回答显示、工具不执行(用户报的『{}泄漏到输出且没执行』根因)。
+        m = re.search(r'\{\s*"tool"', s)
+        if not m:
+            return None
+        s = s[m.start():]
     # 字面控制字符(模型把多行 OCR 文本照抄进字符串值、没转义换行 → JSON 非法解析失败 → 工具不执行)→ 换空格。
     # 合法 JSON 的控制字符必是 \n/\uXXXX 多字符转义,绝不会是字面 0x00-0x1f,故这步对合法 JSON 是 no-op。
     import re
@@ -3035,12 +3061,13 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
             _last_emit = 0.0
             for kind, val in _send_stream(p, content, timeout=_round_to):
                 if kind == "delta":
-                    # tool 调用是裸 JSON(以 { 开头)→ 不流式;最终回答是文字 → 逐字吐 answer(前端边接边渲染)
-                    if val and not val.lstrip().startswith("{"):
+                    # 只吐**工具 JSON 之前**的散文;工具调用 JSON(含前导散文后的)不流式,由 _parse_tool 执行(末尾 3116 补完整 answer)
+                    disp = _display_prefix(val)
+                    if disp.strip():
                         now = time.time()
                         if now - _last_emit > 0.1:   # 节流 ~100ms,减 SSE/重渲(末尾 answer 会补完整)
                             _last_emit = now
-                            yield {"event": "answer", "data": val}
+                            yield {"event": "answer", "data": disp}
                 else:
                     raw = val
             if not raw:
@@ -3224,16 +3251,18 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
             if time.time() - _t_start > 900.0:   # 放宽:多步任务(整章高亮)要跑很久;后台线程跑、写操作即时落盘,到点不丢已完成的
                 yield {"event": "answer", "data": "(这个任务很大,先做到这——已完成的部分都已保存;想接着干就再说一句『继续处理后面的』)"}
                 break
-            raw_parts = []; _last_emit = 0.0; err = None
+            raw_parts = []; _last_emit = 0.0; _emit_len = 0; err = None
             for kind, val in _gemini_stream(system, contents, model=model, think=think):
                 if kind == "delta":
                     raw_parts.append(val)
-                    acc = "".join(raw_parts).lstrip()
-                    if acc and not acc.startswith("{"):   # 工具调用是裸 JSON(以 { 开头)不流式;回答逐字吐
+                    # 只吐**工具 JSON 之前**的散文增量;工具调用 JSON(含前导散文后的)一出现 disp 就冻结,不再吐(末尾补完整 answer)
+                    disp = _display_prefix("".join(raw_parts))
+                    if len(disp) > _emit_len:
                         now = time.time()
                         if now - _last_emit > 0.1:
                             _last_emit = now
-                            yield {"event": "answer", "data": val}
+                            yield {"event": "answer", "data": disp[_emit_len:]}
+                            _emit_len = len(disp)
                 elif kind == "err":
                     err = val
                 elif kind == "tier":

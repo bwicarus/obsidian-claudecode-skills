@@ -1350,11 +1350,12 @@ def _eagent_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
             last_emit = 0.0
             for kind, val in A._send_stream(p, content, timeout=round_to):
                 if kind == "delta":
-                    if val and not val.lstrip().startswith("{"):
+                    disp = A._display_prefix(val)   # 只吐工具 JSON 之前的散文;工具调用 JSON 不流式(含前导散文后的),由 _parse_tool 执行
+                    if disp.strip():
                         now = time.time()
                         if now - last_emit > 0.1:
                             last_emit = now
-                            yield {"event": "answer", "data": val}
+                            yield {"event": "answer", "data": disp}
                 else:
                     raw = val
             if not raw:
@@ -1435,13 +1436,13 @@ def _eagent_gemini(message, ctx, history, variant, depth, uid):
             for kind, val in A._gemini_stream(system, contents, model=model, think=think):
                 if kind == "delta":
                     raw_parts.append(val)
-                    acc = "".join(raw_parts).lstrip()
-                    if acc and not acc.startswith("{"):
+                    # 只吐**工具 JSON 之前**的散文(累计,replace 语义);工具调用 JSON 一出现 disp 冻结不再吐(末尾补完整 answer)
+                    disp = A._display_prefix("".join(raw_parts))
+                    if disp.strip():
                         now = time.time()
                         if now - last_emit > 0.1:
                             last_emit = now
-                            # 发**累计**文本(replace 语义,跟 Claude 路径 _send_stream 一致)→ 前端 answer 事件统一「整段替换」
-                            yield {"event": "answer", "data": "".join(raw_parts)}
+                            yield {"event": "answer", "data": disp}
                 elif kind == "err":
                     err = val
                 elif kind == "tier":
