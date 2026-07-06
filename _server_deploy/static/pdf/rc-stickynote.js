@@ -191,8 +191,10 @@
       '.rc-note-rs-tl{position:absolute;left:-11px;top:-11px;width:26px;height:26px;display:none;z-index:6;cursor:nwse-resize;touch-action:none;border-radius:50%;background:rgba(255,255,255,.92);border:1px solid rgba(0,0,0,.28);box-shadow:0 2px 6px rgba(0,0,0,.3)}',
       '.rc-note.rc-note-editing .rc-note-rs-tl{display:block}',
       '.rc-note-rs-tl::after{content:"";position:absolute;left:7px;top:7px;width:9px;height:9px;border-left:2.2px solid rgba(0,0,0,.5);border-top:2.2px solid rgba(0,0,0,.5);border-radius:2px}',
-      // 视频便签:隐藏工具条的笔/橡皮/视频按钮(一便签只一个视频、有视频不手写);视频区自己裁圆角
+      // 视频便签:工具条的笔/橡皮/视频按钮**默认不显示**(但画笔功能仍在:Apple Pencil / 手指双击切橡皮照常可画,笔画画在文字备注区);视频区自己裁圆角
       '.rc-note.rc-note-hasvideo .rc-note-tool{display:none}',
+      // ⚠ 折叠优先:hasvideo 的 body{display:flex} 会盖过 collapsed 的 display:none → 视频便签折不了。加更高特异性规则修回
+      '.rc-note.rc-note-hasvideo.rc-note-collapsed .rc-note-body{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
       '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
       // 暗底自动对比色(applyColor 按便签本色亮度 toggle .rc-note-darkbg):文字/placeholder/光标 →
@@ -207,7 +209,7 @@
       '.rc-note-video{display:none}',
       '.rc-note.rc-note-hasvideo .rc-note-body{display:flex;flex-direction:column;padding:0}',
       '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none}',
-      '.rc-note.rc-note-hasvideo .rc-note-ink{display:none}',
+      // 手写层保留(用户要:视频便签也能画笔,只是不显示笔按钮)——canvas 铺满 body 叠在文字备注区上,视频 iframe 区会吞笔无妨
       '.rc-note.rc-note-hasvideo .rc-note-text{position:relative;left:auto;top:auto;width:100%;height:auto;flex:1;min-height:30px;font-size:13px;padding:6px 9px;background:transparent}',
       '.rc-vid-embed{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer}',
       '.rc-vid-embed img{width:100%;height:100%;object-fit:cover;display:block}',
@@ -404,7 +406,19 @@
     });
     box.querySelector('.rc-vc-rm').addEventListener('click', function (e) {
       e.stopPropagation(); e.preventDefault();
-      if (!window.confirm('移除这个视频?(便签变回普通便签)')) return;
+      // 便签只有视频(无文字、无手写)→ 移除视频 = 删整张便签;否则只变回普通便签(留文字/手写)
+      var onlyVideo = !(ctl.note.text || '').trim() && !(ctl.note.strokes && ctl.note.strokes.length);
+      if (onlyVideo) {
+        if (!window.confirm('这张便签只有视频,移除视频将**删除整张便签**,确定?')) return;
+        fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
+        try { exitEdit(); } catch (e2) {}
+        try { ctl.root.remove(); } catch (e2) {}
+        delete ctls[ctl.note.id];
+        for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
+        toastMsg('🗑 视频便签已删除');
+        return;
+      }
+      if (!window.confirm('移除这个视频?(便签变回普通便签,保留文字/手写)')) return;
       ctl.note.video = null; patchNote(ctl.note, { video: null }); renderNoteVideo(ctl);
     });
   }
