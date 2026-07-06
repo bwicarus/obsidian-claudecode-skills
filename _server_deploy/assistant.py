@@ -2376,9 +2376,9 @@ def _sys_prompt(ctx):
     #   会答偏(如把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频/配图/拟搜索词都紧扣当前注意力。限长防 prompt 膨胀。
     mp = ctx.get("media_prefer") or {}
     if mp.get("image"):
-        learn_bits.append("★用户开了「配图」偏好:内容适合可视化时优先调 search_image 配真实图片(纯推导/抽象/基础常识别硬配)。")
+        learn_bits.append("★用户开了「配图」偏好:内容适合配图时**直接调 search_image 配真实图片,别问『要不要配图』**(他已用开关表明要图);只有纯推导/抽象/基础常识才跳过。")
     if mp.get("video"):
-        learn_bits.append("★用户开了「视频」偏好:适合时优先调 search_video 找讲解视频(不适合别硬找)。")
+        learn_bits.append("★用户开了「视频」偏好:内容适合视频讲解时**直接调 search_video 找了放进对话,别问『要不要我找视频』**(他已用开关表明要视频);只有完全不适合视频才跳过。")
     vtext = _clean_tag(ctx.get("visible_text") or "")
     if vtext:
         learn_bits.append("★用户此刻**屏幕上正在看的部分**(注意力焦点;整节/整章其余内容只是背景。回答、找视频/"

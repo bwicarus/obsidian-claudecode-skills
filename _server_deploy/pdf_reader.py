@@ -608,25 +608,49 @@ def pdf_api_ping():
 
 @bp.route("/api/img-proxy")
 def pdf_api_img_proxy():
-    """图片代理:iPad 直连 Wikipedia 常被网络/防盗链挡 → AI 配图(search_image 的维基图)由服务器下载转发,
-    经 Tailscale 到 iPad 稳定显示。限 wikimedia 域(防 SSRF);前端 img onerror 时 fallback 到这。"""
+    """图片代理:服务器下载维基图转发给 iPad(经 Tailscale 稳定)。限 wikimedia 域(防 SSRF)。
+    ★关键:AI 拼维基 thumb URL 时常**文件名对但 hash 目录算错**(hash=文件名 MD5 前缀,LLM 算不了)→ 404。
+      本代理在 404 时从文件名查 Wikimedia API 拿**正确 thumburl** 重取 → 自动修好 AI 的 hash 错误。前端 img onerror fallback 到这。"""
     url = (request.args.get("url") or "").strip()
     if not url.startswith(("https://upload.wikimedia.org/", "https://commons.wikimedia.org/",
                            "https://upload.wikipedia.org/")):
         abort(403)
-    try:
-        import requests as _rq
-        rr = _rq.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 (reader-img-proxy)"})
-        if rr.status_code != 200 or not rr.content:
-            abort(502)
-        ct = rr.headers.get("Content-Type", "image/png")
-        if not ct.startswith("image/"):
-            abort(415)
-        resp = Response(rr.content, mimetype=ct)
-        resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
-        return resp
-    except Exception:
+    import requests as _rq
+    import urllib.parse as _up
+    import re as _re
+    UA = {"User-Agent": "Mozilla/5.0 (reader-img-proxy)"}
+
+    def _fetch(u):
+        try:
+            return _rq.get(u, timeout=12, headers=UA)
+        except Exception:
+            return None
+
+    rr = _fetch(url)
+    if (rr is None or rr.status_code == 404) and "/thumb/" in url:
+        m = _re.search(r"/thumb/[0-9a-fA-F]/[0-9a-fA-F]{2}/([^/]+)/(\d+)px-", url)
+        if m:
+            fname = _up.unquote(m.group(1))
+            w = m.group(2)
+            try:
+                api = ("https://commons.wikimedia.org/w/api.php?action=query&titles=File:"
+                       + _up.quote(fname) + "&prop=imageinfo&iiprop=url&iiurlwidth=" + w + "&format=json")
+                j = _rq.get(api, timeout=10, headers=UA).json()
+                for _p in ((j.get("query") or {}).get("pages") or {}).values():
+                    tu = ((_p.get("imageinfo") or [{}])[0]).get("thumburl")
+                    if tu:
+                        rr = _fetch(tu)
+                        break
+            except Exception:
+                pass
+    if rr is None or rr.status_code != 200 or not rr.content:
         abort(502)
+    ct = rr.headers.get("Content-Type", "image/png")
+    if not ct.startswith("image/"):
+        abort(415)
+    resp = Response(rr.content, mimetype=ct)
+    resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    return resp
 
 
 @bp.route("/api/book-meta")

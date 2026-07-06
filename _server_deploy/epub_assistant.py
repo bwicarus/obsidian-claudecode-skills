@@ -1213,9 +1213,9 @@ def _esys_prompt(ctx):
     mp = ctx.get("media_prefer") or {}
     prefer_line = ""
     if mp.get("image"):
-        prefer_line += "\n★用户开了「配图」偏好:内容适合可视化时优先 search_image 配真实图(纯推导/抽象/基础常识别硬配)。"
+        prefer_line += "\n★用户开了「配图」偏好:内容适合配图时**直接调 search_image 配真实图,别问『要不要配图』**(他已用开关表明要图);只有纯推导/抽象/基础常识才跳过。"
     if mp.get("video"):
-        prefer_line += "\n★用户开了「视频」偏好:适合时优先 search_video 找讲解视频(不适合别硬找)。"
+        prefer_line += "\n★用户开了「视频」偏好:内容适合视频讲解时**直接调 search_video 找了放进对话,别问『要不要我找视频』**(他已用开关表明要视频);只有完全不适合视频(纯符号推导)才跳过。"
     prefer_line += "\n★**绝对禁止编造图片链接**:![](url) 的 url 只能是 search_image 刚返回的 image_url,别凭记忆写维基/教科书 URL。"
     return (_ESYS_RULES + f"\n\n【可用工具】\n{cat}\n\n【当前章节】"
             + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line + focus_line + prefer_line
