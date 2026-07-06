@@ -4536,6 +4536,7 @@
       return {
         file: FREL, book: (CFG && CFG.fileName) || '',
         langs: bookLangsArr(),   // M1:书语言(en/ja…)→ 后端 meta「书语言」,AI 不必猜语言(镜像 PDF)
+        visible_vocab: (window.__lastVocab || []).map(function (v) { return v.lemma; }).filter(Boolean).slice(0, 50),   // M2:本页下划线生词(镜像 PDF 05-nav:446)
         current_section_idx: _curTopIdx, total_sections: COUNT, toc: TOC,
         selection: sel.sel || '', selection_sentence: sel.sent || '', selection_anchor: sel.anchor || undefined,
         figures: _epCollectFigures(),

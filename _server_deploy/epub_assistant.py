@@ -1223,8 +1223,14 @@ def _esys_prompt(ctx):
     if mp.get("video"):
         prefer_line += "\n★用户开了「视频」偏好:内容适合视频讲解时**直接调 search_video 找了放进对话,别问『要不要我找视频』**(他已用开关表明要视频);只有完全不适合视频(纯符号推导)才跳过。"
     prefer_line += "\n★**绝对禁止编造图片链接**:![](url) 的 url 只能是 search_image 刚返回的 image_url,别凭记忆写维基/教科书 URL。"
+    vocab_line = ""   # M2:本章页面下划线的『还没掌握』生词(镜像 assistant.py:2369)
+    vocab = ctx.get("visible_vocab") or []
+    if vocab:
+        vv = "、".join(A._clean_tag(w) for w in vocab[:30] if w)
+        if vv:
+            vocab_line = f"\n本章『还没掌握』的生词(页面下划线词):{vv}"
     return (_ESYS_RULES + f"\n\n【可用工具】\n{cat}\n\n【当前章节】"
-            + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line + focus_line + prefer_line
+            + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line + focus_line + vocab_line + prefer_line
             + _fav_sys_block(ctx, cur))
 
 
