@@ -444,7 +444,7 @@ def _convo_append(uid, role, content, meta=None):
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos"):
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards"):
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -3364,6 +3364,10 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
                             vs = (a.get("args") or [None])[0]
                             if isinstance(vs, list) and vs:
                                 job.setdefault("videos", []).extend(vs)
+                elif ev["event"] == "undo":   # H2:高亮撤销卡 → 随回合落库,刷新回放(undo_id 存 state/assistant-undo-log.json 持久,80 条内有效)
+                    d = ev["data"] or {}
+                    if d.get("undo_id"):
+                        job.setdefault("undo_cards", []).append({"undo_id": d["undo_id"], "label": d.get("label"), "page": d.get("page")})
     except Exception as e:
         with job["lock"]:
             job["events"].append({"event": "error", "data": str(e)[:160]})
@@ -3377,6 +3381,8 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
                 _meta["trace"] = job["trace"]
             if job.get("videos"):
                 _meta["videos"] = job["videos"]
+            if job.get("undo_cards"):
+                _meta["undo_cards"] = job["undo_cards"]   # H2:高亮撤销卡持久化
             _convo_append(uid, "assistant", str(job["answer"])[:1500], _meta or None)
         def _cleanup():
             with _chat_jobs_lock:

@@ -9784,6 +9784,11 @@ async function _connProbe() {
             try { _renderFollowups(el, _pf.followups); } catch (_) {}
             try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
             if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (_) {} }   // 视频卡刷新回放(镜像 EPUB 阶段C)
+            if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
+              if (!u || !u.undo_id) return;
+              var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
+              addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+            });
           }
         });
         // 进面板自动滚到最新(最下方):渲完滚一次,再隔 250ms 补一次(图/MathJax 异步撑高后位置会漂)
