@@ -94,3 +94,10 @@
 **域差异/已对齐(不改)**:read_source_page(收藏集专属)· page↔section 命名 · see_page 省额度 · 落库位置死字段 · from/page_type 首连 · 收藏集 NotebookLM · rc-video ui_shared 门控(仅 legacy)
 
 > 已修/独立修过的相关项:快捷栏共享 `rcBuildQuickBar`、视频历史回放、PDF visible_text 采集、工具 JSON 流式不泄漏+带前导散文也执行、找视频某国母语。
+
+## ②b 进展(2026-07-07):PDF 侧栏已搬进共享层,flag 门控
+
+- `reader.src/25-assistant.js` 整份侧栏(1300 行)机械搬进 `rc-assistant.js` 的 `RC.assistant.mountPdfSidebar()`:裸全局(md/_toast/_qhFmtTime/loadAllHighlights/renderHighlightsOnPage/renderPhraseHl/_removePhraseHighlight/_charsRangeToText/_charRangeToPtRects/openGrammarPanel)顶部从 `PdfAdapter._host.asst` 别名;live 值 FILE_REL→fileRel()/pdfDoc→pdfNumPages()/_activePhraseHl 读→activePhraseHl()·写→setActivePhraseHl();window.* 原样;本地函数照搬。
+- **门控 `?asst=shared`**:默认无 flag=老 25-assistant(零风险);flag=老版自退、27-rc-adapter 在 bind 后调 mountPdfSidebar。
+- 对抗验证(general-purpose agent)**零遗漏裸全局**,node --check 过,已部署(默认不变)。
+- **待办**:浏览器 `?asst=shared` 跑一轮全功能确认 = 老版 → 翻默认(25-assistant 的 flag 逻辑反转/直接退役)+ 27-rc-adapter 无条件 mount。然后 ③ EPUB 提供 `asst` 袋复用这份 mountPdfSidebar(或抽成 mountSidebar(host))。
