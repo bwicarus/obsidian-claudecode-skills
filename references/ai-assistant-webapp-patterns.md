@@ -341,3 +341,14 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 ---
 
 > 一句话总结这套东西和"demo 级 AI 网页"的区别:**把"生成"当成一个独立于连接的、会落库的后台任务,网络层和渲染层都按"随时会断/随时要重来"设计。** 其余都是细节。
+
+## 追加:助手「搜索视频」+ 对话内可播放视频卡(2026-07-06)
+
+阅读器助手加了 `search_video` 工具,能在对话框里内嵌播放 YouTube。可迁移要点:
+
+- **搜索后端**(`youtube_search.py`):YouTube Data API v3 `search.list`,`videoEmbeddable=true`(**关键**:否则内嵌 iframe 会「视频不可用」)。search.list=100 units/次、项目每天 10k → **必须缓存**(query→结果,30 天),否则每天只够 100 次搜索。配额跟其它 youtube 用途(如视频轮播)共享同一池。
+- **工具返回分层**:给 agent 的 `videos` 只留 title/channel(省 token,别把缩略图 URL/id 塞进模型上下文);完整数据(id/thumb)走 `client_action:{fn:'renderVideos', args:[vids]}` 给前端渲染。agent 只需说一句「给你找到这些」,别复述链接(卡片已显示)。
+- **内嵌播放 = lite-embed**(YouTube 官方推荐):先渲染缩略图 + ▶,**点击才**换成 `youtube-nocookie.com/embed/<id>?autoplay=1` iframe。省资源、快、不预连一堆第三方。
+- **CSP**:内嵌第三方 iframe 只需站点**没有** `Content-Security-Policy: frame-src` 限制;`X-Frame-Options: SAMEORIGIN` 只限**本站被别人嵌**,不限本站嵌别人。
+- **流式覆盖坑**:视频卡必须插在助手气泡**外**(sibling,`host.parentNode.insertBefore(wrap, host.nextSibling)`)——气泡在流式生成时 `innerHTML` 会被反复覆盖,插内部会被清掉。
+- **去重**:`client_action` 可能经「实时 actions 事件」+「收尾 client_actions」两条路径都触发,前端按视频 id 组签名去重。
