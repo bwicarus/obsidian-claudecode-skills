@@ -84,9 +84,9 @@
 - ✅ M6 make_note 蓝色回链高亮 + 无选中回退整章(EPUB)
 - ✅ M7 find_highlights 支持 sections 列表 + from/to 区间(EPUB)
 - ⬜ M8 用户气泡带入图缩略图不落库不回放(EPUB `figures` 白名单+回放)
-- ⬜ M9 高亮列表卡删除后不可恢复(PDF 缺重做,抄 EPUB)
+- ✅ M9 高亮列表卡删除后「↪重做」(PDF,对齐 EPUB)
 - ✅ M10 空/清空后欢迎语 greet() EPUB
-- ⬜ M11 页面级 see_ink(gated:先确认 EPUB 正文有无自由墨层)
+- ⬜ M11 页面级 see_ink(EPUB 正文**有**自由墨层 _epInk/api/epub-ink → 可做;但需 H3 的栅格化管线,与 H3 合并做)
 
 **LOW**(快改批;✅ L3/L4/L5 已修)
 - ⬜ L1 see_figure 描述漏 {index?}(PDF 文案)· L2 公式收尾句(EPUB 已近似)· L3 tool-done 前端切「思考中」(PDF)· L4 gemini-paid 兜底 showNotice(EPUB)· L5 🗑清空流式守卫(PDF)· L6 空输入分流『讲讲这个便签』(EPUB)· L7 便签 chip 缩略图点开大图(EPUB)· L8 追问/反馈错峰淡入(EPUB,可收进 rc-assistant)· L9 focus_sel 独立通道(可仅登记)· L10 历史「选中」精确锚(PDF)· L11 prewarm(off)(EPUB)· L12 删冗余本地 chat[](EPUB)
