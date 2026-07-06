@@ -499,32 +499,65 @@
   //   {el, left, top, anchor?} —— left/top 为容器内**像素**(PDF=x·clientWidth/y·clientHeight,行为等价旧 %;
   //   EPUB=内容锚 off→字符 rect→section 内像素+dx/dy);anchor 字段=host 懒迁移升级后的新锚(旧 x/y 比例锚 →
   //   内容锚),组件负责 PATCH 落库。旧契约({el,w,h} 无 left/top)兼容:组件退回自算 x/y 百分比。
-  // ─────────────────────────── 展开态置顶浮层(portal)───────────────────────────
+  // ─────────────────────────── 展开态置顶浮层(portal 到滚动容器内的叠加层)───────────────────────────
   // 根因:PDF 单页/连续缩放靠祖先 CSS zoom 撑大,zoom≠1 在 Chrome/Safari 造层叠上下文,把 absolute-in-page-wrap
-  //   的便签困死其中 → z-index 再高也冲不出侧栏(120)。解法=展开时把便签整体搬到 body 级 #rc-note-portal
-  //   (position:fixed,z-index 190:高过两侧栏 120/把手 130,低于模态遮罩 200/210),用 fixed 贴回当前屏幕位置,
-  //   彻底逃出所有被困上下文/overflow 裁剪。展开态=fixed 浮层(不跟滚,规避「fixed+JS 跟滚」抖动);折叠即回内容锚。
-  var _portalEl = null;
-  function portalLayer() {
-    if (_portalEl && _portalEl.isConnected) return _portalEl;
-    _portalEl = document.getElementById('rc-note-portal');
-    if (!_portalEl) {
-      _portalEl = document.createElement('div');
-      _portalEl.id = 'rc-note-portal';
-      _portalEl.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:190;pointer-events:none';
-      document.body.appendChild(_portalEl);
+  //   的便签困死其中 → z-index 再高也冲不出侧栏(120)。
+  // 解法:展开时把便签搬到「滚动容器(PDF #main / EPUB 滚动祖先)内部」的叠加层 .rc-note-overlay
+  //   (position:absolute,z-index 190:#main 非层叠上下文→根上下文里盖过侧栏 120;低于模态遮罩 200/210)。
+  //   便签在叠加层里 absolute 定位 → 随容器**原生滚动**(零 JS 跟滚抖动),又因叠加层不在被 zoom 的 page-container 内
+  //   而逃出层叠陷阱。page-wrap 内留 0×0 占位:reflow/缩放/侧栏开关后 repositionPortaled 读占位屏幕位重算便签坐标
+  //   (原生滚动不需此步,故不绑 scroll)。折叠即回内容锚。
+  function scrollAncestor(el) {
+    for (var p = el && el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      var s; try { s = getComputedStyle(p); } catch (e) { continue; }
+      if (/(auto|scroll|overlay)/.test((s.overflowY || '') + ' ' + (s.overflow || ''))) return p;
     }
-    return _portalEl;
+    return document.scrollingElement || document.documentElement;
+  }
+  function overlayFor(scrollEl) {
+    if (!scrollEl) return null;
+    if (scrollEl.__rcNoteOverlay && scrollEl.__rcNoteOverlay.isConnected) return scrollEl.__rcNoteOverlay;
+    try { if (getComputedStyle(scrollEl).position === 'static') scrollEl.style.position = 'relative'; } catch (e) {}   // abs 子锚到它
+    var ov = document.createElement('div');
+    ov.className = 'rc-note-overlay';
+    ov.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:190;pointer-events:none';
+    scrollEl.appendChild(ov);
+    scrollEl.__rcNoteOverlay = ov;
+    return ov;
+  }
+  // 屏幕坐标 → 滚动容器内容坐标(叠加层里 absolute 定位用;含 border 偏移 clientLeft/Top)
+  function _contentXY(scrollEl, screenLeft, screenTop) {
+    var r = scrollEl.getBoundingClientRect();
+    return { x: Math.round(screenLeft - r.left - scrollEl.clientLeft + scrollEl.scrollLeft),
+             y: Math.round(screenTop - r.top - scrollEl.clientTop + scrollEl.scrollTop) };
+  }
+  // 在 note 当前锚容器里补一个 0×0 占位(供 repositionPortaled 读位;页容器重渲被冲掉时也用它补挂)
+  function attachPlaceholder(ctl) {
+    if (ctl._ph) { try { ctl._ph.remove(); } catch (e) {} ctl._ph = null; }
+    var m = null; try { m = O.mount(ctl.note.anchor); } catch (e) {}
+    if (!m || !m.el) return;
+    var a = ctl.note.anchor || {};
+    var l = (typeof m.left === 'number') ? m.left + 'px' : ((Math.max(0, Math.min(1, a.x || 0)) * 100) + '%');
+    var t = (typeof m.top === 'number') ? m.top + 'px' : ((Math.max(0, Math.min(1, a.y || 0)) * 100) + '%');
+    var ph = document.createElement('div');
+    ph.style.cssText = 'position:absolute;width:0;height:0;pointer-events:none;left:' + l + ';top:' + t;
+    m.el.appendChild(ph);
+    ctl._ph = ph; ctl._scrollEl = scrollAncestor(m.el);
   }
   function portalIn(ctl) {
     if (!ctl || ctl.portaled || ctl.note.collapsed || !ctl.root.isConnected) return;
-    var r = ctl.root.getBoundingClientRect();
-    if (!r.width && !r.height) return;   // 不可见(未布局/滚出视口)→ 不 portal(避免 fixed 到屏外)
-    ctl.portaled = true;
-    portalLayer().appendChild(ctl.root);   // 脱离被困上下文;fixed 子相对视口定位(portal 无 transform)
-    ctl.root.style.position = 'fixed';
-    ctl.root.style.left = Math.round(r.left) + 'px';
-    ctl.root.style.top = Math.round(r.top) + 'px';
+    var home = ctl.root.parentElement;
+    var scrollEl = scrollAncestor(home);
+    var ov = overlayFor(scrollEl);
+    if (!ov) return;
+    var noteRect = ctl.root.getBoundingClientRect();
+    if (!noteRect.width && !noteRect.height) return;   // 不可见 → 不 portal
+    attachPlaceholder(ctl);   // 先在 page-wrap 留占位(读得到锚的真实屏幕位,含缩放)
+    ctl.portaled = true; ctl._scrollEl = scrollEl;
+    var c = _contentXY(scrollEl, noteRect.left, noteRect.top);
+    ov.appendChild(ctl.root);   // 搬进滚动容器叠加层 → 随容器原生滚动 + 逃出 zoom 陷阱
+    ctl.root.style.position = 'absolute';
+    ctl.root.style.left = c.x + 'px'; ctl.root.style.top = c.y + 'px';
     ctl.root.classList.add('rc-note-portaled');
   }
   function portalOut(ctl) {
@@ -532,11 +565,25 @@
     ctl.portaled = false;
     ctl.root.classList.remove('rc-note-portaled');
     ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+    if (ctl._ph) { try { ctl._ph.remove(); } catch (e) {} ctl._ph = null; }
+    ctl._scrollEl = null;
     try { ensureMounted(ctl.note); } catch (e) {}   // 回内容锚(容器没了→卸下待 mountPending 补挂)
+  }
+  // reflow/缩放/侧栏开关后:portaled 便签读占位当前屏幕位 → 重算叠加层坐标
+  function repositionPortaled() {
+    for (var id in ctls) {
+      var ctl = ctls[id];
+      if (!ctl || !ctl.portaled || !ctl._scrollEl) continue;
+      if (!ctl._ph || !ctl._ph.isConnected) { attachPlaceholder(ctl); }   // 页重渲冲掉占位 → 在新容器补挂
+      if (!ctl._ph || !ctl._ph.isConnected) continue;   // 锚页未挂载(滚出) → 保持原坐标,展开浮层不消失
+      var pr = ctl._ph.getBoundingClientRect();
+      var c = _contentXY(ctl._scrollEl, pr.left, pr.top);
+      ctl.root.style.left = c.x + 'px'; ctl.root.style.top = c.y + 'px';
+    }
   }
   function ensureMounted(note) {
     var ctlP = ctls[note.id];
-    if (ctlP && ctlP.portaled) return true;   // 展开态在顶层浮层:重定位/重挂交给 portal,不回插内容容器
+    if (ctlP && ctlP.portaled) return true;   // 展开态在叠加层:重定位/重挂交给 portal(repositionPortaled),不回插内容容器
     var m = null;
     try { m = O.mount(note.anchor); } catch (e) {}
     var ctl = ctls[note.id];
@@ -566,9 +613,13 @@
   function mountAll() {
     if (!O) return;
     for (var i = 0; i < notes.length; i++) ensureMounted(notes[i]);
+    repositionPortaled();   // 展开态浮层便签:reflow/缩放/侧栏开关后按 page-wrap 占位重算叠加层坐标(原生滚动不需)
   }
   function removeAllEls() {
-    for (var id in ctls) { try { ctls[id].root.remove(); } catch (e) {} }
+    for (var id in ctls) {
+      try { ctls[id].root.remove(); } catch (e) {}
+      try { if (ctls[id]._ph) ctls[id]._ph.remove(); } catch (e2) {}   // 清占位,防叠加层/页容器残留孤儿
+    }
     ctls = {};
   }
   function syncCtl(ctl) {
@@ -732,9 +783,10 @@
     if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
       ctl.portaled = false; ctl.root.classList.remove('rc-note-portaled');
       ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+      if (ctl._ph) { try { ctl._ph.remove(); } catch (e) {} ctl._ph = null; }
     }
     ensureMounted(ctl.note);   // 跨页/跨章 → 换容器重挂 + 新锚绝对定位
-    if (wasPortaled && !ctl.note.collapsed) portalIn(ctl);   // 回置顶浮层(落点新位置)
+    if (wasPortaled && !ctl.note.collapsed) portalIn(ctl);   // 回置顶浮层(落点新位置,重建占位)
   }
   // ─────────────────────────── EDIT 编辑模式(长按便签任意部分,handle/body 同一入口)───────────────────────────
   // 同时呈现:🗑 + 色板工具条 + 左上/右下缩放手柄 + handle 拖拽移动;移动/缩放/换色可连续操作不自动退出。
@@ -909,10 +961,11 @@
         }
       }
     }
-    if (g.ctl.portaled) {   // 顶层浮层(fixed):左上缩放位移直接并进 fixed left/top(右下角钉死),ensureMounted 早退不动它
+    if (g.ctl.portaled) {   // 顶层叠加层(absolute):左上缩放位移并进 left/top(右下角钉死),ensureMounted 早退不动它
       var _cl = parseFloat(g.ctl.root.style.left) || 0, _ct = parseFloat(g.ctl.root.style.top) || 0;
       g.ctl.root.style.left = (_cl + g.shiftX) + 'px';
       g.ctl.root.style.top = (_ct + g.shiftY) + 'px';
+      attachPlaceholder(g.ctl);   // 锚已更新 → 占位移到新锚,避免下次 reflow 把便签拉回旧位
     }
     ensureMounted(g.ctl.note);   // host 按新锚重算像素位置(左上缩放不跨容器,原地重挂幂等;portaled 时早退)
     g.ctl._suppressTap = Date.now();
