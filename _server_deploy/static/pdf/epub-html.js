@@ -2609,7 +2609,8 @@
     while (!done && !aborted) {
       try {
         await streamOnce(tries === 0
-          ? { message: message + (window.rcMediaBias ? window.rcMediaBias() : ''), context: context, rid: rid, from: 0,
+          ? { message: message, context: context, rid: rid, from: 0,
+              media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined),
               force_effort: (opts && opts.forceEffort) || undefined,
               force_model: (opts && opts.forceModel) || undefined }
           : { rid: rid, from: evSeen });   // 重连:同 rid + from=已读事件数(服务端 detached 续发缓冲)

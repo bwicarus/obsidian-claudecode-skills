@@ -9496,7 +9496,7 @@ async function _connProbe() {
       try {
         try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (e) {}
         await _stream(tries === 0
-          ? { message: text + (window.rcMediaBias ? window.rcMediaBias() : ''), context: sentCtx, rid: rid, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
+          ? { message: text, context: sentCtx, rid: rid, media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined), force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
           : { rid: rid, from: evSeen });
       } catch (e) {
         if (e && e.name === 'AbortError') {

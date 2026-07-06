@@ -113,15 +113,10 @@
   // ── 输入框上的「配图 / 视频」偏好开关(两个独立 toggle,状态存 localStorage 跨会话)──
   // 开启 = 倾向不强制:发给 AI 的消息附一句偏好提示(内容适合可视化时优先调 search_image/search_video,
   // 纯推导/基础常识不硬配)。气泡仍显示原问题。PDF/EPUB sendChat 发送前把 rcMediaBias() 拼到 message。
-  window.rcMediaBias = function () {
-    var s = '';
-    try {
-      if (localStorage.getItem('rc-prefer-image') === '1')
-        s += '\n\n[用户开启了「配图」偏好:若这个内容适合用图辅助理解,就调 search_image 配一张真实图片;不适合(抽象理论/纯推导/基础常识)别硬配。]';
-      if (localStorage.getItem('rc-prefer-video') === '1')
-        s += '\n\n[用户开启了「视频」偏好:若适合,就调 search_video 找一个讲解视频放进对话;不适合别硬找。]';
-    } catch (e) {}
-    return s;
+  // 偏好作为**独立字段** media_prefer 随请求发(不拼进 message → 不污染气泡/对话历史/后续上下文)。后端 _sys_prompt 注入偏好提示。
+  window.rcMediaPrefer = function () {
+    try { return { image: localStorage.getItem('rc-prefer-image') === '1', video: localStorage.getItem('rc-prefer-video') === '1' }; }
+    catch (e) { return null; }
   };
   // Apple 简约:细线条 SF 风图标(currentColor,跟顶栏一致)+ 文字标签,选中态蓝色描边
   var _MEDIA_SVG = {

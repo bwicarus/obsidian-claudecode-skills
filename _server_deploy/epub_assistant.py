@@ -1976,6 +1976,7 @@ def _eassistant_chat():
     except Exception:
         frm = 0
     ctx_in = body.get("context") or {}
+    ctx_in["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message,避免污染历史)
     file_rel = (ctx_in.get("file") or ctx_in.get("file_rel") or "").strip()
     with _echat_jobs_lock:
         job = _echat_jobs.get(rid)

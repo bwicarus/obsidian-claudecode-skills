@@ -2374,6 +2374,11 @@ def _sys_prompt(ctx):
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
     # 视口焦点:用户此刻**屏幕上正在看的正文**(前端按视口相交采集)。EPUB 一节=整章内容太长、AI 只知章节
     #   会答偏(如把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频/配图/拟搜索词都紧扣当前注意力。限长防 prompt 膨胀。
+    mp = ctx.get("media_prefer") or {}
+    if mp.get("image"):
+        learn_bits.append("★用户开了「配图」偏好:内容适合可视化时优先调 search_image 配真实图片(纯推导/抽象/基础常识别硬配)。")
+    if mp.get("video"):
+        learn_bits.append("★用户开了「视频」偏好:适合时优先调 search_video 找讲解视频(不适合别硬找)。")
     vtext = _clean_tag(ctx.get("visible_text") or "")
     if vtext:
         learn_bits.append("★用户此刻**屏幕上正在看的部分**(注意力焦点;整节/整章其余内容只是背景。回答、找视频/"
@@ -2508,6 +2513,12 @@ def _sys_static():
 
 def _ctx_block(ctx):
     """动态部分(【当前页面】+ 选中/图/知识点/笔迹),每轮随 ctx 变 → 拼进 user message。"""
+    try:
+        import sys as _s
+        _vt = ctx.get("visible_text")
+        print("[VDIAG] visible_text=" + (str(len(_vt)) if _vt else "NONE") + " no_book=" + str(bool(ctx.get("no_book"))) + " media_prefer=" + str(ctx.get("media_prefer")), file=_s.stderr, flush=True)
+    except Exception:
+        pass
     if ctx.get("no_book"):   # 用户点暗「书页」开关:不喂书本上下文,当通用助手答(可问跟书无关的问题)
         return ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
                 "不使用书里的内容、别主动调读书类工具(read_page/search_book/summarize_section/toc 等),"
@@ -3362,6 +3373,7 @@ def assistant_chat():
             force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None
             force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
             ctx = body.get("context") or {}
+            ctx["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message)
             ctx["_base"] = request.host_url.rstrip("/")
             ctx["_uid"] = uid   # 写操作记 owner=本用户 → 撤销只能撤自己的
             history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
