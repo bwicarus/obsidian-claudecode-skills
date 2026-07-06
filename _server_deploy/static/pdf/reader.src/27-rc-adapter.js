@@ -102,7 +102,56 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     //   PDF 暂无「高亮抽屉」UI → 这几个钩子目前无 live 调用方,先就位)。编辑/图描述浮层走 per-call opts,不依赖此 bind。
     allHighlights: () => (typeof _allHighlights !== 'undefined' ? _allHighlights : []),
     jumpToHl: (hl) => { try { if (hl && hl.page && window.goToPage) window.goToPage(hl.page); } catch (_) {} },
-    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} }
+    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} },
+    // ── 助手侧栏共享化(②a):把 25-assistant.js 依赖的**全部宿主符号**收进 asst host 袋,供未来搬进
+    //    rc-assistant.js 的共享侧栏经 RC.adapter()._host.asst 取用(EPUB 提供同名袋 → 复用整份侧栏)。
+    //    全是**纯转发**到 PDF 现有 window.* / reader.js 作用域符号(本文件同在 reader.js IIFE)→ PDF 行为零变化;
+    //    typeof 守卫保证任一符号缺失也不炸。live 值(fileRel/pdfNumPages/noteAttached/activePhraseHl/focusSel)用 getter。
+    asst: {
+      md: (t) => { try { return md(t); } catch (_) { return (t == null ? '' : String(t)); } },
+      toast: (m) => { try { if (typeof _toast === 'function') _toast(m); } catch (_) {} },
+      fmtTime: (ms) => { try { return _qhFmtTime(ms); } catch (_) { return ''; } },
+      fileRel: () => (typeof FILE_REL !== 'undefined' ? FILE_REL : ''),
+      pdfNumPages: () => { try { return pdfDoc ? pdfDoc.numPages : 0; } catch (_) { return 0; } },
+      goTo: (p) => { try { window.jumpWithBack && window.jumpWithBack(p); } catch (_) {} },
+      goToInBook: (fr, p) => { try { if (window.openBookAt) window.openBookAt(fr, p); else window.location.href = '/pdf/view?file=' + encodeURIComponent(fr) + '&page=' + p; } catch (_) {} },
+      dispPage: (p) => { try { return window._dispPage ? window._dispPage(p) : p; } catch (_) { return p; } },
+      pdfFromDisp: (d) => { try { return window._pdfFromDisp ? window._pdfFromDisp(d) : d; } catch (_) { return d; } },
+      locCount: () => { try { return pdfDoc ? pdfDoc.numPages : 0; } catch (_) { return 0; } },
+      changePage: (d) => { try { window.changePage && window.changePage(d); } catch (_) {} },
+      fitWidth: () => { try { window.fitWidth && window.fitWidth(); } catch (_) {} },
+      zoomBy: (d) => { try { window.zoomChange && window.zoomChange(d); } catch (_) {} },
+      toggleTranslate: () => { try { window.togglePageTranslate && window.togglePageTranslate(); } catch (_) {} },
+      openDrawer: () => { try { if (typeof openGrammarPanel === 'function') openGrammarPanel(); } catch (_) {} },
+      switchTab: (n) => { try { window.switchSideTab && window.switchSideTab(n); } catch (_) {} },
+      asstOpen: () => { try { return !!(window.__asstOpen && window.__asstOpen()); } catch (_) { return false; } },
+      voiceContext: () => { try { return window.__voiceContext ? window.__voiceContext() : null; } catch (_) { return null; } },
+      setFocusSel: (t, k) => { try { window.__setFocusSel && window.__setFocusSel(t, k); } catch (_) {} },
+      focusSel: () => { try { return window.__focusSel || null; } catch (_) { return null; } },
+      clearFigFocus: () => { try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {} },
+      figThumb: (d, img, live) => { try { window.__figThumb && window.__figThumb(d, img, live); } catch (_) {} },
+      noteAttached: () => { try { return window.__noteAttached || []; } catch (_) { return []; } },
+      clearNoteAttached: () => { try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {} },
+      renderNoteChips: () => { try { window.__renderNoteChips && window.__renderNoteChips(); } catch (_) {} },
+      notesReload: () => { try { window.notesReload && window.notesReload(); } catch (_) {} },
+      noteInject: (n) => { try { return !!(window.__noteInject && window.__noteInject(n)); } catch (_) { return false; } },
+      reloadHighlights: () => { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} },
+      loadAllHighlights: () => { try { if (typeof loadAllHighlights === 'function') loadAllHighlights(); } catch (_) {} },
+      renderHighlightsOnPage: (pw, n) => { try { if (typeof renderHighlightsOnPage === 'function') renderHighlightsOnPage(pw, n); } catch (_) {} },
+      showHlPicker: (d) => { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },
+      assistEdit: (d) => { try { window._assistEdit && window._assistEdit(d); } catch (_) {} },
+      renderPhraseHl: (w) => { try { if (typeof renderPhraseHl === 'function') renderPhraseHl(w); } catch (_) {} },
+      removePhraseHighlight: () => { try { if (typeof _removePhraseHighlight === 'function') _removePhraseHighlight(); } catch (_) {} },
+      activePhraseHl: () => { try { return typeof _activePhraseHl !== 'undefined' ? _activePhraseHl : null; } catch (_) { return null; } },
+      charsRangeToText: (ch, a, b) => { try { return _charsRangeToText(ch, a, b); } catch (_) { return ''; } },
+      charRangeToPtRects: (ch, a, b) => { try { return _charRangeToPtRects(ch, a, b); } catch (_) { return []; } },
+      flashSelOnPage: (p, t) => { try { if (typeof _flashSelOnPage === 'function') _flashSelOnPage(p, t); } catch (_) {} },
+      noteNearText: (a) => { try { return typeof _noteNearText === 'function' ? _noteNearText(a) : ''; } catch (_) { return ''; } },
+      jumpToCtx: (m) => { try { if (typeof _jumpToCtx === 'function') _jumpToCtx(m); } catch (_) {} },
+      prewarm: (off) => { try { window.__asstPrewarm && window.__asstPrewarm(off); } catch (_) {} },
+      getPaidNoted: () => { try { return !!window.__paidNoted; } catch (_) { return false; } },
+      setPaidNoted: (v) => { try { window.__paidNoted = v; } catch (_) {} }
+    }
   });
   // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)
   try {
