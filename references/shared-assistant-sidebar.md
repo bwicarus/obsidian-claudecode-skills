@@ -80,9 +80,9 @@
 - ✅ M3 讲这里别读整章(EPUB `_ESYS_RULES` 静态铁律)
 - ✅ M4 read_selection 工具 EPUB 缺(一行注册复用 PDF)
 - ✅ M10 空/清空后欢迎语 greet() EPUB(下方 M10 项)
-- ⬜ M5 make_anki 制卡后无 CFI 回链高亮(EPUB)
-- ⬜ M6 make_note 无回链高亮+无选中不回退整章(EPUB)
-- ⬜ M7 find_highlights 范围参数(sections/from-to)EPUB 受限
+- ✅ M5 make_anki 制卡后绿色回链高亮(EPUB)
+- ✅ M6 make_note 蓝色回链高亮 + 无选中回退整章(EPUB)
+- ✅ M7 find_highlights 支持 sections 列表 + from/to 区间(EPUB)
 - ⬜ M8 用户气泡带入图缩略图不落库不回放(EPUB `figures` 白名单+回放)
 - ⬜ M9 高亮列表卡删除后不可恢复(PDF 缺重做,抄 EPUB)
 - ✅ M10 空/清空后欢迎语 greet() EPUB
