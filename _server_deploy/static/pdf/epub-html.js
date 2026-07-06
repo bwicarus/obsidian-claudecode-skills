@@ -104,6 +104,29 @@
     // 便签 v4 重定位时机②:字号/行距/栏宽变 → reflow → 内容锚字符位置变,重算便签像素位置(读 rect 会强制同步布局,便签少,廉价)
     try { if (window.RC && RC.stickynote && RC.stickynote.repositionAll) RC.stickynote.repositionAll(); } catch (e) {}
   }
+  // reflow 阅读位置保持(Kindle/Apple Books 标准):改字号/行距会 reflow → 当前读的那段位移(用户报「缩放伴随章节移动」)。
+  // applyStyle 只改 CSS 变量不重建 DOM → 视口内一个字符的 Range 全程有效:reflow 前记该字符视口 Y,reflow 后重测,差量补 scrollTop 把它移回原位。
+  function _reflowKeepAnchor(apply) {
+    var sc = content;
+    if (!sc) { apply(); return; }
+    var rect = sc.getBoundingClientRect();
+    var px = rect.left + rect.width / 2, py = rect.top + Math.min(80, rect.height * 0.25);   // 视口靠上 1/4(避开边缘)找锚
+    var rng = null, el = null, y0 = null;
+    try {
+      if (document.caretRangeFromPoint) rng = document.caretRangeFromPoint(px, py);
+      else if (document.caretPositionFromPoint) { var p = document.caretPositionFromPoint(px, py); if (p) { rng = document.createRange(); rng.setStart(p.offsetNode, p.offset); rng.collapse(true); } }
+      if (rng) { var rr = rng.getClientRects(); if (rr && rr.length) y0 = rr[0].top; }
+    } catch (e) { rng = null; }
+    if (y0 == null) { try { el = document.elementFromPoint(px, py); if (el) y0 = el.getBoundingClientRect().top; } catch (e) {} }   // 文字锚失败退元素锚
+    apply();   // 改字号/行距 → reflow
+    if (y0 == null) return;   // 没锚(空白/未挂载)→ 不动,安全
+    try {
+      var y1 = null;
+      if (rng) { var r2 = rng.getClientRects(); if (r2 && r2.length) y1 = r2[0].top; }
+      if (y1 == null && el) y1 = el.getBoundingClientRect().top;
+      if (y1 != null) sc.scrollTop += (y1 - y0);   // 差量:把锚字符移回 reflow 前的视口位置
+    } catch (e) {}
+  }
   function refreshSet() { $('ep-fs-v').textContent = st.fs + '%'; $('ep-lh-v').textContent = st.lh.toFixed(1); if ($('ep-mw-v')) $('ep-mw-v').textContent = st.mw;
     [].forEach.call($('ep-theme').children, function (b) { b.classList.toggle('on', b.dataset.th === st.th); });
     var fb = $('ep-fig-badge-chk'); if (fb) fb.checked = (localStorage.getItem(LS_FIG) !== '0'); }
@@ -2777,8 +2800,8 @@
     RC.settings.open({
       tab: tab,
       getReadState: function () { return { fs: st.fs, th: st.th, lh: st.lh }; },
-      onFontSize: function (d) { st.fs = Math.min(220, Math.max(70, st.fs + d)); localStorage.setItem(LS.fs, st.fs); applyStyle(); refreshSet(); },
-      onLineHeight: function (d) { st.lh = Math.min(2.4, Math.max(1.0, +(st.lh + d).toFixed(1))); localStorage.setItem(LS.lh, st.lh); applyStyle(); refreshSet(); },
+      onFontSize: function (d) { st.fs = Math.min(220, Math.max(70, st.fs + d)); localStorage.setItem(LS.fs, st.fs); _reflowKeepAnchor(applyStyle); refreshSet(); },
+      onLineHeight: function (d) { st.lh = Math.min(2.4, Math.max(1.0, +(st.lh + d).toFixed(1))); localStorage.setItem(LS.lh, st.lh); _reflowKeepAnchor(applyStyle); refreshSet(); },
       onTheme: function (th) { st.th = th; localStorage.setItem(LS.th, st.th); applyStyle(); refreshSet(); },
       onConvertFull: function (btn) { convertToFull(btn); },
       getBookLangs: function () { return BOOK_LANGS; },
@@ -2847,7 +2870,7 @@
   //   desktop Ctrl+滚轮 同映射。默认版正文在主文档(无 iframe),只挂 #ep-content + document,不需逐章 doc。
   (function setupEpubPinch() {
     var STEP = 10;
-    function _fontStep(delta) { st.fs = Math.min(220, Math.max(70, st.fs + delta)); try { localStorage.setItem(LS.fs, st.fs); } catch (e) {} applyStyle(); refreshSet(); }
+    function _fontStep(delta) { st.fs = Math.min(220, Math.max(70, st.fs + delta)); try { localStorage.setItem(LS.fs, st.fs); } catch (e) {} _reflowKeepAnchor(applyStyle); refreshSet(); }
     function _noGesture(e) { try { e.preventDefault(); } catch (_) {} }
     try { document.addEventListener('gesturestart', _noGesture, { passive: false }); document.addEventListener('gesturechange', _noGesture, { passive: false }); } catch (e) {}
     function applyPinch(d0, d1) {

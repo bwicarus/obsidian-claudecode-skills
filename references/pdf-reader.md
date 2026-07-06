@@ -1238,3 +1238,9 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 - **现象**:双指放大/缩小后画面跳到别处,要手动移回阅读位置(用户:「每种大小都绑定某一位置」)。
 - **根因**:重标尺用 CSS `zoom` 缩放每个 `.page-wrap`,但**页间距 margin 不随 zoom 缩放**;而焦点保持是 `fx*k` 像素线性外推(假设整个内容严格等比)→ 焦点在文档靠后处偏差=Σ页间距×(k-1),放大 2× 可达几百 px。
 - **修复**(`06-layout.js`,大厂 pinch-zoom 标准):焦点锚从"像素坐标×k"改成"**焦点落在哪一页 + 页内比例**"(`_focalAnchor` 用 getBoundingClientRect,绕 offsetParent、单页/连续/双页通用)。恢复时差量 `scrollTop += (锚点当前屏幕Y − 起始焦点cy)` 把该比例点移回起始焦点屏幕位置——与页间距/缩放倍率/占位高度全无关。三入口(pinch touchstart / 松手 endPinch / 桌面 Ctrl+滚轮)都带 anchor;焦点落在页间距/该页已卸载 → fallback 旧 fx*k。同续读仲裁的 frac 布局无关思路。
+
+### §17.4 2026-07-06 EPUB 缩放伴随章节移动 → reflow 锚点保持
+- **现象**:EPUB 双指缩放后跳到章节别处(接 §17.3,PDF 已修但 EPUB 另一套)。
+- **根因**:EPUB 是 reflow 阅读器,双指捏合映射到**字号步进**(`setupEpubPinch`→`_fontStep`→`applyStyle`),改字号 → 整章文字重排 → scrollTop 对应的内容变了,当前读的段落位移。原本**完全没有 reflow 位置保持**。
+- **修复**(`epub-html.js` `_reflowKeepAnchor`,Kindle/Apple Books 标准):`applyStyle` 只改 CSS 变量(`--fs`/`--lh`)不重建 DOM → 视口内一个字符的 Range 全程有效。reflow 前用 `caretRangeFromPoint` 在视口靠上 1/4 处取字符锚记其视口 Y,`apply()` reflow 后重测同字符 Y,差量 `scrollTop += (Y1−Y0)` 把它移回原位。caret 不支持/命中空白 → 退 `elementFromPoint` 元素锚;都失败 → 不动(安全)。接到字号(`onFontSize`/`_fontStep`)+ 行距(`onLineHeight`)三入口;主题(`onTheme`)不改尺寸不需要。
+- 边界:书末尾放大时 scrollTop 触顶被 clamp,锚点可能不完全回位(极端情况,可接受)。
