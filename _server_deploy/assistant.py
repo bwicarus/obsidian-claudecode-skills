@@ -2513,12 +2513,6 @@ def _sys_static():
 
 def _ctx_block(ctx):
     """动态部分(【当前页面】+ 选中/图/知识点/笔迹),每轮随 ctx 变 → 拼进 user message。"""
-    try:
-        import sys as _s
-        _vt = ctx.get("visible_text")
-        print("[VDIAG] visible_text=" + (str(len(_vt)) if _vt else "NONE") + " no_book=" + str(bool(ctx.get("no_book"))) + " media_prefer=" + str(ctx.get("media_prefer")), file=_s.stderr, flush=True)
-    except Exception:
-        pass
     if ctx.get("no_book"):   # 用户点暗「书页」开关:不喂书本上下文,当通用助手答(可问跟书无关的问题)
         return ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
                 "不使用书里的内容、别主动调读书类工具(read_page/search_book/summarize_section/toc 等),"

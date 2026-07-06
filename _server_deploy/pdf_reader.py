@@ -606,6 +606,29 @@ def pdf_api_ping():
     return r
 
 
+@bp.route("/api/img-proxy")
+def pdf_api_img_proxy():
+    """图片代理:iPad 直连 Wikipedia 常被网络/防盗链挡 → AI 配图(search_image 的维基图)由服务器下载转发,
+    经 Tailscale 到 iPad 稳定显示。限 wikimedia 域(防 SSRF);前端 img onerror 时 fallback 到这。"""
+    url = (request.args.get("url") or "").strip()
+    if not url.startswith(("https://upload.wikimedia.org/", "https://commons.wikimedia.org/",
+                           "https://upload.wikipedia.org/")):
+        abort(403)
+    try:
+        import requests as _rq
+        rr = _rq.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 (reader-img-proxy)"})
+        if rr.status_code != 200 or not rr.content:
+            abort(502)
+        ct = rr.headers.get("Content-Type", "image/png")
+        if not ct.startswith("image/"):
+            abort(415)
+        resp = Response(rr.content, mimetype=ct)
+        resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+        return resp
+    except Exception:
+        abort(502)
+
+
 @bp.route("/api/book-meta")
 def pdf_api_book_meta():
     """书元数据(图片模式用,不下载 PDF):页数 + 首页尺寸(pt)。"""

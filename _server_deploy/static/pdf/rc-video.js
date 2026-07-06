@@ -170,6 +170,10 @@
       var t = e.target;
       if (!t || t.tagName !== 'IMG' || t.__brk) return;
       if (!(t.closest && t.closest('.ep-msg.a, .asst-a, #result-content'))) return;
+      var src = t.getAttribute('src') || '';
+      if (!t.__proxied && /wikimedia\.org|wikipedia\.org/.test(src) && src.indexOf('/api/img-proxy') < 0) {
+        t.__proxied = 1; t.src = '/pdf/api/img-proxy?url=' + encodeURIComponent(src); return;   // iPad 直连维基常被挡 → 走服务器代理重试
+      }
       t.__brk = 1; t.style.display = 'none';
       var s = document.createElement('span'); s.className = 'rc-img-broken'; s.textContent = '🖼 图片加载失败';
       if (t.parentNode) t.parentNode.insertBefore(s, t);

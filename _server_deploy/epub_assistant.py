@@ -1202,8 +1202,23 @@ def _esys_prompt(ctx):
             nitems.append(it)
         note_line = ("\n用户双击带入了自己写的便签(默认在问它/要你结合它答;便签位置附近正文已给好,**别为此再 read_section**):\n"
                      + "\n".join(nitems))
+    # 视口焦点 + 偏好(前端 media_prefer/visible_text 独立字段)。⚠ EPUB 用自己这套 prompt,assistant._sys_prompt
+    #   里加的 visible_text/media_prefer/禁编图 对 EPUB **无效** → 必须在这里补(这是「AI 讲整章/编图」反复的真因)。
+    vt = A._clean_tag(ctx.get("visible_text") or "")
+    focus_line = ""
+    if vt:
+        focus_line = ("\n★用户此刻**屏幕上正在看的部分**(注意力焦点;整章其余只是背景):「" + vt[:900] + "」"
+                      "\n→ 用户说『讲这里/这段/当前/这部分』时**直接基于这段讲**,别 read_section/summarize_section 读整章"
+                      "(EPUB 一节=整章,读了会答成全章总结、跑偏);找视频/配图的搜索词也紧扣这段,别用章节泛主题。")
+    mp = ctx.get("media_prefer") or {}
+    prefer_line = ""
+    if mp.get("image"):
+        prefer_line += "\n★用户开了「配图」偏好:内容适合可视化时优先 search_image 配真实图(纯推导/抽象/基础常识别硬配)。"
+    if mp.get("video"):
+        prefer_line += "\n★用户开了「视频」偏好:适合时优先 search_video 找讲解视频(不适合别硬找)。"
+    prefer_line += "\n★**绝对禁止编造图片链接**:![](url) 的 url 只能是 search_image 刚返回的 image_url,别凭记忆写维基/教科书 URL。"
     return (_ESYS_RULES + f"\n\n【可用工具】\n{cat}\n\n【当前章节】"
-            + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line
+            + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line + focus_line + prefer_line
             + _fav_sys_block(ctx, cur))
 
 
