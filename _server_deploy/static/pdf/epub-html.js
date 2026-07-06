@@ -2956,14 +2956,14 @@
   //   自动 sendChat 发预设 prompt(无需另接);它们住在 asst pane 的快捷区 = 侧栏助手打开时才可见/可点。
   //   预设 prompt 明确引导 AI 用后端注入的【收藏集目录】通览全集 + 按需 read_source_page 翻原书查证
   //   (收藏集识别/目录/工具全在 epub_assistant.py 的收藏集分支,后端零改)。
-  (function _favNotebookEntries() {
+  function _favNotebookEntries() {   // ③-4c:IIFE→具名函数,共享侧栏挂载后(文件末 flag 块)重注入 #asst-quick(内联 quick 区随 pane 被摘)
     if (!IS_FAV_BOOK) return;
-    var quick = document.getElementById('ep-asst-quick');
+    var quick = document.getElementById('ep-asst-quick') || document.getElementById('asst-quick');   // 共享侧栏快捷区 id=asst-quick
     if (!quick || quick.querySelector('.asst-fav-nb')) return;   // 幂等
     if (!document.getElementById('ep-fav-nb-css')) {
       var st = document.createElement('style'); st.id = 'ep-fav-nb-css';
-      st.textContent = '#ep-asst-quick button.asst-fav-nb{background:#241a3a;border-color:#4a3a7d;color:#dcc9ff}' +
-        '#ep-asst-quick button.asst-fav-nb:active{background:#33285a}';
+      st.textContent = '#ep-asst-quick button.asst-fav-nb,#asst-quick button.asst-fav-nb{background:#241a3a;border-color:#4a3a7d;color:#dcc9ff}' +
+        '#ep-asst-quick button.asst-fav-nb:active,#asst-quick button.asst-fav-nb:active{background:#33285a}';
       document.head.appendChild(st);
     }
     var defs = [
@@ -2977,7 +2977,8 @@
       b.className = 'asst-fav-nb'; b.textContent = d[0]; b.setAttribute('data-send', d[1]);
       quick.insertBefore(b, anchor);
     });
-  })();
+  }
+  _favNotebookEntries();
   // ── 苹果风格语音按钮(逐字照搬 PDF 25-assistant.js:930-998):持续聆听,只手动停(再点麦克风/点发送即停)。
   //    iOS 的 SpeechRecognition 静默时会自己结束 → 用户没手动停就 onend 重启 = 真·持续聆听。结果只填输入框、续写已有。
   //    无 SR 的浏览器 → 聚焦输入框用系统键盘听写。micStop 为函数声明(本作用域提升),sendChat 前调它收口防迟到回填残留。
@@ -4492,13 +4493,13 @@
       ],
       onTab: function (name) {
         if (name === 'asst') {
-          loadHistory();
+          if (!window.__asstLoaded) loadHistory();   // 共享侧栏(__asstLoaded)挂载时自管历史;仅内联逃生舱由 tab 切换触发
           try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true }); } catch (e) {}   // 切到助手 tab 就预热待命 Claude CLI 进程(照 PDF __asstPrewarm,通用端点跟具体书无关)
           try { if (window.__renderFigChips) window.__renderFigChips(); } catch (e) {}   // 开助手前点了图 → 进来补渲附件条
           try { if (window.__renderNoteChips) window.__renderNoteChips(); } catch (e) {}  // 补渲便签 chip(双击便签带进来的)
           try { if (window.__renderFocusSel) window.__renderFocusSel(); } catch (e) {}   // 防御性重渲(DOM 可能被章节重建)
           try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (e) {}
-          setTimeout(function () { var ta = $('ep-ai-ta'); if (ta) ta.focus(); }, 120);
+          setTimeout(function () { var ta = $('ep-ai-ta') || $('asst-ta'); if (ta) ta.focus(); }, 120);   // 共享侧栏输入框 id=asst-ta
         }
         else if (name === 'kg') { if (window.RC && RC.knowledge) RC.knowledge.load(); }
         else if (name === 'hl') { loadHlPane(); }
@@ -4633,7 +4634,7 @@
   //         ③ 把共享 tab/pane 的 PDF class(side-tab/side-pane)补成 EPUB 抽屉 class → setTab() 认得
   //   首次开抽屉时 open()→setTab(_lastTab) 会正确激活共享 pane(class/data-pane 已就位),无需手动同步初始态。
   try {
-    var _uSh = ((location.search || '') + (location.hash || '')).indexOf('asst=shared') >= 0;   // ?…&asst=shared 或 #asst=shared 都认(URL 已有 ?file= 时第二个 ? 会并进 file 值→404,hash 追加更不易错)
+    var _uSh = ((location.search || '') + (location.hash || '')).indexOf('asst=inline') < 0;   // ③-4c:浏览器验证通过(2026-07-07)→ 共享侧栏翻默认;&asst=inline / #asst=inline = 内联逃生舱
     if (_uSh && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {
       var _op = document.getElementById('ep-side-asst');                                   // 内联 asst pane(模板)
       if (_op && _op.parentNode) _op.parentNode.removeChild(_op);
@@ -4644,6 +4645,7 @@
       if (_nt) { _nt.classList.remove('side-tab'); _nt.classList.add('ep-side-tab'); }
       var _np = document.getElementById('side-pane-asst');                                   // 共享 pane:补 EPUB class(setTab 靠它 + data-pane 找)
       if (_np) _np.classList.add('ep-side-pane');
+      try { _favNotebookEntries(); } catch (e) {}   // 收藏夹 NotebookLM 三入口:内联 quick 区已随 pane 被摘 → 重注入共享 #asst-quick
     }
   } catch (e) {}
 })();
