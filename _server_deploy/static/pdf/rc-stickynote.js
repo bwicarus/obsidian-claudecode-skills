@@ -250,12 +250,24 @@
   function drawStroke(ctx, s, W, H, dpr) {
     RCInk.drawStroke(ctx, s, W, H, dpr, { color: INK.color, width: INK.width });
   }
+  // 保持手写宽高比(iar=首次落笔时的便签 w/h)的内接绘制区(letterbox):便签任意 resize 笔画不变形。
+  // 存量便签无 iar → 退回整幅(老行为)。W/H 单位随调用方(canvas 像素 或 CSS 像素)。
+  function inkBox(iar, W, H) {
+    if (!iar || iar <= 0) return { ox: 0, oy: 0, w: W, h: H };
+    var car = W / H, w = W, h = H, ox = 0, oy = 0;
+    if (car > iar) { w = H * iar; ox = (W - w) / 2; }   // 容器更宽 → 左右留白
+    else { h = W / iar; oy = (H - h) / 2; }             // 容器更高 → 上下留白
+    return { ox: ox, oy: oy, w: w, h: h };
+  }
   function redrawInk(ctl) {
     var cv = ctl.cv, ctx = cv.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cv.width, cv.height);
     var arr = ctl.note.strokes || [], dpr = window.devicePixelRatio || 1;
-    for (var i = 0; i < arr.length; i++) drawStroke(ctx, arr[i], cv.width, cv.height, dpr);
+    var b = inkBox(ctl.note.iar, cv.width, cv.height);
+    ctx.save(); ctx.translate(b.ox, b.oy);
+    for (var i = 0; i < arr.length; i++) drawStroke(ctx, arr[i], b.w, b.h, dpr);
+    ctx.restore();
   }
   function strokeHit(s, pt, thr) { return RCInk.hit(s, pt, thr); }
 
@@ -858,7 +870,8 @@
   function normPt(ctl, cx, cy) {
     var r = ctl.body.getBoundingClientRect();
     if (!r.width || !r.height) return null;
-    return [(cx - r.left) / r.width, (cy - r.top) / r.height];
+    var b = inkBox(ctl.note.iar, r.width, r.height);   // 输入坐标同样过 letterbox,与 redrawInk 一致
+    return [(cx - r.left - b.ox) / b.w, (cy - r.top - b.oy) / b.h];
   }
   // 视口点命中哪个便签 body(展开态) → note id | null。倒序遍历:后创建的视觉在上,优先命中。
   function penRoute(x, y) {
@@ -884,6 +897,12 @@
       eraseAt(ctl, pt);
       draw = { ctl: ctl, eraser: true, raf: null };
     } else {
+      // 首次落笔锚定当前宽高比:之后 resize 按此比例 letterbox 绘制,笔画不随便签比例变形。
+      // pt 已按当前(尚未变形)几何算出,此刻 iar==w/h → letterbox 为整幅,首点坐标不受影响。
+      if (!ctl.note.strokes.length && !ctl.note.iar) {
+        ctl.note.iar = (ctl.note.w || 260) / (ctl.note.h || 180);
+        patchNote(ctl.note, { iar: ctl.note.iar });
+      }
       var s = { c: strokeColor(ctl), w: INK.width, pts: [pt] };   // 新笔画色:自动对比色开=按便签底色取对比前景
       ctl.note.strokes.push(s);
       draw = { ctl: ctl, stroke: s, raf: null };

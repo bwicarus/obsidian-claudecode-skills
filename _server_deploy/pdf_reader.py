@@ -5615,6 +5615,7 @@ def pdf_api_notes():
              "collapsed": bool(body.get("collapsed", False)),
              "strokes": body.get("strokes") if isinstance(body.get("strokes"), list) else [],
              "video": body.get("video") if isinstance(body.get("video"), dict) else None,   # 视频便签:{id,title,start,end,rate,loop,cc}
+             "iar": (float(body["iar"]) if isinstance(body.get("iar"), (int, float)) and body.get("iar") else None),   # 手写锚定宽高比:笔画 letterbox 到此比例,便签任意 resize 不变形
              "created": now, "updated": now}
         items.append(n); _notes_save(rel, items)
         return jsonify({"ok": True, "id": n["id"], "note": n})
@@ -5639,6 +5640,11 @@ def pdf_api_notes():
         n["strokes"] = body["strokes"]
     if "video" in body:
         n["video"] = body["video"] if isinstance(body.get("video"), dict) else None   # 传 null → 移除视频
+    if "iar" in body:
+        try:
+            n["iar"] = float(body["iar"]) if body.get("iar") else None   # 手写锚定宽高比(letterbox 防变形)
+        except Exception:
+            pass
     n["updated"] = now
     _notes_save(rel, items)
     return jsonify({"ok": True, "note": n})
@@ -5680,9 +5686,17 @@ def _note_composite_png(rel: str, nid: str):
                 line += ch
         if line and yy <= h - lh:
             dr.text((x0, yy), line, fill="#1b1b1b", font=font)
-    # 笔画:归一化坐标 × 便签尺寸
+    # 笔画:归一化坐标 × letterbox 内接区(保持手写宽高比 iar,与前端 inkBox 一致,防便签比例变形)
+    iar = n.get("iar")
+    b_ox, b_oy, b_w, b_h = 0.0, 0.0, float(w), float(h)
+    if iar and iar > 0:
+        car = w / float(h)
+        if car > iar:
+            b_w = h * iar; b_ox = (w - b_w) / 2.0
+        else:
+            b_h = w / iar; b_oy = (h - b_h) / 2.0
     for s in (n.get("strokes") or []):
-        pts = [(float(p[0]) * w, float(p[1]) * h) for p in (s.get("pts") or []) if isinstance(p, (list, tuple)) and len(p) >= 2]
+        pts = [(b_ox + float(p[0]) * b_w, b_oy + float(p[1]) * b_h) for p in (s.get("pts") or []) if isinstance(p, (list, tuple)) and len(p) >= 2]
         if len(pts) >= 2:
             dr.line(pts, fill=s.get("c") or "#e33", width=max(1, int(float(s.get("w") or 2) * scale)), joint="curve")
     buf = io.BytesIO(); img.save(buf, "PNG")
