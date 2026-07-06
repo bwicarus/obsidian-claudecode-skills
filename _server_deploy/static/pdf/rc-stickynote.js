@@ -151,6 +151,9 @@
       //   折叠态(仅手柄)保持低层(40),侧栏开着时不挡。
       '.rc-note:not(.rc-note-collapsed){z-index:140}',
       '.rc-note.rc-note-active{z-index:150}',
+      // portaled 便签在 pointer-events:none 的叠加层里 → 须显式 auto(pointer-events 会继承)才收得到点击;
+      //   否则整张便签"点穿"到下方页面,按钮全失灵。内部显式 none 的层(ink canvas / 编辑态 textarea)不受影响。
+      '.rc-note.rc-note-portaled{pointer-events:auto}',
       // handle:短矩形,常驻,显示便签色;::before 扩触控区 ≥32px(视觉小、命中大)
       '.rc-note-handle{position:relative;width:56px;height:20px;border-radius:7px;border:1px solid rgba(0,0,0,.28);box-shadow:0 2px 6px rgba(0,0,0,.3);cursor:grab;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}',
       '.rc-note-handle::before{content:"";position:absolute;left:-8px;right:-8px;top:-8px;bottom:-8px}',
@@ -1147,6 +1150,12 @@
     var t = e.target;
     var insideRoot = (t && t.closest) ? t.closest('.rc-note') : null;
     if (EDIT && insideRoot !== EDIT.ctl.root) exitEdit();
+    // 点便签外(或点到另一张便签)→ 把「不是当前被点的」portaled 便签放回下层(点别处即降层;只留被点那张在顶)。
+    //   capture 阶段先于 onBodyDown/onHandleDown 跑:被点那张稍后由其 pointerdown 再 portalIn(不受影响)。
+    for (var id in ctls) {
+      var c = ctls[id];
+      if (c && c.portaled && c.root !== insideRoot) portalOut(c);
+    }
   }
 
   // ─────────────────────────── 创建 ───────────────────────────
