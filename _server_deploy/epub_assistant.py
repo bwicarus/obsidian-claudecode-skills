@@ -908,6 +908,7 @@ def _t_read_source_page(args, ctx):
 # 工具表:{name: (描述, fn)}。fn(args, ctx) -> dict。section 级专属 + 直接复用 assistant 的通用工具。
 _etools = {
     "read_section": ("读某章节正文(不传 idx=当前章,顺带给下一章开头预览)。要读/总结某章内容时用。args {idx?}", _t_read_section),
+    "read_selection": ("读用户当前选中的文字。args {}", lambda a, c: _A()._t_read_selection(a, c)),   # M4:复用 PDF(EPUB ctx 已带 selection)
     "summarize_section": ("取当前(或指定)章节正文做**深度结构化总结**(read_section 给原文要你自己总结;『总结这一章/这一节』用它,省额度+同章缓存)。args {idx?}", _t_summarize_section),
     "list_sections": ("看本书结构:章节总数 + 目录(label→章节 idx)。把『第N章/某节/前言』映射成 idx 用。args {}", _t_list_sections),
     "goto_section": ("翻到指定章节(前端跳转)。args {idx}", _t_goto_section),
@@ -1044,6 +1045,9 @@ _ESYS_RULES = (
     "★数学一律用 LaTeX 写进 $...$(行内)或 $$...$$(独立成行):如 $x^2$、$\\frac{a}{b}$、$\\lambda$。"
     "**严禁**用反引号包数学(`x^2` 会被当代码块、公式不渲染)、**严禁**用纯文本或 Unicode 上下标(要写 $x^2$ 不是 x²、$a_i$ 不是 aᵢ);"
     "凡变量、希腊字母、下标、分式、根号、求和/积分一律进 $...$。\n"
+    "★【讲这里别读整章·静态铁律】用户说『讲讲这里/这段/这部分/当前/这里的内容』(尤其系统给了『★用户此刻在看的部分』或有选中)→ "
+    "**直接基于那段可见/选中文字讲解**,别顺手 read_section/summarize_section 去读整章(EPUB 一节=整章,读了会答成全章总结、跑偏用户真正在看的点);"
+    "找视频/配图/拟搜索词也**紧扣这段**,别用章节泛主题。\n"
     "★【章节范围·跨章】read_section(不带 idx,读当前章)会顺带给**下一章开头预览**——内容常跨章,默认据这些回答。"
     "本章+下章预览仍不足以答全时,继续 read_section(idx=再下一章)往下读,够答即止,别无限翻。\n"
     "★复合请求(含多个动作,如『总结再做成卡』『翻译并制卡』『找到X并跳过去』)必须把每个动作都执行完——"
@@ -1237,6 +1241,10 @@ def _esys_static():
 
 def _ectx_block(ctx):
     """动态部分(【当前章节】+ 选中 + 目录),每轮随 ctx 变 → 拼进 user message。"""
+    if ctx.get("no_book"):   # 用户点暗「书页」开关:当通用助手答(镜像 assistant.py:2519;前端 epub-html.js:2517 已发 no_book,此前后端零处理→开关像坏的)
+        return ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
+                "不使用书里的内容、别主动调读书类工具(read_section/search_book/summarize/toc 等),"
+                "除非用户在本条消息里明确要求查书。")
     full = _esys_prompt(ctx)
     i = full.rfind("【当前章节】")
     return full[i:] if i >= 0 else ""
