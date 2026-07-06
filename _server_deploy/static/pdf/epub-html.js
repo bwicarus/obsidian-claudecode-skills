@@ -4547,7 +4547,63 @@
     },
     // 图 + 用户手写圈点采集(reader-agnostic 目标;当前返回 epub-html 现有形状,后续增量再归一化成统一 Figure DTO)
     collectFigures: function () { return _epCollectFigures(); },
-    currentLocation: function () { return { unit: 'section', index: _curTopIdx, total: COUNT }; }
+    currentLocation: function () { return { unit: 'section', index: _curTopIdx, total: COUNT }; },
+    // ③-4a:EPUB 的共享侧栏 host(asst 契约,对齐 PdfAdapter._host.asst)。RC.adapter()._host.asst 取到。
+    //   纯新增,不动现有内联助手;③-4b EPUB 挂 RC.assistant.mountPdfSidebar() 时才生效(flag 门控 + 浏览器验证)。
+    //   页↔章语义:章 idx=显示(dispPage/pdfFromDisp 恒等);PDF 字符层/词组高亮专属方法→no-op(EPUB 用 _jumpFlashSel 替 flashSelOnPage)。
+    _host: {
+      asst: {
+        md: function (t) { return renderMd(t); },
+        toast: function (m) { try { toast(m); } catch (_) {} },
+        fmtTime: function (ms) { try { var s = Math.round((Date.now() - (ms || 0)) / 1000); return s < 60 ? (s + '秒前') : (s < 3600 ? (Math.round(s / 60) + '分钟前') : (Math.round(s / 3600) + '小时前')); } catch (_) { return ''; } },
+        fileRel: function () { return FREL; },
+        pdfNumPages: function () { return COUNT; },
+        locCount: function () { return COUNT; },
+        goTo: function (loc) { try { jumpTo(parseInt(loc, 10) || 0, false); if (typeof _drawerAfterJump === 'function') _drawerAfterJump(); } catch (_) {} },
+        goToInBook: function (fr, loc) { try { location.href = '/pdf/epub/view?file=' + encodeURIComponent(fr) + '#sec=' + loc; } catch (_) {} },
+        dispPage: function (p) { return p; },
+        pdfFromDisp: function (d) { return d; },
+        changePage: function (dd) { try { jumpTo((parseInt(_curTopIdx, 10) || 0) + (dd || 0), false); } catch (_) {} },
+        fitWidth: function () {},
+        zoomBy: function () {},
+        toggleTranslate: function () {},
+        openDrawer: function () { try { if (window.RC && RC.sidedrawer) RC.sidedrawer.open('asst'); } catch (_) {} },
+        switchTab: function (n) { try { if (window.RC && RC.sidedrawer) RC.sidedrawer.open(n); } catch (_) {} },
+        asstOpen: function () { try { var s = document.getElementById('ep-side'); var pane = s && s.querySelector('.ep-side-pane[data-pane="asst"]'); return !!(pane && pane.classList.contains('active')); } catch (_) { return false; } },
+        voiceContext: function () { return null; },
+        setFocusSel: function () {},
+        focusSel: function () { return null; },
+        clearFigFocus: function () {},
+        figThumb: function () {},
+        noteAttached: function () { return window.__noteAttached || []; },
+        clearNoteAttached: function () { try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {} },
+        renderNoteChips: function () { try { if (typeof renderNoteChips === 'function') renderNoteChips(); } catch (_) {} },
+        notesReload: function () { try { window.notesReload && window.notesReload(); } catch (_) {} },
+        noteInject: function () { return false; },
+        reloadHighlights: function () { try { if (typeof loadHls === 'function') loadHls(); } catch (_) {} },
+        loadAllHighlights: function () { try { if (typeof loadHls === 'function') loadHls(); } catch (_) {} },
+        renderHighlightsOnPage: function () {},
+        showHlPicker: function (d) { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },
+        assistEdit: function (d) { try { if (typeof _epAssistEdit === 'function') _epAssistEdit(d); } catch (_) {} },
+        renderPhraseHl: function () {},
+        removePhraseHighlight: function () {},
+        activePhraseHl: function () { return null; },
+        setActivePhraseHl: function () {},
+        charsRangeToText: function () { return ''; },
+        charRangeToPtRects: function () { return []; },
+        flashSelOnPage: function (loc, text) { try { if (typeof _jumpFlashSel === 'function') _jumpFlashSel(parseInt(loc, 10) || 0, null, text); } catch (_) {} },
+        noteNearText: function (a) { try { return (typeof _noteNearText === 'function') ? _noteNearText(a) : ''; } catch (_) { return ''; } },
+        jumpToCtx: function (m) { try { var sec = (m && (m.section != null ? m.section : m.page)) || 0; jumpTo(parseInt(sec, 10) || 0, false); if (typeof _drawerAfterJump === 'function') _drawerAfterJump(); } catch (_) {} },
+        prewarm: function (off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} },
+        getPaidNoted: function () { try { return !!window.__paidNoted; } catch (_) { return false; } },
+        setPaidNoted: function (v) { try { window.__paidNoted = v; } catch (_) {} },
+        hlUrl: function () { return '/pdf/api/epub-highlights'; },
+        notesUrl: function () { return '/pdf/api/notes'; },
+        noteCompositeUrl: function () { return '/pdf/api/note-composite'; },
+        mountPanel: function () { return document.getElementById('ep-side'); },
+        mountTabs: function () { var s = document.getElementById('ep-side'); return s ? (s.querySelector('.ep-side-tabs') || s.querySelector('.ep-side-tabbar') || s) : null; }
+      }
+    }
   };
   try { if (window.RC && RC.use) { RC.use(EpubHtmlAdapter); window.__epubHtmlAdapter = EpubHtmlAdapter; } } catch (e) {}
 })();
