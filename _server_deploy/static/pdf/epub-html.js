@@ -45,7 +45,9 @@
       }).catch(function (e) { toast('保存失败:' + (e.message || '网络错误')); });
   };
   var content = $('ep-content'), col = $('ep-col');
-  var selBar = $('ep-sel'), dictBox = $('ep-dict'), aiBody = $('ep-ai-body');
+  var selBar = $('ep-sel'), dictBox = $('ep-dict');
+  // 清理批次:内联助手已退役 → 助手消息容器=共享侧栏 #asst-thread(mountPdfSidebar 建);未挂载时游离 div 兜底(静默不炸)
+  function _asstBody() { return document.getElementById('asst-thread') || (_asstBody._d = _asstBody._d || document.createElement('div')); }
   var COUNT = 0, TOC = [];
   var _curTopIdx = 0;
   var _jumping = false, _jumpSeq = 0;   // ⑤ 跳转进行中标志:重试循环期间路上全是矮占位,topIdx 会被算得飙高,此窗口不写续读位置
@@ -73,8 +75,6 @@
   });
   var loaded = {}, secEls = [];
   var cur = { text: '', ctx: '', rect: null, anchor: null };
-  var chat = [];
-  var _streaming = false;
   var _hls = {};
 
   // ── 插图说明徽标总开关(设置面板「📷 插图说明徽标」,默认开,localStorage,纯客户端 UI 隐藏,不拦截 AI 描述请求)
@@ -1615,8 +1615,7 @@
   // ── AI 侧栏 ──
   function openAi(t) { if (window.RC && RC.sidedrawer) RC.sidedrawer.open('asst'); }
   function closeAi() { if (window.RC && RC.sidedrawer) RC.sidedrawer.close(); }
-  function addCard(head, sub) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; aiBody.appendChild(card); aiBody.scrollTop = aiBody.scrollHeight; return card.querySelector('.c'); }
-  function chipSel(txt) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">💬 就选中内容提问<span class="ep-sel-chip">' + esc(txt.slice(0, 48)) + (txt.length > 48 ? '…' : '') + '</span></div>'; aiBody.appendChild(card); aiBody.scrollTop = aiBody.scrollHeight; }
+  function addCard(head, sub) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight; return card.querySelector('.c'); }
   function curChapText() { var topIdx = 0; for (var i = 0; i < secEls.length; i++) { if (secEls[i].getBoundingClientRect().bottom > 60) { topIdx = i; break; } } var el = secEls[topIdx]; return el ? (el.innerText || '').slice(0, 4000) : ''; }
   function chapLabelOf(idx) { var lab = ''; for (var i = 0; i < TOC.length; i++) { if (TOC[i].idx <= idx) lab = TOC[i].label; else break; } return lab; }
   // ============================================================================
@@ -1624,7 +1623,6 @@
   // 接 /pdf/api/epub-assistant(SSE,detached worker + rid 重连)+ /pdf/api/epub-convo(历史)。
   // 保留:上下文卡 / 追问 chips / 停止按钮 / mic / 底部快捷。新增:工具循环 / 高亮动作 / 跳章 / 撤销 / trace。
   // ============================================================================
-  var _ridCtr = 0, _asstAbort = null, _asstRecovering = false, _asstLastTs = 0, _histLoaded = false;
 
   // ── 自包含 CSS(tool spinner 行 / notice 横幅 / undo·task 提示条 / trace 折叠 / 章节链接)──
   (function injectAsstCss() {
@@ -1917,138 +1915,6 @@
     } catch (e) {}
   }
 
-  // ── 「!」反馈弹窗:逐字照搬 PDF reader.src/25-assistant.js 的 _attachFeedback + _buildFbPop ──
-  //   每条 AI 回答下方一个「!」按钮,点开弹窗:本轮 AI 调用链(任务名 · 模型 · 耗时/token,步骤名可点开看完整产出)
-  //   + Gemini 免费/付费标 + 每步 ⚙ 齿轮(→ RC.assistant.openModelSettings(action))+ 底部「⚙ 模型设置」按钮。
-  //   底座差异(仅这三处胶水,外表/内容/交互与 PDF 一致):openModelSettings 走 RC.assistant;
-  //   时间格式化用本地 _epFmtTime(EPUB 页不加载 reader.src/21-misc-ai.js 的 _qhFmtTime);⚙ 目标走 RC。
-  var _fbOpenPop = null;
-  function _fbClosePop() { if (_fbOpenPop) { try { _fbOpenPop.remove(); } catch (_) {} _fbOpenPop = null; } }
-  document.addEventListener('click', function (e) {   // 点弹窗外任意处 → 收起(照搬 PDF）
-    if (_fbOpenPop && e.target && e.target.closest && !e.target.closest('.ep-fb-bar')) _fbClosePop();
-  });
-  // _qhFmtTime 等价:EPUB 页不加载它,本地复制一份(逐字照搬 reader.src/21-misc-ai.js 的实现)
-  function _epFmtTime(t) {
-    var d = new Date(t), n = new Date();
-    var hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    return (d.toDateString() === n.toDateString() ? '今天 ' : ((d.getMonth() + 1) + '/' + d.getDate() + ' ')) + hm;
-  }
-  function _epOpenMS(action) { try { if (window.RC && RC.assistant && RC.assistant.openModelSettings) RC.assistant.openModelSettings(action); } catch (_) {} }
-  function _buildFbPop(question, trace, close, ts) {
-    var pop = document.createElement('div'); pop.className = 'ep-fb-pop';
-    var h = document.createElement('div'); h.className = 'ep-afp-h';
-    h.textContent = (trace && trace.length) ? '这条回答经过的 AI 调用' : '对这条回答不满意?';
-    pop.appendChild(h);
-    var _tot = 0;
-    // 无 trace(早期回答没存调用轨迹)→ 兜底合成一个「回答」步,保证每条都至少有「回答」动作的 ⚙
-    var steps = (trace && trace.length) ? trace : [{ label: '回答', model: '', action: 'orchestrator' }];
-    steps.forEach(function (st) {
-      var row = document.createElement('div'); row.className = 'ep-afp-step';
-      var l = document.createElement('span'); l.className = 'ep-afp-l'; l.textContent = st.label || '步骤';   // 任务名
-      if (st.detail) {   // 这步有完整内容 → 步骤名变可点按钮,点开/收起显示该步的完整 AI 产出
-        l.classList.add('ep-afp-l-btn'); l.title = '点开看这一步的完整内容';
-        l.addEventListener('click', function (e) {
-          e.stopPropagation();
-          var ex = row.nextSibling;
-          if (ex && ex.classList && ex.classList.contains('ep-afp-detail')) { ex.remove(); return; }   // 再点收起
-          var dt = document.createElement('div'); dt.className = 'ep-afp-detail'; dt.textContent = st.detail;
-          row.parentNode.insertBefore(dt, row.nextSibling);
-        });
-      }
-      var m = document.createElement('span'); m.className = 'ep-afp-m';
-      if (typeof st.sec === 'number') _tot += st.sec;
-      var mt = st.model || '';
-      m.textContent = mt + (typeof st.sec === 'number' ? (mt ? ' · ' : '') + st.sec + 's' : '');   // 模型 · 耗时(老回答可能都没有)
-      if (st.tier === 'free' || st.tier === 'paid') {   // Gemini 实际服务这条用了哪档 → 标「免费/付费」
-        var tg = document.createElement('span'); tg.textContent = st.tier === 'paid' ? '付费' : '免费';
-        tg.style.cssText = 'margin-left:6px;padding:0 6px;border-radius:6px;font-size:11px;vertical-align:middle;'
-          + (st.tier === 'paid' ? 'background:#5a3a1a;color:#ffcf8f;' : 'background:#1f4a2e;color:#8fe3a8;');
-        m.appendChild(tg);
-      }
-      row.appendChild(l); row.appendChild(m);
-      if (st.action) {   // 这一步是会调模型的动作 → 给个 ⚙ 直接设它的预设
-        var g = document.createElement('button'); g.className = 'ep-afp-gear-btn'; g.textContent = '⚙'; g.title = '设这个动作的模型/深度';
-        g.addEventListener('click', function (e) {
-          e.stopPropagation();
-          _fbClosePop();   // 收起感叹号弹窗
-          // 打开统一三维设置面板(支持 Claude/Gemini + 免费/付费标),定位到本动作 —— EPUB 走 RC.assistant
-          _epOpenMS(st.action);
-        });
-        row.appendChild(g);
-      }
-      pop.appendChild(row);
-    });
-    if (ts || _tot) {   // 页脚:完成时刻 + 总耗时(时间只要有 ts 就显示,不依赖 trace)
-      var ft = document.createElement('div'); ft.className = 'ep-afp-foot';
-      var bits = [];
-      if (ts) { try { bits.push('🕐 ' + _epFmtTime(ts * 1000)); } catch (_) {} }
-      if (_tot) bits.push('共 ' + (Math.round(_tot * 10) / 10) + 's');
-      if (bits.length) { ft.textContent = bits.join(' · '); pop.appendChild(ft); }
-    }
-    var acts = document.createElement('div'); acts.className = 'ep-afp-acts';
-    // 去掉了🎯升档/🐢调快的爬梯子;只留一个「模型设置」按钮 → 打开统一三维设置面板(后端/型号/深度)
-    var bSet = document.createElement('button'); bSet.className = 'ep-afp-act ep-afp-q';
-    bSet.textContent = '⚙ 模型设置';
-    bSet.addEventListener('click', function () { close(); _epOpenMS(); });
-    acts.appendChild(bSet); pop.appendChild(acts);
-    return pop;
-  }
-  // attachTrace:保持原函数名(两处调用点不变,新增可选 ts);内部=PDF _attachFeedback(挂「!」条 + token chip)
-  function attachTrace(am, trace, ts) {
-    if (!am) return;
-    try { var old = am.querySelector('.ep-fb-bar'); if (old) old.remove(); } catch (_) {}   // 重渲时防重复挂
-    var bar = document.createElement('div'); bar.className = 'ep-fb-bar';
-    var _tok = trace && trace[0] && trace[0].tok;   // 本轮累计 token → 显示「3.6k tok」
-    if (_tok) {
-      var tk = document.createElement('span'); tk.className = 'ep-fb-tok';
-      tk.textContent = (_tok >= 1000 ? (_tok / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : _tok) + ' tok';
-      tk.title = '这条回答累计消耗 token：' + _tok;
-      bar.appendChild(tk);
-    }
-    var btn = document.createElement('button'); btn.className = 'ep-fb-btn'; btn.textContent = '!'; btn.title = '对这条回答不满意?';
-    btn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (_fbOpenPop && _fbOpenPop._owner === btn) { _fbClosePop(); return; }
-      _fbClosePop();
-      var pop = _buildFbPop(null, trace, _fbClosePop, ts); pop._owner = btn;
-      bar.appendChild(pop); _fbOpenPop = pop;   // 不再 scrollDown:历史回答在中间时,点开不该把视图拽到底
-    });
-    bar.appendChild(btn); am.appendChild(bar);
-  }
-
-  // ── notice 横幅 / 后台任务轮询 / 撤销 ──
-  function showNotice(text) {
-    var n = document.createElement('div'); n.className = 'ep-asst-note'; n.textContent = text;
-    aiBody.appendChild(n); aiBody.scrollTop = aiBody.scrollHeight;
-  }
-  function trackAsstTask(id, label) {   // make_note/make_anki/add_vocab 走后台任务 → 轮询 voice task-status
-    if (!id) return;
-    var line = document.createElement('div'); line.className = 'ep-msg a';
-    line.innerHTML = '<span class="ep-asst-tool"><span class="ep-spin"></span> ' + esc(label || '处理') + '中…(后台进行中,可继续聊)</span>';
-    aiBody.appendChild(line); aiBody.scrollTop = aiBody.scrollHeight;
-    var n = 0;
-    (function poll() {
-      if (n++ > 120) { line.innerHTML = '<span class="ep-asst-tool">⌛ ' + esc(label) + ':等太久了</span>'; return; }
-      fetch('/api/voice/task-status?id=' + encodeURIComponent(id)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok) { setTimeout(poll, 2500); return; }
-        if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="ep-asst-tool"><span class="ep-spin"></span> ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
-        if (d.status === 'done') {
-          try { if (d.client_actions && d.client_actions.length) runActions(d.client_actions); } catch (e) {}
-          var uid = d.result && d.result.undo_id;
-          line.innerHTML = '✓ ' + esc(d.speak || '完成');
-          notify('阅读助手 ✓', d.speak || '任务完成');
-          if (uid) _epTaskAction(uid);   // 系统自动:制卡/笔记/生词完成 → 查看详情/撤销/重做 持久卡(刷新后仍在)
-        } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
-        aiBody.scrollTop = aiBody.scrollHeight;
-      }).catch(function () { setTimeout(poll, 3000); });
-    })();
-  }
-  function renderUndo(parsed) {   // SSE undo 事件(如 undo_last)→ 即时撤销按钮
-    var line = document.createElement('div'); line.className = 'ep-msg a';
-    var jump = (parsed.section != null) ? ' <button class="ep-asst-jump" data-idx="' + esc(parsed.section) + '">↗ 跳转</button>' : '';
-    line.innerHTML = '✓ ' + esc(parsed.label || '完成') + jump + ' <button class="ep-asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>';
-    aiBody.appendChild(line); aiBody.scrollTop = aiBody.scrollHeight;
-  }
   // 照搬 PDF _assistEdit:AI 画完高亮 → 自动生成「跳转 + 撤销⇄重做」卡片(再点切换:撤销=删,重做=用存的锚重建拿新 id)
   var _assistEdits = {}, _aeCtr = 0;
   function _epAssistEdit(d) {
@@ -2059,7 +1925,7 @@
     card.innerHTML = '<div class="ep-edit-h">✏️ AI 已高亮 ' + d.items.length + ' 处</div>' +
       '<div class="ep-edit-row"><button class="ep-asst-jump" data-idx="' + d.section + '">→ 跳到此处</button>' +
       '<button class="ep-edit-undo" data-eid="' + eid + '">↩ 撤销</button></div>';
-    aiBody.appendChild(card); aiBody.scrollTop = aiBody.scrollHeight;
+    _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight;
   }
 
   // 章名(给高亮列表 / 任务卡用)
@@ -2134,7 +2000,7 @@
     var br = document.createElement('button'); br.className = 'ep-act-btn ep-act-redo'; br.textContent = '↪ 重做';
     var box = document.createElement('div'); box.className = 'ep-act-detail-box'; box.style.display = 'none';
     box.textContent = rec.detail || '(无详情)';
-    bd.addEventListener('click', function () { box.style.display = (box.style.display === 'none') ? 'block' : 'none'; aiBody.scrollTop = aiBody.scrollHeight; });
+    bd.addEventListener('click', function () { box.style.display = (box.style.display === 'none') ? 'block' : 'none'; _asstBody().scrollTop = _asstBody().scrollHeight; });
     bu.addEventListener('click', function () { _epActDo(card, 'undo'); });
     br.addEventListener('click', function () { _epActDo(card, 'redo'); });
     row.appendChild(bd); row.appendChild(bu); row.appendChild(br);
@@ -2142,12 +2008,12 @@
     _epActSync(card);
     return card;
   }
-  function _epShowAction(rec) { var c = _epActionCard(rec); if (c) { aiBody.appendChild(c); aiBody.scrollTop = aiBody.scrollHeight; } return c; }
+  function _epShowAction(rec) { var c = _epActionCard(rec); if (c) { _asstBody().appendChild(c); _asstBody().scrollTop = _asstBody().scrollHeight; } return c; }
   // 前端建的 action → 落库(upsert by id,幂等)。流式中先等本轮 assistant 消息落库再 attach(防 attach 落到 user 消息上)。
   var _epPending = [];
   function _epFlushActions() {
     if (!_epPending.length) return;
-    if (_streaming) { setTimeout(_epFlushActions, 300); return; }
+    if (window.__asstStreaming) { setTimeout(_epFlushActions, 300); return; }   // 共享侧栏流式中缓一缓:等本轮 assistant 消息落库再 attach(rc-assistant._setSendMode 维护标记)
     var batch = _epPending.slice(); _epPending = [];
     fetch('/pdf/api/epub-action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op: 'attach', file: FREL, actions: batch }) }).catch(function () {});
@@ -2171,7 +2037,7 @@
       var card = document.createElement('div'); card.className = 'ep-msg a';
       if (!items.length) {
         card.innerHTML = '<span class="ep-asst-tool">没有可操作的高亮</span>';
-        aiBody.appendChild(card); aiBody.scrollTop = aiBody.scrollHeight; return;
+        _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight; return;
       }
       var h = document.createElement('div'); h.className = 'ep-hl-pick-h';
       h.textContent = '共 ' + items.length + ' 处高亮 —— 点「跳转」去看,点「删除」移除:';
@@ -2197,12 +2063,12 @@
         row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(del);
         card.appendChild(row);
       });
-      aiBody.appendChild(card); aiBody.scrollTop = aiBody.scrollHeight;
+      _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight;
     } catch (e) { dbg('showHlPicker err:' + (e && e.message)); }
   };
 
   // 气泡区委托:章节链接跳转 / ↗跳转 chip / ↩撤销
-  aiBody.addEventListener('click', function (e) {
+  _asstBody().addEventListener('click', function (e) {
     var t = e.target;
     var cl = t.closest && t.closest('.ep-chaplink');   // ⑥ 跳转类操作不再自动收抽屉(仅极窄屏收,见 _drawerAfterJump)
     if (cl) { var ci = parseInt(cl.dataset.idx, 10); if (!isNaN(ci)) { jumpTo(ci, false); _drawerAfterJump(); } return; }
@@ -2325,385 +2191,7 @@
     return { sel: sel, sent: sent };
   }
 
-  function _whenVisible() {
-    return new Promise(function (res) {
-      if (document.visibilityState !== 'hidden') return res();
-      var h = function () { if (document.visibilityState !== 'hidden') { document.removeEventListener('visibilitychange', h); res(); } };
-      document.addEventListener('visibilitychange', h);
-    });
-  }
-  function _recoverAsst(tries) {   // 流彻底断/任务过期 → 从服务端历史拿最后一条 assistant(worker 跑完已落库)
-    tries = tries || 0;
-    return fetch('/pdf/api/epub-convo?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.ok && d.messages && d.messages.length) {
-        var last = d.messages[d.messages.length - 1];
-        if (last && last.role === 'assistant' && last.content) return last;
-      }
-      if (tries < 2) return new Promise(function (rs) { setTimeout(rs, 800); }).then(function () { return _recoverAsst(tries + 1); });
-      return null;
-    }).catch(function () { return null; });
-  }
-
-  function _setSend(stop) {   // 流式中:发送 ➤ → 停止 ■(红)
-    var sb = $('ep-ai-send'); if (!sb) return;
-    if (stop) { sb.classList.add('stop'); sb.textContent = '■'; sb.title = '停止'; }
-    else { sb.classList.remove('stop'); sb.textContent = '➤'; sb.title = '发送'; }
-  }
-
-  // ── 逐字浮现(揭示游标)── 照搬 PDF 25-assistant.js 的 _streamWrap/_appendCaret(经 epub2-assist.js
-  //    已验证的 ep-mfx- 前缀移植,函数体逐字一致;CSS 在 epub_html_reader.html)。
-  function _appendCaret(el) { try { var c = document.createElement('span'); c.className = 'ep-mfx-caret'; el.appendChild(c); } catch (e) {} }
-  // 把 el 正文按 字/词 切片包进 .ep-mfx-w(返回 {spans,total})。下标 < revN 的字打 .ep-mfx-shown(即时,不重播);
-  // ≥ revN 的默认隐藏,由 _revealTick 游标推进时逐个加 .ep-mfx-reveal 淡入。光标放在揭示 frontier 后面。
-  function _streamWrap(el, revN) {
-    var idx = 0, spans = [];
-    function walk(node) {
-      var kids = Array.prototype.slice.call(node.childNodes);
-      for (var i = 0; i < kids.length; i++) {
-        var n = kids[i];
-        if (n.nodeType === 3) {
-          var toks = (n.nodeValue || '').match(/[一-鿿　-〿＀-￯]|[A-Za-z0-9]+(?:['’][A-Za-z]+)?|[^\sA-Za-z0-9一-鿿　-〿＀-￯]|\s+/g) || [];
-          if (!toks.length) continue;
-          var frag = document.createDocumentFragment();
-          toks.forEach(function (p) {
-            if (/^\s+$/.test(p)) { frag.appendChild(document.createTextNode(p)); return; }
-            var s = document.createElement('span'); s.className = 'ep-mfx-w'; s.textContent = p;
-            if (idx < revN) { s.classList.add('ep-mfx-shown'); }
-            frag.appendChild(s); spans.push(s); idx++;
-          });
-          node.replaceChild(frag, n);
-        } else if (n.nodeType === 1 && n.className !== 'ep-mfx-caret') {
-          walk(n);
-        }
-      }
-    }
-    try { walk(el); } catch (e) { return { spans: [], total: idx }; }
-    var f = spans[Math.min(revN, spans.length) - 1];
-    var c = document.createElement('span'); c.className = 'ep-mfx-caret';
-    if (f && f.parentNode) { f.parentNode.insertBefore(c, f.nextSibling); } else { el.appendChild(c); }
-    return { spans: spans, total: idx };
-  }
-
-  // ── 上下文卡跳转(③):点「正在看/选中」→ 跳到发送时所在节/选中处 + 选中文字临时呼吸高亮几秒 ──
-  // 高亮机制 = _wrapPhraseRange 同款 splitText+<mark>(锚进内容自己的坐标系,随文档流滚动零漂移,
-  // 铁律3);独立 class ep-ctx-flash,不碰词组高亮的 _phraseSnap 状态。等目标节加载完再包(同
-  // _searchHilite 的重试节奏);锚(发送时记录的 {section,start,end})仍对得上原文就用锚,不然节内搜文本。
-  var _ctxFlashT = null;
-  function _unwrapCtxFlash() {
-    col.querySelectorAll('mark.ep-ctx-flash').forEach(function (mk) { var p = mk.parentNode; while (mk.firstChild) p.insertBefore(mk.firstChild, mk); p.removeChild(mk); p.normalize(); });
-  }
-  function _wrapCtxFlash(section, start, end) {
-    _unwrapCtxFlash();
-    var secEl = secEls[section]; if (!secEl || start >= end) return null;
-    var w = document.createTreeWalker(secEl, NodeFilter.SHOW_TEXT, null), n, pos = 0, hits = [];   // 偏移空间同 applyHl/_wrapPhraseRange(只数 _countable)
-    while ((n = w.nextNode())) {
-      if (!_countable(n)) continue;
-      var len = n.nodeValue.length;
-      if (n.parentElement && n.parentElement.tagName === 'MARK') { pos += len; continue; }   // 已是高亮内文本 → 计偏移不重复包
-      var ns = pos, ne = pos + len;
-      if (ne > start && ns < end) hits.push({ node: n, s: Math.max(0, start - ns), e: Math.min(len, end - ns) });
-      pos = ne; if (pos >= end) break;
-    }
-    if (!hits.length) return null;
-    var first = null;
-    hits.reverse().forEach(function (r) {   // 反着包防 splitText 挪偏移;循环结束 first=文档序第一个 mark
-      try {
-        var rest = r.node.splitText(r.s); rest.splitText(r.e - r.s);
-        var mk = document.createElement('mark'); mk.className = 'ep-ctx-flash';
-        rest.parentNode.insertBefore(mk, rest); mk.appendChild(rest);
-        first = mk;
-      } catch (e) {}
-    });
-    return first;
-  }
-  function _jumpFlashSel(section, anchor, text) {
-    section = parseInt(section, 10); if (isNaN(section) || section < 0) return;
-    jumpTo(section, false);
-    _drawerAfterJump();
-    text = String(text || '').trim();
-    var tries = 0;
-    (function go() {
-      if (loaded[section] !== true) { if (tries++ < 30) setTimeout(go, 120); return; }   // 等节加载(同 _searchHilite)
-      var el = secEls[section]; if (!el) return;
-      var full = _countableText(el), s = -1, e = -1;
-      if (anchor && anchor.start != null && anchor.end > anchor.start
-          && (full.slice(anchor.start, anchor.end) || '').trim() === text) { s = anchor.start; e = anchor.end; }   // 锚仍有效(原文没变)
-      else if (text) { var i = full.indexOf(text); if (i >= 0) { s = i; e = i + text.length; } }                    // 锚失效/没存 → 节内搜文本
-      if (s < 0) return;   // 找不到(内容变了/跨节)→ 只跳不闪
-      clearTimeout(_ctxFlashT);
-      var mk = _wrapCtxFlash(section, s, e);
-      if (!mk) return;
-      _centerInstant(mk);   // ② 跳转类统一瞬时(原 smooth scrollIntoView)
-      _ctxFlashT = setTimeout(_unwrapCtxFlash, 4500);   // 呼吸几秒自动消失
-    })();
-  }
-  // ⑥ 跳转类操作后的抽屉策略统一入口:宽屏保持开(正文在抽屉左侧仍可见),抽屉≥90vw 才收(判定在 rc-sidedrawer.afterJump)
-  function _drawerAfterJump() { try { if (window.RC && RC.sidedrawer && RC.sidedrawer.afterJump) RC.sidedrawer.afterJump(); } catch (e) {} }
-  // ② 元素滚到视口垂直居中,瞬时(等价 scrollIntoView({block:'center'}) 但不走平滑;跳转类统一瞬时)
-  function _centerInstant(el) {
-    try {
-      var cr = content.getBoundingClientRect(), r = el.getBoundingClientRect();
-      content.scrollTop += (r.top - cr.top) - (cr.height / 2 - r.height / 2);
-    } catch (e) {}
-  }
-
-  // ── 主流程 ──
-  function sendChat() {
-    if (_streaming) return;
-    var ta = $('ep-ai-ta'), msg = (ta.value || '').trim();
-    var selInfo = curSelection();
-    if (window.__focusSel && window.__focusSel.text) { selInfo = { sel: window.__focusSel.text, sent: selInfo.sent || '' }; }   // 钉住的焦点(chip 显示的内容)优先于隐式选中,所见即所得
-    else if (selInfo && selInfo.sel && window.__setFocusSel) { try { window.__setFocusSel(selInfo.sel, 'text'); } catch (e) {} }   // 隐式选中升格为可见 chip(带✕)→ 之后每条都看得见、随时可取消(用户反馈:选中隐形跟着发)
-    var _figs = (window.__figAttached || []);
-    if (!msg) {   // 空输入但有选中/带入图/带入便签 → 等于"就问这个",用默认问法直接发(照搬 epub2-assist 空文本分支)
-      if (_figs.length) msg = '讲讲这张图';
-      else if ((window.__noteAttached || []).length) msg = '讲讲这个便签';
-      else if (selInfo.sel) msg = (/\$/.test(selInfo.sel) ? '讲讲这个公式' : '讲讲这段');
-      else return;   // 真·空 → 不发
-    }
-    micStop(); ta.value = ''; ta.style.height = 'auto'; cur._pending = '';
-    var um = document.createElement('div'); um.className = 'ep-msg u'; um.textContent = msg; aiBody.appendChild(um);
-    // 发送时定格:所在节 + 选区偏移锚(选中文本确实来自 cur 时才有;锚随请求发给服务端存 meta,历史回放也能点)
-    var _secAtSend = _curTopIdx;
-    var _selAnchor = (selInfo.sel && cur.anchor && (cur.text || '').trim() === selInfo.sel.trim())
-      ? { section: cur.anchor.section, start: cur.anchor.start, end: cur.anchor.end } : null;
-    selInfo.anchor = _selAnchor;
-    // 上下文卡:让用户看到 AI 能看到「当前章 + 选中」(照搬 PDF _ctxCard)。③ 行可点:
-    // 「正在看」→ 跳回发送时所在节;「选中」→ 跳到选中处 + 临时呼吸高亮(_jumpFlashSel)。
-    if (window.RC && RC.assistant) {
-      var items = [{ text: '正在看:' + (chapLabelOf(_curTopIdx) || ('第 ' + (_curTopIdx + 1) + ' 节')),
-                     title: '点击跳到该节',
-                     onClick: function () { jumpTo(_secAtSend, false); _drawerAfterJump(); } }];
-      if (selInfo.sel) {
-        var _selTxt = selInfo.sel;
-        items.push({ text: '选中:' + _selTxt, formula: /\$/.test(_selTxt),
-                     title: '点击跳到该处并临时高亮',
-                     onClick: function () { _jumpFlashSel(_selAnchor ? _selAnchor.section : _secAtSend, _selAnchor, _selTxt); } });
-      }
-      var cc = RC.assistant.contextCard(items); if (cc) um.appendChild(cc);
-    }
-    var am = document.createElement('div'); am.className = 'ep-msg a'; am.innerHTML = '<span class="ep-spin"></span>'; aiBody.appendChild(am);
-    aiBody.scrollTop = aiBody.scrollHeight;
-    chat.push({ role: 'user', content: msg });
-    _streaming = true; _setSend(true);
-    runAssistant(msg, selInfo, am);
-    // runAssistant() 内 context.figures 在函数体最前面同步读取 window.__figAttached(await 之前),
-    // 调用已同步执行到那一步 → 这里清空不会丢本次带的图;图已"用掉"进了这条历史,下一条不再重复携带(照搬 PDF 25-assistant send() 的 __clearFigFocus 时机)
-    try { window.__clearFigAttached && window.__clearFigAttached(); } catch (e) {}
-    try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (e) {}   // 便签 chip 同图附件条:发完即清(runAssistant 已同步读走)
-  }
-
-  // opts.forceEffort / opts.forceModel(可选「更强重答」入口,目前无 UI 触发 → 见自检/诚实段)
-  async function runAssistant(message, selInfo, am, opts) {
-    // 上下文采集经统一中间层 RC.adapter().getContext()(收口进 EpubHtmlAdapter,设计见 /reader-middlelayer-design.md);
-    // adapter 不可用/异常 → 回退旧内联组装,新旧并存、零回归。
-    var context = null;
-    try { if (window.RC && RC.adapter && RC.adapter().getContext) context = RC.adapter().getContext({ selection: selInfo }); } catch (e) { context = null; }
-    if (!context) {
-      context = {
-        file: FREL, book: CFG.fileName || '',
-        current_section_idx: _curTopIdx, total_sections: COUNT, toc: TOC,
-        selection: selInfo.sel || '', selection_sentence: selInfo.sent || '',
-        selection_anchor: selInfo.anchor || undefined,   // 选区偏移锚 → 服务端存进消息 meta(sel_anchor),历史回放可跳转+高亮
-        // 带入的图(__figAttached,现测 imgbox+图内墨迹)+ 自动带入当前视口「图上有手写圈点」的图 + 有笔画便签 → 随请求发走视觉
-        figures: _epCollectFigures(),
-        // 无笔画便签:文字+锚点附近正文(文本通道,服务端拼进【当前章节】块)
-        notes: (window.__noteAttached || []).filter(function (n) { return !n.has_ink; }).slice(0, 4).map(function (n) {
-          return { id: n.id, text: String(n.text || '').slice(0, 2000), near: String(n.near || '').slice(0, 1200), section: n.section };
-        })
-      };
-    }
-    try { if (context && !context.visible_text) context.visible_text = _visibleText(); } catch (e) {}   // 视口焦点(adapter/fallback 两路都补)
-    try { if (context && window.rcNoBook && window.rcNoBook()) context.no_book = true; } catch (e) {}   // 「书页」点暗 → 后端当通用助手答
-    var rid = 'e' + Date.now() + '_' + (_ridCtr++);
-    var evSeen = 0, done = false, aborted = false, answer = '', traceData = null, spinner = true;
-    var strip = function (s) { return (window.RC && RC.assistant) ? RC.assistant.splitFollowups(s).text : s; };
-    // 逐字浮现的"揭示游标"(每轮独立):跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)。
-    // 照搬 PDF 25-assistant.js _revealTick(经 epub2-assist.js 的 ep- 前缀移植,函数体逐字一致)。
-    var _revN = 0, _spans = [], _tot = 0, _raf = null, _lastTs = 0, _acc = 0, _noChar = false;
-    function _stopReveal() { if (_raf) { try { cancelAnimationFrame(_raf); } catch (e) {} _raf = null; } }
-    function _revealTick(ts) {
-      _raf = null;
-      if (!_streaming) return;
-      if (!_lastTs) _lastTs = ts;
-      var dt = Math.min(ts - _lastTs, 120); _lastTs = ts;   // clamp:切后台回来 dt 巨大,别一次灌完
-      var backlog = _tot - _revN;
-      if (backlog > 0) {
-        var rate = 0.05 * (1 + backlog / 40);               // 字/ms:落后越多揭示越快,追上自然放慢
-        _acc += dt * rate;
-        var n = Math.min(backlog, Math.floor(_acc), 6);     // 每帧上限 6,防一次性灌入又变"段"
-        if (n > 0) {
-          _acc -= n;
-          for (var k = 0; k < n; k++) { var sp = _spans[_revN]; if (sp) sp.classList.add('ep-mfx-reveal'); _revN++; }
-          var c = am.querySelector('.ep-mfx-caret'), f = _spans[_revN - 1];
-          if (c && f && f.parentNode) f.parentNode.insertBefore(c, f.nextSibling);
-          aiBody.scrollTop = aiBody.scrollHeight;
-        }
-      }
-      if (_streaming) _raf = requestAnimationFrame(_revealTick);
-    }
-
-    function setTool(label, neutral) {
-      am.innerHTML = '<span class="ep-asst-tool"><span class="ep-spin"></span> ' + (neutral ? '思考中…' : '正在 ' + esc(label) + '…') + '</span>';
-      spinner = true; aiBody.scrollTop = aiBody.scrollHeight;
-    }
-    function handleEv(ev, parsed) {
-      if (ev === 'meta') return;          // rid 确认,不计入缓冲计数
-      evSeen++;
-      if (ev === 'done') { done = true; return; }
-      if (ev === 'tool') setTool(parsed, false);
-      else if (ev === 'tool-done') { if (spinner) setTool('', true); }   // 工具完 → 中性「思考中」直到下个 answer/tool
-      else if (ev === 'answer') {   // answer = 完整 answer-so-far。流式轻量渲(不 MathJax,收尾才 typeset 一次,照搬 PDF renderMd(el,t,false))
-        answer = parsed; var _at = strip(answer);           // + 逐字浮现(揭示游标)+ 光标 —— 照搬 PDF 25-assistant.js answer 分支
-        am.innerHTML = renderMd(_at); am.classList.add('ep-mfx-streaming');
-        if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
-        if (_noChar) { _appendCaret(am); }
-        else {
-          var w = _streamWrap(am, _revN); _spans = w.spans; _tot = w.total;   // 重渲后重包:已揭示打 shown,新字等游标
-          if (_revN > _tot) _revN = _tot;
-          if (!_raf) { _lastTs = 0; _raf = requestAnimationFrame(_revealTick); }   // 启动/续跑揭示循环
-        }
-        spinner = false; aiBody.scrollTop = aiBody.scrollHeight;
-      }
-      else if (ev === 'notice') showNotice(parsed);
-      else if (ev === 'gemini-paid') {   // ② 免费 Gemini 受限→本次已用付费:提示条 + 一键「以后直接用付费」(同 session 只提一次,渲染器在 rc-assistant)
-        try { var _pn = (window.RC && RC.assistant && RC.assistant.paidNotice) ? RC.assistant.paidNotice(parsed) : null;
-              if (_pn) { aiBody.appendChild(_pn); aiBody.scrollTop = aiBody.scrollHeight; }
-              else if (!window.__paidNoted) { window.__paidNoted = true; showNotice((parsed && parsed.text) || '免费 Gemini 额度受限,本次已使用付费档。'); }   // L4:paidNotice 空时兜底(镜像 PDF)
-        } catch (e) {}
-      }
-      else if (ev === 'actions') { try { runActions(parsed); } catch (e) {} }   // 工具一执行完立即应用(跳章/高亮即时生效)
-      else if (ev === 'trace') traceData = parsed;
-      else if (ev === 'task') trackAsstTask(parsed && parsed.task_id, parsed && parsed.label);
-      else if (ev === 'action' && parsed && parsed.id) { _epShowAction(parsed); _epQueueAction(parsed); }   // 同步写工具:系统自动弹撤销/重做卡 + 落库
-      else if (ev === 'undo' && parsed && parsed.undo_id) renderUndo(parsed);
-      else if (ev === 'error') { answer = '⚠️ ' + parsed; _stopReveal(); am.classList.remove('ep-mfx-streaming'); am.textContent = answer; spinner = false; }
-    }
-    async function streamOnce(body) {
-      _asstAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      var res = await fetch('/pdf/api/epub-assistant', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-        body: JSON.stringify(body), signal: _asstAbort ? _asstAbort.signal : undefined
-      });
-      if (res.status === 410) { done = 'gone'; return; }   // 任务过期 → 走历史恢复
-      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-      var reader = res.body.getReader(), dec = new TextDecoder(), buf = '';
-      while (true) {
-        var rd = await reader.read(); if (rd.done) break;
-        _asstLastTs = Date.now();
-        buf += dec.decode(rd.value, { stream: true });
-        var idx;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          var chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
-          var ev = 'message', data = '';
-          chunk.split('\n').forEach(function (line) {
-            if (line.indexOf('event:') === 0) ev = line.slice(6).trim();
-            else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
-          });
-          var parsed; try { parsed = JSON.parse(data); } catch (e) { parsed = data; }
-          handleEv(ev, parsed);
-          if (done) return;
-        }
-      }
-    }
-    _asstRecovering = false; _asstLastTs = Date.now();
-    var tries = 0;
-    while (!done && !aborted) {
-      try {
-        await streamOnce(tries === 0
-          ? { message: message, context: context, rid: rid, from: 0,
-              media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined),
-              force_effort: (opts && opts.forceEffort) || undefined,
-              force_model: (opts && opts.forceModel) || undefined }
-          : { rid: rid, from: evSeen });   // 重连:同 rid + from=已读事件数(服务端 detached 续发缓冲)
-      } catch (e) {
-        if (e && e.name === 'AbortError') {
-          if (_asstRecovering) { _asstRecovering = false; }   // 看门狗掐死僵死流 → 当断线重连
-          else { aborted = true; break; }                     // 用户点停止 → 保留已生成部分
-        }
-        // 其它(网络断 / Load failed)→ 落到下面重连
-      }
-      if (done || done === 'gone' || aborted) break;
-      if (++tries > 40) break;
-      try { am.innerHTML = '<span class="ep-asst-tool"><span class="ep-spin"></span> 连接断开,正在续传…</span>'; aiBody.scrollTop = aiBody.scrollHeight; } catch (e) {}
-      await _whenVisible();
-      await new Promise(function (rs) { setTimeout(rs, Math.min(400 * tries, 2000)); });
-    }
-    if ((done === 'gone' || (!done && !aborted)) && !answer) {
-      try { am.innerHTML = '<span class="ep-asst-tool"><span class="ep-spin"></span> 正在恢复…</span>'; } catch (e) {}
-      var rec = await _recoverAsst();
-      if (rec && rec.content) { answer = rec.content; traceData = rec.trace || traceData; }
-    }
-    // 收尾:停揭示循环 + 撤流式提亮(下面 setMd 重渲成干净 markdown,无 span/光标,MathJax 只在这跑一次,照搬 PDF 收尾)
-    _stopReveal();
-    am.classList.remove('ep-mfx-streaming');
-    // 剥 FOLLOWUP → 完整渲染 + 章节 linkify → 追问 chip → trace ℹ️
-    var pf = (window.RC && RC.assistant) ? RC.assistant.splitFollowups(answer) : { text: answer, followups: [] };
-    if (pf.text) { setMd(am, pf.text); linkifyChapters(am); chat.push({ role: 'assistant', content: answer }); }
-    else if (spinner) { am.textContent = aborted ? '(已停止)' : '(没拿到回答)'; }
-    if (!aborted && window.RC && RC.assistant) { try { RC.assistant.renderFollowups(am, pf.followups, function (q) { $('ep-ai-ta').value = q; sendChat(); }); } catch (e) {} }
-    if (!aborted && pf.text) { try { attachTrace(am, traceData, Math.floor(Date.now() / 1000)); } catch (e) {} }   // 「!」反馈条(本轮调用链 + 耗时/时刻);无 trace 也挂(兜底「回答」步给 ⚙）
-    _streaming = false; _setSend(false); _asstAbort = null; _asstRecovering = false;
-    try { _epFlushActions(); } catch (e) {}   // 本轮 assistant 消息已落库 → 把排队的写操作卡 attach 进它的 meta.actions
-  }
-
-  // 切后台→回前台:iOS 常把进行中的 SSE 掐死/僵死 → 回来 3s 没新进度就主动 abort,走 rid 重连
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState !== 'visible' || !_streaming) return;
-    setTimeout(function () {
-      if (_streaming && !_asstRecovering && (Date.now() - _asstLastTs > 3000)) {
-        _asstRecovering = true; try { _asstAbort && _asstAbort.abort(); } catch (e) {}
-      }
-    }, 3000);
-  });
-
-  // ── 历史:开助手 pane 时回灌服务端保存的对话(跨设备续上;一次性 guard)──
-  function greet() {   // M10:空/清空后欢迎语(镜像 PDF greet();「这页」→「这一章」)
-    var am = document.createElement('div'); am.className = 'ep-msg a';
-    am.innerHTML = '我是这本书的阅读助手。试试:<br>· 这一章讲什么 / 总结这一章<br>· 翻译这段(先选中)<br>· 找讲XX的章跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>';
-    aiBody.appendChild(am);
-  }
-  function loadHistory() {
-    if (_histLoaded) return; _histLoaded = true;
-    fetch('/pdf/api/epub-convo?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || !d.ok || !d.messages || !d.messages.length) { greet(); return; }
-      aiBody.innerHTML = ''; chat = [];
-      d.messages.forEach(function (m) {
-        if (m.role === 'user') {
-          var um = document.createElement('div'); um.className = 'ep-msg u'; um.textContent = m.content || ''; aiBody.appendChild(um);
-          if (window.RC && RC.assistant) {
-            var items = [];   // ③ 历史回放的卡同样可点:正在看→跳节;选中→跳转+临时高亮(锚存在 meta.sel_anchor)
-            if (m.section != null) items.push({ text: '正在看:' + (chapLabelOf(m.section) || ('第 ' + (m.section + 1) + ' 节')),
-              title: '点击跳到该节',
-              onClick: function () { jumpTo(parseInt(m.section, 10) || 0, false); _drawerAfterJump(); } });
-            if (m.selection) items.push({ text: '选中:' + m.selection, formula: /\$/.test(m.selection),
-              title: '点击跳到该处并临时高亮',
-              onClick: function () {
-                var a = (m.sel_anchor && m.sel_anchor.section != null) ? m.sel_anchor : null;
-                _jumpFlashSel(a ? a.section : (parseInt(m.section, 10) || 0), a, m.selection);
-              } });
-            var cc = RC.assistant.contextCard(items); if (cc) um.appendChild(cc);
-          }
-          chat.push({ role: 'user', content: m.content || '' });
-        } else {
-          var am = document.createElement('div'); am.className = 'ep-msg a'; aiBody.appendChild(am);
-          var pf = (window.RC && RC.assistant) ? RC.assistant.splitFollowups(m.content || '') : { text: m.content || '', followups: [] };
-          setMd(am, pf.text); linkifyChapters(am);
-          if (window.RC && RC.assistant) { try { RC.assistant.renderFollowups(am, pf.followups, function (q) { $('ep-ai-ta').value = q; sendChat(); }); } catch (e) {} }
-          try { attachTrace(am, m.trace || null, m.ts || null); } catch (e) {}   // 历史也挂「!」反馈条(有 trace 显步骤,没有则兜底）
-          // 持久化回放:这条回合做过的写操作 → 逐个按 state 重渲撤销/重做卡(done→可撤销;undone→可重做)
-          if (Array.isArray(m.actions)) m.actions.forEach(function (a) { try { _epShowAction(a); } catch (e) {} });
-          if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (e) {} }   // 阶段C:视频卡刷新回放
-          chat.push({ role: 'assistant', content: m.content || '' });
-        }
-      });
-      aiBody.scrollTop = aiBody.scrollHeight;
-      requestAnimationFrame(function () { aiBody.scrollTop = aiBody.scrollHeight; });
-      setTimeout(function () { aiBody.scrollTop = aiBody.scrollHeight; }, 250);
-    }).catch(function () {});
-  }
-
-  function streamInto(card, url, body) { body.rid = 'e' + Date.now(); var acc = ''; sse(url, body, function (t) { acc += t; setMd(card, acc); aiBody.scrollTop = aiBody.scrollHeight; }, function () { if (!acc) card.textContent = '(空)'; }, function (er) { card.textContent = '✗ ' + er; }); }
+  function streamInto(card, url, body) { body.rid = 'e' + Date.now(); var acc = ''; sse(url, body, function (t) { acc += t; setMd(card, acc); _asstBody().scrollTop = _asstBody().scrollHeight; }, function () { if (!acc) card.textContent = '(空)'; }, function (er) { card.textContent = '✗ ' + er; }); }
 
   // ── 高亮(偏移锚:{section,start,end})──
   function hlColors() { return (window.RC && RC.settings && RC.settings.hlColors) ? RC.settings.hlColors() : ['#fff59d', '#a7f3d0', '#a3d4ff', '#fda4af']; }
@@ -2926,31 +2414,6 @@
     content.addEventListener('touchcancel', endf, { passive: true });
     content.addEventListener('wheel', function (e) { if (!e.ctrlKey) return; if (e.cancelable) { try { e.preventDefault(); } catch (_) {} } _fontStep(e.deltaY < 0 ? STEP : -STEP); }, { passive: false });
   })();
-  // 助手/目录/高亮/知识点 入口并入右侧统一抽屉(把手打开 + tab 切换);AI 模型设置走顶栏 ⚙(openSettings)
-  // 快捷栏由共享构建器填(与 PDF 同一份来源 → 按钮永不分叉;含知识点/清空/模型 + 媒体行)。EPUB 位置语义=「章」。
-  try {
-    if (window.rcBuildQuickBar) window.rcBuildQuickBar($('ep-asst-quick'), { knowledgeSend: '这一章涉及哪些知识点？简要讲讲', knowledgeLabel: '🧩 这章知识点' });
-    else if (window.rcBuildMediaRow) window.rcBuildMediaRow($('ep-asst-quick'));
-  } catch (e) {}
-  $('ep-ai-send').addEventListener('click', function () {
-    if (_streaming) { try { _asstAbort && _asstAbort.abort(); } catch (e) {} return; }   // 流式中点 ■ → 中止本轮
-    sendChat();
-  });
-  $('ep-ai-ta').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); micStop(); sendChat(); } });
-  $('ep-ai-ta').addEventListener('input', function () { this.style.height = 'auto'; this.style.height = Math.min(120, this.scrollHeight) + 'px'; });
-  // 底部快捷按钮(照搬 PDF asst-quick:data-send 直接发,data-q=clear 清空 + 清服务端历史)
-  document.getElementById('ep-asst-quick').addEventListener('click', function (e) {
-    var b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.q === 'models') { try { if (window.RC && RC.assistant && RC.assistant.openModelSettings) RC.assistant.openModelSettings(); } catch (_) {} return; }   // ⚙ 模型:流式中也可开(照搬 PDF data-q 不受 streaming 阻断)
-    if (_streaming) return;
-    if (b.dataset.q === 'clear') {
-      aiBody.innerHTML = ''; chat = []; _histLoaded = true;   // 别再回灌
-      greet();   // M10:清空后给欢迎语(镜像 PDF)
-      reqJson('POST', '/pdf/api/epub-convo/clear', { file: FREL }, function () {}, function () {});
-      return;
-    }
-    if (b.dataset.send) { $('ep-ai-ta').value = b.dataset.send; sendChat(); }
-  });
   // ── NotebookLM 式收藏集一键入口:**仅收藏夹(IS_FAV_BOOK)** 在助手快捷区置顶注入 3 个「整集级」动作 ──
   //   普通 EPUB 书 / PDF 阅读器都不注入 → 零影响。按钮走既有 data-send → 上面那个 #ep-asst-quick 委托 handler
   //   自动 sendChat 发预设 prompt(无需另接);它们住在 asst pane 的快捷区 = 侧栏助手打开时才可见/可点。
@@ -2979,73 +2442,6 @@
     });
   }
   _favNotebookEntries();
-  // ── 苹果风格语音按钮(逐字照搬 PDF 25-assistant.js:930-998):持续聆听,只手动停(再点麦克风/点发送即停)。
-  //    iOS 的 SpeechRecognition 静默时会自己结束 → 用户没手动停就 onend 重启 = 真·持续聆听。结果只填输入框、续写已有。
-  //    无 SR 的浏览器 → 聚焦输入框用系统键盘听写。micStop 为函数声明(本作用域提升),sendChat 前调它收口防迟到回填残留。
-  var micBtn = $('ep-ai-mic');
-  var ta = $('ep-ai-ta');
-  function autorow() { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; }
-  var _SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var micRec = null, micOn = false, micCommitted = '', micSessFinal = '', micSessTok = null, micLastWrite = '';
-  var micStartTs = 0, micLastStart = 0, micFails = 0, micSessProductive = false;
-  function micStop() {
-    if (!micOn) return;
-    micOn = false; micSessTok = null; micFails = 0;
-    try { micRec && micRec.stop(); } catch (_) {}
-    micBtn.classList.remove('on');
-  }
-  function micSpin() {
-    if (!micOn) return;
-    var tok = (micSessTok = {});
-    var thisRec;
-    try {
-      thisRec = micRec = new _SR();
-      micRec.lang = 'zh-CN'; micRec.interimResults = true; micRec.continuous = true; micRec.maxAlternatives = 1;
-      micSessFinal = ''; micSessProductive = false; micLastStart = Date.now();
-      micRec.onresult = function (e) {
-        if (!micOn || micSessTok !== tok) return;
-        micSessProductive = true;
-        var f = '', it = '';
-        for (var i = 0; i < e.results.length; i++) {
-          if (e.results[i].isFinal) f += e.results[i][0].transcript; else it += e.results[i][0].transcript;
-        }
-        micSessFinal = f;
-        ta.value = micCommitted + f + it; micLastWrite = ta.value; autorow();
-      };
-      micRec.onerror = function (ev) {
-        if (ev && (ev.error === 'not-allowed' || ev.error === 'service-not-allowed' || ev.error === 'audio-capture')) micOn = false;
-      };
-      micRec.onend = function () {
-        if (micRec !== thisRec) return;
-        if (micSessTok === tok && micSessFinal) { micCommitted = (micCommitted + micSessFinal).replace(/\s+$/, '') + ' '; }
-        micSessFinal = '';
-        micBtn.classList.remove('on');
-        if (!micOn) { autorow(); return; }
-        if (Date.now() - micStartTs > 120000) { micStop(); return; }
-        if (!micSessProductive && (Date.now() - micLastStart) < 1200) { if (++micFails >= 5) { micStop(); return; } }
-        else micFails = 0;
-        micBtn.classList.add('on');
-        setTimeout(function () { if (micOn && micRec === thisRec) micSpin(); }, micFails ? 700 : 0);
-      };
-      micRec.start();
-    } catch (_) { micOn = false; micSessTok = null; micBtn.classList.remove('on'); ta.focus(); }
-  }
-  function micStart() {
-    if (!_SR) { ta.focus(); return; }
-    micOn = true; micFails = 0; micStartTs = Date.now(); micBtn.classList.add('on');
-    micCommitted = ta.value ? (ta.value.replace(/\s+$/, '') + ' ') : '';
-    micSessFinal = ''; micLastWrite = ta.value;
-    micSpin();
-  }
-  ta.addEventListener('input', function () {
-    if (!micOn || ta.value === micLastWrite) return;
-    micSessTok = null;
-    micCommitted = ta.value; micLastWrite = ta.value; micSessFinal = '';
-    try { micRec && micRec.stop(); } catch (_) {}
-  });
-  document.addEventListener('visibilitychange', function () { if (document.hidden) micStop(); });
-  if (!_SR) micBtn.title = '点这里→用键盘的听写麦克风';
-  micBtn.addEventListener('click', function () { micOn ? micStop() : micStart(); });
   $('ep-fs-up').addEventListener('click', function () { st.fs = Math.min(220, st.fs + 10); localStorage.setItem(LS.fs, st.fs); applyStyle(); refreshSet(); });
   $('ep-fs-dn').addEventListener('click', function () { st.fs = Math.max(70, st.fs - 10); localStorage.setItem(LS.fs, st.fs); applyStyle(); refreshSet(); });
   $('ep-lh-up').addEventListener('click', function () { st.lh = Math.min(2.4, +(st.lh + 0.1).toFixed(1)); localStorage.setItem(LS.lh, st.lh); applyStyle(); refreshSet(); });
@@ -4493,7 +3889,6 @@
       ],
       onTab: function (name) {
         if (name === 'asst') {
-          if (!window.__asstLoaded) loadHistory();   // 共享侧栏(__asstLoaded)挂载时自管历史;仅内联逃生舱由 tab 切换触发
           try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true }); } catch (e) {}   // 切到助手 tab 就预热待命 Claude CLI 进程(照 PDF __asstPrewarm,通用端点跟具体书无关)
           try { if (window.__renderFigChips) window.__renderFigChips(); } catch (e) {}   // 开助手前点了图 → 进来补渲附件条
           try { if (window.__renderNoteChips) window.__renderNoteChips(); } catch (e) {}  // 补渲便签 chip(双击便签带进来的)
@@ -4589,6 +3984,11 @@
         clearFigFocus: function () { try { window.__clearFigAttached && window.__clearFigAttached(); } catch (_) {} },
         figThumb: function () {},
         locLabel: function (idx) { try { return chapLabelOf(parseInt(idx, 10) || 0) || ''; } catch (_) { return ''; } },
+        locNoun: function () { return '章'; },   // greet/提示语位置量词(PDF 默认「页」)
+        // 清理批次:EPUB 动作卡基建(持久撤销/重做卡)接给共享侧栏——SSE 'action' 事件 + 历史 m.actions 回放 + 后台任务完成持久卡
+        showAction: function (rec) { try { return _epShowAction(rec); } catch (_) { return null; } },
+        queueAction: function (rec) { try { _epQueueAction(rec); } catch (_) {} },
+        taskAction: function (uid) { try { _epTaskAction(uid); } catch (_) {} },
         noteAttached: function () { return window.__noteAttached || []; },
         clearNoteAttached: function () { try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {} },
         renderNoteChips: function () { try { if (typeof renderNoteChips === 'function') renderNoteChips(); } catch (_) {} },
@@ -4634,8 +4034,7 @@
   //         ③ 把共享 tab/pane 的 PDF class(side-tab/side-pane)补成 EPUB 抽屉 class → setTab() 认得
   //   首次开抽屉时 open()→setTab(_lastTab) 会正确激活共享 pane(class/data-pane 已就位),无需手动同步初始态。
   try {
-    var _uSh = ((location.search || '') + (location.hash || '')).indexOf('asst=inline') < 0;   // ③-4c:浏览器验证通过(2026-07-07)→ 共享侧栏翻默认;&asst=inline / #asst=inline = 内联逃生舱
-    if (_uSh && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {
+    if (window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {   // 清理批次:内联助手已物理删除 → 共享侧栏无条件挂载(逃生舱随之退役)
       var _op = document.getElementById('ep-side-asst');                                   // 内联 asst pane(模板)
       if (_op && _op.parentNode) _op.parentNode.removeChild(_op);
       var _ot = document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="asst"]');     // 内联 asst tab(RC.sidedrawer 建)

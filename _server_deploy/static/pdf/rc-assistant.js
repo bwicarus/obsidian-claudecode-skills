@@ -1142,7 +1142,7 @@
   }
   function _ctxCard(meta, live, msg) {
     if (!meta) return null;
-    var figs = (meta.figures || []).filter(function (f) { return f && f.box; });
+    var figs = (meta.figures || []).filter(function (f) { return f && (f.box || f.src); });   // PDF=box 裁图 / EPUB=图自带 src(epub-res)
     var sel = (meta.selection || '').trim();
     var page = parseInt(meta.page, 10) || 0;
     var bookRel = meta.file_rel || (typeof HOST.fileRel() !== 'undefined' ? HOST.fileRel() : '');
@@ -1166,9 +1166,14 @@
       figs.forEach(function (f) {
         var fr = f.file_rel || bookRel;
         var img = document.createElement('img'); img.className = 'actx-thumb'; img.alt = '';
-        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + f.page + ' · 点击跳转';
-        if (typeof window.__figThumb === 'function') HOST.figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
-        img.addEventListener('click', function () { _jumpToCtx(fr, f.page); });
+        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + (f.page != null ? (' · p' + f.page) : '') + ' · 点击跳转';
+        if (f.src && !f.box) img.src = f.src;   // EPUB:图自带 src(epub-res 直链),不走 PDF 裁图
+        else if (typeof window.__figThumb === 'function') HOST.figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
+        img.addEventListener('click', function () {
+          if (f.page != null) { _jumpToCtx(fr, f.page); return; }
+          var _fs = parseInt(f.section, 10);   // EPUB:跳图所在节(section 可能是 userpage 字符串 uid → 跳不了就不动)
+          if (!isNaN(_fs)) { try { HOST.goTo(_fs); } catch (_) {} }
+        });
         row.appendChild(img);
       });
       card.appendChild(row);
@@ -1375,6 +1380,7 @@
     return null;
   }
   function _setSendMode(stop) {   // 流式中:发送键→停止键(红 ■);否则发送(➤)
+    window.__asstStreaming = !!stop;   // 对外暴露流式态:EPUB 动作卡 attach(_epFlushActions)等本轮 assistant 消息落库再发
     if (stop) { sendBtn.classList.add('stop'); sendBtn.textContent = '■'; sendBtn.title = '停止'; }
     else { sendBtn.classList.remove('stop'); sendBtn.textContent = '➤'; sendBtn.title = '发送'; }
     sendBtn.disabled = false;
@@ -1460,6 +1466,7 @@
       else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
+      else if (ev === 'action' && parsed && parsed.id) { try { HOST.showAction && HOST.showAction(parsed); HOST.queueAction && HOST.queueAction(parsed); } catch (_) {} }   // EPUB 同步写工具:持久撤销/重做卡 + 排队落库(PDF 后端不发此事件)
       else if (ev === 'undo' && parsed && parsed.undo_id) {
         var _ujp = parsed.page ? ' <button class="asst-jump" data-page="' + esc(parsed.page) + '">↗ 跳转</button>' : '';
         addMsg('asst-a', '✓ ' + esc(parsed.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(parsed.undo_id) + '">↩ 撤销</button>');
@@ -1545,8 +1552,14 @@
         if (!d || !d.ok) { return; }
         if (d.status === 'running') { if (d.step) line.innerHTML = '<span class="asst-tool">⏳ ' + esc(d.step) + '…</span>'; setTimeout(poll, 2000); return; }
         if (d.status === 'done') {
+          try { if (d.client_actions && d.client_actions.length) runActions(d.client_actions); } catch (_) {}   // 任务附带的客户端副作用(如生词下划线刷新)
           var uid = d.result && d.result.undo_id;
-          line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+          if (uid && HOST.taskAction) {   // EPUB:后台任务完成 → 持久「详情/撤销/重做」卡(落库,刷新仍在)
+            line.innerHTML = '✓ ' + esc(d.speak || '完成');
+            try { HOST.taskAction(uid); } catch (_) {}
+          } else {
+            line.innerHTML = '✓ ' + esc(d.speak || '完成') + (uid ? ' <button class="asst-undo" data-uid="' + esc(uid) + '">↩ 撤销</button>' : '');
+          }
           notify('阅读助手 ✓', d.speak || '任务完成');
         } else { line.innerHTML = '✗ ' + esc(d.error || '没办成'); }
         scrollDown();
@@ -1743,7 +1756,10 @@
 
   function prewarm(off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (_) {} }
   window.__asstPrewarm = function () { try { prewarm(false); } catch (_) {} };   // 切到助手 tab 时也预热(减第二条起的冷启动)
-  function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
+  function greet() {
+    var _n = (HOST.locNoun && HOST.locNoun()) || '页';   // 位置量词按 reader(PDF=页 / EPUB=章)
+    addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>');
+  }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch(_HISTURL).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
@@ -1763,6 +1779,9 @@
               if (!u || !u.undo_id) return;
               var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
               addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+            });
+            if (Array.isArray(m.actions) && HOST.showAction) m.actions.forEach(function (a) {   // EPUB 动作卡回放(持久撤销⇄重做,存 meta.actions;PDF 无此字段)
+              try { HOST.showAction(a); } catch (_) {}
             });
           }
         });
