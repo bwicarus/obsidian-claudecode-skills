@@ -387,7 +387,7 @@
   tabBtn.className = 'side-tab'; tabBtn.dataset.pane = 'asst';
   // Apple/SF「sparkles」图标(替代 🤖 emoji),复用模板 .si 样式
   tabBtn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l1.4 4.2L18 9.6l-4.6 1.4L12 16l-1.4-4.6L6 9.6l4.6-1.4L12 4z"/><path d="M18.6 14.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7z"/></svg>助手';
-  tabBtn.onclick = function () { window.switchSideTab && window.switchSideTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
+  tabBtn.onclick = function () { window.switchSideTab && HOST.switchTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
   tabsEl.insertBefore(tabBtn, tabsEl.firstChild);
 
   // ── pane 注入 ──
@@ -521,7 +521,7 @@
   fab.id = 'asst-fab'; fab.title = '阅读助手'; fab.textContent = '🤖';
   fab.addEventListener('click', function () {
     try { if (typeof openGrammarPanel === 'function') openGrammarPanel(); } catch (_) {}
-    window.switchSideTab && window.switchSideTab('asst');
+    window.switchSideTab && HOST.switchTab('asst');
     prewarm(false);
     try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (_) {}
     setTimeout(function () { ta && ta.focus(); }, 250);
@@ -902,8 +902,8 @@
     var t = e.target;
     if (t && t.classList && t.classList.contains('asst-pagelink') && t.dataset.page && typeof window.jumpWithBack === 'function') {
       // AI 写的「第N页」是**书上印刷页码** → 跳转前转回 PDF 页索引(过本书页码对齐偏移)
-      var _pg = (typeof window._pdfFromDisp === 'function') ? window._pdfFromDisp(t.dataset.page) : parseInt(t.dataset.page, 10);
-      window.jumpWithBack(_pg);
+      var _pg = (typeof window._pdfFromDisp === 'function') ? HOST.pdfFromDisp(t.dataset.page) : parseInt(t.dataset.page, 10);
+      HOST.goTo(_pg);
     }
   });
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
@@ -935,7 +935,7 @@
     // 中间层不可用(legacy 无 adapter / RC 未加载)→ 回退直连 __voiceContext。便签合并见下方(消费侧,不变)。
     try {
       var g = (window.RC && RC.adapter && RC.adapter().getContext) ? RC.adapter().getContext() : null;
-      c = g || ((typeof window.__voiceContext === 'function') ? (window.__voiceContext() || c) : c);
+      c = g || ((typeof window.__voiceContext === 'function') ? (HOST.voiceContext() || c) : c);
     } catch (_) {}
     try { if (c && !c.visible_text) c.visible_text = _visibleText(); } catch (_) {}   // 视口焦点(镜像 EPUB 2516):AI 找视频/配图/回答紧扣当前屏幕,不退回泛章节
     // 便签注入(双击便签 → __noteAttached,见下方注入块):无笔画=文字+锚点附近正文走 context.notes 文本通道;
@@ -1031,7 +1031,7 @@
   }
   window.__noteInject = function (note) {
     try {
-      if (!note || !window.__asstOpen || !window.__asstOpen()) return false;   // 助手没开 → 维持现状(不注入)
+      if (!note || !window.__asstOpen || !HOST.asstOpen()) return false;   // 助手没开 → 维持现状(不注入)
       var list = window.__noteAttached = window.__noteAttached || [];
       var hasInk = !!(note.strokes && note.strokes.length);
       var old = null;
@@ -1059,7 +1059,7 @@
     page = parseInt(page, 10); if (!page || page < 1) return;
     var cur = (typeof HOST.fileRel() !== 'undefined') ? HOST.fileRel() : '';
     if (file_rel && cur && file_rel !== cur) { location.href = '/pdf/view?file=' + encodeURIComponent(file_rel) + '&page=' + page; return; }   // 跨书:正确路由是 /pdf/view(/pdf/ 是书架)
-    if (typeof window.jumpWithBack === 'function') window.jumpWithBack(page);
+    if (typeof window.jumpWithBack === 'function') HOST.goTo(page);
   }
   // ③ 上下文卡「选中」跳页后:目标页字符层里找到这段文字 → 临时呼吸高亮几秒后自动移除。
   // 机制**复用不重写**:高亮走 15-phrase 的 _activePhraseHl 状态 + renderPhraseHl 渲染管线
@@ -1120,7 +1120,7 @@
         var fr = f.file_rel || bookRel;
         var img = document.createElement('img'); img.className = 'actx-thumb'; img.alt = '';
         img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + f.page + ' · 点击跳转';
-        if (typeof window.__figThumb === 'function') window.__figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
+        if (typeof window.__figThumb === 'function') HOST.figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
         img.addEventListener('click', function () { _jumpToCtx(fr, f.page); });
         row.appendChild(img);
       });
@@ -1137,7 +1137,7 @@
       } else {
         s.textContent = '“' + (sel.length > 64 ? sel.slice(0, 64) + '…' : sel) + '”';
       }
-      s.title = page ? ('跳到第 ' + ((typeof window._dispPage === 'function') ? window._dispPage(page) : page) + ' 页') : '';
+      s.title = page ? ('跳到第 ' + ((typeof window._dispPage === 'function') ? HOST.dispPage(page) : page) + ' 页') : '';
       s.addEventListener('click', function () {   // ③ 跳页后把这段选中在页上临时呼吸高亮(跨书整页跳走,不闪)
         _jumpToCtx(bookRel, page);
         var curF = (typeof HOST.fileRel() !== 'undefined') ? HOST.fileRel() : '';
@@ -1147,7 +1147,7 @@
     }
     if (showPage) {
       var pg = document.createElement('span'); pg.className = 'actx-page';
-      pg.textContent = '📄 第 ' + ((typeof window._dispPage === 'function') ? window._dispPage(page) : page) + ' 页';   // 存的是 PDF 页 → 显印刷页
+      pg.textContent = '📄 第 ' + ((typeof window._dispPage === 'function') ? HOST.dispPage(page) : page) + ' 页';   // 存的是 PDF 页 → 显印刷页
       pg.addEventListener('click', function () { _jumpToCtx(bookRel, page); });
       card.appendChild(pg);
     }
@@ -1206,7 +1206,7 @@
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;
-      try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}   // 先把刚画的高亮渲出来
+      try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}   // 先把刚画的高亮渲出来
       var eid = 'ae' + (++_aeCtr);
       _assistEdits[eid] = { file: d.file || '', items: d.items.slice(),
                             ids: d.items.map(function (it) { return it.id; }).filter(Boolean), undone: false };
@@ -1238,7 +1238,7 @@
   //   任何一步都只碰 text/color/整条,绝不动 strokes/anchor/尺寸。
   function _assistNoteCard(d) {
     try {
-      window.notesReload();   // 先把刚建/改的便签渲出来
+      HOST.notesReload();   // 先把刚建/改的便签渲出来
       var eid = 'ae' + (++_aeCtr);
       _assistEdits[eid] = { ntype: 'note', op: d.op || 'create', file: d.file || '', items: d.items.slice(), undone: false };
       var it0 = d.items[0] || {};
@@ -1261,7 +1261,7 @@
   // 便签卡的撤销⇄重做执行(点 .asst-edit-undo 且 st.ntype==='note' 时走这;完成后重挂页面便签)
   function _noteEditToggle(st, eb) {
     var API = '/pdf/api/notes';
-    function fin(undone) { st.undone = undone; eb.disabled = false; eb.textContent = undone ? '↪ 重做' : '↩ 撤销'; window.notesReload(); }
+    function fin(undone) { st.undone = undone; eb.disabled = false; eb.textContent = undone ? '↪ 重做' : '↩ 撤销'; HOST.notesReload(); }
     function patchAll(vals, undone) {
       Promise.all((st.items || []).map(function (it) {
         var v = it[vals] || {};
@@ -1333,7 +1333,7 @@
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
     // (用户反馈:选中悄悄跟着每条消息发,但上方没有那个带 x 的框,无法取消)
-    try { if (!(window.__focusSel && window.__focusSel.text) && sentCtx.selection && sentCtx.selection.trim() && window.__setFocusSel) window.__setFocusSel(sentCtx.selection, 'text'); } catch (_) {}
+    try { if (!(window.__focusSel && window.__focusSel.text) && sentCtx.selection && sentCtx.selection.trim() && window.__setFocusSel) HOST.setFocusSel(sentCtx.selection, 'text'); } catch (_) {}
     if (!text) {
       // 空输入但有焦点上下文(带入的图 / 钉住的公式或段落 / 当前选中)→ 等于"就问这个",用默认问法直接发
       var _hasFig = (sentCtx.figures && sentCtx.figures.length);
@@ -1350,7 +1350,7 @@
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { window.__clearFigFocus && window.__clearFigFocus(); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带
-    try { window.__clearNoteAttached && window.__clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
+    try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
     // 逐字浮现的"揭示游标":跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)
@@ -1502,7 +1502,7 @@
   }
   thread.addEventListener('click', function (e) {
     var jb = e.target && e.target.closest && e.target.closest('.asst-jump');
-    if (jb) { var jp = parseInt(jb.getAttribute('data-page'), 10); if (jp && typeof window.jumpWithBack === 'function') window.jumpWithBack(jp); return; }
+    if (jb) { var jp = parseInt(jb.getAttribute('data-page'), 10); if (jp && typeof window.jumpWithBack === 'function') HOST.goTo(jp); return; }
     var redo = e.target && e.target.closest && e.target.closest('.asst-hl-redo');   // M9:删完的「↪ 重做」→ 用存的锚重建高亮(拿新 id)
     if (redo) {
       var rf = redo.getAttribute('data-file'), rd = {};
@@ -1513,7 +1513,7 @@
         .then(function (r) { return r.json(); })
         .then(function (d) {
           if (d && d.ok) {
-            try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+            try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}
             var db = document.createElement('button'); db.className = 'asst-hl-del';
             db.setAttribute('data-id', d.id || ''); db.setAttribute('data-file', rf); db.setAttribute('data-hl', redo.getAttribute('data-hl') || ''); db.textContent = '🗑 删除';
             var row2 = redo.closest('.asst-hl-row'); redo.replaceWith(db);
@@ -1535,7 +1535,7 @@
               var esc2 = (window.CSS && CSS.escape) ? CSS.escape(hid) : hid;
               document.querySelectorAll('.hl-saved[data-id="' + esc2 + '"]').forEach(function (el) { el.remove(); });
             } catch (_) {}
-            try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}   // 再重拉,同步 _hlByPage,翻页回来不复现
+            try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}   // 再重拉,同步 _hlByPage,翻页回来不复现
             var row = del.closest('.asst-hl-row');
             if (row) { row.style.opacity = '.45'; var tx = row.querySelector('.asst-hl-tx'); if (tx) tx.style.textDecoration = 'line-through'; }
             var _rb = document.createElement('button'); _rb.className = 'asst-hl-redo'; _rb.textContent = '↪ 重做';   // M9:删完转重做(用存的锚重建)
@@ -1557,7 +1557,7 @@
         Promise.all((st.ids || []).map(function (id) {
           return fetch('/pdf/api/highlights', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, id: id }) }).then(function (r) { return r.json(); }).catch(function () { return { ok: false }; });
         })).then(function () {
-          try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+          try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}
           st.undone = true; eb.disabled = false; eb.textContent = '↪ 重做';
         });
       } else {
@@ -1566,7 +1566,7 @@
           return fetch('/pdf/api/highlights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text }) }).then(function (r) { return r.json(); }).then(function (d) { return (d && d.ok) ? d.id : null; }).catch(function () { return null; });
         })).then(function (nids) {
           st.ids = nids.filter(Boolean);
-          try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+          try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}
           st.undone = false; eb.disabled = false; eb.textContent = '↩ 撤销';
         });
       }
@@ -1577,7 +1577,7 @@
     fetch('/api/assistant/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: uid }) })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.ok && d.kind === 'highlight') { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} }   // 撤销高亮要重渲页面才视觉清掉
+        if (d && d.ok && d.kind === 'highlight') { try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {} }   // 撤销高亮要重渲页面才视觉清掉
         btn.outerHTML = d && d.ok ? '<span class="asst-tool">↩ 已撤销</span>' : ('<span class="asst-tool">撤销失败:' + esc((d && d.error) || '') + '</span>');
       })
       .catch(function () { btn.disabled = false; btn.textContent = '↩ 撤销'; });
@@ -1598,12 +1598,12 @@
     if (ds) { if (!streaming) send(ds); return; }   // 学习类快捷按钮:直接发预设问题
     var q = btn && btn.getAttribute('data-q'); if (!q) return;
     try {
-      if (q === 'prev') window.changePage(-1);
-      else if (q === 'next') window.changePage(1);
-      else if (q === 'fit') window.fitWidth();
-      else if (q === 'zin') window.zoomChange(0.15);
-      else if (q === 'zout') window.zoomChange(-0.15);
-      else if (q === 'ptrans') window.togglePageTranslate();
+      if (q === 'prev') HOST.changePage(-1);
+      else if (q === 'next') HOST.changePage(1);
+      else if (q === 'fit') HOST.fitWidth();
+      else if (q === 'zin') HOST.zoomBy(0.15);
+      else if (q === 'zout') HOST.zoomBy(-0.15);
+      else if (q === 'ptrans') HOST.toggleTranslate();
       else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
       else if (q === 'models') { openModelSettings(); }
     } catch (_) {}
