@@ -4600,10 +4600,37 @@
         hlUrl: function () { return '/pdf/api/epub-highlights'; },
         notesUrl: function () { return '/pdf/api/notes'; },
         noteCompositeUrl: function () { return '/pdf/api/note-composite'; },
+        // ③-4b:chat/history/clear → EPUB 后端(epub_assistant.py);后端按原形取 file,故 history/clear 带 ?file=
+        chatUrl: function () { return '/pdf/api/epub-assistant'; },
+        historyUrl: function () { return '/pdf/api/epub-convo?file=' + encodeURIComponent(FREL); },
+        clearUrl: function () { return '/pdf/api/epub-convo/clear?file=' + encodeURIComponent(FREL); },
         mountPanel: function () { return document.getElementById('ep-side'); },
-        mountTabs: function () { var s = document.getElementById('ep-side'); return s ? (s.querySelector('.ep-side-tabs') || s.querySelector('.ep-side-tabbar') || s) : null; }
+        mountTabs: function () { return document.getElementById('ep-side-tabs') || document.getElementById('ep-side'); }
       }
     }
   };
   try { if (window.RC && RC.use) { RC.use(EpubHtmlAdapter); window.__epubHtmlAdapter = EpubHtmlAdapter; } } catch (e) {}
+
+  // ════════ ③-4b:?asst=shared → EPUB 退役内联助手,改挂共享侧栏(rc-assistant.js mountPdfSidebar)════════
+  //   默认(无 flag)完全走内联助手,零影响 → 浏览器验证 ?asst=shared 通过后再翻默认。
+  //   共享侧栏经 EpubHtmlAdapter._host.asst 的 HOST 取所有 reader 触点:chat/history/clear 端点→epub-*、
+  //   context→getContext()、导航→jumpTo、注解→epub-highlights;SSE 事件协议两后端本就同款。
+  //   步骤:① 摘掉模板内联 asst pane + RC.sidedrawer 建的内联 asst tab(避免 data-pane="asst" 撞两份)
+  //         ② mountPdfSidebar() 自建共享 tab+pane 进 #ep-side-tabs/#ep-side
+  //         ③ 把共享 tab/pane 的 PDF class(side-tab/side-pane)补成 EPUB 抽屉 class → setTab() 认得
+  //   首次开抽屉时 open()→setTab(_lastTab) 会正确激活共享 pane(class/data-pane 已就位),无需手动同步初始态。
+  try {
+    var _uSh = (location.search || '').indexOf('asst=shared') >= 0;
+    if (_uSh && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {
+      var _op = document.getElementById('ep-side-asst');                                   // 内联 asst pane(模板)
+      if (_op && _op.parentNode) _op.parentNode.removeChild(_op);
+      var _ot = document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="asst"]');     // 内联 asst tab(RC.sidedrawer 建)
+      if (_ot && _ot.parentNode) _ot.parentNode.removeChild(_ot);
+      RC.assistant.mountPdfSidebar();
+      var _nt = document.querySelector('#ep-side-tabs .side-tab[data-pane="asst"]');         // 共享 tab:PDF class → EPUB class
+      if (_nt) { _nt.classList.remove('side-tab'); _nt.classList.add('ep-side-tab'); }
+      var _np = document.getElementById('side-pane-asst');                                   // 共享 pane:补 EPUB class(setTab 靠它 + data-pane 找)
+      if (_np) _np.classList.add('ep-side-pane');
+    }
+  } catch (e) {}
 })();

@@ -157,6 +157,10 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       hlUrl: () => '/pdf/api/highlights',
       notesUrl: () => '/pdf/api/notes',
       noteCompositeUrl: () => '/pdf/api/note-composite',
+      // ③-4b:chat/history/clear 端点(PDF 默认=原字面量;EPUB host 覆盖成 epub-* 端点)
+      chatUrl: () => '/api/assistant/chat',
+      historyUrl: () => '/api/assistant/history',
+      clearUrl: () => '/api/assistant/clear',
       // ③-3:挂载点容器(侧栏往里建 tab/pane/DOM)。PDF=右侧抽屉 #grammar-panel + tab 栏 #side-tabs;
       //   EPUB 提供 #ep-side + 其 tab 栏。抽屉可见性类(.side-pane/.side-tab)仍 PDF 专属,③-4 再抽 EPUB 集成。
       mountPanel: () => document.getElementById('grammar-panel'),

@@ -2120,7 +2120,8 @@ def _eassistant_convo_clear():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     b = request.get_json(silent=True) or {}
-    file_rel = (b.get("file") or "").strip()
+    # ③-4b:共享侧栏清空是「POST 无 body」→ 从 query 取 file(内联 EPUB 仍传 body,两路都认)
+    file_rel = (b.get("file") or request.args.get("file") or "").strip()
     _econvo_clear(_uid(), file_rel)
     return jsonify({"ok": True})
 

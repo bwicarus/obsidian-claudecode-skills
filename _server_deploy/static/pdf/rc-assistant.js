@@ -379,6 +379,11 @@
         _charsRangeToText = HOST.charsRangeToText, _charRangeToPtRects = HOST.charRangeToPtRects,
         openGrammarPanel = HOST.openDrawer;
     var _HLURL = (HOST.hlUrl && HOST.hlUrl()) || '/pdf/api/highlights', _NOTESURL = (HOST.notesUrl && HOST.notesUrl()) || '/pdf/api/notes', _NCURL = (HOST.noteCompositeUrl && HOST.noteCompositeUrl()) || '/pdf/api/note-composite';   // ③-2:注解端点 reader 无关
+    // ③-4b:chat/history/clear 端点经 HOST(PDF 默认=原字面量→零回归;EPUB=epub-assistant/epub-convo[/clear]?file=)。
+    //   undo(/api/assistant/undo)、prewarm(/api/assistant/prewarm)、action-pref[s]、voice task-status 两阅读器**本就共用同一后端**,无需路由。
+    var _CHATURL = (HOST.chatUrl && HOST.chatUrl()) || '/api/assistant/chat',
+        _HISTURL = (HOST.historyUrl && HOST.historyUrl()) || '/api/assistant/history',
+        _CLEARURL = (HOST.clearUrl && HOST.clearUrl()) || '/api/assistant/clear';
 
 
   var streaming = false;   // 对话历史由服务端保存,前端不再持本地数组
@@ -388,7 +393,7 @@
   tabBtn.className = 'side-tab'; tabBtn.dataset.pane = 'asst';
   // Apple/SF「sparkles」图标(替代 🤖 emoji),复用模板 .si 样式
   tabBtn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l1.4 4.2L18 9.6l-4.6 1.4L12 16l-1.4-4.6L6 9.6l4.6-1.4L12 4z"/><path d="M18.6 14.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7z"/></svg>助手';
-  tabBtn.onclick = function () { window.switchSideTab && HOST.switchTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
+  tabBtn.onclick = function () { HOST.switchTab && HOST.switchTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
   tabsEl.insertBefore(tabBtn, tabsEl.firstChild);
 
   // ── pane 注入 ──
@@ -522,7 +527,7 @@
   fab.id = 'asst-fab'; fab.title = '阅读助手'; fab.textContent = '🤖';
   fab.addEventListener('click', function () {
     try { if (typeof openGrammarPanel === 'function') openGrammarPanel(); } catch (_) {}
-    window.switchSideTab && HOST.switchTab('asst');
+    HOST.switchTab && HOST.switchTab('asst');
     prewarm(false);
     try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (_) {}
     setTimeout(function () { ta && ta.focus(); }, 250);
@@ -1312,7 +1317,7 @@
   async function _recoverFromHistory(tries) {
     tries = tries || 0;
     try {
-      var r = await fetch('/api/assistant/history');
+      var r = await fetch(_HISTURL);
       var d = await r.json();
       if (d && d.ok && d.messages && d.messages.length) {
         var last = d.messages[d.messages.length - 1];
@@ -1417,7 +1422,7 @@
     // 开一条 SSE 读到自然结束/断开。首连带 message+context;重连只带 rid+from(服务端按 rid 续发缓冲事件)。
     async function _stream(body) {
       _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      var r = await fetch('/api/assistant/chat', {
+      var r = await fetch(_CHATURL, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body), signal: _abort ? _abort.signal : undefined,
       });
@@ -1605,7 +1610,7 @@
       else if (q === 'zin') HOST.zoomBy(0.15);
       else if (q === 'zout') HOST.zoomBy(-0.15);
       else if (q === 'ptrans') HOST.toggleTranslate();
-      else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
+      else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; fetch(_CLEARURL, { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
       else if (q === 'models') { openModelSettings(); }
     } catch (_) {}
   });
@@ -1693,7 +1698,7 @@
   window.__asstPrewarm = function () { try { prewarm(false); } catch (_) {} };   // 切到助手 tab 时也预热(减第二条起的冷启动)
   function greet() { addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这页讲什么 / 总结这页<br>· 翻译这段(先选中)<br>· 找讲XX的页跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>'); }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
-    fetch('/api/assistant/history').then(function (r) { return r.json(); }).then(function (d) {
+    fetch(_HISTURL).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
         var _lastQ = '';   // 历史回答的「!」反馈要带上「重答」用的原问题 → 记住上一条用户消息
         d.messages.forEach(function (m) {
