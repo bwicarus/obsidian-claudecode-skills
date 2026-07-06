@@ -1220,4 +1220,4 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 
 **顺带修复**:pyflakes 抓出 4d475c7(体检清理)误删 `_FAV_WAIT_HTML` 定义留使用(收藏夹在建等待页 NameError)→ 从 c39a499 原样找回。教训:**删除"死代码"前 pyflakes 全文件跑一遍**,grep 单符号会漏字符串模板这类定义与使用距离远的对子。
 
-**拆分禁区(记账)**:vocab 域(5 段碎,含单词本 tab 夹在语法域中间)、`_pam_*` 页锚迁移框架(跨全部 sidecar 域)。挂账:rc-ink.js 墨迹引擎三份合并(pdf-tail/epub-html/rc-stickynote)。
+**拆分禁区(记账)**:vocab 域(5 段碎,含单词本 tab 夹在语法域中间)、`_pam_*` 页锚迁移框架(跨全部 sidecar 域)。✅ rc-ink.js 墨迹引擎三份合并已完成(84cde1a):几何/渲染/命中/撤销栈唯一实现在 `rc-ink.js`(RCInk),pdf-tail/epub-html/rc-stickynote 改薄 wrapper(签名不变);兼容超集 `s.p||s.pts`、`s.t` 缺省 pen、defs 覆盖默认色宽 → 零数据迁移。指针状态机/保存策略/live canvas 三方真实分叉,**留在各自文件**(PDF=快照重绘、EPUB=视口叠加 live canvas、便签=rAF 小画布)。⚠ pdf_reader.html 里 rc-ink 必须在 `{% if ui_shared %}` 块**外**(pdf-tail 无条件加载);改 rc-ink 会 bust `_epub_js_v`+`_pdf_shared_js_v`。
