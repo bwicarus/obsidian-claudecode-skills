@@ -10477,7 +10477,11 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       //   DELETE(id+file)/note-composite(file+id)两侧一致,POST create 的 rects 仅 PDF(EPUB items 无 rects→侧栏 guard 跳过)。
       hlUrl: () => '/pdf/api/highlights',
       notesUrl: () => '/pdf/api/notes',
-      noteCompositeUrl: () => '/pdf/api/note-composite'
+      noteCompositeUrl: () => '/pdf/api/note-composite',
+      // ③-3:挂载点容器(侧栏往里建 tab/pane/DOM)。PDF=右侧抽屉 #grammar-panel + tab 栏 #side-tabs;
+      //   EPUB 提供 #ep-side + 其 tab 栏。抽屉可见性类(.side-pane/.side-tab)仍 PDF 专属,③-4 再抽 EPUB 集成。
+      mountPanel: () => document.getElementById('grammar-panel'),
+      mountTabs: () => document.getElementById('side-tabs')
     }
   });
   // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)

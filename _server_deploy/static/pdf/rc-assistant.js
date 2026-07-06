@@ -366,13 +366,13 @@
   if (!RC.assistant) return;
   RC.assistant.mountPdfSidebar = function () {
   if (window.__asstLoaded) return;
-  var panelEl = document.getElementById('grammar-panel');
-  var tabsEl = document.getElementById('side-tabs');
-  if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
-  window.__asstLoaded = true;
-    // ── ②b 共享层 HOST 别名:裸全局从 PdfAdapter._host.asst 取(纯转发,PDF 行为不变);
+    // ── ②b/③ 共享层 HOST:裸全局从 PdfAdapter._host.asst 取(纯转发,PDF 行为不变);挂载点/注解端点也经 HOST(reader 无关)。
     //    本地定义的函数(_flashSelOnPage/_jumpToCtx/_showHlPicker/_reloadHighlights/_assistEdit/_noteNearText)照常在下方定义。
     var HOST = (window.RC && RC.adapter && RC.adapter()._host && RC.adapter()._host.asst) || {};
+  var panelEl = (HOST.mountPanel && HOST.mountPanel()) || document.getElementById('grammar-panel');   // ③-3:挂载容器经 HOST(EPUB=#ep-side)
+  var tabsEl = (HOST.mountTabs && HOST.mountTabs()) || document.getElementById('side-tabs');
+  if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
+  window.__asstLoaded = true;
     var md = HOST.md, _toast = HOST.toast, _qhFmtTime = HOST.fmtTime,
         loadAllHighlights = HOST.loadAllHighlights, renderHighlightsOnPage = HOST.renderHighlightsOnPage,
         renderPhraseHl = HOST.renderPhraseHl, _removePhraseHighlight = HOST.removePhraseHighlight,
