@@ -101,3 +101,16 @@
 - **门控 `?asst=shared`**:默认无 flag=老 25-assistant(零风险);flag=老版自退、27-rc-adapter 在 bind 后调 mountPdfSidebar。
 - 对抗验证(general-purpose agent)**零遗漏裸全局**,node --check 过,已部署(默认不变)。
 - **待办**:浏览器 `?asst=shared` 跑一轮全功能确认 = 老版 → 翻默认(25-assistant 的 flag 逻辑反转/直接退役)+ 27-rc-adapter 无条件 mount。然后 ③ EPUB 提供 `asst` 袋复用这份 mountPdfSidebar(或抽成 mountSidebar(host))。
+
+## ③ 施工图(EPUB 复用共享侧栏)——mountPdfSidebar 里待泛化的 PDF 专属点
+
+> ②b 已把 PDF 侧栏搬进 `rc-assistant.js::RC.assistant.mountPdfSidebar()`(默认生效)。③ = 把它泛化成 reader 无关的 `mountSidebar(host)` + EPUB 提供 host + 退役 EPUB 内联引擎。规模≈②b。
+
+**待路由到 host 的 PDF 专属点**(在 mountPdfSidebar 体内):
+- **挂载点/DOM**(15):`#grammar-panel`/`#side-tabs`/`#side-pane-asst`/`#asst-quick`/`#asst-thread` → host.mountPoints()(EPUB=`#ep-side`/`#ep-asst-quick`/`#ep-ai-body`…)。或统一模板 id。
+- **页↔章语义**:`「第N页」`正则(174)+ 显示(774/784/808/854)、`window.jumpWithBack`(6)、`window._dispPage`(4)、`window._pdfFromDisp`(2)、`window.changePage`/`zoomChange`、`/pdf/view?file=&page=`(695 跨书)、`page_type:'pdf'`(567)→ host.goTo/dispLoc/locLabel(EPUB=章 idx/CFI,「第N章」)。
+- **端点**:`/pdf/api/highlights`(×4)、`/pdf/api/note-composite`、`/pdf/api/notes` → host.endpoints()(EPUB=`/pdf/api/epub-*` / epubHighlight client_action)。
+- **window.* ~30**:jumpWithBack/switchSideTab/changePage/zoomChange/_reloadHighlights/notesReload/__noteAttached/__clearNoteAttached/__setFocusSel/__voiceContext/__figThumb/renderVideos/rcMediaPrefer/rcNoBook/rcBuildQuickBar/rcBuildMediaRow… — PDF 上 window 有、EPUB 没有 → 全改 HOST.xxx(asst 袋已有大部分转发,补齐缺的)。
+- **发送/流式/工具循环**(send/loop/SSE):端点 `/api/assistant/*` 已 reader 无关(EPUB 后端 epub_assistant 有平行 `/pdf/api/epub-*`?需核)——host.chatEndpoints()。
+
+**做法**:同 ②b 用脚本把 `window.jumpWithBack(`→`HOST.goTo(` 等批量路由(asst 袋补齐 goTo/dispLoc/switchTab/changePage/zoomBy/reloadHighlights… 已多数就位);挂载点 + 页章显示串 + 端点经 host。PDF 的 host 转发到现有 window.*(零回归);EPUB 的 host 映射到自身。flag 门控(?asst=shared 已可复用)+ 浏览器验证 → 翻默认 → 退役 epub-html 内联 sendChat/runAssistant。
