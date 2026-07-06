@@ -58,14 +58,19 @@
     } catch (e) {}
     return s;
   };
+  // Apple 简约:细线条 SF 风图标(currentColor,跟顶栏一致)+ 文字标签,选中态蓝色描边
+  var _MEDIA_SVG = {
+    image: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l4.5-4.5 3.5 3 3-2.5 5 5"/></svg>',
+    video: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M10 9.5l4.5 2.5L10 14.5z" fill="currentColor" stroke="none"/></svg>'
+  };
   window.rcBuildMediaRow = function (inputEl) {
     if (!inputEl || !inputEl.parentNode || inputEl.__mediaRow) return;
     inputEl.__mediaRow = 1;
     var row = document.createElement('div'); row.className = 'rc-media-row';
-    [['image', '🖼', '配图'], ['video', '🎬', '视频']].forEach(function (t) {
-      var b = document.createElement('span'); b.className = 'rc-media-tg';
-      b.textContent = t[1] + ' ' + t[2];
-      b.title = '开启后 AI 回答时会倾向于用' + t[2] + '辅助解释(适合才配,不硬塞)';
+    [['image', '配图'], ['video', '视频']].forEach(function (t) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg';
+      b.innerHTML = _MEDIA_SVG[t[0]] + '<span>' + t[1] + '</span>';
+      b.title = '开启后 AI 回答时会倾向于用' + t[1] + '辅助解释(适合才配,不硬塞)';
       var lk = 'rc-prefer-' + t[0];
       try { if (localStorage.getItem(lk) === '1') b.classList.add('on'); } catch (e) {}
       b.addEventListener('click', function () {
@@ -91,10 +96,12 @@
       '.rc-vid-meta{padding:7px 9px}' +
       '.rc-vid-title{font-size:12.5px;color:#dbe7ff;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.rc-vid-ch{font-size:11px;color:#7c93c4;margin-top:3px}' +
-      '.rc-media-row{display:flex;gap:6px;padding:6px 10px 0;flex-wrap:wrap}' +
-      '.rc-media-tg{display:inline-flex;align-items:center;font-size:11.5px;color:#8fa4cc;background:#0d1322;border:1px solid #263255;border-radius:14px;padding:3px 11px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;transition:all .12s}' +
-      '.rc-media-tg:hover{border-color:#3b6db5}' +
-      '.rc-media-tg.on{background:#1a3a6a;border-color:#3b6db5;color:#cfe6ff;font-weight:600}';
+      '.rc-media-row{display:flex;gap:7px;padding:7px 10px 1px}' +
+      '.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:15px;padding:4px 12px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s;font-family:inherit}' +
+      '.rc-media-tg svg{opacity:.85}' +
+      '.rc-media-tg:active{transform:scale(.96)}' +
+      '.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
+      '.rc-media-tg.on svg{opacity:1}';
     (document.head || document.documentElement).appendChild(s);
   }
 })();

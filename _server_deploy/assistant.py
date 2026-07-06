@@ -1189,25 +1189,48 @@ def _t_search_image(args, ctx):
             "image_url": res["image_url"], "page_url": res.get("page_url", "")}
 
 
+def _optimize_video_query(topic):
+    """把用户想看的主题 → **一个优质 YouTube 搜索关键词**(便宜 Gemini Flash)。
+    用户报『直接拿原句搜、结果质量太差』的根治:学术/机制类优先英文+教学词(命中 Khan/科普动画那类高质量讲解),
+    通俗/文化类用中文。失败返回 None(调用方退回原词)。"""
+    try:
+        prompt = (
+            "用户在读书,想在 YouTube 找**讲解**下面这个主题的视频:\n「" + str(topic)[:200] + "」\n\n"
+            "请给出**一个**最能搜到**高质量讲解视频**的 YouTube 搜索关键词。规则:\n"
+            "- 学术/科学/技术/机制/数学类主题 → **优先英文**(英文讲解视频质量远高,如物理/生物/数学的机制动画),"
+            "加上 explained / animation / lecture / how it works 之类教学向词;\n"
+            "- 通俗/文化/历史/中文特定主题 → 用中文,加 讲解/原理/教程 之类;\n"
+            "- 只保留**核心概念**,别照抄整句、别加书名/章节号/作者名。\n"
+            "**只输出这一个关键词本身(一行),不要引号、不要解释、不要给多个选项。**"
+        )
+        out = (_gemini_text(prompt, max_tokens=120, think=False, timeout=20) or "").strip()
+        if out:
+            out = out.splitlines()[0].strip().strip('「」""\'` ')
+        return out[:120] or None
+    except Exception:
+        return None
+
+
 def _t_search_video(args, ctx):
     """搜教学视频(YouTube)并在对话里渲染**可播放**卡片。只在用户明确要『找视频/看视频讲解/有没有视频』时用,
-    别对每个概念都配视频。args {query?}(不传用选中/焦点)。结果卡由 client_action renderVideos 渲染。"""
+    别对每个概念都配视频。args {query?}(传**核心主题**即可,工具内部会自动优化成优质搜索词——学术类会转英文教学词)。"""
     q = (args.get("query") or "").strip() or (ctx.get("selection") or "").strip() or (ctx.get("focus_text") or "").strip()
     if not q:
         return {"error": "缺 query(要搜什么视频)"}
+    search_q = _optimize_video_query(q[:200]) or q[:120]   # AI 拟优质搜索词;失败退原词
     try:
         import youtube_search
-        res = youtube_search.search(q[:120], max_results=6)
+        res = youtube_search.search(search_q, max_results=6)
     except Exception as e:
         return {"error": str(e)[:120]}
     if not res.get("ok"):
         return {"error": res.get("error") or "没搜到视频"}
     vids = res["videos"]
-    return {"ok": True, "count": len(vids),
+    return {"ok": True, "count": len(vids), "query_used": search_q,
             # 只把标题/频道回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
             "videos": [{"title": v.get("title", ""), "channel": v.get("channel", "")} for v in vids],
             "client_action": {"fn": "renderVideos", "args": [vids]},
-            "_note": "视频卡片已在对话里渲染、用户可直接点开播放。你只需简短说一句『给你找到这些视频』,别复述标题/链接。"}
+            "_note": "视频卡片已在对话里渲染、用户可直接点开播放。你只需简短说一句『给你找到这些视频』(可提一句用的搜索词),别复述标题/链接。"}
 
 
 def _t_lookup_word(args, ctx):

@@ -346,6 +346,7 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 
 阅读器助手加了 `search_video` 工具,能在对话框里内嵌播放 YouTube。可迁移要点:
 
+- **AI 拟搜索词**(关键,`_optimize_video_query`):别直接拿用户原句/选中长句搜——YouTube 中文区对学术/机制类内容质量差。先用便宜 Gemini Flash 把主题转成**一个优质搜索词**:学术/科学/机制/数学类**优先英文**+教学词(explained/animation/lecture),通俗/文化类中文。实测「神经放电引起肌肉收缩」直接搜=眼皮跳/中风徵兆(垃圾),AI 拟成 `neuromuscular junction transmission animation explained` =Alila Medical Media/2-Minute Neuroscience 等专业讲解。⚠ Claude 原生 web search **不适合视频**:返回网页链接、拿不到 embeddable video id、不能内嵌播放。
 - **搜索后端**(`youtube_search.py`):YouTube Data API v3 `search.list`,`videoEmbeddable=true`(**关键**:否则内嵌 iframe 会「视频不可用」)。search.list=100 units/次、项目每天 10k → **必须缓存**(query→结果,30 天),否则每天只够 100 次搜索。配额跟其它 youtube 用途(如视频轮播)共享同一池。
 - **工具返回分层**:给 agent 的 `videos` 只留 title/channel(省 token,别把缩略图 URL/id 塞进模型上下文);完整数据(id/thumb)走 `client_action:{fn:'renderVideos', args:[vids]}` 给前端渲染。agent 只需说一句「给你找到这些」,别复述链接(卡片已显示)。
 - **内嵌播放 = lite-embed**(YouTube 官方推荐):先渲染缩略图 + ▶,**点击才**换成 `youtube-nocookie.com/embed/<id>?autoplay=1` iframe。省资源、快、不预连一堆第三方。
