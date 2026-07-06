@@ -10472,7 +10472,12 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       jumpToCtx: (m) => { try { if (typeof _jumpToCtx === 'function') _jumpToCtx(m); } catch (_) {} },
       prewarm: (off) => { try { window.__asstPrewarm && window.__asstPrewarm(off); } catch (_) {} },
       getPaidNoted: () => { try { return !!window.__paidNoted; } catch (_) { return false; } },
-      setPaidNoted: (v) => { try { window.__paidNoted = v; } catch (_) {} }
+      setPaidNoted: (v) => { try { window.__paidNoted = v; } catch (_) {} },
+      // ③-2:注解 CRUD 端点(reader 专属;EPUB 提供自己的)。body 语义(PDF rects vs EPUB cfi)差异由各 reader 后端/guard 处理;
+      //   DELETE(id+file)/note-composite(file+id)两侧一致,POST create 的 rects 仅 PDF(EPUB items 无 rects→侧栏 guard 跳过)。
+      hlUrl: () => '/pdf/api/highlights',
+      notesUrl: () => '/pdf/api/notes',
+      noteCompositeUrl: () => '/pdf/api/note-composite'
     }
   });
   // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)

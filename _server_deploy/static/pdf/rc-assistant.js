@@ -378,6 +378,7 @@
         renderPhraseHl = HOST.renderPhraseHl, _removePhraseHighlight = HOST.removePhraseHighlight,
         _charsRangeToText = HOST.charsRangeToText, _charRangeToPtRects = HOST.charRangeToPtRects,
         openGrammarPanel = HOST.openDrawer;
+    var _HLURL = (HOST.hlUrl && HOST.hlUrl()) || '/pdf/api/highlights', _NOTESURL = (HOST.notesUrl && HOST.notesUrl()) || '/pdf/api/notes', _NCURL = (HOST.noteCompositeUrl && HOST.noteCompositeUrl()) || '/pdf/api/note-composite';   // ③-2:注解端点 reader 无关
 
 
   var streaming = false;   // 对话历史由服务端保存,前端不再持本地数组
@@ -1006,7 +1007,7 @@
   window.__clearNoteAttached = function () { window.__noteAttached = []; _renderNoteChips(); };
   function _noteFetchThumb(entry) {
     setTimeout(function () {   // 稍等 rc-stickynote 的文字/笔画 PATCH 先落库,合成图才含最新内容
-      fetch('/pdf/api/note-composite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      fetch(_NCURL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file: (typeof HOST.fileRel() !== 'undefined' ? HOST.fileRel() : ''), id: entry.id }) })
         .then(function (r) { return r.json(); })
         .then(function (d) { if (d && d.ok && d.data_url) { entry._thumb = d.data_url; _renderNoteChips(); } })
@@ -1260,7 +1261,7 @@
   }
   // 便签卡的撤销⇄重做执行(点 .asst-edit-undo 且 st.ntype==='note' 时走这;完成后重挂页面便签)
   function _noteEditToggle(st, eb) {
-    var API = '/pdf/api/notes';
+    var API = _NOTESURL;
     function fin(undone) { st.undone = undone; eb.disabled = false; eb.textContent = undone ? '↪ 重做' : '↩ 撤销'; HOST.notesReload(); }
     function patchAll(vals, undone) {
       Promise.all((st.items || []).map(function (it) {
@@ -1509,7 +1510,7 @@
       try { rd = JSON.parse(redo.getAttribute('data-hl') || '{}'); } catch (_) {}
       if (!rd.rects || !rd.rects.length) { if (typeof _toast === 'function') _toast('这条没有几何信息,无法重建'); return; }
       redo.disabled = true; redo.textContent = '重建中…';
-      fetch('/pdf/api/highlights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rf, page: rd.page, rects: rd.rects, color: rd.color, text: rd.text }) })
+      fetch(_HLURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rf, page: rd.page, rects: rd.rects, color: rd.color, text: rd.text }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           if (d && d.ok) {
@@ -1527,7 +1528,7 @@
     if (del) {
       var hid = del.getAttribute('data-id'), hfile = del.getAttribute('data-file');
       del.disabled = true; del.textContent = '删除中…';
-      fetch('/pdf/api/highlights', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: hfile, id: hid }) })
+      fetch(_HLURL, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: hfile, id: hid }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           if (d && d.ok) {
@@ -1555,7 +1556,7 @@
       if (!st.undone) {
         eb.textContent = '撤销中…';
         Promise.all((st.ids || []).map(function (id) {
-          return fetch('/pdf/api/highlights', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, id: id }) }).then(function (r) { return r.json(); }).catch(function () { return { ok: false }; });
+          return fetch(_HLURL, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, id: id }) }).then(function (r) { return r.json(); }).catch(function () { return { ok: false }; });
         })).then(function () {
           try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}
           st.undone = true; eb.disabled = false; eb.textContent = '↪ 重做';
@@ -1563,7 +1564,7 @@
       } else {
         eb.textContent = '重做中…';
         Promise.all((st.items || []).map(function (it) {
-          return fetch('/pdf/api/highlights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text }) }).then(function (r) { return r.json(); }).then(function (d) { return (d && d.ok) ? d.id : null; }).catch(function () { return null; });
+          return fetch(_HLURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: st.file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text }) }).then(function (r) { return r.json(); }).then(function (d) { return (d && d.ok) ? d.id : null; }).catch(function () { return null; });
         })).then(function (nids) {
           st.ids = nids.filter(Boolean);
           try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}
