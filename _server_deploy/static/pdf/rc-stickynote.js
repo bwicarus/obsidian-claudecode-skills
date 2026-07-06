@@ -196,7 +196,25 @@
       '.rc-note.rc-note-darkbg .rc-note-handle::after{background:rgba(255,255,255,.42)}',
       '.rc-note.rc-note-darkbg .rc-note-rs::after{border-right-color:rgba(255,255,255,.6);border-bottom-color:rgba(255,255,255,.6)}',
       '.rc-note.rc-note-darkbg .rc-note-rs-tl::after{border-left-color:rgba(255,255,255,.6);border-top-color:rgba(255,255,255,.6)}',
-      '.rc-note.rc-note-darkbg .rc-note-tools{background:rgba(255,255,255,.12)}'
+      '.rc-note.rc-note-darkbg .rc-note-tools{background:rgba(255,255,255,.12)}',
+      /* ── 视频便签:有 video 时 body 改 flex 列(播放器 + 控件 + 文字备注),隐藏手写层 ── */
+      '.rc-note-video{display:none}',
+      '.rc-note.rc-note-hasvideo .rc-note-body{display:flex;flex-direction:column;padding:0;overflow:hidden}',
+      '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none}',
+      '.rc-note.rc-note-hasvideo .rc-note-ink{display:none}',
+      '.rc-note.rc-note-hasvideo .rc-note-text{position:relative;left:auto;top:auto;width:100%;height:auto;flex:1;min-height:30px;font-size:13px;padding:6px 9px;background:transparent}',
+      '.rc-vid-embed{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer}',
+      '.rc-vid-embed img{width:100%;height:100%;object-fit:cover;display:block}',
+      '.rc-vid-if{width:100%;aspect-ratio:16/9;border:0;display:block}',
+      '.rc-vid-go{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:42px;height:42px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:15px;cursor:pointer;padding-left:2px}',
+      '.rc-vid-embed:hover .rc-vid-go{background:rgba(220,40,40,.92)}',
+      '.rc-vid-ctrls{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:5px 8px;font-size:11.5px;color:#2a2a2a;background:rgba(255,255,255,.42);border-top:1px solid rgba(0,0,0,.08)}',
+      '.rc-note-darkbg .rc-vid-ctrls{color:#e8eefc;background:rgba(0,0,0,.22);border-top-color:rgba(255,255,255,.12)}',
+      '.rc-vid-ctrls label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}',
+      '.rc-vid-ctrls .rc-vc-start,.rc-vid-ctrls .rc-vc-end{width:46px;border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:2px 4px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
+      '.rc-vid-ctrls select{border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:1px 3px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
+      '.rc-note-darkbg .rc-vid-ctrls .rc-vc-start,.rc-note-darkbg .rc-vid-ctrls .rc-vc-end,.rc-note-darkbg .rc-vid-ctrls select{background:rgba(255,255,255,.14);color:#eef;border-color:rgba(255,255,255,.24)}',
+      '.rc-vc-ck input{margin:0 2px 0 0}'
     ].join('\n');
     document.head.appendChild(css);
   }
@@ -236,6 +254,7 @@
     root.innerHTML =
       '<div class="rc-note-handle"><button class="rc-note-del" title="删除便签">🗑</button></div>' +
       '<div class="rc-note-body">' +
+        '<div class="rc-note-video"></div>' +
         '<textarea class="rc-note-text" placeholder="输入文字…(笔=手写)"></textarea>' +
         '<canvas class="rc-note-ink"></canvas>' +
         '<div class="rc-note-tools"></div>' +
@@ -249,6 +268,7 @@
       body: root.querySelector('.rc-note-body'),
       ta: root.querySelector('.rc-note-text'),
       cv: root.querySelector('.rc-note-ink'),
+      video: root.querySelector('.rc-note-video'),
       tools: root.querySelector('.rc-note-tools'),
       rs: root.querySelector('.rc-note-rs'),
       rsTL: root.querySelector('.rc-note-rs-tl'),
@@ -265,13 +285,105 @@
       h += '<button class="rc-note-swatch" data-c="' + COLORS[i].c + '" style="background:' + COLORS[i].c + '" title="' + COLORS[i].n + '"></button>';
     }
     h += '<button class="rc-note-tool" data-t="eraser" title="橡皮(点/划笔画删除整条;手指快速双击也可临时切换)">✒️</button>';
+    h += '<button class="rc-note-tool" data-t="video" title="加入/编辑视频(粘贴 YouTube 链接)">🎬</button>';
     ctl.tools.innerHTML = h;
     ctl.tools.addEventListener('click', function (e) {
       var b = e.target && e.target.closest ? e.target.closest('button') : null; if (!b) return;
       e.stopPropagation(); e.preventDefault();
       if (b.dataset.c) setColor(ctl, b.dataset.c);
       else if (b.dataset.t === 'eraser') setTool(ctl, NINK.tool === 'eraser' ? 'pen' : 'eraser', false);
+      else if (b.dataset.t === 'video') promptAddVideo(ctl);
     });
+  }
+
+  // ─────────────────────────── 视频便签(YouTube 嵌入 + 起止/速度/循环/字幕控件)───────────────────────────
+  function ytIdOf(s) {
+    s = String(s || '').trim();
+    var m = s.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?v=|embed\/|v\/|shorts\/|live\/))([A-Za-z0-9_-]{11})/) || s.match(/^([A-Za-z0-9_-]{11})$/);
+    return m ? m[1] : '';
+  }
+  function vEmbedSrc(v) {
+    var p = ['enablejsapi=1', 'playsinline=1', 'rel=0', 'autoplay=1', 'cc_lang_pref=zh-Hans'];
+    if (v.start) p.push('start=' + Math.max(0, v.start | 0));
+    if (v.end) p.push('end=' + Math.max(0, v.end | 0));
+    if (v.loop) { p.push('loop=1'); p.push('playlist=' + v.id); }
+    p.push('cc_load_policy=' + (v.cc !== false ? 1 : 0));
+    return 'https://www.youtube-nocookie.com/embed/' + v.id + '?' + p.join('&');
+  }
+  function secToMMSS(s) { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
+  function mmssToSec(str) {
+    str = String(str || '').trim(); if (!str) return 0;
+    if (/^\d+$/.test(str)) return parseInt(str, 10);
+    var m = str.match(/^(\d+):(\d{1,2})$/); return m ? (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) : 0;
+  }
+  function setRate(ctl, r) {
+    // enablejsapi=1 后经 postMessage 设倍速(YT player ready 才响应 → 载入后多次尝试)
+    var f = ctl.__vif; if (!f || !f.contentWindow) return;
+    [200, 700, 1500].forEach(function (d) {
+      setTimeout(function () { try { f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'setPlaybackRate', args: [r] }), '*'); } catch (e) {} }, d);
+    });
+  }
+  function renderNoteVideo(ctl) {
+    var v = ctl.note.video, box = ctl.video; if (!box) return;
+    if (!v || !v.id) { ctl.root.classList.remove('rc-note-hasvideo'); box.innerHTML = ''; box.__sig = ''; ctl.__vif = null; return; }
+    ctl.root.classList.add('rc-note-hasvideo');
+    var sig = JSON.stringify(v);
+    if (box.__sig === sig) return;   // 无变化不重建(防控件输入时闪 iframe)
+    box.__sig = sig; ctl.__vif = null;
+    box.innerHTML =
+      '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>' +
+      '<div class="rc-vid-ctrls">' +
+        '<label>起<input class="rc-vc-start" inputmode="numeric" placeholder="0:00"></label>' +
+        '<label>止<input class="rc-vc-end" inputmode="numeric" placeholder="结尾"></label>' +
+        '<label>速<select class="rc-vc-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>' +
+        '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-loop">循环</label>' +
+        '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-cc">字幕</label>' +
+      '</div>';
+    var emb = box.querySelector('.rc-vid-embed');
+    box.querySelector('.rc-vc-start').value = v.start ? secToMMSS(v.start) : '';
+    box.querySelector('.rc-vc-end').value = v.end ? secToMMSS(v.end) : '';
+    box.querySelector('.rc-vc-rate').value = String(v.rate || 1);
+    box.querySelector('.rc-vc-loop').checked = !!v.loop;
+    box.querySelector('.rc-vc-cc').checked = v.cc !== false;
+    var loadFrame = function () {
+      if (emb.querySelector('iframe')) return;
+      var f = document.createElement('iframe'); f.className = 'rc-vid-if';
+      f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; f.setAttribute('allowfullscreen', '');
+      f.src = vEmbedSrc(v);
+      emb.innerHTML = ''; emb.appendChild(f); ctl.__vif = f;
+      f.addEventListener('load', function () { setRate(ctl, v.rate || 1); });
+    };
+    emb.querySelector('.rc-vid-go').addEventListener('click', loadFrame);
+    // 控件改动 → 更新 note.video → 存后端 → 起止/循环/字幕改 URL 参数须重载 iframe;速度用 postMessage
+    var applyPatch = function (patch, needReload) {
+      for (var k in patch) v[k] = patch[k];
+      box.__sig = JSON.stringify(v);   // 自己改的:更新签名,避免 syncCtl 回灌重建
+      patchNote(ctl.note, { video: v });
+      if (needReload && ctl.__vif) { ctl.__vif.src = vEmbedSrc(v); ctl.__vif.addEventListener('load', function () { setRate(ctl, v.rate || 1); }, { once: true }); }
+    };
+    box.querySelector('.rc-vc-start').addEventListener('change', function () { applyPatch({ start: mmssToSec(this.value) }, true); });
+    box.querySelector('.rc-vc-end').addEventListener('change', function () { applyPatch({ end: mmssToSec(this.value) }, true); });
+    box.querySelector('.rc-vc-rate').addEventListener('change', function () { var r = parseFloat(this.value) || 1; applyPatch({ rate: r }, false); setRate(ctl, r); });
+    box.querySelector('.rc-vc-loop').addEventListener('change', function () { applyPatch({ loop: this.checked }, true); });
+    box.querySelector('.rc-vc-cc').addEventListener('change', function () { applyPatch({ cc: this.checked }, true); });
+  }
+  function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
+    var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
+    v.id = id; ctl.note.video = v;
+    if (ctl.note.collapsed) { ctl.note.collapsed = false; ctl.root.classList.remove('rc-note-collapsed'); patchNote(ctl.note, { collapsed: false }); }
+    patchNote(ctl.note, { video: v });
+    renderNoteVideo(ctl);
+  }
+  window.__rcNoteSetVideo = function (noteId, id) { var c = ctls[noteId]; if (c) setNoteVideo(c, id); };   // 拖放(阶段B)用
+  function promptAddVideo(ctl) {
+    var cur = ctl.note.video && ctl.note.video.id;
+    var url = window.prompt('粘贴 YouTube 链接或视频 ID' + (cur ? '(留空=移除视频)' : '') + '：', cur || '');
+    if (url === null) return;
+    url = url.trim();
+    if (!url) { if (cur) { ctl.note.video = null; patchNote(ctl.note, { video: null }); renderNoteVideo(ctl); } return; }
+    var id = ytIdOf(url);
+    if (!id) { alert('没识别出 YouTube 视频 ID'); return; }
+    setNoteVideo(ctl, id);
   }
 
   function bindCtl(ctl) {
@@ -353,6 +465,7 @@
     applyColor(ctl);
     applySize(ctl);
     ctl.root.classList.toggle('rc-note-collapsed', !!n.collapsed);
+    renderNoteVideo(ctl);   // 视频便签:有 video 则渲染播放器+控件(签名去重,无变化不重建)
     // 正在输入时(聚焦)不回灌服务端文字,防清掉未保存输入
     if (document.activeElement !== ctl.ta && ctl.ta.value !== (n.text || '')) ctl.ta.value = n.text || '';
   }

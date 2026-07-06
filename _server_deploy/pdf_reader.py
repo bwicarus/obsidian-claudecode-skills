@@ -5567,6 +5567,7 @@ def pdf_api_notes():
              "w": int(body.get("w") or 260), "h": int(body.get("h") or 180),
              "collapsed": bool(body.get("collapsed", False)),
              "strokes": body.get("strokes") if isinstance(body.get("strokes"), list) else [],
+             "video": body.get("video") if isinstance(body.get("video"), dict) else None,   # 视频便签:{id,title,start,end,rate,loop,cc}
              "created": now, "updated": now}
         items.append(n); _notes_save(rel, items)
         return jsonify({"ok": True, "id": n["id"], "note": n})
@@ -5589,6 +5590,8 @@ def pdf_api_notes():
         n["collapsed"] = bool(body.get("collapsed"))
     if isinstance(body.get("strokes"), list):
         n["strokes"] = body["strokes"]
+    if "video" in body:
+        n["video"] = body["video"] if isinstance(body.get("video"), dict) else None   # 传 null → 移除视频
     n["updated"] = now
     _notes_save(rel, items)
     return jsonify({"ok": True, "note": n})
