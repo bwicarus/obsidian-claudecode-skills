@@ -182,3 +182,7 @@
 **翻默认时的接线点**:收藏夹 NotebookLM 三入口重注入 `#asst-quick`(具名函数化 + 双目标 + CSS 双选择器 + 挂载后再调);onTab('asst') loadHistory 加 `__asstLoaded` 守卫;tab 聚焦补 `#asst-ta`。
 
 **遗留清理批次**(独立做,不阻断):物理删除 epub-html.js 内联助手代码(现完全惰性:pane 被摘、监听随 DOM 死)约 500+ 行(sendChat/runAssistant/流式渲染/mic/quick 绑定);EPUB 图 chip 缩略图(_ctxCard 过滤 f.box,EPUB 是 imgbox+src → HOST.figThumb 需按 src 实现);历史 action-card 回放(EPUB 存 actions 非 undo_cards);greet 措辞「页→章」按 host;模板静态 `#ep-side-asst` DOM 删除。
+
+## 清理批次完成(2026-07-07,task #253)
+
+内联助手已**物理删除**(~630 行:对话主体/流式揭示/反馈弹窗/mic/绑定 + 模板静态 pane + 逃生舱 flag)。EPUB 助手=共享侧栏,无 fallback。**动作卡基建保留**并接给共享侧栏:`_epShowAction/_epActDo/_epTaskAction/_epQueueAction/_epFlushActions/_epAssistEdit` 经 HOST(`showAction/queueAction/taskAction`)+ 容器 `_asstBody()`(=`#asst-thread`);共享侧栏新增 SSE `action` 事件分支、trackTask 的 client_actions+持久卡、历史 `m.actions` 回放、图 chip src 直链支路、greet 量词 `HOST.locNoun`。`addCard/streamInto`(showCard 入口)仍活,已重定向共享容器。四个小缺口(图 chip/action 回放/greet 措辞/物理删除)全部关闭。
