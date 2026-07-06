@@ -2279,6 +2279,25 @@
   });
 
   // ── 选区:cur._pending 优先(供别处带入),否则取正文活动选区;selection_sentence 给 cur.ctx ──
+  // 当前视口正在看的正文(注意力焦点):取与滚动容器视口相交的正文块文字,限长防 prompt 膨胀。
+  // EPUB 一节=整章内容太长,只给 AI 章节号会答偏(把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频紧扣当前。
+  function _visibleText() {
+    try {
+      var sc = content; if (!sc || !col) return '';
+      var r = sc.getBoundingClientRect(), top = r.top, bot = r.bottom;
+      var blocks = col.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,blockquote,figcaption,td');
+      var parts = [];
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i], br = b.getBoundingClientRect();
+        if (br.height && br.bottom > top + 8 && br.top < bot - 8) {   // 与视口相交(留 8px 容差,避开只露一线的块)
+          var t = (b.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t) parts.push(t);
+        }
+      }
+      var txt = parts.join('\n');
+      return txt.length > 1000 ? txt.slice(0, 1000) + '…' : txt;
+    } catch (e) { return ''; }
+  }
   function curSelection() {
     var sel = cur._pending || '', sent = '';
     if (sel) { sent = (cur.text === sel ? (cur.ctx || '') : ''); return { sel: sel, sent: sent }; }
@@ -2487,6 +2506,7 @@
         })
       };
     }
+    try { if (context && !context.visible_text) context.visible_text = _visibleText(); } catch (e) {}   // 视口焦点(adapter/fallback 两路都补)
     var rid = 'e' + Date.now() + '_' + (_ridCtr++);
     var evSeen = 0, done = false, aborted = false, answer = '', traceData = null, spinner = true;
     var strip = function (s) { return (window.RC && RC.assistant) ? RC.assistant.splitFollowups(s).text : s; };

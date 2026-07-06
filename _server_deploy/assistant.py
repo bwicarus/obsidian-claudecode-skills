@@ -2372,6 +2372,12 @@ def _sys_prompt(ctx):
     if isinstance(fsel, dict) and fsel.get("text"):
         fkind = "公式" if fsel.get("kind") == "formula" else "段落"
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
+    # 视口焦点:用户此刻**屏幕上正在看的正文**(前端按视口相交采集)。EPUB 一节=整章内容太长、AI 只知章节
+    #   会答偏(如把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频/配图/拟搜索词都紧扣当前注意力。限长防 prompt 膨胀。
+    vtext = _clean_tag(ctx.get("visible_text") or "")
+    if vtext:
+        learn_bits.append("★用户此刻**屏幕上正在看的部分**(注意力焦点;整节/整章其余内容只是背景。回答、找视频/"
+                          f"配图、拟搜索关键词都要紧扣这里,别退回泛泛的章节主题):「{vtext[:900]}」")
     # 本页是否有手写批注:① 先尝试**提取圈/划下的文字**直接当焦点(用户用笔圈词=就问这个词,最强信号);
     #                      ② 拿不到文字(纯涂画/箭头)再提示用 see_page 看合成图。
     if ctx.get("file_rel"):

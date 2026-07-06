@@ -360,3 +360,10 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 - **零改后端**:开启是「倾向不强制」——`window.rcMediaBias()` 读 localStorage 返回一段偏好提示,sendChat 发送前拼到 `message` 末尾(`message + rcMediaBias()`)。提示写明「适合才配、纯推导/基础常识别硬塞」,避免对纯文字问答硬配。
 - **气泡不受污染**:偏置只拼进 body 的 message 字段、不改 message 变量本身,用户气泡仍显示原问题(EPUB 气泡用 msg、PDF 用 text 原值,body 表达式拼接不回写变量)。
 - 共享实现在 `rc-video.js`(`rcMediaBias` + `rcBuildMediaRow(inputEl)`),PDF(挂 #asst-input)/EPUB(挂 #ep-ai-input)各一行调用。
+
+
+### 视口焦点上下文(2026-07-06):给 AI「用户此刻在看哪一段」而非只给章节
+- **问题**:EPUB 一节=整章内容,助手上下文只有章节号 → AI 只知「在看 §3-3 生物学」,不知用户视口正盯着「酶/三羧酸循环」那几段 → 回答/找视频退回泛泛的章节主题(把「酶」搜成「生物物理」)。
+- **修法**:前端 `_visibleText()` 采集**与滚动容器视口相交**的正文块文字(p/h*/li/blockquote/td),限长 1000 字防 prompt 膨胀,随 context 发 `visible_text`;后端 `learn_bits` 加一条「★用户此刻屏幕上正在看的部分(注意力焦点;其余是背景。回答/找视频/拟搜索词都紧扣这里)」。空则不加(有依据才占 prompt)。
+- **效果**:AI 拟视频/配图搜索词、回答都紧扣当前视口内容,不再退回章节泛主题。跟 `_optimize_video_query` 协同(prompt 有焦点 → agent 传的 query 就准)。
+- **未做(有依据地克制)**:用户提的「注意力时间线(查词/滚动/提问时序)」价值边际递减 + 每事件吃 prompt 长度,视口焦点已解决主要问题;真需要再做极简版(只带最近查的 2-3 个词,vocab 日志已有)。
