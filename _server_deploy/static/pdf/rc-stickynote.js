@@ -146,7 +146,11 @@
       // user-select:text 在 root 就显式设(不只 body):iOS WebKit 对 none 祖先链内 textarea 的渲染 bug,
       // 中间层显式 text 有时仍不够,全链切断最稳(handle 自己再设回 none 供拖拽)。
       '.rc-note{position:absolute;z-index:40;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transform-origin:top left;-webkit-user-select:text;user-select:text}',
-      '.rc-note.rc-note-active{z-index:60}',
+      // 展开态置顶:盖过两侧栏(#grammar-panel/#ep-side=120)、把手(130)、PDF 选中框(135)与相邻页;仍低于模态遮罩(≥200)。
+      //   祖先(#main / .page-wrap / .ep-sec)稳态无 z-index/zoom → 不成层叠上下文,便签在根上下文里抬高即生效。
+      //   折叠态(仅手柄)保持低层(40),侧栏开着时不挡。
+      '.rc-note:not(.rc-note-collapsed){z-index:140}',
+      '.rc-note.rc-note-active{z-index:150}',
       // handle:短矩形,常驻,显示便签色;::before 扩触控区 ≥32px(视觉小、命中大)
       '.rc-note-handle{position:relative;width:56px;height:20px;border-radius:7px;border:1px solid rgba(0,0,0,.28);box-shadow:0 2px 6px rgba(0,0,0,.3);cursor:grab;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}',
       '.rc-note-handle::before{content:"";position:absolute;left:-8px;right:-8px;top:-8px;bottom:-8px}',
