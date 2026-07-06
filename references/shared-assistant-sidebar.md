@@ -169,3 +169,16 @@
 **已知小缺口(记录,非阻断)**:① history 内 **action-card 回放**(EPUB 存 `actions` 非 `undo_cards`)② per-msg **section-jump chip**(存 `section` 非 `page`,`_ctxCard` 读 `page`)③ 内联 `onTab('asst')` 在 flag 下仍空跑一次 loadHistory(渲进已移除 DOM,无害)。
 
 **翻默认步骤**(浏览器验证通过后):epub-html.js 把 `var _uSh = …indexOf('asst=shared')>=0` 改成恒 true(或去掉 flag 判定直接挂),再从模板删静态 `#ep-side-asst` 内联助手 DOM + 从 epub-html.js 删内联 `sendChat/runAssistant/流式/quick绑定/mic`(退役内联),部署验证。
+
+## ③-4c 翻默认 + 首轮实测修复(2026-07-07,用户验证「用起来没问题」)
+
+**EPUB 共享侧栏已是默认**;逃生舱 `&asst=inline` / `#asst=inline`(反转前是 `asst=shared` 门控)。
+
+首轮浏览器实测暴露并修复的三类问题(全在 commit 46 前后两个提交里):
+1. **图片 502 洪泛**:流式每个 answer 事件全量重渲把 `<img>` 反复销毁重建 → 同 URL 十几个并发慢代理请求打满 gunicorn → 502。修:renderMd 流式期间 img→占位符、收尾才真渲;`rcImgStabilize`(rc-video)+ 全局失败表 `__rcImgFail`;img-proxy 磁盘缓存(`state/img-proxy-cache/`)+ 同 URL single-flight;**hash 修复分支补上原图 URL**(上次只认 /thumb/,AI 编原图路径错 hash 直穿 502)。实测:错 hash 原图冷取 200/1.15s,热取 0.002s。
+2. **流式动效消失**:揭示游标 CSS 在 `mfx.css`,只有 PDF 模板引 → rc-assistant 检测不到 mfx.css link 时自动注入等价规则(颜色用实值不依赖 var;PDF 不注入零重复)。
+3. **选中/书页上下文断线**(三层):`getContext` 无参时 EPUB 不采选中 → adapter 自采(焦点 chip 优先+隐式兜底+锚点定格+visible_text 收进 adapter);`__asstOpen` 只认已摘的内联 pane → 也认 `#side-pane-asst`;三个 chip 渲染器(选中/图/便签)双目标 `#asst-input`。另加 `_ctxCard` 章 chip(`HOST.locLabel` 支路)+ EPUB 选中 chip 点击走 `HOST.flashSelOnPage`。
+
+**翻默认时的接线点**:收藏夹 NotebookLM 三入口重注入 `#asst-quick`(具名函数化 + 双目标 + CSS 双选择器 + 挂载后再调);onTab('asst') loadHistory 加 `__asstLoaded` 守卫;tab 聚焦补 `#asst-ta`。
+
+**遗留清理批次**(独立做,不阻断):物理删除 epub-html.js 内联助手代码(现完全惰性:pane 被摘、监听随 DOM 死)约 500+ 行(sendChat/runAssistant/流式渲染/mic/quick 绑定);EPUB 图 chip 缩略图(_ctxCard 过滤 f.box,EPUB 是 imgbox+src → HOST.figThumb 需按 src 实现);历史 action-card 回放(EPUB 存 actions 非 undo_cards);greet 措辞「页→章」按 host;模板静态 `#ep-side-asst` DOM 删除。
