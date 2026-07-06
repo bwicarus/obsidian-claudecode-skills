@@ -114,3 +114,12 @@
 - **发送/流式/工具循环**(send/loop/SSE):端点 `/api/assistant/*` 已 reader 无关(EPUB 后端 epub_assistant 有平行 `/pdf/api/epub-*`?需核)——host.chatEndpoints()。
 
 **做法**:同 ②b 用脚本把 `window.jumpWithBack(`→`HOST.goTo(` 等批量路由(asst 袋补齐 goTo/dispLoc/switchTab/changePage/zoomBy/reloadHighlights… 已多数就位);挂载点 + 页章显示串 + 端点经 host。PDF 的 host 转发到现有 window.*(零回归);EPUB 的 host 映射到自身。flag 门控(?asst=shared 已可复用)+ 浏览器验证 → 翻默认 → 退役 epub-html 内联 sendChat/runAssistant。
+
+## ③ 进度更新(2026-07-07 续)
+
+- ✅ **③-1 导航/上下文层泛化**(部署):~28 处 PDF 专属 window.* 纯调用 → HOST.xxx(PDF 转发零回归;typeof 守卫→EPUB 兜底)。
+- ✅ **③-2 注解端点抽象**(部署):`/pdf/api/{highlights,notes,note-composite}` → HOST.hlUrl()/notesUrl()/noteCompositeUrl()(asst 袋加这 3 方法,PDF 返回原 URL)。body 语义差异(rects/cfi)由各 reader 后端 + rects guard 处理。
+- ⬜ **③-3 挂载点 DOM 抽象**:侧栏在 `#grammar-panel`/`#side-tabs` 里建 tab/pane/`#asst-quick`/`#asst-thread`/`#asst-input`;EPUB 是 `#ep-side` 内静态模板 DOM(`#ep-ai-body`/`#ep-asst-quick`/`#ep-ai-input`)。需 host 提供挂载容器/或统一模板 id;`「第N页」`显示串按 host.locLabel。
+- ⬜ **③-4 EPUB host + 挂载 + 退役内联**:EPUB 实现 `EpubHtmlAdapter._host.asst`(~48 方法映射到 section/CFI/ep 端点/ep DOM)→ `mountSidebar` 挂进 `#ep-side` → 退役 epub-html.js 内联 sendChat/runAssistant/流式 → flag(?asst=shared)门控 + 浏览器验证 → 翻默认。**这是最后一大块,动 EPUB 现有可用助手,需谨慎 + 浏览器验证。**
+
+> mountPdfSidebar 的 PDF 专属点现只剩:挂载点 DOM + `「第N页」`显示串。导航/上下文/注解端点已全经 HOST。
