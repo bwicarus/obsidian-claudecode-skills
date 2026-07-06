@@ -123,3 +123,25 @@
 - ⬜ **③-4 EPUB host + 挂载 + 退役内联**:EPUB 实现 `EpubHtmlAdapter._host.asst`(~48 方法映射到 section/CFI/ep 端点/ep DOM)→ `mountSidebar` 挂进 `#ep-side` → 退役 epub-html.js 内联 sendChat/runAssistant/流式 → flag(?asst=shared)门控 + 浏览器验证 → 翻默认。**这是最后一大块,动 EPUB 现有可用助手,需谨慎 + 浏览器验证。**
 
 > mountPdfSidebar 的 PDF 专属点现只剩:挂载点 DOM + `「第N页」`显示串。导航/上下文/注解端点已全经 HOST。
+
+## ③-4 EPUB host 映射表(实现蓝图,原语已摸清)
+
+> 在 `epub-html.js` 的 `EpubHtmlAdapter`(4526)加 `_host = { asst: {...} }`,注册处 4552(`RC.use(EpubHtmlAdapter)` 后)。EPUB 挂共享侧栏 = `RC.assistant.mountPdfSidebar()`(host 经 RC.adapter()._host.asst),flag 门控。
+
+| asst 方法 | EPUB 原语/映射 |
+|---|---|
+| md(t) | `renderMd(t)`(142) | toast(m) | `toast(m)`(3076) | fmtTime | 内联简单格式化 |
+| fileRel() | `FREL` | pdfNumPages()/locCount() | `COUNT`(总节数) | dispPage/pdfFromDisp | 恒等(章 idx=显示) |
+| goTo(loc) | `jumpTo(loc)`(357) + `_drawerAfterJump()` | goToInBook(fr,loc) | `location.href='/pdf/epub/view?file='+fr`(跨书) |
+| changePage(d) | `jumpTo(_curTopIdx+d)` | fitWidth/zoomBy/toggleTranslate | EPUB 无→no-op 或字号 |
+| openDrawer() | `RC.sidedrawer.open('asst')` | switchTab(n) | `RC.sidedrawer.open(n)` | asstOpen() | `.ep-side-pane[data-pane=asst].active`(1253) |
+| mountPanel() | `#ep-side` | mountTabs() | EPUB tab 栏(RC.sidedrawer 建;需确认 id) |
+| voiceContext() | null(EPUB 走 getContext) | noteAttached() | `window.__noteAttached`(1406) | clearNoteAttached/renderNoteChips | 同名(1437/renderNoteChips) |
+| notesReload() | `window.notesReload`(1729) | noteInject(n) | EPUB `__noteInject`(需确认) | assistEdit(d) | `_epShowAction`(2145)/`_epAssistEdit` |
+| reloadHighlights/loadAllHighlights/renderHighlightsOnPage | EPUB 高亮重载(需确认函数名) | showHlPicker | 共享 `window._showHlPicker`(侧栏自带) |
+| flashSelOnPage(p,t) | `_jumpFlashSel`(需确认签名) | noteNearText | EPUB 便签近文(需确认) | jumpToCtx | `jumpTo`+drawer |
+| renderPhraseHl/removePhraseHighlight/activePhraseHl/setActivePhraseHl/charsRangeToText/charRangeToPtRects | PDF 字符层/词组高亮专属 → **EPUB no-op**(侧栏内 _flashSelOnPage 会因此降级,可接受或用 EPUB _jumpFlashSel 替) |
+| prewarm(off) | EPUB prewarm(需确认) | getPaidNoted/setPaidNoted | `window.__paidNoted` |
+| hlUrl() | `/pdf/api/epub-highlights`(1209) | notesUrl() | EPUB 便签端点(需确认) | noteCompositeUrl() | `/pdf/api/note-composite`(共享,1440) |
+
+**③-4b 风险点**:①退役 epub-html 内联 `sendChat/runAssistant/流式`(改成共享侧栏的 send);②抽屉集成——共享侧栏 pane class 是 `.side-pane`,EPUB 抽屉认 `.ep-side-pane`(要么侧栏 pane class 也经 host、要么 EPUB CSS 认 .side-pane);③模板 `#ep-asst-quick`/`#ep-ai-*` 静态 DOM 与共享侧栏自建 `#asst-*` 冲突(EPUB 模板去掉静态助手 DOM,让共享侧栏建)。**必须 flag 门控 + 浏览器逐功能验证再翻默认。**
