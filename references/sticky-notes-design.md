@@ -158,6 +158,6 @@
 便签支持嵌 YouTube 视频 + 学习向控件。这是「拖视频到书里」大功能的地基(拖放/持久化/收藏为后续阶段)。
 - **数据**:note 加 `video` 字段 `{id, start, end, rate, loop, cc}`(后端 notes CRUD 的 POST/PATCH 支持,PATCH 传 `video:null` 移除)。
 - **渲染**(rc-stickynote.js `renderNoteVideo`):有 video 时给 root 加 `.rc-note-hasvideo` → body 改 flex 列(播放器 16:9 + 控件行 + 文字备注),隐藏手写 canvas。lite-embed(缩略图 → 点▶ 加载 iframe)。签名(JSON.stringify(video))去重,防控件输入时闪 iframe。
-- **控件**:起/止时间(mm:ss 或秒,`mmssToSec`/`secToMMSS`)、速度、循环、字幕。起止/循环/字幕 → URL 参数(重载 iframe);速度 → `enablejsapi=1` + postMessage `setPlaybackRate`(player ready 才响应 → 载入后 200/700/1500ms 多次尝试)。字幕默认中文(`cc_lang_pref=zh-Hans`)。
+- **控件**:起/止时间(**分:秒两框**,数字键盘、秒 clamp 0-59)+ **⏱「设为当前播放位置」**(iframe enablejsapi 收 infoDelivery 拿 currentTime → 填框存后端、不重载不打断当前播放)、速度、循环、字幕、✕移除。起止/循环/字幕 → URL 参数(重载 iframe);速度 → `enablejsapi=1` + postMessage `setPlaybackRate`(player ready 才响应 → 载入后 200/700/1500ms 多次尝试)。字幕默认中文(`cc_lang_pref=zh-Hans`)。
 - **入口**:便签工具栏 🎬 按钮 → prompt 贴 YouTube 链接/ID(`ytIdOf` 解析 watch/youtu.be/embed/shorts/live/裸 id);留空移除。`window.__rcNoteSetVideo(noteId, ytid)` 供阶段 B 拖放复用。
 - **⚠ 待续**:阶段 B 拖放建便签、C 视频卡持久化(对话刷新不丢)、D 收藏视频到收藏夹。

@@ -219,6 +219,8 @@
       '.rc-vid-ctrls label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}',
       '.rc-vid-ctrls .rc-vc-sm,.rc-vid-ctrls .rc-vc-ss,.rc-vid-ctrls .rc-vc-em,.rc-vid-ctrls .rc-vc-es{width:26px;text-align:center;border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:2px 3px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
       '.rc-vid-ctrls .rc-vc-cn{margin:0 1px;opacity:.6}',
+      '.rc-vc-now{margin-left:4px;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:4px;width:22px;height:20px;line-height:1;font-size:11px;cursor:pointer;padding:0}',
+      '.rc-note-darkbg .rc-vc-now{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.24)}',
       '.rc-vid-ctrls select{border:1px solid rgba(0,0,0,.22);border-radius:4px;padding:1px 3px;font-size:11.5px;background:rgba(255,255,255,.75);color:#222}',
       '.rc-note-darkbg .rc-vid-ctrls .rc-vc-sm,.rc-note-darkbg .rc-vid-ctrls .rc-vc-ss,.rc-note-darkbg .rc-vid-ctrls .rc-vc-em,.rc-note-darkbg .rc-vid-ctrls .rc-vc-es,.rc-note-darkbg .rc-vid-ctrls select{background:rgba(255,255,255,.14);color:#eef;border-color:rgba(255,255,255,.24)}',
       '.rc-vc-ck input{margin:0 2px 0 0}'
@@ -330,6 +332,16 @@
       setTimeout(function () { try { f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'setPlaybackRate', args: [r] }), '*'); } catch (e) {} }, d);
     });
   }
+  // YouTube iframe(enablejsapi=1)收到 {event:listening} 后周期推 infoDelivery,含 currentTime → 存到对应便签 ctl.__vcur(供「⏱ 设为当前」读)。
+  function _hookVidMsg() {
+    if (window.__rcVidMsg) return; window.__rcVidMsg = 1;
+    window.addEventListener('message', function (e) {
+      if (typeof e.data !== 'string' || e.data.indexOf('"infoDelivery"') < 0) return;
+      var d; try { d = JSON.parse(e.data); } catch (_) { return; }
+      if (!d || d.event !== 'infoDelivery' || !d.info || typeof d.info.currentTime !== 'number') return;
+      for (var id in ctls) { var c = ctls[id]; if (c && c.__vif && c.__vif.contentWindow === e.source) { c.__vcur = d.info.currentTime; break; } }
+    });
+  }
   function renderNoteVideo(ctl) {
     var v = ctl.note.video, box = ctl.video; if (!box) return;
     if (!v || !v.id) { ctl.root.classList.remove('rc-note-hasvideo'); box.innerHTML = ''; box.__sig = ''; ctl.__vif = null; return; }
@@ -340,8 +352,8 @@
     box.innerHTML =
       '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>' +
       '<div class="rc-vid-ctrls">' +
-        '<label>起<input class="rc-vc-sm" inputmode="numeric" maxlength="3" placeholder="0">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-ss" inputmode="numeric" maxlength="2" placeholder="00"></label>' +
-        '<label>止<input class="rc-vc-em" inputmode="numeric" maxlength="3" placeholder="—">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-es" inputmode="numeric" maxlength="2" placeholder="00"></label>' +
+        '<label>起<input class="rc-vc-sm" inputmode="numeric" maxlength="3" placeholder="0">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-ss" inputmode="numeric" maxlength="2" placeholder="00">'+'<button class="rc-vc-now" data-w="start" title="设为当前播放位置">⏱</button></label>' +
+        '<label>止<input class="rc-vc-em" inputmode="numeric" maxlength="3" placeholder="—">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-es" inputmode="numeric" maxlength="2" placeholder="00">'+'<button class="rc-vc-now" data-w="end" title="设为当前播放位置">⏱</button></label>' +
         '<label>速<select class="rc-vc-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-loop">循环</label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-cc">字幕</label>' +
@@ -359,8 +371,11 @@
       var f = document.createElement('iframe'); f.className = 'rc-vid-if';
       f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; f.setAttribute('allowfullscreen', '');
       f.src = vEmbedSrc(v);
-      emb.innerHTML = ''; emb.appendChild(f); ctl.__vif = f;
-      f.addEventListener('load', function () { setRate(ctl, v.rate || 1); });
+      emb.innerHTML = ''; emb.appendChild(f); ctl.__vif = f; _hookVidMsg();
+      f.addEventListener('load', function () {
+        setRate(ctl, v.rate || 1);
+        try { f.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {}   // 注册 → YT 周期推 infoDelivery(含 currentTime)
+      });
     };
     emb.querySelector('.rc-vid-go').addEventListener('click', loadFrame);
     // 控件改动 → 更新 note.video → 存后端 → 起止/循环/字幕改 URL 参数须重载 iframe;速度用 postMessage
@@ -378,6 +393,15 @@
     box.querySelector('.rc-vc-rate').addEventListener('change', function () { var r = parseFloat(this.value) || 1; applyPatch({ rate: r }, false); setRate(ctl, r); });
     box.querySelector('.rc-vc-loop').addEventListener('change', function () { applyPatch({ loop: this.checked }, true); });
     box.querySelector('.rc-vc-cc').addEventListener('change', function () { applyPatch({ cc: this.checked }, true); });
+    Array.prototype.forEach.call(box.querySelectorAll('.rc-vc-now'), function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation(); e.preventDefault();
+        if (!ctl.__vif) { alert('先点播放、播到想要的位置,再点这个标记'); return; }
+        var sec = Math.max(0, Math.floor(ctl.__vcur || 0));
+        if (btn.dataset.w === 'start') { _fillT('.rc-vc-sm', '.rc-vc-ss', sec); applyPatch({ start: sec }, false); }
+        else { _fillT('.rc-vc-em', '.rc-vc-es', sec); applyPatch({ end: sec }, false); }
+      });
+    });
     box.querySelector('.rc-vc-rm').addEventListener('click', function (e) {
       e.stopPropagation(); e.preventDefault();
       if (!window.confirm('移除这个视频?(便签变回普通便签)')) return;
