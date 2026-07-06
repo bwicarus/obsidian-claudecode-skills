@@ -8485,6 +8485,7 @@ async function _connProbe() {
       '<textarea id="asst-ta" rows="1" placeholder="问这本书 / 让我帮你…"></textarea>' +
       '<button id="asst-send" title="发送">➤</button></div>';
   panelEl.appendChild(pane);
+  try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(document.getElementById('asst-input')); } catch (e) {}   // 输入框上「配图/视频」偏好开关
 
   var css = document.createElement('style');
   css.textContent =
@@ -9494,7 +9495,7 @@ async function _connProbe() {
     while (!done && !aborted) {
       try {
         await _stream(tries === 0
-          ? { message: text, context: sentCtx, rid: rid, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
+          ? { message: text + (window.rcMediaBias ? window.rcMediaBias() : ''), context: sentCtx, rid: rid, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
           : { rid: rid, from: evSeen });
       } catch (e) {
         if (e && e.name === 'AbortError') {

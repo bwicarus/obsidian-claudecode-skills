@@ -352,3 +352,10 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 - **CSP**:内嵌第三方 iframe 只需站点**没有** `Content-Security-Policy: frame-src` 限制;`X-Frame-Options: SAMEORIGIN` 只限**本站被别人嵌**,不限本站嵌别人。
 - **流式覆盖坑**:视频卡必须插在助手气泡**外**(sibling,`host.parentNode.insertBefore(wrap, host.nextSibling)`)——气泡在流式生成时 `innerHTML` 会被反复覆盖,插内部会被清掉。
 - **去重**:`client_action` 可能经「实时 actions 事件」+「收尾 client_actions」两条路径都触发,前端按视频 id 组签名去重。
+
+### 输入框上的「配图/视频」偏好开关(2026-07-06)
+把「要不要配图/视频」从 AI 自己猜改成**用户显式表达**(ChatGPT 工具开关 / Perplexity Focus 范式):
+- 输入框上方两个独立 pill toggle(🖼 配图 / 🎬 视频),可各开可同开、默认都关、状态存 localStorage 跨会话。
+- **零改后端**:开启是「倾向不强制」——`window.rcMediaBias()` 读 localStorage 返回一段偏好提示,sendChat 发送前拼到 `message` 末尾(`message + rcMediaBias()`)。提示写明「适合才配、纯推导/基础常识别硬塞」,避免对纯文字问答硬配。
+- **气泡不受污染**:偏置只拼进 body 的 message 字段、不改 message 变量本身,用户气泡仍显示原问题(EPUB 气泡用 msg、PDF 用 text 原值,body 表达式拼接不回写变量)。
+- 共享实现在 `rc-video.js`(`rcMediaBias` + `rcBuildMediaRow(inputEl)`),PDF(挂 #asst-input)/EPUB(挂 #ep-ai-input)各一行调用。

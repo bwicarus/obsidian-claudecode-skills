@@ -2581,7 +2581,7 @@
     while (!done && !aborted) {
       try {
         await streamOnce(tries === 0
-          ? { message: message, context: context, rid: rid, from: 0,
+          ? { message: message + (window.rcMediaBias ? window.rcMediaBias() : ''), context: context, rid: rid, from: 0,
               force_effort: (opts && opts.forceEffort) || undefined,
               force_model: (opts && opts.forceModel) || undefined }
           : { rid: rid, from: evSeen });   // 重连:同 rid + from=已读事件数(服务端 detached 续发缓冲)
@@ -2890,6 +2890,7 @@
     content.addEventListener('wheel', function (e) { if (!e.ctrlKey) return; if (e.cancelable) { try { e.preventDefault(); } catch (_) {} } _fontStep(e.deltaY < 0 ? STEP : -STEP); }, { passive: false });
   })();
   // 助手/目录/高亮/知识点 入口并入右侧统一抽屉(把手打开 + tab 切换);AI 模型设置走顶栏 ⚙(openSettings)
+  try { if (window.rcBuildMediaRow) window.rcBuildMediaRow($('ep-ai-input')); } catch (e) {}   // 输入框上「配图/视频」偏好开关
   $('ep-ai-send').addEventListener('click', function () {
     if (_streaming) { try { _asstAbort && _asstAbort.abort(); } catch (e) {} return; }   // 流式中点 ■ → 中止本轮
     sendChat();
