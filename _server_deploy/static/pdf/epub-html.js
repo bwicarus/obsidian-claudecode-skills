@@ -2294,6 +2294,13 @@
           if (t) parts.push(t);
         }
       }
+      if (!parts.length) {   // 兜底:正文块非 p/h(有些书结构不同)→ 取视口内的整个 .ep-sec 文字
+        var secs = col.querySelectorAll('.ep-sec');
+        for (var j = 0; j < secs.length; j++) {
+          var sr = secs[j].getBoundingClientRect();
+          if (sr.height && sr.bottom > top + 8 && sr.top < bot - 8) { var st = (secs[j].textContent || '').replace(/\s+/g, ' ').trim(); if (st) parts.push(st); }
+        }
+      }
       var txt = parts.join('\n');
       return txt.length > 1000 ? txt.slice(0, 1000) + '…' : txt;
     } catch (e) { return ''; }

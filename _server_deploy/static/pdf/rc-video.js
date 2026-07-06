@@ -88,6 +88,20 @@
   };
   window.rcNoBook = function () { try { return localStorage.getItem('rc-prefer-book') === '0'; } catch (e) { return false; } };
 
+  // AI 回答里的图片加载失败(常见:模型编造了不存在的图片 URL)→ 友好占位,不显示难看的破图标。
+  // img 的 error 不冒泡 → 必须用 capture;只管 AI 回答容器内的图(.ep-msg.a / .asst-a / #result-content)。
+  if (!window.__rcImgErrHook) {
+    window.__rcImgErrHook = 1;
+    document.addEventListener('error', function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== 'IMG' || t.__brk) return;
+      if (!(t.closest && t.closest('.ep-msg.a, .asst-a, #result-content'))) return;
+      t.__brk = 1; t.style.display = 'none';
+      var s = document.createElement('span'); s.className = 'rc-img-broken'; s.textContent = '🖼 图片加载失败';
+      if (t.parentNode) t.parentNode.insertBefore(s, t);
+    }, true);
+  }
+
   if (!document.getElementById('rc-video-css')) {
     var s = document.createElement('style'); s.id = 'rc-video-css';
     s.textContent =
@@ -107,7 +121,8 @@
       '.rc-media-tg svg{opacity:.85}' +
       '.rc-media-tg:active{transform:scale(.96)}' +
       '#ep-asst-quick button.rc-media-tg.on,#asst-quick button.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
-      '.rc-media-tg.on svg{opacity:1}';
+      '.rc-media-tg.on svg{opacity:1}' +
+      '.rc-img-broken{font-size:12px;color:#caa;display:inline-block;padding:3px 9px;border:1px dashed rgba(200,140,140,.5);border-radius:6px;margin:2px 0}';
     (document.head || document.documentElement).appendChild(s);
   }
 })();
