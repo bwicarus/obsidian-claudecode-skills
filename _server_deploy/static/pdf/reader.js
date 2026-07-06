@@ -8453,6 +8453,7 @@ async function _connProbe() {
 // 🤖 fab 一键开抽屉到「助手」tab;快捷按钮(翻页/缩放)直调 window 函数 0 延迟。
 (function () {
   if (window.__asstLoaded) return;
+  if (/[?&]asst=shared/.test(location.search)) return;   // ②b:共享侧栏模式 → 交给 rc-assistant.js 的 mountPdfSidebar 接管,老版不挂(默认无 flag 仍走这里)
   var panelEl = document.getElementById('grammar-panel');
   var tabsEl = document.getElementById('side-tabs');
   if (!panelEl || !tabsEl) return;   // 抽屉不在(非阅读器页)就不挂
@@ -10463,6 +10464,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       renderPhraseHl: (w) => { try { if (typeof renderPhraseHl === 'function') renderPhraseHl(w); } catch (_) {} },
       removePhraseHighlight: () => { try { if (typeof _removePhraseHighlight === 'function') _removePhraseHighlight(); } catch (_) {} },
       activePhraseHl: () => { try { return typeof _activePhraseHl !== 'undefined' ? _activePhraseHl : null; } catch (_) { return null; } },
+      setActivePhraseHl: (v) => { try { _activePhraseHl = v; } catch (_) {} },   // ②b:侧栏 _flashSelOnPage 写共享词组高亮状态(搬进共享层后经此 setter 回写 reader 作用域)
       charsRangeToText: (ch, a, b) => { try { return _charsRangeToText(ch, a, b); } catch (_) { return ''; } },
       charRangeToPtRects: (ch, a, b) => { try { return _charRangeToPtRects(ch, a, b); } catch (_) { return []; } },
       flashSelOnPage: (p, t) => { try { if (typeof _flashSelOnPage === 'function') _flashSelOnPage(p, t); } catch (_) {} },
@@ -10486,5 +10488,10 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       });
       window._noteCreateAtCenter = () => { try { RC.stickynote.createAtCenter(); } catch (_) {} };
     }
+  } catch (_) {}
+  // ②b:共享侧栏模式(?asst=shared)→ bind 完(HOST 就绪)后挂 rc-assistant 的共享侧栏(老 25-assistant 已在 flag 下自退);
+  //     默认无 flag 不调 → 仍走老 25-assistant,零风险。验证通过后再翻默认。
+  try {
+    if (/[?&]asst=shared/.test(location.search) && window.RC && RC.assistant && RC.assistant.mountPdfSidebar) RC.assistant.mountPdfSidebar();
   } catch (_) {}
 }
