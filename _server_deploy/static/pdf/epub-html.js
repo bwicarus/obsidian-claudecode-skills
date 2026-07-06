@@ -2685,6 +2685,7 @@
           try { attachTrace(am, m.trace || null, m.ts || null); } catch (e) {}   // 历史也挂「!」反馈条(有 trace 显步骤,没有则兜底）
           // 持久化回放:这条回合做过的写操作 → 逐个按 state 重渲撤销/重做卡(done→可撤销;undone→可重做)
           if (Array.isArray(m.actions)) m.actions.forEach(function (a) { try { _epShowAction(a); } catch (e) {} });
+          if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (e) {} }   // 阶段C:视频卡刷新回放
           chat.push({ role: 'assistant', content: m.content || '' });
         }
       });

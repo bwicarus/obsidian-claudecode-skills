@@ -1024,6 +1024,22 @@
     }
     createAt(anchor);
   }
+  // 阶段 B:从助手视频卡拖到书页某点 → 在该点建**视频便签**(锚点就近重试,复用 note.video 全套控件)
+  function createVideoAt(clientX, clientY, videoId) {
+    if (!O || !O.anchorFromPoint || !videoId) return false;
+    var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
+    var anchor = null;
+    for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
+    if (!anchor) { toastMsg('这里放不了(把视频拖到正文上再松手)'); return false; }
+    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false,
+                  video: { id: videoId, start: 0, end: 0, rate: 1, loop: false, cc: true } }, function (d) {
+      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      notes.push(d.note);
+      if (!ensureMounted(d.note)) toastMsg('视频便签已建(所在页尚未渲染,渲染后出现)');
+      else toastMsg('✅ 视频已放进书页便签');
+    });
+    return true;
+  }
 
   // ─────────────────────────── 公开 API ───────────────────────────
   RC.stickynote = {
@@ -1055,6 +1071,8 @@
     createAt: createAt,
     // 视野中央建默认便签(顶栏 🗒 按钮入口;经 opts.anchorFromPoint 解析,页缝自动就近重试)
     createAtCenter: createAtCenter,
+    // 阶段 B:拖放建视频便签(助手视频卡长按拖到书页 → 该屏幕点建带 video 的便签)
+    createVideoAt: createVideoAt,
     // ── 笔路由接口(页面 ink 层用,跨界三段切割;见上「编程式笔路由 API」注释)──
     penRoute: penRoute,     // (x,y|event) -> noteId|null  笔尖是否在某展开便签 body 上
     penBegin: penBegin,     // (event, {eraser?}) -> bool  在命中便签开一段(坐标归一化/PATCH 内部管理)

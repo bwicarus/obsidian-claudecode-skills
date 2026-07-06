@@ -31,7 +31,71 @@
       f.className = 'rc-vid-frame';
       box.innerHTML = ''; box.appendChild(f);
     });
+    _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)
+    // 阶段 D:☆ 收藏到收藏夹(第一个夹,无则建「⭐ 我的收藏」;再点取消)
+    var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.innerHTML = '☆'; fav.title = '收藏这个视频到收藏夹';
+    fav.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); _toggleFav(v, fav); });
+    el.querySelector('.rc-vid-thumb').appendChild(fav);
     return el;
+  }
+  function _favToast(m) { try { if (window.RC && RC.toast) RC.toast(m); else if (window._toast) window._toast(m); } catch (e) {} }
+  function _toggleFav(v, btn) {
+    var item = { kind: 'video', vid: v.id, title: v.title || '', thumb: v.thumb || '' };
+    if (btn.classList.contains('on')) {
+      if (btn.__fid) fetch('/pdf/api/favorites', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: btn.__fid, remove_item: item }) })
+        .then(function () { btn.classList.remove('on'); btn.innerHTML = '☆'; _favToast('已取消收藏'); }).catch(function () {});
+      return;
+    }
+    fetch('/pdf/api/favorites').then(function (r) { return r.json(); }).then(function (d) {
+      var fs = (d && d.folders) || [];
+      var done = function (fid, nm) { btn.classList.add('on'); btn.innerHTML = '★'; btn.__fid = fid; _favToast('已收藏到《' + (nm || '收藏夹') + '》'); };
+      if (fs.length) {
+        fetch('/pdf/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: fs[0].id, item: item }) })
+          .then(function (r) { return r.json(); }).then(function () { done(fs[0].id, fs[0].name); }).catch(function () {});
+      } else {
+        fetch('/pdf/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '⭐ 我的收藏', item: item }) })
+          .then(function (r) { return r.json(); }).then(function (dd) { done((dd && (dd.folder || dd.id)) || '', '我的收藏'); }).catch(function () {});
+      }
+    }).catch(function () {});
+  }
+
+  // 阶段 B:长按视频卡 → 拖到左侧书页松手 → RC.stickynote.createVideoAt 建视频便签。
+  // 长按 340ms 进入拖动(短按/移动=点击播放/滚动);全局 move/up 监听(拖出卡范围仍跟手),松手点不在助手面板内=书页。
+  function _bindDragToBook(el, v) {
+    var lp = null, dragging = false, ghost = null, sx = 0, sy = 0, onMove, onUp;
+    var moveGhost = function (x, y) { if (ghost) { ghost.style.left = (x + 12) + 'px'; ghost.style.top = (y + 14) + 'px'; } };
+    var endDrag = function (e, drop) {
+      if (lp) { clearTimeout(lp); lp = null; }
+      document.removeEventListener('pointermove', onMove, true);
+      document.removeEventListener('pointerup', onUp, true);
+      document.removeEventListener('pointercancel', onUp, true);
+      if (ghost) { ghost.remove(); ghost = null; }
+      if (dragging && drop && e) {
+        var tgt = document.elementFromPoint(e.clientX, e.clientY);
+        var inUi = tgt && tgt.closest && tgt.closest('#ep-ai, #ep-side, #asst-panel, .asst-panel, .rc-vids, #result-mask, #ep-asst-quick, #asst-quick');
+        if (!inUi && window.RC && RC.stickynote && RC.stickynote.createVideoAt) RC.stickynote.createVideoAt(e.clientX, e.clientY, v.id);
+      }
+      dragging = false;
+    };
+    onMove = function (e) { if (dragging) { e.preventDefault(); moveGhost(e.clientX, e.clientY); } };
+    onUp = function (e) { endDrag(e, true); };
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button && e.button !== 0) return;
+      sx = e.clientX; sy = e.clientY;
+      lp = setTimeout(function () {
+        lp = null; dragging = true;
+        ghost = document.createElement('div'); ghost.className = 'rc-vid-ghost'; ghost.textContent = '🎬 拖到书页放置';
+        document.body.appendChild(ghost); moveGhost(sx, sy);
+        try { navigator.vibrate && navigator.vibrate(15); } catch (_) {}
+        document.addEventListener('pointermove', onMove, true);
+        document.addEventListener('pointerup', onUp, true);
+        document.addEventListener('pointercancel', onUp, true);
+      }, 340);
+    });
+    el.addEventListener('pointermove', function (e) {   // 长按计时内移动超阈值 = 滚动,取消长按
+      if (lp && (Math.abs(e.clientX - sx) > 9 || Math.abs(e.clientY - sy) > 9)) { clearTimeout(lp); lp = null; }
+    });
+    el.addEventListener('pointerup', function () { if (lp) { clearTimeout(lp); lp = null; } });
   }
 
   window.renderVideos = function (videos) {
@@ -88,6 +152,21 @@
   };
   window.rcNoBook = function () { try { return localStorage.getItem('rc-prefer-book') === '0'; } catch (e) { return false; } };
 
+  // 阶段D:收藏夹里的视频条目(.fav-video,收藏夹 section 走 raw 不消毒 → data-yt 保留)→ 点缩略图换 iframe 播放。
+  if (!window.__rcFavVidHook) {
+    window.__rcFavVidHook = 1;
+    document.addEventListener('click', function (e) {
+      var t = e.target && e.target.closest ? e.target.closest('.fav-video') : null;
+      if (!t || t.querySelector('iframe')) return;
+      var yt = t.getAttribute('data-yt'); var box = t.querySelector('.fav-video-thumb');
+      if (!yt || !box) return;
+      var f = document.createElement('iframe'); f.className = 'fav-video-if';
+      f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(yt) + '?autoplay=1&playsinline=1&rel=0&cc_lang_pref=zh-Hans&hl=zh-CN';
+      f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen'); f.setAttribute('allowfullscreen', '');
+      box.innerHTML = ''; box.appendChild(f);
+    });
+  }
+
   // AI 回答里的图片加载失败(常见:模型编造了不存在的图片 URL)→ 友好占位,不显示难看的破图标。
   // img 的 error 不冒泡 → 必须用 capture;只管 AI 回答容器内的图(.ep-msg.a / .asst-a / #result-content)。
   if (!window.__rcImgErrHook) {
@@ -122,7 +201,17 @@
       '.rc-media-tg:active{transform:scale(.96)}' +
       '#ep-asst-quick button.rc-media-tg.on,#asst-quick button.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
       '.rc-media-tg.on svg{opacity:1}' +
-      '.rc-img-broken{font-size:12px;color:#caa;display:inline-block;padding:3px 9px;border:1px dashed rgba(200,140,140,.5);border-radius:6px;margin:2px 0}';
+      '.rc-img-broken{font-size:12px;color:#caa;display:inline-block;padding:3px 9px;border:1px dashed rgba(200,140,140,.5);border-radius:6px;margin:2px 0}' +
+      '.rc-vid-ghost{position:fixed;z-index:99999;pointer-events:none;background:#1a2540;color:#cfe6ff;border:1px solid #3b6db5;border-radius:8px;padding:6px 12px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.5)}' +
+      '.rc-vid-fav{position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
+      '.rc-vid-fav.on{background:rgba(240,180,40,.92);color:#3a2a00}' +
+      '.fav-video{max-width:640px;margin:10px auto}' +
+      '.fav-video-thumb{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer;border-radius:10px;overflow:hidden}' +
+      '.fav-video-thumb img{width:100%;height:100%;object-fit:cover;display:block}' +
+      '.fav-video-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:52px;height:52px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:19px;display:flex;align-items:center;justify-content:center}' +
+      '.fav-video-thumb:hover .fav-video-play{background:rgba(220,40,40,.9)}' +
+      '.fav-video-if{width:100%;aspect-ratio:16/9;border:0;display:block;border-radius:10px}' +
+      '.fav-video-title{font-size:14px;margin-top:8px;text-align:center;opacity:.85}';
     (document.head || document.documentElement).appendChild(s);
   }
 })();

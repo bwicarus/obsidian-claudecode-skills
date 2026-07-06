@@ -83,8 +83,14 @@ def _fav_norm_item(raw):
     page=PDF 页(1-based)/section=spine idx(0-based)/id=用户页(插入页)记录 id(u_<hex>,file=该插入页所属书 rel)。"""
     if not isinstance(raw, dict):
         return None
-    rel = (raw.get("file") or "").strip()
     kind = (raw.get("kind") or "").strip()
+    if kind == "video":   # 阶段D:收藏 YouTube 视频(无 file → 用 vid 作合成 key,收藏夹物化成可播放 section)
+        vid = (raw.get("vid") or "").strip()
+        if not re.match(r"^[A-Za-z0-9_-]{11}$", vid):
+            return None
+        return {"file": "video:" + vid, "kind": "video", "vid": vid,
+                "title": (raw.get("title") or "")[:200], "thumb": (raw.get("thumb") or "")[:300]}
+    rel = (raw.get("file") or "").strip()
     if not rel or ".." in rel or kind not in ("pdf", "epub", "userpage"):
         return None
     if rel.startswith(_FAV_BOOK_PREFIX):
@@ -714,6 +720,20 @@ def _ink_strokes_to_svg(strokes, vb: int = 1000) -> str:
     return "".join(out)
 
 
+def _fav_video_item(i: int, it: dict):
+    """视频条目(阶段D)→ (label, body, [])。收藏夹 section 走 raw 不消毒 → 缩略图 + data-yt,前端点击升级成 iframe 播放。"""
+    vid = it.get("vid") or ""
+    title = (it.get("title") or "").strip() or "视频"
+    thumb = it.get("thumb") or ("https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid)
+    label = "🎬 视频 · " + title
+    href = "https://www.youtube.com/watch?v=" + vid
+    body = (_fav_sep_html(label, href, it)
+            + ('<div class="fav-item fav-video" data-yt="%s">' % _fav_esc(vid))
+            + ('<div class="fav-video-thumb"><img src="%s" alt=""/><span class="fav-video-play">&#9654;</span></div>' % _fav_esc(thumb))
+            + ('<div class="fav-video-title">%s</div></div>' % _fav_esc(title)))
+    return label, body, []
+
+
 def _fav_userpage_item(i: int, it: dict, warns: list):
     """用户页(插入页)条目 → (label, section_body_html, [(img_arc, bytes, mt)])。userpages sidecar 全程只读。"""
     rel = it.get("file") or ""
@@ -799,6 +819,8 @@ def _fav_write_epub(out_path: Path, fid: str, name: str, items: list, warns: lis
             label, body, imgs = _fav_epub_item(i, it, src_name, warns)
         elif kind == "userpage":
             label, body, imgs = _fav_userpage_item(i, it, warns)   # 自己创建的插入页:物化正文 md 成一节
+        elif kind == "video":
+            label, body, imgs = _fav_video_item(i, it)   # 阶段D:YouTube 视频条目 → 可播放 section
         else:
             label = "未知条目"
             body = _fav_sep_html("未知条目", "/pdf/") + '<div class="fav-item fav-missing">无法识别的收藏条目。</div>'

@@ -160,4 +160,6 @@
 - **渲染**(rc-stickynote.js `renderNoteVideo`):有 video 时给 root 加 `.rc-note-hasvideo` → body 改 flex 列(播放器 16:9 + 控件行 + 文字备注),隐藏手写 canvas。lite-embed(缩略图 → 点▶ 加载 iframe)。签名(JSON.stringify(video))去重,防控件输入时闪 iframe。
 - **控件**:起/止时间(**分:秒两框**,数字键盘、秒 clamp 0-59)+ **⏱「设为当前播放位置」**(iframe enablejsapi 收 infoDelivery 拿 currentTime → 填框存后端、不重载不打断当前播放)、速度、循环、字幕、✕移除。起止/循环/字幕 → URL 参数(重载 iframe);速度 → `enablejsapi=1` + postMessage `setPlaybackRate`(player ready 才响应 → 载入后 200/700/1500ms 多次尝试)。字幕默认中文(`cc_lang_pref=zh-Hans`)。
 - **入口**:便签工具栏 🎬 按钮 → prompt 贴 YouTube 链接/ID(`ytIdOf` 解析 watch/youtu.be/embed/shorts/live/裸 id);留空移除。`window.__rcNoteSetVideo(noteId, ytid)` 供阶段 B 拖放复用。
-- **⚠ 待续**:阶段 B 拖放建便签、C 视频卡持久化(对话刷新不丢)、D 收藏视频到收藏夹。
+- **阶段 B 拖放建便签**(完成):助手视频卡长按 340ms → 拖影跟手 → 松手在书页(不在助手面板内)→ `RC.stickynote.createVideoAt(x,y,vid)` 按 `anchorFromPoint` 就近建带 video 的便签。移动超阈值取消长按(=滚动)。
+- **阶段 C 视频卡持久化**(完成):EPUB 助手 worker 收 `actions` 事件时提取 `renderVideos` 的 videos → 存进 assistant 消息 meta.videos(`_econvo_append` 白名单加 videos);`loadHistory` 回放 assistant 消息后 `renderVideos(m.videos)` → 刷新不丢、清空才没。
+- **阶段 D 收藏视频**(完成):视频卡 ☆ → `/api/favorites` 加 `kind:'video'` 条目(无 file、用 `video:<vid>` 合成 key,收第一个夹/无则建「⭐我的收藏」);`_fav_norm_item`+`_fav_video_item` 物化成 section(收藏夹 section 走 raw 不消毒 → `.fav-video[data-yt]` + 缩略图保留);rc-video.js document 委托:收藏夹里点 `.fav-video` 缩略图 → 换 youtube-nocookie iframe 播放。

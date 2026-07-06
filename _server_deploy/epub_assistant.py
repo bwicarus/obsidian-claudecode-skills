@@ -1529,7 +1529,7 @@ def _econvo_append(uid, file_rel, role, content, meta=None):
         msgs = _econvo_load(uid, file_rel)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:
-            for k in ("section", "book", "selection", "sel_anchor", "trace", "actions"):
+            for k in ("section", "book", "selection", "sel_anchor", "trace", "actions", "videos"):
                 v = meta.get(k)
                 if v is not None and v != "":
                     rec[k] = v
@@ -1936,6 +1936,12 @@ def _echat_worker(rid, message, ctx, history, force_effort, force_model, uid, fi
                     job["trace"] = ev["data"]
                 elif ev["event"] == "action":   # 同步写工具的撤销/重做记录 → 随 assistant 回合落库
                     job.setdefault("actions", []).append(ev["data"])
+                elif ev["event"] == "actions":   # client_actions 列表:提取 renderVideos 的视频 → 随回合落库,刷新不丢(阶段C)
+                    for a in (ev["data"] or []):
+                        if isinstance(a, dict) and a.get("fn") == "renderVideos":
+                            vs = (a.get("args") or [None])[0]
+                            if isinstance(vs, list) and vs:
+                                job.setdefault("videos", []).extend(vs)
     except Exception as e:
         with job["lock"]:
             job["events"].append({"event": "error", "data": str(e)[:160]})
@@ -1944,7 +1950,7 @@ def _echat_worker(rid, message, ctx, history, force_effort, force_model, uid, fi
         if job.get("answer"):   # 跑完就落库(断连也不丢;历史/感叹号/撤销重做卡都用得上)
             _econvo_append(uid, file_rel, "assistant", str(job["answer"])[:1500],
                            {"section": ctx.get("current_section_idx"), "trace": job.get("trace"),
-                            "actions": job.get("actions")})
+                            "actions": job.get("actions"), "videos": job.get("videos")})
         with job["lock"]:
             job["events"].append({"event": "done", "data": {}})
             job["done"] = True
