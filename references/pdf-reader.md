@@ -1221,3 +1221,9 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 **顺带修复**:pyflakes 抓出 4d475c7(体检清理)误删 `_FAV_WAIT_HTML` 定义留使用(收藏夹在建等待页 NameError)→ 从 c39a499 原样找回。教训:**删除"死代码"前 pyflakes 全文件跑一遍**,grep 单符号会漏字符串模板这类定义与使用距离远的对子。
 
 **拆分禁区(记账)**:vocab 域(5 段碎,含单词本 tab 夹在语法域中间)、`_pam_*` 页锚迁移框架(跨全部 sidecar 域)。✅ rc-ink.js 墨迹引擎三份合并已完成(84cde1a):几何/渲染/命中/撤销栈唯一实现在 `rc-ink.js`(RCInk),pdf-tail/epub-html/rc-stickynote 改薄 wrapper(签名不变);兼容超集 `s.p||s.pts`、`s.t` 缺省 pen、defs 覆盖默认色宽 → 零数据迁移。指针状态机/保存策略/live canvas 三方真实分叉,**留在各自文件**(PDF=快照重绘、EPUB=视口叠加 live canvas、便签=rAF 小画布)。⚠ pdf_reader.html 里 rc-ink 必须在 `{% if ui_shared %}` 块**外**(pdf-tail 无条件加载);改 rc-ink 会 bust `_epub_js_v`+`_pdf_shared_js_v`。
+
+### §17.1 2026-07-06 加载提速批次(实测驱动,参照大厂)
+- **实测结论**:服务端热路径全 1-11ms(开书 HTML 5ms/页图热 1ms/字符层 11ms/EPUB section 1ms)——慢不在后端,在**缓存命中率**。
+- **页图宽度两档制**(`_bucketReqW`,04-render.js):单书实测 87 个 distinct 宽度档(放大分支任意 cw×dpr;iPad dpr2 竖 2048/横 2400/捏合每级新值)→ 预热/SW/HTTP 缓存全 miss、Pi 反复冷渲染。参照 Next.js Image/CDN srcset 固定桶:需求≤natW → natW 档,超过 → 2400 一步到顶。显示尺寸仍由 CSS 缩放(浏览器降采样,不糊)。预取与渲染同一公式。⚠ 改宽度逻辑必须同时想预热(natW 档)与 SW URL 稳定性。
+- **SW v3**:epub-manifest/epub-section 进 SWR(排除 `资源/收藏夹/`——物化 EPUB 会整本重建);**epub-html.js 也注册 SW**(此前只有 PDF 01-boot 注册,只读 EPUB 场景 SW 从未激活)。SW 源在 pdf_reader.py `_SW_JS`,bump CACHE 名即整体失效重建。
+- 旧宽度碎片(state/pdf-page-img 2.6G)保留:是 2400 档收敛期的容差近似图来源;要清理只能删"非 natW 且非 2400"且超过 N 天未访问的。
