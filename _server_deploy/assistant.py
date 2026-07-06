@@ -442,8 +442,8 @@ def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
-        if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace,让历史回看也能显示上下文卡片 / 感叹号步骤
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace"):
+        if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos"):
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -3328,6 +3328,12 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
                     job["answer"] = ev["data"]
                 elif ev["event"] == "trace":
                     job["trace"] = ev["data"]
+                elif ev["event"] == "actions":   # client_actions:提取 renderVideos 的视频 → 随回合落库,刷新不丢(镜像 EPUB 阶段C)
+                    for a in (ev["data"] or []):
+                        if isinstance(a, dict) and a.get("fn") == "renderVideos":
+                            vs = (a.get("args") or [None])[0]
+                            if isinstance(vs, list) and vs:
+                                job.setdefault("videos", []).extend(vs)
     except Exception as e:
         with job["lock"]:
             job["events"].append({"event": "error", "data": str(e)[:160]})
@@ -3335,8 +3341,13 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
         with job["lock"]:
             job["events"].append({"event": "done", "data": {}})
             job["done"] = True
-        if job.get("answer"):   # 不管客户端在不在,跑完就落库(断连也不丢;历史/感叹号都用得上)
-            _convo_append(uid, "assistant", str(job["answer"])[:1500], {"trace": job.get("trace")} if job.get("trace") else None)
+        if job.get("answer"):   # 不管客户端在不在,跑完就落库(断连也不丢;历史/感叹号/视频卡都用得上)
+            _meta = {}
+            if job.get("trace"):
+                _meta["trace"] = job["trace"]
+            if job.get("videos"):
+                _meta["videos"] = job["videos"]
+            _convo_append(uid, "assistant", str(job["answer"])[:1500], _meta or None)
         def _cleanup():
             with _chat_jobs_lock:
                 _chat_jobs.pop(rid, None)
