@@ -65,7 +65,7 @@ def _html_js_v():
     mt = 0
     for name in ("html-reader.js", "rc-core.js", "rc-md.js", "rc-highlight.js",
                  "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-settings.js",
-                 "rc-sidedrawer.js", "rc-phrasepop.js"):
+                 "rc-sidedrawer.js", "rc-phrasepop.js", "rc-assistant.js"):   # rc-assistant:2026-07-06 体检补(模板加载它却不在清单,immutable 下改它不 bust)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
             try:
