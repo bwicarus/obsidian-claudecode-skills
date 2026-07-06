@@ -75,19 +75,20 @@
 - ⬜ H3 EPUB 无 see_page 章节级看图 → 加 section 级 rasterize 截图管线+后端 vision(大工程)
 
 **MEDIUM**
-- ⬜ M1 langs 书语言未注入 EPUB(getContext+meta)
+- ✅ M1 langs 书语言注入 EPUB(getContext+meta)
 - ⬜ M2 visible_vocab 本页生词未注入 EPUB
 - ✅ M3 讲这里别读整章(EPUB `_ESYS_RULES` 静态铁律)
 - ✅ M4 read_selection 工具 EPUB 缺(一行注册复用 PDF)
+- ✅ M10 空/清空后欢迎语 greet() EPUB(下方 M10 项)
 - ⬜ M5 make_anki 制卡后无 CFI 回链高亮(EPUB)
 - ⬜ M6 make_note 无回链高亮+无选中不回退整章(EPUB)
 - ⬜ M7 find_highlights 范围参数(sections/from-to)EPUB 受限
 - ⬜ M8 用户气泡带入图缩略图不落库不回放(EPUB `figures` 白名单+回放)
 - ⬜ M9 高亮列表卡删除后不可恢复(PDF 缺重做,抄 EPUB)
-- ⬜ M10 空/清空后欢迎语 greet() EPUB 缺
+- ✅ M10 空/清空后欢迎语 greet() EPUB
 - ⬜ M11 页面级 see_ink(gated:先确认 EPUB 正文有无自由墨层)
 
-**LOW**(快改批)
+**LOW**(快改批;✅ L3/L4/L5 已修)
 - ⬜ L1 see_figure 描述漏 {index?}(PDF 文案)· L2 公式收尾句(EPUB 已近似)· L3 tool-done 前端切「思考中」(PDF)· L4 gemini-paid 兜底 showNotice(EPUB)· L5 🗑清空流式守卫(PDF)· L6 空输入分流『讲讲这个便签』(EPUB)· L7 便签 chip 缩略图点开大图(EPUB)· L8 追问/反馈错峰淡入(EPUB,可收进 rc-assistant)· L9 focus_sel 独立通道(可仅登记)· L10 历史「选中」精确锚(PDF)· L11 prewarm(off)(EPUB)· L12 删冗余本地 chat[](EPUB)
 
 **域差异/已对齐(不改)**:read_source_page(收藏集专属)· page↔section 命名 · see_page 省额度 · 落库位置死字段 · from/page_type 首连 · 收藏集 NotebookLM · rc-video ui_shared 门控(仅 legacy)
