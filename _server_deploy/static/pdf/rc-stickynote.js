@@ -499,7 +499,44 @@
   //   {el, left, top, anchor?} —— left/top 为容器内**像素**(PDF=x·clientWidth/y·clientHeight,行为等价旧 %;
   //   EPUB=内容锚 off→字符 rect→section 内像素+dx/dy);anchor 字段=host 懒迁移升级后的新锚(旧 x/y 比例锚 →
   //   内容锚),组件负责 PATCH 落库。旧契约({el,w,h} 无 left/top)兼容:组件退回自算 x/y 百分比。
+  // ─────────────────────────── 展开态置顶浮层(portal)───────────────────────────
+  // 根因:PDF 单页/连续缩放靠祖先 CSS zoom 撑大,zoom≠1 在 Chrome/Safari 造层叠上下文,把 absolute-in-page-wrap
+  //   的便签困死其中 → z-index 再高也冲不出侧栏(120)。解法=展开时把便签整体搬到 body 级 #rc-note-portal
+  //   (position:fixed,z-index 190:高过两侧栏 120/把手 130,低于模态遮罩 200/210),用 fixed 贴回当前屏幕位置,
+  //   彻底逃出所有被困上下文/overflow 裁剪。展开态=fixed 浮层(不跟滚,规避「fixed+JS 跟滚」抖动);折叠即回内容锚。
+  var _portalEl = null;
+  function portalLayer() {
+    if (_portalEl && _portalEl.isConnected) return _portalEl;
+    _portalEl = document.getElementById('rc-note-portal');
+    if (!_portalEl) {
+      _portalEl = document.createElement('div');
+      _portalEl.id = 'rc-note-portal';
+      _portalEl.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:190;pointer-events:none';
+      document.body.appendChild(_portalEl);
+    }
+    return _portalEl;
+  }
+  function portalIn(ctl) {
+    if (!ctl || ctl.portaled || ctl.note.collapsed || !ctl.root.isConnected) return;
+    var r = ctl.root.getBoundingClientRect();
+    if (!r.width && !r.height) return;   // 不可见(未布局/滚出视口)→ 不 portal(避免 fixed 到屏外)
+    ctl.portaled = true;
+    portalLayer().appendChild(ctl.root);   // 脱离被困上下文;fixed 子相对视口定位(portal 无 transform)
+    ctl.root.style.position = 'fixed';
+    ctl.root.style.left = Math.round(r.left) + 'px';
+    ctl.root.style.top = Math.round(r.top) + 'px';
+    ctl.root.classList.add('rc-note-portaled');
+  }
+  function portalOut(ctl) {
+    if (!ctl || !ctl.portaled) return;
+    ctl.portaled = false;
+    ctl.root.classList.remove('rc-note-portaled');
+    ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+    try { ensureMounted(ctl.note); } catch (e) {}   // 回内容锚(容器没了→卸下待 mountPending 补挂)
+  }
   function ensureMounted(note) {
+    var ctlP = ctls[note.id];
+    if (ctlP && ctlP.portaled) return true;   // 展开态在顶层浮层:重定位/重挂交给 portal,不回插内容容器
     var m = null;
     try { m = O.mount(note.anchor); } catch (e) {}
     var ctl = ctls[note.id];
@@ -609,6 +646,7 @@
     ctl.note.collapsed = !ctl.note.collapsed;
     ctl.root.classList.toggle('rc-note-collapsed', ctl.note.collapsed);
     patchNote(ctl.note, { collapsed: ctl.note.collapsed });
+    if (ctl.note.collapsed) portalOut(ctl); else portalIn(ctl);   // 展开→置顶浮层;折叠→回内容锚
   }
 
   // ─────────────────────────── handle 手势(长按 → EDIT;EDIT 内按下即拖 = 移动便签)───────────────────────────
@@ -683,13 +721,20 @@
     return anchor;
   }
   function dropNote(ctl, rect0, dx, dy) {
-    // 松手:便签左上角(+4px 进容器内)→ anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH
+    // 松手:便签左上角(+4px 进容器内)→ anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH。
+    // rect0=拖动起点屏幕矩形(fixed 也适用),reanchorAt 用屏幕坐标 elementFromPoint → portaled(fixed)照样正确。
+    var wasPortaled = ctl.portaled;
     var anchor = reanchorAt(ctl, rect0.left + dx + 4, rect0.top + dy + 4);
     ctl.root.style.transform = '';
-    if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }
+    if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }   // 清 transform→回原位(portaled 回 fixed 原点)
     ctl.note.anchor = anchor;
     patchNote(ctl.note, { anchor: anchor });
-    ensureMounted(ctl.note);   // 可能跨页/跨章 → 换容器重挂 + 新锚定位
+    if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
+      ctl.portaled = false; ctl.root.classList.remove('rc-note-portaled');
+      ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+    }
+    ensureMounted(ctl.note);   // 跨页/跨章 → 换容器重挂 + 新锚绝对定位
+    if (wasPortaled && !ctl.note.collapsed) portalIn(ctl);   // 回置顶浮层(落点新位置)
   }
   // ─────────────────────────── EDIT 编辑模式(长按便签任意部分,handle/body 同一入口)───────────────────────────
   // 同时呈现:🗑 + 色板工具条 + 左上/右下缩放手柄 + handle 拖拽移动;移动/缩放/换色可连续操作不自动退出。
@@ -699,6 +744,7 @@
     if (ctl.note.collapsed) { ctl.note.collapsed = false; ctl.root.classList.remove('rc-note-collapsed'); patchNote(ctl.note, { collapsed: false }); }
     EDIT = { note: ctl.note, ctl: ctl };
     ctl.root.classList.add('rc-note-editing', 'rc-note-active');
+    portalIn(ctl);   // 进编辑=展开:置顶浮层(逃出被困层叠上下文,盖过侧栏/相邻页)
     try { ctl.ta.blur(); } catch (e) {}   // 收键盘/选词态(blur 顺带 saveText);模式内 textarea pointer-events:none。handle/body 入口一致。
     updateToolUI(ctl); updateSwatchUI(ctl);
     try { if (navigator.vibrate) navigator.vibrate(10); } catch (e2) {}
@@ -863,7 +909,12 @@
         }
       }
     }
-    ensureMounted(g.ctl.note);   // host 按新锚重算像素位置(左上缩放不跨容器,原地重挂幂等)
+    if (g.ctl.portaled) {   // 顶层浮层(fixed):左上缩放位移直接并进 fixed left/top(右下角钉死),ensureMounted 早退不动它
+      var _cl = parseFloat(g.ctl.root.style.left) || 0, _ct = parseFloat(g.ctl.root.style.top) || 0;
+      g.ctl.root.style.left = (_cl + g.shiftX) + 'px';
+      g.ctl.root.style.top = (_ct + g.shiftY) + 'px';
+    }
+    ensureMounted(g.ctl.note);   // host 按新锚重算像素位置(左上缩放不跨容器,原地重挂幂等;portaled 时早退)
     g.ctl._suppressTap = Date.now();
     patchNote(g.ctl.note, { anchor: g.ctl.note.anchor, w: g.ctl.note.w, h: g.ctl.note.h });
   }
