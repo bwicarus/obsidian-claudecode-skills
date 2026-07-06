@@ -2507,6 +2507,7 @@
       };
     }
     try { if (context && !context.visible_text) context.visible_text = _visibleText(); } catch (e) {}   // 视口焦点(adapter/fallback 两路都补)
+    try { if (context && window.rcNoBook && window.rcNoBook()) context.no_book = true; } catch (e) {}   // 「书页」点暗 → 后端当通用助手答
     var rid = 'e' + Date.now() + '_' + (_ridCtr++);
     var evSeen = 0, done = false, aborted = false, answer = '', traceData = null, spinner = true;
     var strip = function (s) { return (window.RC && RC.assistant) ? RC.assistant.splitFollowups(s).text : s; };

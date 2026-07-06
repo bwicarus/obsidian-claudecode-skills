@@ -64,16 +64,21 @@
     image: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l4.5-4.5 3.5 3 3-2.5 5 5"/></svg>',
     video: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M10 9.5l4.5 2.5L10 14.5z" fill="currentColor" stroke="none"/></svg>'
   };
-  // 把两个偏好 toggle 追加进快捷按钮栏(跟「清空/模型」同一行),而非单独一行
+  _MEDIA_SVG.book = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H12v15H5.5A1.5 1.5 0 0 1 4 17.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H12v15h6.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>';
+  // 三个偏好 toggle 追加进快捷按钮栏(跟「清空/模型」同一行)。
+  // 「书页」默认**点亮**(把书本上下文喂 AI);点暗 → sendChat 发 no_book,后端当通用助手答(可问跟书无关的问题)。
+  // 「配图/视频」默认关(倾向不强制)。三元 [key, label, defaultOn, title]。
   window.rcBuildMediaRow = function (quickBar) {
     if (!quickBar || quickBar.__mediaRow) return;
     quickBar.__mediaRow = 1;
-    [['image', '配图'], ['video', '视频']].forEach(function (t) {
+    [['book', '书页', true, '点亮=把当前书页内容作为上下文喂给 AI;点暗=不带书本内容,可问跟这本书无关的问题'],
+     ['image', '配图', false, '开启后 AI 回答时会倾向于配图辅助解释(适合才配,不硬塞)'],
+     ['video', '视频', false, '开启后 AI 回答时会倾向于配视频辅助解释(适合才配,不硬塞)']].forEach(function (t) {
       var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg';
       b.innerHTML = _MEDIA_SVG[t[0]] + '<span>' + t[1] + '</span>';
-      b.title = '开启后 AI 回答时会倾向于用' + t[1] + '辅助解释(适合才配,不硬塞)';
+      b.title = t[3];
       var lk = 'rc-prefer-' + t[0];
-      try { if (localStorage.getItem(lk) === '1') b.classList.add('on'); } catch (e) {}
+      try { var v = localStorage.getItem(lk); if (v === null ? t[2] : v === '1') b.classList.add('on'); } catch (e) {}
       b.addEventListener('click', function () {
         var on = b.classList.toggle('on');
         try { localStorage.setItem(lk, on ? '1' : '0'); } catch (e) {}
@@ -81,6 +86,7 @@
       quickBar.appendChild(b);
     });
   };
+  window.rcNoBook = function () { try { return localStorage.getItem('rc-prefer-book') === '0'; } catch (e) { return false; } };
 
   if (!document.getElementById('rc-video-css')) {
     var s = document.createElement('style'); s.id = 'rc-video-css';

@@ -1045,6 +1045,7 @@
     var tries = 0;
     while (!done && !aborted) {
       try {
+        try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (e) {}
         await _stream(tries === 0
           ? { message: text + (window.rcMediaBias ? window.rcMediaBias() : ''), context: sentCtx, rid: rid, force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
           : { rid: rid, from: evSeen });

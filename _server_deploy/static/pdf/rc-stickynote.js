@@ -162,7 +162,7 @@
       // ⚠ user-select:text 必须显式给整个子树:PDF 挂载容器 .page-wrap 是 -webkit-user-select:none,
       //   iOS WebKit 对 none 子树内的 textarea 编辑期间不渲染字形/光标(输入隐形 bug 根因)。
       // blur 不再 CSS 常驻:磨砂强度可调(rc-note-blur 0-24px),由 applyColor 内联设置(refreshStyle 即时生效)
-      '.rc-note-body{position:relative;margin-top:6px;border-radius:10px;border:1px solid rgba(0,0,0,.22);box-shadow:0 4px 12px rgba(0,0,0,.28);overflow:hidden;-webkit-touch-callout:none;-webkit-user-select:text;user-select:text}',
+      '.rc-note-body{position:relative;margin-top:6px;border-radius:10px;border:1px solid rgba(0,0,0,.22);box-shadow:0 4px 12px rgba(0,0,0,.28);overflow:visible;-webkit-touch-callout:none;-webkit-user-select:text;user-select:text}',
       '.rc-note.rc-note-collapsed .rc-note-body{display:none}',
       // 文字层:16px 防 iOS 聚焦自动缩放;常态可点可聚焦(单击=输入,v2 规格1)
       // -webkit-text-fill-color 显式设(它优先于 color,堵祖先继承);translateZ(0) 强制独立合成层——
@@ -183,12 +183,18 @@
       '.rc-note-tool{position:relative;margin-left:auto;width:32px;height:28px;border-radius:7px;border:1px solid rgba(0,0,0,.25);background:rgba(255,255,255,.6);font-size:14px;line-height:1;cursor:pointer;padding:0;flex-shrink:0}',
       '.rc-note-tool.on{background:#ffe2a8;border-color:#c98a2b}',
       // resize 手柄(EDIT 模式,右下角,34px 触控)+ 左上角手柄(视觉同款角标,位置+尺寸同变)
-      '.rc-note-rs{position:absolute;right:0;bottom:0;width:34px;height:34px;display:none;z-index:4;cursor:nwse-resize;touch-action:none}',
+      // resize 手柄贴便签**外侧边缘**(负偏移露到 body 外,body overflow:visible),不再占内部空间跟工具条/文字冲突。
+      // 手柄本体做成圆形小抓点(半透明白+描边),视觉像 iOS 悬浮调整点。
+      '.rc-note-rs{position:absolute;right:-11px;bottom:-11px;width:26px;height:26px;display:none;z-index:6;cursor:nwse-resize;touch-action:none;border-radius:50%;background:rgba(255,255,255,.92);border:1px solid rgba(0,0,0,.28);box-shadow:0 2px 6px rgba(0,0,0,.3)}',
       '.rc-note.rc-note-editing .rc-note-rs{display:block}',
-      '.rc-note-rs::after{content:"";position:absolute;right:5px;bottom:5px;width:12px;height:12px;border-right:2.5px solid rgba(0,0,0,.45);border-bottom:2.5px solid rgba(0,0,0,.45);border-radius:2px}',
-      '.rc-note-rs-tl{position:absolute;left:0;top:0;width:34px;height:34px;display:none;z-index:4;cursor:nwse-resize;touch-action:none}',
+      '.rc-note-rs::after{content:"";position:absolute;right:7px;bottom:7px;width:9px;height:9px;border-right:2.2px solid rgba(0,0,0,.5);border-bottom:2.2px solid rgba(0,0,0,.5);border-radius:2px}',
+      '.rc-note-rs-tl{position:absolute;left:-11px;top:-11px;width:26px;height:26px;display:none;z-index:6;cursor:nwse-resize;touch-action:none;border-radius:50%;background:rgba(255,255,255,.92);border:1px solid rgba(0,0,0,.28);box-shadow:0 2px 6px rgba(0,0,0,.3)}',
       '.rc-note.rc-note-editing .rc-note-rs-tl{display:block}',
-      '.rc-note-rs-tl::after{content:"";position:absolute;left:5px;top:5px;width:12px;height:12px;border-left:2.5px solid rgba(0,0,0,.45);border-top:2.5px solid rgba(0,0,0,.45);border-radius:2px}',
+      '.rc-note-rs-tl::after{content:"";position:absolute;left:7px;top:7px;width:9px;height:9px;border-left:2.2px solid rgba(0,0,0,.5);border-top:2.2px solid rgba(0,0,0,.5);border-radius:2px}',
+      // 视频便签:隐藏工具条的笔/橡皮/视频按钮(一便签只一个视频、有视频不手写);视频区自己裁圆角
+      '.rc-note.rc-note-hasvideo .rc-note-tool{display:none}',
+      '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
+      '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
       // 暗底自动对比色(applyColor 按便签本色亮度 toggle .rc-note-darkbg):文字/placeholder/光标 →
       // 浅色系;handle 横杠/resize 角标/工具条底 同步翻浅,深色便签上操作件才可见
       '.rc-note.rc-note-darkbg .rc-note-text{color:' + FG_LIGHT + ';-webkit-text-fill-color:' + FG_LIGHT + ';caret-color:' + FG_LIGHT + '}',
@@ -199,7 +205,7 @@
       '.rc-note.rc-note-darkbg .rc-note-tools{background:rgba(255,255,255,.12)}',
       /* ── 视频便签:有 video 时 body 改 flex 列(播放器 + 控件 + 文字备注),隐藏手写层 ── */
       '.rc-note-video{display:none}',
-      '.rc-note.rc-note-hasvideo .rc-note-body{display:flex;flex-direction:column;padding:0;overflow:hidden}',
+      '.rc-note.rc-note-hasvideo .rc-note-body{display:flex;flex-direction:column;padding:0}',
       '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none}',
       '.rc-note.rc-note-hasvideo .rc-note-ink{display:none}',
       '.rc-note.rc-note-hasvideo .rc-note-text{position:relative;left:auto;top:auto;width:100%;height:auto;flex:1;min-height:30px;font-size:13px;padding:6px 9px;background:transparent}',
@@ -338,6 +344,7 @@
         '<label>速<select class="rc-vc-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-loop">循环</label>' +
         '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-cc">字幕</label>' +
+        '<button class="rc-vc-rm" title="移除视频(变回普通便签)">✕</button>' +
       '</div>';
     var emb = box.querySelector('.rc-vid-embed');
     box.querySelector('.rc-vc-start').value = v.start ? secToMMSS(v.start) : '';
@@ -366,6 +373,11 @@
     box.querySelector('.rc-vc-rate').addEventListener('change', function () { var r = parseFloat(this.value) || 1; applyPatch({ rate: r }, false); setRate(ctl, r); });
     box.querySelector('.rc-vc-loop').addEventListener('change', function () { applyPatch({ loop: this.checked }, true); });
     box.querySelector('.rc-vc-cc').addEventListener('change', function () { applyPatch({ cc: this.checked }, true); });
+    box.querySelector('.rc-vc-rm').addEventListener('click', function (e) {
+      e.stopPropagation(); e.preventDefault();
+      if (!window.confirm('移除这个视频?(便签变回普通便签)')) return;
+      ctl.note.video = null; patchNote(ctl.note, { video: null }); renderNoteVideo(ctl);
+    });
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
     var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
