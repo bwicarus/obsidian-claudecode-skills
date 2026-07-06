@@ -8517,6 +8517,7 @@ async function _connProbe() {
     '.asst-hl-tx{flex:1 1 auto;min-width:0;font-size:12.5px;color:#cdd8f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
     '.asst-hl-del{flex:0 0 auto;background:#3a1d1d;border:1px solid #6b3535;color:#ffd0d0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}' +
     '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
+    '.asst-hl-redo{flex:0 0 auto;background:#1d3a2a;border:1px solid #2f6347;color:#bfead0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}.asst-hl-redo:active{background:#244a35}.asst-hl-redo:disabled{opacity:.5}' +   // M9:删完转「↪ 重做」
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
     '.asst-edit-h{font-size:12.5px;color:#bfe0c8}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
@@ -9253,7 +9254,9 @@ async function _connProbe() {
         var _jp = (it.pdf_page != null) ? it.pdf_page : it.page;   // 跳转用 PDF 页(jumpWithBack 收 PDF 页)
         var jb = document.createElement('button'); jb.className = 'asst-jump'; jb.setAttribute('data-page', _jp); jb.textContent = '↗ 跳转';
         var db2 = document.createElement('button'); db2.className = 'asst-hl-del';
-        db2.setAttribute('data-id', it.id); db2.setAttribute('data-file', fileRel); db2.textContent = '🗑 删除';
+        db2.setAttribute('data-id', it.id); db2.setAttribute('data-file', fileRel);
+        try { db2.setAttribute('data-hl', JSON.stringify({ page: _jp, rects: it.rects || [], color: it.color, text: it.text || '' })); } catch (_) {}   // M9:删完「↪重做」重建用
+        db2.textContent = '🗑 删除';
         row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(db2);
         box.appendChild(row);
       });
@@ -9578,6 +9581,26 @@ async function _connProbe() {
   thread.addEventListener('click', function (e) {
     var jb = e.target && e.target.closest && e.target.closest('.asst-jump');
     if (jb) { var jp = parseInt(jb.getAttribute('data-page'), 10); if (jp && typeof window.jumpWithBack === 'function') window.jumpWithBack(jp); return; }
+    var redo = e.target && e.target.closest && e.target.closest('.asst-hl-redo');   // M9:删完的「↪ 重做」→ 用存的锚重建高亮(拿新 id)
+    if (redo) {
+      var rf = redo.getAttribute('data-file'), rd = {};
+      try { rd = JSON.parse(redo.getAttribute('data-hl') || '{}'); } catch (_) {}
+      if (!rd.rects || !rd.rects.length) { if (typeof _toast === 'function') _toast('这条没有几何信息,无法重建'); return; }
+      redo.disabled = true; redo.textContent = '重建中…';
+      fetch('/pdf/api/highlights', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: rf, page: rd.page, rects: rd.rects, color: rd.color, text: rd.text }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.ok) {
+            try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+            var db = document.createElement('button'); db.className = 'asst-hl-del';
+            db.setAttribute('data-id', d.id || ''); db.setAttribute('data-file', rf); db.setAttribute('data-hl', redo.getAttribute('data-hl') || ''); db.textContent = '🗑 删除';
+            var row2 = redo.closest('.asst-hl-row'); redo.replaceWith(db);
+            if (row2) { row2.style.opacity = ''; var tx2 = row2.querySelector('.asst-hl-tx'); if (tx2) tx2.style.textDecoration = ''; }
+          } else { redo.disabled = false; redo.textContent = '↪ 重做'; if (typeof _toast === 'function') _toast('重建失败'); }
+        })
+        .catch(function () { redo.disabled = false; redo.textContent = '↪ 重做'; });
+      return;
+    }
     var del = e.target && e.target.closest && e.target.closest('.asst-hl-del');   // 「列出可删高亮」里的删除按钮
     if (del) {
       var hid = del.getAttribute('data-id'), hfile = del.getAttribute('data-file');
@@ -9593,7 +9616,9 @@ async function _connProbe() {
             try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}   // 再重拉,同步 _hlByPage,翻页回来不复现
             var row = del.closest('.asst-hl-row');
             if (row) { row.style.opacity = '.45'; var tx = row.querySelector('.asst-hl-tx'); if (tx) tx.style.textDecoration = 'line-through'; }
-            del.outerHTML = '<span class="asst-tool">🗑 已删</span>';
+            var _rb = document.createElement('button'); _rb.className = 'asst-hl-redo'; _rb.textContent = '↪ 重做';   // M9:删完转重做(用存的锚重建)
+            _rb.setAttribute('data-file', hfile); _rb.setAttribute('data-hl', del.getAttribute('data-hl') || '');
+            del.replaceWith(_rb);
           } else { del.disabled = false; del.textContent = '🗑 删除'; if (typeof _toast === 'function') _toast('删除失败:' + ((d && d.error) || '')); }
         })
         .catch(function () { del.disabled = false; del.textContent = '🗑 删除'; });

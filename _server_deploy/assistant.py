@@ -1568,7 +1568,8 @@ def _t_find_highlights(args, ctx):
         items = [{"id": h.get("id"),
                   "page": _to_disp(ctx, h.get("page")),   # 显示/报给 AI:印刷页(跟用户一致)
                   "pdf_page": h.get("page"),               # 跳转用:PDF 页(jumpWithBack 收 PDF 页)
-                  "text": (h.get("text") or "")[:120], "color": h.get("color")}
+                  "text": (h.get("text") or "")[:120], "color": h.get("color"),
+                  "rects": h.get("rects")}                  # M9:删除后「↪ 重做」重建高亮要几何
                  for h in hls if h.get("id")]
         items.sort(key=lambda x: (x["pdf_page"], x["text"]))
         if not items:
