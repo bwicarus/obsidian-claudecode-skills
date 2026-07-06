@@ -97,11 +97,8 @@
   <aside id="ep-side">
     <div class="ep-side-pane active" data-pane="asst" id="ep-side-asst">
       <div id="ep-ai-body"></div>
-      <div id="ep-asst-quick">
-        <button class="asst-learn" data-send="这一章涉及哪些知识点？简要讲讲">🧩 这章知识点</button>
-        <button data-q="clear">🗑 清空</button>
-        <button data-q="models">⚙ 模型</button>
-      </div>
+      <!-- 快捷栏按钮由共享构建器 rcBuildQuickBar 填(与 PDF 同一份来源，按钮永不分叉)；容器留空 -->
+      <div id="ep-asst-quick"></div>
       <div id="ep-ai-input">
         <button id="ep-ai-mic" title="语音输入"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V22h2v-3.07A7 7 0 0 0 19 12h-2z"/></svg></button>
         <textarea id="ep-ai-ta" rows="1" placeholder="问这本书 / 让我帮你…"></textarea>

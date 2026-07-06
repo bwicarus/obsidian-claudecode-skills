@@ -2920,7 +2920,11 @@
     content.addEventListener('wheel', function (e) { if (!e.ctrlKey) return; if (e.cancelable) { try { e.preventDefault(); } catch (_) {} } _fontStep(e.deltaY < 0 ? STEP : -STEP); }, { passive: false });
   })();
   // 助手/目录/高亮/知识点 入口并入右侧统一抽屉(把手打开 + tab 切换);AI 模型设置走顶栏 ⚙(openSettings)
-  try { if (window.rcBuildMediaRow) window.rcBuildMediaRow($('ep-asst-quick')); } catch (e) {}   // 「配图/视频」偏好开关(并入快捷按钮栏)
+  // 快捷栏由共享构建器填(与 PDF 同一份来源 → 按钮永不分叉;含知识点/清空/模型 + 媒体行)。EPUB 位置语义=「章」。
+  try {
+    if (window.rcBuildQuickBar) window.rcBuildQuickBar($('ep-asst-quick'), { knowledgeSend: '这一章涉及哪些知识点？简要讲讲', knowledgeLabel: '🧩 这章知识点' });
+    else if (window.rcBuildMediaRow) window.rcBuildMediaRow($('ep-asst-quick'));
+  } catch (e) {}
   $('ep-ai-send').addEventListener('click', function () {
     if (_streaming) { try { _asstAbort && _asstAbort.abort(); } catch (e) {} return; }   // 流式中点 ■ → 中止本轮
     sendChat();

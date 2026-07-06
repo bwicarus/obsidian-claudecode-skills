@@ -50,6 +50,25 @@
   // 共享 toast 兜底:openModelSettings/_setActionPref 里的 `typeof _toast === 'function'` 由它满足(走 RC.toast)。
   function _toast(m) { try { if (RC.toast) RC.toast(m); } catch (e) {} }
 
+  // ── 共享快捷按钮栏(PDF #asst-quick / EPUB #ep-asst-quick 单一来源;根治两边按钮分叉)──
+  //   统一为 [🧩 本X知识点(data-send) · 🗑 清空 · ⚙ 模型] + 媒体行(rcBuildMediaRow「配图/视频」偏好开关)。
+  //   「总结本页/本页生词」历史按钮不再纳入(已从两边移除)。点击处理仍走各 reader 在容器上的既有委托
+  //   (data-send 直接发 / data-q=clear 清空 / data-q=models 开模型面板),故只产 markup、不绑事件 → 零耦合。
+  //   opts.knowledgeSend / opts.knowledgeLabel:各 reader 传各自的位置语义(PDF「页」/ EPUB「章」)。
+  //   假定容器为空;幂等(__quickBuilt 去重);容器需已存在。收藏夹整集按钮由 EPUB 在此之后自行 prepend,不受影响。
+  window.rcBuildQuickBar = function (container, opts) {
+    if (!container || container.__quickBuilt) return;
+    container.__quickBuilt = 1;
+    opts = opts || {};
+    var kSend = opts.knowledgeSend || '这一节涉及哪些知识点？简要讲讲';
+    var kLabel = opts.knowledgeLabel || '🧩 本节知识点';
+    container.insertAdjacentHTML('beforeend',
+      '<button class="asst-learn" data-send="' + esc(kSend) + '">' + esc(kLabel) + '</button>' +
+      '<button data-q="clear">🗑 清空</button>' +
+      '<button data-q="models">⚙ 模型</button>');
+    try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(container); } catch (e) {}   // 「配图/视频」偏好开关并入本栏
+  };
+
   // 一次性注入样式(照搬 25-assistant.js 的 .asst-followups / .asst-ctx-card 视觉,改 scoped 前缀防撞;
   //  另把 ⚙ 模型设置面板的 .ams-* 样式**逐字照搬**进来 —— 这套 class 名与 PDF 完全一致,跟 EPUB 现有 .ep-* 不撞)
   (function injectCss() {
