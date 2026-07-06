@@ -208,7 +208,8 @@
       /* ── 视频便签:有 video 时 body 改 flex 列(播放器 + 控件 + 文字备注),隐藏手写层 ── */
       '.rc-note-video{display:none}',
       '.rc-note.rc-note-hasvideo .rc-note-body{display:flex;flex-direction:column;padding:0}',
-      '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none}',
+      // 视频区显式抬到手写层(z-index:2)与磨砂层之上,永不被白底/canvas 盖住(PDF zoom 祖先下 backdrop 失效时尤甚)
+      '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none;position:relative;z-index:5;background:#000;border-radius:9px 9px 0 0;overflow:hidden}',
       // 手写层保留(用户要:视频便签也能画笔,只是不显示笔按钮)——canvas 铺满 body 叠在文字备注区上,视频 iframe 区会吞笔无妨
       '.rc-note.rc-note-hasvideo .rc-note-text{position:relative;left:auto;top:auto;width:100%;height:auto;flex:1;min-height:30px;font-size:13px;padding:6px 9px;background:transparent}',
       // aspect-ratio 放在图片/iframe(替换元素)上,而非容器——flex 布局(尤其 iOS Safari)里容器 aspect-ratio 常失效
