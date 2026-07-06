@@ -145,3 +145,27 @@
 | hlUrl() | `/pdf/api/epub-highlights`(1209) | notesUrl() | EPUB 便签端点(需确认) | noteCompositeUrl() | `/pdf/api/note-composite`(共享,1440) |
 
 **③-4b 风险点**:①退役 epub-html 内联 `sendChat/runAssistant/流式`(改成共享侧栏的 send);②抽屉集成——共享侧栏 pane class 是 `.side-pane`,EPUB 抽屉认 `.ep-side-pane`(要么侧栏 pane class 也经 host、要么 EPUB CSS 认 .side-pane);③模板 `#ep-asst-quick`/`#ep-ai-*` 静态 DOM 与共享侧栏自建 `#asst-*` 冲突(EPUB 模板去掉静态助手 DOM,让共享侧栏建)。**必须 flag 门控 + 浏览器逐功能验证再翻默认。**
+
+## ③-4 实施结果(2026-07-07 完成 flag 门控切面)
+
+**调研把范围大幅收窄**——原以为要映射 ~48 方法 + 重写内联流式,实测只需「3 端点 + tab 守卫」:
+
+- ✅ **③-3 挂载点抽象**:mountPanel()→`#ep-side`、mountTabs()→`#ep-side-tabs`(id,曾误写 `.ep-side-tabs` class 找不到已修)。侧栏自建 tab(`.side-tab`)+pane(`.side-pane#side-pane-asst`,靠 `#side-pane-asst.active{display:flex}` 自带 CSS 显示)。
+- ✅ **③-4a EPUB host**:`EpubHtmlAdapter._host.asst`(~50 方法转发 EPUB 本地原语;页↔章语义 dispPage/pdfFromDisp 恒等;PDF 字符层/词组高亮专属→no-op;flashSelOnPage→`_jumpFlashSel`)。纯新增。
+- ✅ **③-4b 端点路由 + flag 挂载**:
+  - **`ctx()` 早已经 `RC.adapter().getContext()`**(rc-assistant 938)→ EPUB context 形状由 `EpubHtmlAdapter.getContext()` 产出,**最难的一环本就就位**。
+  - **SSE 事件协议两后端本就同款**(meta/tool/answer/actions/undo/trace…);`runActions` 是 `window[a.fn].apply()`=**reader 无关**:EPUB `window.epubHighlight`(专属画法,不被覆盖)被正确派发;shared 覆盖的 `notesReload`→`RC.stickynote.loadAll`、`_reloadHighlights`→`HOST.loadAllHighlights` 都 reader 无关。
+  - **只有 3 端点真不同** → 经 HOST:`chatUrl`(`/api/assistant/chat`↔`/pdf/api/epub-assistant`)、`historyUrl`(`…/history`↔`…/epub-convo?file=`)、`clearUrl`(`…/clear`↔`…/epub-convo/clear?file=`)。PDF 默认=原字面量(零回归)。
+  - **undo / prewarm / action-pref[s] / voice task-status 两阅读器本就共用**,无需路由(EPUB `.ep-asst-undo` 早打 `/api/assistant/undo`)。
+  - history 顶层 `{ok, messages}` 两后端已一致(epub-convo GET 2101)。
+  - tab 守卫 `window.switchSideTab && HOST.switchTab` → `HOST.switchTab &&`(EPUB 无该 PDF 全局)。
+  - 后端 `_eassistant_convo_clear` 加 `request.args` 取 file 兜底(共享 clear POST 无 body)。
+  - **flag `?asst=shared`**(epub-html.js 末尾):摘内联 asst pane(`#ep-side-asst`)+ RC 建的内联 asst tab → `mountPdfSidebar()` 自建 → 补 EPUB 抽屉 class(`.side-tab`→`.ep-side-tab`,pane 加 `.ep-side-pane`)→ `setTab` 认得。默认无 flag=完全走内联助手=零影响。
+
+**验证状态**:reader.js build+check、node --check ×3、python 语法、PDF host 返回原端点、webapp restart 200、nginx 静态=源 —— **全过**。前端行为等价**须浏览器验证**(此环境无浏览器)。
+
+**浏览器逐项验证清单(EPUB 开 `?asst=shared`)**:① 抽屉「助手」tab 出现且点开显示共享 pane ② 发消息流式回答(打 epub-assistant)③ 快捷栏知识点/清空/模型/媒体行 ④ 历史刷新回放(文本+视频)⑤ 选中→AI 高亮画得出(`window.epubHighlight` 派发)⑥ 制卡/笔记撤销卡 ⑦ 清空清服务端历史。
+
+**已知小缺口(记录,非阻断)**:① history 内 **action-card 回放**(EPUB 存 `actions` 非 `undo_cards`)② per-msg **section-jump chip**(存 `section` 非 `page`,`_ctxCard` 读 `page`)③ 内联 `onTab('asst')` 在 flag 下仍空跑一次 loadHistory(渲进已移除 DOM,无害)。
+
+**翻默认步骤**(浏览器验证通过后):epub-html.js 把 `var _uSh = …indexOf('asst=shared')>=0` 改成恒 true(或去掉 flag 判定直接挂),再从模板删静态 `#ep-side-asst` 内联助手 DOM + 从 epub-html.js 删内联 `sendChat/runAssistant/流式/quick绑定/mic`(退役内联),部署验证。
