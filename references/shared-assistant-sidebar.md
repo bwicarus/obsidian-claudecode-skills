@@ -64,3 +64,32 @@
 - 静态由 nginx `/var/www/html/static/pdf/` 服务;`:5000` Flask static 陈旧。验前端用 nginx curl + `diff -q`。
 - EPUB 无 legacy 模式(恒加载 rc-*);PDF 有 `?ui=legacy` → 共享层不加载,25-assistant 必须留 native 兜底。
 - 便签透明度:PDF 缩放用祖先 CSS `zoom`/`transform` → `backdrop-filter` 磨砂失效(平台限制),EPUB 无此问题。收口时评估是否换不依赖磨砂的透明方案。
+
+## PDF↔EPUB 助手分叉清单(2026-07-07 审计,39 条 → 3高/11中/12低/7域差异)
+
+> 收口成一份代码前的**行为对齐清单**(逐条抹平 → 保证搬迁不丢功能)。✅=已修。
+
+**HIGH**
+- ✅ H1 no_book「书页」开关 EPUB 失效(前端发了后端零处理)→ `_ectx_block` 加 no_book 分支
+- ⬜ H2 写操作撤销/重做卡 PDF 刷新即丢(EPUB 已持久化)→ PDF 补 action 事件+`_convo_append` 白名单+`/pdf-action`+loadHistory 回放(大工程)
+- ⬜ H3 EPUB 无 see_page 章节级看图 → 加 section 级 rasterize 截图管线+后端 vision(大工程)
+
+**MEDIUM**
+- ⬜ M1 langs 书语言未注入 EPUB(getContext+meta)
+- ⬜ M2 visible_vocab 本页生词未注入 EPUB
+- ✅ M3 讲这里别读整章(EPUB `_ESYS_RULES` 静态铁律)
+- ✅ M4 read_selection 工具 EPUB 缺(一行注册复用 PDF)
+- ⬜ M5 make_anki 制卡后无 CFI 回链高亮(EPUB)
+- ⬜ M6 make_note 无回链高亮+无选中不回退整章(EPUB)
+- ⬜ M7 find_highlights 范围参数(sections/from-to)EPUB 受限
+- ⬜ M8 用户气泡带入图缩略图不落库不回放(EPUB `figures` 白名单+回放)
+- ⬜ M9 高亮列表卡删除后不可恢复(PDF 缺重做,抄 EPUB)
+- ⬜ M10 空/清空后欢迎语 greet() EPUB 缺
+- ⬜ M11 页面级 see_ink(gated:先确认 EPUB 正文有无自由墨层)
+
+**LOW**(快改批)
+- ⬜ L1 see_figure 描述漏 {index?}(PDF 文案)· L2 公式收尾句(EPUB 已近似)· L3 tool-done 前端切「思考中」(PDF)· L4 gemini-paid 兜底 showNotice(EPUB)· L5 🗑清空流式守卫(PDF)· L6 空输入分流『讲讲这个便签』(EPUB)· L7 便签 chip 缩略图点开大图(EPUB)· L8 追问/反馈错峰淡入(EPUB,可收进 rc-assistant)· L9 focus_sel 独立通道(可仅登记)· L10 历史「选中」精确锚(PDF)· L11 prewarm(off)(EPUB)· L12 删冗余本地 chat[](EPUB)
+
+**域差异/已对齐(不改)**:read_source_page(收藏集专属)· page↔section 命名 · see_page 省额度 · 落库位置死字段 · from/page_type 首连 · 收藏集 NotebookLM · rc-video ui_shared 门控(仅 legacy)
+
+> 已修/独立修过的相关项:快捷栏共享 `rcBuildQuickBar`、视频历史回放、PDF visible_text 采集、工具 JSON 流式不泄漏+带前导散文也执行、找视频某国母语。
