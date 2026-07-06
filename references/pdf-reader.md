@@ -1233,3 +1233,8 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 - **方案取舍**:用户设想"算 stroke 与背景对比度→替换对比色"。可行但脆:①只对内联 SVG 有效(图片无解);②SVG 颜色形式多样(currentColor/类/渐变/图案)难逐一算;③易误伤有意颜色(红曲线对比其实够)。**采用大厂通行做法**(GitHub/Notion/arXiv 暗色模式看图):给内容图**浅色画布 matte**(`background:#fff;padding;border-radius`)——SVG+PNG 一招通杀、不改写任何颜色、零误伤。
 - **三处 AI markdown 容器**(都加 `img,svg` matte):`#result-content`(rc-result 结果卡,共享)、`.asst-a`(PDF 助手气泡,reader.src/25-assistant.js 注入 CSS)、`.ep-msg.a`(EPUB 助手气泡,epub-styles.css)。
 - **不误伤公式**:MathJax=tex-chtml-full 构建(CHTML 输出,**无 `<svg>`**),故 `容器 svg` 只会命中内容图。改 tex-svg 输出的话此规则要排除 `mjx-container svg`。
+
+### §17.3 2026-07-06 双指缩放焦点跳位 → 页锚定(布局无关)根治
+- **现象**:双指放大/缩小后画面跳到别处,要手动移回阅读位置(用户:「每种大小都绑定某一位置」)。
+- **根因**:重标尺用 CSS `zoom` 缩放每个 `.page-wrap`,但**页间距 margin 不随 zoom 缩放**;而焦点保持是 `fx*k` 像素线性外推(假设整个内容严格等比)→ 焦点在文档靠后处偏差=Σ页间距×(k-1),放大 2× 可达几百 px。
+- **修复**(`06-layout.js`,大厂 pinch-zoom 标准):焦点锚从"像素坐标×k"改成"**焦点落在哪一页 + 页内比例**"(`_focalAnchor` 用 getBoundingClientRect,绕 offsetParent、单页/连续/双页通用)。恢复时差量 `scrollTop += (锚点当前屏幕Y − 起始焦点cy)` 把该比例点移回起始焦点屏幕位置——与页间距/缩放倍率/占位高度全无关。三入口(pinch touchstart / 松手 endPinch / 桌面 Ctrl+滚轮)都带 anchor;焦点落在页间距/该页已卸载 → fallback 旧 fx*k。同续读仲裁的 frac 布局无关思路。

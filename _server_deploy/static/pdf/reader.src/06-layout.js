@@ -238,6 +238,18 @@ window.addEventListener('resize', () => { clearTimeout(_orientResizeT); _orientR
 // ── 双指缩放：阅读器接管（禁浏览器 pinch 位图拉伸，改按新倍率重渲染 PDF → 清晰）──
 // focal = {fx,fy,cx,cy,s0}:fx/fy=捏合焦点在内容坐标(旧 s0 布局下);cx/cy=该点的屏幕位置;
 // 重渲后把它放回同一屏幕位置(焦点保持,缩放不跳)。无 focal(旋转恢复)→ 按相对位置保持。
+// 焦点锚:焦点屏幕点落在哪一页 + 页内比例(布局无关)。缩放后按此比例点移回原屏幕位置 → 焦点保持、缩放不跳。
+// 用 getBoundingClientRect(屏幕坐标)天然绕开 offsetParent 链(单页/连续/双页 spread-row 通用)。
+function _focalAnchor(sx, sy) {
+  const wraps = document.querySelectorAll('#page-container .page-wrap');
+  for (const w of wraps) {
+    const r = w.getBoundingClientRect();
+    if (r.height && sy >= r.top && sy < r.bottom) {
+      return { pn: w.dataset.pageNum, fracY: (sy - r.top) / r.height, fracX: r.width ? (sx - r.left) / r.width : 0 };
+    }
+  }
+  return null;
+}
 async function _applyZoom(newScale, focal) {
   if (_refitBusy || !pdfDoc) return;
   { const _pc = document.getElementById('page-container'); if (_pc && _pc.style.transform) { _pc.style.transform = ''; _pc.style.transformOrigin = ''; } }  // 防御:清掉任何残留的捏合预览 transform(否则跟栅格缩放叠成两层)
@@ -256,9 +268,27 @@ async function _applyZoom(newScale, focal) {
     requestAnimationFrame(() => {
       if (focal && focal.s0 > 0) {
         const mr = main.getBoundingClientRect();
-        const k = newScale / focal.s0;   // 内容坐标随 scale 等比放大
-        main.scrollLeft = Math.max(0, focal.fx * k - (focal.cx - mr.left));
-        main.scrollTop  = Math.max(0, focal.fy * k - (focal.cy - mr.top));
+        let handled = false;
+        // 焦点保持(大厂 pinch-zoom 标准):锚定「焦点落在哪一页 + 页内比例」而非像素线性外推。
+        // 旧 fx*k 假设整个内容严格等比,但连续模式页间距(margin)不随 CSS-zoom 缩放 → 焦点在文档靠后处时
+        // 偏差=Σ页间距×(k-1),放大 2× 可达几百 px(用户报「缩放后要移回阅读位置」的根因)。
+        // 页锚用 getBoundingClientRect 差量把锚点移回起始焦点屏幕位置,布局无关、免受页间距/占位高度变化影响。
+        if (focal.anchor && focal.anchor.pn != null) {
+          const pw = document.querySelector('.page-wrap[data-page-num="' + focal.anchor.pn + '"]');
+          if (pw) {
+            const r = pw.getBoundingClientRect();
+            if (r.height) {
+              main.scrollTop  = Math.max(0, main.scrollTop  + (r.top  + focal.anchor.fracY * r.height) - focal.cy);
+              main.scrollLeft = Math.max(0, main.scrollLeft + (r.left + focal.anchor.fracX * r.width)  - focal.cx);
+              handled = true;
+            }
+          }
+        }
+        if (!handled) {   // 兜底:焦点落在页间距/该页已卸载 → 旧线性外推(近似)
+          const k = newScale / focal.s0;
+          main.scrollLeft = Math.max(0, focal.fx * k - (focal.cx - mr.left));
+          main.scrollTop  = Math.max(0, focal.fy * k - (focal.cy - mr.top));
+        }
       } else if (container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);   // 无焦点:保持相对竖直位置
       }
@@ -291,6 +321,7 @@ function _setupPinchZoom() {
         fx: main.scrollLeft + (cx - mr.left),
         fy: main.scrollTop + (cy - mr.top),
         cx, cy,
+        anchor: _focalAnchor(cx, cy),   // 焦点页锚(布局无关);缩放不跳
       };
       const pc = document.getElementById('page-container');
       pc.style.transformOrigin = _pinch.fx + 'px ' + _pinch.fy + 'px';   // 整个手势固定不变 → 焦点视觉锁定
@@ -314,7 +345,7 @@ function _setupPinchZoom() {
     pc.style.transform = ''; pc.style.transformOrigin = '';
     if (Math.abs(p.target - scale) > 0.01) {
       // 焦点保持:把起始焦点内容点放回起始屏幕位置(cx,cy),缩放不跳
-      _applyZoom(p.target, { fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, s0: p.s0 });
+      _applyZoom(p.target, { fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, s0: p.s0, anchor: p.anchor });
     }
   };
   main.addEventListener('touchend', (e) => { if (_pinch && e.touches.length < 2) endPinch(); }, { passive: false });
@@ -329,7 +360,7 @@ function _setupPinchZoom() {
     const factor = e.deltaY < 0 ? 1.12 : 0.89;
     const target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale * factor));
     if (Math.abs(target - scale) < 0.005) return;
-    _applyZoom(target, { fx: main.scrollLeft + (e.clientX - mr.left), fy: main.scrollTop + (e.clientY - mr.top), cx: e.clientX, cy: e.clientY, s0: scale });
+    _applyZoom(target, { fx: main.scrollLeft + (e.clientX - mr.left), fy: main.scrollTop + (e.clientY - mr.top), cx: e.clientX, cy: e.clientY, s0: scale, anchor: _focalAnchor(e.clientX, e.clientY) });
   }, { passive: false });
 }
 if (document.readyState !== 'loading') _setupPinchZoom();
