@@ -24,7 +24,8 @@
     el.querySelector('.rc-vid-thumb').addEventListener('click', function () {
       var box = el.querySelector('.rc-vid-thumb'); if (!box || box.querySelector('iframe')) return;
       var f = document.createElement('iframe');
-      f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?autoplay=1&playsinline=1&rel=0';
+      // cc_lang_pref=zh-Hans:点 CC 时优先中文字幕(有中文轨/自动翻译时);hl=zh-CN:播放器 UI 中文。不加 cc_load_policy → 不强制默认开字幕,只定语言偏好。
+      f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?autoplay=1&playsinline=1&rel=0&cc_lang_pref=zh-Hans&hl=zh-CN';
       f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
       f.setAttribute('allowfullscreen', '');
       f.className = 'rc-vid-frame';
@@ -63,10 +64,10 @@
     image: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l4.5-4.5 3.5 3 3-2.5 5 5"/></svg>',
     video: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M10 9.5l4.5 2.5L10 14.5z" fill="currentColor" stroke="none"/></svg>'
   };
-  window.rcBuildMediaRow = function (inputEl) {
-    if (!inputEl || !inputEl.parentNode || inputEl.__mediaRow) return;
-    inputEl.__mediaRow = 1;
-    var row = document.createElement('div'); row.className = 'rc-media-row';
+  // 把两个偏好 toggle 追加进快捷按钮栏(跟「清空/模型」同一行),而非单独一行
+  window.rcBuildMediaRow = function (quickBar) {
+    if (!quickBar || quickBar.__mediaRow) return;
+    quickBar.__mediaRow = 1;
     [['image', '配图'], ['video', '视频']].forEach(function (t) {
       var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg';
       b.innerHTML = _MEDIA_SVG[t[0]] + '<span>' + t[1] + '</span>';
@@ -77,9 +78,8 @@
         var on = b.classList.toggle('on');
         try { localStorage.setItem(lk, on ? '1' : '0'); } catch (e) {}
       });
-      row.appendChild(b);
+      quickBar.appendChild(b);
     });
-    inputEl.parentNode.insertBefore(row, inputEl);
   };
 
   if (!document.getElementById('rc-video-css')) {
@@ -96,11 +96,11 @@
       '.rc-vid-meta{padding:7px 9px}' +
       '.rc-vid-title{font-size:12.5px;color:#dbe7ff;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.rc-vid-ch{font-size:11px;color:#7c93c4;margin-top:3px}' +
-      '.rc-media-row{display:flex;gap:7px;padding:7px 10px 1px}' +
-      '.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:15px;padding:4px 12px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s;font-family:inherit}' +
+      /* 偏好 toggle:混进 quick 栏(同「模型」一行),尺寸/圆角对齐 quick button,用透明描边+选中蓝区分是开关不是即时动作 */
+      '#ep-asst-quick button.rc-media-tg,#asst-quick button.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:8px;padding:6px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s}' +
       '.rc-media-tg svg{opacity:.85}' +
       '.rc-media-tg:active{transform:scale(.96)}' +
-      '.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
+      '#ep-asst-quick button.rc-media-tg.on,#asst-quick button.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
       '.rc-media-tg.on svg{opacity:1}';
     (document.head || document.documentElement).appendChild(s);
   }

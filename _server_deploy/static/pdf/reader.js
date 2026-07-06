@@ -8485,7 +8485,7 @@ async function _connProbe() {
       '<textarea id="asst-ta" rows="1" placeholder="问这本书 / 让我帮你…"></textarea>' +
       '<button id="asst-send" title="发送">➤</button></div>';
   panelEl.appendChild(pane);
-  try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(document.getElementById('asst-input')); } catch (e) {}   // 输入框上「配图/视频」偏好开关
+  try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(document.getElementById('asst-quick')); } catch (e) {}   // 「配图/视频」偏好开关(并入快捷按钮栏)
 
   var css = document.createElement('style');
   css.textContent =
