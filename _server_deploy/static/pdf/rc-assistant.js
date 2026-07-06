@@ -133,10 +133,20 @@
 
   function contextCard(items) {
     if (!items || !items.length) return null;
-    var rows = items.filter(function (it) { return it && (it.text != null) && String(it.text).trim() !== ''; });
+    var rows = items.filter(function (it) { return it && (it.image || ((it.text != null) && String(it.text).trim() !== '')); });
     if (!rows.length) return null;
     var card = document.createElement('div'); card.className = 'rc-asst-ctx';
     rows.forEach(function (it) {
+      if (it.image) {   // 图缩略图行(带入图 / 便签合成图回放):有 image(url 或 data_url)就渲小图,点开走 onClick(如 lightbox)
+        var irow = document.createElement('div'); irow.className = 'rc-asst-ctx-row rc-asst-ctx-img';
+        var im = document.createElement('img'); im.src = it.image; im.alt = it.text || '';
+        im.style.cssText = 'max-width:120px;max-height:80px;border-radius:6px;object-fit:cover;display:block' + (typeof it.onClick === 'function' ? ';cursor:zoom-in' : '');
+        if (typeof it.onClick === 'function') im.addEventListener('click', function () { try { it.onClick(); } catch (e) {} });
+        irow.appendChild(im);
+        if (it.text) { var cap = document.createElement('span'); cap.textContent = it.text; cap.style.cssText = 'margin-left:6px;font-size:12px;opacity:.8;vertical-align:top'; irow.appendChild(cap); }
+        card.appendChild(irow);
+        return;
+      }
       var row = document.createElement('div'); row.className = 'rc-asst-ctx-row';
       var t = String(it.text);
       if (it.formula && /^\$\$?[\s\S]+\$\$?$/.test(t.trim())) {   // 公式行:走 MathJax,不显示裸 LaTeX
