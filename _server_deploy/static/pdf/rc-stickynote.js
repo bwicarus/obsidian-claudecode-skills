@@ -211,9 +211,11 @@
       '.rc-note.rc-note-hasvideo .rc-note-video{display:block;flex:none}',
       // 手写层保留(用户要:视频便签也能画笔,只是不显示笔按钮)——canvas 铺满 body 叠在文字备注区上,视频 iframe 区会吞笔无妨
       '.rc-note.rc-note-hasvideo .rc-note-text{position:relative;left:auto;top:auto;width:100%;height:auto;flex:1;min-height:30px;font-size:13px;padding:6px 9px;background:transparent}',
-      '.rc-vid-embed{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer}',
-      '.rc-vid-embed img{width:100%;height:100%;object-fit:cover;display:block}',
-      '.rc-vid-if{width:100%;aspect-ratio:16/9;border:0;display:block}',
+      // aspect-ratio 放在图片/iframe(替换元素)上,而非容器——flex 布局(尤其 iOS Safari)里容器 aspect-ratio 常失效
+      //   导致 height:100% 的图被便签比例拉变形。img/iframe 自己锁 16:9 → 任何便签宽高比都不变形,embed 高度跟随。
+      '.rc-vid-embed{position:relative;width:100%;background:#000;cursor:pointer}',
+      '.rc-vid-embed img{width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;display:block}',
+      '.rc-vid-if{width:100%;height:auto;aspect-ratio:16/9;border:0;display:block}',
       '.rc-vid-go{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:42px;height:42px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:15px;cursor:pointer;padding-left:2px}',
       '.rc-vid-embed:hover .rc-vid-go{background:rgba(220,40,40,.92)}',
       '.rc-vid-ctrls{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:5px 8px;font-size:11.5px;color:#2a2a2a;background:rgba(255,255,255,.42);border-top:1px solid rgba(0,0,0,.08)}',
