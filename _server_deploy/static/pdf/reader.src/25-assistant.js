@@ -1009,6 +1009,7 @@
       evSeen++;
       if (ev === 'done') { done = true; return; }
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
+      else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed; var _at = _splitFollowups(answer).text;
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
@@ -1207,7 +1208,7 @@
       else if (q === 'zin') window.zoomChange(0.15);
       else if (q === 'zout') window.zoomChange(-0.15);
       else if (q === 'ptrans') window.togglePageTranslate();
-      else if (q === 'clear') { thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }
+      else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; fetch('/api/assistant/clear', { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
       else if (q === 'models') { openModelSettings(); }
     } catch (_) {}
   });

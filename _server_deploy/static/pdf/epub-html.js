@@ -2568,7 +2568,9 @@
       else if (ev === 'notice') showNotice(parsed);
       else if (ev === 'gemini-paid') {   // ② 免费 Gemini 受限→本次已用付费:提示条 + 一键「以后直接用付费」(同 session 只提一次,渲染器在 rc-assistant)
         try { var _pn = (window.RC && RC.assistant && RC.assistant.paidNotice) ? RC.assistant.paidNotice(parsed) : null;
-              if (_pn) { aiBody.appendChild(_pn); aiBody.scrollTop = aiBody.scrollHeight; } } catch (e) {}
+              if (_pn) { aiBody.appendChild(_pn); aiBody.scrollTop = aiBody.scrollHeight; }
+              else if (!window.__paidNoted) { window.__paidNoted = true; showNotice((parsed && parsed.text) || '免费 Gemini 额度受限,本次已使用付费档。'); }   // L4:paidNotice 空时兜底(镜像 PDF)
+        } catch (e) {}
       }
       else if (ev === 'actions') { try { runActions(parsed); } catch (e) {} }   // 工具一执行完立即应用(跳章/高亮即时生效)
       else if (ev === 'trace') traceData = parsed;
