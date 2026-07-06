@@ -705,6 +705,7 @@
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (_hd) cancelHandleGesture(true);
     e.preventDefault();   // handle touch-action:none;再挡 iOS 文本选择/callout
+    if (!ctl.note.collapsed) portalIn(ctl);   // 展开态一碰即置顶(单击/长按/拖动统一,idempotent;折叠态由 toggleCollapsed 展开后再置顶)
     _hd = { ctl: ctl, sx: e.clientX, sy: e.clientY, lp: null, dragging: false, moved: false, rect0: null };
     if (EDIT && EDIT.ctl === ctl) startDrag(ctl);   // 已在 EDIT → 按下即拖
     else _hd.lp = setTimeout(function () { if (_hd && _hd.ctl === ctl) { enterEdit(ctl); startDrag(ctl); } }, lpMs());
@@ -813,6 +814,7 @@
 
   // ─────────────────────────── body 手势(v3:单击=文字 / 长按=EDIT / pen=后备直写 / 手指双击=橡皮)───────────────────────────
   function onBodyDown(ctl, e) {
+    if (!ctl.note.collapsed) portalIn(ctl);   // 单击正文即置顶(展开态一碰就浮到最上层;idempotent,已 portaled 则 no-op)
     if (e.target && e.target.closest && (e.target.closest('.rc-note-tools') || e.target.closest('.rc-note-rs') || e.target.closest('.rc-note-rs-tl') || e.target.closest('.rc-note-del'))) return;
     // 手指快速双击 → 临时橡皮(照搬 _epInk 350ms/32px;gate=已有笔画或已是橡皮 → 没写过字的便签双击留给 AI hook)。
     // 第一击不拦截(照常穿透聚焦文字/进 root 双击计数);第二击才吃掉(stopPropagation → 不聚焦、不进 AI 计数)。
