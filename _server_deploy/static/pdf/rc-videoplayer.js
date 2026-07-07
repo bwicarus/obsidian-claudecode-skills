@@ -173,7 +173,7 @@
       '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-list.on{color:#7dd3fc}' +
       '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0}' +
-      '.rcvp-tlist{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:4px 0}' +
+      '.rcvp-tlist{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding:4px 0}' +
       '.rcvp-tempty{color:#7c93c4;font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
       '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
       '.rcvp-tline:hover{background:rgba(255,255,255,.05)}' +
