@@ -4353,6 +4353,7 @@ def pdf_api_dict_quick():
     pdf_rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
     context = request.args.get("context", "")
+    prewarm = request.args.get("prewarm") == "1"   # 预热:纯读(不写查询日志/不 bump 暴露计数/不触发建笔记),供翻页后台预填前端缓存,不污染掌握度
     if not word:
         return jsonify({"ok": False, "error": "no word"})
     ds, _ = _vocab_modules()
@@ -4379,11 +4380,12 @@ def pdf_api_dict_quick():
         # zh 未翻译则回退英文;Tanaka 母语例句即使没中文也先给原句+英译
         ex_txt = "\n".join(
             f"· {e.get('ja','')} — {e.get('zh') or e.get('en') or ''}" for e in ex)
-        try:
-            _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
-            _jp_vocab_bump(word_raw)   # 日语生词高亮：查过即记，按熟悉度上色
-        except Exception:
-            pass
+        if not prewarm:
+            try:
+                _append_lookup_log(word_raw, word_raw, pdf_rel, page, context)
+                _jp_vocab_bump(word_raw)   # 日语生词高亮：查过即记，按熟悉度上色
+            except Exception:
+                pass
         # unidic 权威读音 + 声调(ピッチアクセント),离线毫秒级,覆盖 AI 读音
         ra = {}
         try:
@@ -4392,8 +4394,9 @@ def pdf_api_dict_quick():
             pass
         reading = ra.get("reading") or jp.get("reading", "")
         # 入统一 vocab 库:查词→建/更新 vault 笔记(原形为键,表层入 forms)+ 句子暴露(同英语)
-        _trigger_jp_note_async(_lookup, reading, jp.get("zh", ""), jp.get("examples") or [],
-                               [word_raw, _lookup], pdf_rel, page, context)
+        if not prewarm:
+            _trigger_jp_note_async(_lookup, reading, jp.get("zh", ""), jp.get("examples") or [],
+                                   [word_raw, _lookup], pdf_rel, page, context)
         return jsonify({
             "ok": True, "jp": True, "word": word_raw, "lemma": word_raw, "forms": [],
             "phonetic": reading + (f" [{jp['romaji']}]" if jp.get("romaji") else ""),
@@ -4420,15 +4423,16 @@ def pdf_api_dict_quick():
             zh_defs.append((f"{pos} " if pos else "") + d["zh"])
         elif d.get("en"):
             en_defs.append((f"{pos} " if pos else "") + d["en"])
-    try:
-        _append_lookup_log(word, lemma, pdf_rel, page, context)
-        if pdf_rel and page > 0:
-            _trigger_vocab_note_async(word, pdf_rel, page, context)
-            _trigger_paragraph_exposure_async(pdf_rel, page, lemma)
-        else:
-            _trigger_vocab_note_async(word, "", 0, "")
-    except Exception:
-        pass
+    if not prewarm:
+        try:
+            _append_lookup_log(word, lemma, pdf_rel, page, context)
+            if pdf_rel and page > 0:
+                _trigger_vocab_note_async(word, pdf_rel, page, context)
+                _trigger_paragraph_exposure_async(pdf_rel, page, lemma)
+            else:
+                _trigger_vocab_note_async(word, "", 0, "")
+        except Exception:
+            pass
     # 真人音频：若该词已有 vocab 笔记（之前查过），带上 audio_us 供小框喇叭播放（否则前端退化 TTS）
     audio = ""
     try:

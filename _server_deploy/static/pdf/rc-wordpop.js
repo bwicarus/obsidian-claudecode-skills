@@ -118,6 +118,38 @@
   var _wordHls = [];               // 并存的查词高亮 [{id,word,ctx,rect,breathe,el,isHost,unwrap,shown,ready,data,error,boxOpen,origin,scrollBase,scrollEl}]
   var _wordPopOwnerId = null;      // 当前 word-pop 小框归属的高亮 id(防并发查词回来填错框)
   var _dictCache = new Map();      // 本会话查词结果缓存(word→dict-quick d):已查过的词再点直接秒显小框
+  // ── 生词释义预热:翻到某页时后台空闲把该页生词释义预填 _dictCache(点开秒显),prewarm=1 纯读不 bump 暴露/不建笔记。
+  //    dedup(_prewarmSeen)+ 低并发(2)+ requestIdleCallback 空闲跑;切书/失效经 clearCache 释放,600 上限自然淘汰旧的。──
+  var _DICT_CACHE_MAX = 600;
+  var _prewarmSeen = new Set(), _prewarmQ = [], _prewarmActive = 0, _PREWARM_CONC = 2;
+  function _prewarmPump() {
+    while (_prewarmActive < _PREWARM_CONC && _prewarmQ.length) {
+      var w = _prewarmQ.shift();
+      if (!w || _dictCache.has(w)) continue;
+      _prewarmActive++;
+      (function (ww) {
+        fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(ww) + '&prewarm=1')
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.ok) { _dictCache.set(ww, d); if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value); } })
+          .catch(function () {})
+          .then(function () { _prewarmActive--; if (_prewarmQ.length) _schedPump(); });
+      })(w);
+    }
+  }
+  function _schedPump() {
+    if (window.requestIdleCallback) requestIdleCallback(function () { _prewarmPump(); }, { timeout: 2500 });
+    else setTimeout(_prewarmPump, 250);
+  }
+  function prewarm(words) {
+    if (!Array.isArray(words) || !words.length) return;
+    for (var i = 0; i < words.length; i++) {
+      var w = String(words[i] == null ? '' : words[i]).trim().toLowerCase();
+      if (!w || _dictCache.has(w) || _prewarmSeen.has(w)) continue;
+      _prewarmSeen.add(w); _prewarmQ.push(w);
+    }
+    if (_prewarmQ.length) _schedPump();
+  }
+  function clearDictCache() { try { _dictCache.clear(); _prewarmSeen.clear(); _prewarmQ.length = 0; } catch (_) {} }
   var _jpKanjiData = [];           // 当前日语词的汉字拆解,供 chip 点击展开
   var _jpPollTimer = null;         // 例句/汉字字义中译后台轮询替换的计时器
   // 底座耦合(每次 show 刷新)
@@ -1054,5 +1086,5 @@
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls };   // clearHls:清所有查词呼吸/常亮高亮(词组查询前调,防 z:190 残留截获点击)
+  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache };   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
 })();

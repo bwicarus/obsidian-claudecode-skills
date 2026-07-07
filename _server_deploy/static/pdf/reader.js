@@ -2354,6 +2354,9 @@ function renderVocabUnderlines(pw, marks) {
       layer.appendChild(div);
     }
   }
+  // 翻到本页 → 后台空闲预热这些生词的释义进查词缓存(点开秒显;prewarm=1 纯读,不 bump 暴露/不建笔记,不污染掌握度)。
+  //   切书=整页重载自动清缓存;600 上限自然淘汰旧页的词。
+  try { if (window.RC && RC.wordpop && RC.wordpop.prewarm) RC.wordpop.prewarm(marks.map(m => m.word).filter(Boolean)); } catch (_) {}
 }
 function _vocabUnderlineEnabled() {
   // localStorage 默认开
