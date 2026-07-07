@@ -4301,8 +4301,16 @@ function renderPhraseHl(pw) {
   layer.addEventListener('click', (e) => {
     e.stopPropagation();
     const txt = (_activePhraseHl && _activePhraseHl.text) || a.text;
+    // 用高亮自身的屏幕矩形做锚点:重弹时原选区 .sel-overlay 早已清空 → _rectFromSel 退化成零尺寸页顶矩形,
+    //   页面下滚后页顶为负 → 弹框定位到视口上方屏外 = 「点了不弹」。用高亮 rect 就锚在用户点的位置。
+    let anchorRect = null;
+    try {
+      let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
+      layer.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
+      if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
+    } catch (_) {}
     _removePhraseHighlight();
-    showPhrasePopover(txt, {noHighlight: true});
+    showPhrasePopover(txt, {noHighlight: true, rect: anchorRect});
   });
   pw.appendChild(layer);
 }
@@ -4397,7 +4405,7 @@ function _reopenExplain() {
 window.showPhrasePopover = async (text, opts) => {
   if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
     toolbar.classList.remove('open');
-    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, fallback: () => _showPhrasePopoverNative(text, opts) });
+    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, anchorRect: opts && opts.rect, fallback: () => _showPhrasePopoverNative(text, opts) });
     return;
   }
   return _showPhrasePopoverNative(text, opts);

@@ -169,11 +169,14 @@
       var text = String(opts.text || (h && h.lastSelText && h.lastSelText()) || '').trim();
       if (!text) return;
       if (!(window.RC && RC.phrasepop && RC.phrasepop.show)) { if (opts.fallback) opts.fallback(); return; }
-      if (h && h.phraseHighlight && !opts.noHighlight) { try { h.phraseHighlight(); } catch (e) {} }
+      // 锚点 rect 必须在 phraseHighlight() **之前**算:它会清空 .sel-overlay,之后 _rectFromSel 只剩
+      //   pw 零尺寸页顶矩形 → 下滚后弹框跑到视口上方屏外 =「点了不弹」。重弹时 opts.anchorRect(高亮屏幕矩形)优先。
       var cs = h && h.charSel && h.charSel();
+      var rect = opts.anchorRect || _rectFromSel(cs);
+      if (h && h.phraseHighlight && !opts.noHighlight) { try { h.phraseHighlight(); } catch (e) {} }
       RC.phrasepop.show({
         text: text,
-        rect: _rectFromSel(cs),
+        rect: rect,
         file: (h && h.fileRel && h.fileRel()) || '',
         langs: (h && h.bookLangs && h.bookLangs()) || [],
         onSolid: function () { if (h && h.phraseSolid) { try { h.phraseSolid(); } catch (e) {} } },
