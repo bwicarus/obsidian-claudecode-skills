@@ -17,7 +17,7 @@
   // 进度(单例):infoDelivery 推 currentTime → 外推平滑
   var _vcur = 0, _vcurAt = 0, _vplaying = true, _vrate = 1;
   // 字幕
-  var _sub = null, _subTimer = null, _subPoll = 0;
+  var _sub = null, _subTimer = null, _subPoll = 0, _transCurIdx = -1;
 
   function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
   function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
@@ -94,6 +94,7 @@
       if (idx === _sub.lastIdx) return; _sub.lastIdx = idx;
       if (idx >= 0) { zh.textContent = _sub.segments[idx].zh || '(未翻译)'; en.textContent = _sub.segments[idx].en || ''; }
       else { zh.textContent = ''; en.textContent = ''; }
+      _hlTrans(idx);   // 字幕列表边栏同步高亮当前行 + 滚动跟随
     }, 100);
   }
   async function _toggleSub(source, force) {
@@ -130,6 +131,7 @@
       en.textContent = d.from_cache ? ('(已缓存 · ' + source.toUpperCase() + ')') : ('(新生成 · ' + source.toUpperCase() + ',下次秒出)');
       setTimeout(function () { if (_sub && _sub.lastIdx < 0 && en) en.textContent = ''; }, 2000);
       _subLoop();
+      _renderTranscript();   // 字幕到手 → 若列表边栏开着,填充全文
     } catch (e) { zh.textContent = '✗ 网络失败'; actBtn.classList.remove('on'); }
   }
 
@@ -161,7 +163,22 @@
       '.rcvp-ck{display:inline-flex;align-items:center;gap:3px;color:#9fb4e0;font-size:12px;cursor:pointer}' +
       '.rcvp-rm{color:#ffb0c0;border-color:#6b3550;background:#3a1d2a}' +
       '.rcvp-rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;z-index:5}' +
-      '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid #6b7da0;border-bottom:2px solid #6b7da0;border-bottom-right-radius:2px}';
+      '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid #6b7da0;border-bottom:2px solid #6b7da0;border-bottom-right-radius:2px}' +
+      // 主体两列:左=视频+控制,右=字幕列表边栏(可展开)
+      '.rcvp-body{display:flex;flex-direction:row;min-height:0}' +
+      '.rcvp-left{display:flex;flex-direction:column;min-width:0}' +
+      '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
+      '.rcvp-list.on{color:#7dd3fc}' +
+      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0}' +
+      '.rcvp-tlist{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:4px 0}' +
+      '.rcvp-tempty{color:#7c93c4;font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
+      '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
+      '.rcvp-tline:hover{background:rgba(255,255,255,.05)}' +
+      '.rcvp-tline.cur{background:rgba(59,109,181,.22);border-left-color:#7dd3fc}' +
+      '.rcvp-tt{flex:none;color:#6b7da0;font-size:10.5px;font-variant-numeric:tabular-nums;padding-top:2px;min-width:30px}' +
+      '.rcvp-tx{flex:1 1 auto;min-width:0}' +
+      '.rcvp-tzh{display:block;color:#e6eeff;font-size:12.5px;line-height:1.35;word-break:break-word}' +
+      '.rcvp-ten{display:block;color:#8a9bb4;font-size:11px;line-height:1.3;word-break:break-word;margin-top:1px}';
     document.head.appendChild(s);
   }
 
@@ -170,16 +187,21 @@
     _injectCss();
     box = document.createElement('div'); box.id = 'rc-vplayer';
     box.innerHTML =
-      '<div class="rcvp-bar"><span class="rcvp-grip">⠿</span><span class="rcvp-title"></span><button class="rcvp-x" title="关闭">✕</button></div>' +
-      '<div class="rcvp-stage"><div class="rcvp-sub" style="display:none"><div class="rcvp-zh"></div><div class="rcvp-en"></div></div></div>' +
-      '<div class="rcvp-ctrls">' +
-        '<span class="rcvp-grp">起<input class="rcvp-t rcvp-sm" inputmode="numeric" maxlength="3" placeholder="0"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-ss" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="start" title="设为当前播放位置">⏱</button></span>' +
-        '<span class="rcvp-grp">止<input class="rcvp-t rcvp-em" inputmode="numeric" maxlength="3" placeholder="—"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-es" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="end" title="设为当前播放位置">⏱</button></span>' +
-        '<span class="rcvp-grp">速<select class="rcvp-sel rcvp-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></span>' +
-        '<label class="rcvp-ck"><input type="checkbox" class="rcvp-loop">循环</label>' +
-        '<button class="rcvp-btn rcvp-cc" title="中文字幕(YT 字幕 + 机翻,快)">🇨🇳 字幕</button>' +
-        '<button class="rcvp-btn rcvp-hq" title="高质量中文字幕(英文原文 + AI 精翻;无字幕才转录)">🎯 精翻</button>' +
-        '<button class="rcvp-btn rcvp-rm" title="从便签移除该视频" style="display:none">🗑</button>' +
+      '<div class="rcvp-bar"><span class="rcvp-grip">⠿</span><span class="rcvp-title"></span><button class="rcvp-list" title="字幕列表(按时间轴显示全文,点句子跳转)">📜</button><button class="rcvp-x" title="关闭">✕</button></div>' +
+      '<div class="rcvp-body">' +
+        '<div class="rcvp-left">' +
+          '<div class="rcvp-stage"><div class="rcvp-sub" style="display:none"><div class="rcvp-zh"></div><div class="rcvp-en"></div></div></div>' +
+          '<div class="rcvp-ctrls">' +
+            '<span class="rcvp-grp">起<input class="rcvp-t rcvp-sm" inputmode="numeric" maxlength="3" placeholder="0"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-ss" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="start" title="设为当前播放位置">⏱</button></span>' +
+            '<span class="rcvp-grp">止<input class="rcvp-t rcvp-em" inputmode="numeric" maxlength="3" placeholder="—"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-es" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="end" title="设为当前播放位置">⏱</button></span>' +
+            '<span class="rcvp-grp">速<select class="rcvp-sel rcvp-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></span>' +
+            '<label class="rcvp-ck"><input type="checkbox" class="rcvp-loop">循环</label>' +
+            '<button class="rcvp-btn rcvp-cc" title="中文字幕(YT 字幕 + 机翻,快)">🇨🇳 字幕</button>' +
+            '<button class="rcvp-btn rcvp-hq" title="高质量中文字幕(英文原文 + AI 精翻;无字幕才转录)">🎯 精翻</button>' +
+            '<button class="rcvp-btn rcvp-rm" title="从便签移除该视频" style="display:none">🗑</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="rcvp-trans" style="display:none"><div class="rcvp-tlist"></div></div>' +
       '</div>' +
       '<div class="rcvp-rs" title="拖动改大小"></div>';
     document.body.appendChild(box);
@@ -188,6 +210,7 @@
     iframe.addEventListener('load', function () { _setRate(cur ? (cur.v.rate || 1) : 1); try { iframe.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {} });
     box.querySelector('.rcvp-stage').insertBefore(iframe, box.querySelector('.rcvp-sub'));
     bar = box.querySelector('.rcvp-bar');
+    box.querySelector('.rcvp-list').addEventListener('click', _transToggle);   // 📜 展开/收起字幕列表边栏
     _hook();
     _wireControls();
     _wireDrag();
@@ -253,8 +276,52 @@
     }
     bar.addEventListener('pointerdown', down);
   }
-  // ── 缩放(右下角柄,改宽;高由 16:9 stage + 控件自适应)──
-  function _applyW() { box.style.width = _prefs.w + 'px'; }
+  // ── 字幕列表边栏(transcript):按时间轴全文 + 随播放高亮 + 点句跳转 ──
+  function _mmss(s) { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); }
+  function _seek(sec) {
+    try { iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [sec, true] }), '*'); } catch (e) {}
+    _vcur = sec; _vcurAt = _now(); _vplaying = true;   // 立即反映 → 字幕/高亮即时对齐
+  }
+  function _renderTranscript() {
+    if (!box) return;
+    var t = box.querySelector('.rcvp-trans'); if (!t || t.style.display === 'none') return;
+    var list = t.querySelector('.rcvp-tlist'); if (!list) return;
+    if (!_sub || !_sub.segments || !_sub.segments.length) {
+      list.innerHTML = '<div class="rcvp-tempty">点 🇨🇳 字幕 / 🎯 精翻 加载字幕后,这里按时间轴显示全文(中文+原文),点句子可跳转</div>';
+      _transCurIdx = -1; return;
+    }
+    var h = '';
+    for (var i = 0; i < _sub.segments.length; i++) {
+      var s = _sub.segments[i];
+      h += '<div class="rcvp-tline" data-t="' + (s.start || 0) + '"><span class="rcvp-tt">' + _mmss(s.start) + '</span>' +
+        '<span class="rcvp-tx"><span class="rcvp-tzh">' + esc(s.zh || '(未译)') + '</span><span class="rcvp-ten">' + esc(s.en || '') + '</span></span></div>';
+    }
+    list.innerHTML = h;
+    Array.prototype.forEach.call(list.querySelectorAll('.rcvp-tline'), function (ln) {
+      ln.addEventListener('click', function () { _seek(parseFloat(ln.getAttribute('data-t')) || 0); });
+    });
+    _transCurIdx = -1;
+  }
+  function _hlTrans(idx) {   // 高亮当前段 + 自动滚到中间(仅当前段变了才调 → 不频繁)
+    if (!box) return;
+    var t = box.querySelector('.rcvp-trans'); if (!t || t.style.display === 'none') return;
+    var lines = t.querySelectorAll('.rcvp-tline'); if (!lines.length) return;
+    if (_transCurIdx >= 0 && lines[_transCurIdx]) lines[_transCurIdx].classList.remove('cur');
+    if (idx >= 0 && lines[idx]) { lines[idx].classList.add('cur'); try { lines[idx].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { try { lines[idx].scrollIntoView(); } catch (_) {} } }
+    _transCurIdx = idx;
+  }
+  function _transToggle() {
+    if (!box) return;
+    var t = box.querySelector('.rcvp-trans'); if (!t) return;
+    var on = (t.style.display === 'none' || !t.style.display);
+    t.style.display = on ? 'block' : 'none';
+    box.querySelector('.rcvp-list').classList.toggle('on', on);
+    if (on) { _renderTranscript(); if (!_sub && cur) _toggleSub('auto', false); }   // 开列表时没字幕 → 自动拉 auto
+    _clampPos();
+  }
+
+  // ── 缩放(右下角柄,改左列宽;高由 16:9 stage + 控件自适应;字幕栏另占固定宽)──
+  function _applyW() { var l = box.querySelector('.rcvp-left'); if (l) l.style.width = _prefs.w + 'px'; }
   function _wireResize() {
     var rs = box.querySelector('.rcvp-rs'); var sx = 0, w0 = 0, sz = false, raf = null;
     function down(e) {
@@ -300,8 +367,8 @@
       v: { id: opts.id, start: opts.start | 0, end: opts.end | 0, loop: !!opts.loop, rate: parseFloat(opts.rate) || 1, cc: opts.cc },
       noteId: opts.noteId || null, onChange: opts.onChange || null, onRemove: opts.onRemove || null,
     };
-    // 换视频重置字幕/进度
-    _subStop(); _sub = null; _vcur = cur.v.start || 0; _vcurAt = _now(); _vplaying = true; _vrate = cur.v.rate || 1;
+    // 换视频重置字幕/进度/字幕列表
+    _subStop(); _sub = null; _transCurIdx = -1; _vcur = cur.v.start || 0; _vcurAt = _now(); _vplaying = true; _vrate = cur.v.rate || 1;
     box.querySelector('.rcvp-title').textContent = opts.title || '视频';
     box.querySelector('.rcvp-sub').style.display = 'none';
     box.querySelector('.rcvp-zh').textContent = ''; box.querySelector('.rcvp-en').textContent = '';
@@ -311,6 +378,7 @@
     box.querySelector('.rcvp-loop').checked = !!cur.v.loop;
     box.querySelector('.rcvp-rm').style.display = cur.noteId ? '' : 'none';   // 移除视频仅便签来源
     iframe.src = vEmbedSrc(cur.v);
+    try { var _tp = box.querySelector('.rcvp-trans'); if (_tp && _tp.style.display !== 'none') { _renderTranscript(); if (cur) _toggleSub('auto', false); } } catch (e) {}   // 换视频时列表开着 → 清空并重拉本视频字幕
     _loadPrefs(function () { _place(); });
   }
   function close() {

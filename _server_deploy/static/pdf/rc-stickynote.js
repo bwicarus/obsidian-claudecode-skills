@@ -163,7 +163,7 @@
       '.rc-note.rc-note-lift .rc-note-handle{cursor:grabbing;box-shadow:0 10px 26px rgba(0,0,0,.5)}',
       '.rc-note.rc-note-lift .rc-note-body{box-shadow:0 12px 30px rgba(0,0,0,.45)}',
       /* 删除键:Apple 简约风——右上角小圆角标,毛玻璃深底 + 白色细线 ✕(不再红底红边飘右侧;确认弹窗才是危险动作) */
-      '.rc-note-del{position:absolute;top:-9px;right:-9px;width:24px;height:24px;border-radius:50%;border:none;background:rgba(28,28,30,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);color:#fff;line-height:0;display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 1px 5px rgba(0,0,0,.32);-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .12s ease}',
+      '.rc-note-del{position:absolute;top:-10px;right:-10px;z-index:6;width:24px;height:24px;border-radius:50%;border:none;background:rgba(28,28,30,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);color:#fff;line-height:0;display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 1px 5px rgba(0,0,0,.32);-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .12s ease}',
       '.rc-note-del:hover{background:rgba(40,40,44,.72)}',
       '.rc-note-del:active{transform:scale(.86);background:rgba(20,20,22,.85)}',
       '.rc-note.rc-note-editing .rc-note-del{display:flex}',
@@ -288,7 +288,7 @@
     root.className = 'rc-note';
     root.dataset.noteId = note.id;
     root.innerHTML =
-      '<div class="rc-note-handle"><button class="rc-note-del" title="删除便签"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>' +
+      '<div class="rc-note-handle"></div>' +
       '<div class="rc-note-body">' +
         '<div class="rc-note-video"></div>' +
         '<textarea class="rc-note-text" placeholder="输入文字…(笔=手写)"></textarea>' +
@@ -296,7 +296,9 @@
         '<div class="rc-note-tools"></div>' +
         '<div class="rc-note-rs" title="拖动调整大小"></div>' +
         '<div class="rc-note-rs-tl" title="拖动调整大小(右下角固定)"></div>' +
-      '</div>';
+      '</div>' +
+      // 删除键挂 root(不在小把手内)→ 定位在便签**整体**右上角外部
+      '<button class="rc-note-del" title="删除便签"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
     var ctl = {
       note: note, root: root,
       handle: root.querySelector('.rc-note-handle'),
