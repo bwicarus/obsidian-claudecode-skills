@@ -12,7 +12,7 @@
   var PREFS_URL = '/pdf/api/video-player-prefs';
   var box = null, bar = null, iframe = null, sub = null;
   var cur = null;   // {v:{id,start,end,loop,rate,cc}, noteId, onChange, onRemove, title}
-  var _prefs = { x: null, y: null, w: 380 };
+  var _prefs = { x: null, y: null, w: 380, h: null };   // w=左列(视频)宽,h=整个浮层高(自由拖拽);缺省算 16:9
   var _prefsLoaded = false;
   var _showEn = true;      // 字幕是否显示英文原文(默认中英双语)
   var _subOutside = false; // 字幕位置:false=视频内部下方(叠画面) / true=视频外部下方(独立条,不遮画面)
@@ -32,6 +32,7 @@
       if (typeof p.x === 'number') _prefs.x = p.x;
       if (typeof p.y === 'number') _prefs.y = p.y;
       if (typeof p.w === 'number') _prefs.w = p.w;
+      if (typeof p.h === 'number') _prefs.h = p.h;
       if (typeof p.showEn === 'boolean') _showEn = p.showEn;
       if (typeof p.subOut === 'boolean') _subOutside = p.subOut;
       _prefsLoaded = true; cb && cb();
@@ -154,7 +155,7 @@
       '.rcvp-title{flex:1 1 auto;min-width:0;color:#cdd8f5;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.rcvp-x{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:16px;cursor:pointer;padding:2px 6px;line-height:1;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-x:active{color:#fff}' +
-      '.rcvp-stage{position:relative;width:100%;aspect-ratio:16/9;background:#000;flex:none}' +
+      '.rcvp-stage{position:relative;width:100%;background:#000;flex:1 1 auto;min-height:0}' +   // 占左列剩余高度;视频比例由 YouTube iframe 内部 letterbox 处理(浮层可自由改宽高)
       '.rcvp-if{width:100%;height:100%;border:0;display:block}' +
       '.rcvp-sub{position:absolute;left:0;right:0;bottom:5%;padding:0 10px;text-align:center;pointer-events:none}' +
       '.rcvp-zh{color:#fff;font-size:clamp(14px,3.2vw,20px);line-height:1.35;text-shadow:0 2px 6px #000,0 0 3px #000;word-break:break-word}' +
@@ -176,8 +177,8 @@
       '.rcvp-rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;z-index:5}' +
       '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid #6b7da0;border-bottom:2px solid #6b7da0;border-bottom-right-radius:2px}' +
       // 主体两列:左=视频+控制,右=字幕列表边栏(可展开)
-      '.rcvp-body{display:flex;flex-direction:row;min-height:0}' +
-      '.rcvp-left{display:flex;flex-direction:column;min-width:0}' +
+      '.rcvp-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:row}' +   // 撑满 box 除顶栏外的高度 → 给 stage/字幕栏一个确定高度(字幕栏才能溢出滚动)
+      '.rcvp-left{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column}' +
       '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-list.on{color:#7dd3fc}' +
       '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0;overflow:hidden}' +
@@ -334,12 +335,7 @@
     if (posBtn) { posBtn.classList.toggle('on', _subOutside); posBtn.textContent = _subOutside ? '外' : '内'; }
     _syncTransHeight();   // 内/外切换改变左列高度 → 同步字幕列表高度锁
   }
-  // 字幕栏高度锁 = 左列(视频+控制)高度 → 打开列表不改变浮层整体高度,列表在原高度内滚动
-  function _syncTransHeight() {
-    if (!box) return;
-    var l = box.querySelector('.rcvp-left'), t = box.querySelector('.rcvp-trans');
-    if (l && t && t.style.display !== 'none') t.style.height = l.offsetHeight + 'px';
-  }
+  function _syncTransHeight() {}   // 浮层已有明确高度(flex 链自动:body flex:1 → trans stretch → tlist 溢出滚动),无需 JS 锁高
   function _hlTrans(idx) {   // 高亮当前段;自动把当前句滚到第一行(用户手动滚动时暂停,停手 3.5s 后恢复)
     if (!box) return;
     var t = box.querySelector('.rcvp-trans'); if (!t || t.style.display === 'none') return;
@@ -366,12 +362,16 @@
     _clampPos();
   }
 
-  // ── 缩放(右下角柄,改左列宽;高由 16:9 stage + 控件自适应;字幕栏另占固定宽)──
-  function _applyW() { var l = box.querySelector('.rcvp-left'); if (l) l.style.width = _prefs.w + 'px'; }
+  // ── 缩放(右下角柄,自由拖:左右改左列宽 w、上下改浮层高 h;视频比例交给 YouTube iframe 自适应)──
+  function _applySize() {
+    var l = box.querySelector('.rcvp-left'); if (l) l.style.width = _prefs.w + 'px';
+    if (typeof _prefs.h === 'number') box.style.height = _prefs.h + 'px';
+  }
   function _wireResize() {
-    var rs = box.querySelector('.rcvp-rs'); var sx = 0, w0 = 0, sz = false, raf = null;
+    var rs = box.querySelector('.rcvp-rs'); var sx = 0, sy = 0, w0 = 0, h0 = 0, sz = false, raf = null;
     function down(e) {
-      sz = true; sx = e.clientX; w0 = _prefs.w;
+      sz = true; sx = e.clientX; sy = e.clientY; w0 = _prefs.w;
+      h0 = (typeof _prefs.h === 'number') ? _prefs.h : box.getBoundingClientRect().height;
       try { rs.setPointerCapture(e.pointerId); } catch (_) {}
       document.addEventListener('pointermove', move, true);
       document.addEventListener('pointerup', up, true);
@@ -381,22 +381,24 @@
     function move(e) {
       if (!sz) return;
       var vw = window.innerWidth || 400, vh = window.innerHeight || 400;
-      var maxW = Math.max(240, Math.min(vw * 0.98, (vh - 110) * 16 / 9));   // 上限=宽或高任一撑满视口(16:9 画面+控件不溢出)→ 可放到接近铺满
+      var maxW = Math.max(240, vw * 0.98 - (_subOutside ? 0 : 0));
       _prefs.w = Math.max(240, Math.min(w0 + (e.clientX - sx), maxW));
-      if (!raf) raf = requestAnimationFrame(function () { raf = null; _applyW(); _clampPos(); });
+      _prefs.h = Math.max(180, Math.min(h0 + (e.clientY - sy), vh * 0.96));
+      if (!raf) raf = requestAnimationFrame(function () { raf = null; _applySize(); _clampPos(); });
     }
     function up() {
       if (!sz) return; sz = false;
       document.removeEventListener('pointermove', move, true);
       document.removeEventListener('pointerup', up, true);
       document.removeEventListener('pointercancel', up, true);
-      _savePrefs({ w: _prefs.w });
+      _savePrefs({ w: _prefs.w, h: _prefs.h });
     }
     rs.addEventListener('pointerdown', down);
   }
 
-  function _place() {   // 应用位置/大小(缺省 → 右下角)
-    _applyW();
+  function _place() {   // 应用位置/大小(缺省 → 高按 16:9 算,位置右下角)
+    if (typeof _prefs.h !== 'number') { _prefs.h = Math.round(_prefs.w * 9 / 16) + 96; }   // 默认高 = 视频 16:9 + 顶栏/控制条 chrome(~96);之后用户拖成什么就存什么
+    _applySize();
     if (typeof _prefs.x !== 'number' || typeof _prefs.y !== 'number') {
       var r = box.getBoundingClientRect();
       _prefs.x = Math.max(8, (window.innerWidth || 400) - r.width - 14);
