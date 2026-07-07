@@ -49,26 +49,40 @@
   // 悬浮显示 → body.ep-side-floating(配合上面 CSS:抽屉开时不挤压正文/顶栏);手搓版正文 #ep-content 让位↔覆盖,
   // epub.js 版 #ep-viewer 本就不被挤(避免 rendition.resize 卡顿)、悬浮只是再去掉顶栏 #ep-top 的挤压。开关两版都生效。
   // 背景模糊度 → --gp-blur(抽屉 backdrop-filter:blur(var(--gp-blur,20px)) 读它)。
-  function getFloating() { return _lsGet(LS_FLOAT, '0') === '1'; }
+  // 泛化点(PDF 迁入,2026-07-07):
+  //   opts.appearanceKeys(name)→存储键(PDF 按排版分档 pdf-gp-*-{mode};缺省=eph-gp-* 全局单键,EPUB 不变)
+  //   opts.mirrorOpenClass / mirrorFloatingClass→开关/悬浮时在 body 上镜像的旧类名(PDF=grammar-open/grammar-floating,
+  //     让 pdf-styles.css 既有挤压/悬浮/结果框规则原样生效,消费方 JS 也不用改)
+  //   opts.onReflow→布局重排回调(PDF=_scheduleRefit;缺省=派发合成 resize 给 epub.js)
+  //   opts.tabButtons→tab 栏 per-tab 动作按钮(PDF 的「🗑 清空分析」只在 grammar tab 显示)
+  function _akey(name, fallback) { try { if (typeof _opts.appearanceKeys === 'function') { var k = _opts.appearanceKeys(name); if (k) return k; } } catch (e) {} return fallback; }
+  function _mirror(cls, on) { if (cls) { try { document.body.classList.toggle(cls, !!on); } catch (e) {} } }
+  function getFloating() { return _lsGet(_akey('floating', LS_FLOAT), '0') === '1'; }
   var _rfT = null;
-  function _reflow() {   // 挤压↔悬浮切换 / 开关抽屉 → epub.js 正文宽度变 → 派发 resize 让 epub.js 重排(库监听 window resize)
+  function _reflow() {   // 挤压↔悬浮切换 / 开关抽屉 → 正文宽度变 → 重排(EPUB=合成 resize 给 epub.js;PDF 经 opts.onReflow 走 _scheduleRefit)
     clearTimeout(_rfT);
-    _rfT = setTimeout(function () { try { window.dispatchEvent(new Event('resize')); } catch (e) {} }, 430);
+    _rfT = setTimeout(function () {
+      if (typeof _opts.onReflow === 'function') { try { _opts.onReflow(); } catch (e) {} return; }
+      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }, 430);
   }
   function setFloating(on) {
     on = !!on;
-    _lsSet(LS_FLOAT, on ? '1' : '0');
+    _lsSet(_akey('floating', LS_FLOAT), on ? '1' : '0');
     document.body.classList.toggle('ep-side-floating', on);
+    _mirror(_opts.mirrorFloatingClass, on);
     _reflow();
   }
-  function getBlur() { var n = parseInt(_lsGet(LS_BLUR, '20'), 10); return isNaN(n) ? 20 : n; }
+  function getBlur() { var n = parseInt(_lsGet(_akey('blur', LS_BLUR), '20'), 10); return isNaN(n) ? 20 : n; }
   function setBlur(px) {
     var n = parseInt(px, 10); if (isNaN(n)) n = 20; n = Math.max(0, Math.min(40, n));
-    _lsSet(LS_BLUR, String(n));
+    _lsSet(_akey('blur', LS_BLUR), String(n));
     document.documentElement.style.setProperty('--gp-blur', n + 'px');
   }
-  function applyAppearance() {   // 启动即应用持久化外观(等价 PDF _gpApplyAppearance,init 时调)
-    document.body.classList.toggle('ep-side-floating', getFloating());
+  function applyAppearance() {   // 启动即应用持久化外观(等价 PDF _gpApplyAppearance,init 时调;PDF 切排版后也调=按新档重应用)
+    var f = getFloating();
+    document.body.classList.toggle('ep-side-floating', f);
+    _mirror(_opts.mirrorFloatingClass, f);
     document.documentElement.style.setProperty('--gp-blur', getBlur() + 'px');
   }
 
@@ -223,6 +237,16 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
         bar.appendChild(b);
       });
       var sp = document.createElement('span'); sp.className = 'ep-side-tab-sp'; bar.appendChild(sp);
+      // per-tab 动作按钮(泛化点:PDF「🗑 清空分析」只在 grammar tab 显示;setTab 里按 btn.tabs 切显隐)
+      (_opts.tabButtons || []).forEach(function (tb) {
+        var b = document.createElement('button'); b.className = 'ep-side-x ep-side-tabact';
+        if (tb.id) b.id = tb.id;
+        b.innerHTML = tb.icon || tb.label || '·'; b.title = tb.title || '';
+        b.style.display = 'none';
+        b.addEventListener('click', function (ev) { ev.stopPropagation(); try { tb.onClick && tb.onClick(); } catch (e) {} });
+        b.__tabs = tb.tabs || [];
+        bar.appendChild(b);
+      });
       var setb = document.createElement('button'); setb.className = 'ep-side-x'; setb.id = 'ep-side-set-btn'; setb.title = '侧栏外观设置(悬浮 / 模糊度)';
       setb.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="margin:0;width:16px;height:16px;vertical-align:-3px"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg>';
       setb.addEventListener('click', toggleSideSettings); bar.appendChild(setb);
@@ -258,6 +282,13 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   // 只切 pane(toggle .active on tab + pane),并触发 onTab 懒填充。不改开关态。
   function setTab(name) {
     if (!name) return;
+    // 记忆 tab 在本 reader 无对应 pane(如 EPUB 记了 PDF 专属 hist)→ 回退默认 tab,防空面板
+    try {
+      if (!document.querySelector('#ep-side .ep-side-pane[data-pane="' + name + '"]')) {
+        var _fb = _opts.defaultTab || 'asst';
+        if (name !== _fb) name = _fb;
+      }
+    } catch (e) {}
     _curTab = name;
     try { localStorage.setItem(LS_KEY, name); } catch (e) {}
     document.querySelectorAll('#ep-side-tabs .ep-side-tab').forEach(function (t) {
@@ -265,6 +296,9 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     });
     document.querySelectorAll('#ep-side .ep-side-pane').forEach(function (p) {
       p.classList.toggle('active', p.dataset.pane === name);
+    });
+    document.querySelectorAll('#ep-side-tabs .ep-side-tabact').forEach(function (b) {   // per-tab 动作按钮显隐
+      b.style.display = (b.__tabs && b.__tabs.indexOf(name) >= 0) ? '' : 'none';
     });
     try { if (typeof _opts.onTab === 'function') _opts.onTab(name); } catch (e) {}
   }
@@ -295,6 +329,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     s.style.transform = '';   // 交还给 CSS(从 translateX(102%) → .open translateX(0) 滑入)
     s.classList.add('open');
     document.body.classList.add('ep-side-open');
+    _mirror(_opts.mirrorOpenClass, true);
     setTab(tab || _lastTab());
     _reflow();
     // 滑入结束后去掉 transform(none)→ 根治 iOS 上「transform + backdrop-filter」元素的后代命中盒错位
@@ -312,6 +347,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       s.classList.remove('open');  // → CSS base translateX(102%),带过渡滑出
     }
     document.body.classList.remove('ep-side-open');
+    _mirror(_opts.mirrorOpenClass, false);
     _reflow();
   }
   function toggle() { if (isOpen()) close(); else open(); }

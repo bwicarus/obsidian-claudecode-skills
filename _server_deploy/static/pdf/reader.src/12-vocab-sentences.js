@@ -465,7 +465,7 @@ function _drawSentenceOverlay(layer, s, btn, sx, sy) {
 // 翻译 popover
 // 可视区右边界：侧栏展开时扣掉侧栏宽度，避免浮层被 clamp 到侧栏底下
 function _visRight() {
-  const panel = document.getElementById('grammar-panel');
+  const panel = document.getElementById('grammar-panel') || document.getElementById('ep-side');   // 唯一抽屉模式下根 id=ep-side(body 类仍镜像 grammar-open)
   if (panel && document.body.classList.contains('grammar-open')) {
     const r = panel.getBoundingClientRect();
     if (r.width) return r.left;   // 侧栏左边缘 = 可视区右边界

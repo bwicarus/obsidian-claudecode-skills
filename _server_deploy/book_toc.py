@@ -217,8 +217,11 @@ def register_book_toc(bp, *, claude_dir, book_sha, safe_vault_path, assistant,
             return jsonify({"ok": False, "error": "bad file"}), 400
         entries, source = _effective_toc(ap, rel)
         rng = (_toc_load_abs(ap).get("range")) or {}
-        return jsonify({"ok": True, "exists": bool(entries), "source": source,
-                        "count": len(entries), "range": rng})
+        out = {"ok": True, "exists": bool(entries), "source": source,
+               "count": len(entries), "range": rng}
+        if request.args.get("entries"):   # 统一抽屉「目录」pane 用:?entries=1 直接吐条目({title,page=印刷页,level})
+            out["entries"] = entries
+        return jsonify(out)
 
     @bp.route("/api/page-offset", methods=["POST"])
     def pdf_api_page_offset_set():
