@@ -14,6 +14,8 @@
   var cur = null;   // {v:{id,start,end,loop,rate,cc}, noteId, onChange, onRemove, title}
   var _prefs = { x: null, y: null, w: 380 };
   var _prefsLoaded = false;
+  var _showEn = true;      // 字幕是否显示英文原文(默认中英双语)
+  var _subOutside = false; // 字幕位置:false=视频内部下方(叠画面) / true=视频外部下方(独立条,不遮画面)
   // 进度(单例):infoDelivery 推 currentTime → 外推平滑
   var _vcur = 0, _vcurAt = 0, _vplaying = true, _vrate = 1;
   // 字幕
@@ -30,6 +32,8 @@
       if (typeof p.x === 'number') _prefs.x = p.x;
       if (typeof p.y === 'number') _prefs.y = p.y;
       if (typeof p.w === 'number') _prefs.w = p.w;
+      if (typeof p.showEn === 'boolean') _showEn = p.showEn;
+      if (typeof p.subOut === 'boolean') _subOutside = p.subOut;
       _prefsLoaded = true; cb && cb();
     }).catch(function () { _prefsLoaded = true; cb && cb(); });
   }
@@ -155,6 +159,10 @@
       '.rcvp-sub{position:absolute;left:0;right:0;bottom:5%;padding:0 10px;text-align:center;pointer-events:none}' +
       '.rcvp-zh{color:#fff;font-size:clamp(14px,3.2vw,20px);line-height:1.35;text-shadow:0 2px 6px #000,0 0 3px #000;word-break:break-word}' +
       '.rcvp-en{color:#d3d9e0;font-size:clamp(11px,2.2vw,14px);line-height:1.3;text-shadow:0 2px 5px #000;margin-top:1px;word-break:break-word}' +
+      '.rcvp-sub.rcvp-noen .rcvp-en{display:none}' +   // 原文开关:关=只中文
+      '.rcvp-sub.rcvp-out{position:static;bottom:auto;padding:7px 12px;background:rgba(0,0,0,.5);border-top:1px solid #2a3a63}' +   // 外部下方:独立条(flow),不遮画面
+      '.rcvp-sub.rcvp-out .rcvp-zh{font-size:14.5px;text-shadow:none}' +
+      '.rcvp-sub.rcvp-out .rcvp-en{font-size:12px;text-shadow:none;color:#9aa4af}' +
       '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:7px 9px;background:rgba(0,0,0,.25)}' +
       '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:#9fb4e0;font-size:12px}' +
       '.rcvp-t{width:30px;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:5px;padding:2px 3px;font-size:12px;text-align:center}' +
@@ -201,6 +209,8 @@
             '<label class="rcvp-ck"><input type="checkbox" class="rcvp-loop">循环</label>' +
             '<button class="rcvp-btn rcvp-cc" title="中文字幕(YT 字幕 + 机翻,快)">🇨🇳 字幕</button>' +
             '<button class="rcvp-btn rcvp-hq" title="高质量中文字幕(英文原文 + AI 精翻;无字幕才转录)">🎯 精翻</button>' +
+            '<button class="rcvp-btn rcvp-en-tg" title="显示/隐藏英文原文">原</button>' +
+            '<button class="rcvp-btn rcvp-pos-tg" title="字幕显示在视频内部下方 ↔ 外部下方(不遮画面)">内</button>' +
             '<button class="rcvp-btn rcvp-rm" title="从便签移除该视频" style="display:none">🗑</button>' +
           '</div>' +
         '</div>' +
@@ -246,6 +256,8 @@
     box.querySelector('.rcvp-loop').addEventListener('change', function () { cur.v.loop = this.checked; _reload(); _persist(); });
     box.querySelector('.rcvp-cc').addEventListener('click', function () { _toggleSub('auto', false); });
     box.querySelector('.rcvp-hq').addEventListener('click', function () { _toggleSub('hq', false); });
+    box.querySelector('.rcvp-en-tg').addEventListener('click', function () { _showEn = !_showEn; _applySubUI(); _savePrefs({ showEn: _showEn }); });
+    box.querySelector('.rcvp-pos-tg').addEventListener('click', function () { _subOutside = !_subOutside; _applySubUI(); _savePrefs({ subOut: _subOutside }); });
     box.querySelector('.rcvp-rm').addEventListener('click', function () { try { cur && cur.onRemove && cur.onRemove(); } catch (e) {} close(); });
     box.querySelector('.rcvp-x').addEventListener('click', close);
   }
@@ -308,6 +320,19 @@
       ln.addEventListener('click', function () { _seek(parseFloat(ln.getAttribute('data-t')) || 0); });
     });
     _transCurIdx = -1;
+  }
+  // 字幕开关:原文显隐 + 内/外位置(内=叠画面底,外=视频下方独立条)。状态存服务器全局通用。
+  function _applySubUI() {
+    if (!box) return;
+    var sub = box.querySelector('.rcvp-sub'), stage = box.querySelector('.rcvp-stage'), left = box.querySelector('.rcvp-left'), ctrls = box.querySelector('.rcvp-ctrls');
+    if (!sub) return;
+    sub.classList.toggle('rcvp-noen', !_showEn);
+    if (_subOutside) { sub.classList.add('rcvp-out'); if (sub.parentNode !== left) left.insertBefore(sub, ctrls); }   // 外部:移到 stage 外、ctrls 前(视频下方独立条)
+    else { sub.classList.remove('rcvp-out'); if (sub.parentNode !== stage) stage.appendChild(sub); }                  // 内部:移回 stage 内(absolute 叠画面底)
+    var enBtn = box.querySelector('.rcvp-en-tg'), posBtn = box.querySelector('.rcvp-pos-tg');
+    if (enBtn) enBtn.classList.toggle('on', _showEn);
+    if (posBtn) { posBtn.classList.toggle('on', _subOutside); posBtn.textContent = _subOutside ? '外' : '内'; }
+    _syncTransHeight();   // 内/外切换改变左列高度 → 同步字幕列表高度锁
   }
   // 字幕栏高度锁 = 左列(视频+控制)高度 → 打开列表不改变浮层整体高度,列表在原高度内滚动
   function _syncTransHeight() {
@@ -399,8 +424,9 @@
     box.querySelector('.rcvp-loop').checked = !!cur.v.loop;
     box.querySelector('.rcvp-rm').style.display = cur.noteId ? '' : 'none';   // 移除视频仅便签来源
     iframe.src = vEmbedSrc(cur.v);
+    _applySubUI();   // 按当前(或默认)原文/内外开关先应用一次
     try { var _tp = box.querySelector('.rcvp-trans'); if (_tp && _tp.style.display !== 'none') { _renderTranscript(); if (cur) _toggleSub('auto', false); } } catch (e) {}   // 换视频时列表开着 → 清空并重拉本视频字幕
-    _loadPrefs(function () { _place(); });
+    _loadPrefs(function () { _place(); _applySubUI(); });   // 服务器 prefs 到手 → 再应用一次(首次开浮层生效)
   }
   function close() {
     _subStop(); _sub = null;
