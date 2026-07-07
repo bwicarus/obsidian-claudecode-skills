@@ -700,6 +700,27 @@ def pdf_api_img_proxy():
         return resp
 
 
+@bp.route("/api/video-subtitles/<vid>")
+def pdf_api_video_subtitles(vid):
+    """助手视频卡中文字幕:拉 + 翻 YouTube 字幕(跟健身系统共用 youtube_subtitles 后端 + 全局缓存)。
+    ?source=auto(YT caption + 机翻,默认快)| hq(YouTube 英文字幕原文 + AI 精翻,无字幕才 Cloud STT)；?force=1 重生成。
+    cache miss 后台生成先回 {status:running},前端每 3s 轮询(照搬 fitness /api/fitness/subtitles 语义)。"""
+    if not _reader_uid():
+        return jsonify({"ok": False, "error": "auth"}), 401
+    vid = (vid or "").strip()[:16]
+    if not vid:
+        return jsonify({"ok": False, "error": "no vid"}), 400
+    try:
+        from youtube_subtitles import get_or_translate
+    except Exception as e:
+        return jsonify({"ok": False, "error": "subtitles backend unavailable: " + str(e)}), 500
+    source = request.args.get("source", "auto")
+    force = request.args.get("force") == "1"
+    r = get_or_translate(vid, target_lang="zh", source=source, force=force)
+    ok = r.get("status") == "ready"
+    return jsonify({"ok": ok, **r}), (200 if ok else 500)
+
+
 @bp.route("/api/book-meta")
 def pdf_api_book_meta():
     """书元数据(图片模式用,不下载 PDF):页数 + 首页尺寸(pt)。"""

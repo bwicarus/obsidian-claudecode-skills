@@ -14,23 +14,100 @@
   }
   function _esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
+  // ── 中文字幕(YouTube 无原生中文轨时,拉英文字幕 AI 精翻 / Cloud STT 转录;后端 youtube_subtitles.py,
+  //    跟健身系统共用缓存)。YouTube iframe 无法注入自定义字幕轨 → 做成视频下方字幕条,跟播放进度高亮当前段。
+  //    进度用 enablejsapi=1 + postMessage「listening」→ 收 infoDelivery.currentTime(照搬 rc-stickynote 便签机制,不引入 YT IFrame API)。──
+  function _hookVidCur() {   // 全局一次:infoDelivery 里的 currentTime → 存到对应卡的 el.__vcur
+    if (window.__rcVidCurHook) return; window.__rcVidCurHook = 1;
+    window.addEventListener('message', function (e) {
+      if (typeof e.data !== 'string' || e.data.indexOf('"infoDelivery"') < 0) return;
+      var d; try { d = JSON.parse(e.data); } catch (_) { return; }
+      if (!d || d.event !== 'infoDelivery' || !d.info || typeof d.info.currentTime !== 'number') return;
+      var cards = document.querySelectorAll('.rc-vid');
+      for (var i = 0; i < cards.length; i++) { if (cards[i].__vif && cards[i].__vif.contentWindow === e.source) { cards[i].__vcur = d.info.currentTime; break; } }
+    });
+  }
+  function _playVid(el, v) {   // 缩略图 → iframe 播放(enablejsapi=1;抽出供字幕按钮也能触发)
+    var box = el.querySelector('.rc-vid-thumb'); if (!box) return null;
+    var ex = box.querySelector('iframe'); if (ex) return ex;
+    var f = document.createElement('iframe');
+    // enablejsapi=1:postMessage 拿进度(字幕跟随);cc_lang_pref=zh-Hans/hl=zh-CN:优先中文轨 + 中文 UI
+    f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?enablejsapi=1&autoplay=1&playsinline=1&rel=0&cc_lang_pref=zh-Hans&hl=zh-CN';
+    f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+    f.setAttribute('allowfullscreen', ''); f.className = 'rc-vid-frame';
+    box.innerHTML = ''; box.appendChild(f);
+    el.__vif = f; el.__vid = v.id; _hookVidCur();
+    f.addEventListener('load', function () { try { f.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {} });
+    return f;
+  }
+  function _subStop(el) { if (el.__subTimer) { clearInterval(el.__subTimer); el.__subTimer = null; } }
+  function _subLoop(el) {   // 200ms 读 el.__vcur → 线性查当前段 → 显示 zh/en(照搬 fitness startSubLoop)
+    _subStop(el);
+    el.__subTimer = setInterval(function () {
+      var sub = el.__sub; if (!sub || !sub.enabled) return;
+      var zhEl = el.querySelector('.rc-sub-zh'), enEl = el.querySelector('.rc-sub-en'); if (!zhEl) return;
+      var t = el.__vcur;
+      if (typeof t !== 'number') { if (sub.lastIdx !== -3) { zhEl.textContent = '▶ 播放后字幕跟随进度'; enEl.textContent = ''; sub.lastIdx = -3; } return; }
+      var idx = -1;
+      for (var i = 0; i < sub.segments.length; i++) { var s = sub.segments[i]; if (t >= s.start && t < s.start + s.duration) { idx = i; break; } if (s.start > t) break; }
+      if (idx === sub.lastIdx) return;
+      sub.lastIdx = idx;
+      if (idx >= 0) { zhEl.textContent = sub.segments[idx].zh || '(未翻译)'; enEl.textContent = sub.segments[idx].en || ''; }
+      else { zhEl.textContent = ''; enEl.textContent = ''; }
+    }, 200);
+  }
+  async function _toggleSub(el, v, source, force) {   // 照搬 fitness toggleSubtitle(端点换 /pdf/api/video-subtitles,进度走 postMessage)
+    if (!v || !v.id) return;
+    var subBox = el.querySelector('.rc-vid-sub'), zhEl = el.querySelector('.rc-sub-zh'), enEl = el.querySelector('.rc-sub-en');
+    var ccBtn = el.querySelector('.rc-sub-cc'), hqBtn = el.querySelector('.rc-sub-hq');
+    var actBtn = (source === 'hq') ? hqBtn : ccBtn, othBtn = (source === 'hq') ? ccBtn : hqBtn;
+    var sub = el.__sub;
+    if (sub && sub.source !== source) { _subStop(el); el.__sub = null; sub = null; othBtn && othBtn.classList.remove('on'); }   // 换档 → 重拉
+    if (sub && sub.enabled) { sub.enabled = false; subBox.style.display = 'none'; _subStop(el); actBtn.classList.remove('on'); return; }   // 同档再点 = 关
+    if (sub && sub.segments) { sub.enabled = true; subBox.style.display = 'block'; actBtn.classList.add('on'); _subLoop(el); return; }   // 已拉过 → 直接重开
+    if (!el.__vif) _playVid(el, v);   // 没在播放 → 先播(才有进度)
+    subBox.style.display = 'block'; actBtn.classList.add('on');
+    zhEl.textContent = (source === 'hq') ? '⏳ 高质量字幕(英文原文 + AI 精翻;无字幕才转录,较慢)…' : '⏳ 加载字幕(YT 字幕 + 翻译,~5s)…';
+    enEl.textContent = '';
+    var myPoll = (el.__subPoll = (el.__subPoll || 0) + 1);
+    try {
+      var d = null;
+      for (var i = 0; i < 200; i++) {   // 200×3s ≈ 10min 上限(hq LLM 精翻可能慢)
+        var fq = (force && i === 0) ? '&force=1' : '';
+        var r = await fetch('/pdf/api/video-subtitles/' + encodeURIComponent(v.id) + '?source=' + source + fq);
+        d = await r.json();
+        if (d.status !== 'running') break;
+        await new Promise(function (rs) { setTimeout(rs, 3000); });
+        if (el.__subPoll !== myPoll) return;   // 切档/重开 → 弃旧轮询
+      }
+      if (!d || !d.ok || !d.segments) {
+        var msg = d ? (d.error || (d.status === 'running' ? '仍在后台生成,稍后再点' : '?')) : '?';
+        zhEl.textContent = '✗ 字幕失败: ' + msg + ' ';
+        var retry = document.createElement('a'); retry.textContent = '重试'; retry.href = 'javascript:void(0)'; retry.style.color = '#7dd3fc';
+        retry.addEventListener('click', function () { _toggleSub(el, v, source, true); });   // 重试带 force=1(负缓存出口)
+        zhEl.appendChild(retry); actBtn.classList.remove('on');
+        return;
+      }
+      el.__sub = { source: source, segments: d.segments, lastIdx: -2, enabled: true };
+      enEl.textContent = d.from_cache ? ('(已缓存 · ' + source.toUpperCase() + ')') : ('(新生成 · ' + source.toUpperCase() + ',下次秒出)');
+      setTimeout(function () { if (el.__sub && el.__sub.lastIdx < 0) enEl.textContent = ''; }, 2000);
+      _subLoop(el);
+    } catch (e) { zhEl.textContent = '✗ 网络失败'; actBtn.classList.remove('on'); }
+  }
+
   function _card(v) {
     var el = document.createElement('div'); el.className = 'rc-vid';
     el.innerHTML =
       '<div class="rc-vid-thumb"><img loading="lazy" src="' + _esc(v.thumb) + '" alt="">' +
       '<button class="rc-vid-play" aria-label="播放">▶</button></div>' +
       '<div class="rc-vid-meta"><div class="rc-vid-title">' + _esc(v.title) + '</div>' +
-      '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>';
-    el.querySelector('.rc-vid-thumb').addEventListener('click', function () {
-      var box = el.querySelector('.rc-vid-thumb'); if (!box || box.querySelector('iframe')) return;
-      var f = document.createElement('iframe');
-      // cc_lang_pref=zh-Hans:点 CC 时优先中文字幕(有中文轨/自动翻译时);hl=zh-CN:播放器 UI 中文。不加 cc_load_policy → 不强制默认开字幕,只定语言偏好。
-      f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?autoplay=1&playsinline=1&rel=0&cc_lang_pref=zh-Hans&hl=zh-CN';
-      f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
-      f.setAttribute('allowfullscreen', '');
-      f.className = 'rc-vid-frame';
-      box.innerHTML = ''; box.appendChild(f);
-    });
+      '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>' +
+      '<div class="rc-vid-subbar"><button class="rc-sub-cc" type="button" title="中文字幕(YouTube 字幕 + 机翻,快;首次 ~5s 之后秒出)">🇨🇳 字幕</button>' +
+      '<button class="rc-sub-hq" type="button" title="高质量中文字幕(YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)">🎯 精翻</button></div>' +
+      '<div class="rc-vid-sub" style="display:none"><div class="rc-sub-zh"></div><div class="rc-sub-en"></div></div>';
+    el.querySelector('.rc-vid-thumb').addEventListener('click', function () { _playVid(el, v); });
+    el.querySelector('.rc-sub-cc').addEventListener('click', function () { _toggleSub(el, v, 'auto', false); });
+    el.querySelector('.rc-sub-hq').addEventListener('click', function () { _toggleSub(el, v, 'hq', false); });
     _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)
     // 阶段 D:☆ 收藏到收藏夹(第一个夹,无则建「⭐ 我的收藏」;再点取消)
     var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.innerHTML = '☆'; fav.title = '收藏这个视频到收藏夹';
@@ -213,6 +290,14 @@
       '.rc-vid-meta{padding:7px 9px}' +
       '.rc-vid-title{font-size:12.5px;color:#dbe7ff;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.rc-vid-ch{font-size:11px;color:#7c93c4;margin-top:3px}' +
+      /* 中文字幕:🇨🇳字幕 / 🎯精翻 两档按钮 + 下方字幕条(跟播放进度高亮) */
+      '.rc-vid-subbar{display:flex;gap:6px;padding:2px 9px 6px}' +
+      '.rc-vid-subbar button{flex:0 0 auto;background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:7px;padding:3px 9px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      '.rc-vid-subbar button:active{transform:scale(.96)}' +
+      '.rc-vid-subbar button.on{background:#1d3a52;border-color:#3b6db5;color:#bce0ff}' +
+      '.rc-vid-sub{margin:0 9px 8px;padding:8px 11px;background:rgba(0,0,0,.45);border:1px solid #243152;border-radius:8px;text-align:center;line-height:1.45}' +
+      '.rc-sub-zh{color:#fff;font-size:14.5px;min-height:19px;word-break:break-word}' +
+      '.rc-sub-en{color:#9aa4af;font-size:12px;margin-top:2px;min-height:14px;word-break:break-word}' +
       /* 偏好 toggle:混进 quick 栏(同「模型」一行),尺寸/圆角对齐 quick button,用透明描边+选中蓝区分是开关不是即时动作 */
       '#ep-asst-quick button.rc-media-tg,#asst-quick button.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:8px;padding:6px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s}' +
       '.rc-media-tg svg{opacity:.85}' +
