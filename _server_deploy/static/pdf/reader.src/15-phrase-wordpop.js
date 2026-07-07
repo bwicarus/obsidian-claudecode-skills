@@ -8,7 +8,11 @@ async function _loadPhraseFavs() {
 }
 window.onPhrase = () => {
   const t = (lastSelText || '').trim();
-  if (t) showPhrasePopover(t);
+  if (!t) return;
+  // 词组查询前清掉残留的查词呼吸/常亮高亮:它们(.rc-wp-breathe z:190)会盖住词组高亮(z:6)截获点击 →
+  //   「点词组高亮没反应」(尤其"某词先查过、其查词高亮被打断残留"时)。切到词组模式旧查词高亮已陈旧。
+  try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}
+  showPhrasePopover(t);
 };
 // 词组查询期间的呼吸高亮：**只在点「词组」按钮、查询进行中**出现（showPhrasePopover 开始时建、
 // 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、

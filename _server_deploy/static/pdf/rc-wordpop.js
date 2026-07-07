@@ -497,6 +497,9 @@
     // 注意:这里**不清**已有的呼吸高亮——原生语义是多个查词并存,"不清掉别的查词高亮"(15-phrase-wordpop.js:558)。
     var word = String(opts.word == null ? '' : opts.word).trim().toLowerCase();
     if (!word) return;
+    // 同词去重:重查同一词先清掉它上一次残留的呼吸/常亮高亮(不动别词,保留多查词并存语义)。
+    //   否则缓存秒弹路径不建也不清高亮 → 旧高亮(.rc-wp-breathe z:190)一直残留,盖住词组高亮(z:6)截获点击。
+    try { _wordHls.filter(function (o) { return o.word === word; }).forEach(_hlRemove); } catch (_) {}
     _ctx = {
       file: opts.file || '', page: opts.page || 0, langs: opts.langs || [], ctx: opts.ctx || '',
       rect: opts.rect || null, markHighlight: opts.markHighlight || null,
@@ -1033,5 +1036,5 @@
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull };
+  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls };   // clearHls:清所有查词呼吸/常亮高亮(词组查询前调,防 z:190 残留截获点击)
 })();
