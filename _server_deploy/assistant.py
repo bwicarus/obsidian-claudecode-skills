@@ -1263,13 +1263,26 @@ def _t_search_video(args, ctx):
     if not res.get("ok"):
         return {"error": res.get("error") or "没搜到视频"}
     raw = res["videos"]
+    _tf = time.time()
     vids = _filter_relevant_videos(q, raw, r)   # 搜后 AI 相关性筛选(剔除跑题的,只渲染留下的)
-    dropped = len(raw) - len(vids)
+    _filter_sec = round(time.time() - _tf, 1)
+    kept_ids = {v.get("id") for v in vids}
+    dropped_vids = [v for v in raw if v.get("id") not in kept_ids]
+    dropped = len(dropped_vids)
+    _mdl = f"{_variant_short(r['variant'])}·{r['depth']}"
+    _filter_detail = (
+        f"搜索词「{search_q}」→ YouTube 搜到 {len(raw)} 个候选\n"
+        f"AI 按相关性筛选 → 保留 {len(vids)}、剔除 {dropped}\n\n"
+        "保留:\n" + "\n".join(f"✓ {v.get('title','')} · {v.get('channel','')}" for v in vids) +
+        (("\n\n剔除(跑题/低质):\n" + "\n".join(f"✗ {v.get('title','')} · {v.get('channel','')}" for v in dropped_vids)) if dropped else ""))
     return {"ok": True, "count": len(vids), "query_used": search_q, "dropped": dropped,
             # 只把标题/频道回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
             "videos": [{"title": v.get("title", ""), "channel": v.get("channel", "")} for v in vids],
             "client_action": {"fn": "renderVideos", "args": [vids]},
-            "_gen_model": f"{_variant_short(r['variant'])}·{r['depth']}", "_gen_action": "pick_video",
+            "_gen_model": _mdl, "_gen_action": "pick_video",
+            # 相关性筛选单独占「!」一行(独立子步骤),点开看保留/剔除了哪些视频
+            "_sub_steps": [{"label": "相关性筛选视频", "model": _mdl, "action": "pick_video",
+                            "sec": _filter_sec, "detail": _filter_detail}],
             "_note": "视频卡片已渲染(已按相关性筛过、剔除跑题的),用户可直接点开。简短说一句『给你找到这些视频』(可提搜索词/筛掉了几个),别复述标题/链接。"}
 
 
@@ -3153,6 +3166,9 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 _ga = res.pop("_gen_action", None) if isinstance(res, dict) else None   # 生成步的动作键(可在 ⚙ 里调它的预设)
                 trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec, "action": _ga,
                               "detail": _step_detail(res)})   # 轨迹:任务名+模型+耗时(+动作键)+ 该步完整内容(感叹号里点开看)
+                for _ss in ((res.pop("_sub_steps", None) or []) if isinstance(res, dict) else []):   # 工具内部子步骤(如找视频的相关性筛选)各占「!」一行
+                    trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
+                                  "action": _ss.get("action"), "detail": _ss.get("detail", "")})
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
                 if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
