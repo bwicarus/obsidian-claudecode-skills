@@ -448,7 +448,8 @@
     var w = s.lemma || s.word;
     var url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
     var mark = next ? 'known' : 'unknown';   // 日英统一口径
-    // ① 立刻乐观:翻按钮 + 同步缓存 + 去下划线(PDF 字符层 / EPUB deco)
+    // ① 立刻乐观:关框(点击即消失,不等服务端)+ 翻按钮 + 同步缓存 + 去下划线(PDF 字符层 / EPUB deco)
+    try { var _pp = document.getElementById('word-pop'); if (_pp) _pp.style.display = 'none'; } catch (_) {}
     s.mastered = next;
     try { var c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}
     _paintMasterBtn(btn, next);
