@@ -267,7 +267,8 @@
     }
     function move(e) {
       if (!sz) return;
-      var maxW = Math.min(window.innerWidth * 0.96, 900);
+      var vw = window.innerWidth || 400, vh = window.innerHeight || 400;
+      var maxW = Math.max(240, Math.min(vw * 0.98, (vh - 110) * 16 / 9));   // 上限=宽或高任一撑满视口(16:9 画面+控件不溢出)→ 可放到接近铺满
       _prefs.w = Math.max(240, Math.min(w0 + (e.clientX - sx), maxW));
       if (!raf) raf = requestAnimationFrame(function () { raf = null; _applyW(); _clampPos(); });
     }

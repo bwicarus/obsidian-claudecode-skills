@@ -162,7 +162,10 @@
       '.rc-note.rc-note-lift{transform:scale(1.03);opacity:.92}',
       '.rc-note.rc-note-lift .rc-note-handle{cursor:grabbing;box-shadow:0 10px 26px rgba(0,0,0,.5)}',
       '.rc-note.rc-note-lift .rc-note-body{box-shadow:0 12px 30px rgba(0,0,0,.45)}',
-      '.rc-note-del{position:absolute;left:100%;top:50%;transform:translate(12px,-50%);width:34px;height:34px;border-radius:50%;border:1px solid #e05a5a;background:#fff2f2;color:#c62828;font-size:15px;line-height:1;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 10px rgba(0,0,0,.35);padding:0}',
+      /* 删除键:Apple 简约风——右上角小圆角标,毛玻璃深底 + 白色细线 ✕(不再红底红边飘右侧;确认弹窗才是危险动作) */
+      '.rc-note-del{position:absolute;top:-9px;right:-9px;width:24px;height:24px;border-radius:50%;border:none;background:rgba(28,28,30,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);color:#fff;line-height:0;display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 1px 5px rgba(0,0,0,.32);-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .12s ease}',
+      '.rc-note-del:hover{background:rgba(40,40,44,.72)}',
+      '.rc-note-del:active{transform:scale(.86);background:rgba(20,20,22,.85)}',
       '.rc-note.rc-note-editing .rc-note-del{display:flex}',
       // body:折叠/展开的记录区(底=rgba(便签色,α) 由 applyColor 内联;磨砂 blur 在这常驻,
       //   -webkit-backdrop-filter iOS 必须;文字 textarea + 手写 canvas 叠放,可重叠)。
@@ -285,7 +288,7 @@
     root.className = 'rc-note';
     root.dataset.noteId = note.id;
     root.innerHTML =
-      '<div class="rc-note-handle"><button class="rc-note-del" title="删除便签">🗑</button></div>' +
+      '<div class="rc-note-handle"><button class="rc-note-del" title="删除便签"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>' +
       '<div class="rc-note-body">' +
         '<div class="rc-note-video"></div>' +
         '<textarea class="rc-note-text" placeholder="输入文字…(笔=手写)"></textarea>' +
