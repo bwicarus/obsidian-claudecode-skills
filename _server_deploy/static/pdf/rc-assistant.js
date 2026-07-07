@@ -282,7 +282,7 @@
       _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
       _rh.textContent = '— 阅读器其它 AI —';
       container.appendChild(_rh);
-      _renderActs(['explain', 'translate', 'dict', 'grammar']);   // 服务端没有的 action 自动跳过(向后兼容)
+      _renderActs(['explain', 'translate', 'dict', 'grammar', 'pick_video']);   // 服务端没有的 action 自动跳过(向后兼容);pick_video=找视频拟词+筛选
       var note = document.createElement('div'); note.className = 'ams-note';
       note.textContent = '标「免费」= 免费档支持该型号;但免费是**共享算力**,高峰常过载(503)或限流时会自动落付费保不中断——'
         + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
@@ -830,7 +830,7 @@
       _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
       _rh.textContent = '— PDF 阅读器其它 AI —';
       box.appendChild(_rh);
-      _renderActs(['explain', 'translate', 'dict', 'grammar']);
+      _renderActs(['explain', 'translate', 'dict', 'grammar', 'pick_video']);   // pick_video=找视频拟词+相关性筛选
       var note = document.createElement('div'); note.className = 'ams-note';
       note.textContent = '标「免费」= 免费档支持该型号;但免费是**共享算力**,高峰常过载(503)或限流时会自动落付费保不中断——'
         + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
