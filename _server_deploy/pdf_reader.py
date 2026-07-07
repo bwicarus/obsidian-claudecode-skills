@@ -909,6 +909,48 @@ def pdf_api_prefs():
     return jsonify({"ok": True})
 
 
+_VIDEO_PREFS_DIR = CLAUDE_DIR / "state" / "video-player-prefs"
+def _video_prefs_path():
+    import re as _re
+    user = (session.get("username") or "anon")
+    safe = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(user))[:64] or "anon"
+    return _VIDEO_PREFS_DIR / f"{safe}.json"
+
+
+@bp.route("/api/video-player-prefs", methods=["GET", "POST"])
+def pdf_api_video_player_prefs():
+    """浮动视频播放器的位置/大小(所有视频共用一份,per-user)。GET → {ok, prefs:{x,y,w}}; POST {patch:{k:v|null}} 合并。
+    照 /api/prefs 同款 per-user 小 JSON 范式。"""
+    if not _reader_uid():
+        return jsonify({"ok": False, "error": "auth"}), 401
+    p = _video_prefs_path()
+    try:
+        cur = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except Exception:
+        cur = {}
+    if request.method == "GET":
+        return jsonify({"ok": True, "prefs": cur})
+    body = request.get_json(silent=True) or {}
+    patch = body.get("patch") or {}
+    if not isinstance(patch, dict):
+        return jsonify({"ok": False, "error": "bad patch"}), 400
+    for k, v in patch.items():
+        if not isinstance(k, str):
+            continue
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[str(k)] = v
+    try:
+        _VIDEO_PREFS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cur, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True})
+
+
 @bp.route("/sw.js")
 def pdf_sw_js():
     """Service Worker 脚本。**必须从 /pdf/ 下提供**(SW 作用域=其所在目录 → 覆盖 /pdf/api/page-image)。

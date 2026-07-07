@@ -366,83 +366,45 @@
       for (var id in ctls) { var c = ctls[id]; if (c && c.__vif && c.__vif.contentWindow === e.source) { c.__vcur = d.info.currentTime; break; } }
     });
   }
+  function _removeNoteVideo(ctl) {   // 移除视频(从浮层 🗑 或旧入口调):便签只有视频→删整张;否则变回普通便签
+    var onlyVideo = !(ctl.note.text || '').trim() && !(ctl.note.strokes && ctl.note.strokes.length);
+    if (onlyVideo) {
+      if (!window.confirm('这张便签只有视频,移除视频将删除整张便签,确定?')) return;
+      fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
+      try { exitEdit(); } catch (e2) {}
+      try { ctl.root.remove(); } catch (e2) {}
+      delete ctls[ctl.note.id];
+      for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
+      toastMsg('🗑 视频便签已删除');
+      return;
+    }
+    if (!window.confirm('移除这个视频?(便签变回普通便签,保留文字/手写)')) return;
+    ctl.note.video = null; patchNote(ctl.note, { video: null }); renderNoteVideo(ctl);
+  }
   function renderNoteVideo(ctl) {
     var v = ctl.note.video, box = ctl.video; if (!box) return;
     if (!v || !v.id) { ctl.root.classList.remove('rc-note-hasvideo'); box.innerHTML = ''; box.__sig = ''; ctl.__vif = null; return; }
     ctl.root.classList.add('rc-note-hasvideo');
     var sig = JSON.stringify(v);
-    if (box.__sig === sig) return;   // 无变化不重建(防控件输入时闪 iframe)
+    if (box.__sig === sig) return;   // 无变化不重建
     box.__sig = sig; ctl.__vif = null;
-    box.innerHTML =
-      '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>' +
-      '<div class="rc-vid-ctrls">' +
-        '<label>起<input class="rc-vc-sm" inputmode="numeric" maxlength="3" placeholder="0">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-ss" inputmode="numeric" maxlength="2" placeholder="00">'+'<button class="rc-vc-now" data-w="start" title="设为当前播放位置">⏱</button></label>' +
-        '<label>止<input class="rc-vc-em" inputmode="numeric" maxlength="3" placeholder="—">'+'<span class="rc-vc-cn">:</span>'+'<input class="rc-vc-es" inputmode="numeric" maxlength="2" placeholder="00">'+'<button class="rc-vc-now" data-w="end" title="设为当前播放位置">⏱</button></label>' +
-        '<label>速<select class="rc-vc-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>' +
-        '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-loop">循环</label>' +
-        '<label class="rc-vc-ck"><input type="checkbox" class="rc-vc-cc">字幕</label>' +
-        '<button class="rc-vc-rm" title="移除视频(变回普通便签)">✕</button>' +
-      '</div>';
-    var emb = box.querySelector('.rc-vid-embed');
-    var _fillT = function (mSel, sSel, secs) { box.querySelector(mSel).value = secs ? Math.floor(secs / 60) : ''; box.querySelector(sSel).value = secs ? ('0' + (secs % 60)).slice(-2) : ''; };
-    _fillT('.rc-vc-sm', '.rc-vc-ss', v.start || 0);
-    _fillT('.rc-vc-em', '.rc-vc-es', v.end || 0);
-    box.querySelector('.rc-vc-rate').value = String(v.rate || 1);
-    box.querySelector('.rc-vc-loop').checked = !!v.loop;
-    box.querySelector('.rc-vc-cc').checked = v.cc !== false;
-    var loadFrame = function () {
-      if (emb.querySelector('iframe')) return;
-      var f = document.createElement('iframe'); f.className = 'rc-vid-if';
-      f.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; f.setAttribute('allowfullscreen', '');
-      f.src = vEmbedSrc(v);
-      emb.innerHTML = ''; emb.appendChild(f); ctl.__vif = f; _hookVidMsg();
-      f.addEventListener('load', function () {
-        setRate(ctl, v.rate || 1);
-        try { f.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {}   // 注册 → YT 周期推 infoDelivery(含 currentTime)
+    // 便签视频区 = 纯缩略图 + ▶(点开共享浮层播放器 RC.videoPlayer;起止/循环/倍速/字幕等控制都在浮层里,内联控制条已退役)
+    box.innerHTML = '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>';
+    var openPlayer = function () {
+      if (!(window.RC && RC.videoPlayer)) { window.open('https://www.youtube.com/watch?v=' + encodeURIComponent(v.id), '_blank'); return; }
+      RC.videoPlayer.open({
+        id: v.id, start: v.start, end: v.end, loop: v.loop, rate: v.rate, cc: v.cc,
+        title: ((ctl.note.text || '').trim().slice(0, 40)) || '视频便签',
+        noteId: ctl.note.id,
+        onChange: function (nv) {   // 浮层改起止/循环/倍速/字幕 → 回写 note.video(签名同步防 syncCtl 回灌重建)
+          for (var k in nv) v[k] = nv[k];
+          ctl.note.video = v; box.__sig = JSON.stringify(v);
+          patchNote(ctl.note, { video: v });
+        },
+        onRemove: function () { _removeNoteVideo(ctl); },
       });
     };
-    emb.querySelector('.rc-vid-go').addEventListener('click', loadFrame);
-    // 控件改动 → 更新 note.video → 存后端 → 起止/循环/字幕改 URL 参数须重载 iframe;速度用 postMessage
-    var applyPatch = function (patch, needReload) {
-      for (var k in patch) v[k] = patch[k];
-      box.__sig = JSON.stringify(v);   // 自己改的:更新签名,避免 syncCtl 回灌重建
-      patchNote(ctl.note, { video: v });
-      if (needReload && ctl.__vif) { ctl.__vif.src = vEmbedSrc(v); ctl.__vif.addEventListener('load', function () { setRate(ctl, v.rate || 1); }, { once: true }); }
-    };
-    var _readT = function (mSel, sSel) { var m = parseInt(box.querySelector(mSel).value || '0', 10) || 0; var s2 = parseInt(box.querySelector(sSel).value || '0', 10) || 0; return m * 60 + Math.max(0, Math.min(59, s2)); };
-    box.querySelector('.rc-vc-sm').addEventListener('change', function () { applyPatch({ start: _readT('.rc-vc-sm', '.rc-vc-ss') }, true); });
-    box.querySelector('.rc-vc-ss').addEventListener('change', function () { applyPatch({ start: _readT('.rc-vc-sm', '.rc-vc-ss') }, true); });
-    box.querySelector('.rc-vc-em').addEventListener('change', function () { applyPatch({ end: _readT('.rc-vc-em', '.rc-vc-es') }, true); });
-    box.querySelector('.rc-vc-es').addEventListener('change', function () { applyPatch({ end: _readT('.rc-vc-em', '.rc-vc-es') }, true); });
-    box.querySelector('.rc-vc-rate').addEventListener('change', function () { var r = parseFloat(this.value) || 1; applyPatch({ rate: r }, false); setRate(ctl, r); });
-    box.querySelector('.rc-vc-loop').addEventListener('change', function () { applyPatch({ loop: this.checked }, true); });
-    box.querySelector('.rc-vc-cc').addEventListener('change', function () { applyPatch({ cc: this.checked }, true); });
-    Array.prototype.forEach.call(box.querySelectorAll('.rc-vc-now'), function (btn) {
-      btn.addEventListener('click', function (e) {
-        e.stopPropagation(); e.preventDefault();
-        if (!ctl.__vif) { alert('先点播放、播到想要的位置,再点这个标记'); return; }
-        var sec = Math.max(0, Math.floor(ctl.__vcur || 0));
-        if (btn.dataset.w === 'start') { _fillT('.rc-vc-sm', '.rc-vc-ss', sec); applyPatch({ start: sec }, false); }
-        else { _fillT('.rc-vc-em', '.rc-vc-es', sec); applyPatch({ end: sec }, false); }
-      });
-    });
-    box.querySelector('.rc-vc-rm').addEventListener('click', function (e) {
-      e.stopPropagation(); e.preventDefault();
-      // 便签只有视频(无文字、无手写)→ 移除视频 = 删整张便签;否则只变回普通便签(留文字/手写)
-      var onlyVideo = !(ctl.note.text || '').trim() && !(ctl.note.strokes && ctl.note.strokes.length);
-      if (onlyVideo) {
-        if (!window.confirm('这张便签只有视频,移除视频将**删除整张便签**,确定?')) return;
-        fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
-        try { exitEdit(); } catch (e2) {}
-        try { ctl.root.remove(); } catch (e2) {}
-        delete ctls[ctl.note.id];
-        for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
-        toastMsg('🗑 视频便签已删除');
-        return;
-      }
-      if (!window.confirm('移除这个视频?(便签变回普通便签,保留文字/手写)')) return;
-      ctl.note.video = null; patchNote(ctl.note, { video: null }); renderNoteVideo(ctl);
-    });
+    box.querySelector('.rc-vid-embed').addEventListener('click', function (e) { e.stopPropagation(); openPlayer(); });
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
     var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
