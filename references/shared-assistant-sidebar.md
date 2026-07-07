@@ -186,3 +186,16 @@
 ## 清理批次完成(2026-07-07,task #253)
 
 内联助手已**物理删除**(~630 行:对话主体/流式揭示/反馈弹窗/mic/绑定 + 模板静态 pane + 逃生舱 flag)。EPUB 助手=共享侧栏,无 fallback。**动作卡基建保留**并接给共享侧栏:`_epShowAction/_epActDo/_epTaskAction/_epQueueAction/_epFlushActions/_epAssistEdit` 经 HOST(`showAction/queueAction/taskAction`)+ 容器 `_asstBody()`(=`#asst-thread`);共享侧栏新增 SSE `action` 事件分支、trackTask 的 client_actions+持久卡、历史 `m.actions` 回放、图 chip src 直链支路、greet 量词 `HOST.locNoun`。`addCard/streamInto`(showCard 入口)仍活,已重定向共享容器。四个小缺口(图 chip/action 回放/greet 措辞/物理删除)全部关闭。
+
+## 唯一抽屉(2026-07-07,task #254——用户指正「唯一存在≠只代码相同」后的抽屉本体收敛)
+
+**rc-sidedrawer 现在是两阅读器唯一抽屉**,PDF 默认走它(`&drawer=legacy` 逃生舱,与 ?ui=legacy 同批次物理删除)。两边 tab 完全一致:**助手·单词本·知识点·高亮·目录·语法·历史**。
+
+**架构**(映射=workflow wf_493a012e,4 agent 并行地图):
+- rc-sidedrawer 泛化(加性 opts):`appearanceKeys(name)`(PDF 按排版分档 pdf-gp-*-{mode})、`mirrorOpenClass/mirrorFloatingClass`(body 镜像 grammar-open/grammar-floating → pdf-styles.css 挤压/悬浮规则原样生效,消费方零改)、`onReflow`(PDF=_scheduleRefit 悬浮不重排)、`tabButtons`(per-tab 动作按钮,PDF 🗑 清空分析仅 grammar tab)、setTab 记忆 tab 无 pane 回退 defaultTab(两 reader 共用 LS 键 ep-side-tab)。
+- PDF 侧接线=`reader.src/28-shared-drawer.js`:摘静态 chrome(#side-handle/#side-tabs/#side-settings),#grammar-panel 改名 #ep-side(12-vocab _visRight/27-adapter mountPanel 双目标),静态 pane 挂 .ep-side-pane,旧入口同名改道(switchSideTab/open·close·toggleGrammarPanel/toggleSidebar/toggleVocab/_gpSet*/_gpApplyAppearance→RC.sidedrawer);双页临时切单列走 onLayoutChange。
+- PDF 新 pane:**高亮**(GET/DELETE /pdf/api/highlights + rc-highlight.renderList,跳转 jumpWithBack)、**目录**(GET /api/toc?entries=1←book_toc._effective_toc,印刷页经 _pdfFromDisp,无目录引导设置面板建立)。
+- EPUB 新 pane:**历史**(rc-result beforeOpen 快照→localStorage pdf-qhist-<FREL>,渲染/回放镜像 21-misc-ai,样式注入)。
+- tab 栏定稿(用户拍板):无 ✕(关=把手/afterJump)、不换行,视口 <1360px 标签隐藏只显图标(`.ep-side-tab-lb` span + title),7 tab+🗑+⚙ 单行永远放得下。
+
+**遗留(独立批次)**:?ui=legacy 整体退役时一并物理删除——PDF 旧抽屉 JS(18-grammar 开合/外观旧体、05-nav switchSideTab 旧体)、模板静态 chrome(#side-handle/#side-tabs/#side-settings,早期兜底把手保留到 rc-sidedrawer 可更早建为止)、25-assistant legacy、drawer=legacy flag。
