@@ -163,27 +163,51 @@
         file: opts.file || '', page: opts.page || 0, langs: opts.langs || [] });
     },
     // 词组小框:查询+渲染交给 rc-phrasepop;呼吸高亮层是 PDF 字符层几何 → 经 host(bind)留底座。
+    // 设计(2026-07,用户拍板):查询期**不自动弹框**,只呼吸高亮 + 后台 fetch,结果存到高亮对象上;
+    //   点常亮高亮才用已存结果**秒开**弹框 + 消高亮。缓存快返回(<400ms)则不呼吸、直接弹框。
     lookupPhrase: function (opts) {
       opts = opts || {};
       var h = PdfAdapter._host;
       var text = String(opts.text || (h && h.lastSelText && h.lastSelText()) || '').trim();
       if (!text) return;
       if (!(window.RC && RC.phrasepop && RC.phrasepop.show)) { if (opts.fallback) opts.fallback(); return; }
-      // 锚点 rect 必须在 phraseHighlight() **之前**算:它会清空 .sel-overlay,之后 _rectFromSel 只剩
-      //   pw 零尺寸页顶矩形 → 下滚后弹框跑到视口上方屏外 =「点了不弹」。重弹时 opts.anchorRect(高亮屏幕矩形)优先。
+      var langs = (h && h.bookLangs && h.bookLangs()) || [];
+      var file = (h && h.fileRel && h.fileRel()) || '';
+      // 弹框(点击/缓存快开)共用的按钮回调 —— phl 传引用,onFav 精确删它
+      var _showOpts = function (rect, result, phl) {
+        return {
+          text: text, rect: rect, result: result || null, file: file, langs: langs, ignoreSelector: '#sel-toolbar',
+          // 收藏时无需再删高亮:点击模式弹框前已 _removePhraseHighlight(a),快返回模式根本没建高亮 → 只刷新分词。
+          //   (旧 removePhraseHighlight(phl||t) 里 phl 恒 null → 按文本删会误删并存的同文本高亮。)
+          onFav: function (t, nowFav) { if (!h) return; try { if (h.phraseRefresh) h.phraseRefresh(); } catch (e) {} },
+          onMastered: function () { if (h && h.phraseRefresh) { try { h.phraseRefresh(); } catch (e) {} } },
+          onExplain: function () { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } }
+        };
+      };
+      // ── 点击已有常亮高亮重弹:anchorRect(高亮屏幕矩形)+ 已存结果秒开(无则 fetch 兜底) ──
+      if (opts.noHighlight) {
+        var cr = h && h.charSel && h.charSel();
+        RC.phrasepop.show(_showOpts(opts.anchorRect || _rectFromSel(cr), opts.result || null, opts.phl || null));
+        return;
+      }
+      // ── 查询模式:先算选区 rect(缓存快开时用);400ms 后才物化呼吸高亮(缓存快返回则不呼吸) ──
       var cs = h && h.charSel && h.charSel();
-      var rect = opts.anchorRect || _rectFromSel(cs);
-      var phl = null;   // 本次查询创建的高亮 → onSolid 精确标它常亮(并发多查询各标各的);onFav 精确删它
-      if (h && h.phraseHighlight && !opts.noHighlight) { try { phl = h.phraseHighlight(); } catch (e) {} }
+      var selRect = _rectFromSel(cs);   // 必须在 phraseHighlight() 清 .sel-overlay 之前算
+      var phl = null, resolved = false, hlTimer = null;
+      hlTimer = setTimeout(function () {
+        hlTimer = null;
+        if (resolved) return;
+        if (h && h.phraseHighlight) { try { phl = h.phraseHighlight(); } catch (e) {} }   // 慢:才建呼吸高亮
+      }, 400);
       RC.phrasepop.show({
-        text: text,
-        rect: rect,
-        file: (h && h.fileRel && h.fileRel()) || '',
-        langs: (h && h.bookLangs && h.bookLangs()) || [],
-        onSolid: function () { if (h && h.phraseSolid) { try { h.phraseSolid(phl); } catch (e) {} } },
-        onFav: function (t, nowFav) { if (!h) return; try { if (nowFav && h.removePhraseHighlight) h.removePhraseHighlight(phl || t); if (h.phraseRefresh) h.phraseRefresh(); } catch (e) {} },
-        onMastered: function (t, mastered) { if (h && h.phraseRefresh) { try { h.phraseRefresh(); } catch (e) {} } },
-        onExplain: function (t) { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } }
+        text: text, noDisplay: true, file: file, langs: langs,
+        onResult: function (data) {
+          resolved = true;
+          if (hlTimer) { clearTimeout(hlTimer); hlTimer = null; }
+          if (phl) { phl.result = data; }   // 慢:结果存到高亮 → 等点击秒开
+          else { try { RC.phrasepop.show(_showOpts(selRect, data, null)); } catch (e) {} }   // 快/缓存:没建高亮 → 直接弹结果框
+        },
+        onSolid: function () { if (phl && h && h.phraseSolid) { try { h.phraseSolid(phl); } catch (e) {} } }
       });
     },
 

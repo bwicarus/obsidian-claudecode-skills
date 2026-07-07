@@ -70,8 +70,9 @@ function renderPhraseHl(pw) {
         layer.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
         if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
       } catch (_) {}
+      const res = a.result || null;   // 查询期已把结果存到高亮上 → 点击秒开,不重新 fetch
       _removePhraseHighlight(a);
-      showPhrasePopover(txt, {noHighlight: true, rect: anchorRect});
+      showPhrasePopover(txt, {noHighlight: true, rect: anchorRect, result: res});
     });
     pw.appendChild(layer);
   }
@@ -179,7 +180,7 @@ function _reopenExplain() {
 window.showPhrasePopover = async (text, opts) => {
   if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
     toolbar.classList.remove('open');
-    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, anchorRect: opts && opts.rect, fallback: () => _showPhrasePopoverNative(text, opts) });
+    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, anchorRect: opts && opts.rect, result: opts && opts.result, fallback: () => _showPhrasePopoverNative(text, opts) });
     return;
   }
   return _showPhrasePopoverNative(text, opts);

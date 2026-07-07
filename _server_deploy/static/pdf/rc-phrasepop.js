@@ -109,7 +109,8 @@
     var w = pop.offsetWidth || 320, h = pop.offsetHeight || 120;
     pop.style.left = Math.min(Math.max(8, rect.left), window.innerWidth - w - 8) + 'px';
     var top = rect.bottom + 8;
-    if (top + h > window.innerHeight - 8) top = Math.max(54, rect.top - h - 8);
+    if (top + h > window.innerHeight - 8) top = rect.top - h - 8;
+    top = Math.max(54, Math.min(top, window.innerHeight - h - 8));   // 强制夹进视口(rect 为零尺寸页顶矩形/负 top 时不至于弹到屏外)
     pop.style.top = top + 'px';
   }
   function _ensurePop() {
@@ -123,7 +124,9 @@
     var p = document.getElementById('word-pop');
     if (!p || p.style.display !== 'block') return;
     if (Date.now() - (window._wordPopOpenAt || 0) < 400) return;
-    if (!p.contains(e.target)) p.style.display = 'none';
+    if (p.contains(e.target)) return;
+    if (_ctx && _ctx.ignoreSelector && e.target && e.target.closest && e.target.closest(_ctx.ignoreSelector)) return;   // 点选中工具栏等豁免区不关框
+    p.style.display = 'none';
   }, true);
 
   // ── 模块状态 ──
@@ -186,57 +189,67 @@
   };
 
   // ── 入口:RC.phrasepop.show(opts)。逐字照搬 15-phrase-wordpop.js::showPhrasePopover 的内容/字段/端点 ──
+  // opts.noDisplay=true → 只 fetch + 回调 onResult/onSolid,不弹框(查询期:词组高亮呼吸,结果存起来等点击才弹)。
+  // opts.result={zh,reading,accent} → 用已存结果,不重新 fetch,秒开(点常亮高亮时用)。
+  // opts.onResult(data) → fetch 完把 {text,zh,reading,accent} 回传(供底座存到高亮对象上)。
   function show(opts) {
     opts = opts || {};
     injectCss();
     var text = String(opts.text == null ? '' : opts.text).trim();
     if (!text) return;
-    _ctx = opts;
-    var pop = _ensurePop();
-    _state = { text: text, jp: false, reading: '', mastered: _markSet.has(_norm(text)) };
-    pop.style.display = 'block';
-    window._wordPopOpenAt = Date.now();
-    pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
-    _position(pop, opts.rect);
     var isJa = _isJaWord(text);
-    _state.jp = isJa;   // 掌握按钮按语言分流(PDF 同)。词组掌握统一走 phrase-mark,这里仅记录。
-    (function () {
+    var noDisplay = !!opts.noDisplay;
+    var pop = null;
+    if (!noDisplay) {
+      _ctx = opts;   // 只在真弹框时设(noDisplay 查询不渲染按钮,不该覆盖 _ctx → 防并发查询把已弹框按钮的回调覆盖丢失)
+      pop = _ensurePop();
+      _state = { text: text, jp: isJa, reading: '', mastered: _markSet.has(_norm(text)) };   // 掌握按钮按语言分流;词组掌握统一走 phrase-mark
+      pop.style.display = 'block';
+      window._wordPopOpenAt = Date.now();
+      pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
+      _position(pop, opts.rect);
+    }
+    var render = function (zh, reading, accent) {
+      try { if (opts.onResult) opts.onResult({ text: text, zh: zh, reading: reading, accent: accent }); } catch (_) {}   // 用局部 opts(闭包)不读共享 _ctx:并发查询/点击不会互相覆盖回调
+      try { if (opts.onSolid) opts.onSolid(); } catch (_) {}   // 出结果 → 底座停呼吸转常亮保持
+      if (noDisplay || !pop) return;   // 查询模式:只回调,不渲染/不弹框
+      _state.reading = reading;
+      var phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
+        : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
+      var fav = _favSet.has(text);
+      pop.innerHTML =
+        '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
+        (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
+        '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
+        '<div class="wp-actions">' +
+        '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
+        (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
+        '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
+        (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
+        '<button onclick="_epPhraseExplain()" title="详细解释这个词组">💡 解释</button>' +
+        '</div>';
+      _position(pop, opts.rect);   // 内容定型后再夹一次进视口
+    };
+    if (opts.result) {   // 点击模式:用已存结果秒开,不重新 fetch
+      var r = opts.result;
+      render(r.zh || '', r.reading || '', (r.accent != null ? r.accent : null));
+      return;
+    }
+    (async function () {
       var zh = '', reading = '', accent = null;
-      var fin = function () {
-        // 出结果 → 底座停呼吸转常亮保持(点高亮才消失)。照搬 PDF：solid=true。
-        try { if (_ctx.onSolid) _ctx.onSolid(); } catch (_) {}
-        _state.reading = reading;
-        var phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
-          : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
-        var fav = _favSet.has(text);
-        pop.innerHTML =
-          '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
-          (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
-          '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
-          '<div class="wp-actions">' +
-          '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
-          (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
-          '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
-          (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-          '<button onclick="_epPhraseExplain()" title="详细解释这个词组">💡 解释</button>' +
-          '</div>';
-        _position(pop, opts.rect);   // 内容定型后再夹一次进视口
-      };
-      (async function () {
-        try {
-          if (isJa) {
-            var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
-            if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
-          }
-          if (!zh) {
-            var dt = await (await fetch('/pdf/api/translate-sentence', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
-            })).json();
-            if (dt && dt.ok) zh = dt.zh || '';
-          }
-        } catch (_) {}
-        fin();
-      })();
+      try {
+        if (isJa) {
+          var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
+          if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
+        }
+        if (!zh) {
+          var dt = await (await fetch('/pdf/api/translate-sentence', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
+          })).json();
+          if (dt && dt.ok) zh = dt.zh || '';
+        }
+      } catch (_) {}
+      render(zh, reading, accent);
     })();
   }
 
