@@ -204,6 +204,119 @@ def _translate_gemini_flash(segments: list[dict], key: str) -> bool:
     return any(s.get("zh") for s in segments)
 
 
+# ─────────── AI 重组断句翻译(把机器按时长切的碎段按语义重组成完整句再整句翻译)───────────
+# YouTube 字幕(尤其自动字幕)是按显示时长机械切的,一句话常被切成几段 → 逐段翻译对着半句翻,
+# 译文生硬不连贯。改为:全文碎段带段号给 AI,让它按语义重组成完整句 + 整句翻译,并标注每句覆盖
+# 哪几个原段([起-止]);后端据此合并原段——新句 start=首段 start、end=末段 end(时间轴仍精准),
+# 英文拼接、中文用整句译文。断句由 AI 决定,时间戳来自原段,两全其美。
+_RESEG_PROMPT_HEAD = (
+    "你是专业视频字幕翻译。下面英文字幕已按原始时间轴切成碎片段,每段前 [n] 是段号。\n"
+    "这些碎片是机器按显示时长切的,常把一句话切成好几段。请你:\n"
+    "1. 按**语义**把碎片重组成完整、自然的句子(一个完整意思一句,别太长,便于当字幕看)。\n"
+    "2. 每个重组句翻成简洁自然的中文(贴合原意,不过度意译)。\n"
+    "3. 术语保留英文并首次出现括号解释(如 hypertrophy(肌肥大)/RIR(剩余次数)/eccentric(离心));动作名给中文译名。\n"
+    "**输出格式**:每行一句,格式为「起段号-止段号<TAB>中文翻译」,例:\n"
+    "1-1\t这是一个 3。\n"
+    "2-4\t它写得很潦草、以极低的 28×28 分辨率渲染,但你的大脑毫不费力就能认出它是 3。\n"
+    "**铁律**:段号范围必须连续覆盖全部段、不重叠、不遗漏(上一句止段+1 = 下一句起段);只输出「段号范围+TAB+中文」,不要输出英文原文、不要别的解释。\n\n"
+)
+
+
+def _gemini_call(prompt: str, key: str, max_tokens: int = 32000) -> str:
+    """调 Gemini 2.5 Flash 返回纯文本(抽出复用;字幕翻译/重组都用)。失败抛异常。"""
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           "gemini-2.5-flash:generateContent?key=" + key)
+    r = _req.post(url, json={
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens,
+                             "thinkingConfig": {"thinkingBudget": 0}},
+    }, timeout=180)
+    try:
+        sys.path.insert(0, os.path.join(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"), "scripts"))
+        from google_api_quota import log_usage
+        log_usage("gemini", 1, "generateContent:flash", note=f"reseg status={r.status_code}")
+    except Exception:
+        pass
+    if r.status_code != 200:
+        raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(f"Gemini API: {data['error'].get('message')}")
+    cand = (data.get("candidates") or [{}])[0]
+    text = "".join(p["text"] for p in (cand.get("content") or {}).get("parts", []) if "text" in p)
+    if not text:
+        raise RuntimeError(f"Gemini empty (finishReason={cand.get('finishReason')})")
+    return text
+
+
+def _merge_range(segments: list[dict], a: int, b: int, zh) -> dict:
+    """合并原段 [a..b](1-based,含端点)成一个新段:start=首段 start、end=末段 end,英文拼接。"""
+    a = max(1, a); b = min(len(segments), b)
+    s0, s1 = segments[a - 1], segments[b - 1]
+    start = s0["start"]; end = s1["start"] + s1["duration"]
+    en = " ".join((segments[k]["en"] or "").strip() for k in range(a - 1, b)).strip()
+    return {"start": round(start, 3), "duration": round(max(0.1, end - start), 3), "en": en, "zh": zh}
+
+
+_RESEG_LINE = re.compile(r"^\s*\[?(\d+)\]?\s*[-–—~]\s*\[?(\d+)\]?\s*[\t|:：]+\s*(.+?)\s*$")
+
+
+def _gemini_resegment(segments: list[dict], key: str) -> list[dict] | None:
+    """一块碎段 → AI 重组断句翻译 → 新的完整句段(时间戳来自原段)。失败/覆盖太低返回 None。"""
+    n = len(segments)
+    if n == 0:
+        return []
+    lines = "\n".join(f"[{i+1}] {s['en']}" for i, s in enumerate(segments))
+    text = _gemini_call(_RESEG_PROMPT_HEAD + f"原文({n} 段):\n{lines}\n\n输出(段号连续覆盖 1..{n}):", key)
+    ranges = []
+    for line in text.splitlines():
+        m = _RESEG_LINE.match(line)
+        if m:
+            a, b, zh = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+            if 1 <= a <= b <= n and zh:
+                ranges.append((a, b, zh))
+    if not ranges:
+        return None
+    ranges.sort()
+    out, cursor, covered = [], 1, 0
+    for a, b, zh in ranges:
+        a = max(a, cursor)          # 裁掉与已处理段的重叠
+        if a > b:
+            continue
+        if a > cursor:              # 漏段(AI 没覆盖)→ 补一段,无译文(拼英文,少见)
+            out.append(_merge_range(segments, cursor, a - 1, None))
+        out.append(_merge_range(segments, a, b, zh))
+        covered += (b - a + 1)
+        cursor = b + 1
+    if cursor <= n:
+        out.append(_merge_range(segments, cursor, n, None))
+    if covered < n * 0.7:           # AI 覆盖太少 → 判失败,退回逐段翻译
+        return None
+    return out
+
+
+def _ai_resegment_translate(segments: list[dict]) -> list[dict] | None:
+    """整本 → AI 重组断句翻译。长视频按段分块(块内重组,块边界只影响少数句)。任一块挂 → None(退回逐段)。"""
+    if not segments or not GEMINI_KEY_FILE.exists():
+        return None
+    try:
+        key = GEMINI_KEY_FILE.read_text().strip()
+    except Exception:
+        return None
+    CHUNK = 220
+    result: list[dict] = []
+    for i in range(0, len(segments), CHUNK):
+        try:
+            part = _gemini_resegment(segments[i:i + CHUNK], key)
+        except Exception as e:
+            print(f"[subtitles] resegment chunk {i} failed: {e}", file=sys.stderr)
+            return None
+        if part is None:
+            return None
+        result.extend(part)
+    return result if result else None
+
+
 def _translate_claude(segments: list[dict]) -> bool:
     """走 ai_client.ask()(Claude/Codex 按 ai-settings.json)。Fallback 用。"""
     lines = "\n".join(f"[{i+1}] {s['en']}" for i, s in enumerate(segments))
@@ -375,13 +488,13 @@ def get_or_translate(video_id: str, target_lang: str = "zh",
                         segs, src = _fetch_stt(video_id)
                     except Exception:
                         raise cap_err   # 字幕和 STT 都失败 → 报字幕缺失更直观
-                segs = _translate_hq(segs)   # LLM 精翻
+                segs = _ai_resegment_translate(segs) or _translate_hq(segs)   # 优先 AI 重组断句+整句翻译;失败退回逐段精翻
             elif source == "stt":
                 segs, src = _fetch_stt(video_id)
-                segs = _translate_all(segs)
+                segs = _ai_resegment_translate(segs) or _translate_all(segs)
             else:
                 segs, src = _fetch_english(video_id)
-                segs = _translate_all(segs)
+                segs = _ai_resegment_translate(segs) or _translate_all(segs)   # 优先 AI 重组断句;失败退回逐段
             db = _db()
             db.execute(
                 "INSERT OR REPLACE INTO youtube_subtitles "
