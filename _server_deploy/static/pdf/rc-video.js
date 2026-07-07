@@ -17,36 +17,58 @@
   // ── 中文字幕(YouTube 无原生中文轨时,拉英文字幕 AI 精翻 / Cloud STT 转录;后端 youtube_subtitles.py,
   //    跟健身系统共用缓存)。YouTube iframe 无法注入自定义字幕轨 → 做成视频下方字幕条,跟播放进度高亮当前段。
   //    进度用 enablejsapi=1 + postMessage「listening」→ 收 infoDelivery.currentTime(照搬 rc-stickynote 便签机制,不引入 YT IFrame API)。──
-  function _hookVidCur() {   // 全局一次:infoDelivery 里的 currentTime → 存到对应卡的 el.__vcur
+  function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  function _hookVidCur() {   // 全局一次:infoDelivery → 存 currentTime + 收到时刻 + 播放态 + 倍速(供外推)
     if (window.__rcVidCurHook) return; window.__rcVidCurHook = 1;
     window.addEventListener('message', function (e) {
       if (typeof e.data !== 'string' || e.data.indexOf('"infoDelivery"') < 0) return;
       var d; try { d = JSON.parse(e.data); } catch (_) { return; }
-      if (!d || d.event !== 'infoDelivery' || !d.info || typeof d.info.currentTime !== 'number') return;
-      var cards = document.querySelectorAll('.rc-vid');
-      for (var i = 0; i < cards.length; i++) { if (cards[i].__vif && cards[i].__vif.contentWindow === e.source) { cards[i].__vcur = d.info.currentTime; break; } }
+      if (!d || d.event !== 'infoDelivery' || !d.info) return;
+      var info = d.info, cards = document.querySelectorAll('.rc-vid'), c = null;
+      for (var i = 0; i < cards.length; i++) { if (cards[i].__vif && cards[i].__vif.contentWindow === e.source) { c = cards[i]; break; } }
+      if (!c) return;
+      if (typeof info.currentTime === 'number') { c.__vcur = info.currentTime; c.__vcurAt = _now(); }
+      if (typeof info.playerState === 'number') c.__vplaying = (info.playerState === 1);   // 1=playing
+      if (typeof info.playbackRate === 'number') c.__vrate = info.playbackRate;
     });
   }
-  function _playVid(el, v) {   // 缩略图 → iframe 播放(enablejsapi=1;抽出供字幕按钮也能触发)
+  // 估算「此刻」播放时间:infoDelivery 是离散推送(间隔内 currentTime 不变=字幕滞后)→ 播放中按墙钟×倍速外推,
+  //   两次推送之间也平滑跟随音频;暂停/久未更新(>2s,可能卡)则用最后已知值不外推。
+  function _estTime(el) {
+    if (typeof el.__vcur !== 'number') return null;
+    if (el.__vplaying === false) return el.__vcur;
+    var dt = (_now() - (el.__vcurAt || 0)) / 1000;
+    if (dt < 0 || dt > 2) return el.__vcur;
+    return el.__vcur + dt * (el.__vrate || 1);
+  }
+  function _playVid(el, v) {   // 封面 → iframe 播放(enablejsapi=1 拿进度)。只移除封面 img+▶,收藏/拖动手柄覆盖层保留(播放后仍能拖去书页/收藏)
     var box = el.querySelector('.rc-vid-thumb'); if (!box) return null;
     var ex = box.querySelector('iframe'); if (ex) return ex;
+    var img = box.querySelector('img'); if (img) img.remove();
+    var pb = box.querySelector('.rc-vid-play'); if (pb) pb.remove();
     var f = document.createElement('iframe');
-    // enablejsapi=1:postMessage 拿进度(字幕跟随);cc_lang_pref=zh-Hans/hl=zh-CN:优先中文轨 + 中文 UI
+    // enablejsapi=1:postMessage 拿进度(字幕跟随);autoplay=1:点击(用户手势)内建 iframe → 直接缓冲播放(不用再点一次);cc_lang_pref/hl:中文轨+中文 UI
     f.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?enablejsapi=1&autoplay=1&playsinline=1&rel=0&cc_lang_pref=zh-Hans&hl=zh-CN';
     f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
     f.setAttribute('allowfullscreen', ''); f.className = 'rc-vid-frame';
-    box.innerHTML = ''; box.appendChild(f);
+    box.insertBefore(f, box.firstChild);   // iframe 垫底,收藏★/拖动手柄⠿ 覆盖其上(z-index)→ 播放后不消失
     el.__vif = f; el.__vid = v.id; _hookVidCur();
     f.addEventListener('load', function () { try { f.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {} });
     return f;
   }
+  function _vidFsToggle(el, v) {   // 我们自己的全屏(字幕在内可见;YouTube 自带全屏是跨域 iframe,盖不到本字幕条)。伪全屏 fixed 铺满 → iPad 也生效
+    var stage = el.querySelector('.rc-vid-stage'); if (!stage) return;
+    var on = stage.classList.toggle('rc-vid-stage-fs');
+    if (on && !el.__vif) _playVid(el, v);   // 进全屏若还没播 → 自动播放(否则只有封面图)
+    try { document.body.classList.toggle('rc-vid-fs-lock', on); } catch (e) {}
+  }
   function _subStop(el) { if (el.__subTimer) { clearInterval(el.__subTimer); el.__subTimer = null; } }
-  function _subLoop(el) {   // 200ms 读 el.__vcur → 线性查当前段 → 显示 zh/en(照搬 fitness startSubLoop)
+  function _subLoop(el) {   // 100ms 读外推时间 → 线性查当前段 → 显示 zh/en(照搬 fitness startSubLoop,时间改外推=跟音频同步)
     _subStop(el);
     el.__subTimer = setInterval(function () {
       var sub = el.__sub; if (!sub || !sub.enabled) return;
       var zhEl = el.querySelector('.rc-sub-zh'), enEl = el.querySelector('.rc-sub-en'); if (!zhEl) return;
-      var t = el.__vcur;
+      var t = _estTime(el);
       if (typeof t !== 'number') { if (sub.lastIdx !== -3) { zhEl.textContent = '▶ 播放后字幕跟随进度'; enEl.textContent = ''; sub.lastIdx = -3; } return; }
       var idx = -1;
       for (var i = 0; i < sub.segments.length; i++) { var s = sub.segments[i]; if (t >= s.start && t < s.start + s.duration) { idx = i; break; } if (s.start > t) break; }
@@ -54,7 +76,7 @@
       sub.lastIdx = idx;
       if (idx >= 0) { zhEl.textContent = sub.segments[idx].zh || '(未翻译)'; enEl.textContent = sub.segments[idx].en || ''; }
       else { zhEl.textContent = ''; enEl.textContent = ''; }
-    }, 200);
+    }, 100);
   }
   async function _toggleSub(el, v, source, force) {   // 照搬 fitness toggleSubtitle(端点换 /pdf/api/video-subtitles,进度走 postMessage)
     if (!v || !v.id) return;
@@ -97,17 +119,24 @@
 
   function _card(v) {
     var el = document.createElement('div'); el.className = 'rc-vid';
+    // stage 包住 视频区 + 字幕条 + 退出全屏键 → 「⛶ 全屏」时整体进伪全屏,字幕条随之在内可见
     el.innerHTML =
-      '<div class="rc-vid-thumb"><img loading="lazy" src="' + _esc(v.thumb) + '" alt="">' +
-      '<button class="rc-vid-play" aria-label="播放">▶</button></div>' +
+      '<div class="rc-vid-stage">' +
+        '<div class="rc-vid-thumb"><img loading="lazy" src="' + _esc(v.thumb) + '" alt="">' +
+        '<button class="rc-vid-play" aria-label="播放">▶</button></div>' +
+        '<div class="rc-vid-sub" style="display:none"><div class="rc-sub-zh"></div><div class="rc-sub-en"></div></div>' +
+        '<button class="rc-vid-fsx" type="button" aria-label="退出全屏" title="退出全屏">✕</button>' +
+      '</div>' +
       '<div class="rc-vid-meta"><div class="rc-vid-title">' + _esc(v.title) + '</div>' +
       '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>' +
       '<div class="rc-vid-subbar"><button class="rc-sub-cc" type="button" title="中文字幕(YouTube 字幕 + 机翻,快;首次 ~5s 之后秒出)">🇨🇳 字幕</button>' +
-      '<button class="rc-sub-hq" type="button" title="高质量中文字幕(YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)">🎯 精翻</button></div>' +
-      '<div class="rc-vid-sub" style="display:none"><div class="rc-sub-zh"></div><div class="rc-sub-en"></div></div>';
+      '<button class="rc-sub-hq" type="button" title="高质量中文字幕(YouTube 英文字幕原文 + AI 精翻;无字幕才 Cloud STT 转录)">🎯 精翻</button>' +
+      '<button class="rc-sub-fs" type="button" title="全屏播放(带中文字幕;YouTube 自带的全屏是跨域播放器,看不到本字幕条)">⛶ 全屏</button></div>';
     el.querySelector('.rc-vid-thumb').addEventListener('click', function () { _playVid(el, v); });
     el.querySelector('.rc-sub-cc').addEventListener('click', function () { _toggleSub(el, v, 'auto', false); });
     el.querySelector('.rc-sub-hq').addEventListener('click', function () { _toggleSub(el, v, 'hq', false); });
+    el.querySelector('.rc-sub-fs').addEventListener('click', function () { _vidFsToggle(el, v); });
+    el.querySelector('.rc-vid-fsx').addEventListener('click', function () { _vidFsToggle(el, v); });
     _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)
     // 阶段 D:☆ 收藏到收藏夹(第一个夹,无则建「⭐ 我的收藏」;再点取消)
     var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.innerHTML = '☆'; fav.title = '收藏这个视频到收藏夹';
@@ -298,6 +327,17 @@
       '.rc-vid-sub{margin:0 9px 8px;padding:8px 11px;background:rgba(0,0,0,.45);border:1px solid #243152;border-radius:8px;text-align:center;line-height:1.45}' +
       '.rc-sub-zh{color:#fff;font-size:14.5px;min-height:19px;word-break:break-word}' +
       '.rc-sub-en{color:#9aa4af;font-size:12px;margin-top:2px;min-height:14px;word-break:break-word}' +
+      /* 「⛶ 全屏」= 我们自己的伪全屏(fixed 铺满,iPad 也生效):视频区 + 字幕条都在内,字幕大字浮底可见 */
+      '.rc-vid-stage{position:relative}' +
+      '.rc-vid-fsx{display:none}' +
+      'body.rc-vid-fs-lock{overflow:hidden}' +
+      '.rc-vid-stage-fs{position:fixed;inset:0;z-index:2147483000;background:#000;display:flex;flex-direction:column;justify-content:center;align-items:center}' +
+      '.rc-vid-stage-fs .rc-vid-thumb{flex:0 0 auto;width:min(100%,calc(86vh * 16 / 9));aspect-ratio:16/9;margin:0 auto}' +
+      '.rc-vid-stage-fs .rc-vid-frame{width:100%;height:100%}' +
+      '.rc-vid-stage-fs .rc-vid-sub{position:fixed;left:0;right:0;bottom:6vh;margin:0;padding:0 4vw;background:transparent;border:none;pointer-events:none}' +
+      '.rc-vid-stage-fs .rc-sub-zh{font-size:clamp(18px,5.2vw,34px);min-height:0;text-shadow:0 2px 8px #000,0 0 4px #000}' +
+      '.rc-vid-stage-fs .rc-sub-en{font-size:clamp(12px,3.4vw,20px);min-height:0;color:#d3d9e0;text-shadow:0 2px 6px #000}' +
+      '.rc-vid-stage-fs .rc-vid-fsx{display:flex;position:fixed;top:calc(12px + env(safe-area-inset-top,0px));right:14px;z-index:3;width:40px;height:40px;border-radius:50%;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:19px;align-items:center;justify-content:center;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
       /* 偏好 toggle:混进 quick 栏(同「模型」一行),尺寸/圆角对齐 quick button,用透明描边+选中蓝区分是开关不是即时动作 */
       '#ep-asst-quick button.rc-media-tg,#asst-quick button.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:8px;padding:6px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s}' +
       '.rc-media-tg svg{opacity:.85}' +
