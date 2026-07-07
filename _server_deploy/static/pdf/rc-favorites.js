@@ -52,7 +52,12 @@
   //   userpage = 自己创建的插入页:file=该插入页所属书 rel,id=userpages 记录 id(用 id 判重)
   function normItem(t) {
     var it = { file: (t && t.file) || '', kind: (t && t.kind) || '' };
-    if (it.kind === 'pdf') it.page = Math.max(1, parseInt((t && t.page) || 1, 10) || 1);
+    if (it.kind === 'video') {   // YouTube 视频:无 file → 合成 video:<vid> 作 key(与后端 _fav_norm_item 对齐);带 vid/title/thumb 供 POST
+      it.vid = String((t && t.vid) || '');
+      it.file = 'video:' + it.vid;
+      it.title = (t && t.title) || '';
+      it.thumb = (t && t.thumb) || '';
+    } else if (it.kind === 'pdf') it.page = Math.max(1, parseInt((t && t.page) || 1, 10) || 1);
     else if (it.kind === 'userpage') it.id = String((t && t.id) || '');
     else it.section = Math.max(0, parseInt((t && t.section) || 0, 10) || 0);
     return it;
@@ -68,6 +73,7 @@
     return false;
   }
   function itemLabel(it) {
+    if (it.kind === 'video') return '▶ ' + (it.title || 'YouTube 视频');
     var name = (it.file || '').split('/').pop();
     if (it.kind === 'userpage') return '📝 我的页 · ' + name;
     return name + ' · ' + (it.kind === 'pdf' ? ('第 ' + it.page + ' 页') : ('第 ' + (it.section + 1) + ' 节'));
@@ -117,11 +123,14 @@
   }
   function _esc(e) { if (e.key === 'Escape') { e.stopPropagation(); closePicker(); } }
 
-  function openPicker(target) {
+  function openPicker(target, opts) {
     injectCss();
     var it = normItem(target);
-    if (!it.file || (it.kind !== 'pdf' && it.kind !== 'epub' && it.kind !== 'userpage')) { toast('无法收藏:缺文件信息'); return; }
+    if (!it.file || (it.kind !== 'pdf' && it.kind !== 'epub' && it.kind !== 'userpage' && it.kind !== 'video')) { toast('无法收藏:缺文件信息'); return; }
+    if (it.kind === 'video' && !it.vid) { toast('无法收藏:视频信息缺失'); return; }
     if (it.kind === 'userpage' && !it.id) { toast('这一页还没保存好,稍后再收藏'); return; }
+    // 可选回调:每次勾选/取消/新建后回传「该条目当前是否已在任一夹」,供调用方(如视频卡 ☆ 按钮)同步状态。
+    var _notify = function () { try { if (opts && typeof opts.onChange === 'function') opts.onChange(_isFaved(it)); } catch (_) {} };
     if (it.file.indexOf('资源/收藏夹/') === 0) { toast('收藏夹本身不能再收藏'); return; }   // 防收藏集套收藏集(规格 D)
     closePicker();
     var mask = document.createElement('div'); mask.id = 'rc-fav-mask';
@@ -153,7 +162,7 @@
                         : req('PATCH', EP, { folder: folder.id, remove_item: it });
         p.then(function (d) {
           cb.disabled = false;
-          if (d && d.ok && d.folder) { folder.items = d.folder.items || []; setCt(); cb.checked = hasItem(folder, it); refreshStar(); }
+          if (d && d.ok && d.folder) { folder.items = d.folder.items || []; setCt(); cb.checked = hasItem(folder, it); refreshStar(); _notify(); }
           else { cb.checked = !checked; toast('保存失败:' + ((d && d.error) || '?')); }
         }).catch(function () { cb.disabled = false; cb.checked = !checked; toast('网络错误,没保存上'); });
       }
@@ -176,7 +185,7 @@
     }
 
     req('GET', EP).then(function (d) {
-      if (d && d.ok) { _folders = d.folders || []; renderList(_folders); refreshStar(); }   // renderRow 改的就是 _folders 内对象
+      if (d && d.ok) { _folders = d.folders || []; renderList(_folders); refreshStar(); _notify(); }   // renderRow 改的就是 _folders 内对象
       else list.innerHTML = '<div class="rc-fav-empty">加载失败:' + esc((d && d.error) || '?') + '</div>';
     }).catch(function () { list.innerHTML = '<div class="rc-fav-empty">网络错误,加载失败</div>'; });
 
@@ -194,7 +203,7 @@
           var empty = list.querySelector('.rc-fav-empty'); if (empty) empty.remove();
           list.insertBefore(renderRow(d.folder), list.firstChild);
           if (_folders) _folders.unshift(d.folder);
-          refreshStar();
+          refreshStar(); _notify();
           toast('已建「' + name + '」并收藏');
         } else toast('新建失败:' + ((d && d.error) || '?'));
       }).catch(function () { btn.disabled = false; inp.disabled = false; toast('网络错误,没建上'); });
@@ -207,6 +216,7 @@
     openPicker: openPicker,
     closePicker: closePicker,
     bindStar: bindStar,
-    refreshStar: refreshStar
+    refreshStar: refreshStar,
+    isFaved: function (t) { try { return _isFaved(normItem(t)); } catch (_) { return false; } }   // 供视频卡等外部按钮判断某条目当前是否已在任一夹
   };
 })();

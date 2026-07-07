@@ -29,30 +29,29 @@
       '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>';
     el.querySelector('.rc-vid-thumb').addEventListener('click', function () { _openPlayer(v); });   // 点播放 → 浮动播放器
     _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)
-    // 阶段 D:☆ 收藏到收藏夹(第一个夹,无则建「⭐ 我的收藏」;再点取消)
-    var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.innerHTML = '☆'; fav.title = '收藏这个视频到收藏夹';
-    fav.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); _toggleFav(v, fav); });
+    // 阶段 D:☆ 收藏 → 弹「⭐ 收藏到…」选择器(复用 RC.favorites.openPicker,跟页面/高亮收藏同一套 UI:选夹/多选/新建夹)
+    var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.title = '收藏这个视频到收藏夹';
+    var _item = { kind: 'video', vid: v.id, title: v.title || '', thumb: v.thumb || '' };
+    var _faved = false;
+    try { _faved = !!(window.RC && RC.favorites && RC.favorites.isFaved && RC.favorites.isFaved(_item)); } catch (e) {}
+    _paintFav(fav, _faved);   // 初始态:已在任一夹 → ★
+    fav.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); _openFavPicker(_item, fav); });
     el.querySelector('.rc-vid-thumb').appendChild(fav);
     return el;
   }
+  function _paintFav(btn, on) { btn.classList.toggle('on', !!on); btn.innerHTML = on ? '★' : '☆'; }
   function _favToast(m) { try { if (window.RC && RC.toast) RC.toast(m); else if (window._toast) window._toast(m); } catch (e) {} }
-  function _toggleFav(v, btn) {
-    var item = { kind: 'video', vid: v.id, title: v.title || '', thumb: v.thumb || '' };
-    if (btn.classList.contains('on')) {
-      if (btn.__fid) fetch('/pdf/api/favorites', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: btn.__fid, remove_item: item }) })
-        .then(function () { btn.classList.remove('on'); btn.innerHTML = '☆'; _favToast('已取消收藏'); }).catch(function () {});
+  function _openFavPicker(item, btn) {
+    if (window.RC && RC.favorites && RC.favorites.openPicker) {
+      RC.favorites.openPicker(item, { onChange: function (faved) { _paintFav(btn, faved); } });
       return;
     }
+    // 兜底(收藏夹模块未加载):退回「加到第一个夹」旧行为,不阻塞收藏
     fetch('/pdf/api/favorites').then(function (r) { return r.json(); }).then(function (d) {
       var fs = (d && d.folders) || [];
-      var done = function (fid, nm) { btn.classList.add('on'); btn.innerHTML = '★'; btn.__fid = fid; _favToast('已收藏到《' + (nm || '收藏夹') + '》'); };
-      if (fs.length) {
-        fetch('/pdf/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: fs[0].id, item: item }) })
-          .then(function (r) { return r.json(); }).then(function () { done(fs[0].id, fs[0].name); }).catch(function () {});
-      } else {
-        fetch('/pdf/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '⭐ 我的收藏', item: item }) })
-          .then(function (r) { return r.json(); }).then(function (dd) { done((dd && (dd.folder || dd.id)) || '', '我的收藏'); }).catch(function () {});
-      }
+      var body = fs.length ? { folder: fs[0].id, item: item } : { name: '⭐ 我的收藏', item: item };
+      fetch('/pdf/api/favorites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function () { _paintFav(btn, true); _favToast('已收藏'); }).catch(function () {});
     }).catch(function () {});
   }
 
