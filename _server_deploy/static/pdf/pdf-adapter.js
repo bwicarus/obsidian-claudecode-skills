@@ -88,6 +88,7 @@
         file: opts.file || '',
         page: opts.page || 0,
         langs: opts.langs || [],                         // 纯汉字词判英/日与门控 _isJaWord 对齐
+        noBreathe: !!opts.noBreathe,                     // 已知词(有生词下划线)→ 不呼吸,直接弹占位框秒填
         ignoreSelector: '#sel-toolbar',                  // 「🔍查词」按钮点开小框时 toolbar 仍开着,点 toolbar 其余按钮不误关小框
         showAnki: false,                                 // PDF 原生小框只有「掌握+语法」两个按钮,没有🎴Anki(选中工具栏已有🎴制卡入口)
         onGrammar: function () { if (window.onGrammarAnalyze) window.onGrammarAnalyze(); },

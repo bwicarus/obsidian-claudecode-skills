@@ -507,7 +507,8 @@
       ignoreSelector: opts.ignoreSelector || '',
       showAnki: opts.showAnki !== false,   // 默认 true(EPUB 现状不变);PDF 传 false 恢复原生「掌握+语法」两按钮(PDF 原生小框从没有过🎴Anki按钮,已有选中工具栏🎴制卡)
       breathe: opts.breathe || null,   // {wrap(), unwrap(el)} 可选;host 提供真实 DOM 包裹实现呼吸高亮(零滚动漂移),不提供则退回 position:fixed 兜底
-      positionPop: opts.positionPop || null   // (pop, rect) 可选;host 提供框定位机制(PDF=原生 _positionWordPop,随内容滚动),不提供用 fixed 视口定位
+      positionPop: opts.positionPop || null,   // (pop, rect) 可选;host 提供框定位机制(PDF=原生 _positionWordPop,随内容滚动),不提供用 fixed 视口定位
+      noBreathe: !!opts.noBreathe   // 已知词(有生词下划线=以前查过、服务器有缓存)→ 不呼吸,直接弹占位框秒填结果
     };
     // 非英日(纯中文等)→ 交给底座转译(与 rc-dict 一致),不开词典框。isJa 用 _isJaWord(尊重 langs:
     //   未声明 langs 时汉字默认按日语,跟 PDF dict-quick want_ja 一致;声明 langs 不含 ja 的汉字 → 转译)。
@@ -524,6 +525,23 @@
       _popPosHook = _ctx.positionPop;
       _renderWordPop(word, _ctx.ctx, cached, _ctx.rect);
       _lookupFetch(word).then(function (d) { if (d && d.ok) _dictCache.set(word, d); }).catch(function () {});
+      return;
+    }
+    // 已知词(有生词下划线,本 session 没查过 → _dictCache 空,但服务器有缓存查询很快):不呼吸,
+    //   立刻弹占位框(display:block ⏳)+ fetch 秒填结果,而不是"呼吸高亮等 400ms"。owner 守卫防被别的词覆盖。
+    if (_ctx.noBreathe) {
+      var _oid = _wordPopOwnerId = ++_wordHlSeq;
+      _popPosHook = _ctx.positionPop;
+      pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
+      pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查询中…</div>';
+      _positionPop(pop, _ctx.rect);
+      _lookupFetch(word).then(function (d) {
+        if (d && d.ok) _dictCache.set(word, d);
+        if (_wordPopOwnerId !== _oid) return;   // 期间点了别的词 → 不覆盖
+        if (d && d.ok) { _popPosHook = _ctx.positionPop; _renderWordPop(word, _ctx.ctx, d, _ctx.rect); }
+        else if (_ctx.onFallback) { try { pop.style.display = 'none'; _ctx.onFallback(word); } catch (_) {} }
+        else pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">未查到</div>';
+      }).catch(function () { if (_wordPopOwnerId === _oid) pop.innerHTML = '<div style="padding:14px;color:#c88">查询失败</div>'; });
       return;
     }
     // 慢词生命周期,逐分支照搬原生 showWordPopover:**每次调用独立跑完,多个并存,互不作废**

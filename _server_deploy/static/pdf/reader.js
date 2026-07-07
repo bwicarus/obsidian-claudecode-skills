@@ -3848,8 +3848,15 @@ function _bindCharLayer(cl, pw) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');
+            // 点的词是不是已知生词(有下划线=以前查过、服务器有缓存)→ 跳过呼吸,直接弹占位框秒填结果(用户反馈:已查过的词不该再呼吸等待)
+            let _isKnown = false;
+            try {
+              const _vm = (_charSel && _charSel.pw && _charSel.pw.__vocabMarks) || [];
+              const _tl = _t.toLowerCase();
+              _isKnown = _vm.some(m => (m.word && String(m.word).toLowerCase() === _tl) || (m.lemma && String(m.lemma).toLowerCase() === _tl));
+            } catch (_) {}
             if (window.__uiShared && window.PdfAdapter) {
-              PdfAdapter.lookupWord({ word: _t, context: _ctx, page: _selPageNum(), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+              PdfAdapter.lookupWord({ word: _t, context: _ctx, page: _selPageNum(), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, noBreathe: _isKnown, fallback: (w, c) => showWordPopover(w, c) });
             } else {
               setTimeout(() => { try { showWordPopover(_t, _ctx); } catch(_){} }, 30);
             }
