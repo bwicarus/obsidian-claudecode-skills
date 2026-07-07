@@ -547,6 +547,16 @@
     m.el.appendChild(ph);
     ctl._ph = ph; ctl._scrollEl = scrollAncestor(m.el);
   }
+  // 视频便签守则(用户规格):播放/暂停只归视频自己——iframe 一被 reparent 浏览器就强制重载(=播放中断丢进度),
+  // 所以带活 iframe 的便签不做自动迁回(点外降层/折叠都不搬 DOM);折叠改用 postMessage 暂停(enablejsapi 已开,进度保留)。
+  function _hasLiveVid(ctl) { try { return !!(ctl && ctl.root && ctl.root.querySelector('.rc-vid-if')); } catch (e) { return false; } }
+  function _vidPause(ctl) {
+    try {
+      ctl.root.querySelectorAll('.rc-vid-if').forEach(function (f) {
+        try { f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'); } catch (e) {}
+      });
+    } catch (e) {}
+  }
   function portalIn(ctl) {
     if (!ctl || ctl.portaled || ctl.note.collapsed || !ctl.root.isConnected) return;
     var home = ctl.root.parentElement;
@@ -700,7 +710,10 @@
     ctl.note.collapsed = !ctl.note.collapsed;
     ctl.root.classList.toggle('rc-note-collapsed', ctl.note.collapsed);
     patchNote(ctl.note, { collapsed: ctl.note.collapsed });
-    if (ctl.note.collapsed) portalOut(ctl); else portalIn(ctl);   // 展开→置顶浮层;折叠→回内容锚
+    if (ctl.note.collapsed) {
+      _vidPause(ctl);                         // 折叠=暂停播放(postMessage,进度保留;用户规格)
+      if (!_hasLiveVid(ctl)) portalOut(ctl);  // 有活视频不迁回(reparent 强制重载 iframe);折叠小条留浮层视觉无差,展开时 portalIn 幂等早退不再搬
+    } else portalIn(ctl);                     // 展开→置顶浮层;折叠→回内容锚
   }
 
   // ─────────────────────────── handle 手势(长按 → EDIT;EDIT 内按下即拖 = 移动便签)───────────────────────────
@@ -1154,7 +1167,7 @@
     //   capture 阶段先于 onBodyDown/onHandleDown 跑:被点那张稍后由其 pointerdown 再 portalIn(不受影响)。
     for (var id in ctls) {
       var c = ctls[id];
-      if (c && c.portaled && c.root !== insideRoot) portalOut(c);
+      if (c && c.portaled && c.root !== insideRoot && !_hasLiveVid(c)) portalOut(c);   // 有活视频不降层:portalOut 的 reparent 会重载 iframe=播放中断(用户规格:点外面不碰播放)
     }
   }
 
