@@ -142,8 +142,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   body.ep-side-open #ep-side-handle{right:58vw}
 }
 /* 顶部 tab 栏(照搬 PDF #side-tabs) */
-#ep-side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
-#ep-side-tabs .ep-side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 11px;border-radius:6px;white-space:nowrap;display:inline-flex;align-items:center;-webkit-tap-highlight-color:transparent}
+#ep-side-tabs{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
+#ep-side-tabs .ep-side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 8px;border-radius:6px;white-space:nowrap;display:inline-flex;align-items:center;-webkit-tap-highlight-color:transparent}
 #ep-side-tabs .ep-side-tab:hover{background:#1a2540;color:#cfe6ff}
 #ep-side-tabs .ep-side-tab.active{background:#1a2540;color:#7dd3fc;font-weight:600}
 #ep-side-tabs .ep-side-tab-sp{flex:1}
