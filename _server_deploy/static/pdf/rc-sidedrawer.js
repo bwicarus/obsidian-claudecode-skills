@@ -142,7 +142,9 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   body.ep-side-open #ep-side-handle{right:58vw}
 }
 /* 顶部 tab 栏(照搬 PDF #side-tabs) */
-#ep-side-tabs{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
+#ep-side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
+/* 单行永远放得下:抽屉窄(≲520px,即视口<1360)时 tab 只显图标(hover/长按有 title);不换行不裁切 */
+@media (max-width:1359px){#ep-side-tabs .ep-side-tab-lb{display:none}#ep-side-tabs .ep-side-tab .si{margin-right:0}}
 #ep-side-tabs .ep-side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 8px;border-radius:6px;white-space:nowrap;display:inline-flex;align-items:center;-webkit-tap-highlight-color:transparent}
 #ep-side-tabs .ep-side-tab:hover{background:#1a2540;color:#cfe6ff}
 #ep-side-tabs .ep-side-tab.active{background:#1a2540;color:#7dd3fc;font-weight:600}
@@ -232,7 +234,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       tabs.forEach(function (t) {
         var b = document.createElement('button');
         b.className = 'ep-side-tab'; b.dataset.pane = t.name;
-        b.innerHTML = (t.icon || '') + (t.label || t.name);
+        b.innerHTML = (t.icon || '') + '<span class="ep-side-tab-lb">' + (t.label || t.name) + '</span>';   // 标签包 span:窄屏 CSS 隐藏→只显图标
+        b.title = t.label || t.name;
         b.addEventListener('click', function () { setTab(t.name); });
         bar.appendChild(b);
       });
@@ -250,8 +253,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       var setb = document.createElement('button'); setb.className = 'ep-side-x'; setb.id = 'ep-side-set-btn'; setb.title = '侧栏外观设置(悬浮 / 模糊度)';
       setb.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="margin:0;width:16px;height:16px;vertical-align:-3px"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg>';
       setb.addEventListener('click', toggleSideSettings); bar.appendChild(setb);
-      var x = document.createElement('button'); x.className = 'ep-side-x'; x.textContent = '✕'; x.title = '关闭侧栏';
-      x.addEventListener('click', close); bar.appendChild(x);
+      // ✕ 关闭按钮移除(用户拍板):关抽屉走把手 toggle / afterJump 自动收,tab 栏寸土寸金
       side.insertBefore(bar, side.firstChild);
     }
     if (!document.getElementById('ep-side-settings')) {

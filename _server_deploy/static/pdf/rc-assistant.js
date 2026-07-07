@@ -392,7 +392,8 @@
   var tabBtn = document.createElement('button');
   tabBtn.className = 'side-tab'; tabBtn.dataset.pane = 'asst';
   // Apple/SF「sparkles」图标(替代 🤖 emoji),复用模板 .si 样式
-  tabBtn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l1.4 4.2L18 9.6l-4.6 1.4L12 16l-1.4-4.6L6 9.6l4.6-1.4L12 4z"/><path d="M18.6 14.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7z"/></svg>助手';
+  tabBtn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l1.4 4.2L18 9.6l-4.6 1.4L12 16l-1.4-4.6L6 9.6l4.6-1.4L12 4z"/><path d="M18.6 14.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7z"/></svg><span class="ep-side-tab-lb">助手</span>';   // 标签包 span:统一抽屉窄屏只显图标时一起隐藏
+  tabBtn.title = '助手';
   tabBtn.onclick = function () { HOST.switchTab && HOST.switchTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
   tabsEl.insertBefore(tabBtn, tabsEl.firstChild);
 
