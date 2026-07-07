@@ -161,7 +161,8 @@
       '.rcvp-zh{color:#fff;font-size:clamp(14px,3.2vw,20px);line-height:1.35;text-shadow:0 2px 6px #000,0 0 3px #000;word-break:break-word}' +
       '.rcvp-en{color:#d3d9e0;font-size:clamp(11px,2.2vw,14px);line-height:1.3;text-shadow:0 2px 5px #000;margin-top:1px;word-break:break-word}' +
       '.rcvp-sub.rcvp-noen .rcvp-en{display:none}' +   // 原文开关:关=只中文
-      '.rcvp-sub.rcvp-out{position:static;bottom:auto;padding:7px 12px;background:rgba(0,0,0,.5);border-top:1px solid #2a3a63}' +   // 外部下方:独立条(flow),不遮画面
+      // 外部字幕:视频与底部按钮之间的**固定高度**空白区,字幕在其中居中 → 内容 1 行/2 行/空都不改变布局(不抖)
+      '.rcvp-sub.rcvp-out{position:static;left:auto;right:auto;bottom:auto;flex:0 0 auto;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2px 12px;background:transparent;border:none;overflow:hidden}' +
       '.rcvp-sub.rcvp-out .rcvp-zh{font-size:14.5px;text-shadow:none}' +
       '.rcvp-sub.rcvp-out .rcvp-en{font-size:12px;text-shadow:none;color:#9aa4af}' +
       '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:7px 9px;background:rgba(0,0,0,.25)}' +
