@@ -710,11 +710,12 @@ def _jp_langs_label(langs) -> tuple[str, bool]:
     return label, (ls == ["ja"])
 
 
-def lookup_jp(word: str, context: str = "", model: str = "sonnet", langs=None) -> dict | None:
+def lookup_jp(word: str, context: str = "", model: str = "haiku", langs=None) -> dict | None:
     """日语词 → {reading, romaji, pos, zh, examples}。AI 生成,永久本地缓存。
 
     缓存命中离线秒回(等于边读边攒一本自己的中日词典);未命中调 Claude Haiku
-    (低 effort,~2-4s)。Gemini Flash 若可用更快,但其 billing 常挂,故主用 Claude。
+    (低 effort,~1-2s)。之前默认误写成 sonnet → 首次查词同步干等 ~7s(用户反馈"翻译等待太长"),
+    查词典这种小任务 Haiku 质量足够且快 3-4 倍。Gemini Flash 更快但 billing 常挂,故主用 Claude。
 
     langs = 本书声明语言(来自每本 PDF 的语言设置)。lookup_jp 只在「按日语处理」时被调,
     所以一律按**日语词**出释义,并显式警告中日同形异义(伪朋友),绝不套用中文同形词语感。
@@ -767,7 +768,7 @@ def _jp_regen_bg(word: str, context: str, model: str, langs) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _jp_ai_fetch(word: str, context: str = "", model: str = "sonnet", langs=None) -> dict | None:
+def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None) -> dict | None:
     """调 AI 生成 JP 词条 + 写缓存(lookup_jp 同步路径与后台升级线程共用)。返回原始 data。"""
     try:
         _p = str(PROJECT_ROOT / "scripts")

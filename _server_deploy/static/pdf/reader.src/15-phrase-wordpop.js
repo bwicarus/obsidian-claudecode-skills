@@ -641,15 +641,26 @@ window._speakCurWord = () => {
 function _dropVocabUnderlineOptimistic(s) {
   const keys = new Set();
   for (const k of [s && s.lemma, s && s.word]) if (k) keys.add(String(k).toLowerCase());
-  if (!keys.size) return;
+  if (!keys.size) return function () {};
+  const snaps = [];   // 记录被改的页(before/after)→ 返回 restore 回滚(失败恢复,契约对齐 EPUB __epubDeco.optimisticMaster)
   document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
     if (!pw.__vocabMarks || !pw.__vocabMarks.length) return;
-    const before = pw.__vocabMarks.length;
-    pw.__vocabMarks = pw.__vocabMarks.filter(m =>
+    const before = pw.__vocabMarks;
+    const after = before.filter(m =>
       !(keys.has(String(m.lemma || '').toLowerCase()) || keys.has(String(m.word || '').toLowerCase())));
-    if (pw.__vocabMarks.length !== before) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+    if (after.length !== before.length) {
+      pw.__vocabMarks = after; snaps.push({ pw, before, after });
+      try { renderVocabUnderlines(pw, after); } catch (_) {}
+    }
   });
+  return function restore() {   // 只回滚仍是本次乐观结果的页(防覆盖期间别的刷新写入的新 marks)
+    snaps.forEach(({ pw, before, after }) => {
+      if (pw.__vocabMarks === after) { pw.__vocabMarks = before; try { renderVocabUnderlines(pw, before); } catch (_) {} }
+    });
+  };
 }
+// 共享版 rc-wordpop 的「☆ 标记掌握」乐观去下划线经此调用(PDF 字符层专属;EPUB 走 __epubDeco.optimisticMaster)。
+try { window.__pdfDropVocabUnderline = _dropVocabUnderlineOptimistic; } catch (_) {}
 
 if (!window.__uiShared) {
 window._wordPopMaster = (btn) => {

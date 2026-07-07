@@ -431,31 +431,48 @@
     if (_isJaWord(word)) dictStreamJP(word, ctx);
     else dictStream(word, ctx);
   };
-  // 「掌握」toggle(日英统一):未掌握 ↔ 掌握 100 来回切,不关框。掌握→该词不再标生词下划线(EPUB 由 onMastered 接)。
+  function _paintMasterBtn(btn, on) {
+    if (!btn) return;
+    btn.textContent = on ? '✓ 已掌握 100' : '☆ 标记掌握';
+    btn.title = on ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
+    btn.classList.toggle('wp-anki', on);
+  }
+  // 「掌握」toggle(日英统一):未掌握 ↔ 掌握 100 来回切,不关框。掌握→该词不再标生词下划线。
+  // 乐观 UI(大厂标配):点击瞬间就翻按钮态 + 去下划线,不等服务端往返;失败再回滚。
+  //   之前共享版把按钮翻转/去下划线全塞进 POST 的 .then → PDF 下点了要干等服务端写库+重算,体感很慢(回归)。
   window._wordPopMaster = function (btn) {
     var s = _wordPopState; if (!s) return;
+    if (btn && btn.__busy) return;   // 同一按钮请求未回前不叠加(状态已乐观翻转,再点会乱)
     var next = !s.mastered;
+    var prev = s.mastered;
     var w = s.lemma || s.word;
     var url = s.jp ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
     var mark = next ? 'known' : 'unknown';   // 日英统一口径
-    if (btn) btn.disabled = true;
-    // 乐观 UI:标掌握时立刻去掉该词生词下划线(不等服务端),失败再恢复(对照 PDF 乐观下划线)。
+    // ① 立刻乐观:翻按钮 + 同步缓存 + 去下划线(PDF 字符层 / EPUB deco)
+    s.mastered = next;
+    try { var c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}
+    _paintMasterBtn(btn, next);
     var _restoreUnd = null;
-    if (next) { try { if (window.__epubDeco && __epubDeco.optimisticMaster) _restoreUnd = __epubDeco.optimisticMaster(w); } catch (_) {} }
+    if (next) {
+      try { if (window.__pdfDropVocabUnderline) _restoreUnd = window.__pdfDropVocabUnderline(s); } catch (_) {}          // PDF 字符层
+      try { if (!_restoreUnd && window.__epubDeco && __epubDeco.optimisticMaster) _restoreUnd = __epubDeco.optimisticMaster(w); } catch (_) {}   // EPUB
+    }
+    // ② 后台落库,回来只做权威校正 / 失败回滚
+    if (btn) btn.__busy = true;
     RC.reqJson('POST', url, { word: w, mark: mark }).then(function (d) {
+      if (btn) btn.__busy = false;
       if (d && d.ok === false) throw new Error(d.error || 'fail');
-      s.mastered = next;
-      try { var c = _dictCache.get(s.word); if (c) c.mastered = next; } catch (_) {}   // 同步缓存,再点不显旧掌握态
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = s.mastered ? '✓ 已掌握 100' : '☆ 标记掌握';
-        btn.title = s.mastered ? '点击取消掌握（恢复生词下划线）' : '标记掌握 100（下划线消失）';
-        btn.classList.toggle('wp-anki', s.mastered);
-      }
-      _refreshUnderlines();
+      _refreshUnderlines();   // 服务端权威(掌握列表变了 → 重算下划线)
       try { if (_ctx.onMastered) _ctx.onMastered(w); } catch (_) {}
-      RC.toast(s.mastered ? '已掌握 100，下划线消失' : '已设为未掌握');
-    }).catch(function () { if (_restoreUnd) { try { _restoreUnd(); } catch (_) {} } if (btn) btn.disabled = false; RC.toast('标记失败'); });
+      RC.toast(next ? '已掌握 100，下划线消失' : '已设为未掌握');
+    }).catch(function () {
+      if (btn) btn.__busy = false;
+      s.mastered = prev;
+      try { var c2 = _dictCache.get(s.word); if (c2) c2.mastered = prev; } catch (_) {}
+      _paintMasterBtn(btn, prev);
+      if (_restoreUnd) { try { _restoreUnd(); } catch (_) {} }
+      RC.toast('标记失败');
+    });
   };
   // 核心框「🎴 Anki」:读 _wordPopState 避开 onclick 引号转义,直接复用完整框的 addVocabAnki。
   window._wordPopAnki = function () { var s = _wordPopState; if (!s) return; window.addVocabAnki(s.lemma || s.word); };
