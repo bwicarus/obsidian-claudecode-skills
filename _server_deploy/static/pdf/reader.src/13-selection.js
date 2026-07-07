@@ -456,6 +456,12 @@ document.addEventListener('mouseup', (e) => {
   const p = d.ptToLocal(e.clientX, e.clientY);
   d.onEnd(p.x, p.y);
 });
+// 安全网:任何指针松开/取消 → 全局恢复呼吸高亮 .hl 可点。onStart 拖选时给它们置了 inline pointer-events:none,
+// 但 onEnd 只恢复"起点页"那份(_charSel.pw!==pw 提前 return);跨页松手/中断手势会让别页 solid 词组高亮残留 none →
+// 点它穿透到 char-layer =「点了不弹」。这里兜底清掉所有页的残留 none(只在手势结束时跑,不影响进行中的拖选)。
+['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, () => {
+  document.querySelectorAll(_OVL_HL_SEL).forEach(el => { if (el.style.pointerEvents === 'none') el.style.pointerEvents = ''; });
+}, true));
 
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {

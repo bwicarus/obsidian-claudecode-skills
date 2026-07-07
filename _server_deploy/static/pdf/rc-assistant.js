@@ -1110,14 +1110,13 @@
       if (i < 0) return;
       var rects = _charRangeToPtRects(chars, i, i + text.length - 1);   // 起止含端点(同 _showPhraseHighlight 的 startIdx..endIdx)
       if (!rects.length) return;
-      document.querySelectorAll('.phrase-hl-layer').forEach(function (l) { l.remove(); });   // 清别页残留(同 _showPhraseHighlight)
-      HOST.setActivePhraseHl({ page: page, text: text, rects: rects, solid: false });
+      HOST.setActivePhraseHl({ page: page, text: text, rects: rects, solid: false });   // 追加临时闪烁高亮(多高亮:不清别的并存高亮)
       renderPhraseHl(wrap);
-      var mine = HOST.activePhraseHl();
-      var first = wrap.querySelector('.phrase-hl-layer .hl');
+      var mine = HOST.activePhraseHl();   // = 刚 push 的那个(带 id)
+      var first = wrap.querySelector('.phrase-hl-layer[data-phid="' + (mine && mine.id) + '"] .hl');
       if (first) { try { first.scrollIntoView({ block: 'center' }); } catch (_) {} }
       clearTimeout(_ctxSelFlashT);
-      _ctxSelFlashT = setTimeout(function () { if (HOST.activePhraseHl() === mine) { try { _removePhraseHighlight(); } catch (_) {} } }, 5000);
+      _ctxSelFlashT = setTimeout(function () { try { _removePhraseHighlight(mine); } catch (_) {} }, 5000);   // 5s 后只删这个临时高亮(幂等;被点掉/换书已删则 no-op)
     } catch (_) {}
   }
   // open_book 工具的 client_action 用:打开另一本书(可定位页)

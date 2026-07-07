@@ -713,14 +713,13 @@
       if (i < 0) return;
       var rects = _charRangeToPtRects(chars, i, i + text.length - 1);   // 起止含端点(同 _showPhraseHighlight 的 startIdx..endIdx)
       if (!rects.length) return;
-      document.querySelectorAll('.phrase-hl-layer').forEach(function (l) { l.remove(); });   // 清别页残留(同 _showPhraseHighlight)
-      _activePhraseHl = { page: page, text: text, rects: rects, solid: false };
+      var mine = { id: ++_phraseHlSeq, page: page, text: text, rects: rects, solid: false };
+      _phraseHls.push(mine);   // 追加一个临时闪烁高亮(多高亮:不清别的)
       renderPhraseHl(wrap);
-      var mine = _activePhraseHl;
-      var first = wrap.querySelector('.phrase-hl-layer .hl');
+      var first = wrap.querySelector('.phrase-hl-layer[data-phid="' + mine.id + '"] .hl');
       if (first) { try { first.scrollIntoView({ block: 'center' }); } catch (_) {} }
       clearTimeout(_ctxSelFlashT);
-      _ctxSelFlashT = setTimeout(function () { if (_activePhraseHl === mine) { try { _removePhraseHighlight(); } catch (_) {} } }, 5000);
+      _ctxSelFlashT = setTimeout(function () { if (_phraseHls.indexOf(mine) >= 0) { try { _removePhraseHighlight(mine); } catch (_) {} } }, 5000);
     } catch (_) {}
   }
   // open_book 工具的 client_action 用:打开另一本书(可定位页)

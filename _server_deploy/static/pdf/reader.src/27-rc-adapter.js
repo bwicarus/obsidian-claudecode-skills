@@ -80,10 +80,10 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0, x: (x - r.left) / r.width, y: (y - r.top) / r.height };
     },
     // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
-    phraseHighlight: () => { try { _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) {} },
-    phraseSolid: () => { try { if (_activePhraseHl) { _activePhraseHl.solid = true; document.querySelector('.phrase-hl-layer')?.classList.remove('breathe'); } } catch (_) {} },
+    phraseHighlight: () => { try { return _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) { return null; } },   // 返回本高亮 → onSolid 精确标它(并发多查询各标各的)
+    phraseSolid: (hl) => { try { if (!hl) return; hl.solid = true; const _l = document.querySelector('.phrase-hl-layer[data-phid="' + hl.id + '"]'); if (_l) { _l.classList.remove('breathe'); _l.querySelectorAll('.hl').forEach(el => el.style.pointerEvents = 'auto'); } } catch (_) {} },   // 不回退标"最后一个"(并发查询会误标最新那个)
     phraseRefresh: () => { try { refreshCharsWForAllPages(); } catch (_) {} },
-    removePhraseHighlight: () => { try { _removePhraseHighlight(); } catch (_) {} },
+    removePhraseHighlight: (arg) => { try { _removePhraseHighlight(arg); } catch (_) {} },
     // 词组框「💡 解释」→ 复用 PDF onExplain(它自身也被门控,共享模式下转 rc-result)。
     onExplain: () => { try { window.onExplain && window.onExplain(); } catch (_) {} },
     // 阶段2(补丁):「解释」的琥珀色呼吸高亮 + 后台跑 + 点高亮才开面板 —— 100% 原样复用 PDF 原生
@@ -141,9 +141,9 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       showHlPicker: (d) => { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },
       assistEdit: (d) => { try { window._assistEdit && window._assistEdit(d); } catch (_) {} },
       renderPhraseHl: (w) => { try { if (typeof renderPhraseHl === 'function') renderPhraseHl(w); } catch (_) {} },
-      removePhraseHighlight: () => { try { if (typeof _removePhraseHighlight === 'function') _removePhraseHighlight(); } catch (_) {} },
-      activePhraseHl: () => { try { return typeof _activePhraseHl !== 'undefined' ? _activePhraseHl : null; } catch (_) { return null; } },
-      setActivePhraseHl: (v) => { try { _activePhraseHl = v; } catch (_) {} },   // ②b:侧栏 _flashSelOnPage 写共享词组高亮状态(搬进共享层后经此 setter 回写 reader 作用域)
+      removePhraseHighlight: (arg) => { try { if (typeof _removePhraseHighlight === 'function') _removePhraseHighlight(arg); } catch (_) {} },
+      activePhraseHl: () => { try { return _phraseHls.length ? _phraseHls[_phraseHls.length - 1] : null; } catch (_) { return null; } },   // 多高亮:返回最近一个
+      setActivePhraseHl: (v) => { try { if (v) { if (v.id == null) v.id = ++_phraseHlSeq; _phraseHls.push(v); } } catch (_) {} },   // ②b:侧栏 _flashSelOnPage 追加一个高亮(不再覆盖单例)
       charsRangeToText: (ch, a, b) => { try { return _charsRangeToText(ch, a, b); } catch (_) { return ''; } },
       charRangeToPtRects: (ch, a, b) => { try { return _charRangeToPtRects(ch, a, b); } catch (_) { return []; } },
       flashSelOnPage: (p, t) => { try { if (typeof _flashSelOnPage === 'function') _flashSelOnPage(p, t); } catch (_) {} },

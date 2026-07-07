@@ -14,7 +14,8 @@ window.onPhrase = () => {
 // 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、
 // 持续呼吸；不受点别处影响(独立层)。平时选中=普通选中(点别处照常消失)，这里不参与。
 let _phraseHlTimer = null;
-let _activePhraseHl = null;   // {page, text, rects:[[x0,y0,x1,y1]pt...]}
+let _phraseHls = [];          // 多个词组高亮并存 [{id,page,text,rects:[[x0,y0,x1,y1]pt...],solid}](原单例 _activePhraseHl → 数组)
+let _phraseHlSeq = 0;
 function _charRangeToPtRects(chars, s, e) {
   if (s > e) { const t = s; s = e; e = t; }
   // 块过滤:跟选中预览(_selByCharRange)/句子构造(_buildSentenceFromSel)严格一致——排序后选区首尾之间
@@ -37,42 +38,58 @@ function _charRangeToPtRects(chars, s, e) {
   return rects;
 }
 function renderPhraseHl(pw) {
-  pw.querySelector('.phrase-hl-layer')?.remove();
-  const a = _activePhraseHl;
-  if (!a || !a.rects || !a.rects.length) return;
-  if (parseInt(pw.dataset.pageNum || '0', 10) !== a.page) return;
+  pw.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());   // 清本页所有旧层,按 state 重建(多高亮)
+  const pn = parseInt(pw.dataset.pageNum || '0', 10);
+  const mine = _phraseHls.filter(a => a.page === pn && a.rects && a.rects.length);
+  if (!mine.length) return;
   const canvas = pw.querySelector('canvas');
   const cssW = canvas?.clientWidth || pw.clientWidth, cssH = canvas?.clientHeight || pw.clientHeight;
   const pageWPt = pw.__pageWPt || cssW, pageHPt = pw.__pageHPt || cssH;
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
-  const layer = document.createElement('div');
-  layer.className = 'phrase-hl-layer' + (a.solid ? '' : ' breathe');   // 查询中呼吸；出结果转常亮(a.solid)保持
-  for (const r of a.rects) {
-    const d = document.createElement('div'); d.className = 'hl';
-    d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
-    d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
-    layer.appendChild(d);
+  for (const a of mine) {
+    const layer = document.createElement('div');
+    layer.className = 'phrase-hl-layer' + (a.solid ? '' : ' breathe');   // 查询中呼吸；出结果转常亮(a.solid)保持
+    layer.dataset.phid = a.id;   // 用 id 定位本高亮的层(删除/转常亮只动自己那份)
+    for (const r of a.rects) {
+      const d = document.createElement('div'); d.className = 'hl';
+      d.style.left = (r[0] * sx) + 'px'; d.style.top = (r[1] * sy) + 'px';
+      d.style.width = ((r[2] - r[0]) * sx) + 'px'; d.style.height = ((r[3] - r[1]) * sy) + 'px';
+      d.style.pointerEvents = 'auto';   // 显式抵消拖选残留的 inline pointer-events:none(否则 solid 高亮"点了不弹")
+      layer.appendChild(d);
+    }
+    // 点高亮：只删这一个高亮 + 重新弹出该词组的翻译小框（不再建新高亮）
+    layer.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const txt = a.text;
+      // 用高亮自身的屏幕矩形做锚点:重弹时原选区 .sel-overlay 早已清空 → _rectFromSel 退化成零尺寸页顶矩形,
+      //   页面下滚后页顶为负 → 弹框定位到视口上方屏外 = 「点了不弹」。用高亮 rect 就锚在用户点的位置。
+      let anchorRect = null;
+      try {
+        let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
+        layer.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
+        if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
+      } catch (_) {}
+      _removePhraseHighlight(a);
+      showPhrasePopover(txt, {noHighlight: true, rect: anchorRect});
+    });
+    pw.appendChild(layer);
   }
-  // 点高亮：高亮消失 + 重新弹出该词组的翻译小框（不再建新高亮）
-  layer.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const txt = (_activePhraseHl && _activePhraseHl.text) || a.text;
-    // 用高亮自身的屏幕矩形做锚点:重弹时原选区 .sel-overlay 早已清空 → _rectFromSel 退化成零尺寸页顶矩形,
-    //   页面下滚后页顶为负 → 弹框定位到视口上方屏外 = 「点了不弹」。用高亮 rect 就锚在用户点的位置。
-    let anchorRect = null;
-    try {
-      let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
-      layer.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
-      if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
-    } catch (_) {}
-    _removePhraseHighlight();
-    showPhrasePopover(txt, {noHighlight: true, rect: anchorRect});
-  });
-  pw.appendChild(layer);
 }
-function _removePhraseHighlight() {
-  _activePhraseHl = null;
+// arg=高亮对象→只删它;arg=字符串→删所有同文本(收藏该词组后);arg 空→全清(换书/大跳转)
+function _removePhraseHighlight(arg) {
+  if (arg && typeof arg === 'object') {
+    _phraseHls = _phraseHls.filter(a => a !== arg);
+    document.querySelectorAll('.phrase-hl-layer[data-phid="' + arg.id + '"]').forEach(l => l.remove());
+    return;
+  }
+  if (typeof arg === 'string' && arg) {
+    const gone = _phraseHls.filter(a => a.text === arg);
+    _phraseHls = _phraseHls.filter(a => a.text !== arg);
+    gone.forEach(a => document.querySelectorAll('.phrase-hl-layer[data-phid="' + a.id + '"]').forEach(l => l.remove()));
+    return;
+  }
+  _phraseHls = [];
   clearTimeout(_phraseHlTimer);
   document.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());
 }
@@ -82,11 +99,11 @@ function _showPhraseHighlight(pw) {
   if (!text) return null;
   const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
   if (!rects.length) return null;
-  document.querySelectorAll('.phrase-hl-layer').forEach(l => l.remove());   // 清掉别页残留的旧高亮
-  _activePhraseHl = {page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects, solid: false};
+  const hl = {id: ++_phraseHlSeq, page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects, solid: false};
+  _phraseHls.push(hl);   // 追加,不清旧的 → 多个词组高亮并存
   const sel = pw.querySelector('.sel-overlay'); if (sel) sel.innerHTML = '';   // 移交持久层，避免双重高亮
   renderPhraseHl(pw);
-  return true;
+  return hl;   // 返回本高亮,供 phraseSolid 精确标常亮(并发多查询各标各的)
 }
 // ──────── 解释高亮（与词组高亮平行：独立琥珀色，可与词组高亮共存）────────
 // 设计:点「解释」**不开面板**,只在选区建一个**一直闪烁**的高亮,AI 在后台跑;
@@ -178,7 +195,8 @@ async function _showPhrasePopoverNative(text, opts) {
   _positionWordPop(pop);
   // **点了词组按钮**才把当前选区变持久呼吸高亮（查询中呼吸→出结果常亮保持，点高亮才消失）。
   // 点高亮重新弹框时 opts.noHighlight=true → 只弹框、不再建新高亮。
-  if (_wordPopState.phrase && !(opts && opts.noHighlight)) _showPhraseHighlight(_charSel && _charSel.pw);
+  let _nativePhl = null;
+  if (_wordPopState.phrase && !(opts && opts.noHighlight)) _nativePhl = _showPhraseHighlight(_charSel && _charSel.pw);
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const isJa = _isJaWord(text);
   _wordPopState.jp = isJa;   // 掌握按钮按语言分流 store(jp-vocab-mark / vocab-mark)
@@ -196,9 +214,10 @@ async function _showPhrasePopoverNative(text, opts) {
     }
   } catch (_) {}
   // 出结果 → 停呼吸转常亮**保持**（不移除）；只有点高亮本身才消失
-  if (_activePhraseHl) {
-    _activePhraseHl.solid = true;
-    document.querySelector('.phrase-hl-layer')?.classList.remove('breathe');
+  if (_nativePhl) {
+    _nativePhl.solid = true;
+    const _l = document.querySelector('.phrase-hl-layer[data-phid="' + _nativePhl.id + '"]');
+    if (_l) { _l.classList.remove('breathe'); _l.querySelectorAll('.hl').forEach(el => el.style.pointerEvents = 'auto'); }
   }
   _wordPopState.reading = reading;
   const phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
@@ -230,7 +249,7 @@ window._phraseFav = (btn) => {
       const nowFav = _phraseFavSet.has(t);
       if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
       _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
-      if (nowFav) _removePhraseHighlight();   // 收藏后该词组变成划线(分词单元),呼吸查询高亮自动消除
+      if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
       refreshCharsWForAllPages();   // 让分词合并立即生效
     } else if (btn) { btn.disabled = false; }
   }).catch(() => { if (btn) btn.disabled = false; });

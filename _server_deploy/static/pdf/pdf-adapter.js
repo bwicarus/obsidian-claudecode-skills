@@ -173,14 +173,15 @@
       //   pw 零尺寸页顶矩形 → 下滚后弹框跑到视口上方屏外 =「点了不弹」。重弹时 opts.anchorRect(高亮屏幕矩形)优先。
       var cs = h && h.charSel && h.charSel();
       var rect = opts.anchorRect || _rectFromSel(cs);
-      if (h && h.phraseHighlight && !opts.noHighlight) { try { h.phraseHighlight(); } catch (e) {} }
+      var phl = null;   // 本次查询创建的高亮 → onSolid 精确标它常亮(并发多查询各标各的);onFav 精确删它
+      if (h && h.phraseHighlight && !opts.noHighlight) { try { phl = h.phraseHighlight(); } catch (e) {} }
       RC.phrasepop.show({
         text: text,
         rect: rect,
         file: (h && h.fileRel && h.fileRel()) || '',
         langs: (h && h.bookLangs && h.bookLangs()) || [],
-        onSolid: function () { if (h && h.phraseSolid) { try { h.phraseSolid(); } catch (e) {} } },
-        onFav: function (t, nowFav) { if (!h) return; try { if (nowFav && h.removePhraseHighlight) h.removePhraseHighlight(); if (h.phraseRefresh) h.phraseRefresh(); } catch (e) {} },
+        onSolid: function () { if (h && h.phraseSolid) { try { h.phraseSolid(phl); } catch (e) {} } },
+        onFav: function (t, nowFav) { if (!h) return; try { if (nowFav && h.removePhraseHighlight) h.removePhraseHighlight(phl || t); if (h.phraseRefresh) h.phraseRefresh(); } catch (e) {} },
         onMastered: function (t, mastered) { if (h && h.phraseRefresh) { try { h.phraseRefresh(); } catch (e) {} } },
         onExplain: function (t) { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } }
       });
