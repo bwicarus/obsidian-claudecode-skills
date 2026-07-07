@@ -462,6 +462,11 @@ document.addEventListener('mouseup', (e) => {
 ['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(ev => document.addEventListener(ev, () => {
   document.querySelectorAll(_OVL_HL_SEL).forEach(el => { if (el.style.pointerEvents === 'none') el.style.pointerEvents = ''; });
 }, true));
+// document 级 touchstart 无条件记 _clLastTouchAt:char-layer 的「touch 后 700ms 忽略 iOS 合成 mousedown」守卫
+// 原本只在 touch 落在 char-layer 自身时才更新时间戳;touch 落在**覆盖层**(词组/查词高亮 .hl 等,char-layer 的兄弟,
+// 冒泡不到 char-layer)时守卫失效 → 点词组高亮后 handler 删掉 .hl,~300ms 后合成 mousedown 穿到 char-layer →
+// 误查手指下的词(A/B 缓存秒弹)覆盖词组框。这里任何 touch 都记时间戳,守卫就覆盖到覆盖层上的点击。
+document.addEventListener('touchstart', () => { try { window._clLastTouchAt = Date.now(); } catch (_) {} }, true);
 
 function _bindCharLayer(cl, pw) {
   const ptToLocal = (clientX, clientY) => {
