@@ -1391,6 +1391,18 @@
     if (streaming) return;
     text = (text || '').trim();
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
+    // 「书页」点暗(rcNoBook)= 用户要脱离这本书问通用问题 → 书本定位/内容一律不带:
+    //   ① 后端收 no_book 当通用助手 ② 章/页/选中/视口文字/图/便签全剥掉 → _ctxCard 不再渲染「正在看 §X」误导条
+    //   (用户反馈:关了书页下方仍写「正在看…」)。仅影响本次发送;历史里旧消息的 chip 是当时事实,不动。
+    try {
+      if (window.rcNoBook && window.rcNoBook()) {
+        sentCtx.no_book = true;
+        delete sentCtx.current_section_idx; delete sentCtx.section;
+        delete sentCtx.selection; delete sentCtx.selection_sentence; delete sentCtx.selection_anchor;
+        delete sentCtx.visible_text; delete sentCtx.focus_sel;
+        sentCtx.page = 0; sentCtx.figures = []; sentCtx.notes = [];
+      }
+    } catch (e) {}
     // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
     // (用户反馈:选中悄悄跟着每条消息发,但上方没有那个带 x 的框,无法取消)
     try { if (!(window.__focusSel && window.__focusSel.text) && sentCtx.selection && sentCtx.selection.trim() && window.__setFocusSel) HOST.setFocusSel(sentCtx.selection, 'text'); } catch (_) {}
