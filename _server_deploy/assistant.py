@@ -1190,10 +1190,9 @@ def _t_search_image(args, ctx):
             "image_url": res["image_url"], "page_url": res.get("page_url", "")}
 
 
-def _optimize_video_query(topic):
-    """把用户想看的主题 → **一个优质 YouTube 搜索关键词**(便宜 Gemini Flash)。
-    用户报『直接拿原句搜、结果质量太差』的根治:学术/机制类优先英文+教学词(命中 Khan/科普动画那类高质量讲解),
-    通俗/文化类用中文。失败返回 None(调用方退回原词)。"""
+def _optimize_video_query(topic, r=None):
+    """把用户想看的主题 → **一个优质 YouTube 搜索关键词**(用 pick_video 那档模型,默认便宜 Gemini Flash)。
+    学术/机制类优先英文+教学词(命中 Khan/科普动画那类高质量讲解),通俗/文化类用中文。失败返回 None(调用方退回原词)。"""
     try:
         prompt = (
             "用户在读书,想在 YouTube 找**讲解**下面这个主题的视频:\n「" + str(topic)[:200] + "」\n\n"
@@ -1206,7 +1205,9 @@ def _optimize_video_query(topic):
             "- 只保留**核心概念**,别照抄整句、别加书名/章节号/作者名。\n"
             "**只输出这一个关键词本身(一行),不要引号、不要解释、不要给多个选项。**"
         )
-        out = (_gemini_text(prompt, max_tokens=120, think=False, timeout=20) or "").strip()
+        out = (_deep_ask(prompt, backend=r["backend"], variant=r["variant"], depth="none", timeout=20)
+               if r else _gemini_text(prompt, max_tokens=120, think=False, timeout=20)) or ""
+        out = out.strip()
         if out:
             out = out.splitlines()[0].strip().strip('「」""\'` ')
         return out[:120] or None
@@ -1214,13 +1215,46 @@ def _optimize_video_query(topic):
         return None
 
 
+def _filter_relevant_videos(topic, vids, r):
+    """搜到候选后再让 AI 按相关性筛一遍(标题+频道+描述节选):明显跑题/低质的剔除,返回保留子集(保序,≥1)。
+    只用搜索一次就免费带回的元数据(标题/频道/描述),不额外拉每个视频的字幕(6 个逐一拉太慢太贵)。失败→原样不筛。"""
+    try:
+        if len(vids) <= 1:
+            return vids
+        lines = "\n".join(
+            f"[{i+1}] {v.get('title','')} · 频道:{v.get('channel','')}" +
+            (f" · 简介:{(v.get('desc') or '')[:140]}" if v.get('desc') else "")
+            for i, v in enumerate(vids))
+        prompt = (
+            "用户在读书,想找**讲解「" + str(topic)[:160] + "」**的视频。下面是 YouTube 搜到的候选:\n" + lines + "\n\n"
+            "请判断每个是否**真的在讲这个主题**、是不是像样的讲解/教学视频(剔除:明显跑题、只是提到、纯娱乐/引流、片段混剪、标题党)。\n"
+            "**只输出要保留的编号**,按相关度从高到低用逗号分隔(例:3,1,5)。至少保留 1 个;若全部明显跑题才输出 none。\n"
+            "只输出编号或 none,不要解释。")
+        out = (_deep_ask(prompt, backend=r["backend"], variant=r["variant"], depth="none", timeout=25) or "").strip()
+        if not out or "none" in out.lower():
+            return vids[:3]   # 全跑题/无输出 → 兜底给前 3,不留空
+        import re as _re
+        keep_idx, seen = [], set()
+        for m in _re.finditer(r"\d+", out):
+            k = int(m.group()) - 1
+            if 0 <= k < len(vids) and k not in seen:
+                seen.add(k); keep_idx.append(k)
+        picked = [vids[k] for k in keep_idx] or vids[:3]
+        return picked[:6]
+    except Exception:
+        return vids
+
+
 def _t_search_video(args, ctx):
     """搜教学视频(YouTube)并在对话里渲染**可播放**卡片。只在用户明确要『找视频/看视频讲解/有没有视频』时用,
-    别对每个概念都配视频。args {query?}(传**核心主题**即可,工具内部会自动优化成优质搜索词——学术类会转英文教学词)。"""
+    别对每个概念都配视频。args {query?}(传**核心主题**即可)。工具内部:AI 拟优质搜索词 → 搜 → AI 按相关性筛掉跑题的。"""
     q = (args.get("query") or "").strip() or (ctx.get("selection") or "").strip() or (ctx.get("focus_text") or "").strip()
     if not q:
         return {"error": "缺 query(要搜什么视频)"}
-    search_q = _optimize_video_query(q[:200]) or q[:120]   # AI 拟优质搜索词;失败退原词
+    r = _resolve("pick_video", ctx.get("_uid"))
+    if _paid_recover_check(ctx.get("_uid"), "pick_video"):   # @paid 且免费恢复 → 摘除后重读(静默)
+        r = _resolve("pick_video", ctx.get("_uid"))
+    search_q = _optimize_video_query(q[:200], r) or q[:120]   # AI 拟优质搜索词;失败退原词
     try:
         import youtube_search
         res = youtube_search.search(search_q, max_results=6)
@@ -1228,12 +1262,15 @@ def _t_search_video(args, ctx):
         return {"error": str(e)[:120]}
     if not res.get("ok"):
         return {"error": res.get("error") or "没搜到视频"}
-    vids = res["videos"]
-    return {"ok": True, "count": len(vids), "query_used": search_q,
+    raw = res["videos"]
+    vids = _filter_relevant_videos(q, raw, r)   # 搜后 AI 相关性筛选(剔除跑题的,只渲染留下的)
+    dropped = len(raw) - len(vids)
+    return {"ok": True, "count": len(vids), "query_used": search_q, "dropped": dropped,
             # 只把标题/频道回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
             "videos": [{"title": v.get("title", ""), "channel": v.get("channel", "")} for v in vids],
             "client_action": {"fn": "renderVideos", "args": [vids]},
-            "_note": "视频卡片已在对话里渲染、用户可直接点开播放。你只需简短说一句『给你找到这些视频』(可提一句用的搜索词),别复述标题/链接。"}
+            "_gen_model": f"{_variant_short(r['variant'])}·{r['depth']}", "_gen_action": "pick_video",
+            "_note": "视频卡片已渲染(已按相关性筛过、剔除跑题的),用户可直接点开。简短说一句『给你找到这些视频』(可提搜索词/筛掉了几个),别复述标题/链接。"}
 
 
 def _t_lookup_word(args, ctx):
@@ -2698,7 +2735,7 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "explain", "translate", "dict", "grammar")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "explain", "translate", "dict", "grammar", "pick_video")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
@@ -2708,10 +2745,11 @@ _AP_DEFAULTS = {
     "translate":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},
     "dict":         {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "grammar":      {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},   # 2026-07 从 explain 拆出
+    "pick_video":   {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},   # 找视频:拟搜索词 + 搜后按相关性筛选(便宜 flash 够用)
 }
 _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",
-    "grammar": "语法分析(长句结构 / 语法点)",
+    "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
 }
 _VARIANT_SHORT = {"gemini-flash-latest": "flash-latest", "gemini-pro-latest": "pro-latest",
                   "gemini-3.5-flash": "3.5-flash", "gemini-3.1-flash-lite": "3.1-lite",

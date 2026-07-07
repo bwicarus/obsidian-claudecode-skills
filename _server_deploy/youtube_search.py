@@ -89,7 +89,8 @@ def search(query: str, max_results: int = 6, lang: str = None) -> dict:
         th = sn.get("thumbnails") or {}
         thumb = (th.get("medium") or th.get("high") or th.get("default") or {}).get("url", "")
         vids.append({"id": vid, "title": sn.get("title", ""),
-                     "channel": sn.get("channelTitle", ""), "thumb": thumb})
+                     "channel": sn.get("channelTitle", ""), "thumb": thumb,
+                     "desc": (sn.get("description") or "")[:300]})   # 描述节选(search snippet 免费带,供 AI 判断相关性)
     if not vids:
         return {"ok": False, "error": "没搜到可嵌入的视频,换个关键词"}
     try:
