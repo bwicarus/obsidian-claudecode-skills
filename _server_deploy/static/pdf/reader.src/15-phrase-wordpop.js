@@ -62,25 +62,38 @@ function renderPhraseHl(pw) {
       d.style.pointerEvents = 'auto';   // 显式抵消拖选残留的 inline pointer-events:none(否则 solid 高亮"点了不弹")
       layer.appendChild(d);
     }
-    // 点高亮：只删这一个高亮 + 重新弹出该词组的翻译小框（不再建新高亮）
-    layer.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const txt = a.text;
-      // 用高亮自身的屏幕矩形做锚点:重弹时原选区 .sel-overlay 早已清空 → _rectFromSel 退化成零尺寸页顶矩形,
-      //   页面下滚后页顶为负 → 弹框定位到视口上方屏外 = 「点了不弹」。用高亮 rect 就锚在用户点的位置。
-      let anchorRect = null;
-      try {
-        let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
-        layer.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
-        if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
-      } catch (_) {}
-      const res = a.result || null;   // 查询期已把结果存到高亮上 → 点击秒开,不重新 fetch
-      _removePhraseHighlight(a);
-      showPhrasePopover(txt, {noHighlight: true, rect: anchorRect, result: res});
-    });
+    // 点高亮 → 弹词组框(.hl 命中时走这里;若因 pointer-events 残留穿透到 char-layer,由 char-layer 几何命中 → __readerHlTap 派发,同一函数)
+    layer.addEventListener('click', (e) => { e.stopPropagation(); _openPhraseFromHl(a, layer); });
     pw.appendChild(layer);
   }
 }
+// 打开某词组高亮的结果框:锚点用高亮自身屏幕矩形(先算再删高亮,防原选区已清导致定位屏外),已存结果秒开。
+function _openPhraseFromHl(a, layer) {
+  if (!a) return;
+  const scope = layer || document.querySelector('.phrase-hl-layer[data-phid="' + a.id + '"]');
+  let anchorRect = null;
+  try {
+    let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
+    if (scope) scope.querySelectorAll('.hl').forEach(h => { const r = h.getBoundingClientRect(); if (r.width || r.height) { L = Math.min(L, r.left); T = Math.min(T, r.top); R = Math.max(R, r.right); B = Math.max(B, r.bottom); } });
+    if (L < Infinity) anchorRect = { left: L, top: T, right: R, bottom: B, width: R - L, height: B - T };
+  } catch (_) {}
+  const res = a.result || null;   // 查询期已把结果存到高亮上 → 点击秒开,不重新 fetch
+  _removePhraseHighlight(a);
+  showPhrasePopover(a.text, { noHighlight: true, rect: anchorRect, result: res });
+}
+// char-layer 几何命中覆盖层高亮后派发(根治:点击归属由 char-layer 统一裁决,不靠 pointer-events 抢占)。
+// hit={kind:'phrase'|'word'|'explain', layer, el}。phrase 完整派发;word/explain 暂只"不查词"(避免弹错词框),后续接各自重开。
+window.__readerHlTap = function (pw, hit) {
+  try {
+    if (!hit || !hit.kind) return;
+    if (hit.kind === 'phrase') {
+      const phid = hit.layer && hit.layer.dataset ? hit.layer.dataset.phid : null;
+      const a = _phraseHls.find(h => String(h.id) === String(phid));
+      if (a) _openPhraseFromHl(a, hit.layer);
+    }
+    // word/explain:命中即"让路"(char-layer 不再误查手指下的字);其重开由各自 .hl 的原生 handler 兜(正常态 pointer-events:auto 时)
+  } catch (_) {}
+};
 // arg=高亮对象→只删它;arg=字符串→删所有同文本(收藏该词组后);arg 空→全清(换书/大跳转)
 function _removePhraseHighlight(arg) {
   if (arg && typeof arg === 'object') {

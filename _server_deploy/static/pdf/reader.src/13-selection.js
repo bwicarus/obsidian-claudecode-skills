@@ -1,5 +1,21 @@
 // 拖选期间要临时禁点的呼吸高亮 .hl（查词/词组/解释）——防拖选经过它们被截获(丢 move/up + 误弹)
 const _OVL_HL_SEL = '.word-hl-layer .hl, .phrase-hl-layer .hl, .explain-hl-layer .hl';
+// 根治点击归属:char-layer 收到每次点击后,用**几何**命中(getBoundingClientRect,与 .hl 的 pointer-events 状态无关)
+// 判断是否落在查询高亮(词组/查词/解释)上。命中 → 交给该高亮动作(不选字/不查词);否则正常选字。
+// 这是"状态无关的裁决",不依赖 pointer-events 抢占 → 根除"穿透到 char-layer 误查手指下的字"整类 bug。
+function _overlayHlHitAtClient(pw, cx, cy) {
+  const hls = pw.querySelectorAll(_OVL_HL_SEL);
+  for (let i = hls.length - 1; i >= 0; i--) {   // 逆序:后插入(DOM 靠后)= z:6 平级里视觉在上,先命中它
+    const r = hls[i].getBoundingClientRect();
+    if (r.width && r.height && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
+      const layer = hls[i].closest('.phrase-hl-layer, .word-hl-layer, .explain-hl-layer');
+      const kind = !layer ? '' : (layer.classList.contains('phrase-hl-layer') ? 'phrase'
+        : layer.classList.contains('explain-hl-layer') ? 'explain' : 'word');
+      return { kind, layer, el: hls[i] };
+    }
+  }
+  return null;
+}
 
 // ⚡ charBoxes 的像素坐标是 loadCharsAndBindLayer 当时的 scale 烘焙的;refit/双页切换等竞态后
 // 可能与当前显示尺寸脱节(实测 応用情報 p37 偏 19% → 页面右缘/底部整片点不中,而振假名/下划线
@@ -437,6 +453,7 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 let _dragStartCharIdx = null, _dragMoved = false, _dragStartXY = null, _fromLBtn = false;
+let _hlTapPending = null;   // {pw,hit,x,y}:本次按下落在查询高亮上 → 松手(未拖动)时派发该高亮动作,不查词
 let _dragDir = null;   // 触摸拖动首次动够时锁定:'scroll'(竖直为主→翻页) / 'select'(水平为主→选字)
 let _swipeStart = null;   // 单页模式：起点在空白处的横滑 → 翻页（起点在字上仍走拖选）
 let _lastClickCharIdx = -1, _lastClickTime = 0, _clickCount = 0;
@@ -456,6 +473,17 @@ document.addEventListener('mouseup', (e) => {
   const p = d.ptToLocal(e.clientX, e.clientY);
   d.onEnd(p.x, p.y);
 });
+// 覆盖层高亮点击派发:onStart 几何命中后记 _hlTapPending;这里在**松手**(pointerup,触摸+鼠标通用)派发该高亮动作,
+//   移动超阈值(pointermove)则取消(视作拖动,不派发也不选字)。独立于 onEnd 的跨页守卫,对两端都可靠。
+document.addEventListener('pointermove', (e) => {
+  if (_hlTapPending && Math.abs(e.clientX - _hlTapPending.cx) + Math.abs(e.clientY - _hlTapPending.cy) >= 10) _hlTapPending = null;
+}, true);
+document.addEventListener('pointerup', () => {
+  if (!_hlTapPending) return;
+  const hit = _hlTapPending.hit, pw = _hlTapPending.pw; _hlTapPending = null;
+  try { window.__readerHlTap && window.__readerHlTap(pw, hit); } catch (_) {}
+}, true);
+document.addEventListener('pointercancel', () => { _hlTapPending = null; }, true);
 // 安全网:任何指针松开/取消 → 全局恢复呼吸高亮 .hl 可点。onStart 拖选时给它们置了 inline pointer-events:none,
 // 但 onEnd 只恢复"起点页"那份(_charSel.pw!==pw 提前 return);跨页松手/中断手势会让别页 solid 词组高亮残留 none →
 // 点它穿透到 char-layer =「点了不弹」。这里兜底清掉所有页的残留 none(只在手势结束时跑,不影响进行中的拖选)。
@@ -522,8 +550,11 @@ function _bindCharLayer(cl, pw) {
     if (best3 >= 0) return best3;
     return -1;
   };
-  const onStart = (x, y) => {
+  const onStart = (x, y, cx, cy) => {
     if (window._ink && (_ink.mode || _ink.drawing)) return false;   // 手写模式/正在画 → 不选字(防御:各入口都兜住)
+    // 根治:先几何判断本次按下是否落在查询高亮上。是 → 记 pending,松手派发该高亮动作,**不选字/不查词**。
+    //   与高亮 pointer-events 状态完全无关 → 无论 .hl 是否残留 none、事件是否穿透,都不会误查手指下的字。
+    if (cx != null) { const _hit = _overlayHlHitAtClient(pw, cx, cy); if (_hit && _hit.kind) { _hlTapPending = { pw, hit: _hit, cx, cy }; _dragStartCharIdx = null; return false; } }
     _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
     _hideFmlPop();           // 任何新按下先关掉旧公式浮层(若新点中公式,onEnd 会重新弹)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
@@ -683,7 +714,7 @@ function _bindCharLayer(cl, pw) {
     if (Date.now() - (window._clLastTouchAt || 0) < 700) return;   // 忽略 touch 后 iOS 合成的 mousedown（否则 onStart 双触发→假双击→刚弹的小框被冲掉）
     e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
     const p = ptToLocal(e.clientX, e.clientY);
-    onStart(p.x, p.y);
+    onStart(p.x, p.y, e.clientX, e.clientY);
   });
   // document 级 mousemove/mouseup 移到模块顶层单 dispatcher(经 pw.__charDrag 分发),不再每次绑定泄漏
   cl.addEventListener('touchstart', (e) => {
@@ -697,7 +728,7 @@ function _bindCharLayer(cl, pw) {
     e.stopPropagation();   // 阻止旧 document.touchstart 清 toolbar
     const t = e.touches[0];
     const p = ptToLocal(t.clientX, t.clientY);
-    onStart(p.x, p.y);
+    onStart(p.x, p.y, t.clientX, t.clientY);
     // 单页模式：整页任意处都可横滑翻页（不限空白）。tap=选词 / 横滑=翻页 / 竖滑=滚动；单页不做拖选。
     _swipeStart = (readMode === 'single')
       ? {x: t.clientX, y: t.clientY, lastX: t.clientX, decided: false, h: false}
