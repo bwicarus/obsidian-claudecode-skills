@@ -17,7 +17,7 @@
   // 进度(单例):infoDelivery 推 currentTime → 外推平滑
   var _vcur = 0, _vcurAt = 0, _vplaying = true, _vrate = 1;
   // 字幕
-  var _sub = null, _subTimer = null, _subPoll = 0, _transCurIdx = -1;
+  var _sub = null, _subTimer = null, _subPoll = 0, _transCurIdx = -1, _userScrollAt = 0;
 
   function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
   function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
@@ -172,7 +172,7 @@
       '.rcvp-left{display:flex;flex-direction:column;min-width:0}' +
       '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-list.on{color:#7dd3fc}' +
-      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0}' +
+      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0;overflow:hidden}' +
       '.rcvp-tlist{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding:4px 0}' +
       '.rcvp-tempty{color:#7c93c4;font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
       '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
@@ -214,6 +214,10 @@
     box.querySelector('.rcvp-stage').insertBefore(iframe, box.querySelector('.rcvp-sub'));
     bar = box.querySelector('.rcvp-bar');
     box.querySelector('.rcvp-list').addEventListener('click', _transToggle);   // 📜 展开/收起字幕列表边栏
+    // 用户主动滚字幕列表(滚轮/触摸/按下)→ 记时刻,暂停自动跟随;auto-scroll 用 scrollTo 不触发这些,故能区分
+    var _tlEl = box.querySelector('.rcvp-tlist');
+    ['wheel', 'touchmove', 'pointerdown'].forEach(function (ev) { _tlEl.addEventListener(ev, function () { _userScrollAt = _now(); }, { passive: true }); });
+    try { if (window.ResizeObserver) { new ResizeObserver(function () { _syncTransHeight(); }).observe(box.querySelector('.rcvp-left')); } } catch (e) {}   // 左列(视频)高度变(缩放/换行)→ 字幕栏高度跟随锁定
     _hook();
     _wireControls();
     _wireDrag();
@@ -305,12 +309,26 @@
     });
     _transCurIdx = -1;
   }
-  function _hlTrans(idx) {   // 高亮当前段 + 自动滚到中间(仅当前段变了才调 → 不频繁)
+  // 字幕栏高度锁 = 左列(视频+控制)高度 → 打开列表不改变浮层整体高度,列表在原高度内滚动
+  function _syncTransHeight() {
+    if (!box) return;
+    var l = box.querySelector('.rcvp-left'), t = box.querySelector('.rcvp-trans');
+    if (l && t && t.style.display !== 'none') t.style.height = l.offsetHeight + 'px';
+  }
+  function _hlTrans(idx) {   // 高亮当前段;自动把当前句滚到第一行(用户手动滚动时暂停,停手 3.5s 后恢复)
     if (!box) return;
     var t = box.querySelector('.rcvp-trans'); if (!t || t.style.display === 'none') return;
-    var lines = t.querySelectorAll('.rcvp-tline'); if (!lines.length) return;
+    var listEl = t.querySelector('.rcvp-tlist'); if (!listEl) return;
+    var lines = listEl.querySelectorAll('.rcvp-tline'); if (!lines.length) return;
     if (_transCurIdx >= 0 && lines[_transCurIdx]) lines[_transCurIdx].classList.remove('cur');
-    if (idx >= 0 && lines[idx]) { lines[idx].classList.add('cur'); try { lines[idx].scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { try { lines[idx].scrollIntoView(); } catch (_) {} } }
+    if (idx >= 0 && lines[idx]) {
+      lines[idx].classList.add('cur');
+      if (_now() - _userScrollAt > 3500) {   // 用户最近没手动滚 → 自动滚:当前句到列表顶部(第一行)
+        var top0 = lines[0] ? lines[0].offsetTop : 0;
+        try { listEl.scrollTo({ top: Math.max(0, lines[idx].offsetTop - top0), behavior: 'smooth' }); }
+        catch (e) { listEl.scrollTop = Math.max(0, lines[idx].offsetTop - top0); }
+      }
+    }
     _transCurIdx = idx;
   }
   function _transToggle() {
@@ -319,7 +337,7 @@
     var on = (t.style.display === 'none' || !t.style.display);
     t.style.display = on ? 'block' : 'none';
     box.querySelector('.rcvp-list').classList.toggle('on', on);
-    if (on) { _renderTranscript(); if (!_sub && cur) _toggleSub('auto', false); }   // 开列表时没字幕 → 自动拉 auto
+    if (on) { _renderTranscript(); _syncTransHeight(); if (!_sub && cur) _toggleSub('auto', false); }   // 开列表:锁高度 + 没字幕自动拉 auto
     _clampPos();
   }
 
