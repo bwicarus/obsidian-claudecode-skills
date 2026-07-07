@@ -10163,7 +10163,9 @@ async function _connProbe() {
   // (用户要求:没开 AI 栏时点选/多选只做查词/翻译/高亮,别悄悄往对话塞焦点/带入图)
   window.__asstOpen = function () {
     try {
-      var p = document.getElementById('grammar-panel');
+      // drawer=shared(已翻默认)把 #grammar-panel 改名 #ep-side;不认它 → p 恒 null → __setFocusSel 恒短路
+      //   = PDF 选中的焦点 chip 永不显示(EPUB 那份本就查 #ep-side 所以正常)。两名都认,legacy 逃生舱不受影响。
+      var p = document.getElementById('grammar-panel') || document.getElementById('ep-side');
       var a = document.getElementById('side-pane-asst');
       return !!(p && p.classList.contains('open') && a && a.classList.contains('active'));
     } catch (_) { return false; }
