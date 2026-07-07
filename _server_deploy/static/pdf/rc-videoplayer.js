@@ -89,8 +89,11 @@
       var zh = box.querySelector('.rcvp-zh'), en = box.querySelector('.rcvp-en'); if (!zh) return;
       var t = _est();
       if (typeof t !== 'number') { if (_sub.lastIdx !== -3) { zh.textContent = '▶ 播放后字幕跟随'; en.textContent = ''; _sub.lastIdx = -3; } return; }
-      var idx = -1;
-      for (var i = 0; i < _sub.segments.length; i++) { var s = _sub.segments[i]; if (t >= s.start && t < s.start + s.duration) { idx = i; break; } if (s.start > t) break; }
+      // 当前段 = 最后一个 start<=t 的段(等同播放器「到下一段 start 才切换」)。
+      // ★ 不用 t<start+duration:YouTube 自动字幕(ASR)的 duration 严重过长→段大量重叠,按 duration 会高亮到过时的早段=完全对不上。
+      var segs = _sub.segments, idx = -1;
+      for (var i = 0; i < segs.length; i++) { if (segs[i].start <= t) idx = i; else break; }
+      if (idx >= 0 && idx === segs.length - 1) { var _ls = segs[idx]; if (t > _ls.start + (_ls.duration || 3) + 1) idx = -1; }   // 末段播完 → 清空,不一直挂着
       if (idx === _sub.lastIdx) return; _sub.lastIdx = idx;
       if (idx >= 0) { zh.textContent = _sub.segments[idx].zh || '(未翻译)'; en.textContent = _sub.segments[idx].en || ''; }
       else { zh.textContent = ''; en.textContent = ''; }

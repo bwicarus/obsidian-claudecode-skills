@@ -127,6 +127,12 @@ def _fetch_english(video_id: str) -> tuple[list[dict], str]:
         }
         for s in ts.snippets
     ]
+    # 自动生成字幕(ASR)的 duration 常严重过长 → 段与段大量重叠,前端按 duration 判定当前段会高亮到过时的早段
+    # (完全对不上时间轴)。用「下一段 start」截断本段 duration(不改 start),让 segments 不重叠、时间轴干净。
+    for i in range(len(segs) - 1):
+        gap = segs[i + 1]["start"] - segs[i]["start"]
+        if gap > 0 and segs[i]["duration"] > gap:
+            segs[i]["duration"] = round(gap, 3)
     return segs, src
 
 
