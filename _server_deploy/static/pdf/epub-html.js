@@ -2259,6 +2259,59 @@
   }
   function loadHls() { fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) { (d.highlights || []).forEach(function (h) { if (!h.anchor) return; _hls[h.id] = h; if (typeof h.anchor.section === 'string') { var ub = _secElOf(h.anchor.section); if (ub && ub.isConnected) applyHl(ub, h); } else { var el = secEls[h.anchor.section]; if (el && loaded[h.anchor.section] === true) applyHl(el, h); } }); _decorateVisible(); }).catch(function () {}); }
   // 高亮列表:渲进抽屉「高亮」pane(由 RC.sidedrawer 的 onTab('hl') 触发)
+  // ── 查询结果历史(镜像 PDF 21-misc-ai;统一抽屉「历史」tab 对等)──
+  //   rc-result 的 beforeOpen 钩子(共享层早就位,此前 EPUB 没传)每次开结果框前把上一条快照进
+  //   localStorage 'pdf-qhist-<FREL>'(per-book,同 PDF 键前缀;设备本地,PDF 侧同款设计);点条目 openResult 回放。
+  var _qhRestoring = false;
+  function _qhKey() { return 'pdf-qhist-' + (FREL || '_'); }
+  function _qhLoad() { try { return JSON.parse(localStorage.getItem(_qhKey()) || '[]'); } catch (e) { return []; } }
+  function _qhPush() {
+    if (_qhRestoring) return;
+    var cont = document.getElementById('result-content'); if (!cont) return;
+    var html = cont.innerHTML || '', title = cont.dataset.title || '', src = cont.dataset.src || '';
+    if (!title && !src) return;
+    if (html.length < 40 || (/⏳|class="loading"/.test(html) && html.length < 120)) return;   // 跳过空/纯 loading
+    var h = _qhLoad();
+    if (h.length && h[0].src === src && h[0].title === title) { h[0].html = html.slice(0, 60000); h[0].time = Date.now(); }
+    else h.unshift({ id: 'qh_' + Date.now(), title: title, src: src, html: html.slice(0, 60000), time: Date.now() });
+    try { localStorage.setItem(_qhKey(), JSON.stringify(h.slice(0, 40))); } catch (e) {}
+    var pane = document.getElementById('ep-side-hist');
+    if (pane && pane.classList.contains('active')) _renderQhist();
+  }
+  try { if (window.RC && RC.result && RC.result.config) RC.result.config({ beforeOpen: _qhPush }); } catch (e) {}
+  function _qhFmt(t) {
+    var d = new Date(t), n = new Date();
+    var hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    return (d.toDateString() === n.toDateString() ? '今天 ' : ((d.getMonth() + 1) + '/' + d.getDate() + ' ')) + hm;
+  }
+  function _renderQhist() {
+    var box = document.getElementById('ep-qhist-list'); if (!box) return;
+    if (!document.getElementById('ep-qhist-css')) {   // 样式照搬 pdf-styles.css 的 .qhist-*(那份只在 PDF 页)
+      var st = document.createElement('style'); st.id = 'ep-qhist-css';
+      st.textContent = '#ep-qhist-list .qhist-item{padding:8px 12px;border-bottom:1px solid #1f2740;cursor:pointer}' +
+        '#ep-qhist-list .qhist-item:hover{background:#162045}' +
+        '#ep-qhist-list .qhist-title{color:#cfe6ff;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+        '#ep-qhist-list .qhist-src{color:#8a9bb4;font-size:11px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+        '#ep-qhist-list .qhist-time{color:#5a6680;font-size:10px;margin-top:2px}';
+      document.head.appendChild(st);
+    }
+    var h = _qhLoad();
+    if (!h.length) { box.innerHTML = '<div style="color:#5a6680;font-size:12px;padding:10px">还没有查询记录</div>'; return; }
+    box.innerHTML = h.map(function (it) {
+      return '<div class="qhist-item" data-id="' + it.id + '"><div class="qhist-title">' + esc(it.title) + '</div>' +
+        '<div class="qhist-src">' + esc((it.src || '').slice(0, 80)) + '</div>' +
+        '<div class="qhist-time">' + _qhFmt(it.time) + '</div></div>';
+    }).join('');
+    box.querySelectorAll('.qhist-item').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var it = _qhLoad().find(function (x) { return x.id === el.dataset.id; }); if (!it) return;
+        _qhRestoring = true;
+        try { window.openResult(it.title, it.src, it.html); } finally { _qhRestoring = false; }
+        try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([document.getElementById('result-content')]).catch(function () {}); } catch (e) {}
+      });
+    });
+  }
+
   function loadHlPane() {
     var box = $('ep-side-hl'); if (!box) return;
     box.innerHTML = '<div class="ep-empty"><span class="ep-spin"></span> 加载…</div>';
@@ -3885,7 +3938,8 @@
         { name: 'kg', label: '知识点', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>' },
         { name: 'hl', label: '高亮', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h6M14 4l6 6-8.5 8.5H7v-4.5L14 4z"/></svg>' },
         { name: 'toc', label: '目录', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>' },
-        { name: 'grammar', label: '语法', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v6a3 3 0 0 0 3 3h8M19 4v6a3 3 0 0 1-3 3"/><circle cx="5" cy="3.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="3.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="20" r="1.4" fill="currentColor" stroke="none"/><path d="M12 13v5"/></svg>' }
+        { name: 'grammar', label: '语法', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v6a3 3 0 0 0 3 3h8M19 4v6a3 3 0 0 1-3 3"/><circle cx="5" cy="3.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="3.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="20" r="1.4" fill="currentColor" stroke="none"/><path d="M12 13v5"/></svg>' },
+        { name: 'hist', label: '历史', icon: '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>' }   // 查询结果历史(镜像 PDF,统一抽屉 tab 对等)
       ],
       onTab: function (name) {
         if (name === 'asst') {
@@ -3898,6 +3952,7 @@
         }
         else if (name === 'kg') { if (window.RC && RC.knowledge) RC.knowledge.load(); }
         else if (name === 'hl') { loadHlPane(); }
+        else if (name === 'hist') { _renderQhist(); }
         else if (name === 'vocab') { if (!_vocabLoaded) loadVocabPane(); }   // 首次进单词本自动载(照搬 PDF)
         else if (name === 'grammar') { loadGrammarPane(); }
         // toc 已由 buildToc 在 manifest 加载时填好 #ep-toc-list,无需懒填

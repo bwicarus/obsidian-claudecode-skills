@@ -10523,9 +10523,10 @@ if (window.PdfAdapter && PdfAdapter.bind) {
 //     双页临时切单列/还原走 opts.onLayoutChange;「🗑 清空分析」走 opts.tabButtons(仅 grammar tab 显示)。
 //   · 旧入口(switchSideTab/openGrammarPanel/closeGrammarPanel/toggleGrammarPanel/toggleSidebar/toggleVocab/
 //     _gpSet*/_gpApplyAppearance)全部改道 RC.sidedrawer,同名保留 → 26-figures/rc-assistant/模板兜底零改。
-// flag:URL 带 drawer=shared 才接管(默认走原 PDF 抽屉,零影响);浏览器验证后翻默认。
+// 状态:浏览器验证通过(2026-07-07)→ 已翻默认;&drawer=legacy / #drawer=legacy = 旧 PDF 抽屉逃生舱
+//   (旧抽屉 JS 的物理删除跟 ?ui=legacy 整体退役一个批次做,在那之前逃生舱免费)。
 (() => {
-  if (((location.search || '') + (location.hash || '')).indexOf('drawer=shared') < 0) return;
+  if (((location.search || '') + (location.hash || '')).indexOf('drawer=legacy') >= 0) return;
   if (!(window.RC && RC.sidedrawer && window.__uiShared)) return;
   const panel = document.getElementById('grammar-panel');
   if (!panel) return;
