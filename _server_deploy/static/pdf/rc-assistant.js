@@ -545,17 +545,7 @@
   }
   document.head.appendChild(css);
 
-  // 🤖 fab:一键开抽屉到助手 tab
-  var fab = document.createElement('button');
-  fab.id = 'asst-fab'; fab.title = '阅读助手'; fab.textContent = '🤖';
-  fab.addEventListener('click', function () {
-    try { if (typeof openGrammarPanel === 'function') openGrammarPanel(); } catch (_) {}
-    HOST.switchTab && HOST.switchTab('asst');
-    prewarm(false);
-    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(function () {}); } catch (_) {}
-    setTimeout(function () { ta && ta.focus(); }, 250);
-  });
-  document.body.appendChild(fab);
+  // 悬浮机器人 FAB(#asst-fab)已按用户要求去掉——开助手走右侧抽屉把手(#ep-side-handle / #side-handle)即可,不再额外占屏。
 
   var thread = pane.querySelector('#asst-thread');
   var ta = pane.querySelector('#asst-ta');

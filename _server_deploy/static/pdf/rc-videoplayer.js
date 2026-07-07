@@ -165,25 +165,29 @@
       '.rcvp-sub.rcvp-out{position:static;left:auto;right:auto;bottom:auto;flex:0 0 auto;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2px 12px;background:transparent;border:none;overflow:hidden}' +
       '.rcvp-sub.rcvp-out .rcvp-zh{font-size:14.5px;text-shadow:none}' +
       '.rcvp-sub.rcvp-out .rcvp-en{font-size:12px;text-shadow:none;color:#9aa4af}' +
-      '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:7px 9px;background:rgba(0,0,0,.25)}' +
-      '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:#9fb4e0;font-size:12px}' +
-      '.rcvp-t{width:30px;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:5px;padding:2px 3px;font-size:12px;text-align:center}' +
-      '.rcvp-cn{color:#6b7da0}' +
-      '.rcvp-now,.rcvp-btn{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:6px;padding:2px 7px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
-      '.rcvp-now:active,.rcvp-btn:active{transform:scale(.95)}' +
-      '.rcvp-btn.on{background:#1d3a52;border-color:#3b6db5;color:#bce0ff}' +
-      '.rcvp-sel{background:#0b1220;border:1px solid #2a3a63;color:#dbe7ff;border-radius:6px;padding:2px 4px;font-size:12px}' +
-      '.rcvp-ck{display:inline-flex;align-items:center;gap:3px;color:#9fb4e0;font-size:12px;cursor:pointer}' +
-      '.rcvp-rm{color:#ffb0c0;border-color:#6b3550;background:#3a1d2a}' +
+      // 控制条:Apple 简约风——透明/无重边框,hover 淡底,active=iOS 蓝 tint(而非重填充)
+      '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:4px 5px;padding:7px 10px;background:transparent}' +
+      '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:#8a9bb4;font-size:12px}' +
+      '.rcvp-t{width:26px;background:rgba(255,255,255,.06);border:none;color:#e6eeff;border-radius:5px;padding:3px 2px;font-size:12px;text-align:center;outline:none}' +
+      '.rcvp-cn{color:#5a6680}' +
+      '.rcvp-now,.rcvp-btn{background:transparent;border:none;color:#9fb4e0;border-radius:7px;padding:4px 9px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .12s,color .12s}' +
+      '.rcvp-now:hover,.rcvp-btn:hover{background:rgba(255,255,255,.09)}' +
+      '.rcvp-now:active,.rcvp-btn:active{transform:scale(.93)}' +
+      '.rcvp-btn.on{background:rgba(10,132,255,.2);color:#5aa9ff}' +
+      '.rcvp-sel{background:rgba(255,255,255,.06);border:none;color:#dbe7ff;border-radius:6px;padding:3px 5px;font-size:12px;outline:none}' +
+      '.rcvp-ck{display:inline-flex;align-items:center;gap:4px;color:#9fb4e0;font-size:12.5px;cursor:pointer}' +
+      '.rcvp-rm{color:#ff6b81}' +
+      '.rcvp-rm:hover{background:rgba(255,80,100,.14)}' +
       '.rcvp-rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;z-index:5}' +
       '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid #6b7da0;border-bottom:2px solid #6b7da0;border-bottom-right-radius:2px}' +
       // 主体两列:左=视频+控制,右=字幕列表边栏(可展开)
       '.rcvp-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:row}' +   // 撑满 box 除顶栏外的高度 → 给 stage/字幕栏一个确定高度(字幕栏才能溢出滚动)
       '.rcvp-left{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column}' +
       '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
-      '.rcvp-list.on{color:#7dd3fc}' +
-      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);display:flex;flex-direction:column;min-height:0;overflow:hidden}' +
-      '.rcvp-tlist{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding:4px 0}' +
+      '.rcvp-list.on{color:#5aa9ff}' +
+      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);position:relative;min-height:0;overflow:hidden}' +
+      // tlist 绝对铺满字幕栏(字幕栏高度=body 高度,由 box 明确高度决定)→ 根治 flex 高度歧义,内容超出就滚动
+      '.rcvp-tlist{position:absolute;inset:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding:4px 0}' +
       '.rcvp-tempty{color:#7c93c4;font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
       '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
       '.rcvp-tline:hover{background:rgba(255,255,255,.05)}' +
@@ -209,11 +213,11 @@
             '<span class="rcvp-grp">止<input class="rcvp-t rcvp-em" inputmode="numeric" maxlength="3" placeholder="—"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-es" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="end" title="设为当前播放位置">⏱</button></span>' +
             '<span class="rcvp-grp">速<select class="rcvp-sel rcvp-rate"><option>0.5</option><option>0.75</option><option>1</option><option>1.25</option><option>1.5</option><option>2</option></select></span>' +
             '<label class="rcvp-ck"><input type="checkbox" class="rcvp-loop">循环</label>' +
-            '<button class="rcvp-btn rcvp-cc" title="中文字幕(YT 字幕 + 机翻,快)">🇨🇳 字幕</button>' +
-            '<button class="rcvp-btn rcvp-hq" title="高质量中文字幕(英文原文 + AI 精翻;无字幕才转录)">🎯 精翻</button>' +
-            '<button class="rcvp-btn rcvp-en-tg" title="显示/隐藏英文原文">原</button>' +
+            '<button class="rcvp-btn rcvp-cc" title="中文字幕(YT 字幕 + 机翻,快)">字幕</button>' +
+            '<button class="rcvp-btn rcvp-hq" title="高质量中文字幕(英文原文 + AI 精翻;无字幕才转录)">精翻</button>' +
+            '<button class="rcvp-btn rcvp-en-tg" title="显示/隐藏英文原文">原文</button>' +
             '<button class="rcvp-btn rcvp-pos-tg" title="字幕显示在视频内部下方 ↔ 外部下方(不遮画面)">内</button>' +
-            '<button class="rcvp-btn rcvp-rm" title="从便签移除该视频" style="display:none">🗑</button>' +
+            '<button class="rcvp-btn rcvp-rm" title="从便签移除该视频" style="display:none">移除</button>' +
           '</div>' +
         '</div>' +
         '<div class="rcvp-trans" style="display:none"><div class="rcvp-tlist"></div></div>' +
