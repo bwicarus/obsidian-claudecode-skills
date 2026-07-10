@@ -809,6 +809,9 @@ def _tts_channel(bws, key: str, speaker: str):
     async def _ensure():
         if tts["ws"] is not None:
             return
+        # 朗读音色**现读凭证**(v3-⑮:设置面板 tts_speaker 可调):一轮回答一个 session,改完下一轮生效。
+        # ⚠ 双向流式 TTS(10029)只认 *_moon_bigtts 系音色,S2S 的 jupiter 系传过来报 55000000。
+        spk = _creds().get("tts_speaker") or speaker
         h = {"X-Api-Key": key, "X-Api-Resource-Id": TTS_RID, "X-Api-Connect-Id": str(uuid.uuid4())}
         tws = await websockets.connect(TTS_BIDI_WSS, additional_headers=h, max_size=10 * 1024 * 1024, open_timeout=10)
         await tws.send(enc(T_FULL_CLIENT, 1, b"{}"))
@@ -816,7 +819,7 @@ def _tts_channel(bws, key: str, speaker: str):
         sid_t = str(uuid.uuid4())
         await tws.send(enc(T_FULL_CLIENT, 100, json.dumps({
             "user": {"uid": "voice-agent"}, "event": 100, "namespace": "BidirectionalTTS",
-            "req_params": {"speaker": speaker, "audio_params": {"format": "pcm", "sample_rate": 24000}},
+            "req_params": {"speaker": spk, "audio_params": {"format": "pcm", "sample_rate": 24000}},
         }, ensure_ascii=False).encode(), session_id=sid_t))
         tts["ws"], tts["sid"] = tws, sid_t
         tts["reader"] = asyncio.create_task(_tts_reader(tws, tts["gen"]))   # 150 由 reader 吞,音频/152 它管
