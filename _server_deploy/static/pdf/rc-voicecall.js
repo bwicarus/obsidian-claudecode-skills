@@ -211,9 +211,15 @@
     sub.scrollTop = sub.scrollHeight;
   }
 
+  // S2S 回复方式(「🔊 朗读」开关转岗,agent 入口已撤):亮=语音朗读(默认);灭=只出文字看对话窗。
+  // ⚠ 协议无输出模态开关(查证 2026-07-11:tts 配置只有音色/语速/音量,S2S 音频是模型原生输出,
+  // 生成即按 300元/M 计费)→ 灭=前端丢音频不播,省的是体验干扰不是钱。独立键、默认亮(伴读场景要出声)。
+  function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
+
   // ── 播放(PCM24k)+ 打断 ──
   function playPcm(buf) {
     if (!ac) return;
+    if (mode === 's2s' && !s2sSpeakOn()) return;   // 文本模式:音频直接丢,回复看对话窗字幕(550 增量驱动,不受影响)
     var i16 = new Int16Array(buf), f32 = new Float32Array(i16.length);
     for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
     var ab = ac.createBuffer(1, f32.length, 24000);
@@ -566,19 +572,20 @@
     });
     return true;
   }
-  // 「🔊 朗读」开关:挤进侧栏快捷栏(蹭 rc-media-tg 样式,与「书页/配图/视频」同排)。默认关=回答只出文字。
+  // 「🔊 朗读」开关(转岗给 S2S,agent 入口已撤):亮=语音回复(默认,现在这样);灭=只出文字看对话窗。
+  // 挤进侧栏快捷栏(蹭 rc-media-tg 样式,与「书页/配图/视频」同排)。通话中点击即时生效。
   function injectSpeakToggle() {
     var qb = document.getElementById('asst-quick');
     if (!qb) return false;
     if (qb.querySelector('.vc-speak-tg')) return true;
     var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg vc-speak-tg';
     b.innerHTML = '<span>🔊 朗读</span>';
-    b.title = '语音对话时是否朗读回答。默认关(读比听快);点亮后回答边生成边念,你一开口它就闭嘴';
-    if (speakOn()) b.classList.add('on');
+    b.title = '语音通话的回复方式:点亮=语音朗读;按灭=不出声,回复文字在通话条对话窗里看(通话中切换即时生效)';
+    if (s2sSpeakOn()) b.classList.add('on');
     b.addEventListener('click', function () {
       var on = b.classList.toggle('on');
-      try { localStorage.setItem('rc-voice-speak', on ? '1' : '0'); } catch (e) {}
-      if (!on) bargeIn();   // 关掉的瞬间静音
+      try { localStorage.setItem('rc-voice-speak-s2s', on ? '1' : '0'); } catch (e) {}
+      if (!on) stopPlayback();   // 按灭的瞬间静音(清掉已排队的播放)
     });
     qb.appendChild(b);
     return true;

@@ -46,17 +46,32 @@ _TOKEN_FILE = Path("~/.config/mcp-webapp-token").expanduser()
 DIALOG_ID_FILE = Path("/home/bwicarus/claude/state/doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
 USAGE_FILE = Path("/home/bwicarus/claude/state/doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
 
-# ── S2S 用量记账(154 UsageResponse 每轮 token 用量;官方费率 元/M tok)──
-# 键名归类靠子串匹配(官方文档没给 154 的字段清单,宽容解析 + DEBUG 原样日志观察);
-# cached 命中按 cached 费率(低于正常输入),官方未公布具体价 → 不计入估算、单独累计展示。
-_USAGE_RATE = {"in_audio": 80.0, "in_text": 10.0, "out_audio": 300.0, "out_text": 30.0}
+# ── S2S 用量记账(154 UsageResponse 每轮 token 用量)──
+# 官方字段(文档 154 事件):input_text_tokens / input_audio_tokens / cached_text_tokens /
+#   cached_audio_tokens / output_text_tokens / output_audio_tokens。
+# 官方价格表(用户 2026-07-11 截图核对):输入-文本 10 / 输入-音频 80 / 输入-文本cached 5 /
+#   输入-音频cached 5 / 输出-文本 80 / 输出-音频 300(元/M token)。
+# 计价假设:cached 是 input 的子集(行业通例)→ 未命中部分按全价、命中部分按 5 元。
+_USAGE_RATE = {"in_text": 10.0, "in_audio": 80.0, "cached_text": 5.0, "cached_audio": 5.0,
+               "out_text": 80.0, "out_audio": 300.0}
+_USAGE_KEYS = {"input_text_tokens": "in_text", "input_audio_tokens": "in_audio",
+               "cached_text_tokens": "cached_text", "cached_audio_tokens": "cached_audio",
+               "output_text_tokens": "out_text", "output_audio_tokens": "out_audio"}
 
 
 def _usage_classify(pl: dict) -> dict:
-    """把 154 payload 里的数字 token 字段归到 in/out × text/audio + cached(嵌套 dict 也扫)。"""
-    got = {"in_audio": 0, "in_text": 0, "out_audio": 0, "out_text": 0, "cached": 0}
+    """154 payload → 各类 token。先按官方字段名精确取;全零再退回宽容子串扫(防字段名变更)。"""
+    got = {v: 0 for v in _USAGE_KEYS.values()}
+    u = pl.get("usage") if isinstance(pl.get("usage"), dict) else pl
+    for k, name in _USAGE_KEYS.items():
+        try:
+            got[name] = int(u.get(k) or 0)
+        except Exception:
+            pass
+    if any(got.values()):
+        return got
 
-    def _walk(d, path=""):
+    def _walk(d, path=""):   # 宽容兜底
         if not isinstance(d, dict):
             return
         for k, v in d.items():
@@ -65,13 +80,22 @@ def _usage_classify(pl: dict) -> dict:
                 _walk(v, kp)
             elif isinstance(v, (int, float)) and v and "token" in kp:
                 if "cach" in kp:
-                    got["cached"] += int(v)
-                elif "input" in kp or kp.endswith("_in") or "_in_" in kp:
+                    got["cached_audio" if "audio" in kp else "cached_text"] += int(v)
+                elif "input" in kp:
                     got["in_audio" if "audio" in kp else "in_text"] += int(v)
-                elif "output" in kp or "_out" in kp:
+                elif "output" in kp:
                     got["out_audio" if "audio" in kp else "out_text"] += int(v)
     _walk(pl)
     return got
+
+
+def _usage_cost(d: dict) -> float:
+    """一段累计的估算花费(元):input 未命中按全价 + cached 按 5 元 + output 全价。"""
+    it, ia = d.get("in_text", 0), d.get("in_audio", 0)
+    ct, ca = d.get("cached_text", 0), d.get("cached_audio", 0)
+    cost = (max(0, it - ct) * 10.0 + ct * 5.0 + max(0, ia - ca) * 80.0 + ca * 5.0
+            + d.get("out_text", 0) * 80.0 + d.get("out_audio", 0) * 300.0)
+    return round(cost / 1e6, 4)
 
 
 def _log_usage(pl: dict):
@@ -87,12 +111,12 @@ def _log_usage(pl: dict):
         except Exception:
             data = {"days": {}}
         day = time.strftime("%Y-%m-%d")
-        d = data["days"].setdefault(day, {"rounds": 0, "in_audio": 0, "in_text": 0,
-                                          "out_audio": 0, "out_text": 0, "cached": 0, "cost_est": 0.0})
-        d["rounds"] += 1
+        d = data["days"].setdefault(day, {"rounds": 0})
+        d["rounds"] = d.get("rounds", 0) + 1
         for k, v in got.items():
             d[k] = d.get(k, 0) + v
-        d["cost_est"] = round(sum(d.get(k, 0) * r / 1e6 for k, r in _USAGE_RATE.items()), 4)
+        d["cached"] = d.get("cached_text", 0) + d.get("cached_audio", 0)   # 合计列(控制面板显示用)
+        d["cost_est"] = _usage_cost(d)
         data["total_cost_est"] = round(sum(x.get("cost_est", 0) for x in data["days"].values()), 4)
         data["days"] = dict(sorted(data["days"].items())[-60:])   # 只留最近 60 天
         USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")

@@ -175,3 +175,10 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **resume 超时竞速**:`Promise.race([ac.resume(), 800ms])` ——suspended 也继续建链路(ws/字幕全通,只是暂时无声),声音由**常驻捕获 pointerdown** 监听恢复(用户碰一下屏幕即 resume;没通话时 ac=null 零开销)。
 - **连接世代 `_gen`**:teardown/start 都推进;在飞的旧 start 每个 await 后 `_dead()` 自检,过期就清掉**自己建的局部资源**(myAc/myMic)退出——防 iOS 卡死的旧回合在用户触屏后"复活",跟新回合抢出双连接。
 - **重连 watchdog `_tryStart`**:每次尝试 12s 没建成 ws(且世代没被替代、非主动挂断)→ 强制 `_scheduleReconnect` 推进下一轮;覆盖 start 卡死在任何一个 await 上的情况。
+
+## 朗读开关=S2S 语音/文本回复切换 + 官方价格表修正(2026-07-11)
+
+- **「🔊 朗读」开关转岗给 S2S**(agent 入口已撤,开关原本无活消费者):亮=语音朗读(默认,伴读场景要出声);灭=**文本回复模式**——音频前端直接丢(playPcm gate `mode==='s2s'&&!s2sSpeakOn()`),回复文字照常进通话条对话窗(550 字幕增量驱动,不依赖音频)。独立键 `rc-voice-speak-s2s`(默认亮,与 agent 旧键分离);通话中点击即时生效,按灭瞬间 stopPlayback 清播放队列;确认语/深度思考代播同走 gate。
+- **⚠ 协议无输出模态开关**(文档全查证:`tts.audio_config` 只有 channel/format/sample_rate/speech_rate/loudness_rate;`input_mod` 只管输入侧 text/audio_file/keep_alive/push_to_talk)→ S2S 输出恒为文本+音频双流、**双流都计费**,灭灯省的是听觉干扰不是钱。想真省输出费的候选:speech_rate 拉快(音频 token≈25/s 按时长折算,语速快时长短;未实测,可用 154 账本 A/B 验证)。
+- **154 官方字段清单**(文档 500 行拿到):input_text_tokens/input_audio_tokens/**cached_text_tokens/cached_audio_tokens**/output_text_tokens/output_audio_tokens → `_usage_classify` 改精确解析(宽容子串扫降为兜底)。
+- **官方价格表修正**(用户截图核对):输入-文本 10 / 输入-音频 80 / **输入-文本cached 5 / 输入-音频cached 5** / **输出-文本 80(旧文档误记 30)** / 输出-音频 300(元/M)。`_usage_cost` 新公式:cached 视为 input 子集,未命中按全价+命中按 5 元。首日账本已迁移重算(¥2.17→¥2.14;cached 14.6k 按 5 元仅 ¥0.07——**缓存优化把输入文本费砍掉近半**)。
