@@ -3844,6 +3844,39 @@ def assistant_undo():
 
 _APF_PATH = CLAUDE_DIR / "state" / "assistant-pref-profiles.json"
 
+# ── 语音通话(豆包 S2S)设置(v3-⑮):设置面板读写凭证文件的**非密钥白名单字段**——
+#    api_key 绝不经此暴露;relay 每次 _creds() 现读,写完即生效(通话中由前端发 {type:"cfg"} 触发热更)。
+_VOICE_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
+_VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialect",
+                     "bot_name", "speaking_style", "system_role", "enable_music",
+                     "end_smooth_window_ms")
+
+
+@bp.route("/voice-config", methods=["GET", "POST"])
+def assistant_voice_config():
+    """语音通话设置:GET → 白名单字段当前值;POST {字段:值,…} → merge 写回(值为 ""/null = 删字段回默认)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    try:
+        cfg = json.loads(_VOICE_CFG_PATH.read_text("utf-8"))
+    except Exception:
+        cfg = {}
+    if request.method == "POST":
+        b = request.get_json(silent=True) or {}
+        for k in _VOICE_CFG_FIELDS:
+            if k not in b:
+                continue
+            v = b[k]
+            if v in ("", None, False):   # 清空/关掉 = 删字段回默认(enable_music False 也删,别留死字段)
+                cfg.pop(k, None)
+            else:
+                cfg[k] = v
+        try:
+            _VOICE_CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), "utf-8")
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)[:120]}), 500
+    return jsonify({"ok": True, "cfg": {k: cfg.get(k) for k in _VOICE_CFG_FIELDS}})
+
 
 @bp.route("/pref-profiles", methods=["GET", "POST"])
 def assistant_pref_profiles():

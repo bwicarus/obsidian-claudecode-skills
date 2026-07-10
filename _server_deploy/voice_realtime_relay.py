@@ -309,6 +309,20 @@ def _state_event_text(book: dict) -> str:
     return "(系统状态更新:" + ";".join(parts) + "。以本条为准,更早的状态描述一律作废。)"
 
 
+def _tts_cfg(cfg: dict, full: bool = False) -> dict:
+    """tts 配置(v3-⑮ 设置面板可调):音色/语速/音量/方言。full=True 含音频格式(StartSession 用);
+    UpdateConfig 只带 speaker+audio_config(官方 201 schema)。⚠ tts.extra 置空会报 42000020 → 没方言不带 extra 键。"""
+    t = {"speaker": cfg.get("speaker", "zh_female_vv_jupiter_bigtts"),
+         "audio_config": {"speech_rate": int(cfg.get("speech_rate", 0)),        # [-50,100] 语速
+                          "loudness_rate": int(cfg.get("loudness_rate", 0))}}   # [-50,100] 音量
+    if full:
+        # PCM s16le 24k:浏览器 Web Audio 直接播,免 opus 解码
+        t["audio_config"].update({"channel": 1, "format": "pcm_s16le", "sample_rate": 24000})
+        if cfg.get("explicit_dialect"):   # 方言(dongbei/sichuan/shaanxi,仅 2.0 vv 音色生效)
+            t["extra"] = {"explicit_dialect": cfg["explicit_dialect"]}
+    return t
+
+
 def _start_session_payload(book: dict | None = None, file_rel: str = "", page: int = 0,
                            fresh: bool = False) -> dict:
     """fresh=True(浮层 🧹 新话题):清 dialog_id 文件 + 不带上次会话/助手历史 → 彻底空白记忆,只留当前书页。"""
@@ -335,11 +349,10 @@ def _start_session_payload(book: dict | None = None, file_rel: str = "", page: i
                       "enable_user_query_exit": True,   # 用户说"挂了吧/再见"→ TTSEnded 带 20000002 → 前端自动挂断
                       "model": cfg.get("model", "1.2.1.1")},   # O2.0
         },
-        "tts": {"speaker": cfg.get("speaker", "zh_female_vv_jupiter_bigtts"),
-                # PCM s16le 24k:浏览器 Web Audio 直接播,免 opus 解码;speech_rate 2.0 生效([-50,100],伴读可调快)
-                "audio_config": {"channel": 1, "format": "pcm_s16le", "sample_rate": 24000,
-                                 "speech_rate": int(cfg.get("speech_rate", 0))}},
+        "tts": _tts_cfg(cfg, full=True),
     }
+    if cfg.get("enable_music"):
+        payload["dialog"]["extra"]["enable_music"] = True   # 唱歌能力(检索版权曲库,仅 1.2.1.1)
     if fresh:
         try:
             DIALOG_ID_FILE.unlink()
@@ -1034,24 +1047,27 @@ async def handle_browser(bws):
                 import hashlib
                 return hashlib.md5(txt.encode("utf-8")).hexdigest()
 
-            async def _push_sp():   # UpdateConfig(201) 热更新 SP(翻页/圈画/选中/任务共用;闭包读最新 book/page)
+            async def _push_sp():   # UpdateConfig(201) 热更新 SP+tts(翻页/设置面板改音色语速;闭包读最新 book/page)
                 c2 = _creds()
                 role_txt = _role_text(c2, book, file_rel, page)
-                fp = _sp_fp(role_txt)
+                tts_now = _tts_cfg(c2)
+                fp = _sp_fp(role_txt + json.dumps(tts_now, sort_keys=True))
                 if fp == _sp_state["confirmed"]:
                     return   # 没变且已确认 → 不推(省 UpdateConfig + 保前缀缓存)
                 if fp == _sp_state["pending"] and time.monotonic() - _sp_state.get("pending_at", 0) < 5:
                     return   # 同内容已在途且未超时;超 5s 没等到 251 视为被丢 → 放行重推(原"开口兜底"语义)
                 _sp_state["pending"] = fp
                 _sp_state["pending_at"] = time.monotonic()
-                upd = {"dialog": {"bot_name": c2.get("bot_name", "豆包"),
+                upd = {"tts": tts_now,
+                       "dialog": {"bot_name": c2.get("bot_name", "豆包"),
                                   "system_role": role_txt,
                                   "speaking_style": c2.get("speaking_style", "语气自然友好,不啰嗦。")}}
                 await dws.send(enc(T_FULL_CLIENT, 201, json.dumps(upd, ensure_ascii=False).encode(), session_id=sid))
 
             # StartSession 已带初始 SP → 视为已生效(151 SessionStarted 无 SP ack,这里直接锚定基线)
             try:
-                _sp_state["confirmed"] = _sp_fp(_role_text(_creds(), book, file_rel, page))
+                _c0 = _creds()
+                _sp_state["confirmed"] = _sp_fp(_role_text(_c0, book, file_rel, page) + json.dumps(_tts_cfg(_c0), sort_keys=True))
             except Exception:
                 pass
 
@@ -1148,6 +1164,8 @@ async def handle_browser(bws):
                                 book["ink_ver"] = book.get("ink_ver", 0) + 1   # 版本+1(前端指纹去重,到达即真变化)→ 三态/缓存键都随它走
                                 _push_state_debounced()
                                 sys.stderr.write(f"[voice-rt] 圈画同步 p{ip} strokes={len(strokes)} v{book['ink_ver']}\n")
+                        elif t == "cfg":   # 设置面板改了语音配置(音色/语速/人设)→ 热更(指纹含 tts,变了才真发)
+                            asyncio.create_task(_push_sp())
                         elif t == "finish":
                             await dws.send(enc(T_FULL_CLIENT, 102, b"{}", session_id=sid))
 

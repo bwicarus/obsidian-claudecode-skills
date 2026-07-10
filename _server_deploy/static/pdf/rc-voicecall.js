@@ -696,5 +696,7 @@
     var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
 
-  RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState };
+  RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
+    // 设置面板改了语音配置 → 通知 relay 热更(S2S 通话中才有意义;relay 指纹含 tts,变了才真发 UpdateConfig)
+    pushCfg: function () { try { if (ws && ws.readyState === 1 && mode === 's2s') ws.send(JSON.stringify({ type: 'cfg' })); } catch (e) {} } };
 })();

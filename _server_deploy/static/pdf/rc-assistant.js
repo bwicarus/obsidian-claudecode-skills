@@ -259,6 +259,74 @@
   //   ① openModelSettings 的 .ams-mask 浮层(助手侧边栏 ⚙ / 感叹号步骤 ⚙);
   //   ② rc-settings 总设置面板 AI tab 的**内嵌**模式(2026-07 收口:AI tab 不再放旧 model/effort
   //      下拉 + 跳转按钮,直接内嵌这份配置表)。数据/保存都走同组服务端端点,改完即时生效。
+  // ── 🎙 语音通话(豆包 S2S)设置(v3-⑮):写凭证白名单字段(服务端保存全设备生效);
+  //    通话中改 → RC.voicecall.pushCfg() 让 relay UpdateConfig 热切音色/语速。──
+  var _VC_SPK = [
+    ['zh_female_vv_jupiter_bigtts', 'vv · 活泼灵动女声(默认,支持方言)'],
+    ['zh_female_xiaohe_jupiter_bigtts', 'xiaohe · 甜美女声(台湾腔)'],
+    ['zh_male_yunzhou_jupiter_bigtts', 'yunzhou · 清爽沉稳男声'],
+    ['zh_male_xiaotian_jupiter_bigtts', 'xiaotian · 清爽磁性男声'],
+    ['en_male_tim_uranus_bigtts', 'Tim · 美式英语男声'],
+    ['en_female_dacey_uranus_bigtts', 'Dacey · 美式英语女声'],
+    ['en_female_stokie_uranus_bigtts', 'Stokie · 美式英语女声']];
+  var _VC_DIA = [['', '标准(无方言)'], ['dongbei', '东北话'], ['sichuan', '四川话'], ['shaanxi', '陕西话']];
+  function _renderVoiceCfg(container) {
+    var h = document.createElement('div'); h.className = 'ams-sub';
+    h.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+    h.textContent = '— 🎙 语音通话(豆包 S2S)—';
+    container.appendChild(h);
+    var card = document.createElement('div'); card.className = 'ams-task';
+    card.innerHTML = '<div class="ams-tdef">加载中…</div>';
+    container.appendChild(card);
+    fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.ok) { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; return; }
+      var c = d.cfg || {};
+      function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
+      card.innerHTML =
+        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
+          _VC_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.speaker || _VC_SPK[0][0]) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+        '</select></div>' +
+        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="explicit_dialect" style="flex:1 1 100%">' +
+          _VC_DIA.map(function (o) { return '<option value="' + o[0] + '"' + ((c.explicit_dialect || '') === o[0] ? ' selected' : '') + '>方言:' + o[1] + '</option>'; }).join('') +
+        '</select></div>' +
+        '<div class="ams-cur" style="margin:0 0 2px">语速 <b class="vcv-sr">' + (c.speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
+        '<input type="range" min="-50" max="100" step="5" value="' + (c.speech_rate || 0) + '" data-k="speech_rate" style="width:100%">' +
+        '<div class="ams-cur" style="margin:4px 0 2px">音量 <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
+        '<input type="range" min="-50" max="100" step="5" value="' + (c.loudness_rate || 0) + '" data-k="loudness_rate" style="width:100%">' +
+        '<div class="ams-row" style="margin:7px 0"><input class="ams-sel" data-k="bot_name" placeholder="名字(默认:豆包)" value="' + esc2(c.bot_name || '') + '" style="flex:1 1 44%">' +
+        '<input class="ams-sel" data-k="speaking_style" placeholder="说话风格(如:口吻拽拽的)" value="' + esc2(c.speaking_style || '') + '" style="flex:1 1 50%"></div>' +
+        '<textarea class="ams-sel" data-k="system_role" rows="2" placeholder="人设(背景设定,留空=默认学习伙伴;伴读工具协议会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.system_role || '') + '</textarea>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer">' +
+        '<input type="checkbox" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>' +
+        '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>';
+      function _save(k, v, el) {
+        var body = {}; body[k] = v;
+        fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          .then(function (r) { return r.json(); })
+          .then(function (x) {
+            if (x && x.ok) {
+              if (typeof _toast === 'function') _toast('已保存');
+              try { if (window.RC && RC.voicecall && RC.voicecall.pushCfg) RC.voicecall.pushCfg(); } catch (_) {}
+            } else if (typeof _toast === 'function') _toast('保存失败');
+          }).catch(function () {});
+      }
+      card.querySelectorAll('[data-k]').forEach(function (el) {
+        el.addEventListener('change', function () {
+          var k = el.getAttribute('data-k'), v;
+          if (el.type === 'checkbox') v = el.checked;
+          else if (el.type === 'range') v = parseInt(el.value, 10) || 0;
+          else v = el.value.trim();
+          if (k === 'speech_rate') { var b1 = card.querySelector('.vcv-sr'); if (b1) b1.textContent = v; }
+          if (k === 'loudness_rate') { var b2 = card.querySelector('.vcv-lr'); if (b2) b2.textContent = v; }
+          _save(k, v, el);
+        });
+        if (el.type === 'range') el.addEventListener('input', function () {   // 拖动实时显示数值(change 才保存)
+          var k = el.getAttribute('data-k');
+          var b = card.querySelector(k === 'speech_rate' ? '.vcv-sr' : '.vcv-lr'); if (b) b.textContent = el.value;
+        });
+      });
+    }).catch(function () { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; });
+  }
   function renderModelSettings(container, focusAction) {
     if (!container) return;
     container.innerHTML = '<div class="ams-sub">加载中…</div>';
@@ -335,6 +403,7 @@
         + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
         + '选它每次调用都按量计费。flash 高峰过载较多;想更稳的免费可试 flash-lite 系。';
       container.appendChild(note);
+      _renderVoiceCfg(container);   // 🎙 语音通话设置(v3-⑮:音色/语速/音量/方言/人设/唱歌)
       if (_focusCard) { try { _focusCard.style.outline = '2px solid #6aa3ff'; _focusCard.style.borderRadius = '8px'; _focusCard.scrollIntoView({ block: 'center' }); } catch (_) {} }
     }).catch(function () { container.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; });
   }

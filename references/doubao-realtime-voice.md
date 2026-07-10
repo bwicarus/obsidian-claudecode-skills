@@ -223,3 +223,13 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 ## 同传 S2T 结论修正(2026-07-11,用户查证推动)
 
 细读同传 2.0 文档(6561/1756902)发现**双字幕流**:`SourceSubtitle*(650/651/652)=原文转写`、`TranslationSubtitle*=译文`。→ **S2T 设 zh→en 但只消费原文字幕 = 带语义理解的强中文 ASR**(语义纠错/多说话人 spk_chg/热词 hot_words_list/替换词/中英混杂),正治 agent 模式"sauc 无上下文识别弱"的痛点;计费=推理服务 输入80/输出文本80/输出音频300 元/M(S2T 无音频输出)。它仍不是对话模型(理解服务于翻译,无 QA/工具),"当大脑"不成立、**"当耳朵"成立**。待办:控制台开通同传服务 → relay handle_agent 加 `agent_asr:"ast"` 引擎选项(取 651 原文,协议为 event 帧族,X-Api-Resource-Id 待从文档鉴权段确认)。
+
+## S2S 语音设置面板(2026-07-11 v3-⑮,用户提议"设置里该有音色人设等")
+
+从官方文档梳理 O2.0 可配项全部接入设置面板(「⚙ AI 模型设置」底部「— 🎙 语音通话(豆包 S2S)—」区):
+
+- **音色 7 选 1**(StartSession `tts.speaker`):vv 活泼女(默认,唯一支持方言)/xiaohe 台湾腔/yunzhou 沉稳男/xiaotian 磁性男/Tim/Dacey/Stokie 美音。**方言**(`tts.extra.explicit_dialect`:东北/四川/陕西,仅 vv;⚠ tts.extra 置空报 42000020 → 没方言不带 extra 键)。**语速/音量**滑条(`audio_config.speech_rate/loudness_rate` [-50,100])。**人设三件套**(bot_name/speaking_style/system_role 自定义前缀——伴读工具协议自动拼在人设后面)。**唱歌**(`dialog.extra.enable_music`,仅 1.2.1.1)。
+- **存储** = `/api/assistant/voice-config`(assistant.py):读写凭证文件 `~/.config/doubao-voice.json` 的**非密钥白名单字段**(api_key 绝不经此暴露);值为 ""/null/False 即删字段回默认(⚠ Python `0 in ("",None,False)` 为 True → 0 也会删,恰好 0=默认值语义一致)。relay 每次 `_creds()` 现读 → 写完下次开话即生效。
+- **通话中热切**:前端 change→POST→`RC.voicecall.pushCfg()` 发 `{type:"cfg"}` → relay `_push_sp`(UpdateConfig 现带 `tts` 字段,`_tts_cfg()` 与 StartSession 共用;**指纹掺 tts json**——只有真改了才发,兼容 ⑭ 的"SP 只随翻页变")。音色/语速立即生效;人设/风格影响 SP 下次开话生效(通话中改也会触发一次 UpdateConfig 换 SP,低频可接受)。
+- **SC2.0(2.2.0.0)不接**:角色扮演线用 `character_manifest`+克隆音色但**不支持 system_role** → 工具协议/页文本/状态注入全废;人物扮演在 O2.0 内用 人设+风格+音色 实现(面板 tdef 已注明)。
+- 文档另捡:`enable_conversation_truncate`(513 截断的前置开关,未来真·历史压缩要先开它)、26.02.26 更新"基于客户端实际播报进度对齐上下文,仅向模型暴露已播放内容"(打断场景的上下文精度,relay 现未用)。
