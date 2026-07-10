@@ -767,23 +767,11 @@ async def _tts_stream(key: str, speaker: str, text: str):
                     raise RuntimeError(f"tts code={d.get('code')} {str(d.get('message'))[:80]}")
 
 
-async def handle_agent(bws):
-    cred = _creds()
-    if not cred.get("api_key"):
-        await bws.send(json.dumps({"event": -1, "payload": {"error": "缺凭证:~/.config/doubao-voice.json"}}, ensure_ascii=False))
-        await bws.close()
-        return
-    key = cred["api_key"]
-    speaker = cred.get("tts_speaker", TTS_SPEAKER)
-    asr_headers = {"X-Api-Key": key, "X-Api-Resource-Id": SAUC_RID,
-                   "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
-    asr_cfg = {"user": {"uid": "voice-agent"},
-               "audio": {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
-               # end_window_size:静音多久判一句说完(definite)。不设的话默认窗口极长,连续流里永远等不到终稿
-               "request": {"model_name": "bigmodel", "enable_punc": True,
-                           "end_window_size": int(cred.get("asr_end_window_ms", 800))}}
-    # 双向流式 TTS:一轮回答 = 一条 ws + 一个 session(session 内文本增量连续合成 → 韵律连贯、句间零连接开销)。
-    # 打断(cancel)= 直接 close 连接:立即哑火(FinishSession 会把已收文本全部合成完,打断场景不能用)。
+def _tts_channel(bws, key: str, speaker: str):
+    """双向流式 TTS 通道(v3-⑬ 抽共用:agent 模式朗读 / tts-only 朗读通道两处用):
+    一轮回答 = 一条 ws + 一个 session(session 内文本增量连续合成 → 韵律连贯、句间零连接开销)。
+    打断(cancel)= 直接 close 连接:立即哑火(FinishSession 会把已收文本全部合成完,打断场景不能用)。
+    返回 {"speak","done","cancel"} 三个协程,音频帧直接裸转发给 bws。"""
     tts = {"ws": None, "sid": None, "reader": None, "gen": 0}
 
     async def _tts_reader(tws, g):
@@ -795,7 +783,7 @@ async def handle_agent(bws):
                 if d["type"] == T_AUDIO_SERVER:
                     await bws.send(d["payload"])          # PCM24k 裸转发,浏览器即到即播
                 elif d["type"] == T_ERROR:
-                    sys.stderr.write(f"[voice-agent tts] err {d.get('code')} {d['payload'][:120]}\n")
+                    sys.stderr.write(f"[voice-tts] err {d.get('code')} {d['payload'][:120]}\n")
                     break
                 elif d.get("event") == 152:               # SessionFinished:这轮念完
                     if g == tts["gen"]:
@@ -812,7 +800,7 @@ async def handle_agent(bws):
                 tts["ws"] = None
                 tts["sid"] = None
 
-    async def _tts_ensure():
+    async def _ensure():
         if tts["ws"] is not None:
             return
         h = {"X-Api-Key": key, "X-Api-Resource-Id": TTS_RID, "X-Api-Connect-Id": str(uuid.uuid4())}
@@ -827,7 +815,7 @@ async def handle_agent(bws):
         tts["ws"], tts["sid"] = tws, sid_t
         tts["reader"] = asyncio.create_task(_tts_reader(tws, tts["gen"]))   # 150 由 reader 吞,音频/152 它管
 
-    async def _tts_cancel():
+    async def cancel():
         tts["gen"] += 1
         tws, tts["ws"], tts["sid"] = tts["ws"], None, None
         if tws:
@@ -835,6 +823,84 @@ async def handle_agent(bws):
                 await tws.close()
             except Exception:
                 pass
+
+    async def speak(text: str):
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            await _ensure()
+            await tts["ws"].send(enc(T_FULL_CLIENT, 200, json.dumps({
+                "user": {"uid": "voice-agent"}, "event": 200, "namespace": "BidirectionalTTS",
+                "req_params": {"text": text},
+            }, ensure_ascii=False).encode(), session_id=tts["sid"]))
+        except Exception as ex:
+            sys.stderr.write(f"[voice-tts>] {ex}\n")
+            await cancel()
+
+    async def done():   # 这轮回答文本发完:FinishSession → 服务端把尾巴合成完 → 152
+        if tts["ws"] and tts["sid"]:
+            try:
+                await tts["ws"].send(enc(T_FULL_CLIENT, 102, b"{}", session_id=tts["sid"]))
+            except Exception:
+                await cancel()
+
+    return {"speak": speak, "done": done, "cancel": cancel}
+
+
+async def handle_tts_only(bws):
+    """朗读专用通道(v3-⑬,`?mode=tts`):侧栏助手回答的 T2S 流式播放——**不开麦、不连 ASR**。
+    「🔊 朗读」点亮且没在语音通话时前端 lazy 连这条;speak/speak_done/cancel 协议与 agent 模式同款。"""
+    cred = _creds()
+    if not cred.get("api_key"):
+        await bws.send(json.dumps({"event": -1, "payload": {"error": "缺凭证:~/.config/doubao-voice.json"}}, ensure_ascii=False))
+        await bws.close()
+        return
+    ch = _tts_channel(bws, cred["api_key"], cred.get("tts_speaker", TTS_SPEAKER))
+    try:
+        await bws.send(json.dumps({"event": "tts_ready"}, ensure_ascii=False))
+        async for msg in bws:
+            if isinstance(msg, (bytes, bytearray)):
+                continue
+            try:
+                j = json.loads(msg)
+            except Exception:
+                continue
+            t = j.get("type")
+            if t == "speak" and (j.get("text") or "").strip():
+                await ch["speak"](j["text"])
+            elif t == "speak_done":
+                await ch["done"]()
+            elif t == "cancel":
+                await ch["cancel"]()
+            elif t == "finish":
+                break
+    except Exception:
+        pass
+    finally:
+        await ch["cancel"]()
+        try:
+            await bws.close()
+        except Exception:
+            pass
+
+
+async def handle_agent(bws):
+    cred = _creds()
+    if not cred.get("api_key"):
+        await bws.send(json.dumps({"event": -1, "payload": {"error": "缺凭证:~/.config/doubao-voice.json"}}, ensure_ascii=False))
+        await bws.close()
+        return
+    key = cred["api_key"]
+    speaker = cred.get("tts_speaker", TTS_SPEAKER)
+    asr_headers = {"X-Api-Key": key, "X-Api-Resource-Id": SAUC_RID,
+                   "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
+    asr_cfg = {"user": {"uid": "voice-agent"},
+               "audio": {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
+               # end_window_size:静音多久判一句说完(definite)。不设的话默认窗口极长,连续流里永远等不到终稿
+               "request": {"model_name": "bigmodel", "enable_punc": True,
+                           "end_window_size": int(cred.get("asr_end_window_ms", 800))}}
+    ch = _tts_channel(bws, key, speaker)   # 朗读(可选):speak/speak_done/cancel 由 up() 转发
     try:
         async with websockets.connect(SAUC_WSS, additional_headers=asr_headers,
                                       max_size=10 * 1024 * 1024, open_timeout=15) as aws:
@@ -860,23 +926,11 @@ async def handle_agent(bws):
                         continue
                     t = j.get("type")
                     if t == "speak" and (j.get("text") or "").strip():
-                        try:
-                            await _tts_ensure()
-                            await tts["ws"].send(enc(T_FULL_CLIENT, 200, json.dumps({
-                                "user": {"uid": "voice-agent"}, "event": 200, "namespace": "BidirectionalTTS",
-                                "req_params": {"text": j["text"].strip()},
-                            }, ensure_ascii=False).encode(), session_id=tts["sid"]))
-                        except Exception as ex:
-                            sys.stderr.write(f"[voice-agent tts>] {ex}\n")
-                            await _tts_cancel()
+                        await ch["speak"](j["text"])
                     elif t == "speak_done":          # 这轮回答文本发完:FinishSession → 服务端把尾巴合成完 → 152
-                        if tts["ws"] and tts["sid"]:
-                            try:
-                                await tts["ws"].send(enc(T_FULL_CLIENT, 102, b"{}", session_id=tts["sid"]))
-                            except Exception:
-                                await _tts_cancel()
+                        await ch["done"]()
                     elif t == "cancel":              # 打断:断连立即哑火(FinishSession 语义是"合成完剩余文本",打断不能用)
-                        await _tts_cancel()
+                        await ch["cancel"]()
                     elif t == "finish":
                         return
 
@@ -911,7 +965,7 @@ async def handle_agent(bws):
                 for p in pending:
                     p.cancel()
             finally:
-                await _tts_cancel()
+                await ch["cancel"]()
     except Exception as ex:
         sys.stderr.write(f"[voice-agent] {ex}\n")
         try:
@@ -930,7 +984,11 @@ async def handle_browser(bws):
     file_rel, page, fresh = "", 0, False
     try:
         q = urllib.parse.parse_qs(urllib.parse.urlparse(bws.request.path).query)
-        if (q.get("mode") or [""])[0] == "agent":   # agent 模式:耳+嘴分离,大脑=侧栏助手(见 handle_agent)
+        m0 = (q.get("mode") or [""])[0]
+        if m0 == "tts":      # 朗读专用通道(v3-⑬):不开麦,只有 T2S 流式合成(侧栏「🔊 朗读」lazy 连)
+            await handle_tts_only(bws)
+            return
+        if m0 == "agent":    # agent 模式:耳+嘴分离,大脑=侧栏助手(见 handle_agent)
             await handle_agent(bws)
             return
         file_rel = (q.get("file") or [""])[0]

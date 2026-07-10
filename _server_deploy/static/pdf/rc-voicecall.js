@@ -112,6 +112,10 @@
       '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
       '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+      // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
+      '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+      // 朗读开关播报中:淡蓝呼吸
+      '.vc-speak-tg.speaking{animation:vcCallPulse 1.2s ease-in-out infinite}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
       '#vc-tool-btn{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
@@ -132,8 +136,16 @@
 
   function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function setSt(t) { if (box) box.querySelector('.vc-st').textContent = t; }
-  function callBtnOn(on) { var b = document.getElementById('asst-call'); if (b) b.classList[on ? 'add' : 'remove']('on'); }
-  function callBtnSpeaking(on) { var b = document.getElementById('asst-call'); if (b) b.classList[on ? 'add' : 'remove']('speaking'); }
+  function callBtnOn(on) {
+    var b = document.getElementById('asst-call'), m = document.getElementById('asst-mic');
+    if (!on) { if (b) b.classList.remove('on'); if (m) m.classList.remove('asr'); return; }
+    if (mode === 'agent') { if (m) m.classList.add('asr'); }   // ASR 连续听:麦克风按钮紫色呼吸(区别系统听写的蓝)
+    else if (b) b.classList.add('on');                          // S2S:电话按钮绿色呼吸
+  }
+  function callBtnSpeaking(on) {
+    if (mode === 'agent') { var tg = document.querySelector('.vc-speak-tg'); if (tg) tg.classList[on ? 'add' : 'remove']('speaking'); return; }
+    var b = document.getElementById('asst-call'); if (b) b.classList[on ? 'add' : 'remove']('speaking');
+  }
   // agent 模式无浮层:ASR 转写直接进侧栏输入框,状态用 placeholder + 按钮特效表达
   var _origPh = null;
   function taEl() { return document.getElementById('asst-ta'); }
@@ -211,15 +223,10 @@
     sub.scrollTop = sub.scrollHeight;
   }
 
-  // S2S 回复方式(「🔊 朗读」开关转岗,agent 入口已撤):亮=语音朗读(默认);灭=只出文字看对话窗。
-  // ⚠ 协议无输出模态开关(查证 2026-07-11:tts 配置只有音色/语速/音量,S2S 音频是模型原生输出,
-  // 生成即按 300元/M 计费)→ 灭=前端丢音频不播,省的是体验干扰不是钱。独立键、默认亮(伴读场景要出声)。
-  function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
-
   // ── 播放(PCM24k)+ 打断 ──
   function playPcm(buf) {
     if (!ac) return;
-    if (mode === 's2s' && !s2sSpeakOn()) return;   // 文本模式:音频直接丢,回复看对话窗字幕(550 增量驱动,不受影响)
+    if (mode === 's2s' && !s2sSpeakOn()) return;   // S2S+朗读灭:丢音频,回复看对话窗字幕(550 增量驱动)
     var i16 = new Int16Array(buf), f32 = new Float32Array(i16.length);
     for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
     var ab = ac.createBuffer(1, f32.length, 24000);
@@ -289,21 +296,71 @@
   }
   function speak(text) {
     var t = cleanForSpeech(text);
-    if (!t || !ws || ws.readyState !== 1) return;
-    try { ws.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid })); } catch (e) {}
+    if (!t) return;
+    var w = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;   // agent 通话在→走它;否则朗读专用通道
+    if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid })); } catch (e) {} }
   }
-  function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成
-    stopPlayback();
-    try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
+  function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成(两条通道都发)
+    stopPlayback(); _ttsStopPlay();
+    try { if (ws && mode === 'agent' && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
+    try { if (_tts.ws && _tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
+  }
+  // ── 朗读专用通道(?mode=tts,v3-⑬):没在语音通话时点亮「🔊 朗读」→ 回答经双向流式 TTS 播——
+  //    不开麦、不连 ASR;独立 ws + 独立 AudioContext(与通话互不干扰)。点亮开关(手势内)预热。──
+  var _tts = { ws: null, ac: null, playT: 0, playing: [] };
+  function _ttsEnsure() {
+    try {
+      if (!_tts.ac) _tts.ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (_tts.ac.state !== 'running') _tts.ac.resume();
+    } catch (e) {}
+    if (_tts.ws && _tts.ws.readyState <= 1) return;
+    try {
+      var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      var w = new WebSocket(proto + location.host + '/voice-rt?mode=tts');
+      w.binaryType = 'arraybuffer';
+      w.onmessage = function (ev) { if (ev.data instanceof ArrayBuffer) _ttsPlay(ev.data); };
+      w.onclose = function () { if (_tts.ws === w) _tts.ws = null; };
+      _tts.ws = w;
+    } catch (e) {}
+  }
+  function _ttsPlay(buf) {
+    var a = _tts.ac; if (!a) return;
+    var i16 = new Int16Array(buf), f32 = new Float32Array(i16.length);
+    for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    var ab = a.createBuffer(1, f32.length, 24000);
+    ab.copyToChannel(f32, 0);
+    var src = a.createBufferSource(); src.buffer = ab; src.connect(a.destination);
+    var t = Math.max(a.currentTime + 0.02, _tts.playT);
+    src.start(t); _tts.playT = t + ab.duration; _tts.playing.push(src);
+    var tg = document.querySelector('.vc-speak-tg'); if (tg) tg.classList.add('speaking');
+    src.onended = function () {
+      var k = _tts.playing.indexOf(src); if (k >= 0) _tts.playing.splice(k, 1);
+      if (!_tts.playing.length) { var g = document.querySelector('.vc-speak-tg'); if (g) g.classList.remove('speaking'); }
+    };
+  }
+  function _ttsStopPlay() {
+    _tts.playing.forEach(function (s) { try { s.stop(); } catch (e) {} });
+    _tts.playing = []; _tts.playT = 0;
+    var tg = document.querySelector('.vc-speak-tg'); if (tg) tg.classList.remove('speaking');
+  }
+  function _ttsShutdown() {
+    try { if (_tts.ws) { if (_tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); _tts.ws.close(); } } catch (e) {}
+    _tts.ws = null; _ttsStopPlay();
+    try { if (_tts.ac) _tts.ac.close(); } catch (e) {}
+    _tts.ac = null;
   }
   // 助手流式回答 tap(rc-assistant 在 answer 增量/收尾时调):按标点小片段即时喂 TTS
   //   (双向流式 session:relay 侧一轮回答一个 session,片段连续合成 → 韵律连贯,首句无需等全文)
   function speakOn() { try { return localStorage.getItem('rc-voice-speak') === '1'; } catch (e) { return false; } }
+  // S2S 通话中的出声开关(独立键,默认亮):灭=丢音频只看对话窗字幕。⚠ S2S 双流恒计费(协议无输出模态
+  // 开关,已全查证),灭省的是听觉干扰不是钱;真文本对话用 mic 长按的 ASR 模式(零豆包输出音频费)。
+  function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
   window.__asstVoiceTap = function (full, done) {
-    if (mode !== 'agent' || !ws) return;
-    if (!speakOn()) return;   // 默认静默:读比听快(用户拍板)。「🔊 朗读」开关点亮才合成,关着零 TTS 成本
+    if (!speakOn()) return;                 // 「🔊 朗读」没点亮=零 TTS 成本(读比听快,用户拍板默认关)
+    if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
+    if (!(ws && mode === 'agent')) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
     full = String(full || '');
-    if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; }   // 新一轮回答开始
+    if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; bargeIn(); }   // 新一轮回答开始 → 打断上一轮残播
     vt.tail += full.slice(vt.sent); vt.sent = full.length;
     var re = /[^。！？!?;；,，\n]+[。！？!?;；,，\n]+/g, m, consumed = 0;   // 逗号级边界:更早开始出声
     while ((m = re.exec(vt.tail))) { speak(m[0]); consumed = re.lastIndex; }
@@ -311,11 +368,14 @@
     if (done) {
       if (vt.tail.trim()) speak(vt.tail);
       vt.sent = 0; vt.tail = '';
-      try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'speak_done' })); } catch (e) {}   // FinishSession:让尾巴合成完
+      try {
+        var wd = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;
+        if (wd && wd.readyState === 1) wd.send(JSON.stringify({ type: 'speak_done' }));   // FinishSession:让尾巴合成完
+      } catch (e) {}
       if (pendingUtter) { var p = pendingUtter; pendingUtter = null; sendToAssistant(p, true); }   // 排队的下一句(别掐掉刚念的尾巴)
     }
   };
-  window.__asstVoiceOn = function () { return mode === 'agent' && !!ws && speakOn(); };   // 文本模式(agent 默认不念)不带 voice 标志,后端不用朗读风格
+  window.__asstVoiceOn = function () { return speakOn() && !(ws && mode === 's2s'); };   // 朗读亮且非 S2S 通话 → 后端回答用『适合朗读』风格
   function sendToAssistant(text, keepAudio) {
     if (!keepAudio) bargeIn();        // 新问题:停掉还在念的旧回答(排队派发除外)
     vt.sent = 0; vt.tail = '';
@@ -376,7 +436,8 @@
       ws.onopen = function () {
         _userHung = false; _reconnN = 0; _reconnPend = false; _acquireWL();
         setSt('通话中 · 说话即可(已带上本页内容)'); if (box) box.classList.add('on'); callBtnOn(true);
-        taPlaceholder(mode === 'agent' ? '通话中,说话即可…' : null);
+        taPlaceholder(mode === 'agent' ? '🎙 连续听中,说话即可…' : null);
+        _refreshSpeakTg();   // 朗读开关切到当前语境的键(S2S=默认亮/其余=旧键)
       };
       // teardown 会摘掉本回调 → 走到这里的必然是"没人主动挂断"的意外断线(网络波动/iOS 切后台掐 ws)
       ws.onclose = function () { _scheduleReconnect(); };
@@ -419,6 +480,7 @@
     vt.sent = 0; vt.tail = ''; pendingUtter = null;
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
+    try { _refreshSpeakTg(); } catch (e) {}
   }
 
   function toggle(opts) {
@@ -542,7 +604,7 @@
     injectCss();
     var b = document.createElement('button');
     b.id = 'asst-call'; b.type = 'button';
-    b.title = '语音伴读(点=开始通话,再点=挂断;翻页/圈画/选中它都实时知道,说"找视频/翻到第N页"它真执行)';
+    b.title = '豆包语音通话(S2S 专属):点=开始,再点=挂断;翻页/圈画/选中它都实时知道,说"找视频/翻到第N页"它真执行。文本对话请长按旁边的麦克风(ASR 模式)';
     b.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5.3C5 14.8 9.2 19 18.7 19c.72 0 1.3-.58 1.3-1.3v-2.35c0-.56-.36-1.06-.9-1.23l-2.62-.87a1.3 1.3 0 0 0-1.33.32l-.95.95a11.6 11.6 0 0 1-4.72-4.72l.95-.95c.35-.35.47-.87.32-1.33L9.85 4.9A1.3 1.3 0 0 0 8.62 4H6.3C5.58 4 5 4.58 5 5.3z"/></svg>';
     var mic = document.getElementById('asst-mic');
     if (mic && mic.parentNode === input) input.insertBefore(b, mic.nextSibling);
@@ -556,11 +618,7 @@
         return;
       }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      // 「🔊 朗读」开关=引擎选择:亮 → S2S 端到端语音;灭 → agent 文本链路(豆包只当耳朵 ASR,
-      // 大脑=侧栏助手全工具,回答纯文字进侧栏对话流)——文本模式零豆包输出音频费(S2S 双流恒计费,
-      // 查证协议关不掉;客服提的"同传 S2T"是翻译器无对话大脑,不适用)。
-      if (s2sSpeakOn()) { if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' }); }
-      else { if (window._voiceCall) window._voiceCall(); else toggle({}); }
+      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });   // 电话按钮=S2S 专属
     });
     // 工具调用状态按钮(v3-⑤):挤在 📞 右边;点击开合详情弹层
     var tb = document.createElement('button');
@@ -576,34 +634,66 @@
     });
     return true;
   }
-  // 「🔊 朗读」开关(转岗给 S2S,agent 入口已撤):亮=语音回复(默认,现在这样);灭=只出文字看对话窗。
+  // #asst-mic 长按 600ms = 豆包 ASR 连续听(agent 模式:说话→转写→自动问助手,文字答;朗读亮则也念)。
+  // 单击保留原功能(系统听写)——长按触发后在**捕获阶段**吞掉随后的 click,不碰 rc-assistant 的原 handler。
+  function injectMicLongPress() {
+    var m = document.getElementById('asst-mic');
+    if (!m) return false;
+    if (m.__vcLp) return true;
+    m.__vcLp = true;
+    var _t = null, _fired = false;
+    m.addEventListener('pointerdown', function () {
+      _fired = false;
+      _t = setTimeout(function () {
+        _t = null; _fired = true;
+        try { navigator.vibrate && navigator.vibrate(15); } catch (e) {}
+        if (ws && mode === 'agent') { teardown(false); taPlaceholder(null); return; }   // 再长按=挂断 ASR
+        if (ws) teardown(false);   // S2S 开着 → 先挂再开 ASR
+        if (window._voiceCall) window._voiceCall(); else toggle({});
+      }, 600);
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
+      m.addEventListener(n, function () { if (_t) { clearTimeout(_t); _t = null; } });
+    });
+    m.addEventListener('contextmenu', function (e) { e.preventDefault(); });   // iOS 长按不弹菜单
+    m.addEventListener('click', function (e) {
+      if (_fired) { _fired = false; e.stopImmediatePropagation(); e.preventDefault(); }
+    }, true);
+    return true;
+  }
+  // 「🔊 朗读」开关=统一的"要不要出声":S2S 通话中控制豆包音频播放(独立键,默认亮);
+  // 其余场景(ASR 通话/纯打字)控制回答的 T2S 朗读(旧键,默认灭——读比听快)。语境切换时按钮亮灭自动刷新。
   // 挤进侧栏快捷栏(蹭 rc-media-tg 样式,与「书页/配图/视频」同排)。通话中点击即时生效。
+  function _tgOn() { return (ws && mode === 's2s') ? s2sSpeakOn() : speakOn(); }
+  function _refreshSpeakTg() { var b = document.querySelector('.vc-speak-tg'); if (b) b.classList[_tgOn() ? 'add' : 'remove']('on'); }
   function injectSpeakToggle() {
     var qb = document.getElementById('asst-quick');
     if (!qb) return false;
     if (qb.querySelector('.vc-speak-tg')) return true;
     var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg vc-speak-tg';
     b.innerHTML = '<span>🔊 朗读</span>';
-    b.title = '通话引擎:点亮=豆包语音对话(它开口说话);按灭=文字回复(你说话、AI 文字答在侧栏对话流,不烧语音合成费)。通话中切换会自动重拨';
-    if (s2sSpeakOn()) b.classList.add('on');
+    b.title = '朗读:点亮=AI 出声(语音通话中=播豆包语音;其余=回答用 TTS 流式念出来);按灭=只出文字。语音通话按灭时豆包音频仍生成计费(协议限制),真文本对话用麦克风长按的 ASR 模式';
+    if (_tgOn()) b.classList.add('on');
     b.addEventListener('click', function () {
-      var on = b.classList.toggle('on');
-      try { localStorage.setItem('rc-voice-speak-s2s', on ? '1' : '0'); } catch (e) {}
-      if (!on) stopPlayback();   // 按灭的瞬间静音(清掉已排队的播放)
-      if (ws && mode !== (on ? 's2s' : 'agent')) {   // 通话中切 → 换引擎重拨(S2S 语音 ↔ agent 文本)
-        teardown(false);
-        taPlaceholder(on ? '切换到语音对话…' : '切换到文字回复…');
-        if (on) { if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' }); }
-        else { if (window._voiceCall) window._voiceCall(); else toggle({}); }
+      if (ws && mode === 's2s') {   // S2S 通话中:切"播/不播"豆包音频(字幕恒在对话窗)
+        var on = !s2sSpeakOn();
+        try { localStorage.setItem('rc-voice-speak-s2s', on ? '1' : '0'); } catch (e) {}
+        if (!on) stopPlayback();
+      } else {                      // 其余:切回答的 T2S 朗读
+        var on2 = !speakOn();
+        try { localStorage.setItem('rc-voice-speak', on2 ? '1' : '0'); } catch (e) {}
+        if (on2) _ttsEnsure();      // 手势内预热(iOS AudioContext 必须手势启动)
+        else { bargeIn(); _ttsShutdown(); }
       }
+      _refreshSpeakTg();
     });
     qb.appendChild(b);
     return true;
   }
 
   // 侧栏 pane 注入时机不定(rc-assistant 加载在前,但保守起见轮询到出现为止)
-  if (!(injectBtn() && injectSpeakToggle())) {
-    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle()) || ++_tries > 40) clearInterval(_t); }, 750);
+  if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress())) {
+    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
 
   RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState };

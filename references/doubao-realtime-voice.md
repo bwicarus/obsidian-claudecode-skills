@@ -200,3 +200,12 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **两引擎记忆各自独立**(S2S=dialog_id 服务端 20 轮;agent=助手服务端对话历史)——切换=换脑子,不互通,重拨提示即用户预期管理。
 - `__asstVoiceOn` 收紧为 `mode==='agent'&&ws&&speakOn()`:文本模式不带 voice:1 标志(后端不用"适合朗读"风格,答题排版正常 markdown)。
 - S2S 内的 playPcm 丢音频 gate 保留(切换瞬间保护)。relay 零改动(handle_agent 分支现成,2026-07-10 冒烟全通)。
+
+## 三按钮职责重排 + 朗读专用通道(2026-07-11 v3-⑬,用户设计)
+
+按钮分工定稿(替代 ⑫ 的"朗读开关=引擎选择"):
+- **#asst-mic**:单击=系统听写(原功能,rc-assistant 的 handler 一字不动);**长按 600ms=豆包 ASR 连续听**(agent 模式:说话→sauc 转写→自动问助手,文字回答;朗读亮则也念)。长按后**捕获阶段吞 click**(stopImmediatePropagation,不触发听写);再长按=挂断。ASR 通话中 mic **紫色呼吸 `.asr`**(#bf5af2,区分系统听写的蓝 .on)。S2S 开着时长按=先挂再开 ASR。
+- **#asst-call**:S2S 专属(点=开/挂,绿呼吸)。
+- **「🔊 朗读」= 统一的"要不要出声",双语境双键**:S2S 通话中=播/不播豆包音频(`rc-voice-speak-s2s` 默认亮;灭=丢音频看对话窗字幕,⚠音频仍计费,title 已注明);其余场景(ASR 通话/纯打字提问)=回答的 **T2S 流式朗读**(旧键 `rc-voice-speak` 默认灭)。语境切换(onopen/teardown)时按钮亮灭自动刷新 `_refreshSpeakTg`。播报中开关呼吸 `.speaking`。
+- **朗读专用通道 `?mode=tts`**(relay `handle_tts_only`):没开任何通话时点亮朗读→回答也能念——**不开麦、不连 ASR**,只有双向流式 TTS;speak/speak_done/cancel 协议与 agent 同款。relay 侧 TTS 状态机抽成 **`_tts_channel(bws,key,speaker)` 工厂**(agent/tts-only 共用,pyflakes 验证);前端独立小状态机 `_tts{ws,ac,playT,playing}`(独立 AudioContext 与通话互不干扰),**点亮开关(手势内)预热** `_ttsEnsure`(iOS AudioContext 必须手势启动);新一轮回答开始自动 bargeIn 打断残播。
+- **关于用户查证的"同传 S2T"**(二次确认):同声传译大模型的 S2T 输出的是**目标语种的翻译文本**(端到端识别+理解+翻译),不是对话回答——没有 QA/工具/人设能力,仍不能替代对话模型。"通话中要文本"由朗读开关(S2S 灭=字幕)与 ASR 模式(真省钱)覆盖。
