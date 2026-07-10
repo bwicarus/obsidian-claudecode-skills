@@ -315,7 +315,7 @@
       if (pendingUtter) { var p = pendingUtter; pendingUtter = null; sendToAssistant(p, true); }   // 排队的下一句(别掐掉刚念的尾巴)
     }
   };
-  window.__asstVoiceOn = function () { return mode === 'agent' && !!ws; };   // rc-assistant 据此给后端带 voice 标志
+  window.__asstVoiceOn = function () { return mode === 'agent' && !!ws && speakOn(); };   // 文本模式(agent 默认不念)不带 voice 标志,后端不用朗读风格
   function sendToAssistant(text, keepAudio) {
     if (!keepAudio) bargeIn();        // 新问题:停掉还在念的旧回答(排队派发除外)
     vt.sent = 0; vt.tail = '';
@@ -556,7 +556,11 @@
         return;
       }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
+      // 「🔊 朗读」开关=引擎选择:亮 → S2S 端到端语音;灭 → agent 文本链路(豆包只当耳朵 ASR,
+      // 大脑=侧栏助手全工具,回答纯文字进侧栏对话流)——文本模式零豆包输出音频费(S2S 双流恒计费,
+      // 查证协议关不掉;客服提的"同传 S2T"是翻译器无对话大脑,不适用)。
+      if (s2sSpeakOn()) { if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' }); }
+      else { if (window._voiceCall) window._voiceCall(); else toggle({}); }
     });
     // 工具调用状态按钮(v3-⑤):挤在 📞 右边;点击开合详情弹层
     var tb = document.createElement('button');
@@ -580,12 +584,18 @@
     if (qb.querySelector('.vc-speak-tg')) return true;
     var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg vc-speak-tg';
     b.innerHTML = '<span>🔊 朗读</span>';
-    b.title = '语音通话的回复方式:点亮=语音朗读;按灭=不出声,回复文字在通话条对话窗里看(通话中切换即时生效)';
+    b.title = '通话引擎:点亮=豆包语音对话(它开口说话);按灭=文字回复(你说话、AI 文字答在侧栏对话流,不烧语音合成费)。通话中切换会自动重拨';
     if (s2sSpeakOn()) b.classList.add('on');
     b.addEventListener('click', function () {
       var on = b.classList.toggle('on');
       try { localStorage.setItem('rc-voice-speak-s2s', on ? '1' : '0'); } catch (e) {}
       if (!on) stopPlayback();   // 按灭的瞬间静音(清掉已排队的播放)
+      if (ws && mode !== (on ? 's2s' : 'agent')) {   // 通话中切 → 换引擎重拨(S2S 语音 ↔ agent 文本)
+        teardown(false);
+        taPlaceholder(on ? '切换到语音对话…' : '切换到文字回复…');
+        if (on) { if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' }); }
+        else { if (window._voiceCall) window._voiceCall(); else toggle({}); }
+      }
     });
     qb.appendChild(b);
     return true;
