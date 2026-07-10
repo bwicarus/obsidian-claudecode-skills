@@ -239,3 +239,8 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - 设置面板语音区加「朗读音色」下拉(12 选 1,官方音色列表核对):爽快思思(默认)/温暖阿虎/少年梓辛(三个中英双语)/渊博小叔/解说小明/深夜播客/亲切女声/邻家女孩/开朗姐姐/高冷御姐/湾湾小何(台湾腔)/Lauren(纯英语)。字段 `tts_speaker`(voice-config 白名单)。
 - **⚠ 音色系列不通用**:朗读走双向流式 TTS(10029),只认 `*_moon_bigtts` 系;S2S 通话的 `*_jupiter_bigtts` 系传过去报 55000000(反之亦然)——所以是两个独立下拉。
 - **生效机制零重连**:`_tts_channel._ensure` 每次建 session 时**现读凭证**(一轮回答=一个 session,152 后重建)→ 改完设置**下一句回答**即换声,agent 通话中/tts-only 通道都不用重连。
+
+### 通话/朗读语速分离(v3-⑮ 补 2)
+
+- 面板滑条改三条:「通话语速(S2S)」`speech_rate`/「通话音量(S2S)」`loudness_rate`/**「朗读语速」`tts_speech_rate`**(白名单新字段)。朗读语速由 `_tts_channel._ensure` 每 session 现读注入 `req_params.audio_params.speech_rate` → 改完下一句生效。
+- **实验实证**(bidi TTS 直连冒烟):speech_rate=0 → 3.24s/155KB;=80 → 1.78s/85KB——bidi 认此参数,且**音频量随语速等比减 ~45%**;同理适用 S2S 通话(300元/M 的输出音频按时长折算,语速调快=真省钱)。

@@ -305,9 +305,11 @@
         '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="tts_speaker" style="flex:1 1 100%">' +
           _VC_TTS_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.tts_speaker || _VC_TTS_SPK[0][0]) === o[0] ? ' selected' : '') + '>朗读音色:' + o[1] + '</option>'; }).join('') +
         '</select></div>' +
-        '<div class="ams-cur" style="margin:0 0 2px">语速 <b class="vcv-sr">' + (c.speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
+        '<div class="ams-cur" style="margin:0 0 2px">通话语速(S2S) <b class="vcv-sr">' + (c.speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.speech_rate || 0) + '" data-k="speech_rate" style="width:100%">' +
-        '<div class="ams-cur" style="margin:4px 0 2px">音量 <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
+        '<div class="ams-cur" style="margin:4px 0 2px">朗读语速 <b class="vcv-tsr">' + (c.tts_speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
+        '<input type="range" min="-50" max="100" step="5" value="' + (c.tts_speech_rate || 0) + '" data-k="tts_speech_rate" style="width:100%">' +
+        '<div class="ams-cur" style="margin:4px 0 2px">通话音量(S2S) <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.loudness_rate || 0) + '" data-k="loudness_rate" style="width:100%">' +
         '<div class="ams-row" style="margin:7px 0"><input class="ams-sel" data-k="bot_name" placeholder="名字(默认:豆包)" value="' + esc2(c.bot_name || '') + '" style="flex:1 1 44%">' +
         '<input class="ams-sel" data-k="speaking_style" placeholder="说话风格(如:口吻拽拽的)" value="' + esc2(c.speaking_style || '') + '" style="flex:1 1 50%"></div>' +
@@ -332,13 +334,14 @@
           if (el.type === 'checkbox') v = el.checked;
           else if (el.type === 'range') v = parseInt(el.value, 10) || 0;
           else v = el.value.trim();
-          if (k === 'speech_rate') { var b1 = card.querySelector('.vcv-sr'); if (b1) b1.textContent = v; }
-          if (k === 'loudness_rate') { var b2 = card.querySelector('.vcv-lr'); if (b2) b2.textContent = v; }
+          var _bmap = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr' };
+          if (_bmap[k]) { var b1 = card.querySelector(_bmap[k]); if (b1) b1.textContent = v; }
           _save(k, v, el);
         });
         if (el.type === 'range') el.addEventListener('input', function () {   // 拖动实时显示数值(change 才保存)
           var k = el.getAttribute('data-k');
-          var b = card.querySelector(k === 'speech_rate' ? '.vcv-sr' : '.vcv-lr'); if (b) b.textContent = el.value;
+          var m = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr' };
+          var b = card.querySelector(m[k] || '.vcv-sr'); if (b) b.textContent = el.value;
         });
       });
     }).catch(function () { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; });
