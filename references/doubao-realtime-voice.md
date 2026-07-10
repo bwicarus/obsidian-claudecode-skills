@@ -233,3 +233,9 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **通话中热切**:前端 change→POST→`RC.voicecall.pushCfg()` 发 `{type:"cfg"}` → relay `_push_sp`(UpdateConfig 现带 `tts` 字段,`_tts_cfg()` 与 StartSession 共用;**指纹掺 tts json**——只有真改了才发,兼容 ⑭ 的"SP 只随翻页变")。音色/语速立即生效;人设/风格影响 SP 下次开话生效(通话中改也会触发一次 UpdateConfig 换 SP,低频可接受)。
 - **SC2.0(2.2.0.0)不接**:角色扮演线用 `character_manifest`+克隆音色但**不支持 system_role** → 工具协议/页文本/状态注入全废;人物扮演在 O2.0 内用 人设+风格+音色 实现(面板 tdef 已注明)。
 - 文档另捡:`enable_conversation_truncate`(513 截断的前置开关,未来真·历史压缩要先开它)、26.02.26 更新"基于客户端实际播报进度对齐上下文,仅向模型暴露已播放内容"(打断场景的上下文精度,relay 现未用)。
+
+### 朗读音色可设置(v3-⑮ 补,2026-07-11)
+
+- 设置面板语音区加「朗读音色」下拉(12 选 1,官方音色列表核对):爽快思思(默认)/温暖阿虎/少年梓辛(三个中英双语)/渊博小叔/解说小明/深夜播客/亲切女声/邻家女孩/开朗姐姐/高冷御姐/湾湾小何(台湾腔)/Lauren(纯英语)。字段 `tts_speaker`(voice-config 白名单)。
+- **⚠ 音色系列不通用**:朗读走双向流式 TTS(10029),只认 `*_moon_bigtts` 系;S2S 通话的 `*_jupiter_bigtts` 系传过去报 55000000(反之亦然)——所以是两个独立下拉。
+- **生效机制零重连**:`_tts_channel._ensure` 每次建 session 时**现读凭证**(一轮回答=一个 session,152 后重建)→ 改完设置**下一句回答**即换声,agent 通话中/tts-only 通道都不用重连。
