@@ -492,6 +492,8 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
                 await _inject_500_memory(dws, sid, question, answer)
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if started else "error", "tool": "deep_think", "label": "深度思考",
+            "cmd": f"deep_think({(dm or '默认模型')}/{(de or '默认深度')}): {question[:200]}",
+            "rag": _speech_clean(answer)[:1600],
             "result_brief": _speech_clean(answer)[:400]}}, ensure_ascii=False))
     except Exception as ex:
         sys.stderr.write(f"[voice-rt deep] {ex}\n")
@@ -621,7 +623,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                 if hit.get("ca"):
                     await bws.send(json.dumps({"event": "client_action", "payload": hit["ca"]}, ensure_ascii=False))   # 视频卡等重放
                 await bws.send(json.dumps({"event": "tool_status", "payload": {
-                    "status": "done", "tool": tname, "label": f"{tname}(复用上次结果)", "cached": True}}, ensure_ascii=False))
+                    "status": "done", "tool": tname, "label": f"{tname}(复用上次结果)", "cached": True,
+                    "cmd": str(cmd)[:500], "rag": (hit.get("content") or "")[:1600]}}, ensure_ascii=False))
                 rag = json.dumps([{"title": f"工具 {tname} 的结果(页面状态没变,这是**此前同样查询的结果直接复用**,没有重新执行)",
                                    "content": hit.get("content") or "(界面元素已重新显示)"}], ensure_ascii=False)
                 await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
@@ -656,10 +659,6 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         ca = res.get("client_action")
         if isinstance(ca, dict) and ca.get("fn"):   # 页面副作用照旧(视频卡进侧栏/跳页/高亮…)
             await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
-        await bws.send(json.dumps({"event": "tool_status", "payload": {
-            "status": "done" if d.get("ok") else "error", "tool": tool, "label": d.get("label") or tool,
-            "args": d.get("args"), "took_s": d.get("took_s"),
-            "result_brief": json.dumps(res, ensure_ascii=False)[:400]}}, ensure_ascii=False))
         slim = {k: v for k, v in res.items() if k != "client_action"}
         # v3-⑩:RAG 回填按工具分级限长(进历史的每个字后续轮轮计费)——列表类给短(模型只需播报要点),
         # 视觉/阅读类给足(信息密度高);统一 3000 的旧上限只留给未知工具兜底
@@ -669,6 +668,15 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                            "content": content + "\n(请把要点口语化讲给用户;你此前口头猜测的内容一律作废)"}],
                          ensure_ascii=False)
         await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
+        # 完整调用过程 → tool_status(前端小按钮 + 侧栏对话流详情卡,v3-⑯:S2S指令/上下文/喂回结果全程可查)
+        await bws.send(json.dumps({"event": "tool_status", "payload": {
+            "status": "done" if d.get("ok") else "error", "tool": tool, "label": d.get("label") or tool,
+            "args": d.get("args"), "took_s": d.get("took_s"),
+            "cmd": str(cmd)[:500],                                       # S2S 输出的原始指令 JSON
+            "ctx_brief": {"page": page, "ink": len(ctx.get("ink") or []),
+                          "sel": len(ctx.get("selection") or "")},       # 随调用携带的页面上下文概要
+            "rag": content[:1600],                                       # 喂回豆包播报的真实结果
+            "result_brief": json.dumps(res, ensure_ascii=False)[:400]}}, ensure_ascii=False))
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
                 "content": content, "ca": ca if (isinstance(ca, dict) and ca.get("fn")) else None}

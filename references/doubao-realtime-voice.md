@@ -244,3 +244,10 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 
 - 面板滑条改三条:「通话语速(S2S)」`speech_rate`/「通话音量(S2S)」`loudness_rate`/**「朗读语速」`tts_speech_rate`**(白名单新字段)。朗读语速由 `_tts_channel._ensure` 每 session 现读注入 `req_params.audio_params.speech_rate` → 改完下一句生效。
 - **实验实证**(bidi TTS 直连冒烟):speech_rate=0 → 3.24s/155KB;=80 → 1.78s/85KB——bidi 认此参数,且**音频量随语速等比减 ~45%**;同理适用 S2S 通话(300元/M 的输出音频按时长折算,语速调快=真省钱)。
+
+## 工具调用详情卡进侧栏对话流(2026-07-11 v3-⑯,用户需求"要感叹号那种,点开看每一步")
+
+v3-⑤ 的固定状态按钮(转圈/✓)保留做**进行中**状态;**完成后**在侧栏对话流(#asst-thread)追加一条**可折叠详情卡** `.vc-tcard`(折叠=一行「✓ 找视频 · 2.3s ▸」,点头部展开):
+- 展开内容 = 全过程:**指令(S2S 原话 JSON)** / **携带上下文**(第N页·墨迹N笔·选中N字) / **参数** / **喂回给它播报的结果**(RAG 全文 ≤1600)。
+- 数据源 = relay tool_status done/error 事件扩容:`cmd`(S2S 原始指令 ≤500)+ `ctx_brief{page,ink,sel}` + `rag`(喂回内容);缓存命中路径带 cmd+rag(cached 标记);深度思考带 `cmd="deep_think(模型/深度): 问题"` + rag=答案全文。done 的 tool_status 发送挪到 RAG 构造之后(原在 content 计算前拿不到)。
+- 卡片 ephemeral(不写服务端对话历史,刷新即无——与旧 intent 气泡同性质);持久化待用户提。

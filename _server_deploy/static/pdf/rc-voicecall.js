@@ -133,7 +133,19 @@
       '#vc-tool-pop .vtp-item:last-child{border-bottom:none}' +
       '#vc-tool-pop .vtp-h{font-weight:600}' +
       '#vc-tool-pop .vtp-t{color:#8a9bb4;font-weight:400;font-size:11px}' +
-      '#vc-tool-pop .vtp-b{color:#aab8d4;margin-top:3px;word-break:break-all;white-space:pre-wrap;max-height:120px;overflow-y:auto}';
+      '#vc-tool-pop .vtp-b{color:#aab8d4;margin-top:3px;word-break:break-all;white-space:pre-wrap;max-height:120px;overflow-y:auto}' +
+      // 侧栏对话流里的工具调用详情卡(v3-⑯,感叹号式)
+      '.vc-tcard{margin:4px 0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;font-size:12px;overflow:hidden}' +
+      '.vc-tcard.err{border-color:rgba(255,105,97,.35)}' +
+      '.vc-tc-h{display:flex;align-items:center;gap:7px;padding:6px 10px;cursor:pointer;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}' +
+      '.vc-tc-h:active{background:rgba(255,255,255,.06)}' +
+      '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:#30d158}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
+      '.vc-tc-l{flex:1;color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-tc-t{flex:none;color:#8a9bb4;font-size:11px}' +
+      '.vc-tc-x{flex:none;color:#8a9bb4}' +
+      '.vc-tc-b{padding:2px 10px 8px;border-top:1px solid rgba(255,255,255,.07)}' +
+      '.vc-tc-k{color:#7c93c4;font-size:11px;margin:6px 0 2px;font-weight:600}' +
+      '.vc-tc-v{color:#b9c6e0;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;word-break:break-all;white-space:pre-wrap;max-height:180px;overflow-y:auto}';
     document.head.appendChild(s);
   }
 
@@ -191,8 +203,41 @@
       b.className = (p.status === 'done') ? 'ok' : 'err';
       b.textContent = (p.status === 'done') ? '✓' : '⚠';
       b.title = it.label + (p.status === 'done' ? ' 完成' : ' 出错') + '(点击看详情)';
+      threadToolCard(p);   // v3-⑯:同时在侧栏对话流留一条可展开的调用记录(感叹号式全过程详情)
     }
     renderToolPop(false);
+  }
+  // 侧栏对话流里的工具调用详情卡(用户设计:像回答旁的感叹号那样,点开看每一步——
+  // S2S 发的指令 JSON / 携带的页面上下文 / 参数 / 喂回豆包播报的真实结果)。折叠一行,点头部展开。
+  function threadToolCard(p) {
+    var th = document.getElementById('asst-thread'); if (!th) return;
+    var ok = p.status === 'done';
+    var d = document.createElement('div'); d.className = 'vc-tcard' + (ok ? '' : ' err');
+    var rows = [];
+    if (p.cmd) rows.push(['指令(S2S 原话)', p.cmd]);
+    if (p.ctx_brief) {
+      var cb = p.ctx_brief, cparts = ['第' + (cb.page || '?') + '页'];
+      if (cb.ink) cparts.push('墨迹' + cb.ink + '笔');
+      if (cb.sel) cparts.push('选中' + cb.sel + '字');
+      rows.push(['携带上下文', cparts.join(' · ')]);
+    }
+    try { if (p.args && Object.keys(p.args).length) rows.push(['参数', JSON.stringify(p.args)]); } catch (e) {}
+    if (p.rag) rows.push(['喂回给它播报的结果', p.rag]);
+    else if (p.result_brief) rows.push(['结果', p.result_brief]);
+    d.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">' + (ok ? '✓' : '⚠') + '</span>' +
+      '<span class="vc-tc-l">' + esc(p.label || p.tool || '工具') + '</span>' +
+      (p.took_s != null ? '<span class="vc-tc-t">' + esc(p.took_s) + 's</span>' : '') +
+      (p.cached ? '<span class="vc-tc-t">复用缓存</span>' : '') +
+      '<span class="vc-tc-x">▸</span></div>' +
+      '<div class="vc-tc-b" style="display:none">' +
+      rows.map(function (r) { return '<div class="vc-tc-k">' + esc(r[0]) + '</div><div class="vc-tc-v">' + esc(r[1]) + '</div>'; }).join('') +
+      '</div>';
+    d.querySelector('.vc-tc-h').addEventListener('click', function () {
+      var body = d.querySelector('.vc-tc-b'), open = body.style.display === 'none';
+      body.style.display = open ? 'block' : 'none';
+      d.querySelector('.vc-tc-x').textContent = open ? '▾' : '▸';
+    });
+    th.appendChild(d); th.scrollTop = th.scrollHeight;
   }
   function renderToolPop(force) {
     var pop = document.getElementById('vc-tool-pop');
