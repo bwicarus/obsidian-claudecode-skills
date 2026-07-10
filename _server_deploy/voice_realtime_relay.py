@@ -400,6 +400,7 @@ def _speech_clean(s: str) -> str:
     s = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"[#*_`>|~]+", " ", s)
+    s = re.sub(r"[(（]\s*(?:第\s*\d+\s*[-~至]?\s*\d*\s*页|p\.?\s*\d+)\s*[)）]", "", s, flags=re.I)   # 页码引用不念(显示保留)
     return re.sub(r"[ \t]+", " ", s)
 
 
