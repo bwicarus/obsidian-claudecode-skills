@@ -117,6 +117,9 @@
       // 朗读开关播报中:淡蓝呼吸
       '.vc-speak-tg.speaking{animation:vcCallPulse 1.2s ease-in-out infinite}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
+      // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
+      '#asst-call,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
+      '#rc-vc .vc-grab{touch-action:none}' +   // 抓手保持 none(要拖拽调高)
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
       '#vc-tool-btn{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
       '#vc-tool-btn.ok{color:#34d399;border-color:#1f6b4a}' +
