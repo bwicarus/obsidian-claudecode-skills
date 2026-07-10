@@ -167,3 +167,11 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **F. 长对话摘要护栏**:559 时自然对话轮(非工具 JSON 轮)记 `book["qa_log"]`(u[:24]+a[:36]);攒满 26 轮 → 最旧 12 轮拼接成一条 510 注入("我们更早聊过这些…"),不调外部模型。豆包 12K 硬限已封顶输入费用,这条主要保认知连续(旧轮滚出窗口时脉络已固化);ConversationTruncate(513) 真删除因官方 payload 格式未公开暂不用,拿到格式可升级为"删+摘"真压缩。
 
 前提待实证:豆包 S2S 前缀缓存行为(cache 命中费率官方提过但字段未见)——A 的账本跑几天真实通话后看 cached 列即知 B/C 实际效果。
+
+## iOS 重连卡死修复(2026-07-11,用户真机反馈"切一次后台就一直显示正在重连")
+
+根因:后台掐 ws → 回前台自动重连调 start(),但 **iOS 非用户手势环境里 suspended AudioContext 的 `resume()` 可能永远 pending(不 resolve 不 reject)** → `await ac.resume()` 死等,start 整个卡住,`.then` 永不触发 → 状态永远"重连中…";且每次再切后台回来又 new 一个 AudioContext 卡住(iOS 有 ~4 个上限,泄漏几次后彻底废)。三层修法(rc-voicecall.js):
+
+- **resume 超时竞速**:`Promise.race([ac.resume(), 800ms])` ——suspended 也继续建链路(ws/字幕全通,只是暂时无声),声音由**常驻捕获 pointerdown** 监听恢复(用户碰一下屏幕即 resume;没通话时 ac=null 零开销)。
+- **连接世代 `_gen`**:teardown/start 都推进;在飞的旧 start 每个 await 后 `_dead()` 自检,过期就清掉**自己建的局部资源**(myAc/myMic)退出——防 iOS 卡死的旧回合在用户触屏后"复活",跟新回合抢出双连接。
+- **重连 watchdog `_tryStart`**:每次尝试 12s 没建成 ws(且世代没被替代、非主动挂断)→ 强制 `_scheduleReconnect` 推进下一轮;覆盖 start 卡死在任何一个 await 上的情况。

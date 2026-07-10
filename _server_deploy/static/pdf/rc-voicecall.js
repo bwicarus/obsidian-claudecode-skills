@@ -26,6 +26,7 @@
   // 配合 Wake Lock 防通话中息屏 + visibilitychange 回前台恢复(音频会话 resume / 后台断的线立即重连)。
   var _userHung = true;                      // true=没在通话/用户主动挂断;false=通话中
   var _reconnT = null, _reconnPend = false, _reconnN = 0, _wakeLock = null;
+  var _gen = 0;                              // 连接世代(teardown/start 推进;在飞的旧 start 过期自毁)
   function _acquireWL() {
     try {
       if (!navigator.wakeLock || _wakeLock) return;
@@ -35,6 +36,19 @@
     } catch (e) {}
   }
   function _releaseWL() { try { if (_wakeLock) { _wakeLock.release(); _wakeLock = null; } } catch (e) {} }
+  function _tryStart() {
+    // 一次重连尝试 = start + watchdog:start 可能整个卡死(iOS 非手势 resume 永远 pending 等)
+    // → .then 永不触发,没有 watchdog 就永远停在"重连中…"。12s 没建成 ws 视为卡死,推进下一轮
+    // (_scheduleReconnect→teardown 会 ++_gen,把挂着的旧 start 判死,不会复活)。
+    setSt('重连中…'); taPlaceholder('语音重连中…');
+    var g0 = _gen + 1;   // start 开头 ++_gen 后的世代号
+    start(toggle._opts || {}).then(function () {
+      if (!ws && g0 === _gen && !_userHung) _scheduleReconnect();   // 本世代失败(未被替代)→ 退避重排
+    });
+    setTimeout(function () {
+      if (!ws && g0 === _gen && !_userHung) _scheduleReconnect();   // watchdog:本世代 12s 没建成 → 强制推进
+    }, 12000);
+  }
   function _scheduleReconnect() {
     if (_reconnT || _reconnPend) return;
     teardown(false); _userHung = false;      // teardown 置回 true → 恢复"通话意外中断"态
@@ -43,10 +57,7 @@
     if (document.hidden) { _reconnPend = true; return; }   // 后台不空转烧退避次数,回前台立即连
     var wait = Math.min(8000, 600 * Math.pow(2, _reconnN - 1));
     setSt('连接断开,' + Math.ceil(wait / 1000) + 's 后自动重连…'); taPlaceholder('语音重连中…');
-    _reconnT = setTimeout(function () {
-      _reconnT = null; setSt('重连中…');
-      start(toggle._opts || {}).then(function () { if (!ws) _scheduleReconnect(); });
-    }, wait);
+    _reconnT = setTimeout(function () { _reconnT = null; _tryStart(); }, wait);
   }
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
@@ -54,9 +65,14 @@
     if (ws) { _acquireWL(); return; }        // 通话还活着:wake lock 切后台被系统释放过 → 重新拿
     if (_reconnPend || (!_userHung && !_reconnT)) {   // 后台断的线 → 回来立即重连
       _reconnPend = false;
-      setSt('重连中…'); start(toggle._opts || {}).then(function () { if (!ws) _scheduleReconnect(); });
+      _tryStart();
     }
   });
+  // iOS 音频恢复:suspended 的 AudioContext 只有用户手势才能真正 resume——常驻捕获监听,
+  // 通话中用户任意触屏即恢复声音(没通话时 ac=null,零开销)。
+  document.addEventListener('pointerdown', function () {
+    try { if (ac && ac.state !== 'running') ac.resume(); } catch (e) {}
+  }, true);
 
   function injectCss() {
     if (document.getElementById('rc-vc-css')) return;
@@ -319,11 +335,27 @@
     // 新连接 = relay 端 book 状态全新 → 指纹清零,让 __vcSyncNow 下一轮把选中/墨迹/页码重推上去
     // (旧代码重连/🧹后指纹残留 → 状态永不重推,relay 不知道选中和圈画)
     _stateFp = null; _inkFp = '';
+    // 连接世代:teardown/新 start 都推进 _gen;在飞的旧 start 每个 await 后自检,过期就清掉
+    // 自己建的资源退出(否则 iOS 卡死的旧回合会在用户触屏后"复活",跟新回合抢出双连接+泄漏 AudioContext)
+    var g = ++_gen, myAc = null, myMic = null;
+    function _dead() { return g !== _gen; }
+    function _cleanLocal() {
+      try { if (myMic) myMic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+      try { if (myAc) myAc.close(); } catch (e) {}
+    }
     try {
-      ac = new (window.AudioContext || window.webkitAudioContext)();
-      await ac.resume();   // iOS:须在手势内
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      myAc = new (window.AudioContext || window.webkitAudioContext)();
+      // ⚠ iOS 坑:非用户手势环境(后台断线自动重连)里 suspended AudioContext 的 resume() 可能
+      // **永远 pending(不 resolve 不 reject)** → 旧代码 await 死等 = "一直显示重连中"的根因。
+      // 改 800ms 超时竞速:suspended 也继续建链路(ws/字幕都通,只是暂时无声),等用户碰一下屏幕
+      // 由常驻 pointerdown 监听 resume 恢复声音。
+      try { await Promise.race([myAc.resume(), new Promise(function (r) { setTimeout(r, 800); })]); } catch (e) {}
+      if (_dead()) { _cleanLocal(); return; }
+      myMic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      if (_dead()) { _cleanLocal(); return; }
+      ac = myAc; micStream = myMic;
       await ac.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
+      if (_dead()) { _cleanLocal(); return; }
       var src = ac.createMediaStreamSource(micStream);
       capNode = new AudioWorkletNode(ac, 'vccap');
       capNode.port.onmessage = function (e) { onCap(e.data, ac.sampleRate); };
@@ -360,10 +392,14 @@
         else if (m.event === 451) { var r = (p.results || [])[0] || {}; if (r.text && r.is_interim === false) setSub('u', r.text); }
         else if (m.event === 550) { curAText += (p.content || ''); setSub('a', curAText); }
       };
-    } catch (ex) { setSt('启动失败: ' + ex.message); teardown(false); }
+    } catch (ex) {
+      _cleanLocal();
+      if (!_dead()) { setSt('启动失败: ' + ex.message); teardown(false); }
+    }
   }
 
   function teardown(closeBox) {
+    _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
     _userHung = true; _releaseWL();
     if (_reconnT) { clearTimeout(_reconnT); _reconnT = null; }
     _reconnPend = false;
