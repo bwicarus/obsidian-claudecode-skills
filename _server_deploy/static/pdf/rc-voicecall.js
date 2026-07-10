@@ -39,7 +39,7 @@
     if (_reconnT || _reconnPend) return;
     teardown(false); _userHung = false;      // teardown 置回 true → 恢复"通话意外中断"态
     _reconnN++;
-    if (_reconnN > 8) { _userHung = true; _reconnN = 0; setSt('连接断开(点 📞 重拨)'); taPlaceholder(null); return; }
+    if (_reconnN > 8) { _userHung = true; _reconnN = 0; setSt('连接断开(点通话按钮重拨)'); taPlaceholder(null); return; }
     if (document.hidden) { _reconnPend = true; return; }   // 后台不空转烧退避次数,回前台立即连
     var wait = Math.min(8000, 600 * Math.pow(2, _reconnN - 1));
     setSt('连接断开,' + Math.ceil(wait / 1000) + 's 后自动重连…'); taPlaceholder('语音重连中…');
@@ -62,25 +62,34 @@
     if (document.getElementById('rc-vc-css')) return;
     var s = document.createElement('style'); s.id = 'rc-vc-css';
     s.textContent =
-      '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(13,19,34,.96);' +
-      'border:1px solid #2a3a63;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);color:#dbe7ff;font-size:13px;overflow:hidden}' +
-      '#rc-vc .vc-head{display:flex;align-items:center;gap:8px;padding:9px 12px;background:rgba(0,0,0,.3)}' +
-      '#rc-vc .vc-st{flex:1;color:#8a9bb4;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '#rc-vc .vc-x{background:none;border:none;color:#8a9bb4;font-size:15px;cursor:pointer;padding:2px 6px}' +
-      '#rc-vc .vc-sub{padding:8px 12px;min-height:44px;max-height:120px;overflow-y:auto}' +
-      '#rc-vc .vc-u{color:#9fcbff;margin-bottom:3px}' +
-      '#rc-vc .vc-a{color:#dbe7ff}' +
-      '#rc-vc .vc-vids{display:flex;gap:6px;overflow-x:auto;padding:0 12px 8px}' +
-      '#rc-vc .vc-vid{flex:0 0 128px;cursor:pointer;background:#0d1322;border:1px solid #263255;border-radius:8px;overflow:hidden}' +
+      // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
+      '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(24,30,46,.78);' +
+      '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
+      'border:1px solid rgba(255,255,255,.09);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.45);color:#eaf0fa;' +
+      'font-size:13px;overflow:hidden;font-family:-apple-system,system-ui,sans-serif}' +
+      // sheet 抓手:Apple 底部面板同款小横条,整条可拖 → 调下方对话区高度
+      '#rc-vc .vc-grab{padding:7px 0 3px;display:flex;justify-content:center;cursor:ns-resize;touch-action:none}' +
+      '#rc-vc .vc-grab::before{content:"";width:36px;height:5px;border-radius:3px;background:rgba(255,255,255,.28)}' +
+      '#rc-vc .vc-head{display:flex;align-items:center;gap:8px;padding:2px 12px 8px}' +
+      '#rc-vc .vc-dot{width:8px;height:8px;border-radius:50%;background:#ff9f0a;flex:none;animation:vcDot 1.1s ease-in-out infinite}' +
+      '#rc-vc.on .vc-dot{background:#30d158;animation:vcDot 2.2s ease-in-out infinite}' +
+      '@keyframes vcDot{0%,100%{opacity:1}50%{opacity:.35}}' +
+      '#rc-vc .vc-st{flex:1;color:rgba(235,240,250,.55);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '#rc-vc .vc-new,#rc-vc .vc-x{background:rgba(255,255,255,.08);border:none;color:rgba(235,240,250,.75);width:28px;height:28px;' +
+      'border-radius:50%;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;padding:0;-webkit-tap-highlight-color:transparent}' +
+      '#rc-vc .vc-new:active,#rc-vc .vc-x:active{background:rgba(255,255,255,.18)}' +
+      '#rc-vc .vc-x{color:#ff6961}' +
+      // 对话区:累积消息流(iMessage 风),高度由抓手拖出来、持久化
+      '#rc-vc .vc-sub{padding:2px 12px 8px;height:132px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;overscroll-behavior:contain}' +
+      '#rc-vc .vc-m{max-width:86%;padding:6px 11px;border-radius:16px;line-height:1.45;word-break:break-word;white-space:pre-wrap}' +
+      '#rc-vc .vc-mu{align-self:flex-end;background:#0a84ff;color:#fff;border-bottom-right-radius:5px}' +
+      '#rc-vc .vc-ma{align-self:flex-start;background:rgba(255,255,255,.12);color:#eaf0fa;border-bottom-left-radius:5px}' +
+      '#rc-vc .vc-vids{display:flex;gap:6px;overflow-x:auto;padding:0 12px 10px}' +
+      '#rc-vc .vc-vid{flex:0 0 128px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);border-radius:10px;overflow:hidden}' +
       '#rc-vc .vc-vid img{width:100%;height:72px;object-fit:cover;display:block}' +
       '#rc-vc .vc-vid div{font-size:11px;padding:4px 6px;line-height:1.3;max-height:33px;overflow:hidden}' +
-      '#rc-vc .vc-mic{display:flex;justify-content:center;padding:10px 0 12px}' +
-      '#rc-vc .vc-mic button{width:58px;height:58px;border-radius:50%;border:none;font-size:24px;cursor:pointer;background:#1a7f4b;color:#fff}' +
-      '#rc-vc.on .vc-mic button{background:#b73a3a}' +
-      // 内嵌形态:活在侧栏输入框上方(不再 fixed 右下角);挂断键缩小
-      '#rc-vc.vc-inline{position:static;width:auto;margin:0 10px 6px;right:auto;bottom:auto;box-shadow:0 4px 16px rgba(0,0,0,.35)}' +
-      '#rc-vc.vc-inline .vc-mic{padding:6px 0 8px}' +
-      '#rc-vc.vc-inline .vc-mic button{width:44px;height:44px;font-size:19px}' +
+      // 内嵌形态:活在侧栏输入框上方(不再 fixed 右下角)
+      '#rc-vc.vc-inline{position:static;width:auto;margin:0 10px 6px;right:auto;bottom:auto;box-shadow:0 4px 16px rgba(0,0,0,.3)}' +
       // 侧栏 composer 里的通话入口按钮(样式镜像 #asst-mic;通话中绿色呼吸)
       '#asst-call{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
       '#asst-call:active{transform:scale(.9)}' +
@@ -94,7 +103,9 @@
       '#vc-tool-btn.err{color:#f87171;border-color:#7f2a2a}' +
       '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
-      '#vc-tool-pop{position:fixed;right:14px;bottom:132px;z-index:2147482100;width:min(340px,90vw);max-height:50vh;overflow-y:auto;background:rgba(13,19,34,.97);border:1px solid #2a3a63;border-radius:12px;padding:6px;color:#dbe7ff;font-size:12px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
+      '#vc-tool-pop{position:fixed;right:14px;bottom:132px;z-index:2147482100;width:min(340px,90vw);max-height:50vh;overflow-y:auto;background:rgba(24,30,46,.85);' +
+      '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
+      'border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:6px;color:#eaf0fa;font-size:12px;box-shadow:0 12px 40px rgba(0,0,0,.45)}' +
       '#vc-tool-pop .vtp-item{padding:7px 8px;border-bottom:1px solid #1d2a4a}' +
       '#vc-tool-pop .vtp-item:last-child{border-bottom:none}' +
       '#vc-tool-pop .vtp-h{font-weight:600}' +
@@ -167,11 +178,21 @@
       return '<div class="vtp-item">' + head + body + '</div>';
     }).join('') || '<div class="vtp-item">还没有工具调用</div>';
   }
+  // 字幕改**累积对话流**(iMessage 风,右蓝=你/左灰=AI):旧版只有"最后一句"两行,用户反馈看不到对话内容。
+  // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
+  var curAEl = null;
   function setSub(who, text) {
     if (!box) return;
-    var el = box.querySelector(who === 'u' ? '.vc-u' : '.vc-a');
-    el.textContent = (who === 'u' ? '你: ' : '豆包: ') + text;
-    var sub = box.querySelector('.vc-sub'); sub.scrollTop = sub.scrollHeight;
+    var sub = box.querySelector('.vc-sub'); if (!sub) return;
+    if (who === 'u') {
+      var d = document.createElement('div'); d.className = 'vc-m vc-mu'; d.textContent = text;
+      sub.appendChild(d); curAEl = null;
+    } else {
+      if (!curAEl || !curAEl.parentNode) { curAEl = document.createElement('div'); curAEl.className = 'vc-m vc-ma'; sub.appendChild(curAEl); }
+      curAEl.textContent = text;
+    }
+    while (sub.children.length > 80) sub.removeChild(sub.firstChild);
+    sub.scrollTop = sub.scrollHeight;
   }
 
   // ── 播放(PCM24k)+ 打断 ──
@@ -333,7 +354,7 @@
         if (m.event === 150) setSt('通话中(会话已建立)');
         else if (m.event === 359 && p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→识别退出意图→播完告别语自动挂断
         else if (m.event === 450) {   // 用户开口:打断播报 + **立即同步一次上下文**(墨迹/选中,赶在模型答题前——治刚画完就问的竞态)
-          stopPlayback(); curAText = '';
+          stopPlayback(); curAText = ''; curAEl = null;
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
         }
         else if (m.event === 451) { var r = (p.results || [])[0] || {}; if (r.text && r.is_interim === false) setSub('u', r.text); }
@@ -352,7 +373,7 @@
     try { if (capNode) capNode.disconnect(); } catch (e) {}
     try { if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     try { if (ac) ac.close(); } catch (e) {}
-    ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0); curAText = '';
+    ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0); curAText = ''; curAEl = null;
     vt.sent = 0; vt.tail = ''; pendingUtter = null;
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
@@ -370,24 +391,49 @@
     }
     if (!box) {
       box = document.createElement('div'); box.id = 'rc-vc';
-      box.innerHTML = '<div class="vc-head"><span>🎙</span><span class="vc-st">连接中…</span><button class="vc-new" title="新话题:清空对话记忆重新开始(书页上下文保留,忘掉之前聊的全部内容)">🧹</button><button class="vc-x">✕</button></div>' +
-        '<div class="vc-sub"><div class="vc-u"></div><div class="vc-a"></div></div>' +
-        '<div class="vc-vids"></div>' +
-        '<div class="vc-mic"><button title="挂断/重拨">📞</button></div>';
+      // Apple 风:抓手(拖=调对话区高度)+ 状态点 + SF 线条按钮(↺=新话题 / ✕=结束通话);挂断大圆钮撤掉——
+      // 入口按钮 #asst-call 本身就是开关(再点=挂断),窗内 ✕ 同义
+      box.innerHTML = '<div class="vc-grab" title="拖动调整对话区高度"></div>' +
+        '<div class="vc-head"><span class="vc-dot"></span><span class="vc-st">连接中…</span>' +
+        '<button class="vc-new" title="新话题:清空对话记忆重新开始(书页上下文保留)">' +
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><polyline points="18.5 2.5 18.5 6.5 14.5 6.5"/></svg></button>' +
+        '<button class="vc-x" title="结束通话">' +
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>' +
+        '<div class="vc-sub"></div>' +
+        '<div class="vc-vids"></div>';
       // 侧栏在 → 通话条内嵌在输入框上方(跟对话流一体);侧栏组件不在 → 右下角浮层兜底
       var asstInput = document.getElementById('asst-input');
       if (asstInput && asstInput.parentNode) { box.classList.add('vc-inline'); asstInput.parentNode.insertBefore(box, asstInput); }
       else document.body.appendChild(box);
       box.querySelector('.vc-x').addEventListener('click', function () { teardown(true); });
-      box.querySelector('.vc-new').addEventListener('click', function () {   // 🧹 新话题:挂断 → 带 fresh=1 重连(relay 清 dialog_id + 不带历史)
+      box.querySelector('.vc-new').addEventListener('click', function () {   // ↺ 新话题:挂断 → 带 fresh=1 重连(relay 清 dialog_id + 不带历史)
         teardown(false);
         toggle._fresh = true;
         setSt('已清空记忆,重新开始…');
         start(toggle._opts || {});
       });
-      box.querySelector('.vc-mic button').addEventListener('click', function () {
-        if (ws) { teardown(false); setSt('已挂断'); } else { setSt('连接中…'); start(toggle._opts || {}); }
-      });
+      // 抓手拖拽:上拖=对话区变高(窗在输入框上方,向上扩展),高度存 localStorage 下次直接复原
+      (function () {
+        var g = box.querySelector('.vc-grab'), sub = box.querySelector('.vc-sub');
+        function _clampH(h) { return Math.min(Math.max(h, 56), Math.round((window.innerHeight || 800) * 0.6)); }
+        try { var h0 = parseInt(localStorage.getItem('rcVcSubH') || '', 10); if (h0) sub.style.height = _clampH(h0) + 'px'; } catch (e) {}
+        var drag = false, y0 = 0, hStart = 0;
+        g.addEventListener('pointerdown', function (e) {
+          drag = true; y0 = e.clientY; hStart = sub.getBoundingClientRect().height;
+          try { g.setPointerCapture(e.pointerId); } catch (_) {}
+          e.preventDefault();
+        });
+        g.addEventListener('pointermove', function (e) {
+          if (!drag) return;
+          sub.style.height = _clampH(hStart + (y0 - e.clientY)) + 'px';
+        });
+        ['pointerup', 'pointercancel'].forEach(function (n) {
+          g.addEventListener(n, function () {
+            if (!drag) return; drag = false;
+            try { localStorage.setItem('rcVcSubH', String(Math.round(sub.getBoundingClientRect().height))); } catch (e) {}
+          });
+        });
+      })();
     }
     toggle._opts = opts || {};
     try { box.querySelector('.vc-new').style.display = (mode === 's2s') ? '' : 'none'; } catch (e) {}   // 🧹 是 S2S 记忆专用;agent 模式用助手自己的「清空」
@@ -454,30 +500,21 @@
     injectCss();
     var b = document.createElement('button');
     b.id = 'asst-call'; b.type = 'button';
-    b.title = '语音对话(说话=直接问助手,回答会朗读出来;查词/找视频/制卡/高亮等工具全可用,过程显示在对话里)';
+    b.title = '语音伴读(点=开始通话,再点=挂断;翻页/圈画/选中它都实时知道,说"找视频/翻到第N页"它真执行)';
     b.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5.3C5 14.8 9.2 19 18.7 19c.72 0 1.3-.58 1.3-1.3v-2.35c0-.56-.36-1.06-.9-1.23l-2.62-.87a1.3 1.3 0 0 0-1.33.32l-.95.95a11.6 11.6 0 0 1-4.72-4.72l.95-.95c.35-.35.47-.87.32-1.33L9.85 4.9A1.3 1.3 0 0 0 8.62 4H6.3C5.58 4 5 4.58 5 5.3z"/></svg>';
     var mic = document.getElementById('asst-mic');
     if (mic && mic.parentNode === input) input.insertBefore(b, mic.nextSibling);
     else input.insertBefore(b, input.firstChild);
-    // 短按=语音输入(agent);长按 600ms=S2S 伴读通话(端到端语音对话:自然闲聊+说"找视频/翻到第N页"它真执行)
-    var _lpT = null, _lpFired = false;
-    b.addEventListener('pointerdown', function () {
-      _lpFired = false;
-      _lpT = setTimeout(function () {
-        _lpFired = true;
-        try { navigator.vibrate && navigator.vibrate(15); } catch (e) {}
-        if (ws) { teardown(false); }   // 先挂掉现有(不管哪种模式)再开 s2s
-        if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
-      }, 600);
-    });
-    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evn) {
-      b.addEventListener(evn, function () { if (_lpT) { clearTimeout(_lpT); _lpT = null; } });
-    });
-    b.addEventListener('contextmenu', function (e) { e.preventDefault(); });   // 长按不弹菜单(iOS)
+    // 单击 = S2S 通话开关(用户裁定:不要"先开小窗再按开始"的两步;语音输入归旁边的系统听写 #asst-mic)。
+    // 旧 agent 模式(豆包 ASR 转写进输入框)入口撤掉,代码保留(window._voiceCall 仍可调)。
     b.addEventListener('click', function () {
-      if (_lpFired) { _lpFired = false; return; }   // 长按已处理,吞掉随后的 click
-      // 21-misc-ai 的 _voiceCall 带 FILE_REL/currentPage(模块作用域);没有就裸开(无书页上下文)
-      if (window._voiceCall) window._voiceCall(); else toggle({});
+      if (ws || _reconnT || _reconnPend) {   // 通话中/重连排队中 → 挂断(开关 off)
+        teardown(true);
+        taPlaceholder(null);
+        return;
+      }
+      try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
+      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
     });
     // 工具调用状态按钮(v3-⑤):挤在 📞 右边;点击开合详情弹层
     var tb = document.createElement('button');

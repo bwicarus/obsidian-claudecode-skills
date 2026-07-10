@@ -147,3 +147,10 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **Wake Lock**:onopen `navigator.wakeLock.request('screen')`(iOS 16.4+),teardown 释放;切后台系统会自动释放 → 回前台重新拿。
 - **回前台恢复**(visibilitychange):`ac.state!=='running'→ac.resume()`(iOS 音频会话被挂起);ws 活着→补 wake lock;ws 没了且非主动挂断→立即重连。
 - **iOS 后台保活边界**(系统行为,代码只能兜底):Safari 里 getUserMedia 活跃(麦克风红标)时页面**通常**不被冻结,但锁屏/长时间后台仍可能掐 ws——被掐就走上面的自动重连,回前台几秒内接续记忆恢复通话。真机体验待用户实测反馈。
+
+## 一键开关 + Apple 简约 UI + 对话窗拖高(2026-07-10 第九批,v3-⑨,用户需求)
+
+- **#asst-call 单击 = S2S 开关**:点=直接开通话(_voiceCallS2S,零中间步骤),再点=挂断(teardown(true),重连排队中点=取消重连+挂断)。**长按逻辑删除,agent 模式入口撤掉**(代码保留,`window._voiceCall` 仍可调)——语音输入归旁边的系统听写 #asst-mic,豆包按钮只管 S2S 伴读(与产品反思一致:sauc≈Apple 听写无优势)。
+- **通话条 Apple 风重做**(#rc-vc):毛玻璃(`backdrop-filter:blur(24px) saturate(1.5)`+rgba 半透底+细白边)、iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)、emoji 全换 **SF 线条 SVG**(↺=新话题、✕=结束)、头部**状态点**(橙呼吸=连接中/绿=通话中,`.vc-dot`+`#rc-vc.on`)、挂断大圆钮撤掉(✕ 或入口按钮再点即挂)。⚠ box 无 transform(iOS backdrop-filter+transform 命中盒坑,见 [[reader-toolbar-icons-svg]] 侧栏教训)。
+- **字幕改累积对话流**(用户反馈"看不到对话内容"——旧版覆盖式只显示最后一句):iMessage 风右蓝(你)/左灰(AI)气泡,AI 一轮=一个气泡(550 增量更新同一元素,450 用户开口=上轮定稿 curAEl=null),上限 80 条滚动裁剪。
+- **对话区可拖高**:顶部 **Apple sheet 抓手**(36×5 圆条,`.vc-grab` 整条 ns-resize+touch-action:none),pointerdown+setPointerCapture 上拖=变高(窗在输入框上方向上扩展),clamp 56px~60vh,松手存 `localStorage.rcVcSubH` 下次复原。
