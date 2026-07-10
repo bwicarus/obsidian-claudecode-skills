@@ -126,14 +126,6 @@
       '#vc-tool-btn.err{color:#f87171;border-color:#7f2a2a}' +
       '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
-      '#vc-tool-pop{position:fixed;right:14px;bottom:132px;z-index:2147482100;width:min(340px,90vw);max-height:50vh;overflow-y:auto;background:rgba(24,30,46,.85);' +
-      '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
-      'border:1px solid rgba(255,255,255,.09);border-radius:14px;padding:6px;color:#eaf0fa;font-size:12px;box-shadow:0 12px 40px rgba(0,0,0,.45)}' +
-      '#vc-tool-pop .vtp-item{padding:7px 8px;border-bottom:1px solid #1d2a4a}' +
-      '#vc-tool-pop .vtp-item:last-child{border-bottom:none}' +
-      '#vc-tool-pop .vtp-h{font-weight:600}' +
-      '#vc-tool-pop .vtp-t{color:#8a9bb4;font-weight:400;font-size:11px}' +
-      '#vc-tool-pop .vtp-b{color:#aab8d4;margin-top:3px;word-break:break-all;white-space:pre-wrap;max-height:120px;overflow-y:auto}' +
       // 侧栏对话流里的工具调用详情卡(v3-⑯,感叹号式)
       '.vc-tcard{margin:4px 0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;font-size:12px;overflow:hidden}' +
       '.vc-tcard.err{border-color:rgba(255,105,97,.35)}' +
@@ -184,28 +176,23 @@
 
   // ── 工具调用状态按钮(v3-⑤,用户设计):执行通知**不进侧栏对话流**,收敛到固定小按钮——
   //    调用中转圈、完成 ✓、出错 ⚠;点击弹出调用详情(工具/args/耗时/实际输出,仿「!」弹窗模式)。──
-  var toolLog = [];   // 最近调用 {label,status,tool,args,took_s,result_brief,cached}
+  // v3-⑯b(用户设计):转圈按钮=纯"进行中"指示——调用开始现身旋转,**点击即中止**,
+  //   结束/中止后自动消失;查记录的职责全归对话流详情卡(threadToolCard)。
   function onToolStatus(p) {
     p = p || {};
     var b = document.getElementById('vc-tool-btn'); if (!b) return;
     if (p.status === 'running') {
-      toolLog.unshift({ label: p.label || '工具', status: 'running' });
-      if (toolLog.length > 8) toolLog.pop();
       b.style.display = 'flex'; b.className = 'running'; b.innerHTML = '<span class="vc-spin"></span>';
-      b.title = '正在执行:' + (p.label || '工具');
+      b.title = '正在执行:' + (p.label || '工具') + '(点击中止)';
     } else {
-      var it = null;
-      for (var i = 0; i < toolLog.length; i++) if (toolLog[i].status === 'running') { it = toolLog[i]; break; }
-      if (!it) { it = {}; toolLog.unshift(it); if (toolLog.length > 8) toolLog.pop(); }
-      it.status = p.status; it.tool = p.tool; it.label = p.label || it.label || p.tool || '工具';
-      it.args = p.args; it.took_s = p.took_s; it.result_brief = p.result_brief; it.cached = p.cached;
-      b.style.display = 'flex';
-      b.className = (p.status === 'done') ? 'ok' : 'err';
-      b.textContent = (p.status === 'done') ? '✓' : '⚠';
-      b.title = it.label + (p.status === 'done' ? ' 完成' : ' 出错') + '(点击看详情)';
-      threadToolCard(p);   // v3-⑯:同时在侧栏对话流留一条可展开的调用记录(感叹号式全过程详情)
+      b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
+      if (p.status === 'aborted') {
+        var th = document.getElementById('asst-thread');
+        if (th) { var a = document.createElement('div'); a.className = 'vc-tcard err'; a.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">⊘</span><span class="vc-tc-l">已中止</span></div>'; th.appendChild(a); th.scrollTop = th.scrollHeight; }
+      } else {
+        threadToolCard(p);   // 调用记录进对话流(点开看全过程)
+      }
     }
-    renderToolPop(false);
   }
   // 侧栏对话流里的工具调用详情卡(用户设计:像回答旁的感叹号那样,点开看每一步——
   // S2S 发的指令 JSON / 携带的页面上下文 / 参数 / 喂回豆包播报的真实结果)。折叠一行,点头部展开。
@@ -238,21 +225,6 @@
       d.querySelector('.vc-tc-x').textContent = open ? '▾' : '▸';
     });
     th.appendChild(d); th.scrollTop = th.scrollHeight;
-  }
-  function renderToolPop(force) {
-    var pop = document.getElementById('vc-tool-pop');
-    if (!pop) return;
-    if (pop.style.display === 'none' && !force) return;
-    pop.innerHTML = toolLog.map(function (it) {
-      var st = it.status === 'running' ? '<span class="vc-spin"></span>' : (it.status === 'done' ? '✓' : '⚠');
-      var head = '<div class="vtp-h">' + st + ' ' + esc(it.label || it.tool || '') +
-        (it.took_s != null ? ' <span class="vtp-t">' + esc(it.took_s) + 's</span>' : '') +
-        (it.cached ? ' <span class="vtp-t">复用缓存</span>' : '') + '</div>';
-      var body = '';
-      try { if (it.args && Object.keys(it.args).length) body += '<div class="vtp-b">args: ' + esc(JSON.stringify(it.args)) + '</div>'; } catch (e) {}
-      if (it.result_brief) body += '<div class="vtp-b">' + esc(it.result_brief) + '</div>';
-      return '<div class="vtp-item">' + head + body + '</div>';
-    }).join('') || '<div class="vtp-item">还没有工具调用</div>';
   }
   // 字幕改**累积对话流**(iMessage 风,右蓝=你/左灰=AI):旧版只有"最后一句"两行,用户反馈看不到对话内容。
   // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
@@ -669,17 +641,14 @@
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
       if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });   // 电话按钮=S2S 专属
     });
-    // 工具调用状态按钮(v3-⑤):挤在 📞 右边;点击开合详情弹层
+    // 工具进行中按钮(v3-⑯b):调用开始出现转圈,点击=中止,结束自动消失
     var tb = document.createElement('button');
-    tb.id = 'vc-tool-btn'; tb.type = 'button'; tb.title = '工具调用状态';
+    tb.id = 'vc-tool-btn'; tb.type = 'button'; tb.title = '正在执行(点击中止)';
     input.insertBefore(tb, b.nextSibling);
-    var pop = document.createElement('div');
-    pop.id = 'vc-tool-pop'; pop.style.display = 'none';
-    document.body.appendChild(pop);
     tb.addEventListener('click', function () {
-      var show = pop.style.display === 'none';
-      if (show) renderToolPop(true);
-      pop.style.display = show ? 'block' : 'none';
+      if (tb.className !== 'running') return;
+      tb.innerHTML = '<span class="vc-spin" style="opacity:.4"></span>'; tb.title = '正在中止…';
+      try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'tool_abort' })); } catch (e) {}
     });
     return true;
   }

@@ -1180,6 +1180,19 @@ async def handle_browser(bws):
                                 sys.stderr.write(f"[voice-rt] 圈画同步 p{ip} strokes={len(strokes)} v{book['ink_ver']}\n")
                         elif t == "cfg":   # 设置面板改了语音配置(音色/语速/人设)→ 热更(指纹含 tts,变了才真发)
                             asyncio.create_task(_push_sp())
+                        elif t == "tool_abort":   # 用户点转圈按钮中止工具执行(v3-⑯b)
+                            book["deep_abort"] = True   # 深度思考走自己的打断路径(停发不补 end 包)
+                            tk = book.get("tool_task")
+                            if tk and not tk.done():
+                                tk.cancel()   # 掐掉 relay 侧等待(webapp 里已发出的执行不追);finally 已摘牌
+                                try:
+                                    rag = json.dumps([{"title": "系统通知",
+                                                       "content": "用户手动取消了刚才那个工具的执行,不会再有结果;简短确认一句即可,别道歉太多。"}], ensure_ascii=False)
+                                    await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
+                                except Exception:
+                                    pass
+                            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "aborted", "label": "已中止"}}, ensure_ascii=False))
+                            sys.stderr.write("[voice-rt] 工具执行被用户中止\n")
                         elif t == "finish":
                             await dws.send(enc(T_FULL_CLIENT, 102, b"{}", session_id=sid))
 
@@ -1285,7 +1298,7 @@ async def handle_browser(bws):
                                 if cmd:
                                     reply_fired.add(rid)
                                     drop_audio = True   # 静音 v2:此后到达的音频≈JSON 段,丢到 359(TTSEnded)
-                                    asyncio.create_task(_run_voice_tool(bws, dws, sid, cmd, file_rel, page, book=book, push_sp=_push_sp))
+                                    book['tool_task'] = asyncio.create_task(_run_voice_tool(bws, dws, sid, cmd, file_rel, page, book=book, push_sp=_push_sp))
                         elif ev == 559:   # 回复结束:flush 未发的尾巴;增量没触发过但全文含 "tool" → 整段交服务端顽强解析兜底
                             rid = pl.get("reply_id") or "_"
                             full = reply_buf.pop(rid, "")
@@ -1294,7 +1307,7 @@ async def handle_browser(bws):
                                 if rest:
                                     await bws.send(json.dumps({"event": 550, "payload": {"content": rest}}, ensure_ascii=False))
                             if full and rid not in reply_fired and '"tool"' in full:
-                                asyncio.create_task(_run_voice_tool(bws, dws, sid, full, file_rel, page, book=book, push_sp=_push_sp))
+                                book['tool_task'] = asyncio.create_task(_run_voice_tool(bws, dws, sid, full, file_rel, page, book=book, push_sp=_push_sp))
                             elif full and rid not in reply_fired:
                                 g = _GOPAGE_FALLBACK.search(full)   # 翻页特例兜底(见常量注释)
                                 if g:

@@ -251,3 +251,8 @@ v3-⑤ 的固定状态按钮(转圈/✓)保留做**进行中**状态;**完成后
 - 展开内容 = 全过程:**指令(S2S 原话 JSON)** / **携带上下文**(第N页·墨迹N笔·选中N字) / **参数** / **喂回给它播报的结果**(RAG 全文 ≤1600)。
 - 数据源 = relay tool_status done/error 事件扩容:`cmd`(S2S 原始指令 ≤500)+ `ctx_brief{page,ink,sel}` + `rag`(喂回内容);缓存命中路径带 cmd+rag(cached 标记);深度思考带 `cmd="deep_think(模型/深度): 问题"` + rag=答案全文。done 的 tool_status 发送挪到 RAG 构造之后(原在 content 计算前拿不到)。
 - 卡片 ephemeral(不写服务端对话历史,刷新即无——与旧 intent 气泡同性质);持久化待用户提。
+
+### 进行中按钮=可中止的瞬态指示(v3-⑯b,用户设计)
+
+- #vc-tool-btn 职责收窄:调用开始**出现并转圈**(title"点击中止")→ **点击=中止**(发 `{type:"tool_abort"}`)→ done/error/aborted **自动消失**。常驻 ✓/⚠ 与详情弹层(toolLog/renderToolPop/#vc-tool-pop)整体退役——查记录归对话流详情卡。
+- **中止实现**:relay 存 `book["tool_task"]`(两处 create_task),tool_abort → `task.cancel()`(掐掉 relay 侧等待,webapp 已发出的执行不追,finally 摘牌照跑)+ `deep_abort=True`(深度思考走自己的打断路径)+ external_rag 注入"用户手动取消了,不会再有结果,简短确认即可"(豆包知情且自然回应一句)+ tool_status aborted → 前端按钮消失+对话流一条「⊘ 已中止」小卡。
