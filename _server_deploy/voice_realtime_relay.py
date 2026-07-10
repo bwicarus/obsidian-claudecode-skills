@@ -45,6 +45,8 @@ WEBAPP = "http://127.0.0.1:5000"
 _TOKEN_FILE = Path("~/.config/mcp-webapp-token").expanduser()
 DIALOG_ID_FILE = Path("/home/bwicarus/claude/state/doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
 USAGE_FILE = Path("/home/bwicarus/claude/state/doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
+ACK_PCM_DIR = Path("/home/bwicarus/claude/state/doubao-ack-pcm")            # 确认语 PCM 缓存(v3-⑪:首次豆包合成时录下,之后 relay 直接回放,零合成费)
+ACK_PCM_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── S2S 用量记账(154 UsageResponse 每轮 token 用量)──
 # 官方字段(文档 154 事件):input_text_tokens / input_audio_tokens / cached_text_tokens /
@@ -509,10 +511,27 @@ async def _inject_500_memory(dws, sid, question: str, answer: str):
         pass
 
 
-async def _say_ack(dws, sid, tool: str):
-    """fire 后立刻播确认语(500 ChatTTSText,两包 start/end)。豆包按 session 串行排在被丢弃的 JSON 轮之后。"""
+def _ack_pcm_path(txt: str) -> Path:
+    import hashlib
+    return ACK_PCM_DIR / (hashlib.md5(txt.encode("utf-8")).hexdigest() + ".pcm")
+
+
+async def _say_ack(bws, dws, sid, tool: str, book: dict):
+    """fire 后立刻播确认语。v3-⑪(用户点子):确认语是固定集合,**首次**让豆包合成(500 ChatTTSText)
+    并把下行 PCM 录进 state/doubao-ack-pcm/ —— 之后同句直接由 relay 回放缓存给前端:
+    零合成费(输出音频 300元/M 一分不花)+ 零延迟(不用等豆包排轮,1.6s→即时)。"""
     txt = _ACK_TEXT.get(tool, "好,我来处理。")
+    p = _ack_pcm_path(txt)
+    if p.exists():
+        try:
+            data = p.read_bytes()
+            for i in range(0, len(data), 4800):   # ~100ms/片(24k s16le),沿用前端 playPcm 排队机制
+                await bws.send(data[i:i + 4800])
+            return txt
+        except Exception as ex:
+            sys.stderr.write(f"[voice-rt ack replay] {ex}\n")
     try:
+        book["ack_rec"] = {"txt": txt, "buf": bytearray(), "on": False}   # 下一个 chat_tts_text 轮开录(350 置 on)
         for pkt in ({"start": True, "content": txt, "end": False},
                     {"start": False, "content": "", "end": True}):
             await dws.send(enc(T_FULL_CLIENT, 500, json.dumps(pkt, ensure_ascii=False).encode(), session_id=sid))
@@ -582,7 +601,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
 
     if tname == "deep_think":   # 深度思考虚拟工具:不走 voice-tool,relay 直接流式代播(见 _run_deep_think)
         q = (targs0 or {}).get("question") if isinstance(targs0, dict) else ""
-        ack = await _say_ack(dws, sid, "deep_think")
+        ack = await _say_ack(bws, dws, sid, "deep_think", book)
         await bws.send(json.dumps({"event": 550, "payload": {"content": ack}}, ensure_ascii=False))
         await _run_deep_think(bws, dws, sid, q or (book.get("user_q") or ""), file_rel, page, book, push_sp)
         return
@@ -606,7 +625,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         book.setdefault("tasks", {})[tname] = 1   # 任务开始 → SP 标"正在执行"
         if push_sp:
             await push_sp()
-        ack = await _say_ack(dws, sid, tname)   # 代播确认语(模型自己整轮只有 JSON,已被静音)
+        ack = await _say_ack(bws, dws, sid, tname, book)   # 代播确认语(模型自己整轮只有 JSON,已被静音);缓存命中=relay 直接回放 PCM
         await bws.send(json.dumps({"event": 550, "payload": {"content": ack}}, ensure_ascii=False))   # 字幕同步补上确认语
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tname}}, ensure_ascii=False))
         ctx = {"file_rel": file_rel, "page": page} if file_rel else {}
@@ -1087,6 +1106,9 @@ async def handle_browser(bws):
                     if d["type"] == T_AUDIO_SERVER:                     # TTSResponse 音频(pcm_s16le 24k)
                         if not mute and not drop_audio:
                             await bws.send(d["payload"])
+                            rec = book.get("ack_rec")   # v3-⑪ 确认语录音窗口(350 chat_tts_text 开 → 359 存):tee 一份
+                            if rec and rec.get("on") and len(rec["buf"]) < 500_000:
+                                rec["buf"] += d["payload"]
                         continue
                     if d["type"] in (T_FULL_SERVER, T_ERROR):
                         try:
@@ -1110,6 +1132,7 @@ async def handle_browser(bws):
                             _log_usage(pl)
                         elif ev == 450:   # 用户开口:①重推最新 SP(指纹确认制:没变且已确认的不推) ②打断深度思考播报(官方要求:被打断不补 end 包)
                             book["deep_abort"] = True
+                            book["ack_rec"] = None   # 确认语合成被打断 → 丢弃残缺录音(防缓存半句)
                             asyncio.create_task(_push_sp())
                         elif ev == 451:   # 记录用户语音终稿(笔迹询问程序兜底判定用)
                             try:
@@ -1122,6 +1145,8 @@ async def handle_browser(bws):
                             tt = pl.get("tts_type") or ""
                             if tt in ("chat_tts_text", "external_rag"):
                                 drop_audio = False
+                            if tt == "chat_tts_text" and book.get("ack_rec") is not None:
+                                book["ack_rec"]["on"] = True   # 确认语合成轮开始 → 开录(v3-⑪)
                             if DEBUG:
                                 sys.stderr.write(f"[voice-rt 350] tt={tt} drop={drop_audio}\n")
                             if _is_cmd_sent(pl.get("text") or ""):   # v1 兜底(实测 text 恒空,基本不触发)
@@ -1133,6 +1158,15 @@ async def handle_browser(bws):
                                 fwd = False
                         elif ev == 359:   # 本轮 TTS 结束:解除静音 v2(RAG 播报等下一轮音频不受影响)
                             drop_audio = False
+                            rec = book.get("ack_rec")
+                            if rec and rec.get("on"):   # 确认语录完 → 存盘,同句以后 relay 直接回放(v3-⑪)
+                                book["ack_rec"] = None
+                                if len(rec["buf"]) > 4800:   # <0.1s 的不存(异常/被打断)
+                                    try:
+                                        _ack_pcm_path(rec["txt"]).write_bytes(bytes(rec["buf"]))
+                                        sys.stderr.write(f"[voice-rt] 确认语已缓存「{rec['txt']}」({len(rec['buf'])//1000}KB)\n")
+                                    except Exception as ex:
+                                        sys.stderr.write(f"[voice-rt ack save] {ex}\n")
                         elif ev == 550:   # 回复增量:攒 + JSON 完整即触发;字幕**重组转发**(JSON 段整段不出现在字幕,含撕裂的前缀)
                             rid = pl.get("reply_id") or "_"
                             reply_buf[rid] = reply_buf.get(rid, "") + (pl.get("content") or "")

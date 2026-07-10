@@ -182,3 +182,12 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **⚠ 协议无输出模态开关**(文档全查证:`tts.audio_config` 只有 channel/format/sample_rate/speech_rate/loudness_rate;`input_mod` 只管输入侧 text/audio_file/keep_alive/push_to_talk)→ S2S 输出恒为文本+音频双流、**双流都计费**,灭灯省的是听觉干扰不是钱。想真省输出费的候选:speech_rate 拉快(音频 token≈25/s 按时长折算,语速快时长短;未实测,可用 154 账本 A/B 验证)。
 - **154 官方字段清单**(文档 500 行拿到):input_text_tokens/input_audio_tokens/**cached_text_tokens/cached_audio_tokens**/output_text_tokens/output_audio_tokens → `_usage_classify` 改精确解析(宽容子串扫降为兜底)。
 - **官方价格表修正**(用户截图核对):输入-文本 10 / 输入-音频 80 / **输入-文本cached 5 / 输入-音频cached 5** / **输出-文本 80(旧文档误记 30)** / 输出-音频 300(元/M)。`_usage_cost` 新公式:cached 视为 input 子集,未命中按全价+命中按 5 元。首日账本已迁移重算(¥2.17→¥2.14;cached 14.6k 按 5 元仅 ¥0.07——**缓存优化把输入文本费砍掉近半**)。
+
+## 确认语 PCM 缓存回放(2026-07-11 v3-⑪,用户点子:"固定确认语存下来复用,别每次让 AI 生成")
+
+确认语是固定集合(_ACK_TEXT 十来句),旧流程每次工具调用都发 500 让豆包重新合成 → 每次都付输出音频费(300元/M)+等 1.6s 排轮。改成**首次合成时录下来,之后 relay 直接回放**:
+
+- `_say_ack` 先查 `state/doubao-ack-pcm/<md5(句子)>.pcm`:命中 → relay 把 PCM 按 ~100ms 分片直发前端(与豆包帧同格式 pcm_s16le 24k,前端 playPcm 队列照播)——**零合成费+零延迟**,豆包连 500 都不收;未命中 → 发 500 + 设 `book["ack_rec"]` 进入录音流程。
+- **录音窗口**:350(tts_type=chat_tts_text)置 `on=True` 开录 → 音频帧下发同时 tee 进 buf(cap 500KB)→ 359 存盘(<0.1s 不存);**450 用户开口打断 → 丢弃残缺录音**(防缓存半句)。改 _ACK_TEXT 文案=换 md5=自动重录,无需清缓存。
+- deep_think 正文流式代播不受影响(ack 缓存回放时不发 500,正文 350 到来时 ack_rec 已空,不会误录)。
+- 工具轮成本残余:JSON 命令句本身的 TTS 音频(被丢但生成即计费,~几秒)协议上避不开;确认语部分归零。
