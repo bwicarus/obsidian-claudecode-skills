@@ -238,12 +238,11 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
     直塞优先:页文本/圈画文字/插图描述这些现成纯文本直接进 prompt(直接答,零等待);
     「我去查」只留给真需要动手的(搜视频/查资料/别页/精细图像/写操作)。
 
-    v3-⑩ 缓存分层(前缀缓存按最长公共前缀命中,SP 按变化频率排——高频变的必须垫底):
-      ① 稳定前缀:角色+协议+**全量工具目录**(整场通话不变)
-      ② 中层:页文本/插图描述/生词(翻页才变)
-      ③ 易变尾部:笔迹三态/选中/focus/图/任务状态(高频变,只失效尾部缓存)
-    工具目录不再按状态增删行(原门控:一画笔目录就变 → ②整层缓存连坐失效);
-    "无笔迹连 see_ink 都不给"的**语义**由 ③ 的显式状态声明承接,不可用工具尾部直说无效。"""
+    v3-⑭ 增量上下文(用户 transformer 洞察:SP 在序列最前,改 SP 尾部一个字=它后面**整个对话
+    历史**的前缀缓存全失效——⑩的 SP 内分层救不了历史):笔迹/选中/图/任务等易变状态**整段撤出 SP**,
+    改为对话末尾的『(系统状态更新:…)』增量事件(_inject_state,510 追加=前缀不变=历史缓存全保)。
+    SP 只剩 ①角色+协议+全量目录(整场不变) ②页文本/插图/生词(翻页才变)→ **SP 只随翻页变**。
+    "历史压 SP"定律在此反而是助力:状态写进最近历史,比 SP 快照更能压住旧对话里的过时说法。"""
     book = book or {}
     # ── ① 稳定前缀 ──
     role = cfg.get("system_role",
@@ -275,45 +274,39 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
     if vocab:
         role += ("\n本页『还没掌握』的生词(阅读器下划线词,来自他的生词本掌握度数据;"
                  "他问『这页哪些词我没掌握/有什么生词』直接用这个列表答):" + "、".join(vocab[:30]))
-    # ── ③ 易变尾部:实时状态(高频变,垫底保住上面两层的前缀缓存) ──
-    role += "\n——以下是**实时页面状态**(系统随时更新,永远以最新一份为准):"
-    # 手写笔迹:壳子只管状态;分析走 see_ink 工具。**版本号三态**(用户设计:变化要清楚标注)——
-    # 没看过→去看;看过且没变→可直接答"没变";看过但又画了→记忆已过时,必须重新看,严禁拿旧印象答。
+    # ── ③ 实时状态说明(稳定文案,状态本体走对话内增量事件——v3-⑭) ──
+    role += ("\n——**页面实时状态**(用户选中了什么/手写笔迹/带入的图/后台任务)不写在这里,"
+             "而是随时以『(系统状态更新:…)』的消息出现在**对话里**,**永远以最新一条为准**——"
+             "最新一条说没有的东西就是没有;**对话里一条状态消息都没有=本页当前什么都没有**(无选中、无笔迹、无带入图)。"
+             "状态消息说某工具此刻无效(如无笔迹时的 see_ink)就别调。")
+    return role
+
+
+def _state_event_text(book: dict) -> str:
+    """增量状态事件文本(v3-⑭):合并快照,一条说清当前全部状态(选中/笔迹三态/图)。
+    防抖平息后经 510 追加到对话末尾——前缀不变,历史缓存全保;"以最新一条为准"由 SP 说明段兜底。"""
+    parts = []
+    sel = (book.get("sel") or "").strip()
+    parts.append(f"当前选中了「{sel[:200]}」(他说『这段/我选的』就指它)" if sel else "当前没有选中任何文字")
+    focus = (book.get("focus") or "").strip()
+    if focus:
+        parts.append(f"钉住的焦点内容:「{focus[:150]}」")
+    if book.get("figs_n"):
+        parts.append(f"带入了 {book['figs_n']} 张图(看图内容调 see_figure)")
+    else:
+        parts.append("没带入图(see_figure 此刻无效)")
     if book.get("has_ink"):
         iv, sv = book.get("ink_ver", 0), book.get("ink_seen_ver", 0)
-        role += "\n本页有用户的**手写笔迹/标注**(系统实时同步;别说看不到)。"
         if sv and iv > sv:
-            role += ("⚠**他在你上次查看之后又画了新笔迹,而你还没看过——你现在并不知道新笔迹是什么**。"
-                     "任何关于笔迹的说法(有没有变化、画了什么、什么颜色)都必须先看过才能说,没看就描述=编造,会被用户当场戳穿。"
-                     "如果你此前说过『没看到新的笔迹/没有变化』,那是同步没到时的旧话,现在已经过时。"
-                     "他问笔迹相关问题时,你唯一正确的回复就是:{\"tool\":\"see_ink\",\"args\":{}}")
+            parts.append("本页有手写笔迹,且**你上次查看之后又画了新的、你还没看过**——没看就描述=编造;"
+                         "问笔迹相关时你唯一正确的回复是 {\"tool\":\"see_ink\",\"args\":{}}")
         elif sv:
-            role += ("(系统记录:你已看过当前版本的笔迹,之后没收到新变化。**但若他说自己刚画了/加了/改了什么,"
-                     "以他说的为准**——可能是同步延迟——调 see_ink 重新看,别跟他争『没有变化』。)")
+            parts.append("本页有手写笔迹,自你上次查看后没有新变化(但他说刚画了就以他为准,重新 see_ink)")
         else:
-            role += "用户问跟标注有关的(『我圈的/我画的/这里/这是什么』等)→ 调 see_ink 工具看标注区合成图再答,别猜。"
+            parts.append("本页有手写笔迹(问『我圈的/画的』→ 调 see_ink 看合成图再答,别猜)")
     else:
-        role += ("\n(本页目前**没有任何手写笔迹**——状态是实时同步的。他问『我画了什么/画了吗』直接说没画,"
-                 "see_ink 此刻无效别调;他若刚画,状态几秒内会更新到这里。)")
-    # 选中/chip 状态(前端实时同步,与侧栏 __voiceContext 同源):他说"这段/我选的"就指它
-    sel = book.get("sel") or ""
-    if sel:
-        role += f"\n用户**当前选中**了这段文字(他说『这段/我选的/选中的内容』就是指它,翻译/解释可直接用):「{sel}」"
-    else:
-        role += ("\n(用户当前没有选中任何文字——他问『我选中了什么』就直说现在没选中,read_selection 此刻无效;"
-                 "选中状态是实时同步的,不是你看不到。)")
-    focus = book.get("focus") or ""
-    if focus:
-        role += f"\n用户钉住的焦点内容(输入框上方 chip):「{focus}」"
-    if book.get("figs_n"):
-        role += f"\n用户带入了 {book['figs_n']} 张图(要看图内容 → 调 see_figure 工具)。"
-    else:
-        role += "\n(用户当前没带入图,see_figure 此刻无效。)"
-    tasks = list((book.get("tasks") or {}).keys())
-    if tasks:
-        role += (f"\n⏳系统正在后台执行:{'、'.join(tasks)}(结果还没回来)。用户催或再问相关的"
-                 "→ 告诉他正在做请稍等,**绝不要再调一次同一个工具**;无关的新问题正常答。")
-    return role
+        parts.append("本页没有任何手写笔迹(问『我画了什么』直接说没画,see_ink 此刻无效)")
+    return "(系统状态更新:" + ";".join(parts) + "。以本条为准,更早的状态描述一律作废。)"
 
 
 def _start_session_payload(book: dict | None = None, file_rel: str = "", page: int = 0,
@@ -1069,10 +1062,22 @@ async def handle_browser(bws):
                 pl = {"items": [{"role": "user", "text": u_text}, {"role": "assistant", "text": a_text}]}
                 await dws.send(enc(T_FULL_CLIENT, 510, json.dumps(pl, ensure_ascii=False).encode(), session_id=sid))
 
-            def _push_sp_debounced(delay: float = 1.2):
-                """防抖推送:连续画笔/滚动选中时 2s 轮询会连发 UpdateConfig(实测 20s 内 6 连发疑被豆包丢弃)
-                → 合并成风暴平息后一次。平息时顺带做**笔迹记忆注入**(每个未看版本只注一次)。
-                关键时刻(翻页/任务起止/用户开口)仍用 _push_sp 立即推。"""
+            # v3-⑭:状态变化不再碰 SP(改 SP=打掉其后**整个对话历史**的前缀缓存,用户 transformer 洞察)——
+            # 防抖平息后把合并状态快照经 510 **追加**到对话末尾(前缀不变,历史缓存全保)。
+            # 原"笔迹记忆注入"被状态事件吸收(三态语义都在 _state_event_text 里);指纹去重防重复注入。
+            _state_evt = {"fp": ""}
+
+            async def _inject_state():
+                txt = _state_event_text(book)
+                fp = txt + f"|v{book.get('ink_ver', 0)}"   # 掺笔迹版本:字面相同但又画了新笔迹也要重注
+                if fp == _state_evt["fp"]:
+                    return   # 状态没变 → 不注(省 token + 防历史灌水)
+                _state_evt["fp"] = fp
+                await _inject_memory(txt, "收到,以这条最新状态为准。")
+                sys.stderr.write(f"[voice-rt] 状态事件注入({len(txt)}字)\n")
+
+            def _push_state_debounced(delay: float = 1.2):
+                """防抖:连续画笔/滚动选中的风暴平息后注一条合并状态事件(510 追加,零缓存损失)。"""
                 t = _sp_deb.get("t")
                 if t and not t.done():
                     t.cancel()
@@ -1080,23 +1085,16 @@ async def handle_browser(bws):
                 async def _later():
                     try:
                         await asyncio.sleep(delay)
-                        await _push_sp()
-                        iv, sv = book.get("ink_ver", 0), book.get("ink_seen_ver", 0)
-                        if (book.get("has_ink") and iv > sv and iv != book.get("mem_injected_ver")
-                                and time.monotonic() - book.get("mem_injected_at", 0) > 10):   # 冷却:风暴期只注一条,防灌 20 轮历史
-                            book["mem_injected_ver"] = iv
-                            book["mem_injected_at"] = time.monotonic()
-                            n = len(book.get("ink_strokes") or [])
-                            await _inject_memory(
-                                f"(我刚在本页添加/修改了手写笔迹,现在共约 {n} 笔。)",
-                                "收到,你的笔迹更新了——我之前看到的笔迹内容已经过时。"
-                                "你再问跟笔迹有关的问题时,我会调 see_ink 重新查看后再回答,不凭旧印象说。")
-                            sys.stderr.write(f"[voice-rt] 记忆注入 ink v{iv}\n")
+                        await _inject_state()
                     except asyncio.CancelledError:
                         pass
                     except Exception as ex:
-                        sys.stderr.write(f"[voice-rt sp] {ex}\n")
+                        sys.stderr.write(f"[voice-rt state] {ex}\n")
                 _sp_deb["t"] = asyncio.create_task(_later())
+
+            # 开话时页面已有状态(sidecar 笔迹等)→ 立即注初始状态事件(SP 说明是"没有消息=什么都没有")
+            if book.get("has_ink") or (book.get("sel") or "").strip() or book.get("figs_n"):
+                asyncio.create_task(_inject_state())
 
             async def up():   # 浏览器 → 豆包
                 nonlocal page
@@ -1127,7 +1125,8 @@ async def handle_browser(bws):
                                 book.update({k: ctx2.get(k) for k in ("page_text", "inked", "has_ink", "figures", "vocab")})   # 直塞内容整体换页
                                 book["ink_strokes"] = []          # 换页:上页实时墨迹作废(新页的由 syncInk 再推)
                                 book["ink_seen_ver"] = 0          # "看过"记录跨页无效(新页的笔迹没看过)
-                                await _push_sp()
+                                await _push_sp()                   # SP 换页文本(v3-⑭ 后 SP 唯一的变化源)
+                                _push_state_debounced()            # 换页状态清零(无笔迹/无选中)也要告知
                                 sys.stderr.write(f"[voice-rt] 翻页同步 → p{np}({len(book.get('page_text') or '')}字)\n")
                         elif t == "state":   # 选中/chip 状态实时同步(前端指纹去重后推;relay 再比对,变了才热更 SP)
                             ns = {"sel": (j.get("sel") or "")[:300],
@@ -1135,7 +1134,7 @@ async def handle_browser(bws):
                                   "figs_n": int(j.get("figs") or 0)}
                             if any(book.get(k) != v for k, v in ns.items()):
                                 book.update(ns)
-                                _push_sp_debounced()
+                                _push_state_debounced()
                                 sys.stderr.write(f"[voice-rt] 选中/chip 同步 sel={len(ns['sel'])}字 figs={ns['figs_n']}\n")
                         elif t == "ink":   # 通话中新圈画:同步 has_ink 状态 + 存**实时 strokes**(随工具调用走,see_ink 不等 sidecar)
                             try:
@@ -1146,8 +1145,8 @@ async def handle_browser(bws):
                                 strokes = j.get("strokes") or []
                                 book["has_ink"] = bool(strokes)
                                 book["ink_strokes"] = strokes[:60]
-                                book["ink_ver"] = book.get("ink_ver", 0) + 1   # 版本+1(前端指纹去重,到达即真变化)→ SP 三态/缓存键都随它走
-                                _push_sp_debounced()
+                                book["ink_ver"] = book.get("ink_ver", 0) + 1   # 版本+1(前端指纹去重,到达即真变化)→ 三态/缓存键都随它走
+                                _push_state_debounced()
                                 sys.stderr.write(f"[voice-rt] 圈画同步 p{ip} strokes={len(strokes)} v{book['ink_ver']}\n")
                         elif t == "finish":
                             await dws.send(enc(T_FULL_CLIENT, 102, b"{}", session_id=sid))
