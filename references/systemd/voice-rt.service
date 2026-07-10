@@ -1,0 +1,13 @@
+[Unit]
+Description=Doubao realtime S2S voice relay (browser ws <-> openspeech binary protocol)
+After=network.target
+
+[Service]
+Type=simple
+User=bwicarus
+ExecStart=/home/bwicarus/mcp-venv/bin/python /home/bwicarus/claude/_server_deploy/voice_realtime_relay.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

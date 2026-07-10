@@ -173,8 +173,14 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
         if effort: settings["effort"] = effort
         ad = make_backend(backend_name, settings)
         target_zh = "中文" if target.startswith("zh") else target
-        sys_msg = {"role": "system", "content": "你是专业英汉翻译助手。只输出译文，不要解释或注释。"}
-        user_msg = {"role": "user", "content": f"把下面这句翻译成{target_zh}：\n\n{text}"}
+        if _detect_src(text) == "ja":
+            # 日语→中文:**必须点明源是日语**,否则中日同形汉字复合词(二汁七菜/本膳/精進料理…)会被 AI
+            #   当成"已经是中文"拒翻,返回一段废话(且非空/非 echo)污染结果。点明来源后 AI 按日语义翻。
+            sys_msg = {"role": "system", "content": "你是专业日汉翻译助手。用户给的是**日语**词或短语,可能与中文共用汉字但含义按日语理解。只输出简洁的中文译文,不要解释、注音或说明。"}
+            user_msg = {"role": "user", "content": f"把下面这个日语词/短语翻译成{target_zh}(按日语意思翻,别因为看起来像中文就说无法翻译):\n\n{text}"}
+        else:
+            sys_msg = {"role": "system", "content": "你是专业英汉翻译助手。只输出译文，不要解释或注释。"}
+            user_msg = {"role": "user", "content": f"把下面这句翻译成{target_zh}：\n\n{text}"}
         zh = ad.chat([sys_msg, user_msg])
         if zh:
             zh = zh.strip()
@@ -192,6 +198,8 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
             if ("我是一个软件工程" in zh or "我是一名软件工程" in zh or "专注于编程和代码" in zh
                     or "不在我的职责范围" in zh or "不属于我的职责" in zh or "超出了我的职责" in zh
                     or "我无法翻译" in zh or "我不能翻译" in zh or "我无法为您翻译" in zh or "我不提供翻译" in zh
+                    or "已经是中文" in zh or "本身就是中文" in zh or "已经是简体中文" in zh
+                    or "已经是繁体中文" in zh or "无法翻译成中文" in zh or "已经是中文了" in zh
                     or "software engineering assistant" in _low or "as a coding assistant" in _low
                     or "coding-related task" in _low or "not within my responsibilit" in _low
                     or "not within my scope" in _low or "i'm a software engineering" in _low
@@ -203,6 +211,17 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
     except Exception:
         return None
     return None
+
+
+def _looks_untranslated(src_text: str, tr: str) -> bool:
+    """MT 返回值与原文雷同(等于没翻)→ True。用于 auto 链跳过 echo 继续下一源。
+    仅当原文含汉字时判定(中日同形汉字复合词 Google/DeepL 常原样 echo;纯假名/拉丁不会 echo 成中文)。"""
+    if not tr:
+        return False
+    if not re.search(r"[㐀-鿿一-鿿]", src_text):
+        return False
+    _n = lambda s: re.sub(r"[\s·・,，。、.!！?？:：;；\-—()（）　]", "", s or "")
+    return _n(src_text) == _n(tr)
 
 
 def _detect_src(text: str) -> str:
@@ -280,6 +299,10 @@ def translate(text: str, target: str = "zh-CN",
         # 偶发 API 抖动)→ mymemory 仅最后兜底(评审质量垫底,放最后只防 Google+AI 都挂)
         sources = ["gtranslate", "deepl", "ai", "mymemory"]
 
+    # echo 跳过:仅交互 auto 链(含 ai 兜底)启用——中日同形汉字复合词 Google/DeepL 会原样 echo(等于没翻),
+    #   不跳过则链停在第一个非空 echo 上,拿不到 AI 的真译。page/批量 no_ai 链不启用(保速度,那条本就无 AI 可落)。
+    skip_echo = ("ai" in sources) and (len(sources) > 1)
+    echo_fallback = None
     for src in sources:
         tr = None
         if src == "gtranslate":
@@ -291,8 +314,15 @@ def translate(text: str, target: str = "zh-CN",
         elif src == "mymemory":
             tr = _mymemory(text, target)
         if tr:
+            if skip_echo and _looks_untranslated(text, tr):
+                if echo_fallback is None:
+                    echo_fallback = tr   # 记下 echo,万一后面所有源都没给出真译再用它兜底(总比空强)
+                continue
             _cache_put(text, target, tr, src if src != "ai" else f"ai-{model}")
             return tr
+    if echo_fallback:   # 全链都失败/echo → 退回 echo(纯同形词其实原样即正确,如「学生」)
+        _cache_put(text, target, echo_fallback, "echo")
+        return echo_fallback
     return ""
 
 

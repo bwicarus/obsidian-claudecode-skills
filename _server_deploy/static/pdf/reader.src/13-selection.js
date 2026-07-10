@@ -4,7 +4,7 @@ const _OVL_HL_SEL = '.word-hl-layer .hl, .phrase-hl-layer .hl, .explain-hl-layer
 // 判断是否落在查询高亮(词组/查词/解释)上。命中 → 交给该高亮动作(不选字/不查词);否则正常选字。
 // 这是"状态无关的裁决",不依赖 pointer-events 抢占 → 根除"穿透到 char-layer 误查手指下的字"整类 bug。
 function _overlayHlHitAtClient(pw, cx, cy) {
-  const hls = pw.querySelectorAll(_OVL_HL_SEL);
+  const hls = document.querySelectorAll(_OVL_HL_SEL);   // 全文档搜(不限本页 pw):双页模式下词组高亮可能在别的 pw;getBoundingClientRect 包含判断只会命中点击点上的那个,不误命中别页
   for (let i = hls.length - 1; i >= 0; i--) {   // 逆序:后插入(DOM 靠后)= z:6 平级里视觉在上,先命中它
     const r = hls[i].getBoundingClientRect();
     if (r.width && r.height && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
@@ -554,7 +554,10 @@ function _bindCharLayer(cl, pw) {
     if (window._ink && (_ink.mode || _ink.drawing)) return false;   // 手写模式/正在画 → 不选字(防御:各入口都兜住)
     // 根治:先几何判断本次按下是否落在查询高亮上。是 → 记 pending,松手派发该高亮动作,**不选字/不查词**。
     //   与高亮 pointer-events 状态完全无关 → 无论 .hl 是否残留 none、事件是否穿透,都不会误查手指下的字。
-    if (cx != null) { const _hit = _overlayHlHitAtClient(pw, cx, cy); if (_hit && _hit.kind) { _hlTapPending = { pw, hit: _hit, cx, cy }; _dragStartCharIdx = null; return false; } }
+    if (cx != null) {
+      const _hit = _overlayHlHitAtClient(pw, cx, cy);
+      if (_hit && _hit.kind) { _hlTapPending = { pw, hit: _hit, cx, cy }; _dragStartCharIdx = null; return false; }
+    }
     _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
     _hideFmlPop();           // 任何新按下先关掉旧公式浮层(若新点中公式,onEnd 会重新弹)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）

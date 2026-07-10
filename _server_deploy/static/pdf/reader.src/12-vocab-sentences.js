@@ -56,8 +56,10 @@ async function refreshVocabUnderlinesForAllPages() {
             if (!d.ok) continue;
             pw.__vocabMarks = d.vocab_marks || [];
             pw.__vocabSentences = d.vocab_sentences || [];
+            pw.__masteredFuri = new Set(d.mastered_furi || []);   // 刚标掌握 → 更新已掌握词集
             renderVocabUnderlines(pw, pw.__vocabMarks);
             renderVocabSentences(pw, pw.__vocabSentences);
+            try { renderRubyLayer(pw); } catch (_) {}   // 重画 ruby:标掌握的词当下就不再显示假名注音
           } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
         }
       };

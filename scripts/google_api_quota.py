@@ -141,11 +141,14 @@ def gemini_cost(days: int = 0) -> dict:
     else:
         rows = db.execute("SELECT note FROM quota_log WHERE service='gemini'").fetchall()
     db.close()
-    usd = 0.0; tin = tout = calls = 0; by_model = {}
+    usd = 0.0; tin = tout = calls = 0; by_model = {}; free_tok = 0; free_calls = 0
     for (note,) in rows:
         d = _parse_note(note)
         ti = int(d.get("in", 0) or 0); to = int(d.get("out", 0) or 0)
         if ti == 0 and to == 0:   # 旧记录/失败行没 token → 跳过(不计费)
+            continue
+        if d.get("tier") == "free":   # 免费档:不花钱,只累计用量(成本只算付费档)
+            free_tok += ti + to; free_calls += 1
             continue
         mdl = d.get("model", "") or "gemini-2.5-flash"
         pin, pout = GEMINI_PRICES.get(mdl, _GEM_DEFAULT_PRICE)
@@ -155,7 +158,8 @@ def gemini_cost(days: int = 0) -> dict:
         m["usd"] += c; m["in"] += ti; m["out"] += to; m["calls"] += 1
     for m in by_model.values():
         m["usd"] = round(m["usd"], 4)
-    return {"usd": round(usd, 4), "in_tokens": tin, "out_tokens": tout, "calls": calls, "by_model": by_model}
+    return {"usd": round(usd, 4), "in_tokens": tin, "out_tokens": tout, "calls": calls,
+            "by_model": by_model, "free_tokens": free_tok, "free_calls": free_calls}
 
 
 def fmt_secs(s: int) -> str:

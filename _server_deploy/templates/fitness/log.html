@@ -252,10 +252,13 @@
       <button class="btn small v-add" title="粘贴 YouTube URL 加视频">➕</button>
       <button class="btn small v-del" title="从列表删除该视频">🗑</button>
       <button class="btn small v-save" title="保存当前列表为我的">💾</button>
+      <button class="btn small v-search2" title="两源(YouTube + B站)重新搜索该动作教学视频 + AI 相关性筛选,替换列表">🔎两源</button>
       <button class="btn small v-reset" title="重置回默认列表">🔄</button>
     </div>
     <div class="v-player-box" style="aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;position:relative;">
       <div class="v-player-mount" style="width:100%;height:100%;"></div>
+      <!-- B站视频用官方 player iframe(YT 专属的字幕/要点对 B站隐藏) -->
+      <iframe class="v-bili-frame" style="display:none;width:100%;height:100%;border:0;" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen referrerpolicy="no-referrer"></iframe>
       <div class="v-player-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#8a9bb4;font-size:13px;pointer-events:none;">⏳ 加载播放器…</div>
       <a class="v-yt-fallback" target="_blank" rel="noopener" style="display:none;position:absolute;left:0;right:0;bottom:0;text-align:center;padding:7px;background:#000c;color:#9fcbff;font-size:12px;text-decoration:none;">加载慢? ▶ 在 YouTube 打开</a>
     </div>
@@ -683,13 +686,34 @@ function renderCarousel(exId) {
     wrap.querySelector('.v-points-box').style.display = 'none';
     wrap.querySelector('.v-points').classList.remove('success');
   }
-  // 切换视频:YT.Player 已就绪就 loadVideoById,否则等 player 创建后会自动用 v.video_id
-  const player = PLAYERS[exId];
-  if (player && player.loadVideoById) {
-    try {
-      const cur = player.getVideoData && player.getVideoData().video_id;
-      if (cur !== v.video_id) player.loadVideoById(v.video_id);
-    } catch (e) {}
+  // 按来源分流:B站→官方 iframe(隐藏 YT 播放器 + YT 专属按钮);YT→YT.Player.loadVideoById
+  const isBili = _isBiliVid(v);
+  const biliFrame = wrap.querySelector('.v-bili-frame');
+  const ytMount = wrap.querySelector('.v-player-mount');
+  const ytLoading = wrap.querySelector('.v-player-loading');
+  const ytFb = wrap.querySelector('.v-yt-fallback');
+  ['.v-cc', '.v-cc-hq', '.v-points'].forEach(s => { const b = wrap.querySelector(s); if (b) b.style.display = isBili ? 'none' : ''; });   // 字幕/要点是 YT 专属
+  if (isBili) {
+    if (biliFrame) {
+      const bs = 'https://player.bilibili.com/player.html?bvid=' + encodeURIComponent(v.video_id) + '&autoplay=0&danmaku=0&high_quality=1&p=1';
+      if (biliFrame.getAttribute('src') !== bs) biliFrame.setAttribute('src', bs);
+      biliFrame.style.display = 'block';
+    }
+    if (ytMount) ytMount.style.display = 'none';
+    if (ytLoading) ytLoading.style.display = 'none';
+    if (ytFb) ytFb.style.display = 'none';
+    const p = PLAYERS[exId]; if (p && p.pauseVideo) { try { p.pauseVideo(); } catch (e) {} }   // 暂停 YT 免后台响
+    stopSubLoop(exId); const sb = wrap.querySelector('.v-subtitle'); if (sb) sb.style.display = 'none';
+  } else {
+    if (biliFrame && biliFrame.style.display !== 'none') { biliFrame.style.display = 'none'; biliFrame.setAttribute('src', 'about:blank'); }   // 停 B站播放
+    if (ytMount) ytMount.style.display = '';
+    const player = PLAYERS[exId];
+    if (player && player.loadVideoById) {
+      try {
+        const cur = player.getVideoData && player.getVideoData().video_id;
+        if (cur !== v.video_id) player.loadVideoById(v.video_id);
+      } catch (e) {}
+    }
   }
   // 字幕状态:视频换了 → 清空当前字幕显示(下次开还得重新拉新视频的)
   const sub = SUBS[exId];
@@ -712,6 +736,9 @@ async function loadVideos(exId) {
   }
 }
 
+// 来源识别:显式 src 优先;无 src 才按 bvid(BV+10=12 字符)兜底。B站走官方 iframe,YT 走 YT.Player。
+function _isBiliVid(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.video_id || ''))); }
+
 async function ensurePlayer(exId) {
   if (PLAYERS[exId]) return PLAYERS[exId];
   await loadYT();
@@ -720,7 +747,9 @@ async function ensurePlayer(exId) {
   const loadingEl = wrap.querySelector('.v-player-loading');
   const fbEl = wrap.querySelector('.v-yt-fallback');
   const state = VS[exId];
-  const firstVid = state && state.videos[state.idx] ? state.videos[state.idx].video_id : '';
+  // YT.Player 只能吃 YouTube id → 用列表里第一个 YT 视频初始化(全是 B站 则空初始化,渲染时走 iframe 分支)
+  const firstYt = state && state.videos.find(x => !_isBiliVid(x));
+  const firstVid = firstYt ? firstYt.video_id : '';
   if (fbEl && firstVid) fbEl.href = 'https://www.youtube.com/watch?v=' + firstVid;
   // 慢网兜底:8s 还没 ready 就露出"在 YouTube 打开"链接(播放器仍继续加载)
   const fbTimer = setTimeout(() => { if (fbEl) fbEl.style.display = 'block'; }, 8000);
@@ -862,6 +891,28 @@ document.querySelectorAll('.video-wrap').forEach(wrap => {
       await loadVideos(exId);
       renderCarousel(exId);
     } catch (e) { alert('重置失败'); }
+  });
+  // 🔎 两源(YT+B站)重新搜索 + AI 筛选,替换列表(复用阅读器同一套搜索)
+  wrap.querySelector('.v-search2').addEventListener('click', async () => {
+    const btn = wrap.querySelector('.v-search2');
+    const statusEl = wrap.querySelector('.v-status');
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '搜索中…';
+    if (statusEl) statusEl.textContent = '🔎 两源搜索中(YouTube + B站, AI 筛选, 约 10-20s)…';
+    try {
+      const r = await fetch(`/api/fitness/videos/${encodeURIComponent(exId)}/search`, { method: 'POST' });
+      const d = await r.json();
+      if (!d.ok) { if (statusEl) statusEl.textContent = '✗ ' + (d.error || '搜索失败'); return; }
+      VS[exId] = { videos: d.videos || [], idx: 0, dirty: false };   // 后端已存 override,无需再 💾
+      await ensurePlayer(exId);
+      renderCarousel(exId);
+      const m = d.meta || {};
+      if (statusEl) statusEl.textContent = `✅ 已换成两源结果(B站 ${m.bili || 0} + YT ${m.yt || 0} 条,已保存)`;
+    } catch (e) {
+      if (statusEl) statusEl.textContent = '✗ 网络错误,稍后再试';
+    } finally {
+      btn.disabled = false; btn.textContent = orig;
+    }
   });
 });
 

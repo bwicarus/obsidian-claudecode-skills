@@ -830,4 +830,43 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') { closeResult(); toolbar.classList.remove('open'); }
 });
 
+// 顶栏 🎙 语音通话入口:打开豆包实时语音通话页,带上正在读的书+当前页(relay 会把本页内容注入通话上下文)。
+// 内联 onclick 拿不到模块作用域的 FILE_REL/currentPage → 挂 window(项目惯例,同 _noteCreateAtCenter)。
+window._voiceCall = () => {
+  if (window.RC && RC.voicecall) {   // 语音输入模式(agent:说话=问侧栏助手,转写进输入框,回答文字为主)
+    RC.voicecall.toggle({ file: FILE_REL || '', page: currentPage || 1 });
+    return;
+  }
+  // 兜底:模块没加载 → 独立通话页(纯聊天,无页面控制)
+  window.open('/static/pdf/voice-call.html?file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 1), '_blank');
+};
+// S2S 伴读通话(长按侧栏 📞 触发):端到端语音对话,带本页上下文+翻页热同步;说"找视频/翻到第N页"
+// 由 relay 解析模型回复的协议句式真执行。适合不看屏幕的场景;屏前日常用短按的 agent 模式。
+window._voiceCallS2S = () => {
+  if (window.RC && RC.voicecall) RC.voicecall.toggle({ mode: 's2s', file: FILE_REL || '', page: currentPage || 1 });
+};
+// 通话中翻页 → 同步给 relay 热更新豆包的页面上下文(否则它一直停在开通话那页;currentPage 是模块变量,
+// 浮层拿不到 → 由本文件定时读。仅通话开着时发,setPage 内部去重)。
+// 通话上下文采集(页码/墨迹/选中chip):2s 轮询兜底 + **用户开口瞬间立即同步一次**(rc-voicecall 在 450 事件调,
+// 赶在模型处理这句话之前把最新状态推上去——治"画完立刻问,模型拿着旧状态答『没变化』"的竞态)。
+window.__vcSyncNow = () => {
+  try {
+    if (!(window.RC && RC.voicecall && RC.voicecall.isOpen())) return;
+    if (RC.voicecall.setPage) RC.voicecall.setPage(currentPage || 0);
+    if (RC.voicecall.syncInk) {
+      var _st = (window._ink && _ink.byPage && _ink.byPage[currentPage]) || [];
+      RC.voicecall.syncInk(currentPage || 0, _st);
+    }
+    if (RC.voicecall.syncState && typeof window.__voiceContext === 'function') {
+      var _vc = window.__voiceContext();
+      RC.voicecall.syncState({
+        sel: String(_vc.selection || '').slice(0, 300),
+        focus: (_vc.focus_sel && _vc.focus_sel.text) ? String(_vc.focus_sel.text).slice(0, 200) : '',
+        figs: (_vc.figures || []).length,
+      });
+    }
+  } catch (_) {}
+};
+setInterval(() => { window.__vcSyncNow(); }, 2000);
+
 loadPdf();

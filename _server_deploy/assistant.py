@@ -444,7 +444,7 @@ def _convo_append(uid, role, content, meta=None):
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards"):
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via"):   # via='mcp':外部编排 agent 写入的对话(侧栏可标来源)
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -1171,23 +1171,45 @@ def _verify_image_match(image_url: str, query: str, extract: str = "") -> tuple:
 
 
 def _t_search_image(args, ctx):
-    """配图专用:Wikipedia 免费搜真实图片(非 AI 生成)。只在概念**具体/生僻**、视觉信息真有帮助时才调
-    (某种矿物/历史文物/生物物种/机械结构/天体/建筑/仪器等有明确实物形象的东西);
-    **别对**『力/能量』这类基础常见词、**也别对**抽象理论/数学推导调用。args {query:要搜的词/概念}。"""
-    q = (args.get("query") or "").strip() or (ctx.get("selection") or "").strip()
-    if not q:
-        return {"error": "缺 query(要搜的词/概念)"}
-    try:
-        res = _search_wikipedia_image(q[:120])
-    except Exception as e:
-        return {"error": str(e)[:120]}
-    if not res.get("ok"):
-        return {"error": res.get("error") or "没找到合适的图"}
-    ok, reason = _verify_image_match(res["image_url"], q, res.get("extract", ""))
-    if not ok:
-        return {"error": f"找到条目「{res['title']}」但图不对(核实:{reason}),换个更具体的关键词再试,或者放弃配图"}
-    return {"ok": True, "title": res["title"], "extract": res.get("extract", ""),
-            "image_url": res["image_url"], "page_url": res.get("page_url", "")}
+    """配图专用:按**关键词列表**并行搜真实图片(非 AI 生成),多源=Wikimedia Commons 全库 + Google 图搜(若配好)。
+    配图偏好开时**一次性**传 queries=[{concept, query}...] 把该配图的概念都列上(query 用英文覆盖最好);
+    工具脱开上下文、只认关键词去搜,每个概念返回最匹配 1 张。args {queries:[{concept?,query}], query?(单个兼容)}。"""
+    import concurrent.futures as _cf
+    import image_search
+    ql = args.get("queries")
+    items = []
+    if isinstance(ql, list) and ql:
+        for it in ql[:8]:   # 上限 8,防一次配太多图
+            if isinstance(it, dict) and (it.get("query") or it.get("concept")):
+                items.append({"concept": (it.get("concept") or it.get("query") or "").strip(),
+                              "query": (it.get("query") or it.get("concept") or "").strip()})
+            elif isinstance(it, str) and it.strip():
+                items.append({"concept": it.strip(), "query": it.strip()})
+    else:
+        q = (args.get("query") or ctx.get("selection") or "").strip()
+        if q:
+            items.append({"concept": q, "query": q})
+    if not items:
+        return {"error": "缺 queries(要配图的概念 + 关键词列表)"}
+
+    def _one(it):
+        try:
+            imgs = image_search.search_images(it["query"][:120], n=1)   # 每概念取最匹配 1 张
+        except Exception:
+            imgs = []
+        return {"concept": it["concept"], "found": bool(imgs),
+                "image_url": (imgs[0]["image_url"] if imgs else ""),
+                "page_url": (imgs[0].get("page_url", "") if imgs else "")}
+    with _cf.ThreadPoolExecutor(max_workers=min(6, len(items))) as ex:
+        results = list(ex.map(_one, items))
+    found = [r for r in results if r["found"]]
+    if not found:
+        return {"error": "这些关键词都没搜到合适的真实图片(换更通用的英文关键词,或放弃配图)"}
+    return {"ok": True, "count": len(found),
+            "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"]} for r in found],
+            "missed": [r["concept"] for r in results if not r["found"]],
+            "_note": "把这些图用 markdown ![简短中文说明](image_url) 插进回答里对应概念旁(每张配一句说明)。"
+                     "missed 里的没搜到图 → 别硬配、更别自己编图片链接。"}
 
 
 def _optimize_video_query(topic, r=None):
@@ -1215,19 +1237,63 @@ def _optimize_video_query(topic, r=None):
         return None
 
 
+def _optimize_video_queries(topic, r=None):
+    """一次 AI → 两个搜索关键词:YouTube(按内容原语言) + Bilibili(一律中文)。失败各自返 None(调用方退回原词)。
+    「YT 按内容原语言、B站中文」是用户拍板的策略:B站以中文讲解为主,YT 保留原生优质内容(英语→英文、日语→日文)。"""
+    yt_q = bili_q = None
+    try:
+        prompt = (
+            "用户在读书,想找**讲解**下面这个主题的视频:\n「" + str(topic)[:200] + "」\n\n"
+            "请分别给出用于 YouTube 和 Bilibili(B站)的搜索关键词各一个。\n"
+            "【YouTube 关键词】按内容原语言:\n"
+            "- 某国专属历史/文化/料理/地理/人物/传统 → 用该国母语(日→日文、法→法文…),母语频道讲本国题材质量最高;\n"
+            "- 学术/科学/技术/机制/数学(不特定某国)→ 优先英文,加 explained / animation / lecture / how it works 之类;\n"
+            "- 其它通俗/中文特定主题 → 中文,加 讲解/原理/教程 之类。\n"
+            "【Bilibili 关键词】**一律用中文**(B站以中文讲解内容为主),加 讲解/教程/原理 之类。\n"
+            "两个都**只保留核心概念**,别照抄整句、别加书名/章节号/作者名。\n"
+            "**严格只输出这两行(不要引号/解释/多余内容):**\n"
+            "YT: <关键词>\n"
+            "B站: <中文关键词>"
+        )
+        out = (_deep_ask(prompt, backend=r["backend"], variant=r["variant"], depth="none", timeout=20)
+               if r else _gemini_text(prompt, max_tokens=160, think=False, timeout=20)) or ""
+        for line in out.splitlines():
+            ls = line.strip()
+            m = re.match(r"^(?:YT|YouTube|油管)\s*[:：]\s*(.+)$", ls, re.I)
+            if m and not yt_q:
+                yt_q = m.group(1).strip().strip("「」\"“”'` ")[:120]
+            m2 = re.match(r"^(?:B站|Bili|Bilibili|哔哩|哔哩哔哩)\s*[:：]\s*(.+)$", ls, re.I)
+            if m2 and not bili_q:
+                bili_q = m2.group(1).strip().strip("「」\"“”'` ")[:120]
+    except Exception:
+        pass
+    return (yt_q or None), (bili_q or None)
+
+
 def _filter_relevant_videos(topic, vids, r):
     """搜到候选后再让 AI 按相关性筛一遍(标题+频道+描述节选):明显跑题/低质的剔除,返回保留子集(保序,≥1)。
     只用搜索一次就免费带回的元数据(标题/频道/描述),不额外拉每个视频的字幕(6 个逐一拉太慢太贵)。失败→原样不筛。"""
     try:
         if len(vids) <= 1:
             return vids
+
+        def _play_h(n):   # 播放量人性化(B站质量信号):12345→1.2万
+            try:
+                n = int(n)
+            except Exception:
+                return ""
+            return (f"{n/10000:.1f}万" if n >= 10000 else str(n))
         lines = "\n".join(
             f"[{i+1}] {v.get('title','')} · 频道:{v.get('channel','')}" +
+            (f" · 播放:{_play_h(v.get('play'))}" if v.get('play') else "") +
+            (f" · 标签:{v.get('tag')}" if v.get('tag') else "") +
             (f" · 简介:{(v.get('desc') or '')[:140]}" if v.get('desc') else "")
             for i, v in enumerate(vids))
         prompt = (
-            "用户在读书,想找**讲解「" + str(topic)[:160] + "」**的视频。下面是 YouTube 搜到的候选:\n" + lines + "\n\n"
-            "请判断每个是否**真的在讲这个主题**、是不是像样的讲解/教学视频(剔除:明显跑题、只是提到、纯娱乐/引流、片段混剪、标题党)。\n"
+            "用户在读书,想找**讲解「" + str(topic)[:160] + "」**的视频。下面是搜到的候选(播放量高=质量/热度信号):\n" + lines + "\n\n"
+            "请判断每个是否**真的在专门讲这个主题**、是不是像样的讲解/教学视频。\n"
+            "**剔除**:明显跑题、只是顺带提到、宽泛合集(如「四级真题合集/英语学习大全」而非本主题专讲)、纯娱乐/引流、片段混剪、标题党——"
+            "**即使它播放量很高也要剔除**(高播放≠切题)。在**都切题**的前提下,再优先播放量高的。\n"
             "**只输出要保留的编号**,按相关度从高到低用逗号分隔(例:3,1,5)。至少保留 1 个;若全部明显跑题才输出 none。\n"
             "只输出编号或 none,不要解释。")
         out = (_deep_ask(prompt, backend=r["backend"], variant=r["variant"], depth="none", timeout=25) or "").strip()
@@ -1246,44 +1312,75 @@ def _filter_relevant_videos(topic, vids, r):
 
 
 def _t_search_video(args, ctx):
-    """搜教学视频(YouTube)并在对话里渲染**可播放**卡片。只在用户明确要『找视频/看视频讲解/有没有视频』时用,
-    别对每个概念都配视频。args {query?}(传**核心主题**即可)。工具内部:AI 拟优质搜索词 → 搜 → AI 按相关性筛掉跑题的。"""
+    """搜教学视频(YouTube + Bilibili 两源)并在对话里渲染**可播放**卡片。只在用户明确要『找视频/看视频讲解/有没有视频』时用,
+    别对每个概念都配视频。args {query?}(传**核心主题**即可)。工具内部:AI 拟两个搜索词(YT 按内容原语言 / B站中文)→
+    并行搜两源 → 各自 AI 相关性筛掉跑题的 → 交替合并(两源都露脸)。"""
     q = (args.get("query") or "").strip() or (ctx.get("selection") or "").strip() or (ctx.get("focus_text") or "").strip()
     if not q:
         return {"error": "缺 query(要搜什么视频)"}
     r = _resolve("pick_video", ctx.get("_uid"))
     if _paid_recover_check(ctx.get("_uid"), "pick_video"):   # @paid 且免费恢复 → 摘除后重读(静默)
         r = _resolve("pick_video", ctx.get("_uid"))
-    search_q = _optimize_video_query(q[:200], r) or q[:120]   # AI 拟优质搜索词;失败退原词
-    try:
-        import youtube_search
-        res = youtube_search.search(search_q, max_results=6)
-    except Exception as e:
-        return {"error": str(e)[:120]}
-    if not res.get("ok"):
-        return {"error": res.get("error") or "没搜到视频"}
-    raw = res["videos"]
+    yt_q, bili_q = _optimize_video_queries(q[:200], r)       # 一次 AI → YT(原语言) + B站(中文)两个搜索词
+    yt_q = yt_q or q[:120]
+    bili_q = bili_q or q[:120]
+    import concurrent.futures as _cf
+
+    def _search_yt():
+        try:
+            import youtube_search
+            res = youtube_search.search(yt_q, max_results=5)
+            return [dict(v, src="yt") for v in res.get("videos", [])] if res.get("ok") else []
+        except Exception:
+            return []
+
+    def _search_bili():
+        try:
+            import bilibili_search
+            res = bilibili_search.search(bili_q, max_results=8)   # 多取(已按播放量+点赞+收藏质量分排序过)→ AI 从高质池筛相关 3 个
+            return res.get("videos", []) if res.get("ok") else []   # 已带 src='bili'
+        except Exception:
+            return []
+
+    _ts = time.time()
+    with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f_yt, f_bili = ex.submit(_search_yt), ex.submit(_search_bili)
+        yt_raw, bili_raw = f_yt.result(), f_bili.result()
+    if not yt_raw and not bili_raw:
+        return {"error": "两个源都没搜到视频,换个关键词"}
+    # 各源分别相关性筛(分开筛保证两源都能留下,不会被另一源标题抢占)。
+    # **主线程串行**跑(不放线程池):_filter_relevant_videos 内的 AI token 计数是 thread-local,
+    #   放 worker 线程会漏计到本回合总量(额度 DB 不受影响,但 trace 显示会少算)。两次 Flash 很快,
+    #   慢的网络搜索已并行,这里串行代价小。
     _tf = time.time()
-    vids = _filter_relevant_videos(q, raw, r)   # 搜后 AI 相关性筛选(剔除跑题的,只渲染留下的)
+    yt_keep = (_filter_relevant_videos(q, yt_raw, r) if yt_raw else [])[:3]
+    bili_keep = (_filter_relevant_videos(q, bili_raw, r) if bili_raw else [])[:3]
     _filter_sec = round(time.time() - _tf, 1)
-    kept_ids = {v.get("id") for v in vids}
-    dropped_vids = [v for v in raw if v.get("id") not in kept_ids]
-    dropped = len(dropped_vids)
+    # 交替合并:B站、YT、B站、YT…(中文源优先露头,两边都露脸)
+    vids = []
+    for i in range(max(len(yt_keep), len(bili_keep))):
+        if i < len(bili_keep):
+            vids.append(bili_keep[i])
+        if i < len(yt_keep):
+            vids.append(yt_keep[i])
+    if not vids:
+        return {"error": "搜到的视频都跑题了,换个关键词"}
     _mdl = f"{_variant_short(r['variant'])}·{r['depth']}"
     _filter_detail = (
-        f"搜索词「{search_q}」→ YouTube 搜到 {len(raw)} 个候选\n"
-        f"AI 按相关性筛选 → 保留 {len(vids)}、剔除 {dropped}\n\n"
-        "保留:\n" + "\n".join(f"✓ {v.get('title','')} · {v.get('channel','')}" for v in vids) +
-        (("\n\n剔除(跑题/低质):\n" + "\n".join(f"✗ {v.get('title','')} · {v.get('channel','')}" for v in dropped_vids)) if dropped else ""))
-    return {"ok": True, "count": len(vids), "query_used": search_q, "dropped": dropped,
-            # 只把标题/频道回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
-            "videos": [{"title": v.get("title", ""), "channel": v.get("channel", "")} for v in vids],
+        f"YouTube 搜索词「{yt_q}」→ 搜到 {len(yt_raw)}、保留 {len(yt_keep)}\n"
+        f"Bilibili 搜索词「{bili_q}」→ 搜到 {len(bili_raw)}、保留 {len(bili_keep)}\n\n"
+        "保留:\n" + "\n".join(
+            f"✓ [{'B站' if v.get('src') == 'bili' else 'YT'}] {v.get('title','')} · {v.get('channel','')}" for v in vids))
+    return {"ok": True, "count": len(vids), "query_used": f"YT「{yt_q}」/ B站「{bili_q}」",
+            # 只把标题/频道/来源回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
+            "videos": [{"title": v.get("title", ""), "channel": v.get("channel", ""),
+                        "source": ("B站" if v.get("src") == "bili" else "YouTube")} for v in vids],
             "client_action": {"fn": "renderVideos", "args": [vids]},
             "_gen_model": _mdl, "_gen_action": "pick_video",
-            # 相关性筛选单独占「!」一行(独立子步骤),点开看保留/剔除了哪些视频
-            "_sub_steps": [{"label": "相关性筛选视频", "model": _mdl, "action": "pick_video",
+            # 相关性筛选单独占「!」一行(独立子步骤),点开看两源各搜到/保留了哪些
+            "_sub_steps": [{"label": "搜索+筛选视频(YT+B站)", "model": _mdl, "action": "pick_video",
                             "sec": _filter_sec, "detail": _filter_detail}],
-            "_note": "视频卡片已渲染(已按相关性筛过、剔除跑题的),用户可直接点开。简短说一句『给你找到这些视频』(可提搜索词/筛掉了几个),别复述标题/链接。"}
+            "_note": "视频卡片已渲染(YouTube + Bilibili 两源、已按相关性筛过),用户可直接点开。简短说一句『给你找到这些视频(YT 和 B站都有)』,别复述标题/链接。"}
 
 
 def _t_lookup_word(args, ctx):
@@ -1419,6 +1516,12 @@ def _t_see_ink(args, ctx):
     if not file_rel or not page:
         return {"error": "不在 PDF 书里 / 不知道哪页"}
     if not strokes:
+        try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
+            import pdf_reader as _pdfm0
+            strokes = _pdfm0._page_ink_strokes(file_rel, page) or []
+        except Exception:
+            strokes = []
+    if not strokes:
         return {"error": "本页没有手写笔迹(用户没用笔标注,或还没画)"}
     try:
         import base64
@@ -1434,6 +1537,11 @@ def _t_see_ink(args, ctx):
         note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,描述他到底圈/划/指/写了什么。")
         if marked:
             note += f" 几何上他大概标的是:「{_clean_tag(marked)[:120]}」(仅参考,以图为准)。"
+        prev = _clean_tag(str(ctx.get("prev_ink_desc") or ""))[:400]
+        if prev:   # 对比模式:带上次描述——新增笔画常是**同一图形的补笔**(给花加瓣/加叶),别轻易当成独立新物体
+            note += (f" ⚠此前这块区域的笔迹是:「{prev}」,用户在此基础上**又添加了笔画**。"
+                     "请对比着讲**变化了什么**;注意新增笔画很可能是对原图形的补笔/修饰(比如给花加花瓣、给箭头加分叉),"
+                     "先判断整体是否仍是一个图形,确实独立时才说是新的东西。")
         desc = _vision_for(ctx, [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], note)
         return {"笔迹标注描述": desc or "(看图失败,可重试)"}
     except Exception as e:
@@ -2279,11 +2387,12 @@ TOOLS = {
                  "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
-    "search_image": ("★配图专用(Wikipedia 免费搜真实图片,非 AI 生成)。**只在概念具体/生僻、视觉信息真有帮助时才调**"
-                     "(如某种矿物/历史文物/生物物种/机械结构/天体/建筑/仪器等有明确实物形象的东西);"
-                     "**别对**『力/能量/速度』这类基础常见词、**也别对**抽象理论/数学推导配图——大多数回答根本不需要图,别每个词都调。"
-                     "拿到图后在回答里用标准 markdown ![简短说明](image_url) 插入;没搜到就 ok:false,**别自己编图片链接**。"
-                     "刚好这次还要制卡、这张图也想放进卡片,就把 image_url 一并传给 make_anki。args {query:要搜的词/概念}", _t_search_image),
+    "search_image": ("★配图专用(搜**真实图片**,非 AI 生成;多源 Wikimedia Commons + Google 图搜)。**用户开了配图偏好时**,"
+                     "先想清楚这次回答里**哪些概念配图真有帮助**(有明确视觉形象的:实物/结构/示意图/图表/生物/文物/天体/仪器等),"
+                     "**一次性**把它们连关键词一起传:args {queries:[{concept:\"中文概念\", query:\"english keyword\"}, ...]}"
+                     "(query **用英文**图源覆盖最好;一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
+                     "拿回结果后:对 images 里每张,在回答对应概念旁用 markdown ![简短中文说明](image_url) 插入;missed 里没搜到的**别硬配、别自己编链接**。"
+                     "别对『力/能量』这类无固定形象的抽象词硬配。刚好要制卡也想放这张图,把该 image_url 传给 make_anki。", _t_search_image),
     "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**的视频卡片。用户明确要『找/看视频、有没有视频讲解、放个视频』时用,"
                      "别对每个概念都配视频(大多数回答不需要)。拿到结果只需简短说一句『给你找到这些视频』,"
                      "**别复述标题/链接**(卡片已经显示了、能直接点开播放)。args {query?}(不传用选中/焦点)", _t_search_video),
@@ -2428,9 +2537,16 @@ def _sys_prompt(ctx):
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
     # 视口焦点:用户此刻**屏幕上正在看的正文**(前端按视口相交采集)。EPUB 一节=整章内容太长、AI 只知章节
     #   会答偏(如把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频/配图/拟搜索词都紧扣当前注意力。限长防 prompt 膨胀。
+    if ctx.get("voice_mode"):
+        learn_bits.append("★语音对话中(问题来自语音转写,可能有同音错字,按语境理解;你的回答会被逐句朗读):"
+                          "回答要**适合听**——口语化短句、先给结论;少用列表/表格/标题结构;"
+                          "数学符号和公式用中文口头表述(如「x 的平方除以 2」),别写 LaTeX;"
+                          "尽量几句话说完,内容多时先讲最重要的,再问一句要不要继续展开。工具照常用。")
     mp = ctx.get("media_prefer") or {}
     if mp.get("image"):
-        learn_bits.append("★用户开了「配图」偏好:内容适合配图时**直接调 search_image 配真实图片,别问『要不要配图』**(他已用开关表明要图);只有纯推导/抽象/基础常识才跳过。")
+        learn_bits.append("★用户开了「配图」偏好:回答里凡是**有明确视觉形象**的概念(实物/结构/示意图/图表/生物/文物/天体/仪器…)都该配图。"
+                          "做法:想清楚这次哪些概念该配(可以好几个),**一次性**调 search_image 传 queries=[{concept,query}...]"
+                          "(query 用**英文**关键词图源覆盖最好),别一个个零散调、也别问『要不要配图』。拿回图后每张配一句中文说明插到对应概念旁。只有纯抽象推导/基础常识才跳过。")
     if mp.get("video"):
         learn_bits.append("★用户开了「视频」偏好:内容适合视频讲解时**直接调 search_video 找了放进对话,别问『要不要我找视频』**(他已用开关表明要视频);只有完全不适合视频才跳过。")
     vtext = _clean_tag(ctx.get("visible_text") or "")
@@ -2565,12 +2681,45 @@ def _sys_static():
         _SYS_STATIC_CACHE = (full[:i].rstrip() if i >= 0 else full)
     return _SYS_STATIC_CACHE
 
+def _explicit_attach_lines(ctx):
+    """用户**显式选中/带入**的内容(右侧带 ✕ 的 chip):选中文字 / 图 / 便签 / 钉住片段。
+    「书页」关(no_book)时也保留这些——当成脱离书本的独立片段/图喂给 AI(用户诉求:关书页不该连选中都看不见)。"""
+    out = []
+    sel = _clean_tag(ctx.get("selection"))
+    if sel:
+        out.append(f"· 用户选中的文字(独立片段,别管它出自哪本书):「{sel[:400]}」")
+    figs = ctx.get("figures") or ([ctx["figure"]] if ctx.get("figure") else [])
+    if figs:
+        items = []
+        for i, fg in enumerate(figs, 1):
+            if fg.get("kind") == "note":
+                items.append(f"  [{i}] 手写便签:「{_clean_tag(fg.get('desc'))[:300]}」(笔画内容用 see_figure 看)")
+            else:
+                cap = _clean_tag(fg.get("caption")); desc = _clean_tag(fg.get("desc"))
+                items.append(f"  [{i}]「{cap[:48]}」:{desc[:300] or '(无描述,see_figure 看)'}")
+        out.append("· 用户带入的图(独立看待;要核对图里细节用 see_figure,args {index:第几张}):\n" + "\n".join(items))
+    notes_att = [n for n in (ctx.get("notes") or []) if isinstance(n, dict) and n.get("text")]
+    if notes_att:
+        items = [f"  [{i}]「{_clean_tag(nb.get('text'))[:400]}」" for i, nb in enumerate(notes_att[:4], 1)]
+        out.append("· 用户带入的便签:\n" + "\n".join(items))
+    fsel = ctx.get("focus_sel") or {}
+    if isinstance(fsel, dict) and fsel.get("text") and not sel:
+        out.append(f"· 用户钉住的片段:「{_clean_tag(fsel.get('text'))[:400]}」")
+    return "\n".join(out)
+
+
 def _ctx_block(ctx):
     """动态部分(【当前页面】+ 选中/图/知识点/笔迹),每轮随 ctx 变 → 拼进 user message。"""
-    if ctx.get("no_book"):   # 用户点暗「书页」开关:不喂书本上下文,当通用助手答(可问跟书无关的问题)
-        return ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
-                "不使用书里的内容、别主动调读书类工具(read_page/search_book/summarize_section/toc 等),"
+    if ctx.get("no_book"):   # 用户点暗「书页」开关:不喂书本大上下文,当通用助手答(可问跟书无关的问题)
+        base = ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
+                "不使用书里的定位/周边内容、别主动调**读书导航类**工具(read_page/search_book/summarize_section/toc 等),"
                 "除非用户在本条消息里明确要求查书。")
+        att = _explicit_attach_lines(ctx)   # 但用户显式选中/带入的 chip 仍保留(独立片段/图)
+        if att:
+            base += ("\n【用户提供的内容(独立片段,与整本书无关)】\n" + att +
+                     "\n→ 用户仍显式带来了上面这些内容,请**针对它们**回答(可用 lookup_word/translate/explain/see_figure 处理它们),"
+                     "只是别把它们跟书的其余内容/章节挂钩、也别为它们去 read_page。")
+        return base
     full = _sys_prompt(ctx)
     i = full.rfind("【当前页面】")
     return full[i:] if i >= 0 else ""
@@ -2748,10 +2897,11 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "explain", "translate", "dict", "grammar", "pick_video")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
+    "deep":         {"backend": "claude", "variant": "opus",              "depth": "high"},   # 语音通话 deep_think 虚拟工具用
     "summarize":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "vision":       {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "explain":      {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
@@ -2761,6 +2911,7 @@ _AP_DEFAULTS = {
     "pick_video":   {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},   # 找视频:拟搜索词 + 搜后按相关性筛选(便宜 flash 够用)
 }
 _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
+    "deep": "深度思考(语音通话专用)",
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
 }
@@ -3469,6 +3620,7 @@ def assistant_chat():
             force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
             ctx = body.get("context") or {}
             ctx["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message)
+            ctx["voice_mode"] = 1 if body.get("voice") else 0   # 语音对话:问题来自 ASR 转写,回答会被 TTS 朗读
             ctx["_base"] = request.host_url.rstrip("/")
             ctx["_uid"] = uid   # 写操作记 owner=本用户 → 撤销只能撤自己的
             history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
@@ -3517,6 +3669,162 @@ def assistant_history():
     return jsonify({"ok": True, "messages": _convo_load(session["user_id"])[-100:]})
 
 
+@bp.route("/voice-ctx", methods=["GET", "POST"])
+def assistant_voice_ctx():
+    """语音伴读(S2S)的**直塞上下文**:圈画文字 + 本页插图离线描述——纯文本、现成可得的内容
+    直接进 S2S 的 system prompt,不走「我去查」agent 中间层(用户定调:能直接塞的就直接塞)。
+    POST 可带 strokes(前端内存实时墨迹,通话中新圈的,不等 sidecar 防抖保存——镜像侧栏 ctx["ink"] 机制)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    file_rel = request.args.get("file") or body.get("file") or ""
+    try:
+        page = int(request.args.get("page") or body.get("page") or 0)
+    except Exception:
+        page = 0
+    strokes = body.get("strokes") or None
+    inked, figs, has_ink, vocab = "", [], False, []
+    if file_rel and page:
+        try:
+            import pdf_reader as _pdfm
+            # 有笔迹但提取不到字(纯涂画/箭头)也要让壳子知道;实时 strokes 优先于服务端 sidecar
+            has_ink = bool(strokes) or bool(_pdfm._page_ink_strokes(file_rel, page))
+            if has_ink:
+                inked = _clean_tag(_pdfm._text_under_ink(file_rel, page, strokes=strokes) or "")[:500]
+        except Exception:
+            inked = ""
+        try:   # 本页『还没掌握』的生词(与阅读器 F7 下划线同一套 mastery 判定;侧栏 visible_vocab 的服务端等价物)
+            import pdf_reader as _pdfm
+            abs_path = _pdfm._safe_vault_path(file_rel)
+            res = _pdfm._page_chars_cached(abs_path, file_rel, page) if abs_path else None
+            if res:
+                chars = res[0]
+                _pdfm._apply_char_offset(chars, _pdfm._char_offset_for(file_rel, page))
+                marks = _pdfm._build_vocab_marks(chars)
+                if _pdfm._page_allows_ja(chars, file_rel):
+                    marks += _pdfm._build_jp_vocab_marks(chars)
+                seen = set()
+                for m in marks:
+                    w = (m.get("lemma") or m.get("word") or "").strip()
+                    if w and w.lower() not in seen:
+                        seen.add(w.lower())
+                        vocab.append(w)
+                vocab = vocab[:30]
+        except Exception:
+            vocab = []
+        try:
+            figd = _figdescs_for(file_rel, [_to_disp({"file_rel": file_rel}, page)])
+            for lst in figd.values():
+                for cap, desc in lst:
+                    figs.append({"caption": (cap or "")[:80], "desc": (desc or "")[:400]})
+        except Exception:
+            pass
+    return jsonify({"ok": True, "inked": inked, "has_ink": has_ink, "figures": figs[:4], "vocab": vocab})
+
+
+@bp.route("/tools")
+def assistant_tools_dir():
+    """外部编排 agent(MCP)桥①:内置工具层的目录(name+描述)。外部 AI 先看这个发现能力。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "tools": [{"name": n, "desc": d} for n, (d, _) in TOOLS.items()]})
+
+
+@bp.route("/tool", methods=["POST"])
+def assistant_tool_call():
+    """外部编排 agent(MCP)桥②:直接 dispatch 内置助手的工具层——外部 AI 临时取代最外层编排 agent,
+    共享同一副"身体"(30+ 工具:read_page/see_page/highlight/make_anki/notes/search_book…)。
+    body: {name, args?, ctx?:{file_rel, page, selection, ...}}。ctx 字段与侧栏助手同口径。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if name not in TOOLS:
+        return jsonify({"ok": False, "error": f"unknown tool: {name}", "hint": "GET /api/assistant/tools 看目录"}), 400
+    ctx = dict(body.get("ctx") or {})
+    ctx["_uid"] = session["user_id"]
+    try:
+        res = TOOLS[name][1](body.get("args") or {}, ctx) or {}
+    except Exception as ex:
+        res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    return jsonify({"ok": "error" not in res, "tool": name, "result": res})
+
+
+# 只读(无副作用)工具:语音壳可按「工具+参数+页面状态指纹」缓存结果,重复询问直接复用不再执行
+# (写操作/页面动作绝不缓存——"再做一张卡"是合法语义)。挨着 TOOLS 放:加新工具时顺手归类。
+VOICE_CACHEABLE_TOOLS = {
+    "read_page", "read_selection", "search_book", "search_all_books", "recall_notes",
+    "summarize_section", "translate", "see_page", "see_figure", "see_ink",
+    "notes_query", "notes_read", "read_highlights", "find_highlights", "toc",
+    "page_vocab", "lookup_word", "search_video", "search_image",
+}
+
+
+@bp.route("/voice-tool", methods=["POST"])
+def assistant_voice_tool():
+    """语音套壳(S2S 编排化)桥③:S2S 说出的原始命令文本 → **与编排 agent 同一套** JSON 工具协议:
+    `_parse_tool` 顽强解析(围栏/前导散文/控制字符/非法转义容错)→ 正则级修补再试 → dispatch TOOLS。
+    解析失败返回 feedback(编排 agent 同款自愈措辞),relay 经 ChatRAGText 喂回让 S2S 重出一条合法 JSON。
+    这样工具协议/解析器/工具层三者物理同源,编排 agent 升级语音壳自动跟进(用户定调)。
+    body: {cmd, ctx?:{file_rel,page,...}}"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    raw = (body.get("cmd") or "").strip()
+    tool = _parse_tool(raw)
+    if tool is None and '"tool"' in raw:
+        # 正则级修补(语音模型常见坏点:中文引号当 JSON 引号、尾逗号)后再试一次
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw.replace("“", '"').replace("”", '"'))
+        tool = _parse_tool(fixed)
+    if not tool or tool.get("tool") not in TOOLS:
+        return jsonify({"ok": False, "error": "unparseable",
+                        "feedback": ("你上一条像是工具调用,但 JSON 没解析成功(很可能字符串里有**没转义的双引号**或**换行**)。"
+                                     "请重新只输出**一条合法的 JSON**工具调用:字符串里的引号一律换成中文引号「」、"
+                                     "不要带换行、整条只输出 JSON 别加别的字。"
+                                     if '"tool"' in raw else
+                                     f"「{(tool or {}).get('tool', '?')}」不是有效工具" if tool else "没识别出工具调用")})
+    ctx = dict(body.get("ctx") or {})
+    ctx["_uid"] = session["user_id"]
+    name = tool["tool"]
+    targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+    t0 = time.time()
+    try:
+        res = TOOLS[name][1](targs, ctx) or {}
+    except Exception as ex:
+        res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    return jsonify({"ok": "error" not in res, "tool": name, "args": targs,
+                    "label": _tool_label(name, targs), "took_s": round(time.time() - t0, 1),
+                    "cacheable": name in VOICE_CACHEABLE_TOOLS,
+                    "result": res})
+
+
+@bp.route("/log", methods=["POST"])
+def assistant_log_external():
+    """外部编排 agent(MCP)桥③:把外部 AI 跟用户的对话写进助手会话历史(标 via:'mcp')——
+    阅读器侧栏能看到这些对话,内置助手接手时也有完整上下文。body: {user?, assistant?, file?, page?}。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    uid = session["user_id"]
+    meta = {"via": "mcp"}
+    if b.get("file"):
+        meta["file_rel"] = b["file"]   # _convo_append 白名单字段名是 file_rel
+    if b.get("page"):
+        meta["page"] = b["page"]
+    n = 0
+    for role, key in (("user", "user"), ("assistant", "assistant")):
+        txt = (b.get(key) or "").strip()
+        if txt:
+            _convo_append(uid, role, txt[:8000], meta)
+            n += 1
+    try:
+        import reader_events
+        reader_events.publish("assistant-history", b.get("file") or "", uid)   # 侧栏开着可实时感知(未订阅则无害)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "appended": n})
+
+
 @bp.route("/clear", methods=["POST"])
 def assistant_clear():
     if not _logged_in():
@@ -3532,6 +3840,49 @@ def assistant_undo():
     undo_id = (request.get_json(silent=True) or {}).get("id")
     import voice
     return jsonify(voice._undo_do(undo_id, owner=session["user_id"]))   # owner 校验:只能撤自己的(防猜 id 删别人的)
+
+
+_APF_PATH = CLAUDE_DIR / "state" / "assistant-pref-profiles.json"
+
+
+@bp.route("/pref-profiles", methods=["GET", "POST"])
+def assistant_pref_profiles():
+    """模型设置**预设方案**(用户设计:面板顶部几个按钮,点击=应用整套配置,可保存/删除)。
+    GET → {profiles:[names]};POST {op:"save"|"apply"|"delete", name}。
+    save=把当前用户的全套 action-prefs 存为 name;apply=整包写回 action-prefs;delete=删方案。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    uid = str(session["user_id"])
+    with _ap_lock:
+        try:
+            allp = json.loads(_APF_PATH.read_text("utf-8")) if _APF_PATH.exists() else {}
+        except Exception:
+            allp = {}
+        mine = allp.get(uid) or {}
+        if request.method == "GET":
+            return jsonify({"ok": True, "profiles": sorted(mine.keys())})
+        b = request.get_json(silent=True) or {}
+        op, name = b.get("op"), (b.get("name") or "").strip()[:20]
+        if not name or op not in ("save", "apply", "delete"):
+            return jsonify({"ok": False, "error": "bad op/name"}), 400
+        try:
+            ap = json.loads(_AP_PATH.read_text("utf-8")) if _AP_PATH.exists() else {}
+        except Exception:
+            ap = {}
+        if op == "save":
+            mine[name] = dict(ap.get(uid) or {})
+        elif op == "delete":
+            mine.pop(name, None)
+        elif op == "apply":
+            if name not in mine:
+                return jsonify({"ok": False, "error": "no such profile"}), 404
+            ap[uid] = dict(mine[name])
+            _AP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _AP_PATH.write_text(json.dumps(ap, ensure_ascii=False), "utf-8")
+        allp[uid] = mine
+        _APF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _APF_PATH.write_text(json.dumps(allp, ensure_ascii=False), "utf-8")
+        return jsonify({"ok": True, "profiles": sorted(mine.keys())})
 
 
 @bp.route("/action-pref", methods=["POST"])

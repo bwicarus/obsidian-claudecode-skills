@@ -1,0 +1,14 @@
+[Unit]
+Description=MCP server (bwicarus-study-app) - Streamable HTTP for remote agents
+After=network.target webapp.service
+Wants=webapp.service
+
+[Service]
+Type=simple
+User=bwicarus
+ExecStart=/home/bwicarus/mcp-venv/bin/python /home/bwicarus/claude/_server_deploy/mcp_server.py --http 8766
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

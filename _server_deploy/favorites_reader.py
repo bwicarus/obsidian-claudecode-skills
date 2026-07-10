@@ -84,11 +84,14 @@ def _fav_norm_item(raw):
     if not isinstance(raw, dict):
         return None
     kind = (raw.get("kind") or "").strip()
-    if kind == "video":   # 阶段D:收藏 YouTube 视频(无 file → 用 vid 作合成 key,收藏夹物化成可播放 section)
+    if kind == "video":   # 阶段D:收藏视频(YouTube 11 位 id / Bilibili bvid=BV+10=12 位);无 file → 用 vid 作合成 key
         vid = (raw.get("vid") or "").strip()
-        if not re.match(r"^[A-Za-z0-9_-]{11}$", vid):
+        is_bv = bool(re.match(r"^BV[0-9A-Za-z]{10}$", vid))   # B站 bvid(12 位)
+        if not (re.match(r"^[A-Za-z0-9_-]{11}$", vid) or is_bv):   # 两种都放行(原来只认 11 位 → B站 12 位被判非法)
             return None
-        return {"file": "video:" + vid, "kind": "video", "vid": vid,
+        _src = (raw.get("src") or "").strip()
+        src = "bili" if (_src == "bili" or (not _src and is_bv)) else "yt"   # 显式 src 优先,无则按 bvid 兜底
+        return {"file": "video:" + vid, "kind": "video", "vid": vid, "src": src,
                 "title": (raw.get("title") or "")[:200], "thumb": (raw.get("thumb") or "")[:300]}
     rel = (raw.get("file") or "").strip()
     if not rel or ".." in rel or kind not in ("pdf", "epub", "userpage"):
@@ -724,12 +727,14 @@ def _fav_video_item(i: int, it: dict):
     """视频条目(阶段D)→ (label, body, [])。收藏夹 section 走 raw 不消毒 → 缩略图 + data-yt,前端点击升级成 iframe 播放。"""
     vid = it.get("vid") or ""
     title = (it.get("title") or "").strip() or "视频"
-    thumb = it.get("thumb") or ("https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid)
+    # 来源:显式 src 优先,否则按 bvid(BV 开头 12 位)兜底 → B站/YouTube 各自的原链接 + 缩略图兜底
+    is_bili = (it.get("src") == "bili") if it.get("src") else bool(re.match(r"^BV[0-9A-Za-z]{10}", vid))
+    thumb = it.get("thumb") or ("" if is_bili else ("https://i.ytimg.com/vi/%s/mqdefault.jpg" % vid))
     label = "🎬 视频 · " + title
-    href = "https://www.youtube.com/watch?v=" + vid
+    href = ("https://www.bilibili.com/video/" + vid) if is_bili else ("https://www.youtube.com/watch?v=" + vid)
     body = (_fav_sep_html(label, href, it)
             + ('<div class="fav-item fav-video" data-yt="%s">' % _fav_esc(vid))
-            + ('<div class="fav-video-thumb"><img src="%s" alt=""/><span class="fav-video-play">&#9654;</span></div>' % _fav_esc(thumb))
+            + ('<div class="fav-video-thumb"><img src="%s" alt="" referrerpolicy="no-referrer"/><span class="fav-video-play">&#9654;</span></div>' % _fav_esc(thumb))
             + ('<div class="fav-video-title">%s</div></div>' % _fav_esc(title)))
     return label, body, []
 

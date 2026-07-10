@@ -47,8 +47,18 @@
     }, 400);
   }
 
-  // ── YouTube embed / 进度 / 倍速(照搬 rc-stickynote + rc-video 已验证机制)──
+  // 显式 src 优先(调用方恒传);仅无 src 时按 bvid 兜底(BV+10=12 字符,不误判 11 位 YT id)。
+  function _isBili(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.id || ''))); }
+  // ── embed / 进度 / 倍速(照搬 rc-stickynote + rc-video 已验证机制)──
+  // B 站:官方 player.bilibili.com iframe(自带控制条)。它**不支持** YouTube 那套 postMessage(进度/倍速同步、
+  //   我方字幕轨、起止钉、循环)→ open() 时给浮层加 .rcvp-bili 类,CSS 隐掉这些 YT 专属控件(靠 B 站原生控制条)。
+  //   仅 start(t=秒)B 站 URL 支持,end/loop 不支持。
   function vEmbedSrc(v) {
+    if (_isBili(v)) {
+      var bp = ['bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
+      if (v.start) bp.push('t=' + Math.max(0, v.start | 0));
+      return 'https://player.bilibili.com/player.html?' + bp.join('&');
+    }
     var p = ['enablejsapi=1', 'playsinline=1', 'rel=0', 'autoplay=1', 'cc_lang_pref=zh-Hans', 'hl=zh-CN', 'cc_load_policy=0'];   // 我们有自己的中文字幕轨 → 不强制 YT 原生 CC(免双字幕)
     if (v.start) p.push('start=' + Math.max(0, v.start | 0));
     if (v.end) p.push('end=' + Math.max(0, v.end | 0));
@@ -167,6 +177,9 @@
       '.rcvp-sub.rcvp-out .rcvp-en{font-size:12px;text-shadow:none;color:#9aa4af}' +
       // 控制条:Apple 简约风——透明/无重边框,hover 淡底,active=iOS 蓝 tint(而非重填充)
       '.rcvp-ctrls{flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:center;gap:4px 5px;padding:7px 10px;background:transparent}' +
+      /* B 站:隐掉依赖 YouTube postMessage 的控件(起止钉/倍速/循环/字幕轨/字幕列表)→ 用 B 站原生控制条。整条控制栏空了就不占位。 */
+      '.rcvp-bili .rcvp-grp,.rcvp-bili .rcvp-ck,.rcvp-bili .rcvp-cc,.rcvp-bili .rcvp-hq,.rcvp-bili .rcvp-en-tg,.rcvp-bili .rcvp-pos-tg,.rcvp-bili .rcvp-list{display:none!important}' +
+      '.rcvp-bili .rcvp-ctrls:empty,.rcvp-bili .rcvp-ctrls{padding:0}' +
       '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:#8a9bb4;font-size:12px}' +
       '.rcvp-t{width:26px;background:rgba(255,255,255,.06);border:none;color:#e6eeff;border-radius:5px;padding:3px 2px;font-size:12px;text-align:center;outline:none}' +
       '.rcvp-cn{color:#5a6680}' +
@@ -416,10 +429,12 @@
     opts = opts || {}; if (!opts.id) return;
     if (!box) _build();
     box.style.display = 'flex';
+    var _bili = _isBili({ src: opts.src, id: opts.id });
     cur = {
-      v: { id: opts.id, start: opts.start | 0, end: opts.end | 0, loop: !!opts.loop, rate: parseFloat(opts.rate) || 1, cc: opts.cc },
+      v: { id: opts.id, start: opts.start | 0, end: opts.end | 0, loop: !!opts.loop, rate: parseFloat(opts.rate) || 1, cc: opts.cc, src: (_bili ? 'bili' : 'yt') },
       noteId: opts.noteId || null, onChange: opts.onChange || null, onRemove: opts.onRemove || null,
     };
+    box.classList.toggle('rcvp-bili', _bili);   // B 站:CSS 隐掉 YT 专属控件(字幕/倍速/起止钉/循环/字幕列表)
     // 换视频重置字幕/进度/字幕列表
     _subStop(); _sub = null; _transCurIdx = -1; _vcur = cur.v.start || 0; _vcurAt = _now(); _vplaying = true; _vrate = cur.v.rate || 1;
     box.querySelector('.rcvp-title').textContent = opts.title || '视频';
@@ -431,9 +446,16 @@
     box.querySelector('.rcvp-loop').checked = !!cur.v.loop;
     box.querySelector('.rcvp-rm').style.display = cur.noteId ? '' : 'none';   // 移除视频仅便签来源
     iframe.src = vEmbedSrc(cur.v);
-    _applySubUI();   // 按当前(或默认)原文/内外开关先应用一次
-    try { var _tp = box.querySelector('.rcvp-trans'); if (_tp && _tp.style.display !== 'none') { _renderTranscript(); if (cur) _toggleSub('auto', false); } } catch (e) {}   // 换视频时列表开着 → 清空并重拉本视频字幕
-    _loadPrefs(function () { _place(); _applySubUI(); });   // 服务器 prefs 到手 → 再应用一次(首次开浮层生效)
+    if (_bili) {
+      // B 站:字幕/字幕列表是 YouTube-only(靠 YT postMessage + /api/video-subtitles)。开 B站 视频时
+      //   强制收起残留的字幕列表侧栏 + 字幕浮层,且**不触发** _toggleSub(避免对 bvid 发一次注定失败的 YT 字幕请求)。
+      try { var _tpB = box.querySelector('.rcvp-trans'); if (_tpB) _tpB.style.display = 'none'; } catch (e) {}
+      box.querySelector('.rcvp-sub').style.display = 'none';
+    } else {
+      _applySubUI();   // 按当前(或默认)原文/内外开关先应用一次
+      try { var _tp = box.querySelector('.rcvp-trans'); if (_tp && _tp.style.display !== 'none') { _renderTranscript(); if (cur) _toggleSub('auto', false); } } catch (e) {}   // 换视频时列表开着 → 清空并重拉本视频字幕
+    }
+    _loadPrefs(function () { _place(); if (!_bili) _applySubUI(); });   // 服务器 prefs 到手 → 再应用一次(首次开浮层生效);B站不碰字幕 UI
   }
   function close() {
     _subStop(); _sub = null;

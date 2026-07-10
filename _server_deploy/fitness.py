@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -1168,13 +1169,17 @@ def api_videos_set(exercise_id: str):
     username = _username()
     data = request.get_json(silent=True) or {}
     videos = data.get("videos") or []
-    # 验证: 每个元素必须含 video_id
+    # 验证: 每个元素必须含 video_id。保留 channel/src/thumb(B站视频靠 src 走 B站播放器、thumb 存封面)
     clean = []
     for v in videos:
         if isinstance(v, str):
             clean.append({"video_id": v, "title": ""})
         elif isinstance(v, dict) and v.get("video_id"):
-            clean.append({"video_id": v["video_id"], "title": v.get("title", "")})
+            item = {"video_id": v["video_id"], "title": v.get("title", "")}
+            for k in ("channel", "src", "thumb"):
+                if v.get(k):
+                    item[k] = v[k]
+            clean.append(item)
     db = _db(username)
     db.execute(
         "INSERT INTO fitness_video_override (exercise_id, videos_json, updated_at) "
@@ -1196,6 +1201,81 @@ def api_videos_reset(exercise_id: str):
     db.commit()
     db.close()
     return jsonify({"ok": True})
+
+
+@api_bp.route("/videos/<exercise_id>/search", methods=["POST"])
+def api_videos_search(exercise_id: str):
+    """两源(YouTube + Bilibili)重新搜该动作教学视频 + AI 相关性筛,替换列表。
+    复用阅读器同一套:youtube_search / bilibili_search(B站中文词) + assistant._filter_relevant_videos。
+    结果存 override(带 src/thumb),前端按 src 走 YT / B站 播放器。"""
+    username = _username()
+    plan = _load_plan()
+    # 找动作名 + 拟搜索词(plan 里 search_q 是英文技术词,name 是中文)
+    name = exercise_id
+    yt_q = exercise_id
+    for d in plan.get("days", []):
+        for ex in d.get("exercises", []):
+            if ex["id"] == exercise_id:
+                name = ex.get("name") or exercise_id
+                yt_q = ex.get("search_q") or name
+                break
+    zh_name = re.sub(r"[（(].*?[)）]", "", name).strip()   # 去中文括注让查询更干净
+    bili_q = f"{zh_name} 正确动作 教学"
+    topic = f"健身动作「{zh_name}」的标准动作 / 正确姿势 / 教学(**不是**比赛/vlog/带货/动作合集混剪)"
+
+    import concurrent.futures as _cf
+
+    def _yt():
+        try:
+            import youtube_search
+            r = youtube_search.search(yt_q, max_results=5)
+            return [dict(v, src="yt") for v in r.get("videos", [])] if r.get("ok") else []
+        except Exception:
+            return []
+
+    def _bili():
+        try:
+            import bilibili_search
+            r = bilibili_search.search(bili_q, max_results=8)   # B站已按播放量质量分排过
+            return r.get("videos", []) if r.get("ok") else []
+        except Exception:
+            return []
+
+    with _cf.ThreadPoolExecutor(max_workers=2) as pool:
+        fy, fb = pool.submit(_yt), pool.submit(_bili)
+        yt_raw, bili_raw = fy.result(), fb.result()
+    if not yt_raw and not bili_raw:
+        return jsonify({"ok": False, "error": "两个源都没搜到,稍后再试"})
+    # AI 相关性筛(复用 assistant 的筛选器 + pick_video 便宜档模型);失败退回不筛
+    try:
+        import assistant
+        r = assistant._resolve("pick_video", username)
+        yt_keep = (assistant._filter_relevant_videos(topic, yt_raw, r) if yt_raw else [])[:3]
+        bili_keep = (assistant._filter_relevant_videos(topic, bili_raw, r) if bili_raw else [])[:3]
+    except Exception:
+        yt_keep, bili_keep = yt_raw[:3], bili_raw[:3]
+    # 交替合并(B站中文优先露头,两源都露脸)
+    merged = []
+    for i in range(max(len(yt_keep), len(bili_keep))):
+        if i < len(bili_keep):
+            merged.append(bili_keep[i])
+        if i < len(yt_keep):
+            merged.append(yt_keep[i])
+    clean = [{"video_id": v.get("id"), "title": v.get("title", ""), "channel": v.get("channel", ""),
+              "src": v.get("src", "yt"), "thumb": v.get("thumb", "")}
+             for v in merged if v.get("id")]
+    if not clean:
+        return jsonify({"ok": False, "error": "筛选后无合适视频,保留原列表"})
+    db = _db(username)
+    db.execute(
+        "INSERT INTO fitness_video_override (exercise_id, videos_json, updated_at) "
+        "VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(exercise_id) DO UPDATE SET videos_json=excluded.videos_json, updated_at=CURRENT_TIMESTAMP",
+        (exercise_id, json.dumps(clean, ensure_ascii=False)))
+    db.commit()
+    db.close()
+    return jsonify({"ok": True, "videos": clean,
+                    "meta": {"bili_q": bili_q, "yt_q": yt_q, "yt": len(yt_keep), "bili": len(bili_keep)}})
 
 
 # ───────────────────────── YouTube 字幕 (Gemini Flash 翻译) ─────────────────────

@@ -574,6 +574,45 @@ def _brain_ask(prompt: str, timeout: float = 28.0):
     return out or None
 
 
+# ── 豆包(火山方舟 Ark)大脑:server-config voice.brain=='doubao' 时优先走 ──
+# 语音对话场景:中文应答自然 + flash 档快且便宜(省 Claude 额度)。失败(模型未开通/网络)秒回落原 Claude 链,
+# 用户无感;在方舟控制台开通模型后无需改代码自动生效。key: ~/.config/doubao-api-key(600,不进 git)。
+_DOUBAO_KEY_FILE = Path("~/.config/doubao-api-key").expanduser()
+
+
+def _voice_cfg() -> dict:
+    try:
+        cfg = json.loads((CLAUDE_DIR / "state" / "server-config.json").read_text("utf-8"))
+        return cfg.get("voice") or {}
+    except Exception:
+        return {}
+
+
+def _doubao_ask(prompt: str, timeout: float = 20.0) -> str:
+    """单发豆包 chat(OpenAI 兼容)。失败返回 ""(调用方回落 Claude)。"""
+    try:
+        key = _DOUBAO_KEY_FILE.read_text().strip()
+    except Exception:
+        return ""
+    if not key:
+        return ""
+    model = _voice_cfg().get("doubao_model") or "doubao-seed-1-6-flash-250828"
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+    if "seed-1-6" in model:
+        body["thinking"] = {"type": "disabled"}   # 语音要快:关深度思考(仅 1.6 系列认这个字段)
+    try:
+        r = requests.post("https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                          headers={"Authorization": f"Bearer {key}"}, json=body, timeout=timeout)
+        d = r.json()
+        if d.get("error"):
+            sys.stderr.write(f"[voice doubao] {d['error'].get('message', '')[:80]}\n")
+            return ""
+        return (d["choices"][0]["message"].get("content") or "").strip()
+    except Exception as ex:
+        sys.stderr.write(f"[voice doubao] {ex}\n")
+        return ""
+
+
 def _llm_intent(transcript: str, context: dict) -> dict:
     """Claude 把口令映射成真实动作(或简短作答)。返回定型结构,动作经白名单校验。"""
     ctx = context or {}
@@ -591,7 +630,10 @@ def _llm_intent(transcript: str, context: dict) -> dict:
               f"【当前页面】{meta_txt}{page_block}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
     raw = ""
     try:
-        raw = (_brain_ask(prompt) or "").strip()   # 预热常驻进程,快
+        if _voice_cfg().get("brain") == "doubao":
+            raw = (_doubao_ask(prompt) or "").strip()   # 豆包大脑(中文快+省 Claude 额度);失败落回下面 Claude 链
+        if not raw:
+            raw = (_brain_ask(prompt) or "").strip()   # 预热常驻进程,快
         if not raw:                                 # 没预热进程/失败 → 冷调用兜底
             sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
             import ai_client

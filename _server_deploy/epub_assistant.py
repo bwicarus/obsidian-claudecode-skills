@@ -994,11 +994,11 @@ _etools = {
                  "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中)", _t_make_note),
     "add_vocab": ("把单词加生词本并制卡(后台)。args {word?}(不传用选中)", lambda a, c: _A()._t_add_vocab(a, c)),
-    "search_image": ("★配图专用(Wikipedia 免费搜真实图片,非 AI 生成)。**只在概念具体/生僻、视觉信息真有帮助时才调**"
-                     "(如某种矿物/历史文物/生物物种/机械结构/天体/建筑/仪器等有明确实物形象的东西);"
-                     "**别对**『力/能量/速度』这类基础常见词、**也别对**抽象理论/数学推导配图——大多数回答根本不需要图,别每个词都调。"
-                     "拿到图后在回答里用标准 markdown ![简短说明](image_url) 插入;没搜到就 ok:false,**别自己编图片链接**。"
-                     "刚好这次还要制卡、这张图也想放进卡片,就把 image_url 一并传给 make_anki。args {query:要搜的词/概念}",
+    "search_image": ("★配图专用(搜**真实图片**,非 AI 生成;多源 Wikimedia Commons + Google 图搜若配好)。"
+                     "**一次性**把该配图的概念连关键词一起传:args {queries:[{concept:\"中文概念\", query:\"english keyword\"}, ...]}"
+                     "(query 用英文覆盖最好,一次最多 8 个);工具并行搜、每概念返回最匹配 1 张。"
+                     "拿回后对 images 每张用 markdown ![简短中文说明](image_url) 插到对应概念旁;missed 的没搜到就别硬配、别编链接。"
+                     "别对『力/能量』这类无固定形象的抽象词硬配。要制卡也想放这张图就把 image_url 传给 make_anki。",
                      lambda a, c: _A()._t_search_image(a, c)),
     "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**卡片。用户明确要『找/看视频、有没有视频讲解』时用,"
                      "别对每个概念都配视频。拿到结果只需简短说一句『给你找到这些视频』,**别复述标题/链接**(卡片已能直接播放)。args {query?}(不传用选中)",
@@ -1067,9 +1067,9 @@ _ESYS_RULES = (
     "『帮我记个便签/在这章贴张便签/把便签改成…』才 notes_create/notes_edit(问『我记了什么便签』只是**读**,用 notes_query/notes_read,不算写)。"
     "用户只说『总结/讲解/读一下/这章讲了啥/翻译/解释』——这些都只要**文字回答**,**绝不许**顺手 make_anki / make_note / add_vocab / notes_create。"
     "拿不准用户到底要不要卡时:先给文字总结,再在回答里问一句『要我做成 Anki 卡吗?』,**别擅自写**。\n"
-    "★配图:讲到具体/生僻、视觉信息真有帮助的概念时(某种矿物/历史文物/生物物种/机械结构/天体/建筑/仪器等有明确实物形象的东西),"
-    "可用 search_image(Wikipedia 真实图片,免费无 key,非 AI 生成)拿到图后在回答里用 ![简短说明](image_url) 插入;"
-    "**别对每个词都调**,基础常见词(力/能量/速度等)和抽象理论/数学推导**不需要**配图,大多数回答根本用不上这个工具。\n"
+    "★配图:讲到有明确视觉形象的概念(实物/结构/示意图/图表/生物/文物/天体/仪器等)时,用 search_image 搜**真实图片**"
+    "(多源 Commons + Google,非 AI 生成)。**一次性**把要配的概念连英文关键词一起传 queries=[{concept,query}...];拿回后每张配一句说明插到对应概念旁。"
+    "基础常见词(力/能量/速度等)和纯抽象/数学推导**不需要**配图。\n"
     "调用工具时:**整条消息只输出一行 JSON**,格式 {\"tool\":\"工具名\",\"args\":{...}},别加任何别的字。"
     "我执行后会把【工具结果】返回给你,你再决定继续调工具还是回答。\n"
     "能回答用户时:直接输出给用户看的中文回答(纯文本,不要 JSON、不要工具)。回答简洁自然,别太长。\n"
@@ -1250,7 +1250,7 @@ def _esys_prompt(ctx):
     mp = ctx.get("media_prefer") or {}
     prefer_line = ""
     if mp.get("image"):
-        prefer_line += "\n★用户开了「配图」偏好:内容适合配图时**直接调 search_image 配真实图,别问『要不要配图』**(他已用开关表明要图);只有纯推导/抽象/基础常识才跳过。"
+        prefer_line += "\n★用户开了「配图」偏好:回答里凡有明确视觉形象的概念都该配图。**一次性**调 search_image 传 queries=[{concept,query}...](query 用英文),别一个个零散调、别问『要不要配图』;拿回图每张配一句说明插到对应概念旁。只有纯抽象/基础常识才跳过。"
     if mp.get("video"):
         prefer_line += "\n★用户开了「视频」偏好:内容适合视频讲解时**直接调 search_video 找了放进对话,别问『要不要我找视频』**(他已用开关表明要视频);只有完全不适合视频(纯符号推导)才跳过。"
     prefer_line += "\n★**绝对禁止编造图片链接**:![](url) 的 url 只能是 search_image 刚返回的 image_url,别凭记忆写维基/教科书 URL。"
@@ -1280,10 +1280,18 @@ def _esys_static():
 
 def _ectx_block(ctx):
     """动态部分(【当前章节】+ 选中 + 目录),每轮随 ctx 变 → 拼进 user message。"""
-    if ctx.get("no_book"):   # 用户点暗「书页」开关:当通用助手答(镜像 assistant.py:2519;前端 epub-html.js:2517 已发 no_book,此前后端零处理→开关像坏的)
-        return ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
-                "不使用书里的内容、别主动调读书类工具(read_section/search_book/summarize/toc 等),"
+    if ctx.get("no_book"):   # 用户点暗「书页」开关:当通用助手答;但保留用户显式选中/带入的 chip(独立片段/图)
+        base = ("【当前状态】用户临时关闭了「书页」上下文开关——这一轮请当**通用助手**回答,"
+                "不使用书里的定位/周边内容、别主动调**读书导航类**工具(read_section/search_book/summarize/toc 等),"
                 "除非用户在本条消息里明确要求查书。")
+        try:
+            att = _A()._explicit_attach_lines(ctx)   # 复用 assistant 的显式附件拼装(选中/图/便签/焦点)
+        except Exception:
+            att = ""
+        if att:
+            base += ("\n【用户提供的内容(独立片段,与整本书无关)】\n" + att +
+                     "\n→ 请**针对它们**回答(可用 lookup_word/translate/explain/see_figure),别跟书的其余内容/章节挂钩。")
+        return base
     full = _esys_prompt(ctx)
     i = full.rfind("【当前章节】")
     return full[i:] if i >= 0 else ""

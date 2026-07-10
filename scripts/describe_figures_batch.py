@@ -24,6 +24,10 @@ VAULT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 
 sys.path.insert(0, str(PROJECT / "scripts"))
 import describe_figures as DF   # 复用 _claude_vision / _parse_figs / pdf_sha / _clip
+try:
+    import figure_dedup as _dedup   # 跨书图像去重缓存(同/极相似图只描述一次)
+except Exception:
+    _dedup = None
 
 
 def _rel(pdf_abspath) -> str:
@@ -152,7 +156,7 @@ def process_book(sidecar_path, model="sonnet", force=False, dry=False):
     if not todo_pages:
         print(f"  {os.path.basename(sidecar_path)}: 全部已描述,跳过"); return
     doc = fitz.open(pdf)
-    n_one = n_multi = n_fail = 0
+    n_one = n_multi = n_fail = n_dedup = 0
     for pg in todo_pages:
         idxs = by_page[pg]
         # 只处理还没 desc 的条目
@@ -162,21 +166,36 @@ def process_book(sidecar_path, model="sonnet", force=False, dry=False):
         page = doc[pg - 1]
         ctx = DF._clip(page.get_text("text"), 700)
         loc = _location(pdf, rel, pg)
-        if len(idxs) == 1:
-            k = idxs[0]
+        # ── 先用跨书去重缓存:每框裁图查近邻已描述图,命中直接复用(省 AI 视觉调用) ──
+        crops = {}; miss = []
+        for k in need:
             png = _crop_png(page, geom[k].get("fbox") or geom[k].get("bbox") or [0, 0, 1, 1])
+            crops[k] = png
+            hit = _dedup.lookup(png) if (_dedup and png) else None
+            if hit:
+                geom[k]["desc"] = hit[0]; geom[k]["desc_src"] = "dedup"
+                geom[k].pop("needs_describe", None); n_dedup += 1
+            else:
+                miss.append(k)
+        # ── 缓存没命中的才调 AI(1 张走单图,多张走整页多图) ──
+        if len(miss) == 1:
+            k = miss[0]; png = crops[k]
             desc = describe_one_crop(png, ctx, loc, model) if png else None
             if desc:
                 geom[k]["desc"] = desc.strip(); geom[k].pop("needs_describe", None); n_one += 1
+                if _dedup and png:
+                    _dedup.store(png, desc.strip(), book=rel, page=pg)
             else:
                 n_fail += 1
-        else:
-            boxes = [geom[k].get("fbox") or geom[k].get("bbox") or [0, 0, 1, 1] for k in idxs]
+        elif len(miss) > 1:
+            boxes = [geom[k].get("fbox") or geom[k].get("bbox") or [0, 0, 1, 1] for k in miss]
             res = describe_multi(_page_png(page), boxes, ctx, loc, model)
             got = 0
-            for pos, k in enumerate(idxs):
+            for pos, k in enumerate(miss):
                 if pos in res and not (geom[k].get("desc") or "").strip():
                     geom[k]["desc"] = res[pos]; geom[k].pop("needs_describe", None); got += 1
+                    if _dedup and crops.get(k):
+                        _dedup.store(crops[k], res[pos], book=rel, page=pg)
             n_multi += got
             if not got:
                 n_fail += 1
@@ -188,7 +207,7 @@ def process_book(sidecar_path, model="sonnet", force=False, dry=False):
             open(tmp, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=1))
             os.replace(tmp, sidecar_path)
     doc.close()
-    print(f"  {os.path.basename(sidecar_path)}: 单图描述 {n_one} / 多图描述 {n_multi} / 失败页 {n_fail}")
+    print(f"  {os.path.basename(sidecar_path)}: 单图描述 {n_one} / 多图描述 {n_multi} / 复用缓存 {n_dedup} / 失败页 {n_fail}")
 
 
 def main():

@@ -564,7 +564,7 @@ def _pdf_shared_js_v():
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
                  "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
-                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "pdf-adapter.js",
+                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -2218,6 +2218,29 @@ def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
             })
 
 
+@bp.route("/api/page-text")
+def pdf_api_page_text():
+    """某页纯文本(轻量,给 MCP 服务器/外部 agent 读书用;浏览器阅读器不用它——它要的是 char bbox)。
+    GET ?file=&page= → {ok, page, total, text}。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    try:
+        import fitz
+        doc = fitz.open(str(abs_path))
+        try:
+            if page > doc.page_count:
+                return jsonify({"ok": False, "error": "page out of range", "total": doc.page_count}), 400
+            txt = (doc[page - 1].get_text("text") or "").strip()
+            return jsonify({"ok": True, "page": page, "total": doc.page_count, "text": txt[:8000]})
+        finally:
+            doc.close()
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
 @bp.route("/api/page-chars")
 def pdf_api_page_chars():
     """提取该页所有字符的精确 bbox（PDF 坐标）。
@@ -2380,6 +2403,7 @@ def pdf_api_page_overlay():
             "ok": True,
             "vocab_marks": vocab_marks,
             "vocab_sentences": sentences,
+            "mastered_furi": _page_mastered_surfaces(chars),   # 已掌握词面 → 前端全体假名标注时跳过其注音
             "offset": _char_offset_for(rel, page),
             "cv": _page_content_version(abs_path, rel, page),
         })
@@ -2634,6 +2658,48 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
                           "label_slug": info["label_slug"], "rects": rects, "jp": True})
         i = j
     return marks
+
+
+def _word_mastered(surface: str, idx=None) -> bool:
+    """某词面是否**已掌握**(vocab_index label_slug=='mastered')。英日统一。
+    **PDF 与 EPUB 振假名共用这一处 mastery 判定**——「已掌握不注音」的策略统一在此,渲染各自实现。
+    先按表层查(forms 已含活用形),查不到且含 CJK 再解析原形(辞書形)查。"""
+    if idx is None:
+        idx = _vocab_idx()
+    if not idx or not surface:
+        return False
+    info = idx.get(surface.lower())
+    if not info and any("぀" <= ch <= "鿿" for ch in surface):   # 含 CJK 才试原形还原(英文没必要)
+        base = (_jp_inflection(surface) or {}).get("base")
+        if base:
+            info = idx.get(base.lower())
+    return bool(info and info.get("label_slug") == "mastered")
+
+
+def _page_mastered_surfaces(chars: list[dict]) -> list[str]:
+    """本页**已掌握**的词面列表(用 _word_mastered 判定)。用于 PDF「全体假名标注」跳过它们的注音。跟 furigana 条目的 wd 对齐。"""
+    idx = _vocab_idx()
+    if not idx:
+        return []
+    out = set()
+    i, n = 0, len(chars)
+    while i < n:
+        c = chars[i]
+        wid = c.get("w", -1)
+        if c.get("sp") or wid is None or wid < 0:
+            i += 1
+            continue
+        j = i
+        toks = []
+        while j < n and chars[j].get("w") == wid:
+            if not chars[j].get("sp"):
+                toks.append(chars[j])
+            j += 1
+        surf = "".join(t.get("c", "") for t in toks)
+        if surf and _word_mastered(surf, idx):
+            out.add(surf)
+        i = j
+    return list(out)
 
 
 def page_unmastered_vocab(rel: str, page: int) -> list[dict]:
@@ -3330,6 +3396,7 @@ def pdf_api_page_vocab_marks():
             "ok": True,
             "vocab_marks": marks,
             "vocab_sentences": sentences,
+            "mastered_furi": _page_mastered_surfaces(chars),   # 跟 page-overlay 一致:已掌握词面 → 标掌握后立刻隐藏其假名注音
             "page_w": page_w,
             "page_h": page_h,
         })
@@ -6993,8 +7060,9 @@ def _epub_furigana_tokens(text: str) -> list:
         _apply_jp_tokenize(chars, 0, 0, furigana_out=furi)
         for it in furi:
             try:
-                toks.append({"start": int(round(it["x0"])), "end": int(round(it["x1"])),
-                             "reading": it.get("rt", ""), "kind": "jp"})
+                st, en = int(round(it["x0"])), int(round(it["x1"]))
+                toks.append({"start": st, "end": en, "reading": it.get("rt", ""), "kind": "jp",
+                             "wd": it.get("wd") or text[st:en]})   # wd=词面(mastery 判定用;缓存进,过滤在端点 live)
             except Exception:
                 continue
     except Exception:
@@ -7003,8 +7071,9 @@ def _epub_furigana_tokens(text: str) -> list:
     try:
         for it in _build_en_furigana(chars):
             try:
-                toks.append({"start": int(round(it["x0"])), "end": int(round(it["x1"])),
-                             "reading": it.get("rt", ""), "kind": "en"})
+                st, en = int(round(it["x0"])), int(round(it["x1"]))
+                toks.append({"start": st, "end": en, "reading": it.get("rt", ""), "kind": "en",
+                             "wd": text[st:en]})
             except Exception:
                 continue
     except Exception:
@@ -7015,7 +7084,7 @@ def _epub_furigana_tokens(text: str) -> list:
 
 def _epub_furi_cache_path(text: str) -> Path:
     import hashlib
-    sha = hashlib.sha1(("furi::" + (text or "")).encode("utf-8")).hexdigest()[:16]
+    sha = hashlib.sha1(("furi2::" + (text or "")).encode("utf-8")).hexdigest()[:16]   # furi2:token 加了 wd 字段 → 换版重算
     return _EPUB_FURI_CACHE_DIR / f"{sha}.json"
 
 
@@ -7084,13 +7153,16 @@ def pdf_api_epub_furigana():
         except Exception:
             idx = 0
         texts = _epub_section_paragraphs(rel, idx)
+    _midx = _vocab_idx()   # 已掌握词 live 过滤(不进缓存,mastery 变了立即反映;跟 PDF 全体假名标注同一策略 _word_mastered)
     items: list = []
     for t in texts[:4000]:
         t = "" if t is None else str(t)
         toks = _epub_furi_cache_get(t)
         if toks is None:
             toks = _epub_furigana_tokens(t)
-            _epub_furi_cache_put(t, toks)
+            _epub_furi_cache_put(t, toks)   # 缓存全量(含 wd)
+        if _midx:   # 已掌握的词不下发 → EPUB 前端自然不包 ruby(与 PDF「已掌握不注音」一致)
+            toks = [tk for tk in toks if not _word_mastered(tk.get("wd") or "", _midx)]
         items.append({"text": t, "tokens": toks})
     return jsonify({"ok": True, "items": items})
 

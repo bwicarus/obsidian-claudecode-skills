@@ -52,11 +52,12 @@
   //   userpage = 自己创建的插入页:file=该插入页所属书 rel,id=userpages 记录 id(用 id 判重)
   function normItem(t) {
     var it = { file: (t && t.file) || '', kind: (t && t.kind) || '' };
-    if (it.kind === 'video') {   // YouTube 视频:无 file → 合成 video:<vid> 作 key(与后端 _fav_norm_item 对齐);带 vid/title/thumb 供 POST
+    if (it.kind === 'video') {   // YouTube / Bilibili 视频:无 file → 合成 video:<vid> 作 key(与后端 _fav_norm_item 对齐);带 vid/title/thumb/src 供 POST
       it.vid = String((t && t.vid) || '');
       it.file = 'video:' + it.vid;
       it.title = (t && t.title) || '';
       it.thumb = (t && t.thumb) || '';
+      it.src = (t && t.src) || '';   // 'bili'|'yt':后端据此(或 bvid 兜底)出对应播放器/原链接
     } else if (it.kind === 'pdf') it.page = Math.max(1, parseInt((t && t.page) || 1, 10) || 1);
     else if (it.kind === 'userpage') it.id = String((t && t.id) || '');
     else it.section = Math.max(0, parseInt((t && t.section) || 0, 10) || 0);

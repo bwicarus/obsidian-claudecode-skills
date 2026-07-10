@@ -2301,7 +2301,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     }
     wrap.__vocabMarks = (ov && ov.vocab_marks) || [];
     wrap.__vocabSentences = (ov && ov.vocab_sentences) || [];
+    wrap.__masteredFuri = new Set((ov && ov.mastered_furi) || []);   // 已掌握词面 → ruby 跳过其注音
     try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+    try { renderRubyLayer(wrap); } catch (_) {}   // overlay 到了(含已掌握词集)→ 重画 ruby(首渲时还没这个集,此刻把已掌握词的注音去掉)
     try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
   });
 }
@@ -2380,7 +2382,9 @@ function renderRubyLayer(pw) {
   const pageHPt = pw.__pageHPt || cssH;
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const mastered = pw.__masteredFuri;   // 已掌握词面集(page-overlay 给);已掌握=不注音
   for (const it of items) {
+    if (mastered && it.wd && mastered.has(it.wd)) continue;   // 已掌握的词跳过假名/音标
     const sp = _makeRubySpan(it, sx, sy);
     if (sp) layer.appendChild(sp);
   }
@@ -2714,8 +2718,10 @@ async function refreshVocabUnderlinesForAllPages() {
             if (!d.ok) continue;
             pw.__vocabMarks = d.vocab_marks || [];
             pw.__vocabSentences = d.vocab_sentences || [];
+            pw.__masteredFuri = new Set(d.mastered_furi || []);   // 刚标掌握 → 更新已掌握词集
             renderVocabUnderlines(pw, pw.__vocabMarks);
             renderVocabSentences(pw, pw.__vocabSentences);
+            try { renderRubyLayer(pw); } catch (_) {}   // 重画 ruby:标掌握的词当下就不再显示假名注音
           } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
         }
       };
@@ -3204,7 +3210,7 @@ const _OVL_HL_SEL = '.word-hl-layer .hl, .phrase-hl-layer .hl, .explain-hl-layer
 // 判断是否落在查询高亮(词组/查词/解释)上。命中 → 交给该高亮动作(不选字/不查词);否则正常选字。
 // 这是"状态无关的裁决",不依赖 pointer-events 抢占 → 根除"穿透到 char-layer 误查手指下的字"整类 bug。
 function _overlayHlHitAtClient(pw, cx, cy) {
-  const hls = pw.querySelectorAll(_OVL_HL_SEL);
+  const hls = document.querySelectorAll(_OVL_HL_SEL);   // 全文档搜(不限本页 pw):双页模式下词组高亮可能在别的 pw;getBoundingClientRect 包含判断只会命中点击点上的那个,不误命中别页
   for (let i = hls.length - 1; i >= 0; i--) {   // 逆序:后插入(DOM 靠后)= z:6 平级里视觉在上,先命中它
     const r = hls[i].getBoundingClientRect();
     if (r.width && r.height && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
@@ -3754,7 +3760,10 @@ function _bindCharLayer(cl, pw) {
     if (window._ink && (_ink.mode || _ink.drawing)) return false;   // 手写模式/正在画 → 不选字(防御:各入口都兜住)
     // 根治:先几何判断本次按下是否落在查询高亮上。是 → 记 pending,松手派发该高亮动作,**不选字/不查词**。
     //   与高亮 pointer-events 状态完全无关 → 无论 .hl 是否残留 none、事件是否穿透,都不会误查手指下的字。
-    if (cx != null) { const _hit = _overlayHlHitAtClient(pw, cx, cy); if (_hit && _hit.kind) { _hlTapPending = { pw, hit: _hit, cx, cy }; _dragStartCharIdx = null; return false; } }
+    if (cx != null) {
+      const _hit = _overlayHlHitAtClient(pw, cx, cy);
+      if (_hit && _hit.kind) { _hlTapPending = { pw, hit: _hit, cx, cy }; _dragStartCharIdx = null; return false; }
+    }
     _syncCharBoxScale(pw);   // 命中前先把 charBoxes 对齐到当前显示尺寸(烘焙 scale 可能已过期)
     _hideFmlPop();           // 任何新按下先关掉旧公式浮层(若新点中公式,onEnd 会重新弹)
     _fromLBtn = false;   // 普通 char-layer 起点（非 L 按钮转发）
@@ -8435,6 +8444,45 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') { closeResult(); toolbar.classList.remove('open'); }
 });
 
+// 顶栏 🎙 语音通话入口:打开豆包实时语音通话页,带上正在读的书+当前页(relay 会把本页内容注入通话上下文)。
+// 内联 onclick 拿不到模块作用域的 FILE_REL/currentPage → 挂 window(项目惯例,同 _noteCreateAtCenter)。
+window._voiceCall = () => {
+  if (window.RC && RC.voicecall) {   // 语音输入模式(agent:说话=问侧栏助手,转写进输入框,回答文字为主)
+    RC.voicecall.toggle({ file: FILE_REL || '', page: currentPage || 1 });
+    return;
+  }
+  // 兜底:模块没加载 → 独立通话页(纯聊天,无页面控制)
+  window.open('/static/pdf/voice-call.html?file=' + encodeURIComponent(FILE_REL || '') + '&page=' + (currentPage || 1), '_blank');
+};
+// S2S 伴读通话(长按侧栏 📞 触发):端到端语音对话,带本页上下文+翻页热同步;说"找视频/翻到第N页"
+// 由 relay 解析模型回复的协议句式真执行。适合不看屏幕的场景;屏前日常用短按的 agent 模式。
+window._voiceCallS2S = () => {
+  if (window.RC && RC.voicecall) RC.voicecall.toggle({ mode: 's2s', file: FILE_REL || '', page: currentPage || 1 });
+};
+// 通话中翻页 → 同步给 relay 热更新豆包的页面上下文(否则它一直停在开通话那页;currentPage 是模块变量,
+// 浮层拿不到 → 由本文件定时读。仅通话开着时发,setPage 内部去重)。
+// 通话上下文采集(页码/墨迹/选中chip):2s 轮询兜底 + **用户开口瞬间立即同步一次**(rc-voicecall 在 450 事件调,
+// 赶在模型处理这句话之前把最新状态推上去——治"画完立刻问,模型拿着旧状态答『没变化』"的竞态)。
+window.__vcSyncNow = () => {
+  try {
+    if (!(window.RC && RC.voicecall && RC.voicecall.isOpen())) return;
+    if (RC.voicecall.setPage) RC.voicecall.setPage(currentPage || 0);
+    if (RC.voicecall.syncInk) {
+      var _st = (window._ink && _ink.byPage && _ink.byPage[currentPage]) || [];
+      RC.voicecall.syncInk(currentPage || 0, _st);
+    }
+    if (RC.voicecall.syncState && typeof window.__voiceContext === 'function') {
+      var _vc = window.__voiceContext();
+      RC.voicecall.syncState({
+        sel: String(_vc.selection || '').slice(0, 300),
+        focus: (_vc.focus_sel && _vc.focus_sel.text) ? String(_vc.focus_sel.text).slice(0, 200) : '',
+        figs: (_vc.figures || []).length,
+      });
+    }
+  } catch (_) {}
+};
+setInterval(() => { window.__vcSyncNow(); }, 2000);
+
 loadPdf();
 // ── 整本预热:按当前显示宽度把全书(背景图 + 字符/振假名)渲好缓存 → 翻页秒开。──
 // 手动「📥 预热」按钮 + 开书自动后台预热(客户端自己解决,不用手动管)。后端 /api/prewarm-async 跑
@@ -8583,7 +8631,6 @@ async function _connProbe() {
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button class="asst-learn" data-send="这页涉及哪些知识点？简要讲讲">🧩 这页知识点</button>' +
       '<button data-q="clear">🗑 清空</button>' +
       '<button data-q="models">⚙ 模型</button>';
   pane.innerHTML =
@@ -8596,7 +8643,7 @@ async function _connProbe() {
   panelEl.appendChild(pane);
   try {
     var _qb = document.getElementById('asst-quick');
-    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, { knowledgeSend: '这页涉及哪些知识点？简要讲讲', knowledgeLabel: '🧩 这页知识点' });
+    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, {});
     else if (window.rcBuildMediaRow) window.rcBuildMediaRow(_qb);   // legacy:至少并上「配图/视频」媒体行
   } catch (e) {}
 

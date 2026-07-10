@@ -2730,8 +2730,15 @@
     if (on) { if (!_vocabMap) _loadVocabMap(); else _decorateVisible(); } else _vocabClearAll();
   }
   window.__epSetVocabUnderline = _setVocabUnderline;
-  // 查词/标掌握后实时刷新生词下划线(照搬 PDF refreshVocabUnderlinesForAllPages):重取 map + 重画可视章
-  window.refreshVocabUnderlinesForAllPages = function () { _vocabMap = null; _vocabClearAll(); _loadVocabMap(); };
+  // 查词/标掌握后实时刷新生词下划线(照搬 PDF refreshVocabUnderlinesForAllPages):重取 map + 重画可视章。
+  // 顺带重刷振假名:清 epRuby → 对可视章重新 _rubyApplySection(后端 /api/epub-furigana 已 live 过滤已掌握词)
+  //   → **已掌握的词假名当下就消失**,跟 PDF 一致(mastery 判定统一在后端 _word_mastered)。
+  window.refreshVocabUnderlinesForAllPages = function () {
+    _vocabMap = null; _vocabClearAll();
+    if (_deco.ruby) _rubyClearAll();
+    _loadVocabMap();
+    if (_deco.ruby) _decorateVisible();   // vocab 因 map=null 暂跳过(等 _loadVocabMap 回调);ruby 因 epRuby 已清会重拉
+  };
   // 乐观去下划线(rc-wordpop.js「☆ 标记掌握」调 __epubDeco.optimisticMaster):点掌握后立刻把该词的
   // 生词下划线隐掉(加 class,不动 DOM 结构),不等服务端 vocab-mark + map 刷新;失败调返回的 restore() 撤销。
   // 逐字照搬 epubjs 引擎的已验证实现(epub2-deco.js optimisticMaster,含 ep2-und-opt-off 同名 class,

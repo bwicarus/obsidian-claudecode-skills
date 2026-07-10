@@ -54,16 +54,12 @@
   //   统一为 [🧩 本X知识点(data-send) · 🗑 清空 · ⚙ 模型] + 媒体行(rcBuildMediaRow「配图/视频」偏好开关)。
   //   「总结本页/本页生词」历史按钮不再纳入(已从两边移除)。点击处理仍走各 reader 在容器上的既有委托
   //   (data-send 直接发 / data-q=clear 清空 / data-q=models 开模型面板),故只产 markup、不绑事件 → 零耦合。
-  //   opts.knowledgeSend / opts.knowledgeLabel:各 reader 传各自的位置语义(PDF「页」/ EPUB「章」)。
   //   假定容器为空;幂等(__quickBuilt 去重);容器需已存在。收藏夹整集按钮由 EPUB 在此之后自行 prepend,不受影响。
   window.rcBuildQuickBar = function (container, opts) {
     if (!container || container.__quickBuilt) return;
     container.__quickBuilt = 1;
     opts = opts || {};
-    var kSend = opts.knowledgeSend || '这一节涉及哪些知识点？简要讲讲';
-    var kLabel = opts.knowledgeLabel || '🧩 本节知识点';
     container.insertAdjacentHTML('beforeend',
-      '<button class="asst-learn" data-send="' + esc(kSend) + '">' + esc(kLabel) + '</button>' +
       '<button data-q="clear">🗑 清空</button>' +
       '<button data-q="models">⚙ 模型</button>');
     try { if (window.rcBuildMediaRow) window.rcBuildMediaRow(container); } catch (e) {}   // 「配图/视频」偏好开关并入本栏
@@ -99,7 +95,12 @@
       '.ams-rst{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
       '.ams-rst:active{background:#222d44}' +
       '.ams-cur{font-size:11px;color:#7c93c4;margin-top:6px}' +
-      '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
+      '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}' +
+      // 预设条:一排 chips,点=整包应用,长按/右键=删,＋=存当前
+      '.ams-profiles{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}' +
+      '.ams-prof{background:#14203a;border:1px solid #2a3a63;color:#cdd9f2;border-radius:14px;padding:4px 12px;font-size:12px;cursor:pointer}' +
+      '.ams-prof:active{background:#1e2c4d}' +
+      '.ams-prof-add{background:none;border:1px dashed #2a3a63;color:#7c93c4}';
     document.head.appendChild(css);
   })();
 
@@ -267,6 +268,52 @@
       var sub = document.createElement('div'); sub.className = 'ams-sub';
       sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效(服务端保存,全设备生效)。跟感叹号「更强重答」共用同一套预设。';
       container.appendChild(sub);
+      // ── 预设条:整套设置的快照,点 chip 一键切换(服务端 /pref-profiles)。长按/右键删,＋存当前 ──
+      var pbar = document.createElement('div'); pbar.className = 'ams-profiles';
+      container.appendChild(pbar);
+      (function _loadProfiles() {
+        fetch('/api/assistant/pref-profiles').then(function (r) { return r.json(); }).then(function (p) {
+          if (!p || !p.ok) return;
+          pbar.innerHTML = '';
+          function _del(nm) {
+            if (!confirm('删除预设「' + nm + '」?')) return;
+            fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ op: 'delete', name: nm }) }).then(_loadProfiles).catch(function () {});
+          }
+          (p.profiles || []).forEach(function (nm) {
+            var b = document.createElement('button'); b.className = 'ams-prof'; b.textContent = nm;
+            var _t = null, _held = false;
+            b.addEventListener('touchstart', function () {
+              _held = false; _t = setTimeout(function () { _t = null; _held = true; _del(nm); }, 600);
+            }, { passive: true });
+            b.addEventListener('touchend', function () { if (_t) { clearTimeout(_t); _t = null; } });
+            b.addEventListener('touchmove', function () { if (_t) { clearTimeout(_t); _t = null; } }, { passive: true });
+            b.addEventListener('contextmenu', function (e) { e.preventDefault(); _held = true; _del(nm); });
+            b.addEventListener('click', function () {
+              if (_held) { _held = false; return; }   // 长按删除后 iOS 可能补发 click
+              b.disabled = true;
+              fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ op: 'apply', name: nm }) })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                  if (d && d.ok) { if (typeof _toast === 'function') _toast('已切换到「' + nm + '」'); renderModelSettings(container, focusAction); }
+                  else { b.disabled = false; if (typeof _toast === 'function') _toast('应用失败'); }
+                }).catch(function () { b.disabled = false; });
+            });
+            pbar.appendChild(b);
+          });
+          var add = document.createElement('button'); add.className = 'ams-prof ams-prof-add'; add.textContent = '＋存为预设';
+          add.addEventListener('click', function () {
+            var nm = prompt('预设名(保存当前全部任务的模型设置):'); if (!nm || !nm.trim()) return;
+            fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ op: 'save', name: nm.trim() }) })
+              .then(function (r) { return r.json(); })
+              .then(function (d) { if (d && d.ok) { if (typeof _toast === 'function') _toast('已保存'); _loadProfiles(); } })
+              .catch(function () {});
+          });
+          pbar.appendChild(add);
+        }).catch(function () {});
+      })();
       var _focusCard = null;
       function _renderActs(list) {
         list.forEach(function (a) {
@@ -276,7 +323,7 @@
           container.appendChild(c);
         });
       }
-      _renderActs(['orchestrator', 'summarize', 'vision']);
+      _renderActs(['orchestrator', 'summarize', 'vision', 'deep']);
       // 阅读器其它 AI 入口(解释/翻译/字典/语法),跟助手共用同一套脱壳 Claude + Gemini 双后端预设
       var _rh = document.createElement('div'); _rh.className = 'ams-sub';
       _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
@@ -403,7 +450,6 @@
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button class="asst-learn" data-send="这页涉及哪些知识点？简要讲讲">🧩 这页知识点</button>' +
       '<button data-q="clear">🗑 清空</button>' +
       '<button data-q="models">⚙ 模型</button>';
   pane.innerHTML =
@@ -416,7 +462,7 @@
   panelEl.appendChild(pane);
   try {
     var _qb = document.getElementById('asst-quick');
-    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, { knowledgeSend: '这页涉及哪些知识点？简要讲讲', knowledgeLabel: '🧩 这页知识点' });
+    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, {});
     else if (window.rcBuildMediaRow) window.rcBuildMediaRow(_qb);   // legacy:至少并上「配图/视频」媒体行
   } catch (e) {}
 
@@ -824,7 +870,7 @@
           box.appendChild(c);
         });
       }
-      _renderActs(['orchestrator', 'summarize', 'vision']);
+      _renderActs(['orchestrator', 'summarize', 'vision', 'deep']);
       // PDF 阅读器其它 AI 入口(解释/翻译/字典/语法),跟助手共用同一套脱壳 Claude + Gemini 双后端预设
       var _rh = document.createElement('div'); _rh.className = 'ams-sub';
       _rh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
@@ -1380,16 +1426,18 @@
     if (streaming) return;
     text = (text || '').trim();
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
-    // 「书页」点暗(rcNoBook)= 用户要脱离这本书问通用问题 → 书本定位/内容一律不带:
-    //   ① 后端收 no_book 当通用助手 ② 章/页/选中/视口文字/图/便签全剥掉 → _ctxCard 不再渲染「正在看 §X」误导条
-    //   (用户反馈:关了书页下方仍写「正在看…」)。仅影响本次发送;历史里旧消息的 chip 是当时事实,不动。
+    // 「书页」点暗(rcNoBook)= 脱离这本书问通用问题 → 只剥**书本大上下文**(章/页定位、视口文字、选中所在句);
+    //   **保留**用户显式选中/带入的 chip(选中文字/图/便签/焦点)——它们变成"独立片段/图"仍喂给 AI(用户诉求:
+    //   关书页不该连我选中的都看不见)。后端 _ctx_block(no_book) 会把这些当独立内容拼进去。
+    //   仅影响本次发送;历史里旧消息的 chip 是当时事实,不动。
     try {
       if (window.rcNoBook && window.rcNoBook()) {
         sentCtx.no_book = true;
-        delete sentCtx.current_section_idx; delete sentCtx.section;
-        delete sentCtx.selection; delete sentCtx.selection_sentence; delete sentCtx.selection_anchor;
-        delete sentCtx.visible_text; delete sentCtx.focus_sel;
-        sentCtx.page = 0; sentCtx.figures = []; sentCtx.notes = [];
+        delete sentCtx.current_section_idx; delete sentCtx.section;   // 书本定位:去
+        delete sentCtx.selection_sentence; delete sentCtx.selection_anchor;   // 选中的书本周边句:去(让选中变独立)
+        delete sentCtx.visible_text;   // 整页/视口文字:去
+        sentCtx.page = 0;   // 页定位去(figures 自带各自 page,see_figure 不受影响)
+        // selection / figures / notes / focus_sel **保留**(这些是带 ✕ 的 chip,用户明确要 AI 看的)
       }
     } catch (e) {}
     // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
@@ -1447,6 +1495,7 @@
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed; var _at = _splitFollowups(answer).text;
+        try { window.__asstVoiceTap && window.__asstVoiceTap(_at, false); } catch (_) {}   // 语音对话:回答增量喂 TTS(rc-voicecall)
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
         if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
         if (_noChar) { _appendCaret(aMsg); }
@@ -1509,7 +1558,8 @@
       try {
         try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (e) {}
         await _stream(tries === 0
-          ? { message: text, context: sentCtx, rid: rid, media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined), force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined }
+          ? { message: text, context: sentCtx, rid: rid, media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined), force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
+              voice: (window.__asstVoiceOn && window.__asstVoiceOn()) ? 1 : undefined }   // 语音对话中:后端 prompt 切"适合朗读"风格
           : { rid: rid, from: evSeen });
       } catch (e) {
         if (e && e.name === 'AbortError') {
@@ -1534,6 +1584,7 @@
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
+    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(pf.text || '', true); } catch (_) {}   // 语音对话:回答完,把尾句也念了
     if (pf.text) renderMd(aMsg, pf.text, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
@@ -1542,6 +1593,10 @@
     runActions(acts);
     streaming = false; _abort = null; _recovering = false; _setSendMode(false);
   }
+
+  // 语音对话桥(rc-voicecall agent 模式):send/忙态都在本 IIFE 内,暴露出去 → ASR 终稿直接走完整聊天管线
+  window.__asstSend = send;
+  window.__asstBusy = function () { return !!streaming; };
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
   function trackTask(id, label) {

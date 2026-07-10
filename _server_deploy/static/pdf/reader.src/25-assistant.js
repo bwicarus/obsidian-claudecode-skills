@@ -26,7 +26,6 @@
   // 快捷栏:共享构建器 rcBuildQuickBar(在则空容器等它填,与 EPUB 同一份来源 → 按钮永不分叉;
   //   历史「总结本页/本页生词」不再纳入)。legacy 模式(rc-assistant 未加载)→ native 兜底同款三按钮。
   var _quickNative = window.rcBuildQuickBar ? '' :
-      '<button class="asst-learn" data-send="这页涉及哪些知识点？简要讲讲">🧩 这页知识点</button>' +
       '<button data-q="clear">🗑 清空</button>' +
       '<button data-q="models">⚙ 模型</button>';
   pane.innerHTML =
@@ -39,7 +38,7 @@
   panelEl.appendChild(pane);
   try {
     var _qb = document.getElementById('asst-quick');
-    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, { knowledgeSend: '这页涉及哪些知识点？简要讲讲', knowledgeLabel: '🧩 这页知识点' });
+    if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, {});
     else if (window.rcBuildMediaRow) window.rcBuildMediaRow(_qb);   // legacy:至少并上「配图/视频」媒体行
   } catch (e) {}
 

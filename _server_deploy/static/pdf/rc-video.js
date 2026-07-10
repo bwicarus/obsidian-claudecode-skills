@@ -14,24 +14,31 @@
   }
   function _esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
+  // 来源识别:**显式 src 优先**(后端恒设 src);仅无 src(旧收藏/遗留)时按 bvid 兜底(BV+10 位=12 字符,
+  //   不会误判 11 位 YouTube id 即便它碰巧以 BV 开头)。避免"src=yt 却被 /^BV/ 覆盖成 B站"整类 bug。
+  function _isBili(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.id || ''))); }
   // 播放/字幕/进度/全屏全部收敛进共享浮层 RC.videoPlayer(rc-videoplayer.js)。点缩略图 → 开浮层(自带字幕轨+起止钉+倍速+循环+拖动缩放)。
   function _openPlayer(v) {
-    try { if (window.RC && RC.videoPlayer) { RC.videoPlayer.open({ id: v.id, title: v.title, channel: v.channel, thumb: v.thumb }); return; } } catch (e) {}
-    window.open('https://www.youtube.com/watch?v=' + encodeURIComponent(v.id), '_blank');   // 兜底(浮层未加载):新标签打开
+    try { if (window.RC && RC.videoPlayer) { RC.videoPlayer.open({ id: v.id, title: v.title, channel: v.channel, thumb: v.thumb, src: (_isBili(v) ? 'bili' : 'yt') }); return; } } catch (e) {}
+    var url = _isBili(v) ? ('https://www.bilibili.com/video/' + encodeURIComponent(v.id)) : ('https://www.youtube.com/watch?v=' + encodeURIComponent(v.id));
+    window.open(url, '_blank');   // 兜底(浮层未加载):新标签打开
   }
 
   function _card(v) {
+    var bili = _isBili(v);
     var el = document.createElement('div'); el.className = 'rc-vid';
     el.innerHTML =
-      '<div class="rc-vid-thumb"><img loading="lazy" src="' + _esc(v.thumb) + '" alt="">' +
-      '<button class="rc-vid-play" aria-label="播放">▶</button></div>' +
+      '<div class="rc-vid-thumb"><img loading="lazy" referrerpolicy="no-referrer" src="' + _esc(v.thumb) + '" alt="">' +   // no-referrer:B站图床防盗链,带我们域名 Referer 会 403;不发 Referer 才放行(对 ytimg 无副作用)
+      '<button class="rc-vid-play" aria-label="播放">▶</button>' +
+      '<span class="rc-vid-src ' + (bili ? 'is-bili' : 'is-yt') + '">' + (bili ? 'B站' : 'YouTube') + '</span>' +
+      (v.dur ? '<span class="rc-vid-dur">' + _esc(v.dur) + '</span>' : '') + '</div>' +
       '<div class="rc-vid-meta"><div class="rc-vid-title">' + _esc(v.title) + '</div>' +
       '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>';
     el.querySelector('.rc-vid-thumb').addEventListener('click', function () { _openPlayer(v); });   // 点播放 → 浮动播放器
-    _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)
+    _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)。B站也支持(便签存 thumb+src,不再写死 ytimg)
     // 阶段 D:☆ 收藏 → 弹「⭐ 收藏到…」选择器(复用 RC.favorites.openPicker,跟页面/高亮收藏同一套 UI:选夹/多选/新建夹)
     var fav = document.createElement('button'); fav.className = 'rc-vid-fav'; fav.type = 'button'; fav.title = '收藏这个视频到收藏夹';
-    var _item = { kind: 'video', vid: v.id, title: v.title || '', thumb: v.thumb || '' };
+    var _item = { kind: 'video', vid: v.id, title: v.title || '', thumb: v.thumb || '', src: (bili ? 'bili' : 'yt') };
     var _faved = false;
     try { _faved = !!(window.RC && RC.favorites && RC.favorites.isFaved && RC.favorites.isFaved(_item)); } catch (e) {}
     _paintFav(fav, _faved);   // 初始态:已在任一夹 → ★
@@ -75,7 +82,7 @@
       if (dragging && drop && e) {
         var tgt = document.elementFromPoint(e.clientX, e.clientY);
         var inUi = tgt && tgt.closest && tgt.closest('#ep-ai, #ep-side, #asst-panel, .asst-panel, .rc-vids, #result-mask, #ep-asst-quick, #asst-quick');
-        if (!inUi && window.RC && RC.stickynote && RC.stickynote.createVideoAt) RC.stickynote.createVideoAt(e.clientX, e.clientY, v.id);
+        if (!inUi && window.RC && RC.stickynote && RC.stickynote.createVideoAt) RC.stickynote.createVideoAt(e.clientX, e.clientY, v.id, { thumb: v.thumb, src: (_isBili(v) ? 'bili' : 'yt') });
       }
       dragging = false;
     };
@@ -152,9 +159,10 @@
       var t = e.target && e.target.closest ? e.target.closest('.fav-video') : null;
       if (!t) return;
       var yt = t.getAttribute('data-yt'); if (!yt) return;
+      var _bili = /^BV/i.test(yt);   // 收藏里的 B 站视频 id 是 bvid(BV 开头)→ 走 B 站播放器/兜底
       var ttl = ''; try { var te = t.querySelector('.fav-video-title'); ttl = te ? te.textContent : ''; } catch (_) {}
-      try { if (window.RC && RC.videoPlayer) { RC.videoPlayer.open({ id: yt, title: ttl || '视频' }); return; } } catch (_) {}
-      window.open('https://www.youtube.com/watch?v=' + encodeURIComponent(yt), '_blank');
+      try { if (window.RC && RC.videoPlayer) { RC.videoPlayer.open({ id: yt, title: ttl || '视频', src: (_bili ? 'bili' : 'yt') }); return; } } catch (_) {}
+      window.open((_bili ? 'https://www.bilibili.com/video/' : 'https://www.youtube.com/watch?v=') + encodeURIComponent(yt), '_blank');
     });
   }
 
@@ -204,6 +212,11 @@
       '.rc-vid-frame{width:100%;aspect-ratio:16/9;border:0;display:block}' +
       '.rc-vid-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:46px;height:46px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:2px}' +
       '.rc-vid-thumb:hover .rc-vid-play{background:rgba(220,40,40,.92)}' +
+      /* 来源标(左上角)+ 时长标(右下角):一眼分清 B站/YouTube */
+      '.rc-vid-src{position:absolute;left:6px;top:6px;z-index:3;font-size:10px;font-weight:600;line-height:1;padding:3px 6px;border-radius:5px;color:#fff;letter-spacing:.3px;pointer-events:none}' +
+      '.rc-vid-src.is-bili{background:rgba(251,114,153,.94)}' +   /* B站粉 */
+      '.rc-vid-src.is-yt{background:rgba(220,40,40,.92)}' +       /* YouTube 红 */
+      '.rc-vid-dur{position:absolute;right:6px;bottom:6px;z-index:3;font-size:10px;line-height:1;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:#fff;pointer-events:none}' +
       '.rc-vid-meta{padding:7px 9px}' +
       '.rc-vid-title{font-size:12.5px;color:#dbe7ff;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.rc-vid-ch{font-size:11px;color:#7c93c4;margin-top:3px}' +

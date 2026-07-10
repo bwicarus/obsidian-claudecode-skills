@@ -73,19 +73,62 @@ def _init_schema(con):
     con.commit()
 
 
+_UPAGES_DIR = CLAUDE_DIR / "state" / "reader-userpages"
+
+
+def _userpages_sidecar_mtime(rel: str) -> int:
+    """插入页 overlay sidecar 的 mtime。折进书的变更签名 → sidecar 文字改了(PDF mtime 没变)也触发本书重建索引。"""
+    try:
+        sha = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16]
+        return int((_UPAGES_DIR / (sha + ".json")).stat().st_mtime)
+    except OSError:
+        return 0
+
+
+def _overlay_records(rel: str) -> list:
+    try:
+        sha = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16]
+        items = json.loads((_UPAGES_DIR / (sha + ".json")).read_text("utf-8"))
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _apply_overlay_supplement(texts: dict, rel: str) -> dict:
+    """v4 批次2:未同步(脏)的 overlay 插入页,PDF 那页空白 → 用 sidecar md 顶上,让全文搜索能命中用户内容。
+    已同步的(md_ver==synced_ver)PDF 已含文字,走 get_text,不覆盖。"""
+    for it in _overlay_records(rel):
+        if not isinstance(it, dict) or it.get("mode") != "overlay":
+            continue
+        pg = it.get("page")
+        if not isinstance(pg, int) or isinstance(pg, bool):
+            continue
+        if int(it.get("md_ver", 0) or 0) <= int(it.get("synced_ver", 0) or 0):
+            continue
+        md = (it.get("md") or "").strip()
+        if not md:
+            continue
+        ttl = (it.get("title") or "").strip()
+        texts[str(pg)] = (ttl + "\n" + md) if ttl else md
+    return texts
+
+
 def _list_pdfs():
-    """扫 vault 下所有 PDF(排除 .orig/.compressed 备份),返回 [{rel,name,dir,mtime}]。"""
+    """扫 vault 下所有 PDF(排除 .orig/.compressed 备份),返回 [{rel,name,dir,mtime}]。
+    mtime = max(PDF mtime, overlay sidecar mtime) → 插入页文字改动也纳入增量重建。"""
     out = []
     for p in OBSIDIAN_ROOT.rglob("*.pdf"):
         if p.name.endswith((".orig.pdf", ".compressed.pdf")):
             continue
         try:
             rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
+            if rel.startswith("资源/收藏夹/"):
+                continue   # 收藏夹物化书是原书内容的重复副本 → 不进全文搜索(否则同一页文字原书+收藏夹双份命中)
             out.append({
                 "rel": rel,
                 "name": p.name,
                 "dir": str(Path(rel).parent),
-                "mtime": int(p.stat().st_mtime),
+                "mtime": max(int(p.stat().st_mtime), _userpages_sidecar_mtime(rel)),
                 "abs": p,
             })
         except OSError:
@@ -135,7 +178,7 @@ def _index_book(con, bk: dict) -> int:
     """重建单本书的页行。返回插入的页数。"""
     rel = bk["rel"]
     con.execute("DELETE FROM pages_data WHERE file=?", (rel,))
-    texts = _page_texts(bk["abs"], rel)
+    texts = _apply_overlay_supplement(_page_texts(bk["abs"], rel), rel)   # 未同步 overlay 插入页补 sidecar md
     n = 0
     for pg_str, text in texts.items():
         text = (text or "").strip()

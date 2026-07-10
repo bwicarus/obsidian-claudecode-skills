@@ -102,23 +102,18 @@ def main():
             die("点词 12s 无词典弹框(dict-quick/自动弹出回归)")
         print(f"✓ 词典弹出: {pop[:24]}…")
 
-        # 4) 书架浮层
-        pg.click("h1")
-        try:
-            pg.wait_for_selector("#bookshelf-ov", state="visible", timeout=5000)
-        except Exception:
-            die("点标题书架浮层未打开")
-        for _ in range(10):
-            time.sleep(0.5)
-            n = pg.evaluate("() => document.querySelectorAll('#bs-list .bs-item').length")
-            if n and n > 0:
-                break
-        else:
-            die("书架浮层 5s 无书目(/api/list-pdfs 回归)")
-        pg.click(".bs-close")
-        if pg.evaluate("() => document.getElementById('bookshelf-ov').style.display") != "none":
-            die("书架浮层 ✕ 未关闭")
-        print(f"✓ 书架浮层 开/书目x{n}/关")
+        # 4) 返回书架入口(2026-06-18 阅读器内浮层书单退役 → goPdfList 改 location.href='/pdf/';
+        #    旧 E2E 在等已删除的 #bookshelf-ov 故永远红,改测真实存在的返回入口)
+        if not pg.evaluate("() => typeof window.goPdfList === 'function'"):
+            die("返回书架入口 goPdfList 丢失")
+        print("✓ 返回书架入口 goPdfList→/pdf/ 就绪")
+
+        # 5) 助手模型设置端点(三维 后端/型号/深度;登录态下应回 ok + 含 orchestrator/summarize/vision)
+        prefs = pg.evaluate("""async () => { try { const r = await fetch('/api/assistant/action-prefs');
+            return await r.json(); } catch (e) { return { error: String(e) }; } }""")
+        if not (prefs and prefs.get('ok') and prefs.get('actions') and 'orchestrator' in prefs['actions']):
+            die("/api/assistant/action-prefs 异常: %s" % str(prefs)[:80])
+        print("✓ 模型设置端点 ok(%s)" % ",".join(prefs['actions'].keys()))
 
         b.close()
     real_errs = [e for e in errs if "FILE_REL" not in e]   # 已知模板 ink 历史问题,单独治

@@ -14,7 +14,9 @@ function renderRubyLayer(pw) {
   const pageHPt = pw.__pageHPt || cssH;
   if (!cssW || !cssH || !pageWPt || !pageHPt) return;
   const sx = cssW / pageWPt, sy = cssH / pageHPt;
+  const mastered = pw.__masteredFuri;   // 已掌握词面集(page-overlay 给);已掌握=不注音
   for (const it of items) {
+    if (mastered && it.wd && mastered.has(it.wd)) continue;   // 已掌握的词跳过假名/音标
     const sp = _makeRubySpan(it, sx, sy);
     if (sp) layer.appendChild(sp);
   }

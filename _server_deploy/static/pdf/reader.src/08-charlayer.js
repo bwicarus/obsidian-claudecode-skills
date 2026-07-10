@@ -106,7 +106,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     }
     wrap.__vocabMarks = (ov && ov.vocab_marks) || [];
     wrap.__vocabSentences = (ov && ov.vocab_sentences) || [];
+    wrap.__masteredFuri = new Set((ov && ov.mastered_furi) || []);   // 已掌握词面 → ruby 跳过其注音
     try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+    try { renderRubyLayer(wrap); } catch (_) {}   // overlay 到了(含已掌握词集)→ 重画 ruby(首渲时还没这个集,此刻把已掌握词的注音去掉)
     try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
   });
 }

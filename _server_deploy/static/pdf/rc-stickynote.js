@@ -340,7 +340,15 @@
     var m = s.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?v=|embed\/|v\/|shorts\/|live\/))([A-Za-z0-9_-]{11})/) || s.match(/^([A-Za-z0-9_-]{11})$/);
     return m ? m[1] : '';
   }
+  // 来源识别:显式 src 优先(拖放时存);无 src(旧便签)按 bvid 兜底(BV+10=12 字符,不误判 11 位 YT id)。
+  function _isBili(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.id || ''))); }
+  function _ytThumb(id) { return 'https://i.ytimg.com/vi/' + id + '/mqdefault.jpg'; }   // 仅 YT 用;B站缩略图无 id→URL 规律,须存 v.thumb
   function vEmbedSrc(v) {
+    if (_isBili(v)) {
+      var bp = ['bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
+      if (v.start) bp.push('t=' + Math.max(0, v.start | 0));
+      return 'https://player.bilibili.com/player.html?' + bp.join('&');
+    }
     var p = ['enablejsapi=1', 'playsinline=1', 'rel=0', 'autoplay=1', 'cc_lang_pref=zh-Hans'];
     if (v.start) p.push('start=' + Math.max(0, v.start | 0));
     if (v.end) p.push('end=' + Math.max(0, v.end | 0));
@@ -394,11 +402,14 @@
     if (box.__sig === sig) return;   // 无变化不重建
     box.__sig = sig; ctl.__vif = null;
     // 便签视频区 = 纯缩略图 + ▶(点开共享浮层播放器 RC.videoPlayer;起止/循环/倍速/字幕等控制都在浮层里,内联控制条已退役)
-    box.innerHTML = '<div class="rc-vid-embed"><img loading="lazy" src="https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>';
+    // 缩略图:B站存 v.thumb(bvid 无 URL 规律);YT 用 v.id 拼 ytimg。播放/兜底 URL 按来源分流。
+    var _bili = _isBili(v);
+    var _thumb = v.thumb || (_bili ? '' : _ytThumb(v.id));
+    box.innerHTML = '<div class="rc-vid-embed"><img loading="lazy" referrerpolicy="no-referrer" src="' + _thumb + '" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>';   // no-referrer:B站图床防盗链(带域名 Referer→403)
     var openPlayer = function () {
-      if (!(window.RC && RC.videoPlayer)) { window.open('https://www.youtube.com/watch?v=' + encodeURIComponent(v.id), '_blank'); return; }
+      if (!(window.RC && RC.videoPlayer)) { window.open((_bili ? 'https://www.bilibili.com/video/' : 'https://www.youtube.com/watch?v=') + encodeURIComponent(v.id), '_blank'); return; }
       RC.videoPlayer.open({
-        id: v.id, start: v.start, end: v.end, loop: v.loop, rate: v.rate, cc: v.cc,
+        id: v.id, src: (_bili ? 'bili' : 'yt'), thumb: v.thumb, start: v.start, end: v.end, loop: v.loop, rate: v.rate, cc: v.cc,
         title: ((ctl.note.text || '').trim().slice(0, 40)) || '视频便签',
         noteId: ctl.note.id,
         onChange: function (nv) {   // 浮层改起止/循环/倍速/字幕 → 回写 note.video(签名同步防 syncCtl 回灌重建)
@@ -1160,14 +1171,19 @@
     createAt(anchor);
   }
   // 阶段 B:从助手视频卡拖到书页某点 → 在该点建**视频便签**(锚点就近重试,复用 note.video 全套控件)
-  function createVideoAt(clientX, clientY, videoId) {
+  function createVideoAt(clientX, clientY, videoId, meta) {
     if (!O || !O.anchorFromPoint || !videoId) return false;
+    meta = meta || {};
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把视频拖到正文上再松手)'); return false; }
+    // 视频对象带 thumb+src(B站缩略图无 URL 规律须存;src 决定播放器/embed 走 B站还是 YT)
+    var _vid = { id: videoId, start: 0, end: 0, rate: 1, loop: false, cc: true };
+    if (meta.thumb) _vid.thumb = meta.thumb;
+    if (meta.src) _vid.src = meta.src;
     req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false,
-                  video: { id: videoId, start: 0, end: 0, rate: 1, loop: false, cc: true } }, function (d) {
+                  video: _vid }, function (d) {
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('视频便签已建(所在页尚未渲染,渲染后出现)');

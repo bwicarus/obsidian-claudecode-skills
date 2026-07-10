@@ -116,6 +116,13 @@
   function _ensurePop() {
     var p = document.getElementById('word-pop');
     if (!p) { p = document.createElement('div'); p.id = 'word-pop'; p.setAttribute('onclick', 'event.stopPropagation()'); document.body.appendChild(p); }
+    // 关键:#word-pop 是单词框/词组框**共用**的同一元素。单词框(rc-wordpop 经 PDF _positionWordPop hook)会把它
+    //   挪进 #main 并设 position:absolute(随内容滚动)。词组框走 _position 的 fixed 视口坐标 → 必须先还原成
+    //   body + fixed,否则在滚动到深处的页面上,一个 absolute-in-#main 的元素按视口 top 定位会落到 #main 顶部
+    //   (视口外几千 px)→ 表现为「框 show 了(disp=block)却看不见」,用户被迫再点一次 → 变成查单词。
+    //   单词框那条路每次用时都会自己重设回 absolute-in-#main,是自愈的,不受本行影响。
+    if (p.parentElement !== document.body) document.body.appendChild(p);
+    p.style.position = 'fixed';
     return p;
   }
   // 框外点击 → 关小框(pointerdown capture;刚弹 400ms 内豁免)。rc-wordpop 已注册同款;本模块也注册一份

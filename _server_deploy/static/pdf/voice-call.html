@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>豆包语音通话</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b1020; color:#dbe7ff; font:15px/1.5 -apple-system,"PingFang SC",sans-serif;
+         display:flex; flex-direction:column; align-items:center; min-height:100vh; }
+  h1 { font-size:17px; margin:18px 0 4px; }
+  #status { color:#8a9bb4; font-size:13px; min-height:18px; }
+  #call { margin:26px 0 10px; width:96px; height:96px; border-radius:50%; border:none; font-size:38px;
+          background:#1a7f4b; color:#fff; cursor:pointer; transition:background .2s, transform .1s; }
+  #call.on { background:#b73a3a; }
+  #call:active { transform:scale(.95); }
+  #hint { font-size:12px; color:#5a6680; }
+  #log { width:min(680px,92vw); margin:14px 0 30px; display:flex; flex-direction:column; gap:8px; }
+  .msg { padding:9px 13px; border-radius:12px; max-width:86%; white-space:pre-wrap; word-break:break-word; }
+  .u { align-self:flex-end; background:#24406e; }
+  .a { align-self:flex-start; background:#141b30; border:1px solid #263255; }
+  .sys { align-self:center; color:#8a9bb4; font-size:12px; background:none; }
+</style>
+</head>
+<body>
+<h1>🎙 豆包语音通话</h1>
+<div id="status">待机</div>
+<button id="call">📞</button>
+<div id="hint">点绿色按钮开始通话;再点挂断。直接说话即可,可随时打断它。</div>
+<div id="log"></div>
+<script>
+(function () {
+  var ws = null, ac = null, capNode = null, micStream = null, playT = 0, playing = [];
+  var btn = document.getElementById('call'), st = document.getElementById('status'), log = document.getElementById('log');
+  var curA = null;   // 正在流式追加的助手气泡
+
+  function say(cls, text) {
+    var d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text;
+    log.appendChild(d); window.scrollTo(0, document.body.scrollHeight); return d;
+  }
+
+  // ── 播放:relay 二进制帧 = PCM s16le 24k mono → AudioBuffer 排队;打断(ASRInfo)清队列 ──
+  function playPcm(buf) {
+    if (!ac) return;
+    var i16 = new Int16Array(buf), f32 = new Float32Array(i16.length);
+    for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    var ab = ac.createBuffer(1, f32.length, 24000);
+    ab.copyToChannel(f32, 0);
+    var src = ac.createBufferSource(); src.buffer = ab; src.connect(ac.destination);
+    var t = Math.max(ac.currentTime + 0.02, playT);
+    src.start(t); playT = t + ab.duration;
+    playing.push(src);
+    src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); };
+  }
+  function stopPlayback() {   // 用户开口(服务端 ASRInfo)→ 立即打断本地播报
+    playing.forEach(function (s) { try { s.stop(); } catch (e) {} });
+    playing = []; playT = 0;
+  }
+
+  // ── 采集:AudioWorklet 抓 mic → 主线程降采样到 16k int16 → 20ms(640B)一包发 ──
+  var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("cap",C);';
+  var f32buf = new Float32Array(0);
+  function onCap(chunk, inRate) {
+    var merged = new Float32Array(f32buf.length + chunk.length);
+    merged.set(f32buf); merged.set(chunk, f32buf.length); f32buf = merged;
+    var need = Math.round(inRate * 0.02);            // 20ms 的输入帧数
+    while (f32buf.length >= need) {
+      var seg = f32buf.subarray(0, need); f32buf = f32buf.slice(need);
+      var out = new Int16Array(320);                 // 20ms@16k
+      for (var i = 0; i < 320; i++) {
+        var v = seg[Math.min(need - 1, Math.floor(i * need / 320))];
+        out[i] = Math.max(-32768, Math.min(32767, v * 32768));
+      }
+      if (ws && ws.readyState === 1) ws.send(out.buffer);
+    }
+  }
+
+  async function start() {
+    btn.disabled = true; st.textContent = '连接中…';
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      await ac.resume();   // iOS:必须在手势内
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      var burl = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
+      await ac.audioWorklet.addModule(burl);
+      var src = ac.createMediaStreamSource(micStream);
+      capNode = new AudioWorkletNode(ac, 'cap');
+      capNode.port.onmessage = function (e) { onCap(e.data, ac.sampleRate); };
+      src.connect(capNode);   // 不接 destination:不回放自己的声音
+
+      var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      ws = new WebSocket(proto + location.host + '/voice-rt' + location.search);   // 透传 ?file=&page=(relay 注入书页上下文)
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = function () { st.textContent = '通话中(说话即可)'; btn.classList.add('on'); btn.textContent = '📵'; btn.disabled = false; };
+      ws.onclose = function () { st.textContent = '已挂断'; cleanup(); };
+      ws.onerror = function () { st.textContent = '连接出错'; };
+      ws.onmessage = function (ev) {
+        if (ev.data instanceof ArrayBuffer) { playPcm(ev.data); return; }
+        var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        var p = m.payload || {};
+        if (m.event === -1 || m.event === 153 || m.event === 599 || m.code) {
+          say('sys', '⚠ ' + (p.error || p.message || JSON.stringify(p).slice(0, 160)));
+        } else if (m.event === 150) { say('sys', '✅ 会话已建立,开始说话吧');
+        } else if (m.event === 450) { stopPlayback(); curA = null;      // 用户开口 → 打断播报
+        } else if (m.event === 451) {                                    // ASR 字幕(取最终结果)
+          var r = (p.results || [])[0] || {};
+          if (r.text && r.is_interim === false) say('u', r.text);
+        } else if (m.event === 550) {                                    // 模型回复文本(流式)
+          if (!curA) curA = say('a', '');
+          curA.textContent += (p.content || '');
+        } else if (m.event === 559) { curA = null; }
+      };
+    } catch (ex) {
+      st.textContent = '启动失败: ' + ex.message; btn.disabled = false; cleanup();
+    }
+  }
+
+  function cleanup() {
+    try { if (ws && ws.readyState === 1) { ws.send(JSON.stringify({ type: 'finish' })); ws.close(); } } catch (e) {}
+    ws = null;
+    stopPlayback();
+    try { if (capNode) capNode.disconnect(); } catch (e) {}
+    try { if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    try { if (ac) ac.close(); } catch (e) {}
+    ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0);
+    btn.classList.remove('on'); btn.textContent = '📞'; btn.disabled = false;
+  }
+
+  btn.addEventListener('click', function () {
+    if (ws) { cleanup(); st.textContent = '已挂断'; } else { start(); }
+  });
+})();
+</script>
+</body>
+</html>

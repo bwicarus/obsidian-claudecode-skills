@@ -346,7 +346,8 @@ def user_dir(username, dataset=""):
         base = base / dataset
     return base
 
-PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/insights")
+PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/insights",
+                      "/api/assistant", "/api/fitness")   # 后两个:让 Bearer 桥也覆盖(MCP 外部 agent 冷启动直调健身/助手,此前靠先调 /pdf 拿 session cookie 的隐式顺序)
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 
 @app.before_request

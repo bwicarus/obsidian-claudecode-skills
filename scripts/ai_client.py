@@ -52,6 +52,23 @@ def _resolve_cli(configured: str, name: str) -> str:
 CLAUDE = _resolve_cli(CLAUDE, "claude")
 CODEX  = _resolve_cli(CODEX, "codex")
 
+
+# ── 脱壳 cwd ───────────────────────────────────────────────────────────────────
+# claude CLI 从 cwd 沿目录树向上找 CLAUDE.md(项目记忆,本项目这份很大)。原来 cwd=PROJECT
+# → 每次制卡/摘要/关联调用都把整个 CLAUDE.md 灌进上下文(纯浪费:这些 prompt 自带全部所需
+# 内容,不依赖项目记忆)。改钉到项目树外稳定空目录 → 不加载 CLAUDE.md;再配 --setting-sources ""
+# 不加载设置/插件。--continue(多轮)按 cwd 维护会话,cwd 固定不变故续写照常。登录凭证另存不受影响。
+def _strip_cwd() -> str:
+    d = os.path.join(tempfile.gettempdir(), "bwicarus-cli-cwd")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return tempfile.gettempdir()
+
+
+CLI_CWD = _strip_cwd()
+
 DEFAULT_SETTINGS = {"backend": "auto-claude", "model": ""}
 _VALID_BACKENDS  = frozenset(("auto-claude", "auto-codex", "claude", "codex"))
 
@@ -153,7 +170,8 @@ def claude_raw(prompt: str, first: bool = False,
         cmd = [CLAUDE]
         if WINDOWS:
             cmd += ["--dangerously-skip-permissions"]
-        cmd += ["--output-format", "text"]
+        # 脱壳:不加载 user/project 设置 + 插件(配合下面 cwd=CLI_CWD 不加载 CLAUDE.md)→ 省 token
+        cmd += ["--setting-sources", "", "--output-format", "text"]
         if model:
             cmd += ["--model", model]
         if effort:
@@ -163,7 +181,7 @@ def claude_raw(prompt: str, first: bool = False,
         cmd += ["-p", prompt]
         t0 = time.time()
         try:
-            r = _run_hidden(cmd, cwd=PROJECT, capture_output=True,
+            r = _run_hidden(cmd, cwd=CLI_CWD, capture_output=True,
                             text=True, encoding="utf-8", errors="replace",
                             timeout=900)   # 15 分钟,够 Opus max effort
         except subprocess.TimeoutExpired as e:
