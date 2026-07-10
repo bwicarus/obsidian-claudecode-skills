@@ -154,3 +154,16 @@ voice_realtime_relay.py(systemd voice-rt.service,mcp-venv,127.0.0.1:8767)
 - **通话条 Apple 风重做**(#rc-vc):毛玻璃(`backdrop-filter:blur(24px) saturate(1.5)`+rgba 半透底+细白边)、iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)、emoji 全换 **SF 线条 SVG**(↺=新话题、✕=结束)、头部**状态点**(橙呼吸=连接中/绿=通话中,`.vc-dot`+`#rc-vc.on`)、挂断大圆钮撤掉(✕ 或入口按钮再点即挂)。⚠ box 无 transform(iOS backdrop-filter+transform 命中盒坑,见 [[reader-toolbar-icons-svg]] 侧栏教训)。
 - **字幕改累积对话流**(用户反馈"看不到对话内容"——旧版覆盖式只显示最后一句):iMessage 风右蓝(你)/左灰(AI)气泡,AI 一轮=一个气泡(550 增量更新同一元素,450 用户开口=上轮定稿 curAEl=null),上限 80 条滚动裁剪。
 - **对话区可拖高**:顶部 **Apple sheet 抓手**(36×5 圆条,`.vc-grab` 整条 ns-resize+touch-action:none),pointerdown+setPointerCapture 上拖=变高(窗在输入框上方向上扩展),clamp 56px~60vh,松手存 `localStorage.rcVcSubH` 下次复原。
+
+## 上下文/缓存/消耗优化(2026-07-11 第十批,v3-⑩,用户拍板全做)
+
+计费杠杆:输出音频 300元/M(最大头,豆包说话≈0.45元/分钟)>输入靠 cache 打折;12K 硬限封顶单轮输入。六件套:
+
+- **A. 154 记账**:relay 接 UsageResponse(154,fwd=False 不转发前端)→ `_usage_classify` 宽容解析(官方没给字段清单:嵌套扫数字 token 键,按 input/output×text/audio+cached 归类,DEBUG 打原样观察)→ `_log_usage` 按天累计到 `state/doubao-usage.json`(rounds/各类token/cost_est,费率 in_audio 80/in_text 10/out_audio 300/out_text 30 元/M,cached 单列不计价)。控制面板额度日志 modal 加「🎙 豆包语音通话」块(`/control/api/doubao-cost`,总计/近30天/近7天明细,Gemini 花费块同款)。
+- **B. SP 指纹 + 251 ack 确认制**:`_push_sp` 算 `_role_text` md5——`==confirmed` 不推(没变);`==pending 且 <5s` 不推(在途);**251 ConfigUpdated ack 才把 pending 前移为 confirmed**;pending 超 5s 无 ack 视为被豆包丢弃 → 放行重推。450 开口"无条件重推"的丢包兜底语义完整保留,但 SP 没变的开口不再发 UpdateConfig(之前每次开口都全量替换 SP=每轮打掉前缀缓存)。StartSession 后把初始 SP 指纹锚定为 confirmed。
+- **C. SP 三层分层**(前缀缓存按最长公共前缀命中,按变化频率排):①稳定前缀=角色+协议+简洁约束+**全量工具目录**(整场不变)②中层=页文本/插图描述/生词(翻页才变)③易变尾部=「——以下是实时页面状态」+笔迹三态/选中/focus/图/任务。**门控改声明式**:原设计"无笔迹连 see_ink 都不给"(目录按状态增删行)会让一画笔目录就变 → ②整层缓存连坐;改为目录恒定、尾部显式"see_ink/read_selection/see_figure 此刻无效"承接同一语义。冒烟验证:画笔/选中变化时 ①+② **字节级不变**。
+- **D. 输出瘦身**(300元/M 的大头):`_ACK_TEXT` 全员缩短("好,我找找看"→"我找找");SP 稳定段加"回答默认两三句话说清,用户说详细讲讲才展开"。
+- **E. 历史增量限长**(进历史的字轮轮计费):RAG 回填按工具分级 `_RAG_LIMIT`(列表类 search_video 900/see_* 1600-1800/read_page 2200/写操作 600,未列 1400,替代统一 3000);深度思考 510 注入 800→500。
+- **F. 长对话摘要护栏**:559 时自然对话轮(非工具 JSON 轮)记 `book["qa_log"]`(u[:24]+a[:36]);攒满 26 轮 → 最旧 12 轮拼接成一条 510 注入("我们更早聊过这些…"),不调外部模型。豆包 12K 硬限已封顶输入费用,这条主要保认知连续(旧轮滚出窗口时脉络已固化);ConversationTruncate(513) 真删除因官方 payload 格式未公开暂不用,拿到格式可升级为"删+摘"真压缩。
+
+前提待实证:豆包 S2S 前缀缓存行为(cache 命中费率官方提过但字段未见)——A 的账本跑几天真实通话后看 cached 列即知 B/C 实际效果。

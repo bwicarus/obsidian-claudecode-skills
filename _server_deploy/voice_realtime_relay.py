@@ -44,6 +44,60 @@ DEBUG = False   # 排障时开(350 句文本等)
 WEBAPP = "http://127.0.0.1:5000"
 _TOKEN_FILE = Path("~/.config/mcp-webapp-token").expanduser()
 DIALOG_ID_FILE = Path("/home/bwicarus/claude/state/doubao-dialog-id.txt")   # 跨通话记忆(服务端接续最近20轮)
+USAGE_FILE = Path("/home/bwicarus/claude/state/doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
+
+# ── S2S 用量记账(154 UsageResponse 每轮 token 用量;官方费率 元/M tok)──
+# 键名归类靠子串匹配(官方文档没给 154 的字段清单,宽容解析 + DEBUG 原样日志观察);
+# cached 命中按 cached 费率(低于正常输入),官方未公布具体价 → 不计入估算、单独累计展示。
+_USAGE_RATE = {"in_audio": 80.0, "in_text": 10.0, "out_audio": 300.0, "out_text": 30.0}
+
+
+def _usage_classify(pl: dict) -> dict:
+    """把 154 payload 里的数字 token 字段归到 in/out × text/audio + cached(嵌套 dict 也扫)。"""
+    got = {"in_audio": 0, "in_text": 0, "out_audio": 0, "out_text": 0, "cached": 0}
+
+    def _walk(d, path=""):
+        if not isinstance(d, dict):
+            return
+        for k, v in d.items():
+            kp = (path + "_" + str(k)).lower()
+            if isinstance(v, dict):
+                _walk(v, kp)
+            elif isinstance(v, (int, float)) and v and "token" in kp:
+                if "cach" in kp:
+                    got["cached"] += int(v)
+                elif "input" in kp or kp.endswith("_in") or "_in_" in kp:
+                    got["in_audio" if "audio" in kp else "in_text"] += int(v)
+                elif "output" in kp or "_out" in kp:
+                    got["out_audio" if "audio" in kp else "out_text"] += int(v)
+    _walk(pl)
+    return got
+
+
+def _log_usage(pl: dict):
+    """154 → 按天累计到 USAGE_FILE(轮数/各类 token/估算花费)。relay 单进程 asyncio,直接读改写。"""
+    try:
+        got = _usage_classify(pl)
+        if not any(got.values()):
+            if DEBUG:
+                sys.stderr.write(f"[voice-rt 154] 无 token 字段? {str(pl)[:200]}\n")
+            return
+        try:
+            data = json.loads(USAGE_FILE.read_text("utf-8"))
+        except Exception:
+            data = {"days": {}}
+        day = time.strftime("%Y-%m-%d")
+        d = data["days"].setdefault(day, {"rounds": 0, "in_audio": 0, "in_text": 0,
+                                          "out_audio": 0, "out_text": 0, "cached": 0, "cost_est": 0.0})
+        d["rounds"] += 1
+        for k, v in got.items():
+            d[k] = d.get(k, 0) + v
+        d["cost_est"] = round(sum(d.get(k, 0) * r / 1e6 for k, r in _USAGE_RATE.items()), 4)
+        data["total_cost_est"] = round(sum(x.get("cost_est", 0) for x in data["days"].values()), 4)
+        data["days"] = dict(sorted(data["days"].items())[-60:])   # 只留最近 60 天
+        USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    except Exception as ex:
+        sys.stderr.write(f"[voice-rt usage] {ex}\n")
 
 
 def _webapp_headers() -> dict:
@@ -156,8 +210,16 @@ def _creds() -> dict:
 def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
     """system_role 构造(StartSession 和翻页 UpdateConfig 共用一份逻辑)。
     直塞优先:页文本/圈画文字/插图描述这些现成纯文本直接进 prompt(直接答,零等待);
-    「我去查」只留给真需要动手的(搜视频/查资料/别页/精细图像/写操作)。"""
+    「我去查」只留给真需要动手的(搜视频/查资料/别页/精细图像/写操作)。
+
+    v3-⑩ 缓存分层(前缀缓存按最长公共前缀命中,SP 按变化频率排——高频变的必须垫底):
+      ① 稳定前缀:角色+协议+**全量工具目录**(整场通话不变)
+      ② 中层:页文本/插图描述/生词(翻页才变)
+      ③ 易变尾部:笔迹三态/选中/focus/图/任务状态(高频变,只失效尾部缓存)
+    工具目录不再按状态增删行(原门控:一画笔目录就变 → ②整层缓存连坐失效);
+    "无笔迹连 see_ink 都不给"的**语义**由 ③ 的显式状态声明承接,不可用工具尾部直说无效。"""
     book = book or {}
+    # ── ① 稳定前缀 ──
     role = cfg.get("system_role",
                    "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。回答口语化、简洁自然。")
     role += ("\n你直接接着这本阅读器的工具层(目录在最后)。规则(与系统里另一个编排助手完全同一套):"
@@ -167,20 +229,28 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
              "系统会把这条静音、替你向用户播一句确认语,再执行;字符串值里**别用双引号、别换行**(要引号用「」)。"
              "系统执行后会把真实结果发给你,那时再口语化讲给用户;自己编的结果都是假的,会害用户。每轮最多调一个工具。"
              "\n例:用户说『翻到第8页』→ 你的完整回复就是:{\"tool\":\"goto_page\",\"args\":{\"page\":8}}"
-             "\n**没输出 JSON 页面是不会动的**;之前『先说一句再输出JSON』『直接说翻到第N页』的老办法都已作废。")
-    lines = dict(book.get("tools_lines") or {})
-    if lines:   # 状态门控(用户设计):页面状态决定工具存在与否——无笔迹连 see_ink 都不给,从根上消除模糊
-        if not book.get("has_ink"):
-            lines.pop("see_ink", None)
-        if not book.get("figs_n"):
-            lines.pop("see_figure", None)
-        if not (book.get("sel") or "").strip():
-            lines.pop("read_selection", None)
-        role += "\n可用工具目录(冒号后是用途,{}是 args 字段):\n" + "\n".join(lines.values())
+             "\n**没输出 JSON 页面是不会动的**;之前『先说一句再输出JSON』『直接说翻到第N页』的老办法都已作废。"
+             "\n- 语音场景:回答**默认两三句话说清**,别铺开长篇;用户说『详细讲讲/展开』才展开。")
+    lines = book.get("tools_lines") or {}
+    if lines:
+        role += ("\n可用工具目录(冒号后是用途,{}是 args 字段;**最下方的实时状态说某工具当前无效时以状态为准**):\n"
+                 + "\n".join(lines.values()))
+    # ── ② 中层:跟页走的内容(翻页才变) ──
     page_text = book.get("page_text") or ""
     if page_text:
         name = (file_rel.rsplit("/", 1)[-1] or "这本书")
         role += f"\n用户此刻正在读《{name}》第 {page} 页,本页文字内容(直接可用):\n{page_text}"
+    figs = book.get("figures") or []
+    if figs:
+        fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
+        if fx:
+            role += f"\n本页插图的文字描述(问图直接用;要更精细的视觉细节才「我去查」):{fx[:1200]}"
+    vocab = book.get("vocab") or []
+    if vocab:
+        role += ("\n本页『还没掌握』的生词(阅读器下划线词,来自他的生词本掌握度数据;"
+                 "他问『这页哪些词我没掌握/有什么生词』直接用这个列表答):" + "、".join(vocab[:30]))
+    # ── ③ 易变尾部:实时状态(高频变,垫底保住上面两层的前缀缓存) ──
+    role += "\n——以下是**实时页面状态**(系统随时更新,永远以最新一份为准):"
     # 手写笔迹:壳子只管状态;分析走 see_ink 工具。**版本号三态**(用户设计:变化要清楚标注)——
     # 没看过→去看;看过且没变→可直接答"没变";看过但又画了→记忆已过时,必须重新看,严禁拿旧印象答。
     if book.get("has_ink"):
@@ -198,31 +268,25 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
             role += "用户问跟标注有关的(『我圈的/我画的/这里/这是什么』等)→ 调 see_ink 工具看标注区合成图再答,别猜。"
     else:
         role += ("\n(本页目前**没有任何手写笔迹**——状态是实时同步的。他问『我画了什么/画了吗』直接说没画,"
-                 "不用也没法调笔迹工具;他若刚画,状态几秒内会更新到这里。)")
+                 "see_ink 此刻无效别调;他若刚画,状态几秒内会更新到这里。)")
     # 选中/chip 状态(前端实时同步,与侧栏 __voiceContext 同源):他说"这段/我选的"就指它
     sel = book.get("sel") or ""
     if sel:
         role += f"\n用户**当前选中**了这段文字(他说『这段/我选的/选中的内容』就是指它,翻译/解释可直接用):「{sel}」"
     else:
-        role += "\n(用户当前没有选中任何文字——他问『我选中了什么』就直说现在没选中;选中状态是实时同步的,不是你看不到。)"
+        role += ("\n(用户当前没有选中任何文字——他问『我选中了什么』就直说现在没选中,read_selection 此刻无效;"
+                 "选中状态是实时同步的,不是你看不到。)")
     focus = book.get("focus") or ""
     if focus:
         role += f"\n用户钉住的焦点内容(输入框上方 chip):「{focus}」"
     if book.get("figs_n"):
         role += f"\n用户带入了 {book['figs_n']} 张图(要看图内容 → 调 see_figure 工具)。"
+    else:
+        role += "\n(用户当前没带入图,see_figure 此刻无效。)"
     tasks = list((book.get("tasks") or {}).keys())
     if tasks:
         role += (f"\n⏳系统正在后台执行:{'、'.join(tasks)}(结果还没回来)。用户催或再问相关的"
                  "→ 告诉他正在做请稍等,**绝不要再调一次同一个工具**;无关的新问题正常答。")
-    figs = book.get("figures") or []
-    if figs:
-        fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
-        if fx:
-            role += f"\n本页插图的文字描述(问图直接用;要更精细的视觉细节才「我去查」):{fx[:1200]}"
-    vocab = book.get("vocab") or []
-    if vocab:
-        role += ("\n本页『还没掌握』的生词(阅读器下划线词,来自他的生词本掌握度数据;"
-                 "他问『这页哪些词我没掌握/有什么生词』直接用这个列表答):" + "、".join(vocab[:30]))
     return role
 
 
@@ -284,12 +348,12 @@ def _start_session_payload(book: dict | None = None, file_rel: str = "", page: i
 _TOOL_START = re.compile(r'\{\s*"tool"')
 # 工具确认语(relay 经 ChatTTSText(500) 指定文本让豆包播——音频完全可控,不存在"截断自然话"问题;
 # 协议已改成编排 agent 同款纪律:调工具时整条回复只有 JSON,确认语由这里代播):
-_ACK_TEXT = {
-    "search_video": "好,我找找看。", "search_image": "好,我找找图。",
-    "see_ink": "我看看你标的内容。", "see_page": "我看一眼这页。", "see_figure": "我看看这张图。",
-    "goto_page": "好。", "make_anki": "好,这就做卡片。", "make_note": "好,我来整理笔记。",
-    "summarize_section": "好,我读一下这一章。", "auto_highlight": "好,我来标重点。",
-    "deep_think": "稍等,让我好好想想。",
+_ACK_TEXT = {   # v3-⑩:确认语按输出音频计费(300元/M,最贵的一类)→ 能短则短
+    "search_video": "我找找。", "search_image": "我找图。",
+    "see_ink": "我看看。", "see_page": "我看下这页。", "see_figure": "我看下图。",
+    "goto_page": "好。", "make_anki": "好,做卡片。", "make_note": "好,记笔记。",
+    "summarize_section": "我读下这章。", "auto_highlight": "好,标重点。",
+    "deep_think": "我想想,稍等。",
 }
 # 深度思考虚拟工具(v3-⑥):不在 TOOLS 注册表(它是语音专属体验)——relay 拦截,调助手 chat 流式,
 # answer 增量按句经 ChatTTSText(500) 分片**边生成边播**(不等全文;官方流式协议 start/content/end)。
@@ -412,9 +476,9 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
 
 
 async def _inject_500_memory(dws, sid, question: str, answer: str):
-    """深度答案注入对话历史(510):追问不失忆。"""
+    """深度答案注入对话历史(510):追问不失忆。v3-⑩ 限长 800→500(进历史轮轮计费)。"""
     pl = {"items": [{"role": "user", "text": f"(我刚才请你深度解答:{question[:120]})"},
-                    {"role": "assistant", "text": _speech_clean(answer)[:800]}]}
+                    {"role": "assistant", "text": _speech_clean(answer)[:500]}]}
     try:
         await dws.send(enc(T_FULL_CLIENT, 510, json.dumps(pl, ensure_ascii=False).encode(), session_id=sid))
     except Exception:
@@ -434,6 +498,14 @@ async def _say_ack(dws, sid, tool: str):
 # 翻页唯一特例兜底:模型对"轻操作"顽固地只嘴上应承不出 JSON(fresh 实测仍如此)→ 它说「翻到第N页」
 # 且该轮没 fire 过工具时直接执行;翻页后 setPage→UpdateConfig 链路自动把新页同步回模型,闭环自洽。
 _GOPAGE_FALLBACK = re.compile(r"翻到第\s*(\d+)\s*页")
+
+# v3-⑩:RAG 回填的每工具字符上限(未列出的用 1400 默认;仅影响喂回 S2S 的文本,client_action/侧栏展示不受限)
+_RAG_LIMIT = {
+    "search_video": 900, "search_image": 600,       # 列表类:title/摘要够播报,链接卡片在屏幕上
+    "see_ink": 1600, "see_figure": 1600, "see_page": 1800,   # 视觉描述:信息密度高给足
+    "read_page": 2200, "read_selection": 1600, "summarize_section": 2200,
+    "goto_page": 300, "auto_highlight": 600, "make_anki": 600, "make_note": 600,
+}
 
 
 def _is_cmd_sent(t: str) -> bool:
@@ -539,7 +611,10 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             "args": d.get("args"), "took_s": d.get("took_s"),
             "result_brief": json.dumps(res, ensure_ascii=False)[:400]}}, ensure_ascii=False))
         slim = {k: v for k, v in res.items() if k != "client_action"}
-        content = (json.dumps(slim, ensure_ascii=False)[:3000] if slim else "(无文本结果,界面元素已显示在屏幕上)")
+        # v3-⑩:RAG 回填按工具分级限长(进历史的每个字后续轮轮计费)——列表类给短(模型只需播报要点),
+        # 视觉/阅读类给足(信息密度高);统一 3000 的旧上限只留给未知工具兜底
+        lim = _RAG_LIMIT.get(tool, 1400)
+        content = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在屏幕上)")
         rag = json.dumps([{"title": f"工具 {tool} 的真实执行结果(涉及的界面元素已显示在用户屏幕上)",
                            "content": content + "\n(请把要点口语化讲给用户;你此前口头猜测的内容一律作废)"}],
                          ensure_ascii=False)
@@ -570,7 +645,9 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
 
 async def _fetch_tools_lines() -> dict:
     """拉工具目录(与编排 agent 同一注册表)→ {name: 压缩行}。O2.0 上下文 12K,desc 只留第一句。
-    目录在 _role_text 里按页面状态**门控**(用户设计:无笔迹连 see_ink 都不给,不留模糊地带)。"""
+    v3-⑩ 起目录**全量注入且恒定**(进 SP 稳定前缀保前缀缓存);"无笔迹 see_ink 无效"的
+    状态语义由 _role_text 尾部的实时状态声明承接(原门控=按状态增删行,一画笔目录就变,
+    排在它后面的页文本/生词整层缓存连坐失效)。"""
     try:
         async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=10) as hc:
             r = await hc.get("/api/assistant/tools")
@@ -853,14 +930,36 @@ async def handle_browser(bws):
                                json.dumps(_start_session_payload(book, file_rel, page, fresh=fresh),
                                           ensure_ascii=False).encode(), session_id=sid))
 
+            # v3-⑩ B:SP 指纹 + 251 ack 确认制——内容没变且上次已被豆包确认 → 不发 UpdateConfig
+            # (450 每次开口的"无条件重推"改为"没确认送达才重推":UpdateConfig 被丢的兜底语义保留,
+            #  但 SP 没变的开口不再打掉前缀缓存)。confirmed 只在收到 251 ConfigUpdated 时前移。
             _sp_deb = {"t": None}
+            _sp_state = {"confirmed": "", "pending": ""}
+
+            def _sp_fp(txt: str) -> str:
+                import hashlib
+                return hashlib.md5(txt.encode("utf-8")).hexdigest()
 
             async def _push_sp():   # UpdateConfig(201) 热更新 SP(翻页/圈画/选中/任务共用;闭包读最新 book/page)
                 c2 = _creds()
+                role_txt = _role_text(c2, book, file_rel, page)
+                fp = _sp_fp(role_txt)
+                if fp == _sp_state["confirmed"]:
+                    return   # 没变且已确认 → 不推(省 UpdateConfig + 保前缀缓存)
+                if fp == _sp_state["pending"] and time.monotonic() - _sp_state.get("pending_at", 0) < 5:
+                    return   # 同内容已在途且未超时;超 5s 没等到 251 视为被丢 → 放行重推(原"开口兜底"语义)
+                _sp_state["pending"] = fp
+                _sp_state["pending_at"] = time.monotonic()
                 upd = {"dialog": {"bot_name": c2.get("bot_name", "豆包"),
-                                  "system_role": _role_text(c2, book, file_rel, page),
+                                  "system_role": role_txt,
                                   "speaking_style": c2.get("speaking_style", "语气自然友好,不啰嗦。")}}
                 await dws.send(enc(T_FULL_CLIENT, 201, json.dumps(upd, ensure_ascii=False).encode(), session_id=sid))
+
+            # StartSession 已带初始 SP → 视为已生效(151 SessionStarted 无 SP ack,这里直接锚定基线)
+            try:
+                _sp_state["confirmed"] = _sp_fp(_role_text(_creds(), book, file_rel, page))
+            except Exception:
+                pass
 
             async def _inject_memory(u_text: str, a_text: str):
                 """ConversationCreate(510):把系统事件按时序写进对话历史(不带 timestamp=追加到末尾)。
@@ -978,8 +1077,14 @@ async def handle_browser(bws):
                             except Exception:
                                 pass
                         elif ev in (251, 567, 568, 570, 571):   # 配置/上下文操作的 ack(低频,常开日志:验证 UpdateConfig/记忆注入是否真生效)
+                            if ev == 251 and _sp_state["pending"]:
+                                _sp_state["confirmed"] = _sp_state["pending"]   # 豆包确认收到这版 SP → 指纹前移
+                                _sp_state["pending"] = ""
                             sys.stderr.write(f"[voice-rt ack] ev={ev} {str(pl)[:80]}\n")
-                        elif ev == 450:   # 用户开口:①无条件重推最新 SP(兜 UpdateConfig 被丢的底) ②打断深度思考播报(官方要求:被打断不补 end 包)
+                        elif ev == 154:   # UsageResponse:每轮 token 用量 → 按天记账(v3-⑩ A)
+                            fwd = False
+                            _log_usage(pl)
+                        elif ev == 450:   # 用户开口:①重推最新 SP(指纹确认制:没变且已确认的不推) ②打断深度思考播报(官方要求:被打断不补 end 包)
                             book["deep_abort"] = True
                             asyncio.create_task(_push_sp())
                         elif ev == 451:   # 记录用户语音终稿(笔迹询问程序兜底判定用)
@@ -1050,6 +1155,19 @@ async def handle_browser(bws):
                                                                "payload": {"fn": "goToPage", "args": [int(g.group(1))]}}, ensure_ascii=False))
                                 # (笔迹询问的程序兜底已撤——用户裁定:程序兜底有漏洞且模型升级体验不跟涨,
                                 #  改用 ConversationCreate(510) 记忆注入按时序更新它的认知,见 _push_sp_debounced)
+                            # v3-⑩ F:长对话摘要护栏——自然对话轮(非工具 JSON 轮)记 QA 摘录;
+                            # 攒满 26 轮 → 最旧 12 轮压成一条 510 注入(拼接式,不调外部模型),防服务端
+                            # 滚出 12K 窗口时丢早期脉络。豆包 12K 硬限已封顶输入费用,这条主要保认知连续。
+                            if full and rid not in reply_fired and '"tool"' not in full:
+                                ql = book.setdefault("qa_log", [])
+                                ql.append(((book.get("user_q") or "")[:24], full[:36]))
+                                if len(ql) >= 26:
+                                    old, book["qa_log"] = ql[:12], ql[12:]
+                                    digest = ";".join(f"我:{u}→你:{a}" for u, a in old if u or a)[:700]
+                                    asyncio.create_task(_inject_memory(
+                                        f"(我们更早聊过这些,给你留个备忘:{digest})",
+                                        "好,前面聊过的这些我记住了,后面可以直接接着说。"))
+                                    sys.stderr.write(f"[voice-rt] 长对话摘要注入({len(old)}轮压缩)\n")
                             reply_fired.discard(rid)
                             suppress.discard(rid)
                             sent_len.pop(rid, None)

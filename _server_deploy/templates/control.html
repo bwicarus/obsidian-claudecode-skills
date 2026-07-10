@@ -681,11 +681,26 @@ async function loadGeminiCost(){
     </div>`;
   }catch(_){ return ""; }
 }
+async function loadDoubaoCost(){
+  // 豆包 S2S 语音通话估算花费(relay 收 154 UsageResponse 按天记 state/doubao-usage.json;官方费率 元/M token)
+  try{
+    const d = await (await fetch("/control/api/doubao-cost")).json();
+    if(!d.ok || !d.total_cost_est) return "";
+    const days = Object.entries(d.recent_days||{}).map(([k,v])=>
+      `${k.slice(5)}: ¥${v.cost_est} (${v.rounds}轮${v.cached?`,cache ${(v.cached/1000).toFixed(1)}k`:''})`).join(" · ") || "暂无";
+    return `<div style="padding:8px 10px;margin-bottom:10px;background:#0e1a2e;border:1px solid #2a3550;border-radius:8px;font-family:inherit">
+      <div style="color:#f0abfc;font-weight:700;margin-bottom:4px">🎙 豆包语音通话 累计估算花费(S2S 伴读)</div>
+      <div style="font-size:13px">总计 <b style="color:#fbbf24">¥${d.total_cost_est}</b> · 近30天 ¥${d.last30d_cost_est||0}</div>
+      <div style="font-size:11px;color:#8a9bb4;margin-top:3px">${days}</div>
+      <div style="font-size:11px;color:#6b7688;margin-top:3px">※ 按官方费率×每轮token估算(音频输出300元/M最贵);cache命中部分未计价</div>
+    </div>`;
+  }catch(_){ return ""; }
+}
 async function loadQuotaLog(){
   const body = document.getElementById("quota-log-body");
   body.textContent = "加载中…";
   const aiOnly = document.getElementById("quota-log-ai-only").checked;
-  const gemHtml = await loadGeminiCost();
+  const gemHtml = (await loadGeminiCost()) + (await loadDoubaoCost());
   try{
     const r = await fetch(`/control/api/quota-log?limit=150&ai_only=${aiOnly}`);
     const d = await r.json();

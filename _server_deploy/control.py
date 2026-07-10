@@ -356,6 +356,24 @@ def register_control(app):
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
 
+    @app.route("/control/api/doubao-cost")
+    def control_doubao_cost():
+        """豆包 S2S 语音通话估算花费(元;relay 收 154 UsageResponse 按天累计到 state/doubao-usage.json)。"""
+        try:
+            p = CLAUDE_DIR / "state" / "doubao-usage.json"
+            if not p.exists():
+                return jsonify({"ok": True, "total_cost_est": 0, "days": {}})
+            data = json.loads(p.read_text("utf-8"))
+            days = data.get("days") or {}
+            import datetime as _dt
+            cut = (_dt.date.today() - _dt.timedelta(days=30)).isoformat()
+            last30 = round(sum(v.get("cost_est", 0) for k, v in days.items() if k >= cut), 4)
+            recent = dict(sorted(days.items())[-7:])
+            return jsonify({"ok": True, "total_cost_est": data.get("total_cost_est", 0),
+                            "last30d_cost_est": last30, "recent_days": recent})
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
+
     @app.route("/control/api/trigger-log")
     def control_trigger_log():
         """返回 webapp_trigger.log 末 N 行（追踪 trigger 子进程的实时输出）。"""
