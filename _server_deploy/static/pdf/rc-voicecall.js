@@ -818,24 +818,56 @@
     _dcSend({ type: 'response.create' });
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
   }
+  // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
+  // 末句,且 response.done(生成完≠播完)后提前淡出(rtc 音频在 <audio> 元素,playing 队列看不见它)。
+  // 改逐句估时放出(TTS ≈6字/秒)粗对齐声音;豆包路径(550 跟随合成节奏)不走这里。
+  var _rtcCap = { q: [], t: null, fed: 0, done: false };
+  function _rtcCapReset() {
+    _rtcCap.q = []; _rtcCap.fed = 0; _rtcCap.done = false;
+    if (_rtcCap.t) { clearTimeout(_rtcCap.t); _rtcCap.t = null; }
+  }
+  function _rtcCapFeed(full, isDone) {
+    if (isDone) _rtcCap.done = true;
+    var re = /[^。！？!?;；\n]+[。！？!?;；\n]*/g, parts = [], m;
+    while ((m = re.exec(full))) { if (m[0].trim()) parts.push(m[0].trim()); }
+    var closed = /[。！？!?;；\n]\s*$/.test(full);
+    var upto = (isDone || closed) ? parts.length : parts.length - 1;   // 末句残缺就等它闭合,别闪半句
+    for (var i = _rtcCap.fed; i < upto; i++) _rtcCap.q.push(parts[i]);
+    if (upto > _rtcCap.fed) _rtcCap.fed = upto;
+    _rtcCapPump();
+  }
+  function _rtcCapPump() {
+    if (_rtcCap.t) return;
+    var s = _rtcCap.q.shift();
+    if (s == null) { if (_rtcCap.done) _capMaybeHide(2500); return; }
+    capShow(s, 'a');
+    _rtcCap.t = setTimeout(function () { _rtcCap.t = null; _rtcCapPump(); },
+                           Math.max(1100, Math.min(6000, s.length * 160)));
+  }
   function _rtcOnEvent(e) {   // dc 下行事件 → 既有 UI 语义(对话窗/字幕/按钮/工具卡)
     var t = e.type;
     if (t === 'response.output_audio_transcript.delta') {
-      curAText += (e.delta || ''); setSub('a', curAText); capStream('a', curAText);
+      curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
     } else if (t === 'input_audio_buffer.speech_started') {
       curAText = ''; curAEl = null;
+      _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
-      if (tx) { setSub('u', tx); capUser(tx); }
+      if (tx) {
+        setSub('u', tx);
+        if (!_rtcCap.t && !_rtcCap.q.length) capUser(tx);   // whisper 迟到:AI 字幕在放就别插队打乱滚动(对话窗已有)
+      }
     } else if (t === 'response.function_call_arguments.done') {
       var a = {}; try { a = JSON.parse(e.arguments || '{}'); } catch (_) {}
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
-      callBtnSpeaking(false); _capMaybeHide(2500);
+      callBtnSpeaking(false);
+      _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
             if (u) fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true }); } catch (_) {}
     } else if (t === 'error') {
@@ -878,6 +910,7 @@
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
       _userHung = false; _acquireWL();
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
+      capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
       _refreshSpeakTg();
     } catch (ex) {
       setSt('WebRTC 启动失败: ' + String(ex.message || ex).slice(0, 80));
@@ -886,6 +919,7 @@
   }
   function rtcTeardown() {
     _rtc.on = false;
+    _rtcCapReset();
     try { if (_rtc.dc) _rtc.dc.close(); } catch (e) {}
     try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
