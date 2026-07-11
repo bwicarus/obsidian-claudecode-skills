@@ -13,8 +13,15 @@
 - ✅ **实测 schema 修正(GPT 转述有出入的地方)**:sandbox 枚举=`read-only`(非 readOnly);
   `model/list` 真实清单=gpt-5.6-sol/terra/luna(effort 到 max/ultra)、gpt-5.5、gpt-5.4(-mini)——
   **gpt-5.5-codex 在 app-server 下 400 不可用**(exec 下可用,别名路由);turn/start 可带 effort。
-- ✅ 实测性能:热调用 ~6s(thread/start 开销抵掉部分启动收益),首 delta ~5.8s——**主要收益是流式+并发,
-  不是绝对提速**;并发第二路会排队(账号侧限制)。
+- ✅ **v3 提速(2026-07-11,GPT 诊断方案实施)**:独立干净 `CODEX_HOME=~/.reader-codex/home`
+  (精简 config:features 全关 apps/hooks/goals/memories/multi_agent/remote_plugin/shell_tool/
+  shell_snapshot/unified_exec/personality + web_search=disabled + history.persistence=none)+
+  空 untrusted cwd `~/.reader-codex/empty`。效果:**thread/start 0.8s→0.05s、turn→首delta 3.3-4.7s→
+  1.4-1.8s、热调用 5.9s→2.1s**(agent 周边初始化=原延迟大头,GPT 判断正确)。环境由
+  `_codex_rc_bootstrap()` 自举(auth 从 ~/.codex 拷,0600)。thread 预创建池不需要了(0.05s 可忽略)。
+  ⚠ 配置陷阱(实测):`features.fast_mode` 键非法、`[mcp_servers.X] enabled=false` 覆盖语法非法
+  (报 invalid transport)——**任一非法键=整份配置静默回默认**,改完必须看 configWarning/RUST_LOG。
+  默认模型改 gpt-5.6-luna+low(官方定位:清晰重复的提取/转换/摘要=阅读场景)。
 - 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + cwd=/tmp),不让它当 agent。
   编排循环未接。
 

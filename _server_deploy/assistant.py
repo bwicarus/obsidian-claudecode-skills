@@ -504,11 +504,60 @@ def _claude_text(prompt, model="opus", effort="high", timeout=150):
         _kill(p)
 
 
+_CODEX_RC_HOME = Path("~/.reader-codex/home").expanduser()    # 阅读器专用干净 CODEX_HOME(GPT 建议实测:关掉全部 agent 周边)
+_CODEX_RC_CWD = Path("~/.reader-codex/empty").expanduser()    # 空 untrusted cwd(避免项目发现干扰)
+_CODEX_RC_CONFIG = """model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
+approval_policy = "never"
+sandbox_mode = "read-only"
+check_for_update_on_startup = false
+web_search = "disabled"
+history.persistence = "none"
+[features]
+apps = false
+hooks = false
+goals = false
+memories = false
+multi_agent = false
+remote_plugin = false
+shell_tool = false
+shell_snapshot = false
+unified_exec = false
+personality = false
+[apps._default]
+enabled = false
+[projects."%s"]
+trust_level = "untrusted"
+""" % _CODEX_RC_CWD
+
+
+def _codex_rc_bootstrap():
+    """自举阅读器专用 Codex 环境:干净 CODEX_HOME(auth 从 ~/.codex 拷)+ 精简 config + 空 cwd。
+    实测效果(2026-07-11):thread/start 0.8s→0.05s、turn→首delta 3.3-4.7s→1.4-1.8s、端到端 ~5s→~1.7s
+    (MCP/Apps/Skills 等 agent 周边初始化全砍;⚠ [mcp_servers.X] enabled 覆盖语法非法会整份配置回默认,
+    features.fast_mode 键同样非法——改配置后必须看 configWarning)。"""
+    try:
+        _CODEX_RC_CWD.mkdir(parents=True, exist_ok=True)
+        _CODEX_RC_HOME.mkdir(parents=True, exist_ok=True)
+        os.chmod(_CODEX_RC_HOME, 0o700)
+        auth = _CODEX_RC_HOME / "auth.json"
+        src = Path("~/.codex/auth.json").expanduser()
+        if not auth.exists() and src.exists():
+            auth.write_bytes(src.read_bytes())
+            os.chmod(auth, 0o600)
+        cfg = _CODEX_RC_HOME / "config.toml"
+        if not cfg.exists():
+            cfg.write_text(_CODEX_RC_CONFIG, "utf-8")
+    except Exception as ex:
+        sys.stderr.write(f"[codex-rc bootstrap] {ex}\n")
+
+
 class _CodexApp:
     """codex app-server 常驻客户端(JSON-RPC over stdio,官方说明书 2026-07 + 本机实测 schema):
-    每次 exec 的三宗罪(进程启动 ~1-2s、无文字流式、无会话)一次解决——单例常驻,进程死亡自动重启;
-    每次调用开 **ephemeral thread**(不落盘 ~/.codex/sessions,任务间零污染),事件按 threadId 路由,
-    支持并发。sandbox=read-only + approvalPolicy=never + cwd=/tmp(只当纯文本/看图模型,不让它当 agent)。"""
+    单例常驻,进程死亡自动重启;每次调用开 **ephemeral thread**(不落盘,任务间零污染),事件按
+    threadId 路由,支持并发。跑在**独立干净 CODEX_HOME**(_codex_rc_bootstrap)+ 空 untrusted cwd:
+    agent 周边(Apps/MCP/Hooks/Shell/Multi-agent)全关 → 端到端 ~1.7s(原 ~5s)。
+    sandbox=read-only + approvalPolicy=never(只当纯文本/看图模型,不让它当 agent)。"""
 
     def __init__(self):
         self._lk = threading.Lock()
@@ -523,9 +572,12 @@ class _CodexApp:
                 return
             import shutil as _sh
             cx = _sh.which("codex") or os.environ.get("APP_CODEX") or "codex"
+            _codex_rc_bootstrap()
             self._pending = {}; self._turns = {}
             self._p = subprocess.Popen([cx, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd="/tmp")
+                                       stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                                       cwd=str(_CODEX_RC_CWD),
+                                       env={**os.environ, "CODEX_HOME": str(_CODEX_RC_HOME)})
             threading.Thread(target=self._reader, args=(self._p,), daemon=True).start()
         self._rpc("initialize", {"clientInfo": {"name": "bwicarus-webapp", "title": "assistant", "version": "1"}}, timeout=15)
         self._notify("initialized", {})
@@ -583,7 +635,7 @@ class _CodexApp:
         """yield 文字 delta;turn 失败/超时抛异常(调用方回落 exec/其它后端)。"""
         import queue as _qu
         self._ensure()
-        tp = {"cwd": "/tmp", "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
+        tp = {"cwd": str(_CODEX_RC_CWD), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
         if model and str(model).startswith("gpt-"):
             tp["model"] = model
         th = self._rpc("thread/start", tp, timeout=25)
@@ -635,7 +687,7 @@ class _CodexApp:
 _codex_app = _CodexApp()
 
 
-def _codex_text(prompt, model="gpt-5.5", effort="medium", timeout=180, image_paths=None):
+def _codex_text(prompt, model="gpt-5.6-luna", effort="low", timeout=180, image_paths=None):
     """单次 Codex 生成:**主路=常驻 app-server**(零启动开销+ephemeral thread);失败回落 `codex exec`
     一次性(启动慢但独立健壮)。Pi 已登录 ChatGPT 订阅——额度与 Claude/Gemini 独立。失败/空 → None。"""
     try:
@@ -3011,8 +3063,8 @@ _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
 _BACKENDS = ("claude", "gemini", "codex")
 _CLAUDE_VARIANTS = ("haiku", "sonnet", "opus")
-_CODEX_VARIANTS = ("gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-                   "gpt-5.4", "gpt-5.4-mini")             # app-server model/list 实测清单(2026-07-11;gpt-5.5-codex 在 app-server 下 400)
+_CODEX_VARIANTS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5",
+                   "gpt-5.4", "gpt-5.4-mini")             # model/list 实测清单;luna 前置=官方定位"清晰重复的提取/转换/摘要"正合阅读场景
 _CODEX_DEPTHS = ("low", "medium", "high", "xhigh", "max", "ultra")   # 5.6 系到 ultra;选了型号不支持的档 API 报错→自动回落
 # *-latest 别名永远指向当代最新(现 flash-latest=3.5-flash、pro-latest=3.1-pro);Google 出新版自动跟,不用改代码。
 # 另列具体版本号给想锁定版本的。pro 线目前最高只有 3.1(还没 3.5-pro),pro 是最强推理档(版本号低≠更弱)。
