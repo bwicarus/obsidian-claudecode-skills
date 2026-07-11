@@ -1247,6 +1247,8 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
              "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你连着他的阅读器,配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等"
              "需要动手的事**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
+             "**手写/圈画铁律**:用户提到『我写的/我画的/我圈的/帮我看看这个算式』时,永远**先调 see_ink 工具**"
+             "(它会给你笔迹区域的合成图)——你有这个能力,回答『看不到』或让他粘贴/截图都是错误行为。"
              "工具描述里写了 args 字段的用法,照着填。你没有联网搜索能力(search_all_books 只搜他的书库);"
              "要网上实时信息就如实说没法联网,凭记忆答要先声明可能过时。"
              "只读查询(查词/看图/搜索/读页)意图清楚就直接调;写操作(高亮/做卡片/写笔记/插入页)先用一句话说清你要做什么再做。"
@@ -1473,21 +1475,36 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                         sys.stderr.write(f"[voice-oa] 翻页增量 → p{np}({len(book['page_text'])}字)\n")
                     except Exception:
                         pass
-            elif t in ("state", "ink"):
+            elif t == "state":   # 选中/chip 同步(字段与豆包版同源:sel/focus/figs 数量)
                 sel = (j.get("sel") or "").strip()
                 book["sel"] = sel[:400]
-                if j.get("strokes"):
-                    book["ink_strokes"] = j.get("strokes")
-                bits = []
-                bits.append(f"用户当前选中了「{sel[:200]}」(他说『这段/我选的』就指它)" if sel else "当前无选中")
-                if book.get("ink_strokes"):
-                    bits.append("本页有手写笔迹(看内容用 see_ink 工具)")
+                note0 = (f"用户当前选中了「{sel[:200]}」(他说『这段/我选的』就指它)" if sel
+                         else "用户当前没有选中文字")
                 try:   # 状态=对话内 system 增量消息(与豆包 510 同哲学:前缀不动,历史缓存全保)
                     await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                         "type": "message", "role": "system",
-                        "content": [{"type": "input_text", "text": "(状态更新:" + ";".join(bits) + ",以本条为准)"}]}}))
+                        "content": [{"type": "input_text", "text": "(状态更新:" + note0 + ",以本条为准)"}]}}, ensure_ascii=False))
+                    sys.stderr.write(f"[voice-oa] 状态注入 sel={len(sel)}字\n")
                 except Exception:
                     pass
+            elif t == "ink":     # 通话中圈画(字段与豆包版同源:page/strokes;⚠ink 消息没有 sel 字段,别碰 book['sel'])
+                try:
+                    ip = int(j.get("page") or 0)
+                except Exception:
+                    ip = 0
+                strokes = j.get("strokes") or []
+                if ip and ip == (book.get("page") or page):
+                    book["ink_strokes"] = strokes[:60]
+                    note1 = ((f"用户刚在本页用笔写/圈画了内容(共 {len(strokes)} 笔)。你看不到笔迹本身,但你有 see_ink 工具:"
+                              "他问『我写的/我画的/我圈的/这个对不对』时**必须立即调用 see_ink** 看笔迹合成图再回答——"
+                              "绝不要说你看不到,也不要让他粘贴文字或发截图。") if strokes else "用户清空了本页笔迹。")
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                            "type": "message", "role": "system",
+                            "content": [{"type": "input_text", "text": "(状态更新:" + note1 + ")"}]}}, ensure_ascii=False))
+                        sys.stderr.write(f"[voice-oa] 圈画注入 p{ip} strokes={len(strokes)}\n")
+                    except Exception:
+                        pass
             elif t == "text" and (j.get("content") or "").strip():   # 打字提问(不说话时)
                 try:
                     await ows.send(json.dumps({"type": "conversation.item.create", "item": {
