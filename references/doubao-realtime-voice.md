@@ -333,3 +333,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **前端**(`rc-voicecall.js` `_cap` 模块):`#vc-cap` fixed 底部居中(bottom 76px+safe-area),`pointer-events:none` 全链穿透;Apple TV 字幕风(深毛玻璃胶囊 rgba(28,28,30,.6)+blur);三行=上一句(.45 透明小字)/当前句/状态行。显示 gate=`capOn()`(localStorage `rc-voice-sub`,默认开)+语音活跃(朗读亮或通话中)+**侧栏关着**(`RC.sidedrawer.isOpen()` 开着有对话流不重复)。播完 4s 淡出(还在播/状态行亮着则续等);bargeIn/挂断 `capClear`(清句队列+定时器)。
 - **状态显示**:rc-assistant `tool`/`tool-done` 事件 + relay `tool_status` → `window.__vcCapStatus('⚙︎ 查词典…')`,工具跑完清除。
 - **开关唯一入口**:语音设置卡「朗读字幕」checkbox(设备级 localStorage,不进服务端凭证,不跟 data-k 保存链路混)。
+
+### 字幕二期:S2S 接入 + 等待指示 + 用户句 + audioSession 修复(v3-㉑,2026-07-11)
+
+- **S2S 全聋事故(用户报告"说什么都没反应")**:⑱c 在页面加载时全局 `navigator.audioSession.type='playback'`——WebKit 该类别**静音麦克风采集**(getUserMedia 拿到无声流,豆包连 450 都不发;relay 日志实锤:251/567 ack 全正常、零语音活动)。修:撤全局声明(playback 只在 _ttsEnsure(gate `!ws && !_connecting`)和 teardown 后声明);start() 开头先 `await _ttsShutdown()`(等 playback ac close 落地)再声明 `play-and-record`、再建 AudioContext。**⚠ 铁律:audioSession 类别必须在音频会话激活前声明,活跃中改类别 iOS 不可靠;'playback' 有静音麦克风副作用,任何开麦链路的窗口期都不能被它插队**(_connecting 标志挡流式 tap 的 _ttsEnsure)。
+- **等待指示**:ASR/S2S 通话空闲时字幕位置常驻小胶囊(mic 线条 SVG+三点跳动 vcCapDot);说话/回答时让位,_capMaybeHide 淡出后 `if(ws) capWait(true)` 回位;capClear(打断)也立即回位;agent_ready/150 触发;侧栏开着被 gate 吞的场景由常驻 pointerdown 350ms 兜底补亮。
+- **用户句上屏**:asr interim → `capUser`(当前句是用户句则原地更新,否则 capShow(text,'u'));utterance 定稿 capUser 在 sendToAssistant **之后**(send 内 bargeIn→capClear 会清)+`_capMaybeHide(10000)` 兜底(朗读灭+纯文本回答无任何后续字幕事件,10s 淡出回等待,否则用户句永久钉死)。样式 `.vc-cap-u`=iMessage 蓝。
+- **S2S 字幕**:451(interim 也上屏)→capUser;550→`capStream('a',curAText)`(全量累积切句:尾句进 cur、倒数第二句进 prev;S2S 音频不分句,文本驱动略超前);359 非挂断→_capMaybeHide;`_capPlace()` 在 rc-vc 浮层可见时把字幕抬到浮层顶部上方(iPhone 浮层近全宽,不避让被盖)。
+- **S2S"搜资料"真伪核查**(用户问):voice-log 实锤它真调了工具但是 **search_all_books(书库搜索,非联网)**,且第一次 args 空 `{}` 失败(⚠卡)、重试成功、第三次命中缓存(三张卡的由来);播报的"总务省2026年1.2494亿"工具结果里没有=**模型记忆披着工具外衣**。修:SP 加"**你没有联网/网页搜索能力**,search_all_books 只搜书库;要网上实时信息就如实说没法联网,凭记忆答必须声明『记忆数据可能过时』";目录行加"query 必填";空 query 错误改指导性(带完整 JSON 示例);缓存命中卡 label 用缓存里存的中文 label;_vlog tool 记录加 args+brief(事后可查播报依据)。
+- **对抗验证修复批**(3 verifier,8 findings 全修):H1=_connecting 挡建立窗口的 playback 插队;H2=utterance 后 10s 兜底 hide;H3=`_stripTornFU` 截尾部撕裂 `[[FOLLOWUP]]` 前缀(k≥2 不误伤正文单括号;否则标记补全时 _raw 变短→tap 误判新轮→整答重念+念出"FOLLO");M1=start await _ttsShutdown 返回的 close promise;M2=常驻 pointerdown 同时 resume _tts.ac(通话失败后非手势重建的 suspended 朗读 ac 只有触屏能救);M3=capClear 通话中回 wait+pointerdown 兜底;L1=_cap.gen 世代防打断后 straggler 音频块闪回旧句;L2=teardown 改调 _ttsShutdown(顺带 close 悬空 _tts.ws)。

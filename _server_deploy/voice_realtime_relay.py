@@ -367,6 +367,9 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
              "系统执行后会把真实结果发给你,那时再口语化讲给用户;自己编的结果都是假的,会害用户。每轮最多调一个工具。"
              "\n例:用户说『翻到第8页』→ 你的完整回复就是:{\"tool\":\"goto_page\",\"args\":{\"page\":8}}"
              "\n**没输出 JSON 页面是不会动的**;之前『先说一句再输出JSON』『直接说翻到第N页』的老办法都已作废。"
+             "\n- **你没有联网/网页搜索能力**,工具目录里也没有:search_all_books 搜的是**用户自己的书库**,不是互联网。"
+             "用户要查网上的实时信息(最新统计/新闻/天气等)时,如实说明你没法联网;可以凭自己训练时的知识回答,"
+             "但必须先声明『这是我记忆里的数据,可能过时』——绝不能把记忆包装成刚查到的结果。"
              "\n- 语音场景:回答**默认两三句话说清**,别铺开长篇;用户说『详细讲讲/展开』才展开。")
     lines = book.get("tools_lines") or {}
     if lines:
@@ -767,7 +770,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                 if hit.get("ca"):
                     await bws.send(json.dumps({"event": "client_action", "payload": hit["ca"]}, ensure_ascii=False))   # 视频卡等重放
                 await bws.send(json.dumps({"event": "tool_status", "payload": {
-                    "status": "done", "tool": tname, "label": f"{tname}(复用上次结果)", "cached": True,
+                    "status": "done", "tool": tname, "label": f"{hit.get('label') or tname}(复用上次结果)", "cached": True,
                     "cmd": str(cmd)[:500], "rag": (hit.get("content") or "")[:1600]}}, ensure_ascii=False))
                 rag = json.dumps([{"title": f"工具 {tname} 的结果(页面状态没变,这是**此前同样查询的结果直接复用**,没有重新执行)",
                                    "content": hit.get("content") or "(界面元素已重新显示)"}], ensure_ascii=False)
@@ -812,7 +815,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                            "content": content + "\n(请把要点口语化讲给用户;你此前口头猜测的内容一律作废)"}],
                          ensure_ascii=False)
         await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
-        _vlog("tool", tool=tool, label=d.get("label") or tool, page=page, book=file_rel, ok=bool(d.get("ok")))
+        _vlog("tool", tool=tool, label=d.get("label") or tool, page=page, book=file_rel, ok=bool(d.get("ok")),
+              args=d.get("args"), brief=content[:300])   # 结果摘要落盘:事后可查"它播报的到底有没有依据"
         # 完整调用过程 → tool_status(前端小按钮 + 侧栏对话流详情卡,v3-⑯:S2S指令/上下文/喂回结果全程可查)
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if d.get("ok") else "error", "tool": tool, "label": d.get("label") or tool,
@@ -824,7 +828,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             "result_brief": json.dumps(res, ensure_ascii=False)[:400]}}, ensure_ascii=False))
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
-                "content": content, "ca": ca if (isinstance(ca, dict) and ca.get("fn")) else None}
+                "content": content, "label": d.get("label") or tool,
+                "ca": ca if (isinstance(ca, dict) and ca.get("fn")) else None}
             while len(cache) > 20:
                 cache.pop(next(iter(cache)))
         if d.get("ok") and d.get("tool") in ("see_ink", "see_page", "see_figure"):

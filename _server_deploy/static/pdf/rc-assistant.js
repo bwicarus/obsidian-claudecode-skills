@@ -808,6 +808,14 @@
       return PdfAdapter.splitFollowups(text, _splitFollowupsNative);
     return _splitFollowupsNative(text);
   }
+  function _stripTornFU(t) {   // 尾部撕裂的 [[FOLLOWUP]] 前缀截掉:流式快照可能停在标记半截,留着会让
+    t = String(t || '');       // 朗读 tap 把"标记补全后文本变短"误判成新一轮(整答重念)+ 把 "[[FOLLO" 喂给 TTS
+    var TAG = '[[FOLLOWUP]]';
+    for (var k = Math.min(TAG.length - 1, t.length); k >= 2; k--) {
+      if (t.slice(-k) === TAG.slice(0, k)) return t.slice(0, -k);
+    }
+    return t;
+  }
   function _splitFollowupsNative(text) {
     var fu = [];
     var push = function (body) { body.split(/[|\n]+/).forEach(function (q) { q = q.trim().replace(/^[\-·•\d\.\s]+/, ''); if (q) fu.push(q); }); };
@@ -1613,7 +1621,7 @@
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed;
-        var _raw = _splitFollowups(answer).text;
+        var _raw = _stripTornFU(_splitFollowups(answer).text);
         var _at = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_raw).text : _raw;
         try { window.__asstVoiceTap && window.__asstVoiceTap(_raw, false); } catch (_) {}   // tap 收**原文**(含语气标签,自己解析转折点逐句换情绪)
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
@@ -1704,7 +1712,7 @@
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
-    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(pf.text || '', true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析)
+    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(_stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
     var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
     if (_pft) renderMd(aMsg, _pft, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');

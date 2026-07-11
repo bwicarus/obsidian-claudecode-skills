@@ -69,9 +69,18 @@
     }
   });
   // iOS 音频恢复:suspended 的 AudioContext 只有用户手势才能真正 resume——常驻捕获监听,
-  // 通话中用户任意触屏即恢复声音(没通话时 ac=null,零开销)。
+  // 通话中用户任意触屏即恢复声音(没通话时 ac=null,零开销)。朗读专用 _tts.ac 同样救
+  // (通话失败后它可能在非手势回调里重建=永久 suspended,只有这里能救回)。
   document.addEventListener('pointerdown', function () {
     try { if (ac && ac.state !== 'running') ac.resume(); } catch (e) {}
+    try { if (_tts.ac && _tts.ac.state !== 'running') _tts.ac.resume(); } catch (e) {}
+    // 字幕"正在听"兜底:通话在、字幕该显示却全空(如 agent_ready 时侧栏还开着被 gate 吞)→ 触屏后补亮
+    setTimeout(function () {
+      try {
+        if (ws && _capVisible() && (!_cap.el ||
+            (_cap.cur.style.display === 'none' && _cap.wait.style.display === 'none' && _cap.st.style.display === 'none'))) capWait(true);
+      } catch (e) {}
+    }, 350);
   }, true);
 
   function injectCss() {
@@ -88,6 +97,14 @@
       'box-shadow:0 6px 24px rgba(0,0,0,.18);max-width:100%;word-break:break-word;transition:opacity .3s}' +
       '#vc-cap .vc-cap-prev{opacity:.45;font-size:13px;padding:5px 12px}' +
       '#vc-cap .vc-cap-st{opacity:.85;font-size:13px;padding:5px 12px;background:rgba(28,28,30,.48)}' +
+      '#vc-cap .vc-cap-u{background:rgba(10,132,255,.62)}' +   // 用户句:iMessage 蓝,与 AI 深灰一眼区分
+      // "正在听"等待指示:mic 线条图标 + 三点依次跳动(ASR 通话空闲时常驻)
+      '#vc-cap .vc-cap-wait{display:flex;align-items:center;gap:7px;padding:6px 13px;background:rgba(28,28,30,.48)}' +
+      '#vc-cap .vc-cap-wait svg{width:13px;height:13px;opacity:.8;flex:none}' +
+      '#vc-cap .vc-cap-wait i{width:4px;height:4px;border-radius:50%;background:#fff;opacity:.3;animation:vcCapDot 1.4s ease-in-out infinite}' +
+      '#vc-cap .vc-cap-wait i:nth-of-type(2){animation-delay:.22s}' +
+      '#vc-cap .vc-cap-wait i:nth-of-type(3){animation-delay:.44s}' +
+      '@keyframes vcCapDot{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:.95;transform:translateY(-2.5px)}}' +
       // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
       '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(24,30,46,.78);' +
       '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
@@ -349,16 +366,19 @@
   //    绑到该块的播放调度时刻(playT),字幕跟声音精确同步;bidi/moon 音频不分句,退化为略超前。
   //    开关只在语音设置卡(localStorage rc-voice-sub,默认开);pointer-events:none 不挡任何触控。──
   function capOn() { try { return localStorage.getItem('rc-voice-sub') !== '0'; } catch (e) { return true; } }
-  var _cap = { el: null, prev: null, cur: null, st: null, pend: [], bind: false, timers: [], hideT: null };
+  var _cap = { el: null, prev: null, cur: null, wait: null, st: null, curWho: null, pend: [], bind: false, timers: [], hideT: null };
   function _capEl() {
     if (_cap.el && _cap.el.parentNode) return _cap.el;
     injectCss();   // 纯朗读场景(通话浮层没建过)也要样式
     var d = document.createElement('div'); d.id = 'vc-cap';
     d.innerHTML = '<div class="vc-cap-line vc-cap-prev" style="display:none"></div>' +
                   '<div class="vc-cap-line vc-cap-cur" style="display:none"></div>' +
+                  '<div class="vc-cap-line vc-cap-wait" style="display:none">' +
+                    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/></svg>' +
+                    '<i></i><i></i><i></i></div>' +
                   '<div class="vc-cap-line vc-cap-st" style="display:none"></div>';
     document.body.appendChild(d);
-    _cap.el = d; _cap.prev = d.children[0]; _cap.cur = d.children[1]; _cap.st = d.children[2];
+    _cap.el = d; _cap.prev = d.children[0]; _cap.cur = d.children[1]; _cap.wait = d.children[2]; _cap.st = d.children[3];
     return d;
   }
   function _capVisible() {   // 显示条件:开关开 + 语音链路活跃(朗读亮或通话中) + 侧栏关着(开着有对话流,字幕多余)
@@ -366,14 +386,59 @@
     try { if (window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()) return false; } catch (e) {}
     return true;
   }
-  function capShow(text) {
+  function capShow(text, who) {   // who:'a'=AI(默认)/'u'=用户(ASR 转写,iMessage 蓝);当前句下移成"上一句"
     if (!_capVisible()) return;
     _capEl();
     if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
     var old = _cap.cur.textContent;
-    if (old) { _cap.prev.textContent = old; _cap.prev.style.display = ''; }
+    if (old) {
+      _cap.prev.textContent = old; _cap.prev.style.display = '';
+      _cap.prev.classList.toggle('vc-cap-u', _cap.curWho === 'u');
+    }
     _cap.cur.textContent = text; _cap.cur.style.display = '';
+    _cap.cur.classList.toggle('vc-cap-u', who === 'u');
+    _cap.curWho = who || 'a';
+    capWait(false); _capPlace();
     _cap.el.classList.add('on');
+  }
+  function capUser(text) {   // ASR interim 实时更新:当前句已是用户句→原地改字,否则新起一句
+    if (!text || !_capVisible()) return;
+    _capEl();
+    if (_cap.curWho === 'u') {
+      if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+      _cap.cur.textContent = text; _cap.cur.style.display = '';
+      capWait(false); _capPlace(); _cap.el.classList.add('on');
+      return;
+    }
+    capShow(text, 'u');
+  }
+  function capStream(who, full) {   // S2S:整轮累积文本 → 尾句(可能残)进 cur、倒数第二句进 prev
+    if (!full || !_capVisible()) return;   // (S2S 音频不分句,退化为文本驱动,略超前于声音)
+    _capEl();
+    if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+    var re = /[^。！？!?;；\n]+[。！？!?;；\n]*/g, parts = [], m;
+    while ((m = re.exec(full))) { if (m[0].trim()) parts.push(m[0].trim()); }
+    if (!parts.length) return;
+    if (parts.length > 1) {
+      _cap.prev.textContent = parts[parts.length - 2];
+      _cap.prev.style.display = ''; _cap.prev.classList.remove('vc-cap-u');
+    }
+    _cap.cur.textContent = parts[parts.length - 1]; _cap.cur.style.display = '';
+    _cap.cur.classList.toggle('vc-cap-u', who === 'u'); _cap.curWho = who;
+    capWait(false); _capPlace(); _cap.el.classList.add('on');
+  }
+  function _capPlace() {   // S2S 通话浮层在时:字幕抬到浮层上方(iPhone 上浮层近全宽,不避让会被盖住)
+    if (!_cap.el) return;
+    var b = 0;
+    try { if (box && box.classList.contains('on')) b = window.innerHeight - box.getBoundingClientRect().top + 10; } catch (e) {}
+    _cap.el.style.bottom = b > 0 ? (b + 'px') : '';
+  }
+  function capWait(on) {   // "正在听"等待指示(mic+三点跳动):ASR 通话空闲时亮
+    if (!_cap.el && !on) return;
+    if (on) {
+      if (!_capVisible()) return;
+      _capEl(); _cap.wait.style.display = 'flex'; _capPlace(); _cap.el.classList.add('on');
+    } else if (_cap.wait) _cap.wait.style.display = 'none';
   }
   function capStatus(text) {   // 状态行(工具执行中):text=null 清除
     if (text == null) { if (_cap.st) { _cap.st.style.display = 'none'; } _capMaybeHide(1200); return; }
@@ -383,37 +448,38 @@
     _cap.st.textContent = text; _cap.st.style.display = '';
     _cap.el.classList.add('on');
   }
-  function _capMaybeHide(delay) {   // 播完停留几秒再淡出(还在播/状态行亮着→再等)
+  function _capMaybeHide(delay) {   // 播完停留几秒再淡出(还在播/状态行亮着→再等);ASR 通话继续→句子清掉回"正在听"
     if (!_cap.el) return;
     if (_cap.hideT) clearTimeout(_cap.hideT);
     _cap.hideT = setTimeout(function () {
       _cap.hideT = null;
       if (_tts.playing.length || playing.length || (_cap.st && _cap.st.style.display !== 'none')) { _capMaybeHide(1500); return; }
+      _cap.cur.textContent = ''; _cap.prev.textContent = ''; _cap.curWho = null;
+      _cap.cur.style.display = 'none'; _cap.prev.style.display = 'none';
+      _cap.cur.classList.remove('vc-cap-u'); _cap.prev.classList.remove('vc-cap-u');
+      if (ws && _capVisible()) { capWait(true); return; }   // 通话还在(ASR/S2S 都在听):等待指示常驻
       _cap.el.classList.remove('on');
-      setTimeout(function () {
-        if (_cap.el && !_cap.el.classList.contains('on')) {
-          _cap.cur.textContent = ''; _cap.prev.textContent = '';
-          _cap.cur.style.display = 'none'; _cap.prev.style.display = 'none';
-        }
-      }, 400);
     }, delay || 4000);
   }
-  function capClear() {   // 打断/挂断:清句队列+定时器,立即隐藏
-    _cap.pend = []; _cap.bind = false;
+  function capClear() {   // 打断/挂断:清句队列+定时器,立即隐藏;通话还在 → 直接回"正在听"
+    _cap.pend = []; _cap.bind = false; _cap.curWho = null;
+    _cap.gen = (_cap.gen || 0) + 1;   // 世代:作废还没到点的 capShow 定时器(打断后 straggler 音频块不许把旧句闪回来)
     _cap.timers.forEach(function (t) { clearTimeout(t); }); _cap.timers = [];
     if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
     if (_cap.el) _cap.el.classList.remove('on');
-    if (_cap.cur) { _cap.cur.textContent = ''; _cap.cur.style.display = 'none'; }
-    if (_cap.prev) { _cap.prev.textContent = ''; _cap.prev.style.display = 'none'; }
+    if (_cap.cur) { _cap.cur.textContent = ''; _cap.cur.style.display = 'none'; _cap.cur.classList.remove('vc-cap-u'); }
+    if (_cap.prev) { _cap.prev.textContent = ''; _cap.prev.style.display = 'none'; _cap.prev.classList.remove('vc-cap-u'); }
+    if (_cap.wait) _cap.wait.style.display = 'none';
     if (_cap.st) _cap.st.style.display = 'none';
+    if (ws) capWait(true);   // 打断(通话中)≠挂断:麦还开着,等待指示立即回位
   }
   function _capSeg(text) { if (text) { _cap.pend.push(text); _cap.bind = true; } }   // 收到 tts_seg 帧:下一个音频块=该句开头
   function _capBindChunk(startAt, acx) {   // 音频块调度好了:若它是句首块,到点亮字幕
     if (!_cap.bind || !_cap.pend.length) return;
     _cap.bind = false;
-    var txt = _cap.pend.shift();
+    var txt = _cap.pend.shift(), g0 = _cap.gen || 0;
     var ms = Math.max(0, (startAt - acx.currentTime) * 1000);
-    _cap.timers.push(setTimeout(function () { capShow(txt); }, ms));
+    _cap.timers.push(setTimeout(function () { if ((_cap.gen || 0) === g0) capShow(txt); }, ms));
   }
   window.__vcCapStatus = capStatus;   // rc-assistant 的 tool 事件也走字幕状态行(侧栏关着时能看到 agent 在干嘛)
 
@@ -426,9 +492,12 @@
   function _audioSession(kind) {
     try { if (navigator.audioSession) navigator.audioSession.type = kind; } catch (e) {}
   }
-  _audioSession('playback');   // 默认:本页音频=纯播放(耳机优先)
+  // ⚠ 不在页面加载时全局设 'playback':该类别会**静音麦克风采集**(getUserMedia 拿到无声流,
+  // S2S/ASR 全聋=豆包连 450 都不发,用户实测"说什么都没反应"的根因)。playback 只在朗读通道
+  // (_ttsEnsure,gate !ws)和挂断后(teardown)声明——耳机路由该管的场景都覆盖,不碰开麦链路。
+  var _connecting = false;   // 通话建立中(start 已声明 play-and-record、ws 还没赋值):此窗口谁也不许改回 playback,否则开出来的麦是静音的
   function _ttsEnsure() {
-    if (!ws) _audioSession('playback');   // 没在通话:确保纯播放类别(耳机路由)
+    if (!ws && !_connecting) _audioSession('playback');   // 没在通话/没在建:确保纯播放类别(耳机路由)
     try {
       if (!_tts.ac) _tts.ac = new (window.AudioContext || window.webkitAudioContext)();
       if (_tts.ac.state !== 'running') _tts.ac.resume();
@@ -474,8 +543,10 @@
   function _ttsShutdown() {
     try { if (_tts.ws) { if (_tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); _tts.ws.close(); } } catch (e) {}
     _tts.ws = null; _ttsStopPlay(); capClear();
-    try { if (_tts.ac) _tts.ac.close(); } catch (e) {}
+    var p = null;
+    try { if (_tts.ac) p = _tts.ac.close(); } catch (e) {}
     _tts.ac = null;
+    return p;   // close 的 promise:开麦前要 await 它落地,否则旧 playback 会话还激活着,类别切不动
   }
   // 助手流式回答 tap(rc-assistant 在 answer 增量/收尾时调):按标点小片段即时喂 TTS
   //   (双向流式 session:relay 侧一轮回答一个 session,片段连续合成 → 韵律连贯,首句无需等全文)
@@ -534,12 +605,18 @@
   }
   function handleAgentMsg(m) {
     var p = m.payload || {};
-    if (m.event === 'agent_ready') { taSet(''); taPlaceholder('🎙 说话即可,松口自动发送…'); return; }
-    if (m.event === 'asr') {   // 进行中转写 → 直接写输入框;用户开口 → 立即打断播报
+    if (m.event === 'agent_ready') { taSet(''); taPlaceholder('🎙 说话即可,松口自动发送…'); capWait(true); return; }
+    if (m.event === 'asr') {   // 进行中转写 → 写输入框 + 字幕用户句实时上屏;用户开口 → 立即打断播报
       if (playing.length) bargeIn();
-      taSet(p.text || ''); return;
+      taSet(p.text || '');
+      if (p.text) capUser(p.text);
+      return;
     }
-    if (m.event === 'utterance' && p.text) { taSet(''); sendToAssistant(p.text); return; }
+    if (m.event === 'utterance' && p.text) {
+      taSet(''); sendToAssistant(p.text); capUser(p.text);   // capUser 在 send 之后:send 内 bargeIn 会清字幕,定稿句要重建
+      _capMaybeHide(10000);   // 兜底:朗读灭+纯文本回答时没有任何后续字幕事件,10s 后淡出回"正在听"(朗读亮时 capShow 会 clear 掉这个)
+      return;
+    }
     if (m.event === 'tts_seg') { _capSeg(p.text); return; }         // 字幕:句边界帧(agent 通话朗读)
     if (m.event === 'tts_end') { _capMaybeHide(2500); return; }
     if (m.event === -1 || p.error) threadMsg('asst-note', '⚠ 语音:' + (p.error || '').slice(0, 80));
@@ -558,7 +635,10 @@
       try { if (myMic) myMic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
       try { if (myAc) myAc.close(); } catch (e) {}
     }
+    _connecting = true;   // 建立窗口(到 ws 赋值前):挡住 _ttsEnsure 把类别改回 playback(那会让开出来的麦静音)
     try {
+      try { await (_ttsShutdown() || 0); } catch (e) {}   // 关掉朗读通道并**等 close 落地**:playback 会话还激活着的话类别切不动;通话中朗读走通话 ws,不需要它
+      _audioSession('play-and-record');   // 开麦通话:必须在建 AudioContext **之前**声明——会话一旦以 playback 激活,活跃中改类别 iOS 不可靠,麦克风会保持静音
       myAc = new (window.AudioContext || window.webkitAudioContext)();
       // ⚠ iOS 坑:非用户手势环境(后台断线自动重连)里 suspended AudioContext 的 resume() 可能
       // **永远 pending(不 resolve 不 reject)** → 旧代码 await 死等 = "一直显示重连中"的根因。
@@ -566,7 +646,6 @@
       // 由常驻 pointerdown 监听 resume 恢复声音。
       try { await Promise.race([myAc.resume(), new Promise(function (r) { setTimeout(r, 800); })]); } catch (e) {}
       if (_dead()) { _cleanLocal(); return; }
-      _audioSession('play-and-record');   // 开麦通话:显式声明(系统也会自动切,显式更稳)
       myMic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       if (_dead()) { _cleanLocal(); return; }
       ac = myAc; micStream = myMic;
@@ -582,6 +661,7 @@
       toggle._fresh = false;
       var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       ws = new WebSocket(proto + location.host + '/voice-rt' + qs);
+      _connecting = false;   // ws 已赋值:_ttsEnsure 的 !ws gate 接棒
       ws.binaryType = 'arraybuffer';
       ws.onopen = function () {
         _userHung = false; _reconnN = 0; _reconnPend = false; _acquireWL();
@@ -600,16 +680,24 @@
         if (m.event === 'client_action') { dispatch(p.fn, p.args); return; }
         if (m.event === 'tool_status') { onToolStatus(p); return; }   // 执行通知 → 固定状态按钮(不进对话流,用户设计)
         if (m.event === -1 || m.event === 153 || m.event === 599 || m.code) { setSt('⚠ ' + (p.error || p.message || '').slice(0, 60)); return; }
-        if (m.event === 150) setSt('通话中(会话已建立)');
-        else if (m.event === 359 && p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→识别退出意图→播完告别语自动挂断
+        if (m.event === 150) { setSt('通话中(会话已建立)'); capWait(true); }
+        else if (m.event === 359) {   // 一轮播完
+          if (p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→播完告别语自动挂断
+          else _capMaybeHide(2500);   // 字幕停留几秒 → 回"正在听"等待态
+        }
         else if (m.event === 450) {   // 用户开口:打断播报 + **立即同步一次上下文**(墨迹/选中,赶在模型答题前——治刚画完就问的竞态)
           stopPlayback(); curAText = ''; curAEl = null;
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
         }
-        else if (m.event === 451) { var r = (p.results || [])[0] || {}; if (r.text && r.is_interim === false) setSub('u', r.text); }
-        else if (m.event === 550) { curAText += (p.content || ''); setSub('a', curAText); }
+        else if (m.event === 451) {   // ASR 转写:对话窗定稿句 + 字幕用户句(interim 也实时上屏)
+          var r = (p.results || [])[0] || {};
+          if (r.text && r.is_interim === false) setSub('u', r.text);
+          if (r.text) capUser(r.text);
+        }
+        else if (m.event === 550) { curAText += (p.content || ''); setSub('a', curAText); capStream('a', curAText); }   // S2S 回复:对话窗 + 字幕(尾句 cur/前一句 prev)
       };
     } catch (ex) {
+      _connecting = false;
       _cleanLocal();
       if (!_dead()) { setSt('启动失败: ' + ex.message); teardown(false); }
     }
@@ -617,6 +705,7 @@
 
   function teardown(closeBox) {
     _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
+    _connecting = false;
     _userHung = true; _releaseWL();
     if (_reconnT) { clearTimeout(_reconnT); _reconnT = null; }
     _reconnPend = false;
@@ -627,12 +716,13 @@
     try { if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     try { if (ac) ac.close(); } catch (e) {}
     ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0); curAText = ''; curAEl = null;
-    vt.sent = 0; vt.tail = ''; pendingUtter = null;
+    vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null;
+    capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
     try { _refreshSpeakTg(); } catch (e) {}
-    _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由)
-    try { if (_tts.ac) { _tts.ac.close(); _tts.ac = null; _ttsStopPlay(); } } catch (e) {}   // 通话期建的朗读 ac 路由可能粘扬声器 → 重建拿干净会话
+    _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由;若视频等还在响导致这次没生效,下次 _ttsEnsure 会再声明)
+    try { _ttsShutdown(); } catch (e) {}   // 朗读通道 ws+ac 一并关(通话期建的 ac 路由粘扬声器;残留 ws 会悬空收帧)→ 下次朗读重建拿干净会话
   }
 
   function toggle(opts) {

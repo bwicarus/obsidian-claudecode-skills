@@ -2371,7 +2371,7 @@ def _t_search_all_books(args, ctx):
     import sqlite3
     q = (args.get("query") or "").strip()
     if not q:
-        return {"error": "缺 query"}
+        return {"error": "缺 query:必须带要搜的关键词重新调用,如 {\"tool\":\"search_all_books\",\"args\":{\"query\":\"关键词\"}}"}
     db = _pdf()._SEARCH_DB
     if not db.exists():
         return {"error": "全局搜索索引未建(scripts/build_search_index.py)"}
@@ -2617,7 +2617,7 @@ TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
-    "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用)。args {query}", _t_search_all_books),
+    "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用;只搜书库,不是联网搜索)。args {query 必填=要搜的关键词}", _t_search_all_books),
     "recall_notes": ("**召回用户自己学过/记过的**相关内容:知识索引(带摘要)+ vault 笔记全文 + 知识图谱**已学**节点 + Anki 卡(本地查不耗时)。"
                      "想把当前内容跟『他已学过/记过的』串起来、用户问『我之前记过吗/我笔记里有没有X/跟我学的Y有关吗』、或要结合他知识体系深入讲时用。"
                      "**注意:只有召回到的才算他学过**(图谱里没学的节点不会返回);没召回到就别假设他会。args {query:主题词}(不传用选中/焦点)", _t_recall_notes),
