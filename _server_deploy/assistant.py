@@ -1760,6 +1760,9 @@ def _t_see_page(args, ctx):
         note = "描述这" + ("几" if len(vis) > 1 else "") + "页里文字层读不到的视觉内容(图表/示意图/公式排版/手写等)。"
         if inked:
             note += f" 这些图**已叠加用户的手写批注**(第 {('、'.join(str(_to_disp(ctx, p)) for p in inked))} 页有手写),重点描述他写/圈/画了什么、标在哪。"
+        if ctx.get("_want_vision"):   # ㉗:调用方要原图直喂(GPT Realtime 图像输入)→ 不本地转述,图+看图提示一起穿透
+            return {"_vision": vis, "看图提示": note, "rendered_pages": done, "inked_pages": inked,
+                    "说明": "页面渲染图已直接发给你,结合看图提示自己看图回答"}
         desc = _vision_for(ctx, vis, note)   # 一次性看图 → 返回文字;主循环不背图
         return {"页面图像描述": desc or "(看图失败,可重试)", "rendered_pages": done, "inked_pages": inked}
     except Exception as e:
@@ -1801,6 +1804,9 @@ def _t_see_ink(args, ctx):
             note += (f" ⚠此前这块区域的笔迹是:「{prev}」,用户在此基础上**又添加了笔画**。"
                      "请对比着讲**变化了什么**;注意新增笔画很可能是对原图形的补笔/修饰(比如给花加花瓣、给箭头加分叉),"
                      "先判断整体是否仍是一个图形,确实独立时才说是新的东西。")
+        if ctx.get("_want_vision"):   # ㉗:GPT Realtime 图像输入开 → 笔迹合成图直喂它自己看(不经视觉模型转述,更快更省一跳)
+            return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}],
+                    "看图提示": note, "说明": "笔迹区域合成图已直接发给你,结合看图提示自己看图回答"}
         desc = _vision_for(ctx, [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], note)
         return {"笔迹标注描述": desc or "(看图失败,可重试)"}
     except Exception as e:

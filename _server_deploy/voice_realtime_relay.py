@@ -1362,6 +1362,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             else:
                 cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
                 ctx = {"file_rel": file_rel, "page": book.get("page") or page}
+                if _creds().get("rt_image"):
+                    ctx["_want_vision"] = 1   # ㉗:看图/看笔迹类工具跳过本地转述,原图穿透 → input_image 直喂 GPT
                 if book.get("ink_strokes"):
                     ctx["ink"] = book["ink_strokes"]
                 if book.get("sel"):
