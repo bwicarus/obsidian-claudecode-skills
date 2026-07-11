@@ -586,7 +586,9 @@
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
     '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:#dbe7ff;border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
-    '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
+    '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:6px;padding:8px 10px;border-top:1px solid #233156;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}' +
+    '#asst-quick::-webkit-scrollbar{display:none}' +
+    '#asst-quick button{flex:none;white-space:nowrap}' +   // 按钮多了不换行:单行横滑(iOS chips 惯例)
     '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
