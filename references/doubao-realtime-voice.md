@@ -425,3 +425,18 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **引擎分流**:`toggle._connect`(toggle 连接/vc-new 重连共用)——**仅 s2s 模式**查 voice-config,`rt_engine==='openai_rtc'`→rtcStart,否则 start(WS relay);**agent 模式(mic 长按 ASR)恒走豆包 relay 不受 rt_engine 影响**(与 relay 按 mode 分发同语义,⚠差点漏:第一版分流没判 mode 会把 ASR 也劫走)。teardown 头部挂 rtcTeardown(pc/dc/audio 元素/mic 全清)。设置卡引擎三选:豆包 S2S(默认)/GPT WebRTC(推荐:外放无回声+可随时插话)/GPT WebSocket(外放半双工,保留);isOA 判定覆盖 openai|openai_rtc 两值(GPT 组设置两引擎共用)。
 
 **WebRTC 版不需要的 WS 包袱**(天然消失):半双工 gate/AEC 环回/播放毫秒回报 played_ms(truncate 由 OpenAI 端媒体流自己算)/AudioContext 24k 定频/上行合批。新会话=重连即得(WebRTC 每连接就是新 session,无 dialog_id 概念)。**留意**:60min 会话上限同 WS;iOS ducking(麦活跃压播放音量)理论上 WebRTC 通话路径更稳,属实测项。
+
+**㉚b-e 首测修复批**(2026-07-12,用户真机):
+- **b 回复显示两遍**:GPT 用户转写(whisper)**异步迟到**于 AI 回复开始流(豆包 ASR 恒先于回复,从没暴露这问题)→ setSub('u') 插用户气泡时断开 curAEl 指针 → 后续 delta 带全量文本另起新气泡=前半段定格+完整版重来。修:迟到用户句按时序 insertBefore 到进行中 AI 气泡**前面**不断轮;response.created 重置气泡(text 输入触发的响应没有 speech_started)。
+- **c rtc 字幕**:transcript delta 是文字生成速度(1-2s 全到)≠音频播放速度 → 字幕瞬跳末句;response.done=生成完≠播完,而 rtc 音频在 `<audio>` 元素里,`playing` 队列看不见 → 提前淡出。修:rtc 专用**逐句估时队列**(TTS≈6字/秒,`_rtcCapFeed/_rtcCapPump` 复用 capShow 滚动原语;残句等闭合),淡出由队列放完收尾;speech_started 补 capClear;连接成功补 capWait(true)。
+- **d 笔迹边沿触发**(用户设计"只告诉一次变化"):AI 调过 see_ink 的旧结果在历史里,轻飘飘的"笔迹有更新"打不过它"亲眼看过"的工具结果 → 嘴硬"没变化"。修:变化只通知一次(`_rtc.inkDirty` 边沿,继续画不再打扰),但这一次**显式作废旧记忆**("你之前看到的已过时作废,你现在不知道纸面上是什么;没重新看就答『没变化』是错误行为");see_ink/see_page/see_figure 成功复位边沿;instructions 铁律补跟进问句(『现在呢/看到了什么』)。**影响 AI 认知的通道权重**:instructions<system 状态消息<user 消息<工具结果;下一档手段=伪对话对(user+assistant 自我承诺,豆包 510 注入验证过)。**缓存无忧**:状态消息是 append 不是改前缀,前缀缓存照常命中。
+- **e 图像 sideband**(第二次 see_ink 哑死根因):WebRTC data channel 单条消息有 SCTP 上限(Safari≈64KB),base64 笔迹图几百 KB,**超限发送按规范直接关闭 dc**=通话哑死。修:图像改**服务端 sideband 注入**——`/rtc-call` 从 OpenAI 响应 Location header 提取 call_id 下发;voice-tool 带 rtc_call_id 时后端 `_rtc_sideband_images`(websockets.sync 连 `wss://api.openai.com/v1/realtime?call_id=X`,官方服务端通道)把 input_image 直接注入会话,图**绝不经 dc**;sideband 失败也不回退 dc(如实告知传输失败);dc.onclose 明示"数据通道断开"。依赖:`apt install python3-websockets`(webapp 用系统 python3)。
+
+## ㉛ 通话对话进侧栏对话流(2026-07-12,用户设计)
+
+通话(豆包 S2S + GPT rtc)的双方对话不再显示在通话浮层的迷你对话区(vc-sub),**直接进侧栏 #asst-thread**,与文字 AI 对话同流同清:
+- **投递**:rc-assistant 暴露 `__asstVoiceMsg(who,text)`('a'=全量覆盖当前 AI 轮气泡/'u'=用户句,AI 轮活跃时按时序插前/'reset'=断轮)+`__asstVoiceLog(q,a,file,page)`(POST `/api/assistant/log` via:'voice',与文字对话同一历史库);rc-voicecall 的 setSub 头部分流(接口在→侧栏,不在→vc-sub 兜底,收藏夹独立页等无侧栏场景不受影响)。
+- **轮次管理**:豆包 451 定稿存 `_lastU`、359 落库、450 打断=半截轮先落库+reset;rtc transcription.completed/text 输入存 `_lastU`、response.done 落库、speech_started/response.created reset;挂断 teardown 清 `_lastU`+reset。
+- **浮层瘦身**:侧栏投递可用时 vc-sub+vc-grab(拖高抓手)隐藏,通话条只剩状态行;视频卡区(vc-vids)保留。
+- **清空三位一体**:侧栏 🗑 清空本体清显示+POST clear 清服务端记录;rc-voicecall 捕获旁听同步 fresh 重连(豆包清 dialog_id/rtc 重连即新会话)→ 语音侧记忆和缓存自然作废。旁听重连顺修为 `toggle._connect` 引擎分流(原硬调 start 会把 rtc 清空后重连回 WS 链路)。
+- 字幕系统不变:侧栏开=看侧栏对话流(字幕 gate 掉),侧栏关=底部字幕。
