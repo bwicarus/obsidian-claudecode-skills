@@ -1429,6 +1429,23 @@ def _verify_image_match(image_url: str, query: str, extract: str = "") -> tuple:
     return out.startswith("是"), out[:150]
 
 
+def _t_web_search(args, ctx):
+    """通用网页搜索(Google Programmable Search,与配图共享每日 100 次免费池)。
+    模型没有内建联网(Realtime API 只给 function calling/MCP)——这就是它的联网通道。"""
+    q = str(args.get("query") or "").strip()[:120]
+    if not q:
+        return {"error": "缺 query(搜索关键词)"}
+    try:
+        import image_search
+        rs = image_search.search_web(q, n=5)
+    except Exception as ex:
+        return {"error": f"搜索失败: {str(ex)[:120]}"}
+    if not rs:
+        return {"error": "没搜到结果(可能:搜索服务未启用/每日额度用尽/关键词太偏)。如实告诉用户网页搜索暂时不可用,凭你的知识回答并声明可能过时。"}
+    return {"ok": True, "results": rs,
+            "note": "凭 snippet 口头总结,提一句信息来源;snippet 不够就如实说只搜到概要。"}
+
+
 def _t_search_image(args, ctx):
     """配图专用:按**关键词列表**并行搜真实图片(非 AI 生成),多源=Wikimedia Commons 全库 + Google 图搜(若配好)。
     配图偏好开时**一次性**传 queries=[{concept, query}...] 把该配图的概念都列上(query 用英文覆盖最好);
@@ -2661,6 +2678,9 @@ TOOLS = {
                      "(query **用英文**图源覆盖最好;一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
                      "拿回结果后:对 images 里每张,在回答对应概念旁用 markdown ![简短中文说明](image_url) 插入;missed 里没搜到的**别硬配、别自己编链接**。"
                      "别对『力/能量』这类无固定形象的抽象词硬配。刚好要制卡也想放这张图,把该 image_url 传给 make_anki。", _t_search_image),
+    "web_search": ("联网网页搜索(Google):查**网上的实时信息/事实/新闻/资料**时用,args {query:\"简洁关键词\"}。"
+                   "返回网页标题+摘要+链接,凭摘要总结并提一句来源。跟配图共享每天 100 次免费额度——"
+                   "一个问题最多搜一两次,能凭自己知识答好的不用搜。", _t_web_search),
     "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**的视频卡片。用户明确要『找/看视频、有没有视频讲解、放个视频』时用,"
                      "别对每个概念都配视频(大多数回答不需要)。拿到结果只需简短说一句『给你找到这些视频』,"
                      "**别复述标题/链接**(卡片已经显示了、能直接点开播放)。args {query?}(不传用选中/焦点)", _t_search_video),
@@ -4187,7 +4207,7 @@ VOICE_CACHEABLE_TOOLS = {
     "read_page", "read_selection", "search_book", "search_all_books", "recall_notes",
     "summarize_section", "translate", "see_page", "see_figure", "see_ink",
     "notes_query", "notes_read", "read_highlights", "find_highlights", "toc",
-    "page_vocab", "lookup_word", "search_video", "search_image",
+    "page_vocab", "lookup_word", "search_video", "search_image", "web_search",
 }
 
 
@@ -4283,9 +4303,9 @@ def assistant_rtc_session():
              "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等需要动手的事"
              "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
-             "你没有**通用网页搜索**能力(search_all_books 只搜他的书库),要网上实时信息就如实说没法查、凭记忆答先声明可能过时;"
-             "但 search_image(搜真实图片)和 search_video(搜教学视频)是**真联网工具**——"
-             "用户想看图片/照片/视频时**必须调用对应工具**,结果会自动显示在他的界面上。"
+             "联网能力=三个真工具:web_search(查网上实时信息/资料,额度有限省着用)、search_image(搜真实图片)、"
+             "search_video(搜教学视频)——用户想查网/看图/看视频时**必须调用对应工具**,图片视频结果会自动显示在他的界面上;"
+             "工具失败就如实说暂时查不了,凭记忆答先声明可能过时。search_all_books 只搜他自己的书库,不是互联网。"
              "**绝不要自己输出 markdown 图片或链接占位符**(如 ![...](image_url))假装贴图——界面不会显示任何东西,那是错误行为。"
              "**手写/圈画铁律**:他提到『我写的/我画的/我圈的/帮我看看这个算式』时,永远**先调 see_ink 工具**;"
              "回答『看不到』或让他粘贴/截图都是错误行为。"

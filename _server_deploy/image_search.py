@@ -102,6 +102,34 @@ def search_commons(query: str, n: int = 6) -> list:
     return out
 
 
+def search_web(query: str, n: int = 5) -> list:
+    """通用网页搜索(同一个 Programmable Search Engine,不带 searchType 即网页结果)。
+    与图搜共享每日 100 次免费池;没配 key/cx 返回 []。返回 [{title, snippet, url}]。"""
+    cx, key = _cse_id(), _key()
+    if not cx or not key:
+        return []
+    p = {"key": key, "cx": cx, "q": query, "num": str(max(1, min(n, 10))), "safe": "active"}
+    try:
+        d = _get_json("https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode(p))
+    except Exception:
+        return []
+    try:
+        import sys
+        sp = str(_ROOT / "scripts")
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+        import google_api_quota
+        google_api_quota.log_usage("customsearch", 1, "web", query[:40])
+    except Exception:
+        pass
+    if d.get("error"):
+        return []
+    return [{"title": (it.get("title") or "")[:120],
+             "snippet": (it.get("snippet") or "").replace("\n", " ")[:300],
+             "url": it.get("link") or ""}
+            for it in (d.get("items") or [])[:n]]
+
+
 def search_google(query: str, n: int = 4) -> list:
     """Google Custom Search 图片。需 key + cx + 已启用 Custom Search API,否则返回 []。"""
     cx, key = _cse_id(), _key()
