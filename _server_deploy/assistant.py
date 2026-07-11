@@ -1482,7 +1482,8 @@ def _t_search_image(args, ctx):
     if not found:
         # "没搜到"是合法空结果不是故障(error 会让语音工具卡亮 ⚠、模型当成系统坏了)——引导换词重试
         return {"ok": False, "found": 0,
-                "note": "这些关键词没搜到图。换**更通用的英文关键词**再调一次(如换成事物的英文通称/学名);"
+                "note": "这些关键词没搜到图。**换另一种语言或更通用的词**再调一次"
+                        "(日本特有事物用日语原名,通用/西方概念用英文通称/学名);"
                         "再搜不到就如实告诉用户没找到合适的图,绝不编图片链接。"}
     return {"ok": True, "count": len(found),
             "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"]} for r in found],
@@ -2677,8 +2678,9 @@ TOOLS = {
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
     "search_image": ("★配图专用(搜**真实图片**,非 AI 生成;多源 Wikimedia Commons + Google 图搜)。**用户开了配图偏好时**,"
                      "先想清楚这次回答里**哪些概念配图真有帮助**(有明确视觉形象的:实物/结构/示意图/图表/生物/文物/天体/仪器等),"
-                     "**一次性**把它们连关键词一起传:args {queries:[{concept:\"中文概念\", query:\"english keyword\"}, ...]}"
-                     "(query **用英文**图源覆盖最好;一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
+                     "**一次性**把它们连关键词一起传:args {queries:[{concept:\"中文概念\", query:\"关键词\"}, ...]}"
+                     "(query 用**最可能命中的语言**:日本特有事物(料理/行事/民俗)用日语原名,通用/学术/西方概念用英文;一次最多 8 个)。"
+                     "工具会并行搜、每个概念返回最匹配 1 张。"
                      "拿回结果后:对 images 里每张,在回答对应概念旁用 markdown ![简短中文说明](image_url) 插入;missed 里没搜到的**别硬配、别自己编链接**。"
                      "别对『力/能量』这类无固定形象的抽象词硬配。刚好要制卡也想放这张图,把该 image_url 传给 make_anki。", _t_search_image),
     "web_search": ("联网网页搜索(Google):查**网上的实时信息/事实/新闻/资料**时用,args {query:\"简洁关键词\"}。"
@@ -4333,9 +4335,10 @@ def assistant_rtc_session():
     # 语音场景 description 覆盖:目录行是给文字助手写的,个别工具的"回答里用 markdown 嵌图"教学
     # 在语音里有毒(模型学着输出 ![..](image_url) 假图)——语音版结果由界面自动渲染,只需口头说明
     _vo = {"search_image": ("★配图/看图片专用:按关键词列表**联网搜真实图片**(Wikimedia Commons + Google 图搜,非 AI 生成)。"
-                            "用户想看某物的图片/照片时调它:args {queries:[{concept:\"中文概念\", query:\"english keyword\"}, ...]}"
-                            "(query 用英文图源覆盖最好,一次最多 8 个)。搜到的图会**自动显示在用户界面**,"
-                            "你只需口头简短说明;没搜到就如实说,绝不编链接或输出 markdown 图片语法。")}
+                            "用户想看某物的图片/照片时调它:args {queries:[{concept:\"概念\", query:\"关键词\"}, ...]}"
+                            "(query 用**最可能命中的语言**:日本特有事物用日语原名,通用/西方概念用英文;一次最多 8 个)。"
+                            "搜到的图会**自动显示在用户界面**,你只需口头简短说明;"
+                            "没搜到就换另一种语言/更通用的词再试一次,再没有就如实说,绝不编链接或输出 markdown 图片语法。")}
     tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[:1024],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items()]
