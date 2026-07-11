@@ -32,6 +32,10 @@ DOUBAO_WSS = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
 SAUC_WSS = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"          # 大模型流式识别
 SAUC_RID = "volc.bigasr.sauc.duration"                                     # 流式识别 1.0,时长版计费
 SAUC_RID_V2 = "volc.seedasr.sauc.duration"                                 # 流式识别 2.0(Doubao-Seed-ASR,2025-12:关键词召回+20%,1元/h;⚠控制台需先开通 2.0 商品,凭证 asr_v2 开关)
+# ASR 固定热词(㉓,用户设计"固定的任务相关关键词"):对 agent 说的指令词认错最伤,恒注入 corpus.context
+_ASR_TASK_WORDS = ["翻页", "下一页", "上一页", "跳到", "高亮", "做卡片", "制卡", "Anki", "生词", "查词",
+                   "笔记", "总结", "翻译", "解释", "深度思考", "找视频", "配图", "收藏", "便签", "朗读",
+                   "挂断", "撤销", "清空", "知识点", "振假名", "豆包"]
 TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"    # NDJSON 流式合成(备用)
 TTS_BIDI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"    # 双向流式合成(1.0/moon 音色用:文本增量进,session 级韵律连贯)
 TTS_UNI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"   # 单向流式(2.0/uranus 音色用:context_texts 语气指令+section_id 韵律)
@@ -1167,7 +1171,7 @@ async def handle_tts_only(bws):
             pass
 
 
-async def handle_agent(bws):
+async def handle_agent(bws, file_rel: str = "", page: int = 0):
     cred = _creds()
     if not cred.get("api_key"):
         await bws.send(json.dumps({"event": -1, "payload": {"error": "缺凭证:~/.config/doubao-voice.json"}}, ensure_ascii=False))
@@ -1182,6 +1186,30 @@ async def handle_agent(bws):
                # end_window_size:静音多久判一句说完(definite)。不设的话默认窗口极长,连续流里永远等不到终稿
                "request": {"model_name": "bigmodel", "enable_punc": True,
                            "end_window_size": int(cred.get("asr_end_window_ms", 800))}}
+    # ── ASR 语境注入(㉓,用户设计:固定任务词 + 页面动态内容;协议只认握手配置 → 每次开 ASR 快照当下语境)──
+    # hotwords(1.0/2.0 都吃,词条式权重高)=固定指令词表 + 书名 + 本页未掌握生词;
+    # dialog_ctx(仅 2.0,成段语境,≤800 tokens 从新到旧)=页面文本摘要 + 最近两轮对话(2.0 的 +20% 关键词召回主打场景)。
+    try:
+        vc = await _fetch_book_ctx(file_rel, page)
+        hot = list(_ASR_TASK_WORDS)
+        if file_rel:
+            hot.insert(0, (file_rel.rsplit("/", 1)[-1].rsplit(".", 1)[0])[:24])   # 书名
+        hot += [w for w in (vc.get("vocab") or []) if w][:30]
+        corpus = {"context": json.dumps({"hotwords": [{"word": w} for w in dict.fromkeys(hot)][:50]}, ensure_ascii=False)}
+        if cred.get("asr_v2"):
+            cd = []
+            pt = (vc.get("page_text") or "").strip()
+            if pt:
+                cd.append({"text": "用户正在读的页面内容:" + pt[:350]})
+            for qa in reversed(_qa_pairs(vc.get("history") or [], 2)):   # 从新到旧(官方要求的排列)
+                cd.append({"text": ("用户说过:" if qa.get("role") == "user" else "助手答过:") + str(qa.get("text", ""))[:120]})
+            if cd:
+                corpus["context_type"] = "dialog_ctx"
+                corpus["context_data"] = cd[:20]
+        asr_cfg["request"]["corpus"] = corpus
+        sys.stderr.write(f"[voice-rt asr] 语境注入 hot={len(dict.fromkeys(hot))} ctx={len(corpus.get('context_data') or [])} v2={bool(cred.get('asr_v2'))}\n")
+    except Exception as ex:
+        sys.stderr.write(f"[voice-rt asr-ctx] {str(ex)[:120]}\n")   # 拉不到语境照常裸连,识别退回无语境
     ch = _tts_channel(bws, key, speaker)   # 朗读(可选):speak/speak_done/cancel 由 up() 转发
     try:
         async with websockets.connect(SAUC_WSS, additional_headers=asr_headers,
@@ -1270,8 +1298,10 @@ async def handle_browser(bws):
         if m0 == "tts":      # 朗读专用通道(v3-⑬):不开麦,只有 T2S 流式合成(侧栏「🔊 朗读」lazy 连)
             await handle_tts_only(bws)
             return
-        if m0 == "agent":    # agent 模式:耳+嘴分离,大脑=侧栏助手(见 handle_agent)
-            await handle_agent(bws)
+        if m0 == "agent":    # agent 模式:耳+嘴分离,大脑=侧栏助手(见 handle_agent);file/page → ASR 语境注入(㉓)
+            await handle_agent(bws,
+                               (q.get("file") or [""])[0],
+                               int((q.get("page") or ["0"])[0] or "0"))
             return
         file_rel = (q.get("file") or [""])[0]
         page = int((q.get("page") or ["0"])[0] or "0")

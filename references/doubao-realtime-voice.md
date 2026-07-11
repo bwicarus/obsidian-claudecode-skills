@@ -350,3 +350,11 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **长按到点反馈**(用户:"不知道需要按多久"):`_lpPop`=600ms 到点瞬间弹一下(scale 1.28)+变紫(.vc-lp-pop),侧栏+顶栏共用 `_bindLongPress`。
 - **Apple 听写自动发送**(用户:与豆包 ASR 同逻辑):onresult 有定稿且无 interim → 0.9s 静默自动 `send()`(streaming 时 1.2s 重试不丢话);发送后识别段重起继续听(连续对话);手动编辑输入框暂停计时;听写转写经 `__vcCapUser` 上字幕(`_cap.dictating` 加入 _capVisible gate,侧栏关也能看到自己说的),micStop→`__vcCapDictEnd` 淡出。
 - **ASR 2.0**(agent 调研,官方文档实锤):Doubao-Seed-ASR-2.0(2025-12-05)=**只换 Resource-Id** `volc.bigasr.sauc.duration`→`volc.seedasr.sauc.duration`(端点/model_name="bigmodel" 不变),关键词召回+20%(PPO 强化,专治专有名词/多音字),1元/h;⚠**控制台须先开通 2.0 商品否则鉴权失败**→ 做成凭证开关 `asr_v2`(voice-config 白名单+语音设置卡 checkbox,默认关保 1.0)。**未接的准确率大杀器**:`corpus.context` 热词直传 + **`context_type:"dialog_ctx"`+`context_data`**(≤800 tokens/20 轮,官方支持塞"业务场景信息"=书页关键词/术语注入,2.0 的 +20% 正是这个场景)——候选下一批。同传 ast 当纯 ASR:端到端同传模型(非 sauc 同源),按 token 计费更贵,不划算,维持不接。
+
+### ASR 语境注入(v3-㉓,用户设计,2026-07-11)
+
+- **范围拍板**(用户:"固定的任务相关关键词 + 页面相关的动态内容"):双通道各司其职——
+  ①**hotwords**(`corpus.context` 直传,词条式权重高,1.0/2.0 都吃):固定层=`_ASR_TASK_WORDS` 指令词表(翻页/高亮/制卡/Anki/深度思考/找视频/挂断…26 个,认错指令最伤)+ 动态层=书名+本页未掌握生词(≤50 条去重);
+  ②**dialog_ctx**(`context_type:"dialog_ctx"`+`context_data`,成段语境,**仅 asr_v2 开时**注入防 1.0 握手不认):从新到旧=页面文本摘要(350字)+ 最近两轮对话(各120字),≤800 tokens 预算内——2.0 的 +20% 关键词召回主打场景。
+- **注入时机**:sauc 协议只认握手配置(无中途更新帧)→ **每次长按开 ASR 时快照当下语境**;通话中翻页滞后接受(下次开启即新)。
+- 链路:前端 `_agentCtxQs()`(RC.adapter().getContext() 回退 __voiceContext)把 file/page 拼进 `?mode=agent` 的 qs → relay `handle_agent(bws, file_rel, page)` 握手前复用 `_fetch_book_ctx`(页文本/生词/助手历史一把拉)构造 corpus,拉取失败裸连不阻塞。冒烟:hot=34 注入成功、1.0 兼容、agent_ready 正常。

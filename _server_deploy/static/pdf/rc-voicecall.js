@@ -633,6 +633,15 @@
     if (m.event === -1 || p.error) threadMsg('asst-note', '⚠ 语音:' + (p.error || '').slice(0, 80));
   }
 
+  function _agentCtxQs() {   // ASR 语境注入(㉓):开 ASR 时把当前书/页带给 relay → 握手注入热词+页面语境
+    try {
+      var c = (window.RC && RC.adapter && RC.adapter() && RC.adapter().getContext && RC.adapter().getContext()) ||
+              ((typeof window.__voiceContext === 'function') ? window.__voiceContext() : null) || {};
+      var f = c.file_rel || c.file || '';
+      if (f) return '&file=' + encodeURIComponent(f) + '&page=' + (c.page || 0);
+    } catch (e) {}
+    return '';
+  }
   async function start(opts) {
     opts = opts || {};
     // 新连接 = relay 端 book 状态全新 → 指纹清零,让 __vcSyncNow 下一轮把选中/墨迹/页码重推上去
@@ -667,7 +676,7 @@
       capNode.port.onmessage = function (e) { onCap(e.data, ac.sampleRate); };
       src.connect(capNode);
       var qs = (mode === 'agent')
-        ? '?mode=agent'
+        ? '?mode=agent' + _agentCtxQs()
         : '?file=' + encodeURIComponent(opts.file || '') + '&page=' + (opts.page || 0) + (toggle._fresh ? '&fresh=1' : '');
       toggle._fresh = false;
       var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
