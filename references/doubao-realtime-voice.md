@@ -449,3 +449,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 3. **语音场景图卡无渲染管道**:`_t_search_image` 返回纯数据(文字助手靠模型 markdown 嵌图+侧栏渲染;语音回答是音频,没这管道)——即使调了工具图也显示不出来。修:voice-tool 端点(仅语音链路走)对 search_image 结果注入 `client_action {fn:'renderImages'}`,前端 dispatch 渲染图卡进侧栏对话流(缩略图 grid+概念标签,点开原条目页);文字助手不走此端点,零影响。
 
 **教训**:接入原生 function calling 的模型时,复查所有"能力声明"(负面声明会误伤同类工具)和"目录行教学文案"(写给别的渲染管道的用法会被模型带进当前场景)——工具目录是跨场景共享的,per-场景 description 覆盖是正解。
+
+## ㉝-㉞ 联网工具+配图多源+rtc 断线自愈(2026-07-12)
+
+**㉝ web_search 通用联网**(用户问"模型没联网能力吗"):模型权重不联网;官方指南实锤 Realtime API 只支持 function calling+MCP,**无内建 web search**(那是 Responses API 的)。加 `web_search` 工具=Google Programmable Search 的**网页模式**(同一个 CSE 引擎不带 searchType 即网页结果,`image_search.search_web`),返回标题+摘要+链接;进 TOOLS 一处注册全线受益(GPT rtc/WS/豆包/文字助手),VOICE_CACHEABLE 只读缓存;三处能力声明改"联网=web_search/search_image/search_video 三个真工具"。⚠ **GCP 项目未启用 Custom Search JSON API(403)**——需用户控制台启用,同时解锁配图的 Google 图搜源;与配图共享 100 次/天免费池,目录行叮嘱省着用。配图"没搜到"从 error 降为 ok:false+换英文词引导(error 会亮⚠且被模型当故障弃用);voice-tool 报错上 stderr 日志(journalctl 直查,不再猜)。
+
+**㉞ 配图 Bing 零 key 兜底 + rtc 断线自愈**(用户提议"最原始的浏览器地址式谷歌搜图"+报告后台切回假活/重连失败):
+- **搜索引擎直爬实测**:Google 对无浏览器 HTTP 请求甩 **JS challenge 重定向占位页**(带 SOCS/CONSENT cookie 也不放行,要无头浏览器,弃);**Bing 图搜一次 HTTP 全通**——`bing.com/images/search?q=X&count=35`,HTML 里 `"murl":"原图"`+`"purl":"宿主页"` 结构稳定反爬松。`search_bing_scrape` 落地,合并链=**Commons → Google API(若启用)→ Bing 爬取(零 key 兜底)**;实测 Commons 搜不到的「ひし餅」Bing 一次 3 张真图。缓存加 partial 标记(第二腿没跑成的残缺结果只缓存 1 天,防断腿期污染 30 天)。
+- **rtc 假活根治**(用户:后台切回显示通话中实际全聋):ws shim 的 readyState **恒为 1**,WS 版靠 onclose 的断线检测在 rtc 完全失明;iOS 切后台系统掐 WebRTC。修三件:`pc.onconnectionstatechange`(failed/closed 立即判死;disconnected 等 3s 自愈窗口)+ visibilitychange 回前台检查真实 `pc.connectionState` + dc.onclose→`_rtcDead`。判死=rtcTeardown+状态复位+**非主动挂断自动重连**(800ms)。
+- **重连历史回放**(用户:重启对话没把聊天记录放回去——判断正确,rtc 每连接=全新 session 之前根本没做):dc.onopen 时拉 `/api/assistant/history`(㉛落库的同一份)近 14 条压成**一条 system 消息**注入("延续语境,不要重新打招呼")——官方指南 8.4 的摘要形态,不逐条造 item(省 item 数+不赌 assistant content type);vc-new 新话题(fresh)不回放。rtcStart 失败路径补状态复位(ws/按钮不残留假活)。
