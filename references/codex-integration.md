@@ -6,11 +6,17 @@
 
 ## 0. 本项目现状(2026-07-11)
 
-- ✅ **已上线**:`codex exec` 一次性调用 = 助手面板第三后端(assistant.py `_codex_text`,见 memory
-  `codex-third-backend`)。flags 实测:`--skip-git-repo-check -m gpt-5.5-codex|gpt-5.5
-  -c model_reasoning_effort="low|medium|high|xhigh" -c sandbox_mode="read-only" -o <file> [-i 图…]`。
-  短答 ~5.6s,无流式;`-o` 文件拿最终消息最干净。
-- 定位:**只当纯文本/看图模型用**(沙盒只读+cwd=/tmp),不让它当 agent。编排循环未接。
+- ✅ **已上线(v2,2026-07-11)**:主路=**常驻 `codex app-server`**(assistant.py `_CodexApp` 单例,
+  JSON-RPC over stdio):进程死亡自动重启;每次调用开 **ephemeral thread**(不落盘、任务间零污染)+
+  turn/start;**真文字 delta 流式**(reader_stream 的 codex 分支逐字吐);并发按 threadId 路由。
+  失败回落 `codex exec` 一次性(`_codex_exec_text`,独立退路)。
+- ✅ **实测 schema 修正(GPT 转述有出入的地方)**:sandbox 枚举=`read-only`(非 readOnly);
+  `model/list` 真实清单=gpt-5.6-sol/terra/luna(effort 到 max/ultra)、gpt-5.5、gpt-5.4(-mini)——
+  **gpt-5.5-codex 在 app-server 下 400 不可用**(exec 下可用,别名路由);turn/start 可带 effort。
+- ✅ 实测性能:热调用 ~6s(thread/start 开销抵掉部分启动收益),首 delta ~5.8s——**主要收益是流式+并发,
+  不是绝对提速**;并发第二路会排队(账号侧限制)。
+- 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + cwd=/tmp),不让它当 agent。
+  编排循环未接。
 
 ## 1. 四种集成方式(升级路径)
 

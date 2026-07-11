@@ -504,9 +504,151 @@ def _claude_text(prompt, model="opus", effort="high", timeout=150):
         _kill(p)
 
 
-def _codex_text(prompt, model="gpt-5.5-codex", effort="medium", timeout=180, image_paths=None):
-    """单次 Codex CLI 无头生成(`codex exec`,Pi 已登录 ChatGPT 订阅——**额度与 Claude/Gemini 独立**)。
-    只当纯文本/看图模型用:沙盒只读 + cwd=/tmp + 跳过 git 检查(不让它当 agent 乱跑)。失败/空 → None。"""
+class _CodexApp:
+    """codex app-server 常驻客户端(JSON-RPC over stdio,官方说明书 2026-07 + 本机实测 schema):
+    每次 exec 的三宗罪(进程启动 ~1-2s、无文字流式、无会话)一次解决——单例常驻,进程死亡自动重启;
+    每次调用开 **ephemeral thread**(不落盘 ~/.codex/sessions,任务间零污染),事件按 threadId 路由,
+    支持并发。sandbox=read-only + approvalPolicy=never + cwd=/tmp(只当纯文本/看图模型,不让它当 agent)。"""
+
+    def __init__(self):
+        self._lk = threading.Lock()
+        self._p = None
+        self._rid = 100
+        self._pending = {}   # rpc id -> Queue(响应)
+        self._turns = {}     # threadId -> Queue(事件流)
+
+    def _ensure(self):
+        with self._lk:
+            if self._p and self._p.poll() is None:
+                return
+            import shutil as _sh
+            cx = _sh.which("codex") or os.environ.get("APP_CODEX") or "codex"
+            self._pending = {}; self._turns = {}
+            self._p = subprocess.Popen([cx, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd="/tmp")
+            threading.Thread(target=self._reader, args=(self._p,), daemon=True).start()
+        self._rpc("initialize", {"clientInfo": {"name": "bwicarus-webapp", "title": "assistant", "version": "1"}}, timeout=15)
+        self._notify("initialized", {})
+
+    def _reader(self, p):
+        try:
+            for line in p.stdout:
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                if "id" in j and ("result" in j or "error" in j):
+                    q = self._pending.pop(j["id"], None)
+                    if q:
+                        q.put(j)
+                else:
+                    tid = (j.get("params") or {}).get("threadId")
+                    q = self._turns.get(tid)
+                    if q:
+                        q.put(j)
+        finally:   # 进程退出:唤醒所有等待者(拿到 None 即知连接没了)
+            for q in list(self._pending.values()):
+                q.put(None)
+            for q in list(self._turns.values()):
+                q.put(None)
+
+    def _send(self, obj):
+        with self._lk:
+            self._p.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            self._p.stdin.flush()
+
+    def _notify(self, method, params):
+        self._send({"method": method, "params": params})
+
+    def _rpc(self, method, params, timeout=20):
+        import queue as _qu
+        q = _qu.Queue()
+        with self._lk:
+            self._rid += 1
+            rid = self._rid
+            self._pending[rid] = q
+        self._send({"method": method, "id": rid, "params": params})
+        try:
+            r = q.get(timeout=timeout)
+        except Exception:
+            self._pending.pop(rid, None)
+            raise RuntimeError(f"codex rpc {method} 超时")
+        if r is None:
+            raise RuntimeError("codex app-server 进程退出")
+        if r.get("error"):
+            raise RuntimeError(str(r["error"])[:200])
+        return r.get("result") or {}
+
+    def stream(self, prompt, model="", effort="medium", timeout=180, image_paths=None):
+        """yield 文字 delta;turn 失败/超时抛异常(调用方回落 exec/其它后端)。"""
+        import queue as _qu
+        self._ensure()
+        tp = {"cwd": "/tmp", "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
+        if model and str(model).startswith("gpt-"):
+            tp["model"] = model
+        th = self._rpc("thread/start", tp, timeout=25)
+        tid = th["thread"]["id"]
+        q = _qu.Queue()
+        self._turns[tid] = q
+        try:
+            inp = [{"type": "text", "text": prompt}]
+            for ip in (image_paths or [])[:3]:
+                inp.append({"type": "localImage", "path": ip})
+            args = {"threadId": tid, "input": inp}
+            if effort in _CODEX_DEPTHS:
+                args["effort"] = effort
+            self._rpc("turn/start", args, timeout=25)
+            deadline = time.time() + timeout
+            while True:
+                left = deadline - time.time()
+                if left <= 0:
+                    try:
+                        self._notify("turn/interrupt", {"threadId": tid})
+                    except Exception:
+                        pass
+                    raise RuntimeError("codex turn 超时")
+                try:
+                    ev = q.get(timeout=min(left, 30))
+                except Exception:
+                    continue
+                if ev is None:
+                    raise RuntimeError("codex app-server 连接断开")
+                m = ev.get("method")
+                if m == "item/agentMessage/delta":
+                    d = (ev.get("params") or {}).get("delta") or ""
+                    if d:
+                        yield d
+                elif m == "turn/completed":
+                    st = ((ev.get("params") or {}).get("turn") or {}).get("status")
+                    if st != "completed":
+                        raise RuntimeError(f"codex turn {st}")
+                    return
+                elif m == "error":
+                    raise RuntimeError(str((ev.get("params") or {}).get("error"))[:200])
+        finally:
+            self._turns.pop(tid, None)
+
+    def ask(self, prompt, model="", effort="medium", timeout=180, image_paths=None):
+        return "".join(self.stream(prompt, model, effort, timeout, image_paths)).strip() or None
+
+
+_codex_app = _CodexApp()
+
+
+def _codex_text(prompt, model="gpt-5.5", effort="medium", timeout=180, image_paths=None):
+    """单次 Codex 生成:**主路=常驻 app-server**(零启动开销+ephemeral thread);失败回落 `codex exec`
+    一次性(启动慢但独立健壮)。Pi 已登录 ChatGPT 订阅——额度与 Claude/Gemini 独立。失败/空 → None。"""
+    try:
+        t = _codex_app.ask(prompt, model=model, effort=effort, timeout=timeout, image_paths=image_paths)
+        if t:
+            return t
+    except Exception as ex:
+        sys.stderr.write(f"[codex-app] {str(ex)[:120]} → 回落 exec\n")
+    return _codex_exec_text(prompt, model=model, effort=effort, timeout=timeout, image_paths=image_paths)
+
+
+def _codex_exec_text(prompt, model="gpt-5.5", effort="medium", timeout=180, image_paths=None):
+    """兜底:`codex exec` 一次性无头(app-server 挂/协议变时的独立退路)。"""
     import shutil as _sh, tempfile as _tf
     cx = _sh.which("codex") or os.environ.get("APP_CODEX") or "codex"
     of = _tf.NamedTemporaryFile(prefix="codex-out-", suffix=".txt", delete=False)
@@ -514,7 +656,7 @@ def _codex_text(prompt, model="gpt-5.5-codex", effort="medium", timeout=180, ima
     try:
         cmd = [cx, "exec", "--skip-git-repo-check",
                "-m", (model if str(model).startswith("gpt-") else "gpt-5.5-codex"),
-               "-c", 'model_reasoning_effort="%s"' % (effort if effort in _CODEX_DEPTHS else "medium"),
+               "-c", 'model_reasoning_effort="%s"' % (effort if effort in ("low", "medium", "high", "xhigh") else "high"),
                "-c", 'sandbox_mode="read-only"',
                "-o", of.name]
         for ip in (image_paths or [])[:3]:
@@ -2869,8 +3011,9 @@ _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
 _BACKENDS = ("claude", "gemini", "codex")
 _CLAUDE_VARIANTS = ("haiku", "sonnet", "opus")
-_CODEX_VARIANTS = ("gpt-5.5-codex", "gpt-5.5")            # codex exec -m 实测有效清单(2026-07-11;-mini 无效)
-_CODEX_DEPTHS = ("low", "medium", "high", "xhigh")        # → -c model_reasoning_effort
+_CODEX_VARIANTS = ("gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                   "gpt-5.4", "gpt-5.4-mini")             # app-server model/list 实测清单(2026-07-11;gpt-5.5-codex 在 app-server 下 400)
+_CODEX_DEPTHS = ("low", "medium", "high", "xhigh", "max", "ultra")   # 5.6 系到 ultra;选了型号不支持的档 API 报错→自动回落
 # *-latest 别名永远指向当代最新(现 flash-latest=3.5-flash、pro-latest=3.1-pro);Google 出新版自动跟,不用改代码。
 # 另列具体版本号给想锁定版本的。pro 线目前最高只有 3.1(还没 3.5-pro),pro 是最强推理档(版本号低≠更弱)。
 # 兜底型号清单:仅当 ListModels 拉取失败时用(正常面板走 _gemini_models() 动态拉真实可用清单 → 新模型自动出现)。
@@ -3115,8 +3258,17 @@ def reader_stream(prompt, action="explain", uid="", system=None, timeout=120):
         finally:
             _kill(p)
 
-    if r["backend"] == "codex":   # codex 无流式接口:一次性生成整段吐出;失败落回 gemini→claude
-        txt0 = _codex_text(sysmsg + "\n\n" + prompt, model=r["variant"], effort=r["depth"], timeout=timeout)
+    if r["backend"] == "codex":   # 主路=app-server 真文字流式;失败(未吐字)→ exec 一次性 → 再落 gemini→claude
+        _got = False
+        try:
+            for d in _codex_app.stream(sysmsg + "\n\n" + prompt, model=r["variant"], effort=r["depth"], timeout=timeout):
+                _got = True
+                yield d
+            return
+        except Exception:
+            if _got:
+                return
+        txt0 = _codex_exec_text(sysmsg + "\n\n" + prompt, model=r["variant"], effort=r["depth"], timeout=timeout)
         if txt0:
             yield txt0
             return
