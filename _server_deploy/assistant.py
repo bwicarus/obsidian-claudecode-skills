@@ -1796,7 +1796,10 @@ def _t_see_ink(args, ctx):
             marked = pdf._text_under_ink(file_rel, page, strokes=strokes)
         except Exception:
             marked = ""
-        note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,描述他到底圈/划/指/写了什么。")
+        note = ("下图=用户用笔标注的区域(已叠加他的手写笔迹)。结合笔迹的位置/形状/指向 + 图里文字,描述他到底圈/划/指/写了什么。"
+                "若笔迹本身是**手写的字/算式/公式**:先看整体结构(有无分数线/上标/下标/等号)再逐个认字符,"
+                "手写易混对(G↔A↔C、r↔n↔v、×↔x、9↔g、2↔z)用整体含义的合理性来定夺——比如分数结构『?mm/r²』里首字母是 G(万有引力)远比 A 合理;"
+                "他在学的内容不限于本页主题(可能在空白处写任何学科的公式)。")
         if marked:
             note += f" 几何上他大概标的是:「{_clean_tag(marked)[:120]}」(仅参考,以图为准)。"
         prev = _clean_tag(str(ctx.get("prev_ink_desc") or ""))[:400]

@@ -1400,7 +1400,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                         for v in vis[:2]:
                             await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                                 "type": "message", "role": "user",
-                                "content": [{"type": "input_image",
+                                "content": [{"type": "input_image", "detail": "high",   # 显式高清(auto 的降档不赌)
                                              "image_url": f"data:{v.get('media_type', 'image/png')};base64,{v['b64']}"}]}}))
                         out += "\n(相关图像已直接发给你,请看图回答)"
                     except Exception as ex:

@@ -8760,9 +8760,11 @@ def _text_under_ink(rel, page, strokes=None):
     return "".join(picked[i] for i in sorted(picked))[:200]   # i = reading order(chars 已按阅读序)
 
 
-def _ink_focus_image(rel, page, strokes, scale=2.6):
+def _ink_focus_image(rel, page, strokes, scale=None):
     """裁出**笔迹附近区域**(笔迹外接框 + 留白带上下文)并把笔迹叠加上去 → PNG。
-    给助手:用户笔迹不一定是圈/线(箭头/勾/波浪/随手涂都行),直接看『原文+笔迹』合成图最稳。返回 PNG bytes 或 None。"""
+    给助手:用户笔迹不一定是圈/线(箭头/勾/波浪/随手涂都行),直接看『原文+笔迹』合成图最稳。返回 PNG bytes 或 None。
+    scale 默认**按目标分辨率动态算**:旧版固定 2.6,小块手写(如页面一角的算式)裁出来只有 ~400px,
+    喂视觉模型谁都认不清(用户实测多家模型全认错);手写体要长边 ≥1100px 才稳。"""
     try:
         abs_path = _safe_vault_path(rel)
         if not abs_path or not strokes:
@@ -8779,6 +8781,17 @@ def _ink_focus_image(rel, page, strokes, scale=2.6):
         padx = max(0.07, bw * 0.45)            # 横向多留点(把整行/邻词带进来)
         pady = max(0.05, bh * 0.7)             # 纵向带上下文行
         box = [max(0.0, x0 - padx), max(0.0, y0 - pady), min(1.0, x1 + padx), min(1.0, y1 + pady)]
+        if scale is None:
+            try:
+                import fitz
+                _d0 = fitz.open(abs_path)
+                _r0 = _d0[page - 1].rect
+                pw, ph = float(_r0.width), float(_r0.height)
+                _d0.close()
+            except Exception:
+                pw, ph = 595.0, 842.0
+            long_pt = max((box[2] - box[0]) * pw, (box[3] - box[1]) * ph, 1.0)
+            scale = max(2.6, min(6.0, 1100.0 / long_pt))   # 目标长边 ~1100px;整页级裁剪回落 2.6 下限,超小笔迹封顶 6x
         png = _figure_crop_png(abs_path, page, box, scale=scale, with_ink=True, rel=rel, strokes=strokes)
         if png and len(png) > 3_000_000:       # 太大降一档(防喂回 stdin 过大)
             png = _figure_crop_png(abs_path, page, box, scale=scale * 0.6, with_ink=True, rel=rel, strokes=strokes)
