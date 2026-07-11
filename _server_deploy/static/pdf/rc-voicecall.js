@@ -305,12 +305,19 @@
   // ── 采集(mic → 16k PCM 20ms/包)──
   var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("vccap",C);';
   var _upRate = 16000;   // 上行采样率:豆包=16k;GPT Realtime 只吃 24k(relay 的 up_rate 事件动态切)
+  function _echoGate(seg) {   // 回声能量门(㉕b):AI 正在出声时,低能量输入=大概率是扬声器回声残留 → 丢包。
+    if (!playing.length) return false;   // OpenAI WS 模式回声抑制是**应用责任**(官方原话);豆包服务端自带,门对它无害。
+    var s = 0, n = 0;                    // 只在播放期启用:静默期灵敏度不变;真人打断声音近场响亮(RMS>0.05)能过门。
+    for (var i = 0; i < seg.length; i += 4) { s += seg[i] * seg[i]; n++; }
+    return Math.sqrt(s / (n || 1)) < 0.02;
+  }
   function onCap(chunk, rate) {
     var m = new Float32Array(f32buf.length + chunk.length);
     m.set(f32buf); m.set(chunk, f32buf.length); f32buf = m;
     var need = Math.round(rate * 0.02), outN = Math.round(_upRate * 0.02);
     while (f32buf.length >= need) {
       var seg = f32buf.subarray(0, need); f32buf = f32buf.slice(need);
+      if (mode === 's2s' && _echoGate(seg)) continue;   // 回声包不上传(防"自己跟自己打招呼"自激环)
       var out = new Int16Array(outN);
       for (var i = 0; i < outN; i++) {
         var v = seg[Math.min(need - 1, Math.floor(i * need / outN))];

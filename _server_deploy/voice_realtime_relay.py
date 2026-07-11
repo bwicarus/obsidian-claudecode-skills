@@ -1320,7 +1320,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                                 "turn_detection": {"type": "semantic_vad", "eagerness": "auto",
                                                    "create_response": True, "interrupt_response": True},
                                 "transcription": {"model": "gpt-realtime-whisper"}},
-                      "output": {"format": {"type": "audio/pcm"}, "voice": cred.get("rt_voice") or "marin"}},
+                      "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": cred.get("rt_voice") or "marin"}},   # ⚠ rate 必填:漏掉=session.update 整条被拒,会话跑默认裸配置(无人设无工具无转写=复读机)
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,   # 我们的工具多有副作用/顺序依赖,串行更稳
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}     # 官方:低频批量截断,保缓存前缀稳定(比逐轮小截强)
     try:
@@ -1393,13 +1393,17 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
               args=args, brief=out[:300])
 
     async def up():
+        abuf = bytearray()   # 攒 100ms 再 append(前端 20ms/帧 → 50 msg/s 太碎;24k·16bit·100ms=4800B)
         async for msg in bws:
             if isinstance(msg, (bytes, bytearray)):
-                try:
-                    await ows.send(json.dumps({"type": "input_audio_buffer.append",
-                                               "audio": base64.b64encode(bytes(msg)).decode()}))
-                except Exception:
-                    return
+                abuf.extend(msg)
+                if len(abuf) >= 4800:
+                    try:
+                        await ows.send(json.dumps({"type": "input_audio_buffer.append",
+                                                   "audio": base64.b64encode(bytes(abuf)).decode()}))
+                    except Exception:
+                        return
+                    abuf.clear()
                 continue
             try:
                 j = json.loads(msg)
@@ -1535,6 +1539,21 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
         if first.get("type") != "session.created":
             sys.stderr.write(f"[voice-oa] 首帧异常: {str(first)[:150]}\n")
         await ows.send(json.dumps({"type": "session.update", "session": sess}, ensure_ascii=False))
+        # 等配置确认(㉕b):session.updated=生效;error=整条被拒——被拒时**必须收场**,否则会话以默认裸配置
+        # 跑起来(无人设/无工具/无转写/默认VAD)=复读机+白烧钱(这正是"疯狂打招呼"事故的一半根因)
+        try:
+            while True:
+                ev0 = json.loads(await asyncio.wait_for(ows.recv(), timeout=8))
+                t0 = ev0.get("type")
+                if t0 == "session.updated":
+                    break
+                if t0 == "error":
+                    em = str(((ev0.get("error") or {}) or {}).get("message") or "")[:140]
+                    await bws.send(json.dumps({"event": -1, "payload": {"error": "GPT 会话配置被拒:" + em}}, ensure_ascii=False))
+                    sys.stderr.write(f"[voice-oa] session.update 被拒: {em}\n")
+                    return
+        except asyncio.TimeoutError:
+            sys.stderr.write("[voice-oa] session.updated 超时(继续,但配置状态未知)\n")
         await bws.send(json.dumps({"event": "up_rate", "payload": {"rate": 24000}}, ensure_ascii=False))   # 前端切 24k 采样
         await bws.send(json.dumps({"event": 150, "payload": {"engine": "openai", "model": model}}, ensure_ascii=False))
         sys.stderr.write(f"[voice-oa] session up model={model} tools={len(tools)} p{page}({len(book['page_text'])}字)\n")
