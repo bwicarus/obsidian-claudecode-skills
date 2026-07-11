@@ -1469,12 +1469,19 @@ def _t_search_image(args, ctx):
     if not items:
         return {"error": "缺 queries(要配图的概念 + 关键词列表)"}
 
+    def _short(q):
+        # 裁短降阶(用户实战发现:关键词太长 Commons 全文匹配不到,口头让 AI 缩短就中了——固化成程序兜底):
+        # 带空格的(英文/罗马字)裁到前 3 个词;日文无空格不裁(截半个词更糟,靠提示词管)
+        ws = q.split()
+        return " ".join(ws[:3]) if len(ws) > 3 else ""
+
     def _one(it):
-        # 双语落阶(用户设计):先搜所属语言关键词,没中自动用英文翻译保底——一次调用内完成,不烧第二轮对话
+        # 落阶链(用户设计):原语言 → 英文保底 → 各自裁短(3 词)——一次调用内完成,不烧第二轮对话
+        q0, qe = it["query"], (it.get("query_en") or "")
         imgs = []
         tried = set()
-        for qq in (it["query"], it.get("query_en") or ""):
-            qq = qq.strip()
+        for qq in (q0, qe, _short(q0), _short(qe)):
+            qq = (qq or "").strip()
             if not qq or qq.lower() in tried:
                 continue
             tried.add(qq.lower())
@@ -2691,7 +2698,8 @@ TOOLS = {
                      "先想清楚这次回答里**哪些概念配图真有帮助**(有明确视觉形象的:实物/结构/示意图/图表/生物/文物/天体/仪器等),"
                      "**一次性**把它们连关键词一起传:args {queries:[{concept:\"中文概念\", query:\"所属语言关键词\", query_en:\"english fallback\"}, ...]}"
                      "(query 用**最可能命中的语言**:日本特有事物用日语原名,通用/西方概念用英文;query_en 恒带英文翻译,"
-                     "工具先搜 query、没中自动用 query_en 保底;一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
+                     "工具先搜 query、没中自动用 query_en 保底;**关键词必须简短**——事物名称本身 1~3 个词,"
+                     "别写修饰语和描述句(图库按名称索引,长句反而搜不到);一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
                      "拿回结果后:对 images 里每张,在回答对应概念旁用 markdown ![简短中文说明](image_url) 插入;missed 里没搜到的**别硬配、别自己编链接**。"
                      "别对『力/能量』这类无固定形象的抽象词硬配。刚好要制卡也想放这张图,把该 image_url 传给 make_anki。", _t_search_image),
     "web_search": ("联网网页搜索(Google):查**网上的实时信息/事实/新闻/资料**时用,args {query:\"简洁关键词\"}。"
@@ -4348,7 +4356,8 @@ def assistant_rtc_session():
     _vo = {"search_image": ("★配图/看图片专用:按关键词列表**联网搜真实图片**(Wikimedia Commons + Google 图搜,非 AI 生成)。"
                             "用户想看某物的图片/照片时调它:args {queries:[{concept:\"概念\", query:\"所属语言关键词\", query_en:\"english fallback\"}, ...]}"
                             "(query 用**最可能命中的语言**:日本特有事物用日语原名,通用/西方概念用英文;"
-                            "query_en 恒带英文翻译,工具先搜 query、没中自动用 query_en 保底;一次最多 8 个)。"
+                            "query_en 恒带英文翻译,工具先搜 query、没中自动用 query_en 保底;"
+                            "**关键词必须简短**——事物名称本身 1~3 个词,别写修饰语和描述句;一次最多 8 个)。"
                             "搜到的图会**自动显示在用户界面**,你只需口头简短说明;"
                             "没搜到就换更通用的词再试一次,再没有就如实说,绝不编链接或输出 markdown 图片语法。")}
     tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[:1024],
