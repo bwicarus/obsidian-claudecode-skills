@@ -511,7 +511,8 @@ def _speech_clean(s: str) -> str:
 
 
 async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int,
-                          book: dict, push_sp=None, tool_name: str = "deep_think", tool_label: str = "深度思考"):
+                          book: dict, push_sp=None, tool_name: str = "deep_think", tool_label: str = "深度思考",
+                          preamble: str = "(语音深度解答,直接详细推理回答,少用工具)"):
     """深度思考:调助手 chat(SSE,深度模型可配)→ answer 增量攒句 → 500 分片流式代播。
     打断(450→book["deep_abort"])立即停发且**不发 end 包**(官方要求:播报被打断时别补 end)。"""
     cfg = _creds()
@@ -532,7 +533,7 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
         if push_sp:
             await push_sp()
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tool_label}}, ensure_ascii=False))
-        body = {"message": f"(语音深度解答,直接详细推理回答,少用工具)\n{question}",
+        body = {"message": f"{preamble}\n{question}",
                 "rid": f"dt{uuid.uuid4().hex[:10]}", "voice": 1,
                 "context": ({"file_rel": file_rel, "page": page} if file_rel else {})}
         # 深度模型选型:模型设置面板「深度思考」项(action-prefs deep,⑦的 UI)优先;凭证 deep_model/deep_effort 兜底
@@ -735,11 +736,15 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             await bws.send(json.dumps({"event": "tool_status", "payload": {
                 "status": "done", "tool": "recall_study", "label": "回顾学习", "rag": "(记录为空)"}}, ensure_ascii=False))
             return
-        q2 = ("根据下面的学习活动记录回答用户的问题。只依据记录说话,记录里没有的不要编造;"
-              "口语化、抓重点、按主题归纳(别逐条流水账)。\n【学习记录(按时间,含页码/查词/选中/问答)】\n"
+        q2 = ("根据下面的学习活动记录回答用户的问题。记录里只有页码和操作摘要、**没有页面原文**——"
+              "需要具体内容时用 read_page 工具按需拉取(只拉记录里学习重点所在的几页,别整本拉;"
+              "read_page 只能读当前这本书,别的书就依据记录摘要说)。"
+              "只依据记录和拉到的原文说话,不要编造;口语化、抓重点、按主题归纳(别逐条流水账)。"
+              "\n【学习记录(按时间,含页码/查词/选中/问答)】\n"
               + digest + "\n【用户问题】" + (q or "今天学了什么"))
         await _run_deep_think(bws, dws, sid, q2, file_rel, page, book, push_sp,
-                              tool_name="recall_study", tool_label="回顾学习")
+                              tool_name="recall_study", tool_label="回顾学习",
+                              preamble="(语音回顾:可用工具查证,答案要适合朗读)")
         return
 
     cache = book.setdefault("tool_cache", {})
