@@ -62,7 +62,12 @@
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     try { if (ac && ac.state !== 'running') ac.resume(); } catch (e) {}   // iOS 回前台:音频会话可能被挂起
-    if (ws) { _acquireWL(); return; }        // 通话还活着:wake lock 切后台被系统释放过 → 重新拿
+    if (ws) {
+      _acquireWL();                          // 通话还活着:wake lock 切后台被系统释放过 → 重新拿
+      // ㉞ rtc 假活检查:shim 的 readyState 恒为 1,回前台必须看真实 pc 状态(iOS 后台常把 WebRTC 掐死)
+      if (_rtc.on && _rtc.pc && ['failed', 'closed', 'disconnected'].indexOf(_rtc.pc.connectionState) >= 0) _rtcDead('后台挂起');
+      return;
+    }
     if (_reconnPend || (!_userHung && !_reconnT)) {   // 后台断的线 → 回来立即重连
       _reconnPend = false;
       _tryStart();
@@ -901,8 +906,29 @@
       if (m0 && m0.toLowerCase().indexOf('cancel') < 0) setSt('⚠ ' + m0.slice(0, 60));
     }
   }
+  async function _rtcInjectHistory() {   // ㉞ 重连历史回放:服务端对话记录压成一条 system(官方指南 8.4 摘要形态,
+    try {                                //   不逐条造 item——省 item 数且不赌 assistant content type)
+      var h = await (await fetch('/api/assistant/history')).json();
+      var msgs = (h && h.messages) || [];
+      var lines = [];
+      msgs.slice(-14).forEach(function (m) {
+        var t = String(m.content || '').replace(/\s+/g, ' ').trim().slice(0, 260);
+        if (t) lines.push((m.role === 'assistant' ? '你说:' : '用户说:') + t);
+      });
+      if (lines.length) _rtcSys('(通话重新接通。之前的对话记录:\n' + lines.join('\n') + '\n——延续这段对话的语境回答,不要重新打招呼、不要对本条做任何回应。)');
+    } catch (e) {}
+  }
+  function _rtcDead(reason) {   // ㉞ 连接死亡(后台挂起/网络切换):明示 + 非主动挂断自动重连(带历史回放)
+    if (!_rtc.on) return;
+    rtcTeardown();
+    ws = null; callBtnOn(false); callBtnSpeaking(false);
+    if (_userHung) { setSt('已挂断'); return; }
+    setSt('⚠ ' + reason + ',正在重连…');
+    setTimeout(function () { if (!_userHung && !_rtc.on) rtcStart(toggle._opts || {}); }, 800);
+  }
   async function rtcStart(opts) {
     var g = ++_gen;
+    var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     try {
@@ -917,8 +943,17 @@
       mic.getTracks().forEach(function (t) { pc.addTrack(t, mic); });
       var dc = pc.createDataChannel('oai-events');
       dc.onmessage = function (ev) { try { _rtcOnEvent(JSON.parse(ev.data)); } catch (e) {} };
-      dc.onclose = function () {   // 通话中 dc 意外关闭(如超限消息触发的规范性关闭)→ 明示,别无声哑死
-        if (_rtc.on) setSt('⚠ 数据通道断开,请挂断重拨');
+      dc.onopen = function () { if (!fresh) _rtcInjectHistory(); };   // ㉞:非新话题=把之前的对话记录带回来
+      dc.onclose = function () {   // 通话中 dc 意外关闭(如超限消息触发的规范性关闭)→ 重连自愈,别无声哑死
+        if (_rtc.on && _rtc.dc === dc) _rtcDead('数据通道断开');
+      };
+      pc.onconnectionstatechange = function () {   // ㉞ 假活根治:iOS 切后台系统掐 WebRTC,回来 UI 还显示"通话中"
+        if (!_rtc.on || _rtc.pc !== pc) return;
+        var st = pc.connectionState;
+        if (st === 'failed' || st === 'closed') _rtcDead('连接断开');
+        else if (st === 'disconnected') setTimeout(function () {   // disconnected 可自愈(短暂网络抖动),3s 没恢复才判死
+          if (_rtc.on && _rtc.pc === pc && pc.connectionState === 'disconnected') _rtcDead('连接断开');
+        }, 3000);
       };
       pc.ontrack = function (e) {   // 远端音频:audio 元素播放(WebRTC 路径=浏览器 AEC 生效的关键)
         var el = document.createElement('audio');
@@ -945,6 +980,7 @@
     } catch (ex) {
       setSt('WebRTC 启动失败: ' + String(ex.message || ex).slice(0, 80));
       rtcTeardown();
+      ws = null; callBtnOn(false); callBtnSpeaking(false);   // 状态复位:按钮/shim 不残留假活
     }
   }
   function rtcTeardown() {
