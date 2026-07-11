@@ -440,3 +440,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **浮层瘦身**:侧栏投递可用时 vc-sub+vc-grab(拖高抓手)隐藏,通话条只剩状态行;视频卡区(vc-vids)保留。
 - **清空三位一体**:侧栏 🗑 清空本体清显示+POST clear 清服务端记录;rc-voicecall 捕获旁听同步 fresh 重连(豆包清 dialog_id/rtc 重连即新会话)→ 语音侧记忆和缓存自然作废。旁听重连顺修为 `toggle._connect` 引擎分流(原硬调 start 会把 rtc 清空后重连回 WS 链路)。
 - 字幕系统不变:侧栏开=看侧栏对话流(字幕 gate 掉),侧栏关=底部字幕。
+
+## ㉜ 语音配图走原生工具(2026-07-12,用户截图揪出 markdown 假图)
+
+用户语音说"想看照片",GPT 没调工具,直接输出 `![七草粥の写真](image_url)` markdown 占位符假装贴图。**三层根因链**:
+1. **instructions"你没有联网搜索能力"误伤**:search_image(Commons+Google 图搜)是**真联网工具**,这句一刀切声明把模型劝退,想帮忙只剩幻觉一条路。修:精确化——"没有**通用网页搜索**;但 search_image/search_video 是真联网工具,想看图/视频**必须调用**;绝不输出 markdown 图片占位符假装贴图"。三处同修:rtc-session / relay `_oa_instructions`(GPT WS)/ relay 豆包 SP。
+2. **目录行 markdown 教学有毒**:search_image 的 TOOLS 目录行是给**文字助手**写的("拿回结果后在回答对应概念旁用 markdown ![..](image_url) 插入")——rtc-session 把目录行全量当 description(1024 字),模型把这套 markdown 用法学去了语音回答里。修:rtc-session 加语音场景 description 覆盖表 `_vo`(search_image 语音版:"图会自动显示在用户界面,口头简短说明即可,绝不编链接");relay WS 版 description 截第一句(52字)本就没带毒,不用改。
+3. **语音场景图卡无渲染管道**:`_t_search_image` 返回纯数据(文字助手靠模型 markdown 嵌图+侧栏渲染;语音回答是音频,没这管道)——即使调了工具图也显示不出来。修:voice-tool 端点(仅语音链路走)对 search_image 结果注入 `client_action {fn:'renderImages'}`,前端 dispatch 渲染图卡进侧栏对话流(缩略图 grid+概念标签,点开原条目页);文字助手不走此端点,零影响。
+
+**教训**:接入原生 function calling 的模型时,复查所有"能力声明"(负面声明会误伤同类工具)和"目录行教学文案"(写给别的渲染管道的用法会被模型带进当前场景)——工具目录是跨场景共享的,per-场景 description 覆盖是正解。
