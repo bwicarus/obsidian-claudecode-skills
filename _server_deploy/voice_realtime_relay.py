@@ -1360,9 +1360,24 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 ca = res.get("client_action")
                 if isinstance(ca, dict) and ca.get("fn"):
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
+                vis = res.pop("_vision", None) if isinstance(res, dict) else None   # 原图(b64)绝不进文本 output(会被截成烂 JSON)
                 slim = {k: v for k, v in res.items() if k != "client_action"}
                 lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+                # ㉕ 图像直喂(凭证 rt_image 开关,⚪格式按 GA conversation item 推定待实测):看图类工具返回的渲染图
+                # 直接给 GPT 自己看(2.1 原生视觉),不再经 Claude 文字转述;失败(模型不支持/格式不对)由 error 事件暴露,关掉开关即回文字链路
+                if vis and _creds().get("rt_image"):
+                    try:
+                        for v in vis[:2]:
+                            await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                                "type": "message", "role": "user",
+                                "content": [{"type": "input_image",
+                                             "image_url": f"data:{v.get('media_type', 'image/png')};base64,{v['b64']}"}]}}))
+                        out += "\n(相关图像已直接发给你,请看图回答)"
+                    except Exception as ex:
+                        sys.stderr.write(f"[voice-oa img] {str(ex)[:100]}\n")
+                elif vis:
+                    out += "\n(该工具产出了图像,但「图像输入」开关未开,只能按上面的文本回答;要看图请让用户在语音设置里打开图像输入)"
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
         try:

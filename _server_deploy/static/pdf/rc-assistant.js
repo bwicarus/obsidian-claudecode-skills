@@ -236,7 +236,8 @@
       }
       return l;
     }
-    var selB = _msMkSel(cat.backends, cur.backend, _BACKEND_LABEL, lockB);
+    var _bl = (cat.backends_by_action && cat.backends_by_action[action]) || cat.backends;   // 该任务真正支持的后端(编排不接 Codex、语音深度只走 Claude——选不了就不会被静默降级坑)
+    var selB = _msMkSel(_bl, cur.backend, _BACKEND_LABEL, lockB);
     var selV = _msMkSel(_vlist(cur.backend, cur.variant), cur.variant, varLabels);
     var selD = _msMkSel(cat.depths[cur.backend] || [], cur.depth, _DEPTH_LABEL);
     function save() {
@@ -341,6 +342,8 @@
         '<input type="checkbox" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
         '<input type="checkbox" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
+        '<input type="checkbox" data-k="rt_image"' + (c.rt_image ? ' checked' : '') + '>图像输入(仅 GPT Realtime 引擎:看图类工具的渲染图直接给 GPT 自己看,不经文字转述;实验性,报错就关掉)</label>' +
         '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色/语气下一句生效(2.0 音色支持自然语言语气指令;停顿由 AI 的标点/省略号控制)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>';
       function _save(k, v, el) {
         var body = {}; body[k] = v;
@@ -942,7 +945,8 @@
       }
       return l;
     }
-    var selB = _msMkSel(cat.backends, cur.backend, _BACKEND_LABEL, lockB);
+    var _bl = (cat.backends_by_action && cat.backends_by_action[action]) || cat.backends;   // 该任务真正支持的后端(编排不接 Codex、语音深度只走 Claude——选不了就不会被静默降级坑)
+    var selB = _msMkSel(_bl, cur.backend, _BACKEND_LABEL, lockB);
     var selV = _msMkSel(_vlist(cur.backend, cur.variant), cur.variant, varLabels);
     var selD = _msMkSel(cat.depths[cur.backend] || [], cur.depth, _DEPTH_LABEL);
     function save() {

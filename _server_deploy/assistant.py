@@ -3444,8 +3444,8 @@ def _fast_answer(message, ctx, history, uid):
     (单题系统开销从 ~5-6k 降到 ~1.5k)。返回 (answer, trace) 或 None(失败 → 调用方回退完整编排)。"""
     _t0 = time.time()
     rr = _resolve("orchestrator", uid)
-    if rr.get("backend") == "codex":   # 编排工具循环未接 codex(交互式多轮会话)→ 降级出厂默认
-        rr = dict(_AP_DEFAULTS["orchestrator"])
+    # 快路是**单轮** _deep_ask,codex 完全支持 → 不再降级(旧守卫把 codex 预设静默改回 Claude,
+    # Claude 限流时用户就地撞"额度用完"——正是用户报告的 bug 之一)
     c = ctx or {}
     sel = _clean_tag(c.get("selection")); sent = _clean_tag(c.get("selection_sentence"))
     foc = _clean_tag((c.get("focus_sel") or {}).get("text"))
@@ -3493,8 +3493,10 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 return
             # _fast=None(快路 AI 失败)→ 落回完整编排
         rr = _resolve("orchestrator", uid)
-        if rr.get("backend") == "codex":   # 编排工具循环未接 codex(交互式多轮会话)→ 降级出厂默认
-            rr = dict(_AP_DEFAULTS["orchestrator"])
+        if rr.get("backend") == "codex":   # 编排工具循环未接 codex → 降 **Gemini** 编排(选 codex 的用户多半在躲 Claude 限流,
+            # 旧版静默降回出厂 Claude = 就地撞额度;现在明示 + 走 Gemini)
+            yield {"event": "notice", "data": "编排 agent 不支持 Codex(它只接单轮任务),本次已用 Gemini 编排代跑;请在 ⚙ 里把编排设为 Gemini 或 Claude。"}
+            rr = {"backend": "gemini", "variant": _GEMINI_MODEL, "depth": "think"}
         if rr["backend"] == "gemini":             # 二期:根 agent 跑在 Gemini 工具循环(省 Claude 额度)
             yield from _agent_run_gemini(message, ctx, history, rr["variant"], rr["depth"], uid)
             return
@@ -4134,7 +4136,7 @@ _VOICE_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
 _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialect",
                      "bot_name", "speaking_style", "system_role", "enable_music",
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
-                     "rt_engine", "rt_model", "rt_voice", "rt_effort")
+                     "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])
@@ -4265,6 +4267,10 @@ def assistant_action_prefs():
                               **_AP_LABELS},
                     "catalog": {
                         "backends": list(_BACKENDS),
+                        # 按任务限制可选后端:编排=交互式工具循环不接 codex;deep=relay 只透传 claude 选型。
+                        # 前端下拉据此过滤——根治"选了 codex 被静默降级回 Claude、Claude 没额度直接报额度用完"。
+                        "backends_by_action": {"orchestrator": [b for b in _BACKENDS if b != "codex"],
+                                               "deep": ["claude"]},
                         "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
                         "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,
