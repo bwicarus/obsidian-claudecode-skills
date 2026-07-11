@@ -4223,6 +4223,10 @@ def assistant_voice_tool():
         res = TOOLS[name][1](targs, ctx) or {}
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    # ㉜ 语音场景配图渲染:search_image 结果在语音链路(仅本端点)附 client_action → 前端图卡进侧栏对话流。
+    #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
+    if name == "search_image" and isinstance(res, dict) and res.get("images"):
+        res["client_action"] = {"fn": "renderImages", "args": [res["images"]]}
     # WebRTC 通话(带 rtc_call_id)的图像走 sideband 服务端注入,绝不进响应让前端挤 data channel
     if isinstance(res, dict) and res.get("_vision") and body.get("rtc_call_id"):
         if _rtc_sideband_images(str(body["rtc_call_id"]), res["_vision"]):
@@ -4279,7 +4283,10 @@ def assistant_rtc_session():
              "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等需要动手的事"
              "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
-             "你没有联网搜索能力(search_all_books 只搜他的书库);要网上实时信息就如实说没法联网,凭记忆答先声明可能过时。"
+             "你没有**通用网页搜索**能力(search_all_books 只搜他的书库),要网上实时信息就如实说没法查、凭记忆答先声明可能过时;"
+             "但 search_image(搜真实图片)和 search_video(搜教学视频)是**真联网工具**——"
+             "用户想看图片/照片/视频时**必须调用对应工具**,结果会自动显示在他的界面上。"
+             "**绝不要自己输出 markdown 图片或链接占位符**(如 ![...](image_url))假装贴图——界面不会显示任何东西,那是错误行为。"
              "**手写/圈画铁律**:他提到『我写的/我画的/我圈的/帮我看看这个算式』时,永远**先调 see_ink 工具**;"
              "回答『看不到』或让他粘贴/截图都是错误行为。"
              "收到『笔迹已发生变化』的状态消息后,你旧的笔迹记忆即作废——之后他问『现在呢/看到了什么/有没有变化』"
@@ -4298,7 +4305,13 @@ def assistant_rtc_session():
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"
                  "**状态消息只是记录,永远不要对它们本身做回应或主动评论**;"
                  "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")
-    tools = [{"type": "function", "name": n, "description": str(d)[:1024],
+    # 语音场景 description 覆盖:目录行是给文字助手写的,个别工具的"回答里用 markdown 嵌图"教学
+    # 在语音里有毒(模型学着输出 ![..](image_url) 假图)——语音版结果由界面自动渲染,只需口头说明
+    _vo = {"search_image": ("★配图/看图片专用:按关键词列表**联网搜真实图片**(Wikimedia Commons + Google 图搜,非 AI 生成)。"
+                            "用户想看某物的图片/照片时调它:args {queries:[{concept:\"中文概念\", query:\"english keyword\"}, ...]}"
+                            "(query 用英文图源覆盖最好,一次最多 8 个)。搜到的图会**自动显示在用户界面**,"
+                            "你只需口头简短说明;没搜到就如实说,绝不编链接或输出 markdown 图片语法。")}
+    tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[:1024],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items()]
     tools.append({"type": "function", "name": "deep_think",

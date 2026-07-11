@@ -385,7 +385,26 @@
   // ── client_action 派发:relay 意图旁路的页面控制指令在**阅读器环境**执行 ──
   function dispatch(fn, args) {
     if (fn === 'renderVideos') { renderVids((args || [[]])[0] || []); return; }
+    if (fn === 'renderImages') { renderImgs((args || [[]])[0] || []); return; }
     try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
+  }
+  function renderImgs(imgs) {   // ㉜:语音 search_image 结果 → 真实图卡进侧栏对话流(点开原条目页)
+    if (!imgs || !imgs.length) return;
+    var m = threadMsg('asst-a', '给你找到这些图片:');
+    if (!m) return;
+    var g = document.createElement('div');
+    g.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:6px';
+    imgs.forEach(function (im) {
+      if (!im || !im.image_url) return;
+      var a = document.createElement('a');
+      a.href = im.page_url || im.image_url; a.target = '_blank'; a.rel = 'noopener';
+      a.style.cssText = 'text-decoration:none;color:inherit;max-width:160px';
+      a.innerHTML = '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.image_url) + '" ' +
+        'style="max-width:160px;max-height:130px;border-radius:10px;display:block">' +
+        (im.concept ? '<div style="font-size:11px;opacity:.7;text-align:center;margin-top:2px">' + esc(im.concept) + '</div>' : '');
+      g.appendChild(a);
+    });
+    m.appendChild(g);
   }
   function renderVids(vids) {
     if (!vids || !vids.length) return;
