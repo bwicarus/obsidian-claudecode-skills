@@ -285,6 +285,44 @@
     sub.scrollTop = sub.scrollHeight;
   }
 
+  // ── AEC 环回(㉘,官方公认 workaround):浏览器回声消除的参考信号**只取 WebRTC/<audio> 元素路径**,
+  //    纯 WebAudio 播的声音不被 AEC 消(Chromium issue 40252911)——通话音频外放时全量进麦=回声自激根源。
+  //    把播放经本地 RTCPeerConnection 环回成"远端流"再用 <audio> 播 → AEC 当远端参与者音频自动消;
+  //    顺带走"通话音频"路径,iOS 麦克风活跃时的系统 ducking(音量忽大忽小,WebKit #218012)通常也更平稳。──
+  var _aec = { dest: null, el: null, pc1: null, pc2: null, ready: false, ctx: null };
+  async function _aecSetup(acx) {
+    if (_aec.ready && _aec.ctx === acx) return;
+    _aecTeardown();
+    try {
+      var dest = acx.createMediaStreamDestination();
+      var pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+      pc1.onicecandidate = function (e) { if (e.candidate) { try { pc2.addIceCandidate(e.candidate); } catch (_) {} } };
+      pc2.onicecandidate = function (e) { if (e.candidate) { try { pc1.addIceCandidate(e.candidate); } catch (_) {} } };
+      pc2.ontrack = function (e) {
+        var el = document.createElement('audio');
+        el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
+        el.srcObject = e.streams[0];
+        document.body.appendChild(el);
+        _aec.el = el;
+        try { el.play(); } catch (_) {}
+      };
+      dest.stream.getTracks().forEach(function (t) { pc1.addTrack(t, dest.stream); });
+      var offer = await pc1.createOffer();
+      await pc1.setLocalDescription(offer);
+      await pc2.setRemoteDescription(offer);
+      var ans = await pc2.createAnswer();
+      await pc2.setLocalDescription(ans);
+      await pc1.setRemoteDescription(ans);
+      _aec.dest = dest; _aec.pc1 = pc1; _aec.pc2 = pc2; _aec.ctx = acx; _aec.ready = true;
+    } catch (e) { _aecTeardown(); }   // 失败回落直连(现状),不阻塞通话
+  }
+  function _aecTeardown() {
+    try { if (_aec.pc1) _aec.pc1.close(); } catch (e) {}
+    try { if (_aec.pc2) _aec.pc2.close(); } catch (e) {}
+    try { if (_aec.el) _aec.el.remove(); } catch (e) {}
+    _aec = { dest: null, el: null, pc1: null, pc2: null, ready: false, ctx: null };
+  }
+
   // ── 播放(PCM24k)+ 打断 ──
   function playPcm(buf) {
     if (!ac) return;
@@ -293,7 +331,8 @@
     for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
     var ab = ac.createBuffer(1, f32.length, 24000);
     ab.copyToChannel(f32, 0);
-    var src = ac.createBufferSource(); src.buffer = ab; src.connect(ac.destination);
+    var src = ac.createBufferSource(); src.buffer = ab;
+    src.connect((_aec.ready && _aec.ctx === ac) ? _aec.dest : ac.destination);   // 环回在 → AEC 生效路径;不在 → 直连兜底
     var t = Math.max(ac.currentTime + 0.02, playT);
     src.start(t); playT = t + ab.duration; playing.push(src);
     _capBindChunk(t, ac);   // agent 通话朗读:句首块 → 字幕在开播时刻亮(S2S 无 seg 帧,零影响)
@@ -715,6 +754,7 @@
         setSt('通话中 · 说话即可(已带上本页内容)'); if (box) box.classList.add('on'); callBtnOn(true);
         taPlaceholder(mode === 'agent' ? '🎙 连续听中,说话即可…' : null);
         _refreshSpeakTg();   // 朗读开关切到当前语境的键(S2S=默认亮/其余=旧键)
+        try { _aecSetup(ac); } catch (e) {}   // AEC 环回(手势链内建,fire-and-forget;失败播放直连兜底)
       };
       // teardown 会摘掉本回调 → 走到这里的必然是"没人主动挂断"的意外断线(网络波动/iOS 切后台掐 ws)
       ws.onclose = function () { _scheduleReconnect(); };
@@ -771,6 +811,7 @@
     try { _refreshSpeakTg(); } catch (e) {}
     _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由;若视频等还在响导致这次没生效,下次 _ttsEnsure 会再声明)
     try { _ttsShutdown(); } catch (e) {}   // 朗读通道 ws+ac 一并关(通话期建的 ac 路由粘扬声器;残留 ws 会悬空收帧)→ 下次朗读重建拿干净会话
+    _aecTeardown();   // AEC 环回随通话走(pc/audio 元素清干净)
   }
 
   function toggle(opts) {

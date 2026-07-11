@@ -1308,6 +1308,13 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
     book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
             "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None}
     lines = await _fetch_tools_lines()
+    if len(lines) < 10:   # 工具目录拉取失败(webapp 重启窗口等)→ 重试一次;仍失败=跛脚会话(没 see_ink/看图),宁可报错别哑巴开场
+        await asyncio.sleep(1.5)
+        lines = await _fetch_tools_lines()
+        if len(lines) < 10:
+            await bws.send(json.dumps({"event": -1, "payload": {"error": "工具目录拉取失败(服务可能在重启),几秒后重拨"}}, ensure_ascii=False))
+            await bws.close()
+            return
     tools = [{"type": "function", "name": n, "description": str(line)[:1024],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, line in lines.items()]
@@ -1327,6 +1334,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             "max_output_tokens": 2048,                                  # 护栏(1–4096/inf);朗读答案本就该短,分段更好
             "instructions": _oa_instructions(book, file_rel, page),
             "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
+                                "noise_reduction": {"type": "far_field"},   # ㉘ 官方降噪:远场(iPad 外放/桌面麦场景);回声残留/环境噪对 VAD 的干扰双降
                                 # semantic_vad(2.1 招牌):按**语义**判断说完没——说话中途停顿思考不抢话(官方推荐配置;server_vad 是纯静音计时的降级品)
                                 "turn_detection": {"type": "semantic_vad",
                                                    "eagerness": (cred.get("rt_eagerness") or "auto"),
