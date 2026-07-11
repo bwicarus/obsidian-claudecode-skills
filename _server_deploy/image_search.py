@@ -139,7 +139,9 @@ def search_google(query: str, n: int = 4) -> list:
          "num": str(max(1, min(n, 10))), "safe": "active", "imgSize": "medium"}
     try:
         d = _get_json("https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode(p))
-    except Exception:
+    except Exception as ex:
+        import sys
+        sys.stderr.write(f"[image_search] google fail: {str(ex)[:120]} (403=Custom Search API 未启用/额度尽)\n")
         return []
     try:   # 记本地配额(每天 100 免费)
         import sys
@@ -177,21 +179,28 @@ def search_images(query: str, n: int = 2, want_google: bool = True) -> list:
     try:
         if cf.exists():
             d = json.loads(cf.read_text("utf-8"))
-            if time.time() - d.get("ts", 0) < _TTL and d.get("images") is not None:
+            # partial=Google 源没干活(未启用/额度尽)时的残缺结果:只信 1 天,别把断腿期的空缓存钉 30 天
+            ttl = 86400 if d.get("partial") else _TTL
+            if time.time() - d.get("ts", 0) < ttl and d.get("images") is not None:
                 return d["images"][:n]
     except Exception:
         pass
     imgs = search_commons(q, n)
+    google_ok = True
     if want_google and len(imgs) < n:
         seen = {i["full_url"] for i in imgs}
-        for x in search_google(q, n - len(imgs) + 2):
+        gs = search_google(q, n - len(imgs) + 2)
+        if not gs:
+            google_ok = False   # 没配/403/额度尽——Commons 优先、Google 补齐的第二腿没跑成
+        for x in gs:
             if x["full_url"] not in seen:
                 imgs.append(x)
                 seen.add(x["full_url"])
     imgs = imgs[:n]
+    partial = bool(want_google and len(imgs) < n and not google_ok)
     try:
         _CACHE.mkdir(parents=True, exist_ok=True)
-        cf.write_text(json.dumps({"q": q, "images": imgs, "ts": int(time.time())}, ensure_ascii=False), "utf-8")
+        cf.write_text(json.dumps({"q": q, "images": imgs, "ts": int(time.time()), "partial": partial}, ensure_ascii=False), "utf-8")
     except Exception:
         pass
     return imgs
