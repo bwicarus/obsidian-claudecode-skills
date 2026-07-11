@@ -102,40 +102,6 @@ def search_commons(query: str, n: int = 6) -> list:
     return out
 
 
-_CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-
-
-def search_bing_scrape(query: str, n: int = 4) -> list:
-    """搜索引擎图搜结果页直爬(零 key,用户提议"最原始的浏览器地址式"):Google 对无浏览器请求
-    甩 JS challenge(实测重定向占位页,需无头浏览器不值得),Bing 一次 HTTP 就给全量
-    `"murl":"原图URL"`(media url)+`"purl":"宿主页"`,结构稳定反爬松——用它当无 API 兜底。"""
-    url = "https://www.bing.com/images/search?" + urllib.parse.urlencode({"q": query, "count": "35"})
-    req = urllib.request.Request(url, headers={"User-Agent": _CHROME_UA, "Accept-Language": "ja,en;q=0.8"})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            html = r.read().decode("utf-8", "ignore")
-    except Exception as ex:
-        import sys
-        sys.stderr.write(f"[image_search] bing fail: {str(ex)[:120]}\n")
-        return []
-    import html as _hm
-    txt = _hm.unescape(html)
-    murls = re.findall(r'"murl":"(https?://[^"]+?)"', txt)
-    purls = re.findall(r'"purl":"(https?://[^"]+?)"', txt)
-    out, seen = [], set()
-    for i, u in enumerate(murls):
-        u = u.replace("\\/", "/")
-        if u in seen or not _ok_img(u):   # 无扩展名的间接链(instagram lookaside 等)一并被格式过滤踢掉
-            continue
-        seen.add(u)
-        out.append({"image_url": u, "full_url": u, "title": "",
-                    "page_url": (purls[i].replace("\\/", "/") if i < len(purls) else u),
-                    "source": "bing"})
-        if len(out) >= n:
-            break
-    return out
-
-
 def search_web(query: str, n: int = 5) -> list:
     """通用网页搜索(同一个 Programmable Search Engine,不带 searchType 即网页结果)。
     与图搜共享每日 100 次免费池;没配 key/cx 返回 []。返回 [{title, snippet, url}]。"""
@@ -219,15 +185,14 @@ def search_images(query: str, n: int = 2, want_google: bool = True) -> list:
                 return d["images"][:n]
     except Exception:
         pass
+    # Bing 爬取兜底曾在此(㉞),质量太差(水印图库/新闻配图)被用户裁定撤除——第二腿只留 Google API
     imgs = search_commons(q, n)
     google_ok = True
     if want_google and len(imgs) < n:
         seen = {i["full_url"] for i in imgs}
         gs = search_google(q, n - len(imgs) + 2)
         if not gs:
-            gs = search_bing_scrape(q, n - len(imgs) + 2)   # 零 key 兜底(Google API 未启用/额度尽)
-        if not gs:
-            google_ok = False   # Commons 之外的第二腿(Google API+Bing 爬取)都没跑成
+            google_ok = False   # 没配/403/额度尽——Commons 优先、Google 补齐的第二腿没跑成
         for x in gs:
             if x["full_url"] not in seen:
                 imgs.append(x)
