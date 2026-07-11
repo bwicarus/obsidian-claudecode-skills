@@ -715,7 +715,7 @@
   //    (外放无回声+全双工随时插话,不再需要半双工妥协)。密钥不下发(SDP 经 /rtc-call 后端代理);
   //    工具循环在本地(dc 收 function_call → fetch /voice-tool → dc 回填),client_action 直接执行;
   //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
-  var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false,
+  var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '',
                ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false };
   function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
   function _rtcSys(text) {
@@ -799,24 +799,17 @@
         if (_rtc.ink && _rtc.ink.length) ctx.ink = _rtc.ink;
         if (_rtc.sel) ctx.selection = _rtc.sel;
         var r = await fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx }) });
+          body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx, rtc_call_id: _rtc.callId }) });
         var d = await r.json();
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
         var ca = res.client_action; delete res.client_action;
         if (ca && ca.fn) dispatch(ca.fn, ca.args);           // 页面副作用本地直执行(比经 relay 更直接)
-        var vis = res._vision; delete res._vision;           // 原图绝不进文本 output
+        delete res._vision;   // 图像由后端 sideband 注入(带 rtc_call_id 时后端已处理);绝不经 dc 发——
+                              // SCTP 单条上限(Safari≈64KB),超限发送会**直接关闭 data channel**=通话哑死
         var slim = JSON.stringify(res);
         out = (slim && slim.length > 2) ? slim.slice(0, 1800) : '(无文本结果,界面元素已显示在用户屏幕上)';
-        if (vis && vis.length && _rtc.imgOn) {               // 图像直喂(rt_image)
-          for (var i = 0; i < Math.min(vis.length, 2); i++) {
-            _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user',
-              content: [{ type: 'input_image', detail: 'high',
-                          image_url: 'data:' + (vis[i].media_type || 'image/png') + ';base64,' + vis[i].b64 }] } });
-          }
-          out += '\n(相关图像已直接发给你,请看图回答)';
-        }
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
@@ -896,6 +889,9 @@
       mic.getTracks().forEach(function (t) { pc.addTrack(t, mic); });
       var dc = pc.createDataChannel('oai-events');
       dc.onmessage = function (ev) { try { _rtcOnEvent(JSON.parse(ev.data)); } catch (e) {} };
+      dc.onclose = function () {   // 通话中 dc 意外关闭(如超限消息触发的规范性关闭)→ 明示,别无声哑死
+        if (_rtc.on) setSt('⚠ 数据通道断开,请挂断重拨');
+      };
       pc.ontrack = function (e) {   // 远端音频:audio 元素播放(WebRTC 路径=浏览器 AEC 生效的关键)
         var el = document.createElement('audio');
         el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
@@ -910,6 +906,7 @@
         body: JSON.stringify({ sdp: offer.sdp, session: sres.session }) })).json();
       if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
       if (g !== _gen) { pc.close(); mic.getTracks().forEach(function (t) { t.stop(); }); return; }
+      _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
@@ -929,7 +926,7 @@
     try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
     try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-    _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null;
+    _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = '';
   }
 
   function _agentCtxQs() {   // ASR 语境注入(㉓):开 ASR 时把当前书/页带给 relay → 握手注入热词+页面语境

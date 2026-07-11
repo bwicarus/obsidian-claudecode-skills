@@ -4223,6 +4223,14 @@ def assistant_voice_tool():
         res = TOOLS[name][1](targs, ctx) or {}
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    # WebRTC 通话(带 rtc_call_id)的图像走 sideband 服务端注入,绝不进响应让前端挤 data channel
+    if isinstance(res, dict) and res.get("_vision") and body.get("rtc_call_id"):
+        if _rtc_sideband_images(str(body["rtc_call_id"]), res["_vision"]):
+            res.pop("_vision", None)
+            res["图像"] = "已直接发到对话里,请看图回答"
+        else:
+            res.pop("_vision", None)   # sideband 失败也不给前端(dc 发大图会把通道弄死),如实告知
+            res["图像"] = "传输失败,这次没法看到图;请如实告诉用户图像传输出了问题"
     return jsonify({"ok": "error" not in res, "tool": name, "args": targs,
                     "label": _tool_label(name, targs), "took_s": round(time.time() - t0, 1),
                     "cacheable": name in VOICE_CACHEABLE_TOOLS,
@@ -4344,9 +4352,49 @@ def assistant_rtc_call():
                      timeout=25)
         if r.status_code >= 300:
             return jsonify({"ok": False, "error": f"OpenAI {r.status_code}: {r.text[:300]}"}), 502
-        return jsonify({"ok": True, "sdp": r.text})
+        # call_id 在 Location header(官方形态):sideband 注入大 payload(图像)要用它
+        cid = (r.headers.get("Location") or "").rstrip("/").rsplit("/", 1)[-1]
+        return jsonify({"ok": True, "sdp": r.text, "call_id": cid})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:200]}), 502
+
+
+def _rtc_sideband_images(call_id: str, images: list) -> bool:
+    """经 sideband WS(官方服务端通道,wss://…/v1/realtime?call_id=X)把图像注入 WebRTC 会话。
+    为什么不走前端 data channel:SCTP 单条消息上限(Safari≈64KB),base64 笔迹图几百 KB,
+    超限发送按规范**直接关闭 dc**=通话哑死——图这种大 payload 必须从服务端边带进去。"""
+    try:
+        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+        if not key or not call_id:
+            return False
+        from websockets.sync.client import connect as _ws_connect
+        with _ws_connect(f"wss://api.openai.com/v1/realtime?call_id={call_id}",
+                         additional_headers={"Authorization": f"Bearer {key}"},
+                         open_timeout=8, close_timeout=3, max_size=None) as ws:
+            for im in images[:2]:
+                ws.send(json.dumps({"type": "conversation.item.create", "item": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_image", "detail": "high",
+                                 "image_url": f"data:{im.get('media_type') or 'image/png'};base64,{im.get('b64') or ''}"}]}}))
+            # 短窗收几帧确认没被拒(error 事件=注入失败,让调用方走 fallback)
+            import time as _t
+            t_end = _t.time() + 2.0
+            while _t.time() < t_end:
+                try:
+                    ev = json.loads(ws.recv(timeout=max(0.1, t_end - _t.time())))
+                except TimeoutError:
+                    break
+                except Exception:
+                    break
+                if ev.get("type") == "error":
+                    print(f"[rtc-sideband] error: {json.dumps(ev.get('error') or {})[:200]}", flush=True)
+                    return False
+                if ev.get("type") == "conversation.item.created":
+                    return True   # 至少一张已确认落进对话
+        return True
+    except Exception as ex:
+        print(f"[rtc-sideband] fail: {type(ex).__name__}: {str(ex)[:150]}", flush=True)
+        return False
 
 
 _RTC_USAGE_FILE = CLAUDE_DIR / "state" / "openai-usage.json"
