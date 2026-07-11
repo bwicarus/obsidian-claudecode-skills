@@ -104,14 +104,14 @@
     document.head.appendChild(css);
   })();
 
-  // 剥回答首行的语气标记 [语气:XX](AI 按 voice prompt 输出,驱动 2.0 朗读引擎的情绪;显示与朗读都不要它)。
-  // 流式撕裂保护:首块只到 "[语气:开" 没闭合 → 先 hold 显示空,等下一增量。
+  // 剥语气标记 [语气:XX](AI 按 voice prompt 输出,驱动 2.0 朗读引擎情绪;显示与朗读都不要它)。
+  // v3-⑱c 转折升级:标签可出现在**任意位置**(情绪转折点)→ 全局剥;尾部未闭合半截(流式撕裂)暂截住等下一增量。
   function stripMoodTag(t) {
     t = String(t || '');
-    var m = /^\s*[\[【]语气[::]\s*([^\]】]{1,12})[\]】]\s*/.exec(t);
-    if (m) return { text: t.slice(m[0].length), mood: m[1].trim() };
-    if (/^\s*[\[【]语?气?[::]?[^\]】]{0,12}$/.test(t) && t.trim()) return { text: '', mood: null };
-    return { text: t, mood: null };
+    var mood = null;
+    var text = t.replace(/[\[【]语气[::]\s*([^\]】]{1,12})[\]】]\s*/g, function (_, m) { mood = m.trim(); return ''; });
+    text = text.replace(/[\[【]语气?[::]?[^\]】]{0,12}$/, '');   // 尾部撕裂 hold
+    return { text: text, mood: mood };
   }
   function splitFollowups(text) {
     var fu = [];
@@ -1603,9 +1603,9 @@
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed;
-        var _sm = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_splitFollowups(answer).text) : { text: _splitFollowups(answer).text };
-        var _at = _sm.text;
-        try { window.__asstVoiceTap && window.__asstVoiceTap(_at, false, _sm.mood); } catch (_) {}   // 语音对话:回答增量喂 TTS(带 AI 给的本轮语气)
+        var _raw = _splitFollowups(answer).text;
+        var _at = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_raw).text : _raw;
+        try { window.__asstVoiceTap && window.__asstVoiceTap(_raw, false); } catch (_) {}   // tap 收**原文**(含语气标签,自己解析转折点逐句换情绪)
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
         if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
         if (_noChar) { _appendCaret(aMsg); }
@@ -1694,7 +1694,7 @@
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
-    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : (pf.text || '')), true); } catch (_) {}   // 语音对话:回答完,把尾句也念了
+    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(pf.text || '', true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析)
     var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
     if (_pft) renderMd(aMsg, _pft, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');

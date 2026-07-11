@@ -312,3 +312,8 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **机制**:voice_mode prompt 要求 AI 在回答**最开头**输出 `[语气:XX]` 标签(2~6 字情绪描述,普通内容用"平静")——正好赶在第一句合成前确定情绪(流式时序约束)。前端 `stripMoodTag`(rc-assistant,挂 RC.assistant 导出):**四处渲染/消费点全剥**(流式增量渲染/收尾最终渲染/历史回放/两处 tap),**流式撕裂保护**(首块只到"[语气:开"没闭合 → hold 显示空等下一增量);mood 经 tap 第三参数 → rc-voicecall `vt.mood`(新一轮 reset 清)→ speak 消息 `mood` 字段 → relay 两处 speak 分支 → `_tts_channel.speak(text, mood)` → uni 引擎 **context_texts 优先级:AI mood(`用{mood}的语气说`)> 面板 tts_instruction 兜底**。
 - bidi(1.0 音色)引擎忽略 mood;S2S 通话 tap 天然不触发(语气归豆包人设)。面板语气框语义改"默认/兜底"。
 - 冒烟:mood 贯穿真实合成链;JS 单元=完整标记剥离/撕裂 hold/无标记不误伤 全过。
+
+### 语气转折 + iOS 耳机路由修复(v3-⑱c,2026-07-11)
+
+- **句中语气转折**(用户设计):`[语气:XX]` 标签不限于开头——AI 在**情绪转折句前**插新标签,其后句子全按新语气,直到下一个标签(prompt 已加转折规则+标签内禁标点)。实现:tap 改收**原始文本**(含标签),`_speakSeg` 在句片内解析标签流(标签前残句按旧 mood speak → 切 vt.mood → 继续),单向 2.0 引擎每句一请求天然承接逐句变奏;渲染侧 `stripMoodTag` 升级**全局剥**+尾部撕裂截;done flush 时剥未闭合残段。单元:多标签分段/转折切换/撕裂全过。
+- **iOS 耳机路由**(用户实测:听写+朗读时戴耳机却走扬声器):页面用过麦克风后 WebKit 音频会话粘在 `play-and-record` 类别——**该类别默认强制扬声器**(蓝牙耳机被无视)。修复三件套(Safari 17+ Audio Session API):①默认+朗读 ensure 时 `navigator.audioSession.type='playback'`(纯播放=耳机优先);②开麦(getUserMedia 前)显式 `'play-and-record'`;③teardown 切回 `'playback'` + **重建朗读 AudioContext**(通话期间建的 ac 路由粘扬声器,close+null 下次拿干净会话)。

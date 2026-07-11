@@ -333,7 +333,15 @@
   // ── 朗读专用通道(?mode=tts,v3-⑬):没在语音通话时点亮「🔊 朗读」→ 回答经双向流式 TTS 播——
   //    不开麦、不连 ASR;独立 ws + 独立 AudioContext(与通话互不干扰)。点亮开关(手势内)预热。──
   var _tts = { ws: null, ac: null, playT: 0, playing: [] };
+  // iOS 音频路由(用户实测:听写+朗读时戴耳机却走扬声器):页面用过麦克风后 WebKit 会话粘在
+  // "play-and-record" 类别,该类别**默认强制扬声器**。Safari 17+ 的 Audio Session API 可声明意图:
+  // 纯播放(朗读)= 'playback' → 正常走耳机;开麦通话= 'play-and-record'。挂断后切回 playback。
+  function _audioSession(kind) {
+    try { if (navigator.audioSession) navigator.audioSession.type = kind; } catch (e) {}
+  }
+  _audioSession('playback');   // 默认:本页音频=纯播放(耳机优先)
   function _ttsEnsure() {
+    if (!ws) _audioSession('playback');   // 没在通话:确保纯播放类别(耳机路由)
     try {
       if (!_tts.ac) _tts.ac = new (window.AudioContext || window.webkitAudioContext)();
       if (_tts.ac.state !== 'running') _tts.ac.resume();
@@ -380,19 +388,31 @@
   // S2S 通话中的出声开关(独立键,默认亮):灭=丢音频只看对话窗字幕。⚠ S2S 双流恒计费(协议无输出模态
   // 开关,已全查证),灭省的是听觉干扰不是钱;真文本对话用 mic 长按的 ASR 模式(零豆包输出音频费)。
   function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
-  window.__asstVoiceTap = function (full, done, mood) {
+  // 句片里的语气标签流解析(v3-⑱c 转折):[语气:XX] 之后的文字都按新语气,直到下一个标签——
+  // 标签前的残句先按旧 mood 念,然后切换。标签内约定无标点(prompt),所以不会被句边界撕裂。
+  function _speakSeg(seg) {
+    var re = /[\[【]语气[::]\s*([^\]】]{1,12})[\]】]/g, last = 0, mm;
+    while ((mm = re.exec(seg))) {
+      var before = seg.slice(last, mm.index);
+      if (before.trim()) speak(before);
+      vt.mood = mm[1].trim();               // 情绪转折点:此后句子换新语气
+      last = re.lastIndex;
+    }
+    var rest = seg.slice(last);
+    if (rest.trim()) speak(rest);
+  }
+  window.__asstVoiceTap = function (full, done) {
     if (!speakOn()) return;                 // 「🔊 朗读」没点亮=零 TTS 成本(读比听快,用户拍板默认关)
     if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
     if (!(ws && mode === 'agent')) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
     full = String(full || '');
     if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; vt.mood = null; bargeIn(); }   // 新一轮回答开始 → 打断残播+清上轮语气
-    if (mood) vt.mood = mood;               // AI 按内容给的本轮语气([语气:XX] 标记,rc-assistant 剥离后传来)→ 2.0 引擎 context_texts
     vt.tail += full.slice(vt.sent); vt.sent = full.length;
     var re = /[^。！？!?;；,，\n]+[。！？!?;；,，\n]+/g, m, consumed = 0;   // 逗号级边界:更早开始出声
-    while ((m = re.exec(vt.tail))) { speak(m[0]); consumed = re.lastIndex; }
+    while ((m = re.exec(vt.tail))) { _speakSeg(m[0]); consumed = re.lastIndex; }
     vt.tail = vt.tail.slice(consumed);
     if (done) {
-      if (vt.tail.trim()) speak(vt.tail);
+      if (vt.tail.trim()) _speakSeg(vt.tail.replace(/[\[【]语气?[::]?[^\]】]{0,12}$/, ''));
       vt.sent = 0; vt.tail = '';
       try {
         var wd = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;
@@ -443,6 +463,7 @@
       // 由常驻 pointerdown 监听 resume 恢复声音。
       try { await Promise.race([myAc.resume(), new Promise(function (r) { setTimeout(r, 800); })]); } catch (e) {}
       if (_dead()) { _cleanLocal(); return; }
+      _audioSession('play-and-record');   // 开麦通话:显式声明(系统也会自动切,显式更稳)
       myMic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       if (_dead()) { _cleanLocal(); return; }
       ac = myAc; micStream = myMic;
@@ -507,6 +528,8 @@
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
     try { _refreshSpeakTg(); } catch (e) {}
+    _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由)
+    try { if (_tts.ac) { _tts.ac.close(); _tts.ac = null; _ttsStopPlay(); } } catch (e) {}   // 通话期建的朗读 ac 路由可能粘扬声器 → 重建拿干净会话
   }
 
   function toggle(opts) {
