@@ -276,7 +276,10 @@
     var sub = box.querySelector('.vc-sub'); if (!sub) return;
     if (who === 'u') {
       var d = document.createElement('div'); d.className = 'vc-m vc-mu'; d.textContent = text;
-      sub.appendChild(d); curAEl = null;
+      // GPT 的用户转写(whisper)异步迟到:AI 回复常已在流——用户句按时序插到进行中气泡**前面**,
+      // 不断开 curAEl(断开会让后续 delta 带全量文本另起新气泡=同一回复显示两遍)
+      if (curAEl && curAEl.parentNode === sub) sub.insertBefore(d, curAEl);
+      else { sub.appendChild(d); curAEl = null; }
     } else {
       if (!curAEl || !curAEl.parentNode) { curAEl = document.createElement('div'); curAEl.className = 'vc-m vc-ma'; sub.appendChild(curAEl); }
       curAEl.textContent = text;
@@ -829,6 +832,7 @@
       var a = {}; try { a = JSON.parse(e.arguments || '{}'); } catch (_) {}
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
+      curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false); _capMaybeHide(2500);
