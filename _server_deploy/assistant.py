@@ -1480,7 +1480,10 @@ def _t_search_image(args, ctx):
         results = list(ex.map(_one, items))
     found = [r for r in results if r["found"]]
     if not found:
-        return {"error": "这些关键词都没搜到合适的真实图片(换更通用的英文关键词,或放弃配图)"}
+        # "没搜到"是合法空结果不是故障(error 会让语音工具卡亮 ⚠、模型当成系统坏了)——引导换词重试
+        return {"ok": False, "found": 0,
+                "note": "这些关键词没搜到图。换**更通用的英文关键词**再调一次(如换成事物的英文通称/学名);"
+                        "再搜不到就如实告诉用户没找到合适的图,绝不编图片链接。"}
     return {"ok": True, "count": len(found),
             "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"]} for r in found],
             "missed": [r["concept"] for r in results if not r["found"]],
@@ -4243,6 +4246,8 @@ def assistant_voice_tool():
         res = TOOLS[name][1](targs, ctx) or {}
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    if isinstance(res, dict) and res.get("error"):   # 语音工具报错上服务器日志(排障:journalctl -u webapp | grep voice-tool)
+        print(f"[voice-tool] {name} args={json.dumps(targs, ensure_ascii=False)[:200]} err={str(res['error'])[:200]}", flush=True)
     # ㉜ 语音场景配图渲染:search_image 结果在语音链路(仅本端点)附 client_action → 前端图卡进侧栏对话流。
     #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
     if name == "search_image" and isinstance(res, dict) and res.get("images"):
