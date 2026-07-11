@@ -4272,7 +4272,8 @@ _VOICE_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
 _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialect",
                      "bot_name", "speaking_style", "system_role", "enable_music",
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
-                     "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image")
+                     "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
+                     "rt_instructions", "rt_eagerness")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

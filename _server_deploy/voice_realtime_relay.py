@@ -1229,9 +1229,20 @@ def _oa_log_usage(usage: dict):
 def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     """OpenAI 版 system instructions:角色 + 直塞内容(页文本/生词/插图),无 JSON 工具协议段(原生 FC)。"""
     cfg = _creds()
-    parts = [cfg.get("system_role",
-                     "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。"),
-             "永远用中文口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
+    lang = (cfg.get("rt_lang") or "").strip()   # ㉖b:回答语言(""=自动跟随;写死中文曾让它用中文读音念日语)
+    if lang == "zh":
+        lang_line = "默认用中文口语回答;朗读书里的日语/英语原文时用该语言的**原生发音**念,绝不用中文读音念外语。"
+    elif lang == "ja":
+        lang_line = "日本語で答えてください。本の原文を読み上げるときは、その言語本来の発音で読んでください。"
+    elif lang == "en":
+        lang_line = "Respond in English. When reading passages aloud, pronounce them in their original language."
+    else:
+        lang_line = ("**跟随用户说话的语言**回答(他说中文就用中文,日本語なら日本語で);"
+                     "朗读书页原文时按内容本身的语言用**原生发音**念——日语内容用日语读音,不要用中文读音念日语汉字。")
+    parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
+             "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
+             lang_line,
+             "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你连着他的阅读器,配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等"
              "需要动手的事**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
              "工具描述里写了 args 字段的用法,照着填。你没有联网搜索能力(search_all_books 只搜他的书库);"
@@ -1317,9 +1328,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             "instructions": _oa_instructions(book, file_rel, page),
             "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
                                 # semantic_vad(2.1 招牌):按**语义**判断说完没——说话中途停顿思考不抢话(官方推荐配置;server_vad 是纯静音计时的降级品)
-                                "turn_detection": {"type": "semantic_vad", "eagerness": "auto",
+                                "turn_detection": {"type": "semantic_vad",
+                                                   "eagerness": (cred.get("rt_eagerness") or "auto"),
                                                    "create_response": True, "interrupt_response": True},
-                                "transcription": {"model": "gpt-realtime-whisper"}},
+                                "transcription": ({"model": "gpt-realtime-whisper", "language": cred["rt_lang"]}
+                                                  if cred.get("rt_lang") in ("zh", "ja", "en")
+                                                  else {"model": "gpt-realtime-whisper"})},   # 语言提示跟设置走(转写准确率也受益;自动=不带)
                       "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": cred.get("rt_voice") or "marin"}},   # ⚠ rate 必填:漏掉=session.update 整条被拒,会话跑默认裸配置(无人设无工具无转写=复读机)
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,   # 我们的工具多有副作用/顺序依赖,串行更稳
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}     # 官方:低频批量截断,保缓存前缀稳定(比逐轮小截强)
