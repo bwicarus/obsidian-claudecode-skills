@@ -358,3 +358,19 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
   ②**dialog_ctx**(`context_type:"dialog_ctx"`+`context_data`,成段语境,**仅 asr_v2 开时**注入防 1.0 握手不认):从新到旧=页面文本摘要(350字)+ 最近两轮对话(各120字),≤800 tokens 预算内——2.0 的 +20% 关键词召回主打场景。
 - **注入时机**:sauc 协议只认握手配置(无中途更新帧)→ **每次长按开 ASR 时快照当下语境**;通话中翻页滞后接受(下次开启即新)。
 - 链路:前端 `_agentCtxQs()`(RC.adapter().getContext() 回退 __voiceContext)把 file/page 拼进 `?mode=agent` 的 qs → relay `handle_agent(bws, file_rel, page)` 握手前复用 `_fetch_book_ctx`(页文本/生词/助手历史一把拉)构造 corpus,拉取失败裸连不阻塞。冒烟:hot=34 注入成功、1.0 兼容、agent_ready 正常。
+
+### 字幕联动 + 听写朗读互斥 + GPT Realtime 第二引擎(v3-㉔,2026-07-11)
+
+- **字幕↔侧栏联动**(用户设计):MutationObserver 侦听 `#ep-side` class——开侧栏 `capClear()` 字幕立即消失(其内的"回等待"被 `_capVisible` gate 自然拦住);关侧栏且语音功能活跃(通话/朗读/听写)→ `capWait(true)` 自动回来。
+- **听写-朗读互斥**(耳机路由残余根治):Apple 听写(Web Speech)占麦时 iOS 会话=录音类别 → 朗读被强制扬声器,这是"修完还不走耳机"的根因。修 = 自动发送后 `micHold` 暂停听写(onend 不重启,按钮回暗)+ `__vcDictAudioOff` 关掉听写期间建的朗读 AudioContext(路由已粘,重建拿干净 playback=耳机);回答完且 `__vcTtsBusy`(还有句在播/在队)为假 → `_micResumeWhenQuiet` 恢复连续听、按钮亮回。副产物=根治 AI 朗读被听写录回去的回声。
+- **GPT Realtime 第二引擎**(用户要求,`gpt-realtime-2.1-mini`,2026-07-06 发布):
+  - **凭证** `~/.config/openai-realtime.json`(chmod 600,**绝不进 git**);key 已验证有效。
+  - **架构=协议翻译层** `handle_openai(bws, file_rel, page)`:OpenAI GA 事件 ↔ 前端既有豆包事件语义——`speech_started→450`(打断+truncate)、`input_audio_transcription.completed→451`、`output_audio_transcript.delta→550`、`output_audio.delta→PCM 裸转发`、`response.done→359`、工具→`tool_status`/`client_action`。**前端唯一改动**=`up_rate` 事件把上行采样从 16k 切 24k(OpenAI 只吃 24kHz;`_upRate` 参数化 onCap,teardown/start 复位 16k)。
+  - **工具=原生 function calling**:voice-tools 目录行直接当 description(args 用法在文中),parameters 宽松 schema(`additionalProperties:true`)透传 dispatch——**不再需要豆包那套 JSON 协议/静音/代播确认语 hack**。`deep_think`(转交侧栏 chat/Claude 拿答案回填,GPT 自己念)和 `recall_study`(`_study_digest` 直接回填,128k 上下文吃得下)作虚拟工具保留。
+  - **上下文**:页文本进 instructions(GA 的 session.update 部分更新**不重置对话**,翻页即热更);选中/笔迹状态走 `conversation.item.create` system 消息——与豆包 510 增量哲学同构。128k 窗口(豆包 12K 的 10 倍)。
+  - **打断**:server_vad `interrupt_response:true` 自动 cancel;WS 场景 **truncate 必须 relay 发**(`conversation.item.truncate`,audio_end_ms=已转发字节/48 近似已播时长),不发模型会以为整段都说完了。
+  - **切换**:语音设置卡「通话引擎」下拉(voice-config `rt_engine`:空=豆包 S2S/`openai`)——`handle_browser` 无 mode 分发时按凭证选 handler,**电话按钮同一入口零改**。`rt_model`/`rt_voice`(默认 marin)可配。
+  - **价格**(官方):mini 音频 in $10/M、cached $0.3/M、out $20/M(**输出约豆包 S2S 的一半**);文本 $0.6/$2.4。会话上限 60 分钟(到点断线,前端既有重连机制会重拨=新会话)。
+  - 调研全文(GA 事件名/字段/坑)存档:见本节上方 agent 调研结论(模型谱系/事件清单/function calling 序列/truncation 语义)。
+
+**㉔ GPT Realtime session 配置补全**(据用户上传的 2.1 官方说明书):`reasoning.effort` 默认 low(官方:普通语音代理别默认 high,延迟/成本;凭证 rt_effort 可调)、`max_output_tokens:2048`(护栏,1–4096/inf)、`parallel_tool_calls:False`(我们工具多有副作用/顺序依赖,串行稳)、`truncation:retention_ratio 0.8`(官方力荐:低频批量截断保缓存前缀,比默认逐轮小截强)。加 **`wait_for_user` 静音 no-op 工具**(官方提示指南:背景噪声/等待音乐/没在对助手说话时它调这个 → relay 收到回空 output **不发 response.create**=不出声,省音频费不寒暄)。instructions 加写操作先说一句+成功才报完成+音频含糊请重说(官方工具安全策略)。**冒烟**:relay 连 OpenAI 全链路通(handle_openai 分发/WebSocket 连接/认证全过),唯一卡点=**测试 key 报 insufficient_quota(额度不足)**——协议翻译层无误,待 OpenAI 账户充值即可用;首帧 error 已明确回前端(带充值提示)。豆包引擎不受影响(rt_engine 默认空)。**账单**(官方 response.done.usage 为准):按 session+response 幂等入账,分模态/缓存/输入输出累计;input transcription 是**另一个模型另计费**(在 transcription.completed.usage,别漏)。会话 60min 上限,到点断线走前端既有重连=新会话(上下文不跨连接,需要续接得自己重建)。

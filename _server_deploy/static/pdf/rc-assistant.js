@@ -312,6 +312,10 @@
       var c = d.cfg || {};
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       card.innerHTML =
+        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_engine" style="flex:1 1 100%">' +
+          '<option value=""' + (!c.rt_engine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
+          '<option value="openai"' + (c.rt_engine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime 2.1 mini(原生工具·128k上下文·音频费约豆包一半)</option>' +
+        '</select></div>' +
         '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
           _VC_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.speaker || _VC_SPK[0][0]) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
         '</select></div>' +
@@ -1881,20 +1885,31 @@
   var micRec = null, micOn = false, micCommitted = '', micSessFinal = '', micSessTok = null, micLastWrite = '';
   var micStartTs = 0, micLastStart = 0, micFails = 0, micSessProductive = false;   // 总时长软上限 + 空转(弱网/无语音)退避
   var micAutoT = null;   // 听写自动发送(用户设计:跟豆包 ASR 一样,说完一句静默即发,连续对话)
+  var micHold = false;   // 听写-朗读互斥(㉔):发送后暂停听写,AI 播完再恢复——否则听写占麦让 iOS 会话粘录音类别,
+                         // 朗读被强制走扬声器(用户报告的"戴耳机不走耳机"残余场景);顺带根治 AI 声音被听写录回去
+  function _micResumeWhenQuiet() {
+    if (!micOn) { micHold = false; return; }
+    var busy = false;
+    try { busy = !!(window.__vcTtsBusy && window.__vcTtsBusy()); } catch (_) {}
+    if (busy || streaming) { setTimeout(_micResumeWhenQuiet, 600); return; }   // 回答还在生成/朗读还在响 → 再等
+    micHold = false; micBtn.classList.add('on'); micSpin();                    // 安静了:恢复连续听
+  }
   function _micAutoSend() {
     if (!micOn) return;
     if (streaming) { micAutoT = setTimeout(_micAutoSend, 1200); return; }   // 上一条还在答:等答完再发,别丢话
     var t = (ta.value || '').trim();
     if (!t) return;
-    micSessTok = null;                  // 作废当前段:迟到 onresult 不回填(发送后识别重起 fresh 新段)
+    micSessTok = null;                  // 作废当前段:迟到 onresult 不回填
     micCommitted = ''; micSessFinal = ''; micLastWrite = '';
     ta.value = ''; autorow();
-    try { micRec && micRec.stop(); } catch (_) {}   // onend(micOn 仍真)→ micSpin 重起继续听
-    send(t);
+    micHold = true;                     // 暂停听写(onend 不重启),按钮回暗=「AI 在说」;播完 _micResumeWhenQuiet 自动亮回
+    try { window.__vcDictAudioOff && window.__vcDictAudioOff(); } catch (_) {}   // 关掉听写期间建的朗读 ac(路由粘扬声器),tap 重建拿干净耳机会话
+    try { micRec && micRec.stop(); } catch (_) {}
+    Promise.resolve(send(t)).then(_micResumeWhenQuiet, _micResumeWhenQuiet);
   }
   function micStop() {                 // 手动停:micOn=false + 作废会话 → 迟到 onresult 不回填、onend 不重启
     if (!micOn) return;
-    micOn = false; micSessTok = null; micFails = 0;
+    micOn = false; micSessTok = null; micFails = 0; micHold = false;
     if (micAutoT) { clearTimeout(micAutoT); micAutoT = null; }
     try { micRec && micRec.stop(); } catch (_) {}
     micBtn.classList.remove('on');
@@ -1930,6 +1945,7 @@
         micSessFinal = '';
         micBtn.classList.remove('on');
         if (!micOn) { autorow(); return; }
+        if (micHold) return;   // 发送后暂停中(AI 在答/在念):不重启,_micResumeWhenQuiet 到点恢复(按钮暗=暂停,亮回=继续听)
         if (Date.now() - micStartTs > 120000) { micStop(); return; }   // 总时长软上限 2min:忘关也不会一直占麦
         // 这段没出任何结果且很快就结束 = 疑似弱网/引擎空转 → 累计 5 次即停;出过结果或在正常等静默则清零
         if (!micSessProductive && (Date.now() - micLastStart) < 1200) { if (++micFails >= 5) { micStop(); return; } }

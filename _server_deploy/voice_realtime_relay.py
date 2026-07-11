@@ -1171,6 +1171,327 @@ async def handle_tts_only(bws):
             pass
 
 
+# ── GPT Realtime 引擎(㉔):OpenAI gpt-realtime-2.1-mini 作第二实时语音引擎(凭证 rt_engine=="openai" 切换)──
+# 定位=**协议翻译层**:OpenAI GA 事件 ↔ 前端既有豆包事件语义(450/451/550/359/tool_status/client_action),
+# 前端零逻辑改动(仅 up_rate 事件把上行采样切 24k——OpenAI 只吃 24kHz pcm)。
+# 工具=原生 function calling(session.tools),不需要豆包那套 JSON 协议/静音/代播确认语 hack;
+# 工具描述直接用 voice-tools 目录行(args 用法在 description 里),参数 schema 宽松透传给 dispatch。
+# 上下文 128k(豆包 12K 的 10 倍):页文本进 instructions(session.update 部分更新不重置对话),
+# 状态(选中/笔迹)走 conversation.item.create system 消息——与豆包 510 增量哲学同构。
+OPENAI_RT_CRED = Path("~/.config/openai-realtime.json").expanduser()
+OPENAI_RT_URL = "wss://api.openai.com/v1/realtime?model="
+
+
+def _openai_key() -> str:
+    try:
+        return json.loads(OPENAI_RT_CRED.read_text("utf-8")).get("api_key") or ""
+    except Exception:
+        return ""
+
+
+def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
+    """OpenAI 版 system instructions:角色 + 直塞内容(页文本/生词/插图),无 JSON 工具协议段(原生 FC)。"""
+    cfg = _creds()
+    parts = [cfg.get("system_role",
+                     "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。"),
+             "永远用中文口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
+             "你连着他的阅读器,配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等"
+             "需要动手的事**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
+             "工具描述里写了 args 字段的用法,照着填。你没有联网搜索能力(search_all_books 只搜他的书库);"
+             "要网上实时信息就如实说没法联网,凭记忆答要先声明可能过时。"
+             "只读查询(查词/看图/搜索/读页)意图清楚就直接调;写操作(高亮/做卡片/写笔记/插入页)先用一句话说清你要做什么再做。"
+             "工具成功返回后才能说『已完成』;同样参数失败别重复调超过一次。音频含糊/有噪声时别猜,简短请他重说一遍。"]
+    pt = (book.get("page_text") or "").strip()
+    if pt:
+        name = (file_rel.rsplit("/", 1)[-1] or "这本书")
+        parts.append(f"用户此刻正在读《{name}》第 {page} 页,本页文字内容(直接可用):\n{pt[:1500]}")
+    figs = book.get("figures") or []
+    fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
+    if fx:
+        parts.append(f"本页插图的文字描述:{fx[:1000]}")
+    vocab = book.get("vocab") or []
+    if vocab:
+        parts.append("本页『还没掌握』的生词:" + "、".join(vocab[:30]))
+    parts.append("页面实时状态(选中/手写笔迹)会以 system 消息出现在对话里,以最新一条为准;一条都没有=本页当前无选中无笔迹。")
+    return "\n".join(parts)
+
+
+async def _oa_deep(question: str, file_rel: str, page: int) -> str:
+    """deep_think(OpenAI 版):转交侧栏 chat(Claude,深度预设选型)拿完整回答当 function output 回填,GPT 自己念。"""
+    if not question:
+        return "(问题为空)"
+    body = {"message": "(语音深度思考,直接给最终回答,口语化短句)\n" + question,
+            "rid": f"oa{uuid.uuid4().hex[:10]}", "voice": "s2s",
+            "context": ({"file_rel": file_rel, "page": page} if file_rel else {})}
+    answer = ""
+    try:
+        async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=300) as hc:
+            async with hc.stream("POST", "/api/assistant/chat", json=body) as r:
+                ev, data = "", ""
+                async for line in r.aiter_lines():
+                    if line.startswith("event:"):
+                        ev = line[6:].strip()
+                    elif line.startswith("data:"):
+                        data += line[5:].strip()
+                    elif not line.strip():
+                        if ev == "answer" and data:
+                            try:
+                                parsed = json.loads(data)
+                                if isinstance(parsed, str):
+                                    answer = re.split(r"\n?FOLLOWUP[::]", parsed)[0]
+                            except Exception:
+                                pass
+                        ev, data = "", ""
+    except Exception as ex:
+        return f"(深度思考失败:{str(ex)[:100]})"
+    return answer[:3000] or "(没拿到回答)"
+
+
+async def handle_openai(bws, file_rel: str = "", page: int = 0):
+    key = _openai_key()
+    if not key:
+        await bws.send(json.dumps({"event": -1, "payload": {"error": "缺 OpenAI 凭证:~/.config/openai-realtime.json"}}, ensure_ascii=False))
+        await bws.close()
+        return
+    cred = _creds()
+    model = cred.get("rt_model") or "gpt-realtime-2.1-mini"
+    vc = await _fetch_book_ctx(file_rel, page)
+    book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
+            "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None}
+    lines = await _fetch_tools_lines()
+    tools = [{"type": "function", "name": n, "description": str(line)[:1024],
+              "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
+             for n, line in lines.items()]
+    tools.append({"type": "function", "name": "deep_think",
+                  "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
+                  "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
+                                 "required": ["question"], "additionalProperties": True}})
+    tools.append({"type": "function", "name": "recall_study",
+                  "description": "回顾学习记录:『今天学了什么/之前讲过没/复盘』一类问题,取回用户学习时间线摘要(页码/查词/问答);span 可选 today/week。",
+                  "parameters": {"type": "object", "properties": {"span": {"type": "string"}}, "additionalProperties": True}})
+    # 静音 no-op(官方提示指南):背景噪声/等待音乐/没在对助手说话时调它,结束本轮不出声 → 不触发寒暄、省音频费
+    tools.append({"type": "function", "name": "wait_for_user",
+                  "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。不确定但像是在对你说话时,别调它,简短请对方重说一遍。",
+                  "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
+    sess = {"type": "realtime", "output_modalities": ["audio"],
+            "reasoning": {"effort": cred.get("rt_effort") or "low"},   # 官方:普通语音代理从 low 起,别默认 high(延迟/成本)
+            "max_output_tokens": 2048,                                  # 护栏(1–4096/inf);朗读答案本就该短,分段更好
+            "instructions": _oa_instructions(book, file_rel, page),
+            "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
+                                "turn_detection": {"type": "server_vad", "silence_duration_ms": 700,
+                                                   "create_response": True, "interrupt_response": True},
+                                "transcription": {"model": "gpt-realtime-whisper"}},
+                      "output": {"format": {"type": "audio/pcm"}, "voice": cred.get("rt_voice") or "marin"}},
+            "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,   # 我们的工具多有副作用/顺序依赖,串行更稳
+            "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}     # 官方:低频批量截断,保缓存前缀稳定(比逐轮小截强)
+    try:
+        ows = await websockets.connect(OPENAI_RT_URL + model,
+                                       additional_headers={"Authorization": f"Bearer {key}"},
+                                       max_size=16 * 1024 * 1024, open_timeout=15)
+    except Exception as ex:
+        await bws.send(json.dumps({"event": -1, "payload": {"error": f"OpenAI 连接失败:{str(ex)[:80]}"}}, ensure_ascii=False))
+        await bws.close()
+        return
+    played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item(打断 truncate 用:已转发字节≈已播时长)
+    cur_a = {"txt": ""}
+
+    async def _tool(name: str, args: dict, call_id: str):
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
+        out, ok, label, took = "", True, name, None
+        try:
+            if name == "recall_study":
+                span = str(args.get("span") or "today").lower()
+                out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
+                label = "回顾学习"
+            elif name == "deep_think":
+                out = await _oa_deep(str(args.get("question") or ""), file_rel, book.get("page") or page)
+                label = "深度思考"
+            else:
+                cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
+                ctx = {"file_rel": file_rel, "page": book.get("page") or page}
+                if book.get("ink_strokes"):
+                    ctx["ink"] = book["ink_strokes"]
+                if book.get("sel"):
+                    ctx["selection"] = book["sel"]
+                async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
+                    r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
+                    d = r.json()
+                ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
+                res = d.get("result") or {}
+                ca = res.get("client_action")
+                if isinstance(ca, dict) and ca.get("fn"):
+                    await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
+                slim = {k: v for k, v in res.items() if k != "client_action"}
+                lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
+                out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+        except Exception as ex:
+            ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
+        try:
+            await ows.send(json.dumps({"type": "conversation.item.create",
+                                       "item": {"type": "function_call_output", "call_id": call_id, "output": out}}))
+            await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
+        except Exception:
+            pass
+        await bws.send(json.dumps({"event": "tool_status", "payload": {
+            "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
+            "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+        _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
+              args=args, brief=out[:300])
+
+    async def up():
+        async for msg in bws:
+            if isinstance(msg, (bytes, bytearray)):
+                try:
+                    await ows.send(json.dumps({"type": "input_audio_buffer.append",
+                                               "audio": base64.b64encode(bytes(msg)).decode()}))
+                except Exception:
+                    return
+                continue
+            try:
+                j = json.loads(msg)
+            except Exception:
+                continue
+            t = j.get("type")
+            if t == "finish":
+                return
+            if t in ("cancel", "tool_abort"):
+                try:
+                    await ows.send(json.dumps({"type": "response.cancel"}))
+                except Exception:
+                    pass
+            elif t == "page":
+                np = int(j.get("page") or 0)
+                f2 = j.get("file") or file_rel
+                if np and np != book.get("page"):
+                    vc2 = await _fetch_book_ctx(f2, np)
+                    book.update({"page": np, "page_text": vc2.get("page_text") or "",
+                                 "vocab": vc2.get("vocab") or [], "figures": vc2.get("figures") or []})
+                    try:   # instructions 部分更新不重置对话(GA 语义),页面语境跟着翻页走
+                        await ows.send(json.dumps({"type": "session.update", "session": {
+                            "type": "realtime", "instructions": _oa_instructions(book, f2, np)}}))
+                        sys.stderr.write(f"[voice-oa] 翻页同步 → p{np}({len(book['page_text'])}字)\n")
+                    except Exception:
+                        pass
+            elif t in ("state", "ink"):
+                sel = (j.get("sel") or "").strip()
+                book["sel"] = sel[:400]
+                if j.get("strokes"):
+                    book["ink_strokes"] = j.get("strokes")
+                bits = []
+                bits.append(f"用户当前选中了「{sel[:200]}」(他说『这段/我选的』就指它)" if sel else "当前无选中")
+                if book.get("ink_strokes"):
+                    bits.append("本页有手写笔迹(看内容用 see_ink 工具)")
+                try:   # 状态=对话内 system 增量消息(与豆包 510 同哲学:前缀不动,历史缓存全保)
+                    await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                        "type": "message", "role": "system",
+                        "content": [{"type": "input_text", "text": "(状态更新:" + ";".join(bits) + ",以本条为准)"}]}}))
+                except Exception:
+                    pass
+            elif t == "text" and (j.get("content") or "").strip():   # 打字提问(不说话时)
+                try:
+                    await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": j["content"][:2000]}]}}))
+                    await ows.send(json.dumps({"type": "response.create"}))
+                except Exception:
+                    pass
+
+    async def down():
+        async for raw in ows:
+            try:
+                e = json.loads(raw)
+            except Exception:
+                continue
+            t = e.get("type")
+            if t == "response.output_audio.delta":
+                try:
+                    pcm = base64.b64decode(e.get("delta") or "")
+                except Exception:
+                    continue
+                played["id"] = e.get("item_id") or played["id"]
+                played["bytes"] += len(pcm)
+                await bws.send(pcm)   # PCM16 24k 裸转发,前端 playPcm 原样吃
+            elif t == "response.output_audio_transcript.delta":
+                d0 = e.get("delta") or ""
+                cur_a["txt"] += d0
+                await bws.send(json.dumps({"event": 550, "payload": {"content": d0}}, ensure_ascii=False))
+            elif t == "input_audio_buffer.speech_started":
+                await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))   # 前端清播放队列
+                if played["id"]:
+                    try:   # WS 场景 truncate 必须自己发:把用户没听到的音频从模型上下文删掉(不发会话会错位)
+                        await ows.send(json.dumps({"type": "conversation.item.truncate", "item_id": played["id"],
+                                                   "content_index": 0, "audio_end_ms": int(played["bytes"] / 48)}))
+                    except Exception:
+                        pass
+                    played.update({"id": None, "bytes": 0})
+            elif t == "conversation.item.input_audio_transcription.completed":
+                txt = (e.get("transcript") or "").strip()
+                if txt:
+                    await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": False}]}}, ensure_ascii=False))
+                    _vlog("q", text=txt, page=book.get("page") or page, book=file_rel)
+            elif t == "response.function_call_arguments.done":
+                name = e.get("name") or ""
+                try:
+                    args = json.loads(e.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                if name == "wait_for_user":   # 静音 no-op:回空 output 结束本轮,**不发 response.create**(不出声)
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.create",
+                                                   "item": {"type": "function_call_output",
+                                                            "call_id": e.get("call_id") or "", "output": "{}"}}))
+                    except Exception:
+                        pass
+                elif name:
+                    asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
+            elif t == "response.done":
+                if cur_a["txt"].strip():
+                    _vlog("a", text=cur_a["txt"][:2000], page=book.get("page") or page, book=file_rel)
+                    cur_a["txt"] = ""
+                try:
+                    u = (e.get("response") or {}).get("usage") or {}
+                    if u:
+                        sys.stderr.write(f"[voice-oa] usage {json.dumps(u)[:220]}\n")
+                except Exception:
+                    pass
+                await bws.send(json.dumps({"event": 359, "payload": {}}, ensure_ascii=False))
+                played.update({"id": None, "bytes": 0})
+            elif t == "error":
+                m0 = str(((e.get("error") or {}) or {}).get("message") or "")[:120]
+                sys.stderr.write(f"[voice-oa] err {m0}\n")
+                if "cancel" not in m0.lower():   # 无进行中 response 时 cancel 的报错是常态噪声,不上屏
+                    await bws.send(json.dumps({"event": -1, "payload": {"error": m0}}, ensure_ascii=False))
+
+    try:
+        first = json.loads(await asyncio.wait_for(ows.recv(), timeout=15))
+        if first.get("type") == "error":   # 额度不足/鉴权失败等 → 明确回前端,别让它以为莫名断线
+            em = str(((first.get("error") or {}) or {}).get("message") or "OpenAI 拒绝了连接")[:140]
+            code = ((first.get("error") or {}) or {}).get("code") or ""
+            hint = "(OpenAI 账户额度不足,去 platform.openai.com 充值/检查这个 key 的额度)" if "quota" in str(code).lower() else ""
+            await bws.send(json.dumps({"event": -1, "payload": {"error": "GPT Realtime:" + em + hint}}, ensure_ascii=False))
+            sys.stderr.write(f"[voice-oa] 首帧 error: {em}\n")
+            return
+        if first.get("type") != "session.created":
+            sys.stderr.write(f"[voice-oa] 首帧异常: {str(first)[:150]}\n")
+        await ows.send(json.dumps({"type": "session.update", "session": sess}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "up_rate", "payload": {"rate": 24000}}, ensure_ascii=False))   # 前端切 24k 采样
+        await bws.send(json.dumps({"event": 150, "payload": {"engine": "openai", "model": model}}, ensure_ascii=False))
+        sys.stderr.write(f"[voice-oa] session up model={model} tools={len(tools)} p{page}({len(book['page_text'])}字)\n")
+        t_up = asyncio.create_task(up())
+        t_dn = asyncio.create_task(down())
+        _done, _pend = await asyncio.wait({t_up, t_dn}, return_when=asyncio.FIRST_COMPLETED)
+        for p_ in _pend:
+            p_.cancel()
+    except Exception as ex:
+        sys.stderr.write(f"[voice-oa] {ex}\n")
+    finally:
+        for w in (ows, bws):
+            try:
+                await w.close()
+            except Exception:
+                pass
+
+
 async def handle_agent(bws, file_rel: str = "", page: int = 0):
     cred = _creds()
     if not cred.get("api_key"):
@@ -1309,6 +1630,9 @@ async def handle_browser(bws):
     except Exception:
         pass
     cred = _creds()
+    if cred.get("rt_engine") == "openai":   # ㉔:通话引擎切 GPT Realtime(电话按钮同一入口,relay 层换引擎)
+        await handle_openai(bws, file_rel, page)
+        return
     if cred.get("api_key"):
         # 新版鉴权(实测 2026-07):单 API Key,只要 X-Api-Key + Resource-Id,无需 APP ID/固定 App-Key
         headers = {

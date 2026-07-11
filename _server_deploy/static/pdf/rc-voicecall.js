@@ -304,15 +304,16 @@
 
   // ── 采集(mic → 16k PCM 20ms/包)──
   var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("vccap",C);';
+  var _upRate = 16000;   // 上行采样率:豆包=16k;GPT Realtime 只吃 24k(relay 的 up_rate 事件动态切)
   function onCap(chunk, rate) {
     var m = new Float32Array(f32buf.length + chunk.length);
     m.set(f32buf); m.set(chunk, f32buf.length); f32buf = m;
-    var need = Math.round(rate * 0.02);
+    var need = Math.round(rate * 0.02), outN = Math.round(_upRate * 0.02);
     while (f32buf.length >= need) {
       var seg = f32buf.subarray(0, need); f32buf = f32buf.slice(need);
-      var out = new Int16Array(320);
-      for (var i = 0; i < 320; i++) {
-        var v = seg[Math.min(need - 1, Math.floor(i * need / 320))];
+      var out = new Int16Array(outN);
+      for (var i = 0; i < outN; i++) {
+        var v = seg[Math.min(need - 1, Math.floor(i * need / outN))];
         out[i] = Math.max(-32768, Math.min(32767, v * 32768));
       }
       if (ws && ws.readyState === 1) ws.send(out.buffer);
@@ -493,6 +494,24 @@
   window.__vcCapStatus = capStatus;   // rc-assistant 的 tool 事件也走字幕状态行(侧栏关着时能看到 agent 在干嘛)
   window.__vcCapUser = function (text) { _cap.dictating = true; capUser(text); };        // Apple 听写转写上字幕(侧栏关时)
   window.__vcCapDictEnd = function () { _cap.dictating = false; _capMaybeHide(4000); };  // 听写结束:几秒后淡出
+  window.__vcTtsBusy = function () {   // 朗读是否还在响/还有句没播(听写暂停-恢复的依据)
+    return !!(_tts.playing.length || _cap.pend.length);
+  };
+  window.__vcDictAudioOff = function () {   // 听写发送前:关掉朗读 AudioContext——它若建于听写(录音会话)期间,路由粘扬声器;
+    try { if (_tts.ac) { _tts.ac.close(); _tts.ac = null; _ttsStopPlay(); } } catch (e) {}   // 麦释放后 tap 重建即拿干净 playback 会话(耳机)
+    _audioSession('playback');
+  };
+  // 侧栏开闭 ↔ 字幕联动(㉔,用户设计):开侧栏字幕立即消失(对话流可见,不重复);
+  // 关侧栏且语音功能活跃(通话/朗读/听写)→ 字幕/等待指示自动回来。
+  (function _capSideHook(n) {
+    var side = document.getElementById('ep-side');
+    if (!side) { if (n < 30) setTimeout(function () { _capSideHook(n + 1); }, 900); return; }
+    new MutationObserver(function () {
+      var open = side.classList.contains('open');
+      if (open) capClear();   // capClear 内的"回等待"经 capWait→_capVisible gate(侧栏开)自然不亮
+      else if (ws || speakOn() || _cap.dictating) capWait(true);
+    }).observe(side, { attributes: true, attributeFilter: ['class'] });
+  })(0);
 
   // ── 朗读专用通道(?mode=tts,v3-⑬):没在语音通话时点亮「🔊 朗读」→ 回答经双向流式 TTS 播——
   //    不开麦、不连 ASR;独立 ws + 独立 AudioContext(与通话互不干扰)。点亮开关(手势内)预热。──
@@ -650,6 +669,7 @@
     // 连接世代:teardown/新 start 都推进 _gen;在飞的旧 start 每个 await 后自检,过期就清掉
     // 自己建的资源退出(否则 iOS 卡死的旧回合会在用户触屏后"复活",跟新回合抢出双连接+泄漏 AudioContext)
     var g = ++_gen, myAc = null, myMic = null;
+    _upRate = 16000;   // 每次连接默认 16k(豆包);GPT Realtime 由 relay 的 up_rate 事件切 24k
     function _dead() { return g !== _gen; }
     function _cleanLocal() {
       try { if (myMic) myMic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
@@ -697,6 +717,7 @@
         var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
         if (mode === 'agent') { handleAgentMsg(m); return; }
         var p = m.payload || {};
+        if (m.event === 'up_rate') { _upRate = p.rate || 16000; return; }   // relay 声明上行采样率(GPT Realtime=24k)
         if (m.event === 'client_action') { dispatch(p.fn, p.args); return; }
         if (m.event === 'tool_status') { onToolStatus(p); return; }   // 执行通知 → 固定状态按钮(不进对话流,用户设计)
         if (m.event === -1 || m.event === 153 || m.event === 599 || m.code) { setSt('⚠ ' + (p.error || p.message || '').slice(0, 60)); return; }
