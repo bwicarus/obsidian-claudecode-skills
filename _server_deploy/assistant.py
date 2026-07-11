@@ -4159,6 +4159,8 @@ def assistant_voice_ctx():
         page = 0
     strokes = body.get("strokes") or None
     inked, figs, has_ink, vocab = "", [], False, []
+    if file_rel.lower().endswith(".epub"):   # ㉟:圈画/生词提取全按 PDF 页渲染,epub 无意义→干净空结构(页文本另有 page-text 分流)
+        return jsonify({"ok": True, "inked_text": "", "figures": [], "has_ink": False, "vocab": []})
     if file_rel and page:
         try:
             import pdf_reader as _pdfm
@@ -4339,13 +4341,19 @@ def assistant_rtc_session():
              "这类跟进问题,同样先调 see_ink 重新看;没重新看就凭旧印象答『没有变化』是错误行为。"]
     if file_rel and page:
         try:
-            import fitz
-            _ap = _pdf()._safe_vault_path(file_rel)
-            _d0 = fitz.open(str(_ap))
-            _pt = (_d0[page - 1].get_text("text") or "").strip()
-            _d0.close()
-            if _pt:
-                parts.append(f"用户此刻正在读《{file_rel.rsplit('/', 1)[-1]}》第 {page} 页,本页文字内容(直接可用):\n{_pt[:1500]}")
+            _name = file_rel.rsplit("/", 1)[-1]
+            if file_rel.lower().endswith(".epub"):   # ㉟ EPUB:page=section idx+1,取章节纯文本(fitz 开 epub 分页错位,绝不走)
+                _pt = "\n".join(_pdf()._epub_section_paragraphs(file_rel, page - 1)).strip()
+                if _pt:
+                    parts.append(f"用户此刻正在读《{_name}》第 {page} 章(节),本节文字内容(直接可用):\n{_pt[:1500]}")
+            else:
+                import fitz
+                _ap = _pdf()._safe_vault_path(file_rel)
+                _d0 = fitz.open(str(_ap))
+                _pt = (_d0[page - 1].get_text("text") or "").strip()
+                _d0.close()
+                if _pt:
+                    parts.append(f"用户此刻正在读《{_name}》第 {page} 页,本页文字内容(直接可用):\n{_pt[:1500]}")
         except Exception:
             pass
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"

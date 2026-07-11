@@ -1794,10 +1794,12 @@
   window.__asstVoiceLog = function (q, a, file, page) {   // 通话轮次落库(与文字对话同一历史,清空一起清)
     if (!q && !a) return;
     try {
+      if (HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo,与侧栏历史/清空同源)
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify({ user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' }) }).catch(function () {});
     } catch (e) {}
   };
+  window.__asstHistUrl = function () { return _HISTURL; };   // ㉟ 语音重连历史回放读侧栏同一端点(EPUB=本书 epub-convo)
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
   function trackTask(id, label) {

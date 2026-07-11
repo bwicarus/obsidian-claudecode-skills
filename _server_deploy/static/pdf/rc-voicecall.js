@@ -908,7 +908,8 @@
   }
   async function _rtcInjectHistory() {   // ㉞ 重连历史回放:服务端对话记录压成一条 system(官方指南 8.4 摘要形态,
     try {                                //   不逐条造 item——省 item 数且不赌 assistant content type)
-      var h = await (await fetch('/api/assistant/history')).json();
+      var hu = (window.__asstHistUrl && window.__asstHistUrl()) || '/api/assistant/history';   // ㉟:经侧栏同一端点(EPUB=本书 epub-convo)
+      var h = await (await fetch(hu)).json();
       var msgs = (h && h.messages) || [];
       var lines = [];
       msgs.slice(-14).forEach(function (m) {
@@ -998,7 +999,8 @@
       var c = (window.RC && RC.adapter && RC.adapter() && RC.adapter().getContext && RC.adapter().getContext()) ||
               ((typeof window.__voiceContext === 'function') ? window.__voiceContext() : null) || {};
       var f = c.file_rel || c.file || '';
-      if (f) return '&file=' + encodeURIComponent(f) + '&page=' + (c.page || 0);
+      var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);   // ㉟ EPUB:section idx+1 当 page
+      if (f) return '&file=' + encodeURIComponent(f) + '&page=' + pg;
     } catch (e) {}
     return '';
   }
@@ -1130,6 +1132,16 @@
   };
   function toggle(opts) {
     injectCss();
+    opts = opts || {};
+    // ㉟ 唯一侧栏原则:调用方没带 file/page(EPUB 的通话按钮直接点、无 21-misc-ai 接线)→ 经中间层
+    //    RC.adapter().getContext() 补齐;EPUB 的"page"=当前 section idx+1(1-based 章号,后端按 .epub 分流取章文本)
+    if (!opts.file) {
+      try {
+        var _c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
+        opts.file = _c.file_rel || _c.file || '';
+        if (!opts.page) opts.page = _c.page || (_c.current_section_idx != null ? (_c.current_section_idx + 1) : 0);
+      } catch (e) {}
+    }
     mode = (opts && opts.mode) || 'agent';
     if (ws) { teardown(false); setSt('已挂断(再点 📞 重新通话)'); return; }
     if (mode === 'agent') {   // agent 模式无浮层:状态全靠按钮特效(绿=在听/蓝=在念)+ 输入框(转写/placeholder)
@@ -1454,6 +1466,18 @@
   if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns())) {
     var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
+
+  // ㉟ 共享位置/选中同步:宿主没提供 __vcSyncNow(PDF reader 的 21-misc-ai 有自己的 2s 轮询)时,
+  //    共享层自建——经 RC.adapter().getContext() 拿位置(EPUB=section idx+1 当 page)与选中,变化才推。
+  setInterval(function () {
+    if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
+    try {
+      var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
+      var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
+      if (pg) setPage(pg);
+      syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
+    } catch (e) {}
+  }, 2000);
 
   RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
     // 设置面板改了语音配置 → 通知 relay 热更(S2S 通话中才有意义;relay 指纹含 tts,变了才真发 UpdateConfig)

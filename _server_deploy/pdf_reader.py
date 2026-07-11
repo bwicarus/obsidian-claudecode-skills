@@ -2227,6 +2227,15 @@ def pdf_api_page_text():
     abs_path = _safe_vault_path(rel)
     if not abs_path or page < 1:
         return jsonify({"ok": False, "error": "invalid"}), 400
+    # ㉟ EPUB 分流(唯一侧栏原则:语音链路两种阅读器同源):EPUB 的"page"=section idx+1(1-based 章号),
+    #    走章节纯文本;绝不落进 fitz 分支——fitz 能开 epub 但用自己的 reflow 分页,与阅读器 section 完全错位
+    if rel.lower().endswith(".epub"):
+        try:
+            paras = _epub_section_paragraphs(rel, page - 1)
+            txt = "\n".join(paras).strip()
+            return jsonify({"ok": True, "page": page, "total": 0, "unit": "section", "text": txt[:8000]})
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 500
     try:
         import fitz
         doc = fitz.open(str(abs_path))

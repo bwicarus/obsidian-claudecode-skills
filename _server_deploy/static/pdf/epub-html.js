@@ -3985,7 +3985,7 @@
     kind: 'epub-html',
     config: { isPDF: false, reflow: true, hasFigures: true, hasFormula: true, hasImages: true,
               renderRegion: false, dictMode: 'sse', popupMode: 'fixed', clickWordDetect: true,
-              anchorKind: 'epub-offset', supportsVoice: false },
+              anchorKind: 'epub-offset', supportsVoice: true },   // ㉟:语音全链路已对齐(rc-voicecall 上页 + page=section idx+1 分流)
     getEndpoints: function () { return {}; },
     fileInfo: function () { return { file: FREL, langs: (CFG && CFG.langs) || [] }; },
     // 助手上下文(章 idx/toc/选区/图/便签)——收口自 runAssistant 内联组装,产出该阅读器后端(epub_assistant.py)所需形状
@@ -4080,6 +4080,16 @@
         chatUrl: function () { return '/pdf/api/epub-assistant'; },
         historyUrl: function () { return '/pdf/api/epub-convo?file=' + encodeURIComponent(FREL); },
         clearUrl: function () { return '/pdf/api/epub-convo/clear?file=' + encodeURIComponent(FREL); },
+        // ㉟ 语音通话轮次落库:进本书 epub-convo(与侧栏历史/清空同源同清;复用现成 append 端点,一轮两条)
+        voiceLog: function (q, a, page) {
+          [['user', q], ['assistant', a]].forEach(function (p) {
+            if (!p[1]) return;
+            try {
+              fetch('/pdf/api/epub-convo/append', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+                body: JSON.stringify({ file: FREL, role: p[0], content: String(p[1]).slice(0, 4000), section: (page || 1) - 1 }) }).catch(function () {});
+            } catch (e) {}
+          });
+        },
         mountPanel: function () { return document.getElementById('ep-side'); },
         mountTabs: function () { return document.getElementById('ep-side-tabs') || document.getElementById('ep-side'); }
       }
