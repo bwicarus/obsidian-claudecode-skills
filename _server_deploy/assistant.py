@@ -631,8 +631,10 @@ class _CodexApp:
             raise RuntimeError(str(r["error"])[:200])
         return r.get("result") or {}
 
-    def stream(self, prompt, model="", effort="medium", timeout=180, image_paths=None):
-        """yield 文字 delta;turn 失败/超时抛异常(调用方回落 exec/其它后端)。"""
+    # ── 多轮原语(㉖ 编排接入):thread_start → N× turn_stream(同一 threadId,**服务端保存历史**,
+    #    每轮只发新内容——与 Anthropic 前缀缓存同解,不重拼历史)→ thread_close。ephemeral=不落盘,
+    #    thread 存活于 app-server 进程内存,多 turn 可续(冒烟验证)。──
+    def thread_start(self, model=""):
         import queue as _qu
         self._ensure()
         tp = {"cwd": str(_CODEX_RC_CWD), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True}
@@ -640,45 +642,59 @@ class _CodexApp:
             tp["model"] = model
         th = self._rpc("thread/start", tp, timeout=25)
         tid = th["thread"]["id"]
-        q = _qu.Queue()
-        self._turns[tid] = q
-        try:
-            inp = [{"type": "text", "text": prompt}]
-            for ip in (image_paths or [])[:3]:
-                inp.append({"type": "localImage", "path": ip})
-            args = {"threadId": tid, "input": inp}
-            if effort in _CODEX_DEPTHS:
-                args["effort"] = effort
-            self._rpc("turn/start", args, timeout=25)
-            deadline = time.time() + timeout
-            while True:
-                left = deadline - time.time()
-                if left <= 0:
-                    try:
-                        self._notify("turn/interrupt", {"threadId": tid})
-                    except Exception:
-                        pass
-                    raise RuntimeError("codex turn 超时")
+        self._turns[tid] = _qu.Queue()
+        return tid
+
+    def turn_stream(self, tid, text, effort="medium", timeout=180, image_paths=None):
+        """在既有 thread 上追加一轮,yield 文字 delta;失败/超时抛异常。"""
+        q = self._turns.get(tid)
+        if q is None:
+            raise RuntimeError("codex thread 不存在或已关闭")
+        inp = [{"type": "text", "text": text}]
+        for ip in (image_paths or [])[:3]:
+            inp.append({"type": "localImage", "path": ip})
+        args = {"threadId": tid, "input": inp}
+        if effort in _CODEX_DEPTHS:
+            args["effort"] = effort
+        self._rpc("turn/start", args, timeout=25)
+        deadline = time.time() + timeout
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
                 try:
-                    ev = q.get(timeout=min(left, 30))
+                    self._notify("turn/interrupt", {"threadId": tid})
                 except Exception:
-                    continue
-                if ev is None:
-                    raise RuntimeError("codex app-server 连接断开")
-                m = ev.get("method")
-                if m == "item/agentMessage/delta":
-                    d = (ev.get("params") or {}).get("delta") or ""
-                    if d:
-                        yield d
-                elif m == "turn/completed":
-                    st = ((ev.get("params") or {}).get("turn") or {}).get("status")
-                    if st != "completed":
-                        raise RuntimeError(f"codex turn {st}")
-                    return
-                elif m == "error":
-                    raise RuntimeError(str((ev.get("params") or {}).get("error"))[:200])
+                    pass
+                raise RuntimeError("codex turn 超时")
+            try:
+                ev = q.get(timeout=min(left, 30))
+            except Exception:
+                continue
+            if ev is None:
+                raise RuntimeError("codex app-server 连接断开")
+            m = ev.get("method")
+            if m == "item/agentMessage/delta":
+                d = (ev.get("params") or {}).get("delta") or ""
+                if d:
+                    yield d
+            elif m == "turn/completed":
+                st = ((ev.get("params") or {}).get("turn") or {}).get("status")
+                if st != "completed":
+                    raise RuntimeError(f"codex turn {st}")
+                return
+            elif m == "error":
+                raise RuntimeError(str((ev.get("params") or {}).get("error"))[:200])
+
+    def thread_close(self, tid):
+        self._turns.pop(tid, None)
+
+    def stream(self, prompt, model="", effort="medium", timeout=180, image_paths=None):
+        """单轮便捷入口(开 thread→一轮→关):yield 文字 delta;失败抛异常(调用方回落 exec/其它后端)。"""
+        tid = self.thread_start(model)
+        try:
+            yield from self.turn_stream(tid, prompt, effort, timeout, image_paths)
         finally:
-            self._turns.pop(tid, None)
+            self.thread_close(tid)
 
     def ask(self, prompt, model="", effort="medium", timeout=180, image_paths=None):
         return "".join(self.stream(prompt, model, effort, timeout, image_paths)).strip() or None
@@ -3493,10 +3509,9 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 return
             # _fast=None(快路 AI 失败)→ 落回完整编排
         rr = _resolve("orchestrator", uid)
-        if rr.get("backend") == "codex":   # 编排工具循环未接 codex → 降 **Gemini** 编排(选 codex 的用户多半在躲 Claude 限流,
-            # 旧版静默降回出厂 Claude = 就地撞额度;现在明示 + 走 Gemini)
-            yield {"event": "notice", "data": "编排 agent 不支持 Codex(它只接单轮任务),本次已用 Gemini 编排代跑;请在 ⚙ 里把编排设为 Gemini 或 Claude。"}
-            rr = {"backend": "gemini", "variant": _GEMINI_MODEL, "depth": "think"}
+        if rr.get("backend") == "codex":          # ㉖:根 agent 跑在 Codex(app-server threadId 多轮,失败自动回退 Claude)
+            yield from _agent_run_codex(message, ctx, history, rr["variant"], rr["depth"], uid)
+            return
         if rr["backend"] == "gemini":             # 二期:根 agent 跑在 Gemini 工具循环(省 Claude 额度)
             yield from _agent_run_gemini(message, ctx, history, rr["variant"], rr["depth"], uid)
             return
@@ -3828,6 +3843,127 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
         yield {"event": "trace", "data": trace}
     except Exception as e:
         yield {"event": "error", "data": f"Gemini 编排出错:{str(e)[:120]}"}
+
+
+def _agent_run_codex(message, ctx, history, variant, depth, uid):
+    """orchestrator 跑在 Codex(㉖,用户拍板):app-server **threadId 多轮会话**——服务端保存历史,
+    每轮只发新内容(工具结果),不重拼历史(与 Anthropic 前缀缓存同解)。同一套工具协议/系统提示/
+    SSE 事件。Codex 的编程 agent 本性由三重锁驯服:read-only 沙盒 + 空 untrusted cwd + prompt 明令
+    只用我们的 JSON 工具协议。首轮失败(app-server 挂/无响应)自动回退 Claude,保证有答。"""
+    model = variant if variant in _CODEX_VARIANTS else "gpt-5.6-luna"
+    eff = depth if depth in _CODEX_DEPTHS else "medium"
+    trace = [{"label": "编排+回答", "model": f"{model}·{eff}", "action": "orchestrator"}]
+    first = (_sys_static() + "\n\n"
+             "(补充纪律:你运行在只读沙盒的**空目录**里——**不要**使用你内置的 shell/文件/编辑工具,那里什么都没有;"
+             "上面的 JSON 工具协议是你唯一的工具通道,系统会执行并把【工具结果】发给你。)\n\n"
+             f"{_ctx_block(ctx)}\n\n{_format_history(history, int((ctx or {}).get('page_offset') or 0))}"
+             f"【用户】{message}\n\n现在开始(调工具就只输出 JSON,能答就直接答):")
+    try:
+        tid = _codex_app.thread_start(model)
+    except Exception as ex:
+        _why = f"Codex 起不来({str(ex)[:60]}),转 Claude"
+        yield {"event": "tool", "data": _why}
+        yield {"event": "tool-done", "data": _why}
+        yield from _agent_run_claude(message, ctx, history, _AGENT_MODEL, _effort_for(message, ctx, uid), uid, fallback_from=model)
+        return
+    client_actions = []
+    _t_start = time.time()
+    _tools_ran = False
+    _repair = 0
+    nxt = first
+    try:
+        for step in range(400):
+            if time.time() - _t_start > 900.0:
+                yield {"event": "answer", "data": "(这个任务很大,先做到这——已完成的部分都已保存;想接着干就再说一句『继续处理后面的』)"}
+                break
+            parts = []
+            _last_emit = 0.0
+            err = None
+            try:
+                for d0 in _codex_app.turn_stream(tid, nxt, eff, timeout=240):
+                    parts.append(d0)
+                    # 轮内全量语义(与 claude/gemini 一致):只吐工具 JSON 之前的散文
+                    disp = _display_prefix("".join(parts))
+                    if disp.strip():
+                        now = time.time()
+                        if now - _last_emit > 0.1:
+                            _last_emit = now
+                            yield {"event": "answer", "data": disp}
+            except Exception as ex:
+                err = str(ex)[:120]
+            raw = "".join(parts).strip()
+            if not raw:
+                if not _tools_ran:   # 还没调过工具 → 回退 Claude 整轮重跑,保证用户有答
+                    _why = f"Codex 没响应({err or '超时'}),转 Claude"
+                    yield {"event": "tool", "data": _why}
+                    yield {"event": "tool-done", "data": _why}
+                    yield from _agent_run_claude(message, ctx, history, _AGENT_MODEL, _effort_for(message, ctx, uid), uid, fallback_from=model)
+                    return
+                yield {"event": "error", "data": f"Codex 没响应({err or '超时'})。再问我一次试试。"}
+                return
+            tool = _parse_tool(raw)
+            if tool is None and raw.startswith("{") and '"tool"' in raw[:400] and _repair < 2:
+                _repair += 1
+                yield {"event": "tool", "data": "整理指令"}
+                yield {"event": "tool-done", "data": "整理指令"}
+                nxt = ("你上一条像是工具调用,但 JSON 没解析成功(常见:字符串里有没转义的引号/换行)。"
+                       "请只重新输出**一条合法 JSON**工具调用:字符串里的引号一律换成中文引号「」、不要带换行,别加别的字。")
+                continue
+            if tool and tool.get("tool") in TOOLS:
+                _tools_ran = True
+                name = tool["tool"]
+                targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
+                yield {"event": "tool", "data": _tool_label(name, targs)}
+                _t_tool0 = time.time()
+                try:
+                    res = TOOLS[name][1](targs, ctx) or {}
+                except Exception as e:
+                    res = {"error": str(e)[:160]}
+                _tool_sec = round(time.time() - _t_tool0, 1)
+                vision = res.pop("_vision", None) if isinstance(res, dict) else None
+                _gm = res.pop("_gen_model", None) if isinstance(res, dict) else None
+                _ga = res.pop("_gen_action", None) if isinstance(res, dict) else None
+                trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec, "action": _ga,
+                              "detail": _step_detail(res)})
+                for _ss in ((res.pop("_sub_steps", None) or []) if isinstance(res, dict) else []):
+                    trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
+                                  "action": _ss.get("action"), "detail": _ss.get("detail", "")})
+                if isinstance(res, dict) and res.get("client_action"):
+                    yield {"event": "actions", "data": [res.pop("client_action")]}
+                if isinstance(res, dict) and res.get("task_id"):
+                    yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
+                if isinstance(res, dict) and res.get("undo_id"):
+                    yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
+                yield {"event": "tool-done", "data": _tool_label(name, targs)}
+                if vision:   # see_page 等出图:turn 输入的 localImage 在多轮语境未验证 → 稳妥先经视觉模型转文字喂回
+                    try:
+                        _vd = _vision_for(ctx, vision, note="(工具产出的页面/图像渲染,请完整转述内容供编排模型使用)")
+                    except Exception as _e:
+                        _vd = f"(看图失败:{str(_e)[:80]})"
+                    if isinstance(res, dict):
+                        res["图像内容(视觉模型转述)"] = (_vd or "")[:2200]
+                nxt = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                continue
+            trace[0]["detail"] = (raw or "")[:6000]
+            yield {"event": "answer", "data": raw}
+            break
+        else:
+            yield {"event": "answer", "data": "(步骤已经非常多了,先到这——已完成的部分都已保存,要继续就再说一句)"}
+        if client_actions:
+            yield {"event": "actions", "data": client_actions}
+        _tool_total = sum(t.get("sec", 0) or 0 for t in trace[1:])
+        trace[0]["sec"] = round(max(0.0, (time.time() - _t_start) - _tool_total), 1)
+        _tt = _tok_get()
+        if _tt:
+            trace[0]["tok"] = _tt
+        yield {"event": "trace", "data": trace}
+    except Exception as e:
+        yield {"event": "error", "data": f"Codex 编排出错:{str(e)[:120]}"}
+    finally:
+        try:
+            _codex_app.thread_close(tid)
+        except Exception:
+            pass
 
 
 # ── 助手生成任务:detached(后台线程跑到完,客户端断了也不杀、跑完照样落库)+ 按 rid 缓冲事件供重连续读 ──
@@ -4267,10 +4403,8 @@ def assistant_action_prefs():
                               **_AP_LABELS},
                     "catalog": {
                         "backends": list(_BACKENDS),
-                        # 按任务限制可选后端:编排=交互式工具循环不接 codex;deep=relay 只透传 claude 选型。
-                        # 前端下拉据此过滤——根治"选了 codex 被静默降级回 Claude、Claude 没额度直接报额度用完"。
-                        "backends_by_action": {"orchestrator": [b for b in _BACKENDS if b != "codex"],
-                                               "deep": ["claude"]},
+                        # 按任务限制可选后端:deep=relay 只透传 claude 选型(编排 ㉖ 起三后端全通:claude/gemini/codex)
+                        "backends_by_action": {"deep": ["claude"]},
                         "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
                         "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,

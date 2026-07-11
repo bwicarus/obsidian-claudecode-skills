@@ -76,3 +76,18 @@
 - ✅ 前置开关:feature **`realtime_conversation`**(underDevelopment,默认关)——不开报"thread does not support realtime conversation";`experimentalFeature/list`(带 cursor 翻页)可拉全部 90+ features 现状。已在 `~/.reader-codex/home/config.toml` 开启(无副作用)。
 - ❌ **认证卡死**:`thread/realtime/error: "realtime conversation requires API key auth"`——**ChatGPT 订阅登录不行,必须 OpenAI Platform API Key(独立按量计费)**。说明书"认证方式=已登录 ChatGPT 账号"实测为错。
 - 判断:即使掏 API Key,OpenAI Realtime 音频价(~$32/$64 每 M)比豆包 S2S 贵近一个量级,且我们豆包线已深度打磨——不值得切。留档等 OpenAI 把 Realtime 纳入订阅额度再启用(初始化需 `capabilities.experimentalApi: true`)。
+
+## 6. Codex 编排循环(㉖,2026-07-11,用户拍板接入)
+
+- ✅ **orchestrator 三后端全通**:`_agent_run_codex`(assistant.py)= app-server **threadId 多轮会话**——
+  `_CodexApp` 拆出多轮原语 `thread_start / turn_stream(tid, text) / thread_close`(stream() 改为单轮便捷壳);
+  每轮只发新内容(【工具结果】…),**服务端保存历史不重拼**(与 Anthropic 前缀缓存同解,§4 的约定落地)。
+- ✅ **ephemeral thread 可多轮**(实测):ephemeral 只是不落盘,thread 活在 app-server 进程内存——两轮记忆
+  冒烟(轮1 记暗号/轮2 正确回出)+端到端编排冒烟(真调 search_all_books→结果喂回→合成回答+FOLLOWUP 格式全守)。
+- **驯服编程 agent 本性三重锁**:read-only 沙盒 + 空 untrusted cwd + 首轮 prompt 明令"不要用内置 shell/文件工具
+  (空目录什么都没有),JSON 工具协议是唯一工具通道"。实测服帖。
+- **vision 工具**(see_page 等):turn 输入 localImage 在多轮语境未验证 → 稳妥路径=图先经 `_vision_for`
+  (用户 vision 预设的模型)转文字再喂回;后续可实测 localImage 直喂。
+- 兜底:thread 起不来/首轮无响应(未调工具前)→ 自动回退 `_agent_run_claude`(fallback_from 标注);
+  调过工具后失败→报错(thread 内上下文无法迁移)。
+- 事件语义:与 claude/gemini 编排完全一致(answer=轮内全量/tool/tool-done/actions/task/undo/trace)。
