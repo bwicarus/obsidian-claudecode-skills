@@ -32,7 +32,8 @@ DOUBAO_WSS = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
 SAUC_WSS = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"          # 大模型流式识别
 SAUC_RID = "volc.bigasr.sauc.duration"                                     # 时长版计费
 TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"    # NDJSON 流式合成(备用)
-TTS_BIDI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"    # 双向流式合成(主用:文本增量进,session 级韵律连贯)
+TTS_BIDI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"    # 双向流式合成(1.0/moon 音色用:文本增量进,session 级韵律连贯)
+TTS_UNI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"   # 单向流式(2.0/uranus 音色用:context_texts 语气指令+section_id 韵律)
 TTS_RID = "volc.service_type.10029"
 TTS_SPEAKER = "zh_female_shuangkuaisisi_moon_bigtts"   # ⚠ 10029 只认 moon_bigtts 系音色(vv_jupiter 是 S2S 专属)
 FIXED_APP_KEY = "PlgvMymc7f3tQnJ6"   # 文档固定值
@@ -520,7 +521,7 @@ def _speech_clean(s: str) -> str:
 
 async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int,
                           book: dict, push_sp=None, tool_name: str = "deep_think", tool_label: str = "深度思考",
-                          preamble: str = "(语音深度解答,直接详细推理回答,少用工具)"):
+                          preamble: str = "(语音深度解答,直接详细推理回答,少用工具;回答会被朗读:口语化短句,需要停顿处用省略号……,别用列表和标记符号)"):
     """深度思考:调助手 chat(SSE,深度模型可配)→ answer 增量攒句 → 500 分片流式代播。
     打断(450→book["deep_abort"])立即停发且**不发 end 包**(官方要求:播报被打断时别补 end)。"""
     cfg = _creds()
@@ -752,7 +753,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
               + digest + "\n【用户问题】" + (q or "今天学了什么"))
         await _run_deep_think(bws, dws, sid, q2, file_rel, page, book, push_sp,
                               tool_name="recall_study", tool_label="回顾学习",
-                              preamble="(语音回顾:可用工具查证,答案要适合朗读)")
+                              preamble="(语音回顾:可用工具查证;答案会被朗读:口语化短句,按主题归纳,需要停顿处用省略号……,别用列表)")
         return
 
     cache = book.setdefault("tool_cache", {})
@@ -923,12 +924,78 @@ async def _tts_stream(key: str, speaker: str, text: str):
                     raise RuntimeError(f"tts code={d.get('code')} {str(d.get('message'))[:80]}")
 
 
+def _uni_req_frame(payload: dict) -> bytes:
+    """单向流式 TTS 的请求帧:Full-client、flags=0000(无 event 号)、JSON 无压缩(官方协议实测)。"""
+    b = json.dumps(payload, ensure_ascii=False).encode()
+    return bytes([0x11, 0x10, 0x10, 0x00]) + struct.pack(">I", len(b)) + b
+
+
 def _tts_channel(bws, key: str, speaker: str):
-    """双向流式 TTS 通道(v3-⑬ 抽共用:agent 模式朗读 / tts-only 朗读通道两处用):
-    一轮回答 = 一条 ws + 一个 session(session 内文本增量连续合成 → 韵律连贯、句间零连接开销)。
-    打断(cancel)= 直接 close 连接:立即哑火(FinishSession 会把已收文本全部合成完,打断场景不能用)。
-    返回 {"speak","done","cancel"} 三个协程,音频帧直接裸转发给 bws。"""
+    """朗读 TTS 通道(v3-⑱ 双引擎,按音色自动选,speak 时现读凭证可热切):
+    - `*_uranus_bigtts`(2.0)→ **单向流式 + seed-tts-2.0**:每句一个请求但同 section_id(服务端保持
+      对话式韵律);`context_texts` 载入用户配置的**朗读语气指令**(自然语言,实测生效且不被念出);
+      speech_rate 同名参数。⚠ 2.0 不吃 SSML(实测被剥),停顿靠标点/省略号(prompt 已引导 AI 写)。
+    - 其余(moon 系 1.0)→ 双向流式(原实现):一轮一 session 增量喂文本。
+    打断(cancel)= close 连接+作废世代:立即哑火。返回 {"speak","done","cancel"},音频裸转发 bws。"""
     tts = {"ws": None, "sid": None, "reader": None, "gen": 0}
+    uni = {"q": None, "worker": None, "section": None, "gen": 0, "ws": None}
+
+    async def _uni_synth_one(text: str, g: int):
+        c = _creds()
+        spk = c.get("tts_speaker") or speaker
+        h = {"X-Api-Key": key, "X-Api-Resource-Id": "seed-tts-2.0", "X-Api-Connect-Id": str(uuid.uuid4())}
+        adds = {}
+        instr = (c.get("tts_instruction") or "").strip()
+        if instr:
+            adds["context_texts"] = [instr]   # 语气指令(不计费、不进合成文本;仅 2.0 生效)
+        if uni["section"]:
+            adds["section_id"] = uni["section"]   # 同一通话同一 section:跨请求保持对话式韵律
+        rp = {"text": text, "speaker": spk,
+              "audio_params": {"format": "pcm", "sample_rate": 24000,
+                               "speech_rate": int(c.get("tts_speech_rate", 0))}}
+        if adds:
+            rp["additions"] = json.dumps(adds, ensure_ascii=False)
+        try:
+            async with websockets.connect(TTS_UNI_WSS, additional_headers=h,
+                                          max_size=10 * 1024 * 1024, open_timeout=10) as w:
+                uni["ws"] = w
+                await w.send(_uni_req_frame({"user": {"uid": "voice-agent"}, "req_params": rp}))
+                while True:
+                    if g != uni["gen"]:
+                        return
+                    d = dec(await asyncio.wait_for(w.recv(), timeout=30))
+                    if d["type"] == T_AUDIO_SERVER:
+                        if g == uni["gen"]:
+                            await bws.send(d["payload"])
+                    elif d["type"] == T_ERROR:
+                        pl = d["payload"]
+                        sys.stderr.write(f"[voice-tts uni] err {(pl[:120].decode('utf-8','ignore') if isinstance(pl,(bytes,bytearray)) else str(pl)[:120])}\n")
+                        return
+                    elif d.get("event") == 152:
+                        return
+        finally:
+            if uni["ws"] is not None:
+                uni["ws"] = None
+
+    async def _uni_worker(g: int):
+        """串行消费句队列(保证音频顺序);cancel 换代即退出。"""
+        try:
+            while True:
+                item = await uni["q"].get()
+                if item is None or g != uni["gen"]:
+                    return
+                try:
+                    await _uni_synth_one(item, g)
+                except Exception as ex:
+                    sys.stderr.write(f"[voice-tts uni] {str(ex)[:120]}\n")
+        except asyncio.CancelledError:
+            pass
+
+    def _is_uni() -> bool:
+        try:
+            return "_uranus_" in (_creds().get("tts_speaker") or speaker or "")
+        except Exception:
+            return False
 
     async def _tts_reader(tws, g):
         try:
@@ -989,6 +1056,16 @@ def _tts_channel(bws, key: str, speaker: str):
         text = (text or "").strip()
         if not text:
             return
+        if _is_uni():   # 2.0 音色 → 单向引擎(句队列串行合成,同 section 保韵律)
+            if uni["q"] is None:
+                uni["q"] = asyncio.Queue()
+            if not uni["section"]:
+                uni["section"] = str(uuid.uuid4())
+            if uni["worker"] is None or uni["worker"].done():
+                uni["gen"] += 1
+                uni["worker"] = asyncio.create_task(_uni_worker(uni["gen"]))
+            await uni["q"].put(text)
+            return
         try:
             await _ensure()
             await tts["ws"].send(enc(T_FULL_CLIENT, 200, json.dumps({
@@ -999,14 +1076,41 @@ def _tts_channel(bws, key: str, speaker: str):
             sys.stderr.write(f"[voice-tts>] {ex}\n")
             await cancel()
 
-    async def done():   # 这轮回答文本发完:FinishSession → 服务端把尾巴合成完 → 152
+    async def done():   # 这轮回答文本发完
+        if _is_uni():   # 单向引擎:句子各自完整合成,无轮级收尾;补个 tts_end 让前端状态复位
+            try:
+                await bws.send(json.dumps({"event": "tts_end"}, ensure_ascii=False))
+            except Exception:
+                pass
+            return
         if tts["ws"] and tts["sid"]:
             try:
                 await tts["ws"].send(enc(T_FULL_CLIENT, 102, b"{}", session_id=tts["sid"]))
             except Exception:
                 await cancel()
 
-    return {"speak": speak, "done": done, "cancel": cancel}
+    async def cancel_all():
+        uni["gen"] += 1   # 作废单向世代(worker/在流请求自毁)
+        if uni["q"] is not None:
+            try:
+                while not uni["q"].empty():
+                    uni["q"].get_nowait()
+            except Exception:
+                pass
+            try:
+                uni["q"].put_nowait(None)   # 唤醒 worker 退出
+            except Exception:
+                pass
+        uni["worker"] = None
+        w = uni["ws"]
+        if w is not None:
+            try:
+                await w.close()
+            except Exception:
+                pass
+        await cancel()   # bidi 侧照旧
+
+    return {"speak": speak, "done": done, "cancel": cancel_all}
 
 
 async def handle_tts_only(bws):

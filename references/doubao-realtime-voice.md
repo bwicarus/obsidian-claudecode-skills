@@ -290,3 +290,19 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **接入面**:_deep_ask/_vision_describe(图落盘 -i)/reader_ask/reader_stream(无流式→一次性整段 yield,失败落 gemini→claude)——即 summarize/vision/explain/translate/dict/grammar/pick_video/deep 全部单轮动作可选 codex;兜底链 codex→gemini→claude。
 - **orchestrator 不接**(编排工具循环是 claude/gemini 的交互式多轮实现):预设选了 codex → chat 两处入口守卫降级出厂默认。语音 deep 面板项选 codex 同理暂不生效(relay force_model 仅 claude)。
 - 前端零逻辑改动(catalog 数据驱动),仅 _BACKEND_LABEL 加 'Codex(GPT)' ×2。
+
+## 朗读升级 2.0:语气指令+停顿控制(2026-07-11 v3-⑱,用户需求"升 2.0+提示词加控制符")
+
+**实测定谳(ASR 回转写判别法)**:标记系统的真实支持矩阵——
+| 通道×音色 | SSML | [#语音指令] | context_texts |
+|---|---|---|---|
+| 双向 bidi(1.0/2.0 资源都) | ❌剥除 | ❌照念 | 无此字段 |
+| 单向 uni + 1.0(moon) | ✅ break 生效 | — | ❌仅2.0 |
+| 单向 uni + 2.0(uranus) | ❌剥除 | — | ✅**生效且不被念出** |
+
+即官方设计:1.0=SSML 机械标记;2.0=LLM 式 TTS(**自然语言语气指令 `additions.context_texts`**,如"说慢一点/用痛心的语气",不计费不进文本)+标点智能停顿。"2.0+SSML"官方就不兼得——用户目标(停顿+语气)在 2.0 上由 context_texts(语气)+标点/省略号(停顿,实测有效)达成,比 SSML 更强。
+
+- **relay `_tts_channel` 双引擎**(speak 时现读凭证自动选):`*_uranus_bigtts` → **单向流式 `TTS_UNI_WSS` + `seed-tts-2.0`**——每句一请求经 asyncio 队列 worker **串行**(保音频顺序),同一通道同一 **`section_id`**(服务端保持对话式韵律,治逐句请求的韵律断裂);`context_texts`=面板「朗读语气」(`tts_instruction` 白名单字段);speech_rate 同名直传。moon 系 → 原双向引擎不动(回退安全)。cancel=换代+清队+close 在流请求。单向请求帧 flags=0000(无 event 号,`_uni_req_frame`)。
+- **停顿=AI 标点**:三处朗读 prompt(assistant voice_mode 段/deep preamble/recall preamble)加"用标点控制节奏:短句逗号断句、明显停顿用省略号……、别用其它标记符号"——**不让 AI 写 SSML/标记**(2.0 不支持+会污染侧栏显示;程序+标点承担)。
+- 面板:朗读音色下拉加 2.0 组(vv 2.0 推荐/爽快思思/渊博小叔/深夜播客/温柔小雅/儒雅青年/亲切女声)+「朗读语气」输入框(仅 2.0 生效)。默认已切 vv_uranus+温柔指令。
+- 单向接口另有存货未接:`emotion/emotion_scale`(多情感音色)、`silence_duration`(句尾静音)、`disable_markdown_filter=false` 原生过滤 md、`cache_config`(相同文本 1h 缓存)、pitch。

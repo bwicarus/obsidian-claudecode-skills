@@ -2784,6 +2784,8 @@ def _sys_prompt(ctx):
         learn_bits.append("★语音对话中(问题来自语音转写,可能有同音错字,按语境理解;你的回答会被逐句朗读):"
                           "回答要**适合听**——口语化短句、先给结论;少用列表/表格/标题结构;"
                           "数学符号和公式用中文口头表述(如「x 的平方除以 2」),别写 LaTeX;"
+                          "**用标点控制朗读节奏**:句子短一点、逗号断句;需要明显停顿(转折/换话题/给听者反应时间)"
+                          "的地方用省略号……;重点词前可用逗号轻顿。TTS 会按标点自然停顿,别用其它标记符号。"
                           "尽量几句话说完,内容多时先讲最重要的,再问一句要不要继续展开。工具照常用。")
     mp = ctx.get("media_prefer") or {}
     if mp.get("image"):
@@ -4118,7 +4120,7 @@ _APF_PATH = CLAUDE_DIR / "state" / "assistant-pref-profiles.json"
 _VOICE_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
 _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialect",
                      "bot_name", "speaking_style", "system_role", "enable_music",
-                     "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "recall_cutoff")
+                     "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

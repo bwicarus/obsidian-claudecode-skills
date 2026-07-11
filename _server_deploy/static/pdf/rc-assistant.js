@@ -270,8 +270,15 @@
     ['en_female_dacey_uranus_bigtts', 'Dacey · 美式英语女声'],
     ['en_female_stokie_uranus_bigtts', 'Stokie · 美式英语女声']];
   var _VC_DIA = [['', '标准(无方言)'], ['dongbei', '东北话'], ['sichuan', '四川话'], ['shaanxi', '陕西话']];
-  var _VC_TTS_SPK = [   // 朗读(双向流式 TTS)音色:只认 moon_bigtts 系(S2S 的 jupiter 系传过去报 55000000)
-    ['zh_female_shuangkuaisisi_moon_bigtts', '爽快思思(默认,中英双语)'],
+  var _VC_TTS_SPK = [   // 朗读音色:uranus 系=2.0(单向引擎,支持下面的语气指令);moon 系=1.0(双向引擎)
+    ['zh_female_vv_uranus_bigtts', 'vv · 2.0(推荐,支持语气指令)'],
+    ['zh_female_shuangkuaisisi_uranus_bigtts', '爽快思思 · 2.0'],
+    ['zh_male_yuanboxiaoshu_uranus_bigtts', '渊博小叔 · 2.0(讲解风)'],
+    ['zh_male_shenyeboke_uranus_bigtts', '深夜播客 · 2.0'],
+    ['zh_female_wenrouxiaoya_uranus_bigtts', '温柔小雅 · 2.0'],
+    ['zh_male_ruyaqingnian_uranus_bigtts', '儒雅青年 · 2.0'],
+    ['zh_female_qinqienv_uranus_bigtts', '亲切女声 · 2.0'],
+    ['zh_female_shuangkuaisisi_moon_bigtts', '爽快思思(1.0,中英双语)'],
     ['zh_male_wennuanahu_moon_bigtts', '温暖阿虎(中英双语)'],
     ['zh_male_shaonianzixin_moon_bigtts', '少年梓辛(中英双语)'],
     ['zh_male_yuanboxiaoshu_moon_bigtts', '渊博小叔(讲解风)'],
@@ -309,6 +316,7 @@
         '<input type="range" min="-50" max="100" step="5" value="' + (c.speech_rate || 0) + '" data-k="speech_rate" style="width:100%">' +
         '<div class="ams-cur" style="margin:4px 0 2px">朗读语速 <b class="vcv-tsr">' + (c.tts_speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.tts_speech_rate || 0) + '" data-k="tts_speech_rate" style="width:100%">' +
+        '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="朗读语气(仅2.0音色,如:用温柔平静的语气,慢一点)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
         '<div class="ams-cur" style="margin:4px 0 2px">通话音量(S2S) <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.loudness_rate || 0) + '" data-k="loudness_rate" style="width:100%">' +
         '<div class="ams-row" style="margin:7px 0"><input class="ams-sel" data-k="bot_name" placeholder="名字(默认:豆包)" value="' + esc2(c.bot_name || '') + '" style="flex:1 1 44%">' +
@@ -316,7 +324,7 @@
         '<textarea class="ams-sel" data-k="system_role" rows="2" placeholder="人设(背景设定,留空=默认学习伙伴;伴读工具协议会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.system_role || '') + '</textarea>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer">' +
         '<input type="checkbox" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>' +
-        '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色下一句生效(另一条 TTS 链路,音色系列与通话不通用)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>';
+        '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色/语气下一句生效(2.0 音色支持自然语言语气指令;停顿由 AI 的标点/省略号控制)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>';
       function _save(k, v, el) {
         var body = {}; body[k] = v;
         fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
