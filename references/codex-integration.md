@@ -69,3 +69,10 @@
 - 请求带全:目标/工作目录/能否改文件/是否跑测试/禁触目录/期望格式/成功标准。
 - 保存 `threadId`+工作目录+模型,后续**续 thread 而非重塞历史**。
 - 完成状态只认 `turn/completed status=completed`;failed/interrupted 不得报成功。
+
+## 5. Realtime 语音探测(2026-07-11,实测结论:暂不可用)
+
+- ✅ 0.144.1 接口真实存在(`codex app-server generate-json-schema` 为准):`thread/realtime/start|appendAudio|appendText|appendSpeech|stop` + transcript/outputAudio 事件;**transport 有 `websocket` 型**(不需要浏览器 WebRTC,纯服务端可接,GPT 说明书没提);Schema 有 **RealtimeVoice 19 音色枚举**(alloy/cedar/marin/sage…,说明书说"无 voice 字段"是错的);音频块 = {data, sampleRate, numChannels}。
+- ✅ 前置开关:feature **`realtime_conversation`**(underDevelopment,默认关)——不开报"thread does not support realtime conversation";`experimentalFeature/list`(带 cursor 翻页)可拉全部 90+ features 现状。已在 `~/.reader-codex/home/config.toml` 开启(无副作用)。
+- ❌ **认证卡死**:`thread/realtime/error: "realtime conversation requires API key auth"`——**ChatGPT 订阅登录不行,必须 OpenAI Platform API Key(独立按量计费)**。说明书"认证方式=已登录 ChatGPT 账号"实测为错。
+- 判断:即使掏 API Key,OpenAI Realtime 音频价(~$32/$64 每 M)比豆包 S2S 贵近一个量级,且我们豆包线已深度打磨——不值得切。留档等 OpenAI 把 Realtime 纳入订阅额度再启用(初始化需 `capabilities.experimentalApi: true`)。
