@@ -4133,7 +4133,7 @@ _APF_PATH = CLAUDE_DIR / "state" / "assistant-pref-profiles.json"
 _VOICE_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
 _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialect",
                      "bot_name", "speaking_style", "system_role", "enable_music",
-                     "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff")
+                     "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

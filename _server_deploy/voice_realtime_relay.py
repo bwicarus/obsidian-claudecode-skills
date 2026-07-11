@@ -30,7 +30,8 @@ import websockets
 DOUBAO_WSS = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
 # agent 模式(耳+嘴分离,大脑=侧栏助手):豆包流式 ASR + HTTP 单向流式 TTS(冒烟验证 2026-07-10:全链路通)
 SAUC_WSS = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"          # 大模型流式识别
-SAUC_RID = "volc.bigasr.sauc.duration"                                     # 时长版计费
+SAUC_RID = "volc.bigasr.sauc.duration"                                     # 流式识别 1.0,时长版计费
+SAUC_RID_V2 = "volc.seedasr.sauc.duration"                                 # 流式识别 2.0(Doubao-Seed-ASR,2025-12:关键词召回+20%,1元/h;⚠控制台需先开通 2.0 商品,凭证 asr_v2 开关)
 TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"    # NDJSON 流式合成(备用)
 TTS_BIDI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"    # 双向流式合成(1.0/moon 音色用:文本增量进,session 级韵律连贯)
 TTS_UNI_WSS = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"   # 单向流式(2.0/uranus 音色用:context_texts 语气指令+section_id 韵律)
@@ -959,9 +960,10 @@ def _tts_channel(bws, key: str, speaker: str):
         adds = {}
         # 语气优先级(v3-⑱b 用户设计):AI 按内容给的本轮语气(回答首行 [语气:XX] 标记,前端剥离后随 speak 传来)
         # > 面板固定语气(tts_instruction,兜底)。都是 context_texts 自然语言指令,不计费不进文本。
+        # ㉒音色锁定(用户报告"有时完全变了一个人"):2.0 是 LLM 式 TTS,念到引语/对话内容会自己"演绎"换声线——
+        # 每句恒带音色锁定指令,语气只许变情绪不许变人。
         instr = (f"用{mood}的语气说" if mood else (c.get("tts_instruction") or "").strip())
-        if instr:
-            adds["context_texts"] = [instr]
+        adds["context_texts"] = ["始终保持同一个说话人的声音和音色,不要模仿内容里的角色变声" + (f",{instr}" if instr else "")]
         if uni["section"]:
             adds["section_id"] = uni["section"]   # 同一通话同一 section:跨请求保持对话式韵律
         rp = {"text": text, "speaker": spk,
@@ -1173,7 +1175,7 @@ async def handle_agent(bws):
         return
     key = cred["api_key"]
     speaker = cred.get("tts_speaker", TTS_SPEAKER)
-    asr_headers = {"X-Api-Key": key, "X-Api-Resource-Id": SAUC_RID,
+    asr_headers = {"X-Api-Key": key, "X-Api-Resource-Id": (SAUC_RID_V2 if cred.get("asr_v2") else SAUC_RID),
                    "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
     asr_cfg = {"user": {"uid": "voice-agent"},
                "audio": {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},

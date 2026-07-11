@@ -335,6 +335,8 @@
         '<textarea class="ams-sel" data-k="system_role" rows="2" placeholder="人设(背景设定,留空=默认学习伙伴;伴读工具协议会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.system_role || '') + '</textarea>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer">' +
         '<input type="checkbox" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
+        '<input type="checkbox" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
         '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色/语气下一句生效(2.0 音色支持自然语言语气指令;停顿由 AI 的标点/省略号控制)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>';
       function _save(k, v, el) {
         var body = {}; body[k] = v;
@@ -1878,11 +1880,25 @@
   var _SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   var micRec = null, micOn = false, micCommitted = '', micSessFinal = '', micSessTok = null, micLastWrite = '';
   var micStartTs = 0, micLastStart = 0, micFails = 0, micSessProductive = false;   // 总时长软上限 + 空转(弱网/无语音)退避
+  var micAutoT = null;   // 听写自动发送(用户设计:跟豆包 ASR 一样,说完一句静默即发,连续对话)
+  function _micAutoSend() {
+    if (!micOn) return;
+    if (streaming) { micAutoT = setTimeout(_micAutoSend, 1200); return; }   // 上一条还在答:等答完再发,别丢话
+    var t = (ta.value || '').trim();
+    if (!t) return;
+    micSessTok = null;                  // 作废当前段:迟到 onresult 不回填(发送后识别重起 fresh 新段)
+    micCommitted = ''; micSessFinal = ''; micLastWrite = '';
+    ta.value = ''; autorow();
+    try { micRec && micRec.stop(); } catch (_) {}   // onend(micOn 仍真)→ micSpin 重起继续听
+    send(t);
+  }
   function micStop() {                 // 手动停:micOn=false + 作废会话 → 迟到 onresult 不回填、onend 不重启
     if (!micOn) return;
     micOn = false; micSessTok = null; micFails = 0;
+    if (micAutoT) { clearTimeout(micAutoT); micAutoT = null; }
     try { micRec && micRec.stop(); } catch (_) {}
     micBtn.classList.remove('on');
+    try { window.__vcCapDictEnd && window.__vcCapDictEnd(); } catch (_) {}   // 字幕:听写态结束
   }
   function micSpin() {                  // 起一段识别(每段:会话令牌 tok + 实例身份 thisRec 双重身份)
     if (!micOn) return;
@@ -1901,6 +1917,9 @@
         }
         micSessFinal = f;
         ta.value = micCommitted + f + it; micLastWrite = ta.value; autorow();
+        try { if (ta.value.trim()) window.__vcCapUser && window.__vcCapUser(ta.value.trim()); } catch (_) {}   // 侧栏关着听写:转写实时上字幕(开着时字幕自身 gate 掉)
+        if (micAutoT) { clearTimeout(micAutoT); micAutoT = null; }
+        if ((micCommitted + f).trim() && !it) micAutoT = setTimeout(_micAutoSend, 900);   // 有定稿且没有进行中片段 → 静默 0.9s 自动发送(与豆包 ASR 同节奏)
       };
       micRec.onerror = function (ev) {  // 权限/无麦:立即放弃;network/no-speech 等交给下面的空转计数收口,不单次就放弃
         if (ev && (ev.error === 'not-allowed' || ev.error === 'service-not-allowed' || ev.error === 'audio-capture')) micOn = false;
@@ -1933,6 +1952,7 @@
   ta.addEventListener('input', function () {
     if (!micOn || ta.value === micLastWrite) return;
     micSessTok = null;                  // 作废:在途/后续旧 onresult 不再回填
+    if (micAutoT) { clearTimeout(micAutoT); micAutoT = null; }   // 用户接管编辑:先停自动发送,等下一个定稿再计时
     micCommitted = ta.value; micLastWrite = ta.value; micSessFinal = '';
     try { micRec && micRec.stop(); } catch (_) {}   // onend(micOn 仍真,且是当前实例)→ micSpin 重起 fresh-results 新会话
   });

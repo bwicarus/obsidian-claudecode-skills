@@ -148,6 +148,15 @@
       '.vc-recall-pane input{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:7px;padding:4px 6px;font-size:12px;flex:1 1 150px;min-width:0}' +
       '.vc-recall-pane button{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
+      // 长按到点确认(㉒):弹一下+变紫,到点瞬间就知道"够了可以松手"
+      '@keyframes vcLpPop{0%{transform:scale(1)}45%{transform:scale(1.28)}70%{transform:scale(.92)}100%{transform:scale(1)}}' +
+      '.vc-lp-pop{animation:vcLpPop .4s ease !important;color:#bf5af2 !important;border-color:#bf5af2 !important}' +
+      // 顶栏语音按钮(侧栏收起时显示;样式蹭顶栏原生 button,状态只动颜色+呼吸)
+      '#vc-top-mic.on{color:#0a84ff !important;border-color:#0a84ff !important}' +
+      '#vc-top-mic.asr{color:#bf5af2 !important;border-color:#bf5af2 !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+      '#vc-top-call.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
+      '#vc-top-call.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+      '#vc-top-mic,#vc-top-call{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
       '#asst-call,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       '#rc-vc .vc-grab{touch-action:none}' +   // 抓手保持 none(要拖拽调高)
@@ -381,8 +390,8 @@
     _cap.el = d; _cap.prev = d.children[0]; _cap.cur = d.children[1]; _cap.wait = d.children[2]; _cap.st = d.children[3];
     return d;
   }
-  function _capVisible() {   // 显示条件:开关开 + 语音链路活跃(朗读亮或通话中) + 侧栏关着(开着有对话流,字幕多余)
-    if (!capOn() || !(speakOn() || ws)) return false;
+  function _capVisible() {   // 显示条件:开关开 + 语音链路活跃(朗读亮/通话中/Apple 听写中) + 侧栏关着(开着有对话流,字幕多余)
+    if (!capOn() || !(speakOn() || ws || _cap.dictating)) return false;
     try { if (window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()) return false; } catch (e) {}
     return true;
   }
@@ -482,6 +491,8 @@
     _cap.timers.push(setTimeout(function () { if ((_cap.gen || 0) === g0) capShow(txt); }, ms));
   }
   window.__vcCapStatus = capStatus;   // rc-assistant 的 tool 事件也走字幕状态行(侧栏关着时能看到 agent 在干嘛)
+  window.__vcCapUser = function (text) { _cap.dictating = true; capUser(text); };        // Apple 听写转写上字幕(侧栏关时)
+  window.__vcCapDictEnd = function () { _cap.dictating = false; _capMaybeHide(4000); };  // 听写结束:几秒后淡出
 
   // ── 朗读专用通道(?mode=tts,v3-⑬):没在语音通话时点亮「🔊 朗读」→ 回答经双向流式 TTS 播——
   //    不开麦、不连 ASR;独立 ws + 独立 AudioContext(与通话互不干扰)。点亮开关(手势内)预热。──
@@ -888,29 +899,83 @@
   }
   // #asst-mic 长按 600ms = 豆包 ASR 连续听(agent 模式:说话→转写→自动问助手,文字答;朗读亮则也念)。
   // 单击保留原功能(系统听写)——长按触发后在**捕获阶段**吞掉随后的 click,不碰 rc-assistant 的原 handler。
+  function _lpPop(btn) {   // 长按到点的视觉确认(用户设计:不然不知道按够没):弹一下+变紫,松手前就能看到
+    try {
+      btn.classList.remove('vc-lp-pop'); void btn.offsetWidth;   // 重触发动画
+      btn.classList.add('vc-lp-pop');
+      setTimeout(function () { btn.classList.remove('vc-lp-pop'); }, 450);
+      navigator.vibrate && navigator.vibrate(15);
+    } catch (e) {}
+  }
+  function _micLongAction() {   // mic 长按到点的动作(侧栏 #asst-mic 与顶栏镜像按钮共用)
+    if (ws && mode === 'agent') { teardown(false); taPlaceholder(null); return; }   // 再长按=挂断 ASR
+    if (ws) teardown(false);   // S2S 开着 → 先挂再开 ASR
+    if (window._voiceCall) window._voiceCall(); else toggle({});
+  }
+  function _bindLongPress(btn, onLong) {   // 长按 600ms:到点即 pop 特效+执行;随后的 click 在捕获阶段吞掉
+    if (btn.__vcLp) return;
+    btn.__vcLp = true;
+    var _t = null, _fired = false;
+    btn.addEventListener('pointerdown', function () {
+      _fired = false;
+      _t = setTimeout(function () { _t = null; _fired = true; _lpPop(btn); onLong(); }, 600);
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
+      btn.addEventListener(n, function () { if (_t) { clearTimeout(_t); _t = null; } });
+    });
+    btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });   // iOS 长按不弹菜单
+    btn.addEventListener('click', function (e) {
+      if (_fired) { _fired = false; e.stopImmediatePropagation(); e.preventDefault(); }
+    }, true);
+  }
   function injectMicLongPress() {
     var m = document.getElementById('asst-mic');
     if (!m) return false;
     if (m.__vcLp) return true;
-    m.__vcLp = true;
-    var _t = null, _fired = false;
-    m.addEventListener('pointerdown', function () {
-      _fired = false;
-      _t = setTimeout(function () {
-        _t = null; _fired = true;
-        try { navigator.vibrate && navigator.vibrate(15); } catch (e) {}
-        if (ws && mode === 'agent') { teardown(false); taPlaceholder(null); return; }   // 再长按=挂断 ASR
-        if (ws) teardown(false);   // S2S 开着 → 先挂再开 ASR
-        if (window._voiceCall) window._voiceCall(); else toggle({});
-      }, 600);
-    });
-    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) {
-      m.addEventListener(n, function () { if (_t) { clearTimeout(_t); _t = null; } });
-    });
-    m.addEventListener('contextmenu', function (e) { e.preventDefault(); });   // iOS 长按不弹菜单
-    m.addEventListener('click', function (e) {
-      if (_fired) { _fired = false; e.stopImmediatePropagation(); e.preventDefault(); }
-    }, true);
+    _bindLongPress(m, _micLongAction);
+    return true;
+  }
+  // ── 顶栏语音按钮(㉒,用户设计):侧栏收起时顶栏出 mic+电话,逻辑与侧栏完全一致——
+  //    mic 单击=Apple 听写(转发给 #asst-mic 原 handler,说完自动发送)/长按=豆包 ASR;电话=S2S 开关。
+  //    状态镜像:观察侧栏按钮 class(on/asr/speaking)同步变色呼吸;侧栏打开时这俩隐藏(那边有同款)。──
+  function injectTopbarBtns() {
+    if (document.getElementById('vc-top-mic')) return true;
+    var anchor = document.getElementById('fs-toggle');
+    var srcMic = document.getElementById('asst-mic'), srcCall = document.getElementById('asst-call');
+    if (!anchor || !anchor.parentNode || !srcMic || !srcCall) return false;
+    injectCss();
+    var tm = document.createElement('button');
+    tm.id = 'vc-top-mic'; tm.type = 'button';
+    tm.title = '语音输入:单击=系统听写(说完自动发送);长按=豆包连续听(ASR,到点会弹紫)';
+    tm.innerHTML = '<svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 10.5v.5a6.5 6.5 0 0 0 13 0v-.5"/><path d="M12 17.5V21"/></svg>';
+    var tc = document.createElement('button');
+    tc.id = 'vc-top-call'; tc.type = 'button';
+    tc.title = '豆包语音通话(S2S):点=开始,再点=挂断';
+    tc.innerHTML = srcCall.innerHTML;   // 复用侧栏电话的 SF 线条 SVG
+    anchor.parentNode.insertBefore(tm, anchor);
+    anchor.parentNode.insertBefore(tc, anchor);
+    tm.addEventListener('click', function () { try { srcMic.click(); } catch (e) {} });   // 单击=听写开/停(原 handler;长按后的 click 已被 _bindLongPress 吞)
+    _bindLongPress(tm, _micLongAction);
+    tc.addEventListener('click', function () { try { srcCall.click(); } catch (e) {} });
+    function _mirror(src, dst, cls) {   // 状态镜像:侧栏按钮的状态类 → 顶栏同名类
+      new MutationObserver(function () {
+        cls.forEach(function (c) { dst.classList.toggle(c, src.classList.contains(c)); });
+      }).observe(src, { attributes: true, attributeFilter: ['class'] });
+    }
+    _mirror(srcMic, tm, ['on', 'asr']);
+    _mirror(srcCall, tc, ['on', 'speaking']);
+    function _vis() {   // 侧栏开=隐藏(功能在侧栏里);收起才显示
+      var open = false;
+      try { open = !!(window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()); } catch (e) {}
+      tm.style.display = open ? 'none' : '';
+      tc.style.display = open ? 'none' : '';
+    }
+    _vis();
+    (function _hookSide(n) {   // 侧栏根元素可能晚于本注入出现 → 挂上为止
+      var side = document.getElementById('ep-side');
+      if (side) { new MutationObserver(_vis).observe(side, { attributes: true, attributeFilter: ['class'] }); _vis(); return; }
+      if (n < 20) setTimeout(function () { _hookSide(n + 1); }, 800);
+    })(0);
     return true;
   }
   // 「🔊 朗读」开关=统一的"要不要出声":S2S 通话中控制豆包音频播放(独立键,默认亮);
@@ -988,8 +1053,8 @@
   }
 
   // 侧栏 pane 注入时机不定(rc-assistant 加载在前,但保守起见轮询到出现为止)
-  if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip())) {
-    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip()) || ++_tries > 40) clearInterval(_t); }, 750);
+  if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns())) {
+    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
 
   RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
