@@ -349,17 +349,19 @@
     _playStat.queued += ab.duration;
     _capBindChunk(t, ac);   // agent 通话朗读:句首块 → 字幕在开播时刻亮(S2S 无 seg 帧,零影响)
     callBtnSpeaking(true);
-    src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); if (!playing.length) callBtnSpeaking(false); };
+    src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); if (!playing.length) { callBtnSpeaking(false); try { _lastPlayEnd = ac ? ac.currentTime : 0; } catch (e) {} } };
   }
   function stopPlayback() { playing.forEach(function (s) { try { s.stop(); } catch (e) {} }); playing = []; playT = 0; callBtnSpeaking(false); }
 
   // ── 采集(mic → 16k PCM 20ms/包)──
   var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("vccap",C);';
   var _upRate = 16000;   // 上行采样率:豆包=16k;GPT Realtime 只吃 24k(relay 的 up_rate 事件动态切)
-  // ㉘f:㉕b 的回声能量门已撤——PCM 流无时间戳,丢包≠插入静默而是**把话剪辑拼接**:用户句中轻声段被丢
-  // → OpenAI 收到残缺音频 → semantic_vad 把人为空缺当"说完了"→ 句子中间插话/"有段没听清"(用户实锤)。
-  // 回声正解=AEC 环回(㉘,_aecSetup),门是既多余又有害的创可贴。
+  var _halfDuplex = false, _lastPlayEnd = 0;   // 半双工(㉙,GPT 外放默认):AI 播放期整段静麦+播完 350ms 残响缓冲
+  // ㉘f:㉕b 的回声能量门已撤——PCM 流无时间戳,丢包≠插入静默而是**把话剪辑拼接**(句中插话根因)。
+  // 半双工与门的本质区别:全有或全无=干净静默,不破坏 VAD/转写的输入完整性;这是外放场景的成熟可靠解
+  // (AEC 环回在 Safari/iPad 不保证生效,实测回声仍被转写成用户输入触发自问自答)。
   function onCap(chunk, rate) {
+    if (_halfDuplex && (playing.length || (ac && ac.currentTime - _lastPlayEnd < 0.35))) { f32buf = new Float32Array(0); return; }
     var m = new Float32Array(f32buf.length + chunk.length);
     m.set(f32buf); m.set(chunk, f32buf.length); f32buf = m;
     var need = Math.round(rate * 0.02), outN = Math.round(_upRate * 0.02);
@@ -723,7 +725,7 @@
     // 连接世代:teardown/新 start 都推进 _gen;在飞的旧 start 每个 await 后自检,过期就清掉
     // 自己建的资源退出(否则 iOS 卡死的旧回合会在用户触屏后"复活",跟新回合抢出双连接+泄漏 AudioContext)
     var g = ++_gen, myAc = null, myMic = null;
-    _upRate = 16000;   // 每次连接默认 16k(豆包);GPT Realtime 由 relay 的 up_rate 事件切 24k
+    _upRate = 16000; _halfDuplex = false; _lastPlayEnd = 0;   // 每次连接复位;GPT 由 relay 的 up_rate 事件设置
     function _dead() { return g !== _gen; }
     function _cleanLocal() {
       try { if (myMic) myMic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
@@ -775,7 +777,7 @@
         var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
         if (mode === 'agent') { handleAgentMsg(m); return; }
         var p = m.payload || {};
-        if (m.event === 'up_rate') { _upRate = p.rate || 16000; return; }   // relay 声明上行采样率(GPT Realtime=24k)
+        if (m.event === 'up_rate') { _upRate = p.rate || 16000; _halfDuplex = !!p.half_duplex; return; }   // relay 声明上行采样率(GPT=24k)+半双工模式
         if (m.event === 'client_action') { dispatch(p.fn, p.args); return; }
         if (m.event === 'tool_status') { onToolStatus(p); return; }   // 执行通知 → 固定状态按钮(不进对话流,用户设计)
         if (m.event === -1 || m.event === 153 || m.event === 599 || m.code) { setSt('⚠ ' + (p.error || p.message || '').slice(0, 60)); return; }

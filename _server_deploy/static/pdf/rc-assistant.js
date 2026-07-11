@@ -342,6 +342,8 @@
           '</select></div>' +
           '<textarea class="ams-sel" data-k="rt_instructions" rows="2" placeholder="人设 / 附加指令(留空=默认学习伙伴;语言规则和工具纪律会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.rt_instructions || '') + '</textarea>' +
           '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
+          '<input type="checkbox" data-k="rt_full_duplex"' + (c.rt_full_duplex ? ' checked' : '') + '>全双工打断(⚠仅戴耳机时勾:AI 说话期间也收音,可随时插话;外放勾了会回声自问自答。默认=半双工:它说话时不收音,防外放回声)</label>' +
+          '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
           '<input type="checkbox" data-k="rt_image"' + (c.rt_image ? ' checked' : '') + '>图像输入(看图类工具的渲染图直接给 GPT 自己看,不经文字转述;实验性,报错就关掉)</label>' +
           '<div class="ams-tdef" style="margin:2px 0 6px">语言选「自动」它跟着你切换;读日语书建议选「日本語」或「自动」(原文按原生发音念)。以上都是下次开话生效;接话灵敏度=semantic VAD 的 eagerness(按语义判断你说完没)。</div>';
       } else {      // ── 豆包 S2S 专属 ──

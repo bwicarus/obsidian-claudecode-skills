@@ -1632,7 +1632,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                     return
         except asyncio.TimeoutError:
             sys.stderr.write("[voice-oa] session.updated 超时(继续,但配置状态未知)\n")
-        await bws.send(json.dumps({"event": "up_rate", "payload": {"rate": 24000}}, ensure_ascii=False))   # 前端切 24k 采样
+        # half_duplex(㉙,默认开):AI 播放期整段静麦——外放防回声的**成熟可靠解**(AEC 环回在 Safari/iPad 不保证生效;
+        # 全有全无的静麦是干净静默,不像能量门那样把话剪碎)。耳机用户在设置勾「全双工打断」恢复语音打断。
+        await bws.send(json.dumps({"event": "up_rate", "payload": {
+            "rate": 24000, "half_duplex": (not cred.get("rt_full_duplex"))}}, ensure_ascii=False))
         await bws.send(json.dumps({"event": 150, "payload": {"engine": "openai", "model": model}}, ensure_ascii=False))
         sys.stderr.write(f"[voice-oa] session up model={model} tools={len(tools)} p{page}({len(book['page_text'])}字)\n")
         t_up = asyncio.create_task(up())
