@@ -4229,6 +4229,167 @@ def assistant_voice_tool():
                     "result": res})
 
 
+# ── GPT Realtime WebRTC 直连(㉚,用户拍板治本):浏览器媒体直连 OpenAI——WebRTC 路径的浏览器 AEC
+#    **真正生效**(外放无回声+全双工打断回归,WS 模式的半双工妥协不再需要)。密钥不下发前端:
+#    SDP 经 /rtc-call 代理签给 OpenAI;session 配置由 /rtc-session 下发;工具循环在前端
+#    (data channel 收 function_call → fetch /voice-tool 执行 → dc 回填),client_action 本地直执行。──
+_RTC_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
+_RTC_KEY_PATH = Path("~/.config/openai-realtime.json").expanduser()
+
+
+def _rtc_cfg() -> dict:
+    try:
+        return json.loads(_RTC_CFG_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+@bp.route("/rtc-session", methods=["POST"])
+def assistant_rtc_session():
+    """WebRTC 会话配置(instructions/tools/vad/voice,镜像 relay 的 WS 版构造;audio format 不带——媒体轨自动协商)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    file_rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except Exception:
+        page = 0
+    cfg = _rtc_cfg()
+    lang = (cfg.get("rt_lang") or "").strip()
+    if lang == "zh":
+        lang_line = "默认用中文口语回答;朗读书里的日语/英语原文时用该语言的**原生发音**念,绝不用中文读音念外语。"
+    elif lang == "ja":
+        lang_line = "日本語で答えてください。本の原文を読み上げるときは、その言語本来の発音で読んでください。"
+    elif lang == "en":
+        lang_line = "Respond in English. When reading passages aloud, pronounce them in their original language."
+    else:
+        lang_line = ("**跟随用户说话的语言**回答;朗读书页原文按内容本身的语言用**原生发音**念——日语内容不要用中文读音。")
+    parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
+             "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
+             lang_line,
+             "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
+             "你配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等需要动手的事"
+             "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
+             "你没有联网搜索能力(search_all_books 只搜他的书库);要网上实时信息就如实说没法联网,凭记忆答先声明可能过时。"
+             "**手写/圈画铁律**:他提到『我写的/我画的/我圈的/帮我看看这个算式』时,永远**先调 see_ink 工具**;"
+             "回答『看不到』或让他粘贴/截图都是错误行为。"]
+    if file_rel and page:
+        try:
+            import fitz
+            _ap = _pdf()._safe_vault_path(file_rel)
+            _d0 = fitz.open(str(_ap))
+            _pt = (_d0[page - 1].get_text("text") or "").strip()
+            _d0.close()
+            if _pt:
+                parts.append(f"用户此刻正在读《{file_rel.rsplit('/', 1)[-1]}》第 {page} 页,本页文字内容(直接可用):\n{_pt[:1500]}")
+        except Exception:
+            pass
+    parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"
+                 "**状态消息只是记录,永远不要对它们本身做回应或主动评论**;"
+                 "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")
+    tools = [{"type": "function", "name": n, "description": str(d)[:1024],
+              "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
+             for n, (d, _) in TOOLS.items()]
+    tools.append({"type": "function", "name": "deep_think",
+                  "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
+                  "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
+                                 "required": ["question"], "additionalProperties": True}})
+    tools.append({"type": "function", "name": "wait_for_user",
+                  "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。",
+                  "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
+    sess = {"type": "realtime", "model": cfg.get("rt_model") or "gpt-realtime-2.1-mini",
+            "output_modalities": ["audio"],
+            "reasoning": {"effort": cfg.get("rt_effort") or "low"},
+            "max_output_tokens": 2048,
+            "instructions": "\n".join(parts),
+            "audio": {"input": {"noise_reduction": {"type": "near_field"},
+                                "turn_detection": {"type": "semantic_vad",
+                                                   "eagerness": cfg.get("rt_eagerness") or "auto",
+                                                   "create_response": True, "interrupt_response": True},
+                                "transcription": ({"model": "gpt-realtime-whisper", "language": cfg["rt_lang"]}
+                                                  if cfg.get("rt_lang") in ("zh", "ja", "en")
+                                                  else {"model": "gpt-realtime-whisper"})},
+                      "output": {"voice": cfg.get("rt_voice") or "marin"}},
+            "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,
+            "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}
+    return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image"))})
+
+
+@bp.route("/rtc-call", methods=["POST"])
+def assistant_rtc_call():
+    """SDP 代理:浏览器 offer → OpenAI POST /v1/realtime/calls(标准 key 只在服务端)→ answer SDP 回浏览器。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    sdp = body.get("sdp") or ""
+    sess = body.get("session") or {}
+    model = (sess.get("model") or body.get("model") or "gpt-realtime-2.1-mini").strip()
+    try:
+        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+    except Exception:
+        key = ""
+    if not key:
+        return jsonify({"ok": False, "error": "缺 OpenAI 凭证(~/.config/openai-realtime.json)"}), 400
+    if not sdp:
+        return jsonify({"ok": False, "error": "缺 sdp"}), 400
+    import requests as _rq
+    try:
+        r = _rq.post(f"https://api.openai.com/v1/realtime/calls?model={model}",
+                     headers={"Authorization": f"Bearer {key}"},
+                     files={"sdp": (None, sdp, "application/sdp"),
+                            "session": (None, json.dumps(sess, ensure_ascii=False), "application/json")},
+                     timeout=25)
+        if r.status_code >= 300:
+            return jsonify({"ok": False, "error": f"OpenAI {r.status_code}: {r.text[:300]}"}), 502
+        return jsonify({"ok": True, "sdp": r.text})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:200]}), 502
+
+
+_RTC_USAGE_FILE = CLAUDE_DIR / "state" / "openai-usage.json"
+_RTC_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
+             "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0, "in_image": 0.80}
+
+
+@bp.route("/rtc-usage", methods=["POST"])
+def assistant_rtc_usage():
+    """WebRTC 版 usage 记账(response.done.usage 由前端转发;与 relay WS 版同一账本/口径)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    usage = request.get_json(silent=True) or {}
+    try:
+        itd = usage.get("input_token_details") or {}
+        otd = usage.get("output_token_details") or {}
+        ctd = itd.get("cached_tokens_details") or {}
+        row = {"in_text": int(itd.get("text_tokens") or 0), "in_audio": int(itd.get("audio_tokens") or 0),
+               "in_image": int(itd.get("image_tokens") or 0),
+               "cached_text": int(ctd.get("text_tokens") or 0), "cached_audio": int(ctd.get("audio_tokens") or 0),
+               "out_text": int(otd.get("text_tokens") or 0), "out_audio": int(otd.get("audio_tokens") or 0)}
+        cost = ((row["in_text"] - row["cached_text"]) * _RTC_RATE["in_text"]
+                + row["cached_text"] * _RTC_RATE["cached_text"]
+                + (row["in_audio"] - row["cached_audio"]) * _RTC_RATE["in_audio"]
+                + row["cached_audio"] * _RTC_RATE["cached_audio"]
+                + row["in_image"] * _RTC_RATE["in_image"]
+                + row["out_text"] * _RTC_RATE["out_text"]
+                + row["out_audio"] * _RTC_RATE["out_audio"]) / 1_000_000.0
+        day = time.strftime("%Y-%m-%d")
+        try:
+            data = json.loads(_RTC_USAGE_FILE.read_text("utf-8"))
+        except Exception:
+            data = {}
+        d = data.setdefault(day, {k: 0 for k in row} | {"usd": 0.0, "turns": 0})
+        for k, v in row.items():
+            d[k] = d.get(k, 0) + v
+        d["usd"] = round(d.get("usd", 0.0) + cost, 6)
+        d["turns"] = d.get("turns", 0) + 1
+        _RTC_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _RTC_USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
 @bp.route("/log", methods=["POST"])
 def assistant_log_external():
     """外部编排 agent(MCP)桥③:把外部 AI 跟用户的对话写进助手会话历史(标 via:'mcp')——

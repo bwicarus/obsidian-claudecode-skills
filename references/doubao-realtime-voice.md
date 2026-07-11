@@ -402,3 +402,26 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **㉘f 撤回声能量门**(用户实锤"说到一半就插话/有段没听清"):门(㉕b)丢低能量包的机制性缺陷——**PCM 流无时间戳,丢包≠插入静默而是把话剪辑拼接**:句中轻声段(句尾弱化/低声思考)被丢 → OpenAI 收到残缺音频 → semantic_vad 把人为空缺判成"说完了"→ 句子中间插话;"有段没听清"=音频被剪碎的直接症状。回声正解=AEC 环回(㉘)已上,门是既多余又有害的创可贴 → 全撤。**教训:任何在上行音频流里做丢弃/门控的方案都会破坏 VAD/转写的输入完整性,回声必须在信号层(AEC)解决,不能在传输层裁剪。**接话过快的余量调节=设置卡「接话灵敏度」选"慢热"(semantic_vad eagerness:low)。
 
 **㉙ 半双工外放模式**(用户实锤 AEC 环回在其设备无效——voice-log 里 AI 的话被转写成用户 Q「あ、ごめんごめん…」触发自答;调研早有结论:WS+外放无银弹,可靠解=耳机/半双工/WebRTC):**默认半双工**——AI 播放期整段静麦+播完 350ms 残响缓冲(onCap 头部 gate,f32buf 清空)。与能量门的本质区别:**全有或全无=干净静默**,不像选择性丢包那样把话剪碎破坏 VAD。代价=AI 说话期间不能语音打断(等它说完/点按钮);耳机用户在 GPT 设置勾「全双工打断」(rt_full_duplex,⚠白名单 False=删字段语义,所以用**正字段=勾表示开全双工**,默认无字段=半双工)恢复随时插话。链路:relay up_rate 事件带 half_duplex 布尔→前端 _halfDuplex(teardown/start 复位);仅 GPT 引擎生效(豆包无 up_rate=false,其服务端自带回声处理)。WebRTC 直连(治本,官方对浏览器场景的正式推荐)列任务 #280。
+
+## ㉚ GPT Realtime WebRTC 直连(2026-07-12,用户拍板"那就webrtc呗",外放回声治本)
+
+**为什么治本**:浏览器 AEC 的参考信号只取 WebRTC/`<audio>` 元素播放路径(Chromium issue 40252911)——WebRTC 模式下远端音频天然走 `pc.ontrack→<audio>`,**回声消除全自动生效**,外放+全双工随时插话都成立,㉙半双工/AEC 环回这些 WS 妥协全都不需要。这正是 OpenAI 对浏览器场景的正式推荐形态。
+
+**架构:媒体直连,控制面留在自家后端**(密钥绝不下发):
+```
+浏览器 getUserMedia(echoCancellation) ──媒体轨──> OpenAI (WebRTC 直连,音频不过 Pi)
+   │ createDataChannel('oai-events')  <──事件──>  (转写/函数调用/response.done 走 dc)
+   └ SDP offer ─POST /api/assistant/rtc-call(Pi 代理,带 key)→ OpenAI /v1/realtime/calls → answer
+工具循环搬到前端:dc 收 function_call → fetch /api/assistant/voice-tool → dc 回填 output+response.create
+```
+
+**后端三端点**(assistant.py,key 读 `~/.config/openai-realtime.json`):
+- `POST /rtc-session`:下发完整 GA session 配置——instructions 与 relay `_oa_instructions` 同源(语言段 rt_lang/手写铁律/状态消息规则/页面文本 fitz 直读)+TOOLS 目录转扁平 schema+deep_think/wait_for_user+semantic_vad(rt_eagerness)+noise_reduction near_field(WebRTC 场景近场)+voice/effort/model 全在 session 内;**不带 audio format**(WebRTC 媒体轨自动协商,这点与 WS 版必须 rate:24000 相反);返回 `{session, model, rt_image}`
+- `POST /rtc-call`:SDP 代理——`requests.post(…/v1/realtime/calls?model=X, files={"sdp":(None,sdp,"application/sdp"),"session":(None,json,"application/json")})`(multipart,官方形态),answer SDP 原样回传
+- `POST /rtc-usage`:前端把 response.done 的 usage 转发来记账(state/openai-usage.json 与 WS 版同一本账,_RTC_RATE 含 in_image 0.80)
+
+**前端 rtc 模块**(rc-voicecall.js,~180 行):核心技巧=**ws shim**——`rtcStart` 成功后 `ws = _rtcShimWs()`(readyState:1,send 把既有 `{type:page/ink/state/text/cancel}` 同步消息翻译成 dc 事件,二进制音频忽略)→ 翻页同步/选中注入/输入框发送/挂断检测等**全部现有代码零改动照常工作**。各消息语义与 relay WS 版对齐:page→fetch `/pdf/api/page-text` 拼 system 增量;ink→指纹去重(页+笔画数)+条件化措辞(状态记录≠行动请求);state→sel 去重;text→item.create+response.create。工具循环 `_rtcTool`:wait_for_user=静音回填不 response.create;deep_think→`_rtcDeep`(fetch /chat SSE 解析 answer 事件);其余→fetch voice-tool(ctx 带 ink/selection/_want_vision)→client_action 本地 dispatch(比经 relay 更直接)→`_vision` 转 dc input_image detail:high 直喂→onToolStatus 工具卡全复用。下行 `_rtcOnEvent`:transcript.delta→对话窗+字幕 capStream;speech_started→清 curAText+__vcSyncNow;transcription.completed→capUser;response.done→usage 上报+_capMaybeHide。远端音频=ontrack→隐藏 `<audio>` autoplay+playsinline(AEC 生效的关键,**不要**改成 WebAudio 播)。
+
+**引擎分流**:`toggle._connect`(toggle 连接/vc-new 重连共用)——**仅 s2s 模式**查 voice-config,`rt_engine==='openai_rtc'`→rtcStart,否则 start(WS relay);**agent 模式(mic 长按 ASR)恒走豆包 relay 不受 rt_engine 影响**(与 relay 按 mode 分发同语义,⚠差点漏:第一版分流没判 mode 会把 ASR 也劫走)。teardown 头部挂 rtcTeardown(pc/dc/audio 元素/mic 全清)。设置卡引擎三选:豆包 S2S(默认)/GPT WebRTC(推荐:外放无回声+可随时插话)/GPT WebSocket(外放半双工,保留);isOA 判定覆盖 openai|openai_rtc 两值(GPT 组设置两引擎共用)。
+
+**WebRTC 版不需要的 WS 包袱**(天然消失):半双工 gate/AEC 环回/播放毫秒回报 played_ms(truncate 由 OpenAI 端媒体流自己算)/AudioContext 24k 定频/上行合批。新会话=重连即得(WebRTC 每连接就是新 session,无 dialog_id 概念)。**留意**:60min 会话上限同 WS;iOS ducking(麦活跃压播放音量)理论上 WebRTC 通话路径更稳,属实测项。

@@ -708,6 +708,187 @@
     if (m.event === -1 || p.error) threadMsg('asst-note', '⚠ 语音:' + (p.error || '').slice(0, 80));
   }
 
+  // ── GPT Realtime WebRTC 直连(㉚,用户拍板):媒体直连 OpenAI——WebRTC 路径浏览器 AEC **真正生效**
+  //    (外放无回声+全双工随时插话,不再需要半双工妥协)。密钥不下发(SDP 经 /rtc-call 后端代理);
+  //    工具循环在本地(dc 收 function_call → fetch /voice-tool → dc 回填),client_action 直接执行;
+  //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
+  var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false,
+               ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '' };
+  function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
+  function _rtcSys(text) {
+    _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
+  }
+  function _rtcShimWs() {   // 顶替全局 ws:同步消息翻译成 dc,二进制(音频)忽略(媒体走 WebRTC 轨)
+    return { readyState: 1, close: function () {}, send: function (data) {
+      if (typeof data !== 'string') return;
+      var j; try { j = JSON.parse(data); } catch (e) { return; }
+      _rtcHandleUp(j);
+    } };
+  }
+  function _rtcHandleUp(j) {
+    var t = j.type;
+    if (t === 'page') {
+      var np = j.page, f = j.file || _rtc.ctxFile;
+      if (!np || np === _rtc.ctxPage) return;
+      _rtc.ctxPage = np; _rtc._inkFp = '';
+      fetch('/pdf/api/page-text?file=' + encodeURIComponent(f) + '&page=' + np)
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          _rtcSys('(用户翻到第 ' + np + ' 页,本页文字内容:' + (((d && d.text) || '(本页无文字层)').slice(0, 1200)) + '。之前页面的内容已翻过去了,回答以本条为准)');
+        }).catch(function () {});
+    } else if (t === 'ink') {
+      var strokes = j.strokes || [];
+      _rtc.ink = strokes;
+      var fp = (j.page || 0) + ':' + strokes.length;
+      if (fp === _rtc._inkFp) return;
+      _rtc._inkFp = fp;
+      _rtcSys('(状态更新:' + (strokes.length
+        ? ('用户在本页的手写笔迹有更新(共 ' + strokes.length + ' 笔)。这只是状态记录——不要对本条做任何回应、不要主动评论他画了什么。只有当他之后问「我写的/我画的/我圈的/这个对不对」时,才调 see_ink 工具看笔迹合成图回答;那时绝不要说你看不到,也不要让他粘贴或截图。')
+        : '用户清空了本页笔迹(状态记录,不要回应本条)。') + ')');
+    } else if (t === 'state') {
+      var sel = (j.sel || '').trim();
+      if (sel === _rtc.sel) return;
+      _rtc.sel = sel;
+      _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它)') : '用户当前没有选中文字') + ';状态记录,不要回应本条)');
+    } else if (t === 'text' && j.content) {
+      _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: String(j.content).slice(0, 2000) }] } });
+      _dcSend({ type: 'response.create' });
+    } else if (t === 'cancel' || t === 'tool_abort') {
+      _dcSend({ type: 'response.cancel' });
+    }
+  }
+  async function _rtcDeep(q) {   // deep_think:转交侧栏 chat(Claude)拿完整回答回填,GPT 自己念
+    if (!q) return '(问题为空)';
+    try {
+      var r = await fetch('/api/assistant/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '(语音深度思考,直接给最终回答,口语化短句)\n' + q, rid: 'rtc' + Date.now(),
+                               voice: 's2s', context: _rtc.ctxFile ? { file_rel: _rtc.ctxFile, page: _rtc.ctxPage } : {} }) });
+      var txt = await r.text(), answer = '', ev = '', data = '';
+      txt.split('\n').forEach(function (line) {
+        if (line.indexOf('event:') === 0) ev = line.slice(6).trim();
+        else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+        else if (!line.trim()) {
+          if (ev === 'answer' && data) { try { var p = JSON.parse(data); if (typeof p === 'string') answer = p.split(/\n?FOLLOWUP[::]/)[0]; } catch (e) {} }
+          ev = ''; data = '';
+        }
+      });
+      return (answer || '(没拿到回答)').slice(0, 3000);
+    } catch (e) { return '(深度思考失败:' + String(e).slice(0, 100) + ')'; }
+  }
+  async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
+    if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
+      _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
+      return;
+    }
+    onToolStatus({ status: 'running', label: name });
+    var out = '', ok = true, label = name, took = null, argsUsed = args;
+    try {
+      if (name === 'deep_think') {
+        out = await _rtcDeep(String(args.question || ''));
+        label = '深度思考';
+      } else {
+        var ctx = { file_rel: _rtc.ctxFile, page: _rtc.ctxPage };
+        if (_rtc.imgOn) ctx._want_vision = 1;
+        if (_rtc.ink && _rtc.ink.length) ctx.ink = _rtc.ink;
+        if (_rtc.sel) ctx.selection = _rtc.sel;
+        var r = await fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx }) });
+        var d = await r.json();
+        ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
+        var res = d.result || {};
+        var ca = res.client_action; delete res.client_action;
+        if (ca && ca.fn) dispatch(ca.fn, ca.args);           // 页面副作用本地直执行(比经 relay 更直接)
+        var vis = res._vision; delete res._vision;           // 原图绝不进文本 output
+        var slim = JSON.stringify(res);
+        out = (slim && slim.length > 2) ? slim.slice(0, 1800) : '(无文本结果,界面元素已显示在用户屏幕上)';
+        if (vis && vis.length && _rtc.imgOn) {               // 图像直喂(rt_image)
+          for (var i = 0; i < Math.min(vis.length, 2); i++) {
+            _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user',
+              content: [{ type: 'input_image', detail: 'high',
+                          image_url: 'data:' + (vis[i].media_type || 'image/png') + ';base64,' + vis[i].b64 }] } });
+          }
+          out += '\n(相关图像已直接发给你,请看图回答)';
+        }
+      }
+    } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
+    _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
+    _dcSend({ type: 'response.create' });
+    onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
+  }
+  function _rtcOnEvent(e) {   // dc 下行事件 → 既有 UI 语义(对话窗/字幕/按钮/工具卡)
+    var t = e.type;
+    if (t === 'response.output_audio_transcript.delta') {
+      curAText += (e.delta || ''); setSub('a', curAText); capStream('a', curAText);
+    } else if (t === 'input_audio_buffer.speech_started') {
+      curAText = ''; curAEl = null;
+      try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
+    } else if (t === 'conversation.item.input_audio_transcription.completed') {
+      var tx = (e.transcript || '').trim();
+      if (tx) { setSub('u', tx); capUser(tx); }
+    } else if (t === 'response.function_call_arguments.done') {
+      var a = {}; try { a = JSON.parse(e.arguments || '{}'); } catch (_) {}
+      if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
+    } else if (t === 'response.created') {
+      callBtnSpeaking(true);
+    } else if (t === 'response.done') {
+      callBtnSpeaking(false); _capMaybeHide(2500);
+      try { var u = e.response && e.response.usage;
+            if (u) fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true }); } catch (_) {}
+    } else if (t === 'error') {
+      var m0 = (e.error && e.error.message) || '';
+      if (m0 && m0.toLowerCase().indexOf('cancel') < 0) setSt('⚠ ' + m0.slice(0, 60));
+    }
+  }
+  async function rtcStart(opts) {
+    var g = ++_gen;
+    _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
+    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = '';
+    try {
+      setSt('连接中(WebRTC)…');
+      var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
+      if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
+      _rtc.imgOn = !!sres.rt_image;
+      var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      if (g !== _gen) { mic.getTracks().forEach(function (t) { t.stop(); }); return; }
+      var pc = new RTCPeerConnection();
+      mic.getTracks().forEach(function (t) { pc.addTrack(t, mic); });
+      var dc = pc.createDataChannel('oai-events');
+      dc.onmessage = function (ev) { try { _rtcOnEvent(JSON.parse(ev.data)); } catch (e) {} };
+      pc.ontrack = function (e) {   // 远端音频:audio 元素播放(WebRTC 路径=浏览器 AEC 生效的关键)
+        var el = document.createElement('audio');
+        el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
+        el.srcObject = e.streams[0];
+        document.body.appendChild(el);
+        _rtc.el = el;
+        try { el.play(); } catch (_) {}
+      };
+      var offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      var cres = await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sdp: offer.sdp, session: sres.session }) })).json();
+      if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
+      if (g !== _gen) { pc.close(); mic.getTracks().forEach(function (t) { t.stop(); }); return; }
+      await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
+      _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
+      ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
+      _userHung = false; _acquireWL();
+      setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
+      _refreshSpeakTg();
+    } catch (ex) {
+      setSt('WebRTC 启动失败: ' + String(ex.message || ex).slice(0, 80));
+      rtcTeardown();
+    }
+  }
+  function rtcTeardown() {
+    _rtc.on = false;
+    try { if (_rtc.dc) _rtc.dc.close(); } catch (e) {}
+    try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}
+    try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
+    try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null;
+  }
+
   function _agentCtxQs() {   // ASR 语境注入(㉓):开 ASR 时把当前书/页带给 relay → 握手注入热词+页面语境
     try {
       var c = (window.RC && RC.adapter && RC.adapter() && RC.adapter().getContext && RC.adapter().getContext()) ||
@@ -809,6 +990,7 @@
   function teardown(closeBox) {
     _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
     _connecting = false;
+    if (_rtc.on) rtcTeardown();   // WebRTC 通道随挂断走(pc/dc/audio 元素/mic 全清)
     _userHung = true; _releaseWL();
     if (_reconnT) { clearTimeout(_reconnT); _reconnT = null; }
     _reconnPend = false;
@@ -829,6 +1011,15 @@
     _aecTeardown();   // AEC 环回随通话走(pc/audio 元素清干净)
   }
 
+  // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);
+  // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
+  toggle._connect = function (opts) {
+    if (mode !== 's2s') { start(opts); return; }
+    fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
+      if ((((d || {}).cfg) || {}).rt_engine === 'openai_rtc') rtcStart(opts);
+      else start(opts);
+    }).catch(function () { start(opts); });
+  };
   function toggle(opts) {
     injectCss();
     mode = (opts && opts.mode) || 'agent';
@@ -856,11 +1047,11 @@
       if (asstInput && asstInput.parentNode) { box.classList.add('vc-inline'); asstInput.parentNode.insertBefore(box, asstInput); }
       else document.body.appendChild(box);
       box.querySelector('.vc-x').addEventListener('click', function () { teardown(true); });
-      box.querySelector('.vc-new').addEventListener('click', function () {   // ↺ 新话题:挂断 → 带 fresh=1 重连(relay 清 dialog_id + 不带历史)
+      box.querySelector('.vc-new').addEventListener('click', function () {   // ↺ 新话题:挂断 → 重连(豆包带 fresh=1 清 dialog_id;WebRTC 每连接本就是新会话)
         teardown(false);
         toggle._fresh = true;
         setSt('已清空记忆,重新开始…');
-        start(toggle._opts || {});
+        toggle._connect(toggle._opts || {});
       });
       // 抓手拖拽:上拖=对话区变高(窗在输入框上方,向上扩展),高度存 localStorage 下次直接复原
       (function () {
@@ -888,7 +1079,7 @@
     toggle._opts = opts || {};
     try { box.querySelector('.vc-new').style.display = (mode === 's2s') ? '' : 'none'; } catch (e) {}   // 🧹 是 S2S 记忆专用;agent 模式用助手自己的「清空」
     setSt('连接中…');
-    start(toggle._opts);
+    toggle._connect(toggle._opts);
   }
 
   // 翻页同步:仅 s2s 模式需要(agent 模式每次发送时侧栏 ctx() 自带当前页,天然跟页走)

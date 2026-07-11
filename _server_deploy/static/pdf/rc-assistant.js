@@ -314,10 +314,11 @@
       var c = d.cfg || {};
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       // ㉖b:按通话引擎分组渲染——选 GPT 就藏豆包 S2S 专属项、显示 GPT 专属项;朗读/ASR 与引擎无关恒显。
-      var isOA = (c.rt_engine === 'openai');
+      var isOA = (c.rt_engine === 'openai' || c.rt_engine === 'openai_rtc');
       var H = '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_engine" style="flex:1 1 100%">' +
-          '<option value=""' + (!isOA ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
-          '<option value="openai"' + (isOA ? ' selected' : '') + '>通话引擎:GPT Realtime 2.1 mini(原生工具·128k上下文·音频费约豆包一半)</option>' +
+          '<option value=""' + (!c.rt_engine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
+          '<option value="openai_rtc"' + (c.rt_engine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·推荐:外放无回声+可随时插话)</option>' +
+          '<option value="openai"' + (c.rt_engine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebSocket·外放半双工)</option>' +
         '</select></div>';
       if (isOA) {   // ── GPT Realtime 专属(2.1 可调项全暴露)──
         var _RTM = [['gpt-realtime-2.1-mini', '模型:2.1 mini(推荐,音频费≈豆包一半)'], ['gpt-realtime-2.1', '模型:2.1 完整版(更聪明,约 3 倍贵)']];
