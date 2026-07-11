@@ -97,6 +97,13 @@ def _study_digest(span: str = "today") -> str:
                 pass
     except Exception:
         pass
+    cut = 0
+    try:
+        cut = int(_creds().get("recall_cutoff") or 0)   # 记忆起点(v3-⑰c):只统计此后记录;0=不限
+    except Exception:
+        pass
+    if cut:
+        evs = [e for e in evs if int(e.get("ts", 0)) >= cut]
     evs.sort(key=lambda e: e.get("ts", 0))
     if not evs:
         return ""

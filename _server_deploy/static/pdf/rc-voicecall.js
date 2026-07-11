@@ -116,6 +116,10 @@
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 朗读开关播报中:淡蓝呼吸
       '.vc-speak-tg.speaking{animation:vcCallPulse 1.2s ease-in-out infinite}' +
+      // 记忆起点选择行(v3-⑰c)
+      '.vc-recall-pane{display:flex;gap:6px;align-items:center;margin:6px 10px;padding:6px 8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;flex-wrap:wrap}' +
+      '.vc-recall-pane input{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:7px;padding:4px 6px;font-size:12px;flex:1 1 150px;min-width:0}' +
+      '.vc-recall-pane button{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
       // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
       '#asst-call,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
@@ -591,6 +595,19 @@
     try { ws.send(JSON.stringify({ type: 'state', sel: state.sel || '', focus: state.focus || '', figs: state.figs || 0 })); } catch (e) {}
   }
 
+  // 侧栏「🗑 清空」→ 询问是否顺带把「回顾学习」记忆起点设为现在(v3-⑰c;对话记忆与学习档案分层:
+  // 清空只清对话,时间线档案默认保留——想斩断的由这里显式确认)
+  document.addEventListener('click', function (e) {
+    try {
+      var b = e.target && e.target.closest ? e.target.closest('[data-q="clear"]') : null;
+      if (!b) return;
+      setTimeout(function () {   // 等 clear 本体先跑完,再问(不阻塞清空)
+        if (confirm('把「回顾学习」的记忆起点也设为现在吗?\n(之前的学习记录将不再被回顾提起;学习档案本身保留)')) {
+          _setCutoff(Math.floor(Date.now() / 1000), function (ok) { if (typeof _toast === 'function') _toast(ok ? '记忆起点=现在' : '设置失败'); });
+        }
+      }, 50);
+    } catch (_) {}
+  }, true);
   // 侧栏「🗑 清空」→ S2S 记忆同步清空(fresh 重连;共享/native 两版按钮都是 data-q="clear",捕获阶段旁听不拦截)
   document.addEventListener('click', function (e) {
     try {
@@ -684,6 +701,50 @@
   // 挤进侧栏快捷栏(蹭 rc-media-tg 样式,与「书页/配图/视频」同排)。通话中点击即时生效。
   function _tgOn() { return (ws && mode === 's2s') ? s2sSpeakOn() : speakOn(); }
   function _refreshSpeakTg() { var b = document.querySelector('.vc-speak-tg'); if (b) b.classList[_tgOn() ? 'add' : 'remove']('on'); }
+  var _recallRefresh = null;   // chip 文字刷新(清空联动后调)
+  function _fmtCutoff(ts) {
+    if (!ts) return '⏱ 记忆起点';
+    var d = new Date(ts * 1000);
+    return '⏱ ' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + '时起';
+  }
+  function _setCutoff(ts, cb) {
+    fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recall_cutoff: ts || '' }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) { if (_recallRefresh) _recallRefresh(); if (cb) cb(true); } else if (cb) cb(false); })
+      .catch(function () { if (cb) cb(false); });
+  }
+  function injectRecallChip() {
+    var qb = document.getElementById('asst-quick');
+    if (!qb) return false;
+    if (qb.querySelector('.vc-recall-tg')) return true;
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg vc-recall-tg';
+    b.innerHTML = '<span>⏱ 记忆起点</span>';
+    b.title = '「回顾学习」只统计此时间之后的学习记录(不设=全部)。点开选日期和小时,或一键设为现在';
+    _recallRefresh = function () {
+      fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (v) {
+        if (v && v.ok) b.querySelector('span').textContent = _fmtCutoff(v.cfg && v.cfg.recall_cutoff);
+      }).catch(function () {});
+    };
+    _recallRefresh();
+    var pane = null;
+    b.addEventListener('click', function () {
+      if (pane) { pane.remove(); pane = null; return; }
+      pane = document.createElement('div'); pane.className = 'vc-recall-pane';
+      pane.innerHTML = '<input type="datetime-local" step="3600">' +
+        '<button type="button" data-a="now">设为现在</button><button type="button" data-a="all">不限</button>';
+      qb.parentNode.insertBefore(pane, qb.nextSibling);
+      function done(ok) { if (typeof _toast === 'function') _toast(ok ? '已设置' : '设置失败'); if (pane) { pane.remove(); pane = null; } }
+      pane.querySelector('input').addEventListener('change', function () {
+        var t = Date.parse(this.value);
+        if (t) _setCutoff(Math.floor(t / 1000), done);
+      });
+      pane.querySelector('[data-a="now"]').addEventListener('click', function () { _setCutoff(Math.floor(Date.now() / 1000), done); });
+      pane.querySelector('[data-a="all"]').addEventListener('click', function () { _setCutoff(0, done); });
+    });
+    qb.appendChild(b);
+    return true;
+  }
   function injectSpeakToggle() {
     var qb = document.getElementById('asst-quick');
     if (!qb) return false;
@@ -710,8 +771,8 @@
   }
 
   // 侧栏 pane 注入时机不定(rc-assistant 加载在前,但保守起见轮询到出现为止)
-  if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress())) {
-    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress()) || ++_tries > 40) clearInterval(_t); }, 750);
+  if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip())) {
+    var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
 
   RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
