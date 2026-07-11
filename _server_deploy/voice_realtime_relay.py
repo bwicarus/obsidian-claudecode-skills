@@ -940,14 +940,16 @@ def _tts_channel(bws, key: str, speaker: str):
     tts = {"ws": None, "sid": None, "reader": None, "gen": 0}
     uni = {"q": None, "worker": None, "section": None, "gen": 0, "ws": None}
 
-    async def _uni_synth_one(text: str, g: int):
+    async def _uni_synth_one(text: str, g: int, mood: str = ""):
         c = _creds()
         spk = c.get("tts_speaker") or speaker
         h = {"X-Api-Key": key, "X-Api-Resource-Id": "seed-tts-2.0", "X-Api-Connect-Id": str(uuid.uuid4())}
         adds = {}
-        instr = (c.get("tts_instruction") or "").strip()
+        # 语气优先级(v3-⑱b 用户设计):AI 按内容给的本轮语气(回答首行 [语气:XX] 标记,前端剥离后随 speak 传来)
+        # > 面板固定语气(tts_instruction,兜底)。都是 context_texts 自然语言指令,不计费不进文本。
+        instr = (f"用{mood}的语气说" if mood else (c.get("tts_instruction") or "").strip())
         if instr:
-            adds["context_texts"] = [instr]   # 语气指令(不计费、不进合成文本;仅 2.0 生效)
+            adds["context_texts"] = [instr]
         if uni["section"]:
             adds["section_id"] = uni["section"]   # 同一通话同一 section:跨请求保持对话式韵律
         rp = {"text": text, "speaker": spk,
@@ -985,7 +987,7 @@ def _tts_channel(bws, key: str, speaker: str):
                 if item is None or g != uni["gen"]:
                     return
                 try:
-                    await _uni_synth_one(item, g)
+                    await _uni_synth_one(item[0], g, item[1])
                 except Exception as ex:
                     sys.stderr.write(f"[voice-tts uni] {str(ex)[:120]}\n")
         except asyncio.CancelledError:
@@ -1052,11 +1054,11 @@ def _tts_channel(bws, key: str, speaker: str):
             except Exception:
                 pass
 
-    async def speak(text: str):
+    async def speak(text: str, mood: str = ""):
         text = (text or "").strip()
         if not text:
             return
-        if _is_uni():   # 2.0 音色 → 单向引擎(句队列串行合成,同 section 保韵律)
+        if _is_uni():   # 2.0 音色 → 单向引擎(句队列串行合成,同 section 保韵律;mood 随句走)
             if uni["q"] is None:
                 uni["q"] = asyncio.Queue()
             if not uni["section"]:
@@ -1064,7 +1066,7 @@ def _tts_channel(bws, key: str, speaker: str):
             if uni["worker"] is None or uni["worker"].done():
                 uni["gen"] += 1
                 uni["worker"] = asyncio.create_task(_uni_worker(uni["gen"]))
-            await uni["q"].put(text)
+            await uni["q"].put((text, (mood or "").strip()[:12]))
             return
         try:
             await _ensure()
@@ -1133,7 +1135,7 @@ async def handle_tts_only(bws):
                 continue
             t = j.get("type")
             if t == "speak" and (j.get("text") or "").strip():
-                await ch["speak"](j["text"])
+                await ch["speak"](j["text"], j.get("mood") or "")
             elif t == "speak_done":
                 await ch["done"]()
             elif t == "cancel":
@@ -1191,7 +1193,7 @@ async def handle_agent(bws):
                         continue
                     t = j.get("type")
                     if t == "speak" and (j.get("text") or "").strip():
-                        await ch["speak"](j["text"])
+                        await ch["speak"](j["text"], j.get("mood") or "")
                     elif t == "speak_done":          # 这轮回答文本发完:FinishSession → 服务端把尾巴合成完 → 152
                         await ch["done"]()
                     elif t == "cancel":              # 打断:断连立即哑火(FinishSession 语义是"合成完剩余文本",打断不能用)

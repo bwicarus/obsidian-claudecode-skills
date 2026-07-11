@@ -104,6 +104,15 @@
     document.head.appendChild(css);
   })();
 
+  // 剥回答首行的语气标记 [语气:XX](AI 按 voice prompt 输出,驱动 2.0 朗读引擎的情绪;显示与朗读都不要它)。
+  // 流式撕裂保护:首块只到 "[语气:开" 没闭合 → 先 hold 显示空,等下一增量。
+  function stripMoodTag(t) {
+    t = String(t || '');
+    var m = /^\s*[\[【]语气[::]\s*([^\]】]{1,12})[\]】]\s*/.exec(t);
+    if (m) return { text: t.slice(m[0].length), mood: m[1].trim() };
+    if (/^\s*[\[【]语?气?[::]?[^\]】]{0,12}$/.test(t) && t.trim()) return { text: '', mood: null };
+    return { text: t, mood: null };
+  }
   function splitFollowups(text) {
     var fu = [];
     var push = function (body) {
@@ -316,7 +325,7 @@
         '<input type="range" min="-50" max="100" step="5" value="' + (c.speech_rate || 0) + '" data-k="speech_rate" style="width:100%">' +
         '<div class="ams-cur" style="margin:4px 0 2px">朗读语速 <b class="vcv-tsr">' + (c.tts_speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.tts_speech_rate || 0) + '" data-k="tts_speech_rate" style="width:100%">' +
-        '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="朗读语气(仅2.0音色,如:用温柔平静的语气,慢一点)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
+        '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="默认朗读语气(AI 会按内容自动调整情绪;这里是它没给时的兜底,仅2.0音色)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
         '<div class="ams-cur" style="margin:4px 0 2px">通话音量(S2S) <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.loudness_rate || 0) + '" data-k="loudness_rate" style="width:100%">' +
         '<div class="ams-row" style="margin:7px 0"><input class="ams-sel" data-k="bot_name" placeholder="名字(默认:豆包)" value="' + esc2(c.bot_name || '') + '" style="flex:1 1 44%">' +
@@ -489,6 +498,7 @@
 
   RC.assistant = {
     splitFollowups: splitFollowups,
+    stripMoodTag: stripMoodTag,
     renderFollowups: renderFollowups,
     contextCard: contextCard,
     openModelSettings: openModelSettings,
@@ -1592,8 +1602,10 @@
       if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
       else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
-        answer = parsed; var _at = _splitFollowups(answer).text;
-        try { window.__asstVoiceTap && window.__asstVoiceTap(_at, false); } catch (_) {}   // 语音对话:回答增量喂 TTS(rc-voicecall)
+        answer = parsed;
+        var _sm = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_splitFollowups(answer).text) : { text: _splitFollowups(answer).text };
+        var _at = _sm.text;
+        try { window.__asstVoiceTap && window.__asstVoiceTap(_at, false, _sm.mood); } catch (_) {}   // 语音对话:回答增量喂 TTS(带 AI 给的本轮语气)
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
         if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
         if (_noChar) { _appendCaret(aMsg); }
@@ -1682,8 +1694,9 @@
     _stopReveal();                            // stream-fx:停揭示循环(下面 renderMd 重渲成干净 markdown,无 span/光标)
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
-    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(pf.text || '', true); } catch (_) {}   // 语音对话:回答完,把尾句也念了
-    if (pf.text) renderMd(aMsg, pf.text, true);
+    try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(((RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : (pf.text || '')), true); } catch (_) {}   // 语音对话:回答完,把尾句也念了
+    var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
+    if (_pft) renderMd(aMsg, _pft, true);
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
     if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
@@ -1926,7 +1939,8 @@
             try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
           }
           else {
-            var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || ''); renderMd(el, _pf.text);
+            var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
+            renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
             try { _renderFollowups(el, _pf.followups); } catch (_) {}
             try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
             if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (_) {} }   // 视频卡刷新回放(镜像 EPUB 阶段C)

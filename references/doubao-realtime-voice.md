@@ -306,3 +306,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **停顿=AI 标点**:三处朗读 prompt(assistant voice_mode 段/deep preamble/recall preamble)加"用标点控制节奏:短句逗号断句、明显停顿用省略号……、别用其它标记符号"——**不让 AI 写 SSML/标记**(2.0 不支持+会污染侧栏显示;程序+标点承担)。
 - 面板:朗读音色下拉加 2.0 组(vv 2.0 推荐/爽快思思/渊博小叔/深夜播客/温柔小雅/儒雅青年/亲切女声)+「朗读语气」输入框(仅 2.0 生效)。默认已切 vv_uranus+温柔指令。
 - 单向接口另有存货未接:`emotion/emotion_scale`(多情感音色)、`silence_duration`(句尾静音)、`disable_markdown_filter=false` 原生过滤 md、`cache_config`(相同文本 1h 缓存)、pitch。
+
+### AI 动态语气(v3-⑱b,用户设计:"语气由回答的 agent 定,流式要求开头给出")
+
+- **机制**:voice_mode prompt 要求 AI 在回答**最开头**输出 `[语气:XX]` 标签(2~6 字情绪描述,普通内容用"平静")——正好赶在第一句合成前确定情绪(流式时序约束)。前端 `stripMoodTag`(rc-assistant,挂 RC.assistant 导出):**四处渲染/消费点全剥**(流式增量渲染/收尾最终渲染/历史回放/两处 tap),**流式撕裂保护**(首块只到"[语气:开"没闭合 → hold 显示空等下一增量);mood 经 tap 第三参数 → rc-voicecall `vt.mood`(新一轮 reset 清)→ speak 消息 `mood` 字段 → relay 两处 speak 分支 → `_tts_channel.speak(text, mood)` → uni 引擎 **context_texts 优先级:AI mood(`用{mood}的语气说`)> 面板 tts_instruction 兜底**。
+- bidi(1.0 音色)引擎忽略 mood;S2S 通话 tap 天然不触发(语气归豆包人设)。面板语气框语义改"默认/兜底"。
+- 冒烟:mood 贯穿真实合成链;JS 单元=完整标记剥离/撕裂 hold/无标记不误伤 全过。

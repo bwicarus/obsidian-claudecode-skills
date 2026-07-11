@@ -323,7 +323,7 @@
     var t = cleanForSpeech(text);
     if (!t) return;
     var w = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;   // agent 通话在→走它;否则朗读专用通道
-    if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid })); } catch (e) {} }
+    if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid, mood: vt.mood || '' })); } catch (e) {} }
   }
   function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成(两条通道都发)
     stopPlayback(); _ttsStopPlay();
@@ -380,12 +380,13 @@
   // S2S 通话中的出声开关(独立键,默认亮):灭=丢音频只看对话窗字幕。⚠ S2S 双流恒计费(协议无输出模态
   // 开关,已全查证),灭省的是听觉干扰不是钱;真文本对话用 mic 长按的 ASR 模式(零豆包输出音频费)。
   function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
-  window.__asstVoiceTap = function (full, done) {
+  window.__asstVoiceTap = function (full, done, mood) {
     if (!speakOn()) return;                 // 「🔊 朗读」没点亮=零 TTS 成本(读比听快,用户拍板默认关)
     if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
     if (!(ws && mode === 'agent')) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
     full = String(full || '');
-    if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; bargeIn(); }   // 新一轮回答开始 → 打断上一轮残播
+    if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; vt.mood = null; bargeIn(); }   // 新一轮回答开始 → 打断残播+清上轮语气
+    if (mood) vt.mood = mood;               // AI 按内容给的本轮语气([语气:XX] 标记,rc-assistant 剥离后传来)→ 2.0 引擎 context_texts
     vt.tail += full.slice(vt.sent); vt.sent = full.length;
     var re = /[^。！？!?;；,，\n]+[。！？!?;；,，\n]+/g, m, consumed = 0;   // 逗号级边界:更早开始出声
     while ((m = re.exec(vt.tail))) { speak(m[0]); consumed = re.lastIndex; }
