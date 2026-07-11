@@ -1190,9 +1190,9 @@ def _openai_key() -> str:
 
 
 OPENAI_USAGE_FILE = Path(__file__).resolve().parent.parent / "state" / "openai-usage.json"
-# gpt-realtime-2.1-mini 官方单价($/1M tokens):文本 in 0.60/cached 0.06/out 2.40;音频 in 10/cached 0.30/out 20
+# gpt-realtime-2.1-mini 官方单价($/1M tokens):文本 in 0.60/cached 0.06/out 2.40;音频 in 10/cached 0.30/out 20;图像 in 0.80
 _OA_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
-            "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0}
+            "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0, "in_image": 0.80}
 
 
 def _oa_log_usage(usage: dict):
@@ -1202,12 +1202,14 @@ def _oa_log_usage(usage: dict):
         otd = usage.get("output_token_details") or {}
         ctd = itd.get("cached_tokens_details") or {}
         row = {"in_text": int(itd.get("text_tokens") or 0), "in_audio": int(itd.get("audio_tokens") or 0),
+               "in_image": int(itd.get("image_tokens") or 0),   # >0 = 模型真看到了图(rt_image 直喂的最硬验证信号)
                "cached_text": int(ctd.get("text_tokens") or 0), "cached_audio": int(ctd.get("audio_tokens") or 0),
                "out_text": int(otd.get("text_tokens") or 0), "out_audio": int(otd.get("audio_tokens") or 0)}
         cost = ((row["in_text"] - row["cached_text"]) * _OA_RATE["in_text"]
                 + row["cached_text"] * _OA_RATE["cached_text"]
                 + (row["in_audio"] - row["cached_audio"]) * _OA_RATE["in_audio"]
                 + row["cached_audio"] * _OA_RATE["cached_audio"]
+                + row["in_image"] * _OA_RATE["in_image"]
                 + row["out_text"] * _OA_RATE["out_text"]
                 + row["out_audio"] * _OA_RATE["out_audio"]) / 1_000_000.0
         day = time.strftime("%Y-%m-%d")
@@ -1353,7 +1355,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
         await bws.send(json.dumps({"event": -1, "payload": {"error": f"OpenAI 连接失败:{str(ex)[:80]}"}}, ensure_ascii=False))
         await bws.close()
         return
-    played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item(打断 truncate 用:已转发字节≈已播时长)
+    played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
+    pend_trunc = {"id": None, "fb": 0}  # 打断后待 truncate:等前端回报**真实已播毫秒**(600ms 兜底用已转发字节——它远超实际已播,官方语义是"用户实际听到的毫秒")
     cur_a = {"txt": ""}
 
     async def _tool(name: str, args: dict, call_id: str):
@@ -1436,7 +1439,16 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             t = j.get("type")
             if t == "finish":
                 return
-            if t in ("cancel", "tool_abort"):
+            if t == "played_ms":   # 打断时前端回报的真实已播毫秒 → 精确 truncate(官方语义)
+                pid = pend_trunc.get("id")
+                if pid:
+                    pend_trunc["id"] = None
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.truncate", "item_id": pid,
+                                                   "content_index": 0, "audio_end_ms": int(j.get("ms") or 0)}))
+                    except Exception:
+                        pass
+            elif t in ("cancel", "tool_abort"):
                 try:
                     await ows.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
@@ -1505,14 +1517,21 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 cur_a["txt"] += d0
                 await bws.send(json.dumps({"event": 550, "payload": {"content": d0}}, ensure_ascii=False))
             elif t == "input_audio_buffer.speech_started":
-                await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))   # 前端清播放队列
+                await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))   # 前端清播放队列+回报已播毫秒
                 if played["id"]:
-                    try:   # WS 场景 truncate 必须自己发:把用户没听到的音频从模型上下文删掉(不发会话会错位)
-                        await ows.send(json.dumps({"type": "conversation.item.truncate", "item_id": played["id"],
-                                                   "content_index": 0, "audio_end_ms": int(played["bytes"] / 48)}))
-                    except Exception:
-                        pass
+                    pend_trunc["id"], pend_trunc["fb"] = played["id"], int(played["bytes"] / 48)
                     played.update({"id": None, "bytes": 0})
+
+                    async def _trunc_fb(pid=pend_trunc["id"], ms=pend_trunc["fb"]):
+                        await asyncio.sleep(0.6)   # 前端 600ms 没回报(断连等)→ 按已转发字节兜底截
+                        if pend_trunc.get("id") == pid:
+                            pend_trunc["id"] = None
+                            try:
+                                await ows.send(json.dumps({"type": "conversation.item.truncate", "item_id": pid,
+                                                           "content_index": 0, "audio_end_ms": ms}))
+                            except Exception:
+                                pass
+                    asyncio.create_task(_trunc_fb())
             elif t == "conversation.item.input_audio_transcription.completed":
                 txt = (e.get("transcript") or "").strip()
                 if txt:

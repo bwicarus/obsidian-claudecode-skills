@@ -324,6 +324,16 @@
   }
 
   // ── 播放(PCM24k)+ 打断 ──
+  var _playStat = { t0: 0, queued: 0 };   // 本轮回答播放统计:打断时回报**真实已播毫秒**给 relay 做 truncate
+  function _reportPlayed() {   // (官方语义:audio_end_ms=用户实际听到的毫秒;旧版按已转发字节高估≈不截,上下文残留没听到的内容)
+    try {
+      if (ws && ws.readyState === 1 && _playStat.queued > 0 && ac) {
+        var played = Math.max(0, Math.min(ac.currentTime - _playStat.t0, _playStat.queued));
+        ws.send(JSON.stringify({ type: 'played_ms', ms: Math.round(played * 1000) }));
+      }
+    } catch (e) {}
+    _playStat = { t0: 0, queued: 0 };
+  }
   function playPcm(buf) {
     if (!ac) return;
     if (mode === 's2s' && !s2sSpeakOn()) return;   // S2S+朗读灭:丢音频,回复看对话窗字幕(550 增量驱动)
@@ -335,6 +345,8 @@
     src.connect((_aec.ready && _aec.ctx === ac) ? _aec.dest : ac.destination);   // 环回在 → AEC 生效路径;不在 → 直连兜底
     var t = Math.max(ac.currentTime + 0.02, playT);
     src.start(t); playT = t + ab.duration; playing.push(src);
+    if (_playStat.queued === 0) _playStat.t0 = t;   // 本轮回答首块的开播时刻
+    _playStat.queued += ab.duration;
     _capBindChunk(t, ac);   // agent 通话朗读:句首块 → 字幕在开播时刻亮(S2S 无 seg 帧,零影响)
     callBtnSpeaking(true);
     src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); if (!playing.length) callBtnSpeaking(false); };
@@ -575,7 +587,7 @@
   function _ttsEnsure() {
     if (!ws && !_connecting) _audioSession('playback');   // 没在通话/没在建:确保纯播放类别(耳机路由)
     try {
-      if (!_tts.ac) _tts.ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (!_tts.ac) { try { _tts.ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); } catch (e) { _tts.ac = new (window.AudioContext || window.webkitAudioContext)(); } }   // 24k 定频:消逐 chunk 独立重采样的边界 click(官方 console 同款)
       if (_tts.ac.state !== 'running') _tts.ac.resume();
     } catch (e) {}
     if (_tts.ws && _tts.ws.readyState <= 1) return;
@@ -725,7 +737,10 @@
     try {
       try { await (_ttsShutdown() || 0); } catch (e) {}   // 关掉朗读通道并**等 close 落地**:playback 会话还激活着的话类别切不动;通话中朗读走通话 ws,不需要它
       _audioSession('play-and-record');   // 开麦通话:必须在建 AudioContext **之前**声明——会话一旦以 playback 激活,活跃中改类别 iOS 不可靠,麦克风会保持静音
-      myAc = new (window.AudioContext || window.webkitAudioContext)();
+      // 24k 定频(官方 console 同款):默认 48k 时每个 24k chunk 被**独立重采样**,边界无连续性=周期性 click/断续。
+      // 采集侧同受益:worklet 以 24k 出帧,onCap 降采样更干净(iOS 14.5+ 支持 sampleRate 选项,失败回退默认)。
+      try { myAc = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); }
+      catch (e0) { myAc = new (window.AudioContext || window.webkitAudioContext)(); }
       // ⚠ iOS 坑:非用户手势环境(后台断线自动重连)里 suspended AudioContext 的 resume() 可能
       // **永远 pending(不 resolve 不 reject)** → 旧代码 await 死等 = "一直显示重连中"的根因。
       // 改 800ms 超时竞速:suspended 也继续建链路(ws/字幕都通,只是暂时无声),等用户碰一下屏幕
@@ -770,10 +785,12 @@
         if (m.event === -1 || m.event === 153 || m.event === 599 || m.code) { setSt('⚠ ' + (p.error || p.message || '').slice(0, 60)); return; }
         if (m.event === 150) { setSt('通话中(会话已建立)'); capWait(true); }
         else if (m.event === 359) {   // 一轮播完
+          _playStat = { t0: 0, queued: 0 };   // 整轮播完=无需 truncate,统计清零
           if (p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→播完告别语自动挂断
           else _capMaybeHide(2500);   // 字幕停留几秒 → 回"正在听"等待态
         }
         else if (m.event === 450) {   // 用户开口:打断播报 + **立即同步一次上下文**(墨迹/选中,赶在模型答题前——治刚画完就问的竞态)
+          _reportPlayed();   // 停播前先回报真实已播毫秒(GPT 引擎 relay 用它 truncate;豆包忽略该消息)
           stopPlayback(); curAText = ''; curAEl = null;
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
         }
