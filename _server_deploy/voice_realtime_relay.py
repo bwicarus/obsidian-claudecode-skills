@@ -1265,7 +1265,9 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     if vocab:
         parts.append("本页『还没掌握』的生词:" + "、".join(vocab[:30]))
     parts.append("页面实时状态(选中/手写笔迹)和**翻页后的新页面内容**都会以 system 消息出现在对话里,永远以最新一条为准;"
-                 "一条状态消息都没有=本页当前无选中无笔迹。")
+                 "一条状态消息都没有=本页当前无选中无笔迹。"
+                 "**状态消息只是记录,永远不要对它们本身做回应或主动评论**(不要说『我看到你画了/选了…』);"
+                 "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")
     return "\n".join(parts)
 
 
@@ -1478,12 +1480,15 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             elif t == "state":   # 选中/chip 同步(字段与豆包版同源:sel/focus/figs 数量)
                 sel = (j.get("sel") or "").strip()
                 book["sel"] = sel[:400]
+                if sel == book.get("_sel_fp"):   # 去重:同一选中别反复注入
+                    continue
+                book["_sel_fp"] = sel
                 note0 = (f"用户当前选中了「{sel[:200]}」(他说『这段/我选的』就指它)" if sel
                          else "用户当前没有选中文字")
                 try:   # 状态=对话内 system 增量消息(与豆包 510 同哲学:前缀不动,历史缓存全保)
                     await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                         "type": "message", "role": "system",
-                        "content": [{"type": "input_text", "text": "(状态更新:" + note0 + ",以本条为准)"}]}}, ensure_ascii=False))
+                        "content": [{"type": "input_text", "text": "(状态更新:" + note0 + ";状态记录,不要回应本条)"}]}}, ensure_ascii=False))
                     sys.stderr.write(f"[voice-oa] 状态注入 sel={len(sel)}字\n")
                 except Exception:
                     pass
@@ -1495,9 +1500,22 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 strokes = j.get("strokes") or []
                 if ip and ip == (book.get("page") or page):
                     book["ink_strokes"] = strokes[:60]
-                    note1 = ((f"用户刚在本页用笔写/圈画了内容(共 {len(strokes)} 笔)。你看不到笔迹本身,但你有 see_ink 工具:"
-                              "他问『我写的/我画的/我圈的/这个对不对』时**必须立即调用 see_ink** 看笔迹合成图再回答——"
-                              "绝不要说你看不到,也不要让他粘贴文字或发截图。") if strokes else "用户清空了本页笔迹。")
+                    # 去重(㉘e):画一幅图前端会推好几次(每次落笔防抖后),每次都注入=模型每回合评论一次笔迹。
+                    # 指纹=页+笔画数+末笔末点坐标(粗略但够辨"真变了")。
+                    try:
+                        _lp = (strokes[-1].get("p") or [[0, 0]])[-1] if strokes else [0, 0]
+                        fp1 = f"{ip}:{len(strokes)}:{round(float(_lp[0]), 3)}:{round(float(_lp[1]), 3)}"
+                    except Exception:
+                        fp1 = f"{ip}:{len(strokes)}"
+                    if fp1 == book.get("_ink_fp"):
+                        continue
+                    book["_ink_fp"] = fp1
+                    # 措辞条件化(㉘e):旧版"必须立即调用 see_ink"被当成**行动指令**,模型在下个回合(含 VAD 误触发的
+                    # 空回合)主动评论笔迹、连评两次——状态记录≠行动请求,能力提示保留,主动性去掉。
+                    note1 = ((f"用户在本页的手写笔迹有更新(共 {len(strokes)} 笔)。这只是状态记录——**不要对本条做任何回应、"
+                              "不要主动评论或提起他画了什么**。只有当他之后问『我写的/我画的/我圈的/这个对不对』时,"
+                              "才调 see_ink 工具看笔迹合成图回答;那时绝不要说你看不到,也不要让他粘贴或截图。")
+                             if strokes else "用户清空了本页笔迹(状态记录,不要回应本条)。")
                     try:
                         await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                             "type": "message", "role": "system",
