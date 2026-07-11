@@ -1189,6 +1189,43 @@ def _openai_key() -> str:
         return ""
 
 
+OPENAI_USAGE_FILE = Path(__file__).resolve().parent.parent / "state" / "openai-usage.json"
+# gpt-realtime-2.1-mini 官方单价($/1M tokens):文本 in 0.60/cached 0.06/out 2.40;音频 in 10/cached 0.30/out 20
+_OA_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
+            "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0}
+
+
+def _oa_log_usage(usage: dict):
+    """response.done.usage 按天入账(官方口径:分模态/缓存;cached 是 input 子集,按扣减计价)。"""
+    try:
+        itd = usage.get("input_token_details") or {}
+        otd = usage.get("output_token_details") or {}
+        ctd = itd.get("cached_tokens_details") or {}
+        row = {"in_text": int(itd.get("text_tokens") or 0), "in_audio": int(itd.get("audio_tokens") or 0),
+               "cached_text": int(ctd.get("text_tokens") or 0), "cached_audio": int(ctd.get("audio_tokens") or 0),
+               "out_text": int(otd.get("text_tokens") or 0), "out_audio": int(otd.get("audio_tokens") or 0)}
+        cost = ((row["in_text"] - row["cached_text"]) * _OA_RATE["in_text"]
+                + row["cached_text"] * _OA_RATE["cached_text"]
+                + (row["in_audio"] - row["cached_audio"]) * _OA_RATE["in_audio"]
+                + row["cached_audio"] * _OA_RATE["cached_audio"]
+                + row["out_text"] * _OA_RATE["out_text"]
+                + row["out_audio"] * _OA_RATE["out_audio"]) / 1_000_000.0
+        day = time.strftime("%Y-%m-%d")
+        try:
+            data = json.loads(OPENAI_USAGE_FILE.read_text("utf-8"))
+        except Exception:
+            data = {}
+        d = data.setdefault(day, {k: 0 for k in row} | {"usd": 0.0, "turns": 0})
+        for k, v in row.items():
+            d[k] = d.get(k, 0) + v
+        d["usd"] = round(d.get("usd", 0.0) + cost, 6)
+        d["turns"] = d.get("turns", 0) + 1
+        OPENAI_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        OPENAI_USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    except Exception as ex:
+        sys.stderr.write(f"[voice-oa usage] {ex}\n")
+
+
 def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     """OpenAI 版 system instructions:角色 + 直塞内容(页文本/生词/插图),无 JSON 工具协议段(原生 FC)。"""
     cfg = _creds()
@@ -1212,7 +1249,8 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     vocab = book.get("vocab") or []
     if vocab:
         parts.append("本页『还没掌握』的生词:" + "、".join(vocab[:30]))
-    parts.append("页面实时状态(选中/手写笔迹)会以 system 消息出现在对话里,以最新一条为准;一条都没有=本页当前无选中无笔迹。")
+    parts.append("页面实时状态(选中/手写笔迹)和**翻页后的新页面内容**都会以 system 消息出现在对话里,永远以最新一条为准;"
+                 "一条状态消息都没有=本页当前无选中无笔迹。")
     return "\n".join(parts)
 
 
@@ -1278,7 +1316,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             "max_output_tokens": 2048,                                  # 护栏(1–4096/inf);朗读答案本就该短,分段更好
             "instructions": _oa_instructions(book, file_rel, page),
             "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000},
-                                "turn_detection": {"type": "server_vad", "silence_duration_ms": 700,
+                                # semantic_vad(2.1 招牌):按**语义**判断说完没——说话中途停顿思考不抢话(官方推荐配置;server_vad 是纯静音计时的降级品)
+                                "turn_detection": {"type": "semantic_vad", "eagerness": "auto",
                                                    "create_response": True, "interrupt_response": True},
                                 "transcription": {"model": "gpt-realtime-whisper"}},
                       "output": {"format": {"type": "audio/pcm"}, "voice": cred.get("rt_voice") or "marin"}},
@@ -1366,10 +1405,17 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                     vc2 = await _fetch_book_ctx(f2, np)
                     book.update({"page": np, "page_text": vc2.get("page_text") or "",
                                  "vocab": vc2.get("vocab") or [], "figures": vc2.get("figures") or []})
-                    try:   # instructions 部分更新不重置对话(GA 语义),页面语境跟着翻页走
-                        await ows.send(json.dumps({"type": "session.update", "session": {
-                            "type": "realtime", "instructions": _oa_instructions(book, f2, np)}}))
-                        sys.stderr.write(f"[voice-oa] 翻页同步 → p{np}({len(book['page_text'])}字)\n")
+                    # ⚠ 不改 instructions(改稳定前缀=整个 prompt cache 作废,cached $0.06/M vs 全价 $0.6——
+                    # 官方成本指南明确反对;豆包⑭同款教训):新页内容走**对话内 system 增量消息**,前缀整场稳定
+                    note = f"(用户翻到第 {np} 页,本页文字内容:{(book['page_text'] or '(本页无文字层)')[:1200]}"
+                    if book.get("vocab"):
+                        note += ";本页未掌握生词:" + "、".join(book["vocab"][:20])
+                    note += "。之前页面的内容已翻过去了,回答以本条为准)"
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                            "type": "message", "role": "system",
+                            "content": [{"type": "input_text", "text": note}]}}, ensure_ascii=False))
+                        sys.stderr.write(f"[voice-oa] 翻页增量 → p{np}({len(book['page_text'])}字)\n")
                     except Exception:
                         pass
             elif t in ("state", "ink"):
@@ -1451,7 +1497,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 try:
                     u = (e.get("response") or {}).get("usage") or {}
                     if u:
-                        sys.stderr.write(f"[voice-oa] usage {json.dumps(u)[:220]}\n")
+                        _oa_log_usage(u)   # 按天账本 state/openai-usage.json(分模态/缓存,官方价估算)
                 except Exception:
                     pass
                 await bws.send(json.dumps({"event": 359, "payload": {}}, ensure_ascii=False))
