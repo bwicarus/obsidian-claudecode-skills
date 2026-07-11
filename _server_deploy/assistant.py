@@ -504,6 +504,34 @@ def _claude_text(prompt, model="opus", effort="high", timeout=150):
         _kill(p)
 
 
+def _codex_text(prompt, model="gpt-5.5-codex", effort="medium", timeout=180, image_paths=None):
+    """单次 Codex CLI 无头生成(`codex exec`,Pi 已登录 ChatGPT 订阅——**额度与 Claude/Gemini 独立**)。
+    只当纯文本/看图模型用:沙盒只读 + cwd=/tmp + 跳过 git 检查(不让它当 agent 乱跑)。失败/空 → None。"""
+    import shutil as _sh, tempfile as _tf
+    cx = _sh.which("codex") or os.environ.get("APP_CODEX") or "codex"
+    of = _tf.NamedTemporaryFile(prefix="codex-out-", suffix=".txt", delete=False)
+    of.close()
+    try:
+        cmd = [cx, "exec", "--skip-git-repo-check",
+               "-m", (model if str(model).startswith("gpt-") else "gpt-5.5-codex"),
+               "-c", 'model_reasoning_effort="%s"' % (effort if effort in _CODEX_DEPTHS else "medium"),
+               "-c", 'sandbox_mode="read-only"',
+               "-o", of.name]
+        for ip in (image_paths or [])[:3]:
+            cmd += ["-i", ip]
+        cmd.append(prompt)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd="/tmp")
+        txt = Path(of.name).read_text("utf-8").strip()
+        return txt or None
+    except Exception:
+        return None
+    finally:
+        try:
+            Path(of.name).unlink()
+        except Exception:
+            pass
+
+
 def _deep_ask(prompt, backend="gemini", variant=None, depth="think", timeout=150):
     """一次性深度生成(总结/深度解释等)。按 (backend,variant,depth) 选后端;主后端失败/空 → 另一后端兜底
     (Gemini 省 Claude 额度;互为兜底保证不因一边断而挂)。返回文本或 None。"""
@@ -514,8 +542,12 @@ def _deep_ask(prompt, backend="gemini", variant=None, depth="think", timeout=150
     def via_claude():
         return _claude_text(prompt, model=(variant if variant in _CLAUDE_VARIANTS else "opus"),
                             effort=(depth if depth in _EFFORTS else "high"), timeout=timeout)
+    def via_codex():
+        return _codex_text(prompt, model=variant, effort=depth, timeout=timeout)
     if backend == "claude":
         return via_claude() or via_gemini()
+    if backend == "codex":
+        return via_codex() or via_gemini() or via_claude()
     return via_gemini() or via_claude()
 
 
@@ -545,8 +577,25 @@ def _vision_describe(images, note="", backend="gemini", variant=None, depth="thi
             return _send(p, blocks, timeout=timeout)
         finally:
             _kill(p)
+    def via_codex():
+        import base64 as _b64, tempfile as _tf
+        paths = []
+        try:
+            for v in images[:3]:
+                f = _tf.NamedTemporaryFile(prefix="cxi-", suffix=".png", delete=False)
+                f.write(_b64.b64decode(v["b64"])); f.close(); paths.append(f.name)
+            return _codex_text(_VIS_SYS + "\n" + nt, model=variant, effort=depth,
+                               timeout=timeout, image_paths=paths)
+        finally:
+            for p2 in paths:
+                try:
+                    Path(p2).unlink()
+                except Exception:
+                    pass
     if backend == "claude":
         return via_claude() or via_gemini()
+    if backend == "codex":
+        return via_codex() or via_gemini() or via_claude()
     return via_gemini() or via_claude()
 
 
@@ -2818,8 +2867,10 @@ def _parse_tool(raw):
 # 向后兼容旧 {model, effort}(无 backend → 视作 claude, model→variant, effort→depth)。无预设 → 用 _AP_DEFAULTS。
 _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
-_BACKENDS = ("claude", "gemini")
+_BACKENDS = ("claude", "gemini", "codex")
 _CLAUDE_VARIANTS = ("haiku", "sonnet", "opus")
+_CODEX_VARIANTS = ("gpt-5.5-codex", "gpt-5.5")            # codex exec -m 实测有效清单(2026-07-11;-mini 无效)
+_CODEX_DEPTHS = ("low", "medium", "high", "xhigh")        # → -c model_reasoning_effort
 # *-latest 别名永远指向当代最新(现 flash-latest=3.5-flash、pro-latest=3.1-pro);Google 出新版自动跟,不用改代码。
 # 另列具体版本号给想锁定版本的。pro 线目前最高只有 3.1(还没 3.5-pro),pro 是最强推理档(版本号低≠更弱)。
 # 兜底型号清单:仅当 ListModels 拉取失败时用(正常面板走 _gemini_models() 动态拉真实可用清单 → 新模型自动出现)。
@@ -2915,7 +2966,8 @@ _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
 }
-_VARIANT_SHORT = {"gemini-flash-latest": "flash-latest", "gemini-pro-latest": "pro-latest",
+_VARIANT_SHORT = {"gpt-5.5-codex": "5.5-codex", "gpt-5.5": "5.5",
+                  "gemini-flash-latest": "flash-latest", "gemini-pro-latest": "pro-latest",
                   "gemini-3.5-flash": "3.5-flash", "gemini-3.1-flash-lite": "3.1-lite",
                   "gemini-3.1-pro-preview": "3.1-pro", "gemini-2.5-flash": "2.5-flash",
                   "gemini-2.5-flash-lite": "2.5-lite", "gemini-2.5-pro": "2.5-pro"}
@@ -2935,12 +2987,16 @@ def _variant_short(v):
 def _variant_ok(backend, variant):
     if backend == "gemini":
         return _is_gemini(variant)   # 动态清单 → 宽松:任何 gemini-* 都收(前端只从 ListModels 拉的清单里选)
+    if backend == "codex":
+        return str(variant).startswith("gpt-")   # 宽松同 gemini 哲学(新型号自己填也收)
     return variant in _CLAUDE_VARIANTS
 
 
 def _depth_ok(backend, depth):
     if backend == "gemini":
         return depth in ("none", "think")
+    if backend == "codex":
+        return depth in _CODEX_DEPTHS
     return depth == "auto" or depth in _EFFORTS   # claude: auto(仅 orchestrator) + low..max
 
 
@@ -3059,6 +3115,11 @@ def reader_stream(prompt, action="explain", uid="", system=None, timeout=120):
         finally:
             _kill(p)
 
+    if r["backend"] == "codex":   # codex 无流式接口:一次性生成整段吐出;失败落回 gemini→claude
+        txt0 = _codex_text(sysmsg + "\n\n" + prompt, model=r["variant"], effort=r["depth"], timeout=timeout)
+        if txt0:
+            yield txt0
+            return
     primary, secondary = (via_claude, via_gemini) if r["backend"] == "claude" else (via_gemini, via_claude)
     streamed = False
     try:
@@ -3168,6 +3229,8 @@ def _fast_answer(message, ctx, history, uid):
     (单题系统开销从 ~5-6k 降到 ~1.5k)。返回 (answer, trace) 或 None(失败 → 调用方回退完整编排)。"""
     _t0 = time.time()
     rr = _resolve("orchestrator", uid)
+    if rr.get("backend") == "codex":   # 编排工具循环未接 codex(交互式多轮会话)→ 降级出厂默认
+        rr = dict(_AP_DEFAULTS["orchestrator"])
     c = ctx or {}
     sel = _clean_tag(c.get("selection")); sent = _clean_tag(c.get("selection_sentence"))
     foc = _clean_tag((c.get("focus_sel") or {}).get("text"))
@@ -3215,6 +3278,8 @@ def _agent_run(message, ctx, history, force_effort=None, force_model=None):
                 return
             # _fast=None(快路 AI 失败)→ 落回完整编排
         rr = _resolve("orchestrator", uid)
+        if rr.get("backend") == "codex":   # 编排工具循环未接 codex(交互式多轮会话)→ 降级出厂默认
+            rr = dict(_AP_DEFAULTS["orchestrator"])
         if rr["backend"] == "gemini":             # 二期:根 agent 跑在 Gemini 工具循环(省 Claude 额度)
             yield from _agent_run_gemini(message, ctx, history, rr["variant"], rr["depth"], uid)
             return
@@ -3980,8 +4045,8 @@ def assistant_action_prefs():
                               **_AP_LABELS},
                     "catalog": {
                         "backends": list(_BACKENDS),
-                        "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods},
-                        "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"]},
+                        "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
+                        "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,
                         "gemini_status": gemini_status,   # {型号:{free,reason,retry秒[,paid_only]}} → 前端标「免费 / 付费(原因)/ 💰仅付费」
                         "gemini_paid_only": sorted(m for m in gmods if _is_paid_only(m)),   # 仅付费型号清单(前端标💰)

@@ -187,7 +187,7 @@
   }
   // ── ⚙ 模型设置面板:列出各 AI 任务,每个可设 后端/型号/深度 ──
   var _DEPTH_LABEL = { auto: '自动(按问题)', low: 'low(快)', medium: 'medium', high: 'high(深)', xhigh: 'xhigh', max: 'max(最强)', none: '不思考', think: '思考' };
-  var _BACKEND_LABEL = { claude: 'Claude', gemini: 'Gemini' };
+  var _BACKEND_LABEL = { claude: 'Claude', gemini: 'Gemini', codex: 'Codex(GPT)' };
   function _msMkSel(opts, val, labels, disabledSet) {
     var s = document.createElement('select'); s.className = 'ams-sel';
     (opts || []).forEach(function (o) {
@@ -861,7 +861,7 @@
   var _ACT_NAME = { orchestrator: '回答', summarize: '章节总结', vision: '看图' };
   // ── ⚙ 模型设置面板:列出各 AI 任务,每个可设 后端/型号/深度 ──
   var _DEPTH_LABEL = { auto: '自动(按问题)', low: 'low(快)', medium: 'medium', high: 'high(深)', xhigh: 'xhigh', max: 'max(最强)', none: '不思考', think: '思考' };
-  var _BACKEND_LABEL = { claude: 'Claude', gemini: 'Gemini' };
+  var _BACKEND_LABEL = { claude: 'Claude', gemini: 'Gemini', codex: 'Codex(GPT)' };
   function _msMkSel(opts, val, labels, disabledSet) {
     var s = document.createElement('select'); s.className = 'ams-sel';
     (opts || []).forEach(function (o) {

@@ -281,3 +281,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **段时长封顶修正**:纯查词段(事件稀疏)的"到下一段"时长会把整夜算成停留(实测 p10 段 580 分)→ 封顶"最后事件+5 分"(00:12 查完词人走了 → 约5分)。
 - **真实跑通**:今天 9 条真实查词(无通话记录)→ digest 三段干净纪要 → 按 recall 同款 prompt 调 /api/assistant/chat:Claude **自己调了 read_page 拉 p8 原文**(4 个查词都在 p8=学习重点页,正是"只拉重点页"设计行为),回答把查词逐个对回原文语境("『促し』就是文中『感染症予防を促したり』这句"),对没拉的 p10 诚实说"估计是…"并主动问要不要拉——agentic 按需拉取形态完全符合预期。
 - SSE 解析注意:chat 的 answer 事件 data 是 **JSON 编码的字符串**(非对象),分帧靠空行;照抄 _run_deep_think 的解析。
+
+## Codex 第三后端(2026-07-11,用户提议:Pi 已登录 codex CLI)
+
+助手模型面板 backend 三选:claude / gemini / **codex**(GPT,走 Pi 上已登录的 ChatGPT 订阅——**额度与 Claude/Gemini 完全独立**,等于白捡一路配额)。
+- **执行器 `_codex_text`**:`codex exec --skip-git-repo-check -m <型号> -c model_reasoning_effort="<档>" -c sandbox_mode="read-only" -o <tmpfile> [-i 图…] <prompt>`,cwd=/tmp(只当纯文本/看图模型用,不让它当 agent 乱跑);`-o` 文件拿最终消息,输出干净。实测:短答 ~5.6s、explain 全链 ~19s(与 Claude CLI 量级相当;codex exec **无流式接口**)。
+- **型号**(实测):gpt-5.5-codex(默认)/gpt-5.5 有效,-mini 无效;`_variant_ok` 宽松收 gpt-*。**深度**=low/medium/high/xhigh(映射 model_reasoning_effort)。
+- **接入面**:_deep_ask/_vision_describe(图落盘 -i)/reader_ask/reader_stream(无流式→一次性整段 yield,失败落 gemini→claude)——即 summarize/vision/explain/translate/dict/grammar/pick_video/deep 全部单轮动作可选 codex;兜底链 codex→gemini→claude。
+- **orchestrator 不接**(编排工具循环是 claude/gemini 的交互式多轮实现):预设选了 codex → chat 两处入口守卫降级出厂默认。语音 deep 面板项选 codex 同理暂不生效(relay force_model 仅 claude)。
+- 前端零逻辑改动(catalog 数据驱动),仅 _BACKEND_LABEL 加 'Codex(GPT)' ×2。
