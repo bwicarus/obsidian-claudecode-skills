@@ -116,8 +116,9 @@ def _study_digest(span: str = "today") -> str:
         if bk and not cur["book"]:
             cur["book"] = bk
         cur["items"].append(e)
-    for i, sg in enumerate(segs):   # 段时长=到下一段开始;末段按最后事件+30s 估
-        sg["dur"] = (segs[i + 1]["t0"] - sg["t0"]) if i + 1 < len(segs) else (sg["items"][-1]["ts"] - sg["t0"] + 30)
+    for i, sg in enumerate(segs):   # 段时长=到下一段开始,但封顶"最后事件+5分"(稀疏事件下人早走了,别把整夜算成停留)
+        raw = (segs[i + 1]["t0"] - sg["t0"]) if i + 1 < len(segs) else (sg["items"][-1]["ts"] - sg["t0"] + 30)
+        sg["dur"] = min(raw, sg["items"][-1]["ts"] - sg["t0"] + 300)
     kept = []
     for sg in segs:
         if sg["dur"] < 5:
