@@ -1930,7 +1930,14 @@ async def handle_browser(bws):
                                 np = int(j.get("page") or 0)
                             except Exception:
                                 np = 0
-                            if np and np != page and file_rel:
+                            _vtext = (j.get("text") or "").strip()   # ㉟b EPUB 动态窗口:前端直接带"实际显示内容"(整章太长,视口文本才是用户在看的)
+                            if np and _vtext and file_rel:
+                                page = np
+                                book["page_text"] = _vtext[:2000]
+                                await _push_sp()
+                                _vlog("page", page=np, book=file_rel)
+                                sys.stderr.write(f"[voice-rt] 视口同步 → p{np}({len(book['page_text'])}字,前端直供)\n")
+                            elif np and np != page and file_rel:
                                 page = np
                                 ctx2 = await _fetch_book_ctx(file_rel, np)
                                 book.update({k: ctx2.get(k) for k in ("page_text", "inked", "has_ink", "figures", "vocab")})   # 直塞内容整体换页

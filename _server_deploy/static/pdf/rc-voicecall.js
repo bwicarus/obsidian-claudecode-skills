@@ -759,8 +759,16 @@
     var t = j.type;
     if (t === 'page') {
       var np = j.page, f = j.file || _rtc.ctxFile;
-      if (!np || np === _rtc.ctxPage) return;
-      _rtc.ctxPage = np; _rtc._inkFp = ''; _rtc.inkDirty = false;
+      var vt = String(j.text || '');
+      var pfp = np + ':' + vt.length + ':' + vt.slice(0, 30);
+      if (!np || pfp === _rtc._pageFp) return;
+      _rtc._pageFp = pfp;
+      if (np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
+      _rtc.ctxPage = np;
+      if (vt) {   // ㉟b EPUB 动态窗口:前端直供"实际显示内容"(整章太长;同章滚动=窗口变也注入)
+        _rtcSys('(用户当前阅读位置(第 ' + np + ' 章/页)的可见内容:' + vt.slice(0, 1500) + '。之前的位置内容已过去,回答以本条为准)');
+        return;
+      }
       fetch('/pdf/api/page-text?file=' + encodeURIComponent(f) + '&page=' + np)
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -810,6 +818,38 @@
       return (answer || '(没拿到回答)').slice(0, 3000);
     } catch (e) { return '(深度思考失败:' + String(e).slice(0, 100) + ')'; }
   }
+  // ㉟c 视口截图(用户设计"把即时的重叠渲染后的结果交给AI"):html2canvas 自托管懒加载,
+  //    截当前可见区域(正文+手写笔迹+插入页 overlay 所见即所得);EPUB 看图/看笔迹恒用,
+  //    PDF 在服务端渲不出时(插入页未写回等)兜底。排除侧栏/通话条/字幕等悬浮 UI。
+  var _h2cP = null;
+  function _loadH2C() {
+    if (window.html2canvas) return Promise.resolve();
+    if (_h2cP) return _h2cP;
+    _h2cP = new Promise(function (res, rej) {
+      var s = document.createElement('script');
+      s.src = '/static/pdf/html2canvas.min.js';
+      s.onload = res; s.onerror = function () { _h2cP = null; rej(new Error('h2c load fail')); };
+      document.head.appendChild(s);
+    });
+    return _h2cP;
+  }
+  async function _captureView() {
+    try {
+      await _loadH2C();
+      var canvas = await window.html2canvas(document.body, {
+        x: window.scrollX, y: window.scrollY,
+        width: window.innerWidth, height: window.innerHeight,
+        scale: Math.min(2, window.devicePixelRatio || 1),
+        useCORS: true, logging: false, backgroundColor: '#ffffff',
+        ignoreElements: function (el) {
+          var id = el.id || '';
+          return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' || id === 'word-pop' || id === 'sel-toolbar';
+        }
+      });
+      var b64 = (canvas.toDataURL('image/jpeg', 0.82).split(',')[1]) || '';
+      return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
+    } catch (e) { return null; }
+  }
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
@@ -826,6 +866,9 @@
         if (_rtc.imgOn) ctx._want_vision = 1;
         if (_rtc.ink && _rtc.ink.length) ctx.ink = _rtc.ink;
         if (_rtc.sel) ctx.selection = _rtc.sel;
+        if (name === 'see_ink' || name === 'see_page') {   // ㉟c:看图类恒附视口截图(EPUB 主路/PDF 兜底,后端按需取用)
+          try { var shot = await _captureView(); if (shot) ctx.view_image = shot; } catch (e) {}
+        }
         var r = await fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx, rtc_call_id: _rtc.callId }) });
         var d = await r.json();
@@ -934,8 +977,10 @@
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     try {
       setSt('连接中(WebRTC)…');
+      var _vt0 = '';   // ㉟b:开话初始上下文也用动态视口文本(EPUB;PDF 的 getContext 无此字段=空,后端走页文本)
+      try { _vt0 = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
       var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
+        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage, text: _vt0 || undefined }) })).json();
       if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
       _rtc.imgOn = !!sres.rt_image;
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -1209,14 +1254,15 @@
   }
 
   // 翻页同步:仅 s2s 模式需要(agent 模式每次发送时侧栏 ctx() 自带当前页,天然跟页走)
-  function setPage(page) {
+  function setPage(page, vtext) {   // ㉟b:vtext=EPUB 动态视口文本(整章太长;同章内滚动=page 不变但窗口变,也要推)
     if (mode !== 's2s') return;
     if (!ws || ws.readyState !== 1 || !page) return;
     var o = toggle._opts || {};
-    if (page === o.page) return;
-    o.page = page;
+    var tfp = vtext ? (vtext.length + ':' + vtext.slice(0, 40) + vtext.slice(-40)) : '';
+    if (page === o.page && tfp === (o._vtFp || '')) return;
+    o.page = page; o._vtFp = tfp;
     _inkFp = '';   // 换页后墨迹指纹作废(新页的墨迹要重新同步)
-    try { ws.send(JSON.stringify({ type: 'page', page: page })); setSt('通话中 · 已同步到第 ' + page + ' 页'); } catch (e) {}
+    try { ws.send(JSON.stringify({ type: 'page', page: page, text: vtext ? String(vtext).slice(0, 2000) : undefined })); setSt('通话中 · 已同步到第 ' + page + ' 页'); } catch (e) {}
   }
 
   // 选中/chip 状态同步(与侧栏 __voiceContext 同源):选中文字/钉住焦点/带入图 → relay 热更 SP。
@@ -1474,7 +1520,7 @@
     try {
       var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
       var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
-      if (pg) setPage(pg);
+      if (pg) setPage(pg, String(c.visible_text || '').slice(0, 2000));   // ㉟b:EPUB 带动态视口文本(用户实际在看的内容)
       syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
     } catch (e) {}
   }, 2000);

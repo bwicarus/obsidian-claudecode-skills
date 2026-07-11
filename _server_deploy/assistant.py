@@ -1728,6 +1728,24 @@ def _t_lookup_word(args, ctx):
     return out
 
 
+def _viewshot_result(ctx, note_extra=""):
+    """㉟c 前端视口截图(用户设计"把即时的重叠渲染后的结果交给AI"):所见即所得——
+    正文+手写笔迹+插入页 overlay 全在一张图里。EPUB(服务端无法渲染 HTML)恒用;PDF 渲染失败(如
+    插入页还没写回文件)兜底用。ctx.view_image = {media_type, b64}。"""
+    vimg = ctx.get("view_image")
+    if not isinstance(vimg, dict) or not vimg.get("b64"):
+        return None
+    note = ("下图=用户屏幕当前可见区域的**实时截图**(正文+他的手写笔迹叠加,所见即所得)。"
+            "结合笔迹的位置/形状/指向和图里文字回答。"
+            "若笔迹是手写字/算式:先看整体结构再逐个认字符,易混对(G↔A↔C、r↔n↔v)用整体含义合理性定夺;"
+            "他学的内容不限于本页主题。" + (note_extra or ""))
+    if ctx.get("_want_vision"):
+        return {"_vision": [{"media_type": vimg.get("media_type") or "image/jpeg", "b64": vimg["b64"]}],
+                "看图提示": note, "说明": "屏幕实时截图已直接发给你,结合看图提示自己看图回答"}
+    desc = _vision_for(ctx, [{"media_type": vimg.get("media_type") or "image/jpeg", "b64": vimg["b64"]}], note)
+    return {"画面描述": desc or "(看图失败,可重试)"}
+
+
 def _t_see_page(args, ctx):
     """看当前页(或指定页)的视觉内容(图表/示意图/公式排版/手写等文字层拿不到的)。
     ★优先复用**已存的离线图描述**(夜间管线生成、read_page 也注入过)——**不重复识别**;
@@ -1735,6 +1753,9 @@ def _t_see_page(args, ctx):
     file_rel = ctx.get("file_rel") or ""
     if not file_rel:
         return {"error": "当前不在 PDF 书里,没法看页面"}
+    if file_rel.lower().endswith(".epub"):   # ㉟c EPUB:服务端渲不了 HTML,看页面=前端视口截图
+        r = _viewshot_result(ctx)
+        return r if r else {"error": "EPUB 看页面需要前端视口截图,这次没拿到;请让用户稍后再试或口头描述"}
     if args.get("page"):
         pages = [int(args["page"])]
     else:
@@ -1816,6 +1837,9 @@ def _t_see_ink(args, ctx):
     page = int(ctx.get("page") or 0)
     if not file_rel or not page:
         return {"error": "不在 PDF 书里 / 不知道哪页"}
+    if file_rel.lower().endswith(".epub"):   # ㉟c EPUB:笔迹画在 HTML 上,服务端渲不了 → 前端视口截图(所见即所得)
+        r = _viewshot_result(ctx, " 用户问的是他的手写/圈画,重点看截图里的笔迹。")
+        return r if r else {"error": "EPUB 的笔迹需要前端视口截图,这次没拿到;请让用户稍后再试"}
     if not strokes:
         try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
             import pdf_reader as _pdfm0
@@ -1823,12 +1847,18 @@ def _t_see_ink(args, ctx):
         except Exception:
             strokes = []
     if not strokes:
+        r0 = _viewshot_result(ctx, " 用户问他的手写/圈画,服务端没有这页的笔迹存档(可能画在刚插入的自建页上)——以截图为准。")
+        if r0:   # ㉟c 插入页兜底:自建页还没写回 PDF 文件时服务端两手空空,前端截图=用户真实所见
+            return r0
         return {"error": "本页没有手写笔迹(用户没用笔标注,或还没画)"}
     try:
         import base64
         import pdf_reader as pdf
         png = pdf._ink_focus_image(file_rel, page, strokes)
         if not png:
+            r1 = _viewshot_result(ctx, " (服务端裁不出笔迹区域,已改用屏幕实时截图。)")
+            if r1:
+                return r1
             return {"error": "裁不出笔迹区域"}
         marked = ""
         try:
@@ -4342,7 +4372,10 @@ def assistant_rtc_session():
     if file_rel and page:
         try:
             _name = file_rel.rsplit("/", 1)[-1]
-            if file_rel.lower().endswith(".epub"):   # ㉟ EPUB:page=section idx+1,取章节纯文本(fitz 开 epub 分页错位,绝不走)
+            _vt = (body.get("text") or "").strip()   # ㉟b:前端直供动态视口文本(EPUB 整章太长,用户实际在看的窗口才是上下文)
+            if _vt:
+                parts.append(f"用户此刻正在读《{_name}》(位置:第 {page} 章/页),当前可见内容(直接可用):\n{_vt[:1500]}")
+            elif file_rel.lower().endswith(".epub"):   # ㉟ EPUB:page=section idx+1,取章节纯文本(fitz 开 epub 分页错位,绝不走)
                 _pt = "\n".join(_pdf()._epub_section_paragraphs(file_rel, page - 1)).strip()
                 if _pt:
                     parts.append(f"用户此刻正在读《{_name}》第 {page} 章(节),本节文字内容(直接可用):\n{_pt[:1500]}")

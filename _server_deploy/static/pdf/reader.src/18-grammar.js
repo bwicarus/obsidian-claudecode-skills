@@ -243,6 +243,8 @@ function openGrammarPanel() {
       _spreadBeforePanel = _spreadOffset;
       readMode = 'continuous';
       _updateModeButtons();
+    } else {
+      _spreadBeforePanel = null;   // 单列下开栏:清残留标记(修"单页开关侧栏被莫名切到双页")
     }
     // 打开侧栏让 #main 变窄 → 重算 scale(debounce,挪出动画帧 + 与 ResizeObserver 去重)。
     // 悬浮模式 #main 宽度不变 → 不重排(重排会让背后 PDF 重渲染→闪烁);仅挤压模式重排。
@@ -256,13 +258,13 @@ window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
   _hideDepTip();
-  // 还原侧栏打开时临时切走的双页
-  if (_spreadBeforePanel != null) {
+  // 还原侧栏打开时临时切走的双页——仅当当前仍是"被临时切出来的单列"(开栏期间手动改过模式就不还原)
+  if (_spreadBeforePanel != null && readMode === 'continuous') {
     readMode = 'spread';
     _spreadOffset = _spreadBeforePanel;
-    _spreadBeforePanel = null;
     _updateModeButtons();
   }
+  _spreadBeforePanel = null;
   if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
 

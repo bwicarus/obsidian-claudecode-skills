@@ -5937,6 +5937,8 @@ function openGrammarPanel() {
       _spreadBeforePanel = _spreadOffset;
       readMode = 'continuous';
       _updateModeButtons();
+    } else {
+      _spreadBeforePanel = null;   // 单列下开栏:清残留标记(修"单页开关侧栏被莫名切到双页")
     }
     // 打开侧栏让 #main 变窄 → 重算 scale(debounce,挪出动画帧 + 与 ResizeObserver 去重)。
     // 悬浮模式 #main 宽度不变 → 不重排(重排会让背后 PDF 重渲染→闪烁);仅挤压模式重排。
@@ -5950,13 +5952,13 @@ window.closeGrammarPanel = () => {
   document.getElementById('grammar-panel')?.classList.remove('open');
   document.body.classList.remove('grammar-open');
   _hideDepTip();
-  // 还原侧栏打开时临时切走的双页
-  if (_spreadBeforePanel != null) {
+  // 还原侧栏打开时临时切走的双页——仅当当前仍是"被临时切出来的单列"(开栏期间手动改过模式就不还原)
+  if (_spreadBeforePanel != null && readMode === 'continuous') {
     readMode = 'spread';
     _spreadOffset = _spreadBeforePanel;
-    _spreadBeforePanel = null;
     _updateModeButtons();
   }
+  _spreadBeforePanel = null;
   if (!document.body.classList.contains('grammar-floating')) _scheduleRefit(true);   // 悬浮模式宽度不变→不重排(免闪);挤压才重排
 };
 
@@ -10783,12 +10785,15 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         if (willOpen) {
           if (readMode === 'spread' && !document.body.classList.contains('grammar-floating')) {
             _spreadBeforePanel = _spreadOffset; readMode = 'continuous'; _updateModeButtons();
+          } else {
+            _spreadBeforePanel = null;   // 单列下开栏:清残留标记(修"单页开关侧栏被莫名切到双页")
           }
         } else {
           try { _hideDepTip(); } catch (_) {}
-          if (_spreadBeforePanel != null) {
-            readMode = 'spread'; _spreadOffset = _spreadBeforePanel; _spreadBeforePanel = null; _updateModeButtons();
+          if (_spreadBeforePanel != null && readMode === 'continuous') {   // 仅还原"确实被临时切走的"
+            readMode = 'spread'; _spreadOffset = _spreadBeforePanel; _updateModeButtons();
           }
+          _spreadBeforePanel = null;
         }
       } catch (_) {}
       return null;   // 重排走 onReflow(_scheduleRefit 自带防抖),不需要滚动锚点回调

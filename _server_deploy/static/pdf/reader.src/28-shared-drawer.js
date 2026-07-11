@@ -117,12 +117,15 @@
         if (willOpen) {
           if (readMode === 'spread' && !document.body.classList.contains('grammar-floating')) {
             _spreadBeforePanel = _spreadOffset; readMode = 'continuous'; _updateModeButtons();
+          } else {
+            _spreadBeforePanel = null;   // 单列下开栏:清残留标记(修"单页开关侧栏被莫名切到双页")
           }
         } else {
           try { _hideDepTip(); } catch (_) {}
-          if (_spreadBeforePanel != null) {
-            readMode = 'spread'; _spreadOffset = _spreadBeforePanel; _spreadBeforePanel = null; _updateModeButtons();
+          if (_spreadBeforePanel != null && readMode === 'continuous') {   // 仅还原"确实被临时切走的"
+            readMode = 'spread'; _spreadOffset = _spreadBeforePanel; _updateModeButtons();
           }
+          _spreadBeforePanel = null;
         }
       } catch (_) {}
       return null;   // 重排走 onReflow(_scheduleRefit 自带防抖),不需要滚动锚点回调
