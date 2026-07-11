@@ -716,7 +716,7 @@
   //    工具循环在本地(dc 收 function_call → fetch /voice-tool → dc 回填),client_action 直接执行;
   //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
   var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false,
-               ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '' };
+               ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false };
   function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
   function _rtcSys(text) {
     _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
@@ -733,7 +733,7 @@
     if (t === 'page') {
       var np = j.page, f = j.file || _rtc.ctxFile;
       if (!np || np === _rtc.ctxPage) return;
-      _rtc.ctxPage = np; _rtc._inkFp = '';
+      _rtc.ctxPage = np; _rtc._inkFp = ''; _rtc.inkDirty = false;
       fetch('/pdf/api/page-text?file=' + encodeURIComponent(f) + '&page=' + np)
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -745,9 +745,13 @@
       var fp = (j.page || 0) + ':' + strokes.length;
       if (fp === _rtc._inkFp) return;
       _rtc._inkFp = fp;
-      _rtcSys('(状态更新:' + (strokes.length
-        ? ('用户在本页的手写笔迹有更新(共 ' + strokes.length + ' 笔)。这只是状态记录——不要对本条做任何回应、不要主动评论他画了什么。只有当他之后问「我写的/我画的/我圈的/这个对不对」时,才调 see_ink 工具看笔迹合成图回答;那时绝不要说你看不到,也不要让他粘贴或截图。')
-        : '用户清空了本页笔迹(状态记录,不要回应本条)。') + ')');
+      if (!strokes.length) { _rtc.inkDirty = false; _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }
+      // 边沿触发(用户拍板):笔迹"变了"只通知一次,之后继续画多少笔都不再打扰;
+      // AI 重新看过(see_ink/see_page 成功,_rtcTool 里复位)后,下次变化才再通知。
+      // 关键是这一次要把旧记忆作废——上次 see_ink 的结果还在上下文里,不否定它模型就凭旧印象答"没变化"。
+      if (_rtc.inkDirty) return;
+      _rtc.inkDirty = true;
+      _rtcSys('(状态更新:用户的手写笔迹刚刚发生了变化。你之前通过 see_ink 看到的笔迹内容**已过时作废**——你现在并不知道纸面上实际写了什么。这只是状态记录,不要回应本条、不要主动评论。之后他问「我写的/我画的/现在呢/看到了什么/有没有变化」这类问题时,唯一正确的做法是先调 see_ink 重新看再回答;没重新看之前,凭旧印象说"和原来一样/没有变化"是错误行为。)');
     } else if (t === 'state') {
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
@@ -798,6 +802,7 @@
           body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx }) });
         var d = await r.json();
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
+        if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
         var ca = res.client_action; delete res.client_action;
         if (ca && ca.fn) dispatch(ca.fn, ca.args);           // 页面副作用本地直执行(比经 relay 更直接)
@@ -878,7 +883,7 @@
   async function rtcStart(opts) {
     var g = ++_gen;
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
-    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = '';
+    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     try {
       setSt('连接中(WebRTC)…');
       var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
