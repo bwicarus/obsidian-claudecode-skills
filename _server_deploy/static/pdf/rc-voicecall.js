@@ -271,7 +271,10 @@
   // 字幕改**累积对话流**(iMessage 风,右蓝=你/左灰=AI):旧版只有"最后一句"两行,用户反馈看不到对话内容。
   // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
   var curAEl = null;
+  var _lastU = '';   // ㉛:最近一句用户话(451/whisper 定稿存,轮完随 AI 句一起落库)
   function setSub(who, text) {
+    // ㉛(用户设计):侧栏助手在 → 通话对话直接进 #asst-thread(与文字对话同流同清);浮层迷你对话区只兜底
+    if (window.__asstVoiceMsg && window.__asstVoiceMsg(who, text)) return;
     if (!box) return;
     var sub = box.querySelector('.vc-sub'); if (!sub) return;
     if (who === 'u') {
@@ -758,7 +761,8 @@
       _rtc.sel = sel;
       _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它)') : '用户当前没有选中文字') + ';状态记录,不要回应本条)');
     } else if (t === 'text' && j.content) {
-      _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: String(j.content).slice(0, 2000) }] } });
+      _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
+      _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
       _dcSend({ type: 'response.create' });
     } else if (t === 'cancel' || t === 'tool_abort') {
       _dcSend({ type: 'response.cancel' });
@@ -847,12 +851,15 @@
     if (t === 'response.output_audio_transcript.delta') {
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
     } else if (t === 'input_audio_buffer.speech_started') {
+      try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
       curAText = ''; curAEl = null;
+      try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx) {
+        _lastU = tx;
         setSub('u', tx);
         if (!_rtcCap.t && !_rtcCap.q.length) capUser(tx);   // whisper 迟到:AI 字幕在放就别插队打乱滚动(对话窗已有)
       }
@@ -861,10 +868,12 @@
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
+      try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
             if (u) fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true }); } catch (_) {}
@@ -1005,17 +1014,20 @@
         if (m.event === 150) { setSt('通话中(会话已建立)'); capWait(true); }
         else if (m.event === 359) {   // 一轮播完
           _playStat = { t0: 0, queued: 0 };   // 整轮播完=无需 truncate,统计清零
+          try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page); _lastU = ''; } } catch (e) {}   // ㉛:轮次落库(与文字对话同历史)
           if (p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→播完告别语自动挂断
           else _capMaybeHide(2500);   // 字幕停留几秒 → 回"正在听"等待态
         }
         else if (m.event === 450) {   // 用户开口:打断播报 + **立即同步一次上下文**(墨迹/选中,赶在模型答题前——治刚画完就问的竞态)
           _reportPlayed();   // 停播前先回报真实已播毫秒(GPT 引擎 relay 用它 truncate;豆包忽略该消息)
+          try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page); _lastU = ''; } } catch (e) {}   // ㉛:被打断的半截轮也落库(下一轮覆盖前)
           stopPlayback(); curAText = ''; curAEl = null;
+          try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:断 AI 轮气泡(下一轮开新气泡,别覆盖旧的)
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
         }
         else if (m.event === 451) {   // ASR 转写:对话窗定稿句 + 字幕用户句(interim 也实时上屏)
           var r = (p.results || [])[0] || {};
-          if (r.text && r.is_interim === false) setSub('u', r.text);
+          if (r.text && r.is_interim === false) { _lastU = r.text; setSub('u', r.text); }
           if (r.text) capUser(r.text);
         }
         else if (m.event === 550) { curAText += (p.content || ''); setSub('a', curAText); capStream('a', curAText); }   // S2S 回复:对话窗 + 字幕(尾句 cur/前一句 prev)
@@ -1041,6 +1053,7 @@
     try { if (micStream) micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     try { if (ac) ac.close(); } catch (e) {}
     ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0); curAText = ''; curAEl = null;
+    _lastU = ''; try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:挂断断轮,下次通话开新气泡
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null;
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
@@ -1086,6 +1099,12 @@
       var asstInput = document.getElementById('asst-input');
       if (asstInput && asstInput.parentNode) { box.classList.add('vc-inline'); asstInput.parentNode.insertBefore(box, asstInput); }
       else document.body.appendChild(box);
+      // ㉛(用户设计):对话内容直接进侧栏 #asst-thread(与文字对话同流同清)→ 浮层迷你对话区+抓手退役,
+      //   通话条只剩状态行;视频卡区保留。无侧栏页面(收藏夹独立页等)维持原样兜底。
+      if (window.__asstVoiceMsg) {
+        box.querySelector('.vc-sub').style.display = 'none';
+        box.querySelector('.vc-grab').style.display = 'none';
+      }
       box.querySelector('.vc-x').addEventListener('click', function () { teardown(true); });
       box.querySelector('.vc-new').addEventListener('click', function () {   // ↺ 新话题:挂断 → 重连(豆包带 fresh=1 清 dialog_id;WebRTC 每连接本就是新会话)
         teardown(false);
@@ -1168,7 +1187,7 @@
       teardown(false);
       toggle._fresh = true;
       taPlaceholder('对话已清空,语音记忆重置中…');
-      start(toggle._opts || {});
+      toggle._connect(toggle._opts || {});   // ㉛:按引擎分流(rtc=重连即新会话;豆包=fresh 清 dialog_id)——显示/服务端记录由侧栏 clear 本体清
     } catch (_) {}
   }, true);
 

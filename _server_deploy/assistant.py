@@ -4448,7 +4448,7 @@ def assistant_log_external():
         return jsonify({"ok": False}), 401
     b = request.get_json(silent=True) or {}
     uid = session["user_id"]
-    meta = {"via": "mcp"}
+    meta = {"via": b.get("via") if b.get("via") in ("mcp", "voice") else "mcp"}   # ㉛:通话轮次落库标 voice
     if b.get("file"):
         meta["file_rel"] = b["file"]   # _convo_append 白名单字段名是 file_rel
     if b.get("page"):

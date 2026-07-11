@@ -1772,6 +1772,33 @@
   window.__asstSend = send;
   window.__asstBusy = function () { return !!streaming; };
 
+  // ㉛ 通话对话进侧栏(用户设计):S2S/rtc 端到端通话的双方句子直接进 #asst-thread,与文字对话
+  //   同流同清(🗑 清空=显示+服务端记录+语音记忆一起清,rc-voicecall 旁听 fresh 重连);
+  //   通话浮层的迷你对话区(vc-sub)退役,只在无侧栏的页面兜底。
+  var _vTurnEl = null;   // 通话当前 AI 轮的气泡:'a' 全量覆盖更新;'u'/'reset' 断轮
+  window.__asstVoiceMsg = function (who, text) {
+    try {
+      if (who === 'reset') { _vTurnEl = null; return true; }
+      if (who === 'u') {
+        var d = document.createElement('div'); d.className = 'asst-msg asst-u'; d.textContent = text;
+        // GPT 用户转写(whisper)迟到,AI 回复常已在流:按真实时序插进行中气泡**前面**,不断 AI 轮
+        if (_vTurnEl && _vTurnEl.parentNode === thread) thread.insertBefore(d, _vTurnEl);
+        else { thread.appendChild(d); _vTurnEl = null; }
+        scrollDown(); return true;
+      }
+      if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
+      _vTurnEl.textContent = text;
+      scrollDown(); return true;
+    } catch (e) { return false; }
+  };
+  window.__asstVoiceLog = function (q, a, file, page) {   // 通话轮次落库(与文字对话同一历史,清空一起清)
+    if (!q && !a) return;
+    try {
+      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' }) }).catch(function () {});
+    } catch (e) {}
+  };
+
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
   function trackTask(id, label) {
     if (!id) return;
