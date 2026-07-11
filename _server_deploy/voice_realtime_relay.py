@@ -47,6 +47,109 @@ DIALOG_ID_FILE = Path("/home/bwicarus/claude/state/doubao-dialog-id.txt")   # �
 USAGE_FILE = Path("/home/bwicarus/claude/state/doubao-usage.json")          # 154 UsageResponse 记账(v3-⑩ A)
 ACK_PCM_DIR = Path("/home/bwicarus/claude/state/doubao-ack-pcm")            # 确认语 PCM 缓存(v3-⑪:首次豆包合成时录下,之后 relay 直接回放,零合成费)
 ACK_PCM_DIR.mkdir(parents=True, exist_ok=True)
+VOICE_LOG_DIR = Path("/home/bwicarus/claude/state/voice-log")               # 学习时间线全量落盘(v3-⑰:对话+翻页/选中/圈画/工具事件)
+VOICE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+VOCAB_LOOKUP_LOG = Path("/home/bwicarus/claude/state/vocab-lookups.jsonl")  # 查词日志(vocab 系统写,ts+page+pdf 齐全,聚合时直接合并)
+
+
+def _vlog(kind: str, **kw):
+    """学习时间线事件落盘(按天 jsonl)。写原始事实、**不做任何过滤**——焦点判定(误触/路过)在
+    读取聚合(_study_digest)时执行,规则可随时进化重算(用户设计:写时过滤=信息永久丢失)。"""
+    try:
+        kw.update({"ts": int(time.time()), "kind": kind})
+        p = VOICE_LOG_DIR / (time.strftime("%Y-%m-%d") + ".jsonl")
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(kw, ensure_ascii=False) + "\n")
+    except Exception as ex:
+        sys.stderr.write(f"[voice-rt vlog] {ex}\n")
+
+
+def _study_digest(span: str = "today") -> str:
+    """学习时间线 → 按页聚合的叙事(recall_study 喂给大上下文模型)。焦点规则(用户设计,读取时执行):
+      ① 页段时长 <5s → 整段丢弃——**连段内的选中/查词也算误触**;
+      ② 丢弃后相邻同页段合并(A→B→A 且 B<5s 的交界抖动/路过自然消失);
+      ③ 无操作的纯停留段:≥60s 算"在阅读"留一行,不足丢弃。
+    另按时间窗合并查词日志(vocab-lookups.jsonl)。输出限 ~6000 字(超长保最近)。"""
+    import datetime as dt
+    today = dt.date.today()
+    days = ([(today - dt.timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+            if span == "week" else [today.isoformat()])
+    evs = []
+    for d in days:
+        p = VOICE_LOG_DIR / f"{d}.jsonl"
+        if not p.exists():
+            continue
+        for line in p.read_text("utf-8").splitlines():
+            try:
+                evs.append(json.loads(line))
+            except Exception:
+                pass
+    day0 = dt.datetime.combine(dt.date.fromisoformat(days[0]), dt.time())
+    t0, t1 = int(day0.timestamp()), int(time.time())
+    try:   # 查词日志合并(通话外的查词也进时间线)
+        for line in VOCAB_LOOKUP_LOG.read_text("utf-8").splitlines()[-800:]:
+            try:
+                e = json.loads(line)
+                if t0 <= int(e.get("ts", 0)) <= t1:
+                    evs.append({"ts": int(e["ts"]), "kind": "dict", "text": e.get("word"),
+                                "page": e.get("page"), "book": e.get("pdf")})
+            except Exception:
+                pass
+    except Exception:
+        pass
+    evs.sort(key=lambda e: e.get("ts", 0))
+    if not evs:
+        return ""
+    segs, cur = [], None   # 按(书,页)切段
+    for e in evs:
+        pg, bk = e.get("page"), e.get("book") or ""
+        if cur is None or pg != cur["page"] or (bk and cur["book"] and bk != cur["book"]):
+            cur = {"page": pg, "book": bk or (cur["book"] if cur else ""), "t0": e["ts"], "items": []}
+            segs.append(cur)
+        if bk and not cur["book"]:
+            cur["book"] = bk
+        cur["items"].append(e)
+    for i, sg in enumerate(segs):   # 段时长=到下一段开始;末段按最后事件+30s 估
+        sg["dur"] = (segs[i + 1]["t0"] - sg["t0"]) if i + 1 < len(segs) else (sg["items"][-1]["ts"] - sg["t0"] + 30)
+    kept = []
+    for sg in segs:
+        if sg["dur"] < 5:
+            continue   # 误触/路过:整段丢,含段内操作(用户规则)
+        if kept and kept[-1]["page"] == sg["page"] and kept[-1]["book"] == sg["book"]:
+            kept[-1]["items"] += sg["items"]; kept[-1]["dur"] += sg["dur"]
+        else:
+            kept.append(sg)
+    out = []
+    for sg in kept:
+        hh = time.strftime("%H:%M", time.localtime(sg["t0"]))
+        bookname = (sg["book"] or "").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        head = f"{hh}" + (f"《{bookname}》" if bookname else "") + (f"p{sg['page']}" if sg.get("page") else "")                + f"(约{max(1, sg['dur'] // 60)}分)"
+        by = {}
+        for it in sg["items"]:
+            by.setdefault(it["kind"], []).append(it)
+        parts = []
+        if by.get("dict"):
+            parts.append("查词:" + "、".join(dict.fromkeys(str(i.get("text")) for i in by["dict"] if i.get("text"))))
+        if by.get("sel"):
+            parts.append("选中:" + ";".join(f"「{str(i.get('text'))[:40]}」" for i in by["sel"][:3] if i.get("text")))
+        if by.get("ink"):
+            parts.append("有圈画")
+        if by.get("tool"):
+            parts.append("用了:" + "、".join(dict.fromkeys(str(i.get("label") or i.get("tool")) for i in by["tool"])))
+        qs = [str(i.get("text") or "") for i in by.get("q", [])]
+        ans = [str(i.get("text") or "") for i in by.get("a", [])]
+        for j, q in enumerate(qs):
+            a = ans[j] if j < len(ans) else ""
+            parts.append(f"问:{q[:80]}" + (f" → 答:{a[:160]}" if a else ""))
+        for a in ans[len(qs):]:
+            parts.append(f"AI:{a[:160]}")
+        if not parts:
+            if sg["dur"] >= 60:
+                parts = ["阅读"]
+            else:
+                continue   # 短纯停留:无信息量
+        out.append(head + ":" + ";".join(parts))
+    return "\n".join(out)[-6000:]
 
 # ── S2S 用量记账(154 UsageResponse 每轮 token 用量)──
 # 官方字段(文档 154 事件):input_text_tokens / input_audio_tokens / cached_text_tokens /
@@ -385,11 +488,14 @@ _ACK_TEXT = {   # v3-⑩:确认语按输出音频计费(300元/M,最贵的一类
     "see_ink": "我看看。", "see_page": "我看下这页。", "see_figure": "我看下图。",
     "goto_page": "好。", "make_anki": "好,做卡片。", "make_note": "好,记笔记。",
     "summarize_section": "我读下这章。", "auto_highlight": "好,标重点。",
-    "deep_think": "我想想,稍等。",
+    "deep_think": "我想想,稍等。", "recall_study": "我翻翻记录。",
 }
 # 深度思考虚拟工具(v3-⑥):不在 TOOLS 注册表(它是语音专属体验)——relay 拦截,调助手 chat 流式,
 # answer 增量按句经 ChatTTSText(500) 分片**边生成边播**(不等全文;官方流式协议 start/content/end)。
 DEEP_TOOL_LINE = "- deep_think: 复杂专业问题/数学推导/逻辑推理,交给深度思考模型详细解答并念给用户(慢,简单问题别用) {question:完整问题}"
+RECALL_TOOL_LINE = ("- recall_study: 回顾学习内容(『今天学了什么/之前讲过没/这段时间学了哪些/复盘』)。"
+                    "⚠你的对话记忆只有最近20轮,更早的已被系统裁掉、**你感知不到自己丢了什么**——"
+                    "回顾类问题一律用本工具查完整学习记录,凭印象答=编造 {span:today或week, question:用户原话}")
 _SENT_SPLIT = re.compile(r"[^。！？!?;；\n]+[。！？!?;；\n]+")
 
 
@@ -405,7 +511,7 @@ def _speech_clean(s: str) -> str:
 
 
 async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int,
-                          book: dict, push_sp=None):
+                          book: dict, push_sp=None, tool_name: str = "deep_think", tool_label: str = "深度思考"):
     """深度思考:调助手 chat(SSE,深度模型可配)→ answer 增量攒句 → 500 分片流式代播。
     打断(450→book["deep_abort"])立即停发且**不发 end 包**(官方要求:播报被打断时别补 end)。"""
     cfg = _creds()
@@ -425,7 +531,7 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
         book.setdefault("tasks", {})["deep_think"] = 1
         if push_sp:
             await push_sp()
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": "深度思考"}}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tool_label}}, ensure_ascii=False))
         body = {"message": f"(语音深度解答,直接详细推理回答,少用工具)\n{question}",
                 "rid": f"dt{uuid.uuid4().hex[:10]}", "voice": 1,
                 "context": ({"file_rel": file_rel, "page": page} if file_rel else {})}
@@ -491,18 +597,18 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
             if answer.strip():   # 答案写进它的记忆(ChatTTSText 是否进上下文文档未明说,510 注入保追问不失忆)
                 await _inject_500_memory(dws, sid, question, answer)
         await bws.send(json.dumps({"event": "tool_status", "payload": {
-            "status": "done" if started else "error", "tool": "deep_think", "label": "深度思考",
-            "cmd": f"deep_think({(dm or '默认模型')}/{(de or '默认深度')}): {question[:200]}",
+            "status": "done" if started else "error", "tool": tool_name, "label": tool_label,
+            "cmd": f"{tool_name}({(dm or '默认模型')}/{(de or '默认深度')}): {question[:200]}",
             "rag": _speech_clean(answer)[:1600],
             "result_brief": _speech_clean(answer)[:400]}}, ensure_ascii=False))
     except Exception as ex:
         sys.stderr.write(f"[voice-rt deep] {ex}\n")
         try:
-            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "error", "label": f"深度思考:{str(ex)[:50]}"}}, ensure_ascii=False))
+            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "error", "label": f"{tool_label}:{str(ex)[:50]}"}}, ensure_ascii=False))
         except Exception:
             pass
     finally:
-        (book.get("tasks") or {}).pop("deep_think", None)
+        (book.get("tasks") or {}).pop(tool_name, None)
         if push_sp:
             try:
                 await push_sp()
@@ -615,6 +721,27 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         await _run_deep_think(bws, dws, sid, q or (book.get("user_q") or ""), file_rel, page, book, push_sp)
         return
 
+    if tname == "recall_study":   # 学习回顾(v3-⑰):S2S 只出一条 JSON(~30 token),读日志+聚合+大模型代答全在这
+        q = (targs0 or {}).get("question") if isinstance(targs0, dict) else ""
+        span = str((targs0 or {}).get("span") or "today").lower()
+        ack = await _say_ack(bws, dws, sid, "recall_study", book)
+        await bws.send(json.dumps({"event": 550, "payload": {"content": ack}}, ensure_ascii=False))
+        digest = _study_digest("week" if span.startswith("w") else "today")
+        _vlog("tool", tool="recall_study", label="回顾学习", page=page, book=file_rel, ok=bool(digest))
+        if not digest:
+            rag = json.dumps([{"title": "学习记录查询结果",
+                               "content": "记录为空——这段时间还没有留下学习记录,如实告诉用户即可。"}], ensure_ascii=False)
+            await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
+            await bws.send(json.dumps({"event": "tool_status", "payload": {
+                "status": "done", "tool": "recall_study", "label": "回顾学习", "rag": "(记录为空)"}}, ensure_ascii=False))
+            return
+        q2 = ("根据下面的学习活动记录回答用户的问题。只依据记录说话,记录里没有的不要编造;"
+              "口语化、抓重点、按主题归纳(别逐条流水账)。\n【学习记录(按时间,含页码/查词/选中/问答)】\n"
+              + digest + "\n【用户问题】" + (q or "今天学了什么"))
+        await _run_deep_think(bws, dws, sid, q2, file_rel, page, book, push_sp,
+                              tool_name="recall_study", tool_label="回顾学习")
+        return
+
     cache = book.setdefault("tool_cache", {})
     if targs0 is not None:   # 程序级防重复(用户设计):同工具同参数同页面状态 → 直接复用上次结果,不再执行
         hit = cache.get(_ckey(tname, targs0))
@@ -668,6 +795,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                            "content": content + "\n(请把要点口语化讲给用户;你此前口头猜测的内容一律作废)"}],
                          ensure_ascii=False)
         await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
+        _vlog("tool", tool=tool, label=d.get("label") or tool, page=page, book=file_rel, ok=bool(d.get("ok")))
         # 完整调用过程 → tool_status(前端小按钮 + 侧栏对话流详情卡,v3-⑯:S2S指令/上下文/喂回结果全程可查)
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if d.get("ok") else "error", "tool": tool, "label": d.get("label") or tool,
@@ -1042,6 +1170,7 @@ async def handle_browser(bws):
     book = await _fetch_book_ctx(file_rel, page)   # 书页文本 + 助手历史(没有也照常通话)
     book["tools_lines"] = await _fetch_tools_lines()   # 工具目录(与编排 agent 同一注册表,开话拉一次;SP 组装时按状态门控)
     book["tools_lines"]["deep_think"] = DEEP_TOOL_LINE   # 深度思考虚拟工具(语音专属,relay 拦截流式代播)
+    book["tools_lines"]["recall_study"] = RECALL_TOOL_LINE   # 学习回顾(v3-⑰:12K 之外的长记忆由大上下文模型代答)
     try:
         async with websockets.connect(DOUBAO_WSS, additional_headers=headers,
                                       max_size=10 * 1024 * 1024, open_timeout=15) as dws:
@@ -1142,6 +1271,7 @@ async def handle_browser(bws):
                                 {"content": j["content"]}, ensure_ascii=False).encode(), session_id=sid))
                         elif t == "text" and j.get("content"):     # 文本 query(不说话时打字;意图由模型回复侧协议解析)
                             book["user_q"] = j["content"]           # 记本轮用户问题(笔迹询问程序兜底用)
+                            _vlog("q", text=j["content"], page=page, book=file_rel)
                             await dws.send(enc(T_FULL_CLIENT, 501, json.dumps(
                                 {"content": j["content"]}, ensure_ascii=False).encode(), session_id=sid))
                         elif t == "page":   # 用户翻页 → 拉新页文本 → UpdateConfig(201)热更新 system prompt(通话上下文跟着页走)
@@ -1157,12 +1287,15 @@ async def handle_browser(bws):
                                 book["ink_seen_ver"] = 0          # "看过"记录跨页无效(新页的笔迹没看过)
                                 await _push_sp()                   # SP 换页文本(v3-⑭ 后 SP 唯一的变化源)
                                 _push_state_debounced()            # 换页状态清零(无笔迹/无选中)也要告知
+                                _vlog("page", page=np, book=file_rel)
                                 sys.stderr.write(f"[voice-rt] 翻页同步 → p{np}({len(book.get('page_text') or '')}字)\n")
                         elif t == "state":   # 选中/chip 状态实时同步(前端指纹去重后推;relay 再比对,变了才热更 SP)
                             ns = {"sel": (j.get("sel") or "")[:300],
                                   "focus": (j.get("focus") or "")[:200],
                                   "figs_n": int(j.get("figs") or 0)}
                             if any(book.get(k) != v for k, v in ns.items()):
+                                if ns["sel"] and ns["sel"] != book.get("sel"):
+                                    _vlog("sel", text=ns["sel"][:200], page=page, book=file_rel)
                                 book.update(ns)
                                 _push_state_debounced()
                                 sys.stderr.write(f"[voice-rt] 选中/chip 同步 sel={len(ns['sel'])}字 figs={ns['figs_n']}\n")
@@ -1176,6 +1309,7 @@ async def handle_browser(bws):
                                 book["has_ink"] = bool(strokes)
                                 book["ink_strokes"] = strokes[:60]
                                 book["ink_ver"] = book.get("ink_ver", 0) + 1   # 版本+1(前端指纹去重,到达即真变化)→ 三态/缓存键都随它走
+                                _vlog("ink", n=len(strokes), page=ip, book=file_rel)
                                 _push_state_debounced()
                                 sys.stderr.write(f"[voice-rt] 圈画同步 p{ip} strokes={len(strokes)} v{book['ink_ver']}\n")
                         elif t == "cfg":   # 设置面板改了语音配置(音色/语速/人设)→ 热更(指纹含 tts,变了才真发)
@@ -1241,6 +1375,7 @@ async def handle_browser(bws):
                                 r0 = (pl.get("results") or [{}])[0]
                                 if r0.get("text") and r0.get("is_interim") is False:
                                     book["user_q"] = r0["text"]
+                                    _vlog("q", text=r0["text"], page=page, book=file_rel)
                             except Exception:
                                 pass
                         elif ev == 350:   # 轮级合成开始:按 tts_type 区分——确认语(chat_tts_text)/结果播报(external_rag)绝不丢
@@ -1319,6 +1454,7 @@ async def handle_browser(bws):
                             # 攒满 26 轮 → 最旧 12 轮压成一条 510 注入(拼接式,不调外部模型),防服务端
                             # 滚出 12K 窗口时丢早期脉络。豆包 12K 硬限已封顶输入费用,这条主要保认知连续。
                             if full and rid not in reply_fired and '"tool"' not in full:
+                                _vlog("a", text=full[:2000], page=page, book=file_rel)
                                 ql = book.setdefault("qa_log", [])
                                 ql.append(((book.get("user_q") or "")[:24], full[:36]))
                                 if len(ql) >= 26:
