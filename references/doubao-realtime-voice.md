@@ -457,4 +457,16 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **㉞ 配图 Bing 零 key 兜底 + rtc 断线自愈**(用户提议"最原始的浏览器地址式谷歌搜图"+报告后台切回假活/重连失败):
 - **搜索引擎直爬实测**:Google 对无浏览器 HTTP 请求甩 **JS challenge 重定向占位页**(带 SOCS/CONSENT cookie 也不放行,要无头浏览器,弃);Bing 图搜一次 HTTP 全通(`"murl"`/`"purl"` 结构稳定)曾落地为零 key 兜底——**㉞b 已按用户裁定撤除**(结果质量太差:水印图库/新闻配图充数),第二腿只留 Google API(待启用)。缓存 partial 标记保留(第二腿没跑成的残缺结果只缓存 1 天,防断腿期污染 30 天);撤除时清掉了已写入的 bing 缓存条目。
 - **rtc 假活根治**(用户:后台切回显示通话中实际全聋):ws shim 的 readyState **恒为 1**,WS 版靠 onclose 的断线检测在 rtc 完全失明;iOS 切后台系统掐 WebRTC。修三件:`pc.onconnectionstatechange`(failed/closed 立即判死;disconnected 等 3s 自愈窗口)+ visibilitychange 回前台检查真实 `pc.connectionState` + dc.onclose→`_rtcDead`。判死=rtcTeardown+状态复位+**非主动挂断自动重连**(800ms)。
+
+## ㉟ EPUB 语音全链路对齐(2026-07-12 深夜,用户拍板"唯一侧栏原则"后 autonomous 完成)
+
+**原则**:侧栏唯一(rc-sidedrawer+rc-assistant+rc-voicecall 都是共享层),PDF/EPUB 只是 adapter——语音必须在 EPUB(正主=统一 HTML 主文档版 `/pdf/epub/view`)同等可用。侦察实锤五层断点,全部补齐:
+
+1. **脚本没上页**:`epub_html_reader.html` 根本没加载 rc-voicecall.js(PDF 模板独占)→ 加载(rc-assistant 之后);按钮注入锚点(#asst-input/#asst-mic/#asst-quick/#fs-toggle)EPUB 本就齐备,脚本一上按钮自动出现。
+2. **opts 无接线**(PDF 靠 21-misc-ai 传 file/page,EPUB 无等价物)→ **中间层正道**:`toggle()` 开头 opts 缺 file 时经 `RC.adapter().getContext()` 补齐;**EPUB 的"page"=current_section_idx+1(1-based 章号)**,此约定贯穿全链。`_agentCtxQs`(ASR 语境)同款兼容。
+3. **位置/选中同步无等价物**(PDF=21-misc-ai 的 2s 轮询 __vcSyncNow)→ rc-voicecall 自建**共享轮询**:`window.__vcSyncNow` 不存在时(=非 PDF)每 2s 读 adapter getContext → setPage(page)+syncState(selection);PDF 有自己的轮询不受影响。
+4. **上下文后端 PDF 专用**:`/pdf/api/page-text` 与 `/rtc-session` 按 `.epub` 后缀分流走 `_epub_section_paragraphs(rel, page-1)` 章节纯文本(⚠ **fitz 能打开 epub 但用自己的 reflow 分页,与阅读器 section 完全错位——绝不能落进 fitz 分支**);relay 的 `_fetch_book_ctx` 调的就是 page-text,零改动自动受益(豆包/GPT-WS 链路同吃)。`/voice-ctx`(圈画/生词,全按 PDF 页渲染)对 epub 返回干净空结构。
+5. **落库/历史/清空命名空间错位**(通话记录写死全局 `/api/assistant/log`,EPUB 侧栏历史/清空是 book-scoped epub-convo)→ `__asstVoiceLog` 优先走 `HOST.voiceLog`(adapter 钩子;EPUB 实现=复用现成 `/pdf/api/epub-convo/append` 一轮两条);`_rtcInjectHistory` 经 `window.__asstHistUrl()`(=HOST.historyUrl,EPUB=本书 epub-convo)。清空三位一体在 EPUB 闭环:侧栏 clear(epub-convo/clear)+rc-voicecall 旁听 fresh 重连+回放读已清空的本书历史。
+
+冒烟(test_client)四链路全过:page-text epub 分流出章节文本/rtc-session instructions 含"第 N 章(节)"正文/voice-ctx 空结构/epub-convo 落库→历史→清空闭环。**真机待验**:EPUB 页面按钮出现、通话上下文=当前章、翻章同步、对话进侧栏、清空。已知余项:EPUB 墨迹(epub-ink)未接语音 see_ink(PDF strokes 结构不同),插图/生词直塞对 epub 为空(可后续按需接 epub 数据源)。
 - **重连历史回放**(用户:重启对话没把聊天记录放回去——判断正确,rtc 每连接=全新 session 之前根本没做):dc.onopen 时拉 `/api/assistant/history`(㉛落库的同一份)近 14 条压成**一条 system 消息**注入("延续语境,不要重新打招呼")——官方指南 8.4 的摘要形态,不逐条造 item(省 item 数+不赌 assistant content type);vc-new 新话题(fresh)不回放。rtcStart 失败路径补状态复位(ws/按钮不残留假活)。
