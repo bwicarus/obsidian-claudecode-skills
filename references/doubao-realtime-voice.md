@@ -317,3 +317,19 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 - **句中语气转折**(用户设计):`[语气:XX]` 标签不限于开头——AI 在**情绪转折句前**插新标签,其后句子全按新语气,直到下一个标签(prompt 已加转折规则+标签内禁标点)。实现:tap 改收**原始文本**(含标签),`_speakSeg` 在句片内解析标签流(标签前残句按旧 mood speak → 切 vt.mood → 继续),单向 2.0 引擎每句一请求天然承接逐句变奏;渲染侧 `stripMoodTag` 升级**全局剥**+尾部撕裂截;done flush 时剥未闭合残段。单元:多标签分段/转折切换/撕裂全过。
 - **iOS 耳机路由**(用户实测:听写+朗读时戴耳机却走扬声器):页面用过麦克风后 WebKit 音频会话粘在 `play-and-record` 类别——**该类别默认强制扬声器**(蓝牙耳机被无视)。修复三件套(Safari 17+ Audio Session API):①默认+朗读 ensure 时 `navigator.audioSession.type='playback'`(纯播放=耳机优先);②开麦(getUserMedia 前)显式 `'play-and-record'`;③teardown 切回 `'playback'` + **重建朗读 AudioContext**(通话期间建的 ac 路由粘扬声器,close+null 下次拿干净会话)。
+
+### 朗读 prompt 分层 + 结巴修复(v3-⑲,2026-07-11)
+
+- **prompt 三态分层**(用户要求:朗读亮=更简短口语化;朗读灭=prompt 必须零口语/零语气标签):`/chat` 的 `body.voice` 三值——`1`=前端朗读点亮(口语段+语气标签段)/`"s2s"`=relay 深度思考代播(**只给口语段**,bidi 引擎不吃标签,给了会被念出)/缺省=文字模式(纯净 prompt)。口语段加强:"像当面聊天,默认两三句话说完,别铺开别客套别复述问题,内容多只讲最重要的一点末尾问要不要展开"。
+- **历史落库剥标签**(隐蔽泄漏根源):`_convo_append` 存的是模型原始输出(含 `[语气:XX]`),关掉朗读后模型看到自己历史带标签会**模仿续写**——落库前剥,历史干净,非朗读轮次真正零污染。relay `_speech_clean` 同步补剥(含未闭合撕裂),bidi 代播链路防念出。
+- **朗读结巴根因**(用户报告"念几个字→停顿→从头重念"):claude 编排管线的 answer 事件=**轮内全量、跨工具轮替换**(每个工具轮后新轮文本从头开始)→ 前端 tap 旧版按 `full.length < vt.sent` 判"新回答"→ bargeIn 打断刚念的开场白+从头念新轮。修:tap 改**前缀判定**(`full.startsWith(vt.pref)`),轮次替换=念完上轮残句+从新文本头接着念、**不打断**;真正的 bargeIn 只在新提问(sendToAssistant,连带清 pref/mood)。
+- **gemini 编排管线 answer 改全量**:原流式发**增量片段**(`disp[_emit_len:]`)而前端/relay 都按全量替换消费——屏幕只剩最新一小段+朗读反复重念的既有语义错位,统一成与 claude 管线相同的轮内全量。relay `_run_deep_think` 解析加轮次重置(`len(answer)<sent_len → sent_len=0`)。
+- 单元:轮1残句"我来看看这道题"念完→轮2顺接→轮内语气转折正常→全程零 bargeIn。
+
+### 朗读字幕(v3-⑳,用户设计,2026-07-11)
+
+- **需求原话**:侧栏没开时朗读显示字幕(当前句清晰+上一句半透明);日语/错字念不出所以然时能看见;其他查询/agent 工作时兼作状态显示;只能通过设置开关;不挡后方触控。
+- **同步机制(核心)**:relay 在**每句音频前**向 bws 发 `{"event":"tts_seg","payload":{"text":…}}`——uni 2.0 引擎 worker 串行合成,帧发在 `_uni_synth_one` 开头正好紧贴该句首个音频块;前端收帧入队+置 `bind` 标记,下一个音频 chunk 调度时(`_ttsPlay`/`playPcm`)取队首句、`setTimeout` 到该 chunk 的 `playT` 开播时刻亮字幕 → **字幕与声音精确同步**。bidi/moon 帧发在 speak 分支(音频不分句),退化为略超前。
+- **前端**(`rc-voicecall.js` `_cap` 模块):`#vc-cap` fixed 底部居中(bottom 76px+safe-area),`pointer-events:none` 全链穿透;Apple TV 字幕风(深毛玻璃胶囊 rgba(28,28,30,.6)+blur);三行=上一句(.45 透明小字)/当前句/状态行。显示 gate=`capOn()`(localStorage `rc-voice-sub`,默认开)+语音活跃(朗读亮或通话中)+**侧栏关着**(`RC.sidedrawer.isOpen()` 开着有对话流不重复)。播完 4s 淡出(还在播/状态行亮着则续等);bargeIn/挂断 `capClear`(清句队列+定时器)。
+- **状态显示**:rc-assistant `tool`/`tool-done` 事件 + relay `tool_status` → `window.__vcCapStatus('⚙︎ 查词典…')`,工具跑完清除。
+- **开关唯一入口**:语音设置卡「朗读字幕」checkbox(设备级 localStorage,不进服务端凭证,不跟 data-k 保存链路混)。

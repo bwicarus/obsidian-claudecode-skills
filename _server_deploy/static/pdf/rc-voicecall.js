@@ -15,7 +15,7 @@
   var box = null, f32buf = new Float32Array(0), curAText = '';
   // mode:'agent'(默认,耳=豆包ASR/嘴=豆包TTS/大脑=侧栏助手完整管线) | 's2s'(豆包端到端,旧路保留)
   var mode = 'agent';
-  var vt = { sent: 0, tail: '', sid: 0 };   // 语音 tap 状态:已消费的回答长度 / 未成句尾巴 / 句序号
+  var vt = { sent: 0, tail: '', sid: 0, pref: '' };   // 语音 tap 状态:已消费长度 / 未成句尾巴 / 句序号 / 上次 full(前缀判定轮次替换)
   var pendingUtter = null;                   // 助手忙时到达的新话(覆盖式排队,回答完自动发)
 
   // ── ⑧ 通话生命周期独立于侧栏/网络波动 ──
@@ -78,6 +78,16 @@
     if (document.getElementById('rc-vc-css')) return;
     var s = document.createElement('style'); s.id = 'rc-vc-css';
     s.textContent =
+      // 朗读字幕(v3-⑳):底部居中悬浮,Apple TV 字幕风(深毛玻璃胶囊);pointer-events:none 全链穿透
+      '#vc-cap{position:fixed;left:50%;transform:translateX(-50%) translateY(10px);bottom:calc(76px + env(safe-area-inset-bottom,0px));' +
+      'z-index:2147481500;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none;' +
+      'max-width:min(88vw,620px);opacity:0;transition:opacity .35s ease,transform .35s ease;font-family:-apple-system,system-ui,sans-serif}' +
+      '#vc-cap.on{opacity:1;transform:translateX(-50%) translateY(0)}' +
+      '#vc-cap .vc-cap-line{background:rgba(28,28,30,.6);-webkit-backdrop-filter:blur(18px) saturate(1.5);backdrop-filter:blur(18px) saturate(1.5);' +
+      'color:#fff;border-radius:14px;padding:7px 14px;font-size:15px;line-height:1.5;text-align:center;' +
+      'box-shadow:0 6px 24px rgba(0,0,0,.18);max-width:100%;word-break:break-word;transition:opacity .3s}' +
+      '#vc-cap .vc-cap-prev{opacity:.45;font-size:13px;padding:5px 12px}' +
+      '#vc-cap .vc-cap-st{opacity:.85;font-size:13px;padding:5px 12px;background:rgba(28,28,30,.48)}' +
       // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
       '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(24,30,46,.78);' +
       '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
@@ -188,8 +198,10 @@
     if (p.status === 'running') {
       b.style.display = 'flex'; b.className = 'running'; b.innerHTML = '<span class="vc-spin"></span>';
       b.title = '正在执行:' + (p.label || '工具') + '(点击中止)';
+      capStatus('⚙︎ ' + (p.label || '正在处理') + '…');   // 字幕兼状态显示(侧栏关着也能看到在干嘛)
     } else {
       b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
+      capStatus(null);
       if (p.status === 'aborted') {
         var th = document.getElementById('asst-thread');
         if (th) { var a = document.createElement('div'); a.className = 'vc-tcard err'; a.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">⊘</span><span class="vc-tc-l">已中止</span></div>'; th.appendChild(a); th.scrollTop = th.scrollHeight; }
@@ -258,6 +270,7 @@
     var src = ac.createBufferSource(); src.buffer = ab; src.connect(ac.destination);
     var t = Math.max(ac.currentTime + 0.02, playT);
     src.start(t); playT = t + ab.duration; playing.push(src);
+    _capBindChunk(t, ac);   // agent 通话朗读:句首块 → 字幕在开播时刻亮(S2S 无 seg 帧,零影响)
     callBtnSpeaking(true);
     src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); if (!playing.length) callBtnSpeaking(false); };
   }
@@ -326,10 +339,84 @@
     if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid, mood: vt.mood || '' })); } catch (e) {} }
   }
   function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成(两条通道都发)
-    stopPlayback(); _ttsStopPlay();
+    stopPlayback(); _ttsStopPlay(); capClear();
     try { if (ws && mode === 'agent' && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
     try { if (_tts.ws && _tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
   }
+  // ── 朗读字幕(v3-⑳,用户设计):侧栏关着时把正在念的句子显示在屏幕下方(上一句半透明小字、当前句清晰),
+  //    日语/错字等"念不出所以然"的内容能看见;工具/agent 执行时兼作状态显示。
+  //    同步机制:relay 在每句音频前发 tts_seg JSON 帧(uni 2.0 引擎串行合成,帧紧贴该句首块)→ 前端把句子
+  //    绑到该块的播放调度时刻(playT),字幕跟声音精确同步;bidi/moon 音频不分句,退化为略超前。
+  //    开关只在语音设置卡(localStorage rc-voice-sub,默认开);pointer-events:none 不挡任何触控。──
+  function capOn() { try { return localStorage.getItem('rc-voice-sub') !== '0'; } catch (e) { return true; } }
+  var _cap = { el: null, prev: null, cur: null, st: null, pend: [], bind: false, timers: [], hideT: null };
+  function _capEl() {
+    if (_cap.el && _cap.el.parentNode) return _cap.el;
+    injectCss();   // 纯朗读场景(通话浮层没建过)也要样式
+    var d = document.createElement('div'); d.id = 'vc-cap';
+    d.innerHTML = '<div class="vc-cap-line vc-cap-prev" style="display:none"></div>' +
+                  '<div class="vc-cap-line vc-cap-cur" style="display:none"></div>' +
+                  '<div class="vc-cap-line vc-cap-st" style="display:none"></div>';
+    document.body.appendChild(d);
+    _cap.el = d; _cap.prev = d.children[0]; _cap.cur = d.children[1]; _cap.st = d.children[2];
+    return d;
+  }
+  function _capVisible() {   // 显示条件:开关开 + 语音链路活跃(朗读亮或通话中) + 侧栏关着(开着有对话流,字幕多余)
+    if (!capOn() || !(speakOn() || ws)) return false;
+    try { if (window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()) return false; } catch (e) {}
+    return true;
+  }
+  function capShow(text) {
+    if (!_capVisible()) return;
+    _capEl();
+    if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+    var old = _cap.cur.textContent;
+    if (old) { _cap.prev.textContent = old; _cap.prev.style.display = ''; }
+    _cap.cur.textContent = text; _cap.cur.style.display = '';
+    _cap.el.classList.add('on');
+  }
+  function capStatus(text) {   // 状态行(工具执行中):text=null 清除
+    if (text == null) { if (_cap.st) { _cap.st.style.display = 'none'; } _capMaybeHide(1200); return; }
+    if (!_capVisible()) return;
+    _capEl();
+    if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+    _cap.st.textContent = text; _cap.st.style.display = '';
+    _cap.el.classList.add('on');
+  }
+  function _capMaybeHide(delay) {   // 播完停留几秒再淡出(还在播/状态行亮着→再等)
+    if (!_cap.el) return;
+    if (_cap.hideT) clearTimeout(_cap.hideT);
+    _cap.hideT = setTimeout(function () {
+      _cap.hideT = null;
+      if (_tts.playing.length || playing.length || (_cap.st && _cap.st.style.display !== 'none')) { _capMaybeHide(1500); return; }
+      _cap.el.classList.remove('on');
+      setTimeout(function () {
+        if (_cap.el && !_cap.el.classList.contains('on')) {
+          _cap.cur.textContent = ''; _cap.prev.textContent = '';
+          _cap.cur.style.display = 'none'; _cap.prev.style.display = 'none';
+        }
+      }, 400);
+    }, delay || 4000);
+  }
+  function capClear() {   // 打断/挂断:清句队列+定时器,立即隐藏
+    _cap.pend = []; _cap.bind = false;
+    _cap.timers.forEach(function (t) { clearTimeout(t); }); _cap.timers = [];
+    if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+    if (_cap.el) _cap.el.classList.remove('on');
+    if (_cap.cur) { _cap.cur.textContent = ''; _cap.cur.style.display = 'none'; }
+    if (_cap.prev) { _cap.prev.textContent = ''; _cap.prev.style.display = 'none'; }
+    if (_cap.st) _cap.st.style.display = 'none';
+  }
+  function _capSeg(text) { if (text) { _cap.pend.push(text); _cap.bind = true; } }   // 收到 tts_seg 帧:下一个音频块=该句开头
+  function _capBindChunk(startAt, acx) {   // 音频块调度好了:若它是句首块,到点亮字幕
+    if (!_cap.bind || !_cap.pend.length) return;
+    _cap.bind = false;
+    var txt = _cap.pend.shift();
+    var ms = Math.max(0, (startAt - acx.currentTime) * 1000);
+    _cap.timers.push(setTimeout(function () { capShow(txt); }, ms));
+  }
+  window.__vcCapStatus = capStatus;   // rc-assistant 的 tool 事件也走字幕状态行(侧栏关着时能看到 agent 在干嘛)
+
   // ── 朗读专用通道(?mode=tts,v3-⑬):没在语音通话时点亮「🔊 朗读」→ 回答经双向流式 TTS 播——
   //    不开麦、不连 ASR;独立 ws + 独立 AudioContext(与通话互不干扰)。点亮开关(手势内)预热。──
   var _tts = { ws: null, ac: null, playT: 0, playing: [] };
@@ -351,7 +438,14 @@
       var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       var w = new WebSocket(proto + location.host + '/voice-rt?mode=tts');
       w.binaryType = 'arraybuffer';
-      w.onmessage = function (ev) { if (ev.data instanceof ArrayBuffer) _ttsPlay(ev.data); };
+      w.onmessage = function (ev) {
+        if (ev.data instanceof ArrayBuffer) { _ttsPlay(ev.data); return; }
+        try {
+          var j = JSON.parse(ev.data);
+          if (j.event === 'tts_seg') _capSeg(j.payload && j.payload.text);        // 字幕:句边界帧
+          else if (j.event === 'tts_end') _capMaybeHide(2500);
+        } catch (e) {}
+      };
       w.onclose = function () { if (_tts.ws === w) _tts.ws = null; };
       _tts.ws = w;
     } catch (e) {}
@@ -365,6 +459,7 @@
     var src = a.createBufferSource(); src.buffer = ab; src.connect(a.destination);
     var t = Math.max(a.currentTime + 0.02, _tts.playT);
     src.start(t); _tts.playT = t + ab.duration; _tts.playing.push(src);
+    _capBindChunk(t, a);   // 句首块 → 字幕在该块真正开播的时刻亮
     var tg = document.querySelector('.vc-speak-tg'); if (tg) tg.classList.add('speaking');
     src.onended = function () {
       var k = _tts.playing.indexOf(src); if (k >= 0) _tts.playing.splice(k, 1);
@@ -378,7 +473,7 @@
   }
   function _ttsShutdown() {
     try { if (_tts.ws) { if (_tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); _tts.ws.close(); } } catch (e) {}
-    _tts.ws = null; _ttsStopPlay();
+    _tts.ws = null; _ttsStopPlay(); capClear();
     try { if (_tts.ac) _tts.ac.close(); } catch (e) {}
     _tts.ac = null;
   }
@@ -406,14 +501,21 @@
     if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
     if (!(ws && mode === 'agent')) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
     full = String(full || '');
-    if (full.length < vt.sent) { vt.sent = 0; vt.tail = ''; vt.mood = null; bargeIn(); }   // 新一轮回答开始 → 打断残播+清上轮语气
+    // 轮次替换判定(编排器每个工具轮 answer 从头重来):full 不再是已消费前缀的延伸 → 念完上轮残句,从新文本头接着念。
+    // ⚠ 不 bargeIn:轮间过渡(开场白→工具→正式回答)要连贯念完;真正的打断只在新提问(sendToAssistant)。
+    //   旧版按 full 变短判"新回答"并打断,工具轮一到就掐掉刚念的开场白从头重念 → "念几个字→停→从头再读"的结巴。
+    if (!full.startsWith(vt.pref)) {
+      if (vt.tail.trim()) _speakSeg(vt.tail.replace(/[\[【]语气?[::]?[^\]】]{0,12}$/, ''));   // 上轮残句(常无尾标点)念完
+      vt.sent = 0; vt.tail = '';
+    }
+    vt.pref = full;
     vt.tail += full.slice(vt.sent); vt.sent = full.length;
     var re = /[^。！？!?;；,，\n]+[。！？!?;；,，\n]+/g, m, consumed = 0;   // 逗号级边界:更早开始出声
     while ((m = re.exec(vt.tail))) { _speakSeg(m[0]); consumed = re.lastIndex; }
     vt.tail = vt.tail.slice(consumed);
     if (done) {
       if (vt.tail.trim()) _speakSeg(vt.tail.replace(/[\[【]语气?[::]?[^\]】]{0,12}$/, ''));
-      vt.sent = 0; vt.tail = '';
+      vt.sent = 0; vt.tail = ''; vt.pref = '';
       try {
         var wd = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;
         if (wd && wd.readyState === 1) wd.send(JSON.stringify({ type: 'speak_done' }));   // FinishSession:让尾巴合成完
@@ -424,7 +526,7 @@
   window.__asstVoiceOn = function () { return speakOn() && !(ws && mode === 's2s'); };   // 朗读亮且非 S2S 通话 → 后端回答用『适合朗读』风格
   function sendToAssistant(text, keepAudio) {
     if (!keepAudio) bargeIn();        // 新问题:停掉还在念的旧回答(排队派发除外)
-    vt.sent = 0; vt.tail = '';
+    vt.sent = 0; vt.tail = ''; vt.pref = ''; vt.mood = null;
     if (window.__asstBusy && window.__asstBusy()) { pendingUtter = text; taPlaceholder('⏳ 上一条还在答,已排队:' + text.slice(0, 14) + '…'); return; }
     taPlaceholder('🎙 说话即可,松口自动发送…');
     if (window.__asstSend) window.__asstSend(text);
@@ -438,7 +540,8 @@
       taSet(p.text || ''); return;
     }
     if (m.event === 'utterance' && p.text) { taSet(''); sendToAssistant(p.text); return; }
-    if (m.event === 'tts_end') return;
+    if (m.event === 'tts_seg') { _capSeg(p.text); return; }         // 字幕:句边界帧(agent 通话朗读)
+    if (m.event === 'tts_end') { _capMaybeHide(2500); return; }
     if (m.event === -1 || p.error) threadMsg('asst-note', '⚠ 语音:' + (p.error || '').slice(0, 80));
   }
 

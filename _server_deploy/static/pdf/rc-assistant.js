@@ -326,6 +326,8 @@
         '<div class="ams-cur" style="margin:4px 0 2px">朗读语速 <b class="vcv-tsr">' + (c.tts_speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.tts_speech_rate || 0) + '" data-k="tts_speech_rate" style="width:100%">' +
         '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="默认朗读语气(AI 会按内容自动调整情绪;这里是它没给时的兜底,仅2.0音色)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;cursor:pointer">' +
+        '<input type="checkbox" id="vcv-cap-tg">朗读字幕(侧栏关闭时屏幕下方显示当前句+上一句,跟声音同步,不挡触控;本设备)</label>' +
         '<div class="ams-cur" style="margin:4px 0 2px">通话音量(S2S) <b class="vcv-lr">' + (c.loudness_rate || 0) + '</b>(-50 轻 ~ 100 响)</div>' +
         '<input type="range" min="-50" max="100" step="5" value="' + (c.loudness_rate || 0) + '" data-k="loudness_rate" style="width:100%">' +
         '<div class="ams-row" style="margin:7px 0"><input class="ams-sel" data-k="bot_name" placeholder="名字(默认:豆包)" value="' + esc2(c.bot_name || '') + '" style="flex:1 1 44%">' +
@@ -344,6 +346,14 @@
               try { if (window.RC && RC.voicecall && RC.voicecall.pushCfg) RC.voicecall.pushCfg(); } catch (_) {}
             } else if (typeof _toast === 'function') _toast('保存失败');
           }).catch(function () {});
+      }
+      var _capTg = card.querySelector('#vcv-cap-tg');   // 朗读字幕开关:设备级偏好(localStorage),不进服务端凭证
+      if (_capTg) {
+        try { _capTg.checked = localStorage.getItem('rc-voice-sub') !== '0'; } catch (e) {}
+        _capTg.addEventListener('change', function () {
+          try { localStorage.setItem('rc-voice-sub', _capTg.checked ? '1' : '0'); } catch (e) {}
+          if (typeof _toast === 'function') _toast(_capTg.checked ? '朗读字幕已开' : '朗读字幕已关');
+        });
       }
       card.querySelectorAll('[data-k]').forEach(function (el) {
         el.addEventListener('change', function () {
@@ -1599,8 +1609,8 @@
       if (ev === 'meta') return;                       // rid 确认,不计数
       evSeen++;
       if (ev === 'done') { done = true; return; }
-      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); }
-      else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
+      if (ev === 'tool') { aMsg.innerHTML = '<span class="asst-tool">🔧 ' + esc(parsed) + '…</span>'; scrollDown(); try { window.__vcCapStatus && window.__vcCapStatus('⚙︎ ' + parsed + '…'); } catch (_) {} }   // 朗读字幕兼状态显示(侧栏关着也能看到)
+      else if (ev === 'tool-done') { try { aMsg.innerHTML = '<span class="asst-tool">思考中…</span>'; scrollDown(); } catch (_) {} try { window.__vcCapStatus && window.__vcCapStatus(null); } catch (_) {} }   // L3:工具完→中性「思考中」直到下个 answer/tool(镜像 EPUB)
       else if (ev === 'answer') {   // 流式轻量渲(不 MathJax)+ 剥 FOLLOWUP + 提亮&逐字浮现(揭示游标)+光标(mfx)
         answer = parsed;
         var _raw = _splitFollowups(answer).text;

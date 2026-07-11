@@ -516,6 +516,7 @@ def _speech_clean(s: str) -> str:
     s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"[#*_`>|~]+", " ", s)
     s = re.sub(r"[(（]\s*(?:第\s*\d+\s*[-~至]?\s*\d*\s*页|p\.?\s*\d+)\s*[)）]", "", s, flags=re.I)   # 页码引用不念(显示保留)
+    s = re.sub(r"[\[【]语气[::][^\]】]{0,12}[\]】]?", "", s)   # [语气:XX] 是 2.0 朗读引擎的控制符,bidi 代播链路念不了必须剥
     return re.sub(r"[ \t]+", " ", s)
 
 
@@ -543,7 +544,7 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
             await push_sp()
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tool_label}}, ensure_ascii=False))
         body = {"message": f"{preamble}\n{question}",
-                "rid": f"dt{uuid.uuid4().hex[:10]}", "voice": 1,
+                "rid": f"dt{uuid.uuid4().hex[:10]}", "voice": "s2s",   # 口语化 prompt 要,[语气:XX] 标签指令不要(bidi 代播不吃标签)
                 "context": ({"file_rel": file_rel, "page": page} if file_rel else {})}
         # 深度模型选型:模型设置面板「深度思考」项(action-prefs deep,⑦的 UI)优先;凭证 deep_model/deep_effort 兜底
         dm, de = cfg.get("deep_model"), cfg.get("deep_effort")
@@ -580,6 +581,8 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
                                 parsed = data
                             if ev == "answer" and isinstance(parsed, str):
                                 answer = re.split(r"\n?FOLLOWUP[::]", parsed)[0]
+                                if len(answer) < sent_len:
+                                    sent_len = 0   # 编排器工具轮后 answer 从头重来 → 从新文本头接着念,别按旧偏移切空
                                 tail += answer[sent_len:]
                                 sent_len = len(answer)
                                 consumed = 0
@@ -941,6 +944,10 @@ def _tts_channel(bws, key: str, speaker: str):
     uni = {"q": None, "worker": None, "section": None, "gen": 0, "ws": None}
 
     async def _uni_synth_one(text: str, g: int, mood: str = ""):
+        try:   # 字幕帧(v3-⑳):worker 串行合成,帧紧贴本句音频首块 → 前端把句子绑到该块的播放时刻,字幕与声音同步
+            await bws.send(json.dumps({"event": "tts_seg", "payload": {"text": text}}, ensure_ascii=False))
+        except Exception:
+            pass
         c = _creds()
         spk = c.get("tts_speaker") or speaker
         h = {"X-Api-Key": key, "X-Api-Resource-Id": "seed-tts-2.0", "X-Api-Connect-Id": str(uuid.uuid4())}
@@ -1069,6 +1076,7 @@ def _tts_channel(bws, key: str, speaker: str):
             await uni["q"].put((text, (mood or "").strip()[:12]))
             return
         try:
+            await bws.send(json.dumps({"event": "tts_seg", "payload": {"text": text}}, ensure_ascii=False))   # 字幕帧(bidi 音频不分句,退化为略超前)
             await _ensure()
             await tts["ws"].send(enc(T_FULL_CLIENT, 200, json.dumps({
                 "user": {"uid": "voice-agent"}, "event": 200, "namespace": "BidirectionalTTS",

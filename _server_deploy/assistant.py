@@ -2780,17 +2780,22 @@ def _sys_prompt(ctx):
         learn_bits.append(f"★用户钉住了一个焦点{fkind}(右侧 chip,默认在专门问它):「{_clean_tag(fsel.get('text'))[:240]}」")
     # 视口焦点:用户此刻**屏幕上正在看的正文**(前端按视口相交采集)。EPUB 一节=整章内容太长、AI 只知章节
     #   会答偏(如把「酶」问成整章「生物物理」);给可见部分 → 回答/找视频/配图/拟搜索词都紧扣当前注意力。限长防 prompt 膨胀。
-    if ctx.get("voice_mode"):
-        learn_bits.append("★语音对话中(问题来自语音转写,可能有同音错字,按语境理解;你的回答会被逐句朗读):"
-                          "**回答的最开头先输出语气标签「[语气:XX]」**(XX 用 2~6 字描述情绪,"
-                          "如 平静/开心/严肃认真/温柔/惋惜/兴奋,按内容选,普通内容用 平静;标签里别用标点)。"
-                          "**情绪有转折时**(比如从平静叙述转到惋惜感叹),就在转折的那句话前面再插一个新的「[语气:XX]」——"
-                          "之后的句子都按新语气念,直到下一个标签。标签不会显示也不会被念出,朗读引擎按它调整声音情绪。"
-                          "回答要**适合听**——口语化短句、先给结论;少用列表/表格/标题结构;"
-                          "数学符号和公式用中文口头表述(如「x 的平方除以 2」),别写 LaTeX;"
-                          "**用标点控制朗读节奏**:句子短一点、逗号断句;需要明显停顿(转折/换话题/给听者反应时间)"
-                          "的地方用省略号……;重点词前可用逗号轻顿。TTS 会按标点自然停顿,别用其它标记符号。"
-                          "尽量几句话说完,内容多时先讲最重要的,再问一句要不要继续展开。工具照常用。")
+    _vm = ctx.get("voice_mode")
+    if _vm:
+        # 口语段=所有语音链路共通;[语气:XX] 标签段只给前端朗读(_vm==1,单向 2.0 引擎吃标签)。
+        #   S2S 深度思考代播(_vm=="s2s")走 bidi 内置 TTS,不吃标签,给了指令反而可能把标签念出来。
+        _vseg = ("★语音对话中(问题来自语音转写,可能有同音错字,按语境理解;你的回答会被逐句朗读):"
+                 "回答要**像当面聊天**——口语、短句、直接说结论,**默认两三句话说完**;"
+                 "别铺开、别客套、别复述问题,听者想深入自然会追问;内容确实多就只讲最重要的一点,末尾问一句要不要展开。"
+                 "少用列表/表格/标题结构;数学符号和公式用中文口头表述(如「x 的平方除以 2」),别写 LaTeX。"
+                 "**用标点控制朗读节奏**:逗号断句;需要明显停顿(转折/换话题/给听者反应时间)的地方用省略号……。"
+                 "TTS 按标点自然停顿,别用其它标记符号。工具照常用。")
+        if _vm == 1:
+            _vseg += ("**回答的最开头先输出语气标签「[语气:XX]」**(XX 用 2~6 字描述情绪,"
+                      "如 平静/开心/严肃认真/温柔/惋惜/兴奋,按内容选,普通内容用 平静;标签里别用标点)。"
+                      "**情绪有转折时**(比如从平静叙述转到惋惜感叹),就在转折的那句话前面再插一个新的「[语气:XX]」——"
+                      "之后的句子都按新语气念,直到下一个标签。标签不会显示也不会被念出,朗读引擎按它调整声音情绪。")
+        learn_bits.append(_vseg)
     mp = ctx.get("media_prefer") or {}
     if mp.get("image"):
         learn_bits.append("★用户开了「配图」偏好:回答里凡是**有明确视觉形象**的概念(实物/结构/示意图/图表/生物/文物/天体/仪器…)都该配图。"
@@ -3736,13 +3741,14 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
             for kind, val in _gemini_stream(system, contents, model=model, think=think):
                 if kind == "delta":
                     raw_parts.append(val)
-                    # 只吐**工具 JSON 之前**的散文增量;工具调用 JSON(含前导散文后的)一出现 disp 就冻结,不再吐(末尾补完整 answer)
+                    # 只吐**工具 JSON 之前**的散文;工具调用 JSON(含前导散文后的)一出现 disp 就冻结,不再吐(末尾补完整 answer)。
+                    # ⚠ data=轮内**全量**(与 claude 管线一致):前端/relay 都按全量替换消费,增量片段会让屏幕只剩最新一小段、朗读反复重念
                     disp = _display_prefix("".join(raw_parts))
                     if len(disp) > _emit_len:
                         now = time.time()
                         if now - _last_emit > 0.1:
                             _last_emit = now
-                            yield {"event": "answer", "data": disp[_emit_len:]}
+                            yield {"event": "answer", "data": disp}
                             _emit_len = len(disp)
                 elif kind == "err":
                     err = val
@@ -3863,7 +3869,9 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
                 _meta["videos"] = job["videos"]
             if job.get("undo_cards"):
                 _meta["undo_cards"] = job["undo_cards"]   # H2:高亮撤销卡持久化
-            _convo_append(uid, "assistant", str(job["answer"])[:1500], _meta or None)
+            # 落库前剥 [语气:XX](朗读控制符):历史干净 → 关掉朗读后模型不会照着自己旧回答模仿输出标签
+            _ans = re.sub(r"[\[【]语气[::][^\]】]{0,12}[\]】]", "", str(job["answer"]))
+            _convo_append(uid, "assistant", _ans[:1500], _meta or None)
         def _cleanup():
             with _chat_jobs_lock:
                 _chat_jobs.pop(rid, None)
@@ -3895,7 +3903,8 @@ def assistant_chat():
             force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
             ctx = body.get("context") or {}
             ctx["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message)
-            ctx["voice_mode"] = 1 if body.get("voice") else 0   # 语音对话:问题来自 ASR 转写,回答会被 TTS 朗读
+            _v = body.get("voice")   # 1=前端朗读点亮(2.0 引擎,要口语化+语气标签) / "s2s"=relay 深度思考代播(bidi,只要口语化) / 0=文字模式(纯净 prompt)
+            ctx["voice_mode"] = "s2s" if _v == "s2s" else (1 if _v else 0)
             ctx["_base"] = request.host_url.rstrip("/")
             ctx["_uid"] = uid   # 写操作记 owner=本用户 → 撤销只能撤自己的
             history = [{k: m.get(k) for k in ("role", "content", "page", "pages", "book", "file_rel", "selection")}
