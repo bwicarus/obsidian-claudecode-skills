@@ -738,3 +738,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 用户实测:关了 rt_tool_reply,goto_page 后模型仍口头回报——silent 此前是逐工具散落打标(搜索/配图/视频三个专段),其它动作型工具漏网。收敛为 voice-tool 后处理的**统一静默表** `_SILENT_ACT = {goto_page, highlight, auto_highlight, add_vocab, open_book}`:动作/展示型(结果用户已在界面看到)成功即打 silent+统一 note(「已在界面生效…本轮不要发言」);失败不静默(要告知)。三个专段(个性 note)保留同机制同区域。分类原则:**信息型**(read_page/lookup_word/see_*/recall_*/translate…结果=回答原料)绝不静默;**任务型**(make_anki/make_note)保留简短确认(有等待语设计)。relay/前端 gate(silent && !rt_tool_reply → no_create)本来就统一,无需动。
 
+## 批次 103-104(2026-07-13)转圈超时兜底 + 图像 item 用后即焚
+
+**103**:工具 running 状态 150s 没 done/error→自动标超时(relay 重启杀死进行中工具=永远转圈的防线);**103b** 回声桥下行改道必须等 pc **connected**(offer 即改道时桥连不成=音频进无人播放队列全哑,"Grok 听不到"根因;connected 前照走 ws,与前端判定一致)。
+
+**104(用户设计:发完图最好压历史)**:直喂图像 item **用后即焚**——比压缩整个历史更精准:图的价值在"看的那一刻",模型的文字回答已保留结论,图留在历史=每轮重复携带几千 token(cached 价也不免费+吃 24k 上下文硬顶,挤爆触发 truncation 反而破坏缓存前缀)。实现(RTC+WS 双引擎):直喂时 item **自带 id**(客户端可指定,免监听 created)记账 `(话轮, id)`;`speech_started`(新话轮)时 `conversation.item.delete` 焚**上上轮及更早**的图——保留最近一轮供追问"图里第三格什么意思";更早的要再看=模型重新扣扳机取图(拉模式语义一致)。WS 版新增 `_turn` 话轮计数;RTC 版复用 epoch。Grok 无视觉不涉及。
+

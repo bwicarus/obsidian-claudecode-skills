@@ -1403,6 +1403,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     _bridge = {"pc": None, "q": None, "pend": b""}   # 99 WebRTC 桥(纯音频面);q=None=未建(ws 音频照旧)
     _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
     _tr_done = set()   # 101:转写 completed 去重(xAI 同轮多发)
+    _turn = {"n": 0}   # 104:话轮计数(图像焚旧参照)
+    _img_items = []    # 104:(turn, item_id) 直喂图记账
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
     pend_trunc = {"id": None, "fb": 0}  # 打断后待 truncate:等前端回报**真实已播毫秒**(600ms 兜底用已转发字节——它远超实际已播,官方语义是"用户实际听到的毫秒")
     cur_a = {"txt": ""}
@@ -1445,9 +1447,11 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 # 直接给 GPT 自己看(2.1 原生视觉),不再经 Claude 文字转述;失败(模型不支持/格式不对)由 error 事件暴露,关掉开关即回文字链路
                 if vis and _creds().get("rt_image") and engine != "grok":
                     try:
-                        for v in vis[:2]:
+                        for _vi, v in enumerate(vis[:2]):
+                            _iid2 = f"img{_turn['n']}x{len(_img_items)}{_vi}"   # 104:自带 id → 新话轮焚旧图省 token
+                            _img_items.append((_turn["n"], _iid2))
                             await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                                "type": "message", "role": "user",
+                                "id": _iid2, "type": "message", "role": "user",
                                 "content": [{"type": "input_image", "detail": "high",   # 显式高清(auto 的降档不赌)
                                              "image_url": f"data:{v.get('media_type', 'image/png')};base64,{v['b64']}"}]}}))
                         out += "\n(相关图像已直接发给你,请看图回答)"
@@ -1679,6 +1683,15 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 cur_a["txt"] += d0
                 await bws.send(json.dumps({"event": 550, "payload": {"content": d0}}, ensure_ascii=False))
             elif t == "input_audio_buffer.speech_started":
+                _turn["n"] += 1
+                _keep = [it for it in _img_items if it[0] >= _turn["n"] - 2]   # 104:焚上上轮及更早的直喂图
+                for _ep0, _iid0 in _img_items:
+                    if _ep0 < _turn["n"] - 2:
+                        try:
+                            await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _iid0}))
+                        except Exception:
+                            pass
+                _img_items[:] = _keep
                 if _bridge["q"] is not None:   # 99:桥模式打断=清桥缓冲(未播的丢弃)
                     _bridge["pend"] = b""
                     try:
@@ -2087,6 +2100,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         return full, brief, ("" if full else (err or "空结果"))
 
     _tfail_r = {"key": "", "n": 0}   # 100:RTC 版工具熔断(同 WS 版)
+    _img_items = []   # 104:(epoch, item_id) 直喂图记账——新话轮焚旧
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
@@ -2199,9 +2213,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             vis = None
         try:
             if vis and not stale and _creds().get("rt_image"):
-                for v in vis[:2]:   # P2 视觉:经**本函数已持有的 sideband** 直喂(与 GPT-WS 版 ows 直喂同构)
+                for _vi, v in enumerate(vis[:2]):   # P2 视觉:经**本函数已持有的 sideband** 直喂(与 GPT-WS 版 ows 直喂同构)
+                    _iid2 = f"img{epoch['n']}x{len(_img_items)}{_vi}"   # 104:自带 id(客户端可指定)→ 新话轮焚旧图省 token
+                    _img_items.append((epoch["n"], _iid2))
                     await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                        "type": "message", "role": "user",
+                        "id": _iid2, "type": "message", "role": "user",
                         "content": [{"type": "input_image", "detail": "high",
                                      "image_url": f"data:{v.get('media_type', 'image/png')};base64,{v['b64']}"}]}}))
                 out += "\n(相关图像已直接发给你,请看图回答)"
@@ -2241,6 +2257,15 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             n[t] = n.get(t, 0) + 1
             if t == "input_audio_buffer.speech_started":
                 epoch["n"] += 1   # 用户开口=新话轮:在途工具的结果到手后只回填不抢话(审核P0#2)
+                # 104:焚"上上轮及更早"的直喂图(保留最近一轮供追问;历史不再重复携带图 token)
+                _keep = [it for it in _img_items if it[0] >= epoch["n"] - 2]
+                for _ep0, _iid0 in _img_items:
+                    if _ep0 < epoch["n"] - 2:
+                        try:
+                            await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _iid0}))
+                        except Exception:
+                            pass
+                _img_items[:] = _keep
             elif t == "response.function_call_arguments.done":
                 if fe < 2:
                     continue   # 版本握手:旧前端自己执行工具,relay 只观察(防双执行)
