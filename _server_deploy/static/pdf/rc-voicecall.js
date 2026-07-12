@@ -669,7 +669,13 @@
   function speakOn() { try { return localStorage.getItem('rc-voice-speak') === '1'; } catch (e) { return false; } }
   // S2S 通话中的出声开关(独立键,默认亮):灭=丢音频只看对话窗字幕。⚠ S2S 双流恒计费(协议无输出模态
   // 开关,已全查证),灭省的是听觉干扰不是钱;真文本对话用 mic 长按的 ASR 模式(零豆包输出音频费)。
-  function s2sSpeakOn() { try { return localStorage.getItem('rc-voice-speak-s2s') !== '0'; } catch (e) { return true; } }
+  // ㊿b 四态循环(用户设计,GPT rtc 下每档都是真后台差异):audio=全音频 / mixed=直接提问用音频·工具结果与
+  // 深度思考用文字 / text=全文字(输出音频费归零) / tts=文字回复+豆包朗读通道代念(比 Realtime 音频便宜)。
+  // 豆包 S2S 引擎映射:audio|mixed=播,text|tts=丢音频(它协议无模态开关,不省钱只静音)。
+  function _voiceMode() { try { return localStorage.getItem('rc-voice-mode-s2s') || 'audio'; } catch (e) { return 'audio'; } }
+  var _VM_SEQ = ['audio', 'mixed', 'text', 'tts'];
+  var _VM_LABEL = { audio: '🔊 语音', mixed: '🔊½ 混合', text: '💬 文字', tts: '📢 TTS代念' };
+  function s2sSpeakOn() { var m = _voiceMode(); return m === 'audio' || m === 'mixed'; }
   // 句片里的语气标签流解析(v3-⑱c 转折):[语气:XX] 之后的文字都按新语气,直到下一个标签——
   // 标签前的残句先按旧 mood 念,然后切换。标签内约定无标点(prompt),所以不会被句边界撕裂。
   function _speakSeg(seg) {
@@ -787,13 +793,17 @@
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
       _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
-      _rtcRespCreate();
+      _rtcRespCreate('user');
     } else if (t === 'cancel' || t === 'tool_abort') {
       _dcSend({ type: 'response.cancel' });
     }
   }
-  function _rtcRespCreate() {   // ㊿ 手动挡:按"🔊朗读"开关选输出模态——灭=纯文字回复(输出音频费=成本80%主体归零),
-    _dcSend({ type: 'response.create', response: { output_modalities: [s2sSpeakOn() ? 'audio' : 'text'] } });   // 亮=正常语音;每轮读当前开关=通话中热切
+  function _rtcRespCreate(src) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
+    var m = _voiceMode();
+    // mixed=用户直接提问(短答)用音频,工具结果/深度思考(易长)用文字——外部审核推荐的混合形态
+    var wantAudio = (m === 'audio') || (m === 'mixed' && src === 'user');
+    _rtc.wantTts = (m === 'tts');   // done 时把文字回复喂给豆包朗读通道代念
+    _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'] } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     try {
@@ -892,7 +902,7 @@
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
-    _rtcRespCreate();
+    _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool');
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
@@ -957,7 +967,7 @@
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'input_audio_buffer.speech_stopped') {
-      _rtcRespCreate();   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
+      _rtcRespCreate('user');   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx) {
@@ -976,6 +986,20 @@
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
+      if (_rtc.wantTts && curAText) {   // ㊿b TTS代念:文字回复交豆包朗读通道;播放期禁麦(本地 WebAudio 不被 AEC 消)
+        try {
+          speak(curAText);
+          var mt0 = _rtc.mic && _rtc.mic.getAudioTracks()[0];
+          if (mt0) {
+            mt0.enabled = false;
+            var chk0 = setInterval(function () {
+              var busy = false; try { busy = window.__vcTtsBusy ? window.__vcTtsBusy() : false; } catch (e) {}
+              if (!busy) { clearInterval(chk0); try { mt0.enabled = true; } catch (e) {} }
+            }, 400);
+            setTimeout(function () { clearInterval(chk0); try { mt0.enabled = true; } catch (e) {} }, 120000);
+          }
+        } catch (e) {}
+      }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
@@ -1535,7 +1559,17 @@
   // 其余场景(ASR 通话/纯打字)控制回答的 T2S 朗读(旧键,默认灭——读比听快)。语境切换时按钮亮灭自动刷新。
   // 挤进侧栏快捷栏(蹭 rc-media-tg 样式,与「书页/配图/视频」同排)。通话中点击即时生效。
   function _tgOn() { return (ws && mode === 's2s') ? s2sSpeakOn() : speakOn(); }
-  function _refreshSpeakTg() { var b = document.querySelector('.vc-speak-tg'); if (b) b.classList[_tgOn() ? 'add' : 'remove']('on'); }
+  function _refreshSpeakTg() {
+    var b = document.querySelector('.vc-speak-tg'); if (!b) return;
+    if (ws && mode === 's2s') {   // ㊿b 通话中:四态标签(audio/mixed 视觉点亮)
+      var m = _voiceMode();
+      b.innerHTML = '<span>' + (_VM_LABEL[m] || '🔊 语音') + '</span>';
+      b.classList[(m === 'audio' || m === 'mixed') ? 'add' : 'remove']('on');
+    } else {
+      b.innerHTML = '<span>🔊 朗读</span>';
+      b.classList[_tgOn() ? 'add' : 'remove']('on');
+    }
+  }
   var _recallRefresh = null;   // chip 文字刷新(清空联动后调)
   function _fmtCutoff(ts) {
     if (!ts) return '⏱ 记忆起点';
@@ -1589,10 +1623,13 @@
     b.title = '朗读:点亮=AI 出声(语音通话中=播豆包语音;其余=回答用 TTS 流式念出来);按灭=只出文字。语音通话按灭时豆包音频仍生成计费(协议限制),真文本对话用麦克风长按的 ASR 模式';
     if (_tgOn()) b.classList.add('on');
     b.addEventListener('click', function () {
-      if (ws && mode === 's2s') {   // S2S 通话中:切"播/不播"豆包音频(字幕恒在对话窗)
-        var on = !s2sSpeakOn();
-        try { localStorage.setItem('rc-voice-speak-s2s', on ? '1' : '0'); } catch (e) {}
-        if (!on) stopPlayback();
+      if (ws && mode === 's2s') {   // ㊿b 通话中:四态循环 语音→混合→文字→TTS代念→语音
+        var cur = _voiceMode();
+        var nxt = _VM_SEQ[(_VM_SEQ.indexOf(cur) + 1) % _VM_SEQ.length];
+        try { localStorage.setItem('rc-voice-mode-s2s', nxt); } catch (e) {}
+        if (nxt === 'text' || nxt === 'tts') stopPlayback();
+        if (nxt === 'tts') { try { _ttsEnsure(); } catch (e) {} }   // 手势内预热朗读通道(iOS)
+        try { setSt('通话中 · ' + _VM_LABEL[nxt]); } catch (e) {}
       } else {                      // 其余:切回答的 T2S 朗读
         var on2 = !speakOn();
         try { localStorage.setItem('rc-voice-speak', on2 ? '1' : '0'); } catch (e) {}
