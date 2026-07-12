@@ -538,3 +538,13 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **route_to_text**(审核 route 方案+程序门控):工具**恒挂载**+instructions 恒定说明(§8.1 缓存友好),实际放行由 relay `_tool` 按**当前** rt_voice_mode 判定——非 route 档调用被驳回"请口头简答"(**模式按钮通话中热切立即生效**,不像 53 auto 开关要重拨);route 档→`_oa_route` 调 webapp `/api/assistant/route-text`(Gemini flash `_gemini_stream` SSE,系统 prompt=文字详答引擎+页文本 3.5k+用户原话 last_q+intent),delta 边收边经控制 WS `route_text` 事件下行(前端显示进侧栏气泡+字幕+TTS 开则流式代念),完成**摘要回填**(全文前 240 字进 function_call_output=模型知道自己"说"了什么防追问失忆)+**不 response.create**(零输出音频)。fallback 路径(ctl=false)前端 fetch 同端点同语义。reply_text 退役(rtc-session 不再挂,前端拦截分支留兼容)。
 - **UI**:TTS 开关紧跟模式按钮注入(用户要求相邻);快捷栏整排紧凑(`#asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px}`);🤖auto 按钮删除。
 - 冒烟:rtc-session 工具表(route_to_text 在/reply_text 无/规则段在)+voice-config rt_tts_speak 读写+route-text 真实流式(5 delta 块)全过。
+
+## 62 OpenAI搜索双源+制卡带对话现场+deep三后端+route掐断兜底(2026-07-12,用户三需求+实测反馈)
+
+**①网页/图片搜索主路换 OpenAI**(用户需求,替代待启用的 GCP CSE):`image_search.openai_web(query)`=Responses API 内建 `web_search`(gpt-4.1-mini,综合回答+url_citation 来源;计费=每次固定 8k input tokens 块≈$0.004,**无每日次数额度**);`search_openai_img(query)`=web_search 找图片直链(限 .jpg/.png+HEAD 验 content-type image/*,偏好 wikimedia/museum)。`_t_web_search` 主路 openai_web→CSE 兜底;配图落阶链 Commons→Google(未启用/403)→**OpenAI 第二腿**。key 复用 `~/.config/openai-realtime.json`。冒烟真调:调理师试验日期联网答对+来源。
+
+**②制卡/笔记带对话现场**(用户需求:"搜过网页和图片后要求制卡,卡片要能用上"):此前制卡 AI 只拿 text 种子+出处链接——`_card_extra(ctx)` 汇集 **recent_tools**(relay P2/前端 fallback 各自记最近 6 条工具结果环:label+rag 600 字+images URL)+服务端对话历史近 6 轮 → params.extra_ctx 经 `voice._content_for` 拼进制卡素材("与主题相关就采用,无关忽略");**图**:模型没显式传 image_url 且对话里恰有一张配图→默认进卡(下载存 Anki 媒体库),多张→列 URL 给制卡 AI 参考。承诺核查代执行的 ctx 同带。
+
+**③deep 三后端放开**(用户 bug 报告"深度思考只能选 Claude"):根因=chat 管线 `force_model in _CLAUDE_VARIANTS` 白名单(㉕遗留)——chat 加 `force_backend`(claude/gemini/codex,_agent_run 直接分派对应 runner,force_model 白名单按后端放行);relay deep pref 消费不再只认 claude(`body["force_backend"]=pref["backend"]`);catalog `backends_by_action.deep=["claude","gemini","codex"]`(面板自动跟随)。
+
+**④route 档掐断自动升级文字**(用户实测:route 档文字语音对不上+卡壳;日志实锤=模型没调 route_to_text 而是 read_page 后**口头念页面**,`out=512 status=incomplete` 硬掐):prompt 管不住 → **程序判断**:relay response.done 见 `status=incomplete` 且当前 route 档 → 自动 `_route_rescue`(用户问题+被掐半截当 intent→_oa_route 生成完整文字详答显示+TTS 可代念)+system 注入"你被截断了,全文已显示,别重复"(纪元没变才注入);防重入 busy 标志。**模型自调=快路,掐断兜底=慢路**——route 档从此不依赖模型自觉。_route_line 同步强化"工具结果轮要转述大段内容也先调 route_to_text"。

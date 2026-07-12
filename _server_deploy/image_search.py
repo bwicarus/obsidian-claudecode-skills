@@ -102,6 +102,88 @@ def search_commons(query: str, n: int = 6) -> list:
     return out
 
 
+def _openai_key() -> str:
+    try:
+        return (json.loads((Path("~/.config/openai-realtime.json").expanduser()).read_text("utf-8")).get("api_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def _openai_responses(body: dict, timeout=55) -> dict:
+    req = urllib.request.Request("https://api.openai.com/v1/responses",
+                                 data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "User-Agent": _UA,
+                                          "Authorization": "Bearer " + _openai_key()})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _resp_text(j: dict):
+    """Responses API 输出解析:正文 + url_citation 来源列表。"""
+    text, cites = "", []
+    for it in j.get("output") or []:
+        if it.get("type") == "message":
+            for c in it.get("content") or []:
+                if c.get("type") == "output_text":
+                    text += c.get("text") or ""
+                    for an in c.get("annotations") or []:
+                        u = an.get("url") or ""
+                        if an.get("type") == "url_citation" and u and all(x["url"] != u for x in cites):
+                            cites.append({"title": (an.get("title") or "")[:120], "url": u})
+    return text, cites
+
+
+def openai_web(query: str) -> dict:
+    """OpenAI 内建 web_search(Responses API):联网综合回答+引用来源。无 key/失败返回 {}。
+    计费=每次固定 8k input tokens 块(gpt-4.1-mini ≈$0.004/次),**无每日次数额度**(替代 CSE 100 次/天)。"""
+    if not _openai_key():
+        return {}
+    try:
+        j = _openai_responses({"model": "gpt-4.1-mini", "tools": [{"type": "web_search"}], "input": query,
+                               "instructions": "联网搜索并用问题的语言简洁作答(200字内,关键事实优先),引用来源。"})
+        text, cites = _resp_text(j)
+        return {"answer": text[:1500], "sources": cites[:5]} if text.strip() else {}
+    except Exception as ex:
+        print(f"[image_search] openai_web fail: {str(ex)[:120]}", flush=True)
+        return {}
+
+
+def _head_img_ok(url: str, timeout=6) -> bool:
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (r.headers.get("Content-Type") or "").startswith("image/")
+    except Exception:
+        return False
+
+
+def search_openai_img(query: str, n: int = 2) -> list:
+    """OpenAI web_search 找图片文件直链(Google CSE 未启用/额度尽时的第二腿):模型给 JSON 直链,HEAD 逐一验真。"""
+    if not _openai_key():
+        return []
+    try:
+        j = _openai_responses({"model": "gpt-4.1-mini", "tools": [{"type": "web_search"}],
+                               "input": (f"Find {max(n, 2)} direct image file URLs (.jpg/.jpeg/.png, hotlinkable) depicting: {query}. "
+                                         "Prefer upload.wikimedia.org / museum / educational sites. "
+                                         'Reply ONLY JSON: {"images":[{"url":"...","title":"...","page":"..."}]}')})
+        text, _ = _resp_text(j)
+        m = re.search(r"\{[\s\S]*\}", text or "")
+        items = (json.loads(m.group(0)).get("images") or []) if m else []
+        out = []
+        for it in items:
+            u = (it.get("url") or "").strip()
+            if not u or _BAD.search(u) or not _GOOD.search(u) or not _head_img_ok(u):
+                continue
+            out.append({"image_url": u, "full_url": u, "title": (it.get("title") or "")[:80],
+                        "page_url": it.get("page") or "", "source": "openai"})
+            if len(out) >= n:
+                break
+        return out
+    except Exception as ex:
+        print(f"[image_search] openai_img fail: {str(ex)[:120]}", flush=True)
+        return []
+
+
 def search_web(query: str, n: int = 5) -> list:
     """通用网页搜索(同一个 Programmable Search Engine,不带 searchType 即网页结果)。
     与图搜共享每日 100 次免费池;没配 key/cx 返回 []。返回 [{title, snippet, url}]。"""
@@ -197,6 +279,13 @@ def search_images(query: str, n: int = 2, want_google: bool = True) -> list:
             if x["full_url"] not in seen:
                 imgs.append(x)
                 seen.add(x["full_url"])
+        if not google_ok and len(imgs) < n:   # 61b:OpenAI web_search 当替补第二腿(直链 HEAD 验真)
+            for x in search_openai_img(q, n - len(imgs)):
+                if x["full_url"] not in seen:
+                    imgs.append(x)
+                    seen.add(x["full_url"])
+            if imgs:
+                google_ok = True   # 第二腿实际跑成了(缓存不用标 partial 短命)
     imgs = imgs[:n]
     partial = bool(want_google and len(imgs) < n and not google_ok)
     try:

@@ -1322,14 +1322,47 @@ def _bg_task(kind, params, ctx):
         return {"error": str(e)[:120]}
 
 
+def _card_extra(ctx):
+    """61b(用户需求):制卡/记笔记的后台 AI 自动带上**对话现场**——最近工具结果(网页搜索摘要/配图 URL)
+    + 近几轮对话。语音模型的 text 种子往往只有一句话,搜过的资料不注入就永远进不了卡片。
+    返回 (资料文本块, 图URL列表)。"""
+    parts, imgs = [], []
+    for t in (ctx.get("recent_tools") or [])[-4:]:
+        try:
+            lbl = t.get("label") or t.get("tool") or "工具"
+            rag = (t.get("rag") or "").strip()
+            if rag:
+                parts.append(f"[{lbl}] {rag[:600]}")
+            for u in (t.get("images") or [])[:3]:
+                if u and u not in imgs:
+                    imgs.append(u)
+        except Exception:
+            continue
+    try:
+        for m in _convo_load(ctx.get("_uid"))[-6:]:
+            c = (m.get("content") or "").strip()
+            if c:
+                parts.append(("用户:" if m.get("role") == "user" else "AI:") + c[:300])
+    except Exception:
+        pass
+    return ("\n".join(parts)[:3000], imgs[:4])
+
+
 def _t_make_anki(args, ctx):
     text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
     params = {"text": text}
     img = (args.get("image_url") or "").strip()
+    extra, imgs = _card_extra(ctx)
+    if extra:
+        params["extra_ctx"] = extra   # 对话现场随卡走(voice._task_anki 拼进制卡素材)
+    if not img and len(imgs) == 1:
+        img = imgs[0]   # 对话里刚配过**唯一**一张图且模型没显式传 → 默认进卡(多张不猜,列给 AI 看)
+    elif not img and imgs:
+        params["extra_ctx"] = (params.get("extra_ctx") or "") + "\n(对话配图候选,内容相关可参考:" + " ".join(imgs) + ")"
     if img:
-        params["image_url"] = img   # 刚 search_image 过、这张图也该进卡片 → 一路透传到 _run_snippets_to 真下载存进 Anki 媒体库
+        params["image_url"] = img   # 一路透传到 _run_snippets_to 真下载存进 Anki 媒体库
     res = _bg_task("anki", params, ctx)
     _mark_source_highlight(ctx, "#b9f6ca")   # 双向回链:原文留绿色高亮"这段做过卡"
     return res
@@ -1340,7 +1373,11 @@ def _t_make_note(args, ctx):
         or _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
     if not text:
         return {"error": "没有要整理的内容"}
-    res = _bg_task("note", {"text": text}, ctx)
+    params = {"text": text}
+    extra, imgs = _card_extra(ctx)
+    if extra:
+        params["extra_ctx"] = extra + (("\n(对话配图,合适可用 markdown 嵌入笔记:" + " ".join(imgs) + ")") if imgs else "")
+    res = _bg_task("note", params, ctx)
     _mark_source_highlight(ctx, "#a7d8ff")   # 双向回链:原文留蓝色高亮"这段整理进笔记了"
     return res
 
@@ -1430,18 +1467,22 @@ def _verify_image_match(image_url: str, query: str, extract: str = "") -> tuple:
 
 
 def _t_web_search(args, ctx):
-    """通用网页搜索(Google Programmable Search,与配图共享每日 100 次免费池)。
-    模型没有内建联网(Realtime API 只给 function calling/MCP)——这就是它的联网通道。"""
-    q = str(args.get("query") or "").strip()[:120]
+    """通用网页搜索。61b 主路=OpenAI 内建 web_search(Responses API,综合回答+来源,无每日次数额度,
+    ≈$0.004/次);Google CSE 只作兜底(它还没启用/有 100 次日限)。模型没有内建联网——这就是它的联网通道。"""
+    q = str(args.get("query") or "").strip()[:160]
     if not q:
         return {"error": "缺 query(搜索关键词)"}
     try:
         import image_search
+        r = image_search.openai_web(q)
+        if r.get("answer"):
+            return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],
+                    "note": "answer 是联网搜索的综合结论,口头转述并提一句来源。"}
         rs = image_search.search_web(q, n=5)
     except Exception as ex:
         return {"error": f"搜索失败: {str(ex)[:120]}"}
     if not rs:
-        return {"error": "没搜到结果(可能:搜索服务未启用/每日额度用尽/关键词太偏)。如实告诉用户网页搜索暂时不可用,凭你的知识回答并声明可能过时。"}
+        return {"error": "没搜到结果(联网搜索暂时不可用)。如实告诉用户,凭你的知识回答并声明可能过时。"}
     return {"ok": True, "results": rs,
             "note": "凭 snippet 口头总结,提一句信息来源;snippet 不够就如实说只搜到概要。"}
 
@@ -2732,8 +2773,8 @@ TOOLS = {
                      "别写修饰语和描述句(图库按名称索引,长句反而搜不到);一次最多 8 个)。工具会并行搜、每个概念返回最匹配 1 张。"
                      "拿回结果后:对 images 里每张,在回答对应概念旁用 markdown ![简短中文说明](image_url) 插入;missed 里没搜到的**别硬配、别自己编链接**。"
                      "别对『力/能量』这类无固定形象的抽象词硬配。刚好要制卡也想放这张图,把该 image_url 传给 make_anki。", _t_search_image),
-    "web_search": ("联网网页搜索(Google):查**网上的实时信息/事实/新闻/资料**时用,args {query:\"简洁关键词\"}。"
-                   "返回网页标题+摘要+链接,凭摘要总结并提一句来源。跟配图共享每天 100 次免费额度——"
+    "web_search": ("联网网页搜索:查**网上的实时信息/事实/新闻/资料**时用,args {query:\"简洁关键词或问题\"}。"
+                   "返回联网综合回答(answer)+来源(sources),口头转述并提一句来源。"
                    "一个问题最多搜一两次,能凭自己知识答好的不用搜。", _t_web_search),
     "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**的视频卡片。用户明确要『找/看视频、有没有视频讲解、放个视频』时用,"
                      "别对每个概念都配视频(大多数回答不需要)。拿到结果只需简短说一句『给你找到这些视频』,"
@@ -3567,11 +3608,18 @@ def _fast_answer(message, ctx, history, uid):
     return ans.strip(), trace
 
 
-def _agent_run(message, ctx, history, force_effort=None, force_model=None):
+def _agent_run(message, ctx, history, force_effort=None, force_model=None, force_backend=None):
     """生成 SSE 事件 dict:{event, data}。event ∈ tool|tool-done|answer|actions|trace|error。"""
     _tok_reset()   # 本轮 token 计数清零(本线程内,后续所有 AI 调用累加,收尾写 trace[0].tok)
     uid = (ctx or {}).get("_uid")
     fe = force_effort if force_effort in _EFFORTS else None   # 感叹号「更强重答」强制档(一次性)
+    # 61b:显式后端覆盖(deep 面板选 gemini/codex 时经此;此前 force_model 只认 Claude 梯子=「deep 仅 claude」根因)
+    if force_backend == "gemini":
+        yield from _agent_run_gemini(message, ctx, history, force_model or None, fe or "high", uid)
+        return
+    if force_backend == "codex":
+        yield from _agent_run_codex(message, ctx, history, force_model or None, fe or "high", uid)
+        return
     fm = force_model if force_model in _CLAUDE_VARIANTS else None
     if fm or fe:                                  # 感叹号「更强重答」:一次性强制 Claude 升档(始终 claude)
         if isinstance(ctx, dict):
@@ -4055,10 +4103,10 @@ _chat_jobs = {}
 _chat_jobs_lock = threading.Lock()
 
 
-def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid):
+def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid, force_backend=None):
     job = _chat_jobs[rid]
     try:
-        for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model):
+        for ev in _agent_run(message, ctx, history, force_effort=force_effort, force_model=force_model, force_backend=force_backend):
             with job["lock"]:
                 job["events"].append(ev)
                 if ev["event"] == "answer":
@@ -4121,7 +4169,11 @@ def assistant_chat():
                     return jsonify({"ok": False, "error": "gone"}), 410
                 return jsonify({"ok": False, "error": "empty"}), 400
             force_effort = body.get("force_effort") if body.get("force_effort") in _EFFORTS else None
-            force_model = body.get("force_model") if body.get("force_model") in _AP_MODELS else None
+            force_backend = body.get("force_backend") if body.get("force_backend") in ("claude", "gemini", "codex") else None
+            # 61b:带 force_backend 时型号白名单按该后端放行(gemini/codex 的型号不在 Claude 梯子里)
+            force_model = (body.get("force_model") or None) if force_backend in ("gemini", "codex") \
+                else (body.get("force_model") if body.get("force_model") in _AP_MODELS else None)
+
             ctx = body.get("context") or {}
             ctx["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message)
             _v = body.get("voice")   # 1=前端朗读点亮(2.0 引擎,要口语化+语气标签) / "s2s"=relay 深度思考代播(bidi,只要口语化) / 0=文字模式(纯净 prompt)
@@ -4140,7 +4192,7 @@ def assistant_chat():
             job = _chat_jobs[rid] = {"events": [], "answer": "", "trace": None, "done": False,
                                      "lock": threading.Lock(), "uid": uid}
             threading.Thread(target=_chat_worker, daemon=True,
-                             args=(rid, message, ctx, history, force_effort, force_model, uid)).start()
+                             args=(rid, message, ctx, history, force_effort, force_model, uid, force_backend)).start()
         elif job.get("uid") != uid:
             return jsonify({"ok": False, "error": "forbidden"}), 403   # 别人的 rid 不给读
 
@@ -4445,7 +4497,8 @@ def assistant_rtc_session():
         _tr["language"] = cfg["rt_lang"]
     # 61:route_to_text 恒挂+恒定说明(不随模式变=不破 instructions 前缀缓存);实际放行由 relay 按
     # rt_voice_mode 程序门控(模式按钮通话中热切立即生效,不像 53 的 auto 开关要重拨)
-    _route_line = ("**route_to_text 工具**:回答明显较长(详细解释/多步骤/公式推导/长列表)不适合口头念时调用,"
+    _route_line = ("**route_to_text 工具**:回答明显较长(详细解释/多步骤/公式推导/长列表)不适合口头念时调用;"
+                   "**读完工具结果(如 read_page)要转述大段内容时也一样先调它**,绝不口头念长文(会被长度限制掐断)。"
                    "intent=一句话概括用户想要什么;系统会用文字模型写出完整回答显示在屏幕上,你调用后本轮结束不要再口头重复。"
                    "系统按用户当前输出模式决定是否放行,被驳回时按提示口头简要回答即可。短答/陪聊/发音示范永远直接说。")
     parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
@@ -4893,7 +4946,7 @@ def assistant_action_prefs():
                     "catalog": {
                         "backends": list(_BACKENDS),
                         # 按任务限制可选后端:deep=relay 只透传 claude 选型(编排 ㉖ 起三后端全通:claude/gemini/codex)
-                        "backends_by_action": {"deep": ["claude"]},
+                        "backends_by_action": {"deep": ["claude", "gemini", "codex"]},
                         "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
                         "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,

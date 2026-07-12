@@ -1006,6 +1006,7 @@
         if (_rtc.imgOn) ctx._want_vision = 1;
         if (_rtc.ink && _rtc.ink.length) ctx.ink = _rtc.ink;
         if (_rtc.sel) ctx.selection = _rtc.sel;
+        if (name === 'make_anki' || name === 'make_note') ctx.recent_tools = (_rtc.recentTools || []).slice(-4);   // 61b:搜过的网页/配图随卡走
         if (name === 'see_ink' || name === 'see_page') {   // ㉟c:看图类恒附视口截图(EPUB 主路/PDF 兜底,后端按需取用)
           try { var shot = await _captureView(); if (shot) ctx.view_image = shot; } catch (e) {}
         }
@@ -1016,6 +1017,12 @@
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
         var ca = res.client_action; delete res.client_action;
+        try {   // 61b:最近工具结果环(搜索摘要/配图URL)——之后 make_anki/make_note 把对话现场带给制卡 AI
+          var _imgs = [];
+          (res.images || []).forEach(function (im) { var _u = im.image_url || im.url; if (_u) _imgs.push(_u); });
+          (_rtc.recentTools = _rtc.recentTools || []).push({ tool: name, label: label, rag: JSON.stringify(res).slice(0, 600), images: _imgs.slice(0, 3) });
+          if (_rtc.recentTools.length > 6) _rtc.recentTools.splice(0, _rtc.recentTools.length - 6);
+        } catch (e) {}
         if (ca && ca.fn) dispatch(ca.fn, ca.args);           // 页面副作用本地直执行(比经 relay 更直接)
         delete res._vision;   // 图像由后端 sideband 注入(带 rtc_call_id 时后端已处理);绝不经 dc 发——
                               // SCTP 单条上限(Safari≈64KB),超限发送会**直接关闭 data channel**=通话哑死
@@ -1138,7 +1145,7 @@
           onToolStatus({ status: 'running', label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)' });
           fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cmd: JSON.stringify({ tool: tool, args: { text: seed } }),
-                                   ctx: { file_rel: _rtc.ctxFile, page: _rtc.ctxPage } }) })
+                                   ctx: { file_rel: _rtc.ctxFile, page: _rtc.ctxPage, recent_tools: (_rtc.recentTools || []).slice(-4) } }) })
             .then(function (r) { return r.json(); })
             .then(function (d) {
               onToolStatus({ status: d.ok ? 'done' : 'error', tool: tool, label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)',

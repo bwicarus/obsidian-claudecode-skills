@@ -870,11 +870,14 @@ def _gen_title(content: str) -> str:
 
 def _content_for(params, ctx):
     if (params.get("text") or "").strip():        # agent 工具显式给的内容
-        return params["text"].strip()
-    scope = params.get("scope") or ("sel" if (ctx.get("selection") or "").strip() else "page")
-    if scope == "sel":
-        return (ctx.get("selection") or "").strip()
-    return _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+        base_c = params["text"].strip()
+    else:
+        scope = params.get("scope") or ("sel" if (ctx.get("selection") or "").strip() else "page")
+        base_c = (ctx.get("selection") or "").strip() if scope == "sel" else _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+    extra = (params.get("extra_ctx") or "").strip()   # 61b:对话现场(网页搜索/配图/近几轮)随卡走,制卡 AI 自行取舍
+    if extra and base_c:
+        base_c += "\n\n【通话现场资料(网页搜索结果/配图/近几轮对话;与主题相关就采用进卡片/笔记,无关的忽略)】\n" + extra
+    return base_c
 
 
 def _task_note(tid, params, ctx, base):

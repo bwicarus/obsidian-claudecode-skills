@@ -562,7 +562,8 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
             async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=8) as hc0:
                 r0 = await hc0.get("/api/assistant/action-prefs")
                 pref = ((r0.json().get("actions") or {}).get("deep") or {}).get("pref") or {}
-                if pref.get("backend") == "claude":
+                if pref.get("backend"):   # 61b:deep 面板三后端全放行(chat 管线新 force_backend;旧版只认 claude)
+                    body["force_backend"] = pref["backend"]
                     dm, de = pref.get("variant") or dm, pref.get("depth") or de
         except Exception:
             pass
@@ -1822,6 +1823,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     shot_fut = {}            # need_shot 往返:shot_id → Future(带 ID 防两轮工具重叠时错配/迟到截图被下一请求接走)
     shot_seq = {"n": 0}
     epoch = {"n": 0}         # 轮次纪元(审核P0#2):用户开口/打字=+1;旧纪元工具完成→回填但不 create(旧结果不抢新话轮)
+    recent_tools = []        # 61b(用户需求):最近工具结果(搜索摘要/配图URL)——make_anki/make_note 时随 ctx 带给制卡 AI
     _NO_CACHE = {"see_ink", "see_page", "see_figure",       # 视觉:viewport/缩放/滚动不在键里,误命中=拿旧图说新话
                  "web_search", "search_image", "search_video"}   # 时变数据:整场通话缓存不合适
     try:
@@ -1829,6 +1831,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     except Exception:
         pass
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
+    rescue = {"busy": False}            # 62:route 档 512 掐断自动升级文字详答(防重入)
 
     def _resp_create():
         """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
@@ -1931,6 +1934,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     ctx["ink"] = book["ink_strokes"]
                 if book.get("sel"):
                     ctx["selection"] = book["sel"]
+                if name in ("make_anki", "make_note"):
+                    ctx["recent_tools"] = recent_tools[-4:]   # 对话现场随卡走(webapp _card_extra 消费)
                 if name in ("see_ink", "see_page"):
                     shot = await _need_shot()
                     if shot and shot.get("b64"):
@@ -1950,6 +1955,16 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 slim = {k: v for k, v in res.items() if k not in ("client_action",)}
                 lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+                _imgs = []
+                try:
+                    for _im in (res.get("images") or []):
+                        _u = _im.get("image_url") or _im.get("url") or ""
+                        if _u:
+                            _imgs.append(_u)
+                except Exception:
+                    pass
+                recent_tools.append({"tool": name, "label": label, "rag": out[:600], "images": _imgs[:3]})
+                del recent_tools[:-6]
                 if ok and d.get("cacheable") and name not in _NO_CACHE:
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):
@@ -2011,6 +2026,45 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
+                # 62 route 档掐断兜底(用户实测:模型不调 route_to_text 而是拿工具结果口头念,512 满额=卡壳;
+                # prompt 管不住 → 程序判断:incomplete 且当前 route 档 = 长内容实锤,自动转文字详答):
+                if (fe >= 2 and r0.get("status") == "incomplete" and not rescue["busy"]
+                        and _norm_vm(_creds().get("rt_voice_mode")) == "route"):
+                    half = ""
+                    try:
+                        for _o in (r0.get("output") or []):
+                            if _o.get("type") == "message":
+                                for _c in (_o.get("content") or []):
+                                    half += (_c.get("transcript") or _c.get("text") or "")
+                    except Exception:
+                        half = ""
+                    rescue["busy"] = True
+                    ep_r = epoch["n"]
+
+                    async def _route_rescue(half0):
+                        try:
+                            intent = ("用户的问题:" + (book.get("last_q") or "(见资料)") +
+                                      ";语音助手答到一半被输出长度截断,已说的部分:" + half0[:400] +
+                                      "——请写出**完整**的文字详答(从头完整写,不是接着补)")
+                            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": "文字详答(截断续写)"}}, ensure_ascii=False))
+                            full, rerr = await _oa_route(intent)
+                            await bws.send(json.dumps({"event": "tool_status", "payload": {
+                                "status": "done" if full else "error", "tool": "route_to_text",
+                                "label": "文字详答(截断自动接管)", "rag": (full or rerr)[:800]}}, ensure_ascii=False))
+                            if full and epoch["n"] == ep_r:   # 用户没开新话才注入记忆(长文无论如何已显示)
+                                await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                                    "type": "message", "role": "system",
+                                    "content": [{"type": "input_text", "text":
+                                                 "(你上一轮口头回答因长度限制被截断;系统已把完整文字详答显示给用户,"
+                                                 "要点:" + full[:200] + "……不要口头重复内容,等用户继续。)"}]}}))
+                            _vlog("tool", tool="route_rescue", label="截断自动转文字", page=book.get("page") or page,
+                                  book=file_rel, ok=bool(full), args={}, brief=(full or rerr)[:200])
+                        except Exception:
+                            pass
+                        finally:
+                            rescue["busy"] = False
+
+                    asyncio.create_task(_route_rescue(half))
                 if pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
                     pend["create"] = False
                     if pend["ep"] == epoch["n"]:   # 纪元没变才补(用户已开新话=旧工具结果不该再触发回答)
