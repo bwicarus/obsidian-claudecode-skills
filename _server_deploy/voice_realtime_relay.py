@@ -1418,6 +1418,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     async def _tool(name: str, args: dict, call_id: str):
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
         out, ok, label, took = "", True, name, None
+        _silent = [False]   # 113:展示型工具静默入库(卡片已显示,本轮不让模型发言)
         try:
             if name == "recall_study":
                 span = str(args.get("span") or "today").lower()
@@ -1442,6 +1443,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
                 res = d.get("result") or {}
+                if isinstance(res, dict) and res.get("silent") and not _creds().get("rt_tool_reply"):
+                    _silent[0] = True   # 113(用户实测):silent gate 当年只做在 RTC 版——WS 版(Grok)工具后无条件 create=静默失效
                 ca = res.get("client_action")
                 if isinstance(ca, dict) and ca.get("fn"):
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
@@ -1481,6 +1484,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                        "item": {"type": "function_call_output", "call_id": call_id, "output": out}}))
             if not ok and _tfail["n"] >= 6:
                 sys.stderr.write(f"[voice-oa] 工具熔断硬断: {_tk[:80]} ×{_tfail['n']}\n")
+            elif _silent[0] and ok:
+                sys.stderr.write(f"[voice-oa] 工具静默入库(不 create): {name}\n")   # 113:与 RTC 版 no_create 同语义
             else:
                 await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
         except Exception:
