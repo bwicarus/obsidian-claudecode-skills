@@ -1624,6 +1624,32 @@
       pane.querySelector('[data-a="all"]').addEventListener('click', function () { _setCutoff(0, done); });
     });
     qb.appendChild(b);
+    // ㊿d auto 独立开关(用户设计,非全档兜底):开=挂载 reply_text 工具让模型自判长内容转文字;
+    // 关=工具根本不挂载(真禁用)。⚠工具表在会话建立时决定 → 切换后**重拨才生效**(提示)。持久化在服务器。
+    var ab = document.createElement('button'); ab.type = 'button'; ab.className = 'rc-media-tg vc-auto-tg';
+    ab.innerHTML = '<span>🤖 自动</span>';
+    ab.title = '自动文字路由:开=AI 自己判断"长解释/列表/公式"时改用文字回答(省输出音频费);关=完全按左边模式。切换后重拨生效';
+    function _autoOn() { try { return localStorage.getItem('rc-voice-auto') === '1'; } catch (e) { return false; } }
+    if (_autoOn()) ab.classList.add('on');
+    ab.addEventListener('click', function () {
+      var on = !_autoOn();
+      try { localStorage.setItem('rc-voice-auto', on ? '1' : '0'); } catch (e) {}
+      ab.classList[on ? 'add' : 'remove']('on');
+      try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rt_auto_text: on ? '1' : '' }) }).catch(function () {}); } catch (e) {}
+      try { setSt((ws ? '通话中 · ' : '') + '自动文字路由' + (on ? '开' : '关') + '(重拨后生效)'); } catch (e) {}
+    });
+    qb.appendChild(ab);
+    // 服务器为真相源:初始把 rt_voice_mode/rt_auto_text 同步到本地(跨设备一致)
+    try {
+      fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
+        var c = (d && d.cfg) || {};
+        if (c.rt_voice_mode) { try { localStorage.setItem('rc-voice-mode-s2s', c.rt_voice_mode); } catch (e) {} }
+        try { localStorage.setItem('rc-voice-auto', c.rt_auto_text ? '1' : '0'); } catch (e) {}
+        ab.classList[c.rt_auto_text ? 'add' : 'remove']('on');
+        _refreshSpeakTg();
+      }).catch(function () {});
+    } catch (e) {}
     return true;
   }
   function injectSpeakToggle() {
@@ -1639,6 +1665,8 @@
         var cur = _voiceMode();
         var nxt = _VM_SEQ[(_VM_SEQ.indexOf(cur) + 1) % _VM_SEQ.length];
         try { localStorage.setItem('rc-voice-mode-s2s', nxt); } catch (e) {}
+        try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rt_voice_mode: nxt }) }).catch(function () {}); } catch (e) {}   // 持久化到服务器(跨设备)
         if (nxt === 'text' || nxt === 'tts') stopPlayback();
         if (nxt === 'tts') { try { _ttsEnsure(); } catch (e) {} }   // 手势内预热朗读通道(iOS)
         try { setSt('通话中 · ' + _VM_LABEL[nxt]); } catch (e) {}
