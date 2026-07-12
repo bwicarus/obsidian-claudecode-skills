@@ -581,16 +581,18 @@
     if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
     var html = '<div class="vc-if-hd">' + esc(card.title || '搜索结果') + '</div>' + _infoHtml(card);
     var label = card.title || '搜索结果';
-    if (_sideOpen()) {
-      var th = document.getElementById('asst-thread');
-      if (!th) return;
+    // 77c(用户实测:字幕模式搜的天气,开侧栏后哪都看不到)——对话流**永远**插卡(紧跟工具卡的时序位置,
+    // 自动展开、无✕、可长按选中带入);侧栏关着时**另外**弹浮层镜像即时可见
+    var th = document.getElementById('asst-thread');
+    if (th) {
       var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
       d.innerHTML = html;
       _pinBind(d, label, function () { return _infoText(card); });
       try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}   // 77b:「!」详情
       th.appendChild(d); th.scrollTop = th.scrollHeight;
-    } else {
-      var c = _cardPush(html, label, true);   // 字幕模式:浮层卡(html)
+    }
+    if (!_sideOpen()) {
+      var c = _cardPush(html, label, true);   // 字幕模式:浮层镜像(html)
       if (c) _pinBind(c.el, label, function () { return _infoText(card); });
     }
   }
