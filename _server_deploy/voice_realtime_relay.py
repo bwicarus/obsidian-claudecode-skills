@@ -1633,7 +1633,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     note1 = ((f"用户在本页的手写笔迹有更新(共 {len(strokes)} 笔)。这只是状态记录——**不要对本条做任何回应、"
                               "不要主动评论或提起他画了什么**。只有当他之后问『我写的/我画的/我圈的/这个对不对』时,"
                               "才调 see_ink 工具看笔迹合成图回答;那时绝不要说你看不到,也不要让他粘贴或截图。")
-                             if strokes else "用户清空了本页笔迹(状态记录,不要回应本条)。")
+                             if strokes else ("用户已擦掉本页**全部**笔迹,当前页面没有任何手写内容——"
+                                              "**不要再调 see_ink**(看了也是空白);他若再提到笔迹,直接说已经擦掉了。"
+                                              "直到下一条『笔迹有更新』的状态消息出现前,这一直成立。(状态记录,不要回应本条。)"))
                     try:
                         await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                             "type": "message", "role": "system",
