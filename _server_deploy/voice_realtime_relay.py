@@ -1839,7 +1839,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
         out, ok, label, took, cached = "", True, name, None, False
         try:
             _ink_fp = book.get("_ink_fp") or ""
-            ck = f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|{book.get('page') or page}|{_ink_fp}"
+            # 缓存键含 selection:read_selection 等选中类工具在 cacheable 白名单里,选中变了必须失效
+            ck = (f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|"
+                  f"{book.get('page') or page}|{_ink_fp}|{(book.get('sel') or '')[:80]}")
             if name == "recall_study":
                 span = str(args.get("span") or "today").lower()
                 out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
