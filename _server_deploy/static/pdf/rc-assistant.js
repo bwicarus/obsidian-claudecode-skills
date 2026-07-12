@@ -1824,10 +1824,13 @@
         scrollDown(); return true;
       }
       if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
-      _vTurnEl.textContent = text;
+      if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
+        try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
+      } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }
   };
+  try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染
   window.__asstVoiceLog = function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
     if (!q && !a) return;
     try {

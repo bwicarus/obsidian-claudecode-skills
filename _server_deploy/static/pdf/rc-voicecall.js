@@ -942,7 +942,11 @@
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
       '<div class="vc-card-bd"></div>';
-    el.querySelector('.vc-card-bd').textContent = text;
+    var _bd = el.querySelector('.vc-card-bd');
+    try {
+      if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
+      else _bd.textContent = text;
+    } catch (e) { _bd.textContent = text; }
     var c = { el: el, t: null };
     el.querySelector('.vc-card-x').addEventListener('click', function () { _cardClose(c); });
     el.addEventListener('pointerdown', function () { if (c.t) { clearTimeout(c.t); c.t = null; } });   // 碰了=在读:取消自动消失
@@ -956,9 +960,15 @@
   // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──
   function _speakSafe(t) {
     if (!t || !t.trim()) return;
-    _ttsMicGuard();
-    if (_tts.ws && _tts.ws.readyState === 1) { try { speak(t); } catch (e) {} }
-    else { try { _ttsEnsure(); } catch (e) {} setTimeout(function () { try { speak(t); } catch (e) {} }, 900); }
+    // 67:2.1 的音频(等待语)可能还在 WebRTC 播放队列里——按估计的播放结束时刻延迟代念,不跟它叠音;
+    // 禁麦(_ttsMicGuard)也等真正开念才生效,等待期间用户仍可抢话
+    var wait = Math.max(0, (_rtc.aEnd || 0) - Date.now());
+    var _go = function () {
+      _ttsMicGuard();
+      if (_tts.ws && _tts.ws.readyState === 1) { try { speak(t); } catch (e) {} }
+      else { try { _ttsEnsure(); } catch (e) {} setTimeout(function () { try { speak(t); } catch (e) {} }, 900); }
+    };
+    if (wait > 0) setTimeout(_go, wait); else _go();
   }
   function _mkTtsFeeder() {   // 每个文字流一个 feeder:增量文本按句边界切片喂朗读(关着=只跟进偏移不念)
     var fed = 0;
@@ -1127,6 +1137,7 @@
             }
           }
           if (full) {
+            try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', full, { md: true }); } catch (e) {}   // 67:终态 md
             try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, full, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
             _rtcCapFeed(full, true);
             try { rst.feed(full, true); } catch (e) {}
@@ -1237,6 +1248,10 @@
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
       _rtc.turnText = (t === 'response.output_text.delta');   // 66c:本轮模态以实际事件为准(relay 发的工具轮 create 前端不经过,旧 turnText 会错)
+      if (!_rtc.turnText) {   // 67:估计 2.1 音频播放结束时刻(转写字数≈5.5字/秒+缓冲)——TTS 代念等它说完再开口,不叠音
+        if (!_rtc.aStart) _rtc.aStart = Date.now();
+        _rtc.aEnd = _rtc.aStart + curAText.length / 5.5 * 1000 + 800;
+      }
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
@@ -1247,6 +1262,7 @@
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       if (_ttsOn()) { try { bargeIn(); } catch (_) {} }   // 61:抢话同时打断 TTS 代念残播
+      _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'input_audio_buffer.speech_stopped') {
       _rtcRespCreate('user');   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
@@ -1274,6 +1290,7 @@
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      _rtc.aStart = 0;   // 67:新轮重置音频起点(aEnd 保留——文字轮要等上一音频轮播完才代念)
       try { if (_cap.cur) _cap.cur.classList.remove('vc-cap-route'); } catch (_) {}   // 64:路由字幕样式不残留到普通轮
       if (!_rtc.turnText) _recStart(); else _recAbort();   // 66:音频轮开录(历史回放),文字轮无声不录
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
@@ -1284,7 +1301,10 @@
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
-      if (_rtc.turnText && curAText) { try { _cardPush(curAText, '文字回复'); } catch (e) {} }   // 65:侧栏关着时弹磨砂卡
+      if (_rtc.turnText && curAText) {
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true }); } catch (e) {}   // 67:终态 Markdown 渲染(流式期间是纯文本)
+        try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
+      }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
@@ -1466,7 +1486,7 @@
               }
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR); } catch (e2) {}
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}

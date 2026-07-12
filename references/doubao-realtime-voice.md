@@ -581,3 +581,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 66c route 工具轮改程序模态分流(2026-07-12,0/4 定论)
 
 66b 就地提醒也没管住(第 4 通 read_page 后又念 50s/966 audio tokens)——**定论:「拿到资料+音频模态」=mini 条件反射念,prompt 任何位置都治不了**。换程序判断(用户哲学):**工具结果长度是回填时刻程序已知的事实**——route 档工具回填轮 `_resp_create(long_tool)`:结果<800 字=audio(口头说,保留短答体验)/≥800 字=**text 模态让模型自己写**(无截断、无 Gemini 双引擎文风、route_to_text 留给不调工具的长答场景);前端 fallback `_rtcRespCreate(src, longTool)` 同构;就地提醒文案改为文字轮引导。**顺修既有 bug**:relay 发的工具轮 create 前端不经过 → `_rtc.turnText` 停留在上一轮的值=half/route 的文字工具轮 TTS 代念+文字卡片全断——改由 **delta 事件类型驱动**(output_text.delta=文字轮/audio_transcript.delta=音频轮,以实际到达的事件为准)。
+
+### 67 route 三问题批(2026-07-12 用户截图:叠音/两句等待语/md 没渲染)
+
+20:51 日志钉死链条:决策轮(音频等待语①+read_page)→66c text 工具轮:模型写等待语②后**又转手调 route_to_text**(instructions 的路由规则和 66b 提示叠加)→Gemini 长文=**三段式冗余**+双引擎。修:①relay 记 `turn.text`(最近下发模态),**文字轮里调 route_to_text=程序驳回**"你就在文字轮,直接写正文";66b 提示文案加"不要写过渡句/不要再调工具"。②**TTS 叠音**:2.1 等待语还在 WebRTC 播放队列时 text 轮 delta 已到即开念——加 `_rtc.aStart/aEnd`(音频轮转写字数≈5.5字/秒+800ms 缓冲估播放结束),`_speakSafe` 按 aEnd 延迟开念(禁麦也延到真开念,等待期用户仍可抢话);打断清零。③**Markdown 渲染**:语音气泡 __asstVoiceMsg('a') 一直是 textContent(md 源码裸奔)——加 `{md:true}` 终态渲染(文字轮 done/route done 用 renderMd,流式期间纯文本省性能);renderMd 导出 RC.assistant 供**文字卡片**同渲染。

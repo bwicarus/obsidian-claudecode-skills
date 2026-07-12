@@ -1831,6 +1831,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     except Exception:
         pass
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
+    turn = {"text": False}              # 67:relay 最近下发的模态(text 轮里再调 route_to_text=驳回,防三段式冗余)
 
     def _resp_create(long_tool=False):
         """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
@@ -1839,6 +1840,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         长结果这轮直接给文字模态让它自己写,无截断无双引擎,route_to_text 留给不调工具的长答)。"""
         m = _norm_vm(_creds().get("rt_voice_mode"))
         want_audio = m == "sts" or (m == "route" and not long_tool)
+        turn["text"] = not want_audio
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
                              "max_output_tokens": 2048}}
@@ -1903,7 +1905,10 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             if name == "route_to_text":
                 # 61 程序门控(替代 prompt 门控):按**当前**输出模式放行——模式按钮通话中热切立即生效
                 m_now = _norm_vm(_creds().get("rt_voice_mode"))
-                if m_now != "route":
+                if turn["text"]:   # 67(20:51 实锤三段式冗余):文字轮里转手调 route_to_text=浪费一轮+Gemini 双引擎——驳回让它自己写
+                    out = "(你当前这轮就是文字回答:**直接写出完整讲解**,不要调用任何工具、不要写等待语,现在开始写正文)"
+                    label = "文字路由(已在文字轮)"
+                elif m_now != "route":
                     out = "(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户把模式切到「路由」)"
                     label = "文字路由(未启用)"
                 else:
@@ -1971,7 +1976,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 # 提醒放到**离决策最近的地方**:长工具结果尾部就地一行(just-in-time,非硬兜底)
                 if (ok and readonly and len(out) > 800
                         and _norm_vm(_creds().get("rt_voice_mode")) == "route"):
-                    out += "\n(系统提示:内容较长,本轮已切换为**文字**回答——请完整写出讲解,结构清晰,可用 Markdown)"
+                    out += "\n(系统提示:内容较长,本轮已是**文字**回答——直接开始写完整讲解(结构清晰,可用 Markdown);不要写『稍等/我整理一下』这类过渡句,也不要再调用工具)"
                 if ok and d.get("cacheable") and name not in _NO_CACHE:
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):
