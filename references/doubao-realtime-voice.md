@@ -529,3 +529,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **P1 批**:①shot_fut 改 **shot_id 配对**(旧版单槽,两轮工具重叠=Future 被覆盖/迟到截图错配;无 id 回退取唯一 pending 兼容 59 前端);②截图**尺寸上限**(长边≤1600px+质量阶梯 0.8/0.6/0.45 至 base64≤900KB;relay serve max_size 2→8MiB 保险层——旧状态 2×DPR 整视口无上限,复杂页超限断的是整条控制 WS);③缓存键强化:sel 全文 md5(80 字前缀碰撞)+ink 全笔画 md5("笔画数+末点"易撞);**see_*/web_search/search_image/search_video 退出缓存**(viewport 无 revision/时变数据);**写工具成功→tool_cache.clear()**(revision 体系的保守替身,治 notes/highlights/vocab 写后读旧);④reply_text 截断**前端抢救**(正则捞 JSON 未闭合的 text 已生成部分+提示,治标;治本=route_to_text 薄参数+服务端文本模型,task#289)。
 
 **审核采纳的排期**:#284 SQLite 账本**提前**到 P3 前(JSON 账本无锁 read-modify-write 且浏览器上报不可为硬闸权威);P3=usage+注入归 relay;P4=create/cancel 全归 relay(响应仲裁终态);#285 压缩;控制 WS 可恢复重连(task#290,当前"断线保持前端模式"比朴素重连安全)。
+
+## 61 输出体系定稿:四态重构+TTS 通用开关+route_to_text(2026-07-12,用户设计)
+
+**用户拍板终版**(讨论结论:512 冲突只存在于音频档——stt/tts 本来就是 2048 文本随便写,不需要任何路由):
+- **模式按钮四态**(循环,键 rt_voice_mode 新值域):`sts` 纯语音(512 音频硬顶)/ `stt` 纯文字(2048,无路由无限制)/ `half` 混合(提问=语音·工具/深度=文字)/ **`route` 智能路由**(语音短答 512 + 长内容模型自调 route_to_text 转服务端文本模型写全文)。旧值迁移 audio→sts/mixed→half/text→stt/**tts→stt+TTS 开**(前后端 _norm_vm/_VM_OLD 双侧归一,读到旧值一次性写回服务器)。
+- **TTS 退出模式行列,改独立通用开关**(📢 与模式按钮相邻,键 rt_tts_speak):任何模式的**文字输出**(stt 回复/half 工具轮/route 长文/reply_text 兼容)都用豆包朗读通道**流式切句代念**——`_mkTtsFeeder` 每个文字流一个 feeder,增量文本按句边界(。!?\n;…)切片即念,**尽快开口不等全文**;`_speakSafe`(57 通道韧性)+`_ttsMicGuard` 麦守护单例(流式多段 speak 刷新活动时间不重启;fin=播完+3拍静默+1.5s 无新句,dead=6s 没响,hard=180s)。用户抢话(speech_started)bargeIn 打断残播。豆包引擎原生出声不受此开关影响(stt=丢音频静音,其余=播)。
+- **route_to_text**(审核 route 方案+程序门控):工具**恒挂载**+instructions 恒定说明(§8.1 缓存友好),实际放行由 relay `_tool` 按**当前** rt_voice_mode 判定——非 route 档调用被驳回"请口头简答"(**模式按钮通话中热切立即生效**,不像 53 auto 开关要重拨);route 档→`_oa_route` 调 webapp `/api/assistant/route-text`(Gemini flash `_gemini_stream` SSE,系统 prompt=文字详答引擎+页文本 3.5k+用户原话 last_q+intent),delta 边收边经控制 WS `route_text` 事件下行(前端显示进侧栏气泡+字幕+TTS 开则流式代念),完成**摘要回填**(全文前 240 字进 function_call_output=模型知道自己"说"了什么防追问失忆)+**不 response.create**(零输出音频)。fallback 路径(ctl=false)前端 fetch 同端点同语义。reply_text 退役(rtc-session 不再挂,前端拦截分支留兼容)。
+- **UI**:TTS 开关紧跟模式按钮注入(用户要求相邻);快捷栏整排紧凑(`#asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px}`);🤖auto 按钮删除。
+- 冒烟:rtc-session 工具表(route_to_text 在/reply_text 无/规则段在)+voice-config rt_tts_speak 读写+route-text 真实流式(5 delta 块)全过。

@@ -672,10 +672,18 @@
   // ㊿b 四态循环(用户设计,GPT rtc 下每档都是真后台差异):audio=全音频 / mixed=直接提问用音频·工具结果与
   // 深度思考用文字 / text=全文字(输出音频费归零) / tts=文字回复+豆包朗读通道代念(比 Realtime 音频便宜)。
   // 豆包 S2S 引擎映射:audio|mixed=播,text|tts=丢音频(它协议无模态开关,不省钱只静音)。
-  function _voiceMode() { try { return localStorage.getItem('rc-voice-mode-s2s') || 'audio'; } catch (e) { return 'audio'; } }
-  var _VM_SEQ = ['audio', 'mixed', 'text', 'tts'];
-  var _VM_LABEL = { audio: '🔊 语音', mixed: '🔊½ 混合', text: '💬 文字', tts: '📢 TTS代念' };
-  function s2sSpeakOn() { var m = _voiceMode(); return m === 'audio' || m === 'mixed'; }
+  // 61 四态(用户定稿):sts 纯语音 / stt 纯文字(2048 随便写,无路由) / half 混合(提问=语音·工具/深度=文字) /
+  // route 智能路由(语音短答 + 长内容模型自调 route_to_text 转服务端文本模型写全文);
+  // TTS 退出模式行列,改**独立通用开关**(_ttsOn):任何模式的文字输出都流式切句代念(尽快开口)
+  var _VM_SEQ = ['sts', 'stt', 'half', 'route'];
+  var _VM_LABEL = { sts: '🗣 语音', stt: '💬 文字', half: '🔊½ 混合', route: '🧠 路由' };
+  var _VM_OLD = { audio: 'sts', mixed: 'half', text: 'stt', tts: 'stt' };   // 旧值映射(存量配置兼容)
+  function _voiceMode() {
+    var v = 'sts'; try { v = localStorage.getItem('rc-voice-mode-s2s') || 'sts'; } catch (e) {}
+    return _VM_OLD[v] || (_VM_SEQ.indexOf(v) >= 0 ? v : 'sts');
+  }
+  function _ttsOn() { try { return localStorage.getItem('rc-voice-tts') === '1'; } catch (e) { return false; } }
+  function s2sSpeakOn() { return _voiceMode() !== 'stt'; }   // 豆包引擎映射:stt=静音丢音频,其余=播
   // 句片里的语气标签流解析(v3-⑱c 转折):[语气:XX] 之后的文字都按新语气,直到下一个标签——
   // 标签前的残句先按旧 mood 念,然后切换。标签内约定无标点(prompt),所以不会被句边界撕裂。
   function _speakSeg(seg) {
@@ -800,11 +808,51 @@
       _dcSend({ type: 'response.cancel' });
     }
   }
+  // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──
+  function _speakSafe(t) {
+    if (!t || !t.trim()) return;
+    _ttsMicGuard();
+    if (_tts.ws && _tts.ws.readyState === 1) { try { speak(t); } catch (e) {} }
+    else { try { _ttsEnsure(); } catch (e) {} setTimeout(function () { try { speak(t); } catch (e) {} }, 900); }
+  }
+  function _mkTtsFeeder() {   // 每个文字流一个 feeder:增量文本按句边界切片喂朗读(关着=只跟进偏移不念)
+    var fed = 0;
+    return function (full, fin) {
+      if (!_ttsOn()) { fed = full.length; return; }
+      var rest = full.slice(fed);
+      if (fin) { if (rest.trim()) { _speakSafe(rest); } fed = full.length; return; }
+      var idx = -1;
+      for (var i = rest.length - 1; i >= 0; i--) { if ('。!?!?\n;;…'.indexOf(rest[i]) >= 0) { idx = i; break; } }
+      if (idx >= 4) { _speakSafe(rest.slice(0, idx + 1)); fed += idx + 1; }
+    };
+  }
+  var _turnFeed = null;   // 当前回复轮的代念 feeder(response.created 新建)
+  var _tg = null;         // 麦守护单例:代念播放期禁麦(本地 WebAudio 不在 WebRTC AEC 参考里,不禁=模型听见自己)
+  function _ttsMicGuard() {
+    var mt0 = _rtc.mic && _rtc.mic.getAudioTracks && _rtc.mic.getAudioTracks()[0];
+    if (!mt0) return;
+    if (_tg) { _tg.last = Date.now(); return; }   // 已在守护:刷新活动时间(流式多段 speak 不重启)
+    mt0.enabled = false;
+    _tg = { last: Date.now(), t0: Date.now(), sawPlay: false, quiet: 0 };
+    var iv = setInterval(function () {
+      if (!_tg) { clearInterval(iv); return; }
+      var playing = false; try { playing = _tts.playing.length > 0; } catch (e) {}
+      if (playing) { _tg.sawPlay = true; _tg.quiet = 0; } else if (_tg.sawPlay) _tg.quiet++;
+      var dead = !_tg.sawPlay && Date.now() - _tg.t0 > 6000 && Date.now() - _tg.last > 3000;   // 一直没响=通道坏,别耗死麦
+      var fin = _tg.sawPlay && _tg.quiet >= 3 && Date.now() - _tg.last > 1500;                 // 播完+短静默+没有新句
+      var hard = Date.now() - _tg.t0 > 180000;
+      if (dead || fin || hard) {
+        clearInterval(iv); _tg = null;
+        try { mt0.enabled = true; } catch (e) {}
+        if (dead) { try { _cap.pend = []; setSt('通话中(朗读通道未就绪,这段没念出来)'); } catch (e) {} }
+      }
+    }, 400);
+  }
   function _rtcRespCreate(src) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
     var m = _voiceMode();
-    // mixed=用户直接提问(短答)用音频,工具结果/深度思考(易长)用文字——外部审核推荐的混合形态
-    var wantAudio = (m === 'audio') || (m === 'mixed' && src === 'user');
-    _rtc.wantTts = (m === 'tts');   // done 时把文字回复喂给豆包朗读通道代念
+    // 61:sts/route=语音(route 的长内容由模型自调 route_to_text 转文字);half=提问语音·工具/深度文字;stt=全文字
+    var wantAudio = (m === 'sts') || (m === 'route') || (m === 'half' && src === 'user');
+    _rtc.turnText = !wantAudio;   // 本轮是文字输出:TTS 开关开着就流式代念
     // 预算按模态分级(账本实锤:512 是按25s音频设计的,text 模态下≈350中文字,长文字回答被腰斩)
     _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
                                                    max_output_tokens: wantAudio ? 512 : 2048 } });
@@ -889,10 +937,60 @@
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); window.__asstVoiceMsg && window.__asstVoiceMsg('a', ans); } catch (e) {}
         try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, ans, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
         try { _rtcCapFeed(ans, true); } catch (e) {}   // 侧栏关着时字幕也能看到
-        if (_rtc.wantTts) { try { speak(ans); } catch (e) {} }   // TTS 档:文字答案照样代念
+        if (_ttsOn()) { _speakSafe(ans); }   // TTS 开关:文字答案照样代念
       }
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{"displayed":true}' } });
       return;   // 关键:不发 response.create
+    }
+    if (name === 'route_to_text') {   // 61(fallback 路径;控制面在时由 relay 执行):程序门控按当前模式,热切生效
+      _rtc.turnTool = true;
+      if (_voiceMode() !== 'route') {
+        _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
+                  output: '(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户切到「路由」模式)' } });
+        _rtcRespCreate('tool');
+        return;
+      }
+      onToolStatus({ status: 'running', label: '文字详答' });
+      (async function () {
+        var full = '', err = '';
+        try {
+          var rr = await fetch('/api/assistant/route-text', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ intent: String(args.intent || ''), q: _lastU || '', file: _rtc.ctxFile, page: _rtc.ctxPage }) });
+          var rd = rr.body.getReader(), dec = new TextDecoder(), buf = '', ev2 = '';
+          var rst = { feed: _mkTtsFeeder() };
+          try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}
+          _rtcCapReset();
+          while (true) {
+            var ch = await rd.read(); if (ch.done) break;
+            buf += dec.decode(ch.value, { stream: true });
+            var lines = buf.split('\n'); buf = lines.pop();
+            for (var li = 0; li < lines.length; li++) {
+              var ln = lines[li];
+              if (ln.indexOf('event:') === 0) ev2 = ln.slice(6).trim();
+              else if (ln.indexOf('data:') === 0 && ev2 === 'delta') {
+                var seg = ''; try { seg = JSON.parse(ln.slice(5).trim()); } catch (e) {}
+                if (seg) {
+                  full += seg;
+                  try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', full); } catch (e) {}
+                  _rtcCapFeed(full, false);
+                  try { rst.feed(full, false); } catch (e) {}
+                }
+              } else if (ln.indexOf('data:') === 0 && ev2 === 'err') err = '生成后端不可用';
+            }
+          }
+          if (full) {
+            try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, full, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
+            _rtcCapFeed(full, true);
+            try { rst.feed(full, true); } catch (e) {}
+          }
+        } catch (e) { err = String(e).slice(0, 80); }
+        var okR = !!full;
+        onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '文字详答', args: args, rag: (full || err).slice(0, 400) });
+        _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
+                  output: okR ? ('(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:' + full.slice(0, 240) + ')') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
+        if (!okR) _rtcRespCreate('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=让它口头补救
+      })();
+      return;
     }
     _rtc.turnTool = true;   // ㊸:本轮真调了工具(承诺核查放行)
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
@@ -983,12 +1081,14 @@
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
+      if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
       _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
       try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
       curAText = ''; curAEl = null;
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
+      if (_ttsOn()) { try { bargeIn(); } catch (_) {} }   // 61:抢话同时打断 TTS 代念残播
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'input_audio_buffer.speech_stopped') {
       _rtcRespCreate('user');   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
@@ -1016,39 +1116,14 @@
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
-      if (_rtc.wantTts && curAText) {   // ㊿b TTS代念:文字回复交豆包朗读通道;播放期禁麦(本地 WebAudio 不被 AEC 消)
-        try {
-          // 57 韧性:朗读通道可能已死(rtcStart 的 _ttsShutdown/relay 重启掐线)——speak 会静默丢弃=没声。
-          // 先确保通道,没 ready 就重建并延迟发;禁麦恢复不再依赖 __vcTtsBusy(字幕句队列卡死=麦被禁 2min 的哑死根因),
-          // 改看真实播放:5s 内从未响=通道坏立即恢复;响过=播完恢复;60s 硬顶。
-          var _doSpeak = function () { try { speak(curAText); } catch (e) {} };
-          if (_tts.ws && _tts.ws.readyState === 1) _doSpeak();
-          else { try { _ttsEnsure(); } catch (e) {} setTimeout(_doSpeak, 900); }
-          var mt0 = _rtc.mic && _rtc.mic.getAudioTracks()[0];
-          if (mt0) {
-            mt0.enabled = false;
-            var t0c = Date.now(), sawPlay = false;
-            var chk0 = setInterval(function () {
-              var playing = false; try { playing = _tts.playing.length > 0; } catch (e) {}
-              if (playing) sawPlay = true;
-              var dead = !sawPlay && Date.now() - t0c > 5000;          // 5s 没响=通道坏,别把麦耗死
-              var fin = sawPlay && !playing;                            // 响过且播完
-              var hard = Date.now() - t0c > 60000;                      // 硬顶
-              if (dead || fin || hard) {
-                clearInterval(chk0);
-                try { mt0.enabled = true; } catch (e) {}
-                if (dead) { try { _cap.pend = []; setSt('通话中 · 📢TTS(朗读通道未就绪,这轮没念出来)'); } catch (e) {} }
-              }
-            }, 400);
-          }
-        } catch (e) {}
-      }
+      if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
@@ -1210,6 +1285,28 @@
               _captureView().then(function (shot) {
                 try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
               }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: '' })); } catch (e2) {} });
+            }
+            else if (m0.event === 'route_text') {   // 61 route 档:服务端文本模型流式长文(relay 生成下行)——显示+落库+可选 TTS 代念
+              var rp = m0.payload || {};
+              if (!_rtc._route) {
+                _rtc._route = { buf: '', feed: _mkTtsFeeder() };
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e2) {}
+                _rtcCapReset();   // 字幕偏移与上一轮脱钩
+              }
+              if (rp.delta != null) {
+                _rtc._route.buf += rp.delta;
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', _rtc._route.buf); } catch (e2) {}
+                _rtcCapFeed(_rtc._route.buf, false);
+                try { _rtc._route.feed(_rtc._route.buf, false); } catch (e2) {}
+              }
+              if (rp.done) {
+                var fullR = rp.text || _rtc._route.buf;
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR); } catch (e2) {}
+                try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
+                _rtcCapFeed(fullR, true);
+                try { _rtc._route.feed(fullR, true); } catch (e2) {}
+                _rtc._route = null;
+              }
             }
           } catch (e) {}
         };
@@ -1644,10 +1741,10 @@
   function _tgOn() { return (ws && mode === 's2s') ? s2sSpeakOn() : speakOn(); }
   function _refreshSpeakTg() {
     var b = document.querySelector('.vc-speak-tg'); if (!b) return;
-    if (ws && mode === 's2s') {   // ㊿b 通话中:四态标签(audio/mixed 视觉点亮)
+    if (ws && mode === 's2s') {   // 61 通话中:四态标签(有音频输出的档视觉点亮)
       var m = _voiceMode();
-      b.innerHTML = '<span>' + (_VM_LABEL[m] || '🔊 语音') + '</span>';
-      b.classList[(m === 'audio' || m === 'mixed') ? 'add' : 'remove']('on');
+      b.innerHTML = '<span>' + (_VM_LABEL[m] || '🗣 语音') + '</span>';
+      b.classList[(m !== 'stt') ? 'add' : 'remove']('on');
     } else {
       b.innerHTML = '<span>🔊 朗读</span>';
       b.classList[_tgOn() ? 'add' : 'remove']('on');
@@ -1695,29 +1792,23 @@
       pane.querySelector('[data-a="all"]').addEventListener('click', function () { _setCutoff(0, done); });
     });
     qb.appendChild(b);
-    // ㊿d auto 独立开关(用户设计,非全档兜底):开=挂载 reply_text 工具让模型自判长内容转文字;
-    // 关=工具根本不挂载(真禁用)。⚠工具表在会话建立时决定 → 切换后**重拨才生效**(提示)。持久化在服务器。
-    var ab = document.createElement('button'); ab.type = 'button'; ab.className = 'rc-media-tg vc-auto-tg';
-    ab.innerHTML = '<span>🤖 自动</span>';
-    ab.title = '自动文字路由:开=AI 自己判断"长解释/列表/公式"时改用文字回答(省输出音频费);关=完全按左边模式。切换后重拨生效';
-    function _autoOn() { try { return localStorage.getItem('rc-voice-auto') === '1'; } catch (e) { return false; } }
-    if (_autoOn()) ab.classList.add('on');
-    ab.addEventListener('click', function () {
-      var on = !_autoOn();
-      try { localStorage.setItem('rc-voice-auto', on ? '1' : '0'); } catch (e) {}
-      ab.classList[on ? 'add' : 'remove']('on');
-      try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rt_auto_text: on ? '1' : '' }) }).catch(function () {}); } catch (e) {}
-      try { setSt((ws ? '通话中 · ' : '') + '自动文字路由' + (on ? '开' : '关') + '(重拨后生效)'); } catch (e) {}
-    });
-    qb.appendChild(ab);
-    // 服务器为真相源:初始把 rt_voice_mode/rt_auto_text 同步到本地(跨设备一致)
+    // 服务器为真相源:初始同步 rt_voice_mode/rt_tts_speak + 一次性迁移旧档值(61:tts 档→stt+TTS开)
     try {
       fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
         var c = (d && d.cfg) || {};
-        if (c.rt_voice_mode) { try { localStorage.setItem('rc-voice-mode-s2s', c.rt_voice_mode); } catch (e) {} }
-        try { localStorage.setItem('rc-voice-auto', c.rt_auto_text ? '1' : '0'); } catch (e) {}
-        ab.classList[c.rt_auto_text ? 'add' : 'remove']('on');
+        var mv = c.rt_voice_mode || '';
+        if (mv === 'tts') {   // 旧「TTS代念」档=新 stt+TTS 开(写回服务器,幂等)
+          try { localStorage.setItem('rc-voice-mode-s2s', 'stt'); localStorage.setItem('rc-voice-tts', '1'); } catch (e) {}
+          fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rt_voice_mode: 'stt', rt_tts_speak: '1' }) }).catch(function () {});
+        } else if (mv) {
+          var nv = _VM_OLD[mv] || mv;
+          try { localStorage.setItem('rc-voice-mode-s2s', nv); } catch (e) {}
+          if (nv !== mv) fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rt_voice_mode: nv }) }).catch(function () {});
+        }
+        if (c.rt_tts_speak != null && mv !== 'tts') { try { localStorage.setItem('rc-voice-tts', c.rt_tts_speak ? '1' : '0'); } catch (e) {} }
+        var tb0 = document.querySelector('.vc-tts-tg'); if (tb0) tb0.classList[_ttsOn() ? 'add' : 'remove']('on');
         _refreshSpeakTg();
       }).catch(function () {});
     } catch (e) {}
@@ -1732,14 +1823,13 @@
     b.title = '朗读:点亮=AI 出声(语音通话中=播豆包语音;其余=回答用 TTS 流式念出来);按灭=只出文字。语音通话按灭时豆包音频仍生成计费(协议限制),真文本对话用麦克风长按的 ASR 模式';
     if (_tgOn()) b.classList.add('on');
     b.addEventListener('click', function () {
-      if (ws && mode === 's2s') {   // ㊿b 通话中:四态循环 语音→混合→文字→TTS代念→语音
+      if (ws && mode === 's2s') {   // 61 四态循环 语音→文字→混合→路由→语音(TTS 已独立成旁边的开关)
         var cur = _voiceMode();
         var nxt = _VM_SEQ[(_VM_SEQ.indexOf(cur) + 1) % _VM_SEQ.length];
         try { localStorage.setItem('rc-voice-mode-s2s', nxt); } catch (e) {}
         try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rt_voice_mode: nxt }) }).catch(function () {}); } catch (e) {}   // 持久化到服务器(跨设备)
-        if (nxt === 'text' || nxt === 'tts') stopPlayback();
-        if (nxt === 'tts') { try { _ttsEnsure(); } catch (e) {} }   // 手势内预热朗读通道(iOS)
+          body: JSON.stringify({ rt_voice_mode: nxt }) }).catch(function () {}); } catch (e) {}   // 持久化到服务器(跨设备;relay 门控/预算即时跟随=热切生效)
+        if (nxt === 'stt') stopPlayback();
         try { setSt('通话中 · ' + _VM_LABEL[nxt]); } catch (e) {}
       } else {                      // 其余:切回答的 T2S 朗读
         var on2 = !speakOn();
@@ -1750,6 +1840,26 @@
       _refreshSpeakTg();
     });
     qb.appendChild(b);
+    // 61 TTS 通用开关(用户设计:与模式按钮相邻):任何模式的文字输出都用豆包朗读流式代念
+    var tb = document.createElement('button'); tb.type = 'button'; tb.className = 'rc-media-tg vc-tts-tg';
+    tb.innerHTML = '<span>📢 TTS</span>';
+    tb.title = 'TTS 代念(通用开关):文字/路由/混合模式下的文字输出,句子生成到哪念到哪(豆包朗读通道);关=只显示文字。豆包引擎通话本身出声,不受此开关影响';
+    if (_ttsOn()) tb.classList.add('on');
+    tb.addEventListener('click', function () {
+      var on = !_ttsOn();
+      try { localStorage.setItem('rc-voice-tts', on ? '1' : '0'); } catch (e) {}
+      tb.classList[on ? 'add' : 'remove']('on');
+      if (on) { try { _ttsEnsure(); } catch (e) {} }              // 手势内预热(iOS AudioContext 必须手势启动)
+      else { try { bargeIn(); _ttsShutdown(); } catch (e) {} }    // 关=停残播+撂通道省资源
+      try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rt_tts_speak: on ? '1' : '' }) }).catch(function () {}); } catch (e) {}
+    });
+    qb.appendChild(tb);
+    if (!document.getElementById('vc-quick-compact')) {   // 61:快捷栏整排紧凑(用户要求)
+      var st0 = document.createElement('style'); st0.id = 'vc-quick-compact';
+      st0.textContent = '#asst-quick .rc-media-tg,#ep-asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px;border-radius:7px}';
+      document.head.appendChild(st0);
+    }
     return true;
   }
 

@@ -4443,9 +4443,11 @@ def assistant_rtc_session():
                       "。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹")}
     if cfg.get("rt_lang") in ("zh", "ja", "en"):
         _tr["language"] = cfg["rt_lang"]
-    _auto_line = ("**语音/文字自动选择**:明确要求念/读/发音=语音;日常陪聊和一两句短答=语音;"
-                  "长解释/步骤/列表/公式/链接/大量工具资料=调 reply_text 用文字给出;两可时默认语音但最多两三句;"
-                  "绝不同时又调 reply_text 又口头回答。") if cfg.get("rt_auto_text") else ""
+    # 61:route_to_text 恒挂+恒定说明(不随模式变=不破 instructions 前缀缓存);实际放行由 relay 按
+    # rt_voice_mode 程序门控(模式按钮通话中热切立即生效,不像 53 的 auto 开关要重拨)
+    _route_line = ("**route_to_text 工具**:回答明显较长(详细解释/多步骤/公式推导/长列表)不适合口头念时调用,"
+                   "intent=一句话概括用户想要什么;系统会用文字模型写出完整回答显示在屏幕上,你调用后本轮结束不要再口头重复。"
+                   "系统按用户当前输出模式决定是否放行,被驳回时按提示口头简要回答即可。短答/陪聊/发音示范永远直接说。")
     parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
              "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
              lang_line,
@@ -4468,8 +4470,7 @@ def assistant_rtc_session():
     if file_rel:
         _name = file_rel.rsplit("/", 1)[-1]
         parts.append(f"他正在读的书:《{_name}》(位置和页面内容会在他提问时以 system 消息给你;需要更多就调 read_page)。")
-    if _auto_line:
-        parts.append(_auto_line)
+    parts.append(_route_line)
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"
                  "**状态消息只是记录,永远不要对它们本身做回应或主动评论**;"
                  "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")
@@ -4491,12 +4492,11 @@ def assistant_rtc_session():
                   "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
                   "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
                                  "required": ["question"], "additionalProperties": True}})
-    if cfg.get("rt_auto_text"):
-        tools.append({"type": "function", "name": "reply_text",
-                      "description": "当答案较长、包含列表/公式/链接/步骤,或大量工具资料需要展示时调用:把**完整的最终答案**放进 text,"
-                                     "它会以文字显示在用户屏幕上(不产生语音)。调用后本轮结束,不要再说话。短回答/陪聊/发音示范不要用它。",
-                      "parameters": {"type": "object", "properties": {"text": {"type": "string"}},
-                                     "required": ["text"], "additionalProperties": False}})
+    tools.append({"type": "function", "name": "route_to_text",
+                  "description": "回答较长(详细解释/多步骤/公式/长列表)不适合口头念时调用:intent=一句话概括用户想要什么,"
+                                 "系统转文字模型写完整回答显示在屏幕上。调用后本轮结束不要再说话。短答/陪聊/发音示范不要用。",
+                  "parameters": {"type": "object", "properties": {"intent": {"type": "string"}},
+                                 "required": ["intent"], "additionalProperties": False}})
     tools.append({"type": "function", "name": "wait_for_user",
                   "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。",
                   "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
@@ -4557,6 +4557,60 @@ def assistant_rtc_call():
         return jsonify({"ok": True, "sdp": r.text, "call_id": cid})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:200]}), 502
+
+
+@bp.route("/route-text", methods=["POST"])
+def assistant_route_text():
+    """route 档(61):语音模型只发一句 intent(几十 token,不占 512 音频硬顶),长正文由便宜文本模型
+    (Gemini flash)**流式**生成——SSE: delta*n → done{summary}。审核二轮方案:决定与写作解耦。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    intent = (body.get("intent") or "").strip()[:500]
+    q = (body.get("q") or "").strip()[:2000]
+    file_rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except Exception:
+        page = 0
+    ptext = ""
+    if file_rel:
+        try:
+            ptext = (_page_text(file_rel, page) or "")[:3500]
+        except Exception:
+            ptext = ""
+    sysmsg = ("你是阅读学习助手的文字详答引擎:用户在语音通话中提了需要长篇文字回答的问题,语音助手转给你写正文。"
+              "直接输出最终回答——结构清晰、要点完整但不啰嗦,可用 Markdown(数学严格用 $...$ 包裹,禁止反引号包数学);"
+              "第一句就进入正题,不写「好的/当然」等开场白。用用户提问的语言回答。")
+    pieces = []
+    if ptext:
+        pieces.append(f"[用户正看的第 {page} 页内容节选]\n{ptext}")
+    if q:
+        pieces.append(f"[用户原话]{q}")
+    pieces.append(f"[语音助手对需求的概括]{intent or '(未提供)'}")
+    prompt = "\n\n".join(pieces)
+
+    def gen():
+        full = ""
+        for kind, val in _gemini_stream(sysmsg, [{"role": "user", "parts": [{"text": prompt}]}],
+                                        think=False, timeout=120):
+            if kind == "delta":
+                full += val
+                yield "event: delta\ndata: " + json.dumps(val, ensure_ascii=False) + "\n\n"
+            elif kind == "err" and not full:
+                try:   # 流式失败一次性兜底(慢但别哑)
+                    full = _gemini_text(sysmsg + "\n\n" + prompt, max_tokens=2000, think=False, timeout=90) or ""
+                except Exception:
+                    full = ""
+                if full:
+                    yield "event: delta\ndata: " + json.dumps(full, ensure_ascii=False) + "\n\n"
+                else:
+                    yield "event: err\ndata: {}\n\n"
+                    return
+        yield "event: done\ndata: " + json.dumps({"summary": full[:240]}, ensure_ascii=False) + "\n\n"
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _rtc_sideband_images(call_id: str, images: list) -> bool:
@@ -4707,7 +4761,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
-                     "rt_voice_mode", "rt_auto_text")
+                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

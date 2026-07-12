@@ -1274,6 +1274,12 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     return "\n".join(parts)
 
 
+def _norm_vm(v) -> str:
+    """输出模式归一(61 四态:sts 纯语音/stt 纯文字/half 混合/route 智能路由);旧值映射兼容存量配置。"""
+    v = (v or "sts").strip()
+    return {"audio": "sts", "mixed": "half", "text": "stt", "tts": "stt"}.get(v, v if v in ("sts", "stt", "half", "route") else "sts")
+
+
 async def _oa_deep(question: str, file_rel: str, page: int) -> str:
     """deep_think(OpenAI 版):转交侧栏 chat(Claude,深度预设选型)拿完整回答当 function output 回填,GPT 自己念。"""
     if not question:
@@ -1825,9 +1831,10 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
 
     def _resp_create():
-        """工具回填后的 response.create——模态按服务器持久化档位(src='tool':mixed 档=text)。"""
-        m = (_creds().get("rt_voice_mode") or "audio")
-        want_audio = (m == "audio")   # tool 来源:mixed 也走 text(审核推荐);text/tts 恒 text
+        """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
+        工具结果轮:sts/route=念出来;half=文字(审核推荐混合形态);stt=文字。"""
+        m = _norm_vm(_creds().get("rt_voice_mode"))
+        want_audio = m in ("sts", "route")
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
                              "max_output_tokens": 512 if want_audio else 2048}}
@@ -1846,16 +1853,63 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         finally:
             shot_fut.pop(sid, None)
 
+    async def _oa_route(intent: str):
+        """route 档长文生成(61):调 webapp /route-text(Gemini flash SSE),delta 边收边经控制 WS
+        下行给前端(显示+可选 TTS 代念,尽快开口);返回 (全文, err)。"""
+        full, err = "", ""
+        try:
+            async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=150) as hc:
+                async with hc.stream("POST", "/api/assistant/route-text",
+                                     json={"intent": intent, "q": book.get("last_q") or "",
+                                           "file": file_rel, "page": book.get("page") or page}) as r:
+                    ev, data = "", ""
+                    async for line in r.aiter_lines():
+                        if line.startswith("event:"):
+                            ev = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data += line[5:].strip()
+                        elif not line.strip():
+                            if ev == "delta" and data:
+                                try:
+                                    seg = json.loads(data)
+                                except Exception:
+                                    seg = ""
+                                if seg:
+                                    full += seg
+                                    await bws.send(json.dumps({"event": "route_text", "payload": {"delta": seg}}, ensure_ascii=False))
+                            elif ev == "err":
+                                err = "生成后端不可用"
+                            ev, data = "", ""
+        except Exception as ex:
+            err = str(ex)[:100]
+        if full:
+            await bws.send(json.dumps({"event": "route_text", "payload": {"done": True, "text": full}}, ensure_ascii=False))
+        return full, ("" if full else (err or "空结果"))
+
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
-        vis, readonly = None, True
+        vis, readonly, no_create = None, True, False
         try:
             _ink_fp = book.get("_ink_fp") or ""
             # 缓存键:sel 全文哈希(58b 的前 80 字有前缀碰撞)+ink 全笔画哈希(_up 里算)——审核 P1
             ck = (f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|"
                   f"{book.get('page') or page}|{_ink_fp}|{hashlib.md5((book.get('sel') or '').encode()).hexdigest()[:8]}")
-            if name == "recall_study":
+            if name == "route_to_text":
+                # 61 程序门控(替代 prompt 门控):按**当前**输出模式放行——模式按钮通话中热切立即生效
+                m_now = _norm_vm(_creds().get("rt_voice_mode"))
+                if m_now != "route":
+                    out = "(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户把模式切到「路由」)"
+                    label = "文字路由(未启用)"
+                else:
+                    label = "文字详答"
+                    full, rerr = await _oa_route(str(args.get("intent") or ""))
+                    if rerr:
+                        ok, out = False, f"(文字生成失败:{rerr};请口头简要回答)"
+                    else:
+                        out = "(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:" + full[:240] + ")"
+                        no_create = True   # 长文已显示(可选 TTS 代念),不再花一轮输出音频
+            elif name == "recall_study":
                 span = str(args.get("span") or "today").lower()
                 out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
                 label = "回顾学习"
@@ -1918,7 +1972,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 out += "\n(该工具产出了图像,但「图像输入」开关未开,只能按文本回答)"
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id2, "output": out}}))
-            if not stale:
+            if not stale and not no_create:
                 await ows.send(json.dumps(_resp_create()))
         except Exception:
             pass
@@ -1965,6 +2019,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                         except Exception:
                             pass
             elif t == "conversation.item.input_audio_transcription.completed":
+                _tx0 = (ev.get("transcript") or "").strip()
+                if _tx0:
+                    book["last_q"] = _tx0[:500]   # route 档:生成引擎要用户原话(intent 只是概括)
                 # 指南§7.5/:258:转写是独立账单(usage 在本事件里),不混进 response.done——先记日志供估费(正式入账=#284)
                 u2 = ev.get("usage") or {}
                 sys.stderr.write(f"[rtc-ctl] 转写 usage={json.dumps(u2)[:120]}\n")
