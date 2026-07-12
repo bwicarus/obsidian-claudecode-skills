@@ -66,6 +66,11 @@ tts 档的代念:relay 无法播——done 时经控制 WS 下行事件让前端
      tool_status 下行时置 `turnTool=true`(承诺核查放行)+ see_* done 复位 `inkDirty`(边沿复位镜像,原复位点在前端 _rtcTool 不再经过);
      shim send 把 page/state/ink 上行**镜像**给控制 WS(relay 工具 ctx 要最新状态)。
    - ⚠ 坑:`rtc_call_id` 必须放 voice-tool **请求体顶层**(webapp 读 `body["rtc_call_id"]`),放 ctx 里图像 sideband 注入静默失效。
+   - **版本握手(59,用户首测实锤双执行)**:旧页面 JS(部署前加载,无分工逻辑)+新 relay=同一工具两边各跑一遍
+     (webapp 日志同秒两条 read_page:Safari UA=前端 / python-httpx=relay)+双 response.create 撞
+     `conversation_already_has_active_response`。修=前端控制 WS URL 带 `fe=2`,relay 只对 fe≥2 接管工具,
+     否则退回 P1 观察;凡改变双端分工的升级都必须走这种 capability 声明,不能假设前端已是新版。
+     另:撞车被拒的 create 记 `pend`,response.done 时补发(否则工具结果永远无人回答)。
 3. **P3 usage+注入接管**:relay 记账(前端跳过);拉模式注入搬 relay(page/state/ink 经控制 WS 上行,
    speech_started 时 relay 注入)。
 4. **P4 response.create 接管**(四态+auto 在 relay)+承诺核查搬 relay。

@@ -511,3 +511,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **57 TTS 代念哑死**(用户实测:日语页没念+之后全哑):根因链=朗读通道死(rtcStart _ttsShutdown/relay 重启)时 speak 静默丢弃=没声;且 __vcTtsBusy 含 _cap.pend 字幕句队列→卡死=麦禁满 2min(日志实锤 2分43秒空白)。修:speak 前保证通道(没 ready 先 _ttsEnsure+900ms 延迟发);禁麦恢复改看**真实播放**(_tts.playing:5s 没响=通道坏立即恢复+清 pend+提示/播完即恢复/60s 硬顶)。
 
 **58(㊺P2)工具执行搬服务端**:relay 成为唯一工具执行者(sideband function_call_arguments.done→_tool→voice-tool→function_call_output+response.create 按 rt_voice_mode 模态化);**工具缓存** ck=name|args|页|笔迹指纹(voice-tool `cacheable` 白名单才存,命中重放 client_action=#287 的 read_page 重复调用提前落地);need_shot 截图往返(see_ink/see_page 视口截图只有前端能拍,Future+6s 超时);前端 ctl=true 时只放行 reply_text/wait_for_user,tool_status 下行置 turnTool(承诺核查放行)+see_* done 复位 inkDirty(边沿复位镜像),shim send 上行镜像 page/state/ink 给控制 WS。⚠坑:rtc_call_id 必须在 voice-tool **请求体顶层**(webapp 读 body,放 ctx=图像 sideband 注入静默失效)。P3(usage+注入)/P4(response.create+承诺核查)未动,前端对应逻辑仍在。
+
+## 59 P2首测双执行修(版本握手)+转写升级(2026-07-12,用户截图:读取页面×2+TTS×2+转写错认)
+
+**双执行根因**(webapp 日志同秒实锤):用户页面是部署前加载的**旧版 JS**(无 P2 分工)+新 relay——同一 function_call 前端(Safari UA)与 relay(python-httpx)各执行一遍 read_page(两张工具卡),双 response.create 撞 `conversation_already_has_active_response`(rtc-ctl err 实锤)。修:①**fe=2 版本握手**——前端控制 WS URL 声明 `fe=2`,relay 只对 fe≥2 接管工具,旧前端(不带参数)自动退回 P1 观察模式(日志区分「P2 已挂/P1 观察」);**教训:改变双端分工的升级必须 capability 声明,不能假设前端已刷新**。②撞车被拒的 create 记 pend,response.done 补发(否则那次工具结果永远无人回答)。TTS"念两次"=决策轮开场白+回答轮正文各念一遍(设计行为)+双执行放大,握手修后待重测。
+
+**转写升级**:用户句转写错认("这一页讲了什么"→"毕业讲了什么",模型听音频本身理解对)根因=whisper 无语境音近错认+模型名 `gpt-realtime-whisper` 非官方名。修=`gpt-4o-mini-transcribe`(官方,中文 WER 低于 whisper)+**prompt 语境**(书名+高频指令词:这一页/翻到第N页/做卡片…——与豆包 ASR 热词㉓同思路,官方 transcription.prompt 字段)+language 跟随 rt_lang(仅 zh/ja/en 合法值)。**转写费用**(独立账单,usage 在 `conversation.item.input_audio_transcription.completed` 事件,不进 response.done;relay 已加日志观察):mini-transcribe 音频 $3/M tokens≈**$0.002/分钟纯说话**,一次通话几美分零头,不值得为省它引入 Apple 听写(通话中麦被 WebRTC 占用,iOS 并行 SpeechRecognition 抢麦+录音路由副作用=听写互斥血泪重演)。

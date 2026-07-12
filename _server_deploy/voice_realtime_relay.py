@@ -1778,13 +1778,17 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
 OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
-async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
+async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
     """㊺P2 RtcController:sideband 控制面接管**工具执行**(唯一执行者)——
     复用 handle_openai._tool 语义:voice-tool 执行/client_action+tool_status 经控制 WS 下行/
     图像 sideband 直喂;新增**工具缓存**(同工具+同参数+同页+同笔迹=复用,治 read_page 重复调用)
     与 **need_shot 截图往返**(see_ink/see_page 的视口截图只有前端能拍)。
     reply_text/wait_for_user 是纯前端语义,留给前端 dc 处理(前端放行名单)。
-    usage 记账 P3 接管,现仍由前端上报;response.create 带模态(rt_voice_mode,src='tool')。"""
+    usage 记账 P3 接管,现仍由前端上报;response.create 带模态(rt_voice_mode,src='tool')。
+    **版本握手(59)**:前端 URL 带 fe=2 才接管工具——旧页面(部署前加载的 JS 没有分工逻辑,
+    自己会执行工具)不带 fe → 本函数退回 P1 观察模式,否则新旧换代窗口必双执行
+    (实锤:同一 call 前端 Safari 与 relay httpx 各跑一遍 read_page + create 撞
+    conversation_already_has_active_response)。"""
     key = _openai_key()
     if not key or not call_id:
         try:
@@ -1805,14 +1809,15 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
             pass
         await bws.close()
         return
-    sys.stderr.write(f"[rtc-ctl] P2 已挂 call={call_id[:12]} file={file_rel[:30]} p{page}\n")
+    sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": ""}
     tool_cache = {}          # 只读工具缓存:name|args|page|ink指纹 → {out, ca}(voice-tool 响应 cacheable 才存)
     shot_fut = {"f": None}   # need_shot 往返(一次一张,超时 6s 无图继续)
     try:
-        await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True, "p": 2}}))
+        await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True, "p": 2 if fe >= 2 else 1}}))
     except Exception:
         pass
+    pend = {"create": False}   # 59:response.create 撞"已有进行中response"被拒→记下,response.done 时补发
 
     def _resp_create():
         """工具回填后的 response.create——模态按服务器持久化档位(src='tool':mixed 档=text)。"""
@@ -1906,6 +1911,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
             t = ev.get("type") or "?"
             n[t] = n.get(t, 0) + 1
             if t == "response.function_call_arguments.done":
+                if fe < 2:
+                    continue   # 版本握手:旧前端自己执行工具,relay 只观察(防双执行)
                 name = ev.get("name") or ""
                 if name in ("reply_text", "wait_for_user"):
                     continue   # 纯前端语义(显示/静音),前端 dc 处理
@@ -1921,8 +1928,21 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
+                if pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
+                    pend["create"] = False
+                    try:
+                        await ows.send(json.dumps(_resp_create()))
+                    except Exception:
+                        pass
+            elif t == "conversation.item.input_audio_transcription.completed":
+                # 指南§7.5/:258:转写是独立账单(usage 在本事件里),不混进 response.done——先记日志供估费(正式入账=#284)
+                u2 = ev.get("usage") or {}
+                sys.stderr.write(f"[rtc-ctl] 转写 usage={json.dumps(u2)[:120]}\n")
             elif t == "error":
-                sys.stderr.write(f"[rtc-ctl] err: {json.dumps(ev.get('error') or {})[:150]}\n")
+                e0 = ev.get("error") or {}
+                if e0.get("code") == "conversation_already_has_active_response":
+                    pend["create"] = True   # 59:等 response.done 补发,工具结果不至于永远无人回答
+                sys.stderr.write(f"[rtc-ctl] err: {json.dumps(e0)[:150]}\n")
         sys.stderr.write(f"[rtc-ctl] sideband 关闭 call={call_id[:12]} 事件统计={json.dumps(n)[:300]}\n")
 
     async def _up():
@@ -1989,7 +2009,8 @@ async def handle_browser(bws):
             await handle_rtc_ctl(bws,
                                  (q.get("call_id") or [""])[0],
                                  (q.get("file") or [""])[0],
-                                 int((q.get("page") or ["0"])[0] or "0"))
+                                 int((q.get("page") or ["0"])[0] or "0"),
+                                 int((q.get("fe") or ["1"])[0] or "1"))
             return
         file_rel = (q.get("file") or [""])[0]
         page = int((q.get("page") or ["0"])[0] or "0")

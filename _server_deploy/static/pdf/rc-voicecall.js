@@ -1172,7 +1172,9 @@
       // P1 只建通道观察(relay 镜像事件);连不上=静默纯前端模式(现有代码即 fallback)。
       try {
         var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&call_id=' + encodeURIComponent(_rtc.callId) +
+        // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
+        // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
+        var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=2&call_id=' + encodeURIComponent(_rtc.callId) +
                                '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
         cw.onmessage = function (ev) {
           try {

@@ -4434,6 +4434,15 @@ def assistant_rtc_session():
         lang_line = "Respond in English. When reading passages aloud, pronounce them in their original language."
     else:
         lang_line = ("**跟随用户说话的语言**回答;朗读书页原文按内容本身的语言用**原生发音**念——日语内容不要用中文读音。")
+    # 59 转写升级:whisper 无语境音近错认("这一页"→"毕业")+模型名 gpt-realtime-whisper 非官方——
+    # 换 gpt-4o-mini-transcribe(官方,中文 WER 低于 whisper,$3/M 音频≈$0.003/分钟,独立账单)
+    # + prompt 语境(书名+高频指令词,与豆包 ASR 热词㉓同思路;转写模型每句独立调用,不碰主模型缓存)
+    _book_t = (file_rel.rsplit("/", 1)[-1].rsplit(".", 1)[0] if file_rel else "")
+    _tr = {"model": "gpt-4o-mini-transcribe",
+           "prompt": ("学习伴读通话" + (f",正在读《{_book_t}》" if _book_t else "") +
+                      "。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹")}
+    if cfg.get("rt_lang") in ("zh", "ja", "en"):
+        _tr["language"] = cfg["rt_lang"]
     _auto_line = ("**语音/文字自动选择**:明确要求念/读/发音=语音;日常陪聊和一两句短答=语音;"
                   "长解释/步骤/列表/公式/链接/大量工具资料=调 reply_text 用文字给出;两可时默认语音但最多两三句;"
                   "绝不同时又调 reply_text 又口头回答。") if cfg.get("rt_auto_text") else ""
@@ -4502,9 +4511,7 @@ def assistant_rtc_session():
                                                    # ㊿ 手动挡(官方VAD指南):speech_stopped 后前端按"朗读"开关发带 output_modalities 的 response.create——
                                                    # 灭=纯文字回复(输出音频费=成本80%主体直接归零);顺带消灭短问竞态(审核#5)
                                                    "create_response": False, "interrupt_response": True},
-                                "transcription": ({"model": "gpt-realtime-whisper", "language": cfg["rt_lang"]}
-                                                  if cfg.get("rt_lang") in ("zh", "ja", "en")
-                                                  else {"model": "gpt-realtime-whisper"})},
+                                "transcription": _tr},
                       "output": {"voice": cfg.get("rt_voice") or "marin"}},
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
