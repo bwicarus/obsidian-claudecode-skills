@@ -335,6 +335,11 @@
           '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_lang" style="flex:1 1 100%">' +
             _RTL.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_lang || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_noise" style="flex:1 1 100%">' +
+            [['', '噪音抑制:近场(耳机 / 手持,默认)'], ['far', '噪音抑制:远场(iPad 放桌上外放——环境音 / 操作声抑制更强)']].map(function (o) {
+              return '<option value="' + o[0] + '"' + ((c.rt_noise || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+            }).join('') +
+          '</select></div>' +
           '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_eagerness" style="flex:1 1 100%">' +
             _RTG.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_eagerness || 'auto') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
@@ -1851,6 +1856,15 @@
           }
         } catch (e) {}
         try { if (arguments[2].pin && window.__vcPinBind) window.__vcPinBind(_vTurnEl, arguments[2].pin.label, arguments[2].pin.textFn); } catch (e) {}   // 79:长按=全文带入
+        try {   // 86:气泡顶部把手条(⠿)——按住拖到屏幕底边=收入收藏夹
+          if (arguments[2].pin && window.__vcDragToDock && !_vTurnEl.querySelector(':scope > .vc-bub-hd')) {
+            var _p0 = arguments[2].pin;
+            var _hd0 = document.createElement('div'); _hd0.className = 'vc-bub-hd';
+            _hd0.innerHTML = '<span class="vc-grip" title="按住拖到屏幕底边=收入收藏夹">⠿</span>';
+            _vTurnEl.insertBefore(_hd0, _vTurnEl.firstChild);
+            window.__vcDragToDock(_vTurnEl, function () { var t0 = _p0.textFn(); return { label: _p0.label, raw: t0, isHtml: false, text: String(t0).slice(0, 4000) }; });
+          }
+        } catch (e) {}
       } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }

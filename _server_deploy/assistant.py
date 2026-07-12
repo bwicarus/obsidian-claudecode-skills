@@ -4678,7 +4678,7 @@ def assistant_rtc_session():
             "reasoning": {"effort": cfg.get("rt_effort") or "low"},
             "max_output_tokens": 2048,   # 64 用户拍板:全档 2048(≈100s 音频),不搞小预算硬截断;时长靠 prompt 规则+route 自觉
             "instructions": "\n".join(parts),
-            "audio": {"input": {"noise_reduction": {"type": "near_field"},
+            "audio": {"input": {"noise_reduction": {"type": ("far_field" if cfg.get("rt_noise") == "far" else "near_field")},   # 86:官方降噪双档——far_field=桌面外放场景,环境音/操作声抑制更强
                                 "turn_detection": {"type": "semantic_vad",
                                                    "eagerness": cfg.get("rt_eagerness") or "auto",
                                                    # ㊿ 手动挡(官方VAD指南):speech_stopped 后前端按"朗读"开关发带 output_modalities 的 response.create——
@@ -5092,7 +5092,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
-                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak")
+                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

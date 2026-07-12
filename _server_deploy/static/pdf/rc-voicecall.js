@@ -190,7 +190,10 @@
       '.vc-pc-s{font-size:11.5px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
-      '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px}' +
+      '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px;display:flex;align-items:center;gap:6px;cursor:grab}' +
+      '.vc-if-hd span:first-child{flex:1}' +
+      '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
+      '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
       '.vc-if-wc{font-size:14px;color:#cdd9f2;margin-top:1px}' +
       '.vc-if-ws{font-size:12px;color:#8a9bb4;margin-top:2px}' +
@@ -617,7 +620,7 @@
     if (!card || !card.kind) return;
     // 75(用户设计):静默入库配听觉确认——卡片弹出时念一声"搜索完成"(仅通话中且当前形态有语音输出)
     if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
-    var html = '<div class="vc-if-hd">' + esc(card.title || '搜索结果') + '</div>' + _infoHtml(card);
+    var html = '<div class="vc-if-hd"><span>' + esc(card.title || '搜索结果') + '</span><span class="vc-grip" title="按住拖到屏幕底边=收入收藏夹">⠿</span></div>' + _infoHtml(card);
     var label = card.title || '搜索结果';
     // 77c(用户实测:字幕模式搜的天气,开侧栏后哪都看不到)——对话流**永远**插卡(紧跟工具卡的时序位置,
     // 自动展开、无✕、可长按选中带入);侧栏关着时**另外**弹浮层镜像即时可见
@@ -1491,6 +1494,7 @@
     ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
       el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
     });
+
     el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
     el.addEventListener('pointerdown', function () {
       if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
