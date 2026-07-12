@@ -734,3 +734,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **101 Grok 一句变三句根修(实测铁证)**:时间线同秒 2-3 条 q=程序性重复;真音频喂 xAI 抓事件序列——**xAI 同一轮发 2-3 个 `conversation.item.input_audio_transcription.completed`(官方文档只记载 .updated,被实测推翻)**,叠加 97a 因"文档无 completed"而加的 response.done 定稿补丁=三条。修:completed 按 item_id 去重(`_tr_done` set,OpenAI 一轮一个去重无害)+updated 只做 interim 字幕+撤 done 定稿。"接通没响应"=VAD 0.85 太钝(100 已降 0.5)+goto_page 风暴堵死(100 已熔断)。
 
+## 批次 102(2026-07-13)工具静默统一表
+
+用户实测:关了 rt_tool_reply,goto_page 后模型仍口头回报——silent 此前是逐工具散落打标(搜索/配图/视频三个专段),其它动作型工具漏网。收敛为 voice-tool 后处理的**统一静默表** `_SILENT_ACT = {goto_page, highlight, auto_highlight, add_vocab, open_book}`:动作/展示型(结果用户已在界面看到)成功即打 silent+统一 note(「已在界面生效…本轮不要发言」);失败不静默(要告知)。三个专段(个性 note)保留同机制同区域。分类原则:**信息型**(read_page/lookup_word/see_*/recall_*/translate…结果=回答原料)绝不静默;**任务型**(make_anki/make_note)保留简短确认(有等待语设计)。relay/前端 gate(silent && !rt_tool_reply → no_create)本来就统一,无需动。
+

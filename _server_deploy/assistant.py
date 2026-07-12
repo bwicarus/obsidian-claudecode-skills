@@ -4587,6 +4587,14 @@ def assistant_voice_tool():
         res["silent"] = True
         res["_note"] = ("视频已用卡片显示在用户屏幕上(" + "、".join([v0.get("title", "")[:24] for v0 in res["videos"][:4]]) +
                         ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动复述标题。")
+    # 102(用户设计):**统一静默表**——动作/展示型工具(结果用户已在界面上看到:翻页/高亮/加生词/开书)成功即静默,
+    # 不再逐工具散落打标;与上面搜索/配图/视频三个专段(带个性 note)同一机制(silent 标),relay/前端按 rt_tool_reply 统一 gate。
+    # 信息型工具(read_page/查词/看图/回顾…结果=回答原料)绝不进此表——静默它们=问了白问。任务型(make_*)保留简短确认。
+    _SILENT_ACT = {"goto_page", "highlight", "auto_highlight", "add_vocab", "open_book"}
+    if isinstance(res, dict) and not res.get("error") and name in _SILENT_ACT and not res.get("silent"):
+        res["silent"] = True
+        _n0 = res.get("note") or res.get("_note") or "操作已完成"
+        res["_note"] = str(_n0)[:200] + "(已在界面上生效,用户看得见)。本轮到此结束,不要发言;用户下次说话时正常继续。"
         res["_note"] = ("图片已用卡片显示在用户屏幕上(含:" +
                         "、".join([i0.get("concept") or "图" for i0 in res.get("images", [])][:6]) +
                         ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动描述图片内容。")
