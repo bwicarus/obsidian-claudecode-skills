@@ -1002,15 +1002,28 @@
       callBtnSpeaking(false);
       if (_rtc.wantTts && curAText) {   // ㊿b TTS代念:文字回复交豆包朗读通道;播放期禁麦(本地 WebAudio 不被 AEC 消)
         try {
-          speak(curAText);
+          // 57 韧性:朗读通道可能已死(rtcStart 的 _ttsShutdown/relay 重启掐线)——speak 会静默丢弃=没声。
+          // 先确保通道,没 ready 就重建并延迟发;禁麦恢复不再依赖 __vcTtsBusy(字幕句队列卡死=麦被禁 2min 的哑死根因),
+          // 改看真实播放:5s 内从未响=通道坏立即恢复;响过=播完恢复;60s 硬顶。
+          var _doSpeak = function () { try { speak(curAText); } catch (e) {} };
+          if (_tts.ws && _tts.ws.readyState === 1) _doSpeak();
+          else { try { _ttsEnsure(); } catch (e) {} setTimeout(_doSpeak, 900); }
           var mt0 = _rtc.mic && _rtc.mic.getAudioTracks()[0];
           if (mt0) {
             mt0.enabled = false;
+            var t0c = Date.now(), sawPlay = false;
             var chk0 = setInterval(function () {
-              var busy = false; try { busy = window.__vcTtsBusy ? window.__vcTtsBusy() : false; } catch (e) {}
-              if (!busy) { clearInterval(chk0); try { mt0.enabled = true; } catch (e) {} }
+              var playing = false; try { playing = _tts.playing.length > 0; } catch (e) {}
+              if (playing) sawPlay = true;
+              var dead = !sawPlay && Date.now() - t0c > 5000;          // 5s 没响=通道坏,别把麦耗死
+              var fin = sawPlay && !playing;                            // 响过且播完
+              var hard = Date.now() - t0c > 60000;                      // 硬顶
+              if (dead || fin || hard) {
+                clearInterval(chk0);
+                try { mt0.enabled = true; } catch (e) {}
+                if (dead) { try { _cap.pend = []; setSt('通话中 · 📢TTS(朗读通道未就绪,这轮没念出来)'); } catch (e) {} }
+              }
             }, 400);
-            setTimeout(function () { clearInterval(chk0); try { mt0.enabled = true; } catch (e) {} }, 120000);
           }
         } catch (e) {}
       }
