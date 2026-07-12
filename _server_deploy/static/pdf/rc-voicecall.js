@@ -1219,6 +1219,13 @@
     ['pointerup', 'pointercancel'].forEach(function (n0) { el.addEventListener(n0, _end); });
   }
   window.__vcDragToDock = function (el, payloadFn) { try { _dragToDock(el, payloadFn); } catch (e) {} };
+  window.__vcTtsWarm = function () { try { _ttsEnsure(); } catch (e) {} };   // 82:必须在点击手势**同步栈**内调(iOS AudioContext 手势激活)
+  window.__vcMicHold = function (on) {   // 82:历史 clip 经 <audio> 播放不在 WebRTC AEC 参考里——播放期禁麦防 AI 听到自己
+    try {
+      var mt = _rtc.mic && _rtc.mic.getAudioTracks && _rtc.mic.getAudioTracks()[0];
+      if (mt) mt.enabled = !on;
+    } catch (e) {}
+  };
   window.__vcFavBtn = function (el, payloadFn) {   // 78:星形「收藏」钮(信息卡/长回答气泡通用,「!」左侧)
     try {
       if (!el || el.querySelector(':scope > .vc-fav-b')) return;
@@ -1813,6 +1820,7 @@
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
       _rtc.turnText = (t === 'response.output_text.delta');   // 66c:本轮模态以实际事件为准(relay 发的工具轮 create 前端不经过,旧 turnText 会错)
+      if (!_rtc.turnText && !_rec.mr) _recStart();   // 82:音频轮的首个 delta=确认真在出声,此刻开录(文字轮永不误录)
       if (!_rtc.turnText) {   // 67:估计 2.1 音频播放结束时刻(转写字数≈5.5字/秒+缓冲)——TTS 代念等它说完再开口,不叠音
         if (!_rtc.aStart) _rtc.aStart = Date.now();
         _rtc.aEnd = _rtc.aStart + curAText.length / 5.5 * 1000 + 800;
@@ -1857,7 +1865,7 @@
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
       _rtc.aStart = 0;   // 67:新轮重置音频起点(aEnd 保留——文字轮要等上一音频轮播完才代念)
       try { if (_cap.cur) _cap.cur.classList.remove('vc-cap-route'); } catch (_) {}   // 64:路由字幕样式不残留到普通轮
-      if (!_rtc.turnText) _recStart(); else _recAbort();   // 66:音频轮开录(历史回放),文字轮无声不录
+      _recAbort();   // 82:created 时 turnText 还是上一轮旧值(66c delta 驱动的缝隙)——不再赌预期,等首个音频 delta 定性再开录
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
@@ -1896,7 +1904,7 @@
             }).catch(function () { onToolStatus({ status: 'error', tool: tool, label: '系统代提交失败' }); });
         })();
       }
-      var _clip0 = (!_rtc.turnText) ? _recFinish() : '';   // 66:本轮语音收尾(id 即时可用,blob 异步上传)
+      var _clip0 = _rec.mr ? _recFinish() : '';   // 66/82:有录音器在跑才收(启停已由实际模态驱动)
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clip0 ? { clip: _clip0 } : null); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库(+66 语音)
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;

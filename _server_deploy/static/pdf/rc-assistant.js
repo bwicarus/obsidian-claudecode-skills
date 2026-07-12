@@ -2135,6 +2135,7 @@
   var _clipAudio = null, _clipBtnCur = null;
   function _clipStop() {
     try { if (_clipAudio) { _clipAudio.pause(); _clipAudio = null; } } catch (e) {}
+    try { window.__vcMicHold && window.__vcMicHold(false); } catch (e) {}   // 82:播放结束/停止恢复麦
     if (_clipBtnCur) { _clipBtnCur.classList.remove('playing'); _clipBtnCur.textContent = '▶'; _clipBtnCur = null; }
   }
   function _attachClipBtn(el, m) {
@@ -2162,11 +2163,13 @@
       });
     }
     b.addEventListener('click', function () {
+      try { window.__vcTtsWarm && window.__vcTtsWarm(); } catch (e) {}   // 82:手势同步栈内预热(灰钮不出声根因:异步链里激活 AudioContext 被 iOS 拒)
       if (b.classList.contains('playing')) { _clipStop(); return; }
       _clipStop();
       if (m.clip) {
         var a = new Audio('/api/assistant/voice-clip/' + encodeURIComponent(m.clip));
         _clipAudio = a; _clipBtnCur = b; b.classList.add('playing'); b.textContent = '◼';
+        try { window.__vcMicHold && window.__vcMicHold(true); } catch (e) {}   // 82:<audio> 不在 AEC 参考里——播放期禁麦防通话 AI 听到
         a.onended = _clipStop;
         a.onerror = function () { _clipStop(); _ttsGen(); };   // 录音缺失(当时没传成)→ 降级 TTS 生成
         a.play().catch(function () { _clipStop(); _ttsGen(); });
