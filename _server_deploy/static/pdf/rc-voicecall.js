@@ -2096,9 +2096,12 @@
     ws = null; callBtnOn(false); callBtnSpeaking(false);
     if (_userHung) { setSt('已挂断'); return; }
     setSt('⚠ ' + reason + ',正在重连…');
-    setTimeout(function () { if (!_userHung && !_rtc.on) rtcStart(toggle._opts || {}); }, 800);
+    setTimeout(function () { if (!_userHung && !_rtc.on && !_connecting) rtcStart(toggle._opts || {}); }, 800);   // 93:_connecting=有人在拨,别叠
   }
   async function rtcStart(opts) {
+    // 93(用户实测双回答根因):单飞锁——通话已在/舞步进行中,任何来路的第二次拨号直接吞。
+    // 没有这把锁时,清空重拨与迟到的自动重连可各建一个 call,两个模型同时听同一句各答一条。
+    if (_rtc.on || _connecting) { try { console.warn('[vc] rtcStart 被单飞锁拦下(on=' + _rtc.on + ' connecting=' + _connecting + ')'); } catch (e) {} return; }
     var g = ++_gen;
     var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
@@ -2251,6 +2254,7 @@
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
     try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = '';
+    _connecting = false;   // 93:teardown 不经 teardown() 的路径(_rtcDead)也要解锁,否则单飞锁永久卡死
   }
 
   function _agentCtxQs() {   // ASR 语境注入(㉓):开 ASR 时把当前书/页带给 relay → 握手注入热词+页面语境

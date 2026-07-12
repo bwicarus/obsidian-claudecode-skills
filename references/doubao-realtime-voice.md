@@ -674,3 +674,17 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **拖动 ghost 看不见修复**:`_dragToDock` 开头 `injectCss()` 保险——`.vc-drag-ghost` 样式由 rc-voicecall `injectCss` 注入,通话 UI 从没初始化过时侧栏拖动的 ghost 是无样式裸 div(position:static 看不见=「没有卡片的图像」);另 ghost 加 `color/font-size` 兜底(clone 到 body 后侧栏后代选择器样式丢失)。
 - **拖出到字幕浮层**(用户设计):侧栏卡拖到阅读器区(`_sideOpen()` 且放手 x < 侧栏左缘-30,且不在收藏 dock 区)→ `_cardPush(raw,label,isHtml,force=true)`(新 force 参数绕过「侧栏开不弹」guard;容器 `#vc-cards` 在侧栏开时本就 display:none=`_cardsVisSync`,所以**放过去当下不可见**,关侧栏自然浮现——与「开侧栏卡片全隐」既定设计自洽)+ `_placeFx` 放置特效(紫色小卡从放手点飞向浮层堆叠位缩小淡出)+ toast「已放入字幕浮层(关闭侧栏可见)」。
 
+## 批次 93(2026-07-13)双 call 并存事故(问一句答两句+不查页面)
+
+**用户截图**:清空对话后马上提问「このページは何を書いてありますか?」→ 两条回答(一条讲"ホログラム"戛然而止,一条裸模型口吻"見えている情報がない,把 PDF 图片发给我")且没调 read_page。
+
+**取证(relay 日志钉死)**:两个 P2 ctl 连续挂上(`rtc_u7_E0qkb`/`rtc_u7_E0qke`)+ 用户同一句话被**转写两次**(00:51:38/00:51:41 两条转写 usage)= **两个 RTC call 同时活着,两个模型各听各答**。一条被 cancel(「ホログラム」幻听大概率来自音频在两连接间错位),另一条在清空后的空白语境里决策失误没调工具。
+
+**根因面**:`rtcStart` 没有并发单飞锁——清空重拨(`teardown→_connect(async fetch)→rtcStart`)与任何迟到的自动重连(`_rtcDead` 800ms setTimeout 只查 `!_userHung && !_rtc.on`,不查 `_connecting`)可各建一个 call;舞步中 `_rtc.on` 尚未置 true 的窗口有数百 ms~秒级(getUserMedia+SDP fetch)。
+
+**修复(三层防御)**:
+1. `rtcStart` 开头单飞锁:`if (_rtc.on || _connecting) return`(console.warn 留痕)——任何来路的第二次拨号物理进不来;`rtcTeardown` 补 `_connecting=false`(不经 teardown() 的 _rtcDead 路径也解锁,防锁死)。
+2. `_rtcDead` 800ms 重连 guard 补 `!_connecting`。
+3. relay `_RTC_CTL_LIVE[uid]` 取证:同 uid 新 ctl 挂上时旧的还在→`⚠ 同 uid 双 call 并存` 告警日志(不踢——iPad+PC 多设备并存合法,只留证据供下次诊断)。
+4. SP 加**页面内容铁律**:被问"这页写什么"而上下文无页文本→必须先 read_page;答"我看不到/把内容发给我"=错误行为(治裸模型式回答,与 see_ink 铁律同构)。
+

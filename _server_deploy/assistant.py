@@ -4655,6 +4655,8 @@ def assistant_rtc_session():
         _name = file_rel.rsplit("/", 1)[-1]
         parts.append(f"他正在读的书:《{_name}》(位置和页面内容会在他提问时以 system 消息给你;需要更多就调 read_page)。")
     parts.append(_route_line)
+    parts.append("**页面内容铁律**:他问『这页写了什么/这页讲什么』而上下文里没有当前页文本时,永远**先调 read_page**;"
+                 "回答『我看不到页面』或让他把内容/截图发给你,都是错误行为——你有工具,自己去看。")
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"
                  "**状态消息只是记录,永远不要对它们本身做回应或主动评论**;"
                  "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")

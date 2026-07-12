@@ -1786,6 +1786,9 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
 OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
+_RTC_CTL_LIVE = {}   # 93:uid → 最近挂上的 call_id(双 call 并存取证)
+
+
 async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
     """㊺P2 RtcController:sideband 控制面接管**工具执行**(唯一执行者)——
     复用 handle_openai._tool 语义:voice-tool 执行/client_action+tool_status 经控制 WS 下行/
@@ -1818,6 +1821,15 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         await bws.close()
         return
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
+    # 93(双回答事故取证):同 uid 已有活跃 ctl 还没退→双 call 并存(前端双拨/多设备)。只告警留证据,不踢(多设备合法)。
+    try:
+        _uid_m = call_id.split("_")[1] if call_id.startswith("rtc_") else ""
+        _old_c = _RTC_CTL_LIVE.get(_uid_m)
+        if _old_c and _old_c != call_id:
+            sys.stderr.write(f"[rtc-ctl] ⚠ 同 uid 双 call 并存: 旧={_old_c[:12]} 新={call_id[:12]}(前端双拨或多设备)\n")
+        _RTC_CTL_LIVE[_uid_m] = call_id
+    except Exception:
+        pass
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": ""}
     tool_cache = {}          # 只读工具缓存:name|args|page|ink哈希|sel哈希 → {out, ca};写工具成功=整体清空(域失效)
     shot_fut = {}            # need_shot 往返:shot_id → Future(带 ID 防两轮工具重叠时错配/迟到截图被下一请求接走)
