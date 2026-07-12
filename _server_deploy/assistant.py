@@ -1553,9 +1553,14 @@ def _t_web_search(args, ctx):
             # 70(用户设计):结构化结果卡——卡片经 client_action 显示(侧栏卡/字幕模式浮层),
             # 2.1 只拿 brief=「已显示+一句概况」,不用念细节(与 route 同哲学:知道任务完成即可)
             brief = card.get("brief") or (card.get("data") or {}).get("text") or card.get("title") or "结果已显示"
+            idx = ""
+            if card["kind"] == "news":   # 70c(用户指正):给 2.1 一份条目索引——追问"第二条是什么"时它知道有哪些,不用重搜
+                _ts = [it.get("t") or "" for it in (card.get("data") or {}).get("items") or [] if it.get("t")]
+                if _ts:
+                    idx = " 卡片条目:" + ";".join(_ts[:5]) + "。"
             return {"ok": True, "kind": card["kind"],
-                    "note": "搜索结果已用卡片显示在用户屏幕上。口头只说一句概况:" + brief +
-                            "(不要念卡片细节,不要重复列表内容;用户想深入会自己看或追问)",
+                    "note": "搜索结果已用卡片显示在用户屏幕上。口头只说一句概况:" + brief + "。" + idx +
+                            "(不要念卡片细节;用户想深入会自己看或追问)",
                     "client_action": {"fn": "renderInfoCard", "args": [card]}}
         if r.get("answer"):
             return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],
