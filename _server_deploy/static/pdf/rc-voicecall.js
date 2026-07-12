@@ -2395,6 +2395,9 @@
   }
   async function start(opts) {
     opts = opts || {};
+    // 108(用户实测 Grok 多连接并存):单飞锁——93 只锁了 rtcStart,WS 引擎这条路漏配。
+    // ws 活着/舞步进行中,任何来路的第二次拨号直接吞(teardown/断线都会把 ws 置 null,合法重拨不受影响)。
+    if (ws || _connecting) { try { console.warn('[vc] start 被单飞锁拦下(ws=' + !!ws + ' connecting=' + _connecting + ')'); } catch (e) {} return; }
     // 新连接 = relay 端 book 状态全新 → 指纹清零,让 __vcSyncNow 下一轮把选中/墨迹/页码重推上去
     // (旧代码重连/🧹后指纹残留 → 状态永不重推,relay 不知道选中和圈画)
     _stateFp = null; _inkFp = '';
@@ -2436,6 +2439,7 @@
       toggle._fresh = false;
       var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
       ws = new WebSocket(proto + location.host + '/voice-rt' + qs);
+      if (_dead()) { try { ws.close(); } catch (e) {} ws = null; _cleanLocal(); return; }   // 108:过期回合不许留活连接
       _connecting = false;   // ws 已赋值:_ttsEnsure 的 !ws gate 接棒
       ws.binaryType = 'arraybuffer';
       ws.addEventListener('open', function () {   // 99:回声桥判定(auto=检测到耳机就直连;总是/关闭按设置)
