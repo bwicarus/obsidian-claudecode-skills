@@ -1402,6 +1402,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         return
     _bridge = {"pc": None, "q": None, "pend": b""}   # 99 WebRTC 桥(纯音频面);q=None=未建(ws 音频照旧)
     _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
+    _tr_done = set()   # 101:转写 completed 去重(xAI 同轮多发)
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
     pend_trunc = {"id": None, "fb": 0}  # 打断后待 truncate:等前端回报**真实已播毫秒**(600ms 兜底用已转发字节——它远超实际已播,官方语义是"用户实际听到的毫秒")
     cur_a = {"txt": ""}
@@ -1688,17 +1689,21 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                 pass
                     asyncio.create_task(_trunc_fb())
             elif t == "conversation.item.input_audio_transcription.completed":
+                # 101(实测铁证):xAI 同一轮发 2-3 个 completed(文档未记载)→"一句话重复三句"。按 item_id 去重;
+                # OpenAI 一轮一个,去重无害。item_id 缺失时按文本+近邻兜底。
                 txt = (e.get("transcript") or "").strip()
-                if txt:
+                _iid = e.get("item_id") or ("~" + txt[:40])
+                if txt and _iid not in _tr_done:
+                    _tr_done.add(_iid)
+                    if len(_tr_done) > 200:
+                        _tr_done.clear()
                     await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": False}]}}, ensure_ascii=False))
                     _vlog("q", text=txt, page=book.get("page") or page, book=file_rel)
             elif t == "conversation.item.input_audio_transcription.updated":
-                # 97a(xAI 形制):.updated=累积全文可修正,且官方未记载 .completed——先当 interim 下发(前端覆盖式显示);
-                # 轮次落库以最后一次为准(is_interim=True 不触发前端定稿逻辑,避免每次修正都落一条)
+                # 101:xAI 的 .updated=累积全文可修正——只做 interim 实时显示(前端覆盖式);定稿由 completed(上面,已去重)负责
                 txt = (e.get("transcript") or "").strip()
                 if txt:
                     await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": True}]}}, ensure_ascii=False))
-                    book["_grok_tr"] = txt   # 暂存;response.done 时定稿
             elif t == "response.function_call_arguments.done":
                 name = e.get("name") or ""
                 try:
@@ -1715,10 +1720,6 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 elif name:
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
             elif t == "response.done":
-                if book.get("_grok_tr"):   # 97a:grok 转写定稿(最后一次 .updated 全文=本轮用户句)
-                    _t9 = book.pop("_grok_tr")
-                    await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": _t9, "is_interim": False}]}}, ensure_ascii=False))
-                    _vlog("q", text=_t9, page=book.get("page") or page, book=file_rel)
                 if cur_a["txt"].strip():
                     _vlog("a", text=cur_a["txt"][:2000], page=book.get("page") or page, book=file_rel)
                     cur_a["txt"] = ""
