@@ -781,3 +781,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **待实测清单(用户点名)**:①response.create 是否接受 per-response 文字模态(四态迁移前提);②纯文字轮是否零音频费;③文字轮后能否切回语音;④工具回填后能否纯文字输出;⑤日本→us-east-1 真实首音延迟;⑥iPad WS/WebAudio 回声表现(桥=治本,半双工=兜底)。另:reasoning.effort 现用 none(低延迟);调研称 high 工具选择更可靠——工具误用高发时改 high 或做成设置。工具静默(113)已同语义:并行工具单 create 的要求因 parallel_tool_calls=False(串行)天然满足;"工具完成时上段音频还在播"的响应仲裁=grok 手动模式下待观察(RTC 有 epoch 体系)。
 
+## 批次 115-116(2026-07-13)"一句话答好几遍"根修:延迟提交反悔窗
+
+**115 取证**:服务端记账证同一时刻仅一个 grok 会话(用户怀疑的"两个模型并存"排除);双相似回答=单会话双响应。create 来源日志(turn_end/tool)+created/done/status+VAD 边界全打点。
+
+**116 根修(用户直觉"发送了很多次"的精确版)**:一句话被 0.8s hangover 切成多轮——句中喘气>0.8s=判"说完"→commit+create→模型答前半句;后半句又一轮→再答一次(且只有半句语境=答非所问/自由发挥)。修:**延迟提交**(端点检测标准做法)——hangover 到期先置 inactive+启动 450ms 反悔窗定时器;窗内又开口=cancel 定时器**同轮继续**(不 turn_start=不打断不焚图,反悔窗期间静音帧在预滚里补发=音频连续);窗到期才真 commit+create。体感应答延迟=0.8+0.45≈1.25s。另修**响应竞态窗**:create 已发但 response.created 未到时打断信号漏掉(busy 还 false)→旧响应照跑=双答另一来源;`pend_resp` 标志覆盖该窗,turn_start 时 busy或pend_resp 都 cancel。
+
