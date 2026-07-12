@@ -4632,9 +4632,12 @@ def assistant_rtc_session():
                             "没搜到就换更通用的词再试一次,再没有就如实说,绝不编链接或输出 markdown 图片语法。")}
     # 工具 description=目录行原文(本就简洁:全量合计≈3.7k 字,"用途+args"结构,符合官方§10.1 的简洁要求)。
     # [:280] 只是防御 cap(防未来有人写出长目录行),现存目录行零截断;_vo 覆盖项(search_image)保留完整。
+    # 75(用户裁定):read_selection **永久不挂**——选中内容程序保证经 state 通道注入上下文,
+    # 工具是纯重复入口(工具表每次会话恒定一致=前缀缓存无伤;长选中引导 read_page 该页)
+    _RTC_DROP = {"read_selection"}
     tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[: (1024 if n in _vo else 280)],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
-             for n, (d, _) in TOOLS.items()]
+             for n, (d, _) in TOOLS.items() if n not in _RTC_DROP]
     tools.append({"type": "function", "name": "deep_think",
                   "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
                   "parameters": {"type": "object", "properties": {"question": {"type": "string"}},

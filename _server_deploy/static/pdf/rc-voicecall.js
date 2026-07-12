@@ -147,7 +147,7 @@
       '.vc-if-fd{font-size:12.5px;color:#b8c6e2;margin-top:3px}' +
       '.vc-if-g{font-size:13.5px;line-height:1.55}' +
       '.vc-if-srcs{margin-top:7px;font-size:11px}.vc-if-srcs a{color:#7ea2e6;text-decoration:none}' +
-      '.vc-pinnable{-webkit-user-select:none;user-select:none}' +
+      '.vc-pinnable{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
       '.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.85),0 12px 40px rgba(0,0,0,.4) !important;border-radius:16px}' +
       '.asst-msg.vc-if{max-width:96%;width:min(100%,340px)}' +
       // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
@@ -521,14 +521,17 @@
       lpT = setTimeout(_fire, 600);
     });
     el.addEventListener('pointermove', function (ev) {
-      if (lpT && (Math.abs(ev.clientX - lpX) + Math.abs(ev.clientY - lpY)) > 8) { clearTimeout(lpT); lpT = null; }   // 拖动=取消长按
+      if (lpT && (Math.abs(ev.clientX - lpX) + Math.abs(ev.clientY - lpY)) > 14) { clearTimeout(lpT); lpT = null; }   // 拖动=取消长按(75:8px 手指按住必抖过=长按永远触发不了的根因,放宽)
     });
+    el.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });   // 75:iOS 长按系统菜单会抢手势
     ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evn) {
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
   function renderInfo(card) {
     if (!card || !card.kind) return;
+    // 75(用户设计):静默入库配听觉确认——卡片弹出时念一声"搜索完成"(仅通话中且当前形态有语音输出)
+    if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
     var html = '<div class="vc-if-hd">' + esc(card.title || '搜索结果') + '</div>' + _infoHtml(card);
     var label = card.title || '搜索结果';
     if (_sideOpen()) {
@@ -1062,7 +1065,7 @@
       if (sel === _rtc.sel) return;
       _rtc.sel = sel;
       _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它;' +
-        (sel.length <= 200 ? '**选中内容已完整在此,直接使用,不必调 read_selection**' : '选中较长已截断,需要完整内容才调 read_selection') + ')') :
+        (sel.length <= 200 ? '**选中内容已完整在此,直接使用**' : '选中较长已截断,需要完整上下文可 read_page 当前页') + ')') :
         '用户当前没有选中文字') + ';状态记录,不要回应本条)');
     } else if (t === 'text' && j.content) {
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
