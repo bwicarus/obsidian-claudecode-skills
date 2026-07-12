@@ -190,7 +190,8 @@
       '.vc-pc-s{font-size:11.5px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
-      '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px;display:flex;align-items:center;gap:6px;cursor:grab}' +
+      '.vc-if-hd{font-size:12px;color:#c3cee6;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
+      'background:rgba(255,255,255,.06);border-radius:9px;font-weight:600}' +
       '.vc-if-hd span:first-child{flex:1}' +
       '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
       '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
@@ -616,28 +617,35 @@
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
+  function _infoCardEl(card) {   // 87:构一张侧栏信息卡(实时与历史回放共用——刷新后卡永远还是卡)
+    var label = card.title || '搜索结果';
+    var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
+    var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
+    d.innerHTML = html;
+    _pinBind(d, label, function () { return _infoText(card); });
+    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}
+    try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
+    try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
+    return d;
+  }
+  window.__vcInfoCardEl = function (card) { try { return (card && card.kind) ? _infoCardEl(card) : null; } catch (e) { return null; } };
   function renderInfo(card) {
     if (!card || !card.kind) return;
     // 75(用户设计):静默入库配听觉确认——卡片弹出时念一声"搜索完成"(仅通话中且当前形态有语音输出)
     if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
-    var html = '<div class="vc-if-hd"><span>' + esc(card.title || '搜索结果') + '</span><span class="vc-grip" title="按住拖到屏幕底边=收入收藏夹">⠿</span></div>' + _infoHtml(card);
     var label = card.title || '搜索结果';
-    // 77c(用户实测:字幕模式搜的天气,开侧栏后哪都看不到)——对话流**永远**插卡(紧跟工具卡的时序位置,
-    // 自动展开、无✕、可长按选中带入);侧栏关着时**另外**弹浮层镜像即时可见
     var th = document.getElementById('asst-thread');
-    if (th) {
-      var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
-      d.innerHTML = html;
-      _pinBind(d, label, function () { return _infoText(card); });
-      try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}   // 77b:「!」详情
-      try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}   // 78:☆ 收藏
-      try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}   // 81:拖到底边=收入收藏夹
-      th.appendChild(d); th.scrollTop = th.scrollHeight;
-    }
+    if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; }
     if (!_sideOpen()) {
+      var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
       var c = _cardPush(html, label, true);   // 字幕模式:浮层镜像(html)
       if (c) _pinBind(c.el, label, function () { return _infoText(card); });
     }
+    // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
+    try {   // ⚠EPUB 自有历史(epub-convo)结构不同,card 落库暂只走 PDF 主历史
+      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
+    } catch (e) {}
   }
   function renderImgs(imgs) {   // ㉜:语音 search_image 结果 → 真实图卡进侧栏对话流(点开原条目页)
     if (!imgs || !imgs.length) return;

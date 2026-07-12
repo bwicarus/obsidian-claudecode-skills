@@ -692,6 +692,12 @@
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +
+    '#asst-thread{overscroll-behavior:contain}' +   // 87:侧栏滚到头不再把滚动漏给底下的阅读器
+    '#side-pane-asst,#ep-side{overscroll-behavior:contain}' +
+    '.vc-bub-hd{display:flex;align-items:center;gap:6px;margin:-3px -4px 6px;padding:4px 8px;border-radius:8px;' +
+    'background:rgba(255,255,255,.06);cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
+    '.vc-bub-t{flex:1;font-size:11.5px;color:#aab8d4;font-weight:600}' +
+    '.vc-bub-hd .vc-grip{flex:none;color:#6f7d9e;font-size:12px;letter-spacing:1px}' +
     '.vc-inf-b{position:absolute;right:6px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
     'background:rgba(255,255,255,.1);color:#8fa0c2;font-size:11px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}' +
     '.vc-inf-pop{position:absolute;right:4px;bottom:26px;z-index:60;min-width:210px;max-width:270px;padding:10px 12px;border-radius:12px;' +
@@ -1856,15 +1862,7 @@
           }
         } catch (e) {}
         try { if (arguments[2].pin && window.__vcPinBind) window.__vcPinBind(_vTurnEl, arguments[2].pin.label, arguments[2].pin.textFn); } catch (e) {}   // 79:长按=全文带入
-        try {   // 86:气泡顶部把手条(⠿)——按住拖到屏幕底边=收入收藏夹
-          if (arguments[2].pin && window.__vcDragToDock && !_vTurnEl.querySelector(':scope > .vc-bub-hd')) {
-            var _p0 = arguments[2].pin;
-            var _hd0 = document.createElement('div'); _hd0.className = 'vc-bub-hd';
-            _hd0.innerHTML = '<span class="vc-grip" title="按住拖到屏幕底边=收入收藏夹">⠿</span>';
-            _vTurnEl.insertBefore(_hd0, _vTurnEl.firstChild);
-            window.__vcDragToDock(_vTurnEl, function () { var t0 = _p0.textFn(); return { label: _p0.label, raw: t0, isHtml: false, text: String(t0).slice(0, 4000) }; });
-          }
-        } catch (e) {}
+        try { _bubDecor(_vTurnEl, arguments[2].pin && arguments[2].pin.label, arguments[2].pin && arguments[2].pin.textFn); } catch (e) {}   // 86/87:标题把手条
       } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }
@@ -2158,6 +2156,18 @@
     var _n = (HOST.locNoun && HOST.locNoun()) || '页';   // 位置量词按 reader(PDF=页 / EPUB=章)
     addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>');
   }
+  // ── 87:气泡装饰(标题整行把手,voiceMsg 实时与 loadHistory 回放共用——"消息记录中的卡片永远是卡片")──
+  function _bubDecor(el, label, textFn) {
+    if (!el || !label || !textFn || el.querySelector(':scope > .vc-bub-hd')) return;
+    var hd0 = document.createElement('div'); hd0.className = 'vc-bub-hd';
+    hd0.innerHTML = '<span class="vc-bub-t">' + esc(label) + '</span><span class="vc-grip">⠿</span>';
+    hd0.title = '按住此栏拖到屏幕底边=收入收藏夹;长按气泡=带入对话';
+    el.insertBefore(hd0, el.firstChild);
+    try {
+      if (window.__vcDragToDock) window.__vcDragToDock(el, function () { var t0 = textFn(); return { label: label, raw: t0, isHtml: false, text: String(t0).slice(0, 4000) }; });
+      if (window.__vcPinBind) window.__vcPinBind(el, label, textFn);
+    } catch (e) {}
+  }
   // ── 66 历史语音回放(用户设计):每条 AI 消息一个播放钮——通话时录下的原声(clip)直接播;
   //    没有录音(文字轮/旧记录)=灰钮,点击用 TTS 现场念+同时录下上传,并回写历史(clip-attach)变紫 ──
   var _clipAudio = null, _clipBtnCur = null;
@@ -2215,10 +2225,15 @@
             var uel = addMsg('asst-u', esc(m.content));
             try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
           }
+          else if (m.card && window.__vcInfoCardEl) {   // 87:结构化卡回放——刷新后仍是可交互的卡(长按/把手/详情)
+            var ce = window.__vcInfoCardEl(m.card);
+            if (ce) { thread.appendChild(ce); }
+          }
           else {
             var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
             renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
             try { _attachClipBtn(el, m); } catch (_) {}   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
+            try { if (m.via === 'voice' && (m.content || '').length > 120) _bubDecor(el, 'AI 回答', (function (t0) { return function () { return t0; }; })(m.content || '')); } catch (_) {}   // 87:历史语音长文=同样可拖可长按
             try { _renderFollowups(el, _pf.followups); } catch (_) {}
             try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
             if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (_) {} }   // 视频卡刷新回放(镜像 EPUB 阶段C)

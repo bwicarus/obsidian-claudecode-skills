@@ -504,7 +504,7 @@ def _convo_append(uid, role, content, meta=None):
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip"):   # via 标来源;clip=66 该轮语音录音 id(历史回放)
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card"):   # clip=语音录音;card=87 结构化卡(历史回放仍是卡)
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -4911,10 +4911,16 @@ def assistant_log_external():
     n = 0
     for role, key in (("user", "user"), ("assistant", "assistant")):
         txt = (b.get(key) or "").strip()
+        card = b.get("card") if (role == "assistant" and isinstance(b.get("card"), dict)
+                                 and len(json.dumps(b.get("card"), ensure_ascii=False)) < 8000) else None
+        if not txt and card:   # 87:卡片可独立成一条(content=概要,结构在 meta.card)
+            txt = str(card.get("brief") or card.get("title") or "[卡片]")[:300]
         if txt:
             m2 = dict(meta)
             if role == "assistant" and b.get("clip"):   # 66:通话录下的该轮语音,历史回放用
                 m2["clip"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["clip"]))[:40]
+            if card:
+                m2["card"] = card
             _convo_append(uid, role, txt[:8000], m2)
             n += 1
     try:
