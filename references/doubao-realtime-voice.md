@@ -589,3 +589,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 68 read_page 参数别名(2026-07-12 用户截图"翻页后还读上一页")
 
 21:05 日志实锤:模型传 `{"pages":[9]}` 被静默忽略(实现只认单数 `page`)→回退 ctx 旧页码=goto_page 都成功了还读到第 8 页;21:06 模型自己试出 `{"page":9}` 才对。**根因:工具返回结构里是复数 `"pages":[N]`,模型照着返回学传参**,而宽松 schema(additionalProperties)不校验=静默吞。修:`_t_read_page` 接受 pages 数组/标量别名(单数优先);冒烟三形态全过。**教训:工具的参数名和返回字段名不一致=模型必然踩;宽松 schema 下所有合理别名都要收。**
+
+### 69 文字卡拖动/置顶+工具可视化升级(2026-07-12 用户三需求)
+
+①**卡片拖动**:按住头部(vc-card-hd,cursor:grab/touch-action:none)pointer 拖——拖超 6px=`c.free` 脱离堆叠自由停放(_cardLayout 只排非 free 卡);②**点击置顶**:任意 pointerdown → `_cards.topZ++` 抬 z-index;③**工具可视化**:`_toolIcon(name)` 按类别映射 8 个 SF 线条 SVG(read/search/eye/write/nav/route/dict/net/gear)——字幕状态行升级(capStatus 支持 {html,cls,hold} 对象:**running=图标+label+小转圈,done=图标+绿✓停留 2.5s,error=红⚠停留 4s**;旧行为 done 立即清=侧栏关着的用户什么都看不见的根因)+对话流工具卡 label 前加同款图标。

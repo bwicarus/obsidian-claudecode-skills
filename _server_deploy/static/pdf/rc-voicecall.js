@@ -105,6 +105,13 @@
       '#vc-cap .vc-cap-u{background:rgba(10,132,255,.62)}' +   // 用户句:iMessage 蓝,与 AI 深灰一眼区分
       // "正在听"等待指示:mic 线条图标 + 三点依次跳动(ASR 通话空闲时常驻)
       '#vc-cap .vc-cap-wait{display:flex;align-items:center;gap:7px;padding:6px 13px;background:rgba(28,28,30,.48)}' +
+      '#vc-cap .vc-cap-st{display:flex;align-items:center;gap:7px}' +
+      '#vc-cap .vc-cap-st svg{width:14px;height:14px;flex:none;opacity:.9}' +
+      '#vc-cap .vc-cap-st.vc-st-ok{background:rgba(38,58,44,.62);color:#c7f0d2}' +
+      '#vc-cap .vc-cap-st.vc-st-err{background:rgba(70,36,36,.62);color:#ffd0cc}' +
+      '#vc-cap .vc-cap-st .vc-tks.ok{color:#30d158;font-weight:600}' +
+      '#vc-cap .vc-cap-st .vc-tks.err{color:#ff6961}' +
+      '.vc-spin-s{width:11px;height:11px;border-width:1.6px;flex:none}' +
       '#vc-cap .vc-cap-wait svg{width:13px;height:13px;opacity:.8;flex:none}' +
       '#vc-cap .vc-cap-wait i{width:4px;height:4px;border-radius:50%;background:#fff;opacity:.3;animation:vcCapDot 1.4s ease-in-out infinite}' +
       '#vc-cap .vc-cap-wait i:nth-of-type(2){animation-delay:.22s}' +
@@ -189,6 +196,7 @@
       '.vc-tc-h:active{background:rgba(255,255,255,.06)}' +
       '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:#30d158}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
       '.vc-tc-l{flex:1;color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-tc-i{flex:none;display:inline-flex;color:#8fa4cc}.vc-tc-i svg{width:13px;height:13px}' +
       '.vc-tc-t{flex:none;color:#8a9bb4;font-size:11px}' +
       '.vc-tc-x{flex:none;color:#8a9bb4}' +
       '.vc-tc-b{padding:2px 10px 8px;border-top:1px solid rgba(255,255,255,.07)}' +
@@ -234,16 +242,44 @@
   //    调用中转圈、完成 ✓、出错 ⚠;点击弹出调用详情(工具/args/耗时/实际输出,仿「!」弹窗模式)。──
   // v3-⑯b(用户设计):转圈按钮=纯"进行中"指示——调用开始现身旋转,**点击即中止**,
   //   结束/中止后自动消失;查记录的职责全归对话流详情卡(threadToolCard)。
+  // 69 工具图标(用户需求:不同工具不同符号):按类别映射 SF 线条 SVG(currentColor)
+  var _TICONS = {
+    read: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3 2.8h7.5L13 5.3v8H3z"/><path d="M5.4 7h5.2M5.4 9.3h5.2M5.4 11.6h3.4"/></svg>',
+    search: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.3 10.3L13.6 13.6"/></svg>',
+    eye: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8z"/><circle cx="8" cy="8" r="1.9"/></svg>',
+    write: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M9.8 3.2l3 3L6 13H3v-3z"/><path d="M8.4 4.6l3 3"/></svg>',
+    nav: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h9M8.6 4.2L12.4 8l-3.8 3.8"/></svg>',
+    route: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h3.2C8 8 8 4.5 10.8 4.5H13M5.2 8C8 8 8 11.5 10.8 11.5H13"/><path d="M11.4 2.8L13.2 4.5l-1.8 1.7M11.4 9.8l1.8 1.7-1.8 1.7"/></svg>',
+    dict: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3.5 2.5h9v11h-9a1.2 1.2 0 0 1 0-2.4h9"/><path d="M6.2 8.6L8 4.8l1.8 3.8M6.7 7.6h2.6"/></svg>',
+    net: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c-3.4 3.4-3.4 7.8 0 11.2M8 2.4c3.4 3.4 3.4 7.8 0 11.2"/></svg>',
+    gear: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 2.6v1.7M8 11.7v1.7M2.6 8h1.7M11.7 8h1.7M4.2 4.2l1.2 1.2M10.6 10.6l1.2 1.2M11.8 4.2l-1.2 1.2M5.4 10.6l-1.2 1.2"/></svg>'
+  };
+  function _toolIcon(name) {
+    name = String(name || '');
+    if (/^(route_to_text|deep_think)/.test(name)) return _TICONS.route;
+    if (/^see_/.test(name)) return _TICONS.eye;
+    if (/^(web_search)/.test(name)) return _TICONS.net;
+    if (/^(search|find|recall)/.test(name)) return _TICONS.search;
+    if (/^(read|summarize|toc|page_vocab)/.test(name)) return _TICONS.read;
+    if (/^(make|add|highlight|note|mark)/.test(name)) return _TICONS.write;
+    if (/^(goto|turn|go_to)/.test(name)) return _TICONS.nav;
+    if (/^(translate|dict|lookup)/.test(name)) return _TICONS.dict;
+    return _TICONS.gear;
+  }
   function onToolStatus(p) {
     p = p || {};
     var b = document.getElementById('vc-tool-btn'); if (!b) return;
+    var _ic = _toolIcon(p.tool || p.label);
     if (p.status === 'running') {
       b.style.display = 'flex'; b.className = 'running'; b.innerHTML = '<span class="vc-spin"></span>';
       b.title = '正在执行:' + (p.label || '工具') + '(点击中止)';
-      capStatus('⚙︎ ' + (p.label || '正在处理') + '…');   // 字幕兼状态显示(侧栏关着也能看到在干嘛)
+      capStatus({ html: _ic + '<span>' + esc(p.label || '正在处理') + '…</span><span class="vc-spin vc-spin-s"></span>', cls: 'run' });   // 69:图标+转圈
     } else {
       b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
-      capStatus(null);
+      // 69:完成/失败在字幕停留一下再走(旧行为=立即清,侧栏关着的用户什么都看不见)
+      if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok">✓</span>', cls: 'ok', hold: 2500 });
+      else if (p.status === 'error') capStatus({ html: _ic + '<span>' + esc(p.label || '工具') + '</span><span class="vc-tks err">⚠</span>', cls: 'err', hold: 4000 });
+      else capStatus(null);
       if (p.status === 'aborted') {
         var th = document.getElementById('asst-thread');
         if (th) { var a = document.createElement('div'); a.className = 'vc-tcard err'; a.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">⊘</span><span class="vc-tc-l">已中止</span></div>'; th.appendChild(a); th.scrollTop = th.scrollHeight; }
@@ -270,6 +306,7 @@
     if (p.rag) rows.push(['喂回给它播报的结果', p.rag]);
     else if (p.result_brief) rows.push(['结果', p.result_brief]);
     d.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">' + (ok ? '✓' : '⚠') + '</span>' +
+      '<span class="vc-tc-i">' + _toolIcon(p.tool || p.label) + '</span>' +
       '<span class="vc-tc-l">' + esc(p.label || p.tool || '工具') + '</span>' +
       (p.took_s != null ? '<span class="vc-tc-t">' + esc(p.took_s) + 's</span>' : '') +
       (p.cached ? '<span class="vc-tc-t">复用缓存</span>' : '') +
@@ -548,12 +585,25 @@
       _capEl(); _cap.wait.style.display = 'flex'; _capPlace(); _cap.el.classList.add('on');
     } else if (_cap.wait) _cap.wait.style.display = 'none';
   }
-  function capStatus(text) {   // 状态行(工具执行中):text=null 清除
-    if (text == null) { if (_cap.st) { _cap.st.style.display = 'none'; } _capMaybeHide(1200); return; }
+  var _capStT = null;
+  function capStatus(text) {   // 状态行(工具执行/完成):text=null 清除;字符串或 {html, cls, hold}(69)
+    if (_capStT) { clearTimeout(_capStT); _capStT = null; }
+    if (text == null) { if (_cap.st) { _cap.st.style.display = 'none'; _cap.st.className = 'vc-cap-line vc-cap-st'; } _capMaybeHide(1200); return; }
+    if (typeof text === 'object') {
+      if (!_capVisible()) return;   // 与字符串路径同 gate(侧栏开=对话流可见,状态行不重复)
+      _capEl();
+      if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
+      _cap.st.innerHTML = text.html || '';
+      _cap.st.className = 'vc-cap-line vc-cap-st' + (text.cls ? ' vc-st-' + text.cls : '');
+      _cap.st.style.display = 'flex';
+      _cap.el.classList.add('on');
+      if (text.hold) _capStT = setTimeout(function () { capStatus(null); }, text.hold);
+      return;
+    }
     if (!_capVisible()) return;
     _capEl();
     if (_cap.hideT) { clearTimeout(_cap.hideT); _cap.hideT = null; }
-    _cap.st.textContent = text; _cap.st.style.display = '';
+    _cap.st.textContent = text; _cap.st.className = 'vc-cap-line vc-cap-st'; _cap.st.style.display = '';
     _cap.el.classList.add('on');
   }
   function _capMaybeHide(delay) {   // 播完停留几秒再淡出(还在播/状态行亮着→再等);ASR 通话继续→句子清掉回"正在听"
@@ -916,9 +966,10 @@
   function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
   function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
   function _cardLayout() {
-    var n = _cards.list.length;
-    _cards.list.forEach(function (c, i) {
-      var k = n - 1 - i;   // 0=最新(最前)
+    var vis = _cards.list.filter(function (c) { return !c.free; });   // 69:拖走的卡脱离堆叠,自由停放
+    var n = vis.length;
+    vis.forEach(function (c, i) {
+      var k = n - 1 - i;
       c.el.style.transform = 'translate(' + (-k * 9) + 'px,' + (-k * 13) + 'px) scale(' + (1 - k * 0.035) + ')';
       c.el.style.zIndex = String(400 - k);
       c.el.style.opacity = k >= 3 ? '0' : '1';   // 只露 3 张,更旧的隐去(数量上限另有裁剪)
@@ -948,9 +999,30 @@
       if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = text; }
-    var c = { el: el, t: null };
+    var c = { el: el, t: null, free: false, dx: 0, dy: 0 };
     el.querySelector('.vc-card-x').addEventListener('click', function () { _cardClose(c); });
-    el.addEventListener('pointerdown', function () { if (c.t) { clearTimeout(c.t); c.t = null; } });   // 碰了=在读:取消自动消失
+    el.addEventListener('pointerdown', function () {
+      if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
+      _cards.topZ = (_cards.topZ || 500) + 1; el.style.zIndex = String(_cards.topZ);   // 69:点击=置顶
+    });
+    // 69:按住头部拖动(拖了=脱离堆叠自由停放;× 按钮除外)
+    var hd = el.querySelector('.vc-card-hd');
+    hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
+    hd.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('.vc-card-x')) return;
+      ev.preventDefault();
+      var sx = ev.clientX - c.dx, sy = ev.clientY - c.dy, moved = false;
+      try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
+      function mv(e2) {
+        c.dx = e2.clientX - sx; c.dy = e2.clientY - sy;
+        if (!moved && (Math.abs(c.dx) + Math.abs(c.dy)) > 6) { moved = true; c.free = true; _cardLayout(); }
+        if (moved) el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
+      }
+      function up() {
+        hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+      }
+      hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
+    });
     w.appendChild(el);
     _cards.list.push(c);
     while (_cards.list.length > 4) _cardClose(_cards.list[0]);
