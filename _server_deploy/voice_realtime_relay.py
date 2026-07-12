@@ -1773,6 +1773,92 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
             pass
 
 
+OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
+
+
+async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
+    """㊺P1 RtcController 骨架:以 call_id 挂 sideband WS(官方 server-side controls 通道),
+    P1 只做**事件镜像观察**(记日志,不执行任何动作)——验证通道稳定后 P2 起逐步接管工具/usage/注入。
+    浏览器控制 WS(bws)上行的 page/state/ink 先收下存 book(P3 用);断线=前端自动回退纯前端模式。"""
+    key = _openai_key()
+    if not key or not call_id:
+        try:
+            await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": False, "error": "缺 key/call_id"}}))
+        except Exception:
+            pass
+        await bws.close()
+        return
+    try:
+        ows = await websockets.connect(OPENAI_RT_CALL_URL + call_id,
+                                       additional_headers={"Authorization": f"Bearer {key}"},
+                                       max_size=16 * 1024 * 1024, open_timeout=10)
+    except Exception as ex:
+        sys.stderr.write(f"[rtc-ctl] sideband 连接失败 call={call_id[:12]}: {str(ex)[:100]}\n")
+        try:
+            await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": False, "error": str(ex)[:80]}}))
+        except Exception:
+            pass
+        await bws.close()
+        return
+    sys.stderr.write(f"[rtc-ctl] sideband 已挂 call={call_id[:12]} file={file_rel[:30]} p{page}\n")
+    book = {"page": page, "sel": "", "ink_strokes": None}
+    try:
+        await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True}}))
+    except Exception:
+        pass
+
+    async def _down():   # sideband → 观察镜像(P1 只记事件类型;P2 起在此接管工具/usage)
+        n = {}
+        async for raw in ows:
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                continue
+            t = ev.get("type") or "?"
+            n[t] = n.get(t, 0) + 1
+            if t == "response.done":
+                u = (ev.get("response") or {}).get("usage") or {}
+                sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
+                                 f"(P1 观察;记账仍由前端上报)\n")
+            elif t == "error":
+                sys.stderr.write(f"[rtc-ctl] err: {json.dumps(ev.get('error') or {})[:150]}\n")
+        sys.stderr.write(f"[rtc-ctl] sideband 关闭 call={call_id[:12]} 事件统计={json.dumps(n)[:300]}\n")
+
+    async def _up():   # 浏览器控制 WS → 状态收纳(P1 只存;P3 起在 speech_started 注入)
+        async for raw in bws:
+            if isinstance(raw, bytes):
+                continue
+            try:
+                j = json.loads(raw)
+            except Exception:
+                continue
+            t = j.get("type")
+            if t == "page":
+                book["page"] = j.get("page") or book["page"]
+                if j.get("text") is not None:
+                    book["page_text"] = str(j.get("text") or "")
+            elif t == "state":
+                book["sel"] = j.get("sel") or ""
+            elif t == "ink":
+                book["ink_strokes"] = j.get("strokes") or []
+
+    try:
+        done, pending = await asyncio.wait(
+            [asyncio.create_task(_down()), asyncio.create_task(_up())],
+            return_when=asyncio.FIRST_COMPLETED)
+        for p_ in pending:
+            p_.cancel()
+    finally:
+        try:
+            await ows.close()
+        except Exception:
+            pass
+        try:
+            await bws.close()
+        except Exception:
+            pass
+
+
 async def handle_browser(bws):
     """一个浏览器连接 = 一路豆包通话。ws URL 可带 ?file=<rel>&page=<n>(阅读器浮层传)→ 书页上下文注入。"""
     file_rel, page, fresh = "", 0, False
@@ -1786,6 +1872,12 @@ async def handle_browser(bws):
             await handle_agent(bws,
                                (q.get("file") or [""])[0],
                                int((q.get("page") or ["0"])[0] or "0"))
+            return
+        if m0 == "rtc":      # ㊺P1 RtcController:WebRTC 通话的服务端控制面(sideband,设计见 references/rtc-controller-design.md)
+            await handle_rtc_ctl(bws,
+                                 (q.get("call_id") or [""])[0],
+                                 (q.get("file") or [""])[0],
+                                 int((q.get("page") or ["0"])[0] or "0"))
             return
         file_rel = (q.get("file") or [""])[0]
         page = int((q.get("page") or ["0"])[0] or "0")

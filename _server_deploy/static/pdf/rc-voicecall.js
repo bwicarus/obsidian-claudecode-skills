@@ -1148,6 +1148,24 @@
       _userHung = false; _acquireWL();
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
       capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
+      // ㊺P1 RtcController 控制 WS(服务端 sideband 控制面,设计见 references/rtc-controller-design.md):
+      // P1 只建通道观察(relay 镜像事件);连不上=静默纯前端模式(现有代码即 fallback)。
+      try {
+        var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&call_id=' + encodeURIComponent(_rtc.callId) +
+                               '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
+        cw.onmessage = function (ev) {
+          try {
+            var m0 = JSON.parse(ev.data);
+            if (m0.event === 'rtc_ctl') { _rtc.ctl = !!(m0.payload && m0.payload.ok); }
+            else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
+            else if (m0.event === 'tool_status') onToolStatus(m0.payload || {});
+          } catch (e) {}
+        };
+        cw.onclose = function () { _rtc.ctl = false; _rtc.ctlWs = null; };   // 断线=回退纯前端(韧性)
+        cw.onerror = function () {};
+        _rtc.ctlWs = cw;
+      } catch (e) { _rtc.ctl = false; }
       _refreshSpeakTg();
     } catch (ex) {
       _connecting = false;
@@ -1159,6 +1177,8 @@
   function rtcTeardown() {
     _rtc.on = false;
     _rtcCapReset();
+    try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.close(); } } catch (e) {}
+    _rtc.ctlWs = null; _rtc.ctl = false;
     try { if (_rtc.dc) _rtc.dc.close(); } catch (e) {}
     try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
