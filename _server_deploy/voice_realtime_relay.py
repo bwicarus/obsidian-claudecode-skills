@@ -1862,7 +1862,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     async def _oa_route(intent: str):
         """route 档长文生成(61):调 webapp /route-text(Gemini flash SSE),delta 边收边经控制 WS
         下行给前端(显示+可选 TTS 代念,尽快开口);返回 (全文, err)。"""
-        full, err = "", ""
+        full, err, brief = "", "", ""
         try:
             async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=150) as hc:
                 async with hc.stream("POST", "/api/assistant/route-text",
@@ -1883,6 +1883,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                                 if seg:
                                     full += seg
                                     await bws.send(json.dumps({"event": "route_text", "payload": {"delta": seg}}, ensure_ascii=False))
+                            elif ev == "done" and data:
+                                try:
+                                    brief = (json.loads(data) or {}).get("summary") or ""
+                                except Exception:
+                                    brief = ""
                             elif ev == "err":
                                 err = "生成后端不可用"
                             ev, data = "", ""
@@ -1890,7 +1895,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             err = str(ex)[:100]
         if full:
             await bws.send(json.dumps({"event": "route_text", "payload": {"done": True, "text": full}}, ensure_ascii=False))
-        return full, ("" if full else (err or "空结果"))
+        return full, brief, ("" if full else (err or "空结果"))
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
@@ -1913,11 +1918,14 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     label = "文字路由(未启用)"
                 else:
                     label = "路由详答"
-                    full, rerr = await _oa_route(str(args.get("intent") or ""))
+                    full, rbrief, rerr = await _oa_route(str(args.get("intent") or ""))
                     if rerr:
                         ok, out = False, f"(文字生成失败:{rerr};请口头简要回答)"
                     else:
-                        out = "(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:" + full[:240] + ")"
+                        # 79(用户设计):与天气/新闻卡同逻辑——回填只有引擎写的**简介**(静默入库,全文在卡上;
+                        # 用户长按卡片时全文才进 2.1 上下文)
+                        out = ("(文字详答已显示在用户屏幕上,本轮到此结束。内容简介:" + (rbrief or full[:200]) +
+                               "。用户下次说话时若相关直接运用;想让你看全文他会长按卡片带入。)")
                         no_create = True   # 长文已显示(可选 TTS 代念),不再花一轮输出音频
             elif name == "read_selection" and (book.get("sel") or "").strip():
                 # 74(用户设计):选中内容早已随 state 在手——重复类工具程序短路,零 webapp 调用零延迟

@@ -1834,6 +1834,7 @@
         try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
         try { if (arguments[2].info && window.__asstInfoBtn) window.__asstInfoBtn(_vTurnEl, arguments[2].info); } catch (e) {}   // 77b:「!」详情
         try { if (arguments[2].fav && window.__vcFavBtn) window.__vcFavBtn(_vTurnEl, arguments[2].fav); } catch (e) {}   // 78:☆ 收藏(长回答也是独立卡)
+        try { if (arguments[2].pin && window.__vcPinBind) window.__vcPinBind(_vTurnEl, arguments[2].pin.label, arguments[2].pin.textFn); } catch (e) {}   // 79:长按=全文带入
       } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }

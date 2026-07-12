@@ -549,7 +549,7 @@
       var lb = label, i = 2;
       while (_pins.map[lb]) lb = label + '·' + (i++);   // label 唯一化(两次天气卡不互相顶掉)
       el.dataset.pinLabel = lb;
-      _pins.map[lb] = String(textFn()).slice(0, 700);
+      _pins.map[lb] = String(textFn()).slice(0, 2500);   // 79:长按=全文入脑(路由长文也放得下)
       _pins.els[lb] = el;
     } else {
       var lb0 = el.dataset.pinLabel || label;
@@ -1161,6 +1161,7 @@
   function _favMeta() {   // 元数据:书/页/触发这轮的问题——长回答离开会话也能自释
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
+  window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
   window.__vcFavBtn = function (el, payloadFn) {   // 78:星形「收藏」钮(信息卡/长回答气泡通用,「!」左侧)
     try {
       if (!el || el.querySelector(':scope > .vc-fav-b')) return;
@@ -1576,6 +1577,8 @@
                   _rtcCapFeed(full, false);
                   try { rst.feed(full, false); } catch (e) {}
                 }
+              } else if (ln.indexOf('data:') === 0 && ev2 === 'done') {
+                try { _rtcTool._rbrief = (JSON.parse(ln.slice(5).trim()) || {}).summary || ''; } catch (e) {}
               } else if (ln.indexOf('data:') === 0 && ev2 === 'err') err = '生成后端不可用';
             }
           }
@@ -1590,7 +1593,8 @@
         var okR = !!full;
         onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '路由详答', args: args, rag: (full || err).slice(0, 400) });
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
-                  output: okR ? ('(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:' + full.slice(0, 240) + ')') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
+                  output: okR ? ('(文字详答已显示在用户屏幕上,本轮到此结束。内容简介:' + (_rtcTool._rbrief || full.slice(0, 200)) + '。用户下次说话时若相关直接运用;想让你看全文他会长按卡片带入。)') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
+        _rtcTool._rbrief = '';
         if (!okR) _rtcRespCreate('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=让它口头补救
       })();
       return;
@@ -1756,7 +1760,8 @@
       if (_rtc.turnText && curAText) {
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
           tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) },
-          fav: (function (txt) { return function () { return { label: 'AI 回答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(curAText) }); } catch (e) {}   // 67/77b/78:终态+「!」+☆(闭包快照防串轮)
+          fav: (function (txt) { return function () { return { label: 'AI 回答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(curAText),
+          pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) } }); } catch (e) {}   // 67/77b/78/79
         try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
@@ -1941,11 +1946,15 @@
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
                 try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' },
-                  fav: (function (txt) { return function () { return { label: '路由详答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(fullR) }); } catch (e2) {}
+                  fav: (function (txt) { return function () { return { label: '路由详答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(fullR),
+                  pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) } }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}
-                try { _cardPush(fullR, '路由详答'); } catch (e2) {}   // 65:侧栏关着时弹磨砂卡
+                try {
+                  var cR = _cardPush(fullR, '路由详答');
+                  if (cR) _pinBind(cR.el, '路由详答', (function (txt) { return function () { return txt; }; })(fullR));   // 79:长按=全文带入
+                } catch (e2) {}
                 _rtc._route = null;
               }
             }

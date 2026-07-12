@@ -4754,7 +4754,8 @@ def assistant_route_text():
             ptext = ""
     sysmsg = ("你是阅读学习助手的文字详答引擎:用户在语音通话中提了需要长篇文字回答的问题,语音助手转给你写正文。"
               "直接输出最终回答——结构清晰、要点完整但不啰嗦,可用 Markdown(数学严格用 $...$ 包裹,禁止反引号包数学);"
-              "第一句就进入正题,不写「好的/当然」等开场白。用用户提问的语言回答。")
+              "第一句就进入正题,不写「好的/当然」等开场白。用用户提问的语言回答。"
+              "正文写完后,**另起一行**输出 [[BRIEF]] 开头的一句话概括(30 字内,给语音助手看的要点,不面向用户)。")
     pieces = []
     if ptext:
         pieces.append(f"[用户正看的第 {page} 页内容节选]\n{ptext}")
@@ -4764,23 +4765,41 @@ def assistant_route_text():
     prompt = "\n\n".join(pieces)
 
     def gen():
-        full = ""
+        # 79:正文流式外发,[[BRIEF]] 段拦下不外流(尾部 hold-back 12 字防标记被 chunk 切两半);
+        # done.summary=引擎专门写的简介(给 2.1 静默入库,与天气/新闻卡同逻辑),没写就前 240 字兜底
+        full, sent = "", 0
+        MARK = "[[BRIEF]]"
+        def _flush(force=False):
+            nonlocal sent
+            mi = full.find(MARK)
+            limit = mi if mi >= 0 else (len(full) if force else max(sent, len(full) - 12))
+            if limit > sent:
+                seg = full[sent:limit]
+                sent = limit
+                return "event: delta\ndata: " + json.dumps(seg, ensure_ascii=False) + "\n\n"
+            return ""
         for kind, val in _gemini_stream(sysmsg, [{"role": "user", "parts": [{"text": prompt}]}],
                                         think=False, timeout=120):
             if kind == "delta":
                 full += val
-                yield "event: delta\ndata: " + json.dumps(val, ensure_ascii=False) + "\n\n"
+                out0 = _flush()
+                if out0:
+                    yield out0
             elif kind == "err" and not full:
                 try:   # 流式失败一次性兜底(慢但别哑)
                     full = _gemini_text(sysmsg + "\n\n" + prompt, max_tokens=2000, think=False, timeout=90) or ""
                 except Exception:
                     full = ""
-                if full:
-                    yield "event: delta\ndata: " + json.dumps(full, ensure_ascii=False) + "\n\n"
-                else:
+                if not full:
                     yield "event: err\ndata: {}\n\n"
                     return
-        yield "event: done\ndata: " + json.dumps({"summary": full[:240]}, ensure_ascii=False) + "\n\n"
+        tail = _flush(force=True)
+        if tail:
+            yield tail
+        mi = full.find(MARK)
+        brief = full[mi + len(MARK):].strip().strip(":: ").splitlines()[0][:120] if mi >= 0 else ""
+        body = full[:mi].rstrip() if mi >= 0 else full
+        yield "event: done\ndata: " + json.dumps({"summary": brief or body[:240]}, ensure_ascii=False) + "\n\n"
 
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
