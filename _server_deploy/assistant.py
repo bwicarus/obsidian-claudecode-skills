@@ -4378,6 +4378,8 @@ def assistant_voice_tool():
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     if isinstance(res, dict) and res.get("error"):   # 语音工具报错上服务器日志(排障:journalctl -u webapp | grep voice-tool)
         print(f"[voice-tool] {name} args={json.dumps(targs, ensure_ascii=False)[:200]} err={str(res['error'])[:200]}", flush=True)
+    else:   # ㊸ 成功调用也记一行(工具名+耗时)——"到底调没调"从此一句 grep 实锤,不再靠推理
+        print(f"[voice-tool] {name} ok {round(time.time() - t0, 1)}s", flush=True)
     # ㉜ 语音场景配图渲染:search_image 结果在语音链路(仅本端点)附 client_action → 前端图卡进侧栏对话流。
     #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
     if name == "search_image" and isinstance(res, dict) and res.get("images"):
@@ -4437,7 +4439,8 @@ def assistant_rtc_session():
              lang_line,
              "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等需要动手的事"
-             "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"
+             "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事——"
+             "尤其做卡片=必须调 make_anki、记笔记=必须调 make_note,没调工具就说『已放进后台/已做好』是欺骗,系统会核查。"
              "联网能力=三个真工具:web_search(查网上实时信息/资料,额度有限省着用)、search_image(搜真实图片)、"
              "search_video(搜教学视频)——用户想查网/看图/看视频时**必须调用对应工具**,图片视频结果会自动显示在他的界面上;"
              "工具失败就如实说暂时查不了,凭记忆答先声明可能过时。search_all_books 只搜他自己的书库,不是互联网。"

@@ -857,6 +857,7 @@
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
       return;
     }
+    _rtc.turnTool = true;   // ㊸:本轮真调了工具(承诺核查放行)
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
     if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
     onToolStatus({ status: 'running', label: name });
@@ -964,11 +965,21 @@
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
+      // ㊸ 承诺核查(实锤过两次:嘴上"已整理成卡片放进后台"实际零工具调用——mini 的幻觉承诺老毛病):
+      // 本轮说了"已做成卡片/笔记"却没调任何工具 → 立即注入纠偏并强制它真做(60s 冷却防对喷循环)
+      if (!_rtc.turnTool && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,6}(已|放进后台|做好了)/.test(curAText)
+          && Date.now() - (_rtc.scoldT || 0) > 60000) {
+        _rtc.scoldT = Date.now();
+        _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text',
+          text: '(系统核查:你刚才宣称已经做了卡片/笔记,但本轮你没有调用任何工具——什么都没有发生,那样说是欺骗用户。现在立即调 make_anki(做卡)或 make_note(笔记)真正执行,内容用你刚才总结的要点;执行后再简短确认。)' }] } });
+        _dcSend({ type: 'response.create' });
+      }
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
