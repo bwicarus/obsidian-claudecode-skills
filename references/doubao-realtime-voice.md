@@ -480,5 +480,22 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **㊲ 会话间压缩**(挂断后空闲期做功):官方 Realtime 指南 8.4"摘要替代无限历史"+业界滚动摘要(LangChain ConversationSummaryBuffer 同款)。链路:teardown fire-and-forget POST `/compact-history`(幂等:新增<14 轮跳过;**清空竞态守卫**=写入前重载历史,已空就放弃,防"清空后压缩把记忆复活")→ Gemini 便宜档把旧轮滚动合并成 ≤300 字摘要(只留偏好/已确认事实/学习进度/未决事项),最近 6 轮保留原文(同秒轮次不拆开——upto_ts 按秒);摘要 sidecar(`state/assistant-convo/<uid>.summary.json`,EPUB=`epub-convo/<uid>/<key>.summary.json`)。回放:`_rtcInjectHistory` 走 `history?compact=1` 压缩视图(摘要+近几轮原文),替代全量灌注;侧栏显示仍全量。**清空三位一体扩展**:两处 clear 端点顺带删 summary。缓存友好:压缩只发生在会话之间,不碰在用前缀。实测 20 轮→170 字摘要核心事实全留。
 
-**㊳ 会话内自动压缩**(用户:"实时监控缓存命中,压缩更便宜时自动启动"):经济账=会话内历史每轮按 cached 价重复计费(**音频缓存 $0.30/M 是大头**),压缩代价=一次缓存失效(摘要+近几轮全价),**会话再续 ≥2 轮即回本** → 触发判据用"每轮 `input_tokens` 超阈值"(usage 实时监控,response.done 每轮都有 cached 明细)。链路:rtc 前端记 item 账本(`conversation.item.added|created` 两个事件名都认)→ 每轮 done 检查 `input_tokens ≥ rt_compact_tokens`(默认 20k,voice-config 可配,0=关)→ `_rtcCompactNow()`:POST compact-history(force=1,阈值降 8 轮)拿摘要 → **批量** `conversation.item.delete` 删旧 item(保尾部 8 个)→ 摘要 system 顶上 → `_pageFp/_inkFp` 作废(轮询 2s 内重推当前页/笔迹状态)→ 对话流出 📦 note。90s 低频保护(官方:低频批量>频繁逐条)。**㊲b 顺修**:WebRTC 挂断后重拨必死——日志实锤 rtc-call 从未到达=死在 getUserMedia;根因=rtcStart 漏了 WS 版音频会话舞步(挂断把 iOS 会话切回 playback=静音麦)→ 开麦前先 `_ttsShutdown()` 再声明 `play-and-record`(㉑铁律再犯);失败提示补错误 name。
+**㊳ 会话内自动压缩**(⚠已被 ㊹ 外部审核默认关闭,待按官方 Cookbook 重做=task#285):经济账=会话内历史每轮按 cached 价重复计费(**音频缓存 $0.30/M 是大头**),压缩代价=一次缓存失效(摘要+近几轮全价),**会话再续 ≥2 轮即回本** → 触发判据用"每轮 `input_tokens` 超阈值"(usage 实时监控,response.done 每轮都有 cached 明细)。链路:rtc 前端记 item 账本(`conversation.item.added|created` 两个事件名都认)→ 每轮 done 检查 `input_tokens ≥ rt_compact_tokens`(默认 20k,voice-config 可配,0=关)→ `_rtcCompactNow()`:POST compact-history(force=1,阈值降 8 轮)拿摘要 → **批量** `conversation.item.delete` 删旧 item(保尾部 8 个)→ 摘要 system 顶上 → `_pageFp/_inkFp` 作废(轮询 2s 内重推当前页/笔迹状态)→ 对话流出 📦 note。90s 低频保护(官方:低频批量>频繁逐条)。**㊲b 顺修**:WebRTC 挂断后重拨必死——日志实锤 rtc-call 从未到达=死在 getUserMedia;根因=rtcStart 漏了 WS 版音频会话舞步(挂断把 iOS 会话切回 playback=静音麦)→ 开麦前先 `_ttsShutdown()` 再声明 `play-and-record`(㉑铁律再犯);失败提示补错误 name。
 - **重连历史回放**(用户:重启对话没把聊天记录放回去——判断正确,rtc 每连接=全新 session 之前根本没做):dc.onopen 时拉 `/api/assistant/history`(㉛落库的同一份)近 14 条压成**一条 system 消息**注入("延续语境,不要重新打招呼")——官方指南 8.4 的摘要形态,不逐条造 item(省 item 数+不赌 assistant content type);vc-new 新话题(fresh)不回放。rtcStart 失败路径补状态复位(ws/按钮不残留假活)。
+
+
+## ㊴-53 承诺核查 + 官方通读对照 + 外部审核修订 + 输出模态体系(2026-07-12 下午)
+
+**㊸/㊸b 承诺核查→程序代执行**:实锤 mini 两次"已整理成卡片放进后台"实际零工具调用(journalctl+对话流无工具卡+任务系统零启动三重证据)。v1"打脸再走一轮"被用户否决(语音模型只是扳机不产卡片内容,多走一轮=白烧音频费)→ v2=**程序直接替它调 make_anki/make_note**(种子=用户请求句+它口头总结的要点,后台制卡模型自判内容,ctx 带 file/page),工具卡可见+零成本 system 记录;⚠别走 _rtcTool(空 callId 的 function_call_output 被拒),直调 fetch。voice-tool **成功调用也记日志**(`[voice-tool] name ok Ns`)——"调没调"从此一句 grep 实锤。
+
+**㊶ 指南通读对照**(用户批评"没认真看指南"成立——grep 挑段落漏结构性要求):①instructions 含动态页文本=违反 §8.1 真 bug(跨会话缓存从未命中)→ 恒定化,页面内容并入拉模式池;②补 `truncation.token_limits.post_instructions=24000` 硬顶(§5);③账本按模型分价表(§7.1 标准版 $4/$32 vs mini $0.6/$10,混算=切标准版错账;usage 上报带 _model);④rtc-call 补 `OpenAI-Safety-Identifier`(§4.1,uid 哈希)。要点存档:§2.2 音频响应自带 transcript(assistant 历史本就以文字存);§7.5 whisper 转写是独立账单;§2.1 max_output_tokens 合法域 1-4096|inf。
+
+**㊹ 外部审核修订**(用户拿代码给别的 AI 审,高质量已核实):实测成本结构=**输出音频占 80%**($1.29/$1.61,220 响应均 14.7s),输入才 14%、图片 1.1%——**控制回答时长才是主战场**。立即项:max_output_tokens 2048→512(≈25s 硬顶)+可测量长度规则(8s/15s/20s 摘要问继续/不复述/整段朗读转专用通道);会话内压缩默认关(㊳三处不安全:没等 item.deleted 确认/没按 turn 组删/12k<官方 Cookbook 生产区间 20k-32k,摘要应 root:true 放根部)。大项列 task:#283 持久 sideband RtcController(官方 server-side controls 形态)/#284 全链路 SQLite 账本/#285 压缩重做/#286 selection+ink 拉模式补全/#287 工具缓存+熔断+getStats+截图质量。
+
+**㊿/51/52/53 输出模态体系**(输出音频 80% 成本的完整解法):
+- ㊿ 手动挡:`create_response:false`,speech_stopped/打字/工具回填三路统一走 `_rtcRespCreate(src)` 按需选 `output_modalities`;`output_text.delta` 并线进 transcript 渲染管线。
+- 51 **四态循环按钮**(通话中🔊按钮,键 rt_voice_mode):audio 全音频/mixed 混合(src='user' 直接提问=音频,'tool'/'deep'=文字)/text 全文字(音频费归零)/**tts=文字回复+豆包朗读通道代念**(done 时 speak(curAText);⚠TTS 走本地 WebAudio 不在 WebRTC AEC 参考里→播放期 `mic.enabled=false` 防它听见自己,__vcTtsBusy 轮询恢复+2min 兜底)。豆包引擎映射:audio|mixed=播,text|tts=静音(它无模态开关不省钱)。
+- 52 **reply_text 自动路由**(外部审核设计,一次推理完成选择+回答):模型自判长内容→调 reply_text 把完整答案放参数(输出文本价),前端拦截(与 wait_for_user 同构)显示+落库+字幕+闭合 call **不 response.create**=零输出音频;tts 档答案照样代念。
+- 53 **auto 独立开关**(用户否决全档兜底):🤖小按钮在四态旁——开=rtc-session 挂载 reply_text+注入判断规则/关=**工具根本不挂**(真禁用;工具表随会话建立→切换重拨生效);**四态+auto 持久化服务器** voice-config(rt_voice_mode/rt_auto_text),点按=localStorage 即时+POST 持久,初始 fetch 同步(服务器=真相源跨设备)。
+
+**㊷ 检查表收尾**:单会话工具调用护栏(40 次提醒)+60min 上限预警(55min 知会,到点 _rtcDead 自动重连+摘要回放兜底)。官方 realtime-costs 页 WebFetch 复核=无新字段遗漏,§13 检查表 12/13 ✓(工具最小集一项=有意取舍:33 工具 schema 实测仅 3.5k tokens)。
