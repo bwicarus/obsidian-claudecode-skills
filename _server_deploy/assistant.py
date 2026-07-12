@@ -1663,7 +1663,8 @@ def _t_search_image(args, ctx):
                         "(日本特有事物用日语原名,通用/西方概念用英文通称/学名);"
                         "再搜不到就如实告诉用户没找到合适的图,绝不编图片链接。"}
     return {"ok": True, "count": len(found),
-            "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"]} for r in found],
+            "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"],
+                        "source": r.get("source", ""), "matched_query": r.get("matched_query", "")} for r in found],
             "missed": [r["concept"] for r in results if not r["found"]],
             "_note": "把这些图用 markdown ![简短中文说明](image_url) 插进回答里对应概念旁(每张配一句说明)。"
                      "missed 里的没搜到图 → 别硬配、更别自己编图片链接。"}
@@ -4556,6 +4557,11 @@ def assistant_voice_tool():
     #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
     if name == "search_image" and isinstance(res, dict) and res.get("images"):
         res["client_action"] = {"fn": "renderImages", "args": [res["images"]]}
+        # 89(用户设计):配图与搜索同构静默入库——卡片已显示,回填只带概况;是否放行口头回报由 rt_tool_reply 开关定(relay/前端 gate)
+        res["silent"] = True
+        res["_note"] = ("图片已用卡片显示在用户屏幕上(含:" +
+                        "、".join([i0.get("concept") or "图" for i0 in res.get("images", [])][:6]) +
+                        ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动描述图片内容。")
     # WebRTC 通话(带 rtc_call_id)的图像走 sideband 服务端注入,绝不进响应让前端挤 data channel
     if isinstance(res, dict) and res.get("_vision") and body.get("rtc_call_id"):
         if _rtc_sideband_images(str(body["rtc_call_id"]), res["_vision"]):
@@ -5104,7 +5110,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
-                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise")
+                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

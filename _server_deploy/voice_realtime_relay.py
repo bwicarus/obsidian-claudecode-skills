@@ -1994,8 +1994,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):
                     tool_cache.clear()   # 写操作成功=便签/高亮/生词等状态变了,粗粒度域失效(审核 P1:revision 的保守替身)
-                if res.get("silent"):
-                    no_create = True   # 74(用户设计):搜索类结果静默入库——卡片已显示,本轮不让模型发言,知识留给下一轮
+                if res.get("silent") and not _creds().get("rt_tool_reply"):
+                    no_create = True   # 74/89:展示型工具静默入库(卡片已显示);设置「工具完成后口头回报」开=放行它自由回答
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
         stale = (epoch["n"] != ep0)   # 审核P0#2:工具跑着的时候用户开了新话轮——旧结果不抢话(不 create)

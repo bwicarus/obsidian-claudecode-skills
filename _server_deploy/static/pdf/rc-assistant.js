@@ -351,6 +351,8 @@
           '<input type="checkbox" data-k="rt_full_duplex"' + (c.rt_full_duplex ? ' checked' : '') + '>全双工打断(⚠仅戴耳机时勾:AI 说话期间也收音,可随时插话;外放勾了会回声自问自答。默认=半双工:它说话时不收音,防外放回声)</label>' +
           '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
           '<input type="checkbox" data-k="rt_image"' + (c.rt_image ? ' checked' : '') + '>图像输入(看图类工具的渲染图直接给 GPT 自己看,不经文字转述;实验性,报错就关掉)</label>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
+        '<input type="checkbox" data-k="rt_tool_reply"' + (c.rt_tool_reply ? ' checked' : '') + '>工具完成后口头回报(搜索/配图等展示型工具:关=静默入库只显示卡片[推荐];开=AI 拿到结果后自由回答)</label>' +
           '<div class="ams-tdef" style="margin:2px 0 6px">语言选「自动」它跟着你切换;读日语书建议选「日本語」或「自动」(原文按原生发音念)。以上都是下次开话生效;接话灵敏度=semantic VAD 的 eagerness(按语义判断你说完没)。</div>';
       } else {      // ── 豆包 S2S 专属 ──
         H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
@@ -397,7 +399,7 @@
             if (x && x.ok) {
               if (typeof _toast === 'function') _toast('已保存');
               try { if (window.RC && RC.voicecall && RC.voicecall.pushCfg) RC.voicecall.pushCfg(); } catch (_) {}
-              if (k === 'rt_engine') _renderVoiceCfg(container);   // 切引擎:整卡重绘,只显示该引擎相关项
+              if (k === 'rt_engine') _renderVoiceCfg(container);   // 切引擎:整卡重绘,只显示该引擎相关项(89:container=tab2 pane)
             } else if (typeof _toast === 'function') _toast('保存失败');
           }).catch(function () {});
       }
@@ -450,6 +452,25 @@
     fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); }).then(function (d) {
       if (!d || !d.ok) { container.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; return; }
       container.innerHTML = '';
+      // 89(用户设计):内容太多→Tab 分区。tab1=阅读 AI 任务(预设+各环节模型);tab2=语音通话·朗读
+      var tabbar = document.createElement('div'); tabbar.className = 'ams-tabs';
+      tabbar.innerHTML = '<button type="button" class="ams-tab on" data-t="1">阅读 AI 任务</button>' +
+        '<button type="button" class="ams-tab" data-t="2">语音通话 · 朗读</button>';
+      var pane1 = document.createElement('div'), pane2 = document.createElement('div');
+      pane2.style.display = 'none';
+      container.appendChild(tabbar); container.appendChild(pane1); container.appendChild(pane2);
+      tabbar.querySelectorAll('.ams-tab').forEach(function (tb) {
+        tb.addEventListener('click', function () {
+          tabbar.querySelectorAll('.ams-tab').forEach(function (x) { x.classList.remove('on'); });
+          tb.classList.add('on');
+          var t = tb.getAttribute('data-t');
+          pane1.style.display = t === '1' ? '' : 'none';
+          pane2.style.display = t === '2' ? '' : 'none';
+          if (t === '2' && !pane2.childElementCount) _renderVoiceCfg(pane2);
+        });
+      });
+      container = pane1;   // 下方既有代码原样渲进 tab1(最小侵入;focusAction 定位的 actions 都在 tab1)
+      window.__amsVoicePane = pane2;   // 语音区挂 tab2(见下方 523 行改调)
       var sub = document.createElement('div'); sub.className = 'ams-sub';
       sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效(服务端保存,全设备生效)。跟感叹号「更强重答」共用同一套预设。';
       container.appendChild(sub);
@@ -520,7 +541,8 @@
         + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
         + '选它每次调用都按量计费。flash 高峰过载较多;想更稳的免费可试 flash-lite 系。';
       container.appendChild(note);
-      _renderVoiceCfg(container);   // 🎙 语音通话设置(v3-⑮:音色/语速/音量/方言/人设/唱歌)
+      // 89:语音区改挂 tab2(点开 tab 才渲,省首屏);tab1 只留阅读任务
+      // _renderVoiceCfg 由 tab 切换懒加载(见上方 tabbar 逻辑)
       if (_focusCard) { try { _focusCard.style.outline = '2px solid #6aa3ff'; _focusCard.style.borderRadius = '8px'; _focusCard.scrollIntoView({ block: 'center' }); } catch (_) {} }
     }).catch(function () { container.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; });
   }
@@ -692,6 +714,9 @@
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +
+    '.ams-tabs{display:flex;gap:6px;margin:2px 0 10px}' +
+    '.ams-tab{flex:1;padding:7px 0;border-radius:9px;border:1px solid #2a3550;background:transparent;color:#8a9bb4;font-size:12.5px;cursor:pointer}' +
+    '.ams-tab.on{background:#233150;color:#cfe0ff;border-color:#3a4f7f;font-weight:600}' +
     '#asst-thread{overscroll-behavior:contain}' +   // 87:侧栏滚到头不再把滚动漏给底下的阅读器
     '#side-pane-asst,#ep-side{overscroll-behavior:contain}' +
     '.vc-bub-hd{display:flex;align-items:center;gap:6px;margin:-3px -4px 6px;padding:4px 8px;border-radius:8px;' +

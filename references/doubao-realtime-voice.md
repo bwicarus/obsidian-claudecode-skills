@@ -641,3 +641,20 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 83 收藏夹封面流+拖出修+TTS念钮+头部拖把手(2026-07-12 用户四点)
 
 ①**面板拖出失效根因**=横滚容器把竖直手势当滚动取消 pointer 流→卡片 `touch-action:pan-x`(横滑归滚动/竖滑归 JS)+setPointerCapture+阈值 50。②**封面流**(用户"圆筒"设计):scroll-snap center 停靠+滚动监听按距视口中心分 3 档改 **width**(330/180/112px)——内容随宽度自适应"变小变少"(line-clamp 9/3/1 行+远档隐 meta),非几何缩放;面板高度改随卡自适应(max 46vh)。③**长文卡 TTS 念钮**:浮层卡头部+侧栏气泡尾部 ▶(点=__vcSpeakText 现场念/再点=停,紫呼吸);**长文气泡☆撤**(用户裁定,浮层 fav 参数移除)。④**侧栏卡拖拽收藏改头部把手**(300ms 拎起实测与滚动矛盾):vc-if-hd 即时拖(touch-action:none 只在头部,不碍对话流滚动)+ghost 跟手+底边收入。
+
+## 批次 88-90(2026-07-13)图片卡统一 + 工具回报开关 + 设置 Tab 化
+
+**88 图片卡升格结构化卡**(用户:"所有的方块都要可以同时显示而且样式是一模一样的"):
+- `renderImgs` 重构:不再走 threadMsg 图卡+浮层图卡两套旧路径,构 `{kind:'images', title:'配图 × N', data:{items:[{url,title,page,src,q}]}}` 直接调 `renderInfo`——对话流恒插卡+字幕模式浮层镜像+落库(log{card})+刷新回放,全部自动继承,零新管线。
+- `_infoHtml`/`_infoText` 加 images 分支(图网格);`_igWire(root,card)` 事件委托:每图右上 ✕=从卡中移除;**点图=单选**(紫框 `vc-picked`,该图标题+链接进 `_pins` 带入上下文;点另一张自动切换;再点取消)。侧栏卡(`_infoCardEl`)与浮层卡(`_cardPush` 后)都绑=两模式共通。
+- 溯源:webapp `_one` 记 `hitq`(实际命中词)+返回 `source`/`matched_query`;「!」详情加**搜索链路**行。
+
+**89 工具回报开关 + 设置 Tab 化**(用户:配图完成后模型没静默;设置内容太多):
+- 配图与搜索同构静默:voice-tool 后处理对 search_image 注入 `silent:true` + 静默 note(卡片已显示,本轮不发言)。**只在语音链路注入**,不碰文字助手的 markdown 插图语义。
+- 新设置 `rt_tool_reply`(GPT 组 checkbox「工具完成后口头回报」,默认关):relay `silent and not rt_tool_reply → no_create`;前端 fallback 读 `localStorage rc-voice-toolreply`。开=展示型工具结果放行模型自由回答。
+- 模型设置面板 Tab 化:`ams-tabs` 两 Tab——「阅读 AI 任务」(预设条+各环节模型)/「语音通话 · 朗读」(`_renderVoiceCfg` 懒加载进 tab2,点开才渲染,省首屏)。最小侵入:`container = pane1` 重绑,下方既有渲染代码原样进 tab1。
+
+**90 回归修正**(用户截图):
+- **☆收藏按钮删除**:87 给信息卡加的 `__vcFavBtn` 违反既定设计(85 已定:收藏唯一入口=拖动标题把手进底部收藏区),`_infoCardEl` 中调用删除。
+- **链路问号根因**:88 只改了 `_one` 的返回,组装最终 `images` 列表时仍只挑 concept/image_url/page_url 三字段,source/matched_query 被丢——列表补齐两字段;前端源名映射可读(`commons→维基共享(Commons)`/`google→Google 图搜`/`openai→OpenAI 搜索`),空值显示「未记录(旧卡片)」,绝不显示问号。
+

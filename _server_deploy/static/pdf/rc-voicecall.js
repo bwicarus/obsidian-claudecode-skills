@@ -673,15 +673,16 @@
     d.innerHTML = html;
     _pinBind(d, label, function () { return _infoText(card); });
     var _srcs = '';
-    if (card.kind === 'images') {   // 88:溯源——每张图哪个源(Commons/Google/OpenAI)哪个词命中
+    if (card.kind === 'images') {   // 88/90:溯源——每张图哪个源哪个词命中;源名映射可读,绝不显示问号
+      var SRC_NAME = { commons: '维基共享(Commons)', google: 'Google 图搜', openai: 'OpenAI 搜索', gemini: 'Gemini' };
       var seenS = {};
       _srcs = ((card.data || {}).items || []).map(function (it) {
-        var k2 = (it.src || '?') + (it.q ? '「' + it.q + '」' : '');
-        if (seenS[k2]) return ''; seenS[k2] = 1; return k2;
-      }).filter(Boolean).join(' · ');
+        var nm = SRC_NAME[it.src] || it.src || '';
+        var k2 = nm ? (nm + (it.q ? '「' + it.q + '」' : '')) : '';
+        if (!k2 || seenS[k2]) return ''; seenS[k2] = 1; return k2;
+      }).filter(Boolean).join(' · ') || '未记录(旧卡片)';
     }
     try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined }); } catch (e) {}
-    try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
     return d;
@@ -1858,7 +1859,7 @@
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
-        _rtcTool._silent = !!res.silent;   // 74:搜索类静默入库(卡片已显示,本轮不发言)
+        _rtcTool._silent = !!res.silent && localStorage.getItem('rc-voice-toolreply') !== '1';   // 74/89:静默入库;「工具口头回报」开=放行
         var ca = res.client_action; delete res.client_action;
         try {   // 61b:最近工具结果环(搜索摘要/配图URL)——之后 make_anki/make_note 把对话现场带给制卡 AI
           var _imgs = [];
