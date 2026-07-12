@@ -367,11 +367,11 @@ def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90, model=None):
         continue   # 任何非 200 都试下一把 key(免费不行→付费);全失败才 None→回退 Claude
     return None
 
-def _gemini_websearch(query, timeout=45):
+def _gemini_websearch(query, timeout=45, model=None):
     """网页搜索首选(64):Gemini google_search grounding——3.x 系**每月 5000 次免费**(之后 $14/1k;
     2.x 时代是 1500 次/天 $35/1k)。免费 key 优先同 _gemini_text;返回 {answer, sources} 或 {}。"""
-    keys = _gemini_keys(_GEMINI_MODEL)
-    mdl = _variant_paid(_GEMINI_MODEL)[0]
+    keys = _gemini_keys(model or _GEMINI_MODEL)
+    mdl = _variant_paid(model or _GEMINI_MODEL)[0]
     if not keys:
         return {}
     _sys = ("联网搜索,然后只输出一个 JSON 对象(禁止其他任何文字/代码块标记):\n"
@@ -1547,7 +1547,8 @@ def _t_web_search(args, ctx):
     if not q:
         return {"error": "缺 query(搜索关键词)"}
     try:
-        r = _gemini_websearch(q)   # 64 首选:Gemini google_search grounding(3.x 每月 5000 次免费)
+        _wsr = _resolve("web_search", ctx.get("_uid"))   # 91:型号走设置项(感叹号「本环节设置」可直改)
+        r = _gemini_websearch(q, model=(_wsr.get("variant") if _is_gemini(_wsr.get("variant") or "") else None))
         card = r.get("card")
         if card and card.get("kind") in ("weather", "news", "fact", "general"):
             # 70(用户设计):结构化结果卡——卡片经 client_action 显示(侧栏卡/字幕模式浮层),
@@ -3413,12 +3414,14 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video", "img_norm")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
     "deep":         {"backend": "claude", "variant": "opus",              "depth": "high"},   # 语音通话 deep_think 虚拟工具用
     "img_norm":     {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 77:配图关键词规范化(可自定义型号)
+    "web_search":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:联网搜索结构卡(grounding,深度无效恒不思考)
+    "route_text":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:路由详答文字引擎(SSE 流式)
     "summarize":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "vision":       {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "explain":      {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
@@ -3432,6 +3435,7 @@ _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "img_norm": "配图关键词规范化(搜图没中时转 Commons 规范名)",
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
+    "web_search": "联网搜索(天气/新闻/事实 结构卡)", "route_text": "路由详答(语音转文字长回答引擎)",
 }
 _VARIANT_SHORT = {"gpt-5.5-codex": "5.5-codex", "gpt-5.5": "5.5",
                   "gemini-flash-latest": "flash-latest", "gemini-pro-latest": "pro-latest",
@@ -4776,6 +4780,9 @@ def assistant_route_text():
     pieces.append(f"[语音助手对需求的概括]{intent or '(未提供)'}")
     prompt = "\n\n".join(pieces)
 
+    _rt = _resolve("route_text", session.get("user_id"))   # 91:路由详答型号走设置项
+    _rt_model = _rt.get("variant") if _is_gemini(_rt.get("variant") or "") else None
+
     def gen():
         # 79:正文流式外发,[[BRIEF]] 段拦下不外流(尾部 hold-back 12 字防标记被 chunk 切两半);
         # done.summary=引擎专门写的简介(给 2.1 静默入库,与天气/新闻卡同逻辑),没写就前 240 字兜底
@@ -4791,7 +4798,7 @@ def assistant_route_text():
                 return "event: delta\ndata: " + json.dumps(seg, ensure_ascii=False) + "\n\n"
             return ""
         for kind, val in _gemini_stream(sysmsg, [{"role": "user", "parts": [{"text": prompt}]}],
-                                        think=False, timeout=120):
+                                        model=_rt_model, think=False, timeout=120):
             if kind == "delta":
                 full += val
                 out0 = _flush()
@@ -4799,7 +4806,7 @@ def assistant_route_text():
                     yield out0
             elif kind == "err" and not full:
                 try:   # 流式失败一次性兜底(慢但别哑)
-                    full = _gemini_text(sysmsg + "\n\n" + prompt, max_tokens=2000, think=False, timeout=90) or ""
+                    full = _gemini_text(sysmsg + "\n\n" + prompt, max_tokens=2000, model=_rt_model, think=False, timeout=90) or ""
                 except Exception:
                     full = ""
                 if not full:
@@ -5242,7 +5249,8 @@ def assistant_action_prefs():
                     "catalog": {
                         "backends": list(_BACKENDS),
                         # 按任务限制可选后端:deep=relay 只透传 claude 选型(编排 ㉖ 起三后端全通:claude/gemini/codex)
-                        "backends_by_action": {"deep": ["claude", "gemini", "codex"], "img_norm": ["gemini"]},
+                        "backends_by_action": {"deep": ["claude", "gemini", "codex"], "img_norm": ["gemini"],
+                                               "web_search": ["gemini"], "route_text": ["gemini"]},
                         "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
                         "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,

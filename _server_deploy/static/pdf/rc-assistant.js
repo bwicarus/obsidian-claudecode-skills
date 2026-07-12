@@ -536,6 +536,11 @@
       _rh.textContent = '— 阅读器其它 AI —';
       container.appendChild(_rh);
       _renderActs(['explain', 'translate', 'dict', 'grammar', 'pick_video']);   // 服务端没有的 action 自动跳过(向后兼容);pick_video=找视频拟词+筛选
+      var _wh = document.createElement('div'); _wh.className = 'ams-sub';
+      _wh.style.cssText = 'margin-top:12px;font-weight:600;color:#9fc0ff;';
+      _wh.textContent = '— 联网与语音文字环节 —';
+      container.appendChild(_wh);
+      _renderActs(['web_search', 'route_text', 'img_norm']);   // 91:总面板补全(此前 img_norm 只有感叹号直达)
       var note = document.createElement('div'); note.className = 'ams-note';
       note.textContent = '标「免费」= 免费档支持该型号;但免费是**共享算力**,高峰常过载(503)或限流时会自动落付费保不中断——'
         + '此时这里会标「付费(过载/限流)」、感叹号里也显付费。「💰仅付费」= 该型号免费档没有(如 3.1-pro),'
@@ -561,6 +566,50 @@
     renderModelSettings(body, focusAction);
   }
   try { window.openModelSettings = openModelSettings; } catch (_) {}   // 供 EPUB 总设置面板 / inline onclick 调起
+
+  // ── 91(用户设计):「本环节 AI 设置」迷你面板——感叹号⚙不再只是快捷键,而是把该环节相关的
+  //    AI 调用设置(action-prefs 同一套行 UI + 同一组端点)单独拿出来直接改。actions=相关环节键列表。──
+  function openActionSettings(actions, opts) {
+    opts = opts || {};
+    var mask = document.createElement('div'); mask.className = 'ams-mask';
+    mask.addEventListener('click', function (e) { if (e.target === mask) mask.remove(); });
+    var box = document.createElement('div'); box.className = 'ams-box';
+    var h = document.createElement('div'); h.className = 'ams-h';
+    var ht = document.createElement('span'); ht.textContent = '⚙ 本环节 AI 设置';
+    var x = document.createElement('button'); x.className = 'ams-x'; x.textContent = '×';
+    x.addEventListener('click', function () { mask.remove(); });
+    h.appendChild(ht); h.appendChild(x); box.appendChild(h);
+    var body = document.createElement('div'); box.appendChild(body);
+    mask.appendChild(box); document.body.appendChild(mask);
+    body.innerHTML = '<div class="ams-sub">加载中…</div>';
+    fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.ok) { body.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; return; }
+      body.innerHTML = '';
+      if (opts.note) { var n0 = document.createElement('div'); n0.className = 'ams-sub'; n0.textContent = opts.note; body.appendChild(n0); }
+      var got = 0;
+      (actions || []).forEach(function (a) {
+        var ai = d.actions[a]; if (!ai) return;
+        body.appendChild(_buildMsTask(a, { pref: ai.pref, def: ai.default }, d.catalog, d.names, d.locked || {}));
+        got++;
+      });
+      if (!got) { var n1 = document.createElement('div'); n1.className = 'ams-sub'; n1.textContent = '该环节走固定链路,暂无可调模型。'; body.appendChild(n1); }
+      if (opts.voiceTab) {   // 语音轮:主模型=GPT Realtime,设置在总面板「语音通话·朗读」Tab——给一键直达
+        var vb = document.createElement('button'); vb.className = 'vc-inf-set'; vb.textContent = '🎙 语音通话主模型与开关(打开语音 Tab)';
+        vb.addEventListener('click', function () {
+          mask.remove();
+          try { openModelSettings(); } catch (e) { return; }
+          var tries = 0;
+          (function _hit() {   // renderModelSettings 是 fetch 异步渲染,tabbar 晚到——轮询点 tab2
+            var t2 = document.querySelector('.ams-mask .ams-tab[data-t="2"]');
+            if (t2) { t2.click(); return; }
+            if (tries++ < 25) setTimeout(_hit, 120);
+          })();
+        });
+        body.appendChild(vb);
+      }
+    }).catch(function () { body.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; });
+  }
+  try { window.__asstActionSettings = openActionSettings; } catch (_) {}
 
   // ── 「免费 Gemini 受限→本次已用付费」提示条(SSE 'gemini-paid' 事件的渲染器,PDF/EPUB 共用)──
   //   data = 后端 _paid_fallback_note():{text, action, variant, paid_variant, depth}。
@@ -1914,7 +1963,10 @@
           '<button type="button" class="vc-inf-set">⚙ 调整各环节 AI 模型</button>';
         pop.querySelector('.vc-inf-set').addEventListener('click', function () {
           pop.remove();
-          try { window.openModelSettings && window.openModelSettings(info && info.focus); } catch (e2) {}
+          try {   // 91:有环节清单→只开该环节的直改面板;没有→退回总设置
+            if (info && info.actions && window.__asstActionSettings) window.__asstActionSettings(info.actions, { note: info.note, voiceTab: info.voiceTab });
+            else if (window.openModelSettings) window.openModelSettings(info && info.focus);
+          } catch (e2) {}
         });
         el.appendChild(pop);
       });

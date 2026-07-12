@@ -682,7 +682,8 @@
         if (!k2 || seenS[k2]) return ''; seenS[k2] = 1; return k2;
       }).filter(Boolean).join(' · ') || '未记录(旧卡片)';
     }
-    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined }); } catch (e) {}
+    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined,
+      actions: (card.kind === 'images' ? ['img_norm'] : ['web_search']) }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
     return d;
@@ -1995,7 +1996,8 @@
           _cardPush._did = cT;
         } catch (e) {}
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
-          tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) },
+          tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }),
+          actions: ['deep'], voiceTab: true, note: '本轮主模型=GPT Realtime(见语音 Tab);下面是它可能调用的环节' },
           pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) },
           speak: true }); } catch (e) {}   // 67/77b/79/83(☆撤,+TTS念钮)
       }
@@ -2180,7 +2182,7 @@
               }
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' },
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)', actions: ['route_text'], voiceTab: true },
                   pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) },
                   speak: true }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}

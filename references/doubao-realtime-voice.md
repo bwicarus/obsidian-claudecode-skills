@@ -658,3 +658,12 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **☆收藏按钮删除**:87 给信息卡加的 `__vcFavBtn` 违反既定设计(85 已定:收藏唯一入口=拖动标题把手进底部收藏区),`_infoCardEl` 中调用删除。
 - **链路问号根因**:88 只改了 `_one` 的返回,组装最终 `images` 列表时仍只挑 concept/image_url/page_url 三字段,source/matched_query 被丢——列表补齐两字段;前端源名映射可读(`commons→维基共享(Commons)`/`google→Google 图搜`/`openai→OpenAI 搜索`),空值显示「未记录(旧卡片)」,绝不显示问号。
 
+## 批次 91(2026-07-13)感叹号⚙=环节直改面板
+
+用户:"感叹号的调整各环节模型按钮毫无意义,不应该只是打开模型设置的快捷键,而是把所有跟这个环节相关的 AI 调用设置单独拿出来放在一个版面里直接修改。"
+
+- **前端 `openActionSettings(actions, opts)`**(rc-assistant,导出 `__asstActionSettings`):迷你浮层复用 `_buildMsTask`(action-prefs 同一套行 UI/端点,改即保存全设备生效),只渲染传入环节;`opts.note` 说明行;`opts.voiceTab`=「🎙 打开语音 Tab」按钮(openModelSettings 后轮询点 tab2——renderModelSettings 是异步渲染,tabbar 晚到)。`__asstInfoBtn` ⚙:有 `info.actions` 走直改面板,否则退回总设置。
+- **环节映射**:语音文字回复气泡=['deep']+voiceTab+note(主模型=GPT Realtime 在语音 Tab);路由详答=['route_text']+voiceTab;搜索卡 images=['img_norm'],weather/news/fact/general=['web_search']。
+- **web_search / route_text 纳入 action-prefs**(此前固定 flash 无设置项,"直接修改"无从谈起):`_AP_ACTIONS`/`_AP_DEFAULTS`/`_AP_LABELS`/`backends_by_action`(都只 gemini)+ `_gemini_websearch(model=)` 接 `_resolve("web_search", ctx._uid)`、route-text 端点 `_gemini_stream(model=)`+兜底 `_gemini_text(model=)` 接 `_resolve("route_text", session.user_id)`。深度下拉对这两环节无效(grounding 恒不思考),行照渲不接线。
+- **总面板补全**:tab1 新组「联网与语音文字环节」= web_search/route_text/img_norm(**img_norm 此前在总面板根本不显示**,77 只做了感叹号 focus 直达,白名单漏加——顺手修)。
+
