@@ -517,3 +517,15 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **双执行根因**(webapp 日志同秒实锤):用户页面是部署前加载的**旧版 JS**(无 P2 分工)+新 relay——同一 function_call 前端(Safari UA)与 relay(python-httpx)各执行一遍 read_page(两张工具卡),双 response.create 撞 `conversation_already_has_active_response`(rtc-ctl err 实锤)。修:①**fe=2 版本握手**——前端控制 WS URL 声明 `fe=2`,relay 只对 fe≥2 接管工具,旧前端(不带参数)自动退回 P1 观察模式(日志区分「P2 已挂/P1 观察」);**教训:改变双端分工的升级必须 capability 声明,不能假设前端已刷新**。②撞车被拒的 create 记 pend,response.done 补发(否则那次工具结果永远无人回答)。TTS"念两次"=决策轮开场白+回答轮正文各念一遍(设计行为)+双执行放大,握手修后待重测。
 
 **转写升级**:用户句转写错认("这一页讲了什么"→"毕业讲了什么",模型听音频本身理解对)根因=whisper 无语境音近错认+模型名 `gpt-realtime-whisper` 非官方名。修=`gpt-4o-mini-transcribe`(官方,中文 WER 低于 whisper)+**prompt 语境**(书名+高频指令词:这一页/翻到第N页/做卡片…——与豆包 ASR 热词㉓同思路,官方 transcription.prompt 字段)+language 跟随 rt_lang(仅 zh/ja/en 合法值)。**转写费用**(独立账单,usage 在 `conversation.item.input_audio_transcription.completed` 事件,不进 response.done;relay 已加日志观察):mini-transcribe 音频 $3/M tokens≈**$0.002/分钟纯说话**,一次通话几美分零头,不值得为省它引入 Apple 听写(通话中麦被 WebRTC 占用,iOS 并行 SpeechRecognition 抢麦+录音路由副作用=听写互斥血泪重演)。
+
+## 60 审核二轮落地:视觉链路真修+turn epoch+shot_id+截图上限(2026-07-12)
+
+外部审核二轮(拿 58b 版代码)揪出 **P0×2 全部成立**,并暴露 58 的一个实施事故:
+
+**P0#1 视觉链路实际是断的**(58 的"修复"改错了地方):python `replace(old,new,1)` 匹配到**两个同形代码块的第一个**——rtc_call_id 被错加到 GPT-WS `_tool`(那里 call_id 是**函数调用 ID**非 WebRTC 会话 ID),真正要改的 P2 `handle_rtc_ctl._tool` 没改到且 `res.pop("_vision")` 无条件丢图=webapp 不注入+relay 丢弃,模型拿不到截图。修(60):①撤 WS 版错误参数;②P2 改用**自己已持有的持久 sideband(ows)直喂 input_image**(与 WS 版 ows 直喂同构,不传 rtc_call_id、不让 webapp 开第二条临时连接);③webapp `_rtc_sideband_images`(仍服务前端 fallback)等每张 created 再关(旧版第一张确认就返回)。⚠**教训:手写 python replace 改重复代码没有 Edit 工具的唯一性保护,同形代码必先 count**。
+
+**P0#2 抢话竞态**:慢工具跑着用户开新话轮→旧工具完成时无条件回填+response.create=旧结果混新问题/答完新的又答旧的。修=**turn epoch**:speech_started/打字=epoch+1;_tool 捕获发起纪元,完成时纪元已变→只读工具换"(结果已过期,如需请重调)"回填、写工具回填真实结果,**都不 create**(旧结果不抢话);vis 过期丢弃;撞车补发也带纪元检查。"显示与执行无共享状态"的旧判断不成立(共享 conversation/活动 response/turn 边界)——response.create 全归 relay 的完整仲裁=P4。
+
+**P1 批**:①shot_fut 改 **shot_id 配对**(旧版单槽,两轮工具重叠=Future 被覆盖/迟到截图错配;无 id 回退取唯一 pending 兼容 59 前端);②截图**尺寸上限**(长边≤1600px+质量阶梯 0.8/0.6/0.45 至 base64≤900KB;relay serve max_size 2→8MiB 保险层——旧状态 2×DPR 整视口无上限,复杂页超限断的是整条控制 WS);③缓存键强化:sel 全文 md5(80 字前缀碰撞)+ink 全笔画 md5("笔画数+末点"易撞);**see_*/web_search/search_image/search_video 退出缓存**(viewport 无 revision/时变数据);**写工具成功→tool_cache.clear()**(revision 体系的保守替身,治 notes/highlights/vocab 写后读旧);④reply_text 截断**前端抢救**(正则捞 JSON 未闭合的 text 已生成部分+提示,治标;治本=route_to_text 薄参数+服务端文本模型,task#289)。
+
+**审核采纳的排期**:#284 SQLite 账本**提前**到 P3 前(JSON 账本无锁 read-modify-write 且浏览器上报不可为硬闸权威);P3=usage+注入归 relay;P4=create/cancel 全归 relay(响应仲裁终态);#285 压缩;控制 WS 可恢复重连(task#290,当前"断线保持前端模式"比朴素重连安全)。

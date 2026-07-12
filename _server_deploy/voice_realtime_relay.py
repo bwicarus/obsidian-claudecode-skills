@@ -15,6 +15,7 @@ X-Api-App-Key 是文档给的固定值)。凭证缺失 → 服务照常监听,�
 import asyncio
 import base64
 import gzip
+import hashlib
 import json
 import re
 import struct
@@ -1386,9 +1387,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 if book.get("sel"):
                     ctx["selection"] = book["sel"]
                 async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
-                    # rtc_call_id 必须在**请求体顶层**(webapp 读 body["rtc_call_id"]):图像走 sideband 注入
-                    r = await hc.post("/api/assistant/voice-tool",
-                                      json={"cmd": cmd, "ctx": ctx, "rtc_call_id": call_id})
+                    # ⚠不带 rtc_call_id:此处 call_id 是**函数调用 ID**非 WebRTC 会话 ID(58 曾误加,外部审核揪出);
+                    # WS 模式图像走下方 ows 直喂 input_image,不经 sideband
+                    r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
                 res = d.get("result") or {}
@@ -1811,13 +1812,17 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         return
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": ""}
-    tool_cache = {}          # 只读工具缓存:name|args|page|ink指纹 → {out, ca}(voice-tool 响应 cacheable 才存)
-    shot_fut = {"f": None}   # need_shot 往返(一次一张,超时 6s 无图继续)
+    tool_cache = {}          # 只读工具缓存:name|args|page|ink哈希|sel哈希 → {out, ca};写工具成功=整体清空(域失效)
+    shot_fut = {}            # need_shot 往返:shot_id → Future(带 ID 防两轮工具重叠时错配/迟到截图被下一请求接走)
+    shot_seq = {"n": 0}
+    epoch = {"n": 0}         # 轮次纪元(审核P0#2):用户开口/打字=+1;旧纪元工具完成→回填但不 create(旧结果不抢新话轮)
+    _NO_CACHE = {"see_ink", "see_page", "see_figure",       # 视觉:viewport/缩放/滚动不在键里,误命中=拿旧图说新话
+                 "web_search", "search_image", "search_video"}   # 时变数据:整场通话缓存不合适
     try:
         await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True, "p": 2 if fe >= 2 else 1}}))
     except Exception:
         pass
-    pend = {"create": False}   # 59:response.create 撞"已有进行中response"被拒→记下,response.done 时补发
+    pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
 
     def _resp_create():
         """工具回填后的 response.create——模态按服务器持久化档位(src='tool':mixed 档=text)。"""
@@ -1828,25 +1833,28 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                              "max_output_tokens": 512 if want_audio else 2048}}
 
     async def _need_shot():
-        """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。"""
+        """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。shot_id 配对防错配。"""
+        shot_seq["n"] += 1
+        sid = shot_seq["n"]
         fut = asyncio.get_event_loop().create_future()
-        shot_fut["f"] = fut
+        shot_fut[sid] = fut
         try:
-            await bws.send(json.dumps({"event": "need_shot"}))
+            await bws.send(json.dumps({"event": "need_shot", "payload": {"shot_id": sid}}))
             return await asyncio.wait_for(fut, timeout=6)
         except Exception:
             return None
         finally:
-            shot_fut["f"] = None
+            shot_fut.pop(sid, None)
 
-    async def _tool(name: str, args: dict, call_id2: str):
+    async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
+        vis, readonly = None, True
         try:
             _ink_fp = book.get("_ink_fp") or ""
-            # 缓存键含 selection:read_selection 等选中类工具在 cacheable 白名单里,选中变了必须失效
+            # 缓存键:sel 全文哈希(58b 的前 80 字有前缀碰撞)+ink 全笔画哈希(_up 里算)——审核 P1
             ck = (f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|"
-                  f"{book.get('page') or page}|{_ink_fp}|{(book.get('sel') or '')[:80]}")
+                  f"{book.get('page') or page}|{_ink_fp}|{hashlib.md5((book.get('sel') or '').encode()).hexdigest()[:8]}")
             if name == "recall_study":
                 span = str(args.get("span") or "today").lower()
                 out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
@@ -1854,7 +1862,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             elif name == "deep_think":
                 out = await _oa_deep(str(args.get("question") or ""), file_rel, book.get("page") or page)
                 label = "深度思考"
-            elif ck in tool_cache:
+            elif ck in tool_cache and name not in _NO_CACHE:
                 hit = tool_cache[ck]
                 out, cached = hit["out"], True
                 if hit.get("ca"):
@@ -1873,33 +1881,52 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     shot = await _need_shot()
                     if shot and shot.get("b64"):
                         ctx["view_image"] = {"media_type": shot.get("media_type") or "image/jpeg", "b64": shot["b64"]}
+                # ⚠不带 rtc_call_id(58 的修复曾错落到 WS 版此处漏改=视觉链路断,审核实锤):
+                # P2 有**自己的持久 sideband(ows)**,_vision 直接在下面注入,不让 webapp 再开第二条临时连接
                 async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
                     r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
+                readonly = bool(d.get("cacheable"))   # 白名单=只读集合;写工具 stale 时仍回填真实结果
                 res = d.get("result") or {}
                 ca = res.get("client_action")
                 if isinstance(ca, dict) and ca.get("fn"):
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
-                res.pop("_vision", None)   # rtc_call_id 在:图已由 webapp 经 sideband 注入,文本里绝不带
-                slim = {k: v for k, v in res.items() if k != "client_action"}
+                vis = res.pop("_vision", None)   # 原图(b64)绝不进文本 output(会被截成烂 JSON)
+                slim = {k: v for k, v in res.items() if k not in ("client_action",)}
                 lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
-                if ok and d.get("cacheable"):
+                if ok and d.get("cacheable") and name not in _NO_CACHE:
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
+                if ok and not d.get("cacheable"):
+                    tool_cache.clear()   # 写操作成功=便签/高亮/生词等状态变了,粗粒度域失效(审核 P1:revision 的保守替身)
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
+        stale = (epoch["n"] != ep0)   # 审核P0#2:工具跑着的时候用户开了新话轮——旧结果不抢话
+        if stale and readonly:
+            out = "(该工具结果已过期:用户在等待期间开始了新话题。如仍需要请重新调用工具。)"
+            vis = None
         try:
+            if vis and not stale and _creds().get("rt_image"):
+                for v in vis[:2]:   # P2 视觉:经**本函数已持有的 sideband** 直喂(与 GPT-WS 版 ows 直喂同构)
+                    await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_image", "detail": "high",
+                                     "image_url": f"data:{v.get('media_type', 'image/png')};base64,{v['b64']}"}]}}))
+                out += "\n(相关图像已直接发给你,请看图回答)"
+            elif vis and not stale:
+                out += "\n(该工具产出了图像,但「图像输入」开关未开,只能按文本回答)"
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id2, "output": out}}))
-            await ows.send(json.dumps(_resp_create()))
+            if not stale:
+                await ows.send(json.dumps(_resp_create()))
         except Exception:
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {
-            "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
+            "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
-              args=args, brief=("[cache] " if cached else "") + out[:300])
+              args=args, brief=("[cache] " if cached else "") + ("[stale] " if stale else "") + out[:300])
 
     async def _down():
         n = {}
@@ -1910,7 +1937,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 continue
             t = ev.get("type") or "?"
             n[t] = n.get(t, 0) + 1
-            if t == "response.function_call_arguments.done":
+            if t == "input_audio_buffer.speech_started":
+                epoch["n"] += 1   # 用户开口=新话轮:在途工具的结果到手后只回填不抢话(审核P0#2)
+            elif t == "response.function_call_arguments.done":
                 if fe < 2:
                     continue   # 版本握手:旧前端自己执行工具,relay 只观察(防双执行)
                 name = ev.get("name") or ""
@@ -1920,7 +1949,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     a = json.loads(ev.get("arguments") or "{}")
                 except Exception:
                     a = {}
-                asyncio.create_task(_tool(name, a if isinstance(a, dict) else {}, ev.get("call_id") or ""))
+                asyncio.create_task(_tool(name, a if isinstance(a, dict) else {}, ev.get("call_id") or "", epoch["n"]))
             elif t == "response.done":
                 r0 = ev.get("response") or {}
                 u = r0.get("usage") or {}
@@ -1930,10 +1959,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                                  f"status={r0.get('status')}\n")
                 if pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
                     pend["create"] = False
-                    try:
-                        await ows.send(json.dumps(_resp_create()))
-                    except Exception:
-                        pass
+                    if pend["ep"] == epoch["n"]:   # 纪元没变才补(用户已开新话=旧工具结果不该再触发回答)
+                        try:
+                            await ows.send(json.dumps(_resp_create()))
+                        except Exception:
+                            pass
             elif t == "conversation.item.input_audio_transcription.completed":
                 # 指南§7.5/:258:转写是独立账单(usage 在本事件里),不混进 response.done——先记日志供估费(正式入账=#284)
                 u2 = ev.get("usage") or {}
@@ -1941,7 +1971,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             elif t == "error":
                 e0 = ev.get("error") or {}
                 if e0.get("code") == "conversation_already_has_active_response":
-                    pend["create"] = True   # 59:等 response.done 补发,工具结果不至于永远无人回答
+                    pend["create"], pend["ep"] = True, epoch["n"]   # 59:等 response.done 补发,工具结果不至于永远无人回答
                 sys.stderr.write(f"[rtc-ctl] err: {json.dumps(e0)[:150]}\n")
         sys.stderr.write(f"[rtc-ctl] sideband 关闭 call={call_id[:12]} 事件统计={json.dumps(n)[:300]}\n")
 
@@ -1959,18 +1989,20 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 if np and np != book["page"]:
                     book["page"] = np
                     book["_ink_fp"] = ""   # 换页:笔迹指纹作废(缓存键随之翻新)
+            elif t == "text":
+                epoch["n"] += 1   # 打字提问=新话轮(与 speech_started 同语义)
             elif t == "state":
                 book["sel"] = (j.get("sel") or "")[:400]
             elif t == "ink":
                 strokes = j.get("strokes") or []
                 book["ink_strokes"] = strokes[:60]
-                try:
-                    _lp = (strokes[-1].get("p") or [[0, 0]])[-1] if strokes else [0, 0]
-                    book["_ink_fp"] = f"{len(strokes)}:{round(float(_lp[0]), 3)}:{round(float(_lp[1]), 3)}"
+                try:   # 全笔画哈希(审核 P1:"笔画数+末点"不同图形易撞)
+                    book["_ink_fp"] = hashlib.md5(json.dumps(strokes, sort_keys=True).encode()).hexdigest()[:10] if strokes else ""
                 except Exception:
                     book["_ink_fp"] = str(len(strokes))
             elif t == "shot":
-                f = shot_fut.get("f")
+                sid = j.get("shot_id")
+                f = shot_fut.get(sid) if sid is not None else (next(iter(shot_fut.values()), None))   # 无 id=59 旧前端,兼容取唯一 pending
                 if f and not f.done():
                     f.set_result({"b64": j.get("b64") or "", "media_type": j.get("media_type") or "image/jpeg"})
 
@@ -2382,7 +2414,7 @@ async def main():
     c = _creds()
     if not (c.get("api_key") or c.get("app_id")):
         print("[voice-rt] ⚠ 未配置凭证(~/.config/doubao-voice.json),服务先监听;浏览器连接会收到提示", file=sys.stderr)
-    async with websockets.serve(handle_browser, LISTEN_HOST, LISTEN_PORT, max_size=2 * 1024 * 1024):
+    async with websockets.serve(handle_browser, LISTEN_HOST, LISTEN_PORT, max_size=8 * 1024 * 1024):   # 截图上行(P2 shot)可达数MB,2MiB 超限=整条控制 WS 被关
         print(f"[voice-rt] listening ws://{LISTEN_HOST}:{LISTEN_PORT}", file=sys.stderr)
         await asyncio.Future()
 

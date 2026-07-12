@@ -4576,10 +4576,12 @@ def _rtc_sideband_images(call_id: str, images: list) -> bool:
                     "type": "message", "role": "user",
                     "content": [{"type": "input_image", "detail": "high",
                                  "image_url": f"data:{im.get('media_type') or 'image/png'};base64,{im.get('b64') or ''}"}]}}))
-            # 短窗收几帧确认没被拒(error 事件=注入失败,让调用方走 fallback)
+            # 短窗收确认:等**每张**都 created 再关连接(60,审核指正:旧版第一张确认就返回,
+            # 后续图的确认没等到;error 事件=注入失败走 fallback)
             import time as _t
-            t_end = _t.time() + 2.0
-            while _t.time() < t_end:
+            n_sent, n_ok = min(len(images), 2), 0
+            t_end = _t.time() + 3.0
+            while _t.time() < t_end and n_ok < n_sent:
                 try:
                     ev = json.loads(ws.recv(timeout=max(0.1, t_end - _t.time())))
                 except TimeoutError:
@@ -4590,7 +4592,10 @@ def _rtc_sideband_images(call_id: str, images: list) -> bool:
                     print(f"[rtc-sideband] error: {json.dumps(ev.get('error') or {})[:200]}", flush=True)
                     return False
                 if ev.get("type") == "conversation.item.created":
-                    return True   # 至少一张已确认落进对话
+                    n_ok += 1
+            if n_ok < n_sent:
+                print(f"[rtc-sideband] 确认不全 {n_ok}/{n_sent}(短窗超时,已发送帧通常仍会送达)", flush=True)
+            return n_ok >= 1
         return True
     except Exception as ex:
         print(f"[rtc-sideband] fail: {type(ex).__name__}: {str(ex)[:150]}", flush=True)

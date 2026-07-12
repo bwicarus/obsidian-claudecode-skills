@@ -855,17 +855,25 @@
   async function _captureView() {
     try {
       await _loadH2C();
+      // 60 尺寸上限(审核P1):长边≤1600px——2×DPR 整视口无上限时复杂页 base64 可超服务端消息上限,断的是整条控制 WS
+      var longEdge = Math.max(window.innerWidth, window.innerHeight);
       var canvas = await window.html2canvas(document.body, {
         x: window.scrollX, y: window.scrollY,
         width: window.innerWidth, height: window.innerHeight,
-        scale: Math.min(2, window.devicePixelRatio || 1),
+        scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
         useCORS: true, logging: false, backgroundColor: '#ffffff',
         ignoreElements: function (el) {
           var id = el.id || '';
           return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' || id === 'word-pop' || id === 'sel-toolbar';
         }
       });
-      var b64 = (canvas.toDataURL('image/jpeg', 0.82).split(',')[1]) || '';
+      // 质量阶梯:编码后目标 ≤900KB base64(0.8→0.6→0.45),超了逐级降质而不是赌网关上限
+      var b64 = '';
+      var qs = [0.8, 0.6, 0.45];
+      for (var qi = 0; qi < qs.length; qi++) {
+        b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
+        if (b64.length <= 900000) break;
+      }
       return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
     } catch (e) { return null; }
   }
@@ -996,6 +1004,15 @@
       // reply_text(显示/落库)与 wait_for_user(静音)。控制面断线=ctl false=回退前端全套。
       if (_rtc.ctl && e.name !== 'reply_text' && e.name !== 'wait_for_user') return;
       var a = {}; try { a = JSON.parse(e.arguments || '{}'); } catch (_) {}
+      // 60:reply_text 参数被输出预算截断=JSON 没闭合 parse 失败→抢救 text 字段已生成的部分,别让整条回复消失
+      if (e.name === 'reply_text' && !(a && a.text) && e.arguments) {
+        var m1 = /"text"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(e.arguments);
+        if (m1) {
+          var rescued = m1[1];
+          try { rescued = JSON.parse('"' + m1[1] + '"'); } catch (_) {}
+          a = { text: rescued + '\n\n(⚠ 回复超出输出长度被截断——想看完整内容请再问一次,或让我分段讲)' };
+        }
+      }
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
@@ -1189,9 +1206,10 @@
               onToolStatus(tp);
             }
             else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要视口截图(只有浏览器能拍)
+              var sid0 = (m0.payload || {}).shot_id;   // 60:带 ID 配对,防两轮工具重叠时迟到截图被下一请求接走
               _captureView().then(function (shot) {
-                try { cw.send(JSON.stringify({ type: 'shot', b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
-              }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', b64: '' })); } catch (e2) {} });
+                try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
+              }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: '' })); } catch (e2) {} });
             }
           } catch (e) {}
         };
