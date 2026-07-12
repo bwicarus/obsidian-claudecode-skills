@@ -548,3 +548,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **③deep 三后端放开**(用户 bug 报告"深度思考只能选 Claude"):根因=chat 管线 `force_model in _CLAUDE_VARIANTS` 白名单(㉕遗留)——chat 加 `force_backend`(claude/gemini/codex,_agent_run 直接分派对应 runner,force_model 白名单按后端放行);relay deep pref 消费不再只认 claude(`body["force_backend"]=pref["backend"]`);catalog `backends_by_action.deep=["claude","gemini","codex"]`(面板自动跟随)。
 
 **④route 档掐断自动升级文字**(用户实测:route 档文字语音对不上+卡壳;日志实锤=模型没调 route_to_text 而是 read_page 后**口头念页面**,`out=512 status=incomplete` 硬掐):prompt 管不住 → **程序判断**:relay response.done 见 `status=incomplete` 且当前 route 档 → 自动 `_route_rescue`(用户问题+被掐半截当 intent→_oa_route 生成完整文字详答显示+TTS 可代念)+system 注入"你被截断了,全文已显示,别重复"(纪元没变才注入);防重入 busy 标志。**模型自调=快路,掐断兜底=慢路**——route 档从此不依赖模型自觉。_route_line 同步强化"工具结果轮要转述大段内容也先调 route_to_text"。
+
+## 63 输出预算按档分级 v2(2026-07-12,用户"512是不是太小了")
+
+㊹ 的 512 一刀切(≈25s)是没有模态体系时的唯一手段;账本实锤平均响应才 14.7s=多数轮次到不了顶,**被掐的是长尾轮=体验最差的时刻**,上限翻倍只影响长尾、平均成本几乎不变。分档:**sts/half=1024**(≈50s;纯语音掐断无兜底=硬事故,日常时长仍由 instructions 8s/20s 规则管,上限只当保险丝)/**route=512 故意保持**(掐断=62 自动转文字详答的触发器,提高反而迟钝)/text=2048。session 级 max_output_tokens 512→1024(纯兜底,每个 response.create 都带显式分档值)。

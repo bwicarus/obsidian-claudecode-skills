@@ -1838,9 +1838,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         工具结果轮:sts/route=念出来;half=文字(审核推荐混合形态);stt=文字。"""
         m = _norm_vm(_creds().get("rt_voice_mode"))
         want_audio = m in ("sts", "route")
+        # 63 分档预算:sts=1024(≈50s,纯语音掐断无兜底);route=512(掐断=转文字详答的触发器,故意收紧);文字=2048
+        budget = 2048 if not want_audio else (512 if m == "route" else 1024)
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
-                             "max_output_tokens": 512 if want_audio else 2048}}
+                             "max_output_tokens": budget}}
 
     async def _need_shot():
         """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。shot_id 配对防错配。"""

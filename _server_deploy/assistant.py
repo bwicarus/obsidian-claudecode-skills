@@ -4556,7 +4556,7 @@ def assistant_rtc_session():
     sess = {"type": "realtime", "model": cfg.get("rt_model") or "gpt-realtime-2.1-mini",
             "output_modalities": ["audio"],
             "reasoning": {"effort": cfg.get("rt_effort") or "low"},
-            "max_output_tokens": 512,   # ㊹审核:输出音频占成本80%,512≈25s音频硬顶(分级预算待sideband控制面)
+            "max_output_tokens": 1024,   # session 级兜底(每个 response.create 都带显式分档预算:sts/half=1024,route=512,text=2048)
             "instructions": "\n".join(parts),
             "audio": {"input": {"noise_reduction": {"type": "near_field"},
                                 "turn_detection": {"type": "semantic_vad",

@@ -853,9 +853,11 @@
     // 61:sts/route=语音(route 的长内容由模型自调 route_to_text 转文字);half=提问语音·工具/深度文字;stt=全文字
     var wantAudio = (m === 'sts') || (m === 'route') || (m === 'half' && src === 'user');
     _rtc.turnText = !wantAudio;   // 本轮是文字输出:TTS 开关开着就流式代念
-    // 预算按模态分级(账本实锤:512 是按25s音频设计的,text 模态下≈350中文字,长文字回答被腰斩)
+    // 预算按档分级(63):sts/half=1024(≈50s,纯语音掐断没有兜底=硬事故,上限只当保险丝——日常时长仍由
+    // instructions 的 8s/20s 规则管);route=512(掐断是机制:触发自动转文字详答,提高反而迟钝);text=2048
+    var budget = !wantAudio ? 2048 : (m === 'route' ? 512 : 1024);
     _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
-                                                   max_output_tokens: wantAudio ? 512 : 2048 } });
+                                                   max_output_tokens: budget } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     try {
