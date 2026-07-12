@@ -1521,6 +1521,13 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                 pass
                     asyncio.create_task(_pump())
 
+                @pc.on("connectionstatechange")
+                def _on_cs():
+                    if pc.connectionState in ("failed", "closed", "disconnected") and _bridge.get("pc") is pc:
+                        _bridge["q"] = None   # 99:桥断→下行回 ws(前端同步回退,双侧一致)
+                        _bridge["pend"] = b""
+                        sys.stderr.write("[voice-oa] 桥断开,音频回退 ws\n")
+
                 pc.addTrack(_mk_bridge_track(q))
                 await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
                 await pc.setLocalDescription(await pc.createAnswer())

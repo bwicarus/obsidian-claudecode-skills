@@ -724,3 +724,13 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **99 WebRTC 桥(外放回声治本,relay 端已落)**:实测 xAI `/v1/realtime/calls` 返回 403"Team is not authorized"(端点存在=灰度中,我们无权限)→按用户设计在 Pi 架桥。**纯音频面**:浏览器⇄aiortc(Pi)WebRTC(<audio> 播放=浏览器 AEC 参考,同 #280 原理),Pi 侧转引擎 WS;事件/字幕/控制照旧走现有 ws。relay 端已实装(handle_openai 内):`bridge_offer` 信令→aiortc pc(非 trickle,Tailscale 内 host candidates 直连);入向 track→AudioResampler 24k mono→`_feed_audio`(与 ws binary 同路);出向 `response.output_audio.delta`→960B 定长块队列→`_mk_bridge_track`(20ms 实时 pacing,空发静音);speech_started 清桥缓冲;finally 关 pc;建桥失败=前端回退 ws 音频。**前端未接**(bridge_offer 发送/pc 建立/ontrack 播放/耳机检测自动分流/设置三态)=下一批,aiortc 1.14.0 已装 mcp-venv。边界:v1 只挂 GPT-WS/Grok 引擎,豆包(binary 协议+16k)二期。
 
+## 批次 99 收尾+101(2026-07-13)回声桥前端 + Grok 转写三重复根修
+
+**99 收尾(前端桥+耳机自动分流)**:
+- `_abridge` 状态机(rc-voicecall):ws open 后按三态偏好判定(`rc-voice-bridge`:auto/1/0,设置「回声桥」下拉,设备级)——**auto=检测到耳机直连,外放走桥**;`_headphonesIn()`=enumerateDevices label 匹配(airpod/headphone/耳机/イヤホン…,getUserMedia 授权后 label 可见,iOS 不列 audiooutput 靠 input label 兜)。
+- 桥建立:pc.addTrack(mic)→non-trickle offer(等 ICE complete,Tailscale host candidates)→ws `bridge_offer`→relay answer(`bridge_answer` 事件)→ontrack=`<audio>` 播放(**AEC 参考=回声消除生效**);`connected` 才置 `_abridge.on`(onCap 停发 ws 音频,此前双路防黑洞)。
+- **双侧回退**:前端 6s 没 connected/pc 断态→`_abridgeStop`(onCap 恢复);relay pc connectionstatechange failed/closed→`_bridge["q"]=None`(下行回 ws)。teardown 随挂断收桥。
+- 边界:v1 只挂 GPT-WS/Grok 引擎(handle_openai);豆包(16k+binary 协议)二期;openai_rtc 引擎原生 WebRTC 不需要桥。
+
+**101 Grok 一句变三句根修(实测铁证)**:时间线同秒 2-3 条 q=程序性重复;真音频喂 xAI 抓事件序列——**xAI 同一轮发 2-3 个 `conversation.item.input_audio_transcription.completed`(官方文档只记载 .updated,被实测推翻)**,叠加 97a 因"文档无 completed"而加的 response.done 定稿补丁=三条。修:completed 按 item_id 去重(`_tr_done` set,OpenAI 一轮一个去重无害)+updated 只做 interim 字幕+撤 done 定稿。"接通没响应"=VAD 0.85 太钝(100 已降 0.5)+goto_page 风暴堵死(100 已熔断)。
+

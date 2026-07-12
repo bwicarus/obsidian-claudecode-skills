@@ -391,6 +391,11 @@
         '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="默认朗读语气(AI 会按内容自动调整情绪;这里是它没给时的兜底,仅2.0音色)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;cursor:pointer">' +
         '<input type="checkbox" id="vcv-cap-tg">朗读字幕(侧栏关闭时屏幕下方显示当前句+上一句,跟声音同步,不挡触控;本设备)</label>' +
+        '<div class="ams-row" style="margin:7px 0"><select class="ams-sel" id="vcv-bridge" style="flex:1 1 100%">' +
+          '<option value="auto">回声桥:自动(外放走 Pi 桥消回声,戴耳机自动直连;豆包/GPT-WS/Grok 引擎)</option>' +
+          '<option value="1">回声桥:总是</option>' +
+          '<option value="0">回声桥:关闭</option>' +
+        '</select></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
         '<input type="checkbox" id="vcv-card-tg">文字卡自动消失(路由/文字模式的回复在侧栏关闭时弹磨砂卡片;开=到时自动收起,关=常驻到手动关;本设备)</label>' +
         '<div class="ams-row" id="vcv-card-row" style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding-left:22px">' +
@@ -412,6 +417,14 @@
               if (k === 'rt_engine') _renderVoiceCfg(container);   // 切引擎:整卡重绘,只显示该引擎相关项(89:container=tab2 pane)
             } else if (typeof _toast === 'function') _toast('保存失败');
           }).catch(function () {});
+      }
+      var _brSel = card.querySelector('#vcv-bridge');   // 99:回声桥三态(设备级)
+      if (_brSel) {
+        try { _brSel.value = localStorage.getItem('rc-voice-bridge') || 'auto'; } catch (e) {}
+        _brSel.addEventListener('change', function () {
+          try { localStorage.setItem('rc-voice-bridge', _brSel.value); } catch (e) {}
+          if (typeof _toast === 'function') _toast('回声桥:' + (_brSel.value === 'auto' ? '自动' : _brSel.value === '1' ? '总是' : '关闭') + '(下次通话生效)');
+        });
       }
       var _capTg = card.querySelector('#vcv-cap-tg');   // 朗读字幕开关:设备级偏好(localStorage),不进服务端凭证
       if (_capTg) {

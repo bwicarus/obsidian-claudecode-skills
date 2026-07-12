@@ -522,7 +522,60 @@
   // ㉘f:㉕b 的回声能量门已撤——PCM 流无时间戳,丢包≠插入静默而是**把话剪辑拼接**(句中插话根因)。
   // 半双工与门的本质区别:全有或全无=干净静默,不破坏 VAD/转写的输入完整性;这是外放场景的成熟可靠解
   // (AEC 环回在 Safari/iPad 不保证生效,实测回声仍被转写成用户输入触发自问自答)。
+  // ── 99(用户设计):WebRTC 回声桥——外放时浏览器媒体走 WebRTC 到 Pi(aiortc),<audio> 播放
+  //    进浏览器 AEC 参考=回声消除生效(同 #280 原理);戴耳机自动退出桥(直连 ws,省一跳)。
+  //    纯音频面:事件/字幕/控制照旧走 ws。桥建立失败/中断=双侧自动回退 ws 音频(relay 侧同样回退)。
+  var _abridge = { on: false, pc: null, el: null };
+  function _headphonesIn() {   // 耳机检测:授权后 label 可见;iOS 不列 audiooutput,靠 input label 兜
+    return navigator.mediaDevices.enumerateDevices().then(function (ds) {
+      return ds.some(function (d) {
+        return (d.kind === 'audioinput' || d.kind === 'audiooutput') &&
+          /airpod|headphone|headset|earbud|earpiece|耳机|イヤホン|ヘッドホン/i.test(d.label || '');
+      });
+    }).catch(function () { return false; });
+  }
+  function _bridgePref() { try { return localStorage.getItem('rc-voice-bridge') || 'auto'; } catch (e) { return 'auto'; } }
+  function _abridgeStop() {
+    _abridge.on = false;
+    try { if (_abridge.pc) _abridge.pc.close(); } catch (e) {}
+    try { if (_abridge.el) _abridge.el.remove(); } catch (e) {}
+    _abridge.pc = null; _abridge.el = null;
+  }
+  async function _abridgeStart(mic) {   // 桥建立:offer 经 ws 信令;connected 才接管麦上行
+    try {
+      var pc = new RTCPeerConnection();
+      _abridge.pc = pc;
+      pc.addTrack(mic.getAudioTracks()[0], mic);
+      pc.ontrack = function (e) {
+        var el = document.createElement('audio');
+        el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
+        el.srcObject = e.streams[0];
+        document.body.appendChild(el);
+        _abridge.el = el;
+        try { el.play(); } catch (e2) {}
+      };
+      pc.onconnectionstatechange = function () {
+        var st = pc.connectionState;
+        if (st === 'connected') { _abridge.on = true; setSt('通话中(回声桥·外放可用)'); }
+        else if (st === 'failed' || st === 'closed' || st === 'disconnected') {
+          if (_abridge.pc === pc && _abridge.on) { _abridgeStop(); setSt('通话中(桥断,已回退)'); }
+        }
+      };
+      var offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await new Promise(function (r) {   // non-trickle:等 ICE 收集完(Tailscale 内 host candidates,快)
+        if (pc.iceGatheringState === 'complete') { r(); return; }
+        var t0 = setTimeout(r, 2000);
+        pc.onicegatheringstatechange = function () { if (pc.iceGatheringState === 'complete') { clearTimeout(t0); r(); } };
+      });
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'bridge_offer', sdp: pc.localDescription.sdp }));
+      setTimeout(function () {   // 6s 没 connected=放弃(relay 侧 pc 断态自回退)
+        if (_abridge.pc === pc && !_abridge.on) { console.warn('[vc] 回声桥超时,回退 ws 音频'); _abridgeStop(); }
+      }, 6000);
+    } catch (e) { console.warn('[vc] 回声桥建立失败', e); _abridgeStop(); }
+  }
   function onCap(chunk, rate) {
+    if (_abridge.on) return;   // 99:桥接管麦上行(WebRTC 轨),ws 不再发音频
     if (_halfDuplex && (playing.length || (ac && ac.currentTime - _lastPlayEnd < 0.35))) { f32buf = new Float32Array(0); return; }
     var m = new Float32Array(f32buf.length + chunk.length);
     m.set(f32buf); m.set(chunk, f32buf.length); f32buf = m;
@@ -2370,6 +2423,15 @@
       ws = new WebSocket(proto + location.host + '/voice-rt' + qs);
       _connecting = false;   // ws 已赋值:_ttsEnsure 的 !ws gate 接棒
       ws.binaryType = 'arraybuffer';
+      ws.addEventListener('open', function () {   // 99:回声桥判定(auto=检测到耳机就直连;总是/关闭按设置)
+        if (mode !== 's2s') return;
+        var bp = _bridgePref();
+        if (bp === '0') return;
+        _headphonesIn().then(function (hp) {
+          if (bp === 'auto' && hp) { console.warn('[vc] 检测到耳机,直连(不走回声桥)'); return; }
+          if (myMic) _abridgeStart(myMic);
+        });
+      });
       ws.onopen = function () {
         _userHung = false; _reconnN = 0; _reconnPend = false; _acquireWL();
         setSt('通话中 · 说话即可(已带上本页内容)'); if (box) box.classList.add('on'); callBtnOn(true);
@@ -2403,6 +2465,9 @@
           try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:断 AI 轮气泡(下一轮开新气泡,别覆盖旧的)
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
         }
+        else if (m.event === 'bridge_answer') {   // 99:回声桥 answer
+          try { if (_abridge.pc) _abridge.pc.setRemoteDescription({ type: 'answer', sdp: (p || {}).sdp || '' }); } catch (e2) {}
+        }
         else if (m.event === 451) {   // ASR 转写:对话窗定稿句 + 字幕用户句(interim 也实时上屏)
           var r = (p.results || [])[0] || {};
           if (r.text && r.is_interim === false) { _lastU = r.text; setSub('u', r.text); }
@@ -2422,6 +2487,7 @@
     _connecting = false;
     callBtnConnecting(false);   // 96:挂断/失败即退出等待态
     if (_rtc.on) rtcTeardown();   // WebRTC 通道随挂断走(pc/dc/audio 元素/mic 全清)
+    _abridgeStop();   // 99:回声桥随挂断走
     _userHung = true; _releaseWL();
     if (_reconnT) { clearTimeout(_reconnT); _reconnT = null; }
     _reconnPend = false;
