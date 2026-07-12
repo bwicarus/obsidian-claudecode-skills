@@ -127,6 +127,12 @@
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
+      '.vc-card.vc-lift{box-shadow:0 22px 60px rgba(0,0,0,.55),0 0 0 0.5px rgba(255,255,255,.2);cursor:grabbing}' +
+      '.vc-card-sum{display:none;font-size:12.5px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.vc-card.vc-min .vc-card-bd{display:none}.vc-card.vc-min .vc-card-sum{display:block}' +
+      '.vc-card.vc-min{padding:9px 13px}' +
+      '@keyframes vcPinPop{0%{filter:brightness(1)}40%{filter:brightness(1.4)}100%{filter:brightness(1)}}' +   // ⚠不用 transform:会覆盖拖动后的内联 translate 导致瞬移
+      '.vc-pin-pop{animation:vcPinPop .4s ease}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
       '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
@@ -494,17 +500,31 @@
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
     return d.text || card.brief || card.title || '';
   }
-  function _pinBind(el, label, textFn) {   // 双击=选中带入 2.1 上下文(紫边框),再双击=移出;选中的浮层卡不自动消失
+  function _pinBind(el, label, textFn) {   // 72:长按 600ms=选中带入 2.1 上下文(紫边框+pop 特效),再长按=移出;选中的浮层卡不自动消失
     el.classList.add('vc-pinnable');
-    el.addEventListener('dblclick', function (ev) {
-      ev.preventDefault(); ev.stopPropagation();
+    var lpT = null, lpX = 0, lpY = 0;
+    function _fire() {
+      lpT = null;
       if (!_rtc.on) return;   // 只在 2.1 通话中有意义
       var on = !el.classList.contains('vc-picked');
       el.classList.toggle('vc-picked', on);
+      el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
       try {
         if (on) _rtcSys('(用户把「' + label + '」的内容带入对话,后续问题请参考:' + String(textFn()).slice(0, 700) + '。状态记录,不要回应本条。)');
         else _rtcSys('(用户移除了刚才带入的「' + label + '」,后续不必再参考它。状态记录,不要回应本条。)');
       } catch (e) {}
+    }
+    el.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('.vc-card-x')) return;
+      lpX = ev.clientX; lpY = ev.clientY;
+      if (lpT) clearTimeout(lpT);
+      lpT = setTimeout(_fire, 600);
+    });
+    el.addEventListener('pointermove', function (ev) {
+      if (lpT && (Math.abs(ev.clientX - lpX) + Math.abs(ev.clientY - lpY)) > 8) { clearTimeout(lpT); lpT = null; }   // 拖动=取消长按
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evn) {
+      el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
   function renderInfo(card) {
@@ -1085,7 +1105,7 @@
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
-      '<div class="vc-card-bd"></div>';
+      '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
     var _bd = el.querySelector('.vc-card-bd');
     try {
       if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
@@ -1093,12 +1113,26 @@
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
     var c = { el: el, t: null, free: false, dx: 0, dy: 0 };
-    el.querySelector('.vc-card-x').addEventListener('click', function () { _cardClose(c); });
+    el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
     el.addEventListener('pointerdown', function () {
       if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
       _cards.topZ = (_cards.topZ || 500) + 1; el.style.zIndex = String(_cards.topZ);   // 69:点击=置顶
     });
-    // 69:按住头部拖动(拖了=脱离堆叠自由停放;× 按钮除外)
+    // 72:双击=收起/展开(收起=头部+一行摘要,仍可拖可关可长按)
+    el.addEventListener('dblclick', function (ev) {
+      if (ev.target.closest('.vc-card-x')) return;
+      ev.preventDefault();
+      var min = !el.classList.contains('vc-min');
+      if (min) {
+        try {
+          var _sm = el.querySelector('.vc-card-sum');
+          if (_sm && !_sm.textContent) _sm.textContent = (el.querySelector('.vc-card-bd').textContent || '').replace(/\s+/g, ' ').trim().slice(0, 42) + '…';
+        } catch (e) {}
+      }
+      el.classList.toggle('vc-min', min);
+    });
+    // 69/72:按住头部拖动——物理感:阈值内粘住不动;拽过阈值"弹起"(微放大+深阴影)跟手;松手落定回弹。
+    // 旧版粘滞/闪烁根因:堆叠布局的 transform 0.38s 过渡在拖动中每帧追赶——拖动期必须 transition:none
     var hd = el.querySelector('.vc-card-hd');
     hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
     hd.addEventListener('pointerdown', function (ev) {
@@ -1107,12 +1141,22 @@
       var sx = ev.clientX - c.dx, sy = ev.clientY - c.dy, moved = false;
       try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
       function mv(e2) {
-        c.dx = e2.clientX - sx; c.dy = e2.clientY - sy;
-        if (!moved && (Math.abs(c.dx) + Math.abs(c.dy)) > 6) { moved = true; c.free = true; _cardLayout(); }
-        if (moved) el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
+        var nx = e2.clientX - sx, ny = e2.clientY - sy;
+        if (!moved && (Math.abs(nx - c.dx) + Math.abs(ny - c.dy)) > 6) {   // 粘滞阈值:拽过才起
+          moved = true; c.free = true;
+          el.style.transition = 'none';                     // 跟手期零动画(粘滞/闪烁的根治)
+          el.classList.add('vc-lift');                      // 弹起态:scale 1.03+深阴影(见 CSS)
+          _cardLayout();
+        }
+        if (moved) { c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)'; }
       }
       function up() {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+        if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
+          el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
+          el.classList.remove('vc-lift');
+          el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
+        }
       }
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });

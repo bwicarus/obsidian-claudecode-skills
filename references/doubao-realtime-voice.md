@@ -599,3 +599,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **结构化结果路由**(用户设计,与 route 同哲学:对 2.1 只是"工具调用+知道完成了"):无需额外小模型——`_gemini_websearch` 的**同一次** grounding 调用直接输出 `{kind: weather|news|fact|general, title, data(按类型 schema), brief}`;`_t_web_search` 结构化成功→卡片经 client_action `renderInfoCard` 显示,**给 2.1 的回填只有 brief**("已显示,口头只说一句概况,不要念细节"——卡片数据在 client_action 里被 pop,不进 RAG);parse 失败→回退纯文本旧行为。前端 `renderInfo`:按 kind 渲 Apple 风卡(天气=大字温度+降水+tip/新闻=条目列表+来源/事实=结论+补充+sources 链接)——**侧栏开=进对话流,关(字幕模式)=磨砂浮层卡**;search_image 侧栏关时也弹浮层图卡。**70b 关键修**:Gemini flash 的 **thinking 不关会泄漏 thought parts 进输出**("Wait, the prompt says…"内心戏实锤)且思考 tokens 吃掉输出预算致正文截断,JSON 守规率 1/3→加 `thinkingConfig:{thinkingBudget:0}`+parts 过滤 `thought` 标记→**4/4**(fact/news/weather)。
 
 **双击入上下文**(用户设计"我们已有向 AI 灌文字和图的渠道"):信息卡/浮层卡/图卡 `_pinBind`——**双击=选中**(紫描边 vc-picked)+`_rtcSys` 注入"用户把「X」带入对话,请参考:内容"(2.1 通话中才生效);**再双击=移出**+注入"已移除不必参考";**选中的浮层卡不自动消失**(自动消失计时豁免+数量裁剪豁免,即用户说的"选中后气泡的计时暂停到取消为止")。
+
+### 72 浮层卡交互重做(2026-07-12 用户设计:磁吸拖动/双击收展/长按选中)
+
+**拖动粘滞/闪烁根因**=堆叠布局的 `transform .38s` 过渡在拖动中每帧追赶——**跟手期必须 transition:none**。新物理感:阈值 6px 内粘住不动→拽过瞬间「弹起」(.vc-lift:scale1.03+深阴影+grabbing)→零动画跟手→松手**落定回弹**(overshoot 曲线 cubic-bezier(.34,1.56,.64,1) 像重新粘回)。**双击**改=收起/展开(收起态 .vc-min:头部+一行正文摘要 42 字,仍可拖/关/长按)。**选中带入上下文改长按 600ms**(pointerdown 计时,move>8px 或抬手取消,到点亮度脉冲 pop+紫框 toggle;⚠pop 动画不能用 transform——会覆盖拖动的内联 translate 致瞬移)。
