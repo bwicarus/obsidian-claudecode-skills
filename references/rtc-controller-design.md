@@ -71,10 +71,22 @@ tts 档的代念:relay 无法播——done 时经控制 WS 下行事件让前端
      `conversation_already_has_active_response`。修=前端控制 WS URL 带 `fe=2`,relay 只对 fe≥2 接管工具,
      否则退回 P1 观察;凡改变双端分工的升级都必须走这种 capability 声明,不能假设前端已是新版。
      另:撞车被拒的 create 记 `pend`,response.done 时补发(否则工具结果永远无人回答)。
+2.5 **P2.5 审核二轮落地** ✅(语音60):
+   - **视觉链路真修**(P0):58 的 rtc_call_id 修复被 python replace 落到同形代码第一处(GPT-WS `_tool`,
+     那里 call_id 是函数调用 ID)——撤销;P2 改用**自己持有的 sideband(ows)直喂 input_image**
+     (与 WS 版同构,不传 rtc_call_id、webapp 不开第二条临时连接);webapp `_rtc_sideband_images`
+     (仍服务前端 fallback)等每张 created 再关。
+   - **turn epoch**(P0 抢话竞态):speech_started/打字=epoch+1;工具完成时纪元已变→只读换过期提示回填、
+     写工具回填真实结果,**都不 response.create**;撞车补发带纪元检查。完整响应仲裁(create/cancel 全归 relay)=P4。
+   - shot_id 配对(防两轮工具重叠错配)+截图尺寸上限(长边1600/质量阶梯≤900KB/serve 8MiB)
+   - 缓存:sel/ink 全量 md5 进键;see_*/搜索类退出缓存;**写工具成功→tool_cache.clear()**(revision 体系的保守替身)。
+   - reply_text 512 截断=前端抢救提示(治本 route_to_text=task#289)。
 3. **P3 usage+注入接管**:relay 记账(前端跳过);拉模式注入搬 relay(page/state/ink 经控制 WS 上行,
-   speech_started 时 relay 注入)。
-4. **P4 response.create 接管**(四态+auto 在 relay)+承诺核查搬 relay。
-5. **P5(=#285/#286)**:压缩状态机/预算硬闸/getStats 上报入库。
+   speech_started 时 relay 注入)。**前置=#284 SQLite 事件账本**(审核:JSON 账本无锁 read-modify-write
+   且浏览器上报不可为硬闸权威;responses/tool_calls/usage_events 带 UNIQUE 幂等键,事务累计)。
+4. **P4 response.create 接管**(四态+auto 在 relay)+承诺核查搬 relay+响应仲裁(所有 create/cancel 串行化)。
+5. **P5(=#285/#286)**:压缩状态机/预算硬闸/getStats 上报入库。之后=控制 WS 可恢复重连(task#290:
+   退避+ctl_ready 才转移所有权+快照重推+call 去重;在此之前"断线保持前端模式"比朴素重连安全)。
 
 ## 现有代码锚点
 
