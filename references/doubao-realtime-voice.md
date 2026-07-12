@@ -593,3 +593,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 69 文字卡拖动/置顶+工具可视化升级(2026-07-12 用户三需求)
 
 ①**卡片拖动**:按住头部(vc-card-hd,cursor:grab/touch-action:none)pointer 拖——拖超 6px=`c.free` 脱离堆叠自由停放(_cardLayout 只排非 free 卡);②**点击置顶**:任意 pointerdown → `_cards.topZ++` 抬 z-index;③**工具可视化**:`_toolIcon(name)` 按类别映射 8 个 SF 线条 SVG(read/search/eye/write/nav/route/dict/net/gear)——字幕状态行升级(capStatus 支持 {html,cls,hold} 对象:**running=图标+label+小转圈,done=图标+绿✓停留 2.5s,error=红⚠停留 4s**;旧行为 done 立即清=侧栏关着的用户什么都看不见的根因)+对话流工具卡 label 前加同款图标。
+
+## 70 结构化结果卡+双击入上下文(2026-07-12,用户设计)
+
+**结构化结果路由**(用户设计,与 route 同哲学:对 2.1 只是"工具调用+知道完成了"):无需额外小模型——`_gemini_websearch` 的**同一次** grounding 调用直接输出 `{kind: weather|news|fact|general, title, data(按类型 schema), brief}`;`_t_web_search` 结构化成功→卡片经 client_action `renderInfoCard` 显示,**给 2.1 的回填只有 brief**("已显示,口头只说一句概况,不要念细节"——卡片数据在 client_action 里被 pop,不进 RAG);parse 失败→回退纯文本旧行为。前端 `renderInfo`:按 kind 渲 Apple 风卡(天气=大字温度+降水+tip/新闻=条目列表+来源/事实=结论+补充+sources 链接)——**侧栏开=进对话流,关(字幕模式)=磨砂浮层卡**;search_image 侧栏关时也弹浮层图卡。**70b 关键修**:Gemini flash 的 **thinking 不关会泄漏 thought parts 进输出**("Wait, the prompt says…"内心戏实锤)且思考 tokens 吃掉输出预算致正文截断,JSON 守规率 1/3→加 `thinkingConfig:{thinkingBudget:0}`+parts 过滤 `thought` 标记→**4/4**(fact/news/weather)。
+
+**双击入上下文**(用户设计"我们已有向 AI 灌文字和图的渠道"):信息卡/浮层卡/图卡 `_pinBind`——**双击=选中**(紫描边 vc-picked)+`_rtcSys` 注入"用户把「X」带入对话,请参考:内容"(2.1 通话中才生效);**再双击=移出**+注入"已移除不必参考";**选中的浮层卡不自动消失**(自动消失计时豁免+数量裁剪豁免,即用户说的"选中后气泡的计时暂停到取消为止")。

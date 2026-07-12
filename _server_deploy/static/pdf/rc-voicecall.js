@@ -127,6 +127,23 @@
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
+      // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
+      '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px}' +
+      '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
+      '.vc-if-wc{font-size:14px;color:#cdd9f2;margin-top:1px}' +
+      '.vc-if-ws{font-size:12px;color:#8a9bb4;margin-top:2px}' +
+      '.vc-if-tip{font-size:12px;color:#b8c6e2;margin-top:6px;padding-top:6px;border-top:0.5px solid rgba(255,255,255,.1)}' +
+      '.vc-if-ni{padding:5px 0;border-bottom:0.5px solid rgba(255,255,255,.08)}.vc-if-ni:last-child{border-bottom:none}' +
+      '.vc-if-nt{font-size:13px;font-weight:600;color:#e8eefb}' +
+      '.vc-if-ns{font-size:12px;color:#9fb0cf;margin-top:1px}' +
+      '.vc-if-src{opacity:.65}' +
+      '.vc-if-fa{font-size:15px;font-weight:600}' +
+      '.vc-if-fd{font-size:12.5px;color:#b8c6e2;margin-top:3px}' +
+      '.vc-if-g{font-size:13.5px;line-height:1.55}' +
+      '.vc-if-srcs{margin-top:7px;font-size:11px}.vc-if-srcs a{color:#7ea2e6;text-decoration:none}' +
+      '.vc-pinnable{-webkit-user-select:none;user-select:none}' +
+      '.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.85),0 12px 40px rgba(0,0,0,.4) !important;border-radius:16px}' +
+      '.asst-msg.vc-if{max-width:96%;width:min(100%,340px)}' +
       // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
       '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(24,30,46,.78);' +
       '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
@@ -439,10 +456,85 @@
   function dispatch(fn, args) {
     if (fn === 'renderVideos') { renderVids((args || [[]])[0] || []); return; }
     if (fn === 'renderImages') { renderImgs((args || [[]])[0] || []); return; }
+    if (fn === 'renderInfoCard') { renderInfo((args || [{}])[0] || {}); return; }
     try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
+  }
+  // ── 70 结构化结果卡(用户设计):web_search 的 Gemini 综合直接给 kind/data/brief——
+  //    系统按类型渲染(天气/新闻/事实/综合),2.1 只口头一句概况;双击卡=内容带入 2.1 上下文(再双击=移出) ──
+  function _infoHtml(card) {
+    var k = card.kind, d = card.data || {}, h = '';
+    function e0(x) { return esc(String(x == null ? '' : x)); }
+    if (k === 'weather') {
+      h = '<div class="vc-if-w"><div class="vc-if-wt">' + e0(d.lo) + '–' + e0(d.hi) + '°C</div>' +
+          '<div class="vc-if-wc">' + e0(d.cond) + (d.precip != null ? ' · 降水 ' + e0(d.precip) + '%' : '') + '</div>' +
+          '<div class="vc-if-ws">' + e0(d.loc) + ' ' + e0(d.date) + '</div>' +
+          (d.tip ? '<div class="vc-if-tip">' + e0(d.tip) + '</div>' : '') + '</div>';
+    } else if (k === 'news') {
+      h = '<div class="vc-if-n">' + (d.items || []).slice(0, 5).map(function (it) {
+        return '<div class="vc-if-ni"><div class="vc-if-nt">' + e0(it.t) + '</div>' +
+               '<div class="vc-if-ns">' + e0(it.s) + (it.src ? ' <span class="vc-if-src">— ' + e0(it.src) + '</span>' : '') + '</div></div>';
+      }).join('') + '</div>';
+    } else if (k === 'fact') {
+      h = '<div class="vc-if-f"><div class="vc-if-fa">' + e0(d.answer) + '</div>' +
+          (d.detail ? '<div class="vc-if-fd">' + e0(d.detail) + '</div>' : '') + '</div>';
+    } else {
+      h = '<div class="vc-if-g">' + e0(d.text || card.brief || '') + '</div>';
+    }
+    if (card.sources && card.sources.length) {
+      h += '<div class="vc-if-srcs">' + card.sources.slice(0, 3).map(function (sc) {
+        return '<a href="' + esc(sc.url || '#') + '" target="_blank" rel="noopener">' + e0((sc.title || '来源').split('.')[0]) + '</a>';
+      }).join(' · ') + '</div>';
+    }
+    return h;
+  }
+  function _infoText(card) {   // 双击带入上下文用的纯文本化
+    var d = card.data || {}, k = card.kind;
+    if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
+    if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
+    if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
+    return d.text || card.brief || card.title || '';
+  }
+  function _pinBind(el, label, textFn) {   // 双击=选中带入 2.1 上下文(紫边框),再双击=移出;选中的浮层卡不自动消失
+    el.classList.add('vc-pinnable');
+    el.addEventListener('dblclick', function (ev) {
+      ev.preventDefault(); ev.stopPropagation();
+      if (!_rtc.on) return;   // 只在 2.1 通话中有意义
+      var on = !el.classList.contains('vc-picked');
+      el.classList.toggle('vc-picked', on);
+      try {
+        if (on) _rtcSys('(用户把「' + label + '」的内容带入对话,后续问题请参考:' + String(textFn()).slice(0, 700) + '。状态记录,不要回应本条。)');
+        else _rtcSys('(用户移除了刚才带入的「' + label + '」,后续不必再参考它。状态记录,不要回应本条。)');
+      } catch (e) {}
+    });
+  }
+  function renderInfo(card) {
+    if (!card || !card.kind) return;
+    var html = '<div class="vc-if-hd">' + esc(card.title || '搜索结果') + '</div>' + _infoHtml(card);
+    var label = card.title || '搜索结果';
+    if (_sideOpen()) {
+      var th = document.getElementById('asst-thread');
+      if (!th) return;
+      var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
+      d.innerHTML = html;
+      _pinBind(d, label, function () { return _infoText(card); });
+      th.appendChild(d); th.scrollTop = th.scrollHeight;
+    } else {
+      var c = _cardPush(html, label, true);   // 字幕模式:浮层卡(html)
+      if (c) _pinBind(c.el, label, function () { return _infoText(card); });
+    }
   }
   function renderImgs(imgs) {   // ㉜:语音 search_image 结果 → 真实图卡进侧栏对话流(点开原条目页)
     if (!imgs || !imgs.length) return;
+    if (!_sideOpen()) {   // 70:字幕模式下图也要看得见——弹浮层图卡(可拖/可双击带入)
+      var gh = imgs.map(function (im) {
+        return im && im.image_url ? '<img src="' + esc(im.image_url) + '" style="max-width:100%;border-radius:10px;margin:3px 0" alt="' + esc(im.title || '') + '">' : '';
+      }).join('');
+      var c0 = _cardPush(gh, '配图 × ' + imgs.length, true);
+      if (c0) _pinBind(c0.el, '配图', function () {
+        return imgs.map(function (im) { return (im.title || '图') + ': ' + (im.image_url || ''); }).join(';');
+      });
+      return;
+    }
     var m = threadMsg('asst-a', '给你找到这些图片:');
     if (!m) return;
     var g = document.createElement('div');
@@ -984,8 +1076,8 @@
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
     _cardLayout();
   }
-  function _cardPush(text, kindLabel) {
-    if (!text || !text.trim() || _sideOpen()) return;   // 侧栏开着=内容已在对话流,不弹
+  function _cardPush(text, kindLabel, isHtml) {
+    if (!text || (!isHtml && !text.trim()) || _sideOpen()) return null;   // 侧栏开着=内容已在对话流,不弹
     injectCss();
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
@@ -996,9 +1088,10 @@
       '<div class="vc-card-bd"></div>';
     var _bd = el.querySelector('.vc-card-bd');
     try {
-      if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
+      if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
+      else if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
       else _bd.textContent = text;
-    } catch (e) { _bd.textContent = text; }
+    } catch (e) { _bd.textContent = String(text); }
     var c = { el: el, t: null, free: false, dx: 0, dy: 0 };
     el.querySelector('.vc-card-x').addEventListener('click', function () { _cardClose(c); });
     el.addEventListener('pointerdown', function () {
@@ -1025,9 +1118,15 @@
     });
     w.appendChild(el);
     _cards.list.push(c);
-    while (_cards.list.length > 4) _cardClose(_cards.list[0]);
+    while (_cards.list.length > 4) {   // 70:被双击选中(带入上下文)的卡不被数量裁剪挤掉
+      var victim = null;
+      for (var vi = 0; vi < _cards.list.length - 1; vi++) { if (!_cards.list[vi].el.classList.contains('vc-picked')) { victim = _cards.list[vi]; break; } }
+      if (!victim) break;
+      _cardClose(victim);
+    }
     requestAnimationFrame(_cardLayout);
-    if (_cardHideOn()) c.t = setTimeout(function () { _cardClose(c); }, _cardSecs() * 1000);
+    if (_cardHideOn()) c.t = setTimeout(function () { if (!el.classList.contains('vc-picked')) _cardClose(c); }, _cardSecs() * 1000);
+    return c;
   }
 
   // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──

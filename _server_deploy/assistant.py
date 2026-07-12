@@ -374,10 +374,21 @@ def _gemini_websearch(query, timeout=45):
     mdl = _variant_paid(_GEMINI_MODEL)[0]
     if not keys:
         return {}
+    _sys = ("联网搜索,然后只输出一个 JSON 对象(禁止其他任何文字/代码块标记):\n"
+            '{"kind":"weather|news|fact|general","title":"简短标题",\n'
+            ' "data": 按 kind 选一种——\n'
+            '   weather: {"loc":"地点","date":"日期","cond":"天气现象","lo":最低温数字,"hi":最高温数字,"precip":降水概率数字,"tip":"一句出行建议"}\n'
+            '   news: {"items":[{"t":"标题","s":"一句话摘要","src":"来源名"}]}  (最多5条)\n'
+            '   fact: {"answer":"直接结论(一句)","detail":"补充说明(一两句)"}\n'
+            '   general: {"text":"综合回答(200字内)"}\n'
+            ' "brief":"给语音助手的一句话概况,用户的语言"}\n'
+            "kind 选最贴合查询意图的;数字字段用数字不要带单位。")
     body = {"contents": [{"role": "user", "parts": [{"text": query}]}],
             "tools": [{"google_search": {}}],
-            "systemInstruction": {"parts": [{"text": "联网搜索并用问题的语言简洁作答(200字内),关键事实优先。"}]},
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 900}}
+            "systemInstruction": {"parts": [{"text": _sys}]},
+            # 70b:必须关 thinking——不关的话 thought parts 泄漏进输出(实锤"Wait, the prompt says…"内心戏)
+            # 且思考 tokens 吃掉 900 输出预算导致正文截断,JSON 守规率 1/3
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 900, "thinkingConfig": {"thinkingBudget": 0}}}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key="
     for key, tier in keys:
         try:
@@ -389,13 +400,26 @@ def _gemini_websearch(query, timeout=45):
             j = r.json(); us = _gemini_usage(j)
             _gemini_log("assistant:websearch", 200, mdl, us["total"], us["prompt"], us["out"], tier)
             cand = (j.get("candidates") or [{}])[0]
-            text = "".join(pt.get("text", "") for pt in (cand.get("content") or {}).get("parts", [])).strip()
+            text = "".join(pt.get("text", "") for pt in (cand.get("content") or {}).get("parts", [])
+                           if not pt.get("thought")).strip()
             srcs = []
             for ch in ((cand.get("groundingMetadata") or {}).get("groundingChunks") or []):
                 w = ch.get("web") or {}
                 if w.get("uri") and all(x["url"] != w["uri"] for x in srcs):
                     srcs.append({"title": (w.get("title") or "")[:120], "url": w["uri"]})
-            return {"answer": text[:1500], "sources": srcs[:5]} if text else {}
+            if not text:
+                return {}
+            card = None
+            try:   # 70:结构化输出(kind/title/data/brief)——parse 失败回退纯文本(general)
+                m = re.search(r"\{[\s\S]*\}", text)
+                if m:
+                    c0 = json.loads(m.group(0))
+                    if isinstance(c0, dict) and c0.get("kind") and isinstance(c0.get("data"), dict):
+                        card = {"kind": str(c0["kind"])[:16], "title": str(c0.get("title") or "")[:80],
+                                "data": c0["data"], "brief": str(c0.get("brief") or "")[:300], "sources": srcs[:4]}
+            except Exception:
+                card = None
+            return {"card": card, "answer": text[:1500], "sources": srcs[:5]}
         _gemini_log("assistant:websearch", r.status_code, mdl, tier=tier)
         if r.status_code in (429, 403):
             _gemini_cooldown(tier, _retry_after(r.text))
@@ -1524,6 +1548,15 @@ def _t_web_search(args, ctx):
         return {"error": "缺 query(搜索关键词)"}
     try:
         r = _gemini_websearch(q)   # 64 首选:Gemini google_search grounding(3.x 每月 5000 次免费)
+        card = r.get("card")
+        if card and card.get("kind") in ("weather", "news", "fact", "general"):
+            # 70(用户设计):结构化结果卡——卡片经 client_action 显示(侧栏卡/字幕模式浮层),
+            # 2.1 只拿 brief=「已显示+一句概况」,不用念细节(与 route 同哲学:知道任务完成即可)
+            brief = card.get("brief") or (card.get("data") or {}).get("text") or card.get("title") or "结果已显示"
+            return {"ok": True, "kind": card["kind"],
+                    "note": "搜索结果已用卡片显示在用户屏幕上。口头只说一句概况:" + brief +
+                            "(不要念卡片细节,不要重复列表内容;用户想深入会自己看或追问)",
+                    "client_action": {"fn": "renderInfoCard", "args": [card]}}
         if r.get("answer"):
             return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],
                     "note": "answer 是联网搜索的综合结论,口头转述并提一句来源。"}
