@@ -2106,6 +2106,10 @@ def _eassistant_convo_get():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     file_rel = (request.args.get("file") or "").strip()
+    if request.args.get("compact"):   # ㊲:语音回放用压缩视图(摘要 sidecar 由 assistant.py 统一管)
+        import assistant as _as
+        v = _as._compact_view(_uid(), file_rel)
+        return jsonify({"ok": True, "summary": v["summary"], "messages": v["messages"]})
     return jsonify({"ok": True, "messages": _econvo_load(_uid(), file_rel)[-100:]})
 
 
@@ -2131,6 +2135,11 @@ def _eassistant_convo_clear():
     # ③-4b:共享侧栏清空是「POST 无 body」→ 从 query 取 file(内联 EPUB 仍传 body,两路都认)
     file_rel = (b.get("file") or request.args.get("file") or "").strip()
     _econvo_clear(_uid(), file_rel)
+    try:   # ㊲:压缩摘要与历史同命运——清空=原文+压缩记忆一起消失
+        import assistant as _as
+        _as._summary_path(_uid(), file_rel).unlink(missing_ok=True)
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 

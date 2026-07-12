@@ -949,17 +949,20 @@
       if (m0 && m0.toLowerCase().indexOf('cancel') < 0) setSt('⚠ ' + m0.slice(0, 60));
     }
   }
-  async function _rtcInjectHistory() {   // ㉞ 重连历史回放:服务端对话记录压成一条 system(官方指南 8.4 摘要形态,
-    try {                                //   不逐条造 item——省 item 数且不赌 assistant content type)
+  async function _rtcInjectHistory() {   // ㉞ 重连历史回放 → ㊲ 压缩视图:摘要(旧轮次的滚动压缩)+近几轮原文,
+    try {                                //   替代全量原文灌注(官方指南 8.4 形态,省上下文)
       var hu = (window.__asstHistUrl && window.__asstHistUrl()) || '/api/assistant/history';   // ㉟:经侧栏同一端点(EPUB=本书 epub-convo)
+      hu += (hu.indexOf('?') >= 0 ? '&' : '?') + 'compact=1';
       var h = await (await fetch(hu)).json();
-      var msgs = (h && h.messages) || [];
+      var parts = [];
+      if (h && h.summary) parts.push('[此前对话的摘要]\n' + String(h.summary).slice(0, 2000));
       var lines = [];
-      msgs.slice(-14).forEach(function (m) {
+      ((h && h.messages) || []).slice(-10).forEach(function (m) {
         var t = String(m.content || '').replace(/\s+/g, ' ').trim().slice(0, 260);
         if (t) lines.push((m.role === 'assistant' ? '你说:' : '用户说:') + t);
       });
-      if (lines.length) _rtcSys('(通话重新接通。之前的对话记录:\n' + lines.join('\n') + '\n——延续这段对话的语境回答,不要重新打招呼、不要对本条做任何回应。)');
+      if (lines.length) parts.push('[最近的对话]\n' + lines.join('\n'));
+      if (parts.length) _rtcSys('(通话重新接通。' + parts.join('\n') + '\n——延续这段对话的语境回答,不要重新打招呼、不要对本条做任何回应。)');
     } catch (e) {}
   }
   function _rtcDead(reason) {   // ㉞ 连接死亡(后台挂起/网络切换):明示 + 非主动挂断自动重连(带历史回放)
@@ -1156,6 +1159,12 @@
     try { if (ac) ac.close(); } catch (e) {}
     ac = null; capNode = null; micStream = null; f32buf = new Float32Array(0); curAText = ''; curAEl = null;
     _lastU = ''; try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:挂断断轮,下次通话开新气泡
+    // ㊲ 挂断=空闲期做功:后台触发历史压缩(fire-and-forget;后端幂等——轮次不够/已清空都会跳过,
+    //    竞态守卫防"清空后压缩把记忆复活");下次开话回放"摘要+近几轮"而非全量原文
+    try {
+      fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ file: (toggle._opts || {}).file || '' }) }).catch(function () {});
+    } catch (e) {}
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null;
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);

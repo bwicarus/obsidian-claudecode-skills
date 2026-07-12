@@ -4167,10 +4167,86 @@ def assistant_chat():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ── ㊲ 对话历史压缩(官方 Realtime 指南 8.4 形态:滚动摘要替代无限历史,低频批量优于频繁删除)──
+# 挂断时后台压缩(空闲期做功),新开语音回放"摘要+近几轮原文"——压缩发生在会话之间,不碰任何在用缓存前缀。
+# 摘要 sidecar 与对话历史同命运:🗑 清空时一并删除。
+def _summary_path(uid, file_rel: str = ""):
+    if file_rel and file_rel.lower().endswith(".epub"):
+        import epub_assistant as _ea
+        return _ea._ECONVO_DIR / str(uid) / (_ea._file_key(file_rel) + ".summary.json")
+    return _CONVO_DIR / f"{uid}.summary.json"
+
+
+def _summary_load(uid, file_rel: str = "") -> dict:
+    try:
+        return json.loads(_summary_path(uid, file_rel).read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_msgs_for(uid, file_rel: str = "") -> list:
+    if file_rel and file_rel.lower().endswith(".epub"):
+        import epub_assistant as _ea
+        return _ea._econvo_load(uid, file_rel)
+    return _convo_load(uid)
+
+
+def _compact_view(uid, file_rel: str = "") -> dict:
+    """历史的压缩视图:{summary, messages=摘要覆盖点之后的原文}。语音重连回放用它,替代全量原文。"""
+    sm = _summary_load(uid, file_rel)
+    upto = sm.get("upto_ts") or 0
+    msgs = [m for m in _load_msgs_for(uid, file_rel) if (m.get("ts") or 0) > upto]
+    return {"summary": (sm.get("summary") or ""), "messages": msgs[-20:]}
+
+
+@bp.route("/compact-history", methods=["POST"])
+def assistant_compact_history():
+    """挂断触发(前端 fire-and-forget):未压缩轮次够多才压(幂等防抖),便宜文字模型滚动合并旧摘要。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    uid = session["user_id"]
+    file_rel = (b.get("file") or "").strip()
+    sm = _summary_load(uid, file_rel)
+    upto = sm.get("upto_ts") or 0
+    fresh = [m for m in _load_msgs_for(uid, file_rel)
+             if (m.get("ts") or 0) > upto and m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+    KEEP = 6   # 最近几轮保留原文(摘要丢局部语义,官方 8.4 同款建议)
+    if len(fresh) < 14:
+        return jsonify({"ok": True, "skipped": "对话不够长,暂不压缩"})
+    cut = len(fresh) - KEEP
+    while cut > 1 and (fresh[cut - 1].get("ts") or 0) == (fresh[cut].get("ts") or 0):
+        cut -= 1   # 打包边界别拆开同一秒的轮次(upto_ts 按秒,拆开会把保留段误滤掉)
+    pack = fresh[:cut]
+    if len(pack) < 8:
+        return jsonify({"ok": True, "skipped": "可打包轮次太少"})
+    lines = [("用户: " if m["role"] == "user" else "AI: ") + str(m["content"]).replace("\n", " ")[:400] for m in pack]
+    old = (sm.get("summary") or "").strip()
+    prompt = ("你在为一个语音学习助手压缩对话记忆。把下面的对话(连同已有摘要)合并成**一段 300 字以内**的摘要,"
+              "只保留:用户的偏好与习惯、已确认的事实和结论、学习进度(在读什么书/学到哪)、还没办完的事项。"
+              "丢掉寒暄、过程性内容和重复。直接输出摘要正文,不加任何前后缀。\n"
+              + (f"[已有摘要]\n{old}\n" if old else "") + "[新增对话]\n" + "\n".join(lines))
+    out = (_gemini_text(prompt, max_tokens=600, think=False, timeout=45) or "").strip()
+    if not out:
+        return jsonify({"ok": False, "error": "压缩模型没返回"}), 502
+    # 竞态守卫:压缩期间用户可能点了清空——重载校验,历史已空就放弃写入(别把清掉的记忆复活)
+    if not _load_msgs_for(uid, file_rel):
+        return jsonify({"ok": True, "skipped": "历史已被清空,放弃写入"})
+    p = _summary_path(uid, file_rel)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"summary": out[:2000], "upto_ts": pack[-1].get("ts") or int(time.time()),
+                             "ts": int(time.time())}, ensure_ascii=False), "utf-8")
+    print(f"[compact] uid={uid} file={file_rel or 'global'} packed={len(pack)} → {len(out)}字", flush=True)
+    return jsonify({"ok": True, "packed": len(pack), "summary_chars": len(out)})
+
+
 @bp.route("/history")
 def assistant_history():
     if not _logged_in():
         return jsonify({"ok": False}), 401
+    if request.args.get("compact"):   # ㊲:语音回放用压缩视图(摘要+近几轮原文),侧栏显示仍走全量
+        v = _compact_view(session["user_id"])
+        return jsonify({"ok": True, "summary": v["summary"], "messages": v["messages"]})
     return jsonify({"ok": True, "messages": _convo_load(session["user_id"])[-100:]})
 
 
@@ -4575,6 +4651,10 @@ def assistant_clear():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     _convo_clear(session["user_id"])
+    try:   # ㊲:摘要与历史同命运——清空=原文+压缩记忆一起消失
+        _summary_path(session["user_id"]).unlink(missing_ok=True)
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
