@@ -1931,11 +1931,18 @@
   //   同流同清(🗑 清空=显示+服务端记录+语音记忆一起清,rc-voicecall 旁听 fresh 重连);
   //   通话浮层的迷你对话区(vc-sub)退役,只在无侧栏的页面兜底。
   var _vTurnEl = null;   // 通话当前 AI 轮的气泡:'a' 全量覆盖更新;'u'/'reset' 断轮
+  var _vUEl = null;   // 112:{iid, el} 最近用户句气泡——grok 可修订全文按 iid 覆盖
   window.__asstVoiceMsg = function (who, text) {
     try {
       if (who === 'reset') { _vTurnEl = null; return true; }
       if (who === 'u') {
+        var _o2 = arguments[2] || {};
+        if (_o2.utterId && _vUEl && _vUEl.iid === _o2.utterId && _vUEl.el && _vUEl.el.parentNode === thread) {
+          _vUEl.el.textContent = text;   // 112(用户规范):同 item 的修订=覆盖同一气泡,不追加
+          scrollDown(); return true;
+        }
         var d = document.createElement('div'); d.className = 'asst-msg asst-u'; d.textContent = text;
+        if (_o2.utterId) _vUEl = { iid: _o2.utterId, el: d };
         // GPT 用户转写(whisper)迟到,AI 回复常已在流:按真实时序插进行中气泡**前面**,不断 AI 轮
         if (_vTurnEl && _vTurnEl.parentNode === thread) thread.insertBefore(d, _vTurnEl);
         else { thread.appendChild(d); _vTurnEl = null; }

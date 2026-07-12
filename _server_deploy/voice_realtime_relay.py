@@ -1402,7 +1402,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         return
     _bridge = {"pc": None, "q": None, "pend": b""}   # 99 WebRTC 桥(纯音频面);q=None=未建(ws 音频照旧)
     _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
-    _tr_done = set()   # 101:转写 completed 去重(xAI 同轮多发)
+    _tr_pend = {}     # 112:item_id → 最新累计全文(可修订)
+    _tr_timers = {}   # 112:item_id → debounce 定稿任务
     _turn = {"n": 0}   # 104:话轮计数(图像焚旧参照)
     import array as _arr
     import collections as _coll
@@ -1798,22 +1799,39 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                             except Exception:
                                 pass
                     asyncio.create_task(_trunc_fb())
-            elif t == "conversation.item.input_audio_transcription.completed":
-                # 101(实测铁证):xAI 同一轮发 2-3 个 completed(文档未记载)→"一句话重复三句"。按 item_id 去重;
-                # OpenAI 一轮一个,去重无害。item_id 缺失时按文本+近邻兜底。
+            elif t in ("conversation.item.input_audio_transcription.completed",
+                       "conversation.item.input_audio_transcription.updated"):
+                # 112(用户规范):xAI 的 updated/completed=同 item 的**可修订累计全文**——对同一 item_id 覆盖式更新
+                # (不追加、不因已见过而 return——101 取首个 completed 会把更完整的迟到修订挡掉);
+                # speech_stopped 后迟到修订照收,以最后一次为准,debounce 0.8s 后定稿落库。
                 txt = (e.get("transcript") or "").strip()
-                _iid = e.get("item_id") or ("~" + txt[:40])
-                if txt and _iid not in _tr_done:
-                    _tr_done.add(_iid)
-                    if len(_tr_done) > 200:
-                        _tr_done.clear()
+                _iid = e.get("item_id") or "~"
+                if txt and engine == "grok":
+                    _tr_pend[_iid] = txt
+                    await bws.send(json.dumps({"event": 451, "payload": {"results": [
+                        {"text": txt, "is_interim": True, "iid": _iid}]}}, ensure_ascii=False))
+                    _t_old = _tr_timers.pop(_iid, None)
+                    if _t_old:
+                        _t_old.cancel()
+
+                    async def _tr_fin(iid0=_iid):
+                        try:
+                            await asyncio.sleep(0.8)
+                        except asyncio.CancelledError:
+                            return
+                        txt0 = _tr_pend.pop(iid0, "")
+                        _tr_timers.pop(iid0, None)
+                        if txt0:
+                            try:
+                                await bws.send(json.dumps({"event": 451, "payload": {"results": [
+                                    {"text": txt0, "is_interim": False, "iid": iid0}]}}, ensure_ascii=False))
+                            except Exception:
+                                pass
+                            _vlog("q", text=txt0, page=book.get("page") or page, book=file_rel)
+                    _tr_timers[_iid] = asyncio.create_task(_tr_fin())
+                elif txt and t.endswith(".completed"):   # OpenAI 形制:一轮一个 completed,即时定稿
                     await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": False}]}}, ensure_ascii=False))
                     _vlog("q", text=txt, page=book.get("page") or page, book=file_rel)
-            elif t == "conversation.item.input_audio_transcription.updated":
-                # 101:xAI 的 .updated=累积全文可修正——只做 interim 实时显示(前端覆盖式);定稿由 completed(上面,已去重)负责
-                txt = (e.get("transcript") or "").strip()
-                if txt:
-                    await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": True}]}}, ensure_ascii=False))
             elif t == "response.function_call_arguments.done":
                 name = e.get("name") or ""
                 try:

@@ -435,13 +435,18 @@
   // AI 一轮 = 一个气泡(550 增量更新同一元素;450 用户开口 = 上一轮定稿,curAEl 置空)。
   var curAEl = null;
   var _lastU = '';   // ㉛:最近一句用户话(451/whisper 定稿存,轮完随 AI 句一起落库)
-  function setSub(who, text) {
+  function setSub(who, text, iid) {
     // ㉛(用户设计):侧栏助手在 → 通话对话直接进 #asst-thread(与文字对话同流同清);浮层迷你对话区只兜底
-    if (window.__asstVoiceMsg && window.__asstVoiceMsg(who, text)) return;
+    if (window.__asstVoiceMsg && window.__asstVoiceMsg(who, text, iid ? { utterId: iid } : undefined)) return;
     if (!box) return;
     var sub = box.querySelector('.vc-sub'); if (!sub) return;
     if (who === 'u') {
+      if (iid && setSub._u && setSub._u.iid === iid && setSub._u.el && setSub._u.el.parentNode === sub) {
+        setSub._u.el.textContent = text;   // 112:同 iid=覆盖同一气泡(可修订全文,不追加)
+        return;
+      }
       var d = document.createElement('div'); d.className = 'vc-m vc-mu'; d.textContent = text;
+      if (iid) setSub._u = { iid: iid, el: d };
       // GPT 的用户转写(whisper)异步迟到:AI 回复常已在流——用户句按时序插到进行中气泡**前面**,
       // 不断开 curAEl(断开会让后续 delta 带全量文本另起新气泡=同一回复显示两遍)
       if (curAEl && curAEl.parentNode === sub) sub.insertBefore(d, curAEl);
@@ -2489,7 +2494,8 @@
         }
         else if (m.event === 451) {   // ASR 转写:对话窗定稿句 + 字幕用户句(interim 也实时上屏)
           var r = (p.results || [])[0] || {};
-          if (r.text && r.is_interim === false) { _lastU = r.text; setSub('u', r.text); }
+          if (r.text && r.is_interim === false) { _lastU = r.text; setSub('u', r.text, r.iid); }
+          else if (r.text && r.iid) setSub('u', r.text, r.iid);   // 112(用户规范):grok 可修订全文——interim 也进对话窗,同 iid 覆盖同一气泡
           if (r.text) capUser(r.text);
         }
         else if (m.event === 550) { curAText += (p.content || ''); setSub('a', curAText); capStream('a', curAText); }   // S2S 回复:对话窗 + 字幕(尾句 cur/前一句 prev)

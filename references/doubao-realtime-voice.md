@@ -764,3 +764,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **111 本地 VAD 手动轮次(用户设计,替代 109 的半吊子语音门)**:109 保留 server_vad 有自相矛盾 bug——静默停推后服务端听不到句尾静音流,轮次判定永远凑不齐=不回答。定稿:`turn_detection: null` + relay 本地 RMS VAD 全权:开口(RMS>350)→`_grok_turn_start`(response.cancel 打断进行中响应+给前端发 450 清播放+桥清缓冲+话轮计数/焚图——原 speech_started 的全部职责)+补发 0.6s 预滚;说完(800ms hangover)→`_grok_turn_end`(补 0.5s 尾静音助转写收尾→flush→`input_audio_buffer.commit`+`response.create`)→**停止上传**。busy 标志由 down 泵 response.created/done 维护(_vg 提升函数级,up/down 共享)。静默期完全不推流=挂机≈零成本。
 
+## 批次 112(2026-07-13)xAI 转写=可修订累计全文的正确实现(用户规范)
+
+101 的"按 item 去重取首个 completed"是错的——xAI 的 updated/**completed 都可多发**,每次是同 item 的**可修订累计全文**,取首个=把更完整的迟到修订挡掉。定稿实现:
+- **relay**:updated/completed 统一处理(grok)——`_tr_pend[item_id]=最新全文`,每次下发 451 `{text, is_interim:true, iid}`;**debounce 0.8s**(每次修订重置定时器),静默后以最后一次为准发 `is_interim:false` 定稿+落库。speech_stopped 后的迟到修订照收(定时器机制天然支持)。OpenAI 形制(一轮一个 completed)保持即时定稿。
+- **前端**:451 带 iid 时 interim 也进对话窗;`setSub('u',text,iid)`/`__asstVoiceMsg('u',text,{utterId})` 同 iid=**覆盖同一气泡**(textContent 改字),不追加、不因已存在而丢弃;新 iid=新气泡。浮层兜底路径同款(setSub._u 记忆)。
+
