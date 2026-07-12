@@ -126,6 +126,12 @@
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
+      '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
+      'font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0 0 0 1px;flex:none;transition:transform .12s}' +
+      '.vc-card-p:active{transform:scale(.82)}' +
+      '.vc-card-p.playing{background:#7b6cff;color:#fff;animation:vcClipBreath2 1.8s ease-in-out infinite}' +
+      '@keyframes vcClipBreath2{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45)}50%{box-shadow:0 0 0 6px rgba(123,108,255,0)}}' +
+      '.vc-card-hd .vc-card-x{margin-left:6px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
       '.vc-card.vc-lift{box-shadow:0 22px 60px rgba(0,0,0,.55),0 0 0 0.5px rgba(255,255,255,.2);cursor:grabbing}' +
       '.vc-card-sum{display:none;font-size:12.5px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
@@ -140,7 +146,7 @@
       '#vc-dock-hint{position:fixed;left:0;right:0;bottom:0;height:150px;pointer-events:none;z-index:2147481410;opacity:0;transition:opacity .25s;' +
       'background:linear-gradient(to top,rgba(123,108,255,.38),rgba(123,108,255,.1) 55%,transparent)}' +
       '#vc-dock-hint.on{opacity:1}' +
-      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;height:26vh;display:flex;flex-direction:column;' +
+      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;' +
       'background:rgba(24,24,30,.82);-webkit-backdrop-filter:blur(26px) saturate(1.5);backdrop-filter:blur(26px) saturate(1.5);' +
       'border-top:0.5px solid rgba(255,255,255,.14);box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
       '.vc-dkp-hd{display:flex;align-items:center;gap:8px;padding:9px 14px 4px;flex:none}' +
@@ -148,7 +154,16 @@
       '.vc-dkp-b{border:1px solid #35446b;background:rgba(255,255,255,.05);color:#9fb4e0;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +
       '.vc-dkp-b.on{background:#2b3a5f;color:#cfe0ff}.vc-dkp-b.danger{border-color:#7f2a2a;color:#ff8a80}' +
       // 时间线:天节点=轴上单线条+日期;每张卡上方竖线+具体时刻(用户设计元素,布局取横向时间轴成熟形态)
-      '.vc-dkp-sc{flex:1;display:flex;align-items:flex-start;gap:14px;overflow-x:auto;overflow-y:hidden;padding:14px 16px 10px;-webkit-overflow-scrolling:touch}' +
+      '.vc-dkp-sc{flex:1;display:flex;align-items:flex-start;gap:14px;overflow-x:auto;overflow-y:hidden;padding:14px 16px 10px;-webkit-overflow-scrolling:touch;' +
+      'scroll-snap-type:x proximity;scroll-padding:0 50%}' +
+      '.vc-dkp-cell{scroll-snap-align:center;transition:width .28s ease}' +
+      '.vc-dkp-cell[data-lvl="0"]{width:min(76vw,330px)}' +
+      '.vc-dkp-cell[data-lvl="0"] .vc-dkp-txt{-webkit-line-clamp:9;font-size:12.5px}' +
+      '.vc-dkp-cell[data-lvl="1"]{width:180px}' +
+      '.vc-dkp-cell[data-lvl="1"] .vc-dkp-txt{-webkit-line-clamp:3}' +
+      '.vc-dkp-cell[data-lvl="2"]{width:112px}' +
+      '.vc-dkp-cell[data-lvl="2"] .vc-dkp-txt{-webkit-line-clamp:1}' +
+      '.vc-dkp-cell[data-lvl="2"] .vc-dk-m{display:none}' +
       '.vc-dkp-day{flex:none;display:flex;align-items:center;height:18px;margin-top:0;padding:0 10px 0 2px;position:relative}' +
       '.vc-dkp-day span{font-size:11px;color:#b9a8ff;font-weight:600;white-space:nowrap;padding:0 8px;border-bottom:1px solid rgba(123,108,255,.5);line-height:17px}' +
       '.vc-dkp-cell{flex:none;display:flex;flex-direction:column;align-items:center;width:158px}' +
@@ -1179,47 +1194,48 @@
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
   window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
-  function _dragToDock(el, payloadFn) {   // 81:侧栏卡拖拽收入——按住 300ms 静止=拎起(ghost 跟手+临时锁滚动),拖到底边光晕=收入
-    var t0 = null, sx = 0, sy = 0, ghost = null, lifted = false;
+  function _dragToDock(el, payloadFn) {   // 83(用户设计):**头部当拖动把手**(仿浮层卡)——即时拖,和对话流滚动零冲突
+    var hd = el.querySelector('.vc-if-hd') || el.firstElementChild || el;
+    hd.style.touchAction = 'none'; hd.style.cursor = 'grab';
+    var ghost = null, moved = false, sx = 0, sy = 0;
     function _pos(x, y) { if (ghost) { ghost.style.left = (x - ghost.offsetWidth / 2) + 'px'; ghost.style.top = (y - 26) + 'px'; } }
-    function _end(ev) {
-      if (t0) { clearTimeout(t0); t0 = null; }
-      if (!lifted) return;
-      lifted = false;
-      var th = document.getElementById('asst-thread'); if (th) th.style.overflow = '';
-      if (ghost) { ghost.remove(); ghost = null; }
-      el.style.opacity = '';
-      _dockHint(false);
-      if (ev && _inDockZone(ev.clientX, ev.clientY)) {
-        var rec = payloadFn();
-        rec.meta = rec.meta || _favMeta();
-        _dockLoad(function () { _favSave(rec); });
-        try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
+    hd.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('button,a')) return;
+      ev.preventDefault();
+      sx = ev.clientX; sy = ev.clientY; moved = false;
+      try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
+      function mv(e2) {
+        if (!moved && (Math.abs(e2.clientX - sx) + Math.abs(e2.clientY - sy)) > 8) {
+          moved = true;
+          ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
+          ghost.style.width = Math.min(el.offsetWidth, 300) + 'px';
+          document.body.appendChild(ghost);
+          el.style.opacity = '.35';
+        }
+        if (moved) { _pos(e2.clientX, e2.clientY); _dockHint(_inDockZone(e2.clientX, e2.clientY)); }
       }
-    }
-    el.addEventListener('pointerdown', function (ev) {
-      if (ev.target.closest('.vc-inf-b,.vc-fav-b,button,a')) return;
-      sx = ev.clientX; sy = ev.clientY;
-      if (t0) clearTimeout(t0);
-      var pid = ev.pointerId;
-      t0 = setTimeout(function () {
-        t0 = null; lifted = true;
-        try { el.setPointerCapture(pid); } catch (e) {}
-        var th = document.getElementById('asst-thread'); if (th) th.style.overflow = 'hidden';   // 拎起期锁滚动(松手恢复)
-        ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
-        ghost.style.width = Math.min(el.offsetWidth, 300) + 'px';
-        document.body.appendChild(ghost); _pos(sx, sy);
-        el.style.opacity = '.35';
-      }, 300);
+      function up(e3) {
+        hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+        if (ghost) { ghost.remove(); ghost = null; }
+        el.style.opacity = '';
+        _dockHint(false);
+        if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) {
+          var rec = payloadFn();
+          rec.meta = rec.meta || _favMeta();
+          _dockLoad(function () { _favSave(rec); });
+          try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
+        }
+      }
+      hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
-    el.addEventListener('pointermove', function (ev) {
-      if (t0 && (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy)) > 8) { clearTimeout(t0); t0 = null; }   // 300ms 内动了=在滚动,不拎
-      if (lifted) { try { ev.preventDefault(); } catch (e) {} _pos(ev.clientX, ev.clientY); _dockHint(_inDockZone(ev.clientX, ev.clientY)); }
-    });
-    ['pointerup', 'pointercancel'].forEach(function (n0) { el.addEventListener(n0, _end); });
   }
   window.__vcDragToDock = function (el, payloadFn) { try { _dragToDock(el, payloadFn); } catch (e) {} };
   window.__vcTtsWarm = function () { try { _ttsEnsure(); } catch (e) {} };   // 82:必须在点击手势**同步栈**内调(iOS AudioContext 手势激活)
+  window.__vcSpeakText = function (text) {   // 83:TTS 念一段文字(卡片/气泡播放钮);返回 stop 函数
+    try { _ttsEnsure(); } catch (e) {}
+    try { _speakSafe(String(text || '').slice(0, 4000)); } catch (e) {}
+    return function () { try { bargeIn(); } catch (e) {} };
+  };
   window.__vcMicHold = function (on) {   // 82:历史 clip 经 <audio> 播放不在 WebRTC AEC 参考里——播放期禁麦防 AI 听到自己
     try {
       var mt = _rtc.mic && _rtc.mic.getAudioTracks && _rtc.mic.getAudioTracks()[0];
@@ -1345,11 +1361,12 @@
         });
       } else {
         _pinBind(cardEl, it.label, function () { return it.text || ''; });   // 长按=带入上下文
-        (function () {   // 向上拖出面板=**复制**一张浮层卡(收藏保留)
+        (function () {   // 83:向上拖出=复制浮层卡。touch-action:pan-x=横滑归滚动、竖滑归拖出(旧版被滚动手势吃掉=拖不出的根因)
           var sy0 = 0, drag = false;
-          cardEl.addEventListener('pointerdown', function (ev) { sy0 = ev.clientY; drag = true; });
+          cardEl.style.touchAction = 'pan-x';
+          cardEl.addEventListener('pointerdown', function (ev) { sy0 = ev.clientY; drag = true; try { cardEl.setPointerCapture(ev.pointerId); } catch (e) {} });
           cardEl.addEventListener('pointermove', function (ev) {
-            if (drag && (sy0 - ev.clientY) > 70) {
+            if (drag && (sy0 - ev.clientY) > 50) {
               drag = false;
               _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml);
               _dockPanel(false); _dockBtn();
@@ -1361,6 +1378,21 @@
       sc.appendChild(w);
     });
     p0.appendChild(sc);
+    // 83:封面流尺寸——离视口中心越近越大(改宽度=内容自适应变多变少,非几何缩放);snap 停靠中心
+    var _fitT = null;
+    function _fit() {
+      var cx = sc.scrollLeft + sc.clientWidth / 2;
+      sc.querySelectorAll('.vc-dkp-cell').forEach(function (cell) {
+        var c0 = cell.offsetLeft + cell.offsetWidth / 2;
+        var d = Math.abs(c0 - cx) / (sc.clientWidth * 0.55);
+        cell.dataset.lvl = d < 0.25 ? '0' : (d < 0.6 ? '1' : '2');
+      });
+    }
+    sc.addEventListener('scroll', function () {
+      if (_fitT) return;
+      _fitT = requestAnimationFrame(function () { _fitT = null; _fit(); });
+    });
+    setTimeout(_fit, 60);
   }
   function _chipRender() {   // 77:侧栏开着时,选中内容=输入框上方竖排 chip(与旧上下文 chip 同风格,×=取消带入)
     var wrap = document.getElementById('vc-pin-chips');
@@ -1422,9 +1454,22 @@
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
     var el = document.createElement('div'); el.className = 'vc-card';
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
+      '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
       '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
+    (function () {   // 83:浮层卡 TTS 念(再点=停)
+      var pb = el.querySelector('.vc-card-p'), stopFn = null;
+      pb.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        if (stopFn) { stopFn(); stopFn = null; pb.textContent = '▶'; pb.classList.remove('playing'); return; }
+        try { window.__vcTtsWarm && window.__vcTtsWarm(); } catch (e) {}
+        var txt = (el.querySelector('.vc-card-bd') || {}).textContent || '';
+        stopFn = window.__vcSpeakText ? window.__vcSpeakText(txt) : null;
+        pb.textContent = '◼'; pb.classList.add('playing');
+        setTimeout(function () { if (stopFn) { pb.textContent = '▶'; pb.classList.remove('playing'); stopFn = null; } }, Math.min(180000, txt.length * 350));
+      });
+    })();
     var _bd = el.querySelector('.vc-card-bd');
     try {
       if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
@@ -1877,8 +1922,8 @@
       if (_rtc.turnText && curAText) {
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
           tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) },
-          fav: (function (txt) { return function () { return { label: 'AI 回答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(curAText),
-          pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) } }); } catch (e) {}   // 67/77b/78/79
+          pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) },
+          speak: true }); } catch (e) {}   // 67/77b/79/83(☆撤,+TTS念钮)
         try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
@@ -2063,8 +2108,8 @@
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
                 try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' },
-                  fav: (function (txt) { return function () { return { label: '路由详答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(fullR),
-                  pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) } }); } catch (e2) {}
+                  pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) },
+                  speak: true }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}
