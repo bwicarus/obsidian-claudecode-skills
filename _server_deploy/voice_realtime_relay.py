@@ -1333,7 +1333,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             await bws.close()
             return
     cred = _creds()
-    model = "grok-voice-latest" if engine == "grok" else (cred.get("rt_model") or "gpt-realtime-2.1-mini")
+    model = "grok-voice-think-fast-1.0" if engine == "grok" else (cred.get("rt_model") or "gpt-realtime-2.1-mini")   # 114:固定型号(latest 指向会漂移)
     vc = await _fetch_book_ctx(file_rel, page)
     book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
             "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None}
@@ -1383,7 +1383,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         _gtr = {"model": "grok-transcribe"}
         if cred.get("rt_lang") in ("zh", "ja", "en"):
             _gtr["language_hint"] = cred["rt_lang"]
+        _kt = [w for w in [Path(file_rel).stem if file_rel else "", "这一页", "翻页", "做卡片", "笔记"] if w]
+        _gtr["keyterms"] = _kt[:100]   # 114:转写热词(≤100 项×50 字符,书名命中率↑)
         sess["audio"]["input"]["transcription"] = _gtr
+        sess["resumption"] = {"enabled": True}   # 114:断线恢复(conversation_id 30min 内重连保历史;续接=#290 二期)
         sess["audio"]["input"]["turn_detection"] = None   # 111(用户设计):手动轮次——本地 VAD 判边界+commit+response.create;server_vad 需要听到持续静音才判轮次,与"静默停推"互斥
         sess["audio"]["output"].pop("voice", None)
         sess["voice"] = cred.get("rt_grok_voice") or "eve"   # 97a:官方形制=session 顶层(94 放 audio.output 无效,一直是默认 eve)
@@ -1493,6 +1496,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+        if engine == "grok":
+            _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=out[:300])
 
@@ -1525,6 +1530,19 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
         async def _grok_turn_start():   # 111:本地判定开口——打断进行中的响应+前端清播放+话轮计数/焚图(原 speech_started 职责)
             _vg["active"] = True
+            if book.pop("_dirty", None):   # 114(用户方案C变体):状态变化只存 Pi;开口时才注入**一条**背景 item(文字 item $0.004/条,懒注入=每轮至多一条)
+                bits = [f"现在在第 {book.get('page') or page} 页"]
+                if book.get("sel"):
+                    bits.append(f"用户选中了:「{str(book['sel'])[:200]}」")
+                if book.get("ink_strokes"):
+                    bits.append("本页有用户手写笔迹(他问到手写内容时调 see_ink)")
+                try:
+                    await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                        "type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "[背景更新] " + ";".join(bits) + "。(状态记录,勿回应)"}]}}, ensure_ascii=False))
+                    _gk["items"] = _gk.get("items", 0) + 1
+                except Exception:
+                    pass
             if _vg["busy"]:
                 try:
                     await ows.send(json.dumps({"type": "response.cancel"}))
@@ -1642,6 +1660,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             except Exception:
                 continue
             t = j.get("type")
+            if engine == "grok" and t in ("page", "state", "ink"):
+                book["_dirty"] = True   # 114:状态变化只标脏(存 Pi),开口时懒注入一条
             if t == "finish":
                 return
             if t == "bridge_offer":   # 99:WebRTC 桥信令(纯音频面)
@@ -1730,6 +1750,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     except Exception:
                         pass
             elif t == "text" and (j.get("content") or "").strip():   # 打字提问(不说话时)
+                if engine == "grok":
+                    _gk["items"] = _gk.get("items", 0) + 1
                 try:
                     await ows.send(json.dumps({"type": "conversation.item.create", "item": {
                         "type": "message", "role": "user",
@@ -1919,7 +1941,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 _cm = (time.time() - _gk["t0"]) / 60.0
                 _am = (_gk["in_b"] + _gk["out_b"]) / 48000.0 / 60.0   # 24k·16bit=48000B/s
                 _rec = {"ts": int(time.time()), "conn_min": round(_cm, 2), "audio_min": round(_am, 2),
-                        "est_by_audio_usd": round(_am * 0.05, 4), "est_by_conn_usd": round(_cm * 0.05, 4)}
+                        "text_items": _gk.get("items", 0), "tool_calls": _gk.get("tools", 0),
+                        "est_by_audio_usd": round(_am * 0.05 + _gk.get("items", 0) * 0.004, 4),
+                        "est_by_conn_usd": round(_cm * 0.05, 4)}
                 _gp = Path("/home/bwicarus/claude/state/grok-usage.json")
                 try:
                     _gd = json.loads(_gp.read_text("utf-8"))

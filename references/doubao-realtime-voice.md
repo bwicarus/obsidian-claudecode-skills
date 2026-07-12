@@ -770,3 +770,14 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **relay**:updated/completed 统一处理(grok)——`_tr_pend[item_id]=最新全文`,每次下发 451 `{text, is_interim:true, iid}`;**debounce 0.8s**(每次修订重置定时器),静默后以最后一次为准发 `is_interim:false` 定稿+落库。speech_stopped 后的迟到修订照收(定时器机制天然支持)。OpenAI 形制(一轮一个 completed)保持即时定稿。
 - **前端**:451 带 iid 时 interim 也进对话窗;`setSub('u',text,iid)`/`__asstVoiceMsg('u',text,{utterId})` 同 iid=**覆盖同一气泡**(textContent 改字),不追加、不因已存在而丢弃;新 iid=新气泡。浮层兜底路径同款(setSub._u 记忆)。
 
+## 批次 114(2026-07-13)Grok 调研摘要落地(用户提供,五项差距)
+
+对照用户调研(全文精华已按批次散记):已对齐=本地 VAD 手动轮次/静默停推/覆盖式转写+debounce/WebRTC 桥(即用户"长期结构建议" iPad←WebRTC→Pi←WS→Grok)/idle_timeout 未设/音频秒数自记账。本批补齐五项:
+1. **模型固定** `grok-voice-think-fast-1.0`(latest 指向会漂移);
+2. **转写热词** `keyterms`=[书名(stem)+这一页/翻页/做卡片/笔记](≤100×50字符);
+3. **resumption 开启**(`enabled:true`;conversation_id 续接=#290 二期);
+4. **状态懒注入(用户方案C变体)**:page/state/ink 变化只标脏存 Pi($0);用户**开口时**才 flush 成一条 `role:assistant` 背景 item(页码+选中+笔迹有无,"[背景更新]…勿回应")——文字 item $0.004/条,懒注入=每轮至多一条(此前逐事件注入的路径 WS 版本来就没有,这是给 grok 补上"模型知道翻页了"的感知);
+5. **账本补维度**:text_items+tool_calls 计数,est_by_audio 含 items×$0.004。
+
+**待实测清单(用户点名)**:①response.create 是否接受 per-response 文字模态(四态迁移前提);②纯文字轮是否零音频费;③文字轮后能否切回语音;④工具回填后能否纯文字输出;⑤日本→us-east-1 真实首音延迟;⑥iPad WS/WebAudio 回声表现(桥=治本,半双工=兜底)。另:reasoning.effort 现用 none(低延迟);调研称 high 工具选择更可靠——工具误用高发时改 high 或做成设置。工具静默(113)已同语义:并行工具单 create 的要求因 parallel_tool_calls=False(串行)天然满足;"工具完成时上段音频还在播"的响应仲裁=grok 手动模式下待观察(RTC 有 epoch 体系)。
+
