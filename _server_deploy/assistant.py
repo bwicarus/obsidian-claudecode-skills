@@ -4437,7 +4437,9 @@ def assistant_rtc_session():
     parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
              "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
              lang_line,
-             "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
+             "**回答长度规则(可测量,请严格遵守)**:快问快答≤8秒;普通讲解≤15秒;内容确实长时先给≤20秒的摘要"
+             "并问『要继续展开吗』;绝不复述用户的问题,绝不复述界面卡片上已显示的标题/链接;"
+             "用户要听整段原文时,请他用界面上的朗读按钮(那是专用通道),你别整段念。"
              "你配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等需要动手的事"
              "**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事——"
              "尤其做卡片=必须调 make_anki、记笔记=必须调 make_note,没调工具就说『已放进后台/已做好』是欺骗,系统会核查。"
@@ -4481,7 +4483,7 @@ def assistant_rtc_session():
     sess = {"type": "realtime", "model": cfg.get("rt_model") or "gpt-realtime-2.1-mini",
             "output_modalities": ["audio"],
             "reasoning": {"effort": cfg.get("rt_effort") or "low"},
-            "max_output_tokens": 2048,
+            "max_output_tokens": 512,   # ㊹审核:输出音频占成本80%,512≈25s音频硬顶(分级预算待sideband控制面)
             "instructions": "\n".join(parts),
             "audio": {"input": {"noise_reduction": {"type": "near_field"},
                                 "turn_detection": {"type": "semantic_vad",
@@ -4495,9 +4497,9 @@ def assistant_rtc_session():
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
                            "token_limits": {"post_instructions": 24000}}}   # ㊶ 指南§5:上下文硬顶(㊳摘要12k先行,这是官方截断兜底)
     try:   # ㊳ 会话内压缩阈值:每轮 input_tokens 超过它=历史携带成本已值得付一次缓存失效换摘要(0=关)
-        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 12000
+        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 0   # ㊹审核:默认关,待按官方Cookbook重做(root摘要+turn组删+等deleted确认;彼时阈值24k)
     except Exception:
-        _cth = 12000
+        _cth = 0
     return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image")),
                     "compact_tokens": _cth})
 
