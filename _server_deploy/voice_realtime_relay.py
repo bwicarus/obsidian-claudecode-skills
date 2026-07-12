@@ -1491,6 +1491,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 sys.stderr.write(f"[voice-oa] 工具静默入库(不 create): {name}\n")   # 113:与 RTC 版 no_create 同语义
             else:
                 await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
+                if engine == "grok":
+                    sys.stderr.write(f"[grok-diag] create(tool:{name})\n")   # 115:双响应取证
         except Exception:
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {
@@ -1514,6 +1516,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
         async def _grok_turn_end():   # 111:本地判定说完→补 0.5s 尾静音(转写收尾)→flush→commit+response.create→停止上传
             _vg["active"] = False
+            sys.stderr.write("[grok-diag] turn_end(本地VAD判说完)\n")
             abuf.extend(b"\x00" * 24000)   # 0.5s @24k16bit
             if abuf:
                 try:
@@ -1525,6 +1528,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             try:
                 await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
                 await ows.send(json.dumps({"type": "response.create"}))
+                sys.stderr.write("[grok-diag] create(turn_end)\n")   # 115:双响应取证
             except Exception:
                 pass
 
@@ -1876,8 +1880,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
             elif t == "response.created":
                 _vg["busy"] = True
+                if engine == "grok":
+                    sys.stderr.write("[grok-diag] response.created\n")
             elif t == "response.done":
                 _vg["busy"] = False
+                if engine == "grok":
+                    sys.stderr.write(f"[grok-diag] response.done status={(e.get('response') or {}).get('status')}\n")
                 if cur_a["txt"].strip():
                     _vlog("a", text=cur_a["txt"][:2000], page=book.get("page") or page, book=file_rel)
                     cur_a["txt"] = ""
