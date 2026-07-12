@@ -53,10 +53,19 @@ tts 档的代念:relay 无法播——done 时经控制 WS 下行事件让前端
 
 ## 分步实施(每步可独立部署验证)
 
-1. **P1 骨架**:handle_browser 分发 mode=rtc;handle_rtc_ctl 打开 sideband、镜像日志(只读不动作);
+1. **P1 骨架** ✅(语音54,真机验证):handle_browser 分发 mode=rtc;handle_rtc_ctl 打开 sideband、镜像日志(只读不动作);
    前端 rtcStart 连控制 WS(失败静默=纯前端模式)。验证:journalctl 看 sideband 收到事件流。
-2. **P2 工具接管**:relay _tool 复用接 sideband;前端 ctl=true 跳过工具;need_shot/shot 截图往返;
+2. **P2 工具接管** ✅(语音58):relay _tool 复用接 sideband;前端 ctl=true 跳过工具;need_shot/shot 截图往返;
    client_action/tool_status 经控制 WS 下行(前端 dispatch/onToolStatus 现有处理)。
+   实现要点(以运行时为准):
+   - relay `handle_rtc_ctl`:`_tool`(voice-tool 执行+client_action/tool_status 下行)+
+     **工具缓存** `ck=name|args|page|ink指纹`(voice-tool 响应 `cacheable` 白名单才存,命中重放 client_action,治 read_page 同页重复调用=#287 提前落地)+
+     `_need_shot()`(need_shot→前端 _captureView→shot 回填 Future,6s 超时无图继续)+
+     `_resp_create()` 工具回填模态按 rt_voice_mode(mixed 档 tool 来源=text,512/2048 分级预算)。
+   - 前端分工:function_call_arguments.done 在 ctl=true 时**只放行 reply_text/wait_for_user**(纯前端语义),其余 return(relay 执行);
+     tool_status 下行时置 `turnTool=true`(承诺核查放行)+ see_* done 复位 `inkDirty`(边沿复位镜像,原复位点在前端 _rtcTool 不再经过);
+     shim send 把 page/state/ink 上行**镜像**给控制 WS(relay 工具 ctx 要最新状态)。
+   - ⚠ 坑:`rtc_call_id` 必须放 voice-tool **请求体顶层**(webapp 读 `body["rtc_call_id"]`),放 ctx 里图像 sideband 注入静默失效。
 3. **P3 usage+注入接管**:relay 记账(前端跳过);拉模式注入搬 relay(page/state/ink 经控制 WS 上行,
    speech_started 时 relay 注入)。
 4. **P4 response.create 接管**(四态+auto 在 relay)+承诺核查搬 relay。

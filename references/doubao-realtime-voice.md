@@ -499,3 +499,15 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - 53 **auto 独立开关**(用户否决全档兜底):🤖小按钮在四态旁——开=rtc-session 挂载 reply_text+注入判断规则/关=**工具根本不挂**(真禁用;工具表随会话建立→切换重拨生效);**四态+auto 持久化服务器** voice-config(rt_voice_mode/rt_auto_text),点按=localStorage 即时+POST 持久,初始 fetch 同步(服务器=真相源跨设备)。
 
 **㊷ 检查表收尾**:单会话工具调用护栏(40 次提醒)+60min 上限预警(55min 知会,到点 _rtcDead 自动重连+摘要回放兜底)。官方 realtime-costs 页 WebFetch 复核=无新字段遗漏,§13 检查表 12/13 ✓(工具最小集一项=有意取舍:33 工具 schema 实测仅 3.5k tokens)。
+
+## 54-58 RtcController P1-P2 + 插入页双bug + text腰斩 + TTS哑死(2026-07-12)
+
+**54(㊺P1)骨架**:设计文档定稿 `references/rtc-controller-design.md`(5 步渐进/双通道分工防双执行/断线回退韧性);relay `handle_rtc_ctl`(?mode=rtc:sideband 挂载+事件镜像观察,P1 零动作);前端 rtcStart 连控制 WS(失败/断线=静默纯前端模式)。真机验证:journalctl 见 sideband 事件流全镜像。
+
+**55 插入页双 bug**(#288,侦察实锤):①新建页刷新前 AI 看不见=currentPage 死区(中线落乐观插入页 `.pdf-upage` 时返回 null 冻结上一页)→fallback 读 `__upRec.page`;②笔迹串下一页=SSE 自回声(自己 POST 保存触发的广播,按页号命中未重编号的旧同名页)→`_ink.echo` 指纹 3s 抑制(pdf-tail 保存记账+SSE 守卫+_upInkPersist 同账)。
+
+**56 text 模态腰斩修**:账本实锤 text 档多轮 out=512 满额(≈350 中文字被砍)→输出预算按模态分级:audio 轮 512(≈25s)/text 轮 2048,response 级 max_output_tokens;P1 镜像日志升级(done 带 audio/text 分模态 tokens)。
+
+**57 TTS 代念哑死**(用户实测:日语页没念+之后全哑):根因链=朗读通道死(rtcStart _ttsShutdown/relay 重启)时 speak 静默丢弃=没声;且 __vcTtsBusy 含 _cap.pend 字幕句队列→卡死=麦禁满 2min(日志实锤 2分43秒空白)。修:speak 前保证通道(没 ready 先 _ttsEnsure+900ms 延迟发);禁麦恢复改看**真实播放**(_tts.playing:5s 没响=通道坏立即恢复+清 pend+提示/播完即恢复/60s 硬顶)。
+
+**58(㊺P2)工具执行搬服务端**:relay 成为唯一工具执行者(sideband function_call_arguments.done→_tool→voice-tool→function_call_output+response.create 按 rt_voice_mode 模态化);**工具缓存** ck=name|args|页|笔迹指纹(voice-tool `cacheable` 白名单才存,命中重放 client_action=#287 的 read_page 重复调用提前落地);need_shot 截图往返(see_ink/see_page 视口截图只有前端能拍,Future+6s 超时);前端 ctl=true 时只放行 reply_text/wait_for_user,tool_status 下行置 turnTool(承诺核查放行)+see_* done 复位 inkDirty(边沿复位镜像),shim send 上行镜像 page/state/ink 给控制 WS。⚠坑:rtc_call_id 必须在 voice-tool **请求体顶层**(webapp 读 body,放 ctx=图像 sideband 注入静默失效)。P3(usage+注入)/P4(response.create+承诺核查)未动,前端对应逻辑仍在。

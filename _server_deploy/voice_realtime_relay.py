@@ -1386,7 +1386,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 if book.get("sel"):
                     ctx["selection"] = book["sel"]
                 async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
-                    r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
+                    # rtc_call_id 必须在**请求体顶层**(webapp 读 body["rtc_call_id"]):图像走 sideband 注入
+                    r = await hc.post("/api/assistant/voice-tool",
+                                      json={"cmd": cmd, "ctx": ctx, "rtc_call_id": call_id})
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
                 res = d.get("result") or {}
@@ -1777,9 +1779,12 @@ OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
 async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
-    """㊺P1 RtcController 骨架:以 call_id 挂 sideband WS(官方 server-side controls 通道),
-    P1 只做**事件镜像观察**(记日志,不执行任何动作)——验证通道稳定后 P2 起逐步接管工具/usage/注入。
-    浏览器控制 WS(bws)上行的 page/state/ink 先收下存 book(P3 用);断线=前端自动回退纯前端模式。"""
+    """㊺P2 RtcController:sideband 控制面接管**工具执行**(唯一执行者)——
+    复用 handle_openai._tool 语义:voice-tool 执行/client_action+tool_status 经控制 WS 下行/
+    图像 sideband 直喂;新增**工具缓存**(同工具+同参数+同页+同笔迹=复用,治 read_page 重复调用)
+    与 **need_shot 截图往返**(see_ink/see_page 的视口截图只有前端能拍)。
+    reply_text/wait_for_user 是纯前端语义,留给前端 dc 处理(前端放行名单)。
+    usage 记账 P3 接管,现仍由前端上报;response.create 带模态(rt_voice_mode,src='tool')。"""
     key = _openai_key()
     if not key or not call_id:
         try:
@@ -1800,14 +1805,96 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
             pass
         await bws.close()
         return
-    sys.stderr.write(f"[rtc-ctl] sideband 已挂 call={call_id[:12]} file={file_rel[:30]} p{page}\n")
-    book = {"page": page, "sel": "", "ink_strokes": None}
+    sys.stderr.write(f"[rtc-ctl] P2 已挂 call={call_id[:12]} file={file_rel[:30]} p{page}\n")
+    book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": ""}
+    tool_cache = {}          # 只读工具缓存:name|args|page|ink指纹 → {out, ca}(voice-tool 响应 cacheable 才存)
+    shot_fut = {"f": None}   # need_shot 往返(一次一张,超时 6s 无图继续)
     try:
-        await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True}}))
+        await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": True, "p": 2}}))
     except Exception:
         pass
 
-    async def _down():   # sideband → 观察镜像(P1 只记事件类型;P2 起在此接管工具/usage)
+    def _resp_create():
+        """工具回填后的 response.create——模态按服务器持久化档位(src='tool':mixed 档=text)。"""
+        m = (_creds().get("rt_voice_mode") or "audio")
+        want_audio = (m == "audio")   # tool 来源:mixed 也走 text(审核推荐);text/tts 恒 text
+        return {"type": "response.create",
+                "response": {"output_modalities": ["audio" if want_audio else "text"],
+                             "max_output_tokens": 512 if want_audio else 2048}}
+
+    async def _need_shot():
+        """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。"""
+        fut = asyncio.get_event_loop().create_future()
+        shot_fut["f"] = fut
+        try:
+            await bws.send(json.dumps({"event": "need_shot"}))
+            return await asyncio.wait_for(fut, timeout=6)
+        except Exception:
+            return None
+        finally:
+            shot_fut["f"] = None
+
+    async def _tool(name: str, args: dict, call_id2: str):
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
+        out, ok, label, took, cached = "", True, name, None, False
+        try:
+            _ink_fp = book.get("_ink_fp") or ""
+            ck = f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|{book.get('page') or page}|{_ink_fp}"
+            if name == "recall_study":
+                span = str(args.get("span") or "today").lower()
+                out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
+                label = "回顾学习"
+            elif name == "deep_think":
+                out = await _oa_deep(str(args.get("question") or ""), file_rel, book.get("page") or page)
+                label = "深度思考"
+            elif ck in tool_cache:
+                hit = tool_cache[ck]
+                out, cached = hit["out"], True
+                if hit.get("ca"):
+                    await bws.send(json.dumps({"event": "client_action", "payload": hit["ca"]}, ensure_ascii=False))
+                label = name + "(复用)"
+            else:
+                cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
+                ctx = {"file_rel": file_rel, "page": book.get("page") or page}
+                if _creds().get("rt_image"):
+                    ctx["_want_vision"] = 1
+                if book.get("ink_strokes"):
+                    ctx["ink"] = book["ink_strokes"]
+                if book.get("sel"):
+                    ctx["selection"] = book["sel"]
+                if name in ("see_ink", "see_page"):
+                    shot = await _need_shot()
+                    if shot and shot.get("b64"):
+                        ctx["view_image"] = {"media_type": shot.get("media_type") or "image/jpeg", "b64": shot["b64"]}
+                async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
+                    r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
+                    d = r.json()
+                ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
+                res = d.get("result") or {}
+                ca = res.get("client_action")
+                if isinstance(ca, dict) and ca.get("fn"):
+                    await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
+                res.pop("_vision", None)   # rtc_call_id 在:图已由 webapp 经 sideband 注入,文本里绝不带
+                slim = {k: v for k, v in res.items() if k != "client_action"}
+                lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
+                out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+                if ok and d.get("cacheable"):
+                    tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
+        except Exception as ex:
+            ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
+        try:
+            await ows.send(json.dumps({"type": "conversation.item.create",
+                                       "item": {"type": "function_call_output", "call_id": call_id2, "output": out}}))
+            await ows.send(json.dumps(_resp_create()))
+        except Exception:
+            pass
+        await bws.send(json.dumps({"event": "tool_status", "payload": {
+            "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
+            "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+        _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
+              args=args, brief=("[cache] " if cached else "") + out[:300])
+
+    async def _down():
         n = {}
         async for raw in ows:
             try:
@@ -1816,11 +1903,19 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
                 continue
             t = ev.get("type") or "?"
             n[t] = n.get(t, 0) + 1
-            if t == "response.done":
+            if t == "response.function_call_arguments.done":
+                name = ev.get("name") or ""
+                if name in ("reply_text", "wait_for_user"):
+                    continue   # 纯前端语义(显示/静音),前端 dc 处理
+                try:
+                    a = json.loads(ev.get("arguments") or "{}")
+                except Exception:
+                    a = {}
+                asyncio.create_task(_tool(name, a if isinstance(a, dict) else {}, ev.get("call_id") or ""))
+            elif t == "response.done":
                 r0 = ev.get("response") or {}
                 u = r0.get("usage") or {}
                 otd = u.get("output_token_details") or {}
-                # 模态一目了然:哪轮出了音频不用靠耳朵定位(out_audio>0=这轮真出声了)
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
@@ -1828,7 +1923,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
                 sys.stderr.write(f"[rtc-ctl] err: {json.dumps(ev.get('error') or {})[:150]}\n")
         sys.stderr.write(f"[rtc-ctl] sideband 关闭 call={call_id[:12]} 事件统计={json.dumps(n)[:300]}\n")
 
-    async def _up():   # 浏览器控制 WS → 状态收纳(P1 只存;P3 起在 speech_started 注入)
+    async def _up():
         async for raw in bws:
             if isinstance(raw, bytes):
                 continue
@@ -1838,13 +1933,24 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
                 continue
             t = j.get("type")
             if t == "page":
-                book["page"] = j.get("page") or book["page"]
-                if j.get("text") is not None:
-                    book["page_text"] = str(j.get("text") or "")
+                np = j.get("page") or 0
+                if np and np != book["page"]:
+                    book["page"] = np
+                    book["_ink_fp"] = ""   # 换页:笔迹指纹作废(缓存键随之翻新)
             elif t == "state":
-                book["sel"] = j.get("sel") or ""
+                book["sel"] = (j.get("sel") or "")[:400]
             elif t == "ink":
-                book["ink_strokes"] = j.get("strokes") or []
+                strokes = j.get("strokes") or []
+                book["ink_strokes"] = strokes[:60]
+                try:
+                    _lp = (strokes[-1].get("p") or [[0, 0]])[-1] if strokes else [0, 0]
+                    book["_ink_fp"] = f"{len(strokes)}:{round(float(_lp[0]), 3)}:{round(float(_lp[1]), 3)}"
+                except Exception:
+                    book["_ink_fp"] = str(len(strokes))
+            elif t == "shot":
+                f = shot_fut.get("f")
+                if f and not f.done():
+                    f.set_result({"b64": j.get("b64") or "", "media_type": j.get("media_type") or "image/jpeg"})
 
     try:
         done, pending = await asyncio.wait(

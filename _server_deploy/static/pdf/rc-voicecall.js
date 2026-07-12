@@ -758,6 +758,8 @@
   function _rtcShimWs() {   // 顶替全局 ws:同步消息翻译成 dc,二进制(音频)忽略(媒体走 WebRTC 轨)
     return { readyState: 1, close: function () {}, send: function (data) {
       if (typeof data !== 'string') return;
+      // ㊺P2:上行状态(page/state/ink)镜像给控制 WS——relay 是工具执行者,ctx 要最新笔迹/选中/页码
+      try { if (_rtc.ctlWs && _rtc.ctlWs.readyState === 1) _rtc.ctlWs.send(data); } catch (e) {}
       var j; try { j = JSON.parse(data); } catch (e) { return; }
       _rtcHandleUp(j);
     } };
@@ -990,6 +992,9 @@
         if (!_rtcCap.t && !_rtcCap.q.length) capUser(tx);   // whisper 迟到:AI 字幕在放就别插队打乱滚动(对话窗已有)
       }
     } else if (t === 'response.function_call_arguments.done') {
+      // ㊺P2 双通道分工:控制面在(ctl)→工具执行归 relay(sideband);前端只处理纯前端语义的
+      // reply_text(显示/落库)与 wait_for_user(静音)。控制面断线=ctl false=回退前端全套。
+      if (_rtc.ctl && e.name !== 'reply_text' && e.name !== 'wait_for_user') return;
       var a = {}; try { a = JSON.parse(e.arguments || '{}'); } catch (_) {}
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
@@ -1174,7 +1179,18 @@
             var m0 = JSON.parse(ev.data);
             if (m0.event === 'rtc_ctl') { _rtc.ctl = !!(m0.payload && m0.payload.ok); }
             else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
-            else if (m0.event === 'tool_status') onToolStatus(m0.payload || {});
+            else if (m0.event === 'tool_status') {
+              var tp = m0.payload || {};
+              _rtc.turnTool = true;   // relay 执行了工具:承诺核查放行
+              // 边沿复位镜像:ctl 模式下 see_* 在 relay 跑,前端 _rtcTool 不经过——在这里复位
+              if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
+              onToolStatus(tp);
+            }
+            else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要视口截图(只有浏览器能拍)
+              _captureView().then(function (shot) {
+                try { cw.send(JSON.stringify({ type: 'shot', b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
+              }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', b64: '' })); } catch (e2) {} });
+            }
           } catch (e) {}
         };
         cw.onclose = function () { _rtc.ctl = false; _rtc.ctlWs = null; };   // 断线=回退纯前端(韧性)
