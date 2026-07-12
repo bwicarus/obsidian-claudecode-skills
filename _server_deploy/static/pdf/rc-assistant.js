@@ -686,7 +686,13 @@
     '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
-    '#asst-send.stop{background:#b23b3b}' +   // 流式中:发送→停止(红)
+    '#asst-send.stop{background:#b23b3b}' +
+    '.asst-clip{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:none;cursor:pointer;' +
+    'background:rgba(123,108,255,.16);color:#8f7dff;margin:6px 0 0 2px;padding:0;-webkit-tap-highlight-color:transparent;vertical-align:middle}' +
+    '.asst-clip svg{width:11px;height:11px;margin-left:1px}' +
+    '.asst-clip.dim{background:rgba(255,255,255,.07);color:#5a6478}' +
+    '.asst-clip.playing{background:#7b6cff;color:#fff;animation:vcCallPulse 1.4s ease-in-out infinite}' +
+    '.asst-clip.busy{opacity:.5;pointer-events:none}' +   // 流式中:发送→停止(红)
     // AI 答完的「追问建议」chip
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
     '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
@@ -1618,6 +1624,15 @@
   async function send(text, opts) {
     if (streaming) return;
     text = (text || '').trim();
+    // 66:2.1(WebRTC)通话中打字直达实时模型(输入框紫光=在此状态);消费成功=不走文字助手管线
+    if (text && window.__vcSendText) {
+      try {
+        if (window.__vcSendText(text)) {
+          try { var _ta0 = pane.querySelector('#asst-ta'); if (_ta0) { _ta0.value = ''; _ta0.style.height = 'auto'; } } catch (e) {}
+          return;
+        }
+      } catch (e) {}
+    }
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     // 「书页」点暗(rcNoBook)= 脱离这本书问通用问题 → 只剥**书本大上下文**(章/页定位、视口文字、选中所在句);
     //   **保留**用户显式选中/带入的 chip(选中文字/图/便签/焦点)——它们变成"独立片段/图"仍喂给 AI(用户诉求:
@@ -1813,12 +1828,14 @@
       scrollDown(); return true;
     } catch (e) { return false; }
   };
-  window.__asstVoiceLog = function (q, a, file, page) {   // 通话轮次落库(与文字对话同一历史,清空一起清)
+  window.__asstVoiceLog = function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
     if (!q && !a) return;
     try {
-      if (HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo,与侧栏历史/清空同源)
+      if (HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo;clip 暂不支持该路径)
+      var _b = { user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' };
+      if (extra && extra.clip) _b.clip = extra.clip;
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-        body: JSON.stringify({ user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' }) }).catch(function () {});
+        body: JSON.stringify(_b) }).catch(function () {});
     } catch (e) {}
   };
   window.__asstHistUrl = function () { return _HISTURL; };   // ㉟ 语音重连历史回放读侧栏同一端点(EPUB=本书 epub-convo)
@@ -2072,6 +2089,50 @@
     var _n = (HOST.locNoun && HOST.locNoun()) || '页';   // 位置量词按 reader(PDF=页 / EPUB=章)
     addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>');
   }
+  // ── 66 历史语音回放(用户设计):每条 AI 消息一个播放钮——通话时录下的原声(clip)直接播;
+  //    没有录音(文字轮/旧记录)=灰钮,点击用 TTS 现场念+同时录下上传,并回写历史(clip-attach)变紫 ──
+  var _clipAudio = null, _clipBtnCur = null;
+  function _clipStop() {
+    try { if (_clipAudio) { _clipAudio.pause(); _clipAudio = null; } } catch (e) {}
+    if (_clipBtnCur) { _clipBtnCur.classList.remove('playing'); _clipBtnCur = null; }
+  }
+  function _attachClipBtn(el, m) {
+    if (!m || !(m.content || '').trim()) return;
+    var b = document.createElement('button'); b.type = 'button';
+    b.className = 'asst-clip' + (m.clip ? '' : ' dim');
+    b.title = m.clip ? '播放当时的语音' : '没有录音:点击用 TTS 念这条并保存';
+    b.innerHTML = '<svg viewBox="0 0 14 14" fill="currentColor"><path d="M4.2 2.9v8.2a.4.4 0 0 0 .62.34l6.4-4.1a.4.4 0 0 0 0-.68l-6.4-4.1a.4.4 0 0 0-.62.34z"/></svg>';
+    function _ttsGen() {
+      if (!window.__vcTtsCapture) { if (typeof _toast === 'function') _toast('朗读引擎不可用'); return; }
+      b.classList.add('busy');
+      window.__vcTtsCapture((m.content || '').slice(0, 3000)).then(function (blob) {
+        b.classList.remove('busy');
+        if (!blob || blob.size < 4000) return;   // 念了但没录到(引擎没出声)就不存
+        var id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/mp4' }, body: blob })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!(d && d.ok)) return;
+            m.clip = id;
+            b.classList.remove('dim'); b.title = '播放当时的语音';
+            fetch('/api/assistant/clip-attach', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ts: m.ts || 0, head: (m.content || '').slice(0, 60), clip: id }) }).catch(function () {});
+          }).catch(function () {});
+      });
+    }
+    b.addEventListener('click', function () {
+      if (b.classList.contains('playing')) { _clipStop(); return; }
+      _clipStop();
+      if (m.clip) {
+        var a = new Audio('/api/assistant/voice-clip/' + encodeURIComponent(m.clip));
+        _clipAudio = a; _clipBtnCur = b; b.classList.add('playing');
+        a.onended = _clipStop;
+        a.onerror = function () { _clipStop(); _ttsGen(); };   // 录音缺失(当时没传成)→ 降级 TTS 生成
+        a.play().catch(function () { _clipStop(); _ttsGen(); });
+      } else _ttsGen();
+    });
+    el.appendChild(b);
+  }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch(_HISTURL).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok && d.messages && d.messages.length) {
@@ -2085,6 +2146,7 @@
           else {
             var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
             renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
+            try { _attachClipBtn(el, m); } catch (_) {}   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
             try { _renderFollowups(el, _pf.followups); } catch (_) {}
             try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
             if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (_) {} }   // 视频卡刷新回放(镜像 EPUB 阶段C)

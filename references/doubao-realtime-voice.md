@@ -566,3 +566,10 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **新按钮 Apple 化**:模式四态+TTS 开关的 emoji 全换 **SF 风线条 SVG**(`_VMI` 表:sts=声波竖线/stt=对话气泡/half=半波半行/route=分叉箭头/spk=喇叭波,currentColor 跟随亮灭)+短中文标签;`_VM_TXT` 供状态行纯文字(setSt 不能吃 HTML);工具卡 label 去 emoji(「路由详答·生成中」/「路由详答」,relay+前端双侧)。
 - **字幕**:底子本就是 Apple TV 磨砂胶囊(v3-⑳);route 样式去 🧠 emoji 改克制版=内嵌紫光条(inset box-shadow)+微紫底+淡紫字。
 - **文字卡片堆叠浮层**(用户设计,route/stt 等文字回复的侧栏关闭出口):`_cardPush(text,label)`——右下固定锚 `#vc-cards`,**按时间层叠**(新卡在前,旧卡向左上交错 9/13px+缩小 3.5%,只露 3 张,上限 4);半透明磨砂(blur24+saturate1.6+0.5px 白边+16px 圆角);每张头部=类型标签+**关闭×**(圆形毛玻璃钮);**自动消失**=设置卡新开关「文字卡自动消失」(默认开)+5-60s 滑条(localStorage rc-voice-card-hide/rc-voice-card-secs,设备级同字幕先例);**碰卡=取消该卡计时**(在读不收);侧栏开着不弹(内容已在对话流)。触发四点:route done(relay 下行+fallback)/文字轮 done/reply_text 兼容。
+
+## 66 通话打字直达+通话条撤除+语音历史回放(2026-07-12,用户四需求)
+
+**①2.1 通话中文字输入**:能力早在(㊿ 手动挡时 _rtcHandleUp 'text' 分支:flush ctx+item.create+RespCreate),但 grep 实锤**没有任何发送方**=死路。接线:`window.__vcSendText(text)`(rtc 通话中→用户气泡 __asstVoiceMsg('u')+字幕 capUser+ws.send({type:'text'}) 走 shim);rc-assistant `send()` 开头拦截(消费成功=清输入框 #asst-ta+return,不走文字助手管线);**输入框紫光** `#asst-input.vc-live`(rtcStart 加/teardown 摘)=可视化"现在打字直达 2.1"。
+**②通话条残留版面撤除**(用户裁定):`#rc-vc.vc-inline{display:none!important}`——输入框上方内嵌通话条不再显示(状态看按钮呼吸/字幕,对话在侧栏流;setSt 等写入逻辑不动,零风险)。
+**③通话语音按轮录制**:pc.ontrack 存 `_rtc.remoteStream`→MediaRecorder(mime 探测 mp4/webm;Safari=AAC-mp4)——音频轮 response.created 开录(文字轮不录)/done `_recFinish()` **先拿 clipId 立即落库、blob 在 onstop 异步上传**(POST /api/assistant/voice-clip?id=,≤8MB,每用户保留 400 段按 mtime 清);打断的半截轮也收;历史消息 `clip` 字段(_convo_append 白名单+log 端点只挂 assistant 侧)。
+**④历史语音回放按钮**:loadHistory 每条 AI 气泡尾加圆形播放钮——**有 clip=紫**(new Audio 播 GET /voice-clip/<id>,再点停,单例互斥)/**无 clip=灰**(点击=`__vcTtsCapture`:朗读通道现场念+`_tts.tap` MediaStreamDestination 抽头 MediaRecorder 同步录→上传→**clip-attach 回写历史**(ts+内容前缀定位)→按钮变紫);播放 404(当时 blob 没传成)自动降级灰流程。⚠EPUB 的 HOST.voiceLog 路径暂不带 clip(epub-convo 结构不同,灰钮 TTS 现场念可用,回写不通)。冒烟:上传/下载/落库/补挂全链路通过。

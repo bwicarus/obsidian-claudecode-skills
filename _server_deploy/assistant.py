@@ -480,7 +480,7 @@ def _convo_append(uid, role, content, meta=None):
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via"):   # via='mcp':外部编排 agent 写入的对话(侧栏可标来源)
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip"):   # via 标来源;clip=66 该轮语音录音 id(历史回放)
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -4816,7 +4816,10 @@ def assistant_log_external():
     for role, key in (("user", "user"), ("assistant", "assistant")):
         txt = (b.get(key) or "").strip()
         if txt:
-            _convo_append(uid, role, txt[:8000], meta)
+            m2 = dict(meta)
+            if role == "assistant" and b.get("clip"):   # 66:通话录下的该轮语音,历史回放用
+                m2["clip"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["clip"]))[:40]
+            _convo_append(uid, role, txt[:8000], m2)
             n += 1
     try:
         import reader_events
@@ -4824,6 +4827,85 @@ def assistant_log_external():
     except Exception:
         pass
     return jsonify({"ok": True, "appended": n})
+
+
+_CLIP_DIR = CLAUDE_DIR / "state" / "voice-clips"
+
+
+def _clip_id_ok(cid: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "", cid or "")[:40]
+
+
+@bp.route("/voice-clip", methods=["POST"])
+def assistant_voice_clip_up():
+    """66:通话按轮录下的 AI 语音上传(前端 MediaRecorder blob)。?id=<clipId>,body=音频字节。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    cid = _clip_id_ok(request.args.get("id", ""))
+    data = request.get_data()
+    if not cid or not data or len(data) > 8 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "bad id/size"}), 400
+    mt = (request.content_type or "audio/mp4").split(";")[0]
+    ext = "mp4" if "mp4" in mt else ("webm" if "webm" in mt else "bin")
+    d = _CLIP_DIR / str(session["user_id"])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{cid}.{ext}").write_bytes(data)
+    try:   # 简单配额:每用户保留最近 400 段,旧的按 mtime 清
+        fs = sorted(d.iterdir(), key=lambda f: f.stat().st_mtime)
+        for f in fs[:-400]:
+            f.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return jsonify({"ok": True, "id": cid})
+
+
+@bp.route("/voice-clip/<cid>")
+def assistant_voice_clip_dl(cid):
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    cid = _clip_id_ok(cid)
+    d = _CLIP_DIR / str(session["user_id"])
+    for ext, mt in (("mp4", "audio/mp4"), ("webm", "audio/webm"), ("bin", "application/octet-stream")):
+        f = d / f"{cid}.{ext}"
+        if cid and f.exists():
+            return Response(f.read_bytes(), mimetype=mt, headers={"Cache-Control": "private, max-age=86400"})
+    return jsonify({"ok": False}), 404
+
+
+@bp.route("/clip-attach", methods=["POST"])
+def assistant_clip_attach():
+    """66:历史消息补挂语音(灰钮 TTS 生成保存后回写)——按 ts+内容前缀定位该条 assistant 消息。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    uid = session["user_id"]
+    clip = _clip_id_ok(b.get("clip") or "")
+    head = (b.get("head") or "").strip()[:60]
+    try:
+        ts = int(b.get("ts") or 0)
+    except Exception:
+        ts = 0
+    if not clip or not head:
+        return jsonify({"ok": False}), 400
+    with _convo_lock:
+        msgs = _convo_load(uid)
+        hit = None
+        for m in reversed(msgs):
+            if (m.get("role") == "assistant" and (not ts or m.get("ts") == ts)
+                    and (m.get("content") or "").startswith(head[:40])):
+                hit = m
+                break
+        if not hit:
+            return jsonify({"ok": False, "error": "not found"}), 404
+        hit["clip"] = clip
+        try:
+            p = _convo_path(uid)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(json.dumps(msgs[-200:], ensure_ascii=False), "utf-8")
+            os.replace(tmp, p)
+        except Exception:
+            return jsonify({"ok": False}), 500
+    return jsonify({"ok": True})
 
 
 @bp.route("/clear", methods=["POST"])

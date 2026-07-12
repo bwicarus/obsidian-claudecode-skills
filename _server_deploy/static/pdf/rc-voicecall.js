@@ -147,7 +147,8 @@
       '#rc-vc .vc-vid img{width:100%;height:72px;object-fit:cover;display:block}' +
       '#rc-vc .vc-vid div{font-size:11px;padding:4px 6px;line-height:1.3;max-height:33px;overflow:hidden}' +
       // 内嵌形态:活在侧栏输入框上方(不再 fixed 右下角)
-      '#rc-vc.vc-inline{position:static;width:auto;margin:0 10px 6px;right:auto;bottom:auto;box-shadow:0 4px 16px rgba(0,0,0,.3)}' +
+      '#rc-vc.vc-inline{display:none !important}' +   // 66 用户裁定:输入框上方的通话条残留版面撤除(状态看按钮/字幕;对话在侧栏流)
+      '#asst-input.vc-live{box-shadow:0 0 0 1.5px rgba(94,92,230,.6),0 0 16px rgba(94,92,230,.22);border-radius:14px;transition:box-shadow .3s}' +
       // 侧栏 composer 里的通话入口按钮(样式镜像 #asst-mic;通话中绿色呼吸)
       '#asst-call{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
       '#asst-call:active{transform:scale(.9)}' +
@@ -652,6 +653,7 @@
     var ab = a.createBuffer(1, f32.length, 24000);
     ab.copyToChannel(f32, 0);
     var src = a.createBufferSource(); src.buffer = ab; src.connect(a.destination);
+    if (_tts.tap) { try { src.connect(_tts.tap); } catch (e) {} }   // 66:录制抽头(历史灰钮=念+存)
     var t = Math.max(a.currentTime + 0.02, _tts.playT);
     src.start(t); _tts.playT = t + ab.duration; _tts.playing.push(src);
     _capBindChunk(t, a);   // 句首块 → 字幕在该块真正开播的时刻亮
@@ -661,6 +663,37 @@
       if (!_tts.playing.length) { var g = document.querySelector('.vc-speak-tg'); if (g) g.classList.remove('speaking'); }
     };
   }
+  window.__vcTtsCapture = function (text) {   // 66:历史灰钮——朗读通道现场念这条,同时录 WebAudio 输出;resolve(blob|null)
+    return new Promise(function (resolve) {
+      try {
+        _ttsEnsure();
+        setTimeout(function () {
+          var a = _tts.ac;
+          if (!a || !window.MediaRecorder) { try { speak(text); } catch (e) {} resolve(null); return; }
+          var mime = _recMime();
+          if (!mime) { try { speak(text); } catch (e) {} resolve(null); return; }
+          var dest = a.createMediaStreamDestination();
+          _tts.tap = dest;
+          var mr, chunks = [];
+          try { mr = new MediaRecorder(dest.stream, { mimeType: mime }); } catch (e) { _tts.tap = null; try { speak(text); } catch (e2) {} resolve(null); return; }
+          mr.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+          mr.onstop = function () { _tts.tap = null; resolve(chunks.length ? new Blob(chunks, { type: mime }) : null); };
+          mr.start(1000);
+          try { _ttsMicGuard(); } catch (e) {}   // 通话中念历史:照旧禁麦防模型听见
+          try { speak(text); } catch (e) {}
+          var t0 = Date.now(), saw = false, quiet = 0;
+          var iv = setInterval(function () {
+            var playing = false; try { playing = _tts.playing.length > 0; } catch (e) {}
+            if (playing) { saw = true; quiet = 0; } else if (saw) quiet++;
+            if ((saw && quiet >= 4) || (!saw && Date.now() - t0 > 9000) || Date.now() - t0 > 180000) {
+              clearInterval(iv);
+              try { mr.stop(); } catch (e) { _tts.tap = null; resolve(null); }
+            }
+          }, 350);
+        }, 350);
+      } catch (e) { resolve(null); }
+    });
+  };
   function _ttsStopPlay() {
     _tts.playing.forEach(function (s) { try { s.stop(); } catch (e) {} });
     _tts.playing = []; _tts.playT = 0;
@@ -783,6 +816,53 @@
   function _rtcSys(text) {
     _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
   }
+  // ── 66 按轮语音录制(用户设计:历史对话可回放当时的语音):remote 轨 MediaRecorder,
+  //    音频轮 created 开录 / done 收尾拿 clipId(上传异步),文字轮不录;打断的半截轮也收 ──
+  var _rec = { mr: null, chunks: [], mime: '' };
+  function _recMime() {
+    var c = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
+    for (var i = 0; i < c.length; i++) { try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(c[i])) return c[i]; } catch (e) {} }
+    return '';
+  }
+  function _recStart() {
+    _recAbort();
+    if (!_rtc.remoteStream || !window.MediaRecorder) return;
+    var mime = _recMime(); if (!mime) return;
+    try {
+      var mr = new MediaRecorder(_rtc.remoteStream, { mimeType: mime });
+      _rec = { mr: mr, chunks: [], mime: mime };
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) _rec.chunks.push(e.data); };
+      mr.start(1000);
+    } catch (e) { _rec.mr = null; }
+  }
+  function _recAbort() {
+    try { if (_rec.mr && _rec.mr.state !== 'inactive') { _rec.mr.ondataavailable = null; _rec.mr.onstop = null; _rec.mr.stop(); } } catch (e) {}
+    _rec.mr = null;
+  }
+  function _recFinish() {   // 返回 clipId(录着才有);blob 在 onstop 异步上传,落库先带 id 不等传完
+    var mr = _rec.mr;
+    if (!mr || mr.state === 'inactive') { _rec.mr = null; return ''; }
+    var id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    var mime = _rec.mime, chunks = _rec.chunks;
+    mr.onstop = function () {
+      try {
+        var blob = new Blob(chunks, { type: mime });
+        if (blob.size > 4000) fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob }).catch(function () {});
+      } catch (e) {}
+    };
+    try { mr.stop(); } catch (e) { _rec.mr = null; return ''; }
+    _rec.mr = null;
+    return id;
+  }
+  window.__vcSendText = function (text) {   // 66:侧栏输入框在 2.1(WebRTC)通话中打字直达实时模型(rc-assistant send 拦截调用)
+    if (!(_rtc.on && ws && mode === 's2s')) return false;
+    try {
+      try { window.__asstVoiceMsg && window.__asstVoiceMsg('u', text); } catch (e) {}
+      try { capUser(text); } catch (e) {}
+      ws.send(JSON.stringify({ type: 'text', content: text }));   // shim → _rtcHandleUp 'text':flush ctx+item.create+RespCreate
+      return true;
+    } catch (e) { return false; }
+  };
   function _rtcShimWs() {   // 顶替全局 ws:同步消息翻译成 dc,二进制(音频)忽略(媒体走 WebRTC 轨)
     return { readyState: 1, close: function () {}, send: function (data) {
       if (typeof data !== 'string') return;
@@ -1159,7 +1239,8 @@
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
       _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
-      try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
+      var _clipH = _recFinish();   // 66:被打断的半截轮也把已播语音收下
+      try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clipH ? { clip: _clipH } : null); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
       curAText = ''; curAEl = null;
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
@@ -1192,6 +1273,7 @@
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
       try { if (_cap.cur) _cap.cur.classList.remove('vc-cap-route'); } catch (_) {}   // 64:路由字幕样式不残留到普通轮
+      if (!_rtc.turnText) _recStart(); else _recAbort();   // 66:音频轮开录(历史回放),文字轮无声不录
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
@@ -1224,7 +1306,8 @@
             }).catch(function () { onToolStatus({ status: 'error', tool: tool, label: '系统代提交失败' }); });
         })();
       }
-      try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库
+      var _clip0 = (!_rtc.turnText) ? _recFinish() : '';   // 66:本轮语音收尾(id 即时可用,blob 异步上传)
+      try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clip0 ? { clip: _clip0 } : null); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库(+66 语音)
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
             if (u) {
@@ -1315,6 +1398,7 @@
         }, 3000);
       };
       pc.ontrack = function (e) {   // 远端音频:audio 元素播放(WebRTC 路径=浏览器 AEC 生效的关键)
+        try { _rtc.remoteStream = e.streams[0]; } catch (e2) {}   // 66:同一路流供按轮录制(历史可回放当时语音)
         var el = document.createElement('audio');
         el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
         el.srcObject = e.streams[0];
@@ -1336,6 +1420,7 @@
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
       _userHung = false; _acquireWL();
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
+      try { var _ai0 = document.getElementById('asst-input'); if (_ai0) _ai0.classList.add('vc-live'); } catch (e) {}   // 66:输入框紫光=打字直达 2.1
       capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
       // ㊺P1 RtcController 控制 WS(服务端 sideband 控制面,设计见 references/rtc-controller-design.md):
       // P1 只建通道观察(relay 镜像事件);连不上=静默纯前端模式(现有代码即 fallback)。
@@ -1403,6 +1488,8 @@
   }
   function rtcTeardown() {
     _rtc.on = false;
+    try { var _ai1 = document.getElementById('asst-input'); if (_ai1) _ai1.classList.remove('vc-live'); } catch (e) {}
+    _recAbort();
     _rtcCapReset();
     try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.close(); } } catch (e) {}
     _rtc.ctlWs = null; _rtc.ctl = false;
