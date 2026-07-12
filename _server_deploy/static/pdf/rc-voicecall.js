@@ -940,7 +940,14 @@
   function _capPlace() {   // S2S 通话浮层在时:字幕抬到浮层上方(iPhone 上浮层近全宽,不避让会被盖住)
     if (!_cap.el) return;
     var b = 0;
-    try { if (box && box.classList.contains('on')) b = window.innerHeight - box.getBoundingClientRect().top + 10; } catch (e) {}
+    try {
+      // 107(用户实测"收起侧栏开语音字幕消失"根因):通话条内嵌在侧栏里时(vc-inline),侧栏收起=rect 为 0/屏外,
+      // 旧算式 b=屏高+10 把字幕抬出屏幕顶端。避让只在浮层**真实可见**时生效。
+      if (box && box.classList.contains('on')) {
+        var r0 = box.getBoundingClientRect();
+        if (r0.height > 0 && r0.top > 40 && r0.top < window.innerHeight) b = window.innerHeight - r0.top + 10;
+      }
+    } catch (e) {}
     _cap.el.style.bottom = b > 0 ? (b + 'px') : '';
   }
   function capWait(on) {   // "正在听"等待指示(mic+三点跳动):ASR 通话空闲时亮
