@@ -1967,6 +1967,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     pass
                 recent_tools.append({"tool": name, "label": label, "rag": out[:600], "images": _imgs[:3]})
                 del recent_tools[:-6]
+                # 66b(日志分析:route 档 read_page 后模型口头念整页 60s,instructions 远端规则命中率 0)——
+                # 提醒放到**离决策最近的地方**:长工具结果尾部就地一行(just-in-time,非硬兜底)
+                if (ok and readonly and len(out) > 800
+                        and _norm_vm(_creds().get("rt_voice_mode")) == "route"):
+                    out += "\n(系统提示:内容较长——要详细讲解请调 route_to_text 转文字详答;口头只概括两三句要点,绝不逐段念)"
                 if ok and d.get("cacheable") and name not in _NO_CACHE:
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):

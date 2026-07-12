@@ -573,3 +573,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **②通话条残留版面撤除**(用户裁定):`#rc-vc.vc-inline{display:none!important}`——输入框上方内嵌通话条不再显示(状态看按钮呼吸/字幕,对话在侧栏流;setSt 等写入逻辑不动,零风险)。
 **③通话语音按轮录制**:pc.ontrack 存 `_rtc.remoteStream`→MediaRecorder(mime 探测 mp4/webm;Safari=AAC-mp4)——音频轮 response.created 开录(文字轮不录)/done `_recFinish()` **先拿 clipId 立即落库、blob 在 onstop 异步上传**(POST /api/assistant/voice-clip?id=,≤8MB,每用户保留 400 段按 mtime 清);打断的半截轮也收;历史消息 `clip` 字段(_convo_append 白名单+log 端点只挂 assistant 侧)。
 **④历史语音回放按钮**:loadHistory 每条 AI 气泡尾加圆形播放钮——**有 clip=紫**(new Audio 播 GET /voice-clip/<id>,再点停,单例互斥)/**无 clip=灰**(点击=`__vcTtsCapture`:朗读通道现场念+`_tts.tap` MediaStreamDestination 抽头 MediaRecorder 同步录→上传→**clip-attach 回写历史**(ts+内容前缀定位)→按钮变紫);播放 404(当时 blob 没传成)自动降级灰流程。⚠EPUB 的 HOST.voiceLog 路径暂不带 clip(epub-convo 结构不同,灰钮 TTS 现场念可用,回写不通)。冒烟:上传/下载/落库/补挂全链路通过。
+
+### 66b route 快路命中率首份日志分析(2026-07-12 用户实测)
+
+三通 route 档电话实锤:管线全通(P2 在/read_page relay 执行/66 语音录制 5 段全传成功),但**模型零次调 route_to_text**——read_page 后口头念整页 60s(1185 audio tokens,2048 内没被掐所以"看似正常")。结论:**instructions 顶部规则对工具回填轮命中率 0**。修=提醒放离决策最近处(just-in-time):route 档+只读工具+结果>800 字 → relay 在 function_call_output **尾部就地追加**"内容较长请调 route_to_text,口头只概括两三句"。非硬兜底(不掐不代打),纯 prompt 位置优化;后续按 voice-log 持续观察命中率。
