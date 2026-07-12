@@ -1832,13 +1832,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         pass
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
 
-    def _resp_create():
+    def _resp_create(long_tool=False):
         """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
-        工具结果轮:sts/route=念出来;half=文字(审核推荐混合形态);stt=文字。"""
+        工具结果轮:sts=念;half/stt=文字;route=**按结果长度程序分流**(66c:0/4 实锤
+        「拿到资料+音频模态=念」是 mini 条件反射,prompt/就地提醒都治不了——短结果口头说,
+        长结果这轮直接给文字模态让它自己写,无截断无双引擎,route_to_text 留给不调工具的长答)。"""
         m = _norm_vm(_creds().get("rt_voice_mode"))
-        want_audio = m in ("sts", "route")
-        # 64 用户拍板:全档 2048(≈100s 音频保险丝,正常轮永远碰不到)——不搞小预算硬截断,
-        # 时长控制交给 prompt 规则 + route 档模型自觉(靠日志分析慢慢调,不靠掐)
+        want_audio = m == "sts" or (m == "route" and not long_tool)
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
                              "max_output_tokens": 2048}}
@@ -1971,7 +1971,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 # 提醒放到**离决策最近的地方**:长工具结果尾部就地一行(just-in-time,非硬兜底)
                 if (ok and readonly and len(out) > 800
                         and _norm_vm(_creds().get("rt_voice_mode")) == "route"):
-                    out += "\n(系统提示:内容较长——要详细讲解请调 route_to_text 转文字详答;口头只概括两三句要点,绝不逐段念)"
+                    out += "\n(系统提示:内容较长,本轮已切换为**文字**回答——请完整写出讲解,结构清晰,可用 Markdown)"
                 if ok and d.get("cacheable") and name not in _NO_CACHE:
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):
@@ -1995,7 +1995,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id2, "output": out}}))
             if not stale and not no_create:
-                await ows.send(json.dumps(_resp_create()))
+                await ows.send(json.dumps(_resp_create(readonly and len(out) > 800)))
         except Exception:
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {

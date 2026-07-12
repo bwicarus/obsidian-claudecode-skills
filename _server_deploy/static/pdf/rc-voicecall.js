@@ -993,10 +993,11 @@
       }
     }, 400);
   }
-  function _rtcRespCreate(src) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
+  function _rtcRespCreate(src, longTool) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
     var m = _voiceMode();
-    // 61:sts/route=语音(route 的长内容由模型自调 route_to_text 转文字);half=提问语音·工具/深度文字;stt=全文字
-    var wantAudio = (m === 'sts') || (m === 'route') || (m === 'half' && src === 'user');
+    // 61/66c:sts=全语音;half=提问语音·工具/深度文字;stt=全文字;route=语音,但**长工具结果轮程序切文字**
+    // (0/4 实锤 mini 拿到资料+音频模态必念,prompt 治不了——短结果口头说,长结果它自己文字写,无截断)
+    var wantAudio = (m === 'sts') || (m === 'route' && !longTool) || (m === 'half' && src === 'user');
     _rtc.turnText = !wantAudio;   // 本轮是文字输出:TTS 开关开着就流式代念
     // 64 用户拍板:全档 2048(≈100s 音频保险丝,正常轮碰不到)——不搞小预算硬截断,时长靠 prompt+route 自觉
     _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
@@ -1179,7 +1180,7 @@
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
-    _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool');
+    _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c:route 档长结果=文字轮(程序分流)
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
@@ -1235,6 +1236,7 @@
       return;
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
+      _rtc.turnText = (t === 'response.output_text.delta');   // 66c:本轮模态以实际事件为准(relay 发的工具轮 create 前端不经过,旧 turnText 会错)
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {

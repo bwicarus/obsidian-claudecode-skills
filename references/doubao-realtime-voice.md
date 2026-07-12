@@ -577,3 +577,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 66b route 快路命中率首份日志分析(2026-07-12 用户实测)
 
 三通 route 档电话实锤:管线全通(P2 在/read_page relay 执行/66 语音录制 5 段全传成功),但**模型零次调 route_to_text**——read_page 后口头念整页 60s(1185 audio tokens,2048 内没被掐所以"看似正常")。结论:**instructions 顶部规则对工具回填轮命中率 0**。修=提醒放离决策最近处(just-in-time):route 档+只读工具+结果>800 字 → relay 在 function_call_output **尾部就地追加**"内容较长请调 route_to_text,口头只概括两三句"。非硬兜底(不掐不代打),纯 prompt 位置优化;后续按 voice-log 持续观察命中率。
+
+### 66c route 工具轮改程序模态分流(2026-07-12,0/4 定论)
+
+66b 就地提醒也没管住(第 4 通 read_page 后又念 50s/966 audio tokens)——**定论:「拿到资料+音频模态」=mini 条件反射念,prompt 任何位置都治不了**。换程序判断(用户哲学):**工具结果长度是回填时刻程序已知的事实**——route 档工具回填轮 `_resp_create(long_tool)`:结果<800 字=audio(口头说,保留短答体验)/≥800 字=**text 模态让模型自己写**(无截断、无 Gemini 双引擎文风、route_to_text 留给不调工具的长答场景);前端 fallback `_rtcRespCreate(src, longTool)` 同构;就地提醒文案改为文字轮引导。**顺修既有 bug**:relay 发的工具轮 create 前端不经过 → `_rtc.turnText` 停留在上一轮的值=half/route 的文字工具轮 TTS 代念+文字卡片全断——改由 **delta 事件类型驱动**(output_text.delta=文字轮/audio_transcript.delta=音频轮,以实际到达的事件为准)。
