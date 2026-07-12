@@ -687,6 +687,12 @@
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +
+    '.vc-inf-b{position:absolute;right:6px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
+    'background:rgba(255,255,255,.1);color:#8fa0c2;font-size:11px;font-weight:700;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}' +
+    '.vc-inf-pop{position:absolute;right:4px;bottom:26px;z-index:60;min-width:210px;max-width:270px;padding:10px 12px;border-radius:12px;' +
+    'background:rgba(24,26,34,.94);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.14);box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:12px}' +
+    '.vc-inf-r{display:flex;gap:8px;margin:3px 0;color:#c6d1e8}.vc-inf-r span{flex:none;color:#7f8cab}' +
+    '.vc-inf-set{margin-top:7px;width:100%;padding:6px;border-radius:8px;border:1px solid #35446b;background:#1b2338;color:#9fb4e0;cursor:pointer;font-size:12px}' +
     '.asst-clip{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:none;cursor:pointer;' +
     'background:rgba(123,108,255,.16);color:#8f7dff;margin:6px 0 0 2px;padding:0;-webkit-tap-highlight-color:transparent;vertical-align:middle}' +
     '.asst-clip svg{width:11px;height:11px;margin-left:1px}' +
@@ -1826,11 +1832,39 @@
       if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
         try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
+        try { if (arguments[2].info && window.__asstInfoBtn) window.__asstInfoBtn(_vTurnEl, arguments[2].info); } catch (e) {}   // 77b:「!」详情
       } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }
   };
   try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染
+  window.__asstInfoBtn = function (el, info) {   // 77b:右下角小「!」详情钮(语音气泡/搜索卡通用)
+    try {
+      if (!el || el.querySelector(':scope > .vc-inf-b')) return;
+      el.style.position = 'relative';
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'vc-inf-b'; b.textContent = '!';
+      b.title = '本轮详情 / 模型设置';
+      b.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var old = el.querySelector(':scope > .vc-inf-pop');
+        if (old) { old.remove(); return; }
+        var pop = document.createElement('div'); pop.className = 'vc-inf-pop';
+        var rows = [];
+        if (info && info.mode) rows.push('<div class="vc-inf-r"><span>输出形态</span>' + esc(info.mode) + '</div>');
+        if (info && info.tools && info.tools.length) rows.push('<div class="vc-inf-r"><span>本段工具</span>' + esc(info.tools.join(' · ')) + '</div>');
+        if (info && info.kind) rows.push('<div class="vc-inf-r"><span>类型</span>' + esc(info.kind) + '</div>');
+        pop.innerHTML = rows.join('') +
+          '<div class="vc-inf-r"><span>中间步骤</span>见对话流中各工具卡(点开看参数与结果)</div>' +
+          '<button type="button" class="vc-inf-set">⚙ 调整各环节 AI 模型</button>';
+        pop.querySelector('.vc-inf-set').addEventListener('click', function () {
+          pop.remove();
+          try { window.openModelSettings && window.openModelSettings(info && info.focus); } catch (e2) {}
+        });
+        el.appendChild(pop);
+      });
+      el.appendChild(b);
+    } catch (e) {}
+  };
   window.__asstVoiceLog = function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
     if (!q && !a) return;
     try {

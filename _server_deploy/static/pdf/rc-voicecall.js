@@ -133,6 +133,24 @@
       '.vc-card.vc-min{padding:9px 13px}' +
       '@keyframes vcPinPop{0%{filter:brightness(1)}40%{filter:brightness(1.4)}100%{filter:brightness(1)}}' +   // ⚠不用 transform:会覆盖拖动后的内联 translate 导致瞬移
       '.vc-pin-pop{animation:vcPinPop .4s ease}' +
+      '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
+      'border:0.5px solid rgba(255,255,255,.16);background:rgba(40,36,64,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
+      'color:#b9a8ff;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.4);padding:0}' +
+      '#vc-dock-btn .vc-dk-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;border-radius:8px;background:#7b6cff;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}' +
+      '#vc-dock-hint{position:fixed;right:0;bottom:0;width:220px;height:240px;pointer-events:none;z-index:2147481410;opacity:0;transition:opacity .25s;' +
+      'background:radial-gradient(circle at 100% 100%,rgba(123,108,255,.4),rgba(123,108,255,.12) 55%,transparent 75%)}' +
+      '#vc-dock-hint.on{opacity:1}' +
+      '#vc-dock-panel{position:fixed;right:14px;bottom:calc(144px + env(safe-area-inset-bottom,0px));z-index:2147481430;width:min(76vw,300px);max-height:44vh;overflow-y:auto;' +
+      'display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:16px;background:rgba(26,26,32,.8);' +
+      '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);border:0.5px solid rgba(255,255,255,.14);box-shadow:0 14px 44px rgba(0,0,0,.5)}' +
+      '.vc-dk-item{display:flex;align-items:center;gap:7px;padding:8px 10px;border-radius:11px;background:rgba(255,255,255,.06);color:#e4e9f5;font-size:12.5px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
+      '.vc-dk-item.vc-picked{box-shadow:0 0 0 1.5px rgba(123,108,255,.85)}' +
+      '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
+      '.vc-pin-chip{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:10px;' +
+      'background:rgba(123,108,255,.12);border:1px solid rgba(123,108,255,.4);max-width:100%}' +
+      '.vc-pc-l{font-size:12px;color:#c9bcff;font-weight:600;flex:none}' +
+      '.vc-pc-s{font-size:11.5px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
+      '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
       '.vc-if-hd{font-size:12px;color:#9fb0cf;margin-bottom:5px}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
@@ -500,19 +518,48 @@
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
     return d.text || card.brief || card.title || '';
   }
+  // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
+  // 反复选中/取消若最终状态没变=零注入;变了=一条"当前带入清单(以本条为准,旧声明作废)"——历史不膨胀、语义无歧义
+  var _pins = { map: {}, fp: null, t: null, els: {} };
+  function _pinSync() {
+    if (_pins.t) clearTimeout(_pins.t);
+    _pins.t = setTimeout(function () {
+      _pins.t = null;
+      var ks = Object.keys(_pins.map);
+      var fp = ks.sort().join('|');
+      if (fp === _pins.fp) return;
+      _pins.fp = fp;
+      if (!_rtc.on) return;
+      var msg = ks.length
+        ? '(参考内容更新(以本条为准,之前的带入/移除声明全部作废):用户当前带入 ' + ks.length + ' 项——' +
+          ks.map(function (k) { return '「' + k + '」:' + _pins.map[k]; }).join(';') + '。状态记录,不要回应本条。)'
+        : '(参考内容更新:用户已移除全部带入内容,之前的带入声明作废。状态记录,不要回应本条。)';
+      try { _rtcSys(msg); } catch (e) {}
+    }, 1200);
+  }
+  function _pinToggle(el, label, textFn) {
+    var on = !el.classList.contains('vc-picked');
+    if (on) {
+      var lb = label, i = 2;
+      while (_pins.map[lb]) lb = label + '·' + (i++);   // label 唯一化(两次天气卡不互相顶掉)
+      el.dataset.pinLabel = lb;
+      _pins.map[lb] = String(textFn()).slice(0, 700);
+      _pins.els[lb] = el;
+    } else {
+      var lb0 = el.dataset.pinLabel || label;
+      delete _pins.map[lb0]; delete _pins.els[lb0];
+    }
+    el.classList.toggle('vc-picked', on);
+    el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
+    _pinSync(); _chipRender();
+  }
   function _pinBind(el, label, textFn) {   // 72:长按 600ms=选中带入 2.1 上下文(紫边框+pop 特效),再长按=移出;选中的浮层卡不自动消失
     el.classList.add('vc-pinnable');
     var lpT = null, lpX = 0, lpY = 0;
     function _fire() {
       lpT = null;
       if (!_rtc.on) return;   // 只在 2.1 通话中有意义
-      var on = !el.classList.contains('vc-picked');
-      el.classList.toggle('vc-picked', on);
-      el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
-      try {
-        if (on) _rtcSys('(用户把「' + label + '」的内容带入对话,后续问题请参考:' + String(textFn()).slice(0, 700) + '。状态记录,不要回应本条。)');
-        else _rtcSys('(用户移除了刚才带入的「' + label + '」,后续不必再参考它。状态记录,不要回应本条。)');
-      } catch (e) {}
+      _pinToggle(el, label, textFn);   // 77:状态中心统一管(覆盖式注入+chip 同步)
     }
     el.addEventListener('pointerdown', function (ev) {
       if (ev.target.closest('.vc-card-x')) return;
@@ -540,6 +587,7 @@
       var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
       d.innerHTML = html;
       _pinBind(d, label, function () { return _infoText(card); });
+      try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}   // 77b:「!」详情
       th.appendChild(d); th.scrollTop = th.scrollHeight;
     } else {
       var c = _cardPush(html, label, true);   // 字幕模式:浮层卡(html)
@@ -773,6 +821,7 @@
       var open = side.classList.contains('open');
       if (open) capClear();   // capClear 内的"回等待"经 capWait→_capVisible gate(侧栏开)自然不亮
       else if (ws || speakOn() || _cap.dictating) capWait(true);
+      try { _cardsVisSync(); } catch (e) {}   // 77:浮层卡随侧栏开合隐/现,选中项变输入框上方 chip
     }).observe(side, { attributes: true, attributeFilter: ['class'] });
   })(0);
 
@@ -891,7 +940,7 @@
     stt: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M2.5 3.5h11v7.2h-6L4.7 13v-2.3H2.5z"/><path d="M5 6.2h6M5 8.4h4"/></svg>',
     half: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M2 6.5v3M4.7 4.5v7M7.4 6v4"/><path d="M10.5 5.6h3.5M10.5 8h3.5M10.5 10.4h2.4"/></svg>',
     route: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h3.2C8 8 8 4.5 10.8 4.5H13M5.2 8C8 8 8 11.5 10.8 11.5H13"/><path d="M11.4 2.8L13.2 4.5l-1.8 1.7M11.4 9.8l1.8 1.7-1.8 1.7"/></svg>',
-    spk: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.3v3.4h2.3L8 12.4V3.6L4.8 6.3z"/><path d="M10.3 5.9a3 3 0 0 1 0 4.2M12.4 4.1a5.6 5.6 0 0 1 0 7.8"/></svg>'
+    spk: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.5v3h2L8.5 12V4L5 6.5z"/><path d="M10.5 6a3 3 0 0 1 0 4M12.5 4.3a5.5 5.5 0 0 1 0 7.4"/></svg>'
   };
   var _VM_LABEL = { sts: _VMI.sts + '<span>语音</span>', stt: _VMI.stt + '<span>文字</span>',
                     half: _VMI.half + '<span>混合</span>', route: _VMI.route + '<span>路由</span>' };
@@ -1082,6 +1131,99 @@
   function _cardHideOn() { try { return localStorage.getItem('rc-voice-card-hide') !== '0'; } catch (e) { return true; } }
   function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
   function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
+  var _dock = { list: [], open: false };
+  function _dockBtn() {
+    var b = document.getElementById('vc-dock-btn');
+    if (!b) {
+      b = document.createElement('button'); b.id = 'vc-dock-btn'; b.type = 'button';
+      b.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 9.5V12a1.5 1.5 0 0 0 1.5 1.5h8A1.5 1.5 0 0 0 13.5 12V9.5M2.5 9.5h3l1 1.6h3l1-1.6h3M4.5 6.5L8 3l3.5 3.5M8 3v6"/></svg><span class="vc-dk-n"></span>';
+      b.title = '卡片收藏夹(把浮层卡拖到右下角可收入)';
+      b.addEventListener('click', function () { _dock.open = !_dock.open; _dockPanel(_dock.open); });
+      document.body.appendChild(b);
+    }
+    b.querySelector('.vc-dk-n').textContent = String(_dock.list.length);
+    b.style.display = _dock.list.length ? 'flex' : 'none';
+  }
+  function _dockHint(on) {
+    var h = document.getElementById('vc-dock-hint');
+    if (!h) { h = document.createElement('div'); h.id = 'vc-dock-hint'; document.body.appendChild(h); }
+    h.classList.toggle('on', !!on);
+  }
+  function _inDockZone(x, y) { return (window.innerWidth - x) < 150 && (window.innerHeight - y) < 180; }
+  function _dockAdd(c) {   // 收入:数据留(不再有自动消失计时),浮层 DOM 撤
+    try { clearTimeout(c.t); } catch (e) {}
+    _dock.list.push({ label: c.label || '卡片', raw: c.raw || '', isHtml: !!c.isHtml,
+                      text: (c.el.querySelector('.vc-card-bd') || {}).textContent || '',
+                      pin: (c.el.dataset && c.el.dataset.pinLabel) || '' });
+    var i = _cards.list.indexOf(c); if (i >= 0) _cards.list.splice(i, 1);
+    try { c.el.remove(); } catch (e) {}
+    _cardLayout(); _dockBtn(); _dockHint(false);
+    if (_dock.open) _dockPanel(true);
+  }
+  function _dockPanel(show) {
+    var p0 = document.getElementById('vc-dock-panel');
+    if (!show) { if (p0) p0.remove(); _dock.open = false; return; }
+    if (!p0) { p0 = document.createElement('div'); p0.id = 'vc-dock-panel'; document.body.appendChild(p0); }
+    p0.innerHTML = '';
+    if (!_dock.list.length) { p0.innerHTML = '<div class="vc-dk-empty">空——把浮层卡拖到右下角收进来</div>'; return; }
+    _dock.list.slice().forEach(function (it) {
+      var d = document.createElement('div'); d.className = 'vc-dk-item' + ((it.pin && _pins.map[it.pin]) ? ' vc-picked' : '');
+      if (it.pin) d.dataset.pinLabel = it.pin;
+      d.innerHTML = '<span class="vc-pc-l">' + esc(it.label) + '</span><span class="vc-pc-s">' + esc((it.text || '').replace(/\s+/g, ' ').slice(0, 26)) + '</span>' +
+        '<button type="button" class="vc-pc-x">✕</button>';
+      d.querySelector('.vc-pc-x').addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var i2 = _dock.list.indexOf(it); if (i2 >= 0) _dock.list.splice(i2, 1);
+        _dockPanel(true); _dockBtn();
+      });
+      _pinBind(d, it.label, function () { return it.text || ''; });   // 长按=选中收藏的卡(同一套状态中心)
+      (function () {   // 拖出面板 60px=变回浮层卡(选中状态跟随)
+        var sx0 = 0, sy0 = 0, drag = false;
+        d.addEventListener('pointerdown', function (ev) { sx0 = ev.clientX; sy0 = ev.clientY; drag = true; });
+        d.addEventListener('pointermove', function (ev) {
+          if (drag && (Math.abs(ev.clientX - sx0) + Math.abs(ev.clientY - sy0)) > 60) {
+            drag = false;
+            var i3 = _dock.list.indexOf(it); if (i3 >= 0) _dock.list.splice(i3, 1);
+            var c2 = _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml);
+            if (c2 && it.pin && _pins.map[it.pin]) { c2.el.classList.add('vc-picked'); c2.el.dataset.pinLabel = it.pin; _pins.els[it.pin] = c2.el; }
+            _dockPanel(true); _dockBtn();
+          }
+        });
+        ['pointerup', 'pointercancel'].forEach(function (evn) { d.addEventListener(evn, function () { drag = false; }); });
+      })();
+      p0.appendChild(d);
+    });
+  }
+  function _chipRender() {   // 77:侧栏开着时,选中内容=输入框上方竖排 chip(与旧上下文 chip 同风格,×=取消带入)
+    var wrap = document.getElementById('vc-pin-chips');
+    var ks = Object.keys(_pins.map);
+    if (!_sideOpen() || !ks.length) { if (wrap) wrap.remove(); return; }
+    var input = document.getElementById('asst-input');
+    if (!input) return;
+    if (!wrap) {
+      wrap = document.createElement('div'); wrap.id = 'vc-pin-chips';
+      wrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;padding:6px 10px 0';
+      input.parentNode.insertBefore(wrap, document.getElementById('asst-note-chips') || input);
+    }
+    wrap.innerHTML = '';
+    ks.forEach(function (k) {
+      var chip = document.createElement('div'); chip.className = 'asst-fig-chip vc-pin-chip';
+      chip.innerHTML = '<span class="vc-pc-l">' + esc(k) + '</span><span class="vc-pc-s">' + esc((_pins.map[k] || '').slice(0, 30)) + '</span>' +
+        '<button type="button" class="vc-pc-x" aria-label="移除">✕</button>';
+      chip.querySelector('.vc-pc-x').addEventListener('click', function () {
+        var el0 = _pins.els[k];
+        if (el0 && el0.classList) { el0.classList.remove('vc-picked'); delete el0.dataset.pinLabel; }
+        delete _pins.map[k]; delete _pins.els[k];
+        _pinSync(); _chipRender();
+      });
+      wrap.appendChild(chip);
+    });
+  }
+  function _cardsVisSync() {   // 77:侧栏开=浮层卡全部消失(不挡内容);关=回来
+    var w = document.getElementById('vc-cards');
+    if (w) w.style.display = _sideOpen() ? 'none' : '';
+    _chipRender();
+  }
   function _cardLayout() {
     var vis = _cards.list.filter(function (c) { return !c.free; });   // 69:拖走的卡脱离堆叠,自由停放
     var n = vis.length;
@@ -1095,6 +1237,10 @@
   function _cardClose(c) {
     var i = _cards.list.indexOf(c);
     if (i < 0) return;
+    try {   // 77:选中的卡被×关闭=同时解除带入(卡都没了,别留幽灵参考)
+      var lb = c.el.dataset && c.el.dataset.pinLabel;
+      if (lb && _pins.map[lb]) { delete _pins.map[lb]; delete _pins.els[lb]; _pinSync(); _chipRender(); }
+    } catch (e) {}
     _cards.list.splice(i, 1);
     try { clearTimeout(c.t); } catch (e) {}
     c.el.style.opacity = '0';
@@ -1117,7 +1263,7 @@
       else if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
-    var c = { el: el, t: null, free: false, dx: 0, dy: 0 };
+    var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml };
     el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
     el.addEventListener('pointerdown', function () {
       if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
@@ -1153,10 +1299,15 @@
           el.classList.add('vc-lift');                      // 弹起态:scale 1.03+深阴影(见 CSS)
           _cardLayout();
         }
-        if (moved) { c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)'; }
+        if (moved) {
+          c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)';
+          _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近右下=收藏区光晕提示
+        }
       }
-      function up() {
+      function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+        _dockHint(false);
+        if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
         if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
           el.classList.remove('vc-lift');
@@ -1552,7 +1703,8 @@
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       if (_rtc.turnText && curAText) {
-        try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true }); } catch (e) {}   // 67:终态 Markdown 渲染(流式期间是纯文本)
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
+          tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) } }); } catch (e) {}   // 67/77b:终态渲染+「!」详情
         try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
@@ -1736,7 +1888,7 @@
               }
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true }); } catch (e2) {}
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' } }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}

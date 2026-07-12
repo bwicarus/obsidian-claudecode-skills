@@ -1631,9 +1631,11 @@ def _t_search_image(args, ctx):
             # 76(用户方案"wiki 关键词查询"):Gemini 免费文本档把词规范化成 Commons 必中的检索名
             # ("日本富士山 真实照片"→"Mount Fuji"/"富士山"),再搜一轮——纯知识任务,不占 grounding 额度
             try:
+                _nr = _resolve("img_norm", ctx.get("_uid"))   # 77:规范化模型走设置项(面板「配图关键词规范化」,非硬编码)
                 cj = _gemini_text('「' + (q0 or qe) + '」这个事物在 Wikimedia Commons 图库最可能命中的检索词。'
                                   '只输出 JSON 数组(英文规范名+原语言规范名,只要事物名称本身):["English name","原名"]',
-                                  max_tokens=80, think=False, timeout=15)
+                                  max_tokens=80, think=False, timeout=15,
+                                  model=(_nr.get("variant") if _is_gemini(_nr.get("variant") or "") else None))
                 import re as _re2
                 mm = _re2.search(r"\[[\s\S]*?\]", cj or "")
                 for cand in (json.loads(mm.group(0)) if mm else [])[:3]:
@@ -3404,11 +3406,12 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video", "img_norm")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
     "deep":         {"backend": "claude", "variant": "opus",              "depth": "high"},   # 语音通话 deep_think 虚拟工具用
+    "img_norm":     {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 77:配图关键词规范化(可自定义型号)
     "summarize":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "vision":       {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "explain":      {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
@@ -3419,6 +3422,7 @@ _AP_DEFAULTS = {
 }
 _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "deep": "深度思考(语音通话专用)",
+    "img_norm": "配图关键词规范化(搜图没中时转 Commons 规范名)",
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
 }
@@ -5144,7 +5148,7 @@ def assistant_action_prefs():
                     "catalog": {
                         "backends": list(_BACKENDS),
                         # 按任务限制可选后端:deep=relay 只透传 claude 选型(编排 ㉖ 起三后端全通:claude/gemini/codex)
-                        "backends_by_action": {"deep": ["claude", "gemini", "codex"]},
+                        "backends_by_action": {"deep": ["claude", "gemini", "codex"], "img_norm": ["gemini"]},
                         "variants": {"claude": list(_CLAUDE_VARIANTS), "gemini": gmods, "codex": list(_CODEX_VARIANTS)},
                         "depths": {"claude": ["auto"] + list(_EFFORTS), "gemini": ["none", "think"], "codex": list(_CODEX_DEPTHS)},
                         "variant_short": vshort,
