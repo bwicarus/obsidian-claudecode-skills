@@ -367,6 +367,42 @@ def _gemini_text(prompt, max_tokens=4000, think=True, timeout=90, model=None):
         continue   # 任何非 200 都试下一把 key(免费不行→付费);全失败才 None→回退 Claude
     return None
 
+def _gemini_websearch(query, timeout=45):
+    """网页搜索首选(64):Gemini google_search grounding——3.x 系**每月 5000 次免费**(之后 $14/1k;
+    2.x 时代是 1500 次/天 $35/1k)。免费 key 优先同 _gemini_text;返回 {answer, sources} 或 {}。"""
+    keys = _gemini_keys(_GEMINI_MODEL)
+    mdl = _variant_paid(_GEMINI_MODEL)[0]
+    if not keys:
+        return {}
+    body = {"contents": [{"role": "user", "parts": [{"text": query}]}],
+            "tools": [{"google_search": {}}],
+            "systemInstruction": {"parts": [{"text": "联网搜索并用问题的语言简洁作答(200字内),关键事实优先。"}]},
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 900}}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key="
+    for key, tier in keys:
+        try:
+            import requests
+            r = requests.post(url + key, json=body, timeout=timeout)
+        except Exception:
+            continue
+        if r.status_code == 200:
+            j = r.json(); us = _gemini_usage(j)
+            _gemini_log("assistant:websearch", 200, mdl, us["total"], us["prompt"], us["out"], tier)
+            cand = (j.get("candidates") or [{}])[0]
+            text = "".join(pt.get("text", "") for pt in (cand.get("content") or {}).get("parts", [])).strip()
+            srcs = []
+            for ch in ((cand.get("groundingMetadata") or {}).get("groundingChunks") or []):
+                w = ch.get("web") or {}
+                if w.get("uri") and all(x["url"] != w["uri"] for x in srcs):
+                    srcs.append({"title": (w.get("title") or "")[:120], "url": w["uri"]})
+            return {"answer": text[:1500], "sources": srcs[:5]} if text else {}
+        _gemini_log("assistant:websearch", r.status_code, mdl, tier=tier)
+        if r.status_code in (429, 403):
+            _gemini_cooldown(tier, _retry_after(r.text))
+        continue
+    return {}
+
+
 def _gemini_vision(prompt, images, max_tokens=1500, timeout=90, model=None):
     """Gemini 看图出文字描述。免费 key 优先,**任何失败(限流/5xx/网络/不支持)都自动切付费**。images=[{media_type,b64}]。付费也失败/空 → None(才回退 Claude)。"""
     if not images:
@@ -1473,8 +1509,12 @@ def _t_web_search(args, ctx):
     if not q:
         return {"error": "缺 query(搜索关键词)"}
     try:
+        r = _gemini_websearch(q)   # 64 首选:Gemini google_search grounding(3.x 每月 5000 次免费)
+        if r.get("answer"):
+            return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],
+                    "note": "answer 是联网搜索的综合结论,口头转述并提一句来源。"}
         import image_search
-        r = image_search.openai_web(q)
+        r = image_search.openai_web(q)   # 次选:OpenAI web_search(≈$0.004/次)
         if r.get("answer"):
             return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],
                     "note": "answer 是联网搜索的综合结论,口头转述并提一句来源。"}
@@ -4498,7 +4538,8 @@ def assistant_rtc_session():
     # 61:route_to_text 恒挂+恒定说明(不随模式变=不破 instructions 前缀缓存);实际放行由 relay 按
     # rt_voice_mode 程序门控(模式按钮通话中热切立即生效,不像 53 的 auto 开关要重拨)
     _route_line = ("**route_to_text 工具**:回答明显较长(详细解释/多步骤/公式推导/长列表)不适合口头念时调用;"
-                   "**读完工具结果(如 read_page)要转述大段内容时也一样先调它**,绝不口头念长文(会被长度限制掐断)。"
+                   "**读完工具结果(如 read_page)要转述大段内容时也一样先调它**,绝不口头念长文。"
+                   "调用的同一轮**先口头说一句等待语**(按话题自然说,比如『我把这部分整理成文字给你,稍等』),再调工具。"
                    "intent=一句话概括用户想要什么;系统会用文字模型写出完整回答显示在屏幕上,你调用后本轮结束不要再口头重复。"
                    "系统按用户当前输出模式决定是否放行,被驳回时按提示口头简要回答即可。短答/陪聊/发音示范永远直接说。")
     parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
@@ -4547,7 +4588,9 @@ def assistant_rtc_session():
                                  "required": ["question"], "additionalProperties": True}})
     tools.append({"type": "function", "name": "route_to_text",
                   "description": "回答较长(详细解释/多步骤/公式/长列表)不适合口头念时调用:intent=一句话概括用户想要什么,"
-                                 "系统转文字模型写完整回答显示在屏幕上。调用后本轮结束不要再说话。短答/陪聊/发音示范不要用。",
+                                 "系统转文字模型写完整回答显示在屏幕上。**调用的同一轮先口头说一句简短等待语**"
+                                 "(按话题自然措辞,如『这个说来话长,我详细写给你,稍等两秒』),说完就调,"
+                                 "**绝不口头讲解内容本身**。短答/陪聊/发音示范不要用。",
                   "parameters": {"type": "object", "properties": {"intent": {"type": "string"}},
                                  "required": ["intent"], "additionalProperties": False}})
     tools.append({"type": "function", "name": "wait_for_user",
@@ -4556,7 +4599,7 @@ def assistant_rtc_session():
     sess = {"type": "realtime", "model": cfg.get("rt_model") or "gpt-realtime-2.1-mini",
             "output_modalities": ["audio"],
             "reasoning": {"effort": cfg.get("rt_effort") or "low"},
-            "max_output_tokens": 1024,   # session 级兜底(每个 response.create 都带显式分档预算:sts/half=1024,route=512,text=2048)
+            "max_output_tokens": 2048,   # 64 用户拍板:全档 2048(≈100s 音频),不搞小预算硬截断;时长靠 prompt 规则+route 自觉
             "instructions": "\n".join(parts),
             "audio": {"input": {"noise_reduction": {"type": "near_field"},
                                 "turn_detection": {"type": "semantic_vad",

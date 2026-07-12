@@ -552,3 +552,11 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ## 63 输出预算按档分级 v2(2026-07-12,用户"512是不是太小了")
 
 ㊹ 的 512 一刀切(≈25s)是没有模态体系时的唯一手段;账本实锤平均响应才 14.7s=多数轮次到不了顶,**被掐的是长尾轮=体验最差的时刻**,上限翻倍只影响长尾、平均成本几乎不变。分档:**sts/half=1024**(≈50s;纯语音掐断无兜底=硬事故,日常时长仍由 instructions 8s/20s 规则管,上限只当保险丝)/**route=512 故意保持**(掐断=62 自动转文字详答的触发器,提高反而迟钝)/text=2048。session 级 max_output_tokens 512→1024(纯兜底,每个 response.create 都带显式分档值)。
+
+## 64 路由体验定稿:等待语+专属视觉+全档2048撤硬兜底+Gemini搜索首选(2026-07-12,用户拍板)
+
+**用户裁定**:不喜欢硬截断("需要处理的问题太多且省不了多少钱,大部分情况做对就行,之后按记录调 prompt")。
+- **全档 2048**(≈100s 音频,正常轮永远碰不到=纯保险丝):前端/relay/session 级三处;63 的分档预算(1024/512)与 **62 的掐断硬兜底(route_rescue)全部撤除**——incomplete 只落 `_vlog("truncated")` 记录当分析素材(哪轮该走 route 却口头念了,供之后调 prompt/工具描述提高快路命中率)。
+- **route 等待语**(用户设计):工具描述+_route_line 明确"调用的**同一轮先口头说一句等待语**(按话题自然措辞,如『说来话长,我写给你稍等』),说完就调,绝不口头讲解内容本身"——利用 audio 轮可同时输出音频+function_call 的特性,消灭"沉默调工具"的怪异感。
+- **路由专属视觉**:工具卡 running=「🧠 文字详答生成中」/done=「🧠 文字详答」(relay 快路+前端 fallback 双侧);**字幕**:route 长文滚动时 cur 行加 `.vc-cap-route`(紫左边框+🧠 前缀+淡紫字),response.created 时摘除不残留;字幕状态行经既有 tool_status 机制自动显示 🧠 label。
+- **网页搜索首选换 Gemini google_search grounding**(用户指出免费额度,核实属实:**3.x 系每月 5000 次免费**、之后 $14/1k;2.x 时代=1500 次/天 $35/1k):`_gemini_websearch`(generateContent+tools:[{google_search:{}}],免费 key 优先/403冷却同 _gemini_text,来源=groundingMetadata.groundingChunks.web);`_t_web_search` 落阶=**gemini(免费)→openai_web($0.004)→CSE**。冒烟真调:调理师实技试验答对+grounding 来源。⚠grounding 来源 URL 是 vertexaisearch redirect 链(正常,点击可达真页)。

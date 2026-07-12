@@ -853,11 +853,9 @@
     // 61:sts/route=语音(route 的长内容由模型自调 route_to_text 转文字);half=提问语音·工具/深度文字;stt=全文字
     var wantAudio = (m === 'sts') || (m === 'route') || (m === 'half' && src === 'user');
     _rtc.turnText = !wantAudio;   // 本轮是文字输出:TTS 开关开着就流式代念
-    // 预算按档分级(63):sts/half=1024(≈50s,纯语音掐断没有兜底=硬事故,上限只当保险丝——日常时长仍由
-    // instructions 的 8s/20s 规则管);route=512(掐断是机制:触发自动转文字详答,提高反而迟钝);text=2048
-    var budget = !wantAudio ? 2048 : (m === 'route' ? 512 : 1024);
+    // 64 用户拍板:全档 2048(≈100s 音频保险丝,正常轮碰不到)——不搞小预算硬截断,时长靠 prompt+route 自觉
     _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
-                                                   max_output_tokens: budget } });
+                                                   max_output_tokens: 2048 } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     try {
@@ -952,7 +950,7 @@
         _rtcRespCreate('tool');
         return;
       }
-      onToolStatus({ status: 'running', label: '文字详答' });
+      onToolStatus({ status: 'running', label: '🧠 文字详答生成中' });
       (async function () {
         var full = '', err = '';
         try {
@@ -962,6 +960,7 @@
           var rst = { feed: _mkTtsFeeder() };
           try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}
           _rtcCapReset();
+          try { if (_cap.cur) _cap.cur.classList.add('vc-cap-route'); } catch (e) {}
           while (true) {
             var ch = await rd.read(); if (ch.done) break;
             buf += dec.decode(ch.value, { stream: true });
@@ -987,7 +986,7 @@
           }
         } catch (e) { err = String(e).slice(0, 80); }
         var okR = !!full;
-        onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '文字详答', args: args, rag: (full || err).slice(0, 400) });
+        onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '🧠 文字详答', args: args, rag: (full || err).slice(0, 400) });
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                   output: okR ? ('(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:' + full.slice(0, 240) + ')') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
         if (!okR) _rtcRespCreate('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=让它口头补救
@@ -1125,6 +1124,7 @@
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
+      try { if (_cap.cur) _cap.cur.classList.remove('vc-cap-route'); } catch (_) {}   // 64:路由字幕样式不残留到普通轮
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
@@ -1306,6 +1306,7 @@
                 _rtc._route.buf += rp.delta;
                 try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', _rtc._route.buf); } catch (e2) {}
                 _rtcCapFeed(_rtc._route.buf, false);
+                try { if (_cap.cur) _cap.cur.classList.add('vc-cap-route'); } catch (e2) {}   // 64:字幕路由专属样式
                 try { _rtc._route.feed(_rtc._route.buf, false); } catch (e2) {}
               }
               if (rp.done) {
@@ -1866,7 +1867,9 @@
     qb.appendChild(tb);
     if (!document.getElementById('vc-quick-compact')) {   // 61:快捷栏整排紧凑(用户要求)
       var st0 = document.createElement('style'); st0.id = 'vc-quick-compact';
-      st0.textContent = '#asst-quick .rc-media-tg,#ep-asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px;border-radius:7px}';
+      st0.textContent = '#asst-quick .rc-media-tg,#ep-asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px;border-radius:7px}' +
+        '.vc-cap-line.vc-cap-route{border-left:3px solid #9d7bff;padding-left:9px;color:#d6c6ff}' +
+        '.vc-cap-line.vc-cap-route::before{content:"🧠 ";opacity:.85}';
       document.head.appendChild(st0);
     }
     return true;

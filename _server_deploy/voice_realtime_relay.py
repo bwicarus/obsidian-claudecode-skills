@@ -1831,18 +1831,17 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     except Exception:
         pass
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
-    rescue = {"busy": False}            # 62:route 档 512 掐断自动升级文字详答(防重入)
 
     def _resp_create():
         """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
         工具结果轮:sts/route=念出来;half=文字(审核推荐混合形态);stt=文字。"""
         m = _norm_vm(_creds().get("rt_voice_mode"))
         want_audio = m in ("sts", "route")
-        # 63 分档预算:sts=1024(≈50s,纯语音掐断无兜底);route=512(掐断=转文字详答的触发器,故意收紧);文字=2048
-        budget = 2048 if not want_audio else (512 if m == "route" else 1024)
+        # 64 用户拍板:全档 2048(≈100s 音频保险丝,正常轮永远碰不到)——不搞小预算硬截断,
+        # 时长控制交给 prompt 规则 + route 档模型自觉(靠日志分析慢慢调,不靠掐)
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
-                             "max_output_tokens": budget}}
+                             "max_output_tokens": 2048}}
 
     async def _need_shot():
         """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。shot_id 配对防错配。"""
@@ -1892,7 +1891,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         return full, ("" if full else (err or "空结果"))
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
+        _lbl0 = "🧠 文字详答生成中" if name == "route_to_text" else name   # 64:路由有专属视觉(工具卡+字幕状态行同用)
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": _lbl0}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
         vis, readonly, no_create = None, True, False
         try:
@@ -1907,7 +1907,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     out = "(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户把模式切到「路由」)"
                     label = "文字路由(未启用)"
                 else:
-                    label = "文字详答"
+                    label = "🧠 文字详答"
                     full, rerr = await _oa_route(str(args.get("intent") or ""))
                     if rerr:
                         ok, out = False, f"(文字生成失败:{rerr};请口头简要回答)"
@@ -2028,45 +2028,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
-                # 62 route 档掐断兜底(用户实测:模型不调 route_to_text 而是拿工具结果口头念,512 满额=卡壳;
-                # prompt 管不住 → 程序判断:incomplete 且当前 route 档 = 长内容实锤,自动转文字详答):
-                if (fe >= 2 and r0.get("status") == "incomplete" and not rescue["busy"]
-                        and _norm_vm(_creds().get("rt_voice_mode")) == "route"):
-                    half = ""
-                    try:
-                        for _o in (r0.get("output") or []):
-                            if _o.get("type") == "message":
-                                for _c in (_o.get("content") or []):
-                                    half += (_c.get("transcript") or _c.get("text") or "")
-                    except Exception:
-                        half = ""
-                    rescue["busy"] = True
-                    ep_r = epoch["n"]
-
-                    async def _route_rescue(half0):
-                        try:
-                            intent = ("用户的问题:" + (book.get("last_q") or "(见资料)") +
-                                      ";语音助手答到一半被输出长度截断,已说的部分:" + half0[:400] +
-                                      "——请写出**完整**的文字详答(从头完整写,不是接着补)")
-                            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": "文字详答(截断续写)"}}, ensure_ascii=False))
-                            full, rerr = await _oa_route(intent)
-                            await bws.send(json.dumps({"event": "tool_status", "payload": {
-                                "status": "done" if full else "error", "tool": "route_to_text",
-                                "label": "文字详答(截断自动接管)", "rag": (full or rerr)[:800]}}, ensure_ascii=False))
-                            if full and epoch["n"] == ep_r:   # 用户没开新话才注入记忆(长文无论如何已显示)
-                                await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                                    "type": "message", "role": "system",
-                                    "content": [{"type": "input_text", "text":
-                                                 "(你上一轮口头回答因长度限制被截断;系统已把完整文字详答显示给用户,"
-                                                 "要点:" + full[:200] + "……不要口头重复内容,等用户继续。)"}]}}))
-                            _vlog("tool", tool="route_rescue", label="截断自动转文字", page=book.get("page") or page,
-                                  book=file_rel, ok=bool(full), args={}, brief=(full or rerr)[:200])
-                        except Exception:
-                            pass
-                        finally:
-                            rescue["busy"] = False
-
-                    asyncio.create_task(_route_rescue(half))
+# 64:硬兜底已撤(用户拍板:体验差,大部分做对即可)——incomplete 只落盘记录,供之后按日志调 prompt/工具描述
+                if r0.get("status") == "incomplete":
+                    _vlog("truncated", page=book.get("page") or page, book=file_rel,
+                          mode=_norm_vm(_creds().get("rt_voice_mode")), q=(book.get("last_q") or "")[:120],
+                          brief="回复被 2048 保险丝掐断(分析素材:该轮该走 route 却口头念了)")
                 if pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
                     pend["create"] = False
                     if pend["ep"] == epoch["n"]:   # 纪元没变才补(用户已开新话=旧工具结果不该再触发回答)
