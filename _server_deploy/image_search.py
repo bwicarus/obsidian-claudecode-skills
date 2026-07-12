@@ -256,6 +256,9 @@ def search_images(query: str, n: int = 2, want_google: bool = True) -> list:
     if not q:
         return []
     q = q[:120]
+    # 76:剥修饰尾巴("日本富士山 真实照片"实锤全灭)——Commons 按名称索引,修饰词让全文匹配失败;
+    # 模型不听"关键词要简短"的 prompt,程序清洗才可靠
+    q = re.sub(r"[\s的の]*(真实|實際|高清|清晰|代表性?|经典)?[\s的の]*(照片|图片|图像|图|写真|畫像|picture|photo(?:graph)?s?|image?s?)\s*$", "", q, flags=re.I).strip() or q
     ck = hashlib.sha1(("img|" + q.lower() + "|" + str(n)).encode("utf-8")).hexdigest()[:20]
     cf = _CACHE / (ck + ".json")
     try:
@@ -287,6 +290,8 @@ def search_images(query: str, n: int = 2, want_google: bool = True) -> list:
             if imgs:
                 google_ok = True   # 第二腿实际跑成了(缓存不用标 partial 短命)
     imgs = imgs[:n]
+    if not imgs:
+        return []   # 76:空结果不缓存——源抖动/坏词的失败别钉住,下次重试有机会
     partial = bool(want_google and len(imgs) < n and not google_ok)
     try:
         _CACHE.mkdir(parents=True, exist_ok=True)

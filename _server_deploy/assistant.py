@@ -1614,17 +1614,34 @@ def _t_search_image(args, ctx):
         q0, qe = it["query"], (it.get("query_en") or "")
         imgs = []
         tried = set()
-        for qq in (q0, qe, _short(q0), _short(qe)):
+        def _try(qq):
             qq = (qq or "").strip()
             if not qq or qq.lower() in tried:
-                continue
+                return []
             tried.add(qq.lower())
             try:
-                imgs = image_search.search_images(qq[:120], n=1)   # 每概念取最匹配 1 张
+                return image_search.search_images(qq[:120], n=1)   # 每概念取最匹配 1 张
             except Exception:
-                imgs = []
+                return []
+        for qq in (q0, qe, _short(q0), _short(qe)):
+            imgs = _try(qq)
             if imgs:
                 break
+        if not imgs:
+            # 76(用户方案"wiki 关键词查询"):Gemini 免费文本档把词规范化成 Commons 必中的检索名
+            # ("日本富士山 真实照片"→"Mount Fuji"/"富士山"),再搜一轮——纯知识任务,不占 grounding 额度
+            try:
+                cj = _gemini_text('「' + (q0 or qe) + '」这个事物在 Wikimedia Commons 图库最可能命中的检索词。'
+                                  '只输出 JSON 数组(英文规范名+原语言规范名,只要事物名称本身):["English name","原名"]',
+                                  max_tokens=80, think=False, timeout=15)
+                import re as _re2
+                mm = _re2.search(r"\[[\s\S]*?\]", cj or "")
+                for cand in (json.loads(mm.group(0)) if mm else [])[:3]:
+                    imgs = _try(str(cand))
+                    if imgs:
+                        break
+            except Exception:
+                pass
         return {"concept": it["concept"], "found": bool(imgs),
                 "image_url": (imgs[0]["image_url"] if imgs else ""),
                 "page_url": (imgs[0].get("page_url", "") if imgs else "")}
