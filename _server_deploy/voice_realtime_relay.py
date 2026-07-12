@@ -1487,8 +1487,35 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
     async def up():
         abuf = bytearray()   # 攒 100ms 再 append(前端 20ms/帧 → 50 msg/s 太碎;24k·16bit·100ms=4800B)
+        # 109(用户设计:静默别烧钱):grok 按音频时长计费——静音也是音频,持续推流=持续计费。
+        # RMS 语音门:静默段不转发(只进 0.6s 预滚缓冲),开口时先补发预滚(不吃句首)+800ms hangover(不切句尾)。
+        import array as _arr
+        import collections as _coll
+        import time as _tm2
+        _vg = {"last": 0.0, "pre": _coll.deque(maxlen=30)}   # pre:最近 ~0.6s(浏览器 20ms/帧 ×30)
+
+        def _rms(b):
+            try:
+                a = _arr.array("h", bytes(b[:len(b) - (len(b) % 2)]))
+                return (sum(x * x for x in a) / max(1, len(a))) ** 0.5
+            except Exception:
+                return 9999.0
 
         async def _feed_audio(chunk):
+            if engine == "grok":
+                _nw = _tm2.time()
+                if _rms(chunk) > 350:
+                    _vg["last"] = _nw
+                if _nw - _vg["last"] > 0.8:   # 静默(含 hangover 之外):不推,只留预滚
+                    _vg["pre"].append(bytes(chunk))
+                    return
+                if _vg["pre"]:   # 开口:先补发预滚,句首不丢
+                    for c0 in _vg["pre"]:
+                        abuf.extend(c0)
+                    _vg["pre"].clear()
+            await _feed_audio_raw(chunk)
+
+        async def _feed_audio_raw(chunk):
             abuf.extend(chunk)
             if len(abuf) >= 4800:
                 try:
