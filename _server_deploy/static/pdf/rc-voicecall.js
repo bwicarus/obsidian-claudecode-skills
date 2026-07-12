@@ -1293,6 +1293,15 @@
     if (!show) { if (p0) p0.remove(); _dock.open = false; _dock.delMode = false; _dock.trash = false; return; }
     if (!_dock.loaded) { _dockLoad(function () { if (_dock.open) _dockPanel(true); }); }
     if (!p0) { p0 = document.createElement('div'); p0.id = 'vc-dock-panel'; document.body.appendChild(p0); }
+    if (!_dock._outside) {   // 84:点面板外=自动关闭(选择模式/回收站视图除外——那是明确的操作态,别误关)
+      _dock._outside = function (ev) {
+        if (!_dock.open || _dock.delMode || _dock.trash) return;
+        var p1 = document.getElementById('vc-dock-panel'), b1 = document.getElementById('vc-dock-btn');
+        if ((p1 && p1.contains(ev.target)) || (b1 && b1.contains(ev.target))) return;
+        _dockPanel(false); _dockBtn();
+      };
+      document.addEventListener('pointerdown', _dock._outside, true);
+    }
     p0.innerHTML = '';
     // 顶栏:标题 + 删除模式开关(删除模式下再露"回收站"和批量删除)
     var hd = document.createElement('div'); hd.className = 'vc-dkp-hd';
