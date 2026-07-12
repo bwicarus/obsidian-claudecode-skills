@@ -1833,6 +1833,7 @@
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
         try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
         try { if (arguments[2].info && window.__asstInfoBtn) window.__asstInfoBtn(_vTurnEl, arguments[2].info); } catch (e) {}   // 77b:「!」详情
+        try { if (arguments[2].fav && window.__vcFavBtn) window.__vcFavBtn(_vTurnEl, arguments[2].fav); } catch (e) {}   // 78:☆ 收藏(长回答也是独立卡)
       } else _vTurnEl.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }

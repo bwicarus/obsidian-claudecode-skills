@@ -146,6 +146,12 @@
       '.vc-dk-item{display:flex;align-items:center;gap:7px;padding:8px 10px;border-radius:11px;background:rgba(255,255,255,.06);color:#e4e9f5;font-size:12.5px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}' +
       '.vc-dk-item.vc-picked{box-shadow:0 0 0 1.5px rgba(123,108,255,.85)}' +
       '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
+      '.vc-dk-item{flex-direction:column;align-items:stretch;gap:2px}' +
+      '.vc-dk-r1{display:flex;align-items:center;gap:7px}.vc-dk-r1 .vc-pc-x{margin-left:auto}' +
+      '.vc-dk-m{font-size:10.5px;color:#6f7d9e}' +
+      '.vc-fav-b{position:absolute;right:28px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
+      'background:rgba(255,255,255,.1);color:#8fa0c2;display:flex;align-items:center;justify-content:center;padding:0}' +
+      '.vc-fav-b.on{color:#ffd54f;background:rgba(255,213,79,.15)}' +
       '.vc-pin-chip{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:10px;' +
       'background:rgba(123,108,255,.12);border:1px solid rgba(123,108,255,.4);max-width:100%}' +
       '.vc-pc-l{font-size:12px;color:#c9bcff;font-weight:600;flex:none}' +
@@ -589,6 +595,7 @@
       d.innerHTML = html;
       _pinBind(d, label, function () { return _infoText(card); });
       try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}   // 77b:「!」详情
+      try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}   // 78:☆ 收藏
       th.appendChild(d); th.scrollTop = th.scrollHeight;
     }
     if (!_sideOpen()) {
@@ -1133,7 +1140,45 @@
   function _cardHideOn() { try { return localStorage.getItem('rc-voice-card-hide') !== '0'; } catch (e) { return true; } }
   function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
   function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
-  var _dock = { list: [], open: false };
+  var _dock = { list: [], open: false, loaded: false };
+  function _dockLoad(cb) {   // 78:收藏夹服务端持久化(独立于会话,清空对话不清它)
+    if (_dock.loaded) { cb && cb(); return; }
+    fetch('/api/assistant/voice-cards').then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok) { _dock.list = d.cards || []; _dock.loaded = true; }
+      _dockBtn(); cb && cb();
+    }).catch(function () { cb && cb(); });
+  }
+  function _favSave(rec) {
+    rec.id = rec.id || ('v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+    fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'add', card: rec }) }).catch(function () {});
+    var i = -1;
+    _dock.list.forEach(function (x, k) { if (x.id === rec.id) i = k; });
+    if (i < 0) _dock.list.push(rec); else _dock.list[i] = rec;
+    _dockBtn(); if (_dock.open) _dockPanel(true);
+    return rec.id;
+  }
+  function _favMeta() {   // 元数据:书/页/触发这轮的问题——长回答离开会话也能自释
+    return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
+  }
+  window.__vcFavBtn = function (el, payloadFn) {   // 78:星形「收藏」钮(信息卡/长回答气泡通用,「!」左侧)
+    try {
+      if (!el || el.querySelector(':scope > .vc-fav-b')) return;
+      el.style.position = 'relative';
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'vc-fav-b'; b.title = '加入卡片收藏夹(独立于对话,清空不丢)';
+      b.innerHTML = '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.2l1.8 3.7 4 .58-2.9 2.83.68 4L8 11.4l-3.6 1.9.68-4L2.2 6.48l4-.58z"/></svg>';
+      b.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        if (b.classList.contains('on')) return;
+        var rec = payloadFn();
+        rec.meta = rec.meta || _favMeta();
+        _dockLoad(function () { _favSave(rec); });
+        b.classList.add('on');
+        if (typeof _toast === 'function') { try { _toast('已收藏'); } catch (e) {} }
+      });
+      el.appendChild(b);
+    } catch (e) {}
+  };
   function _dockBtn() {
     var b = document.getElementById('vc-dock-btn');
     if (!b) {
@@ -1152,43 +1197,46 @@
     h.classList.toggle('on', !!on);
   }
   function _inDockZone(x, y) { return (window.innerWidth - x) < 150 && (window.innerHeight - y) < 180; }
-  function _dockAdd(c) {   // 收入:数据留(不再有自动消失计时),浮层 DOM 撤
+  function _dockAdd(c) {   // 收入:持久化到服务端(78,清空对话不丢),浮层 DOM 撤
     try { clearTimeout(c.t); } catch (e) {}
-    _dock.list.push({ label: c.label || '卡片', raw: c.raw || '', isHtml: !!c.isHtml,
-                      text: (c.el.querySelector('.vc-card-bd') || {}).textContent || '',
-                      pin: (c.el.dataset && c.el.dataset.pinLabel) || '' });
+    var rec = { label: c.label || '卡片', raw: c.raw || '', isHtml: !!c.isHtml,
+                text: (c.el.querySelector('.vc-card-bd') || {}).textContent || '',
+                meta: _favMeta() };
+    _dockLoad(function () { _favSave(rec); });
     var i = _cards.list.indexOf(c); if (i >= 0) _cards.list.splice(i, 1);
     try { c.el.remove(); } catch (e) {}
-    _cardLayout(); _dockBtn(); _dockHint(false);
-    if (_dock.open) _dockPanel(true);
+    _cardLayout(); _dockHint(false);
   }
   function _dockPanel(show) {
     var p0 = document.getElementById('vc-dock-panel');
     if (!show) { if (p0) p0.remove(); _dock.open = false; return; }
+    if (!_dock.loaded) { _dockLoad(function () { if (_dock.open) _dockPanel(true); }); }
     if (!p0) { p0 = document.createElement('div'); p0.id = 'vc-dock-panel'; document.body.appendChild(p0); }
     p0.innerHTML = '';
-    if (!_dock.list.length) { p0.innerHTML = '<div class="vc-dk-empty">空——把浮层卡拖到右下角收进来</div>'; return; }
-    _dock.list.slice().forEach(function (it) {
-      var d = document.createElement('div'); d.className = 'vc-dk-item' + ((it.pin && _pins.map[it.pin]) ? ' vc-picked' : '');
-      if (it.pin) d.dataset.pinLabel = it.pin;
-      d.innerHTML = '<span class="vc-pc-l">' + esc(it.label) + '</span><span class="vc-pc-s">' + esc((it.text || '').replace(/\s+/g, ' ').slice(0, 26)) + '</span>' +
-        '<button type="button" class="vc-pc-x">✕</button>';
+    if (!_dock.list.length) { p0.innerHTML = '<div class="vc-dk-empty">空——把浮层卡拖到右下角,或点卡片上的 ☆</div>'; return; }
+    _dock.list.slice().reverse().forEach(function (it) {   // 新的在上
+      var d = document.createElement('div'); d.className = 'vc-dk-item';
+      var m = it.meta || {};
+      var mline = [m.file, m.page && ('p' + m.page), m.q && ('「' + m.q.slice(0, 16) + '…」')].filter(Boolean).join(' · ');
+      d.innerHTML = '<div class="vc-dk-r1"><span class="vc-pc-l">' + esc(it.label) + '</span>' +
+        '<button type="button" class="vc-pc-x">✕</button></div>' +
+        '<span class="vc-pc-s">' + esc((it.text || '').replace(/\s+/g, ' ').slice(0, 34)) + '</span>' +
+        (mline ? '<span class="vc-dk-m">' + esc(mline) + '</span>' : '');
       d.querySelector('.vc-pc-x').addEventListener('click', function (ev) {
         ev.stopPropagation();
         var i2 = _dock.list.indexOf(it); if (i2 >= 0) _dock.list.splice(i2, 1);
+        if (it.id) fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'del', id: it.id }) }).catch(function () {});
         _dockPanel(true); _dockBtn();
       });
       _pinBind(d, it.label, function () { return it.text || ''; });   // 长按=选中收藏的卡(同一套状态中心)
-      (function () {   // 拖出面板 60px=变回浮层卡(选中状态跟随)
+      (function () {   // 78:拖出面板 60px=**复制**一张浮层卡(收藏是长期库,不移除)
         var sx0 = 0, sy0 = 0, drag = false;
         d.addEventListener('pointerdown', function (ev) { sx0 = ev.clientX; sy0 = ev.clientY; drag = true; });
         d.addEventListener('pointermove', function (ev) {
           if (drag && (Math.abs(ev.clientX - sx0) + Math.abs(ev.clientY - sy0)) > 60) {
             drag = false;
-            var i3 = _dock.list.indexOf(it); if (i3 >= 0) _dock.list.splice(i3, 1);
-            var c2 = _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml);
-            if (c2 && it.pin && _pins.map[it.pin]) { c2.el.classList.add('vc-picked'); c2.el.dataset.pinLabel = it.pin; _pins.els[it.pin] = c2.el; }
-            _dockPanel(true); _dockBtn();
+            _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml);
           }
         });
         ['pointerup', 'pointercancel'].forEach(function (evn) { d.addEventListener(evn, function () { drag = false; }); });
@@ -1196,6 +1244,7 @@
       p0.appendChild(d);
     });
   }
+  setTimeout(function () { try { _dockLoad(); } catch (e) {} }, 2500);   // 78:开页预载收藏(托盘徽标即时可见)
   function _chipRender() {   // 77:侧栏开着时,选中内容=输入框上方竖排 chip(与旧上下文 chip 同风格,×=取消带入)
     var wrap = document.getElementById('vc-pin-chips');
     var ks = Object.keys(_pins.map);
@@ -1706,7 +1755,8 @@
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       if (_rtc.turnText && curAText) {
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
-          tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) } }); } catch (e) {}   // 67/77b:终态渲染+「!」详情
+          tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) },
+          fav: (function (txt) { return function () { return { label: 'AI 回答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(curAText) }); } catch (e) {}   // 67/77b/78:终态+「!」+☆(闭包快照防串轮)
         try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
@@ -1890,7 +1940,8 @@
               }
               if (rp.done) {
                 var fullR = rp.text || _rtc._route.buf;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' } }); } catch (e2) {}
+                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)' },
+                  fav: (function (txt) { return function () { return { label: '路由详答', raw: txt, isHtml: false, text: txt.slice(0, 4000) }; }; })(fullR) }); } catch (e2) {}
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}

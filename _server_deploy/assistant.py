@@ -4949,6 +4949,48 @@ def assistant_voice_clip_dl(cid):
     return jsonify({"ok": False}), 404
 
 
+_VCARD_DIR = CLAUDE_DIR / "state" / "voice-cards"
+
+
+@bp.route("/voice-cards", methods=["GET", "POST"])
+def assistant_voice_cards():
+    """78:卡片收藏夹(用户设计)——独立于会话持久存储(清空对话不清它)。
+    卡片自带元数据(书/页/触发问题/时间),长回答类内容离开上下文也能自释。
+    GET → {cards};POST {op:'add', card} / {op:'del', id}。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    uid = session["user_id"]
+    _VCARD_DIR.mkdir(parents=True, exist_ok=True)
+    f = _VCARD_DIR / f"{uid}.json"
+    try:
+        cards = json.loads(f.read_text("utf-8"))
+    except Exception:
+        cards = []
+    if request.method == "GET":
+        return jsonify({"ok": True, "cards": cards[-200:]})
+    b = request.get_json(silent=True) or {}
+    if b.get("op") == "add" and isinstance(b.get("card"), dict):
+        c = b["card"]
+        rec = {"id": re.sub(r"[^A-Za-z0-9_-]", "", str(c.get("id") or ""))[:40] or f"v{int(time.time()*1000)}",
+               "label": str(c.get("label") or "卡片")[:80],
+               "kind": str(c.get("kind") or "")[:24],
+               "raw": str(c.get("raw") or "")[:20000],
+               "isHtml": bool(c.get("isHtml")),
+               "text": str(c.get("text") or "")[:4000],
+               "meta": {k: str((c.get("meta") or {}).get(k) or "")[:300] for k in ("file", "page", "q")},
+               "ts": int(time.time())}
+        cards = [x for x in cards if x.get("id") != rec["id"]]
+        cards.append(rec)
+        f.write_text(json.dumps(cards[-200:], ensure_ascii=False), "utf-8")
+        return jsonify({"ok": True, "id": rec["id"]})
+    if b.get("op") == "del" and b.get("id"):
+        n0 = len(cards)
+        cards = [x for x in cards if x.get("id") != b["id"]]
+        f.write_text(json.dumps(cards, ensure_ascii=False), "utf-8")
+        return jsonify({"ok": True, "removed": n0 - len(cards)})
+    return jsonify({"ok": False}), 400
+
+
 @bp.route("/clip-attach", methods=["POST"])
 def assistant_clip_attach():
     """66:历史消息补挂语音(灰钮 TTS 生成保存后回写)——按 ts+内容前缀定位该条 assistant 消息。"""

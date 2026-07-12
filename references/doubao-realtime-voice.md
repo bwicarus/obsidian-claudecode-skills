@@ -625,3 +625,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **e. TTS 按钮白方块**:spk SVG 加显式 width/height 属性+简化 path(不赌外部 CSS 加载序)。
 **f. img_norm 设置项**(用户指正"规范化不应默认某模型"):_AP_ACTIONS 加 `img_norm`(「配图关键词规范化」,默认 gemini flash,面板可换型号;backends 目前只放 gemini=诚实选项);_one 规范化经 _resolve 按用户设置选型号。
 **g. OpenAI 图搜核实**:**无独立图片搜索 API**(Responses 内建工具=web/file/computer;图像能力=生成 gpt-image-2+视觉理解)——搜图维持 Commons 直链主路+规范化。
+
+### 78 卡片收藏夹持久化+☆收藏钮(2026-07-12 用户设计"卡片独立于会话存在")
+
+**服务端持久化** `/api/assistant/voice-cards`(GET/add/del,`state/voice-cards/<uid>.json` 上限 200)——**独立文件=清空对话天然不清收藏**(冒烟验证隔离);卡片带**元数据** meta{file 书名, page 页, q 触发问题}(长回答离开会话也能自释语境)。前端:dock 全面接服务端(开页预载徽标/面板 GET/✕=del/拖入浮层=add);**☆ 收藏钮**(`__vcFavBtn`,「!」左侧)挂三处=侧栏信息卡/文字回复气泡/路由长文气泡(闭包快照防串轮);dock 面板条目显示元数据行(书·p页·「问题…」);**拖出改复制**(收藏是长期库,✕才删)。
