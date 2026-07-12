@@ -1503,7 +1503,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 pc = RTCPeerConnection()
                 _bridge["pc"] = pc
                 q = asyncio.Queue(maxsize=600)   # ~12s 音频缓冲上限(防泄漏;满了丢最旧)
-                _bridge["q"] = q
+                # 103b(用户实测 Grok 全哑):下行改道**必须等 connected**——offer 一到就改道的话,
+                # 桥连不成(ICE 不通/answer 未达)时音频全进无人播放的队列=全哑。connected 前照走 ws。
 
                 @pc.on("track")
                 def _on_track(track):
@@ -1523,7 +1524,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
                 @pc.on("connectionstatechange")
                 def _on_cs():
-                    if pc.connectionState in ("failed", "closed", "disconnected") and _bridge.get("pc") is pc:
+                    if _bridge.get("pc") is not pc:
+                        return
+                    if pc.connectionState == "connected":
+                        _bridge["q"] = q   # 103b:真正连通才改道下行(与前端 connected 才停发麦一致)
+                        sys.stderr.write("[voice-oa] 桥已连通,音频改道 WebRTC\n")
+                    elif pc.connectionState in ("failed", "closed", "disconnected"):
                         _bridge["q"] = None   # 99:桥断→下行回 ws(前端同步回退,双侧一致)
                         _bridge["pend"] = b""
                         sys.stderr.write("[voice-oa] 桥断开,音频回退 ws\n")
