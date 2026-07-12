@@ -1983,9 +1983,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     tool_cache.clear()   # 写操作成功=便签/高亮/生词等状态变了,粗粒度域失效(审核 P1:revision 的保守替身)
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
-        stale = (epoch["n"] != ep0)   # 审核P0#2:工具跑着的时候用户开了新话轮——旧结果不抢话
+        stale = (epoch["n"] != ep0)   # 审核P0#2:工具跑着的时候用户开了新话轮——旧结果不抢话(不 create)
         if stale and readonly:
-            out = "(该工具结果已过期:用户在等待期间开始了新话题。如仍需要请重新调用工具。)"
+            # 71(用户截图实锤):杂音被 VAD 当新话轮→正当结果被整个作废,而卡片其实已显示=模型说"没查到"用户却看着卡。
+            # 改降级:结果概况照给,模型自己判断上一句是真换话题还是杂音/等待(它有对话上下文,程序判不了这个)
+            out = ("(结果已生成" + ("、卡片已显示给用户" if "client_action" in out or "卡片" in out else "") +
+                   ",但期间有新的语音输入打断。结果概况:" + out[:500] +
+                   "——若用户上一句其实是在等这个结果(或只是杂音/无关短语),直接据此回答;若确实换了新话题,忽略本条。)")
             vis = None
         try:
             if vis and not stale and _creds().get("rt_image"):
