@@ -980,6 +980,12 @@
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     try {
       setSt('连接中(WebRTC)…');
+      _connecting = true;
+      // ㉑铁律(WS 版 start() 同款舞步,rtcStart 之前漏了=挂断后重拨 getUserMedia 必死的根因):
+      // 挂断/朗读会把 iOS 音频会话切回 'playback'(该类别**静音麦克风**)——开麦前必须先撂下朗读通道
+      // 再显式声明 play-and-record,否则第一次通话能成、之后每次都"启动失败"
+      try { await _ttsShutdown(); } catch (e) {}
+      _audioSession('play-and-record');
       var _vt0 = '';   // ㉟b:开话初始上下文也用动态视口文本(EPUB;PDF 的 getContext 无此字段=空,后端走页文本)
       try { _vt0 = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
       var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1021,13 +1027,15 @@
       _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
+      _connecting = false;
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
       _userHung = false; _acquireWL();
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
       capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
       _refreshSpeakTg();
     } catch (ex) {
-      setSt('WebRTC 启动失败: ' + String(ex.message || ex).slice(0, 80));
+      _connecting = false;
+      setSt('WebRTC 启动失败: ' + String(ex.name || '') + ' ' + String(ex.message || ex).slice(0, 80));
       rtcTeardown();
       ws = null; callBtnOn(false); callBtnSpeaking(false);   // 状态复位:按钮/shim 不残留假活
     }
