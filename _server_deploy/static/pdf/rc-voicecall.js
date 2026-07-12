@@ -857,6 +857,8 @@
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
       return;
     }
+    _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
+    if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
     onToolStatus({ status: 'running', label: name });
     var out = '', ok = true, label = name, took = null, argsUsed = args;
     try {
@@ -973,6 +975,11 @@
             if (u) {
               u._model = _rtc.model || 'mini';   // ㊶:记账按模型选价表
               fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true });
+              // ㊷ §12 告警:会话接近 60 分钟硬上限(到点 OpenAI 断线,_rtcDead 会自动重连+摘要回放,但提前知会更体面)
+              if (!_rtc.warned && _rtc.t0 && Date.now() - _rtc.t0 > 55 * 60000) {
+                _rtc.warned = 1;
+                try { threadMsg('asst-note', '⏳ 本次通话已近 60 分钟(平台单会话上限),到点会自动重连并带上对话摘要。'); } catch (e2) {}
+              }
               _rtc.inTok = u.input_tokens || 0;   // ㊳ 实时监控:本轮输入总量(cached 也按 cached 价反复计费)
               if (_rtc.compactTh && _rtc.inTok >= _rtc.compactTh) _rtcCompactNow();
             } } catch (_) {}
@@ -1069,6 +1076,7 @@
       _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
+      _rtc.t0 = Date.now(); _rtc.toolN = 0; _rtc.warned = 0;   // ㊷ §12/§13:会话时长与工具调用护栏计数
       _connecting = false;
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
       _userHung = false; _acquireWL();
