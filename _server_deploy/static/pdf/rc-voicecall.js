@@ -208,6 +208,12 @@
       '.vc-ig-cell.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.9)}' +
       '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
       '.vc-ig-t{font-size:10.5px;color:#9fb0cf;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.vc-vg-wrap{position:relative}' +
+      '.vc-vg-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;border:none;' +
+      'background:rgba(0,0,0,.6);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2}' +
+      '.vc-vg-tag{position:absolute;top:4px;left:4px;z-index:2;font-size:9px;padding:1px 5px;border-radius:5px;background:#c00;color:#fff}' +
+      '.vc-vg-tag.bili{background:#fb7299}' +
+      '.vc-vg-ch{color:#7d8db0;font-size:9.5px}' +
       '.vc-ig-x{position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;' +
       'font-size:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;z-index:2}' +
       '.vc-if-fa{font-size:15px;font-weight:600}' +
@@ -534,7 +540,7 @@
 
   // ── client_action 派发:relay 意图旁路的页面控制指令在**阅读器环境**执行 ──
   function dispatch(fn, args) {
-    if (fn === 'renderVideos') { renderVids((args || [[]])[0] || []); return; }
+    if (fn === 'renderVideos') { renderVids((args || [[]])[0] || [], (args || [])[1]); return; }
     if (fn === 'renderImages') { renderImgs((args || [[]])[0] || []); return; }
     if (fn === 'renderInfoCard') { renderInfo((args || [{}])[0] || {}); return; }
     try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
@@ -561,6 +567,15 @@
           '<img class="vc-ig-img" data-i="' + i + '" src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
           (it.title ? '<div class="vc-ig-t">' + esc(it.title) + '</div>' : '') + '</div>';
       }).join('') + '</div>';
+    } else if (k === 'videos') {
+      h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
+        return '<div class="vc-ig-cell" data-i="' + i + '">' +
+          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
+          '<span class="vc-vg-tag' + (it.src === 'bili' ? ' bili' : '') + '">' + (it.src === 'bili' ? 'B站' : 'YouTube') + '</span>' +
+          '<div class="vc-vg-wrap"><img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.thumb || '') + '" alt="">' +
+          '<button type="button" class="vc-vg-play" data-i="' + i + '" aria-label="播放">▶</button></div>' +
+          '<div class="vc-ig-t">' + esc(it.title || '') + (it.channel ? '<br><span class="vc-vg-ch">' + esc(it.channel) + '</span>' : '') + '</div></div>';
+      }).join('') + '</div>';
     } else if (k === 'fact') {
       h = '<div class="vc-if-f"><div class="vc-if-fa">' + e0(d.answer) + '</div>' +
           (d.detail ? '<div class="vc-if-fd">' + e0(d.detail) + '</div>' : '') + '</div>';
@@ -580,6 +595,7 @@
     if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
     if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).map(function (it) { return (it.title || '图') + ' ' + (it.url || ''); }).join(';');
+    if (k === 'videos') return (card.title || '视频') + ':' + (d.items || []).map(function (it) { return (it.title || '') + '(' + (it.channel || '') + ')' + (it.url || ''); }).join(';');
     return d.text || card.brief || card.title || '';
   }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
@@ -649,8 +665,20 @@
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
-  function _igWire(root, card) {   // 88:图卡交互——每图右上✕移除;点图=只选中这一张(带入上下文,再点取消)
-    if (!card || card.kind !== 'images') return;
+  function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
+    if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
+    root.addEventListener('click', function (ev) {
+      var pb = ev.target.closest && ev.target.closest('.vc-vg-play');
+      if (pb) {   // 98:播放钮=原播放行为(浮动播放器/新窗),不参与选中
+        ev.stopPropagation();
+        var ip = +pb.getAttribute('data-i');
+        var vt = ((card.data || {}).items || [])[ip] || {};
+        try {
+          if (window.RC && RC.videoPlayer) RC.videoPlayer.open({ id: vt.id, src: vt.src === 'bili' ? 'bili' : 'yt', title: vt.title });
+          else window.open(vt.url || '', '_blank');
+        } catch (e) {}
+      }
+    });
     root.addEventListener('click', function (ev) {
       var x = ev.target.closest('.vc-ig-x');
       if (x) {
@@ -680,9 +708,9 @@
             return;
           }
           cell1.classList.add('vc-picked');
-          var lb = (it.title || '配图') + '·图' + (i1 + 1);
+          var lb = (it.title || (card.kind === 'videos' ? '视频' : '配图')) + (card.kind === 'videos' ? '·视频' : '·图') + (i1 + 1);
           cell1.dataset.pinLabel = lb; cell1.dataset.vcCid = gcid;
-          _pins.map[lb] = ((it.title || '') + ' ' + (it.url || '')).slice(0, 500);
+          _pins.map[lb] = ((it.title || '') + (it.channel ? '(' + it.channel + ')' : '') + ' ' + (it.url || '')).slice(0, 500);
           _pins.els[lb] = cell1;
           _pins.cids[gcid] = lb;
         }
@@ -698,6 +726,7 @@
     d.innerHTML = html;
     _pinBind(d, label, function () { return _infoText(card); });
     var _srcs = '';
+    if (card.kind === 'videos') _srcs = ((card.data || {}).q || '') || '未记录(旧卡片)';   // 98:视频溯源=两源搜索词
     if (card.kind === 'images') {   // 88/90:溯源——每张图哪个源哪个词命中;源名映射可读,绝不显示问号
       var SRC_NAME = { commons: '维基共享(Commons)', google: 'Google 图搜', openai: 'OpenAI 搜索', gemini: 'Gemini' };
       var seenS = {};
@@ -708,7 +737,7 @@
       }).filter(Boolean).join(' · ') || '未记录(旧卡片)';
     }
     try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined,
-      actions: (card.kind === 'images' ? ['img_norm'] : ['web_search']) }); } catch (e) {}
+      actions: (card.kind === 'images' ? ['img_norm'] : card.kind === 'videos' ? ['pick_video'] : ['web_search']) }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
     try { d.dataset.vcCid = card.cid; } catch (e) {}   // 95:同卡编号(与浮层镜像实例共享)
@@ -744,26 +773,17 @@
       }) }
     });
   }
-  function renderVids(vids) {
+  function renderVids(vids, meta) {   // 98(用户设计):视频升格结构卡(kind:'videos')走 renderInfo 全管线——对话流+浮层同款、✕/单选/播放、落库回放、溯源
     if (!vids || !vids.length) return;
-    // 优先落侧栏对话流:状态气泡改文案 + rc-video 的 renderVideos 把可播放卡插在它后面(最后一个 asst-a)
-    var th = document.getElementById('asst-thread');
-    if (th) {   // 视频结果是**内容**(非通知),照旧进侧栏:先建承载气泡,rc-video 把可播放卡插它后面
-      threadMsg('asst-a', '给你找到了 ' + vids.length + ' 个相关视频:');
-      try { if (window.renderVideos) window.renderVideos(vids); } catch (e) {}
-      if (box && box.classList.contains('vc-inline')) { setSt('通话中'); return; }   // 内嵌模式不再重复渲染小横条
-    }
-    if (!box) return;
-    var host = box.querySelector('.vc-vids'); host.innerHTML = '';
-    vids.forEach(function (v) {
-      var d = document.createElement('div'); d.className = 'vc-vid';
-      d.innerHTML = '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(v.thumb || '') + '"><div>' + esc(v.title || '') + '</div>';
-      d.addEventListener('click', function () {
+    renderInfo({
+      kind: 'videos', title: '相关视频 × ' + vids.length,
+      brief: vids.map(function (v) { return v.title || ''; }).filter(Boolean).slice(0, 4).join('、').slice(0, 120),
+      data: { q: (meta && meta.q) || '', items: vids.map(function (v) {
         var bili = (v.src === 'bili' || /^BV[0-9A-Za-z]{10}/.test(v.id || ''));
-        if (window.RC && RC.videoPlayer) RC.videoPlayer.open({ id: v.id, src: (bili ? 'bili' : 'yt'), title: v.title });
-        else window.open((bili ? 'https://www.bilibili.com/video/' : 'https://www.youtube.com/watch?v=') + encodeURIComponent(v.id), '_blank');
-      });
-      host.appendChild(d);
+        return { id: v.id || '', title: v.title || '', channel: v.channel || '', thumb: v.thumb || '',
+                 src: bili ? 'bili' : 'yt',
+                 url: (bili ? 'https://www.bilibili.com/video/' : 'https://www.youtube.com/watch?v=') + encodeURIComponent(v.id || '') };
+      }) }
     });
   }
 

@@ -1376,9 +1376,13 @@ def _t_translate(args, ctx):
 
 def _t_goto_page(args, ctx):
     try:
-        n = int(args.get("page"))   # AI/用户给的是**印刷页码**
+        # 100:参数名别名兼容(Grok 实测传 page_number → 报错 → 模型重试风暴;68 批 read_page pages 同款教训)
+        _pv = args.get("page")
+        if _pv is None:
+            _pv = args.get("page_number", args.get("pageNumber", args.get("p")))
+        n = int(_pv)   # AI/用户给的是**印刷页码**
     except (TypeError, ValueError):
-        return {"error": "page 不是数字"}
+        return {"error": "page 不是数字(参数名用 page)"}
     pdf_n = _to_pdf(ctx, n)         # 转成 PDF 页索引再跳(jumpWithBack 收 PDF 页)
     return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "jumpWithBack", "args": [pdf_n]}}
 
@@ -1834,7 +1838,7 @@ def _t_search_video(args, ctx):
             # 只把标题/频道/来源回给 agent(省 token;id/缩略图只给前端渲染,别进模型上下文)
             "videos": [{"title": v.get("title", ""), "channel": v.get("channel", ""),
                         "source": ("B站" if v.get("src") == "bili" else "YouTube")} for v in vids],
-            "client_action": {"fn": "renderVideos", "args": [vids]},
+            "client_action": {"fn": "renderVideos", "args": [vids, {"q": f"YT「{yt_q}」/ B站「{bili_q}」"}]},
             "_gen_model": _mdl, "_gen_action": "pick_video",
             # 相关性筛选单独占「!」一行(独立子步骤),点开看两源各搜到/保留了哪些
             "_sub_steps": [{"label": "搜索+筛选视频(YT+B站)", "model": _mdl, "action": "pick_video",
@@ -4578,6 +4582,11 @@ def assistant_voice_tool():
         res["client_action"] = {"fn": "renderImages", "args": [res["images"]]}
         # 89(用户设计):配图与搜索同构静默入库——卡片已显示,回填只带概况;是否放行口头回报由 rt_tool_reply 开关定(relay/前端 gate)
         res["silent"] = True
+    if isinstance(res, dict) and res.get("ok") and name == "search_video" and res.get("videos"):
+        # 98(用户设计):视频与配图/搜索统一静默——卡片已显示,2.1 本轮不发言("给你找到6个视频…请自行点击"式废话轮=没静默的产物)
+        res["silent"] = True
+        res["_note"] = ("视频已用卡片显示在用户屏幕上(" + "、".join([v0.get("title", "")[:24] for v0 in res["videos"][:4]]) +
+                        ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动复述标题。")
         res["_note"] = ("图片已用卡片显示在用户屏幕上(含:" +
                         "、".join([i0.get("concept") or "图" for i0 in res.get("images", [])][:6]) +
                         ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动描述图片内容。")

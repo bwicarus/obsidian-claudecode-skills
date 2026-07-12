@@ -1384,7 +1384,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         if cred.get("rt_lang") in ("zh", "ja", "en"):
             _gtr["language_hint"] = cred["rt_lang"]
         sess["audio"]["input"]["transcription"] = _gtr
-        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad"}   # xAI 无 semantic_vad;threshold 默认 .85
+        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad", "threshold": 0.5}   # xAI 无 semantic_vad;默认 .85 偏钝(耳机麦轻声不触发="听不到我说话"),降到 OpenAI 同款 0.5
         sess["audio"]["output"].pop("voice", None)
         sess["voice"] = cred.get("rt_grok_voice") or "eve"   # 97a:官方形制=session 顶层(94 放 audio.output 无效,一直是默认 eve)
         try:
@@ -1400,6 +1400,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         await bws.send(json.dumps({"event": -1, "payload": {"error": f"OpenAI 连接失败:{str(ex)[:80]}"}}, ensure_ascii=False))
         await bws.close()
         return
+    _bridge = {"pc": None, "q": None, "pend": b""}   # 99 WebRTC 桥(纯音频面);q=None=未建(ws 音频照旧)
+    _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
     pend_trunc = {"id": None, "fb": 0}  # 打断后待 truncate:等前端回报**真实已播毫秒**(600ms 兜底用已转发字节——它远超实际已播,官方语义是"用户实际听到的毫秒")
     cur_a = {"txt": ""}
@@ -1454,10 +1456,22 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     out += "\n(该工具产出了图像,但「图像输入」开关未开,只能按上面的文本回答;要看图请让用户在语音设置里打开图像输入)"
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
+        # 100(Grok 实测 goto_page 错参无限重试):同名同参连续失败=熔断。≥3 换强提示;≥6 不 create 硬断循环(用户说话重启)
+        _tk = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True)[:120]
+        if not ok:
+            _tfail["n"] = _tfail["n"] + 1 if _tfail["key"] == _tk else 1
+            _tfail["key"] = _tk
+        else:
+            _tfail["key"], _tfail["n"] = "", 0
+        if not ok and _tfail["n"] >= 3:
+            out = json.dumps({"error": "这个工具已连续失败多次,系统已熔断。**禁止再调用它**——直接告诉用户『这个操作暂时做不了』,然后安静等用户说话。"}, ensure_ascii=False)
         try:
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id, "output": out}}))
-            await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
+            if not ok and _tfail["n"] >= 6:
+                sys.stderr.write(f"[voice-oa] 工具熔断硬断: {_tk[:80]} ×{_tfail['n']}\n")
+            else:
+                await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
         except Exception:
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {
@@ -1468,16 +1482,56 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
     async def up():
         abuf = bytearray()   # 攒 100ms 再 append(前端 20ms/帧 → 50 msg/s 太碎;24k·16bit·100ms=4800B)
+
+        async def _feed_audio(chunk):
+            abuf.extend(chunk)
+            if len(abuf) >= 4800:
+                try:
+                    await ows.send(json.dumps({"type": "input_audio_buffer.append",
+                                               "audio": base64.b64encode(bytes(abuf)).decode()}))
+                except Exception:
+                    return
+                abuf.clear()
+
+        async def _bridge_setup(sdp):
+            """99(用户设计):Pi 上的 WebRTC 桥——浏览器媒体走 WebRTC(<audio> 播放=浏览器 AEC 参考,
+            外放回声治本,同 #280 原理),Pi 侧转回引擎 WS。纯音频面:事件/字幕/控制照旧走本 ws。"""
+            try:
+                import av
+                from aiortc import RTCPeerConnection, RTCSessionDescription
+                pc = RTCPeerConnection()
+                _bridge["pc"] = pc
+                q = asyncio.Queue(maxsize=600)   # ~12s 音频缓冲上限(防泄漏;满了丢最旧)
+                _bridge["q"] = q
+
+                @pc.on("track")
+                def _on_track(track):
+                    async def _pump():
+                        resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
+                        while True:
+                            try:
+                                frame = await track.recv()
+                            except Exception:
+                                break
+                            try:
+                                for f2 in resampler.resample(frame):
+                                    await _feed_audio(bytes(f2.planes[0]))
+                            except Exception:
+                                pass
+                    asyncio.create_task(_pump())
+
+                pc.addTrack(_mk_bridge_track(q))
+                await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+                await pc.setLocalDescription(await pc.createAnswer())
+                await bws.send(json.dumps({"event": "bridge_answer", "payload": {"sdp": pc.localDescription.sdp}}, ensure_ascii=False))
+                sys.stderr.write("[voice-oa] 桥已建(WebRTC 音频面)\n")
+            except Exception as ex:
+                _bridge["q"] = None
+                sys.stderr.write(f"[voice-oa] 桥建立失败(前端将回退 ws 音频): {str(ex)[:120]}\n")
+
         async for msg in bws:
             if isinstance(msg, (bytes, bytearray)):
-                abuf.extend(msg)
-                if len(abuf) >= 4800:
-                    try:
-                        await ows.send(json.dumps({"type": "input_audio_buffer.append",
-                                                   "audio": base64.b64encode(bytes(abuf)).decode()}))
-                    except Exception:
-                        return
-                    abuf.clear()
+                await _feed_audio(msg)
                 continue
             try:
                 j = json.loads(msg)
@@ -1486,6 +1540,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             t = j.get("type")
             if t == "finish":
                 return
+            if t == "bridge_offer":   # 99:WebRTC 桥信令(纯音频面)
+                asyncio.create_task(_bridge_setup(j.get("sdp") or ""))
+                continue
             if t == "played_ms":   # 打断时前端回报的真实已播毫秒 → 精确 truncate(官方语义)
                 pid = pend_trunc.get("id")
                 if pid:
@@ -1589,12 +1646,32 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     continue
                 played["id"] = e.get("item_id") or played["id"]
                 played["bytes"] += len(pcm)
-                await bws.send(pcm)   # PCM16 24k 裸转发,前端 playPcm 原样吃
+                if _bridge["q"] is not None:   # 99:桥模式=音频改道 WebRTC 轨(960B=20ms 定长块),ws 不再发 binary
+                    _bridge["pend"] += pcm
+                    while len(_bridge["pend"]) >= 960:
+                        try:
+                            _bridge["q"].put_nowait(_bridge["pend"][:960])
+                        except asyncio.QueueFull:
+                            try:
+                                _bridge["q"].get_nowait()
+                                _bridge["q"].put_nowait(_bridge["pend"][:960])
+                            except Exception:
+                                pass
+                        _bridge["pend"] = _bridge["pend"][960:]
+                else:
+                    await bws.send(pcm)   # PCM16 24k 裸转发,前端 playPcm 原样吃
             elif t == "response.output_audio_transcript.delta":
                 d0 = e.get("delta") or ""
                 cur_a["txt"] += d0
                 await bws.send(json.dumps({"event": 550, "payload": {"content": d0}}, ensure_ascii=False))
             elif t == "input_audio_buffer.speech_started":
+                if _bridge["q"] is not None:   # 99:桥模式打断=清桥缓冲(未播的丢弃)
+                    _bridge["pend"] = b""
+                    try:
+                        while True:
+                            _bridge["q"].get_nowait()
+                    except Exception:
+                        pass
                 await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))   # 前端清播放队列+回报已播毫秒
                 if played["id"]:
                     pend_trunc["id"], pend_trunc["fb"] = played["id"], int(played["bytes"] / 48)
@@ -1700,6 +1777,11 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     except Exception as ex:
         sys.stderr.write(f"[voice-oa] {ex}\n")
     finally:
+        try:
+            if _bridge.get("pc"):
+                await _bridge["pc"].close()   # 99:会话结束随手关桥
+        except Exception:
+            pass
         for w in (ows, bws):
             try:
                 await w.close()
@@ -1831,6 +1913,45 @@ OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 _RTC_CTL_LIVE = {}   # 93:uid → 最近挂上的 call_id(双 call 并存取证)
 
 
+def _mk_bridge_track(q):
+    """99 WebRTC 桥出向音轨:24k mono s16,20ms/帧实时 pacing(照 aiortc AudioStreamTrack 模式);
+    队列(元素=960B 定长块)空时发静音——track 必须持续出帧,否则浏览器侧断流。"""
+    import fractions
+    import time as _tm
+
+    import av
+    from aiortc.mediastreams import MediaStreamTrack
+
+    class _T(MediaStreamTrack):
+        kind = "audio"
+
+        def __init__(self):
+            super().__init__()
+            self._start = None
+            self._ts = 0
+
+        async def recv(self):
+            if self._start is None:
+                self._start = _tm.time()
+            else:
+                wait = self._start + self._ts / 24000 - _tm.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            try:
+                buf = q.get_nowait()
+            except asyncio.QueueEmpty:
+                buf = b"\x00" * 960
+            frame = av.AudioFrame(format="s16", layout="mono", samples=480)
+            frame.planes[0].update(buf)
+            frame.sample_rate = 24000
+            frame.pts = self._ts
+            frame.time_base = fractions.Fraction(1, 24000)
+            self._ts += 480
+            return frame
+
+    return _T()
+
+
 async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
     """㊺P2 RtcController:sideband 控制面接管**工具执行**(唯一执行者)——
     复用 handle_openai._tool 语义:voice-tool 执行/client_action+tool_status 经控制 WS 下行/
@@ -1951,6 +2072,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             await bws.send(json.dumps({"event": "route_text", "payload": {"done": True, "text": full}}, ensure_ascii=False))
         return full, brief, ("" if full else (err or "空结果"))
 
+    _tfail_r = {"key": "", "n": 0}   # 100:RTC 版工具熔断(同 WS 版)
+
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": _lbl0}}, ensure_ascii=False))
@@ -2070,9 +2193,20 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 out += "\n(相关图像已直接发给你,请看图回答)"
             elif vis and not stale:
                 out += "\n(该工具产出了图像,但「图像输入」开关未开,只能按文本回答)"
+            # 100:RTC 版工具熔断(同 WS 版——同名同参连续失败≥3 强提示;≥6 不 create 硬断循环)
+            _tk2 = name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True)[:120]
+            if not ok:
+                _tfail_r["n"] = _tfail_r["n"] + 1 if _tfail_r["key"] == _tk2 else 1
+                _tfail_r["key"] = _tk2
+            else:
+                _tfail_r["key"], _tfail_r["n"] = "", 0
+            if not ok and _tfail_r["n"] >= 3:
+                out = json.dumps({"error": "这个工具已连续失败多次,系统已熔断。**禁止再调用它**——直接告诉用户『这个操作暂时做不了』,然后安静等用户说话。"}, ensure_ascii=False)
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id2, "output": out}}))
-            if not stale and not no_create:
+            if not ok and _tfail_r["n"] >= 6:
+                sys.stderr.write(f"[rtc-ctl] 工具熔断硬断: {_tk2[:80]} ×{_tfail_r['n']}\n")
+            elif not stale and not no_create:
                 await ows.send(json.dumps(_resp_create(readonly and len(out) > 800)))
         except Exception:
             pass

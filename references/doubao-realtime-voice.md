@@ -714,3 +714,13 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **97d TTS 播放钮全状态可停**(用户设计):busy(生成中)再点=`__vcTtsStop`(bargeIn:清本地队列+作废 relay 侧合成)→ capture 检测无播放自然收尾→blob 过小丢弃不入库;playing 再点=停(已有)。
 
+## 批次 98-100(2026-07-13)视频卡统一 + Grok 首战修复 + WebRTC 桥(relay 端)
+
+**98 视频结构卡**(用户:"参照图片的搜索卡片"):`renderVids` 重构=`kind:'videos'` 走 renderInfo 全管线(对话流+浮层同款/✕/单选带入/▶播放钮独立不选中/落库回放/「!」溯源=两源搜索词+pick_video 环节直改);search_video 静默(silent,与配图/搜索统一——"给你找到6个视频请自行点击"式废话轮=没静默的产物);`_bubDecor` 弱化:普通回复的整行「AI 回答」标题条退役→右上角小 ⠿ 把手(拖收藏保留,长按带入在气泡本体)——治"2.1 的回复被当成卡片"的视觉混淆,**只有真正的结构卡才有标题条**。
+
+**100 Grok 首战两 bug**(用户戴耳机实测截图):
+- **goto_page 无限重试风暴**:宽松 schema(properties 空)下参数名全靠模型猜——Grok 猜 `page_number`(我们要 `page`)→error→模型看到错误再调→几十连发。修:①goto_page 参数别名(page_number/pageNumber/p,68 批 read_page 同款教训);②**工具熔断**(WS+RTC 双版):同名同参连续失败≥3=回填熔断强提示「禁止再调用」;≥6=不再 response.create 硬断循环(用户说话重启)。
+- **"你听不到我说话吗"**:xAI server_vad 默认 threshold 0.85 偏钝(耳机麦轻声不触发)→降 0.5(OpenAI 同款)。
+
+**99 WebRTC 桥(外放回声治本,relay 端已落)**:实测 xAI `/v1/realtime/calls` 返回 403"Team is not authorized"(端点存在=灰度中,我们无权限)→按用户设计在 Pi 架桥。**纯音频面**:浏览器⇄aiortc(Pi)WebRTC(<audio> 播放=浏览器 AEC 参考,同 #280 原理),Pi 侧转引擎 WS;事件/字幕/控制照旧走现有 ws。relay 端已实装(handle_openai 内):`bridge_offer` 信令→aiortc pc(非 trickle,Tailscale 内 host candidates 直连);入向 track→AudioResampler 24k mono→`_feed_audio`(与 ws binary 同路);出向 `response.output_audio.delta`→960B 定长块队列→`_mk_bridge_track`(20ms 实时 pacing,空发静音);speech_started 清桥缓冲;finally 关 pc;建桥失败=前端回退 ws 音频。**前端未接**(bridge_offer 发送/pc 建立/ontrack 播放/耳机检测自动分流/设置三态)=下一批,aiortc 1.14.0 已装 mcp-venv。边界:v1 只挂 GPT-WS/Grok 引擎,豆包(binary 协议+16k)二期。
+

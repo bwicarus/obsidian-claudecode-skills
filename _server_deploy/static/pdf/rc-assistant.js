@@ -773,6 +773,7 @@
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +
+    '.vc-bub-grip{position:absolute;top:5px;right:7px;color:#4a5a7d;font-size:11px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;padding:2px 4px}' +
     '.ams-tabs{display:flex;gap:6px;margin:2px 0 10px}' +
     '.ams-tab{flex:1;padding:7px 0;border-radius:9px;border:1px solid #2a3550;background:transparent;color:#8a9bb4;font-size:12.5px;cursor:pointer}' +
     '.ams-tab.on{background:#233150;color:#cfe0ff;border-color:#3a4f7f;font-weight:600}' +
@@ -2247,11 +2248,13 @@
   }
   // ── 87:气泡装饰(标题整行把手,voiceMsg 实时与 loadHistory 回放共用——"消息记录中的卡片永远是卡片")──
   function _bubDecor(el, label, textFn) {
-    if (!el || !label || !textFn || el.querySelector(':scope > .vc-bub-hd')) return;
-    var hd0 = document.createElement('div'); hd0.className = 'vc-bub-hd';
-    hd0.innerHTML = '<span class="vc-bub-t">' + esc(label) + '</span><span class="vc-grip">⠿</span>';
-    hd0.title = '按住此栏拖到屏幕底边=收入收藏夹;长按气泡=带入对话';
-    el.insertBefore(hd0, el.firstChild);
+    // 98(用户反馈"2.1 的回复被当成了卡片"):普通回复**不再**披卡片外观——整行标题条退役,
+    // 改右上角弱化小把手(拖收藏功能保留);长按带入在气泡本体照旧。只有真正的结构卡才有标题条。
+    if (!el || !label || !textFn || el.querySelector(':scope > .vc-bub-grip')) return;
+    el.style.position = 'relative';
+    var g0 = document.createElement('span'); g0.className = 'vc-bub-grip'; g0.textContent = '⠿';
+    g0.title = '按住拖到屏幕底边=收入收藏夹;长按气泡=带入对话';
+    el.insertBefore(g0, el.firstChild);
     try {
       if (window.__vcDragToDock) window.__vcDragToDock(el, function () { var t0 = textFn(); return { label: label, raw: t0, isHtml: false, text: String(t0).slice(0, 4000) }; });
       if (window.__vcPinBind) window.__vcPinBind(el, label, textFn);
