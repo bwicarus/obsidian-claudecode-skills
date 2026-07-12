@@ -1570,12 +1570,16 @@
 
   // ㉟ 共享位置/选中同步:宿主没提供 __vcSyncNow(PDF reader 的 21-misc-ai 有自己的 2s 轮询)时,
   //    共享层自建——经 RC.adapter().getContext() 拿位置(EPUB=section idx+1 当 page)与选中,变化才推。
+  var _vtLast = null;
   setInterval(function () {
     if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
     try {
       var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
       var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
-      if (pg) setPage(pg, String(c.visible_text || '').slice(0, 2000));   // ㉟b:EPUB 带动态视口文本(用户实际在看的内容)
+      var vt2 = String(c.visible_text || '').slice(0, 2000);
+      var vfp = vt2 ? (vt2.length + ':' + vt2.slice(0, 40)) : '';
+      var stable = (vfp === _vtLast); _vtLast = vfp;   // 缓存优化:滚动中每条视口注入都是全价新增——停稳(连续两拍不变)才推
+      if (pg && (stable || pg !== ((toggle._opts || {}).page || 0))) setPage(pg, stable ? vt2 : undefined);
       syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
     } catch (e) {}
   }, 2000);
