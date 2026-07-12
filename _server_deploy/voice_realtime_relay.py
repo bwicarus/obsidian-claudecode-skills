@@ -1514,9 +1514,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             except Exception:
                 return 9999.0
 
-        async def _grok_turn_end():   # 111:本地判定说完→补 0.5s 尾静音(转写收尾)→flush→commit+response.create→停止上传
-            _vg["active"] = False
-            sys.stderr.write("[grok-diag] turn_end(本地VAD判说完)\n")
+        async def _grok_commit():   # 116:真提交(延迟窗到期)——补尾静音→flush→commit+create
+            _vg["endT"] = None
+            sys.stderr.write("[grok-diag] turn_end(延迟窗到期,提交)\n")
             abuf.extend(b"\x00" * 24000)   # 0.5s @24k16bit
             if abuf:
                 try:
@@ -1528,9 +1528,17 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             try:
                 await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
                 await ows.send(json.dumps({"type": "response.create"}))
-                sys.stderr.write("[grok-diag] create(turn_end)\n")   # 115:双响应取证
+                _vg["pend_resp"] = True   # 116:create 已发但 response.created 未到的竞态窗(打断要覆盖它)
+                sys.stderr.write("[grok-diag] create(turn_end)\n")
             except Exception:
                 pass
+
+        async def _grok_end_timer():   # 116:说完≠立即提交——450ms 反悔窗,句中停顿回来=取消提交继续同轮
+            try:
+                await asyncio.sleep(0.45)
+            except asyncio.CancelledError:
+                return
+            await _grok_commit()
 
         async def _grok_turn_start():   # 111:本地判定开口——打断进行中的响应+前端清播放+话轮计数/焚图(原 speech_started 职责)
             _vg["active"] = True
@@ -1547,11 +1555,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     _gk["items"] = _gk.get("items", 0) + 1
                 except Exception:
                     pass
-            if _vg["busy"]:
+            if _vg["busy"] or _vg.get("pend_resp"):   # 116:create 已发但 created 未到的窗口也要打断(旧响应照跑=双答来源之一)
                 try:
                     await ows.send(json.dumps({"type": "response.cancel"}))
                 except Exception:
                     pass
+                _vg["pend_resp"] = False
             try:
                 await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))
             except Exception:
@@ -1574,23 +1583,31 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             _img_items[:] = _keep
 
         async def _feed_audio(chunk):
-            if engine == "grok":   # 111(用户设计):本地 VAD 全权判轮次——说话才上传(静音 PCM 也按 $0.05/min 计费)
+            if engine == "grok":   # 111/116:本地 VAD 判轮次+450ms 延迟提交(句中喘气不切轮="一句话答好几遍"根修)
                 _nw = _tm2.time()
-                if _rms(chunk) > 350:
+                _voiced = _rms(chunk) > 350
+                if _voiced:
                     _vg["last"] = _nw
                 if not _vg["active"]:
-                    if _nw - _vg["last"] < 0.1:   # 刚检测到人声=开口
-                        await _grok_turn_start()
-                        for c0 in _vg["pre"]:   # 预滚补发,句首不丢
+                    if _voiced:
+                        if _vg.get("endT"):   # 反悔窗内回来了:撤销提交,同轮继续(不 turn_start=不 cancel 不焚图)
+                            _vg["endT"].cancel()
+                            _vg["endT"] = None
+                            sys.stderr.write("[grok-diag] 句中停顿回归,同轮继续\n")
+                        else:
+                            await _grok_turn_start()
+                        _vg["active"] = True
+                        for c0 in _vg["pre"]:   # 预滚补发,句首不丢(反悔窗期间的静音帧也在 pre,音频连续)
                             abuf.extend(c0)
                         _vg["pre"].clear()
                     else:
                         _vg["pre"].append(bytes(chunk))
                         return
                 else:
-                    if _nw - _vg["last"] > 0.8:   # 说完(800ms hangover)
+                    if _nw - _vg["last"] > 0.8:   # 800ms hangover 判"疑似说完"
                         await _feed_audio_raw(chunk)
-                        await _grok_turn_end()
+                        _vg["active"] = False
+                        _vg["endT"] = asyncio.create_task(_grok_end_timer())
                         return
             await _feed_audio_raw(chunk)
 
@@ -1880,6 +1897,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
             elif t == "response.created":
                 _vg["busy"] = True
+                _vg["pend_resp"] = False
                 if engine == "grok":
                     sys.stderr.write("[grok-diag] response.created\n")
             elif t == "response.done":
