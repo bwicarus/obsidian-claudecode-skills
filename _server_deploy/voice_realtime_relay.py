@@ -1404,6 +1404,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
     _tr_done = set()   # 101:转写 completed 去重(xAI 同轮多发)
     _turn = {"n": 0}   # 104:话轮计数(图像焚旧参照)
+    _gk = {"t0": time.time(), "in_b": 0, "out_b": 0}   # 110:grok 自记账(推送/接收音频字节+连接时长)
     _img_items = []    # 104:(turn, item_id) 直喂图记账
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
     pend_trunc = {"id": None, "fb": 0}  # 打断后待 truncate:等前端回报**真实已播毫秒**(600ms 兜底用已转发字节——它远超实际已播,官方语义是"用户实际听到的毫秒")
@@ -1516,6 +1517,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             await _feed_audio_raw(chunk)
 
         async def _feed_audio_raw(chunk):
+            if engine == "grok":
+                _gk["in_b"] += len(chunk)
             abuf.extend(chunk)
             if len(abuf) >= 4800:
                 try:
@@ -1693,6 +1696,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     continue
                 played["id"] = e.get("item_id") or played["id"]
                 played["bytes"] += len(pcm)
+                if engine == "grok":
+                    _gk["out_b"] += len(pcm)   # 110:接收音频记账
                 if _bridge["q"] is not None:   # 99:桥模式=音频改道 WebRTC 轨(960B=20ms 定长块),ws 不再发 binary
                     _bridge["pend"] += pcm
                     while len(_bridge["pend"]) >= 960:
@@ -1833,6 +1838,22 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     except Exception as ex:
         sys.stderr.write(f"[voice-oa] {ex}\n")
     finally:
+        if engine == "grok":
+            try:   # 110:grok 会话账单(两种口径各估一笔,与 console 实际扣费对照即知计费口径)
+                _cm = (time.time() - _gk["t0"]) / 60.0
+                _am = (_gk["in_b"] + _gk["out_b"]) / 48000.0 / 60.0   # 24k·16bit=48000B/s
+                _rec = {"ts": int(time.time()), "conn_min": round(_cm, 2), "audio_min": round(_am, 2),
+                        "est_by_audio_usd": round(_am * 0.05, 4), "est_by_conn_usd": round(_cm * 0.05, 4)}
+                _gp = Path("/home/bwicarus/claude/state/grok-usage.json")
+                try:
+                    _gd = json.loads(_gp.read_text("utf-8"))
+                except Exception:
+                    _gd = []
+                _gd.append(_rec)
+                _gp.write_text(json.dumps(_gd[-500:], ensure_ascii=False, indent=1), "utf-8")
+                sys.stderr.write(f"[grok-usage] 连接{_cm:.1f}min 音频{_am:.1f}min → 按音频≈${_am * 0.05:.3f} / 按连接≈${_cm * 0.05:.3f}\n")
+            except Exception:
+                pass
         try:
             if _bridge.get("pc"):
                 await _bridge["pc"].close()   # 99:会话结束随手关桥
