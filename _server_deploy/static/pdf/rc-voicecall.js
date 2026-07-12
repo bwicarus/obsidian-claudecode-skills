@@ -971,14 +971,28 @@
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
-      // ㊸ 承诺核查(实锤过两次:嘴上"已整理成卡片放进后台"实际零工具调用——mini 的幻觉承诺老毛病):
-      // 本轮说了"已做成卡片/笔记"却没调任何工具 → 立即注入纠偏并强制它真做(60s 冷却防对喷循环)
+      // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
+      // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
+      // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
       if (!_rtc.turnTool && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,6}(已|放进后台|做好了)/.test(curAText)
           && Date.now() - (_rtc.scoldT || 0) > 60000) {
         _rtc.scoldT = Date.now();
-        _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text',
-          text: '(系统核查:你刚才宣称已经做了卡片/笔记,但本轮你没有调用任何工具——什么都没有发生,那样说是欺骗用户。现在立即调 make_anki(做卡)或 make_note(笔记)真正执行,内容用你刚才总结的要点;执行后再简短确认。)' }] } });
-        _dcSend({ type: 'response.create' });
+        (function () {
+          var isNote = /笔记|ノート/.test(curAText) && !/卡片|カード/.test(curAText);
+          var tool = isNote ? 'make_note' : 'make_anki';
+          var seed = ('(语音对话中用户请求做' + (isNote ? '笔记' : '卡片') + ')\n用户说:' + (_lastU || '(语音请求)') +
+                      '\nAI 口头总结的要点:' + curAText).slice(0, 1600);
+          onToolStatus({ status: 'running', label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)' });
+          fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cmd: JSON.stringify({ tool: tool, args: { text: seed } }),
+                                   ctx: { file_rel: _rtc.ctxFile, page: _rtc.ctxPage } }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              onToolStatus({ status: d.ok ? 'done' : 'error', tool: tool, label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)',
+                             rag: JSON.stringify((d && d.result) || {}).slice(0, 400) });
+              _rtcSys('(系统核查:你宣称做了' + (isNote ? '笔记' : '卡片') + '但没有调用工具——系统已代为提交任务(后台生成,完成会通知用户)。今后必须真调 ' + tool + '。状态记录,不要回应本条。)');
+            }).catch(function () { onToolStatus({ status: 'error', tool: tool, label: '系统代提交失败' }); });
+        })();
       }
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
