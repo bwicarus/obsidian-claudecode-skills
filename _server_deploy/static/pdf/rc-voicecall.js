@@ -759,22 +759,12 @@
   function _rtcHandleUp(j) {
     var t = j.type;
     if (t === 'page') {
-      var np = j.page, f = j.file || _rtc.ctxFile;
-      var vt = String(j.text || '');
-      var pfp = np + ':' + vt.length + ':' + vt.slice(0, 30);
-      if (!np || pfp === _rtc._pageFp) return;
-      _rtc._pageFp = pfp;
-      if (np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
-      _rtc.ctxPage = np;
-      if (vt) {   // ㉟b EPUB 动态窗口:前端直供"实际显示内容"(整章太长;同章滚动=窗口变也注入)
-        _rtcSys('(用户当前阅读位置(第 ' + np + ' 章/页)的可见内容:' + vt.slice(0, 1500) + '。之前的位置内容已过去,回答以本条为准)');
-        return;
-      }
-      fetch('/pdf/api/page-text?file=' + encodeURIComponent(f) + '&page=' + np)
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          _rtcSys('(用户翻到第 ' + np + ' 页,本页文字内容:' + (((d && d.text) || '(本页无文字层)').slice(0, 1200)) + '。之前页面的内容已翻过去了,回答以本条为准)');
-        }).catch(function () {});
+      // ㊵ 拉模式(用户拍板"只在需要时读取"):翻页/滚动**只更新本地状态,一个字都不发**——
+      // 内容在用户开口/发文字的瞬间经 _rtcFlushCtx 注入(不问=零注入);模型要更多内容自己调 read_page
+      var np = j.page;
+      if (np && np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
+      if (np) _rtc.ctxPage = np;
+      if (j.text != null) _rtc.pendText = String(j.text || '');
     } else if (t === 'ink') {
       var strokes = j.strokes || [];
       _rtc.ink = strokes;
@@ -794,12 +784,23 @@
       _rtc.sel = sel;
       _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它)') : '用户当前没有选中文字') + ';状态记录,不要回应本条)');
     } else if (t === 'text' && j.content) {
+      _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
       _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
       _dcSend({ type: 'response.create' });
     } else if (t === 'cancel' || t === 'tool_abort') {
       _dcSend({ type: 'response.cancel' });
     }
+  }
+  function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
+    try {
+      var vt = _rtc.pendText || '';
+      var fp = _rtc.ctxPage + ':' + vt.length + ':' + vt.slice(0, 30);
+      if (fp === _rtc._sentCtxFp) return;
+      _rtc._sentCtxFp = fp;
+      _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') +
+              '。回答以本条为准;状态记录,不要回应本条。)');
+    } catch (e) {}
   }
   async function _rtcDeep(q) {   // deep_think:转交侧栏 chat(Claude)拿完整回答回填,GPT 自己念
     if (!q) return '(问题为空)';
@@ -943,6 +944,7 @@
     if (t === 'response.output_audio_transcript.delta') {
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
     } else if (t === 'input_audio_buffer.speech_started') {
+      _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
       try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
       curAText = ''; curAEl = null;
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
@@ -1570,16 +1572,14 @@
 
   // ㉟ 共享位置/选中同步:宿主没提供 __vcSyncNow(PDF reader 的 21-misc-ai 有自己的 2s 轮询)时,
   //    共享层自建——经 RC.adapter().getContext() 拿位置(EPUB=section idx+1 当 page)与选中,变化才推。
-  var _vtLast = null;
   setInterval(function () {
     if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
     try {
       var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
       var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
-      var vt2 = String(c.visible_text || '').slice(0, 2000);
-      var vfp = vt2 ? (vt2.length + ':' + vt2.slice(0, 40)) : '';
-      var stable = (vfp === _vtLast); _vtLast = vfp;   // 缓存优化:滚动中每条视口注入都是全价新增——停稳(连续两拍不变)才推
-      if (pg && (stable || pg !== ((toggle._opts || {}).page || 0))) setPage(pg, stable ? vt2 : undefined);
+      // ㊵ 拉模式下 setPage 经 shim 只更新本地状态(零网络/token 成本),恒推保持 pendText 最新即可;
+      // 豆包(真 WS,SP 前缀架构)只在翻页时推、不带视口流(滚动流会打它的 dialog 缓存)
+      if (pg) setPage(pg, _rtc.on ? String(c.visible_text || '').slice(0, 2000) : undefined);
       syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
     } catch (e) {}
   }, 2000);
