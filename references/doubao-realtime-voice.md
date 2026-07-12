@@ -798,3 +798,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 6. **纯文字模态实测**:output_modalities/modalities 两种写法均被静默忽略照样出音频——**Grok 恒纯语音铁证,四态不迁移**(详见 grok-voice-realtime.md)。
 未落地记录:搜索预算闸(我们未挂 xAI 内置搜索,走自家 webapp 链路已有免费额度体系);resumption 续接重连=#290;半双工播放状态确认=桥失败回退场景的二期。
 
+## 批次 118(2026-07-13)instructions 免费通道扩容:整页正文每轮注入(用户设计)
+
+用户洞察的套利空间:xAI Voice 计价=音频时长+文字 item 条数+工具次数,**无 token 维度**——`response.create.response.instructions` 塞多少字都免费。落地:①WS 版 page 分支(grok)翻页→后台 `_fetch_book_ctx` 刷新 `book["page_text"]`(防注入陈旧页,带翻页竞态检查);②`_grok_commit` instructions 扩容=人设句+页码+**本页正文 1800 字**+选中 400 字+笔迹状态+「需要其它页才用 read_page」——当前页问答零工具往返(延迟↓),且不进历史(每轮最新,无陈旧页残留)。同通道可继续扩:生词表/图描述/收藏卡片等,注意 instructions 是**替换**语义(人设句必须常驻)与处理延迟(总长控制 ~2500 字)。
+

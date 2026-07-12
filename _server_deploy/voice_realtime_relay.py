@@ -1536,13 +1536,17 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             try:
                 await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
                 _cr = {"type": "response.create"}
-                # 117:本轮 instructions 注入最新页面状态($0;含一句核心人设防替换语义裸奔)
+                # 117/118(用户设计):本轮 instructions 注入页面状态+**整页正文**——xAI 计价=音频时长+item 条数+工具次数,
+                # **无 token 维度**,instructions 塞多少字都免费→当前页不再需要 read_page 工具轮(省往返延迟)。
                 _bits = [f"当前第 {book.get('page') or page} 页"]
+                _pt0 = (book.get("page_text") or "")[:1800]
+                if _pt0:
+                    _bits.append(f"本页正文(直接参考,不用 read_page 读当前页):「{_pt0}」")
                 if book.get("sel"):
                     _bits.append(f"用户选中:「{str(book['sel'])[:400]}」")
                 if book.get("ink_strokes"):
                     _bits.append("本页有用户手写笔迹(问到时调 see_ink)")
-                _cr["response"] = {"instructions": "你是简短口语化的伴读助手。" + ";".join(_bits) + "。结合最新状态回答本轮。"}
+                _cr["response"] = {"instructions": "你是简短口语化的伴读助手。" + ";".join(_bits) + "。结合最新状态回答本轮;需要**其它页**才用 read_page。"}
                 book.pop("_dirty", None)
                 await ows.send(json.dumps(_cr, ensure_ascii=False))
                 _vg["pend_resp"] = True   # 116:create 已发但 response.created 未到的竞态窗(打断要覆盖它)
@@ -1689,7 +1693,23 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 continue
             t = j.get("type")
             if engine == "grok" and t in ("page", "state", "ink"):
-                book["_dirty"] = True   # 114:状态变化只标脏(存 Pi),开口时懒注入一条
+                book["_dirty"] = True   # 114:状态变化只标脏(存 Pi),开口时随 instructions 注入
+                if t == "page":
+                    try:
+                        _np0 = int(j.get("page") or 0)
+                    except Exception:
+                        _np0 = 0
+                    if _np0 and _np0 != book.get("_pt_page"):
+                        book["_pt_page"] = _np0
+
+                        async def _refresh_pt(np1=_np0):   # 118:翻页后台刷新页正文(供免费 instructions 注入)
+                            try:
+                                vc2 = await _fetch_book_ctx(file_rel, np1)
+                                if book.get("_pt_page") == np1:   # 没被更新的翻页顶掉才写
+                                    book["page_text"] = vc2.get("page_text") or ""
+                            except Exception:
+                                pass
+                        asyncio.create_task(_refresh_pt())
             if t == "finish":
                 return
             if t == "bridge_offer":   # 99:WebRTC 桥信令(纯音频面)
