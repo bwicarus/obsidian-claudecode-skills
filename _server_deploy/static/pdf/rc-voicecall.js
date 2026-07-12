@@ -463,6 +463,7 @@
     if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid, mood: vt.mood || '' })); } catch (e) {} }
   }
   function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成(两条通道都发)
+    try { _sq.length = 0; if (_sqT) { clearInterval(_sqT); _sqT = null; } } catch (e) {}   // 67b:排队待念的也作废
     stopPlayback(); _ttsStopPlay(); capClear();
     try { if (ws && mode === 'agent' && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
     try { if (_tts.ws && _tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
@@ -958,6 +959,22 @@
   }
 
   // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──
+  // 67b:通道未就绪时的待念队列(用户实锤"只读最后一段"——朗读 WS 建立要 1-2s,流式前几句各自
+  // 900ms 重试全死在建立窗口里被 speak 静默丢弃,只有末段赶上通道就绪。改队列:就绪瞬间按原序全放)
+  var _sq = [], _sqT = null;
+  function _sqPump() {
+    if (_sqT) return;
+    var t0 = Date.now();
+    _sqT = setInterval(function () {
+      if (_tts.ws && _tts.ws.readyState === 1) {
+        clearInterval(_sqT); _sqT = null;
+        _sq.splice(0).forEach(function (x) { try { speak(x); } catch (e) {} });
+      } else if (Date.now() - t0 > 12000) {   // 12s 还没就绪=通道真起不来,放弃这批(别攒到下轮突然全念)
+        clearInterval(_sqT); _sqT = null; _sq.length = 0;
+        try { setSt('通话中(朗读通道未就绪,这段没念出来)'); } catch (e) {}
+      }
+    }, 250);
+  }
   function _speakSafe(t) {
     if (!t || !t.trim()) return;
     // 67:2.1 的音频(等待语)可能还在 WebRTC 播放队列里——按估计的播放结束时刻延迟代念,不跟它叠音;
@@ -965,8 +982,12 @@
     var wait = Math.max(0, (_rtc.aEnd || 0) - Date.now());
     var _go = function () {
       _ttsMicGuard();
-      if (_tts.ws && _tts.ws.readyState === 1) { try { speak(t); } catch (e) {} }
-      else { try { _ttsEnsure(); } catch (e) {} setTimeout(function () { try { speak(t); } catch (e) {} }, 900); }
+      if (_tts.ws && _tts.ws.readyState === 1 && !_sq.length && !_sqT) { try { speak(t); } catch (e) {} }
+      else {   // 未就绪(或队列在途,保序不插队):入队,通道就绪后按序放出
+        _sq.push(t);
+        try { _ttsEnsure(); } catch (e) {}
+        _sqPump();
+      }
     };
     if (wait > 0) setTimeout(_go, wait); else _go();
   }
