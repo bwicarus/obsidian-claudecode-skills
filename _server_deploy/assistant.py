@@ -4985,9 +4985,22 @@ def assistant_voice_cards():
         cards = json.loads(f.read_text("utf-8"))
     except Exception:
         cards = []
+    now = int(time.time())
+    n_before = len(cards)
+    cards = [c for c in cards if not c.get("deleted") or now - c["deleted"] < 86400]   # 80:回收站保 1 天,过期真删
+    if len(cards) != n_before:
+        f.write_text(json.dumps(cards, ensure_ascii=False), "utf-8")
     if request.method == "GET":
-        return jsonify({"ok": True, "cards": cards[-200:]})
+        if request.args.get("trash"):   # 80:回收站视图(1 天内删除的)
+            return jsonify({"ok": True, "cards": [c for c in cards if c.get("deleted")][-100:]})
+        return jsonify({"ok": True, "cards": [c for c in cards if not c.get("deleted")][-200:]})
     b = request.get_json(silent=True) or {}
+    if b.get("op") == "restore" and b.get("id"):   # 80:从回收站恢复
+        for c in cards:
+            if c.get("id") == b["id"]:
+                c.pop("deleted", None)
+        f.write_text(json.dumps(cards, ensure_ascii=False), "utf-8")
+        return jsonify({"ok": True})
     if b.get("op") == "add" and isinstance(b.get("card"), dict):
         c = b["card"]
         rec = {"id": re.sub(r"[^A-Za-z0-9_-]", "", str(c.get("id") or ""))[:40] or f"v{int(time.time()*1000)}",
@@ -5002,11 +5015,13 @@ def assistant_voice_cards():
         cards.append(rec)
         f.write_text(json.dumps(cards[-200:], ensure_ascii=False), "utf-8")
         return jsonify({"ok": True, "id": rec["id"]})
-    if b.get("op") == "del" and b.get("id"):
-        n0 = len(cards)
-        cards = [x for x in cards if x.get("id") != b["id"]]
+    if b.get("op") == "del" and (b.get("id") or b.get("ids")):
+        ids = set([b["id"]] if b.get("id") else (b.get("ids") or []))
+        for c in cards:
+            if c.get("id") in ids:
+                c["deleted"] = now   # 80:软删进回收站(1 天可恢复)
         f.write_text(json.dumps(cards, ensure_ascii=False), "utf-8")
-        return jsonify({"ok": True, "removed": n0 - len(cards)})
+        return jsonify({"ok": True})
     return jsonify({"ok": False}), 400
 
 

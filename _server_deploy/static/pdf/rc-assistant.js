@@ -693,12 +693,14 @@
     'background:rgba(24,26,34,.94);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.14);box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:12px}' +
     '.vc-inf-r{display:flex;gap:8px;margin:3px 0;color:#c6d1e8}.vc-inf-r span{flex:none;color:#7f8cab}' +
     '.vc-inf-set{margin-top:7px;width:100%;padding:6px;border-radius:8px;border:1px solid #35446b;background:#1b2338;color:#9fb4e0;cursor:pointer;font-size:12px}' +
-    '.asst-clip{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:none;cursor:pointer;' +
-    'background:rgba(123,108,255,.16);color:#8f7dff;margin:6px 0 0 2px;padding:0;-webkit-tap-highlight-color:transparent;vertical-align:middle}' +
-    '.asst-clip svg{width:11px;height:11px;margin-left:1px}' +
-    '.asst-clip.dim{background:rgba(255,255,255,.07);color:#5a6478}' +
-    '.asst-clip.playing{background:#7b6cff;color:#fff;animation:vcCallPulse 1.4s ease-in-out infinite}' +
-    '.asst-clip.busy{opacity:.5;pointer-events:none}' +   // 流式中:发送→停止(红)
+    '.asst-clip{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:none;cursor:pointer;' +
+    'font-size:9px;line-height:1;background:rgba(123,108,255,.16);color:#9d8cff;margin:6px 0 0 2px;padding:0 0 0 1px;' +
+    '-webkit-tap-highlight-color:transparent;vertical-align:middle;transition:transform .12s ease,background .2s;-webkit-user-select:none;user-select:none}' +
+    '.asst-clip:active{transform:scale(.82)}' +                                            // 80:按压特效
+    '.asst-clip.dim{background:rgba(255,255,255,.08);color:#5a6478}' +                     // 无录音=灰
+    '.asst-clip.playing{background:#7b6cff;color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
+    '.asst-clip.busy{background:rgba(255,190,90,.22);color:#f0b451;animation:vcClipBreath 1.1s ease-in-out infinite;pointer-events:none}' +   // 生成录音中=琥珀
+    '@keyframes vcClipBreath{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45);opacity:1}50%{box-shadow:0 0 0 6px rgba(123,108,255,0);opacity:.75}}' +   // 流式中:发送→停止(红)
     // AI 答完的「追问建议」chip
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
     '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
@@ -2133,14 +2135,14 @@
   var _clipAudio = null, _clipBtnCur = null;
   function _clipStop() {
     try { if (_clipAudio) { _clipAudio.pause(); _clipAudio = null; } } catch (e) {}
-    if (_clipBtnCur) { _clipBtnCur.classList.remove('playing'); _clipBtnCur = null; }
+    if (_clipBtnCur) { _clipBtnCur.classList.remove('playing'); _clipBtnCur.textContent = '▶'; _clipBtnCur = null; }
   }
   function _attachClipBtn(el, m) {
     if (!m || !(m.content || '').trim()) return;
     var b = document.createElement('button'); b.type = 'button';
     b.className = 'asst-clip' + (m.clip ? '' : ' dim');
     b.title = m.clip ? '播放当时的语音' : '没有录音:点击用 TTS 念这条并保存';
-    b.innerHTML = '<svg viewBox="0 0 14 14" fill="currentColor"><path d="M4.2 2.9v8.2a.4.4 0 0 0 .62.34l6.4-4.1a.4.4 0 0 0 0-.68l-6.4-4.1a.4.4 0 0 0-.62.34z"/></svg>';
+    b.textContent = '▶';   // 80:纯字符替代 SVG(仿「!」钮实现——SVG 在部分环境渲成白块的保底修复)
     function _ttsGen() {
       if (!window.__vcTtsCapture) { if (typeof _toast === 'function') _toast('朗读引擎不可用'); return; }
       b.classList.add('busy');
@@ -2164,7 +2166,7 @@
       _clipStop();
       if (m.clip) {
         var a = new Audio('/api/assistant/voice-clip/' + encodeURIComponent(m.clip));
-        _clipAudio = a; _clipBtnCur = b; b.classList.add('playing');
+        _clipAudio = a; _clipBtnCur = b; b.classList.add('playing'); b.textContent = '◼';
         a.onended = _clipStop;
         a.onerror = function () { _clipStop(); _ttsGen(); };   // 录音缺失(当时没传成)→ 降级 TTS 生成
         a.play().catch(function () { _clipStop(); _ttsGen(); });
