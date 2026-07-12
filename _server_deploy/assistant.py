@@ -1614,13 +1614,17 @@ def _t_search_image(args, ctx):
         q0, qe = it["query"], (it.get("query_en") or "")
         imgs = []
         tried = set()
+        hitq = {"q": ""}
         def _try(qq):
             qq = (qq or "").strip()
             if not qq or qq.lower() in tried:
                 return []
             tried.add(qq.lower())
             try:
-                return image_search.search_images(qq[:120], n=1)   # 每概念取最匹配 1 张
+                r0 = image_search.search_images(qq[:120], n=1)   # 每概念取最匹配 1 张
+                if r0:
+                    hitq["q"] = qq   # 88:记命中词(感叹号溯源"哪条链路搜到的")
+                return r0
             except Exception:
                 return []
         for qq in (q0, qe, _short(q0), _short(qe)):
@@ -1646,7 +1650,9 @@ def _t_search_image(args, ctx):
                 pass
         return {"concept": it["concept"], "found": bool(imgs),
                 "image_url": (imgs[0]["image_url"] if imgs else ""),
-                "page_url": (imgs[0].get("page_url", "") if imgs else "")}
+                "page_url": (imgs[0].get("page_url", "") if imgs else ""),
+                "source": (imgs[0].get("source", "commons") if imgs else ""),
+                "matched_query": hitq["q"]}
     with _cf.ThreadPoolExecutor(max_workers=min(6, len(items))) as ex:
         results = list(ex.map(_one, items))
     found = [r for r in results if r["found"]]

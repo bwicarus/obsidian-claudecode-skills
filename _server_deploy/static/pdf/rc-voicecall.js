@@ -203,6 +203,13 @@
       '.vc-if-nt{font-size:13px;font-weight:600;color:#e8eefb}' +
       '.vc-if-ns{font-size:12px;color:#9fb0cf;margin-top:1px}' +
       '.vc-if-src{opacity:.65}' +
+      '.vc-ig{display:flex;flex-wrap:wrap;gap:8px}' +
+      '.vc-ig-cell{position:relative;width:calc(50% - 4px);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.04)}' +
+      '.vc-ig-cell.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.9)}' +
+      '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
+      '.vc-ig-t{font-size:10.5px;color:#9fb0cf;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.vc-ig-x{position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;' +
+      'font-size:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;z-index:2}' +
       '.vc-if-fa{font-size:15px;font-weight:600}' +
       '.vc-if-fd{font-size:12.5px;color:#b8c6e2;margin-top:3px}' +
       '.vc-if-g{font-size:13.5px;line-height:1.55}' +
@@ -540,6 +547,13 @@
         return '<div class="vc-if-ni"><div class="vc-if-nt">' + e0(it.t) + '</div>' +
                '<div class="vc-if-ns">' + e0(it.s) + (it.src ? ' <span class="vc-if-src">— ' + e0(it.src) + '</span>' : '') + '</div></div>';
       }).join('') + '</div>';
+    } else if (k === 'images') {
+      h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
+        return '<div class="vc-ig-cell" data-i="' + i + '">' +
+          '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
+          '<img class="vc-ig-img" data-i="' + i + '" src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
+          (it.title ? '<div class="vc-ig-t">' + esc(it.title) + '</div>' : '') + '</div>';
+      }).join('') + '</div>';
     } else if (k === 'fact') {
       h = '<div class="vc-if-f"><div class="vc-if-fa">' + e0(d.answer) + '</div>' +
           (d.detail ? '<div class="vc-if-fd">' + e0(d.detail) + '</div>' : '') + '</div>';
@@ -558,6 +572,7 @@
     if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
     if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
+    if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).map(function (it) { return (it.title || '图') + ' ' + (it.url || ''); }).join(';');
     return d.text || card.brief || card.title || '';
   }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
@@ -617,15 +632,58 @@
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
+  function _igWire(root, card) {   // 88:图卡交互——每图右上✕移除;点图=只选中这一张(带入上下文,再点取消)
+    if (!card || card.kind !== 'images') return;
+    root.addEventListener('click', function (ev) {
+      var x = ev.target.closest('.vc-ig-x');
+      if (x) {
+        ev.stopPropagation();
+        var i0 = +x.getAttribute('data-i');
+        var cell = x.closest('.vc-ig-cell');
+        if (cell) cell.remove();
+        try { (card.data.items || [])[i0]._gone = 1; } catch (e) {}
+        return;
+      }
+      var img = ev.target.closest('.vc-ig-img');
+      if (img) {
+        ev.stopPropagation();
+        var i1 = +img.getAttribute('data-i');
+        var it = ((card.data || {}).items || [])[i1] || {};
+        var cell1 = img.closest('.vc-ig-cell');
+        var on = !cell1.classList.contains('vc-picked');
+        root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (c2) {   // 单选:先清其它
+          c2.classList.remove('vc-picked');
+          var lb2 = c2.dataset.pinLabel; if (lb2 && _pins.map[lb2]) { delete _pins.map[lb2]; delete _pins.els[lb2]; }
+        });
+        if (on) {
+          cell1.classList.add('vc-picked');
+          var lb = (it.title || '配图') + '·图' + (i1 + 1);
+          cell1.dataset.pinLabel = lb;
+          _pins.map[lb] = ((it.title || '') + ' ' + (it.url || '')).slice(0, 500);
+          _pins.els[lb] = cell1;
+        }
+        _pinSync(); _chipRender();
+      }
+    });
+  }
   function _infoCardEl(card) {   // 87:构一张侧栏信息卡(实时与历史回放共用——刷新后卡永远还是卡)
     var label = card.title || '搜索结果';
     var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
     var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
     d.innerHTML = html;
     _pinBind(d, label, function () { return _infoText(card); });
-    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}
+    var _srcs = '';
+    if (card.kind === 'images') {   // 88:溯源——每张图哪个源(Commons/Google/OpenAI)哪个词命中
+      var seenS = {};
+      _srcs = ((card.data || {}).items || []).map(function (it) {
+        var k2 = (it.src || '?') + (it.q ? '「' + it.q + '」' : '');
+        if (seenS[k2]) return ''; seenS[k2] = 1; return k2;
+      }).filter(Boolean).join(' · ');
+    }
+    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined }); } catch (e) {}
     try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
+    try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
     return d;
   }
   window.__vcInfoCardEl = function (card) { try { return (card && card.kind) ? _infoCardEl(card) : null; } catch (e) { return null; } };
@@ -639,7 +697,7 @@
     if (!_sideOpen()) {
       var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
       var c = _cardPush(html, label, true);   // 字幕模式:浮层镜像(html)
-      if (c) _pinBind(c.el, label, function () { return _infoText(card); });
+      if (c) { _pinBind(c.el, label, function () { return _infoText(card); }); try { _igWire(c.el, card); } catch (e) {} }
     }
     // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
     try {   // ⚠EPUB 自有历史(epub-convo)结构不同,card 落库暂只走 PDF 主历史
@@ -647,33 +705,16 @@
         body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
     } catch (e) {}
   }
-  function renderImgs(imgs) {   // ㉜:语音 search_image 结果 → 真实图卡进侧栏对话流(点开原条目页)
+  function renderImgs(imgs) {   // 88:图片结果升格为结构化卡(kind:'images')走 renderInfo 全管线——对话流+浮层同款、落库、回放、✕/单选/溯源
     if (!imgs || !imgs.length) return;
-    if (!_sideOpen()) {   // 70:字幕模式下图也要看得见——弹浮层图卡(可拖/可双击带入)
-      var gh = imgs.map(function (im) {
-        return im && im.image_url ? '<img src="' + esc(im.image_url) + '" style="max-width:100%;border-radius:10px;margin:3px 0" alt="' + esc(im.title || '') + '">' : '';
-      }).join('');
-      var c0 = _cardPush(gh, '配图 × ' + imgs.length, true);
-      if (c0) _pinBind(c0.el, '配图', function () {
-        return imgs.map(function (im) { return (im.title || '图') + ': ' + (im.image_url || ''); }).join(';');
-      });
-      return;
-    }
-    var m = threadMsg('asst-a', '给你找到这些图片:');
-    if (!m) return;
-    var g = document.createElement('div');
-    g.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:6px';
-    imgs.forEach(function (im) {
-      if (!im || !im.image_url) return;
-      var a = document.createElement('a');
-      a.href = im.page_url || im.image_url; a.target = '_blank'; a.rel = 'noopener';
-      a.style.cssText = 'text-decoration:none;color:inherit;max-width:160px';
-      a.innerHTML = '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(im.image_url) + '" ' +
-        'style="max-width:160px;max-height:130px;border-radius:10px;display:block">' +
-        (im.concept ? '<div style="font-size:11px;opacity:.7;text-align:center;margin-top:2px">' + esc(im.concept) + '</div>' : '');
-      g.appendChild(a);
+    renderInfo({
+      kind: 'images', title: '配图 × ' + imgs.length,
+      brief: imgs.map(function (im) { return im.title || im.concept || '图'; }).join('、').slice(0, 120),
+      data: { items: imgs.filter(function (im) { return im && im.image_url; }).map(function (im) {
+        return { url: im.image_url, title: im.title || im.concept || '', page: im.page_url || '',
+                 src: im.source || '', q: im.matched_query || '' };
+      }) }
     });
-    m.appendChild(g);
   }
   function renderVids(vids) {
     if (!vids || !vids.length) return;

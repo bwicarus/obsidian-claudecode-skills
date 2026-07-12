@@ -1883,6 +1883,7 @@
         if (info && info.mode) rows.push('<div class="vc-inf-r"><span>输出形态</span>' + esc(info.mode) + '</div>');
         if (info && info.tools && info.tools.length) rows.push('<div class="vc-inf-r"><span>本段工具</span>' + esc(info.tools.join(' · ')) + '</div>');
         if (info && info.kind) rows.push('<div class="vc-inf-r"><span>类型</span>' + esc(info.kind) + '</div>');
+        if (info && info.srcs) rows.push('<div class="vc-inf-r"><span>搜索链路</span>' + esc(info.srcs) + '</div>');
         pop.innerHTML = rows.join('') +
           '<div class="vc-inf-r"><span>中间步骤</span>见对话流中各工具卡(点开看参数与结果)</div>' +
           '<button type="button" class="vc-inf-set">⚙ 调整各环节 AI 模型</button>';
