@@ -374,6 +374,11 @@
         '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="默认朗读语气(AI 会按内容自动调整情绪;这里是它没给时的兜底,仅2.0音色)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;cursor:pointer">' +
         '<input type="checkbox" id="vcv-cap-tg">朗读字幕(侧栏关闭时屏幕下方显示当前句+上一句,跟声音同步,不挡触控;本设备)</label>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
+        '<input type="checkbox" id="vcv-card-tg">文字卡自动消失(路由/文字模式的回复在侧栏关闭时弹磨砂卡片;开=到时自动收起,关=常驻到手动关;本设备)</label>' +
+        '<div class="ams-row" id="vcv-card-row" style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding-left:22px">' +
+        '<span style="font-size:12px;color:#8a9bb4;flex:none">停留 <b id="vcv-card-v">20</b> 秒</span>' +
+        '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#7b6cff"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
         '<input type="checkbox" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
         (isOA ? '' :
@@ -397,6 +402,23 @@
         _capTg.addEventListener('change', function () {
           try { localStorage.setItem('rc-voice-sub', _capTg.checked ? '1' : '0'); } catch (e) {}
           if (typeof _toast === 'function') _toast(_capTg.checked ? '朗读字幕已开' : '朗读字幕已关');
+        });
+      }
+      var _cdTg = card.querySelector('#vcv-card-tg'), _cdSec = card.querySelector('#vcv-card-sec'), _cdV = card.querySelector('#vcv-card-v');
+      if (_cdTg) {   // 65 文字卡自动消失:开关+秒数(设备级)
+        try { _cdTg.checked = localStorage.getItem('rc-voice-card-hide') !== '0'; } catch (e) {}
+        try { var _s0 = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; _cdSec.value = _s0; _cdV.textContent = _s0; } catch (e) {}
+        var _cdRow = card.querySelector('#vcv-card-row');
+        function _cdSync() { if (_cdRow) _cdRow.style.opacity = _cdTg.checked ? '1' : '.35'; }
+        _cdSync();
+        _cdTg.addEventListener('change', function () {
+          try { localStorage.setItem('rc-voice-card-hide', _cdTg.checked ? '1' : '0'); } catch (e) {}
+          _cdSync();
+          if (typeof _toast === 'function') _toast(_cdTg.checked ? '文字卡到时自动收起' : '文字卡常驻(手动关)');
+        });
+        if (_cdSec) _cdSec.addEventListener('input', function () {
+          if (_cdV) _cdV.textContent = _cdSec.value;
+          try { localStorage.setItem('rc-voice-card-secs', String(_cdSec.value)); } catch (e) {}
         });
       }
       card.querySelectorAll('[data-k]').forEach(function (el) {

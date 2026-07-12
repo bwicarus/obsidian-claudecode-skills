@@ -560,3 +560,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **route 等待语**(用户设计):工具描述+_route_line 明确"调用的**同一轮先口头说一句等待语**(按话题自然措辞,如『说来话长,我写给你稍等』),说完就调,绝不口头讲解内容本身"——利用 audio 轮可同时输出音频+function_call 的特性,消灭"沉默调工具"的怪异感。
 - **路由专属视觉**:工具卡 running=「🧠 文字详答生成中」/done=「🧠 文字详答」(relay 快路+前端 fallback 双侧);**字幕**:route 长文滚动时 cur 行加 `.vc-cap-route`(紫左边框+🧠 前缀+淡紫字),response.created 时摘除不残留;字幕状态行经既有 tool_status 机制自动显示 🧠 label。
 - **网页搜索首选换 Gemini google_search grounding**(用户指出免费额度,核实属实:**3.x 系每月 5000 次免费**、之后 $14/1k;2.x 时代=1500 次/天 $35/1k):`_gemini_websearch`(generateContent+tools:[{google_search:{}}],免费 key 优先/403冷却同 _gemini_text,来源=groundingMetadata.groundingChunks.web);`_t_web_search` 落阶=**gemini(免费)→openai_web($0.004)→CSE**。冒烟真调:调理师实技试验答对+grounding 来源。⚠grounding 来源 URL 是 vertexaisearch redirect 链(正常,点击可达真页)。
+
+## 65 语音 UI 批次:按钮 Apple 化+字幕美化+文字卡片堆叠浮层(2026-07-12,用户设计)
+
+- **新按钮 Apple 化**:模式四态+TTS 开关的 emoji 全换 **SF 风线条 SVG**(`_VMI` 表:sts=声波竖线/stt=对话气泡/half=半波半行/route=分叉箭头/spk=喇叭波,currentColor 跟随亮灭)+短中文标签;`_VM_TXT` 供状态行纯文字(setSt 不能吃 HTML);工具卡 label 去 emoji(「路由详答·生成中」/「路由详答」,relay+前端双侧)。
+- **字幕**:底子本就是 Apple TV 磨砂胶囊(v3-⑳);route 样式去 🧠 emoji 改克制版=内嵌紫光条(inset box-shadow)+微紫底+淡紫字。
+- **文字卡片堆叠浮层**(用户设计,route/stt 等文字回复的侧栏关闭出口):`_cardPush(text,label)`——右下固定锚 `#vc-cards`,**按时间层叠**(新卡在前,旧卡向左上交错 9/13px+缩小 3.5%,只露 3 张,上限 4);半透明磨砂(blur24+saturate1.6+0.5px 白边+16px 圆角);每张头部=类型标签+**关闭×**(圆形毛玻璃钮);**自动消失**=设置卡新开关「文字卡自动消失」(默认开)+5-60s 滑条(localStorage rc-voice-card-hide/rc-voice-card-secs,设备级同字幕先例);**碰卡=取消该卡计时**(在读不收);侧栏开着不弹(内容已在对话流)。触发四点:route done(relay 下行+fallback)/文字轮 done/reply_text 兼容。

@@ -1891,7 +1891,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         return full, ("" if full else (err or "空结果"))
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
-        _lbl0 = "🧠 文字详答生成中" if name == "route_to_text" else name   # 64:路由有专属视觉(工具卡+字幕状态行同用)
+        _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": _lbl0}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
         vis, readonly, no_create = None, True, False
@@ -1907,7 +1907,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     out = "(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户把模式切到「路由」)"
                     label = "文字路由(未启用)"
                 else:
-                    label = "🧠 文字详答"
+                    label = "路由详答"
                     full, rerr = await _oa_route(str(args.get("intent") or ""))
                     if rerr:
                         ok, out = False, f"(文字生成失败:{rerr};请口头简要回答)"

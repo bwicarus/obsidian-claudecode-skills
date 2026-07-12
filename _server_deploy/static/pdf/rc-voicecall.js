@@ -110,6 +110,16 @@
       '#vc-cap .vc-cap-wait i:nth-of-type(2){animation-delay:.22s}' +
       '#vc-cap .vc-cap-wait i:nth-of-type(3){animation-delay:.44s}' +
       '@keyframes vcCapDot{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:.95;transform:translateY(-2.5px)}}' +
+      // 65 文字卡片:iOS 通知风磨砂堆叠(右下锚,新卡在前,旧卡左上交错缩小)
+      '#vc-cards{position:fixed;right:14px;bottom:calc(150px + env(safe-area-inset-bottom,0px));z-index:2147481400;width:min(80vw,340px);pointer-events:none}' +
+      '.vc-card{position:absolute;right:0;bottom:0;width:100%;background:rgba(28,28,30,.72);-webkit-backdrop-filter:blur(24px) saturate(1.6);backdrop-filter:blur(24px) saturate(1.6);' +
+      'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
+      'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
+      'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
+      '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
+      '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-card-x svg{width:10px;height:10px}' +
+      '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
       // Apple 简约风:毛玻璃 + iOS 系统色(绿 #30d158/蓝 #0a84ff/橙 #ff9f0a)+ 细边 + SF 线条图标 + sheet 抓手
       '#rc-vc{position:fixed;right:14px;bottom:78px;z-index:2147482000;width:min(320px,88vw);background:rgba(24,30,46,.78);' +
       '-webkit-backdrop-filter:blur(24px) saturate(1.5);backdrop-filter:blur(24px) saturate(1.5);' +
@@ -676,7 +686,17 @@
   // route 智能路由(语音短答 + 长内容模型自调 route_to_text 转服务端文本模型写全文);
   // TTS 退出模式行列,改**独立通用开关**(_ttsOn):任何模式的文字输出都流式切句代念(尽快开口)
   var _VM_SEQ = ['sts', 'stt', 'half', 'route'];
-  var _VM_LABEL = { sts: '🗣 语音', stt: '💬 文字', half: '🔊½ 混合', route: '🧠 路由' };
+  // 65 Apple 化:SF 风线条 SVG(currentColor 跟随亮灭态)+短中文标签;_VM_TXT=状态行用纯文字
+  var _VMI = {
+    sts: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M2 6.5v3M5 4v8M8 2.5v11M11 4v8M14 6.5v3"/></svg>',
+    stt: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M2.5 3.5h11v7.2h-6L4.7 13v-2.3H2.5z"/><path d="M5 6.2h6M5 8.4h4"/></svg>',
+    half: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M2 6.5v3M4.7 4.5v7M7.4 6v4"/><path d="M10.5 5.6h3.5M10.5 8h3.5M10.5 10.4h2.4"/></svg>',
+    route: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h3.2C8 8 8 4.5 10.8 4.5H13M5.2 8C8 8 8 11.5 10.8 11.5H13"/><path d="M11.4 2.8L13.2 4.5l-1.8 1.7M11.4 9.8l1.8 1.7-1.8 1.7"/></svg>',
+    spk: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.3v3.4h2.3L8 12.4V3.6L4.8 6.3z"/><path d="M10.3 5.9a3 3 0 0 1 0 4.2M12.4 4.1a5.6 5.6 0 0 1 0 7.8"/></svg>'
+  };
+  var _VM_LABEL = { sts: _VMI.sts + '<span>语音</span>', stt: _VMI.stt + '<span>文字</span>',
+                    half: _VMI.half + '<span>混合</span>', route: _VMI.route + '<span>路由</span>' };
+  var _VM_TXT = { sts: '语音', stt: '文字', half: '混合', route: '路由' };
   var _VM_OLD = { audio: 'sts', mixed: 'half', text: 'stt', tts: 'stt' };   // 旧值映射(存量配置兼容)
   function _voiceMode() {
     var v = 'sts'; try { v = localStorage.getItem('rc-voice-mode-s2s') || 'sts'; } catch (e) {}
@@ -808,6 +828,51 @@
       _dcSend({ type: 'response.cancel' });
     }
   }
+  // ── 65 文字卡片(用户设计):route/stt 等文字回复在**侧栏关闭**时弹半透明磨砂卡——固定右下,
+  //    按时间层叠(新卡在前,旧卡向左上交错缩小),每张可关;自动消失开关+秒数在语音设置卡(设备级)──
+  var _cards = { list: [] };
+  function _cardHideOn() { try { return localStorage.getItem('rc-voice-card-hide') !== '0'; } catch (e) { return true; } }
+  function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
+  function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
+  function _cardLayout() {
+    var n = _cards.list.length;
+    _cards.list.forEach(function (c, i) {
+      var k = n - 1 - i;   // 0=最新(最前)
+      c.el.style.transform = 'translate(' + (-k * 9) + 'px,' + (-k * 13) + 'px) scale(' + (1 - k * 0.035) + ')';
+      c.el.style.zIndex = String(400 - k);
+      c.el.style.opacity = k >= 3 ? '0' : '1';   // 只露 3 张,更旧的隐去(数量上限另有裁剪)
+    });
+  }
+  function _cardClose(c) {
+    var i = _cards.list.indexOf(c);
+    if (i < 0) return;
+    _cards.list.splice(i, 1);
+    try { clearTimeout(c.t); } catch (e) {}
+    c.el.style.opacity = '0';
+    setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
+    _cardLayout();
+  }
+  function _cardPush(text, kindLabel) {
+    if (!text || !text.trim() || _sideOpen()) return;   // 侧栏开着=内容已在对话流,不弹
+    injectCss();
+    var w = document.getElementById('vc-cards');
+    if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
+    var el = document.createElement('div'); el.className = 'vc-card';
+    el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
+      '<button type="button" class="vc-card-x" aria-label="关闭">' +
+      '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
+      '<div class="vc-card-bd"></div>';
+    el.querySelector('.vc-card-bd').textContent = text;
+    var c = { el: el, t: null };
+    el.querySelector('.vc-card-x').addEventListener('click', function () { _cardClose(c); });
+    el.addEventListener('pointerdown', function () { if (c.t) { clearTimeout(c.t); c.t = null; } });   // 碰了=在读:取消自动消失
+    w.appendChild(el);
+    _cards.list.push(c);
+    while (_cards.list.length > 4) _cardClose(_cards.list[0]);
+    requestAnimationFrame(_cardLayout);
+    if (_cardHideOn()) c.t = setTimeout(function () { _cardClose(c); }, _cardSecs() * 1000);
+  }
+
   // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──
   function _speakSafe(t) {
     if (!t || !t.trim()) return;
@@ -938,6 +1003,7 @@
         try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, ans, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
         try { _rtcCapFeed(ans, true); } catch (e) {}   // 侧栏关着时字幕也能看到
         if (_ttsOn()) { _speakSafe(ans); }   // TTS 开关:文字答案照样代念
+        try { _cardPush(ans, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{"displayed":true}' } });
       return;   // 关键:不发 response.create
@@ -950,7 +1016,7 @@
         _rtcRespCreate('tool');
         return;
       }
-      onToolStatus({ status: 'running', label: '🧠 文字详答生成中' });
+      onToolStatus({ status: 'running', label: '路由详答·生成中' });
       (async function () {
         var full = '', err = '';
         try {
@@ -983,10 +1049,11 @@
             try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, full, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
             _rtcCapFeed(full, true);
             try { rst.feed(full, true); } catch (e) {}
+            try { _cardPush(full, '路由详答'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
           }
         } catch (e) { err = String(e).slice(0, 80); }
         var okR = !!full;
-        onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '🧠 文字详答', args: args, rag: (full || err).slice(0, 400) });
+        onToolStatus({ status: okR ? 'done' : 'error', tool: 'route_to_text', label: '路由详答', args: args, rag: (full || err).slice(0, 400) });
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                   output: okR ? ('(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:' + full.slice(0, 240) + ')') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
         if (!okR) _rtcRespCreate('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=让它口头补救
@@ -1133,6 +1200,7 @@
     } else if (t === 'response.done') {
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
+      if (_rtc.turnText && curAText) { try { _cardPush(curAText, '文字回复'); } catch (e) {} }   // 65:侧栏关着时弹磨砂卡
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
@@ -1315,6 +1383,7 @@
                 try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
                 _rtcCapFeed(fullR, true);
                 try { _rtc._route.feed(fullR, true); } catch (e2) {}
+                try { _cardPush(fullR, '路由详答'); } catch (e2) {}   // 65:侧栏关着时弹磨砂卡
                 _rtc._route = null;
               }
             }
@@ -1753,10 +1822,10 @@
     var b = document.querySelector('.vc-speak-tg'); if (!b) return;
     if (ws && mode === 's2s') {   // 61 通话中:四态标签(有音频输出的档视觉点亮)
       var m = _voiceMode();
-      b.innerHTML = '<span>' + (_VM_LABEL[m] || '🗣 语音') + '</span>';
+      b.innerHTML = _VM_LABEL[m] || _VM_LABEL.sts;
       b.classList[(m !== 'stt') ? 'add' : 'remove']('on');
     } else {
-      b.innerHTML = '<span>🔊 朗读</span>';
+      b.innerHTML = _VMI.spk + '<span>朗读</span>';
       b.classList[_tgOn() ? 'add' : 'remove']('on');
     }
   }
@@ -1829,7 +1898,7 @@
     if (!qb) return false;
     if (qb.querySelector('.vc-speak-tg')) return true;
     var b = document.createElement('button'); b.type = 'button'; b.className = 'rc-media-tg vc-speak-tg';
-    b.innerHTML = '<span>🔊 朗读</span>';
+    b.innerHTML = _VMI.spk + '<span>朗读</span>';
     b.title = '朗读:点亮=AI 出声(语音通话中=播豆包语音;其余=回答用 TTS 流式念出来);按灭=只出文字。语音通话按灭时豆包音频仍生成计费(协议限制),真文本对话用麦克风长按的 ASR 模式';
     if (_tgOn()) b.classList.add('on');
     b.addEventListener('click', function () {
@@ -1840,7 +1909,7 @@
         try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ rt_voice_mode: nxt }) }).catch(function () {}); } catch (e) {}   // 持久化到服务器(跨设备;relay 门控/预算即时跟随=热切生效)
         if (nxt === 'stt') stopPlayback();
-        try { setSt('通话中 · ' + _VM_LABEL[nxt]); } catch (e) {}
+        try { setSt('通话中 · ' + (_VM_TXT[nxt] || nxt)); } catch (e) {}
       } else {                      // 其余:切回答的 T2S 朗读
         var on2 = !speakOn();
         try { localStorage.setItem('rc-voice-speak', on2 ? '1' : '0'); } catch (e) {}
@@ -1852,7 +1921,7 @@
     qb.appendChild(b);
     // 61 TTS 通用开关(用户设计:与模式按钮相邻):任何模式的文字输出都用豆包朗读流式代念
     var tb = document.createElement('button'); tb.type = 'button'; tb.className = 'rc-media-tg vc-tts-tg';
-    tb.innerHTML = '<span>📢 TTS</span>';
+    tb.innerHTML = _VMI.spk + '<span>代念</span>';
     tb.title = 'TTS 代念(通用开关):文字/路由/混合模式下的文字输出,句子生成到哪念到哪(豆包朗读通道);关=只显示文字。豆包引擎通话本身出声,不受此开关影响';
     if (_ttsOn()) tb.classList.add('on');
     tb.addEventListener('click', function () {
@@ -1868,8 +1937,8 @@
     if (!document.getElementById('vc-quick-compact')) {   // 61:快捷栏整排紧凑(用户要求)
       var st0 = document.createElement('style'); st0.id = 'vc-quick-compact';
       st0.textContent = '#asst-quick .rc-media-tg,#ep-asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px;border-radius:7px}' +
-        '.vc-cap-line.vc-cap-route{border-left:3px solid #9d7bff;padding-left:9px;color:#d6c6ff}' +
-        '.vc-cap-line.vc-cap-route::before{content:"🧠 ";opacity:.85}';
+        '#asst-quick .rc-media-tg svg,#ep-asst-quick .rc-media-tg svg{width:14px;height:14px;flex:none}' +
+        '.vc-cap-line.vc-cap-route{box-shadow:inset 3px 0 0 rgba(157,123,255,.85),0 6px 24px rgba(0,0,0,.18);background:rgba(48,38,80,.6);color:#e9e2ff}';
       document.head.appendChild(st0);
     }
     return true;
