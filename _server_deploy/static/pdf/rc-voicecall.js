@@ -1026,7 +1026,14 @@
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       if (g !== _gen) { mic.getTracks().forEach(function (t) { t.stop(); }); return; }
       var pc = new RTCPeerConnection();
-      mic.getTracks().forEach(function (t) { pc.addTrack(t, mic); });
+      mic.getTracks().forEach(function (t) {
+        pc.addTrack(t, mic);
+        // ㊴ 后台"他听不到我":iOS 切到其他 app 时系统**静音网页麦克风**(下行 audio 可继续=你还听得到他),
+        // 平台限制无法绕过——能做的是如实提示 + 回前台自动恢复;track 被彻底回收(ended)则自动重连重新拉流
+        t.onmute = function () { if (_rtc.on) setSt('⚠ 麦克风被系统暂停(iOS 后台限制)——回到页面即恢复'); };
+        t.onunmute = function () { if (_rtc.on) setSt('通话中(WebRTC·外放可用)'); };
+        t.onended = function () { if (_rtc.on && _rtc.mic === mic) _rtcDead('麦克风被系统回收'); };
+      });
       var dc = pc.createDataChannel('oai-events');
       dc.onmessage = function (ev) { try { _rtcOnEvent(JSON.parse(ev.data)); } catch (e) {} };
       dc.onopen = function () { if (!fresh) _rtcInjectHistory(); };   // ㉞:非新话题=把之前的对话记录带回来
