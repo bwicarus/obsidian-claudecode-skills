@@ -531,6 +531,12 @@
   var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("vccap",C);';
   var _upRate = 16000;   // 上行采样率:豆包=16k;GPT Realtime 只吃 24k(relay 的 up_rate 事件动态切)
   var _halfDuplex = false, _lastPlayEnd = 0;   // 半双工(㉙,GPT 外放默认):AI 播放期整段静麦+播完 350ms 残响缓冲
+  var _hpIn = false;   // 119:耳机在线(通话建立时检测+devicechange 实时更新)——耳机/桥场景免半双工=可随时打断
+  try {
+    navigator.mediaDevices.addEventListener('devicechange', function () {
+      _headphonesIn().then(function (hp) { _hpIn = hp; });
+    });
+  } catch (e) {}
   // ㉘f:㉕b 的回声能量门已撤——PCM 流无时间戳,丢包≠插入静默而是**把话剪辑拼接**(句中插话根因)。
   // 半双工与门的本质区别:全有或全无=干净静默,不破坏 VAD/转写的输入完整性;这是外放场景的成熟可靠解
   // (AEC 环回在 Safari/iPad 不保证生效,实测回声仍被转写成用户输入触发自问自答)。
@@ -588,7 +594,7 @@
   }
   function onCap(chunk, rate) {
     if (_abridge.on) return;   // 99:桥接管麦上行(WebRTC 轨),ws 不再发音频
-    if (_halfDuplex && (playing.length || (ac && ac.currentTime - _lastPlayEnd < 0.35))) { f32buf = new Float32Array(0); return; }
+    if (_halfDuplex && !_hpIn && !_abridge.on && (playing.length || (ac && ac.currentTime - _lastPlayEnd < 0.35))) { f32buf = new Float32Array(0); return; }   // 119:耳机/桥=全双工可打断;仅外放无桥才静麦兜底
     var m = new Float32Array(f32buf.length + chunk.length);
     m.set(f32buf); m.set(chunk, f32buf.length); f32buf = m;
     var need = Math.round(rate * 0.02), outN = Math.round(_upRate * 0.02);
@@ -2452,6 +2458,7 @@
         var bp = _bridgePref();
         if (bp === '0') return;
         _headphonesIn().then(function (hp) {
+          _hpIn = hp;   // 119:耳机状态供半双工判定(耳机=可打断)
           if (bp === 'auto' && hp) { console.warn('[vc] 检测到耳机,直连(不走回声桥)'); return; }
           if (myMic) _abridgeStart(myMic);
         });
