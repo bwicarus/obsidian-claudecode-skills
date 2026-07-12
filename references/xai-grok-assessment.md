@@ -3,6 +3,19 @@
 > 结论速览:①Realtime 语音=技术上能接(OpenAI 协议兼容)但**无原生 WebRTC**,与我们 #280 回声治本架构冲突,$0.05/min 平价制;②Web Search=旧 Live Search 已死(410),新 Agent Tools $5/1k 比 OpenAI 贵且 agentic 计费不可控,唯一独家=x_search;③grok-4.5 智力 AA54 第一梯队第4,每美元智力断层第一,但幻觉率 54% 四家最差+TTFT 12.6s,不适合讲解主力,适合夜间批处理;④账号 0 credits,充$5 后可 opt-in 数据共享换 $150/月(永久不可退,隐私权衡)。key 在 ~/.config/xai-grok.json(600,不进 git)。
 > 以下为四个调研 agent 的完整原始报告(全部数字含来源 URL)。
 
+## 实机实测(2026-07-13,充值后,Pi 直连)
+
+| 项 | 实测结果 |
+|---|---|
+| **realtime 语音** | `wss://api.x.ai/v1/realtime?model=grok-voice-latest`:**连接 0.48s、首音频 1.03s**(官方宣称<1s 基本兑现);事件流=OpenAI GA 形制(`response.output_audio.delta` 等)完全兼容,session.update/item.create/response.create 原样可用;一次响应内中文→日文双语切换正常,eve 音色自然;24kHz PCM。样本 `grok-voice-test.wav` 已给用户 |
+| **web_search** | Responses API + `tools:[{type:"web_search"}]` 通,7.3s;**agentic 计费陷阱实锤**:一条天气问答模型自主搜了 3 次(`web_search_calls:3`),`cost_in_usd_ticks:275583500`≈**$0.028/问**(3×$0.005 搜索+11k tokens)vs Gemini grounding 同题免费。行内 [[n]](url) 引用,顶层 citations 空 |
+| **grok-4.3 (effort=none)** | 日语语法讲解题:1.4s、回答正确、$0.00025/条;⚠ 未指定简繁时**输出繁体中文**倾向 |
+
+实测结论:①realtime 技术上随时可接(协议兼容+中日文过关+延迟优秀),但 WS-only——外放场景回声问题(#280 迁 WebRTC 的原因)会回来,只适合耳机档/实验档;②web_search 维持不接的判断(单问成本≈Gemini 的 ∞ 倍、OpenAI 的 7 倍);③grok-4.3 effort=none 快且便宜,夜间批处理候选,需 prompt 钉简体。
+消费进度:实测共花约 $0.03,距 data-sharing 门槛($5 累计消费)还远。
+
+
+
 
 
 ================================================================================
