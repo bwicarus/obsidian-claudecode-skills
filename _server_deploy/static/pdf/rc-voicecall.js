@@ -252,6 +252,7 @@
       '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
       '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+      '#asst-call.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 朗读开关播报中:淡蓝呼吸
@@ -269,6 +270,7 @@
       '#vc-top-mic.asr{color:#bf5af2 !important;border-color:#bf5af2 !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       '#vc-top-call.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
       '#vc-top-call.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+      '#vc-top-call.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
       '#vc-top-mic,#vc-top-call{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
       '#asst-call,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
@@ -297,8 +299,13 @@
 
   function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function setSt(t) { if (box) box.querySelector('.vc-st').textContent = t; }
+  function callBtnConnecting(on) {   // 96(用户设计):按下→接通之间的"正在等它开启"视觉态(琥珀快脉冲)
+    var b = document.getElementById('asst-call');
+    if (b) b.classList[on ? 'add' : 'remove']('connecting');
+  }
   function callBtnOn(on) {
     var b = document.getElementById('asst-call'), m = document.getElementById('asst-mic');
+    callBtnConnecting(false);   // 96:状态确定(接通/挂断/失败)即退出等待态
     if (!on) { if (b) b.classList.remove('on'); if (m) m.classList.remove('asr'); return; }
     if (mode === 'agent') { if (m) m.classList.add('asr'); }   // ASR 连续听:麦克风按钮紫色呼吸(区别系统听写的蓝)
     else if (b) b.classList.add('on');                          // S2S:电话按钮绿色呼吸
@@ -2130,6 +2137,7 @@
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     try {
       setSt('连接中(WebRTC)…');
+      callBtnConnecting(true);   // 96:按下即琥珀脉冲,"确实在等它开启"
       _connecting = true;
       // ㉑铁律(WS 版 start() 同款舞步,rtcStart 之前漏了=挂断后重拨 getUserMedia 必死的根因):
       // 挂断/朗读会把 iOS 音频会话切回 'playback'(该类别**静音麦克风**)——开麦前必须先撂下朗读通道
@@ -2384,6 +2392,7 @@
   function teardown(closeBox) {
     _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
     _connecting = false;
+    callBtnConnecting(false);   // 96:挂断/失败即退出等待态
     if (_rtc.on) rtcTeardown();   // WebRTC 通道随挂断走(pc/dc/audio 元素/mic 全清)
     _userHung = true; _releaseWL();
     if (_reconnT) { clearTimeout(_reconnT); _reconnT = null; }
@@ -2496,6 +2505,7 @@
     toggle._opts = opts || {};
     try { box.querySelector('.vc-new').style.display = (mode === 's2s') ? '' : 'none'; } catch (e) {}   // 🧹 是 S2S 记忆专用;agent 模式用助手自己的「清空」
     setSt('连接中…');
+    callBtnConnecting(true);   // 96:豆包/GPT-WS 路径同样点亮等待态
     toggle._connect(toggle._opts);
   }
 
@@ -2665,7 +2675,7 @@
       }).observe(src, { attributes: true, attributeFilter: ['class'] });
     }
     _mirror(srcMic, tm, ['on', 'asr']);
-    _mirror(srcCall, tc, ['on', 'speaking']);
+    _mirror(srcCall, tc, ['on', 'speaking', 'connecting']);
     function _vis() {   // 侧栏开=隐藏(功能在侧栏里);收起才显示
       var open = false;
       try { open = !!(window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()); } catch (e) {}
