@@ -161,6 +161,9 @@
       '.vc-dk-card.del-mark::after{content:"✕";position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#e0463c;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}' +
       '.vc-dkp-txt{color:#aab6cf;font-size:11.5px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
+      '.vc-drag-ghost{position:fixed;z-index:2147481460;pointer-events:none;opacity:.88;transform:scale(.92);border-radius:14px;overflow:hidden;' +
+      'background:rgba(30,32,42,.9);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.18);' +
+      'box-shadow:0 18px 50px rgba(0,0,0,.55);padding:10px 12px;max-height:120px}' +
       '.vc-dk-m{font-size:10.5px;color:#6f7d9e;margin-top:3px}' +
       '.vc-fav-b{position:absolute;right:28px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
       'background:rgba(255,255,255,.1);color:#8fa0c2;display:flex;align-items:center;justify-content:center;padding:0}' +
@@ -609,6 +612,7 @@
       _pinBind(d, label, function () { return _infoText(card); });
       try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)' }); } catch (e) {}   // 77b:「!」详情
       try { window.__vcFavBtn && window.__vcFavBtn(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}   // 78:☆ 收藏
+      try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}   // 81:拖到底边=收入收藏夹
       th.appendChild(d); th.scrollTop = th.scrollHeight;
     }
     if (!_sideOpen()) {
@@ -1175,6 +1179,46 @@
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
   window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
+  function _dragToDock(el, payloadFn) {   // 81:侧栏卡拖拽收入——按住 300ms 静止=拎起(ghost 跟手+临时锁滚动),拖到底边光晕=收入
+    var t0 = null, sx = 0, sy = 0, ghost = null, lifted = false;
+    function _pos(x, y) { if (ghost) { ghost.style.left = (x - ghost.offsetWidth / 2) + 'px'; ghost.style.top = (y - 26) + 'px'; } }
+    function _end(ev) {
+      if (t0) { clearTimeout(t0); t0 = null; }
+      if (!lifted) return;
+      lifted = false;
+      var th = document.getElementById('asst-thread'); if (th) th.style.overflow = '';
+      if (ghost) { ghost.remove(); ghost = null; }
+      el.style.opacity = '';
+      _dockHint(false);
+      if (ev && _inDockZone(ev.clientX, ev.clientY)) {
+        var rec = payloadFn();
+        rec.meta = rec.meta || _favMeta();
+        _dockLoad(function () { _favSave(rec); });
+        try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
+      }
+    }
+    el.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('.vc-inf-b,.vc-fav-b,button,a')) return;
+      sx = ev.clientX; sy = ev.clientY;
+      if (t0) clearTimeout(t0);
+      var pid = ev.pointerId;
+      t0 = setTimeout(function () {
+        t0 = null; lifted = true;
+        try { el.setPointerCapture(pid); } catch (e) {}
+        var th = document.getElementById('asst-thread'); if (th) th.style.overflow = 'hidden';   // 拎起期锁滚动(松手恢复)
+        ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
+        ghost.style.width = Math.min(el.offsetWidth, 300) + 'px';
+        document.body.appendChild(ghost); _pos(sx, sy);
+        el.style.opacity = '.35';
+      }, 300);
+    });
+    el.addEventListener('pointermove', function (ev) {
+      if (t0 && (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy)) > 8) { clearTimeout(t0); t0 = null; }   // 300ms 内动了=在滚动,不拎
+      if (lifted) { try { ev.preventDefault(); } catch (e) {} _pos(ev.clientX, ev.clientY); _dockHint(_inDockZone(ev.clientX, ev.clientY)); }
+    });
+    ['pointerup', 'pointercancel'].forEach(function (n0) { el.addEventListener(n0, _end); });
+  }
+  window.__vcDragToDock = function (el, payloadFn) { try { _dragToDock(el, payloadFn); } catch (e) {} };
   window.__vcFavBtn = function (el, payloadFn) {   // 78:星形「收藏」钮(信息卡/长回答气泡通用,「!」左侧)
     try {
       if (!el || el.querySelector(':scope > .vc-fav-b')) return;
