@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, session
+from flask import Blueprint, Response, jsonify, request, send_file, session
 
 bp = Blueprint("assistant", __name__, url_prefix="/api/assistant")
 
@@ -3233,10 +3233,25 @@ def _ctx_block(ctx):
             base += ("\n【用户提供的内容(独立片段,与整本书无关)】\n" + att +
                      "\n→ 用户仍显式带来了上面这些内容,请**针对它们**回答(可用 lookup_word/translate/explain/see_figure 处理它们),"
                      "只是别把它们跟书的其余内容/章节挂钩、也别为它们去 read_page。")
-        return base
+        return base + _pinned_lines(ctx)
     full = _sys_prompt(ctx)
     i = full.rfind("【当前页面】")
-    return full[i:] if i >= 0 else ""
+    out = full[i:] if i >= 0 else ""
+    return out + _pinned_lines(ctx)
+
+
+def _pinned_lines(ctx):
+    """97(用户设计):长按带入的卡片(语音/文字模式通用)——文字助手 send 时经 ctx.pinned 注入。"""
+    pn = ctx.get("pinned") or []
+    if not isinstance(pn, list) or not pn:
+        return ""
+    lines = []
+    for p0 in pn[:8]:
+        if isinstance(p0, dict) and (p0.get("text") or "").strip():
+            lines.append(f"· 「{_clean_tag(p0.get('label'))[:60]}」:{_clean_tag(p0.get('text'))[:2000]}")
+    if not lines:
+        return ""
+    return "\n【用户长按带入的卡片(明确要你参考的内容)】\n" + "\n".join(lines)
 
 
 def _clean_tag(s):
@@ -4974,7 +4989,20 @@ def assistant_voice_clip_up():
     ext = "mp4" if "mp4" in mt else ("webm" if "webm" in mt else "bin")
     d = _CLIP_DIR / str(session["user_id"])
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{cid}.{ext}").write_bytes(data)
+    f0 = d / f"{cid}.{ext}"
+    f0.write_bytes(data)
+    if ext == "mp4":   # 97(实测根因):iOS MediaRecorder 分段 fMP4 的 moov 时长只有首段(0.8s)→回放只响一声;-c copy remux 重写正确时长
+        try:
+            import subprocess as _sp
+            _tmp = d / f"{cid}.fix.mp4"
+            r0 = _sp.run(["ffmpeg", "-y", "-v", "error", "-i", str(f0), "-c", "copy", "-movflags", "+faststart", str(_tmp)],
+                         capture_output=True, timeout=20)
+            if r0.returncode == 0 and _tmp.exists() and _tmp.stat().st_size > 1000:
+                _tmp.replace(f0)
+            else:
+                _tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
     try:   # 简单配额:每用户保留最近 400 段,旧的按 mtime 清
         fs = sorted(d.iterdir(), key=lambda f: f.stat().st_mtime)
         for f in fs[:-400]:
@@ -4993,7 +5021,9 @@ def assistant_voice_clip_dl(cid):
     for ext, mt in (("mp4", "audio/mp4"), ("webm", "audio/webm"), ("bin", "application/octet-stream")):
         f = d / f"{cid}.{ext}"
         if cid and f.exists():
-            return Response(f.read_bytes(), mimetype=mt, headers={"Cache-Control": "private, max-age=86400"})
+            resp = send_file(str(f), mimetype=mt, conditional=True)   # 97:conditional=Range 支持(iOS <audio> 对无 Range 源易异常)
+            resp.headers["Cache-Control"] = "private, max-age=86400"
+            return resp
     return jsonify({"ok": False}), 404
 
 

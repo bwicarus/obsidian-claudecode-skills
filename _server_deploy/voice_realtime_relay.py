@@ -1375,14 +1375,23 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                       "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": cred.get("rt_voice") or "marin"}},   # ⚠ rate 必填:漏掉=session.update 整条被拒,会话跑默认裸配置(无人设无工具无转写=复读机)
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,   # 我们的工具多有副作用/顺序依赖,串行更稳
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}     # 官方:低频批量截断,保缓存前缀稳定(比逐轮小截强)
-    if engine == "grok":   # 94:裁掉 OpenAI 特有字段(xAI 对未知字段的容忍度未知,session.update 整条被拒=裸配置复读机)
+    if engine == "grok":   # 94/97a:按官方文档定稿(docs.x.ai voice-agent,2026-07-13 核实)——裁 OpenAI 特有字段防 session.update 整条被拒
         sess.pop("truncation", None)
         sess.pop("max_output_tokens", None)
         sess["audio"]["input"].pop("noise_reduction", None)
-        sess["audio"]["input"].pop("transcription", None)   # OpenAI 形制转写配置;xAI 转写格式未知(边界:用户句字幕暂缺,看日志再补)
-        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad", "create_response": True, "interrupt_response": True}
-        sess["audio"]["output"]["voice"] = cred.get("rt_grok_voice") or "eve"
-        sess["reasoning"] = {"effort": "low"}   # grok-voice-think 默认 high=慢,伴读场景 low 起步
+        # 97a:转写=grok-transcribe(设了才发事件;事件名 .updated=累积全文,非 OpenAI 的 .delta/.completed)
+        _gtr = {"model": "grok-transcribe"}
+        if cred.get("rt_lang") in ("zh", "ja", "en"):
+            _gtr["language_hint"] = cred["rt_lang"]
+        sess["audio"]["input"]["transcription"] = _gtr
+        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad"}   # xAI 无 semantic_vad;threshold 默认 .85
+        sess["audio"]["output"].pop("voice", None)
+        sess["voice"] = cred.get("rt_grok_voice") or "eve"   # 97a:官方形制=session 顶层(94 放 audio.output 无效,一直是默认 eve)
+        try:
+            sess["audio"]["output"]["speed"] = max(0.7, min(1.5, float(cred.get("rt_speed") or 1.0)))   # 官方 0.7-1.5
+        except Exception:
+            pass
+        sess["reasoning"] = {"effort": "none"}   # 97a:取值只有 high|none(94 的 low 是无效值);伴读要快=none
     try:
         ows = await websockets.connect((XAI_RT_URL if engine == "grok" else OPENAI_RT_URL) + model,
                                        additional_headers={"Authorization": f"Bearer {key}"},
@@ -1606,6 +1615,13 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 if txt:
                     await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": False}]}}, ensure_ascii=False))
                     _vlog("q", text=txt, page=book.get("page") or page, book=file_rel)
+            elif t == "conversation.item.input_audio_transcription.updated":
+                # 97a(xAI 形制):.updated=累积全文可修正,且官方未记载 .completed——先当 interim 下发(前端覆盖式显示);
+                # 轮次落库以最后一次为准(is_interim=True 不触发前端定稿逻辑,避免每次修正都落一条)
+                txt = (e.get("transcript") or "").strip()
+                if txt:
+                    await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": txt, "is_interim": True}]}}, ensure_ascii=False))
+                    book["_grok_tr"] = txt   # 暂存;response.done 时定稿
             elif t == "response.function_call_arguments.done":
                 name = e.get("name") or ""
                 try:
@@ -1622,6 +1638,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 elif name:
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
             elif t == "response.done":
+                if book.get("_grok_tr"):   # 97a:grok 转写定稿(最后一次 .updated 全文=本轮用户句)
+                    _t9 = book.pop("_grok_tr")
+                    await bws.send(json.dumps({"event": 451, "payload": {"results": [{"text": _t9, "is_interim": False}]}}, ensure_ascii=False))
+                    _vlog("q", text=_t9, page=book.get("page") or page, book=file_rel)
                 if cur_a["txt"].strip():
                     _vlog("a", text=cur_a["txt"][:2000], page=book.get("page") or page, book=file_rel)
                     cur_a["txt"] = ""

@@ -701,3 +701,16 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - 方案:每张卡出生发稳定编号 `_mkCid()`,跟随所有形态:`renderInfo` 卡(`card.cid`,落库自然带上→历史回放同号;旧卡回放时补发)、浮层镜像 `_cardPush(…,cid)` 与侧栏 `_infoCardEl`(dataset.vcCid)**同号**、收藏入夹 `rec.cid`、拖出复制保留原号、图片单选=`卡号#图序`。
 - `_pinToggle`:选中时查 `_pins.cids[cid]`——同号已在上下文→toast「这张卡已在上下文中」+已选实例 pop 特效提示,拒绝重复注入;取消时清号。label `·2` 唯一化保留(服务**不同**编号的同名卡,如两次天气卡)。
 
+## 批次 97(2026-07-13)Grok 官方文档定稿 + pin 全模式 + 录音根修 + TTS 可停
+
+**97a Grok 按官方文档修正**(docs.x.ai voice-agent 全参数表,存档 references/xai-grok-assessment.md):
+- **voice 在 session 顶层**(94 放 audio.output.voice 无效=一直默认 eve);`reasoning.effort` 取值只有 high|none(94 的 low 是无效值)→ none;`audio.output.speed` 0.7-1.5 官方支持=rt_speed 接上。
+- **转写开启**:`audio.input.transcription={"model":"grok-transcribe","language_hint":rt_lang}`——设了才发事件;事件名 `.updated`(**累积全文可修正**,非 OpenAI 的 .delta;官方未记载 .completed)。relay:updated→前端 is_interim 覆盖显示+暂存,response.done 时定稿(is_interim:false+落库)。
+- 其它文档事实:会话上限 **120min**(30min 是 resumption 历史过期);文本输入 $0.004/**每个 item.create**(拉模式注入每条都计费!);turn_detection 只有 server_vad|null(threshold 默认 .85)+xAI 特色 idle_timeout_ms(久不说话反复主动开口);**26 音色**(5 内置+21 旗舰:luna/cosmo/lumen 教育系、ursa 温暖助手系……前端下拉暂只列 5 内置,可扩);force_message(硬编码 TTS 不过模型,"IS the turn"不要再 create)/replace 发音映射/resumption 断线恢复(enabled+conversation_id 重连,30min)=可用未接。
+
+**97b pin 全模式化**(用户设计):`_pinBind._fire` 去掉"仅通话中"gate——文字模式长按卡片同样带入;chips 本来就无通话 gate(输入框上方,×取消)✓;`_pinSync` 的 2.1 注入仍只在通话中;文字管线=send 时 `sentCtx.pinned`(`__vcPins()` 导出)→ webapp `_ctx_block` 尾部拼「用户长按带入的卡片」段(no_book 路径也拼——带入内容与书本开关独立)。
+
+**97c 录音只响一声根修**(ffprobe 实锤字节/时长匹配=文件本来就短,推翻元数据假设):录的是 WebRTC **实时**流,`_recFinish` 在 response.done(数据推完)立即 mr.stop——但音频还要播好几秒→只录到已播的开头,回答越长丢越多。修:mr.stop **延迟到 aEnd(估算播放结束)+600ms**(上限 90s);`_recAbort` 改 flush 语义(已定稿的 onstop 照常上传,插话/挂断不再静默丢最后一轮)。另:clip POST 落盘后 ffmpeg -c copy remux+faststart(fMP4 兜底)、GET 改 send_file(conditional=True)(Range 支持,iOS <audio> 对无 Range 源易异常)、存量已批量 remux。
+
+**97d TTS 播放钮全状态可停**(用户设计):busy(生成中)再点=`__vcTtsStop`(bargeIn:清本地队列+作废 relay 侧合成)→ capture 检测无播放自然收尾→blob 过小丢弃不入库;playing 再点=停(已有)。
+

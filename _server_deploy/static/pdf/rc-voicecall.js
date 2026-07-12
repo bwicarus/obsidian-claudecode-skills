@@ -632,8 +632,8 @@
     var lpT = null, lpX = 0, lpY = 0;
     function _fire() {
       lpT = null;
-      if (!_rtc.on) return;   // 只在 2.1 通话中有意义
-      _pinToggle(el, label, textFn);   // 77:状态中心统一管(覆盖式注入+chip 同步)
+      // 97(用户设计):不再限通话中——文字模式同样可长按带入(chips 照常出输入框上方,send 时随 ctx.pinned 走文字管线)
+      _pinToggle(el, label, textFn);   // 77:状态中心统一管(通话=覆盖式注入;文字=send 注入;chip 同步)
     }
     el.addEventListener('pointerdown', function (ev) {
       if (ev.target.closest('.vc-card-x')) return;
@@ -1172,8 +1172,8 @@
       mr.start(1000);
     } catch (e) { _rec.mr = null; }
   }
-  function _recAbort() {
-    try { if (_rec.mr && _rec.mr.state !== 'inactive') { _rec.mr.ondataavailable = null; _rec.mr.onstop = null; _rec.mr.stop(); } } catch (e) {}
+  function _recAbort() {   // 97:flush 语义——已设 onstop(=已 _recFinish 拿过 id)的照常触发上传;未定稿的无 id 引用,丢弃无害
+    try { if (_rec.mr && _rec.mr.state !== 'inactive') { _rec.mr.stop(); } } catch (e) {}
     _rec.mr = null;
   }
   function _recFinish() {   // 返回 clipId(录着才有);blob 在 onstop 异步上传,落库先带 id 不等传完
@@ -1187,7 +1187,11 @@
         if (blob.size > 4000) fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob }).catch(function () {});
       } catch (e) {}
     };
-    try { mr.stop(); } catch (e) { _rec.mr = null; return ''; }
+    // 97(用户实测"回放只响一声"根因):录的是 WebRTC **实时**流——response.done 只是数据推完,
+    // 音频还要播好几秒;立即 stop=只录到已播的开头。延到估算播放结束(aEnd)+余量再停。
+    var _wait = 0;
+    try { _wait = Math.max(0, (_rtc.aEnd || 0) - Date.now()) + 600; } catch (e) { _wait = 600; }
+    setTimeout(function () { try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {} }, Math.min(_wait, 90000));
     _rec.mr = null;
     return id;
   }
@@ -1348,6 +1352,10 @@
     try { _speakSafe(String(text || '').slice(0, 4000)); } catch (e) {}
     return function () { try { bargeIn(); } catch (e) {} };
   };
+  window.__vcPins = function () {   // 97:文字助手 send 时取当前带入的卡片(非通话模式的上下文注入)
+    try { return Object.keys(_pins.map).map(function (k) { return { label: k, text: _pins.map[k] }; }); } catch (e) { return []; }
+  };
+  window.__vcTtsStop = function () { try { bargeIn(); } catch (e) {} };   // 97:TTS 生成/播放随时可停(历史▶钮 busy 再点=停)
   window.__vcMicHold = function (on) {   // 82:历史 clip 经 <audio> 播放不在 WebRTC AEC 参考里——播放期禁麦防 AI 听到自己
     try {
       var mt = _rtc.mic && _rtc.mic.getAudioTracks && _rtc.mic.getAudioTracks()[0];
