@@ -1486,12 +1486,14 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         try:
             await ows.send(json.dumps({"type": "conversation.item.create",
                                        "item": {"type": "function_call_output", "call_id": call_id, "output": out}}))
+            if engine == "grok":
+                _vg["tools_n"] = max(0, _vg["tools_n"] - 1)   # 119b(实测bug):回填即出飞——117 把出飞放在判定后,单工具看到"自己还在飞"=永不 create,每个工具都要用户追问一次才出结果
             if not ok and _tfail["n"] >= 6:
                 sys.stderr.write(f"[voice-oa] 工具熔断硬断: {_tk[:80]} ×{_tfail['n']}\n")
             elif _silent[0] and ok:
                 sys.stderr.write(f"[voice-oa] 工具静默入库(不 create): {name}\n")   # 113:与 RTC 版 no_create 同语义
             elif engine == "grok" and _vg["tools_n"] > 0:
-                sys.stderr.write(f"[grok-diag] 工具回填暂不 create(在飞还有 {_vg['tools_n']} 个)\n")   # 117:收齐并行工具再单次 create
+                sys.stderr.write(f"[grok-diag] 工具回填暂不 create(在飞还有 {_vg['tools_n']} 个)\n")   # 117:收齐并行工具再单次 create(末位工具负责 create)
             else:
                 if engine == "grok":   # 117:工具续答前等上段音频播完(官方提醒:立即 create=语音重叠)
                     _wait0 = _vg["aEnd"] - time.time()
@@ -1506,8 +1508,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
         if engine == "grok":
-            _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数
-            _vg["tools_n"] = max(0, _vg["tools_n"] - 1)   # 117:在飞收口(此处必经:成功/失败/静默都过)
+            _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数(出飞已在回填处前移,119b)
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=out[:300])
 
