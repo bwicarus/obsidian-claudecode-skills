@@ -4478,8 +4478,8 @@ def assistant_rtc_session():
                             "**关键词必须简短**——事物名称本身 1~3 个词,别写修饰语和描述句;一次最多 8 个)。"
                             "搜到的图会**自动显示在用户界面**,你只需口头简短说明;"
                             "没搜到就换更通用的词再试一次,再没有就如实说,绝不编链接或输出 markdown 图片语法。")}
-    # ㊴ 官方降耗(指南§10.1"工具越多描述越长,每轮越贵"):description 截短——schema 每轮进上下文,
-    # 33 个工具×1024 字是每轮固定开销;截到 ~280 字(用途+args 说明开头都在),_vo 覆盖项保留完整
+    # 工具 description=目录行原文(本就简洁:全量合计≈3.7k 字,"用途+args"结构,符合官方§10.1 的简洁要求)。
+    # [:280] 只是防御 cap(防未来有人写出长目录行),现存目录行零截断;_vo 覆盖项(search_image)保留完整。
     tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[: (1024 if n in _vo else 280)],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items()]
