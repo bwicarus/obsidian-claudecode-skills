@@ -1061,7 +1061,9 @@
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
       _rtc.sel = sel;
-      _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它)') : '用户当前没有选中文字') + ';状态记录,不要回应本条)');
+      _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它;' +
+        (sel.length <= 200 ? '**选中内容已完整在此,直接使用,不必调 read_selection**' : '选中较长已截断,需要完整内容才调 read_selection') + ')') :
+        '用户当前没有选中文字') + ';状态记录,不要回应本条)');
     } else if (t === 'text' && j.content) {
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
