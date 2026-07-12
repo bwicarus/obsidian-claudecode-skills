@@ -1384,7 +1384,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         if cred.get("rt_lang") in ("zh", "ja", "en"):
             _gtr["language_hint"] = cred["rt_lang"]
         sess["audio"]["input"]["transcription"] = _gtr
-        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad", "threshold": 0.5}   # xAI 无 semantic_vad;默认 .85 偏钝(耳机麦轻声不触发="听不到我说话"),降到 OpenAI 同款 0.5
+        sess["audio"]["input"]["turn_detection"] = None   # 111(用户设计):手动轮次——本地 VAD 判边界+commit+response.create;server_vad 需要听到持续静音才判轮次,与"静默停推"互斥
         sess["audio"]["output"].pop("voice", None)
         sess["voice"] = cred.get("rt_grok_voice") or "eve"   # 97a:官方形制=session 顶层(94 放 audio.output 无效,一直是默认 eve)
         try:
@@ -1404,6 +1404,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     _tfail = {"key": "", "n": 0}   # 100:工具熔断(Grok 实测 goto_page 错参失败→模型无限重试;GPT 也防)
     _tr_done = set()   # 101:转写 completed 去重(xAI 同轮多发)
     _turn = {"n": 0}   # 104:话轮计数(图像焚旧参照)
+    import array as _arr
+    import collections as _coll
+    import time as _tm2
+    _vg = {"last": 0.0, "pre": _coll.deque(maxlen=30), "active": False, "busy": False}   # 111:本地 VAD 状态(up 写/down 维护 busy)
     _gk = {"t0": time.time(), "in_b": 0, "out_b": 0}   # 110:grok 自记账(推送/接收音频字节+连接时长)
     _img_items = []    # 104:(turn, item_id) 直喂图记账
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
@@ -1490,11 +1494,6 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         abuf = bytearray()   # 攒 100ms 再 append(前端 20ms/帧 → 50 msg/s 太碎;24k·16bit·100ms=4800B)
         # 109(用户设计:静默别烧钱):grok 按音频时长计费——静音也是音频,持续推流=持续计费。
         # RMS 语音门:静默段不转发(只进 0.6s 预滚缓冲),开口时先补发预滚(不吃句首)+800ms hangover(不切句尾)。
-        import array as _arr
-        import collections as _coll
-        import time as _tm2
-        _vg = {"last": 0.0, "pre": _coll.deque(maxlen=30)}   # pre:最近 ~0.6s(浏览器 20ms/帧 ×30)
-
         def _rms(b):
             try:
                 a = _arr.array("h", bytes(b[:len(b) - (len(b) % 2)]))
@@ -1502,18 +1501,69 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             except Exception:
                 return 9999.0
 
+        async def _grok_turn_end():   # 111:本地判定说完→补 0.5s 尾静音(转写收尾)→flush→commit+response.create→停止上传
+            _vg["active"] = False
+            abuf.extend(b"\x00" * 24000)   # 0.5s @24k16bit
+            if abuf:
+                try:
+                    await ows.send(json.dumps({"type": "input_audio_buffer.append",
+                                               "audio": base64.b64encode(bytes(abuf)).decode()}))
+                except Exception:
+                    return
+                abuf.clear()
+            try:
+                await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                await ows.send(json.dumps({"type": "response.create"}))
+            except Exception:
+                pass
+
+        async def _grok_turn_start():   # 111:本地判定开口——打断进行中的响应+前端清播放+话轮计数/焚图(原 speech_started 职责)
+            _vg["active"] = True
+            if _vg["busy"]:
+                try:
+                    await ows.send(json.dumps({"type": "response.cancel"}))
+                except Exception:
+                    pass
+            try:
+                await bws.send(json.dumps({"event": 450, "payload": {}}, ensure_ascii=False))
+            except Exception:
+                pass
+            if _bridge["q"] is not None:   # 桥模式:清未播缓冲
+                _bridge["pend"] = b""
+                try:
+                    while True:
+                        _bridge["q"].get_nowait()
+                except Exception:
+                    pass
+            _turn["n"] += 1
+            _keep = [it for it in _img_items if it[0] >= _turn["n"] - 2]
+            for _ep0, _iid0 in _img_items:
+                if _ep0 < _turn["n"] - 2:
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _iid0}))
+                    except Exception:
+                        pass
+            _img_items[:] = _keep
+
         async def _feed_audio(chunk):
-            if engine == "grok":
+            if engine == "grok":   # 111(用户设计):本地 VAD 全权判轮次——说话才上传(静音 PCM 也按 $0.05/min 计费)
                 _nw = _tm2.time()
                 if _rms(chunk) > 350:
                     _vg["last"] = _nw
-                if _nw - _vg["last"] > 0.8:   # 静默(含 hangover 之外):不推,只留预滚
-                    _vg["pre"].append(bytes(chunk))
-                    return
-                if _vg["pre"]:   # 开口:先补发预滚,句首不丢
-                    for c0 in _vg["pre"]:
-                        abuf.extend(c0)
-                    _vg["pre"].clear()
+                if not _vg["active"]:
+                    if _nw - _vg["last"] < 0.1:   # 刚检测到人声=开口
+                        await _grok_turn_start()
+                        for c0 in _vg["pre"]:   # 预滚补发,句首不丢
+                            abuf.extend(c0)
+                        _vg["pre"].clear()
+                    else:
+                        _vg["pre"].append(bytes(chunk))
+                        return
+                else:
+                    if _nw - _vg["last"] > 0.8:   # 说完(800ms hangover)
+                        await _feed_audio_raw(chunk)
+                        await _grok_turn_end()
+                        return
             await _feed_audio_raw(chunk)
 
         async def _feed_audio_raw(chunk):
@@ -1779,7 +1829,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                         pass
                 elif name:
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
+            elif t == "response.created":
+                _vg["busy"] = True
             elif t == "response.done":
+                _vg["busy"] = False
                 if cur_a["txt"].strip():
                     _vlog("a", text=cur_a["txt"][:2000], page=book.get("page") or page, book=file_rel)
                     cur_a["txt"] = ""

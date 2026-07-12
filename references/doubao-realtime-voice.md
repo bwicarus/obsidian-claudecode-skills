@@ -756,3 +756,11 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **108**:WS 引擎 `start()` 补单飞锁(93 只锁 rtcStart——Grok/豆包/GPT-WS 路径漏配=用户实测"四五个同时工作");ws 建立后过期回合自毁不留活连接。
 - **109(用户设计:静默别烧钱)**:Grok 按音频时长计费(静音也是音频,常驻推流=挂着就烧 $3/h)→ relay `_feed_audio` 加 **RMS 语音门**(仅 grok):静默段不转发只进 0.6s 预滚缓冲(30×20ms 帧),开口先补发预滚不吃句首+800ms hangover 不切句尾,阈值 RMS>350。**待账单验证计费口径**:若实测"连接挂着不推音频也计费"(第三方 evalgent 称按连接时长),则升级用户的**懒连接方案**:说话时才连(实测连接 0.48s+resumption conversation_id 30min 历史保留=断连不丢上下文),response.done+8s 关连接。
 
+## 批次 110-111(2026-07-13)Grok 自记账 + 本地 VAD 手动轮次(用户定稿计费口径)
+
+**计费口径(用户核实 docs.x.ai voice-agent 定价)**:只挂 WS 不发不收音频≈$0(无连接时长费);**上传静音 PCM 照计费**($0.05/min 按收发音频时长,静音帧不豁免);`server_vad` 不省上传费(它在服务端收到音频后才判断);`idle_timeout_ms` 必须 null(否则沉默后模型反复主动开口烧钱——我们从未设置✓)。
+
+**110 自记账**:xAI 无公开 usage API(探测 404)→relay grok 会话 finally 记账:实际推送/接收音频分钟+连接分钟,两口径各估费用→`state/grok-usage.json`(留 500 笔)+日志行;与 console 余额对照可验证。
+
+**111 本地 VAD 手动轮次(用户设计,替代 109 的半吊子语音门)**:109 保留 server_vad 有自相矛盾 bug——静默停推后服务端听不到句尾静音流,轮次判定永远凑不齐=不回答。定稿:`turn_detection: null` + relay 本地 RMS VAD 全权:开口(RMS>350)→`_grok_turn_start`(response.cancel 打断进行中响应+给前端发 450 清播放+桥清缓冲+话轮计数/焚图——原 speech_started 的全部职责)+补发 0.6s 预滚;说完(800ms hangover)→`_grok_turn_end`(补 0.5s 尾静音助转写收尾→flush→`input_audio_buffer.commit`+`response.create`)→**停止上传**。busy 标志由 down 泵 response.created/done 维护(_vg 提升函数级,up/down 共享)。静默期完全不推流=挂机≈零成本。
+
