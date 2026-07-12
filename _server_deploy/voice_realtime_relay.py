@@ -1817,9 +1817,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0):
             t = ev.get("type") or "?"
             n[t] = n.get(t, 0) + 1
             if t == "response.done":
-                u = (ev.get("response") or {}).get("usage") or {}
+                r0 = ev.get("response") or {}
+                u = r0.get("usage") or {}
+                otd = u.get("output_token_details") or {}
+                # 模态一目了然:哪轮出了音频不用靠耳朵定位(out_audio>0=这轮真出声了)
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
-                                 f"(P1 观察;记账仍由前端上报)\n")
+                                 f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
+                                 f"status={r0.get('status')}\n")
             elif t == "error":
                 sys.stderr.write(f"[rtc-ctl] err: {json.dumps(ev.get('error') or {})[:150]}\n")
         sys.stderr.write(f"[rtc-ctl] sideband 关闭 call={call_id[:12]} 事件统计={json.dumps(n)[:300]}\n")

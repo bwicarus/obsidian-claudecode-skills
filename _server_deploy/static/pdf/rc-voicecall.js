@@ -803,7 +803,9 @@
     // mixed=用户直接提问(短答)用音频,工具结果/深度思考(易长)用文字——外部审核推荐的混合形态
     var wantAudio = (m === 'audio') || (m === 'mixed' && src === 'user');
     _rtc.wantTts = (m === 'tts');   // done 时把文字回复喂给豆包朗读通道代念
-    _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'] } });
+    // 预算按模态分级(账本实锤:512 是按25s音频设计的,text 模态下≈350中文字,长文字回答被腰斩)
+    _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
+                                                   max_output_tokens: wantAudio ? 512 : 2048 } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     try {
