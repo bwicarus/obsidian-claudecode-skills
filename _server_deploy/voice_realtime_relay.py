@@ -1183,6 +1183,8 @@ async def handle_tts_only(bws):
 # 状态(选中/笔迹)走 conversation.item.create system 消息——与豆包 510 增量哲学同构。
 OPENAI_RT_CRED = Path("~/.config/openai-realtime.json").expanduser()
 OPENAI_RT_URL = "wss://api.openai.com/v1/realtime?model="
+XAI_RT_CRED = Path("~/.config/xai-grok.json").expanduser()          # 94:Grok Voice 第三引擎(协议兼容 OpenAI Realtime)
+XAI_RT_URL = "wss://api.x.ai/v1/realtime?model="
 
 
 def _openai_key() -> str:
@@ -1312,14 +1314,26 @@ async def _oa_deep(question: str, file_rel: str, page: int) -> str:
     return answer[:3000] or "(没拿到回答)"
 
 
-async def handle_openai(bws, file_rel: str = "", page: int = 0):
-    key = _openai_key()
-    if not key:
-        await bws.send(json.dumps({"event": -1, "payload": {"error": "缺 OpenAI 凭证:~/.config/openai-realtime.json"}}, ensure_ascii=False))
-        await bws.close()
-        return
+async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "openai"):
+    # 94:engine="grok" 复用整条 GPT-WS 管线(xAI Voice Agent 协议兼容)。实测差异:恒纯语音(text 模态被忽略)、
+    # 无视觉(input_image 被静默收下但模型看不见,回答幻觉)→ 视觉走文字转述;OpenAI 特有字段裁掉防 session.update 整条被拒。
+    if engine == "grok":
+        try:
+            key = json.loads(XAI_RT_CRED.read_text("utf-8")).get("api_key") or ""
+        except Exception:
+            key = ""
+        if not key:
+            await bws.send(json.dumps({"event": -1, "payload": {"error": "缺 xAI 凭证:~/.config/xai-grok.json"}}, ensure_ascii=False))
+            await bws.close()
+            return
+    else:
+        key = _openai_key()
+        if not key:
+            await bws.send(json.dumps({"event": -1, "payload": {"error": "缺 OpenAI 凭证:~/.config/openai-realtime.json"}}, ensure_ascii=False))
+            await bws.close()
+            return
     cred = _creds()
-    model = cred.get("rt_model") or "gpt-realtime-2.1-mini"
+    model = "grok-voice-latest" if engine == "grok" else (cred.get("rt_model") or "gpt-realtime-2.1-mini")
     vc = await _fetch_book_ctx(file_rel, page)
     book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
             "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None}
@@ -1361,8 +1375,16 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                       "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": cred.get("rt_voice") or "marin"}},   # ⚠ rate 必填:漏掉=session.update 整条被拒,会话跑默认裸配置(无人设无工具无转写=复读机)
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,   # 我们的工具多有副作用/顺序依赖,串行更稳
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}     # 官方:低频批量截断,保缓存前缀稳定(比逐轮小截强)
+    if engine == "grok":   # 94:裁掉 OpenAI 特有字段(xAI 对未知字段的容忍度未知,session.update 整条被拒=裸配置复读机)
+        sess.pop("truncation", None)
+        sess.pop("max_output_tokens", None)
+        sess["audio"]["input"].pop("noise_reduction", None)
+        sess["audio"]["input"].pop("transcription", None)   # OpenAI 形制转写配置;xAI 转写格式未知(边界:用户句字幕暂缺,看日志再补)
+        sess["audio"]["input"]["turn_detection"] = {"type": "server_vad", "create_response": True, "interrupt_response": True}
+        sess["audio"]["output"]["voice"] = cred.get("rt_grok_voice") or "eve"
+        sess["reasoning"] = {"effort": "low"}   # grok-voice-think 默认 high=慢,伴读场景 low 起步
     try:
-        ows = await websockets.connect(OPENAI_RT_URL + model,
+        ows = await websockets.connect((XAI_RT_URL if engine == "grok" else OPENAI_RT_URL) + model,
                                        additional_headers={"Authorization": f"Bearer {key}"},
                                        max_size=16 * 1024 * 1024, open_timeout=15)
     except Exception as ex:
@@ -1387,8 +1409,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
             else:
                 cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
                 ctx = {"file_rel": file_rel, "page": book.get("page") or page}
-                if _creds().get("rt_image"):
-                    ctx["_want_vision"] = 1   # ㉗:看图/看笔迹类工具跳过本地转述,原图穿透 → input_image 直喂 GPT
+                if _creds().get("rt_image") and engine != "grok":
+                    ctx["_want_vision"] = 1   # ㉗:看图/看笔迹类工具跳过本地转述,原图穿透 → input_image 直喂 GPT(94:grok 无视觉,恒走文字转述)
                 if book.get("ink_strokes"):
                     ctx["ink"] = book["ink_strokes"]
                 if book.get("sel"):
@@ -1409,7 +1431,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0):
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
                 # ㉕ 图像直喂(凭证 rt_image 开关,⚪格式按 GA conversation item 推定待实测):看图类工具返回的渲染图
                 # 直接给 GPT 自己看(2.1 原生视觉),不再经 Claude 文字转述;失败(模型不支持/格式不对)由 error 事件暴露,关掉开关即回文字链路
-                if vis and _creds().get("rt_image"):
+                if vis and _creds().get("rt_image") and engine != "grok":
                     try:
                         for v in vis[:2]:
                             await ows.send(json.dumps({"type": "conversation.item.create", "item": {
@@ -2170,8 +2192,8 @@ async def handle_browser(bws):
     except Exception:
         pass
     cred = _creds()
-    if cred.get("rt_engine") == "openai":   # ㉔:通话引擎切 GPT Realtime(电话按钮同一入口,relay 层换引擎)
-        await handle_openai(bws, file_rel, page)
+    if cred.get("rt_engine") in ("openai", "grok"):   # ㉔/94:通话引擎切 GPT Realtime / Grok Voice(电话按钮同一入口,relay 层换引擎)
+        await handle_openai(bws, file_rel, page, engine=cred.get("rt_engine"))
         return
     if cred.get("api_key"):
         # 新版鉴权(实测 2026-07):单 API Key,只要 X-Api-Key + Resource-Id,无需 APP ID/固定 App-Key

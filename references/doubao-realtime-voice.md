@@ -688,3 +688,16 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 3. relay `_RTC_CTL_LIVE[uid]` 取证:同 uid 新 ctl 挂上时旧的还在→`⚠ 同 uid 双 call 并存` 告警日志(不踢——iPad+PC 多设备并存合法,只留证据供下次诊断)。
 4. SP 加**页面内容铁律**:被问"这页写什么"而上下文无页文本→必须先 read_page;答"我看不到/把内容发给我"=错误行为(治裸模型式回答,与 see_ink 铁律同构)。
 
+## 批次 94-95(2026-07-13)Grok 第三引擎 + 卡片稳定编号去重
+
+**94 Grok Voice 接入**(实测先行,能力边界钉死后按现实接):
+- 实测:①`output_modalities:["text"]` 被无视仍出声(audio.delta×4)→ **恒纯语音,四态不适用**;②`input_image` 被静默收下但模型无视觉(纯红图答"无法查看图片",首测幻觉"一只猫")→ 视觉走文字转述;③function calling ✓(`response.function_call_arguments.done` 实测);④文本输入 ✓;⑤事件流=OpenAI GA 形制(响应/音频/字幕事件全同名)。
+- 接法:`handle_openai(engine="grok")` **复用整条 GPT-WS relay 管线**——`XAI_RT_URL`+`~/.config/xai-grok.json`+model=grok-voice-latest;sess 裁掉 OpenAI 特有字段(truncation/max_output_tokens/noise_reduction/transcription/semantic_vad→server_vad)防 session.update 整条被拒;voice=`rt_grok_voice`(默认 eve);reasoning.effort=low(grok-voice-think 默认 high 慢)。视觉双 gate:`_want_vision`/直喂分支 `engine != "grok"`(恒本地文字转述)。分发:`rt_engine in ("openai","grok")`。
+- 前端:引擎下拉加「Grok Voice(WebSocket·耳机推荐)」+ grok 专属组(音色 eve/ara/rex/sal/leo + 能力边界说明行);webapp 白名单 +rt_grok_voice。
+- 已知边界:用户句转写暂缺(xAI 转写配置格式未知,裁掉了 transcription;看日志有无自动转写事件再补);WS 半双工外放可能回声(建议耳机)。
+
+**95 卡片稳定编号(用户设计:同内容禁止重复入上下文)**:
+- 根因:`_pins` 键=label,同 label 自动 `·2` 后缀=同一张卡的浮层/侧栏/收藏夹拖出三种实例以不同键共存,内容注入两遍(用户截图实锤)。
+- 方案:每张卡出生发稳定编号 `_mkCid()`,跟随所有形态:`renderInfo` 卡(`card.cid`,落库自然带上→历史回放同号;旧卡回放时补发)、浮层镜像 `_cardPush(…,cid)` 与侧栏 `_infoCardEl`(dataset.vcCid)**同号**、收藏入夹 `rec.cid`、拖出复制保留原号、图片单选=`卡号#图序`。
+- `_pinToggle`:选中时查 `_pins.cids[cid]`——同号已在上下文→toast「这张卡已在上下文中」+已选实例 pop 特效提示,拒绝重复注入;取消时清号。label `·2` 唯一化保留(服务**不同**编号的同名卡,如两次天气卡)。
+

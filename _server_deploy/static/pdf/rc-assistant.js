@@ -319,7 +319,15 @@
           '<option value=""' + (!c.rt_engine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
           '<option value="openai_rtc"' + (c.rt_engine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·推荐:外放无回声+可随时插话)</option>' +
           '<option value="openai"' + (c.rt_engine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebSocket·外放半双工)</option>' +
+          '<option value="grok"' + (c.rt_engine === 'grok' ? ' selected' : '') + '>通话引擎:Grok Voice(WebSocket·耳机推荐)</option>' +
         '</select></div>';
+      if (c.rt_engine === 'grok') {   // ── 94 Grok 专属:音色 + 能力边界说明 ──
+        var _GKV = ['eve', 'ara', 'rex', 'sal', 'leo'];
+        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_voice" style="flex:1 1 100%">' +
+          _GKV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_grok_voice || 'eve') === v ? ' selected' : '') + '>Grok 音色:' + v + (v === 'eve' ? '(默认)' : '') + '</option>'; }).join('') +
+          '</select></div>' +
+          '<div class="ams-tdef">Grok Voice:$0.05/分钟平价 · 首音频≈1s · 中日文可用 · 工具调用可用。边界:恒纯语音(模式按钮的文字/混合档无效)、不支持看图(看图类工具走文字转述)、WebSocket 半双工(外放可能有回声,建议耳机)。</div>';
+      }
       if (isOA) {   // ── GPT Realtime 专属(2.1 可调项全暴露)──
         var _RTM = [['gpt-realtime-2.1-mini', '模型:2.1 mini(推荐,音频费≈豆包一半)'], ['gpt-realtime-2.1', '模型:2.1 完整版(更聪明,约 3 倍贵)']];
         var _RTV = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'];

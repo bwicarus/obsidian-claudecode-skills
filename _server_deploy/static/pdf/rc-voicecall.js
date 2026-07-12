@@ -577,7 +577,9 @@
   }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
   // 反复选中/取消若最终状态没变=零注入;变了=一条"当前带入清单(以本条为准,旧声明作废)"——历史不膨胀、语义无歧义
-  var _pins = { map: {}, fp: null, t: null, els: {} };
+  var _pins = { map: {}, fp: null, t: null, els: {}, cids: {} };   // 95:cids={卡片稳定编号:label}——同卡多实例(浮层/侧栏/收藏夹拖出)去重
+  var _cidSeq = 0;
+  function _mkCid() { return 'c' + Date.now().toString(36) + '-' + (++_cidSeq); }   // 95:卡片出生编号,跟随卡片所有形态流转
   function _pinSync() {
     if (_pins.t) clearTimeout(_pins.t);
     _pins.t = setTimeout(function () {
@@ -596,15 +598,23 @@
   }
   function _pinToggle(el, label, textFn) {
     var on = !el.classList.contains('vc-picked');
+    var cid = (el.dataset && el.dataset.vcCid) || '';
     if (on) {
+      if (cid && _pins.cids[cid] && _pins.map[_pins.cids[cid]]) {   // 95(用户设计):同编号的卡已在上下文——同一张卡的另一实例,不重复注入
+        try { if (typeof _toast === 'function') _toast('这张卡已在上下文中'); } catch (e) {}
+        try { var el0 = _pins.els[_pins.cids[cid]]; if (el0) { el0.classList.add('vc-pin-pop'); setTimeout(function () { el0.classList.remove('vc-pin-pop'); }, 420); } } catch (e) {}
+        return;
+      }
       var lb = label, i = 2;
-      while (_pins.map[lb]) lb = label + '·' + (i++);   // label 唯一化(两次天气卡不互相顶掉)
+      while (_pins.map[lb]) lb = label + '·' + (i++);   // label 唯一化(**不同**编号的同名卡,如两次天气卡,不互相顶掉)
       el.dataset.pinLabel = lb;
       _pins.map[lb] = String(textFn()).slice(0, 2500);   // 79:长按=全文入脑(路由长文也放得下)
       _pins.els[lb] = el;
+      if (cid) _pins.cids[cid] = lb;
     } else {
       var lb0 = el.dataset.pinLabel || label;
       delete _pins.map[lb0]; delete _pins.els[lb0];
+      if (cid && _pins.cids[cid] === lb0) delete _pins.cids[cid];
     }
     el.classList.toggle('vc-picked', on);
     el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
@@ -654,19 +664,27 @@
         root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (c2) {   // 单选:先清其它
           c2.classList.remove('vc-picked');
           var lb2 = c2.dataset.pinLabel; if (lb2 && _pins.map[lb2]) { delete _pins.map[lb2]; delete _pins.els[lb2]; }
+          var gc2 = c2.dataset.vcCid; if (gc2 && _pins.cids[gc2]) delete _pins.cids[gc2];
         });
         if (on) {
+          var gcid = (card.cid || '') + '#' + i1;   // 95:图编号=卡号#序号(浮层/侧栏两实例互斥)
+          if (_pins.cids[gcid] && _pins.map[_pins.cids[gcid]]) {
+            try { if (typeof _toast === 'function') _toast('这张图已在上下文中'); } catch (e) {}
+            return;
+          }
           cell1.classList.add('vc-picked');
           var lb = (it.title || '配图') + '·图' + (i1 + 1);
-          cell1.dataset.pinLabel = lb;
+          cell1.dataset.pinLabel = lb; cell1.dataset.vcCid = gcid;
           _pins.map[lb] = ((it.title || '') + ' ' + (it.url || '')).slice(0, 500);
           _pins.els[lb] = cell1;
+          _pins.cids[gcid] = lb;
         }
         _pinSync(); _chipRender();
       }
     });
   }
   function _infoCardEl(card) {   // 87:构一张侧栏信息卡(实时与历史回放共用——刷新后卡永远还是卡)
+    if (!card.cid) card.cid = _mkCid();   // 95:历史旧卡(落库时还没 cid 字段)补发——本次会话内该实例稳定
     var label = card.title || '搜索结果';
     var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
     var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
@@ -686,6 +704,7 @@
       actions: (card.kind === 'images' ? ['img_norm'] : ['web_search']) }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
+    try { d.dataset.vcCid = card.cid; } catch (e) {}   // 95:同卡编号(与浮层镜像实例共享)
     return d;
   }
   window.__vcInfoCardEl = function (card) { try { return (card && card.kind) ? _infoCardEl(card) : null; } catch (e) { return null; } };
@@ -698,7 +717,7 @@
     if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; }
     if (!_sideOpen()) {
       var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
-      var c = _cardPush(html, label, true);   // 字幕模式:浮层镜像(html)
+      var c = _cardPush(html, label, true, false, card.cid);   // 字幕模式:浮层镜像(html,与侧栏卡同编号)
       if (c) { _pinBind(c.el, label, function () { return _infoText(card); }); try { _igWire(c.el, card); } catch (e) {} }
     }
     // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
@@ -1293,6 +1312,7 @@
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) {
           var rec = payloadFn();
           rec.meta = rec.meta || _favMeta();
+          rec.cid = rec.cid || (el.dataset && el.dataset.vcCid) || _mkCid();   // 95:收藏保留卡片编号
           _dockLoad(function () { _favSave(rec); });
           try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
         } else if (moved && e3 && _sideOpen()) {
@@ -1302,7 +1322,8 @@
           var sl = sd2 ? sd2.getBoundingClientRect().left : window.innerWidth;
           if (e3.clientX < sl - 30) {
             var rec2 = payloadFn();
-            var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true);
+            var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true,
+              (el.dataset && el.dataset.vcCid) || '');
             if (c2) {
               _placeFx(e3.clientX, e3.clientY);
               try { if (typeof _toast === 'function') _toast('已放入字幕浮层(关闭侧栏可见)'); } catch (e) {}
@@ -1461,7 +1482,7 @@
           cardEl.addEventListener('pointermove', function (ev) {
             if (drag && (sy0 - ev.clientY) > 50) {
               drag = false;
-              _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml);
+              _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml, false, it.cid || '');   // 95:拖出复制=同一张卡(同编号)
               _dockPanel(false); _dockBtn();
             }
           });
@@ -1540,13 +1561,14 @@
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
     _cardLayout();
   }
-  function _cardPush(text, kindLabel, isHtml, force) {
+  function _cardPush(text, kindLabel, isHtml, force, cid) {
     if (!text || (!isHtml && !text.trim()) || (_sideOpen() && !force)) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
     if (force) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
     var el = document.createElement('div'); el.className = 'vc-card';
+    el.dataset.vcCid = cid || _mkCid();   // 95:浮层卡编号(renderInfo 镜像=侧栏卡同号;普通文字卡自发)
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +

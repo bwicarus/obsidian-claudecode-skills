@@ -5121,7 +5121,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
-                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply", "rt_speed")
+                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply", "rt_speed", "rt_grok_voice")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])
