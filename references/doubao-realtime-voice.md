@@ -810,3 +810,20 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 用户实测(translate 要追问"で、結果は?"才出结果、see_ink 要问"まだですか?"两次)+diag 日志实锤:`工具回填暂不 create(在飞还有 1 个)` 后永远没有补上的 create——**117 的出飞(-1)放在了 create 判定之后**,单工具场景判定时"自己还在飞"→永远跳过 create→模型不念结果,直到用户追问触发新 turn_end create 才顺带带出回填。修:**回填发出即出飞**(-1 前移到判定前),尾部收口 -1 删除防双减;并行语义不变(末位工具出飞后 tools_n=0 负责唯一 create)。附注:Grok 遇翻译请求倾向调 translate 工具而非自己翻(GPT 通常直接翻)——工具在表即合法行为,非 bug;嫌绕可在工具描述加「简短翻译可直接口头给出」。
 
+## 批次 120(2026-07-13)官方文档精读研讨落地(用户睡前指令;五路 agent 精读协议 schema/指南/计费/两示例源码+代码审计,57 条差距)
+
+**机器可读真理源**:docs.x.ai 协议参考页脚注指向 `docs.x.ai/voice-realtime.ws.json`(95KB,9 客户端/37 服务端事件逐字段 schema)——比任何指南页都权威。完整研讨档案 `/tmp scratchpad/grok-study.md`(五路原文)。
+
+**八项落地**:
+1. **P0 instructions 替换语义修正**:官方原文 "replaces the session-level instructions for this response only"——117 起每轮 create 的一句短人设**覆盖了整个 SP**(see_ink 铁律/工具规则/回答语言每轮失效="行为怪异"最深根源)。改:每轮注入 `_oa_instructions()` **全文**+实时状态(免费);
+2. **P0 打断 truncate**:truncate 管线只挂 speech_started(官方:server_vad 专属事件,grok 手动模式不发)→grok 从不 truncate=被打断回答全文留上下文、追问对不齐。`_grok_turn_start` 补 pend_trunc+played 清零+0.6s 字节兜底(前端 played_ms 精确截自动接上);
+3. **P1 状态双通道漏 continue**:grok 拦截块落穿到通用 system item 注入=翻页/选中/圈画各多发一条 $0.004 item 且内容与 instructions 重复;补齐 book 落地(含 `book["page"]`——此前只通用分支更新=instructions 页码陈旧!)+continue;
+4. **延迟压缩**:hangover 0.8→0.6s、反悔窗 0.45→0.3s、尾静音 0.5→0.1s(自加的,官方只要求 commit)——静态开销 1.75→约 0.9s,对齐 2.1 手感;
+5. **cancel 残尾**:response.created 记 response_id;cancel 后按 id 丢弃迟到音频 delta(官方:"Audio deltas from this turn share the same response_id");
+6. **force_message 垫话**:慢工具(deep_think/搜索/看图等)开始即硬编码 TTS「稍等,我处理一下」——零模型往返即时出声,自带完整响应生命周期,不跟 create;
+7. **resumption 第一块砖**:conversation.created 的 id 此前被等待循环静默吞掉——现捕获存 `_conv["id"]`(重连 `?conversation_id=` 续接=#290);
+8. **账本卫生**:grok 的 response.done.usage 不再污染 openai-usage.json;response.create 带 metadata{src}(官方取证钩子,created/done 回显)。
+
+**记录不改**:tools 扁平形制(官方 schema 是嵌套 Chat-Completions 式,实测兼容,排障时第一批归一);transcription.model 字段官方 schema 缺失但事件描述要求(自相矛盾,实测有效保留);`replace` 发音映射/托管 web_search/x_search/audio-opus(WAN 带宽 10 倍降)/keyterms mid-session 更新/server_vad 实验开关(等账单裁决计费口径后定)——均记待办。
+**用户实测清单**:①打断:它说话时插话应立即住嘴且追问对得齐(truncate 生效);②应答延迟体感(约快 0.8s);③慢工具即时听到「稍等」垫话;④行为规则稳定性(每轮铁律恒在);⑤对照 console 扣费与 grok-usage.json 裁决计费口径→决定 server_vad 实验。
+
