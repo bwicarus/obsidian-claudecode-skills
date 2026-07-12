@@ -787,10 +787,13 @@
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
       _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
-      _dcSend({ type: 'response.create' });
+      _rtcRespCreate();
     } else if (t === 'cancel' || t === 'tool_abort') {
       _dcSend({ type: 'response.cancel' });
     }
+  }
+  function _rtcRespCreate() {   // ㊿ 手动挡:按"🔊朗读"开关选输出模态——灭=纯文字回复(输出音频费=成本80%主体归零),
+    _dcSend({ type: 'response.create', response: { output_modalities: [s2sSpeakOn() ? 'audio' : 'text'] } });   // 亮=正常语音;每轮读当前开关=通话中热切
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     try {
@@ -889,7 +892,7 @@
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
-    _dcSend({ type: 'response.create' });
+    _rtcRespCreate();
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
@@ -944,7 +947,7 @@
       try { if (e.item && e.item.id) _rtc.items.push({ id: e.item.id }); } catch (_) {}
       return;
     }
-    if (t === 'response.output_audio_transcript.delta') {
+    if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
     } else if (t === 'input_audio_buffer.speech_started') {
       _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
@@ -953,6 +956,8 @@
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
+    } else if (t === 'input_audio_buffer.speech_stopped') {
+      _rtcRespCreate();   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx) {

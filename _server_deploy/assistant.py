@@ -4488,7 +4488,9 @@ def assistant_rtc_session():
             "audio": {"input": {"noise_reduction": {"type": "near_field"},
                                 "turn_detection": {"type": "semantic_vad",
                                                    "eagerness": cfg.get("rt_eagerness") or "auto",
-                                                   "create_response": True, "interrupt_response": True},
+                                                   # ㊿ 手动挡(官方VAD指南):speech_stopped 后前端按"朗读"开关发带 output_modalities 的 response.create——
+                                                   # 灭=纯文字回复(输出音频费=成本80%主体直接归零);顺带消灭短问竞态(审核#5)
+                                                   "create_response": False, "interrupt_response": True},
                                 "transcription": ({"model": "gpt-realtime-whisper", "language": cfg["rt_lang"]}
                                                   if cfg.get("rt_lang") in ("zh", "ja", "en")
                                                   else {"model": "gpt-realtime-whisper"})},
