@@ -1919,6 +1919,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     else:
                         out = "(已转文字详答并显示在用户屏幕上,不要再口头重复。要点:" + full[:240] + ")"
                         no_create = True   # 长文已显示(可选 TTS 代念),不再花一轮输出音频
+            elif name == "read_selection" and (book.get("sel") or "").strip():
+                # 74(用户设计):选中内容早已随 state 在手——重复类工具程序短路,零 webapp 调用零延迟
+                # (不从工具表摘除:动态改 tools=前缀变=缓存全灭,㊶教训;短路等效且缓存无伤)
+                out = "(选中内容就在这里,无需再查:「" + book["sel"] + "」——直接使用)"
+                label = "读取选中(免调用)"
             elif name == "recall_study":
                 span = str(args.get("span") or "today").lower()
                 out = _study_digest("week" if span.startswith("w") else "today") or "(记录为空——这段时间还没有学习记录,如实告诉用户)"
@@ -1981,6 +1986,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     tool_cache[ck] = {"out": out, "ca": ca if isinstance(ca, dict) else None}
                 if ok and not d.get("cacheable"):
                     tool_cache.clear()   # 写操作成功=便签/高亮/生词等状态变了,粗粒度域失效(审核 P1:revision 的保守替身)
+                if res.get("silent"):
+                    no_create = True   # 74(用户设计):搜索类结果静默入库——卡片已显示,本轮不让模型发言,知识留给下一轮
         except Exception as ex:
             ok, out = False, json.dumps({"error": str(ex)[:200]}, ensure_ascii=False)
         stale = (epoch["n"] != ep0)   # 审核P0#2:工具跑着的时候用户开了新话轮——旧结果不抢话(不 create)

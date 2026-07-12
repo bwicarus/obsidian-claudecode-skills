@@ -1558,9 +1558,10 @@ def _t_web_search(args, ctx):
                 _ts = [it.get("t") or "" for it in (card.get("data") or {}).get("items") or [] if it.get("t")]
                 if _ts:
                     idx = " 卡片条目:" + ";".join(_ts[:5]) + "。"
-            return {"ok": True, "kind": card["kind"],
-                    "note": "搜索结果已用卡片显示在用户屏幕上。口头只说一句概况:" + brief + "。" + idx +
-                            "(不要念卡片细节;用户想深入会自己看或追问)",
+            return {"ok": True, "kind": card["kind"], "silent": True,
+                    "note": "搜索结果已用卡片显示在用户屏幕上,本轮到此结束(系统不会请你发言)。"
+                            "结果概况:" + brief + "。" + idx +
+                            "用户下次说话时若与此相关,直接运用这些信息回答;不要主动复述卡片内容。",
                     "client_action": {"fn": "renderInfoCard", "args": [card]}}
         if r.get("answer"):
             return {"ok": True, "answer": r["answer"], "sources": r.get("sources") or [],

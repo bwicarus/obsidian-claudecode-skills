@@ -1391,6 +1391,13 @@
       return;
     }
     _rtc.turnTool = true;   // ㊸:本轮真调了工具(承诺核查放行)
+    if (name === 'read_selection' && _rtc.sel && _rtc.sel.trim()) {   // 74:选中在手=短路闪回(fallback 路径与 relay 同构)
+      onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
+      _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
+                output: '(选中内容就在这里,无需再查:「' + _rtc.sel.slice(0, 800) + '」——直接使用)' } });
+      _rtcRespCreate('tool');
+      return;
+    }
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
     if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
     onToolStatus({ status: 'running', label: name });
@@ -1414,6 +1421,7 @@
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
+        _rtcTool._silent = !!res.silent;   // 74:搜索类静默入库(卡片已显示,本轮不发言)
         var ca = res.client_action; delete res.client_action;
         try {   // 61b:最近工具结果环(搜索摘要/配图URL)——之后 make_anki/make_note 把对话现场带给制卡 AI
           var _imgs = [];
@@ -1429,7 +1437,8 @@
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
-    _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c:route 档长结果=文字轮(程序分流)
+    if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
+    _rtcTool._silent = false;
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
