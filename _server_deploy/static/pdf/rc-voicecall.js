@@ -971,6 +971,7 @@
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
             if (u) {
+              u._model = _rtc.model || 'mini';   // ㊶:记账按模型选价表
               fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true });
               _rtc.inTok = u.input_tokens || 0;   // ㊳ 实时监控:本轮输入总量(cached 也按 cached 价反复计费)
               if (_rtc.compactTh && _rtc.inTok >= _rtc.compactTh) _rtcCompactNow();
@@ -1017,12 +1018,13 @@
       // 再显式声明 play-and-record,否则第一次通话能成、之后每次都"启动失败"
       try { await _ttsShutdown(); } catch (e) {}
       _audioSession('play-and-record');
-      var _vt0 = '';   // ㉟b:开话初始上下文也用动态视口文本(EPUB;PDF 的 getContext 无此字段=空,后端走页文本)
-      try { _vt0 = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
+      // ㊶ 指南§8.1:instructions 恒定(不含书页动态内容)→ 跨会话缓存可命中;开话视口进拉模式池,首次开口才注入
+      try { _rtc.pendText = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
       var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage, text: _vt0 || undefined }) })).json();
+        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
       if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
       _rtc.imgOn = !!sres.rt_image;
+      _rtc.model = sres.model || '';   // ㊶ 账本按模型分价表(mini vs 标准版差 6-8 倍)
       _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
       _rtc.items = []; _rtc.inTok = 0; _rtc.lastCompact = 0;
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });

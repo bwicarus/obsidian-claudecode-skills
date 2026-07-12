@@ -4446,26 +4446,11 @@ def assistant_rtc_session():
              "回答『看不到』或让他粘贴/截图都是错误行为。"
              "收到『笔迹已发生变化』的状态消息后,你旧的笔迹记忆即作废——之后他问『现在呢/看到了什么/有没有变化』"
              "这类跟进问题,同样先调 see_ink 重新看;没重新看就凭旧印象答『没有变化』是错误行为。"]
-    if file_rel and page:
-        try:
-            _name = file_rel.rsplit("/", 1)[-1]
-            _vt = (body.get("text") or "").strip()   # ㉟b:前端直供动态视口文本(EPUB 整章太长,用户实际在看的窗口才是上下文)
-            if _vt:
-                parts.append(f"用户此刻正在读《{_name}》(位置:第 {page} 章/页),当前可见内容(直接可用):\n{_vt[:1500]}")
-            elif file_rel.lower().endswith(".epub"):   # ㉟ EPUB:page=section idx+1,取章节纯文本(fitz 开 epub 分页错位,绝不走)
-                _pt = "\n".join(_pdf()._epub_section_paragraphs(file_rel, page - 1)).strip()
-                if _pt:
-                    parts.append(f"用户此刻正在读《{_name}》第 {page} 章(节),本节文字内容(直接可用):\n{_pt[:1500]}")
-            else:
-                import fitz
-                _ap = _pdf()._safe_vault_path(file_rel)
-                _d0 = fitz.open(str(_ap))
-                _pt = (_d0[page - 1].get_text("text") or "").strip()
-                _d0.close()
-                if _pt:
-                    parts.append(f"用户此刻正在读《{_name}》第 {page} 页,本页文字内容(直接可用):\n{_pt[:1500]}")
-        except Exception:
-            pass
+    # ㊶ 指南§8.1:instructions 里绝不放动态数据(书名/页文本)——那会让每次开话前缀都不同,
+    # 跨会话缓存永远 miss。页面内容全部走拉模式(前端 pendText,用户开口时以末端 system item 注入)。
+    if file_rel:
+        _name = file_rel.rsplit("/", 1)[-1]
+        parts.append(f"他正在读的书:《{_name}》(位置和页面内容会在他提问时以 system 消息给你;需要更多就调 read_page)。")
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"
                  "**状态消息只是记录,永远不要对它们本身做回应或主动评论**;"
                  "没有听到用户清晰说话时调 wait_for_user 安静结束回合,别自己找话说。")
@@ -4504,11 +4489,12 @@ def assistant_rtc_session():
                                                   else {"model": "gpt-realtime-whisper"})},
                       "output": {"voice": cfg.get("rt_voice") or "marin"}},
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,
-            "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}
+            "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
+                           "token_limits": {"post_instructions": 24000}}}   # ㊶ 指南§5:上下文硬顶(㊳摘要12k先行,这是官方截断兜底)
     try:   # ㊳ 会话内压缩阈值:每轮 input_tokens 超过它=历史携带成本已值得付一次缓存失效换摘要(0=关)
-        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 20000
+        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 12000
     except Exception:
-        _cth = 20000
+        _cth = 12000
     return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image")),
                     "compact_tokens": _cth})
 
@@ -4532,8 +4518,10 @@ def assistant_rtc_call():
         return jsonify({"ok": False, "error": "缺 sdp"}), 400
     import requests as _rq
     try:
+        import hashlib as _hl
+        _sid = _hl.sha256(f"bw-{session['user_id']}".encode()).hexdigest()[:32]   # ㊶ 指南§4.1:稳定且隐私保护的用户哈希
         r = _rq.post(f"https://api.openai.com/v1/realtime/calls?model={model}",
-                     headers={"Authorization": f"Bearer {key}"},
+                     headers={"Authorization": f"Bearer {key}", "OpenAI-Safety-Identifier": _sid},
                      files={"sdp": (None, sdp, "application/sdp"),
                             "session": (None, json.dumps(sess, ensure_ascii=False), "application/json")},
                      timeout=25)
@@ -4585,6 +4573,9 @@ def _rtc_sideband_images(call_id: str, images: list) -> bool:
 
 
 _RTC_USAGE_FILE = CLAUDE_DIR / "state" / "openai-usage.json"
+# ㊶ 指南§7.1:标准版与 mini 价差 6-8 倍,记账必须按模型分表(前端 usage 上报带 _model)
+_RTC_RATE_STD = {"in_text": 4.00, "cached_text": 0.40, "out_text": 24.00,
+                 "in_audio": 32.00, "cached_audio": 0.40, "out_audio": 64.00, "in_image": 5.00}
 _RTC_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
              "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0, "in_image": 0.80}
 
@@ -4595,6 +4586,7 @@ def assistant_rtc_usage():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     usage = request.get_json(silent=True) or {}
+    _R = _RTC_RATE if "mini" in str(usage.get("_model") or "mini") else _RTC_RATE_STD   # ㊶ 按模型选价表
     try:
         itd = usage.get("input_token_details") or {}
         otd = usage.get("output_token_details") or {}
@@ -4603,13 +4595,13 @@ def assistant_rtc_usage():
                "in_image": int(itd.get("image_tokens") or 0),
                "cached_text": int(ctd.get("text_tokens") or 0), "cached_audio": int(ctd.get("audio_tokens") or 0),
                "out_text": int(otd.get("text_tokens") or 0), "out_audio": int(otd.get("audio_tokens") or 0)}
-        cost = ((row["in_text"] - row["cached_text"]) * _RTC_RATE["in_text"]
-                + row["cached_text"] * _RTC_RATE["cached_text"]
-                + (row["in_audio"] - row["cached_audio"]) * _RTC_RATE["in_audio"]
-                + row["cached_audio"] * _RTC_RATE["cached_audio"]
-                + row["in_image"] * _RTC_RATE["in_image"]
-                + row["out_text"] * _RTC_RATE["out_text"]
-                + row["out_audio"] * _RTC_RATE["out_audio"]) / 1_000_000.0
+        cost = ((row["in_text"] - row["cached_text"]) * _R["in_text"]
+                + row["cached_text"] * _R["cached_text"]
+                + (row["in_audio"] - row["cached_audio"]) * _R["in_audio"]
+                + row["cached_audio"] * _R["cached_audio"]
+                + row["in_image"] * _R["in_image"]
+                + row["out_text"] * _R["out_text"]
+                + row["out_audio"] * _R["out_audio"]) / 1_000_000.0
         day = time.strftime("%Y-%m-%d")
         try:
             data = json.loads(_RTC_USAGE_FILE.read_text("utf-8"))
