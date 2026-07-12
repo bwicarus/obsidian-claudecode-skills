@@ -4207,12 +4207,13 @@ def assistant_compact_history():
     b = request.get_json(silent=True) or {}
     uid = session["user_id"]
     file_rel = (b.get("file") or "").strip()
+    force = bool(b.get("force"))   # ㊳ 会话内压缩:阈值降到 8 轮(通话中触发时轮次可能不多但音频 token 已重)
     sm = _summary_load(uid, file_rel)
     upto = sm.get("upto_ts") or 0
     fresh = [m for m in _load_msgs_for(uid, file_rel)
              if (m.get("ts") or 0) > upto and m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
     KEEP = 6   # 最近几轮保留原文(摘要丢局部语义,官方 8.4 同款建议)
-    if len(fresh) < 14:
+    if len(fresh) < (8 if force else 14):
         return jsonify({"ok": True, "skipped": "对话不够长,暂不压缩"})
     cut = len(fresh) - KEEP
     while cut > 1 and (fresh[cut - 1].get("ts") or 0) == (fresh[cut].get("ts") or 0):
@@ -4237,7 +4238,7 @@ def assistant_compact_history():
     p.write_text(json.dumps({"summary": out[:2000], "upto_ts": pack[-1].get("ts") or int(time.time()),
                              "ts": int(time.time())}, ensure_ascii=False), "utf-8")
     print(f"[compact] uid={uid} file={file_rel or 'global'} packed={len(pack)} → {len(out)}字", flush=True)
-    return jsonify({"ok": True, "packed": len(pack), "summary_chars": len(out)})
+    return jsonify({"ok": True, "packed": len(pack), "summary_chars": len(out), "summary": out[:2000]})
 
 
 @bp.route("/history")
@@ -4502,7 +4503,12 @@ def assistant_rtc_session():
                       "output": {"voice": cfg.get("rt_voice") or "marin"}},
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8}}
-    return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image"))})
+    try:   # ㊳ 会话内压缩阈值:每轮 input_tokens 超过它=历史携带成本已值得付一次缓存失效换摘要(0=关)
+        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 20000
+    except Exception:
+        _cth = 20000
+    return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image")),
+                    "compact_tokens": _cth})
 
 
 @bp.route("/rtc-call", methods=["POST"])
@@ -4676,7 +4682,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "bot_name", "speaking_style", "system_role", "enable_music",
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
-                     "rt_instructions", "rt_eagerness", "rt_full_duplex")
+                     "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

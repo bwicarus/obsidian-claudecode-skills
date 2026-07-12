@@ -743,7 +743,8 @@
   //    工具循环在本地(dc 收 function_call → fetch /voice-tool → dc 回填),client_action 直接执行;
   //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
   var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '',
-               ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false };
+               ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false,
+               items: [], inTok: 0, compactTh: 0, lastCompact: 0 };   // ㊳:item 账本+每轮输入量+会话内压缩阈值
   function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
   function _rtcSys(text) {
     _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
@@ -913,8 +914,32 @@
     _rtcCap.t = setTimeout(function () { _rtcCap.t = null; _rtcCapPump(); },
                            Math.max(1100, Math.min(6000, s.length * 160)));
   }
+  // ㊳ 会话内压缩(官方 8.4:item.delete 批量删旧轮+摘要顶上,低频批量>频繁逐条):
+  //   触发判据=每轮 input_tokens(usage 实时监控,cached 也要按 cached 价反复付)超过阈值——
+  //   此时"历史携带成本×剩余轮次"必然超过一次性缓存失效(摘要+近几轮全价),压缩更便宜。
+  async function _rtcCompactNow() {
+    if (Date.now() - (_rtc.lastCompact || 0) < 90000) return;   // 低频保护
+    if (_rtc.items.length < 12) return;
+    _rtc.lastCompact = Date.now();
+    try {
+      var r = await (await fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: _rtc.ctxFile || '', force: 1 }) })).json();
+      var summary = (r && r.summary) || '';
+      var keep = 8;   // 尾部近几轮 item 保留原文(含最近的 page/state system)
+      var del = _rtc.items.slice(0, -keep);
+      _rtc.items = _rtc.items.slice(-keep);
+      del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
+      if (summary) _rtcSys('(为控制上下文,更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)');
+      _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
+      try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
+    } catch (e) { _rtc.lastCompact = 0; }
+  }
   function _rtcOnEvent(e) {   // dc 下行事件 → 既有 UI 语义(对话窗/字幕/按钮/工具卡)
     var t = e.type;
+    if (t === 'conversation.item.added' || t === 'conversation.item.created') {   // ㊳:记 item 账本(GA/beta 两个事件名都认)
+      try { if (e.item && e.item.id) _rtc.items.push({ id: e.item.id }); } catch (_) {}
+      return;
+    }
     if (t === 'response.output_audio_transcript.delta') {
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
     } else if (t === 'input_audio_buffer.speech_started') {
@@ -943,7 +968,11 @@
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
-            if (u) fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true }); } catch (_) {}
+            if (u) {
+              fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true });
+              _rtc.inTok = u.input_tokens || 0;   // ㊳ 实时监控:本轮输入总量(cached 也按 cached 价反复计费)
+              if (_rtc.compactTh && _rtc.inTok >= _rtc.compactTh) _rtcCompactNow();
+            } } catch (_) {}
     } else if (t === 'error') {
       var m0 = (e.error && e.error.message) || '';
       if (m0 && m0.toLowerCase().indexOf('cancel') < 0) setSt('⚠ ' + m0.slice(0, 60));
@@ -992,6 +1021,8 @@
         body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage, text: _vt0 || undefined }) })).json();
       if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
       _rtc.imgOn = !!sres.rt_image;
+      _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
+      _rtc.items = []; _rtc.inTok = 0; _rtc.lastCompact = 0;
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       if (g !== _gen) { mic.getTracks().forEach(function (t) { t.stop(); }); return; }
       var pc = new RTCPeerConnection();
