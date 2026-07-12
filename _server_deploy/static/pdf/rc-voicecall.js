@@ -377,7 +377,14 @@
       b.style.display = 'flex'; b.className = 'running'; b.innerHTML = '<span class="vc-spin"></span>';
       b.title = '正在执行:' + (p.label || '工具') + '(点击中止)';
       capStatus({ html: _ic + '<span>' + esc(p.label || '正在处理') + '…</span><span class="vc-spin vc-spin-s"></span>', cls: 'run' });   // 69:图标+转圈
+      // 103(用户实测:relay 重启时进行中的工具死亡=永远转圈):running 超时兜底——150s 没等到 done/error 自动标超时
+      if (onToolStatus._t0) clearTimeout(onToolStatus._t0);
+      onToolStatus._t0 = setTimeout(function () {
+        var b2 = document.getElementById('vc-tool-btn');
+        if (b2 && b2.className === 'running') onToolStatus({ status: 'error', tool: p.tool, label: (p.label || '工具') + '·超时(服务可能重启过,重问一次即可)' });
+      }, 150000);
     } else {
+      if (onToolStatus._t0) { clearTimeout(onToolStatus._t0); onToolStatus._t0 = null; }
       b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
       // 69:完成/失败在字幕停留一下再走(旧行为=立即清,侧栏关着的用户什么都看不见)
       if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok">✓</span>', cls: 'ok', hold: 2500 });
