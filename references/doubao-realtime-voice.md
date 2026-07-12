@@ -585,3 +585,7 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 ### 67 route 三问题批(2026-07-12 用户截图:叠音/两句等待语/md 没渲染)
 
 20:51 日志钉死链条:决策轮(音频等待语①+read_page)→66c text 工具轮:模型写等待语②后**又转手调 route_to_text**(instructions 的路由规则和 66b 提示叠加)→Gemini 长文=**三段式冗余**+双引擎。修:①relay 记 `turn.text`(最近下发模态),**文字轮里调 route_to_text=程序驳回**"你就在文字轮,直接写正文";66b 提示文案加"不要写过渡句/不要再调工具"。②**TTS 叠音**:2.1 等待语还在 WebRTC 播放队列时 text 轮 delta 已到即开念——加 `_rtc.aStart/aEnd`(音频轮转写字数≈5.5字/秒+800ms 缓冲估播放结束),`_speakSafe` 按 aEnd 延迟开念(禁麦也延到真开念,等待期用户仍可抢话);打断清零。③**Markdown 渲染**:语音气泡 __asstVoiceMsg('a') 一直是 textContent(md 源码裸奔)——加 `{md:true}` 终态渲染(文字轮 done/route done 用 renderMd,流式期间纯文本省性能);renderMd 导出 RC.assistant 供**文字卡片**同渲染。
+
+### 68 read_page 参数别名(2026-07-12 用户截图"翻页后还读上一页")
+
+21:05 日志实锤:模型传 `{"pages":[9]}` 被静默忽略(实现只认单数 `page`)→回退 ctx 旧页码=goto_page 都成功了还读到第 8 页;21:06 模型自己试出 `{"page":9}` 才对。**根因:工具返回结构里是复数 `"pages":[N]`,模型照着返回学传参**,而宽松 schema(additionalProperties)不校验=静默吞。修:`_t_read_page` 接受 pages 数组/标量别名(单数优先);冒烟三形态全过。**教训:工具的参数名和返回字段名不一致=模型必然踩;宽松 schema 下所有合理别名都要收。**

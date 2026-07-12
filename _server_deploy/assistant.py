@@ -1268,8 +1268,22 @@ def _t_read_page(args, ctx):
     # 双页模式下读全部可见页(ctx.pages,PDF 索引),不传 page 时默认所有可见页;
     # 传 page 时那是**印刷页码**(AI/用户语言)→ 转成 PDF 页读。
     file_rel = ctx.get("file_rel", "")
-    if args.get("page"):
-        pages = [_to_pdf(ctx, args["page"])]
+    # 68:参数别名——模型常传复数 pages(照着**返回结构**里的 "pages":[N] 学的,21:05 实锤被静默忽略
+    # 回退旧页码=「翻了页还读到上一页」);单数优先,复数取值兜底,别让宽松 schema 静默吞参数
+    _pg_arg = args.get("page")
+    if not _pg_arg:
+        _pl = args.get("pages")
+        if isinstance(_pl, list) and _pl:
+            _pg_arg = _pl[0]
+        elif isinstance(_pl, (int, str)) and str(_pl).strip():
+            _pg_arg = _pl
+    if _pg_arg:
+        try:
+            _pg_arg = int(_pg_arg)
+        except Exception:
+            _pg_arg = 0
+    if _pg_arg:
+        pages = [_to_pdf(ctx, _pg_arg)]
         want_next = False                              # 显式指定某页 → 只给那页(AI 自己决定要不要再往下)
     else:
         pages = ctx.get("pages") or [ctx.get("page", 0)]
