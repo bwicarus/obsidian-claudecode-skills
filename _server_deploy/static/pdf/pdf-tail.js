@@ -308,6 +308,7 @@ async function _inkSave(num, strokes) {
       body: JSON.stringify({ file: FILE_REL, page: num, strokes: strokes || [] }),
     });
     // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧事件用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
+    if (r && r.ok) { (_ink.echo = _ink.echo || {})[num] = Date.now(); }   // 55:记自存指纹,SSE 自回声 3s 内忽略
     if (r && r.ok && _ink.dirty && !(_ink.pend && _ink.pend[num])) delete _ink.dirty[num];
     if (!(r && r.ok)) (_ink.dirty = _ink.dirty || {})[num] = true;
   } catch (_) { (_ink.dirty = _ink.dirty || {})[num] = true; }   // 失败重标脏,flush 兜底还有机会补
@@ -362,6 +363,8 @@ window._inkLoadAll = _inkLoadAll;
         var num = parseInt(ev.uid, 10); if (!num) return;
         if (_ink.drawing && _ink.drawing.num === num) return;               // 正在画这页 → 不打断
         if (_ink.dirty && _ink.dirty[num]) return;                          // 本地有待存 → 别用服务端旧值覆盖
+        if (_ink.echo && _ink.echo[num] && Date.now() - _ink.echo[num] < 3000) return;   // 55 自回声抑制:自己刚存的不用回放——
+        // 插入页场景它还会按页号命中"未重编号的旧下一页"把墨迹串过去(publish 无发起端排除,前端兜)
         _ink._sseT = _ink._sseT || {};
         clearTimeout(_ink._sseT[num]);                                       // 每页 250ms 合并(防事件风暴每笔一次全书 GET)
         _ink._sseT[num] = setTimeout(function () {

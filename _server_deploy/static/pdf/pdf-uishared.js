@@ -709,6 +709,9 @@ window._favOpenPicker = function () {
   window._upInkPersist = function (el) {
     var rec = el && el.__upRec; if (!rec || _upIsTempId(rec.id) || !UP_FILE) return;
     try {
+      // 55:记自回声指纹(与 pdf-tail _ink.echo 同一本账)——插入页存墨迹触发的 SSE 广播会被本端收到,
+      // 按页号命中"尚未重编号的旧同名页"(=插入页的下一页)把墨迹串过去;3s 抑制窗兜住
+      try { var _ik = window._ink || (window._ink = {}); (_ik.echo = _ik.echo || {})[rec.page] = Date.now(); } catch (e) {}
       fetch('/pdf/api/ink', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify({ file: UP_FILE, page: rec.page, strokes: el.__inkStrokes || [] }) });
     } catch (_) {}

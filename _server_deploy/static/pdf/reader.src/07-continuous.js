@@ -255,6 +255,25 @@ function _onContinuousScroll() {
         if (wraps[i].getBoundingClientRect().bottom >= center) { target = wraps[i]; break; }
       }
     }
+    // 55:插入页死区修——中线落在乐观插入页(.pdf-upage,无 data-page-num)上时 target=null,
+    // currentPage 冻在上一页 → AI 按页码永远看不见插入页。后台插页 job 完成后 overlay 已绑真页号
+    // (__upRec.page>0,服务端 PDF 已物理含该页)→ 用它更新 currentPage,页码链路即通(read_page/see_ink 都对)。
+    if (!target) {
+      const ups = document.querySelectorAll('#page-container .pdf-upage');
+      for (let i = 0; i < ups.length; i++) {
+        const r = ups[i].getBoundingClientRect();
+        if (r.top <= center && r.bottom >= center) {
+          const rec = ups[i].__upRec;
+          if (rec && typeof rec.page === 'number' && rec.page > 0) {
+            if (rec.page !== currentPage) {
+              currentPage = rec.page;
+              { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(rec.page) : rec.page); }
+            }
+          }
+          break;
+        }
+      }
+    }
     if (target) {
       const num = parseInt(target.dataset.pageNum);
       if (num !== currentPage) {
