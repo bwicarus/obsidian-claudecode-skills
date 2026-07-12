@@ -120,6 +120,7 @@
       // 65 文字卡片:iOS 通知风磨砂堆叠(右下锚,新卡在前,旧卡左上交错缩小)
       '#vc-cards{position:fixed;right:14px;bottom:calc(150px + env(safe-area-inset-bottom,0px));z-index:2147481400;width:min(80vw,340px);pointer-events:none}' +
       '.vc-card{position:absolute;right:0;bottom:0;width:100%;background:rgba(28,28,30,.72);-webkit-backdrop-filter:blur(24px) saturate(1.6);backdrop-filter:blur(24px) saturate(1.6);' +
+      '-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;' +
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
       'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
@@ -1486,6 +1487,10 @@
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
     var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml };
+    // 85:卡片不可透过——事件在卡内消化,不冒泡到 document 级监听(点词/选中工具栏等都挂 document)
+    ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
+      el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
+    });
     el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
     el.addEventListener('pointerdown', function () {
       if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
@@ -1895,6 +1900,7 @@
       _rtcRespCreate('user');   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
+      if (tx && (tx.indexOf('学习伴读通话') >= 0 || tx.indexOf('常说:这一页') >= 0)) tx = '';   // 85:转写 prompt 泄漏(静音时模型复读语境提示词)→丢弃
       if (tx) {
         _lastU = tx;
         setSub('u', tx);
@@ -1929,11 +1935,15 @@
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       if (_rtc.turnText && curAText) {
+        try {
+          var cT = _cardPush(curAText, '文字回复');
+          if (cT) _pinBind(cT.el, '文字回复', (function (txt) { return function () { return txt; }; })(curAText));   // 85:浮层文字卡长按选中(此前漏绑)
+          _cardPush._did = cT;
+        } catch (e) {}
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
           tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }) },
           pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) },
           speak: true }); } catch (e) {}   // 67/77b/79/83(☆撤,+TTS念钮)
-        try { _cardPush(curAText, '文字回复'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
