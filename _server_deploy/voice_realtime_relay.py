@@ -1394,7 +1394,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             sess["audio"]["output"]["speed"] = max(0.7, min(1.5, float(cred.get("rt_speed") or 1.0)))   # 官方 0.7-1.5
         except Exception:
             pass
-        sess["reasoning"] = {"effort": "none"}   # 97a:取值只有 high|none(94 的 low 是无效值);伴读要快=none
+        sess["reasoning"] = {"effort": "high"}   # 117(文档定稿):high=默认,工具选择/多步判断更可靠(33 工具场景);嫌慢再调 none
     try:
         ows = await websockets.connect((XAI_RT_URL if engine == "grok" else OPENAI_RT_URL) + model,
                                        additional_headers={"Authorization": f"Bearer {key}"},
@@ -1411,7 +1411,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     import array as _arr
     import collections as _coll
     import time as _tm2
-    _vg = {"last": 0.0, "pre": _coll.deque(maxlen=30), "active": False, "busy": False}   # 111:本地 VAD 状态(up 写/down 维护 busy)
+    _vg = {"last": 0.0, "pre": _coll.deque(maxlen=30), "active": False, "busy": False,
+           "tools_n": 0, "aEnd": 0.0}   # 111/117:本地 VAD 状态+并行工具在飞计数+输出音频播放结束估算
     _gk = {"t0": time.time(), "in_b": 0, "out_b": 0}   # 110:grok 自记账(推送/接收音频字节+连接时长)
     _img_items = []    # 104:(turn, item_id) 直喂图记账
     played = {"id": None, "bytes": 0}   # 正在播的 assistant 音频 item
@@ -1489,7 +1490,13 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 sys.stderr.write(f"[voice-oa] 工具熔断硬断: {_tk[:80]} ×{_tfail['n']}\n")
             elif _silent[0] and ok:
                 sys.stderr.write(f"[voice-oa] 工具静默入库(不 create): {name}\n")   # 113:与 RTC 版 no_create 同语义
+            elif engine == "grok" and _vg["tools_n"] > 0:
+                sys.stderr.write(f"[grok-diag] 工具回填暂不 create(在飞还有 {_vg['tools_n']} 个)\n")   # 117:收齐并行工具再单次 create
             else:
+                if engine == "grok":   # 117:工具续答前等上段音频播完(官方提醒:立即 create=语音重叠)
+                    _wait0 = _vg["aEnd"] - time.time()
+                    if 0 < _wait0 < 20:
+                        await asyncio.sleep(_wait0)
                 await ows.send(json.dumps({"type": "response.create"}))   # 必须手发,模型才会用结果继续说
                 if engine == "grok":
                     sys.stderr.write(f"[grok-diag] create(tool:{name})\n")   # 115:双响应取证
@@ -1500,6 +1507,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
         if engine == "grok":
             _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数
+            _vg["tools_n"] = max(0, _vg["tools_n"] - 1)   # 117:在飞收口(此处必经:成功/失败/静默都过)
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=out[:300])
 
@@ -1527,9 +1535,18 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 abuf.clear()
             try:
                 await ows.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                await ows.send(json.dumps({"type": "response.create"}))
+                _cr = {"type": "response.create"}
+                # 117:本轮 instructions 注入最新页面状态($0;含一句核心人设防替换语义裸奔)
+                _bits = [f"当前第 {book.get('page') or page} 页"]
+                if book.get("sel"):
+                    _bits.append(f"用户选中:「{str(book['sel'])[:400]}」")
+                if book.get("ink_strokes"):
+                    _bits.append("本页有用户手写笔迹(问到时调 see_ink)")
+                _cr["response"] = {"instructions": "你是简短口语化的伴读助手。" + ";".join(_bits) + "。结合最新状态回答本轮。"}
+                book.pop("_dirty", None)
+                await ows.send(json.dumps(_cr, ensure_ascii=False))
                 _vg["pend_resp"] = True   # 116:create 已发但 response.created 未到的竞态窗(打断要覆盖它)
-                sys.stderr.write("[grok-diag] create(turn_end)\n")
+                sys.stderr.write("[grok-diag] create(turn_end+状态instructions)\n")
             except Exception:
                 pass
 
@@ -1542,19 +1559,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
 
         async def _grok_turn_start():   # 111:本地判定开口——打断进行中的响应+前端清播放+话轮计数/焚图(原 speech_started 职责)
             _vg["active"] = True
-            if book.pop("_dirty", None):   # 114(用户方案C变体):状态变化只存 Pi;开口时才注入**一条**背景 item(文字 item $0.004/条,懒注入=每轮至多一条)
-                bits = [f"现在在第 {book.get('page') or page} 页"]
-                if book.get("sel"):
-                    bits.append(f"用户选中了:「{str(book['sel'])[:200]}」")
-                if book.get("ink_strokes"):
-                    bits.append("本页有用户手写笔迹(他问到手写内容时调 see_ink)")
-                try:
-                    await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                        "type": "message", "role": "assistant",
-                        "content": [{"type": "output_text", "text": "[背景更新] " + ";".join(bits) + "。(状态记录,勿回应)"}]}}, ensure_ascii=False))
-                    _gk["items"] = _gk.get("items", 0) + 1
-                except Exception:
-                    pass
+            # 117(文档 9.3 定稿):状态注入改 per-response instructions($0,只影响本轮,官方确认之后自动恢复
+            # session instructions)——替代 114 的 assistant item($0.004/条)。内容在 _grok_commit 组装。
+            _vg["aEnd"] = 0.0   # 117:打断=播放已清,别让工具续答再等
             if _vg["busy"] or _vg.get("pend_resp"):   # 116:create 已发但 created 未到的窗口也要打断(旧响应照跑=双答来源之一)
                 try:
                     await ows.send(json.dumps({"type": "response.cancel"}))
@@ -1797,6 +1804,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 played["bytes"] += len(pcm)
                 if engine == "grok":
                     _gk["out_b"] += len(pcm)   # 110:接收音频记账
+                    _nw3 = time.time()
+                    _vg["aEnd"] = max(_vg["aEnd"], _nw3) + len(pcm) / 48000.0   # 117:播放结束估算(工具续答仲裁用)
                 if _bridge["q"] is not None:   # 99:桥模式=音频改道 WebRTC 轨(960B=20ms 定长块),ws 不再发 binary
                     _bridge["pend"] += pcm
                     while len(_bridge["pend"]) >= 960:
@@ -1854,7 +1863,16 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 # speech_stopped 后迟到修订照收,以最后一次为准,debounce 0.8s 后定稿落库。
                 txt = (e.get("transcript") or "").strip()
                 _iid = e.get("item_id") or "~"
-                if txt and engine == "grok":
+                if txt and engine == "grok" and t.endswith(".completed"):
+                    # 117(最新协议正式提供 completed):到达即定稿;updated 的 debounce 只作无 completed 的兜底
+                    _t_old = _tr_timers.pop(_iid, None)
+                    if _t_old:
+                        _t_old.cancel()
+                    _tr_pend.pop(_iid, None)
+                    await bws.send(json.dumps({"event": 451, "payload": {"results": [
+                        {"text": txt, "is_interim": False, "iid": _iid}]}}, ensure_ascii=False))
+                    _vlog("q", text=txt, page=book.get("page") or page, book=file_rel)
+                elif txt and engine == "grok":
                     _tr_pend[_iid] = txt
                     await bws.send(json.dumps({"event": 451, "payload": {"results": [
                         {"text": txt, "is_interim": True, "iid": _iid}]}}, ensure_ascii=False))
@@ -1894,6 +1912,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     except Exception:
                         pass
                 elif name:
+                    _vg["tools_n"] += 1   # 117:并行工具收齐——最后一个回填才 create
                     asyncio.create_task(_tool(name, args if isinstance(args, dict) else {}, e.get("call_id") or ""))
             elif t == "response.created":
                 _vg["busy"] = True

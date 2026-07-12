@@ -787,3 +787,14 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **116 根修(用户直觉"发送了很多次"的精确版)**:一句话被 0.8s hangover 切成多轮——句中喘气>0.8s=判"说完"→commit+create→模型答前半句;后半句又一轮→再答一次(且只有半句语境=答非所问/自由发挥)。修:**延迟提交**(端点检测标准做法)——hangover 到期先置 inactive+启动 450ms 反悔窗定时器;窗内又开口=cancel 定时器**同轮继续**(不 turn_start=不打断不焚图,反悔窗期间静音帧在预滚里补发=音频连续);窗到期才真 commit+create。体感应答延迟=0.8+0.45≈1.25s。另修**响应竞态窗**:create 已发但 response.created 未到时打断信号漏掉(busy 还 false)→旧响应照跑=双答另一来源;`pend_resp` 标志覆盖该窗,turn_start 时 busy或pend_resp 都 cancel。
 
+## 批次 117(2026-07-13)Grok 完整技术说明落地(用户二稿)+ 纯文字模态实测钉死
+
+用户完整技术说明存档 `references/grok-voice-realtime.md`(工程速查版)。相对 114 的**六项新落地**:
+1. **effort 改 high**(文档:high=默认,工具选择/多步判断更可靠——33 工具场景正确取舍;嫌慢再调);
+2. **状态注入终极形态**:114 的 assistant item($0.004/条)→ **`response.create.response.instructions`**($0,官方确认只影响本轮、之后自动恢复 session instructions)——_grok_commit 组装"一句核心人设(防替换语义裸奔)+页码+选中+笔迹有无";
+3. **completed 即时定稿**(最新协议正式提供该事件):到达即 final+落库+取消 debounce;updated 的 debounce 降级为无 completed 时的兜底;
+4. **并行工具收齐**:`tools_n` 在飞计数,最后一个回填才 create(xAI 可能忽略 parallel_tool_calls=False,模型或并行发多 call——每个各自 create=模型只看到部分结果);
+5. **工具续答播放仲裁**(官方提醒:立即 create=语音重叠):输出音频 delta 累计估算 `aEnd`(字节/48000),工具 create 前等播放完(上限 20s);打断清零;
+6. **纯文字模态实测**:output_modalities/modalities 两种写法均被静默忽略照样出音频——**Grok 恒纯语音铁证,四态不迁移**(详见 grok-voice-realtime.md)。
+未落地记录:搜索预算闸(我们未挂 xAI 内置搜索,走自家 webapp 链路已有免费额度体系);resumption 续接重连=#290;半双工播放状态确认=桥失败回退场景的二期。
+
