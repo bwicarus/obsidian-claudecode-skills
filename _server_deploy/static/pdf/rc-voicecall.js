@@ -1460,6 +1460,7 @@
       el.appendChild(b);
     } catch (e) {}
   };
+  setTimeout(function () { try { _dockLoad(); } catch (e) {} }, 2500);   // 106(用户实测):收藏夹按钮曾是懒加载——有存货但页面加载后不显示,直到做一次收藏;开页主动拉一次
   function _dockBtn() {
     var b = document.getElementById('vc-dock-btn');
     if (!b) {

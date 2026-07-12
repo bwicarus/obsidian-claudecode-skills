@@ -618,3 +618,6 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}
 .set-hl-row .del:hover{background:#9a3232}
 
+
+/* 106(用户设计):画面中的圆形笔按钮退役——手写入口收敛到顶栏(工具本体不受影响) */
+#ink-fab{display:none !important}
