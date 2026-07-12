@@ -4437,6 +4437,7 @@ def assistant_rtc_session():
     parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
              "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
              lang_line,
+             "**语音/文字自动选择**:明确要求念/读/发音=语音;日常陪聊和一两句短答=语音;长解释/步骤/列表/公式/链接/大量工具资料=调 reply_text 用文字给出;两可时默认语音但最多两三句;绝不同时又调 reply_text 又口头回答。"
              "**回答长度规则(可测量,请严格遵守)**:快问快答≤8秒;普通讲解≤15秒;内容确实长时先给≤20秒的摘要"
              "并问『要继续展开吗』;绝不复述用户的问题,绝不复述界面卡片上已显示的标题/链接;"
              "用户要听整段原文时,请他用界面上的朗读按钮(那是专用通道),你别整段念。"
@@ -4477,6 +4478,11 @@ def assistant_rtc_session():
                   "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
                   "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
                                  "required": ["question"], "additionalProperties": True}})
+    tools.append({"type": "function", "name": "reply_text",
+                  "description": "当答案较长、包含列表/公式/链接/步骤,或大量工具资料需要展示时调用:把**完整的最终答案**放进 text,"
+                                 "它会以文字显示在用户屏幕上(不产生语音)。调用后本轮结束,不要再说话。短回答/陪聊/发音示范不要用它。",
+                  "parameters": {"type": "object", "properties": {"text": {"type": "string"}},
+                                 "required": ["text"], "additionalProperties": False}})
     tools.append({"type": "function", "name": "wait_for_user",
                   "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。",
                   "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})

@@ -870,6 +870,18 @@
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
       return;
     }
+    if (name === 'reply_text') {   // ㊿c 自动模式(外部审核设计):模型自判"长内容文字更合适"→答案在参数里,
+      // 文字显示+落库,闭合 call 但**不 response.create**(与 wait_for_user 同构)=零输出音频;一次推理完成选择+回答
+      var ans = String(args.text || '').slice(0, 6000);
+      if (ans) {
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); window.__asstVoiceMsg && window.__asstVoiceMsg('a', ans); } catch (e) {}
+        try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, ans, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
+        try { _rtcCapFeed(ans, true); } catch (e) {}   // 侧栏关着时字幕也能看到
+        if (_rtc.wantTts) { try { speak(ans); } catch (e) {} }   // TTS 档:文字答案照样代念
+      }
+      _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{"displayed":true}' } });
+      return;   // 关键:不发 response.create
+    }
     _rtc.turnTool = true;   // ㊸:本轮真调了工具(承诺核查放行)
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
     if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
