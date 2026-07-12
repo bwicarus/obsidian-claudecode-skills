@@ -667,3 +667,10 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 - **web_search / route_text 纳入 action-prefs**(此前固定 flash 无设置项,"直接修改"无从谈起):`_AP_ACTIONS`/`_AP_DEFAULTS`/`_AP_LABELS`/`backends_by_action`(都只 gemini)+ `_gemini_websearch(model=)` 接 `_resolve("web_search", ctx._uid)`、route-text 端点 `_gemini_stream(model=)`+兜底 `_gemini_text(model=)` 接 `_resolve("route_text", session.user_id)`。深度下拉对这两环节无效(grounding 恒不思考),行照渲不接线。
 - **总面板补全**:tab1 新组「联网与语音文字环节」= web_search/route_text/img_norm(**img_norm 此前在总面板根本不显示**,77 只做了感叹号 focus 直达,白名单漏加——顺手修)。
 
+## 批次 92(2026-07-13)通话语速 + 拖动实卡 ghost + 拖出到字幕浮层
+
+- **通话语速 `rt_speed`**:语音 Tab GPT 组新滑条(0.5-1.5×,step .05,badge 实时);session `audio.output.speed`(官方 0.25-1.5,session 级,下次通话生效)。⚠ 通用 range 保存是 `parseInt`——按 `step` 含小数点分流 `parseFloat`(否则 1.25 存成 1)。
+- **音色位置**(用户问"在哪设置"):早已存在——语音 Tab GPT 组「GPT 音色」下拉(_RTV 10 音色,默认 marin),91 Tab 化后好找了;后端 `rt_voice`→session `audio.output.voice`。
+- **拖动 ghost 看不见修复**:`_dragToDock` 开头 `injectCss()` 保险——`.vc-drag-ghost` 样式由 rc-voicecall `injectCss` 注入,通话 UI 从没初始化过时侧栏拖动的 ghost 是无样式裸 div(position:static 看不见=「没有卡片的图像」);另 ghost 加 `color/font-size` 兜底(clone 到 body 后侧栏后代选择器样式丢失)。
+- **拖出到字幕浮层**(用户设计):侧栏卡拖到阅读器区(`_sideOpen()` 且放手 x < 侧栏左缘-30,且不在收藏 dock 区)→ `_cardPush(raw,label,isHtml,force=true)`(新 force 参数绕过「侧栏开不弹」guard;容器 `#vc-cards` 在侧栏开时本就 display:none=`_cardsVisSync`,所以**放过去当下不可见**,关侧栏自然浮现——与「开侧栏卡片全隐」既定设计自洽)+ `_placeFx` 放置特效(紫色小卡从放手点飞向浮层堆叠位缩小淡出)+ toast「已放入字幕浮层(关闭侧栏可见)」。
+

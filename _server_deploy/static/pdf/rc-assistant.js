@@ -332,6 +332,8 @@
           '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_voice" style="flex:1 1 100%">' +
             _RTV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_voice || 'marin') === v ? ' selected' : '') + '>GPT 音色:' + v + (v === 'marin' || v === 'cedar' ? '(官方推荐)' : '') + '</option>'; }).join('') +
           '</select></div>' +
+          '<label class="ams-cur">通话语速(下次通话生效)<span class="vcv-rts" style="float:right">' + (c.rt_speed || 1) + '×</span></label>' +
+          '<input type="range" min="0.5" max="1.5" step="0.05" value="' + (c.rt_speed || 1) + '" data-k="rt_speed" style="width:100%">' +
           '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_lang" style="flex:1 1 100%">' +
             _RTL.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_lang || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
@@ -432,16 +434,16 @@
         el.addEventListener('change', function () {
           var k = el.getAttribute('data-k'), v;
           if (el.type === 'checkbox') v = el.checked;
-          else if (el.type === 'range') v = parseInt(el.value, 10) || 0;
+          else if (el.type === 'range') v = ((el.getAttribute('step') || '').indexOf('.') >= 0 ? (parseFloat(el.value) || 1) : (parseInt(el.value, 10) || 0));   // 92:小数步长滑条(通话语速)按 float 存
           else v = el.value.trim();
-          var _bmap = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr' };
+          var _bmap = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr', rt_speed: '.vcv-rts' };
           if (_bmap[k]) { var b1 = card.querySelector(_bmap[k]); if (b1) b1.textContent = v; }
           _save(k, v, el);
         });
         if (el.type === 'range') el.addEventListener('input', function () {   // 拖动实时显示数值(change 才保存)
           var k = el.getAttribute('data-k');
-          var m = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr' };
-          var b = card.querySelector(m[k] || '.vcv-sr'); if (b) b.textContent = el.value;
+          var m = { speech_rate: '.vcv-sr', loudness_rate: '.vcv-lr', tts_speech_rate: '.vcv-tsr', rt_speed: '.vcv-rts' };
+          var b = card.querySelector(m[k] || '.vcv-sr'); if (b) b.textContent = el.value + (k === 'rt_speed' ? '×' : '');
         });
       });
     }).catch(function () { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; });

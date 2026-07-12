@@ -4701,7 +4701,9 @@ def assistant_rtc_session():
                                                    # 灭=纯文字回复(输出音频费=成本80%主体直接归零);顺带消灭短问竞态(审核#5)
                                                    "create_response": False, "interrupt_response": True},
                                 "transcription": _tr},
-                      "output": {"voice": cfg.get("rt_voice") or "marin"}},
+                      "output": {"voice": cfg.get("rt_voice") or "marin",
+                                 # 92:语速设置(官方 audio.output.speed 0.25-1.5,session 级,下次通话生效)
+                                 "speed": max(0.25, min(1.5, float(cfg.get("rt_speed") or 1.0)))}},
             "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False,
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
                            "token_limits": {"post_instructions": 24000}}}   # ㊶ 指南§5:上下文硬顶(㊳摘要12k先行,这是官方截断兜底)
@@ -5117,7 +5119,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "end_smooth_window_ms", "tts_speaker", "tts_speech_rate", "tts_instruction", "recall_cutoff", "asr_v2",
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
-                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply")
+                     "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply", "rt_speed")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

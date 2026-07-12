@@ -177,7 +177,7 @@
       '.vc-dk-card.del-mark::after{content:"✕";position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#e0463c;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}' +
       '.vc-dkp-txt{color:#aab6cf;font-size:11.5px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
-      '.vc-drag-ghost{position:fixed;z-index:2147481460;pointer-events:none;opacity:.88;transform:scale(.92);border-radius:14px;overflow:hidden;' +
+      '.vc-drag-ghost{position:fixed;z-index:2147481460;pointer-events:none;opacity:.88;transform:scale(.92);border-radius:14px;overflow:hidden;color:#dde6f5;font-size:12.5px;line-height:1.5;' +
       'background:rgba(30,32,42,.9);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.18);' +
       'box-shadow:0 18px 50px rgba(0,0,0,.55);padding:10px 12px;max-height:120px}' +
       '.vc-dk-m{font-size:10.5px;color:#6f7d9e;margin-top:3px}' +
@@ -1249,7 +1249,23 @@
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
   window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
+  function _placeFx(x, y) {   // 92:放置特效——小卡从放手点飞向浮层堆叠位置缩小淡出("看不见但确实放过去了")
+    try {
+      var f = document.createElement('div');
+      f.style.cssText = 'position:fixed;left:' + (x - 30) + 'px;top:' + (y - 20) + 'px;width:60px;height:40px;border-radius:10px;' +
+        'background:rgba(123,108,255,.55);border:1px solid rgba(255,255,255,.35);z-index:2147481470;pointer-events:none;' +
+        'transition:transform .55s cubic-bezier(.4,0,.6,1),opacity .55s';
+      document.body.appendChild(f);
+      requestAnimationFrame(function () {
+        var tx = (window.innerWidth - 80) - x, ty = (window.innerHeight - 210) - y;
+        f.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(.18)';
+        f.style.opacity = '0';
+      });
+      setTimeout(function () { try { f.remove(); } catch (e) {} }, 650);
+    } catch (e) {}
+  }
   function _dragToDock(el, payloadFn) {   // 83(用户设计):**头部当拖动把手**(仿浮层卡)——即时拖,和对话流滚动零冲突
+    try { injectCss(); } catch (e) {}   // 92:ghost 样式保险——通话 UI 没初始化过时侧栏拖动 ghost 曾无样式(看不见"卡片")
     var hd = el.querySelector('.vc-if-hd') || el.firstElementChild || el;
     hd.style.touchAction = 'none'; hd.style.cursor = 'grab';
     var ghost = null, moved = false, sx = 0, sy = 0;
@@ -1279,6 +1295,19 @@
           rec.meta = rec.meta || _favMeta();
           _dockLoad(function () { _favSave(rec); });
           try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
+        } else if (moved && e3 && _sideOpen()) {
+          // 92(用户设计):从侧栏把卡拖出到阅读器区(没进收藏夹)=放入字幕浮层。侧栏开着浮层隐身,
+          // 只放"飞入"特效示意确实放过去了;关侧栏它就在那。
+          var sd2 = document.getElementById('ep-side');
+          var sl = sd2 ? sd2.getBoundingClientRect().left : window.innerWidth;
+          if (e3.clientX < sl - 30) {
+            var rec2 = payloadFn();
+            var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true);
+            if (c2) {
+              _placeFx(e3.clientX, e3.clientY);
+              try { if (typeof _toast === 'function') _toast('已放入字幕浮层(关闭侧栏可见)'); } catch (e) {}
+            }
+          }
         }
       }
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
@@ -1511,11 +1540,12 @@
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
     _cardLayout();
   }
-  function _cardPush(text, kindLabel, isHtml) {
-    if (!text || (!isHtml && !text.trim()) || _sideOpen()) return null;   // 侧栏开着=内容已在对话流,不弹
+  function _cardPush(text, kindLabel, isHtml, force) {
+    if (!text || (!isHtml && !text.trim()) || (_sideOpen() && !force)) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
+    if (force) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
     var el = document.createElement('div'); el.className = 'vc-card';
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
