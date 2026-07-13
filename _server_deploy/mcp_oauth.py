@@ -25,6 +25,7 @@ from urllib.parse import urlencode
 
 PASS_FILE = Path("~/.config/mcp-oauth-pass").expanduser()
 STORE_FILE = Path("~/.config/mcp-oauth-store.json").expanduser()
+CLIENT_FILE = Path("~/.config/mcp-oauth-client").expanduser()   # 固定 client 凭证(JSON),给官方 app Advanced settings 手填
 
 CODE_TTL = 600
 ACCESS_TTL = 7 * 86400
@@ -100,6 +101,29 @@ def _client_ip(request) -> str:
     return request.client.host if request.client else "?"
 
 
+def _ensure_fixed_client() -> tuple[str, str]:
+    """固定 client(用户手填 Client ID/Secret 的路径,不走 DCR)。首次创建并写 CLIENT_FILE。"""
+    with _lock:
+        st = _load()
+        for cid, c in st["clients"].items():
+            if c.get("fixed"):
+                return cid, c.get("secret", "")
+        cid = "bwapp_" + secrets.token_urlsafe(8)
+        sec = secrets.token_urlsafe(24)
+        st["clients"][cid] = {"redirect_uris": ["https://claude.ai/api/mcp/auth_callback",
+                                                "https://claude.com/api/mcp/auth_callback"],
+                              "name": "手动配置(Claude 官方 app)", "fixed": True, "secret": sec,
+                              "ts": int(time.time())}
+        _save(st)
+    try:
+        CLIENT_FILE.write_text(json.dumps({"client_id": cid, "client_secret": sec}))
+        CLIENT_FILE.chmod(0o600)
+    except Exception:
+        pass
+    _log(f"fixed client created: {cid}")
+    return cid, sec
+
+
 # ───────────────────────── ASGI 组装 ─────────────────────────
 
 def build_asgi(mcp_app, static_token: str, public_base: str):
@@ -120,7 +144,7 @@ def build_asgi(mcp_app, static_token: str, public_base: str):
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["none"],
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
         "scopes_supported": ["mcp"],
     }
     PRM = {
@@ -167,8 +191,11 @@ def build_asgi(mcp_app, static_token: str, public_base: str):
             return None, "invalid_redirect_uri"
         if q.get("response_type") != "code":
             return None, "unsupported_response_type"
-        if not q.get("code_challenge") or q.get("code_challenge_method", "S256") != "S256":
-            return None, "code_challenge_required(S256)"
+        chal = q.get("code_challenge", "")
+        if chal and q.get("code_challenge_method", "S256") != "S256":
+            return None, "code_challenge_method(S256 only)"
+        if not chal and not cl.get("secret"):
+            return None, "code_challenge_required(S256)"   # public client 必须 PKCE;固定 client(有 secret)可免
         return cl, ""
 
     async def authorize_get(request):
@@ -176,6 +203,7 @@ def build_asgi(mcp_app, static_token: str, public_base: str):
         with _lock:
             cl, err = _authz_check(q, _load())
         if err:
+            _log(f"authorize GET reject: {err} client={q.get('client_id','')!r} redirect={q.get('redirect_uri','')!r}")
             return HTMLResponse(f"<h3>请求无效</h3><p>{html.escape(err)}</p>", status_code=400)
         hidden = "".join(
             f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
@@ -221,7 +249,7 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
                 return HTMLResponse(f"<h3>请求无效</h3><p>{html.escape(err)}</p>", status_code=400)
             code = "mac_" + secrets.token_urlsafe(32)
             st["codes"][code] = {"client_id": form["client_id"], "redirect_uri": form["redirect_uri"],
-                                 "challenge": form["code_challenge"], "scope": form.get("scope", "mcp"),
+                                 "challenge": form.get("code_challenge", ""), "scope": form.get("scope", "mcp"),
                                  "exp": time.time() + CODE_TTL}
             _save(st)
         _log(f"authorize OK client={form['client_id']} ip={ip}")
@@ -243,7 +271,23 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
         ip = _client_ip(request)
         if _ratelimited(ip):
             return JSONResponse({"error": "slow_down"}, status_code=429)
+        # client 认证:client_secret_post(form)或 client_secret_basic(Authorization: Basic)
+        cid_req, csec = form.get("client_id", ""), form.get("client_secret", "")
+        ah = request.headers.get("authorization", "")
+        if ah.lower().startswith("basic "):
+            try:
+                import base64
+                from urllib.parse import unquote
+                u, _, pw = base64.b64decode(ah[6:]).decode().partition(":")
+                cid_req, csec = unquote(u) or cid_req, unquote(pw) or csec
+            except Exception:
+                pass
         gt = form.get("grant_type", "")
+
+        def _client_auth_ok(st, client_id):
+            sec = (st["clients"].get(client_id) or {}).get("secret", "")
+            return hmac.compare_digest(csec, sec) if sec else True   # confidential client 必须验 secret;public 免
+
         with _lock:
             st = _load()
             if gt == "authorization_code":
@@ -254,12 +298,16 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
                     import base64
                     calc = base64.urlsafe_b64encode(
                         hashlib.sha256(ver.encode()).digest()).rstrip(b"=").decode()
+                pkce_ok = (hmac.compare_digest(calc, rec["challenge"]) if (rec and rec["challenge"])
+                           else bool(rec))   # code 无 challenge(固定 client 免 PKCE)→ 靠 secret
                 if not (rec and rec["exp"] > time.time()
-                        and rec["client_id"] == form.get("client_id", rec["client_id"])
+                        and rec["client_id"] == (cid_req or rec["client_id"])
                         and rec["redirect_uri"] == form.get("redirect_uri", "")
-                        and hmac.compare_digest(calc, rec["challenge"])):
+                        and pkce_ok and _client_auth_ok(st, rec["client_id"])):
                     _fail(ip)
                     _save(st)
+                    _log(f"token(code) REJECT ip={ip} client={cid_req!r} has_rec={bool(rec)} "
+                         f"pkce_ok={pkce_ok if rec else '-'} redirect={form.get('redirect_uri','')!r}")
                     return JSONResponse({"error": "invalid_grant"}, status_code=400)
                 out = _issue(st, rec["client_id"], rec["scope"])
                 _save(st)
@@ -325,4 +373,14 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
         async with mcp_app.router.lifespan_context(mcp_app):
             yield
 
-    return Starlette(routes=routes, lifespan=_lifespan)
+    _ensure_fixed_client()   # 固定 client(Advanced settings 手填路径)开机即备好,凭证在 CLIENT_FILE
+
+    # CORS:claude.ai 网页端添加连接器时,发现(well-known)/DCR 部分请求从浏览器发起,
+    # 无 CORS 头会静默失败且服务器看不到任何日志(本次排查的教训)。preflight 由中间件
+    # 直接应答,不会撞 Gate 的 401(OPTIONS 不带 Authorization)。
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    mw = [Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+                     allow_headers=["*"], expose_headers=["Mcp-Session-Id", "WWW-Authenticate"])]
+
+    return Starlette(routes=routes, middleware=mw, lifespan=_lifespan)
