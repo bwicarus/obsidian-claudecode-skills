@@ -796,6 +796,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         ctx = {"file_rel": file_rel, "page": page} if file_rel else {}
         if book.get("ink_strokes"):
             ctx["ink"] = book["ink_strokes"]   # 实时墨迹随工具走(see_ink/see_page 合成图用它,与侧栏行为一致)
+        if book.get("view_shot"):
+            ctx["view_image"] = book["view_shot"]   # EPUB 笔迹合成图(前端 syncInk 拍,存 book;PDF 走服务端裁图不设此字段)→ see_ink/see_page 直接看这张图
         if book.get("sel"):
             ctx["selection"] = book["sel"]     # 当前选中随工具走(read_selection/translate/make_anki 等吃它,与侧栏同口径)
         if tname == "see_ink" and book.get("last_ink_desc"):
@@ -1555,6 +1557,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     ctx["_want_vision"] = 1   # ㉗:看图/看笔迹类工具跳过本地转述,原图穿透 → input_image 直喂 GPT(94:grok 无视觉,恒走文字转述)
                 if book.get("ink_strokes"):
                     ctx["ink"] = book["ink_strokes"]
+                if book.get("view_shot"):
+                    ctx["view_image"] = book["view_shot"]   # EPUB 笔迹合成图(前端 syncInk 拍;grok 无视觉 → webapp _viewshot_result 走视觉模型转述这张图)
                 if book.get("sel"):
                     ctx["selection"] = book["sel"]
                 async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=180) as hc:
@@ -1876,6 +1880,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                         _ip0 = 0
                     if _ip0 and _ip0 == (book.get("page") or page):
                         book["ink_strokes"] = (j.get("strokes") or [])[:60]
+                        book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                 continue
             if t == "finish":
                 return
@@ -1939,6 +1944,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 strokes = j.get("strokes") or []
                 if ip and ip == (book.get("page") or page):
                     book["ink_strokes"] = strokes[:60]
+                    book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                     # 去重(㉘e):画一幅图前端会推好几次(每次落笔防抖后),每次都注入=模型每回合评论一次笔迹。
                     # 指纹=页+笔画数+末笔末点坐标(粗略但够辨"真变了")。
                     try:
@@ -2776,6 +2782,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             elif t == "ink":
                 strokes = j.get("strokes") or []
                 book["ink_strokes"] = strokes[:60]
+                book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                 book["_dirty3"] = True
                 try:   # 全笔画哈希(审核 P1:"笔画数+末点"不同图形易撞)
                     book["_ink_fp"] = hashlib.md5(json.dumps(strokes, sort_keys=True).encode()).hexdigest()[:10] if strokes else ""
@@ -2980,6 +2987,7 @@ async def handle_browser(bws):
                                 ctx2 = await _fetch_book_ctx(file_rel, np)
                                 book.update({k: ctx2.get(k) for k in ("page_text", "inked", "has_ink", "figures", "vocab")})   # 直塞内容整体换页
                                 book["ink_strokes"] = []          # 换页:上页实时墨迹作废(新页的由 syncInk 再推)
+                                book["view_shot"] = None          # 上页笔迹合成图也作废(防 see_ink 用到陈旧图)
                                 book["ink_seen_ver"] = 0          # "看过"记录跨页无效(新页的笔迹没看过)
                                 await _push_sp()                   # SP 换页文本(v3-⑭ 后 SP 唯一的变化源)
                                 _push_state_debounced()            # 换页状态清零(无笔迹/无选中)也要告知
@@ -3004,6 +3012,7 @@ async def handle_browser(bws):
                                 strokes = j.get("strokes") or []
                                 book["has_ink"] = bool(strokes)
                                 book["ink_strokes"] = strokes[:60]
+                                book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                                 book["ink_ver"] = book.get("ink_ver", 0) + 1   # 版本+1(前端指纹去重,到达即真变化)→ 三态/缓存键都随它走
                                 _vlog("ink", n=len(strokes), page=ip, book=file_rel)
                                 _push_state_debounced()

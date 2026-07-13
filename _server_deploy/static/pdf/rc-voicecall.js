@@ -2794,6 +2794,18 @@
     var first = (_inkFp === '');
     _inkFp = fp;
     if (first && !strokes.length) return;   // 首次空态只记指纹(没圈过东西不必更新 SP)
+    // EPUB/HTML(reflow):后端拿到的是归一化 strokes,没有章节宽高无法无失真渲染合成图 → 由前端(唯一知道布局的中间层)
+    // 产出笔迹合成图(视口截图)随 ink 消息发给 relay,存 book.view_shot 供 WS 引擎(豆包/Grok 不能直接看图,
+    // 靠 see_ink 让视觉模型描述那张合成图)。PDF 走服务端裁图不需要;空笔迹不带 shot(relay view_shot=None 自动清陈旧)。
+    try {
+      var _isPdf = !!(window.RC && RC.adapter && RC.adapter().config && RC.adapter().config.isPDF);
+      if (!_isPdf && strokes.length && window.RC && RC.captureView) {
+        RC.captureView().then(function (shot) {
+          try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60), shot: (shot && shot.b64) ? { media_type: shot.media_type, b64: shot.b64 } : null })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
+        }).catch(function () { try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); } catch (e) {} });
+        return;
+      }
+    } catch (e) {}
     try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
   }
 
