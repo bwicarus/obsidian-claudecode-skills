@@ -276,14 +276,16 @@
 
   // ── 进度 + 续读位置 ──
   var _saveT;
-  // ③ topIdx = 「第一个 bottom > 60 的节」。原实现每次 scroll 事件从 0 全量线性扫 getBoundingClientRect
-  // (长书几百节 = 每帧几百次强制布局)。滚动是连续的 → 从上次 _curTopIdx 邻域双向搜:bottom 沿文档序
-  // 单调不减,当前候选仍覆盖视口顶就往前收敛,已滚过就往后找,通常 O(1)。语义与全量扫完全一致
-  // (唯一差异:滚过最后一节底之后原版返回 0(bug 味),现返回最后一节 = 更符合「顶部可见节」语义)。
+  // ③ 当前节 = 「覆盖画面主体中线(可见正文区竖向中点)的节」,不再是「顶部第一个 bottom>60 的节」。
+  // 用户反馈:上一章只剩一条尾巴挂在顶部时,画面主体+传给 AI 的可见内容其实几乎都是下一章了,却还算上一章。
+  // 改用参考线 ref=可见正文区中点:谁覆盖它谁就是当前节 → 页码/current_section_idx 跟画面主体一致。
+  // 邻域双向搜(bottom 沿文档序单调不减)仍是 O(1);只把阈值从 60(顶部)挪到可见区中点。
   function _findTopIdx() {
     var n = secEls.length; if (!n) return 0;
+    var ref = 60;
+    try { var cr = content.getBoundingClientRect(); ref = (Math.max(cr.top, 0) + Math.min(cr.bottom, window.innerHeight || cr.bottom)) / 2; } catch (e) {}
     var i = Math.min(Math.max(_curTopIdx | 0, 0), n - 1);
-    var below = function (k) { return secEls[k].getBoundingClientRect().bottom > 60; };
+    var below = function (k) { return secEls[k].getBoundingClientRect().bottom > ref; };
     if (below(i)) { while (i > 0 && below(i - 1)) i--; return i; }
     while (i < n - 1) { i++; if (below(i)) return i; }
     return n - 1;
