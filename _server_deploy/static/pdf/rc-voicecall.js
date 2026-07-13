@@ -2316,6 +2316,7 @@
     var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
+    if (toggle._opts) { toggle._opts._syncedPage = 0; toggle._opts._vtFp = ''; }   // 123:同款清零(RTC 重连同风险)
     try {
       setSt('连接中(WebRTC)…');
       callBtnConnecting(true);   // 96:按下即琥珀脉冲,"确实在等它开启"
@@ -2428,6 +2429,7 @@
     // 新连接 = relay 端 book 状态全新 → 指纹清零,让 __vcSyncNow 下一轮把选中/墨迹/页码重推上去
     // (旧代码重连/🧹后指纹残留 → 状态永不重推,relay 不知道选中和圈画)
     _stateFp = null; _inkFp = '';
+    if (toggle._opts) { toggle._opts._syncedPage = 0; toggle._opts._vtFp = ''; }   // 123:翻页同步指纹随新会话清零(重连后重推页码)
     // 连接世代:teardown/新 start 都推进 _gen;在飞的旧 start 每个 await 后自检,过期就清掉
     // 自己建的资源退出(否则 iOS 卡死的旧回合会在用户触屏后"复活",跟新回合抢出双连接+泄漏 AudioContext)
     var g = ++_gen, myAc = null, myMic = null;
@@ -2657,8 +2659,10 @@
     if (!ws || ws.readyState !== 1 || !page) return;
     var o = toggle._opts || {};
     var tfp = vtext ? (vtext.length + ':' + vtext.slice(0, 40) + vtext.slice(-40)) : '';
-    if (page === o.page && tfp === (o._vtFp || '')) return;
-    o.page = page; o._vtFp = tfp;
+    // 123(用户实测"翻到第5页读的是第3页"根因):去重键改独立 _syncedPage——旧版用 o.page,重连(relay 重启)后
+    // 新会话是"初始页脑子",而 o.page 残留新页码=去重永远拦住,page 消息再也不发。_syncedPage 在连接成功处清零。
+    if (page === o._syncedPage && tfp === (o._vtFp || '')) return;
+    o.page = page; o._syncedPage = page; o._vtFp = tfp;
     _inkFp = '';   // 换页后墨迹指纹作废(新页的墨迹要重新同步)
     try { ws.send(JSON.stringify({ type: 'page', page: page, text: vtext ? String(vtext).slice(0, 2000) : undefined })); setSt('通话中 · 已同步到第 ' + page + ' 页'); } catch (e) {}
   }

@@ -1384,7 +1384,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         if cred.get("rt_lang") in ("zh", "ja", "en"):
             _gtr["language_hint"] = cred["rt_lang"]
         _kt = [w for w in [Path(file_rel).stem if file_rel else "", "这一页", "翻页", "做卡片", "笔记"] if w]
-        _gtr["keyterms"] = _kt[:100]   # 114:转写热词(≤100 项×50 字符,书名命中率↑)
+        _gtr["keyterms"] = _kt[:20]   # 114/123:转写热词——实测上限 20(API err "exceeds maximum of 20",官方文档的 100 是假的)
         sess["audio"]["input"]["transcription"] = _gtr
         sess["resumption"] = {"enabled": True}   # 114:断线恢复(conversation_id 30min 内重连保历史;续接=#290 二期)
         if cred.get("rt_grok_vad") == "server":   # 121 实验开关:官方推荐路("Enable server_vad for automatic, natural barge-in")
@@ -1776,11 +1776,11 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                     book["figures"] = vc2.get("figures") or []
                                     try:   # 121:keyterms mid-session 更新(官方支持)——本页生词进转写热词
                                         _kt2 = [w for w in [Path(file_rel).stem if file_rel else "", "这一页", "翻页", "做卡片", "笔记"] if w]
-                                        _kt2 += [str(v)[:50] for v in (book.get("vocab") or [])[:60]]
+                                        _kt2 += [str(v)[:50] for v in (book.get("vocab") or [])[:15]]
                                         await ows.send(json.dumps({"type": "session.update", "session": {
                                             "audio": {"input": {"transcription": {"model": "grok-transcribe",
                                                      **({"language_hint": _creds().get("rt_lang")} if _creds().get("rt_lang") in ("zh", "ja", "en") else {}),
-                                                     "keyterms": _kt2[:100]}}}}}, ensure_ascii=False))
+                                                     "keyterms": _kt2[:20]}}}}}, ensure_ascii=False))   # 123:实测上限 20
                                     except Exception:
                                         pass
                             except Exception:

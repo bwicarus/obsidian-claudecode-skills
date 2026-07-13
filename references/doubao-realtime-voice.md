@@ -840,3 +840,8 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 1. **Grok tools 官方嵌套形制**:实测先行(嵌套 `{"type":"function","function":{...}}` 发 session.update→session.updated ✓+工具正常触发 `read_page {"page":5}` ✓)→relay grok 分支切官方形制,顺手裁掉不在官方 schema 的 `tool_choice/parallel_tool_calls/output_modalities`(此前靠兼容层撑,排障隐患归一)。
 2. **#290 控制 WS 可恢复重连(RTC/GPT)**:ctl 建立从 rtcStart 内联抽成 `_ctlOpen()`;onclose(通话仍在=非主动挂断,teardown 摘回调兜底)→退避重连 800ms×2^n(≤5 次);重挂成功(rtc_ctl ok)→重试清零+`__vcSyncNow` 快照重推(relay 新会话 book 状态空——选中/墨迹/页码重新入库)。治"relay 重启掐死通话中工具"(103 事故的结构性防线):重启后 ≤0.8s 自动重挂 P2,工具执行权无缝回归 relay;重连放弃(5 次)=纯前端模式接管(现有回退)。relay 端同 call_id 重挂走现有 handle_rtc_ctl(93 的双挂告警对同 call_id 不误报)。
 
+## 批次 123(2026-07-13)"翻到第5页读的是第3页"根因链 + keyterms 实测上限
+
+**证据链**(用户截图:Grok 自述"最初に教えてくれたのが第3ページ"+日志):①10:18:24 relay 被 systemctl restart(=我部署 122 撞上用户测试,第二次犯——已写 memory:restart 前查活跃通话);②前端自动重连,新会话用开话时定格的 p3 初始化;③**setPage 去重键用 o.page**——用户翻到第 5 页时 o.page 已=5,重连后新会话是"第 3 页脑子"而去重认为"已同步到 5"=page 消息永不再发→instructions 恒注入第 3 页页码+正文。修:去重键改独立 `o._syncedPage`,连接成功(start/rtcStart 指纹清零处)清零=重连后页码必重推。
+**keyterms 实测上限 20**:API err "Too many keyterms: 27 exceeds maximum of 20. Keyterms were not applied"——官方文档写 ≤100 是假的;两处裁 20(连接 5 固定+翻页更新 5 固定+15 生词)。
+
