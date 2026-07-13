@@ -1974,6 +1974,7 @@
       return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
     } catch (e) { return null; }
   }
+  try { window.RC = window.RC || {}; RC.captureView = _captureView; } catch (e) {}   // 共享截图能力:文字侧栏(rc-assistant)EPUB 笔迹场景发送前 await 一张视口截图(语音链路走 need_shot,文字链路一次性 HTTP 只能预拍)
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });

@@ -3980,6 +3980,20 @@
     });
   }
 
+  function _viewportHasInk() {   // 当前视口内任一章有手写笔迹?(getContext 的 want_viewshot=据此让共享 send 预拍视口截图给 AI 看笔迹)
+    try {
+      var secs = document.querySelectorAll('.ep-sec, .ep-usec');
+      var vh = window.innerHeight || document.documentElement.clientHeight;
+      for (var i = 0; i < secs.length; i++) {
+        var r = secs[i].getBoundingClientRect();
+        if (r.bottom < 0 || r.top > vh) continue;   // 不在视口 → 跳过
+        var st = secs[i].__inkStrokes;
+        if (st && st.length) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
   // ════════ EpubHtmlAdapter:把 epub-html.js(HTML 直渲 EPUB)收敛进统一中间层 RC.adapter 契约 ════════
   // 设计见 /reader-middlelayer-design.md。此前 epub-html.js 是 direct driver、无 adapter 对象 →
   // 现注册进 RC._adapter,让上层(助手)经 RC.adapter() 统一取上下文/图,不再直连本地函数(_epCollectFigures)。
@@ -4014,6 +4028,7 @@
         current_section_idx: _curTopIdx, total_sections: COUNT, toc: TOC,
         selection: sel.sel || '', selection_sentence: sel.sent || '', selection_anchor: sel.anchor || undefined,
         figures: _epCollectFigures(),
+        want_viewshot: _viewportHasInk(),   // EPUB 笔迹画在 HTML 上、服务端渲不了 → 视口有笔迹时让共享 send 预拍一张视口截图塞 view_image(PdfAdapter 不返回此字段=PDF 走服务端裁图不受影响)
         notes: (window.__noteAttached || []).filter(function (n) { return !n.has_ink; }).slice(0, 4).map(function (n) {
           return { id: n.id, text: String(n.text || '').slice(0, 2000), near: String(n.near || '').slice(0, 1200), section: n.section };
         })

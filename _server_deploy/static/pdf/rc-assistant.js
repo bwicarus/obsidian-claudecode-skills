@@ -1796,6 +1796,12 @@
     try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
+    if (sentCtx.want_viewshot && window.RC && RC.captureView) {
+      // EPUB 笔迹场景(adapter 声明 want_viewshot):服务端渲不了 HTML 笔迹 → 预拍一张视口截图随请求发,
+      // see_ink/see_page 拿 ctx.view_image 所见即所得(语音链路走 need_shot,文字侧栏一次性 HTTP 只能预拍)。
+      try { var _vs = await RC.captureView(); if (_vs && _vs.b64) sentCtx.view_image = _vs; } catch (_) {}
+    }
+    delete sentCtx.want_viewshot;   // 前端标志,不入后端 ctx / 历史 meta
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;
     // 逐字浮现的"揭示游标":跟 SSE delta 到达节奏解耦,由 rAF 稳定速度推进 → 连续逐字(不段一段)
     var _revN = 0, _spans = [], _tot = 0, _raf = null, _lastTs = 0, _acc = 0, _noChar = false;
