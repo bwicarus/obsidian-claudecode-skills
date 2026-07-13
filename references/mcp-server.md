@@ -57,16 +57,31 @@ stdio 模式由客户端按需拉起进程,不需要常驻服务。
 
 **远程模式(已启用)**:`mcp-server.service`(systemd,`--http 8766` Streamable HTTP,只听 127.0.0.1)+ Pi nginx 两个 server 块(80/443)各加了 `location /mcp`(proxy_buffering off + 3600s 超时;⚠ Pi nginx 是手工 patch,备份在 `sites-available/bwicarus.bak-mcp`)。unit 副本 `references/systemd/mcp-server.service`。
 
-**HTTP 模式强制 Bearer 门禁**:所有请求须带 `Authorization: Bearer <~/.config/mcp-http-token>`(无 token → 401;token 文件缺失服务拒绝启动)。**两把 token 职责别混**:`mcp-http-token`=客户端→MCP 服务器的门禁;`mcp-webapp-token`=MCP 服务器→webapp 的用户身份。SDK 的 DNS-rebinding Host 校验已关(经反代 Host=ts.net 会 421;安全由门禁负责)。
+**HTTP 模式强制 Bearer 门禁**:所有请求须带 `Authorization: Bearer <token>`,认**两类** token(无 token → 401;静态 token 文件缺失服务拒绝启动):
+- 静态 token `~/.config/mcp-http-token`(Claude Code / 脚本客户端,`--header` 直填);
+- **OAuth access token**(官方 app 走 OAuth 流程签发,见下节)。
+
+**两把基础 token 职责别混**:`mcp-http-token`=客户端→MCP 服务器的门禁;`mcp-webapp-token`=MCP 服务器→webapp 的用户身份。SDK 的 DNS-rebinding Host 校验已关(经反代 Host=ts.net 会 421;安全由门禁负责)。
 
 **接入方式**:
 - tailnet 内:`https://bwicarus.taile44d0c.ts.net/mcp` + Authorization header。
-- **公网(tailnet 外的 AI)= Tailscale Funnel**(待用户执行,见下)——Tailscale 官方入口反代,自动 TLS,无需开路由器端口:
+- **公网(官方 app / tailnet 外的 AI)= Tailscale Funnel**:
   ```bash
-  sudo tailscale funnel --bg --https=8443 --set-path=/mcp http://127.0.0.1:8766/mcp
+  sudo tailscale funnel --bg --https=8443 --set-path=/ http://127.0.0.1:8766
   ```
-  首次可能要在 admin console 开 Funnel 权限(命令会给链接)。之后公网地址 `https://bwicarus.taile44d0c.ts.net:8443/mcp`(仍需 Bearer 门禁)。⚠ 必须用 8443,**绝不能** `--https=443`(tailscaled 会接管 tailnet 侧 443,遮蔽 nginx 全站)。
-  claude.ai 远程连接器若只支持 OAuth/无鉴权(不支持自定义 header),接它需另加 OAuth 层;Claude Code(`claude mcp add --transport http URL --header ...`)/SDK 客户端都支持 header。
+  转发**整根**(OAuth 发现端点 `/.well-known/*`、`/oauth/*` 都必须公网可达,不能只转 /mcp)。公网地址 `https://bwicarus.taile44d0c.ts.net:8443/mcp`。⚠ 必须用 8443,**绝不能** `--https=443`(tailscaled 会接管 tailnet 侧 443,遮蔽 nginx 全站)。首次可能要在 admin console 开 Funnel 权限(命令会给链接)。
+
+## OAuth 2.1 层(mcp_oauth.py,2026-07-13)——接 claude.ai / ChatGPT 官方连接器
+
+claude.ai 自定义连接器**只支持 OAuth**(UI 无静态 Bearer/自定义 header 字段;无鉴权服务器的 connect flow 也有已知 issue),所以公网面提供标准 OAuth:
+
+- **端点**:RFC 9728 PRM(`/.well-known/oauth-protected-resource[/mcp]`)+ RFC 8414 AS metadata(`/.well-known/oauth-authorization-server[/mcp]` + `openid-configuration` 别名)+ RFC 7591 DCR(`POST /oauth/register`,public client)+ `GET/POST /oauth/authorize` + `POST /oauth/token`(PKCE S256 强制;authorization_code + refresh_token 轮换)。
+- **发现流程**:客户端无 token 打 /mcp → 401 带 `WWW-Authenticate: Bearer resource_metadata=...` → 客户端顺藤摸瓜 DCR→authorize→token(claude.ai 全自动,用户只见授权页)。
+- **信任模型**:授权页要求**配对密码**(`~/.config/mcp-oauth-pass`,600)——URL 公开无妨,没密码拿不到 token。consent-phishing 缓解=页面显示回调域名+警示「只在自己主动添加连接器时输入」。密码输错限速(10min 5 次/IP)。
+- **token**:access 7 天 / refresh 180 天(轮换,旧 refresh 即废),存 `~/.config/mcp-oauth-store.json`(600,原子写);前缀 `mat_`/`mrt_`/`mac_`(access/refresh/code)、`mcl_`(client)。静态 token 并行有效。
+- **public base** env `MCP_PUBLIC_BASE`(默认 `https://bwicarus.taile44d0c.ts.net:8443`)——元数据/issuer 都用它,换域名只改这一处。
+- ⚠ **lifespan 桥接坑**:外层 Starlette 组装(Route+Mount)会消费 lifespan 不传子 app → FastMCP 的 session manager 不启动,/mcp 全 500 且 worker 连接复位。mcp_oauth.build_asgi 里手动 `async with mcp_app.router.lifespan_context(mcp_app)` 桥接。
+- **Claude app 添加**:设置 → 连接器 → 添加自定义连接器 → URL 填 `https://bwicarus.taile44d0c.ts.net:8443/mcp`(Advanced 的 Client ID/Secret 留空,走 DCR)→ 跳授权页输配对密码。ChatGPT 开发者模式连接器同一套 OAuth 应可用(待实测)。
 
 ## 踩坑(HTTP 模式)
 

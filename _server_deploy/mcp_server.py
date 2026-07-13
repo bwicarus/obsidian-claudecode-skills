@@ -228,30 +228,6 @@ def add_highlight(file: str, page: int, texts: list[str], color: str = "") -> di
                                          "ctx": {"file_rel": file, "page": page}})
 
 
-class _BearerGate:
-    """HTTP 模式的 MCP 层认证:所有请求须带 Authorization: Bearer <~/.config/mcp-http-token>。
-    该 token 是「客户端→本服务器」的门禁(与「本服务器→webapp」的 mcp-webapp-token 是两把,别混);
-    tailnet 内(nginx /mcp)和公网(Tailscale Funnel)都过这道门。token 文件不存在 → 拒绝启动 HTTP 模式。"""
-    def __init__(self, app, token):
-        self.app, self.token = app, ("Bearer " + token).encode()
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            auth = b""
-            for k, v in (scope.get("headers") or []):
-                if k == b"authorization":
-                    auth = v
-                    break
-            if auth != self.token:
-                body = b'{"error":"unauthorized"}'
-                await send({"type": "http.response.start", "status": 401,
-                            "headers": [(b"content-type", b"application/json"),
-                                        (b"content-length", str(len(body)).encode())]})
-                await send({"type": "http.response.body", "body": body})
-                return
-        await self.app(scope, receive, send)
-
-
 if __name__ == "__main__":
     if "--http" in sys.argv:
         try:
@@ -267,7 +243,10 @@ if __name__ == "__main__":
             print("HTTP 模式必须有 ~/.config/mcp-http-token(客户端门禁),拒绝无认证启动", file=sys.stderr)
             sys.exit(1)
         import uvicorn
-        app = _BearerGate(mcp.streamable_http_app(), http_token)
+        # 门禁+OAuth 面都在 mcp_oauth(静态 token 与 OAuth token 并行;官方 app 走 OAuth 发现流程)
+        from mcp_oauth import build_asgi
+        public_base = os.environ.get("MCP_PUBLIC_BASE", "https://bwicarus.taile44d0c.ts.net:8443")
+        app = build_asgi(mcp.streamable_http_app(), static_token=http_token, public_base=public_base)
         uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")   # 只听本机:入口=nginx /mcp(tailnet)+ Tailscale Funnel(公网)
     else:
         mcp.run()   # stdio(默认):由 MCP 客户端(claude mcp add)按需拉起,无 HTTP 面
