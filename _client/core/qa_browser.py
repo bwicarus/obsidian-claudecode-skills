@@ -3011,8 +3011,12 @@ class Handler(BaseHTTPRequestHandler):
                         buf = io.BytesIO()
                         img_obj.convert("RGB").save(buf, format="PNG")
                         temp_path.write_bytes(buf.getvalue())
+                        # ⚠ 存**转换后的 PNG** base64:前端 pollScreenshot 硬编码 `data:image/png;base64,`+data,
+                        # 若这里仍存原始 b64(iPad 快捷指令发的是 JPEG),就成了「声明 PNG 却塞 JPEG 数据」的
+                        # data URL —— iOS Safari 严格校验直接不显示 = 「页面能开但没有截图」的真因(2026-07-14 实测确证)。
+                        img_b64 = base64.b64encode(buf.getvalue()).decode()
                     except Exception:
-                        temp_path.write_bytes(raw_bytes)
+                        temp_path.write_bytes(raw_bytes)   # 转换失败:保留原始字节与原始 b64(浏览器多数能嗅探)
                     state.update({
                         "img_b64":   img_b64,
                         "img_fname": img_fname,
