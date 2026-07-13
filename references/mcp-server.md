@@ -65,7 +65,7 @@ stdio 模式由客户端按需拉起进程,不需要常驻服务。
 
 **接入方式**:
 - tailnet 内:`https://bwicarus.taile44d0c.ts.net/mcp` + Authorization header。
-- **公网(官方 app / tailnet 外的 AI)= Tailscale Funnel**:
+- **公网(官方 app / tailnet 外的 AI)= Tailscale Funnel**(✅ 2026-07-13 已启用,公网验证通过):
   ```bash
   sudo tailscale funnel --bg --https=8443 --set-path=/ http://127.0.0.1:8766
   ```
