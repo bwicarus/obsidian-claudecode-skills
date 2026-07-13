@@ -4627,11 +4627,36 @@ def _rtc_cfg() -> dict:
         return {}
 
 
+def _voice_budget_gate():
+    """125(#284):预算硬闸——读 relay 的 SQLite 账本(WAL 跨进程读安全)。rt_budget_usd≤0=不设闸。"""
+    try:
+        cfg = json.loads(_VOICE_CFG_PATH.read_text("utf-8"))
+        b = float(cfg.get("rt_budget_usd") or 0)
+    except Exception:
+        b = 0.0
+    if b <= 0:
+        return True, 0.0
+    try:
+        import sqlite3
+        import time as _t2
+        c = sqlite3.connect(str(CLAUDE_DIR / "state" / "voice-ledger.db"), timeout=3)
+        r = c.execute("SELECT COALESCE(SUM(est_usd),0) FROM usage_events WHERE day=?",
+                      (_t2.strftime("%Y-%m-%d"),)).fetchone()
+        c.close()
+        spent = float(r[0] or 0)
+    except Exception:
+        return True, 0.0
+    return spent < b, spent
+
+
 @bp.route("/rtc-session", methods=["POST"])
 def assistant_rtc_session():
     """WebRTC 会话配置(instructions/tools/vad/voice,镜像 relay 的 WS 版构造;audio format 不带——媒体轨自动协商)。"""
     if not _logged_in():
         return jsonify({"ok": False}), 401
+    _bok, _bspent = _voice_budget_gate()
+    if not _bok:
+        return jsonify({"ok": False, "error": f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
     body = request.get_json(silent=True) or {}
     file_rel = (body.get("file") or "").strip()
     try:
@@ -4913,9 +4938,11 @@ _RTC_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
 
 @bp.route("/rtc-usage", methods=["POST"])
 def assistant_rtc_usage():
-    """WebRTC 版 usage 记账(response.done.usage 由前端转发;与 relay WS 版同一账本/口径)。"""
+    """WebRTC 版 usage 记账。125(#283 P3):记账权威=relay sideband(自读 response.done.usage 写 SQLite 账本),
+    本端点**退位为兼容 no-op**(旧页面 JS 还在上报;继续写账=双记)。"""
     if not _logged_in():
         return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "note": "ledger-by-relay"})
     usage = request.get_json(silent=True) or {}
     _R = _RTC_RATE if "mini" in str(usage.get("_model") or "mini") else _RTC_RATE_STD   # ㊶ 按模型选价表
     try:
@@ -5169,7 +5196,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
                      "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply", "rt_speed", "rt_grok_voice",
-                     "rt_grok_vad", "rt_grok_replace")
+                     "rt_grok_vad", "rt_grok_replace", "rt_budget_usd")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])

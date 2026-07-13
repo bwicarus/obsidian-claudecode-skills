@@ -1200,7 +1200,78 @@ _OA_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
             "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0, "in_image": 0.80}
 
 
-def _oa_log_usage(usage: dict):
+LEDGER_DB = Path("/home/bwicarus/claude/state/voice-ledger.db")
+
+
+def _ledger_conn():
+    import sqlite3
+    LEDGER_DB.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(LEDGER_DB, timeout=5)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_events(
+        id INTEGER PRIMARY KEY, ts INTEGER, day TEXT, engine TEXT, kind TEXT, span TEXT,
+        resp_id TEXT, model TEXT, in_tok INTEGER, out_tok INTEGER, cached_tok INTEGER,
+        audio_in_s REAL, audio_out_s REAL, text_items INTEGER, est_usd REAL, meta TEXT,
+        UNIQUE(engine, kind, resp_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS tool_calls(
+        id INTEGER PRIMARY KEY, ts INTEGER, day TEXT, engine TEXT, span TEXT,
+        call_id TEXT, tool TEXT, ok INTEGER, took_s REAL, cached INTEGER,
+        UNIQUE(engine, call_id))""")
+    return c
+
+
+def _ledger_usage(engine, span, resp_id, model="", in_tok=0, out_tok=0, cached_tok=0,
+                  audio_in_s=0.0, audio_out_s=0.0, text_items=0, est_usd=0.0, kind="response", meta=""):
+    """#284:usage 事件入账(幂等:同 engine+kind+resp_id 只记一次——response.done 重复投递不双记)。"""
+    try:
+        c = _ledger_conn()
+        with c:
+            c.execute("INSERT OR IGNORE INTO usage_events(ts,day,engine,kind,span,resp_id,model,in_tok,out_tok,"
+                      "cached_tok,audio_in_s,audio_out_s,text_items,est_usd,meta) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (int(time.time()), time.strftime("%Y-%m-%d"), engine, kind, span, resp_id or f"~{time.time()}",
+                       model, in_tok, out_tok, cached_tok, audio_in_s, audio_out_s, text_items, est_usd, meta[:200]))
+        c.close()
+    except Exception as ex:
+        sys.stderr.write(f"[ledger] {ex}\n")
+
+
+def _ledger_tool(engine, span, call_id, tool, ok, took_s=0.0, cached=False):
+    try:
+        c = _ledger_conn()
+        with c:
+            c.execute("INSERT OR IGNORE INTO tool_calls(ts,day,engine,span,call_id,tool,ok,took_s,cached) "
+                      "VALUES(?,?,?,?,?,?,?,?,?)",
+                      (int(time.time()), time.strftime("%Y-%m-%d"), engine, span,
+                       call_id or f"~{time.time()}", tool, 1 if ok else 0, float(took_s or 0), 1 if cached else 0))
+        c.close()
+    except Exception as ex:
+        sys.stderr.write(f"[ledger] {ex}\n")
+
+
+def _ledger_day_spent(day=None):
+    try:
+        c = _ledger_conn()
+        r = c.execute("SELECT COALESCE(SUM(est_usd),0) FROM usage_events WHERE day=?",
+                      (day or time.strftime("%Y-%m-%d"),)).fetchone()
+        c.close()
+        return float(r[0] or 0)
+    except Exception:
+        return 0.0
+
+
+def _budget_gate():
+    """#284 预算硬闸:rt_budget_usd>0 且当日已花≥预算 → (False, 已花)。0/缺省=不设闸。"""
+    try:
+        b = float(_creds().get("rt_budget_usd") or 0)
+    except Exception:
+        b = 0.0
+    if b <= 0:
+        return True, 0.0
+    spent = _ledger_day_spent()
+    return spent < b, spent
+
+
+def _oa_log_usage(usage: dict, engine: str = "openai_ws", span: str = "", resp_id: str = ""):
     """response.done.usage 按天入账(官方口径:分模态/缓存;cached 是 input 子集,按扣减计价)。"""
     try:
         itd = usage.get("input_token_details") or {}
@@ -1229,6 +1300,9 @@ def _oa_log_usage(usage: dict):
         d["turns"] = d.get("turns", 0) + 1
         OPENAI_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
         OPENAI_USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        _ledger_usage(engine, span, resp_id, model="gpt-realtime",
+                      in_tok=int(usage.get("input_tokens") or 0), out_tok=int(usage.get("output_tokens") or 0),
+                      cached_tok=row["cached_text"] + row["cached_audio"], est_usd=round(cost, 6))   # 284:双写过渡(JSON 留只读历史)
     except Exception as ex:
         sys.stderr.write(f"[voice-oa usage] {ex}\n")
 
@@ -1333,6 +1407,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             await bws.close()
             return
     cred = _creds()
+    _span = uuid.uuid4().hex[:12]   # 284:voice_span_id——本会话全部 usage/工具事件的贯穿键
+    _bok, _bspent = _budget_gate()
+    if not _bok:   # 284:预算硬闸(rt_budget_usd,0=关)
+        await bws.send(json.dumps({"event": -1, "payload": {"error": f"今日语音预算已用完(${_bspent:.2f})——明天再聊,或在设置调高 rt_budget_usd"}}, ensure_ascii=False))
+        await bws.close()
+        return
     model = "grok-voice-think-fast-1.0" if engine == "grok" else (cred.get("rt_model") or "gpt-realtime-2.1-mini")   # 114:固定型号(latest 指向会漂移)
     vc = await _fetch_book_ctx(file_rel, page)
     book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
@@ -1546,6 +1626,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
         if engine == "grok":
             _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数(出飞已在回填处前移,119b)
+        _ledger_tool(engine, _span, call_id, name, ok, took or 0)   # 284
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=out[:300])
 
@@ -2038,7 +2119,10 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 try:
                     u = (e.get("response") or {}).get("usage") or {}
                     if u and engine != "grok":
-                        _oa_log_usage(u)   # 按天账本 state/openai-usage.json(120:grok 计价无 token 维度,别污染 openai 账本)
+                        _oa_log_usage(u, engine="openai_ws", span=_span, resp_id=(e.get("response") or {}).get("id") or "")
+                    elif u and engine == "grok":   # 284:grok 每响应也入账(est_usd=0,时长费在会话级)
+                        _ledger_usage("grok", _span, (e.get("response") or {}).get("id") or "",
+                                      model=model, in_tok=int(u.get("input_tokens") or 0), out_tok=int(u.get("output_tokens") or 0))
                 except Exception:
                     pass
                 await bws.send(json.dumps({"event": 359, "payload": {}}, ensure_ascii=False))
@@ -2113,6 +2197,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     _gd = []
                 _gd.append(_rec)
                 _gp.write_text(json.dumps(_gd[-500:], ensure_ascii=False, indent=1), "utf-8")
+                _ledger_usage("grok", _span, _span, model=model, kind="session",
+                              audio_in_s=round(_gk["in_b"] / 48000.0, 1), audio_out_s=round(_gk["out_b"] / 48000.0, 1),
+                              text_items=_gk.get("items", 0), est_usd=_rec["est_by_audio_usd"])   # 284
                 sys.stderr.write(f"[grok-usage] 连接{_cm:.1f}min 音频{_am:.1f}min → 按音频≈${_am * 0.05:.3f} / 按连接≈${_cm * 0.05:.3f}\n")
             except Exception:
                 pass
@@ -2293,6 +2380,13 @@ def _mk_bridge_track(q):
 
 
 async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
+    _span = uuid.uuid4().hex[:12]   # 284:voice_span_id
+    _bok, _bspent = _budget_gate()
+    if not _bok:
+        try:
+            await bws.send(json.dumps({"event": -1, "payload": {"error": f"今日语音预算已用完(${_bspent:.2f})"}}, ensure_ascii=False))
+        except Exception:
+            pass
     """㊺P2 RtcController:sideband 控制面接管**工具执行**(唯一执行者)——
     复用 handle_openai._tool 语义:voice-tool 执行/client_action+tool_status 经控制 WS 下行/
     图像 sideband 直喂;新增**工具缓存**(同工具+同参数+同页+同笔迹=复用,治 read_page 重复调用)
@@ -2556,6 +2650,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,
             "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+        _ledger_tool("openai_rtc", _span, call_id2, name, ok, took or 0, cached=bool(cached))   # 284
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=("[cache] " if cached else "") + ("[stale] " if stale else "") + out[:300])
 
@@ -2594,6 +2689,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 r0 = ev.get("response") or {}
                 u = r0.get("usage") or {}
                 otd = u.get("output_token_details") or {}
+                _oa_log_usage(u, engine="openai_rtc", span=_span, resp_id=(ev.get("response") or {}).get("id") or "")   # 284/P3:usage 记账归 relay(sideband 自读,不再依赖前端上报)
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")

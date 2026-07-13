@@ -853,3 +853,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **#287 清账**:工具缓存白名单查证**已齐**(VOICE_CACHEABLE_TOOLS 20 项含全部只读工具);provider 熔断**已有等价体系**(_FREE_BUSY_TTL free→paid/ai_backends Gemini 兜底/100 的工具熔断);**getStats 遥测(新做)**:通话中每 10s `pc.getStats` 抽 inbound-rtp audio(packetsLost/jitter)+candidate-pair RTT→ws `rtcstats` 上行→relay `_vlog("rtcstats")` 落学习时间线——"断续/听不清"从此有数据;截图容器化=边际价值低,记录跳过(60 批的尺寸上限+质量阶梯已覆盖主要风险)。
 
+## 批次 125(2026-07-13)#284 SQLite 统一账本+预算硬闸 + OpenAI Cookbook 原文核实修正
+
+**#284 落地**:`state/voice-ledger.db`(WAL,webapp 跨进程读安全)——`usage_events`(UNIQUE(engine,kind,resp_id) 幂等键,response.done 重复投递不双记;冒烟验证 1 行)+`tool_calls`(UNIQUE(engine,call_id))。`voice_span_id`=每会话 uuid 贯穿全部事件。写入点:WS done(openai_ws)/RTC sideband done(openai_rtc——**这就是 #283 P3 的 usage 归 relay**:relay 自读 sideband,webapp /rtc-usage 端点退位 no-op 防双记)/grok 每响应+会话级/两版工具循环。**预算硬闸** `rt_budget_usd`(白名单,0=关):WS/RTC ctl 开局闸+webapp rtc-session 429 闸(打不通电话)。JSON 账本双写过渡(只读历史)。
+
+**OpenAI Cookbook 原文核实(agent 精读 platform 文档+cookbook notebook 源码)**:①`previous_item_id:'root'`=官方唯一文档化插头部写法,**验证通过**;②压缩方向全对(24k 在官方建议 20-32k 区间/system role 恰好躲开官方明示的"assistant 摘要会让模型切文字输出"坑/低频批量有官方背书);③**两处按原文修正**:时序改"**先插摘要后删旧轮**"(官方顺序无空窗;delete 定点+create 插 root 无冲突,官方范例不等 deleted 确认——124 的等确认机制退役)+摘要**固定 id**(sum_*,不入 items 账本免 slice 排序错位,下次压缩连旧摘要一起删);④新增**紧急压缩线 27k**(服务端 28672 自动截断会先吃 root 摘要,紧急线豁免 90s 低频保护);⑤truncation 会话参数查证 RTC 已配 0.8✓。cookbook 其余遗漏记档:session.update 周期重申 instructions(长对话防遗忘)/工具输出瘦身/out-of-band response 旁路任务。
+

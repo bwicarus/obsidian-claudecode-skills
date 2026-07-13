@@ -2075,8 +2075,8 @@
   // ㊳ 会话内压缩(官方 8.4:item.delete 批量删旧轮+摘要顶上,低频批量>频繁逐条):
   //   触发判据=每轮 input_tokens(usage 实时监控,cached 也要按 cached 价反复付)超过阈值——
   //   此时"历史携带成本×剩余轮次"必然超过一次性缓存失效(摘要+近几轮全价),压缩更便宜。
-  async function _rtcCompactNow() {
-    if (Date.now() - (_rtc.lastCompact || 0) < 90000) return;   // 低频保护
+  async function _rtcCompactNow(urgent) {
+    if (!urgent && Date.now() - (_rtc.lastCompact || 0) < 90000) return;   // 低频保护(cookbook:低频批量>高频零碎;紧急线豁免)
     if (_rtc.items.length < 12) return;
     _rtc.lastCompact = Date.now();
     try {
@@ -2086,31 +2086,24 @@
       var keep = 8;   // 尾部近几轮 item 保留原文(含最近的 page/state system)
       var del = _rtc.items.slice(0, -keep);
       _rtc.items = _rtc.items.slice(-keep);
-      // 124(#285 Cookbook 定稿):批删后**等全部 conversation.item.deleted 确认**再插摘要(防竞态);
-      // 摘要插到 root(previous_item_id:'root'=历史头部,官方语义:摘要先于其余历史)
-      var _inject = function () {
-        if (summary) _dcSend({ type: 'conversation.item.create', previous_item_id: 'root', item: {
-          type: 'message', role: 'system',
+      if (_rtc.sumId) del.push({ id: _rtc.sumId });   // 125b:上一个摘要也删(它在头部,不在 items 账本里)
+      // 125b(cookbook 原文核实):官方时序=**先插摘要、后删旧轮**(无"旧轮已删摘要未插"的空窗;
+      // delete 定点删与 create 插 root 无冲突,官方范例不等 deleted 确认)。摘要固定 id(不入 items 账本,免排序错位)。
+      if (summary) {
+        _rtc.sumId = 'sum_' + Date.now().toString(36);
+        _dcSend({ type: 'conversation.item.create', previous_item_id: 'root', item: {
+          id: _rtc.sumId, type: 'message', role: 'system',
           content: [{ type: 'input_text', text: '(更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)' }] } });
-        _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
-        try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
-      };
-      if (del.length) {
-        _rtc._delWait = { n: del.length, cb: _inject };
-        setTimeout(function () { if (_rtc._delWait) { _rtc._delWait = null; _inject(); } }, 3000);   // 3s 兜底:确认没等齐也注入
-        del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
-      } else { _inject(); }
+      }
+      del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
+      _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
+      try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
     } catch (e) { _rtc.lastCompact = 0; }
   }
   function _rtcOnEvent(e) {   // dc 下行事件 → 既有 UI 语义(对话窗/字幕/按钮/工具卡)
     var t = e.type;
     if (t === 'conversation.item.added' || t === 'conversation.item.created') {   // ㊳:记 item 账本(GA/beta 两个事件名都认)
-      try { if (e.item && e.item.id) _rtc.items.push({ id: e.item.id }); } catch (_) {}
-      return;
-    }
-    if (t === 'conversation.item.deleted') {   // 124(#285):压缩批删的确认计数——全部确认才插 root 摘要
-      var dw = _rtc._delWait;
-      if (dw && --dw.n <= 0) { _rtc._delWait = null; try { dw.cb(); } catch (_) {} }
+      try { if (e.item && e.item.id && !/^sum_/.test(e.item.id)) _rtc.items.push({ id: e.item.id }); } catch (_) {}   // 125b:摘要不入账本(它在头部,slice 排序会错位)
       return;
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
@@ -2218,7 +2211,7 @@
                 try { threadMsg('asst-note', '⏳ 本次通话已近 60 分钟(平台单会话上限),到点会自动重连并带上对话摘要。'); } catch (e2) {}
               }
               _rtc.inTok = u.input_tokens || 0;   // ㊳ 实时监控:本轮输入总量(cached 也按 cached 价反复计费)
-              if (_rtc.compactTh && _rtc.inTok >= _rtc.compactTh) _rtcCompactNow();
+              if (_rtc.compactTh && _rtc.inTok >= _rtc.compactTh) _rtcCompactNow(_rtc.inTok >= 27000);   // 125b:≥27k=紧急(服务端 28672 自动截断会先吃 root 摘要)
             } } catch (_) {}
     } else if (t === 'error') {
       var m0 = (e.error && e.error.message) || '';
