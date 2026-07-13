@@ -7915,8 +7915,18 @@ def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
         return None
 
 
-def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None) -> dict:
-    """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。"""
+def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None,
+                     on_step=None) -> dict:
+    """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。
+
+    on_step(text): 可选回调——把**内部阶段**实时吐出来(工具指示器 v2:长条态滚动显示「正在…」,
+    并累积进 trace 供「!」面板逐步查看)。不传=完全不影响原行为。"""
+    def _step(s):
+        if on_step:
+            try:
+                on_step(s)
+            except Exception:
+                pass
     out = {"ok": True}
     # ── 创建笔记 ──
     if make_note:
@@ -7967,6 +7977,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
     # ── 创建 Anki 卡 ──
     if make_anki:
         try:
+            _step("正在整理要做卡的内容")
             # AI 把 snippets 转 Anki 卡片 JSON
             snippets_text = "\n\n".join([
                 f"段 {i+1}：{s.get('text','')}"
@@ -7983,11 +7994,13 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 "3. 数学公式 $...$ 或 $$...$$\n\n"
                 f"=== 学习内容 ===\n{snippets_text}"
             )
+            _step("AI 正在生成卡片")
             raw = _ai_call(prompt, action, uid)
             # 提取 JSON
             s_idx = raw.find("{"); e_idx = raw.rfind("}")
             cards_data = json.loads(raw[s_idx:e_idx+1]) if s_idx >= 0 else {"cards": []}
             cards = cards_data.get("cards") or []
+            _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
             # 通过 AnkiConnect 加入 Anki（deck 用 "QA"）
             import urllib.request
             ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
@@ -8074,6 +8087,15 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                     pass
             out["anki_added"] = added
             out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
+            # 工具指示器 v2:完成卡=「完整卡片预览」(逐张正反面,含 $公式$ 与 <img>)→ 前端方块态渲染。
+            # 原样带出 AI 生成的卡面(不做转义/截断,MathJax 与图片由前端渲染)。
+            out["anki_cards"] = [{
+                "type": (c.get("type") or "basic"),
+                "front": (c.get("front") or "")[:2000],
+                "back": (c.get("back") or "")[:2000],
+                "cloze": (c.get("cloze") or c.get("text") or "")[:2000],
+            } for c in cards][:8]
+            out["anki_deck"] = "QA"
             # 制完触发 AnkiWeb sync（fire-and-forget，~50ms 返回，后台推送）
             if added > 0:
                 try:

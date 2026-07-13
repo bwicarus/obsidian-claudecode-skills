@@ -829,7 +829,8 @@ def _vtask_new(kind: str) -> str:
         _vtask_seq += 1
         tid = f"vt{int(time.time())}_{_vtask_seq}"
         _vtasks[tid] = {"id": tid, "kind": kind, "status": "running", "step": "",
-                        "speak": "", "client_actions": [], "result": None, "error": "", "ts": time.time()}
+                        "speak": "", "client_actions": [], "result": None, "error": "", "ts": time.time(),
+                        "steps": []}   # 工具指示器 v2:内部步骤流水(长条滚动 + 「!」面板逐步查看)
         for k in [k for k, v in _vtasks.items() if time.time() - v.get("ts", 0) > 1800]:
             _vtasks.pop(k, None)   # 清 30min 前的老任务
         return tid
@@ -908,13 +909,25 @@ def _task_anki(tid, params, ctx, base):
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
     text = content + f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
     image_url = (params.get("image_url") or "").strip()   # 助手 search_image 找到的图,若也要放进卡片就一并透传
+    # 工具指示器 v2:把制卡内部阶段实时吐给前端(长条态滚动;steps 累积供「!」面板逐步查看)
+    _steps = []
+
+    def _on_step(s):
+        _steps.append({"label": s, "t": round(time.time(), 1)})
+        _vtask_set(tid, step=s, steps=list(_steps))
+
     with _anki_lock:   # AnkiConnect 串行
         out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
-                                          image_url=image_url or None)
+                                          image_url=image_url or None, on_step=_on_step)
     n = out.get("anki_added", 0)
     if out.get("ok") and n:
         uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []}, owner=ctx.get("_uid"))
-        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki", result={"undo_id": uid})
+        # result 带**完整卡片内容**(正反面,含公式/图)→ 前端方块态「完整卡片预览」逐张翻看
+        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki",
+                   steps=list(_steps),
+                   result={"undo_id": uid, "kind": "anki",
+                           "n": n, "deck": out.get("anki_deck") or "QA",
+                           "cards": out.get("anki_cards") or []})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
     else:
@@ -1044,6 +1057,7 @@ def voice_task_status():
     if not t:
         return jsonify({"ok": False, "error": "unknown task"}), 404
     return jsonify({"ok": True, "status": t.get("status"), "step": t.get("step"),
+                    "steps": t.get("steps") or [],   # 工具指示器 v2:内部步骤流水(长条滚动 + 「!」面板逐步查看)
                     "speak": t.get("speak"), "client_actions": t.get("client_actions") or [],
                     "result": t.get("result"), "error": t.get("error")})
 
