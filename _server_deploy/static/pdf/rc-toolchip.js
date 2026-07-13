@@ -54,6 +54,25 @@
     return 'text';
   }
   function isAction(t) { return t === 'action'; }
+  // 标记图标按**工具语义**选(颜色仍按输出类型):看图=眼睛 / 读=书页 / 翻页=箭头 / 搜索=放大镜 / 高亮=笔 …
+  var TICON = {
+    eye:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8z"/><circle cx="8" cy="8" r="1.9"/></svg>',
+    read: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M3 2.8h7.5L13 5.3v8H3z"/><path d="M5.4 7h5.2M5.4 9.3h5.2M5.4 11.6h3.4"/></svg>',
+    find: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.3 10.3L13.6 13.6"/></svg>',
+    pen:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M9.8 3.2l3 3L6 13H3v-3z"/><path d="M8.4 4.6l3 3"/></svg>',
+    dict: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M3.5 2.5h9v11h-9a1.2 1.2 0 0 1 0-2.4h9"/><path d="M6.2 8.6L8 4.8l1.8 3.8M6.7 7.6h2.6"/></svg>',
+    net:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="5.6"/><path d="M2.4 8h11.2M8 2.4c-3.4 3.4-3.4 7.8 0 11.2M8 2.4c3.4 3.4 3.4 7.8 0 11.2"/></svg>'
+  };
+  function iconOf(tool, type) {
+    var t = String(tool || '');
+    if (/^see_/.test(t)) return TICON.eye;
+    if (/^(read_|toc|list_sections|notes_read)/.test(t)) return TICON.read;
+    if (/^(search_book|search_all_books|find_highlights|recall|notes_query)/.test(t)) return TICON.find;
+    if (/^(highlight|epub_highlight|auto_highlight|mark)/.test(t)) return TICON.pen;
+    if (/^(lookup_word|translate|page_vocab|section_vocab)/.test(t)) return TICON.dict;
+    if (/^web_search/.test(t)) return TICON.net;
+    return SVG[type] || SVG.text;
+  }
   function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function VC() { return window.RC && RC.voiceCard; }
   function hdSplit(el, label, act) {   // 头部:纯文本标题 → <标题><状态> + 【数据流】按钮
@@ -316,7 +335,7 @@
     chips.push(chip);
     if (vc && o.floating !== false) {   // 浮层:出生 = 透明玻璃圆标记
       var c = vc.push('', chip.label, true, true, chip.cid, {
-        tool: chip.tool, type: TYPE_C[type] || TYPE_C.text, icon: SVG[type] || SVG.text,
+        tool: chip.tool, type: TYPE_C[type] || TYPE_C.text, icon: iconOf(chip.tool, type),
         dot: true, noAuto: true
       });
       if (c) {

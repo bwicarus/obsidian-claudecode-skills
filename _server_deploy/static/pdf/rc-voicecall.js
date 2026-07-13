@@ -153,10 +153,12 @@
       // 进行中/创建:标记是**透明玻璃**(无色);出结果:有色磨砂(两个状态一眼可辨,用户要求)
       '.vc-card.vc-typed .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 22%,rgba(22,26,38,.8));' +
         '--vc-tl:color-mix(in srgb,var(--vc-tc) 48%,transparent);box-shadow:0 6px 18px -8px rgba(0,0,0,.5)}' +
-      '.vc-card.vc-busy .vc-card-dot{--vc-tf:rgba(255,255,255,.06);--vc-tl:transparent;box-shadow:none}' +
+      // ⚠ 进行中的标记必须**在任何底色上都看得见**:原来是 6% 白玻璃,压在 PDF 白页上等于隐形(用户实测"不显示方块了")
+      '.vc-card.vc-busy .vc-card-dot{--vc-tf:rgba(22,26,38,.62);--vc-tl:rgba(255,255,255,.22);' +
+        'box-shadow:0 4px 14px -4px rgba(0,0,0,.45)}' +
       // 收起态:整张卡就是那枚圆角方形标记
       '.vc-card.vc-dot{width:40px;height:40px;min-height:0;padding:0;border-radius:13px;border-color:transparent;' +
-        'background:transparent;box-shadow:none;overflow:visible}' +
+        'background:transparent;box-shadow:none;overflow:visible;backdrop-filter:none;-webkit-backdrop-filter:none}' +
       '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
       // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
       '.vc-card.vc-hasdot{right:auto;bottom:auto;transform-origin:0 0;' +
@@ -1069,9 +1071,15 @@
     var _hosts = [];
     if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
     if (!_sideOpen()) {
-      var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card);
-      var c = _cardPush(html, label, true, false, card.cid);   // 字幕模式:浮层镜像(html,与侧栏卡同编号)
-      if (c) { _pinBind(c.el, label, function () { return _infoText(card); }); try { _igWire(c.el, card); } catch (e) {} _hosts.push(c.el); }
+      // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
+      var c = _cardPush(_infoHtml(card), label, true, false, card.cid);   // 字幕模式:浮层镜像(与侧栏卡同编号)
+      if (c) {
+        // 结果卡不是"文字回复" → 标题栏只留【数据流】按钮(▶/✕ 去掉,与侧栏一致)
+        ['.vc-card-p', '.vc-card-x'].forEach(function (q) { var b = c.el.querySelector(q); if (b) b.remove(); });
+        _pinBind(c.el, label, function () { return _infoText(card); });
+        try { _igWire(c.el, card); } catch (e) {}
+        _hosts.push(c.el);
+      }
     }
     // 用户设计:这类工具**本来就有自己的结果卡** → 别再让工具指示器另造一张(字幕模式曾一次弹两张)。
     //   把工具卡「吸收」进结果卡:唯一显示的是结果卡,标题栏多一个按钮,点开就是那条线性流程图。
@@ -1312,7 +1320,7 @@
     try {
       if (!_tts.ac) { try { _tts.ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); } catch (e) { _tts.ac = new (window.AudioContext || window.webkitAudioContext)(); } }   // 24k 定频:消逐 chunk 独立重采样的边界 click(官方 console 同款)
       if (_tts.ac.state !== 'running') _tts.ac.resume();
-      if (_rtc.on || ws) { try { _ttsAecSetup(_tts.ac); } catch (e) {} }   // 130:通话中才需要(fire-and-forget;失败=回退禁麦)
+      if (_ttsIrqWant() && !_taec.ready) { try { _ttsAecSetup(_tts.ac); } catch (e) {} }   // 131:只在「可打断代念」条件成立时建
     } catch (e) {}
     if (_tts.ws && _tts.ws.readyState <= 1) return;
     try {
@@ -1586,6 +1594,7 @@
       var np = j.page;
       if (np && np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
       if (np) _rtc.ctxPage = np;
+      if (j.total) _rtc.ctxTotal = j.total | 0;   // 131:总页数(用户实测 AI 上下文里没有,答不出"这本书多少页/还剩多少")
       if (j.text != null) _rtc.pendText = String(j.text || '');
     } else if (t === 'ink') {
       var strokes = j.strokes || [];
@@ -2203,6 +2212,25 @@
   }
   var _turnFeed = null;   // 当前回复轮的代念 feeder(response.created 新建)
   var _tg = null;         // 麦守护单例:代念播放期禁麦(本地 WebAudio 不在 WebRTC AEC 参考里,不禁=模型听见自己)
+  // ── 「可打断代念」模式(用户设计,131)──
+  //   条件:GPT(2.1-mini,WebRTC)通话中 + 会用到 TTS 代念(文字/混合/路由档 且 代念开关开)。
+  //   进 = 给 TTS 的 AudioContext 建 AEC 环回 → 代念声进回声消除的参考信号被消掉 → **不必禁麦**
+  //        → 你随时开口即打断(VAD 收得到 speech_started),模型也听得见你。
+  //   退 = 切回纯语音档 / 关掉代念 / 挂断 → 拆掉环回(省两条 pc + 一个 audio 元素),禁麦回到兜底位。
+  function _ttsIrqWant() {
+    try { return !!(_rtc.on && _ttsOn() && _voiceMode() !== 'sts'); } catch (e) { return false; }
+  }
+  function _ttsIrqSync() {
+    var want = _ttsIrqWant();
+    if (want && !_taec.ready) {
+      if (!_tts.ac) { try { _ttsEnsure(); } catch (e) {} }        // 通道没起 → 先起(手势链外也无妨,AEC 不需要手势)
+      if (_tts.ac) { try { _ttsAecSetup(_tts.ac); } catch (e) {} }
+      try { setSt('通话中 · 代念可随时打断'); } catch (e) {}
+    } else if (!want && _taec.ready) {
+      _aecKill(_taec);                                            // 退出:环回拆掉,禁麦回到兜底位
+    }
+  }
+  window.__vcTtsIrqSync = _ttsIrqSync;
   function _ttsMicGuard() {
     // 130:环回在 → 代念已进 AEC 参考、会被消掉 → **不禁麦**(禁了就打断不了,模型也听不见你)
     if (_taec.ready) return;
@@ -2240,10 +2268,11 @@
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
-      var fp = _rtc.ctxPage + ':' + vt.length + ':' + vt.slice(0, 30);
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
-      _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') +
+      _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
+              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') +
               '。回答以本条为准;状态记录,不要回应本条。)');
     } catch (e) {}
   }
@@ -2656,6 +2685,7 @@
             if (_rtc.ctl) {   // 122:重挂成功——重试清零+快照重推(relay 新会话不知道选中/墨迹/页码)
               _rtc.ctlRetry = 0;
               try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e2) {}
+      try { _ttsIrqSync(); } catch (e2) {}   // 131:接通后按当前档位/代念开关,自动进入「可打断代念」
             }
           }
           else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
@@ -2820,6 +2850,7 @@
     try { var _ai1 = document.getElementById('asst-input'); if (_ai1) _ai1.classList.remove('vc-live'); } catch (e) {}
     _recStop();   // 128:挂断时把还在录的那段**收下并上传**(别丢掉用户刚听到的最后一段)
     _rec.oab = false;
+    try { _aecKill(_taec); } catch (e) {}   // 131:退出「可打断代念」(环回随通话走)
     _rtcCapReset();
     try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.close(); } } catch (e) {}
     _rtc.ctlWs = null; _rtc.ctl = false;
@@ -3087,7 +3118,11 @@
     if (page === o._syncedPage && tfp === (o._vtFp || '')) return;
     o.page = page; o._syncedPage = page; o._vtFp = tfp;
     _inkFp = '';   // 换页后墨迹指纹作废(新页的墨迹要重新同步)
-    try { ws.send(JSON.stringify({ type: 'page', page: page, text: vtext ? String(vtext).slice(0, 2000) : undefined })); setSt('通话中 · 已同步到第 ' + page + ' 页'); } catch (e) {}
+    var _tot = 0;
+    try { _tot = (o.total || (window.RC && RC.adapter && RC.adapter() && RC.adapter().totalPages && RC.adapter().totalPages()) ||
+                  (typeof pdfDoc !== 'undefined' && pdfDoc && pdfDoc.numPages) || 0) | 0; } catch (e) {}
+    try { ws.send(JSON.stringify({ type: 'page', page: page, total: _tot || undefined,
+                                   text: vtext ? String(vtext).slice(0, 2000) : undefined })); setSt('通话中 · 已同步到第 ' + page + ' 页'); } catch (e) {}
   }
 
   // 选中/chip 状态同步(与侧栏 __voiceContext 同源):选中文字/钉住焦点/带入图 → relay 热更 SP。
@@ -3368,6 +3403,7 @@
         // 127:自动挡下用户轮的模态由**会话级** output_modalities 决定 → 热切要立刻 session.update
         try { if (_rtc.on) _dcSend({ type: 'session.update',
           session: { type: 'realtime', output_modalities: [nxt === 'stt' ? 'text' : 'audio'] } }); } catch (e) {}
+        try { _ttsIrqSync(); } catch (e) {}   // 131:切档 → 自动进/退「可打断代念」模式
         if (nxt === 'stt') stopPlayback();
         try { setSt('通话中 · ' + (_VM_TXT[nxt] || nxt)); } catch (e) {}
       } else {                      // 其余:切回答的 T2S 朗读
@@ -3390,6 +3426,7 @@
       tb.classList[on ? 'add' : 'remove']('on');
       if (on) { try { _ttsEnsure(); } catch (e) {} }              // 手势内预热(iOS AudioContext 必须手势启动)
       else { try { bargeIn(); _ttsShutdown(); } catch (e) {} }    // 关=停残播+撂通道省资源
+      try { _ttsIrqSync(); } catch (e) {}                         // 131:代念开/关 → 进/退「可打断代念」模式
       try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rt_tts_speak: on ? '1' : '' }) }).catch(function () {}); } catch (e) {}
     });
