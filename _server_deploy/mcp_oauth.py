@@ -284,9 +284,15 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
                 pass
         gt = form.get("grant_type", "")
 
-        def _client_auth_ok(st, client_id):
+        def _client_auth_ok(st, client_id, real_pkce=False):
             sec = (st["clients"].get(client_id) or {}).get("secret", "")
-            return hmac.compare_digest(csec, sec) if sec else True   # confidential client 必须验 secret;public 免
+            if not sec:
+                return True   # public client(PKCE 已在外层强制)
+            if csec:
+                return hmac.compare_digest(csec, sec)
+            # 2026-07-13 实测:claude.ai 手填 ID/Secret 模式换码**不回送 secret**,只带 PKCE
+            # (has_rec/pkce_ok/redirect 全对仍 REJECT 的根因)——完整 PKCE 通过即放行
+            return real_pkce
 
         with _lock:
             st = _load()
@@ -298,16 +304,18 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
                     import base64
                     calc = base64.urlsafe_b64encode(
                         hashlib.sha256(ver.encode()).digest()).rstrip(b"=").decode()
-                pkce_ok = (hmac.compare_digest(calc, rec["challenge"]) if (rec and rec["challenge"])
-                           else bool(rec))   # code 无 challenge(固定 client 免 PKCE)→ 靠 secret
+                real_pkce = bool(rec and rec["challenge"] and calc
+                                 and hmac.compare_digest(calc, rec["challenge"]))
+                pkce_ok = real_pkce or bool(rec and not rec["challenge"])   # 无 challenge 的 code=免 PKCE 路径(此时 secret 必须在)
                 if not (rec and rec["exp"] > time.time()
                         and rec["client_id"] == (cid_req or rec["client_id"])
                         and rec["redirect_uri"] == form.get("redirect_uri", "")
-                        and pkce_ok and _client_auth_ok(st, rec["client_id"])):
+                        and pkce_ok and _client_auth_ok(st, rec["client_id"], real_pkce)):
                     _fail(ip)
                     _save(st)
                     _log(f"token(code) REJECT ip={ip} client={cid_req!r} has_rec={bool(rec)} "
-                         f"pkce_ok={pkce_ok if rec else '-'} redirect={form.get('redirect_uri','')!r}")
+                         f"pkce_ok={pkce_ok if rec else '-'} sec_post={bool(form.get('client_secret'))} "
+                         f"basic={ah[:6]!r} redirect={form.get('redirect_uri','')!r}")
                     return JSONResponse({"error": "invalid_grant"}, status_code=400)
                 out = _issue(st, rec["client_id"], rec["scope"])
                 _save(st)
