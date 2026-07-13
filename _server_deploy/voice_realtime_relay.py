@@ -1314,7 +1314,7 @@ async def _oa_deep(question: str, file_rel: str, page: int) -> str:
     return answer[:3000] or "(没拿到回答)"
 
 
-async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "openai"):
+async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "openai", fresh: bool = False):
     # 94:engine="grok" 复用整条 GPT-WS 管线(xAI Voice Agent 协议兼容)。实测差异:恒纯语音(text 模态被忽略)、
     # 无视觉(input_image 被静默收下但模型看不见,回答幻觉)→ 视觉走文字转述;OpenAI 特有字段裁掉防 session.update 整条被拒。
     if engine == "grok":
@@ -1387,16 +1387,36 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         _gtr["keyterms"] = _kt[:100]   # 114:转写热词(≤100 项×50 字符,书名命中率↑)
         sess["audio"]["input"]["transcription"] = _gtr
         sess["resumption"] = {"enabled": True}   # 114:断线恢复(conversation_id 30min 内重连保历史;续接=#290 二期)
-        sess["audio"]["input"]["turn_detection"] = None   # 111(用户设计):手动轮次——本地 VAD 判边界+commit+response.create;server_vad 需要听到持续静音才判轮次,与"静默停推"互斥
+        if cred.get("rt_grok_vad") == "server":   # 121 实验开关:官方推荐路("Enable server_vad for automatic, natural barge-in")
+            sess["audio"]["input"]["turn_detection"] = {"type": "server_vad", "threshold": 0.85,
+                                                        "silence_duration_ms": 600, "prefix_padding_ms": 333}
+            # 代价:与静默停推互斥(全程推流按 $0.05/min 计费);打断/truncate 走 speech_started 现成管线
+        else:
+            sess["audio"]["input"]["turn_detection"] = None   # 111(用户设计):手动轮次——本地 VAD 判边界+commit+response.create
         sess["audio"]["output"].pop("voice", None)
         sess["voice"] = cred.get("rt_grok_voice") or "eve"   # 97a:官方形制=session 顶层(94 放 audio.output 无效,一直是默认 eve)
+        try:   # 121:replace 发音映射(xAI 扩展:只改读音不改字幕;设置 rt_grok_replace={"词":"读法"} JSON)
+            _rp = cred.get("rt_grok_replace")
+            if isinstance(_rp, str) and _rp.strip():
+                _rp = json.loads(_rp)
+            if isinstance(_rp, dict) and _rp:
+                sess["replace"] = {str(k)[:50]: str(v)[:50] for k, v in list(_rp.items())[:50]}
+        except Exception:
+            pass
         try:
             sess["audio"]["output"]["speed"] = max(0.7, min(1.5, float(cred.get("rt_speed") or 1.0)))   # 官方 0.7-1.5
         except Exception:
             pass
         sess["reasoning"] = {"effort": "high"}   # 117(文档定稿):high=默认,工具选择/多步判断更可靠(33 工具场景);嫌慢再调 none
+    _url_extra = ""
+    if engine == "grok":
+        if fresh:
+            _GROK_CONV["id"], _GROK_CONV["ts"] = "", 0.0   # 🧹 新话题:不续旧会话
+        elif _GROK_CONV["id"] and time.time() - _GROK_CONV["ts"] < 1700:   # 官方:闲置 30min 后历史失效
+            _url_extra = "&conversation_id=" + _GROK_CONV["id"]
+            sys.stderr.write(f"[voice-oa] resumption 续接 conv={_GROK_CONV['id'][:20]}\n")
     try:
-        ows = await websockets.connect((XAI_RT_URL if engine == "grok" else OPENAI_RT_URL) + model,
+        ows = await websockets.connect((XAI_RT_URL if engine == "grok" else OPENAI_RT_URL) + model + _url_extra,
                                        additional_headers={"Authorization": f"Bearer {key}"},
                                        max_size=16 * 1024 * 1024, open_timeout=15)
     except Exception as ex:
@@ -1626,6 +1646,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             _img_items[:] = _keep
 
         async def _feed_audio(chunk):
+            if engine == "grok" and _creds().get("rt_grok_vad") == "server":
+                await _feed_audio_raw(chunk)   # 121:server_vad 实验模式=全程推流,轮次/打断交服务端(计费 $0.05/min 全程)
+                return
             if engine == "grok":   # 111/116:本地 VAD 判轮次+450ms 延迟提交(句中喘气不切轮="一句话答好几遍"根修)
                 _nw = _tm2.time()
                 _voiced = _rms(chunk) > 350
@@ -1744,6 +1767,15 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                     book["page_text"] = vc2.get("page_text") or ""
                                     book["vocab"] = vc2.get("vocab") or []
                                     book["figures"] = vc2.get("figures") or []
+                                    try:   # 121:keyterms mid-session 更新(官方支持)——本页生词进转写热词
+                                        _kt2 = [w for w in [Path(file_rel).stem if file_rel else "", "这一页", "翻页", "做卡片", "笔记"] if w]
+                                        _kt2 += [str(v)[:50] for v in (book.get("vocab") or [])[:60]]
+                                        await ows.send(json.dumps({"type": "session.update", "session": {
+                                            "audio": {"input": {"transcription": {"model": "grok-transcribe",
+                                                     **({"language_hint": _creds().get("rt_lang")} if _creds().get("rt_lang") in ("zh", "ja", "en") else {}),
+                                                     "keyterms": _kt2[:100]}}}}}, ensure_ascii=False))
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                         asyncio.create_task(_refresh_pt())
@@ -2028,10 +2060,11 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             while True:
                 ev0 = json.loads(await asyncio.wait_for(ows.recv(), timeout=8))
                 t0 = ev0.get("type")
-                if t0 == "conversation.created":   # 120:存续接钥匙(此前被静默吞掉)
+                if t0 == "conversation.created":   # 120/121:存续接钥匙(模块级,跨连接;前端断线重连即无缝续接)
                     _conv["id"] = ((ev0.get("conversation") or {}).get("id")) or ""
-                    if _conv["id"]:
-                        sys.stderr.write(f"[voice-oa] conversation.id={_conv['id'][:20]}(resumption 钥匙)\n")
+                    if _conv["id"] and engine == "grok":
+                        _GROK_CONV["id"], _GROK_CONV["ts"] = _conv["id"], time.time()
+                        sys.stderr.write(f"[voice-oa] conversation.id={_conv['id'][:20]}(resumption 钥匙已存)\n")
                     continue
                 if t0 == "session.updated":
                     break
@@ -2056,6 +2089,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     except Exception as ex:
         sys.stderr.write(f"[voice-oa] {ex}\n")
     finally:
+        if engine == "grok" and _GROK_CONV["id"]:
+            _GROK_CONV["ts"] = time.time()   # 121:断开时刷新活跃时刻(30min 窗口从此刻算)
         if engine == "grok":
             try:   # 110:grok 会话账单(两种口径各估一笔,与 console 实际扣费对照即知计费口径)
                 _cm = (time.time() - _gk["t0"]) / 60.0
@@ -2208,6 +2243,7 @@ OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
 _RTC_CTL_LIVE = {}   # 93:uid → 最近挂上的 call_id(双 call 并存取证)
+_GROK_CONV = {"id": "", "ts": 0.0}   # 121:grok resumption 续接钥匙(跨连接;30min 内重连带 conversation_id=历史无缝恢复)
 
 
 def _mk_bridge_track(q):
@@ -2656,7 +2692,7 @@ async def handle_browser(bws):
         pass
     cred = _creds()
     if cred.get("rt_engine") in ("openai", "grok"):   # ㉔/94:通话引擎切 GPT Realtime / Grok Voice(电话按钮同一入口,relay 层换引擎)
-        await handle_openai(bws, file_rel, page, engine=cred.get("rt_engine"))
+        await handle_openai(bws, file_rel, page, engine=cred.get("rt_engine"), fresh=fresh)
         return
     if cred.get("api_key"):
         # 新版鉴权(实测 2026-07):单 API Key,只要 X-Api-Key + Resource-Id,无需 APP ID/固定 App-Key

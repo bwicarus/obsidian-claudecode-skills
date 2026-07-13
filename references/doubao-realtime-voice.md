@@ -827,3 +827,11 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **记录不改**:tools 扁平形制(官方 schema 是嵌套 Chat-Completions 式,实测兼容,排障时第一批归一);transcription.model 字段官方 schema 缺失但事件描述要求(自相矛盾,实测有效保留);`replace` 发音映射/托管 web_search/x_search/audio-opus(WAN 带宽 10 倍降)/keyterms mid-session 更新/server_vad 实验开关(等账单裁决计费口径后定)——均记待办。
 **用户实测清单**:①打断:它说话时插话应立即住嘴且追问对得齐(truncate 生效);②应答延迟体感(约快 0.8s);③慢工具即时听到「稍等」垫话;④行为规则稳定性(每轮铁律恒在);⑤对照 console 扣费与 grok-usage.json 裁决计费口径→决定 server_vad 实验。
 
+## 批次 121(2026-07-13)研讨遗留高价值项落地
+
+1. **resumption 断线续接(#290 grok 部分完成)**:`_GROK_CONV` 模块级钥匙(单用户)——conversation.created 存 id+断开刷新活跃时刻;**前端断线自动重连(现成管线)→relay 连接 URL 带 `&conversation_id=`(30min 窗内且非 fresh)→官方回放全部对话/工具历史=无缝续接**;🧹清空(fresh=1)清钥匙不续旧。30min 会话上限/网络抖动/relay 重启(前端重连)三场景全覆盖。
+2. **keyterms mid-session 更新**(官方支持):翻页刷新页正文时同步 session.update 转写热词=书名+固定词+**本页生词前 60**——生词转写命中率↑。
+3. **replace 发音映射管道**:设置 `rt_grok_replace`(JSON {"词":"读法"},≤50 对)→session.replace(xAI 扩展:只改读音不改字幕)。
+4. **server_vad 实验开关**:设置「轮次判定」下拉(本地 VAD=省钱默认/服务端 VAD=官方打断手感,threshold .85+silence 600ms+prefix 333ms)——server 模式全程推流($3/h)、本地 VAD gate 旁路、打断/truncate 走 speech_started 现成管线。等账单裁决计费口径后用户自选。
+未做记录:audio/opus(WAN 带宽 10 倍降——静默停推后上行只在说话期,家宽下非瓶颈,搁置)、xAI 托管搜索(自家链路已有免费额度体系)。
+

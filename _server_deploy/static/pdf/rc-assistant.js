@@ -326,7 +326,11 @@
         H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_voice" style="flex:1 1 100%">' +
           _GKV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_grok_voice || 'eve') === v ? ' selected' : '') + '>Grok 音色:' + v + (v === 'eve' ? '(默认)' : '') + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="ams-tdef">Grok Voice:$0.05/分钟平价 · 首音频≈1s · 中日文可用 · 工具调用可用。边界:恒纯语音(模式按钮的文字/混合档无效)、不支持看图(看图类工具走文字转述)、WebSocket 半双工(外放可能有回声,建议耳机)。</div>';
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_vad" style="flex:1 1 100%">' +
+            '<option value=""' + (!c.rt_grok_vad ? ' selected' : '') + '>轮次判定:本地 VAD(省钱:静默零上传;应答≈0.9s)</option>' +
+            '<option value="server"' + (c.rt_grok_vad === 'server' ? ' selected' : '') + '>轮次判定:服务端 VAD(实验:官方打断手感;全程计费 $3/小时)</option>' +
+          '</select></div>' +
+          '<div class="ams-tdef">Grok Voice:$0.05/分钟(音频时长) · 首音频≈1s · 中日文可用 · 工具可用 · 断线30分钟内自动续接记忆。边界:恒纯语音、不支持看图(走文字转述)。</div>';
       }
       if (isOA) {   // ── GPT Realtime 专属(2.1 可调项全暴露)──
         var _RTM = [['gpt-realtime-2.1-mini', '模型:2.1 mini(推荐,音频费≈豆包一半)'], ['gpt-realtime-2.1', '模型:2.1 完整版(更聪明,约 3 倍贵)']];
