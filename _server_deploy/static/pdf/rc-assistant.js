@@ -1922,6 +1922,7 @@
     else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
     if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
     if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
+    if (!aborted && pf.text) { try { _attachClipBtn(aMsg, { content: answer, ts: _recTs || 0 }); } catch (_) {} }   // 66b:实时回答立即有 ▶(灰=TTS 念+保存;此前要刷新重渲历史才出现)
     if (!aborted) { try { _fadeInAfter(aMsg); } catch (_) {} }   // stream-fx:追问/反馈条错峰淡入
     runActions(acts);
     streaming = false; _abort = null; _recovering = false; _setSendMode(false);
@@ -2011,6 +2012,16 @@
   };
   window.__asstVoiceLog = function (q, a, file, page, extra) {   // 通话轮次落库(与文字对话同一历史,清空一起清);extra.clip=66 该轮语音录音 id
     if (!q && !a) return;
+    try {   // 66b:本轮气泡实时挂 ▶(有录音=放当时原声;无=灰钮 TTS)——延迟避开 md 终态重渲清 DOM;先删 1960 的旧 TTS 钮防双钮
+      var _bel = _vTurnEl;
+      if (_bel && a) setTimeout(function () {
+        try {
+          if (!_bel.parentNode) return;
+          _bel.querySelectorAll(':scope > .asst-clip').forEach(function (x) { x.remove(); });
+          _attachClipBtn(_bel, { content: a, clip: (extra && extra.clip) || '' });
+        } catch (e) {}
+      }, 60);
+    } catch (e) {}
     try {
       if (HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo;clip 暂不支持该路径)
       var _b = { user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' };

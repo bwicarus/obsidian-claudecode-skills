@@ -865,3 +865,15 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **P4 响应仲裁归 relay**:speech_stopped 的用户轮 create 搬 relay(`_resp_create(user=True)`,补 half 档用户轮=音频语义与前端对齐);前端 gate 同款。至此 RTC 的全部 response.create(用户轮+工具轮)与 cancel 前置(epoch/pend 补发)收口 relay 一处——双响应类竞态从结构上消失。
 **fe=3 版本握手**(59 教训):前端 ctl URL fe=2→3;relay 只对 fe≥3 做 P3 注入+P4 create(fe=2 旧页面=前端自己注入/create,零双执行窗口)。usage 记账归 relay 已随 125 完成。#283 全阶段(P1/P2/P2.5/P3/P4)收官。
 
+
+## 批次 127(2026-07-13)语音回放全覆盖:实时挂 ▶ + WS 引擎按轮录音 + 清空级联删
+
+用户需求:所有 AI 回复都要有播放钮;通话时 AI 说过的话存原声,点 ▶=回放当时音频(当作 TTS 已生成),清记录一并删。
+
+**现状盘点**:66/82 批已有大半——`_attachClipBtn`(有 clip=紫放原声/无=灰钮 TTS 现场念+录+clip-attach 回写)、WebRTC 轮 `_rec`(remote 轨录音)落库带 clip、后端 voice-clip 上传/下载/attach 三路由。三个缺口:①`_attachClipBtn` 只挂在 loadHistory 历史重渲路径——**实时新气泡没按钮**(用户"普通对话没有播放按钮"的根因);②豆包/Grok/GPT-WS 的音频走 WebAudio(playPcm),没有 remote 轨可录——**WS 引擎轮没录音**;③assistant_clear 不删 voice-clips。
+
+**66b 补齐**:
+- **实时挂钮**:文字轮=SSE 收尾 `_attachFeedback` 旁挂 `_attachClipBtn(aMsg,{content:answer,ts:_recTs})`;语音轮=`__asstVoiceLog` 统一入口挂/升级(60ms 延迟避开 md 终态重渲清 DOM;先删 1960 旧 TTS 钮防双钮)——WebRTC/WS 两引擎同点收口,WebRTC 的 clip 实时气泡从此也是紫钮。
+- **WS 按轮录音 `_wsRec`**:playPcm 每个 source 多 connect 一个 `MediaStreamDestination` tap(__vcTtsCapture 同模式;仅 mode==='s2s',agent 模式不录);首块懒开录;**359 收尾等队列真放完**(97 同款坑「数据推完≠播完」:快照 `playT` 为本轮末端时刻,`ac.currentTime` 过线再 stop;450 打断经 `_wsRecCutPend` 立即截住,防新轮混进尾巴);450 打断=immediate 收(录到打断点);无文本轮/挂断=abort 丢弃(onstop 不设上传=零孤儿)。id 格式/异步上传/落库先带 id 全镜像 `_recFinish`。
+- **清空级联**:assistant_clear 加 `shutil.rmtree(_CLIP_DIR/<uid>)`——原声与记录同命运。
+- 紫钮点击时上传可能还没完成(收尾等播放+异步 POST)→ 404 自动降级 TTS 现场念(2333 原有兜底,无需新码)。

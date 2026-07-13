@@ -517,6 +517,7 @@
     ab.copyToChannel(f32, 0);
     var src = ac.createBufferSource(); src.buffer = ab;
     src.connect((_aec.ready && _aec.ctx === ac) ? _aec.dest : ac.destination);   // 环回在 → AEC 生效路径;不在 → 直连兜底
+    if (mode === 's2s') { var _tp = _wsRecTap(); if (_tp) { try { src.connect(_tp); } catch (e) {} } }   // 66b:同块喂录音 tap(按轮存原声)
     var t = Math.max(ac.currentTime + 0.02, playT);
     src.start(t); playT = t + ab.duration; playing.push(src);
     if (_playStat.queued === 0) _playStat.t0 = t;   // 本轮回答首块的开播时刻
@@ -526,6 +527,55 @@
     src.onended = function () { var k = playing.indexOf(src); if (k >= 0) playing.splice(k, 1); if (!playing.length) { callBtnSpeaking(false); try { _lastPlayEnd = ac ? ac.currentTime : 0; } catch (e) {} } };
   }
   function stopPlayback() { playing.forEach(function (s) { try { s.stop(); } catch (e) {} }); playing = []; playT = 0; callBtnSpeaking(false); }
+
+  // ── 66b WS 引擎按轮语音录制(用户设计:AI 说过的话点 ▶ 回放当时原声)——豆包/Grok/GPT-WS 的音频
+  //    走 WebAudio 播放(没有 WebRTC remote 轨可录),录法=playPcm 的 source 多接一个
+  //    MediaStreamDestination 分支(__vcTtsCapture 同模式);轮界:首块懒开录 / 359 播完收(等队列真放完:
+  //    playT 快照,97 同款坑「数据推完≠播完」)/ 450 打断即收 ──
+  var _wsRec = { mr: null, chunks: [], mime: '', tap: null, ctx: null, pend: null };
+  function _wsRecTap() {   // playPcm 每块调:确保 tap+录音器活着(ac 重建后 tap 随之重建);返回 tap|null
+    if (!window.MediaRecorder || !ac) return null;
+    if (!_wsRec.tap || _wsRec.ctx !== ac) {
+      try { _wsRec.tap = ac.createMediaStreamDestination(); _wsRec.ctx = ac; } catch (e) { return null; }
+    }
+    if (!_wsRec.mr) {
+      var mime = _recMime(); if (!mime) return _wsRec.tap;
+      try {
+        var mr = new MediaRecorder(_wsRec.tap.stream, { mimeType: mime });
+        _wsRec.mr = mr; _wsRec.chunks = []; _wsRec.mime = mime;
+        mr.ondataavailable = function (e) { if (e.data && e.data.size) _wsRec.chunks.push(e.data); };
+        mr.start(1000);
+      } catch (e) { _wsRec.mr = null; }
+    }
+    return _wsRec.tap;
+  }
+  function _wsRecCutPend() { var f = _wsRec.pend; _wsRec.pend = null; if (f) f(); }   // 450:上一轮还在等队列放完 → 立即截住(别把新轮录进尾巴)
+  function _wsRecAbort() { _wsRec.pend = null; try { if (_wsRec.mr && _wsRec.mr.state !== 'inactive') _wsRec.mr.stop(); } catch (e) {} _wsRec.mr = null; }   // 丢弃(不上传:onstop 未设 id 引用)
+  function _wsRecFinish(immediate) {   // 返回 clipId(录着才有);blob 异步上传,落库先带 id(镜像 _recFinish)
+    var mr = _wsRec.mr;
+    if (!mr || mr.state === 'inactive') { _wsRec.mr = null; return ''; }
+    var id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    var mime = _wsRec.mime, chunks = _wsRec.chunks;
+    mr.onstop = function () {
+      try {
+        var blob = new Blob(chunks, { type: mime });
+        if (blob.size > 4000) fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob }).catch(function () {});
+      } catch (e) {}
+    };
+    function stopNow() { _wsRec.pend = null; try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {} }
+    if (immediate) stopNow();   // 打断:音频已停,立即收(录到打断点)
+    else {   // 359=服务端推完,队列常还有几秒没放:等本轮队列末端时刻(playT 快照)过去再停
+      var tEnd = playT;
+      _wsRec.pend = stopNow;
+      var iv = setInterval(function () {
+        if (_wsRec.pend !== stopNow) { clearInterval(iv); return; }   // 已被 450 截停
+        if (!ac || ac.currentTime >= tEnd - 0.05) { clearInterval(iv); setTimeout(stopNow, 200); }
+      }, 300);
+      setTimeout(stopNow, 120000);   // 兜底:别让录音器永远吊着
+    }
+    _wsRec.mr = null;   // 状态机腾位:下一轮首块可开新录音器(本轮收尾由闭包完成)
+    return id;
+  }
 
   // ── 采集(mic → 16k PCM 20ms/包)──
   var WORKLET = 'class C extends AudioWorkletProcessor{process(i){var c=i[0][0];if(c)this.port.postMessage(c.slice(0));return true}}registerProcessor("vccap",C);';
@@ -2527,13 +2577,14 @@
         if (m.event === 150) { setSt('通话中(会话已建立)'); capWait(true); }
         else if (m.event === 359) {   // 一轮播完
           _playStat = { t0: 0, queued: 0 };   // 整轮播完=无需 truncate,统计清零
-          try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page); _lastU = ''; } } catch (e) {}   // ㉛:轮次落库(与文字对话同历史)
+          try { if (window.__asstVoiceLog) { var _cw = _wsRecFinish(false); window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page, _cw ? { clip: _cw } : null); _lastU = ''; } } catch (e) {}   // ㉛:轮次落库(与文字对话同历史)+66b 原声 clip
           if (p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→播完告别语自动挂断
           else _capMaybeHide(2500);   // 字幕停留几秒 → 回"正在听"等待态
         }
         else if (m.event === 450) {   // 用户开口:打断播报 + **立即同步一次上下文**(墨迹/选中,赶在模型答题前——治刚画完就问的竞态)
           _reportPlayed();   // 停播前先回报真实已播毫秒(GPT 引擎 relay 用它 truncate;豆包忽略该消息)
-          try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page); _lastU = ''; } } catch (e) {}   // ㉛:被打断的半截轮也落库(下一轮覆盖前)
+          _wsRecCutPend();   // 66b:上一轮若还在等队列放完 → 立即截住(别把新轮录进尾巴)
+          try { if (window.__asstVoiceLog && (curAText || _lastU)) { var _cw2 = _wsRecFinish(true); window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page, _cw2 ? { clip: _cw2 } : null); _lastU = ''; } else { _wsRecAbort(); } } catch (e) {}   // ㉛:被打断的半截轮也落库(下一轮覆盖前)+66b 原声(无文本轮=丢录音)
           stopPlayback(); curAText = ''; curAEl = null;
           try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:断 AI 轮气泡(下一轮开新气泡,别覆盖旧的)
           try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
@@ -2557,6 +2608,7 @@
   }
 
   function teardown(closeBox) {
+    try { _wsRecAbort(); } catch (e) {}   // 66b:挂断=丢弃未定稿录音(已定稿的由闭包照常上传)
     _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
     _connecting = false;
     callBtnConnecting(false);   // 96:挂断/失败即退出等待态

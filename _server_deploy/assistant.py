@@ -5173,6 +5173,11 @@ def assistant_clear():
         _summary_path(session["user_id"]).unlink(missing_ok=True)
     except Exception:
         pass
+    try:   # 66b:语音原声与记录同命运——清空对话=该用户的录音文件一并删
+        import shutil
+        shutil.rmtree(_CLIP_DIR / str(session["user_id"]), ignore_errors=True)
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
