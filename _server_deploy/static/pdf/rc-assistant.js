@@ -1165,6 +1165,11 @@
     if (window.__uiShared && window.PdfAdapter && PdfAdapter.openModelSettings) {
       return PdfAdapter.openModelSettings({ focusAction: focusAction, fallback: function () { _openModelSettingsNative(focusAction); } });
     }
+    if (window.RC && RC.assistant && RC.assistant.openModelSettings) {
+      // EPUB(EpubHtmlAdapter,无 window.PdfAdapter):直接用共享 Tab 版(阅读 AI/语音通话·朗读)。
+      // 此前门控只认 PdfAdapter → EPUB 掉进 native 旧浮层=「EPUB 设置无语音 Tab」根因(2026-07-13 用户截图实锤)
+      return RC.assistant.openModelSettings(focusAction);
+    }
     return _openModelSettingsNative(focusAction);
   }
   function _openModelSettingsNative(focusAction) {
