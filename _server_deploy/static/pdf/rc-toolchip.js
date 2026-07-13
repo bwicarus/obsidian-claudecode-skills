@@ -52,6 +52,16 @@
   function isAction(t) { return t === 'action'; }
   function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function VC() { return window.RC && RC.voiceCard; }
+  function hdSplit(el, label, act) {   // 头部:纯文本标题 → <标题><状态>两段(一行长条的状态显示在这)
+    var hd = el.querySelector('.vc-card-hd');
+    if (!hd || hd.querySelector('.vc-hd-l')) return;
+    var l = document.createElement('span'); l.className = 'vc-hd-l'; l.textContent = label;
+    var st = document.createElement('span'); st.className = 'vc-hd-s';
+    if (hd.firstChild && hd.firstChild.nodeType === 3) hd.replaceChild(l, hd.firstChild);
+    else hd.insertBefore(l, hd.firstChild);
+    hd.insertBefore(st, l.nextSibling);
+    if (act) el.classList.add('vc-act');
+  }
 
   var chips = [];
 
@@ -77,36 +87,107 @@
           '<button class="vc-fc-x2"' + (i >= cards.length - 1 ? ' disabled' : '') + '>›</button></div>'
         : '');
   }
-  function stepsHtml(chip, view) {
-    var st = chip.steps || [], rows = chip.meta || [];
-    if (!st.length && !rows.length) return '';
-    var h = '<div class="vc-stp"><button class="vc-stp-b">' + (view.deep ? '▾' : '▸') + ' ' +
-      (st.length ? st.length + ' 个步骤' : '调用详情') + '</button>';
-    if (view.deep) {
-      h += st.map(function (s) { return '<div class="vc-stp-i"><i></i><span>' + esc(s.label || s) + '</span></div>'; }).join('');
-      h += rows.map(function (r) { return '<div class="vc-stp-k">' + esc(r[0]) + '</div><div class="vc-stp-v">' + esc(r[1]) + '</div>'; }).join('');
+  // ── 展开视图 = 数据流图(用户设计):AI → 各处理步骤 → 结果,每个小方块可点开看它经手的数据 ──
+  //    载荷用 markdown/MathJax 正常渲染(之前直接 esc() 出来一坨纯文本,根本没法读)。
+  var ICON = { ai: '🧠', tool: '⚙︎', step: '▸', out: '◧', err: '⚠' };
+  function stages(chip) {
+    var st = [];
+    var args = null;
+    (chip.meta || []).forEach(function (r) { if (r[0] === '参数') args = r[1]; });
+    st.push({ ic: ICON.ai, t: 'AI 请求 ' + chip.label, m: '', kind: 'code',
+              body: args || '(无参数)' });
+    (chip.steps || []).forEach(function (x) {
+      st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : ''),
+                kind: 'text', body: x.detail || '' });
+    });
+    var sec = '';
+    (chip.meta || []).forEach(function (r) { if (r[0] === '耗时') sec = r[1]; });
+    st.push({ ic: chip.failed ? ICON.err : ICON.out,
+              t: chip.failed ? '出错' : (chip.result && chip.result.kind === 'anki' ? '生成卡片' : '结果'),
+              m: sec, kind: chip.result && chip.result.kind === 'anki' ? 'anki' : 'md',
+              body: chip.detail || chip.summary || '' , open: true });
+    return st;
+  }
+  function renderPayload(el, sg, chip, view) {
+    if (sg.kind === 'anki') { el.innerHTML = ankiHtml(chip, view); wireAnki(el, chip, view); return; }
+    if (sg.kind === 'code') {
+      var txt = sg.body;
+      try { txt = JSON.stringify(JSON.parse(sg.body), null, 1); } catch (e) {}
+      el.innerHTML = '<pre>' + esc(txt) + '</pre>';
+      return;
     }
-    return h + '</div>';
+    var body = String(sg.body || '');
+    if (!body.trim()) { el.innerHTML = '<span style="color:#7f92b8">(没有额外内容)</span>'; return; }
+    try {
+      if (window.RC && RC.assistant && RC.assistant.renderMd) RC.assistant.renderMd(el, body, true);   // 主路:与对话同一套 md+MathJax
+      else el.innerHTML = miniMd(body);                                                                // 兜底:侧栏还没挂载时也别吐纯文本
+    } catch (e) { el.innerHTML = miniMd(body); }
+    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]); } catch (e) {}
+  }
+  function miniMd(t) {   // 极简 markdown 兜底(粗体/斜体/行内码/列表/换行)——绝不把原始文本直接倒出来
+    var h = esc(t);
+    h = h.replace(/`([^`]+)`/g, '<code>$1</code>')
+         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    h = h.split(/\n{2,}/).map(function (blk) {
+      if (/^\s*[-*·]\s+/m.test(blk)) {
+        return '<ul>' + blk.split('\n').map(function (li) {
+          return li.trim() ? '<li>' + li.replace(/^\s*[-*·]\s+/, '') + '</li>' : '';
+        }).join('') + '</ul>';
+      }
+      return '<p>' + blk.replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+    return h;
+  }
+  function wireAnki(bd, chip, view) {
+    var p = bd.querySelector('.vc-fc-p'), n = bd.querySelector('.vc-fc-x2');
+    if (p) p.addEventListener('click', function (e) { e.stopPropagation(); view.idx = Math.max(0, (view.idx || 0) - 1); paintBody(chip, view); });
+    if (n) n.addEventListener('click', function (e) { e.stopPropagation(); view.idx = (view.idx || 0) + 1; paintBody(chip, view); });
+    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([bd]); } catch (e) {}
   }
   function paintBody(chip, view) {
     var bd = view.el.querySelector('.vc-card-bd');
     if (!bd) return;
-    var r = chip.result || {};
-    var main = (r.kind === 'anki' && (r.cards || []).length)
-      ? ankiHtml(chip, view)
-      : (chip.detail ? '<div class="vc-fc">' + esc(String(chip.detail).slice(0, 900)) + '</div>' : '');
-    bd.innerHTML = main + stepsHtml(chip, view);
     bd.style.whiteSpace = 'normal';
-    var p = bd.querySelector('.vc-fc-p'), n = bd.querySelector('.vc-fc-x2'), m = bd.querySelector('.vc-stp-b');
-    if (p) p.addEventListener('click', function (e) { e.stopPropagation(); view.idx = Math.max(0, (view.idx || 0) - 1); paintBody(chip, view); });
-    if (n) n.addEventListener('click', function (e) { e.stopPropagation(); view.idx = (view.idx || 0) + 1; paintBody(chip, view); });
-    if (m) m.addEventListener('click', function (e) { e.stopPropagation(); view.deep = !view.deep; paintBody(chip, view); });
-    try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([bd]); } catch (e) {}
+    var sgs = stages(chip);
+    if (!view.open) view.open = {};
+    bd.innerHTML = '<div class="vc-flow">' + sgs.map(function (sg, i) {
+      var on = (view.open[i] === undefined ? !!sg.open : view.open[i]);
+      return (i ? '<div class="vc-fw"></div>' : '') +
+        '<div class="vc-fn' + (on ? ' on' : '') + '" data-i="' + i + '">' +
+          '<span class="vc-fn-i">' + sg.ic + '</span>' +
+          '<span class="vc-fn-t">' + esc(sg.t) + '</span>' +
+          (sg.m ? '<span class="vc-fn-m">' + esc(sg.m) + '</span>' : '') +
+          '<span class="vc-fn-x">▸</span>' +
+        '</div>' +
+        '<div class="vc-fp" data-p="' + i + '"' + (on ? '' : ' hidden') + '></div>';
+    }).join('') + '</div>';
+    sgs.forEach(function (sg, i) {
+      var pane = bd.querySelector('.vc-fp[data-p="' + i + '"]');
+      var on = (view.open[i] === undefined ? !!sg.open : view.open[i]);
+      if (on && pane) renderPayload(pane, sg, chip, view);
+    });
+    bd.querySelectorAll('.vc-fn').forEach(function (nd) {
+      nd.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var i = +nd.getAttribute('data-i');
+        var pane = bd.querySelector('.vc-fp[data-p="' + i + '"]');
+        var now = !nd.classList.contains('on');
+        view.open[i] = now;
+        nd.classList.toggle('on', now);
+        if (!pane) return;
+        pane.hidden = !now;
+        if (now) renderPayload(pane, sgs[i], chip, view);
+      });
+    });
   }
   function paintSum(chip) {   // 长条:进行中步骤 / 完成摘要;标记呼吸 = 正在干活
     chip.views.forEach(function (v) {
+      var txt = chip.step || chip.summary || chip.label || '';
       var sm = v.el.querySelector('.vc-card-sum');
-      if (sm) sm.textContent = chip.step || chip.summary || chip.label || '';
+      if (sm) sm.textContent = txt;
+      var hs = v.el.querySelector('.vc-hd-s');     // 一行长条:状态就显示在标题旁边
+      if (hs) hs.textContent = (txt && txt !== chip.label) ? ('· ' + txt) : '';
       var dot = v.el.querySelector('.vc-card-dot');
       if (dot) dot.classList.toggle('busy', !!chip.busy);
       v.el.classList.toggle('vc-busy', !!chip.busy);   // 创建/进行中=标记透明玻璃;完成=有色磨砂(一眼可辨)
@@ -123,7 +204,7 @@
     var vc = VC(), th = document.getElementById('asst-thread');
     if (!vc || !th) return null;
     var el = document.createElement('div');
-    el.className = 'vc-card vc-inflow vc-typed vc-min';
+    el.className = 'vc-card vc-inflow vc-hasdot vc-typed vc-min';   // hasdot=套用同一套一行长条/展开规则
     el.style.setProperty('--vc-tc', TYPE_C[chip.type] || TYPE_C.text);
     el.innerHTML = '<div class="vc-card-hd">' + esc(chip.label) +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
@@ -131,6 +212,7 @@
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
       '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
     var view = { el: el, inflow: true, idx: 0, deep: false };
+    hdSplit(el, chip.label, isAction(chip.type));
     el.querySelector('.vc-card-hd').addEventListener('click', function (ev) {   // 点头部=折叠/展开(两态)
       if (ev.target.closest('button')) return;
       el.dataset.touched = '1';
@@ -175,6 +257,7 @@
       if (c) {
         chip.card = c;
         c.el.classList.add('vc-typed');
+        hdSplit(c.el, chip.label, isAction(type));
         chip.views.push({ el: c.el, inflow: false, idx: 0, deep: false });
         if (!isAction(type)) {   // 长按=选中/取消(紫边,按 cid 全局广播);执行类不参与选中
           vc.pinBind(c.el, chip.label, function () { return (c.el.querySelector('.vc-card-bd') || {}).textContent || chip.summary || ''; });
@@ -218,7 +301,8 @@
         setTimeout(function () { if (chip.card) vc && vc.close(chip.card); }, 1500);
         return;
       }
-      if (v.el.dataset.touched === '1') return;   // 动过 → 不自动展开
+      if (v.el.dataset.touched === '1') return;      // 动过 → 不自动展开
+      if (isAction(chip.type)) { vc && vc.form(v.el, 'min'); return; }   // 执行类:侧栏里默认收着(一行长条)
       vc && vc.form(v.el, 'full');
       if (!v.inflow) {                            // 浮层:20s 后自动收起成圆标记
         clearTimeout(v._t);

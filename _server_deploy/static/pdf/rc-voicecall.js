@@ -141,13 +141,12 @@
       // ── 工具指示器 v2(用户设计):在这张卡上加**第三态=圆形标记**,并让标记本身当形态控制按钮 ──
       //    圆(vc-dot,创建/收起:透明玻璃无边缘) → 长条(vc-min) → 方块(展开)。标记坐落在方块左上角。
       // 标记 = 圆角方形(用户改:套长条的外观,别用正圆),坐落在卡片**左上角**,永远是形态控制按钮
-      '.vc-card-dot{position:absolute;left:0;top:0;width:36px;height:36px;border-radius:12px;padding:0;border:0.5px solid var(--vc-tl,rgba(255,255,255,.16));' +
+      '.vc-card-dot{position:absolute;left:0;top:0;width:40px;height:40px;border-radius:13px;padding:0;border:0.5px solid var(--vc-tl,rgba(255,255,255,.16));' +
         'background:var(--vc-tf,rgba(28,28,30,.72));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);' +
         'color:var(--vc-tc,#b9a8ff);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
         'transition:transform .16s cubic-bezier(.34,1.5,.64,1),background .3s,border-color .3s,box-shadow .3s}' +
       '.vc-card-dot svg{width:17px;height:17px}' +
-      '.vc-card.vc-hasdot .vc-card-hd{padding-left:42px;min-height:36px}' +   // 标记坐在左上角 → 标题让位
-      '.vc-card.vc-hasdot.vc-min .vc-card-sum{padding-left:42px}' +
+      '.vc-card.vc-hasdot .vc-card-hd{padding-left:48px;min-height:40px}' +   // 标记坐在左上角 → 标题让位
       '.vc-card-dot:active{transform:scale(.9)}' +
       '.vc-card-dot.busy{animation:vcDotBr 1.5s ease-in-out infinite}' +
       '@keyframes vcDotBr{0%,100%{opacity:.45}50%{opacity:1}}' +
@@ -156,7 +155,7 @@
         '--vc-tl:color-mix(in srgb,var(--vc-tc) 48%,transparent);box-shadow:0 6px 18px -8px rgba(0,0,0,.5)}' +
       '.vc-card.vc-busy .vc-card-dot{--vc-tf:rgba(255,255,255,.06);--vc-tl:transparent;box-shadow:none}' +
       // 收起态:整张卡就是那枚圆角方形标记
-      '.vc-card.vc-dot{width:36px;height:36px;min-height:0;padding:0;border-radius:12px;border-color:transparent;' +
+      '.vc-card.vc-dot{width:40px;height:40px;min-height:0;padding:0;border-radius:13px;border-color:transparent;' +
         'background:transparent;box-shadow:none;overflow:visible}' +
       '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
       // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
@@ -164,9 +163,15 @@
         'transition:width .34s cubic-bezier(.2,.85,.3,1),height .34s cubic-bezier(.2,.85,.3,1),' +
         'border-radius .3s,background .3s,box-shadow .3s,border-color .25s,' +
         'transform .3s cubic-bezier(.34,1.35,.64,1),opacity .3s}' +
-      // 长条 = 原卡片的折叠态(标题行 + ▶/✕ + 一行摘要,就是用户截图里那个),只是给左上角标记让出位置
-      '.vc-card.vc-hasdot.vc-min{width:296px}' +
-      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot){width:320px}' +
+      // 长条 = **一行**(用户改):标题+状态+▶+✕ 全挤在头部一行,与标记同高 40px
+      //   → 标记→长条 = 上下边不动、纯向右拉长;长条→方块 = 纯向下伸长(动画方向干净)
+      '.vc-card.vc-hasdot.vc-min{width:300px;height:40px;min-height:40px;padding:0 10px 0 0;overflow:hidden}' +
+      '.vc-card.vc-hasdot.vc-min .vc-card-hd{margin-bottom:0;height:40px}' +
+      '.vc-card.vc-hasdot.vc-min .vc-card-sum,.vc-card.vc-hasdot.vc-min .vc-card-bd{display:none}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot){width:326px;padding:0 13px 12px 0}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-hd{padding-right:10px}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-sum{display:none}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{padding-left:13px}' +
       // 完成态:有色磨砂 + 边缘阴影(跟"创建时的透明玻璃圆"区分开)
       '.vc-card.vc-typed{border-color:color-mix(in srgb,var(--vc-tc) 42%,transparent);' +
         'background:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
@@ -174,13 +179,32 @@
       '.vc-card.vc-typed .vc-card-hd{color:var(--vc-tc)}' +
       '.vc-card.vc-typed.vc-dot{background:rgba(255,255,255,.05);box-shadow:none;border-color:transparent}' +
       '.vc-card.vc-err{--vc-tc:#ff6961}' +
-      // 步骤区(内部步骤全推出来 = 原「!」详情面板的内容)
-      '.vc-stp{margin-top:8px;border-top:0.5px solid rgba(255,255,255,.1);padding-top:6px}' +
-      '.vc-stp-b{background:transparent;border:0;color:#8a9bb4;font-size:11px;padding:0;cursor:pointer}' +
-      '.vc-stp-i{display:flex;gap:7px;align-items:flex-start;margin-top:5px;font-size:11.5px;color:#a9b8d4}' +
-      '.vc-stp-i i{flex:none;width:5px;height:5px;border-radius:50%;background:var(--vc-tc,#b9a8ff);margin-top:5px}' +
-      '.vc-stp-k{color:#7c93c4;font-size:10.5px;font-weight:700;margin-top:6px}' +
-      '.vc-stp-v{color:#b9c6e0;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;word-break:break-all;white-space:pre-wrap;max-height:140px;overflow:auto}' +
+      // 展开视图 = **数据流图**(用户设计):AI / 工具 / 结果 各一个可点开的小方块,用线连起来表示数据传递
+      '.vc-flow{margin-top:2px}' +
+      '.vc-fn{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:10px;cursor:pointer;' +
+        'background:rgba(255,255,255,.05);border:0.5px solid rgba(255,255,255,.1);-webkit-tap-highlight-color:transparent;' +
+        'transition:background .18s,border-color .18s}' +
+      '.vc-fn:active{background:rgba(255,255,255,.1)}' +
+      '.vc-fn.on{border-color:var(--vc-tc);background:color-mix(in srgb,var(--vc-tc) 14%,rgba(255,255,255,.04))}' +
+      '.vc-fn-i{flex:none;width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;' +
+        'font-size:12px;background:color-mix(in srgb,var(--vc-tc) 26%,rgba(0,0,0,.35));color:#fff}' +
+      '.vc-fn-t{flex:1;font-size:12.5px;color:#e2e9f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-fn-m{flex:none;font-size:10.5px;color:#7f92b8;font-variant-numeric:tabular-nums}' +
+      '.vc-fn-x{flex:none;font-size:10px;color:#7f92b8;transition:transform .2s}' +
+      '.vc-fn.on .vc-fn-x{transform:rotate(90deg)}' +
+      // 连接线:表示数据从上一个方块流到下一个
+      '.vc-fw{height:16px;margin-left:19px;border-left:1.5px solid color-mix(in srgb,var(--vc-tc) 45%,transparent);position:relative}' +
+      '.vc-fw::after{content:"";position:absolute;left:-3.5px;bottom:0;width:6px;height:6px;border-right:1.5px solid color-mix(in srgb,var(--vc-tc) 60%,transparent);' +
+        'border-bottom:1.5px solid color-mix(in srgb,var(--vc-tc) 60%,transparent);transform:rotate(45deg)}' +
+      // 方块展开出来的载荷(markdown / 公式 / 图 / JSON 都在这里正常渲染)
+      '.vc-fp{margin:6px 0 0 19px;padding:8px 10px;border-left:1.5px solid rgba(255,255,255,.12);' +
+        'font-size:12.5px;line-height:1.6;color:#dbe4f5;max-height:230px;overflow:auto;word-break:break-word}' +
+      '.vc-fp pre,.vc-fp code{font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#b9c6e0}' +
+      '.vc-fp img{max-width:100%;border-radius:6px;display:block;margin-top:5px}' +
+      '.vc-fp p{margin:.35em 0}.vc-fp ul,.vc-fp ol{margin:.35em 0;padding-left:1.2em}' +
+      // 头部:标题 + 状态(一行长条里状态就显示在这)
+      '.vc-hd-l{flex:none;font-weight:600}' +
+      '.vc-hd-s{flex:1;font-size:11.5px;color:#93a4c6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       // Anki 完整卡片预览(正/反面翻页 + 挖空 + 公式/图由 MathJax/img 渲染)
       '.vc-fc{margin-top:7px;background:rgba(0,0,0,.26);border:0.5px solid rgba(255,255,255,.1);border-radius:9px;padding:7px 9px;color:#e6ecf8;font-size:13px}' +
       '.vc-fc img{max-width:100%;border-radius:6px;margin-top:5px;display:block}' +
@@ -191,8 +215,11 @@
       '.vc-fc-n button:disabled{opacity:.3}' +
       '.vc-fc-d{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.22)}' +
       '.vc-fc-d.on{background:#fff;width:14px;border-radius:3px}' +
-      // 侧栏内联(同一张卡进对话流:静态排布,不绝对定位)
-      '.vc-card.vc-inflow{position:relative;right:auto;bottom:auto;width:100%;margin:8px 0;transform:none!important;max-height:none}' +
+      // 侧栏内联(同一张卡进对话流:静态排布,不绝对定位)。它没有左上角标记 → 头部不用让位
+      '.vc-card.vc-inflow{position:relative;right:auto;bottom:auto;width:100%!important;margin:8px 0;transform:none!important;max-height:none}' +
+      '.vc-card.vc-inflow .vc-card-hd{padding-left:12px}' +
+      '.vc-card.vc-inflow.vc-min{padding:0 10px 0 0}' +
+      '.vc-card.vc-inflow:not(.vc-min) .vc-card-bd{padding-left:12px}' +
       '@keyframes vcPinPop{0%{filter:brightness(1)}40%{filter:brightness(1.4)}100%{filter:brightness(1)}}' +   // ⚠不用 transform:会覆盖拖动后的内联 translate 导致瞬移
       '.vc-pin-pop{animation:vcPinPop .4s ease}' +
       '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
