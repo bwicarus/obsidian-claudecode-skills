@@ -190,3 +190,52 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
 
 ### reflow 永久不适用(非漏做,有意省略)
 ⊞双页 / ↔适应宽 / ✂️去边 / 单页横滑翻页 / canvas pinch 缩放 / 🔎OCR / 文字层校准·单页重扫 —— 全依赖 PDF 页位图/char-layer,reflow 无对应。scrubber/搜索/译页/振假名/生词/词组/知识点 等用 reflow 等价物实现。
+
+---
+
+## 🧩 工具指示器 v2:`rc-toolchip.js`(2026-07-14,用户设计)
+
+一次工具调用 = 一个 **chip**(逻辑单元),可同时有多个**视图**:浮层(字幕模式,绝对定位)、侧栏(对话流 inflow)、侧栏拖出的副本。所有视图共享同一 `cid`,**状态更新一次处处同步**;**选中一处处处高亮、取消一处处处取消**(用户强调的全局广播,`byCid` 注册表 + `rc-chip-sel` CustomEvent)。
+
+### 三形态(圆形标记本身就是形态控制按钮,坐落在方块左上角)
+
+| 形态 | 语义 | 外观 |
+|---|---|---|
+| `circle` | 创建 / 收起 | 透明玻璃、**无边缘**,图标呼吸=进行中 |
+| `bar` | 折叠 / 进行中 | 有色磨砂胶囊,**内部步骤在这里滚** |
+| `card` | 展开 / 结果 | 有色磨砂 + 边缘阴影;制卡=**完整卡片预览**(正/反面翻页、Cloze、MathJax、图片) |
+
+### 手势(复用现有口径)
+
+- **单击** → 形态循环 `circle → bar → card`
+- **长按 320ms** → 按下特效 + 进入可拖;拖动**粘性 8px**(与 `_dragToDock` 同阈值,低于阈值不算移动)
+- **长按原地松手** → 选中 / 取消选中(紫边)
+- 一旦被拖动/长按/手动换形态 → `touched=1`,出结果**不自动展开**(尊重用户摆放)
+- 出结果 **20s** 后没动过的自动收起成圆标记
+- 侧栏视图拖出 → 画面上生成**同一 chip 的新视图**(原件留在侧栏,天然共享选中/内容)
+
+### 颜色 = 输出类型(紫色**只**表示选中,不参与类型编码)
+
+`TYPE_C`:anki `#39d98a`(制卡单独一色)/ text `#5b9cff` / image `#c77dff` / video `#ff7a59` / weather `#2dd4bf` / news `#fbbf24` / **action `#8194b8`**(执行类)。
+`typeOf(toolName)` 按真实工具名分类;**执行类**(`goto_*` / `highlight` / `epub_highlight` / `auto_highlight` / `open_book` / `undo_last`)在浮层上**无方块、不可选中、完成即消失**,但**侧栏里保留**(可点开=完成后的状态确认)。
+
+### 位置
+
+`findSpot()` 随机采样 70 个点按**画面当前占用情况**打分(离已有 chip 越远越好 + 偏好右/下不压正文左上 + 侧栏开着则限制在侧栏左侧),即"交错重叠"的算法版。
+
+### 数据链路(内部步骤全推出来)
+
+```
+后端 _run_snippets_to(on_step=...) → voice._task_anki → _vtask_set(step=, steps=[])
+   → GET /api/voice/task-status → {step, steps[], result:{kind:'anki', n, deck, cards[]}}
+   → RC.toolChip.track(chip, task_id) → 步骤进长条,结果进方块
+```
+
+- **方块的「步骤」区 = 原「!」详情面板内容**:steps 列表 + 参数 / 耗时 / 喂回给模型播报的结果。
+- **结构化 tool2 事件**(`assistant.py::_tool2`,与旧 `tool`/`tool-done` 并行发,老前端忽略):`{name, label, args, status, sec, brief, task_id}`。发在 assistant 的 3 个驱动(claude/gemini/codex)+ epub_assistant 的 2 个驱动。**文字对话**(`rc-assistant.js::_toolChip`)与**语音通话**(`rc-voicecall.js::_chipStart/_chipEnd`)由此共用同一套 chip。
+- 🗑 清空对话 → `RC.toolChip.clearAll()`(与对话流同清)。
+- 字幕框**不再重复**显示工具状态:chip 是"进行中指示"的**高级替代**(`_hasChip` 时 `capStatus` 让位),字幕只留说话内容。
+
+### ⚠ 部署
+
+`rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里导致"设置面板没有语音 tab"整整排查一轮)。前端只由 nginx 从 `/var/www/html/static/pdf/` 服务。
