@@ -92,27 +92,39 @@
     if (document.getElementById('rc-vc-css')) return;
     var s = document.createElement('style'); s.id = 'rc-vc-css';
     s.textContent =
-      // 朗读字幕(v3-⑳):底部居中悬浮,Apple TV 字幕风(深毛玻璃胶囊);pointer-events:none 全链穿透
-      '#vc-cap{position:fixed;left:50%;transform:translateX(-50%) translateY(10px);bottom:calc(76px + env(safe-area-inset-bottom,0px));' +
-      'z-index:2147481500;display:flex;flex-direction:column;align-items:center;gap:6px;pointer-events:none;' +
-      'max-width:min(88vw,620px);opacity:0;transition:opacity .35s ease,transform .35s ease;font-family:-apple-system,system-ui,sans-serif}' +
-      '#vc-cap.on{opacity:1;transform:translateX(-50%) translateY(0)}' +
-      '#vc-cap .vc-cap-line{background:rgba(28,28,30,.6);-webkit-backdrop-filter:blur(18px) saturate(1.5);backdrop-filter:blur(18px) saturate(1.5);' +
-      'color:#fff;border-radius:14px;padding:7px 14px;font-size:15px;line-height:1.5;text-align:center;' +
-      'box-shadow:0 6px 24px rgba(0,0,0,.18);max-width:100%;word-break:break-word;transition:opacity .3s}' +
-      '#vc-cap .vc-cap-prev{opacity:.45;font-size:13px;padding:5px 12px}' +
-      '#vc-cap .vc-cap-st{opacity:.85;font-size:13px;padding:5px 12px;background:rgba(28,28,30,.48)}' +
-      '#vc-cap .vc-cap-u{background:rgba(10,132,255,.62)}' +   // 用户句:iMessage 蓝,与 AI 深灰一眼区分
-      // "正在听"等待指示:mic 线条图标 + 三点依次跳动(ASR 通话空闲时常驻)
-      '#vc-cap .vc-cap-wait{display:flex;align-items:center;gap:7px;padding:6px 13px;background:rgba(28,28,30,.48)}' +
-      '#vc-cap .vc-cap-st{display:flex;align-items:center;gap:7px}' +
-      '#vc-cap .vc-cap-st svg{width:14px;height:14px;flex:none;opacity:.9}' +
-      '#vc-cap .vc-cap-st.vc-st-ok{background:rgba(38,58,44,.62);color:#c7f0d2}' +
-      '#vc-cap .vc-cap-st.vc-st-err{background:rgba(70,36,36,.62);color:#ffd0cc}' +
+      // 朗读字幕(v3-⑳ → 133 重做外观):**一整块**毛玻璃(仿 iOS 实况字幕),不再是两个分离的黑胶囊。
+      //   上一句淡、当前句亮,同一块玻璃里;你说的话左侧一条蓝细条、AI 无条 —— 不再整块变蓝(太重、太碎)。
+      '#vc-cap{position:fixed;left:50%;transform:translateX(-50%) translateY(12px) scale(.97);' +
+        'bottom:calc(76px + env(safe-area-inset-bottom,0px));z-index:2147481500;' +
+        'display:flex;flex-direction:column;align-items:stretch;gap:1px;pointer-events:none;' +
+        'width:max-content;max-width:min(88vw,640px);padding:11px 17px;border-radius:22px;' +
+        'background:linear-gradient(180deg,rgba(26,26,32,.78),rgba(16,16,20,.84));' +   // 白页上也要够暗:文字才立得住
+        '-webkit-backdrop-filter:blur(30px) saturate(1.8);backdrop-filter:blur(30px) saturate(1.8);' +
+        'border:0.5px solid rgba(255,255,255,.14);' +
+        'box-shadow:0 14px 48px -12px rgba(0,0,0,.5),inset 0 0.5px 0 rgba(255,255,255,.09);' +
+        'opacity:0;transition:opacity .34s cubic-bezier(.32,.72,.36,1),transform .34s cubic-bezier(.32,.72,.36,1);' +
+        'font-family:-apple-system,system-ui,sans-serif}' +
+      '#vc-cap.on{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}' +
+      // 每一行 = 纯文字(玻璃在外层容器上,行内不再各自套底色)
+      '#vc-cap .vc-cap-line{background:none;box-shadow:none;border-radius:0;padding:3px 0 3px 11px;' +
+        'color:rgba(255,255,255,.97);font-size:16px;font-weight:450;line-height:1.55;letter-spacing:.012em;' +
+        'text-align:left;max-width:100%;word-break:break-word;position:relative;' +
+        'animation:vcCapIn .34s cubic-bezier(.2,.85,.3,1);transition:opacity .3s}' +
+      '@keyframes vcCapIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}' +
+      '#vc-cap .vc-cap-prev{opacity:.42;font-size:13.5px;font-weight:400;padding-bottom:1px}' +   // 上一句:淡一档、小一档
+      // 你说的话:左侧一条蓝细条(不整块变蓝);AI 无条
+      '#vc-cap .vc-cap-u::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2.5px;border-radius:2px;background:#0a84ff}' +
+      '#vc-cap .vc-cap-u{color:rgba(255,255,255,.92)}' +
+      // 状态行 / "正在听":做成小 chip,不跟字幕同宽
+      '#vc-cap .vc-cap-st,#vc-cap .vc-cap-wait{align-self:flex-start;display:flex;align-items:center;gap:7px;' +
+        'font-size:12.5px;font-weight:450;color:rgba(255,255,255,.8);background:rgba(255,255,255,.09);' +
+        'border-radius:10px;padding:4px 10px 4px 9px;margin-top:3px;box-shadow:none;letter-spacing:0}' +
+      '#vc-cap .vc-cap-st svg,#vc-cap .vc-cap-wait svg{width:13px;height:13px;flex:none;opacity:.85}' +
+      '#vc-cap .vc-cap-st.vc-st-ok{background:rgba(48,209,88,.16);color:#a8ebbb}' +
+      '#vc-cap .vc-cap-st.vc-st-err{background:rgba(255,105,97,.16);color:#ffc4bf}' +
       '#vc-cap .vc-cap-st .vc-tks.ok{color:#30d158;font-weight:600}' +
       '#vc-cap .vc-cap-st .vc-tks.err{color:#ff6961}' +
       '.vc-spin-s{width:11px;height:11px;border-width:1.6px;flex:none}' +
-      '#vc-cap .vc-cap-wait svg{width:13px;height:13px;opacity:.8;flex:none}' +
       '#vc-cap .vc-cap-wait i{width:4px;height:4px;border-radius:50%;background:#fff;opacity:.3;animation:vcCapDot 1.4s ease-in-out infinite}' +
       '#vc-cap .vc-cap-wait i:nth-of-type(2){animation-delay:.22s}' +
       '#vc-cap .vc-cap-wait i:nth-of-type(3){animation-delay:.44s}' +
@@ -3455,7 +3467,8 @@
       var st0 = document.createElement('style'); st0.id = 'vc-quick-compact';
       st0.textContent = '#asst-quick .rc-media-tg,#ep-asst-quick .rc-media-tg{padding:4px 7px;font-size:12px;gap:3px;border-radius:7px}' +
         '#asst-quick .rc-media-tg svg,#ep-asst-quick .rc-media-tg svg{width:14px;height:14px;flex:none}' +
-        '.vc-cap-line.vc-cap-route{box-shadow:inset 3px 0 0 rgba(157,123,255,.85),0 6px 24px rgba(0,0,0,.18);background:rgba(48,38,80,.6);color:#e9e2ff}';
+        '#vc-cap .vc-cap-line.vc-cap-route::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2.5px;border-radius:2px;background:#9d7bff}' +
+        '#vc-cap .vc-cap-line.vc-cap-route{color:#e9e2ff}';
       document.head.appendChild(st0);
     }
     return true;
