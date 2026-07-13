@@ -361,6 +361,12 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
         Route("/oauth/authorize", authorize_get, methods=["GET"]),
         Route("/oauth/authorize", authorize_post, methods=["POST"]),
         Route("/oauth/token", token, methods=["POST"]),
+        # 根路径别名(2026-07-13 实测):claude.ai 手填 Client ID 模式不读 AS metadata,
+        # 按 MCP 授权 spec 默认端点约定直接打 <origin>/authorize|/token|/register
+        Route("/register", register, methods=["POST"]),
+        Route("/authorize", authorize_get, methods=["GET"]),
+        Route("/authorize", authorize_post, methods=["POST"]),
+        Route("/token", token, methods=["POST"]),
         Mount("/", app=_Gate(mcp_app)),
     ]
 
