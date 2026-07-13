@@ -1326,17 +1326,19 @@
       var fp = (j.page || 0) + ':' + strokes.length;
       if (fp === _rtc._inkFp) return;
       _rtc._inkFp = fp;
-      if (!strokes.length) { _rtc.inkDirty = false; _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }
+      if (!strokes.length) { _rtc.inkDirty = false; if (!_rtc.ctl) _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }   // 126(P3):ctl=relay 注入
       // 边沿触发(用户拍板):笔迹"变了"只通知一次,之后继续画多少笔都不再打扰;
       // AI 重新看过(see_ink/see_page 成功,_rtcTool 里复位)后,下次变化才再通知。
       // 关键是这一次要把旧记忆作废——上次 see_ink 的结果还在上下文里,不否定它模型就凭旧印象答"没变化"。
       if (_rtc.inkDirty) return;
       _rtc.inkDirty = true;
+      if (_rtc.ctl) return;   // 126(P3):ctl 活着=状态注入归 relay
       _rtcSys('(状态更新:用户的手写笔迹刚刚发生了变化。你之前通过 see_ink 看到的笔迹内容**已过时作废**——你现在并不知道纸面上实际写了什么。这只是状态记录,不要回应本条、不要主动评论。之后他问「我写的/我画的/现在呢/看到了什么/有没有变化」这类问题时,唯一正确的做法是先调 see_ink 重新看再回答;没重新看之前,凭旧印象说"和原来一样/没有变化"是错误行为。)');
     } else if (t === 'state') {
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
       _rtc.sel = sel;
+      if (_rtc.ctl) return;   // 126(P3):ctl 活着=状态注入归 relay
       _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它;' +
         (sel.length <= 200 ? '**选中内容已完整在此,直接使用**' : '选中较长已截断,需要完整上下文可 read_page 当前页') + ')') :
         '用户当前没有选中文字') + ';状态记录,不要回应本条)');
@@ -1854,6 +1856,7 @@
                                                    max_output_tokens: 2048 } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
+    if (_rtc.ctl) return;   // 126(P3):ctl 活着=注入归 relay(page/state/ink 已 shim 镜像);断线回退前端
     try {
       var vt = _rtc.pendText || '';
       var fp = _rtc.ctxPage + ':' + vt.length + ':' + vt.slice(0, 30);
@@ -2126,7 +2129,7 @@
       _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'input_audio_buffer.speech_stopped') {
-      _rtcRespCreate('user');   // ㊿ 手动挡:VAD 判定说完 → 按朗读开关选模态创建回复(create_response:false 后唯一触发点)
+      if (!_rtc.ctl) _rtcRespCreate('user');   // ㊿/126(P4):ctl 活着=create 归 relay 仲裁;断线回退前端(fe=3 握手,relay 只对 fe≥3 接管)
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx && (tx.indexOf('学习伴读通话') >= 0 || tx.indexOf('常说:这一页') >= 0)) tx = '';   // 85:转写 prompt 泄漏(静音时模型复读语境提示词)→丢弃
@@ -2247,7 +2250,7 @@
       var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
       // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
       // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
-      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=2&call_id=' + encodeURIComponent(_rtc.callId) +
+      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=3&call_id=' + encodeURIComponent(_rtc.callId) +
                              '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
       cw.onmessage = function (ev) {
         try {

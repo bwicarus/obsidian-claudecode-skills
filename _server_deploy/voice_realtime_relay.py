@@ -2442,13 +2442,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     pend = {"create": False, "ep": 0}   # 59:create 撞车被拒→记下,response.done 时补发(纪元变了=用户已开新话,放弃)
     turn = {"text": False}              # 67:relay 最近下发的模态(text 轮里再调 route_to_text=驳回,防三段式冗余)
 
-    def _resp_create(long_tool=False):
-        """工具回填后的 response.create——模态按服务器持久化档位(61 四态)。
-        工具结果轮:sts=念;half/stt=文字;route=**按结果长度程序分流**(66c:0/4 实锤
-        「拿到资料+音频模态=念」是 mini 条件反射,prompt/就地提醒都治不了——短结果口头说,
-        长结果这轮直接给文字模态让它自己写,无截断无双引擎,route_to_text 留给不调工具的长答)。"""
+    def _resp_create(long_tool=False, user=False):
+        """response.create——模态按服务器持久化档位(61 四态)。126(P4):user=True=用户轮(speech_stopped
+        仲裁归 relay),half 档用户轮=音频(与前端 _rtcRespCreate 对齐);工具结果轮语义不变。"""
         m = _norm_vm(_creds().get("rt_voice_mode"))
-        want_audio = m == "sts" or (m == "route" and not long_tool)
+        want_audio = m == "sts" or (m == "route" and not long_tool) or (m == "half" and user)
         turn["text"] = not want_audio
         return {"type": "response.create",
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
@@ -2665,6 +2663,20 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             n[t] = n.get(t, 0) + 1
             if t == "input_audio_buffer.speech_started":
                 epoch["n"] += 1   # 用户开口=新话轮:在途工具的结果到手后只回填不抢话(审核P0#2)
+                if fe >= 3 and book.pop("_dirty3", None):   # 126(P3):拉模式注入归 relay——开口瞬间注入最新状态(前端 _rtcFlushCtx/_rtcSys 退役)
+                    _vt3 = (book.get("vtext") or book.get("page_text") or "")[:1500]
+                    _b3 = [f"用户此刻在第 {book.get('page') or page} 页" + (f",当前可见内容:{_vt3}" if _vt3 else ",需要页面内容就调 read_page")]
+                    if book.get("sel"):
+                        _b3.append(f"选中了「{str(book['sel'])[:200]}」(他说『这段/我选的』就指它)")
+                    if book.get("ink_strokes"):
+                        _b3.append("本页有他的手写笔迹(问到手写内容先调 see_ink;之前看过的笔迹记忆已作废)")
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                            "type": "message", "role": "system",
+                            "content": [{"type": "input_text", "text": "(" + ";".join(_b3) + "。状态记录,不要回应本条。)"}]}}, ensure_ascii=False))
+                        sys.stderr.write(f"[rtc-ctl] P3 注入 p{book.get('page')}(vt={len(_vt3)}字)\n")
+                    except Exception:
+                        pass
                 # 104:焚"上上轮及更早"的直喂图(保留最近一轮供追问;历史不再重复携带图 token)
                 _keep = [it for it in _img_items if it[0] >= epoch["n"] - 2]
                 for _ep0, _iid0 in _img_items:
@@ -2674,6 +2686,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                         except Exception:
                             pass
                 _img_items[:] = _keep
+            elif t == "input_audio_buffer.speech_stopped":
+                if fe >= 3:   # 126(P4):用户轮 create 归 relay(响应仲裁收口一处;旧前端 fe<3=前端自己 create)
+                    try:
+                        await ows.send(json.dumps(_resp_create(user=True)))
+                        sys.stderr.write("[rtc-ctl] P4 create(user)\n")
+                    except Exception:
+                        pass
             elif t == "response.function_call_arguments.done":
                 if fe < 2:
                     continue   # 版本握手:旧前端自己执行工具,relay 只观察(防双执行)
@@ -2730,9 +2749,22 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             t = j.get("type")
             if t == "page":
                 np = j.get("page") or 0
+                if j.get("text") is not None:
+                    book["vtext"] = str(j.get("text") or "")[:2000]   # 126(P3):前端视口文本(EPUB 动态窗/PDF 可见文字)
+                    book["_dirty3"] = True
                 if np and np != book["page"]:
                     book["page"] = np
                     book["_ink_fp"] = ""   # 换页:笔迹指纹作废(缓存键随之翻新)
+                    book["_dirty3"] = True
+
+                    async def _rf3(np1=np):   # 126(P3):翻页后台刷新页正文(注入归 relay 的原料)
+                        try:
+                            vc3 = await _fetch_book_ctx(file_rel, np1)
+                            if book.get("page") == np1:
+                                book["page_text"] = vc3.get("page_text") or ""
+                        except Exception:
+                            pass
+                    asyncio.create_task(_rf3())
             elif t == "rtcstats":   # 124(#287):WebRTC 质量遥测(丢包/抖动ms/RTTms)→学习时间线,诊断"断续"用数据说话
                 _st0 = j.get("s") or {}
                 _vlog("rtcstats", text=json.dumps(_st0, ensure_ascii=False), page=book.get("page") or page, book=file_rel)
@@ -2740,9 +2772,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 epoch["n"] += 1   # 打字提问=新话轮(与 speech_started 同语义)
             elif t == "state":
                 book["sel"] = (j.get("sel") or "")[:400]
+                book["_dirty3"] = True
             elif t == "ink":
                 strokes = j.get("strokes") or []
                 book["ink_strokes"] = strokes[:60]
+                book["_dirty3"] = True
                 try:   # 全笔画哈希(审核 P1:"笔画数+末点"不同图形易撞)
                     book["_ink_fp"] = hashlib.md5(json.dumps(strokes, sort_keys=True).encode()).hexdigest()[:10] if strokes else ""
                 except Exception:

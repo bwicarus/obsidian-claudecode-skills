@@ -859,3 +859,9 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 
 **OpenAI Cookbook 原文核实(agent 精读 platform 文档+cookbook notebook 源码)**:①`previous_item_id:'root'`=官方唯一文档化插头部写法,**验证通过**;②压缩方向全对(24k 在官方建议 20-32k 区间/system role 恰好躲开官方明示的"assistant 摘要会让模型切文字输出"坑/低频批量有官方背书);③**两处按原文修正**:时序改"**先插摘要后删旧轮**"(官方顺序无空窗;delete 定点+create 插 root 无冲突,官方范例不等 deleted 确认——124 的等确认机制退役)+摘要**固定 id**(sum_*,不入 items 账本免 slice 排序错位,下次压缩连旧摘要一起删);④新增**紧急压缩线 27k**(服务端 28672 自动截断会先吃 root 摘要,紧急线豁免 90s 低频保护);⑤truncation 会话参数查证 RTC 已配 0.8✓。cookbook 其余遗漏记档:session.update 周期重申 instructions(长对话防遗忘)/工具输出瘦身/out-of-band response 旁路任务。
 
+## 批次 126(2026-07-13)#283 P3+P4 完成:注入与响应仲裁归 relay(fe=3 握手)
+
+**P3 注入归 relay**:前端 page 消息的视口文本(vtext)relay 落 book;翻页后台刷新页正文;state/ink 标脏 `_dirty3`;**speech_started 时 relay 注入**最新快照(页码+可见内容 1500 字+选中+笔迹状态,与前端 _rtcFlushCtx 同构,system item 状态记录)。前端 `_rtcFlushCtx`/ink 清空/笔迹变化/选中四处注入 **gate `if (_rtc.ctl) return`**——ctl 活着=relay 负责,断线自动回退前端(原设计回退语义)。
+**P4 响应仲裁归 relay**:speech_stopped 的用户轮 create 搬 relay(`_resp_create(user=True)`,补 half 档用户轮=音频语义与前端对齐);前端 gate 同款。至此 RTC 的全部 response.create(用户轮+工具轮)与 cancel 前置(epoch/pend 补发)收口 relay 一处——双响应类竞态从结构上消失。
+**fe=3 版本握手**(59 教训):前端 ctl URL fe=2→3;relay 只对 fe≥3 做 P3 注入+P4 create(fe=2 旧页面=前端自己注入/create,零双执行窗口)。usage 记账归 relay 已随 125 完成。#283 全阶段(P1/P2/P2.5/P3/P4)收官。
+
