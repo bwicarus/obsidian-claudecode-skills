@@ -820,6 +820,15 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
                     "fields": fields, "options": {"allowDuplicate": True},
                     "tags": ["obsidian", "ai_generated", "qa_improved"]}
             nid = _anki_request("addNote", {"note": note}, timeout=30)
+            # AnkiConnect × Anki 25:addNote 的 deckName 不生效(notetype 缓存被 requireReset 清掉)
+            # → 卡落「系统默认」。显式归位。
+            if nid:
+                try:
+                    _cids = _anki_request("findCards", {"query": f"nid:{nid}"}, timeout=20) or []
+                    if _cids:
+                        _anki_request("changeDeck", {"cards": _cids, "deck": deck}, timeout=20)
+                except Exception:
+                    pass
             rec.setdefault("cards", []).append({
                 "local_id": new_lid, "type": ctype, "deck": deck,
                 "front": card.get("front", ""), "back": card.get("back", ""),

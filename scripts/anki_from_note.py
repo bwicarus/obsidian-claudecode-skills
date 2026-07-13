@@ -617,6 +617,17 @@ def sync_cards_to_anki(
             anki_request(args.anki_url, "createDeck", {"deck": card["deck"]})
             note = build_anki_note(card, local_id, source_link, source_url, args)
             note_id = anki_request(args.anki_url, "addNote", {"note": note}, timeout=30)
+            # AnkiConnect × Anki 25:addNote 的 deckName 不生效(插件靠 notetype 缓存传 did,而
+            # startEditing()→requireReset()→mw.reset() 先把缓存清了)→ 卡落「系统默认」。显式归位。
+            if note_id:
+                try:
+                    cids = anki_request(args.anki_url, "findCards",
+                                        {"query": f"nid:{note_id}"}, timeout=20) or []
+                    if cids:
+                        anki_request(args.anki_url, "changeDeck",
+                                     {"cards": cids, "deck": card["deck"]}, timeout=20)
+                except Exception:
+                    pass
             card_record["anki_note_id"] = note_id
             card_record["status"] = "synced"
             print(f"  OK {local_id} → Anki note {note_id}")

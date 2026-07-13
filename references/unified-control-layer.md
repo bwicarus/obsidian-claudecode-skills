@@ -193,49 +193,49 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
 
 ---
 
-## 🧩 工具指示器 v2:`rc-toolchip.js`(2026-07-14,用户设计)
+## 🧩 工具指示器 v2:扩展**现有那张语音卡片**(2026-07-14,用户设计)
 
-一次工具调用 = 一个 **chip**(逻辑单元),可同时有多个**视图**:浮层(字幕模式,绝对定位)、侧栏(对话流 inflow)、侧栏拖出的副本。所有视图共享同一 `cid`,**状态更新一次处处同步**;**选中一处处处高亮、取消一处处处取消**(用户强调的全局广播,`byCid` 注册表 + `rc-chip-sel` CustomEvent)。
+⚠ **铁律(用户拍板)**:*不另造 UI*。用的就是现有的 `.vc-card`(DOM/CSS 在 `rc-voicecall.js`)——「我很喜欢这个方块的样式,在这个基础上进行修改就好」。`rc-toolchip.js` **只是状态机 + 内容渲染**,拖动 / 收藏 / TTS ▶ / ✕ / 紫边选中全部复用 `RC.voiceCard` 暴露的那张卡。
 
-### 三形态(圆形标记本身就是形态控制按钮,坐落在方块左上角)
+### 三形态(在原卡片的「方块 ↔ 长条」之上**加第三态:圆形标记**)
 
-| 形态 | 语义 | 外观 |
-|---|---|---|
-| `circle` | 创建 / 收起 | 透明玻璃、**无边缘**,图标呼吸=进行中 |
-| `bar` | 折叠 / 进行中 | 有色磨砂胶囊,**内部步骤在这里滚** |
-| `card` | 展开 / 结果 | 有色磨砂 + 边缘阴影;制卡=**完整卡片预览**(正/反面翻页、Cloze、MathJax、图片) |
+| 形态 | class | 语义 | 外观 |
+|---|---|---|---|
+| 圆 | `.vc-dot` | 创建 / 收起 | 透明玻璃标记、无边缘;图标呼吸 = 正在干活 |
+| 长条 | `.vc-min` | 折叠 / 进行中 | 原卡片折叠态,**内部步骤在这里滚** |
+| 方块 | (无) | 展开 / 结果 | 原卡片展开态;制卡 = **完整卡片预览**(正/反面翻页、Cloze、MathJax、图片) |
 
-### 手势(复用现有口径)
+- **圆形标记本身 = 形态控制按钮**(`.vc-card-dot`,坐落在方块**左上角**),单击循环三态;它同时是圆态下的**拖动把手**(圆态时 `.vc-card-hd` 隐藏,没有它就拖不动)。`.vc-hasdot` 让标题给标记让位。
+- **侧栏内联卡(`.vc-inflow`)只有 长条 ↔ 方块 两态**——用户明确:侧栏不要圆。点头部折叠/展开。
+- 长按 = 选中/取消(紫边,原 `_pinBind`);长按拖动 = 移动 / 从侧栏拖出副本 / 拖到屏幕底部收藏(原 `_dragToDock`)。
+- 动过(拖/长按/手动切形态)→ `dataset.touched=1`,出结果**不自动展开**、20s 也不自动收起(尊重用户摆放)。
+- 没动过的:出结果自动展成方块,**20s 后自动收起成圆标记**(不销毁,单击可再展开)。
 
-- **单击** → 形态循环 `circle → bar → card`
-- **长按 320ms** → 按下特效 + 进入可拖;拖动**粘性 8px**(与 `_dragToDock` 同阈值,低于阈值不算移动)
-- **长按原地松手** → 选中 / 取消选中(紫边)
-- 一旦被拖动/长按/手动换形态 → `touched=1`,出结果**不自动展开**(尊重用户摆放)
-- 出结果 **20s** 后没动过的自动收起成圆标记
-- 侧栏视图拖出 → 画面上生成**同一 chip 的新视图**(原件留在侧栏,天然共享选中/内容)
+### 选中 = 按 cid 全局广播
 
-### 颜色 = 输出类型(紫色**只**表示选中,不参与类型编码)
+`_pins.byCid`(cid → 所有实例 el)+ `_pinReg` / `_pinPaint`:同一张卡在**浮层 / 侧栏 / 收藏夹**处处高亮、处处取消。这修掉了用户报的「字幕里选中了,侧栏同一张卡没高亮」。
 
-`TYPE_C`:anki `#39d98a`(制卡单独一色)/ text `#5b9cff` / image `#c77dff` / video `#ff7a59` / weather `#2dd4bf` / news `#fbbf24` / **action `#8194b8`**(执行类)。
-`typeOf(toolName)` 按真实工具名分类;**执行类**(`goto_*` / `highlight` / `epub_highlight` / `auto_highlight` / `open_book` / `undo_last`)在浮层上**无方块、不可选中、完成即消失**,但**侧栏里保留**(可点开=完成后的状态确认)。
+### 颜色 = 输出类型(紫色只表示选中,不参与类型编码)
 
-### 位置
-
-`findSpot()` 随机采样 70 个点按**画面当前占用情况**打分(离已有 chip 越远越好 + 偏好右/下不压正文左上 + 侧栏开着则限制在侧栏左侧),即"交错重叠"的算法版。
+`TYPE_C`:anki `#39d98a`(制卡单独一色)/ text `#7b9cff` / image `#c77dff` / video `#ff7a59` / weather `#2dd4bf` / news `#fbbf24` / **action `#8194b8`**。
+`typeOf(toolName)` 按真实工具名分类。**执行类**(`goto_*` / `highlight` / `epub_highlight` / `auto_highlight` / `open_book` / `undo_last`):浮层上无方块、不可选中、**完成即消失**;但**侧栏里保留**(点开 = 完成后的状态确认)。
 
 ### 数据链路(内部步骤全推出来)
 
 ```
-后端 _run_snippets_to(on_step=...) → voice._task_anki → _vtask_set(step=, steps=[])
+后端 _run_snippets_to(on_step=…) → voice._task_anki → _vtask_set(step=, steps=[])
    → GET /api/voice/task-status → {step, steps[], result:{kind:'anki', n, deck, cards[]}}
    → RC.toolChip.track(chip, task_id) → 步骤进长条,结果进方块
 ```
 
-- **方块的「步骤」区 = 原「!」详情面板内容**:steps 列表 + 参数 / 耗时 / 喂回给模型播报的结果。
-- **结构化 tool2 事件**(`assistant.py::_tool2`,与旧 `tool`/`tool-done` 并行发,老前端忽略):`{name, label, args, status, sec, brief, task_id}`。发在 assistant 的 3 个驱动(claude/gemini/codex)+ epub_assistant 的 2 个驱动。**文字对话**(`rc-assistant.js::_toolChip`)与**语音通话**(`rc-voicecall.js::_chipStart/_chipEnd`)由此共用同一套 chip。
-- 🗑 清空对话 → `RC.toolChip.clearAll()`(与对话流同清)。
-- 字幕框**不再重复**显示工具状态:chip 是"进行中指示"的**高级替代**(`_hasChip` 时 `capStatus` 让位),字幕只留说话内容。
+- 方块底部的「步骤」区(`.vc-stp`)= **原「!」详情面板的内容**:steps 列表 + 参数 / 耗时 / 喂回给模型播报的结果。
+- **结构化 `tool2` 事件**(`assistant.py::_tool2`,与旧 `tool`/`tool-done` 并行发,老前端忽略):`{name, label, args, status, sec, brief, task_id}`,发在 assistant 的 3 个驱动(claude/gemini/codex)+ epub_assistant 的 2 个驱动。**文字对话**(`rc-assistant.js::_toolChip`)与**语音通话**(`rc-voicecall.js::_chipStart/_chipEnd`)由此共用同一套卡。
+- 🗑 清空对话 → `RC.toolChip.clearAll()`。字幕框不再重复显示工具状态(卡片是它的高级替代)。
+
+### API(`RC.voiceCard`,rc-voicecall 暴露)
+
+`push(text,label,isHtml,force,cid,opts)`(`opts={tool,type,icon,dot,noAuto}`)/ `close` / `form(el,'dot'|'min'|'full')` / `layout` / `mkCid` / `pinReg` / `pinBind` / `dragToDock` / `sideOpen`。
 
 ### ⚠ 部署
 
-`rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里导致"设置面板没有语音 tab"整整排查一轮)。前端只由 nginx 从 `/var/www/html/static/pdf/` 服务。
+`rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里,导致「设置面板没有语音 tab」排查一整轮)。前端只由 nginx 从 `/var/www/html/static/pdf/` 服务。

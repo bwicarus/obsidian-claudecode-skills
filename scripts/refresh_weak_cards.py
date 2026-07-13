@@ -457,6 +457,17 @@ def do_split(w: dict, subs: list[dict], origin: str) -> None:
         try:
             nc["anki_note_id"] = anki_request(ANKI_URL, "addNote",
                                               {"note": note}, timeout=20)
+            # AnkiConnect × Anki 25:addNote 的 deckName 不生效(notetype 缓存被 requireReset 清掉)
+            # → 卡落「系统默认」。显式归位。
+            if nc["anki_note_id"]:
+                try:
+                    _cids = anki_request(ANKI_URL, "findCards",
+                                         {"query": f"nid:{nc['anki_note_id']}"}, timeout=20) or []
+                    if _cids:
+                        anki_request(ANKI_URL, "changeDeck",
+                                     {"cards": _cids, "deck": nc["deck"]}, timeout=20)
+                except Exception:
+                    pass
             w["rec"]["cards"].append(nc)
             print(f"  ✓ 新子卡 {nc['local_id']} → {nc['anki_note_id']}")
         except Exception as e:  # noqa: BLE001

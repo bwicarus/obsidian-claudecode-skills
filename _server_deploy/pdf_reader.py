@@ -8087,6 +8087,19 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                     pass
             out["anki_added"] = added
             out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
+            # ⚠ AnkiConnect × Anki 25 的坑(2026-07-14 定位):addNote 的 deckName **不生效**——
+            #   插件用 `note.model()['did'] = deck_id` 指定牌组,而它调的 startEditing() → requireReset()
+            #   → mw.reset() 把 notetype 缓存清了,addNote 读回来的 did 已退回 notetype 自带的默认牌组
+            #   → 卡全落「系统默认」(QA 恒 0 的真凶,不是 AnkiWeb sync)。显式 changeDeck 归位。
+            #   (scripts/vocab/anki_from_word.py 早就这么兜底,所以 Vocab 牌组一直是对的)
+            if note_ids:
+                try:
+                    cids = (_ank("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)})
+                            or {}).get("result") or []
+                    if cids:
+                        _ank("changeDeck", {"cards": cids, "deck": "QA"})
+                except Exception:
+                    pass
             # 工具指示器 v2:完成卡=「完整卡片预览」(逐张正反面,含 $公式$ 与 <img>)→ 前端方块态渲染。
             # 原样带出 AI 生成的卡面(不做转义/截断,MathJax 与图片由前端渲染)。
             out["anki_cards"] = [{

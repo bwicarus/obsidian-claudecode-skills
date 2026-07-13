@@ -1793,6 +1793,21 @@ def _sticky_set(p):
         return False, str(e)[:120]
 
 
+def _anki_fix_deck(note_ids, deck):
+    """AnkiConnect × Anki 25:addNote/addNotes 的 deckName **不生效**(插件靠 notetype 缓存里的 did 传牌组,
+    而它先调的 startEditing()→requireReset()→mw.reset() 把缓存清了)→ 卡落「系统默认」。建完显式归位。"""
+    if not note_ids:
+        return
+    try:
+        v = _vmod()
+        cids = (v._anki_req("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)})
+                or {}).get("result") or []
+        if cids:
+            v._anki_req("changeDeck", {"cards": cids, "deck": deck or "QA"})
+    except Exception:
+        pass
+
+
 def _action_redo(action):
     r = action.get("redo") or {}
     op = r.get("op")
@@ -1807,6 +1822,7 @@ def _action_redo(action):
             return False, str(e)[:120]
         if not new_ids:
             return False, "重新建卡失败"
+        _anki_fix_deck(new_ids, (notes[0].get("deckName") or "QA"))   # addNote 的 deckName 不生效,显式归位
         action["undo"] = {"op": "anki_delete", "note_ids": new_ids}   # 新 ids 接管撤销
         _anki_sync_bg()
         return True, None

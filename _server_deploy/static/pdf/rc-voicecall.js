@@ -138,6 +138,49 @@
       '.vc-card-sum{display:none;font-size:12.5px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.vc-card.vc-min .vc-card-bd{display:none}.vc-card.vc-min .vc-card-sum{display:block}' +
       '.vc-card.vc-min{padding:9px 13px}' +
+      // ── 工具指示器 v2(用户设计):在这张卡上加**第三态=圆形标记**,并让标记本身当形态控制按钮 ──
+      //    圆(vc-dot,创建/收起:透明玻璃无边缘) → 长条(vc-min) → 方块(展开)。标记坐落在方块左上角。
+      '.vc-card-dot{position:absolute;left:-9px;top:-9px;width:34px;height:34px;border-radius:50%;padding:0;border:0.5px solid rgba(255,255,255,.16);' +
+        'background:rgba(28,28,30,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
+        'color:var(--vc-tc,#b9a8ff);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
+        'box-shadow:0 6px 18px rgba(0,0,0,.32);transition:transform .14s,box-shadow .2s}' +
+      '.vc-card-dot svg{width:16px;height:16px}' +
+      '.vc-card.vc-hasdot .vc-card-hd{padding-left:20px}' +   // 标记坐在左上角 → 标题让位,别被压住
+      '.vc-card.vc-hasdot.vc-min .vc-card-sum{padding-left:20px}' +
+      '.vc-card-dot:active{transform:scale(.9)}' +
+      '.vc-card-dot.busy{animation:vcDotBr 1.5s ease-in-out infinite}' +
+      '@keyframes vcDotBr{0%,100%{opacity:.42}50%{opacity:1}}' +
+      // 圆态:整张卡缩成标记本身(透明玻璃、无边缘、无阴影 —— 用户要的"创建时"外观)
+      '.vc-card.vc-dot{width:34px;height:34px;min-height:0;padding:0;border-radius:50%;border-color:transparent;' +
+        'background:rgba(255,255,255,.05);box-shadow:none;overflow:visible}' +
+      '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
+      '.vc-card.vc-dot .vc-card-dot{left:0;top:0;box-shadow:none;border-color:transparent;background:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}' +
+      // 完成态:有色磨砂 + 边缘阴影(跟"创建时的透明玻璃圆"区分开)
+      '.vc-card.vc-typed{border-color:color-mix(in srgb,var(--vc-tc) 42%,transparent);' +
+        'background:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
+        'box-shadow:0 16px 42px rgba(0,0,0,.5),0 0 22px -8px color-mix(in srgb,var(--vc-tc) 55%,transparent)}' +
+      '.vc-card.vc-typed .vc-card-hd{color:var(--vc-tc)}' +
+      '.vc-card.vc-typed.vc-dot{background:rgba(255,255,255,.05);box-shadow:none;border-color:transparent}' +
+      '.vc-card.vc-err{--vc-tc:#ff6961}' +
+      // 步骤区(内部步骤全推出来 = 原「!」详情面板的内容)
+      '.vc-stp{margin-top:8px;border-top:0.5px solid rgba(255,255,255,.1);padding-top:6px}' +
+      '.vc-stp-b{background:transparent;border:0;color:#8a9bb4;font-size:11px;padding:0;cursor:pointer}' +
+      '.vc-stp-i{display:flex;gap:7px;align-items:flex-start;margin-top:5px;font-size:11.5px;color:#a9b8d4}' +
+      '.vc-stp-i i{flex:none;width:5px;height:5px;border-radius:50%;background:var(--vc-tc,#b9a8ff);margin-top:5px}' +
+      '.vc-stp-k{color:#7c93c4;font-size:10.5px;font-weight:700;margin-top:6px}' +
+      '.vc-stp-v{color:#b9c6e0;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;word-break:break-all;white-space:pre-wrap;max-height:140px;overflow:auto}' +
+      // Anki 完整卡片预览(正/反面翻页 + 挖空 + 公式/图由 MathJax/img 渲染)
+      '.vc-fc{margin-top:7px;background:rgba(0,0,0,.26);border:0.5px solid rgba(255,255,255,.1);border-radius:9px;padding:7px 9px;color:#e6ecf8;font-size:13px}' +
+      '.vc-fc img{max-width:100%;border-radius:6px;margin-top:5px;display:block}' +
+      '.vc-fc-t{font-size:9.5px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
+      '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid #7b6cff;border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
+      '.vc-fc-n{display:flex;align-items:center;gap:7px;margin-top:7px}' +
+      '.vc-fc-n button{background:transparent;border:0.5px solid rgba(255,255,255,.16);border-radius:7px;color:#93a4c6;width:26px;height:24px;cursor:pointer;font-size:13px;padding:0}' +
+      '.vc-fc-n button:disabled{opacity:.3}' +
+      '.vc-fc-d{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.22)}' +
+      '.vc-fc-d.on{background:#fff;width:14px;border-radius:3px}' +
+      // 侧栏内联(同一张卡进对话流:静态排布,不绝对定位)
+      '.vc-card.vc-inflow{position:relative;right:auto;bottom:auto;width:100%;margin:8px 0;transform:none!important;max-height:none}' +
       '@keyframes vcPinPop{0%{filter:brightness(1)}40%{filter:brightness(1.4)}100%{filter:brightness(1)}}' +   // ⚠不用 transform:会覆盖拖动后的内联 translate 导致瞬移
       '.vc-pin-pop{animation:vcPinPop .4s ease}' +
       '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
@@ -793,13 +836,29 @@
       try { _rtcSys(msg); } catch (e) {}
     }, 1200);
   }
+  // 用户强调:同一编号(cid)的卡无论出现在字幕浮层 / 侧栏 / 收藏夹,选中一处则**处处高亮**,
+  //   取消一处则**处处取消**。每个渲染实例出生时来登记,选中态按 cid 广播到全部实例。
+  _pins.byCid = {};
+  function _pinReg(el, cid) {
+    if (!el || !cid) return;
+    el.dataset.vcCid = cid;
+    var a = (_pins.byCid[cid] = (_pins.byCid[cid] || []).filter(function (x) { return x.isConnected; }));
+    if (a.indexOf(el) < 0) a.push(el);
+    if (_pins.cids[cid] && _pins.map[_pins.cids[cid]]) el.classList.add('vc-picked');   // 已选中 → 新实例出生即高亮
+  }
+  function _pinPaint(cid, on) {
+    (_pins.byCid[cid] || []).filter(function (x) { return x.isConnected; }).forEach(function (x) {
+      x.classList.toggle('vc-picked', !!on);
+      x.classList.add('vc-pin-pop'); setTimeout(function () { x.classList.remove('vc-pin-pop'); }, 420);
+    });
+  }
   function _pinToggle(el, label, textFn) {
     var on = !el.classList.contains('vc-picked');
     var cid = (el.dataset && el.dataset.vcCid) || '';
     if (on) {
-      if (cid && _pins.cids[cid] && _pins.map[_pins.cids[cid]]) {   // 95(用户设计):同编号的卡已在上下文——同一张卡的另一实例,不重复注入
-        try { if (typeof _toast === 'function') _toast('这张卡已在上下文中'); } catch (e) {}
-        try { var el0 = _pins.els[_pins.cids[cid]]; if (el0) { el0.classList.add('vc-pin-pop'); setTimeout(function () { el0.classList.remove('vc-pin-pop'); }, 420); } } catch (e) {}
+      if (cid && _pins.cids[cid] && _pins.map[_pins.cids[cid]]) {   // 95:同编号的卡已在上下文=同一张卡的另一实例,不重复注入——只把这个实例也点亮
+        el.dataset.pinLabel = _pins.cids[cid];
+        _pinPaint(cid, true);
         return;
       }
       var lb = label, i = 2;
@@ -815,6 +874,7 @@
     }
     el.classList.toggle('vc-picked', on);
     el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
+    if (cid) _pinPaint(cid, on);   // 同号卡:处处高亮 / 处处取消(用户强调)
     _pinSync(); _chipRender();
   }
   function _pinBind(el, label, textFn) {   // 72:长按 600ms=选中带入 2.1 上下文(紫边框+pop 特效),再长按=移出;选中的浮层卡不自动消失
@@ -1482,6 +1542,19 @@
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
   window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
+  // 工具指示器 v2:把**这张卡**(.vc-card)整套能力暴露出去,rc-toolchip 只当状态机、不另造 DOM——
+  //   用户拍板:「我很喜欢这个方块的样式,在这个基础上进行修改就好」。
+  RC.voiceCard = {
+    push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
+    close: function (c) { try { _cardClose(c); } catch (e) {} },
+    form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
+    layout: function () { try { _cardLayout(); } catch (e) {} },
+    mkCid: _mkCid,
+    pinReg: function (el, cid) { try { _pinReg(el, cid); } catch (e) {} },       // 登记实例 → 选中按 cid 处处同步
+    pinBind: function (el, label, fn) { try { _pinBind(el, label, fn); } catch (e) {} },   // 长按=选中/取消(紫边)
+    dragToDock: function (el, fn) { try { _dragToDock(el, fn); } catch (e) {} },  // 侧栏卡长按拖出=生成副本/收藏
+    sideOpen: _sideOpen
+  };
   function _placeFx(x, y) {   // 92:放置特效——小卡从放手点飞向浮层堆叠位置缩小淡出("看不见但确实放过去了")
     try {
       var f = document.createElement('div');
@@ -1780,19 +1853,37 @@
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
     _cardLayout();
   }
-  function _cardPush(text, kindLabel, isHtml, force, cid) {
-    if (!text || (!isHtml && !text.trim()) || (_sideOpen() && !force)) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
+  function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
+    opts = opts || {};
+    // opts(工具指示器 v2):{tool,type,dot:true 起手圆态,noAuto:自动收起成圆标记而不是关掉}
+    if (!opts.dot && (!text || (!isHtml && !text.trim()))) return null;
+    if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
-    if (force) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
-    var el = document.createElement('div'); el.className = 'vc-card';
-    el.dataset.vcCid = cid || _mkCid();   // 95:浮层卡编号(renderInfo 镜像=侧栏卡同号;普通文字卡自发)
+    if (force || opts.dot) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
+    var el = document.createElement('div'); el.className = 'vc-card' + (opts.dot ? ' vc-dot vc-hasdot' : '');
+    var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
+    el.dataset.vcCid = _cid;
+    if (opts.type) el.style.setProperty('--vc-tc', opts.type);
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
       '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
+    if (opts.dot) {   // 圆形标记(坐落在方块左上角)= 形态控制按钮:单击 圆 → 长条 → 方块 → 圆
+      var dot = document.createElement('button');
+      dot.type = 'button'; dot.className = 'vc-card-dot busy';
+      dot.innerHTML = opts.icon || '';
+      dot.title = '点击切换形态(圆 / 长条 / 方块)';
+      dot.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }   // 刚拖过 → 这次 click 不算形态切换
+        el.dataset.touched = '1';   // 手动动过 → 出结果不再自动展开/自动收起(尊重用户摆放)
+        _cardForm(el, _cardForm(el) === 'dot' ? 'min' : (_cardForm(el) === 'min' ? 'full' : 'dot'));
+      });
+      el.appendChild(dot);
+    }
     (function () {   // 83:浮层卡 TTS 念(再点=停)
       var pb = el.querySelector('.vc-card-p'), stopFn = null;
       pb.addEventListener('click', function (ev) {
@@ -1838,6 +1929,10 @@
     // 69/72:按住头部拖动——物理感:阈值内粘住不动;拽过阈值"弹起"(微放大+深阴影)跟手;松手落定回弹。
     // 旧版粘滞/闪烁根因:堆叠布局的 transform 0.38s 过渡在拖动中每帧追赶——拖动期必须 transition:none
     var hd = el.querySelector('.vc-card-hd');
+    _bindCardDrag(hd);
+    if (opts.dot) _bindCardDrag(el.querySelector('.vc-card-dot'));   // 圆态:头部隐藏,标记自己当把手
+    function _bindCardDrag(hd) {
+    if (!hd) return;
     hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
     hd.addEventListener('pointerdown', function (ev) {
       if (ev.target.closest('.vc-card-x')) return;
@@ -1854,6 +1949,7 @@
         }
         if (moved) {
           c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)';
+          el.dataset.dragged = '1'; el.dataset.touched = '1';   // 动过 → 出结果不自动展开;松手后的 click 不算形态切换
           _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近右下=收藏区光晕提示
         }
       }
@@ -1869,6 +1965,7 @@
       }
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
+    }
     w.appendChild(el);
     _cards.list.push(c);
     while (_cards.list.length > 4) {   // 70:被双击选中(带入上下文)的卡不被数量裁剪挤掉
@@ -1878,8 +1975,29 @@
       _cardClose(victim);
     }
     requestAnimationFrame(_cardLayout);
-    if (_cardHideOn()) c.t = setTimeout(function () { if (!el.classList.contains('vc-picked')) _cardClose(c); }, _cardSecs() * 1000);
+    if (_cardHideOn()) {
+      c.t = setTimeout(function () {
+        if (el.classList.contains('vc-picked')) return;
+        if (opts.noAuto) { if (el.dataset.touched !== '1') _cardForm(el, 'dot'); }   // 工具卡:收起成圆标记(不销毁,单击可再展开)
+        else _cardClose(c);
+      }, _cardSecs() * 1000);
+    }
+    c.cid = _cid;
+    _pinReg(el, _cid);   // 登记进 cid 注册表:选中态处处同步
     return c;
+  }
+  // 形态读写:'dot'(圆) / 'min'(长条) / 'full'(方块)。侧栏内联卡只有 min/full 两态(用户要求:不要圆)。
+  function _cardForm(el, f) {
+    if (f === undefined) return el.classList.contains('vc-dot') ? 'dot' : (el.classList.contains('vc-min') ? 'min' : 'full');
+    if (f === 'dot' && el.classList.contains('vc-inflow')) f = 'min';
+    el.classList.toggle('vc-dot', f === 'dot');
+    el.classList.toggle('vc-min', f === 'min');
+    if (f === 'min') {   // 长条:没摘要就从正文摘一行
+      var sm = el.querySelector('.vc-card-sum');
+      if (sm && !sm.textContent) sm.textContent = ((el.querySelector('.vc-card-bd') || {}).textContent || '').replace(/\s+/g, ' ').trim().slice(0, 42);
+    }
+    try { _cardLayout(); } catch (e) {}
+    return f;
   }
 
   // ── 61 TTS 通用开关:文字输出流式切句代念(不等全文,尽快开口)。57 韧性(通道保证)+麦守护单例 ──
