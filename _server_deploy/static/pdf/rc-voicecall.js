@@ -617,9 +617,18 @@
   //    把播放经本地 RTCPeerConnection 环回成"远端流"再用 <audio> 播 → AEC 当远端参与者音频自动消;
   //    顺带走"通话音频"路径,iOS 麦克风活跃时的系统 ducking(音量忽大忽小,WebKit #218012)通常也更平稳。──
   var _aec = { dest: null, el: null, pc1: null, pc2: null, ready: false, ctx: null };
-  async function _aecSetup(acx) {
-    if (_aec.ready && _aec.ctx === acx) return;
-    _aecTeardown();
+  // 130(用户实测:文字模式 + TTS 代读时,①我开口它不停 ②它念的时候模型听不见我)——
+  //   根因:AEC 环回**只在 WS 引擎路径建**,WebRTC(GPT)路径没建 → TTS 代念走裸 WebAudio,
+  //   不在回声消除的参考信号里 → 只能靠 _ttsMicGuard **禁麦**防模型听见自己 →
+  //   麦一禁,VAD 收不到 speech_started:你打断不了它,它也听不见你。死结。
+  //   解法:**给 TTS 的 AudioContext 也建一条环回** → 代念的声音进 AEC 参考被消掉 → 不必再禁麦。
+  var _taec = { dest: null, el: null, pc1: null, pc2: null, ready: false, ctx: null };
+  async function _aecSetup(acx) { return _aecMake(_aec, acx); }
+  async function _ttsAecSetup(acx) { return _aecMake(_taec, acx); }
+  async function _aecMake(slot, acx) {
+    if (!acx) return;
+    if (slot.ready && slot.ctx === acx) return;
+    _aecKill(slot);
     try {
       var dest = acx.createMediaStreamDestination();
       var pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
@@ -630,7 +639,7 @@
         el.autoplay = true; el.setAttribute('playsinline', ''); el.style.display = 'none';
         el.srcObject = e.streams[0];
         document.body.appendChild(el);
-        _aec.el = el;
+        slot.el = el;
         try { el.play(); } catch (_) {}
       };
       dest.stream.getTracks().forEach(function (t) { pc1.addTrack(t, dest.stream); });
@@ -640,15 +649,16 @@
       var ans = await pc2.createAnswer();
       await pc2.setLocalDescription(ans);
       await pc1.setRemoteDescription(ans);
-      _aec.dest = dest; _aec.pc1 = pc1; _aec.pc2 = pc2; _aec.ctx = acx; _aec.ready = true;
-    } catch (e) { _aecTeardown(); }   // 失败回落直连(现状),不阻塞通话
+      slot.dest = dest; slot.pc1 = pc1; slot.pc2 = pc2; slot.ctx = acx; slot.ready = true;
+    } catch (e) { _aecKill(slot); }   // 失败回落直连(现状),不阻塞通话
   }
-  function _aecTeardown() {
-    try { if (_aec.pc1) _aec.pc1.close(); } catch (e) {}
-    try { if (_aec.pc2) _aec.pc2.close(); } catch (e) {}
-    try { if (_aec.el) _aec.el.remove(); } catch (e) {}
-    _aec = { dest: null, el: null, pc1: null, pc2: null, ready: false, ctx: null };
+  function _aecKill(slot) {
+    try { if (slot.pc1) slot.pc1.close(); } catch (e) {}
+    try { if (slot.pc2) slot.pc2.close(); } catch (e) {}
+    try { if (slot.el) slot.el.remove(); } catch (e) {}
+    slot.dest = null; slot.el = null; slot.pc1 = null; slot.pc2 = null; slot.ready = false; slot.ctx = null;
   }
+  function _aecTeardown() { _aecKill(_aec); }
 
   // ── 播放(PCM24k)+ 打断 ──
   var _playStat = { t0: 0, queued: 0 };   // 本轮回答播放统计:打断时回报**真实已播毫秒**给 relay 做 truncate
@@ -1035,10 +1045,22 @@
     return d;
   }
   window.__vcInfoCardEl = function (card) { try { return (card && card.kind) ? _infoCardEl(card) : null; } catch (e) { return null; } };
+  // 「任务完成预制语音」(设备级开关,用户设计):工具/任务做完念一句固定提示音(如"搜索完成")。
+  //   ⚠ 与「工具完成后口头回报」互斥——那个开着时 AI 自己会拿结果说话,预制音再响就是**两个声音同时发**。
+  //     所以只要口头回报是开的,这里**自动禁用**(不管开关怎么设)。
+  function _cueOn() {
+    try { if (localStorage.getItem('rc-voice-toolreply') === '1') return false; } catch (e) {}   // 口头回报开 → 预制音让路
+    try { return localStorage.getItem('rc-voice-cue') !== '0'; } catch (e) { return true; }
+  }
+  function _cue(text) {
+    if (!_cueOn()) return;
+    if (!(_rtc.on && (_voiceMode() !== 'stt' || _ttsOn()))) return;
+    try { _speakSafe(text); } catch (e) {}
+  }
+  window.__vcCue = _cue;   // 供任务完成播报复用
   function renderInfo(card) {
     if (!card || !card.kind) return;
-    // 75(用户设计):静默入库配听觉确认——卡片弹出时念一声"搜索完成"(仅通话中且当前形态有语音输出)
-    if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
+    _cue('搜索完成');   // 75:静默入库配听觉确认(受「任务完成预制语音」开关 + 口头回报互斥门控)
     var label = card.title || '搜索结果';
     var th = document.getElementById('asst-thread');
     var _hosts = [];
@@ -1287,6 +1309,7 @@
     try {
       if (!_tts.ac) { try { _tts.ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); } catch (e) { _tts.ac = new (window.AudioContext || window.webkitAudioContext)(); } }   // 24k 定频:消逐 chunk 独立重采样的边界 click(官方 console 同款)
       if (_tts.ac.state !== 'running') _tts.ac.resume();
+      if (_rtc.on || ws) { try { _ttsAecSetup(_tts.ac); } catch (e) {} }   // 130:通话中才需要(fire-and-forget;失败=回退禁麦)
     } catch (e) {}
     if (_tts.ws && _tts.ws.readyState <= 1) return;
     try {
@@ -1311,7 +1334,8 @@
     for (var i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
     var ab = a.createBuffer(1, f32.length, 24000);
     ab.copyToChannel(f32, 0);
-    var src = a.createBufferSource(); src.buffer = ab; src.connect(a.destination);
+    var src = a.createBufferSource(); src.buffer = ab;
+    src.connect((_taec.ready && _taec.ctx === a) ? _taec.dest : a.destination);   // 130:环回在 → 代念进 AEC 参考(不必禁麦)
     if (_tts.tap) { try { src.connect(_tts.tap); } catch (e) {} }   // 66:录制抽头(历史灰钮=念+存)
     var t = Math.max(a.currentTime + 0.02, _tts.playT);
     src.start(t); _tts.playT = t + ab.duration; _tts.playing.push(src);
@@ -2176,6 +2200,8 @@
   var _turnFeed = null;   // 当前回复轮的代念 feeder(response.created 新建)
   var _tg = null;         // 麦守护单例:代念播放期禁麦(本地 WebAudio 不在 WebRTC AEC 参考里,不禁=模型听见自己)
   function _ttsMicGuard() {
+    // 130:环回在 → 代念已进 AEC 参考、会被消掉 → **不禁麦**(禁了就打断不了,模型也听不见你)
+    if (_taec.ready) return;
     var mt0 = _rtc.mic && _rtc.mic.getAudioTracks && _rtc.mic.getAudioTracks()[0];
     if (!mt0) return;
     if (_tg) { _tg.last = Date.now(); return; }   // 已在守护:刷新活动时间(流式多段 speak 不重启)
@@ -2955,7 +2981,7 @@
     try { _refreshSpeakTg(); } catch (e) {}
     _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由;若视频等还在响导致这次没生效,下次 _ttsEnsure 会再声明)
     try { _ttsShutdown(); } catch (e) {}   // 朗读通道 ws+ac 一并关(通话期建的 ac 路由粘扬声器;残留 ws 会悬空收帧)→ 下次朗读重建拿干净会话
-    _aecTeardown();   // AEC 环回随通话走(pc/audio 元素清干净)
+    _aecTeardown(); _aecKill(_taec);   // AEC 环回随通话走(pc/audio 元素清干净)
   }
 
   // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);

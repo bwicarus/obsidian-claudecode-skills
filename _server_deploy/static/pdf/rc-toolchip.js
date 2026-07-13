@@ -39,6 +39,9 @@
     news: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2.2" y="3.4" width="11.6" height="9.2" rx="1.6"/><path d="M4.6 6.2h4M4.6 8.4h6.8M4.6 10.4h6.8"/></svg>',
     action: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h9M8.6 4.2L12.4 8l-3.8 3.8"/></svg>'
   };
+  // 用户口径:「不会留下**实际内容**的工具」= 只改状态 / 只是取数喂给 AI(读页面、翻页、看图、
+  //   查目录、搜书内、取笔记…)→ 归 action:进行中显示,**完成立刻消失**(不留方块、不计时)。
+  //   真正留内容给用户看的才留卡:制卡 / 配图 / 视频 / 天气 / 新闻 / 文字结果(翻译·查词·总结·深度思考·路由长答)。
   function typeOf(tool) {
     var t = String(tool || '');
     if (/^(make_anki|add_vocab)/.test(t)) return 'anki';
@@ -46,7 +49,8 @@
     if (/^search_video/.test(t)) return 'video';
     if (/weather/.test(t)) return 'weather';
     if (/news/.test(t)) return 'news';
-    if (/^(goto|turn|highlight|epub_highlight|auto_highlight|mark|open_book|undo_last|wait_for_user)/.test(t)) return 'action';
+    if (/^(translate|lookup_word|summarize|deep_think|route_to_text|make_note|notes_create|notes_edit|web_search)/.test(t)) return 'text';
+    if (/^(goto|turn|highlight|epub_highlight|auto_highlight|mark|open_book|undo_last|wait_for_user|read_|see_|toc|list_sections|find_highlights|search_book|search_all_books|notes_query|notes_read|page_vocab|section_vocab|recall)/.test(t)) return 'action';
     return 'text';
   }
   function isAction(t) { return t === 'action'; }
@@ -346,20 +350,14 @@
     if (chip.absorbed) { repaintFlows(chip); return; }   // 已被结果卡吸收:没有自己的视图,只刷流程图
     chip.views.forEach(function (v) {
       paintBody(chip, v);
-      if (isAction(chip.type) && !v.inflow) {   // 执行类(不产出内容):**完成即消失**——报一下就走人
-        vc && vc.form(v.el, 'min');              // (只有出错才留在页面上,见 fail();侧栏那条记录保留)
-        setTimeout(function () { if (chip.card) vc && vc.close(chip.card); }, 1500);
+      if (isAction(chip.type) && !v.inflow) {   // 执行类:**立刻消失**(不留小方块、不计时)——用户要求
+        if (chip.card) vc && vc.close(chip.card);
         return;
       }
-      if (v.el.dataset.touched === '1') return;      // 动过 → 不自动展开
-      if (isAction(chip.type)) { vc && vc.form(v.el, 'min'); return; }   // 执行类:侧栏里默认收着(一行长条)
-      vc && vc.form(v.el, 'full');
-      if (!v.inflow) {                            // 浮层:20s 后自动收起成圆标记
-        clearTimeout(v._t);
-        v._t = setTimeout(function () {
-          if (v.el.dataset.touched !== '1' && !v.el.classList.contains('vc-picked')) vc && vc.form(v.el, 'dot');
-        }, AUTO_COLLAPSE);
-      }
+      // 其余:出结果**不自动展开**(用户要求)——停在长条,想看点头部/标记再展开。
+      //   形态节奏:创建=标记 → 有进展=长条 → 出结果仍是长条(只是内容/颜色变了)。
+      if (v.el.dataset.touched === '1') return;
+      vc && vc.form(v.el, 'min');
     });
   }
   function fail(chip, msg) {

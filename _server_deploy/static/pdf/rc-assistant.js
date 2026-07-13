@@ -402,6 +402,9 @@
         '</select></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
         '<input type="checkbox" id="vcv-card-tg">文字卡自动消失(路由/文字模式的回复在侧栏关闭时弹磨砂卡片;开=到时自动收起,关=常驻到手动关;本设备)</label>' +
+        '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
+        '<input type="checkbox" id="vcv-cue-tg">任务完成预制语音(搜索/制卡等做完念一句固定提示音;本设备)' +
+        '<span style="color:#7a8497">— 开了「工具完成后口头回报」时**自动禁用**,免得跟 AI 的真实回答同时出声</span></label>' +
         '<div class="ams-row" id="vcv-card-row" style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding-left:22px">' +
         '<span style="font-size:12px;color:#8a9bb4;flex:none">停留 <b id="vcv-card-v">20</b> 秒</span>' +
         '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#7b6cff"></div>' +
@@ -436,6 +439,32 @@
         _capTg.addEventListener('change', function () {
           try { localStorage.setItem('rc-voice-sub', _capTg.checked ? '1' : '0'); } catch (e) {}
           if (typeof _toast === 'function') _toast(_capTg.checked ? '朗读字幕已开' : '朗读字幕已关');
+        });
+      }
+      var _cueTg = card.querySelector('#vcv-cue-tg');   // 任务完成预制语音(设备级;与「工具口头回报」互斥)
+      if (_cueTg) {
+        var _syncCue = function () {
+          var muted = false;
+          try { muted = localStorage.getItem('rc-voice-toolreply') === '1'; } catch (e) {}
+          _cueTg.disabled = muted;
+          _cueTg.parentNode.style.opacity = muted ? '.4' : '1';
+          _cueTg.parentNode.title = muted ? '「工具完成后口头回报」开着 → 预制语音已自动禁用(避免两个声音同时发)' : '';
+        };
+        try {   // 服务端的 rt_tool_reply 是真相源 → 开面板时镜像到本地(互斥判定和 _rtcTool._silent 都读它)
+          var _tr0 = card.querySelector('[data-k="rt_tool_reply"]');
+          if (_tr0) localStorage.setItem('rc-voice-toolreply', _tr0.checked ? '1' : '0');
+        } catch (e) {}
+        try { _cueTg.checked = localStorage.getItem('rc-voice-cue') !== '0'; } catch (e) {}
+        _syncCue();
+        _cueTg.addEventListener('change', function () {
+          try { localStorage.setItem('rc-voice-cue', _cueTg.checked ? '1' : '0'); } catch (e) {}
+          if (typeof _toast === 'function') _toast(_cueTg.checked ? '任务完成预制语音已开' : '任务完成预制语音已关');
+        });
+        card.addEventListener('change', function (ev) {   // 口头回报开关一变 → 预制音开关跟着灰/亮
+          if (ev.target && ev.target.getAttribute && ev.target.getAttribute('data-k') === 'rt_tool_reply') {
+            try { localStorage.setItem('rc-voice-toolreply', ev.target.checked ? '1' : '0'); } catch (e) {}
+            _syncCue();
+          }
         });
       }
       var _cdTg = card.querySelector('#vcv-card-tg'), _cdSec = card.querySelector('#vcv-card-sec'), _cdV = card.querySelector('#vcv-card-v');
