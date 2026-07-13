@@ -505,15 +505,28 @@
   // ── 工具指示器 v2(rc-toolchip):每次工具调用一个 chip(圆/长条/方块),状态由此驱动 ──
   //    key = 工具名+轮次(同轮同工具复用同一个 chip);后台任务(制卡等)拿 task_id 继续轮询步骤+结果。
   var _chipOf = {};
-  function _chipKey(p) { return (p.tool || p.label || 'tool') + '#' + (p.call_id || p.id || _rtc.toolN || 0); }
+  // 136(用户实测"读页面这类工具不消失、还变成小方块"的根因之一):
+  //   relay 的 running 事件曾**只带 label 不带 tool**,而 done 带 tool 且 label 可能多出"(已过期)"后缀
+  //   → key 对不上:done 没找到那张 running 的卡,又新建一张收尾,**原来那张永远卡在"进行中"**,
+  //     20s 后被自动收成小方块。所以 key 只能用**稳定标识**(call_id / 工具名),绝不能用会变的 label。
+  function _chipKey(p) { return (p.call_id || p.id || '') + '|' + (p.tool || p.label || 'tool'); }
+  var _chipSeq = [];   // 按开工顺序排(工具是串行的)——key 万一没配上,收尾时认领最近那个未收尾的
   function _chipStart(p) {
     if (!(window.RC && RC.toolChip)) return null;
     var k = _chipKey(p);
     if (_chipOf[k]) return _chipOf[k];
     var c = RC.toolChip.create({ tool: p.tool || '', label: p.label || p.tool || '工具' });
     RC.toolChip.progress(c, (p.label || '处理') + '…');
-    _chipOf[k] = c;
+    _chipOf[k] = c; c._k = k; _chipSeq.push(c);
     return c;
+  }
+  window.__vcChipSeqClear = function () { _chipSeq = []; _chipOf = {}; };   // 清空对话 → 待收尾队列一起清
+  function _chipTake(p) {   // 收尾时取那张卡:先按 key,不中就认领最近一张未收尾的(兼容 running 不带工具名的老 relay)
+    var k = _chipKey(p), c = _chipOf[k];
+    if (c) { delete _chipOf[k]; _chipSeq = _chipSeq.filter(function (x) { return x !== c; }); return c; }
+    c = _chipSeq.pop();
+    if (c) { delete _chipOf[c._k]; return c; }
+    return null;
   }
   function _chipMeta(p) {   // 调用详情(=原「!」面板内容:指令/上下文/参数/喂回结果)
     var rows = [];
@@ -532,12 +545,9 @@
   }
   function _chipEnd(p) {
     if (!(window.RC && RC.toolChip)) return;
-    var k = _chipKey(p), c = _chipOf[k];
-    if (!c) {   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
-      c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });
-      _chipOf[k] = c;
-    }
-    delete _chipOf[k];
+    var c = _chipTake(p);
+    if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
+    if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
     RC.toolChip.setMeta(c, _chipMeta(p));
     if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
     // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status

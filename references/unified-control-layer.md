@@ -205,6 +205,25 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
 | 长条 | `.vc-min` | 折叠 / 进行中 | **一行**(标题 + 状态 + ▶ + ✕),与标记**同高 40px** → 标记→长条 = 上下边不动、纯向右拉长 |
 | 方块 | (无) | 展开 / 结果 | 长条→方块 = 纯向下伸长;正文 = **数据流图**(见下) |
 
+### ⚠ 「执行类工具不消失、还变成小方块」的真因(136,用户反复反馈才挖出来)
+
+不是 `done()` 的逻辑写错了 —— 是**工具卡从头到尾就没被认成执行类**,而且**一次调用长出了两张卡**:
+
+relay 发的 `tool_status`:
+- `running` 事件 **只带中文 label、不带 `tool`**(`{"status":"running","label":"读取页面"}`)
+- `done` 事件才带 `tool`,而且 label 还可能多出「(已过期)」后缀
+
+后果两条:
+1. chip 建出来时 `typeOf('')` → 判成 **text**(不是 action)→ 当然不会"完成即消失";
+2. chip 的 key 是 `tool || label` → running 用 label 建、done 用 tool 找 → **对不上** → done 又新建一张卡收尾,
+   **原来那张永远卡在「进行中」**,20s 后被自动收成小方块 —— 这就是用户反复看到的"变成小方块"。
+
+修(三层,任一层单独都不够):
+- **relay**:所有 `running` / `error` 的 `tool_status` 都补上 `"tool": <name>`。
+- **key 稳定化**:`_chipKey = (call_id||'') + '|' + (tool||label)` —— **绝不能用会变的 label 当 key**。
+- **两道兜底**:① key 没命中 → 认领 `_chipSeq` 里最近那张未收尾的(工具是串行的);
+  ② `done` 拿到真实工具名 → `RC.toolChip.retype(chip, tool)` **重判类型**(颜色/图标/是否执行类一起改)。
+
 ### 形态循环的三条铁律(133,用户实测踩坑)
 
 1. **单向**:顺序恒为 `小方块 → 长条 → 方块 → 小方块`(`_cycleForm()` 是唯一入口)。

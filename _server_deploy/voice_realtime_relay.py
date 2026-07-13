@@ -552,7 +552,7 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
         book.setdefault("tasks", {})["deep_think"] = 1
         if push_sp:
             await push_sp()
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tool_label}}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": "deep_think", "label": tool_label}}, ensure_ascii=False))
         body = {"message": f"{preamble}\n{question}",
                 "rid": f"dt{uuid.uuid4().hex[:10]}", "voice": "s2s",   # 口语化 prompt 要,[语气:XX] 标签指令不要(bidi 代播不吃标签)
                 "context": ({"file_rel": file_rel, "page": page} if file_rel else {})}
@@ -628,7 +628,7 @@ async def _run_deep_think(bws, dws, sid, question: str, file_rel: str, page: int
     except Exception as ex:
         sys.stderr.write(f"[voice-rt deep] {ex}\n")
         try:
-            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "error", "label": f"{tool_label}:{str(ex)[:50]}"}}, ensure_ascii=False))
+            await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "error", "tool": "deep_think", "label": f"{tool_label}:{str(ex)[:50]}"}}, ensure_ascii=False))
         except Exception:
             pass
     finally:
@@ -792,7 +792,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             await push_sp()
         ack = await _say_ack(bws, dws, sid, tname, book)   # 代播确认语(模型自己整轮只有 JSON,已被静音);缓存命中=relay 直接回放 PCM
         await bws.send(json.dumps({"event": 550, "payload": {"content": ack}}, ensure_ascii=False))   # 字幕同步补上确认语
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": tname}}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": tname, "label": tname}}, ensure_ascii=False))
         ctx = {"file_rel": file_rel, "page": page} if file_rel else {}
         if book.get("ink_strokes"):
             ctx["ink"] = book["ink_strokes"]   # 实时墨迹随工具走(see_ink/see_page 合成图用它,与侧栏行为一致)
@@ -1532,7 +1532,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     _SLOW_TOOLS = {"deep_think", "web_search", "search_image", "search_video", "see_page", "see_figure", "see_ink", "summarize_section", "recall_study"}
 
     async def _tool(name: str, args: dict, call_id: str):
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": name}}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": name, "label": name}}, ensure_ascii=False))
         if engine == "grok" and name in _SLOW_TOOLS and _vg.get("tools_n", 0) <= 1:
             try:   # 120:force_message 垫话(xAI 扩展:硬编码 TTS 即时出声,自带完整响应生命周期,不跟 response.create)
                 await ows.send(json.dumps({"type": "conversation.item.create", "item": {
@@ -2515,7 +2515,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
-        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "label": _lbl0}}, ensure_ascii=False))
+        await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": name, "label": _lbl0}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
         vis, readonly, no_create = None, True, False
         try:

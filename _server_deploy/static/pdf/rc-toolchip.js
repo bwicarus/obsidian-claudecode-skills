@@ -415,7 +415,7 @@
     chip.views.forEach(function (v) { if (v.inflow) { try { v.el.remove(); } catch (e) {} } });
     chips = chips.filter(function (c) { return c !== chip; });
   }
-  function clearAll() { chips.slice().forEach(remove); }
+  function clearAll() { chips.slice().forEach(remove); try { window.__vcChipSeqClear && window.__vcChipSeqClear(); } catch (e) {} }
 
   // ── 后台任务(制卡/笔记/生词):轮询步骤 → 长条滚动;完成 → 方块(完整卡片预览)──
   function track(chip, tid) {
@@ -481,8 +481,24 @@
   }
   function repaintFlows(chip) { (chip._flows || []).forEach(function (v) { if (!v.el.hidden) paintFlow(chip, v); }); }
 
+  // 136:running 事件可能没带工具名(chip 建成 text 型)→ done 拿到真名后**重判类型**,
+  //   否则「读页面/翻页」这类执行类永远不会"完成即消失"(用户反复反馈)。
+  function retype(chip, tool) {
+    if (!chip || !tool || chip.tool === tool) return;
+    chip.tool = tool;
+    var t = typeOf(tool);
+    if (t === chip.type) return;
+    chip.type = t;
+    chip.views.forEach(function (v) {
+      v.el.style.setProperty('--vc-tc', TYPE_C[t] || TYPE_C.text);
+      v.el.classList.toggle('vc-act', isAction(t));
+      var d = v.el.querySelector('.vc-card-dot');
+      if (d) d.innerHTML = iconOf(tool, t);
+    });
+  }
+
   RC.toolChip = {
-    absorb: absorb,
+    absorb: absorb, retype: retype,
     styleOf: function (t) { return { color: TYPE_C[t] || TYPE_C.text, icon: SVG[t] || SVG.text }; },   // 结果卡复用同一套色/图标
     create: create, progress: progress, done: done, fail: fail, remove: remove, clearAll: clearAll, track: track,
     typeOf: typeOf, isAction: isAction, setForm: form,
