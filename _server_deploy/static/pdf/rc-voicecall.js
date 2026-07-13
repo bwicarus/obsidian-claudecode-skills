@@ -265,6 +265,20 @@
       '#vc-dock-hint{position:fixed;left:0;right:0;bottom:0;height:150px;pointer-events:none;z-index:2147481410;opacity:0;transition:opacity .25s;' +
       'background:linear-gradient(to top,rgba(123,108,255,.38),rgba(123,108,255,.1) 55%,transparent)}' +
       '#vc-dock-hint.on{opacity:1}' +
+      // 134(用户设计):往下拖=收藏 → 往上拖=**删除**。左上角一个窄的红色投放区,**只在拖动时出现**,平时不挡任何东西。
+      '#vc-trash{position:fixed;left:0;top:0;width:126px;height:92px;z-index:2147481600;pointer-events:none;' +
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;' +
+        'border-radius:0 0 24px 0;color:#fff;font-size:12px;font-weight:600;letter-spacing:.02em;' +
+        'background:linear-gradient(135deg,rgba(255,69,58,.92),rgba(255,69,58,.45));' +
+        '-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);' +
+        'box-shadow:0 10px 34px -10px rgba(255,69,58,.6);' +
+        'opacity:0;transform:translate(-14px,-14px) scale(.9);' +
+        'transition:opacity .22s ease,transform .28s cubic-bezier(.34,1.4,.64,1),box-shadow .2s}' +
+      '#vc-trash.on{opacity:.97;transform:translate(0,0) scale(1)}' +
+      '#vc-trash.hot{background:linear-gradient(135deg,#ff453a,rgba(255,69,58,.8));' +
+        'box-shadow:0 14px 44px -8px rgba(255,69,58,.85),0 0 0 2px rgba(255,255,255,.35) inset;transform:scale(1.06)}' +
+      '#vc-trash svg{width:22px;height:22px;transition:transform .2s}' +
+      '#vc-trash.hot svg{transform:scale(1.16) rotate(-8deg)}' +
       '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;' +
       'background:rgba(24,24,30,.82);-webkit-backdrop-filter:blur(26px) saturate(1.5);backdrop-filter:blur(26px) saturate(1.5);' +
       'border-top:0.5px solid rgba(255,255,255,.14);box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
@@ -1304,7 +1318,7 @@
     if (_cap.st) _cap.st.style.display = 'none';
     if (ws) capWait(true);   // 打断(通话中)≠挂断:麦还开着,等待指示立即回位
   }
-  function _capSeg(text) { if (text) { _cap.pend.push(text); _cap.bind = true; } }   // 收到 tts_seg 帧:下一个音频块=该句开头
+  function _capSeg(text) { if (text) { _cap.pend.push(text); _cap.bind = true; _cap.sawSeg = 1; } }   // 收到 tts_seg 帧:下一个音频块=该句开头(sawSeg:精确路活着)
   function _capBindChunk(startAt, acx) {   // 音频块调度好了:若它是句首块,到点亮字幕
     if (!_cap.bind || !_cap.pend.length) return;
     _cap.bind = false;
@@ -1734,13 +1748,26 @@
           document.body.appendChild(ghost);
           el.style.opacity = '.35';
         }
-        if (moved) { _pos(e2.clientX, e2.clientY); _dockHint(_inDockZone(e2.clientX, e2.clientY)); }
+        if (moved) {
+          _pos(e2.clientX, e2.clientY);
+          _dockHint(_inDockZone(e2.clientX, e2.clientY));
+          _trashShow(true); _trashHot(_inTrashZone(e2.clientX, e2.clientY));   // 134:侧栏卡也能往左上角拖删
+        }
       }
       function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
         if (ghost) { ghost.remove(); ghost = null; }
         el.style.opacity = '';
-        _dockHint(false);
+        _dockHint(false); _trashShow(false);
+        if (moved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:侧栏卡拖到左上角=从对话流移除
+          try {
+            el.style.transition = 'transform .24s ease,opacity .24s ease,max-height .24s ease';
+            el.style.transformOrigin = '0 0'; el.style.transform = 'scale(.6)'; el.style.opacity = '0'; el.style.maxHeight = '0';
+          } catch (e) {}
+          setTimeout(function () { try { el.remove(); } catch (e) {} }, 240);
+          try { if (typeof _toast === 'function') _toast('已删除'); } catch (e) {}
+          return;
+        }
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) {
           var rec = payloadFn();
           rec.meta = rec.meta || _favMeta();
@@ -1820,6 +1847,23 @@
     h.classList.toggle('on', !!on);
   }
   function _inDockZone(x, y) { return (window.innerHeight - y) < 130; }   // 80:拖到屏幕最下端整条边=收入
+  // 134:往上拖到左上角=删除(手动消失的通道;跟自动收起/自动消失互补)
+  function _trashEl() {
+    var t = document.getElementById('vc-trash');
+    if (!t) {
+      injectCss();
+      t = document.createElement('div'); t.id = 'vc-trash';
+      t.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M2.6 4.2h10.8"/><path d="M6.2 4.2V2.9a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v1.3"/>' +
+        '<path d="M4 4.2l.6 8.2a1.2 1.2 0 0 0 1.2 1.1h4.4a1.2 1.2 0 0 0 1.2-1.1l.6-8.2"/>' +
+        '<path d="M6.6 6.8v4M9.4 6.8v4"/></svg><span>删除</span>';
+      document.body.appendChild(t);
+    }
+    return t;
+  }
+  function _trashShow(on) { var t = _trashEl(); t.classList.toggle('on', !!on); if (!on) t.classList.remove('hot'); }
+  function _trashHot(on) { _trashEl().classList.toggle('hot', !!on); }
+  function _inTrashZone(x, y) { return x < 126 && y < 92; }
   function _dockAdd(c) {   // 收入:持久化到服务端(78,清空对话不丢),浮层 DOM 撤
     try { clearTimeout(c.t); } catch (e) {}
     var rec = { label: c.label || '卡片', raw: c.raw || '', isHtml: !!c.isHtml,
@@ -2142,12 +2186,20 @@
         if (moved) {
           c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)';
           el.dataset.dragged = '1'; el.dataset.touched = '1';   // 动过 → 出结果不自动展开;松手后的 click 不算形态切换
-          _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近右下=收藏区光晕提示
+          _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近底部=收藏区光晕提示
+          _trashShow(true);                                 // 134:拖起来就亮出左上角删除区
+          _trashHot(_inTrashZone(e2.clientX, e2.clientY));
         }
       }
       function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
-        _dockHint(false);
+        _dockHint(false); _trashShow(false);
+        if (moved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:往上拖到左上角=删除(手动消失通道)
+          try { el.style.transition = 'transform .26s ease,opacity .26s ease'; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(.5)'; el.style.opacity = '0'; } catch (e) {}
+          setTimeout(function () { _cardClose(c); }, 200);
+          try { if (typeof _toast === 'function') _toast('已删除'); } catch (e) {}
+          return;
+        }
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
         if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
@@ -2514,9 +2566,20 @@
   var _rtcCap = { q: [], t: null, fed: 0, done: false };
   function _rtcCapReset() {
     _rtcCap.q = []; _rtcCap.fed = 0; _rtcCap.done = false;
+    _rtcCap.fb = 0; _cap.sawSeg = 0;   // 135:新一轮 —— 兜底放行 / 句边界帧标志都归零(否则串轮)
     if (_rtcCap.t) { clearTimeout(_rtcCap.t); _rtcCap.t = null; }
+    if (_rtcCap.wd) { clearTimeout(_rtcCap.wd); _rtcCap.wd = null; }
   }
+  // 135(用户):TTS 代念时,句子和音频的对应关系是**拿得到的**(relay 每句前发 tts_seg 帧,前端把它绑到
+  //   该音频块的真实播放调度时刻 playT)→ 字幕能跟声音一秒不差。所以这一轮字幕归**精确路**,
+  //   估算路(_rtcCapFeed:按字数×160ms 轮播)必须让开 —— 否则两条路同时跑,文字生成远快于说话,
+  //   估算路一路狂奔在前、精确路在后面追,字幕就永远对不上(用户实测)。
+  function _capTtsOwns() { try { return !!(_rtc.turnText && _ttsOn()); } catch (e) { return false; } }
   function _rtcCapFeed(full, isDone) {
+    if (_capTtsOwns() && !_rtcCap.fb) {   // TTS 代念这轮:让位给精确路(fb=兜底放行,见看门狗)
+      if (isDone) { _rtcCap.done = true; _capSegWatch(full); }
+      return;
+    }
     if (isDone) _rtcCap.done = true;
     var re = /[^。！？!?;；\n]+[。！？!?;；\n]*/g, parts = [], m;
     while ((m = re.exec(full))) { if (m[0].trim()) parts.push(m[0].trim()); }
@@ -2525,6 +2588,14 @@
     for (var i = _rtcCap.fed; i < upto; i++) _rtcCap.q.push(parts[i]);
     if (upto > _rtcCap.fed) _rtcCap.fed = upto;
     _rtcCapPump();
+  }
+  function _capSegWatch(full) {   // TTS 通道没给句边界帧 → 回退估算路(宁可不精确,也不能没字幕)
+    clearTimeout(_rtcCap.wd);
+    _rtcCap.wd = setTimeout(function () {
+      if (_cap.sawSeg) return;                 // 精确路已经在放了
+      _rtcCap.fb = 1;                          // 放行估算路(本轮)
+      try { _rtcCapFeed(full, true); } catch (e) {}
+    }, 3500);
   }
   function _rtcCapPump() {
     if (_rtcCap.t) return;
