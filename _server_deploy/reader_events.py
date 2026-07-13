@@ -22,9 +22,12 @@ _SUBS = set()            # set[queue.Queue]:每个订阅的 SSE 连接一个队�
 _LOCK = threading.Lock()
 
 
-def publish(kind: str, file: str, uid):
-    """向所有订阅者推一条变更事件。满队列(maxsize=128)的病态连接静默丢(15s 心跳会让死连接很快被回收)。"""
+def publish(kind: str, file: str, uid, extra: dict | None = None):
+    """向所有订阅者推一条变更事件。满队列(maxsize=128)的病态连接静默丢(15s 心跳会让死连接很快被回收)。
+    extra:附加字段直接并入事件(如 client-action 的 {"action":{fn,args}},MCP 遥控用)。"""
     ev = {"kind": kind, "file": file, "uid": (str(uid) if uid is not None else None), "t": int(time.time())}
+    if extra:
+        ev.update(extra)
     with _LOCK:
         subs = list(_SUBS)
     for q in subs:

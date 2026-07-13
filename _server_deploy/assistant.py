@@ -4527,6 +4527,15 @@ def assistant_tool_call():
         res = TOOLS[name][1](body.get("args") or {}, ctx) or {}
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    try:   # MCP 遥控(2026-07-13):外部 agent 没有浏览器在等 client_action——前端动作经阅读器
+        # SSE 总线广播,打开着且可见的阅读器页面真执行("让他翻页但页面没变"的根治;file 空=广播全部)
+        ca = res.get("client_action") if isinstance(res, dict) else None
+        if ca and ca.get("fn"):
+            import reader_events
+            reader_events.publish("client-action", ctx.get("file_rel") or "", ctx["_uid"],
+                                  extra={"action": ca})
+    except Exception:
+        pass
     return jsonify({"ok": "error" not in res, "tool": name, "result": res})
 
 

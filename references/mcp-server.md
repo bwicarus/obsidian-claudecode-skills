@@ -45,6 +45,8 @@
 | `assistant_log_chat(user,assistant,file,page)` | POST /api/assistant/log | 把外部对话写进历史(`via:'mcp'` + file_rel/page),侧栏可见、内置助手接手有上下文;写后 publish `assistant-history` SSE 事件 |
 
 写操作便捷封装:`make_anki_card(text,file,page)`、`add_highlight(file,page,texts,color)`(texts 须页面原文逐字,先 read_page 照抄)。
+
+**MCP 遥控前端(2026-07-13)**:外部 agent 调前端动作类工具(goto_page 等)时没有浏览器在等 `client_action`——之前"让它翻页但页面不动"。现在 `/api/assistant/tool` 桥执行后把 `client_action` 经**阅读器 SSE 总线**(`reader_events.publish("client-action", file, uid, extra={"action":{fn,args}})`)广播;PDF 阅读器(pdf-tail.js 的 reader-events 监听)收到后 `window[fn].apply(null,args)` 真执行(仅 visible 页面;file 空=广播全部,非空=只匹配的书)。EPUB 侧未接(页码语义不同,按需再做)。
 ⚠ `_convo_append` 的 meta 是**白名单字段**(page/book/file_rel/…/via)——加新 meta 字段要进白名单,字段名用 `file_rel` 不是 `file`。
 
 ## 注册 / 使用

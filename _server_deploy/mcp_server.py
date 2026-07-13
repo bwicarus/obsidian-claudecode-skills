@@ -52,7 +52,9 @@ mcp = FastMCP("bwicarus-study-app",
                            "① assistant_tools() 看内置工具目录(read_page/see_page/highlight/make_anki/notes…30+ 个);"
                            "② assistant_call_tool(name, args, file, page) 实际操作书本(与内置助手同一副身体);"
                            "③ 每轮对话结束用 assistant_log_chat 把你和用户的这轮对话写进助手会话历史——"
-                           "阅读器侧栏会显示这些记录,内置助手接手时也有完整上下文。")
+                           "阅读器侧栏会显示这些记录,内置助手接手时也有完整上下文。\n"
+                           "前端动作类工具(goto_page 翻页等)会实时同步到用户**打开着的**PDF 阅读器页面"
+                           "(经 SSE 总线);调用时 ctx 带上 file(书的 rel 路径)保证页码偏移正确。")
 
 
 def _get(path: str, **params) -> dict:

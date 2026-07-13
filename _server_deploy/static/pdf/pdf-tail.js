@@ -359,6 +359,10 @@ window._inkLoadAll = _inkLoadAll;
       es.addEventListener('change', function (e) {
         if (document.visibilityState !== 'visible') return;
         var ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+        if (ev && ev.kind === 'client-action' && ev.action && (!ev.file || ev.file === FILE_REL)) {   // MCP 遥控:外部 agent(Claude/ChatGPT app)的前端动作(jumpWithBack 翻页等)在本页面真执行
+          try { var _ra = ev.action; if (_ra && typeof window[_ra.fn] === 'function') window[_ra.fn].apply(null, _ra.args || []); } catch (_) {}
+          return;
+        }
         if (!ev || ev.kind !== 'ink' || ev.file !== FILE_REL) return;
         var num = parseInt(ev.uid, 10); if (!num) return;
         if (_ink.drawing && _ink.drawing.num === num) return;               // 正在画这页 → 不打断
