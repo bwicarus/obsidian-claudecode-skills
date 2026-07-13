@@ -195,8 +195,10 @@
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{padding-left:13px}' +
       // 结果卡标题栏上的「流程」按钮(天气/搜索等自带结果卡的工具:唯一显示的是结果卡,流程收在这个按钮里)
       '.vc-flowb{flex:none;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.12);border:none;color:#cbd6ea;' +
-        'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin-left:4px}' +
-      '.vc-flowb svg{width:12px;height:12px}' +
+        'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin-left:4px;line-height:0;' +
+        '-webkit-appearance:none;appearance:none;font-size:0}' +
+      '.vc-flowb svg{width:13px;height:13px;display:block;stroke:currentColor;fill:none}' +
+      '.vc-flowb:active{transform:scale(.86)}' +
       '.vc-flowb.on{background:#7b6cff;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
       // 唯一保留 ▶ 的地方(用户设计):纯文字结果那块内容的角落 —— 点它用 TTS 念
@@ -1020,6 +1022,7 @@
     });
   }
   function _infoCardEl(card) {   // 87:构一张侧栏信息卡(实时与历史回放共用——刷新后卡永远还是卡)
+    injectCss();   // 131:历史回放/侧栏先出卡时通话 UI 可能还没建过 → 样式没注入,标题栏按钮就成了裸 <button>(白块)
     if (!card.cid) card.cid = _mkCid();   // 95:历史旧卡(落库时还没 cid 字段)补发——本次会话内该实例稳定
     var label = card.title || '搜索结果';
     var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card);
@@ -1644,6 +1647,7 @@
   // 工具指示器 v2:把**这张卡**(.vc-card)整套能力暴露出去,rc-toolchip 只当状态机、不另造 DOM——
   //   用户拍板:「我很喜欢这个方块的样式,在这个基础上进行修改就好」。
   RC.voiceCard = {
+    css: function () { try { injectCss(); } catch (e) {} },   // 131:任何时候建卡/挂按钮前先确保样式在
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
     form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
@@ -2113,7 +2117,7 @@
     }
     if (opts.dot) {   // 工具卡:左上角锚定 + 交错重叠落点(不进右下堆叠,免得展开时往左上长、标记乱跑)
       c.free = true;
-      var sp = _tSpot(300, 40);
+      var sp = _tSpot(330, 40);   // 按**展开态**的宽度找位(326px),否则靠右落点展开时会溢出屏幕
       el.style.left = sp.x + 'px'; el.style.top = sp.y + 'px';
       _tlayer().appendChild(el);
     } else {

@@ -56,15 +56,29 @@
   function isAction(t) { return t === 'action'; }
   function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function VC() { return window.RC && RC.voiceCard; }
-  function hdSplit(el, label, act) {   // 头部:纯文本标题 → <标题><状态>两段(一行长条的状态显示在这)
+  function hdSplit(el, label, act) {   // 头部:纯文本标题 → <标题><状态> + 【数据流】按钮
     var hd = el.querySelector('.vc-card-hd');
     if (!hd || hd.querySelector('.vc-hd-l')) return;
+    try { VC() && VC().css && VC().css(); } catch (e) {}
     var l = document.createElement('span'); l.className = 'vc-hd-l'; l.textContent = label;
     var st = document.createElement('span'); st.className = 'vc-hd-s';
     if (hd.firstChild && hd.firstChild.nodeType === 3) hd.replaceChild(l, hd.firstChild);
     else hd.insertBefore(l, hd.firstChild);
     hd.insertBefore(st, l.nextSibling);
     if (act) el.classList.add('vc-act');
+    // 标题栏默认按钮 = 数据流(用户要求:侧栏 / 字幕模式的卡都有这一个)。点=展开/收起流程图。
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'vc-flowb'; b.title = '数据流(这个结果是怎么来的)';
+    b.innerHTML = ICON.flow;
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      el.dataset.touched = '1';
+      var vc = VC(); if (!vc) return;
+      var open = !el.classList.contains('vc-min') && !el.classList.contains('vc-dot');
+      vc.form(el, open ? 'min' : 'full');
+      b.classList.toggle('on', !open);
+    });
+    hd.appendChild(b);
   }
 
   var chips = [];
@@ -99,7 +113,8 @@
     step: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><circle cx="8" cy="8" r="2.1"/><path d="M8 2.7v1.5M8 11.8v1.5M2.7 8h1.5M11.8 8h1.5M4.3 4.3l1.05 1.05M10.65 10.65l1.05 1.05M11.7 4.3l-1.05 1.05M5.35 10.65L4.3 11.7" stroke-linecap="round"/></svg>',
     out:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 8.4l3 3 6.6-7"/></svg>',
     err:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.9l5.6 9.8H2.4z"/><path d="M8 6.4v2.6M8 11h.01"/></svg>',
-    flow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.6" r="1.6"/><circle cx="4" cy="12.4" r="1.6"/><circle cx="12" cy="8" r="1.6"/><path d="M5.5 4.4L10.6 7.2M5.5 11.6l5.1-2.8"/></svg>'
+    // 数据流:方块 →(箭头)→ 方块,一眼看懂"数据从哪流到哪"(小尺寸下也不会误读成发送箭头)
+    flow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="2" width="5.4" height="3.8" rx="1.1"/><rect x="8.8" y="10.2" width="5.4" height="3.8" rx="1.1"/><path d="M4.5 5.8v3.1a1.2 1.2 0 0 0 1.2 1.2h3.1"/><path d="M7.6 8.7l1.4 1.4-1.4 1.4"/></svg>'
   };
   function stages(chip) {
     var m = {};
@@ -419,6 +434,7 @@
     hosts.forEach(function (h) { chip.absorbed.push(h); mountFlow(h, chip); });
   }
   function mountFlow(host, chip) {
+    try { VC() && VC().css && VC().css(); } catch (e) {}   // 131:样式必须在,否则裸 <button> = 白块
     var hd = host.querySelector('.vc-if-hd') || host.querySelector('.vc-card-hd');
     if (!hd || hd.querySelector('.vc-flowb')) return;
     var b = document.createElement('button');
