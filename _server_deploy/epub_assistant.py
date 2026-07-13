@@ -1430,6 +1430,7 @@ def _eagent_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _elabel(name)}
+                yield A._tool2(name, _elabel(name), targs, "running")
                 t0 = time.time()
                 try:
                     res = _fn(targs, ctx) or {}
@@ -1443,6 +1444,7 @@ def _eagent_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 for ev in _emit_tool_side(res, name):
                     yield ev
                 yield {"event": "tool-done", "data": _elabel(name)}
+                yield A._tool2(name, _elabel(name), targs, "done", res, sec)
                 content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue
             if tool and tool.get("tool"):   # 解析出工具调用但工具名不存在 → 明确反馈(否则 break,模型幻觉"工具还在运行中")
@@ -1538,6 +1540,7 @@ def _eagent_gemini(message, ctx, history, variant, depth, uid):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _elabel(name)}
+                yield A._tool2(name, _elabel(name), targs, "running")
                 t0 = time.time()
                 try:
                     res = _fn(targs, ctx) or {}
@@ -1551,6 +1554,7 @@ def _eagent_gemini(message, ctx, history, variant, depth, uid):
                 for ev in _emit_tool_side(res, name):
                     yield ev
                 yield {"event": "tool-done", "data": _elabel(name)}
+                yield A._tool2(name, _elabel(name), targs, "done", res, sec)
                 feed = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 contents.append({"role": "user", "parts": [{"text": feed}]})

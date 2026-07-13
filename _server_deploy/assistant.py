@@ -3308,6 +3308,26 @@ def _format_history(history, offset=0):
     return ("【最近对话】\n" + "\n".join(out) + "\n") if out else ""
 
 
+def _tool2(name, label, args=None, status="running", res=None, sec=None):
+    """工具指示器 v2 的结构化事件(与旧 tool/tool-done 并行发,老前端忽略即可)。
+    前端 rc-toolchip 用 name 判类型/颜色、用 task_id 继续轮询后台步骤、用 brief 填方块。"""
+    d = {"name": name, "label": label, "status": status, "args": args or {}}
+    if sec is not None:
+        d["sec"] = sec
+    if isinstance(res, dict):
+        if res.get("task_id"):
+            d["task_id"] = res["task_id"]
+        if res.get("error"):
+            d["status"] = "error"
+            d["brief"] = str(res["error"])[:300]
+        else:
+            try:
+                d["brief"] = _step_detail(res)[:800]
+            except Exception:
+                d["brief"] = ""
+    return {"event": "tool2", "data": d}
+
+
 _TOOL_START_RE = re.compile(r'\{\s*"tool"')
 
 
@@ -3891,6 +3911,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
                     res = TOOLS[name][1](targs, ctx) or {}
@@ -3912,6 +3933,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec)
                 text_part = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 if vision:   # see_page:把渲染图作为 image block 喂回(大脑 sonnet 能看图)
                     content = [{"type": "text", "text": text_part}]
@@ -4089,6 +4111,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
                     res = TOOLS[name][1](targs, ctx) or {}
@@ -4107,6 +4130,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec)
                 feed = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 uparts = [{"text": feed}]
@@ -4202,6 +4226,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 name = tool["tool"]
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
                     res = TOOLS[name][1](targs, ctx) or {}
@@ -4223,6 +4248,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec)
                 if vision:   # see_page 等出图:turn 输入的 localImage 在多轮语境未验证 → 稳妥先经视觉模型转文字喂回
                     try:
                         _vd = _vision_for(ctx, vision, note="(工具产出的页面/图像渲染,请完整转述内容供编排模型使用)")

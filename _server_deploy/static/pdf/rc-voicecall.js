@@ -369,14 +369,66 @@
     if (/^(translate|dict|lookup)/.test(name)) return _TICONS.dict;
     return _TICONS.gear;
   }
+  // ── 工具指示器 v2(rc-toolchip):每次工具调用一个 chip(圆/长条/方块),状态由此驱动 ──
+  //    key = 工具名+轮次(同轮同工具复用同一个 chip);后台任务(制卡等)拿 task_id 继续轮询步骤+结果。
+  var _chipOf = {};
+  function _chipKey(p) { return (p.tool || p.label || 'tool') + '#' + (p.call_id || p.id || _rtc.toolN || 0); }
+  function _chipStart(p) {
+    if (!(window.RC && RC.toolChip)) return null;
+    var k = _chipKey(p);
+    if (_chipOf[k]) return _chipOf[k];
+    var c = RC.toolChip.create({ tool: p.tool || '', label: p.label || p.tool || '工具' });
+    RC.toolChip.progress(c, (p.label || '处理') + '…');
+    _chipOf[k] = c;
+    return c;
+  }
+  function _chipMeta(p) {   // 调用详情(=原「!」面板内容:指令/上下文/参数/喂回结果)
+    var rows = [];
+    if (p.cmd) rows.push(['指令(S2S 原话)', p.cmd]);
+    if (p.ctx_brief) {
+      var cb = p.ctx_brief, cp = ['第' + (cb.page || '?') + '页'];
+      if (cb.ink) cp.push('墨迹' + cb.ink + '笔');
+      if (cb.sel) cp.push('选中' + cb.sel + '字');
+      rows.push(['携带上下文', cp.join(' · ')]);
+    }
+    try { if (p.args && Object.keys(p.args).length) rows.push(['参数', JSON.stringify(p.args)]); } catch (e) {}
+    if (p.took_s != null) rows.push(['耗时', p.took_s + 's' + (p.cached ? ' · 复用缓存' : '')]);
+    if (p.rag) rows.push(['喂回给它播报的结果', p.rag]);
+    else if (p.result_brief) rows.push(['结果', p.result_brief]);
+    return rows;
+  }
+  function _chipEnd(p) {
+    if (!(window.RC && RC.toolChip)) return;
+    var k = _chipKey(p), c = _chipOf[k];
+    if (!c) {   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
+      c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });
+      _chipOf[k] = c;
+    }
+    delete _chipOf[k];
+    RC.toolChip.setMeta(c, _chipMeta(p));
+    if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
+    // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
+    var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
+    if (tid) { RC.toolChip.progress(c, '已派发,正在后台执行…'); _chipTrackTask(c, tid); return; }
+    RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
+  }
+  function _pickTaskId(rag) {   // 工具返回体里带 task_id(voice-tool 的 rag 是 JSON 字符串)
+    try { var o = typeof rag === 'string' ? JSON.parse(rag) : rag; return (o && o.task_id) || ''; } catch (e) { return ''; }
+  }
+  function _chipTrackTask(c, tid) { RC.toolChip.track(c, tid); }   // 轮询后台任务(组件内实现,与文字对话共用)
+
   function onToolStatus(p) {
     p = p || {};
+    try { if (p.status === 'running') _chipStart(p); else if (p.status !== 'aborted') _chipEnd(p); } catch (e) {}
+    // chip 系统在 = 工具状态由 chip 的长条负责(用户设计:这套是"进行中"指示的高级替代)
+    //   → 字幕框只留说话内容,不再挤工具状态行(超出的那部分内容归到标记里去)。
+    var _hasChip = !!(window.RC && RC.toolChip);
     var b = document.getElementById('vc-tool-btn'); if (!b) return;
     var _ic = _toolIcon(p.tool || p.label);
     if (p.status === 'running') {
       b.style.display = 'flex'; b.className = 'running'; b.innerHTML = '<span class="vc-spin"></span>';
       b.title = '正在执行:' + (p.label || '工具') + '(点击中止)';
-      capStatus({ html: _ic + '<span>' + esc(p.label || '正在处理') + '…</span><span class="vc-spin vc-spin-s"></span>', cls: 'run' });   // 69:图标+转圈
+      if (!_hasChip) capStatus({ html: _ic + '<span>' + esc(p.label || '正在处理') + '…</span><span class="vc-spin vc-spin-s"></span>', cls: 'run' });   // 69:图标+转圈(chip 在=交给 chip 长条)
       // 103(用户实测:relay 重启时进行中的工具死亡=永远转圈):running 超时兜底——150s 没等到 done/error 自动标超时
       if (onToolStatus._t0) clearTimeout(onToolStatus._t0);
       onToolStatus._t0 = setTimeout(function () {
@@ -387,14 +439,15 @@
       if (onToolStatus._t0) { clearTimeout(onToolStatus._t0); onToolStatus._t0 = null; }
       b.style.display = 'none'; b.className = ''; b.textContent = '';   // 完成/出错/中止 → 自动消失
       // 69:完成/失败在字幕停留一下再走(旧行为=立即清,侧栏关着的用户什么都看不见)
-      if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok">✓</span>', cls: 'ok', hold: 2500 });
+      if (_hasChip) { capStatus(null); }   // 完成/失败都由 chip 表达(方块/红长条)
+      else if (p.status === 'done') capStatus({ html: _ic + '<span>' + esc(p.label || '完成') + '</span><span class="vc-tks ok">✓</span>', cls: 'ok', hold: 2500 });
       else if (p.status === 'error') capStatus({ html: _ic + '<span>' + esc(p.label || '工具') + '</span><span class="vc-tks err">⚠</span>', cls: 'err', hold: 4000 });
       else capStatus(null);
       if (p.status === 'aborted') {
         var th = document.getElementById('asst-thread');
         if (th) { var a = document.createElement('div'); a.className = 'vc-tcard err'; a.innerHTML = '<div class="vc-tc-h"><span class="vc-tc-st">⊘</span><span class="vc-tc-l">已中止</span></div>'; th.appendChild(a); th.scrollTop = th.scrollHeight; }
-      } else {
-        threadToolCard(p);   // 调用记录进对话流(点开看全过程)
+      } else if (!(window.RC && RC.toolChip)) {
+        threadToolCard(p);   // 回退:没有 chip 组件时仍用旧详情卡
       }
     }
   }

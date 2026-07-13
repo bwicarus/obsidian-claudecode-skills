@@ -272,7 +272,7 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
         if _ratelimited(ip):
             return JSONResponse({"error": "slow_down"}, status_code=429)
         # client 认证:client_secret_post(form)或 client_secret_basic(Authorization: Basic)
-        cid_req, csec = form.get("client_id", ""), form.get("client_secret", "")
+        cid_req, csec = form.get("client_id", "").strip(), form.get("client_secret", "").strip()
         ah = request.headers.get("authorization", "")
         if ah.lower().startswith("basic "):
             try:
@@ -315,6 +315,7 @@ button{{width:100%;margin-top:.9rem;padding:.7rem;font-size:1rem;border:0;border
                     _save(st)
                     _log(f"token(code) REJECT ip={ip} client={cid_req!r} has_rec={bool(rec)} "
                          f"pkce_ok={pkce_ok if rec else '-'} sec_post={bool(form.get('client_secret'))} "
+                         f"csec_len={len(csec)} csec_head={csec[:4]!r} "
                          f"basic={ah[:6]!r} redirect={form.get('redirect_uri','')!r}")
                     return JSONResponse({"error": "invalid_grant"}, status_code=400)
                 out = _issue(st, rec["client_id"], rec["scope"])

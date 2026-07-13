@@ -1858,6 +1858,7 @@
         } catch (_) {}
       }
       else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
+      else if (ev === 'tool2' && parsed && parsed.name) { _toolChip(parsed); }   // 工具指示器 v2:同一套圆/长条/方块(与语音通话共用)
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
       else if (ev === 'action' && parsed && parsed.id) { try { HOST.showAction && HOST.showAction(parsed); HOST.queueAction && HOST.queueAction(parsed); } catch (_) {} }   // EPUB 同步写工具:持久撤销/重做卡 + 排队落库(PDF 后端不发此事件)
@@ -2068,6 +2069,31 @@
     };
   } catch (e) {}
 
+  // ── 工具指示器 v2(rc-toolchip):文字对话的每次工具调用也长一个 chip 进对话流 ──
+  //    与语音通话完全同一套组件/同一套选中广播(同 cid 处处高亮);后台任务继续轮询步骤。
+  var _tchips = {};
+  function _toolChip(d) {
+    if (!(window.RC && RC.toolChip)) return;
+    var key = d.name || 'tool';
+    if (d.status === 'running') {
+      if (_tchips[key]) return;
+      var c = RC.toolChip.create({ tool: d.name, label: d.label || d.name, mount: thread, floating: false });
+      RC.toolChip.progress(c, (d.label || '处理') + '…');
+      _tchips[key] = c;
+      return;
+    }
+    var c2 = _tchips[key] || RC.toolChip.create({ tool: d.name, label: d.label || d.name, mount: thread, floating: false });
+    delete _tchips[key];
+    var rows = [];
+    try { if (d.args && Object.keys(d.args).length) rows.push(['参数', JSON.stringify(d.args)]); } catch (_) {}
+    if (d.sec != null) rows.push(['耗时', d.sec + 's']);
+    if (d.brief) rows.push(['结果', d.brief]);
+    RC.toolChip.setMeta(c2, rows);
+    if (d.status === 'error') { RC.toolChip.fail(c2, d.brief || '失败'); return; }
+    if (d.task_id) { RC.toolChip.progress(c2, '已派发,正在后台执行…'); RC.toolChip.track(c2, d.task_id); return; }
+    RC.toolChip.done(c2, { summary: d.label || '完成', detail: d.brief || '' });
+  }
+
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
   function trackTask(id, label) {
     if (!id) return;
@@ -2197,7 +2223,7 @@
       else if (q === 'zin') HOST.zoomBy(0.15);
       else if (q === 'zout') HOST.zoomBy(-0.15);
       else if (q === 'ptrans') HOST.toggleTranslate();
-      else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; fetch(_CLEARURL, { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
+      else if (q === 'clear') { if (streaming) { try { _abort && _abort.abort(); } catch (_) {} streaming = false; _setSendMode(false); } thread.innerHTML = ''; try { RC.toolChip && RC.toolChip.clearAll(); } catch (_) {} fetch(_CLEARURL, { method: 'POST' }).catch(function () {}); greet(); }   // L5:流式中清空先中止,防在已移除气泡上继续写 + streaming 卡死
       else if (q === 'models') { openModelSettings(); }
     } catch (_) {}
   });
