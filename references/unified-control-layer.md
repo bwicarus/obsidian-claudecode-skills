@@ -227,6 +227,17 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
   样式没注入,按钮就成了**裸 `<button>`(白块)**。`_infoCardEl()` 和 `hdSplit()`/`mountFlow()` 都先调
   `injectCss()` / `RC.voiceCard.css()` 兜住。
 
+### 结果卡也走同一套三态(132,用户)
+
+天气 / 配图 / 视频 / 新闻这类**自带结果卡**的工具,卡片本身也接进三态系统:
+
+- **浮层**:`_cardPush(..., {dot:true, form:'full', noAuto:true, type/icon})` → 带标记、进 `#vc-tlayer`(左上角锚定)、**以方块出生**,单击**头部**三态循环 `方块 → 长条 → 小方块 → 方块`(展开时标记隐藏,所以**头部就是形态按钮**;到了标记态整张卡就是那枚标记,点它继续循环)。颜色/图标复用 `RC.toolChip.styleOf(kind)`。
+- **侧栏**:点 `.vc-if-hd` 折叠成一行(`.vc-if-min`),即 长条 ↔ 方块 两态(侧栏不要标记)。
+
+### 字幕模式不再弹「AI 文字输出」卡(132,用户)
+
+字幕本来就在显示 AI 的文字输出 → 文字输出档下**不再另弹**「文字回复 / 路由详答」浮层卡(重复且挡内容)。三处 `_cardPush` 已撤。
+
 ### 结果卡吸收(天气 / 网络搜索 / 配图 / 视频)
 
 这类工具**本来就有自己的结果卡**(`renderInfo`)。以前工具指示器还会另造一张 → 字幕模式一次弹**两张**。现在:

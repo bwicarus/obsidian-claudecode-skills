@@ -203,6 +203,9 @@
       '.vc-flowb:active{transform:scale(.86)}' +
       '.vc-flowb.on{background:#7b6cff;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
+      // 侧栏结果卡折叠成一行长条(点头部切换;侧栏没有标记)
+      '.vc-if.vc-if-min > *:not(.vc-if-hd){display:none}' +
+      '.vc-if.vc-if-min .vc-if-hd{margin-bottom:-4px}' +
       // 唯一保留 ▶ 的地方(用户设计):纯文字结果那块内容的角落 —— 点它用 TTS 念
       '.vc-fp-tts{position:absolute;right:4px;bottom:4px;width:22px;height:22px;border-radius:50%;padding:0;border:none;' +
         'background:rgba(123,108,255,.18);color:#9d8cff;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
@@ -833,6 +836,7 @@
     if (fn === 'renderInfoCard') { renderInfo((args || [{}])[0] || {}); return; }
     try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
   }
+  window.__vcDispatch = dispatch;   // 测试/共享层可直接派发结果卡(与 relay client_action 同一条路)
   // ── 70 结构化结果卡(用户设计):web_search 的 Gemini 综合直接给 kind/data/brief——
   //    系统按类型渲染(天气/新闻/事实/综合),2.1 只口头一句概况;双击卡=内容带入 2.1 上下文(再双击=移出) ──
   function _infoHtml(card) {
@@ -1046,6 +1050,16 @@
       actions: (card.kind === 'images' ? ['img_norm'] : card.kind === 'videos' ? ['pick_video'] : ['web_search']) }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
+    try {   // 132:侧栏结果卡也能折叠——长条 ↔ 方块(侧栏不要标记,与工具卡侧栏视图同规矩)
+      var _hd = d.querySelector('.vc-if-hd');
+      if (_hd) {
+        _hd.style.cursor = 'pointer';
+        _hd.addEventListener('click', function (ev) {
+          if (ev.target.closest('button,a')) return;
+          d.classList.toggle('vc-if-min');
+        });
+      }
+    } catch (e) {}
     try { d.dataset.vcCid = card.cid; } catch (e) {}   // 95:同卡编号(与浮层镜像实例共享)
     return d;
   }
@@ -1072,8 +1086,15 @@
     if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
-      var c = _cardPush(_infoHtml(card), label, true, false, card.cid);   // 字幕模式:浮层镜像(与侧栏卡同编号)
+      // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
+      //   以"方块"出生(它就是用户要看的内容),但标记/头部点击可收成长条、再收成标记。
+      var _ck = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[card.kind] || 'text';
+      var _cst = {};
+      try { _cst = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_ck) : {}; } catch (e) {}
+      var c = _cardPush(_infoHtml(card), label, true, false, card.cid,
+                        { dot: true, form: 'full', noAuto: true, type: _cst.color, icon: _cst.icon });
       if (c) {
+        c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
         // 结果卡不是"文字回复" → 标题栏只留【数据流】按钮(▶/✕ 去掉,与侧栏一致)
         ['.vc-card-p', '.vc-card-x'].forEach(function (q) { var b = c.el.querySelector(q); if (b) b.remove(); });
         _pinBind(c.el, label, function () { return _infoText(card); });
@@ -2012,7 +2033,9 @@
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
     if (force || opts.dot) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
-    var el = document.createElement('div'); el.className = 'vc-card' + (opts.dot ? ' vc-dot vc-hasdot' : '');
+    var _f0 = opts.form || (opts.dot ? 'dot' : 'full');   // 初始形态:工具卡=标记出生;结果卡=方块出生(仍可循环)
+    var el = document.createElement('div');
+    el.className = 'vc-card' + (opts.dot ? ' vc-hasdot' : '') + (_f0 === 'dot' ? ' vc-dot' : (_f0 === 'min' ? ' vc-min' : ''));
     var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
     el.dataset.vcCid = _cid;
     if (opts.type) el.style.setProperty('--vc-tc', opts.type);
@@ -2082,11 +2105,14 @@
     _bindCardDrag(hd);
     if (opts.dot) {
       _bindCardDrag(el.querySelector('.vc-card-dot'));   // 收起态:头部隐藏,标记自己当把手
-      hd.addEventListener('click', function (ev) {       // 展开后标记不显示 → 点头部循环形态
+      // 展开后标记不显示 → **头部就是形态按钮**,单击三态循环:方块 → 长条 → 小方块(标记)→ 方块
+      //   (到了标记态,整张卡就是那枚标记,点它继续循环)
+      hd.addEventListener('click', function (ev) {
         if (ev.target.closest('button')) return;
         if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }
         el.dataset.touched = '1';
-        _cardForm(el, _cardForm(el) === 'min' ? 'full' : 'min');
+        var f = _cardForm(el);
+        _cardForm(el, f === 'full' ? 'min' : (f === 'min' ? 'dot' : 'full'));
       });
     }
     function _bindCardDrag(hd) {
@@ -2397,7 +2423,7 @@
             try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, full, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e) {}
             _rtcCapFeed(full, true);
             try { rst.feed(full, true); } catch (e) {}
-            try { _cardPush(full, '路由详答'); } catch (e) {}   // 65:侧栏关着时弹磨砂卡
+            // 132(用户):字幕已经在显示 AI 的文字输出 → 文字输出档**不再另弹一张卡**(重复且挡内容)
           }
         } catch (e) { err = String(e).slice(0, 80); }
         var okR = !!full;
@@ -2586,11 +2612,8 @@
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       if (_rtc.turnText && curAText) {
-        try {
-          var cT = _cardPush(curAText, '文字回复');
-          if (cT) _pinBind(cT.el, '文字回复', (function (txt) { return function () { return txt; }; })(curAText));   // 85:浮层文字卡长按选中(此前漏绑)
-          _cardPush._did = cT;
-        } catch (e) {}
+        // 132(用户):字幕已经在显示 AI 的文字输出 → 文字输出档**不再另弹一张卡**(重复且挡内容)
+
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
           tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }),
           actions: ['deep'], voiceTab: true, note: '本轮主模型=GPT Realtime(见语音 Tab);下面是它可能调用的环节' },
@@ -2724,10 +2747,7 @@
               try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
               _rtcCapFeed(fullR, true);
               try { _rtc._route.feed(fullR, true); } catch (e2) {}
-              try {
-                var cR = _cardPush(fullR, '路由详答');
-                if (cR) _pinBind(cR.el, '路由详答', (function (txt) { return function () { return txt; }; })(fullR));   // 79:长按=全文带入
-              } catch (e2) {}
+              // 132(用户):字幕已经在显示 AI 的文字输出 → 文字输出档**不再另弹一张卡**(重复且挡内容)
               _rtc._route = null;
             }
           }

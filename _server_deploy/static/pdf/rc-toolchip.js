@@ -483,6 +483,7 @@
 
   RC.toolChip = {
     absorb: absorb,
+    styleOf: function (t) { return { color: TYPE_C[t] || TYPE_C.text, icon: SVG[t] || SVG.text }; },   // 结果卡复用同一套色/图标
     create: create, progress: progress, done: done, fail: fail, remove: remove, clearAll: clearAll, track: track,
     typeOf: typeOf, isAction: isAction, setForm: form,
     setSteps: function (chip, st) { if (chip) { chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); } },
