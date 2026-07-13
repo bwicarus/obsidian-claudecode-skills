@@ -4797,16 +4797,20 @@ def assistant_rtc_session():
                   "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。",
                   "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
     sess = {"type": "realtime", "model": cfg.get("rt_model") or "gpt-realtime-2.1-mini",
-            "output_modalities": ["audio"],
+            # 127(用户拍板):GPT 走**官方 WebRTC 直连**,别再叠中间层——会话级模态按四态档定
+            # (stt=纯文字:输出音频费归零;其余=语音)。工具结果轮仍可用带 modalities 的 response.create 覆盖。
+            "output_modalities": (["text"] if (cfg.get("rt_voice_mode") == "stt") else ["audio"]),
             "reasoning": {"effort": cfg.get("rt_effort") or "low"},
             "max_output_tokens": 2048,   # 64 用户拍板:全档 2048(≈100s 音频),不搞小预算硬截断;时长靠 prompt 规则+route 自觉
             "instructions": "\n".join(parts),
             "audio": {"input": {"noise_reduction": {"type": ("far_field" if cfg.get("rt_noise") == "far" else "near_field")},   # 86:官方降噪双档——far_field=桌面外放场景,环境音/操作声抑制更强
                                 "turn_detection": {"type": "semantic_vad",
                                                    "eagerness": cfg.get("rt_eagerness") or "auto",
-                                                   # ㊿ 手动挡(官方VAD指南):speech_stopped 后前端按"朗读"开关发带 output_modalities 的 response.create——
-                                                   # 灭=纯文字回复(输出音频费=成本80%主体直接归零);顺带消灭短问竞态(审核#5)
-                                                   "create_response": False, "interrupt_response": True},
+                                                   # 127:回归**官方自动挡**(create_response=True 是官方默认)。
+                                                   # 手动挡(False)时 speech_stopped 要绕一圈 Pi 的 sideband 才发 response.create
+                                                   # (OpenAI→Pi→OpenAI 跨海往返)=每轮多等一个 RTT,第一句尤其明显。
+                                                   # 模态改由会话级 output_modalities 承担(见上),手动挡的唯一好处不再需要。
+                                                   "create_response": True, "interrupt_response": True},
                                 "transcription": _tr},
                       "output": {"voice": cfg.get("rt_voice") or "marin",
                                  # 92:语速设置(官方 audio.output.speed 0.25-1.5,session 级,下次通话生效)

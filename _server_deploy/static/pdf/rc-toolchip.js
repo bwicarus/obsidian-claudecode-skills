@@ -109,6 +109,7 @@
       if (sm) sm.textContent = chip.step || chip.summary || chip.label || '';
       var dot = v.el.querySelector('.vc-card-dot');
       if (dot) dot.classList.toggle('busy', !!chip.busy);
+      v.el.classList.toggle('vc-busy', !!chip.busy);   // 创建/进行中=标记透明玻璃;完成=有色磨砂(一眼可辨)
       v.el.classList.toggle('vc-err', !!chip.failed);
     });
   }
@@ -212,9 +213,9 @@
     paintSum(chip);
     chip.views.forEach(function (v) {
       paintBody(chip, v);
-      if (isAction(chip.type) && !v.inflow) {   // 执行类:浮层报一下就消失(侧栏保留可点开确认)
-        vc && vc.form(v.el, 'min');
-        setTimeout(function () { if (chip.card) vc && vc.close(chip.card); }, 1800);
+      if (isAction(chip.type) && !v.inflow) {   // 执行类(不产出内容):**完成即消失**——报一下就走人
+        vc && vc.form(v.el, 'min');              // (只有出错才留在页面上,见 fail();侧栏那条记录保留)
+        setTimeout(function () { if (chip.card) vc && vc.close(chip.card); }, 1500);
         return;
       }
       if (v.el.dataset.touched === '1') return;   // 动过 → 不自动展开
@@ -232,8 +233,14 @@
     var vc = VC();
     chip.busy = false; chip.failed = true;
     chip.summary = chip.step = msg || '失败';
+    chip.detail = msg || '失败';
     paintSum(chip);
-    chip.views.forEach(function (v) { if (v.el.dataset.touched !== '1') vc && vc.form(v.el, 'min'); });
+    // 用户设计:出错的卡**留在页面上**(不自动消失,包括执行类)——点开看错误详情
+    chip.views.forEach(function (v) {
+      v.el.classList.add('vc-canfull');   // 执行类平时没有方块,出错时开放展开(为了看 error)
+      paintBody(chip, v);
+      if (v.el.dataset.touched !== '1') vc && vc.form(v.el, 'min');
+    });
   }
   function remove(chip) {
     if (!chip) return;

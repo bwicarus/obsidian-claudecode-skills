@@ -2669,7 +2669,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             n[t] = n.get(t, 0) + 1
             if t == "input_audio_buffer.speech_started":
                 epoch["n"] += 1   # 用户开口=新话轮:在途工具的结果到手后只回填不抢话(审核P0#2)
-                if fe >= 3 and book.pop("_dirty3", None):   # 126(P3):拉模式注入归 relay——开口瞬间注入最新状态(前端 _rtcFlushCtx/_rtcSys 退役)
+                if 3 <= fe < 4 and book.pop("_dirty3", None):   # 127:fe>=4 的前端**自己经 data channel 直连注入**(浏览器→OpenAI 一跳,不绕 Pi);旧前端(fe=3)仍由 relay 代管
                     _vt3 = (book.get("vtext") or book.get("page_text") or "")[:1500]
                     _b3 = [f"用户此刻在第 {book.get('page') or page} 页" + (f",当前可见内容:{_vt3}" if _vt3 else ",需要页面内容就调 read_page")]
                     if book.get("sel"):
@@ -2693,7 +2693,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                             pass
                 _img_items[:] = _keep
             elif t == "input_audio_buffer.speech_stopped":
-                if fe >= 3:   # 126(P4):用户轮 create 归 relay(响应仲裁收口一处;旧前端 fe<3=前端自己 create)
+                if 3 <= fe < 4:   # 127:fe>=4 = 官方自动挡(create_response=True),VAD 判完直接出声,不绕 Pi 一个 RTT;旧前端(fe=3)仍由 relay 代发
                     try:
                         await ows.send(json.dumps(_resp_create(user=True)))
                         sys.stderr.write("[rtc-ctl] P4 create(user)\n")

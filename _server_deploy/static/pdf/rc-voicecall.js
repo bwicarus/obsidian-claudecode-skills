@@ -140,21 +140,33 @@
       '.vc-card.vc-min{padding:9px 13px}' +
       // ── 工具指示器 v2(用户设计):在这张卡上加**第三态=圆形标记**,并让标记本身当形态控制按钮 ──
       //    圆(vc-dot,创建/收起:透明玻璃无边缘) → 长条(vc-min) → 方块(展开)。标记坐落在方块左上角。
-      '.vc-card-dot{position:absolute;left:-9px;top:-9px;width:34px;height:34px;border-radius:50%;padding:0;border:0.5px solid rgba(255,255,255,.16);' +
-        'background:rgba(28,28,30,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
+      // 标记 = 圆角方形(用户改:套长条的外观,别用正圆),坐落在卡片**左上角**,永远是形态控制按钮
+      '.vc-card-dot{position:absolute;left:0;top:0;width:36px;height:36px;border-radius:12px;padding:0;border:0.5px solid var(--vc-tl,rgba(255,255,255,.16));' +
+        'background:var(--vc-tf,rgba(28,28,30,.72));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);' +
         'color:var(--vc-tc,#b9a8ff);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
-        'box-shadow:0 6px 18px rgba(0,0,0,.32);transition:transform .14s,box-shadow .2s}' +
-      '.vc-card-dot svg{width:16px;height:16px}' +
-      '.vc-card.vc-hasdot .vc-card-hd{padding-left:20px}' +   // 标记坐在左上角 → 标题让位,别被压住
-      '.vc-card.vc-hasdot.vc-min .vc-card-sum{padding-left:20px}' +
+        'transition:transform .16s cubic-bezier(.34,1.5,.64,1),background .3s,border-color .3s,box-shadow .3s}' +
+      '.vc-card-dot svg{width:17px;height:17px}' +
+      '.vc-card.vc-hasdot .vc-card-hd{padding-left:42px;min-height:36px}' +   // 标记坐在左上角 → 标题让位
+      '.vc-card.vc-hasdot.vc-min .vc-card-sum{padding-left:42px}' +
       '.vc-card-dot:active{transform:scale(.9)}' +
       '.vc-card-dot.busy{animation:vcDotBr 1.5s ease-in-out infinite}' +
-      '@keyframes vcDotBr{0%,100%{opacity:.42}50%{opacity:1}}' +
-      // 圆态:整张卡缩成标记本身(透明玻璃、无边缘、无阴影 —— 用户要的"创建时"外观)
-      '.vc-card.vc-dot{width:34px;height:34px;min-height:0;padding:0;border-radius:50%;border-color:transparent;' +
-        'background:rgba(255,255,255,.05);box-shadow:none;overflow:visible}' +
+      '@keyframes vcDotBr{0%,100%{opacity:.45}50%{opacity:1}}' +
+      // 进行中/创建:标记是**透明玻璃**(无色);出结果:有色磨砂(两个状态一眼可辨,用户要求)
+      '.vc-card.vc-typed .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 22%,rgba(22,26,38,.8));' +
+        '--vc-tl:color-mix(in srgb,var(--vc-tc) 48%,transparent);box-shadow:0 6px 18px -8px rgba(0,0,0,.5)}' +
+      '.vc-card.vc-busy .vc-card-dot{--vc-tf:rgba(255,255,255,.06);--vc-tl:transparent;box-shadow:none}' +
+      // 收起态:整张卡就是那枚圆角方形标记
+      '.vc-card.vc-dot{width:36px;height:36px;min-height:0;padding:0;border-radius:12px;border-color:transparent;' +
+        'background:transparent;box-shadow:none;overflow:visible}' +
       '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
-      '.vc-card.vc-dot .vc-card-dot{left:0;top:0;box-shadow:none;border-color:transparent;background:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}' +
+      // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
+      '.vc-card.vc-hasdot{right:auto;bottom:auto;transform-origin:0 0;' +
+        'transition:width .34s cubic-bezier(.2,.85,.3,1),height .34s cubic-bezier(.2,.85,.3,1),' +
+        'border-radius .3s,background .3s,box-shadow .3s,border-color .25s,' +
+        'transform .3s cubic-bezier(.34,1.35,.64,1),opacity .3s}' +
+      // 长条 = 原卡片的折叠态(标题行 + ▶/✕ + 一行摘要,就是用户截图里那个),只是给左上角标记让出位置
+      '.vc-card.vc-hasdot.vc-min{width:296px}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot){width:320px}' +
       // 完成态:有色磨砂 + 边缘阴影(跟"创建时的透明玻璃圆"区分开)
       '.vc-card.vc-typed{border-color:color-mix(in srgb,var(--vc-tc) 42%,transparent);' +
         'background:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
@@ -1489,19 +1501,17 @@
       var fp = (j.page || 0) + ':' + strokes.length;
       if (fp === _rtc._inkFp) return;
       _rtc._inkFp = fp;
-      if (!strokes.length) { _rtc.inkDirty = false; if (!_rtc.ctl) _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }   // 126(P3):ctl=relay 注入
+      if (!strokes.length) { _rtc.inkDirty = false; _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }   // 127:经 data channel 直连注入
       // 边沿触发(用户拍板):笔迹"变了"只通知一次,之后继续画多少笔都不再打扰;
       // AI 重新看过(see_ink/see_page 成功,_rtcTool 里复位)后,下次变化才再通知。
       // 关键是这一次要把旧记忆作废——上次 see_ink 的结果还在上下文里,不否定它模型就凭旧印象答"没变化"。
       if (_rtc.inkDirty) return;
-      _rtc.inkDirty = true;
-      if (_rtc.ctl) return;   // 126(P3):ctl 活着=状态注入归 relay
+      _rtc.inkDirty = true;   // 127:注入走前端 dc(不再让 relay 代劳绕一圈)
       _rtcSys('(状态更新:用户的手写笔迹刚刚发生了变化。你之前通过 see_ink 看到的笔迹内容**已过时作废**——你现在并不知道纸面上实际写了什么。这只是状态记录,不要回应本条、不要主动评论。之后他问「我写的/我画的/现在呢/看到了什么/有没有变化」这类问题时,唯一正确的做法是先调 see_ink 重新看再回答;没重新看之前,凭旧印象说"和原来一样/没有变化"是错误行为。)');
     } else if (t === 'state') {
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
-      _rtc.sel = sel;
-      if (_rtc.ctl) return;   // 126(P3):ctl 活着=状态注入归 relay
+      _rtc.sel = sel;   // 127:注入走前端 dc
       _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它;' +
         (sel.length <= 200 ? '**选中内容已完整在此,直接使用**' : '选中较长已截断,需要完整上下文可 read_page 当前页') + ')') :
         '用户当前没有选中文字') + ';状态记录,不要回应本条)');
@@ -1828,7 +1838,45 @@
   function _cardsVisSync() {   // 77:侧栏开=浮层卡全部消失(不挡内容);关=回来
     var w = document.getElementById('vc-cards');
     if (w) w.style.display = _sideOpen() ? 'none' : '';
+    var tl = document.getElementById('vc-tlayer');
+    if (tl) tl.style.display = _sideOpen() ? 'none' : '';
     _chipRender();
+  }
+  // 工具卡图层(用户设计:交错重叠,落点按画面当前占用情况算)——左上角锚定,不进右下堆叠
+  function _tlayer() {
+    var t = document.getElementById('vc-tlayer');
+    if (!t) {
+      t = document.createElement('div'); t.id = 'vc-tlayer';
+      t.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147481400';
+      document.body.appendChild(t);
+    }
+    return t;
+  }
+  function _tSpot(w, h) {
+    var W = window.innerWidth, H = window.innerHeight, pad = 14;
+    var occ = [];
+    _cards.list.forEach(function (c) {
+      if (!c.el.classList.contains('vc-hasdot') || !c.el.isConnected) return;
+      var r = c.el.getBoundingClientRect();
+      occ.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+    });
+    var lim = W;
+    try { var sd = document.getElementById('ep-side') || document.getElementById('rc-side');
+      if (sd && sd.classList.contains('open')) { var sr = sd.getBoundingClientRect(); if (sr.width > 0) lim = sr.left - 8; } } catch (e) {}
+    var best = null, bs = -1e9;
+    for (var i = 0; i < 70; i++) {
+      var x = pad + Math.random() * Math.max(10, lim - w - pad * 2);
+      var y = pad + Math.random() * Math.max(10, H - h - pad * 2 - 110);   // 底部给字幕留位
+      var md = 1e9;
+      occ.forEach(function (p) {
+        var dx = Math.max(p.x - (x + w), x - (p.x + p.w), 0), dy = Math.max(p.y - (y + h), y - (p.y + p.h), 0);
+        md = Math.min(md, Math.sqrt(dx * dx + dy * dy));
+      });
+      var sc = occ.length ? Math.min(md, 140) : 100;
+      sc += (x / Math.max(1, lim)) * 40 + (y / H) * 22;   // 偏好右/下,别压正文左上
+      if (sc > bs) { bs = sc; best = { x: x, y: y }; }
+    }
+    return best || { x: Math.max(8, W - w - 20), y: 90 };
   }
   function _cardLayout() {
     var vis = _cards.list.filter(function (c) { return !c.free; });   // 69:拖走的卡脱离堆叠,自由停放
@@ -1966,13 +2014,21 @@
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
     }
-    w.appendChild(el);
+    if (opts.dot) {   // 工具卡:左上角锚定 + 交错重叠落点(不进右下堆叠,免得展开时往左上长、标记乱跑)
+      c.free = true;
+      var sp = _tSpot(300, 40);
+      el.style.left = sp.x + 'px'; el.style.top = sp.y + 'px';
+      _tlayer().appendChild(el);
+    } else {
+      w.appendChild(el);
+    }
     _cards.list.push(c);
-    while (_cards.list.length > 4) {   // 70:被双击选中(带入上下文)的卡不被数量裁剪挤掉
+    var _plain = _cards.list.filter(function (x) { return !x.el.classList.contains('vc-hasdot'); });
+    while (_plain.length > 4) {   // 70:被选中(带入上下文)的卡不被数量裁剪挤掉;工具卡不参与裁剪
       var victim = null;
-      for (var vi = 0; vi < _cards.list.length - 1; vi++) { if (!_cards.list[vi].el.classList.contains('vc-picked')) { victim = _cards.list[vi]; break; } }
+      for (var vi = 0; vi < _plain.length - 1; vi++) { if (!_plain[vi].el.classList.contains('vc-picked')) { victim = _plain[vi]; break; } }
       if (!victim) break;
-      _cardClose(victim);
+      _cardClose(victim); _plain.splice(_plain.indexOf(victim), 1);
     }
     requestAnimationFrame(_cardLayout);
     if (_cardHideOn()) {
@@ -2077,7 +2133,8 @@
                                                    max_output_tokens: 2048 } });
   }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
-    if (_rtc.ctl) return;   // 126(P3):ctl 活着=注入归 relay(page/state/ink 已 shim 镜像);断线回退前端
+    // 127:注入走**前端自己的 data channel**(浏览器→OpenAI 一跳)。绕 relay 的旧路 = OpenAI→Pi→OpenAI
+    //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
       var fp = _rtc.ctxPage + ':' + vt.length + ':' + vt.slice(0, 30);
@@ -2351,7 +2408,9 @@
       _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
     } else if (t === 'input_audio_buffer.speech_stopped') {
-      if (!_rtc.ctl) _rtcRespCreate('user');   // ㊿/126(P4):ctl 活着=create 归 relay 仲裁;断线回退前端(fe=3 握手,relay 只对 fe≥3 接管)
+      // 127(用户拍板):**什么都不做**——官方自动挡(session.turn_detection.create_response=true)。
+      // 旧的手动挡要么前端发 create、要么绕 Pi 的 sideband 发,都是白等一个往返;第一句最明显。
+      // 本轮模态由会话级 output_modalities 决定(四态档,热切时 session.update)。
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx && (tx.indexOf('学习伴读通话') >= 0 || tx.indexOf('常说:这一页') >= 0)) tx = '';   // 85:转写 prompt 泄漏(静音时模型复读语境提示词)→丢弃
@@ -2472,7 +2531,7 @@
       var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
       // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
       // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
-      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=3&call_id=' + encodeURIComponent(_rtc.callId) +
+      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=4&call_id=' + encodeURIComponent(_rtc.callId) +
                              '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
       cw.onmessage = function (ev) {
         try {
@@ -3190,6 +3249,9 @@
         try { localStorage.setItem('rc-voice-mode-s2s', nxt); } catch (e) {}
         try { fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ rt_voice_mode: nxt }) }).catch(function () {}); } catch (e) {}   // 持久化到服务器(跨设备;relay 门控/预算即时跟随=热切生效)
+        // 127:自动挡下用户轮的模态由**会话级** output_modalities 决定 → 热切要立刻 session.update
+        try { if (_rtc.on) _dcSend({ type: 'session.update',
+          session: { type: 'realtime', output_modalities: [nxt === 'stt' ? 'text' : 'audio'] } }); } catch (e) {}
         if (nxt === 'stt') stopPlayback();
         try { setSt('通话中 · ' + (_VM_TXT[nxt] || nxt)); } catch (e) {}
       } else {                      // 其余:切回答的 T2S 朗读
