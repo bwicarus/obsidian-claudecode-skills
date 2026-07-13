@@ -845,3 +845,11 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 **证据链**(用户截图:Grok 自述"最初に教えてくれたのが第3ページ"+日志):①10:18:24 relay 被 systemctl restart(=我部署 122 撞上用户测试,第二次犯——已写 memory:restart 前查活跃通话);②前端自动重连,新会话用开话时定格的 p3 初始化;③**setPage 去重键用 o.page**——用户翻到第 5 页时 o.page 已=5,重连后新会话是"第 3 页脑子"而去重认为"已同步到 5"=page 消息永不再发→instructions 恒注入第 3 页页码+正文。修:去重键改独立 `o._syncedPage`,连接成功(start/rtcStart 指纹清零处)清零=重连后页码必重推。
 **keyterms 实测上限 20**:API err "Too many keyterms: 27 exceeds maximum of 20. Keyterms were not applied"——官方文档写 ≤100 是假的;两处裁 20(连接 5 固定+翻页更新 5 固定+15 生词)。
 
+## 批次 124(2026-07-13)#285/#286/#287 清账
+
+**#286(标 completed,零新代码)**:精读发现实质已由历史批次覆盖——`_rtcFlushCtx`(㊵)=开口瞬间注入位置+可见内容的拉模式核心;㊿=semantic_vad 手动 create_response;450 开口即同步(__vcSyncNow)闭合"画完立刻问"竞态;ink/sel 变化注入已有指纹去重+"旧知识作废"语义(1329-1340)。任务描述滞后于代码。
+
+**#285 会话压缩 Cookbook 补齐(默认启用)**:现有 `_rtcCompactNow` 骨架(摘要端点+批删+保尾 8+指纹作废)之上补三点:①摘要改插 **root**(`previous_item_id:'root'`=历史头部,官方语义);②批删后**等全部 conversation.item.deleted 确认**再插摘要(`_rtc._delWait` 计数+3s 兜底),`_rtcOnEvent` 加 deleted 分支;③默认阈值 0(关)→**24000**(㊹审核约定"重做完成后 24k")。
+
+**#287 清账**:工具缓存白名单查证**已齐**(VOICE_CACHEABLE_TOOLS 20 项含全部只读工具);provider 熔断**已有等价体系**(_FREE_BUSY_TTL free→paid/ai_backends Gemini 兜底/100 的工具熔断);**getStats 遥测(新做)**:通话中每 10s `pc.getStats` 抽 inbound-rtp audio(packetsLost/jitter)+candidate-pair RTT→ws `rtcstats` 上行→relay `_vlog("rtcstats")` 落学习时间线——"断续/听不清"从此有数据;截图容器化=边际价值低,记录跳过(60 批的尺寸上限+质量阶梯已覆盖主要风险)。
+

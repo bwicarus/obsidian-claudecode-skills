@@ -2637,6 +2637,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 if np and np != book["page"]:
                     book["page"] = np
                     book["_ink_fp"] = ""   # 换页:笔迹指纹作废(缓存键随之翻新)
+            elif t == "rtcstats":   # 124(#287):WebRTC 质量遥测(丢包/抖动ms/RTTms)→学习时间线,诊断"断续"用数据说话
+                _st0 = j.get("s") or {}
+                _vlog("rtcstats", text=json.dumps(_st0, ensure_ascii=False), page=book.get("page") or page, book=file_rel)
             elif t == "text":
                 epoch["n"] += 1   # 打字提问=新话轮(与 speech_started 同语义)
             elif t == "state":

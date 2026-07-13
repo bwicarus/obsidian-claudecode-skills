@@ -4742,7 +4742,7 @@ def assistant_rtc_session():
             "truncation": {"type": "retention_ratio", "retention_ratio": 0.8,
                            "token_limits": {"post_instructions": 24000}}}   # ㊶ 指南§5:上下文硬顶(㊳摘要12k先行,这是官方截断兜底)
     try:   # ㊳ 会话内压缩阈值:每轮 input_tokens 超过它=历史携带成本已值得付一次缓存失效换摘要(0=关)
-        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 0   # ㊹审核:默认关,待按官方Cookbook重做(root摘要+turn组删+等deleted确认;彼时阈值24k)
+        _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 24000   # 124(#285):Cookbook 重做完成(root摘要+等deleted确认)→按审核约定默认启用,阈值24k
     except Exception:
         _cth = 0
     return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image")),

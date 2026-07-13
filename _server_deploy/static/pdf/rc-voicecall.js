@@ -2086,16 +2086,31 @@
       var keep = 8;   // 尾部近几轮 item 保留原文(含最近的 page/state system)
       var del = _rtc.items.slice(0, -keep);
       _rtc.items = _rtc.items.slice(-keep);
-      del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
-      if (summary) _rtcSys('(为控制上下文,更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)');
-      _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
-      try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
+      // 124(#285 Cookbook 定稿):批删后**等全部 conversation.item.deleted 确认**再插摘要(防竞态);
+      // 摘要插到 root(previous_item_id:'root'=历史头部,官方语义:摘要先于其余历史)
+      var _inject = function () {
+        if (summary) _dcSend({ type: 'conversation.item.create', previous_item_id: 'root', item: {
+          type: 'message', role: 'system',
+          content: [{ type: 'input_text', text: '(更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)' }] } });
+        _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
+        try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
+      };
+      if (del.length) {
+        _rtc._delWait = { n: del.length, cb: _inject };
+        setTimeout(function () { if (_rtc._delWait) { _rtc._delWait = null; _inject(); } }, 3000);   // 3s 兜底:确认没等齐也注入
+        del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
+      } else { _inject(); }
     } catch (e) { _rtc.lastCompact = 0; }
   }
   function _rtcOnEvent(e) {   // dc 下行事件 → 既有 UI 语义(对话窗/字幕/按钮/工具卡)
     var t = e.type;
     if (t === 'conversation.item.added' || t === 'conversation.item.created') {   // ㊳:记 item 账本(GA/beta 两个事件名都认)
       try { if (e.item && e.item.id) _rtc.items.push({ id: e.item.id }); } catch (_) {}
+      return;
+    }
+    if (t === 'conversation.item.deleted') {   // 124(#285):压缩批删的确认计数——全部确认才插 root 摘要
+      var dw = _rtc._delWait;
+      if (dw && --dw.n <= 0) { _rtc._delWait = null; try { dw.cb(); } catch (_) {} }
       return;
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
@@ -2385,6 +2400,18 @@
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
       try { var _ai0 = document.getElementById('asst-input'); if (_ai0) _ai0.classList.add('vc-live'); } catch (e) {}   // 66:输入框紫光=打字直达 2.1
       capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
+      // 124(#287):getStats 遥测——诊断"断续/听不清"用数据说话(丢包/抖动/RTT 每 10s 上报,relay 落时间线)
+      _rtc.statsT = setInterval(function () {
+        if (!_rtc.on || !_rtc.pc) return;
+        _rtc.pc.getStats().then(function (rep0) {
+          var o = {};
+          rep0.forEach(function (st) {
+            if (st.type === 'inbound-rtp' && st.kind === 'audio') { o.lost = st.packetsLost; o.jit = Math.round((st.jitter || 0) * 1000); }
+            if (st.type === 'candidate-pair' && st.state === 'succeeded' && st.currentRoundTripTime != null) o.rtt = Math.round(st.currentRoundTripTime * 1000);
+          });
+          if (o.lost != null || o.rtt != null) { try { ws && ws.send(JSON.stringify({ type: 'rtcstats', s: o })); } catch (e2) {} }
+        }).catch(function () {});
+      }, 10000);
       // ㊺P1 控制 WS:抽出为 _ctlOpen(122:可恢复重连);连不上=静默纯前端模式(现有代码即 fallback)
       _rtc.ctlRetry = 0;
       _ctlOpen();
@@ -2408,6 +2435,7 @@
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
     try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = '';
+    try { if (_rtc.statsT) { clearInterval(_rtc.statsT); _rtc.statsT = null; } } catch (e) {}   // 124:遥测随挂断走
     _connecting = false;   // 93:teardown 不经 teardown() 的路径(_rtcDead)也要解锁,否则单飞锁永久卡死
   }
 
