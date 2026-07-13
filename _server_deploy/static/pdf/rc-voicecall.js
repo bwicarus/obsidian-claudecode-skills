@@ -2061,12 +2061,7 @@
       dot.type = 'button'; dot.className = 'vc-card-dot busy';
       dot.innerHTML = opts.icon || '';
       dot.title = '点击切换形态(圆 / 长条 / 方块)';
-      dot.addEventListener('click', function (ev) {
-        ev.stopPropagation();
-        if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }   // 刚拖过 → 这次 click 不算形态切换
-        el.dataset.touched = '1';   // 手动动过 → 出结果不再自动展开/自动收起(尊重用户摆放)
-        _cardForm(el, _cardForm(el) === 'dot' ? 'min' : (_cardForm(el) === 'min' ? 'full' : 'dot'));
-      });
+      dot.addEventListener('click', function (ev) { ev.stopPropagation(); _cycleForm(el); });
       el.appendChild(dot);
     }
     (function () {   // 83:浮层卡 TTS 念(再点=停)
@@ -2098,33 +2093,33 @@
       if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
       _cards.topZ = (_cards.topZ || 500) + 1; el.style.zIndex = String(_cards.topZ);   // 69:点击=置顶
     });
-    // 72:双击=收起/展开(收起=头部+一行摘要,仍可拖可关可长按)
-    el.addEventListener('dblclick', function (ev) {
-      if (ev.target.closest('.vc-card-x')) return;
-      ev.preventDefault();
-      var min = !el.classList.contains('vc-min');
-      if (min) {
-        try {
-          var _sm = el.querySelector('.vc-card-sum');
-          if (_sm && !_sm.textContent) _sm.textContent = (el.querySelector('.vc-card-bd').textContent || '').replace(/\s+/g, ' ').trim().slice(0, 42) + '…';
-        } catch (e) {}
-      }
-      el.classList.toggle('vc-min', min);
-    });
+    // 72:双击=收起/展开 —— **三态卡(opts.dot)已退役这个手势**:单击就是三态循环,双击会连触发两次、
+    //    还跟这个 toggle 打架(用户问"双击到底对应什么" → 答案:三态卡上什么都不对应,已删)。
+    //    非三态卡(普通文字卡/收藏夹拖出的副本)保留旧行为。
+    if (!opts.dot) {
+      el.addEventListener('dblclick', function (ev) {
+        if (ev.target.closest('.vc-card-x')) return;
+        ev.preventDefault();
+        var min = !el.classList.contains('vc-min');
+        if (min) {
+          try {
+            var _sm = el.querySelector('.vc-card-sum');
+            if (_sm && !_sm.textContent) _sm.textContent = (el.querySelector('.vc-card-bd').textContent || '').replace(/\s+/g, ' ').trim().slice(0, 42) + '…';
+          } catch (e) {}
+        }
+        el.classList.toggle('vc-min', min);
+      });
+    }
     // 69/72:按住头部拖动——物理感:阈值内粘住不动;拽过阈值"弹起"(微放大+深阴影)跟手;松手落定回弹。
     // 旧版粘滞/闪烁根因:堆叠布局的 transform 0.38s 过渡在拖动中每帧追赶——拖动期必须 transition:none
     var hd = el.querySelector('.vc-card-hd');
     _bindCardDrag(hd);
     if (opts.dot) {
       _bindCardDrag(el.querySelector('.vc-card-dot'));   // 收起态:头部隐藏,标记自己当把手
-      // 展开后标记不显示 → **头部就是形态按钮**,单击三态循环:方块 → 长条 → 小方块(标记)→ 方块
-      //   (到了标记态,整张卡就是那枚标记,点它继续循环)
+      // 展开后标记不显示 → **头部就是形态按钮**(与标记同一条循环,方向必须一致)
       hd.addEventListener('click', function (ev) {
         if (ev.target.closest('button')) return;
-        if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }
-        el.dataset.touched = '1';
-        var f = _cardForm(el);
-        _cardForm(el, f === 'full' ? 'min' : (f === 'min' ? 'dot' : 'full'));
+        _cycleForm(el);
       });
     }
     function _bindCardDrag(hd) {
@@ -2133,6 +2128,7 @@
     hd.addEventListener('pointerdown', function (ev) {
       if (ev.target.closest('.vc-card-x')) return;
       ev.preventDefault();
+      el.dataset.downT = String(Date.now());   // 131:按下时刻 → 抬手时判"短按才切形态"(长按=选中,不改形态)
       var sx = ev.clientX - c.dx, sy = ev.clientY - c.dy, moved = false;
       try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
       function mv(e2) {
@@ -2189,6 +2185,20 @@
     c.cid = _cid;
     _pinReg(el, _cid);   // 登记进 cid 注册表:选中态处处同步
     return c;
+  }
+  // ── 形态循环(唯一入口,用户设计)──
+  //   顺序恒为 小方块 → 长条 → 方块 → 小方块。⚠ 标记和头部必须**同方向**,否则:长条态标记是隐藏的、
+  //   只有头部可点,若头部反着走就成了 长条↔小方块 死循环,永远到不了方块(用户实测)。
+  //   ⚠ 只认**短按抬手**:长按 = 选中(_pinBind 600ms),拖动 = 移动 —— 这两种松手都不该改形态。
+  var LP_MS = 600;   // 与 _pinBind 的长按阈值同口径
+  function _cycleForm(el) {
+    if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }        // 刚拖过
+    var down = +(el.dataset.downT || 0);
+    if (down && Date.now() - down >= LP_MS - 60) { el.dataset.downT = ''; return; }   // 长按(已被判成选中)
+    el.dataset.downT = '';
+    el.dataset.touched = '1';   // 手动动过 → 出结果不再自动展开/自动收起(尊重用户摆放)
+    var f = _cardForm(el);
+    _cardForm(el, f === 'dot' ? 'min' : (f === 'min' ? 'full' : 'dot'));
   }
   // 形态读写:'dot'(圆) / 'min'(长条) / 'full'(方块)。侧栏内联卡只有 min/full 两态(用户要求:不要圆)。
   function _cardForm(el, f) {
