@@ -1455,46 +1455,62 @@
   }
   // ── 66 按轮语音录制(用户设计:历史对话可回放当时的语音):remote 轨 MediaRecorder,
   //    音频轮 created 开录 / done 收尾拿 clipId(上传异步),文字轮不录;打断的半截轮也收 ──
-  var _rec = { mr: null, chunks: [], mime: '' };
+  // 128(用户实测:两段录音拼起来是**第一段的前半部分**)——根因:录音是按**文字时间线**切的。
+  //   旧法:首个转写 delta 开录、response.done 时按"字数÷5.5"**估算**播放结束再停。
+  //   但转写 delta 跑在音频播放**前面**很多(生成快、播放慢)→ 开录时上一轮的音频还在播、
+  //   停录时本轮才播了个开头 → 录到的是「上轮尾巴 + 本轮开头」,而且长度全靠猜。
+  //   正解:用 WebRTC 专属的官方事件 output_audio_buffer.started/stopped/cleared —— 它们标记的是
+  //   音频**真正开始 / 结束播放**的时刻,录音起止跟它走,一秒不差。
+  var _rec = { mr: null, chunks: [], mime: '', id: '', oab: false };
   function _recMime() {
     var c = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
     for (var i = 0; i < c.length; i++) { try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(c[i])) return c[i]; } catch (e) {} }
     return '';
   }
-  function _recStart() {
-    _recAbort();
-    if (!_rtc.remoteStream || !window.MediaRecorder) return;
-    var mime = _recMime(); if (!mime) return;
+  function _recStart() {   // 音频**开始播** → 开录(clipId 此刻就发,落库不用等录完)
+    _recDrop();
+    if (!_rtc.remoteStream || !window.MediaRecorder) return '';
+    var mime = _recMime(); if (!mime) return '';
     try {
       var mr = new MediaRecorder(_rtc.remoteStream, { mimeType: mime });
-      _rec = { mr: mr, chunks: [], mime: mime };
-      mr.ondataavailable = function (e) { if (e.data && e.data.size) _rec.chunks.push(e.data); };
+      var id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      var chunks = [];
+      _rec = { mr: mr, chunks: chunks, mime: mime, id: id, oab: _rec.oab };
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      mr.onstop = function () {   // 播完才停 → blob 是完整的一整段
+        try {
+          var blob = new Blob(chunks, { type: mime });
+          if (blob.size > 4000) fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob }).catch(function () {});
+        } catch (e) {}
+      };
       mr.start(1000);
-    } catch (e) { _rec.mr = null; }
+      return id;
+    } catch (e) { _rec.mr = null; return ''; }
   }
-  function _recAbort() {   // 97:flush 语义——已设 onstop(=已 _recFinish 拿过 id)的照常触发上传;未定稿的无 id 引用,丢弃无害
-    try { if (_rec.mr && _rec.mr.state !== 'inactive') { _rec.mr.stop(); } } catch (e) {}
+  function _recStop() {    // 音频**播完 / 被打断** → 停录并上传(返回 clipId)
+    var mr = _rec.mr, id = _rec.id;
+    if (!mr) return '';
+    try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {}
+    _rec.mr = null;
+    return id;
+  }
+  function _recDrop() {    // 丢弃(不上传):挂断/重连时清场
+    try { if (_rec.mr) { _rec.mr.onstop = null; if (_rec.mr.state !== 'inactive') _rec.mr.stop(); } } catch (e) {}
     _rec.mr = null;
   }
-  function _recFinish() {   // 返回 clipId(录着才有);blob 在 onstop 异步上传,落库先带 id 不等传完
+  function _recId() { return _rec.id || ''; }
+  function _recAbort() { if (!_rec.oab) _recDrop(); }   // 官方事件在用时:不许中途掐(上一轮可能还在播)
+  function _recFinishLegacy() {   // 回退路径(万一拿不到 output_audio_buffer.*):仍按估算收尾
     var mr = _rec.mr;
     if (!mr || mr.state === 'inactive') { _rec.mr = null; return ''; }
-    var id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-    var mime = _rec.mime, chunks = _rec.chunks;
-    mr.onstop = function () {
-      try {
-        var blob = new Blob(chunks, { type: mime });
-        if (blob.size > 4000) fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob }).catch(function () {});
-      } catch (e) {}
-    };
-    // 97(用户实测"回放只响一声"根因):录的是 WebRTC **实时**流——response.done 只是数据推完,
-    // 音频还要播好几秒;立即 stop=只录到已播的开头。延到估算播放结束(aEnd)+余量再停。
-    var _wait = 0;
-    try { _wait = Math.max(0, (_rtc.aEnd || 0) - Date.now()) + 600; } catch (e) { _wait = 600; }
+    var id = _rec.id;
+    var _wait = 600;
+    try { _wait = Math.max(0, (_rtc.aEnd || 0) - Date.now()) + 600; } catch (e) {}
     setTimeout(function () { try { if (mr.state !== 'inactive') mr.stop(); } catch (e) {} }, Math.min(_wait, 90000));
     _rec.mr = null;
     return id;
   }
+  function _recFinish() { return _rec.oab ? _recId() : _recFinishLegacy(); }
   window.__vcSendText = function (text) {   // 66:侧栏输入框在 2.1(WebRTC)通话中打字直达实时模型(rc-assistant send 拦截调用)
     if (!(_rtc.on && ws && mode === 's2s')) return false;
     try {
@@ -2417,7 +2433,7 @@
     }
     if (t === 'response.output_audio_transcript.delta' || t === 'response.output_text.delta') {   // ㊿ 文字模式回复=output_text.delta,同一渲染管线
       _rtc.turnText = (t === 'response.output_text.delta');   // 66c:本轮模态以实际事件为准(relay 发的工具轮 create 前端不经过,旧 turnText 会错)
-      if (!_rtc.turnText && !_rec.mr) _recStart();   // 82:音频轮的首个 delta=确认真在出声,此刻开录(文字轮永不误录)
+      if (!_rtc.turnText && !_rec.mr && !_rec.oab) _recStart();   // 兜底:没有 output_audio_buffer.* 时才按 delta 开录(有官方事件就等它)
       if (!_rtc.turnText) {   // 67:估计 2.1 音频播放结束时刻(转写字数≈5.5字/秒+缓冲)——TTS 代念等它说完再开口,不叠音
         if (!_rtc.aStart) _rtc.aStart = Date.now();
         _rtc.aEnd = _rtc.aStart + curAText.length / 5.5 * 1000 + 800;
@@ -2426,7 +2442,7 @@
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
       _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
-      var _clipH = _recFinish();   // 66:被打断的半截轮也把已播语音收下
+      var _clipH = _recFinish();   // 66:被打断的半截轮也把已播语音收下(官方事件模式下 .cleared 负责真停录)
       try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clipH ? { clip: _clipH } : null); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
       curAText = ''; curAEl = null;
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
@@ -2434,6 +2450,12 @@
       if (_ttsOn()) { try { bargeIn(); } catch (_) {} }   // 61:抢话同时打断 TTS 代念残播
       _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
       try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
+    } else if (t === 'output_audio_buffer.started') {   // WebRTC 专属:模型音频**真正开始播** → 此刻开录
+      _rec.oab = true;
+      if (!_rec.mr) _recStart();
+    } else if (t === 'output_audio_buffer.stopped' || t === 'output_audio_buffer.cleared') {
+      _rec.oab = true;   // **播完 / 被打断** → 此刻停录(blob 完整,不再靠估算)
+      _recStop();
     } else if (t === 'input_audio_buffer.speech_stopped') {
       // 127(用户拍板):**什么都不做**——官方自动挡(session.turn_detection.create_response=true)。
       // 旧的手动挡要么前端发 create、要么绕 Pi 的 sideband 发,都是白等一个往返;第一句最明显。
@@ -2509,7 +2531,13 @@
             }).catch(function () { onToolStatus({ status: 'error', tool: tool, label: '系统代提交失败' }); });
         })();
       }
-      var _clip0 = _rec.mr ? _recFinish() : '';   // 66/82:有录音器在跑才收(启停已由实际模态驱动)
+      var _clip0 = _rec.mr ? _recFinish() : '';   // 128:官方事件模式=只取 id(音频还在播,停录交给 .stopped);回退模式=老估算收尾
+      if (_rec.oab && _rec.mr) {   // 看门狗:社区实测 output_audio_buffer.stopped 偶发大延迟/不来——
+        var _wid = _rec.id, _cap = Math.max(0, (_rtc.aEnd || 0) - Date.now()) + 20000;   // 估算播完 + 20s 余量
+        setTimeout(function () {
+          if (_rec.mr && _rec.id === _wid) { try { console.warn('[voice] output_audio_buffer.stopped 没来,看门狗收尾'); } catch (e) {} _recStop(); }
+        }, Math.min(_cap, 180000));
+      }
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clip0 ? { clip: _clip0 } : null); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库(+66 语音)
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
       try { var u = e.response && e.response.usage;
@@ -2730,7 +2758,8 @@
   function rtcTeardown() {
     _rtc.on = false;
     try { var _ai1 = document.getElementById('asst-input'); if (_ai1) _ai1.classList.remove('vc-live'); } catch (e) {}
-    _recAbort();
+    _recStop();   // 128:挂断时把还在录的那段**收下并上传**(别丢掉用户刚听到的最后一段)
+    _rec.oab = false;
     _rtcCapReset();
     try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.close(); } } catch (e) {}
     _rtc.ctlWs = null; _rtc.ctl = false;

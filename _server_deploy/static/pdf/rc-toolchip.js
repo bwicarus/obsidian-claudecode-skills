@@ -71,12 +71,12 @@
     var i = Math.max(0, Math.min(view.idx || 0, cards.length - 1)), c = cards[i] || {};
     var faces;
     if ((c.type || 'basic') === 'cloze') {
-      var cz = String(c.cloze || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g,
+      var cz = mdInline(String(c.cloze || '')).replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g,
         function (_m, a) { return '<span class="vc-cz">' + a + '</span>'; });
       faces = '<div class="vc-fc"><div class="vc-fc-t">填空</div>' + cz + '</div>';
     } else {
-      faces = '<div class="vc-fc"><div class="vc-fc-t">正面</div>' + (c.front || '') + '</div>' +
-              '<div class="vc-fc"><div class="vc-fc-t">背面</div>' + (c.back || '') + '</div>';
+      faces = '<div class="vc-fc"><div class="vc-fc-t">正面</div>' + mdInline(c.front || '') + '</div>' +
+              '<div class="vc-fc"><div class="vc-fc-t">背面</div>' + mdInline(c.back || '') + '</div>';
     }
     var dots = cards.map(function (_x, k) { return '<span class="vc-fc-d' + (k === i ? ' on' : '') + '"></span>'; }).join('');
     return '<div style="font-weight:600;margin-bottom:2px">已加 ' + (r.n || cards.length) + ' 张卡 · ' + esc(r.deck || 'QA') + '</div>' +
@@ -137,6 +137,14 @@
       }
       return '<p>' + blk.replace(/\n/g, '<br>') + '</p>';
     }).join('');
+    return h;
+  }
+  function mdInline(t) {   // 卡面 = AI 产的富文本:已有的 HTML(如 <img>)原样保留,markdown 补渲,$公式$ 交给 MathJax
+    var h = String(t || '');
+    if (!/[*`_]/.test(h)) return h;                                   // 没有 markdown 记号:原样(别动 HTML)
+    h = h.replace(/(^|[^\\])`([^`\n]+)`/g, '$1<code>$2</code>')
+         .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     return h;
   }
   function wireAnki(bd, chip, view) {
@@ -206,10 +214,8 @@
     var el = document.createElement('div');
     el.className = 'vc-card vc-inflow vc-hasdot vc-typed vc-min';   // hasdot=套用同一套一行长条/展开规则
     el.style.setProperty('--vc-tc', TYPE_C[chip.type] || TYPE_C.text);
-    el.innerHTML = '<div class="vc-card-hd">' + esc(chip.label) +
-      '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
-      '<button type="button" class="vc-card-x" aria-label="移除">' +
-      '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
+    // 侧栏里的工具卡 = 对话记录本身 → **不要 ▶ 播放、不要 ✕ 删除**(用户明确)
+    el.innerHTML = '<div class="vc-card-hd">' + esc(chip.label) + '</div>' +
       '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
     var view = { el: el, inflow: true, idx: 0, deep: false };
     hdSplit(el, chip.label, isAction(chip.type));
@@ -217,12 +223,6 @@
       if (ev.target.closest('button')) return;
       el.dataset.touched = '1';
       vc.form(el, el.classList.contains('vc-min') ? 'full' : 'min');
-    });
-    el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); el.remove(); });
-    el.querySelector('.vc-card-p').addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      try { window.__vcTtsWarm && window.__vcTtsWarm(); } catch (e) {}
-      try { window.__vcSpeakText && window.__vcSpeakText((el.querySelector('.vc-card-bd') || {}).textContent || ''); } catch (e) {}
     });
     vc.pinReg(el, chip.cid);   // 选中按 cid 全局同步(同号卡处处高亮/处处取消)
     if (!isAction(chip.type)) {   // 执行类(翻页等)不产出内容 → 不参与选中,但仍显示+可点开确认

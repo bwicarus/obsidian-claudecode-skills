@@ -249,3 +249,30 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
 ### ⚠ 部署
 
 `rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里,导致「设置面板没有语音 tab」排查一整轮)。前端只由 nginx 从 `/var/www/html/static/pdf/` 服务。
+
+
+---
+
+## 🎙 通话录音的切分:必须按**真实播放边界**,不能按文字时间线(2026-07-14,用户实测)
+
+用户症状:连续两段回复的录音,按 ▶ 播出来拼在一起是**第一段的前半部分**。
+
+**根因**:录音(remote 轨 `MediaRecorder`)的起止是按**文字时间线**驱动的——
+- 开录 = 首个音频转写 delta;
+- 停录 = `response.done` 时按「字数 ÷ 5.5 字/秒」**估算**播放结束再延时 stop。
+
+但转写 delta 跑在音频播放**前面**很多(生成快、播放慢)。于是开录时**上一轮的音频还在播**、停录时本轮才播了个开头 → 录到的是「上轮尾巴 + 本轮开头」,长度还全靠猜。
+
+**正解**:用 WebRTC 专属的官方事件(API reference 里没写,但实际在发):
+
+| 事件 | 含义 | 动作 |
+|---|---|---|
+| `output_audio_buffer.started` | 模型音频**真正开始播** | `_recStart()`(clipId 此刻就发,落库不用等录完) |
+| `output_audio_buffer.stopped` | 音频**播完** | `_recStop()` → blob 完整,上传 |
+| `output_audio_buffer.cleared` | 音频**被打断** | `_recStop()`(半截也收下) |
+
+- `response.done` 只取 clipId 落库,**不再掐录音**(那时音频还在播)。
+- `_rec.oab` 标志:一旦见过任一 `output_audio_buffer.*` 就走新路;万一环境不发这组事件,回退老的 delta/估算路径。
+- **看门狗**:社区实测 `.stopped` 偶发大延迟甚至不来 → `response.done` 后按「估算播完 + 20s」兜底强停,免得录音器一直转。
+
+Sources: [community.openai.com — output_audio_buffer.stopped 未文档化](https://community.openai.com/t/why-is-the-realtime-server-event-output-audio-buffer-stopped-not-documented/1132028) / [.stopped 延迟报告](https://community.openai.com/t/big-delays-receiving-output-audio-buffer-stopped-event-since-apr-18th/1379823)
