@@ -89,47 +89,93 @@
   }
   // ── 展开视图 = 数据流图(用户设计):AI → 各处理步骤 → 结果,每个小方块可点开看它经手的数据 ──
   //    载荷用 markdown/MathJax 正常渲染(之前直接 esc() 出来一坨纯文本,根本没法读)。
-  var ICON = { ai: '🧠', tool: '⚙︎', step: '▸', out: '◧', err: '⚠' };
+  // 流程图节点图标:Apple 简约线条 SVG(currentColor),与项目其余图标同一风格——不要 emoji
+  var ICON = {
+    ai:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"><path d="M6.4 2.2l1.05 2.75L10.2 6l-2.75 1.05L6.4 9.8 5.35 7.05 2.6 6l2.75-1.05z"/><path d="M11.4 9l.62 1.63L13.65 11.25l-1.63.62L11.4 13.5l-.62-1.63L9.15 11.25l1.63-.62z"/></svg>',
+    step: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35"><circle cx="8" cy="8" r="2.1"/><path d="M8 2.7v1.5M8 11.8v1.5M2.7 8h1.5M11.8 8h1.5M4.3 4.3l1.05 1.05M10.65 10.65l1.05 1.05M11.7 4.3l-1.05 1.05M5.35 10.65L4.3 11.7" stroke-linecap="round"/></svg>',
+    out:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 8.4l3 3 6.6-7"/></svg>',
+    err:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.9l5.6 9.8H2.4z"/><path d="M8 6.4v2.6M8 11h.01"/></svg>',
+    flow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="3.6" r="1.6"/><circle cx="4" cy="12.4" r="1.6"/><circle cx="12" cy="8" r="1.6"/><path d="M5.5 4.4L10.6 7.2M5.5 11.6l5.1-2.8"/></svg>'
+  };
   function stages(chip) {
+    var m = {};
+    (chip.meta || []).forEach(function (r) { m[r[0]] = r[1]; });
     var st = [];
-    var args = null;
-    (chip.meta || []).forEach(function (r) { if (r[0] === '参数') args = r[1]; });
-    st.push({ ic: ICON.ai, t: 'AI 请求 ' + chip.label, m: '', kind: 'code',
-              body: args || '(无参数)' });
+    // ① AI 请求:它说了什么 / 带了什么上下文 / 传了什么参数(全部 markdown 渲染)
+    var ai = '';
+    if (m['指令(S2S 原话)']) ai += '**指令**:' + m['指令(S2S 原话)'] + '\n\n';
+    if (m['携带上下文']) ai += '**携带上下文**:' + m['携带上下文'] + '\n\n';
+    var args = m['参数'] || '';
+    if (args) {
+      try { args = JSON.stringify(JSON.parse(args), null, 1); } catch (e) {}
+      ai += '**参数**\n\n```\n' + args + '\n```';
+    }
+    st.push({ ic: ICON.ai, t: 'AI 请求 · ' + chip.label, m: '', kind: 'md', body: ai || '(无参数)' });
+    // ② 中间步骤
     (chip.steps || []).forEach(function (x) {
       st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : ''),
-                kind: 'text', body: x.detail || '' });
+                kind: 'md', body: x.detail || '' });
     });
-    var sec = '';
-    (chip.meta || []).forEach(function (r) { if (r[0] === '耗时') sec = r[1]; });
+    // ③ 结果(默认展开)
     st.push({ ic: chip.failed ? ICON.err : ICON.out,
               t: chip.failed ? '出错' : (chip.result && chip.result.kind === 'anki' ? '生成卡片' : '结果'),
-              m: sec, kind: chip.result && chip.result.kind === 'anki' ? 'anki' : 'md',
-              body: chip.detail || chip.summary || '' , open: true });
+              m: m['耗时'] || '',
+              kind: (chip.result && chip.result.kind === 'anki') ? 'anki' : 'md',
+              tts: !(chip.result && chip.result.kind === 'anki') && !chip.failed,   // 纯文字结果才给 ▶
+              body: chip.detail || chip.summary || '', open: true });
     return st;
   }
   function renderPayload(el, sg, chip, view) {
     if (sg.kind === 'anki') { el.innerHTML = ankiHtml(chip, view); wireAnki(el, chip, view); return; }
-    if (sg.kind === 'code') {
-      var txt = sg.body;
-      try { txt = JSON.stringify(JSON.parse(sg.body), null, 1); } catch (e) {}
-      el.innerHTML = '<pre>' + esc(txt) + '</pre>';
-      return;
-    }
-    var body = String(sg.body || '');
+    var body = prettyResult(sg.body);
     if (!body.trim()) { el.innerHTML = '<span style="color:#7f92b8">(没有额外内容)</span>'; return; }
     try {
-      if (window.RC && RC.assistant && RC.assistant.renderMd) RC.assistant.renderMd(el, body, true);   // 主路:与对话同一套 md+MathJax
-      else el.innerHTML = miniMd(body);                                                                // 兜底:侧栏还没挂载时也别吐纯文本
+      if (window.RC && RC.assistant && RC.assistant.renderMd) RC.assistant.renderMd(el, body, true);   // 主路:与对话同一套 md + MathJax
+      else el.innerHTML = miniMd(body);                                                                // 兜底:绝不吐纯文本
     } catch (e) { el.innerHTML = miniMd(body); }
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]); } catch (e) {}
+    if (sg.tts) addTts(el);   // 纯文字的最终结果 → 文字区域角落放一个 ▶(TTS 念它)
   }
-  function miniMd(t) {   // 极简 markdown 兜底(粗体/斜体/行内码/列表/换行)——绝不把原始文本直接倒出来
-    var h = esc(t);
-    h = h.replace(/`([^`]+)`/g, '<code>$1</code>')
-         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  function prettyResult(t) {   // 工具回给模型的常是 JSON(截图里那坨 {"kind":"weather","note":...})→ 抽人话,别倒原文
+    var raw = String(t || '');
+    var o = null;
+    try { o = JSON.parse(raw); } catch (e) { return raw; }
+    if (!o || typeof o !== 'object') return raw;
+    var pick = o.note || o.speak || o.summary || o.text || o.brief || o.result;
+    if (typeof pick === 'string' && pick.trim()) return pick;
+    var lines = [];
+    Object.keys(o).forEach(function (k) {
+      if (k.charAt(0) === '_' || o[k] == null || o[k] === false) return;
+      var v = o[k];
+      if (typeof v === 'object') { try { v = JSON.stringify(v); } catch (e) { v = ''; } }
+      lines.push('- **' + k + '**:' + v);
+    });
+    return lines.join('\n') || raw;
+  }
+  function addTts(el) {   // 用户设计:唯一留 ▶ 的地方——纯文字结果那块内容的角落
+    if (el.querySelector('.vc-fp-tts')) return;
+    el.style.position = 'relative';
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'vc-fp-tts'; b.title = '念一遍';
+    b.innerHTML = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M5.6 3.6l6 4.4-6 4.4z"/></svg>';
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      try { window.__vcTtsWarm && window.__vcTtsWarm(); } catch (e) {}
+      try { window.__vcSpeakText && window.__vcSpeakText(el.textContent || ''); } catch (e) {}
+    });
+    el.appendChild(b);
+  }
+  function miniMd(t) {   // 兜底 markdown(侧栏未挂载时也不能吐原始文本):代码块/标题/列表/粗斜体/行内码
+    var fences = [];
+    var h = String(t || '').replace(/```[a-z]*\n([\s\S]*?)```/g, function (_m, code) {
+      fences.push(code); return '\u0000F' + (fences.length - 1) + '\u0000';
+    });
+    h = esc(h)
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     h = h.split(/\n{2,}/).map(function (blk) {
+      if (/^#{1,4}\s/.test(blk)) return '<p><strong>' + blk.replace(/^#{1,4}\s*/, '') + '</strong></p>';
       if (/^\s*[-*·]\s+/m.test(blk)) {
         return '<ul>' + blk.split('\n').map(function (li) {
           return li.trim() ? '<li>' + li.replace(/^\s*[-*·]\s+/, '') + '</li>' : '';
@@ -137,15 +183,15 @@
       }
       return '<p>' + blk.replace(/\n/g, '<br>') + '</p>';
     }).join('');
+    h = h.replace(/\u0000F(\d+)\u0000/g, function (_m, i) { return '<pre>' + esc(fences[+i]) + '</pre>'; });
     return h;
   }
-  function mdInline(t) {   // 卡面 = AI 产的富文本:已有的 HTML(如 <img>)原样保留,markdown 补渲,$公式$ 交给 MathJax
+  function mdInline(t) {   // Anki 卡面 = AI 产的富文本:已有 HTML(<img> 等)原样保留,markdown 补渲,$公式$ 交给 MathJax
     var h = String(t || '');
-    if (!/[*`_]/.test(h)) return h;                                   // 没有 markdown 记号:原样(别动 HTML)
-    h = h.replace(/(^|[^\\])`([^`\n]+)`/g, '$1<code>$2</code>')
-         .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-         .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-    return h;
+    if (!/[*`_]/.test(h)) return h;
+    return h.replace(/`([^`\n]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
   }
   function wireAnki(bd, chip, view) {
     var p = bd.querySelector('.vc-fc-p'), n = bd.querySelector('.vc-fc-x2');
@@ -258,6 +304,9 @@
         chip.card = c;
         c.el.classList.add('vc-typed');
         hdSplit(c.el, chip.label, isAction(type));
+        // 字幕浮层的工具卡也**不要 ▶ / ✕**(与侧栏一致,用户要求):它是过程指示,不是可播可删的内容卡。
+        //   收起靠点头部/标记;唯一保留 ▶ 的地方 = 纯文字结果那块内容的角落(见 renderPayload)。
+        ['.vc-card-p', '.vc-card-x'].forEach(function (q) { var b = c.el.querySelector(q); if (b) b.remove(); });
         chip.views.push({ el: c.el, inflow: false, idx: 0, deep: false });
         if (!isAction(type)) {   // 长按=选中/取消(紫边,按 cid 全局广播);执行类不参与选中
           vc.pinBind(c.el, chip.label, function () { return (c.el.querySelector('.vc-card-bd') || {}).textContent || chip.summary || ''; });
@@ -294,6 +343,7 @@
     chip.detail = o.detail || chip.detail || '';
     chip.step = '';
     paintSum(chip);
+    if (chip.absorbed) { repaintFlows(chip); return; }   // 已被结果卡吸收:没有自己的视图,只刷流程图
     chip.views.forEach(function (v) {
       paintBody(chip, v);
       if (isAction(chip.type) && !v.inflow) {   // 执行类(不产出内容):**完成即消失**——报一下就走人
@@ -319,6 +369,7 @@
     chip.summary = chip.step = msg || '失败';
     chip.detail = msg || '失败';
     paintSum(chip);
+    if (chip.absorbed) { repaintFlows(chip); return; }
     // 用户设计:出错的卡**留在页面上**(不自动消失,包括执行类)——点开看错误详情
     chip.views.forEach(function (v) {
       v.el.classList.add('vc-canfull');   // 执行类平时没有方块,出错时开放展开(为了看 error)
@@ -351,7 +402,54 @@
     })();
   }
 
+  // ── 结果卡吸收(用户设计)──
+  //   天气/网络搜索/配图/视频 这类工具**本来就有自己的结果卡**(renderInfo)。以前工具指示器还会
+  //   另造一张 → 字幕模式一次弹两张。现在:结果卡是唯一显示,工具卡被它吸收,
+  //   标题栏加一个「流程」按钮,点开在卡片内展开这条线性流程图(AI → 工具 → 结果)。
+  function absorb(hosts) {
+    hosts = [].concat(hosts || []).filter(Boolean);
+    if (!hosts.length) return;
+    var chip = null;                       // 认领:最近一个还没被吸收的 chip(工具是串行的)
+    for (var i = chips.length - 1; i >= 0; i--) { if (!chips[i].absorbed) { chip = chips[i]; break; } }
+    if (!chip) return;
+    chip.absorbed = [];
+    chip.views.slice().forEach(function (v) {   // 撤掉它自己的两个视图(浮层 + 侧栏)
+      if (v.inflow) { try { v.el.remove(); } catch (e) {} }
+    });
+    if (chip.card) { try { VC().close(chip.card); } catch (e) {} }
+    chip.views = [];
+    hosts.forEach(function (h) { chip.absorbed.push(h); mountFlow(h, chip); });
+  }
+  function mountFlow(host, chip) {
+    var hd = host.querySelector('.vc-if-hd') || host.querySelector('.vc-card-hd');
+    if (!hd || hd.querySelector('.vc-flowb')) return;
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
+    b.innerHTML = ICON.flow;
+    var box = document.createElement('div');
+    box.className = 'vc-flowbox'; box.hidden = true;
+    var view = { el: box, inflow: true, idx: 0, open: {}, host: 1 };
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      box.hidden = !box.hidden;
+      b.classList.toggle('on', !box.hidden);
+      if (!box.hidden) paintFlow(chip, view);
+    });
+    hd.appendChild(b);
+    host.appendChild(box);
+    chip._flows = chip._flows || [];
+    chip._flows.push(view);
+  }
+  function paintFlow(chip, view) {   // 复用同一套流程图渲染(view.el 直接当画布)
+    var fake = { el: { querySelector: function (q) { return q === '.vc-card-bd' ? view.el : null; } },
+                 inflow: true, idx: view.idx, deep: false, open: view.open };
+    paintBody(chip, fake);
+    view.idx = fake.idx;
+  }
+  function repaintFlows(chip) { (chip._flows || []).forEach(function (v) { if (!v.el.hidden) paintFlow(chip, v); }); }
+
   RC.toolChip = {
+    absorb: absorb,
     create: create, progress: progress, done: done, fail: fail, remove: remove, clearAll: clearAll, track: track,
     typeOf: typeOf, isAction: isAction, setForm: form,
     setSteps: function (chip, st) { if (chip) { chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); } },

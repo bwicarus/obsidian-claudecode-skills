@@ -187,7 +187,24 @@
       '.vc-fn:active{background:rgba(255,255,255,.1)}' +
       '.vc-fn.on{border-color:var(--vc-tc);background:color-mix(in srgb,var(--vc-tc) 14%,rgba(255,255,255,.04))}' +
       '.vc-fn-i{flex:none;width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;' +
-        'font-size:12px;background:color-mix(in srgb,var(--vc-tc) 26%,rgba(0,0,0,.35));color:#fff}' +
+        'background:color-mix(in srgb,var(--vc-tc) 24%,rgba(0,0,0,.32));color:#dfe7f6}' +
+      '.vc-fn-i svg{width:13px;height:13px}' +
+      // 展开(长条/方块)后:左上角那枚标记按钮**不再显示**(用户要求);形态切换改点头部
+      '.vc-card.vc-hasdot:not(.vc-dot) .vc-card-dot{display:none}' +
+      '.vc-card.vc-hasdot:not(.vc-dot) .vc-card-hd{padding-left:13px}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{padding-left:13px}' +
+      // 结果卡标题栏上的「流程」按钮(天气/搜索等自带结果卡的工具:唯一显示的是结果卡,流程收在这个按钮里)
+      '.vc-flowb{flex:none;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.12);border:none;color:#cbd6ea;' +
+        'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin-left:4px}' +
+      '.vc-flowb svg{width:12px;height:12px}' +
+      '.vc-flowb.on{background:#7b6cff;color:#fff}' +
+      '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
+      // 唯一保留 ▶ 的地方(用户设计):纯文字结果那块内容的角落 —— 点它用 TTS 念
+      '.vc-fp-tts{position:absolute;right:4px;bottom:4px;width:22px;height:22px;border-radius:50%;padding:0;border:none;' +
+        'background:rgba(123,108,255,.18);color:#9d8cff;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
+        'transition:transform .12s}' +
+      '.vc-fp-tts:active{transform:scale(.85)}' +
+      '.vc-fp-tts svg{width:11px;height:11px}' +
       '.vc-fn-t{flex:1;font-size:12.5px;color:#e2e9f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.vc-fn-m{flex:none;font-size:10.5px;color:#7f92b8;font-variant-numeric:tabular-nums}' +
       '.vc-fn-x{flex:none;font-size:10px;color:#7f92b8;transition:transform .2s}' +
@@ -272,7 +289,8 @@
       '.vc-pc-s{font-size:11.5px;color:#8d97b4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}' +
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
-      '.vc-if-hd{font-size:12px;color:#c3cee6;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
+      // 结果卡头部 = 直接套用我们方块的头部(小字主题色 + 整条当把手);⠿ 那个多余的拖动按钮已删
+      '.vc-if-hd{font-size:12px;color:#b9a8ff;font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
       'background:rgba(255,255,255,.06);border-radius:9px;font-weight:600}' +
       '.vc-if-hd span:first-child{flex:1}' +
       '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
@@ -994,7 +1012,7 @@
   function _infoCardEl(card) {   // 87:构一张侧栏信息卡(实时与历史回放共用——刷新后卡永远还是卡)
     if (!card.cid) card.cid = _mkCid();   // 95:历史旧卡(落库时还没 cid 字段)补发——本次会话内该实例稳定
     var label = card.title || '搜索结果';
-    var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
+    var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card);
     var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
     d.innerHTML = html;
     _pinBind(d, label, function () { return _infoText(card); });
@@ -1023,12 +1041,16 @@
     if (_rtc.on && (_voiceMode() !== 'stt' || _ttsOn())) { try { _speakSafe('搜索完成'); } catch (e) {} }
     var label = card.title || '搜索结果';
     var th = document.getElementById('asst-thread');
-    if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; }
+    var _hosts = [];
+    if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
     if (!_sideOpen()) {
-      var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span><span class="vc-grip">⠿</span></div>' + _infoHtml(card);
+      var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card);
       var c = _cardPush(html, label, true, false, card.cid);   // 字幕模式:浮层镜像(html,与侧栏卡同编号)
-      if (c) { _pinBind(c.el, label, function () { return _infoText(card); }); try { _igWire(c.el, card); } catch (e) {} }
+      if (c) { _pinBind(c.el, label, function () { return _infoText(card); }); try { _igWire(c.el, card); } catch (e) {} _hosts.push(c.el); }
     }
+    // 用户设计:这类工具**本来就有自己的结果卡** → 别再让工具指示器另造一张(字幕模式曾一次弹两张)。
+    //   把工具卡「吸收」进结果卡:唯一显示的是结果卡,标题栏多一个按钮,点开就是那条线性流程图。
+    try { if (window.RC && RC.toolChip && RC.toolChip.absorb) RC.toolChip.absorb(_hosts); } catch (e) {}
     // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
     try {   // ⚠EPUB 自有历史(epub-convo)结构不同,card 落库暂只走 PDF 主历史
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
@@ -2021,7 +2043,15 @@
     // 旧版粘滞/闪烁根因:堆叠布局的 transform 0.38s 过渡在拖动中每帧追赶——拖动期必须 transition:none
     var hd = el.querySelector('.vc-card-hd');
     _bindCardDrag(hd);
-    if (opts.dot) _bindCardDrag(el.querySelector('.vc-card-dot'));   // 圆态:头部隐藏,标记自己当把手
+    if (opts.dot) {
+      _bindCardDrag(el.querySelector('.vc-card-dot'));   // 收起态:头部隐藏,标记自己当把手
+      hd.addEventListener('click', function (ev) {       // 展开后标记不显示 → 点头部循环形态
+        if (ev.target.closest('button')) return;
+        if (el.dataset.dragged === '1') { el.dataset.dragged = ''; return; }
+        el.dataset.touched = '1';
+        _cardForm(el, _cardForm(el) === 'min' ? 'full' : 'min');
+      });
+    }
     function _bindCardDrag(hd) {
     if (!hd) return;
     hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
