@@ -326,6 +326,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 - profile 自动创建有 i18n backend 依赖问题，用 Python `ProfileManager._loadMeta + create("User 1")` 绕开
 - obsidian-headless 必须 Node 22+（全局 `WebSocket` API）+ `npm rebuild better-sqlite3`
 - 二进制名是 `ob`，子命令是 `sync-setup`（不是 `init`）
+- ⚠ **AnkiConnect 的 `addNote` deckName 不生效**（2026-07-14 定位，曾让 QA 牌组恒 0、6 天 39 张卡全落「系统默认」）：插件靠 `note.model()['did'] = deck_id` 传牌组，而它先调的 `startEditing()` → `requireReset()` → `mw.reset()` 把 notetype 缓存清了，`collection.addNote()` 读回来的 `did` 已退回 notetype 自带的默认牌组。**所有 addNote 之后必须显式 `changeDeck` 归位**（已在 7 个调用点全部加上；`scripts/vocab/anki_from_word.py` 早就这么兜底，所以 Vocab 牌组一直是对的）。注：**AnkiWeb sync 是无辜的**，它不会冲掉本地新卡
 
 ## 电源 / 屏幕守护
 
