@@ -1445,6 +1445,10 @@ def _eagent_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 yield {"event": "tool-done", "data": _elabel(name)}
                 content = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue
+            if tool and tool.get("tool"):   # 解析出工具调用但工具名不存在 → 明确反馈(否则 break,模型幻觉"工具还在运行中")
+                content = (f"【系统】没有名为「{tool.get('tool')}」的工具。读正文用 read_section(EPUB 无 read_page);"
+                           "其余见【可用工具】。改调正确工具,或直接用已知/可见正文回答——别说工具在运行中。")
+                continue
             trace[0]["detail"] = (raw or "")[:6000]
             yield {"event": "answer", "data": raw}
             break
@@ -1551,6 +1555,10 @@ def _eagent_gemini(message, ctx, history, variant, depth, uid):
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 contents.append({"role": "user", "parts": [{"text": feed}]})
                 A._compact_gemini_contents(contents)
+                continue
+            if tool and tool.get("tool"):   # 解析出工具调用但工具名不存在 → 明确反馈(否则 break,模型幻觉"工具还在运行中")
+                contents.append({"role": "model", "parts": [{"text": raw}]})
+                contents.append({"role": "user", "parts": [{"text": f"【系统】没有名为「{tool.get('tool')}」的工具。读正文用 read_section(EPUB 无 read_page);其余见【可用工具】。改调正确工具,或直接用已知/可见正文回答——别说工具在运行中。"}]})
                 continue
             trace[0]["detail"] = (raw or "")[:6000]
             yield {"event": "answer", "data": raw}
