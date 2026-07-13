@@ -3543,6 +3543,10 @@
       _readerES.addEventListener('change', function (e) {
         if (document.visibilityState !== 'visible') return;   // 不活跃 → 忽略(后端已更新,回来 visibility 同步)
         var ev; try { ev = JSON.parse(e.data); } catch (x) { return; }
+        if (ev && ev.kind === 'client-action' && ev.action && (!ev.file || ev.file === FREL)) {   // MCP 遥控:统一走 RC.execRemote(EPUB 的 jumpWithBack→HOST.goTo 章跳)
+          try { if (window.RC && RC.execRemote) RC.execRemote(ev.action); } catch (x3) {}
+          return;
+        }
         if (ev && ev.kind === 'fav-built' && _FAV_FID && ev.file === ('fav:' + _FAV_FID)) { _favReconcile(); return; }   // 本收藏夹重建完 → 结构增量重排
         if (ev && ev.kind === 'userpage-del') { _upageRemoveLive(ev.file, ev.uid); return; }   // 别处删了这张纸 → 本视图当场移除
         if (ev && ev.file && _favUpFiles().indexOf(ev.file) >= 0) _liveSyncSoon();   // 事件跟本阅读器某自建页来源匹配才同步

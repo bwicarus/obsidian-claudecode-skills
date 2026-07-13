@@ -2032,6 +2032,31 @@
   };
   window.__asstHistUrl = function () { return _HISTURL; };   // ㉟ 语音重连历史回放读侧栏同一端点(EPUB=本书 epub-convo)
 
+  // ── MCP 遥控统一执行器(共享层,阅读器统一架构):外部 agent(Claude/ChatGPT app 经 MCP)的
+  //    client_action 由两阅读器的 reader-events SSE 监听各自挂载、都调这里执行。
+  //    顺序:① adapter.execAction(fn,args) 精确翻译钩子(per-reader 语义,可选实现,返回 true=已接住)
+  //         ② window[fn] 原生全局(PDF 的 jumpWithBack 等,保留原语义:跳转带返回按钮)
+  //         ③ 跳转语义映射 HOST 契约 goTo(EPUB 无 window.jumpWithBack → 章跳,两 adapter 都实现了 goTo)──
+  try {
+    window.RC = window.RC || {};
+    RC.execRemote = function (action) {
+      if (!action || !action.fn) return false;
+      var fn = action.fn, args = action.args || [];
+      try {
+        var ad = (RC.adapter && RC.adapter()) || null;
+        if (ad && typeof ad.execAction === 'function' && ad.execAction(fn, args)) return true;
+      } catch (e) {}
+      try { if (typeof window[fn] === 'function') { window[fn].apply(null, args); return true; } } catch (e) {}
+      try {
+        if (fn === 'jumpWithBack') {
+          var host = (RC.adapter && RC.adapter()._host && RC.adapter()._host.asst) || null;
+          if (host && host.goTo) { host.goTo(parseInt(args[0], 10) || 0); return true; }
+        }
+      } catch (e) {}
+      return false;
+    };
+  } catch (e) {}
+
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
   function trackTask(id, label) {
     if (!id) return;

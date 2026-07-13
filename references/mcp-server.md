@@ -46,7 +46,7 @@
 
 写操作便捷封装:`make_anki_card(text,file,page)`、`add_highlight(file,page,texts,color)`(texts 须页面原文逐字,先 read_page 照抄)。
 
-**MCP 遥控前端(2026-07-13)**:外部 agent 调前端动作类工具(goto_page 等)时没有浏览器在等 `client_action`——之前"让它翻页但页面不动"。现在 `/api/assistant/tool` 桥执行后把 `client_action` 经**阅读器 SSE 总线**(`reader_events.publish("client-action", file, uid, extra={"action":{fn,args}})`)广播;PDF 阅读器(pdf-tail.js 的 reader-events 监听)收到后 `window[fn].apply(null,args)` 真执行(仅 visible 页面;file 空=广播全部,非空=只匹配的书)。EPUB 侧未接(页码语义不同,按需再做)。
+**MCP 遥控前端(2026-07-13)**:外部 agent 调前端动作类工具(goto_page 等)时没有浏览器在等 `client_action`——之前"让它翻页但页面不动"。现在 `/api/assistant/tool` 桥执行后把 `client_action` 经**阅读器 SSE 总线**(`reader_events.publish("client-action", file, uid, extra={"action":{fn,args}})`)广播;**执行器在统一中间层**(rc-assistant.js 的 `RC.execRemote(action)`,PDF/EPUB 都加载):① `adapter.execAction(fn,args)` 精确翻译钩子(可选实现)→ ② `window[fn]` 原生全局(PDF 的 jumpWithBack,保留跳转带返回语义)→ ③ 跳转语义映射 `_host.asst.goTo`(EPUB=章跳,两 adapter 都实现了 goTo)。挂载=两阅读器各自的 reader-events SSE 监听各一行(仅 visible 页面;file 空=广播全部,非空=只匹配的书)。
 ⚠ `_convo_append` 的 meta 是**白名单字段**(page/book/file_rel/…/via)——加新 meta 字段要进白名单,字段名用 `file_rel` 不是 `file`。
 
 ## 注册 / 使用
