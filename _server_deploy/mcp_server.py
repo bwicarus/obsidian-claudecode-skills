@@ -247,6 +247,9 @@ if __name__ == "__main__":
         from mcp_oauth import build_asgi
         public_base = os.environ.get("MCP_PUBLIC_BASE", "https://bwicarus.taile44d0c.ts.net:8443")
         app = build_asgi(mcp.streamable_http_app(), static_token=http_token, public_base=public_base)
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")   # 只听本机:入口=nginx /mcp(tailnet)+ Tailscale Funnel(公网);info=开访问日志(低流量,排查连接器全靠它)
+        # host 默认只听本机;Pi unit 设 0.0.0.0(VPS nginx 经 tailnet 反代进来,claude.ai 连接器
+        # 的服务端请求不走非 443 端口——8443 Funnel 授权页能开但 token/mcp 全连不上,2026-07-13 实测)
+        host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
+        uvicorn.run(app, host=host, port=port, log_level="info")   # 入口=nginx /mcp(tailnet)+ Funnel 8443 + VPS bwicarus.space 443;info=开访问日志(排查连接器全靠它)
     else:
         mcp.run()   # stdio(默认):由 MCP 客户端(claude mcp add)按需拉起,无 HTTP 面
