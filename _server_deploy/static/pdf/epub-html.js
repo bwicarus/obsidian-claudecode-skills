@@ -3274,6 +3274,26 @@
       return;
     }
     reqJson('POST', '/pdf/api/epub-ink', { file: _inkFileOf(idx), idx: idx, strokes: strokes || [] }, done, fail);
+    _inkShotSync(_inkFileOf(idx), (strokes || []).length > 0);   // EPUB 笔迹合成图:存笔迹时顺带拍视口截图存服务端,see_ink 全链路回退用(用户诉求:中间层按需产合成图)
+  }
+  // 存笔迹时把「正文+笔迹」合成图(视口截图)推服务端 /api/epub-ink-shot,供 see_ink 各链路(文字/语音/WS/WebRTC)
+  //   拿不到请求时截图时回退读。有笔迹→拍图存;无笔迹→删图。节流:同一本书 1.2s 内合并一次,避免连续落笔狂拍。
+  var _inkShotT = null, _inkShotLast = 0;
+  function _inkShotSync(fileRel, hasInk) {
+    if (!fileRel) return;
+    clearTimeout(_inkShotT);
+    if (!hasInk) {   // 清空:立即删服务端图(别留陈旧)
+      try { reqJson('POST', '/pdf/api/epub-ink-shot', { file: fileRel, b64: '' }, function () {}, function () {}); } catch (e) {}
+      return;
+    }
+    _inkShotT = setTimeout(function () {
+      if (!(window.RC && RC.captureView)) return;
+      RC.captureView().then(function (shot) {
+        if (shot && shot.b64) {
+          try { reqJson('POST', '/pdf/api/epub-ink-shot', { file: fileRel, b64: shot.b64, media_type: shot.media_type }, function () {}, function () {}); } catch (e) {}
+        }
+      }).catch(function () {});
+    }, 1200);
   }
   // 自建页拖拽改高 → 墨迹按 startH/新H 重归一化 y,保持像素位置不变(空间加到下方,不整体拉伸)。
   //   墨迹 y 归一到 section 高度(见 _inkNorm/_inkDrawStroke),高度一变 y*H 就竖向拉伸——resize 时反向补偿即抵消。

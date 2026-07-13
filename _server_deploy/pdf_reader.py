@@ -6933,6 +6933,44 @@ def pdf_api_epub_ink():
     return jsonify({"ok": True, "count": len(strokes)})
 
 
+# ── EPUB 笔迹合成图缓存(state/epub-ink-shot/<sha>.jpg)──
+# EPUB 笔迹是归一化坐标、服务端无章节宽高无法无失真渲染合成图 → 前端每次存笔迹时顺带拍一张视口截图存这里;
+# see_ink 各链路(文字侧栏/WS relay 豆包·Grok/WebRTC)拿不到请求时截图就回退读这张(_viewshot_result 里)。
+# 用户明确诉求:「EPUB 中间层按需输出笔迹合成图」——中间层(前端 adapter)产图、服务端缓存、全路径可用。
+_EPUB_INKSHOT_DIR = CLAUDE_DIR / "state" / "epub-ink-shot"
+
+
+def _epub_inkshot_path(rel: str) -> Path:
+    import hashlib
+    return _EPUB_INKSHOT_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".jpg")
+
+
+@bp.route("/api/epub-ink-shot", methods=["POST"])
+def pdf_api_epub_ink_shot():
+    """前端存 EPUB 笔迹合成图。body {file, b64, media_type?}:有 b64=写图,无=删图(笔迹清空时)。"""
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    if not rel:
+        return jsonify({"ok": False, "error": "缺少 file"}), 400
+    b64 = (data.get("b64") or "").strip()
+    p = _epub_inkshot_path(rel)
+    try:
+        if b64:
+            import base64
+            raw = base64.b64decode(b64)
+            if len(raw) > 4 * 1024 * 1024:   # 4MB 上限(质量阶梯前端已压到 ~900KB)
+                return jsonify({"ok": False, "error": "too large"}), 400
+            _EPUB_INKSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".jpg.tmp")
+            tmp.write_bytes(raw)
+            tmp.replace(p)
+        else:
+            p.unlink(missing_ok=True)   # 笔迹清空 → 删陈旧合成图
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:120]}), 500
+    return jsonify({"ok": True})
+
+
 # ── 阅读器实时事件总线:拆到 reader_events.py(2026-07-06 结构拆分第 1 刀;零业务依赖)──
 # publish 别名保持 _reader_publish(8 个发布点零改动);路由 /api/reader-events 由 register_reader_events(bp) 挂上。
 from reader_events import publish as _reader_publish, register_reader_events

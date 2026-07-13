@@ -1899,6 +1899,19 @@ def _viewshot_result(ctx, note_extra=""):
     插入页还没写回文件)兜底用。ctx.view_image = {media_type, b64}。"""
     vimg = ctx.get("view_image")
     if not isinstance(vimg, dict) or not vimg.get("b64"):
+        # 请求时没带截图(WS relay 拿不到/前端截图失败等)→ 回退读**服务端缓存的笔迹合成图**
+        # (EPUB 每次存笔迹时前端顺带存的,见 pdf_reader /api/epub-ink-shot)——让 see_ink 全链路可靠。
+        try:
+            import base64
+            import pdf_reader as _pdfm_vs
+            _p = _pdfm_vs._epub_inkshot_path(ctx.get("file_rel") or "")
+            if _p.exists():
+                _raw = _p.read_bytes()
+                if len(_raw) > 2000:
+                    vimg = {"media_type": "image/jpeg", "b64": base64.b64encode(_raw).decode()}
+        except Exception:
+            vimg = None
+    if not isinstance(vimg, dict) or not vimg.get("b64"):
         return None
     note = ("下图=用户屏幕当前可见区域的**实时截图**(正文+他的手写笔迹叠加,所见即所得)。"
             "结合笔迹的位置/形状/指向和图里文字回答。"
