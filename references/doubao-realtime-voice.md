@@ -835,3 +835,8 @@ digest 只含页码+操作摘要、无页面原文——全量注入页文本(�
 4. **server_vad 实验开关**:设置「轮次判定」下拉(本地 VAD=省钱默认/服务端 VAD=官方打断手感,threshold .85+silence 600ms+prefix 333ms)——server 模式全程推流($3/h)、本地 VAD gate 旁路、打断/truncate 走 speech_started 现成管线。等账单裁决计费口径后用户自选。
 未做记录:audio/opus(WAN 带宽 10 倍降——静默停推后上行只在说话期,家宽下非瓶颈,搁置)、xAI 托管搜索(自家链路已有免费额度体系)。
 
+## 批次 122(2026-07-13)tools 嵌套形制归一 + 控制 WS 可恢复重连(#290 RTC 部分)
+
+1. **Grok tools 官方嵌套形制**:实测先行(嵌套 `{"type":"function","function":{...}}` 发 session.update→session.updated ✓+工具正常触发 `read_page {"page":5}` ✓)→relay grok 分支切官方形制,顺手裁掉不在官方 schema 的 `tool_choice/parallel_tool_calls/output_modalities`(此前靠兼容层撑,排障隐患归一)。
+2. **#290 控制 WS 可恢复重连(RTC/GPT)**:ctl 建立从 rtcStart 内联抽成 `_ctlOpen()`;onclose(通话仍在=非主动挂断,teardown 摘回调兜底)→退避重连 800ms×2^n(≤5 次);重挂成功(rtc_ctl ok)→重试清零+`__vcSyncNow` 快照重推(relay 新会话 book 状态空——选中/墨迹/页码重新入库)。治"relay 重启掐死通话中工具"(103 事故的结构性防线):重启后 ≤0.8s 自动重挂 P2,工具执行权无缝回归 relay;重连放弃(5 次)=纯前端模式接管(现有回退)。relay 端同 call_id 重挂走现有 handle_rtc_ctl(93 的双挂告警对同 call_id 不误报)。
+

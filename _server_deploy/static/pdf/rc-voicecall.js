@@ -2234,6 +2234,80 @@
     setSt('⚠ ' + reason + ',正在重连…');
     setTimeout(function () { if (!_userHung && !_rtc.on && !_connecting) rtcStart(toggle._opts || {}); }, 800);   // 93:_connecting=有人在拨,别叠
   }
+  function _ctlOpen() {   // ㊺P1/122(#290):控制 WS 连接(可恢复重连,见 references/rtc-controller-design.md)
+    try {
+      var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
+      // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
+      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=2&call_id=' + encodeURIComponent(_rtc.callId) +
+                             '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
+      cw.onmessage = function (ev) {
+        try {
+          var m0 = JSON.parse(ev.data);
+          if (m0.event === 'rtc_ctl') {
+            _rtc.ctl = !!(m0.payload && m0.payload.ok);
+            if (_rtc.ctl) {   // 122:重挂成功——重试清零+快照重推(relay 新会话不知道选中/墨迹/页码)
+              _rtc.ctlRetry = 0;
+              try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e2) {}
+            }
+          }
+          else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
+          else if (m0.event === 'tool_status') {
+            var tp = m0.payload || {};
+            _rtc.turnTool = true;   // relay 执行了工具:承诺核查放行
+            // 边沿复位镜像:ctl 模式下 see_* 在 relay 跑,前端 _rtcTool 不经过——在这里复位
+            if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
+            onToolStatus(tp);
+          }
+          else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要视口截图(只有浏览器能拍)
+            var sid0 = (m0.payload || {}).shot_id;   // 60:带 ID 配对,防两轮工具重叠时迟到截图被下一请求接走
+            _captureView().then(function (shot) {
+              try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
+            }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: '' })); } catch (e2) {} });
+          }
+          else if (m0.event === 'route_text') {   // 61 route 档:服务端文本模型流式长文(relay 生成下行)——显示+落库+可选 TTS 代念
+            var rp = m0.payload || {};
+            if (!_rtc._route) {
+              _rtc._route = { buf: '', feed: _mkTtsFeeder() };
+              try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e2) {}
+              _rtcCapReset();   // 字幕偏移与上一轮脱钩
+            }
+            if (rp.delta != null) {
+              _rtc._route.buf += rp.delta;
+              try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', _rtc._route.buf); } catch (e2) {}
+              _rtcCapFeed(_rtc._route.buf, false);
+              try { if (_cap.cur) _cap.cur.classList.add('vc-cap-route'); } catch (e2) {}   // 64:字幕路由专属样式
+              try { _rtc._route.feed(_rtc._route.buf, false); } catch (e2) {}
+            }
+            if (rp.done) {
+              var fullR = rp.text || _rtc._route.buf;
+              try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)', actions: ['route_text'], voiceTab: true },
+                pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) },
+                speak: true }); } catch (e2) {}
+              try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
+              _rtcCapFeed(fullR, true);
+              try { _rtc._route.feed(fullR, true); } catch (e2) {}
+              try {
+                var cR = _cardPush(fullR, '路由详答');
+                if (cR) _pinBind(cR.el, '路由详答', (function (txt) { return function () { return txt; }; })(fullR));   // 79:长按=全文带入
+              } catch (e2) {}
+              _rtc._route = null;
+            }
+          }
+        } catch (e) {}
+      };
+      cw.onclose = function () {   // 122(#290):可恢复重连——relay 重启/网络抖动后自动重挂 P2(退避≤5次);挂断由 teardown 摘回调不触发
+        _rtc.ctl = false; _rtc.ctlWs = null;
+        if (!_rtc.on) return;
+        var n = (_rtc.ctlRetry = (_rtc.ctlRetry || 0) + 1);
+        if (n > 5) { console.warn('[vc] ctl 重连放弃(纯前端模式接管工具)'); return; }
+        setTimeout(function () { if (_rtc.on && !_rtc.ctlWs) _ctlOpen(); }, Math.min(8000, 800 * Math.pow(2, n - 1)));
+      };
+      cw.onerror = function () {};
+      _rtc.ctlWs = cw;
+    } catch (e) { _rtc.ctl = false; }
+  }
+
   async function rtcStart(opts) {
     // 93(用户实测双回答根因):单飞锁——通话已在/舞步进行中,任何来路的第二次拨号直接吞。
     // 没有这把锁时,清空重拨与迟到的自动重连可各建一个 call,两个模型同时听同一句各答一条。
@@ -2310,67 +2384,9 @@
       setSt('通话中(WebRTC·外放可用)'); if (box) box.classList.add('on'); callBtnOn(true);
       try { var _ai0 = document.getElementById('asst-input'); if (_ai0) _ai0.classList.add('vc-live'); } catch (e) {}   // 66:输入框紫光=打字直达 2.1
       capWait(true);   // 等待指示点亮(对齐 WS 版 150/agent_ready)
-      // ㊺P1 RtcController 控制 WS(服务端 sideband 控制面,设计见 references/rtc-controller-design.md):
-      // P1 只建通道观察(relay 镜像事件);连不上=静默纯前端模式(现有代码即 fallback)。
-      try {
-        var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
-        // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
-        var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=2&call_id=' + encodeURIComponent(_rtc.callId) +
-                               '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
-        cw.onmessage = function (ev) {
-          try {
-            var m0 = JSON.parse(ev.data);
-            if (m0.event === 'rtc_ctl') { _rtc.ctl = !!(m0.payload && m0.payload.ok); }
-            else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
-            else if (m0.event === 'tool_status') {
-              var tp = m0.payload || {};
-              _rtc.turnTool = true;   // relay 执行了工具:承诺核查放行
-              // 边沿复位镜像:ctl 模式下 see_* 在 relay 跑,前端 _rtcTool 不经过——在这里复位
-              if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
-              onToolStatus(tp);
-            }
-            else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要视口截图(只有浏览器能拍)
-              var sid0 = (m0.payload || {}).shot_id;   // 60:带 ID 配对,防两轮工具重叠时迟到截图被下一请求接走
-              _captureView().then(function (shot) {
-                try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
-              }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: '' })); } catch (e2) {} });
-            }
-            else if (m0.event === 'route_text') {   // 61 route 档:服务端文本模型流式长文(relay 生成下行)——显示+落库+可选 TTS 代念
-              var rp = m0.payload || {};
-              if (!_rtc._route) {
-                _rtc._route = { buf: '', feed: _mkTtsFeeder() };
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e2) {}
-                _rtcCapReset();   // 字幕偏移与上一轮脱钩
-              }
-              if (rp.delta != null) {
-                _rtc._route.buf += rp.delta;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', _rtc._route.buf); } catch (e2) {}
-                _rtcCapFeed(_rtc._route.buf, false);
-                try { if (_cap.cur) _cap.cur.classList.add('vc-cap-route'); } catch (e2) {}   // 64:字幕路由专属样式
-                try { _rtc._route.feed(_rtc._route.buf, false); } catch (e2) {}
-              }
-              if (rp.done) {
-                var fullR = rp.text || _rtc._route.buf;
-                try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', fullR, { md: true, info: { mode: '路由详答(服务端文字引擎)', actions: ['route_text'], voiceTab: true },
-                  pin: { label: '路由详答', textFn: (function (txt) { return function () { return txt; }; })(fullR) },
-                  speak: true }); } catch (e2) {}
-                try { window.__asstVoiceLog && window.__asstVoiceLog(_lastU, fullR, _rtc.ctxFile, _rtc.ctxPage); _lastU = ''; } catch (e2) {}
-                _rtcCapFeed(fullR, true);
-                try { _rtc._route.feed(fullR, true); } catch (e2) {}
-                try {
-                  var cR = _cardPush(fullR, '路由详答');
-                  if (cR) _pinBind(cR.el, '路由详答', (function (txt) { return function () { return txt; }; })(fullR));   // 79:长按=全文带入
-                } catch (e2) {}
-                _rtc._route = null;
-              }
-            }
-          } catch (e) {}
-        };
-        cw.onclose = function () { _rtc.ctl = false; _rtc.ctlWs = null; };   // 断线=回退纯前端(韧性)
-        cw.onerror = function () {};
-        _rtc.ctlWs = cw;
-      } catch (e) { _rtc.ctl = false; }
+      // ㊺P1 控制 WS:抽出为 _ctlOpen(122:可恢复重连);连不上=静默纯前端模式(现有代码即 fallback)
+      _rtc.ctlRetry = 0;
+      _ctlOpen();
       _refreshSpeakTg();
     } catch (ex) {
       _connecting = false;

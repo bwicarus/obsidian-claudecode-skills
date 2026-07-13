@@ -1408,6 +1408,13 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
         except Exception:
             pass
         sess["reasoning"] = {"effort": "high"}   # 117(文档定稿):high=默认,工具选择/多步判断更可靠(33 工具场景);嫌慢再调 none
+        # 122(官方 schema+实测背书):tools 切嵌套 Chat-Completions 形制({"type":"function","function":{...}}),
+        # 扁平 OpenAI-Realtime 式靠 xAI 兼容层撑着——排障隐患归一
+        sess["tools"] = [{"type": "function", "function": {k: t0[k] for k in ("name", "description", "parameters") if k in t0}}
+                         for t0 in tools if t0.get("type") == "function"]
+        sess.pop("tool_choice", None)
+        sess.pop("parallel_tool_calls", None)
+        sess.pop("output_modalities", None)   # 不在官方 schema(实测被忽略),裁掉
     _url_extra = ""
     if engine == "grok":
         if fresh:
