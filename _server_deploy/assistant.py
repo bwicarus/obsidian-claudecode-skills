@@ -499,13 +499,51 @@ def _convo_load(uid):
         return []
 
 
+def _convo_upsert_turn(uid, turn_id: str, content: str, meta: dict):
+    """141(轮次容器):**一个用户轮 = 历史里恰好一条助手消息**,按 turn_id 覆盖而不是追加。
+
+    ⚠ 为什么必须这样(用户实测:刷新后每条回答渲染两遍、天气卡丢失):
+      手动放行闸(133)之后,一个用户轮里天然有**多个 response**
+      (「我去查一下，稍等」+function_call 是一个;拿到工具结果后的正答是另一个)。
+      而前端落库挂在 `response.done` 上 → **一轮落两条库**,每条各带当时的 parts 快照:
+        · 回放时同一轮被渲染两遍;
+        · 而且第一条快照里还没有工具结果/结果卡 → 卡片丢失。
+      按 turn_id 覆盖后,这一轮无论几个 response,历史里始终只有一条、且永远是最新的完整 parts。
+    """
+    with _convo_lock:
+        msgs = _convo_load(uid)
+        rec = None
+        for m in reversed(msgs):
+            if m.get("role") == "assistant" and m.get("turn_id") == turn_id:
+                rec = m
+                break
+        if rec is None:
+            return False
+        if content:
+            rec["content"] = content
+        rec["ts"] = int(time.time())
+        for k in ("parts", "card", "clip", "trace", "videos", "undo_cards"):
+            v = (meta or {}).get(k)
+            if v:
+                rec[k] = v
+        try:
+            _CONVO_DIR.mkdir(parents=True, exist_ok=True)
+            p = _convo_path(uid)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(json.dumps(msgs, ensure_ascii=False), "utf-8")
+            tmp.replace(p)
+        except Exception:
+            pass
+        return True
+
+
 def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
             # ⚠ 白名单:没列进来的 meta 字段会被**静默丢掉**。141 的 parts 忘了加就等于没落库。
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card", "parts"):   # clip=语音录音;card=87 结构化卡;parts=141 轮次容器(历史回放走同一渲染器)
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card", "parts", "turn_id"):   # clip=语音录音;card=87 结构化卡;parts/turn_id=141 轮次容器
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -5471,6 +5509,15 @@ def assistant_log_external():
         meta["file_rel"] = b["file"]   # _convo_append 白名单字段名是 file_rel
     if b.get("page"):
         meta["page"] = b["page"]
+    # 141(轮次容器):同一 turn_id 再次上报 = 这一轮又产生了新内容(多 response / 工具结果 / 结果卡)
+    #   → **覆盖**那条助手消息,而不是再追加一条。不这么做就会:同一轮渲两遍 + 早期快照缺卡片。
+    _tid = str(b.get("turn_id") or "")[:40]
+    if _tid and _convo_upsert_turn(uid, _tid, (b.get("assistant") or "").strip(),
+                                   {"parts": b.get("parts") if isinstance(b.get("parts"), list) else None,
+                                    "clip": re.sub(r"[^A-Za-z0-9_-]", "", str(b.get("clip") or ""))[:40] or None}):
+        return jsonify({"ok": True, "n": 0, "upserted": True})
+    if _tid:
+        meta["turn_id"] = _tid
     n = 0
     for role, key in (("user", "user"), ("assistant", "assistant")):
         txt = (b.get(key) or "").strip()

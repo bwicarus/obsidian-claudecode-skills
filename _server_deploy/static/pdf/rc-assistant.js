@@ -2096,12 +2096,14 @@
       if (HOST.voiceLog) { HOST.voiceLog(q, a, page); return; }   // ㉟ adapter 自定义落库(EPUB=本书 epub-convo;clip 暂不支持该路径)
       var _b = { user: q || '', assistant: a || '', file: file || '', page: page || 0, via: 'voice' };
       if (extra && extra.clip) _b.clip = extra.clip;
-      // 141(轮次容器):把本轮的**全量 part 结构**一起落库 —— 刷新/跨设备后历史回放走**同一个渲染器**
-      //   复原成一模一样的卡(ADR 不变式①③)。旧实现只落了残缺的 m.card,拼接结果一刷新就没了。
+      // 141(轮次容器):把本轮的**全量 part 结构**一起落库 —— 刷新/跨设备后回放走**同一个渲染器**复原。
+      //   ⚠ 带上 turn_id:一个用户轮里天然有多个 response(「稍等」+工具 / 正答),而落库挂在 response.done 上
+      //   → 不带 turn_id 就会**一轮落两条**(回放渲两遍 + 早期快照里还没有结果卡 = 卡片丢失,用户实测)。
+      //   服务端按 turn_id **覆盖**那条助手消息,始终只留一条、且是最新的完整 parts。
       try {
         RC.turnCard.freezeDraft(_vTid);
         var _ps = RC.turnCard.partsOf(_vTid);
-        if (_ps && _ps.length) _b.parts = _ps;
+        if (_ps && _ps.length) { _b.parts = _ps; _b.turn_id = _vTid; }
       } catch (e) {}
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify(_b) }).catch(function () {});
