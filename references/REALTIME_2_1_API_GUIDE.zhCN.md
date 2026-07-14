@@ -656,3 +656,24 @@ MCP 不等于“免费工具调用”：模型读取工具定义、生成调用�
 
 修法:`AbortController` + **45s** 超时(同步工具实测最慢 6.9s,长任务后端本来就走 task_id 派发 → 45s 只可能兜住真挂起)。超时抛错 → 落进原有的 catch → 照常回填「工具超时」的 `function_call_output` + `response.create`,**让 AI 开口说"没查到,换个方式"而不是哑掉**;工具卡标 error(按设计留在页面上可点)。
 同文件里「系统代提交」那条 fire-and-forget 的 fetch 也补了 60s 超时(它挂了不会掐死对话,但会留一张**永远转圈**的工具卡)。
+
+
+## A/B 混合:**调用前垫话策略**(2026-07-14 上线)
+
+「AI 调工具前先说一句『我去查一下』」= A;「静默直接调」= B。实测两者**都只有 1 次 response**(垫话搭在 function_call 那一次里),差别仅是那句话的 output token(≈$0.0008/次)。
+→ **这是体验旋钮,不是省钱旋钮**:秒回的工具垫话反而啰嗦,慢工具不垫话就是干等。所以做成**混合**:
+
+**每个工具一条策略**:`auto`(默认)/ `always` / `never`。
+- **`auto` 不拍脑袋** —— 读 `state/voice-ledger.db` 的 `tool_calls`,取这个工具的**中位耗时**(取中位不取均值:一次 164.9s 的挂起会毁掉均值),`median >= 阈值`(默认 2.5s)→ 垫话,否则静默。没数据的新工具 → 保守垫话。
+- 实测判定:`web_search` 3.8s → **垫话**;`read_page` 0.1s → **静默**;`goto_page` 0.0s → **静默**。
+
+**唯一注入口**:策略拼进实时语音 session 的 `tools[].description`(`assistant.py::_tool_desc_rtc`)—— 跟工具说明同一条通道,改完下次开通话即生效。
+
+| 层 | 位置 |
+|---|---|
+| 存储 | `state/assistant-tool-prompts.json`:per-tool `{"filler": "auto|always|never"}`;全局 `{"_global":{"filler":{"mode","threshold_s"}}}` |
+| 后端 | `assistant.py`:`_tool_median_s` / `_filler_global` / `_filler_mode` / `_FILLER_TXT` / `_tool_desc_rtc`;端点 `/api/assistant/tool-prompt` 加 `op=filler`(单工具)、`op=filler_global`(总设置)、GET `?tool=_global` |
+| 单工具 UI | **长按工具卡 → 详情窗**顶部分段控件(`rc-toolchip.js::mountFiller`),状态行直接显示「这个工具中位耗时 3.8s ≥ 2.5s 阈值 → 会先说一句」 |
+| 总设置 UI | 设置面板 **AI tab → 🗣 语音·调用前垫话**(`rc-settings.js::_fillFiller`):默认策略 + 自动的耗时阈值 |
+
+⚠ **动作类工具本来就是单轮,不用管垫话** —— `_SILENT_ACT = {goto_page, highlight, auto_highlight, add_vocab, open_book}`(加 search_image / search_video)成功后标 `silent`,前端**不发第二次 `response.create`**(`rc-voicecall.js`:`if (!_rtcTool._silent) _rtcRespCreate(...)`)。所以「翻页没必要两次」这件事**早就做到了**。

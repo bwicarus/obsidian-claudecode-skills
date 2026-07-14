@@ -311,10 +311,52 @@
   // ── 140(用户设计):工具的**说明**和**内部 prompt** 都能在这里直接改,且**真的**进 AI ──
   //   三个按钮:保存(写成生效文本) / 设为默认(把当前文本记成"我的默认") / 默认(一键填回我的默认)
   //   + 恢复出厂(清掉所有覆盖,回系统原始)。
+  function toast(m) { try { if (window.RC && RC.toast) RC.toast(m); } catch (e) {} }   // 模块级(mountPrompts 里那个是嵌套的,别的函数看不见)
+
+  // 143(用户设计):**调用前垫话策略**——A(先说「我去查一下」再调) / B(静默直接调) 的**每个工具**开关。
+  //   实测两者都只是 1 次 response(垫话搭在 function_call 那次里),所以这是**体验**旋钮不是省钱旋钮:
+  //   秒回的工具垫话反而啰嗦,慢工具不垫话就是干等。默认「自动」= 拿这个工具在账本里的**真实中位耗时**
+  //   跟阈值比(默认 2.5s),不拍脑袋。写进工具的 description → 直接进实时语音 session,立刻生效。
+  function mountFiller(host, before, tool, fl) {
+    if (!fl) return;
+    var box = document.createElement('div'); box.className = 'vc-fl';
+    var med = (fl.median_s != null && fl.median_s >= 0) ? (fl.median_s + 's') : '没数据';
+    var g = fl.global || {};
+    box.innerHTML =
+      '<div class="vc-fl-t">调用前垫话 <em>· 让 AI 先说一句「我去查一下」再调工具</em></div>' +
+      '<div class="vc-fl-seg">' +
+        '<button data-m="">自动</button><button data-m="always">总是说</button><button data-m="never">静默</button>' +
+      '</div>' +
+      '<div class="vc-fl-st"></div>';
+    host.insertBefore(box, before);   // 排在「提示词」那段之前
+    var segs = box.querySelectorAll('.vc-fl-seg button');
+    var st = box.querySelector('.vc-fl-st');
+    function paint(mode, resolved) {
+      Array.prototype.forEach.call(segs, function (b) { b.classList.toggle('on', (b.dataset.m || '') === (mode || '')); });
+      var how = resolved === 'always' ? '会先说一句' : '静默直接调';
+      st.textContent = (mode ? '' : ('自动:这个工具中位耗时 ' + med + ' ' + (fl.median_s >= (g.threshold_s || 2.5) ? '≥' : '<') +
+                        ' ' + (g.threshold_s || 2.5) + 's 阈值 → ') ) + how;
+    }
+    paint(fl.mode || '', fl.resolved);
+    box.querySelector('.vc-fl-seg').addEventListener('click', function (ev) {
+      var b = ev.target.closest('button'); if (!b) return;
+      var m = b.dataset.m || '';
+      fetch('/api/assistant/tool-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: tool, op: 'filler', mode: m }) })
+        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (!r || !r.ok) { toast((r && r.error) || '保存失败'); return; }
+          fl.mode = r.mode; fl.resolved = r.resolved;
+          paint(r.mode, r.resolved);
+          toast(m ? ('已固定为「' + (m === 'always' ? '总是说' : '静默') + '」') : '已改回自动(按实测耗时判)');
+        });
+    });
+  }
+
   function mountPrompts(host, tool) {
     var wrap = document.createElement('div');
     wrap.className = 'vc-tp';
-    wrap.innerHTML = '<div class="vc-tp-t">提示词 <em>· 改了会**真的**进 AI 并生效</em></div><div class="vc-tp-body">加载中…</div>';
+    wrap.innerHTML = '<div class="vc-tp-t">提示词 <em>· 改了会<b style="color:#c6d2e8">真的</b>进 AI 并生效</em></div><div class="vc-tp-body">加载中…</div>';
     host.appendChild(wrap);
     fetch('/api/assistant/tool-prompt?tool=' + encodeURIComponent(tool))
       .then(function (r) { return r.json(); })
@@ -322,6 +364,7 @@
         var bodyEl = wrap.querySelector('.vc-tp-body');
         if (!d || !d.ok || !(d.fields || []).length) { wrap.remove(); return; }
         bodyEl.innerHTML = '';
+        mountFiller(host, wrap, tool, d.filler);   // 143:垫话策略=独立一段,插在「提示词」这段之前
         var tas = {};
         d.fields.forEach(function (f) {
           var row = document.createElement('div'); row.className = 'vc-tp-f';

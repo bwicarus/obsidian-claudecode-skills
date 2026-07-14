@@ -4657,6 +4657,71 @@ VOICE_CACHEABLE_TOOLS = {
 }
 
 
+# ── 143(用户设计):**调用前垫话策略**(A/B 混合)────────────────────────────────
+#   A = 调工具前先说一句「我去查一下」;B = 静默直接调。实测(scratchpad/rt_probe.py)两者**都只是 1 次 response**
+#   ——垫话和 function_call 挤在同一个 response 里,差别只有那句话的 output token(≈$0.0008/次)。
+#   所以这不是成本问题,是**体验**问题:秒回的工具垫话反而啰嗦,慢工具不垫话就是干等。
+#   → 每个工具一条策略:auto(默认)/ always / never。**auto 用账本里这个工具的真实中位耗时判定**,
+#     不拍脑袋:median >= 阈值(默认 2.5s)→ 垫话,否则静默。策略经工具 description 注入模型(唯一入口)。
+_FILLER_DEF = {"mode": "auto", "threshold_s": 2.5}
+_fill_cache = {"t": 0.0, "med": {}}
+
+
+def _tool_median_s(tool: str) -> float:
+    """这个工具在账本里的**中位**耗时(取中位不取均值:一次 164.9s 的挂起会把均值毁掉)。60s 缓存。"""
+    import statistics
+    import sqlite3 as _sq
+    now = time.time()
+    if now - _fill_cache["t"] > 60:
+        med = {}
+        try:
+            c = _sq.connect(str(CLAUDE_DIR / "state" / "voice-ledger.db"), timeout=3)
+            rows = c.execute("SELECT tool, took_s FROM tool_calls WHERE took_s IS NOT NULL").fetchall()
+            c.close()
+            byt = {}
+            for t, sec in rows:
+                byt.setdefault(t, []).append(float(sec or 0))
+            for t, xs in byt.items():
+                med[t] = round(statistics.median(xs[-50:]), 2)
+        except Exception:
+            pass
+        _fill_cache["t"] = now
+        _fill_cache["med"] = med
+    return _fill_cache["med"].get(tool, -1.0)   # -1 = 账本里没这工具的数据
+
+
+def _filler_global(uid: str) -> dict:
+    g = ((_tp_load().get(str(uid)) or {}).get("_global") or {}).get("filler") or {}
+    return {"mode": g.get("mode") or _FILLER_DEF["mode"],
+            "threshold_s": float(g.get("threshold_s") or _FILLER_DEF["threshold_s"])}
+
+
+def _filler_mode(uid: str, tool: str) -> str:
+    """最终策略:per-tool 没设 → 跟全局;全局 auto → 按中位耗时判。恒返回 always/never。"""
+    g = _filler_global(uid)
+    m = (((_tp_load().get(str(uid)) or {}).get(tool) or {}).get("filler") or "").strip()
+    if m not in ("always", "never", "auto"):
+        m = g["mode"]
+    if m == "auto":
+        med = _tool_median_s(tool)
+        if med < 0:                       # 没跑过 → 保守垫话(宁可多说一句,也别让人干等)
+            return "always"
+        return "always" if med >= g["threshold_s"] else "never"
+    return m if m in ("always", "never") else "always"
+
+
+_FILLER_TXT = {
+    "always": "【调用前】先用一句很短的话告诉用户你要去做什么(如「我去查一下」),然后立刻调用本工具(说话和调用在同一轮内完成,不要分两次)。",
+    "never": "【调用前】不要说任何话,直接调用本工具。",
+}
+
+
+def _tool_desc_rtc(uid: str, tool: str, base: str, cap: int) -> str:
+    """实时语音会话里这个工具的 description = 用户可改的说明(截断) + 垫话策略注入语。"""
+    d = _tp(uid, tool, "desc", base)[:cap]
+    return (d + " " + _FILLER_TXT[_filler_mode(uid, tool)])[: cap + 90]
+
+
 @bp.route("/tool-prompt", methods=["GET", "POST"])
 def assistant_tool_prompt():
     """140(用户设计):工具的**说明**和**内部 prompt** —— 凡是会进 AI 并实际产生影响的,都能在这里改。
@@ -4682,20 +4747,61 @@ def assistant_tool_prompt():
 
     if request.method == "GET":
         tool = (request.args.get("tool") or "").strip()
+        if tool == "_global":   # 143:总设置页读全局垫话策略(不是真工具,没有 fields)
+            return jsonify({"ok": True, "tool": "_global", "fields": [], "filler": {"global": _filler_global(uid)},
+                            "medians": _fill_cache["med"] if (_tool_median_s("") or True) else {}})
         fs = _fields(tool)
         if not fs:
             return jsonify({"ok": False, "error": f"没有可改的提示词:{tool}"}), 404
         store = _tp_load()
         cur = ((store.get(uid) or {}).get(tool) or {})
         mine = cur.get("_defaults") or {}
+        g = _filler_global(uid)   # 143:垫话策略(per-tool + 全局 + 实测中位耗时,前端要显示"自动会怎么判")
         return jsonify({"ok": True, "tool": tool, "fields": [
             {"key": k, "label": lb, "sys": dv,
              "cur": cur.get(k) if isinstance(cur.get(k), str) else "",
              "mine": mine.get(k) if isinstance(mine.get(k), str) else ""}
-            for k, lb, dv in fs]})
+            for k, lb, dv in fs],
+            "filler": {"mode": cur.get("filler") or "",           # '' = 跟全局
+                       "resolved": _filler_mode(uid, tool),       # 最终生效:always / never
+                       "median_s": _tool_median_s(tool),          # -1 = 账本里没数据
+                       "global": g}})
 
     body = request.get_json(silent=True) or {}
     tool = (body.get("tool") or "").strip()
+    op0 = (body.get("op") or "").strip()
+
+    if op0 == "filler_global":   # 143:总设置——默认策略 + 自动的耗时阈值
+        st = _tp_load()
+        u = st.setdefault(uid, {})
+        gg = u.setdefault("_global", {}).setdefault("filler", {})
+        m = (body.get("mode") or "").strip()
+        if m in ("auto", "always", "never"):
+            gg["mode"] = m
+        try:
+            th = float(body.get("threshold_s"))
+            if 0.2 <= th <= 30:
+                gg["threshold_s"] = round(th, 1)
+        except (TypeError, ValueError):
+            pass
+        _tp_save(st)
+        return jsonify({"ok": True, "global": _filler_global(uid)})
+
+    if op0 == "filler":   # 143:单个工具——'' = 跟全局
+        m = (body.get("mode") or "").strip()
+        if m not in ("", "auto", "always", "never"):
+            return jsonify({"ok": False, "error": "策略只能是 auto/always/never 或空(跟全局)"}), 400
+        if not _fields(tool):
+            return jsonify({"ok": False, "error": "未知工具"}), 400
+        st = _tp_load()
+        t = st.setdefault(uid, {}).setdefault(tool, {})
+        if m:
+            t["filler"] = m
+        else:
+            t.pop("filler", None)
+        _tp_save(st)
+        return jsonify({"ok": True, "mode": m, "resolved": _filler_mode(uid, tool), "median_s": _tool_median_s(tool)})
+
     if not _fields(tool):
         return jsonify({"ok": False, "error": "未知工具"}), 400
     op = body.get("op") or "save"
@@ -4920,7 +5026,7 @@ def assistant_rtc_session():
     # 75(用户裁定):read_selection **永久不挂**——选中内容程序保证经 state 通道注入上下文,
     # 工具是纯重复入口(工具表每次会话恒定一致=前缀缓存无伤;长选中引导 read_page 该页)
     _RTC_DROP = {"read_selection"}
-    tools = [{"type": "function", "name": n, "description": _tp(uid, n, "desc", _vo.get(n, str(d)))[: (1024 if n in _vo else 280)],
+    tools = [{"type": "function", "name": n, "description": _tool_desc_rtc(uid, n, _vo.get(n, str(d)), 1024 if n in _vo else 280),   # 143:说明 + 垫话策略
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items() if n not in _RTC_DROP]
     tools.append({"type": "function", "name": "deep_think",

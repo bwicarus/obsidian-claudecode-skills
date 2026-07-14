@@ -241,6 +241,15 @@
       '.vc-dtl-r .bd{padding:2px 11px 11px;font-size:12.5px;line-height:1.6;color:#c9d4e8;word-break:break-word;max-height:230px;overflow:auto}' +
       '.vc-dtl-r .bd pre{white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:11px}' +
       // 140(用户):工具的说明 / 内部 prompt —— 凡是会进 AI 并实际产生影响的,都能在这里直接改
+      // 143:调用前垫话策略(详情窗里的分段控件)
+      '.vc-fl{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
+      '.vc-fl-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
+      '.vc-fl-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-fl-seg{display:flex;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(255,255,255,.14)}' +
+      '.vc-fl-seg button{flex:1;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;border:none;\n        background:rgba(255,255,255,.05);color:#9db0d4;-webkit-appearance:none;appearance:none;\n        border-right:0.5px solid rgba(255,255,255,.12)}' +
+      '.vc-fl-seg button:last-child{border-right:none}' +
+      '.vc-fl-seg button.on{background:#7b6cff;color:#fff}' +
+      '.vc-fl-st{font-size:10.5px;color:#7f92b8;margin-top:5px}' +
       '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
       '.vc-tp-t em{font-style:normal;color:#7f92b8;font-weight:400}' +

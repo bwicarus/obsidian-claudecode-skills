@@ -290,6 +290,21 @@
             '<option value="max">max</option>' +
           '</select>' +
         '</div>' +
+        // 143(用户设计):语音工具的**调用前垫话**总策略。单个工具可在「长按工具卡 → 详情窗」里单独覆盖。
+        //   实测垫话和 function_call 同属一个 response ⇒ 这是体验旋钮不是省钱旋钮(见 REALTIME_2_1_API_GUIDE)。
+        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
+          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
+          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
+          '<select id="set-filler-mode" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
+            '<option value="auto">自动（按实测耗时判，推荐）</option>' +
+            '<option value="always">总是说（每个工具都先垫一句）</option>' +
+            '<option value="never">全部静默（工具调用不吭声）</option>' +
+          '</select>' +
+          '<div id="set-filler-th-row">' +
+            '<label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">自动的耗时阈值（秒）：慢于它才垫话</label>' +
+            '<input id="set-filler-th" type="number" step="0.5" min="0.5" max="30" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '</div>' +
+        '</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
           '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
         '</label>' +
@@ -698,6 +713,31 @@
   }
 
   // ── 打开 ──
+  // ── 143:语音·调用前垫话 总策略(服务端 /api/assistant/tool-prompt?tool=_global;单工具覆盖在详情窗)──
+  function _fillFiller() {
+    var sel = $('set-filler-mode'), th = $('set-filler-th'), row = $('set-filler-th-row');
+    if (!sel || !th) return;
+    function sync() { if (row) row.style.display = (sel.value === 'auto') ? '' : 'none'; }
+    fetch('/api/assistant/tool-prompt?tool=_global').then(function (r) { return r.json(); }).then(function (d) {
+      var g = (d && d.filler && d.filler.global) || {};
+      sel.value = g.mode || 'auto';
+      th.value = g.threshold_s != null ? g.threshold_s : 2.5;
+      sync();
+    }).catch(function () {});
+    if (sel._b) return;   // 只绑一次(面板 DOM 复用)
+    sel._b = 1;
+    function save() {
+      sync();
+      fetch('/api/assistant/tool-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: '_global', op: 'filler_global', mode: sel.value, threshold_s: parseFloat(th.value) }) })
+        .then(function (r) { return r.json(); })
+        .then(function (r) { if (!r || !r.ok) toast('垫话策略保存失败'); })
+        .catch(function () { toast('垫话策略保存失败'); });
+    }
+    sel.addEventListener('change', save);
+    th.addEventListener('change', save);
+  }
+
   function open(opts) {
     _opts = opts || {};
     if (_opts.host) _host = _opts.host;
@@ -706,6 +746,7 @@
     ensureDom();
     gateSections();
     _renderAiInline();   // AI tab 内嵌模型配置表(host 无关,数据在服务端;PDF 的 onFill 不管这块)
+    _fillFiller();       // 143:语音垫话总策略(同上——服务端数据,PDF 的 onFill 也不管)
     _fillNotePane();     // 便签 tab 回填(host 无关,设备级 rc-note-* 键;PDF 的 onFill 同样不管这块)
     if (typeof _opts.onFill === 'function') {
       try { _opts.onFill(); } catch (e) { toast('设置回填失败：' + (e && e.message)); }   // PDF:原生 _fillSettings(同名 id 全量回填)
