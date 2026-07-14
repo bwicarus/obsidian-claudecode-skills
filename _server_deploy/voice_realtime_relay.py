@@ -2403,7 +2403,6 @@ OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
 _RTC_CTL_LIVE = {}   # 93:uid → 最近挂上的 call_id(双 call 并存取证)
-_RTC_CTL_STOP = {}   # 148:uid → 当前通话的 stop Event。同 uid 来新通话(不同 call_id)就 set 旧的 → 踢掉旧通话,治「连续回答很多次」
 _GROK_CONV = {"id": "", "ts": 0.0}   # 121:grok resumption 续接钥匙(跨连接;30min 内重连带 conversation_id=历史无缝恢复)
 
 
@@ -2485,21 +2484,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         await bws.close()
         return
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
-    # 148(治「连续回答很多次」):同 uid 新通话来了(call_id 不同)就**踢掉旧通话**——单用户系统里双拨/媒体重连
-    #   产生的旧 sideband 若不退,两个都响应=用户听到重复回答。只在 call_id **不同**时踢;同 call_id 重连(#290)
-    #   不触发(_old_c == call_id),不受影响。踢法:set 旧通话的 stop Event → 它在下面 asyncio.wait 里退出并关连接。
-    _my_stop = asyncio.Event()
-    _uid_m = ""
+    # 93(双回答事故取证):同 uid 已有活跃 ctl 还没退→双 call 并存(前端双拨/多设备)。只告警留证据,不踢(多设备合法)。
     try:
         _uid_m = call_id.split("_")[1] if call_id.startswith("rtc_") else ""
         _old_c = _RTC_CTL_LIVE.get(_uid_m)
         if _old_c and _old_c != call_id:
-            sys.stderr.write(f"[rtc-ctl] 同 uid 新通话 {call_id[:12]} → 踢掉旧 {_old_c[:12]}(治双回答)\n")
-            _old_stop = _RTC_CTL_STOP.get(_uid_m)
-            if _old_stop is not None:
-                _old_stop.set()
+            sys.stderr.write(f"[rtc-ctl] ⚠ 同 uid 双 call 并存: 旧={_old_c[:12]} 新={call_id[:12]}(前端双拨或多设备)\n")
         _RTC_CTL_LIVE[_uid_m] = call_id
-        _RTC_CTL_STOP[_uid_m] = _my_stop
     except Exception:
         pass
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": "", "_over": (not _bok)}   # _over:超支后 sideband 掐生成(入口已超支=从首轮就掐,含 #290 重连场景)
@@ -2891,16 +2882,11 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
 
     try:
         done, pending = await asyncio.wait(
-            [asyncio.create_task(_down()), asyncio.create_task(_up()),
-             asyncio.create_task(_my_stop.wait())],   # 148:被更新通话踢掉时 _my_stop.set → 本协程退出、关连接
+            [asyncio.create_task(_down()), asyncio.create_task(_up())],
             return_when=asyncio.FIRST_COMPLETED)
         for p_ in pending:
             p_.cancel()
     finally:
-        # 148:只清「自己」那份(被踢的旧通话此时 _RTC_CTL_STOP[uid] 已被新通话覆盖 → is 判断为假 → 不误删新通话的)
-        if _uid_m and _RTC_CTL_STOP.get(_uid_m) is _my_stop:
-            _RTC_CTL_STOP.pop(_uid_m, None)
-            _RTC_CTL_LIVE.pop(_uid_m, None)
         try:
             await ows.close()
         except Exception:
