@@ -1976,11 +1976,18 @@
   // ㉛ 通话对话进侧栏(用户设计):S2S/rtc 端到端通话的双方句子直接进 #asst-thread,与文字对话
   //   同流同清(🗑 清空=显示+服务端记录+语音记忆一起清,rc-voicecall 旁听 fresh 重连);
   //   通话浮层的迷你对话区(vc-sub)退役,只在无侧栏的页面兜底。
-  var _vTurnEl = null;   // 通话当前 AI 轮的气泡:'a' 全量覆盖更新;'u'/'reset' 断轮
+  var _vTurnEl = null;   // 通话当前 AI 轮的**容器**(气泡或卡片):'u'/'reset' 断轮
+  // 141:一个**用户轮**里可以有多个 response(典型:「稍等」+function_call 是一个,工具结果的正答是另一个)。
+  //   'a' 是**全量覆盖**语义 —— 若两个 response 共用一个写入点,后一个会把前一个覆盖掉;
+  //   而若把前一个复制成"前置语"再让后一个写正文,那前一个还在流的 delta 又会把自己写进正文 = **显示两遍**
+  //   (用户实测截图里「我去查一下东京明天的天气」出现两次,就是这么来的)。
+  //   正解:**每个 response 一个槽位** —— 'slot' 断槽,'a' 只覆盖当前槽。
+  var _vSlot = null;
   var _vUEl = null;   // 112:{iid, el} 最近用户句气泡——grok 可修订全文按 iid 覆盖
   window.__asstVoiceMsg = function (who, text) {
     try {
-      if (who === 'reset') { _vTurnEl = null; return true; }
+      if (who === 'reset') { _vTurnEl = null; _vSlot = null; return true; }
+      if (who === 'slot') { _vSlot = null; return true; }   // 141:同一轮里换一个 response → 开新段落(不断轮)
       if (who === 'u') {
         var _o2 = arguments[2] || {};
         if (_o2.utterId && _vUEl && _vUEl.iid === _o2.utterId && _vUEl.el && _vUEl.el.parentNode === thread) {
@@ -1994,9 +2001,13 @@
         else { thread.appendChild(d); _vTurnEl = null; }
         scrollDown(); return true;
       }
-      if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
-      // 141:本轮若已升格成「工具调用卡」→ 正文写进卡片 body(标题/前置语/流程按钮不能被覆盖掉)
-      var _tgt = (_vTurnEl.__tcBd && _vTurnEl.__tcBd.isConnected) ? _vTurnEl.__tcBd : _vTurnEl;
+      if (!_vTurnEl || !_vTurnEl.parentNode) { _vTurnEl = addMsg('asst-a', ''); _vSlot = null; }
+      // 141:升格成卡片后正文写进卡片 body(卡头/流程按钮不能被覆盖);槽位则保证每个 response 独占一段
+      var _host = (_vTurnEl.__tcBd && _vTurnEl.__tcBd.isConnected) ? _vTurnEl.__tcBd : _vTurnEl;
+      if (!_vSlot || !_vSlot.isConnected || _vSlot.parentNode !== _host) {
+        _vSlot = document.createElement('div'); _host.appendChild(_vSlot);
+      }
+      var _tgt = _vSlot;
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
         try { renderMd(_tgt, text, true); } catch (e) { _tgt.textContent = text; }
         // 139(用户):AI 的文字输出**不需要「!」这样的按键** —— 工具调用的详情归工具卡的【数据流】按钮 + 长按详情窗
@@ -2038,22 +2049,38 @@
       // ⚠ 复用**既有卡片组件**(用户拍板):结果卡 = `.asst-msg.asst-a.vc-if` + `.vc-if-hd` 卡头,
       //   见 rc-voicecall 的 _infoCardEl();rc-toolchip 的 absorb() 也正是找 .vc-if-hd 挂【流程】按钮。
       //   别再另造 .asst-tcard/.tc-title 那种平行的一套 —— 那是重复造轮子。
-      var lead = (_vTurnEl.textContent || '').trim();   // 此刻气泡里装着的正是那句前置语
-      _vTurnEl.innerHTML = '';
+      // ⚠ 把已有内容(前置语所在的槽位)**整体搬进**卡片正文 —— 绝不"复制文本再另起正文":
+      //   那个 response 可能还在流,它的后续 delta 会再把同一段文字写进正文 = 显示两遍(用户实测)。
+      var bd = document.createElement('div');
+      while (_vTurnEl.firstChild) bd.appendChild(_vTurnEl.removeChild(_vTurnEl.firstChild));
       _vTurnEl.classList.add('vc-if');
       var hd = document.createElement('div'); hd.className = 'vc-if-hd';
       var tt = document.createElement('span'); tt.textContent = label || '工具调用';   // .vc-if-hd span:first-child{flex:1}
       hd.appendChild(tt);
-      var ld = document.createElement('div');   // 前置语:结构性容器,不引入新 class(样式跟随卡片正文,只压淡)
-      ld.style.cssText = 'opacity:.72;margin-bottom:6px';
-      ld.textContent = lead;
-      if (!lead) ld.style.display = 'none';
-      var bd = document.createElement('div');   // 正文:最终回答流式写进这里
-      _vTurnEl.appendChild(hd); _vTurnEl.appendChild(ld); _vTurnEl.appendChild(bd);
-      _vTurnEl.__tcBd = bd; _vTurnEl.__tcLead = ld;
+      _vTurnEl.appendChild(hd); _vTurnEl.appendChild(bd);
+      _vTurnEl.__tcBd = bd;   // _vSlot 依旧指向搬进来的那个槽 → 该 response 继续流也只写它自己那一段
       scrollDown();
       return _vTurnEl;
     } catch (e) { return null; }
+  };
+  // 141:天气/搜索/配图/视频这类工具**本来就有自己的结果卡**(renderInfo 产的 .vc-if)。
+  //   此时不该再造一张"工具调用卡" —— 而是把本轮的前置语(「我去查一下…稍等」)**搬进那张结果卡**,
+  //   由它做唯一的 host(absorb 给它挂【流程】按钮)。这样才是用户要的"一张卡"。
+  window.__asstVoiceMoveLead = function (host) {
+    try {
+      if (!host || !_vTurnEl || !_vTurnEl.parentNode) return false;
+      if (!(_vTurnEl.textContent || '').trim()) return false;
+      var ld = document.createElement('div');
+      ld.style.cssText = 'opacity:.72;margin-bottom:8px';
+      while (_vTurnEl.firstChild) ld.appendChild(_vTurnEl.removeChild(_vTurnEl.firstChild));
+      var hd = host.querySelector(':scope > .vc-if-hd');
+      if (hd && hd.nextSibling) host.insertBefore(ld, hd.nextSibling);
+      else if (hd) host.appendChild(ld);
+      else host.insertBefore(ld, host.firstChild);
+      try { _vTurnEl.remove(); } catch (e2) {}
+      _vTurnEl = null; _vSlot = null;   // 后续文字另起气泡(结果卡是这一轮的主体)
+      return true;
+    } catch (e) { return false; }
   };
   try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染
   window.__asstInfoBtn = function (el, info) {   // 77b:右下角小「!」详情钮(语音气泡/搜索卡通用)

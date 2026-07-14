@@ -581,13 +581,10 @@
     var c = RC.toolChip.create({ tool: p.tool || '', label: p.label || p.tool || '工具' });
     RC.toolChip.progress(c, (p.label || '处理') + '…');
     _chipOf[k] = c; c._k = k; _chipSeq.push(c);
-    // 141(用户设计):前置语 + 工具 + 结果 = 一次工具调用的三个阶段 → 合成**一张卡**。
-    //   把本轮气泡(此刻装着「稍等一下」那句前置语)升格为卡片 host,再让工具卡被它吸收:
-    //   工具不再另起一张,标题栏多一个【流程】按钮,点开才看到 AI 请求→工具→结果。
-    try {
-      var _host = window.__asstVoiceCard && window.__asstVoiceCard((p.label || p.tool || '工具'));
-      if (_host && RC.toolChip.absorb) RC.toolChip.absorb([_host]);
-    } catch (e) {}
+    // ⚠ 这里**绝不能**抢先 absorb(踩过的坑):天气/搜索/配图/视频这类工具本来就有自己的结果卡,
+    //   由 renderInfo 经 client_action 异步送来、再 absorb 认领 chip。若在这里先把 chip 吸收掉,
+    //   结果卡就认领不到了(absorb 只找"还没被吸收的 chip")→ 变成两张卡、【流程】按钮挂在错的那张上。
+    //   正解:让结果卡按原路认领;**没有结果卡**的工具(see_ink/read_page…)才在 _chipEnd 里升格气泡。
     return c;
   }
   window.__vcChipSeqClear = function () { _chipSeq = []; _chipOf = {}; };   // 清空对话 → 待收尾队列一起清
@@ -626,6 +623,16 @@
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
     if (tid) { RC.toolChip.progress(c, '已派发,正在后台执行…'); _chipTrackTask(c, tid); return; }
     RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
+    // 141:给结果卡一点时间来认领(renderInfo 走 client_action,与 tool_status 是两条异步线)。
+    //   到点还没人认领 = 这个工具没有自己的结果卡(see_ink/read_page…)→ 把本轮回答气泡升格成
+    //   「工具调用卡」:前置语 + 工具 + 正答 收进一张,标题栏挂【流程】按钮。
+    setTimeout(function () {
+      try {
+        if (!c || c.absorbed) return;   // 已被结果卡认领 → 别再造第二张
+        var _host = window.__asstVoiceCard && window.__asstVoiceCard(p.label || p.tool || '工具');
+        if (_host && RC.toolChip.absorb) RC.toolChip.absorb([_host]);
+      } catch (e) {}
+    }, 700);
   }
   function _pickTaskId(rag) {   // 工具返回体里带 task_id(voice-tool 的 rag 是 JSON 字符串)
     try { var o = typeof rag === 'string' ? JSON.parse(rag) : rag; return (o && o.task_id) || ''; } catch (e) { return ''; }
@@ -1192,7 +1199,14 @@
     var label = card.title || '搜索结果';
     var th = document.getElementById('asst-thread');
     var _hosts = [];
-    if (th) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
+    if (th) {
+      var d = _infoCardEl(card);
+      th.appendChild(d);
+      // 141:把本轮的前置语(「我去查一下…稍等」)搬进这张结果卡 —— 用户要的是**一张卡**,
+      //   而不是"一条前置语气泡 + 一张结果卡"分开摆。
+      try { window.__asstVoiceMoveLead && window.__asstVoiceMoveLead(d); } catch (e) {}
+      th.scrollTop = th.scrollHeight; _hosts.push(d);
+    }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
       // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
@@ -2838,6 +2852,10 @@
       if (_rtc._newTurn || !_rtc.ctl) {
         _rtc._newTurn = false;
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
+      } else {
+        // 同一用户轮里的下一个 response(典型:工具结果的正答)→ **开新段落**,不断轮。
+        // 'a' 是全量覆盖语义,不断槽的话正答会把前置语覆盖掉;而复制前置语又会显示两遍。
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('slot'); } catch (_) {}
       }
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
