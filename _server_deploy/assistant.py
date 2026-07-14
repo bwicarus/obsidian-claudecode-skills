@@ -5002,6 +5002,27 @@ def assistant_voice_tool():
 #    (data channel 收 function_call → fetch /voice-tool 执行 → dc 回填),client_action 本地直执行。──
 _RTC_CFG_PATH = Path("~/.config/doubao-voice.json").expanduser()
 _RTC_KEY_PATH = Path("~/.config/openai-realtime.json").expanduser()
+# 133:通话票据密钥(与 voice_realtime_relay.py 共享同一文件)。用途见 relay 的 _ticket_uid 注释:
+#   接管旧通话必须确认"两路 call 是同一个人的",而 call_id 是 OpenAI 生成的、**不保证含应用用户身份**,
+#   从中猜 uid 可能踢掉别人的通话。所以由 webapp(唯一持有 session 的一方)签发,relay 验签。
+_VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
+
+
+def _voice_ticket(uid, call_id: str) -> str:
+    try:
+        import hmac as _hm
+        if not _VOICE_TICKET_KEY.exists():
+            _VOICE_TICKET_KEY.parent.mkdir(parents=True, exist_ok=True)
+            _VOICE_TICKET_KEY.write_text(os.urandom(32).hex(), "utf-8")
+            try:
+                _VOICE_TICKET_KEY.chmod(0o600)
+            except Exception:
+                pass
+        sec = _VOICE_TICKET_KEY.read_text("utf-8").strip().encode()
+        import hashlib as _hl2
+        return _hm.new(sec, f"{uid}|{call_id}".encode(), _hl2.sha256).hexdigest()[:32]
+    except Exception:
+        return ""
 
 
 def _rtc_cfg() -> dict:
@@ -5230,7 +5251,9 @@ def assistant_rtc_call():
             return jsonify({"ok": False, "error": f"OpenAI {r.status_code}: {r.text[:300]}"}), 502
         # call_id 在 Location header(官方形态):sideband 注入大 payload(图像)要用它
         cid = (r.headers.get("Location") or "").rstrip("/").rsplit("/", 1)[-1]
-        return jsonify({"ok": True, "sdp": r.text, "call_id": cid})
+        # 133:连同票据一起下发 —— 前端把它带在 sideband URL 上,relay 验签后才敢做"接管旧通话"
+        return jsonify({"ok": True, "sdp": r.text, "call_id": cid,
+                        "uid": str(uid), "ticket": _voice_ticket(uid, cid)})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:200]}), 502
 

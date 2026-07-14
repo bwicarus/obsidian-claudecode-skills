@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import threading
 import json
 import os
 import re
@@ -962,47 +963,78 @@ def pdf_sw_js():
     return resp
 
 
+# ══════════ 141:PyMuPDF 渲染移出请求线程 → 有界进程池 ══════════
+# ① PyMuPDF **官方不支持多线程**(全局 MuPDF context);而 gunicorn 线程数刚从 8 提到 32
+#    (SSE 舱壁事故的连带处理)→ 线程不安全的暴露面放大 4 倍。
+# ② 渲一页在 Pi 上 0.5-2s **纯 CPU**;32 线程同时渲页会压垮 4 核 Pi 并 OOM。
+# 有界进程池(2 worker)同时治这两件事。渲染函数放在极小的 pdf_render_worker.py 里,
+# 子进程只 import fitz,不会把整条 Flask 依赖链拖进来。
+# ⚠ 用 **forkserver** 上下文:gunicorn worker 是多线程的,直接从多线程进程 fork 可能死锁;
+#   forkserver 先起一个干净的单线程 server 再 fork,规避这个经典坑。
+_RENDER_POOL = None
+_RENDER_POOL_LOCK = threading.Lock()
+
+
+def _render_pool():
+    global _RENDER_POOL
+    if _RENDER_POOL is not None:
+        return _RENDER_POOL
+    with _RENDER_POOL_LOCK:
+        if _RENDER_POOL is None:
+            try:
+                import concurrent.futures as _cf
+                import multiprocessing as _mp
+                _RENDER_POOL = _cf.ProcessPoolExecutor(max_workers=2,
+                                                       mp_context=_mp.get_context("forkserver"))
+                sys.stderr.write("[pdf] 渲染进程池已就绪(forkserver × 2)\n")
+            except Exception as ex:
+                sys.stderr.write(f"[pdf] 渲染进程池创建失败,回退线程内渲染: {str(ex)[:120]}\n")
+                _RENDER_POOL = False   # 明确的"不可用",别每次请求都重试
+    return _RENDER_POOL
+
+
 def _render_page_jpg(ap, page: int, w: int, cf: Path) -> bool:
-    """渲一页→JPEG 写到 cf(原子)。True=成功。同步路径与后台补渲共用。"""
-    import fitz
-    d = None
+    """渲一页→JPEG 写到 cf(原子)。True=成功。同步路径与后台补渲共用。
+    实际渲染跑在**独立进程**里;进程池不可用时回退到本线程(宁可慢,也不能让用户看不到图)。"""
+    import pdf_render_worker as _rw
+    pool = _render_pool()
+    if not pool:
+        return _rw.render_page_jpg(str(ap), page, w, str(cf))
     try:
-        d = fitz.open(str(ap))
-        if page < 1 or page > d.page_count:
-            return False
-        p = d[page - 1]; zoom = w / max(1.0, p.rect.width)
-        pix = p.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        tmp = cf.with_suffix(".jpg.tmp")
-        tmp.write_bytes(pix.tobytes("jpg", jpg_quality=78))
-        tmp.replace(cf)
-        return True
-    except Exception:
-        return False
-    finally:
-        try:
-            if d: d.close()
-        except Exception:
-            pass
+        return bool(pool.submit(_rw.render_page_jpg, str(ap), page, w, str(cf)).result(timeout=120))
+    except Exception as ex:
+        sys.stderr.write(f"[pdf] 进程池渲染失败({str(ex)[:80]}),回退线程内渲染 p{page}\n")
+        return _rw.render_page_jpg(str(ap), page, w, str(cf))
 
 
 _BG_RENDERS: set = set()      # 去重在途的后台补渲(单 worker 进程内)
 
 
 def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
-    """后台补渲精确宽度(轻度放大回退时用):本次先回近似图即时显示,下次请求命中精确图。"""
-    import threading
+    """后台补渲精确宽度(轻度放大回退时用):本次先回近似图即时显示,下次请求命中精确图。
+    141:直接投进程池 —— 以前每次都起一个**无上限**的 daemon 线程,几十页滚动就是几十个线程在抢 CPU。"""
     key = str(cf)
     if key in _BG_RENDERS:
         return
+    import pdf_render_worker as _rw
+    pool = _render_pool()
+    if not pool:   # 池不可用 → 维持旧的线程兜底
+        _BG_RENDERS.add(key)
+
+        def _run():
+            try:
+                _rw.render_page_jpg(str(ap), page, w, str(cf))
+            finally:
+                _BG_RENDERS.discard(key)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return
     _BG_RENDERS.add(key)
-
-    def _run():
-        try:
-            _render_page_jpg(ap, page, w, cf)
-        finally:
-            _BG_RENDERS.discard(key)
-
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        fut = pool.submit(_rw.render_page_jpg, str(ap), page, w, str(cf))
+        fut.add_done_callback(lambda f: _BG_RENDERS.discard(key))
+    except Exception:
+        _BG_RENDERS.discard(key)
 
 
 @bp.route("/api/page-image")

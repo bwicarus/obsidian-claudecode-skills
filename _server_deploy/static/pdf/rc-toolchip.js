@@ -210,7 +210,7 @@
         if (!v || !v.b64) return;
         var im = document.createElement('img');
         im.src = 'data:' + (v.media_type || 'image/png') + ';base64,' + v.b64;
-        im.className = 'tc-vis-img'; im.alt = '喂给 AI 的图';
+        im.alt = '喂给 AI 的图';
         im.title = '这就是实际发给 AI 的图 —— 点击放大';
         im.addEventListener('click', function (ev) { ev.stopPropagation(); visLightbox(im.src); });
         wrap.appendChild(im);
@@ -229,15 +229,12 @@
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]); } catch (e) {}
     if (sg.tts) addTts(el);   // 纯文字的最终结果 → 文字区域角落放一个 ▶(TTS 念它)
   }
-  function visLightbox(src) {   // 141:点图放大 —— 全屏遮罩,再点/按 Esc 关闭
-    var ov = document.createElement('div'); ov.className = 'tc-lb';
-    var im = document.createElement('img'); im.src = src; im.className = 'tc-lb-img';
-    ov.appendChild(im);
-    function close() { try { ov.remove(); } catch (e) {} document.removeEventListener('keydown', onKey); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    ov.addEventListener('click', close);
-    document.addEventListener('keydown', onKey);
-    document.body.appendChild(ov);
+  function visLightbox(src) {   // 141:点图放大 —— **复用项目既有的 .fig-lightbox**(26-figures 定义,
+    //   rc-assistant:1412 已在这么用)。别再自造一个平行的灯箱。
+    var mask = document.createElement('div'); mask.className = 'fig-lightbox';
+    var big = document.createElement('img'); big.src = src; big.alt = '';
+    mask.appendChild(big); document.body.appendChild(mask);
+    mask.addEventListener('click', function () { mask.remove(); });
   }
   function prettyResult(t) {   // 工具回给模型的常是 JSON(截图里那坨 {"kind":"weather","note":...})→ 抽人话,别倒原文
     var raw = String(t || '');

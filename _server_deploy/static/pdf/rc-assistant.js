@@ -2030,20 +2030,25 @@
   window.__asstVoiceCard = function (label) {
     try {
       if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
-      if (_vTurnEl.__tcBd) {   // 同一轮里连调多个工具 → 复用同一张卡(流程图里串成多个节点)
-        var t0 = _vTurnEl.querySelector(':scope > .vc-if-hd > .tc-title');
+      if (_vTurnEl.__tcBd) {   // 同一轮里连调多个工具 → 复用同一张卡(流程图里把它们串成多个节点)
+        var t0 = _vTurnEl.querySelector(':scope > .vc-if-hd > span');
         if (t0 && label) t0.textContent = label;
         return _vTurnEl;
       }
-      var lead = (_vTurnEl.textContent || '').trim();   // 此刻气泡里的正是那句前置语
+      // ⚠ 复用**既有卡片组件**(用户拍板):结果卡 = `.asst-msg.asst-a.vc-if` + `.vc-if-hd` 卡头,
+      //   见 rc-voicecall 的 _infoCardEl();rc-toolchip 的 absorb() 也正是找 .vc-if-hd 挂【流程】按钮。
+      //   别再另造 .asst-tcard/.tc-title 那种平行的一套 —— 那是重复造轮子。
+      var lead = (_vTurnEl.textContent || '').trim();   // 此刻气泡里装着的正是那句前置语
       _vTurnEl.innerHTML = '';
-      _vTurnEl.classList.add('asst-tcard');
+      _vTurnEl.classList.add('vc-if');
       var hd = document.createElement('div'); hd.className = 'vc-if-hd';
-      var tt = document.createElement('span'); tt.className = 'tc-title'; tt.textContent = label || '工具调用';
+      var tt = document.createElement('span'); tt.textContent = label || '工具调用';   // .vc-if-hd span:first-child{flex:1}
       hd.appendChild(tt);
-      var ld = document.createElement('div'); ld.className = 'tc-lead'; ld.textContent = lead;
+      var ld = document.createElement('div');   // 前置语:结构性容器,不引入新 class(样式跟随卡片正文,只压淡)
+      ld.style.cssText = 'opacity:.72;margin-bottom:6px';
+      ld.textContent = lead;
       if (!lead) ld.style.display = 'none';
-      var bd = document.createElement('div'); bd.className = 'tc-bd';
+      var bd = document.createElement('div');   // 正文:最终回答流式写进这里
       _vTurnEl.appendChild(hd); _vTurnEl.appendChild(ld); _vTurnEl.appendChild(bd);
       _vTurnEl.__tcBd = bd; _vTurnEl.__tcLead = ld;
       scrollDown();

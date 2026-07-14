@@ -136,21 +136,12 @@
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
       'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
-      // 141:工具调用卡(前置语+工具+结果 合成一张)+ 喂给 AI 的图 + 点击放大灯箱
-      '.asst-msg.asst-tcard{padding:0;overflow:hidden}' +
-      '.asst-tcard>.vc-if-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;' +
-        'padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.03)}' +
-      '.asst-tcard>.vc-if-hd .tc-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '.asst-tcard>.tc-lead{padding:8px 12px 0;color:#8fa0c0;font-size:13px;line-height:1.5}' +
-      '.asst-tcard>.tc-bd{padding:8px 12px 10px}' +
-      '.asst-tcard>.tc-bd:empty{padding:0}' +
+      // 141:工具卡里「喂给 AI 的图」缩略图。卡片本体复用既有 .vc-if/.vc-if-hd,放大复用既有 .fig-lightbox
+      //     —— 不另造卡片、不另造灯箱(用户拍板:复用之前设计的卡片,别自己新设计一套)。
       '.tc-vis{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 4px}' +
-      '.tc-vis-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
+      '.tc-vis img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
         'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block}' +
       '.tc-vis-cap{font-size:11px;color:#7f92b8;margin-bottom:6px}' +
-      '.tc-lb{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.86);display:flex;' +
-        'align-items:center;justify-content:center;cursor:zoom-out;padding:24px}' +
-      '.tc-lb-img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.6)}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
@@ -2944,7 +2935,8 @@
       // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
       // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
       var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=4&call_id=' + encodeURIComponent(_rtc.callId) +
-                             '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0));
+                             '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0) +
+                             '&uid=' + encodeURIComponent(_rtc.uid || '') + '&tk=' + encodeURIComponent(_rtc.tk || ''));
       cw.onmessage = function (ev) {
         try {
           var m0 = JSON.parse(ev.data);
@@ -2958,6 +2950,20 @@
               _stateFp = null; _inkFp = '';
               try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e2) {}
       try { _ttsIrqSync(); } catch (e2) {}   // 131:接通后按当前档位/代念开关,自动进入「可打断代念」
+            }
+          }
+          else if (m0.event === 'superseded') {
+            // ★ 133 单通话唯一性:这一路被**同一账号的新通话接管**了(多标签/多设备/僵尸页)。
+            // ⚠ 这里是治「后端踢人 vs 前端自动重连打乒乓」的关键(commit 0b9999c 就栽在这):
+            //   若把它当成普通断线,前端会指数退避自动重连 → 建出新 call → 反过来把用户正在用的那路踢掉
+            //   → 无限乒乓。所以必须置 _userHung=true 进**终态**(等同用户主动挂断,teardown 不会触发重连)。
+            // ⚠ 只对**确实是自己当前这一路**生效:迟到的 superseded 可能是给旧 call 的,不能误杀新通话。
+            var _sp = m0.payload || {};
+            if (!_sp.call_id || _sp.call_id === _rtc.callId) {
+              try { console.warn('[vc] 本通话已被新通话接管 → 进终态,不重连'); } catch (e2) {}
+              _userHung = true;                 // 关键:teardown 里的重连逻辑只认"意外断线"
+              try { setSt('已在其它页面/设备开始新通话 —— 本通话结束'); } catch (e2) {}
+              try { teardown(false); } catch (e2) {}
             }
           }
           else if (m0.event === 'turn') {
@@ -3112,6 +3118,7 @@
       if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
       if (g !== _gen) { _rtcAbandon(pc, mic, cres.call_id); return; }
       _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
+      _rtc.uid = cres.uid || ''; _rtc.tk = cres.ticket || '';   // 133:单通话唯一性票据(relay 验签后才敢接管旧通话)
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       // 133(双通话真凶,外部评审揪出):setRemoteDescription **也是一个 await** —— 这期间用户完全可能
       // 挂断+重拨(teardown 会 ++_gen)。旧代码在此直接提交 _rtc.pc/_rtc.on,于是**过期的这一轮醒来后
@@ -3157,7 +3164,9 @@
     _rec.oab = false;
     try { _aecKill(_taec); } catch (e) {}   // 131:退出「可打断代念」(环回随通话走)
     _rtcCapReset();
-    try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.close(); } } catch (e) {}
+    // 摘回调再关:onclose 不摘=主动挂断被当成意外断线触发重连;onmessage 不摘=旧 ctlWs 的迟到消息
+    // (尤其 superseded)会打到**新通话**的状态上(133:_userHung 被误置 → 新通话当场自杀)。
+    try { if (_rtc.ctlWs) { _rtc.ctlWs.onclose = null; _rtc.ctlWs.onmessage = null; _rtc.ctlWs.close(); } } catch (e) {}
     _rtc.ctlWs = null; _rtc.ctl = false;
     try { if (_rtc.dc) _rtc.dc.close(); } catch (e) {}
     try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}

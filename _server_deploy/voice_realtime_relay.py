@@ -17,6 +17,7 @@ import base64
 import difflib
 import gzip
 import hashlib
+import hmac
 import json
 import re
 import struct
@@ -2490,7 +2491,91 @@ def _is_asr_ghost(tx: str):
     return False, ""
 
 
-async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
+# ══════════ 133:通话票据(webapp 签发 / relay 验签)══════════
+# 为什么需要它:接管旧通话必须知道"这两路 call 是**同一个人**的"。
+# ⚠ 绝不能从 call_id 猜 —— `rtc_u7_E1S05` 这串**完全来自 OpenAI 的 Location header**,我们没参与生成。
+#   日志里它恒为 `rtc_u7_`,但**无法证明** `u7` 是"用户"而不是"组织/项目"级前缀。
+#   万一是后者,`call_id.split("_")[1]` 对所有用户都相同 → 接管逻辑会去**踢掉别人的通话**。
+#   所以:uid 只认 webapp 用共享密钥签发的票据;**验不过就绝不踢人**(只告警),宁可不去重也不误伤。
+VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
+
+
+def _ticket_secret() -> bytes:
+    try:
+        if not VOICE_TICKET_KEY.exists():
+            VOICE_TICKET_KEY.parent.mkdir(parents=True, exist_ok=True)
+            VOICE_TICKET_KEY.write_text(os.urandom(32).hex(), "utf-8")
+            try:
+                VOICE_TICKET_KEY.chmod(0o600)
+            except Exception:
+                pass
+        return VOICE_TICKET_KEY.read_text("utf-8").strip().encode()
+    except Exception:
+        return b""
+
+
+def _ticket_uid(uid: str, call_id: str, tk: str) -> str:
+    """验签通过 → 返回可信 uid;否则空串(调用方据此**放弃接管**)。"""
+    sec = _ticket_secret()
+    if not (sec and uid and call_id and tk):
+        return ""
+    want = hmac.new(sec, f"{uid}|{call_id}".encode(), hashlib.sha256).hexdigest()[:32]
+    return uid if hmac.compare_digest(want, tk) else ""
+
+
+async def _openai_hangup(call_id: str):
+    """官方 POST /v1/realtime/calls/{id}/hangup —— 从服务端真正终止一路通话。
+    媒体是浏览器↔OpenAI 直连,relay 拆不了;但这个端点可以。用于接管旧通话。"""
+    key = _openai_key()
+    if not key or not call_id:
+        return False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"https://api.openai.com/v1/realtime/calls/{call_id}/hangup",
+                             headers={"Authorization": f"Bearer {key}"})
+        sys.stderr.write(f"[rtc-ctl] ☎hangup call={call_id[:14]} → {r.status_code}\n")
+        return r.status_code < 300
+    except Exception as ex:
+        sys.stderr.write(f"[rtc-ctl] hangup 失败 call={call_id[:14]}: {str(ex)[:80]}\n")
+        return False
+
+
+async def _supersede_others(uid: str, new_call: str):
+    """★ 133:单通话唯一性 —— 同一用户开新通话 → **接管**(踢掉)他所有旧通话。
+
+    ⚠ 这里埋着一个我踩过的坑(commit 0b9999c 因此被 revert):**纯后端踢人会跟前端自动重连打乒乓** ——
+      踢旧 → 旧前端以为"意外断线" → 指数退避自动重连 → 建出新 call → 又把用户真正在用的那路踢掉 → 死循环。
+      后端**无法区分**"被踢的旧通话在重连" vs "用户开的全新通话"。
+    破解点:**先给旧前端发一条它看得懂的 superseded**,让它进**终态**(等同用户主动挂断,不触发重连),
+      再挂断。带上 call_id,前端只对"确实是自己当前那路"生效(防迟到消息误杀新通话)。
+    """
+    live = _RTC_CTL_LIVE.get(uid) or {}
+    olds = [c for c in list(live.keys()) if c != new_call]
+    for old in olds:
+        rec = live.get(old) or {}
+        obws = rec.get("bws")
+        if obws is not None:
+            try:   # ① 先告知:这是"被接管",不是断线 → 前端进终态,**不许自动重连**
+                await obws.send(json.dumps({"event": "superseded",
+                                            "payload": {"call_id": old, "by": new_call}}, ensure_ascii=False))
+            except Exception:
+                pass
+        asyncio.create_task(_openai_hangup(old))   # ② 再真正终止服务端那路(否则它继续收音频、继续答、继续计费)
+        live.pop(old, None)
+        sys.stderr.write(f"[rtc-ctl] ⛔接管:旧 call={old[:14]} 被 {new_call[:14]} 取代\n")
+        if obws is not None:
+            async def _close_later(w):
+                await asyncio.sleep(0.5)   # 给 superseded 一点时间送达再关
+                try:
+                    await w.close()
+                except Exception:
+                    pass
+            asyncio.create_task(_close_later(obws))
+
+
+async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1,
+                         uid_q: str = "", tk_q: str = ""):
     _span = uuid.uuid4().hex[:12]   # 284:voice_span_id
     _bok, _bspent = _budget_gate()
     if not _bok:
@@ -2530,14 +2615,21 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         return
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
     # 93/133(双回答事故取证):登记到真并发注册表;**只有此刻别的 call 还挂着**才是真并存(前端双拨/多标签/多设备)。
-    _uid_m = call_id.split("_")[1] if call_id.startswith("rtc_") else ""
+    # 133:uid **只认票据**(见 _ticket_uid 的说明:从 call_id 猜会误踢别人的通话)
+    _uid_m = _ticket_uid(uid_q, call_id, tk_q)
+    if not _uid_m:
+        sys.stderr.write(f"[rtc-ctl] ⚠ 票据无效/缺失(uid={uid_q!r}) → 本路不参与单通话唯一性(不踢人)\n")
     try:
+        if not _uid_m:
+            raise RuntimeError("no ticket")
         _live = _RTC_CTL_LIVE.setdefault(_uid_m, {})
         _others = [c for c in _live if c != call_id]
         if _others:
-            sys.stderr.write(f"[rtc-ctl] ⚠ 真·同 uid 多 call 并存({len(_others) + 1} 条): "
-                             f"在挂={[c[:12] for c in _others]} 新={call_id[:12]}\n")
-        _live[call_id] = time.time()
+            sys.stderr.write(f"[rtc-ctl] ⚠ 同 uid 多 call 并存({len(_others) + 1} 条): "
+                             f"在挂={[c[:12] for c in _others]} 新={call_id[:12]} → 接管\n")
+        _live[call_id] = {"ts": time.time(), "bws": bws}
+        if _others:
+            await _supersede_others(_uid_m, call_id)   # 133:最新通话独占 —— 旧的进终态 + 官方 hangup
     except Exception:
         pass
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": "", "_over": (not _bok)}   # _over:超支后 sideband 掐生成(入口已超支=从首轮就掐,含 #290 重连场景)
@@ -3184,7 +3276,9 @@ async def handle_browser(bws):
                                  (q.get("call_id") or [""])[0],
                                  (q.get("file") or [""])[0],
                                  int((q.get("page") or ["0"])[0] or "0"),
-                                 int((q.get("fe") or ["1"])[0] or "1"))
+                                 int((q.get("fe") or ["1"])[0] or "1"),
+                                 (q.get("uid") or [""])[0],
+                                 (q.get("tk") or [""])[0])
             return
         file_rel = (q.get("file") or [""])[0]
         page = int((q.get("page") or ["0"])[0] or "0")
