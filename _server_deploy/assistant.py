@@ -218,10 +218,23 @@ def _probe_free(model, timeout=12):
         _mark_unsupported("free", model)   # 免费档确实用不了 → 持久记住 + 面板隐藏
     # 其它(429/5xx)→ 不写缓存,保持 unknown,下次再探
 
+_probe_fail = {}          # model → 上次探测"没得出结论"的时刻(限流/网络异常)
+_PROBE_FAIL_COOLDOWN = 900   # 15 分钟内不再重探同一个型号
+
+
 def _probe_free_batch(models):
-    """并发探测一批"未验证"型号的免费档支持情况(只探 unknown 的;已知 ok/no 跳过)。面板首次打开时调,之后命中缓存=0 请求。"""
-    todo = [m for m in (models or []) if _free_state(m) == "unknown"]
-    if not todo or time.time() < _gemini_off.get("free", 0):
+    """并发探测一批"未验证"型号的免费档支持情况(只探 unknown 的;已知 ok/no 跳过)。
+
+    ⚠ 用户实测「模型设置面板有时要加载很久」的根因之一:
+      _probe_free 只在 **200(ok)** 或 **明确不支持(no)** 时才写持久缓存;
+      **限流/网络异常时不写** → 该型号永远停在 unknown → **每次打开面板都重探一遍**,
+      每个 12s 超时 → 面板一直转圈。
+      故:探测没得出结论的,记 _probe_fail 冷却 15 分钟,别每次都撞。
+    """
+    now = time.time()
+    todo = [m for m in (models or [])
+            if _free_state(m) == "unknown" and now - _probe_fail.get(m, 0) > _PROBE_FAIL_COOLDOWN]
+    if not todo or now < _gemini_off.get("free", 0):
         return
     try:
         from concurrent.futures import ThreadPoolExecutor
@@ -230,6 +243,9 @@ def _probe_free_batch(models):
     except Exception:
         for m in todo:
             _probe_free(m)
+    for m in todo:   # 探完仍是 unknown = 没得出结论(限流/网络)→ 上冷却,别下次开面板又撞一遍
+        if _free_state(m) == "unknown":
+            _probe_fail[m] = time.time()
 
 def _is_model_unsupported(status, text):
     """这把 key 是不是"根本用不了这个模型"(免费档没这模型/需付费/无权限)——**永久性**,区别于额度耗尽(临时)。
@@ -5842,7 +5858,12 @@ def assistant_action_prefs():
     # 主动探测:免费档对各型号支不支持(只探"没探过"的,结果持久缓存 30 天 → 之后命中缓存 0 请求)。
     # 这样 pro 等付费型号在用户「真点」之前就被验证并隐藏,而不是等点了失败才隐藏。
     gall = _gemini_models()
-    _probe_free_batch([m for m in gall if not _is_paid_only(m)])   # 已知仅付费的不用探
+    # ⚠ **不阻塞面板**:探测是真出网(每型号 12s 超时),放在请求线程里 → 用户点开「⚙ 模型」要干等十几秒
+    #   (用户实测「有时加载很久」)。改成后台跑:本次用**已知缓存**立即出面板,探测结果下次打开生效。
+    #   (缓存是持久化的 30 天,所以"下次"通常就是稳定态;首次/过期那一次少几个型号也无伤。)
+    _todo = [m for m in gall if not _is_paid_only(m)]
+    if _todo:
+        threading.Thread(target=_probe_free_batch, args=(_todo,), daemon=True).start()
     # 「免费档验证为不支持」且不在付费清单 → 真不可用,隐藏;**仅付费**的保留并标💰
     # (以前一律隐藏 → 3.1-pro 这类 paid-only 型号面板里永远选不到,2026-07 修)
     gmods = [m for m in gall if _free_state(m) != "no" or _is_paid_only(m)]
