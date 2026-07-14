@@ -91,3 +91,54 @@
 - 兜底:thread 起不来/首轮无响应(未调工具前)→ 自动回退 `_agent_run_claude`(fallback_from 标注);
   调过工具后失败→报错(thread 内上下文无法迁移)。
 - 事件语义:与 claude/gemini 编排完全一致(answer=轮内全量/tool/tool-done/actions/task/undo/trace)。
+
+## codex exec 调「远程 HTTP MCP 工具」:**已打通**(2026-07-14 实测)
+
+**结论:通了,而且走的是 ChatGPT 订阅额度(plan_type=plus),不是 API Key 计费。** codex 可以当白嫖额度的 MCP worker。
+
+### 唯一的关键:`default_tools_approval_mode = "approve"`
+
+单变量隔离实测(其余配置完全相同):
+
+| 配置 | 结果 |
+|---|---|
+| 只加 `default_tools_approval_mode="approve"` | ✅ 成功(拿到真实数据) |
+| 不加它 | ❌ `user cancelled MCP tool call` |
+| 加它 + `features.shell_tool=false` | ✅ 成功 |
+
+**根因**:`~/.codex/config.toml` 里的 `approval_policy = "on-request"` + `approvals_reviewer = "user"` 让 **MCP 工具默认需要人工审批**;无头 `codex exec` 没有人能批 → 立刻自动取消。CLI 打印的 `user cancelled MCP tool call` 措辞极具误导性(并没有人取消),而 debug 日志里的 `SSE stream disconnected / hyper::Error(IncompleteMessage)` + `turn aborted reason=stream_disconnected` **只是取消后 turn 被 abort 的下游现象,不是根因**。
+
+⚠ cookbook `articles/codex_mcp_tools` 里那句「exec 模式 MCP 工具 auto-approved」**与实际不符**(至少 0.144.1 + 用户 config 有 `approval_policy=on-request` 时不成立)。别信它,显式写 `default_tools_approval_mode="approve"`。
+
+### 不需要的东西(实测排除,别浪费时间)
+- ❌ **不需要 ChatGPT 网页端「开发者模式」**(开了没用;它当时把「秒放弃」变成「重试」纯属巧合/灰度)
+- ❌ 不需要 `--ignore-user-config` / `--ephemeral` / `--strict-config`(保留用户配置照样成功)
+- ❌ 不需要 `experimental_use_rmcp_client`(0.144.1 已内置 streamable HTTP client,该字段已过时,`--strict-config` 下会报未知字段)
+- ❌ 不需要改我们的 MCP 成 stateless(stateful 正常工作)
+- ❌ 不是沙箱问题(Claude Code 的 Bash 沙箱内外都成功)
+- ❌ 不是工具集大小(`enabled_tools` 收窄与否都一样)
+
+### 可用配置(实测通过)
+
+```bash
+export BWAPP_TOKEN='<token>'
+codex exec --skip-git-repo-check --color never -s read-only \
+  -c 'model="gpt-5.6-terra"' \
+  -c 'model_reasoning_effort="low"' \
+  -c 'mcp_servers.bwapp={url="https://bwicarus.space/mcp",bearer_token_env_var="BWAPP_TOKEN",required=true,enabled_tools=["list_books"],default_tools_approval_mode="approve",startup_timeout_sec=20,tool_timeout_sec=60}' \
+  -c 'features.shell_tool=false' \
+  '只调用一次 bwapp/list_books,然后输出前三本书的标题。'
+```
+
+- `features.shell_tool=false` — **安全底线**:worker 只能调 MCP,不能跑 shell(语音驱动的 worker 必须加)
+- `required=true` — MCP 初始化失败直接退出,不静默降级
+- `enabled_tools=[...]` — 按任务收窄工具面(可选;cookbook `articles/codex_mcp_tools` 讲的白名单,默认全暴露)
+- `-o <file>` — 最后一条消息写文件(取结果用)
+
+### 模型(ChatGPT 账号目录,`codex debug models` 可查)
+`gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini`。
+⚠ `gpt-5.1` / `gpt-5-codex` **不在目录里**,用了会报 `model is not supported when using Codex with a ChatGPT account`(那个 400 跟 MCP 无关)。
+建议:一般 MCP 编排 = `gpt-5.6-terra` + `low`;简单重复批量 = `gpt-5.6-luna` + `low`;复杂判断 = `gpt-5.6-sol`。**高 reasoning effort 会明显变慢且爱画蛇添足**(实测它在工具返回空时会自己去翻本地文件)。
+
+### ⚠ 操作坑
+`codex mcp get` 等**交互子命令**在无 TTY 环境会卡在 `Reading additional input from stdin...`,Ctrl+C 后会**污染整个工具执行层**(后续所有 Bash/Read/Glob 返回空,只能重开 session)。**调 codex 一律 `< /dev/null` + `timeout` 双保险**;`codex exec` 传了 prompt arg 则不读 stdin,安全。

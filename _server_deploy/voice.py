@@ -1069,6 +1069,107 @@ def _agent_catalog() -> str:
     return _agent_cat["txt"]
 
 
+# 148:worker 默认走 **codex**(ChatGPT 订阅额度,与 Claude 额度完全独立=白捡一路),失败自动降级 claude。
+#   实测同一多步任务(3 轮中位):claude/opus 8.3s、codex/gpt-5.6-luna 14.5s、codex/gpt-5.6-terra 20.0s,
+#   **成功率都是 3/3**。worker 只用于「≥4步/探索性/长耗时」的活(见 147 的 A/B),多等几秒无所谓,
+#   但能把 Claude 额度整个省给主力(阅读器助手/语音)。要切回:AGENT_TASK_BACKEND=claude。
+_AGENT_BACKEND = os.environ.get("AGENT_TASK_BACKEND", "codex").strip().lower()   # codex | claude
+
+
+def _agent_codex_cmd(prompt: str) -> list:
+    """148:codex exec 当 MCP worker —— **走 ChatGPT 订阅额度,与 Claude 额度完全独立**(白捡一路)。
+
+    ⚠ **唯一的关键是 `default_tools_approval_mode="approve"`**(2026-07-14 单变量隔离实测):
+      不加它 → MCP 工具被当成「需要人工审批」(用户 config.toml 里 approval_policy=on-request +
+      approvals_reviewer=user),无头下没人批 → 立刻 `user cancelled MCP tool call`。
+      那句措辞极具误导性(根本没人取消);debug 日志里的 `SSE stream disconnected /
+      hyper::Error(IncompleteMessage)` **只是取消后 turn 被 abort 的下游现象,不是根因**。
+      (cookbook 说 exec 模式 MCP 自动批准 —— 与实际不符,别信。)
+
+    ⚠ **`features.shell_tool=false` 是安全底线**:worker 由语音驱动,绝不能让它跑 shell。
+      (codex 的 `-s read-only` 只限制沙箱,shell 工具本身依然存在。)
+    """
+    url = os.environ.get("MCP_PUBLIC_URL", "https://bwicarus.space/mcp")
+    # disabled_tools = codex 侧的 _AGENT_DENY:MCP server 的 instructions 让**外部编排 agent**每轮把对话
+    #   写进助手历史(assistant_log_chat)——worker 是内部执行体,不需要;实测它真去调了,白烧一整轮。
+    mcp = ('mcp_servers.bwapp={url="%s",bearer_token_env_var="BWAPP_TOKEN",required=true,'
+           'default_tools_approval_mode="approve",'
+           'disabled_tools=["assistant_log_chat","assistant_history"],'
+           'startup_timeout_sec=20,tool_timeout_sec=60}' % url)
+    return [os.environ.get("APP_CODEX", "codex"), "exec", "--json",
+            "--skip-git-repo-check", "--color", "never", "-s", "read-only",
+            "-c", 'model="%s"' % os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna"),
+            "-c", 'model_reasoning_effort="%s"' % os.environ.get("AGENT_CODEX_EFFORT", "low"),
+            "-c", mcp,
+            "-c", "features.shell_tool=false",   # 安全底线:只能调 MCP
+            prompt]
+
+
+class _AgentTimeout(Exception):
+    pass
+
+
+def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list) -> str:
+    """跑一个无头 CLI(claude | codex),流式解析事件驱动工具卡进度条。返回最终答案('' = 没给结果)。
+
+    两边的事件格式不同,但语义一一对应:
+      claude  `--output-format stream-json`:{type:assistant, message.content[].type=tool_use} / {type:result}
+      codex   `--json`:{type:item.started, item.type=mcp_tool_call} / {type:item.completed, item.type=agent_message}
+    """
+    codex = backend == "codex"
+    if codex:
+        cmd = _agent_codex_cmd(prompt + "\n\n" + sysp)   # codex exec 没有 --append-system-prompt,并进 prompt
+    else:
+        cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt,
+               "--append-system-prompt", sysp,
+               "--mcp-config", _agent_mcp_cfg(),
+               "--allowedTools", "mcp__bwapp",
+               "--disallowedTools", _AGENT_DENY,
+               "--model", os.environ.get("AGENT_TASK_MODEL", "opus"),
+               "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
+    env = dict(os.environ)
+    if codex:
+        # codex 用 bearer_token_env_var 取 MCP token(不落盘,比 claude 的 --mcp-config 更干净)
+        env["BWAPP_TOKEN"] = Path("~/.config/mcp-http-token").expanduser().read_text().strip()
+    else:
+        env["ENABLE_TOOL_SEARCH"] = "false"   # 147c:关掉工具延迟加载(见下)——轮数减半
+    answer = ""
+    pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
+    t0 = time.time()
+    for line in pr.stdout:
+        if time.time() - t0 > _AGENT_TIMEOUT:
+            pr.kill()
+            raise _AgentTimeout()
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if codex:
+            it = d.get("item") or {}
+            if d.get("type") == "item.started" and it.get("type") == "mcp_tool_call":
+                nm = str(it.get("tool") or "")
+                if nm:
+                    steps.append({"name": nm, "status": "done"})
+                    _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
+            elif d.get("type") == "item.completed" and it.get("type") == "agent_message":
+                answer = (it.get("text") or "").strip()   # 覆盖式:最后一条 agent_message 即最终答案
+        elif d.get("type") == "assistant":
+            for c in ((d.get("message") or {}).get("content") or []):
+                if c.get("type") == "tool_use":
+                    nm = str(c.get("name") or "").replace("mcp__bwapp__", "")
+                    if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
+                        steps.append({"name": nm, "status": "done"})
+                        _vtask_set(tid, step=f"{nm}…", steps=list(steps))
+        elif d.get("type") == "result":
+            answer = (d.get("result") or "").strip()
+    pr.wait(timeout=10)
+    return answer
+
+
 def _task_agent(tid, params, ctx, base):
     instr = (params.get("instruction") or "").strip()
     if len(instr) < 3:
@@ -1098,45 +1199,29 @@ def _task_agent(tid, params, ctx, base):
     #   且 system.init 里 MCP 从 0 个变成 **20 个直接可见**。
     #   ⇒ 目录预注入(_agent_catalog)因此**不再需要**,留着只是白塞 token。
     sysp = "做完只输出一句话(40 字内)告诉用户结果,不要罗列过程、不要 markdown。做不到就直说做不到和原因。"
-    cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt,
-           "--append-system-prompt", sysp,
-           "--mcp-config", _agent_mcp_cfg(),
-           "--allowedTools", "mcp__bwapp",
-           "--disallowedTools", _AGENT_DENY,
-           "--model", os.environ.get("AGENT_TASK_MODEL", "opus"),
-           "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
     steps, answer = [], ""
     try:
-        env = dict(os.environ)
-        env["ENABLE_TOOL_SEARCH"] = "false"   # 147c:关掉工具延迟加载(见上)——轮数减半
-        pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
-        t0 = time.time()
-        for line in pr.stdout:
-            if time.time() - t0 > _AGENT_TIMEOUT:
-                pr.kill()
-                _vtask_set(tid, status="error", error="任务超时")
-                return
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("type") == "assistant":
-                for c in ((d.get("message") or {}).get("content") or []):
-                    if c.get("type") == "tool_use":
-                        nm = str(c.get("name") or "").replace("mcp__bwapp__", "")
-                        if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
-                            steps.append({"name": nm, "status": "done"})
-                            _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
-            elif d.get("type") == "result":
-                answer = (d.get("result") or "").strip()
-        pr.wait(timeout=10)
-    except Exception as e:
-        _vtask_set(tid, status="error", error=str(e)[:140])
+        answer = _agent_run_cli(_AGENT_BACKEND, prompt, sysp, tid, steps)
+    except _AgentTimeout:
+        _vtask_set(tid, status="error", error="任务超时")   # 超时不降级:再来一轮又是 240s
         return
+    except Exception as e:
+        if _AGENT_BACKEND != "codex":
+            _vtask_set(tid, status="error", error=str(e)[:140])
+            return
+        sys.stderr.write(f"[agent] codex 异常({e}),降级 claude\n")   # 进程起不来/崩了 → 往下走降级
+    # 148:白嫖后端没给结果(或压根没起来)→ 降级 claude 保成功率(用户排序:成功率 > 速度)
+    if not answer and _AGENT_BACKEND == "codex":
+        steps.clear()
+        _vtask_set(tid, step="换个助手重试…")
+        try:
+            answer = _agent_run_cli("claude", prompt, sysp, tid, steps)
+        except _AgentTimeout:
+            _vtask_set(tid, status="error", error="任务超时")
+            return
+        except Exception as e:
+            _vtask_set(tid, status="error", error=str(e)[:140])
+            return
     if not answer:
         _vtask_set(tid, status="error", error="助手没给出结果")
         return
