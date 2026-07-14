@@ -1,0 +1,192 @@
+# ADR:任务运行时(Task Runtime)+ 页面块 —— AI 出卷、你手写、AI 批改
+
+日期:2026-07-14 · 状态:**已采纳,先做「听写」垂直切片** · 提出者:用户
+
+---
+
+## 1. 要做什么
+
+让 AI 能**新建页 + 往页里写结构化内容**(试卷/听写纸/练习题),你**手写填写**,AI **看图批改**;
+并引入一个**确定性的任务运行时**来编排这类长任务(有停顿、有等待、有循环)。
+
+第一个垂直切片 = **AI 听写**:
+
+```
+AI(一次调用) → 生成 words[] + 起一个 run
+──────────── 之后 LLM 完全不参与循环 ────────────
+运行时: 写一张听写纸(N 个 blank + 「下一个」按钮)
+        loop i in words:
+            say(words[i])            ← 借 client_action 让前端 TTS 念
+            wait_event("next")       ← 挂起,等你按按钮
+        逐个 blank 裁图 → llm 批改   ← LLM 只在这里回来一次
+        把批改结果写回页面
+```
+
+---
+
+## 2. 铁律:**LLM 不做等待,也不做循环**
+
+最自然的想法是让 AI 在工具循环里挂起等你按按钮。**这条路会死**:
+
+- **烧钱**:每等一次,整个上下文重发一遍
+- **不可恢复**:刷新 / 断网 / 切后台 → 任务没了
+- **不可靠**:模型会忘记念到第几个、会重复、会提前收尾
+
+**正解**:循环、等待、超时、恢复 全部交给**确定性的运行时**;LLM 只做两件它擅长的事——
+**生成内容**(words[])和**做判断**(批改)。
+
+> 这与项目里 Workflow 的模式一致(确定性控制流 + 嵌入 LLM 步骤),也是业界 durable execution 的通行做法。
+
+### 铁律二:**运行时不许有"阻塞等待的线程"**
+
+2026-07-14 的事故记忆犹新:SSE 长连接每条独占一个 gthread 线程,8 条就把线程池吃光、**全站零响应**
+(见 `reader_events.py` 文件头 + memory `sse-thread-starvation`)。
+
+所以运行时是**事件驱动的状态机**,不是"等待的线程":
+
+- 状态存**文件**(durable) → 进程重启不丢
+- 推进由**事件**触发:① 按钮 HTTP 上报 ② 定时器到点 ③ 前端回前台对齐
+- **任何时刻零线程**被这个任务占用
+
+---
+
+## 3. 关键设计决策(测绘之后定的)
+
+### 3.1 🔴 批改的图从哪来 —— 绕开最大的坑
+
+**坑**:`pdf_reader._figure_crop_png()`(pdf_reader.py:8746)是**从磁盘上的 PDF 文件渲页**。
+而 overlay 插入页在 PDF 文件里**是一张空白真页** —— 内容只在 sidecar(`md_ver > synced_ver` 时压根没写回)。
+→ 按 bbox 裁出来 = **白纸 + 墨迹**,AI 看不到题号/填空框/提示词。
+
+**绕法(采纳)**:**批改不需要图里有题号。**
+
+- 每个 `blank` 块存一个**页归一化 bbox**(0-1)
+- 裁图:`_figure_crop_png(ap, page, box=blank.rect, with_ink=True, rel=rel, strokes=strokes)`
+  → 只裁出**这一格里你手写的字**
+- 题号 / 正确答案 **在 prompt 里用文字给**:
+  「第 3 题,正确答案是『憂鬱』。这是用户写的:[图]。判断对错。」
+
+**收益**:零新渲染器、不依赖视口截图(它只截一屏且 ≤900KB)、不依赖异步写回 PDF、
+分辨率可控(现成代码会把长边动态拉到 ~1100px —— 注释明写这是手写体识别的下限,
+旧版固定 scale 导致"多家模型全认错",pdf_reader.py:8896-8930)。
+
+**被否决的两条**:
+- ❌ 先把内容烧进 PDF 再裁:依赖 `_inspage_job`(单书互斥、大书慢),且现在烧的是 `_up_md_html(md)`、不认块。
+- ❌ 前端视口截图:只截一屏(N 个 blank 超屏)、分辨率受限、依赖 html2canvas。
+
+### 3.2 服务端怎么"念" —— 借道,不新建通道
+
+**全站没有服务端 TTS**(webapp 无端点;relay 的 `handle_tts_only` 只被动读浏览器 WS)。
+
+**采纳**:`reader_events.publish("client-action", file, uid, {"action":{"fn":"__vcSpeakText","args":[word]}})`
+→ 阅读器页 SSE 收到 → `RC.execRemote`(rc-assistant.js:2149)→ `window.__vcSpeakText(word)`(rc-voicecall.js:1937)
+→ 走前端已有的完整 TTS 链路(分段、打断、AEC)。**MCP 遥控翻页已经在用这条路。**
+
+⚠ 三个硬约束:
+1. **页面不可见时 SSE 事件直接丢**(`pdf-tail.js:364` / `epub-html.js:3573` 的 `visibilityState !== 'visible'` 早退)
+   → 必须有 `GET /pdf/api/run-status?rid=`,前端 **visibilitychange 回前台时拉状态机对齐**,不能只靠推送。
+2. **iOS AudioContext 必须在点击手势的同步栈内 warm**(`window.__vcTtsWarm()`,rc-voicecall.js:1936)
+   → 听写「开始」按钮**必须**调它,否则 iOS 上无声。
+3. `html_reader.html` **没有引 rc-voicecall.js** → HTML 阅读器里没有 `__vcSpeakText`。**先只做 PDF。**
+
+### 3.3 存储:文件驱动,照抄 preprocess 范式
+
+现有三套任务表(`_vtasks` voice.py:829 / `_JOBS` pdf_reader.py:7813 / `_chat_jobs`)**全是进程内存 dict**,
+webapp 一重启就丢,且**没有"挂起等待用户事件"这个状态**。
+
+→ 新建 `state/reader-runs/<rid>.json`,照 `state/book-preprocess/<sha>.json` 的文件驱动范式
+(pdf_reader.py:1257-1276:phase + percent + updated_at + pid 存活检测)。
+
+---
+
+## 4. 数据结构
+
+### 4.1 页面块(挂在插入页 sidecar 的新字段 `blocks`)
+
+插入页记录现在只有 `{id, page, title, md, mode, md_ver, synced_ver}`(真实样本见测绘)。
+**加一个 `blocks` 字段**,`md` 路径原样保留(向后兼容):
+
+```jsonc
+{
+  "id": "u_26b4ffda", "page": 32, "mode": "overlay",
+  "kind": "dictation",              // 这张纸是什么(供运行时/渲染识别)
+  "run_id": "r_ab12",               // 关联的运行时
+  "blocks": [
+    {"id":"t1","kind":"text","text":"日语听写 · 2026-07-14","style":"h1"},
+    {"id":"q1","kind":"blank","label":"1.","rect":[0.10,0.18,0.90,0.26]},   // ★ 页归一化 0-1
+    {"id":"q2","kind":"blank","label":"2.","rect":[0.10,0.28,0.90,0.36]},
+    {"id":"b1","kind":"button","label":"下一个","event":"next"},
+    {"id":"c1","kind":"checkbox","label":"我写完了","event":"done"}
+  ]
+}
+```
+
+- **`rect` 是页归一化 0-1** —— 与墨迹坐标(`RCInk.norm`,rc-ink.js:80)、与 `_figure_crop_png` 的 `box`
+  **同一坐标系**。这是"按填空裁图"能成立的关键。
+- 布局后由**前端把实际 rect 写回** sidecar(PATCH),因为只有前端知道渲染后的真实位置。
+
+### 4.2 运行(`state/reader-runs/<rid>.json`)
+
+```jsonc
+{
+  "rid": "r_ab12", "kind": "dictation", "uid": "7",
+  "file": "资源/uploads/xxx.pdf", "page": 32, "upage": "u_26b4ffda",
+  "status": "waiting",              // running | waiting | done | error | cancelled
+  "step": 3,                        // 当前走到第几步
+  "wait": {"event": "next", "since": 1784041000, "timeout_s": 1800},
+  "params": {"words": ["憂鬱", "薔薇", ...], "lang": "ja"},
+  "state": {"i": 2},                // 循环游标
+  "result": null,
+  "updated_at": 1784041000
+}
+```
+
+---
+
+## 5. 要新增/改动的东西(精确到 file:line)
+
+| # | 改哪 | 做什么 |
+|---|---|---|
+| 1 | **新建 `_server_deploy/task_runtime.py`** | 状态机:`start(kind, params, ctx)` / `advance(rid, event)` / `status(rid)`;文件驱动 |
+| 2 | `pdf_reader.py` 新路由 | `POST /pdf/api/run-event {rid, event}`(按钮回执)· `GET /pdf/api/run-status?rid=`(回前台对齐)<br>⚠ 挂 `/pdf` 前缀 → 自动进 `PROTECTED_PREFIXES`(app.py:349)拿到 session+Bearer 双认证 |
+| 3 | `pdf_reader.py` `pdf_api_userpages` PATCH 白名单(:6067-6081) | 放行 `blocks` / `kind` / `run_id`(现在只认 `title/md/after/h`,**没列进去的字段会被静默丢掉**) |
+| 4 | `static/pdf/pdf-uishared.js` `_upRenderOverlay`(:721) | `if (rec.blocks) renderBlocks(body, rec) else 原 md 路径`;button/checkbox 点击 → `POST /pdf/api/run-event`<br>⚠ 覆盖层拦手势用**冒泡非捕获**(memory `overlay-gate-use-bubble-not-capture`:捕获阶段 stopPropagation 会吞掉内部按钮事件) |
+| 5 | `assistant.py` `TOOLS`(:2970) | 加 `start_dictation`(生成 words + 起 run)。**唯一注册表** → 侧栏/语音/MCP **自动全都有** |
+| 6 | `assistant.py` `_tool_label`(:3061) | 中文名 |
+| 7 | `assistant.py` `_AP_ACTIONS`/`_AP_DEFAULTS`(:3627) | 注册 `dictation_grade` action key → 批改能进设置面板、能用 `_resolve` 兜底链 |
+| 8 | `assistant.py` `VOICE_CACHEABLE_TOOLS`(:4751) | **千万别加**(写工具;"再来一次听写"是合法语义) |
+
+**复用(零新代码)**:
+- `reader_events.publish` → `client-action` → `RC.execRemote` → `window.__vcSpeakText`
+- `_figure_crop_png(box, with_ink=True)` 按 bbox 裁图 + 叠墨迹
+- 插入页墨迹**存在同一个 pdf-ink 边车、键=真页号**(`_upInkPersist`,pdf-uishared.js:709)→ 裁图直接拿得到
+- `reader_vision(images, prompt, action=...)`(assistant.py:3841)做批改
+
+---
+
+## 6. 明确不做的
+
+- **不另开 EventSource**。SSE 是稀缺资源(舱壁 12 总 / 4 每用户,每条独占一个线程)——
+  必须**复用现有那条**,只加新的 `kind`。
+- **不复用 `_task_sema`**(voice.py:694 的 `Semaphore(2)`,**阻塞排队**)。听写要等你写完 N 个词,
+  占着它会把制卡/笔记全堵死。
+- **不复用 `RC.toolChip.track`**(rc-toolchip.js:748:240 次 × 1.2s ≈ **5 分钟就 fail**)。远不够。
+- **先只做 PDF**。EPUB 插入页是虚拟段(`.ep-usec`)、坐标系不同;HTML 阅读器连 `__vcSpeakText` 都没有。
+- **不做通用配方系统**。先把听写这一个场景端到端跑通(它把四层全用上),再抽象。
+
+---
+
+## 7. 之后:配方(高级工具)
+
+听写跑通后,把「任务定义」抽出来存成配方 → 变成 AI 的**一个工具**(`run_recipe("听写", {words})`)。
+届时再定:参数化、版本、per-user 覆盖(可复用 `TOOL_SLOTS` / `state/assistant-tool-prompts.json` 的范式)。
+
+---
+
+## 8. 相关
+
+- `references/adr-turn-container.md`(同一条原则:**服务端权威**,前端不是真相源)
+- `references/reader-userpages-favorites.md`(插入页现状)
+- memory `sse-thread-starvation`(为什么运行时不许有阻塞等待的线程)
+- memory `overlay-gate-use-bubble-not-capture`(覆盖层里的按钮为什么会失灵)
+- memory `ios-button-white-block` / `verify-innermost-child-not-container`(块渲染的 UI 坑)

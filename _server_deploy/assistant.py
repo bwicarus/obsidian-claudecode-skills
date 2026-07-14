@@ -2967,6 +2967,39 @@ def _mark_source_highlight(ctx, color):
         pass
 
 
+def _t_start_dictation(args, ctx):
+    """建一张听写纸 + 起运行时。**这是 LLM 在整个听写里唯一的一次参与(出题)**;
+    之后的「念一个 → 等你写 → 念下一个 → 批改」全由 task_runtime 的状态机跑,
+    LLM 不参与循环(见 references/adr-task-runtime.md 的铁律一)。"""
+    words = [str(w).strip() for w in (args.get("words") or []) if str(w).strip()][:50]
+    if not words:
+        return {"error": "没给要听写的词(args.words)"}
+    rel = (ctx or {}).get("file_rel") or ""
+    if not rel or not rel.lower().endswith(".pdf"):
+        return {"error": "听写目前只支持 PDF 阅读器(EPUB 插入页是虚拟段,坐标系不同,还没做)"}
+    try:
+        page = int((ctx or {}).get("page") or 0)
+    except Exception:
+        page = 0
+    if not page:
+        return {"error": "不知道在第几页"}
+    import pdf_reader as P
+    import task_runtime as TR
+    # 在当前页**后面**插一张纸(走已有的插入页链路:真插 PDF 页 + overlay 即时显示)
+    r = P.create_userpage_for_tool(rel, after=page, title=(args.get("title") or "听写"))
+    if not r.get("ok"):
+        return {"error": "建听写纸失败:" + str(r.get("error"))[:100]}
+    run = TR.start("dictation", {"words": words, "title": args.get("title") or "听写",
+                                 "upage": r["id"], "page": r["page"]},
+                   {"file_rel": rel, "page": r["page"], "_uid": (ctx or {}).get("_uid")})
+    if not run.get("ok"):
+        return {"error": run.get("error")}
+    return {"已生成听写纸": f"{len(words)} 题,在第 {r['page']} 页",
+            "接下来": "点纸上的「▶ 念下一个」开始;系统会逐个念、你手写、最后自动批改。你(AI)不用再管了。",
+            "client_action": {"fn": "jumpWithBack", "args": [r["page"]]},
+            "silent": True}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
@@ -3043,7 +3076,14 @@ TOOLS = {
                    "args {id, text?, color?}(id 从 notes_query 拿;text/color 至少给一个)。"
                    "**只能改文字和颜色**——手写笔画/位置/尺寸动不了(工具层面就不接收),别答应用户改这些", _t_notes_edit),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮/便签)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
+    "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"
+                        "然后由**系统**逐个念、等用户手写、最后按格裁图批改。"
+                        "args {words:[要听写的词,按顺序], title?:纸的标题}。"
+                        "词由**你**来出(按用户要求的语言/难度/数量;用户没说数量就给 10 个)。"
+                        "调完这个工具你的任务就结束了 —— **循环和等待由系统负责,你不要再管**,"
+                        "也不要自己去念词、不要问用户写完没有。", _t_start_dictation),
 }
+
 
 
 def _step_detail(res):
@@ -3059,7 +3099,7 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    return {"read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
+    return {"start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",
@@ -3624,7 +3664,7 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text", "dictation_grade")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
@@ -3642,6 +3682,8 @@ _AP_DEFAULTS = {
     "route_text":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:路由详答文字引擎(SSE 流式)
     "summarize":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "vision":       {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
+    # 听写批改:看的是**手写体**,比一般看图难 → 默认给更强的档(可在 ⚙ 模型面板改)
+    "dictation_grade": {"backend": "gemini", "variant": "gemini-3.5-pro", "depth": "think"},
     "explain":      {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
     "translate":    {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},
     "dict":         {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "think"},
@@ -3649,6 +3691,7 @@ _AP_DEFAULTS = {
     "pick_video":   {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},   # 找视频:拟搜索词 + 搜后按相关性筛选(便宜 flash 够用)
 }
 _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
+    "dictation_grade": "听写批改(看手写体,比一般看图难)",
     "deep": "深度思考(语音通话专用)",
     "img_norm": "配图关键词规范化(搜图没中时转 Commons 规范名)",
     "explain": "解释 / 问 AI / 选中查询", "translate": "翻译 / 例句", "dict": "字典 AI / 日语深入讲解",

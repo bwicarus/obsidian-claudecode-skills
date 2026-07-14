@@ -1037,6 +1037,66 @@ def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
         _BG_RENDERS.discard(key)
 
 
+def create_userpage_for_tool(rel: str, after: int, title: str = ""):
+    """给 AI 工具用的「新建一张插入页」——**同步**跑完插页 job,立刻返回 {ok, id, page}。
+
+    为什么同步:工具调用要立刻拿到页号才能起运行时(否则得再引一层轮询)。
+    插页是真改 PDF 文件(delete/insert + 14 类按页号锚定的存储迁移),有单书互斥 _INSPAGE_MUTEX,
+    所以这里**直接跑 job 函数**、不起线程 —— 大书会慢几秒,工具调用本来就是"执行中"状态,可接受。
+    ⚠ 复用 /api/pdf-insert-page 的同一套安全流程(备份 + journal + 锚迁移),别另写一份。
+    """
+    import fitz
+    ap = _safe_vault_path(rel)
+    if not ap or not ap.exists() or ap.suffix.lower() != ".pdf":
+        return {"ok": False, "error": "文件不存在或不是 PDF"}
+    sha = _book_sha(ap)
+    if _up_journal_path(sha).exists():
+        return {"ok": False, "error": "上次改页中断(journal 残留),先人工核对备份"}
+    try:
+        n = fitz.open(str(ap)).page_count
+    except Exception as ex:
+        return {"ok": False, "error": "打不开 PDF:%s" % ex}
+    after = max(0, min(int(after or 0), n))
+    rid = "u_" + _uuid.uuid4().hex[:8]
+    payload = {"after": after, "title": title[:120], "md": "",
+               "record_op": {"op": "add", "id": rid, "page": after + 1, "mode": "overlay",
+                             "title": title[:120], "md": ""}}
+    jid = "j_" + _uuid.uuid4().hex[:8]
+    _inspage_job(jid, "insert", rel, ap, payload)   # ★ 同步跑(不起线程)
+    j = _JOBS.get(jid) or {}
+    if j.get("status") != "done":
+        return {"ok": False, "error": (j.get("error") or "插页失败")[:120]}
+    rec = next((x for x in _upages_load(rel) if x.get("id") == rid), None)
+    if not rec or not isinstance(rec.get("page"), int):
+        return {"ok": False, "error": "插页后没找到记录"}
+    return {"ok": True, "id": rid, "page": rec["page"]}
+
+
+@bp.route("/api/run-event", methods=["POST"])
+def pdf_api_run_event():
+    """任务运行时的**唯一推进入口**:页面上的按钮/勾选被点 → 推进状态机。
+    (鉴权:/pdf 整个前缀由 app.py 的 PROTECTED_PREFIXES + before_request 挡住,路由内不自查。)"""
+    import task_runtime as TR
+    b = request.get_json(silent=True) or {}
+    rid = str(b.get("rid") or "")[:20]
+    ev = str(b.get("event") or "")[:20]
+    if not rid or not ev:
+        return jsonify({"ok": False, "error": "缺 rid/event"}), 400
+    return jsonify(TR.advance(rid, ev))
+
+
+@bp.route("/api/run-status")
+def pdf_api_run_status():
+    """前端**回前台时用它对齐状态机**。
+    ⚠ 必须有这个:SSE 在页面不可见时会被前端直接丢弃(pdf-tail.js 的 visibilityState 早退),
+      所以状态机绝不能只靠推送 —— 切个后台就永远卡住了。"""
+    import task_runtime as TR
+    rid = (request.args.get("rid") or "")[:20]
+    if not rid:
+        return jsonify({"ok": False, "error": "缺 rid"}), 400
+    return jsonify(TR.status(rid))
+
+
 @bp.route("/api/toolshot/<name>")
 def pdf_api_toolshot(name):
     """141(ADR §4):提供「真正喂给 AI 的图」(see_ink/see_page/see_figure 的合成图)。
@@ -6057,6 +6117,11 @@ def pdf_api_userpages():
                     p["title"] = (body.get("title") or "")[:120]; changed = True
                 if "md" in body:
                     p["md"] = (body.get("md") or "")[:100000]; changed = True
+                # 141/任务运行时:结构化块(text/blank/button/checkbox)。⚠ 白名单没列的字段会被**静默丢掉**。
+                #   blank 的 rect(页归一化 0-1)由**前端布局后写回** —— 只有前端知道渲染出来的真实位置,
+                #   而批改要按 rect 裁图(与墨迹坐标同一坐标系,这是整个方案的根基)。
+                if isinstance(body.get("blocks"), list):
+                    p["blocks"] = body["blocks"][:400]; changed = True
                 if changed:
                     p["md_ver"] = int(p.get("md_ver", 0)) + 1   # 脏标记版本戳:md_ver > synced_ver = 待写回 PDF
                 p["updated"] = now

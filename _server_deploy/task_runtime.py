@@ -1,0 +1,317 @@
+"""task_runtime.py — 任务运行时:确定性状态机,编排"有停顿、有等待、有循环"的长任务。
+
+设计见 references/adr-task-runtime.md。第一个 kind = 听写(dictation)。
+
+═══ 两条铁律(都是 2026-07-14 用血换来的)═══
+
+**① LLM 不做等待,也不做循环。**
+   让模型在工具循环里挂起等用户按按钮 → 每等一次重发整个上下文(烧钱)、刷新即丢(不可恢复)、
+   模型会忘记念到第几个(不可靠)。所以:循环/等待/超时/恢复 全在这里,LLM 只负责
+   **生成内容**(words[])和**做判断**(批改)。
+
+**② 绝不许有"阻塞等待的线程"。**
+   同日事故:SSE 长连接每条独占一个 gthread 线程,8 条就把线程池吃光、**全站零响应**
+   (见 reader_events.py 文件头 + memory sse-thread-starvation)。
+   所以这是**事件驱动的状态机**,不是"等待的线程":
+     · 状态存文件(state/reader-runs/<rid>.json)→ 进程重启不丢
+     · 推进由**事件**触发:① 按钮 HTTP 上报 ② 前端回前台对齐 ③ (将来)定时器
+     · **任何时刻零线程**被这个任务占用
+   唯一会起线程的地方是"批改"(要调 LLM,是有界的短任务),而且是 fire-and-forget,不是等待。
+
+═══ 状态机 ═══
+  status: running(在推进) | waiting(挂起,等事件) | done | error | cancelled
+  推进入口只有一个:advance(rid, event) —— 幂等,同一个事件重复到达不会走两步。
+
+⚠ 部署:本文件 + pdf_reader.py + assistant.py 一起 cp 到 /home/bwicarus/webapp/ 并重启 webapp。
+"""
+import json
+import os
+import threading
+import time
+import uuid
+from pathlib import Path
+
+RUNS_DIR = Path("/home/bwicarus/claude/state/reader-runs")
+RUN_TTL = 7 * 86400          # 7 天后清理(听写纸本身留着,只清运行状态)
+WAIT_TIMEOUT = 3600          # 挂起超时:1 小时没动静就判 cancelled(防僵尸 run 永远占着页面)
+
+_lock = threading.Lock()
+
+
+# ── 存储 ──────────────────────────────────────────────────────────────────────
+def _path(rid: str) -> Path:
+    return RUNS_DIR / f"{rid}.json"
+
+
+def load(rid: str):
+    try:
+        return json.loads(_path(rid).read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _save(run: dict):
+    run["updated_at"] = int(time.time())
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    p = _path(run["rid"])
+    tmp = p.with_name(p.name + ".tmp")   # 原子替换:读者永远看到完整的旧/新文件
+    tmp.write_text(json.dumps(run, ensure_ascii=False), "utf-8")
+    tmp.replace(p)
+
+
+def _gc():
+    try:
+        cutoff = time.time() - RUN_TTL
+        for f in RUNS_DIR.glob("r_*.json"):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ── 对前端的"手和嘴"(全部借道已有基础设施,不新建通道)───────────────────────
+def _say(run: dict, text: str):
+    """让前端念一段话。**没有服务端 TTS**(全站都没有)——借 client-action 遥控前端的
+    __vcSpeakText(rc-voicecall.js:1937),它背后是完整的豆包 TTS 链路(分段/打断/AEC)。
+    MCP 遥控翻页走的就是这条路。
+    ⚠ 页面不可见时 SSE 事件会被前端**直接丢弃**(pdf-tail.js 的 visibilityState 早退)→
+      所以状态机**不能依赖"念出去了"**;真正的推进信号是用户按按钮。回前台由 status 接口对齐。"""
+    try:
+        from reader_events import publish
+        publish("client-action", run.get("file") or "", run.get("uid"),
+                {"action": {"fn": "__vcSpeakText", "args": [text]}})
+    except Exception:
+        pass
+
+
+def _push_run(run: dict):
+    """把 run 的当前状态推给前端(更新按钮文案/进度)。同样复用那条唯一的 SSE。"""
+    try:
+        from reader_events import publish
+        publish("run", run.get("file") or "", run.get("uid"),
+                {"run": {"rid": run["rid"], "status": run["status"], "kind": run["kind"],
+                         "state": run.get("state") or {}, "upage": run.get("upage"),
+                         "hint": run.get("hint") or ""}})
+    except Exception:
+        pass
+
+
+def _set_blocks(run: dict, blocks: list, kind: str = ""):
+    """把块写进插入页的 sidecar。⚠ 直接改 sidecar 而不是走 HTTP —— 运行时跑在 webapp 进程内。"""
+    import pdf_reader as P
+    rel = run["file"]
+    with _lock:
+        items = P._upages_load(rel)
+        for it in items:
+            if it.get("id") == run.get("upage"):
+                it["blocks"] = blocks
+                if kind:
+                    it["kind"] = kind
+                it["run_id"] = run["rid"]
+                it["updated"] = int(time.time())
+                break
+        P._upages_save(rel, items)
+    try:   # 让打开着这本书的页面立刻重画那一页
+        from reader_events import publish
+        publish("text", rel, run.get("upage"))
+    except Exception:
+        pass
+
+
+# ── 听写程序(kind='dictation')────────────────────────────────────────────────
+# 步骤是**显式的、可恢复的**:任何一步都只看 run["step"] + run["state"],不依赖内存。
+def _paper_blocks(words: list, title: str) -> list:
+    """一张听写纸:标题 + N 个填空 + 一个「下一个」按钮 + 一个「写完了」勾选。
+    ⚠ rect(页归一化 0-1)由**前端布局后写回** —— 只有前端知道渲染出来的真实位置,
+      而批改要按 rect 裁图(与墨迹坐标同一坐标系,这是整个方案的根基)。"""
+    bs = [{"id": "title", "kind": "text", "text": title, "style": "h1"}]
+    for i, _w in enumerate(words):
+        bs.append({"id": f"q{i + 1}", "kind": "blank", "label": f"{i + 1}.", "rect": None})
+    bs.append({"id": "btn_next", "kind": "button", "label": "▶ 念下一个", "event": "next"})
+    bs.append({"id": "btn_done", "kind": "button", "label": "✓ 写完了,批改", "event": "grade"})
+    return bs
+
+
+def _dictation_tick(run: dict, event: str) -> bool:
+    """推进听写一步。返回 True=状态有变(要落盘)。**永不阻塞**。"""
+    words = (run.get("params") or {}).get("words") or []
+    st = run.setdefault("state", {})
+    i = int(st.get("i") or 0)
+
+    if run["step"] == 0:                       # ① 铺纸
+        _set_blocks(run, _paper_blocks(words, (run.get("params") or {}).get("title") or "听写"),
+                    kind="dictation")
+        run["step"] = 1
+        run["status"] = "waiting"
+        run["wait"] = {"event": "start", "since": int(time.time())}
+        run["hint"] = f"听写纸已生成({len(words)} 题)。点「▶ 念下一个」开始。"
+        return True
+
+    if run["step"] == 1:                       # ② 循环:念一个 → 等按钮
+        if event not in ("start", "next"):
+            return False                       # 不是我等的事件 → 忽略(幂等)
+        if i >= len(words):
+            run["step"] = 2
+            run["status"] = "running"
+            return _dictation_tick(run, "")     # 立刻进批改判定
+        _say(run, words[i])
+        st["i"] = i + 1
+        run["status"] = "waiting"
+        run["wait"] = {"event": "next", "since": int(time.time())}
+        run["hint"] = f"第 {i + 1}/{len(words)} 个。写完按「▶ 念下一个」。"
+        if st["i"] >= len(words):
+            run["hint"] = f"最后一个({len(words)}/{len(words)})。写完点「✓ 写完了,批改」。"
+        return True
+
+    if run["step"] == 2:                       # ③ 批改(唯一会起线程的地方:调 LLM,fire-and-forget)
+        if run.get("status") == "grading":
+            return False                       # 已经在批了,别重复起线程
+        run["status"] = "grading"
+        run["hint"] = "正在批改…"
+        _save(run)
+        _push_run(run)
+        threading.Thread(target=_grade, args=(run["rid"],), daemon=True).start()
+        return False                           # 已自行落盘
+
+    return False
+
+
+def _grade(rid: str):
+    """批改:逐个 blank 裁图 → 一次 LLM 判卷 → 结果写回页面。跑在后台线程里(有界短任务)。
+
+    🔴 关键(ADR §3.1):**不整页截图**。overlay 插入页在 PDF 文件里是**一张空白真页**
+      (内容只在 sidecar,异步才写回)→ 整页裁出来是白纸,AI 看不到题号。
+    绕法:按每个 blank 的 rect 裁出**这一格里用户手写的字**(_figure_crop_png(with_ink=True)),
+      题号与正确答案**在 prompt 里用文字给**。零新渲染器、不依赖视口截图、分辨率可控。
+    """
+    run = load(rid)
+    if not run:
+        return
+    try:
+        import pdf_reader as P
+        import assistant as A
+        rel, page = run["file"], int(run.get("page") or 0)
+        words = (run.get("params") or {}).get("words") or []
+        ap = P._safe_vault_path(rel)
+        strokes = P._page_ink_strokes(rel, page) or []
+
+        blocks = []
+        for it in P._upages_load(rel):
+            if it.get("id") == run.get("upage"):
+                blocks = it.get("blocks") or []
+                break
+        blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+
+        images, lines = [], []
+        for idx, b in enumerate(blanks[:len(words)]):
+            png = None
+            try:
+                png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
+            except Exception:
+                png = None
+            if not png:
+                continue
+            import base64
+            images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+            lines.append(f"第 {idx + 1} 题,正确答案:「{words[idx]}」(对应第 {len(images)} 张图)")
+
+        if not images:
+            run.update(status="error", error="没裁到任何手写内容(rect 还没写回?或者你还没写)")
+            _save(run); _push_run(run)
+            return
+
+        prompt = ("下面每一张图是用户在听写纸上**手写**的一个答案(只有那一格,白底)。\n"
+                  + "\n".join(lines) +
+                  "\n\n逐题判断写得对不对(手写体,允许笔画潦草;错字/漏字/假名写错都算错)。\n"
+                  "**只输出 JSON**,形如:"
+                  '{"items":[{"n":1,"ok":true,"got":"憂鬱","note":""},...],"score":"18/20","brief":"一句话总评"}')
+        out = A.reader_vision(images, prompt, action="dictation_grade", uid=str(run.get("uid") or ""))
+        try:
+            import re as _re
+            m = _re.search(r"\{.*\}", out or "", _re.S)
+            res = json.loads(m.group(0)) if m else {"brief": (out or "")[:300]}
+        except Exception:
+            res = {"brief": (out or "")[:300]}
+
+        # 结果写回页面(追加一个 text 块;不动原来的题目块 —— 你手写的还在纸上)
+        items = res.get("items") or []
+        md = ["### 批改结果  " + str(res.get("score") or "")]
+        for it in items:
+            n = it.get("n")
+            ok = "✅" if it.get("ok") else "❌"
+            w = words[n - 1] if isinstance(n, int) and 1 <= n <= len(words) else ""
+            got = it.get("got") or ""
+            md.append(f"{ok} **{n}.** 正解「{w}」" + (f" · 你写的「{got}」" if got and not it.get("ok") else ""))
+        if res.get("brief"):
+            md.append("\n> " + str(res["brief"]))
+        new_blocks = list(blocks) + [{"id": "grade", "kind": "text", "text": "\n".join(md)}]
+        _set_blocks(run, new_blocks)
+
+        run.update(status="done", result=res, hint="批改完成 ✅")
+        _save(run); _push_run(run)
+    except Exception as ex:
+        run = load(rid) or run
+        run.update(status="error", error=str(ex)[:200])
+        _save(run); _push_run(run)
+
+
+_PROGRAMS = {"dictation": _dictation_tick}
+
+
+# ── 对外三个入口 ──────────────────────────────────────────────────────────────
+def start(kind: str, params: dict, ctx: dict) -> dict:
+    """起一个 run。返回 {ok, rid} 或 {ok:False, error}。**同步、瞬间返回**(不做任何等待)。"""
+    if kind not in _PROGRAMS:
+        return {"ok": False, "error": f"未知任务类型 {kind}"}
+    upage = (params or {}).get("upage") or ""
+    page = int((params or {}).get("page") or ctx.get("page") or 0)
+    if not upage or not page:
+        return {"ok": False, "error": "缺 upage/page(得先建一张插入页)"}
+    _gc()
+    run = {
+        "rid": "r_" + uuid.uuid4().hex[:8],
+        "kind": kind, "uid": str(ctx.get("_uid") or ctx.get("uid") or ""),
+        "file": ctx.get("file_rel") or "", "page": page, "upage": upage,
+        "status": "running", "step": 0, "state": {}, "params": params or {},
+        "result": None, "hint": "", "created_at": int(time.time()),
+    }
+    _PROGRAMS[kind](run, "")
+    _save(run)
+    _push_run(run)
+    return {"ok": True, "rid": run["rid"], "hint": run.get("hint") or ""}
+
+
+def advance(rid: str, event: str) -> dict:
+    """事件驱动的唯一推进入口(按钮点击 / 定时器 / 回前台)。**幂等**。"""
+    with _lock:
+        run = load(rid)
+        if not run:
+            return {"ok": False, "error": "run 不存在(可能已过期)"}
+        if run["status"] in ("done", "error", "cancelled"):
+            return {"ok": True, "status": run["status"], "hint": run.get("hint") or ""}
+        if event == "cancel":
+            run.update(status="cancelled", hint="已取消")
+            _save(run); _push_run(run)
+            return {"ok": True, "status": "cancelled"}
+        # 挂起超时 → 判死(防僵尸 run 永远占着这张纸)
+        w = run.get("wait") or {}
+        if run["status"] == "waiting" and w.get("since") and time.time() - w["since"] > WAIT_TIMEOUT:
+            run.update(status="cancelled", hint="太久没动静,已取消")
+            _save(run); _push_run(run)
+            return {"ok": True, "status": "cancelled"}
+        changed = _PROGRAMS[run["kind"]](run, event)
+        if changed:
+            _save(run)
+            _push_run(run)
+    return {"ok": True, "status": run["status"], "hint": run.get("hint") or "",
+            "state": run.get("state") or {}}
+
+
+def status(rid: str) -> dict:
+    """前端回前台时用它**对齐状态机** —— SSE 在页面不可见时会丢事件,不能只靠推送。"""
+    run = load(rid)
+    if not run:
+        return {"ok": False, "error": "run 不存在"}
+    return {"ok": True, "rid": rid, "kind": run["kind"], "status": run["status"],
+            "step": run["step"], "state": run.get("state") or {}, "hint": run.get("hint") or "",
+            "upage": run.get("upage"), "result": run.get("result"), "error": run.get("error")}

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-14T04:00:05+09:00",
+  "generated_at": "2026-07-15T00:00:05+09:00",
   "notes": [
     {
       "name": "000-向量空间",
@@ -18,14 +18,14 @@
       "anki_learning": 0,
       "anki_review": 14,
       "anki_relearning": 0,
-      "retention": 0.3065,
-      "mastery": 0.1291,
+      "retention": 0.3015,
+      "mastery": 0.1271,
       "reps_total": 57,
       "lapses_total": 1,
-      "priority": 0.8709,
+      "priority": 0.8729,
       "activation": 1.0,
       "importance": 1.0,
-      "weakness": 0.8709
+      "weakness": 0.8729
     },
     {
       "name": "000-Fn",
@@ -45,14 +45,14 @@
       "anki_learning": 0,
       "anki_review": 10,
       "anki_relearning": 0,
-      "retention": 0.7642,
-      "mastery": 0.3367,
+      "retention": 0.7583,
+      "mastery": 0.3342,
       "reps_total": 47,
       "lapses_total": 0,
-      "priority": 0.5314,
+      "priority": 0.5334,
       "activation": 0.8959,
       "importance": 0.8943,
-      "weakness": 0.6633
+      "weakness": 0.6658
     },
     {
       "name": "000-线性组合",
@@ -70,14 +70,14 @@
       "anki_learning": 0,
       "anki_review": 14,
       "anki_relearning": 0,
-      "retention": 0.6038,
-      "mastery": 0.258,
+      "retention": 0.5966,
+      "mastery": 0.255,
       "reps_total": 73,
       "lapses_total": 4,
-      "priority": 0.3541,
+      "priority": 0.3555,
       "activation": 0.6889,
       "importance": 0.6927,
-      "weakness": 0.742
+      "weakness": 0.745
     },
     {
       "name": "000-复数的基本性质",
@@ -96,14 +96,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.8584,
-      "mastery": 0.3782,
+      "retention": 0.8542,
+      "mastery": 0.3763,
       "reps_total": 17,
       "lapses_total": 0,
-      "priority": 0.3128,
+      "priority": 0.3137,
       "activation": 0.7247,
       "importance": 0.6942,
-      "weakness": 0.6218
+      "weakness": 0.6237
     },
     {
       "name": "000-子空间",
@@ -122,14 +122,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.6179,
-      "mastery": 0.2559,
+      "retention": 0.6085,
+      "mastery": 0.2521,
       "reps_total": 23,
       "lapses_total": 1,
-      "priority": 0.2893,
+      "priority": 0.2908,
       "activation": 0.6203,
       "importance": 0.6267,
-      "weakness": 0.7441
+      "weakness": 0.7479
     },
     {
       "name": "000-F^s",
@@ -149,14 +149,14 @@
       "anki_learning": 0,
       "anki_review": 3,
       "anki_relearning": 0,
-      "retention": 0.1877,
-      "mastery": 0.0762,
+      "retention": 0.1804,
+      "mastery": 0.0733,
       "reps_total": 11,
       "lapses_total": 0,
-      "priority": 0.2815,
+      "priority": 0.2824,
       "activation": 0.5496,
       "importance": 0.5545,
-      "weakness": 0.9238
+      "weakness": 0.9267
     },
     {
       "name": "000-线性无关",
@@ -175,14 +175,14 @@
       "anki_learning": 0,
       "anki_review": 14,
       "anki_relearning": 0,
-      "retention": 0.603,
-      "mastery": 0.2572,
+      "retention": 0.5961,
+      "mastery": 0.2543,
       "reps_total": 55,
       "lapses_total": 0,
-      "priority": 0.2692,
+      "priority": 0.2703,
       "activation": 0.605,
       "importance": 0.599,
-      "weakness": 0.7428
+      "weakness": 0.7457
     },
     {
       "name": "000-直和",
@@ -201,14 +201,14 @@
       "anki_learning": 0,
       "anki_review": 7,
       "anki_relearning": 1,
-      "retention": 0.6192,
-      "mastery": 0.264,
+      "retention": 0.6123,
+      "mastery": 0.2611,
       "reps_total": 44,
       "lapses_total": 2,
-      "priority": 0.221,
+      "priority": 0.2218,
       "activation": 0.5457,
       "importance": 0.5502,
-      "weakness": 0.736
+      "weakness": 0.7389
     },
     {
       "name": "000-组的定义",
@@ -227,14 +227,14 @@
       "anki_learning": 0,
       "anki_review": 5,
       "anki_relearning": 0,
-      "retention": 0.8424,
-      "mastery": 0.3876,
+      "retention": 0.8377,
+      "mastery": 0.3856,
       "reps_total": 21,
       "lapses_total": 0,
-      "priority": 0.2159,
+      "priority": 0.2167,
       "activation": 0.6002,
       "importance": 0.5875,
-      "weakness": 0.6124
+      "weakness": 0.6144
     },
     {
       "name": "010-泰勒级数",
@@ -253,14 +253,14 @@
       "anki_learning": 0,
       "anki_review": 6,
       "anki_relearning": 0,
-      "retention": 0.6677,
-      "mastery": 0.2764,
+      "retention": 0.659,
+      "mastery": 0.2728,
       "reps_total": 29,
       "lapses_total": 1,
-      "priority": 0.2028,
+      "priority": 0.2038,
       "activation": 0.5454,
       "importance": 0.5138,
-      "weakness": 0.7236
+      "weakness": 0.7272
     },
     {
       "name": "010-指数函数求导",
@@ -278,14 +278,14 @@
       "anki_learning": 0,
       "anki_review": 5,
       "anki_relearning": 0,
-      "retention": 0.7648,
-      "mastery": 0.3222,
+      "retention": 0.7581,
+      "mastery": 0.3194,
       "reps_total": 30,
       "lapses_total": 1,
-      "priority": 0.1856,
+      "priority": 0.1864,
       "activation": 0.5392,
       "importance": 0.508,
-      "weakness": 0.6778
+      "weakness": 0.6806
     },
     {
       "name": "010-链式法则",
@@ -304,14 +304,14 @@
       "anki_learning": 0,
       "anki_review": 4,
       "anki_relearning": 0,
-      "retention": 0.8225,
-      "mastery": 0.3655,
+      "retention": 0.8172,
+      "mastery": 0.3632,
       "reps_total": 17,
       "lapses_total": 0,
-      "priority": 0.1829,
+      "priority": 0.1835,
       "activation": 0.5531,
       "importance": 0.5211,
-      "weakness": 0.6345
+      "weakness": 0.6368
     },
     {
       "name": "010-导数的定义",
@@ -331,14 +331,14 @@
       "anki_learning": 0,
       "anki_review": 3,
       "anki_relearning": 0,
-      "retention": 0.5084,
-      "mastery": 0.2177,
+      "retention": 0.5022,
+      "mastery": 0.2151,
       "reps_total": 12,
       "lapses_total": 0,
-      "priority": 0.1472,
+      "priority": 0.1477,
       "activation": 0.4474,
       "importance": 0.4205,
-      "weakness": 0.7823
+      "weakness": 0.7849
     },
     {
       "name": "000-减法与除法",
@@ -356,14 +356,14 @@
       "anki_learning": 0,
       "anki_review": 2,
       "anki_relearning": 0,
-      "retention": 0.434,
-      "mastery": 0.1825,
+      "retention": 0.4282,
+      "mastery": 0.1801,
       "reps_total": 5,
       "lapses_total": 0,
-      "priority": 0.1278,
+      "priority": 0.1281,
       "activation": 0.4015,
       "importance": 0.3892,
-      "weakness": 0.8175
+      "weakness": 0.8199
     }
   ],
   "graph": {
@@ -373,10 +373,10 @@
         "wdeg": 6.94,
         "degree": 10,
         "subject": "数学",
-        "priority": 0.5314,
-        "weakness": 0.6633,
-        "retention": 0.7642,
-        "mastery": 0.3367,
+        "priority": 0.5334,
+        "weakness": 0.6658,
+        "retention": 0.7583,
+        "mastery": 0.3342,
         "importance": 0.8943,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-Fn",
         "has_cards": true
@@ -386,10 +386,10 @@
         "wdeg": 4.233,
         "degree": 7,
         "subject": "数学",
-        "priority": 0.2159,
-        "weakness": 0.6124,
-        "retention": 0.8424,
-        "mastery": 0.3876,
+        "priority": 0.2167,
+        "weakness": 0.6144,
+        "retention": 0.8377,
+        "mastery": 0.3856,
         "importance": 0.5875,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BB%84%E7%9A%84%E5%AE%9A%E4%B9%89",
         "has_cards": true
@@ -399,10 +399,10 @@
         "wdeg": 7.868,
         "degree": 10,
         "subject": "数学",
-        "priority": 0.8709,
-        "weakness": 0.8709,
-        "retention": 0.3065,
-        "mastery": 0.1291,
+        "priority": 0.8729,
+        "weakness": 0.8729,
+        "retention": 0.3015,
+        "mastery": 0.1271,
         "importance": 1.0,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%90%91%E9%87%8F%E7%A9%BA%E9%97%B4",
         "has_cards": true
@@ -412,10 +412,10 @@
         "wdeg": 4.24,
         "degree": 7,
         "subject": "数学",
-        "priority": 0.3128,
-        "weakness": 0.6218,
-        "retention": 0.8584,
-        "mastery": 0.3782,
+        "priority": 0.3137,
+        "weakness": 0.6237,
+        "retention": 0.8542,
+        "mastery": 0.3763,
         "importance": 0.6942,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E5%A4%8D%E6%95%B0%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%80%A7%E8%B4%A8",
         "has_cards": true
@@ -425,10 +425,10 @@
         "wdeg": 4.831,
         "degree": 7,
         "subject": "数学",
-        "priority": 0.2893,
-        "weakness": 0.7441,
-        "retention": 0.6179,
-        "mastery": 0.2559,
+        "priority": 0.2908,
+        "weakness": 0.7479,
+        "retention": 0.6085,
+        "mastery": 0.2521,
         "importance": 0.6267,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%AD%90%E7%A9%BA%E9%97%B4",
         "has_cards": true
@@ -438,10 +438,10 @@
         "wdeg": 4.154,
         "degree": 6,
         "subject": "数学",
-        "priority": 0.221,
-        "weakness": 0.736,
-        "retention": 0.6192,
-        "mastery": 0.264,
+        "priority": 0.2218,
+        "weakness": 0.7389,
+        "retention": 0.6123,
+        "mastery": 0.2611,
         "importance": 0.5502,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%9B%B4%E5%92%8C",
         "has_cards": true
@@ -451,10 +451,10 @@
         "wdeg": 5.372,
         "degree": 8,
         "subject": "数学",
-        "priority": 0.3541,
-        "weakness": 0.742,
-        "retention": 0.6038,
-        "mastery": 0.258,
+        "priority": 0.3555,
+        "weakness": 0.745,
+        "retention": 0.5966,
+        "mastery": 0.255,
         "importance": 0.6927,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=000-%E7%BA%BF%E6%80%A7%E7%BB%84%E5%90%88",
         "has_cards": true
@@ -464,10 +464,10 @@
         "wdeg": 4.57,
         "degree": 6,
         "subject": "数学",
-        "priority": 0.2692,
-        "weakness": 0.7428,
-        "retention": 0.603,
-        "mastery": 0.2572,
+        "priority": 0.2703,
+        "weakness": 0.7457,
+        "retention": 0.5961,
+        "mastery": 0.2543,
         "importance": 0.599,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E7%BA%BF%E6%80%A7%E6%97%A0%E5%85%B3",
         "has_cards": true
@@ -477,10 +477,10 @@
         "wdeg": 2.516,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1278,
-        "weakness": 0.8175,
-        "retention": 0.434,
-        "mastery": 0.1825,
+        "priority": 0.1281,
+        "weakness": 0.8199,
+        "retention": 0.4282,
+        "mastery": 0.1801,
         "importance": 0.3892,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-%E5%87%8F%E6%B3%95%E4%B8%8E%E9%99%A4%E6%B3%95",
         "has_cards": true
@@ -490,10 +490,10 @@
         "wdeg": 4.17,
         "degree": 6,
         "subject": "数学",
-        "priority": 0.2815,
-        "weakness": 0.9238,
-        "retention": 0.1877,
-        "mastery": 0.0762,
+        "priority": 0.2824,
+        "weakness": 0.9267,
+        "retention": 0.1804,
+        "mastery": 0.0733,
         "importance": 0.5545,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=000-F%5Es",
         "has_cards": true
@@ -516,10 +516,10 @@
         "wdeg": 2.469,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.2028,
-        "weakness": 0.7236,
-        "retention": 0.6677,
-        "mastery": 0.2764,
+        "priority": 0.2038,
+        "weakness": 0.7272,
+        "retention": 0.659,
+        "mastery": 0.2728,
         "importance": 0.5138,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%B3%B0%E5%8B%92%E7%BA%A7%E6%95%B0",
         "has_cards": true
@@ -529,10 +529,10 @@
         "wdeg": 2.44,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1856,
-        "weakness": 0.6778,
-        "retention": 0.7648,
-        "mastery": 0.3222,
+        "priority": 0.1864,
+        "weakness": 0.6806,
+        "retention": 0.7581,
+        "mastery": 0.3194,
         "importance": 0.508,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BE%AE%E7%A7%AF%E5%88%86%2F010-%E6%8C%87%E6%95%B0%E5%87%BD%E6%95%B0%E6%B1%82%E5%AF%BC",
         "has_cards": true
@@ -542,10 +542,10 @@
         "wdeg": 2.509,
         "degree": 4,
         "subject": "数学",
-        "priority": 0.1829,
-        "weakness": 0.6345,
-        "retention": 0.8225,
-        "mastery": 0.3655,
+        "priority": 0.1835,
+        "weakness": 0.6368,
+        "retention": 0.8172,
+        "mastery": 0.3632,
         "importance": 0.5211,
         "obsidian_url": "obsidian://open?vault=Obsidian Vault&file=010-%E9%93%BE%E5%BC%8F%E6%B3%95%E5%88%99",
         "has_cards": true
@@ -555,10 +555,10 @@
         "wdeg": 1.866,
         "degree": 3,
         "subject": "数学",
-        "priority": 0.1472,
-        "weakness": 0.7823,
-        "retention": 0.5084,
-        "mastery": 0.2177,
+        "priority": 0.1477,
+        "weakness": 0.7849,
+        "retention": 0.5022,
+        "mastery": 0.2151,
         "importance": 0.4205,
         "obsidian_url": "obsidian://open?vault=Obsidian%20Vault&file=010-%E5%AF%BC%E6%95%B0%E7%9A%84%E5%AE%9A%E4%B9%89",
         "has_cards": true
@@ -566,224 +566,8 @@
     ],
     "edges": [
       {
-        "source": "000-向量空间",
-        "target": "000-回收站-1",
-        "weight": 0.644,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "010-导数的定义",
-        "target": "010-泰勒级数",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-子空间",
-        "target": "000-线性组合",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-减法与除法",
-        "target": "000-向量空间",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-复数的基本性质",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
         "source": "000-复数的基本性质",
         "target": "010-泰勒级数",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-导数的定义",
-        "target": "010-链式法则",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-子空间",
-        "target": "000-直和",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-线性组合",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-减法与除法",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-回收站-1",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-直和",
-        "target": "000-线性无关",
-        "weight": 1.078,
-        "link_count": 2,
-        "kw_shared": 2,
-        "kind": "both"
-      },
-      {
-        "source": "000-线性无关",
-        "target": "000-线性组合",
-        "weight": 1.092,
-        "link_count": 2,
-        "kw_shared": 2,
-        "kind": "both"
-      },
-      {
-        "source": "000-线性无关",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-回收站-1",
-        "target": "000-子空间",
-        "weight": 0.644,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-减法与除法",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-复数的基本性质",
-        "target": "000-组的定义",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-泰勒级数",
-        "target": "010-链式法则",
-        "weight": 0.636,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-线性组合",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-组的定义",
-        "weight": 0.633,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-F^s",
-        "target": "000-Fn",
-        "weight": 0.631,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-复数的基本性质",
-        "target": "010-指数函数求导",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-直和",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-复数的基本性质",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-直和",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-回收站-1",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-向量空间",
-        "target": "000-线性无关",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -798,20 +582,20 @@
         "kind": "both"
       },
       {
-        "source": "000-线性组合",
-        "target": "000-组的定义",
+        "source": "000-Fn",
+        "target": "000-复数的基本性质",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
         "kind": "explicit"
       },
       {
-        "source": "000-Fn",
-        "target": "000-线性无关",
-        "weight": 0.6,
+        "source": "000-F^s",
+        "target": "000-Fn",
+        "weight": 0.631,
         "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
+        "kw_shared": 1,
+        "kind": "both"
       },
       {
         "source": "000-向量空间",
@@ -822,40 +606,8 @@
         "kind": "both"
       },
       {
-        "source": "000-直和",
-        "target": "000-线性组合",
-        "weight": 0.64,
-        "link_count": 2,
-        "kw_shared": 1,
-        "kind": "both"
-      },
-      {
-        "source": "000-Fn",
-        "target": "000-子空间",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-回收站-1",
-        "target": "000-线性组合",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "010-指数函数求导",
-        "target": "010-泰勒级数",
-        "weight": 0.6,
-        "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
-      },
-      {
-        "source": "000-子空间",
-        "target": "000-线性无关",
+        "source": "000-线性组合",
+        "target": "000-组的定义",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -870,12 +622,12 @@
         "kind": "explicit"
       },
       {
-        "source": "000-复数的基本性质",
+        "source": "010-导数的定义",
         "target": "010-链式法则",
-        "weight": 0.6,
+        "weight": 0.633,
         "link_count": 2,
-        "kw_shared": 0,
-        "kind": "explicit"
+        "kw_shared": 1,
+        "kind": "both"
       },
       {
         "source": "010-指数函数求导",
@@ -886,8 +638,8 @@
         "kind": "both"
       },
       {
-        "source": "010-导数的定义",
-        "target": "010-指数函数求导",
+        "source": "000-F^s",
+        "target": "000-组的定义",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -910,8 +662,48 @@
         "kind": "both"
       },
       {
-        "source": "000-向量空间",
+        "source": "000-F^s",
         "target": "000-线性组合",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-直和",
+        "target": "000-线性无关",
+        "weight": 1.078,
+        "link_count": 2,
+        "kw_shared": 2,
+        "kind": "both"
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "010-链式法则",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-线性无关",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-泰勒级数",
+        "weight": 0.633,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "010-指数函数求导",
+        "target": "010-泰勒级数",
         "weight": 0.6,
         "link_count": 2,
         "kw_shared": 0,
@@ -926,403 +718,611 @@
         "kind": "explicit"
       },
       {
+        "source": "000-Fn",
+        "target": "000-组的定义",
+        "weight": 0.633,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-直和",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
         "source": "000-F^s",
         "target": "000-子空间",
         "weight": 0.633,
         "link_count": 2,
         "kw_shared": 1,
         "kind": "both"
+      },
+      {
+        "source": "000-直和",
+        "target": "000-线性组合",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-F^s",
+        "target": "000-回收站-1",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-减法与除法",
+        "target": "000-向量空间",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-线性组合",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "010-导数的定义",
+        "target": "010-指数函数求导",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-直和",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-线性无关",
+        "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-复数的基本性质",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-减法与除法",
+        "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-线性无关",
+        "target": "000-线性组合",
+        "weight": 1.092,
+        "link_count": 2,
+        "kw_shared": 2,
+        "kind": "both"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-回收站-1",
+        "weight": 0.644,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-子空间",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-回收站-1",
+        "target": "000-线性组合",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-回收站-1",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "010-指数函数求导",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-减法与除法",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-线性无关",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-回收站-1",
+        "target": "000-子空间",
+        "weight": 0.644,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-线性无关",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-子空间",
+        "target": "000-线性组合",
+        "weight": 0.64,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-复数的基本性质",
+        "target": "000-组的定义",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "010-泰勒级数",
+        "target": "010-链式法则",
+        "weight": 0.636,
+        "link_count": 2,
+        "kw_shared": 1,
+        "kind": "both"
+      },
+      {
+        "source": "000-向量空间",
+        "target": "000-线性组合",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
+      },
+      {
+        "source": "000-Fn",
+        "target": "000-直和",
+        "weight": 0.6,
+        "link_count": 2,
+        "kw_shared": 0,
+        "kind": "explicit"
       }
     ]
   },
   "keywords": [
     [
       "加法",
-      2.6667,
+      2.6744,
       "jiafa",
       "jf"
     ],
     [
       "标量乘法",
-      2.4363,
+      2.4432,
       "biaoliangchengfa",
       "blcf"
     ],
     [
       "加法逆元",
-      2.4232,
+      2.43,
       "jiafaniyuan",
       "jfny"
     ],
     [
       "向量空间",
-      2.2832,
+      2.2902,
       "xiangliangkongjian",
       "xlkj"
     ],
     [
       "加法恒等元",
-      2.0157,
+      2.0218,
       "jiafahengdengyuan",
       "jfhdy"
     ],
     [
       "分配性质",
-      1.7418,
+      1.7458,
       "fenpeixingzhi",
       "fpxz"
     ],
     [
       "子空间",
-      1.369,
+      1.3748,
       "zikongjian",
       "zkj"
     ],
     [
       "组",
-      1.2983,
+      1.3032,
       "zu",
       "z"
     ],
     [
-      "线性组合",
-      1.0829,
-      "xianxingzuhe",
-      "xxzh"
-    ],
-    [
       "张成空间",
-      1.0829,
+      1.0872,
       "zhangchengkongjian",
       "zckj"
     ],
     [
+      "线性组合",
+      1.0872,
+      "xianxingzuhe",
+      "xxzh"
+    ],
+    [
       "可交换性",
-      1.0628,
+      1.0668,
       "kejiaohuanxing",
       "kjhx"
     ],
     [
-      "坐标",
-      1.0628,
-      "zuobiao",
-      "zb"
-    ],
-    [
       "Fn",
-      1.0628,
+      1.0668,
       "fn",
       "fn"
     ],
     [
+      "坐标",
+      1.0668,
+      "zuobiao",
+      "zb"
+    ],
+    [
       "直和",
-      0.8516,
+      0.855,
       "zhihe",
       "zh"
     ],
     [
       "唯一表示",
-      0.8516,
+      0.855,
       "weiyibiaoshi",
       "wybs"
     ],
     [
       "导数",
-      0.844,
+      0.8473,
       "daoshu",
       "ds"
     ],
     [
       "复数运算",
-      0.7655,
+      0.7676,
       "fushuyunsuan",
       "fsys"
     ],
     [
       "向量组",
-      0.7082,
+      0.711,
       "xiangliangzu",
       "xlz"
     ],
     [
       "有限维向量空间",
-      0.7082,
+      0.711,
       "youxianweixiangliangkongjian",
       "yxwxlkj"
     ],
     [
       "链式法则",
-      0.6402,
+      0.6426,
       "lianshifaze",
       "lsfz"
     ],
     [
       "复数除法",
-      0.6256,
+      0.6274,
       "fushuchufa",
       "fscf"
     ],
     [
-      "极坐标",
-      0.6256,
-      "jizuobiao",
-      "jzb"
-    ],
-    [
-      "复数",
-      0.6256,
-      "fushu",
-      "fs"
-    ],
-    [
       "欧拉公式",
-      0.6256,
+      0.6274,
       "oulagongshi",
       "olgs"
     ],
     [
       "复数定义",
-      0.6256,
+      0.6274,
       "fushudingyi",
       "fsdy"
     ],
     [
-      "最小子空间",
-      0.5786,
-      "zuixiaozikongjian",
-      "zxzkj"
+      "极坐标",
+      0.6274,
+      "jizuobiao",
+      "jzb"
+    ],
+    [
+      "复数",
+      0.6274,
+      "fushu",
+      "fs"
     ],
     [
       "子空间的和",
-      0.5786,
+      0.5816,
       "zikongjiandehe",
       "zkjdh"
     ],
     [
+      "最小子空间",
+      0.5816,
+      "zuixiaozikongjian",
+      "zxzkj"
+    ],
+    [
       "封闭性",
-      0.5786,
+      0.5816,
       "fengbixing",
       "fbx"
     ],
     [
       "线性代数",
-      0.563,
+      0.5648,
       "xianxingdaishu",
       "xxds"
     ],
     [
       "函数空间",
-      0.563,
+      0.5648,
       "hanshukongjian",
       "hskj"
     ],
     [
-      "数乘",
-      0.563,
-      "shucheng",
-      "sc"
-    ],
-    [
-      "抽象代数",
-      0.563,
-      "chouxiangdaishu",
-      "cxds"
-    ],
-    [
       "F^S",
-      0.563,
+      0.5648,
       "f^s",
       "f^s"
     ],
     [
-      "线性无关",
-      0.5384,
-      "xianxingwuguan",
-      "xxwg"
+      "抽象代数",
+      0.5648,
+      "chouxiangdaishu",
+      "cxds"
+    ],
+    [
+      "数乘",
+      0.5648,
+      "shucheng",
+      "sc"
     ],
     [
       "线性相关",
-      0.5384,
+      0.5406,
       "xianxingxiangguan",
       "xxxg"
     ],
     [
+      "线性无关",
+      0.5406,
+      "xianxingwuguan",
+      "xxwg"
+    ],
+    [
+      "零向量判定",
+      0.4436,
+      "lingxiangliangpanding",
+      "lxlpd"
+    ],
+    [
       "维数公式",
-      0.442,
+      0.4436,
       "weishugongshi",
       "wsgs"
     ],
     [
       "交集为零",
-      0.442,
+      0.4436,
       "jiaojiweiling",
       "jjwl"
     ],
     [
-      "零向量判定",
-      0.442,
-      "lingxiangliangpanding",
-      "lxlpd"
-    ],
-    [
       "长度",
-      0.4318,
+      0.4334,
       "changdu",
       "cd"
     ],
     [
-      "重复元素",
-      0.4318,
-      "chongfuyuansu",
-      "cfys"
-    ],
-    [
-      "集合",
-      0.4318,
-      "jihe",
-      "jh"
-    ],
-    [
       "相等性",
-      0.4318,
+      0.4334,
       "xiangdengxing",
       "xdx"
     ],
     [
+      "集合",
+      0.4334,
+      "jihe",
+      "jh"
+    ],
+    [
       "有序元素",
-      0.4318,
+      0.4334,
       "youxuyuansu",
       "yxys"
     ],
     [
+      "重复元素",
+      0.4334,
+      "chongfuyuansu",
+      "cfys"
+    ],
+    [
+      "多项式近似",
+      0.4076,
+      "duoxiangshijinsi",
+      "dxsjs"
+    ],
+    [
       "e^x",
-      0.4056,
+      0.4076,
       "e^x",
       "e^x"
     ],
     [
       "泰勒级数",
-      0.4056,
+      0.4076,
       "taileijishu",
       "tljs"
     ],
     [
-      "几何理解",
-      0.4056,
-      "jihelijie",
-      "jhlj"
-    ],
-    [
-      "多项式近似",
-      0.4056,
-      "duoxiangshijinsi",
-      "dxsjs"
-    ],
-    [
       "泰勒多项式",
-      0.4056,
+      0.4076,
       "taileiduoxiangshi",
       "tldxs"
     ],
     [
+      "几何理解",
+      0.4076,
+      "jihelijie",
+      "jhlj"
+    ],
+    [
       "导数定义",
-      0.3712,
+      0.3728,
       "daoshudingyi",
       "dsdy"
     ],
     [
-      "指数函数求导",
-      0.3712,
-      "zhishuhanshuqiudao",
-      "zshsqd"
-    ],
-    [
       "欧拉数",
-      0.3712,
+      0.3728,
       "oulashu",
       "ols"
     ],
     [
       "自然对数",
-      0.3712,
+      0.3728,
       "ziranduishu",
       "zrds"
     ],
     [
+      "指数函数求导",
+      0.3728,
+      "zhishuhanshuqiudao",
+      "zshsqd"
+    ],
+    [
       "复合函数",
-      0.3658,
+      0.367,
       "fuhehanshu",
       "fhhs"
     ],
     [
+      "加法法则",
+      0.367,
+      "jiafafaze",
+      "jffz"
+    ],
+    [
       "乘法法则",
-      0.3658,
+      0.367,
       "chengfafaze",
       "cffz"
     ],
     [
       "微积分",
-      0.3658,
+      0.367,
       "weijifen",
       "wjf"
     ],
     [
-      "加法法则",
-      0.3658,
-      "jiafafaze",
-      "jffz"
-    ],
-    [
-      "牛顿多项式",
-      0.2944,
-      "niudunduoxiangshi",
-      "nddxs"
-    ],
-    [
-      "最佳近似",
-      0.2944,
-      "zuijiajinsi",
-      "zjjs"
-    ],
-    [
-      "微分",
-      0.2944,
-      "weifen",
-      "wf"
-    ],
-    [
       "变化率",
-      0.2944,
+      0.2954,
       "bianhualv",
       "bhl"
     ],
     [
+      "最佳近似",
+      0.2954,
+      "zuijiajinsi",
+      "zjjs"
+    ],
+    [
       "dt",
-      0.2944,
+      0.2954,
       "dt",
       "dt"
     ],
     [
+      "牛顿多项式",
+      0.2954,
+      "niudunduoxiangshi",
+      "nddxs"
+    ],
+    [
+      "微分",
+      0.2954,
+      "weifen",
+      "wf"
+    ],
+    [
       "极限",
-      0.2944,
+      0.2954,
       "jixian",
       "jx"
     ],
     [
-      "减法",
-      0.2556,
-      "jianfa",
-      "jf"
-    ],
-    [
       "乘法逆元",
-      0.2556,
+      0.2562,
       "chengfaniyuan",
       "cfny"
     ],
     [
+      "减法",
+      0.2562,
+      "jianfa",
+      "jf"
+    ],
+    [
       "除法",
-      0.2556,
+      0.2562,
       "chufa",
       "cf"
     ]

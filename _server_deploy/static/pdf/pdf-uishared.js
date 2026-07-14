@@ -102,6 +102,21 @@ window._favOpenPicker = function () {
     '.up2-content .up2-content-body{padding:16px 20px;font-size:15px;line-height:1.65;min-height:60px}' +
     '.up2-content .up2-content-body.empty{color:#9aa5bd;font-style:italic}' +
     '.up2-content .up2-content-body p{margin:0 0 .8em}' +
+    // 任务运行时:页面块(references/adr-task-runtime.md)。纸是白底(PDF 真页) → 用深色文字。
+    '.up2-blocks{padding:16px 22px}' +
+    '.up2-b{margin:0 0 10px}' +
+    '.up2-b.up2-h1{font-size:19px;font-weight:700;color:#1e2a44;margin-bottom:14px}' +
+    '.up2-b-blank{display:flex;align-items:flex-end;gap:8px}' +
+    '.up2-b-lab{flex:none;width:26px;color:#5b76b8;font-size:14px;line-height:34px}' +
+    // ★ 手写就写在这个框里。框只是**视觉参考 + bbox 来源**;手写层(ink canvas)在更上层,天然共存。
+    '.up2-b-box{flex:1;height:34px;border-bottom:1.5px solid #b9c6e2;border-radius:2px}' +
+    '.up2-b-button{margin-top:14px}' +
+    // <span role=button>(不是 <button>):memory ios-button-white-block —— Safari 会用原生外观盖掉一切
+    '.up2-b-btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 18px;' +
+      'border-radius:10px;background:#3b6fd4;color:#fff;font-size:14px;font-weight:600;cursor:pointer;' +
+      '-webkit-appearance:none;appearance:none;user-select:none;margin-right:8px}' +
+    '.up2-b-btn:active{transform:scale(.96)}' +
+    '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
     '.up2-content .up2-content-body h1,.up2-content .up2-content-body h2,.up2-content .up2-content-body h3{line-height:1.35;margin:.9em 0 .45em}' +
     '.up2-content .up2-content-body ul,.up2-content .up2-content-body ol{margin:0 0 .8em;padding-left:1.6em}' +
     '.up2-content.editing{z-index:52;pointer-events:auto;cursor:default;display:flex;flex-direction:column}' +   /* 编辑态才抬到最上+全拦(禁手写/选词) */
@@ -720,6 +735,8 @@ window._favOpenPicker = function () {
   // overlay 页常驻覆盖层:显示态渲 RC.md(空则提示);点击进 textarea 即时编辑
   function _upRenderOverlay(ov, rec) {
     ov.classList.remove('editing');
+    // ★ 任务运行时(references/adr-task-runtime.md):这一页有结构化块 → 走块渲染;否则原 md 路径不动。
+    if (rec.blocks && rec.blocks.length) { _upRenderBlocks(ov, rec); return; }
     var md = (rec.md || '').trim();
     ov.innerHTML = '<div class="up2-content-hd">📝 ' + (rec.title ? RC.esc(rec.title) : '我的页') + '</div>' +
                    '<div class="up2-content-body' + (md ? '' : ' empty') + '"></div>';
@@ -728,6 +745,91 @@ window._favOpenPicker = function () {
     else { body.textContent = '（点左上角 ✏️ 写笔记 · 自动保存,无需按钮）'; }
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);   // 虚拟页:显示态校准手写层尺寸(真 .page-wrap 无 .pdf-upage 祖先 → 跳过)
   }
+  // ══════════ 任务运行时:页面块渲染(text / blank / button)══════════
+  //   设计见 references/adr-task-runtime.md。三个坑一次绕开:
+  //   ① 覆盖层拦手势用**冒泡非捕获**(memory overlay-gate-use-bubble-not-capture:
+  //      捕获阶段 stopPropagation 会吞掉内部按钮事件 —— 插入页保存键失灵就是这么来的)
+  //   ② iOS 的 AudioContext **必须在点击的同步栈里** warm(__vcTtsWarm),否则听写第一个词无声
+  //   ③ SSE 在页面不可见时会被**直接丢弃** → 回前台必须拉 run-status **对齐状态机**,不能只靠推送
+  function _upRunEvent(rec, ev) {
+    if (!rec.run_id) return;
+    try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
+    RC.reqJson('/pdf/api/run-event', { method: 'POST', body: { rid: rec.run_id, event: ev } })
+      .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); })
+      .catch(function () {});
+  }
+  function _upRunHint(rec, txt) {
+    try {
+      var el = document.querySelector('[data-up-run="' + rec.run_id + '"] .up2-run-hint');
+      if (el) el.textContent = txt || '';
+    } catch (e) {}
+  }
+  function _upRenderBlocks(ov, rec) {
+    ov.setAttribute('data-up-run', rec.run_id || '');
+    ov.innerHTML = '<div class="up2-content-hd">📝 ' + RC.esc(rec.title || '任务页') + '</div>' +
+                   '<div class="up2-content-body up2-blocks"></div>' +
+                   '<div class="up2-run-hint"></div>';
+    var body = ov.querySelector('.up2-blocks');
+    (rec.blocks || []).forEach(function (b) {
+      var d = document.createElement('div');
+      d.className = 'up2-b up2-b-' + (b.kind || 'text');
+      d.setAttribute('data-bid', b.id || '');
+      if (b.kind === 'text') {
+        d.innerHTML = (window.RC && RC.md) ? RC.md(b.text || '') : RC.esc(b.text || '');
+        if (b.style === 'h1') d.classList.add('up2-h1');
+      } else if (b.kind === 'blank') {
+        d.innerHTML = '<span class="up2-b-lab">' + RC.esc(b.label || '') + '</span>' +
+                      '<span class="up2-b-box"></span>';   // ← 你手写在这个框里(手写层在更上层,天然共存)
+      } else if (b.kind === 'button') {
+        // 用 <span role=button>:memory ios-button-white-block —— <button> 在 Safari 上会被原生外观盖掉
+        var sp = document.createElement('span');
+        sp.className = 'up2-b-btn'; sp.setAttribute('role', 'button'); sp.setAttribute('tabindex', '0');
+        sp.textContent = b.label || '按钮';
+        sp.addEventListener('click', function (ev) { ev.stopPropagation(); _upRunEvent(rec, b.event || 'next'); });
+        d.appendChild(sp);
+      } else { return; }
+      body.appendChild(d);
+    });
+    _upSyncRects(ov, rec);
+    var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);
+  }
+  // ★ rect 写回:批改要按 blank 的 bbox 裁图(_figure_crop_png),而 **只有前端知道渲染后的真实位置**。
+  //   坐标必须是**页归一化 0-1** —— 与墨迹(RCInk.norm)、与服务端裁图 box 同一坐标系。这是整个方案的根基。
+  function _upSyncRects(ov, rec) {
+    var pw = ov.closest ? (ov.closest('.page-wrap') || ov.closest('.pdf-upage')) : null;
+    if (!pw) return;
+    var pr = pw.getBoundingClientRect();
+    if (!pr.width || !pr.height) return;
+    var changed = false;
+    (rec.blocks || []).forEach(function (b) {
+      if (b.kind !== 'blank') return;
+      var el = ov.querySelector('[data-bid="' + b.id + '"] .up2-b-box');
+      if (!el) return;
+      var r = el.getBoundingClientRect();
+      var nb = [(r.left - pr.left) / pr.width, (r.top - pr.top) / pr.height,
+                (r.right - pr.left) / pr.width, (r.bottom - pr.top) / pr.height].map(function (v) {
+        return Math.max(0, Math.min(1, Math.round(v * 1e4) / 1e4));
+      });
+      var old = b.rect || [];
+      if (old.length !== 4 || Math.abs(old[0] - nb[0]) > 2e-3 || Math.abs(old[1] - nb[1]) > 2e-3 ||
+          Math.abs(old[2] - nb[2]) > 2e-3 || Math.abs(old[3] - nb[3]) > 2e-3) { b.rect = nb; changed = true; }
+    });
+    if (!changed) return;
+    RC.reqJson('/pdf/api/userpages', { method: 'PATCH',
+      body: { file: FILE_REL, id: rec.id, blocks: rec.blocks } }).catch(function () {});
+  }
+  // ③ 回前台对齐状态机(SSE 不可见时丢事件 → 不能只靠推送)
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    document.querySelectorAll('[data-up-run]').forEach(function (ov) {
+      var rid = ov.getAttribute('data-up-run');
+      if (!rid) return;
+      RC.reqJson('/pdf/api/run-status?rid=' + encodeURIComponent(rid))
+        .then(function (d) { if (d && d.ok) { var h = ov.querySelector('.up2-run-hint'); if (h) h.textContent = d.hint || ''; } })
+        .catch(function () {});
+    });
+  });
+
   // 左上角小 Aa 编辑按钮(唯一进编辑入口),显示态覆盖层穿透。无论覆盖层挂不挂(脏/已同步)都放,是「再次编辑」入口。
   function _upEnsureEditBtn(rec, pw) {
     if (pw.querySelector('.up2-edit-btn')) return;
