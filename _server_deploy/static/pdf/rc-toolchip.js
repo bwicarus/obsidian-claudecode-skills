@@ -181,7 +181,10 @@
     if (m['指令(S2S 原话)']) ai += '**指令**:' + m['指令(S2S 原话)'] + '\n\n';
     if (m['携带上下文']) ai += '**携带上下文**:' + m['携带上下文'] + '\n\n';
     if (m['参数']) ai += argLines(m['参数']);
-    st.push({ ic: ICON.ai, t: 'AI 请求 · ' + chip.label, m: '', kind: 'md', body: ai || '(无参数)' });
+    // 141(用户):视觉工具(see_ink/see_page/see_figure)把**真正喂给 AI 的那张图**也显示出来 ——
+    //   以前这里只有"(无参数)",到底喂了什么图全靠猜,笔迹裁歪了都发现不了。点图可放大。
+    st.push({ ic: ICON.ai, t: 'AI 请求 · ' + chip.label, m: '', kind: 'md',
+              body: ai || (chip.vision && chip.vision.length ? '' : '(无参数)'), vision: chip.vision || [] });
     // ② 中间步骤(内层工具/模型调用)
     (chip.steps || []).forEach(function (x) {
       st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : (x.sec != null ? x.sec + 's' : '')),
@@ -200,13 +203,41 @@
   function renderPayload(el, sg, chip, view) {
     if (sg.kind === 'anki') { el.innerHTML = ankiHtml(chip, view); wireAnki(el, chip, view); return; }
     var body = prettyResult(sg.body);
-    if (!body.trim()) { el.innerHTML = '<span style="color:#7f92b8">(没有额外内容)</span>'; return; }
+    if (sg.vision && sg.vision.length) {   // 141:先把喂给 AI 的图贴出来(点击放大),再接文字参数
+      el.innerHTML = '';
+      var wrap = document.createElement('div'); wrap.className = 'tc-vis';
+      sg.vision.forEach(function (v) {
+        if (!v || !v.b64) return;
+        var im = document.createElement('img');
+        im.src = 'data:' + (v.media_type || 'image/png') + ';base64,' + v.b64;
+        im.className = 'tc-vis-img'; im.alt = '喂给 AI 的图';
+        im.title = '这就是实际发给 AI 的图 —— 点击放大';
+        im.addEventListener('click', function (ev) { ev.stopPropagation(); visLightbox(im.src); });
+        wrap.appendChild(im);
+      });
+      var cap = document.createElement('div'); cap.className = 'tc-vis-cap';
+      cap.textContent = '↑ 实际发给 AI 的图(点击放大)';
+      el.appendChild(wrap); el.appendChild(cap);
+      if (!body.trim()) return;
+      var more = document.createElement('div'); el.appendChild(more); el = more;   // 文字参数接在图下面
+    } else if (!body.trim()) { el.innerHTML = '<span style="color:#7f92b8">(没有额外内容)</span>'; return; }
+    if (!body.trim()) return;
     try {
       if (window.RC && RC.assistant && RC.assistant.renderMd) RC.assistant.renderMd(el, body, true);   // 主路:与对话同一套 md + MathJax
       else el.innerHTML = miniMd(body);                                                                // 兜底:绝不吐纯文本
     } catch (e) { el.innerHTML = miniMd(body); }
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]); } catch (e) {}
     if (sg.tts) addTts(el);   // 纯文字的最终结果 → 文字区域角落放一个 ▶(TTS 念它)
+  }
+  function visLightbox(src) {   // 141:点图放大 —— 全屏遮罩,再点/按 Esc 关闭
+    var ov = document.createElement('div'); ov.className = 'tc-lb';
+    var im = document.createElement('img'); im.src = src; im.className = 'tc-lb-img';
+    ov.appendChild(im);
+    function close() { try { ov.remove(); } catch (e) {} document.removeEventListener('keydown', onKey); }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    ov.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(ov);
   }
   function prettyResult(t) {   // 工具回给模型的常是 JSON(截图里那坨 {"kind":"weather","note":...})→ 抽人话,别倒原文
     var raw = String(t || '');
@@ -802,6 +833,13 @@
     typeOf: typeOf, isAction: isAction, setForm: form,
     setSteps: function (chip, st) { if (!chip || chip.nested) return; chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); },
     setMeta: function (chip, rows) { if (chip && !chip.nested) chip.meta = rows || []; },
+    setVision: function (chip, imgs) {   // 141:relay 捎来的"真正喂给 AI 的图"→ 存进 chip,流程图的「AI 请求」节点展示
+      var c = chip && chip.nested ? chip.parent : chip;
+      if (!c || !imgs || !imgs.length) return;
+      c.vision = imgs;
+      c.views.forEach(function (v) { if (v.el.isConnected) paintBody(c, v); });
+      repaintFlows(c);
+    },
     setModel: function (chip, model, action) { if (chip && !chip.nested) { chip.model = model || chip.model; chip.action = action || chip.action; } },
     openDetail: openDetail,
     addSteps: function (chip, st) {   // 137:工具内部子步骤(服务端 sub_steps)→ 并进外层卡的步骤

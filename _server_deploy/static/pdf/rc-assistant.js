@@ -1995,8 +1995,10 @@
         scrollDown(); return true;
       }
       if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
+      // 141:本轮若已升格成「工具调用卡」→ 正文写进卡片 body(标题/前置语/流程按钮不能被覆盖掉)
+      var _tgt = (_vTurnEl.__tcBd && _vTurnEl.__tcBd.isConnected) ? _vTurnEl.__tcBd : _vTurnEl;
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
-        try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
+        try { renderMd(_tgt, text, true); } catch (e) { _tgt.textContent = text; }
         // 139(用户):AI 的文字输出**不需要「!」这样的按键** —— 工具调用的详情归工具卡的【数据流】按钮 + 长按详情窗
         try {   // 83:长文气泡 TTS 念钮(☆撤——用户裁定收藏走拖拽/浮层)
           if (arguments[2].speak && !_vTurnEl.querySelector(':scope > .asst-clip')) {
@@ -2015,9 +2017,38 @@
         } catch (e) {}
         try { if (arguments[2].pin && window.__vcPinBind) window.__vcPinBind(_vTurnEl, arguments[2].pin.label, arguments[2].pin.textFn); } catch (e) {}   // 79:长按=全文带入
         try { _bubDecor(_vTurnEl, arguments[2].pin && arguments[2].pin.label, arguments[2].pin && arguments[2].pin.textFn); } catch (e) {}   // 86/87:标题把手条
-      } else _vTurnEl.textContent = text;
+      } else _tgt.textContent = text;
       scrollDown(); return true;
     } catch (e) { return false; }
+  };
+  // ── 141(用户设计):**工具调用卡** ────────────────────────────────────────────────
+  //   AI 用工具时的真实节奏是:先说一句「我先看一下你画了什么,稍等」→ 调工具 → 再说结果。
+  //   这三段本来就是**一次工具调用的三个阶段**,以前却渲染成「气泡 + 独立工具卡 + 气泡」三块,很散。
+  //   现在合成**一张卡**:标题=工具名(右侧【流程】按钮),淡色前置语,正文=最终回答(流式增长)。
+  //   不点流程按钮时,它看起来就是一张普通回答卡;点开才看到 AI 请求 → 工具 → 结果 的流程图。
+  //   host 交给 rc-toolchip 的 absorb() 认领(它找 .vc-if-hd 挂按钮),工具卡不再另起一张。
+  window.__asstVoiceCard = function (label) {
+    try {
+      if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
+      if (_vTurnEl.__tcBd) {   // 同一轮里连调多个工具 → 复用同一张卡(流程图里串成多个节点)
+        var t0 = _vTurnEl.querySelector(':scope > .vc-if-hd > .tc-title');
+        if (t0 && label) t0.textContent = label;
+        return _vTurnEl;
+      }
+      var lead = (_vTurnEl.textContent || '').trim();   // 此刻气泡里的正是那句前置语
+      _vTurnEl.innerHTML = '';
+      _vTurnEl.classList.add('asst-tcard');
+      var hd = document.createElement('div'); hd.className = 'vc-if-hd';
+      var tt = document.createElement('span'); tt.className = 'tc-title'; tt.textContent = label || '工具调用';
+      hd.appendChild(tt);
+      var ld = document.createElement('div'); ld.className = 'tc-lead'; ld.textContent = lead;
+      if (!lead) ld.style.display = 'none';
+      var bd = document.createElement('div'); bd.className = 'tc-bd';
+      _vTurnEl.appendChild(hd); _vTurnEl.appendChild(ld); _vTurnEl.appendChild(bd);
+      _vTurnEl.__tcBd = bd; _vTurnEl.__tcLead = ld;
+      scrollDown();
+      return _vTurnEl;
+    } catch (e) { return null; }
   };
   try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染
   window.__asstInfoBtn = function (el, info) {   // 77b:右下角小「!」详情钮(语音气泡/搜索卡通用)

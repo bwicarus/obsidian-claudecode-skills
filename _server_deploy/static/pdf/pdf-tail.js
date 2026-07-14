@@ -351,11 +351,15 @@ window._inkLoadAll = _inkLoadAll;
 // ── 阅读器实时事件(SSE):别的视图(收藏夹/其它设备)画了本书墨迹 → ~1s 更新该页(同一张纸,与 EPUB 侧同一事件总线)──
 (function () {
   if (typeof EventSource === 'undefined' || !FILE_REL) return;
-  var es = null;
+  var es = null, _retry = 0;
+  // 133:退避+抖动。原来 onerror 恒定 3s 重连——SSE 舱壁满时返 503,而 EventSource 按规范
+  // 对非 200 **直接判失败、不自己重连**,于是全靠这里的定时器,变成每 3s 硬刷一次(风暴)。
+  function _backoff() { return Math.min(30000, 3000 * Math.pow(2, Math.min(_retry, 4))) * (0.7 + Math.random() * 0.6); }
   function connect() {
     if (es) return;
     try {
       es = new EventSource('/pdf/api/reader-events');
+      es.addEventListener('open', function () { _retry = 0; });   // 接通即清退避
       es.addEventListener('change', function (e) {
         if (document.visibilityState !== 'visible') return;
         var ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
@@ -385,7 +389,7 @@ window._inkLoadAll = _inkLoadAll;
           }).catch(function () {});
         }, 250);
       });
-      es.onerror = function () { if (es && es.readyState === 2) { es = null; setTimeout(connect, 3000); } };
+      es.onerror = function () { if (es && es.readyState === 2) { es = null; _retry++; setTimeout(connect, _backoff()); } };
     } catch (_) { es = null; }
   }
   connect();

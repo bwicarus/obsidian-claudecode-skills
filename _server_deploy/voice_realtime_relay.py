@@ -14,6 +14,7 @@ X-Api-App-Key 是文档给的固定值)。凭证缺失 → 服务照常监听,�
 """
 import asyncio
 import base64
+import difflib
 import gzip
 import hashlib
 import json
@@ -2447,6 +2448,48 @@ def _mk_bridge_track(q):
     return _T()
 
 
+# ══════════ 133:ASR「提示词泄漏式幻觉」判别(手动放行闸的判据)══════════
+# 现象(实测):AI 出声/静音段被 VAD 误判成一个新的音频轮,转写模型对着这段没有人声的音频
+#   **把我们喂给它的 prompt 原样复述**成"用户说的话"。日志铁证:转写文本与 assistant.py 的
+#   _tr["prompt"] 逐字一致。这是 prompt-copy 式幻觉,不是"Whisper 的 bug"那么笼统。
+# ⚠ 因果澄清(外部评审纠正,我原先讲反了):假转写**不是**多次回答的触发源——Realtime 模型直接
+#   听原始音频,转写是**旁路异步**产物(日志里 response.created 早于 transcription.completed)。
+#   真凶是 **VAD 假轮 + create_response=true**。所以本判别器是**闸门的判据**,不是闸门本身;
+#   光靠过滤转写救不了自动挡(那时回答早已生成)——必须同时关掉自动挡,见 handle_rtc_ctl 的 gate。
+# 判别原则:**高精度硬拒,宁可漏判也绝不错杀真实语音**。用户真的会说「下一页」「笔迹」「生词」,
+#   所以严禁"转写是 prompt 的子串就拒"这类一般性规则(评审明确点名)。
+# ⚠ 血的教训:这里曾放过「关键词」「常说」——而用户完全可能说「这一页的**关键词**是什么?」
+#   → 命中锚点 → 真实提问被当成假轮**删掉且不回答**,用户干等、界面零反馈。违反了下面自己写的原则。
+#   锚点只能放**人类不可能自然说出口**的整串。prompt 被复读的场景由下面的 LCS 判据兜底(去标点后
+#   与 mirror 的最长公共子串轻松 ≥10),所以删掉它们**零损失**。
+_ASR_GHOST_ANCHORS = ("学习伴读通话",)
+# ⚠ 必须与 assistant.py 的 _tr["prompt"] 保持一致(改那边记得改这里)。anchors 是主判据,这个是补充。
+_ASR_PROMPT_MIRROR = ("关键词:Anki、笔迹、振假名、生词、假名"
+                      "|学习伴读通话。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/"
+                      "做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹")   # 含旧版,防旧会话残留
+_GHOST_LCS_MIN = 10   # 与 prompt 的最长公共子串阈值:「翻到第N页」才5字、「下一页」3字 → 10 字才不会误杀真人
+
+
+def _strip_punct(s: str) -> str:
+    return re.sub(r"[\s,，。、:：;；/·!！?？…\-]+", "", s or "")
+
+
+def _is_asr_ghost(tx: str):
+    """判定这一轮音频是不是"假轮"。返回 (是否假, 原因)。"""
+    s = (tx or "").strip()
+    if not s:
+        return True, "空转写(纯静音轮)"
+    for a in _ASR_GHOST_ANCHORS:
+        if a in s:
+            return True, f"含 prompt 锚点「{a}」"
+    a1, a2 = _strip_punct(s), _strip_punct(_ASR_PROMPT_MIRROR)
+    if a1 and a2:
+        m = difflib.SequenceMatcher(None, a1, a2, autojunk=False).find_longest_match(0, len(a1), 0, len(a2))
+        if m.size >= _GHOST_LCS_MIN:
+            return True, f"与 ASR prompt 最长公共子串 {m.size} 字(≥{_GHOST_LCS_MIN})"
+    return False, ""
+
+
 async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, fe: int = 1):
     _span = uuid.uuid4().hex[:12]   # 284:voice_span_id
     _bok, _bspent = _budget_gate()
@@ -2714,15 +2757,190 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             if not ok and _tfail_r["n"] >= 6:
                 sys.stderr.write(f"[rtc-ctl] 工具熔断硬断: {_tk2[:80]} ×{_tfail_r['n']}\n")
             elif not stale and not no_create:
-                await ows.send(json.dumps(_resp_create(readonly and len(out) > 800)))
+                # 133:有候选音频轮正在等转写验证 → **工具结果先回填,但暂缓它的 create**。
+                # 否则:候选若是真人插话,工具轮会抢在用户前面说话;候选若是假轮,又不能让工具永远闭嘴。
+                # 所以挂起来——REJECT 时放行(_reject_turn),ACCEPT 时丢弃(用户轮的回答会带上工具结果)。
+                if gate["pending"]:
+                    gate["hold_tool"] = {"long": bool(readonly and len(out) > 800), "ep": ep0}
+                    sys.stderr.write(f"[rtc-ctl] ⏸工具轮 create 暂缓({name}:有候选输入待验证)\n")
+                else:
+                    await _do_create(long_tool=bool(readonly and len(out) > 800))
         except Exception:
             pass
+        # 141(用户):视觉类工具(see_ink/see_page/see_figure)**把真正喂给 AI 的那张图也带给前端**,
+        #   在工具卡的「AI 请求」节点里显示(可点开放大)。以前前端只看到 "(无参数)" —— 到底喂了什么图
+        #   全靠猜,笔迹裁歪了也无从发现。图本就已经过网发给 OpenAI 了,再镜像一份到本机浏览器成本可忽略。
+        _vshot = []
+        try:
+            for _v in (vis or [])[:2]:
+                _b64 = (_v or {}).get("b64") or ""
+                if _b64 and len(_b64) < 1_500_000:   # ~1.1MB 原图上限,超大的不镜像(别撑爆 ctl WS)
+                    _vshot.append({"media_type": _v.get("media_type") or "image/png", "b64": _b64})
+        except Exception:
+            _vshot = []
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,
-            "args": args, "rag": out[:1600], "sub_steps": _subs}}, ensure_ascii=False))
+            "args": args, "rag": out[:1600], "sub_steps": _subs, "vision": _vshot}}, ensure_ascii=False))
         _ledger_tool("openai_rtc", _span, call_id2, name, ok, took or 0, cached=bool(cached))   # 284
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=("[cache] " if cached else "") + ("[stale] " if stale else "") + out[:300])
+
+    # ══════════ 133 手动放行(外部评审 P0):由 relay 仲裁"这一轮该不该回答" ══════════
+    # 旧(自动挡):create_response=true → VAD 一判轮次结束就**自动生成回答**。于是噪声/AI 回声被切成的
+    #   假轮直接白答一次;interrupt_response=true 还让假轮**打断**正在跑的工具轮(实测 see_ink 被打断标"已过期")。
+    # 新(手动挡):speech_started **只登记候选**——不推进纪元、不消费状态、不作废在途工具;
+    #   等这个 item 的转写回来判真伪:假轮 → 删掉 item、不生成;真轮 → 推进纪元 + 注入状态 + response.create。
+    # 代价:首字延迟多等一次 ASR。用超时兜底(转写不来也照常放行)——**绝不允许出现"该答却不答"**。
+    gate = {
+        "pending": {},        # item_id → 登记时刻:等转写验证的候选音频轮
+        "active_resp": None,  # 当前在生成的 response id(定向 cancel 用;无 ID 的 cancel 会误杀新回合)
+        "want_user": False,   # 已 ACCEPT 但撞上活跃 response → 等 done 再 create
+        "hold_tool": None,    # 因有候选待验而暂缓的工具轮 create
+        "seg": 0,             # 语音段号(speech_started 递增)
+        "decided": 0,         # 已裁决到哪一段
+        "seg_of": {},         # item_id → 它属于哪一段(M7:decided 必须记"被裁决的那段",不是"当前段")
+        # ★ B2:**create 已发、response.created 未回** 的窗口(跨海 RTT 200-500ms)。
+        #   没有它,active_resp 还是 None → 第二个 create 被无条件发出 → 撞
+        #   conversation_already_has_active_response → pend 补发 → **同一句话答两遍**(症状根本没关掉)。
+        #   同文件的 WS(Grok)路径早有等价守卫(_vg["pend_resp"]:1726),RTC 这条路漏配了。
+        "inflight": False,
+        "inflight_t": 0.0,
+        "kill_next": False,   # 在途那条 create 一 created 就掐(此刻还没有 id,无法定向 cancel)
+    }
+    TURN_ASR_WAIT = 4.0
+
+    async def _do_create(long_tool=False, user=False):
+        """★ response.create 的**唯一出口**(B2)。任何绕过它的直发都会重开双答的口子。"""
+        if gate["active_resp"] or gate["inflight"]:
+            return False
+        gate["inflight"] = True
+        gate["inflight_t"] = time.time()
+        try:
+            await ows.send(json.dumps(_resp_create(long_tool, user)))
+            return True
+        except Exception:
+            gate["inflight"] = False
+            return False
+
+    async def _burn_old_images():
+        # 104:焚"上上轮及更早"的直喂图(保留最近一轮供追问;历史不再重复携带图 token)
+        _keep = [it for it in _img_items if it[0] >= epoch["n"] - 2]
+        for _ep0, _iid0 in _img_items:
+            if _ep0 < epoch["n"] - 2:
+                try:
+                    await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _iid0}))
+                except Exception:
+                    pass
+        _img_items[:] = _keep
+
+    async def _inject_state():
+        """把当前 页/选中/笔迹 状态注入对话。**只在 ACCEPT 后调**(133:确认是真轮才消费 _dirty3/_ink_fresh,
+        否则一个噪声假轮就会把"刚画过"这个一次性边沿吃掉,真问题来时反而没有笔迹提示)。"""
+        if not (fe >= 3 and book.pop("_dirty3", None)):
+            return
+        _vt3 = (book.get("vtext") or book.get("page_text") or "")[:1500]
+        _b3 = [f"用户此刻在第 {book.get('page') or page} 页" + (f",当前可见内容:{_vt3}" if _vt3 else ",需要页面内容就调 read_page")]
+        if book.get("sel"):
+            _b3.append(f"选中了「{str(book['sel'])[:200]}」(他说『这段/我选的』就指它)")
+        if book.get("ink_strokes"):
+            if book.pop("_ink_fresh", None):
+                _b3.append("他本页有手写笔迹、而且**刚刚画过**(你之前 see_ink 看到的内容已过时作废)"
+                           "——接下来他若问「这是什么/这个/这里/什么意思」这类**没指明对象**的话,"
+                           "默认就是在问这笔迹:**先调 see_ink**(不是 see_page,别看整页)再答;"
+                           "他若点到具体的词/概念或要求翻页等,就按他说的来,别硬套笔迹")
+            else:
+                _b3.append("本页有他的手写笔迹(问到手写内容先调 see_ink,别用 see_page 看整页)")
+        try:
+            await ows.send(json.dumps({"type": "conversation.item.create", "item": {
+                "type": "message", "role": "system",
+                "content": [{"type": "input_text", "text": "(" + ";".join(_b3) + "。状态记录,不要回应本条。)"}]}}, ensure_ascii=False))
+            sys.stderr.write(f"[rtc-ctl] P3 注入 p{book.get('page')}(vt={len(_vt3)}字 ink={bool(book.get('ink_strokes'))})\n")
+        except Exception:
+            pass
+
+    async def _accept_turn(item_id: str, tx: str, why: str = ""):
+        """这一轮是真人说话 → 推进纪元、注入状态、生成回答。"""
+        # M7:裁决的是**这个 item 所属的那一段**,不是"当前段"(seg 在 speech_started 就已经往前跑了)。
+        gate["decided"] = max(gate["decided"], gate["seg_of"].pop(item_id, gate["seg"]))
+        epoch["n"] += 1            # 只有真轮才推进(在途工具结果随之作废=旧结果不抢新话轮)
+        # M8:丢弃被暂缓的工具轮时,**别把它的模态决策位一起丢了** —— hold_tool["long"]=长工具结果该走文字模态,
+        #     丢了会让 route 档口头念整页正文,念到 2048 保险丝被截断。
+        _lt = bool(gate["hold_tool"] and gate["hold_tool"].get("long"))
+        gate["hold_tool"] = None
+        if tx:
+            book["last_q"] = tx[:500]
+        sys.stderr.write(f"[rtc-ctl] ✅放行 call={call_id[:12]} ep={epoch['n']} 「{tx[:30]}」{why}\n")
+        # B1 回执:告诉前端"这一轮我接管了" → 前端撤销它的哑火兜底定时器(否则会重复 create)
+        try:
+            await bws.send(json.dumps({"event": "turn", "payload": {"verdict": "accept"}}))
+        except Exception:
+            pass
+        await _burn_old_images()
+        await _inject_state()
+        if gate["active_resp"] or gate["inflight"]:
+            # 用户插话打断。interrupt_response 已关 → 打断归我们管。
+            # ⚠ M6:**先写 want_user 再发 cancel** —— 反过来的话,cancel 与 response.done 之间若让出事件循环,
+            #    done 会先跑、看到 want_user 还是 False → 该轮永久哑,且防哑网被 want_user 永久缴械。
+            gate["want_user"] = True
+            gate["want_long"] = _lt
+            if gate["active_resp"]:
+                # 有 id → 定向 cancel(无 ID 的 cancel 会误杀比它更新的合法 response)
+                try:
+                    await ows.send(json.dumps({"type": "response.cancel", "response_id": gate["active_resp"]}))
+                    await ows.send(json.dumps({"type": "output_audio_buffer.clear"}))
+                except Exception:
+                    pass
+            else:
+                gate["kill_next"] = True   # create 在途、还没有 id → 等 created 一到立刻掐
+        else:
+            await _do_create(long_tool=_lt, user=True)
+
+    async def _reject_turn(item_id: str, tx: str, why: str):
+        """假轮 → 从对话里删掉这条假的用户输入,不生成任何回答。
+        (手动挡下此刻**还没有** response 被创建,所以 delete 是干净的——这正是评审强调的:
+         自动挡里"回答都已经说出口了再删 item"是不可靠的工作流。)"""
+        gate["decided"] = max(gate["decided"], gate["seg_of"].pop(item_id, gate["seg"]))   # M7:裁决"这个 item 那一段"
+        sys.stderr.write(f"[rtc-ctl] 🚫假轮丢弃 call={call_id[:12]} 「{tx[:30]}」({why})\n")
+        # ★ B1 回执(**关键**):假轮不会产生 response.created —— 不回执的话,前端的哑火兜底定时器
+        #   会在超时后**替这个假轮补发一次 create**,整个闸门当场白做。必须显式告诉它"我判假了"。
+        try:
+            await bws.send(json.dumps({"event": "turn", "payload": {"verdict": "reject"}}))
+        except Exception:
+            pass
+        try:
+            await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": item_id}))
+        except Exception:
+            pass
+        # 候选清空 → 之前因它而暂缓的工具轮 create 可以放行了
+        if not gate["pending"] and gate["hold_tool"] and not gate["active_resp"]:
+            ht = gate["hold_tool"]
+            gate["hold_tool"] = None
+            if ht["ep"] == epoch["n"]:
+                await _do_create(long_tool=ht["long"])
+
+    async def _turn_timeout(item_id: str):
+        """转写迟迟不来(ASR 慢/失败)→ 按真轮放行。宁可多答一次,也绝不让用户等不到回答。"""
+        await asyncio.sleep(TURN_ASR_WAIT)
+        if item_id in gate["pending"]:
+            gate["pending"].pop(item_id, None)
+            await _accept_turn(item_id, "", "(转写超时,按真轮放行)")
+
+    async def _silence_watchdog(seg: int):
+        """★ 防哑网(自审补):整条闸挂在 input_audio_buffer.committed 上。万一这个事件不来
+        (语义 VAD 行为变了/协议改了/事件丢了),就会没有候选、没有超时 → **永远不生成回答**,
+        从"答太多次"变成"一句都不答"——那比原病更糟。
+        所以:说完话之后若这一段迟迟无人裁决、且没有候选在验、也没有回答在生成 → 强行放行。"""
+        await asyncio.sleep(TURN_ASR_WAIT + 1.5)
+        # M6:回收卡死的在途 create(created 永不回来 → inflight 永真 → 谁都别想再 create)
+        if gate["inflight"] and time.time() - gate["inflight_t"] > 8:
+            sys.stderr.write("[rtc-ctl] 🛟回收僵死 inflight(create 已发但 created 迟迟不来)\n")
+            gate["inflight"] = False
+        # M7:**不能**把 active_resp 列入缴械条件 —— 用户插话时 active_resp 恰恰非空,
+        #     那正是防哑网最该救的场景。decided 才是"这一段有没有人管"的唯一判据。
+        if gate["decided"] >= seg or gate["pending"] or gate["want_user"]:
+            return
+        sys.stderr.write(f"[rtc-ctl] 🛟防哑网:seg={seg} 无人裁决 → 强行放行(committed 事件可能没来)\n")
+        await _accept_turn("", "", "(防哑网)")
 
     async def _down():
         n = {}
@@ -2734,37 +2952,22 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             t = ev.get("type") or "?"
             n[t] = n.get(t, 0) + 1
             if t == "input_audio_buffer.speech_started":
-                epoch["n"] += 1   # 用户开口=新话轮:在途工具的结果到手后只回填不抢话(审核P0#2)
-                if 3 <= fe < 4 and book.pop("_dirty3", None):   # 127:fe>=4 的前端**自己经 data channel 直连注入**(浏览器→OpenAI 一跳,不绕 Pi);旧前端(fe=3)仍由 relay 代管
-                    _vt3 = (book.get("vtext") or book.get("page_text") or "")[:1500]
-                    _b3 = [f"用户此刻在第 {book.get('page') or page} 页" + (f",当前可见内容:{_vt3}" if _vt3 else ",需要页面内容就调 read_page")]
-                    if book.get("sel"):
-                        _b3.append(f"选中了「{str(book['sel'])[:200]}」(他说『这段/我选的』就指它)")
-                    if book.get("ink_strokes"):
-                        _b3.append("本页有他的手写笔迹(问到手写内容先调 see_ink;之前看过的笔迹记忆已作废)")
-                    try:
-                        await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                            "type": "message", "role": "system",
-                            "content": [{"type": "input_text", "text": "(" + ";".join(_b3) + "。状态记录,不要回应本条。)"}]}}, ensure_ascii=False))
-                        sys.stderr.write(f"[rtc-ctl] P3 注入 p{book.get('page')}(vt={len(_vt3)}字)\n")
-                    except Exception:
-                        pass
-                # 104:焚"上上轮及更早"的直喂图(保留最近一轮供追问;历史不再重复携带图 token)
-                _keep = [it for it in _img_items if it[0] >= epoch["n"] - 2]
-                for _ep0, _iid0 in _img_items:
-                    if _ep0 < epoch["n"] - 2:
-                        try:
-                            await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _iid0}))
-                        except Exception:
-                            pass
-                _img_items[:] = _keep
+                # 133 手动放行:这里**只知道"有声音"**,不知道是人还是噪声/回声 —— 什么都不做。
+                # 旧代码在这里 epoch+=1 并消费状态,于是一个噪声假轮就能把正在跑的 see_ink 判成"已过期"
+                # (用户实测"工具被打断"的直接原因),还会白吃掉"刚画过"这个一次性边沿。
+                gate["seg"] += 1
+            elif t == "input_audio_buffer.committed":
+                # VAD 判定一轮结束并落成 item → 登记候选,等转写来验真伪(超时兜底见 _turn_timeout)
+                _iid = ev.get("item_id") or ""
+                if _iid:
+                    gate["pending"][_iid] = time.time()
+                    gate["seg_of"][_iid] = gate["seg"]   # M7:这个 item 属于哪一段
+                    sys.stderr.write(f"[rtc-ctl] ⇢committed seg={gate['seg']} item={_iid[:14]}\n")   # M10
+                    asyncio.create_task(_turn_timeout(_iid))
             elif t == "input_audio_buffer.speech_stopped":
-                if 3 <= fe < 4:   # 127:fe>=4 = 官方自动挡(create_response=True),VAD 判完直接出声,不绕 Pi 一个 RTT;旧前端(fe=3)仍由 relay 代发
-                    try:
-                        await ows.send(json.dumps(_resp_create(user=True)))
-                        sys.stderr.write("[rtc-ctl] P4 create(user)\n")
-                    except Exception:
-                        pass
+                # 133:不再在这里 create —— 放行权归转写验证(见 transcription.completed)。
+                # 但要挂一道防哑网:万一 committed/转写 这条链断了,这段话不能就此石沉大海。
+                asyncio.create_task(_silence_watchdog(gate["seg"]))
             elif t == "response.function_call_arguments.done":
                 if fe < 2:
                     continue   # 版本握手:旧前端自己执行工具,relay 只观察(防双执行)
@@ -2780,13 +2983,22 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 # 133 探针:前端经 data channel 直发的**系统状态消息**(墨迹/选中)relay 看不见发送侧,
                 # 但 OpenAI 会把 item.created 广播给本 call 的所有连接——这里就能确认它到底进没进对话。
                 _it = ev.get("item") or {}
-                if _it.get("role") == "system":
-                    _c0 = (_it.get("content") or [{}])[0].get("text") or ""
-                    sys.stderr.write(f"[rtc-ctl] ⇣sys call={call_id[:12]} 「{_c0[:60]}」\n")
+                _c0 = (_it.get("content") or [{}])[0]
+                sys.stderr.write(f"[rtc-ctl] ⇣item call={call_id[:12]} role={_it.get('role')} type={_it.get('type')} "
+                                 f"「{str(_c0.get('text') or _c0.get('transcript') or '')[:50]}」\n")
             elif t == "response.created":
-                # 133 取证:谁在开火。同一 call 一个用户轮出现两条 created = 多发了 response.create(自动挡之外还有人手发);
-                # 两个 call 各一条 = 前端真的开了两路通话。日志里一眼分得开。
+                # 133:记住**当前活跃 response 的 ID** —— 打断必须定向 cancel(无 ID 的 cancel 会误杀更新的合法回合)。
+                gate["active_resp"] = ((ev.get("response") or {}).get("id") or "") or None
+                gate["inflight"] = False   # B2:在途窗口关闭
                 sys.stderr.write(f"[rtc-ctl] created call={call_id[:12]} resp={(ev.get('response') or {}).get('id', '')[:14]}\n")
+                if gate["kill_next"] and gate["active_resp"]:
+                    # B2:用户在"create 已发、created 未回"的窗口里插了话 —— 现在拿到 id 了,定向掐掉它
+                    gate["kill_next"] = False
+                    try:
+                        await ows.send(json.dumps({"type": "response.cancel", "response_id": gate["active_resp"]}))
+                        await ows.send(json.dumps({"type": "output_audio_buffer.clear"}))
+                    except Exception:
+                        pass
                 # 安全(#284 加固):超支后 fe>=4 前端仍会经自己的 data channel 直发 response.create——
                 # 本 sideband 对同 call_id 发 response.cancel 即可掐掉这一轮生成(输出音频=大头成本)。
                 if book.get("_over"):
@@ -2795,6 +3007,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     except Exception:
                         pass
             elif t == "response.done":
+                gate["active_resp"] = None   # 133:本轮生成结束(含被我们 cancel 掉的)
+                gate["inflight"] = False
                 r0 = ev.get("response") or {}
                 u = r0.get("usage") or {}
                 otd = u.get("output_token_details") or {}
@@ -2823,23 +3037,44 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     _vlog("truncated", page=book.get("page") or page, book=file_rel,
                           mode=_norm_vm(_creds().get("rt_voice_mode")), q=(book.get("last_q") or "")[:120],
                           brief="回复被 2048 保险丝掐断(分析素材:该轮该走 route 却口头念了)")
-                if pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
+                # 133:补发被暂缓的 create。优先级:**用户轮 > 撞车补发 > 工具轮**(用户永远优先)。
+                if gate["want_user"]:      # 打断后等到 done 了 → 现在给用户这一轮生成回答
+                    gate["want_user"] = False
+                    await _do_create(long_tool=bool(gate.pop("want_long", False)), user=True)
+                elif pend["create"]:   # 59:撞车被拒的工具回填 create 在此补发(active response 已结束)
                     pend["create"] = False
                     if pend["ep"] == epoch["n"]:   # 纪元没变才补(用户已开新话=旧工具结果不该再触发回答)
-                        try:
-                            await ows.send(json.dumps(_resp_create()))
-                        except Exception:
-                            pass
+                        await _do_create()
+                elif gate["hold_tool"] and not gate["pending"]:   # 候选已判完且无人接管 → 工具轮可以说话了
+                    _ht = gate["hold_tool"]
+                    gate["hold_tool"] = None
+                    if _ht["ep"] == epoch["n"]:
+                        await _do_create(long_tool=_ht["long"])
             elif t == "conversation.item.input_audio_transcription.completed":
+                # ★ 133:手动放行闸的**判决点**。转写是旁路异步产物,但在手动挡下它正好可以当"这一轮是不是真人"的判据。
+                _iid = ev.get("item_id") or ""
                 _tx0 = (ev.get("transcript") or "").strip()
-                if _tx0:
-                    book["last_q"] = _tx0[:500]   # route 档:生成引擎要用户原话(intent 只是概括)
                 # 指南§7.5/:258:转写是独立账单(usage 在本事件里),不混进 response.done——先记日志供估费(正式入账=#284)
                 u2 = ev.get("usage") or {}
-                # 133:带 call 归属——分辨"一个会话答两次" vs "两个通话各答一次"(每个会话对同一句话只会有 1 条转写)
                 sys.stderr.write(f"[rtc-ctl] 转写 call={call_id[:12]} 「{_tx0[:40]}」 usage={json.dumps(u2)[:80]}\n")
+                if _iid and _iid in gate["pending"]:
+                    gate["pending"].pop(_iid, None)
+                    _ghost, _why = _is_asr_ghost(_tx0)
+                    if _ghost:
+                        await _reject_turn(_iid, _tx0, _why)
+                    else:
+                        await _accept_turn(_iid, _tx0)
+                elif _tx0:
+                    book["last_q"] = _tx0[:500]   # 已被超时放行/不归本闸管 → 只更新原话(route 档要用)
+            elif t == "conversation.item.input_audio_transcription.failed":
+                # 转写失败 → 无从判真伪。宁可多答一次,不可该答不答。
+                _iid = ev.get("item_id") or ""
+                if _iid and _iid in gate["pending"]:
+                    gate["pending"].pop(_iid, None)
+                    await _accept_turn(_iid, "", "(转写失败,按真轮放行)")
             elif t == "error":
                 e0 = ev.get("error") or {}
+                gate["inflight"] = False   # B2:create 被拒也要关掉在途窗口,否则永久卡死没人能再 create
                 if e0.get("code") == "conversation_already_has_active_response":
                     pend["create"], pend["ep"] = True, epoch["n"]   # 59:等 response.done 补发,工具结果不至于永远无人回答
                 sys.stderr.write(f"[rtc-ctl] err: {json.dumps(e0)[:150]}\n")
@@ -2876,6 +3111,13 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 _st0 = j.get("s") or {}
                 _vlog("rtcstats", text=json.dumps(_st0, ensure_ascii=False), page=book.get("page") or page, book=file_rel)
             elif t == "text":
+                # H4:打字 = 用户改用别的方式表达了 → 之前那段还在等转写的音频**作废**。
+                # 不清的话:4s 后 _turn_timeout 会把那半句废话"按真轮放行" → 定向 cancel 掉打字的回答
+                # → 打字的答案被拦腰砍断,然后再答一遍那半句废话。
+                gate["pending"].clear()
+                gate["seg_of"].clear()
+                gate["decided"] = gate["seg"]
+                gate["hold_tool"] = None
                 epoch["n"] += 1   # 打字提问=新话轮(与 speech_started 同语义)
             elif t == "state":
                 book["sel"] = (j.get("sel") or "")[:400]
@@ -2883,6 +3125,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             elif t == "ink":
                 strokes = j.get("strokes") or []
                 sys.stderr.write(f"[rtc-ctl] ⇡ink call={call_id[:12]} p{j.get('page')} 笔画={len(strokes)}\n")   # 133 探针:前端到底推没推墨迹
+                if strokes:
+                    book["_ink_fresh"] = True   # 133 边沿:刚画过 → 下一次 speech_started 注入强措辞(模糊指代默认指笔迹)
                 book["ink_strokes"] = strokes[:60]
                 book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                 book["_dirty3"] = True

@@ -136,6 +136,21 @@
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
       'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
+      // 141:工具调用卡(前置语+工具+结果 合成一张)+ 喂给 AI 的图 + 点击放大灯箱
+      '.asst-msg.asst-tcard{padding:0;overflow:hidden}' +
+      '.asst-tcard>.vc-if-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;' +
+        'padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.03)}' +
+      '.asst-tcard>.vc-if-hd .tc-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.asst-tcard>.tc-lead{padding:8px 12px 0;color:#8fa0c0;font-size:13px;line-height:1.5}' +
+      '.asst-tcard>.tc-bd{padding:8px 12px 10px}' +
+      '.asst-tcard>.tc-bd:empty{padding:0}' +
+      '.tc-vis{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 4px}' +
+      '.tc-vis-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
+        'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block}' +
+      '.tc-vis-cap{font-size:11px;color:#7f92b8;margin-bottom:6px}' +
+      '.tc-lb{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.86);display:flex;' +
+        'align-items:center;justify-content:center;cursor:zoom-out;padding:24px}' +
+      '.tc-lb-img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.6)}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
@@ -575,6 +590,13 @@
     var c = RC.toolChip.create({ tool: p.tool || '', label: p.label || p.tool || '工具' });
     RC.toolChip.progress(c, (p.label || '处理') + '…');
     _chipOf[k] = c; c._k = k; _chipSeq.push(c);
+    // 141(用户设计):前置语 + 工具 + 结果 = 一次工具调用的三个阶段 → 合成**一张卡**。
+    //   把本轮气泡(此刻装着「稍等一下」那句前置语)升格为卡片 host,再让工具卡被它吸收:
+    //   工具不再另起一张,标题栏多一个【流程】按钮,点开才看到 AI 请求→工具→结果。
+    try {
+      var _host = window.__asstVoiceCard && window.__asstVoiceCard((p.label || p.tool || '工具'));
+      if (_host && RC.toolChip.absorb) RC.toolChip.absorb([_host]);
+    } catch (e) {}
     return c;
   }
   window.__vcChipSeqClear = function () { _chipSeq = []; _chipOf = {}; };   // 清空对话 → 待收尾队列一起清
@@ -606,6 +628,7 @@
     if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
     if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
     if (p.sub_steps && p.sub_steps.length) { try { RC.toolChip.addSteps(c, p.sub_steps); } catch (e) {} }   // 137:工具内部子步骤 → 并进这张卡的步骤(不另起卡)
+    if (p.vision && p.vision.length) { try { RC.toolChip.setVision(c, p.vision); } catch (e) {} }   // 141:真正喂给 AI 的图(see_ink 的笔迹合成图等)
     RC.toolChip.setMeta(c, _chipMeta(p));
     if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
     // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
@@ -1726,20 +1749,18 @@
       var fp = (j.page || 0) + ':' + strokes.length;
       if (fp === _rtc._inkFp) return;
       _rtc._inkFp = fp;
-      if (!strokes.length) { _rtc.inkDirty = false; _rtcSys('(用户清空了本页笔迹。状态记录,不要回应本条。)'); return; }   // 127:经 data channel 直连注入
-      // 边沿触发(用户拍板):笔迹"变了"只通知一次,之后继续画多少笔都不再打扰;
-      // AI 重新看过(see_ink/see_page 成功,_rtcTool 里复位)后,下次变化才再通知。
-      // 关键是这一次要把旧记忆作废——上次 see_ink 的结果还在上下文里,不否定它模型就凭旧印象答"没变化"。
+      // 133:笔迹/选中的**系统消息注入已收归 relay**(它在 speech_started 上注入,见 voice_realtime_relay.py)。
+      // 这里曾用 _rtcSys 经 data channel 直发(127 为省一个 Pi 往返),但实测**从没落地过**:
+      // 探针证实墨迹推到了 relay(⇡ink),却没有任何 role=system 的 item 进过对话——_dcSend 在 dc 未 open 时
+      // 是静默丢弃的,失败无声无息,于是 bca7bb7 的措辞等于从没生效。别再往这条哑路上加东西。
+      // 本地状态(_rtc.ink/inkDirty)仍要维护:见 see_ink 成功后的边沿复位。
+      if (!strokes.length) { _rtc.inkDirty = false; return; }
       if (_rtc.inkDirty) return;
-      _rtc.inkDirty = true;   // 127:注入走前端 dc(不再让 relay 代劳绕一圈)
-      _rtcSys('(状态更新:用户的手写笔迹刚刚发生了变化。你之前通过 see_ink 看到的笔迹内容**已过时作废**——你现在并不知道纸面上实际写了什么。这只是状态记录,不要回应本条、不要主动评论。之后他问「我写的/我画的/现在呢/看到了什么/有没有变化」这类问题时,唯一正确的做法是先调 see_ink 重新看再回答;没重新看之前,凭旧印象说"和原来一样/没有变化"是错误行为。**另外——他刚画完:接下来紧接着若问「这是什么/这个/这里/什么意思」这类没指明对象的话,默认就是在问这笔迹,先 see_ink 再答,别当成问正文或选中;但他若点到具体的词/概念/或翻页等操作,就按他说的来,别硬套笔迹。**)');
+      _rtc.inkDirty = true;
     } else if (t === 'state') {
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
-      _rtc.sel = sel;   // 127:注入走前端 dc
-      _rtcSys('(状态更新:' + (sel ? ('用户当前选中了「' + sel.slice(0, 200) + '」(他说「这段/我选的」就指它;' +
-        (sel.length <= 200 ? '**选中内容已完整在此,直接使用**' : '选中较长已截断,需要完整上下文可 read_page 当前页') + ')') :
-        '用户当前没有选中文字') + ';状态记录,不要回应本条)');
+      _rtc.sel = sel;   // 133:同上,注入归 relay(本地只记状态)
     } else if (t === 'text' && j.content) {
       _rtcInterrupt();   // AI 正说话时打字发消息:不先打断会撞 conversation_already_has_active_response,这条 item 进了上下文却永远没 response(官方参考实现 handleSendTextMessage 第一行也是 interrupt)
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
@@ -2770,9 +2791,24 @@
       _rec.oab = true;   // **播完 / 被打断** → 此刻停录(blob 完整,不再靠估算)
       _recStop();
     } else if (t === 'input_audio_buffer.speech_stopped') {
-      // 127(用户拍板):**什么都不做**——官方自动挡(session.turn_detection.create_response=true)。
-      // 旧的手动挡要么前端发 create、要么绕 Pi 的 sideband 发,都是白等一个往返;第一句最明显。
-      // 本轮模态由会话级 output_modalities 决定(四态档,热切时 session.update)。
+      // ★ 133-B1(对抗审查揪出的新单点故障):session 已改回**手动挡**(create_response=false),
+      //   relay 成了 response 的**唯一发起者**。此处若仍"什么都不做",一旦 sideband(ctl WS)断开
+      //   —— voice-rt 重启 / 网络抖动 / ctl 重连 5 次放弃 —— 就**没有任何一方发 create**:
+      //   用户说话,OpenAI 照常收音、照常 commit item,但 AI **一个字都不说**,界面还毫无提示。
+      //   整通通话从此全哑,比原来的"多答"更糟。所以前端必须能顶上。
+      //   互斥是天然的:_rtc.ctl 为真=relay 在仲裁(它会验转写、挡假轮);为假=没人管,前端自己发。
+      if (!_rtc.ctl) { _rtcRespCreate('user'); return; }
+      // ctl 在,但 relay 可能卡死 → 兜底 create。**窗口必须长于 relay 的转写超时(4s)**,
+      // 否则一次慢转写就会被误当成"relay 卡死",前端多发一个 create = 双答复活。
+      // 正常路径下前端根本等不到这个定时器:relay 每次裁决(放行/判假)都会回执 event:'turn',
+      // 前端收到就撤销它 —— 尤其是**判假**:假轮永远不会有 response.created,
+      // 没有这条回执,兜底定时器就会替假轮补发一次 create,整个闸门当场白做。
+      try { clearTimeout(_rtc._createT); } catch (e) {}
+      _rtc._createT = setTimeout(function () {
+        if (!_rtc.on || !_rtc.ctl) return;
+        try { console.warn('[vc] relay 6.5s 无裁决回执,前端兜底 create'); } catch (e) {}
+        _rtcRespCreate('user');
+      }, 6500);
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
       if (tx && (tx.indexOf('学习伴读通话') >= 0 || tx.indexOf('常说:这一页') >= 0)) tx = '';   // 85:转写 prompt 泄漏(静音时模型复读语境提示词)→丢弃
@@ -2797,13 +2833,21 @@
       }
       if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
     } else if (t === 'response.created') {
+      try { clearTimeout(_rtc._createT); _rtc._createT = null; } catch (e) {}   // B1:回答已开始 → 撤销哑火兜底
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
       _rtc.aStart = 0;   // 67:新轮重置音频起点(aEnd 保留——文字轮要等上一音频轮播完才代念)
       try { if (_cap.cur) _cap.cur.classList.remove('vc-cap-route'); } catch (_) {}   // 64:路由字幕样式不残留到普通轮
       _recAbort();   // 82:created 时 turnText 还是上一轮旧值(66c delta 驱动的缝隙)——不再赌预期,等首个音频 delta 定性再开录
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
-      try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
+      // 141:气泡改按**用户轮**断,不再按 response 断 —— 一次工具调用天然是两个 response
+      //   (前置语+function_call / 工具结果+正答),按 response 断必然把它俩切成两条气泡,
+      //   工具卡又夹在中间 = 三块散的。现在同一用户轮内续用同一张卡(见 __asstVoiceCard)。
+      //   轮次边界由 relay 的裁决回执(event:'turn')给出;ctl 断线时退回按 response 断(老行为)。
+      if (_rtc._newTurn || !_rtc.ctl) {
+        _rtc._newTurn = false;
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
+      }
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
@@ -2916,6 +2960,13 @@
       try { _ttsIrqSync(); } catch (e2) {}   // 131:接通后按当前档位/代念开关,自动进入「可打断代念」
             }
           }
+          else if (m0.event === 'turn') {
+            // 133-B1 裁决回执:relay 已对这一轮做出裁决(放行 or 判假)→ 撤销前端的哑火兜底定时器。
+            // 判假尤其重要:假轮不会有 response.created,没这条回执兜底就会替它补发 create(闸门白做)。
+            try { clearTimeout(_rtc._createT); _rtc._createT = null; } catch (e2) {}
+            // 141:放行 = 一个**新的用户轮**开始 → 下一个 response.created 才开新气泡(工具轮不开新的)
+            if ((m0.payload || {}).verdict === 'accept') _rtc._newTurn = true;
+          }
           else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
           else if (m0.event === 'tool_status') {
             var tp = m0.payload || {};
@@ -2968,6 +3019,20 @@
       cw.onerror = function () {};
       _rtc.ctlWs = cw;
     } catch (e) { _rtc.ctl = false; }
+  }
+
+  // 133:过期拨号的自我了断。**关键在最后一句**:媒体是浏览器↔OpenAI 直连,pc.close() 只切断本端,
+  // /rtc-call 已经在 OpenAI 侧建起来的那路 call **依然活着**(继续收音频、继续计费、继续跟新通话抢答)。
+  // 必须调官方 hangup 从服务端真正终止它,否则就是我们观测到的"两路通话都在答"的僵尸 call。
+  function _rtcAbandon(pc, mic, callId) {
+    try { if (pc) pc.close(); } catch (e) {}
+    try { if (mic) mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    if (!callId) return;
+    try {
+      fetch('/api/assistant/rtc-hangup', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        keepalive: true, body: JSON.stringify({ call_id: callId }) }).catch(function () {});
+      console.warn('[vc] 过期拨号已弃用并挂断 call=' + String(callId).slice(0, 14));
+    } catch (e) {}
   }
 
   async function rtcStart(opts) {
@@ -3038,12 +3103,22 @@
       };
       var offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      // 133(配置错位,外部评审揪出):/rtc-call 的后端**忽略** body["session"](安全加固:防篡改型号/token 上限),
+      // 一律用 body 的 file/page **重建**会话——可这里以前根本没发 file/page → 真正建起来的 OpenAI 会话
+      // 书名为空、page=0(日志实证:ASR prompt 里只有通用"学习伴读通话",没有书名)。
+      // /rtc-session 那次辛苦算好的配置等于**被整个丢弃**。必须在这里也带上。
       var cres = await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp, session: sres.session }) })).json();
+        body: JSON.stringify({ sdp: offer.sdp, file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
       if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
-      if (g !== _gen) { pc.close(); mic.getTracks().forEach(function (t) { t.stop(); }); return; }
+      if (g !== _gen) { _rtcAbandon(pc, mic, cres.call_id); return; }
       _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
+      // 133(双通话真凶,外部评审揪出):setRemoteDescription **也是一个 await** —— 这期间用户完全可能
+      // 挂断+重拨(teardown 会 ++_gen)。旧代码在此直接提交 _rtc.pc/_rtc.on,于是**过期的这一轮醒来后
+      // 把自己的 pc 覆盖写进 _rtc**,新通话的 pc 就此失去引用:关不掉、却还活着、还在喂麦克风
+      //  → 同一浏览器两路通话都听同一句话、各答一次(实测 17:48 那次 4 秒内两次拨号即此)。
+      // 每个 await 之后都必须重新验世代;过期就把**自己建的**资源全收掉(含服务端已建的 call)。
+      if (g !== _gen) { _rtcAbandon(pc, mic, _rtc.callId); return; }
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
       _rtc.t0 = Date.now(); _rtc.toolN = 0; _rtc.warned = 0;   // ㊷ §12/§13:会话时长与工具调用护栏计数
       _connecting = false;
@@ -3253,10 +3328,14 @@
   // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
   toggle._connect = function (opts) {
     if (mode !== 's2s') { start(opts); return; }
+    // 133:这个 fetch 以前不受世代管辖 —— 用户在它在途时挂断,迟到的 .then 照样把拨号**复活**,
+    // 建出一路没人管的通话。拨号前记世代,回调里过期就直接丢弃。
+    var g0 = _gen;
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
+      if (g0 !== _gen) { try { console.warn('[vc] voice-config 迟到,拨号已取消'); } catch (e) {} return; }
       if ((((d || {}).cfg) || {}).rt_engine === 'openai_rtc') rtcStart(opts);
       else start(opts);
-    }).catch(function () { start(opts); });
+    }).catch(function () { if (g0 === _gen) start(opts); });
   };
   function toggle(opts) {
     injectCss();

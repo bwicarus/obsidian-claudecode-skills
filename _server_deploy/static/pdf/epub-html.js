@@ -3558,10 +3558,15 @@
     if (document.querySelector('.ep-usec[data-uid]')) s[FREL] = 1;
     return Object.keys(s);
   }
+  var _resRetry = 0;
+  // 133:退避+抖动(同 pdf-tail.js)。SSE 舱壁满时返 503,EventSource 按规范对非 200 不自己重连 →
+  // 全靠下面的定时器;恒定 3s 会变成持续硬刷。
+  function _resBackoff() { return Math.min(30000, 3000 * Math.pow(2, Math.min(_resRetry, 4))) * (0.7 + Math.random() * 0.6); }
   function _readerEventsConnect() {
     if (_readerES || typeof EventSource === 'undefined') return;
     try {
       _readerES = new EventSource('/pdf/api/reader-events');
+      _readerES.addEventListener('open', function () { _resRetry = 0; });
       _readerES.addEventListener('change', function (e) {
         if (document.visibilityState !== 'visible') return;   // 不活跃 → 忽略(后端已更新,回来 visibility 同步)
         var ev; try { ev = JSON.parse(e.data); } catch (x) { return; }
@@ -3573,7 +3578,7 @@
         if (ev && ev.kind === 'userpage-del') { _upageRemoveLive(ev.file, ev.uid); return; }   // 别处删了这张纸 → 本视图当场移除
         if (ev && ev.file && _favUpFiles().indexOf(ev.file) >= 0) _liveSyncSoon();   // 事件跟本阅读器某自建页来源匹配才同步
       });
-      _readerES.onerror = function () { if (_readerES && _readerES.readyState === 2) { _readerES = null; setTimeout(_readerEventsConnect, 3000); } };   // 永久关 → 3s 后重连(瞬断 EventSource 自愈)
+      _readerES.onerror = function () { if (_readerES && _readerES.readyState === 2) { _readerES = null; _resRetry++; setTimeout(_readerEventsConnect, _resBackoff()); } };   // 永久关 → 退避重连
     } catch (e) { _readerES = null; }
   }
   try {

@@ -38,8 +38,11 @@ _SSE_TOTAL = 0
 
 
 def _sse_uid():
+    # ⚠ 本站 session 的用户键是 **user_id**(全站 25 处)。曾误写 session["user"]/["uid"] → 全部取不到 →
+    #   回落 request.remote_addr,而请求都经 nginx 反代 = 恒为 127.0.0.1 → "每用户 4 条"实际退化成
+    #   **全站共 4 条**、总闸 12 成了死代码(压测日志 uid=127.0.0.1 本人=4/4 就是证据)。
     try:
-        return str(session.get("user") or session.get("uid") or request.remote_addr or "?")
+        return str(session.get("user_id") or session.get("username") or request.remote_addr or "?")
     except Exception:
         return "?"
 

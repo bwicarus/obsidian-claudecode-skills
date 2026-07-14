@@ -5054,9 +5054,14 @@ def _build_rtc_session(uid, file_rel, page):
     # 换 gpt-4o-mini-transcribe(官方,中文 WER 低于 whisper,$3/M 音频≈$0.003/分钟,独立账单)
     # + prompt 语境(书名+高频指令词,与豆包 ASR 热词㉓同思路;转写模型每句独立调用,不碰主模型缓存)
     _book_t = (file_rel.rsplit("/", 1)[-1].rsplit(".", 1)[0] if file_rel else "")
+    # 133(实测事故):这里的 prompt 会被转写模型在**静音/噪声轮**里原样复述回来当成"用户说的话"
+    #   (prompt-copy 式幻觉;日志里出现过逐字一致的假转写)。prompt 越长越像句子,可复述的面就越大。
+    #   → 缩成**短的稀有词表**:只保留 ASR 真容易听错、又确实需要偏置的专有词;
+    #     "这一页/下一页/翻到第N页"这类是常见中文,不给提示也认得准,留着只是给幻觉送弹药。
+    #   ⚠ 缩短只能**减少**假转写,不能根治 VAD 假轮 —— 真正的闸是 relay 的手动放行(见 voice_realtime_relay.py)。
+    #   ⚠ 改这里的措辞要同步改 relay 的 _ASR_PROMPT_MIRROR / _ASR_GHOST_ANCHORS。
     _tr = {"model": "gpt-4o-mini-transcribe",
-           "prompt": ("学习伴读通话" + (f",正在读《{_book_t}》" if _book_t else "") +
-                      "。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹")}
+           "prompt": "关键词:Anki、笔迹、振假名、生词、假名"}
     if cfg.get("rt_lang") in ("zh", "ja", "en"):
         _tr["language"] = cfg["rt_lang"]
     # 61:route_to_text 恒挂+恒定说明(不随模式变=不破 instructions 前缀缓存);实际放行由 relay 按
@@ -5140,11 +5145,15 @@ def _build_rtc_session(uid, file_rel, page):
             "audio": {"input": {"noise_reduction": {"type": ("far_field" if cfg.get("rt_noise") == "far" else "near_field")},   # 86:官方降噪双档——far_field=桌面外放场景,环境音/操作声抑制更强
                                 "turn_detection": {"type": "semantic_vad",
                                                    "eagerness": cfg.get("rt_eagerness") or "auto",
-                                                   # 127:回归**官方自动挡**(create_response=True 是官方默认)。
-                                                   # 手动挡(False)时 speech_stopped 要绕一圈 Pi 的 sideband 才发 response.create
-                                                   # (OpenAI→Pi→OpenAI 跨海往返)=每轮多等一个 RTT,第一句尤其明显。
-                                                   # 模态改由会话级 output_modalities 承担(见上),手动挡的唯一好处不再需要。
-                                                   "create_response": True, "interrupt_response": True},
+                                                   # 133(用户实测「一句话被回答很多次」+ 外部评审 P0):**退回手动挡**。
+                                                   # 127 当年为省一个跨海 RTT 开了自动挡,代价是把"这一轮该不该回答"
+                                                   # 整个交给 VAD —— 而 VAD 会把 AI 的回声/环境噪声切成**假轮**,
+                                                   # 于是白答一次;interrupt_response=True 还让假轮**打断**正在跑的工具
+                                                   # (实测 see_ink 被打断标"已过期")。这不是调参能治的,必须夺回放行权。
+                                                   # 现在:VAD 只负责断句 → relay 拿到转写验明真伪 → 真人才 response.create,
+                                                   # 假轮直接删掉 item(见 voice_realtime_relay.py 的 gate)。
+                                                   # 代价=首字多等一次 ASR(有 4s 超时兜底,绝不会该答不答)。
+                                                   "create_response": False, "interrupt_response": False},
                                 "transcription": _tr},
                       "output": {"voice": cfg.get("rt_voice") or "marin",
                                  # 92:语速设置(官方 audio.output.speed 0.25-1.5,session 级,下次通话生效)
@@ -5222,6 +5231,37 @@ def assistant_rtc_call():
         # call_id 在 Location header(官方形态):sideband 注入大 payload(图像)要用它
         cid = (r.headers.get("Location") or "").rstrip("/").rsplit("/", 1)[-1]
         return jsonify({"ok": True, "sdp": r.text, "call_id": cid})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:200]}), 502
+
+
+@bp.route("/rtc-hangup", methods=["POST"])
+def assistant_rtc_hangup():
+    """133:真·挂断一路 WebRTC 通话(官方 POST /v1/realtime/calls/{call_id}/hangup)。
+
+    为什么需要服务端挂断:媒体是浏览器↔OpenAI **直连**,前端 pc.close() 只切断自己这一端;
+    若前端因竞态把某个 pc 的引用弄丢了(见 rc-voicecall.js 的世代漏洞),那路 call **在 OpenAI 侧仍然活着**
+    ——继续收音频、继续计费、继续跟别的 call 抢答。只有这个官方端点能从服务端把它真正终止。
+    用途:① 前端过期拨号自我了断(_rtcAbandon);② 后续的单通话唯一性租约(踢掉被接管的旧通话)。
+    """
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    cid = ((request.get_json(silent=True) or {}).get("call_id") or "").strip()
+    if not cid:
+        return jsonify({"ok": False, "error": "缺 call_id"}), 400
+    try:
+        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+    except Exception:
+        key = ""
+    if not key:
+        return jsonify({"ok": False, "error": "缺 OpenAI 凭证"}), 400
+    import requests as _rq
+    try:
+        r = _rq.post(f"https://api.openai.com/v1/realtime/calls/{cid}/hangup",
+                     headers={"Authorization": f"Bearer {key}"}, timeout=10)
+        ok = r.status_code < 300
+        sys.stderr.write(f"[rtc-hangup] uid={session['user_id']} call={cid[:14]} → {r.status_code}\n")
+        return jsonify({"ok": ok, "status": r.status_code})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:200]}), 502
 
