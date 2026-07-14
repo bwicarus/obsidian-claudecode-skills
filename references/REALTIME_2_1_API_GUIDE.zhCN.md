@@ -911,3 +911,40 @@ worker 的 17s 里大头是**纯开销**:CLI 冷启动 + **强制 ToolSearch 一
 **其余一律直接调。** 另外两个 worker 独有的好处(跟速度无关):
 - 工具结果**不进语音模型的上下文**(直接调时,`read_page` 的整页正文会永久插进 realtime 会话,之后每次 response 都重算一遍 input)
 - 跑在服务端,**页面切后台/关掉照样跑**
+
+
+### 147c:**`ENABLE_TOOL_SEARCH=false`** —— ToolSearch 不是强制的(我一度以为关不掉)
+
+**现象**:Claude Code 把 MCP 工具做成**延迟加载**——`system.init` 事件里 `tools` 有 21 个,但 **MCP 直接可见 0 个**。模型必须先调 `ToolSearch` 拿 schema,白烧 1~2 轮。
+我试了 `--settings` 里塞 `toolSearch` / `deferTools` / `enableToolSearch` / `mcp.deferLoading` —— **全部无效**,于是写进文档说"关不掉"。**那是错的。**
+
+**真开关**(在 CLI 二进制里 grep 出来的):
+```js
+function OBr(){                                    // 决定 tool-search 模式
+  if(W4e()) return "standard";
+  let e = process.env.ENABLE_TOOL_SEARCH;
+  if (t === 100) return "standard";                // 100 → 关
+  if (Wc(process.env.ENABLE_TOOL_SEARCH)) return "standard";   // 假值 → 关
+  return "tst";                                    // 默认 → 开(ToolSearch)
+}
+```
+→ **`ENABLE_TOOL_SEARCH=false`**(或 `100`)⇒ `standard` 模式 = **工具直接给,不用搜**。
+
+**实测同一任务**:
+
+| | 初始工具 | MCP 直接可见 | 轮数 | 耗时 | 调用链 |
+|---|---|---|---|---|---|
+| 默认 | 21 | **0** | 4 | 12.2s | `ToolSearch → ToolSearch → read_page` |
+| **`ENABLE_TOOL_SEARCH=false`** | 43 | **20** | **2** | **6.0s** | `read_page` |
+
+已接进 `voice.py::_task_agent` 的 subprocess env。**目录预注入(`_agent_catalog`)因此退役** —— 工具都直接可见了,再塞一份目录纯属浪费 token。
+
+⚠ 另外禁掉了 `mcp__bwapp__assistant_log_chat` / `assistant_history`:我们 MCP server 的 `instructions` 让**外部编排 agent**每轮把对话写进助手历史 —— worker 是内部执行体,不需要,**实测它真去调了**,白烧 2 轮。
+
+### 为什么**不**迁到 Claude Agent SDK(2026-07-14 查官方文档)
+
+官方 `code.claude.com/docs/en/agent-sdk/overview` 明确:
+> "Unless previously approved, Anthropic does **not** allow third party developers to offer claude.ai login or **rate limits** for their products, **including agents built on the Claude Agent SDK**. Please use the **API key** authentication methods."
+
+→ **Agent SDK 是给 `ANTHROPIC_API_KEY` 按量计费的,不是订阅额度。** 我们 worker 的整个经济基础就是"走订阅额度、免费",换过去等于把免费的活变成按量付费。且 TS 版"bundles a native Claude Code binary",连"省掉冷启动"都不成立。
+→ **维持 subprocess 调 `claude -p`。**

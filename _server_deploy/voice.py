@@ -1007,7 +1007,9 @@ def _task_search(tid, params, ctx, base):
 #   ⚠ **安全(实测踩到)**:`--allowedTools` 只是「**自动批准**」名单,**不是「能力」名单** ——
 #     不在名单里的工具**依然存在**,haiku 真的去调了 Bash 和 Read。必须再用 `--disallowedTools`
 #     把本地工具明确掐掉。加上之后 CLI 会老实回「没有 Bash 工具可用」。
-_AGENT_DENY = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,BashOutput,KillShell"
+_AGENT_DENY = ("Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,BashOutput,KillShell"
+               ",mcp__bwapp__assistant_log_chat,mcp__bwapp__assistant_history")   # 147d:MCP server 的 instructions 让**外部编排 agent**
+#   每轮把对话写进助手历史(assistant_log_chat)——worker 是内部执行体,不需要,实测它真去调了,白烧 2 轮(17s→本可更快)
 _AGENT_TIMEOUT = int(os.environ.get("AGENT_TASK_TIMEOUT", "240"))
 
 
@@ -1088,24 +1090,27 @@ def _task_agent(tid, params, ctx, base):
         "要求:自己决定用哪些工具、按什么顺序;做完后**只输出一句话**(40 字以内)告诉用户结果,"
         "不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
     )
-    cat = _agent_catalog()
-    sysp = ("你能用的工具全在这里(它们是延迟加载的):\n" + cat +
-            "\n\n规则:①第一步就用 ToolSearch 的 select 语法**一次性**精确加载你需要的工具,"
-            "例如 ToolSearch(\"select:mcp__bwapp__read_page,mcp__bwapp__make_anki_card\")"
-            " —— **禁止**关键词搜索、禁止探索、禁止多次 ToolSearch。"
-            "②然后直接调用干活。③做完只输出一句话(40 字内),不要罗列过程。") if cat else ""
-    cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt]
-    if sysp:
-        cmd += ["--append-system-prompt", sysp]   # 147b:目录预注入 → 轮数 4→3、耗时 15.5s→6.7s
-    cmd += ["--mcp-config", _agent_mcp_cfg(),
+    # 147c:**ENABLE_TOOL_SEARCH=false** —— Claude Code 默认把 MCP 工具做成「延迟加载」
+    #   (system.init 里 MCP 直接可见 **0** 个),模型必须先 ToolSearch 才拿得到 schema,白烧 1~2 轮。
+    #   我一度以为关不掉(--settings 塞各种候选键全无效),后来在 CLI 二进制里挖出真开关:
+    #     OBr(): process.env.ENABLE_TOOL_SEARCH 为假值 → 走 "standard" 模式 = **工具直接给,不用搜**
+    #   实测同一任务:默认 4 轮/12.2s(还调了 2 次 ToolSearch) → **2 轮/6.0s,零 ToolSearch**,
+    #   且 system.init 里 MCP 从 0 个变成 **20 个直接可见**。
+    #   ⇒ 目录预注入(_agent_catalog)因此**不再需要**,留着只是白塞 token。
+    sysp = "做完只输出一句话(40 字内)告诉用户结果,不要罗列过程、不要 markdown。做不到就直说做不到和原因。"
+    cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt,
+           "--append-system-prompt", sysp,
+           "--mcp-config", _agent_mcp_cfg(),
            "--allowedTools", "mcp__bwapp",
            "--disallowedTools", _AGENT_DENY,
            "--model", os.environ.get("AGENT_TASK_MODEL", "opus"),
            "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
     steps, answer = [], ""
     try:
+        env = dict(os.environ)
+        env["ENABLE_TOOL_SEARCH"] = "false"   # 147c:关掉工具延迟加载(见上)——轮数减半
         pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
         t0 = time.time()
         for line in pr.stdout:
             if time.time() - t0 > _AGENT_TIMEOUT:
