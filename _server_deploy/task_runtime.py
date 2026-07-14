@@ -97,14 +97,33 @@ def _push_run(run: dict):
 
 
 def _set_blocks(run: dict, blocks: list, kind: str = ""):
-    """把块写进插入页的 sidecar。⚠ 直接改 sidecar 而不是走 HTTP —— 运行时跑在 webapp 进程内。"""
+    """经**格子布局器**排版后写进插入页 sidecar(直接改 sidecar,运行时就跑在 webapp 进程内)。
+
+    ★ 布局器会给每个块补上 at/span/**rect(页归一化 bbox)** —— 纯算术,不需要前端量。
+      rect 与墨迹坐标、与服务端裁图 box 是**同一坐标系**,这是"按填空裁图批改"的根基。
+    ⚠ 溢出会被 layout() 拆成多张纸;当前切片只用第一张(多纸支持见 ADR 待办)。"""
     import pdf_reader as P
+    import paper as PA
+    import fitz
     rel = run["file"]
+    pk = run.get("paper") or ("dictation" if run["kind"] == "dictation" else "note")
+    try:
+        d = fitz.open(str(P._safe_vault_path(rel)))
+        r = d[max(0, int(run.get("page") or 1) - 1)].rect
+        pw, ph = float(r.width), float(r.height)
+        d.close()
+    except Exception:
+        pw, ph = 595.0, 842.0
+    pl = PA.plan(pk, blocks, pw, ph)
+    laid = pl["papers"][0] if pl["papers"] else []
+    if pl["n_pages"] > 1:
+        run["hint"] = (run.get("hint") or "") + f"(内容超出一张纸,只放下了第 1 张;共需 {pl['n_pages']} 张)"
     with _lock:
         items = P._upages_load(rel)
         for it in items:
             if it.get("id") == run.get("upage"):
-                it["blocks"] = blocks
+                it["blocks"] = laid
+                it["paper"] = pl["spec"]      # 前端按这个规格**严格按格子绝对定位**渲染
                 if kind:
                     it["kind"] = kind
                 it["run_id"] = run["rid"]
@@ -121,12 +140,12 @@ def _set_blocks(run: dict, blocks: list, kind: str = ""):
 # ── 听写程序(kind='dictation')────────────────────────────────────────────────
 # 步骤是**显式的、可恢复的**:任何一步都只看 run["step"] + run["state"],不依赖内存。
 def _paper_blocks(words: list, title: str) -> list:
-    """一张听写纸:标题 + N 个填空 + 一个「下一个」按钮 + 一个「写完了」勾选。
-    ⚠ rect(页归一化 0-1)由**前端布局后写回** —— 只有前端知道渲染出来的真实位置,
-      而批改要按 rect 裁图(与墨迹坐标同一坐标系,这是整个方案的根基)。"""
+    """一张听写纸的**元素清单**(A 模式:不带坐标,布局器自己排)。
+    ⚠ rect **不在这里给** —— 由 paper.layout() 从格子(row,col,span)**纯算术算出**。
+      服务端自己就知道每个填空在哪,不需要前端渲染完再量出来写回(那一环又丑又不可靠)。"""
     bs = [{"id": "title", "kind": "text", "text": title, "style": "h1"}]
     for i, _w in enumerate(words):
-        bs.append({"id": f"q{i + 1}", "kind": "blank", "label": f"{i + 1}.", "rect": None})
+        bs.append({"id": f"q{i + 1}", "kind": "blank", "label": f"{i + 1}."})
     bs.append({"id": "btn_next", "kind": "button", "label": "▶ 念下一个", "event": "next"})
     bs.append({"id": "btn_done", "kind": "button", "label": "✓ 写完了,批改", "event": "grade"})
     return bs

@@ -103,14 +103,20 @@ window._favOpenPicker = function () {
     '.up2-content .up2-content-body.empty{color:#9aa5bd;font-style:italic}' +
     '.up2-content .up2-content-body p{margin:0 0 .8em}' +
     // 任务运行时:页面块(references/adr-task-runtime.md)。纸是白底(PDF 真页) → 用深色文字。
-    '.up2-blocks{padding:16px 22px}' +
-    '.up2-b{margin:0 0 10px}' +
-    '.up2-b.up2-h1{font-size:19px;font-weight:700;color:#1e2a44;margin-bottom:14px}' +
-    '.up2-b-blank{display:flex;align-items:flex-end;gap:8px}' +
-    '.up2-b-lab{flex:none;width:26px;color:#5b76b8;font-size:14px;line-height:34px}' +
-    // ★ 手写就写在这个框里。框只是**视觉参考 + bbox 来源**;手写层(ink canvas)在更上层,天然共存。
-    '.up2-b-box{flex:1;height:34px;border-bottom:1.5px solid #b9c6e2;border-radius:2px}' +
-    '.up2-b-button{margin-top:14px}' +
+    // ★ 格子布局(paper.py):块用**服务端算好的归一化 rect** 绝对定位 —— 前端不再自己量。
+    //   容器必须 position:relative(绝对定位的基准);绝不能用自由流式 CSS(会跟服务端算的 bbox 对不上)。
+    '.up2-blocks{position:absolute;inset:0}' +
+    '.up2-b{position:absolute;box-sizing:border-box;display:flex;align-items:center}' +
+    '.up2-b.up2-h1{font-weight:700;color:#1e2a44;font-size:1.25em!important;align-items:flex-end;padding-bottom:4px}' +
+    '.up2-b-blank{align-items:flex-end;gap:6px}' +
+    '.up2-b-lab{flex:none;color:#5b76b8;opacity:.75}' +
+    // 手写就写在这条线上。线只是**视觉参考**;bbox 是算出来的,手写层(ink canvas)在更上层,天然共存。
+    '.up2-b-box{flex:1;align-self:stretch;border-bottom:1.5px solid #c3cee6;margin-bottom:3px}' +
+    '.up2-b-ck{flex:none;width:1em;height:1em;border:1.5px solid #8fa2c8;border-radius:3px;margin-right:6px}' +
+    '.up2-b-lab2{color:#33436a}' +
+    // 纸张底纹:横线(听写/笔记)/ 方格(数学演草)—— 由 paper 预设的 rule 决定
+    '.up2-rule-line{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--lh) - 1px),rgba(120,150,200,.16) calc(var(--lh) - 1px),rgba(120,150,200,.16) var(--lh))}' +
+    '.up2-rule-grid{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--lh) - 1px),rgba(120,150,200,.13) calc(var(--lh) - 1px),rgba(120,150,200,.13) var(--lh)),repeating-linear-gradient(to right,transparent 0,transparent calc(var(--cw) - 1px),rgba(120,150,200,.13) calc(var(--cw) - 1px),rgba(120,150,200,.13) var(--cw))}' +
     // <span role=button>(不是 <button>):memory ios-button-white-block —— Safari 会用原生外观盖掉一切
     '.up2-b-btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 18px;' +
       'border-radius:10px;background:#3b6fd4;color:#fff;font-size:14px;font-weight:600;cursor:pointer;' +
@@ -819,59 +825,54 @@ window._favOpenPicker = function () {
       if (el) el.textContent = txt || '';
     } catch (e) {}
   }
+  // ★ 严格按**格子绝对定位**渲染 —— 服务端用 (row,col,span) 纯算术算出的 rect,
+  //   只有前端也按同一套格子摆,那个 rect 才等于屏幕上的真实位置(批改按它裁图)。
+  //   ⚠ 绝不能用自由流式 CSS:那样服务端算的 bbox 就对不上了。
   function _upRenderBlocks(ov, rec) {
+    var sp = rec.paper || {};
     ov.setAttribute('data-up-run', rec.run_id || '');
-    ov.innerHTML = '<div class="up2-content-hd">📝 ' + RC.esc(rec.title || '任务页') + '</div>' +
-                   '<div class="up2-content-body up2-blocks"></div>' +
-                   '<div class="up2-run-hint"></div>';
+    ov.innerHTML = '<div class="up2-blocks"></div><div class="up2-run-hint"></div>';
     var body = ov.querySelector('.up2-blocks');
+    if (sp.bg) ov.style.background = sp.bg;
+    body.classList.toggle('up2-rule-line', sp.rule === 'line');
+    body.classList.toggle('up2-rule-grid', sp.rule === 'grid');
+    if (sp.line_h) body.style.setProperty('--lh', sp.line_h + 'px');
+    if (sp.char_w) body.style.setProperty('--cw', sp.char_w + 'px');
+
     (rec.blocks || []).forEach(function (b) {
+      if (!b.rect) return;
       var d = document.createElement('div');
       d.className = 'up2-b up2-b-' + (b.kind || 'text');
       d.setAttribute('data-bid', b.id || '');
+      // 位置/尺寸**直接用服务端算好的归一化 rect**(单一真相源;前端不再自己量、不再写回)
+      d.style.cssText = 'position:absolute;left:' + (b.rect[0] * 100) + '%;top:' + (b.rect[1] * 100) + '%;' +
+                        'width:' + ((b.rect[2] - b.rect[0]) * 100) + '%;' +
+                        'height:' + ((b.rect[3] - b.rect[1]) * 100) + '%;' +
+                        'font-size:' + (sp.font || 15) + 'px;';
       if (b.kind === 'text') {
-        d.innerHTML = (window.RC && RC.md) ? RC.md(b.text || '') : RC.esc(b.text || '');
+        d.textContent = b.text || '';
         if (b.style === 'h1') d.classList.add('up2-h1');
       } else if (b.kind === 'blank') {
-        d.innerHTML = '<span class="up2-b-lab">' + RC.esc(b.label || '') + '</span>' +
-                      '<span class="up2-b-box"></span>';   // ← 你手写在这个框里(手写层在更上层,天然共存)
+        d.innerHTML = '<span class="up2-b-lab">' + RC.esc(b.label || '') + '</span><span class="up2-b-box"></span>';
+      } else if (b.kind === 'checkbox') {
+        d.innerHTML = '<span class="up2-b-ck"></span><span class="up2-b-lab2">' + RC.esc(b.label || '') + '</span>';
       } else if (b.kind === 'button') {
-        // 用 <span role=button>:memory ios-button-white-block —— <button> 在 Safari 上会被原生外观盖掉
-        var sp = document.createElement('span');
-        sp.className = 'up2-b-btn'; sp.setAttribute('role', 'button'); sp.setAttribute('tabindex', '0');
-        sp.textContent = b.label || '按钮';
-        sp.addEventListener('click', function (ev) { ev.stopPropagation(); _upRunEvent(rec, b.event || 'next'); });
-        d.appendChild(sp);
+        // <span role=button>(不是 <button>):memory ios-button-white-block —— Safari 会用原生外观盖掉一切
+        var sb = document.createElement('span');
+        sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
+        sb.textContent = b.label || '按钮';
+        // ⚠ 冒泡阶段 stopPropagation(memory overlay-gate-use-bubble-not-capture:
+        //   捕获阶段拦会**吞掉内部按钮事件** —— 插入页保存键失灵就是这么来的)
+        sb.addEventListener('click', function (ev) { ev.stopPropagation(); _upRunEvent(rec, b.event || 'next'); });
+        d.appendChild(sb);
       } else { return; }
       body.appendChild(d);
     });
-    _upSyncRects(ov, rec);
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);
   }
-  // ★ rect 写回:批改要按 blank 的 bbox 裁图(_figure_crop_png),而 **只有前端知道渲染后的真实位置**。
-  //   坐标必须是**页归一化 0-1** —— 与墨迹(RCInk.norm)、与服务端裁图 box 同一坐标系。这是整个方案的根基。
-  function _upSyncRects(ov, rec) {
-    var pw = ov.closest ? (ov.closest('.page-wrap') || ov.closest('.pdf-upage')) : null;
-    if (!pw) return;
-    var pr = pw.getBoundingClientRect();
-    if (!pr.width || !pr.height) return;
-    var changed = false;
-    (rec.blocks || []).forEach(function (b) {
-      if (b.kind !== 'blank') return;
-      var el = ov.querySelector('[data-bid="' + b.id + '"] .up2-b-box');
-      if (!el) return;
-      var r = el.getBoundingClientRect();
-      var nb = [(r.left - pr.left) / pr.width, (r.top - pr.top) / pr.height,
-                (r.right - pr.left) / pr.width, (r.bottom - pr.top) / pr.height].map(function (v) {
-        return Math.max(0, Math.min(1, Math.round(v * 1e4) / 1e4));
-      });
-      var old = b.rect || [];
-      if (old.length !== 4 || Math.abs(old[0] - nb[0]) > 2e-3 || Math.abs(old[1] - nb[1]) > 2e-3 ||
-          Math.abs(old[2] - nb[2]) > 2e-3 || Math.abs(old[3] - nb[3]) > 2e-3) { b.rect = nb; changed = true; }
-    });
-    if (!changed) return;
-    RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: rec.blocks }).catch(function () {});   // ⚠ UP_TEXT_API=存边车;UP_API 是**真改 PDF 的 job**,打错会误触发改页
-  }
+  // 141:_upSyncRects(前端量 bbox 再 PATCH 写回)已**删除**。
+  //   有了格子模型之后,bbox 由服务端从 (row,col,span) **纯算术**算出(paper.py),
+  //   前端只要**严格按同一套格子绝对定位**渲染就必然对齐 —— 量和写回这一环又丑又不可靠,没了。
   // ③ 回前台对齐状态机(SSE 不可见时丢事件 → 不能只靠推送)
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible') return;
