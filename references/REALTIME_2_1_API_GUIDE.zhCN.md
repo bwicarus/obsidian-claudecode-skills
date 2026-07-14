@@ -625,3 +625,34 @@ MCP 不等于“免费工具调用”：模型读取工具定义、生成调用�
 - 近期 **84 次工具调用 / 220 个 response** → **约 38% 的 response 是"工具回来后再说一次"** 产生的
 - `_OA_RATE`(relay 里的单价表)已经是 mini 官方价,**没问题**;⚠ 别跟同文件里 `_log_usage` 的豆包**人民币**表(10/5/80/300)搞混
 - `usage.output_token_details` 里有 `reasoning_tokens`(23~25/次)—— 2.1 带 reasoning,effort 可配,也是成本项
+
+## 异步函数调用(C):**已经开着,且关不掉**
+
+官方(开发者博客 / GA 公告)只写了两句,但都是硬结论:
+> "This feature is **automatically enabled for new models—no changes necessary on your end**."
+> "available natively in `gpt-realtime`, so **developers do not need to update their code**."
+
+- **没有任何 API 字段/开关**(session 级、response 级都没有)。我们跑的 `gpt-realtime-2.1-mini` 是 GA 代 → **异步函数调用本来就在生效**。
+- 语义:function_call 发出后客户端**不必立刻**回 `function_call_output`,会话不冻结;用户问结果时模型会自己说 **"I'm still waiting on that"**(这句 placeholder 是**模型内置调过的**,不是 prompt 工程)。
+- ⚠ **不省钱**:工具结果回来后仍要 `function_call_output` + **显式 `response.create`**(`conversation.item.create` 本身**从不**触发生成)= 又一次 response = 整段会话 input 全量重算。异步只解决"卡住",不解决"重算"。
+- ⚠ 官方**没有**:pending 超时上限 / 多个 function_call 并存 / 回填顺序错乱 的任何说明,也**没有 cookbook 示例**。
+- ⚠ **MCP 必须配 GA 模型**(官方唯一明确的兼容性警告):老 beta 模型 "lacks async function calling, pending MCP tool calls without an output **may not be treated well by the model**"。→ 直接约束 task #279 的模型选型。
+- 🎁 副产品:**豆包 S2S 上手搓的「我去查一下」垫话编排,在 OpenAI 这边是原生的** —— 迁过去可以砍掉那一整块自研代码。
+
+### 我们的工具耗时实测(`tool_calls` 表,84 次)
+
+| 档 | 占比 | 说明 |
+|---|---|---|
+| <1s | **61.9%** | `read_page` 0.1s / `goto_page` / `toc` / `make_anki` 等,秒回 |
+| 1–3s | 1.2% | |
+| 3–8s | 34.5% | 几乎全是 `web_search`(29 次,均 3.9s)+ `search_image` 6.9s |
+| >8s | 2.4% | 含一次 `read_page` **卡 164.9s**(挂起,非正常耗时) |
+
+→ **异步的边际价值对我们很低**:六成工具秒回,唯一慢的 `web_search` 4 秒有垫话完全能忍;长任务我们早就用 `task_id` + 后台 job + 进度卡片(#205/#206/#260)自己实现了同等效果。
+
+### 但它暴露了一个真 bug:工具调用没有超时(2026-07-14 已修)
+
+`rc-voicecall.js::_rtcTool` 的 `fetch('/api/assistant/voice-tool')` **原来没有 AbortController** → 工具不回 = `function_call_output` 不回填 = `response.create` 不发 = **整通对话死在那里,AI 一句话都不说**(账本实录:一次 `read_page` 卡 164.9s)。
+
+修法:`AbortController` + **45s** 超时(同步工具实测最慢 6.9s,长任务后端本来就走 task_id 派发 → 45s 只可能兜住真挂起)。超时抛错 → 落进原有的 catch → 照常回填「工具超时」的 `function_call_output` + `response.create`,**让 AI 开口说"没查到,换个方式"而不是哑掉**;工具卡标 error(按设计留在页面上可点)。
+同文件里「系统代提交」那条 fire-and-forget 的 fetch 也补了 60s 超时(它挂了不会掐死对话,但会留一张**永远转圈**的工具卡)。

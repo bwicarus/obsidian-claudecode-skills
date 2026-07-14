@@ -2596,9 +2596,24 @@
         if (name === 'see_ink' || name === 'see_page') {   // ㉟c:看图类恒附视口截图(EPUB 主路/PDF 兜底,后端按需取用)
           try { var shot = await _captureView(); if (shot) ctx.view_image = shot; } catch (e) {}
         }
-        var r = await fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx, rtc_call_id: _rtc.callId }) });
-        var d = await r.json();
+        // 142:**工具超时护栏**。原来这个 fetch 没有 AbortController —— 工具不回 = function_call_output 不回填
+        //   = response.create 不发 = 整通对话死在这儿,AI 一句话都不说(账本实录:一次 read_page 卡了 164.9s)。
+        //   同步工具实测最慢 6.9s(search_image),长任务后端本来就走 task_id 派发;45s 只可能兜住真挂起。
+        //   超时后照常走下面的 catch → 回填「工具超时」的 function_call_output + response.create,让 AI 开口而不是哑掉。
+        var _ac = new AbortController();
+        var _to = setTimeout(function () { try { _ac.abort(); } catch (e) {} }, 45000);
+        var r, d;
+        try {
+          r = await fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            signal: _ac.signal,
+            body: JSON.stringify({ cmd: JSON.stringify({ tool: name, args: args }), ctx: ctx, rtc_call_id: _rtc.callId }) });
+          d = await r.json();
+        } catch (_e) {
+          clearTimeout(_to);
+          if (_e && _e.name === 'AbortError') throw new Error('工具超时(45秒无响应),请改用别的方式或稍后再试');
+          throw _e;
+        }
+        clearTimeout(_to);
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         var res = d.result || {};
@@ -2787,7 +2802,10 @@
           var seed = ('(语音对话中用户请求做' + (isNote ? '笔记' : '卡片') + ')\n用户说:' + (_lastU || '(语音请求)') +
                       '\nAI 口头总结的要点:' + curAText).slice(0, 1600);
           onToolStatus({ status: 'running', label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)' });
+          var _ac2 = new AbortController();   // 142:这条是 fire-and-forget(不回填 function_call_output),挂了不会掐死对话,
+          setTimeout(function () { try { _ac2.abort(); } catch (e) {} }, 60000);   //   但会留一张**永远转圈**的工具卡 → 同样封超时
           fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            signal: _ac2.signal,
             body: JSON.stringify({ cmd: JSON.stringify({ tool: tool, args: { text: seed } }),
                                    ctx: { file_rel: _rtc.ctxFile, page: _rtc.ctxPage, recent_tools: (_rtc.recentTools || []).slice(-4) } }) })
             .then(function (r) { return r.json(); })

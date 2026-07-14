@@ -1,0 +1,54 @@
+<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>UI 自检</title>
+<style>
+body{margin:0;background:#0b0f1a;color:#e6edf3;font:15px -apple-system,system-ui,sans-serif;padding:16px}
+h3{margin:16px 0 8px;font-size:15px;color:#9db0d4}
+#out{white-space:pre-wrap;word-break:break-all;background:#141b2c;padding:12px;border-radius:12px;font-size:14px;line-height:1.7}
+.ok{color:#39d98a}.bad{color:#ff6961;font-weight:700}
+</style>
+<h3>① 这四个圆在你屏幕上是什么样?</h3>
+<div id="host"></div>
+<h3>② 你设备上的实测值(截图发我这一段)</h3>
+<div id="out">跑起来中…</div>
+<script src="/static/pdf/rc-core.js"></script>
+<script src="/static/pdf/rc-toolchip.js"></script>
+<script src="/static/pdf/rc-voicecall.js"></script>
+<script>
+(function () {
+  function sup(prop, val) { try { return CSS.supports(prop, val) ? '✅' : '❌'; } catch (e) { return '?'; } }
+  var L = [];
+  L.push('color-mix          ' + sup('background', 'color-mix(in srgb, #7b9cff 24%, rgba(0,0,0,.32))'));
+  L.push('color-mix+var      ' + sup('background', 'color-mix(in srgb, var(--x) 24%, rgba(0,0,0,.32))'));
+  L.push('appearance:none    ' + sup('-webkit-appearance', 'none'));
+  L.push('backdrop-filter    ' + sup('-webkit-backdrop-filter', 'blur(10px)'));
+  var host = document.getElementById('host');
+  try {
+    var c = RC.toolChip.create({ tool: 'web_search', label: '搜天气', mount: host, floating: false });
+    RC.toolChip.done(c, { summary: '东京 26°C' });
+    setTimeout(function () { try { host.querySelector('.vc-flowb').click(); } catch (e) {} setTimeout(dump, 400); }, 500);
+  } catch (e) { L.push('建卡失败 ' + e); dump(); }
+  function one(name, sel) {
+    var e = document.querySelector(sel); if (!e) { L.push(name + ' 不存在'); return; }
+    var s = getComputedStyle(e), g = e.querySelector('svg');
+    L.push(name + '  底色=' + s.backgroundColor + '  色=' + s.color + '  appearance=' + (s.webkitAppearance || s.appearance));
+    L.push('     ' + (g ? 'svg ' + getComputedStyle(g).width + '×' + getComputedStyle(g).height
+            + ' fill=' + getComputedStyle(g).fill + ' stroke=' + getComputedStyle(g).stroke
+          : '内部无 svg → ' + e.innerHTML.slice(0, 30)));
+  }
+  function dump() {
+    L.push('');
+    L.push('CSS 注入=' + (document.getElementById('rc-vc-css') ? '✅ ' + document.getElementById('rc-vc-css').textContent.length + '字符' : '❌ 没有!'));
+    L.push('按钮重置=' + (document.getElementById('rc-btn-reset') ? '✅' : '❌ 没到(缓存旧文件)'));
+    var card = document.querySelector('.vc-card');
+    L.push('--vc-tc=' + (card ? getComputedStyle(card).getPropertyValue('--vc-tc') : '?'));
+    L.push('');
+    one('数据流键', '.vc-flowb');
+    one('流程图标', '.vc-fn-i');
+    one('播放键  ', '.vc-fp-tts');
+    L.push('');
+    L.push(navigator.userAgent);
+    document.getElementById('out').textContent = L.join('\n');
+  }
+})();
+</script>
