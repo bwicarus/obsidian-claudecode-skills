@@ -593,8 +593,14 @@
     RC.toolChip.progress(c, (p.label || '处理') + '…');
     _chipOf[k] = c; c._k = k; _chipSeq.push(c);
     // 141(轮次容器):工具运行中 → 容器里显示一条**临时**指示(不是 part、不落库)。
-    //   不再造独立卡片、不再 absorb 认领 —— 那套竞态正是三个卡片 bug 的根源(见 ADR)。
-    try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.busy(window.__asstVoiceTid(), p.label || p.tool || '工具'); } catch (e) {}
+    //   ⚠ 必须同时 silence 掉 chip 自己的 DOM —— 我上一版只拆了 absorb,chip 照样在 thread 里画自己那张卡,
+    //   于是变成「chip 卡 + 容器卡」两块(用户实测图1)。显示权归容器,chip 只留对象供后台任务追踪。
+    try {
+      if (RC.turnCard && window.__asstVoiceTid) {
+        RC.turnCard.busy(window.__asstVoiceTid(), p.label || p.tool || '工具');
+        RC.toolChip.silence(c);
+      }
+    } catch (e) {}
     return c;
   }
   window.__vcChipSeqClear = function () { _chipSeq = []; _chipOf = {}; };   // 清空对话 → 待收尾队列一起清
@@ -1243,11 +1249,16 @@
     // 141:容器在 → 上面已注入 card part,_hosts 为空,absorb 自然 no-op(它对空数组直接 return)。
     //   只有容器不可用(极端兜底)才会走到旧的"结果卡吸收工具卡"路径。
     try { if (_hosts.length && window.RC && RC.toolChip && RC.toolChip.absorb) RC.toolChip.absorb(_hosts); } catch (e) {}
-    // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
-    try {   // ⚠EPUB 自有历史(epub-convo)结构不同,card 落库暂只走 PDF 主历史
-      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-        body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
-    } catch (e) {}
+    // 141(轮次容器):卡已经作为 card part 进了本轮容器,轮次结束时随 parts 一起落库。
+    //   ⚠ **绝不能再单独落一条 card** —— 那样历史里同一张卡存两份(parts 一份 + m.card 一份),
+    //   回放时容器渲一遍、旧路径又渲一遍 = **重复内容**(用户实测图3)。
+    //   只有容器不可用(极端兜底)才回落旧的独立落库。
+    if (!_tcOk) {
+      try {
+        fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+          body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
+      } catch (e) {}
+    }
   }
   function renderImgs(imgs) {   // 88:图片结果升格为结构化卡(kind:'images')走 renderInfo 全管线——对话流+浮层同款、落库、回放、✕/单选/溯源
     if (!imgs || !imgs.length) return;

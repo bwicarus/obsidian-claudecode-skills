@@ -824,6 +824,16 @@
   }
 
   RC.toolChip = {
+    // 141(轮次容器):撤掉 chip 自己的视图/浮层卡 —— 显示已由 RC.turnCard 接管(busy 指示 + tool part)。
+    //   chip 对象保留:后台任务追踪(_chipTrackTask)还要用它。absorbed=[] 让后续 progress/done 不再造新视图。
+    silence: function (chip) {
+      var c = chip && chip.nested ? chip.parent : chip;
+      if (!c || c.absorbed) return;
+      c.absorbed = [];
+      c.views.slice().forEach(function (v) { try { v.el.remove(); } catch (e) {} });
+      if (c.card) { try { VC().close(c.card); } catch (e) {} }
+      c.views = [];
+    },
     absorb: absorb, retype: retype,
     styleOf: function (t) { return { color: TYPE_C[t] || TYPE_C.text, icon: SVG[t] || SVG.text }; },   // 结果卡复用同一套色/图标
     create: create, progress: progress, done: done, fail: fail, remove: remove, clearAll: clearAll, track: track,

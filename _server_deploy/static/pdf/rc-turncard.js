@@ -59,12 +59,19 @@
       if (s0 && label) s0.textContent = label;
       return t.hd;
     }
+    // ⚠ 样式必须先在:rc-toolchip 的 mountFlow 就是这么做的(它注释写着「样式必须在,否则裸 <button> = 白块」),
+    //   我上一版漏了这一步 → 【流程】按钮退化成 Safari 原生 push-button(白方块,用户实测)。
+    try { if (RC.voiceCard && RC.voiceCard.css) RC.voiceCard.css(); } catch (e) {}
     t.el.classList.add('vc-if');   // 复用既有结果卡外观(见 _infoCardEl)
     var hd = document.createElement('div'); hd.className = 'vc-if-hd';
     var sp = document.createElement('span'); sp.textContent = label || '工具调用';
     hd.appendChild(sp);
     var b = document.createElement('button');
     b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
+    // 再兜一层内联:即便样式表因任何原因没到位,也绝不退化成原生白按钮(memory: ios-button-white-block)
+    b.style.cssText = 'flex:none;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.12);' +
+      'border:none;color:#cbd6ea;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
+      'padding:0;margin-left:4px;line-height:0;-webkit-appearance:none;appearance:none;font-size:0';
     b.innerHTML = ICON_FLOW;
     b.addEventListener('click', function (ev) {
       ev.stopPropagation();
