@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 import struct
+import os
 import sys
 import time
 import urllib.parse
@@ -948,7 +949,7 @@ def _uni_req_frame(payload: dict) -> bytes:
     return bytes([0x11, 0x10, 0x10, 0x00]) + struct.pack(">I", len(b)) + b
 
 
-def _tts_channel(bws, key: str, speaker: str):
+def _tts_channel(bws, key: str, speaker: str, span: str = ""):
     """朗读 TTS 通道(v3-⑱ 双引擎,按音色自动选,speak 时现读凭证可热切):
     - `*_uranus_bigtts`(2.0)→ **单向流式 + seed-tts-2.0**:每句一个请求但同 section_id(服务端保持
       对话式韵律);`context_texts` 载入用户配置的**朗读语气指令**(自然语言,实测生效且不被念出);
@@ -957,8 +958,10 @@ def _tts_channel(bws, key: str, speaker: str):
     打断(cancel)= close 连接+作废世代:立即哑火。返回 {"speak","done","cancel"},音频裸转发 bws。"""
     tts = {"ws": None, "sid": None, "reader": None, "gen": 0}
     uni = {"q": None, "worker": None, "section": None, "gen": 0, "ws": None}
+    _tts_span = [span]   # 146:记账要 span
 
     async def _uni_synth_one(text: str, g: int, mood: str = ""):
+        _ledger_volc_tts(_tts_span[0], len(text or ""), "seed-tts-2.0")   # 146:按字符入账(3元/万字)
         try:   # 字幕帧(v3-⑳):worker 串行合成,帧紧贴本句音频首块 → 前端把句子绑到该块的播放时刻,字幕与声音同步
             await bws.send(json.dumps({"event": "tts_seg", "payload": {"text": text}}, ensure_ascii=False))
         except Exception:
@@ -1147,7 +1150,8 @@ async def handle_tts_only(bws):
         await bws.send(json.dumps({"event": -1, "payload": {"error": "缺凭证:~/.config/doubao-voice.json"}}, ensure_ascii=False))
         await bws.close()
         return
-    ch = _tts_channel(bws, cred["api_key"], cred.get("tts_speaker", TTS_SPEAKER))
+    _tspan = uuid.uuid4().hex[:12]   # 146:纯朗读连接也要记账(它没有对话 span,自建一个)
+    ch = _tts_channel(bws, cred["api_key"], cred.get("tts_speaker", TTS_SPEAKER), span=_tspan)
     try:
         await bws.send(json.dumps({"event": "tts_ready"}, ensure_ascii=False))
         async for msg in bws:
@@ -1202,6 +1206,20 @@ _OA_RATE = {"in_text": 0.60, "cached_text": 0.06, "out_text": 2.40,
             "in_audio": 10.0, "cached_audio": 0.30, "out_audio": 20.0, "in_image": 0.80}
 
 
+# 146:**火山侧单价**(官方计费页 https://www.volcengine.com/docs/6561/1359370,2026-07-14 核对)。
+#   之前账本只记 OpenAI,火山的耳朵(ASR)和嘴(TTS)一分没记 → "我们花了多少钱"根本答不上来。
+#   ⚠ 人民币!换算 USD 用 RMB_USD。买了资源包就改 env(后付费→资源包能再省 30%)。
+RMB_USD = float(os.environ.get("RMB_USD", "7.2"))
+VOLC_ASR_RMB_H = {                      # 元/小时(按时长,精确到毫秒)
+    "v2": float(os.environ.get("VOLC_ASR2_RMB_H", "1.0")),    # 豆包流式语音识别模型2.0(在用)
+    "v1": float(os.environ.get("VOLC_ASR1_RMB_H", "4.5")),    # 大模型流式语音识别(贵 4.5×)
+}
+VOLC_TTS_RMB_10K = {                    # 元/万字符(1 汉字 = 1 字符)
+    "seed-tts-2.0": float(os.environ.get("VOLC_TTS20_RMB_10K", "3.0")),   # 豆包语音合成模型2.0(uranus 音色)
+    "volc.service_type.10029": float(os.environ.get("VOLC_TTS10_RMB_10K", "5.0")),  # 大模型语音合成(moon 1.0 音色)
+}
+
+
 LEDGER_DB = Path("/home/bwicarus/claude/state/voice-ledger.db")
 
 
@@ -1235,6 +1253,24 @@ def _ledger_usage(engine, span, resp_id, model="", in_tok=0, out_tok=0, cached_t
         c.close()
     except Exception as ex:
         sys.stderr.write(f"[ledger] {ex}\n")
+
+
+def _ledger_volc_asr(span: str, seconds: float, v2: bool = True):
+    """146:火山 ASR 按时长入账。relay 每帧固定 100ms(3200B@16k/16bit/mono),数帧即得秒数。"""
+    if seconds <= 0:
+        return
+    rmb = VOLC_ASR_RMB_H["v2" if v2 else "v1"] * seconds / 3600.0
+    _ledger_usage("volc_asr", span, f"asr_{span}_{int(time.time()*1000)}", model=("asr-2.0" if v2 else "asr-bigmodel"),
+                  audio_in_s=round(seconds, 2), est_usd=round(rmb / RMB_USD, 6), kind="asr")
+
+
+def _ledger_volc_tts(span: str, chars: int, rid: str):
+    """146:火山 TTS 按字符入账(1 汉字=1 字符;标点/空格也算)。"""
+    if chars <= 0:
+        return
+    rmb = VOLC_TTS_RMB_10K.get(rid, 5.0) * chars / 10000.0
+    _ledger_usage("volc_tts", span, f"tts_{span}_{int(time.time()*1000000)}", model=rid,
+                  text_items=chars, est_usd=round(rmb / RMB_USD, 6), kind="tts")
 
 
 def _ledger_tool(engine, span, call_id, tool, ok, took_s=0.0, cached=False):
@@ -2229,6 +2265,7 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
         await bws.close()
         return
     key = cred["api_key"]
+    _span = uuid.uuid4().hex[:12]   # 146:本连接的 voice_span_id(handle_agent 原来没有;ASR/TTS 记账要它)
     speaker = cred.get("tts_speaker", TTS_SPEAKER)
     asr_headers = {"X-Api-Key": key, "X-Api-Resource-Id": (SAUC_RID_V2 if cred.get("asr_v2") else SAUC_RID),
                    "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
@@ -2261,7 +2298,7 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
         sys.stderr.write(f"[voice-rt asr] 语境注入 hot={len(dict.fromkeys(hot))} ctx={len(corpus.get('context_data') or [])} v2={bool(cred.get('asr_v2'))}\n")
     except Exception as ex:
         sys.stderr.write(f"[voice-rt asr-ctx] {str(ex)[:120]}\n")   # 拉不到语境照常裸连,识别退回无语境
-    ch = _tts_channel(bws, key, speaker)   # 朗读(可选):speak/speak_done/cancel 由 up() 转发
+    ch = _tts_channel(bws, key, speaker, span=_span)   # 朗读(可选):speak/speak_done/cancel 由 up() 转发。146:带 span 记账
     try:
         async with websockets.connect(SAUC_WSS, additional_headers=asr_headers,
                                       max_size=10 * 1024 * 1024, open_timeout=15) as aws:
@@ -2271,6 +2308,7 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
             seq = 1
             buf = bytearray()
 
+            _asr_n = [0]      # 146:ASR 帧计数(list 免 nonlocal 声明)
             async def up():   # 浏览器 → (音频)豆包ASR / (speak)TTS 队列
                 nonlocal seq
                 async for msg in bws:
@@ -2280,6 +2318,10 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
                             seq += 1
                             await aws.send(_sauc_frame(0b0010, 0b0001, seq, bytes(buf[:3200])))
                             del buf[:3200]
+                            _asr_n[0] += 1                       # 146:计量——每帧恒 100ms
+                            if _asr_n[0] >= 300:                 #   每 30s 落一笔(不必等会话结束,断连也不丢)
+                                _ledger_volc_asr(_span, _asr_n[0] * 0.1, v2=bool(cred.get("asr_v2")))
+                                _asr_n[0] = 0
                         continue
                     try:
                         j = json.loads(msg)
