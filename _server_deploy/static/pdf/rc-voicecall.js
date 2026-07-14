@@ -1129,7 +1129,7 @@
       var _cst = {};
       try { _cst = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_ck) : {}; } catch (e) {}
       var c = _cardPush(_infoHtml(card), label, true, false, card.cid,
-                        { dot: true, form: 'full', noAuto: true, type: _cst.color, icon: _cst.icon });
+                        { dot: true, form: 'full', type: _cst.color, icon: _cst.icon });
       if (c) {
         c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
         // 结果卡不是"文字回复" → 标题栏只留【数据流】按钮(▶/✕ 去掉,与侧栏一致)
@@ -2093,7 +2093,7 @@
   }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
     opts = opts || {};
-    // opts(工具指示器 v2):{tool,type,dot:true 起手圆态,noAuto:自动收起成圆标记而不是关掉}
+    // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
     if (!opts.dot && (!text || (!isHtml && !text.trim()))) return null;
     if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
@@ -2113,7 +2113,9 @@
       '<div class="vc-card-sum"></div><div class="vc-card-bd"></div>';
     if (opts.dot) {   // 圆形标记(坐落在方块左上角)= 形态控制按钮:单击 圆 → 长条 → 方块 → 圆
       var dot = document.createElement('button');
-      dot.type = 'button'; dot.className = 'vc-card-dot busy';
+      // ⚠ 别在这里写死 busy(那是"正在干活"的呼吸动画):工具卡由状态机(paintSum)开关它,
+      //   结果卡(天气/图/视频)根本没有状态机 → 写死就永远在闪(用户实测"点成小方块后一直闪烁")。
+      dot.type = 'button'; dot.className = 'vc-card-dot' + (opts.busy ? ' busy' : '');
       dot.innerHTML = opts.icon || '';
       dot.title = '点击切换形态(圆 / 长条 / 方块)';
       dot.addEventListener('click', function (ev) { ev.stopPropagation(); _cycleForm(el); });
@@ -2145,7 +2147,7 @@
 
     el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
     el.addEventListener('pointerdown', function () {
-      if (c.t) { clearTimeout(c.t); c.t = null; }   // 碰了=在读:取消自动消失
+      _armAuto(c, el);   // 碰了=在读:倒计时**重新开始**(旧版是永久掐掉 → 点一下就再也不消失了)
       _cards.topZ = (_cards.topZ || 500) + 1; el.style.zIndex = String(_cards.topZ);   // 69:点击=置顶
     });
     // 72:双击=收起/展开 —— **三态卡(opts.dot)已退役这个手势**:单击就是三态循环,双击会连触发两次、
@@ -2238,17 +2240,24 @@
       _cardClose(victim); _plain.splice(_plain.indexOf(victim), 1);
     }
     requestAnimationFrame(_cardLayout);
-    if (_cardHideOn()) {
-      c.t = setTimeout(function () {
-        if (el.classList.contains('vc-picked')) return;
-        if (opts.noAuto) { if (el.dataset.touched !== '1') _cardForm(el, 'dot'); }   // 工具卡:收起成圆标记(不销毁,单击可再展开)
-        else _cardClose(c);
-      }, _cardSecs() * 1000);
-    }
+    _armAuto(c, el);
     c.cid = _cid;
     _pinReg(el, _cid);   // 登记进 cid 注册表:选中态处处同步
     return c;
   }
+  // 138(用户设计):倒计时到点 → **卡片完全消失**(不是收起成小方块)。
+  //   唯一豁免 = **长按选中**(紫边):选中的留下,没选中的到点全清。
+  //   碰它(点/拖/切形态)= 你在看它 → 倒计时**重新开始**;松开不管它,照样会走。
+  function _armAuto(c, el) {
+    try { clearTimeout(c.t); } catch (e) {}
+    c.t = null;
+    if (!_cardHideOn()) return;
+    c.t = setTimeout(function () {
+      if (el.classList.contains('vc-picked')) return;   // 选中 = 唯一豁免
+      _cardClose(c);
+    }, _cardSecs() * 1000);
+  }
+
   // ── 形态循环(唯一入口,用户设计)──
   //   顺序恒为 小方块 → 长条 → 方块 → 小方块。⚠ 标记和头部必须**同方向**,否则:长条态标记是隐藏的、
   //   只有头部可点,若头部反着走就成了 长条↔小方块 死循环,永远到不了方块(用户实测)。

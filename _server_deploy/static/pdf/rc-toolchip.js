@@ -23,7 +23,7 @@
   if (window.RC && RC.toolChip) return;
   window.RC = window.RC || {};
 
-  var AUTO_COLLAPSE = 20000;   // 出结果 20s 后自动收起成圆标记(用户选)
+  // 自动消失归卡片本体统一管(rc-voicecall::_armAuto):倒计时到点=**完全消失**,长按选中是唯一豁免。
 
   // ── 类型 → 主色 + 图标(SF 线条,currentColor)──
   var TYPE_C = {
@@ -371,7 +371,7 @@
     if (vc && o.floating !== false) {   // 浮层:出生 = 透明玻璃圆标记
       var c = vc.push('', chip.label, true, true, chip.cid, {
         tool: chip.tool, type: TYPE_C[type] || TYPE_C.text, icon: iconOf(chip.tool, type),
-        dot: true, noAuto: true
+        dot: true, busy: true
       });
       if (c) {
         chip.card = c;
