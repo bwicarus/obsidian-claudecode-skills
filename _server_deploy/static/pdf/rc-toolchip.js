@@ -353,6 +353,66 @@
     });
   }
 
+  // 148(用户设计):**这个工具用哪个模型** —— 就在工具卡长按面板里直接改。
+  //   写的是跟「总设置」**同一份** action-prefs(服务端 state/assistant-action-prefs.json),
+  //   所以两处改的是同一个东西,不会打架;总设置里也照样能改。
+  //   只有**真会调 LLM** 的工具才显示这段(后端 _TOOL_ACTION 决定,没有就不返回 model)。
+  function mountModel(host, before, tool, md) {
+    if (!md || !md.action) return;
+    var box = document.createElement('div'); box.className = 'vc-md';
+    box.innerHTML =
+      '<div class="vc-md-t">模型 <em>· 这个工具用哪个 AI 去干活</em></div>' +
+      '<div class="vc-md-r">' +
+        '<select class="vc-md-b"></select><select class="vc-md-v"></select><select class="vc-md-d"></select>' +
+      '</div>' +
+      '<div class="vc-md-st"></div>';
+    host.insertBefore(box, before);
+    var selB = box.querySelector('.vc-md-b'), selV = box.querySelector('.vc-md-v'),
+        selD = box.querySelector('.vc-md-d'), st = box.querySelector('.vc-md-st');
+    var dflt = md.default || {};
+    function cur() {   // 有预设用预设,没有就是出厂默认
+      var p = md.pref || {};
+      return { backend: p.backend || dflt.backend, variant: p.variant || dflt.variant, depth: p.depth || dflt.depth };
+    }
+    function fill(sel, list, val) {
+      sel.innerHTML = '';
+      (list || []).forEach(function (x) {
+        var o = document.createElement('option'); o.value = x; o.textContent = x;
+        if (x === val) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+    function paint() {
+      var c = cur();
+      fill(selB, md.backends, c.backend);
+      fill(selV, (md.variants || {})[c.backend] || [], c.variant);
+      fill(selD, (md.depths || {})[c.backend] || [], c.depth);
+      var isDflt = !(md.pref && md.pref.backend);
+      st.textContent = isDflt
+        ? ('出厂默认:' + dflt.backend + ' / ' + dflt.variant + ' / ' + dflt.depth)
+        : ('已自定义(出厂是 ' + dflt.backend + ' / ' + dflt.variant + ' / ' + dflt.depth + ')');
+    }
+    paint();
+    function save() {
+      fetch('/api/assistant/tool-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: tool, op: 'model', backend: selB.value, variant: selV.value, depth: selD.value }) })
+        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (!r || !r.ok) { toast((r && r.error) || '保存失败'); return; }
+          md.pref = r.pref || {};
+          paint();
+          toast('已改成 ' + selB.value + ' / ' + selV.value);
+        });
+    }
+    selB.addEventListener('change', function () {   // 换后端 → 型号/深度目录跟着换,先落到该后端第一项
+      var vs = (md.variants || {})[selB.value] || [], ds = (md.depths || {})[selB.value] || [];
+      md.pref = { backend: selB.value, variant: vs[0] || '', depth: ds[0] || '' };
+      paint(); save();
+    });
+    selV.addEventListener('change', save);
+    selD.addEventListener('change', save);
+  }
+
   function mountPrompts(host, tool) {
     var wrap = document.createElement('div');
     wrap.className = 'vc-tp';
@@ -364,6 +424,7 @@
         var bodyEl = wrap.querySelector('.vc-tp-body');
         if (!d || !d.ok || !(d.fields || []).length) { wrap.remove(); return; }
         bodyEl.innerHTML = '';
+        mountModel(host, wrap, tool, d.model);     // 148:模型选择=独立一段,排在最前(最常改的放最上面)
         mountFiller(host, wrap, tool, d.filler);   // 143:垫话策略=独立一段,插在「提示词」这段之前
         var tas = {};
         d.fields.forEach(function (f) {

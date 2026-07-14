@@ -1409,7 +1409,11 @@ def _t_do_task(args, ctx):
     instr = (args.get("instruction") or args.get("task") or args.get("text") or "").strip()
     if len(instr) < 3:
         return {"error": "要做什么?说清楚点"}
-    return _bg_task("agent", {"instruction": instr}, ctx)
+    # 148:后端/型号/思考深度走**统一的 per-action 预设**(设置面板「agent」那一行,跟其它工具一套 UI),
+    #   不再写死 env。默认 codex/gpt-5.6-luna/low(白嫖 ChatGPT 额度);codex 失败 worker 会自动降级 claude。
+    r = _resolve("agent", str(ctx.get("uid") or ""))
+    return _bg_task("agent", {"instruction": instr, "backend": r["backend"],
+                              "model": r["variant"], "effort": r["depth"]}, ctx)
 
 
 def _card_extra(ctx):
@@ -3552,11 +3556,16 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
     "deep":         {"backend": "claude", "variant": "opus",              "depth": "high"},   # 语音通话 deep_think 虚拟工具用
+    # 148:do_task 后台 agent worker(无头 CLI + 我们的 MCP)。默认 **codex**:走 ChatGPT 订阅额度,
+    #   与 Claude 额度完全独立=白捡一路,把 Claude 额度整个省给主力(阅读器助手/语音)。
+    #   实测同一多步任务中位:claude/opus 7.4s、codex/luna+priority 11.0s,**成功率都 100%**;
+    #   worker 只接「≥4步/探索性/长耗时」的活,多等 3 秒换一整条额度,划算。codex 失败自动降级 claude。
+    "agent":        {"backend": "codex",  "variant": "gpt-5.6-luna",      "depth": "low"},
     "img_norm":     {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 77:配图关键词规范化(可自定义型号)
     "web_search":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:联网搜索结构卡(grounding,深度无效恒不思考)
     "route_text":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:路由详答文字引擎(SSE 流式)
@@ -4741,6 +4750,40 @@ def _tool_desc_rtc(uid: str, tool: str, base: str, cap: int) -> str:
     return (d + " " + _FILLER_TXT[_filler_mode(uid, tool)])[: cap + 90]
 
 
+# 148(用户设计):工具卡长按面板里也能改**这个工具用哪个模型**。工具 → AI 预设 action 的映射
+#   (只列**真的会调 LLM** 的工具;没列的工具面板不显示模型段)。跟总设置面板共用同一套 action-prefs 存储,
+#   两边改的是同一份数据 —— 在哪改都一样,不会打架。
+_TOOL_ACTION = {
+    "do_task":      "agent",        # 后台 agent worker(无头 CLI + MCP)
+    "web_search":   "web_search",
+    "search_image": "img_norm",     # 配图关键词规范化
+    "search_video": "pick_video",
+    "see_page":     "vision",
+    "see_figure":   "vision",
+    "see_ink":      "vision",
+    "translate":    "translate",
+    "summarize_section": "summarize",
+    "make_note":    "summarize",
+    "make_anki":    "summarize",
+    "lookup_word":  "dict",
+}
+
+
+def _tool_model_block(uid: str, tool: str):
+    """给工具卡面板的「模型」段:该工具对应 action 的当前预设 + 出厂默认 + 可选目录。无对应 action → None。"""
+    action = _TOOL_ACTION.get(tool)
+    if not action:
+        return None
+    return {"action": action,
+            "pref": _ap_get(uid, action) or {},
+            "default": _AP_DEFAULTS[action],
+            "backends": ["claude", "codex", "gemini"],
+            "variants": {"claude": list(_CLAUDE_VARIANTS),
+                         "codex": list(_CODEX_VARIANTS),
+                         "gemini": list(_GEMINI_VARIANTS)},
+            "depths": {"claude": list(_EFFORTS), "codex": list(_EFFORTS), "gemini": ["none", "think"]}}
+
+
 @bp.route("/tool-prompt", methods=["GET", "POST"])
 def assistant_tool_prompt():
     """140(用户设计):工具的**说明**和**内部 prompt** —— 凡是会进 AI 并实际产生影响的,都能在这里改。
@@ -4784,11 +4827,23 @@ def assistant_tool_prompt():
             "filler": {"mode": cur.get("filler") or "",           # '' = 跟全局
                        "resolved": _filler_mode(uid, tool),       # 最终生效:always / never
                        "median_s": _tool_median_s(tool),          # -1 = 账本里没数据
-                       "global": g}})
+                       "global": g},
+            "model": _tool_model_block(uid, tool)})               # 148:该工具用哪个模型(跟总设置同一份数据)
 
     body = request.get_json(silent=True) or {}
     tool = (body.get("tool") or "").strip()
     op0 = (body.get("op") or "").strip()
+
+    if op0 == "model":   # 148:工具卡面板里改这个工具用的模型 —— 写的是**总设置同一份** action-prefs
+        action = _TOOL_ACTION.get(tool)
+        if not action:
+            return jsonify({"ok": False, "error": f"这个工具不调 AI 模型:{tool}"}), 400
+        bk = (body.get("backend") or "").strip()
+        va = (body.get("variant") or "").strip()
+        dp = (body.get("depth") or "").strip()
+        saved = _ap_set(uid, action, bk, va, dp)   # 三者非法 → 清除,回出厂默认
+        return jsonify({"ok": True, "action": action, "pref": saved or {},
+                        "default": _AP_DEFAULTS[action]})
 
     if op0 == "filler_global":   # 143:总设置——默认策略 + 自动的耗时阈值
         st = _tp_load()

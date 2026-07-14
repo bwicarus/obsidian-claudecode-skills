@@ -242,6 +242,13 @@
       '.vc-dtl-r .bd pre{white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:11px}' +
       // 140(用户):工具的说明 / 内部 prompt —— 凡是会进 AI 并实际产生影响的,都能在这里直接改
       // 143:调用前垫话策略(详情窗里的分段控件)
+      // 148:工具卡面板的「模型」段(跟 .vc-fl 同一套配色/间距,视觉上是同族)
+      '.vc-md{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
+      '.vc-md-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
+      '.vc-md-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-md-r{display:flex;gap:6px}' +
+      '.vc-md-r select{flex:1;min-width:0;padding:7px 8px;font-size:12px;font-weight:600;cursor:pointer;\n        border-radius:10px;border:0.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);\n        color:#c6d2e8;-webkit-appearance:none;appearance:none;text-overflow:ellipsis}' +
+      '.vc-md-st{font-size:10.5px;color:#7f92b8;margin-top:5px}' +
       '.vc-fl{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-fl-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
       '.vc-fl-t em{font-style:normal;color:#7f92b8;font-weight:400}' +

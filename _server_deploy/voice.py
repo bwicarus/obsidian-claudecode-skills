@@ -1076,7 +1076,7 @@ def _agent_catalog() -> str:
 _AGENT_BACKEND = os.environ.get("AGENT_TASK_BACKEND", "codex").strip().lower()   # codex | claude
 
 
-def _agent_codex_cmd(prompt: str) -> list:
+def _agent_codex_cmd(prompt: str, model: str = "", effort: str = "") -> list:
     """148:codex exec 当 MCP worker —— **走 ChatGPT 订阅额度,与 Claude 额度完全独立**(白捡一路)。
 
     ⚠ **唯一的关键是 `default_tools_approval_mode="approve"`**(2026-07-14 单变量隔离实测):
@@ -1098,8 +1098,12 @@ def _agent_codex_cmd(prompt: str) -> list:
            'startup_timeout_sec=20,tool_timeout_sec=60}' % url)
     return [os.environ.get("APP_CODEX", "codex"), "exec", "--json",
             "--skip-git-repo-check", "--color", "never", "-s", "read-only",
-            "-c", 'model="%s"' % os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna"),
-            "-c", 'model_reasoning_effort="%s"' % os.environ.get("AGENT_CODEX_EFFORT", "low"),
+            "-c", 'model="%s"' % (model or os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna")),
+            "-c", 'model_reasoning_effort="%s"' % (effort or os.environ.get("AGENT_CODEX_EFFORT", "low")),
+            # fast 档:service_tier=priority = 官方的 "Fast"(1.5x speed, increased usage)。
+            #   codex 必须**显式**开(实测 12.3s→11.0s);claude 那边 fast 是**默认开着**的
+            #   (反证:CLAUDE_CODE_DISABLE_FAST_MODE=1 会从 7.7s 慢到 9.1s),所以 claude 侧不用配。
+            "-c", 'service_tier="%s"' % os.environ.get("AGENT_CODEX_TIER", "priority"),
             "-c", mcp,
             "-c", "features.shell_tool=false",   # 安全底线:只能调 MCP
             prompt]
@@ -1109,24 +1113,31 @@ class _AgentTimeout(Exception):
     pass
 
 
-def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list) -> str:
+def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
+                   model: str = "", effort: str = "") -> str:
     """跑一个无头 CLI(claude | codex),流式解析事件驱动工具卡进度条。返回最终答案('' = 没给结果)。
 
-    两边的事件格式不同,但语义一一对应:
+    backend/model/effort 由 assistant.py 的 **per-action 预设**(设置面板「agent」行)传进来;
+    传空则回落 env → 出厂默认。两边的事件格式不同,但语义一一对应:
       claude  `--output-format stream-json`:{type:assistant, message.content[].type=tool_use} / {type:result}
       codex   `--json`:{type:item.started, item.type=mcp_tool_call} / {type:item.completed, item.type=agent_message}
     """
     codex = backend == "codex"
     if codex:
-        cmd = _agent_codex_cmd(prompt + "\n\n" + sysp)   # codex exec 没有 --append-system-prompt,并进 prompt
+        # codex exec 没有 --append-system-prompt,并进 prompt
+        cmd = _agent_codex_cmd(prompt + "\n\n" + sysp, model=model, effort=effort)
     else:
         cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt,
                "--append-system-prompt", sysp,
                "--mcp-config", _agent_mcp_cfg(),
                "--allowedTools", "mcp__bwapp",
                "--disallowedTools", _AGENT_DENY,
-               "--model", os.environ.get("AGENT_TASK_MODEL", "opus"),
+               "--model", (model if model in ("haiku", "sonnet", "opus")
+                           else os.environ.get("AGENT_TASK_MODEL", "opus")),
                "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
+        # claude 的 fast mode 是**默认开着**的(实测 DISABLE=1 会从 7.7s 慢到 9.1s),不用显式配。
+        if effort in ("low", "medium", "high", "xhigh", "max"):
+            cmd += ["--effort", effort]
     env = dict(os.environ)
     if codex:
         # codex 用 bearer_token_env_var 取 MCP token(不落盘,比 claude 的 --mcp-config 更干净)
@@ -1199,23 +1210,27 @@ def _task_agent(tid, params, ctx, base):
     #   且 system.init 里 MCP 从 0 个变成 **20 个直接可见**。
     #   ⇒ 目录预注入(_agent_catalog)因此**不再需要**,留着只是白塞 token。
     sysp = "做完只输出一句话(40 字内)告诉用户结果,不要罗列过程、不要 markdown。做不到就直说做不到和原因。"
+    # 148:后端/型号/深度来自 assistant.py 的 per-action 预设(设置面板「agent」行);没传就回落 env/默认
+    backend = (params.get("backend") or _AGENT_BACKEND).strip().lower()
+    model = (params.get("model") or "").strip()
+    effort = (params.get("effort") or "").strip()
     steps, answer = [], ""
     try:
-        answer = _agent_run_cli(_AGENT_BACKEND, prompt, sysp, tid, steps)
+        answer = _agent_run_cli(backend, prompt, sysp, tid, steps, model=model, effort=effort)
     except _AgentTimeout:
         _vtask_set(tid, status="error", error="任务超时")   # 超时不降级:再来一轮又是 240s
         return
     except Exception as e:
-        if _AGENT_BACKEND != "codex":
+        if backend != "codex":
             _vtask_set(tid, status="error", error=str(e)[:140])
             return
         sys.stderr.write(f"[agent] codex 异常({e}),降级 claude\n")   # 进程起不来/崩了 → 往下走降级
     # 148:白嫖后端没给结果(或压根没起来)→ 降级 claude 保成功率(用户排序:成功率 > 速度)
-    if not answer and _AGENT_BACKEND == "codex":
+    if not answer and backend == "codex":
         steps.clear()
         _vtask_set(tid, step="换个助手重试…")
         try:
-            answer = _agent_run_cli("claude", prompt, sysp, tid, steps)
+            answer = _agent_run_cli("claude", prompt, sysp, tid, steps)   # 降级用 claude 默认档
         except _AgentTimeout:
             _vtask_set(tid, status="error", error="任务超时")
             return
