@@ -229,6 +229,15 @@
         'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin-left:4px;line-height:0;' +
         '-webkit-appearance:none;appearance:none;font-size:0}' +
       '.vc-flowb svg{width:13px;height:13px;display:block;stroke:currentColor;fill:none}' +
+      // ★ 141(白块真凶):rc-assistant 有一条 `.asst-a img,.asst-a svg{background:#fff;padding:10px;border-radius:8px}`
+      //   —— 那是给**助手回答里的内容图片/公式 SVG** 加白底的(深色图看得清)。
+      //   而轮次容器复用了 .asst-a → 它里面**所有 SVG 都被涂成白底**,包括【流程】按钮的图标
+      //   = 20px 白圆角块塞满 22px 的圆 = 用户看到的"白方块"。
+      //   (toolchip 自己的卡是 .vc-card、不带 .asst-a,所以它的按钮一直正常 —— 用户"之前渲染正常"的观察是对的。)
+      //   ⚠ 跟 Safari 无关:Chromium 里同样是白的,我先前只验了按钮本身的 computed style、没验它里面的 svg。
+      //   修:UI 图标不是"内容图片"。用更高优先级(0,2,1 > 0,1,1)把它们从那条白底规则里摘出来。
+      '.asst-a .vc-flowb svg{width:13px;height:13px;background:none;padding:0;margin:0;border-radius:0;max-width:none;display:block}' +
+      '.asst-a .vc-if-hd svg,.asst-a [role="button"] svg,.asst-a button svg{background:none;padding:0;margin:0;border-radius:0;max-width:none;height:auto}' +
       '.vc-flowb:active{transform:scale(.86)}' +
       '.vc-flowb.on{background:#7b6cff;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +

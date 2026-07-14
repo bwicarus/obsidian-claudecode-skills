@@ -827,13 +827,12 @@
     //   ⚠ 首行 VC().css() 不可省:历史回放时通话 UI 可能还没建过 → 样式没注入 → 裸 <button> = 白块。
     flowBtn: function (onToggle) {
       try { VC() && VC().css && VC().css(); } catch (e) {}
-      // ⚠ 用 <span> 而**不是** <button>(memory: ios-button-white-block)。
-      //   实测(playwright 经 nginx 打真页面):headless Chromium 下 `<button class="vc-flowb">` 渲染**完全正常**
-      //   —— bg rgba(255,255,255,.12) / 22px / 圆角50% / appearance:none / SVG 在,CSS 规则也确在 document 里。
-      //   但用户的 Safari 上它就是个白方块 = **Safari 顽固保留原生 push-button 外观**,
-      //   而 headless Chromium **测不出 iOS/Safari 渲染**(memory 原话)。
-      //   span 上根本不存在原生按钮外观 → 结构性杜绝,不跟 UA 样式较劲。
-      //   ⚠ 别改回 <button>:Chromium 上"看起来没问题"不能作为证据。
+      // 用 <span role="button">(而非 <button>):顺带免疫 UA 原生按钮外观。
+      // ⚠ **更正**:我一度把"白方块"归咎于 Safari 原生 push-button —— **那是误判**。
+      //   真凶是 rc-assistant 的 `.asst-a img,.asst-a svg{background:#fff;padding:10px}`(给回答里的
+      //   内容图片加白底),而轮次容器复用了 .asst-a → 按钮里的**图标 SVG 被涂成白底**。
+      //   已在 rc-voicecall 的 injectCss 里用更高优先级把 UI 图标摘出去。Chromium 也能复现,与 Safari 无关。
+      //   教训:验渲染问题要一路验到**最里层的子元素**,只看容器的 computed style 会看漏。
       var b = document.createElement('span');
       b.className = 'vc-flowb';
       b.setAttribute('role', 'button');
