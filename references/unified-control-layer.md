@@ -393,3 +393,35 @@ relay 发的 `tool_status`:
 - **看门狗**:社区实测 `.stopped` 偶发大延迟甚至不来 → `response.done` 后按「估算播完 + 20s」兜底强停,免得录音器一直转。
 
 Sources: [community.openai.com — output_audio_buffer.stopped 未文档化](https://community.openai.com/t/why-is-the-realtime-server-event-output-audio-buffer-stopped-not-documented/1132028) / [.stopped 延迟报告](https://community.openai.com/t/big-delays-receiving-output-audio-buffer-stopped-event-since-apr-18th/1379823)
+
+## 踩坑:「按钮渲染成白色方块」的真正根因(iOS Safari 原生按钮外观)
+
+**症状**(反复出现、每次以为修好了又冒出来):卡片上新加的按钮(数据流 ▸、播放 ▶、详情窗的保存/默认…)在 iPad/iPhone 上显示成一个**白色圆角方块**,自定义 `background` / 图标全看不见。
+
+**过去的误判**:以为是 `injectCss()` 没被调到 → 裸 `<button>` 无样式。于是一处处补 `RC.voiceCard.css()`。治标,因为**每加一个新按钮就复发**。
+
+**真根因**:`<button>` 在 **Safari(尤其 iOS)默认 `-webkit-appearance: push-button`** —— 浏览器会画一层**原生浅色圆角块**盖在你的 `background` 上。**桌面 Chromium 不画**,所以 headless Playwright 永远复现不出来(这是它一直没被抓到的原因)。
+
+**根治**(2026-07-14):最低优先级的全局重置,新按钮自动免疫,任何 class 规则都压得过它,零回归:
+
+```css
+button{-webkit-appearance:none;appearance:none}
+```
+
+落三处(缺一不可,覆盖所有加载路径):
+- `static/pdf/pdf-styles.css`(PDF 阅读器)
+- `static/pdf/epub-styles.css`(EPUB 阅读器,并进已有的 `button,[role=button],…{touch-action:manipulation}` 那条旁边)
+- `static/pdf/rc-core.js`(共享层地基,在 `window.RC` 建立时 inject `#rc-btn-reset`;覆盖没引上面两个样式表的页面,如 HTML 阅读器 / 收藏夹)
+
+**修之前的实况**:审计整页 `getComputedStyle(btn).webkitAppearance !== 'none'` → **38 个有底色的按钮类**中招(`vc-card-x` / `vc-card-p` / `vc-fp-tts` / `ink-fab` / `asst-send` / `ruby-toggle` / …)。修完 PDF 115 个 + EPUB 144 个按钮**全部 `none`**,抽查底色/尺寸/圆角不变。
+
+**验证方法**(以后加按钮照做):
+
+```js
+document.querySelectorAll('button').forEach(b => {
+  const s = getComputedStyle(b);
+  if ((s.webkitAppearance || s.appearance) !== 'none') console.warn('iOS 会变白块:', b.className);
+});
+```
+
+⚠ **headless Chromium 测不出 iOS 的按钮外观问题** —— 想真复现要用 WebKit 引擎(`playwright install webkit`)或真机。

@@ -5,6 +5,8 @@
   *{box-sizing:border-box}
   /* iOS tap 可靠性:所有按钮/可点元素去掉双击缩放歧义 + 300ms 延迟(根治弹层/抽屉/设置里按钮偶发点了没反应) */
   button,[role=button],.ep-fb-btn,select,input[type=checkbox]{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  /* 【iOS 根治】默认 -webkit-appearance:push-button 会画原生浅色块盖住自定义底色(=「白色方块」);最低优先级重置,任何 class 规则都压得过 */
+  button{-webkit-appearance:none;appearance:none}
   html,body{margin:0;height:100%;overflow:hidden;background:#0a0e1a;color:#e6edf3;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-text-size-adjust:100%}
   body{display:flex;flex-direction:column}   /* 照搬 PDF:竖向 flex 列(顶栏 + 滚动区),开抽屉用 padding-right 挤,顶栏永远可点 */

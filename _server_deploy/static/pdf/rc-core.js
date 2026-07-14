@@ -6,6 +6,15 @@
  */
 (function () {
   if (window.RC) return;
+  // 【iOS 根治】button 的原生外观(push-button)会画一层浅色圆角块盖住自定义 background → 用户看到的「白色方块」。
+  // 桌面 Chromium 不画 ⇒ headless 测不出。这里在共享层地基上兜底一次(最低优先级,零回归),覆盖没有引 pdf/epub-styles 的页面。
+  try {
+    if (!document.getElementById('rc-btn-reset')) {
+      var _bs = document.createElement('style'); _bs.id = 'rc-btn-reset';
+      _bs.textContent = 'button{-webkit-appearance:none;appearance:none}';
+      (document.head || document.documentElement).insertBefore(_bs, (document.head || document.documentElement).firstChild);
+    }
+  } catch (e) {}
   var RC = window.RC = {
     _adapter: null,
     // 各 reader 在自己脚本末尾 RC.use(adapter) 注册整套适配器方法

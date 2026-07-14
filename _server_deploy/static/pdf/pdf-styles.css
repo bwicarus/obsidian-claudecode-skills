@@ -2,6 +2,10 @@
    ⚠ 纯 CSS 无 Jinja;改这里 → 部署到 /var/www/html/static/pdf/ 生效。*/
 
 *{box-sizing:border-box}
+/* 【iOS 根治】<button> 在 Safari 默认 -webkit-appearance:push-button —— 会画一层原生浅色圆角块盖住自定义 background,
+   看上去就是「白色方块」。桌面 Chromium 不画,所以 headless 永远复现不出。全局最低优先级重置一次,
+   以后任何新按钮自动免疫(任何 class 规则都能压过它,零回归)。2026-07-14 */
+button{-webkit-appearance:none;appearance:none}
 html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}
 /* 用 dvh 避开 iOS Safari 100vh 包含 toolbar 高度让 header 挤出可视区的 bug */
 #app{display:flex;flex-direction:column;height:100vh;height:100dvh}
