@@ -2039,6 +2039,34 @@
       scrollDown(); return true;
     } catch (e) { return false; }
   };
+  // 141:容器内容一变就同步落库(防抖)。见 rc-turncard 的注释:展示型工具之后不再有 response,
+  //   只靠 response.done 落库会把 tool/card 永远漏在服务器之外。
+  var _psT = null;
+  function _syncParts(tid) {
+    if (!tid) return;
+    clearTimeout(_psT);
+    _psT = setTimeout(function () {
+      try {
+        var ps = RC.turnCard.partsOf(tid);
+        if (!ps || !ps.length) return;
+        var txt = ps.filter(function (p) { return p.kind === 'text'; })
+                    .map(function (p) { return p.text; }).join('\n\n');
+        var ctx = {};
+        try { ctx = (RC.adapter && RC.adapter().getContext && RC.adapter().getContext()) || {}; } catch (e) {}
+        // upsert_only:记录还不存在就**什么都不做**(见后端注释:抢在 response.done 前面建记录
+        //   会把用户的提问挤掉)。没落上就 2.5s 后再试一次 —— 那时 response.done 的记录必已就位。
+        fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+          body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1,
+            file: ctx.file_rel || ctx.file || '', page: ctx.page || 0 }) })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.upserted === false && !_psRetry[tid]) { _psRetry[tid] = 1; setTimeout(function () { _syncParts(tid); }, 2500); } })
+          .catch(function () {});
+      } catch (e) {}
+    }, 900);
+  }
+  var _psRetry = {};
+  try { if (window.RC && RC.turnCard) RC.turnCard.onChange = _syncParts; } catch (e) {}
+
   // 141:当前轮容器 id 的**唯一出口**(rc-voicecall 的工具/结果卡靠它把 part 注进同一个容器)
   window.__asstVoiceTid = function () {
     if (!_vTid) _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);

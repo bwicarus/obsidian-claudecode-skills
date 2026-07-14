@@ -5516,6 +5516,11 @@ def assistant_log_external():
                                    {"parts": b.get("parts") if isinstance(b.get("parts"), list) else None,
                                     "clip": re.sub(r"[^A-Za-z0-9_-]", "", str(b.get("clip") or ""))[:40] or None}):
         return jsonify({"ok": True, "n": 0, "upserted": True})
+    # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
+    #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
+    #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
+    if b.get("upsert_only"):
+        return jsonify({"ok": True, "n": 0, "upserted": False})
     if _tid:
         meta["turn_id"] = _tid
     n = 0

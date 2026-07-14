@@ -184,6 +184,10 @@
     t.parts.push(part);
     var el = renderPart(t, part);
     if (part.kind === 'tool' && !t.flow.hidden) _paintFlow(t);   // 面板开着 → 实时补画
+    // ★ 容器一有新内容就通知落库。**不能只在 response.done 落库**:展示型工具(天气/搜索/配图)
+    //   跑完后 relay 设了 no_create —— **不会再有下一个 response**,于是 tool/card 这两个 part
+    //   永远等不到落库时机 → 刷新后卡片消失(用户实测)。容器是内容的唯一来源,由它自己触发。
+    try { if (RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
     return el;
   }
 
