@@ -66,12 +66,22 @@
     var hd = document.createElement('div'); hd.className = 'vc-if-hd';
     var sp = document.createElement('span'); sp.textContent = label || '工具调用';
     hd.appendChild(sp);
-    var b = document.createElement('button');
-    b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
-    // 再兜一层内联:即便样式表因任何原因没到位,也绝不退化成原生白按钮(memory: ios-button-white-block)
+    // ⚠ 用 <span> 而**不是** <button>:实测这里的 <button> 在 Safari 上顽固地保留原生 push-button 外观
+    //   (白圆块),即便 .vc-flowb 的 CSS 和内联的 -webkit-appearance:none 都到位了也压不住
+    //   (memory: ios-button-white-block —— 白方块=Safari 原生按钮外观)。
+    //   span 上**根本不存在**原生按钮外观 → 结构性杜绝,不依赖任何 CSS 能不能加载。
+    //   可访问性用 role/tabindex/键盘事件补齐,行为与 <button> 等价。
+    var b = document.createElement('span');
+    b.className = 'vc-flowb';
+    b.setAttribute('role', 'button');
+    b.setAttribute('tabindex', '0');
+    b.title = '看这个结果是怎么来的(工具流程)';
     b.style.cssText = 'flex:none;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.12);' +
       'border:none;color:#cbd6ea;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
-      'padding:0;margin-left:4px;line-height:0;-webkit-appearance:none;appearance:none;font-size:0';
+      'padding:0;margin-left:4px;line-height:0;font-size:0;box-sizing:border-box';
+    b.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); b.click(); }
+    });
     b.innerHTML = ICON_FLOW;
     b.addEventListener('click', function (ev) {
       ev.stopPropagation();
@@ -85,7 +95,8 @@
     return hd;
   }
 
-  var ICON_FLOW = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">' +
+  // width/height 直接写在 SVG 上(不靠 .vc-flowb svg 那条 CSS)—— 样式表万一没到位,图标也不会撑爆
+  var ICON_FLOW = '<svg viewBox="0 0 16 16" width="13" height="13" style="display:block" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">' +
     '<rect x="1.8" y="2" width="5.4" height="3.8" rx="1.1"/><rect x="8.8" y="10.2" width="5.4" height="3.8" rx="1.1"/>' +
     '<path d="M4.5 5.8v3.1a1.2 1.2 0 0 0 1.2 1.2h3.1"/><path d="M7.6 8.7l1.4 1.4-1.4 1.4"/></svg>';
 
