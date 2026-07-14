@@ -320,10 +320,45 @@
     return view;
   }
 
+  // ── 嵌套(137,用户设计)──
+  //   「就算工具中需要调用其他工具,也把它作为中间过程显示在外层那张卡里:长条显示进度、
+  //     展开的流程图里作为一个节点」—— 内层调用**绝不另起一张方块**,侧栏同理。
+  //   判据:顶层工具是**串行**的(parallel_tool_calls=false,模型拿到结果才会调下一个)→
+  //     所以"外层还在跑时又开了一个工具"只可能是**它内部**调的。
+  //   例外:后台任务(chip.bg,如制卡派发后轮询)期间模型可以继续调别的工具 → 不算嵌套。
+  function activeParent() {
+    for (var i = chips.length - 1; i >= 0; i--) {
+      var c = chips[i];
+      if (c.busy && !c.bg && !c.nested) return c;
+    }
+    return null;
+  }
+  function mkNested(parent, label) {
+    var st = { label: label, t0: Date.now() };
+    parent.steps = parent.steps || [];
+    parent.steps.push(st);
+    progress(parent, label + '…');                                  // 长条里滚:它就是外层的一个进度
+    return { nested: 1, parent: parent, st: st, cid: parent.cid, type: parent.type, tool: '', views: [], steps: [] };
+  }
+  function nestDone(chip, o) {
+    var st = chip.st;
+    st.dt = Math.round((Date.now() - st.t0) / 100) / 10;
+    st.detail = (o && (o.detail || o.summary)) || '';
+    if (o && o.err) st.err = 1;
+    var p = chip.parent;
+    progress(p, p.label + '…');                                      // 回到外层自己的进度文字
+    p.views.forEach(function (v) { if (v.el.isConnected) paintBody(p, v); });
+    repaintFlows(p);
+  }
+
   // ── 生命周期 ──
   function create(o) {
     o = o || {};
     var vc = VC();
+    if (o.nest !== false) {                       // 137:外层工具还在跑 → 这次是它内部的一步,不另起卡
+      var par = activeParent();
+      if (par) return mkNested(par, o.label || o.tool || '子步骤');
+    }
     var type = o.type || typeOf(o.tool);
     var chip = {
       cid: o.cid || (vc ? vc.mkCid() : 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)),
@@ -360,6 +395,7 @@
   }
   function progress(chip, step) {
     if (!chip) return;
+    if (chip.nested) { if (step) { chip.st.label = step; progress(chip.parent, step + '…'); } return; }
     chip.busy = true;
     if (step) chip.step = step;
     var vc = VC();
@@ -371,6 +407,7 @@
   }
   function done(chip, o) {
     if (!chip) return;
+    if (chip.nested) { nestDone(chip, o); return; }
     o = o || {};
     var vc = VC();
     chip.busy = false; chip.failed = false;
@@ -396,6 +433,7 @@
   }
   function fail(chip, msg) {
     if (!chip) return;
+    if (chip.nested) { nestDone(chip, { detail: msg || '失败', err: 1 }); return; }
     var vc = VC();
     chip.busy = false; chip.failed = true;
     chip.summary = chip.step = msg || '失败';
@@ -420,6 +458,8 @@
   // ── 后台任务(制卡/笔记/生词):轮询步骤 → 长条滚动;完成 → 方块(完整卡片预览)──
   function track(chip, tid) {
     if (!chip || !tid) return;
+    if (chip.nested) return;
+    chip.bg = 1;   // 137:后台任务期间模型可继续调别的工具 → 那些不算嵌套
     var n = 0;
     (function poll() {
       if (n++ > 240) { fail(chip, '等太久了'); return; }
@@ -484,7 +524,7 @@
   // 136:running 事件可能没带工具名(chip 建成 text 型)→ done 拿到真名后**重判类型**,
   //   否则「读页面/翻页」这类执行类永远不会"完成即消失"(用户反复反馈)。
   function retype(chip, tool) {
-    if (!chip || !tool || chip.tool === tool) return;
+    if (!chip || chip.nested || !tool || chip.tool === tool) return;
     chip.tool = tool;
     var t = typeOf(tool);
     if (t === chip.type) return;
@@ -502,8 +542,17 @@
     styleOf: function (t) { return { color: TYPE_C[t] || TYPE_C.text, icon: SVG[t] || SVG.text }; },   // 结果卡复用同一套色/图标
     create: create, progress: progress, done: done, fail: fail, remove: remove, clearAll: clearAll, track: track,
     typeOf: typeOf, isAction: isAction, setForm: form,
-    setSteps: function (chip, st) { if (chip) { chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); } },
-    setMeta: function (chip, rows) { if (chip) chip.meta = rows || []; },
+    setSteps: function (chip, st) { if (!chip || chip.nested) return; chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); },
+    setMeta: function (chip, rows) { if (chip && !chip.nested) chip.meta = rows || []; },
+    addSteps: function (chip, st) {   // 137:工具内部子步骤(服务端 sub_steps)→ 并进外层卡的步骤
+      if (!chip || !st || !st.length) return;
+      var c = chip.nested ? chip.parent : chip;
+      c.steps = (c.steps || []).concat(st.map(function (x) {
+        return { label: x.label || String(x), detail: x.detail || '', dt: x.sec };
+      }));
+      c.views.forEach(function (v) { if (v.el.isConnected) paintBody(c, v); });
+      repaintFlows(c);
+    },
     _chips: function () { return chips; }
   };
 })();

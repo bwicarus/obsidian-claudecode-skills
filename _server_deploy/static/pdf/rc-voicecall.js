@@ -548,6 +548,7 @@
     var c = _chipTake(p);
     if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
     if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
+    if (p.sub_steps && p.sub_steps.length) { try { RC.toolChip.addSteps(c, p.sub_steps); } catch (e) {} }   // 137:工具内部子步骤 → 并进这张卡的步骤(不另起卡)
     RC.toolChip.setMeta(c, _chipMeta(p));
     if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
     // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status

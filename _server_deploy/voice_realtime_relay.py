@@ -1567,6 +1567,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                     r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
+                _subs = ((d.get("result") or {}).get("sub_steps") or d.get("sub_steps") or [])[:12]   # 137:工具内部子步骤 → 外层卡的步骤(不另起卡)
                 res = d.get("result") or {}
                 if isinstance(res, dict) and res.get("silent") and not _creds().get("rt_tool_reply"):
                     _silent[0] = True   # 113(用户实测):silent gate 当年只做在 RTC 版——WS 版(Grok)工具后无条件 create=静默失效
@@ -2514,6 +2515,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     _img_items = []   # 104:(epoch, item_id) 直喂图记账——新话轮焚旧
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
+        _subs = []   # 137:工具内部子步骤 —— 它们是**外层卡的步骤**,不另起一张卡
         _lbl0 = "路由详答·生成中" if name == "route_to_text" else name   # 64/65:路由专属标签(工具卡+字幕状态行同用,Apple 化去 emoji)
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": name, "label": _lbl0}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
@@ -2582,6 +2584,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     r = await hc.post("/api/assistant/voice-tool", json={"cmd": cmd, "ctx": ctx})
                     d = r.json()
                 ok = bool(d.get("ok")); label = d.get("label") or name; took = d.get("took_s")
+                _subs = ((d.get("result") or {}).get("sub_steps") or d.get("sub_steps") or [])[:12]   # 137:工具内部子步骤 → 外层卡的步骤(不另起卡)
                 readonly = bool(d.get("cacheable"))   # 白名单=只读集合;写工具 stale 时仍回填真实结果
                 res = d.get("result") or {}
                 ca = res.get("client_action")
@@ -2653,7 +2656,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,
-            "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+            "args": args, "rag": out[:1600], "sub_steps": _subs}}, ensure_ascii=False))
         _ledger_tool("openai_rtc", _span, call_id2, name, ok, took or 0, cached=bool(cached))   # 284
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=("[cache] " if cached else "") + ("[stale] " if stale else "") + out[:300])

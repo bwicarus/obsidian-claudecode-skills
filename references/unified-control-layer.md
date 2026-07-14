@@ -205,6 +205,24 @@ AI/上下文:`getFileInfo/getPageContext/getCurrentChapterText/getAssistantConte
 | 长条 | `.vc-min` | 折叠 / 进行中 | **一行**(标题 + 状态 + ▶ + ✕),与标记**同高 40px** → 标记→长条 = 上下边不动、纯向右拉长 |
 | 方块 | (无) | 展开 / 结果 | 长条→方块 = 纯向下伸长;正文 = **数据流图**(见下) |
 
+### 内层工具调用 = 外层卡的**步骤**,不另起方块(137,用户设计)
+
+> 「就算工具中需要调用其他工具,也把它作为中间结果和过程显示在那张卡里:**长条显示进度**,它就是进度之一;
+>   点开流程图当然能看见这个调用,但**不需要单独出现一个中间工具的方块**。侧边栏也一样。」
+
+两条来源,都并进外层那张卡:
+
+1. **实时嵌套**(`activeParent()` / `mkNested()`):外层工具还 busy 时又开了一个工具 → 判定为**它内部**调的
+   → 不建卡,只往外层的 `steps` 里追加一条 + 把长条文字换成它(`配图 · 联网搜索…`)。
+   判据成立的前提:顶层工具是**串行**的(`parallel_tool_calls:false`,模型拿到结果才调下一个)。
+   例外:**后台任务**(`chip.bg`,如制卡派发后轮询)期间模型可以继续调别的工具 → 那些**不算**嵌套。
+2. **服务端子步骤**(`_sub_steps` → `sub_steps`):工具内部又调了模型/别的源(如「找视频→搜索+筛选」、
+   「配图→AI 列关键词→并行搜」)。原来只进「!」trace,现在经 `tool2.sub_steps`(文字路)/
+   `tool_status.sub_steps`(语音路,relay 转发)送到前端,由 `RC.toolChip.addSteps()` 并进外层卡。
+
+链路:`assistant.py::_tool2(sub_steps=…)` + `/voice-tool` 透出 `sub_steps` → relay 的 `tool_status` 转发
+→ `rc-voicecall::_chipEnd` / `rc-assistant::_toolChip` → `RC.toolChip.addSteps()`。
+
 ### ⚠ 「执行类工具不消失、还变成小方块」的真因(136,用户反复反馈才挖出来)
 
 不是 `done()` 的逻辑写错了 —— 是**工具卡从头到尾就没被认成执行类**,而且**一次调用长出了两张卡**:

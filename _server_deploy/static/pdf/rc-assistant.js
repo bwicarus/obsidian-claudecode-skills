@@ -2118,6 +2118,7 @@
     if (d.sec != null) rows.push(['耗时', d.sec + 's']);
     if (d.brief) rows.push(['结果', d.brief]);
     RC.toolChip.setMeta(c2, rows);
+    if (d.sub_steps && d.sub_steps.length) { try { RC.toolChip.addSteps(c2, d.sub_steps); } catch (_) {} }   // 137:工具内部子步骤 → 并进这张卡(不另起卡)
     if (d.status === 'error') { RC.toolChip.fail(c2, d.brief || '失败'); return; }
     if (d.task_id) { RC.toolChip.progress(c2, '已派发,正在后台执行…'); RC.toolChip.track(c2, d.task_id); return; }
     RC.toolChip.done(c2, { summary: d.label || '完成', detail: d.brief || '' });
