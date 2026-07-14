@@ -5074,9 +5074,14 @@ def assistant_rtc_session():
                    "调用的同一轮**先口头说一句等待语**(按话题自然说,比如『我把这部分整理成文字给你,稍等』),再调工具。"
                    "intent=一句话概括用户想要什么;系统会用文字模型写出完整回答显示在屏幕上,你调用后本轮结束不要再口头重复。"
                    "系统按用户当前输出模式决定是否放行,被驳回时按提示口头简要回答即可。短答/陪聊/发音示范永远直接说。")
-    parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
-             "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
-             lang_line,
+    # rt_instructions 是**附加**指令(UI placeholder 也这么写):旧的 or 链是互斥替换语义,
+    # 线上只填了一句发音偏好就把默认人设整段顶掉了 → 默认人设恒在,用户内容按官方骨架另起一段追加。
+    _persona = (cfg.get("system_role") or "").strip() or "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。"
+    _extra = (cfg.get("rt_instructions") or "").strip()
+    parts = ["# Role & Objective\n" + _persona]
+    if _extra:
+        parts.append("# Personality & Tone\n" + _extra)
+    parts += [lang_line,
              "**回答长度规则(可测量,请严格遵守)**:快问快答≤8秒;普通讲解≤15秒;内容确实长时先给≤20秒的摘要"
              "并问『要继续展开吗』;绝不复述用户的问题,绝不复述界面卡片上已显示的标题/链接;"
              "用户要听整段原文时,请他用界面上的朗读按钮(那是专用通道),你别整段念。"

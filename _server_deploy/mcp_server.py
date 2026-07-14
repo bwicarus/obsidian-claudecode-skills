@@ -51,9 +51,13 @@ mcp = FastMCP("bwicarus-study-app",
                            "书籍文件路径(file 参数)一律用 list_books 返回条目的 rel 字段原样传入。\n"
                            "【编排模式】你可以临时充当这个 App 内置读书助手的最外层编排 agent:"
                            "① assistant_tools() 看内置工具目录(read_page/see_page/highlight/make_anki/notes…30+ 个);"
-                           "② assistant_call_tool(name, args, file, page) 实际操作书本(与内置助手同一副身体);"
-                           "③ 每轮对话结束用 assistant_log_chat 把你和用户的这轮对话写进助手会话历史——"
-                           "阅读器侧栏会显示这些记录,内置助手接手时也有完整上下文。\n"
+                           "② assistant_call_tool(name, args, file, page) 实际操作书本(与内置助手同一副身体)。\n"
+                           # 这段 instructions 发给**每一个**连上来的客户端。原先这里写「③ 每轮对话结束都调
+                           #   assistant_log_chat」——是强制指令,导致每个客户端每轮白烧一次工具调用回写内置助手
+                           #   历史(实测我们自己的 worker 也照做,白费一整轮)。改成 opt-in 能力提示:多数编排根本
+                           #   不需要回写,只有想让阅读器内置助手事后接手时才用。
+                           "若希望阅读器内置助手事后能接手你这轮编排,可(非必需)在合适时机用 assistant_log_chat "
+                           "回写要点——记录会显示在阅读器侧栏、内置助手接手时能看到;不要每轮都调。\n"
                            "前端动作类工具(goto_page 翻页等)会实时同步到用户**打开着的**PDF 阅读器页面"
                            "(经 SSE 总线);调用时 ctx 带上 file(书的 rel 路径)保证页码偏移正确。")
 
@@ -77,8 +81,19 @@ def _post(path: str, body: dict) -> dict:
 # ───────────────────────── 书籍 / 阅读 ─────────────────────────
 @mcp.tool()
 def list_books() -> dict:
-    """列出书架上所有 PDF 书。每本的 **rel 字段**就是其他工具 file 参数要用的路径(原样传入,别改)。"""
-    return _get("/pdf/api/list-pdfs")
+    """列出书架上所有书(PDF/EPUB)。每本的 **rel 字段**就是其他工具 file 参数要用的路径(原样传入,别改);
+    kind=pdf|epub。列表已**按最近打开时间排好序**(books[0]=最近打开的那本;想要精确阅读位置用 reading_positions)。"""
+    d = _get("/pdf/api/list-pdfs")
+    if not d.get("ok"):
+        return d
+    # 只投影 agent 真正要用的字段。透传体里 comp_compressing/comp_exists/comp_percent 是压缩流水线的内部
+    #   簿记、mtime/lastopen 是前端排序用的时间戳——对 agent 全无意义,纯占上下文(29 本 9.8KB → ~4KB)。
+    #   rel 必留(其它工具的 file 参数);name 给可读标题,kind 决定哪些工具适用,size_kb 给大致篇幅。
+    #   源端已按 lastopen 降序排好,保持原序即「最近在读在前」。
+    books = [{"rel": b.get("rel"), "name": b.get("name"), "kind": b.get("kind"),
+              "size_kb": int(round(b.get("size_kb") or 0))}
+             for b in (d.get("pdfs") or [])]
+    return {"ok": True, "count": len(books), "books": books}
 
 
 @mcp.tool()
@@ -94,9 +109,24 @@ def search_in_book(file: str, query: str, limit: int = 50) -> dict:
 
 
 @mcp.tool()
-def search_all_books(query: str) -> dict:
-    """跨**全部书**全文搜索(FTS 索引),返回各书命中数+片段。找"哪本书讲过 X"用这个。"""
-    return _get("/pdf/api/global-search", q=query)
+def search_all_books(query: str, limit: int = 30) -> dict:
+    """跨**全部书**全文搜索(FTS 索引),**按相关度**返回各书命中页+片段。找"哪本书讲过 X"用这个。
+    limit=返回的命中页上限(取相关度最高的前 N;默认 30,要更全就调大)。"""
+    d = _get("/pdf/api/global-search", q=query, limit=limit)
+    if not d.get("ok"):
+        return d
+    # 透传会撑爆上下文:一次 "HTTP" 命中 254 页 ≈ 80KB。backend 已按 bm25 相关度排序并 truncate 到 limit,
+    #   这里只做字段投影——pos/qlen 是前端加粗用的字符偏移、dir 与 file 重复,对 agent 全无意义。
+    books = [{"file": b.get("file"), "name": b.get("name"), "hits": b.get("hits"),
+              "pages": [{"page": p.get("page"), "snippet": p.get("snippet")}
+                        for p in (b.get("pages") or [])]}
+             for b in (d.get("books") or [])]
+    out = {"ok": True, "q": d.get("q"), "books": books,
+           "total_books": d.get("total_books"), "total_hits": d.get("total_hits"),
+           "truncated": bool(d.get("truncated"))}
+    if out["truncated"]:
+        out["note"] = f"结果已截断到最相关的 {limit} 页;要更多请调大 limit,或用 search_in_book 在指定书里精确定位。"
+    return out
 
 
 @mcp.tool()
@@ -152,21 +182,89 @@ def mark_vocab(word: str, mark: str = "known") -> dict:
 
 # ───────────────────────── 高亮 / 便签 / 收藏 ─────────────────────────
 @mcp.tool()
-def list_highlights(file: str) -> dict:
-    """列出某书的全部高亮(颜色/句子/备注/页码)。"""
-    return _get("/pdf/api/highlights", file=file)
+def list_highlights(file: str, limit: int = 100) -> dict:
+    """列出某书的高亮,**按页排好序**(页码 + 高亮文字 + 备注 + 颜色)。limit=返回条数上限。"""
+    d = _get("/pdf/api/highlights", file=file)
+    if not d.get("ok"):
+        return d
+    # rects(高亮矩形几何)/page_w/page_h/time/kind 是渲染与内部簿记,agent 用不到 → 只留 页/文字/颜色,
+    #   外加非空的 note/sentence/body(用户实际写的内容)。按页排序,省得模型自己整理。
+    rows = []
+    for h in (d.get("highlights") or []):
+        r = {"page": h.get("page"), "text": h.get("text") or "", "color": h.get("color")}
+        for k in ("note", "sentence", "body"):
+            v = (h.get(k) or "").strip()
+            if v:
+                r[k] = v
+        rows.append(r)
+    rows.sort(key=lambda x: (x.get("page") or 0))
+    total = len(rows)
+    out = {"ok": True, "count": min(total, limit), "highlights": rows[:limit]}
+    if total > limit:
+        out["truncated"] = True
+        out["note"] = f"共 {total} 条,只返回前 {limit} 条(按页序);要更多请调大 limit。"
+    return out
 
 
 @mcp.tool()
-def list_notes(file: str) -> dict:
-    """列出某书的全部便签(文字内容+所在页;手写笔画不含)。"""
-    return _get("/pdf/api/notes", file=file)
+def list_notes(file: str, limit: int = 100) -> dict:
+    """列出某书的便签,**按位置排好序**(位置 loc + 文字;手写笔画只给 has_ink 标记,不含坐标)。limit=返回条数上限。"""
+    d = _get("/pdf/api/notes", file=file)
+    if not d.get("ok"):
+        return d
+    # anchor 坐标 / strokes 笔画点 / w/h/collapsed/iar 都是渲染态,agent 用不到 → 只给位置(pdf=p.页 /
+    #   epub=§节)+ 文字 + has_ink;按位置排序。
+    rows = []
+    for n in (d.get("notes") or []):
+        a = n.get("anchor") or {}
+        if a.get("kind") == "epub":
+            loc, sk = f"§{a.get('section')}", (1, a.get("section") or 0)
+        else:
+            loc, sk = f"p.{a.get('page')}", (0, a.get("page") or 0)
+        rows.append({"_k": sk, "loc": loc, "text": n.get("text") or "",
+                     "has_ink": bool(n.get("strokes"))})
+    rows.sort(key=lambda x: x["_k"])
+    for r in rows:
+        r.pop("_k", None)
+    total = len(rows)
+    out = {"ok": True, "count": min(total, limit), "notes": rows[:limit]}
+    if total > limit:
+        out["truncated"] = True
+        out["note"] = f"共 {total} 条,只返回前 {limit} 条;要更多请调大 limit。"
+    return out
 
 
 @mcp.tool()
-def list_favorites() -> dict:
-    """列出用户的收藏夹(页面/高亮/视频/插入页等收藏条目)。"""
-    return _get("/pdf/api/favorites")
+def list_favorites(limit: int = 100) -> dict:
+    """列出用户的收藏夹,按文件夹分组(每条:kind + 定位信息)。limit=返回条目总数上限。"""
+    d = _get("/pdf/api/favorites")
+    if not d.get("ok"):
+        return d
+    # built_sig/content_sig/built_ts/built_ver 是「收藏夹物化成 EPUB」的内部簿记、thumb 是缩略图 URL,
+    #   agent 都用不到 → 每条只留 kind + 定位。定位字段随 kind 变(见 favorites 归一化):
+    #   pdf=file+page、epub=file+section、userpage=file+id、video=vid+src+title——section/id 少一个就
+    #   定位不到具体章节/插入页,必须一并保留。
+    folders, shown, truncated = [], 0, False
+    for f in (d.get("folders") or []):
+        items = []
+        for it in (f.get("items") or []):
+            if shown >= limit:
+                truncated = True
+                break
+            row = {"kind": it.get("kind")}
+            for k in ("title", "file", "page", "section", "id", "vid", "src"):
+                if it.get(k) not in (None, ""):
+                    row[k] = it.get(k)
+            items.append(row)
+            shown += 1
+        folders.append({"name": f.get("name"), "items": items})
+        if truncated:
+            break
+    out = {"ok": True, "folders": folders}
+    if truncated:
+        out["truncated"] = True
+        out["note"] = f"收藏条目超过 {limit} 已截断;要更多请调大 limit。"
+    return out
 
 
 # ───────────────────────── 健身 ─────────────────────────
@@ -228,7 +326,7 @@ def assistant_history(limit: int = 30) -> dict:
 def assistant_log_chat(user_text: str = "", assistant_text: str = "",
                        file: str = "", page: int = 0) -> dict:
     """把你(外部编排 AI)和用户的一轮对话写进助手会话历史(标 via:'mcp')。
-    每轮对话结束都调一次——阅读器侧栏会显示,内置助手接手时有完整上下文。"""
+    **可选、非必需**:仅当希望阅读器内置助手事后接手时能看到上下文,才在合适时机回写要点——别每轮都调。"""
     return _post("/api/assistant/log", {"user": user_text, "assistant": assistant_text,
                                         "file": file, "page": page or None})
 

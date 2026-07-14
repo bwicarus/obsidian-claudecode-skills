@@ -1358,9 +1358,14 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
     else:
         lang_line = ("**跟随用户说话的语言**回答(他说中文就用中文,日本語なら日本語で);"
                      "朗读书页原文时按内容本身的语言用**原生发音**念——日语内容用日语读音,不要用中文读音念日语汉字。")
-    parts = [cfg.get("rt_instructions") or cfg.get("system_role") or
-             "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。",
-             lang_line,
+    # rt_instructions 是**附加**指令(UI placeholder 也这么写):旧的 or 链是互斥替换语义,
+    # 线上只填了一句发音偏好就把默认人设整段顶掉了 → 默认人设恒在,用户内容按官方骨架另起一段追加。
+    _persona = (cfg.get("system_role") or "").strip() or "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。"
+    _extra = (cfg.get("rt_instructions") or "").strip()
+    parts = ["# Role & Objective\n" + _persona]
+    if _extra:
+        parts.append("# Personality & Tone\n" + _extra)
+    parts += [lang_line,
              "口语回答,默认两三句话说清,别铺开;用户要求展开才展开。"
              "你连着他的阅读器,配了一套真实工具(function calling):看图细节/翻页/搜索/高亮/做卡片/查词等"
              "需要动手的事**直接调用工具**,拿到真实结果再回答;绝不口头宣称做了没做的事。"

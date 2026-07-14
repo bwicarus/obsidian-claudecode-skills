@@ -1702,6 +1702,14 @@
       _rtcHandleUp(j);
     } };
   }
+  function _rtcInterrupt() {
+    // 程序发起的打断:光发 response.cancel 不够——已推进浏览器 WebRTC output buffer 的音频会照播完
+    // (用户点了停,AI 还在自顾自说)。官方(client events / output_audio_buffer.clear,WebRTC/SIP Only)
+    // 要求切断已缓冲音频必须发 output_audio_buffer.clear,且须紧跟在 response.cancel 之后。
+    // (VAD 自动打断不走这里——WebRTC 下服务端自管 output 缓冲;我们已监听 output_audio_buffer.cleared,录音收尾自动对齐。)
+    _dcSend({ type: 'response.cancel' });
+    _dcSend({ type: 'output_audio_buffer.clear' });
+  }
   function _rtcHandleUp(j) {
     var t = j.type;
     if (t === 'page') {
@@ -1733,12 +1741,13 @@
         (sel.length <= 200 ? '**选中内容已完整在此,直接使用**' : '选中较长已截断,需要完整上下文可 read_page 当前页') + ')') :
         '用户当前没有选中文字') + ';状态记录,不要回应本条)');
     } else if (t === 'text' && j.content) {
+      _rtcInterrupt();   // AI 正说话时打字发消息:不先打断会撞 conversation_already_has_active_response,这条 item 进了上下文却永远没 response(官方参考实现 handleSendTextMessage 第一行也是 interrupt)
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
       _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
       _rtcRespCreate('user');
     } else if (t === 'cancel' || t === 'tool_abort') {
-      _dcSend({ type: 'response.cancel' });
+      _rtcInterrupt();
     }
   }
   // ── 65 文字卡片(用户设计):route/stt 等文字回复在**侧栏关闭**时弹半透明磨砂卡——固定右下,
@@ -2709,18 +2718,21 @@
       var r = await (await fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file: _rtc.ctxFile || '', force: 1 }) })).json();
       var summary = (r && r.summary) || '';
+      // 服务端 compact-history 有合法的 skip 出口(fresh/pack < 8),返回 {ok,skipped} 不带 summary。
+      // 删除集必须由摘要派生(cookbook 不变式:没摘要就直接收场)——否则这里会无条件删掉除近 8 条外的全部历史、
+      // 连上一版摘要一起删,通话中途模型记忆归零且没有任何东西顶上(第二次压缩最易踩:upto_ts 已推进,新增才几条 → skip)。
+      if (!summary) { _rtc.lastCompact = 0; return; }   // 什么都别删;冷却重置,让下次积够了再试
       var keep = 8;   // 尾部近几轮 item 保留原文(含最近的 page/state system)
       var del = _rtc.items.slice(0, -keep);
       _rtc.items = _rtc.items.slice(-keep);
-      if (_rtc.sumId) del.push({ id: _rtc.sumId });   // 125b:上一个摘要也删(它在头部,不在 items 账本里)
+      var prevSumId = _rtc.sumId;   // 上一版摘要 id(在头部,不在 items 账本里);等新摘要插好再删,别先删空了顶不上
       // 125b(cookbook 原文核实):官方时序=**先插摘要、后删旧轮**(无"旧轮已删摘要未插"的空窗;
       // delete 定点删与 create 插 root 无冲突,官方范例不等 deleted 确认)。摘要固定 id(不入 items 账本,免排序错位)。
-      if (summary) {
-        _rtc.sumId = 'sum_' + Date.now().toString(36);
-        _dcSend({ type: 'conversation.item.create', previous_item_id: 'root', item: {
-          id: _rtc.sumId, type: 'message', role: 'system',
-          content: [{ type: 'input_text', text: '(更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)' }] } });
-      }
+      _rtc.sumId = 'sum_' + Date.now().toString(36);
+      _dcSend({ type: 'conversation.item.create', previous_item_id: 'root', item: {
+        id: _rtc.sumId, type: 'message', role: 'system',
+        content: [{ type: 'input_text', text: '(更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)' }] } });
+      if (prevSumId) del.push({ id: prevSumId });   // 新摘要已插:旧摘要现在可以安全删
       del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
       _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
       try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
