@@ -717,3 +717,79 @@ MCP 不等于“免费工具调用”：模型读取工具定义、生成调用�
 ### 认证
 
 `authorization` 字段直接塞**静态 token**(`~/.config/mcp-http-token`)即可 —— `mcp_oauth.py` 的门禁是「静态 token 或 OAuth token 二者其一」,不用走 OAuth 舞蹈。
+
+
+---
+
+# ⚠ 2026-07-14 更正批次(GPT 复核 + 我方复测,推翻本文档前面三条结论)
+
+把材料给 GPT(有全套官方资料)复核后,**三条我先前写下的结论被证伪**。以下为最终版,前面章节里与此冲突的以本节为准。
+
+## 更正 1:**成本大头是 output(音频),不是 input 重算** ❌→✅
+
+我先前反复讲「每 response input 5367 / output 311 → 输入是输出的 17 倍 → 大头在 input 全量重算」。
+**错在拿 token 数量比当成本比。** 各档单价差 30 倍以上,必须分档乘价。
+
+按 gpt-realtime-2.1-mini 官方价重算我们真实账本(670 response,$3.83):
+
+| 档 | token | 美元 | 占比 |
+|---|---|---|---|
+| **output·音频** | 136,361 | **$2.727** | **71.1%** |
+| input·文字(未命中) | 726,421 | $0.436 | 11.4% |
+| input·音频(未命中) | 24,100 | $0.241 | 6.3% |
+| output·文字 | 96,190 | $0.231 | 6.0% |
+| input·文字(命中缓存) | 2,512,640 | $0.151 | 3.9% |
+| input·图片 / 音频缓存 | — | $0.048 | 1.2% |
+| **INPUT 合计** | | **$0.875** | **22.8%** |
+| **OUTPUT 合计** | | **$2.958** | **77.2%** |
+
+**token 数量比 14:1(input 多),美元比 0.30:1(output 多)—— 完全反过来。**
+
+**推论(重要)**:第二次 response 贵,是因为它**要说话**;而说话就是答案本身,省不掉。
+→ 就算真能做到「工具调用 = 1 次 response」,省下的也只是那次 response 的 **input 重算 ≈ $0.001**,**不是一半**。
+→ **真正的省钱杠杆是砍音频 output**(答案更短、silent 工具不发言、TTS 分流),不是砍 response 次数。
+
+## 更正 2:**stateless 不是必需的** ❌→✅
+
+我先前写「OpenAI Realtime 的 MCP 客户端跟 stateful 模式对不上,必须 stateless+json_response」。
+GPT 指出我**同时改了两个变量、不能断因**。做了 stateless × json_response **四格交叉实验**:
+
+| stateless | json_response | 结果 |
+|---|---|---|
+| 1 | 1 | ✅ mcp_list_tools + mcp_call 有结果 |
+| 0 | 1 | ✅ |
+| 1 | 0 | ✅ |
+| **0** | **0**(原生配置) | **✅** |
+
+**四种组合全部正常。** 真因是 **mcp_call 走异步生命周期**(`response.done` 先结束,工具 1.9s 后才完成),
+而我在 `response.done` 就断开了 WS —— 把「我自己没等结果」误判成了「transport 不兼容」。
+→ `mcp_server.py` 已**改回原生 stateful**(`MCP_STATELESS` / `MCP_JSON` env 保留但默认关);claude.ai 连接器不受影响。
+
+## 更正 3:`reasoning.effort` **可配**(先前标"未知")
+
+实测 `session.update` 里 `{"reasoning":{"effort":"minimal"|"low"|...}}` —— **2.1 和 2.1-mini 都接受**,`session.updated` 回显生效。
+但我们每次只有 23~25 reasoning token,**省钱空间可忽略**(mini 约 $0.00006/次),收益主要在**延迟**。
+且 GPT 提醒:`reasoning_tokens` 是 output 的**子集**(65 text + 39 audio = 104 总数,23 reasoning 已含在 65 text 里),别重复相加。
+
+## GPT 复核确认的其余各条
+
+- ✅ **垫话 + function_call 同一 response 是官方支持的**(官方有 "Tool Call Preambles" 专章推荐这么做),不是未定义行为。但客户端要同时兼容「只有 function_call」和「message + function_call」两种。
+- ✅ **客户端 function tool 无法在原 response 内续写** —— 没有 `response.resume` / `continue` / realtime 版 `previous_response_id`。需要读工具结果的调用**必然 2 次 response**。
+- ✅ **异步函数调用没有公开关闭开关**(`parallel_tool_calls:false` 不是它)。
+- ✅ **MCP 没有官方保证「一次工具调用只计一个 Response」**,也没有同步等待配置 → **生产按 2 次 response 预算**。官方 `realtime-mcp` 页写的是同一个 "turn",而 **turn ≠ 计费单位,Response 才是**(我先前把两者混为一谈)。
+- ✅ **MCP 输出没有官方截断上限**(没有 `max_tool_output_tokens`;`max_output_tokens` 管的是模型生成)→ **必须服务端自己瘦身**。
+- ✅ **非 443 端口不是官方要求**(schema 无端口白名单)→ `:8443` 打不通属于 OpenAI 出站/校验的实现问题,`mcp_list_tools.failed` **确实没有 error 字段**(不是我们漏读)。生产继续用 443。
+- 🆕 **`mcp_list_tools` 赛跑的正确解法是等 `mcp_list_tools.completed` 事件**,不是固定 sleep;并且要检查 `conversation.item.done`(`item.type === "mcp_list_tools"`)确认真导入了哪些工具。
+- 🆕 **out-of-band response**(`{"conversation":"none","input":[…]}`):第二次播报可以只带「本次请求 + 工具调用 + 精简结果」的小上下文,不重送整段会话。仍是第 2 次 response,但 input 更小(鉴于 input 只占 23%,收益有限);缺点是输出不自动写回主会话,要自己补摘要。
+- 🆕 **静态 Bearer 不要硬编码进浏览器** —— MCP 的 `authorization` 应在**后端**创建 session 时配置。
+
+## 最终分层建议(GPT 给的,我认同)
+
+| 工具类型 | 走哪条路 | response 数 |
+|---|---|---|
+| 翻页/滚动/高亮/跳转(结果用户已看见) | 客户端 function + **silent** | **1** ✅ 已实现(`_SILENT_ACT`) |
+| 查词/笔记查询(要口头报结果) | 客户端 function,**结果精简**,可选 OOB 小上下文 | 2(不可避免) |
+| 视频/书单等富 UI 数据 | 完整结果**直达侧栏**,给 AI 只喂摘要/`result_id` | 2 |
+| 仅后端可达、输出很小、认证复杂 | remote MCP | 2 |
+
+**不要把 30 个工具统一迁 MCP。** MCP 的确定价值是托管执行 / 认证 / 工具发现 / 少写浏览器转发代码,**不是省钱**。

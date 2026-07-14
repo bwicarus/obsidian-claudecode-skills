@@ -248,16 +248,19 @@ if __name__ == "__main__":
         # 门禁+OAuth 面都在 mcp_oauth(静态 token 与 OAuth token 并行;官方 app 走 OAuth 发现流程)
         from mcp_oauth import build_asgi
         public_base = os.environ.get("MCP_PUBLIC_BASE", "https://bwicarus.taile44d0c.ts.net:8443")
-        # 144(2026-07-14 实测):**OpenAI Realtime 的 MCP 客户端跟 stateful(SSE 会话)模式对不上** ——
-        #   日志里每次请求都 "Created new transport"、夹一个 400,tools/call 我们这侧 0.9s 就跑完并返回了
-        #   (直连公网 URL 验证过:200 + 完整结果 10.8KB),但 OpenAI 那边 mcp_call.output 恒为 None、
-        #   模型一直"还在等",最后干脆编书名。改 stateless + json_response(每个 POST 自包含、纯 JSON、
-        #   不依赖 SSE 长连接会话)——穿 nginx/代理最稳,也是 hosted MCP 客户端的通用形态。
-        #   ⚠ 可回退:systemd 里设 MCP_STATELESS=0 即回老行为(claude.ai 连接器若出问题先试这个)。
-        _stateless = os.environ.get("MCP_STATELESS", "1") != "0"
+        # 145(2026-07-14,交叉实验断因后**改回原样**):MCP 的 transport 模式**根本不影响** OpenAI Realtime。
+        #   我一度以为 stateful(SSE 会话)跟 OpenAI 的 MCP 客户端不兼容(日志里每次都 "Created new transport"
+        #   + 夹一个 400,而 mcp_call.output 恒为 None)→ 改成 stateless+json_response 后"立刻通了"。
+        #   **那是误判**:真因是 mcp_call 走**异步**生命周期(response.done 先结束,工具 1.9s 后才完成),
+        #   我在 response.done 就断开了 WS,自然永远看不到结果。GPT 指出我同时改了两个变量、不能断因,
+        #   于是做了 stateless×json_response 四格交叉实验 —— **四种组合全部正常**(mcp_list_tools ✅ + mcp_call 有结果)。
+        #   → 默认回到原生 stateful(claude.ai 连接器一直跑在这上面,没理由为一个不存在的问题动它)。
+        #   env 可覆盖:MCP_STATELESS=1 / MCP_JSON=1(留着,万一将来真遇到代理不兼容)。
+        _stateless = os.environ.get("MCP_STATELESS", "0") != "0"
+        _json = os.environ.get("MCP_JSON", "0") != "0"
         mcp.settings.stateless_http = _stateless
-        mcp.settings.json_response = _stateless
-        print(f"[mcp] streamable-http stateless={_stateless} json_response={_stateless}", flush=True)
+        mcp.settings.json_response = _json
+        print(f"[mcp] streamable-http stateless={_stateless} json_response={_json}", flush=True)
         app = build_asgi(mcp.streamable_http_app(), static_token=http_token, public_base=public_base)
         # host 默认只听本机;Pi unit 设 0.0.0.0(VPS nginx 经 tailnet 反代进来,claude.ai 连接器
         # 的服务端请求不走非 443 端口——8443 Funnel 授权页能开但 token/mcp 全连不上,2026-07-13 实测)
