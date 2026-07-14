@@ -824,6 +824,23 @@
   }
 
   RC.toolChip = {
+    // 141:【流程】按钮的**唯一创建点**。rc-turncard 的容器也调它 —— 我原本在那边自己 new 了一个
+    //   一模一样的 <button class="vc-flowb">,结果渲染成白圆块,而这里建的却一直正常。
+    //   与其继续猜差异在哪,不如**跑同一段代码**(用户拍板:复用已经能跑通的,别自己另设计)。
+    //   ⚠ 首行 VC().css() 不可省:历史回放时通话 UI 可能还没建过 → 样式没注入 → 裸 <button> = 白块。
+    flowBtn: function (onToggle) {
+      try { VC() && VC().css && VC().css(); } catch (e) {}
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
+      b.innerHTML = ICON.flow;
+      b.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var on = false;
+        try { on = !!onToggle(); } catch (e) {}
+        b.classList.toggle('on', on);
+      });
+      return b;
+    },
     // 141(轮次容器):撤掉 chip 自己的视图/浮层卡 —— 显示已由 RC.turnCard 接管(busy 指示 + tool part)。
     //   chip 对象保留:后台任务追踪(_chipTrackTask)还要用它。absorbed=[] 让后续 progress/done 不再造新视图。
     silence: function (chip) {
