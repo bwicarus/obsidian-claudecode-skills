@@ -334,10 +334,9 @@
           bodyEl.appendChild(row);
         });
         var btns = document.createElement('div'); btns.className = 'vc-tp-btns';
-        btns.innerHTML = '<button class="pri" data-op="save">保存并生效</button>' +
+        btns.innerHTML = '<button class="pri" data-op="save">保存</button>' +
           '<button data-op="setdefault">设为默认</button>' +
-          '<button data-op="filldefault">默认</button>' +
-          '<button data-op="factory">恢复出厂</button>';
+          '<button data-op="restore">恢复默认</button>';   // 141(用户):只要这三个
         bodyEl.appendChild(btns);
         function collect() { var o = {}; Object.keys(tas).forEach(function (k) { o[k] = tas[k].ta.value; }); return o; }
         function post(op, fields) {
@@ -348,18 +347,21 @@
         btns.addEventListener('click', function (ev) {
           var b = ev.target.closest('button'); if (!b) return;
           var op = b.getAttribute('data-op');
-          if (op === 'filldefault') {   // 「默认」= 把**你设的默认**填回输入框(没设过就填系统原始)
+          if (op === 'restore') {
+            // 「恢复默认」= 填回默认(你设过的默认 → 用它;没设过 → 系统原始)**并立刻生效**(不用再按保存)
+            var fields = {};
             Object.keys(tas).forEach(function (k) {
               var x = tas[k];
               x.ta.value = x.f.mine || x.f.sys || '';
-              x.st.textContent = x.f.mine ? '(已填回你的默认 · 记得保存)' : '(已填回系统原始 · 记得保存)';
+              fields[k] = x.f.mine || '';   // 有你的默认 → 存成生效;没有 → 空(清覆盖=回系统原始)
             });
-            return;
-          }
-          if (op === 'factory') {
-            post('factory').then(function () {
-              Object.keys(tas).forEach(function (k) { tas[k].ta.value = tas[k].f.sys || ''; tas[k].st.textContent = '(系统原始)'; tas[k].f.cur = ''; tas[k].f.mine = ''; });
-              toast('已恢复出厂');
+            post('save', fields).then(function () {
+              Object.keys(tas).forEach(function (k) {
+                var x = tas[k];
+                x.f.cur = x.f.mine || '';
+                x.st.textContent = x.f.mine ? '(用的是你的默认)' : '(系统原始)';
+              });
+              toast('已恢复默认');
             });
             return;
           }
