@@ -1997,7 +1997,7 @@
       if (!_vTurnEl || !_vTurnEl.parentNode) _vTurnEl = addMsg('asst-a', '');
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
         try { renderMd(_vTurnEl, text, true); } catch (e) { _vTurnEl.textContent = text; }
-        try { if (arguments[2].info && window.__asstInfoBtn) window.__asstInfoBtn(_vTurnEl, arguments[2].info); } catch (e) {}   // 77b:「!」详情
+        // 139(用户):AI 的文字输出**不需要「!」这样的按键** —— 工具调用的详情归工具卡的【数据流】按钮 + 长按详情窗
         try {   // 83:长文气泡 TTS 念钮(☆撤——用户裁定收藏走拖拽/浮层)
           if (arguments[2].speak && !_vTurnEl.querySelector(':scope > .asst-clip')) {
             var _sb = document.createElement('button'); _sb.type = 'button'; _sb.className = 'asst-clip dim'; _sb.textContent = '▶';
@@ -2119,6 +2119,7 @@
     if (d.brief) rows.push(['结果', d.brief]);
     RC.toolChip.setMeta(c2, rows);
     if (d.sub_steps && d.sub_steps.length) { try { RC.toolChip.addSteps(c2, d.sub_steps); } catch (_) {} }   // 137:工具内部子步骤 → 并进这张卡(不另起卡)
+    if (d.model || d.action) { try { RC.toolChip.setModel(c2, d.model, d.action); } catch (_) {} }   // 139:详情窗要显示"用了哪个模型"
     if (d.status === 'error') { RC.toolChip.fail(c2, d.brief || '失败'); return; }
     if (d.task_id) { RC.toolChip.progress(c2, '已派发,正在后台执行…'); RC.toolChip.track(c2, d.task_id); return; }
     RC.toolChip.done(c2, { summary: d.label || '完成', detail: d.brief || '' });

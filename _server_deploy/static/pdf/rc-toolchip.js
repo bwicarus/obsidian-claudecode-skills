@@ -20,6 +20,7 @@
  */
 (function () {
   'use strict';
+  var RC_openDetail;
   if (window.RC && RC.toolChip) return;
   window.RC = window.RC || {};
 
@@ -98,6 +99,22 @@
       b.classList.toggle('on', !open);
     });
     hd.appendChild(b);
+    // 139(用户):这条小长条**长按 → 详情窗**(单击切形态的功能保留;_cycleForm 已判长按不改形态)
+    var lp = null;
+    hd.addEventListener('pointerdown', function (ev) {
+      if (ev.target.closest('button')) return;
+      lp = setTimeout(function () { lp = null; openDetail(chipOf(el)); }, 600);
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (e2) {
+      hd.addEventListener(e2, function () { if (lp) { clearTimeout(lp); lp = null; } });
+    });
+  }
+  function chipOf(el) {   // el → 它所属的 chip
+    for (var i = 0; i < chips.length; i++) {
+      var c = chips[i];
+      for (var j = 0; j < c.views.length; j++) if (c.views[j].el === el) return c;
+    }
+    return null;
   }
 
   var chips = [];
@@ -135,32 +152,49 @@
     // 数据流:方块 →(箭头)→ 方块,一眼看懂"数据从哪流到哪"(小尺寸下也不会误读成发送箭头)
     flow: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="2" width="5.4" height="3.8" rx="1.1"/><rect x="8.8" y="10.2" width="5.4" height="3.8" rx="1.1"/><path d="M4.5 5.8v3.1a1.2 1.2 0 0 0 1.2 1.2h3.1"/><path d="M7.6 8.7l1.4 1.4-1.4 1.4"/></svg>'
   };
+  var ARG_LABEL = {   // 参数键 → 人话("传输的是什么格式的什么内容")
+    query: '文字', q: '文字', text: '文字', word: '单词', lemma: '单词', sentence: '句子',
+    page: '页码', pages: '页码', section: '章节', file: '书', intent: '意图',
+    queries: '关键词', concept: '概念', color: '颜色', note: '备注', deck: '牌组',
+    snippets: '选段', content: '内容', title: '标题', path: '路径', lang: '语言', n: '数量'
+  };
+  function argLines(raw) {   // 139(用户):这里直接写**传输内容的格式和内容**,别倒原始 JSON
+    var o = raw;
+    if (typeof raw === 'string') { try { o = JSON.parse(raw); } catch (e) { return String(raw); } }
+    if (!o || typeof o !== 'object') return String(raw == null ? '' : raw);
+    var ls = [];
+    Object.keys(o).forEach(function (k) {
+      var v = o[k];
+      if (v == null || v === '' || v === false) return;
+      if (Array.isArray(v)) v = v.map(function (x) { return (x && typeof x === 'object') ? (x.query || x.concept || JSON.stringify(x)) : x; }).join('、');
+      else if (typeof v === 'object') v = JSON.stringify(v);
+      ls.push('**' + (ARG_LABEL[k] || k) + '**:' + String(v).slice(0, 300));
+    });
+    return ls.join('\n\n');
+  }
   function stages(chip) {
     var m = {};
     (chip.meta || []).forEach(function (r) { m[r[0]] = r[1]; });
     var st = [];
-    // ① AI 请求:它说了什么 / 带了什么上下文 / 传了什么参数(全部 markdown 渲染)
+    // ① AI 请求:它说了什么 / 带了什么上下文 / 传了什么内容(**人话**,不是 JSON)
     var ai = '';
     if (m['指令(S2S 原话)']) ai += '**指令**:' + m['指令(S2S 原话)'] + '\n\n';
     if (m['携带上下文']) ai += '**携带上下文**:' + m['携带上下文'] + '\n\n';
-    var args = m['参数'] || '';
-    if (args) {
-      try { args = JSON.stringify(JSON.parse(args), null, 1); } catch (e) {}
-      ai += '**参数**\n\n```\n' + args + '\n```';
-    }
+    if (m['参数']) ai += argLines(m['参数']);
     st.push({ ic: ICON.ai, t: 'AI 请求 · ' + chip.label, m: '', kind: 'md', body: ai || '(无参数)' });
-    // ② 中间步骤
+    // ② 中间步骤(内层工具/模型调用)
     (chip.steps || []).forEach(function (x) {
-      st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : ''),
-                kind: 'md', body: x.detail || '' });
+      st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : (x.sec != null ? x.sec + 's' : '')),
+                kind: 'md', body: x.detail || '', model: x.model, action: x.action, sec: x.dt != null ? x.dt : x.sec });
     });
     // ③ 结果(默认展开)
     st.push({ ic: chip.failed ? ICON.err : ICON.out,
               t: chip.failed ? '出错' : (chip.result && chip.result.kind === 'anki' ? '生成卡片' : '结果'),
               m: m['耗时'] || '',
               kind: (chip.result && chip.result.kind === 'anki') ? 'anki' : 'md',
-              tts: !(chip.result && chip.result.kind === 'anki') && !chip.failed,   // 纯文字结果才给 ▶
-              body: chip.detail || chip.summary || '', open: true });
+              tts: !(chip.result && chip.result.kind === 'anki') && !chip.failed,
+              body: chip.detail || chip.summary || '', open: true,
+              model: chip.model, sec: m['耗时'] });
     return st;
   }
   function renderPayload(el, sg, chip, view) {
@@ -237,6 +271,44 @@
     if (n) n.addEventListener('click', function (e) { e.stopPropagation(); view.idx = (view.idx || 0) + 1; paintBody(chip, view); });
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([bd]); } catch (e) {}
   }
+  // ── 139(用户):工具调用详情窗(长按流程里的小长条打开)——复用旧「!」面板的格式 ──
+  //   每条流程一行:[名称] [模型 chip] [耗时],点名字展开该条的细节。
+  function openDetail(chip, focusIdx) {
+    try { VC() && VC().css && VC().css(); } catch (e) {}
+    var old = document.getElementById('vc-dtl'); if (old) old.remove();
+    var sgs = stages(chip);
+    var d = document.createElement('div'); d.id = 'vc-dtl';
+    d.innerHTML = '<div class="vc-dtl-w">' +
+      '<div class="vc-dtl-h"><span class="vc-fn-i" style="width:24px;height:24px;border-radius:8px;--vc-tc:' +
+        (TYPE_C[chip.type] || TYPE_C.text) + ';color:#dfe7f6;background:color-mix(in srgb,' +
+        (TYPE_C[chip.type] || TYPE_C.text) + ' 24%,rgba(0,0,0,.32))">' + (SVG[chip.type] || SVG.text) + '</span>' +
+        '<b>' + esc(chip.label) + '</b><button type="button" class="vc-dtl-x">✕</button></div>' +
+      '<div class="vc-dtl-b"></div></div>';
+    var body = d.querySelector('.vc-dtl-b');
+    sgs.forEach(function (sg, i) {
+      var r = document.createElement('div'); r.className = 'vc-dtl-r';
+      r.innerHTML = '<div class="h">' +
+        '<span class="nm">' + esc(sg.t) + '</span>' +
+        (sg.model ? '<span class="md">' + esc(sg.model) + '</span>' : '') +
+        (sg.sec != null && sg.sec !== '' ? '<span class="sc">' + esc(String(sg.sec).replace(/s?$/, 's')) + '</span>' : '') +
+        '<span class="ar">▸</span></div><div class="bd" hidden></div>';
+      var bd = r.querySelector('.bd');
+      r.querySelector('.h').addEventListener('click', function () {
+        var on = bd.hidden;
+        bd.hidden = !on; r.classList.toggle('on', on);
+        if (on && !bd.dataset.done) { renderPayload(bd, sg, chip, { idx: 0, el: bd }); bd.dataset.done = '1'; }
+      });
+      if (i === (focusIdx == null ? -1 : focusIdx)) setTimeout(function () { r.querySelector('.h').click(); }, 30);
+      body.appendChild(r);
+    });
+    function close() { d.classList.remove('on'); setTimeout(function () { try { d.remove(); } catch (e) {} }, 220); }
+    d.querySelector('.vc-dtl-x').addEventListener('click', close);
+    d.addEventListener('click', function (ev) { if (ev.target === d) close(); });
+    document.body.appendChild(d);
+    requestAnimationFrame(function () { d.classList.add('on'); });
+  }
+  RC_openDetail = openDetail;
+
   function paintBody(chip, view) {
     var bd = view.el.querySelector('.vc-card-bd');
     if (!bd) return;
@@ -260,8 +332,18 @@
       if (on && pane) renderPayload(pane, sg, chip, view);
     });
     bd.querySelectorAll('.vc-fn').forEach(function (nd) {
+      var lp = null, longed = 0;
+      nd.addEventListener('pointerdown', function () {   // 139:长按 → 详情窗(单击展开的功能保留)
+        longed = 0;
+        lp = setTimeout(function () { longed = 1; lp = null; openDetail(chip, +nd.getAttribute('data-i')); }, 550);
+      });
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (e2) {
+        nd.addEventListener(e2, function () { if (lp) { clearTimeout(lp); lp = null; } });
+      });
+      nd.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
       nd.addEventListener('click', function (ev) {
         ev.stopPropagation();
+        if (longed) { longed = 0; return; }   // 刚长按开过窗 → 这次 click 不当展开
         var i = +nd.getAttribute('data-i');
         var pane = bd.querySelector('.vc-fp[data-p="' + i + '"]');
         var now = !nd.classList.contains('on');
@@ -544,11 +626,13 @@
     typeOf: typeOf, isAction: isAction, setForm: form,
     setSteps: function (chip, st) { if (!chip || chip.nested) return; chip.steps = st || []; chip.views.forEach(function (v) { paintBody(chip, v); }); },
     setMeta: function (chip, rows) { if (chip && !chip.nested) chip.meta = rows || []; },
+    setModel: function (chip, model, action) { if (chip && !chip.nested) { chip.model = model || chip.model; chip.action = action || chip.action; } },
+    openDetail: openDetail,
     addSteps: function (chip, st) {   // 137:工具内部子步骤(服务端 sub_steps)→ 并进外层卡的步骤
       if (!chip || !st || !st.length) return;
       var c = chip.nested ? chip.parent : chip;
       c.steps = (c.steps || []).concat(st.map(function (x) {
-        return { label: x.label || String(x), detail: x.detail || '', dt: x.sec };
+        return { label: x.label || String(x), detail: x.detail || '', dt: x.sec, model: x.model, action: x.action };   // 139:模型/动作要留住(详情窗显示)
       }));
       c.views.forEach(function (v) { if (v.el.isConnected) paintBody(c, v); });
       repaintFlows(c);

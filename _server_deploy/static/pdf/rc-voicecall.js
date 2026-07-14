@@ -215,6 +215,31 @@
       '.vc-flowb:active{transform:scale(.86)}' +
       '.vc-flowb.on{background:#7b6cff;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
+      // 139(用户):工具调用**详情窗**(长按流程里的小长条打开)——复用旧「!」面板的格式:
+      //   每条流程可点名字看细节,后面跟模型 / 耗时。
+      '#vc-dtl{position:fixed;inset:0;z-index:2147481700;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(0,0,0,.42);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);opacity:0;transition:opacity .22s}' +
+      '#vc-dtl.on{opacity:1}' +
+      '.vc-dtl-w{width:min(92vw,520px);max-height:78vh;display:flex;flex-direction:column;border-radius:20px;' +
+        'background:linear-gradient(180deg,rgba(30,30,36,.96),rgba(20,20,26,.98));border:0.5px solid rgba(255,255,255,.14);' +
+        'box-shadow:0 28px 70px -18px rgba(0,0,0,.75);color:#e9eefb;font-family:-apple-system,system-ui,sans-serif;' +
+        'transform:scale(.94);transition:transform .26s cubic-bezier(.34,1.4,.64,1)}' +
+      '#vc-dtl.on .vc-dtl-w{transform:scale(1)}' +
+      '.vc-dtl-h{display:flex;align-items:center;gap:8px;padding:13px 15px;border-bottom:0.5px solid rgba(255,255,255,.1);flex:none}' +
+      '.vc-dtl-h b{flex:1;font-size:14.5px;font-weight:650}' +
+      '.vc-dtl-h .vc-dtl-x{width:26px;height:26px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#dfe6f5;' +
+        'display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font-size:14px;line-height:1}' +
+      '.vc-dtl-b{overflow-y:auto;padding:10px 13px 14px;-webkit-overflow-scrolling:touch}' +
+      '.vc-dtl-r{border-radius:11px;background:rgba(255,255,255,.05);border:0.5px solid rgba(255,255,255,.08);margin-top:7px;overflow:hidden}' +
+      '.vc-dtl-r>.h{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      '.vc-dtl-r>.h:active{background:rgba(255,255,255,.07)}' +
+      '.vc-dtl-r .nm{flex:1;font-size:13px;color:#e6ecf8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-dtl-r .md{flex:none;font-size:10.5px;padding:2px 7px;border-radius:6px;background:rgba(123,108,255,.2);color:#c3b7ff;font-weight:600}' +
+      '.vc-dtl-r .sc{flex:none;font-size:11px;color:#8195b8;font-variant-numeric:tabular-nums}' +
+      '.vc-dtl-r .ar{flex:none;font-size:10px;color:#8195b8;transition:transform .2s}' +
+      '.vc-dtl-r.on .ar{transform:rotate(90deg)}' +
+      '.vc-dtl-r .bd{padding:2px 11px 11px;font-size:12.5px;line-height:1.6;color:#c9d4e8;word-break:break-word;max-height:230px;overflow:auto}' +
+      '.vc-dtl-r .bd pre{white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:11px}' +
       // 侧栏结果卡折叠成一行长条(点头部切换;侧栏没有标记)
       '.vc-if.vc-if-min > *:not(.vc-if-hd){display:none}' +
       '.vc-if.vc-if-min .vc-if-hd{margin-bottom:-4px}' +
@@ -1083,7 +1108,8 @@
         if (!k2 || seenS[k2]) return ''; seenS[k2] = 1; return k2;
       }).filter(Boolean).join(' · ') || '未记录(旧卡片)';
     }
-    try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined,
+    // 139(用户):「!」按钮由标题栏的【数据流】按钮替代(absorb→mountFlow 已挂上),这里不再另挂
+    if (false) try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined,
       actions: (card.kind === 'images' ? ['img_norm'] : card.kind === 'videos' ? ['pick_video'] : ['web_search']) }); } catch (e) {}
     try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)

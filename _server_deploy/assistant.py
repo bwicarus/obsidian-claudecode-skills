@@ -3308,7 +3308,7 @@ def _format_history(history, offset=0):
     return ("【最近对话】\n" + "\n".join(out) + "\n") if out else ""
 
 
-def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_steps=None):
+def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_steps=None, model=None, action=None):
     """工具指示器 v2 的结构化事件(与旧 tool/tool-done 并行发,老前端忽略即可)。
     前端 rc-toolchip 用 name 判类型/颜色、用 task_id 继续轮询后台步骤、用 brief 填方块。"""
     d = {"name": name, "label": label, "status": status, "args": args or {}}
@@ -3316,7 +3316,11 @@ def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_ste
         d["sec"] = sec
     if sub_steps:   # 137(用户):工具内部又调了别的工具/模型 → 它们是**外层卡的步骤**(长条里滚 + 流程图节点),不另起一张卡
         d["sub_steps"] = [{"label": x.get("label", ""), "detail": (x.get("detail") or "")[:600],
-                           "model": x.get("model"), "sec": x.get("sec")} for x in sub_steps][:12]
+                           "model": x.get("model"), "action": x.get("action"), "sec": x.get("sec")} for x in sub_steps][:12]
+    if model:   # 139(用户):这一步用了哪个模型 / 哪个动作预设 → 详情窗要显示"模型选择"
+        d["model"] = model
+    if action:
+        d["action"] = action
     if isinstance(res, dict):
         if res.get("task_id"):
             d["task_id"] = res["task_id"]
@@ -3937,7 +3941,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
-                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"))
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
                 text_part = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 if vision:   # see_page:把渲染图作为 image block 喂回(大脑 sonnet 能看图)
                     content = [{"type": "text", "text": text_part}]
@@ -4134,7 +4138,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
-                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"))
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
                 feed = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 uparts = [{"text": feed}]
@@ -4253,7 +4257,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
-                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"))
+                yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
                 if vision:   # see_page 等出图:turn 输入的 localImage 在多轮语境未验证 → 稳妥先经视觉模型转文字喂回
                     try:
                         _vd = _vision_for(ctx, vision, note="(工具产出的页面/图像渲染,请完整转述内容供编排模型使用)")
