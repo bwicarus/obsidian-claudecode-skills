@@ -745,6 +745,61 @@ window._favOpenPicker = function () {
     else { body.textContent = '（点左上角 ✏️ 写笔记 · 自动保存,无需按钮）'; }
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);   // 虚拟页:显示态校准手写层尺寸(真 .page-wrap 无 .pdf-upage 祖先 → 跳过)
   }
+  // 任务运行时:AI 建的插入页是**真往 PDF 文件里插了一页** —— 浏览器里加载的 PDF 已经过时
+  //   (页数都变了),光 jumpWithBack 只会跳到**旧文档**的那一页,新纸根本不在里面。必须重载。
+  //   ⚠ 必须挂 window:client_action 是 `window[fn].apply(...)` 找函数的(模块内的声明它够不到)。
+  // ★ AI 遥控前端**建一张任务纸**(听写等)。
+  //   ⚠ 建页**必须走前端已有的乐观新建链路**:立刻插一个虚拟页、马上可用,PDF 写回在后台异步跑,
+  //     **不刷新、不卡顿**(CLAUDE.md「乐观新建即全功能页」)。
+  //     我一开始让后端**同步**插页再整本书重载 —— 大书上要卡好几秒,而且把浏览器里那份 PDF 作废了。
+  //     用户拍板:前端才是建页的执行者,AI 只负责遥控 + 注入内容。
+  window.__upStartTask = function (spec) {
+    try {
+      spec = spec || {};
+      if (_upEditing || document.body.classList.contains('up-editing')) { alert('先完成当前正在编辑的页'); return; }
+      var after = 0;
+      try { after = _upCurPage() | 0; } catch (e) {}
+      if (after < 0) after = 0;
+      var tempId = 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      var rec = { id: tempId, page: 0, title: spec.title || '任务', md: '', mode: 'overlay',
+                  md_ver: 0, synced_ver: 0, _temp: true };
+      var tmp = document.createElement('div');
+      tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = tempId;
+      if (!_upPlace(tmp, after, null)) { alert('请先翻到要插纸的位置附近'); return; }
+      try { tmp.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) {}
+      _upTempEls[tempId] = tmp;
+      // 与 _upCreate 的差别:**不进编辑态**(这是任务纸,不是笔记本),先显示"生成中"
+      _upMountOverlay(rec, tmp);
+      var mini = _upMini('正在生成' + (spec.title || '任务纸') + '…');
+      RC.reqJson('POST', UP_API, { file: UP_FILE, after: after, title: spec.title || '', md: '' })
+        .then(function (d) {
+          if (!(d && d.ok && d.job_id)) { _upMiniEnd(mini, '新增失败', true); _upTempFail(tempId); return; }
+          _upWatchCreate(d.job_id, tempId, rec, mini);
+          // 绑到真 id 之后再起 run —— 运行时要真页号才能按 bbox 裁图
+          var iv = setInterval(function () {
+            var real = rec.id && String(rec.id).indexOf('tmp_') !== 0 ? rec : null;
+            if (!real || !rec.page) return;
+            clearInterval(iv);
+            RC.reqJson('POST', '/pdf/api/run-start',
+              { file: UP_FILE, kind: spec.kind || 'dictation', upage: rec.id, page: rec.page,
+                params: spec.params || {} })
+              .then(function (r) {
+                if (!(r && r.ok)) { _upRunHint(rec, '起任务失败:' + ((r && r.error) || '?')); return; }
+                // 服务端已把 blocks 写进 sidecar → 重新渲染这一页
+                RC.reqJson('GET', UP_TEXT_API + '?file=' + encodeURIComponent(UP_FILE)).then(function (g) {
+                  var fresh = ((g && (g.pages || g.items)) || []).filter(function (x) { return x.id === rec.id; })[0];
+                  if (fresh) { for (var k in fresh) rec[k] = fresh[k]; }
+                  var ov = tmp.querySelector('.up2-content') || (document.querySelector('[data-page-num="' + rec.page + '"] .up2-content'));
+                  if (ov) _upRenderOverlay(ov, rec);
+                }).catch(function () {});
+              }).catch(function () {});
+          }, 400);
+          setTimeout(function () { clearInterval(iv); }, 120000);   // 兜底:2 分钟没绑上就放弃
+        })
+        .catch(function () { _upMiniEnd(mini, '网络错误', true); _upTempFail(tempId); });
+    } catch (e) { try { console.warn('[task] __upStartTask 失败', e); } catch (e2) {} }
+  };
+
   // ══════════ 任务运行时:页面块渲染(text / blank / button)══════════
   //   设计见 references/adr-task-runtime.md。三个坑一次绕开:
   //   ① 覆盖层拦手势用**冒泡非捕获**(memory overlay-gate-use-bubble-not-capture:
@@ -754,7 +809,7 @@ window._favOpenPicker = function () {
   function _upRunEvent(rec, ev) {
     if (!rec.run_id) return;
     try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
-    RC.reqJson('/pdf/api/run-event', { method: 'POST', body: { rid: rec.run_id, event: ev } })
+    RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })   // ⚠ 签名是 (method,url,body)
       .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); })
       .catch(function () {});
   }
@@ -815,8 +870,7 @@ window._favOpenPicker = function () {
           Math.abs(old[2] - nb[2]) > 2e-3 || Math.abs(old[3] - nb[3]) > 2e-3) { b.rect = nb; changed = true; }
     });
     if (!changed) return;
-    RC.reqJson('/pdf/api/userpages', { method: 'PATCH',
-      body: { file: FILE_REL, id: rec.id, blocks: rec.blocks } }).catch(function () {});
+    RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: rec.blocks }).catch(function () {});   // ⚠ UP_TEXT_API=存边车;UP_API 是**真改 PDF 的 job**,打错会误触发改页
   }
   // ③ 回前台对齐状态机(SSE 不可见时丢事件 → 不能只靠推送)
   document.addEventListener('visibilitychange', function () {
@@ -824,7 +878,7 @@ window._favOpenPicker = function () {
     document.querySelectorAll('[data-up-run]').forEach(function (ov) {
       var rid = ov.getAttribute('data-up-run');
       if (!rid) return;
-      RC.reqJson('/pdf/api/run-status?rid=' + encodeURIComponent(rid))
+      RC.reqJson('GET', '/pdf/api/run-status?rid=' + encodeURIComponent(rid))
         .then(function (d) { if (d && d.ok) { var h = ov.querySelector('.up2-run-hint'); if (h) h.textContent = d.hint || ''; } })
         .catch(function () {});
     });

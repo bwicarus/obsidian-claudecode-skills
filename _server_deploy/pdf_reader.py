@@ -1037,39 +1037,34 @@ def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
         _BG_RENDERS.discard(key)
 
 
-def create_userpage_for_tool(rel: str, after: int, title: str = ""):
-    """给 AI 工具用的「新建一张插入页」——**同步**跑完插页 job,立刻返回 {ok, id, page}。
+# 141:create_userpage_for_tool(后端**同步**插页)已删 —— 用户拍板:建页归前端。
+#   前端有乐观新建链路(立刻出纸、后台写回、不刷新);后端同步插页会在大书上卡好几秒,
+#   还让浏览器里那份 PDF 作废(页数变了)。AI 只遥控(__upStartTask)+ 注内容(run-start)。
 
-    为什么同步:工具调用要立刻拿到页号才能起运行时(否则得再引一层轮询)。
-    插页是真改 PDF 文件(delete/insert + 14 类按页号锚定的存储迁移),有单书互斥 _INSPAGE_MUTEX,
-    所以这里**直接跑 job 函数**、不起线程 —— 大书会慢几秒,工具调用本来就是"执行中"状态,可接受。
-    ⚠ 复用 /api/pdf-insert-page 的同一套安全流程(备份 + journal + 锚迁移),别另写一份。
+
+@bp.route("/api/run-start", methods=["POST"])
+def pdf_api_run_start():
+    """前端**建完页之后**回调这里起 run(kind/params/upage/page)。
+
+    ⚠ 为什么建页在前端(用户拍板):前端已有一套**乐观新建**链路(立刻插一个虚拟页、马上可用,
+      PDF 写回在后台异步跑)—— 不刷新、不卡顿。我一开始让后端**同步**插页再整本书重载,
+      大书上要卡好几秒,还把浏览器里那份 PDF 作废了。**前端是建页的执行者,AI 只遥控 + 注内容。**
     """
-    import fitz
-    ap = _safe_vault_path(rel)
-    if not ap or not ap.exists() or ap.suffix.lower() != ".pdf":
-        return {"ok": False, "error": "文件不存在或不是 PDF"}
-    sha = _book_sha(ap)
-    if _up_journal_path(sha).exists():
-        return {"ok": False, "error": "上次改页中断(journal 残留),先人工核对备份"}
+    import task_runtime as TR
+    b = request.get_json(silent=True) or {}
+    rel = (b.get("file") or "").strip()
+    upage = str(b.get("upage") or "")[:20]
     try:
-        n = fitz.open(str(ap)).page_count
-    except Exception as ex:
-        return {"ok": False, "error": "打不开 PDF:%s" % ex}
-    after = max(0, min(int(after or 0), n))
-    rid = "u_" + _uuid.uuid4().hex[:8]
-    payload = {"after": after, "title": title[:120], "md": "",
-               "record_op": {"op": "add", "id": rid, "page": after + 1, "mode": "overlay",
-                             "title": title[:120], "md": ""}}
-    jid = "j_" + _uuid.uuid4().hex[:8]
-    _inspage_job(jid, "insert", rel, ap, payload)   # ★ 同步跑(不起线程)
-    j = _JOBS.get(jid) or {}
-    if j.get("status") != "done":
-        return {"ok": False, "error": (j.get("error") or "插页失败")[:120]}
-    rec = next((x for x in _upages_load(rel) if x.get("id") == rid), None)
-    if not rec or not isinstance(rec.get("page"), int):
-        return {"ok": False, "error": "插页后没找到记录"}
-    return {"ok": True, "id": rid, "page": rec["page"]}
+        page = int(b.get("page") or 0)
+    except Exception:
+        page = 0
+    kind = str(b.get("kind") or "")[:20]
+    if not (rel and upage and page and kind):
+        return jsonify({"ok": False, "error": "缺 file/upage/page/kind"}), 400
+    params = dict(b.get("params") or {})
+    params.update({"upage": upage, "page": page})
+    return jsonify(TR.start(kind, params, {"file_rel": rel, "page": page,
+                                           "_uid": session.get("user_id")}))
 
 
 @bp.route("/api/run-event", methods=["POST"])

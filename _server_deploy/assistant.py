@@ -2968,35 +2968,29 @@ def _mark_source_highlight(ctx, color):
 
 
 def _t_start_dictation(args, ctx):
-    """建一张听写纸 + 起运行时。**这是 LLM 在整个听写里唯一的一次参与(出题)**;
-    之后的「念一个 → 等你写 → 念下一个 → 批改」全由 task_runtime 的状态机跑,
-    LLM 不参与循环(见 references/adr-task-runtime.md 的铁律一)。"""
+    """出题 + **遥控前端**建一张听写纸。
+
+    ⚠ **不在后端建页**(用户拍板):前端已有一套乐观新建链路(立刻插一个虚拟页、马上可用,
+      PDF 写回后台异步跑)—— 不刷新、不卡顿。后端同步插页会在大书上卡好几秒,
+      还会让浏览器里那份 PDF 作废(页数变了)。前端建完页会回调 /pdf/api/run-start 起运行时。
+
+    这是 LLM 在整个听写里**唯一的一次参与**(出题);之后的「念一个 → 等你写 → 念下一个 → 批改」
+    全由 task_runtime 的状态机跑(见 references/adr-task-runtime.md 的铁律一)。
+    """
     words = [str(w).strip() for w in (args.get("words") or []) if str(w).strip()][:50]
     if not words:
         return {"error": "没给要听写的词(args.words)"}
     rel = (ctx or {}).get("file_rel") or ""
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "听写目前只支持 PDF 阅读器(EPUB 插入页是虚拟段,坐标系不同,还没做)"}
-    try:
-        page = int((ctx or {}).get("page") or 0)
-    except Exception:
-        page = 0
-    if not page:
-        return {"error": "不知道在第几页"}
-    import pdf_reader as P
-    import task_runtime as TR
-    # 在当前页**后面**插一张纸(走已有的插入页链路:真插 PDF 页 + overlay 即时显示)
-    r = P.create_userpage_for_tool(rel, after=page, title=(args.get("title") or "听写"))
-    if not r.get("ok"):
-        return {"error": "建听写纸失败:" + str(r.get("error"))[:100]}
-    run = TR.start("dictation", {"words": words, "title": args.get("title") or "听写",
-                                 "upage": r["id"], "page": r["page"]},
-                   {"file_rel": rel, "page": r["page"], "_uid": (ctx or {}).get("_uid")})
-    if not run.get("ok"):
-        return {"error": run.get("error")}
-    return {"已生成听写纸": f"{len(words)} 题,在第 {r['page']} 页",
-            "接下来": "点纸上的「▶ 念下一个」开始;系统会逐个念、你手写、最后自动批改。你(AI)不用再管了。",
-            "client_action": {"fn": "jumpWithBack", "args": [r["page"]]},
+    title = (args.get("title") or "听写")[:60]
+    return {"已出题": f"{len(words)} 个词",
+            "接下来": "系统会在你当前位置插一张听写纸(即时出现,不用刷新)。"
+                      "点纸上的「▶ 念下一个」开始:它念一个、你手写一个,最后点「✓ 写完了,批改」。"
+                      "你(AI)不用再管了 —— 循环和批改由系统负责。",
+            "client_action": {"fn": "__upStartTask",
+                              "args": [{"kind": "dictation", "title": title,
+                                        "params": {"words": words, "title": title}}]},
             "silent": True}
 
 
