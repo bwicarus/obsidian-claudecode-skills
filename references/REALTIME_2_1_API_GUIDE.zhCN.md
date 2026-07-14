@@ -888,3 +888,26 @@ env 可覆盖:`AGENT_TASK_MODEL` / `AGENT_TASK_TIMEOUT`(默认 240s)/ `MCP_PUBLI
 语音模型全程 **1 次工具调用**。
 
 ⚠ `state/mcp-headless.json` 含**静态 Bearer token**,600 权限,**不要进 git**。
+
+
+### ⚠ A/B 实测:**worker 不是速度方案,1~3 步的活直接调更快**(用户提出,实测证实)
+
+同一个任务(读当前页 → 挑要点做 Anki 卡):
+
+| | response 数 | 耗时 | 时间线 |
+|---|---|---|---|
+| **A) 语音模型直接调工具** | 3 | **7.8s** | `[2.5s] resp#1 [message+function_call read_page]` → `[2.6s] 执行 0.1s` → `[3.4s] resp#2 [function_call make_anki]` → `[3.4s] 执行 0.1s` → `[5.7s] resp#3 说话` |
+| **B) worker(`do_task`)** | 2~3 | **17s** | 派发 → CLI 冷启 ~2s → ToolSearch 一轮 → read_page → make_anki → 回报 |
+
+**直接调快一倍多。** 而且语音模型**自己就会串链**:`resp#1` 里边说话边调 `read_page`,拿到结果 `resp#2` 直接接着调 `make_anki` —— 工具各 0.1s,几乎零开销。
+worker 的 17s 里大头是**纯开销**:CLI 冷启动 + **强制 ToolSearch 一轮** + opus 每轮 ~4s。**它永远追不上直接调。**
+
+#### 所以 worker 只在这三种情况才值(已写死进 `do_task` 的工具说明,把语音模型的手按住)
+
+1. **≥4 步**的活(「把这一章重点全标出来再逐条做成卡片」)
+2. **探索性**的活 —— 事先不知道要翻几本书/查几次(「找找我读过的书里哪本提过 X」)
+3. **要跑很久**的活(整章处理),不能让用户干等
+
+**其余一律直接调。** 另外两个 worker 独有的好处(跟速度无关):
+- 工具结果**不进语音模型的上下文**(直接调时,`read_page` 的整页正文会永久插进 realtime 会话,之后每次 response 都重算一遍 input)
+- 跑在服务端,**页面切后台/关掉照样跑**
