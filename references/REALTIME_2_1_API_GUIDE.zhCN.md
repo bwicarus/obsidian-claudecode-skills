@@ -677,3 +677,43 @@ MCP 不等于“免费工具调用”：模型读取工具定义、生成调用�
 | 总设置 UI | 设置面板 **AI tab → 🗣 语音·调用前垫话**(`rc-settings.js::_fillFiller`):默认策略 + 自动的耗时阈值 |
 
 ⚠ **动作类工具本来就是单轮,不用管垫话** —— `_SILENT_ACT = {goto_page, highlight, auto_highlight, add_vocab, open_book}`(加 search_image / search_video)成功后标 `silent`,前端**不发第二次 `response.create`**(`rc-voicecall.js`:`if (!_rtcTool._silent) _rtcRespCreate(...)`)。所以「翻页没必要两次」这件事**早就做到了**。
+
+
+## 远程 MCP 托管工具:**跑通了,但省不了钱**(2026-07-14 实测,推翻先前推断)
+
+### 结论先行
+
+**❌ MCP 不能把工具往返变成 1 次 response。** 我先前基于官方 `realtime-mcp` 页(「assistant message 和 response.done 收尾同一个 turn」)推断它能砍一半 —— **实测是错的**。
+
+实测(`scratchpad/rt_mcp.py`,gpt-realtime-2.1-mini + 真实 MCP):
+
+| | |
+|---|---|
+| response#1(0.6s) | items=`['mcp_call']`(或 `['message','mcp_call']`),此时 `mcp_call.output = None` |
+| mcp_call 完成 | **1.9s**(OpenAI → VPS → Pi → 回,网络往返仅 ~1.3s) |
+| response#2(3.1s) | 模型说出真实结果,**in=2898** out=184 |
+| **合计** | **2 次 response** —— 跟客户端 function tool 一样 |
+
+**根因 = 异步函数调用(GA 模型自动开、关不掉)**:模型**不等**工具结果就 `response.done`,结果晚到后落进 conversation,必须再 `response.create` 才会说出来。所以官方 `realtime-mcp` 页那段事件序列描述,**在 realtime 上实际不成立**。
+
+⚠ **还可能更贵**:MCP 工具结果**不经我们截断**直接进上下文。`list_books` 吐 9.8KB JSON(`comp_compressing`/`comp_percent` 等无用字段)→ 第二次 response 的 input 冲到 **2898 token**。我们自己的 function tool 路径有 `out.slice(0, 1800)`。**要用 MCP 就必须先把工具返回瘦身。**
+
+### MCP 真正买到的东西
+
+1. **零客户端代码** —— 工具循环不在浏览器里,页面切后台/关掉也能跑
+2. **少一趟往返** —— OpenAI 直连我们服务器(1.3s),不再 OpenAI→浏览器→Pi→浏览器→OpenAI
+3. **工具定义唯一** —— 跟 claude.ai / ChatGPT 连接器共用同一套
+
+**但动作类工具(翻页/高亮/看画面)本来就不该走 MCP**(要操作用户当前打开的页面),而它们**早就是单轮**(`_SILENT_ACT` 标 silent → 前端不发第二次 `response.create`)。
+
+### 接通过程中踩的三个坑
+
+1. **`server_url` 不能用 Funnel 的 `:8443`** —— OpenAI 不接受非标准端口,`mcp_list_tools.failed` 且我们服务器日志里**一条请求都没有**。必须用 **`https://bwicarus.space/mcp`**(VPS 443 → tailnet 反代到 Pi:8766)。
+2. **必须 stateless** —— 原来 `mcp.streamable_http_app()` 是 stateful(SSE 会话)。OpenAI 的 MCP 客户端跟它对不上:日志里每次请求都 `Created new transport` + 夹一个 400,`tools/call` 我们这侧 0.9s 就返回了(直连公网 URL 验证过),但 OpenAI 那边 `mcp_call.output` 恒为 `None`、模型一直"还在等"、最后编书名。
+   → `mcp_server.py` 加 `mcp.settings.stateless_http = True` + `json_response = True`(env `MCP_STATELESS=0` 可回退)。改完立刻通。
+   ⚠ **claude.ai 连接器请复测**(同一个 transport,理论上 stateless 也支持)。
+3. **工具列表跟第一次 response 赛跑** —— `mcp_list_tools` 是懒加载的,`session.update` 后立刻 `response.create`,模型手上还没有工具 → 只能瞎编。**要么等 ~2s,要么第二轮才可靠。**
+
+### 认证
+
+`authorization` 字段直接塞**静态 token**(`~/.config/mcp-http-token`)即可 —— `mcp_oauth.py` 的门禁是「静态 token 或 OAuth token 二者其一」,不用走 OAuth 舞蹈。
