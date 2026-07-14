@@ -782,17 +782,14 @@
     try { VC() && VC().css && VC().css(); } catch (e) {}   // 131:样式必须在,否则裸 <button> = 白块
     var hd = host.querySelector('.vc-if-hd') || host.querySelector('.vc-card-hd');
     if (!hd || hd.querySelector('.vc-flowb')) return;
-    var b = document.createElement('button');
-    b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
-    b.innerHTML = ICON.flow;
     var box = document.createElement('div');
     box.className = 'vc-flowbox'; box.hidden = true;
     var view = { el: box, inflow: true, idx: 0, open: {}, host: 1 };
-    b.addEventListener('click', function (ev) {
-      ev.stopPropagation();
+    // 141:走同一个创建点(RC.toolChip.flowBtn)—— 别再留两套建按钮的代码
+    var b = RC.toolChip.flowBtn(function () {
       box.hidden = !box.hidden;
-      b.classList.toggle('on', !box.hidden);
       if (!box.hidden) paintFlow(chip, view);
+      return !box.hidden;
     });
     hd.appendChild(b);
     host.appendChild(box);
@@ -830,14 +827,28 @@
     //   ⚠ 首行 VC().css() 不可省:历史回放时通话 UI 可能还没建过 → 样式没注入 → 裸 <button> = 白块。
     flowBtn: function (onToggle) {
       try { VC() && VC().css && VC().css(); } catch (e) {}
-      var b = document.createElement('button');
-      b.type = 'button'; b.className = 'vc-flowb'; b.title = '看这个结果是怎么来的(工具流程)';
+      // ⚠ 用 <span> 而**不是** <button>(memory: ios-button-white-block)。
+      //   实测(playwright 经 nginx 打真页面):headless Chromium 下 `<button class="vc-flowb">` 渲染**完全正常**
+      //   —— bg rgba(255,255,255,.12) / 22px / 圆角50% / appearance:none / SVG 在,CSS 规则也确在 document 里。
+      //   但用户的 Safari 上它就是个白方块 = **Safari 顽固保留原生 push-button 外观**,
+      //   而 headless Chromium **测不出 iOS/Safari 渲染**(memory 原话)。
+      //   span 上根本不存在原生按钮外观 → 结构性杜绝,不跟 UA 样式较劲。
+      //   ⚠ 别改回 <button>:Chromium 上"看起来没问题"不能作为证据。
+      var b = document.createElement('span');
+      b.className = 'vc-flowb';
+      b.setAttribute('role', 'button');
+      b.setAttribute('tabindex', '0');
+      b.title = '看这个结果是怎么来的(工具流程)';
       b.innerHTML = ICON.flow;
-      b.addEventListener('click', function (ev) {
+      var _fire = function (ev) {
         ev.stopPropagation();
         var on = false;
         try { on = !!onToggle(); } catch (e) {}
         b.classList.toggle('on', on);
+      };
+      b.addEventListener('click', _fire);
+      b.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); _fire(ev); }
       });
       return b;
     },
