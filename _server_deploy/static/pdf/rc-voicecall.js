@@ -2908,6 +2908,10 @@
             _rtc.ctl = !!(m0.payload && m0.payload.ok);
             if (_rtc.ctl) {   // 122:重挂成功——重试清零+快照重推(relay 新会话不知道选中/墨迹/页码)
               _rtc.ctlRetry = 0;
+              // 133:这句"重推"以前是空转的——__vcSyncNow 会被 syncInk/syncState 的模块级指纹挡下(值没变),
+              // relay 重启后 book 是全新的却永远拿不回墨迹/选中(see_ink 因此没素材)。清指纹才推得动。
+              // 安全性:_rtc._inkFp/_rtc.sel 不动 → 同一份墨迹重推只喂 relay,不会再朝模型注一遍"笔迹变了"。
+              _stateFp = null; _inkFp = '';
               try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e2) {}
       try { _ttsIrqSync(); } catch (e2) {}   // 131:接通后按当前档位/代念开关,自动进入「可打断代念」
             }
@@ -2974,6 +2978,11 @@
     var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
+    // 133(用户实测"圈完问这是什么,它说看不到"):上面清的是 _rtc.* 的注入指纹,但**发不发**由 syncInk/syncState
+    // 各自的模块级指纹(_inkFp/_stateFp)说了算——它们只在 WS 版 start()(:3104)清过,rtcStart 这条路一直漏。
+    // 后果:同一页面第二通电话起,墨迹/选中的指纹跟上一通一样 → syncInk 直接 return → 新会话**永远收不到**
+    // 笔迹状态消息(relay 的 book.ink_strokes 也是空的)→ 模型不知道纸上有圈画,只能答"你把截图发一下"。
+    _stateFp = null; _inkFp = '';
     if (toggle._opts) { toggle._opts._syncedPage = 0; toggle._opts._vtFp = ''; }   // 123:同款清零(RTC 重连同风险)
     try {
       setSt('连接中(WebRTC)…');

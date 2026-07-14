@@ -2402,7 +2402,9 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
 OPENAI_RT_CALL_URL = "wss://api.openai.com/v1/realtime?call_id="
 
 
-_RTC_CTL_LIVE = {}   # 93:uid → 最近挂上的 call_id(双 call 并存取证)
+_RTC_CTL_LIVE = {}   # 93/133:uid → {call_id: 挂上时刻} —— **真** 并发注册表(挂上加、关闭删)。
+# ⚠ 133:旧版是 uid → 最近 call_id 且**只写不删**,于是"同 uid 双 call 并存"对**每一次新通话**都报警
+#   (哪怕上一通半小时前就 session_expired 了)= 纯假阳性,把根因排查带沟里过一次。判并发只看 len(dict)。
 _GROK_CONV = {"id": "", "ts": 0.0}   # 121:grok resumption 续接钥匙(跨连接;30min 内重连带 conversation_id=历史无缝恢复)
 
 
@@ -2484,13 +2486,15 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         await bws.close()
         return
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
-    # 93(双回答事故取证):同 uid 已有活跃 ctl 还没退→双 call 并存(前端双拨/多设备)。只告警留证据,不踢(多设备合法)。
+    # 93/133(双回答事故取证):登记到真并发注册表;**只有此刻别的 call 还挂着**才是真并存(前端双拨/多标签/多设备)。
+    _uid_m = call_id.split("_")[1] if call_id.startswith("rtc_") else ""
     try:
-        _uid_m = call_id.split("_")[1] if call_id.startswith("rtc_") else ""
-        _old_c = _RTC_CTL_LIVE.get(_uid_m)
-        if _old_c and _old_c != call_id:
-            sys.stderr.write(f"[rtc-ctl] ⚠ 同 uid 双 call 并存: 旧={_old_c[:12]} 新={call_id[:12]}(前端双拨或多设备)\n")
-        _RTC_CTL_LIVE[_uid_m] = call_id
+        _live = _RTC_CTL_LIVE.setdefault(_uid_m, {})
+        _others = [c for c in _live if c != call_id]
+        if _others:
+            sys.stderr.write(f"[rtc-ctl] ⚠ 真·同 uid 多 call 并存({len(_others) + 1} 条): "
+                             f"在挂={[c[:12] for c in _others]} 新={call_id[:12]}\n")
+        _live[call_id] = time.time()
     except Exception:
         pass
     book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": "", "_over": (not _bok)}   # _over:超支后 sideband 掐生成(入口已超支=从首轮就掐,含 #290 重连场景)
@@ -2772,7 +2776,17 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 except Exception:
                     a = {}
                 asyncio.create_task(_tool(name, a if isinstance(a, dict) else {}, ev.get("call_id") or "", epoch["n"]))
+            elif t == "conversation.item.created":
+                # 133 探针:前端经 data channel 直发的**系统状态消息**(墨迹/选中)relay 看不见发送侧,
+                # 但 OpenAI 会把 item.created 广播给本 call 的所有连接——这里就能确认它到底进没进对话。
+                _it = ev.get("item") or {}
+                if _it.get("role") == "system":
+                    _c0 = (_it.get("content") or [{}])[0].get("text") or ""
+                    sys.stderr.write(f"[rtc-ctl] ⇣sys call={call_id[:12]} 「{_c0[:60]}」\n")
             elif t == "response.created":
+                # 133 取证:谁在开火。同一 call 一个用户轮出现两条 created = 多发了 response.create(自动挡之外还有人手发);
+                # 两个 call 各一条 = 前端真的开了两路通话。日志里一眼分得开。
+                sys.stderr.write(f"[rtc-ctl] created call={call_id[:12]} resp={(ev.get('response') or {}).get('id', '')[:14]}\n")
                 # 安全(#284 加固):超支后 fe>=4 前端仍会经自己的 data channel 直发 response.create——
                 # 本 sideband 对同 call_id 发 response.cancel 即可掐掉这一轮生成(输出音频=大头成本)。
                 if book.get("_over"):
@@ -2785,7 +2799,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 u = r0.get("usage") or {}
                 otd = u.get("output_token_details") or {}
                 _oa_log_usage(u, engine="openai_rtc", span=_span, resp_id=(ev.get("response") or {}).get("id") or "")   # 284/P3:usage 记账归 relay(sideband 自读,不再依赖前端上报)
-                sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
+                sys.stderr.write(f"[rtc-ctl] done call={call_id[:12]} in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
                 # 安全(#284 加固):WebRTC 直连路径也在每轮记账后复查预算。媒体是浏览器↔OpenAI 直连、
@@ -2822,7 +2836,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     book["last_q"] = _tx0[:500]   # route 档:生成引擎要用户原话(intent 只是概括)
                 # 指南§7.5/:258:转写是独立账单(usage 在本事件里),不混进 response.done——先记日志供估费(正式入账=#284)
                 u2 = ev.get("usage") or {}
-                sys.stderr.write(f"[rtc-ctl] 转写 usage={json.dumps(u2)[:120]}\n")
+                # 133:带 call 归属——分辨"一个会话答两次" vs "两个通话各答一次"(每个会话对同一句话只会有 1 条转写)
+                sys.stderr.write(f"[rtc-ctl] 转写 call={call_id[:12]} 「{_tx0[:40]}」 usage={json.dumps(u2)[:80]}\n")
             elif t == "error":
                 e0 = ev.get("error") or {}
                 if e0.get("code") == "conversation_already_has_active_response":
@@ -2867,6 +2882,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 book["_dirty3"] = True
             elif t == "ink":
                 strokes = j.get("strokes") or []
+                sys.stderr.write(f"[rtc-ctl] ⇡ink call={call_id[:12]} p{j.get('page')} 笔画={len(strokes)}\n")   # 133 探针:前端到底推没推墨迹
                 book["ink_strokes"] = strokes[:60]
                 book["view_shot"] = j.get("shot")   # EPUB 笔迹合成图(前端 syncInk 拍;PDF/空=None 自动清)→ see_ink 用
                 book["_dirty3"] = True
@@ -2887,6 +2903,14 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         for p_ in pending:
             p_.cancel()
     finally:
+        try:   # 133:退出并发注册表(不删=假阳性告警的老根源)
+            _lv = _RTC_CTL_LIVE.get(_uid_m)
+            if _lv is not None:
+                _lv.pop(call_id, None)
+                if not _lv:
+                    _RTC_CTL_LIVE.pop(_uid_m, None)
+        except Exception:
+            pass
         try:
             await ows.close()
         except Exception:

@@ -10,7 +10,11 @@ WorkingDirectory=/home/bwicarus/webapp
 EnvironmentFile=/home/bwicarus/webapp/.env
 # 生产 WSGI:gunicorn 替代 Flask dev server。单 worker(保住进程内 _JOBS 断连恢复 + 后台线程共享内存,
 # 等同原 threaded=True)+ gthread 多线程并发 + timeout 600(放过慢 AI/翻译) + access/error log 入 journald。
-ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 8 --worker-class gthread --timeout 600 --graceful-timeout 30 --bind 127.0.0.1:5000 --access-logfile - --error-logfile - app:app
+# 133(全站宕机事故):--threads 8 → 32。SSE(/pdf/api/reader-events)每条流独占 1 个 gthread 线程,
+# 8 条就能把线程池吃光 → 全站零响应。线程数只是"桶更大",真正的护栏是 reader_events.py 里的舱壁
+# (_SSE_MAX_TOTAL=12 / _SSE_MAX_PER_UID=4)。⚠ 改这里的 --threads 必须同步复查那两个常数,
+# 保证 _SSE_MAX_TOTAL 显著小于线程数,否则舱壁形同虚设。
+ExecStart=/usr/bin/python3 -m gunicorn --workers 1 --threads 32 --worker-class gthread --timeout 600 --graceful-timeout 30 --bind 127.0.0.1:5000 --access-logfile - --error-logfile - app:app
 ExecReload=/bin/kill -s HUP $MAINPID
 Restart=always
 RestartSec=5
