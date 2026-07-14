@@ -2498,6 +2498,8 @@ def _is_asr_ghost(tx: str):
 #   万一是后者,`call_id.split("_")[1]` 对所有用户都相同 → 接管逻辑会去**踢掉别人的通话**。
 #   所以:uid 只认 webapp 用共享密钥签发的票据;**验不过就绝不踢人**(只告警),宁可不去重也不误伤。
 VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
+# 141:喂给 AI 的图落盘(按内容 sha1 去重);part 里只带 URL,webapp 的 /pdf/api/toolshot/<name> 提供
+TOOLSHOT_DIR = Path("/home/bwicarus/claude/state/reader-toolshots")
 
 
 def _ticket_secret() -> bytes:
@@ -2862,13 +2864,25 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         # 141(用户):视觉类工具(see_ink/see_page/see_figure)**把真正喂给 AI 的那张图也带给前端**,
         #   在工具卡的「AI 请求」节点里显示(可点开放大)。以前前端只看到 "(无参数)" —— 到底喂了什么图
         #   全靠猜,笔迹裁歪了也无从发现。图本就已经过网发给 OpenAI 了,再镜像一份到本机浏览器成本可忽略。
+        # 141(ADR §4):**落盘 + 只发 URL**,绝不发 base64 ——
+        #   b64 既撑爆 ctl WS 的 payload,又会撑爆历史 JSON(单张 10-50 万字节,几十轮就废了)。
         _vshot = []
         try:
+            TOOLSHOT_DIR.mkdir(parents=True, exist_ok=True)
             for _v in (vis or [])[:2]:
                 _b64 = (_v or {}).get("b64") or ""
-                if _b64 and len(_b64) < 1_500_000:   # ~1.1MB 原图上限,超大的不镜像(别撑爆 ctl WS)
-                    _vshot.append({"media_type": _v.get("media_type") or "image/png", "b64": _b64})
-        except Exception:
+                if not _b64:
+                    continue
+                _raw = base64.b64decode(_b64)
+                _mt = (_v.get("media_type") or "image/png")
+                _ext = ".jpg" if "jpeg" in _mt or "jpg" in _mt else ".png"
+                _nm = hashlib.sha1(_raw).hexdigest()[:24] + _ext
+                _fp = TOOLSHOT_DIR / _nm
+                if not _fp.exists():
+                    _fp.write_bytes(_raw)
+                _vshot.append("/pdf/api/toolshot/" + _nm)
+        except Exception as _ex:
+            sys.stderr.write(f"[rtc-ctl] toolshot 落盘失败: {str(_ex)[:80]}\n")
             _vshot = []
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,

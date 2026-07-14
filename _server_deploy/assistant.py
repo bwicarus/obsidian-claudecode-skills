@@ -504,7 +504,8 @@ def _convo_append(uid, role, content, meta=None):
         msgs = _convo_load(uid)
         rec = {"role": role, "content": content, "ts": int(time.time())}
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card"):   # clip=语音录音;card=87 结构化卡(历史回放仍是卡)
+            # ⚠ 白名单:没列进来的 meta 字段会被**静默丢掉**。141 的 parts 忘了加就等于没落库。
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card", "parts"):   # clip=语音录音;card=87 结构化卡;parts=141 轮次容器(历史回放走同一渲染器)
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -5481,6 +5482,17 @@ def assistant_log_external():
             m2 = dict(meta)
             if role == "assistant" and b.get("clip"):   # 66:通话录下的该轮语音,历史回放用
                 m2["clip"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["clip"]))[:40]
+            # 141(轮次容器):落全量 part 结构 → 历史回放用**同一个渲染器**复原,不再退化成纯文本。
+            #   ⚠ 体积闸:图必须走 URL 不能走 base64(单张 10-50 万字节,几十轮就把历史撑爆;见 ADR §4)。
+            if role == "assistant" and isinstance(b.get("parts"), list):
+                try:
+                    _pj = json.dumps(b["parts"], ensure_ascii=False)
+                    if len(_pj) < 24000:
+                        m2["parts"] = b["parts"]
+                    else:
+                        sys.stderr.write(f"[log] parts 过大({len(_pj)}字)已丢弃 —— 图是不是又走了 base64?\n")
+                except Exception:
+                    pass
             if card:
                 m2["card"] = card
             _convo_append(uid, role, txt[:8000], m2)

@@ -541,7 +541,7 @@ def _epub_js_v():
     mt = 0
     for name in ("epub-html.js", "epub-styles.css", "rc-ink.js", "rc-core.js", "rc-md.js",
                  "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
-                 "rc-voicecall.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
+                 "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
             try:
@@ -566,7 +566,7 @@ def _pdf_shared_js_v():
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
                  "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
-                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-toolchip.js", "pdf-adapter.js",
+                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -1035,6 +1035,24 @@ def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
         fut.add_done_callback(lambda f: _BG_RENDERS.discard(key))
     except Exception:
         _BG_RENDERS.discard(key)
+
+
+@bp.route("/api/toolshot/<name>")
+def pdf_api_toolshot(name):
+    """141(ADR §4):提供「真正喂给 AI 的图」(see_ink/see_page/see_figure 的合成图)。
+    relay 按内容 sha1 落盘到 state/reader-toolshots/,轮次容器的 part 里只带本 URL ——
+    b64 既撑爆 ctl WS,又会撑爆历史 JSON(单张 10-50 万字节)。
+    鉴权:/pdf 整个前缀已由 app.py 的 PROTECTED_PREFIXES + before_request 挡住,路由内不再自查
+    (pdf_reader 里所有路由都是这个约定 —— 我一开始写了个 _logged_in(),但这个函数在本模块根本不存在)。"""
+    if not re.fullmatch(r"[0-9a-f]{6,40}\.(jpg|png)", name or ""):   # 路径安全:只认 sha1 十六进制 + 白名单扩展名
+        return jsonify({"ok": False}), 400
+    d = Path("/home/bwicarus/claude/state/reader-toolshots")
+    f = d / name
+    if not f.exists():
+        return jsonify({"ok": False, "error": "not found"}), 404
+    r = send_file(str(f), mimetype=("image/jpeg" if name.endswith(".jpg") else "image/png"))
+    r.headers["Cache-Control"] = "public, max-age=31536000, immutable"   # 内容寻址 → 可永久缓存
+    return r
 
 
 @bp.route("/api/page-image")

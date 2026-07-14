@@ -136,12 +136,23 @@
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
       'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
-      // 141:工具卡里「喂给 AI 的图」缩略图。卡片本体复用既有 .vc-if/.vc-if-hd,放大复用既有 .fig-lightbox
-      //     —— 不另造卡片、不另造灯箱(用户拍板:复用之前设计的卡片,别自己新设计一套)。
-      '.tc-vis{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 4px}' +
-      '.tc-vis img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
-        'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block}' +
-      '.tc-vis-cap{font-size:11px;color:#7f92b8;margin-bottom:6px}' +
+      // 141 轮次容器(rc-turncard.js;设计见 references/adr-turn-container.md):
+      //   容器本体复用既有气泡/结果卡外观(.asst-a / .vc-if / .vc-if-hd),流程按钮复用 .vc-flowb,
+      //   看大图复用 .fig-lightbox —— 一律不另造(用户拍板:复用之前设计的,别自己新设计一套)。
+      '.rc-turn .rc-turn-bd>.rc-part+.rc-part{margin-top:8px}' +
+      '.rc-turn.vc-if .rc-turn-bd{padding-top:2px}' +
+      '.rc-part-cardin{padding:0!important;background:transparent!important;border:none!important;box-shadow:none!important}' +
+      '.rc-turn-flow{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12);font-size:12px;color:#9fb0cf}' +
+      '.rc-flow-meta{color:#7f92b8;margin-bottom:6px}' +
+      '.rc-flow-node{padding:6px 0;border-bottom:0.5px solid rgba(255,255,255,.07)}' +
+      '.rc-flow-node:last-child{border-bottom:none}' +
+      '.rc-flow-h{color:#b9a8ff;font-weight:600;margin-bottom:4px}' +
+      '.rc-flow-args{color:#7f92b8;word-break:break-all;font-size:11px}' +
+      '.rc-flow-step{color:#8fa0c0;font-size:11px}' +
+      '.rc-flow-r{margin-top:4px}' +
+      '.rc-flow-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
+        'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block;margin-bottom:2px}' +
+      '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-x svg{width:10px;height:10px}' +
@@ -581,10 +592,9 @@
     var c = RC.toolChip.create({ tool: p.tool || '', label: p.label || p.tool || '工具' });
     RC.toolChip.progress(c, (p.label || '处理') + '…');
     _chipOf[k] = c; c._k = k; _chipSeq.push(c);
-    // ⚠ 这里**绝不能**抢先 absorb(踩过的坑):天气/搜索/配图/视频这类工具本来就有自己的结果卡,
-    //   由 renderInfo 经 client_action 异步送来、再 absorb 认领 chip。若在这里先把 chip 吸收掉,
-    //   结果卡就认领不到了(absorb 只找"还没被吸收的 chip")→ 变成两张卡、【流程】按钮挂在错的那张上。
-    //   正解:让结果卡按原路认领;**没有结果卡**的工具(see_ink/read_page…)才在 _chipEnd 里升格气泡。
+    // 141(轮次容器):工具运行中 → 容器里显示一条**临时**指示(不是 part、不落库)。
+    //   不再造独立卡片、不再 absorb 认领 —— 那套竞态正是三个卡片 bug 的根源(见 ADR)。
+    try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.busy(window.__asstVoiceTid(), p.label || p.tool || '工具'); } catch (e) {}
     return c;
   }
   window.__vcChipSeqClear = function () { _chipSeq = []; _chipOf = {}; };   // 清空对话 → 待收尾队列一起清
@@ -623,16 +633,17 @@
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
     if (tid) { RC.toolChip.progress(c, '已派发,正在后台执行…'); _chipTrackTask(c, tid); return; }
     RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
-    // 141:给结果卡一点时间来认领(renderInfo 走 client_action,与 tool_status 是两条异步线)。
-    //   到点还没人认领 = 这个工具没有自己的结果卡(see_ink/read_page…)→ 把本轮回答气泡升格成
-    //   「工具调用卡」:前置语 + 工具 + 正答 收进一张,标题栏挂【流程】按钮。
-    setTimeout(function () {
-      try {
-        if (!c || c.absorbed) return;   // 已被结果卡认领 → 别再造第二张
-        var _host = window.__asstVoiceCard && window.__asstVoiceCard(p.label || p.tool || '工具');
-        if (_host && RC.toolChip.absorb) RC.toolChip.absorb([_host]);
-      } catch (e) {}
-    }, 700);
+    // 141(轮次容器):工具完成 → 把它作为一个 **tool part 注入本轮容器**(参数/子步骤/喂给 AI 的图/结果
+    //   全在 part 里)。容器据此长出卡头 +【流程】按钮;part 落库 → 刷新后**照样是卡**(旧实现刷完就没了)。
+    try {
+      if (RC.turnCard && window.__asstVoiceTid) {
+        var _tid = window.__asstVoiceTid();
+        RC.turnCard.idle(_tid);
+        RC.turnCard.addPart(_tid, { kind: 'tool', tool: p.tool || '', label: p.label || p.tool || '工具',
+          args: p.args || {}, steps: p.sub_steps || [], vision: p.vision || [],
+          result: String(p.rag || p.result_brief || '').slice(0, 3000), took_s: p.took_s });
+      }
+    } catch (e) {}
   }
   function _pickTaskId(rag) {   // 工具返回体里带 task_id(voice-tool 的 rag 是 JSON 字符串)
     try { var o = typeof rag === 'string' ? JSON.parse(rag) : rag; return (o && o.task_id) || ''; } catch (e) { return ''; }
@@ -1199,14 +1210,16 @@
     var label = card.title || '搜索结果';
     var th = document.getElementById('asst-thread');
     var _hosts = [];
-    if (th) {
-      var d = _infoCardEl(card);
-      th.appendChild(d);
-      // 141:把本轮的前置语(「我去查一下…稍等」)搬进这张结果卡 —— 用户要的是**一张卡**,
-      //   而不是"一条前置语气泡 + 一张结果卡"分开摆。
-      try { window.__asstVoiceMoveLead && window.__asstVoiceMoveLead(d); } catch (e) {}
-      th.scrollTop = th.scrollHeight; _hosts.push(d);
-    }
+    // 141(轮次容器):结果卡 = 本轮容器里的一个 **card part**。前置语是它前面的 text part,天然同框,
+    //   不需要"搬";也不再需要 absorb 认领 —— 工具细节统一收在容器的【流程】按钮里。
+    var _tcOk = false;
+    try {
+      if (RC.turnCard && window.__asstVoiceTid) {
+        RC.turnCard.addPart(window.__asstVoiceTid(), { kind: 'card', card: card });
+        _tcOk = true;
+      }
+    } catch (e) {}
+    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
       // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
@@ -1227,7 +1240,9 @@
     }
     // 用户设计:这类工具**本来就有自己的结果卡** → 别再让工具指示器另造一张(字幕模式曾一次弹两张)。
     //   把工具卡「吸收」进结果卡:唯一显示的是结果卡,标题栏多一个按钮,点开就是那条线性流程图。
-    try { if (window.RC && RC.toolChip && RC.toolChip.absorb) RC.toolChip.absorb(_hosts); } catch (e) {}
+    // 141:容器在 → 上面已注入 card part,_hosts 为空,absorb 自然 no-op(它对空数组直接 return)。
+    //   只有容器不可用(极端兜底)才会走到旧的"结果卡吸收工具卡"路径。
+    try { if (_hosts.length && window.RC && RC.toolChip && RC.toolChip.absorb) RC.toolChip.absorb(_hosts); } catch (e) {}
     // 87:卡片落库(独立条,content=brief,结构在 meta.card)——刷新/跨设备后历史里仍是可交互的卡
     try {   // ⚠EPUB 自有历史(epub-convo)结构不同,card 落库暂只走 PDF 主历史
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
