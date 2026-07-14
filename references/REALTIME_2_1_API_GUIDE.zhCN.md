@@ -585,3 +585,43 @@ MCP 不等于“免费工具调用”：模型读取工具定义、生成调用�
 - 当前模型页和连接指南已明确使用 `gpt-realtime-2.1`；提示指南标题/部分正文仍以 Realtime 2.0 或 `gpt-realtime-2` 讲解。2.1 属于该推理型 Realtime 系列的更新版，本手册将这些通用提示策略用于 2.1，并以 2.1 模型页为能力与价格依据。
 - 官方成本指南的一处 JSON 示例使用了顶层 `"event": "session.update"`，而 GA 客户端事件的标准 discriminator 是 `"type": "session.update"`；本手册统一使用 `type`。
 - 价格、速率限制和 schema 可能变化；生产代码应校验 `session.updated`、错误事件与官方 API reference，而不是只依赖本文静态值。
+
+---
+
+## 工具调用的计费形态(2026-07-14 实测,别信文档字面)
+
+**背景**:想知道"AI 说『我去查一下』→ 调工具 → 再回答"到底算几次 response(=几次计费)。Grok 那边看起来把工具前后两段输出算成一次。
+
+### 实测结论(真调 `gpt-realtime-2.1-mini`,`scratchpad/rt_probe.py`)
+
+| 场景 | response 数 | 这一次 response 的 output items | output token |
+|---|---|---|---|
+| 指令要求「调工具前先说一句」 | **1** | `message`(语音"我去查一下东京的天气哦。")**+** `function_call` | 104(text 65 + audio 39 + reasoning 23) |
+| 指令要求「静默直接调工具」 | **1** | 只有 `function_call` | 43 |
+
+⚠ **官方文档这句话是不准的**:
+> "**Instead of** immediately returning a text or audio response, the model will **instead** generate a response that contains the arguments…"
+
+实测:模型**完全可以在同一个 response 里既说话又发 function_call**(output 是数组,两种 item 并存)。所以「垫话」**不额外多一次 response**。
+
+### 由此得出的计费真相
+
+一次工具往返 = **恒定 2 次 response**(客户端 function tool 路径):
+1. 说话(可选)+ 产出函数参数 —— 1 次
+2. 工具结果回填(`function_call_output`)后 `response.create` 组织回答 —— 1 次
+
+**官方计费口径**(Managing costs 页):"**The entire conversation is sent to the model for each Response**" / "costs are accrued **when a Response is created**"。
+→ 第 2 次 response = **整段会话按 input 重新计费一遍**。本项目实测均值:**每 response input 5367 token(cached 4115)、output 仅 311** —— **输入是输出的 17 倍**,大头全在 input 重算。
+
+**因此**:
+- 「静默调工具」省的只是那句垫话的 output(61 token ≈ **$0.0008/次**)。84 次工具调用总共省 8 美分 —— **可忽略,是体验取舍不是成本优化**。
+- 想真省一半,唯一路径是 **远程 MCP 托管工具**(`realtime-mcp`:`{type:"mcp", server_url, require_approval:"never"}`)—— 工具由 **OpenAI 服务端自己执行**,`mcp_call` → assistant message → `response.done` **同一 turn 收尾**,客户端**不发第二次 `response.create`**。对应 task #279 + #291。
+  ⚠ MCP 的计费口径官方文档**没写**,上线前必须实测 `response.done.usage` 对账。
+  ⚠ **动作类工具(翻页/高亮/看画面)不适合迁 MCP**(要操作用户当前打开的页面);查询类(web_search / read_page / notes_query / lookup_word)才吃得到红利 → **混合**,不是全迁。
+
+### 本项目真实账单(`state/openai-usage.json` + `state/voice-ledger.db`)
+
+- 累计 **670 个 response,$3.83**(gpt-realtime-2.1-mini 官方价:audio in $10 / cached $0.30 / audio out $20;text in $0.60 / cached $0.06 / text out $2.40 每 1M)
+- 近期 **84 次工具调用 / 220 个 response** → **约 38% 的 response 是"工具回来后再说一次"** 产生的
+- `_OA_RATE`(relay 里的单价表)已经是 mini 官方价,**没问题**;⚠ 别跟同文件里 `_log_usage` 的豆包**人民币**表(10/5/80/300)搞混
+- `usage.output_token_details` 里有 `reasoning_tokens`(23~25/次)—— 2.1 带 reasoning,effort 可配,也是成本项
