@@ -240,6 +240,22 @@
       '.vc-dtl-r.on .ar{transform:rotate(90deg)}' +
       '.vc-dtl-r .bd{padding:2px 11px 11px;font-size:12.5px;line-height:1.6;color:#c9d4e8;word-break:break-word;max-height:230px;overflow:auto}' +
       '.vc-dtl-r .bd pre{white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:11px}' +
+      // 140(用户):工具的说明 / 内部 prompt —— 凡是会进 AI 并实际产生影响的,都能在这里直接改
+      '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
+      '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
+      '.vc-tp-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-tp-f{margin-top:9px}' +
+      '.vc-tp-f label{display:block;font-size:11.5px;color:#c6d2e8;margin-bottom:4px}' +
+      '.vc-tp-f textarea{width:100%;box-sizing:border-box;min-height:74px;resize:vertical;border-radius:10px;padding:8px 10px;' +
+        'background:rgba(0,0,0,.28);border:0.5px solid rgba(255,255,255,.14);color:#e6ecf8;' +
+        'font-size:12.5px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
+      '.vc-tp-f textarea:focus{outline:none;border-color:#7b6cff;box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
+      '.vc-tp-f .st{font-size:10.5px;color:#7f92b8;margin-top:3px}' +
+      '.vc-tp-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}' +
+      '.vc-tp-btns button{flex:1;min-width:78px;border-radius:10px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer;' +
+        'border:0.5px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#dbe4f5;-webkit-appearance:none}' +
+      '.vc-tp-btns button.pri{background:#7b6cff;border-color:#7b6cff;color:#fff}' +
+      '.vc-tp-btns button:active{transform:scale(.96)}' +
       // 侧栏结果卡折叠成一行长条(点头部切换;侧栏没有标记)
       '.vc-if.vc-if-min > *:not(.vc-if-hd){display:none}' +
       '.vc-if.vc-if-min .vc-if-hd{margin-bottom:-4px}' +

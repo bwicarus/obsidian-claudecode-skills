@@ -301,12 +301,82 @@
       if (i === (focusIdx == null ? -1 : focusIdx)) setTimeout(function () { r.querySelector('.h').click(); }, 30);
       body.appendChild(r);
     });
+    if (chip.tool) mountPrompts(body, chip.tool);   // 140:提示词编辑区(改了真的影响 AI)
     function close() { d.classList.remove('on'); setTimeout(function () { try { d.remove(); } catch (e) {} }, 220); }
     d.querySelector('.vc-dtl-x').addEventListener('click', close);
     d.addEventListener('click', function (ev) { if (ev.target === d) close(); });
     document.body.appendChild(d);
     requestAnimationFrame(function () { d.classList.add('on'); });
   }
+  // ── 140(用户设计):工具的**说明**和**内部 prompt** 都能在这里直接改,且**真的**进 AI ──
+  //   三个按钮:保存(写成生效文本) / 设为默认(把当前文本记成"我的默认") / 默认(一键填回我的默认)
+  //   + 恢复出厂(清掉所有覆盖,回系统原始)。
+  function mountPrompts(host, tool) {
+    var wrap = document.createElement('div');
+    wrap.className = 'vc-tp';
+    wrap.innerHTML = '<div class="vc-tp-t">提示词 <em>· 改了会**真的**进 AI 并生效</em></div><div class="vc-tp-body">加载中…</div>';
+    host.appendChild(wrap);
+    fetch('/api/assistant/tool-prompt?tool=' + encodeURIComponent(tool))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var bodyEl = wrap.querySelector('.vc-tp-body');
+        if (!d || !d.ok || !(d.fields || []).length) { wrap.remove(); return; }
+        bodyEl.innerHTML = '';
+        var tas = {};
+        d.fields.forEach(function (f) {
+          var row = document.createElement('div'); row.className = 'vc-tp-f';
+          row.innerHTML = '<label>' + esc(f.label) + '</label><textarea spellcheck="false"></textarea>' +
+            '<div class="st"></div>';
+          var ta = row.querySelector('textarea');
+          ta.value = f.cur || f.mine || f.sys || '';
+          row.querySelector('.st').textContent = f.cur ? '(已改过 · 生效中)' : (f.mine ? '(用的是你的默认)' : '(系统原始)');
+          tas[f.key] = { ta: ta, f: f, st: row.querySelector('.st') };
+          bodyEl.appendChild(row);
+        });
+        var btns = document.createElement('div'); btns.className = 'vc-tp-btns';
+        btns.innerHTML = '<button class="pri" data-op="save">保存并生效</button>' +
+          '<button data-op="setdefault">设为默认</button>' +
+          '<button data-op="filldefault">默认</button>' +
+          '<button data-op="factory">恢复出厂</button>';
+        bodyEl.appendChild(btns);
+        function collect() { var o = {}; Object.keys(tas).forEach(function (k) { o[k] = tas[k].ta.value; }); return o; }
+        function post(op, fields) {
+          return fetch('/api/assistant/tool-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool: tool, op: op, fields: fields || {} }) }).then(function (r) { return r.json(); });
+        }
+        function toast(m) { try { if (window.RC && RC.toast) RC.toast(m); } catch (e) {} }
+        btns.addEventListener('click', function (ev) {
+          var b = ev.target.closest('button'); if (!b) return;
+          var op = b.getAttribute('data-op');
+          if (op === 'filldefault') {   // 「默认」= 把**你设的默认**填回输入框(没设过就填系统原始)
+            Object.keys(tas).forEach(function (k) {
+              var x = tas[k];
+              x.ta.value = x.f.mine || x.f.sys || '';
+              x.st.textContent = x.f.mine ? '(已填回你的默认 · 记得保存)' : '(已填回系统原始 · 记得保存)';
+            });
+            return;
+          }
+          if (op === 'factory') {
+            post('factory').then(function () {
+              Object.keys(tas).forEach(function (k) { tas[k].ta.value = tas[k].f.sys || ''; tas[k].st.textContent = '(系统原始)'; tas[k].f.cur = ''; tas[k].f.mine = ''; });
+              toast('已恢复出厂');
+            });
+            return;
+          }
+          post(op, collect()).then(function (r) {
+            if (!r || !r.ok) { toast((r && r.error) || '保存失败'); return; }
+            if (op === 'setdefault') {
+              Object.keys(tas).forEach(function (k) { tas[k].f.mine = tas[k].ta.value; });
+              toast('已记为你的默认');
+            } else {
+              Object.keys(tas).forEach(function (k) { tas[k].f.cur = tas[k].ta.value; tas[k].st.textContent = '(已改过 · 生效中)'; });
+              toast('已保存,下次调用即生效');
+            }
+          });
+        });
+      }).catch(function () { wrap.remove(); });
+  }
+
   RC_openDetail = openDetail;
 
   function paintBody(chip, view) {

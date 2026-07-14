@@ -2325,8 +2325,7 @@ def _t_auto_highlight(args, ctx):
     # ② 批处理:每 4 页一次叶子调用挑句(省每次调用的固定开销),返回 {页码:[句]}
     for bi in range(0, len(need), 4):
         batch = need[bi:bi + 4]
-        prompt = ("下面是几页书的正文,每页以【页N】开头。请**逐页**挑出每页 **1~3 句最重要**的(定义/核心结论/关键公式/易错点),"
-                  "**逐字照抄原文**(不改写/不翻译/不合并/不跨段)。返回一个 JSON 对象 {\"页N\":[\"原句1\",\"原句2\"], ...};只输出 JSON,别加别的。\n\n"
+        prompt = (_tps(ctx.get("_uid") or "", "auto_highlight", "main") + "\n\n"   # 140:可在工具详情窗里改
                   + "\n\n".join(f"【页{pg}】\n{text[:3500]}" for pg, text, _ in batch))
         out = _deep_ask(prompt, backend=r["backend"], variant=r["variant"], depth=r["depth"])
         parsed = {}
@@ -2980,7 +2979,9 @@ def _tool_label(name, args):
 
 # ──────────────────────── agent 循环 ────────────────────────
 def _sys_prompt(ctx):
-    cat = "\n".join(f"- {n}: {d}" for n, (d, _) in TOOLS.items())
+    _uid0 = ctx.get("_uid") or ctx.get("uid") or ""
+    # 140:工具说明支持 per-user 覆盖(详情窗里改 → 这里就是它进 AI 的地方)
+    cat = "\n".join(f"- {n}: {_tp(_uid0, n, 'desc', d)}" for n, (d, _) in TOOLS.items())
     _off = int(ctx.get("page_offset") or 0)   # PDF页 - 印刷页;给 AI 看的页码一律转成书上印刷页(跟用户一致)
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
     meta = {"book": ctx.get("book_name"), "当前可见页": [int(p) - _off for p in vis if p],
@@ -3389,6 +3390,65 @@ def _parse_tool(raw):
 # 每用户「按动作」的 (后端/型号/深度) 预设(感叹号弹窗的 ⚙ + 🐢/🎯 + 模型设置面板 写它)。
 # action ∈ {orchestrator(根:分配+回答), summarize(章节总结), vision(看图)};值 = {backend, variant, depth}。
 # 向后兼容旧 {model, effort}(无 backend → 视作 claude, model→variant, effort→depth)。无预设 → 用 _AP_DEFAULTS。
+# ── 140(用户设计):工具提示词覆盖 ──
+#   「长按工具 → 直接改 AI 工具里的 prompt,甚至工具的说明 —— 凡是会进 AI 并实际产生影响的,
+#     都给一个输入框」。存 per-user 覆盖;运行时**真的**用它(不是只显示)。
+#   两类可改文本:
+#     · desc   工具说明 —— 进**工具目录**(文字 agent 的 _sys_prompt + 实时语音 session 的 tools[].description)
+#     · slots  工具内部自己调 AI 时用的 prompt(下面 TOOL_SLOTS 注册)
+_TP_PATH = CLAUDE_DIR / "state" / "assistant-tool-prompts.json"
+_tp_lock = threading.Lock()
+
+
+def _tp_load():
+    try:
+        return json.loads(_TP_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _tp_save(d):
+    with _tp_lock:
+        _TP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _TP_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+
+
+def _tp(uid, tool, slot, default):
+    """取生效文本:用户改过就用改的,没改用默认。**运行时唯一入口**——所有喂给 AI 的地方都走它。"""
+    if slot.startswith("_"):
+        return default
+    try:
+        v = ((_tp_load().get(str(uid)) or {}).get(tool) or {}).get(slot)
+        if isinstance(v, str) and v.strip():
+            return v
+    except Exception:
+        pass
+    return default
+
+
+# 工具内部 prompt 的可改槽位:{工具: {槽位: (人话标签, 默认文本)}} —— 详情窗按这个渲染输入框
+TOOL_SLOTS = {}
+
+
+def _slot(tool, key, label, default):
+    TOOL_SLOTS.setdefault(tool, {})[key] = (label, default)
+    return default
+
+
+def _tps(uid, tool, key):
+    """取某个已注册槽位的生效文本(用户改过 → 用改的;没改 → 默认)。"""
+    d = (TOOL_SLOTS.get(tool) or {}).get(key)
+    return _tp(uid, tool, key, d[1] if d else "")
+
+
+# 工具内部**真正喂给 AI**的 prompt(改了立刻生效):
+_slot("auto_highlight", "main", "挑句指令(逐页挑重点)",
+      "下面是几页书的正文,每页以【页N】开头。请**逐页**挑出每页 **1~3 句最重要**的(定义/核心结论/关键公式/易错点),"
+      "**逐字照抄原文**(不改写/不翻译/不合并/不跨段)。返回一个 JSON 对象 {\"页N\":[\"原句1\",\"原句2\"], ...};只输出 JSON,别加别的。")
+_slot("web_search", "sys", "联网搜索的系统指令(决定它怎么搜、怎么组织结果)",
+      "联网搜索,然后只输出一个 JSON 对象(禁止其他任何文字/代码块标记):\n")
+
+
 _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
 _BACKENDS = ("claude", "gemini", "codex")
@@ -4597,6 +4657,74 @@ VOICE_CACHEABLE_TOOLS = {
 }
 
 
+@bp.route("/tool-prompt", methods=["GET", "POST"])
+def assistant_tool_prompt():
+    """140(用户设计):工具的**说明**和**内部 prompt** —— 凡是会进 AI 并实际产生影响的,都能在这里改。
+
+    GET  ?tool=X → 每个字段给三份:cur(现在生效的) / sys(系统原始默认) / mine(你自己设的默认,可能没有)
+    POST {tool, fields:{key:text}, op}
+      op=save       写成**生效**文本(空串=清掉覆盖,回到"你的默认"或系统默认)
+      op=setdefault 把当前文本**记为你的默认**(以后按「默认」就填回它)
+      op=factory    清掉这个工具的所有覆盖 + 你的默认(彻底回系统原始)
+    """
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    uid = str(session["user_id"])
+
+    def _fields(tool):
+        out = []
+        d0 = TOOLS.get(tool)
+        if d0:
+            out.append(("desc", "工具说明(决定 AI 何时/如何调它 —— 进工具目录)", str(d0[0])))
+        for k, (lb, dv) in (TOOL_SLOTS.get(tool) or {}).items():
+            out.append((k, lb, dv))
+        return out
+
+    if request.method == "GET":
+        tool = (request.args.get("tool") or "").strip()
+        fs = _fields(tool)
+        if not fs:
+            return jsonify({"ok": False, "error": f"没有可改的提示词:{tool}"}), 404
+        store = _tp_load()
+        cur = ((store.get(uid) or {}).get(tool) or {})
+        mine = cur.get("_defaults") or {}
+        return jsonify({"ok": True, "tool": tool, "fields": [
+            {"key": k, "label": lb, "sys": dv,
+             "cur": cur.get(k) if isinstance(cur.get(k), str) else "",
+             "mine": mine.get(k) if isinstance(mine.get(k), str) else ""}
+            for k, lb, dv in fs]})
+
+    body = request.get_json(silent=True) or {}
+    tool = (body.get("tool") or "").strip()
+    if not _fields(tool):
+        return jsonify({"ok": False, "error": "未知工具"}), 400
+    op = body.get("op") or "save"
+    store = _tp_load()
+    u = store.setdefault(uid, {})
+    t = u.setdefault(tool, {})
+    if op == "factory":
+        u.pop(tool, None)
+    else:
+        fields = body.get("fields") or {}
+        if op == "setdefault":
+            dd = t.setdefault("_defaults", {})
+            for k, v in fields.items():
+                if isinstance(v, str) and v.strip():
+                    dd[k] = v
+                else:
+                    dd.pop(k, None)
+        else:   # save:写成生效文本(空 = 清覆盖)
+            for k, v in fields.items():
+                if isinstance(v, str) and v.strip():
+                    t[k] = v
+                else:
+                    t.pop(k, None)
+        if not t:
+            u.pop(tool, None)
+    _tp_save(store)
+    return jsonify({"ok": True})
+
+
 @bp.route("/voice-tool", methods=["POST"])
 def assistant_voice_tool():
     """语音套壳(S2S 编排化)桥③:S2S 说出的原始命令文本 → **与编排 agent 同一套** JSON 工具协议:
@@ -4714,6 +4842,7 @@ def assistant_rtc_session():
     """WebRTC 会话配置(instructions/tools/vad/voice,镜像 relay 的 WS 版构造;audio format 不带——媒体轨自动协商)。"""
     if not _logged_in():
         return jsonify({"ok": False}), 401
+    uid = session["user_id"]   # 140:工具说明的 per-user 覆盖要用它
     _bok, _bspent = _voice_budget_gate()
     if not _bok:
         return jsonify({"ok": False, "error": f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
@@ -4791,7 +4920,7 @@ def assistant_rtc_session():
     # 75(用户裁定):read_selection **永久不挂**——选中内容程序保证经 state 通道注入上下文,
     # 工具是纯重复入口(工具表每次会话恒定一致=前缀缓存无伤;长选中引导 read_page 该页)
     _RTC_DROP = {"read_selection"}
-    tools = [{"type": "function", "name": n, "description": _vo.get(n, str(d))[: (1024 if n in _vo else 280)],
+    tools = [{"type": "function", "name": n, "description": _tp(uid, n, "desc", _vo.get(n, str(d)))[: (1024 if n in _vo else 280)],
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items() if n not in _RTC_DROP]
     tools.append({"type": "function", "name": "deep_think",

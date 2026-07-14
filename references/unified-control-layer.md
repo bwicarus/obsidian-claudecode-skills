@@ -282,6 +282,29 @@ relay 发的 `tool_status`:
 - **「!」按钮全面退役**:侧栏卡片的详情归标题栏的【数据流】按钮 + 长按详情窗;
   **AI 的文字输出(语音/文字回答)不要「!」**(用户明确)。
 
+### 工具提示词可改(140,用户设计)—— 详情窗底部
+
+> 「长按这些工具可以**直接修改 AI 工具里的 prompt,甚至包括工具的说明** —— 凡是**会进 AI 并实际产生影响**的,
+>   都提供一个修改的输入框。还要有一个『默认』按钮:把当前设置记为默认,按下时重新填入。」
+
+**存储**:`state/assistant-tool-prompts.json`,per-user:
+```
+{ "<uid>": { "<tool>": { "desc": "生效覆盖", "main": "生效覆盖",
+                         "_defaults": {"desc": "你设的默认", ...} } } }
+```
+**运行时唯一入口** `_tp(uid, tool, slot, default)` —— 所有喂给 AI 的地方都走它,**不是只显示**:
+
+| 可改字段 | 真正进 AI 的地方 |
+|---|---|
+| `desc`(工具说明) | 文字 agent 的 `_sys_prompt` 工具目录 + 实时语音 session 的 `tools[].description` |
+| 槽位(工具内部 prompt) | `TOOL_SLOTS` 注册(`_slot`),工具里用 `_tps(uid, tool, key)` 取。已接:`auto_highlight.main`(逐页挑重点指令)、`web_search.sys` |
+
+**端点** `GET/POST /api/assistant/tool-prompt`:每个字段返回三份 `cur`(生效)/ `sys`(系统原始)/ `mine`(你设的默认);
+四个操作 `save`(写成生效)/ `setdefault`(记为你的默认)/ `filldefault`(前端:填回你的默认)/ `factory`(清光,回系统原始)。
+
+**UI**:详情窗底部「提示词」区 —— 每个字段一个 textarea(下方标注「已改过·生效中 / 用的是你的默认 / 系统原始」),
+四个按钮:**保存并生效 · 设为默认 · 默认 · 恢复出厂**。
+
 ### 按钮纪律(用户拍板)—— 标题栏按钮清单
 
 | 卡 | 标题栏按钮 | 说明 |
