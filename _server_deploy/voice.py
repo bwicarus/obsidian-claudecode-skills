@@ -992,11 +992,159 @@ def _task_search(tid, params, ctx, base):
         _vtask_set(tid, status="error", error=str(e)[:160])
 
 
+# ── 147(用户点子):**通用 agent worker** ────────────────────────────────────────────
+#   把「要连着调好几个工具才能干完」的任务整个甩给**无头 Claude CLI + 我们自己的 MCP**。
+#   它自己规划、自己调工具、干完回一句话 —— 语音模型只花 **1 次**工具调用。
+#
+#   为什么值:一个 3 步任务走语音模型 ≈ 4~6 次 realtime response(每次都把整段会话按 input 重算,
+#   而且工具结果全堆进语音上下文);走 worker = **2 次 response**,语音模型只看见最后那句摘要。
+#   省的是 N-1 轮 realtime + 上下文膨胀。
+#
+#   CLI 走**订阅额度**(不是 API 计费)→ 对我们是白捡的算力。所以选型**只看成功率和速度**:
+#     实测同一个 3 步任务:opus 3轮/6.8s(最稳) · sonnet 4轮/13.6s · haiku 7轮/29s(乱,还去试 Bash/Read)
+#     → 默认 opus。
+#
+#   ⚠ **安全(实测踩到)**:`--allowedTools` 只是「**自动批准**」名单,**不是「能力」名单** ——
+#     不在名单里的工具**依然存在**,haiku 真的去调了 Bash 和 Read。必须再用 `--disallowedTools`
+#     把本地工具明确掐掉。加上之后 CLI 会老实回「没有 Bash 工具可用」。
+_AGENT_DENY = "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,BashOutput,KillShell"
+_AGENT_TIMEOUT = int(os.environ.get("AGENT_TASK_TIMEOUT", "240"))
+
+
+def _agent_mcp_cfg() -> str:
+    """无头 CLI 用的 MCP 配置(HTTP + 静态 Bearer)。600 权限,含 token,别进 git。"""
+    import stat
+    f = CLAUDE_DIR / "state" / "mcp-headless.json"
+    tok = (Path("~/.config/mcp-http-token").expanduser().read_text().strip())
+    f.write_text(json.dumps({"mcpServers": {"bwapp": {
+        "type": "http", "url": os.environ.get("MCP_PUBLIC_URL", "https://bwicarus.space/mcp"),
+        "headers": {"Authorization": "Bearer " + tok}}}}), encoding="utf-8")
+    f.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return str(f)
+
+
+_agent_cat = {"t": 0.0, "txt": ""}
+
+
+def _agent_catalog() -> str:
+    """147b(用户点子):**把工具目录预先写进 system prompt**。
+    Claude Code 把 MCP 工具做成**延迟加载**(实测:初始工具 21 个,MCP 直接可见 **0** 个;
+    --settings 里塞各种候选键都关不掉)→ 模型必须先 ToolSearch 才拿得到 schema。
+    不给目录时它会"搜关键词 → 再搜 → 试错",白烧好几轮;把目录直接摆在 system prompt 里 +
+    要求它**一次 `select:` 精确加载、禁止探索** → 轮数压到理论下限。
+    实测同一个任务:15.5s / 4 轮 → **6.7s / 3 轮**(ToolSearch → read_page → 回答)。10 分钟缓存。"""
+    if time.time() - _agent_cat["t"] < 600 and _agent_cat["txt"]:
+        return _agent_cat["txt"]
+    try:
+        import urllib.request
+        tok = Path("~/.config/mcp-http-token").expanduser().read_text().strip()
+        url = os.environ.get("MCP_PUBLIC_URL", "https://bwicarus.space/mcp")
+        h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+             "Authorization": "Bearer " + tok}
+
+        def post(body, sid=None):
+            hh = dict(h)
+            if sid:
+                hh["mcp-session-id"] = sid
+            r = urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(body).encode(), headers=hh), timeout=20)
+            return r.read().decode(), dict(r.headers)
+
+        _b, hd = post({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "voice-agent", "version": "1"}}})
+        sid = hd.get("mcp-session-id")
+        post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+        body, _ = post({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, sid)
+        lines = []
+        for ln in body.splitlines():
+            if ln.startswith("data:"):
+                for t in (json.loads(ln[5:])["result"]["tools"]):
+                    lines.append(f"- mcp__bwapp__{t['name']}: {(t.get('description') or '')[:80]}")
+        _agent_cat["txt"] = "\n".join(lines)
+        _agent_cat["t"] = time.time()
+    except Exception as e:
+        sys.stderr.write(f"[agent-catalog] {e}\n")
+    return _agent_cat["txt"]
+
+
+def _task_agent(tid, params, ctx, base):
+    instr = (params.get("instruction") or "").strip()
+    if len(instr) < 3:
+        _vtask_set(tid, status="error", error="没听清要做什么")
+        return
+    _vtask_set(tid, step="交给助手规划…")
+    # 语境:worker 不在浏览器里,得把「用户现在读哪本书第几页/选中了什么」显式喂给它
+    ctx_lines = []
+    if ctx.get("file_rel"):
+        ctx_lines.append(f"用户当前打开的书:{ctx.get('book_name') or ctx['file_rel']}(file 参数用 `{ctx['file_rel']}`)")
+    if ctx.get("page"):
+        ctx_lines.append(f"当前页码:{ctx['page']}")
+    if (ctx.get("selection") or "").strip():
+        ctx_lines.append(f"用户选中的文字:{ctx['selection'][:300]}")
+    prompt = (
+        "你是这个自学 App 的后台助手,用 bwapp 这套 MCP 工具帮用户把事情做完。\n"
+        + ("\n".join(ctx_lines) + "\n" if ctx_lines else "")
+        + f"\n用户的要求:{instr}\n\n"
+        "要求:自己决定用哪些工具、按什么顺序;做完后**只输出一句话**(40 字以内)告诉用户结果,"
+        "不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
+    )
+    cat = _agent_catalog()
+    sysp = ("你能用的工具全在这里(它们是延迟加载的):\n" + cat +
+            "\n\n规则:①第一步就用 ToolSearch 的 select 语法**一次性**精确加载你需要的工具,"
+            "例如 ToolSearch(\"select:mcp__bwapp__read_page,mcp__bwapp__make_anki_card\")"
+            " —— **禁止**关键词搜索、禁止探索、禁止多次 ToolSearch。"
+            "②然后直接调用干活。③做完只输出一句话(40 字内),不要罗列过程。") if cat else ""
+    cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt]
+    if sysp:
+        cmd += ["--append-system-prompt", sysp]   # 147b:目录预注入 → 轮数 4→3、耗时 15.5s→6.7s
+    cmd += ["--mcp-config", _agent_mcp_cfg(),
+           "--allowedTools", "mcp__bwapp",
+           "--disallowedTools", _AGENT_DENY,
+           "--model", os.environ.get("AGENT_TASK_MODEL", "opus"),
+           "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
+    steps, answer = [], ""
+    try:
+        pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+        t0 = time.time()
+        for line in pr.stdout:
+            if time.time() - t0 > _AGENT_TIMEOUT:
+                pr.kill()
+                _vtask_set(tid, status="error", error="任务超时")
+                return
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("type") == "assistant":
+                for c in ((d.get("message") or {}).get("content") or []):
+                    if c.get("type") == "tool_use":
+                        nm = str(c.get("name") or "").replace("mcp__bwapp__", "")
+                        if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
+                            steps.append({"name": nm, "status": "done"})
+                            _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
+            elif d.get("type") == "result":
+                answer = (d.get("result") or "").strip()
+        pr.wait(timeout=10)
+    except Exception as e:
+        _vtask_set(tid, status="error", error=str(e)[:140])
+        return
+    if not answer:
+        _vtask_set(tid, status="error", error="助手没给出结果")
+        return
+    _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps),
+               result={"answer": answer, "tools": [x["name"] for x in steps]})
+
+
 def _run_task(tid, kind, params, context, base):
     _vtask_set(tid, step="排队中…")
     with _task_sema:   # 阻塞排队:同时最多 2 个综合任务跑(daemon 线程阻塞无碍)
         try:
-            {"note": _task_note, "anki": _task_anki, "vocab": _task_vocab, "search": _task_search}[kind](tid, params, context, base)
+            {"note": _task_note, "anki": _task_anki, "vocab": _task_vocab, "search": _task_search,
+             "agent": _task_agent}[kind](tid, params, context, base)   # 147:通用 agent worker
         except Exception as e:
             _vtask_set(tid, status="error", error=str(e)[:160])
 

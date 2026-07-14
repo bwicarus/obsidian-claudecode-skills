@@ -836,3 +836,55 @@ GPT 指出我**同时改了两个变量、不能断因**。做了 stateless × j
 - `_ledger_volc_tts(span, chars, rid)` —— TTS 按字符(1 汉字 = 1 字符,标点空格也算)
 - 单价常量 `VOLC_ASR_RMB_H` / `VOLC_TTS_RMB_10K` / `RMB_USD`,**env 可覆盖**(买了资源包就改 env)
 - ⚠ 历史用量无法追溯,从 2026-07-14 起才有数
+
+
+---
+
+## 通用 agent worker:多步任务甩给无头 CLI + 自家 MCP(2026-07-14 上线,用户点子)
+
+### 为什么
+
+一个 3 步任务走**语音模型**:每个工具一个来回 ≈ **4~6 次 realtime response**,每次全量 input 重算,而且**工具结果全堆进语音上下文**(`list_books` 一次就能顶 2.7k token)。
+走 **worker**:语音模型只花 **1 次**工具调用 → **2 次 response**,它只看见最后那句 40 字摘要。省的是 **N-1 轮 realtime + 上下文不膨胀**。
+
+CLI 走**订阅额度**(不是 API 计费)→ 白捡的算力。**所以选型只看成功率和速度,不看钱**(用户裁定)。
+
+### 实现
+
+- `voice.py::_task_agent` —— 新的第 5 个 task kind(`agent`),复用既有的 `_vtask_new/_vtask_set` + 进度卡片 + 完成播报
+- `assistant.py::_t_do_task` / TOOLS 里的 **`do_task(instruction)`** —— 语音模型把用户原话**原样**转述给它,别自己拆步骤
+- 无头调用:`claude -p <任务> --append-system-prompt <工具目录> --mcp-config <HTTP+静态Bearer> --allowedTools mcp__bwapp --disallowedTools <本地工具> --model opus --output-format stream-json`
+- `stream-json` 里的每个 `tool_use` → `_vtask_set(step=…, steps=[…])` → **工具卡长条实时滚动**显示 worker 在调哪个工具
+
+### 三个实测踩坑
+
+1. **`--allowedTools` 不是「能力」名单,只是「自动批准」名单** —— 不在名单里的工具**依然存在**。实测 haiku **真的去调了 Bash 和 Read**。
+   → 必须再加 **`--disallowedTools "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task,…"`**。加上之后 CLI 会老实回「没有 Bash 工具可用」。**这是安全底线,不能省。**
+
+2. **MCP 工具在 Claude Code 里是「延迟加载」的,关不掉** —— `system.init` 事件里 `tools` 有 21 个,**其中 MCP 直接可见 0 个**;`--settings` 里塞 `toolSearch/deferTools/enableToolSearch/mcp.deferLoading` 全部无效。
+   → `ToolSearch` 是**一轮固定开销**,省不掉。但可以**不让它探索**。
+
+3. **把工具目录预先写进 system prompt**(`--append-system-prompt`)+ 要求「**一次 `select:` 精确加载,禁止关键词搜索/禁止探索/禁止多次 ToolSearch**」→ **轮数 4→3、耗时 15.5s→6.7s**。
+   目录从我们自己的 MCP `tools/list` 拉,10 分钟缓存(`_agent_catalog`)。
+
+### 选型实测(同一个 3 步任务)
+
+| 模型 | 轮数 | 耗时 | 表现 |
+|---|---|---|---|
+| **opus**(默认) | **3** | **6.8s** | 干净,一次到位 |
+| sonnet | 4 | 13.6s | 干净 |
+| haiku | 7 | 29s | 乱,还去试 Bash/Read |
+
+env 可覆盖:`AGENT_TASK_MODEL` / `AGENT_TASK_TIMEOUT`(默认 240s)/ `MCP_PUBLIC_URL`。
+
+### 端到端实测(读页 + 制卡)
+
+```
+[4s]  交给助手规划…
+[8s]  read_page…          ← worker 自己决定
+[13s] make_anki_card…     ← 自己接着做
+[17s] done → 「已按第30页『请求必由客户端发起』这一要点生成 Anki 卡」
+```
+语音模型全程 **1 次工具调用**。
+
+⚠ `state/mcp-headless.json` 含**静态 Bearer token**,600 权限,**不要进 git**。

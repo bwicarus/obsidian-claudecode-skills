@@ -1400,6 +1400,18 @@ def _bg_task(kind, params, ctx):
         return {"error": str(e)[:120]}
 
 
+def _t_do_task(args, ctx):
+    """147(用户点子):**多步任务甩给后台 agent worker**(无头 Claude CLI + 我们自己的 MCP)。
+    它自己规划/调工具/收敛,回来一句话 —— 语音模型只花 1 次工具调用。
+    值在哪:3 步任务走语音模型 ≈ 4~6 次 realtime response(每次全量 input 重算 + 工具结果全堆进语音上下文);
+    走 worker = 2 次 response,语音模型只看见最后那句摘要。省 N-1 轮 + 上下文不膨胀。
+    CLI 走订阅额度不是 API 计费 → 白捡的算力,所以选型只看成功率和速度(实测 opus 最快最稳)。"""
+    instr = (args.get("instruction") or args.get("task") or args.get("text") or "").strip()
+    if len(instr) < 3:
+        return {"error": "要做什么?说清楚点"}
+    return _bg_task("agent", {"instruction": instr}, ctx)
+
+
 def _card_extra(ctx):
     """61b(用户需求):制卡/记笔记的后台 AI 自动带上**对话现场**——最近工具结果(网页搜索摘要/配图 URL)
     + 近几轮对话。语音模型的 text 种子往往只有一句话,搜过的资料不注入就永远进不了卡片。
@@ -2900,6 +2912,10 @@ TOOLS = {
                  "(不传 text 用选中;image_url 若刚 search_image 过、这张图也该进卡片,把同一个 image_url 传进来——"
                  "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
+    "do_task": ("**要连着用好几个工具才能干完的活**交给它(后台 agent,自己规划自己调工具,干完回报一句话)。"
+                "比如\"把这章重点标出来再做成卡片\"、\"查这个词然后加进生词本并制卡\"、\"找找我读过的书里哪本提过X\"。"
+                "把用户的原话**原样**转述给它就行,别自己拆步骤。**单个工具能干完的别用它**(慢)。args {instruction}",
+                _t_do_task),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
     "search_image": ("★配图专用(搜**真实图片**,非 AI 生成;多源 Wikimedia Commons + Google 图搜)。**用户开了配图偏好时**,"
                      "先想清楚这次回答里**哪些概念配图真有帮助**(有明确视觉形象的:实物/结构/示意图/图表/生物/文物/天体/仪器等),"
