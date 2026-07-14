@@ -30,10 +30,16 @@ CLIENT_FILE = Path("~/.config/mcp-oauth-client").expanduser()   # 固定 client 
 CODE_TTL = 600
 ACCESS_TTL = 7 * 86400
 REFRESH_TTL = 180 * 86400
-RATE_WINDOW, RATE_MAX = 600, 5   # 授权密码/换码失败限速:10 分钟 5 次
+RATE_WINDOW, RATE_MAX = 600, 5   # 授权密码/换码失败限速:10 分钟 5 次(单键)
+# 全局兜底:_client_ip 取最右 XFF 已把攻击者钉住,但前提是终端代理确实往右追加真实 peer——
+# 公网走 Tailscale Funnel 直连 8766(不经 nginx、无 X-Real-IP 可依),该追加行为无法从仓库核实。
+# 万一某代理透传客户端 XFF,最右仍可被伪造→逐次换键绕过单键限速。故再叠一层不分键的总量闸:
+# 所有失败合计超此阈即锁,跟 IP/头一概无关,把暴力破解硬钉死(单用户系统配对本就罕见,误伤代价低)。
+RATE_MAX_GLOBAL = 20
 
 _lock = threading.Lock()
 _fails: dict[str, list[float]] = {}
+_fails_all: list[float] = []   # 不分键的全局失败时间戳(兜底)
 
 
 def _log(msg: str):
@@ -87,17 +93,28 @@ def _ratelimited(ip: str) -> bool:
     now = time.time()
     lst = [t for t in _fails.get(ip, []) if now - t < RATE_WINDOW]
     _fails[ip] = lst
-    return len(lst) >= RATE_MAX
+    allg = [t for t in _fails_all if now - t < RATE_WINDOW]
+    _fails_all[:] = allg
+    return len(lst) >= RATE_MAX or len(allg) >= RATE_MAX_GLOBAL
 
 
 def _fail(ip: str):
-    _fails.setdefault(ip, []).append(time.time())
+    now = time.time()
+    _fails.setdefault(ip, []).append(now)
+    _fails_all.append(now)
 
 
 def _client_ip(request) -> str:
+    # 限速键(_fails 的键)必须取攻击者无法自由轮换的值,否则配对密码限速形同虚设。
+    # XFF 是「client, proxy1, …」链:最左是客户端自称值(可任意伪造),最右一跳才是
+    # 最靠近本服务的可信代理注入的。本服务只听 127.0.0.1,公网面走 Tailscale Funnel、
+    # tailnet 面走 nginx,都恰好一跳可信代理,且都往 XFF 右侧追加真实 peer
+    # (Go reverseproxy / nginx $proxy_add_x_forwarded_for)——攻击者只能往左塞假值,
+    # 篡改不了最右那段。故取最右:换掉最左会绕过限速的洞。
     xf = request.headers.get("x-forwarded-for", "")
-    if xf:
-        return xf.split(",")[0].strip()
+    parts = [p.strip() for p in xf.split(",") if p.strip()]
+    if parts:
+        return parts[-1]
     return request.client.host if request.client else "?"
 
 

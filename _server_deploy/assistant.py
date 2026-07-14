@@ -5012,12 +5012,14 @@ def _rtc_cfg() -> dict:
 
 
 def _voice_budget_gate():
-    """125(#284):预算硬闸——读 relay 的 SQLite 账本(WAL 跨进程读安全)。rt_budget_usd≤0=不设闸。"""
+    """125(#284):预算硬闸——读 relay 的 SQLite 账本(WAL 跨进程读安全)。
+    安全:默认 $5/天(缺 rt_budget_usd 时不再形同虚设);cfg 里显式写 0 才是关闭闸。"""
     try:
         cfg = json.loads(_VOICE_CFG_PATH.read_text("utf-8"))
-        b = float(cfg.get("rt_budget_usd") or 0)
+        _rb = cfg.get("rt_budget_usd")
+        b = float(_rb) if _rb is not None else 5.0
     except Exception:
-        b = 0.0
+        b = 5.0
     if b <= 0:
         return True, 0.0
     try:
@@ -5033,21 +5035,11 @@ def _voice_budget_gate():
     return spent < b, spent
 
 
-@bp.route("/rtc-session", methods=["POST"])
-def assistant_rtc_session():
-    """WebRTC 会话配置(instructions/tools/vad/voice,镜像 relay 的 WS 版构造;audio format 不带——媒体轨自动协商)。"""
-    if not _logged_in():
-        return jsonify({"ok": False}), 401
-    uid = session["user_id"]   # 140:工具说明的 per-user 覆盖要用它
-    _bok, _bspent = _voice_budget_gate()
-    if not _bok:
-        return jsonify({"ok": False, "error": f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
-    body = request.get_json(silent=True) or {}
-    file_rel = (body.get("file") or "").strip()
-    try:
-        page = int(body.get("page") or 0)
-    except Exception:
-        page = 0
+def _build_rtc_session(uid, file_rel, page):
+    """WebRTC 会话配置**服务端自建**(instructions/tools/vad/voice,镜像 relay 的 WS 版构造;
+    audio format 不带——媒体轨自动协商)。/rtc-session 和 /rtc-call 共用这一份:配置**绝不能**
+    让前端塞进来——否则任一注册用户就能自带贵型号/超大 max_output_tokens 绕开预算烧 key。
+    返回 (sess, compact_tokens, rt_image)。"""
     cfg = _rtc_cfg()
     lang = (cfg.get("rt_lang") or "").strip()
     if lang == "zh":
@@ -5164,27 +5156,58 @@ def assistant_rtc_session():
         _cth = int(cfg.get("rt_compact_tokens")) if cfg.get("rt_compact_tokens") is not None else 24000   # 124(#285):Cookbook 重做完成(root摘要+等deleted确认)→按审核约定默认启用,阈值24k
     except Exception:
         _cth = 0
-    return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": bool(cfg.get("rt_image")),
+    return sess, _cth, bool(cfg.get("rt_image"))
+
+
+@bp.route("/rtc-session", methods=["POST"])
+def assistant_rtc_session():
+    """WebRTC 会话配置下发:预算闸 + 服务端自建 session(见 _build_rtc_session)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    uid = session["user_id"]   # 140:工具说明的 per-user 覆盖要用它
+    _bok, _bspent = _voice_budget_gate()
+    if not _bok:
+        return jsonify({"ok": False, "error": f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
+    body = request.get_json(silent=True) or {}
+    file_rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except Exception:
+        page = 0
+    sess, _cth, _rt_image = _build_rtc_session(uid, file_rel, page)
+    return jsonify({"ok": True, "session": sess, "model": sess["model"], "rt_image": _rt_image,
                     "compact_tokens": _cth})
 
 
 @bp.route("/rtc-call", methods=["POST"])
 def assistant_rtc_call():
-    """SDP 代理:浏览器 offer → OpenAI POST /v1/realtime/calls(标准 key 只在服务端)→ answer SDP 回浏览器。"""
+    """SDP 代理:浏览器 offer → OpenAI POST /v1/realtime/calls(标准 key 只在服务端)→ answer SDP 回浏览器。
+    安全:① 这里也跑一次预算闸(此前只有 /rtc-session 有,直接 POST /rtc-call 能绕开);
+    ② session 配置**一律服务端重建**,忽略前端回传的 body["session"](防篡改型号/token 上限烧 key)。
+    前端可信的只有 sdp;file/page 仅用于书目上下文,缺失也能正常建连。"""
     if not _logged_in():
         return jsonify({"ok": False}), 401
+    _bok, _bspent = _voice_budget_gate()
+    if not _bok:
+        return jsonify({"ok": False, "error": f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
     body = request.get_json(silent=True) or {}
     sdp = body.get("sdp") or ""
-    sess = body.get("session") or {}
-    model = (sess.get("model") or body.get("model") or "gpt-realtime-2.1-mini").strip()
+    if not sdp:
+        return jsonify({"ok": False, "error": "缺 sdp"}), 400
+    uid = session["user_id"]
+    file_rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except Exception:
+        page = 0
+    sess, _cth, _rt_image = _build_rtc_session(uid, file_rel, page)   # 忽略 body["session"],服务端自建
+    model = (sess.get("model") or "gpt-realtime-2.1-mini").strip()
     try:
         key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
     except Exception:
         key = ""
     if not key:
         return jsonify({"ok": False, "error": "缺 OpenAI 凭证(~/.config/openai-realtime.json)"}), 400
-    if not sdp:
-        return jsonify({"ok": False, "error": "缺 sdp"}), 400
     import requests as _rq
     try:
         import hashlib as _hl

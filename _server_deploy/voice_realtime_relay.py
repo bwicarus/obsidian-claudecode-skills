@@ -1298,11 +1298,13 @@ def _ledger_day_spent(day=None):
 
 
 def _budget_gate():
-    """#284 预算硬闸:rt_budget_usd>0 且当日已花≥预算 → (False, 已花)。0/缺省=不设闸。"""
+    """#284 预算硬闸:当日已花≥预算 → (False, 已花)。
+    安全:默认 $5/天(缺 rt_budget_usd 时不再形同虚设);cfg 里显式写 0 才是关闭闸。"""
     try:
-        b = float(_creds().get("rt_budget_usd") or 0)
+        _rb = _creds().get("rt_budget_usd")
+        b = float(_rb) if _rb is not None else 5.0
     except Exception:
-        b = 0.0
+        b = 5.0
     if b <= 0:
         return True, 0.0
     spent = _ledger_day_spent()
@@ -2173,6 +2175,16 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                                       model=model, in_tok=int(u.get("input_tokens") or 0), out_tok=int(u.get("output_tokens") or 0))
                 except Exception:
                     pass
+                # 安全(#284 加固):拨号只查一次挡不住会话中途超支——每轮记账后复查,超了就收场。
+                # return 退出 down() → asyncio.wait FIRST_COMPLETED 触发 → finally 关 ows/bws。
+                _bok2, _bspent2 = _budget_gate()
+                if not _bok2:
+                    sys.stderr.write(f"[voice-oa] 预算超支 ${_bspent2:.2f},中断通话\n")
+                    try:
+                        await bws.send(json.dumps({"event": -1, "payload": {"error": f"今日语音预算已用完(${_bspent2:.2f})——通话结束,明天再聊或调高 rt_budget_usd"}}, ensure_ascii=False))
+                    except Exception:
+                        pass
+                    return
                 await bws.send(json.dumps({"event": 359, "payload": {}}, ensure_ascii=False))
                 played.update({"id": None, "bytes": 0})
             elif t == "error":
@@ -2481,7 +2493,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         _RTC_CTL_LIVE[_uid_m] = call_id
     except Exception:
         pass
-    book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": ""}
+    book = {"page": page, "sel": "", "ink_strokes": None, "_ink_fp": "", "_over": (not _bok)}   # _over:超支后 sideband 掐生成(入口已超支=从首轮就掐,含 #290 重连场景)
     tool_cache = {}          # 只读工具缓存:name|args|page|ink哈希|sel哈希 → {out, ca};写工具成功=整体清空(域失效)
     shot_fut = {}            # need_shot 往返:shot_id → Future(带 ID 防两轮工具重叠时错配/迟到截图被下一请求接走)
     shot_seq = {"n": 0}
@@ -2760,6 +2772,14 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 except Exception:
                     a = {}
                 asyncio.create_task(_tool(name, a if isinstance(a, dict) else {}, ev.get("call_id") or "", epoch["n"]))
+            elif t == "response.created":
+                # 安全(#284 加固):超支后 fe>=4 前端仍会经自己的 data channel 直发 response.create——
+                # 本 sideband 对同 call_id 发 response.cancel 即可掐掉这一轮生成(输出音频=大头成本)。
+                if book.get("_over"):
+                    try:
+                        await ows.send(json.dumps({"type": "response.cancel"}))
+                    except Exception:
+                        pass
             elif t == "response.done":
                 r0 = ev.get("response") or {}
                 u = r0.get("usage") or {}
@@ -2768,6 +2788,22 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 sys.stderr.write(f"[rtc-ctl] done in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
+                # 安全(#284 加固):WebRTC 直连路径也在每轮记账后复查预算。媒体是浏览器↔OpenAI 直连、
+                # relay 无法强拆,但 sideband 是服务端控制面(持同 call_id 的 ows),超支即置标记,之后每轮
+                # response.created 立刻 response.cancel 让助手噤声——止住烧钱、逼用户挂断。event:-1 供留痕。
+                if not book.get("_over"):
+                    _bok3, _bspent3 = _budget_gate()
+                    if not _bok3:
+                        book["_over"] = True
+                        sys.stderr.write(f"[rtc-ctl] 预算超支 ${_bspent3:.2f},sideband 掐断后续生成\n")
+                        try:
+                            await ows.send(json.dumps({"type": "response.cancel"}))
+                        except Exception:
+                            pass
+                        try:
+                            await bws.send(json.dumps({"event": -1, "payload": {"error": f"今日语音预算已用完(${_bspent3:.2f})——助手已停止应答,请挂断,明天再聊或调高 rt_budget_usd"}}, ensure_ascii=False))
+                        except Exception:
+                            pass
 # 64:硬兜底已撤(用户拍板:体验差,大部分做对即可)——incomplete 只落盘记录,供之后按日志调 prompt/工具描述
                 if r0.get("status") == "incomplete":
                     _vlog("truncated", page=book.get("page") or page, book=file_rel,
