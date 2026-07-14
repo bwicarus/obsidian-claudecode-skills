@@ -90,6 +90,7 @@
 - `references/codex-integration.md` — Codex 集成参考：exec 第三后端现状(实测 flags)+ 四种集成方式升级路径(mcp-server/SDK/app-server 的 threadId 会话续用与文字 delta 流式)+ 沙盒审批安全底线。⚪标注=GPT 转述待验证,动手前以运行时为准
 - `references/book-ocr-pipeline.md` — 日文扫描 PDF 双 OCR 流水线：mokuro manga-ocr + Google Vision 两条路径、`state/mokuro-ocr/<sha>/` 断点续传、不可见文字层 embed、book-ocr / book-ocr-watchdog systemd
 - `references/ai-assistant-webapp-patterns.md` — **「网页里集成 AI 助手」可迁移架构要点**(独立蓝本,可喂给做别的 AI 网页的人/AI):⭐生成与请求解耦(detached worker + rid 重连,切后台不丢)/ 全站 fetch 韧性 / 对话服务端持久化 / Markdown×MathJax 占位符共存 / 模型分档+反馈梯子(Pareto)/ agentic 工具循环(沙盒+顽强JSON)/ 上下文只在助手开着时收集 / 后台长任务+进度 / 额度护栏 / iOS 坑 / 系统prompt清单 + 落地 checklist
+- `references/vendor-docs-local.md` — **本地厂商参考库**(`/home/bwicarus/refs/`,git 之外):OpenAI cookbook(含 Realtime 提示词指南/上下文压缩/out-of-band)、**官方 realtime-agents 参考应用**、xAI cookbook。⚠ **要查官方资料先 grep 这里,别急着上网**(2026-07-14 教训:没查官方资料导致成本算反、开关没找到)
 - `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv，`spacy_parse.py --server` 常驻模式免每次加载模型，pdf_reader 经 `_spacy_worker_request` 锁串行+超时自愈调用）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析；spaCy 结果存 sentence-only 缓存键、grammar-stream 有回放缓存）
 
 **脚本**
