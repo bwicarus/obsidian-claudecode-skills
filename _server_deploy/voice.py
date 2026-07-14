@@ -1069,11 +1069,11 @@ def _agent_catalog() -> str:
     return _agent_cat["txt"]
 
 
-# 148:worker 默认走 **codex**(ChatGPT 订阅额度,与 Claude 额度完全独立=白捡一路),失败自动降级 claude。
-#   实测同一多步任务(3 轮中位):claude/opus 8.3s、codex/gpt-5.6-luna 14.5s、codex/gpt-5.6-terra 20.0s,
-#   **成功率都是 3/3**。worker 只用于「≥4步/探索性/长耗时」的活(见 147 的 A/B),多等几秒无所谓,
-#   但能把 Claude 额度整个省给主力(阅读器助手/语音)。要切回:AGENT_TASK_BACKEND=claude。
-_AGENT_BACKEND = os.environ.get("AGENT_TASK_BACKEND", "codex").strip().lower()   # codex | claude
+# 148:worker 后端**正常由 per-action 预设决定**(设置面板「agent」行 → params.backend);
+#   这个 env 只是 params 没传时的兜底默认。默认 claude(用户 Max 5x,额度够用,且 opus worker
+#   耗时几乎不随步数增长:2步 9.1s / 5步 11.1s,而 codex 是 15.3s / 18.8s)。
+#   主后端挂了会自动换另一个 CLI 重跑(claude ↔ codex 双向兜底,见 _task_agent)。
+_AGENT_BACKEND = os.environ.get("AGENT_TASK_BACKEND", "claude").strip().lower()   # claude | codex
 
 
 def _agent_codex_cmd(prompt: str, model: str = "", effort: str = "") -> list:
@@ -1215,22 +1215,22 @@ def _task_agent(tid, params, ctx, base):
     model = (params.get("model") or "").strip()
     effort = (params.get("effort") or "").strip()
     steps, answer = [], ""
+    # 148:双向兜底 —— 主后端挂了(限流/进程起不来/没给结果)就换另一个 CLI 再跑一遍。
+    #   用户排序:**成功率 > 速度**。默认主 = claude/opus(Max 5x 额度够用),兜底 = codex(白嫖池,
+    #   跟 Claude 额度完全独立 → Claude 真限流时它照样能干活)。
+    alt = "codex" if backend == "claude" else "claude"
     try:
         answer = _agent_run_cli(backend, prompt, sysp, tid, steps, model=model, effort=effort)
     except _AgentTimeout:
         _vtask_set(tid, status="error", error="任务超时")   # 超时不降级:再来一轮又是 240s
         return
     except Exception as e:
-        if backend != "codex":
-            _vtask_set(tid, status="error", error=str(e)[:140])
-            return
-        sys.stderr.write(f"[agent] codex 异常({e}),降级 claude\n")   # 进程起不来/崩了 → 往下走降级
-    # 148:白嫖后端没给结果(或压根没起来)→ 降级 claude 保成功率(用户排序:成功率 > 速度)
-    if not answer and backend == "codex":
+        sys.stderr.write(f"[agent] {backend} 异常({e}),降级 {alt}\n")   # 进程起不来/崩了 → 往下走降级
+    if not answer:
         steps.clear()
         _vtask_set(tid, step="换个助手重试…")
         try:
-            answer = _agent_run_cli("claude", prompt, sysp, tid, steps)   # 降级用 claude 默认档
+            answer = _agent_run_cli(alt, prompt, sysp, tid, steps)   # 兜底后端用它自己的默认档
         except _AgentTimeout:
             _vtask_set(tid, status="error", error="任务超时")
             return

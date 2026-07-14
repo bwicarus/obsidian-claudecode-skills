@@ -1404,15 +1404,20 @@ def _t_do_task(args, ctx):
     """147(用户点子):**多步任务甩给后台 agent worker**(无头 Claude CLI + 我们自己的 MCP)。
     它自己规划/调工具/收敛,回来一句话 —— 语音模型只花 1 次工具调用。
     值在哪:N 步任务走语音模型 = N+1 次 realtime response(每次全量 input 重算 + 工具结果全堆进语音上下文);
-    走 worker = 2 次 response,语音模型只看见最后那句摘要。省 N-1 轮 + 上下文不膨胀。
+    走 worker = **恒定 2 次** response(调 do_task 一次 + 播报结果一次),语音模型只看见最后那句摘要。
 
-    **148 实测(账本 218 次 response,平均 $0.0053/轮;worker 内部连调 MCP 无 realtime 往返)**:
-      · 3 步:直接调 17~29s / $0.027  vs  worker **15.9s** / $0.011  → worker **又快又省**
-      · 5 步:直接调 20~35s / $0.037  vs  worker **18.8s** / $0.011
-      · 盈亏平衡:realtime 每轮往返 > 1.7s 时 worker 就更快;实测最低分位(p10)已是 2.0s。
-    ⇒ 门槛从「≥4 步」放宽到「**≥3 步**」(当初定 4 是基于 worker 17s 的旧数据,现在 codex 只要 11s)。
-    1~2 步仍直接调(worker 有 ~11s 固有开销:CLI 启动 + MCP 建连)。
-    CLI 走订阅额度不是 API 计费 → 白捡的算力,把贵的 realtime 轮次换成免费额度。"""
+    **⚠ 省的轮数 = N - 1,所以 1 步任务是零收益**(直接调 2 轮 vs worker 也是 2 轮 —— 不省钱、不省时间、
+       还白烧一次 CLI 额度)。**1 个工具能答的一律直接调**,这条与后端无关。
+
+    **148 实测(账本 218 次 response @ $0.0053/轮;realtime 每轮往返 p10=2.0s / p25=5.0s)**:
+      步数   直接调(N+1轮)        worker/opus     worker/codex
+       1     5~11s  / $0.011      8.8s(零收益)   9.0s(零收益)
+       2     8~17s  / $0.016      **9.1s**/$0.011  15.3s
+       3     17~29s / $0.021      **11.1s**       15.9s
+       5     20~35s / $0.037      **11.1s**       18.8s
+    worker 内部连调 MCP **没有 realtime 往返**,所以耗时几乎不随步数增长(opus 封顶 ~11s);
+    直接调每加一步就多一整轮往返。⇒ **opus 从 2 步起就又快又省**(codex 要 3 步才追平)。
+    ⇒ 门槛定「**≥2 个工具**」(默认 opus)。CLI 走订阅额度不是 API 计费 → 把贵的 realtime 轮次换成订阅额度。"""
     instr = (args.get("instruction") or args.get("task") or args.get("text") or "").strip()
     if len(instr) < 3:
         return {"error": "要做什么?说清楚点"}
@@ -2923,12 +2928,12 @@ TOOLS = {
                  "(不传 text 用选中;image_url 若刚 search_image 过、这张图也该进卡片,把同一个 image_url 传进来——"
                  "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
-    "do_task": ("后台 agent(自己规划、自己连着调工具、干完回报一句话)。**一件事要连着调 3 个以上工具就用它**:"
-                "①需要 3 步以上才能答的(如\"我在读哪本书、一共多少页、读了百分之多少\"、"
+    "do_task": ("后台 agent(自己规划、自己连着调工具、干完回报一句话)。**一件事需要调 2 个以上工具就用它**:"
+                "①要 2 步以上才能答的(如\"我在读的那本书一共多少页\"=先查在读哪本再查页数、"
                 "\"把这章重点标出来再逐条做成卡片\");"
                 "②探索性的活,你事先不知道要翻几本书/查几次(如\"找找我读过的书里哪本提过X\");"
                 "③要跑很久的活(整章处理),不能让用户干等。"
-                "**1~2 步的活自己直接调工具**(那种情况你更快)。"
+                "**只有 1 个工具就能答的,自己直接调**(那种情况用它没有任何好处)。"
                 "用它时把用户原话**原样**转述,别自己拆步骤。args {instruction}",
                 _t_do_task),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
@@ -3569,11 +3574,14 @@ _AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "explain"
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
     "deep":         {"backend": "claude", "variant": "opus",              "depth": "high"},   # 语音通话 deep_think 虚拟工具用
-    # 148:do_task 后台 agent worker(无头 CLI + 我们的 MCP)。默认 **codex**:走 ChatGPT 订阅额度,
-    #   与 Claude 额度完全独立=白捡一路,把 Claude 额度整个省给主力(阅读器助手/语音)。
-    #   实测同一多步任务中位:claude/opus 7.4s、codex/luna+priority 11.0s,**成功率都 100%**;
-    #   worker 只接「≥4步/探索性/长耗时」的活,多等 3 秒换一整条额度,划算。codex 失败自动降级 claude。
-    "agent":        {"backend": "codex",  "variant": "gpt-5.6-luna",      "depth": "low"},
+    # 148:do_task 后台 agent worker(无头 CLI + 我们的 MCP)。默认 **claude/opus**(用户 Max 5x,额度够用)。
+    #   实测 worker 耗时**几乎不随步数增长**(内部连调 MCP 无 realtime 往返):
+    #     opus  2步 9.1s / 3步 11.1s / 5步 11.1s   ← 封顶 ~11s
+    #     codex 2步 15.3s / 3步 15.9s / 5步 18.8s  ← 慢,但白嫖 ChatGPT 额度(不动 Claude 池)
+    #   而直接调每加一步就多一整轮 realtime 往返(实测 p10=2.0s,p25=5.0s)。
+    #   ⇒ opus 从 **2 步**就开始占优;codex 要 3 步。**1 步两者都零收益**(见 _t_do_task)。
+    #   opus 失败 → 自动降级 codex(白嫖兜底),见 voice.py::_task_agent。
+    "agent":        {"backend": "claude", "variant": "opus",              "depth": "low"},
     "img_norm":     {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 77:配图关键词规范化(可自定义型号)
     "web_search":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:联网搜索结构卡(grounding,深度无效恒不思考)
     "route_text":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:路由详答文字引擎(SSE 流式)
