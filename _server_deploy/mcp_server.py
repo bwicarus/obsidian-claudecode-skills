@@ -14,6 +14,7 @@
 
 运行环境:/home/bwicarus/mcp-venv(mcp + httpx)。不 import webapp 代码,只走 HTTP → webapp 更新无需动本文件。
 """
+import datetime
 import json
 import os
 import sys
@@ -100,10 +101,30 @@ def search_all_books(query: str) -> dict:
 
 @mcp.tool()
 def reading_positions() -> dict:
-    """用户各书的当前阅读位置(页码/章节)。判断"用户最近在读什么/读到哪"用这个。"""
+    """用户各书的当前阅读位置,**按最后阅读时间从新到旧排好序**(第一条 = 最近在读的那本)。
+    判断"用户最近在读什么/读到哪"用这个 —— 直接取 most_recent 或 books[0],不用自己比时间。"""
     try:
         p = Path("/home/bwicarus/claude/state/reader-positions.json")
-        return {"ok": True, "positions": json.loads(p.read_text("utf-8")) if p.exists() else {}}
+        raw = json.loads(p.read_text("utf-8")) if p.exists() else {}
+        # 148:原先直接把无序 dict 原样吐出去 → 模型得自己逐个比 ts 找最大值,**实测真的挑错过书**
+        #   (codex 挑了第二近的那本)。按 Anthropic「writing tools for agents」的 high-signal 原则:
+        #   排好序 + 给人类可读时间 + 把结论(most_recent)直接摆出来,别让模型做本该我们做的事。
+        rows = []
+        for f, v in (raw.items() if isinstance(raw, dict) else []):
+            if not isinstance(v, dict):
+                continue
+            ts = v.get("ts") or 0
+            rows.append({"file": f,
+                         "name": f.rsplit("/", 1)[-1].rsplit(".", 1)[0],
+                         "kind": v.get("kind"),
+                         "pos": v.get("pos"),
+                         "last_read": (datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                                       if ts else ""),
+                         "ts": ts})
+        rows.sort(key=lambda r: r["ts"], reverse=True)   # 新 → 旧
+        return {"ok": True,
+                "most_recent": rows[0] if rows else None,   # 「最近在读」的答案,直接给
+                "books": rows}
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
 
