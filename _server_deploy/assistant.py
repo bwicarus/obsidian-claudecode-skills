@@ -3120,7 +3120,9 @@ TOOLS = {
                 "①要 2 步以上才能答的(如\"我在读的那本书一共多少页\"=先查在读哪本再查页数、"
                 "\"把这章重点标出来再逐条做成卡片\");"
                 "②探索性的活,你事先不知道要翻几本书/查几次(如\"找找我读过的书里哪本提过X\");"
-                "③要跑很久的活(整章处理),不能让用户干等。"
+                "③要跑很久的活(整章处理),不能让用户干等;"
+                "④**造一张让用户在页面上手写作答的交互纸**(出题/填空/试卷/听写/清单/『给我出…我写』/『在纸上做』)"
+                "——你**没有**直接造纸的工具,这类一律交给它(它那边的 CLI 有造纸工具)。"
                 "**只有 1 个工具就能答的,自己直接调**(那种情况用它没有任何好处)。"
                 "用它时把用户原话**原样**转述,别自己拆步骤。args {instruction}",
                 _t_do_task),
@@ -3222,10 +3224,17 @@ def _tool_label(name, args):
 
 
 # ──────────────────────── agent 循环 ────────────────────────
+# ★ 用户设计(#52/#55):编排 AI **不该**有直接造纸工具 —— 一遇到"出题让用户写/造交互纸"这种多步活,
+#   就该发现"没有直接可调用的工具"→ 交给 CLI(do_task)去做(CLI 那边经 MCP 才看得到 page_*)。
+#   这样造纸永远是**一张 CLI 卡**(可保存),不会退化成编排侧内联的一堆 page_new/add/show 工具 chip。
+#   ⚠ 只从**编排侧目录**摘除,page_* 仍留在 TOOLS 里给 MCP/CLI 调(去壳回放也靠它)。
+_ORCH_DROP = {"page_new", "page_add", "page_show"}
+
+
 def _sys_prompt(ctx):
     _uid0 = ctx.get("_uid") or ctx.get("uid") or ""
     # 140:工具说明支持 per-user 覆盖(详情窗里改 → 这里就是它进 AI 的地方)
-    cat = "\n".join(f"- {n}: {_tp(_uid0, n, 'desc', d)}" for n, (d, _) in TOOLS.items())
+    cat = "\n".join(f"- {n}: {_tp(_uid0, n, 'desc', d)}" for n, (d, _) in TOOLS.items() if n not in _ORCH_DROP)
     _off = int(ctx.get("page_offset") or 0)   # PDF页 - 印刷页;给 AI 看的页码一律转成书上印刷页(跟用户一致)
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
     meta = {"book": ctx.get("book_name"), "当前可见页": [int(p) - _off for p in vis if p],
@@ -5349,7 +5358,7 @@ def _build_rtc_session(uid, file_rel, page):
     # [:280] 只是防御 cap(防未来有人写出长目录行),现存目录行零截断;_vo 覆盖项(search_image)保留完整。
     # 75(用户裁定):read_selection **永久不挂**——选中内容程序保证经 state 通道注入上下文,
     # 工具是纯重复入口(工具表每次会话恒定一致=前缀缓存无伤;长选中引导 read_page 该页)
-    _RTC_DROP = {"read_selection"}
+    _RTC_DROP = {"read_selection"} | _ORCH_DROP   # 语音模型同样不直接造纸,交给 do_task(见 _ORCH_DROP)
     tools = [{"type": "function", "name": n, "description": _tool_desc_rtc(uid, n, _vo.get(n, str(d)), 1024 if n in _vo else 280),   # 143:说明 + 垫话策略
               "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, (d, _) in TOOLS.items() if n not in _RTC_DROP]
