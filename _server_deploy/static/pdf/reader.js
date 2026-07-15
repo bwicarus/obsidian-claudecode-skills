@@ -816,7 +816,7 @@ async function _renderPageImg(num, wrap, viewport) {
   }
   // char 层(PyMuPDF chars:选词/高亮/振假名/搜索)。它只用 viewport.scale + 自己做坐标转换 → shim viewport 够。
   loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + (e && e.message)));
-  wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
+  wrap.__inkStrokes = (window._ink && window._ink.byPage[num] && !(window._upClaimed && window._upClaimed[num])) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];   // #4:插入页占用的页号,陈旧真页不贴其墨迹
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);
   wrap.__renderScale = scale;   // 记录渲染时的 scale → 缩放重排时按比例 zoom 现有位图(过渡期补偿)
@@ -993,7 +993,7 @@ async function _renderPageInto(num, wrap) {
   // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
   loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
   // 加载该页已存墨迹并重绘
-  wrap.__inkStrokes = (window._ink && window._ink.byPage[num]) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];
+  wrap.__inkStrokes = (window._ink && window._ink.byPage[num] && !(window._upClaimed && window._upClaimed[num])) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];   // #4:插入页占用的页号,陈旧真页不贴其墨迹
   if (window._inkRedraw) window._inkRedraw(wrap);
   _applyCropToWrap(wrap, cw, ch);   // 去边模式:裁切窗口 + 子层统一位移
   // 自愈:渲染期间(render/getTextContent/tl.render 几段 await)全局 scale 变了 → 本页定格旧 scale

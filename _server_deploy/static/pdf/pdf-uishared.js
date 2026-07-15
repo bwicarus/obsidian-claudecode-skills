@@ -799,14 +799,25 @@ window._favOpenPicker = function () {
   };
 
   // 建一张任务纸(乐观新建),绑到真页号后回调 onReady(rec, tmpEl)。多纸时反复调它。
-  function _upSpawnTaskPage(after, title, onReady) {
+  //   afterEl(可选):把新页**紧邻这个 DOM 元素之后**插入 —— 多纸溢出必须用它,否则按页号 _upPlace
+  //   会命中"乐观插入未重编号的陈旧同号真页"→ 溢出页落到它后面 = 两页中间隔一页(用户实测 #1)。
+  function _upSpawnTaskPage(after, title, onReady, afterEl) {
     if (after < 0) after = 0;
     var tempId = 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     var rec = { id: tempId, page: 0, title: title || '任务', md: '', mode: 'overlay',
                 md_ver: 0, synced_ver: 0, _temp: true };
     var tmp = document.createElement('div');
     tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = tempId;
-    if (!_upPlace(tmp, after, null)) { alert('请先翻到要插纸的位置附近'); return; }
+    var placed = false;
+    if (afterEl && afterEl.parentNode && afterEl.isConnected) {
+      try {
+        if (afterEl.style.width) tmp.style.width = afterEl.style.width;                 // 跟前一张同宽
+        if (afterEl.style.aspectRatio) { tmp.style.aspectRatio = afterEl.style.aspectRatio; tmp.style.minHeight = '0'; }
+        afterEl.parentNode.insertBefore(tmp, afterEl.nextSibling);                      // 紧邻前一张之后
+        placed = true;
+      } catch (e) {}
+    }
+    if (!placed && !_upPlace(tmp, after, null)) { alert('请先翻到要插纸的位置附近'); return; }
     try { tmp.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) {}
     _upTempEls[tempId] = tmp;
     _upMountOverlay(rec, tmp);   // 不进编辑态,先显示"生成中"
@@ -834,16 +845,17 @@ window._favOpenPicker = function () {
     }).catch(function () {});
   }
   // 多纸自动补页(#33):建第 index 张溢出页 → attach 写块 → 渲染 → 递归下一张。
-  function _upSpawnOverflow(rid, afterPage, n, index) {
+  //   afterEl=前一张的 DOM 元素:紧邻它插入(#1 修复:不按会碰撞陈旧同号页的页号)。
+  function _upSpawnOverflow(rid, afterPage, afterEl, n, index) {
     if (index >= n) return;
     _upSpawnTaskPage(afterPage, '第 ' + (index + 1) + ' 页', function (rec, tmp) {
       RC.reqJson('POST', '/pdf/api/run-attach', { rid: rid, upage: rec.id, page: rec.page, index: index })
         .then(function (a) {
           rec.run_id = rid;
           _upRenderTaskPage(rec, tmp);
-          _upSpawnOverflow(rid, rec.page, n, index + 1);   // 下一张接在这张后面
+          _upSpawnOverflow(rid, rec.page, tmp, n, index + 1);   // 下一张紧邻这张
         }).catch(function () {});
-    });
+    }, afterEl);
   }
 
   window.__upStartTask = function (spec) {
@@ -859,7 +871,7 @@ window._favOpenPicker = function () {
           .then(function (r) {
             if (!(r && r.ok)) { _upRunHint(rec, '起任务失败:' + ((r && r.error) || '?')); return; }
             _upRenderTaskPage(rec, tmp);
-            if ((r.n_pages || 1) > 1) _upSpawnOverflow(r.rid, rec.page, r.n_pages, 1);   // 溢出 → 自动补页
+            if ((r.n_pages || 1) > 1) _upSpawnOverflow(r.rid, rec.page, tmp, r.n_pages, 1);   // 溢出 → 自动补页(紧邻第 1 张)
           }).catch(function () {});
       });
     } catch (e) { try { console.warn('[task] __upStartTask 失败', e); } catch (e2) {} }
@@ -1311,6 +1323,9 @@ window._favOpenPicker = function () {
     }
     var snap = _upTextSnap[tempId];
     rec.id = realId; rec.page = realPage; rec._temp = false;   // 就地升级:同一 rec 对象 → 覆盖层闭包后续用真 id
+    // ★#4:登记"这个页号本会话归插入页占用"。乐观插入不重编号 DOM → 同号还有张陈旧真页;
+    //   _upClaimed 让墨迹渲染路径(_inkLoadAll / SSE / 04-render)绝不把插入页墨迹贴到陈旧同号页。
+    try { (window._upClaimed = window._upClaimed || {})[realPage] = realId; } catch (e) {}
     if (realRec) { rec.md_ver = +(realRec.md_ver || 0); rec.synced_ver = +(realRec.synced_ver || 0); }
     var el = _upTempEls[tempId];
     if (el) {

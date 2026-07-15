@@ -295,6 +295,19 @@
   }
 
   function setTaskId(tid, taskId) { var t = _turns[tid]; if (t) t.taskId = taskId; }
+  // CLI 任务:运行中就建/更新**唯一**工具 part(否则【流程】要等 done 才有内容 = 用户实测"流程空")。
+  //   同一个 part 就地更新 steps(它是本轮的当前 part,未冻结),流程开着就实时补画。
+  function cliPart(tid, part) {
+    var t = _turns[tid] || open(tid);
+    if (!t) return;
+    _ensureHead(t, part.label || '任务');
+    if (!t._cliPart) { t._cliPart = { kind: 'tool', tool: 'do_task', label: '', steps: [], seq: t.parts.length }; t.parts.push(t._cliPart); }
+    if (part.label) t._cliPart.label = part.label;
+    if (part.steps) t._cliPart.steps = part.steps;
+    if (part.error != null) t._cliPart.error = part.error;
+    if (!t.flow.hidden) _paintFlow(t);
+    try { if (RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+  }
   // CLI 任务:运行中就把卡头设成任务名(不必等结束的 tool part)——复用同一个 _ensureHead,
   // 卡片长这样:[卡头=任务名][body 增量渲结果][流程按钮]。
   function title(tid, label) { var t = _turns[tid] || open(tid); if (t) _ensureHead(t, label); }
@@ -310,7 +323,7 @@
 
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title, status: status,
+    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
     has: function (tid) { return !!_turns[tid]; },
   };

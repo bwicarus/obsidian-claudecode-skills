@@ -344,9 +344,14 @@ async function _inkLoadAll() {
       _ink.byPage = {};
       for (const k in d.pages) _ink.byPage[parseInt(k)] = d.pages[k];
       for (const dk in hold) _ink.byPage[parseInt(dk, 10)] = hold[dk];
+      // ★#4 根治:会话内**插入页占用的页号**(乐观插入未重编号,DOM 里同号的是陈旧真页),
+      //   其服务器墨迹归**插入页自己**(el.__inkStrokes)。删掉这些键,陈旧真页就拿不到插入页墨迹
+      //   → 不再串页。重开书 PDF 已烧页、页号天然对齐,byPage 正常映射(那时 _upClaimed 为空)。
+      try { const _cl = window._upClaimed || {}; for (const ck in _cl) delete _ink.byPage[parseInt(ck, 10)]; } catch (e) {}
       document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach(pw => {
         const n = parseInt(pw.dataset.pageNum);
         if (_ink.dirty && _ink.dirty[n]) return;   // 待存页:画面保持本地
+        if (window._upClaimed && window._upClaimed[n]) return;   // 该页号归插入页 → 陈旧真页不贴
         if (_ink.byPage[n]) { pw.__inkStrokes = JSON.parse(JSON.stringify(_ink.byPage[n])); _inkRedraw(pw); }
       });
     }
@@ -384,6 +389,7 @@ window._inkLoadAll = _inkLoadAll;
         }
         if (!ev || ev.kind !== 'ink' || ev.file !== FILE_REL) return;
         var num = parseInt(ev.uid, 10); if (!num) return;
+        if (window._upClaimed && window._upClaimed[num]) return;             // #4 该页号归会话内插入页,别贴给陈旧真页
         if (_ink.drawing && _ink.drawing.num === num) return;               // 正在画这页 → 不打断
         if (_ink.dirty && _ink.dirty[num]) return;                          // 本地有待存 → 别用服务端旧值覆盖
         if (_ink.echo && _ink.echo[num] && Date.now() - _ink.echo[num] < 3000) return;   // 55 自回声抑制:自己刚存的不用回放——

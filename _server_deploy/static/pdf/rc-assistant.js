@@ -2197,32 +2197,39 @@
     try { RC.turnCard && RC.turnCard.setTaskId && RC.turnCard.setTaskId(tid, taskId); } catch (_) {}
     try { RC.turnCard.title(tid, label); } catch (_) {}                 // 卡头=CLI任务名(用户设计 #57)
     try { RC.turnCard.status(tid, '规划中', false); } catch (_) {}      // 进度=标题下面一行(用户设计 #49/#52)
-    var n = 0;
+    var n = 0, _appliedCA = 0;
+    function _applyNewCAs(cas) {   // #2:client_action(建纸)一出现就应用,不等 CLI 说完(page_show 一跑纸就开始建)
+      cas = cas || [];
+      for (var i = _appliedCA; i < cas.length; i++) {
+        var a = cas[i];
+        try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {}
+      }
+      _appliedCA = cas.length;
+    }
+    function _mkSteps(steps) { return (steps || []).map(function (x) { return { label: x.name || String(x), detail: x.status || '' }; }); }
     (function poll() {
       if (n++ > 600) {
         try { RC.turnCard.status(tid, '等太久了，没等到结果', true); RC.turnCard.freezeDraft(tid);
-          RC.turnCard.addPart(tid, { kind: 'tool', tool: 'do_task', label: label + '(超时)', error: '等太久了' }); } catch (_) {}
+          RC.turnCard.cliPart(tid, { label: label + '(超时)', error: '等太久了' }); } catch (_) {}
         return;
       }
       fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
         if (!d || !d.ok) { setTimeout(poll, 1500); return; }
         var steps = d.steps || [];
-        // 进度 → 标题下面一行;结果 → body 增量渲(用户设计 #52「每一步状态在进度那一行」+ #57「结果增量显示」)。
+        // 进度 → 标题下面一行;结果 → body 增量渲(#52/#57);工具 → 运行中就进【流程】(#5:流程不再空)。
         try { RC.turnCard.status(tid, (d.step || '规划中') + (steps.length ? ('  ·  已用 ' + steps.length + ' 个工具') : ''), false); } catch (_) {}
         if (d.partial) { try { RC.turnCard.draftText(tid, d.partial); } catch (_) {} }
+        try { RC.turnCard.cliPart(tid, { label: label, steps: _mkSteps(steps) }); } catch (_) {}   // #5 流程实时填
+        _applyNewCAs(d.client_actions);                                                             // #2 建纸即时开始
         if (d.status === 'done' || d.status === 'error') {
           try {
             var body = String(d.partial || d.speak || (d.status === 'error' ? d.error : '') || '').trim();
             if (body) { RC.turnCard.draftText(tid, body); }
             RC.turnCard.freezeDraft(tid);
-            RC.turnCard.status(tid, d.status === 'error' ? ('出错：' + (d.error || '')) : '制作完毕', true);   // #52「卡片输出制作完毕」
-            // tool part:① 卡头=任务名 ② CLI 内部工具进【流程】 ③ 让"💾保存为工具"拿到 steps
-            RC.turnCard.addPart(tid, { kind: 'tool', tool: 'do_task', label: label,
-              steps: steps.map(function (x) { return { label: x.name || String(x), detail: x.status || '' }; }),
+            RC.turnCard.status(tid, d.status === 'error' ? ('出错：' + (d.error || '')) : '制作完毕', true);   // #52
+            RC.turnCard.cliPart(tid, { label: label, steps: _mkSteps(steps),
               error: d.status === 'error' ? (d.error || '失败') : '' });
-            if (d.client_actions && d.client_actions.length) {
-              d.client_actions.forEach(function (a) { try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {} });
-            }
+            _applyNewCAs(d.client_actions);   // 收尾补一次(done 时才出现的 client_action)
           } catch (_) {}
           return;
         }
