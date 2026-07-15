@@ -2190,22 +2190,35 @@
   }
   // 轮询 CLI 后台任务:进度进 busy 行,**内部每个工具**作为 sub_steps 展进 tool part 的流程。
   function _trackCliTask(tid, taskId, label) {
+    // ★ 用户拍板(9a1a6c1 截图):CLI 卡要跟 web_search 卡**同款**——[卡头=任务名][body 增量渲结果][流程]。
+    //   不再用"进度行 + 全塞 sub_steps"那套。走 turn 容器同一套:title 设卡头、draftText 增量渲正文、
+    //   done 时补一个 tool part(只为设卡头 + 进【流程】+ 让"保存为工具"能拿到 steps)。
     try { RC.turnCard && RC.turnCard.setTaskId && RC.turnCard.setTaskId(tid, taskId); } catch (_) {}
-    var n = 0, lastN = -1;
+    try { RC.turnCard.title(tid, label); } catch (_) {}   // 卡头=任务名(运行中就显示,不等结束)
+    try { RC.turnCard.draftText(tid, ''); } catch (_) {}  // 先占正文位 → 增量结果在上、spinner 在下
+    var n = 0;
     (function poll() {
-      if (n++ > 600) { try { RC.turnCard.idle(tid); RC.turnCard.addPart(tid, { kind: 'tool', tool: label, label: label + '(超时)', error: '等太久了' }); } catch (_) {} return; }
+      if (n++ > 600) {
+        try { RC.turnCard.idle(tid); RC.turnCard.draftText(tid, '_（等太久了，没等到结果）_'); RC.turnCard.freezeDraft(tid);
+          RC.turnCard.addPart(tid, { kind: 'tool', tool: 'do_task', label: label + '(超时)', error: '等太久了' }); } catch (_) {}
+        return;
+      }
       fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
         if (!d || !d.ok) { setTimeout(poll, 1500); return; }
         var steps = d.steps || [];
-        // 进度行:显示 CLI 当前在干什么 + 已用的工具
-        try { RC.turnCard.busy(tid, (d.step || label) + '  ·  已用 ' + steps.length + ' 个工具'); } catch (_) {}
+        // 运行中:body 增量渲 CLI 正文(有就渲),底部一行小 spinner 显示当前在干什么。
+        if (d.partial) { try { RC.turnCard.draftText(tid, d.partial); } catch (_) {} }
+        try { RC.turnCard.busy(tid, (d.step || '规划中') + (steps.length ? ('  ·  已用 ' + steps.length + ' 个工具') : '')); } catch (_) {}
         if (d.status === 'done' || d.status === 'error') {
           try {
             RC.turnCard.idle(tid);
-            // 把 CLI 用过的每个工具作为 sub_steps,注入一个"CLI 编排"tool part → 点流程能看到全部
-            RC.turnCard.addPart(tid, { kind: 'tool', tool: label, label: label,
+            // 最终正文落进 body(优先 partial 全文,回落 speak);冻结成不可变 part。
+            var body = String(d.partial || d.speak || (d.status === 'error' ? d.error : '') || '').trim();
+            if (body) { RC.turnCard.draftText(tid, body); }
+            RC.turnCard.freezeDraft(tid);
+            // 补一个 tool part:① 再确认卡头=任务名 ② CLI 内部工具进【流程】 ③ 让"💾保存为工具"拿到 steps。
+            RC.turnCard.addPart(tid, { kind: 'tool', tool: 'do_task', label: label,
               steps: steps.map(function (x) { return { label: x.name || String(x), detail: x.status || '' }; }),
-              result: String((d.status === 'error' ? d.error : d.speak) || '').slice(0, 2000),
               error: d.status === 'error' ? (d.error || '失败') : '' });
             // CLI 产出的 client_actions(如建纸)—— 应用它们
             if (d.client_actions && d.client_actions.length) {

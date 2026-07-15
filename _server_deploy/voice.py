@@ -1204,6 +1204,7 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
     else:
         env["ENABLE_TOOL_SEARCH"] = "false"   # 147c:关掉工具延迟加载(见下)——轮数减半
     answer = ""
+    _acc = ""   # CLI 输出的正文累积 → 增量推给前端(卡片 body 边跑边显示,像 web_search)
     pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
     t0 = time.time()
@@ -1233,6 +1234,9 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                     _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
             elif d.get("type") == "item.completed" and it.get("type") == "agent_message":
                 answer = (it.get("text") or "").strip()   # 覆盖式:最后一条 agent_message 即最终答案
+                if answer:
+                    _acc = answer
+                    _vtask_set(tid, partial=_acc[:4000])   # 增量结果 → 前端卡片 body
         elif d.get("type") == "assistant":
             for c in ((d.get("message") or {}).get("content") or []):
                 if c.get("type") == "tool_use":
@@ -1242,6 +1246,9 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                         nm, _inp = _unwrap_call(nm, _inp)
                         steps.append({"name": nm, "status": "done", "args": _inp})   # 记参数 → 保存工具时可 replay
                         _vtask_set(tid, step=f"{nm}…", steps=list(steps))
+                elif c.get("type") == "text" and (c.get("text") or "").strip():
+                    _acc += c.get("text")   # claude 流式正文 → 边跑边推(增量结果显示在卡片 body)
+                    _vtask_set(tid, partial=_acc[:4000])
         elif d.get("type") == "user":
             # ★ 工具返回体里的 client_action(如 page_show 的 __upStartTask)—— headless agent 不会转发它,
             #   我们从 tool_result 里挖出来收集进 task,前端轮询 task-status 时应用 → 后台 agent 建的纸才真显示。
@@ -1400,6 +1407,7 @@ def voice_task_status():
         return jsonify({"ok": False, "error": "unknown task"}), 404
     return jsonify({"ok": True, "status": t.get("status"), "step": t.get("step"),
                     "steps": t.get("steps") or [],   # 工具指示器 v2:内部步骤流水(长条滚动 + 「!」面板逐步查看)
+                    "partial": t.get("partial") or "",   # CLI 正文增量 → 卡片 body 边跑边显示
                     "speak": t.get("speak"), "client_actions": t.get("client_actions") or [],
                     "result": t.get("result"), "error": t.get("error")})
 

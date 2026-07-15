@@ -272,6 +272,9 @@
   }
 
   function setTaskId(tid, taskId) { var t = _turns[tid]; if (t) t.taskId = taskId; }
+  // CLI 任务:运行中就把卡头设成任务名(不必等结束的 tool part)——复用同一个 _ensureHead,
+  // 卡片长这样:[卡头=任务名][body 增量渲结果][流程按钮]。
+  function title(tid, label) { var t = _turns[tid] || open(tid); if (t) _ensureHead(t, label); }
   function partsOf(tid) {
     var t = _turns[tid];
     if (!t) return [];
@@ -284,7 +287,7 @@
 
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId,
+    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title,
     current: function () { return _cur; },
     has: function (tid) { return !!_turns[tid]; },
   };

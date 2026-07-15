@@ -3209,6 +3209,9 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
+    if name == "do_task":   # CLI 卡标题 = 用户任务原话(不是通用"do_task"),前端拿它当卡头
+        instr = (args.get("instruction") or args.get("task") or args.get("text") or "").strip()
+        return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else "后台任务"
     return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "run_saved_task": "运行工具", "list_saved_tasks": "列出工具", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
