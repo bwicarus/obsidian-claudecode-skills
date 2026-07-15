@@ -909,6 +909,12 @@ window._favOpenPicker = function () {
     });
     // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
     requestAnimationFrame(function () {
+      // 检查结果(持久化在 sidecar 的 result_md)→ 渲进卡内结果区(不塞格子)
+      if (rec.result_md) {
+        var rr = ov.querySelector('.up2-run-result');
+        if (!rr) { rr = document.createElement('div'); rr.className = 'up2-run-result'; ov.appendChild(rr); }
+        try { rr.innerHTML = (window.RC && RC.md) ? RC.md(rec.result_md) : RC.esc(rec.result_md); } catch (e) { rr.textContent = rec.result_md; }
+      }
       var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
         var fr = el.__fr; if (!fr) return;

@@ -408,9 +408,29 @@ def _check_page(rid, prompt_hint=""):
                       (" — " + it.get("note")) if it.get("note") else ""))
         if res.get("brief"):
             md.append("\n> " + str(res["brief"]))
-        run.update(status="done", result=res, result_md="\n".join(md), hint="检查完成 ✅")
+        rmd = "\n".join(md)
+        run.update(status="done", result=res, result_md=rmd, hint="检查完成 ✅")
         _save(run)
-        _push_run(run)   # 带 result_md,前端显示在卡片下方(_push_run 会把 result_md 一起推)
+        # ★ 结果**存进纸的 sidecar**(不是格子块) → 刷新/回前台/换设备都能看到,不靠那一次性 SSE。
+        #   (后台线程发的 SSE 若那刻页面不可见就被 visibility 早退丢了 —— 用户实测"结果没出现"的根因。)
+        try:
+            import pdf_reader as P
+            with _lock:
+                items = P._upages_load(run["file"])
+                for it in items:
+                    if it.get("id") == run.get("upage"):
+                        it["result_md"] = rmd
+                        it["updated"] = int(time.time())
+                        break
+                P._upages_save(run["file"], items)
+        except Exception:
+            pass
+        _push_run(run)                                   # 实时推(在线就立刻显示)
+        try:                                             # 再补发 text 事件 → __upRerender 重画(更可靠)
+            from reader_events import publish
+            publish("text", run["file"], run.get("upage"))
+        except Exception:
+            pass
     except Exception as ex:
         run = load(rid) or run
         run.update(status="error", error=str(ex)[:200])
