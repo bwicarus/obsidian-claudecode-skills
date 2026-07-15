@@ -782,7 +782,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                     await bws.send(json.dumps({"event": "client_action", "payload": hit["ca"]}, ensure_ascii=False))   # 视频卡等重放
                 await bws.send(json.dumps({"event": "tool_status", "payload": {
                     "status": "done", "tool": tname, "label": f"{hit.get('label') or tname}(复用上次结果)", "cached": True,
-                    "cmd": str(cmd)[:500], "rag": (hit.get("content") or "")[:1600]}}, ensure_ascii=False))
+                    "cmd": str(cmd)[:500], "vision": hit.get("vision") or [],   # #8 缓存命中也重发"实际发给AI的图"(否则看图类工具复用时无图)
+                    "rag": (hit.get("content") or "")[:1600]}}, ensure_ascii=False))
                 rag = json.dumps([{"title": f"工具 {tname} 的结果(页面状态没变,这是**此前同样查询的结果直接复用**,没有重新执行)",
                                    "content": hit.get("content") or "(界面元素已重新显示)"}], ensure_ascii=False)
                 await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
@@ -853,6 +854,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
                 "content": content, "label": d.get("label") or tool,
+                "vision": _vision,   # #8 连"实际发给AI的图"一起缓存 → 命中时能重发(看图类工具复用不丢图)
                 "ca": ca if (isinstance(ca, dict) and ca.get("fn")) else None}
             while len(cache) > 20:
                 cache.pop(next(iter(cache)))
