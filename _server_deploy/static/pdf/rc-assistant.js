@@ -2180,11 +2180,42 @@
     // done/error:注入一个 tool part(参数/子步骤/结果全在里面)
     try {
       RC.turnCard.idle(tid);
-      if (d.task_id) { RC.turnCard.busy(tid, (d.label || '任务') + '(后台执行中)'); return; }   // 后台任务:仍显示进行中
+      // ★ do_task(CLI 编排):后台 agent 的**内部工具调用**要展进这张卡的流程 —— 否则没 parts,
+      //   保存工具(E)也无从下手(用户点破:CLI 不显示工具,保存就做不了)。轮询 task-status 拉 steps。
+      if (d.task_id) { _trackCliTask(tid, d.task_id, d.label || d.name || 'do_task'); return; }
       RC.turnCard.addPart(tid, { kind: 'tool', tool: d.name || '', label: d.label || d.name || '工具',
         args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 3000),
         took_s: d.sec, model: d.model, error: d.status === 'error' ? (d.brief || '失败') : '' });
     } catch (_) {}
+  }
+  // 轮询 CLI 后台任务:进度进 busy 行,**内部每个工具**作为 sub_steps 展进 tool part 的流程。
+  function _trackCliTask(tid, taskId, label) {
+    var n = 0, lastN = -1;
+    (function poll() {
+      if (n++ > 600) { try { RC.turnCard.idle(tid); RC.turnCard.addPart(tid, { kind: 'tool', tool: label, label: label + '(超时)', error: '等太久了' }); } catch (_) {} return; }
+      fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) { setTimeout(poll, 1500); return; }
+        var steps = d.steps || [];
+        // 进度行:显示 CLI 当前在干什么 + 已用的工具
+        try { RC.turnCard.busy(tid, (d.step || label) + '  ·  已用 ' + steps.length + ' 个工具'); } catch (_) {}
+        if (d.status === 'done' || d.status === 'error') {
+          try {
+            RC.turnCard.idle(tid);
+            // 把 CLI 用过的每个工具作为 sub_steps,注入一个"CLI 编排"tool part → 点流程能看到全部
+            RC.turnCard.addPart(tid, { kind: 'tool', tool: label, label: label,
+              steps: steps.map(function (x) { return { label: x.name || String(x), detail: x.status || '' }; }),
+              result: String((d.status === 'error' ? d.error : d.speak) || '').slice(0, 2000),
+              error: d.status === 'error' ? (d.error || '失败') : '' });
+            // CLI 产出的 client_actions(如建纸)—— 应用它们
+            if (d.client_actions && d.client_actions.length) {
+              d.client_actions.forEach(function (a) { try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {} });
+            }
+          } catch (_) {}
+          return;
+        }
+        setTimeout(poll, 1500);
+      }).catch(function () { setTimeout(poll, 2000); });
+    })();
   }
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知
