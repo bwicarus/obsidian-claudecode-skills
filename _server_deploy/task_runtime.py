@@ -416,10 +416,216 @@ def _check_page(rid, prompt_hint=""):
         _push_run(run)
 
 
-_PROGRAMS = {"dictation": _dictation_tick, "free": _free_tick}
+# ══════════ 阶段 C:声明式配方解释器(流程即数据,不是代码)══════════
+# ADR adr-page-orchestrator.md 栏杆①:流程是一份**声明式 flow**(白名单 step),由这个解释器
+# 确定性执行 —— 编排 AI(阶段 D)产出的是这份数据,不是可执行代码。
+#
+# ⚠ 解释器必须能**挂起再恢复**(不是一次跑完):遇到 wait 就停在那儿存 pc,
+#   下次 advance(事件到达)从 pc 继续。所有游标存 run["vm"] 里(durable),不靠内存。
+#
+# flow = [ step, step, ... ];step 是下面白名单之一:
+#   {"page": [blocks]}              铺纸(模板变量 {{x}} / {{i}} / {{item}} 由 _tpl 展开)
+#   {"say": "文本"}                 念(TTS 遥控)
+#   {"wait": "事件名"}              挂起,等某个按钮事件(带 WAIT_TIMEOUT 超时)
+#   {"wait_ms": 3000}              计划内停顿(定时器;当前实现为立即过,定时留阶段 D)
+#   {"loop": {"over":"words", "do":[...]}}   对 params[over] 逐项循环,item/i 进作用域
+#   {"check": {"answers":"words", "hint":"..."}}  按 blank 裁图 → 有界 LLM 点评(起后台线程)
+#   {"write": [blocks]}             往页里追加块
+#   {"reveal"/"hide": "块id"}
+#   {"set_enabled": {"id":.., "on":bool}}
+# 校验:validate_flow() 在**保存/运行前**跑,未知 step / 悬空引用 → 拒(栏杆①)。
+_FLOW_STEPS = ("page", "say", "wait", "wait_ms", "loop", "check", "write", "reveal", "hide", "set_enabled")
+
+
+def validate_flow(flow):
+    """返回 (ok, error)。宁可严:不认识的 step 一律拒(防编排 AI 编出跑不了的东西)。"""
+    if not isinstance(flow, list) or not flow:
+        return False, "flow 必须是非空数组"
+    def _walk(steps, depth=0):
+        if depth > 6:
+            return "嵌套太深"
+        for st in steps:
+            if not isinstance(st, dict) or len(st) < 1:
+                return "step 必须是对象"
+            key = next(iter(st))
+            if key not in _FLOW_STEPS:
+                return f"未知 step「{key}」"
+            if key == "loop":
+                lp = st[key] or {}
+                if not lp.get("over") or not isinstance(lp.get("do"), list):
+                    return "loop 需要 over(字符串) + do(数组)"
+                e = _walk(lp["do"], depth + 1)
+                if e:
+                    return e
+        return ""
+    e = _walk(flow)
+    return (not e), e
+
+
+def _tpl(v, scope):
+    """展开模板变量:{{title}} {{i}} {{item}} → scope 里的值。"""
+    if isinstance(v, str):
+        for k, val in scope.items():
+            v = v.replace("{{%s}}" % k, str(val))
+        return v
+    if isinstance(v, list):
+        return [_tpl(x, scope) for x in v]
+    if isinstance(v, dict):
+        return {k: _tpl(x, scope) for k, x in v.items()}
+    return v
+
+
+def _recipe_tick(run, event):
+    """声明式配方的执行器。用**扁平化的指令流 + pc**驱动(loop 在 vm 初始化时展开成线性序列),
+    这样"挂起-恢复"只需要存一个整数 pc,不用重建循环栈 —— 最简单、最可靠。"""
+    vm = run.setdefault("vm", {})
+    if "prog" not in vm:                       # 首次:把 flow 展开成扁平指令流
+        vm["prog"] = _flatten(run.get("flow") or [], run.get("params") or {})
+        vm["pc"] = 0
+    prog = vm["prog"]
+
+    # 若正挂起等事件:先看这个事件是不是它等的
+    if run.get("status") == "waiting":
+        want = (run.get("wait") or {}).get("event")
+        if want and event and event != want and event not in ("start",):
+            return False                       # 不是等的事件 → 忽略(幂等)
+        run["status"] = "running"              # 收到 → 继续往下走
+
+    changed = False
+    while vm["pc"] < len(prog):
+        ins = prog[vm["pc"]]
+        vm["pc"] += 1
+        op = ins["op"]
+        if op == "page":
+            _set_blocks(run, ins["blocks"], kind=run.get("kind") or "free")
+            changed = True
+        elif op == "say":
+            _say(run, ins["text"])
+        elif op == "write":
+            cur = _blocks_of(run)
+            _set_blocks(run, list(cur) + ins["blocks"], kind=run.get("kind") or "free")
+            changed = True
+        elif op in ("reveal", "hide"):
+            _reveal(run, ins["id"], op == "reveal")
+            changed = True
+        elif op == "wait":
+            run["status"] = "waiting"
+            run["wait"] = {"event": ins["event"], "since": int(time.time())}
+            run["hint"] = ins.get("hint") or run.get("hint") or ""
+            return True                        # ★ 挂起:存 pc,等下次事件
+        elif op == "wait_ms":
+            continue                           # 定时器留阶段 D;当前立即过
+        elif op == "check":
+            if run.get("status") == "checking":
+                return changed
+            run["status"] = "checking"
+            run["hint"] = "正在检查…"
+            _save(run); _push_run(run)
+            threading.Thread(target=_check_page, args=(run["rid"], ins.get("hint") or ""),
+                             daemon=True).start()
+            return False                       # 后台线程会自行落盘/收尾
+        elif op == "set_enabled":
+            _set_enabled(run, ins["id"], ins["on"])
+            changed = True
+    run.update(status="done", hint=run.get("hint") or "完成 ✅")
+    return True
+
+
+def _flatten(flow, params):
+    """flow(可能含 loop)→ 扁平指令流。loop 在这里按 params 展开(item/i 进模板作用域)。"""
+    out = []
+    def _emit(steps, scope):
+        for st in steps:
+            key = next(iter(st))
+            body = st[key]
+            if key == "loop":
+                over = params.get(body["over"]) or []
+                for i, item in enumerate(over):
+                    _emit(body["do"], dict(scope, i=i + 1, item=item, n=len(over)))
+            elif key == "page":
+                out.append({"op": "page", "blocks": _expand_blocks(body, scope, params)})
+            elif key == "write":
+                out.append({"op": "write", "blocks": _expand_blocks(body, scope, params)})
+            elif key == "say":
+                out.append({"op": "say", "text": _tpl(body, scope)})
+            elif key == "wait":
+                out.append({"op": "wait", "event": _tpl(body, scope) if isinstance(body, str) else body.get("event"),
+                            "hint": _tpl(body.get("hint"), scope) if isinstance(body, dict) else ""})
+            elif key == "wait_ms":
+                out.append({"op": "wait_ms", "ms": int(body or 0)})
+            elif key == "check":
+                out.append({"op": "check", "hint": _tpl((body or {}).get("hint"), scope)})
+            elif key in ("reveal", "hide"):
+                out.append({"op": key, "id": _tpl(body, scope)})
+            elif key == "set_enabled":
+                out.append({"op": "set_enabled", "id": body.get("id"), "on": bool(body.get("on"))})
+    _emit(flow, {"title": params.get("title") or ""})
+    return out
+
+
+def _expand_blocks(blocks, scope, params):
+    """块列表:普通块直接展开模板;带 {repeat:"key"} 的块 → 对 params[key] 逐项展开(i/item 进作用域)。
+    这样"20 个填空"在铺纸时一次全放上(批改要裁到它们),不必写 20 遍。"""
+    out = []
+    for b in (blocks or []):
+        rep = b.get("repeat") if isinstance(b, dict) else None
+        if rep:
+            items = params.get(rep) or []
+            base = {k: v for k, v in b.items() if k != "repeat"}
+            for i, item in enumerate(items):
+                out.append(_tpl(base, dict(scope, i=i + 1, item=item, n=len(items))))
+        else:
+            out.append(_tpl(b, scope))
+    return out
+
+
+def _set_enabled(run, block_id, on):
+    import pdf_reader as P
+    rel = run["file"]
+    with _lock:
+        items = P._upages_load(rel)
+        for it in items:
+            if it.get("id") == run.get("upage"):
+                for b in (it.get("blocks") or []):
+                    if b.get("id") == block_id:
+                        b["enabled"] = bool(on)
+                it["updated"] = int(time.time())
+                break
+        P._upages_save(rel, items)
+    try:
+        from reader_events import publish
+        publish("text", rel, run.get("upage"))
+    except Exception:
+        pass
+
+
+_PROGRAMS = {"dictation": _dictation_tick, "free": _free_tick, "recipe": _recipe_tick}
 
 
 # ── 对外三个入口 ──────────────────────────────────────────────────────────────
+# ── 内置配方(阶段 C:dictation 用**纯声明式数据**重写,证明"流程即数据")──
+#   阶段 E 用户保存的配方 = 同一种数据,存 state/recipes/<name>.json。
+RECIPES = {
+    "dictation": {
+        "name": "听写",
+        "paper": "dictation",
+        "flow": [
+            {"page": [
+                {"id": "title", "kind": "text", "text": "{{title}}", "style": "h1"},
+                {"repeat": "words", "id": "q{{i}}", "kind": "blank", "label": "{{i}}.", "answer": "{{item}}"},
+                {"id": "b_next", "kind": "button", "label": "▶ 念下一个", "event": "next"},
+                {"id": "b_done", "kind": "button", "label": "✓ 写完了", "event": "done"},
+            ]},
+            {"loop": {"over": "words", "do": [
+                {"say": "{{item}}"},
+                {"wait": {"event": "next", "hint": "第 {{i}} 个,写完按「▶ 念下一个」"}},
+            ]}},
+            {"check": {"hint": "逐题判断听写对错(手写体,错字/漏字/假名错都算错)。"}},
+        ],
+    },
+}
+
+
 def start(kind: str, params: dict, ctx: dict) -> dict:
     """起一个 run。返回 {ok, rid} 或 {ok:False, error}。**同步、瞬间返回**(不做任何等待)。"""
     if kind not in _PROGRAMS:
@@ -436,6 +642,14 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
         "status": "running", "step": 0, "state": {}, "params": params or {},
         "result": None, "hint": "", "created_at": int(time.time()),
     }
+    if kind == "recipe":                       # 声明式配方:flow 从内置库或 params 拿,**校验后**才跑
+        rec_name = (params or {}).get("recipe") or ""
+        flow = (RECIPES.get(rec_name) or {}).get("flow") or (params or {}).get("flow")
+        ok, err = validate_flow(flow)
+        if not ok:
+            return {"ok": False, "error": "配方无效:" + err}
+        run["flow"] = flow
+        run["paper"] = (RECIPES.get(rec_name) or {}).get("paper") or (params or {}).get("paper") or "note"
     _PROGRAMS[kind](run, "")
     _save(run)
     _push_run(run)
