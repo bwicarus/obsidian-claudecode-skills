@@ -660,6 +660,13 @@
     if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
     // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
+    // CLI 委托任务(make_paper/do_task):走**跟文字侧栏同一套** _trackCliTask —— 轮询 task-status 把 CLI
+    //   内部工具填进本轮容器的【流程】+ 增量结果 + 建纸。否则语音路流程恒空「本轮没有工具调用」(用户实测)。
+    if (tid && (p.tool === 'make_paper' || p.tool === 'do_task')
+        && window.RC && RC.assistant && RC.assistant.trackCliTask && RC.turnCard && window.__asstVoiceTid) {
+      try { RC.assistant.trackCliTask(window.__asstVoiceTid(), tid, p.label || p.tool || '造纸'); } catch (e) {}
+      return;
+    }
     if (tid) { RC.toolChip.progress(c, '已派发,正在后台执行…'); _chipTrackTask(c, tid); return; }
     RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
     // 141(轮次容器):工具完成 → 把它作为一个 **tool part 注入本轮容器**(参数/子步骤/喂给 AI 的图/结果

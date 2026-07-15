@@ -2092,7 +2092,7 @@
   //   ADR 铁律:旧的实时拼接路径不许留着当 fallback,留着就等于允许实时/回放分叉。
   // 141:__asstVoiceMoveLead(把前置语搬进结果卡)已**删除** —— 结果卡现在是容器里的一个 card part,
   //   前置语是它前面的 text part,天然同框,不需要"搬"。
-  try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染
+  try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; RC.assistant.trackCliTask = _trackCliTask; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染;trackCliTask 供语音路(rc-voicecall)复用(CLI 委托任务的流程/结果/建纸)
   window.__asstInfoBtn = function (el, info) {   // 77b:右下角小「!」详情钮(语音气泡/搜索卡通用)
     try {
       if (!el || el.querySelector(':scope > .vc-inf-b')) return;
