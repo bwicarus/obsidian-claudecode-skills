@@ -780,10 +780,11 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             try:
                 if hit.get("ca"):
                     await bws.send(json.dumps({"event": "client_action", "payload": hit["ca"]}, ensure_ascii=False))   # 视频卡等重放
+                _hc = hit.get("content") or ""
                 await bws.send(json.dumps({"event": "tool_status", "payload": {
                     "status": "done", "tool": tname, "label": f"{hit.get('label') or tname}(复用上次结果)", "cached": True,
                     "cmd": str(cmd)[:500], "vision": hit.get("vision") or [],   # #8 缓存命中也重发"实际发给AI的图"(否则看图类工具复用时无图)
-                    "rag": (hit.get("content") or "")[:1600]}}, ensure_ascii=False))
+                    "rag": _hc[:1600]}}, ensure_ascii=False))
                 rag = json.dumps([{"title": f"工具 {tname} 的结果(页面状态没变,这是**此前同样查询的结果直接复用**,没有重新执行)",
                                    "content": hit.get("content") or "(界面元素已重新显示)"}], ensure_ascii=False)
                 await dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": rag}, ensure_ascii=False).encode(), session_id=sid))
@@ -842,6 +843,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         _vlog("tool", tool=tool, label=d.get("label") or tool, page=page, book=file_rel, ok=bool(d.get("ok")),
               args=d.get("args"), brief=content[:300])   # 结果摘要落盘:事后可查"它播报的到底有没有依据"
         # 完整调用过程 → tool_status(前端小按钮 + 侧栏对话流详情卡,v3-⑯:S2S指令/上下文/喂回结果全程可查)
+        _rb = json.dumps(slim, ensure_ascii=False)[:400]
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if d.get("ok") else "error", "tool": tool, "label": d.get("label") or tool,
             "args": d.get("args"), "took_s": d.get("took_s"),
@@ -850,7 +852,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                           "sel": len(ctx.get("selection") or "")},       # 随调用携带的页面上下文概要
             "rag": content[:1600],                                       # 喂回豆包播报的真实结果
             "vision": _vision,                                           # #8 实际发给 AI 的图 → 前端「AI 请求」节点展示
-            "result_brief": json.dumps(slim, ensure_ascii=False)[:400]}}, ensure_ascii=False))   # slim=已剔 b64,不再裸露
+            "result_brief": _rb}}, ensure_ascii=False))   # slim=已剔 b64,不再裸露
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
                 "content": content, "label": d.get("label") or tool,
@@ -2805,8 +2807,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 ca = res.get("client_action")
                 if isinstance(ca, dict) and ca.get("fn"):
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
-                vis = res.pop("_vision", None)   # 原图(b64)绝不进文本 output(会被截成烂 JSON)
-                slim = {k: v for k, v in res.items() if k not in ("client_action",)}
+                vis = res.pop("_vision", None)   # 直喂 Realtime 的图(GPT 自己看);b64 绝不进文本 output(会被截成烂 JSON)
+                card_vis = res.get("_fed_images") or vis   # 工具卡展示的图(落盘发 URL)——see_ink 走文字描述路时图在 _fed_images
+                slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}  # 剔 _fed_images 等 b64,别进 out/rag
                 lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
                 _imgs = []
@@ -2884,7 +2887,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         _vshot = []
         try:
             TOOLSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            for _v in (vis or [])[:2]:
+            for _v in (card_vis or [])[:2]:
                 _b64 = (_v or {}).get("b64") or ""
                 if not _b64:
                     continue

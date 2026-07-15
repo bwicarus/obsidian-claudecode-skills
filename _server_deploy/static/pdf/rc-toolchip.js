@@ -206,18 +206,26 @@
     if (sg.vision && sg.vision.length) {   // 141:先把喂给 AI 的图贴出来(点击放大),再接文字参数
       el.innerHTML = '';
       var wrap = document.createElement('div'); wrap.className = 'tc-vis';
+      var _shown = 0;
       sg.vision.forEach(function (v) {
-        if (!v || !v.b64) return;
-        var im = document.createElement('img');
-        im.src = 'data:' + (v.media_type || 'image/png') + ';base64,' + v.b64;
+        // 兼容三种:URL 字符串("/pdf/api/toolshot/x.png")/ {url} / {media_type,b64}
+        var src = '';
+        if (typeof v === 'string') src = v;
+        else if (v && v.url) src = v.url;
+        else if (v && v.b64) src = 'data:' + (v.media_type || 'image/png') + ';base64,' + v.b64;
+        if (!src) return;
+        var im = document.createElement('img'); im.className = 'rc-flow-img';   // 复用既有图样式(tc-vis 无 CSS)
+        im.src = src;
         im.alt = '喂给 AI 的图';
         im.title = '这就是实际发给 AI 的图 —— 点击放大';
         im.addEventListener('click', function (ev) { ev.stopPropagation(); visLightbox(im.src); });
-        wrap.appendChild(im);
+        wrap.appendChild(im); _shown++;
       });
-      var cap = document.createElement('div'); cap.className = 'tc-vis-cap';
-      cap.textContent = '↑ 实际发给 AI 的图(点击放大)';
-      el.appendChild(wrap); el.appendChild(cap);
+      if (_shown) {   // 只有真创建了 <img> 才显示 caption(否则会出现"有字没图")
+        var cap = document.createElement('div'); cap.className = 'rc-flow-cap';
+        cap.textContent = '↑ 实际发给 AI 的图(点击放大)';
+        el.appendChild(wrap); el.appendChild(cap);
+      }
       if (!body.trim()) return;
       var more = document.createElement('div'); el.appendChild(more); el = more;   // 文字参数接在图下面
     } else if (!body.trim()) { el.innerHTML = '<span style="color:#7f92b8">(没有额外内容)</span>'; return; }
