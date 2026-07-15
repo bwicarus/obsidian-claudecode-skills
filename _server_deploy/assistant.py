@@ -2967,43 +2967,59 @@ def _mark_source_highlight(ctx, color):
         pass
 
 
-def _t_make_page(args, ctx):
-    """AI **自由造一张交互纸**(阶段 B)。static blocks + 内置按钮动作,不需要编排 AI。
+# ══════════ 分步造纸(阶段 B+,用户拍板)══════════
+# 根因:让对话模型**一次手打整个 blocks 嵌套数组**(几十行 JSON)太脆 —— parse 常残缺 → 建空纸 →
+#   AI 反复重试还编「权限没授权」的借口(实测)。改成:AI 每次只加一个元素(一小段 JSON,不会烂),
+#   服务端攒成草稿,最后一次性铺纸。这正是 ADR「AI 一次加一个元素,不手搓大结构」的方向。
+_PAGE_DRAFTS = {}   # uid → {"paper":.., "title":.., "blocks":[..]}(内存草稿,就一次造纸过程,不落盘)
 
-    args {
-      paper?: dictation|exam|math|draw|note   # 纸型,默认 note(决定背景/字号/行高/底纹)
-      title?: str
-      blocks: [                               # 你要放的元素,**不用写坐标**(布局器自动排)
-        {kind:'text', text, style?:'h1'} |
-        {kind:'blank', label?, answer?} |     # 填空;answer 给了 check 时就判对错
-        {kind:'checkbox', label} |
-        {kind:'button', label, event}         # event = 内置动作:
-                                              #   check | check:提示语 | say:要念的话 | goto:页码 | reveal:块id | hide:块id
-      ]
-    }
-    典型:出一张练习纸,放几个 blank + 一个 {kind:'button',label:'让 AI 检查',event:'check'} —— 用户手写后点它,AI 就按格看手写并点评。
-    你(AI)造完纸就完事,循环/等待/检查都由系统负责。"""
-    blocks = args.get("blocks")
-    if not isinstance(blocks, list) or not blocks:
-        return {"error": "没给 blocks(要放的元素)"}
+
+def _pd_key(ctx):
+    return str((ctx or {}).get("_uid") or (ctx or {}).get("uid") or "?")
+
+
+def _t_page_new(args, ctx):
+    """开一张**新草稿纸**(造纸第一步)。args {paper?: dictation|exam|math|draw|note(默认note), title?}。
+    之后用 page_add 逐个加元素,最后 page_show 生成。"""
+    _PAGE_DRAFTS[_pd_key(ctx)] = {"paper": (args.get("paper") or "note"),
+                                  "title": (args.get("title") or "")[:60], "blocks": []}
+    return {"草稿已开": (args.get("title") or "新纸"),
+            "下一步": "用 page_add 一个一个加元素(text/blank/button…),加完调 page_show 生成。", "silent": True}
+
+
+def _t_page_add(args, ctx):
+    """往草稿纸**加一个元素**(造纸第二步,可多次)。一次只加一个,别一次塞一堆。
+    args = 元素本身,例:
+      {kind:'text', text:'写出假名', style?:'h1'}
+      {kind:'blank', label?:'1.', answer?:'ばら'}     # answer 给了,check 时判对错
+      {kind:'checkbox', label:'我写完了'}
+      {kind:'button', label:'让 AI 检查', event:'check'}   # event 内置动作:check|say:话|goto:页|reveal:块id|hide:块id
+    """
+    d = _PAGE_DRAFTS.get(_pd_key(ctx))
+    if not d:
+        return {"error": "还没开草稿。先调 page_new。"}
+    kind = args.get("kind")
+    if kind not in ("text", "blank", "checkbox", "button", "hr"):
+        return {"error": "kind 只能是 text/blank/checkbox/button/hr"}
+    b = {k: v for k, v in args.items() if k in ("kind", "text", "style", "label", "answer", "event", "id")}
+    b.setdefault("id", "b%d" % len(d["blocks"]))
+    d["blocks"].append(b)
+    return {"已加": kind, "当前共": len(d["blocks"]), "silent": True}
+
+
+def _t_page_show(args, ctx):
+    """把草稿纸**生成出来**(造纸最后一步):在当前位置插一张纸,起运行时。args {}。"""
+    d = _PAGE_DRAFTS.pop(_pd_key(ctx), None)
+    if not d or not d["blocks"]:
+        return {"error": "草稿是空的(先 page_new + page_add)。"}
     rel = (ctx or {}).get("file_rel") or ""
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "目前只支持 PDF 阅读器"}
-    paper = (args.get("paper") or "note")
-    title = (args.get("title") or "")[:60]
-    # 给没 id 的块补 id(check/reveal 要按 id 找)
-    clean = []
-    for i, b in enumerate(blocks[:200]):
-        if not isinstance(b, dict) or not b.get("kind"):
-            continue
-        b = dict(b)
-        b.setdefault("id", "b%d" % i)
-        clean.append(b)
-    return {"已设计": "%d 个元素" % len(clean),
-            "接下来": "系统会在你当前位置插一张纸(即时出现,不用刷新)。用户填/写完点纸上的按钮即可。",
+    return {"已生成": "%d 个元素" % len(d["blocks"]),
+            "接下来": "系统会在你当前位置插一张纸(即时出现,不用刷新)。用户填/写完点纸上的按钮。",
             "client_action": {"fn": "__upStartTask",
-                              "args": [{"kind": "free", "title": title, "paper": paper,
-                                        "params": {"blocks": clean, "paper": paper, "title": title}}]},
+                              "args": [{"kind": "free", "title": d["title"], "paper": d["paper"],
+                                        "params": {"blocks": d["blocks"], "paper": d["paper"], "title": d["title"]}}]},
             "silent": True}
 
 
@@ -3110,12 +3126,13 @@ TOOLS = {
                    "args {id, text?, color?}(id 从 notes_query 拿;text/color 至少给一个)。"
                    "**只能改文字和颜色**——手写笔画/位置/尺寸动不了(工具层面就不接收),别答应用户改这些", _t_notes_edit),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮/便签)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
-    "make_page": ("★ **造一张交互纸**(练习/试卷/清单/任何要用户在页面上写或勾的东西)。"
-                 "你直接给出要放的元素(文字/填空/勾选框/按钮),**不用管排版和坐标**,系统自动排。"
-                 "按钮的 event 用内置动作:check(让 AI 看这页手写并点评,填空给了 answer 就判对错)/"
-                 "say:话 / goto:页码 / reveal:块id / hide:块id。"
-                 "args {paper?, title?, blocks:[...]}(blocks 结构见工具实现)。"
-                 "适合『给我出道题我写』『做张清单』这类;要**逐个念、念一个等一个**的听写请用 start_dictation。", _t_make_page),
+    "page_new": ("造一张交互纸的**第一步**:开一张新草稿。args {paper?:dictation|exam|math|draw|note(默认note), title?}。"
+                 "接着用 page_add 一个个加元素,最后 page_show 生成。"
+                 "适合『给我出题我写』『做张清单/试卷』;要**逐个念、念一个等一个**的听写用 start_dictation。", _t_page_new),
+    "page_add": ("给草稿纸**加一个元素**(可多次,一次一个):text/blank/checkbox/button。"
+                 "args=元素本身,如 {kind:'blank',label:'1.',answer:'ばら'} 或 "
+                 "{kind:'button',label:'让 AI 检查',event:'check'}。别一次塞一堆,一次一个最稳。", _t_page_add),
+    "page_show": ("把草稿纸**生成出来**(造纸最后一步)。args {}。", _t_page_show),
     "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"
                         "然后由**系统**逐个念、等用户手写、最后按格裁图批改。"
                         "args {words:[要听写的词,按顺序], title?:纸的标题}。"
@@ -3139,7 +3156,7 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    return {"make_page": "造纸", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
+    return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",
