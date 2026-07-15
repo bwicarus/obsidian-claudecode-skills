@@ -414,6 +414,12 @@
       '.rc-turn-status[hidden]{display:none}' +
       '.rc-turn-status.done{color:#79b891}' +
       '.rc-turn-status .vc-spin-s{width:10px;height:10px;flex:none}' +
+      // #44 框选保存:工具长条前的选中圆点(实心=选中/空心=排除)+ 排除态整条变淡
+      '.rc-sel-dot{flex:none;width:13px;height:13px;border-radius:50%;border:1.5px solid #7b8cae;margin-right:7px;cursor:pointer;box-sizing:border-box}' +
+      '.rc-sel-dot.on{background:#7b6cff;border-color:#7b6cff}' +
+      '.vc-fn.rc-fn-off{opacity:.4}' +
+      '.vc-fn.rc-fn-off .vc-fn-t{text-decoration:line-through}' +
+      '.rc-flow-selhint{font-size:11px;color:#8a97b5;margin:4px 2px 2px}' +
       '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
       '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +

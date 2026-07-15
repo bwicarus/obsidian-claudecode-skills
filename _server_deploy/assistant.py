@@ -1492,10 +1492,17 @@ def _t_make_paper(args, ctx):
     if len(intent) < 2:
         return {"error": "要造什么纸?一句话说清(如『出3道填空题让我写』)"}
     r = _resolve("agent", str(ctx.get("uid") or ""))
-    # 把造纸规矩直接写进给 CLI 的指令:分步 page_new→page_add(逐个)→page_show;答题/填空纸**必须**加检查按钮。
+    # 把造纸规矩直接写进给 CLI 的指令:page_new → page_add(可 blocks=[…] 批量)→ page_show。
+    #   #38:按钮由**你自己设计行为** —— 每个按钮的 event 决定按下干什么。
     instr = ("造一张让用户在页面上手写作答的交互纸:" + intent +
-             "。用 page_new 开纸 → page_add 逐个加元素(题干 text、作答 blank)→ page_show 生成。"
-             "**答题/填空/试卷纸务必加一个按钮**(kind:button, label:'让 AI 检查', event:'check')让用户写完点它批改。")
+             "。步骤:page_new 开纸 → page_add 加元素(题干 kind:text、作答 kind:blank;"
+             "**可一次 page_add(blocks=[…]) 批量加完**,一次决定所有元素好安排位置)→ page_show 生成。\n"
+             "★ 按钮(kind:button)的行为你自己定,event 可选:\n"
+             "  check = 批改手写(答题/填空/试卷纸**务必**放一个 {kind:button,label:'让 AI 检查',event:'check'})\n"
+             "  reveal:块id / hide:块id = 显/隐某块(如做完再显示答案/提示)\n"
+             "  set_enabled:块id / disable:块id = 开/关某按钮(如写完前禁用交卷)\n"
+             "  say:文本 = 念一句;goto:页码 = 跳页;call:工具名 = 触发任意工具\n"
+             "  按钮可加 enabled:false 初始禁用。blank 可加 answer:'正解' 供 check 判对错。")
     return _bg_task("agent", {"instruction": instr, "backend": r["backend"],
                               "model": r["variant"], "effort": r["depth"]}, ctx)
 

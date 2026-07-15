@@ -375,9 +375,69 @@ def _reveal(run, block_id, show):
         pass
 
 
+def _set_enabled(run, block_id, enabled):
+    """动态开/关某个按钮的可点态(#36 显示状态可被别的按钮/流程改)。跨本 run 所有纸找。"""
+    import pdf_reader as P
+    rel = run["file"]
+    _upids = {pg.get("upage") for pg in _run_pages(run)}
+    with _lock:
+        items = P._upages_load(rel)
+        for it in items:
+            if it.get("id") in _upids:
+                for b in (it.get("blocks") or []):
+                    if b.get("id") == block_id and b.get("kind") == "button":
+                        b["enabled"] = bool(enabled)
+                it["updated"] = int(time.time())
+        P._upages_save(rel, items)
+
+
+def _schedule(rid, event, secs):
+    """一次性定时器:到点 fire-and-forget 调 advance(rid, event)。用于 wait_ms(#27)。
+    不是常驻等待线程 —— 一个短 Timer,触发完即退,跟 _check_page 的后台线程同性质。"""
+    def _fire():
+        try:
+            advance(rid, event)
+        except Exception:
+            pass
+    tm = threading.Timer(max(0.05, float(secs)), _fire)
+    tm.daemon = True
+    tm.start()
+
+
+def _call_tool(run, tool, arg):
+    """按钮触发**任意工具**(去壳:进程内直接调 A.TOOLS[tool],不走 MCP)。
+    #38「CLI 自己设计等待程序」的通用出口:CLI 造纸时给按钮绑 event='call:工具名',
+    按下就在当前书/页 ctx 下跑那个工具,产出的 client_action 推给前端应用。"""
+    try:
+        import assistant as A
+    except Exception:
+        return
+    fn = (A.TOOLS.get(tool) or (None, None))[1]
+    if not fn:
+        run["hint"] = f"没有叫「{tool}」的工具"
+        return
+    ctx = {"file_rel": run.get("file"), "page": run.get("page"), "_uid": run.get("uid")}
+    try:
+        res = fn({}, ctx) or {}
+    except Exception as ex:
+        run["hint"] = f"{tool} 出错:{str(ex)[:60]}"
+        return
+    if isinstance(res, dict) and res.get("client_action"):
+        ca = res["client_action"]
+        _client(run, ca.get("fn"), ca.get("args") or [])
+    run["hint"] = (res.get("hint") if isinstance(res, dict) else None) or f"已执行 {tool}"
+
+
 def _free_tick(run, event):
-    """free 纸:按钮事件 = 内置动作名(带可选参数,冒号分隔:say:文本 / goto:12 / reveal:块id)。
-    check 起后台线程(有界 LLM),其余同步瞬间完成。"""
+    """free 纸:按钮事件 = 内置动作名(带可选参数,冒号分隔)。CLI 造纸时给每个按钮绑不同 event
+    就等于**自己设计了每个按钮按下干什么**(#38)。支持:
+      check[:提示]     批改手写(裁图 + LLM)
+      say:文本         念一句
+      goto:页码        跳页
+      reveal:块id / hide:块id      显/隐某块
+      set_enabled:块id / disable:块id   开/关某按钮可点(#36)
+      call:工具名       去壳调任意工具(通用出口)
+    check/call 起后台或即时;其余同步瞬间完成。"""
     if run["step"] == 0:                       # 铺纸:AI 给的 blocks → 布局器排版
         run["paper"] = (run.get("params") or {}).get("paper") or "note"
         _set_blocks(run, (run.get("params") or {}).get("blocks") or [], kind="free")
@@ -396,6 +456,12 @@ def _free_tick(run, event):
         return False
     if act in ("reveal", "hide") and arg:
         _reveal(run, arg, act == "reveal")
+        return True
+    if act in ("set_enabled", "enable", "disable") and arg:
+        _set_enabled(run, arg, act != "disable")
+        return True
+    if act == "call" and arg:
+        _call_tool(run, arg, "")
         return True
     if act == "check":
         if run.get("status") == "checking":
@@ -619,7 +685,17 @@ def _recipe_tick(run, event):
                 sys.stderr.write("[recipe] call %s 失败: %s\n" % (ins.get("tool"), str(_ex)[:80]))
             continue
         elif op == "wait_ms":
-            continue                           # 定时器留阶段 D;当前立即过
+            ms = int(ins.get("ms") or 0)
+            if ms <= 0:
+                continue
+            # 计划内停顿(#27 定时几秒→下一步)。**非阻塞**:挂起存 pc + 一次性 Timer 到点自动 advance,
+            #   不是常驻等待线程(跟 check 的 fire-and-forget 一致,不违反零阻塞铁律)。
+            run["status"] = "waiting"
+            run["wait"] = {"event": "__timer", "since": int(time.time())}
+            run["hint"] = ins.get("hint") or run.get("hint") or ""
+            _save(run); _push_run(run)
+            _schedule(run["rid"], "__timer", ms / 1000.0)
+            return True
         elif op == "check":
             if run.get("status") == "checking":
                 return changed

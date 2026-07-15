@@ -1054,7 +1054,12 @@ def pdf_api_run_save():
         import voice as V
         t = V._vtask_get(task_id) if hasattr(V, "_vtask_get") else None
         if t and (t.get("steps")):
-            return jsonify(TR.save_trace_recipe(b.get("name"), b.get("desc") or "", t.get("steps"),
+            steps = t.get("steps")
+            sel = b.get("select")   # #44 框选:只保留选中的 step 下标
+            if isinstance(sel, list) and sel:
+                keep = {int(i) for i in sel if isinstance(i, (int, float))}
+                steps = [s for i, s in enumerate(steps) if i in keep]
+            return jsonify(TR.save_trace_recipe(b.get("name"), b.get("desc") or "", steps,
                                                 str(session.get("user_id") or ""),
                                                 source_label=b.get("source_label") or "",
                                                 source_spec=b.get("source_spec")))

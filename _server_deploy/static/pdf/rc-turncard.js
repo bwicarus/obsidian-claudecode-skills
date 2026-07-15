@@ -122,36 +122,6 @@
         meta.voice_mode ? ('档位 ' + meta.voice_mode) : ''].filter(Boolean).join(' · ');
       f.appendChild(m);
     }
-    // ★ E:≥2 个工具的流程 → 提供「保存为工具」(ADR:任何 ≥2 工具的卡都能一键固化)。
-    //   CLI 任务(t.taskId)的内部工具塞在**单个** part 的 sub_steps 里 → tools.length 恒=1,
-    //   但用户拍板"所有走 CLI 的多步任务都要能保存" → 用它记的步数(sub_steps ≥2)也放行。
-    var cliSteps = tools.reduce(function (a, p) { return a + ((p.steps && p.steps.length) || 0); }, 0);
-    var canSave = tools.length >= 2 || (t.taskId && cliSteps >= 2);
-    if (canSave) {
-      var sv = document.createElement('div'); sv.className = 'rc-flow-save';
-      var sb = document.createElement('span');
-      sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
-      sb.textContent = '💾 保存为工具';
-      sb.style.cssText = 'display:inline-flex;padding:6px 14px;border-radius:9px;background:#3b6fd4;color:#fff;font-size:12.5px;cursor:pointer;-webkit-appearance:none;appearance:none';
-      sb.addEventListener('click', function (ev) {
-        ev.stopPropagation();
-        var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
-        if (!nm) return;
-        var body = { name: nm };
-        if (t.taskId) {
-          body.task_id = t.taskId;   // ★ CLI 任务:保存**执行轨迹**(自包含回放,不问数据源)
-        } else {
-          // 内置多工具流程:可挂一个上游工具当去壳数据源(用户可留空)
-          var src = prompt('这个任务的内容来自哪个上游工具?(留空=不记数据源,直接固化)\n例:高亮 / 未掌握词', '') || '';
-          var srcTool = tools.length ? tools[0].tool : '';
-          if (src && srcTool) { body.source_label = src; body.source_spec = { call: srcTool, extract: 'text' }; }
-        }
-        try { RC.reqJson('POST', '/pdf/api/run-save', body).then(function (r) {
-          alert((r && r.hint) || (r && r.ok ? '已保存' : '保存失败:' + ((r && r.error) || '?')));
-        }).catch(function () { alert('保存失败(网络)'); }); } catch (e) {}
-      });
-      sv.appendChild(sb); f.appendChild(sv);
-    }
     if (!tools.length) { f.appendChild(document.createTextNode('(本轮没有工具调用)')); return; }
     // ★用户设计 #3:每个工具都以「工具长条」显示、可长按进各种设置 —— **复用 rc-toolchip 的 paintFlow**
     //   (.vc-fn 长条 + 长按 openDetail),别再自己画纯文本步骤(那正是"擅自设计"的又一处)。
@@ -168,6 +138,42 @@
         return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model };
       });
     }
+    // ★#44 框选保存:CLI 轨迹默认全选;取消选中的工具不打包进新工具。t._sel=选中的 step 下标集合。
+    if (isCli && !t._sel) { t._sel = {}; for (var _i = 0; _i < steps.length; _i++) t._sel[_i] = 1; }
+
+    var cliSteps = tools.reduce(function (a, p) { return a + ((p.steps && p.steps.length) || 0); }, 0);
+    var canSave = tools.length >= 2 || (t.taskId && cliSteps >= 2);
+    if (canSave) {
+      var sv = document.createElement('div'); sv.className = 'rc-flow-save';
+      var sb = document.createElement('span');
+      sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
+      sb.textContent = '💾 保存为工具';
+      sb.style.cssText = 'display:inline-flex;padding:6px 14px;border-radius:9px;background:#3b6fd4;color:#fff;font-size:12.5px;cursor:pointer;-webkit-appearance:none;appearance:none';
+      if (isCli) { var _hint = document.createElement('div'); _hint.className = 'rc-flow-selhint'; _hint.textContent = '↓ 点工具前的圆点取消选中,只把选中的打包成工具'; sv.appendChild(_hint); }
+      sb.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
+        if (!nm) return;
+        var body = { name: nm };
+        if (t.taskId) {
+          body.task_id = t.taskId;   // ★ CLI 任务:保存**执行轨迹**(自包含回放,不问数据源)
+          if (t._sel) {   // #44:只保存选中的工具
+            var sel = []; for (var k = 0; k < steps.length; k++) if (t._sel[k]) sel.push(k);
+            if (!sel.length) { alert('至少选一个工具'); return; }
+            if (sel.length < steps.length) body.select = sel;
+          }
+        } else {
+          // 内置多工具流程:可挂一个上游工具当去壳数据源(用户可留空)
+          var src = prompt('这个任务的内容来自哪个上游工具?(留空=不记数据源,直接固化)\n例:高亮 / 未掌握词', '') || '';
+          var srcTool = tools.length ? tools[0].tool : '';
+          if (src && srcTool) { body.source_label = src; body.source_spec = { call: srcTool, extract: 'text' }; }
+        }
+        try { RC.reqJson('POST', '/pdf/api/run-save', body).then(function (r) {
+          alert((r && r.hint) || (r && r.ok ? '已保存' : '保存失败:' + ((r && r.error) || '?')));
+        }).catch(function () { alert('保存失败(网络)'); }); } catch (e) {}
+      });
+      sv.appendChild(sb); f.appendChild(sv);
+    }
     var vision = [];
     tools.forEach(function (p) { (p.vision || []).forEach(function (v) { vision.push(v); }); });
     var ans = t.parts.filter(function (p) { return p.kind === 'text' && (p.text || '').trim(); })
@@ -179,8 +185,31 @@
                  failed: tools.some(function (p) { return !!p.error; }),
                  detail: ans, summary: '' };
     var box = document.createElement('div'); f.appendChild(box);
-    if (RC.toolChip && RC.toolChip.renderFlowInto) { RC.toolChip.renderFlowInto(box, chip); }
-    else { box.textContent = steps.map(function (s) { return '· ' + s.label; }).join('\n'); }   // 兜底
+    if (RC.toolChip && RC.toolChip.renderFlowInto) {
+      RC.toolChip.renderFlowInto(box, chip);
+      if (isCli && canSave) _wireFlowSelect(box, steps.length, t._sel);   // #44:给工具长条挂选中圆点
+    } else { box.textContent = steps.map(function (s) { return '· ' + s.label; }).join('\n'); }   // 兜底
+  }
+
+  // #44:给流程里**每个工具长条**(.vc-fn)前面加一个可点圆点(实心=选中/空心=排除,默认全选)。
+  //   stages() 的节点顺序 = [AI请求(0), 工具1(1)…工具N(N), 结果(N+1)];工具节点 data-i = 1..N。
+  function _wireFlowSelect(box, nSteps, sel) {
+    var nodes = box.querySelectorAll('.vc-fn');
+    nodes.forEach(function (nd) {
+      var di = parseInt(nd.getAttribute('data-i'), 10);
+      if (!(di >= 1 && di <= nSteps)) return;   // 只给工具节点加,跳过 AI请求/结果
+      var si = di - 1;
+      var dot = document.createElement('span'); dot.className = 'rc-sel-dot';
+      if (sel[si]) dot.classList.add('on');
+      dot.title = '选中=打包进新工具;点一下排除';
+      dot.addEventListener('click', function (ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        if (sel[si]) { delete sel[si]; dot.classList.remove('on'); nd.classList.add('rc-fn-off'); }
+        else { sel[si] = 1; dot.classList.add('on'); nd.classList.remove('rc-fn-off'); }
+      });
+      nd.insertBefore(dot, nd.firstChild);
+      if (!sel[si]) nd.classList.add('rc-fn-off');
+    });
   }
 
   // ── 注入 ─────────────────────────────────────────────────────────────────
