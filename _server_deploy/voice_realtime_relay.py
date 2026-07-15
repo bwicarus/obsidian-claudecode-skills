@@ -2676,14 +2676,15 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 "response": {"output_modalities": ["audio" if want_audio else "text"],
                              "max_output_tokens": 2048}}
 
-    async def _need_shot():
-        """向前端要一张视口截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。shot_id 配对防错配。"""
+    async def _need_shot(tool=""):
+        """向前端要一张截图(see_ink/see_page 用;WebRTC 模式截图只有浏览器能拍)。shot_id 配对防错配。
+        带 tool:前端 see_ink 时按笔迹外接框**截局部**(灵活位置/大小),see_page 截整视口。"""
         shot_seq["n"] += 1
         sid = shot_seq["n"]
         fut = asyncio.get_event_loop().create_future()
         shot_fut[sid] = fut
         try:
-            await bws.send(json.dumps({"event": "need_shot", "payload": {"shot_id": sid}}))
+            await bws.send(json.dumps({"event": "need_shot", "payload": {"shot_id": sid, "tool": tool}}))
             return await asyncio.wait_for(fut, timeout=6)
         except Exception:
             return None
@@ -2792,7 +2793,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 if name in ("make_anki", "make_note"):
                     ctx["recent_tools"] = recent_tools[-4:]   # 对话现场随卡走(webapp _card_extra 消费)
                 if name in ("see_ink", "see_page"):
-                    shot = await _need_shot()
+                    shot = await _need_shot(name)   # see_ink → 前端按笔迹外接框截局部
                     if shot and shot.get("b64"):
                         ctx["view_image"] = {"media_type": shot.get("media_type") or "image/jpeg", "b64": shot["b64"]}
                 # ⚠不带 rtc_call_id(58 的修复曾错落到 WS 版此处漏改=视觉链路断,审核实锤):

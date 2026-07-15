@@ -2627,7 +2627,40 @@
       return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
     } catch (e) { return null; }
   }
-  try { window.RC = window.RC || {}; RC.captureView = _captureView; RC.captureEl = _captureEl; } catch (e) {}   // 共享截图能力:视口(captureView)/ 指定元素(captureEl)。文字侧栏 EPUB 笔迹发送前预拍;语音走 need_shot
+  // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);给 see_ink 按笔迹外接框截局部用。
+  function _curInkPageEl() {
+    var els = document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], r = el.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0) && el.__inkStrokes && el.__inkStrokes.length) return el;
+    }
+    return null;
+  }
+  // 用户点子:前端截图但**灵活截局部**——按笔迹外接框(+留白上下文)只截那一小块,而非整屏。所见即所得 + 聚焦。
+  async function _captureInkRegion() {
+    try {
+      var el = _curInkPageEl();
+      var strokes = el && el.__inkStrokes;
+      if (!el || !strokes || !strokes.length) return null;
+      var x0 = 1, y0 = 1, x1 = 0, y1 = 0;   // 笔迹外接框(归一化 0-1)
+      strokes.forEach(function (s) { (s.p || []).forEach(function (pt) { x0 = Math.min(x0, pt[0]); y0 = Math.min(y0, pt[1]); x1 = Math.max(x1, pt[0]); y1 = Math.max(y1, pt[1]); }); });
+      if (!(x1 > x0 && y1 > y0)) return null;
+      var m = 0.08; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(1, x1 + m); y1 = Math.min(1, y1 + m);   // 留白带上下文
+      if (x1 - x0 < 0.28) { var cx = (x0 + x1) / 2; x0 = Math.max(0, cx - 0.14); x1 = Math.min(1, cx + 0.14); }   // 太窄→给最小宽(别只裁个点)
+      if (y1 - y0 < 0.18) { var cy = (y0 + y1) / 2; y0 = Math.max(0, cy - 0.09); y1 = Math.min(1, cy + 0.09); }
+      await _loadH2C();
+      var W = el.offsetWidth || el.getBoundingClientRect().width, H = el.offsetHeight || el.getBoundingClientRect().height;
+      var canvas = await window.html2canvas(el, {
+        x: Math.round(x0 * W), y: Math.round(y0 * H), width: Math.round((x1 - x0) * W), height: Math.round((y1 - y0) * H),
+        useCORS: true, logging: false, backgroundColor: '#ffffff', scale: Math.min(2, window.devicePixelRatio || 1),
+        ignoreElements: function (e2) { var id = e2.id || ''; return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' || id === 'word-pop' || id === 'sel-toolbar'; }
+      });
+      var b64 = '', qs = [0.85, 0.7, 0.5];
+      for (var q = 0; q < qs.length; q++) { b64 = (canvas.toDataURL('image/jpeg', qs[q]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
+      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
+    } catch (e) { return null; }
+  }
+  try { window.RC = window.RC || {}; RC.captureView = _captureView; RC.captureEl = _captureEl; RC.captureInkRegion = _captureInkRegion; } catch (e) {}   // 共享截图:视口/指定元素/**笔迹局部**。文字侧栏 EPUB 预拍;语音走 need_shot
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
@@ -3079,9 +3112,14 @@
             if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
             onToolStatus(tp);
           }
-          else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要视口截图(只有浏览器能拍)
+          else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要截图(只有浏览器能拍)
             var sid0 = (m0.payload || {}).shot_id;   // 60:带 ID 配对,防两轮工具重叠时迟到截图被下一请求接走
-            _captureView().then(function (shot) {
+            var _tool0 = (m0.payload || {}).tool || '';
+            // see_ink:按笔迹外接框**截局部**(灵活位置/大小,聚焦你圈的那块);拿不到则回退整视口。see_page:整视口。
+            var _capP = (_tool0 === 'see_ink' && RC.captureInkRegion)
+              ? RC.captureInkRegion().then(function (s) { return s || _captureView(); })
+              : _captureView();
+            Promise.resolve(_capP).then(function (shot) {
               try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: (shot && shot.b64) || '', media_type: (shot && shot.media_type) || 'image/jpeg' })); } catch (e2) {}
             }).catch(function () { try { cw.send(JSON.stringify({ type: 'shot', shot_id: sid0, b64: '' })); } catch (e2) {} });
           }

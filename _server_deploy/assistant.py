@@ -2139,9 +2139,9 @@ def _t_see_ink(args, ctx):
     if file_rel.lower().endswith(".epub"):   # ㉟c EPUB:笔迹画在 HTML 上,服务端渲不了 → 前端视口截图(所见即所得)
         r = _viewshot_result(ctx, " 用户问的是他的手写/圈画,重点看截图里的笔迹。")
         return r if r else {"error": "EPUB 的笔迹需要前端视口截图,这次没拿到;请让用户稍后再试"}
-    if ctx.get("view_image") and _is_overlay_page(file_rel, page):   # **只有插入页**(覆盖层:题干在前端、PDF 页空白)
-        r = _viewshot_result(ctx, " 用户问的是他在自建页上的手写/作答,截图里题目和手写都在,一起看。")
-        if r:                    # 才用前端截图;**普通 PDF 页**照旧走服务端**精确局部裁图**(_ink_focus_image,只裁笔迹附近)
+    if ctx.get("view_image"):   # 前端已按**笔迹外接框截了局部图**(所见即所得、聚焦圈画,不是整屏)→ 优先用它;
+        r = _viewshot_result(ctx, " 用户问的是他圈/画/写的那块,截图已聚焦到笔迹区域,结合题目和手写一起看。")
+        if r:                    #   服务端 _ink_focus_image 退为兜底(view_image 没拿到时才裁,见下)
             return r
     if not strokes:
         try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
