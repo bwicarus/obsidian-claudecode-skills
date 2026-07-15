@@ -470,6 +470,15 @@
     create: create,
     mountOne: mountOne,   // 收藏夹:把单页绑到原书 (file,id) 挂进 fav 容器,与原书同一份编辑器/改高/存
     elOf: function (id) { return _els[id] || null; },   // 便签 host 用:u_* 锚 → 容器 el(未插入时也返回,调用方自查 isConnected)
-    pages: function () { return _pages.slice(); }
+    pages: function () { return _pages.slice(); },
+    // 纯本地移除(不调服务端)——PDF 删页的服务端删除走异步改页 job,前端必须**立刻**把这条从
+    //   _pages 剔除,否则 mountAll/_upMountBadges 会从陈旧列表把已删页重挂回 DOM(删了还显示的根因)。
+    removeLocal: function (id) {
+      var p = null, i;
+      for (i = 0; i < _pages.length; i++) { if (_pages[i].id === id) { p = _pages[i]; break; } }
+      var el = _els[id]; if (el) { try { if (el.__epRatioRO) el.__epRatioRO.disconnect(); } catch (_) {} try { el.remove(); } catch (_) {} }
+      delete _els[id]; _pages = _pages.filter(function (x) { return x.id !== id; });
+      if (p && O && O.onRemoved) { try { O.onRemoved(p); } catch (_) {} }
+    }
   };
 })();

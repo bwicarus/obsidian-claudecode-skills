@@ -160,40 +160,10 @@ window._favOpenPicker = function () {
   //   面板对 pointerdown/dblclick/click stopPropagation → 其下页面手势(选词/ink/双击缩放)全部够不着
   //   = 用户要的「编辑模式禁用所有阅读器功能」;body.up-editing 再兜底藏选中工具栏/词典弹窗。
   //   iOS 输入链 user-select:text(rc-upage/up2-inline 已在 CSS 钉死),复用 rc-up-ti/ta 类。
-  // 滚动时间戳(P1-b 空闲自动刷新判据)+ 待撤销删除表(P1-a 延后提交)
+  // 滚动时间戳(_upBanner 空闲自动刷新判据)。**删除撤销已去掉**(用户要求)—— 删除立即执行(见 _upDelReal)。
   var _upScrolledAt = 0;
   try { window.addEventListener('scroll', function () { _upScrolledAt = Date.now(); }, { capture: true, passive: true }); } catch (_) {}
-  var _upPendingDel = {};   // id -> {rec, veil, bar, commit}
-  function _upFlushPendingDel() {   // 离开页面:待撤销的删除立即真提交(keepalive),不丢操作
-    for (var id in _upPendingDel) {
-      try { fetch(UP_API + '?file=' + encodeURIComponent(UP_FILE) + '&id=' + encodeURIComponent(id), { method: 'DELETE', keepalive: true }); } catch (_) {}
-    }
-    _upPendingDel = {};
-  }
-  window.addEventListener('pagehide', _upFlushPendingDel);
-  // 撤销小条(Gmail 式):ms 后自动 onCommit,点撤销走 onUndo。多条堆叠在 #up2-undo-stack
-  function _upUndoStack() {
-    var s = document.getElementById('up2-undo-stack');
-    if (!s) { s = document.createElement('div'); s.id = 'up2-undo-stack'; document.body.appendChild(s); }
-    return s;
-  }
-  function _upUndoBar(msg, ms, onUndo, onCommit) {
-    var bar = document.createElement('div'); bar.className = 'up2-undo';
-    bar.innerHTML = '<span class="up2-undo-msg"></span><button class="up2-undo-btn">↩ 撤销</button><div class="up2-undo-bar"></div>';
-    bar.querySelector('.up2-undo-msg').textContent = msg;
-    bar.querySelector('.up2-undo-bar').style.animationDuration = ms + 'ms';
-    _upUndoStack().appendChild(bar);
-    var done = false;
-    var timer = setTimeout(function () { finish(true); }, ms);
-    function finish(commit) {
-      if (done) return; done = true;
-      clearTimeout(timer);
-      try { bar.remove(); } catch (_) {}
-      if (commit) { if (onCommit) onCommit(); } else { if (onUndo) onUndo(); }
-    }
-    bar.querySelector('.up2-undo-btn').addEventListener('click', function () { finish(false); });
-    return { commitNow: function () { finish(true); } };
-  }
+  var _upDeleting = {};   // id -> 1(删除进行中,防重复触发)
 
   var _upEditing = null;   // 当前就地编辑面板 {el, anchorEl, onClose}
   function _upCloseInline() {
@@ -273,7 +243,7 @@ window._favOpenPicker = function () {
             var w = (j.result && j.result.warnings) || [];
             var sp = bn.querySelector('.up2-spin'); if (sp) sp.remove();
             bn.className = 'ok';
-            msg.textContent = '✔ 已写入新页' + (w.length ? '(' + w.join(';') + ')' : '') + ' · 轻点查看';
+            msg.textContent = '✔ ' + (opts.doneMsg || '已写入新页') + (w.length ? '(' + w.join(';') + ')' : '') + ' · 轻点查看';
             bn.addEventListener('click', function () { location.reload(); });
             addX(function () { bn.remove(); });   // 不想现在看:关掉,下次开书自然是新状态
             // P1-b:空闲(无选中/无编辑/近 3s 没滚动/无待撤销)且无警告 → 延迟 1.2s 二次确认仍空闲后静默 reload
@@ -1221,40 +1191,45 @@ window._favOpenPicker = function () {
     });
     setTimeout(function () { try { ta.focus(); } catch (_) {} }, 80);
   }
-  // P1-a:删除 = 立即收起那页 + 「已删除·撤销」小条 + 延后 6s 提交(撤销窗口内一次后端都不调,PDF/页码分毫未动)
+  // 删除 = **立即执行**(用户要求去掉撤销)。关键三步防"删了还显示"/"删除失败":
+  //   ① 立刻从本地 RC.userpages 列表剔除(否则 _upMountBadges 从陈旧列表重挂已删页 = 删了还显示的根因);
+  //   ② 立刻抹掉这页覆盖层 + 盖"正在删除"蒙层(视觉立即消失;真减页/重编号靠 job done 后 reload);
+  //   ③ DELETE 改页 job 撞并发锁(409「进行中」)时**排队重试**,不再直接弹"删除失败"。
   function _upDelReal(rec) {
     if (rec._temp) {   // 乐观新建 job 还没完成就删 → 移除临时元素;绑真 id 时再清理那张空白真页(_upBindTempToReal)
       _upTempCancelled[rec.id] = true;
       var tel = _upTempEls[rec.id]; if (tel) { try { tel.remove(); } catch (_) {} }
       delete _upTempEls[rec.id];
+      try { if (window.RC && RC.userpages && RC.userpages.removeLocal) RC.userpages.removeLocal(rec.id); } catch (_) {}
       if (window.RC && RC.toast) RC.toast('已取消新增');
       return;
     }
-    if (_upPendingDel[rec.id]) return;   // 已在待删,忽略重复
-    // 绑定后的临时虚拟元素(无 data-page-num,本会话显示)优先;否则真 .page-wrap(重开后)
+    if (_upDeleting[rec.id]) return;   // 已在删,忽略重复
+    _upDeleting[rec.id] = true;
+    try { if (window.RC && RC.userpages && RC.userpages.removeLocal) RC.userpages.removeLocal(rec.id); } catch (_) {}   // ① 本地列表立刻剔除
     var tempEl = _upTempEls[rec.id];
     var pw = tempEl || document.querySelector('.page-wrap[data-page-num="' + rec.page + '"]');
-    var veil = null;
-    if (pw) {
-      veil = document.createElement('div'); veil.className = 'up2-delveil';
-      veil.textContent = '🗑 已删除第 ' + rec.page + ' 页(可撤销)';
-      pw.style.position = pw.style.position || 'relative';
-      pw.appendChild(veil);
+    if (tempEl) { try { tempEl.remove(); } catch (_) {} delete _upTempEls[rec.id]; }   // 临时虚拟元素:直接移除
+    else if (pw) {   // ② 真页:抹覆盖层内容 + 蒙层(立即消失,真减页靠 reload)
+      var ov = pw.querySelector('.up2-content'); if (ov) try { ov.remove(); } catch (_) {}
+      var bd = pw.querySelector('.up2-badge'); if (bd) try { bd.remove(); } catch (_) {}
+      var veil = document.createElement('div'); veil.className = 'up2-delveil';
+      veil.textContent = '🗑 正在删除第 ' + rec.page + ' 页…';
+      pw.style.position = pw.style.position || 'relative'; pw.appendChild(veil);
     }
-    function commit() {   // 真提交:调后端删除 job(此后才动 PDF/页码)
-      if (!_upPendingDel[rec.id]) return;   // 已被撤销
-      delete _upPendingDel[rec.id];
-      RC.reqJson('DELETE', UP_API + '?file=' + encodeURIComponent(UP_FILE) + '&id=' + encodeURIComponent(rec.id), null)
-        .then(function (d) {
-          if (!(d && d.ok && d.job_id)) { if (veil) try { veil.remove(); } catch (_) {} alert('删除失败:' + ((d && d.error) || '?')); return; }
-          if (tempEl) { try { tempEl.remove(); } catch (_) {} delete _upTempEls[rec.id]; }   // 临时虚拟元素无 reload → 直接移除
-          _upBanner(d.job_id, { afterPage: rec.page - 1 });   // 删这页 → 其后前移
-        }).catch(function () { if (veil) try { veil.remove(); } catch (_) {} alert('网络错误,没删掉'); });
-    }
-    var bar = _upUndoBar('已删除第 ' + rec.page + ' 页', 6000,
-      function onUndo() { if (veil) try { veil.remove(); } catch (_) {} delete _upPendingDel[rec.id]; },   // 撤销:恢复显示,零后端
-      function onCommit() { commit(); });                                                                  // 超时:真删
-    _upPendingDel[rec.id] = { rec: rec, veil: veil, bar: bar, commit: commit };
+    _upCommitDelete(rec, 0);
+  }
+  function _upCommitDelete(rec, attempt) {   // ③ DELETE 改页 job;409「进行中」→ 排队重试(复用后台同步 _upSyncPump 的思路,别直接弹错)
+    RC.reqJson('DELETE', UP_API + '?file=' + encodeURIComponent(UP_FILE) + '&id=' + encodeURIComponent(rec.id), null)
+      .then(function (d) {
+        if (d && d.ok && d.job_id) { delete _upDeleting[rec.id]; _upBanner(d.job_id, { afterPage: rec.page - 1, doneMsg: '已删除第 ' + rec.page + ' 页' }); return; }   // 删这页→其后前移,job done 后 reload 收尾
+        if (d && !d.ok && /进行中/.test(d.error || '') && attempt < 20) { setTimeout(function () { _upCommitDelete(rec, attempt + 1); }, 2000); return; }
+        if (d && !d.ok && /未找到|not\s*found/i.test(d.error || '')) { delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('已删除'); return; }   // 服务端已无此记录=已删,当成功
+        delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('删除失败:' + ((d && d.error) || '?'));
+      }).catch(function () {
+        if (attempt < 20) { setTimeout(function () { _upCommitDelete(rec, attempt + 1); }, 2500); return; }
+        delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('网络错误,没删掉');
+      });
   }
   function _upMountBadges() {
     _upRealPages().forEach(function (p) {
@@ -1420,6 +1395,14 @@ window._favOpenPicker = function () {
       el.dataset.uid = realId; delete _upTempEls[tempId]; _upTempEls[realId] = el;   // 便签比例锚 u_* 跟着换;__upRec 是同一对象(rec.id 已更新)
       if (el.__inkStrokes && el.__inkStrokes.length) window._upInkPersist(el);         // 临时期手写落库到 realPage(/api/ink);此刻 rec 已绑真 id
     }
+    // 新建页做好后**自动翻到那一页**(用户要求)——仅当它此刻不在视口才滚,已经看得见就不打断。
+    try {
+      var _nel = _ovElOfRec(rec);
+      if (_nel) {
+        var _r = _nel.getBoundingClientRect();
+        if (!(_r.bottom > 60 && _r.top < (window.innerHeight || 0) - 60)) _nel.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    } catch (e) {}
     _upMigrateOvHls(tempId, realId, rec);   // 临时期精确 offset 高亮(tempId 键 sidecar)迁到 realId 键 + 重挂 mark
     if (_upEditedIds[tempId]) { _upEditedIds[realId] = true; delete _upEditedIds[tempId]; }
     delete _upTextTimers[tempId]; delete _upTextDirty[tempId];

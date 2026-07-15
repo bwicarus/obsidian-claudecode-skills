@@ -2551,11 +2551,22 @@
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30);
+      // 检查报告存在提示 —— 跟**文字侧完全一致**:只告知"有报告《名》",讲错题让模型调 read_check_report
+      //   (读同一个 window.__lastCheckResult,文字/语音行为无缝一致,不再各搞各的)。
+      var rcHint = '';
+      try {
+        var _lc = window.__lastCheckResult;
+        if (_lc && _lc.name && (Date.now() - _lc.ts) < 10 * 60 * 1000) {
+          rcHint = '。另:用户最近做完自制练习纸《' + _lc.name + '》并让你检查了' + (_lc.score ? ('(得分 ' + _lc.score + ')') : '')
+                 + ',他要讲错题/分析成绩就调 read_check_report(name="' + _lc.name + '")拿题目原文和判分再答,别自己猜';
+        }
+      } catch (e) {}
+      var _rcName = rcHint && window.__lastCheckResult ? (window.__lastCheckResult.name || '') : '';
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + _rcName;
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
-              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') +
+              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + rcHint +
               '。回答以本条为准;状态记录,不要回应本条。)');
     } catch (e) {}
   }
