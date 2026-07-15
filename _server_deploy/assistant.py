@@ -3649,6 +3649,7 @@ def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_ste
                                if isinstance(v, dict) and v.get("b64") and len(v["b64"]) < 1300000][:3]   # 太大不塞 SSE
             except Exception:
                 pass
+            res.pop("_fed_images", None)   # 抽完就从 res 拿掉:b64 别再进 brief / 别再喂回模型 content(省 token + 杜绝裸 base64 泄漏)
         if res.get("error"):
             d["status"] = "error"
             d["brief"] = str(res["error"])[:300]
