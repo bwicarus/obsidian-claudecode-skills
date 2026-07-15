@@ -2610,7 +2610,24 @@
       return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
     } catch (e) { return null; }
   }
-  try { window.RC = window.RC || {}; RC.captureView = _captureView; } catch (e) {}   // 共享截图能力:文字侧栏(rc-assistant)EPUB 笔迹场景发送前 await 一张视口截图(语音链路走 need_shot,文字链路一次性 HTTP 只能预拍)
+  // 通用原语(用户点子:前端渲染截图通用性强,统一覆盖各种取图):截**任意元素**为图(所见即所得)。
+  //   检查纸(pdf-uishared)、笔迹查看(see_ink 插入页/覆盖层)、以后别处都走这一条,不再各写各的。
+  async function _captureEl(el) {
+    try {
+      if (!el) return null;
+      await _loadH2C();
+      var longEdge = Math.max(el.offsetWidth || 0, el.offsetHeight || 0, 1);
+      var canvas = await window.html2canvas(el, {
+        useCORS: true, logging: false, backgroundColor: '#ffffff',
+        scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
+        ignoreElements: function (e2) { var id = e2.id || ''; return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' || id === 'word-pop' || id === 'sel-toolbar'; }
+      });
+      var b64 = '', qs = [0.85, 0.7, 0.5];
+      for (var qi = 0; qi < qs.length; qi++) { b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
+      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
+    } catch (e) { return null; }
+  }
+  try { window.RC = window.RC || {}; RC.captureView = _captureView; RC.captureEl = _captureEl; } catch (e) {}   // 共享截图能力:视口(captureView)/ 指定元素(captureEl)。文字侧栏 EPUB 笔迹发送前预拍;语音走 need_shot
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });

@@ -2125,6 +2125,10 @@ def _t_see_ink(args, ctx):
     if file_rel.lower().endswith(".epub"):   # ㉟c EPUB:笔迹画在 HTML 上,服务端渲不了 → 前端视口截图(所见即所得)
         r = _viewshot_result(ctx, " 用户问的是他的手写/圈画,重点看截图里的笔迹。")
         return r if r else {"error": "EPUB 的笔迹需要前端视口截图,这次没拿到;请让用户稍后再试"}
+    if ctx.get("view_image"):   # PDF **插入页**(覆盖层:题干在前端,PDF 页空白)→ 前端截图所见即所得,
+        r = _viewshot_result(ctx, " 用户问的是他在自建页上的手写/作答,截图里题目和手写都在,一起看。")
+        if r:                    # 优先于服务端裁图(那张只有手写、没题干,判不准)
+            return r
     if not strokes:
         try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
             import pdf_reader as _pdfm0

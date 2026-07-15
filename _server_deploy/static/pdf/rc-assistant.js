@@ -1826,10 +1826,15 @@
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var sawCliCard = false;   // #2:本轮委托给了 CLI(make_paper/do_task)→ CLI 卡就是回答,别再单独出编排答案气泡+建议按钮
-    if (sentCtx.want_viewshot && window.RC && RC.captureView) {
-      // EPUB 笔迹场景(adapter 声明 want_viewshot):服务端渲不了 HTML 笔迹 → 预拍一张视口截图随请求发,
-      // see_ink/see_page 拿 ctx.view_image 所见即所得(语音链路走 need_shot,文字侧栏一次性 HTTP 只能预拍)。
-      try { var _vs = await RC.captureView(); if (_vs && _vs.b64) sentCtx.view_image = _vs; } catch (_) {}
+    if (sentCtx.want_viewshot && window.RC && (RC.captureView || RC.captureEl)) {
+      // adapter 声明 want_viewshot(服务端渲不了的内容:EPUB HTML 笔迹 / PDF 插入页覆盖层)→ 预拍一张
+      //   随请求发,see_ink/see_page 拿 ctx.view_image 所见即所得。**优先 adapter.captureShot**
+      //   (可截**具体那块**,如插入页元素,比整视口更聚焦);没有才退回整视口 captureView。
+      try {
+        var _ad = (RC.adapter && RC.adapter()) || null;
+        var _vs = (_ad && _ad.captureShot) ? await _ad.captureShot() : (RC.captureView ? await RC.captureView() : null);
+        if (_vs && _vs.b64) sentCtx.view_image = _vs;
+      } catch (_) {}
     }
     delete sentCtx.want_viewshot;   // 前端标志,不入后端 ctx / 历史 meta
     var answer = '', acts = [], aborted = false, traceData = null, _recTs = 0;

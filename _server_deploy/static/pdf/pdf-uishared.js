@@ -925,6 +925,8 @@ window._favOpenPicker = function () {
     });
   }
   function _upShotEl(el) {
+    // 统一走共享原语 RC.captureEl(通用截图);未就绪才本地兜底(html2canvas 直调)。
+    if (window.RC && RC.captureEl) return RC.captureEl(el).then(function (r) { return (r && r.b64) || ''; });
     return _upH2C().then(function (h2c) {
       return h2c(el, { useCORS: true, logging: false, backgroundColor: '#ffffff',
                        scale: Math.min(2, window.devicePixelRatio || 1) });

@@ -30,8 +30,20 @@
     return { left: pr.left, top: pr.top, right: pr.left, bottom: pr.top, width: 0, height: 0 };
   }
 
+  // 视口里带手写的**插入页**(.pdf-upage,PDF 文件本身空白、服务端裁图两手空空)→ 返回它,给 see_ink 截前端图。
+  function _pdfInkUpageEl() {
+    var ups = document.querySelectorAll('.pdf-upage');
+    for (var i = 0; i < ups.length; i++) {
+      var el = ups[i], r = el.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0) && el.__inkCanvas &&
+          el.__inkStrokes && el.__inkStrokes.length) return el;   // 在视口内 + 有手写
+    }
+    return null;
+  }
+
   var PdfAdapter = window.PdfAdapter = {
     _host: null,
+    __shotEl: null,
 
     // 阶段2 用:reader.src 末尾桥接段喂模块内部量。阶段1 lookupWord 不依赖它。
     bind: function (host) { PdfAdapter._host = host || null; return PdfAdapter; },
@@ -51,8 +63,18 @@
         if (c && c.figures && c.figures.length) {
           c.figures.forEach(function (f) { if (f && !f.ref && f.box && f.kind !== 'note') f.ref = { kind: 'pdf', page: f.page, box: f.box }; });
         }
+        // 用户点子:视口里带手写的**插入页**(.pdf-upage,服务端 PDF 空白渲不出)→ 声明 want_viewshot,
+        //   共享 send 会 await 一张 captureShot(截那张插入页元素,所见即所得)喂给 see_ink,不再两手空空。
+        //   普通 PDF 页有真墨迹的仍走服务端精确裁图(_ink_focus_image,快、无往返),不设此标志。
+        try { var _inkEl = _pdfInkUpageEl(); if (_inkEl && c) { c.want_viewshot = true; PdfAdapter.__shotEl = _inkEl; } } catch (e) {}
         return c || null;
       } catch (e) { return null; }
+    },
+    // want_viewshot 的实际截图:截当前那张插入页元素(RC.captureEl 通用原语);没记到就整视口兜底。
+    captureShot: function () {
+      var el = PdfAdapter.__shotEl;
+      if (el && window.RC && RC.captureEl) return RC.captureEl(el);
+      return (window.RC && RC.captureView) ? RC.captureView() : Promise.resolve(null);
     },
     collectFigures: function () { try { var c = (typeof window.__voiceContext === 'function') ? window.__voiceContext() : null; return (c && c.figures) || []; } catch (e) { return []; } },
 
