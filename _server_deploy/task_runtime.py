@@ -26,6 +26,7 @@
 """
 import json
 import os
+import sys
 import threading
 import time
 import uuid
@@ -434,7 +435,7 @@ def _check_page(rid, prompt_hint=""):
 #   {"reveal"/"hide": "块id"}
 #   {"set_enabled": {"id":.., "on":bool}}
 # 校验:validate_flow() 在**保存/运行前**跑,未知 step / 悬空引用 → 拒(栏杆①)。
-_FLOW_STEPS = ("page", "say", "wait", "wait_ms", "loop", "check", "write", "reveal", "hide", "set_enabled")
+_FLOW_STEPS = ("page", "say", "wait", "wait_ms", "loop", "check", "write", "reveal", "hide", "set_enabled", "call")
 
 
 def validate_flow(flow):
@@ -513,6 +514,27 @@ def _recipe_tick(run, event):
             run["wait"] = {"event": ins["event"], "since": int(time.time())}
             run["hint"] = ins.get("hint") or run.get("hint") or ""
             return True                        # ★ 挂起:存 pc,等下次事件
+        elif op == "call":
+            # ★★ 去壳:MCP 只是 TOOLS 的薄门面(mcp_server 全线 HTTP 转发到 /api/assistant/tool →
+            #   TOOLS[name][1])。所以"进程内直接调 TOOLS[name][1]" = MCP 转发到的同一个函数,
+            #   零拷贝、零标注、改一个工具所有配方自动跟着变(ADR §5.5.3)。
+            try:
+                import assistant as A
+                fn = (A.TOOLS.get(ins["tool"]) or (None, None))[1]
+                if fn:
+                    ctx = {"file_rel": run["file"], "page": run.get("page"), "_uid": run.get("uid")}
+                    res = fn(ins["args"] or {}, ctx) or {}
+                    val = res
+                    ex = ins.get("into")
+                    # 简单 extract:结果里挑一个 list/str 字段(配方里可指定 res 的键,默认整体)
+                    if isinstance(res, dict) and ins.get("extract"):
+                        val = res.get(ins["extract"])
+                    if ex:
+                        run.setdefault("params", {})[ex] = val
+                        # call 改了 params → 后续 loop 要重新展开(prog 里 loop 已展开的除外;call 应放在 loop 前)
+            except Exception as _ex:
+                sys.stderr.write("[recipe] call %s 失败: %s\n" % (ins.get("tool"), str(_ex)[:80]))
+            continue
         elif op == "wait_ms":
             continue                           # 定时器留阶段 D;当前立即过
         elif op == "check":
@@ -555,6 +577,9 @@ def _flatten(flow, params):
                 out.append({"op": "wait_ms", "ms": int(body or 0)})
             elif key == "check":
                 out.append({"op": "check", "hint": _tpl((body or {}).get("hint"), scope)})
+            elif key == "call":
+                out.append({"op": "call", "tool": body.get("tool"), "args": _tpl(body.get("args") or {}, scope),
+                            "into": body.get("into")})   # ★ 去壳:进程内调 TOOLS[tool],结果 extract 后存进 params[into]
             elif key in ("reveal", "hide"):
                 out.append({"op": key, "id": _tpl(body, scope)})
             elif key == "set_enabled":
@@ -626,6 +651,140 @@ RECIPES = {
 }
 
 
+RECIPES_DIR = Path("/home/bwicarus/claude/state/recipes")
+
+
+def _load_recipe(name):
+    """从 state/recipes/<name>.json 读用户保存的配方。"""
+    if not name:
+        return None
+    try:
+        import re as _re
+        safe = _re.sub(r"[^\w\u4e00-\u9fff-]", "", str(name))[:60]
+        f = RECIPES_DIR / (safe + ".json")
+        return json.loads(f.read_text("utf-8")) if f.exists() else None
+    except Exception:
+        return None
+
+
+def list_recipes():
+    """列出所有已保存配方(供 run_saved_task 的目录 / AI 看有哪些工具)。"""
+    out = []
+    try:
+        for f in RECIPES_DIR.glob("*.json"):
+            try:
+                d = json.loads(f.read_text("utf-8"))
+                out.append({"name": d.get("name") or f.stem,
+                            "desc": d.get("desc") or "",
+                            "sources": list((d.get("sources") or {}).keys()),
+                            "inputs": list((d.get("inputs") or {}).keys())})
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def recent_run(uid):
+    """该用户最近一个 free/recipe run(保存按钮不带 rid 时用)。"""
+    best, bt = None, 0
+    try:
+        for f in RUNS_DIR.glob("r_*.json"):
+            try:
+                d = json.loads(f.read_text("utf-8"))
+            except Exception:
+                continue
+            if str(d.get("uid")) != str(uid):
+                continue
+            if d.get("kind") not in ("free", "recipe"):
+                continue
+            if (d.get("updated_at") or 0) > bt:
+                best, bt = d, d.get("updated_at") or 0
+    except Exception:
+        pass
+    return best
+
+
+def _flow_signature(flow, page_blocks):
+    """结构指纹(忽略具体数据):同指纹 = 同一种纸/流程 → 保存时可合并成一个工具的不同数据源(ADR §5.5.5)。
+    只取"骨架":flow 的 step 类型序列 + page 里块的 kind 序列。"""
+    def _skel(steps):
+        out = []
+        for st in (steps or []):
+            k = next(iter(st)) if isinstance(st, dict) and st else "?"
+            if k == "loop":
+                out.append("loop[" + _skel((st[k] or {}).get("do")) + "]")
+            elif k == "page":
+                out.append("page")
+            else:
+                out.append(k)
+        return ",".join(out)
+    kinds = ",".join(b.get("kind", "?") for b in (page_blocks or []) if not b.get("repeat")) \
+            + "|rep:" + ",".join(b.get("kind", "?") for b in (page_blocks or []) if b.get("repeat"))
+    import hashlib
+    return hashlib.md5((_skel(flow) + "||" + kinds).encode()).hexdigest()[:16]
+
+
+def save_recipe(run, name, desc="", source_label="", source_spec=None):
+    """把一次 run 冻成配方文件。同结构指纹已存在 → **合并**(只加一个数据源选项),否则新建。
+    返回 {ok, name, merged}。"""
+    import re as _re
+    safe = _re.sub(r"[^\w\u4e00-\u9fff-]", "", str(name or ""))[:60]
+    if not safe:
+        return {"ok": False, "error": "工具名不能为空"}
+    flow = run.get("flow")
+    # 从 flow 里抽 page 模板(第一个 page step 的块)
+    page_blocks = []
+    for st in (flow or []):
+        if isinstance(st, dict) and "page" in st:
+            page_blocks = st["page"]; break
+    if not flow:   # free 纸没有 flow,用它的 blocks 当 page(合成一个极简 flow)
+        page_blocks = (run.get("params") or {}).get("blocks") or []
+        flow = [{"page": page_blocks}]
+    sig = _flow_signature(flow, page_blocks)
+    RECIPES_DIR.mkdir(parents=True, exist_ok=True)
+    # 找同指纹的已存配方 → 合并
+    for f in RECIPES_DIR.glob("*.json"):
+        try:
+            d = json.loads(f.read_text("utf-8"))
+        except Exception:
+            continue
+        if d.get("sig") == sig and source_label and source_spec:
+            d.setdefault("sources_menu", {})[source_label] = source_spec
+            f.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+            return {"ok": True, "name": d.get("name"), "merged": True,
+                    "hint": "已合并进已有工具「%s」,新增数据源「%s」" % (d.get("name"), source_label)}
+    # 新建
+    rec = {"name": safe, "desc": desc or ("一键" + safe), "sig": sig, "paper": run.get("paper") or "note",
+           "page": page_blocks, "flow": flow, "inputs": {}, "sources": {}}
+    if source_label and source_spec:
+        rec["sources_menu"] = {source_label: source_spec}
+    (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+    return {"ok": True, "name": safe, "merged": False, "hint": "已保存为工具「%s」" % safe}
+
+
+def _run_sources(run, sources):
+    """★ 去壳预取:进程内直接调 TOOLS[工具],结果填进 params[input名]。
+    MCP 只是 TOOLS 的薄门面 → 进程内调 = MCP 转发到的同一个函数,零拷贝零标注(ADR §5.5.3)。"""
+    if not sources:
+        return
+    import assistant as A
+    ctx = {"file_rel": run["file"], "page": run.get("page"), "_uid": run.get("uid")}
+    for into, spec in sources.items():
+        if not isinstance(spec, dict) or not spec.get("call"):
+            continue
+        fn = (A.TOOLS.get(spec["call"]) or (None, None))[1]
+        if not fn:
+            sys.stderr.write("[recipe] 数据源工具不存在:%s\n" % spec.get("call"))
+            continue
+        try:
+            res = fn(spec.get("args") or {}, ctx) or {}
+            val = res.get(spec["extract"]) if (isinstance(res, dict) and spec.get("extract")) else res
+            run.setdefault("params", {})[into] = val
+        except Exception as ex:
+            sys.stderr.write("[recipe] 数据源 %s 失败: %s\n" % (spec.get("call"), str(ex)[:80]))
+
+
 def start(kind: str, params: dict, ctx: dict) -> dict:
     """起一个 run。返回 {ok, rid} 或 {ok:False, error}。**同步、瞬间返回**(不做任何等待)。"""
     if kind not in _PROGRAMS:
@@ -644,12 +803,17 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
     }
     if kind == "recipe":                       # 声明式配方:flow 从内置库或 params 拿,**校验后**才跑
         rec_name = (params or {}).get("recipe") or ""
-        flow = (RECIPES.get(rec_name) or {}).get("flow") or (params or {}).get("flow")
+        rdef = RECIPES.get(rec_name) or _load_recipe(rec_name) or {}
+        flow = rdef.get("flow") or (params or {}).get("flow")
         ok, err = validate_flow(flow)
         if not ok:
             return {"ok": False, "error": "配方无效:" + err}
+        # ★ sources(去壳预取):配方里 sources={input名:{call:工具, extract:字段, args}} →
+        #   在跑 flow 前进程内直接调 TOOLS[工具],把结果填进 params[input名]。
+        #   这就是"高亮听写/未掌握词听写"共用一个配方、只换数据源的实现(ADR §5.5)。
+        _run_sources(run, rdef.get("sources") or (params or {}).get("sources") or {})
         run["flow"] = flow
-        run["paper"] = (RECIPES.get(rec_name) or {}).get("paper") or (params or {}).get("paper") or "note"
+        run["paper"] = rdef.get("paper") or (params or {}).get("paper") or "note"
     _PROGRAMS[kind](run, "")
     _save(run)
     _push_run(run)

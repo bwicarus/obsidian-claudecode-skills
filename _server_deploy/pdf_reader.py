@@ -1042,6 +1042,28 @@ def _spawn_exact_render(ap, page: int, w: int, cf: Path) -> None:
 #   还让浏览器里那份 PDF 作废(页数变了)。AI 只遥控(__upStartTask)+ 注内容(run-start)。
 
 
+@bp.route("/api/run-save", methods=["POST"])
+def pdf_api_run_save():
+    """把一次 run 保存成工具(ADR §7)。body {rid, name, desc?, source_label?, source_spec?}。
+    同结构指纹已存在 → 合并进已有工具的数据源菜单,否则新建配方文件。"""
+    import task_runtime as TR
+    b = request.get_json(silent=True) or {}
+    rid = str(b.get("rid") or "")
+    run = TR.load(rid) if rid else TR.recent_run(str(session.get("user_id") or ""))
+    if not run:
+        return jsonify({"ok": False, "error": "找不到要保存的任务(先做一个)"}), 404
+    return jsonify(TR.save_recipe(run, b.get("name"), desc=b.get("desc") or "",
+                                  source_label=b.get("source_label") or "",
+                                  source_spec=b.get("source_spec")))
+
+
+@bp.route("/api/recipes")
+def pdf_api_recipes():
+    """列出已保存的工具(配方)。"""
+    import task_runtime as TR
+    return jsonify({"ok": True, "recipes": TR.list_recipes()})
+
+
 @bp.route("/api/run-start", methods=["POST"])
 def pdf_api_run_start():
     """前端**建完页之后**回调这里起 run(kind/params/upage/page)。

@@ -3007,6 +3007,46 @@ def _t_page_add(args, ctx):
     return {"已加": kind, "当前共": len(d["blocks"]), "silent": True}
 
 
+def _t_run_saved_task(args, ctx):
+    """运行一个**已保存的工具**(用户之前保存的任务,如「日语听写」)。
+    args {name: 工具名, source?: 数据源(如"高亮"/"未掌握词",工具有多个来源时选一个), params?}。
+    工具有哪些、各有什么数据源,用 list_saved_tasks 查。"""
+    import task_runtime as TR
+    name = (args.get("name") or "").strip()
+    rec = TR._load_recipe(name)
+    if not rec:
+        return {"error": "没有叫「%s」的已保存工具。用 list_saved_tasks 看有哪些。" % name}
+    rel = (ctx or {}).get("file_rel") or ""
+    if not rel or not rel.lower().endswith(".pdf"):
+        return {"error": "目前只支持 PDF 阅读器"}
+    # 选数据源(合并型工具有 sources_menu)
+    src = args.get("source") or ""
+    menu = rec.get("sources_menu") or {}
+    sources = {}
+    if menu:
+        chosen = menu.get(src) or (list(menu.values())[0] if len(menu) == 1 else None)
+        if not chosen:
+            return {"error": "工具「%s」要选数据源,有:%s" % (name, "/".join(menu.keys()))}
+        # sources_menu 的 value 是 {call,extract};填给配方的第一个 input(约定 words/blocks)
+        sources = {"words": chosen}
+    params = dict(args.get("params") or {})
+    params.update({"recipe": name, "sources": sources, "paper": rec.get("paper")})
+    return {"已启动": name, "接下来": "系统会在你当前位置建纸并开始;你按纸上按钮推进。",
+            "client_action": {"fn": "__upStartTask",
+                              "args": [{"kind": "recipe", "title": name, "paper": rec.get("paper") or "note",
+                                        "params": params}]},
+            "silent": True}
+
+
+def _t_list_saved_tasks(args, ctx):
+    """列出所有**已保存的工具**及其数据源。args {}。"""
+    import task_runtime as TR
+    lst = TR.list_recipes()
+    if not lst:
+        return {"结果": "还没有保存过工具。做完一个任务后点卡片上的「保存为工具」即可。"}
+    return {"已保存的工具": [{"名字": x["name"], "数据源": x.get("sources") or x.get("inputs") or []} for x in lst]}
+
+
 def _t_page_show(args, ctx):
     """把草稿纸**生成出来**(造纸最后一步):在当前位置插一张纸,起运行时。args {}。"""
     d = _PAGE_DRAFTS.pop(_pd_key(ctx), None)
@@ -3132,6 +3172,9 @@ TOOLS = {
     "page_add": ("给草稿纸**加一个元素**(可多次,一次一个):text/blank/checkbox/button。"
                  "args=元素本身,如 {kind:'blank',label:'1.',answer:'ばら'} 或 "
                  "{kind:'button',label:'让 AI 检查',event:'check'}。别一次塞一堆,一次一个最稳。", _t_page_add),
+    "run_saved_task": ("运行一个**已保存的工具**(用户之前存的任务,如听写)。args {name, source?, params?}。"
+                       "不知道有哪些就先 list_saved_tasks。", _t_run_saved_task),
+    "list_saved_tasks": ("列出所有已保存的工具及其数据源。args {}。", _t_list_saved_tasks),
     "page_show": ("把草稿纸**生成出来**(造纸最后一步)。args {}。", _t_page_show),
     "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"
                         "然后由**系统**逐个念、等用户手写、最后按格裁图批改。"
@@ -3156,7 +3199,7 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
+    return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "run_saved_task": "运行工具", "list_saved_tasks": "列出工具", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",

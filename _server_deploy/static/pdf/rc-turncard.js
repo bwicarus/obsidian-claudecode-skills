@@ -121,6 +121,28 @@
         meta.voice_mode ? ('档位 ' + meta.voice_mode) : ''].filter(Boolean).join(' · ');
       f.appendChild(m);
     }
+    // ★ E:≥2 个工具的流程 → 提供「保存为工具」(ADR:任何 ≥2 工具的卡都能一键固化)。
+    if (tools.length >= 2) {
+      var sv = document.createElement('div'); sv.className = 'rc-flow-save';
+      var sb = document.createElement('span');
+      sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
+      sb.textContent = '💾 保存为工具';
+      sb.style.cssText = 'display:inline-flex;padding:6px 14px;border-radius:9px;background:#3b6fd4;color:#fff;font-size:12.5px;cursor:pointer;-webkit-appearance:none;appearance:none';
+      sb.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
+        if (!nm) return;
+        var src = prompt('这个任务的内容来自哪个上游工具?(留空=不记数据源,直接固化)\n例:高亮 / 未掌握词', '') || '';
+        // 数据源:取流程里第一个工具当去壳来源(用户可留空)
+        var srcTool = tools.length ? tools[0].tool : '';
+        var body = { name: nm };
+        if (src && srcTool) { body.source_label = src; body.source_spec = { call: srcTool, extract: 'text' }; }
+        try { RC.reqJson('POST', '/pdf/api/run-save', body).then(function (r) {
+          alert((r && r.hint) || (r && r.ok ? '已保存' : '保存失败:' + ((r && r.error) || '?')));
+        }).catch(function () { alert('保存失败(网络)'); }); } catch (e) {}
+      });
+      sv.appendChild(sb); f.appendChild(sv);
+    }
     tools.forEach(function (p) {
       var n = document.createElement('div'); n.className = 'rc-flow-node';
       var h = document.createElement('div'); h.className = 'rc-flow-h';
