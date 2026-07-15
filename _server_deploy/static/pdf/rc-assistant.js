@@ -2224,12 +2224,27 @@
       _appliedCA = cas.length;
     }
     function _mkSteps(steps) {   // 每步带 tool + **输入(args)/输出(result)** → 流程条能看到工具间数据流(#44)
-      return (steps || []).map(function (x) {
+      var out = (steps || []).map(function (x) {
         var d = '';
         try { if (x.args && Object.keys(x.args).length) d += '**输入**\n```json\n' + JSON.stringify(x.args, null, 1) + '\n```\n'; } catch (_) {}
         if (x.result) d += '**输出**\n' + String(x.result);
         return { label: x.name || String(x), detail: d || (x.status || ''), tool: x.name || '' };
       });
+      // #1(用户):造纸流程只要建了「让 AI 检查」按钮(page_add/page_show 的 args 带 event:check),
+      //   就补一个合成节点「检查按钮 → 判分 AI」,tool=dictation_grade → **长按弹的是判分 AI 自己的设置**
+      //   (可改判分指令 + 换模型),而不是外层 CLI 的设置。
+      var hasCheck = false;
+      try {
+        (steps || []).forEach(function (x) {
+          var s = JSON.stringify(x.args || '');
+          if (/"event"\s*:\s*"check"/.test(s) || s.indexOf('让 AI 检查') >= 0) hasCheck = true;
+        });
+      } catch (_) {}
+      if (hasCheck) {
+        out.push({ label: '🔘 检查按钮 → 判分 AI', tool: 'dictation_grade',
+          detail: '**输入**  你在这张纸上的手写作答\n\n**这一步**  按下纸上「让 AI 检查」时，用判分 AI 看这页手写、逐空识别并打分。\n\n**输出**  检查结果(逐空对错 / 点评 / 总评)\n\n> 长按本条可**改判分指令、换模型**。' });
+      }
+      return out;
     }
     (function poll() {
       if (n++ > 600) {

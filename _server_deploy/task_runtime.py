@@ -523,6 +523,9 @@ def _check_page(rid, prompt_hint=""):
         import re as _re
         import pdf_reader as P
         import assistant as A
+        # #1:判分指令可在流程「检查·判分 AI」条里改(槽位 dictation_grade/main);
+        #     本次 check 若带了 prompt_hint(按钮自定义)优先它,否则用用户设的判分指令。
+        _instr = (prompt_hint or "").strip() or A._tps(str(run.get("uid") or ""), "dictation_grade", "main")
         rel = run["file"]
         ap = P._safe_vault_path(rel)
         shots = _CHECK_SHOTS.pop(rid, None)               # 前端渲染的整页截图(所见即所得:题目+手写都在图上)
@@ -553,7 +556,7 @@ def _check_page(rid, prompt_hint=""):
                                  ("(标准答案「%s」)" % ans) if ans else ""))
             base = ("每张图是用户**手写作答的一整页**(题目文字和手写都在图上,所见即所得)。共 %d 张图。\n"
                     % len(images) + "\n".join(lines) + "\n\n"
-                    + (prompt_hint or "逐空:识别用户写在空里的手写内容,判断对错/点评(手写体,允许潦草)。有标准答案的判对错。")
+                    + _instr
                     + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
                     + '"score":"可空","brief":"总评"}')
         else:
@@ -587,7 +590,7 @@ def _check_page(rid, prompt_hint=""):
             base = ("每张图是用户**手写作答的一整页**(白底,只有手写笔迹;题目文字不在图上)。"
                     "共 %d 张图。按下面每空的**纵向位置**在图里找到对应手写:\n" % len(images)
                     + "\n".join(lines) + "\n\n"
-                    + (prompt_hint or "逐空识别手写内容并判断/点评(手写体,允许潦草)。有标准答案的判对错。")
+                    + _instr
                     + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
                     + '"score":"可空","brief":"总评"}')
         if not images:

@@ -3785,6 +3785,8 @@ _slot("auto_highlight", "main", "挑句指令(逐页挑重点)",
       "**逐字照抄原文**(不改写/不翻译/不合并/不跨段)。返回一个 JSON 对象 {\"页N\":[\"原句1\",\"原句2\"], ...};只输出 JSON,别加别的。")
 _slot("web_search", "sys", "联网搜索的系统指令(决定它怎么搜、怎么组织结果)",
       "联网搜索,然后只输出一个 JSON 对象(禁止其他任何文字/代码块标记):\n")
+_slot("dictation_grade", "main", "判分指令(纸上「让 AI 检查」按钮按下时,判分 AI 怎么看手写、怎么打分)",
+      "逐空:识别用户写在空里的手写内容,判断对错/点评(手写体,允许潦草)。有标准答案的判对错。")
 
 
 _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
@@ -5090,6 +5092,7 @@ _TOOL_ACTION = {
     "make_note":    "summarize",
     "make_anki":    "summarize",
     "lookup_word":  "dict",
+    "dictation_grade": "dictation_grade",   # #1:判分 AI(纸上「让 AI 检查」按钮)也能在工具设置里换模型
 }
 
 
