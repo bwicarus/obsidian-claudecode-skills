@@ -1100,6 +1100,23 @@ def pdf_api_run_start():
                                            "_uid": session.get("user_id")}))
 
 
+@bp.route("/api/run-attach", methods=["POST"])
+def pdf_api_run_attach():
+    """多纸自动补页(#33):前端建好第 index 张溢出页后回调,把该页的块写进它的 sidecar 并登记进 run。"""
+    import task_runtime as TR
+    b = request.get_json(silent=True) or {}
+    rid = str(b.get("rid") or "")[:40]
+    upage = str(b.get("upage") or "")[:20]
+    try:
+        page = int(b.get("page") or 0)
+        index = int(b.get("index") or 0)
+    except Exception:
+        return jsonify({"ok": False, "error": "page/index 非法"}), 400
+    if not (rid and upage and page and index):
+        return jsonify({"ok": False, "error": "缺 rid/upage/page/index"}), 400
+    return jsonify(TR.attach_page(rid, upage, page, index))
+
+
 @bp.route("/api/run-event", methods=["POST"])
 def pdf_api_run_event():
     """任务运行时的**唯一推进入口**:页面上的按钮/勾选被点 → 推进状态机。

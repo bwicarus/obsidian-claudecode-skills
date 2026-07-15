@@ -1286,9 +1286,29 @@ def _task_agent(tid, params, ctx, base):
         ctx_lines.append(f"当前页码:{ctx['page']}")
     if (ctx.get("selection") or "").strip():
         ctx_lines.append(f"用户选中的文字:{ctx['selection'][:300]}")
+    # #38:把**前后的聊天上下文**告诉专用 ai —— 编排把任务甩过来时往往只有一句话,
+    #   之前聊的(出过什么题/纠正过什么/围绕哪些词)不喂就丢了。取侧栏对话最近几轮。
+    convo_block = ""
+    try:
+        import assistant as A
+        msgs = A._convo_load(str(ctx.get("_uid") or "")) or []
+        rows = []
+        for m in msgs[-8:]:
+            role = "用户" if m.get("role") == "user" else "助手"
+            c = (m.get("content") or "")
+            if isinstance(c, list):
+                c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+            c = str(c).strip().replace("\n", " ")
+            if c:
+                rows.append(f"{role}:{c[:200]}")
+        if rows:
+            convo_block = "\n【最近对话(理解用户想要什么的背景)】\n" + "\n".join(rows) + "\n"
+    except Exception:
+        pass
     prompt = (
         "你是这个自学 App 的后台助手,用 bwapp 这套 MCP 工具帮用户把事情做完。\n"
         + ("\n".join(ctx_lines) + "\n" if ctx_lines else "")
+        + convo_block
         + f"\n用户的要求:{instr}\n\n"
         # 能力提示(不教做法,只让它知道有这个能力 —— 用户拍板:CLI 自己决定用哪些工具、怎么编排)。
         #   实测它面对"做填空题"去调了 make_anki_card,是因为不知道能造**交互纸**(让用户在页面上手写作答的那种)。

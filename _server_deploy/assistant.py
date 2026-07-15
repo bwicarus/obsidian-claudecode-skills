@@ -3001,27 +3001,49 @@ def _t_page_new(args, ctx):
     _PAGE_DRAFTS[_pd_key(ctx)] = {"paper": (args.get("paper") or "note"),
                                   "title": (args.get("title") or "")[:60], "blocks": []}
     return {"草稿已开": (args.get("title") or "新纸"),
-            "下一步": "用 page_add 一个一个加元素(text/blank/button…),加完调 page_show 生成。", "silent": True}
+            "下一步": "用 page_add 加元素(**可一次批量** page_add(blocks=[…]) 一把加完,更好安排位置),再 page_show 生成。", "silent": True}
+
+
+# 元素字段白名单:kind/内容 + style + 定位(at/cols/span)+ 按钮态(event/enabled)。
+_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span")
+_BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr")
+
+
+def _norm_block(a, idx):
+    b = {k: v for k, v in a.items() if k in _BLOCK_KEYS}
+    b.setdefault("id", "b%d" % idx)
+    return b
 
 
 def _t_page_add(args, ctx):
-    """往草稿纸**加一个元素**(造纸第二步,可多次)。一次只加一个,别一次塞一堆。
-    args = 元素本身,例:
+    """往草稿纸**加元素**(造纸第二步)。**可一次一个,也可一次一批**(args.blocks=[…])。
+    单个元素例:
       {kind:'text', text:'写出假名', style?:'h1'}
-      {kind:'blank', label?:'1.', answer?:'ばら'}     # answer 给了,check 时判对错
+      {kind:'blank', label?:'1.', answer?:'ばら'}          # answer 给了 check 时判对错
       {kind:'checkbox', label:'我写完了'}
-      {kind:'button', label:'让 AI 检查', event:'check'}   # event 内置动作:check|say:话|goto:页|reveal:块id|hide:块id
+      {kind:'button', label:'让 AI 检查', event:'check', enabled?:true}
+    批量(#49 D,一次决定所有元素、好安排彼此位置):{blocks:[{…},{…},…]}
+    ★ 每个元素可选:
+      at:[行,列]   精确定位(B 模式;不给=按顺序自动流式排,碰撞自动下移)
+      enabled:false 按钮初始**禁用/不可点**(#36 显示状态;之后可被 set_enabled 事件打开)
+      event 内置动作:check | say:话 | goto:页 | reveal:块id | hide:块id | call:工具名(按钮触发)
     """
     d = _PAGE_DRAFTS.get(_pd_key(ctx))
     if not d:
         return {"error": "还没开草稿。先调 page_new。"}
-    kind = args.get("kind")
-    if kind not in ("text", "blank", "checkbox", "button", "hr"):
-        return {"error": "kind 只能是 text/blank/checkbox/button/hr"}
-    b = {k: v for k, v in args.items() if k in ("kind", "text", "style", "label", "answer", "event", "id")}
-    b.setdefault("id", "b%d" % len(d["blocks"]))
-    d["blocks"].append(b)
-    return {"已加": kind, "当前共": len(d["blocks"]), "silent": True}
+    batch = args.get("blocks")
+    items = batch if isinstance(batch, list) else [args]
+    added = 0
+    for a in items:
+        if not isinstance(a, dict):
+            continue
+        if a.get("kind") not in _BLOCK_KINDS:
+            return {"error": "kind 只能是 text/blank/checkbox/button/hr(第 %d 个是 %r)" % (added + 1, a.get("kind"))}
+        d["blocks"].append(_norm_block(a, len(d["blocks"])))
+        added += 1
+    if not added:
+        return {"error": "没加成任何元素(检查 kind;批量用 args.blocks=[…])"}
+    return {"已加": added, "当前共": len(d["blocks"]), "silent": True}
 
 
 def _t_run_saved_task(args, ctx):

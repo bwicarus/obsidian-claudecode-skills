@@ -117,8 +117,14 @@ def _set_blocks(run: dict, blocks: list, kind: str = ""):
         pw, ph = 595.0, 842.0
     pl = PA.plan(pk, blocks, pw, ph)
     laid = pl["papers"][0] if pl["papers"] else []
+    run["n_pages"] = pl["n_pages"]
+    run["pages_info"] = [{"upage": run.get("upage"), "page": run.get("page")}]   # 第 1 张
     if pl["n_pages"] > 1:
-        run["hint"] = (run.get("hint") or "") + f"(内容超出一张纸,只放下了第 1 张;共需 {pl['n_pages']} 张)"
+        # 溢出的纸(第 2 张起)存进 run,等前端建好页调 attach_page 逐张写回(多纸自动补页,#33)
+        run["_overflow"] = {"spec": pl["spec"], "pages": pl["papers"][1:], "kind": kind}
+        run["hint"] = (run.get("hint") or "") + f"(内容较多,自动补到 {pl['n_pages']} 张纸)"
+    else:
+        run.pop("_overflow", None)
     with _lock:
         items = P._upages_load(rel)
         for it in items:
@@ -136,6 +142,42 @@ def _set_blocks(run: dict, blocks: list, kind: str = ""):
         publish("text", rel, run.get("upage"))
     except Exception:
         pass
+
+
+def attach_page(rid, upage, page, index):
+    """多纸自动补页:前端建好第 index 张溢出页后调这个,把 _overflow 里第 index 张的块写进它的
+    sidecar,并登记进 run["pages_info"]。index 从 1 起(第 1 张是原始纸)。返回 {ok, done}。"""
+    import pdf_reader as P
+    run = load(rid)
+    if not run:
+        return {"ok": False, "error": "run 不存在"}
+    ov = run.get("_overflow") or {}
+    pages = ov.get("pages") or []
+    if index < 1 or index > len(pages):
+        return {"ok": False, "error": "index 越界"}
+    laid = pages[index - 1]
+    with _lock:
+        items = P._upages_load(run["file"])
+        for it in items:
+            if it.get("id") == upage:
+                it["blocks"] = laid
+                it["paper"] = ov.get("spec")
+                if ov.get("kind"):
+                    it["kind"] = ov["kind"]
+                it["run_id"] = run["rid"]
+                it["updated"] = int(time.time())
+                break
+        P._upages_save(run["file"], items)
+    pi = run.setdefault("pages_info", [{"upage": run.get("upage"), "page": run.get("page")}])
+    if not any(x.get("upage") == upage for x in pi):
+        pi.append({"upage": upage, "page": int(page)})
+    _save(run)
+    try:
+        from reader_events import publish
+        publish("text", run["file"], upage)
+    except Exception:
+        pass
+    return {"ok": True, "done": len(pi) >= int(run.get("n_pages") or 1)}
 
 
 # ── 听写程序(kind='dictation')────────────────────────────────────────────────
@@ -289,6 +331,22 @@ def _blocks_of(run):
     return []
 
 
+def _run_pages(run):
+    """这个 run 涉及的所有纸(多纸支持):[{upage, page}, …]。单纸时就一项。"""
+    pi = run.get("pages_info")
+    if pi:
+        return pi
+    return [{"upage": run.get("upage"), "page": run.get("page")}]
+
+
+def _blocks_of_page(run, upage):
+    import pdf_reader as P
+    for it in P._upages_load(run["file"]):
+        if it.get("id") == upage:
+            return it.get("blocks") or []
+    return []
+
+
 def _client(run, fn, args):
     try:
         from reader_events import publish
@@ -300,15 +358,15 @@ def _client(run, fn, args):
 def _reveal(run, block_id, show):
     import pdf_reader as P
     rel = run["file"]
+    _upids = {pg.get("upage") for pg in _run_pages(run)}   # 多纸:跨本 run 所有纸找块
     with _lock:
         items = P._upages_load(rel)
         for it in items:
-            if it.get("id") == run.get("upage"):
+            if it.get("id") in _upids:
                 for b in (it.get("blocks") or []):
                     if b.get("id") == block_id:
                         b["hidden"] = not show
                 it["updated"] = int(time.time())
-                break
         P._upages_save(rel, items)
     try:
         from reader_events import publish
@@ -364,24 +422,27 @@ def _check_page(rid, prompt_hint=""):
         import pdf_reader as P
         import assistant as A
         rel = run["file"]
-        page = int(run.get("page") or 0)
         ap = P._safe_vault_path(rel)
-        strokes = P._page_ink_strokes(rel, page) or []
-        blocks = _blocks_of(run)
-        blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
         images = []
         lines = []
-        for idx, b in enumerate(blanks):
-            try:
-                png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
-            except Exception:
-                png = None
-            if not png:
-                continue
-            images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
-            ans = b.get("answer")
-            lines.append("第 %d 张图 = 第 %d 空%s" % (len(images), idx + 1,
-                         ("(标准答案「%s」)" % ans) if ans else ""))
+        qn = 0                                           # 跨页连续空号
+        for pg in _run_pages(run):                       # ★ 多纸:逐张纸收手写(#33)
+            page = int(pg.get("page") or 0)
+            strokes = P._page_ink_strokes(rel, page) or []
+            blocks = _blocks_of_page(run, pg.get("upage"))
+            blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+            for b in blanks:
+                qn += 1
+                try:
+                    png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
+                except Exception:
+                    png = None
+                if not png:
+                    continue
+                images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+                ans = b.get("answer")
+                lines.append("第 %d 张图 = 第 %d 空%s" % (len(images), qn,
+                             ("(标准答案「%s」)" % ans) if ans else ""))
         if not images:
             run.update(status="error", error="这页没有可检查的手写填空(还没写?)")
             _save(run)
@@ -415,20 +476,21 @@ def _check_page(rid, prompt_hint=""):
         #   (后台线程发的 SSE 若那刻页面不可见就被 visibility 早退丢了 —— 用户实测"结果没出现"的根因。)
         try:
             import pdf_reader as P
+            _upids = {pg.get("upage") for pg in _run_pages(run)}   # 多纸:结果写到本 run 每张纸(哪页点检查都看得到)
             with _lock:
                 items = P._upages_load(run["file"])
                 for it in items:
-                    if it.get("id") == run.get("upage"):
+                    if it.get("id") in _upids:
                         it["result_md"] = rmd
                         it["updated"] = int(time.time())
-                        break
                 P._upages_save(run["file"], items)
         except Exception:
             pass
         _push_run(run)                                   # 实时推(在线就立刻显示)
         try:                                             # 再补发 text 事件 → __upRerender 重画(更可靠)
             from reader_events import publish
-            publish("text", run["file"], run.get("upage"))
+            for pg in _run_pages(run):
+                publish("text", run["file"], pg.get("upage"))
         except Exception:
             pass
     except Exception as ex:
@@ -892,7 +954,11 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
     _PROGRAMS[kind](run, "")
     _save(run)
     _push_run(run)
-    return {"ok": True, "rid": run["rid"], "hint": run.get("hint") or ""}
+    # n_pages / overflow:前端据此决定要不要再建溢出页(多纸自动补页,#33)。
+    ov = run.get("_overflow") or {}
+    return {"ok": True, "rid": run["rid"], "hint": run.get("hint") or "",
+            "n_pages": int(run.get("n_pages") or 1),
+            "overflow": len(ov.get("pages") or [])}
 
 
 def advance(rid: str, event: str) -> dict:

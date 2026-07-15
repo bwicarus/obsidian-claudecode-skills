@@ -122,6 +122,8 @@ window._favOpenPicker = function () {
       'border-radius:10px;background:#3b6fd4;color:#fff;font-size:14px;font-weight:600;cursor:pointer;' +
       '-webkit-appearance:none;appearance:none;user-select:none;margin-right:8px}' +
     '.up2-b-btn:active{transform:scale(.96)}' +
+    '.up2-b-btn.up2-b-off{background:#9aa7c4;opacity:.55;cursor:not-allowed}' +   // #36 禁用态
+    '.up2-b-btn.up2-b-off:active{transform:none}' +
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
     '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;overflow:auto;padding:12px 22px;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08);-webkit-overflow-scrolling:touch}' +
     '.up2-run-result h3{font-size:15px;margin:0 0 6px}.up2-run-result p{margin:0 0 .4em}' +
@@ -793,50 +795,70 @@ window._favOpenPicker = function () {
     } catch (e) {}
   };
 
+  // 建一张任务纸(乐观新建),绑到真页号后回调 onReady(rec, tmpEl)。多纸时反复调它。
+  function _upSpawnTaskPage(after, title, onReady) {
+    if (after < 0) after = 0;
+    var tempId = 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    var rec = { id: tempId, page: 0, title: title || '任务', md: '', mode: 'overlay',
+                md_ver: 0, synced_ver: 0, _temp: true };
+    var tmp = document.createElement('div');
+    tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = tempId;
+    if (!_upPlace(tmp, after, null)) { alert('请先翻到要插纸的位置附近'); return; }
+    try { tmp.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) {}
+    _upTempEls[tempId] = tmp;
+    _upMountOverlay(rec, tmp);   // 不进编辑态,先显示"生成中"
+    var mini = _upMini('正在生成' + (title || '任务纸') + '…');
+    RC.reqJson('POST', UP_API, { file: UP_FILE, after: after, title: title || '', md: '' })
+      .then(function (d) {
+        if (!(d && d.ok && d.job_id)) { _upMiniEnd(mini, '新增失败', true); _upTempFail(tempId); return; }
+        _upWatchCreate(d.job_id, tempId, rec, mini);
+        var iv = setInterval(function () {   // 绑到真 id+页号后才回调(运行时要真页号才能按 bbox 裁图)
+          if (String(rec.id).indexOf('tmp_') === 0 || !rec.page) return;
+          clearInterval(iv);
+          try { onReady(rec, tmp); } catch (e) {}
+        }, 400);
+        setTimeout(function () { clearInterval(iv); }, 120000);
+      })
+      .catch(function () { _upMiniEnd(mini, '网络错误', true); _upTempFail(tempId); });
+  }
+  // 服务端已把 blocks 写进 sidecar → 重新拉回渲染这一页
+  function _upRenderTaskPage(rec, tmp) {
+    RC.reqJson('GET', UP_TEXT_API + '?file=' + encodeURIComponent(UP_FILE)).then(function (g) {
+      var fresh = ((g && (g.pages || g.items)) || []).filter(function (x) { return x.id === rec.id; })[0];
+      if (fresh) { for (var k in fresh) rec[k] = fresh[k]; }
+      var ov = tmp.querySelector('.up2-content') || (document.querySelector('[data-page-num="' + rec.page + '"] .up2-content'));
+      if (ov) _upRenderOverlay(ov, rec);
+    }).catch(function () {});
+  }
+  // 多纸自动补页(#33):建第 index 张溢出页 → attach 写块 → 渲染 → 递归下一张。
+  function _upSpawnOverflow(rid, afterPage, n, index) {
+    if (index >= n) return;
+    _upSpawnTaskPage(afterPage, '第 ' + (index + 1) + ' 页', function (rec, tmp) {
+      RC.reqJson('POST', '/pdf/api/run-attach', { rid: rid, upage: rec.id, page: rec.page, index: index })
+        .then(function (a) {
+          rec.run_id = rid;
+          _upRenderTaskPage(rec, tmp);
+          _upSpawnOverflow(rid, rec.page, n, index + 1);   // 下一张接在这张后面
+        }).catch(function () {});
+    });
+  }
+
   window.__upStartTask = function (spec) {
     try {
       spec = spec || {};
       if (_upEditing || document.body.classList.contains('up-editing')) { alert('先完成当前正在编辑的页'); return; }
       var after = 0;
       try { after = _upCurPage() | 0; } catch (e) {}
-      if (after < 0) after = 0;
-      var tempId = 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      var rec = { id: tempId, page: 0, title: spec.title || '任务', md: '', mode: 'overlay',
-                  md_ver: 0, synced_ver: 0, _temp: true };
-      var tmp = document.createElement('div');
-      tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = tempId;
-      if (!_upPlace(tmp, after, null)) { alert('请先翻到要插纸的位置附近'); return; }
-      try { tmp.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) {}
-      _upTempEls[tempId] = tmp;
-      // 与 _upCreate 的差别:**不进编辑态**(这是任务纸,不是笔记本),先显示"生成中"
-      _upMountOverlay(rec, tmp);
-      var mini = _upMini('正在生成' + (spec.title || '任务纸') + '…');
-      RC.reqJson('POST', UP_API, { file: UP_FILE, after: after, title: spec.title || '', md: '' })
-        .then(function (d) {
-          if (!(d && d.ok && d.job_id)) { _upMiniEnd(mini, '新增失败', true); _upTempFail(tempId); return; }
-          _upWatchCreate(d.job_id, tempId, rec, mini);
-          // 绑到真 id 之后再起 run —— 运行时要真页号才能按 bbox 裁图
-          var iv = setInterval(function () {
-            var real = rec.id && String(rec.id).indexOf('tmp_') !== 0 ? rec : null;
-            if (!real || !rec.page) return;
-            clearInterval(iv);
-            RC.reqJson('POST', '/pdf/api/run-start',
-              { file: UP_FILE, kind: spec.kind || 'dictation', upage: rec.id, page: rec.page,
-                params: spec.params || {} })
-              .then(function (r) {
-                if (!(r && r.ok)) { _upRunHint(rec, '起任务失败:' + ((r && r.error) || '?')); return; }
-                // 服务端已把 blocks 写进 sidecar → 重新渲染这一页
-                RC.reqJson('GET', UP_TEXT_API + '?file=' + encodeURIComponent(UP_FILE)).then(function (g) {
-                  var fresh = ((g && (g.pages || g.items)) || []).filter(function (x) { return x.id === rec.id; })[0];
-                  if (fresh) { for (var k in fresh) rec[k] = fresh[k]; }
-                  var ov = tmp.querySelector('.up2-content') || (document.querySelector('[data-page-num="' + rec.page + '"] .up2-content'));
-                  if (ov) _upRenderOverlay(ov, rec);
-                }).catch(function () {});
-              }).catch(function () {});
-          }, 400);
-          setTimeout(function () { clearInterval(iv); }, 120000);   // 兜底:2 分钟没绑上就放弃
-        })
-        .catch(function () { _upMiniEnd(mini, '网络错误', true); _upTempFail(tempId); });
+      _upSpawnTaskPage(after, spec.title || '任务纸', function (rec, tmp) {
+        RC.reqJson('POST', '/pdf/api/run-start',
+          { file: UP_FILE, kind: spec.kind || 'dictation', upage: rec.id, page: rec.page,
+            params: spec.params || {} })
+          .then(function (r) {
+            if (!(r && r.ok)) { _upRunHint(rec, '起任务失败:' + ((r && r.error) || '?')); return; }
+            _upRenderTaskPage(rec, tmp);
+            if ((r.n_pages || 1) > 1) _upSpawnOverflow(r.rid, rec.page, r.n_pages, 1);   // 溢出 → 自动补页
+          }).catch(function () {});
+      });
     } catch (e) { try { console.warn('[task] __upStartTask 失败', e); } catch (e2) {} }
   };
 
@@ -900,9 +922,16 @@ window._favOpenPicker = function () {
         var sb = document.createElement('span');
         sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
         sb.textContent = b.label || '按钮';
+        // #36 显示状态:enabled:false → 禁用/不可点(灰);状态机 set_enabled 事件可动态打开。
+        var _on = (b.enabled !== false);
+        if (!_on) { sb.classList.add('up2-b-off'); sb.setAttribute('aria-disabled', 'true'); }
         // ⚠ 冒泡阶段 stopPropagation(memory overlay-gate-use-bubble-not-capture:
         //   捕获阶段拦会**吞掉内部按钮事件** —— 插入页保存键失灵就是这么来的)
-        sb.addEventListener('click', function (ev) { ev.stopPropagation(); _upRunEvent(rec, b.event || 'next'); });
+        sb.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          if (sb.classList.contains('up2-b-off')) return;   // 禁用态不响应
+          _upRunEvent(rec, b.event || 'next');
+        });
         d.appendChild(sb);
       } else { return; }
       body.appendChild(d);
