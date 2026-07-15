@@ -1825,6 +1825,7 @@
     try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
+    var sawCliCard = false;   // #2:本轮委托给了 CLI(make_paper/do_task)→ CLI 卡就是回答,别再单独出编排答案气泡+建议按钮
     if (sentCtx.want_viewshot && window.RC && RC.captureView) {
       // EPUB 笔迹场景(adapter 声明 want_viewshot):服务端渲不了 HTML 笔迹 → 预拍一张视口截图随请求发,
       // see_ink/see_page 拿 ctx.view_image 所见即所得(语音链路走 need_shot,文字侧栏一次性 HTTP 只能预拍)。
@@ -1887,7 +1888,12 @@
         } catch (_) {}
       }
       else if (ev === 'actions') { try { runActions(parsed); } catch (_) {} }   // 实时:工具一执行完就应用(高亮/跳页立即生效),不等 AI 输出完
-      else if (ev === 'tool2' && parsed && parsed.name) { _toolChip(parsed); }   // 工具指示器 v2:同一套圆/长条/方块(与语音通话共用)
+      else if (ev === 'tool2' && parsed && parsed.name) {
+        if (parsed.task_id && (parsed.name === 'do_task' || parsed.name === 'make_paper')) {   // #2 委托 CLI:CLI 卡接管 → 隐藏单独的编排答案气泡
+          sawCliCard = true; try { aMsg.style.display = 'none'; } catch (_) {}
+        }
+        _toolChip(parsed);   // 工具指示器 v2:同一套圆/长条/方块(与语音通话共用)
+      }
       else if (ev === 'trace') { traceData = parsed; }   // 调用链 → 喂「!」反馈弹窗
       else if (ev === 'task') { trackTask(parsed.task_id, parsed.label); }
       else if (ev === 'action' && parsed && parsed.id) { try { HOST.showAction && HOST.showAction(parsed); HOST.queueAction && HOST.queueAction(parsed); } catch (_) {} }   // EPUB 同步写工具:持久撤销/重做卡 + 排队落库(PDF 后端不发此事件)
@@ -1958,13 +1964,18 @@
     aMsg.classList.remove('mfx-streaming');   // 停止提亮
     var pf = _splitFollowups(answer);
     try { if (!aborted) window.__asstVoiceTap && window.__asstVoiceTap(_stripTornFU(pf.text || ''), true); } catch (_) {}   // 语音对话:回答完,尾句也念(原文含标签,tap 自己解析;撕裂 FOLLOWUP 残段截掉)
-    var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
-    if (_pft) renderMd(aMsg, _pft, true);
-    else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
-    if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
-    if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
-    if (!aborted && pf.text) { try { _attachClipBtn(aMsg, { content: answer, ts: _recTs || 0 }); } catch (_) {} }   // 66b:实时回答立即有 ▶(灰=TTS 念+保存;此前要刷新重渲历史才出现)
-    if (!aborted) { try { _fadeInAfter(aMsg); } catch (_) {} }   // stream-fx:追问/反馈条错峰淡入
+    if (sawCliCard) {
+      // #2 委托 CLI:CLI 卡即回答,撤掉这个多余的编排答案气泡(连带追问建议按钮),跟语音模式一致。
+      try { aMsg.remove(); } catch (_) {}
+    } else {
+      var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
+      if (_pft) renderMd(aMsg, _pft, true);
+      else if (aMsg.innerHTML.indexOf('asst-tool') >= 0 || aMsg.innerHTML.indexOf('mfx-typing') >= 0) aMsg.innerHTML = esc(aborted ? '(已停止)' : '(没拿到回答)');
+      if (!aborted) { try { _renderFollowups(aMsg, pf.followups); } catch (_) {} }
+      if (!aborted && pf.text) { try { _attachFeedback(aMsg, text, traceData, _recTs || Math.floor(Date.now() / 1000)); } catch (_) {} }   // 「!」反馈按钮(带本轮调用链 + 耗时/时刻 + 可重答)
+      if (!aborted && pf.text) { try { _attachClipBtn(aMsg, { content: answer, ts: _recTs || 0 }); } catch (_) {} }   // 66b:实时回答立即有 ▶(灰=TTS 念+保存;此前要刷新重渲历史才出现)
+      if (!aborted) { try { _fadeInAfter(aMsg); } catch (_) {} }   // stream-fx:追问/反馈条错峰淡入
+    }
     runActions(acts);
     streaming = false; _abort = null; _recovering = false; _setSendMode(false);
   }

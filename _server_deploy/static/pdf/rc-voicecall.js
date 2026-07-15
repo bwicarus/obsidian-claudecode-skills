@@ -238,6 +238,9 @@
       //   修:UI 图标不是"内容图片"。用更高优先级(0,2,1 > 0,1,1)把它们从那条白底规则里摘出来。
       '.asst-a .vc-flowb svg{width:13px;height:13px;background:none;padding:0;margin:0;border-radius:0;max-width:none;display:block}' +
       '.asst-a .vc-if-hd svg,.asst-a [role="button"] svg,.asst-a button svg{background:none;padding:0;margin:0;border-radius:0;max-width:none;height:auto}' +
+      // ★ 流程里的工具长条图标(.vc-fn-i / .vc-flow / 详情窗)也是 UI 图标,同样从白底规则摘出去(白块复发根因:上一条没覆盖 .vc-fn-i)。
+      '.asst-a .vc-flow svg,.asst-a .vc-fn svg,.asst-a .vc-fn-i svg,.asst-a .vc-dtl svg,.asst-a .rc-flow-node svg{background:none;padding:0;margin:0;border-radius:0;max-width:none;display:block;height:auto}' +
+      '.asst-a .vc-fn-i svg{width:13px;height:13px}' +
       '.vc-flowb:active{transform:scale(.86)}' +
       '.vc-flowb.on{background:#7b6cff;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +

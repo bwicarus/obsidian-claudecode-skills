@@ -287,7 +287,8 @@ def _grade(rid: str):
                   "\n\n逐题判断写得对不对(手写体,允许笔画潦草;错字/漏字/假名写错都算错)。\n"
                   "**只输出 JSON**,形如:"
                   '{"items":[{"n":1,"ok":true,"got":"憂鬱","note":""},...],"score":"18/20","brief":"一句话总评"}')
-        out = A.reader_vision(images, prompt, action="dictation_grade", uid=str(run.get("uid") or ""))
+        out = A.reader_vision(images, prompt, action="dictation_grade", uid=str(run.get("uid") or ""),
+                              max_images=min(len(images), 40))   # 听写批改同理:按词数放宽,别只判前 6
         try:
             import re as _re
             m = _re.search(r"\{.*\}", out or "", _re.S)
@@ -519,7 +520,8 @@ def _check_page(rid, prompt_hint=""):
                 + (prompt_hint or "逐格判断/点评(手写体,允许潦草)。有标准答案的判对错。")
                 + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
                 + '"score":"可空","brief":"总评"}')
-        out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""))
+        out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""),
+                              max_images=min(len(images), 40))   # 批改整张卷子:按题数放宽(默认 6 会只判前 6 题)
         try:
             m = _re.search(r"\{.*\}", out or "", _re.S)
             res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}

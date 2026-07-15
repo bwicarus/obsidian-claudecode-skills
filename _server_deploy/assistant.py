@@ -443,7 +443,7 @@ def _gemini_websearch(query, timeout=45, model=None):
     return {}
 
 
-def _gemini_vision(prompt, images, max_tokens=1500, timeout=90, model=None):
+def _gemini_vision(prompt, images, max_tokens=1500, timeout=90, model=None, max_images=3):
     """Gemini 看图出文字描述。免费 key 优先,**任何失败(限流/5xx/网络/不支持)都自动切付费**。images=[{media_type,b64}]。付费也失败/空 → None(才回退 Claude)。"""
     if not images:
         return None
@@ -452,7 +452,7 @@ def _gemini_vision(prompt, images, max_tokens=1500, timeout=90, model=None):
     if not keys:
         return None
     parts = [{"text": prompt}]
-    for v in images[:3]:
+    for v in images[:max(1, int(max_images))]:
         parts.append({"inlineData": {"mimeType": v.get("media_type", "image/png"), "data": v["b64"]}})
     gc = {"temperature": 0.3, "maxOutputTokens": max_tokens}
     if "pro" not in mdl:   # Pro 是 thinking-only,thinkingBudget=0 会 400
@@ -4061,9 +4061,10 @@ def reader_stream(prompt, action="explain", uid="", system=None, timeout=120):
         yield txt
 
 
-def reader_vision(images, prompt, action="vision", uid="", system=None, timeout=120):
+def reader_vision(images, prompt, action="vision", uid="", system=None, timeout=120, max_images=6):
     """PDF 阅读器看图/裁图 OCR 的统一入口:**脱壳** claude + Gemini 看图,按「看图」预设 + 互为兜底。
     images=[{media_type,b64}];system 可自定义(OCR 要 LaTeX、目录要抽章节…),传 '' 则不加系统提示。
+    max_images:一次最多喂几张(默认 6;批改整张卷子要按题数放宽,否则只判前几题)。
     返回文本或 None。统一了原先直调 claude CLI(没脱壳,白加载 CLAUDE.md + 工具 schema)的看图/OCR。"""
     if not images:
         return None
@@ -4071,11 +4072,13 @@ def reader_vision(images, prompt, action="vision", uid="", system=None, timeout=
     if _paid_recover_check(uid, action):   # @paid 且免费恢复 → 预设已摘除,重读让本次就用免费(静默)
         r = _resolve(action, uid)
     sysmsg = _VIS_SYS if system is None else system
+    imgs = images[:max(1, int(max_images))]
 
     def via_gemini():
-        return _gemini_vision((sysmsg + "\n" + prompt) if sysmsg else prompt, images,
+        return _gemini_vision((sysmsg + "\n" + prompt) if sysmsg else prompt, imgs,
                               timeout=min(timeout, 100),
-                              model=(r["variant"] if _is_gemini(r["variant"]) else None))
+                              model=(r["variant"] if _is_gemini(r["variant"]) else None),
+                              max_images=len(imgs))
 
     def via_claude():
         p = _spawn(effort=(r["depth"] if r["depth"] in _EFFORTS else "low"),
@@ -4085,7 +4088,7 @@ def reader_vision(images, prompt, action="vision", uid="", system=None, timeout=
             return None
         try:
             blocks = [{"type": "text", "text": prompt}]
-            for v in images[:6]:
+            for v in imgs:
                 blocks.append({"type": "image", "source": {"type": "base64",
                               "media_type": v.get("media_type", "image/png"), "data": v["b64"]}})
             return _send(p, blocks, timeout=timeout)
