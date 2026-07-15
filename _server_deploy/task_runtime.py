@@ -274,7 +274,149 @@ def _grade(rid: str):
         _save(run); _push_run(run)
 
 
-_PROGRAMS = {"dictation": _dictation_tick}
+# ══════════ 阶段 B:内置按钮动作(任意纸通用,不依赖配方)══════════
+# AI 用 write_page 造一张静态纸,按钮的 event 直接是**内置动作名**;运行时按块定义执行。
+# 这样"AI 出卷 + 让 AI 检查"这条链**不需要编排 AI**,一次工具调用就能用(ADR 阶段 B)。
+_BUILTIN = ("check", "say", "reveal", "hide", "goto")
+
+
+def _blocks_of(run):
+    import pdf_reader as P
+    for it in P._upages_load(run["file"]):
+        if it.get("id") == run.get("upage"):
+            return it.get("blocks") or []
+    return []
+
+
+def _client(run, fn, args):
+    try:
+        from reader_events import publish
+        publish("client-action", run.get("file") or "", run.get("uid"), {"action": {"fn": fn, "args": args}})
+    except Exception:
+        pass
+
+
+def _reveal(run, block_id, show):
+    import pdf_reader as P
+    rel = run["file"]
+    with _lock:
+        items = P._upages_load(rel)
+        for it in items:
+            if it.get("id") == run.get("upage"):
+                for b in (it.get("blocks") or []):
+                    if b.get("id") == block_id:
+                        b["hidden"] = not show
+                it["updated"] = int(time.time())
+                break
+        P._upages_save(rel, items)
+    try:
+        from reader_events import publish
+        publish("text", rel, run.get("upage"))
+    except Exception:
+        pass
+
+
+def _free_tick(run, event):
+    """free 纸:按钮事件 = 内置动作名(带可选参数,冒号分隔:say:文本 / goto:12 / reveal:块id)。
+    check 起后台线程(有界 LLM),其余同步瞬间完成。"""
+    if run["step"] == 0:                       # 铺纸:AI 给的 blocks → 布局器排版
+        run["paper"] = (run.get("params") or {}).get("paper") or "note"
+        _set_blocks(run, (run.get("params") or {}).get("blocks") or [], kind="free")
+        run["step"] = 1
+        run["status"] = "waiting"
+        run["hint"] = "纸已生成。填写/勾选后点纸上的按钮。"
+        return True
+    if not event:
+        return False
+    act, _, arg = event.partition(":")
+    if act == "say" and arg:
+        _say(run, arg)
+        return False
+    if act == "goto" and arg.isdigit():
+        _client(run, "jumpWithBack", [int(arg)])
+        return False
+    if act in ("reveal", "hide") and arg:
+        _reveal(run, arg, act == "reveal")
+        return True
+    if act == "check":
+        if run.get("status") == "checking":
+            return False
+        run["status"] = "checking"
+        run["hint"] = "正在检查…"
+        _save(run)
+        _push_run(run)
+        threading.Thread(target=_check_page, args=(run["rid"], arg or ""), daemon=True).start()
+        return False
+    return False
+
+
+def _check_page(rid, prompt_hint=""):
+    """★ 阶段 B 的核心:让 AI 看这一页的手写并点评。**任意纸通用**(不只听写)。
+    按每个 blank 的 rect 裁出手写(有 answer 字段就带上正确答案);题号/答案在 prompt 里用文字给。
+    把"AI 出题 → 你手写 → AI 批改"从听写里解耦 —— 任何纸配一个『让 AI 检查』按钮即可。"""
+    run = load(rid)
+    if not run:
+        return
+    try:
+        import base64
+        import re as _re
+        import pdf_reader as P
+        import assistant as A
+        rel = run["file"]
+        page = int(run.get("page") or 0)
+        ap = P._safe_vault_path(rel)
+        strokes = P._page_ink_strokes(rel, page) or []
+        blocks = _blocks_of(run)
+        blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+        images = []
+        lines = []
+        for idx, b in enumerate(blanks):
+            try:
+                png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
+            except Exception:
+                png = None
+            if not png:
+                continue
+            images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+            ans = b.get("answer")
+            lines.append("第 %d 张图 = 第 %d 空%s" % (len(images), idx + 1,
+                         ("(标准答案「%s」)" % ans) if ans else ""))
+        if not images:
+            run.update(status="error", error="这页没有可检查的手写填空(还没写?)")
+            _save(run)
+            _push_run(run)
+            return
+        base = ("下面每张图是用户在一张纸上**手写**的一格内容(白底,只有那一格)。\n"
+                + "\n".join(lines) + "\n\n"
+                + (prompt_hint or "逐格判断/点评(手写体,允许潦草)。有标准答案的判对错。")
+                + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
+                + '"score":"可空","brief":"总评"}')
+        out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""))
+        try:
+            m = _re.search(r"\{.*\}", out or "", _re.S)
+            res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}
+        except Exception:
+            res = {"brief": (out or "")[:400]}
+        md = ["### 检查结果  " + str(res.get("score") or "")]
+        for it in (res.get("items") or []):
+            ok = "✅" if it.get("ok") else "❌"
+            md.append("%s **%s.** %s%s" % (ok, it.get("n"), it.get("got") or "",
+                      (" — " + it.get("note")) if it.get("note") else ""))
+        if res.get("brief"):
+            md.append("\n> " + str(res["brief"]))
+        _set_blocks(run, list(blocks) + [{"id": "check_" + str(int(time.time())),
+                                          "kind": "text", "text": "\n".join(md)}])
+        run.update(status="done", result=res, hint="检查完成 ✅")
+        _save(run)
+        _push_run(run)
+    except Exception as ex:
+        run = load(rid) or run
+        run.update(status="error", error=str(ex)[:200])
+        _save(run)
+        _push_run(run)
+
+
+_PROGRAMS = {"dictation": _dictation_tick, "free": _free_tick}
 
 
 # ── 对外三个入口 ──────────────────────────────────────────────────────────────

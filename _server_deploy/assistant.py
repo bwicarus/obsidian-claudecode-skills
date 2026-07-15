@@ -2967,6 +2967,46 @@ def _mark_source_highlight(ctx, color):
         pass
 
 
+def _t_make_page(args, ctx):
+    """AI **自由造一张交互纸**(阶段 B)。static blocks + 内置按钮动作,不需要编排 AI。
+
+    args {
+      paper?: dictation|exam|math|draw|note   # 纸型,默认 note(决定背景/字号/行高/底纹)
+      title?: str
+      blocks: [                               # 你要放的元素,**不用写坐标**(布局器自动排)
+        {kind:'text', text, style?:'h1'} |
+        {kind:'blank', label?, answer?} |     # 填空;answer 给了 check 时就判对错
+        {kind:'checkbox', label} |
+        {kind:'button', label, event}         # event = 内置动作:
+                                              #   check | check:提示语 | say:要念的话 | goto:页码 | reveal:块id | hide:块id
+      ]
+    }
+    典型:出一张练习纸,放几个 blank + 一个 {kind:'button',label:'让 AI 检查',event:'check'} —— 用户手写后点它,AI 就按格看手写并点评。
+    你(AI)造完纸就完事,循环/等待/检查都由系统负责。"""
+    blocks = args.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        return {"error": "没给 blocks(要放的元素)"}
+    rel = (ctx or {}).get("file_rel") or ""
+    if not rel or not rel.lower().endswith(".pdf"):
+        return {"error": "目前只支持 PDF 阅读器"}
+    paper = (args.get("paper") or "note")
+    title = (args.get("title") or "")[:60]
+    # 给没 id 的块补 id(check/reveal 要按 id 找)
+    clean = []
+    for i, b in enumerate(blocks[:200]):
+        if not isinstance(b, dict) or not b.get("kind"):
+            continue
+        b = dict(b)
+        b.setdefault("id", "b%d" % i)
+        clean.append(b)
+    return {"已设计": "%d 个元素" % len(clean),
+            "接下来": "系统会在你当前位置插一张纸(即时出现,不用刷新)。用户填/写完点纸上的按钮即可。",
+            "client_action": {"fn": "__upStartTask",
+                              "args": [{"kind": "free", "title": title, "paper": paper,
+                                        "params": {"blocks": clean, "paper": paper, "title": title}}]},
+            "silent": True}
+
+
 def _t_start_dictation(args, ctx):
     """出题 + **遥控前端**建一张听写纸。
 
@@ -3070,6 +3110,12 @@ TOOLS = {
                    "args {id, text?, color?}(id 从 notes_query 拿;text/color 至少给一个)。"
                    "**只能改文字和颜色**——手写笔画/位置/尺寸动不了(工具层面就不接收),别答应用户改这些", _t_notes_edit),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮/便签)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
+    "make_page": ("★ **造一张交互纸**(练习/试卷/清单/任何要用户在页面上写或勾的东西)。"
+                 "你直接给出要放的元素(文字/填空/勾选框/按钮),**不用管排版和坐标**,系统自动排。"
+                 "按钮的 event 用内置动作:check(让 AI 看这页手写并点评,填空给了 answer 就判对错)/"
+                 "say:话 / goto:页码 / reveal:块id / hide:块id。"
+                 "args {paper?, title?, blocks:[...]}(blocks 结构见工具实现)。"
+                 "适合『给我出道题我写』『做张清单』这类;要**逐个念、念一个等一个**的听写请用 start_dictation。", _t_make_page),
     "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"
                         "然后由**系统**逐个念、等用户手写、最后按格裁图批改。"
                         "args {words:[要听写的词,按顺序], title?:纸的标题}。"
@@ -3093,7 +3139,7 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    return {"start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
+    return {"make_page": "造纸", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",

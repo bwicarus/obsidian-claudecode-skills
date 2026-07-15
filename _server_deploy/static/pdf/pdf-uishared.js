@@ -840,7 +840,7 @@ window._favOpenPicker = function () {
     if (sp.char_w) body.style.setProperty('--cw', sp.char_w + 'px');
 
     (rec.blocks || []).forEach(function (b) {
-      if (!b.rect) return;
+      if (!b.rect || b.hidden) return;   // hidden:reveal/hide 内置动作控制显隐
       var d = document.createElement('div');
       d.className = 'up2-b up2-b-' + (b.kind || 'text');
       d.setAttribute('data-bid', b.id || '');
