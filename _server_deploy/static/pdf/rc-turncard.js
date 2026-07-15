@@ -126,7 +126,11 @@
     // ★用户设计 #3:每个工具都以「工具长条」显示、可长按进各种设置 —— **复用 rc-toolchip 的 paintFlow**
     //   (.vc-fn 长条 + 长按 openDetail),别再自己画纯文本步骤(那正是"擅自设计"的又一处)。
     var main = tools[tools.length - 1] || {};
-    var isCli = !!t.taskId && main.steps && main.steps.length;   // CLI 卡:内部工具塞在单个 part 的 sub_steps 里
+    // CLI 卡判据 = **该 part 自带内部 steps**(不靠 t.taskId)。t.taskId 只活在内存,刷新回放后就没了 →
+    //   旧判据 `!!t.taskId && …` 在回放时恒 false,于是把整条 cliPart 当**一条** do_task 长条渲染
+    //   (而它只有 steps、没有 args/result)→ 流程塌成一条空条 = 用户实测"刷新后流程变了"。
+    var isCli = !!(main.steps && main.steps.length);
+    var taskId = t.taskId || main.task_id || '';   // 回放后从持久化的 part 取 task_id → 刷新后仍能「保存为工具」
     var steps;
     if (isCli) {
       steps = main.steps.map(function (s) { return { label: s.label || String(s), detail: s.detail || '', tool: s.tool || s.label || '' }; });   // tool=该 CLI 内部工具名 → 长按弹它自己的设置
@@ -142,7 +146,7 @@
     if (isCli && !t._sel) { t._sel = {}; for (var _i = 0; _i < steps.length; _i++) t._sel[_i] = 1; }
 
     var cliSteps = tools.reduce(function (a, p) { return a + ((p.steps && p.steps.length) || 0); }, 0);
-    var canSave = tools.length >= 2 || (t.taskId && cliSteps >= 2);
+    var canSave = tools.length >= 2 || (taskId && cliSteps >= 2);
     if (canSave) {
       var sv = document.createElement('div'); sv.className = 'rc-flow-save';
       var sb = document.createElement('span');
@@ -155,8 +159,8 @@
         var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
         if (!nm) return;
         var body = { name: nm };
-        if (t.taskId) {
-          body.task_id = t.taskId;   // ★ CLI 任务:保存**执行轨迹**(自包含回放,不问数据源)
+        if (taskId) {
+          body.task_id = taskId;   // ★ CLI 任务:保存**执行轨迹**(自包含回放,不问数据源)
           if (t._sel) {   // #44:只保存选中的工具
             var sel = []; for (var k = 0; k < steps.length; k++) if (t._sel[k]) sel.push(k);
             if (!sel.length) { alert('至少选一个工具'); return; }
@@ -294,7 +298,7 @@
     return t.el;
   }
 
-  function setTaskId(tid, taskId) { var t = _turns[tid]; if (t) t.taskId = taskId; }
+  function setTaskId(tid, taskId) { var t = _turns[tid]; if (t) { t.taskId = taskId; if (t._cliPart) t._cliPart.task_id = taskId; } }
   // CLI 任务:运行中就建/更新**唯一**工具 part(否则【流程】要等 done 才有内容 = 用户实测"流程空")。
   //   同一个 part 就地更新 steps(它是本轮的当前 part,未冻结),流程开着就实时补画。
   function cliPart(tid, part) {
@@ -302,6 +306,7 @@
     if (!t) return;
     _ensureHead(t, part.label || '任务');
     if (!t._cliPart) { t._cliPart = { kind: 'tool', tool: 'do_task', label: '', steps: [], seq: t.parts.length }; t.parts.push(t._cliPart); }
+    if (t.taskId) t._cliPart.task_id = t.taskId;   // 落库 → 刷新回放后仍能「保存为工具」(见 _paintFlow taskId)
     if (part.label) t._cliPart.label = part.label;
     if (part.steps) t._cliPart.steps = part.steps;
     if (part.error != null) t._cliPart.error = part.error;
