@@ -819,7 +819,17 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         ca = res.get("client_action")
         if isinstance(ca, dict) and ca.get("fn"):   # 页面副作用照旧(视频卡进侧栏/跳页/高亮…)
             await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
-        slim = {k: v for k, v in res.items() if k != "client_action"}
+        # 剔控制字段(_开头=_fed_images 的 b64 等 / client_action):否则 b64 ①烧进喂豆包的 content ②裸露在前端
+        #   详情卡 result_brief(用户实测那串 base64)。图单独走 vision 展示。
+        _vision = []
+        try:
+            for v in (res.get("_fed_images") or []):
+                if isinstance(v, dict) and v.get("b64") and len(v["b64"]) < 1300000:
+                    _vision.append({"media_type": v.get("media_type", "image/png"), "b64": v["b64"]})
+            _vision = _vision[:3]
+        except Exception:
+            _vision = []
+        slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}
         # v3-⑩:RAG 回填按工具分级限长(进历史的每个字后续轮轮计费)——列表类给短(模型只需播报要点),
         # 视觉/阅读类给足(信息密度高);统一 3000 的旧上限只留给未知工具兜底
         lim = _RAG_LIMIT.get(tool, 1400)
@@ -838,7 +848,8 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             "ctx_brief": {"page": page, "ink": len(ctx.get("ink") or []),
                           "sel": len(ctx.get("selection") or "")},       # 随调用携带的页面上下文概要
             "rag": content[:1600],                                       # 喂回豆包播报的真实结果
-            "result_brief": json.dumps(res, ensure_ascii=False)[:400]}}, ensure_ascii=False))
+            "vision": _vision,                                           # #8 实际发给 AI 的图 → 前端「AI 请求」节点展示
+            "result_brief": json.dumps(slim, ensure_ascii=False)[:400]}}, ensure_ascii=False))   # slim=已剔 b64,不再裸露
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
                 "content": content, "label": d.get("label") or tool,
@@ -1620,7 +1631,9 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 if isinstance(ca, dict) and ca.get("fn"):
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
                 vis = res.pop("_vision", None) if isinstance(res, dict) else None   # 原图(b64)绝不进文本 output(会被截成烂 JSON)
-                slim = {k: v for k, v in res.items() if k != "client_action"}
+                if isinstance(res, dict) and not vis and res.get("_fed_images"):
+                    vis = res.get("_fed_images")   # 前端截图路径的图在 _fed_images(同样直喂 GPT 看)
+                slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}  # 剔 _fed_images 等 b64
                 lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
                 out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
                 # ㉕ 图像直喂(凭证 rt_image 开关,⚪格式按 GA conversation item 推定待实测):看图类工具返回的渲染图
