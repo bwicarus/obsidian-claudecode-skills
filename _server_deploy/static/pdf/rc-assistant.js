@@ -2190,6 +2190,7 @@
   }
   // 轮询 CLI 后台任务:进度进 busy 行,**内部每个工具**作为 sub_steps 展进 tool part 的流程。
   function _trackCliTask(tid, taskId, label) {
+    try { RC.turnCard && RC.turnCard.setTaskId && RC.turnCard.setTaskId(tid, taskId); } catch (_) {}
     var n = 0, lastN = -1;
     (function poll() {
       if (n++ > 600) { try { RC.turnCard.idle(tid); RC.turnCard.addPart(tid, { kind: 'tool', tool: label, label: label + '(超时)', error: '等太久了' }); } catch (_) {} return; }

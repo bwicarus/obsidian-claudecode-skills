@@ -3020,6 +3020,17 @@ def _t_run_saved_task(args, ctx):
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "目前只支持 PDF 阅读器"}
     # 选数据源(合并型工具有 sources_menu)
+    # trace 型(CLI 执行轨迹)→ 进程内回放整串工具(去壳),收集 client_action 给前端应用
+    if rec.get("kind") == "trace":
+        r = TR.run_trace(rec, {"file_rel": rel, "page": (ctx or {}).get("page"), "_uid": (ctx or {}).get("_uid")})
+        cas = r.get("client_actions") or []
+        out = {"已运行": name, "silent": True}
+        if len(cas) == 1:
+            out["client_action"] = cas[0]
+        elif cas:
+            out["client_actions"] = cas
+        return out
+    # page/flow 型(交互纸)→ 建纸起状态机
     src = args.get("source") or ""
     menu = rec.get("sources_menu") or {}
     sources = {}
@@ -3027,7 +3038,6 @@ def _t_run_saved_task(args, ctx):
         chosen = menu.get(src) or (list(menu.values())[0] if len(menu) == 1 else None)
         if not chosen:
             return {"error": "工具「%s」要选数据源,有:%s" % (name, "/".join(menu.keys()))}
-        # sources_menu 的 value 是 {call,extract};填给配方的第一个 input(约定 words/blocks)
         sources = {"words": chosen}
     params = dict(args.get("params") or {})
     params.update({"recipe": name, "sources": sources, "paper": rec.get("paper")})

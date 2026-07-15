@@ -1116,6 +1116,16 @@ class _AgentTimeout(Exception):
 _CA_SINK = {}   # tid → [client_action]:后台 agent 内部工具产生的 client_action(headless 不会转发,这里挖出)
 
 
+def _unwrap_call(nm, inp):
+    """CLI 只能经 MCP 的通用派发器 assistant_call_tool(name,args,file,page) 调内置工具。
+    拆包成**真工具名 + 真 args**:① 工具卡显示真名(page_new 而非 assistant_call_tool×5)
+    ② 保存轨迹时 name 对得上 assistant.TOOLS(裸名),run_trace 才能进程内回放(去壳)。
+    file/page 不带进 args —— 回放时用**当前**书/页的 ctx(在当前位置重做,而非原书原页)。"""
+    if nm == "assistant_call_tool" and isinstance(inp, dict) and inp.get("name"):
+        return str(inp["name"]), (inp.get("args") if isinstance(inp.get("args"), dict) else {})
+    return nm, (inp if isinstance(inp, dict) else {})
+
+
 def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                    model: str = "", effort: str = "") -> str:
     """跑一个无头 CLI(claude | codex),流式解析事件驱动工具卡进度条。返回最终答案('' = 没给结果)。
@@ -1165,9 +1175,15 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
         if codex:
             it = d.get("item") or {}
             if d.get("type") == "item.started" and it.get("type") == "mcp_tool_call":
-                nm = str(it.get("tool") or "")
+                nm = str(it.get("tool") or "").replace("mcp__bwapp__", "")
                 if nm:
-                    steps.append({"name": nm, "status": "done"})
+                    _arg = it.get("arguments")
+                    try:
+                        _arg = json.loads(_arg) if isinstance(_arg, str) else (_arg or {})
+                    except Exception:
+                        _arg = {}
+                    nm, _arg = _unwrap_call(nm, _arg if isinstance(_arg, dict) else {})
+                    steps.append({"name": nm, "status": "done", "args": _arg})
                     _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
             elif d.get("type") == "item.completed" and it.get("type") == "agent_message":
                 answer = (it.get("text") or "").strip()   # 覆盖式:最后一条 agent_message 即最终答案
@@ -1176,7 +1192,9 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                 if c.get("type") == "tool_use":
                     nm = str(c.get("name") or "").replace("mcp__bwapp__", "")
                     if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
-                        steps.append({"name": nm, "status": "done"})
+                        _inp = c.get("input") if isinstance(c.get("input"), dict) else {}
+                        nm, _inp = _unwrap_call(nm, _inp)
+                        steps.append({"name": nm, "status": "done", "args": _inp})   # 记参数 → 保存工具时可 replay
                         _vtask_set(tid, step=f"{nm}…", steps=list(steps))
         elif d.get("type") == "user":
             # ★ 工具返回体里的 client_action(如 page_show 的 __upStartTask)—— headless agent 不会转发它,
@@ -1223,16 +1241,12 @@ def _task_agent(tid, params, ctx, base):
         "你是这个自学 App 的后台助手,用 bwapp 这套 MCP 工具帮用户把事情做完。\n"
         + ("\n".join(ctx_lines) + "\n" if ctx_lines else "")
         + f"\n用户的要求:{instr}\n\n"
-        # ★ 造纸能力(用户实测:它面对"做填空题"去调了 make_anki_card,不知道能造练习纸)——
-        #   要**用户在页面上写/手写/练习纸/填空题让我写/试卷**这类,必须用 page_new→page_add→page_show 造一张交互纸,
-        #   **绝不能**用 make_anki_card 代替(Anki 卡是背记,不是让用户在纸上手写作答)。
-        "**判断要不要造纸**:用户要的是「在页面上手写作答」(填空题让我写/练习纸/试卷/听写)→ 用造纸工具:\n"
-        "  page_new(paper?,title?) 开一张纸 → 多次 page_add(一次加一个元素:"
-        "{kind:'text'} 标题/{kind:'blank',label,answer} 填空/{kind:'button',label:'让 AI 检查',event:'check'} 检查按钮)"
-        " → page_show() 生成。填空题每题一个 blank(answer 填标准答案),末尾加一个 event:'check' 的按钮。\n"
-        "  ——**别用 make_anki_card 冒充练习纸**。只有用户明确要「做成 Anki 卡/背记」才用 make_anki_card。\n\n"
-        "要求:自己决定用哪些工具、按什么顺序;做完后**只输出一句话**(40 字以内)如实说你做了什么"
-        "(做了纸就说做了纸,别谎称做了纸其实做的是卡),不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
+        # 能力提示(不教做法,只让它知道有这个能力 —— 用户拍板:CLI 自己决定用哪些工具、怎么编排)。
+        #   实测它面对"做填空题"去调了 make_anki_card,是因为不知道能造**交互纸**(让用户在页面上手写作答的那种)。
+        "工具里有一组 **page_new / page_add / page_show**:能造一张让用户**在页面上手写作答**的交互纸"
+        "(填空/练习/试卷/听写这类,用户要「让我写/在纸上做」时用它,不是 make_anki_card——那是背记卡不是作答纸)。\n\n"
+        "要求:**你自己决定**用哪些工具、按什么顺序把这件事做成;做完后**只输出一句话**(40 字以内)"
+        "如实说你做了什么(做了什么就说什么,别夸大),不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
     )
     # 147c:**ENABLE_TOOL_SEARCH=false** —— Claude Code 默认把 MCP 工具做成「延迟加载」
     #   (system.init 里 MCP 直接可见 **0** 个),模型必须先 ToolSearch 才拿得到 schema,白烧 1~2 轮。

@@ -122,7 +122,11 @@
       f.appendChild(m);
     }
     // ★ E:≥2 个工具的流程 → 提供「保存为工具」(ADR:任何 ≥2 工具的卡都能一键固化)。
-    if (tools.length >= 2) {
+    //   CLI 任务(t.taskId)的内部工具塞在**单个** part 的 sub_steps 里 → tools.length 恒=1,
+    //   但用户拍板"所有走 CLI 的多步任务都要能保存" → 用它记的步数(sub_steps ≥2)也放行。
+    var cliSteps = tools.reduce(function (a, p) { return a + ((p.steps && p.steps.length) || 0); }, 0);
+    var canSave = tools.length >= 2 || (t.taskId && cliSteps >= 2);
+    if (canSave) {
       var sv = document.createElement('div'); sv.className = 'rc-flow-save';
       var sb = document.createElement('span');
       sb.className = 'up2-b-btn'; sb.setAttribute('role', 'button'); sb.setAttribute('tabindex', '0');
@@ -132,11 +136,15 @@
         ev.stopPropagation();
         var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
         if (!nm) return;
-        var src = prompt('这个任务的内容来自哪个上游工具?(留空=不记数据源,直接固化)\n例:高亮 / 未掌握词', '') || '';
-        // 数据源:取流程里第一个工具当去壳来源(用户可留空)
-        var srcTool = tools.length ? tools[0].tool : '';
         var body = { name: nm };
-        if (src && srcTool) { body.source_label = src; body.source_spec = { call: srcTool, extract: 'text' }; }
+        if (t.taskId) {
+          body.task_id = t.taskId;   // ★ CLI 任务:保存**执行轨迹**(自包含回放,不问数据源)
+        } else {
+          // 内置多工具流程:可挂一个上游工具当去壳数据源(用户可留空)
+          var src = prompt('这个任务的内容来自哪个上游工具?(留空=不记数据源,直接固化)\n例:高亮 / 未掌握词', '') || '';
+          var srcTool = tools.length ? tools[0].tool : '';
+          if (src && srcTool) { body.source_label = src; body.source_spec = { call: srcTool, extract: 'text' }; }
+        }
         try { RC.reqJson('POST', '/pdf/api/run-save', body).then(function (r) {
           alert((r && r.hint) || (r && r.ok ? '已保存' : '保存失败:' + ((r && r.error) || '?')));
         }).catch(function () { alert('保存失败(网络)'); }); } catch (e) {}
@@ -263,6 +271,7 @@
     return t.el;
   }
 
+  function setTaskId(tid, taskId) { var t = _turns[tid]; if (t) t.taskId = taskId; }
   function partsOf(tid) {
     var t = _turns[tid];
     if (!t) return [];
@@ -275,7 +284,7 @@
 
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset,
+    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId,
     current: function () { return _cur; },
     has: function (tid) { return !!_turns[tid]; },
   };

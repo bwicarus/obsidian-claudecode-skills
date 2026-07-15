@@ -784,6 +784,60 @@ def save_recipe(run, name, desc="", source_label="", source_spec=None):
     return {"ok": True, "name": safe, "merged": False, "hint": "已保存为工具「%s」" % safe}
 
 
+def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None):
+    """把一次 **CLI 多步任务的执行轨迹** 冻成可复用工具(用户拍板:所有走 CLI 的多步任务都能保存)。
+    steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序进程内调 TOOLS[name](去壳)。
+    同"工具序列"已存在 → 合并加数据源;否则新建。"""
+    import re as _re
+    safe = _re.sub(r"[^\w\u4e00-\u9fff-]", "", str(name or ""))[:60]
+    if not safe:
+        return {"ok": False, "error": "工具名不能为空"}
+    calls = [{"tool": st.get("name"), "args": st.get("args") or {}}
+             for st in (steps or []) if st.get("name")]
+    if not calls:
+        return {"ok": False, "error": "这次任务没有可复用的工具调用"}
+    import hashlib
+    sig = "trace:" + hashlib.md5(",".join(c["tool"] for c in calls).encode()).hexdigest()[:14]
+    RECIPES_DIR.mkdir(parents=True, exist_ok=True)
+    for f in RECIPES_DIR.glob("*.json"):
+        try:
+            d = json.loads(f.read_text("utf-8"))
+        except Exception:
+            continue
+        if d.get("sig") == sig and source_label and source_spec:
+            d.setdefault("sources_menu", {})[source_label] = source_spec
+            f.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+            return {"ok": True, "name": d.get("name"), "merged": True,
+                    "hint": "已合并进「%s」,新增数据源「%s」" % (d.get("name"), source_label)}
+    rec = {"name": safe, "desc": desc or ("一键" + safe), "sig": sig, "kind": "trace",
+           "calls": calls}
+    if source_label and source_spec:
+        rec["sources_menu"] = {source_label: source_spec}
+    (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+    return {"ok": True, "name": safe, "merged": False, "hint": "已保存为工具「%s」" % safe}
+
+
+def run_trace(rec, ctx):
+    """回放一个 trace 配方:按序**进程内**调 TOOLS[tool](args)(去壳,不走 MCP)。
+    工具产生的 client_action(如建纸)收集起来返回给前端应用。返回 {ok, client_actions, last}。"""
+    import assistant as A
+    cas, last = [], None
+    tctx = {"file_rel": (ctx or {}).get("file_rel"), "page": (ctx or {}).get("page"),
+            "_uid": (ctx or {}).get("_uid")}
+    for c in (rec.get("calls") or []):
+        fn = (A.TOOLS.get(c.get("tool")) or (None, None))[1]
+        if not fn:
+            continue
+        try:
+            res = fn(c.get("args") or {}, tctx) or {}
+            last = res
+            if isinstance(res, dict) and res.get("client_action"):
+                cas.append(res["client_action"])
+        except Exception as ex:
+            sys.stderr.write("[trace] %s 失败: %s\n" % (c.get("tool"), str(ex)[:80]))
+    return {"ok": True, "client_actions": cas, "last": last}
+
+
 def _run_sources(run, sources):
     """★ 去壳预取:进程内直接调 TOOLS[工具],结果填进 params[input名]。
     MCP 只是 TOOLS 的薄门面 → 进程内调 = MCP 转发到的同一个函数,零拷贝零标注(ADR §5.5.3)。"""

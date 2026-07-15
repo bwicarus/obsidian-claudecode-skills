@@ -1048,6 +1048,17 @@ def pdf_api_run_save():
     同结构指纹已存在 → 合并进已有工具的数据源菜单,否则新建配方文件。"""
     import task_runtime as TR
     b = request.get_json(silent=True) or {}
+    # ★ 优先保存 **CLI 执行轨迹**(用户拍板:所有走 CLI 的多步任务都能保存)。前端传 task_id → 拿它的 steps。
+    task_id = str(b.get("task_id") or "")
+    if task_id:
+        import voice as V
+        t = V._vtask_get(task_id) if hasattr(V, "_vtask_get") else None
+        if t and (t.get("steps")):
+            return jsonify(TR.save_trace_recipe(b.get("name"), b.get("desc") or "", t.get("steps"),
+                                                str(session.get("user_id") or ""),
+                                                source_label=b.get("source_label") or "",
+                                                source_spec=b.get("source_spec")))
+    # 否则保存造纸 run(page/flow 型)
     rid = str(b.get("rid") or "")
     run = TR.load(rid) if rid else TR.recent_run(str(session.get("user_id") or ""))
     if not run:
