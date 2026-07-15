@@ -129,13 +129,13 @@
     var isCli = !!t.taskId && main.steps && main.steps.length;   // CLI 卡:内部工具塞在单个 part 的 sub_steps 里
     var steps;
     if (isCli) {
-      steps = main.steps.map(function (s) { return { label: s.label || String(s), detail: s.detail || '' }; });
+      steps = main.steps.map(function (s) { return { label: s.label || String(s), detail: s.detail || '', tool: s.tool || s.label || '' }; });   // tool=该 CLI 内部工具名 → 长按弹它自己的设置
     } else {
       steps = tools.map(function (p) {
         var a = ''; try { a = (p.args && Object.keys(p.args).length) ? JSON.stringify(p.args) : ''; } catch (e) {}
         var det = a;
         if (p.result) det = (a ? a + '\n\n' : '') + String(p.result).slice(0, 2000);
-        return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model };
+        return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model, tool: p.tool || '' };
       });
     }
     // ★#44 框选保存:CLI 轨迹默认全选;取消选中的工具不打包进新工具。t._sel=选中的 step 下标集合。

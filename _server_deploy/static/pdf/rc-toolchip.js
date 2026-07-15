@@ -185,10 +185,12 @@
     //   以前这里只有"(无参数)",到底喂了什么图全靠猜,笔迹裁歪了都发现不了。点图可放大。
     st.push({ ic: ICON.ai, t: 'AI 请求 · ' + chip.label, m: '', kind: 'md',
               body: ai || (chip.vision && chip.vision.length ? '' : '(无参数)'), vision: chip.vision || [] });
-    // ② 中间步骤(内层工具/模型调用)
+    // ② 中间步骤(内层工具/模型调用)。★ tool:这一步用的**具体工具名** → 长按它弹的是**这个工具**的设置,
+    //   不是外层 CLI(do_task/make_paper)的(用户设计:只有「AI 请求」那条才弹 CLI 设置)。
     (chip.steps || []).forEach(function (x) {
       st.push({ ic: ICON.step, t: x.label || String(x), m: (x.dt != null ? x.dt + 's' : (x.sec != null ? x.sec + 's' : '')),
-                kind: 'md', body: x.detail || '', model: x.model, action: x.action, sec: x.dt != null ? x.dt : x.sec });
+                kind: 'md', body: x.detail || '', model: x.model, action: x.action, sec: x.dt != null ? x.dt : x.sec,
+                tool: x.tool || '' });
     });
     // ③ 结果(默认展开)
     st.push({ ic: chip.failed ? ICON.err : ICON.out,
@@ -337,7 +339,10 @@
       if (i === (focusIdx == null ? -1 : focusIdx)) setTimeout(function () { r.querySelector('.h').click(); }, 30);
       body.appendChild(r);
     });
-    if (chip.tool) mountPrompts(body, chip.tool);   // 140:提示词编辑区(改了真的影响 AI)
+    // 140:提示词/设置编辑区(改了真的影响 AI)。★长按的是**哪个工具条**就弹**那个工具**的设置:
+    //   步骤条(有自己的 tool)→ 该工具;「AI 请求」/结果 → 外层工具(chip.tool,即 CLI:do_task/make_paper)。
+    var _mt = (focusIdx != null && sgs[focusIdx] && sgs[focusIdx].tool) || chip.tool;
+    if (_mt) mountPrompts(body, _mt);
     function close() { d.classList.remove('on'); setTimeout(function () { try { d.remove(); } catch (e) {} }, 220); }
     d.querySelector('.vc-dtl-x').addEventListener('click', close);
     d.addEventListener('click', function (ev) { if (ev.target === d) close(); });
