@@ -407,6 +407,26 @@ def _set_enabled(run, block_id, enabled):
         P._upages_save(rel, items)
 
 
+def _save_toolshot(b64, mt="image/png"):
+    """把一张图(b64)按内容 sha1 落盘到 toolshot 目录 → 返回 /pdf/api/toolshot/<name> URL。
+    result_md 里只放 URL(b64 会撑爆 sidecar/历史 JSON)。给"检查判分依据图"用(#1)。"""
+    import base64 as _b64, hashlib as _hl
+    try:
+        if not b64:
+            return ""
+        raw = _b64.b64decode(b64)
+        ext = ".jpg" if ("jpeg" in (mt or "") or "jpg" in (mt or "")) else ".png"
+        nm = _hl.sha1(raw).hexdigest()[:24] + ext
+        d = Path("/home/bwicarus/claude/state/reader-toolshots")
+        d.mkdir(parents=True, exist_ok=True)
+        fp = d / nm
+        if not fp.exists():
+            fp.write_bytes(raw)
+        return "/pdf/api/toolshot/" + nm
+    except Exception:
+        return ""
+
+
 def _schedule(rid, event, secs):
     """一次性定时器:到点 fire-and-forget 调 advance(rid, event)。用于 wait_ms(#27)。
     不是常驻等待线程 —— 一个短 Timer,触发完即退,跟 _check_page 的后台线程同性质。"""
@@ -592,7 +612,16 @@ def _check_page(rid, prompt_hint=""):
                       (" — " + it.get("note")) if it.get("note") else ""))
         if res.get("brief"):
             md.append("\n> " + str(res["brief"]))
-        rmd = "\n".join(md)
+        # #1(用户):把**检查这个 AI 的相关信息**也显示出来——用了哪个模型、实际看的是哪张图(点击放大)。
+        try:
+            _mr = A._resolve("dictation_grade", str(run.get("uid") or ""))
+            _model = _mr.get("variant") or _mr.get("backend") or "视觉模型"
+            _shots = [u for u in (_save_toolshot(im.get("b64"), im.get("media_type")) for im in images) if u]
+            _foot = ["\n---", "🔍 **判分依据** · 用 `%s` 看了下面这张图作答判分:" % _model]
+            _foot += ["![判分图](%s)" % u for u in _shots]
+            rmd = "\n".join(md + _foot)
+        except Exception:
+            rmd = "\n".join(md)
         run.update(status="done", result=res, result_md=rmd, hint="检查完成 ✅")
         _save(run)
         # ★ 结果**存进纸的 sidecar**(不是格子块) → 刷新/回前台/换设备都能看到,不靠那一次性 SSE。

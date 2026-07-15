@@ -130,6 +130,8 @@ window._favOpenPicker = function () {
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
     '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;overflow:auto;padding:12px 22px;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08);-webkit-overflow-scrolling:touch}' +
     '.up2-run-result h3{font-size:15px;margin:0 0 6px}.up2-run-result p{margin:0 0 .4em}' +
+    '.up2-run-result img{max-width:100%;max-height:220px;border-radius:6px;cursor:zoom-in;margin:4px 6px 0 0;vertical-align:top}' +   // #1 判分依据图(点击放大)
+    '.up2-run-result hr{border:none;border-top:1px solid rgba(91,118,184,.25);margin:8px 0}' +
     '.up2-content .up2-content-body h1,.up2-content .up2-content-body h2,.up2-content .up2-content-body h3{line-height:1.35;margin:.9em 0 .45em}' +
     '.up2-content .up2-content-body ul,.up2-content .up2-content-body ol{margin:0 0 .8em;padding-left:1.6em}' +
     '.up2-content.editing{z-index:52;pointer-events:auto;cursor:default;display:flex;flex-direction:column}' +   /* 编辑态才抬到最上+全拦(禁手写/选词) */
@@ -427,6 +429,16 @@ window._favOpenPicker = function () {
   }
   window.addEventListener('pagehide', _upTextFlushBeacon);
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') _upTextFlushBeacon(); });
+  // #1 检查结果里的「判分依据图」点击放大(复用 .fig-lightbox)
+  document.addEventListener('click', function (e) {
+    var im = e.target && e.target.closest && e.target.closest('.up2-run-result img');
+    if (!im) return;
+    e.stopPropagation();
+    var mask = document.createElement('div'); mask.className = 'fig-lightbox';
+    var big = document.createElement('img'); big.src = im.src; big.alt = '';
+    mask.appendChild(big); document.body.appendChild(mask);
+    mask.addEventListener('click', function () { mask.remove(); });
+  });
 
   // ══════════════ v4 批次3:overlay 覆盖层「过渡态」DOM 选词/查词/精确高亮(复用 html-reader.js 那套 offset 锚胶水)══════════════
   //   覆盖层 .up2-content 显示态是网页原生文本(RC.md 渲染),不走 PDF 字符层。选词/查词/高亮全用 DOM Selection +

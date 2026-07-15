@@ -1244,7 +1244,8 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                     if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
                         _inp = c.get("input") if isinstance(c.get("input"), dict) else {}
                         nm, _inp = _unwrap_call(nm, _inp)
-                        steps.append({"name": nm, "status": "done", "args": _inp})   # 记参数 → 保存工具时可 replay
+                        # 记 name+args(输入)+ tool_use id(下面按它把工具**输出**配对挂回来,流程显示"输入→输出")
+                        steps.append({"name": nm, "status": "done", "args": _inp, "_id": c.get("id")})
                         _vtask_set(tid, step=f"{nm}…", steps=list(steps))
                 elif c.get("type") == "text" and (c.get("text") or "").strip():
                     _acc += c.get("text")   # claude 流式正文 → 边跑边推(增量结果显示在卡片 body)
@@ -1259,6 +1260,16 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                 _tc = c.get("content")
                 _txt = _tc if isinstance(_tc, str) else " ".join(
                     (x.get("text") or "") for x in (_tc or []) if isinstance(x, dict))
+                # 把工具**输出**按 tool_use_id 配对挂到对应步骤(去掉 client_action 那段 b64,只留可读结果)→ 流程显示输入/输出
+                _tuid = c.get("tool_use_id")
+                if _tuid:
+                    import re as _re2
+                    _clean = _re2.sub(r'"client_action"\s*:\s*\{.*', "", _txt, flags=_re2.S)[:500].strip()
+                    for _st in steps:
+                        if _st.get("_id") == _tuid:
+                            _st["result"] = _clean
+                            break
+                    _vtask_set(tid, steps=list(steps))
                 # ★ 括号配平提取(不能用非贪婪正则:__upStartTask 深嵌套 args→params→blocks[],
                 #   `\{.*?\}\s*\}` 会在 blocks 第一个块的 `}}` 处截断 → json.loads 失败 → CLI 造的纸静默丢失,
                 #   正是用户"页面没做成功"的根因)。

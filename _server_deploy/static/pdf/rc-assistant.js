@@ -2223,7 +2223,14 @@
       }
       _appliedCA = cas.length;
     }
-    function _mkSteps(steps) { return (steps || []).map(function (x) { return { label: x.name || String(x), detail: x.status || '' }; }); }
+    function _mkSteps(steps) {   // 每步带 tool + **输入(args)/输出(result)** → 流程条能看到工具间数据流(#44)
+      return (steps || []).map(function (x) {
+        var d = '';
+        try { if (x.args && Object.keys(x.args).length) d += '**输入**\n```json\n' + JSON.stringify(x.args, null, 1) + '\n```\n'; } catch (_) {}
+        if (x.result) d += '**输出**\n' + String(x.result);
+        return { label: x.name || String(x), detail: d || (x.status || ''), tool: x.name || '' };
+      });
+    }
     (function poll() {
       if (n++ > 600) {
         try { RC.turnCard.status(tid, '等太久了，没等到结果', true); RC.turnCard.freezeDraft(tid);
