@@ -25,6 +25,7 @@
   var _cur = null;        // 当前轮 turn_id
 
   function _thread() { return document.getElementById('asst-thread'); }
+  function _esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
   function _md(el, text) {
     try {
       if (RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(el, text, true); return; }
@@ -240,25 +241,34 @@
     t.draft = null;
   }
 
-  // 工具运行中的临时指示:**不是 part、不落库**(所以不违反"只追加不重写"),done 时换成真正的 tool part。
+  // ── 进度状态行 ★用户设计 #49/#52:进行中的状态显示在**标题的下面一行**(卡片标题区内),
+  //   绝不做成 body 上方那种独立 spinner。**不是 part、不落库**(所以不违反"只追加不重写")。
+  function _statusEl(t) {
+    if (!t.statusEl) {
+      _ensureHead(t, t.hd ? undefined : '处理中');   // 状态行依附标题下 → 先确保有标题栏
+      t.statusEl = document.createElement('div');
+      t.statusEl.className = 'rc-turn-status';
+      t.el.insertBefore(t.statusEl, t.bd);   // hd 与 bd 之间 = "标题的下面一行"
+    }
+    return t.statusEl;
+  }
+  function status(tid, text, done) {
+    var t = _turns[tid] || open(tid);
+    if (!t) return;
+    var s = _statusEl(t);
+    if (!text) { s.hidden = true; return; }
+    s.hidden = false;
+    s.className = 'rc-turn-status' + (done ? ' done' : '');
+    s.innerHTML = (done ? '✓ ' : '<span class="vc-spin vc-spin-s"></span> ') + _esc(text);
+  }
+  // busy = 某个工具在跑:标题=工具名 + 状态行"处理中"(兼容既有调用点;进度一律落在标题区,不进 body)。
   function busy(tid, label) {
     var t = _turns[tid] || open(tid);
     if (!t) return;
-    if (!t._busy) {
-      t._busy = document.createElement('div');
-      t._busy.className = 'rc-part rc-part-busy';
-      t.bd.appendChild(t._busy);
-    }
-    t._busy.innerHTML = '<span class="vc-spin vc-spin-s"></span> ' +
-      String(label || '处理').replace(/[<>&]/g, '') + '…';
-    _scroll();
+    _ensureHead(t, label);
+    status(tid, '处理中', false);
   }
-  function idle(tid) {
-    var t = _turns[tid];
-    if (!t || !t._busy) return;
-    try { t._busy.remove(); } catch (e) {}
-    t._busy = null;
-  }
+  function idle(tid) { var t = _turns[tid]; if (t && t.statusEl) t.statusEl.hidden = true; }
 
   // ── 历史回放:**同一个 renderPart**(不变式①)────────────────────────────
   function renderTurn(tid, parts) {
@@ -287,7 +297,7 @@
 
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title,
+    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title, status: status,
     current: function () { return _cur; },
     has: function (tid) { return !!_turns[tid]; },
   };

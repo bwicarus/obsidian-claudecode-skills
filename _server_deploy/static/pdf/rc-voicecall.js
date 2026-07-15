@@ -409,6 +409,11 @@
       '.vc-if-hd{font-size:12px;color:#b9a8ff;font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
       'background:rgba(255,255,255,.06);border-radius:9px;font-weight:600}' +
       '.vc-if-hd span:first-child{flex:1}' +
+      // 进度状态行(标题的下面一行,用户设计 #49/#52):进行中状态显示在标题区内、不在 body 上方。
+      '.rc-turn-status{font-size:11px;color:#8a97b5;font-weight:500;margin:-2px 2px 6px;padding:0 2px;display:flex;align-items:center;gap:5px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.rc-turn-status[hidden]{display:none}' +
+      '.rc-turn-status.done{color:#79b891}' +
+      '.rc-turn-status .vc-spin-s{width:10px;height:10px;flex:none}' +
       '.vc-grip{flex:none;color:#6f7d9e;font-size:13px;letter-spacing:1px;padding:1px 5px;border-radius:6px;background:rgba(255,255,255,.06)}' +
       '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
