@@ -1380,6 +1380,41 @@ def _read_one(file_rel, ctx, pg, figd, cap_txt=4800, cap_fig=600, label=None):
     return block
 
 
+def _upage_read_text(file_rel, pdf_page):
+    """自建页(插入页)的内容:题目原文 + 各空标准答案 +(检查过的话)上次判分。
+    read_page 直接读这页会读到**空白 PDF**(插入页文件本身是空白,内容在 overlay sidecar)——
+    用户实测:AI read_page 自建页只看到标题、答不出题目的根因。这里改从 sidecar blocks 直接取。"""
+    try:
+        import pdf_reader as P
+        items = [it for it in P._upages_load(file_rel) if int(it.get("page") or 0) == int(pdf_page or 0)]
+    except Exception:
+        items = []
+    if not items:
+        return ""
+    out = []
+    for it in items:
+        out.append("【自建页「%s」(用户手写作答页,内容如下,别再找 PDF 正文)】" % (it.get("title") or ""))
+        qn = 0
+        for b in (it.get("blocks") or []):
+            k = b.get("kind")
+            if k == "text":
+                t = (b.get("text") or "").strip()
+                if t:
+                    out.append(t)
+            elif k == "blank":
+                qn += 1
+                lab = (b.get("label") or "").strip()
+                ans = (b.get("answer") or "").strip()
+                out.append("第%d空" % qn + ((" " + lab) if lab else "") + "＿＿"
+                           + (("(标准答案:%s)" % ans) if ans else ""))
+            elif k == "checkbox":
+                out.append("☐ " + (b.get("label") or "").strip())
+        rmd = (it.get("result_ai") or it.get("result_md") or "").strip()
+        if rmd:
+            out.append("〔上次检查/判分〕\n" + rmd[:1500])
+    return "\n".join(out)
+
+
 def _t_read_page(args, ctx):
     # 双页模式下读全部可见页(ctx.pages,PDF 索引),不传 page 时默认所有可见页;
     # 传 page 时那是**印刷页码**(AI/用户语言)→ 转成 PDF 页读。
@@ -1409,7 +1444,11 @@ def _t_read_page(args, ctx):
     nxt = (max(pages) + 1) if (want_next and pages) else None
     figd = _figdescs_for(file_rel, printed + ([_to_disp(ctx, nxt)] if nxt else []))
     parts = []
+    up_hit = False
     for pg in pages:
+        up = _upage_read_text(file_rel, pg)   # 自建页:PDF 空白 → 直接读 sidecar blocks(题目+标准答案+上次判分)
+        if up:
+            parts.append(up); up_hit = True; continue
         b = _read_one(file_rel, ctx, pg, figd)
         if b:
             parts.append(b)
@@ -1420,8 +1459,18 @@ def _t_read_page(args, ctx):
                        label=f"【下一页·第{_to_disp(ctx, nxt)}页(开头预览,要看全文再 read_page 它)】")
         if nb:
             parts.append(nb)
-    return ({"pages": printed, "text": "\n\n".join(parts)}
-            if parts else {"error": "这些页没取到文字(可能纯图/未OCR)"})
+    if not parts:
+        return {"error": "这些页没取到文字(可能纯图/未OCR)"}
+    result = {"pages": printed, "text": "\n\n".join(parts)}
+    # 自建页(用户手写作答页):再附一张**前端渲染图**(所见即所得,含手写)喂回大脑 —— 前端在场
+    #   截了 view_image 才有(_vision 喂模型 + _fed_images 给流程展示);无头/不在视口时纯文字兜底(题目+标准答案已在 text 里)。
+    if up_hit and isinstance(ctx.get("view_image"), dict) and ctx["view_image"].get("b64"):
+        _vi = ctx["view_image"]
+        _fed = [{"media_type": _vi.get("media_type") or "image/jpeg", "b64": _vi["b64"]}]
+        result["_vision"] = _fed
+        result["_fed_images"] = _fed
+        result["看图提示"] = "下图=这张自建页的前端实时截图(题目+用户手写,所见即所得),结合上面文字一起看。"
+    return result
 
 
 def _t_read_selection(args, ctx):

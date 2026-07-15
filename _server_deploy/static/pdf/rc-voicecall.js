@@ -2764,7 +2764,17 @@
         if (_rtc.ink && _rtc.ink.length) ctx.ink = _rtc.ink;
         if (_rtc.sel) ctx.selection = _rtc.sel;
         if (name === 'make_anki' || name === 'make_note') ctx.recent_tools = (_rtc.recentTools || []).slice(-4);   // 61b:搜过的网页/配图随卡走
-        if (name === 'see_ink' || name === 'see_page') {   // ㉟c:看图类恒附视口截图(EPUB 主路/PDF 兜底,后端按需取用)
+        var _needShot = (name === 'see_ink' || name === 'see_page');   // ㉟c:看图类恒附视口截图(EPUB 主路/PDF 兜底,后端按需取用)
+        if (name === 'read_page') {   // 自建页(插入页)PDF 空白 → 视口里有自建页时也附渲染图(题目+手写),后端 read_page 会返给 AI
+          try {
+            var _ups = document.querySelectorAll('.pdf-upage');
+            for (var _ui = 0; _ui < _ups.length; _ui++) {
+              var _ur = _ups[_ui].getBoundingClientRect();
+              if (_ur.bottom > 0 && _ur.top < (window.innerHeight || 0)) { _needShot = true; break; }
+            }
+          } catch (e) {}
+        }
+        if (_needShot) {
           try { var shot = await _captureView(); if (shot) ctx.view_image = shot; } catch (e) {}
         }
         // 142:**工具超时护栏**。原来这个 fetch 没有 AbortController —— 工具不回 = function_call_output 不回填

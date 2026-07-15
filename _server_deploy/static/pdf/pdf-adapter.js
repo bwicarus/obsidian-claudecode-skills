@@ -40,6 +40,15 @@
     }
     return null;
   }
+  // 视口里的自建页(**不要求有墨迹**)—— 让 read_page 遇自建页能返回前端渲染图(题目+手写,所见即所得)。
+  function _pdfUpageElAny() {
+    var ups = document.querySelectorAll('.pdf-upage');
+    for (var i = 0; i < ups.length; i++) {
+      var el = ups[i], r = el.getBoundingClientRect();
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0)) return el;
+    }
+    return null;
+  }
 
   var PdfAdapter = window.PdfAdapter = {
     _host: null,
@@ -66,7 +75,10 @@
         // 用户点子:视口里带手写的**插入页**(.pdf-upage,服务端 PDF 空白渲不出)→ 声明 want_viewshot,
         //   共享 send 会 await 一张 captureShot(截那张插入页元素,所见即所得)喂给 see_ink,不再两手空空。
         //   普通 PDF 页有真墨迹的仍走服务端精确裁图(_ink_focus_image,快、无往返),不设此标志。
-        try { var _inkEl = _pdfInkUpageEl(); if (_inkEl && c) { c.want_viewshot = true; PdfAdapter.__shotEl = _inkEl; } } catch (e) {}
+        try {
+          var _inkEl = _pdfInkUpageEl() || _pdfUpageElAny();   // 有墨迹的优先;没墨迹的自建页也截(供 read_page 返回渲染图)
+          if (_inkEl && c) { c.want_viewshot = true; PdfAdapter.__shotEl = _inkEl; }
+        } catch (e) {}
         // 用户设计:检查报告**不塞全文进上下文**(跟笔迹一样只告知存在)。最近一次检查(10 分钟内)
         //   只带**报告名+得分** → AI 知道"有这么份报告",用户一问就调 read_check_report(带报告上下文
         //   的子 agent)查证作答。
