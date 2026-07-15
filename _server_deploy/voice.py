@@ -1116,6 +1116,52 @@ class _AgentTimeout(Exception):
 _CA_SINK = {}   # tid → [client_action]:后台 agent 内部工具产生的 client_action(headless 不会转发,这里挖出)
 
 
+def _extract_client_actions(txt):
+    """从一段(可能被 MCP 再包一层的)tool_result 文本里挖出**所有** client_action 对象。
+    括号配平 + 尊重字符串字面量/转义 —— 深嵌套的 __upStartTask(args→params→blocks[])也能完整吞下。
+    非贪婪正则在这会翻车(blocks 第一个 `}}` 就截断),别退回去。"""
+    out = []
+    key = '"client_action"'
+    i = 0
+    while True:
+        k = txt.find(key, i)
+        if k < 0:
+            break
+        j = txt.find("{", k + len(key))
+        if j < 0:
+            break
+        depth, in_str, esc, end = 0, False, False, -1
+        for p in range(j, len(txt)):
+            ch = txt[p]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = p
+                    break
+        if end < 0:
+            break
+        frag = txt[j:end + 1]
+        try:
+            ca = json.loads(frag)
+            if isinstance(ca, dict):
+                out.append(ca)
+        except Exception:
+            pass
+        i = end + 1
+    return out
+
+
 def _unwrap_call(nm, inp):
     """CLI 只能经 MCP 的通用派发器 assistant_call_tool(name,args,file,page) 调内置工具。
     拆包成**真工具名 + 真 args**:① 工具卡显示真名(page_new 而非 assistant_call_tool×5)
@@ -1206,17 +1252,13 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                 _tc = c.get("content")
                 _txt = _tc if isinstance(_tc, str) else " ".join(
                     (x.get("text") or "") for x in (_tc or []) if isinstance(x, dict))
-                m = re.search(r'"client_action"\s*:\s*(\{.*?\}\s*\})', _txt, re.S)
-                if not m:
-                    m = re.search(r'"client_action"\s*:\s*(\{[^{}]*\{[^{}]*\}[^{}]*\})', _txt, re.S)
-                if m:
-                    try:
-                        ca = json.loads(m.group(1))
-                        if ca.get("fn"):
-                            _CA_SINK.setdefault(tid, []).append(ca)
-                            _vtask_set(tid, client_actions=list(_CA_SINK[tid]))
-                    except Exception:
-                        pass
+                # ★ 括号配平提取(不能用非贪婪正则:__upStartTask 深嵌套 args→params→blocks[],
+                #   `\{.*?\}\s*\}` 会在 blocks 第一个块的 `}}` 处截断 → json.loads 失败 → CLI 造的纸静默丢失,
+                #   正是用户"页面没做成功"的根因)。
+                for ca in _extract_client_actions(_txt):
+                    if ca.get("fn"):
+                        _CA_SINK.setdefault(tid, []).append(ca)
+                        _vtask_set(tid, client_actions=list(_CA_SINK[tid]))
         elif d.get("type") == "result":
             answer = (d.get("result") or "").strip()
     pr.wait(timeout=10)
