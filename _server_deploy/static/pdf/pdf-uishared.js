@@ -847,8 +847,10 @@ window._favOpenPicker = function () {
       // 位置/尺寸**直接用服务端算好的归一化 rect**(单一真相源;前端不再自己量、不再写回)
       d.style.cssText = 'position:absolute;left:' + (b.rect[0] * 100) + '%;top:' + (b.rect[1] * 100) + '%;' +
                         'width:' + ((b.rect[2] - b.rect[0]) * 100) + '%;' +
-                        'height:' + ((b.rect[3] - b.rect[1]) * 100) + '%;' +
-                        'font-size:' + (sp.font || 15) + 'px;';
+                        'height:' + ((b.rect[3] - b.rect[1]) * 100) + '%;';
+      // 字号 = 这一格**渲染后的真实高度** × font_ratio。不能写死 px:PDF 页尺寸千差万别
+      //   (A4 595pt vs 超大扫描件 2230pt),写死会让字比蚂蚁小或撑破格子(实测那次就是这么翻的)。
+      d.__fr = (b.kind === 'text' && b.style === 'h1') ? (sp.font_ratio || 0.45) * 1.3 : (sp.font_ratio || 0.45);
       if (b.kind === 'text') {
         d.textContent = b.text || '';
         if (b.style === 'h1') d.classList.add('up2-h1');
@@ -867,6 +869,14 @@ window._favOpenPicker = function () {
         d.appendChild(sb);
       } else { return; }
       body.appendChild(d);
+    });
+    // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
+    requestAnimationFrame(function () {
+      body.querySelectorAll('.up2-b').forEach(function (el) {
+        var fr = el.__fr; if (!fr) return;
+        var fs = Math.max(9, Math.round(el.offsetHeight * fr));
+        el.style.fontSize = fs + 'px';
+      });
     });
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);
   }

@@ -2167,28 +2167,24 @@
   // ── 工具指示器 v2(rc-toolchip):文字对话的每次工具调用也长一个 chip 进对话流 ──
   //    与语音通话完全同一套组件/同一套选中广播(同 cid 处处高亮);后台任务继续轮询步骤。
   var _tchips = {};
+  // 141(用户实测:侧栏 chat 多工具 = 6 张平铺卡):改成注入**轮次容器**(与语音路径一致)——
+  //   多工具聚合成**一张卡**,点【流程】看每步。不再给每个工具单独造 chip 挂 thread。
   function _toolChip(d) {
     if (!(window.RC && RC.toolChip)) return;
-    var key = d.name || 'tool';
+    if (!_vTid) { _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+    var tid = _vTid;
     if (d.status === 'running') {
-      if (_tchips[key]) return;
-      var c = RC.toolChip.create({ tool: d.name, label: d.label || d.name, mount: thread, floating: false });
-      RC.toolChip.progress(c, (d.label || '处理') + '…');
-      _tchips[key] = c;
+      try { RC.turnCard && RC.turnCard.busy(tid, d.label || d.name || '工具'); } catch (_) {}
       return;
     }
-    var c2 = _tchips[key] || RC.toolChip.create({ tool: d.name, label: d.label || d.name, mount: thread, floating: false });
-    delete _tchips[key];
-    var rows = [];
-    try { if (d.args && Object.keys(d.args).length) rows.push(['参数', JSON.stringify(d.args)]); } catch (_) {}
-    if (d.sec != null) rows.push(['耗时', d.sec + 's']);
-    if (d.brief) rows.push(['结果', d.brief]);
-    RC.toolChip.setMeta(c2, rows);
-    if (d.sub_steps && d.sub_steps.length) { try { RC.toolChip.addSteps(c2, d.sub_steps); } catch (_) {} }   // 137:工具内部子步骤 → 并进这张卡(不另起卡)
-    if (d.model || d.action) { try { RC.toolChip.setModel(c2, d.model, d.action); } catch (_) {} }   // 139:详情窗要显示"用了哪个模型"
-    if (d.status === 'error') { RC.toolChip.fail(c2, d.brief || '失败'); return; }
-    if (d.task_id) { RC.toolChip.progress(c2, '已派发,正在后台执行…'); RC.toolChip.track(c2, d.task_id); return; }
-    RC.toolChip.done(c2, { summary: d.label || '完成', detail: d.brief || '' });
+    // done/error:注入一个 tool part(参数/子步骤/结果全在里面)
+    try {
+      RC.turnCard.idle(tid);
+      if (d.task_id) { RC.turnCard.busy(tid, (d.label || '任务') + '(后台执行中)'); return; }   // 后台任务:仍显示进行中
+      RC.turnCard.addPart(tid, { kind: 'tool', tool: d.name || '', label: d.label || d.name || '工具',
+        args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 3000),
+        took_s: d.sec, model: d.model, error: d.status === 'error' ? (d.brief || '失败') : '' });
+    } catch (_) {}
   }
 
   // 后台写任务(制卡/笔记/生词):轮询完成 → 在对话里给结果 + 「↩ 撤销」按钮 + PWA 通知

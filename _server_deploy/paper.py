@@ -19,28 +19,37 @@
 """
 import math
 
-# ── 纸张预设:用途决定行高(听写纸行高大,是因为要留手写空间)────────────────────
+# ── 纸张预设:用**目标行/列数(观感)**定,不用绝对 px ────────────────────────────
+# ⚠ 血的教训(2026-07-15):最初用 "line_h=28px / char_w=字号" 算格子。在 595pt 的 A4 上合理,
+#   但这本书的 PDF 页是 **2230×3225pt**(超大扫描件)→ 一格才 14pt=整页 0.6% → 每行 8pt、
+#   字比蚂蚁小、横线全挤顶部。根因:格子物理大小不该由"字号 px"定(那是 CSS 像素、相对视口),
+#   而该由"页面上看起来占几行几列"定。所以改成:给**目标行列数**,行高/字宽 = 页尺寸 ÷ 目标数。
+# rows/cols = 一页大致放多少行、多少全角字(观感固定,与页面物理尺寸无关);
+# font_ratio = 字号占行高的比例(渲染时前端按 rect 高度 × 它算实际字号)。
 PAPERS = {
-    "dictation": {"label": "听写纸", "bg": "#fffdf7", "font": 16, "line_h": 40, "margin": [44, 38], "rule": "line"},
-    "exam":      {"label": "试卷纸", "bg": "#ffffff", "font": 14, "line_h": 28, "margin": [46, 42], "rule": "none"},
-    "math":      {"label": "数学演草纸", "bg": "#fbfdff", "font": 14, "line_h": 26, "margin": [36, 32], "rule": "grid"},
-    "draw":      {"label": "绘画纸", "bg": "#fffefa", "font": 14, "line_h": 26, "margin": [24, 24], "rule": "none"},
-    "note":      {"label": "笔记纸", "bg": "#fffdf7", "font": 15, "line_h": 30, "margin": [42, 38], "rule": "line"},
+    "dictation": {"label": "听写纸", "bg": "#fffdf7", "rows": 20, "cols": 24, "margin": 0.05, "font_ratio": 0.42, "rule": "line"},
+    "exam":      {"label": "试卷纸", "bg": "#ffffff", "rows": 30, "cols": 34, "margin": 0.05, "font_ratio": 0.5, "rule": "none"},
+    "math":      {"label": "数学演草纸", "bg": "#fbfdff", "rows": 32, "cols": 30, "margin": 0.04, "font_ratio": 0.5, "rule": "grid"},
+    "draw":      {"label": "绘画纸", "bg": "#fffefa", "rows": 24, "cols": 26, "margin": 0.03, "font_ratio": 0.5, "rule": "none"},
+    "note":      {"label": "笔记纸", "bg": "#fffdf7", "rows": 26, "cols": 28, "margin": 0.05, "font_ratio": 0.45, "rule": "line"},
 }
 DEFAULT_KIND = "note"
 
 
 def spec(kind: str, page_w: float, page_h: float) -> dict:
-    """由 纸张预设 + 页面物理尺寸 算出网格规格。
-    ⚠ cols/rows 是**算出来的**,不是设的 —— 不同书页宽不同(A4/信纸/漫画开本),所以
-      AI 出题时并不知道有几列。这正是"A 默认(AI 不管布局)"的理由。"""
+    """由 纸张预设(目标行列数)+ 页面物理尺寸 算出格子的物理大小。
+    格子按**比例**切:留 margin 边距后,把可用区平分成 rows × cols 格。
+    这样不管页面是 A4(595)还是超大扫描件(2230),观感一致(都是 ~30 行 ~34 列)。"""
     p = dict(PAPERS.get(kind) or PAPERS[DEFAULT_KIND])
-    my, mx = p["margin"]
-    char_w = float(p["font"])          # 全角字符宽 ≈ 字号
-    cols = max(1, int((page_w - 2 * mx) // char_w))
-    rows = max(1, int((page_h - 2 * my) // p["line_h"]))
+    rows, cols = int(p["rows"]), int(p["cols"])
+    mgn = float(p["margin"])
+    mx = page_w * mgn
+    my = page_h * mgn
+    char_w = (page_w - 2 * mx) / cols       # 一格的物理宽(pt)
+    line_h = (page_h - 2 * my) / rows       # 一格的物理高(pt)
     p.update({"kind": kind if kind in PAPERS else DEFAULT_KIND,
-              "cols": cols, "rows": rows, "char_w": char_w,
+              "cols": cols, "rows": rows, "char_w": char_w, "line_h": line_h,
+              "font_ratio": float(p.get("font_ratio") or 0.45),
               "mx": mx, "my": my, "page_w": float(page_w), "page_h": float(page_h)})
     return p
 
