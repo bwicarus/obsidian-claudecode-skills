@@ -177,13 +177,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "axoeDmW0oAY",
-              "title": "How To Build a Thick Back With Perfect Rowing Technique (Pendlay Row/ Helms Row)",
+              "video_id": "lf8cleyFDYM",
+              "title": "4 Amazing Lat Exercises You’re Missing Out On",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "fgSyNdEsqlM",
-              "title": "A Better Way To Do Rows",
+              "video_id": "gj_p-xaG7sw",
+              "title": "3 Back Training Tips You’ve Never Tried",
               "channel": "Jeff Nippard"
             },
             {
@@ -207,8 +207,8 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "Oa1ta2lU3ZI",
-              "title": "Stop Doing THIS On Lat Pulldowns!",
+              "video_id": "h75LrmiiJGk",
+              "title": "The IDEAL Way to Train Rear Delts",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -310,74 +310,80 @@
           }
         },
         {
-          "id": "rdl",
-          "name": "罗马尼亚硬拉(EZ 杆)",
+          "id": "cable_pull_through",
+          "name": "绳索髋屈伸/拉举(综合训练器底部滑轮)",
           "videos": [
             {
-              "video_id": "_oyxCn2iSjU",
-              "title": "HOW TO DO ROMANIAN DEADLIFTS (RDLs): Build Beefy Hamstrings With Perfect Technique",
+              "video_id": "mYROrXBWfKA",
+              "title": "Why Is No One Doing This Glute Exercise?",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "ZaTM37cfiDs",
-              "title": "How To Deadlift With Perfect Technique (Step By Step)",
+              "video_id": "3ryh7PNhz3E",
+              "title": "The Best &amp; Worst Glute Exercises (According To Science)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "0a_fVS2s4Ho",
-              "title": "The Most Effective Way to Train HAMSTRINGS | Training Science Explained",
+              "video_id": "BhUpWmlKcJ8",
+              "title": "Top 3 Glute Exercises For A Shelf-Like Butt",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "Lh3iMIcbkBQ",
-              "title": "Grow Your Hamstrings 1.5x Faster (New Research)",
+              "video_id": "KmR_AaN7h58",
+              "title": "How To Boost Muscle Activation By 25%",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "f23vXjoG2e8",
-              "title": "HOW TO DO THE GOOD MORNING EXERCISE: Build Your Glutes, Hamstrings And Squat With Perfect Technique",
+              "video_id": "jf9PBwwNAMs",
+              "title": "Best Scientific Leg Workout For 2025",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "5zmlnbWb-g4",
-              "title": "Stop F*cking Up RDL&#39;s (PROPER FORM!)",
+              "video_id": "Kb6CktirkEQ",
+              "title": "“My Glutes Will NOT Grow” (JUST DO THIS!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "dFR11xt1GbQ",
-              "title": "STOP Doing RDL’s Like This! (I’M BEGGING YOU)",
+              "video_id": "1jp2uhfO8M0",
+              "title": "Glute Exercises Ranked | Hamstrings (BEST TO WORST!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "hCDzSR6bW10",
-              "title": "The Official Deadlift Checklist (AVOID MISTAKES!)",
+              "video_id": "pXrlpwmdpI4",
+              "title": "The ONLY 2 Glute Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "3h1TVVwXabc",
-              "title": "How To Fix Your Deadlift (5 RED FLAGS!)",
+              "video_id": "QXtXEug0PLU",
+              "title": "The PERFECT Leg Workout (Backed by Science)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "6pKKnVg1hzE",
+              "title": "How to WAKE UP Your Glutes (DO THIS EVERY DAY!)",
               "channel": "Jeff Cavaliere"
             }
           ],
-          "search_q": "romanian deadlift RDL hamstring",
+          "search_q": "cable pull through glute hamstring",
           "tips": [
-            "膝盖微弯,屁股向后推(髋铰链)",
-            "杆贴大腿下滑至膝盖下方(腘绳深拉伸即停)",
-            "下背全程绷紧 + 中立,不要圆背"
+            "背对机器,绳索/短杆从两腿之间穿过,退到绳索有张力站稳",
+            "屁股向后推做髋铰链、微屈膝,躯干前倾——脊柱中立别弯腰",
+            "靠臀和腘绳肌把髋前送、站直,顶峰挤臀 1 秒",
+            "别用手臂拉、别靠后仰借力;重心稳在脚跟"
           ],
-          "evidence_note": "腘绳长头主激活,deficit RDL (脚踩台阶) 拉伸位再加深 (Maeo 2021);保留 RIR 2 防下背疲劳",
-          "sets": "3 × 8-10",
-          "start_weight_hint": "哑铃/EZ 杆,20 kg 起,重腘绳肌拉伸",
+          "evidence_note": "底部滑轮做的髋铰链,臀主导、腘绳肌参与,阻力全程连续(IROTEC MHG150V2 底部滑轮用法)。机器配重上限有限,练强后可偶尔补哑铃 RDL 加深腘绳肌拉伸。",
+          "sets": "3 × 10-12",
+          "start_weight_hint": "背对机器绳索穿两腿间,臀主导站起,25 kg 档起",
           "prescribed": {
             "sets": 3,
             "rep_range": [
-              8,
-              10
+              10,
+              12
             ],
-            "rir_target": 3,
-            "rest_seconds": 150,
-            "start_weight_kg": 20,
-            "weight_step_kg": 2.5
+            "rir_target": 2,
+            "rest_seconds": 100,
+            "start_weight_kg": 25,
+            "weight_step_kg": 5
           }
         },
         {
@@ -501,13 +507,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "TqXwI1MWZks",
-              "title": "Ab Exercises Ranked (BEST TO WORST!)",
+              "video_id": "PkaRgiKXxB8",
+              "title": "6 “Gut Busting” Ab Exercises (NO CRUNCHES!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "D68xrxfHHOA",
-              "title": "Do THIS ✅ Not THAT ❌ (pt 3)",
+              "video_id": "TqXwI1MWZks",
+              "title": "Ab Exercises Ranked (BEST TO WORST!)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -554,6 +560,11 @@
               "channel": "Jeff Nippard"
             },
             {
+              "video_id": "nDh_BlnLCGc",
+              "title": "How To Leg Press With Perfect Technique",
+              "channel": "Jeff Nippard"
+            },
+            {
               "video_id": "3TN4otAxzZk",
               "title": "4 Amazing Chest Builders You’re Missing Out On",
               "channel": "Jeff Nippard"
@@ -561,11 +572,6 @@
             {
               "video_id": "fGm-ef-4PVk",
               "title": "The Best And Worst Chest Exercises (Ranked By Science)",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "B_2meD6SSNA",
-              "title": "Flat Vs Incline (Which Is Better?)",
               "channel": "Jeff Nippard"
             },
             {
@@ -589,8 +595,8 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "q--6_PuEV_c",
-              "title": "20 Second Form Fix: DB Bench Press",
+              "video_id": "zD266B2jk0s",
+              "title": "The PERFECT Chest Workout (2025 EDITION)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -631,18 +637,18 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "-EIhKMDSjBY",
-              "title": "The Best Way To Isolate The Chest For Growth (Upper Chest Focus)",
-              "channel": "Jeff Nippard"
-            },
-            {
               "video_id": "fGm-ef-4PVk",
               "title": "The Best And Worst Chest Exercises (Ranked By Science)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "P5CXx_jgTDE",
-              "title": "A Better Way To Train Rear Delts",
+              "video_id": "-EIhKMDSjBY",
+              "title": "The Best Way To Isolate The Chest For Growth (Upper Chest Focus)",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "NsEbXsTwas8",
+              "title": "The Best &amp; Worst Chest Exercises To Build Muscle (Ranked!)",
               "channel": "Jeff Nippard"
             },
             {
@@ -697,13 +703,13 @@
           "name": "高位下拉(综合训练器)",
           "videos": [
             {
-              "video_id": "hnSqbBk15tw",
-              "title": "Stop Messing Up Your Lat Pulldowns",
+              "video_id": "O94yEoGXtBY",
+              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "O94yEoGXtBY",
-              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
+              "video_id": "hnSqbBk15tw",
+              "title": "Stop Messing Up Your Lat Pulldowns",
               "channel": "Jeff Nippard"
             },
             {
@@ -727,13 +733,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "8Tbml_pGdwg",
-              "title": "Use THIS On Lat Pulldowns For Bigger Lats",
+              "video_id": "gFHQ5S6rPwo",
+              "title": "STOP Screwing Up Lat Pulldowns!",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "gFHQ5S6rPwo",
-              "title": "STOP Screwing Up Lat Pulldowns!",
+              "video_id": "8Tbml_pGdwg",
+              "title": "Use THIS On Lat Pulldowns For Bigger Lats",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -784,13 +790,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "jf9PBwwNAMs",
-              "title": "Best Scientific Leg Workout For 2025",
+              "video_id": "3ryh7PNhz3E",
+              "title": "The Best &amp; Worst Glute Exercises (According To Science)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "PPmvh7gBTi0",
-              "title": "Do You Have A Perfect Squat? (Find Out)",
+              "video_id": "jf9PBwwNAMs",
+              "title": "Best Scientific Leg Workout For 2025",
               "channel": "Jeff Nippard"
             },
             {
@@ -921,13 +927,13 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "v_ZkxWzYnMc",
-              "title": "How To Build Capped Shoulders: Optimal Training Explained (Side Delts)",
+              "video_id": "OWAfHGmOf0A",
+              "title": "What Is The Best Side Delt Exercise?",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "OWAfHGmOf0A",
-              "title": "What Is The Best Side Delt Exercise?",
+              "video_id": "v_ZkxWzYnMc",
+              "title": "How To Build Capped Shoulders: Optimal Training Explained (Side Delts)",
               "channel": "Jeff Nippard"
             },
             {
@@ -1101,13 +1107,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "6rr5p1jCZC4",
-              "title": "Stop Doing Chest Flys - I&#39;m Begging You!!",
+              "video_id": "S298ziysRdI",
+              "title": "The Better Chest Fly (MORE GAINS!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "S298ziysRdI",
-              "title": "The Better Chest Fly (MORE GAINS!)",
+              "video_id": "6rr5p1jCZC4",
+              "title": "Stop Doing Chest Flys - I&#39;m Begging You!!",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -1116,8 +1122,8 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "XgwXopZadqs",
-              "title": "The ONLY 2 Dumbbell Chest Exercises You Need (NO, SERIOUSLY!)",
+              "video_id": "MyTtPb0MyV8",
+              "title": "STOP Messing Up Chest Training (EASY FIX!)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -1192,8 +1198,8 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "h75LrmiiJGk",
-              "title": "The IDEAL Way to Train Rear Delts",
+              "video_id": "Oa1ta2lU3ZI",
+              "title": "Stop Doing THIS On Lat Pulldowns!",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -1223,13 +1229,13 @@
           "name": "高位下拉(综合训练器)",
           "videos": [
             {
-              "video_id": "O94yEoGXtBY",
-              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
+              "video_id": "hnSqbBk15tw",
+              "title": "Stop Messing Up Your Lat Pulldowns",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "hnSqbBk15tw",
-              "title": "Stop Messing Up Your Lat Pulldowns",
+              "video_id": "O94yEoGXtBY",
+              "title": "How To Build A V-Tapered Back: Lat Training Dos and Don’ts",
               "channel": "Jeff Nippard"
             },
             {
@@ -1258,13 +1264,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "WQasM7Jh9dQ",
-              "title": "The ONLY 2 Lat Exercises You Need (NO, SERIOUSLY!)",
+              "video_id": "8Tbml_pGdwg",
+              "title": "Use THIS On Lat Pulldowns For Bigger Lats",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "8Tbml_pGdwg",
-              "title": "Use THIS On Lat Pulldowns For Bigger Lats",
+              "video_id": "WQasM7Jh9dQ",
+              "title": "The ONLY 2 Lat Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             }
           ],
@@ -1291,22 +1297,27 @@
           }
         },
         {
-          "id": "rdl",
-          "name": "罗马尼亚硬拉(EZ 杆)",
+          "id": "cable_pull_through",
+          "name": "绳索髋屈伸/拉举(综合训练器底部滑轮)",
           "videos": [
             {
-              "video_id": "_oyxCn2iSjU",
-              "title": "HOW TO DO ROMANIAN DEADLIFTS (RDLs): Build Beefy Hamstrings With Perfect Technique",
+              "video_id": "mYROrXBWfKA",
+              "title": "Why Is No One Doing This Glute Exercise?",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "ZaTM37cfiDs",
-              "title": "How To Deadlift With Perfect Technique (Step By Step)",
+              "video_id": "3ryh7PNhz3E",
+              "title": "The Best &amp; Worst Glute Exercises (According To Science)",
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "0a_fVS2s4Ho",
-              "title": "The Most Effective Way to Train HAMSTRINGS | Training Science Explained",
+              "video_id": "BhUpWmlKcJ8",
+              "title": "Top 3 Glute Exercises For A Shelf-Like Butt",
+              "channel": "Jeff Nippard"
+            },
+            {
+              "video_id": "KmR_AaN7h58",
+              "title": "How To Boost Muscle Activation By 25%",
               "channel": "Jeff Nippard"
             },
             {
@@ -1315,50 +1326,51 @@
               "channel": "Jeff Nippard"
             },
             {
-              "video_id": "f23vXjoG2e8",
-              "title": "HOW TO DO THE GOOD MORNING EXERCISE: Build Your Glutes, Hamstrings And Squat With Perfect Technique",
-              "channel": "Jeff Nippard"
-            },
-            {
-              "video_id": "5zmlnbWb-g4",
-              "title": "Stop F*cking Up RDL&#39;s (PROPER FORM!)",
+              "video_id": "Kb6CktirkEQ",
+              "title": "“My Glutes Will NOT Grow” (JUST DO THIS!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "dFR11xt1GbQ",
-              "title": "STOP Doing RDL’s Like This! (I’M BEGGING YOU)",
+              "video_id": "1jp2uhfO8M0",
+              "title": "Glute Exercises Ranked | Hamstrings (BEST TO WORST!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "hCDzSR6bW10",
-              "title": "The Official Deadlift Checklist (AVOID MISTAKES!)",
+              "video_id": "pXrlpwmdpI4",
+              "title": "The ONLY 2 Glute Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "3h1TVVwXabc",
-              "title": "How To Fix Your Deadlift (5 RED FLAGS!)",
+              "video_id": "QXtXEug0PLU",
+              "title": "The PERFECT Leg Workout (Backed by Science)",
+              "channel": "Jeff Cavaliere"
+            },
+            {
+              "video_id": "6pKKnVg1hzE",
+              "title": "How to WAKE UP Your Glutes (DO THIS EVERY DAY!)",
               "channel": "Jeff Cavaliere"
             }
           ],
-          "search_q": "romanian deadlift RDL hamstring",
+          "search_q": "cable pull through glute hamstring",
           "tips": [
-            "膝盖微弯,屁股向后推(髋铰链)",
-            "杆贴大腿下滑至膝盖下方(腘绳深拉伸即停)",
-            "下背全程绷紧 + 中立,不要圆背"
+            "背对机器,绳索/短杆从两腿之间穿过,退到绳索有张力站稳",
+            "屁股向后推做髋铰链、微屈膝,躯干前倾——脊柱中立别弯腰",
+            "靠臀和腘绳肌把髋前送、站直,顶峰挤臀 1 秒",
+            "别用手臂拉、别靠后仰借力;重心稳在脚跟"
           ],
-          "evidence_note": "腘绳长头主激活,deficit RDL (脚踩台阶) 拉伸位再加深 (Maeo 2021);保留 RIR 2 防下背疲劳",
-          "sets": "3 × 12-15",
-          "start_weight_hint": "轻一档、重腘绳肌感受",
+          "evidence_note": "底部滑轮做的髋铰链,臀主导、腘绳肌参与,阻力全程连续(IROTEC MHG150V2 底部滑轮用法)。机器配重上限有限,练强后可偶尔补哑铃 RDL 加深腘绳肌拉伸。",
+          "sets": "3 × 15-20",
+          "start_weight_hint": "高次数臀部泵感,轻一档",
           "prescribed": {
             "sets": 3,
             "rep_range": [
-              12,
-              15
+              15,
+              20
             ],
             "rir_target": 1,
-            "rest_seconds": 90,
-            "start_weight_kg": 15,
-            "weight_step_kg": 2.5
+            "rest_seconds": 75,
+            "start_weight_kg": 20,
+            "weight_step_kg": 5
           }
         },
         {
@@ -1396,13 +1408,13 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "QfDqL93fr3A",
-              "title": "The 3 Greatest Rear Delt Exercises (NOT FLYS!)",
+              "video_id": "dKluhLck1Zs",
+              "title": "The ONLY 2 Exercises You Need for Rear Delts (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "dKluhLck1Zs",
-              "title": "The ONLY 2 Exercises You Need for Rear Delts (NO, SERIOUSLY!)",
+              "video_id": "QfDqL93fr3A",
+              "title": "The 3 Greatest Rear Delt Exercises (NOT FLYS!)",
               "channel": "Jeff Cavaliere"
             },
             {
@@ -1472,18 +1484,18 @@
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "d2r5TCqnR4Y",
-              "title": "Do EZ Bar Curls Like This (IMPORTANT)",
+              "video_id": "ymCcs3lhiLs",
+              "title": "The ONLY 2 Biceps Exercises You Need (NO, SERIOUSLY!)",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "tciCEtwnGuc",
-              "title": "Man vs Preacher Curls",
+              "video_id": "KtGLpdA5UkI",
+              "title": "How To Build Bigger Biceps with the Athlean X Biceps Blast",
               "channel": "Jeff Cavaliere"
             },
             {
-              "video_id": "puSK4XFHr8I",
-              "title": "STOP, You&#39;re Training Your Biceps Wrong!",
+              "video_id": "6g57DJntRXk",
+              "title": "Biceps Exercises Ranked (BEST TO WORST!)",
               "channel": "Jeff Cavaliere"
             }
           ],
