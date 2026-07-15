@@ -262,33 +262,39 @@ def _grade(rid: str):
             if it.get("id") == run.get("upage"):
                 blocks = it.get("blocks") or []
                 break
-        blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+        blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")][:len(words)]
 
+        # ★ 一张整图(白底+全部手写)而非每题一张(省 token + 整页上下文);每题按纵向位置定位。
+        import base64
         images, lines = [], []
-        for idx, b in enumerate(blanks[:len(words)]):
-            png = None
+        rects = [b["rect"] for b in blocks if b.get("rect")]
+        if blanks and rects:
+            mgn = 0.02
+            box = [max(0.0, min(r[0] for r in rects) - mgn), max(0.0, min(r[1] for r in rects) - mgn),
+                   min(1.0, max(r[2] for r in rects) + mgn), min(1.0, max(r[3] for r in rects) + mgn)]
             try:
-                png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
+                png = P._figure_crop_png(ap, page, box, with_ink=True, rel=rel, strokes=strokes)
             except Exception:
                 png = None
-            if not png:
-                continue
-            import base64
-            images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
-            lines.append(f"第 {idx + 1} 题,正确答案:「{words[idx]}」(对应第 {len(images)} 张图)")
+            if png:
+                images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+                bh = (box[3] - box[1]) or 1e-6
+                for idx, b in enumerate(blanks):
+                    cy = ((b["rect"][1] + b["rect"][3]) / 2 - box[1]) / bh
+                    lines.append(f"第 {idx + 1} 题(纵向约 {round(cy * 100)}% 处),正确答案:「{words[idx]}」")
 
         if not images:
             run.update(status="error", error="没裁到任何手写内容(rect 还没写回?或者你还没写)")
             _save(run); _push_run(run)
             return
 
-        prompt = ("下面每一张图是用户在听写纸上**手写**的一个答案(只有那一格,白底)。\n"
+        prompt = ("这张图是用户在听写纸上**手写作答的一整页**(白底,只有手写)。按每题的**纵向位置**找到对应手写:\n"
                   + "\n".join(lines) +
                   "\n\n逐题判断写得对不对(手写体,允许笔画潦草;错字/漏字/假名写错都算错)。\n"
                   "**只输出 JSON**,形如:"
                   '{"items":[{"n":1,"ok":true,"got":"憂鬱","note":""},...],"score":"18/20","brief":"一句话总评"}')
         out = A.reader_vision(images, prompt, action="dictation_grade", uid=str(run.get("uid") or ""),
-                              max_images=min(len(images), 40))   # 听写批改同理:按词数放宽,别只判前 6
+                              max_images=len(images))
         try:
             import re as _re
             m = _re.search(r"\{.*\}", out or "", _re.S)
@@ -490,38 +496,51 @@ def _check_page(rid, prompt_hint=""):
         import assistant as A
         rel = run["file"]
         ap = P._safe_vault_path(rel)
+        # ★ 一页一张整图(用户拍板:别给每个空各裁一张 = 又费 token 又丢整页上下文)。
+        #   插入页 PDF 本身空白、题目文字只在前端覆盖层 → 整页图只有手写;题干/答案用文字给,
+        #   每个空标注它在图上的**纵向位置(%)**,AI 按位置把手写对到对应空(空是竖排、位置唯一)。
         images = []
         lines = []
-        qn = 0                                           # 跨页连续空号
-        for pg in _run_pages(run):                       # ★ 多纸:逐张纸收手写(#33)
+        qn = 0                                            # 跨页连续空号
+        for pg in _run_pages(run):                        # 多纸:一页一张图(#33)
             page = int(pg.get("page") or 0)
             strokes = P._page_ink_strokes(rel, page) or []
             blocks = _blocks_of_page(run, pg.get("upage"))
             blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+            if not blanks:
+                continue
+            rects = [b["rect"] for b in blocks if b.get("rect")]
+            mgn = 0.02                                     # 内容 bbox + 小边距 = 整页作答区
+            box = [max(0.0, min(r[0] for r in rects) - mgn), max(0.0, min(r[1] for r in rects) - mgn),
+                   min(1.0, max(r[2] for r in rects) + mgn), min(1.0, max(r[3] for r in rects) + mgn)]
+            try:
+                png = P._figure_crop_png(ap, page, box, with_ink=True, rel=rel, strokes=strokes)
+            except Exception:
+                png = None
+            if not png:
+                continue
+            images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+            imgno = len(images)
+            bh = (box[3] - box[1]) or 1e-6
             for b in blanks:
                 qn += 1
-                try:
-                    png = P._figure_crop_png(ap, page, b["rect"], with_ink=True, rel=rel, strokes=strokes)
-                except Exception:
-                    png = None
-                if not png:
-                    continue
-                images.append({"media_type": "image/png", "b64": base64.b64encode(png).decode()})
+                cy = ((b["rect"][1] + b["rect"][3]) / 2 - box[1]) / bh   # 空中心在本图的纵向比例
                 ans = b.get("answer")
-                lines.append("第 %d 张图 = 第 %d 空%s" % (len(images), qn,
+                lines.append("第 %d 空:第 %d 张图 纵向约 %d%% 处%s" % (qn, imgno, round(cy * 100),
                              ("(标准答案「%s」)" % ans) if ans else ""))
         if not images:
             run.update(status="error", error="这页没有可检查的手写填空(还没写?)")
             _save(run)
             _push_run(run)
             return
-        base = ("下面每张图是用户在一张纸上**手写**的一格内容(白底,只有那一格)。\n"
+        base = ("每张图是用户**手写作答的一整页**(白底,只有手写笔迹;题目文字不在图上)。"
+                "共 %d 张图,每张=一页。按下面每个空的**纵向位置**在图里找到对应手写:\n" % len(images)
                 + "\n".join(lines) + "\n\n"
-                + (prompt_hint or "逐格判断/点评(手写体,允许潦草)。有标准答案的判对错。")
+                + (prompt_hint or "逐空识别手写内容并判断/点评(手写体,允许潦草)。有标准答案的判对错。")
                 + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
                 + '"score":"可空","brief":"总评"}')
         out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""),
-                              max_images=min(len(images), 40))   # 批改整张卷子:按题数放宽(默认 6 会只判前 6 题)
+                              max_images=min(len(images), 8))   # 一页一张 → 最多几张,不再按题数堆图
         try:
             m = _re.search(r"\{.*\}", out or "", _re.S)
             res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}
