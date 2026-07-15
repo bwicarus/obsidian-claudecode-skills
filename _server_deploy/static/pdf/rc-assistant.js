@@ -2093,6 +2093,9 @@
   // 141:__asstVoiceMoveLead(把前置语搬进结果卡)已**删除** —— 结果卡现在是容器里的一个 card part,
   //   前置语是它前面的 text part,天然同框,不需要"搬"。
   try { window.RC = window.RC || {}; RC.assistant = RC.assistant || {}; RC.assistant.renderMd = renderMd; RC.assistant.trackCliTask = _trackCliTask; } catch (e) {}   // 67:文字卡片等外部组件复用 md 渲染;trackCliTask 供语音路(rc-voicecall)复用(CLI 委托任务的流程/结果/建纸)
+  // 统一「主动问一句」出口:开抽屉 + 走 send(通话中→实时模型 __vcSendText,否则→文字管线)。
+  //   供外部(如检查结果面板「让 AI 讲讲」)把内容回报给前端编排 AI,文字/语音自动路由。
+  try { RC.assistant.ask = function (t) { try { if (openGrammarPanel) openGrammarPanel(); } catch (e) {} return send(t); }; } catch (e) {}
   window.__asstInfoBtn = function (el, info) {   // 77b:右下角小「!」详情钮(语音气泡/搜索卡通用)
     try {
       if (!el || el.querySelector(':scope > .vc-inf-b')) return;

@@ -3458,6 +3458,13 @@ def _sys_prompt(ctx):
     except Exception:
         pass
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
+    # 用户诉求:纸上「让 AI 检查」的批改结果**回报给前端 AI**(前端把最近一次检查放进 recent_check)。
+    #   有它=用户刚做完一张自制练习纸并让你判分 → 主动结合成绩点评、讲错题(别装作不知道)。
+    check_line = ""
+    _rc = _clean_tag(ctx.get("recent_check"))
+    if _rc:
+        check_line = ("\n★用户刚在一张**自制练习纸**上作答并让你检查,判分结果如下(所见即所得):\n「"
+                      + _rc[:1200] + "」\n默认他想就这个结果聊——主动点评、讲错在哪、怎么改对;别再让他重复。")
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -3527,7 +3534,7 @@ def _sys_prompt(ctx):
         "格式就一行:[[FOLLOWUP]]问题1|问题2|问题3(用 | 分隔,放在整条回答末尾,前端会渲成可点按钮;问题要短、具体)。"
         "**每条最终回答都要带**;只有在调工具(输出 JSON)那几条里不要带。\n\n"
         f"【可用工具】\n{cat}\n\n"
-        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}{note_line}{learn_line}"
+        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}{note_line}{learn_line}{check_line}"
     )
 
 

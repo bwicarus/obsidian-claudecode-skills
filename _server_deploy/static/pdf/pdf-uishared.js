@@ -128,10 +128,16 @@ window._favOpenPicker = function () {
       'padding:8px 10px;overflow:auto;font-size:13px;line-height:1.5;color:#2a2f3a}' +
     '.up2-b-card img{max-width:100%}' +
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
-    '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;overflow:auto;padding:12px 22px;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08);-webkit-overflow-scrolling:touch}' +
-    '.up2-run-result h3{font-size:15px;margin:0 0 6px}.up2-run-result p{margin:0 0 .4em}' +
-    '.up2-run-result img{max-width:100%;max-height:220px;border-radius:6px;cursor:zoom-in;margin:4px 6px 0 0;vertical-align:top}' +   // #1 判分依据图(点击放大)
-    '.up2-run-result hr{border:none;border-top:1px solid rgba(91,118,184,.25);margin:8px 0}' +
+    '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;display:flex;flex-direction:column;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08)}' +
+    '.up2-rr-hd{display:flex;align-items:center;gap:8px;padding:7px 16px;border-bottom:1px solid rgba(91,118,184,.16);flex:0 0 auto;background:rgba(245,248,253,.98)}' +   // 收起头(不挡内容:收起后只剩这一条)
+    '.up2-rr-tt{font-weight:600;font-size:13px}.up2-rr-sp{flex:1}' +
+    '.up2-rr-ask,.up2-rr-tog{-webkit-appearance:none;appearance:none;border:1px solid rgba(91,118,184,.35);background:#fff;color:#31518f;font-size:12px;padding:3px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}' +
+    '.up2-rr-ask{background:#3b6fd4;color:#fff;border-color:#3b6fd4}' +
+    '.up2-rr-bd{padding:10px 20px 14px;overflow:auto;-webkit-overflow-scrolling:touch}' +
+    '.up2-run-result.collapsed{max-height:none}.up2-run-result.collapsed .up2-rr-bd{display:none}' +   // 收起=藏正文,只留头条,不挡纸
+    '.up2-rr-bd h3{font-size:15px;margin:0 0 6px}.up2-rr-bd p{margin:0 0 .4em}' +
+    '.up2-rr-bd img{max-width:100%;max-height:220px;border-radius:6px;cursor:zoom-in;margin:4px 6px 0 0;vertical-align:top}' +   // #1 判分依据图(点击放大)
+    '.up2-rr-bd hr{border:none;border-top:1px solid rgba(91,118,184,.25);margin:8px 0}' +
     '.up2-content .up2-content-body h1,.up2-content .up2-content-body h2,.up2-content .up2-content-body h3{line-height:1.35;margin:.9em 0 .45em}' +
     '.up2-content .up2-content-body ul,.up2-content .up2-content-body ol{margin:0 0 .8em;padding-left:1.6em}' +
     '.up2-content.editing{z-index:52;pointer-events:auto;cursor:default;display:flex;flex-direction:column}' +   /* 编辑态才抬到最上+全拦(禁手写/选词) */
@@ -778,6 +784,46 @@ window._favOpenPicker = function () {
   //     **不刷新、不卡顿**(CLAUDE.md「乐观新建即全功能页」)。
   //     我一开始让后端**同步**插页再整本书重载 —— 大书上要卡好几秒,而且把浏览器里那份 PDF 作废了。
   //     用户拍板:前端才是建页的执行者,AI 只负责遥控 + 注入内容。
+  // ── 检查结果面板(共享渲染)──────────────────────────────────────────────
+  //   ① 可**收起**(默认展开;收起后只剩一条头,不再挡纸内容)—— 收起态按纸 id 记住,跨重画不丢。
+  //   ② 头里带「🤖 让 AI 讲讲」→ 把检查结果**回报给前端编排 AI**(送进助手,文字/语音自动路由)。
+  var _upResCollapsed = {};   // upage id → true(收起)
+  function _upResKey(ov, fallback) {
+    try { var h = ov.closest('[data-uid]'); if (h && h.getAttribute('data-uid')) return h.getAttribute('data-uid'); } catch (e) {}
+    return fallback || '_';
+  }
+  // 把检查结果拼成一句自然的用户请求,送进前端 AI(在通话中→实时模型;否则→文字助手)。
+  function _upReportCheckToAI(md) {
+    var body = String(md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 1500);
+    var msg = '我刚做完这张练习纸并让你检查了,检查结果如下:\n\n' + body + '\n\n请帮我讲讲错的题、为什么错、怎么改对。';
+    try { if (window.RC && RC.assistant && RC.assistant.ask) { RC.assistant.ask(msg); return; } } catch (e) {}
+    try { var ta = document.getElementById('asst-ta'); if (ta) { ta.value = msg; ta.focus(); if (window.RC && RC.toast) RC.toast('已填入助手输入框,按发送即可'); return; } } catch (e) {}
+    try { if (window.RC && RC.toast) RC.toast('助手未就绪'); } catch (e) {}
+  }
+  function _upRenderResult(ov, md, key) {
+    var r = ov.querySelector('.up2-run-result');
+    if (!r) { r = document.createElement('div'); r.className = 'up2-run-result'; ov.appendChild(r); }
+    var collapsed = !!_upResCollapsed[key];
+    r.classList.toggle('collapsed', collapsed);
+    var bodyHtml; try { bodyHtml = (window.RC && RC.md) ? RC.md(md) : RC.esc(md); } catch (e) { bodyHtml = RC.esc(md); }
+    var hd = document.createElement('div'); hd.className = 'up2-rr-hd';
+    var tt = document.createElement('span'); tt.className = 'up2-rr-tt'; tt.textContent = '🔍 检查结果';
+    var sp = document.createElement('span'); sp.className = 'up2-rr-sp';
+    var askB = document.createElement('button'); askB.type = 'button'; askB.className = 'up2-rr-ask'; askB.textContent = '🤖 让 AI 讲讲';
+    var tog = document.createElement('button'); tog.type = 'button'; tog.className = 'up2-rr-tog'; tog.textContent = collapsed ? '展开 ▸' : '收起 ▾';
+    hd.appendChild(tt); hd.appendChild(sp); hd.appendChild(askB); hd.appendChild(tog);
+    var bd = document.createElement('div'); bd.className = 'up2-rr-bd'; bd.innerHTML = bodyHtml;
+    r.innerHTML = ''; r.appendChild(hd); r.appendChild(bd);
+    tog.addEventListener('click', function (e) {
+      e.stopPropagation();
+      _upResCollapsed[key] = !_upResCollapsed[key];
+      var c = !!_upResCollapsed[key];
+      r.classList.toggle('collapsed', c); tog.textContent = c ? '展开 ▸' : '收起 ▾';
+    });
+    askB.addEventListener('click', function (e) { e.stopPropagation(); _upReportCheckToAI(md); });
+    try { window.__lastCheckResult = { md: md, ts: Date.now() }; } catch (_) {}   // 被动:getContext 也带给 AI
+  }
+
   // 任务运行时:按 upage id 重画那张纸(检查结果写回 sidecar 后,SSE text 事件触发)。
   window.__upRerender = function (upId) {
     try {
@@ -802,11 +848,7 @@ window._favOpenPicker = function () {
       var h = ov.querySelector('.up2-run-hint');
       if (h) h.textContent = run.hint || '';
       // 检查/批改结果(AI 回复)显示在**卡片内**(纸的下方),渲成 markdown。不塞进纸格子(会撑破)。
-      if (run.result_md) {
-        var r = ov.querySelector('.up2-run-result');
-        if (!r) { r = document.createElement('div'); r.className = 'up2-run-result'; ov.appendChild(r); }
-        try { r.innerHTML = (window.RC && RC.md) ? RC.md(run.result_md) : RC.esc(run.result_md); } catch (e) { r.textContent = run.result_md; }
-      }
+      if (run.result_md) _upRenderResult(ov, run.result_md, _upResKey(ov, run.rid));
     } catch (e) {}
   };
 
@@ -1048,11 +1090,7 @@ window._favOpenPicker = function () {
     // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
     requestAnimationFrame(function () {
       // 检查结果(持久化在 sidecar 的 result_md)→ 渲进卡内结果区(不塞格子)
-      if (rec.result_md) {
-        var rr = ov.querySelector('.up2-run-result');
-        if (!rr) { rr = document.createElement('div'); rr.className = 'up2-run-result'; ov.appendChild(rr); }
-        try { rr.innerHTML = (window.RC && RC.md) ? RC.md(rec.result_md) : RC.esc(rec.result_md); } catch (e) { rr.textContent = rec.result_md; }
-      }
+      if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id));
       var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
         if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号
