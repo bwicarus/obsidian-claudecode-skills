@@ -1213,6 +1213,10 @@ window._favOpenPicker = function () {
     else if (pw) {   // ② 真页:抹覆盖层内容 + 蒙层(立即消失,真减页靠 reload)
       var ov = pw.querySelector('.up2-content'); if (ov) try { ov.remove(); } catch (_) {}
       var bd = pw.querySelector('.up2-badge'); if (bd) try { bd.remove(); } catch (_) {}
+      // ⚠ ink 画布(__inkCanvas)挂在 pw 上、独立于 up2-content —— 删除必须**顺手清掉这页笔画**,
+      //   否则它留在 pw 上,reload 前页码移位就蹭到别的页(用户实测:删页笔迹留到别页)。
+      try { pw.__inkStrokes = []; var _ic = pw.__inkCanvas; if (_ic) { var _ictx = _ic.getContext('2d'); if (_ictx) _ictx.clearRect(0, 0, _ic.width, _ic.height); } } catch (_) {}
+      try { if (window._upClaimed) delete window._upClaimed[rec.page]; } catch (_) {}   // 清这页的会话级占用,别抑制移位后页的 ink
       var veil = document.createElement('div'); veil.className = 'up2-delveil';
       veil.textContent = '🗑 正在删除第 ' + rec.page + ' 页…';
       pw.style.position = pw.style.position || 'relative'; pw.appendChild(veil);

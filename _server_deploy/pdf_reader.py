@@ -6444,6 +6444,30 @@ def _pam_ink(ctx):
     return ([plan] if plan else []), ([warn] if warn else [])
 
 
+def _pam_reading_pos(ctx):
+    """服务端续读位置 reader-positions.json({rel:{pos:PDF页1-based,kind}})。插/删页后 pos 指错页的漏网补齐。
+    pos 正落在被删页 → 退到前一页(别丢续读、别指错页);EPUB 记录(kind==epub)不动。"""
+    def mut(d):
+        if not isinstance(d, dict):
+            return False
+        rec = d.get(ctx["rel"])
+        if not isinstance(rec, dict) or rec.get("kind") == "epub":
+            return False
+        try:
+            p = int(rec.get("pos"))
+        except (TypeError, ValueError):
+            return False
+        np = ctx["mv"](p)
+        if np is None:                 # 续读位置在被删页上 → 退前一页(≥1)
+            np = max(1, p - 1)
+        if np == p:
+            return False
+        rec["pos"] = np
+        return True
+    plan, warn = _up_json_plan(_READER_POS_FILE, mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
 def _pam_favorites(ctx):
     def mut(d):
         changed = False
@@ -6750,6 +6774,7 @@ def _pam_ocr_checkpoints(ctx):
 PAGE_ANCHOR_MIGRATIONS = [
     ("pdf-highlights", _pam_highlights),
     ("reader-notes", _pam_notes),
+    ("reader-positions", _pam_reading_pos),   # 服务端续读位置(漏网补齐:插/删页后 pos 不再指错页)
     ("pdf-ink", _pam_ink),
     ("reader-favorites", _pam_favorites),
     ("reader-userpages", _pam_userpages),
