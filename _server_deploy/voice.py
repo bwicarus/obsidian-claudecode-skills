@@ -1113,6 +1113,9 @@ class _AgentTimeout(Exception):
     pass
 
 
+_CA_SINK = {}   # tid → [client_action]:后台 agent 内部工具产生的 client_action(headless 不会转发,这里挖出)
+
+
 def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                    model: str = "", effort: str = "") -> str:
     """跑一个无头 CLI(claude | codex),流式解析事件驱动工具卡进度条。返回最终答案('' = 没给结果)。
@@ -1175,6 +1178,27 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                     if nm and nm != "ToolSearch":   # ToolSearch 是 CLI 内部找工具,不是"做事",别显示
                         steps.append({"name": nm, "status": "done"})
                         _vtask_set(tid, step=f"{nm}…", steps=list(steps))
+        elif d.get("type") == "user":
+            # ★ 工具返回体里的 client_action(如 page_show 的 __upStartTask)—— headless agent 不会转发它,
+            #   我们从 tool_result 里挖出来收集进 task,前端轮询 task-status 时应用 → 后台 agent 建的纸才真显示。
+            #   (用户实测"页面没做成功"根因:do_task 就算调了造纸工具,client_action 也被丢在 stdout 里。)
+            for c in ((d.get("message") or {}).get("content") or []):
+                if c.get("type") != "tool_result":
+                    continue
+                _tc = c.get("content")
+                _txt = _tc if isinstance(_tc, str) else " ".join(
+                    (x.get("text") or "") for x in (_tc or []) if isinstance(x, dict))
+                m = re.search(r'"client_action"\s*:\s*(\{.*?\}\s*\})', _txt, re.S)
+                if not m:
+                    m = re.search(r'"client_action"\s*:\s*(\{[^{}]*\{[^{}]*\}[^{}]*\})', _txt, re.S)
+                if m:
+                    try:
+                        ca = json.loads(m.group(1))
+                        if ca.get("fn"):
+                            _CA_SINK.setdefault(tid, []).append(ca)
+                            _vtask_set(tid, client_actions=list(_CA_SINK[tid]))
+                    except Exception:
+                        pass
         elif d.get("type") == "result":
             answer = (d.get("result") or "").strip()
     pr.wait(timeout=10)
@@ -1199,8 +1223,16 @@ def _task_agent(tid, params, ctx, base):
         "你是这个自学 App 的后台助手,用 bwapp 这套 MCP 工具帮用户把事情做完。\n"
         + ("\n".join(ctx_lines) + "\n" if ctx_lines else "")
         + f"\n用户的要求:{instr}\n\n"
-        "要求:自己决定用哪些工具、按什么顺序;做完后**只输出一句话**(40 字以内)告诉用户结果,"
-        "不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
+        # ★ 造纸能力(用户实测:它面对"做填空题"去调了 make_anki_card,不知道能造练习纸)——
+        #   要**用户在页面上写/手写/练习纸/填空题让我写/试卷**这类,必须用 page_new→page_add→page_show 造一张交互纸,
+        #   **绝不能**用 make_anki_card 代替(Anki 卡是背记,不是让用户在纸上手写作答)。
+        "**判断要不要造纸**:用户要的是「在页面上手写作答」(填空题让我写/练习纸/试卷/听写)→ 用造纸工具:\n"
+        "  page_new(paper?,title?) 开一张纸 → 多次 page_add(一次加一个元素:"
+        "{kind:'text'} 标题/{kind:'blank',label,answer} 填空/{kind:'button',label:'让 AI 检查',event:'check'} 检查按钮)"
+        " → page_show() 生成。填空题每题一个 blank(answer 填标准答案),末尾加一个 event:'check' 的按钮。\n"
+        "  ——**别用 make_anki_card 冒充练习纸**。只有用户明确要「做成 Anki 卡/背记」才用 make_anki_card。\n\n"
+        "要求:自己决定用哪些工具、按什么顺序;做完后**只输出一句话**(40 字以内)如实说你做了什么"
+        "(做了纸就说做了纸,别谎称做了纸其实做的是卡),不要罗列过程、不要 markdown。做不到就直接说做不到和原因。"
     )
     # 147c:**ENABLE_TOOL_SEARCH=false** —— Claude Code 默认把 MCP 工具做成「延迟加载」
     #   (system.init 里 MCP 直接可见 **0** 个),模型必须先 ToolSearch 才拿得到 schema,白烧 1~2 轮。
@@ -1241,6 +1273,7 @@ def _task_agent(tid, params, ctx, base):
         _vtask_set(tid, status="error", error="助手没给出结果")
         return
     _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps),
+               client_actions=_CA_SINK.pop(tid, []),   # ★ 后台 agent 内部工具产生的 client_action(如建纸)→ 前端应用
                result={"answer": answer, "tools": [x["name"] for x in steps]})
 
 
