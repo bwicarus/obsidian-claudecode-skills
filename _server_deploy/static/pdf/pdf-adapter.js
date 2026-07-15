@@ -67,13 +67,13 @@
         //   共享 send 会 await 一张 captureShot(截那张插入页元素,所见即所得)喂给 see_ink,不再两手空空。
         //   普通 PDF 页有真墨迹的仍走服务端精确裁图(_ink_focus_image,快、无往返),不设此标志。
         try { var _inkEl = _pdfInkUpageEl(); if (_inkEl && c) { c.want_viewshot = true; PdfAdapter.__shotEl = _inkEl; } } catch (e) {}
-        // 用户诉求:检查结果**回报给前端 AI**。最近一次检查(6 分钟内)被动带进上下文 →
-        //   下次发言 AI 就知道成绩/错题,不必用户重贴(主动回报另有结果面板「让 AI 讲讲」按钮)。
+        // 用户设计:检查报告**不塞全文进上下文**(跟笔迹一样只告知存在)。最近一次检查(10 分钟内)
+        //   只带**报告名+得分** → AI 知道"有这么份报告",用户一问就调 read_check_report(带报告上下文
+        //   的子 agent)查证作答。
         try {
           var _lc = window.__lastCheckResult;
-          if (_lc && c && (Date.now() - _lc.ts) < 6 * 60 * 1000) {
-            // 富报告(带题目原文+标准答案)优先 → AI 才能分析错题;没有才退回只有结论的 md。
-            c.recent_check = String(_lc.ai || _lc.md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 2200);
+          if (_lc && _lc.name && c && (Date.now() - _lc.ts) < 10 * 60 * 1000) {
+            c.recent_check = { name: _lc.name, score: _lc.score || '', ts: _lc.ts };
           }
         } catch (e) {}
         return c || null;

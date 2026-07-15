@@ -785,29 +785,15 @@ window._favOpenPicker = function () {
   //     我一开始让后端**同步**插页再整本书重载 —— 大书上要卡好几秒,而且把浏览器里那份 PDF 作废了。
   //     用户拍板:前端才是建页的执行者,AI 只负责遥控 + 注入内容。
   // ── 检查结果面板(共享渲染)──────────────────────────────────────────────
-  //   ① 可**收起**(默认展开;收起后只剩一条头,不再挡纸内容)—— 收起态按纸 id 记住,跨重画不丢。
-  //   ② 头里带「🤖 让 AI 讲讲」→ 把检查结果**回报给前端编排 AI**(送进助手,文字/语音自动路由)。
+  //   可**收起**(默认展开;收起后只剩一条头,不再挡纸内容)—— 收起态按纸 id 记住,跨重画不丢。
+  //   **不放「让 AI 讲讲」按钮**(用户设计):上下文只告知"最近有检查报告《名》",用户直接问,
+  //   AI 调 read_check_report(一个带报告上下文、能自己查书核实的子 agent)作答。这里只 stash 报告名/得分。
   var _upResCollapsed = {};   // upage id → true(收起)
   function _upResKey(ov, fallback) {
     try { var h = ov.closest('[data-uid]'); if (h && h.getAttribute('data-uid')) return h.getAttribute('data-uid'); } catch (e) {}
     return fallback || '_';
   }
-  // 把检查结果拼成一句自然的用户请求,送进前端 AI(在通话中→实时模型;否则→文字助手)。
-  //   ai=后端富报告(题目原文+标准答案+手写+判分),有它就用它(AI 才看得到题干、能分析);
-  //   没有(旧数据)才退回只有结论的 md。
-  function _upReportCheckToAI(md, ai) {
-    var msg;
-    if (ai && ai.trim()) {
-      msg = ai.trim() + '\n\n请帮我讲讲错的/没答上的题:题目在问什么、正确答案是什么、为什么、怎么记。';
-    } else {
-      var body = String(md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 1500);
-      msg = '我刚做完这张练习纸并让你检查了,检查结果如下:\n\n' + body + '\n\n请帮我讲讲错的题、为什么错、怎么改对。';
-    }
-    try { if (window.RC && RC.assistant && RC.assistant.ask) { RC.assistant.ask(msg); return; } } catch (e) {}
-    try { var ta = document.getElementById('asst-ta'); if (ta) { ta.value = msg; ta.focus(); if (window.RC && RC.toast) RC.toast('已填入助手输入框,按发送即可'); return; } } catch (e) {}
-    try { if (window.RC && RC.toast) RC.toast('助手未就绪'); } catch (e) {}
-  }
-  function _upRenderResult(ov, md, key, ai) {
+  function _upRenderResult(ov, md, key, name, score) {
     var r = ov.querySelector('.up2-run-result');
     if (!r) { r = document.createElement('div'); r.className = 'up2-run-result'; ov.appendChild(r); }
     var collapsed = !!_upResCollapsed[key];
@@ -816,9 +802,8 @@ window._favOpenPicker = function () {
     var hd = document.createElement('div'); hd.className = 'up2-rr-hd';
     var tt = document.createElement('span'); tt.className = 'up2-rr-tt'; tt.textContent = '🔍 检查结果';
     var sp = document.createElement('span'); sp.className = 'up2-rr-sp';
-    var askB = document.createElement('button'); askB.type = 'button'; askB.className = 'up2-rr-ask'; askB.textContent = '🤖 让 AI 讲讲';
     var tog = document.createElement('button'); tog.type = 'button'; tog.className = 'up2-rr-tog'; tog.textContent = collapsed ? '展开 ▸' : '收起 ▾';
-    hd.appendChild(tt); hd.appendChild(sp); hd.appendChild(askB); hd.appendChild(tog);
+    hd.appendChild(tt); hd.appendChild(sp); hd.appendChild(tog);
     var bd = document.createElement('div'); bd.className = 'up2-rr-bd'; bd.innerHTML = bodyHtml;
     r.innerHTML = ''; r.appendChild(hd); r.appendChild(bd);
     tog.addEventListener('click', function (e) {
@@ -827,8 +812,8 @@ window._favOpenPicker = function () {
       var c = !!_upResCollapsed[key];
       r.classList.toggle('collapsed', c); tog.textContent = c ? '展开 ▸' : '收起 ▾';
     });
-    askB.addEventListener('click', function (e) { e.stopPropagation(); _upReportCheckToAI(md, ai); });
-    try { window.__lastCheckResult = { md: md, ai: ai || md, ts: Date.now() }; } catch (_) {}   // 被动:getContext 用富报告(带题干)
+    // 被动:只记报告名/得分(不记全文)→ getContext 告知"最近有报告《名》",AI 要看内容自己调工具。
+    try { if (name) window.__lastCheckResult = { name: name, score: score || '', ts: Date.now() }; } catch (_) {}
   }
 
   // 任务运行时:按 upage id 重画那张纸(检查结果写回 sidecar 后,SSE text 事件触发)。
@@ -855,7 +840,7 @@ window._favOpenPicker = function () {
       var h = ov.querySelector('.up2-run-hint');
       if (h) h.textContent = run.hint || '';
       // 检查/批改结果(AI 回复)显示在**卡片内**(纸的下方),渲成 markdown。不塞进纸格子(会撑破)。
-      if (run.result_md) _upRenderResult(ov, run.result_md, _upResKey(ov, run.rid), run.result_ai);
+      if (run.result_md) _upRenderResult(ov, run.result_md, _upResKey(ov, run.rid), run.check_name, run.check_score);
     } catch (e) {}
   };
 
@@ -1097,7 +1082,7 @@ window._favOpenPicker = function () {
     // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
     requestAnimationFrame(function () {
       // 检查结果(持久化在 sidecar 的 result_md)→ 渲进卡内结果区(不塞格子)
-      if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id), rec.result_ai);
+      if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id), rec.check_name, rec.check_score);
       var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
         if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号

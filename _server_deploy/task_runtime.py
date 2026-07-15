@@ -102,7 +102,7 @@ def _push_run(run: dict):
                 {"run": {"rid": run["rid"], "status": run["status"], "kind": run["kind"],
                          "state": run.get("state") or {}, "upage": run.get("upage"),
                          "hint": run.get("hint") or "", "result_md": run.get("result_md") or "",
-                         "result_ai": run.get("result_ai") or ""}})
+                         "check_name": run.get("check_name") or "", "check_score": run.get("check_score") or ""}})
     except Exception:
         pass
 
@@ -664,24 +664,44 @@ def _check_page(rid, prompt_hint=""):
             rmd = "\n".join(md + _foot)
         except Exception:
             rmd = "\n".join(md)
-        # 给前端 AI 的富报告(题目原文+标准答案+手写+判分)→ 回报给编排 AI 用它,不只结论。
+        # 富报告(题目原文+标准答案+手写+判分)。**不塞进上下文**(跟笔迹一样只告知存在),
+        #   而是登记成一份**带名字的检查报告**;AI 被问到时调 read_check_report(name) 才拿全文。
         try:
             rai = _grade_report(run, res)
         except Exception:
             rai = rmd
-        run.update(status="done", result=res, result_md=rmd, result_ai=rai, hint="检查完成 ✅")
+        _cscore = str((res or {}).get("score") or "")
+        _upids = {pg.get("upage") for pg in _run_pages(run)}   # 多纸:结果写到本 run 每张纸(哪页点检查都看得到)
+        _cname = ""
+        try:
+            import pdf_reader as P
+            with _lock:
+                for it in P._upages_load(run["file"]):
+                    if it.get("id") in _upids and (it.get("title") or "").strip():
+                        _cname = it.get("title").strip(); break
+        except Exception:
+            pass
+        # 登记报告(供 read_check_report 工具按名查)。返回**最终报告名**(可能加了序号去重)。
+        try:
+            import assistant as A
+            _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore)
+        except Exception:
+            _cname = _cname or "练习纸检查"
+        run.update(status="done", result=res, result_md=rmd, result_ai=rai,
+                   check_name=_cname, check_score=_cscore, hint="检查完成 ✅")
         _save(run)
         # ★ 结果**存进纸的 sidecar**(不是格子块) → 刷新/回前台/换设备都能看到,不靠那一次性 SSE。
         #   (后台线程发的 SSE 若那刻页面不可见就被 visibility 早退丢了 —— 用户实测"结果没出现"的根因。)
         try:
             import pdf_reader as P
-            _upids = {pg.get("upage") for pg in _run_pages(run)}   # 多纸:结果写到本 run 每张纸(哪页点检查都看得到)
             with _lock:
                 items = P._upages_load(run["file"])
                 for it in items:
                     if it.get("id") in _upids:
                         it["result_md"] = rmd
                         it["result_ai"] = rai
+                        it["check_name"] = _cname
+                        it["check_score"] = _cscore
                         it["updated"] = int(time.time())
                 P._upages_save(run["file"], items)
         except Exception:

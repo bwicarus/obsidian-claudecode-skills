@@ -493,6 +493,43 @@ def _pdf():
 _CONVO_DIR = CLAUDE_DIR / "state" / "assistant-convo"
 _convo_lock = threading.Lock()
 
+# ── 练习纸检查报告(题目原文+标准答案+手写+判分)。上下文只给报告名,AI 调 read_check_report 拿全文 ──
+#   (用户设计:跟笔迹一样"只告知存在,被问到再调工具看",别把全文塞进每轮上下文。)
+_CHECK_DIR = CLAUDE_DIR / "state" / "reader-check-reports"
+_check_lock = threading.Lock()
+
+
+def _check_reports_load(uid):
+    try:
+        return json.loads((_CHECK_DIR / f"{uid}.json").read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _save_check_report(uid, name, file_rel, report, score=""):
+    """登记一份检查报告,返回**最终报告名**(同名已存在就加序号去重,便于按名精确查)。"""
+    uid = str(uid or "")
+    name = (name or "练习纸检查").strip() or "练习纸检查"
+    if not uid or not (report or "").strip():
+        return name
+    with _check_lock:
+        lst = _check_reports_load(uid)
+        existing = {x.get("name") for x in lst}
+        final = name
+        if final in existing:                     # 同名去重:《X》《X (2)》《X (3)》…
+            i = 2
+            while f"{name} ({i})" in existing:
+                i += 1
+            final = f"{name} ({i})"
+        import hashlib
+        rid = hashlib.sha1(f"{final}|{int(time.time())}".encode("utf-8")).hexdigest()[:8]
+        lst.append({"id": rid, "name": final, "file": file_rel or "", "score": score or "",
+                    "report": report, "ts": int(time.time())})
+        lst = lst[-60:]                           # 每人最多留 60 份
+        _CHECK_DIR.mkdir(parents=True, exist_ok=True)
+        (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
+    return final
+
 
 def _convo_path(uid):
     return _CONVO_DIR / f"{uid}.json"
@@ -1390,6 +1427,53 @@ def _t_read_page(args, ctx):
 def _t_read_selection(args, ctx):
     sel = (ctx.get("selection") or "").strip()
     return {"selection": sel[:4000]} if sel else {"error": "用户当前没有选中文字"}
+
+
+def _find_check_report(uid, name):
+    """按名字(精确→模糊,id 也行)找报告;不传名字=最近一份。返回 (报告 dict, 错误 dict)。"""
+    lst = _check_reports_load(uid)
+    if not lst:
+        return None, {"error": "还没有任何练习纸检查报告(用户做完自制练习纸点『让 AI 检查』后才会生成)"}
+    name = (name or "").strip()
+    if not name:
+        return lst[-1], None
+    cand = [x for x in lst if x.get("id") == name or name == (x.get("name") or "")]
+    if not cand:
+        cand = [x for x in lst if name in (x.get("name") or "") or (x.get("name") or "") in name]
+    if not cand:
+        return None, {"error": f"没找到叫「{name}」的检查报告", "available": [x.get("name") for x in lst[-8:]]}
+    return cand[-1], None
+
+
+def _t_read_check_report(args, ctx):
+    """★用户设计:回答**练习纸检查报告**相关问题的**子 agent**(不是取全文给编排看)。
+    把用户的问题 + 报告标识丢进来 → 内部起一个带这份报告为上下文的后台 agent(无头 CLI + MCP),
+    它可自己调工具(search_book/read_page/see_page/lookup_word 查书核实)来保证知识性问答可靠,
+    然后就着报告作答。产出**一张 CLI 卡**(跟 do_task 同一套)。
+    args {question: 用户的原话问题(必给); name?: 报告名(纸标题,可模糊;不传=最近一份)}。"""
+    uid = str(ctx.get("_uid") or ctx.get("uid") or "")
+    r, err = _find_check_report(uid, args.get("name"))
+    if err:
+        return err
+    question = (args.get("question") or args.get("q") or args.get("text") or "").strip()
+    if len(question) < 2:
+        # 没带问题 → 退化成把报告全文给编排 AI 自己看(兜底,不推荐;正常应带 question 走子 agent)
+        return {"name": r.get("name"), "score": r.get("score") or "", "report": r.get("report") or "",
+                "note": "把用户的问题放进 question 参数再调我,我会带这份报告+查书核实来作答(更可靠)。"}
+    rr = _resolve("agent", uid)
+    instr = (
+        f"用户在一张自制练习纸《{r.get('name')}》上作答并已判分。下面是完整**检查报告**"
+        f"(题目原文+各空标准答案+用户手写识别+判分)——这就是题目和答案的来源"
+        f"(题目**不在**书页正文,别去 read_page 找题目;报告已在下面,别再调 read_check_report):\n\n"
+        f"{r.get('report')}\n\n"
+        f"用户的问题:{question}\n\n"
+        f"请**紧扣这份报告**回答:讲清相关题目在问什么、正确答案、为什么、用户错/漏在哪、怎么记。"
+        f"为保证准确,你可以调工具去书里核实(search_book 搜关键词、read_page 读某页正文、"
+        f"see_page 看页面图、lookup_word 查词),但**题目与标准答案一律以报告为准**。"
+        f"最后用简明中文给用户一段可靠、具体的解答。"
+    )
+    return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
+                              "model": rr["variant"], "effort": rr["depth"]}, ctx)
 
 
 def _t_search_book(args, ctx):
@@ -3173,6 +3257,10 @@ def _t_start_dictation(args, ctx):
 
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
+    "read_check_report": ("回答**练习纸检查报告**相关问题的子 agent(它带着那份报告为上下文、能自己查书核实再作答)。"
+                          "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改,就调它——"
+                          "**把用户的原话问题放进 question**、报告名放进 name。别自己凭空答、别 read_page 找题目(题目在报告里)。"
+                          "args {question:用户问题(必给); name?:报告名(纸标题,可模糊;不传=最近一份)}", _t_read_check_report),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
     "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用;只搜书库,不是联网搜索)。args {query 必填=要搜的关键词}", _t_search_all_books),
@@ -3286,9 +3374,10 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    if name in ("do_task", "make_paper"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
-        instr = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("text") or "").strip()
-        return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else ("造纸" if name == "make_paper" else "后台任务")
+    if name in ("do_task", "make_paper", "read_check_report"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
+        instr = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("question") or args.get("text") or "").strip()
+        _dft = {"make_paper": "造纸", "read_check_report": "讲解检查报告"}.get(name, "后台任务")
+        return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else _dft
     return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "run_saved_task": "运行工具", "list_saved_tasks": "列出工具", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
@@ -3305,7 +3394,8 @@ def _tool_label(name, args):
 #   ⚠ 只从**编排侧目录**摘除,page_* 仍留在 TOOLS 里给 MCP/CLI 调(去壳回放也靠它)。
 _ORCH_DROP = {"page_new", "page_add", "page_show"}
 # CLI 委托类后台任务:进度/结果显示在**卡内**(tool2 → _trackCliTask),不发卡外浮动 task 事件(#1 状态在卡外的根因)。
-_AGENT_TASKS = {"do_task", "make_paper"}
+#   read_check_report=报告问答子 agent,同样走 CLI 卡。
+_AGENT_TASKS = {"do_task", "make_paper", "read_check_report"}
 
 
 def _sys_prompt(ctx):
@@ -3458,14 +3548,17 @@ def _sys_prompt(ctx):
     except Exception:
         pass
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
-    # 用户诉求:纸上「让 AI 检查」的批改结果**回报给前端 AI**(前端把最近一次检查放进 recent_check)。
-    #   有它=用户刚做完一张自制练习纸并让你判分 → 主动结合成绩点评、讲错题(别装作不知道)。
+    # 检查报告**不塞全文进上下文**(跟笔迹一样,只告知存在)。前端只传 {name, score};要分析
+    #   错题时**调 read_check_report(name) 拿题目原文+判分**再答(用户设计)。
     check_line = ""
-    _rc = _clean_tag(ctx.get("recent_check"))
-    if _rc:
-        check_line = ("\n★用户刚在一张**自制练习纸**上作答并让你检查,题目原文+标准答案+他的手写+判分如下"
-                      "(题目就在这里、不在书页正文,别再 read_page 找):\n「"
-                      + _rc[:2200] + "」\n默认他想就这个结果聊——主动点评、讲错在哪、正确答案为何、怎么记;别再让他重复。")
+    _rc = ctx.get("recent_check")
+    if isinstance(_rc, dict) and _rc.get("name"):
+        _nm = _clean_tag(_rc.get("name"))
+        _sc = _clean_tag(str(_rc.get("score") or ""))
+        check_line = (f"\n★用户最近做完一张**自制练习纸**《{_nm}》并让你检查了"
+                      + (f"(得分 {_sc})" if _sc else "") + "。"
+                      "题目原文、标准答案、他的手写、判分都在这份**检查报告**里(不在书页正文)。"
+                      f"他要讲错题/分析成绩时,**先调 read_check_report(name=\"{_nm}\")** 拿报告再答,别 read_page。")
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"

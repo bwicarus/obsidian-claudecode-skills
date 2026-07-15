@@ -662,7 +662,7 @@
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
     // CLI 委托任务(make_paper/do_task):走**跟文字侧栏同一套** _trackCliTask —— 轮询 task-status 把 CLI
     //   内部工具填进本轮容器的【流程】+ 增量结果 + 建纸。否则语音路流程恒空「本轮没有工具调用」(用户实测)。
-    if (tid && (p.tool === 'make_paper' || p.tool === 'do_task')
+    if (tid && (p.tool === 'make_paper' || p.tool === 'do_task' || p.tool === 'read_check_report')
         && window.RC && RC.assistant && RC.assistant.trackCliTask && RC.turnCard && window.__asstVoiceTid) {
       try { RC.assistant.trackCliTask(window.__asstVoiceTid(), tid, p.label || p.tool || '造纸'); } catch (e) {}
       return;
