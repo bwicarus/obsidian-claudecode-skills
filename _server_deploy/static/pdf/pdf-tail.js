@@ -288,7 +288,12 @@ function _inkScheduleSave(pw, num) {
   // 插入页虚拟元素(.pdf-upage,有 __upRec):墨迹走边路径 —— 未绑真 id 只缓冲 el.__inkStrokes(_upInkPersist 内部早退),
   //   绑真 id 后 POST 到 realPage。绝不按 num 走下方 page-num POST(虚拟元素 num=NaN/currentPage 会污染别页墨迹)。
   //   ⚠ 只对有 __upRec 的虚拟元素生效;真 .page-wrap 永不带 __upRec → 全部照旧(legacy/普通页零影响)。
-  if (pw && pw.__upRec) { if (window._upInkPersist) window._upInkPersist(pw); return; }
+  //   #50 串页根因加固:某些路径(便签跨界/悬空重锚)解析出的 pw 可能是插入页祖先 .pdf-upage 但 __upRec 一时没挂,
+  //   这时若走下方 byPage[num] 分支,就会把插入页笔画写进 currentPage → 未重编号的旧同名页(插入页下一页)显示它。
+  //   → 判定放宽:只要 pw 自身或祖先是 .pdf-upage(插入页),一律走边路径,绝不写 byPage。
+  var _up = null;
+  if (pw) { _up = pw.__upRec ? pw : (pw.closest ? pw.closest('.pdf-upage') : null); }
+  if (_up) { if (window._upInkPersist) window._upInkPersist(_up); return; }
   // ⚠ 捕获数组引用**快照**,绝不能在 setTimeout 里延迟读 pw.__inkStrokes:页面滚出视口/重渲染时
   //   04-render 会把 pw.__inkStrokes 置 null(见 _renderPageInto)→ 延迟读会把 null→[] 存进服务器,
   //   覆盖掉真笔画 = 手写重开消失的真根因。快照指向原数组(有笔画),不受 pw 后续被置 null 影响;

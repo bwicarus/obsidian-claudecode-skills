@@ -124,6 +124,9 @@ window._favOpenPicker = function () {
     '.up2-b-btn:active{transform:scale(.96)}' +
     '.up2-b-btn.up2-b-off{background:#9aa7c4;opacity:.55;cursor:not-allowed}' +   // #36 禁用态
     '.up2-b-btn.up2-b-off:active{transform:none}' +
+    '.up2-b-card{background:rgba(123,108,255,.06);border:1px solid rgba(123,108,255,.28);border-radius:10px;' +   // #50 贴上来的卡
+      'padding:8px 10px;overflow:auto;font-size:13px;line-height:1.5;color:#2a2f3a}' +
+    '.up2-b-card img{max-width:100%}' +
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
     '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;overflow:auto;padding:12px 22px;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08);-webkit-overflow-scrolling:touch}' +
     '.up2-run-result h3{font-size:15px;margin:0 0 6px}.up2-run-result p{margin:0 0 .4em}' +
@@ -862,6 +865,38 @@ window._favOpenPicker = function () {
     } catch (e) { try { console.warn('[task] __upStartTask 失败', e); } catch (e2) {} }
   };
 
+  // #50 卡片贴到自建页:格子 → 页归一化 bbox(与 paper._rect 同一算术,前后端一致)。
+  function _upGridRect(sp, r, c, h, w) {
+    var pw = sp.page_w || 595, ph = sp.page_h || 842, mx = sp.mx || 0, my = sp.my || 0,
+        cw = sp.char_w || (pw / (sp.cols || 28)), lh = sp.line_h || (ph / (sp.rows || 26));
+    var f = function (v) { return Math.max(0, Math.min(1, Math.round(v * 1e4) / 1e4)); };
+    return [f((mx + c * cw) / pw), f((my + r * lh) / ph), f((mx + (c + w) * cw) / pw), f((my + (r + h) * lh) / ph)];
+  }
+  // 把一张卡(payload={label, raw|text, isHtml})贴到自建页 pageEl 的落点,吸附到最近行列交叉点,持久化。
+  window.__upPasteCard = function (pageEl, clientX, clientY, payload) {
+    try {
+      var rec = pageEl && pageEl.__upRec; if (!rec || !UP_FILE) return;
+      var sp = rec.paper || {};
+      var rows = sp.rows || 26, cols = sp.cols || 28;
+      var host = pageEl.querySelector('.up2-content') || pageEl;
+      var rc = host.getBoundingClientRect();
+      var pw = sp.page_w || rc.width, ph = sp.page_h || rc.height, mx = sp.mx || 0, my = sp.my || 0,
+          cw = sp.char_w || (pw / cols), lh = sp.line_h || (ph / rows);
+      var nx = Math.max(0, Math.min(1, (clientX - rc.left) / Math.max(1, rc.width)));
+      var ny = Math.max(0, Math.min(1, (clientY - rc.top) / Math.max(1, rc.height)));
+      var w = Math.max(4, Math.round(cols * 0.9)), h = 8;                 // 卡默认 8 行 × 90% 页宽
+      var col = Math.max(0, Math.min(Math.round((nx * pw - mx) / cw), cols - w));   // 吸附最近列
+      var row = Math.max(0, Math.min(Math.round((ny * ph - my) / lh), rows - h));   // 吸附最近行
+      var html = payload.isHtml ? (payload.raw || '') : RC.esc(payload.text || payload.raw || '');
+      var blk = { kind: 'card', id: 'card_' + Date.now().toString(36), html: html, label: payload.label || '',
+                  at: [row, col], span: [h, w], rect: _upGridRect(sp, row, col, h, w) };
+      var blocks = (rec.blocks || []).slice(); blocks.push(blk); rec.blocks = blocks;   // 独立副本(存快照)
+      RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: blocks }).then(function () {
+        var ov = pageEl.querySelector('.up2-content'); if (ov) _upRenderOverlay(ov, rec);
+      }).catch(function () {});
+    } catch (e) { try { console.warn('[paste] __upPasteCard 失败', e); } catch (e2) {} }
+  };
+
   // ══════════ 任务运行时:页面块渲染(text / blank / button)══════════
   //   设计见 references/adr-task-runtime.md。三个坑一次绕开:
   //   ① 覆盖层拦手势用**冒泡非捕获**(memory overlay-gate-use-bubble-not-capture:
@@ -933,6 +968,10 @@ window._favOpenPicker = function () {
           _upRunEvent(rec, b.event || 'next');
         });
         d.appendChild(sb);
+      } else if (b.kind === 'card') {
+        // #50 贴到页面的卡片:独立副本(存的是快照 html),按格子定位,内部可滚。
+        d.classList.add('up2-b-card');
+        try { d.innerHTML = b.html || RC.esc(b.label || '卡片'); } catch (e) { d.textContent = b.label || '卡片'; }
       } else { return; }
       body.appendChild(d);
     });
@@ -946,6 +985,7 @@ window._favOpenPicker = function () {
       }
       var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
+        if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号
         var fr = el.__fr; if (!fr) return;
         // 单行格高(px)= 页高 × 行高比例;字号 = 单行格高 × ratio。**与块自身高度无关** → 永不爆炸。
         var rowPx = (el.__lhr && bh) ? bh * el.__lhr : (el.offsetHeight || 20);

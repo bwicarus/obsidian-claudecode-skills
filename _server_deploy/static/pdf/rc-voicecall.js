@@ -1879,6 +1879,13 @@
       setTimeout(function () { try { f.remove(); } catch (e) {} }, 650);
     } catch (e) {}
   }
+  function _dropOnUpage(e) {   // #50:落点下面是不是一张自建页(.pdf-upage);是则返回它,供粘贴
+    try {
+      var t = document.elementFromPoint(e.clientX, e.clientY);
+      var pg = t && t.closest ? t.closest('.pdf-upage') : null;
+      return (pg && pg.__upRec) ? pg : null;
+    } catch (err) { return null; }
+  }
   function _dragToDock(el, payloadFn) {   // 83(用户设计):**头部当拖动把手**(仿浮层卡)——即时拖,和对话流滚动零冲突
     try { injectCss(); } catch (e) {}   // 92:ghost 样式保险——通话 UI 没初始化过时侧栏拖动 ghost 曾无样式(看不见"卡片")
     var hd = el.querySelector('.vc-if-hd') || el.firstElementChild || el;
@@ -1924,6 +1931,13 @@
           rec.cid = rec.cid || (el.dataset && el.dataset.vcCid) || _mkCid();   // 95:收藏保留卡片编号
           _dockLoad(function () { _favSave(rec); });
           try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
+        } else if (moved && e3 && _dropOnUpage(e3) && window.__upPasteCard) {
+          // #50(用户设计):把卡从侧栏/收藏拖到**自建页**上=粘贴。落点吸附到最近行列交叉点,
+          //   持久化,内容作为**独立副本**(删除不影响收藏夹/侧栏原件)。
+          var _pg = _dropOnUpage(e3);
+          window.__upPasteCard(_pg, e3.clientX, e3.clientY, payloadFn());
+          _placeFx(e3.clientX, e3.clientY);
+          try { if (typeof _toast === 'function') _toast('已贴到页面'); } catch (e) {}
         } else if (moved && e3 && _sideOpen()) {
           // 92(用户设计):从侧栏把卡拖出到阅读器区(没进收藏夹)=放入字幕浮层。侧栏开着浮层隐身,
           // 只放"飞入"特效示意确实放过去了;关侧栏它就在那。
