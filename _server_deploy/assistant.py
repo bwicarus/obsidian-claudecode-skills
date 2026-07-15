@@ -1483,6 +1483,23 @@ def _t_do_task(args, ctx):
                               "model": r["variant"], "effort": r["depth"]}, ctx)
 
 
+def _t_make_paper(args, ctx):
+    """★用户设计(#38/#55):编排 AI 唯一能看到的**造纸入口**(它自己没有 page_* 工具)。
+    造一张让用户**在页面上手写作答**的交互纸(出题/填空/试卷/听写/清单/『给我出…我写』/『在纸上做』)。
+    内部把活儿甩给后台 CLI(CLI 那边经 MCP 才有 page_new/page_add/page_show),产出**一张 CLI 卡**、可保存为工具。
+    args {intent: 一句话说清要造什么纸(题目/数量/紧扣哪页…),把用户原话原样带上}。"""
+    intent = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("text") or "").strip()
+    if len(intent) < 2:
+        return {"error": "要造什么纸?一句话说清(如『出3道填空题让我写』)"}
+    r = _resolve("agent", str(ctx.get("uid") or ""))
+    # 把造纸规矩直接写进给 CLI 的指令:分步 page_new→page_add(逐个)→page_show;答题/填空纸**必须**加检查按钮。
+    instr = ("造一张让用户在页面上手写作答的交互纸:" + intent +
+             "。用 page_new 开纸 → page_add 逐个加元素(题干 text、作答 blank)→ page_show 生成。"
+             "**答题/填空/试卷纸务必加一个按钮**(kind:button, label:'让 AI 检查', event:'check')让用户写完点它批改。")
+    return _bg_task("agent", {"instruction": instr, "backend": r["backend"],
+                              "model": r["variant"], "effort": r["depth"]}, ctx)
+
+
 def _card_extra(ctx):
     """61b(用户需求):制卡/记笔记的后台 AI 自动带上**对话现场**——最近工具结果(网页搜索摘要/配图 URL)
     + 近几轮对话。语音模型的 text 种子往往只有一句话,搜过的资料不注入就永远进不了卡片。
@@ -3065,6 +3082,12 @@ def _t_page_show(args, ctx):
     rel = (ctx or {}).get("file_rel") or ""
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "目前只支持 PDF 阅读器"}
+    # 兜底(#2 纸上没按钮):有填空/作答块却没按钮 → 自动补一个「让 AI 检查」按钮,
+    #   不依赖 CLI 记得加。答题纸必有批改入口;纯笔记/绘画纸(无 blank)不加。
+    kinds = {b.get("kind") for b in d["blocks"]}
+    if "blank" in kinds and "button" not in kinds:
+        d["blocks"].append({"kind": "button", "label": "让 AI 检查", "event": "check",
+                            "id": "b_check%d" % len(d["blocks"])})
     return {"已生成": "%d 个元素" % len(d["blocks"]),
             "接下来": "系统会在你当前位置插一张纸(即时出现,不用刷新)。用户填/写完点纸上的按钮。",
             "client_action": {"fn": "__upStartTask",
@@ -3126,6 +3149,10 @@ TOOLS = {
                 "**只有 1 个工具就能答的,自己直接调**(那种情况用它没有任何好处)。"
                 "用它时把用户原话**原样**转述,别自己拆步骤。args {instruction}",
                 _t_do_task),
+    "make_paper": ("★造一张让用户**在页面上手写作答**的交互纸(出题/填空/试卷/听写/清单/『给我出…我写』/『在纸上做』/"
+                   "『让我在纸上写』)。**你没有别的造纸工具**——凡是要用户在页面上手写的,一律用它(它会交给后台 CLI 造)。"
+                   "args {intent:一句话说清要造什么纸,把用户原话原样带上}",
+                   _t_make_paper),
     "add_vocab": ("把英文单词加生词本并制卡(后台)。args {word?}(不传用选中)", _t_add_vocab),
     "search_image": ("★配图专用(搜**真实图片**,非 AI 生成;多源 Wikimedia Commons + Google 图搜)。**用户开了配图偏好时**,"
                      "先想清楚这次回答里**哪些概念配图真有帮助**(有明确视觉形象的:实物/结构/示意图/图表/生物/文物/天体/仪器等),"
@@ -3211,9 +3238,9 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    if name == "do_task":   # CLI 卡标题 = 用户任务原话(不是通用"do_task"),前端拿它当卡头
-        instr = (args.get("instruction") or args.get("task") or args.get("text") or "").strip()
-        return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else "后台任务"
+    if name in ("do_task", "make_paper"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
+        instr = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("text") or "").strip()
+        return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else ("造纸" if name == "make_paper" else "后台任务")
     return {"page_new": "新建纸", "page_add": "加元素", "page_show": "生成纸", "run_saved_task": "运行工具", "list_saved_tasks": "列出工具", "start_dictation": "开始听写", "read_page": "读取页面", "read_selection": "读取选中", "search_book": "搜索全书",
             "search_all_books": "跨书搜索", "open_book": "打开书", "summarize_section": "总结本章",
             "translate": "翻译", "goto_page": "翻页", "make_anki": "制卡", "make_note": "整理笔记",
@@ -3229,6 +3256,8 @@ def _tool_label(name, args):
 #   这样造纸永远是**一张 CLI 卡**(可保存),不会退化成编排侧内联的一堆 page_new/add/show 工具 chip。
 #   ⚠ 只从**编排侧目录**摘除,page_* 仍留在 TOOLS 里给 MCP/CLI 调(去壳回放也靠它)。
 _ORCH_DROP = {"page_new", "page_add", "page_show"}
+# CLI 委托类后台任务:进度/结果显示在**卡内**(tool2 → _trackCliTask),不发卡外浮动 task 事件(#1 状态在卡外的根因)。
+_AGENT_TASKS = {"do_task", "make_paper"}
 
 
 def _sys_prompt(ctx):
@@ -4260,7 +4289,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
-                if isinstance(res, dict) and res.get("task_id"):   # 后台写任务 → 前端轮询完成+给撤销按钮
+                if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # 后台写任务(制卡/笔记)→ 卡外浮动轮询+撤销;CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不重复
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
                 if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}

@@ -152,51 +152,35 @@
       });
       sv.appendChild(sb); f.appendChild(sv);
     }
-    tools.forEach(function (p) {
-      var n = document.createElement('div'); n.className = 'rc-flow-node';
-      var h = document.createElement('div'); h.className = 'rc-flow-h';
-      h.textContent = (p.label || p.tool || '工具') + (p.took_s != null ? ('  ' + p.took_s + 's') : '');
-      n.appendChild(h);
-      // ① AI 请求 —— 含**真正喂给 AI 的图**(点击放大;复用既有 .fig-lightbox)
-      var q = document.createElement('div'); q.className = 'rc-flow-q';
-      var argTxt = '';
-      try { argTxt = (p.args && Object.keys(p.args).length) ? JSON.stringify(p.args) : ''; } catch (e) {}
-      (p.vision || []).forEach(function (v) {
-        var src = (typeof v === 'string') ? v : ('data:' + (v.media_type || 'image/png') + ';base64,' + v.b64);
-        var im = document.createElement('img');
-        im.src = src; im.className = 'rc-flow-img'; im.alt = '喂给 AI 的图';
-        im.title = '这就是实际发给 AI 的图 —— 点击放大';
-        im.addEventListener('click', function (ev) {
-          ev.stopPropagation();
-          var mask = document.createElement('div'); mask.className = 'fig-lightbox';
-          var big = document.createElement('img'); big.src = src; big.alt = '';
-          mask.appendChild(big); document.body.appendChild(mask);
-          mask.addEventListener('click', function () { mask.remove(); });
-        });
-        q.appendChild(im);
+    if (!tools.length) { f.appendChild(document.createTextNode('(本轮没有工具调用)')); return; }
+    // ★用户设计 #3:每个工具都以「工具长条」显示、可长按进各种设置 —— **复用 rc-toolchip 的 paintFlow**
+    //   (.vc-fn 长条 + 长按 openDetail),别再自己画纯文本步骤(那正是"擅自设计"的又一处)。
+    var main = tools[tools.length - 1] || {};
+    var isCli = !!t.taskId && main.steps && main.steps.length;   // CLI 卡:内部工具塞在单个 part 的 sub_steps 里
+    var steps;
+    if (isCli) {
+      steps = main.steps.map(function (s) { return { label: s.label || String(s), detail: s.detail || '' }; });
+    } else {
+      steps = tools.map(function (p) {
+        var a = ''; try { a = (p.args && Object.keys(p.args).length) ? JSON.stringify(p.args) : ''; } catch (e) {}
+        var det = a;
+        if (p.result) det = (a ? a + '\n\n' : '') + String(p.result).slice(0, 2000);
+        return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model };
       });
-      if ((p.vision || []).length) {
-        var cap = document.createElement('div'); cap.className = 'rc-flow-cap';
-        cap.textContent = '↑ 实际发给 AI 的图(点击放大)';
-        q.appendChild(cap);
-      }
-      if (argTxt) { var a = document.createElement('div'); a.className = 'rc-flow-args'; a.textContent = argTxt; q.appendChild(a); }
-      if (!q.childNodes.length) { q.className = 'rc-flow-args'; q.textContent = '(无参数)'; }
-      n.appendChild(q);
-      // ② 结果
-      if (p.result) {
-        var r = document.createElement('div'); r.className = 'rc-flow-r';
-        _md(r, String(p.result).slice(0, 3000));
-        n.appendChild(r);
-      }
-      (p.steps || []).forEach(function (s) {
-        var sd = document.createElement('div'); sd.className = 'rc-flow-step';
-        sd.textContent = '· ' + (s.label || String(s)) + (s.sec != null ? (' ' + s.sec + 's') : '');
-        n.appendChild(sd);
-      });
-      f.appendChild(n);
-    });
-    if (!tools.length) { f.textContent = '(本轮没有工具调用)'; }
+    }
+    var vision = [];
+    tools.forEach(function (p) { (p.vision || []).forEach(function (v) { vision.push(v); }); });
+    var ans = t.parts.filter(function (p) { return p.kind === 'text' && (p.text || '').trim(); })
+                     .map(function (p) { return p.text; }).join('\n\n');
+    var titleTxt = (t.hd && t.hd.querySelector('span')) ? t.hd.querySelector('span').textContent
+                                                        : (main.label || main.tool || '任务');
+    var chip = { type: 'text', label: titleTxt, tool: (isCli ? 'do_task' : (main.tool || '')),
+                 steps: steps, meta: [], vision: vision,
+                 failed: tools.some(function (p) { return !!p.error; }),
+                 detail: ans, summary: '' };
+    var box = document.createElement('div'); f.appendChild(box);
+    if (RC.toolChip && RC.toolChip.renderFlowInto) { RC.toolChip.renderFlowInto(box, chip); }
+    else { box.textContent = steps.map(function (s) { return '· ' + s.label; }).join('\n'); }   // 兜底
   }
 
   // ── 注入 ─────────────────────────────────────────────────────────────────

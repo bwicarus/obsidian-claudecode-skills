@@ -2182,7 +2182,8 @@
       RC.turnCard.idle(tid);
       // ★ do_task(CLI 编排):后台 agent 的**内部工具调用**要展进这张卡的流程 —— 否则没 parts,
       //   保存工具(E)也无从下手(用户点破:CLI 不显示工具,保存就做不了)。轮询 task-status 拉 steps。
-      if (d.task_id) { _trackCliTask(tid, d.task_id, d.label || d.name || 'do_task'); return; }
+      // CLI 委托任务(do_task/make_paper)→ 卡内进度+结果(_trackCliTask);其它后台写任务(制卡/笔记)走 task 事件的卡外浮动+撤销。
+      if (d.task_id && (d.name === 'do_task' || d.name === 'make_paper')) { _trackCliTask(tid, d.task_id, d.label || d.name || '造纸'); return; }
       RC.turnCard.addPart(tid, { kind: 'tool', tool: d.name || '', label: d.label || d.name || '工具',
         args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 3000),
         took_s: d.sec, model: d.model, error: d.status === 'error' ? (d.brief || '失败') : '' });
