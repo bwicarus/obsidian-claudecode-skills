@@ -123,6 +123,8 @@ window._favOpenPicker = function () {
       '-webkit-appearance:none;appearance:none;user-select:none;margin-right:8px}' +
     '.up2-b-btn:active{transform:scale(.96)}' +
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
+    '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;overflow:auto;padding:12px 22px;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08);-webkit-overflow-scrolling:touch}' +
+    '.up2-run-result h3{font-size:15px;margin:0 0 6px}.up2-run-result p{margin:0 0 .4em}' +
     '.up2-content .up2-content-body h1,.up2-content .up2-content-body h2,.up2-content .up2-content-body h3{line-height:1.35;margin:.9em 0 .45em}' +
     '.up2-content .up2-content-body ul,.up2-content .up2-content-body ol{margin:0 0 .8em;padding-left:1.6em}' +
     '.up2-content.editing{z-index:52;pointer-events:auto;cursor:default;display:flex;flex-direction:column}' +   /* 编辑态才抬到最上+全拦(禁手写/选词) */
@@ -759,6 +761,38 @@ window._favOpenPicker = function () {
   //     **不刷新、不卡顿**(CLAUDE.md「乐观新建即全功能页」)。
   //     我一开始让后端**同步**插页再整本书重载 —— 大书上要卡好几秒,而且把浏览器里那份 PDF 作废了。
   //     用户拍板:前端才是建页的执行者,AI 只负责遥控 + 注入内容。
+  // 任务运行时:按 upage id 重画那张纸(检查结果写回 sidecar 后,SSE text 事件触发)。
+  window.__upRerender = function (upId) {
+    try {
+      RC.reqJson('GET', UP_TEXT_API + '?file=' + encodeURIComponent(UP_FILE)).then(function (g) {
+        var fresh = ((g && (g.pages || g.items)) || []).filter(function (x) { return x.id === upId; })[0];
+        if (!fresh) return;
+        // 找到这张纸的覆盖层重画(它已挂在某个 page-wrap / pdf-upage 上)
+        var el = document.querySelector('[data-uid="' + upId + '"]') ||
+                 (fresh.page ? document.querySelector('.page-wrap[data-page-num="' + fresh.page + '"]') : null);
+        var ov = el ? el.querySelector('.up2-content') : null;
+        if (!ov && fresh.page) { var pw = document.querySelector('[data-page-num="' + fresh.page + '"]'); ov = pw ? pw.querySelector('.up2-content') : null; }
+        if (ov) _upRenderOverlay(ov, fresh);
+      }).catch(function () {});
+    } catch (e) {}
+  };
+  // 进度:更新那张纸卡片**内**的提示行(在标题下方,不在卡上方)。
+  window.__upRunProgress = function (run) {
+    try {
+      if (!run || !run.rid) return;
+      var ov = document.querySelector('[data-up-run="' + run.rid + '"]');
+      if (!ov) return;
+      var h = ov.querySelector('.up2-run-hint');
+      if (h) h.textContent = run.hint || '';
+      // 检查/批改结果(AI 回复)显示在**卡片内**(纸的下方),渲成 markdown。不塞进纸格子(会撑破)。
+      if (run.result_md) {
+        var r = ov.querySelector('.up2-run-result');
+        if (!r) { r = document.createElement('div'); r.className = 'up2-run-result'; ov.appendChild(r); }
+        try { r.innerHTML = (window.RC && RC.md) ? RC.md(run.result_md) : RC.esc(run.result_md); } catch (e) { r.textContent = run.result_md; }
+      }
+    } catch (e) {}
+  };
+
   window.__upStartTask = function (spec) {
     try {
       spec = spec || {};
@@ -850,7 +884,10 @@ window._favOpenPicker = function () {
                         'height:' + ((b.rect[3] - b.rect[1]) * 100) + '%;';
       // 字号 = 这一格**渲染后的真实高度** × font_ratio。不能写死 px:PDF 页尺寸千差万别
       //   (A4 595pt vs 超大扫描件 2230pt),写死会让字比蚂蚁小或撑破格子(实测那次就是这么翻的)。
-      d.__fr = (b.kind === 'text' && b.style === 'h1') ? (sp.font_ratio || 0.45) * 1.3 : (sp.font_ratio || 0.45);
+      // 字号锁定**单行格高**(不是块的 offsetHeight —— 内容多的块会被撑高,× ratio 就字号爆炸,
+      //   用户实测检查结果撑破整页的根因)。行高比例 = line_h / page_h,乘页元素像素高。
+      d.__fr = (b.kind === 'text' && b.style === 'h1') ? (sp.font_ratio || 0.45) * 1.25 : (sp.font_ratio || 0.45);
+      d.__lhr = (sp.line_h && sp.page_h) ? (sp.line_h / sp.page_h) : 0;   // 单行占页高的比例
       if (b.kind === 'text') {
         d.textContent = b.text || '';
         if (b.style === 'h1') d.classList.add('up2-h1');
@@ -872,10 +909,14 @@ window._favOpenPicker = function () {
     });
     // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
     requestAnimationFrame(function () {
+      var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
         var fr = el.__fr; if (!fr) return;
-        var fs = Math.max(9, Math.round(el.offsetHeight * fr));
+        // 单行格高(px)= 页高 × 行高比例;字号 = 单行格高 × ratio。**与块自身高度无关** → 永不爆炸。
+        var rowPx = (el.__lhr && bh) ? bh * el.__lhr : (el.offsetHeight || 20);
+        var fs = Math.max(9, Math.min(64, Math.round(rowPx * fr)));
         el.style.fontSize = fs + 'px';
+        if (el.classList.contains('up2-b-text') || el.classList.contains('up2-b')) el.style.overflow = 'hidden';
       });
     });
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);

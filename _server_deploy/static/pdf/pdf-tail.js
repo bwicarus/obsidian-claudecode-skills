@@ -367,6 +367,16 @@ window._inkLoadAll = _inkLoadAll;
           try { var _ra = ev.action; if (window.RC && RC.execRemote) RC.execRemote(_ra); else if (_ra && typeof window[_ra.fn] === 'function') window[_ra.fn].apply(null, _ra.args || []); } catch (_) {}
           return;
         }
+        // ★ 任务运行时:纸内容变了(检查结果写回 / 块显隐)→ 重画那张用户页。
+        //   之前这里只认 ink,text/run 事件被下面那行 return 掉 → 「让 AI 检查」结果写进了 sidecar 却不显示(用户实测卡住)。
+        if (ev && ev.kind === 'text' && ev.file === FILE_REL) {
+          try { if (window.__upRerender) window.__upRerender(ev.uid); } catch (_) {}
+          return;
+        }
+        if (ev && ev.kind === 'run' && ev.file === FILE_REL && ev.run) {
+          try { if (window.__upRunProgress) window.__upRunProgress(ev.run); } catch (_) {}
+          return;
+        }
         if (!ev || ev.kind !== 'ink' || ev.file !== FILE_REL) return;
         var num = parseInt(ev.uid, 10); if (!num) return;
         if (_ink.drawing && _ink.drawing.num === num) return;               // 正在画这页 → 不打断

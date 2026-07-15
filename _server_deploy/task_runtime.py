@@ -92,7 +92,7 @@ def _push_run(run: dict):
         publish("run", run.get("file") or "", run.get("uid"),
                 {"run": {"rid": run["rid"], "status": run["status"], "kind": run["kind"],
                          "state": run.get("state") or {}, "upage": run.get("upage"),
-                         "hint": run.get("hint") or ""}})
+                         "hint": run.get("hint") or "", "result_md": run.get("result_md") or ""}})
     except Exception:
         pass
 
@@ -398,6 +398,9 @@ def _check_page(rid, prompt_hint=""):
             res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}
         except Exception:
             res = {"brief": (out or "")[:400]}
+        # 检查结果是 **AI 的回复** → 放**卡片里**(用户拍板:AI 的回复在卡片中输出),
+        #   **绝不塞进纸的格子** —— 一大段 markdown 当 text 块塞格子,布局器按字数估成几十行、
+        #   字号=格高×ratio 就爆炸撑破整页(用户实测那张巨字图的根因)。
         md = ["### 检查结果  " + str(res.get("score") or "")]
         for it in (res.get("items") or []):
             ok = "✅" if it.get("ok") else "❌"
@@ -405,11 +408,9 @@ def _check_page(rid, prompt_hint=""):
                       (" — " + it.get("note")) if it.get("note") else ""))
         if res.get("brief"):
             md.append("\n> " + str(res["brief"]))
-        _set_blocks(run, list(blocks) + [{"id": "check_" + str(int(time.time())),
-                                          "kind": "text", "text": "\n".join(md)}])
-        run.update(status="done", result=res, hint="检查完成 ✅")
+        run.update(status="done", result=res, result_md="\n".join(md), hint="检查完成 ✅")
         _save(run)
-        _push_run(run)
+        _push_run(run)   # 带 result_md,前端显示在卡片下方(_push_run 会把 result_md 一起推)
     except Exception as ex:
         run = load(rid) or run
         run.update(status="error", error=str(ex)[:200])
