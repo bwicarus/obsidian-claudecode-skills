@@ -1132,6 +1132,9 @@ def pdf_api_run_event():
     ev = str(b.get("event") or "")[:20]
     if not rid or not ev:
         return jsonify({"ok": False, "error": "缺 rid/event"}), 400
+    shots = b.get("shots")   # 检查时前端带来的整页渲染截图(所见即所得)→ 暂存给 _check_page 用
+    if isinstance(shots, list) and shots:
+        TR.set_check_shots(rid, shots)
     return jsonify(TR.advance(rid, ev))
 
 

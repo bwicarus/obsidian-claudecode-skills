@@ -915,9 +915,53 @@ window._favOpenPicker = function () {
   //      捕获阶段 stopPropagation 会吞掉内部按钮事件 —— 插入页保存键失灵就是这么来的)
   //   ② iOS 的 AudioContext **必须在点击的同步栈里** warm(__vcTtsWarm),否则听写第一个词无声
   //   ③ SSE 在页面不可见时会被**直接丢弃** → 回前台必须拉 run-status **对齐状态机**,不能只靠推送
+  // 用户点子:检查时**截前端渲染好的整页**(题目+手写所见即所得)发后端,比服务端拼图准。
+  function _upH2C() {
+    if (window.html2canvas) return Promise.resolve(window.html2canvas);
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script'); s.src = '/static/pdf/html2canvas.min.js';
+      s.onload = function () { res(window.html2canvas); }; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  function _upShotEl(el) {
+    return _upH2C().then(function (h2c) {
+      return h2c(el, { useCORS: true, logging: false, backgroundColor: '#ffffff',
+                       scale: Math.min(2, window.devicePixelRatio || 1) });
+    }).then(function (canvas) {
+      var b64 = '', qs = [0.85, 0.7, 0.5];
+      for (var q = 0; q < qs.length; q++) { b64 = (canvas.toDataURL('image/jpeg', qs[q]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
+      return b64.length > 3000 ? b64 : '';
+    });
+  }
+  function _upCaptureRunShots(rec) {   // 截本 run 的每一页(按页号排序=图序=页序)
+    var els = Array.prototype.slice.call(document.querySelectorAll('.pdf-upage'))
+      .filter(function (el) { return el.__upRec && el.__upRec.run_id === rec.run_id; });
+    if (!els.length && rec && _upTempEls[rec.id]) els = [_upTempEls[rec.id]];
+    els.sort(function (a, b) { return ((a.__upRec && a.__upRec.page) || 0) - ((b.__upRec && b.__upRec.page) || 0); });
+    var shots = [];
+    return els.reduce(function (chain, el) {
+      return chain.then(function () {
+        return _upShotEl(el).then(function (b64) {
+          if (b64) shots.push({ page: (el.__upRec || {}).page, media_type: 'image/jpeg', b64: b64 });
+        }).catch(function () {});
+      });
+    }, Promise.resolve()).then(function () { return shots; });
+  }
   function _upRunEvent(rec, ev) {
     if (!rec.run_id) return;
     try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
+    if (ev === 'check') {   // 检查:先截整页(所见即所得)再连截图一起发
+      _upRunHint(rec, '正在截图检查…');
+      _upCaptureRunShots(rec).then(function (shots) {
+        RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev, shots: shots })
+          .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); }).catch(function () {});
+      }).catch(function () {   // 截图失败 → 退回纯事件(后端回退服务端拼图)
+        RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })
+          .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); }).catch(function () {});
+      });
+      return;
+    }
     RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })   // ⚠ 签名是 (method,url,body)
       .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); })
       .catch(function () {});
