@@ -2202,6 +2202,7 @@
       if (d.task_id && (d.name === 'do_task' || d.name === 'make_paper')) { _trackCliTask(tid, d.task_id, d.label || d.name || '造纸'); return; }
       RC.turnCard.addPart(tid, { kind: 'tool', tool: d.name || '', label: d.label || d.name || '工具',
         args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 3000),
+        vision: d.vision || [],   // #8:实际发给 AI 的图 → 流程「AI 请求」节点展示(点击放大)
         took_s: d.sec, model: d.model, error: d.status === 'error' ? (d.brief || '失败') : '' });
     } catch (_) {}
   }

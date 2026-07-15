@@ -2024,11 +2024,12 @@ def _viewshot_result(ctx, note_extra=""):
             "结合笔迹的位置/形状/指向和图里文字回答。"
             "若笔迹是手写字/算式:先看整体结构再逐个认字符,易混对(G↔A↔C、r↔n↔v)用整体含义合理性定夺;"
             "他学的内容不限于本页主题。" + (note_extra or ""))
+    _fed = [{"media_type": vimg.get("media_type") or "image/jpeg", "b64": vimg["b64"]}]
     if ctx.get("_want_vision"):
-        return {"_vision": [{"media_type": vimg.get("media_type") or "image/jpeg", "b64": vimg["b64"]}],
+        return {"_vision": _fed, "_fed_images": _fed,
                 "看图提示": note, "说明": "屏幕实时截图已直接发给你,结合看图提示自己看图回答"}
-    desc = _vision_for(ctx, [{"media_type": vimg.get("media_type") or "image/jpeg", "b64": vimg["b64"]}], note)
-    return {"画面描述": desc or "(看图失败,可重试)"}
+    desc = _vision_for(ctx, _fed, note)
+    return {"画面描述": desc or "(看图失败,可重试)", "_fed_images": _fed}   # #8 前端截图=实际发给AI的图,回卡显示
 
 
 def _t_see_page(args, ctx):
@@ -2165,11 +2166,12 @@ def _t_see_ink(args, ctx):
             note += (f" ⚠此前这块区域的笔迹是:「{prev}」,用户在此基础上**又添加了笔画**。"
                      "请对比着讲**变化了什么**;注意新增笔画很可能是对原图形的补笔/修饰(比如给花加花瓣、给箭头加分叉),"
                      "先判断整体是否仍是一个图形,确实独立时才说是新的东西。")
+        _fed = [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}]
         if ctx.get("_want_vision"):   # ㉗:GPT Realtime 图像输入开 → 笔迹合成图直喂它自己看(不经视觉模型转述,更快更省一跳)
-            return {"_vision": [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}],
+            return {"_vision": _fed, "_fed_images": _fed,
                     "看图提示": note, "说明": "笔迹区域合成图已直接发给你,结合看图提示自己看图回答"}
-        desc = _vision_for(ctx, [{"media_type": "image/png", "b64": base64.b64encode(png).decode()}], note)
-        return {"笔迹标注描述": desc or "(看图失败,可重试)"}
+        desc = _vision_for(ctx, _fed, note)
+        return {"笔迹标注描述": desc or "(看图失败,可重试)", "_fed_images": _fed}   # #8 实际发给AI的图,回卡显示
     except Exception as e:
         return {"error": str(e)[:140]}
 
@@ -3640,6 +3642,13 @@ def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_ste
     if isinstance(res, dict):
         if res.get("task_id"):
             d["task_id"] = res["task_id"]
+        if res.get("_fed_images"):   # ★ #8:把**实际喂给 AI 的图**带给前端 → 流程「AI 请求」节点展示(点击放大)
+            try:
+                d["vision"] = [{"media_type": v.get("media_type", "image/png"), "b64": v.get("b64")}
+                               for v in res["_fed_images"]
+                               if isinstance(v, dict) and v.get("b64") and len(v["b64"]) < 1300000][:3]   # 太大不塞 SSE
+            except Exception:
+                pass
         if res.get("error"):
             d["status"] = "error"
             d["brief"] = str(res["error"])[:300]
