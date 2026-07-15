@@ -98,47 +98,81 @@ def _rect(sp: dict, r: int, c: int, h: int, w: int) -> list:
     return [f(x0), f(y0), f(x1), f(y1)]
 
 
-def layout(blocks: list, sp: dict) -> list:
-    """流式排版 + 自动补页。返回 **每张纸一个 list**:[[block,...], [block,...]]
+def _hit(occ: list, r: int, c: int, h: int, w: int) -> bool:
+    """[r,c,h,w] 这块格子跟已放的任何一块**重叠**吗?"""
+    for (R, C, H, W) in occ:
+        if not (r + h <= R or R + H <= r or c + w <= C or C + W <= c):
+            return True
+    return False
 
-    A(默认):元素不带 at → 按游标流式排,放不下换行,一页放不下 → 开下一张纸。
-    B(可选):元素带 at:[row,col] → 就摆那儿(不推游标;越界则夹到页内)。
-    每个元素都会被补上 at / span / rect。
+
+def layout(blocks: list, sp: dict) -> list:
+    """碰撞安全排版 + 自动补页。返回 **每张纸一个 list**。
+
+    ★ 用户铁律(2026-07-15):**每个元素都有自己的占位,绝不覆盖**。任何放置(流式 or 精确 at)
+      若跟已放元素重叠 → **自动往下挪**到第一个不冲突的行,而不是叠上去。
+      这尤其保护"批量生成"(AI 一次给一堆 at 坐标)时不小心把两个元素排到同一格。
+
+    A(默认):不带 at → 游标流式排;放不下换行;整页放不下 → 开新纸。
+    B(可选):带 at:[row,col] → 尽量摆那儿,但**同样做碰撞检测**,冲突则从该行往下找空位。
     """
-    pages, cur = [], []
+    ROWS, COLS = int(sp["rows"]), int(sp["cols"])
+    pages, cur, occ = [], [], []      # occ = 当前页已占格子 [(r,c,h,w)]
     r, c = 0, 0
+
+    def _newpage():
+        nonlocal cur, occ, r, c
+        if cur:
+            pages.append(cur)
+        cur, occ, r, c = [], [], 0, 0
+
     for b0 in (blocks or []):
         b = dict(b0)
         h, w = (b.get("span") or default_span(b, sp))
-        h = max(1, min(int(h), sp["rows"]))
-        w = max(1, min(int(w), sp["cols"]))
+        h = max(1, min(int(h), ROWS))
+        w = max(1, min(int(w), COLS))
 
-        if b.get("at"):                                   # ── B:精确定位
-            ar, ac = int(b["at"][0]), int(b["at"][1])
-            ar = max(0, min(ar, sp["rows"] - h))
-            ac = max(0, min(ac, sp["cols"] - w))
+        if b.get("at"):                                   # ── B:精确定位(但仍碰撞安全)
+            ar = max(0, int(b["at"][0]))
+            ac = max(0, min(int(b["at"][1]), COLS - w))
+            while ar + h <= ROWS and _hit(occ, ar, ac, h, w):   # 冲突 → 往下挪
+                ar += 1
+            if ar + h > ROWS:                             # 这页放不下 → 新纸,从顶开始
+                _newpage()
+                ar, ac = 0, max(0, min(int(b["at"][1]), COLS - w))
+                while ar + h <= ROWS and _hit(occ, ar, ac, h, w):
+                    ar += 1
             b["at"], b["span"] = [ar, ac], [h, w]
             b["rect"] = _rect(sp, ar, ac, h, w)
+            occ.append((ar, ac, h, w))
             cur.append(b)
             continue
 
-        if c + w > sp["cols"]:                            # ── A:放不下 → 换行
+        # ── A:流式,同样碰撞安全 ──
+        if c + w > COLS:                                  # 本行放不下 → 换行
             r += 1
             c = 0
-        if r + h > sp["rows"]:                            # ── 一页放不下 → 开新纸
-            if cur:
-                pages.append(cur)
-            cur, r, c = [], 0, 0
+        # 从 (r,c) 起找第一个不冲突的位置:先在本行右移,右满换行
+        while True:
+            if c + w > COLS:
+                r += 1
+                c = 0
+            if r + h > ROWS:                              # 整页放不下 → 新纸
+                _newpage()
+            if not _hit(occ, r, c, h, w):
+                break
+            c += 1                                        # 冲突 → 右移一格再试
         b["at"], b["span"] = [r, c], [h, w]
         b["rect"] = _rect(sp, r, c, h, w)
+        occ.append((r, c, h, w))
         cur.append(b)
-        # 推进游标:整行宽的元素(填空/标题/分隔线)独占若干行;窄元素(按钮)可并排
-        if w >= sp["cols"]:
+        # 推进游标:整行宽元素独占若干行;窄元素并排
+        if w >= COLS:
             r += h
             c = 0
         else:
             c += w
-            if c >= sp["cols"]:
+            if c >= COLS:
                 r += h
                 c = 0
     if cur:
