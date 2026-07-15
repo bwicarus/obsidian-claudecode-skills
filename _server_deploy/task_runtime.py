@@ -101,7 +101,8 @@ def _push_run(run: dict):
         publish("run", run.get("file") or "", run.get("uid"),
                 {"run": {"rid": run["rid"], "status": run["status"], "kind": run["kind"],
                          "state": run.get("state") or {}, "upage": run.get("upage"),
-                         "hint": run.get("hint") or "", "result_md": run.get("result_md") or ""}})
+                         "hint": run.get("hint") or "", "result_md": run.get("result_md") or "",
+                         "result_ai": run.get("result_ai") or ""}})
     except Exception:
         pass
 
@@ -511,6 +512,44 @@ def _free_tick(run, event):
     return False
 
 
+def _grade_report(run, res):
+    """给**前端编排 AI**的富报告:题目原文 + 各空标准答案 + 我的手写识别 + 判分。
+    纸上只显示判分结论(result_md),但 AI 要分析错题必须看到**题干**——而题干在自制纸的
+    overlay blocks 里(text 块=题干,blank.answer=标准答案),不在 PDF 文字层,read_page 读不到。
+    (用户实测:AI 拿到『8题全空0分』却答不出『第一题题目是什么』的根因。)"""
+    stem = []
+    qn = 0
+    try:
+        for pg in _run_pages(run):
+            for b in _blocks_of_page(run, pg.get("upage")):
+                k = b.get("kind")
+                if k == "text":
+                    t = (b.get("text") or "").strip()
+                    if t:
+                        stem.append(t)
+                elif k == "blank":
+                    qn += 1
+                    lab = (b.get("label") or "").strip()
+                    ans = (b.get("answer") or "").strip()
+                    seg = "第%d空" % qn + ((" " + lab) if lab else "")
+                    seg += "＿＿" + (("(标准答案:%s)" % ans) if ans else "(无标准答案)")
+                    stem.append(seg)
+    except Exception:
+        pass
+    out = ["这是我在一张**自制练习纸**上的作答,已用 AI 判分。下面给你**题目原文 + 各空标准答案 + 我的手写识别 + 判分**,请据此帮我分析(题目不在书页正文里,就在下面,别再去 read_page 找):", ""]
+    out.append("【题目纸原文(含各空标准答案)】")
+    out += stem or ["(这张纸没有题干文字)"]
+    out.append("")
+    out.append("【判分】" + (("  得分 " + str(res.get("score"))) if res.get("score") else ""))
+    for it in (res.get("items") or []):
+        ok = "✅ 正确" if it.get("ok") else "❌ 错/空"
+        out.append("第%s空 %s — 我写的:%s%s" % (it.get("n"), ok, (it.get("got") or "(空)"),
+                   ("  · 判语:" + it.get("note")) if it.get("note") else ""))
+    if res.get("brief"):
+        out.append("总评:" + str(res.get("brief")))
+    return "\n".join(out)
+
+
 def _check_page(rid, prompt_hint=""):
     """★ 阶段 B 的核心:让 AI 看这一页的手写并点评。**任意纸通用**(不只听写)。
     按每个 blank 的 rect 裁出手写(有 answer 字段就带上正确答案);题号/答案在 prompt 里用文字给。
@@ -625,7 +664,12 @@ def _check_page(rid, prompt_hint=""):
             rmd = "\n".join(md + _foot)
         except Exception:
             rmd = "\n".join(md)
-        run.update(status="done", result=res, result_md=rmd, hint="检查完成 ✅")
+        # 给前端 AI 的富报告(题目原文+标准答案+手写+判分)→ 回报给编排 AI 用它,不只结论。
+        try:
+            rai = _grade_report(run, res)
+        except Exception:
+            rai = rmd
+        run.update(status="done", result=res, result_md=rmd, result_ai=rai, hint="检查完成 ✅")
         _save(run)
         # ★ 结果**存进纸的 sidecar**(不是格子块) → 刷新/回前台/换设备都能看到,不靠那一次性 SSE。
         #   (后台线程发的 SSE 若那刻页面不可见就被 visibility 早退丢了 —— 用户实测"结果没出现"的根因。)
@@ -637,6 +681,7 @@ def _check_page(rid, prompt_hint=""):
                 for it in items:
                     if it.get("id") in _upids:
                         it["result_md"] = rmd
+                        it["result_ai"] = rai
                         it["updated"] = int(time.time())
                 P._upages_save(run["file"], items)
         except Exception:

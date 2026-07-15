@@ -793,14 +793,21 @@ window._favOpenPicker = function () {
     return fallback || '_';
   }
   // 把检查结果拼成一句自然的用户请求,送进前端 AI(在通话中→实时模型;否则→文字助手)。
-  function _upReportCheckToAI(md) {
-    var body = String(md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 1500);
-    var msg = '我刚做完这张练习纸并让你检查了,检查结果如下:\n\n' + body + '\n\n请帮我讲讲错的题、为什么错、怎么改对。';
+  //   ai=后端富报告(题目原文+标准答案+手写+判分),有它就用它(AI 才看得到题干、能分析);
+  //   没有(旧数据)才退回只有结论的 md。
+  function _upReportCheckToAI(md, ai) {
+    var msg;
+    if (ai && ai.trim()) {
+      msg = ai.trim() + '\n\n请帮我讲讲错的/没答上的题:题目在问什么、正确答案是什么、为什么、怎么记。';
+    } else {
+      var body = String(md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 1500);
+      msg = '我刚做完这张练习纸并让你检查了,检查结果如下:\n\n' + body + '\n\n请帮我讲讲错的题、为什么错、怎么改对。';
+    }
     try { if (window.RC && RC.assistant && RC.assistant.ask) { RC.assistant.ask(msg); return; } } catch (e) {}
     try { var ta = document.getElementById('asst-ta'); if (ta) { ta.value = msg; ta.focus(); if (window.RC && RC.toast) RC.toast('已填入助手输入框,按发送即可'); return; } } catch (e) {}
     try { if (window.RC && RC.toast) RC.toast('助手未就绪'); } catch (e) {}
   }
-  function _upRenderResult(ov, md, key) {
+  function _upRenderResult(ov, md, key, ai) {
     var r = ov.querySelector('.up2-run-result');
     if (!r) { r = document.createElement('div'); r.className = 'up2-run-result'; ov.appendChild(r); }
     var collapsed = !!_upResCollapsed[key];
@@ -820,8 +827,8 @@ window._favOpenPicker = function () {
       var c = !!_upResCollapsed[key];
       r.classList.toggle('collapsed', c); tog.textContent = c ? '展开 ▸' : '收起 ▾';
     });
-    askB.addEventListener('click', function (e) { e.stopPropagation(); _upReportCheckToAI(md); });
-    try { window.__lastCheckResult = { md: md, ts: Date.now() }; } catch (_) {}   // 被动:getContext 也带给 AI
+    askB.addEventListener('click', function (e) { e.stopPropagation(); _upReportCheckToAI(md, ai); });
+    try { window.__lastCheckResult = { md: md, ai: ai || md, ts: Date.now() }; } catch (_) {}   // 被动:getContext 用富报告(带题干)
   }
 
   // 任务运行时:按 upage id 重画那张纸(检查结果写回 sidecar 后,SSE text 事件触发)。
@@ -848,7 +855,7 @@ window._favOpenPicker = function () {
       var h = ov.querySelector('.up2-run-hint');
       if (h) h.textContent = run.hint || '';
       // 检查/批改结果(AI 回复)显示在**卡片内**(纸的下方),渲成 markdown。不塞进纸格子(会撑破)。
-      if (run.result_md) _upRenderResult(ov, run.result_md, _upResKey(ov, run.rid));
+      if (run.result_md) _upRenderResult(ov, run.result_md, _upResKey(ov, run.rid), run.result_ai);
     } catch (e) {}
   };
 
@@ -1090,7 +1097,7 @@ window._favOpenPicker = function () {
     // 定位完成后按各块真实高度算字号(offsetHeight 此刻可读)
     requestAnimationFrame(function () {
       // 检查结果(持久化在 sidecar 的 result_md)→ 渲进卡内结果区(不塞格子)
-      if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id));
+      if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id), rec.result_ai);
       var bh = body.offsetHeight || 0;
       body.querySelectorAll('.up2-b').forEach(function (el) {
         if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号

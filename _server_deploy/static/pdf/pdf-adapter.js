@@ -72,7 +72,8 @@
         try {
           var _lc = window.__lastCheckResult;
           if (_lc && c && (Date.now() - _lc.ts) < 6 * 60 * 1000) {
-            c.recent_check = String(_lc.md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 1200);
+            // 富报告(带题目原文+标准答案)优先 → AI 才能分析错题;没有才退回只有结论的 md。
+            c.recent_check = String(_lc.ai || _lc.md || '').split(/\n-{3,}\n?/)[0].replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim().slice(0, 2200);
           }
         } catch (e) {}
         return c || null;
