@@ -4486,7 +4486,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                               "detail": _step_detail(res)})
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
-                if isinstance(res, dict) and res.get("task_id"):
+                if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不发卡外浮动 task 事件(三后端一致)
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
@@ -4605,7 +4605,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}
-                if isinstance(res, dict) and res.get("task_id"):
+                if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不发卡外浮动 task 事件(三后端一致)
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
                 if isinstance(res, dict) and res.get("undo_id"):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
