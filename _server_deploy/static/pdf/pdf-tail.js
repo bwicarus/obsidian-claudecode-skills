@@ -153,6 +153,11 @@ function _inkBeginPageSegAt(d, e) {
   return true;
 }
 
+function _inkBeginGuard() {   // 笔一落就:①开手写守卫窗口(+1s)②清掉任何已有选中/查词框
+  //   —— 补"第一下"空窗(守卫原来要等 move 才建);也治 palm 抢在笔之前落下已经选中了的情况(用户点子:画笔工作时全部取消选中)。
+  try { window.__inkGuardUntil = Date.now() + 1000; } catch (_) {}
+  try { if (window.__clearContentSelection) window.__clearContentSelection(); } catch (_) {}
+}
 function _inkPointerDown(e) {
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
   if (document.body.classList.contains('up-editing')) return;   // 插入页就地编辑期:禁用页面手写(覆盖层挡不住 .page-wrap 的捕获 pointerdown)
@@ -174,6 +179,7 @@ function _inkPointerDown(e) {
   }
   // 绘制：Apple Pencil 始终；鼠标仅桌面手写模式；手指永不画（只滚动/双击切工具）
   if (!(e.pointerType === 'pen' || (e.pointerType === 'mouse' && _ink.mode))) return;
+  _inkBeginGuard();   // ★笔一落即开守卫 + 清已有选中(覆盖便签路由与普通两条画笔路径的公共点)
   // 便签路由:笔落在展开便签 body 上 → 整条手势仍由本模块主持,但这一段经 rc-stickynote 的
   // penBegin/penMove/penEnd 写进便签(跨界切割在 _inkPointerMove 处理)。落在 handle/工具等部位 →
   // 直接放行(不 stopPropagation),让便签自身手势(单击折叠/长按移动)接管;两种情况都不画页面

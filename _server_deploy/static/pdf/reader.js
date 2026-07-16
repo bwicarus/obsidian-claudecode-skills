@@ -5393,6 +5393,19 @@ document.addEventListener('touchstart', (e) => {
   }
 }, {passive: true});
 
+// 手写起笔时调(pdf-tail._inkBeginGuard):把任何**已有选中/查词框**一把清掉 + 关选中工具栏。
+//   用户点子:画笔工作时选中内容全部取消选中(治 palm 抢在笔前落下、或第一笔误触已经选中的字)。
+window.__clearContentSelection = function () {
+  try { if (_charSel && _charSel.pw) _charSel.pw.querySelector('.sel-overlay')?.replaceChildren(); _charSel = null; } catch (_) {}
+  try { document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = ''); } catch (_) {}
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
+  try { lastSelText = ''; } catch (_) {}
+  try { toolbar.classList.remove('open'); } catch (_) {}
+  try { _updateSelPreview(''); } catch (_) {}
+  try { var _wp = document.getElementById('word-pop'); if (_wp) _wp.style.display = 'none'; } catch (_) {}   // 关查词/词组小框(共用 #word-pop)
+  try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}            // 清查词高亮
+};
+
 // ─────────── PDF 高亮：sidecar JSON 持久化 + 渲染 + popover ───────────
 const DEFAULT_HL_COLORS = ['#fff59d','#a7f3d0','#a3d4ff','#fda4af'];
 function getHlColors() {
