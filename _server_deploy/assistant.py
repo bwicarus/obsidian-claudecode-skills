@@ -2396,6 +2396,46 @@ def _t_page_vocab(args, ctx):
                     "回答『我没掌握哪些词/这页生词』就用这个列表,别拿正文里的词自己猜掌握与否。"}
 
 
+def _hl_char_match(pdf, ap, rel, pg, needle):
+    """search_for 失败时的兜底:**char 层归一化子串匹配** → 行合并 rects。
+    治两类真实 miss(用户实测 highlighted:0):①句子跨换行(文字层"推\\n進" vs AI 给的连续"推進",
+    search_for 匹配不上)②全半角/中点等微差(NFKC 归一)。命中返回 rects(page pt),否则 None。"""
+    try:
+        r = pdf._page_chars_cached(ap, rel, pg)
+        chars = r[0] if r else None
+    except Exception:
+        chars = None
+    if not chars:
+        return None
+    import unicodedata
+
+    def _n(ch):
+        ch = unicodedata.normalize("NFKC", ch)
+        return "·" if ch in "·・•‧∙" else ch
+    seq = [( _n(c.get("c") or ""), c) for c in chars
+           if (c.get("c") or "").strip()]
+    S = "".join(x[0] for x in seq)
+    T = "".join(_n(ch) for ch in needle if not ch.isspace())[:120]
+    if len(T) < 4:
+        return None
+    i = S.find(T)
+    if i < 0:
+        return None
+    rows = []
+    for _, c in seq[i:i + len(T)]:
+        bb = (float(c.get("x0", 0)), float(c.get("y0", 0)), float(c.get("x1", 0)), float(c.get("y1", 0)))
+        cy = (bb[1] + bb[3]) / 2
+        for row in rows:
+            if abs(cy - row[4]) < max(2.0, (bb[3] - bb[1]) * 0.6):   # 同一行(y 中心接近)→ 合并
+                row[0] = min(row[0], bb[0]); row[1] = min(row[1], bb[1])
+                row[2] = max(row[2], bb[2]); row[3] = max(row[3], bb[3])
+                row[4] = (row[1] + row[3]) / 2
+                break
+        else:
+            rows.append([bb[0], bb[1], bb[2], bb[3], cy])
+    return [[round(r0[0], 2), round(r0[1], 2), round(r0[2], 2), round(r0[3], 2)] for r0 in rows] or None
+
+
 def _t_highlight(args, ctx):
     """把原文句子在 PDF 上画高亮:PyMuPDF search_for 文字→rects(同 char 层坐标系)→写高亮 sidecar。可撤销。"""
     file_rel = ctx.get("file_rel", "")
@@ -2431,10 +2471,13 @@ def _t_highlight(args, ctx):
                     continue
                 p = doc[pg - 1]
                 rects = p.search_for(t[:180])   # search_for 上限,长句截断匹配
-                if not rects:
-                    continue
+                if rects:
+                    nrects = [[round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)] for r in rects]
+                else:
+                    nrects = _hl_char_match(pdf, ap, file_rel, pg, t)   # 兜底:char 层归一化匹配(跨换行/全半角/中点差异)
+                    if not nrects:
+                        continue
                 hid = "h_" + os.urandom(6).hex()
-                nrects = [[round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)] for r in rects]
                 db["highlights"].append({
                     "id": hid, "page": pg, "rects": nrects,
                     "color": color, "text": t[:2000], "note": "", "kind": "note",
@@ -2453,6 +2496,10 @@ def _t_highlight(args, ctx):
         doc.close()
         if ids:
             pdf._hl_save(file_rel, db)
+        if not ids:   # 全 miss:必须是显式 error(曾静默返回 0 → AI 说"我先高亮一下"就结束,用户以为画了实际全无)
+            return {"error": "一处都没画上——给的句子在该页文字层里找不到(必须**逐字来自 read_page 返回的原文**,"
+                             "别改写/别翻译/别自行加标点)。没找到的:%s。可先 read_page 核对原文再重试。" % "、".join(miss),
+                    "missed": miss}
         res = {"highlighted": len(ids), "missed": miss, "_created": created,
                # 自动弹「跳转+撤销/重做」卡片(系统在改动发生时生成,非 AI 生成)
                "client_action": {"fn": "_assistEdit", "args": [{"type": "highlight", "file": file_rel, "items": created}]},
