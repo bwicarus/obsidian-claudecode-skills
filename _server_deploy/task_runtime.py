@@ -1147,7 +1147,22 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
     _gen = any(c["tool"] in ("page_new", "page_add", "page_add_many", "page_show") for c in calls)
     if _gen and str(instruction or "").strip():
         RECIPES_DIR.mkdir(parents=True, exist_ok=True)
+        # ★用户设计:节选保存时,「决定起点那一步的 AI 思路」= 这段子流程的真实局部意图(调用开端)。
+        #   CLI 执行时已随步存 rationale(工具调用前的散文);起点步没有 → 轻 AI 按路线总结一句;再无 → 留空(运行侧退回警示)。
+        origin = ""
+        if partial:
+            origin = str((steps or [{}])[0].get("rationale") or "").strip()
+            if not origin:
+                try:
+                    import assistant as A
+                    origin = (A._gemini_text(
+                        "下面是一个大任务里被用户节选出来的一段工具流程。用一句话(≤60字)概括这段子流程的意图"
+                        "(它自己要完成什么),别提大任务其余部分:\n大任务:%s\n节选路线:\n%s"
+                        % (str(instruction)[:300], _abstract_route(calls)), max_tokens=200, think=False) or "").strip()[:200]
+                except Exception:
+                    origin = ""
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
+               "origin": origin,
                "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
                "partial": bool(partial),   # 框选子集:原始意图是全量任务的,执行范围要以路线为准(否则会把用户框掉的步骤也做了)
                "route": _abstract_route(calls),   # 指挥棒:成功路线的结构化抽象(用户设计)

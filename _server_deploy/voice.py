@@ -1205,6 +1205,7 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
         env["ENABLE_TOOL_SEARCH"] = "false"   # 147c:关掉工具延迟加载(见下)——轮数减半
     answer = ""
     _acc = ""   # CLI 输出的正文累积 → 增量推给前端(卡片 body 边跑边显示,像 web_search)
+    _prose = ""  # 自上一个工具调用以来的散文(=决定下一步的思路)→ 随步存 rationale(节选保存时当"调用开端",用户设计)
     pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
     t0 = time.time()
@@ -1230,7 +1231,8 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                     except Exception:
                         _arg = {}
                     nm, _arg = _unwrap_call(nm, _arg if isinstance(_arg, dict) else {})
-                    steps.append({"name": nm, "status": "done", "args": _arg})
+                    steps.append({"name": nm, "status": "done", "args": _arg,
+                                  "rationale": (_acc.strip()[-500:] or None)})   # codex 无 per-step 散文,拿当时累积文本近似
                     _vtask_set(tid, step=f"{nm}…", steps=list(steps))   # 工具卡长条实时滚
             elif d.get("type") == "item.completed" and it.get("type") == "agent_message":
                 answer = (it.get("text") or "").strip()   # 覆盖式:最后一条 agent_message 即最终答案
@@ -1245,10 +1247,13 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                         _inp = c.get("input") if isinstance(c.get("input"), dict) else {}
                         nm, _inp = _unwrap_call(nm, _inp)
                         # 记 name+args(输入)+ tool_use id(下面按它把工具**输出**配对挂回来,流程显示"输入→输出")
-                        steps.append({"name": nm, "status": "done", "args": _inp, "_id": c.get("id")})
+                        steps.append({"name": nm, "status": "done", "args": _inp, "_id": c.get("id"),
+                                      "rationale": (_prose.strip()[-500:] or None)})   # 决定这一步之前 AI 说的话
+                        _prose = ""
                         _vtask_set(tid, step=f"{nm}…", steps=list(steps))
                 elif c.get("type") == "text" and (c.get("text") or "").strip():
                     _acc += c.get("text")   # claude 流式正文 → 边跑边推(增量结果显示在卡片 body)
+                    _prose += c.get("text")
                     _vtask_set(tid, partial=_acc[:4000])
         elif d.get("type") == "user":
             # ★ 工具返回体里的 client_action(如 page_show 的 __upStartTask)—— headless agent 不会转发它,

@@ -208,3 +208,11 @@ run_saved_task args 加 adjust;intent 分支返回 task_id 走 CLI 卡(_AGENT_TA
 (如「批量 11 块(text:5, blank:5带answer, button:1 event=check)——按新数量复制同构,题面重新生成」)。
 运行时整段注入指令:「严格按此步骤顺序与结构执行,内容按本次要求重新生成」——新 CLI 不重新摸索流程,
 沿已验证路线走,只换内容/参数。意图=要做什么,路线=怎么做,合成=指挥棒。
+
+### §8c 节选工具的「调用开端」= 决定起点那步的 AI 思路(2026-07-17,用户设计)
+
+CLI 执行时**随步记录 rationale**(claude 分支:工具调用前累积的散文,tool_use 时摘尾 500 字存进该步
+并清空;codex 无 per-step 散文,拿当时累积文本近似)。框选节选保存时:起点步 rationale = 这段子流程
+的**真实局部意图**,存 rec["origin"];起点无 rationale → 轻 AI(gemini flash,think=False)按
+「大任务+节选路线」总结一句;再无 → 留空。运行合成:partial+origin → "这段子流程的起始思路(当时
+AI 决定这么做的原话,作为本次执行的出发点):『…』+ 执行范围以路线为准";无 origin 退回警示方案。

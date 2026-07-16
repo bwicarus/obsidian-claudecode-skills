@@ -3486,8 +3486,15 @@ def _t_run_saved_task(args, ctx):
         adjust = str(adjust).strip()
         rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
         route = (rec.get("route") or "").strip()
-        _part = ("⚠ 本工具只保存了原任务的**一部分步骤**(用户框选):执行范围**以下面的操作路线为准**,"
-                 "原始意图中路线之外的环节(如做卡/记笔记等)**不要做**。\n") if rec.get("partial") else ""
+        _origin = str(rec.get("origin") or "").strip()
+        if rec.get("partial") and _origin:   # 节选+有起点思路:用它当调用开端(替代全量委托语义,用户设计)
+            _part = ("本工具**节选自更大任务**。这段子流程的**起始思路**(当时 AI 决定这么做的原话,作为本次执行的出发点):"
+                     "『%s』。执行范围**以下面的操作路线为准**,路线之外的环节**不要做**。\n" % _origin)
+        elif rec.get("partial"):
+            _part = ("⚠ 本工具只保存了原任务的**一部分步骤**(用户框选):执行范围**以下面的操作路线为准**,"
+                     "原始意图中路线之外的环节(如做卡/记笔记等)**不要做**。\n")
+        else:
+            _part = ""
         instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") + _part +
                  (("本次用户的调整(与原意图冲突时**以本次为准**):%s。\n" % adjust) if adjust else "") +
                  (("这是它上次**成功执行的操作路线**(已验证的指挥棒;**严格按此步骤顺序与结构执行**,"
