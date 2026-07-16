@@ -218,6 +218,7 @@ function _inkPointerDown(e) {
 }
 function _inkPointerMove(e) {
   const d = _ink.drawing; if (!d) return;
+  try { window.__inkGuardUntil = Date.now() + 1000; } catch (_) {}   // 手写守卫:活动时刷到 +1s → 绘制中+抬笔后 1s 内屏蔽内容层查词/选中(界面操作不受影响)
   e.preventDefault();
   // ── 便签跨界路由(规格:笔尖实时位置决定写哪层;pen/橡皮参与切割,line/arrow/rect 形状不切)──
   const RS = window.RC && RC.stickynote;
@@ -258,6 +259,7 @@ function _inkPointerMove(e) {
 }
 function _inkPointerUp(e) {
   const d = _ink.drawing; if (!d) return;
+  try { window.__inkGuardUntil = Date.now() + 1000; } catch (_) {}   // 抬笔:守卫再延 1s(手掌残留触摸不误触内容层)
   if (d.raf) { cancelAnimationFrame(d.raf); d.raf = null; }
   document.removeEventListener('pointermove', _inkPointerMove, true);
   document.removeEventListener('pointerup', _inkPointerUp, true);

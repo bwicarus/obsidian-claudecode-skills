@@ -3938,7 +3938,7 @@ function _bindCharLayer(cl, pw) {
 
   cl.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    if (window._ink && (_ink.mode || _ink.drawing)) return;        // 桌面手写模式/正在画 → 鼠标用于画,不选字
+    if ((window._ink && (_ink.mode || _ink.drawing)) || (Date.now() < (window.__inkGuardUntil || 0))) return;   // 手写模式/正在画/刚写完 1s 内 → 不选字查词(palm rejection)
     if (Date.now() - (window._clLastTouchAt || 0) < 700) return;   // 忽略 touch 后 iOS 合成的 mousedown（否则 onStart 双触发→假双击→刚弹的小框被冲掉）
     e.preventDefault(); e.stopPropagation();   // 阻止旧 document.mousedown 清 toolbar
     const p = ptToLocal(e.clientX, e.clientY);
@@ -3949,7 +3949,7 @@ function _bindCharLayer(cl, pw) {
     if (e.touches.length !== 1) { _dragStartCharIdx = null; _swipeStart = null; return; }
     // Apple Pencil(touchType='stylus')或手写模式/正在画 → 让墨迹层处理,**不选字**
     // (墨迹绘制在 wrap 的 pointerdown,跟这条 touchstart 是不同类事件,pointerdown 的 stopPropagation 挡不住它)
-    if ((e.touches[0] && e.touches[0].touchType === 'stylus') || (window._ink && (_ink.mode || _ink.drawing))) {
+    if ((e.touches[0] && e.touches[0].touchType === 'stylus') || (window._ink && (_ink.mode || _ink.drawing)) || (Date.now() < (window.__inkGuardUntil || 0))) {   // 手写中/刚写完 1s 内:手掌触摸不选字查词(palm rejection)
       _dragStartCharIdx = null; _swipeStart = null; return;
     }
     window._clLastTouchAt = Date.now();   // 标记触摸：后续 iOS 合成 mousedown 忽略
