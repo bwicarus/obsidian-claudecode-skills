@@ -2020,6 +2020,7 @@
         try { RC.turnCard.idle(_vTid); } catch (_) {}   // 审查 Q1:工具 running 后走 error/停止,done 永不来 → 收尾必须掐掉卡头 spinner
         var _pftT = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
         if (_pftT && !aborted) RC.turnCard.draftText(_vTid, _pftT);
+        else RC.turnCard.status(_vTid, aborted ? '已停止' : '没拿到回答(可以重问一次)', true);   // 空回答兜底:别让卡空着像没结束(审查后补)
         RC.turnCard.freezeDraft(_vTid);
         if (traceData && traceData.length) {
           var _t0 = traceData[0] || {};

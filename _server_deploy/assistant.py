@@ -3481,6 +3481,13 @@ def _tool_label(name, args):
             "recall_notes": "召回我的笔记", "undo_last": "撤销", "search_image": "配图搜索", "search_video": "找视频"}.get(name, name)
 
 
+# 只读工具集:跑过它们**不该**挡住"编排后端没响应→回退 Claude 整轮重跑"(重跑无副作用)。
+#   用户实测:codex 第二轮 240s 无响应,但因 read_page 已跑过被判 _tools_ran → 不回退,整轮 error 收场。
+_READONLY_TOOLS = {"read_page", "read_selection", "search_book", "search_all_books", "toc", "page_vocab",
+                   "lookup_word", "see_page", "see_figure", "see_ink", "read_highlights", "find_highlights",
+                   "notes_query", "notes_read", "read_check_report", "summarize_section", "web_search",
+                   "search_image", "search_video", "recall_notes", "list_saved_tasks"}
+
 # 写操作幻觉硬防线(用户连抓两次:luna·low 只 read_page 就回复「第66页重点已高亮,共5句」,
 #   prompt 铁律无效):最终回答声称完成了写操作、但本轮**没调对应工具** → 服务端拦截,打回重试一次。
 _WRITE_CLAIMS = (
@@ -4773,8 +4780,9 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                     "请只重新输出**一条合法 JSON**工具调用:字符串里反斜杠写成 \\\\、引号用「」、整条别带换行,别加别的字。"}]})
                 continue
             if tool and tool.get("tool") in TOOLS:
-                _tools_ran = True
                 name = tool["tool"]
+                if name not in _READONLY_TOOLS:
+                    _tools_ran = True   # **写过**工具才挡回退(重跑会重复写);纯读轮(read_page等)后端没响应照样回退 Claude 保答
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "running")
@@ -4899,8 +4907,9 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                        "请只重新输出**一条合法 JSON**工具调用:字符串里的引号一律换成中文引号「」、不要带换行,别加别的字。")
                 continue
             if tool and tool.get("tool") in TOOLS:
-                _tools_ran = True
                 name = tool["tool"]
+                if name not in _READONLY_TOOLS:
+                    _tools_ran = True   # **写过**工具才挡回退(重跑会重复写);纯读轮(read_page等)后端没响应照样回退 Claude 保答
                 targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
                 yield {"event": "tool", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "running")
@@ -4982,6 +4991,8 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid, for
                 job["events"].append(ev)
                 if ev["event"] == "answer":
                     job["answer"] = ev["data"]
+                elif ev["event"] == "error":
+                    job["error"] = str(ev["data"])[:300]   # 错误也落库(否则前端断连+刷新后什么都看不到="迟迟没有回答")
                 elif ev["event"] == "trace":
                     job["trace"] = ev["data"]
                 elif ev["event"] == "actions":   # client_actions:提取 renderVideos 的视频 → 随回合落库,刷新不丢(镜像 EPUB 阶段C)
@@ -5001,6 +5012,8 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid, for
         with job["lock"]:
             job["events"].append({"event": "done", "data": {}})
             job["done"] = True
+        if not job.get("answer") and job.get("error"):   # 失败轮:落一条错误说明(断连+刷新后用户能看到失败原因,而不是永远空等)
+            job["answer"] = "⚠️ " + job["error"]
         if job.get("answer"):   # 不管客户端在不在,跑完就落库(断连也不丢;历史/感叹号/视频卡都用得上)
             _meta = {}
             if job.get("trace"):
