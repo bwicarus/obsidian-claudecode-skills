@@ -1056,15 +1056,18 @@ def pdf_api_run_save():
         if t and (t.get("steps")):
             steps = t.get("steps")
             sel = b.get("select")   # #44 框选:只保留选中的 step 下标
+            _partial = False
             if isinstance(sel, list) and sel:
                 keep = {int(i) for i in sel if isinstance(i, (int, float))}
+                _n0 = len(steps)
                 steps = [s for i, s in enumerate(steps) if i in keep]
+                _partial = len(steps) < _n0   # 真截了子集 → 意图配方要标记(执行范围以路线为准)
             return jsonify(TR.save_trace_recipe(b.get("name"), b.get("desc") or "", steps,
                                                 str(session.get("user_id") or ""),
                                                 source_label=b.get("source_label") or "",
                                                 source_spec=b.get("source_spec"),
                                                 instruction=(t.get("instruction") or ""),   # 生成型判型用:含造纸步骤+有原意图 → 存意图配方
-                                                anchor_page=b.get("page")))
+                                                anchor_page=b.get("page"), partial=_partial))
     # 否则保存造纸 run(page/flow 型)
     rid = str(b.get("rid") or "")
     run = TR.load(rid) if rid else TR.recent_run(str(session.get("user_id") or ""))

@@ -1128,7 +1128,7 @@ def _abstract_route(calls):
     return "\n".join(lines)[:1500]
 
 
-def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None):
+def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None, partial=False):
     """把一次 **CLI 多步任务的执行轨迹** 冻成可复用工具(用户拍板:所有走 CLI 的多步任务都能保存)。
     steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序进程内调 TOOLS[name](去壳)。
     同"工具序列"已存在 → 合并加数据源;否则新建。"""
@@ -1149,6 +1149,7 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
         RECIPES_DIR.mkdir(parents=True, exist_ok=True)
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
                "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
+               "partial": bool(partial),   # 框选子集:原始意图是全量任务的,执行范围要以路线为准(否则会把用户框掉的步骤也做了)
                "route": _abstract_route(calls),   # 指挥棒:成功路线的结构化抽象(用户设计)
                "calls": calls[:30]}   # calls 留档备查,不用于回放
         (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")

@@ -3486,7 +3486,9 @@ def _t_run_saved_task(args, ctx):
         adjust = str(adjust).strip()
         rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
         route = (rec.get("route") or "").strip()
-        instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") +
+        _part = ("⚠ 本工具只保存了原任务的**一部分步骤**(用户框选):执行范围**以下面的操作路线为准**,"
+                 "原始意图中路线之外的环节(如做卡/记笔记等)**不要做**。\n") if rec.get("partial") else ""
+        instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") + _part +
                  (("本次用户的调整(与原意图冲突时**以本次为准**):%s。\n" % adjust) if adjust else "") +
                  (("这是它上次**成功执行的操作路线**(已验证的指挥棒;**严格按此步骤顺序与结构执行**,"
                    "内容按本次要求重新生成,[可调]数字按本次调整):\n%s\n" % route) if route else "") +
