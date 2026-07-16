@@ -47,6 +47,17 @@
   .tl-b.pri { background: #2b4a8f; border-color: #4a6fd0; color: #fff; }
   .tl-b.danger { color: #ff9d9d; border-color: rgba(200,90,90,.5); }
   .tl-empty { color: #6f7fa3; text-align: center; margin-top: 40px; font-size: 13px; }
+  .tl-tabs { display: flex; gap: 6px; margin-bottom: 10px; position: sticky; top: 0; background: #0b1120; padding: 2px 0 8px; z-index: 5; }
+  .tl-tab { flex: 1; text-align: center; background: #101a30; border: 1px solid #22304f; color: #9fb2d6; border-radius: 9px; padding: 6px 0; font-size: 13px; cursor: pointer; }
+  .tl-tab.on { background: #2b4a8f; border-color: #4a6fd0; color: #fff; }
+  .tl-bi { background: #0e1628; border: 1px solid #1c2946; border-radius: 10px; padding: 9px 12px; margin-bottom: 8px; }
+  .tl-bi-n { font-weight: 600; font-size: 13.5px; }
+  .tl-bi-d { color: #8fa2c6; font-size: 12px; margin: 3px 0 7px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  #tl-modal { position: fixed; inset: 0; z-index: 300; background: rgba(5,9,18,.72); display: none; align-items: flex-start; justify-content: center; padding: calc(env(safe-area-inset-top,0px) + 30px) 14px 30px; overflow-y: auto; }
+  #tl-modal.on { display: flex; }
+  #tl-modal .box { background: #0f1930; border: 1px solid #2a3a63; border-radius: 14px; max-width: 560px; width: 100%; padding: 14px 16px; max-height: 82vh; overflow-y: auto; }
+  #tl-modal .box h3 { margin: 0 0 8px; font-size: 15px; }
+  #tl-modal .x { float: right; cursor: pointer; color: #8fa2c6; font-size: 18px; padding: 0 4px; }
   /* 右列:聊天 */
   #tl-chat { display: flex; flex-direction: column; min-width: 0; }
   #asst-thread { flex: 1; overflow-y: auto; padding: 14px 16px 8px; }
@@ -71,7 +82,15 @@
   <select id="tl-book"><option value="">(不带书)</option></select>
 </header>
 <main>
-  <div id="tl-list"><div class="tl-empty">加载中…</div></div>
+  <div id="tl-list">
+    <div class="tl-tabs">
+      <div class="tl-tab on" data-t="mine">我的工具</div>
+      <div class="tl-tab" data-t="builtin">内置工具</div>
+    </div>
+    <div id="tl-mine"><div class="tl-empty">加载中…</div></div>
+    <div id="tl-builtin" style="display:none"><div class="tl-empty">加载中…</div></div>
+  </div>
+  <div id="tl-modal"><div class="box"><span class="x">✕</span><h3 id="tl-modal-t"></h3><div id="tl-modal-b"></div></div></div>
   <div id="tl-chat">
     <div id="asst-thread"></div>
     <div id="tl-inrow">
@@ -105,7 +124,56 @@
   }
 
   // ── 工具列表 ─────────────────────────────────────────────────────────
-  var listEl = document.getElementById('tl-list');
+  var listEl = document.getElementById('tl-mine');
+  // 分区 tab
+  document.querySelectorAll('.tl-tab').forEach(function (tb) {
+    tb.addEventListener('click', function () {
+      document.querySelectorAll('.tl-tab').forEach(function (x) { x.classList.remove('on'); });
+      tb.classList.add('on');
+      var t = tb.getAttribute('data-t');
+      document.getElementById('tl-mine').style.display = t === 'mine' ? '' : 'none';
+      document.getElementById('tl-builtin').style.display = t === 'builtin' ? '' : 'none';
+      if (t === 'builtin' && !window.__biLoaded) loadBuiltin();
+    });
+  });
+  // 设置浮层(内置工具 ⚙:复用 rc-toolchip 的 mountPrompts —— 与阅读器长按工具条同一套)
+  var modal = document.getElementById('tl-modal');
+  modal.querySelector('.x').addEventListener('click', function () { modal.classList.remove('on'); });
+  modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.remove('on'); });
+  function openToolCfg(name) {
+    document.getElementById('tl-modal-t').textContent = '⚙ ' + name;
+    var b = document.getElementById('tl-modal-b'); b.innerHTML = '';
+    try { RC.toolChip.mountPrompts(b, name); } catch (e) { b.textContent = '(这个工具没有可改设置)'; }
+    modal.classList.add('on');
+  }
+  // 内置工具目录(用户设计:工具库包括**所有**工具;简单工具可升级成复杂工具+AI 功能)
+  function loadBuiltin() {
+    window.__biLoaded = true;
+    var box = document.getElementById('tl-builtin');
+    fetch('/pdf/api/builtin-tools').then(function (r) { return r.json(); }).then(function (d) {
+      box.innerHTML = '';
+      (d.tools || []).forEach(function (t) {
+        var c = document.createElement('div'); c.className = 'tl-bi';
+        var n = document.createElement('div'); n.className = 'tl-bi-n'; n.textContent = t.name + (t.orch ? '' : ' (内部)');
+        var ds = document.createElement('div'); ds.className = 'tl-bi-d'; ds.textContent = t.desc || '';
+        var ops = document.createElement('div'); ops.className = 'tl-ops'; ops.style.marginTop = '0';
+        function bt(txt, cls, fn) { var b = document.createElement('button'); b.className = 'tl-b' + (cls ? ' ' + cls : ''); b.textContent = txt; b.addEventListener('click', fn); ops.appendChild(b); }
+        bt('⚙ 设置', '', function () { openToolCfg(t.name); });
+        bt('▶ 试用', '', function () {
+          var q = prompt('想让它做什么?(直接描述,AI 会调用「' + t.name + '」)') || '';
+          if (q.trim()) send(q.trim() + '(用工具 ' + t.name + ')');
+        });
+        bt('🧪 造新工具', 'pri', function () {
+          var idea = prompt('基于「' + t.name + '」想造个什么工具?(描述步骤/加什么 AI 功能,如:读当前页→挑生词→逐个做卡)') || '';
+          if (!idea.trim()) return;
+          send('设计并**保存**一个新工具(用 save_intent_tool):基于内置工具「' + t.name + '」,' + idea.trim() + '。保存后简述它运行时会怎么做。');
+        });
+        c.appendChild(n); c.appendChild(ds); c.appendChild(ops);
+        box.appendChild(c);
+      });
+      if (!(d.tools || []).length) box.innerHTML = '<div class="tl-empty">拉取失败</div>';
+    }).catch(function () { box.innerHTML = '<div class="tl-empty">拉取失败</div>'; });
+  }
   function kindLabel(k) { return k === 'intent' ? '重新生成型' : (k === 'trace' ? '机械回放型' : '交互纸'); }
   function chipOf(rec) {   // 配方 → rc-toolchip 的 chip 形状(流程条与阅读器同一渲染器)
     var steps = (rec.calls && rec.calls.length)

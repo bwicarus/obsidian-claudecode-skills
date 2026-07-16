@@ -1144,6 +1144,22 @@ def pdf_api_recipe_edit():
         return jsonify({"ok": False, "error": str(e)[:120]}), 500
 
 
+@bp.route("/api/builtin-tools")
+def pdf_api_builtin_tools():
+    """内置工具全目录(工具库页):名字 + 生效说明(per-user 覆盖过的就是覆盖版)+ 是否编排可见。"""
+    import assistant as A
+    uid = str(session.get("user_id") or "")
+    out = []
+    for n, (d, _fn) in A.TOOLS.items():
+        try:
+            desc = A._tp(uid, n, "desc", str(d))
+        except Exception:
+            desc = str(d)
+        out.append({"name": n, "desc": desc[:240], "orch": n not in A._ORCH_DROP})
+    out.sort(key=lambda x: x["name"])
+    return jsonify({"ok": True, "tools": out})
+
+
 @bp.route("/tools")
 def pdf_tools_page():
     """工具库页面(用户设计):查看所有已保存工具(route 渲成流程条,与阅读器同一份 rc-toolchip)+

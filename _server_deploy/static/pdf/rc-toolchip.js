@@ -912,6 +912,7 @@
     },
     setModel: function (chip, model, action) { if (chip && !chip.nested) { chip.model = model || chip.model; chip.action = action || chip.action; } },
     openDetail: openDetail,
+    mountPrompts: mountPrompts,   // 工具库页:内置工具的设置窗直接复用(提示词/模型/垫话/记忆同一套)
     // 轮次容器复用:把一个(合成的)chip 的**工具长条流程**渲进任意容器 box(每个工具=可长按设置的 .vc-fn 长条)。
     //   rc-turncard 别再自己画纯文本步骤了 —— 跑同一段 paintBody,长条/长按详情一致。
     renderFlowInto: function (box, chip) { try { paintFlow(chip, { el: box, inflow: true, idx: 0, open: {} }); } catch (e) {} },

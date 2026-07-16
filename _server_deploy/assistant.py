@@ -3465,6 +3465,27 @@ def _t_page_add(args, ctx):
     return {"已加": added, "当前共": len(d["blocks"]), "silent": True}
 
 
+def _t_save_intent_tool(args, ctx):
+    """把一个想法**直接铸成新工具**(意图配方,kind:'intent')——用户说「做一个工具:…/把 X 升级成
+    带 AI 的工具/保存这个思路当工具」时用(用户设计:简单工具可组合升级成复杂工具+AI 功能)。
+    args {name: 短名, instruction: 这个工具要做什么(把用户想法完整写清楚:步骤/内容来源/产出形式)}。
+    运行时 = CLI 按该意图+当次调整在当前上下文执行(天然带 AI 创作)。"""
+    import task_runtime as TR
+    import re as _re
+    name = _re.sub(r"[^\w一-鿿-]", "", str(args.get("name") or ""))[:60]
+    instr = str(args.get("instruction") or "").strip()
+    if not name or len(instr) < 8:
+        return {"error": "要 name(短名)和 instruction(这个工具做什么,写清楚步骤与产出)"}
+    TR.RECIPES_DIR.mkdir(parents=True, exist_ok=True)
+    _new = not (TR.RECIPES_DIR / (name + ".json")).exists()
+    rec = {"name": name, "desc": instr[:80], "kind": "intent", "instruction": instr[:2000],
+           "origin": "", "route": "", "partial": False, "calls": []}
+    (TR.RECIPES_DIR / (name + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+    return {"已保存": name, "新建" if _new else "覆盖": True,
+            "note": "已铸成**重新生成型**工具《%s》(工具库/列表可见)。运行=run_saved_task(name, adjust?)。"
+                    "告诉用户已保存,并用一两句话说明它运行时会怎么做。" % name}
+
+
 def _t_run_saved_task(args, ctx):
     """运行一个**已保存的工具**(用户之前保存的任务,如「日语听写」)。
     args {name: 工具名, source?: 数据源(如"高亮"/"未掌握词",工具有多个来源时选一个), params?}。
@@ -3689,6 +3710,8 @@ TOOLS = {
     "page_add": ("给草稿纸**加一个元素**(可多次,一次一个):text/blank/checkbox/button。"
                  "args=元素本身,如 {kind:'blank',label:'1.',answer:'ばら'} 或 "
                  "{kind:'button',label:'让 AI 检查',event:'check'}。别一次塞一堆,一次一个最稳。", _t_page_add),
+    "save_intent_tool": ("把一个想法**铸成新工具**(重新生成型):用户说『做一个工具:…/把某工具升级成带 AI 的/保存这个思路当工具』时调。"
+                         "args {name:短名, instruction:这个工具要做什么(步骤/内容来源/产出形式写清楚)}。存完告诉用户已保存+简述运行方式。", _t_save_intent_tool),
     "run_saved_task": ("运行一个**已保存的工具**。两类:**重新生成型**(如『出N题』——按原意图在当前页重新出内容,"
                        "用户说的数量/难度/主题调整放 args.adjust 原话带上,如 adjust:\"15道题,难一点\");"
                        "**机械回放型**(如听写——数据源驱动,选 source)。args {name, adjust?, source?, params?}。"
