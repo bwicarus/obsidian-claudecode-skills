@@ -1184,6 +1184,14 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
         "status": "running", "step": 0, "state": {}, "params": params or {},
         "result": None, "hint": "", "created_at": int(time.time()),
     }
+    try:   # 创造物库:纸出生即入册(ref 引用 sidecar 不复制;状态"未检查/已检查"清单时实时判)
+        import assistant as A
+        _t = (params or {}).get("title") or kind
+        A._creation_add(run["uid"], "paper", "建了练习纸《%s》(第%s页)" % (_t, page),
+                        ref={"upage": upage, "file": run["file"], "page": page},
+                        anchor={"file": run["file"], "page": page})
+    except Exception:
+        pass
     if kind == "recipe":                       # 声明式配方:flow 从内置库或 params 拿,**校验后**才跑
         rec_name = (params or {}).get("recipe") or ""
         rdef = RECIPES.get(rec_name) or _load_recipe(rec_name) or {}

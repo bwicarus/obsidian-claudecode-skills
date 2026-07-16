@@ -79,15 +79,8 @@
           var _inkEl = _pdfInkUpageEl() || _pdfUpageElAny();   // 有墨迹的优先;没墨迹的自建页也截(供 read_page 返回渲染图)
           if (_inkEl && c) { c.want_viewshot = true; PdfAdapter.__shotEl = _inkEl; }
         } catch (e) {}
-        // 用户设计:检查报告**不塞全文进上下文**(跟笔迹一样只告知存在)。最近一次检查(10 分钟内)
-        //   只带**报告名+得分** → AI 知道"有这么份报告",用户一问就调 read_check_report(带报告上下文
-        //   的子 agent)查证作答。
-        try {
-          var _lc = window.__lastCheckResult;
-          if (_lc && _lc.name && c && (Date.now() - _lc.ts) < 10 * 60 * 1000) {
-            c.recent_check = { name: _lc.name, score: _lc.score || '', ts: _lc.ts };
-          }
-        } catch (e) {}
+        // recent_check 专线已退役:上下文告知统一走服务端**创造物库**(_sys_prompt 直读
+        //   _creations_recent_line,纸/报告/搜索/翻译一并覆盖),前端不再逐项拼。
         return c || null;
       } catch (e) { return null; }
     },

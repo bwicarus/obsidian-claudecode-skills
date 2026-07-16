@@ -493,7 +493,128 @@ def _pdf():
 _CONVO_DIR = CLAUDE_DIR / "state" / "assistant-convo"
 _convo_lock = threading.Lock()
 
-# ── 练习纸检查报告(题目原文+标准答案+手写+判分)。上下文只给报告名,AI 调 read_check_report 拿全文 ──
+# ── 创造物库 Creation Store(用户设计,业界=summary-plus-handle / just-in-time context)──
+#   所有**非操作型**工具的最终结果 = 一个创造物:{id(时间戳), kind, brief 告知, query, content|ref, anchor, ts}。
+#   工具回复附「告知+句柄」;上下文只注入**最近创造物清单**;AI 用 recall_creation(id) 按需取回全文。
+#   铁律(业界共识):①句柄无损保留 ②省略显式告知 ③取回=agent 主动工具调用。设计:references/creation-store.md
+_CREATIONS_DIR = CLAUDE_DIR / "state" / "assistant-creations"
+_creations_lock = threading.Lock()
+
+
+def _creations_load(uid):
+    try:
+        return json.loads((_CREATIONS_DIR / f"{uid}.json").read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _creation_add(uid, kind, brief, query=None, content=None, ref=None, anchor=None):
+    """登记一个创造物,返回 id。content=直接存的结果文本;ref=引用型(纸/报告,本体在各自 sidecar 不复制)。"""
+    uid = str(uid or "")
+    if not uid or not kind:
+        return None
+    cid = "c_" + format(int(time.time()), "x") + "_" + os.urandom(2).hex()
+    with _creations_lock:
+        lst = _creations_load(uid)
+        lst.append({"id": cid, "kind": kind, "brief": str(brief or "")[:200],
+                    "query": (query if isinstance(query, (dict, str)) else None),
+                    "content": (str(content)[:8000] if content else None),
+                    "ref": (ref if isinstance(ref, dict) else None),
+                    "anchor": (anchor if isinstance(anchor, dict) else None), "ts": int(time.time())})
+        lst = lst[-40:]
+        _CREATIONS_DIR.mkdir(parents=True, exist_ok=True)
+        (_CREATIONS_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False), "utf-8")
+    return cid
+
+
+def _creation_rel_time(ts):
+    d = int(time.time()) - int(ts or 0)
+    if d < 90: return "刚刚"
+    if d < 3600: return f"{d // 60}分钟前"
+    if d < 86400: return f"{d // 3600}小时前"
+    return time.strftime("%m-%d %H:%M", time.localtime(ts))
+
+
+def _creation_paper_state(c):
+    """paper 条目的实时状态(未检查/已检查)——从纸的 sidecar 现查,不存快照。"""
+    try:
+        import pdf_reader as P
+        for it in P._upages_load((c.get("ref") or {}).get("file") or ""):
+            if it.get("id") == (c.get("ref") or {}).get("upage"):
+                return ("已检查 " + (it.get("check_score") or "")) if (it.get("result_md") or "").strip() else "未检查"
+    except Exception:
+        pass
+    return ""
+
+
+def _creations_recent_line(uid, n=6):
+    """给系统提示的**最近创造物清单**(纸/报告优先保留,其余同 kind 去重,共 n 条)。"""
+    lst = _creations_load(uid)
+    if not lst:
+        return ""
+    pri = [c for c in reversed(lst) if c.get("kind") in ("paper", "check_report")]
+    rest, seen = [], set()
+    for c in reversed(lst):
+        if c.get("kind") in ("paper", "check_report"):
+            continue
+        if c.get("kind") in seen:
+            continue
+        seen.add(c.get("kind"))
+        rest.append(c)
+    picked = (pri[:4] + rest)[:n]
+    picked.sort(key=lambda c: -(c.get("ts") or 0))
+    rows = []
+    for c in picked:
+        st = _creation_paper_state(c) if c.get("kind") == "paper" else ""
+        rows.append(f"#{c['id']} {c.get('brief', '')}" + (f"({st})" if st else "") + f" · {_creation_rel_time(c.get('ts'))}")
+    return "\n".join(rows)
+
+
+def _t_recall_creation(args, ctx):
+    """取回一个**创造物**的完整内容(之前某次工具产出:练习纸/检查报告/联网搜索/找到的视频/翻译/章节总结/后台任务结果)。
+    上下文『最近创造物』清单里的 #id 就是句柄;用户提到『刚才查的/搜的/那张纸/那个结果』→ 调我。
+    args {id?: 句柄; kind?: paper/check_report/web_search/search_video/translate/summarize_section/cli_task; query?: 描述模糊}:都不传=最近一条。"""
+    uid = str(ctx.get("_uid") or ctx.get("uid") or "")
+    lst = _creations_load(uid)
+    if not lst:
+        return {"error": "还没有任何创造物记录"}
+    cid = (args.get("id") or "").strip().lstrip("#")
+    kind = (args.get("kind") or "").strip()
+    q = (args.get("query") or "").strip()
+    cand = list(reversed(lst))
+    if cid:
+        cand = [c for c in cand if c.get("id") == cid] or cand
+    if kind:
+        cand = [c for c in cand if c.get("kind") == kind] or cand
+    if q:
+        cand = [c for c in cand if q in (c.get("brief") or "") or (isinstance(c.get("query"), str) and q in c["query"])] or cand
+    cand.sort(key=lambda c0: 0 if c0.get("kind") == "paper" else 1)   # 命中多条→纸优先(纸=本体,报告是它的侧面且随纸附带)
+    c = cand[0]
+    out = {"id": c["id"], "kind": c.get("kind"), "brief": c.get("brief"),
+           "time": _creation_rel_time(c.get("ts")), "anchor": c.get("anchor")}
+    ref = c.get("ref") or {}
+    if c.get("kind") == "paper" and ref.get("upage"):   # 纸:题目+标准答案(实时读 sidecar)+ 最近检查报告(=纸的侧面)
+        try:
+            out["纸的内容"] = _upage_read_text(ref.get("file") or "", ref.get("page") or 0) or "(纸还没内容)"
+        except Exception:
+            out["纸的内容"] = "(读取失败)"
+        try:
+            import pdf_reader as P
+            for it in P._upages_load(ref.get("file") or ""):
+                if it.get("id") == ref.get("upage") and it.get("check_name"):
+                    r0, _ = _find_check_report(uid, it["check_name"])
+                    if r0:
+                        out["最近检查报告"] = (r0.get("report") or "")[:2500]
+                    break
+        except Exception:
+            pass
+        out["note"] = "题目/标准答案就在上面,据此直接答;报告没有=还没检查过。"
+    elif c.get("kind") == "check_report" and ref.get("name"):
+        r0, err = _find_check_report(uid, ref["name"])
+        out["报告"] = (r0.get("report") or "")[:3500] if r0 else (err or {}).get("error", "(报告丢失)")
+    else:
+        out["内容"] = c.get("content") or "(这条没有存正文)"
+    return out
 #   (用户设计:跟笔迹一样"只告知存在,被问到再调工具看",别把全文塞进每轮上下文。)
 _CHECK_DIR = CLAUDE_DIR / "state" / "reader-check-reports"
 _check_lock = threading.Lock()
@@ -532,6 +653,11 @@ def _save_check_report(uid, name, file_rel, report, score="", src_page=None, loo
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
         (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
+    try:   # 创造物库:检查报告入册(ref 按名引用报告库)
+        _creation_add(uid, "check_report", "检查了《%s》%s" % (final, ("得分 " + score) if score else ""),
+                      ref={"name": final}, anchor={"file": file_rel})
+    except Exception:
+        pass
     return final
 
 
@@ -3418,6 +3544,9 @@ def _t_start_dictation(args, ctx):
 
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
+    "recall_creation": ("取回一个**创造物**的完整内容(之前工具的产出:练习纸/检查报告/联网搜索/视频/翻译/章节总结)。"
+                        "上下文『最近创造物』清单里的 #id 就是句柄;用户提到『刚才查的/搜的/那张纸/那个结果/第几题的答案』→ 调我拿全文再答。"
+                        "纸类条目返回**题目+标准答案+检查报告(有的话)**。args {id?:句柄; kind?:类型; query?:描述模糊;都不传=最近一条}", _t_recall_creation),
     "read_check_report": ("拿到**练习纸检查报告**的内容(题目原文+标准答案+用户手写+判分),**默认直接返回给你、你据此直接答**。"
                           "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改/**题目出处/原文在哪**,就调它拿报告再答——"
                           "报告名放 name(不传=最近一份)。⚠ 这纸是**用户自制**的,题目和答案**都在报告里、书本正文没有**,"
@@ -3555,6 +3684,37 @@ _READONLY_TOOLS = {"read_page", "read_selection", "search_book", "search_all_boo
                    "lookup_word", "see_page", "see_figure", "see_ink", "read_highlights", "find_highlights",
                    "notes_query", "notes_read", "read_check_report", "summarize_section", "web_search",
                    "search_image", "search_video", "recall_notes", "list_saved_tasks"}
+
+# 创造物自动登记:非操作型工具完成 → 入库(告知 brief 含实际查询词;read_page 不登——可随时重读,登了只添噪)。
+_CREATION_KINDS = {
+    "web_search":        ("联网搜了「{}」", lambda a: a.get("query")),
+    "search_video":      ("找了视频「{}」", lambda a: a.get("query")),
+    "search_image":      ("搜了配图「{}」", lambda a: a.get("query")),
+    "translate":         ("翻译了「{}」", lambda a: str(a.get("text") or "")[:24]),
+    "summarize_section": ("总结了第 {} 页所在章节", lambda a: a.get("page")),
+    "search_all_books":  ("跨书搜了「{}」", lambda a: a.get("query")),
+}
+
+
+def _creation_register(uid, name, targs, res, ctx):
+    """工具 done 统一钩子:白名单内且无 error → 登记创造物(brief=告知+结果要点)。三个编排循环共用。"""
+    try:
+        if name not in _CREATION_KINDS or not isinstance(res, dict) or res.get("error"):
+            return
+        tmpl, getk = _CREATION_KINDS[name]
+        v = None
+        try:
+            v = getk(targs or {})
+        except Exception:
+            pass
+        head = tmpl.format(str(v)[:40]) if ("{}" in tmpl and v not in (None, "")) else tmpl.split("{")[0]
+        gist = re.sub(r'[{}"\[\]]', "", _step_detail(res)).replace("\n", " ").strip()[:80]   # 去 JSON 符号,brief 是给模型看的一句人话
+        _creation_add(uid, name, head + ":" + gist, query=(v if isinstance(v, str) else None),
+                      content=_step_detail(res)[:6000],
+                      anchor={"file": (ctx or {}).get("file_rel"), "page": (ctx or {}).get("page")})
+    except Exception:
+        pass
+
 
 # 写操作幻觉硬防线(用户连抓两次:luna·low 只 read_page 就回复「第66页重点已高亮,共5句」,
 #   prompt 铁律无效):最终回答声称完成了写操作、但本轮**没调对应工具** → 服务端拦截,打回重试一次。
@@ -3739,18 +3899,14 @@ def _sys_prompt(ctx):
     except Exception:
         pass
     learn_line = ("\n" + "\n".join(learn_bits)) if learn_bits else ""
-    # 检查报告**不塞全文进上下文**(跟笔迹一样,只告知存在)。前端只传 {name, score};要分析
-    #   错题时**调 read_check_report(name) 拿题目原文+判分**再答(用户设计)。
+    # ★创造物库(用户设计,替代零散的 recent_check 专线):上下文只注入**最近创造物清单**(告知+句柄),
+    #   AI 用 recall_creation(id) 按需取回全文——纸/报告/联网搜索/视频/翻译一并覆盖(summary-plus-handle)。
     check_line = ""
-    _rc = ctx.get("recent_check")
-    if isinstance(_rc, dict) and _rc.get("name"):
-        _nm = _clean_tag(_rc.get("name"))
-        _sc = _clean_tag(str(_rc.get("score") or ""))
-        check_line = (f"\n★用户最近做完一张**他自己生成的练习纸**《{_nm}》并让你检查了"
-                      + (f"(得分 {_sc})" if _sc else "") + "。"
-                      f"他问讲题/某题答案/为什么错/题目出处/**这个知识点在书里哪**,**一律调 read_check_report(name=\"{_nm}\", question=用户原话)**——"
-                      "它会把题目/答案/判分**和这张纸参考的源书页**都给你,你据此直接答;要讲书里的知识点/原文,再按它说的 read_page 那页找。"
-                      "注意:题目是**纸上自制**的、书里没有逐字题目,别自己凭空猜、也别 search_book 找『逐字题目原文』。")
+    _cl = _creations_recent_line(_uid0)
+    if _cl:
+        check_line = ("\n★最近创造物(之前工具的产出,句柄=#id;**内容不在这里**,要用就 recall_creation(id=…)取回):\n" + _cl +
+                      "\n用户提到『刚才查的/搜的/那张纸/那个结果/第几题』→ 先 recall_creation 拿到对应创造物再答。"
+                      "纸类条目会给**题目+标准答案+检查报告(有的话)**——题目是纸上自制的,书里没有逐字原文,别去书里找题目。")
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -4661,6 +4817,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                     _used_tools.add(name)
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
+                _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -4869,6 +5026,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                     _used_tools.add(name)
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
+                _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -5000,6 +5158,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                     _used_tools.add(name)
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
+                _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 同上:高亮/便签卡接管撤销,不再发 undo 行
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}
