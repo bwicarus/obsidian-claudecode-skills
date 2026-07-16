@@ -58,7 +58,8 @@ def main() -> int:
         print("PC 不可达(睡眠/离线),跳过 —— 下次 timer 再补", flush=True)
         return 0
     big = [f for f in VAULT.rglob("*")
-           if f.is_file() and not f.name.startswith(".") and f.stat().st_size > THRESHOLD]
+           if f.is_file() and not f.name.startswith(".") and "/." not in f.as_posix()
+           and f.stat().st_size > THRESHOLD]
     print(f"vault 中 >200MB 文件:{len(big)}", flush=True)
     pushed = skipped = failed = 0
     for f in big:

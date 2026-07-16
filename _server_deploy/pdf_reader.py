@@ -108,6 +108,8 @@ def _list_vault_pdfs() -> list[dict]:
             rel = p.relative_to(OBSIDIAN_ROOT).as_posix()
             if rel.startswith(_FAV_BOOK_PREFIX):
                 continue   # 收藏夹物化书只该出现在「⭐收藏夹」tab,不进「📖书架」普通列表(规格 E)
+            if rel.startswith(_SANDBOX_DIR_REL):
+                continue   # 工具库沙盒副本(测试用,不是书)
             st = p.stat()
             ci = _compressed_info(rel)
             out.append({
@@ -736,6 +738,69 @@ def pdf_api_book_meta():
         return jsonify({"ok": True, "page_count": n, "page_w": pw, "page_h": ph, "mtime": int(ap.stat().st_mtime)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── 工具库沙盒:在书籍**副本**上跑工具测试(不动原书)。iframe 预览 = 真实阅读器打开副本,
+#    CLI 产物 client_actions 经 /api/publish-actions → SSE 总线(与 MCP 遥控同通道)推给它执行——
+#    纸/高亮/手写/检查全套真功能,零阅读器改动(一份代码)。──
+_SANDBOX_DIR_REL = "资源/uploads/.sandbox"   # 点目录:Obsidian Sync 不同步、list-pdfs/搜索索引排除
+
+
+@bp.route("/api/sandbox", methods=["POST"])
+def pdf_api_sandbox():
+    """确保 file 的沙盒副本存在(资源/uploads/.sandbox/<原名>);reset=true 重置副本+清边车。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    if rel.startswith(_SANDBOX_DIR_REL):
+        return jsonify({"ok": True, "rel": rel, "fresh": False})
+    ap = _safe_vault_path(rel)
+    if not ap or not rel.lower().endswith(".pdf"):
+        return jsonify({"ok": False, "error": "文件不存在或不是 PDF"}), 400
+    import shutil
+    sb_dir = OBSIDIAN_ROOT / _SANDBOX_DIR_REL
+    sb_dir.mkdir(parents=True, exist_ok=True)
+    dst = sb_dir / ap.name
+    sb_rel = _SANDBOX_DIR_REL + "/" + ap.name
+    fresh = False
+    if body.get("reset") or not dst.exists():
+        tmp = dst.with_suffix(".pdf.tmp")
+        shutil.copy2(str(ap), str(tmp))
+        tmp.replace(dst)
+        fresh = True
+        try:
+            _upages_save(sb_rel, [])
+        except Exception:
+            pass
+        try:
+            _hl_save(sb_rel, {"pdf_rel": sb_rel, "highlights": []})
+        except Exception:
+            pass
+        try:
+            _ink_save(sb_rel, {})
+        except Exception:
+            pass
+    return jsonify({"ok": True, "rel": sb_rel, "fresh": fresh})
+
+
+@bp.route("/api/publish-actions", methods=["POST"])
+def pdf_api_publish_actions():
+    """把一组 client_action 推给打开着该书的阅读器(工具库沙盒预览 iframe 用;复用 MCP 遥控 SSE 通道)。"""
+    body = request.get_json(silent=True) or {}
+    rel = (body.get("file") or "").strip()
+    acts = body.get("actions") or []
+    if not rel or not isinstance(acts, list):
+        return jsonify({"ok": False, "error": "缺 file/actions"}), 400
+    n = 0
+    for a in acts[:20]:
+        fn = (a or {}).get("fn")
+        if not fn:
+            continue
+        try:
+            _reader_publish("client-action", rel, None, {"action": {"fn": str(fn), "args": (a or {}).get("args") or []}})
+            n += 1
+        except Exception:
+            pass
+    return jsonify({"ok": True, "published": n})
 
 
 _SW_JS = r"""// PDF 阅读器 Service Worker(作用域 /pdf/,只拦 /pdf/*):
@@ -6859,6 +6924,61 @@ def _pam_ocr_checkpoints(ctx):
 #   vocab-lookups.jsonl(追加日志,只做近期活跃页启发)、pdf-prefs 阅读位置(客户端 LS 为真源,±1 接受)、
 #   book-preprocess 状态(一次性流水线)、pdf-book-{langs,crop,figures,offset}(无页号/印刷页偏移标量,
 #   偏移在插入点之后差 1 属已知妥协,可在设置里重新对齐)。
+def _up_mig_newpage(p, mode, pivot):
+    """改页后物理页 p 的新页号;None=该页缓存作废。delete:pivot 没了后面前移;insert:pivot(=after)之后+1;edit:仅 pivot 重渲。"""
+    if mode == "delete":
+        return None if p == pivot else (p - 1 if p > pivot else p)
+    if mode == "insert":
+        return p if p <= pivot else p + 1
+    if mode == "edit":
+        return None if p == pivot else p
+    return p
+
+
+def _up_migrate_render_caches(rel, ap, mode, pivot, old_mtime, new_mtime):
+    """改页后把渲染缓存(页图/字符层)按新页号+新 mtime **改名迁移**。
+    只是删/插一页,其余物理页内容没变;不迁移的话缓存键(含 mtime)全 miss →
+    客户端 reload 后整本书重渲重下(大扫描书要几分钟,用户实测痛点)。纯缓存,尽力而为。"""
+    import hashlib
+    import re as _re
+    moved = 0
+    try:
+        bsha = _book_sha(ap)
+        if _PAGE_IMG_DIR.exists():
+            for f in list(_PAGE_IMG_DIR.glob("%s-p*-w*-%d.jpg" % (bsha, old_mtime))):
+                m = _re.match(r".*-p(\d+)-w(\d+)-\d+\.jpg$", f.name)
+                if not m:
+                    continue
+                np_ = _up_mig_newpage(int(m.group(1)), mode, pivot)
+                if np_ is None:
+                    f.unlink(missing_ok=True)
+                    continue
+                try:
+                    f.rename(_PAGE_IMG_DIR / ("%s-p%d-w%s-%d.jpg" % (bsha, np_, m.group(2), new_mtime)))
+                    moved += 1
+                except Exception:
+                    pass
+        cdir = CLAUDE_DIR / "state" / "pdf-char-cache"
+        rsha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+        if cdir.exists():
+            for f in list(cdir.glob("%s-p*-%d-*.json" % (rsha, old_mtime))):
+                m = _re.match(r".*-p(\d+)-\d+-(ja|zh)\.json$", f.name)
+                if not m:
+                    continue
+                np_ = _up_mig_newpage(int(m.group(1)), mode, pivot)
+                if np_ is None:
+                    f.unlink(missing_ok=True)
+                    continue
+                try:
+                    f.rename(cdir / ("%s-p%d-%d-%s.json" % (rsha, np_, new_mtime, m.group(2))))
+                    moved += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return moved
+
+
 PAGE_ANCHOR_MIGRATIONS = [
     ("pdf-highlights", _pam_highlights),
     ("reader-notes", _pam_notes),
@@ -7008,6 +7128,7 @@ def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
         jp = _up_journal_path(sha)
         jp.write_text(json.dumps({"mode": mode, "rel": rel, "backup": str(backup),
                                   "ts": int(_time.time())}, ensure_ascii=False), "utf-8")
+        old_mtime = int(os.path.getmtime(str(ap)))   # 渲染缓存迁移要旧键
         os.replace(str(tmp), str(ap))
         tmp = None
         _job_set(jid, step="迁移页锚(高亮/便签/墨迹/图注等)…")
@@ -7028,6 +7149,8 @@ def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
             raise RuntimeError("锚迁移失败,已从备份恢复原书、未改任何数据:%s" % ex)
         jp.unlink(missing_ok=True)
         _up_prune_backups(sha)
+        _job_set(jid, step="迁移渲染缓存(页图/字符层)…")
+        _up_migrate_render_caches(rel, ap, mode, pivot, old_mtime, new_mtime)   # 纯缓存尽力而为:让 reload/重取全命中,不再整本重渲
         result = {"ok": True, "mode": mode, "warnings": warns, "mtime": new_mtime}
         if mode == "insert":
             result["page"] = pivot + 1

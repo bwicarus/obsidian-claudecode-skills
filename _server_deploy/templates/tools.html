@@ -72,6 +72,16 @@
   #tl-input { flex: 1; background: #14203a; border: 1px solid #2a3a63; color: #dfe8fa; border-radius: 11px;
               padding: 9px 12px; font-size: 14px; outline: none; }
   #tl-send { flex: 0 0 auto; }
+  /* 沙盒预览:右侧滑出真实阅读器 iframe(打开沙盒副本;CLI 产物经 SSE 推给它执行) */
+  #tl-sb-badge { flex: 0 0 auto; font-size: 11.5px; color: #a9e6b8; border: 1px solid #2f6d45; background: #12281c; border-radius: 8px; padding: 2px 8px; }
+  #tl-sim { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 94vw); z-index: 200;
+            background: #0b1120; border-left: 1px solid #2a3a63; box-shadow: -12px 0 40px rgba(0,0,0,.5);
+            display: flex; flex-direction: column; }
+  #tl-sim[hidden] { display: none; }
+  .tl-sim-hd { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #9fb2d6;
+               padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px; border-bottom: 1px solid #1d2a47; }
+  .tl-sim-hd .sp { flex: 1; }
+  #tl-sim-f { flex: 1; border: 0; width: 100%; background: #0b1120; }
 </style>
 </head>
 <body>
@@ -80,6 +90,8 @@
   <span class="sp"></span>
   <label style="font-size:12px;color:#8fa2c6">测试上下文</label>
   <select id="tl-book"><option value="">(不带书)</option></select>
+  <span id="tl-sb-badge" title="测试都在书的沙盒副本上跑,不动原书">🧪 沙盒</span>
+  <button id="tl-sim-open" class="tl-b">👁 预览</button>
 </header>
 <main>
   <div id="tl-list">
@@ -99,6 +111,16 @@
     </div>
   </div>
 </main>
+<div id="tl-sim" hidden>
+  <div class="tl-sim-hd">🧪 沙盒预览 · 真实阅读器(可手写/点检查),<b>不动原书</b>
+    <span class="sp"></span>
+    <button id="tl-sim-reload" class="tl-b" title="重新载入预览">↻</button>
+    <button id="tl-sim-reset" class="tl-b" title="把沙盒恢复成原书的干净副本">♻ 重置沙盒</button>
+    <button id="tl-sim-ext" class="tl-b" title="在新页签打开">↗</button>
+    <button id="tl-sim-x" class="tl-b">✕ 收起</button>
+  </div>
+  <iframe id="tl-sim-f" title="沙盒预览"></iframe>
+</div>
 <script>
 (function () {
   var RC = window.RC || {};
@@ -118,10 +140,59 @@
       if (i === 0) bookSel.value = b.rel;   // 最近打开的书排最前(服务端已按 lastopen 排序)
     });
   }).catch(function () {});
-  function ctx() {
-    var rel = bookSel.value;
-    return rel ? { file_rel: rel, page: 1, tools_page: true } : { no_book: true, tools_page: true };
+  // ── 沙盒(用户设计:测试在**模拟环境**跑 + 直观看到结果):测试上下文一律换成书的沙盒副本;
+  //    预览 = iframe 里开真实阅读器读副本,CLI 产物 client_actions 经 /api/publish-actions → SSE 推给它执行。
+  var _sbMap = {};   // 原书 rel → 沙盒 rel
+  function sbEnsure(rel, reset) {
+    if (!rel) return Promise.resolve('');
+    if (!reset && _sbMap[rel]) return Promise.resolve(_sbMap[rel]);
+    return fetch('/pdf/api/sandbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: rel, reset: !!reset }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) { _sbMap[rel] = d.rel; return d.rel; } throw new Error((d && d.error) || '沙盒创建失败'); });
   }
+  function ctx() {
+    var rel = bookSel.value, sb = rel && _sbMap[rel];
+    return rel ? { file_rel: sb || rel, page: 1, tools_page: true } : { no_book: true, tools_page: true };
+  }
+  // 预览面板:iframe 载入慢/SSE 要先接上 → client_action 进队列,ready 后统一 publish(SSE 无回放,早发会丢)
+  var _simQ = [], _simReady = false, _simRel = '';
+  var simEl = document.getElementById('tl-sim'), simF = document.getElementById('tl-sim-f');
+  function simOpen() {
+    var rel = bookSel.value; if (!rel) { RC.toast && RC.toast('先选一本书'); return; }
+    sbEnsure(rel).then(function (sb) {
+      if (_simRel !== sb) {
+        _simReady = false; _simRel = sb;
+        simF.src = '/pdf/view?file=' + encodeURIComponent(sb);
+        simF.onload = function () { setTimeout(function () { _simReady = true; simFlush(); }, 2500); };   // 等阅读器 SSE 接上
+      }
+      simEl.hidden = false;
+    }).catch(function (e) { RC.toast && RC.toast('沙盒:' + e.message); });
+  }
+  function simFlush() {
+    if (!_simReady || !_simQ.length || !_simRel) return;
+    var acts = _simQ.splice(0);
+    fetch('/pdf/api/publish-actions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: _simRel, actions: acts }) }).catch(function () {});
+  }
+  function simForward(fn, args) { _simQ.push({ fn: fn, args: args }); simOpen(); simFlush(); }
+  // CLI/编排的前端动作 → 转发给沙盒预览(rc-turncard._applyNewCAs 走 window[fn],同名即接管)
+  window.__upStartTask = function (spec) { simForward('__upStartTask', [spec]); };
+  window.goToPage = function (p) { simForward('goToPage', [p]); };
+  window.openBookAt = function (fr, pg) { simForward('openBookAt', [fr, pg]); };   // 覆盖 rc-assistant 的跨书导航(别把工具库整页带走)
+  document.getElementById('tl-sim-open').addEventListener('click', simOpen);
+  document.getElementById('tl-sim-x').addEventListener('click', function () { simEl.hidden = true; });
+  document.getElementById('tl-sim-ext').addEventListener('click', function () { if (_simRel) window.open('/pdf/view?file=' + encodeURIComponent(_simRel)); });
+  document.getElementById('tl-sim-reload').addEventListener('click', function () { if (_simRel) { _simReady = false; simF.src = simF.src; simF.onload = function () { setTimeout(function () { _simReady = true; simFlush(); }, 2500); }; } });
+  document.getElementById('tl-sim-reset').addEventListener('click', function () {
+    var rel = bookSel.value; if (!rel) return;
+    if (!confirm('重置沙盒?(恢复成原书干净副本,测试产生的纸/高亮/手写全清掉)')) return;
+    sbEnsure(rel, true).then(function (sb) {
+      RC.toast && RC.toast('沙盒已重置');
+      if (!simEl.hidden) { _simRel = ''; simOpen(); }
+    }).catch(function (e) { RC.toast && RC.toast('重置失败:' + e.message); });
+  });
+  bookSel.addEventListener('change', function () { simEl.hidden = true; });
 
   // ── 工具列表 ─────────────────────────────────────────────────────────
   var listEl = document.getElementById('tl-mine');
@@ -238,6 +309,17 @@
   function send(text) {
     text = (text || '').trim();
     if (!text || streaming) return;
+    var rel = bookSel.value;
+    if (rel && !_sbMap[rel]) {   // 首次带书发言:先备好沙盒(失败就不发,绝不落在原书上)
+      streaming = true;
+      sbEnsure(rel).then(function () { streaming = false; _sendNow(text); })
+        .catch(function (e) { streaming = false; uMsg(text); var d = document.createElement('div'); d.className = 'asst-msg asst-a'; d.textContent = '⚠️ 沙盒创建失败(' + e.message + '),没有执行——不在原书上测试。'; thread.appendChild(d); });
+      return;
+    }
+    _sendNow(text);
+  }
+  function _sendNow(text) {
+    if (streaming) return;
     streaming = true;
     uMsg(text);
     var tid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);

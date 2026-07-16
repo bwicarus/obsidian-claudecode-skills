@@ -118,6 +118,8 @@ def _list_pdfs():
     mtime = max(PDF mtime, overlay sidecar mtime) → 插入页文字改动也纳入增量重建。"""
     out = []
     for p in OBSIDIAN_ROOT.rglob("*.pdf"):
+        if "/.sandbox/" in p.as_posix():
+            continue   # 工具库沙盒副本不进全文搜索
         if p.name.endswith((".orig.pdf", ".compressed.pdf")):
             continue
         try:
