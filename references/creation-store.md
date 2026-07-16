@@ -28,10 +28,13 @@
 - **上下文注入**(唯一入口,替代 recent_check 等专线):`_sys_prompt` 直读 `_creations_recent_line(uid)`——6 条,纸/报告优先保留、其余同 kind 去重,`#id brief · 相对时间`。前端不再拼(pdf-adapter 的 recent_check 已删)。
 - **取回**:工具 `recall_creation(id?|kind?|query?)`;query 命中多条 → **paper 优先**(纸=本体,报告是它的侧面);paper 条目返回 题目+标准答案(`_upage_read_text` 实时)+ 最近检查报告(经纸的 check_name 反查)。
 
-## 语音侧(P2 待统一)
+## 语音侧(已统一,2026-07-17)
 
-语音实时链路的告知仍走前端 `_rtcFlushCtx` 的 rcHint(读 `window.__lastCheckResult`,文案已指向 recall_creation);
-`recall_creation` 经统一 TOOLS 注册表自动进语音工具目录。P2:relay 侧状态事件改读创造物库(需动 voice-rt,注意通话中不可 restart)。
+- **RTC 实时模型**:前端 `_rtcCreFetch` 拉 `/api/assistant/creations-brief`(同一个 `_creations_recent_line`),
+  stale-while-revalidate(开口用缓存注入、>15s 后台刷新、工具完成强制刷新),`_rtcFlushCtx` 注入告知+句柄。
+- **S2S 深度思考**:走 `/api/assistant/chat`(voice:"s2s")→ `_sys_prompt` → 天然带清单,零改动。
+- **relay 不需要动**(它注入的是笔迹/选中等页面状态,不属创造物;S2S 大脑已经经 _sys_prompt 统一)。
+- 旧 `window.__lastCheckResult` 专线已删(pdf-uishared stash + rc-voicecall 读取)。
 
 ## 踩坑
 

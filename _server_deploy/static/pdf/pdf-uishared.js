@@ -782,8 +782,7 @@ window._favOpenPicker = function () {
       var c = !!_upResCollapsed[key];
       r.classList.toggle('collapsed', c); tog.textContent = c ? '展开 ▸' : '收起 ▾';
     });
-    // 被动:只记报告名/得分(不记全文)→ getContext 告知"最近有报告《名》",AI 要看内容自己调工具。
-    try { if (name) window.__lastCheckResult = { name: name, score: score || '', ts: Date.now() }; } catch (_) {}
+    // (旧 __lastCheckResult 专线已退役:上下文告知统一走服务端创造物库,文字=_sys_prompt 直读、语音=creations-brief 端点。)
   }
 
   // 任务运行时:按 upage id 重画那张纸(检查结果写回 sidecar 后,SSE text 事件触发)。

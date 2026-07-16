@@ -651,6 +651,7 @@
   }
   function _chipEnd(p) {
     if (!(window.RC && RC.toolChip)) return;
+    try { _rtcCreFetch._t = 0; _rtcCreFetch(); } catch (e) {}   // 工具完成=可能有新创造物 → 强制刷新清单缓存
     var c = _chipTake(p);
     if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
     if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
@@ -2546,25 +2547,29 @@
     _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
                                                    max_output_tokens: 2048 } });
   }
+  // 创造物库清单(与文字侧同源:/api/assistant/creations-brief → _creations_recent_line)。
+  //   stale-while-revalidate:开口时用缓存注入,距上次拉取 >15s 就后台刷新;工具完成(_chipEnd)也刷新。
+  function _rtcCreFetch() {
+    var now = Date.now();
+    if (now - (_rtcCreFetch._t || 0) < 15000) return;
+    _rtcCreFetch._t = now;
+    fetch('/api/assistant/creations-brief').then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) _rtc.creLine = d.line || ''; }).catch(function () {});
+  }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     // 127:注入走**前端自己的 data channel**(浏览器→OpenAI 一跳)。绕 relay 的旧路 = OpenAI→Pi→OpenAI
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
-      // 检查报告存在提示 —— 跟**文字侧完全一致**:只告知"有报告《名》",讲错题让模型调 read_check_report
-      //   (读同一个 window.__lastCheckResult,文字/语音行为无缝一致,不再各搞各的)。
-      var rcHint = '';
-      try {
-        var _lc = window.__lastCheckResult;
-        if (_lc && _lc.name && (Date.now() - _lc.ts) < 10 * 60 * 1000) {
-          rcHint = '。另:用户最近做完一张**他自己生成的练习纸**《' + _lc.name + '》并让你检查了' + (_lc.score ? ('(得分 ' + _lc.score + ')') : '')
-                 + '。他问讲题/某题答案/为什么错/题目出处,**调 recall_creation(query="' + _lc.name + '")**——'
-                 + '它返回题目+标准答案+检查报告,你据此直接答。'
-                 + '注意:题目是**纸上自制**的、书里没有逐字题目,别自己凭空猜、也别去 search_book 找"逐字题目原文"';
-        }
-      } catch (e) {}
-      var _rcName = rcHint && window.__lastCheckResult ? (window.__lastCheckResult.name || '') : '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + _rcName;
+      // ★创造物库告知(与文字侧同一个源;替代旧 __lastCheckResult 专线):只注入告知+句柄,内容 recall 取。
+      _rtcCreFetch();
+      var cre = (_rtc.creLine || '').replace(/\n/g, ';');
+      var rcHint = cre
+        ? ('。最近创造物(之前工具的产出;句柄=#id,**内容不在这里**,用 recall_creation(id=…)取回):' + cre
+           + '。用户提到"刚才查的/搜的/那张纸/第几题的答案"→ **先 recall_creation 再答**;纸类条目会给题目+标准答案+检查报告——'
+           + '题目是纸上自制的,书里没有逐字题目,别去 search_book 找题目原文')
+        : '';
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +

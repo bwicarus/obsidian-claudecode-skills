@@ -6555,6 +6555,14 @@ def assistant_voice_config():
     return jsonify({"ok": True, "cfg": {k: cfg.get(k) for k in _VOICE_CFG_FIELDS}})
 
 
+@bp.route("/creations-brief")
+def assistant_creations_brief():
+    """最近创造物清单(告知+句柄)——语音 RTC 前端注入用,与文字 _sys_prompt 同一个源(_creations_recent_line)。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "line": _creations_recent_line(str(session["user_id"]))})
+
+
 @bp.route("/pref-profiles", methods=["GET", "POST"])
 def assistant_pref_profiles():
     """模型设置**预设方案**(用户设计:面板顶部几个按钮,点击=应用整套配置,可保存/删除)。
