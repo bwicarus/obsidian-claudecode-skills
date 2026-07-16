@@ -402,8 +402,10 @@ def _gemini_websearch(query, timeout=45, model=None):
     body = {"contents": [{"role": "user", "parts": [{"text": query}]}],
             "tools": [{"google_search": {}}],
             "systemInstruction": {"parts": [{"text": _sys}]},
-            # 70b:必须关 thinking——不关的话 thought parts 泄漏进输出(实锤"Wait, the prompt says…"内心戏)
-            # 且思考 tokens 吃掉 900 输出预算导致正文截断,JSON 守规率 1/3
+            # 70b(2026-07-17 实验修订):关 thinking 的两个旧理由在 3.5 上都不复现——①thought 内容默认根本
+            # 不回传(仅 thoughtsTokenCount 计数;下面解析还留了 thought 过滤双保险)②思考 tok 已不挤占输出预算
+            # (实测 879 思考+138 输出在 max900 下 finish=STOP 完整)。维持关闭的**现理由**:浅归纳质量无差,
+            # 开了每次慢 2~4s + 多烧 ~1k tok,不划算。当年"泄漏"疑为 2.x 行为/解析未滤(用户点破,实验证实)。
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 900, "thinkingConfig": {"thinkingBudget": 0}}}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key="
     for key, tier in keys:
