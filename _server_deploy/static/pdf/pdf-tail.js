@@ -161,6 +161,9 @@ function _inkBeginGuard() {   // 笔一落就:①开手写守卫窗口(+1s)②�
 function _inkPointerDown(e) {
   const pw = e.currentTarget; if (!pw || !pw.__inkCanvas) return;
   if (document.body.classList.contains('up-editing')) return;   // 插入页就地编辑期:禁用页面手写(覆盖层挡不住 .page-wrap 的捕获 pointerdown)
+  // ★纸上的按钮/交互元素(「让 AI 检查」等)→ 放行让它收 click,绝不当画笔起点:否则 Apple Pencil 落在
+  //   按钮上会被本 capture 的 preventDefault 吞掉 click,点了没反应(用户实测「点检查一直没出结果」根因)。
+  if (e.target && e.target.closest && e.target.closest('.up2-b-btn,[role="button"],button,a')) return;
   // 便签 gate:手指落在便签上(聚焦文字/双击橡皮/长按样式)全归便签自己,页面 ink 不掺和
   const noteEl = e.target && e.target.closest ? e.target.closest('.rc-note') : null;
   if (noteEl && e.pointerType === 'touch') return;

@@ -969,15 +969,18 @@ window._favOpenPicker = function () {
   function _upRunEvent(rec, ev) {
     if (!rec.run_id) return;
     try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
-    if (ev === 'check') {   // 检查:先截整页(所见即所得)再连截图一起发
-      _upRunHint(rec, '正在截图检查…');
-      _upCaptureRunShots(rec).then(function (shots) {
-        RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev, shots: shots })
+    if (ev === 'check') {   // 检查:先截整页(所见即所得)再连截图一起发。★截图**加 5s 超时**:卡住也照发纯事件
+      _upRunHint(rec, '正在截图检查…');   //   (后端回退服务端拼图)→ 绝不因截图挂住而"点检查没反应"(用户实测根因之一)。
+      var _fired = false;
+      function _fire(shots) {
+        if (_fired) return; _fired = true;
+        var body = { rid: rec.run_id, event: ev };
+        if (shots && shots.length) body.shots = shots;
+        RC.reqJson('POST', '/pdf/api/run-event', body)
           .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); }).catch(function () {});
-      }).catch(function () {   // 截图失败 → 退回纯事件(后端回退服务端拼图)
-        RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })
-          .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); }).catch(function () {});
-      });
+      }
+      setTimeout(function () { _fire(null); }, 5000);
+      _upCaptureRunShots(rec).then(function (shots) { _fire(shots); }).catch(function () { _fire(null); });
       return;
     }
     RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })   // ⚠ 签名是 (method,url,body)
