@@ -216,3 +216,31 @@ CLI 执行时**随步记录 rationale**(claude 分支:工具调用前累积的�
 的**真实局部意图**,存 rec["origin"];起点无 rationale → 轻 AI(gemini flash,think=False)按
 「大任务+节选路线」总结一句;再无 → 留空。运行合成:partial+origin → "这段子流程的起始思路(当时
 AI 决定这么做的原话,作为本次执行的出发点):『…』+ 执行范围以路线为准";无 origin 退回警示方案。
+
+### §8d 节选语义收紧:origin 只按路线总结 + 运行不附原始意图(2026-07-17,用户实锤修正)
+
+§8c 的「rationale 直取」被用户实测击穿:框掉「查高亮」步骤保存的《试卷制作》,测试时 AI 仍去查高亮。
+两处泄漏——① 起点步(read_page)的 rationale 是**被框掉那一步的产物叙述**("Found 3 highlights…
+reading those pages"),直取等于把删掉的语义从后门带回;② 运行合成还附了全量原始意图(『找到我画的
+高亮并制卷』)。修:**节选一律 AI 总结 origin,输入只有节选路线本身**(不给 rationale、不给大任务
+instruction——都带被删语义;prompt 声明"字符串参数(标题/文案)是数据示例,别把其中的词当动作",
+防纸标题『高亮内容小测』这种词泄漏);**partial 运行不再给原始意图**,只给 origin + "路线里没有的
+步骤类型(如没查高亮步骤就绝不查高亮)一律不要做"。rationale 机制保留(流程展示用),不再当 origin。
+
+## §9 工具库沙盒模拟环境(2026-07-17,用户设计:测试在模拟环境跑+直观看到结果)
+
+用户:「工具测试应该在模拟环境中进行且需要能直观看到结果,而不是要跑到阅读器里检测」。落地三件套:
+
+- **沙盒副本** `POST /pdf/api/sandbox {file, reset?}`:把书拷到 `资源/uploads/.sandbox/<原名>`
+  (点目录:Obsidian Sync 不同步、list-pdfs/全文搜索/push_big_files 全排除),reset 时重拷+清边车
+  (userpages/highlights/ink)。工具页 send 前先 ensure(失败**不发**,绝不落原书)。ctx.file_rel
+  一律换沙盒 rel → CLI 读页/造纸/高亮/检查报告全部落副本。
+- **预览 = 真实阅读器 iframe**(一份代码铁律):工具页右侧滑出面板,iframe 开 `/pdf/view?file=<沙盒rel>`
+  ——纸/高亮/手写/AI 检查全套真功能免费得到,零阅读器改动。
+- **产物投递 = SSE 总线** `POST /pdf/api/publish-actions {file, actions}` → `publish("client-action",…)`
+  (与 MCP 遥控同通道,pdf-tail 的 SSE handler → RC.execRemote → window[fn])。工具页定义
+  `window.__upStartTask/goToPage/openBookAt` **转发器**接管 rc-turncard `_applyNewCAs` 的 window[fn]
+  调用(openBookAt 必须覆盖,否则 rc-assistant 的跨书导航会把工具库整页带走);SSE 无回放 → 动作先进
+  `_simQ` 队列,iframe onload+2.5s(SSE 接上)后统一 flush。
+- 验证结论:直连页与 iframe 均实测通(publish → 纸渲染);冷沙盒首开在 Pi 上可能要 1-2 分钟
+  (页图现渲+若有 yolo 批任务抢 CPU 更慢),不是链路问题。

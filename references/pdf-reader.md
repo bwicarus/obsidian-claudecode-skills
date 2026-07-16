@@ -1244,3 +1244,25 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 - **根因**:EPUB 是 reflow 阅读器,双指捏合映射到**字号步进**(`setupEpubPinch`→`_fontStep`→`applyStyle`),改字号 → 整章文字重排 → scrollTop 对应的内容变了,当前读的段落位移。原本**完全没有 reflow 位置保持**。
 - **修复**(`epub-html.js` `_reflowKeepAnchor`,Kindle/Apple Books 标准):`applyStyle` 只改 CSS 变量(`--fs`/`--lh`)不重建 DOM → 视口内一个字符的 Range 全程有效。reflow 前用 `caretRangeFromPoint` 在视口靠上 1/4 处取字符锚记其视口 Y,`apply()` reflow 后重测同字符 Y,差量 `scrollTop += (Y1−Y0)` 把它移回原位。caret 不支持/命中空白 → 退 `elementFromPoint` 元素锚;都失败 → 不动(安全)。接到字号(`onFontSize`/`_fontStep`)+ 行距(`onLineHeight`)三入口;主题(`onTheme`)不改尺寸不需要。
 - 边界:书末尾放大时 scrollTop 触顶被 clamp,锚点可能不完全回位(极端情况,可接受)。
+
+## §18 2026-07-17:自建页删除不再强制刷新(heisenbug 定位记 + 自愈闸 + 渲染缓存迁移)
+
+用户报「删除自建页每次强制刷新且缓存全失效要重载整本」。playwright 循环复现(书副本+伪造 session)定位到**两层**:
+
+1. **reconcile 计数闸竞态**(heisenbug,约 1/3 轮命中):删除后 `__upReconcileDelete` 的
+   `kids.length !== M` 偶发 dom=82 vs backend=81——有异步挂载把刚删的页元素又放回 DOM。
+   凶手没抓到现行(挂 CDP 后 12 连成功,典型海森 bug),按症状根治:
+   - `_upDelReal` 登记 `window._upJustDeleted[rec.id]`;
+   - reconcile 计数不符时先**清僵尸**(uid 在名单里的 `.pdf-upage` remove 再对账);
+   - `_upDelFinish` 失败**隔 900ms 重试一次**(等 DOM churn 落定)再退 reload。
+   - 现场诊断留 `localStorage._recon_dbg`(限长 1500):gate:mode/meta/container/count(含 pw/up/dup 构成)。
+2. **reload 代价**:改页后 mtime 变 → 页图/字符层缓存键全 miss → 整本重渲(Pi 上大扫描书要几分钟)。
+   修:改页 job 收尾 `_up_migrate_render_caches`——页图 `{sha}-p{p}-w{w}-{mt}.jpg` 与字符层
+   `{relsha}-p{p}-{mt}-{lang}.json` 按新页号+新 mtime **改名迁移**(delete:pivot 删、后面前移;
+   insert:pivot 后+1;edit:仅 pivot 作废)。其余物理页内容本来没变,迁移后即使 reload 也全命中。
+
+**排查方法论**(下次 heisenbug 可复用):console.warn 会被紧随的同步 `location.reload()` 吞掉
+(CDP 异步投递,导航丢在途事件)→ **诊断写 localStorage**(跨 reload 存活);抓「谁导航的」用
+CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅读器滚动时
+`history.replaceState` 会把 `&page=N` 写进 URL,所以「导航到带 page 参数的 URL」≠ 有人构造跳转,
+任何 location.reload() 都长这样。
