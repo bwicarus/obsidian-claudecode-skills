@@ -1216,6 +1216,7 @@ window._favOpenPicker = function () {
     }
     if (_upDeleting[rec.id]) return;   // 已在删,忽略重复
     _upDeleting[rec.id] = true;
+    try { (window._upJustDeleted = window._upJustDeleted || {})[rec.id] = Date.now(); } catch (_) {}   // reconcile 自愈:僵尸元素按此名单清
     try { if (window.RC && RC.userpages && RC.userpages.removeLocal) RC.userpages.removeLocal(rec.id); } catch (_) {}   // 本地列表立刻剔除
     var tempEl = _upTempEls[rec.id];
     var pw = tempEl || document.querySelector('.page-wrap[data-page-num="' + rec.page + '"]');
@@ -1269,19 +1270,27 @@ window._favOpenPicker = function () {
         }).catch(function () {});   // 网络抖动:下一轮再试
     }, 800);
   }
-  function _upDelFinish() {   // 全部删完 → 一次性按新文件对齐页号/注解层(**就地 reconcile,不刷新**);不适用/失败才退回 reload。
-    var warns = _upDelWarns; _upDelWarns = [];
-    _upDelIndicator('');
-    if (warns.length && window.RC && RC.toast) RC.toast('部分删除失败:' + warns.join(';'));
-    // 取新的 mtime + 页数 → 就地 reconcile(图片模式+连续排版才行);拿不到/不适用 → reload 兜底(reading-pos 服务端化,无感回位)。
+  function _upDelFinish(attempt) {   // 全部删完 → 就地 reconcile(不刷新);失败**隔 900ms 重试一次**(异步挂载churn落定)再退 reload。
+    if (!attempt) {
+      var warns = _upDelWarns; _upDelWarns = [];
+      _upDelIndicator('');
+      if (warns.length && window.RC && RC.toast) RC.toast('部分删除失败:' + warns.join(';'));
+    }
     fetch('/pdf/api/book-meta?file=' + encodeURIComponent(UP_FILE), { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (meta) {
         var ok = false;
-        try { if (meta && meta.ok && window.__upReconcileDelete) ok = window.__upReconcileDelete(meta); } catch (_) {}
-        if (!ok) { try { location.reload(); } catch (_) {} }
+        try { if (meta && meta.ok && window.__upReconcileDelete) ok = window.__upReconcileDelete(meta); }
+        catch (e) { try { localStorage.setItem('_recon_dbg', ((localStorage.getItem('_recon_dbg') || '') + '|throw:' + e.message).slice(-1500)); } catch (_) {} }
+        if (!ok) {
+          if (!attempt) { setTimeout(function () { _upDelFinish(1); }, 900); return; }   // 自愈第二枪
+          try { location.reload(); } catch (_) {}
+        }
       })
-      .catch(function () { try { location.reload(); } catch (_) {} });
+      .catch(function () {
+        if (!attempt) { setTimeout(function () { _upDelFinish(1); }, 900); return; }
+        try { location.reload(); } catch (_) {}
+      });
   }
   function _upMountBadges() {
     _upRealPages().forEach(function (p) {
