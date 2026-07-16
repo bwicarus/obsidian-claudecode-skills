@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>🧰 工具库</title>
+<script src="/static/qa/marked.js?v={{ js_v }}"></script>
+<script>window.MathJax = { tex: { inlineMath: [['$','$'], ['\\(','\\)']] }, options: { enableMenu: false } };</script>
+<script src="/static/qa/mathjax-full.js?v={{ js_v }}" async></script>
+<!-- 一份代码(用户设计):流程条/详情窗/设置=rc-toolchip,轮次卡/CLI 追踪=rc-turncard,与阅读器完全同文件 -->
+<script src="/static/pdf/rc-core.js?v={{ js_v }}"></script>
+<script src="/static/pdf/rc-md.js?v={{ js_v }}"></script>
+<script src="/static/pdf/rc-assistant.js?v={{ js_v }}"></script>
+<script src="/static/pdf/rc-toolchip.js?v={{ js_v }}"></script>
+<script src="/static/pdf/rc-turncard.js?v={{ js_v }}"></script>
+<script src="/static/pdf/rc-voicecall.js?v={{ js_v }}"></script><!-- 只取 RC.voiceCard.css(.vc-*/.rc-turn-* 全套样式)+ __vcInfoCardEl;通话 UI 只在 #asst-input 存在时挂,本页没有 -->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b1120; color: #dfe8fa; font: 14px/1.6 -apple-system, "SF Pro Text", "PingFang SC", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+           background: rgba(11,17,32,.92); border-bottom: 1px solid #1d2a47; backdrop-filter: blur(8px); }
+  header h1 { font-size: 17px; margin: 0; flex: 0 0 auto; }
+  header .sp { flex: 1; }
+  header select { background: #14203a; color: #cdd9f2; border: 1px solid #2a3a63; border-radius: 9px; padding: 6px 10px; font-size: 13px; max-width: 46vw; }
+  main { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 0; height: calc(100vh - 55px); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; grid-template-rows: 45% 55%; } }
+  /* 左列:工具列表 */
+  #tl-list { overflow-y: auto; padding: 12px; border-right: 1px solid #16213b; }
+  .tl-card { background: #101a30; border: 1px solid #22304f; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+  .tl-hd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tl-name { font-weight: 700; font-size: 15px; }
+  .tl-kind { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; border-radius: 8px; border: 1px solid; }
+  .tl-kind.intent { color: #a9e6b8; border-color: #2f6d45; background: #12281c; }
+  .tl-kind.trace  { color: #a8c4f0; border-color: #2a3a63; background: #131f38; }
+  .tl-kind.paper  { color: #f0d9a8; border-color: #6d5a2f; background: #282112; }
+  .tl-int { margin: 6px 0 2px; font-size: 12.5px; color: #9fb2d6; }
+  .tl-int b { color: #cdd9f2; }
+  .tl-flow { margin-top: 8px; }
+  .tl-ops { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .tl-b { -webkit-appearance: none; appearance: none; background: #14203a; border: 1px solid #2a3a63; color: #cdd9f2;
+          border-radius: 9px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; touch-action: manipulation; }
+  .tl-b.pri { background: #2b4a8f; border-color: #4a6fd0; color: #fff; }
+  .tl-b.danger { color: #ff9d9d; border-color: rgba(200,90,90,.5); }
+  .tl-empty { color: #6f7fa3; text-align: center; margin-top: 40px; font-size: 13px; }
+  /* 右列:聊天 */
+  #tl-chat { display: flex; flex-direction: column; min-width: 0; }
+  #asst-thread { flex: 1; overflow-y: auto; padding: 14px 16px 8px; }
+  /* 气泡基础样式(阅读器里在 reader CSS,这里补一份最小等价;.vc-*/.rc-turn-* 来自 RC.voiceCard.css 同源注入) */
+  .asst-msg { max-width: 92%; margin: 0 0 10px; padding: 10px 13px; border-radius: 13px; word-break: break-word; overflow-wrap: anywhere; }
+  .asst-a { background: #101a30; border: 1px solid #1e2c4d; margin-right: auto; }
+  .asst-u { background: #2b4a8f; color: #fff; margin-left: auto; }
+  .asst-msg pre { overflow-x: auto; background: #0b1322; border-radius: 8px; padding: 8px; }
+  .asst-msg code { background: #0b1322; border-radius: 4px; padding: 0 4px; }
+  .asst-msg img { max-width: 100%; border-radius: 8px; }
+  #tl-inrow { display: flex; gap: 8px; padding: 10px 12px calc(env(safe-area-inset-bottom, 0px) + 10px); border-top: 1px solid #16213b; }
+  #tl-input { flex: 1; background: #14203a; border: 1px solid #2a3a63; color: #dfe8fa; border-radius: 11px;
+              padding: 9px 12px; font-size: 14px; outline: none; }
+  #tl-send { flex: 0 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧰 工具库</h1>
+  <span class="sp"></span>
+  <label style="font-size:12px;color:#8fa2c6">测试上下文</label>
+  <select id="tl-book"><option value="">(不带书)</option></select>
+</header>
+<main>
+  <div id="tl-list"><div class="tl-empty">加载中…</div></div>
+  <div id="tl-chat">
+    <div id="asst-thread"></div>
+    <div id="tl-inrow">
+      <input id="tl-input" type="text" placeholder="和 AI 聊工具:测试、调整、问它会怎么跑…" autocomplete="off">
+      <button id="tl-send" class="tl-b pri">发送</button>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  var RC = window.RC || {};
+  try { RC.voiceCard && RC.voiceCard.css && RC.voiceCard.css(); } catch (e) {}   // .vc-*/.rc-turn-* 样式(与阅读器同源)
+  // renderMd 垫片:rc-assistant 的完整版在阅读器挂载后才导出;本页用 RC.md 等价核心(丢的只有页码链接化)
+  RC.assistant = RC.assistant || {};
+  if (!RC.assistant.renderMd) RC.assistant.renderMd = function (el, t, wm) { try { el.innerHTML = RC.md(t || ''); if (wm !== false && RC.typeset) RC.typeset(el); } catch (e) { el.textContent = t || ''; } };
+  var CLI_TOOLS = { do_task: 1, make_paper: 1, read_check_report: 1, run_saved_task: 1 };
+  var thread = document.getElementById('tl-thread') || document.getElementById('asst-thread');
+
+  // ── 书选择(测试上下文;造纸类工具需要书) ──────────────────────────────
+  var bookSel = document.getElementById('tl-book');
+  fetch('/pdf/api/list-pdfs').then(function (r) { return r.json(); }).then(function (d) {
+    (d.pdfs || []).slice(0, 25).forEach(function (b, i) {
+      var o = document.createElement('option'); o.value = b.rel; o.textContent = b.name;
+      bookSel.appendChild(o);
+      if (i === 0) bookSel.value = b.rel;   // 最近打开的书排最前(服务端已按 lastopen 排序)
+    });
+  }).catch(function () {});
+  function ctx() {
+    var rel = bookSel.value;
+    return rel ? { file_rel: rel, page: 1, tools_page: true } : { no_book: true, tools_page: true };
+  }
+
+  // ── 工具列表 ─────────────────────────────────────────────────────────
+  var listEl = document.getElementById('tl-list');
+  function kindLabel(k) { return k === 'intent' ? '重新生成型' : (k === 'trace' ? '机械回放型' : '交互纸'); }
+  function chipOf(rec) {   // 配方 → rc-toolchip 的 chip 形状(流程条与阅读器同一渲染器)
+    var steps = (rec.calls && rec.calls.length)
+      ? rec.calls.map(function (c) { return { label: c.tool, detail: c.brief || '', tool: c.tool }; })
+      : (rec.flow_ops || []).map(function (op) { return { label: op, detail: '', tool: '' }; });
+    return { label: rec.name, tool: '', type: 'text', steps: steps,
+             detail: rec.instruction || rec.desc || '', meta: [], vision: [] };
+  }
+  function render(recs) {
+    listEl.innerHTML = '';
+    if (!recs.length) { listEl.innerHTML = '<div class="tl-empty">还没有保存过工具。<br>在阅读器里做完一个多步任务,点卡片流程里的「💾 保存为工具」。</div>'; return; }
+    recs.forEach(function (rec) {
+      var card = document.createElement('div'); card.className = 'tl-card';
+      var hd = document.createElement('div'); hd.className = 'tl-hd';
+      var nm = document.createElement('span'); nm.className = 'tl-name'; nm.textContent = rec.name;
+      var kd = document.createElement('span'); kd.className = 'tl-kind ' + (rec.kind || 'paper'); kd.textContent = kindLabel(rec.kind);
+      hd.appendChild(nm); hd.appendChild(kd);
+      if (rec.partial) { var pt = document.createElement('span'); pt.className = 'tl-kind trace'; pt.textContent = '节选'; hd.appendChild(pt); }
+      card.appendChild(hd);
+      var intn = rec.origin || rec.instruction || rec.desc;
+      if (intn) { var it = document.createElement('div'); it.className = 'tl-int'; it.innerHTML = '<b>意图</b> · ' + RC.esc(intn); card.appendChild(it); }
+      var fl = document.createElement('div'); fl.className = 'tl-flow';
+      try { RC.toolChip.renderFlowInto(fl, chipOf(rec)); } catch (e) { fl.textContent = (rec.route || ''); }
+      card.appendChild(fl);
+      var ops = document.createElement('div'); ops.className = 'tl-ops';
+      function btn(txt, cls, fn) { var b = document.createElement('button'); b.className = 'tl-b' + (cls ? ' ' + cls : ''); b.textContent = txt; b.addEventListener('click', fn); ops.appendChild(b); }
+      btn('▶ 测试', 'pri', function () {
+        var adj = prompt('本次调整(可空,如「15道题,难一点」「基于当前页」):') || '';
+        send('运行已保存的工具《' + rec.name + '》' + (adj.trim() ? ',本次调整:' + adj.trim() : ''));
+      });
+      if (rec.kind === 'intent') {
+        btn('✏️ 改意图', '', function () {
+          var v = prompt('修改这个工具的意图(运行时以它为准):', rec.instruction || '');
+          if (v == null || !v.trim()) return;
+          fetch('/pdf/api/recipe-edit', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: rec.name, instruction: v.trim() }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { RC.toast(d.ok ? '已保存' : ('失败:' + (d.error || '?'))); if (d.ok) load(); });
+        });
+      }
+      btn('🗑 删除', 'danger', function () {
+        if (!confirm('删除工具「' + rec.name + '」?')) return;
+        fetch('/pdf/api/recipe-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: rec.name }) })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { RC.toast(d.ok ? '已删除' : ('失败:' + (d.error || '?'))); if (d.ok) load(); });
+      });
+      card.appendChild(ops);
+      listEl.appendChild(card);
+    });
+  }
+  function load() {
+    fetch('/pdf/api/recipes?full=1').then(function (r) { return r.json(); })
+      .then(function (d) { render(d.recipes || []); })
+      .catch(function () { listEl.innerHTML = '<div class="tl-empty">加载失败</div>'; });
+  }
+  load();
+
+  // ── 聊天(轻胶水:SSE 循环;卡片/流程/CLI 追踪全走共享层) ─────────────────
+  var streaming = false, _ridN = 0;
+  function uMsg(text) { var d = document.createElement('div'); d.className = 'asst-msg asst-u'; d.textContent = text; thread.appendChild(d); thread.scrollTop = thread.scrollHeight; }
+  function send(text) {
+    text = (text || '').trim();
+    if (!text || streaming) return;
+    streaming = true;
+    uMsg(text);
+    var tid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    var rid = 'tl' + Date.now() + '_' + (_ridN++);
+    RC.turnCard.open(tid);
+    RC.turnCard.status(tid, '思考中', false);
+    var answer = '', sawCli = false;
+    function handle(ev, parsed) {
+      if (ev === 'answer') {
+        answer = parsed;
+        var pf = (RC.assistant.splitFollowups ? RC.assistant.splitFollowups(answer) : { text: answer });
+        try { RC.turnCard.draftText(tid, pf.text || ''); } catch (e) {}
+      } else if (ev === 'tool') { try { RC.turnCard.busy(tid, String(parsed)); } catch (e) {} }
+      else if (ev === 'tool-done') { try { RC.turnCard.status(tid, '思考中', false); } catch (e) {} }
+      else if (ev === 'tool2' && parsed && parsed.name) {
+        if (parsed.task_id && CLI_TOOLS[parsed.name]) { sawCli = true; RC.turnCard.trackCli(tid, parsed.task_id, parsed.label || parsed.name); return; }
+        try {
+          RC.turnCard.addPart(tid, { kind: 'tool', tool: parsed.name, label: parsed.label || parsed.name,
+            args: parsed.args || {}, steps: parsed.sub_steps || [], result: String(parsed.brief || '').slice(0, 6000),
+            vision: parsed.vision || [], took_s: parsed.sec, model: parsed.model,
+            error: parsed.status === 'error' ? (parsed.brief || '失败') : '' });
+        } catch (e) {}
+      }
+      else if (ev === 'trace' && parsed && parsed.length) {
+        var t0 = parsed[0] || {};
+        try { RC.turnCard.addPart(tid, { kind: 'meta', model: t0.model || '', sec: t0.sec, tok: t0.tok, tier: t0.tier,
+          total_sec: parsed.reduce(function (a, s) { return a + (s.sec || 0); }, 0),
+          ts: Math.floor(Date.now() / 1000), action: 'orchestrator' }); } catch (e) {}
+      }
+      else if (ev === 'error') { try { RC.turnCard.draftText(tid, '⚠️ ' + parsed); } catch (e) {} }
+    }
+    fetch('/api/assistant/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, context: ctx(), rid: rid, turn_id: tid }) })
+      .then(function (r) {
+        var rd = r.body.getReader(), dec = new TextDecoder(), buf = '';
+        function pump() {
+          return rd.read().then(function (x) {
+            if (x.done) return;
+            buf += dec.decode(x.value, { stream: true });
+            var i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              var chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+              var ev = 'message', data = '';
+              chunk.split('\n').forEach(function (ln) {
+                if (ln.indexOf('event:') === 0) ev = ln.slice(6).trim();
+                else if (ln.indexOf('data:') === 0) data += ln.slice(5).trim();
+              });
+              var parsed; try { parsed = JSON.parse(data); } catch (e) { parsed = data; }
+              if (ev === 'done') return;
+              handle(ev, parsed);
+            }
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function () { try { RC.turnCard.draftText(tid, '⚠️ 连接失败,重试一次?'); } catch (e) {} })
+      .then(function () {
+        streaming = false;
+        try {
+          if (!sawCli) { RC.turnCard.freezeDraft(tid); RC.turnCard.status(tid, '完成', true); }
+          // CLI 轮:trackCli 自己管进度/收尾
+        } catch (e) {}
+      });
+  }
+  var inp = document.getElementById('tl-input');
+  document.getElementById('tl-send').addEventListener('click', function () { var v = inp.value; inp.value = ''; send(v); });
+  inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { var v = inp.value; inp.value = ''; send(v); } });
+})();
+</script>
+</body>
+</html>

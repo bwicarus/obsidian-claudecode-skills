@@ -30,6 +30,9 @@
     try {
       if (RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(el, text, true); return; }
     } catch (e) {}
+    try {   // 非阅读器页面(如工具库)没有 renderMd → 退 RC.md(marked)+typeset,再退纯文本
+      if (RC.md) { el.innerHTML = RC.md(text || ''); if (RC.typeset) RC.typeset(el); return; }
+    } catch (e) {}
     el.textContent = text;
   }
   function _scroll() { try { var t = _thread(); if (t) t.scrollTop = t.scrollHeight; } catch (e) {} }
@@ -444,10 +447,84 @@
   }
   function reset() { _turns = {}; _cur = null; }
 
+  // ── CLI 委托任务追踪(从 rc-assistant 搬入:卡头/增量正文/流程/建纸 CA;阅读器与工具库页共用同一份)──
+  function trackCli(tid, taskId, label) {
+    // ★ 用户拍板(9a1a6c1 截图):CLI 卡要跟 web_search 卡**同款**——[卡头=任务名][body 增量渲结果][流程]。
+    //   不再用"进度行 + 全塞 sub_steps"那套。走 turn 容器同一套:title 设卡头、draftText 增量渲正文、
+    //   done 时补一个 tool part(只为设卡头 + 进【流程】+ 让"保存为工具"能拿到 steps)。
+    try { RC.turnCard && RC.turnCard.setTaskId && RC.turnCard.setTaskId(tid, taskId); } catch (_) {}
+    try { RC.turnCard.title(tid, label); } catch (_) {}                 // 卡头=CLI任务名(用户设计 #57)
+    try { RC.turnCard.status(tid, '规划中', false); } catch (_) {}      // 进度=标题下面一行(用户设计 #49/#52)
+    var n = 0, _appliedCA = 0;
+    function _applyNewCAs(cas) {   // #2:client_action(建纸)一出现就应用,不等 CLI 说完(page_show 一跑纸就开始建)
+      cas = cas || [];
+      for (var i = _appliedCA; i < cas.length; i++) {
+        var a = cas[i];
+        try { if (a && a.fn && typeof window[a.fn] === 'function') window[a.fn].apply(null, a.args || []); } catch (_) {}
+      }
+      _appliedCA = cas.length;
+    }
+    function _mkSteps(steps) {   // 每步带 tool + **输入(args)/输出(result)** → 流程条能看到工具间数据流(#44)
+      var out = (steps || []).map(function (x) {
+        var d = '';
+        try { if (x.args && Object.keys(x.args).length) d += '**输入**\n```json\n' + JSON.stringify(x.args, null, 1) + '\n```\n'; } catch (_) {}
+        if (x.result) d += '**输出**\n' + String(x.result);
+        return { label: x.name || String(x), detail: d || (x.status || ''), tool: x.name || '' };
+      });
+      // #1(用户):造纸流程只要建了「让 AI 检查」按钮(page_add/page_show 的 args 带 event:check),
+      //   就补一个合成节点「检查按钮 → 判分 AI」,tool=dictation_grade → **长按弹的是判分 AI 自己的设置**
+      //   (可改判分指令 + 换模型),而不是外层 CLI 的设置。
+      var hasCheck = false;
+      try {
+        (steps || []).forEach(function (x) {
+          var s = JSON.stringify(x.args || '');
+          if (/"event"\s*:\s*"check"/.test(s) || s.indexOf('让 AI 检查') >= 0) hasCheck = true;
+        });
+      } catch (_) {}
+      if (hasCheck) {
+        out.push({ label: '🔘 检查按钮 → 判分 AI', tool: 'dictation_grade',
+          detail: '**输入**  你在这张纸上的手写作答\n\n**这一步**  按下纸上「让 AI 检查」时，用判分 AI 看这页手写、逐空识别并打分。\n\n**输出**  检查结果(逐空对错 / 点评 / 总评)\n\n> 长按本条可**改判分指令、换模型**。' });
+      }
+      return out;
+    }
+    (function poll() {
+      if (n++ > 600) {
+        try { RC.turnCard.status(tid, '等太久了，没等到结果', true); RC.turnCard.freezeDraft(tid);
+          RC.turnCard.cliPart(tid, { label: label + '(超时)', error: '等太久了' }); } catch (_) {}
+        return;
+      }
+      fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
+        if (!d || !d.ok) { setTimeout(poll, 1500); return; }
+        var steps = d.steps || [];
+        // 进度 → 标题下面一行;结果 → body 增量渲(#52/#57);工具 → 运行中就进【流程】(#5:流程不再空)。
+        try { RC.turnCard.status(tid, (d.step || '规划中') + (steps.length ? ('  ·  已用 ' + steps.length + ' 个工具') : ''), false); } catch (_) {}
+        if (d.partial) { try { RC.turnCard.draftText(tid, d.partial); } catch (_) {} }
+        try { RC.turnCard.cliPart(tid, { label: label, steps: _mkSteps(steps) }); } catch (_) {}   // #5 流程实时填
+        _applyNewCAs(d.client_actions);                                                             // #2 建纸即时开始
+        if (d.status === 'done' || d.status === 'error') {
+          try {
+            var body = String(d.partial || d.speak || (d.status === 'error' ? d.error : '') || '').trim();
+            var _fl = d.result && d.result.flow;   // ★流程摘要(查找类带实际参数)→ 附在正文下,让用户看到 CLI 做了啥
+            if (_fl) body = (body ? body + '\n\n' : '') + '🔎 过程:' + _fl;
+            if (body) { RC.turnCard.draftText(tid, body); }
+            RC.turnCard.freezeDraft(tid);
+            RC.turnCard.status(tid, d.status === 'error' ? ('出错：' + (d.error || '')) : '制作完毕', true);   // #52
+            RC.turnCard.cliPart(tid, { label: label, steps: _mkSteps(steps),
+              error: d.status === 'error' ? (d.error || '失败') : '' });
+            _applyNewCAs(d.client_actions);   // 收尾补一次(done 时才出现的 client_action)
+          } catch (_) {}
+          return;
+        }
+        setTimeout(poll, 1500);
+      }).catch(function () { setTimeout(poll, 2000); });
+    })();
+  }
+
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
     renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
+    trackCli: trackCli,
     has: function (tid) { return !!_turns[tid]; },
   };
 })();

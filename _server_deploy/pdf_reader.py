@@ -1080,9 +1080,76 @@ def pdf_api_run_save():
 
 @bp.route("/api/recipes")
 def pdf_api_recipes():
-    """列出已保存的工具(配方)。"""
+    """列出已保存的工具(配方)。?full=1 → 完整字段(工具库页:route/origin/partial/calls 瘦身版)。"""
     import task_runtime as TR
-    return jsonify({"ok": True, "recipes": TR.list_recipes()})
+    if not request.args.get("full"):
+        return jsonify({"ok": True, "recipes": TR.list_recipes()})
+    out = []
+    try:
+        for f in TR.RECIPES_DIR.glob("*.json"):
+            try:
+                d = json.loads(f.read_text("utf-8"))
+            except Exception:
+                continue
+            calls = [{"tool": c.get("tool"),
+                      "brief": json.dumps(c.get("args") or {}, ensure_ascii=False)[:200]}
+                     for c in (d.get("calls") or [])][:30]
+            out.append({"name": d.get("name") or f.stem, "desc": d.get("desc") or "",
+                        "kind": d.get("kind") or ("paper" if d.get("page") or d.get("flow") else ""),
+                        "instruction": d.get("instruction") or "", "origin": d.get("origin") or "",
+                        "route": d.get("route") or "", "partial": bool(d.get("partial")),
+                        "anchor_page": d.get("anchor_page"),
+                        "sources": list((d.get("sources") or {}).keys()) or list((d.get("sources_menu") or {}).keys()),
+                        "flow_ops": [list(x.keys())[0] for x in (d.get("flow") or []) if isinstance(x, dict)][:20],
+                        "calls": calls})
+    except Exception:
+        pass
+    return jsonify({"ok": True, "recipes": out})
+
+
+@bp.route("/api/recipe-delete", methods=["POST"])
+def pdf_api_recipe_delete():
+    """删除一个已保存工具。body {name}。"""
+    import task_runtime as TR
+    import re as _re
+    name = _re.sub(r"[^\w一-鿿-]", "", str((request.get_json(silent=True) or {}).get("name") or ""))[:60]
+    if not name:
+        return jsonify({"ok": False, "error": "缺 name"}), 400
+    p = TR.RECIPES_DIR / (name + ".json")
+    if not p.exists():
+        return jsonify({"ok": False, "error": "没有这个工具"}), 404
+    p.unlink()
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/recipe-edit", methods=["POST"])
+def pdf_api_recipe_edit():
+    """编辑工具的可改字段。body {name, desc?, instruction?}(intent 型才有 instruction 语义)。"""
+    import task_runtime as TR
+    import re as _re
+    b = request.get_json(silent=True) or {}
+    name = _re.sub(r"[^\w一-鿿-]", "", str(b.get("name") or ""))[:60]
+    p = TR.RECIPES_DIR / (name + ".json")
+    if not name or not p.exists():
+        return jsonify({"ok": False, "error": "没有这个工具"}), 404
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        if isinstance(b.get("desc"), str):
+            d["desc"] = b["desc"][:200]
+        if isinstance(b.get("instruction"), str) and b["instruction"].strip():
+            d["instruction"] = b["instruction"][:2000]
+        p.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:120]}), 500
+
+
+@bp.route("/tools")
+def pdf_tools_page():
+    """工具库页面(用户设计):查看所有已保存工具(route 渲成流程条,与阅读器同一份 rc-toolchip)+
+    聊天区可视化实测(测试=让编排 AI 真跑 run_saved_task → CLI 卡在聊天流里长出来)。
+    登录墙由 app.PROTECTED_PREFIXES(/pdf)兜;nav 注入同理。"""
+    return render_template("tools.html", js_v=_reader_js_v())
 
 
 @bp.route("/api/run-start", methods=["POST"])
