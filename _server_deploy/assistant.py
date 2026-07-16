@@ -2654,6 +2654,15 @@ def _t_highlight(args, ctx):
         if ids:
             import voice
             res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids}, owner=ctx.get("_uid"))
+            if not (ctx or {}).get("_suppress_creation"):   # auto_highlight 逐页调我时由它汇总登一条,别碎 N 条
+                try:   # 创造物库:**写操作也留痕**(用户实锤:"取消刚才你高亮的"——AI 没有"我高亮过什么"的记忆)。
+                    _pgs = sorted({c0.get("disp_page") for c0 in created if c0.get("disp_page")})
+                    _creation_add(str(ctx.get("_uid") or ""), "highlight",
+                                  "在第 %s 页高亮了 %d 处" % ("、".join(str(x) for x in _pgs) or "?", len(ids)),
+                                  content="\n".join("[%s] p%s %s" % (c0.get("id"), c0.get("pdf_page"), c0.get("text") or "") for c0 in created),
+                                  anchor={"file": file_rel, "page": (pages[0] if pages else None)})
+                except Exception:
+                    pass
         return res
     except Exception as e:
         return {"error": str(e)[:120]}
@@ -2839,11 +2848,20 @@ def _t_auto_highlight(args, ctx):
         sents = picks.get(pg) or []
         if not sents:
             reports.append({"page": disp, "n": 0, "skip": "没挑出重点"}); continue
-        hr = _t_highlight({"texts": sents, "page": disp, "color": color}, ctx) or {}
+        hr = _t_highlight({"texts": sents, "page": disp, "color": color}, dict(ctx or {}, _suppress_creation=True)) or {}
         n = int(hr.get("highlighted") or 0)
         total += n
         created.extend(hr.get("_created") or [])   # 汇总各页高亮 → 一张「跳转+撤销/重做」卡片
         reports.append({"page": disp, "n": n, "sentences": [s[:24] for s in sents]})
+    try:   # 创造物库:写操作留痕(汇总一条,逐页子调用已抑制)
+        _apgs = sorted({c0.get("disp_page") for c0 in created if c0.get("disp_page")})
+        if created:
+            _creation_add(str((ctx or {}).get("_uid") or ""), "highlight",
+                          "自动标重点:第 %s 页共 %d 句" % ("、".join(str(x) for x in _apgs) or "?", total),
+                          content="\n".join("[%s] p%s %s" % (c0.get("id"), c0.get("pdf_page"), c0.get("text") or "") for c0 in created)[:6000],
+                          anchor={"file": file_rel})
+    except Exception:
+        pass
     return {"done": True, "total_highlighted": total, "pages": reports,
             "client_action": {"fn": "_assistEdit", "args": [{"type": "highlight", "file": file_rel, "items": created}]},
             "note": f"已逐页自动标重点,共 {total} 句(分布见 pages)。**别再逐页 read_page**;直接把'标了哪些页、共多少句'简洁告诉用户即可。"}
@@ -5780,6 +5798,7 @@ def assistant_voice_tool():
         print(f"[voice-tool] {name} args={json.dumps(targs, ensure_ascii=False)[:200]} err={str(res['error'])[:200]}", flush=True)
     else:   # ㊸ 成功调用也记一行(工具名+耗时)——"到底调没调"从此一句 grep 实锤,不再靠推理
         print(f"[voice-tool] {name} ok {round(time.time() - t0, 1)}s", flush=True)
+    _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:语音链路走本端点不经编排循环——漏了它=语音轮产出全不入册(用户实锤"查完天气就忘")
     # ㉜ 语音场景配图渲染:search_image 结果在语音链路(仅本端点)附 client_action → 前端图卡进侧栏对话流。
     #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
     if name == "search_image" and isinstance(res, dict) and res.get("images"):
