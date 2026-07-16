@@ -677,7 +677,7 @@
         RC.turnCard.idle(_tid);
         RC.turnCard.addPart(_tid, { kind: 'tool', tool: p.tool || '', label: p.label || p.tool || '工具',
           args: p.args || {}, steps: p.sub_steps || [], vision: p.vision || [],
-          result: String(p.rag || p.result_brief || '').slice(0, 3000), took_s: p.took_s });
+          result: String(p.rag || p.result_brief || '').slice(0, 6000), took_s: p.took_s, model: p.model });   // model 补上(流程详情窗显示;relay 没带则显 —)
       }
     } catch (e) {}
   }

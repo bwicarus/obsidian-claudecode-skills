@@ -199,9 +199,25 @@
     var tools = t.parts.filter(function (p) { return p.kind === 'tool'; });
     var meta = t.parts.filter(function (p) { return p.kind === 'meta'; })[0];
     if (meta) {
+      // 感叹号并入流程(用户设计):编排模型·总耗时·tok·tier·时刻 + ⚙ 直达编排设置,全在这一行。
       var m = document.createElement('div'); m.className = 'rc-flow-meta';
-      m.textContent = ['模型 ' + (meta.model || '—'), meta.effort ? ('深度 ' + meta.effort) : '',
-        meta.voice_mode ? ('档位 ' + meta.voice_mode) : ''].filter(Boolean).join(' · ');
+      var bits = ['模型 ' + (meta.model || '—')];
+      if (meta.effort) bits.push('深度 ' + meta.effort);
+      if (meta.voice_mode) bits.push('档位 ' + meta.voice_mode);
+      var _tsec = meta.total_sec || meta.sec;
+      if (_tsec) bits.push('共 ' + (Math.round(_tsec * 10) / 10) + 's');
+      if (meta.tok) bits.push((meta.tok >= 1000 ? (meta.tok / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : meta.tok) + ' tok');
+      if (meta.tier) bits.push(String(meta.tier));
+      if (meta.ts) { try { var _d0 = new Date(meta.ts * 1000); bits.push('🕐 ' + _d0.getHours() + ':' + ('0' + _d0.getMinutes()).slice(-2)); } catch (e) {} }
+      m.textContent = bits.filter(Boolean).join(' · ') + '  ';
+      var gear = document.createElement('button'); gear.type = 'button'; gear.className = 'rc-hl-b'; gear.textContent = '⚙';
+      gear.title = '编排 AI 设置(改动直接写当前预设)';
+      gear.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        try { if (RC.assistant && RC.assistant.openModelSettings) RC.assistant.openModelSettings(meta.action || 'orchestrator'); } catch (e) {}
+      });
+      _hlCss();   // rc-hl-b 按钮样式来自 hlcard 的 CSS 块,先确保注入
+      m.appendChild(gear);
       f.appendChild(m);
     }
     if (!tools.length) { f.appendChild(document.createTextNode('(本轮没有工具调用)')); return; }
@@ -220,7 +236,7 @@
       steps = tools.map(function (p) {
         var a = ''; try { a = (p.args && Object.keys(p.args).length) ? JSON.stringify(p.args) : ''; } catch (e) {}
         var det = a;
-        if (p.result) det = (a ? a + '\n\n' : '') + String(p.result).slice(0, 2000);
+        if (p.result) det = (a ? a + '\n\n' : '') + String(p.result).slice(0, 6000);   // 放宽:感叹号 detail 全量语义并入流程
         return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model, tool: p.tool || '' };
       });
     }
@@ -302,9 +318,29 @@
   function addPart(tid, part) {
     var t = _turns[tid] || open(tid);
     if (!t) return null;
+    if (part.kind === 'hlcard') {   // 同轮同书的高亮**合并进一张卡**(AI 调两次 highlight ≠ 两张卡,用户实测)
+      for (var _i = t.parts.length - 1; _i >= 0; _i--) {
+        var _p0 = t.parts[_i];
+        if (_p0.kind === 'hlcard' && _p0.file === part.file) {
+          _p0.items = (_p0.items || []).concat(part.items || []);
+          try {
+            if (_p0._el && _p0._el.isConnected) {
+              var _open0 = !!_p0._el.querySelector('.rc-hlcard.open');
+              var _nd = document.createElement('div'); _nd.className = _p0._el.className;
+              _nd.appendChild(_hlCardEl(t, _p0));
+              if (_open0) { var _c0 = _nd.querySelector('.rc-hlcard'); if (_c0) _c0.classList.add('open'); }
+              _p0._el.replaceWith(_nd); _p0._el = _nd;
+            }
+          } catch (e) {}
+          try { if (RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+          return _p0._el || null;
+        }
+      }
+    }
     part.seq = t.parts.length;
     t.parts.push(part);
     var el = renderPart(t, part);
+    if (el) part._el = el;   // 供 hlcard 合并就地重建(partsOf 复制时显式跳过 _el,不泄漏进落库)
     if (part.kind === 'tool' && !t.flow.hidden) _paintFlow(t);   // 面板开着 → 实时补画
     // ★ 容器一有新内容就通知落库。**不能只在 response.done 落库**:展示型工具(天气/搜索/配图)
     //   跑完后 relay 设了 no_create —— **不会再有下一个 response**,于是 tool/card 这两个 part

@@ -3889,7 +3889,7 @@ def _tool2(name, label, args=None, status="running", res=None, sec=None, sub_ste
             d["brief"] = str(res["error"])[:300]
         else:
             try:
-                d["brief"] = _step_detail(res)[:800]
+                d["brief"] = _step_detail(res)[:4000]   # 放宽(原800):感叹号"每步 detail 全量"语义并入卡片流程,靠它承载
             except Exception:
                 d["brief"] = ""
     return {"event": "tool2", "data": d}
@@ -5009,6 +5009,8 @@ def _chat_worker(rid, message, ctx, history, force_effort, force_model, uid, for
                 _meta["videos"] = job["videos"]
             if job.get("undo_cards"):
                 _meta["undo_cards"] = job["undo_cards"]   # H2:高亮撤销卡持久化
+            if job.get("turn_id"):
+                _meta["turn_id"] = job["turn_id"]   # 文字工具轮:_syncParts 按 turn_id upsert parts → 刷新回放仍是完整卡
             # 落库前剥 [语气:XX](朗读控制符):历史干净 → 关掉朗读后模型不会照着自己旧回答模仿输出标签
             _ans = re.sub(r"[\[【]语气[::][^\]】]{0,12}[\]】]", "", str(job["answer"]))
             _convo_append(uid, "assistant", _ans[:1500], _meta or None)
@@ -5061,7 +5063,8 @@ def assistant_chat():
                             for f in (ctx.get("figures") or [])][:6],
             })
             job = _chat_jobs[rid] = {"events": [], "answer": "", "trace": None, "done": False,
-                                     "lock": threading.Lock(), "uid": uid}
+                                     "lock": threading.Lock(), "uid": uid,
+                                     "turn_id": str(body.get("turn_id") or "")[:24]}   # 轮次容器 id:落库带上 → _syncParts 的 upsert 才能命中(文字工具轮 parts 持久化)
             threading.Thread(target=_chat_worker, daemon=True,
                              args=(rid, message, ctx, history, force_effort, force_model, uid, force_backend)).start()
         elif job.get("uid") != uid:

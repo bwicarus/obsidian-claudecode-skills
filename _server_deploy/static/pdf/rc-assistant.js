@@ -532,6 +532,14 @@
       var sub = document.createElement('div'); sub.className = 'ams-sub';
       sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效(服务端保存,全设备生效)。点预设=进入该预设的设置页,✓亮的是当前生效预设,改动自动存进它;切到别的预设互不影响。';
       container.appendChild(sub);
+      // 界面开关:回答下方的「追问建议按钮」默认不显示(用户拍板放弃),这里可重新打开(本机 localStorage)。
+      var fuRow = document.createElement('label'); fuRow.className = 'ams-sub';
+      fuRow.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;margin:2px 0 8px';
+      var fuCk = document.createElement('input'); fuCk.type = 'checkbox';
+      try { fuCk.checked = localStorage.getItem('asst-followups-on') === '1'; } catch (_) {}
+      fuCk.addEventListener('change', function () { try { localStorage.setItem('asst-followups-on', fuCk.checked ? '1' : '0'); } catch (_) {} });
+      fuRow.appendChild(fuCk); fuRow.appendChild(document.createTextNode('回答下方显示「追问建议」按钮(本设备)'));
+      container.appendChild(fuRow);
       // ── 预设条:整套设置的快照,点 chip 一键切换(服务端 /pref-profiles)。长按/右键删,＋存当前 ──
       var pbar = document.createElement('div'); pbar.className = 'ams-profiles';
       container.appendChild(pbar);
@@ -846,6 +854,13 @@
     '.asst-clip.playing{background:#7b6cff;color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
     '.asst-clip.busy{background:rgba(255,190,90,.22);color:#f0b451;animation:vcClipBreath 1.1s ease-in-out infinite;pointer-events:none}' +   // 生成录音中=琥珀
     '@keyframes vcClipBreath{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45);opacity:1}50%{box-shadow:0 0 0 6px rgba(123,108,255,0);opacity:.75}}' +   // 流式中:发送→停止(红)
+    // 回答底部操作行:▶ / 追问chips / tok+! 排一行(用户:别占多行;chips 多则行内横滚)
+    '.asst-btm{display:flex;align-items:center;gap:6px;margin-top:8px;min-width:0}' +
+    '.asst-btm .asst-followups{margin-top:0;flex:1 1 auto;min-width:0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}' +
+    '.asst-btm .asst-followups::-webkit-scrollbar{display:none}' +
+    '.asst-btm .asst-fu{flex:0 0 auto;white-space:nowrap}' +
+    '.asst-btm .asst-fb-bar{margin-top:0;margin-left:auto;flex:0 0 auto}' +
+    '.asst-btm .asst-clip{margin:0;flex:0 0 auto}' +
     // AI 答完的「追问建议」chip
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
     '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
@@ -1051,6 +1066,7 @@
   }
   function _renderFollowups(afterEl, fus) {
     if (!fus || !fus.length) return;
+    try { if (localStorage.getItem('asst-followups-on') !== '1') return; } catch (_) {}   // ★默认不显示(用户:放弃建议按钮;⚙ 模型设置里有开关)
     var box = document.createElement('div'); box.className = 'asst-followups';
     fus.forEach(function (q) {
       var b = document.createElement('button'); b.className = 'asst-fu';
@@ -1058,7 +1074,7 @@
       b.addEventListener('click', function () { if (!streaming) send(q); });
       box.appendChild(b);
     });
-    afterEl.appendChild(box);
+    _btmBar(afterEl).appendChild(box);   // 进底部操作行(▶/chips/! 同一行)
     try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([box]).catch(function () {}); } catch (_) {}   // 追问 chip 里的公式渲染
     scrollDown();
   }
@@ -1302,7 +1318,7 @@
     // 去掉了🎯升档/🐢调快的爬梯子;只留一个「模型设置」按钮 → 打开统一三维设置面板(后端/型号/深度)
     var bSet = document.createElement('button'); bSet.className = 'afp-act afp-q';
     bSet.textContent = '⚙ 模型设置';
-    bSet.addEventListener('click', function () { close(); try { openModelSettings(); } catch (_) {} });
+    bSet.addEventListener('click', function () { close(); try { openModelSettings('orchestrator'); } catch (_) {} });   // 无工具轮的「!」=编排信息+编排设置直达(工具轮的调用链已并入卡片流程)
     acts.appendChild(bSet); pop.appendChild(acts);
     return pop;
   }
@@ -1325,7 +1341,13 @@
       var pop = _buildFbPop(question, trace, _fbClosePop, ts); pop._owner = btn;
       bar.appendChild(pop); _fbOpenPop = pop;   // 不再 scrollDown:历史回答在中间时,点开不该把视图拽到底
     });
-    bar.appendChild(btn); bubble.appendChild(bar);
+    bar.appendChild(btn); _btmBar(bubble).appendChild(bar);   // 进底部操作行(与 ▶/chips 同一行,不再独占一行)
+  }
+  // 回答底部操作行:▶ / 追问chips / tok+「!」排**一行**(用户:别占多行)。幂等取/建。
+  function _btmBar(el) {
+    var b = el.querySelector(':scope > .asst-btm');
+    if (!b) { b = document.createElement('div'); b.className = 'asst-btm'; el.appendChild(b); }
+    return b;
   }
 
   document.addEventListener('click', function (e) {   // 点回答里的页码链接 → 跳页 + 底部回到条
@@ -1837,6 +1859,8 @@
     try { window.__clearNoteAttached && HOST.clearNoteAttached(); } catch (_) {}   // 便签 chip 同图附件条:发完即清(已定格进 sentCtx)
     var aMsg = addMsg('asst-a', '<span class="mfx-typing"><i></i><i></i><i></i></span>');
     var sawCliCard = false;   // #2:本轮委托给了 CLI(make_paper/do_task)→ CLI 卡就是回答,别再单独出编排答案气泡+建议按钮
+    var sawTool = false;      // ★用户设计:本轮出现工具调用 → 「工具方块」模式(回答/流程/按钮全进 turn 卡)
+    _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);   // 每轮一个新方块(旧 bug:从不重置→多轮堆一卡);立即生成→随请求上送,后端落库带 turn_id,_syncParts 的 parts upsert 才能命中(审查 Q6)
     if (sentCtx.want_viewshot && window.RC && (RC.captureView || RC.captureEl)) {
       // adapter 声明 want_viewshot(服务端渲不了的内容:EPUB HTML 笔迹 / PDF 插入页覆盖层)→ 预拍一张
       //   随请求发,see_ink/see_page 拿 ctx.view_image 所见即所得。**优先 adapter.captureShot**
@@ -1885,6 +1909,10 @@
         var _raw = _stripTornFU(_splitFollowups(answer).text);
         var _at = (window.RC && RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_raw).text : _raw;
         try { window.__asstVoiceTap && window.__asstVoiceTap(_raw, false); } catch (_) {}   // tap 收**原文**(含语气标签,自己解析转折点逐句换情绪)
+        if (sawTool && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {   // ★工具方块模式:回答直接流进卡 body(不再回气泡,收尾也在卡)
+          try { RC.turnCard.draftText(_vTid, _at); } catch (_) {}
+          scrollDown(); return;
+        }
         renderMd(aMsg, _at, false); aMsg.classList.add('mfx-streaming');
         if (!_noChar && _at.length > 5000) { _noChar = true; _stopReveal(); }   // 超长答案:停揭示,改普通(保性能)
         if (_noChar) { _appendCaret(aMsg); }
@@ -1907,6 +1935,8 @@
       else if (ev === 'tool2' && parsed && parsed.name) {
         if (parsed.task_id && (parsed.name === 'do_task' || parsed.name === 'make_paper' || parsed.name === 'read_check_report')) {   // #2 委托 CLI:CLI 卡接管 → 隐藏单独的编排答案气泡
           sawCliCard = true; try { aMsg.style.display = 'none'; } catch (_) {}
+        } else if (!sawTool) {   // ★第一个工具调用出现 → 本轮进入「工具方块」模式:此后所有输出(含最终回答)都在卡内
+          sawTool = true; try { aMsg.style.display = 'none'; } catch (_) {}
         }
         _toolChip(parsed);   // 工具指示器 v2:同一套圆/长条/方块(与语音通话共用)
       }
@@ -1953,7 +1983,7 @@
       try {
         try { if (sentCtx && window.rcNoBook && window.rcNoBook()) sentCtx.no_book = true; } catch (e) {}
         await _stream(tries === 0
-          ? { message: text, context: sentCtx, rid: rid, media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined), force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
+          ? { message: text, context: sentCtx, rid: rid, turn_id: _vTid, media_prefer: (window.rcMediaPrefer ? window.rcMediaPrefer() : undefined), force_effort: (opts && opts.forceEffort) || undefined, force_model: (opts && opts.forceModel) || undefined,
               voice: (window.__asstVoiceOn && window.__asstVoiceOn()) ? 1 : undefined }   // 语音对话中:后端 prompt 切"适合朗读"风格
           : { rid: rid, from: evSeen });
       } catch (e) {
@@ -1983,6 +2013,27 @@
     if (sawCliCard) {
       // #2 委托 CLI:CLI 卡即回答,撤掉这个多余的编排答案气泡(连带追问建议按钮),跟语音模式一致。
       try { aMsg.remove(); } catch (_) {}
+    } else if (sawTool && window.RC && RC.turnCard && RC.turnCard.has(_vTid)) {
+      // ★用户设计:**有工具调用的轮 = 回答写进工具方块**(turn 卡 body,与语音/CLI 同一形态),气泡撤掉。
+      //   感叹号信息并入卡:编排模型/耗时/tok/时刻 → meta part(流程面板顶部,⚙ 直达编排设置)。
+      try {
+        try { RC.turnCard.idle(_vTid); } catch (_) {}   // 审查 Q1:工具 running 后走 error/停止,done 永不来 → 收尾必须掐掉卡头 spinner
+        var _pftT = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
+        if (_pftT && !aborted) RC.turnCard.draftText(_vTid, _pftT);
+        RC.turnCard.freezeDraft(_vTid);
+        if (traceData && traceData.length) {
+          var _t0 = traceData[0] || {};
+          RC.turnCard.addPart(_vTid, { kind: 'meta', model: _t0.model || '', sec: _t0.sec, tok: _t0.tok, tier: _t0.tier,
+            total_sec: traceData.reduce(function (a, s) { return a + (s.sec || 0); }, 0),
+            ts: _recTs || Math.floor(Date.now() / 1000), action: 'orchestrator' });
+        }
+        var _tc0 = RC.turnCard.open(_vTid);
+        if (_tc0 && _tc0.bd && !aborted) {   // 底部操作行(▶/追问)挂在卡 body 内,一行
+          if (pf.followups && pf.followups.length) { try { _renderFollowups(_tc0.bd, pf.followups); } catch (_) {} }
+          if (pf.text) { try { _attachClipBtn(_tc0.bd, { content: answer, ts: _recTs || 0 }); } catch (_) {} }
+        }
+        aMsg.remove();
+      } catch (_) {}
     } else {
       var _pft = (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(pf.text || '').text : pf.text;
       if (_pft) renderMd(aMsg, _pft, true);
@@ -2046,7 +2097,7 @@
         try { renderMd(_tgt, text, true); } catch (e) { _tgt.textContent = text; }
         // 139(用户):AI 的文字输出**不需要「!」这样的按键** —— 工具调用的详情归工具卡的【数据流】按钮 + 长按详情窗
         try {   // 83:长文气泡 TTS 念钮(☆撤——用户裁定收藏走拖拽/浮层)
-          if (arguments[2].speak && !_vTurnEl.querySelector(':scope > .asst-clip')) {
+          if (arguments[2].speak && !_vTurnEl.querySelector('.asst-clip')) {   // 跨层查(clip 可能在 .asst-btm 内,审查 Q7)
             var _sb = document.createElement('button'); _sb.type = 'button'; _sb.className = 'asst-clip dim'; _sb.textContent = '▶';
             _sb.title = 'TTS 念这条';
             var _txt0 = text, _stop0 = null;
@@ -2145,7 +2196,7 @@
       if (_bel && a) setTimeout(function () {
         try {
           if (!_bel.parentNode) return;
-          _bel.querySelectorAll(':scope > .asst-clip').forEach(function (x) { x.remove(); });
+          _bel.querySelectorAll('.asst-clip').forEach(function (x) { x.remove(); });   // 跨层删(同上)
           _attachClipBtn(_bel, { content: a, clip: (extra && extra.clip) || '' });
         } catch (e) {}
       }, 60);
@@ -2215,7 +2266,7 @@
       // CLI 委托任务(do_task/make_paper)→ 卡内进度+结果(_trackCliTask);其它后台写任务(制卡/笔记)走 task 事件的卡外浮动+撤销。
       if (d.task_id && (d.name === 'do_task' || d.name === 'make_paper' || d.name === 'read_check_report')) { _trackCliTask(tid, d.task_id, d.label || d.name || '造纸'); return; }
       RC.turnCard.addPart(tid, { kind: 'tool', tool: d.name || '', label: d.label || d.name || '工具',
-        args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 3000),
+        args: d.args || {}, steps: d.sub_steps || [], result: String(d.brief || '').slice(0, 6000),   // 放宽:感叹号 detail 全量语义并入流程
         vision: d.vision || [],   // #8:实际发给 AI 的图 → 流程「AI 请求」节点展示(点击放大)
         took_s: d.sec, model: d.model, error: d.status === 'error' ? (d.brief || '失败') : '' });
     } catch (_) {}
@@ -2606,7 +2657,8 @@
         a.play().catch(function () { _clipStop(); _ttsGen(); });
       } else _ttsGen();
     });
-    el.appendChild(b);
+    try { el.querySelectorAll('.asst-clip').forEach(function (x) { x.remove(); }); } catch (_) {}   // 审查 Q7:跨层去重(clip 现在在 .asst-btm 内,旧 :scope> 守卫看不见 → 双 ▶)
+    _btmBar(el).insertBefore(b, _btmBar(el).firstChild);   // ▶ 进底部操作行最左(与 chips/! 同一行,不再各占一行)
   }
   function loadHistory() {   // 开面板载入服务端保存的历史(跨设备续上)
     fetch(_HISTURL).then(function (r) { return r.json(); }).then(function (d) {
