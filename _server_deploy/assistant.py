@@ -653,7 +653,9 @@ def _save_check_report(uid, name, file_rel, report, score="", src_page=None, loo
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
         (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
-    try:   # 创造物库:检查报告入册(ref 按名引用报告库)
+    try:   # 创造物库:检查报告入册(ref 按名引用报告库;「记忆」开关=dictation_grade)
+        if not _creation_enabled(uid, "dictation_grade"):
+            raise RuntimeError("off")
         _creation_add(uid, "check_report", "检查了《%s》%s" % (final, ("得分 " + score) if score else ""),
                       ref={"name": final}, anchor={"file": file_rel})
     except Exception:
@@ -2654,7 +2656,7 @@ def _t_highlight(args, ctx):
         if ids:
             import voice
             res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids}, owner=ctx.get("_uid"))
-            if not (ctx or {}).get("_suppress_creation"):   # auto_highlight 逐页调我时由它汇总登一条,别碎 N 条
+            if not (ctx or {}).get("_suppress_creation") and _creation_enabled(str(ctx.get("_uid") or ""), "highlight"):   # auto_highlight 逐页调我时由它汇总登;「记忆」开关可关
                 try:   # 创造物库:**写操作也留痕**(用户实锤:"取消刚才你高亮的"——AI 没有"我高亮过什么"的记忆)。
                     _pgs = sorted({c0.get("disp_page") for c0 in created if c0.get("disp_page")})
                     _creation_add(str(ctx.get("_uid") or ""), "highlight",
@@ -2853,9 +2855,9 @@ def _t_auto_highlight(args, ctx):
         total += n
         created.extend(hr.get("_created") or [])   # 汇总各页高亮 → 一张「跳转+撤销/重做」卡片
         reports.append({"page": disp, "n": n, "sentences": [s[:24] for s in sents]})
-    try:   # 创造物库:写操作留痕(汇总一条,逐页子调用已抑制)
+    try:   # 创造物库:写操作留痕(汇总一条,逐页子调用已抑制;「记忆」开关可关)
         _apgs = sorted({c0.get("disp_page") for c0 in created if c0.get("disp_page")})
-        if created:
+        if created and _creation_enabled(str((ctx or {}).get("_uid") or ""), "auto_highlight"):
             _creation_add(str((ctx or {}).get("_uid") or ""), "highlight",
                           "自动标重点:第 %s 页共 %d 句" % ("、".join(str(x) for x in _apgs) or "?", total),
                           content="\n".join("[%s] p%s %s" % (c0.get("id"), c0.get("pdf_page"), c0.get("text") or "") for c0 in created)[:6000],
@@ -3714,19 +3716,44 @@ _CREATION_KINDS = {
 }
 
 
-def _creation_register(uid, name, targs, res, ctx):
-    """工具 done 统一钩子:白名单内且无 error → 登记创造物(brief=告知+结果要点)。三个编排循环共用。"""
+# 默认记忆的工具(白名单 + 特殊登记点对应的工具名);其它工具默认不记,但都可在工具设置里用「记忆」开关改
+_CREATION_DEFAULT_ON = set(_CREATION_KINDS) | {"highlight", "auto_highlight", "make_paper", "do_task", "dictation_grade"}
+
+
+def _creation_enabled(uid, tool, default_on=None):
+    """工具「记忆」开关(工具设置面板可改):on/off 覆盖,没设=默认(白名单 on,其它 off)。"""
+    if default_on is None:
+        default_on = tool in _CREATION_DEFAULT_ON
     try:
-        if name not in _CREATION_KINDS or not isinstance(res, dict) or res.get("error"):
+        v = ((_tp_load().get(str(uid)) or {}).get(tool) or {}).get("creation")
+        if v == "on":
+            return True
+        if v == "off":
+            return False
+    except Exception:
+        pass
+    return default_on
+
+
+def _creation_register(uid, name, targs, res, ctx):
+    """工具 done 统一钩子:开关允许且无 error → 登记创造物(brief=告知+结果要点)。
+    白名单工具默认记;其它工具默认不记但开了开关也能记(通用模板)。编排循环 + voice-tool 端点共用。"""
+    try:
+        if not isinstance(res, dict) or res.get("error"):
             return
-        tmpl, getk = _CREATION_KINDS[name]
-        v = None
-        try:
-            v = getk(targs or {})
-        except Exception:
-            pass
-        head = tmpl.format(str(v)[:40]) if ("{}" in tmpl and v not in (None, "")) else tmpl.split("{")[0]
+        if not _creation_enabled(uid, name, default_on=(name in _CREATION_KINDS)):
+            return
         gist = re.sub(r'[{}"\[\]]', "", _step_detail(res)).replace("\n", " ").strip()[:80]   # 去 JSON 符号,brief 是给模型看的一句人话
+        v = None
+        if name in _CREATION_KINDS:
+            tmpl, getk = _CREATION_KINDS[name]
+            try:
+                v = getk(targs or {})
+            except Exception:
+                pass
+            head = tmpl.format(str(v)[:40]) if ("{}" in tmpl and v not in (None, "")) else tmpl.split("{")[0]
+        else:   # 非白名单但用户开了记忆 → 通用告知(工具人话名 + 结果要点)
+            head = _tool_label(name, targs or {})
         _creation_add(uid, name, head + ":" + gist, query=(v if isinstance(v, str) else None),
                       content=_step_detail(res)[:6000],
                       anchor={"file": (ctx or {}).get("file_rel"), "page": (ctx or {}).get("page")})
@@ -5682,7 +5709,9 @@ def assistant_tool_prompt():
                        "resolved": _filler_mode(uid, tool),       # 最终生效:always / never
                        "median_s": _tool_median_s(tool),          # -1 = 账本里没数据
                        "global": g},
-            "model": _tool_model_block(uid, tool)})               # 148:该工具用哪个模型(跟总设置同一份数据)
+            "model": _tool_model_block(uid, tool),                # 148:该工具用哪个模型(跟总设置同一份数据)
+            "creation": {"mode": (cur.get("creation") if cur.get("creation") in ("on", "off") else ""),
+                         "default": tool in _CREATION_DEFAULT_ON}})   # 记忆开关:结果是否记入创造物库(用户设计)
 
     body = request.get_json(silent=True) or {}
     tool = (body.get("tool") or "").strip()
@@ -5714,6 +5743,21 @@ def assistant_tool_prompt():
             pass
         _tp_save(st)
         return jsonify({"ok": True, "global": _filler_global(uid)})
+
+    if op0 == "creation":   # 记忆开关:'' = 默认(白名单记/其它不记),on/off = 强制
+        m = (body.get("mode") or "").strip()
+        if m not in ("", "on", "off"):
+            return jsonify({"ok": False, "error": "mode 只能是 on/off 或空(默认)"}), 400
+        if not _fields(tool):
+            return jsonify({"ok": False, "error": "未知工具"}), 400
+        st = _tp_load()
+        t = st.setdefault(uid, {}).setdefault(tool, {})
+        if m:
+            t["creation"] = m
+        else:
+            t.pop("creation", None)
+        _tp_save(st)
+        return jsonify({"ok": True, "mode": m, "resolved": _creation_enabled(uid, tool)})
 
     if op0 == "filler":   # 143:单个工具——'' = 跟全局
         m = (body.get("mode") or "").strip()

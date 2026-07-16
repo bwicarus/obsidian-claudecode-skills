@@ -1425,8 +1425,10 @@ def _task_agent(tid, params, ctx, base):
         _vtask_set(tid, status="error", error="助手没给出结果")
         return
     _flow_txt, _lookups = _flow_summary(steps)   # ★用户设计:流程摘要(查找类带实际参数)→ 进 CLI 返回,供显示 + AI 复用查询
-    try:   # 创造物库:CLI 任务结果入册(跨轮可 recall"刚才那个任务的结果")
+    try:   # 创造物库:CLI 任务结果入册(跨轮可 recall"刚才那个任务的结果";「记忆」开关=do_task)
         import assistant as A
+        if not A._creation_enabled(str((ctx or {}).get("_uid") or ""), "do_task"):
+            raise RuntimeError("off")
         A._creation_add(str((ctx or {}).get("_uid") or ""), "cli_task",
                         "后台任务:" + (_flow_txt or instr[:60]).replace("\n", " ")[:160],
                         content=(answer or "")[:4000])

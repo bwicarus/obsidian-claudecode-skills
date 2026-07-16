@@ -398,6 +398,28 @@
   //   写的是跟「总设置」**同一份** action-prefs(服务端 state/assistant-action-prefs.json),
   //   所以两处改的是同一个东西,不会打架;总设置里也照样能改。
   //   只有**真会调 LLM** 的工具才显示这段(后端 _TOOL_ACTION 决定,没有就不返回 model)。
+  // 记忆开关(用户设计):这个工具的结果要不要记入**创造物库**(供"刚才那个结果/那张纸"被想起并 recall 取回)。
+  //   '' = 默认(常用产出类默认记,其它默认不记);on/off = 强制。存 tool-prompt 同一份 per-user 配置。
+  function mountCreation(host, before, tool, cr) {
+    if (!cr) return;
+    var box = document.createElement('div'); box.className = 'vc-md';
+    box.innerHTML = '<div class="vc-md-t">记忆 <em>· 结果记入创造物库,之后能被"刚才那个…"想起并取回</em></div>' +
+      '<div class="vc-md-r"><select class="vc-cr-s"></select></div><div class="vc-md-st"></div>';
+    var sel = box.querySelector('.vc-cr-s'), st = box.querySelector('.vc-md-st');
+    [['', '默认(' + (cr.default ? '记' : '不记') + ')'], ['on', '记入'], ['off', '不记']].forEach(function (o) {
+      var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; sel.appendChild(op);
+    });
+    sel.value = (cr.mode === 'on' || cr.mode === 'off') ? cr.mode : '';
+    sel.addEventListener('change', function () {
+      fetch('/api/assistant/tool-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: tool, op: 'creation', mode: sel.value }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { st.textContent = (d && d.ok) ? ('已保存 · 当前' + (d.resolved ? '会记入' : '不记入')) : '保存失败'; })
+        .catch(function () { st.textContent = '网络错误'; });
+    });
+    host.insertBefore(box, before);
+  }
+
   function mountModel(host, before, tool, md) {
     if (!md || !md.action) return;
     var box = document.createElement('div'); box.className = 'vc-md';
@@ -467,6 +489,7 @@
         bodyEl.innerHTML = '';
         mountModel(host, wrap, tool, d.model);     // 148:模型选择=独立一段,排在最前(最常改的放最上面)
         mountFiller(host, wrap, tool, d.filler);   // 143:垫话策略=独立一段,插在「提示词」这段之前
+        mountCreation(host, wrap, tool, d.creation);   // 记忆开关:结果是否记入创造物库(用户设计)
         var tas = {};
         d.fields.forEach(function (f) {
           var row = document.createElement('div'); row.className = 'vc-tp-f';
