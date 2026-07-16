@@ -4210,9 +4210,13 @@ def _ap_set(uid, action, backend, variant, depth):
             _AP_PATH.write_text(json.dumps(full, ensure_ascii=False), "utf-8")
         except Exception:
             pass
-        try:   # 单项改动 = 当前配置**偏离预设** → 清「应用中」标记(设置面板 chip 高亮据此;想固化就再「存为预设」)
+        try:   # ★预设即配置本体(用户设计):有「应用中」预设 → 每个单项改动**同步固化进该预设**
+               #   (点开哪个预设改的就是哪个,切走再切回改动还在);没建过预设 → 只写生效配置(行为同旧)。
             allp = json.loads(_APF_PATH.read_text("utf-8")) if _APF_PATH.exists() else {}
-            if isinstance(allp, dict) and isinstance(allp.get(str(uid)), dict) and allp[str(uid)].pop("_active", None) is not None:
+            mine = allp.get(str(uid)) if isinstance(allp, dict) else None
+            act = mine.get("_active") if isinstance(mine, dict) else None
+            if act and isinstance(mine.get(act), dict):
+                mine[act] = dict(u)   # 固化 = 该预设直接持有当前全套生效配置
                 _APF_PATH.write_text(json.dumps(allp, ensure_ascii=False), "utf-8")
         except Exception:
             pass

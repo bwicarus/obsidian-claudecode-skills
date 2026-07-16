@@ -530,7 +530,7 @@
       container = pane1;   // 下方既有代码原样渲进 tab1(最小侵入;focusAction 定位的 actions 都在 tab1)
       window.__amsVoicePane = pane2;   // 语音区挂 tab2(见下方 523 行改调)
       var sub = document.createElement('div'); sub.className = 'ams-sub';
-      sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效(服务端保存,全设备生效)。跟感叹号「更强重答」共用同一套预设。';
+      sub.textContent = '每个任务可单独设 后端/型号/深度,改完即时生效(服务端保存,全设备生效)。点预设=进入该预设的设置页,✓亮的是当前生效预设,改动自动存进它;切到别的预设互不影响。';
       container.appendChild(sub);
       // ── 预设条:整套设置的快照,点 chip 一键切换(服务端 /pref-profiles)。长按/右键删,＋存当前 ──
       var pbar = document.createElement('div'); pbar.className = 'ams-profiles';
@@ -569,7 +569,7 @@
           });
           var add = document.createElement('button'); add.className = 'ams-prof ams-prof-add'; add.textContent = '＋存为预设';
           add.addEventListener('click', function () {
-            var nm = prompt('预设名(保存当前全部任务的模型设置;同名=覆盖更新):', act); if (!nm || !nm.trim()) return;
+            var nm = prompt('新预设名(复制当前全部设置为一个新预设;之后在它页面里的改动会自动存进它):'); if (!nm || !nm.trim()) return;
             fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ op: 'save', name: nm.trim() }) })
               .then(function (r) { return r.json(); })
