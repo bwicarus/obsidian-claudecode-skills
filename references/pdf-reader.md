@@ -1266,3 +1266,9 @@ pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部�
 CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅读器滚动时
 `history.replaceState` 会把 `&page=N` 写进 URL,所以「导航到带 page 参数的 URL」≠ 有人构造跳转,
 任何 location.reload() 都长这样。
+
+⚠ **最大的坑(事后勘误)**:Playwright 的 `framenavigated` 对 `history.replaceState`
+**同文档导航也触发**——阅读器滚动/reconcile 后 currentPage 变化都会 replaceState → 事件计数被污染,
+把大量成功轮误报成 RELOAD(&page=5→&page=6 两连"导航"其实就是滚动)。判定真 reload 用
+**窗口标记法**:点删除前 `window.__marker=1`,轮询若 marker 丢失=真重载;replaceState 不丢。
+用标记法重验后,真实失败率远低于最初观感,唯一实锤失败模式就是 gate:count(瞬时多元素)。
