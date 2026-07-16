@@ -3508,15 +3508,18 @@ def _t_run_saved_task(args, ctx):
         rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
         route = (rec.get("route") or "").strip()
         _origin = str(rec.get("origin") or "").strip()
-        if rec.get("partial") and _origin:   # 节选+有起点思路:用它当调用开端(替代全量委托语义,用户设计)
-            _part = ("本工具**节选自更大任务**。这段子流程的**起始思路**(当时 AI 决定这么做的原话,作为本次执行的出发点):"
-                     "『%s』。执行范围**以下面的操作路线为准**,路线之外的环节**不要做**。\n" % _origin)
+        if rec.get("partial") and _origin:   # 节选:origin(按路线总结的自洽意图)是唯一意图,原始 instruction 含被框掉的语义不给
+            _part = ("本工具是从更大任务中**节选**的子流程。它的意图:『%s』。"
+                     "执行范围**严格以下面的操作路线为准**——路线里没有的步骤类型(比如没有查高亮的步骤就绝不查高亮、"
+                     "没有做卡的步骤就绝不做卡)**一律不要做**。\n" % _origin)
         elif rec.get("partial"):
-            _part = ("⚠ 本工具只保存了原任务的**一部分步骤**(用户框选):执行范围**以下面的操作路线为准**,"
-                     "原始意图中路线之外的环节(如做卡/记笔记等)**不要做**。\n")
+            _part = ("⚠ 本工具只保存了原任务的**一部分步骤**(用户框选):执行范围**严格以下面的操作路线为准**,"
+                     "路线里没有的步骤类型**一律不要做**。\n")
         else:
             _part = ""
-        instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") + _part +
+        _head = ("运行已保存工具《%s》。\n" % name) if rec.get("partial") else \
+                ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or ""))
+        instr = (_head + _part +
                  (("本次用户的调整(与原意图冲突时**以本次为准**):%s。\n" % adjust) if adjust else "") +
                  (("这是它上次**成功执行的操作路线**(已验证的指挥棒;**严格按此步骤顺序与结构执行**,"
                    "内容按本次要求重新生成,[可调]数字按本次调整):\n%s\n" % route) if route else "") +

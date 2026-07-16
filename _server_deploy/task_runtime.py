@@ -1151,16 +1151,18 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
         #   CLI 执行时已随步存 rationale(工具调用前的散文);起点步没有 → 轻 AI 按路线总结一句;再无 → 留空(运行侧退回警示)。
         origin = ""
         if partial:
-            origin = str((steps or [{}])[0].get("rationale") or "").strip()
-            if not origin:
-                try:
-                    import assistant as A
-                    origin = (A._gemini_text(
-                        "下面是一个大任务里被用户节选出来的一段工具流程。用一句话(≤60字)概括这段子流程的意图"
-                        "(它自己要完成什么),别提大任务其余部分:\n大任务:%s\n节选路线:\n%s"
-                        % (str(instruction)[:300], _abstract_route(calls)), max_tokens=200, think=False) or "").strip()[:200]
-                except Exception:
-                    origin = ""
+            # ⚠ 用户实锤的污染案例:起点步的 rationale("Found 3 highlights… reading those pages")本身是
+            #   **被框掉步骤(查高亮)的产物叙述**——直取会把被剔除的语义从后门带回来。所以节选时一律
+            #   AI 总结,且**输入只有节选路线本身**(不给 rationale、不给全量 instruction——都含被删语义)。
+            try:
+                import assistant as A
+                origin = (A._gemini_text(
+                    "下面是一段工具流程(从更大任务中节选出来的子流程)。只依据这些步骤本身,用一句话(≤60字)"
+                    "概括这段子流程自己要完成什么。**不要引用/假设这些步骤之外的任何环节**(比如没有查高亮的"
+                    "步骤就绝不提高亮);步骤里的字符串参数(标题/文案等)只是当时的数据示例,"
+                    "**别把其中的词当成要执行的动作**:\n" + _abstract_route(calls), max_tokens=200, think=False) or "").strip()[:200]
+            except Exception:
+                origin = ""
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
                "origin": origin,
                "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
