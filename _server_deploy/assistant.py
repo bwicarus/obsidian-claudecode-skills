@@ -3318,8 +3318,9 @@ def _t_start_dictation(args, ctx):
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "read_check_report": ("回答**练习纸检查报告**相关问题的子 agent(它带着那份报告为上下文、能自己查书核实再作答)。"
-                          "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改,就调它——"
-                          "**把用户的原话问题放进 question**、报告名放进 name。别自己凭空答、别 read_page 找题目(题目在报告里)。"
+                          "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改/**题目出处/原文在哪**,就调它——"
+                          "**把用户的原话问题放进 question**、报告名放进 name。⚠ 这张纸是**用户自制**的,题目和答案**都在报告里、书本正文里没有**——"
+                          "所以**别自己 read_page/search_book 去书里找『题目原文』**(找不到会误导你),一律交给它。"
                           "args {question:用户问题(必给); name?:报告名(纸标题,可模糊;不传=最近一份)}", _t_read_check_report),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
@@ -3615,10 +3616,11 @@ def _sys_prompt(ctx):
     if isinstance(_rc, dict) and _rc.get("name"):
         _nm = _clean_tag(_rc.get("name"))
         _sc = _clean_tag(str(_rc.get("score") or ""))
-        check_line = (f"\n★用户最近做完一张**自制练习纸**《{_nm}》并让你检查了"
+        check_line = (f"\n★用户最近做完一张**他自己生成的练习纸**《{_nm}》并让你检查了"
                       + (f"(得分 {_sc})" if _sc else "") + "。"
-                      "题目原文、标准答案、他的手写、判分都在这份**检查报告**里(不在书页正文)。"
-                      f"他要讲错题/分析成绩时,**先调 read_check_report(name=\"{_nm}\")** 拿报告再答,别 read_page。")
+                      "这张纸的题目、标准答案、判分都在这份**检查报告**里(纸是根据某页内容自制的,**书本正文里并没有这些题**)。"
+                      f"他问讲题/某题答案/为什么错/**题目出处/原文在哪**,**一律调 read_check_report(name=\"{_nm}\", question=用户原话)** 拿报告作答;"
+                      "**别去 read_page/search_book 翻书找『题目原文』**——书里没有,题是纸上自制的,翻书会误导你。")
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"

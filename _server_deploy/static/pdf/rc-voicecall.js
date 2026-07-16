@@ -2557,8 +2557,10 @@
       try {
         var _lc = window.__lastCheckResult;
         if (_lc && _lc.name && (Date.now() - _lc.ts) < 10 * 60 * 1000) {
-          rcHint = '。另:用户最近做完自制练习纸《' + _lc.name + '》并让你检查了' + (_lc.score ? ('(得分 ' + _lc.score + ')') : '')
-                 + ',他要讲错题/分析成绩就调 read_check_report(name="' + _lc.name + '")拿题目原文和判分再答,别自己猜';
+          rcHint = '。另:用户最近做完一张**他自己生成的练习纸**《' + _lc.name + '》并让你检查了' + (_lc.score ? ('(得分 ' + _lc.score + ')') : '')
+                 + '。这张纸的**题目和标准答案都在检查报告里**(是根据某页内容自制的,书本正文里并没有这些题)。'
+                 + '他问讲题/某题答案/为什么错/题目出处/原文在哪,**一律调 read_check_report(name="' + _lc.name + '", question="用户的原话问题")**拿报告作答;'
+                 + '**别去 search_book/read_page 翻书找"题目原文"**——书里没有,题是纸上自制的,找不到会误导你';
         }
       } catch (e) {}
       var _rcName = rcHint && window.__lastCheckResult ? (window.__lastCheckResult.name || '') : '';
