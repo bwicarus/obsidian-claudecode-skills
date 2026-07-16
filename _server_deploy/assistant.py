@@ -3170,6 +3170,17 @@ _BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr")
 
 def _norm_block(a, idx):
     b = {k: v for k, v in a.items() if k in _BLOCK_KEYS}
+    # 顽强容错:AI 常把内容放错字段(text 块的题目写进 label,或反之)。text/hr 用 `text`,
+    #   blank/button/checkbox 用 `label` —— 放错就自动搬到正确字段(否则渲染不出=用户实测"page_add 失败")。
+    kind = b.get("kind")
+    _t = str(b.get("text") or "").strip()
+    _l = str(b.get("label") or "").strip()
+    if kind in ("text", "hr"):
+        if not _t and _l:
+            b["text"] = b.pop("label")
+    else:   # blank / button / checkbox 用 label
+        if not _l and _t:
+            b["label"] = b.pop("text")
     b.setdefault("id", "b%d" % idx)
     return b
 

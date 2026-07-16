@@ -1020,7 +1020,7 @@ window._favOpenPicker = function () {
       d.__fr = (b.kind === 'text' && b.style === 'h1') ? (sp.font_ratio || 0.45) * 1.25 : (sp.font_ratio || 0.45);
       d.__lhr = (sp.line_h && sp.page_h) ? (sp.line_h / sp.page_h) : 0;   // 单行占页高的比例
       if (b.kind === 'text') {
-        d.textContent = b.text || '';
+        d.textContent = b.text || b.label || '';   // 容错:AI 把题目误放进 label 也能显示(后端 _norm_block 已纠,这里兜旧数据)
         if (b.style === 'h1') d.classList.add('up2-h1');
       } else if (b.kind === 'blank') {
         d.innerHTML = '<span class="up2-b-lab">' + RC.esc(b.label || '') + '</span><span class="up2-b-box"></span>';
