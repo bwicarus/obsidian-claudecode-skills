@@ -2266,6 +2266,8 @@
         if (d.status === 'done' || d.status === 'error') {
           try {
             var body = String(d.partial || d.speak || (d.status === 'error' ? d.error : '') || '').trim();
+            var _fl = d.result && d.result.flow;   // ★流程摘要(查找类带实际参数)→ 附在正文下,让用户看到 CLI 做了啥
+            if (_fl) body = (body ? body + '\n\n' : '') + '🔎 过程:' + _fl;
             if (body) { RC.turnCard.draftText(tid, body); }
             RC.turnCard.freezeDraft(tid);
             RC.turnCard.status(tid, d.status === 'error' ? ('出错：' + (d.error || '')) : '制作完毕', true);   // #52

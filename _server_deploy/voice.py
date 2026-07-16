@@ -1283,6 +1283,52 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
     return answer
 
 
+# ★用户设计:CLI 流程摘要。**查找/查看类**工具(时效性/引用类)带**实际参数**(搜了啥、看第几页)→ 供 AI 复用查询;
+#   机械类工具(建纸/加元素/写内容)一笔带过。{工具: (叙述模板, 从 args 取参数)}。
+_LOOKUP_TOOLS = {
+    "read_page":         ("读了第 {} 页", lambda a: a.get("page") or (a.get("pages") if not isinstance(a.get("pages"), list) else (a.get("pages") or [None])[0])),
+    "search_book":       ("在这本书里搜了「{}」", lambda a: a.get("query")),
+    "search_all_books":  ("跨书搜了「{}」", lambda a: a.get("query")),
+    "web_search":        ("联网搜了「{}」", lambda a: a.get("query")),
+    "lookup_word":       ("查了词「{}」", lambda a: a.get("word") or a.get("text")),
+    "see_page":          ("看了第 {} 页的图", lambda a: a.get("page")),
+    "see_figure":        ("看了带入的图", lambda a: None),
+    "summarize_section": ("总结了第 {} 页所在章节", lambda a: a.get("page")),
+    "toc":               ("看了目录", lambda a: None),
+    "read_selection":    ("读了选中内容", lambda a: None),
+}
+
+
+def _flow_summary(steps):
+    """从 CLI steps 生成一句**流程叙述** + 结构化 lookups(可复用的查询)。查找类带实际参数,机械类归纳。"""
+    parts, lookups = [], []
+    made, blanks, btns = False, 0, 0
+    for s in (steps or []):
+        nm = s.get("name"); a = s.get("args") if isinstance(s.get("args"), dict) else {}
+        if nm in _LOOKUP_TOOLS:
+            tmpl, getk = _LOOKUP_TOOLS[nm]
+            try:
+                v = getk(a)
+            except Exception:
+                v = None
+            if "{}" in tmpl and v not in (None, "", []):
+                parts.append(tmpl.format(str(v)[:40])); lookups.append({"tool": nm, "arg": v})
+            else:
+                parts.append(tmpl.split("{")[0].rstrip("「 "))
+                lookups.append({"tool": nm, "arg": None})
+        elif nm in ("page_new", "page_add", "page_add_many", "page_show"):
+            made = True
+            for b in (a.get("blocks") or ([a] if a.get("kind") else [])):
+                if isinstance(b, dict):
+                    if b.get("kind") == "blank": blanks += 1
+                    if b.get("kind") == "button": btns += 1
+    if made:
+        tail = "出了" + (f"{blanks}道题" if blanks else "一张纸")
+        tail += "、放了个『让 AI 检查』按钮,现在等你作答" if btns else ",等你使用"
+        parts.append(tail)
+    return ("；".join(p for p in parts if p)), lookups
+
+
 def _task_agent(tid, params, ctx, base):
     instr = (params.get("instruction") or "").strip()
     if len(instr) < 3:
@@ -1366,9 +1412,15 @@ def _task_agent(tid, params, ctx, base):
     if not answer:
         _vtask_set(tid, status="error", error="助手没给出结果")
         return
+    _flow_txt, _lookups = _flow_summary(steps)   # ★用户设计:流程摘要(查找类带实际参数)→ 进 CLI 返回,供显示 + AI 复用查询
+    _res = {"answer": answer, "tools": [x["name"] for x in steps]}
+    if _flow_txt:
+        _res["flow"] = _flow_txt
+    if _lookups:
+        _res["lookups"] = _lookups
     _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps),
                client_actions=_CA_SINK.pop(tid, []),   # ★ 后台 agent 内部工具产生的 client_action(如建纸)→ 前端应用
-               result={"answer": answer, "tools": [x["name"] for x in steps]})
+               result=_res)
 
 
 def _run_task(tid, kind, params, context, base):
