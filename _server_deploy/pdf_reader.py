@@ -1062,7 +1062,9 @@ def pdf_api_run_save():
             return jsonify(TR.save_trace_recipe(b.get("name"), b.get("desc") or "", steps,
                                                 str(session.get("user_id") or ""),
                                                 source_label=b.get("source_label") or "",
-                                                source_spec=b.get("source_spec")))
+                                                source_spec=b.get("source_spec"),
+                                                instruction=(t.get("instruction") or ""),   # 生成型判型用:含造纸步骤+有原意图 → 存意图配方
+                                                anchor_page=b.get("page")))
     # 否则保存造纸 run(page/flow 型)
     rid = str(b.get("rid") or "")
     run = TR.load(rid) if rid else TR.recent_run(str(session.get("user_id") or ""))

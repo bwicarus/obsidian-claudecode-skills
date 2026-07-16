@@ -1439,7 +1439,7 @@ def _task_agent(tid, params, ctx, base):
         _res["flow"] = _flow_txt
     if _lookups:
         _res["lookups"] = _lookups
-    _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps),
+    _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps), instruction=instr,   # instruction:保存工具判型用(生成型→存意图而非字面轨迹)
                client_actions=_CA_SINK.pop(tid, []),   # ★ 后台 agent 内部工具产生的 client_action(如建纸)→ 前端应用
                result=_res)
 

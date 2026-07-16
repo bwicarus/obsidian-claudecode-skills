@@ -190,3 +190,13 @@ webapp 一重启就丢,且**没有"挂起等待用户事件"这个状态**。
 - memory `sse-thread-starvation`(为什么运行时不许有阻塞等待的线程)
 - memory `overlay-gate-use-bubble-not-capture`(覆盖层里的按钮为什么会失灵)
 - memory `ios-button-white-block` / `verify-innermost-child-not-container`(块渲染的 UI 坑)
+
+## §8 保存工具的判型(2026-07-17,用户点破的设计漏洞)
+
+轨迹保存(save_trace_recipe)原本把一切冻成字面 calls——**生成型任务**(读页→AI出题→建卷)回放时
+AI 不在场:10 题工具永远回放当年那 10 道原题,15 题/换页出新题都不成立。修:保存时**自动判型**——
+- 轨迹含造纸步骤(page_new/add/show)且有原始 instruction(vtask 完成时随 steps 存)→ **意图配方 kind:'intent'**
+  {instruction 原话, anchor_page, calls 留档}:运行=重新起 CLI(paper 预设),指令=原意图+args.adjust(本次调整,
+  冲突以本次为准)+「先读当前页、内容重新生成、骨架沿用」——AI 上下文=一次全新造纸会话;
+- 纯机械序列 → kind:'trace' 原语义(进程内回放,零 token 秒回);无 instruction 的生成型退回 trace(兼容)。
+run_saved_task args 加 adjust;intent 分支返回 task_id 走 CLI 卡(_AGENT_TASKS/前端三处路由/_tool_label 已接)。

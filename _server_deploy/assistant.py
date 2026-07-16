@@ -3477,6 +3477,20 @@ def _t_run_saved_task(args, ctx):
     rel = (ctx or {}).get("file_rel") or ""
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "目前只支持 PDF 阅读器"}
+    # ★intent 型(重新生成):不回放字面轨迹——重新起 CLI,指令=原意图+本次调整+当前上下文。
+    #   (用户点破:10题工具要15题、换页出新题,只有"AI 重新在场"才成立;那时 AI 的上下文=一次全新造纸会话。)
+    if rec.get("kind") == "intent":
+        adjust = args.get("adjust") or args.get("params") or args.get("source") or ""
+        if isinstance(adjust, dict):
+            adjust = json.dumps(adjust, ensure_ascii=False)
+        adjust = str(adjust).strip()
+        rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
+        instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") +
+                 (("本次用户的调整(与原意图冲突时**以本次为准**):%s。\n" % adjust) if adjust else "") +
+                 "在**当前上下文**执行:先读当前页,内容基于当前页**重新生成**(不要照搬任何旧题面);"
+                 "数量/难度/形式按本次调整优先;流程骨架(建纸→出题→检查按钮)沿用原意图。")
+        return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
+                                  "model": rr["variant"], "effort": rr["depth"]}, ctx)
     # 选数据源(合并型工具有 sources_menu)
     # trace 型(CLI 执行轨迹)→ 进程内回放整串工具(去壳),收集 client_action 给前端应用
     if rec.get("kind") == "trace":
@@ -3512,7 +3526,10 @@ def _t_list_saved_tasks(args, ctx):
     lst = TR.list_recipes()
     if not lst:
         return {"结果": "还没有保存过工具。做完一个任务后点卡片上的「保存为工具」即可。"}
-    return {"已保存的工具": [{"名字": x["name"], "数据源": x.get("sources") or x.get("inputs") or []} for x in lst]}
+    return {"已保存的工具": [{"名字": x["name"],
+                             "类型": ("重新生成型(可 adjust 调数量/难度,在当前页重新出内容)" if x.get("kind") == "intent" else "机械回放型"),
+                             "意图": (str(x.get("instruction") or "")[:80] or None),
+                             "数据源": x.get("sources") or x.get("inputs") or []} for x in lst]}
 
 
 def _t_page_show(args, ctx):
@@ -3660,7 +3677,9 @@ TOOLS = {
     "page_add": ("给草稿纸**加一个元素**(可多次,一次一个):text/blank/checkbox/button。"
                  "args=元素本身,如 {kind:'blank',label:'1.',answer:'ばら'} 或 "
                  "{kind:'button',label:'让 AI 检查',event:'check'}。别一次塞一堆,一次一个最稳。", _t_page_add),
-    "run_saved_task": ("运行一个**已保存的工具**(用户之前存的任务,如听写)。args {name, source?, params?}。"
+    "run_saved_task": ("运行一个**已保存的工具**。两类:**重新生成型**(如『出N题』——按原意图在当前页重新出内容,"
+                       "用户说的数量/难度/主题调整放 args.adjust 原话带上,如 adjust:\"15道题,难一点\");"
+                       "**机械回放型**(如听写——数据源驱动,选 source)。args {name, adjust?, source?, params?}。"
                        "不知道有哪些就先 list_saved_tasks。", _t_run_saved_task),
     "list_saved_tasks": ("列出所有已保存的工具及其数据源。args {}。", _t_list_saved_tasks),
     "page_show": ("把草稿纸**生成出来**(造纸最后一步)。args {}。", _t_page_show),
@@ -3687,7 +3706,10 @@ def _step_detail(res):
 
 
 def _tool_label(name, args):
-    if name in ("do_task", "make_paper", "read_check_report"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
+    if name in ("do_task", "make_paper", "read_check_report", "run_saved_task"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
+        if name == "run_saved_task":
+            _nm0 = (args.get("name") or "").strip(); _adj0 = str(args.get("adjust") or "").strip()
+            return ("运行工具·" + _nm0 + ((" (" + _adj0[:20] + ")") if _adj0 else ""))[:44] if _nm0 else "运行工具"
         instr = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("question") or args.get("text") or "").strip()
         _dft = {"make_paper": "造纸", "read_check_report": "讲解检查报告"}.get(name, "后台任务")
         return (instr[:40] + ("…" if len(instr) > 40 else "")) if instr else _dft
@@ -3793,7 +3815,7 @@ def _claim_fix_msg(raw, used):
 _ORCH_DROP = {"page_new", "page_add", "page_show"}
 # CLI 委托类后台任务:进度/结果显示在**卡内**(tool2 → _trackCliTask),不发卡外浮动 task 事件(#1 状态在卡外的根因)。
 #   read_check_report=报告问答子 agent,同样走 CLI 卡。
-_AGENT_TASKS = {"do_task", "make_paper", "read_check_report"}
+_AGENT_TASKS = {"do_task", "make_paper", "read_check_report", "run_saved_task"}   # run_saved_task 的 intent 分支返回 task_id → 卡内 trackCliTask
 
 
 def _sys_prompt(ctx):

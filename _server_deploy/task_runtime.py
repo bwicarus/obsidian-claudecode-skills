@@ -1005,7 +1005,9 @@ def list_recipes():
                 d = json.loads(f.read_text("utf-8"))
                 out.append({"name": d.get("name") or f.stem,
                             "desc": d.get("desc") or "",
-                            "sources": list((d.get("sources") or {}).keys()),
+                            "kind": d.get("kind") or "",
+                            "instruction": (d.get("instruction") or "")[:120],
+                            "sources": list((d.get("sources") or {}).keys()) or list((d.get("sources_menu") or {}).keys()),
                             "inputs": list((d.get("inputs") or {}).keys())})
             except Exception:
                 pass
@@ -1092,7 +1094,7 @@ def save_recipe(run, name, desc="", source_label="", source_spec=None):
     return {"ok": True, "name": safe, "merged": False, "hint": "已保存为工具「%s」" % safe}
 
 
-def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None):
+def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None):
     """把一次 **CLI 多步任务的执行轨迹** 冻成可复用工具(用户拍板:所有走 CLI 的多步任务都能保存)。
     steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序进程内调 TOOLS[name](去壳)。
     同"工具序列"已存在 → 合并加数据源;否则新建。"""
@@ -1104,6 +1106,19 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None)
              for st in (steps or []) if st.get("name")]
     if not calls:
         return {"ok": False, "error": "这次任务没有可复用的工具调用"}
+    # ★判型(用户点破的设计漏洞:生成型任务冻成字面轨迹=回放永远是当年那10道原题、AI 不在场):
+    #   轨迹含造纸步骤且有原始 instruction → **意图配方(kind:'intent')**:存原意图+锚点,
+    #   运行=重新起 CLI 按「原意图+本次调整+当前上下文」重新生成(15题/换页出新题都成立);
+    #   纯机械序列 → 轨迹配方(kind:'trace',按序进程内回放,零 token 秒回,原语义)。
+    _gen = any(c["tool"] in ("page_new", "page_add", "page_add_many", "page_show") for c in calls)
+    if _gen and str(instruction or "").strip():
+        RECIPES_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
+               "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
+               "calls": calls[:30]}   # calls 留档备查,不用于回放
+        (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+        return {"ok": True, "name": safe, "merged": False, "kind": "intent",
+                "hint": "已保存为**重新生成型**工具「%s」(运行时按原意图+当次调整,在当前页重新出内容)" % safe}
     import hashlib
     sig = "trace:" + hashlib.md5(",".join(c["tool"] for c in calls).encode()).hexdigest()[:14]
     RECIPES_DIR.mkdir(parents=True, exist_ok=True)
