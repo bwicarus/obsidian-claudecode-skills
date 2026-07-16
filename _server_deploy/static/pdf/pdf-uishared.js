@@ -1267,11 +1267,19 @@ window._favOpenPicker = function () {
         }).catch(function () {});   // 网络抖动:下一轮再试
     }, 800);
   }
-  function _upDelFinish() {   // 全部删完 → 一次性对齐页号/内存状态(自动,无需点)。页已乐观移除,这步只做后端对齐。
+  function _upDelFinish() {   // 全部删完 → 一次性按新文件对齐页号/注解层(**就地 reconcile,不刷新**);不适用/失败才退回 reload。
     var warns = _upDelWarns; _upDelWarns = [];
     _upDelIndicator('');
     if (warns.length && window.RC && RC.toast) RC.toast('部分删除失败:' + warns.join(';'));
-    try { location.reload(); } catch (_) {}   // reading-pos 服务端化 → 回到原位,用户无感
+    // 取新的 mtime + 页数 → 就地 reconcile(图片模式+连续排版才行);拿不到/不适用 → reload 兜底(reading-pos 服务端化,无感回位)。
+    fetch('/pdf/api/book-meta?file=' + encodeURIComponent(UP_FILE), { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (meta) {
+        var ok = false;
+        try { if (meta && meta.ok && window.__upReconcileDelete) ok = window.__upReconcileDelete(meta); } catch (_) {}
+        if (!ok) { try { location.reload(); } catch (_) {} }
+      })
+      .catch(function () { try { location.reload(); } catch (_) {} });
   }
   function _upMountBadges() {
     _upRealPages().forEach(function (p) {
