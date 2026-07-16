@@ -506,9 +506,11 @@ def _check_reports_load(uid):
         return []
 
 
-def _save_check_report(uid, name, file_rel, report, score="", src_page=None):
+def _save_check_report(uid, name, file_rel, report, score="", src_page=None, lookups=None):
     """登记一份检查报告,返回**最终报告名**(同名已存在就加序号去重,便于按名精确查)。
-    src_page=这张纸参考的**源书页(印刷页)**——题目自制、书里无逐字题,但知识点在这页附近,供按需读原文。"""
+    src_page=这张纸参考的**源书页(印刷页)**——题目自制、书里无逐字题,但知识点在这页附近,供按需读原文。
+    lookups=造纸 CLI 当时的查找类查询 [{tool,arg},…](读了第几页/搜了什么)——比 src_page 更精确的 provenance,
+    后续 AI 可**原样复用这些查询**去书里找知识点(用户设计:工具返回自带查询履历,替代零散上下文注入)。"""
     uid = str(uid or "")
     name = (name or "练习纸检查").strip() or "练习纸检查"
     if not uid or not (report or "").strip():
@@ -525,7 +527,8 @@ def _save_check_report(uid, name, file_rel, report, score="", src_page=None):
         import hashlib
         rid = hashlib.sha1(f"{final}|{int(time.time())}".encode("utf-8")).hexdigest()[:8]
         lst.append({"id": rid, "name": final, "file": file_rel or "", "score": score or "",
-                    "report": report, "src_page": (int(src_page) if src_page else None), "ts": int(time.time())})
+                    "report": report, "src_page": (int(src_page) if src_page else None),
+                    "lookups": (lookups[:8] if isinstance(lookups, list) else None), "ts": int(time.time())})
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
         (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
@@ -1506,12 +1509,32 @@ def _t_read_check_report(args, ctx):
     question = (args.get("question") or args.get("q") or args.get("text") or "").strip()
     verify = bool(args.get("verify") or args.get("deep") or args.get("查书"))
     _sp = r.get("src_page")
-    # provenance:题目**自制自**书里第 X 页附近 —— 题目书里没有逐字原文,但**知识点在书里**;
-    #   要答『知识点/相关原文在书里哪』就按需 read_page(X) 或 search_book 找**那个知识点**(不是找逐字题目)。
-    _prov = (f"这张纸的题目是**根据本书第 {_sp} 页附近的内容自制**的。" if _sp else "这张纸的题目是根据书里某页内容自制的。")
-    _prov += ("题目本身书里没有逐字原文,但**它考的知识点在书里**——用户问『这个知识点/相关原文在书里哪、讲讲原文』时,"
-              + (f"就 read_page({_sp}) 读那页、" if _sp else "就 ") + "或 search_book 搜知识点关键词,找到书里对应讲解来答;"
-              "**别去找『逐字的题目原文』**(那是纸上自制的,书里没有)。")
+    _lks = r.get("lookups") if isinstance(r.get("lookups"), list) else []
+    # provenance:题目**自制自**书里的内容 —— 题目书里没有逐字原文,但**知识点在书里**。
+    #   优先给**造纸时的原始查询**(lookups:读了第几页/搜了什么)→ AI 直接复用同样的查询去找知识点;
+    #   没有 lookups(旧报告)才退回粗粒度的 src_page。
+    _verb = {"read_page": "读了第 {} 页", "search_book": "在书里搜了「{}」", "search_in_book": "在书里搜了「{}」",
+             "search_all_books": "跨书搜了「{}」", "web_search": "联网搜了「{}」", "lookup_word": "查了词「{}」",
+             "see_page": "看了第 {} 页的图", "see_figure": "看了带入的图",
+             "summarize_section": "总结了第 {} 页所在章节", "toc": "看了目录", "read_selection": "读了选中内容"}
+    _done = []
+    for x in _lks[:8]:
+        t, a = (x or {}).get("tool"), (x or {}).get("arg")
+        tpl = _verb.get(t)
+        if not tpl:
+            continue
+        _done.append(tpl.format(str(a)[:40]) if ("{}" in tpl and a not in (None, "")) else tpl.split("{")[0].rstrip("「 "))
+    if _done:   # 有可渲染的查询才走 lookups 分支;渲染不出(全是未知工具)→ 回退 src_page,别给一句空 provenance
+        _prov = ("出这张纸时 AI " + "、".join(_done) + "。")
+        _prov += ("题目本身书里没有逐字原文,但**它考的知识点就在上面这些查询命中的内容里**——"
+                  "用户问『这个知识点/相关原文在书里哪、讲讲原文』时,**复用同样的查询**"
+                  "(read_page 同一页 / search_book 同样的关键词)找到书里对应讲解来答;"
+                  "**别去找『逐字的题目原文』**(那是纸上自制的,书里没有)。")
+    else:
+        _prov = (f"这张纸的题目是**根据本书第 {_sp} 页附近的内容自制**的。" if _sp else "这张纸的题目是根据书里某页内容自制的。")
+        _prov += ("题目本身书里没有逐字原文,但**它考的知识点在书里**——用户问『这个知识点/相关原文在书里哪、讲讲原文』时,"
+                  + (f"就 read_page({_sp}) 读那页、" if _sp else "就 ") + "或 search_book 搜知识点关键词,找到书里对应讲解来答;"
+                  "**别去找『逐字的题目原文』**(那是纸上自制的,书里没有)。")
     if verify and question:
         # 需要查书核实 → 起带报告上下文、能自己查书的后台子 agent(产 CLI 卡)
         rr = _resolve("agent", uid)
@@ -1527,6 +1550,7 @@ def _t_read_check_report(args, ctx):
                                   "model": rr["variant"], "effort": rr["depth"]}, ctx)
     # 默认(A 折中):把报告内容**同步回给编排模型**,让它直接据此作答 —— 追问(题目出处/某题答案/为什么错)秒答。
     return {"name": r.get("name"), "score": r.get("score") or "", "src_page": _sp,
+            "lookups": (_lks[:8] or None),
             "report": (r.get("report") or "")[:3500],
             "note": "这是那张**用户自制练习纸**的题目原文+标准答案+用户手写+判分。**据此直接回答用户**"
                     "(题目/答案/为什么错/怎么记都在这里)。" + _prov

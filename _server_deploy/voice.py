@@ -1275,6 +1275,17 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                 #   正是用户"页面没做成功"的根因)。
                 for ca in _extract_client_actions(_txt):
                     if ca.get("fn"):
+                        if ca["fn"] == "__upStartTask":
+                            # ★用户设计(最佳实践:provenance 跟**工件**走,不靠时间侧信道猜关联):
+                            #   把 CLI 到此为止的**查找类查询**(读了第几页/搜了什么)注进这张纸的 params
+                            #   → run 记录 → 检查报告 → read_check_report 原样给出,后续 AI 可复用同样的查询。
+                            try:
+                                _, _lk0 = _flow_summary(steps)
+                                _sp0 = (ca.get("args") or [None])[0]
+                                if _lk0 and isinstance(_sp0, dict):
+                                    _sp0.setdefault("params", {})["lookups"] = _lk0[:8]
+                            except Exception:
+                                pass
                         _CA_SINK.setdefault(tid, []).append(ca)
                         _vtask_set(tid, client_actions=list(_CA_SINK[tid]))
         elif d.get("type") == "result":
@@ -1288,6 +1299,7 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
 _LOOKUP_TOOLS = {
     "read_page":         ("读了第 {} 页", lambda a: a.get("page") or (a.get("pages") if not isinstance(a.get("pages"), list) else (a.get("pages") or [None])[0])),
     "search_book":       ("在这本书里搜了「{}」", lambda a: a.get("query")),
+    "search_in_book":    ("在这本书里搜了「{}」", lambda a: a.get("query")),   # MCP 直连名(CLI 直调不经 assistant_call_tool;审查抓的:漏了它=搜索型出题查询全丢)
     "search_all_books":  ("跨书搜了「{}」", lambda a: a.get("query")),
     "web_search":        ("联网搜了「{}」", lambda a: a.get("query")),
     "lookup_word":       ("查了词「{}」", lambda a: a.get("word") or a.get("text")),

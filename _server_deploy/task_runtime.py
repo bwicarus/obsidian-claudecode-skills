@@ -695,9 +695,12 @@ def _check_page(rid, prompt_hint=""):
         except Exception:
             _srcp = None
         # 登记报告(供 read_check_report 工具按名查)。返回**最终报告名**(可能加了序号去重)。
+        #   lookups=造纸 CLI 当时的查找类查询(读了第几页/搜了什么),随纸的 params 一路带过来(provenance 跟工件走)。
+        _lk = (run.get("params") or {}).get("lookups") or None
         try:
             import assistant as A
-            _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore, src_page=_srcp)
+            _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore,
+                                          src_page=_srcp, lookups=_lk)
         except Exception:
             _cname = _cname or "练习纸检查"
         run.update(status="done", result=res, result_md=rmd, result_ai=rai,
