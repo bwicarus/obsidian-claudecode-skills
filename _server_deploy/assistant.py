@@ -1624,7 +1624,7 @@ def _t_make_paper(args, ctx):
     intent = (args.get("intent") or args.get("instruction") or args.get("task") or args.get("text") or "").strip()
     if len(intent) < 2:
         return {"error": "要造什么纸?一句话说清(如『出3道填空题让我写』)"}
-    r = _resolve("agent", str(ctx.get("uid") or ""))
+    r = _resolve("paper", str(ctx.get("uid") or ""))   # 造纸=设计插入内容,用**更深思考**的独立预设(默认 opus·high;≠ do_task 的 agent)
     # 把造纸规矩直接写进给 CLI 的指令:page_new → page_add(可 blocks=[…] 批量)→ page_show。
     #   #38:按钮由**你自己设计行为** —— 每个按钮的 event 决定按下干什么。
     instr = ("造一张让用户在页面上手写作答的交互纸:" + intent +
@@ -4034,7 +4034,7 @@ def _gemini_models():
 _AP_MODELS = _CLAUDE_VARIANTS              # 兼容旧引用(感叹号 force_model 仍只在 Claude 三档里爬梯子)
 # orchestrator/summarize/vision = 侧边栏助手;explain/translate/dict/grammar = 阅读器其它 AI 入口
 # (解释·问AI·选中查询 / 翻译·例句 / 字典AI·日语深入讲解 / 语法分析),统一走脱壳 claude + Gemini 双后端。
-_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text", "dictation_grade")
+_AP_ACTIONS = ("orchestrator", "summarize", "vision", "deep", "agent", "paper", "explain", "translate", "dict", "grammar", "pick_video", "img_norm", "web_search", "route_text", "dictation_grade")
 # 各 action 出厂默认(无用户预设时 _resolve 回退到这)。depth='auto'(仅 orchestrator)= 按问题自动路由 effort。
 _AP_DEFAULTS = {
     "orchestrator": {"backend": "claude", "variant": "sonnet",            "depth": "auto"},
@@ -4047,6 +4047,8 @@ _AP_DEFAULTS = {
     #   ⇒ opus 从 **2 步**就开始占优;codex 要 3 步。**1 步两者都零收益**(见 _t_do_task)。
     #   opus 失败 → 自动降级 codex(白嫖兜底),见 voice.py::_task_agent。
     "agent":        {"backend": "claude", "variant": "opus",              "depth": "low"},
+    # 造纸 / 设计插入内容(出题、排布 blocks):认知要求高 → 默认给**更深的思考档**(用户拍板;可在 ⚙/长按第一行工具条改)
+    "paper":        {"backend": "claude", "variant": "opus",              "depth": "high"},
     "img_norm":     {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 77:配图关键词规范化(可自定义型号)
     "web_search":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:联网搜索结构卡(grounding,深度无效恒不思考)
     "route_text":   {"backend": "gemini", "variant": _GEMINI_MODEL,       "depth": "none"},   # 91:路由详答文字引擎(SSE 流式)
@@ -4061,6 +4063,7 @@ _AP_DEFAULTS = {
     "pick_video":   {"backend": "gemini", "variant": "gemini-3.5-flash",  "depth": "none"},   # 找视频:拟搜索词 + 搜后按相关性筛选(便宜 flash 够用)
 }
 _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
+    "paper": "造纸 / 设计练习纸(出题+排布 blocks,思考要深)",
     "dictation_grade": "听写批改(看手写体,比一般看图难)",
     "deep": "深度思考(语音通话专用)",
     "img_norm": "配图关键词规范化(搜图没中时转 Commons 规范名)",
@@ -5242,6 +5245,7 @@ def _tool_desc_rtc(uid: str, tool: str, base: str, cap: int) -> str:
 #   两边改的是同一份数据 —— 在哪改都一样,不会打架。
 _TOOL_ACTION = {
     "do_task":      "agent",        # 后台 agent worker(无头 CLI + MCP)
+    "make_paper":   "paper",        # 造纸 = 设计插入内容,独立更深预设(长按第一行工具条可调模型/深度)
     "web_search":   "web_search",
     "search_image": "img_norm",     # 配图关键词规范化
     "search_video": "pick_video",
