@@ -3481,6 +3481,28 @@ def _tool_label(name, args):
             "recall_notes": "召回我的笔记", "undo_last": "撤销", "search_image": "配图搜索", "search_video": "找视频"}.get(name, name)
 
 
+# 写操作幻觉硬防线(用户连抓两次:luna·low 只 read_page 就回复「第66页重点已高亮,共5句」,
+#   prompt 铁律无效):最终回答声称完成了写操作、但本轮**没调对应工具** → 服务端拦截,打回重试一次。
+_WRITE_CLAIMS = (
+    (re.compile(r"已高亮|高亮了|已标[注记]好?了?重点"), ("highlight", "auto_highlight", "read_highlights", "find_highlights"), "highlight / auto_highlight"),   # 读类也算:刚 read_highlights 后说「已高亮的内容有…」是合理转述,不拦
+    (re.compile(r"已制卡|已做好?了?卡|卡片已(做|建|加)"), ("make_anki",), "make_anki"),
+    (re.compile(r"已记好?了?笔记|笔记已(记|建|写)"), ("make_note",), "make_note"),
+    (re.compile(r"已加[入进]?生词"), ("add_vocab",), "add_vocab"),
+)
+
+
+def _claim_fix_msg(raw, used):
+    """回答里有完成话术但对应写工具没调过 → 返回打回指令(调用方喂回模型重试);没问题 → None。"""
+    for rx, tools, label in _WRITE_CLAIMS:
+        if rx.search(raw or "") and not any(t in (used or ()) for t in tools):
+            return ("系统拦截:你刚才的回答声称完成了写操作,但你本轮**没有调用 " + label + "**,"
+                    "页面上实际什么都没发生——该回答是编造,已被拒绝、用户看不到。现在二选一:"
+                    "①真要做 → **立刻只输出对应工具调用的 JSON**(整页标重点用 auto_highlight;个别句子用 highlight);"
+                    "②做不了 → 重写回答,如实说没有执行。**禁止**在工具成功之前说『已…』。"
+                    "另:报页码只能用工具返回的 pages 字段,不许用正文里印的数字。")
+    return None
+
+
 # ──────────────────────── agent 循环 ────────────────────────
 # ★ 用户设计(#52/#55):编排 AI **不该**有直接造纸工具 —— 一遇到"出题让用户写/造交互纸"这种多步活,
 #   就该发现"没有直接可调用的工具"→ 交给 CLI(do_task)去做(CLI 那边经 MCP 才看得到 page_*)。
@@ -4550,6 +4572,10 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 for _ss in _subs:   # 工具内部子步骤(如找视频的相关性筛选)各占「!」一行
                     trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
+                try:
+                    _used_tools.add(name)
+                except NameError:
+                    _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -4569,6 +4595,11 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                     content = text_part
                 continue
             # 不是工具调用 = 给用户的最终回答
+            _fix = None if locals().get("_claim_retried") else _claim_fix_msg(raw, locals().get("_used_tools"))
+            if _fix:   # 写操作幻觉 → 拦下,打回重试一次(仅一次,防循环)
+                _claim_retried = True
+                content = _fix
+                continue
             trace[0]["detail"] = (raw or "")[:6000]   # 编排步的「完整内容」= 最终回答(感叹号里点开看)
             yield {"event": "answer", "data": raw}
             break
@@ -4748,6 +4779,10 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 _ga = res.pop("_gen_action", None) if isinstance(res, dict) else None
                 trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec, "action": _ga,
                               "detail": _step_detail(res)})
+                try:
+                    _used_tools.add(name)
+                except NameError:
+                    _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -4765,6 +4800,12 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                         uparts.append({"inlineData": {"mimeType": v.get("media_type", "image/png"), "data": v["b64"]}})
                 contents.append({"role": "user", "parts": uparts})
                 _compact_gemini_contents(contents)   # 压缩较早工具结果(只留最近2个全文 + 丢老图)→ 上下文不随步数线性膨胀
+                continue
+            _fix = None if locals().get("_claim_retried") else _claim_fix_msg(raw, locals().get("_used_tools"))
+            if _fix:   # 写操作幻觉 → 拦下,打回重试一次(仅一次,防循环)
+                _claim_retried = True
+                contents.append({"role": "model", "parts": [{"text": raw}]})
+                contents.append({"role": "user", "parts": [{"text": _fix}]})
                 continue
             trace[0]["detail"] = (raw or "")[:6000]   # 编排步的「完整内容」= 最终回答
             yield {"event": "answer", "data": raw}   # 最终回答(补完整,前端以此为准)
@@ -4868,6 +4909,10 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 for _ss in _subs:
                     trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
+                try:
+                    _used_tools.add(name)
+                except NameError:
+                    _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 同上:高亮/便签卡接管撤销,不再发 undo 行
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}
@@ -4885,6 +4930,11 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                     if isinstance(res, dict):
                         res["图像内容(视觉模型转述)"] = (_vd or "")[:2200]
                 nxt = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                continue
+            _fix = None if locals().get("_claim_retried") else _claim_fix_msg(raw, locals().get("_used_tools"))
+            if _fix:   # 写操作幻觉 → 拦下,打回重试一次(仅一次,防循环)
+                _claim_retried = True
+                nxt = _fix
                 continue
             trace[0]["detail"] = (raw or "")[:6000]
             yield {"event": "answer", "data": raw}
