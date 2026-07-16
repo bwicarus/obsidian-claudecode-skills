@@ -1549,11 +1549,32 @@ def _t_read_check_report(args, ctx):
         )
         return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
                                   "model": rr["variant"], "effort": rr["depth"]}, ctx)
+    # ★用户实测踩坑:刚建了**新纸还没检查**,问"第一题答案" → 编排无 name 调本工具 → 拿到**旧纸**报告,
+    #   答了旧卷的第一题。这里主动探测:当前书里有比该报告**更新且未检查**的答题纸 → 强警告+指路 read_page
+    #   (新纸的题目和标准答案就在纸上,read_page 自建页会原样给出)。
+    _newer = []
+    try:
+        import pdf_reader as P
+        for _it in P._upages_load((ctx or {}).get("file_rel") or r.get("file") or ""):
+            if (_it.get("created") or _it.get("updated") or 0) > (r.get("ts") or 0) and not (_it.get("result_md") or "").strip():
+                _ks = {b.get("kind") for b in (_it.get("blocks") or [])}
+                if "blank" in _ks or "button" in _ks:
+                    _newer.append({"title": _it.get("title") or "", "page": _it.get("page")})
+    except Exception:
+        pass
+    _warn = ""
+    if _newer:
+        _warn = ("⚠⚠ 注意:用户在这份报告**之后**又建了新练习纸(还没检查、没有报告):"
+                 + "、".join("《%s》(第%s页)" % (x["title"], x["page"]) for x in _newer[:3])
+                 + "。**若用户问的是新纸的题/答案,这份旧报告不适用**——直接 read_page(新纸页码) 读那张纸"
+                 "(自建页会返回题目原文+标准答案)。只有确定在问旧纸才用本报告,回答时**先说明你依据的是哪张纸**。")
     # 默认(A 折中):把报告内容**同步回给编排模型**,让它直接据此作答 —— 追问(题目出处/某题答案/为什么错)秒答。
     return {"name": r.get("name"), "score": r.get("score") or "", "src_page": _sp,
+            "report_time": time.strftime("%m-%d %H:%M", time.localtime(r.get("ts") or 0)),
+            "newer_unchecked": (_newer[:4] or None),
             "lookups": (_lks[:8] or None),
             "report": (r.get("report") or "")[:3500],
-            "note": "这是那张**用户自制练习纸**的题目原文+标准答案+用户手写+判分。**据此直接回答用户**"
+            "note": _warn + "这是练习纸《" + str(r.get("name") or "") + "》的题目原文+标准答案+用户手写+判分。**据此直接回答用户**"
                     "(题目/答案/为什么错/怎么记都在这里)。" + _prov
                     + "(要查书就 read_page/search_book 按需读那几页,不用把整页原文都背下来;深入查证可用 verify:true 起子 agent。)"}
 
