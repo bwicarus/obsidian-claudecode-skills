@@ -504,6 +504,7 @@
   }
   function renderModelSettings(container, focusAction) {
     if (!container) return;
+    var _rootEl = container;   // 外层容器引用:下面 528 行 container 被重指到 pane1,预设切换的整体重渲必须用它(否则 tab 行叠加,用户实测每切一次多一组)
     container.innerHTML = '<div class="ams-sub">加载中…</div>';
     fetch('/api/assistant/action-prefs').then(function (r) { return r.json(); }).then(function (d) {
       if (!d || !d.ok) { container.innerHTML = '<div class="ams-sub">拉取设置失败</div>'; return; }
@@ -558,7 +559,7 @@
                 body: JSON.stringify({ op: 'apply', name: nm }) })
                 .then(function (r) { return r.json(); })
                 .then(function (d) {
-                  if (d && d.ok) { if (typeof _toast === 'function') _toast('已切换到「' + nm + '」'); renderModelSettings(container, focusAction); }
+                  if (d && d.ok) { if (typeof _toast === 'function') _toast('已切换到「' + nm + '」'); renderModelSettings(_rootEl, focusAction); }
                   else { b.disabled = false; if (typeof _toast === 'function') _toast('应用失败'); }
                 }).catch(function () { b.disabled = false; });
             });
