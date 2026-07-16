@@ -1495,34 +1495,35 @@ def _find_check_report(uid, name):
 
 
 def _t_read_check_report(args, ctx):
-    """★用户设计:回答**练习纸检查报告**相关问题的**子 agent**(不是取全文给编排看)。
-    把用户的问题 + 报告标识丢进来 → 内部起一个带这份报告为上下文的后台 agent(无头 CLI + MCP),
-    它可自己调工具(search_book/read_page/see_page/lookup_word 查书核实)来保证知识性问答可靠,
-    然后就着报告作答。产出**一张 CLI 卡**(跟 do_task 同一套)。
-    args {question: 用户的原话问题(必给); name?: 报告名(纸标题,可模糊;不传=最近一份)}。"""
+    """回答**练习纸检查报告**相关问题(A 折中:默认**同步返回报告内容让你直接答**,追问类小问题秒答、不起重型子 agent;
+    只有要**查书核实**知识点时传 verify:true 才起带报告上下文+能查书的子 agent)。
+    args {question?: 用户原话问题; name?: 报告名(纸标题,可模糊;不传=最近一份); verify?: true=起查书子 agent}。"""
     uid = str(ctx.get("_uid") or ctx.get("uid") or "")
     r, err = _find_check_report(uid, args.get("name"))
     if err:
         return err
     question = (args.get("question") or args.get("q") or args.get("text") or "").strip()
-    if len(question) < 2:
-        # 没带问题 → 退化成把报告全文给编排 AI 自己看(兜底,不推荐;正常应带 question 走子 agent)
-        return {"name": r.get("name"), "score": r.get("score") or "", "report": r.get("report") or "",
-                "note": "把用户的问题放进 question 参数再调我,我会带这份报告+查书核实来作答(更可靠)。"}
-    rr = _resolve("agent", uid)
-    instr = (
-        f"用户在一张自制练习纸《{r.get('name')}》上作答并已判分。下面是完整**检查报告**"
-        f"(题目原文+各空标准答案+用户手写识别+判分)——这就是题目和答案的来源"
-        f"(题目**不在**书页正文,别去 read_page 找题目;报告已在下面,别再调 read_check_report):\n\n"
-        f"{r.get('report')}\n\n"
-        f"用户的问题:{question}\n\n"
-        f"请**紧扣这份报告**回答:讲清相关题目在问什么、正确答案、为什么、用户错/漏在哪、怎么记。"
-        f"为保证准确,你可以调工具去书里核实(search_book 搜关键词、read_page 读某页正文、"
-        f"see_page 看页面图、lookup_word 查词),但**题目与标准答案一律以报告为准**。"
-        f"最后用简明中文给用户一段可靠、具体的解答。"
-    )
-    return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
-                              "model": rr["variant"], "effort": rr["depth"]}, ctx)
+    verify = bool(args.get("verify") or args.get("deep") or args.get("查书"))
+    if verify and question:
+        # 需要查书核实 → 起带报告上下文、能自己查书的后台子 agent(产 CLI 卡)
+        rr = _resolve("agent", uid)
+        instr = (
+            f"用户在一张自制练习纸《{r.get('name')}》上作答并已判分。下面是完整**检查报告**"
+            f"(题目原文+各空标准答案+用户手写识别+判分)——题目和答案的来源"
+            f"(题目**不在**书页正文,别 read_page 找题目;报告已在下面,别再调 read_check_report):\n\n"
+            f"{r.get('report')}\n\n用户的问题:{question}\n\n"
+            f"请**紧扣报告**回答,并为保证准确去书里核实(search_book/read_page/see_page/lookup_word),"
+            f"但**题目与标准答案一律以报告为准**。最后用简明中文给一段可靠、具体的解答。"
+        )
+        return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
+                                  "model": rr["variant"], "effort": rr["depth"]}, ctx)
+    # 默认(A 折中):把报告内容**同步回给编排模型**,让它直接据此作答 —— 追问(题目出处/某题答案/为什么错)秒答。
+    return {"name": r.get("name"), "score": r.get("score") or "",
+            "report": (r.get("report") or "")[:3500],
+            "note": "这是那张**用户自制练习纸**的题目原文+标准答案+用户手写+判分。**据此直接回答用户**"
+                    "(题目/答案/出处/为什么错/怎么记都在这里)。⚠ 这些题是纸上自制的、**书本正文里没有**,"
+                    "**别去 search_book/read_page 翻书找『题目原文』**。只有要核对书里某个知识点对不对时,"
+                    "才 read_page/search_book,或用 verify:true 让子 agent 去书里查证。"}
 
 
 def _t_search_book(args, ctx):
@@ -3317,11 +3318,11 @@ def _t_start_dictation(args, ctx):
 
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
-    "read_check_report": ("回答**练习纸检查报告**相关问题的子 agent(它带着那份报告为上下文、能自己查书核实再作答)。"
-                          "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改/**题目出处/原文在哪**,就调它——"
-                          "**把用户的原话问题放进 question**、报告名放进 name。⚠ 这张纸是**用户自制**的,题目和答案**都在报告里、书本正文里没有**——"
-                          "所以**别自己 read_page/search_book 去书里找『题目原文』**(找不到会误导你),一律交给它。"
-                          "args {question:用户问题(必给); name?:报告名(纸标题,可模糊;不传=最近一份)}", _t_read_check_report),
+    "read_check_report": ("拿到**练习纸检查报告**的内容(题目原文+标准答案+用户手写+判分),**默认直接返回给你、你据此直接答**。"
+                          "上下文里若提到『最近有检查报告《X》』,用户又在问这张纸的题/答案/错在哪/怎么改/**题目出处/原文在哪**,就调它拿报告再答——"
+                          "报告名放 name(不传=最近一份)。⚠ 这纸是**用户自制**的,题目和答案**都在报告里、书本正文没有**,"
+                          "**别自己 read_page/search_book 去书里找『题目原文』**。要深入**查书核实**某个知识点才传 verify:true(那时才起查书子 agent)。"
+                          "args {name?:报告名(可模糊); question?:用户问题; verify?:true=起查书子 agent}", _t_read_check_report),
     "read_selection": ("读用户当前选中的文字。args {}", _t_read_selection),
     "search_book": ("在当前这本书全文搜关键词,返回命中页+片段。args {query}", _t_search_book),
     "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用;只搜书库,不是联网搜索)。args {query 必填=要搜的关键词}", _t_search_all_books),
