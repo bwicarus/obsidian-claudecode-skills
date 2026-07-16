@@ -1655,6 +1655,14 @@
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;
       try { window._reloadHighlights && HOST.reloadHighlights(); } catch (_) {}   // 先把刚画的高亮渲出来
+      // ★用户设计:融入 turn 卡系统 —— hlcard part(头行可点展开 → 逐条[原文|↗跳转|↩撤销⇄↪重做]),
+      //   走唯一渲染器 + parts 落库(旧独立卡刷新即丢;这个刷新回放仍可操作)。RC 不可用才落到下面 legacy 卡。
+      try {
+        if (window.RC && RC.turnCard && window.__asstVoiceTid) {
+          RC.turnCard.addPart(window.__asstVoiceTid(), { kind: 'hlcard', file: d.file || '', items: d.items.slice() });
+          return;
+        }
+      } catch (_) {}
       var eid = 'ae' + (++_aeCtr);
       _assistEdits[eid] = { file: d.file || '', items: d.items.slice(),
                             ids: d.items.map(function (it) { return it.id; }).filter(Boolean), undone: false };

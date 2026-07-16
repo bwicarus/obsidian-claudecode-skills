@@ -4546,11 +4546,12 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 for _ss in _subs:   # 工具内部子步骤(如找视频的相关性筛选)各占「!」一行
                     trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
+                _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
                 if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # 后台写任务(制卡/笔记)→ 卡外浮动轮询+撤销;CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不重复
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
-                if isinstance(res, dict) and res.get("undo_id"):   # 同步写操作(高亮)→ 立即给撤销按钮
+                if isinstance(res, dict) and res.get("undo_id") and not _ae_card:   # 同步写操作 → 撤销按钮(高亮/便签有 _assistEdit 卡则不重复发,治双条)
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
@@ -4743,11 +4744,12 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 _ga = res.pop("_gen_action", None) if isinstance(res, dict) else None
                 trace.append({"label": _tool_label(name, targs), "model": _gm or "—", "sec": _tool_sec, "action": _ga,
                               "detail": _step_detail(res)})
+                _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
                 if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不发卡外浮动 task 事件(三后端一致)
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
-                if isinstance(res, dict) and res.get("undo_id"):
+                if isinstance(res, dict) and res.get("undo_id") and not _ae_card:
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
@@ -4862,11 +4864,12 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 for _ss in _subs:
                     trace.append({"label": _ss.get("label", ""), "model": _ss.get("model", "—"), "sec": _ss.get("sec"),
                                   "action": _ss.get("action"), "detail": _ss.get("detail", "")})
+                _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 同上:高亮/便签卡接管撤销,不再发 undo 行
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}
                 if isinstance(res, dict) and res.get("task_id") and name not in _AGENT_TASKS:   # CLI 委托任务(do_task/make_paper)走卡内 _trackCliTask,不发卡外浮动 task 事件(三后端一致)
                     yield {"event": "task", "data": {"task_id": res["task_id"], "label": _tool_label(name, targs)}}
-                if isinstance(res, dict) and res.get("undo_id"):
+                if isinstance(res, dict) and res.get("undo_id") and not _ae_card:
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)

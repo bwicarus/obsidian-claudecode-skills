@@ -97,6 +97,10 @@
       ce.classList.remove('asst-msg', 'asst-a');   // 它现在是容器内的一块,不是独立气泡
       ce.classList.add('rc-part-cardin');
       d.appendChild(ce);
+    } else if (p.kind === 'hlcard') {
+      // 高亮写操作卡(用户设计:旧「已高亮N处」独立气泡融入 turn 卡系统):
+      //   头行可点展开 → 逐条[色块|原文|↗跳转|↩撤销⇄↪重做];状态改动 mutate part + onChange 落库 → 刷新回放仍可操作。
+      d.appendChild(_hlCardEl(t, p));
     } else if (p.kind === 'tool') {
       _ensureHead(t, p.label || p.tool || '工具');
       return null;   // 工具本身不在正文里占块 —— 它的细节收在【流程】按钮里(用户设计)
@@ -108,6 +112,84 @@
     t.bd.appendChild(d);
     _scroll();
     return d;
+  }
+
+  // ── 高亮写操作卡(kind:'hlcard';实时与回放同走 renderPart → 本渲染器)──────────
+  var _hlCssDone = false;
+  function _hlCss() {
+    if (_hlCssDone || document.getElementById('rc-hlcard-css')) { _hlCssDone = true; return; }
+    _hlCssDone = true;
+    var s = document.createElement('style'); s.id = 'rc-hlcard-css';
+    s.textContent =
+      '.rc-hlcard{background:rgba(26,36,58,.55);border:1px solid rgba(91,118,184,.35);border-radius:10px;padding:8px 10px;font-size:13px}' +
+      '.rc-hlcard-h{display:flex;align-items:center;gap:8px;cursor:pointer;-webkit-user-select:none;user-select:none}' +
+      '.rc-hlcard-h .tt{flex:1;min-width:0}.rc-hlcard-h .ar{flex:0 0 auto;opacity:.7;font-size:11px;white-space:nowrap}' +
+      '.rc-hlcard-bd{display:none;margin-top:6px;border-top:1px solid rgba(91,118,184,.2);padding-top:6px}' +
+      '.rc-hlcard.open .rc-hlcard-bd{display:block}' +
+      '.rc-hl-row{display:flex;align-items:center;gap:7px;padding:3px 0}' +
+      '.rc-hl-sw{flex:0 0 auto;width:10px;height:10px;border-radius:3px}' +
+      '.rc-hl-tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.rc-hl-row.undone .rc-hl-tx{text-decoration:line-through;opacity:.55}' +
+      '.rc-hl-b{flex:0 0 auto;-webkit-appearance:none;appearance:none;background:transparent;border:1px solid rgba(120,150,210,.45);color:#a8c4f0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;touch-action:manipulation}' +
+      '.rc-hl-b:disabled{opacity:.5}';
+    document.head.appendChild(s);
+  }
+  function _hlCardEl(t, p) {
+    _hlCss();
+    var items = p.items || [], file = p.file || '';
+    var box = document.createElement('div'); box.className = 'rc-hlcard';
+    var pages = [], seen = {};
+    items.forEach(function (it) { var dp = (it.disp_page != null) ? it.disp_page : it.pdf_page; if (dp != null && !seen[dp]) { seen[dp] = 1; pages.push(dp); } });
+    var hd = document.createElement('div'); hd.className = 'rc-hlcard-h';
+    var tt = document.createElement('span'); tt.className = 'tt';
+    var ar = document.createElement('span'); ar.className = 'ar'; ar.textContent = '▸ 点开逐条管理';
+    function live() { var n = 0; items.forEach(function (x) { if (!x.undone) n++; }); return n; }
+    function title() { tt.textContent = '✏️ 已高亮 ' + live() + '/' + items.length + ' 处' + (pages.length ? '（第 ' + pages.join('、') + ' 页）' : ''); }
+    title();
+    hd.appendChild(tt); hd.appendChild(ar); box.appendChild(hd);
+    var bd = document.createElement('div'); bd.className = 'rc-hlcard-bd'; box.appendChild(bd);
+    hd.addEventListener('click', function () {
+      box.classList.toggle('open');
+      ar.textContent = box.classList.contains('open') ? '▾ 收起' : '▸ 点开逐条管理';
+    });
+    function sync() {   // 状态改动:标题刷新 + part 落库(刷新回放仍是最新态) + 页面高亮重渲
+      title();
+      try { var tid = t.el.getAttribute('data-turn'); if (tid && RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+      try { if (window._reloadHighlights) window._reloadHighlights(); } catch (e) {}
+    }
+    items.forEach(function (it) {
+      var row = document.createElement('div'); row.className = 'rc-hl-row' + (it.undone ? ' undone' : '');
+      var sw = document.createElement('span'); sw.className = 'rc-hl-sw'; sw.style.background = it.color || '#fff59d';
+      var tx = document.createElement('span'); tx.className = 'rc-hl-tx'; tx.textContent = it.text || '(无文字)'; tx.title = it.text || '';
+      var jb = document.createElement('button'); jb.type = 'button'; jb.className = 'rc-hl-b'; jb.textContent = '↗';
+      jb.title = '跳转到第 ' + ((it.disp_page != null) ? it.disp_page : it.pdf_page) + ' 页';
+      jb.addEventListener('click', function (ev) { ev.stopPropagation(); try { if (window.jumpWithBack) window.jumpWithBack(it.pdf_page); } catch (e) {} });
+      var ub = document.createElement('button'); ub.type = 'button'; ub.className = 'rc-hl-b'; ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销';
+      ub.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        if (ub.disabled) return; ub.disabled = true;
+        if (!it.undone) {   // 撤销 = 删这条高亮
+          RC.reqJson('DELETE', '/pdf/api/highlights?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id || ''), null)
+            .then(function (d) {
+              ub.disabled = false;
+              if (!(d && d.ok)) { try { RC.toast('撤销失败:' + ((d && d.error) || '?')); } catch (e) {} return; }
+              it.undone = true; row.classList.add('undone'); ub.textContent = '↪ 重做'; sync();
+            }).catch(function () { ub.disabled = false; try { RC.toast('网络错误'); } catch (e) {} });
+        } else {            // 重做 = 用存的锚重建(拿新 id 接管后续撤销)
+          if (!(it.rects && it.rects.length)) { ub.disabled = false; try { RC.toast('这条没有几何信息,无法重建'); } catch (e) {} return; }
+          RC.reqJson('POST', '/pdf/api/highlights', { file: file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text || '' })
+            .then(function (d) {
+              ub.disabled = false;
+              if (!(d && d.ok)) { try { RC.toast('重做失败:' + ((d && d.error) || '?')); } catch (e) {} return; }
+              if (d.id) it.id = d.id;
+              it.undone = false; row.classList.remove('undone'); ub.textContent = '↩ 撤销'; sync();
+            }).catch(function () { ub.disabled = false; try { RC.toast('网络错误'); } catch (e) {} });
+        }
+      });
+      row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(ub);
+      bd.appendChild(row);
+    });
+    return box;
   }
 
   // 流程面板:把本轮所有 tool part(+meta)画成 AI 请求 → 工具 → 结果 的线性流程
