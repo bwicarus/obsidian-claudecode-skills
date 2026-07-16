@@ -1465,7 +1465,8 @@ def _t_read_page(args, ctx):
             parts.append(nb)
     if not parts:
         return {"error": "这些页没取到文字(可能纯图/未OCR)"}
-    result = {"pages": printed, "text": "\n\n".join(parts)}
+    result = {"pages": printed, "text": "\n\n".join(parts),
+              "页码提醒": "报页码一律用本结果的 pages 字段(系统页,用户界面同款);正文开头/角落出现的数字可能是**原书自印的页码**(与系统页不一致),别抄它报页。"}
     # 自建页(用户手写作答页):再附一张**前端渲染图**(所见即所得,含手写)喂回大脑 —— 前端在场
     #   截了 view_image 才有(_vision 喂模型 + _fed_images 给流程展示);无头/不在视口时纯文字兜底(题目+标准答案已在 text 里)。
     if up_hit and isinstance(ctx.get("view_image"), dict) and ctx["view_image"].get("b64"):
@@ -3715,6 +3716,9 @@ def _sys_prompt(ctx):
         "★可溯源:凡复述/引用书里的具体内容,在句末标来源页「(第N页)」,N 必须来自工具实际返回的页码(read_page/search_book/summarize_section 都带页码),**不许编页码**。前端会把『第N页』变成可点跳转。\n"
         "★**绝对禁止编造图片链接**:回答里任何 ![](url) 图片的 url **只能是 search_image 工具刚返回的 image_url**,"
         "**严禁**凭记忆写维基/教科书/任何你以为存在的图片 URL——编的链接一定加载失败、显示成破图。要配图**必须先调 search_image** 拿真实 url 再插;搜不到就纯文字讲、别放图。\n"
+        "★**写操作诚实铁律**:『已高亮/已制卡/已记笔记/已加生词/已建纸/已创建便签』这类**完成话术,只有本轮真调了对应工具且它返回成功之后才许说**。"
+        "没调工具就绝不能声称做了(那是编造,用户实测抓到过:模型只 read_page 就说『已高亮5句』,页面上什么都没有)。"
+        "用户要你高亮/制卡/记笔记 → **当场调 highlight/auto_highlight/make_anki/make_note 等对应工具**;不打算调就明说没做。\n"
         "★用户说『讲讲这里/这段/当前/这部分/这里的内容』且系统已给了『★用户此刻屏幕上正在看的部分』→ **直接基于那段可见文字讲解**,"
         "**别调 read_section/summarize_section 去读整节/整章**(EPUB 一节=整章,读了会答成全章总结、跑偏用户真正在看的点);"
         "只有用户明确说『这一节/这一章/总结本章/整节』才读整节。找视频/配图的搜索词也**紧扣这段可见内容**,别用章节泛主题。\n"
