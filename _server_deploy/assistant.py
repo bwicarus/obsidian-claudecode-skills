@@ -4210,6 +4210,12 @@ def _ap_set(uid, action, backend, variant, depth):
             _AP_PATH.write_text(json.dumps(full, ensure_ascii=False), "utf-8")
         except Exception:
             pass
+        try:   # 单项改动 = 当前配置**偏离预设** → 清「应用中」标记(设置面板 chip 高亮据此;想固化就再「存为预设」)
+            allp = json.loads(_APF_PATH.read_text("utf-8")) if _APF_PATH.exists() else {}
+            if isinstance(allp, dict) and isinstance(allp.get(str(uid)), dict) and allp[str(uid)].pop("_active", None) is not None:
+                _APF_PATH.write_text(json.dumps(allp, ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
         return u.get(action)
 
 
@@ -6317,10 +6323,11 @@ def assistant_pref_profiles():
             allp = {}
         mine = allp.get(uid) or {}
         if request.method == "GET":
-            return jsonify({"ok": True, "profiles": sorted(mine.keys())})
+            return jsonify({"ok": True, "profiles": sorted(k for k in mine.keys() if not k.startswith("_")),
+                            "active": mine.get("_active")})   # active=当前应用中的预设名(chip 高亮;单项改过即被清)
         b = request.get_json(silent=True) or {}
         op, name = b.get("op"), (b.get("name") or "").strip()[:20]
-        if not name or op not in ("save", "apply", "delete"):
+        if not name or name.startswith("_") or op not in ("save", "apply", "delete"):
             return jsonify({"ok": False, "error": "bad op/name"}), 400
         try:
             ap = json.loads(_AP_PATH.read_text("utf-8")) if _AP_PATH.exists() else {}
@@ -6328,18 +6335,23 @@ def assistant_pref_profiles():
             ap = {}
         if op == "save":
             mine[name] = dict(ap.get(uid) or {})
+            mine["_active"] = name        # 存完当前 = 应用中就是它
         elif op == "delete":
             mine.pop(name, None)
+            if mine.get("_active") == name:
+                mine.pop("_active", None)
         elif op == "apply":
             if name not in mine:
                 return jsonify({"ok": False, "error": "no such profile"}), 404
             ap[uid] = dict(mine[name])
             _AP_PATH.parent.mkdir(parents=True, exist_ok=True)
             _AP_PATH.write_text(json.dumps(ap, ensure_ascii=False), "utf-8")
+            mine["_active"] = name
         allp[uid] = mine
         _APF_PATH.parent.mkdir(parents=True, exist_ok=True)
         _APF_PATH.write_text(json.dumps(allp, ensure_ascii=False), "utf-8")
-        return jsonify({"ok": True, "profiles": sorted(mine.keys())})
+        return jsonify({"ok": True, "profiles": sorted(k for k in mine.keys() if not k.startswith("_")),
+                        "active": mine.get("_active")})
 
 
 @bp.route("/action-pref", methods=["POST"])

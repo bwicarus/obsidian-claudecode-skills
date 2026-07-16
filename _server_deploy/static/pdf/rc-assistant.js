@@ -100,6 +100,7 @@
       '.ams-profiles{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}' +
       '.ams-prof{background:#14203a;border:1px solid #2a3a63;color:#cdd9f2;border-radius:14px;padding:4px 12px;font-size:12px;cursor:pointer}' +
       '.ams-prof:active{background:#1e2c4d}' +
+      '.ams-prof.on{background:#2b4a8f;border-color:#5b82d8;color:#fff;font-weight:600}' +   // 当前应用中的预设(单项改过即熄灭=已偏离)
       '.ams-prof-add{background:none;border:1px dashed #2a3a63;color:#7c93c4}';
     document.head.appendChild(css);
   })();
@@ -537,6 +538,7 @@
       (function _loadProfiles() {
         fetch('/api/assistant/pref-profiles').then(function (r) { return r.json(); }).then(function (p) {
           if (!p || !p.ok) return;
+          var act = p.active || '';   // 当前应用中的预设(存/应用会设,单项改动会清)
           pbar.innerHTML = '';
           function _del(nm) {
             if (!confirm('删除预设「' + nm + '」?')) return;
@@ -544,7 +546,7 @@
               body: JSON.stringify({ op: 'delete', name: nm }) }).then(_loadProfiles).catch(function () {});
           }
           (p.profiles || []).forEach(function (nm) {
-            var b = document.createElement('button'); b.className = 'ams-prof'; b.textContent = nm;
+            var b = document.createElement('button'); b.className = 'ams-prof' + (nm === act ? ' on' : ''); b.textContent = (nm === act ? '✓ ' : '') + nm;
             var _t = null, _held = false;
             b.addEventListener('touchstart', function () {
               _held = false; _t = setTimeout(function () { _t = null; _held = true; _del(nm); }, 600);
@@ -567,7 +569,7 @@
           });
           var add = document.createElement('button'); add.className = 'ams-prof ams-prof-add'; add.textContent = '＋存为预设';
           add.addEventListener('click', function () {
-            var nm = prompt('预设名(保存当前全部任务的模型设置):'); if (!nm || !nm.trim()) return;
+            var nm = prompt('预设名(保存当前全部任务的模型设置;同名=覆盖更新):', act); if (!nm || !nm.trim()) return;
             fetch('/api/assistant/pref-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ op: 'save', name: nm.trim() }) })
               .then(function (r) { return r.json(); })
