@@ -3485,10 +3485,13 @@ def _t_run_saved_task(args, ctx):
             adjust = json.dumps(adjust, ensure_ascii=False)
         adjust = str(adjust).strip()
         rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
+        route = (rec.get("route") or "").strip()
         instr = ("运行已保存工具《%s》。它的**原始意图**:『%s』。\n" % (name, rec.get("instruction") or "") +
                  (("本次用户的调整(与原意图冲突时**以本次为准**):%s。\n" % adjust) if adjust else "") +
+                 (("这是它上次**成功执行的操作路线**(已验证的指挥棒;**严格按此步骤顺序与结构执行**,"
+                   "内容按本次要求重新生成,[可调]数字按本次调整):\n%s\n" % route) if route else "") +
                  "在**当前上下文**执行:先读当前页,内容基于当前页**重新生成**(不要照搬任何旧题面);"
-                 "数量/难度/形式按本次调整优先;流程骨架(建纸→出题→检查按钮)沿用原意图。")
+                 "数量/难度/形式按本次调整优先。")
         return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
                                   "model": rr["variant"], "effort": rr["depth"]}, ctx)
     # 选数据源(合并型工具有 sources_menu)

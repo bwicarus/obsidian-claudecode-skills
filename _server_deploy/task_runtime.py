@@ -1094,6 +1094,40 @@ def save_recipe(run, name, desc="", source_label="", source_spec=None):
     return {"ok": True, "name": safe, "merged": False, "hint": "已保存为工具「%s」" % safe}
 
 
+def _abstract_route(calls):
+    """★用户设计「指挥棒」:程序化把一次**成功执行**的 calls 抽象成操作路线——去内容、留结构。
+    字符串内容→占位(留10字提示),数字保留并标[可调],page_add 的 blocks 归纳成构成模式。
+    下次运行时整段注入 CLI 指令:「严格按此路线执行新要求」——流程不用重新摸索,只换内容。"""
+    import collections
+    lines = []
+    for i, c in enumerate(calls or [], 1):
+        t, a = c.get("tool"), c.get("args") or {}
+        if t in ("page_add", "page_add_many") and isinstance(a.get("blocks"), list):
+            bs = [b for b in a["blocks"] if isinstance(b, dict)]
+            pat = dict(collections.Counter(b.get("kind") for b in bs))
+            has_ans = any(b.get("answer") for b in bs)
+            evs = [b.get("event") for b in bs if b.get("kind") == "button" and b.get("event")]
+            lines.append("%d. %s 批量 %d 块(构成 %s%s%s)——本次按新数量复制同构结构,题面/答案重新生成"
+                         % (i, t, len(bs), pat,
+                            ";blank 带标准答案 answer" if has_ans else "",
+                            (";按钮 event=%s" % evs) if evs else ""))
+            continue
+        ps = []
+        for k, v in list(a.items())[:6]:
+            if isinstance(v, str):
+                ps.append("%s:'%s…'" % (k, v[:10]) if len(v) > 12 else "%s:'%s'" % (k, v))
+            elif isinstance(v, bool):
+                ps.append("%s:%s" % (k, v))
+            elif isinstance(v, (int, float)):
+                ps.append("%s:%s[可调]" % (k, v))
+            elif isinstance(v, list):
+                ps.append("%s:[%d项]" % (k, len(v)))
+            elif isinstance(v, dict):
+                ps.append("%s:{…}" % k)
+        lines.append("%d. %s(%s)" % (i, t, ", ".join(ps)))
+    return "\n".join(lines)[:1500]
+
+
 def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None):
     """把一次 **CLI 多步任务的执行轨迹** 冻成可复用工具(用户拍板:所有走 CLI 的多步任务都能保存)。
     steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序进程内调 TOOLS[name](去壳)。
@@ -1115,6 +1149,7 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
         RECIPES_DIR.mkdir(parents=True, exist_ok=True)
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
                "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
+               "route": _abstract_route(calls),   # 指挥棒:成功路线的结构化抽象(用户设计)
                "calls": calls[:30]}   # calls 留档备查,不用于回放
         (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
         return {"ok": True, "name": safe, "merged": False, "kind": "intent",
