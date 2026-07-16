@@ -506,8 +506,9 @@ def _check_reports_load(uid):
         return []
 
 
-def _save_check_report(uid, name, file_rel, report, score=""):
-    """登记一份检查报告,返回**最终报告名**(同名已存在就加序号去重,便于按名精确查)。"""
+def _save_check_report(uid, name, file_rel, report, score="", src_page=None):
+    """登记一份检查报告,返回**最终报告名**(同名已存在就加序号去重,便于按名精确查)。
+    src_page=这张纸参考的**源书页(印刷页)**——题目自制、书里无逐字题,但知识点在这页附近,供按需读原文。"""
     uid = str(uid or "")
     name = (name or "练习纸检查").strip() or "练习纸检查"
     if not uid or not (report or "").strip():
@@ -524,7 +525,7 @@ def _save_check_report(uid, name, file_rel, report, score=""):
         import hashlib
         rid = hashlib.sha1(f"{final}|{int(time.time())}".encode("utf-8")).hexdigest()[:8]
         lst.append({"id": rid, "name": final, "file": file_rel or "", "score": score or "",
-                    "report": report, "ts": int(time.time())})
+                    "report": report, "src_page": (int(src_page) if src_page else None), "ts": int(time.time())})
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
         (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
@@ -1504,26 +1505,32 @@ def _t_read_check_report(args, ctx):
         return err
     question = (args.get("question") or args.get("q") or args.get("text") or "").strip()
     verify = bool(args.get("verify") or args.get("deep") or args.get("查书"))
+    _sp = r.get("src_page")
+    # provenance:题目**自制自**书里第 X 页附近 —— 题目书里没有逐字原文,但**知识点在书里**;
+    #   要答『知识点/相关原文在书里哪』就按需 read_page(X) 或 search_book 找**那个知识点**(不是找逐字题目)。
+    _prov = (f"这张纸的题目是**根据本书第 {_sp} 页附近的内容自制**的。" if _sp else "这张纸的题目是根据书里某页内容自制的。")
+    _prov += ("题目本身书里没有逐字原文,但**它考的知识点在书里**——用户问『这个知识点/相关原文在书里哪、讲讲原文』时,"
+              + (f"就 read_page({_sp}) 读那页、" if _sp else "就 ") + "或 search_book 搜知识点关键词,找到书里对应讲解来答;"
+              "**别去找『逐字的题目原文』**(那是纸上自制的,书里没有)。")
     if verify and question:
         # 需要查书核实 → 起带报告上下文、能自己查书的后台子 agent(产 CLI 卡)
         rr = _resolve("agent", uid)
         instr = (
             f"用户在一张自制练习纸《{r.get('name')}》上作答并已判分。下面是完整**检查报告**"
             f"(题目原文+各空标准答案+用户手写识别+判分)——题目和答案的来源"
-            f"(题目**不在**书页正文,别 read_page 找题目;报告已在下面,别再调 read_check_report):\n\n"
-            f"{r.get('report')}\n\n用户的问题:{question}\n\n"
-            f"请**紧扣报告**回答,并为保证准确去书里核实(search_book/read_page/see_page/lookup_word),"
+            f"(报告已在下面,别再调 read_check_report):\n\n{r.get('report')}\n\n"
+            f"【出处】{_prov}\n\n用户的问题:{question}\n\n"
+            f"请**紧扣报告**回答;要核对知识点就按上面出处去书里查(read_page/search_book/see_page/lookup_word),"
             f"但**题目与标准答案一律以报告为准**。最后用简明中文给一段可靠、具体的解答。"
         )
         return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
                                   "model": rr["variant"], "effort": rr["depth"]}, ctx)
     # 默认(A 折中):把报告内容**同步回给编排模型**,让它直接据此作答 —— 追问(题目出处/某题答案/为什么错)秒答。
-    return {"name": r.get("name"), "score": r.get("score") or "",
+    return {"name": r.get("name"), "score": r.get("score") or "", "src_page": _sp,
             "report": (r.get("report") or "")[:3500],
             "note": "这是那张**用户自制练习纸**的题目原文+标准答案+用户手写+判分。**据此直接回答用户**"
-                    "(题目/答案/出处/为什么错/怎么记都在这里)。⚠ 这些题是纸上自制的、**书本正文里没有**,"
-                    "**别去 search_book/read_page 翻书找『题目原文』**。只有要核对书里某个知识点对不对时,"
-                    "才 read_page/search_book,或用 verify:true 让子 agent 去书里查证。"}
+                    "(题目/答案/为什么错/怎么记都在这里)。" + _prov
+                    + "(要查书就 read_page/search_book 按需读那几页,不用把整页原文都背下来;深入查证可用 verify:true 起子 agent。)"}
 
 
 def _t_search_book(args, ctx):
@@ -3619,9 +3626,9 @@ def _sys_prompt(ctx):
         _sc = _clean_tag(str(_rc.get("score") or ""))
         check_line = (f"\n★用户最近做完一张**他自己生成的练习纸**《{_nm}》并让你检查了"
                       + (f"(得分 {_sc})" if _sc else "") + "。"
-                      "这张纸的题目、标准答案、判分都在这份**检查报告**里(纸是根据某页内容自制的,**书本正文里并没有这些题**)。"
-                      f"他问讲题/某题答案/为什么错/**题目出处/原文在哪**,**一律调 read_check_report(name=\"{_nm}\", question=用户原话)** 拿报告作答;"
-                      "**别去 read_page/search_book 翻书找『题目原文』**——书里没有,题是纸上自制的,翻书会误导你。")
+                      f"他问讲题/某题答案/为什么错/题目出处/**这个知识点在书里哪**,**一律调 read_check_report(name=\"{_nm}\", question=用户原话)**——"
+                      "它会把题目/答案/判分**和这张纸参考的源书页**都给你,你据此直接答;要讲书里的知识点/原文,再按它说的 read_page 那页找。"
+                      "注意:题目是**纸上自制**的、书里没有逐字题目,别自己凭空猜、也别 search_book 找『逐字题目原文』。")
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"

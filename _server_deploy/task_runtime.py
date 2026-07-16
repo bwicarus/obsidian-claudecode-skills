@@ -681,10 +681,23 @@ def _check_page(rid, prompt_hint=""):
                         _cname = it.get("title").strip(); break
         except Exception:
             pass
+        # 源书页(provenance):这张纸参考的**印刷页**(run.page 是 PDF 页 → 减偏移)。供 read_check_report 说明"题目自制自第 X 页附近、按需读原文"。
+        _srcp = None
+        try:
+            import pdf_reader as P
+            _pdfp = int(run.get("page") or 0)
+            if _pdfp:
+                try:
+                    _off = P._page_offset_for(run["file"])
+                except Exception:
+                    _off = 0
+                _srcp = (_pdfp - _off) if (_pdfp - _off) >= 1 else _pdfp
+        except Exception:
+            _srcp = None
         # 登记报告(供 read_check_report 工具按名查)。返回**最终报告名**(可能加了序号去重)。
         try:
             import assistant as A
-            _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore)
+            _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore, src_page=_srcp)
         except Exception:
             _cname = _cname or "练习纸检查"
         run.update(status="done", result=res, result_md=rmd, result_ai=rai,
