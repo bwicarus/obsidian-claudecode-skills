@@ -63,12 +63,12 @@ window._favOpenPicker = function () {
     '.pdf-upage.up2-new{min-height:80vh;position:relative;display:block}' +
     '.up2-newph{padding:24px;color:#7a8bb0;font-size:14px;text-align:left;line-height:1.7}' +
     /* 顶部非阻塞横幅:细条,不遮阅读区,可继续读 */
-    '#up2-banner{position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top,0px) + 8px);z-index:2500;' +
+    '#up2-banner,#up2-del-ind{position:fixed;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top,0px) + 8px);z-index:2500;' +
     'max-width:92vw;display:flex;align-items:center;gap:10px;background:#12203c;border:1px solid #33507f;border-radius:999px;' +
     'padding:8px 16px;font-size:13px;color:#dbe7ff;box-shadow:0 6px 22px rgba(0,0,0,.45);cursor:default}' +
     '#up2-banner.ok{background:#123324;border-color:#2f6d45;color:#c7f0d6;cursor:pointer}' +
     '#up2-banner.err{background:#33161a;border-color:#7a2f36;color:#ffc7cd}' +
-    '#up2-banner .up2-spin{width:15px;height:15px;flex:0 0 auto;border:2px solid rgba(110,160,255,.3);border-top-color:#7fb0ff;border-radius:50%;animation:up2spin .9s linear infinite}' +
+    '#up2-banner .up2-spin,#up2-del-ind .up2-spin{width:15px;height:15px;flex:0 0 auto;border:2px solid rgba(110,160,255,.3);border-top-color:#7fb0ff;border-radius:50%;animation:up2spin .9s linear infinite}' +
     '#up2-banner .up2-x{flex:0 0 auto;margin-left:4px;color:inherit;opacity:.7;cursor:pointer;font-size:15px;line-height:1}' +
     '@keyframes up2spin{to{transform:rotate(360deg)}}' +
     /* 编辑期兜底:藏掉可能已弹出的选中工具栏/词典弹窗(覆盖层拦截是主防线,这是二道保险)*/
@@ -1195,6 +1195,14 @@ window._favOpenPicker = function () {
   //   ① 立刻从本地 RC.userpages 列表剔除(否则 _upMountBadges 从陈旧列表重挂已删页 = 删了还显示的根因);
   //   ② 立刻抹掉这页覆盖层 + 盖"正在删除"蒙层(视觉立即消失;真减页/重编号靠 job done 后 reload);
   //   ③ DELETE 改页 job 撞并发锁(409「进行中」)时**排队重试**,不再直接弹"删除失败"。
+  // 删除 = 乐观**整页立即消失**(不再盖蒙层等 reload、不再"轻点查看")+ 串行后台真删(连续删不撞锁、
+  //   不被中途 reload 打断)+ 全删完自动对齐一次(reading-pos 服务端化 → 无感回位,用户零操作)。
+  var _upDelQueue = [], _upDelBusy = false, _upDelWarns = [], _upDelInd = null;
+  function _upDelIndicator(txt) {
+    if (!txt) { if (_upDelInd) { try { _upDelInd.remove(); } catch (_) {} _upDelInd = null; } return; }
+    if (!_upDelInd) { _upDelInd = document.createElement('div'); _upDelInd.id = 'up2-del-ind'; document.body.appendChild(_upDelInd); }
+    _upDelInd.className = ''; _upDelInd.innerHTML = '<span class="up2-spin"></span><span class="up2-msg">' + RC.esc(txt) + '</span>';
+  }
   function _upDelReal(rec) {
     if (rec._temp) {   // 乐观新建 job 还没完成就删 → 移除临时元素;绑真 id 时再清理那张空白真页(_upBindTempToReal)
       _upTempCancelled[rec.id] = true;
@@ -1206,34 +1214,64 @@ window._favOpenPicker = function () {
     }
     if (_upDeleting[rec.id]) return;   // 已在删,忽略重复
     _upDeleting[rec.id] = true;
-    try { if (window.RC && RC.userpages && RC.userpages.removeLocal) RC.userpages.removeLocal(rec.id); } catch (_) {}   // ① 本地列表立刻剔除
+    try { if (window.RC && RC.userpages && RC.userpages.removeLocal) RC.userpages.removeLocal(rec.id); } catch (_) {}   // 本地列表立刻剔除
     var tempEl = _upTempEls[rec.id];
     var pw = tempEl || document.querySelector('.page-wrap[data-page-num="' + rec.page + '"]');
-    if (tempEl) { try { tempEl.remove(); } catch (_) {} delete _upTempEls[rec.id]; }   // 临时虚拟元素:直接移除
-    else if (pw) {   // ② 真页:抹覆盖层内容 + 蒙层(立即消失,真减页靠 reload)
-      var ov = pw.querySelector('.up2-content'); if (ov) try { ov.remove(); } catch (_) {}
-      var bd = pw.querySelector('.up2-badge'); if (bd) try { bd.remove(); } catch (_) {}
-      // ⚠ ink 画布(__inkCanvas)挂在 pw 上、独立于 up2-content —— 删除必须**顺手清掉这页笔画**,
-      //   否则它留在 pw 上,reload 前页码移位就蹭到别的页(用户实测:删页笔迹留到别页)。
-      try { pw.__inkStrokes = []; var _ic = pw.__inkCanvas; if (_ic) { var _ictx = _ic.getContext('2d'); if (_ictx) _ictx.clearRect(0, 0, _ic.width, _ic.height); } } catch (_) {}
-      try { if (window._upClaimed) delete window._upClaimed[rec.page]; } catch (_) {}   // 清这页的会话级占用,别抑制移位后页的 ink
-      var veil = document.createElement('div'); veil.className = 'up2-delveil';
-      veil.textContent = '🗑 正在删除第 ' + rec.page + ' 页…';
-      pw.style.position = pw.style.position || 'relative'; pw.appendChild(veil);
+    if (pw) {
+      // ★乐观:**整页立即移除**(书就地合拢)。删的页完全在视口上方 → 补偿 scrollTop 防内容跳动。
+      try {
+        var mainEl = document.getElementById('main');
+        var r = pw.getBoundingClientRect();
+        if (mainEl && r.bottom <= 0) mainEl.scrollTop -= (pw.offsetHeight || r.height || 0);
+      } catch (_) {}
+      try { pw.__inkStrokes = []; } catch (_) {}
+      try { if (window._upClaimed) delete window._upClaimed[rec.page]; } catch (_) {}
+      try { pw.remove(); } catch (_) {}   // 窗口内不重编号其余页:它们的页号仍匹配旧文件 → 页图/字符层/高亮全对
     }
-    _upCommitDelete(rec, 0);
+    if (tempEl) delete _upTempEls[rec.id];
+    _upDelQueue.push(rec);
+    _upDrainDeletes();
   }
-  function _upCommitDelete(rec, attempt) {   // ③ DELETE 改页 job;409「进行中」→ 排队重试(复用后台同步 _upSyncPump 的思路,别直接弹错)
+  function _upDrainDeletes() {
+    if (_upDelBusy) return;
+    var rec = _upDelQueue.shift();
+    if (!rec) { _upDelFinish(); return; }
+    _upDelBusy = true;
+    _upDelIndicator('🗑 删除中…' + (_upDelQueue.length ? ('(还剩 ' + (_upDelQueue.length + 1) + ')') : ''));
+    _upSendDelete(rec, 0);
+  }
+  function _upSendDelete(rec, attempt) {   // 串行:DELETE → 等这张改页 job 完成 → 下一张(不撞并发锁、不中途 reload)
     RC.reqJson('DELETE', UP_API + '?file=' + encodeURIComponent(UP_FILE) + '&id=' + encodeURIComponent(rec.id), null)
       .then(function (d) {
-        if (d && d.ok && d.job_id) { delete _upDeleting[rec.id]; _upBanner(d.job_id, { afterPage: rec.page - 1, doneMsg: '已删除第 ' + rec.page + ' 页' }); return; }   // 删这页→其后前移,job done 后 reload 收尾
-        if (d && !d.ok && /进行中/.test(d.error || '') && attempt < 20) { setTimeout(function () { _upCommitDelete(rec, attempt + 1); }, 2000); return; }
-        if (d && !d.ok && /未找到|not\s*found/i.test(d.error || '')) { delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('已删除'); return; }   // 服务端已无此记录=已删,当成功
-        delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('删除失败:' + ((d && d.error) || '?'));
+        if (d && d.ok && d.job_id) {
+          _upWaitJob(d.job_id, function (ok, warns) {
+            if (warns && warns.length) _upDelWarns = _upDelWarns.concat(warns);
+            delete _upDeleting[rec.id]; _upDelBusy = false; _upDrainDeletes();
+          });
+          return;
+        }
+        if (d && !d.ok && /进行中/.test(d.error || '') && attempt < 40) { setTimeout(function () { _upSendDelete(rec, attempt + 1); }, 1500); return; }   // 撞别的改页 job → 排队重试
+        if (!(d && !d.ok && /未找到|not\s*found/i.test(d.error || ''))) { if (d && !d.ok) _upDelWarns.push('第' + rec.page + '页:' + ((d && d.error) || '失败')); }   // 404=已删,忽略;其它记一下
+        delete _upDeleting[rec.id]; _upDelBusy = false; _upDrainDeletes();
       }).catch(function () {
-        if (attempt < 20) { setTimeout(function () { _upCommitDelete(rec, attempt + 1); }, 2500); return; }
-        delete _upDeleting[rec.id]; if (window.RC && RC.toast) RC.toast('网络错误,没删掉');
+        if (attempt < 40) { setTimeout(function () { _upSendDelete(rec, attempt + 1); }, 2000); return; }
+        _upDelWarns.push('第' + rec.page + '页:网络错误'); delete _upDeleting[rec.id]; _upDelBusy = false; _upDrainDeletes();
       });
+  }
+  function _upWaitJob(jobId, cb) {   // 等改页 job 完成(**不 reload**),再处理下一张
+    var t = setInterval(function () {
+      fetch('/pdf/api/job-status?id=' + encodeURIComponent(jobId), { cache: 'no-store' })
+        .then(function (r) { return r.json(); }).then(function (j) {
+          if (j.status === 'done') { clearInterval(t); cb(true, (j.result && j.result.warnings) || []); }
+          else if (j.status === 'error' || j.status === 'unknown') { clearInterval(t); cb(false, [j.error || '删除失败']); }
+        }).catch(function () {});   // 网络抖动:下一轮再试
+    }, 800);
+  }
+  function _upDelFinish() {   // 全部删完 → 一次性对齐页号/内存状态(自动,无需点)。页已乐观移除,这步只做后端对齐。
+    var warns = _upDelWarns; _upDelWarns = [];
+    _upDelIndicator('');
+    if (warns.length && window.RC && RC.toast) RC.toast('部分删除失败:' + warns.join(';'));
+    try { location.reload(); } catch (_) {}   // reading-pos 服务端化 → 回到原位,用户无感
   }
   function _upMountBadges() {
     _upRealPages().forEach(function (p) {
