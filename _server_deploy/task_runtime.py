@@ -586,12 +586,13 @@ def _check_page(rid, prompt_hint=""):
                 images.append({"media_type": s.get("media_type", "image/jpeg"), "b64": s["b64"]})
                 imgno = len(images)
                 blanks = sorted([b for b in _blocks_of_page(run, pg.get("upage"))
-                                 if b.get("kind") == "blank" and b.get("rect")],
+                                 if b.get("kind") in ("blank", "choice") and b.get("rect")],
                                 key=lambda b: b["rect"][1])   # 从上到下
                 for k, b in enumerate(blanks):
                     qn += 1
                     ans = b.get("answer")
-                    lines.append("第 %d 空 = 第 %d 张图从上往下第 %d 个空%s" % (qn, imgno, k + 1,
+                    _ch = "(选择题,答字母即可)" if b.get("kind") == "choice" else ""
+                    lines.append("第 %d 空 = 第 %d 张图从上往下第 %d 个空%s%s" % (qn, imgno, k + 1, _ch,
                                  ("(标准答案「%s」)" % ans) if ans else ""))
             base = ("每张图是用户**手写作答的一整页**(题目文字和手写都在图上,所见即所得)。共 %d 张图。\n"
                     % len(images) + "\n".join(lines) + "\n\n"
@@ -604,7 +605,7 @@ def _check_page(rid, prompt_hint=""):
                 page = int(pg.get("page") or 0)
                 strokes = P._page_ink_strokes(rel, page) or []
                 blocks = _blocks_of_page(run, pg.get("upage"))
-                blanks = [b for b in blocks if b.get("kind") == "blank" and b.get("rect")]
+                blanks = [b for b in blocks if b.get("kind") in ("blank", "choice") and b.get("rect")]
                 if not blanks:
                     continue
                 rects = [b["rect"] for b in blocks if b.get("rect")]

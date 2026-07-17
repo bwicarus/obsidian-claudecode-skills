@@ -3413,8 +3413,8 @@ def _t_page_new(args, ctx):
 
 
 # 元素字段白名单:kind/内容 + style + 定位(at/cols/span)+ 按钮态(event/enabled)。
-_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span")
-_BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr")
+_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span", "options")
+_BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr", "choice")
 
 
 def _norm_block(a, idx):
@@ -3424,12 +3424,24 @@ def _norm_block(a, idx):
     kind = b.get("kind")
     _t = str(b.get("text") or "").strip()
     _l = str(b.get("label") or "").strip()
-    if kind in ("text", "hr"):
+    if kind in ("text", "hr", "choice"):   # choice 题干也用 text
         if not _t and _l:
             b["text"] = b.pop("label")
     else:   # blank / button / checkbox 用 label
         if not _l and _t:
             b["label"] = b.pop("text")
+    if kind == "choice":
+        opts = b.get("options")
+        if isinstance(opts, str):
+            opts = [x.strip() for x in opts.split("/") if x.strip()]
+        if not isinstance(opts, list) or not opts:
+            b["kind"] = "text"          # 没给选项 → 降级普通文字,别渲染出空壳
+            b.pop("options", None)
+        else:
+            import re as _re2
+            b["options"] = [_re2.sub(r"^[A-Da-d][\.、\)]\s*", "", str(o)).strip() for o in opts[:6]]
+            if b.get("answer"):
+                b["answer"] = str(b["answer"]).strip().upper()[:1]
     b.setdefault("id", "b%d" % idx)
     return b
 
@@ -3439,6 +3451,9 @@ def _t_page_add(args, ctx):
     单个元素例:
       {kind:'text', text:'写出假名', style?:'h1'}
       {kind:'blank', label?:'1.', answer?:'ばら'}          # answer 给了 check 时判对错
+      {kind:'choice', text:'题干', options:['81.47歳','85.57歳','87.57歳','90.57歳'], answer:'C'}
+        # ★选择题**必须用 choice**(题干/选项/作答线分层排版,自动换行);
+        #   把"题干+A.xx B.xx"塞进 blank 的 label 会挤成一行被截断
       {kind:'checkbox', label:'我写完了'}
       {kind:'button', label:'让 AI 检查', event:'check', enabled?:true}
     批量(#49 D,一次决定所有元素、好安排彼此位置):{blocks:[{…},{…},…]}

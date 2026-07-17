@@ -227,6 +227,24 @@ instruction——都带被删语义;prompt 声明"字符串参数(标题/文案)
 防纸标题『高亮内容小测』这种词泄漏);**partial 运行不再给原始意图**,只给 origin + "路线里没有的
 步骤类型(如没查高亮步骤就绝不查高亮)一律不要做"。rationale 机制保留(流程展示用),不再当 origin。
 
+## §8e 选择题原语 choice + blank 长标签多行(2026-07-17,用户实测排版翻车)
+
+用户截图:选择题被塞成一行(题干+A~D 选项全在 blank 的 label 里),超出页右缘被截断。根因:
+块模型没有选择题原语,CLI 只能把整道题塞进单行 blank;且 blank 固定 [1, C] 一行高、
+`.up2-b-lab` 不换行。修:
+- **choice 块**:`{kind:'choice', text:'题干', options:['81.47歳',…], answer:'C'}`。
+  paper.py default_span 算行数=题干行(ceil(wide/C))+选项行(贪心装行:一行放得下就一行,
+  否则自动多行)+1 行作答线;渲染(pdf-uishared `_upRenderBlocks`)三段纵排:题干(wrap)/
+  选项 flex-wrap(自动补 A. B. C. 前缀)/「答:____」短线。判分两路(shots 首选+服务端拼图回退)
+  的空过滤加 choice(标注"选择题,答字母即可")。_norm_block 容错:options 缺→降级 text;
+  字符串→按 / 拆;选项自带字母前缀→剥掉;answer 取首字母大写。
+- **blank 长标签多行**(通用底座):default_span 按 ceil((wide(label)+8)/C) 给行数;
+  CSS `.up2-b-blank` flex-wrap + `.up2-b-lab` 可换行 + `.up2-b-box{flex:1 1 8em;min-height:1.1em}`
+  (作答线落到末行)。旧单行 blank 渲染不变(内容放得下仍一行)。
+- page_add 提示词明说:**选择题必须用 choice,别把题干+选项塞进 blank 的 label**。
+  重新生成型工具重跑时 CLI 看到新说明,自动改用 choice(旧纸 blocks 已定型不回改,重跑即新排版)。
+- 沙盒 E2E:短选项 1 行/长选项 2 行/旧式长 blank 换行,程序化溢出检查(scrollWidth+子元素右缘)零命中。
+
 ## §9 工具库沙盒模拟环境(2026-07-17,用户设计:测试在模拟环境跑+直观看到结果)
 
 用户:「工具测试应该在模拟环境中进行且需要能直观看到结果,而不是要跑到阅读器里检测」。落地三件套:

@@ -76,7 +76,21 @@ def default_span(b: dict, sp: dict) -> list:
             need += 1                                   # 大标题占两行(视觉留白)
         return [need, w]
     if k == "blank":
-        return [1, C]                                   # 填空:整行(留足手写宽度)
+        # 长标签(AI 把整道题塞进 label 的现实)→ 按内容给足行数,渲染端 label 换行、作答线保底在末行
+        need = max(1, int(math.ceil((_wide(b.get("label")) + 8) / C)))   # +8 格作答线保底宽
+        return [need, C]
+    if k == "choice":
+        # 选择题原语:题干行 + 选项行(贪心装行:能一行放下就一行,不行 2×2,再不行逐行)+ 1 行作答线
+        qrows = max(1, int(math.ceil(_wide(b.get("text") or b.get("label")) / C)))
+        opts = b.get("options") or []
+        orows, used = (1, 0) if opts else (0, 0)
+        for i, o in enumerate(opts):
+            w = min(C, _wide("A. " + str(o)) + 2)
+            if used and used + w > C:
+                orows += 1
+                used = 0
+            used += w
+        return [qrows + orows + 1, C]
     if k == "button":
         return [1, min(C, _wide(b.get("label")) + 3)]   # 按钮:1 行高 · 文字宽 + 内边距
     if k == "checkbox":

@@ -108,10 +108,15 @@ window._favOpenPicker = function () {
     '.up2-blocks{position:absolute;inset:0}' +
     '.up2-b{position:absolute;box-sizing:border-box;display:flex;align-items:center}' +
     '.up2-b.up2-h1{font-weight:700;color:#1e2a44;font-size:1.25em!important;align-items:flex-end;padding-bottom:4px}' +
-    '.up2-b-blank{align-items:flex-end;gap:6px}' +
-    '.up2-b-lab{flex:none;color:#5b76b8;opacity:.75}' +
+    '.up2-b-blank{align-items:flex-end;gap:6px;flex-wrap:wrap}' +   // 长标签(整道题在 label 里)换行,作答线落到末行
+    '.up2-b-lab{flex:none;color:#5b76b8;opacity:.75;white-space:normal;max-width:100%}' +
     // 手写就写在这条线上。线只是**视觉参考**;bbox 是算出来的,手写层(ink canvas)在更上层,天然共存。
-    '.up2-b-box{flex:1;align-self:stretch;border-bottom:1.5px solid #c3cee6;margin-bottom:3px}' +
+    '.up2-b-box{flex:1 1 8em;align-self:stretch;min-height:1.1em;border-bottom:1.5px solid #c3cee6;margin-bottom:3px}' +
+    /* 选择题(choice):题干 / 选项 / 作答线 三段纵排;选项 flex wrap 自动装行 —— 治"题干+ABCD 塞一行被截断" */
+    '.up2-b-choice{flex-direction:column;align-items:stretch;justify-content:space-between;row-gap:2px}' +
+    '.up2-c-q{color:#1e2a44}' +
+    '.up2-c-opts{display:flex;flex-wrap:wrap;column-gap:1.2em;row-gap:2px;color:#33436a}' +
+    '.up2-c-ans{display:flex;align-items:flex-end;gap:6px}' +
     '.up2-b-ck{flex:none;width:1em;height:1em;border:1.5px solid #8fa2c8;border-radius:3px;margin-right:6px}' +
     '.up2-b-lab2{color:#33436a}' +
     // 纸张底纹:横线(听写/笔记)/ 方格(数学演草)—— 由 paper 预设的 rule 决定
@@ -1026,6 +1031,15 @@ window._favOpenPicker = function () {
         if (b.style === 'h1') d.classList.add('up2-h1');
       } else if (b.kind === 'blank') {
         d.innerHTML = '<span class="up2-b-lab">' + RC.esc(b.label || '') + '</span><span class="up2-b-box"></span>';
+      } else if (b.kind === 'choice') {
+        var cq = document.createElement('div'); cq.className = 'up2-c-q'; cq.textContent = b.text || b.label || '';
+        var co = document.createElement('div'); co.className = 'up2-c-opts';
+        (b.options || []).forEach(function (o, oi) {
+          var it = document.createElement('span'); it.textContent = String.fromCharCode(65 + oi) + '. ' + o; co.appendChild(it);
+        });
+        var ca = document.createElement('div'); ca.className = 'up2-c-ans';
+        ca.innerHTML = '<span class="up2-b-lab">答:</span><span class="up2-b-box" style="flex:0 1 10em"></span>';
+        d.appendChild(cq); d.appendChild(co); d.appendChild(ca);
       } else if (b.kind === 'checkbox') {
         d.innerHTML = '<span class="up2-b-ck"></span><span class="up2-b-lab2">' + RC.esc(b.label || '') + '</span>';
       } else if (b.kind === 'button') {
