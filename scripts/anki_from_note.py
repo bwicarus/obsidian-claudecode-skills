@@ -562,7 +562,10 @@ def source_footer(source_link: str, source_url: str, reason: str, local_id: str)
     qa = os.environ.get("QA_PUBLIC_URL", "").rstrip("/")
     if qa:
         lines.append(f'<a href="{qa}/?card={local_id}">问 AI / 改进这张卡</a>')
-    return '<hr><div style="font-size:0.85em;color:#666;">' + "<br>".join(lines) + "</div>"
+    # ★机器可读来源(HTML 注释,不显示;注意力画像 read_material 用 obsidian_to_ref 归一成 material ref)。
+    #   用户实锤:制卡自动注入的来源要**可迅速提取**(原来只有 <a> 显示格式,机器提取要解析 URL)。
+    src_marker = "<!--@src:%s-->" % source_link if source_link else ""
+    return '<hr><div style="font-size:0.85em;color:#666;">' + "<br>".join(lines) + "</div>" + src_marker
 
 
 def build_anki_note(

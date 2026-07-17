@@ -1338,9 +1338,15 @@ def read_material(ref, limit=1500):
         deck = str(r[1] or "").replace("\x1f", "::").strip(":")
         res = {"ok": True, "ref": ref, "kind": "anki", "title": "Anki 卡片(%s)" % deck,
                "content": {"正面": parts[0][:600] if parts else "", "背面": parts[1][:600] if len(parts) > 1 else ""}}
-        # ★卡片→源:这张卡是学哪份材料做的(用户设计的诊断链入口)
-        nid = _anki_cid_to_nid(cid)
-        src = _anki_source_map().get(nid) if nid else None
+        # ★卡片→源:这张卡是学哪份材料做的(用户设计的诊断链入口)。
+        #   优先从**卡片自带**的 @src 标记提取(制卡时注入,覆盖所有新卡);没有再查 records(旧卡兜底)。
+        src = None
+        _m = re.search(r"@src:(.+?)-->", str(flds))
+        if _m:
+            src = obsidian_to_ref(_m.group(1).strip())
+        if not src:
+            nid = _anki_cid_to_nid(cid)
+            src = _anki_source_map().get(nid) if nid else None
         if src:
             res["源"] = {"ref": src, "label": _material_label(src)}
             if src.startswith("note:"):

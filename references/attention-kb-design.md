@@ -484,6 +484,18 @@ events 路提供「行为证据分」,FTS5 路提供「存在但未读」的候�
 → ② FTS5 路 + 语义相似合入打分 → ③ `relate_material` AI 工具(三链路可用)
 → ④ 可视化(/insights 焦点词点开→相关材料)→ ⑤(未来)下游操作接挂载点。
 
+### 制卡注入可提取来源(2026-07-18,用户实锤:自动注入的内容要能迅速提取)
+问题:①「卡片→源」原来只从 `anki/records` 反查,**覆盖率仅 29%**(手动卡/vocab卡/记录丢的卡断链);
+②制卡 footer 注入的来源是 `<a href="obsidian://…">[[X]]</a>` **显示格式**,机器提取要解析 URL。
+修:**制卡时在 footer 埋机器可读来源**——`anki_from_note.source_footer` 加 `<!--@src:[[X]]-->`
+(HTML 注释,不显示;source_link 原样)。提取端 `read_material` 的 anki 分支**优先从卡片 flds
+正则抓 @src → obsidian_to_ref 归一**(覆盖所有新卡),records 兜底(旧卡)。
+→ 制卡脚本零新依赖(只埋已有的 source_link,归一交给 obsidian_to_ref);pdf/md 统一(@src 值可以是
+`[[笔记]]` 或 `![[pdf#page=N]]`,归一器都认)。
+- 覆盖策略:**新卡自带**(制卡即注入)、旧卡 records 兜底(29%)、要全覆盖可重新制卡(可选,非必需)。
+- ⏳ 待做:vocab 制卡(`anki_from_word`)同样注入 `@src`(它的 Url 字段有原句出处 pdf+page →
+  `book:<pdf>#p<page>`,一行改动;诊断价值低于 note 卡故排后)。
+
 ### 卡片→源→书页→KG节点:诊断链打通(2026-07-18,用户设计)
 用户实锤:「anki 卡的来源字段和查询字段归一后,能从答错的卡追到学它的内容、KG 节点、前置根源」。
 **数据全在,是连接问题**(不是采集):`anki/records/*.json` 有 source_note+anki_note_id、
