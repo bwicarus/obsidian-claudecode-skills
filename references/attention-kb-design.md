@@ -186,6 +186,54 @@
 - **L2 语义层暂缓**:等真出现「同一知识点两种语言材料」再上多语 embedding + 双闸(§2.3);
   届时只换 `norm_key` 实现(key 机制已贯通),不动别处。ECDICT 释义映射**实测不可用**(误连过半)。
 
+## 5f. 外部 AI 审查的处理(2026-07-17)——真金、幻觉与我的取舍
+
+用户带来一份外部 AI 的详细建议(Hermes 记忆分层 / learning.db / 多粒度分词)。**逐条核实后**的处置:
+
+### 属实并已修(它的真金:自己做了实测)
+1. **分词路由 bug**(实锤,见 git 3d1bee3):纯汉字日语被 jieba 切碎。已按书语言路由 + 加接尾辞。
+2. **`events.db` 直写会被 rebuild 删掉的矛盾**(实锤,我自己写的注释误导)→ 见下「账本」。
+
+### 核实为幻觉/失真(**别当权威引用**)
+- **「Hermes 的五层记忆分层(工作/原始事件/情节/语义/程序)」= 幻觉**。shallow clone 全仓库 grep:
+  `episodic` 0 命中、`semantic memory` 0 命中、`five layer` 0 命中。Hermes 自述架构是
+  **三件套**:两个记忆文件(MEMORY.md/USER.md)+ 会话搜索(SQLite FTS5)+ Skills。
+  五个词里只有「程序性记忆」是它的原话(专指 Skills)。那个五层是把认知科学分类事后套上去的。
+- **「OpenAI 官方建议保留完整 trace / 从真实失败案例建数据集做回归评测」= 转述失真**。
+  三个链接都真实,但原文只说「先用 traces 调试行为 → 再转 datasets/eval runs 求可复现」,
+  没有留存策略、没说从失败案例取数,还把「发现回归」从 trace grading 错挂到了 dataset。
+- 属实的部分:Hermes Agent 真实存在(NousResearch/hermes-agent,MIT);
+  「~1300 token 常驻(2200+1375 字符上限)+ 完整会话存 SQLite FTS5 按需搜索」**逐字对得上源码**;
+  OpenAI sideband「工具/业务逻辑留服务端」属实。
+
+### 决策一:**不引入 Hermes**,但抄它三个设计取舍
+它是**完整 agent 平台**(271MB / 7405 文件 / desktop+CLI+各种 IM gateway),不是能 pip 进
+Flask 的库;而它的记忆设计极简(两个有字符上限的 md + 一张 FTS5 表),自建成本远低于扛进平台。
+值得抄的三条(**已在本项目对应物上生效或待用**):
+1. **超限报错、不自动压缩** —— 逼 agent 自己合并/删条目(比静默截断诚实);
+2. **frozen snapshot 保 prefix cache** —— session 中途改记忆立即落盘但下次 session 才进 prompt;
+3. **常驻记忆(贵、恒定 token)与会话搜索(免费、按需)明确分工** —— 我们的对应物:
+   `_sys_prompt` 常驻清单 vs `recall_creation`/`learning_focus`/FTS5 按需取回。**已是同款范式**。
+
+### 决策二:**不建 learning.db**,改用 `raw-events.jsonl` 账本(更简单地解决同一个问题)
+外部建议「建不可重建的 learning.db 三张表,events.db 降级派生索引」。诊断对,处方过重:
+- **本项目 5 个渠道都有天然 append-only 源**(查词 jsonl / 高亮 sidecar / 对话+归档 / dwell /
+  检查报告),零侵入导入器已在跑 —— 全量迁 learning.db 等于给每个源再造一份副本,双写+一致性全来了。
+- 真正缺的只有一个口子:**没有天然源的新渠道**(眼镜 gaze / 外部 App / 工具调用)往哪写。
+- → `state/attention/raw-events.jsonl`(**append-only,永不删,--rebuild 也重导它**)+
+  `append_raw(channel, text, ...)` 统一入口 + `import_raw()` 导入器。**20 行解决,零新数据库**。
+  实测:写账本 → `--rebuild` 删库 → 事件仍在 ✓。
+- `add_event()` 降为内部函数(只给导入器用),注释写明「新渠道用 append_raw」。
+- 何时才真需要 learning.db:事件破 10 万(全量重算不再秒级)、或要跨设备同步事务。**现在 2208 条**。
+
+### 决策三:多粒度候选/term_mentions/C-value —— **暂不做**(YAGNI)
+外部建议保留「人口動態統計 + 人口動態 + 統計」多候选再分级加权。但:
+- 我们的产物是**给人看的焦点榜**,多粒度会让同一概念的碎片占满榜(它自己也承认这风险);
+- 「用『統計』搜到『人口動態統計』」的需求 **FTS5 trigram 已经解决**(全文搜索另一条链路);
+- C-value/NC-value 是**术语抽取系统**的方法,我们是注意力画像 —— 最长复合名词 + IDF 已够。
+- 有价值但排后面:**领域词典从系统自己长出来**(KG 节点名/Anki 卡正面/书目录/用户查过的词
+  → jieba `add_word` + fugashi 用户词典),等焦点榜用一段时间发现具体切错案例再做。
+
 ## 6. 分阶段路线(建议,未拍板)
 
 - ~~**阶段 0**:事件表 + 现有渠道接入~~ ✅ 2026-07-17(改为零侵入导入器,见 §5b)

@@ -228,12 +228,54 @@ def _db():
     return c
 
 
+RAW = ATT_DIR / "raw-events.jsonl"   # ★没有天然源文件的渠道的**账本**(append-only,永不删;--rebuild 也重导它)
+
+
+def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hint="", lang=None, extra=None):
+    """★统一事件入口(给**没有天然源文件**的渠道:眼镜 gaze / 工具调用 / 外部 App…)。
+    写 append-only 账本 raw-events.jsonl,由 import_raw() 导进派生索引 —— 于是新渠道
+    **既不用各造一套源日志格式,也不会被 --rebuild 删掉**。
+
+    ⚠ 为什么不直接写 events.db(外部审查实锤的矛盾):events.db 是**可重建派生索引**
+      (`--rebuild` 删库重导,分词/权重/归一算法改版必须能重算);直写它而不写账本的数据,
+      重建时会永久消失。已有 5 个渠道天然带源(查词 jsonl/高亮 sidecar/对话+归档/dwell/检查报告),
+      走各自导入器;没有源的渠道走这里。
+    """
+    rec = {"ts": int(ts or time.time()), "channel": str(channel), "text": str(text or "")[:2000],
+           "file": file or "", "page": int(page or 0), "uid": str(uid or "")}
+    for k, v in (("weight", weight), ("hint", hint), ("lang", lang)):
+        if v is not None:
+            rec[k] = v
+    if isinstance(extra, dict):
+        rec["extra"] = extra
+    ATT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(RAW, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return True
+
+
+def import_raw(c):
+    """账本 → 派生索引(幂等增量;--rebuild 后也会重导,数据不丢)。"""
+    if not RAW.exists():
+        return 0
+    n = 0
+    for ln in RAW.read_text("utf-8").splitlines():
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        if "/.sandbox/" in (d.get("file") or ""):
+            continue
+        n += add_event(c, d.get("ts") or 0, d.get("channel") or "raw", d.get("text") or "",
+                       d.get("file") or "", d.get("page") or 0, uid=d.get("uid") or "",
+                       weight=d.get("weight"), hint=d.get("hint") or "", lang=d.get("lang"))
+    return n
+
+
 def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="", lang=None):
-    """新渠道(眼镜/自定义)也走这里:自动抽词、按 src_key 幂等。
-    ⚠ 事件的原始文本在**各自的源文件**里(查词 jsonl / 高亮 sidecar / 对话归档 / dwell),
-      本表是**可重建的派生索引**(--rebuild 删库重导)——直写本表而不写源的渠道,重建时会丢。
-      新渠道接入时:要么先写自己的 append-only 源日志 + 写个导入器(现有 5 个渠道都这样),
-      要么等 learning.db(不可重建的事实账本,设计见 attention-kb-design.md §7)。"""
+    """把一条事件写进**派生索引**(自动抽词、按 src_key 幂等)。
+    ⚠ 这是内部函数:调用方必须是导入器(读的是 append-only 的源)。
+      新渠道请用 **append_raw()**(写账本)—— 直写本表的数据 --rebuild 时会丢。"""
     key = hashlib.sha1(f"{channel}|{int(ts)}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
     terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)))
     if not terms:
@@ -653,7 +695,7 @@ def run(rebuild=False):
     t0 = time.time()
     stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
              "qa": import_convo(c), "qa_arch": import_convo_archive(c),
-             "check": import_checks(c), "read": import_dwell(c)}
+             "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c)}
     c.commit()
     prof = rebuild_profile(c)
     total = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
