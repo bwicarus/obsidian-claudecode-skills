@@ -248,6 +248,13 @@ instruction——都带被删语义;prompt 声明"字符串参数(标题/文案)
   参数存 `<名>.pdf.meta.json`;书 ≤10 页整本拷)。ctx.page=anchor → CLI"读当前页"读到的仍是用户
   正在学的内容;iframe URL 带 &page=anchor 直接落锚页;♻重置=按当前阅读位置重切。
   实测:204MB→34MB 切 1.5s,iframe 骨架 1.1s、首屏页图 4.1s(原来 30s-2min)。
+- **对抗审查修复批**(2026-07-17,workflow 10-agent 全部实锤):沙盒按**源路径哈希分子目录**
+  `.sandbox/<h8>/<原名>`(vault 真有同名书 Main.pdf,扁平 basename 会串书;文件名保留原名,阅读器
+  标题干净)+ meta.src_rel 复用校验;`_SANDBOX_LOCK` 防并发 check-then-act;fitz 切割 try/finally
+  (坏书回 JSON 500、句柄必关、tmp 清理);reset 清边车补便签 `_notes_save` + reader-positions 的
+  sb_rel 键(否则 iframe 被旧续读带走不落锚页);publish-actions **只允许沙盒路径**(403 其它,
+  消掉任意 fn 注入面);前端:sbEnsure in-flight 去重、send 快照 rel(ensure 在飞期间切书→中止,
+  绝不回落原书)、重置无条件失效 _simRel、切书清 _simQ、↗ 新页签带 &page=anchor。
 - 验证结论:publish → SSE → iframe 建纸带块渲染,端到端实测通。⚠ 测试时手搓 client_action 载荷
   注意 **paper 是纸型字符串**('exam'),不是 dict——传 dict 曾致 paper.spec `PAPERS.get(dict)` 500
   (已加防御:非 str 落默认纸型),且此前多轮"纸没出现"的假失败全是这个假载荷问题,链路一直是通的。

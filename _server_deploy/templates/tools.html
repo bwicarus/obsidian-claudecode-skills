@@ -144,13 +144,18 @@
   // ── 沙盒(用户设计:测试在**模拟环境**跑 + 直观看到结果):测试上下文一律换成书的沙盒副本;
   //    预览 = iframe 里开真实阅读器读副本,CLI 产物 client_actions 经 /api/publish-actions → SSE 推给它执行。
   var _sbMap = {};   // 原书 rel → {rel:沙盒rel, anchor:锚页(节选内页码), pages, src_from}
+  var _sbPending = {};   // in-flight 去重:发消息+点预览近同时触发只发一个 POST(服务端也有锁,双保险)
   function sbEnsure(rel, reset) {
     if (!rel) return Promise.resolve(null);
     if (!reset && _sbMap[rel]) return Promise.resolve(_sbMap[rel]);
-    return fetch('/pdf/api/sandbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    if (!reset && _sbPending[rel]) return _sbPending[rel];
+    var pr = fetch('/pdf/api/sandbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file: rel, reset: !!reset }) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) { _sbMap[rel] = d; return d; } throw new Error((d && d.error) || '沙盒创建失败'); });
+      .then(function (r) { return r.json().catch(function () { return { ok: false, error: '服务器返回异常' }; }); })
+      .then(function (d) { delete _sbPending[rel]; if (d && d.ok) { _sbMap[rel] = d; return d; } throw new Error((d && d.error) || '沙盒创建失败'); })
+      .catch(function (e) { delete _sbPending[rel]; throw e; });
+    if (!reset) _sbPending[rel] = pr;
+    return pr;
   }
   function ctx() {
     var rel = bookSel.value, sb = rel && _sbMap[rel];
@@ -186,17 +191,22 @@
   window.openBookAt = function (fr, pg) { simForward('openBookAt', [fr, pg]); };   // 覆盖 rc-assistant 的跨书导航(别把工具库整页带走)
   document.getElementById('tl-sim-open').addEventListener('click', simOpen);
   document.getElementById('tl-sim-x').addEventListener('click', function () { simEl.hidden = true; });
-  document.getElementById('tl-sim-ext').addEventListener('click', function () { if (_simRel) window.open('/pdf/view?file=' + encodeURIComponent(_simRel)); });
+  document.getElementById('tl-sim-ext').addEventListener('click', function () {
+    if (!_simRel) return;
+    var sb = _sbMap[bookSel.value];
+    window.open('/pdf/view?file=' + encodeURIComponent(_simRel) + '&page=' + ((sb && sb.anchor) || 1));
+  });
   document.getElementById('tl-sim-reload').addEventListener('click', function () { if (_simRel) { _simReady = false; simF.src = simF.src; simF.onload = function () { setTimeout(function () { _simReady = true; simFlush(); }, 2500); }; } });
   document.getElementById('tl-sim-reset').addEventListener('click', function () {
     var rel = bookSel.value; if (!rel) return;
     if (!confirm('重置沙盒?(恢复成原书干净副本,测试产生的纸/高亮/手写全清掉)')) return;
     sbEnsure(rel, true).then(function () {
       RC.toast && RC.toast('沙盒已重置(按当前阅读位置重新节选)');
-      if (!simEl.hidden) { _simRel = ''; simOpen(); }
+      _simRel = ''; _simReady = false;   // 无条件失效:重切后同名同路径,不失效的话 iframe 不会重载
+      if (!simEl.hidden) simOpen();
     }).catch(function (e) { RC.toast && RC.toast('重置失败:' + e.message); });
   });
-  bookSel.addEventListener('change', function () { simEl.hidden = true; });
+  bookSel.addEventListener('change', function () { simEl.hidden = true; _simQ.length = 0; _simRel = ''; _simReady = false; });
 
   // ── 工具列表 ─────────────────────────────────────────────────────────
   var listEl = document.getElementById('tl-mine');
@@ -316,7 +326,16 @@
     var rel = bookSel.value;
     if (rel && !_sbMap[rel]) {   // 首次带书发言:先备好沙盒(失败就不发,绝不落在原书上)
       streaming = true;
-      sbEnsure(rel).then(function () { streaming = false; _sendNow(text); })
+      sbEnsure(rel).then(function () {
+        streaming = false;
+        if (bookSel.value !== rel) {   // ensure 在飞期间切了书:中止(否则 ctx 会回落到新书的原书)
+          uMsg(text);
+          var w = document.createElement('div'); w.className = 'asst-msg asst-a';
+          w.textContent = '⚠️ 刚才切换了书,这条没有执行——确认书选对了再发一次。';
+          thread.appendChild(w); return;
+        }
+        _sendNow(text);
+      })
         .catch(function (e) { streaming = false; uMsg(text); var d = document.createElement('div'); d.className = 'asst-msg asst-a'; d.textContent = '⚠️ 沙盒创建失败(' + e.message + '),没有执行——不在原书上测试。'; thread.appendChild(d); });
       return;
     }

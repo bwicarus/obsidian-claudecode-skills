@@ -747,6 +747,7 @@ _SANDBOX_DIR_REL = "资源/uploads/.sandbox"   # 点目录:Obsidian Sync 不同�
 
 
 _SANDBOX_PAGES = 10   # 节选页数:整本副本在大扫描书上"很长时间加载不出来"(页图/字符层全新文件从零渲+自动预热整本),模拟环境用节选即可
+_SANDBOX_LOCK = __import__("threading").Lock()   # 建/重切低频,全局锁防并发 check-then-act 写坏副本
 
 
 @bp.route("/api/sandbox", methods=["POST"])
@@ -757,56 +758,97 @@ def pdf_api_sandbox():
     reset=true 重切(阅读位置变了跟着走)+清边车。返回 {rel, fresh, pages, anchor, src_from}。"""
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
-    if rel.startswith(_SANDBOX_DIR_REL):
-        return jsonify({"ok": True, "rel": rel, "fresh": False, "anchor": 1})
     ap = _safe_vault_path(rel)
     if not ap or not rel.lower().endswith(".pdf"):
         return jsonify({"ok": False, "error": "文件不存在或不是 PDF"}), 400
-    sb_dir = OBSIDIAN_ROOT / _SANDBOX_DIR_REL
-    sb_dir.mkdir(parents=True, exist_ok=True)
+    rel = ap.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()   # 规范化(与 reader-positions 写入端同键)
+    if rel.startswith(_SANDBOX_DIR_REL):   # 已是沙盒:返回它自己的节选参数
+        mp = ap.parent / (ap.name + ".meta.json")
+        try:
+            m = json.loads(mp.read_text("utf-8"))
+        except Exception:
+            m = {}
+        return jsonify({"ok": True, "rel": rel, "fresh": False, "anchor": m.get("anchor", 1),
+                        "src_from": m.get("src_from", 1), "pages": m.get("pages", 0)})
+    import hashlib as _hl
+    h8 = _hl.sha1(rel.encode("utf-8")).hexdigest()[:8]   # 按源路径分子目录:同名书(vault 里真有 Main.pdf 重名)互不串,文件名保持原名(阅读器标题干净)
+    sb_dir = OBSIDIAN_ROOT / _SANDBOX_DIR_REL / h8
     dst = sb_dir / ap.name
-    sb_rel = _SANDBOX_DIR_REL + "/" + ap.name
-    meta_p = sb_dir / (ap.name + ".meta.json")   # 记节选参数(anchor/src_from),非 fresh 时也能返回
-    fresh = False
-    if body.get("reset") or not dst.exists() or not meta_p.exists():
-        import fitz
-        src = fitz.open(str(ap))
-        n = src.page_count
-        pos = 1
-        try:
-            _rp = json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
-            pos = int((_rp.get(rel) or {}).get("pos") or 1)
-        except Exception:
-            pass
-        pos = max(1, min(pos, n))
-        if n <= _SANDBOX_PAGES:
-            start, end = 1, n                     # 小书整本
-        else:
-            start = max(1, pos - 2)
-            end = min(n, start + _SANDBOX_PAGES - 1)
-            start = max(1, end - _SANDBOX_PAGES + 1)
-        out = fitz.open()
-        out.insert_pdf(src, from_page=start - 1, to_page=end - 1)
-        src.close()
-        tmp = dst.with_suffix(".pdf.tmp")
-        out.save(str(tmp), garbage=3, deflate=True)
-        out.close()
-        tmp.replace(dst)
-        meta = {"anchor": pos - start + 1, "src_from": start, "pages": end - start + 1, "src_rel": rel}
-        meta_p.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
-        fresh = True
-        try:
-            _upages_save(sb_rel, [])
-        except Exception:
-            pass
-        try:
-            _hl_save(sb_rel, {"pdf_rel": sb_rel, "highlights": []})
-        except Exception:
-            pass
-        try:
-            _ink_save(sb_rel, {})
-        except Exception:
-            pass
+    sb_rel = _SANDBOX_DIR_REL + "/" + h8 + "/" + ap.name
+    meta_p = sb_dir / (ap.name + ".meta.json")
+    with _SANDBOX_LOCK:
+        # 复用校验:meta.src_rel 必须指回同一本源书,不符(哈希碰撞/手工挪动)→ 重切
+        _stale = True
+        if dst.exists() and meta_p.exists():
+            try:
+                _stale = json.loads(meta_p.read_text("utf-8")).get("src_rel") != rel
+            except Exception:
+                _stale = True
+        fresh = False
+        if body.get("reset") or _stale:
+            sb_dir.mkdir(parents=True, exist_ok=True)
+            import fitz
+            src = None
+            out = None
+            tmp = dst.with_suffix(".pdf.tmp")
+            try:
+                src = fitz.open(str(ap))
+                n = src.page_count
+                pos = 1
+                try:
+                    _rp = json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
+                    pos = int((_rp.get(rel) or {}).get("pos") or 1)
+                except Exception:
+                    pass
+                pos = max(1, min(pos, n))
+                if n <= _SANDBOX_PAGES:
+                    start, end = 1, n                     # 小书整本
+                else:
+                    start = max(1, pos - 2)
+                    end = min(n, start + _SANDBOX_PAGES - 1)
+                    start = max(1, end - _SANDBOX_PAGES + 1)
+                out = fitz.open()
+                out.insert_pdf(src, from_page=start - 1, to_page=end - 1)
+                out.save(str(tmp), garbage=3, deflate=True)
+            except Exception as ex:
+                return jsonify({"ok": False, "error": "节选失败:%s" % ex}), 500
+            finally:
+                try:
+                    if src:
+                        src.close()
+                except Exception:
+                    pass
+                try:
+                    if out:
+                        out.close()
+                except Exception:
+                    pass
+                try:
+                    if tmp.exists() and not tmp.stat().st_size:
+                        tmp.unlink()
+                except Exception:
+                    pass
+            tmp.replace(dst)
+            meta = {"anchor": pos - start + 1, "src_from": start, "pages": end - start + 1, "src_rel": rel}
+            mtmp = meta_p.with_suffix(".json.tmp")
+            mtmp.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
+            mtmp.replace(meta_p)
+            fresh = True
+            for _fn, _empty in ((_upages_save, []), (_hl_save, {"pdf_rel": sb_rel, "highlights": []}),
+                                (_ink_save, {}), (_notes_save, [])):
+                try:
+                    _fn(sb_rel, _empty)
+                except Exception:
+                    pass
+            try:
+                with _READER_POS_LOCK:   # 清沙盒自己的续读记录(否则 iframe 会被旧位置带走,不落锚页)
+                    _pp = CLAUDE_DIR / "state" / "reader-positions.json"
+                    _m = json.loads(_pp.read_text("utf-8"))
+                    if sb_rel in _m:
+                        del _m[sb_rel]
+                        _pp.write_text(json.dumps(_m, ensure_ascii=False), "utf-8")
+            except Exception:
+                pass
     try:
         meta = json.loads(meta_p.read_text("utf-8"))
     except Exception:
@@ -824,6 +866,8 @@ def pdf_api_publish_actions():
     acts = body.get("actions") or []
     if not rel or not isinstance(acts, list):
         return jsonify({"ok": False, "error": "缺 file/actions"}), 400
+    if not rel.startswith(_SANDBOX_DIR_REL):   # 本通道只服务沙盒预览;真书遥控走 MCP 的服务端路径,不经此端点
+        return jsonify({"ok": False, "error": "只允许沙盒文件"}), 403
     n = 0
     for a in acts[:20]:
         fn = (a or {}).get("fn")
