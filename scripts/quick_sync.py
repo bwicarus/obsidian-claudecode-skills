@@ -107,6 +107,10 @@ def main() -> int:
     rc |= run("build_search_index", [
         PYTHON, str(PROJECT_DIR / "scripts" / "build_search_index.py"),
     ])
+    # 5. 注意力画像（查词/高亮/问答/检查 → 事件层 → 学习焦点；幂等增量,全量重算 ~2s）
+    rc |= run("attention_profile", [
+        PYTHON, str(PROJECT_DIR / "scripts" / "attention_profile.py"),
+    ])
     return rc
 
 

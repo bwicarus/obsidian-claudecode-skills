@@ -154,7 +154,7 @@ function passColor(p){ return p==null?'#555':p>=0.85?'#3ad88f':p>=0.7?'#7cc4ff':
 function render(d){
   if(!d.ok){ $('root').innerHTML='<div class="loading">数据加载失败：'+esc(d.error||'')+'</div>'; return; }
   $('gen').textContent='更新于 '+d.generated_at;
-  const K=d.kpis||{}, A=d.anki||{}, V=d.vocab||{}, G=d.kg||{}, R=d.reading||{}, N=d.notes||{};
+  const K=d.kpis||{}, A=d.anki||{}, V=d.vocab||{}, G=d.kg||{}, R=d.reading||{}, N=d.notes||{}, F=d.focus||{};
   let h='';
 
   // KPI strip
@@ -168,6 +168,24 @@ function render(d){
     {v:K.mastered_nodes, l:'已掌握知识点'},
   ];
   h+='<div class="kpis">'+kpiDefs.map(k=>'<div class="kpi'+(k.hot?' hot':'')+'"><div class="v">'+(k.v??'—')+'</div><div class="l">'+k.l+'</div></div>').join('')+'</div>';
+
+  // 🎯 注意力焦点(词云式:字号=分数,🔥=近期突增;点击=去那本书那一页)
+  //    数据来自 scripts/attention_profile.py(查词/高亮/问答/检查 → 术语画像 → 双半衰期衰减×IDF)
+  if(F.ok && (F.top||[]).length){
+    const mx=Math.max(...F.top.map(t=>t.score||0))||1, mn=Math.min(...F.top.map(t=>t.score||0));
+    h+='<div class="card"><h2>🎯 注意力焦点</h2><div class="desc">你最近在攻的知识点(近 7 天权重最高;🔥=突然集中攻;字号=热度) · 共 '+(F.n_events||0)+' 条行为</div>'
+      +'<div style="display:flex;flex-wrap:wrap;gap:9px;align-items:baseline;padding:4px 0">'
+      + F.top.map(t=>{
+          const r=(t.score-mn)/Math.max(0.001,mx-mn), fs=(13+r*12).toFixed(1);
+          const ref=t.ref||{}; const nm=(ref.file||'').split('/').pop()||'';
+          const tip=esc(nm+(ref.page?(' 第'+ref.page+'页'):'')+' · 近7天 '+(t.n7||0)+' 次 · '+(t.books||0)+' 本书');
+          const url=ref.file?('/pdf/view?file='+encodeURIComponent(ref.file)+'&page='+(ref.page||1)):'';
+          const inner='<span style="font-size:'+fs+'px;font-weight:'+(r>0.5?700:500)+'">'+esc(t.term)+'</span>'+(t.burst>=3?'<span style="font-size:11px">🔥</span>':'');
+          return url?('<a href="'+url+'" title="'+tip+'" style="color:'+(t.burst>=3?'#ffd28a':'#cfe0ff')+';text-decoration:none;border-bottom:1px dotted rgba(160,190,255,.35)">'+inner+'</a>')
+                    :('<span title="'+tip+'" style="color:#cfe0ff">'+inner+'</span>');
+        }).join('')
+      +'</div></div>';
+  }
 
   // 活跃度热力图
   if(d.activity&&d.activity.length){

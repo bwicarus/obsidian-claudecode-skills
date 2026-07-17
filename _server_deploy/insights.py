@@ -492,6 +492,7 @@ def _build_payload(username: str) -> dict:
     return {
         "ok": True,
         "generated_at": _jst_day(time.time()) + datetime.fromtimestamp(time.time() + JST_OFF, tz=timezone.utc).strftime(" %H:%M"),
+        "focus": _focus(),
         "kpis": kpis,
         "activity": activity,
         "anki": anki,
@@ -500,6 +501,20 @@ def _build_payload(username: str) -> dict:
         "reading": reading,
         "notes": notes,
     }
+
+
+def _focus():
+    """注意力焦点(scripts/attention_profile.py 每 15min 由 quick_sync 重算;这里纯读)。
+    设计:references/attention-kb-design.md。"""
+    try:
+        p = CLAUDE_DIR / "state" / "attention" / "focus.json"
+        d = json.loads(p.read_text("utf-8"))
+        top = [{"term": x["term"], "score": x["score"], "burst": x.get("burst", 0),
+                "n7": x.get("n7", 0), "books": x.get("books", 0),
+                "ref": (x.get("refs") or [{}])[0]} for x in (d.get("top") or [])[:24]]
+        return {"ok": True, "updated": d.get("updated"), "n_events": d.get("n_events", 0), "top": top}
+    except Exception:
+        return {"ok": False, "top": []}
 
 
 def register_insights(app):
