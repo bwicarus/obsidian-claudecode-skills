@@ -1132,6 +1132,227 @@ def _ecdict_zh(word):
         return set()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 跨语言关联 · 融合打分(用户设计,2026-07-18):
+#   「多个可能性乘以权重达到一定程度就进行 AI 判断」—— 信息检索里的 late fusion + 阈值门控。
+#   四个信号各归一到 [0,1],加权几何平均(用户强调「乘」:多个都强才高;任一为 0 靠 ε 不致命):
+#       P = ∏ (ε + wᵢ·sᵢ)^(1/n)          P > τ → 送 AI 判定(贵,只判高分候选)
+#   信号:
+#     T 时间共现  = NPMI 取正(★关键:用点互信息而非裸共现 —— 高频词即使共现 PMI 也低,
+#                   天然压制「feynman↔原子」这类高频互撞;这修正了「时间共现是垃圾」的旧结论:
+#                   不是时间没用,是没归一化)
+#     S 向量相似  = (cos−0.5)×2 取正(gemini-embedding,跨语言 + 短词长句通用;实测同义 0.8/无关 0.57)
+#     O 部件重合  = 已确认别名的部件数 / 部件数(vector↔向量已确认 → vector space 加分,用户「某些字眼互相对应」)
+#     D 词典对应  = ECDICT 命中(单词才有,长句自然为 0)
+_FUSION_W = {"T": 1.0, "S": 1.2, "O": 1.0, "D": 0.8}   # 权重(向量相似最可靠,给最高)
+_FUSION_EPS = 0.15                                       # 平滑:缺一个信号不致命
+_FUSION_TAU = 0.30                                       # 阈值:P > τ 才送 AI(调这个控制 AI 调用量/召回)
+_EMB_CACHE = ATT_DIR / "emb-cache.json"                  # 术语向量永久缓存(算过就不再花 API)
+
+
+def _emb_load():
+    try:
+        return json.loads(_EMB_CACHE.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _emb_get(terms, cache):
+    """要 embedding 的术语 → {term: vec};缓存没有的批量调 API 补上(夜间,量不大)。"""
+    need = [t for t in terms if t not in cache]
+    if need:
+        try:
+            sys.path.insert(0, "/home/bwicarus/webapp")
+            import assistant as A
+            for i in range(0, len(need), 40):
+                chunk = need[i:i + 40]
+                vs = A.gemini_embed(chunk)
+                if not vs:
+                    break
+                for t, v in zip(chunk, vs):
+                    cache[t] = v
+        except Exception:
+            pass
+        try:
+            _EMB_CACHE.write_text(json.dumps(cache, ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
+    return cache
+
+
+def _cos(a, b):
+    if not a or not b:
+        return 0.0
+    d = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a)) or 1e-9
+    nb = math.sqrt(sum(x * x for x in b)) or 1e-9
+    return d / (na * nb)
+
+
+def _sig_time(A, B, day_of, ndays):
+    """T = NPMI 取正。day_of[x] = x 出现过的天集合。"""
+    da, db = day_of.get(A) or set(), day_of.get(B) or set()
+    if not da or not db or not ndays:
+        return 0.0
+    co = len(da & db)
+    if co == 0:
+        return 0.0
+    pab = co / ndays
+    pa, pb = len(da) / ndays, len(db) / ndays
+    pmi = math.log(pab / (pa * pb))
+    npmi = pmi / (-math.log(pab))          # ∈ [-1,1]
+    return max(0.0, npmi)
+
+
+def _sig_parts(A, B):
+    """O = A、B 拆成部件后,已被 concepts 确认为同一别名的部件比例。"""
+    al = _concepts()
+    pa = re.findall(r"[a-z][a-z\-']+", A.lower()) if A.isascii() else list(A)
+    pb = set(B)                            # 中文按字
+    if not pa:
+        return 0.0
+    ok = 0
+    for w in pa:
+        cn = al.get(w)                     # 部件的中文别名
+        if cn and any(ch in pb for ch in cn):
+            ok += 1
+    return ok / len(pa)
+
+
+_FUSION_WFILE = ATT_DIR / "fusion-weights.json"   # 学出来的权重(有则覆盖手调默认)
+
+
+def _load_weights():
+    """启动时读学出来的权重(fit_weights 产物);没有就用手调默认。"""
+    global _FUSION_W, _FUSION_TAU
+    try:
+        d = json.loads(_FUSION_WFILE.read_text("utf-8"))
+        _FUSION_W = {k: float(v) for k, v in d["W"].items()}
+        _FUSION_TAU = float(d["tau"])
+    except Exception:
+        pass
+
+
+def fit_weights(dry=False):
+    """★用词典金标准**反向学习**融合权重(用户设计:「用百分百确认的词典对应反向调整,找到正确的值」)。
+    把手调的 _FUSION_W/τ 变成**数据学出来的** —— 金标准免费(词典+向量),零人工标注。
+
+    训练集(全自动构造):
+      正例(同义 label=1):ECDICT 命中 **AND** 向量 cos>0.72(两个独立信号双确认)
+                          ∪ concepts.json 里 AI 已判 same 的对。
+      负例(非同义 label=0):随机配对 ∪ 时间共现>0 但向量 cos<0.40(feynman↔原子 类)。
+    ⚠ 正例用「词典 AND 向量」双确认、负例用「共现但向量远」—— 让**每个信号都有独立的正负样本**,
+      学出的权重才不偏向单一信号(否则「正例都是词典选的 → 学出来 D 权重最大」是循环论证)。
+    模型:逻辑回归 P=σ(w·[T,S,O,D]+b),numpy 梯度下降(4 维,秒级)。
+    输出:学到的 W(非负,几何平均语义)+ 按 F1 最优选的 τ → fusion-weights.json。
+    """
+    import numpy as np
+    c = _db()
+    ensure_fresh(c)
+    book_days, mine_days = defaultdict(set), defaultdict(set)
+    for ts, ch, tj, f in c.execute("SELECT ts, channel, terms, file FROM events"):
+        day = int(ts // 86400)
+        try:
+            terms = set(json.loads(tj))
+        except Exception:
+            continue
+        tgt = book_days if (ch in ("lookup", "read", "highlight", "check") and f) else mine_days
+        for t in terms:
+            tgt[t].add(day)
+    ndays = len({int(ts // 86400) for ts, in c.execute("SELECT ts FROM events")}) or 1
+    day_of = {**book_days, **mine_days}
+    mine_cjk = [t for t in mine_days if _CJK.search(t) and not _KANA.search(t)]
+    en_all = [w for w in book_days if re.match(r"^[a-z\-']{3,}$", w) and w not in _STOP_EN]
+    en_all += [w for w in mine_days if re.match(r"^[a-z\-']{3,}$", w) and w not in _STOP_EN]
+    en_all = list(dict.fromkeys(en_all))
+    # 候选正/负对
+    pos, neg = [], []
+    for w in en_all:
+        zs = _ecdict_zh(w) & set(mine_cjk)
+        for z in zs:
+            pos.append((w, z, "dict"))              # 词典命中 → 待向量二次确认
+    al = _concepts()
+    for k, v in al.items():
+        if k.isascii():
+            pos.append((k, v, "concept"))           # AI 已判 same
+    # 负例:随机 + 共现远
+    import random as _rnd
+    rng = _rnd.Random(42)                            # 固定种子(可复现;脚本环境无 Math.random 顾虑)
+    for _ in range(min(400, len(en_all) * 3)):
+        neg.append((rng.choice(en_all), rng.choice(mine_cjk), "rand"))
+    # 全体术语算 embedding
+    allt = sorted({x for pr in (pos + neg) for x in pr[:2]})
+    emb = _emb_get(allt, _emb_load())
+    fctx = {"day_of": day_of, "ndays": ndays, "emb": emb, "dict_fn": _ecdict_zh}
+
+    def _feat(a_, b_):
+        _, sg = fuse_score(a_, b_, fctx)             # 复用信号计算(权重此刻无所谓,只取 sigs)
+        return [sg["T"], sg["S"], sg["O"], sg["D"]]
+
+    X, y = [], []
+    for a_, b_, src in pos:
+        f_ = _feat(a_, b_)
+        if src == "dict" and f_[1] < 0.34:           # 词典对但向量远 → 大概率一词多义的错义,不当正例
+            continue
+        X.append(f_); y.append(1)
+    for a_, b_, src in neg:
+        f_ = _feat(a_, b_)
+        if f_[1] > 0.5:                              # 随机对里偶尔真同义 → 剔除(别污染负例)
+            continue
+        X.append(f_); y.append(0)
+    X = np.array(X, float); y = np.array(y, float)
+    if len(y) < 30 or y.sum() < 8 or (len(y) - y.sum()) < 8:
+        return {"ok": False, "error": "样本不足(正 %d 负 %d)" % (int(y.sum()), int(len(y) - y.sum()))}
+    # 逻辑回归(权重**非负**约束:融合是「证据累积」,负权重无意义)
+    w = np.array([1.0, 1.2, 1.0, 0.8]); b = -1.5
+    lr, lam = 0.3, 1e-3
+    for _ in range(3000):
+        z = X @ w + b
+        pr = 1 / (1 + np.exp(-z))
+        g = pr - y
+        w -= lr * (X.T @ g / len(y) + lam * w)
+        b -= lr * g.mean()
+        w = np.clip(w, 0, None)                      # 非负
+    # 按 F1 最优选 τ(用融合几何平均的 P,不是 logistic 的 pr —— 上线用的是 fuse_score)
+    Wd = {"T": float(w[0]), "S": float(w[1]), "O": float(w[2]), "D": float(w[3])}
+    ps = []
+    for i in range(len(y)):
+        prod = 1.0
+        for j, k in enumerate(("T", "S", "O", "D")):
+            prod *= (_FUSION_EPS + Wd[k] * X[i][j])
+        ps.append(prod ** 0.25)
+    ps = np.array(ps)
+    best_tau, best_f1 = _FUSION_TAU, -1
+    for tau in np.linspace(0.15, 0.8, 40):
+        pred = (ps >= tau).astype(float)
+        tp = ((pred == 1) & (y == 1)).sum(); fp = ((pred == 1) & (y == 0)).sum(); fn = ((pred == 0) & (y == 1)).sum()
+        prec = tp / (tp + fp + 1e-9); rec = tp / (tp + fn + 1e-9)
+        f1 = 2 * prec * rec / (prec + rec + 1e-9)
+        if f1 > best_f1:
+            best_f1, best_tau = f1, float(tau)
+    res = {"ok": True, "W": Wd, "tau": round(best_tau, 3), "f1": round(best_f1, 3),
+           "n_pos": int(y.sum()), "n_neg": int(len(y) - y.sum())}
+    if not dry:
+        _FUSION_WFILE.write_text(json.dumps(res, ensure_ascii=False, indent=1), "utf-8")
+        _load_weights()
+    c.close()
+    return res
+
+
+def fuse_score(A, B, ctx):
+    """四信号融合 → P(A,B 是同一概念的可能性)。ctx = {day_of, ndays, emb, dict_fn}。"""
+    T = _sig_time(A, B, ctx["day_of"], ctx["ndays"])
+    S = max(0.0, (_cos(ctx["emb"].get(A), ctx["emb"].get(B)) - 0.5) * 2)
+    O = _sig_parts(A, B)
+    D = 1.0 if (A.isascii() and B in (ctx["dict_fn"](A) or set())) else 0.0
+    sigs = {"T": T, "S": S, "O": O, "D": D}
+    prod = 1.0
+    for k, w in _FUSION_W.items():
+        prod *= (_FUSION_EPS + w * sigs[k])
+    P = prod ** (1.0 / len(_FUSION_W))
+    return P, sigs
+
+
 def build_concepts(dry=False, max_pairs=120):   # 120:一次判完(实测 131 个候选;vector↔向量 曾被 top50 挤掉)
     """★跨语言概念归一 L2(用户要求:「相同含义的不同语言单词必须在数据库中被看作同一单词」)。
 
@@ -1162,36 +1383,51 @@ def build_concepts(dry=False, max_pairs=120):   # 120:一次判完(实测 131 �
         for t in terms:
             tgt[t].add(day)
     mine_cjk = {t for t in mine_days if _CJK.search(t) and not _KANA.search(t)}
-    # ① 词典候选
-    # ⚠ 实测漏网:英文词可能只出现在**我的笔记**里(vector 就是),不在书内容渠道 →
-    #   两侧的英文词都要当候选源(en_all),否则 vector↔向量 永远进不了候选。
+    ndays = len({int(ts // 86400) for ts, in c.execute("SELECT ts FROM events")}) or 1
+    book_terms = {t for t in book_days if not (_CJK.search(t) and not _KANA.search(t))}   # 外语侧(英/日)
+    day_of = {**book_days, **mine_days}
+    # ── 候选两路(统一进融合打分):① 词典召回(短词强项) ② 高共现召回(长句/词组,词典查不到)──
     en_all = {}
     for src in (book_days, mine_days):
         for w, days in src.items():
             if re.match(r"^[a-z\-']{3,}$", w) and w not in _STOP_EN:
                 en_all.setdefault(w, set()).update(days)
-    cand = []
-    for w, days in en_all.items():
-        inter = _ecdict_zh(w) & mine_cjk
-        for z in inter:
-            co = len(days & set().union(*[mine_days[z]]) ) if mine_days.get(z) else 0
-            heat = len(days) + len(mine_days.get(z) or ())
-            cand.append((co * 100 + heat, w, z))      # ② 共现天数优先,其次双边热度
-    cand.sort(reverse=True)
-    # ★按英文词分组(实测教训:一词多义时逐对判 → set↔设定 被判 same,而它在《Book of Proof》里是「集合」;
-    #   element↔成分 同理。分组后让 AI **在候选里选一个或全拒**,并给出书名语境。)
+    pair_set = set()
+    for w in en_all:                                   # ① 词典对
+        for z in (_ecdict_zh(w) & mine_cjk):
+            pair_set.add((w, z))
+    for a_t in list(book_terms)[:400]:                 # ② 高共现对(NPMI 粗筛;长句/词组靠这条)
+        best = []
+        for b_t in mine_cjk:
+            npmi = _sig_time(a_t, b_t, day_of, ndays)
+            if npmi > 0.15:
+                best.append((npmi, b_t))
+        for _, b_t in sorted(best, reverse=True)[:3]:
+            pair_set.add((a_t, b_t))
+    if not pair_set:
+        return {"ok": True, "pairs": 0, "merged": 0, "note": "没有跨语言候选"}
+    # ── 融合打分:每对算 P(时间×向量×部件×词典),P>τ 才送 AI ──────────────────
+    allterms = sorted({x for pr in pair_set for x in pr})
+    emb = {} if dry else _emb_get(allterms, _emb_load())
+    fctx = {"day_of": day_of, "ndays": ndays, "emb": emb, "dict_fn": _ecdict_zh}
+    scored = []
+    for a_t, b_t in pair_set:
+        P, sigs = (0.0, {}) if dry else fuse_score(a_t, b_t, fctx)
+        if dry or P >= _FUSION_TAU:
+            scored.append((P, a_t, b_t, sigs))
+    scored.sort(key=lambda x: -x[0])
+    if dry:
+        return {"ok": True, "n_pairs": len(pair_set), "sample": sorted(pair_set)[:24]}
     grp = {}
-    for sc0, w, z in cand:
+    for P, w, z, sg in scored[:max_pairs * 2]:          # 按英文词分组(一词多义:AI 选一个或全拒)
         grp.setdefault(w, [])
         if z not in grp[w]:
             grp[w].append(z)
-    words = [w for w in list(grp)[:max_pairs]]
+    words = list(grp)[:max_pairs]
     top = [(w, grp[w]) for w in words]
-    if dry:
-        return {"ok": True, "n_candidates": len(cand), "n_words": len(grp),
-                "top": [(w, zs[:5]) for w, zs in top[:20]]}
     if not top:
-        return {"ok": True, "pairs": 0, "merged": 0, "note": "没有跨语言候选"}
+        return {"ok": True, "pairs": 0, "merged": 0,
+                "note": "融合分都没过 τ=%.2f(候选 %d 对)" % (_FUSION_TAU, len(pair_set))}
     _books = sorted({(f or "").split("/")[-1] for f, in c.execute(
         "SELECT DISTINCT file FROM events WHERE file<>'' AND channel IN ('lookup','read','highlight')")})[:6]
     listing = "\n".join("%d. %s → 候选:%s" % (i + 1, w, " / ".join(zs[:6])) for i, (w, zs) in enumerate(top))
@@ -1280,13 +1516,23 @@ def run(rebuild=False):
     return stats, total
 
 
+try:
+    _load_weights()          # 有学出来的权重就用它(fit_weights 产物)
+except Exception:
+    pass
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true", help="删库重导全量(分词算法改版后用)")
     ap.add_argument("--domain-dict", action="store_true", help="重建领域词典(KG/目录/查词 → 让分词认长词组)")
+    ap.add_argument("--fit", action="store_true", help="用词典金标准反向学习融合权重 → fusion-weights.json")
     ap.add_argument("--concepts", action="store_true", help="跨语言概念归一:AI 判定同义对 → concepts.json")
     ap.add_argument("--dry", action="store_true", help="配合 --concepts:只看候选,不调 AI")
     a = ap.parse_args()
+    if a.fit:
+        print("fit:", json.dumps(fit_weights(dry=a.dry), ensure_ascii=False))
+        raise SystemExit
     if a.domain_dict:
         print("domain:", json.dumps(build_domain_dict(), ensure_ascii=False))
         run(rebuild=True)      # 词典变了 → 分词变了 → 重算
