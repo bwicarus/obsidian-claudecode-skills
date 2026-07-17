@@ -515,6 +515,12 @@ def _creation_add(uid, kind, brief, query=None, content=None, ref=None, anchor=N
     uid = str(uid or "")
     if not uid or not kind:
         return None
+    try:   # 沙盒测试产物不入册(否则测试越勤,真实学习记忆被挤出 40 条环越狠;实测已混入「演示小测」等)
+        _rf = str(((ref or {}).get("file")) or ((anchor or {}).get("file")) or "")
+        if "/.sandbox/" in _rf or _rf.startswith("资源/uploads/.sandbox/"):
+            return None
+    except Exception:
+        pass
     cid = "c_" + format(int(time.time()), "x") + "_" + os.urandom(2).hex()
     with _creations_lock:
         lst = _creations_load(uid)
@@ -649,8 +655,9 @@ def _save_check_report(uid, name, file_rel, report, score="", src_page=None, loo
             final = f"{name} ({i})"
         import hashlib
         rid = hashlib.sha1(f"{final}|{int(time.time())}".encode("utf-8")).hexdigest()[:8]
+        _sb = "/.sandbox/" in (file_rel or "")   # 沙盒测试报告:照存(工具测试要能读到)但打标,不当「最近一份」
         lst.append({"id": rid, "name": final, "file": file_rel or "", "score": score or "",
-                    "report": report, "src_page": (int(src_page) if src_page else None),
+                    "report": report, "src_page": (int(src_page) if src_page else None), "sandbox": _sb,
                     "lookups": (lookups[:8] if isinstance(lookups, list) else None), "ts": int(time.time())})
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
@@ -1620,7 +1627,8 @@ def _find_check_report(uid, name):
         return None, {"error": "还没有任何练习纸检查报告(用户做完自制练习纸点『让 AI 检查』后才会生成)"}
     name = (name or "").strip()
     if not name:
-        return lst[-1], None
+        real = [x for x in lst if not x.get("sandbox")]   # 「最近一份」跳过沙盒测试报告(防测试卷顶掉真实成绩)
+        return (real[-1] if real else lst[-1]), None
     cand = [x for x in lst if x.get("id") == name or name == (x.get("name") or "")]
     if not cand:
         cand = [x for x in lst if name in (x.get("name") or "") or (x.get("name") or "") in name]
@@ -3493,9 +3501,18 @@ def _t_save_intent_tool(args, ctx):
         return {"error": "要 name(短名)和 instruction(这个工具做什么,写清楚步骤与产出)"}
     TR.RECIPES_DIR.mkdir(parents=True, exist_ok=True)
     _new = not (TR.RECIPES_DIR / (name + ".json")).exists()
+    if not _new and not args.get("overwrite"):   # 撞名拒绝静默覆盖(审查:一次好心铸造可毁掉精心调好的工具)
+        return {"error": "已有同名工具《%s》。要覆盖就把选择权交给用户:确认后再调我并带 overwrite:true,"
+                         "或者换个名字。" % name}
+    if not _new:
+        TR._recipe_snapshot(name)   # 覆盖前快照进 _history(可回滚)
     rec = {"name": name, "desc": instr[:80], "kind": "intent", "instruction": instr[:2000],
-           "origin": "", "route": "", "partial": False, "calls": []}
+           "origin": "", "route": "", "partial": False, "calls": [],
+           "inputs": {}, "owner": str((ctx or {}).get("_uid") or ""),
+           "created": int(time.time()), "updated": int(time.time())}
     (TR.RECIPES_DIR / (name + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+    TR._extract_inputs_async(name, instr)   # 参数槽后台补写(不阻塞铸造)
+    _sys_cache_reset()   # 已存工具清单在系统提示静态段里
     return {"已保存": name, "新建" if _new else "覆盖": True,
             "note": "已铸成**重新生成型**工具《%s》(工具库/列表可见)。运行=run_saved_task(name, adjust?)。"
                     "告诉用户已保存,并用一两句话说明它运行时会怎么做。" % name}
@@ -3516,9 +3533,13 @@ def _t_run_saved_task(args, ctx):
     # ★intent 型(重新生成):不回放字面轨迹——重新起 CLI,指令=原意图+本次调整+当前上下文。
     #   (用户点破:10题工具要15题、换页出新题,只有"AI 重新在场"才成立;那时 AI 的上下文=一次全新造纸会话。)
     if rec.get("kind") == "intent":
-        adjust = args.get("adjust") or args.get("params") or args.get("source") or ""
-        if isinstance(adjust, dict):
-            adjust = json.dumps(adjust, ensure_ascii=False)
+        adjust = args.get("adjust") or ""
+        _pv = args.get("params") or args.get("source") or ""
+        if isinstance(_pv, dict) and _pv:   # 参数槽(rec.inputs)结构化注入,比自由文本稳(审查:inputs 原是死字段)
+            adjust = ("本次参数:" + ";".join("%s=%s" % (k, v) for k, v in list(_pv.items())[:6]) +
+                      ("。" + str(adjust).strip() if str(adjust).strip() else ""))
+        elif _pv and not adjust:
+            adjust = _pv
         adjust = str(adjust).strip()
         rr = _resolve("paper", str(ctx.get("uid") or ctx.get("_uid") or ""))
         route = (rec.get("route") or "").strip()
@@ -3541,12 +3562,20 @@ def _t_run_saved_task(args, ctx):
                  "在**当前上下文**执行:先读当前页,内容基于当前页**重新生成**(不要照搬任何旧题面);"
                  "数量/难度/形式按本次调整优先。")
         return _bg_task("agent", {"instruction": instr, "backend": rr["backend"],
-                                  "model": rr["variant"], "effort": rr["depth"]}, ctx)
+                                  "model": rr["variant"], "effort": rr["depth"],
+                                  "recipe": name}, ctx)   # recipe:收尾回写运行履历
     # 选数据源(合并型工具有 sources_menu)
     # trace 型(CLI 执行轨迹)→ 进程内回放整串工具(去壳),收集 client_action 给前端应用
     if rec.get("kind") == "trace":
         r = TR.run_trace(rec, {"file_rel": rel, "page": (ctx or {}).get("page"), "_uid": (ctx or {}).get("_uid")})
         cas = r.get("client_actions") or []
+        if not r.get("ok"):   # 回放失败要明说(去 silent),别让"已运行"骗过编排 AI(审查实锤:步步失败也报成功)
+            _f = "; ".join("%s(%s)" % (x.get("tool"), x.get("error")) for x in (r.get("failed") or [])[:3])
+            out = {"error": "工具《%s》回放失败:%s。如实告诉用户,别说已完成。" % (name, _f or "没有任何产出")}
+            if cas:
+                out["client_actions"] = cas
+                out["error"] += "(部分步骤有产出,页面上可能已出现部分内容)"
+            return out
         out = {"已运行": name, "silent": True}
         if len(cas) == 1:
             out["client_action"] = cas[0]
@@ -3871,10 +3900,34 @@ _ORCH_DROP = {"page_new", "page_add", "page_show"}
 _AGENT_TASKS = {"do_task", "make_paper", "read_check_report", "run_saved_task"}   # run_saved_task 的 intent 分支返回 task_id → 卡内 trackCliTask
 
 
+def _recipes_prompt_line():
+    """已存工具清单(注入系统提示;审查实锤:不注入的话 AI 连『有没有』都不知道,复用入口是断的)。"""
+    try:
+        import task_runtime as TR
+        recs = TR.list_recipes()
+        if not recs:
+            return ""
+        rows = []
+        for r in recs[:20]:
+            gist = str(r.get("instruction") or r.get("desc") or "")[:60]
+            rows.append("- 《%s》(%s)%s" % (r.get("name"), r.get("kind") or "?", (" — " + gist) if gist else ""))
+        return ("\n\n★已保存的工具(用户铸造的成品,各自带已验证的执行路线):\n" + "\n".join(rows) +
+                "\n用户的要求与某个已存工具的意图相符 → **优先 run_saved_task 运行它**(可带 adjust 传本次调整),"
+                "别从头重新编排;不确定就先 list_saved_tasks 看详情。")
+    except Exception:
+        return ""
+
+
+def _sys_cache_reset():
+    global _SYS_STATIC_CACHE
+    _SYS_STATIC_CACHE = None
+
+
 def _sys_prompt(ctx):
     _uid0 = ctx.get("_uid") or ctx.get("uid") or ""
     # 140:工具说明支持 per-user 覆盖(详情窗里改 → 这里就是它进 AI 的地方)
     cat = "\n".join(f"- {n}: {_tp(_uid0, n, 'desc', d)}" for n, (d, _) in TOOLS.items() if n not in _ORCH_DROP)
+    cat += _recipes_prompt_line()   # 已存工具目录(在 _SYS_STATIC_CACHE 里;保存/删除配方时须 _sys_cache_reset)
     _off = int(ctx.get("page_offset") or 0)   # PDF页 - 印刷页;给 AI 看的页码一律转成书上印刷页(跟用户一致)
     vis = ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])
     meta = {"book": ctx.get("book_name"), "当前可见页": [int(p) - _off for p in vis if p],

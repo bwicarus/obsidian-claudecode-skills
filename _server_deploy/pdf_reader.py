@@ -1237,12 +1237,16 @@ def pdf_api_recipes():
             calls = [{"tool": c.get("tool"),
                       "brief": json.dumps(c.get("args") or {}, ensure_ascii=False)[:200]}
                      for c in (d.get("calls") or [])][:30]
+            _runs = d.get("runs") or []
             out.append({"name": d.get("name") or f.stem, "desc": d.get("desc") or "",
                         "kind": d.get("kind") or ("paper" if d.get("page") or d.get("flow") else ""),
                         "instruction": d.get("instruction") or "", "origin": d.get("origin") or "",
                         "route": d.get("route") or "", "partial": bool(d.get("partial")),
                         "anchor_page": d.get("anchor_page"),
                         "sources": list((d.get("sources") or {}).keys()) or list((d.get("sources_menu") or {}).keys()),
+                        "inputs": (d.get("inputs") or {}),
+                        "n_runs": len(_runs), "last_ok": (_runs[-1].get("ok") if _runs else None),
+                        "last_run": (_runs[-1].get("ts") if _runs else None),
                         "flow_ops": [list(x.keys())[0] for x in (d.get("flow") or []) if isinstance(x, dict)][:20],
                         "calls": calls})
     except Exception:
@@ -1258,10 +1262,13 @@ def pdf_api_recipe_delete():
     name = _re.sub(r"[^\w一-鿿-]", "", str((request.get_json(silent=True) or {}).get("name") or ""))[:60]
     if not name:
         return jsonify({"ok": False, "error": "缺 name"}), 400
-    p = TR.RECIPES_DIR / (name + ".json")
-    if not p.exists():
+    if not TR.recipe_trash(name):   # 删除=移入回收站(_trash,30 天),不再直接 unlink(审查:误删无回滚)
         return jsonify({"ok": False, "error": "没有这个工具"}), 404
-    p.unlink()
+    try:
+        import assistant as A
+        A._sys_cache_reset()
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
@@ -1276,12 +1283,19 @@ def pdf_api_recipe_edit():
     if not name or not p.exists():
         return jsonify({"ok": False, "error": "没有这个工具"}), 404
     try:
+        TR._recipe_snapshot(name)   # 改前快照(可回滚)
         d = json.loads(p.read_text("utf-8"))
         if isinstance(b.get("desc"), str):
             d["desc"] = b["desc"][:200]
         if isinstance(b.get("instruction"), str) and b["instruction"].strip():
             d["instruction"] = b["instruction"][:2000]
+        d["updated"] = int(__import__("time").time())
         p.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+        try:
+            import assistant as A
+            A._sys_cache_reset()
+        except Exception:
+            pass
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:120]}), 500
@@ -1366,7 +1380,20 @@ def pdf_api_run_event():
     shots = b.get("shots")   # 检查时前端带来的整页渲染截图(所见即所得)→ 暂存给 _check_page 用
     if isinstance(shots, list) and shots:
         TR.set_check_shots(rid, shots)
-    return jsonify(TR.advance(rid, ev))
+    res = TR.advance(rid, ev)
+    # ★检查按钮永不死:run 过期/已终态时(纸是隔天写完的常态),按纸 sidecar 复活一个 run 再检查
+    if ev == "check" and (not res.get("ok") or res.get("status") in ("cancelled", "done", "error")):
+        fr = (b.get("file") or "").strip()
+        up = (b.get("upage") or "").strip()
+        if fr and up:
+            rv = TR.revive_check(fr, up, session.get("user_id"))
+            if rv.get("ok"):
+                rid2 = rv["rid"]
+                if isinstance(shots, list) and shots:
+                    TR.set_check_shots(rid2, shots)
+                res = TR.advance(rid2, ev)
+                res["rid"] = rid2   # 前端把纸上的 run_id 换成新的
+    return jsonify(res)
 
 
 @bp.route("/api/run-status")

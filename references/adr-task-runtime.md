@@ -276,3 +276,35 @@ instruction——都带被删语义;prompt 声明"字符串参数(标题/文案)
 - 验证结论:publish → SSE → iframe 建纸带块渲染,端到端实测通。⚠ 测试时手搓 client_action 载荷
   注意 **paper 是纸型字符串**('exam'),不是 dict——传 dict 曾致 paper.spec `PAPERS.get(dict)` 500
   (已加防御:非 str 落默认纸型),且此前多轮"纸没出现"的假失败全是这个假载荷问题,链路一直是通的。
+
+## §10 体系加固批(2026-07-17,三视角审计后用户拍板"除学习闭环全修")
+
+**可靠性**:① 检查按钮永不死——`revive_check(file,upage,uid)` 按纸 sidecar 重建 free run
+(run 三种死法:done 终态早退/waiting 1h 判 cancelled/7 天 GC;纸是隔天写完的常态),
+run-event 收到 check 撞死 run 时自动复活并回新 rid(前端 `_upRunResp` 换绑);checking 卡超
+5 分钟(`state.check_since`)允许重触发(批改线程随重启死掉的自愈)。② run_trace「成功」有定义:
+per-step failed 清单+生成步零产出=失败,run_saved_task 去 silent 明说;`_run_sources` 空结果
+fail-fast 不铺 0 题纸。③ CLI 重试闸门看副作用:steps 有写类工具或 _CA_SINK 非空 → 按部分成功
+收尾,不盲目换后端全量重跑(防双纸/双高亮)。④ 判分:结果卡「↻ 重判」(event=check:__recheck__
+→ 复判指令重截图);shots 缺页回退服务端拼图并标注(原静默漏判整页)。
+
+**持久层**:vtask 落盘 `state/cli-tasks/<tid>.json`(_vtask_set 关键节点写/读回退;铸造窗口
+30min→30 天);启动 `_cli_tasks_boot_scan`:非终态标 error+按 pid(校验 cmdline 含 claude/codex)
+清孤儿 CLI;前端 trackCli 连续 8 次 404 即收尾报"任务丢失"(原空转 15 分钟)。
+
+**生命周期**:① 已存工具清单注入——`_recipes_prompt_line()` 进 _sys_prompt 静态段
+(保存/删除/编辑处 `_sys_cache_reset()`),voice CLI prompt 同款注入(复用入口打通)。
+② 运行履历 `recipe_log_run`(runs[-20:]),run_saved_task 带 recipe 名,工具库卡片徽标
+「跑过 N 次·上次成功/失败|未验证」。③ 参数化:`_extract_inputs`(gemini 抽参数槽)
+**后台补写**(_extract_inputs_async,~9s 不阻塞保存),run_saved_task 接 params dict 结构化注入,
+tools.html 有槽渲染表单、无槽退回自由文本;trace 型**参数重绑**(rebind:args 剥 file、page 存
+相对锚页偏移,run_trace 按当前 ctx 还原——机械回放可搬运,旧配方无 rebind 标不受影响)。
+④ 版本/回收站:写路径先 `_recipe_snapshot`(_history/<名>/,留 10),删除= `recipe_trash`
+(_trash/,30 天),owner/created/updated 字段;save_intent_tool 撞名默认拒绝(overwrite:true 才盖)。
+
+**记忆卫生**:沙盒产物过滤——`_creation_add` 单点拦 ref/anchor.file 含 .sandbox 的产物;
+检查报告照存但打 `sandbox:true` 标,`_find_check_report` 默认「最近一份」跳过沙盒
+(防测试卷顶掉真实成绩);cli_task 入册补 anchor.file。
+
+学习闭环三件(错题台账/出题偏置/mastery·KG 回写)用户明确跳过,审计原文见 workflow
+wf_7cbd1aa1(learning 视角),日后要做时从那读起。

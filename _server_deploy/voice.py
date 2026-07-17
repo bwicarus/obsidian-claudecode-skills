@@ -823,6 +823,67 @@ def _undo_do(uid=None, owner=None):
         return {"ok": False, "error": str(e)[:120]}
 
 
+_CLI_TASK_DIR = Path("/home/bwicarus/claude/state/cli-tasks")   # vtask 落盘:重启不蒸发 + 铸造窗口 30 天(审查实锤:原先内存 30min)
+
+
+def _vtask_persist(tid):
+    """把 vtask 快照落盘(轻:只在关键节点调——status/steps 变化;不含 base64 类大字段)。"""
+    try:
+        with _vtasks_lock:
+            v = _vtasks.get(tid)
+            if not v:
+                return
+            snap = {k: v.get(k) for k in ("id", "kind", "status", "step", "speak", "client_actions",
+                                          "result", "error", "ts", "steps", "instruction", "pid", "recipe")}
+        _CLI_TASK_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _CLI_TASK_DIR / (tid + ".json.tmp")
+        tmp.write_text(json.dumps(snap, ensure_ascii=False, default=str), "utf-8")
+        tmp.replace(_CLI_TASK_DIR / (tid + ".json"))
+    except Exception:
+        pass
+
+
+def _vtask_disk_get(tid):
+    try:
+        return json.loads((_CLI_TASK_DIR / (tid + ".json")).read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _cli_tasks_boot_scan():
+    """webapp 启动扫描:上一进程留下的非终态任务 → 标 error(否则前端空转 15 分钟才认输);
+    记录的 CLI 子进程还活着且确是 claude/codex → 已成孤儿,杀掉(防继续烧额度)。顺手清 30 天前的老文件。"""
+    try:
+        if not _CLI_TASK_DIR.exists():
+            return
+        now = time.time()
+        for f in _CLI_TASK_DIR.glob("vt*.json"):
+            try:
+                if now - f.stat().st_mtime > 30 * 86400:
+                    f.unlink()
+                    continue
+                d = json.loads(f.read_text("utf-8"))
+                if d.get("status") in ("done", "error"):
+                    continue
+                pid = d.get("pid")
+                if pid:
+                    try:
+                        cmdl = Path("/proc/%d/cmdline" % int(pid)).read_bytes().decode(errors="replace")
+                        if "claude" in cmdl or "codex" in cmdl:
+                            os.kill(int(pid), 9)
+                    except Exception:
+                        pass
+                d["status"], d["error"] = "error", "服务重启,任务已中断(重发一次即可)"
+                f.write_text(json.dumps(d, ensure_ascii=False, default=str), "utf-8")
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+_cli_tasks_boot_scan()   # import 即扫:上一进程的未完任务标 error + 清孤儿 CLI
+
+
 def _vtask_new(kind: str) -> str:
     global _vtask_seq
     with _vtasks_lock:
@@ -840,11 +901,14 @@ def _vtask_set(tid, **kw):
     with _vtasks_lock:
         if tid in _vtasks:
             _vtasks[tid].update(kw)
+    if any(k in kw for k in ("status", "steps", "result", "error", "pid", "instruction", "recipe")):
+        _vtask_persist(tid)   # 关键节点落盘(step 心跳类不写,防高频 IO)
 
 
 def _vtask_get(tid):
     with _vtasks_lock:
-        return dict(_vtasks.get(tid) or {})
+        v = dict(_vtasks.get(tid) or {})
+    return v or _vtask_disk_get(tid)   # 内存 miss(重启/30min TTL)→ 读盘:铸造窗口变 30 天
 
 
 def _pdf_mod():
@@ -1208,6 +1272,7 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
     _prose = ""  # 自上一个工具调用以来的散文(=决定下一步的思路)→ 随步存 rationale(节选保存时当"调用开端",用户设计)
     pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", env=env)
+    _vtask_set(tid, pid=pr.pid)   # 落盘:重启扫描据此清孤儿 CLI(防继续烧额度)
     t0 = time.time()
     for line in pr.stdout:
         if time.time() - t0 > _AGENT_TIMEOUT:
@@ -1351,9 +1416,18 @@ def _task_agent(tid, params, ctx, base):
     if len(instr) < 3:
         _vtask_set(tid, status="error", error="没听清要做什么")
         return
+    _vtask_set(tid, instruction=instr, recipe=(params.get("recipe") or ""))   # 起点即落盘(铸造/履历都要)
     _vtask_set(tid, step="交给助手规划…")
     # 语境:worker 不在浏览器里,得把「用户现在读哪本书第几页/选中了什么」显式喂给它
     ctx_lines = []
+    try:   # 已存工具清单:CLI 编排时知道有哪些已验证路线可借(审查:复用入口原是断的)
+        import task_runtime as TR
+        _rl = TR.list_recipes()
+        if _rl:
+            ctx_lines.append("用户已保存的工具(各自带已验证路线):" + "、".join("《%s》" % r["name"] for r in _rl[:10]) +
+                             "。若本次要求与某工具意图相符,可参考其做法;完整运行它则用 assistant_call_tool 调 run_saved_task。")
+    except Exception:
+        pass
     if ctx.get("file_rel"):
         ctx_lines.append(f"用户当前打开的书:{ctx.get('book_name') or ctx['file_rel']}(file 参数用 `{ctx['file_rel']}`)")
     if ctx.get("page"):
@@ -1416,17 +1490,33 @@ def _task_agent(tid, params, ctx, base):
     except Exception as e:
         sys.stderr.write(f"[agent] {backend} 异常({e}),降级 {alt}\n")   # 进程起不来/崩了 → 往下走降级
     if not answer:
-        steps.clear()
-        _vtask_set(tid, step="换个助手重试…")
-        try:
-            answer = _agent_run_cli(alt, prompt, sysp, tid, steps)   # 兜底后端用它自己的默认档
-        except _AgentTimeout:
-            _vtask_set(tid, status="error", error="任务超时")
-            return
-        except Exception as e:
-            _vtask_set(tid, status="error", error=str(e)[:140])
-            return
+        # ★重试闸门看副作用,不只看 answer(审查实锤:第一轮的 client_action 已被前端即时应用、
+        #   写操作已落盘——盲目全量重跑=两张一样的纸/双份高亮)。有写痕迹 → 按部分成功收尾,不重跑。
+        _WRITE_STEPS = {"page_show", "page_new", "page_add", "page_add_many", "highlight",
+                        "add_highlight", "auto_highlight", "make_anki", "make_anki_card",
+                        "save_note", "write_note", "start_dictation"}
+        _side = [x["name"] for x in steps if x.get("name") in _WRITE_STEPS] or                 (['client_action'] if _CA_SINK.get(tid) else [])
+        if _side:
+            _flow_txt0, _ = _flow_summary(steps)
+            answer = "任务主体已执行(%s),但助手没有给出收尾说明。" % (_flow_txt0 or "、".join(_side[:4]))
+        else:
+            steps.clear()
+            _vtask_set(tid, step="换个助手重试…")
+            try:
+                answer = _agent_run_cli(alt, prompt, sysp, tid, steps)   # 兜底后端用它自己的默认档
+            except _AgentTimeout:
+                _vtask_set(tid, status="error", error="任务超时")
+                return
+            except Exception as e:
+                _vtask_set(tid, status="error", error=str(e)[:140])
+                return
     if not answer:
+        try:
+            if params.get("recipe"):
+                import task_runtime as TR
+                TR.recipe_log_run(params["recipe"], {"ts": int(time.time()), "ok": False})
+        except Exception:
+            pass
         _vtask_set(tid, status="error", error="助手没给出结果")
         return
     _flow_txt, _lookups = _flow_summary(steps)   # ★用户设计:流程摘要(查找类带实际参数)→ 进 CLI 返回,供显示 + AI 复用查询
@@ -1436,7 +1526,8 @@ def _task_agent(tid, params, ctx, base):
             raise RuntimeError("off")
         A._creation_add(str((ctx or {}).get("_uid") or ""), "cli_task",
                         "后台任务:" + (_flow_txt or instr[:60]).replace("\n", " ")[:160],
-                        content=(answer or "")[:4000])
+                        content=(answer or "")[:4000],
+                        anchor={"file": str((ctx or {}).get("file_rel") or "")})   # 带上书 → 沙盒测试任务不入册(_creation_add 统一拦)
     except Exception:
         pass
     _res = {"answer": answer, "tools": [x["name"] for x in steps]}
@@ -1444,6 +1535,12 @@ def _task_agent(tid, params, ctx, base):
         _res["flow"] = _flow_txt
     if _lookups:
         _res["lookups"] = _lookups
+    try:   # 运行履历:工具发起的任务 → 回写配方 runs[-20:](工具库徽标「运行N次·上次成功」)
+        if params.get("recipe"):
+            import task_runtime as TR
+            TR.recipe_log_run(params["recipe"], {"ts": int(time.time()), "ok": True})
+    except Exception:
+        pass
     _vtask_set(tid, status="done", speak=answer[:200], steps=list(steps), instruction=instr,   # instruction:保存工具判型用(生成型→存意图而非字面轨迹)
                client_actions=_CA_SINK.pop(tid, []),   # ★ 后台 agent 内部工具产生的 client_action(如建纸)→ 前端应用
                result=_res)

@@ -778,7 +778,15 @@ window._favOpenPicker = function () {
     var tt = document.createElement('span'); tt.className = 'up2-rr-tt'; tt.textContent = '🔍 检查结果';
     var sp = document.createElement('span'); sp.className = 'up2-rr-sp';
     var tog = document.createElement('button'); tog.type = 'button'; tog.className = 'up2-rr-tog'; tog.textContent = collapsed ? '展开 ▸' : '收起 ▾';
-    hd.appendChild(tt); hd.appendChild(sp); hd.appendChild(tog);
+    var rej = document.createElement('button'); rej.type = 'button'; rej.className = 'up2-rr-tog'; rej.textContent = '↻ 重判';
+    rej.title = '对判分有异议/改了答案 → 重新截图、更仔细地复判';
+    rej.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var host = ov.closest ? ov.closest('.pdf-upage, .page-wrap') : null;
+      var rec2 = host && host.__upRec;
+      if (rec2) _upRunEvent(rec2, 'check:__recheck__');
+    });
+    hd.appendChild(tt); hd.appendChild(sp); hd.appendChild(rej); hd.appendChild(tog);
     var bd = document.createElement('div'); bd.className = 'up2-rr-bd'; bd.innerHTML = bodyHtml;
     r.innerHTML = ''; r.appendChild(hd); r.appendChild(bd);
     tog.addEventListener('click', function (e) {
@@ -970,25 +978,33 @@ window._favOpenPicker = function () {
       });
     }, Promise.resolve()).then(function () { return shots; });
   }
+  function _upRunResp(rec, d) {   // 统一处理 run-event 响应:后端复活了 run(旧 rid 过期)→ 换绑新 rid
+    if (!d) return;
+    if (d.rid && d.rid !== rec.run_id) {
+      var old = rec.run_id; rec.run_id = d.rid;
+      try { var el = document.querySelector('[data-up-run="' + old + '"]'); if (el) el.setAttribute('data-up-run', d.rid); } catch (e) {}
+    }
+    if (d.hint) _upRunHint(rec, d.hint);
+  }
   function _upRunEvent(rec, ev) {
     if (!rec.run_id) return;
     try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
-    if (ev === 'check') {   // 检查:先截整页(所见即所得)再连截图一起发。★截图**加 5s 超时**:卡住也照发纯事件
+    if (ev === 'check' || ev.indexOf('check:') === 0) {   // 检查/复判:先截整页(所见即所得)再连截图一起发。★截图**加 5s 超时**:卡住也照发纯事件
       _upRunHint(rec, '正在截图检查…');   //   (后端回退服务端拼图)→ 绝不因截图挂住而"点检查没反应"(用户实测根因之一)。
       var _fired = false;
       function _fire(shots) {
         if (_fired) return; _fired = true;
-        var body = { rid: rec.run_id, event: ev };
+        var body = { rid: rec.run_id, event: ev, file: UP_FILE, upage: rec.id };   // file/upage:run 过期时后端按纸复活
         if (shots && shots.length) body.shots = shots;
         RC.reqJson('POST', '/pdf/api/run-event', body)
-          .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); }).catch(function () {});
+          .then(function (d) { _upRunResp(rec, d); }).catch(function () {});
       }
       setTimeout(function () { _fire(null); }, 5000);
       _upCaptureRunShots(rec).then(function (shots) { _fire(shots); }).catch(function () { _fire(null); });
       return;
     }
-    RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev })   // ⚠ 签名是 (method,url,body)
-      .then(function (d) { if (d && d.hint) _upRunHint(rec, d.hint); })
+    RC.reqJson('POST', '/pdf/api/run-event', { rid: rec.run_id, event: ev, file: UP_FILE, upage: rec.id })   // ⚠ 签名是 (method,url,body)
+      .then(function (d) { _upRunResp(rec, d); })
       .catch(function () {});
   }
   function _upRunHint(rec, txt) {

@@ -502,8 +502,11 @@ def _free_tick(run, event):
         return True
     if act == "check":
         if run.get("status") == "checking":
-            return False
+            if time.time() - float((run.get("state") or {}).get("check_since") or 0) < 300:
+                return False   # 正常批改中,防重触发
+            # 超 5 分钟还在 checking = 批改线程随进程重启死了 → 复位重来(否则永卡「正在检查…」)
         run["status"] = "checking"
+        run.setdefault("state", {})["check_since"] = time.time()
         run["hint"] = "正在检查…"
         _save(run)
         _push_run(run)
@@ -564,7 +567,11 @@ def _check_page(rid, prompt_hint=""):
         import assistant as A
         # #1:判分指令可在流程「检查·判分 AI」条里改(槽位 dictation_grade/main);
         #     本次 check 若带了 prompt_hint(按钮自定义)优先它,否则用用户设的判分指令。
-        _instr = (prompt_hint or "").strip() or A._tps(str(run.get("uid") or ""), "dictation_grade", "main")
+        _hint = (prompt_hint or "").strip()
+        if _hint == "__recheck__":   # 结果卡「↻ 重判」:重截图+更审慎的判分指令(识别抖动/改了答案后复判)
+            _hint = ("这是**复判**(用户对上次判分有异议或修改了作答)。请更仔细地逐空重新识别手写"
+                     "(潦草字先列候选再定),再判分;不确定的空在 note 里说明理由。")
+        _instr = _hint or A._tps(str(run.get("uid") or ""), "dictation_grade", "main")
         rel = run["file"]
         ap = P._safe_vault_path(rel)
         shots = _CHECK_SHOTS.pop(rid, None)               # 前端渲染的整页截图(所见即所得:题目+手写都在图上)
@@ -581,7 +588,23 @@ def _check_page(rid, prompt_hint=""):
             for pg in _run_pages(run):
                 page = int(pg.get("page") or 0)
                 s = by_page.get(page)
+                if not s:   # 该页没截到图(原先静默漏判整页)→ 回退服务端拼图,并在行里标注
+                    try:
+                        _blks = _blocks_of_page(run, pg.get("upage"))
+                        _rects = [b["rect"] for b in _blks if b.get("rect")]
+                        if _rects:
+                            _mg = 0.02
+                            _bx = [max(0.0, min(r[0] for r in _rects) - _mg), max(0.0, min(r[1] for r in _rects) - _mg),
+                                   min(1.0, max(r[2] for r in _rects) + _mg), min(1.0, max(r[3] for r in _rects) + _mg)]
+                            _png = P._figure_crop_png(ap, page, _bx, with_ink=True, rel=rel,
+                                                      strokes=P._page_ink_strokes(rel, page) or [])
+                            if _png:
+                                s = {"media_type": "image/png", "b64": base64.b64encode(_png).decode(),
+                                     "_synth": True}
+                    except Exception:
+                        s = None
                 if not s:
+                    lines.append("(第 %d 页没截到图,该页各空无法判分)" % page)
                     continue
                 images.append({"media_type": s.get("media_type", "image/jpeg"), "b64": s["b64"]})
                 imgno = len(images)
@@ -1004,12 +1027,16 @@ def list_recipes():
         for f in RECIPES_DIR.glob("*.json"):
             try:
                 d = json.loads(f.read_text("utf-8"))
+                _runs = d.get("runs") or []
                 out.append({"name": d.get("name") or f.stem,
                             "desc": d.get("desc") or "",
                             "kind": d.get("kind") or "",
                             "instruction": (d.get("instruction") or "")[:120],
                             "sources": list((d.get("sources") or {}).keys()) or list((d.get("sources_menu") or {}).keys()),
-                            "inputs": list((d.get("inputs") or {}).keys())})
+                            "inputs": list((d.get("inputs") or {}).keys()),
+                            "n_runs": len(_runs),
+                            "last_ok": (_runs[-1].get("ok") if _runs else None),
+                            "last_run": (_runs[-1].get("ts") if _runs else None)})
             except Exception:
                 pass
     except Exception:
@@ -1057,6 +1084,91 @@ def _flow_signature(flow, page_blocks):
     return hashlib.md5((_skel(flow) + "||" + kinds).encode()).hexdigest()[:16]
 
 
+def _recipe_snapshot(safe_name):
+    """写路径前快照旧版(state/recipes/_history/<name>/<ts>.json,留 10)——照 KG 回收站/卡片回滚的范式。"""
+    try:
+        src = RECIPES_DIR / (safe_name + ".json")
+        if not src.exists():
+            return
+        hd = RECIPES_DIR / "_history" / safe_name
+        hd.mkdir(parents=True, exist_ok=True)
+        (hd / ("%d.json" % int(time.time()))).write_text(src.read_text("utf-8"), "utf-8")
+        old = sorted(hd.glob("*.json"))
+        for f in old[:-10]:
+            f.unlink()
+    except Exception:
+        pass
+
+
+def recipe_trash(safe_name):
+    """删除=移入回收站(_trash,TTL 30 天),不再直接 unlink。返回 True=移了。"""
+    try:
+        src = RECIPES_DIR / (safe_name + ".json")
+        if not src.exists():
+            return False
+        td = RECIPES_DIR / "_trash"
+        td.mkdir(parents=True, exist_ok=True)
+        src.replace(td / ("%s-%d.json" % (safe_name, int(time.time()))))
+        now = time.time()
+        for f in td.glob("*.json"):
+            if now - f.stat().st_mtime > 30 * 86400:
+                f.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def recipe_log_run(name, entry):
+    """运行履历:往配方追加 runs[-20:](工具从「冻结定义」变「有履历的资产」,工具库显示徽标)。"""
+    try:
+        import re as _re
+        safe = _re.sub(r"[^\w\u4e00-\u9fff-]", "", str(name or ""))[:60]
+        f = RECIPES_DIR / (safe + ".json")
+        if not f.exists():
+            return
+        d = json.loads(f.read_text("utf-8"))
+        d.setdefault("runs", []).append(entry)
+        d["runs"] = d["runs"][-20:]
+        d["updated"] = int(time.time())
+        f.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+def _extract_inputs(text):
+    """轻 AI 从路线/意图抽**参数槽**(题数/难度/页数这类每次想调的量)→ rec['inputs']。
+    失败/没有可调项 → {}(运行侧退回自由文本 adjust)。"""
+    try:
+        import assistant as A
+        raw = (A._gemini_text(
+            "从下面这个学习工具的描述里,找出**用户每次运行时可能想调整的参数**(如题数、难度、页数、词数),"
+            '输出 JSON(没有就 {}):{"参数英文名":{"default":默认值,"desc":"中文说明(≤8字)"}},最多 4 个,别编造:\n'
+            + str(text)[:1200], max_tokens=300, think=False) or "")
+        import re as _re
+        m = _re.search(r"\{.*\}", raw, _re.S)
+        d = json.loads(m.group(0)) if m else {}
+        return {str(k)[:20]: {"default": v.get("default"), "desc": str(v.get("desc") or "")[:24]}
+                for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_inputs_async(safe_name, text):
+    """后台补写参数槽(gemini 一次 ~9s,别阻塞保存/铸造;写回时文件可能已删,静默放弃)。"""
+    def _work():
+        d = _extract_inputs(text)
+        if not d:
+            return
+        try:
+            f = RECIPES_DIR / (safe_name + ".json")
+            rec = json.loads(f.read_text("utf-8"))
+            rec["inputs"] = d
+            f.write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
+    threading.Thread(target=_work, daemon=True).start()
+
+
 def save_recipe(run, name, desc="", source_label="", source_spec=None):
     """把一次 run 冻成配方文件。同结构指纹已存在 → **合并**(只加一个数据源选项),否则新建。
     返回 {ok, name, merged}。"""
@@ -1082,13 +1194,17 @@ def save_recipe(run, name, desc="", source_label="", source_spec=None):
         except Exception:
             continue
         if d.get("sig") == sig and source_label and source_spec:
+            _recipe_snapshot(f.stem)
             d.setdefault("sources_menu", {})[source_label] = source_spec
+            d["updated"] = int(time.time())
             f.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
             return {"ok": True, "name": d.get("name"), "merged": True,
                     "hint": "已合并进已有工具「%s」,新增数据源「%s」" % (d.get("name"), source_label)}
     # 新建
+    _recipe_snapshot(safe)
     rec = {"name": safe, "desc": desc or ("一键" + safe), "sig": sig, "paper": run.get("paper") or "note",
-           "page": page_blocks, "flow": flow, "inputs": {}, "sources": {}}
+           "page": page_blocks, "flow": flow, "inputs": {}, "sources": {},
+           "owner": str(run.get("uid") or ""), "created": int(time.time()), "updated": int(time.time())}
     if source_label and source_spec:
         rec["sources_menu"] = {source_label: source_spec}
     (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
@@ -1164,13 +1280,18 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
                     "**别把其中的词当成要执行的动作**:\n" + _abstract_route(calls), max_tokens=200, think=False) or "").strip()[:200]
             except Exception:
                 origin = ""
+        _route = _abstract_route(calls)
+        _recipe_snapshot(safe)
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
                "origin": origin,
                "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
                "partial": bool(partial),   # 框选子集:原始意图是全量任务的,执行范围要以路线为准(否则会把用户框掉的步骤也做了)
-               "route": _abstract_route(calls),   # 指挥棒:成功路线的结构化抽象(用户设计)
+               "route": _route,   # 指挥棒:成功路线的结构化抽象(用户设计)
+               "inputs": {},   # 参数槽后台补写(_extract_inputs_async,~9s 不阻塞保存)
+               "owner": str(uid or ""), "created": int(time.time()), "updated": int(time.time()),
                "calls": calls[:30]}   # calls 留档备查,不用于回放
         (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
+        _extract_inputs_async(safe, (origin or str(instruction)[:400]) + "\n" + _route)
         return {"ok": True, "name": safe, "merged": False, "kind": "intent",
                 "hint": "已保存为**重新生成型**工具「%s」(运行时按原意图+当次调整,在当前页重新出内容)" % safe}
     import hashlib
@@ -1182,12 +1303,26 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
         except Exception:
             continue
         if d.get("sig") == sig and source_label and source_spec:
+            _recipe_snapshot(f.stem)
             d.setdefault("sources_menu", {})[source_label] = source_spec
+            d["updated"] = int(time.time())
             f.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
             return {"ok": True, "name": d.get("name"), "merged": True,
                     "hint": "已合并进「%s」,新增数据源「%s」" % (d.get("name"), source_label)}
+    # ★参数重绑(审查实锤:字面 args 冻着原书 file/原 page,换书回放会去读当年那页):
+    #   file 剥掉(回放时由当前 ctx 提供);page 存相对锚页偏移(rebind 标记,run_trace 按当前页还原)。
+    _anchor = int(anchor_page or 0)
+    rb_calls = []
+    for c in calls:
+        cc = {"tool": c["tool"], "args": dict(c.get("args") or {})}
+        cc["args"].pop("file", None)
+        if isinstance(cc["args"].get("page"), int) and _anchor:
+            cc["args"]["_page_off"] = cc["args"].pop("page") - _anchor
+        rb_calls.append(cc)
+    _recipe_snapshot(safe)
     rec = {"name": safe, "desc": desc or ("一键" + safe), "sig": sig, "kind": "trace",
-           "calls": calls}
+           "rebind": True, "owner": str(uid or ""), "created": int(time.time()), "updated": int(time.time()),
+           "calls": rb_calls}
     if source_label and source_spec:
         rec["sources_menu"] = {source_label: source_spec}
     (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
@@ -1198,21 +1333,41 @@ def run_trace(rec, ctx):
     """回放一个 trace 配方:按序**进程内**调 TOOLS[tool](args)(去壳,不走 MCP)。
     工具产生的 client_action(如建纸)收集起来返回给前端应用。返回 {ok, client_actions, last}。"""
     import assistant as A
-    cas, last = [], None
+    cas, last, failed = [], None, []
     tctx = {"file_rel": (ctx or {}).get("file_rel"), "page": (ctx or {}).get("page"),
             "_uid": (ctx or {}).get("_uid")}
+    _cur = int((ctx or {}).get("page") or 0)
     for c in (rec.get("calls") or []):
         fn = (A.TOOLS.get(c.get("tool")) or (None, None))[1]
         if not fn:
+            failed.append({"tool": c.get("tool"), "error": "工具不存在"})
             continue
         try:
-            res = fn(c.get("args") or {}, tctx) or {}
+            _args = dict(c.get("args") or {})
+            if rec.get("rebind"):   # 重绑配方:按当前上下文还原 file/page(可搬运的机械回放)
+                if "_page_off" in _args and _cur:
+                    _args["page"] = _cur + int(_args.pop("_page_off") or 0)
+                else:
+                    _args.pop("_page_off", None)
+            res = fn(_args, tctx) or {}
             last = res
+            if isinstance(res, dict) and res.get("error"):
+                failed.append({"tool": c.get("tool"), "error": str(res["error"])[:120]})
             if isinstance(res, dict) and res.get("client_action"):
                 cas.append(res["client_action"])
         except Exception as ex:
+            failed.append({"tool": c.get("tool"), "error": str(ex)[:120]})
             sys.stderr.write("[trace] %s 失败: %s\n" % (c.get("tool"), str(ex)[:80]))
-    return {"ok": True, "client_actions": cas, "last": last}
+    # 「成功」有定义(审查实锤:原先步步失败也报 ok:True,用户以为跑成了页面却空空):
+    #   有失败步就如实报;有生成步(page_*)却零 client_action = 没有任何产出,同样算失败。
+    _gensteps = any((c.get("tool") or "").startswith("page_") for c in (rec.get("calls") or []))
+    ok = not failed and not (_gensteps and not cas)
+    out = {"ok": ok, "client_actions": cas, "last": last, "n_actions": len(cas)}
+    if failed:
+        out["failed"] = failed[:5]
+    elif not ok:
+        out["failed"] = [{"tool": "page_show", "error": "没有产生任何页面动作(纸没建出来)"}]
+    return out
 
 
 def _run_sources(run, sources):
@@ -1233,7 +1388,10 @@ def _run_sources(run, sources):
             res = fn(spec.get("args") or {}, ctx) or {}
             val = res.get(spec["extract"]) if (isinstance(res, dict) and spec.get("extract")) else res
             run.setdefault("params", {})[into] = val
+            if not val:   # 空结果 fail-fast:别拿着空 words 铺一张 0 题的纸(审查实锤)
+                run["_source_empty"] = into
         except Exception as ex:
+            run["_source_empty"] = into
             sys.stderr.write("[recipe] 数据源 %s 失败: %s\n" % (spec.get("call"), str(ex)[:80]))
 
 
@@ -1274,6 +1432,8 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
         #   在跑 flow 前进程内直接调 TOOLS[工具],把结果填进 params[input名]。
         #   这就是"高亮听写/未掌握词听写"共用一个配方、只换数据源的实现(ADR §5.5)。
         _run_sources(run, rdef.get("sources") or (params or {}).get("sources") or {})
+        if run.pop("_source_empty", None):
+            return {"ok": False, "error": "数据源「%s」没取到内容(可能这页没有高亮/生词),没有铺纸" % rec_name}
         run["flow"] = flow
         run["paper"] = rdef.get("paper") or (params or {}).get("paper") or "note"
     _PROGRAMS[kind](run, "")
@@ -1284,6 +1444,38 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
     return {"ok": True, "rid": run["rid"], "hint": run.get("hint") or "",
             "n_pages": int(run.get("n_pages") or 1),
             "overflow": len(ov.get("pages") or [])}
+
+
+def revive_check(file_rel: str, upage: str, uid) -> dict:
+    """复活检查(死按钮救活):纸是永生的(sidecar 里 blocks/answer/paper 全有),run 却有三种死法
+    (done 终态早退 / waiting 1h 判 cancelled / 7 天 GC)——隔天写完点「让 AI 检查」就报已取消。
+    按纸上现成的 blocks 重建一个 free run(不重铺纸,直接 step=1 waiting),检查按钮永远可点。"""
+    import pdf_reader as P
+    it = next((x for x in P._upages_load(file_rel) if x.get("id") == upage), None)
+    if not it or not it.get("blocks"):
+        return {"ok": False, "error": "这张纸上没有可检查的内容"}
+    run = {
+        "rid": "r_" + uuid.uuid4().hex[:8],
+        "kind": "free", "uid": str(uid or ""),
+        "file": file_rel, "page": int(it.get("page") or 0), "upage": upage,
+        "status": "waiting", "step": 1, "state": {},
+        "params": {"blocks": it.get("blocks"), "paper": ((it.get("paper") or {}).get("kind") or "note"),
+                   "title": it.get("title") or ""},
+        "result": None, "hint": "", "created_at": int(time.time()), "revived": True,
+        "n_pages": 1, "pages_info": [{"upage": upage, "page": int(it.get("page") or 0)}],
+    }
+    with _lock:
+        _save(run)
+    try:
+        with P._upages_lock(file_rel):
+            items = P._upages_load(file_rel)
+            for x in items:
+                if x.get("id") == upage:
+                    x["run_id"] = run["rid"]
+            P._upages_save(file_rel, items)
+    except Exception:
+        pass
+    return {"ok": True, "rid": run["rid"]}
 
 
 def advance(rid: str, event: str) -> dict:

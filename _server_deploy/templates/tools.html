@@ -277,6 +277,10 @@
       var kd = document.createElement('span'); kd.className = 'tl-kind ' + (rec.kind || 'paper'); kd.textContent = kindLabel(rec.kind);
       hd.appendChild(nm); hd.appendChild(kd);
       if (rec.partial) { var pt = document.createElement('span'); pt.className = 'tl-kind trace'; pt.textContent = '节选'; hd.appendChild(pt); }
+      var rb = document.createElement('span'); rb.className = 'tl-kind ' + (rec.n_runs ? (rec.last_ok ? 'intent' : 'paper') : 'trace');
+      rb.textContent = rec.n_runs ? ('跑过 ' + rec.n_runs + ' 次 · 上次' + (rec.last_ok ? '成功' : '失败')) : '未验证';
+      rb.title = rec.last_run ? ('最近运行:' + new Date(rec.last_run * 1000).toLocaleString()) : '还没跑过——先 ▶ 测试一次';
+      hd.appendChild(rb);
       card.appendChild(hd);
       var intn = rec.origin || rec.instruction || rec.desc;
       if (intn) { var it = document.createElement('div'); it.className = 'tl-int'; it.innerHTML = '<b>意图</b> · ' + RC.esc(intn); card.appendChild(it); }
@@ -286,8 +290,40 @@
       var ops = document.createElement('div'); ops.className = 'tl-ops';
       function btn(txt, cls, fn) { var b = document.createElement('button'); b.className = 'tl-b' + (cls ? ' ' + cls : ''); b.textContent = txt; b.addEventListener('click', fn); ops.appendChild(b); }
       btn('▶ 测试', 'pri', function () {
-        var adj = prompt('本次调整(可空,如「15道题,难一点」「基于当前页」):') || '';
-        send('运行已保存的工具《' + rec.name + '》' + (adj.trim() ? ',本次调整:' + adj.trim() : ''));
+        var inp = rec.inputs || {};
+        var keys = Object.keys(inp);
+        if (!keys.length) {
+          var adj = prompt('本次调整(可空,如「15道题,难一点」「基于当前页」):') || '';
+          send('运行已保存的工具《' + rec.name + '》' + (adj.trim() ? ',本次调整:' + adj.trim() : ''));
+          return;
+        }
+        // 参数槽表单(铸造时轻 AI 从意图/路线抽的可调项)
+        document.getElementById('tl-modal-t').textContent = '▶ 运行《' + rec.name + '》';
+        var bx = document.getElementById('tl-modal-b'); bx.innerHTML = '';
+        var rows = keys.map(function (k) {
+          var d = inp[k] || {};
+          var row = document.createElement('div'); row.style.cssText = 'margin:8px 0';
+          row.innerHTML = '<label style="font-size:12.5px;color:#9fb2d6">' + RC.esc(d.desc || k) + '</label>';
+          var f = document.createElement('input'); f.type = 'text'; f.value = (d.default != null ? d.default : '');
+          f.style.cssText = 'width:100%;margin-top:3px;background:#14203a;border:1px solid #2a3a63;color:#dfe8fa;border-radius:8px;padding:7px 10px;font-size:13.5px';
+          row.appendChild(f); bx.appendChild(row);
+          return { k: k, f: f, def: (d.default != null ? String(d.default) : '') };
+        });
+        var extra = document.createElement('input'); extra.type = 'text'; extra.placeholder = '其它调整(可空)';
+        extra.style.cssText = 'width:100%;margin:8px 0;background:#14203a;border:1px solid #2a3a63;color:#dfe8fa;border-radius:8px;padding:7px 10px;font-size:13.5px';
+        bx.appendChild(extra);
+        var go = document.createElement('button'); go.className = 'tl-b pri'; go.textContent = '▶ 运行';
+        go.addEventListener('click', function () {
+          document.getElementById('tl-modal').classList.remove('on');
+          var changed = rows.filter(function (r) { return String(r.f.value).trim() !== r.def && String(r.f.value).trim() !== ''; })
+                            .map(function (r) { return r.k + '=' + r.f.value.trim(); });
+          var parts = [];
+          if (changed.length) parts.push('本次参数:' + changed.join(';'));
+          if (extra.value.trim()) parts.push(extra.value.trim());
+          send('运行已保存的工具《' + rec.name + '》' + (parts.length ? ',' + parts.join(',') : ''));
+        });
+        bx.appendChild(go);
+        document.getElementById('tl-modal').classList.add('on');
       });
       if (rec.kind === 'intent') {
         btn('✏️ 改意图', '', function () {

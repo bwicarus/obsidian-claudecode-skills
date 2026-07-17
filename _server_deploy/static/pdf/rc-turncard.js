@@ -455,7 +455,7 @@
     try { RC.turnCard && RC.turnCard.setTaskId && RC.turnCard.setTaskId(tid, taskId); } catch (_) {}
     try { RC.turnCard.title(tid, label); } catch (_) {}                 // 卡头=CLI任务名(用户设计 #57)
     try { RC.turnCard.status(tid, '规划中', false); } catch (_) {}      // 进度=标题下面一行(用户设计 #49/#52)
-    var n = 0, _appliedCA = 0;
+    var n = 0, _appliedCA = 0, _miss = 0;
     function _applyNewCAs(cas) {   // #2:client_action(建纸)一出现就应用,不等 CLI 说完(page_show 一跑纸就开始建)
       cas = cas || [];
       for (var i = _appliedCA; i < cas.length; i++) {
@@ -494,7 +494,16 @@
         return;
       }
       fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok) { setTimeout(poll, 1500); return; }
+        if (!d || !d.ok) {
+          _miss++;   // 连续拿不到任务(服务重启后任务丢失)→ 12s 就收尾报错,别空转 15 分钟(审查实锤)
+          if (_miss >= 8) {
+            try { RC.turnCard.status(tid, '任务丢失(服务可能重启了),重发一次即可', true); RC.turnCard.freezeDraft(tid);
+              RC.turnCard.cliPart(tid, { label: label + '(任务丢失)', error: '服务重启' }); } catch (_) {}
+            return;
+          }
+          setTimeout(poll, 1500); return;
+        }
+        _miss = 0;
         var steps = d.steps || [];
         // 进度 → 标题下面一行;结果 → body 增量渲(#52/#57);工具 → 运行中就进【流程】(#5:流程不再空)。
         try { RC.turnCard.status(tid, (d.step || '规划中') + (steps.length ? ('  ·  已用 ' + steps.length + ' 个工具') : ''), false); } catch (_) {}
