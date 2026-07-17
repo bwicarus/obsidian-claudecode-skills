@@ -3661,6 +3661,52 @@ def _t_start_dictation(args, ctx):
             "silent": True}
 
 
+
+def _t_learning_focus(args, ctx):
+    """回答**「我最近/某段时间在学什么」**类问题:按时间窗给出学习焦点词(带出处书页)。
+    数据=所有学习行为(查词/高亮/问 AI/自测)的加权术语画像(references/attention-kb-design.md)。
+    args: when?(今天/昨天/本周/上周/本月/上个月/最近三天/最近一周/最近一个月/最近三个月/全部)
+          days?(直接给天数,优先于 when)  scope?("book"=只看当前书 | "convo"=当前这轮对话的焦点)
+          channels?(["lookup","highlight","qa","check"])  top?(默认 12)
+    """
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import attention_profile as AP
+    except Exception as e:
+        return {"error": "注意力画像不可用:%s" % str(e)[:80]}
+    top = max(1, min(int(args.get("top") or 12), 30))
+    scope = (args.get("scope") or "").strip()
+    if scope == "convo":   # 当前对话的焦点:本轮上下文抽词 + 全库 IDF 排序(不查历史事件)
+        txt = str(args.get("text") or "") + " " + str((ctx or {}).get("selection") or "")
+        if len(txt.strip()) < 4:
+            try:
+                _msgs = _convo_load(str((ctx or {}).get("_uid") or ""))[-8:]
+                txt = " ".join(str(m.get("content") or "")[:400] for m in _msgs)
+            except Exception:
+                txt = ""
+        r = AP.focus_of_text(txt, top=top)
+        return {"范围": "当前对话", "焦点词": [{"词": x["term"], "本轮出现": x["n"],
+                                             "出现过的书数": x.get("seen_in_books", 0)} for x in r["top"]],
+                "怎么用": "这是**本轮对话**在谈的知识点;要看用户的历史学习焦点请不带 scope 再调一次。"}
+    file = ((ctx or {}).get("file_rel") or "") if scope == "book" else ""
+    r = AP.focus_window(when=args.get("when") or "", days=args.get("days"),
+                        channels=args.get("channels"), file=file, top=top)
+    if not r.get("top"):
+        return {"范围": r["window"]["label"], "结果": "这段时间没有学习行为记录"}
+    items = []
+    for x in r["top"]:
+        it = {"词": x["term"], "热度": x["score"], "次数": x["n"], "来源渠道": x["channels"]}
+        if x.get("refs"):
+            _f = x["refs"][0]
+            it["出处"] = "%s 第%s页" % (_f["file"].split("/")[-1], _f["page"] or "?")
+            it["file"], it["page"] = _f["file"], _f["page"]
+        items.append(it)
+    return {"范围": r["window"]["label"] + ("(仅当前这本书)" if file else ""),
+            "行为数": r["n_events"], "焦点词": items,
+            "怎么用": "按热度排序(渠道加权 × 跨书泛词降权)。要读原文用 read_page(file,page)。"
+                      "**这些是从行为统计出来的词,不是用户原话**。"}
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "recall_creation": ("取回一个**创造物**的完整内容(之前工具的产出:练习纸/检查报告/联网搜索/视频/翻译/章节总结)。"
@@ -3763,6 +3809,10 @@ TOOLS = {
                        "用户说的数量/难度/主题调整放 args.adjust 原话带上,如 adjust:\"15道题,难一点\");"
                        "**机械回放型**(如听写——数据源驱动,选 source)。args {name, adjust?, source?, params?}。"
                        "不知道有哪些就先 list_saved_tasks。", _t_run_saved_task),
+    "learning_focus": ("回答「我最近/昨天/上个月在学什么」「这本书我关注了啥」「这轮在聊什么知识点」:"
+                       "按时间窗给学习焦点词+出处书页。args {when?:今天/昨天/本周/上个月/最近三个月/全部, "
+                       "days?:天数, scope?:book(只看当前书)|convo(当前对话), channels?, top?}。"
+                       "数据=查词/高亮/问AI/自测行为的加权画像。", _t_learning_focus),
     "list_saved_tasks": ("列出所有已保存的工具及其数据源。args {}。", _t_list_saved_tasks),
     "page_show": ("把草稿纸**生成出来**(造纸最后一步)。args {}。", _t_page_show),
     "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"

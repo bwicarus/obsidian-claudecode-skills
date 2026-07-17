@@ -1377,6 +1377,7 @@ _LOOKUP_TOOLS = {
     "see_figure":        ("看了带入的图", lambda a: None),
     "summarize_section": ("总结了第 {} 页所在章节", lambda a: a.get("page")),
     "toc":               ("看了目录", lambda a: None),
+    "learning_focus":    ("查了「{}」的学习焦点", lambda a: a.get("when") or (("最近%s天" % a["days"]) if a.get("days") else "最近一周")),
     "read_selection":    ("读了选中内容", lambda a: None),
 }
 

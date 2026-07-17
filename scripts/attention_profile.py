@@ -313,6 +313,125 @@ def rebuild_profile(c, now=None):
     return out
 
 
+# ── 灵活查询:任意时间窗 / 渠道 / 书 的焦点(AI 按语境调用;"昨天""上个月"都能答) ──────
+_WHEN = {   # 自然语言时间窗 → (since_days_ago, until_days_ago);AI 传 when= 这些词即可
+    "今天": (0, 0), "today": (0, 0), "昨天": (1, 1), "yesterday": (1, 1), "前天": (2, 2),
+    "本周": (7, 0), "这周": (7, 0), "this_week": (7, 0), "上周": (14, 7), "last_week": (14, 7),
+    "最近三天": (3, 0), "最近一周": (7, 0), "最近两周": (14, 0), "本月": (30, 0), "这个月": (30, 0),
+    "上个月": (60, 30), "last_month": (60, 30), "最近一个月": (30, 0), "最近三个月": (90, 0),
+    "最近半年": (180, 0), "全部": (36500, 0), "all": (36500, 0),
+}
+
+
+def parse_when(when="", days=None, since=None, until=None):
+    """自然语言/参数 → (since_ts, until_ts)。优先级:显式 since/until > days > when > 默认近 7 天。
+    ⚠ 日界按 JST 本地日切(用户在日本;'昨天'指昨天 00:00-24:00,不是 24 小时前)。"""
+    now = time.time()
+    if since or until:
+        return (float(since or 0), float(until or now))
+    if days:
+        return (now - float(days) * 86400, now)
+    w = (when or "").strip().lower().replace(" ", "")
+    if w in _WHEN:
+        a_d, b_d = _WHEN[w]
+        if b_d == 0 and a_d <= 2:      # 今天/昨天/前天:按本地日界对齐
+            import datetime as _dt
+            d0 = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            return ((d0 - _dt.timedelta(days=a_d)).timestamp(),
+                    (d0 - _dt.timedelta(days=b_d) + _dt.timedelta(days=1)).timestamp())
+        if a_d == b_d:                 # 昨天/前天(单日)
+            import datetime as _dt
+            d0 = _dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            return ((d0 - _dt.timedelta(days=a_d)).timestamp(), (d0 - _dt.timedelta(days=a_d - 1)).timestamp())
+        return (now - a_d * 86400, now - b_d * 86400)
+    m = re.search(r"(\d+)\s*(天|日|days?)", w)
+    if m:
+        return (now - int(m.group(1)) * 86400, now)
+    return (now - 7 * 86400, now)      # 默认近一周
+
+
+def focus_window(when="", days=None, since=None, until=None, channels=None, file="", top=15, uid=""):
+    """★任意时间窗的焦点词(AI 按语境调:"昨天在学什么""上个月的重点""这本书我关注了啥")。
+    与 rebuild_profile 的区别:**窗内不做时间衰减**(窗口本身就是时间选择),纯 w/√N 加权 × IDF。
+    返回 {ok, window:{since,until,label}, n_events, top:[{term,score,n,channels,refs}]}。"""
+    s_ts, u_ts = parse_when(when, days, since, until)
+    c = _db()
+    q = "SELECT ts, channel, weight, terms, file, page FROM events WHERE ts>=? AND ts<?"
+    args = [int(s_ts), int(u_ts)]
+    if channels:
+        q += " AND channel IN (%s)" % ",".join("?" * len(channels))
+        args += list(channels)
+    if file:
+        q += " AND file=?"
+        args.append(file)
+    if uid:
+        q += " AND (uid=? OR uid='')"
+        args.append(str(uid))
+    rows = c.execute(q, args).fetchall()
+    # IDF 用**全库**书数(窗内书太少,IDF 会失真)
+    all_books = {r[0] for r in c.execute("SELECT DISTINCT file FROM events WHERE file<>''")}
+    tb = defaultdict(set)
+    for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
+        try:
+            for t in set(json.loads(r[0])):
+                tb[t].add(r[1])
+        except Exception:
+            pass
+    sc, cnt, chs, refs = defaultdict(float), defaultdict(int), defaultdict(set), defaultdict(list)
+    for ts, ch, w, terms_j, f, page in rows:
+        try:
+            terms = set(json.loads(terms_j))
+        except Exception:
+            continue
+        w = w / math.sqrt(max(1, len(terms)))
+        for t in terms:
+            sc[t] += w
+            cnt[t] += 1
+            chs[t].add(ch)
+            if f and len(refs[t]) < 6:
+                refs[t].append((ts, f, page))
+    nb = max(1, len(all_books))
+    out = []
+    for t, v in sc.items():
+        idf = math.log((1 + nb) / (1 + len(tb.get(t, ())))) + 0.3
+        out.append({"term": t, "score": round(v * idf, 2), "n": cnt[t], "channels": sorted(chs[t]),
+                    "refs": [{"file": f, "page": p} for _, f, p in sorted(refs[t], reverse=True)[:2]]})
+    out.sort(key=lambda x: -x["score"])
+    c.close()
+    return {"ok": True, "n_events": len(rows),
+            "window": {"since": int(s_ts), "until": int(u_ts),
+                       "label": (when or (f"最近{days}天" if days else "最近7天"))},
+            "top": out[:top]}
+
+
+def focus_of_text(text, top=8):
+    """★「当前对话/这段文字的焦点」:直接抽词 + 用全库 IDF 排序(无需事件表)。
+    用于:助手看本轮对话说了什么 → 焦点术语 → 再去 focus_window/FTS 找相关材料。"""
+    terms = extract_terms(text or "")
+    if not terms:
+        return {"ok": True, "top": []}
+    c = _db()
+    tb = defaultdict(set)
+    all_books = {r[0] for r in c.execute("SELECT DISTINCT file FROM events WHERE file<>''")}
+    for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
+        try:
+            for t in set(json.loads(r[0])):
+                tb[t].add(r[1])
+        except Exception:
+            pass
+    c.close()
+    nb = max(1, len(all_books))
+    cnt = defaultdict(int)
+    for t in terms:
+        cnt[t] += 1
+    out = []
+    for t, n in cnt.items():
+        idf = math.log((1 + nb) / (1 + len(tb.get(t, ())))) + 0.3
+        out.append({"term": t, "score": round(n * idf, 2), "n": n, "seen_in_books": len(tb.get(t, ()))})
+    out.sort(key=lambda x: -x["score"])
+    return {"ok": True, "top": out[:top]}
+
+
 def run(rebuild=False):
     if rebuild and DB.exists():
         DB.unlink()
