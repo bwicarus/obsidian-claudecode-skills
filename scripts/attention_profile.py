@@ -737,7 +737,7 @@ def import_anki_lapses(c):
         con.create_collation("unicase", lambda a, b: (a.lower() > b.lower()) - (a.lower() < b.lower()))
         cut = int((time.time() - ANKI_LAPSE_DAYS * 86400) * 1000)
         rows = con.execute(
-            "SELECT r.id, n.sfld, d.name FROM revlog r"
+            "SELECT r.id, r.cid, n.sfld, d.name FROM revlog r"
             " JOIN cards ca ON ca.id = r.cid JOIN notes n ON n.id = ca.nid"
             " LEFT JOIN decks d ON d.id = ca.did"
             " WHERE r.ease = 1 AND r.id > ? ORDER BY r.id DESC LIMIT 2000", (cut,)).fetchall()
@@ -746,7 +746,7 @@ def import_anki_lapses(c):
         sys.stderr.write("[anki] 读 collection 失败(跳过): %s\n" % str(ex)[:80])
         return 0
     import re as _re
-    for rid, sfld, deck in rows:
+    for rid, cid, sfld, deck in rows:
         txt = _re.sub(r"<[^>]+>|\\\([^)]*\\\)|\$[^$]*\$", " ", str(sfld or ""))   # 去 HTML / LaTeX(公式不是术语)
         txt = _re.sub(r"\s+", " ", txt).strip()[:200]
         if len(txt) < 2:
@@ -762,7 +762,7 @@ def import_anki_lapses(c):
                   " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
                   (key, int(rid / 1000), "anki_lapse", W["anki_lapse"], txt,
                    json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
-                   ("anki::" + str(deck or "").replace("\x1f", "::").strip(":")), 0, "", key, EXTRACTOR_VER))
+                   ("anki:" + str(cid)), 0, "", key, EXTRACTOR_VER))
         n += 1
     return n
 
@@ -1099,7 +1099,7 @@ def _material_ref(channel, file, page, uid=""):
     if channel == "note":
         return "note:" + f             # f = vault 相对路径(现已存)
     if channel == "anki_lapse":
-        return f or "anki::?"          # f = "anki::<牌组>"(同牌组材料聚一起;revlog 无法反查单卡文件)
+        return f or "anki:?"           # f = "anki:<cid>"(卡片级 → read_material 能读正反面)
     if f and page:
         return "book:%s#p%d" % (f, int(page))
     if f:
@@ -1122,7 +1122,7 @@ def _material_label(ref):
     if kind == "check":
         return "检查报告"
     if kind == "anki":
-        return "Anki 牌组「%s」" % (rest or "?")
+        return "Anki 卡片"             # 详细正反面靠 read_material(ref)
     return ref
 
 
@@ -1172,6 +1172,63 @@ def relate_material(term, when="", days=None, top=12, order="relevance", now=Non
     mats.sort(key=key)
     return {"ok": True, "term": term, "key": k, "n": len(mats),
             "order": order, "materials": mats[:top]}
+
+
+def read_material(ref, limit=1500):
+    """★material ref → **详细内容**(用户实锤:能看到材料却读不到内容)。统一取详细内容入口,
+    下游(出题/复习/AI 分析)靠它把「地址」变成「内容」。
+      book:<file>#p<page> → 那页正文(离线从 char-cache 拼)
+      note:<vault相对路径>  → 笔记全文(前 limit 字)
+      anki:<cid>           → 那张卡的正面+背面(去 HTML)
+      check:<file>         → 提示用 read_check_report(检查报告有专门工具)
+    返回 {ok, ref, kind, title, content} 或 {error}。"""
+    try:
+        kind, rest = ref.split(":", 1)
+    except ValueError:
+        return {"error": "ref 格式不对:%s" % ref}
+    if kind == "book":
+        f, _, pg = rest.partition("#p")
+        page = int(pg) if pg.isdigit() else 0
+        txt = _page_text(f, page, limit=limit) if page else ""
+        if not txt:
+            return {"ok": True, "ref": ref, "kind": "book", "title": _material_label(ref),
+                    "content": "", "note": "这页没缓存正文;用 read_page(file='%s', page=%d) 读" % (f, page)}
+        return {"ok": True, "ref": ref, "kind": "book", "title": _material_label(ref), "content": txt}
+    if kind == "note":
+        try:
+            body = (Path(VAULT_ROOT) / rest).read_text("utf-8")
+        except Exception as e:
+            return {"error": "读笔记失败:%s" % str(e)[:60]}
+        if body.startswith("---"):                 # 跳过 frontmatter(anki_total 等元数据不是内容)
+            _e = body.find("\n---", 3)
+            if _e > 0:
+                body = body[_e + 4:]
+        body = body.strip()[:limit]
+        return {"ok": True, "ref": ref, "kind": "note",
+                "title": "笔记《%s》" % rest.split("/")[-1].replace(".md", ""), "content": body}
+    if kind == "anki":
+        try:
+            cid = int(rest)
+        except ValueError:
+            return {"error": "anki ref 无 cid"}
+        try:
+            con = sqlite3.connect("file:%s?mode=ro&immutable=1" % ANKI_DB, uri=True)
+            r = con.execute("SELECT n.flds, d.name FROM cards ca JOIN notes n ON n.id = ca.nid"
+                            " LEFT JOIN decks d ON d.id = ca.did WHERE ca.id = ?", (cid,)).fetchone()
+            con.close()
+        except Exception as e:
+            return {"error": "读卡片失败:%s" % str(e)[:60]}
+        if not r:
+            return {"error": "卡片 %d 不存在(可能已删)" % cid}
+        import re as _re
+        parts = [_re.sub(r"<[^>]+>", " ", x).strip() for x in str(r[0]).split("\x1f")]
+        deck = str(r[1] or "").replace("\x1f", "::").strip(":")
+        return {"ok": True, "ref": ref, "kind": "anki", "title": "Anki 卡片(%s)" % deck,
+                "content": {"正面": parts[0][:600] if parts else "", "背面": parts[1][:600] if len(parts) > 1 else ""}}
+    if kind == "check":
+        return {"ok": True, "ref": ref, "kind": "check",
+                "note": "检查报告用 read_check_report 工具读(有专门的问答式接口)"}
+    return {"error": "未知材料类型:%s" % kind}
 
 
 def focus_of_text(text, top=8):
