@@ -68,6 +68,21 @@ _EN_TOKEN = re.compile(r"[A-Za-z][A-Za-z\-']{2,}")
 
 _fugashi = None
 _jieba = None
+_BOOK_LANGS = None
+
+
+def _book_lang(rel):
+    """书的语言(state/pdf-book-langs.json,阅读器已维护)→ 分词路由的**权威依据**。
+    ★为什么必须要它(2026-07-17 实锤 bug):纯汉字文本**无法靠字形区分中/日**——
+      「人口動態統計」被 jieba 切成 人口/動態/統計、「公衆衛生学」→「衛生学」(丢字)、
+      「一般相対性理論」→「一般/性理」(荒谬)。焦点榜里的「公衆」就是这么来的残骸。"""
+    global _BOOK_LANGS
+    if _BOOK_LANGS is None:
+        try:
+            _BOOK_LANGS = json.loads((STATE / "pdf-book-langs.json").read_text("utf-8"))
+        except Exception:
+            _BOOK_LANGS = {}
+    return _BOOK_LANGS.get(rel or "") or []
 
 # ── 归一键(用户设计:相同含义的不同写法在库里应是同一个词)────────────────────────
 # ★分层落地(数据驱动,2026-07-17 实测):
@@ -146,7 +161,11 @@ def _ja_terms(text):
         for tk in _tag_ja()(text):
             f = tk.feature
             pos = getattr(f, "pos1", None) or str(f).split(",")[0]
-            if pos == "名詞":
+            pos2 = getattr(f, "pos2", None) or ""
+            # 名詞 + **接頭辞/接尾辞(名詞的)** 一起进复合名词串(2026-07-17 实锤:
+            #   只收名詞会把「公衆衛生**学**」→「公衆衛生」、「情報処理技術**者**試験」切两半——
+            #   学/性/者/化/的/率 都是 接尾辞·名詞的,它们正是复合术语的构词部件)。
+            if pos == "名詞" or (pos in ("接尾辞", "接頭辞") and (pos2 == "名詞的" or pos2 == "*")):
                 run.append(str(tk.surface))
             else:
                 _flush()
@@ -156,9 +175,10 @@ def _ja_terms(text):
     return out
 
 
-def extract_terms(text, hint=""):
-    """文本 → 术语列表(名词/名词短语粒度,非裸单字)。语言路由:假名→ja;CJK→zh;拉丁→en。
-    hint='word' 时(查词事件)text 本身就是术语,原样返回。"""
+def extract_terms(text, hint="", lang=None):
+    """文本 → 术语列表(名词/名词短语粒度,非裸单字)。
+    **语言路由**(2026-07-17 修):假名→ja;纯汉字→**看 lang(书语言)**,ja→fugashi / 否则 jieba;
+    拉丁→en。lang 由调用方从 _book_lang(file_rel) 传入——纯汉字靠字形猜中/日必错。"""
     text = (text or "").strip()
     if not text:
         return []
@@ -171,10 +191,15 @@ def extract_terms(text, hint=""):
             lw = w.lower()
             return [lw] if len(lw) > 1 and lw not in _STOP_EN else []
         if not _KANA.search(w):
+            if lang and "ja" in lang and len(w) > 4:   # 长的纯汉字日语词:过日语分词器抽复合名词
+                _t = [t for t in _ja_terms(w) if t not in _STOP_JA]
+                if _t:
+                    return _t[:3]
             return [w] if 1 < len(w) <= 8 else []
         return [t for t in _ja_terms(w) if t not in _STOP_JA][:4]
     out = []
-    if _KANA.search(text):                                   # 日语:连续名词合并成复合名词(LRValue 候选生成的 lite 版)
+    _is_ja = _KANA.search(text) or (lang and "ja" in lang)   # 有假名 → 必是日语;纯汉字 → 按书语言(不猜字形)
+    if _is_ja:                                               # 日语:连续名词合并成复合名词(LRValue 候选生成的 lite 版)
         out += _ja_terms(text)
     elif _CJK.search(text):                                  # 中文:jieba,留 ≥2 字词
         try:
@@ -203,10 +228,14 @@ def _db():
     return c
 
 
-def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint=""):
-    """新渠道(眼镜/自定义)也走这里:自动抽词、按 src_key 幂等。"""
+def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="", lang=None):
+    """新渠道(眼镜/自定义)也走这里:自动抽词、按 src_key 幂等。
+    ⚠ 事件的原始文本在**各自的源文件**里(查词 jsonl / 高亮 sidecar / 对话归档 / dwell),
+      本表是**可重建的派生索引**(--rebuild 删库重导)——直写本表而不写源的渠道,重建时会丢。
+      新渠道接入时:要么先写自己的 append-only 源日志 + 写个导入器(现有 5 个渠道都这样),
+      要么等 learning.db(不可重建的事实账本,设计见 attention-kb-design.md §7)。"""
     key = hashlib.sha1(f"{channel}|{int(ts)}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
-    terms = extract_terms(text, hint=hint)
+    terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)))
     if not terms:
         return 0
     cur = c.execute("INSERT OR IGNORE INTO events(ts,channel,weight,text,terms,file,page,uid,src_key)"
