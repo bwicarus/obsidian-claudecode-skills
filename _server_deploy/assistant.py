@@ -352,7 +352,7 @@ def _gemini_usage(j):
     return {"total": u.get("totalTokenCount", 0), "prompt": u.get("promptTokenCount", 0),
             "out": u.get("candidatesTokenCount", 0)}
 
-def gemini_embed(texts, timeout=30):
+def gemini_embed(texts, timeout=30, dim=None):
     """批量文本 → 向量(gemini-embedding-001,3072 维)。复用 _gemini_keys(免费优先→付费兜底)。
     注意力画像的跨语言关联用(vector space ↔ 向量空间 在向量空间里很近)。返回 [[float]…] 或 None。
     单条也传 list。失败(限流/网络)自动切下一把 key;全失败 → None。"""
@@ -371,8 +371,10 @@ def gemini_embed(texts, timeout=30):
         got = None
         for k, _ in keys:                 # 每条独立试 key(免费断了切付费)
             try:
-                r = requests.post(url + k,
-                                  json={"content": {"parts": [{"text": t}]}}, timeout=timeout)
+                _b = {"content": {"parts": [{"text": t}]}}
+                if dim:
+                    _b["outputDimensionality"] = int(dim)
+                r = requests.post(url + k, json=_b, timeout=timeout)
             except Exception:
                 continue
             if r.status_code == 200:

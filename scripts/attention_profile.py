@@ -1147,18 +1147,43 @@ def _ecdict_zh(word):
 _FUSION_W = {"T": 1.0, "S": 1.2, "O": 1.0, "D": 0.8}   # 权重(向量相似最可靠,给最高)
 _FUSION_EPS = 0.15                                       # 平滑:缺一个信号不致命
 _FUSION_TAU = 0.30                                       # 阈值:P > τ 才送 AI(调这个控制 AI 调用量/召回)
-_EMB_CACHE = ATT_DIR / "emb-cache.json"                  # 术语向量永久缓存(算过就不再花 API)
+_EMB_CACHE = ATT_DIR / "emb-cache.npz"                  # 术语向量永久缓存(numpy 二进制:比 51MB JSON 快几十倍)
+_EMB_JSON_OLD = ATT_DIR / "emb-cache.json"             # 旧 JSON 缓存(一次性迁移后删)
 
 
 def _emb_load():
+    """{term: np.array}。旧 JSON 缓存自动迁移到 npz。"""
+    import numpy as np
     try:
-        return json.loads(_EMB_CACHE.read_text("utf-8"))
+        d = np.load(_EMB_CACHE, allow_pickle=True)
+        terms = list(d["terms"]); M = d["M"]
+        return {t: M[i] for i, t in enumerate(terms)}
     except Exception:
-        return {}
+        pass
+    if _EMB_JSON_OLD.exists():                          # 迁移:旧 51MB JSON → npz(一次)
+        try:
+            j = json.loads(_EMB_JSON_OLD.read_text("utf-8"))
+            cache = {t: np.array(v, dtype=np.float32) for t, v in j.items()}
+            _emb_save(cache)
+            _EMB_JSON_OLD.rename(_EMB_JSON_OLD.with_suffix(".json.bak"))
+            return cache
+        except Exception:
+            pass
+    return {}
+
+
+def _emb_save(cache):
+    import numpy as np
+    if not cache:
+        return
+    terms = list(cache)
+    M = np.array([np.asarray(cache[t], dtype=np.float32) for t in terms])
+    np.savez_compressed(_EMB_CACHE, terms=np.array(terms, dtype=object), M=M)
 
 
 def _emb_get(terms, cache):
-    """要 embedding 的术语 → {term: vec};缓存没有的批量调 API 补上(夜间,量不大)。"""
+    """要 embedding 的术语 → {term: vec(np)};缺的批量调 API(768 维,省流量)。"""
+    import numpy as np
     need = [t for t in terms if t not in cache]
     if need:
         try:
@@ -1166,27 +1191,26 @@ def _emb_get(terms, cache):
             import assistant as A
             for i in range(0, len(need), 40):
                 chunk = need[i:i + 40]
-                vs = A.gemini_embed(chunk)
+                vs = A.gemini_embed(chunk, dim=768)     # 768 足够,存储/传输小 4 倍
                 if not vs:
                     break
                 for t, v in zip(chunk, vs):
-                    cache[t] = v
-        except Exception:
-            pass
-        try:
-            _EMB_CACHE.write_text(json.dumps(cache, ensure_ascii=False), "utf-8")
+                    cache[t] = np.asarray(v, dtype=np.float32)
+            _emb_save(cache)
         except Exception:
             pass
     return cache
 
 
 def _cos(a, b):
-    if not a or not b:
+    import numpy as np
+    if a is None or b is None:
         return 0.0
-    d = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a)) or 1e-9
-    nb = math.sqrt(sum(x * x for x in b)) or 1e-9
-    return d / (na * nb)
+    a = np.asarray(a, dtype=np.float32); b = np.asarray(b, dtype=np.float32)
+    if a.size == 0 or b.size == 0 or a.size != b.size:
+        return 0.0
+    na = float(np.linalg.norm(a)) or 1e-9; nb = float(np.linalg.norm(b)) or 1e-9
+    return float(a @ b) / (na * nb)
 
 
 def _sig_time(A, B, day_of, ndays):
@@ -1275,14 +1299,17 @@ def fit_weights(dry=False):
     for k, v in al.items():
         if k.isascii():
             pos.append((k, v, "concept"))           # AI 已判 same
-    # 负例:随机 + 共现远
+    # ★embedding 只用**已缓存**的术语(fit 是校准,不为造负例狂调 API;缓存由 --concepts 填)
+    emb = _emb_load()
+    cached = set(emb)
+    pos = [(a_, b_, sr) for (a_, b_, sr) in pos if a_ in cached and b_ in cached]
+    en_c = [w for w in en_all if w in cached]
+    mine_c = [z for z in mine_cjk if z in cached]
     import random as _rnd
-    rng = _rnd.Random(42)                            # 固定种子(可复现;脚本环境无 Math.random 顾虑)
-    for _ in range(min(400, len(en_all) * 3)):
-        neg.append((rng.choice(en_all), rng.choice(mine_cjk), "rand"))
-    # 全体术语算 embedding
-    allt = sorted({x for pr in (pos + neg) for x in pr[:2]})
-    emb = _emb_get(allt, _emb_load())
+    rng = _rnd.Random(42)                            # 固定种子(可复现)
+    if en_c and mine_c:
+        for _ in range(min(400, len(en_c) * 3)):
+            neg.append((rng.choice(en_c), rng.choice(mine_c), "rand"))
     fctx = {"day_of": day_of, "ndays": ndays, "emb": emb, "dict_fn": _ecdict_zh}
 
     def _feat(a_, b_):
@@ -1303,34 +1330,34 @@ def fit_weights(dry=False):
     X = np.array(X, float); y = np.array(y, float)
     if len(y) < 30 or y.sum() < 8 or (len(y) - y.sum()) < 8:
         return {"ok": False, "error": "样本不足(正 %d 负 %d)" % (int(y.sum()), int(len(y) - y.sum()))}
+    # ★hold-out 20%:训练集 F1 天生虚高(正负例好分),**留出集 F1 才是真实泛化**(过拟合检查)
+    idx = np.arange(len(y)); np.random.RandomState(7).shuffle(idx)
+    cut = int(len(y) * 0.8); tr, te = idx[:cut], idx[cut:]
+    Xtr, ytr = X[tr], y[tr]
     # 逻辑回归(权重**非负**约束:融合是「证据累积」,负权重无意义)
     w = np.array([1.0, 1.2, 1.0, 0.8]); b = -1.5
-    lr, lam = 0.3, 1e-3
+    lr, lam = 0.3, 5e-3                               # L2 稍强(防 4 维小样本过拟合)
     for _ in range(3000):
-        z = X @ w + b
+        z = Xtr @ w + b
         pr = 1 / (1 + np.exp(-z))
-        g = pr - y
-        w -= lr * (X.T @ g / len(y) + lam * w)
+        g = pr - ytr
+        w -= lr * (Xtr.T @ g / len(ytr) + lam * w)
         b -= lr * g.mean()
         w = np.clip(w, 0, None)                      # 非负
-    # 按 F1 最优选 τ(用融合几何平均的 P,不是 logistic 的 pr —— 上线用的是 fuse_score)
     Wd = {"T": float(w[0]), "S": float(w[1]), "O": float(w[2]), "D": float(w[3])}
-    ps = []
-    for i in range(len(y)):
-        prod = 1.0
-        for j, k in enumerate(("T", "S", "O", "D")):
-            prod *= (_FUSION_EPS + Wd[k] * X[i][j])
-        ps.append(prod ** 0.25)
-    ps = np.array(ps)
+    # 上线打分器 = fuse_score 的几何平均 P(不是 logistic pr),τ 在此空间选
+    ps = np.array([np.prod([_FUSION_EPS + Wd[k] * X[i][j] for j, k in enumerate(("T","S","O","D"))]) ** 0.25
+                   for i in range(len(y))])
+    def _f1(tau, mask):
+        pred = (ps[mask] >= tau).astype(float); yy = y[mask]
+        tp = ((pred==1)&(yy==1)).sum(); fp=((pred==1)&(yy==0)).sum(); fn=((pred==0)&(yy==1)).sum()
+        pr_=tp/(tp+fp+1e-9); rc=tp/(tp+fn+1e-9); return 2*pr_*rc/(pr_+rc+1e-9)
     best_tau, best_f1 = _FUSION_TAU, -1
-    for tau in np.linspace(0.15, 0.8, 40):
-        pred = (ps >= tau).astype(float)
-        tp = ((pred == 1) & (y == 1)).sum(); fp = ((pred == 1) & (y == 0)).sum(); fn = ((pred == 0) & (y == 1)).sum()
-        prec = tp / (tp + fp + 1e-9); rec = tp / (tp + fn + 1e-9)
-        f1 = 2 * prec * rec / (prec + rec + 1e-9)
-        if f1 > best_f1:
-            best_f1, best_tau = f1, float(tau)
-    res = {"ok": True, "W": Wd, "tau": round(best_tau, 3), "f1": round(best_f1, 3),
+    for tau in np.linspace(0.15, 0.8, 40):           # τ 只在**训练集**上选(不偷看留出集)
+        f = _f1(tau, tr)
+        if f > best_f1: best_f1, best_tau = f, float(tau)
+    res = {"ok": True, "W": Wd, "tau": round(best_tau, 3),
+           "train_f1": round(float(best_f1), 3), "holdout_f1": round(float(_f1(best_tau, te)), 3),
            "n_pos": int(y.sum()), "n_neg": int(len(y) - y.sum())}
     if not dry:
         _FUSION_WFILE.write_text(json.dumps(res, ensure_ascii=False, indent=1), "utf-8")
