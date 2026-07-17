@@ -170,7 +170,149 @@ def norm_key(term):
     if _CJK.search(t):
         t = _t2s(t.translate(_JP_TRANS))
     t = t.lower()
-    return _concepts().get(t, t)          # L2:命中别名表 → 概念键;没命中 → 字形键(原样)
+    al = _concepts()
+    if t in al:
+        return al[t]                       # L2:命中别名表 → 概念键
+    if " " in t and t.isascii():           # ★英文词组:每个部件都有中文别名 → 拼成中文长词组
+        parts = t.split()                  #   (vector space → 向量+空间 = 向量空间;用户的「长词组跨语言对应」)
+        zh = [al.get(w) for w in parts]
+        if all(zh) and all(not x.isascii() for x in zh):
+            return "".join(zh)
+    return t                               # 没命中 → 字形键(原样)
+
+
+DOMAIN_DICT = ATT_DIR / "domain-terms.json"   # 领域词典(自动长出来的;缓存,可随时删)
+_DOMAIN = None
+
+
+def build_domain_dict():
+    """★领域词典 —— **从系统自己的高质量数据长出来**(不是外部词典)。
+
+    为什么必须要(2026-07-17 用户实锤 + 数据佐证):通用分词器不认领域术语 ——
+    「向量空间」原文出现 11 次却抽成术语 **0 次**(jieba 切成 向量+空间)、「子空间」18 次也是 0;
+    英文侧 473 个术语里**多词词组 0 个**(正则只抽单词)。
+
+    来源(按质量排序,都是**人工/AI 已经确认过**的术语):
+      ① **KG 节点名**(最好):1164 个,如 LADR 的「向量空间」「向量空间的定义」、
+         EGIU 的「Present perfect」—— 本来就是「知识点」的名字;
+      ② 书目录章节名(book_toc);
+      ③ 用户查过的词(vocab-lookups 的 lemma:他亲手点的 = 他认的词)。
+    ⚠ **不用** Anki 卡正面(实测是问句「什么是有限维向量空间?」不是术语)、
+      不用笔记标题(实测混 Excalidraw 元数据噪声)。
+    """
+    terms = {}
+
+    def _add(t, src):
+        t = str(t or "").strip()
+        if not (2 <= len(t) <= 20) or t.startswith(("#", "http")):
+            return
+        # ⚠ 实测:lookup 源会带进 would/even/by/the(用户真点过这些词查释义)+ F^n/F^S(公式残渣)
+        #   —— 它们进领域词典 = 分词时被当术语最长匹配,榜单立刻被虚词污染。
+        if t.lower() in _STOP_EN or t in _STOP_ZH or t in _STOP_JA:
+            return
+        if t.isascii() and (len(t) < 5 or not t.isalpha()):
+            return                      # 英文短词/含符号(F^n)一律不进:英文单词由正则抽,词典只负责**词组**
+        terms.setdefault(t, src)
+
+    for f in (Path(PROJECT_DIR) / "knowledge_graph").glob("*.json"):   # ① KG 节点名
+        if ".bak." in f.name:
+            continue
+        try:
+            for n in (json.loads(f.read_text("utf-8")).get("nodes") or []):
+                _add(n.get("name"), "kg")
+        except Exception:
+            continue
+    try:                                                               # ② 书目录章节名
+        for f in (Path(PROJECT_DIR) / "state" / "book-toc").glob("*.json"):
+            d = json.loads(f.read_text("utf-8"))
+            for it in (d.get("toc") or d.get("items") or []):
+                if isinstance(it, dict):
+                    _add(it.get("title") or it.get("name"), "toc")
+    except Exception:
+        pass
+    try:                                                               # ③ 用户亲手查过的词
+        for ln in (STATE / "vocab-lookups.jsonl").read_text("utf-8").splitlines()[-3000:]:
+            d = json.loads(ln)
+            w = d.get("lemma") or d.get("word")
+            if w and len(str(w)) >= 2:
+                _add(w, "lookup")
+    except Exception:
+        pass
+    DOMAIN_DICT.write_text(json.dumps({"terms": terms, "updated": int(time.time()), "n": len(terms)},
+                                      ensure_ascii=False, indent=1), "utf-8")
+    global _DOMAIN
+    _DOMAIN = None
+    return {"ok": True, "n": len(terms), "by_src": dict(Counter(terms.values()))}
+
+
+def _domain():
+    """领域词典 → {原词} + 喂给 jieba(中文侧靠它切出「向量空间」)。"""
+    global _DOMAIN
+    if _DOMAIN is None:
+        try:
+            _DOMAIN = set(json.loads(DOMAIN_DICT.read_text("utf-8")).get("terms", {}))
+        except Exception:
+            _DOMAIN = set()
+        if _DOMAIN:
+            try:
+                import jieba
+                jieba.setLogLevel(60)
+                for t in _DOMAIN:
+                    if _CJK.search(t) and not _KANA.search(t):
+                        jieba.add_word(t, freq=10000)      # 中文侧:领域词优先切
+            except Exception:
+                pass
+    return _DOMAIN
+
+
+def _combo_en(text):
+    """★英文词组 = **已归一概念词在原文里真的相邻**(用户的洞察:「在文中没有实际前后连接就毫无关系」)。
+    领域词典里没有英文词组(KG 节点是中文名、lookup 全是单词)→ 靠组合律现场发现:
+    concepts.json 已有 vector/space → 原文出现 `vector space` 相邻 → 录长词组「vector space」。
+    只组 2 元(3 元噪声大);两个词都必须是**已知概念**(否则 of/the 也会被组进来)。"""
+    # 已知英文概念词 = concepts 的英文键(vector) ∪ 领域词典的英文词(KG 里的英文术语)∪
+    #   ECDICT 里"有中文对应且我用过"的词 —— 用最宽的已知集,组合律才不因某轮 AI 漏判而失效。
+    kn = {k for k in _concepts() if k.isascii() and len(k) >= 3}
+    kn |= {t.lower() for t in _domain() if t.isascii() and t.isalpha() and len(t) >= 3}
+    # 常见数学/CS 构词词(它们本身可能不进焦点,但作为词组部件必须认)
+    kn |= {"vector", "space", "linear", "inner", "product", "sub", "subspace", "dot",
+           "scalar", "matrix", "field", "map", "basis", "dimension", "kernel", "image",
+           "data", "structure", "protocol", "system", "network", "function", "set"}
+    if not text:
+        return []
+    toks = re.findall(r"[a-z][a-z\-']+", text.lower())
+    out = []
+    for i in range(len(toks) - 1):
+        if toks[i] in kn and toks[i + 1] in kn and toks[i] not in _STOP_EN and toks[i + 1] not in _STOP_EN:
+            out.append(toks[i] + " " + toks[i + 1])
+    return out[:6]
+
+
+def _domain_match(text):
+    """★原文里的领域术语(最长匹配)—— 英文词组靠它(「vector space」正则抽不出来),
+    中文/日语的长词组也靠它兜底。用户的洞察:**在原文里真的连在一起**才算词组。"""
+    d = _domain()
+    if not d or not text:
+        return []
+    low = text.lower()
+    out = []
+    for t in d:
+        if len(t) < 3:
+            continue
+        if (t.lower() in low) if not t.isascii() else _re_word(t.lower(), low):
+            out.append(t)
+    # 去掉被更长术语包含的(用户点的「包含问题」:录长词组比录短词有意义)
+    out.sort(key=len, reverse=True)
+    keep = []
+    for t in out:
+        if not any(t != k and t.lower() in k.lower() for k in keep):
+            keep.append(t)
+    return keep[:8]
+
+
+def _re_word(t, low):
+    """英文按词边界匹配(防 'set' 命中 'settle')。"""
+    return re.search(r"(?<![a-z])" + re.escape(t) + r"(?![a-z])", low) is not None
 
 
 def _tag_ja():
@@ -188,6 +330,24 @@ def _cut_zh(text):
         jieba.setLogLevel(60)
         _jieba = jieba
     return _jieba.lcut(text)
+
+
+def _dedup_nest(terms):
+    """★去重 + **长词组吃掉被它包含的短词**(用户的「词组包含问题」)。
+    原文里既然是「向量空间的定义」,就不该同时再记「向量空间」「向量」「空间」——
+    否则同一处注意力被计四遍、榜单被同一概念的碎片占满。
+    ⚠ 只在**同一段文本内**做(跨事件不做):同一句里出现长词组 = 这次的注意力就是它;
+      别的地方单独出现「向量」时,那是另一次注意力,照记不误。"""
+    out, seen = [], set()
+    for t in sorted(dict.fromkeys(terms), key=len, reverse=True):     # 长的先占位
+        tl = str(t).lower()
+        if not tl or tl in seen:
+            continue
+        if any(tl in k and tl != k for k in seen):                    # 被已录的更长术语包含 → 跳过
+            continue
+        seen.add(tl)
+        out.append(t)
+    return out
 
 
 def _ja_terms(text):
@@ -239,7 +399,9 @@ def extract_terms(text, hint="", lang=None):
                     return _t[:3]
             return [w] if 1 < len(w) <= 8 else []
         return [t for t in _ja_terms(w) if t not in _STOP_JA][:4]
-    out = []
+    # ★① 领域词典最长匹配(原文里真的连在一起的长词组 —— 用户的洞察):
+    #    「向量空间」「vector space」「公衆衛生学」这类,通用分词器切碎、正则抽不出。
+    out = list(_domain_match(text)) + _combo_en(text)
     _is_ja = _KANA.search(text) or (lang and "ja" in lang)   # 有假名 → 必是日语;纯汉字 → 按书语言(不猜字形)
     if _is_ja:                                               # 日语:连续名词合并成复合名词(LRValue 候选生成的 lite 版)
         out += _ja_terms(text)
@@ -255,7 +417,7 @@ def extract_terms(text, hint="", lang=None):
         lw = w.lower()
         if lw not in _STOP_EN:
             out.append(lw)
-    return out[:60]
+    return _dedup_nest(out)[:60]
 
 
 # ── 事件层 ─────────────────────────────────────────────────────────────────────
@@ -970,7 +1132,7 @@ def _ecdict_zh(word):
         return set()
 
 
-def build_concepts(dry=False, max_pairs=50):
+def build_concepts(dry=False, max_pairs=120):   # 120:一次判完(实测 131 个候选;vector↔向量 曾被 top50 挤掉)
     """★跨语言概念归一 L2(用户要求:「相同含义的不同语言单词必须在数据库中被看作同一单词」)。
 
     **数据实证**(2026-07-17):库里 proof↔证明、theorem↔定理、vector↔向量 同时存在
@@ -1001,10 +1163,15 @@ def build_concepts(dry=False, max_pairs=50):
             tgt[t].add(day)
     mine_cjk = {t for t in mine_days if _CJK.search(t) and not _KANA.search(t)}
     # ① 词典候选
+    # ⚠ 实测漏网:英文词可能只出现在**我的笔记**里(vector 就是),不在书内容渠道 →
+    #   两侧的英文词都要当候选源(en_all),否则 vector↔向量 永远进不了候选。
+    en_all = {}
+    for src in (book_days, mine_days):
+        for w, days in src.items():
+            if re.match(r"^[a-z\-']{3,}$", w) and w not in _STOP_EN:
+                en_all.setdefault(w, set()).update(days)
     cand = []
-    for w, days in book_days.items():
-        if not re.match(r"^[a-z\-']{3,}$", w):
-            continue
+    for w, days in en_all.items():
         inter = _ecdict_zh(w) & mine_cjk
         for z in inter:
             co = len(days & set().union(*[mine_days[z]]) ) if mine_days.get(z) else 0
@@ -1116,9 +1283,14 @@ def run(rebuild=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true", help="删库重导全量(分词算法改版后用)")
+    ap.add_argument("--domain-dict", action="store_true", help="重建领域词典(KG/目录/查词 → 让分词认长词组)")
     ap.add_argument("--concepts", action="store_true", help="跨语言概念归一:AI 判定同义对 → concepts.json")
     ap.add_argument("--dry", action="store_true", help="配合 --concepts:只看候选,不调 AI")
     a = ap.parse_args()
+    if a.domain_dict:
+        print("domain:", json.dumps(build_domain_dict(), ensure_ascii=False))
+        run(rebuild=True)      # 词典变了 → 分词变了 → 重算
+        raise SystemExit
     if a.concepts:
         print("concepts:", json.dumps(build_concepts(dry=a.dry), ensure_ascii=False)[:600])
         if not a.dry:

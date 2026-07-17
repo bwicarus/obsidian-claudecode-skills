@@ -448,7 +448,8 @@ def main() -> int:
     step("清理孤儿", lambda: run_py("cleanup_orphans.py", ["--apply"]))
     # 知识图谱：先 AI 关联（精准）+ 再算 mastery / state（每个 KG 文件一次）
     step("KG 关联+掌握度", run_kg_link_mastery)
-    # 跨语言概念归一(词典候选 + AI 判词义 → concepts.json;夜间跑,不放 15min 的 quick_sync)
+    # 领域词典(从 KG/目录/查词长出来 → 让分词认「向量空间」这类长词组)+ 跨语言概念归一(AI 判词义)
+    step("领域词典", lambda: run_py("attention_profile.py", ["--domain-dict"]))
     step("跨语言概念归一", lambda: run_py("attention_profile.py", ["--concepts"]))
     step("导出仪表板", lambda: run_py("export_dashboard.py"))
     step("部署仪表板", deploy_dashboard)
