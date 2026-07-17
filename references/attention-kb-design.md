@@ -484,6 +484,24 @@ events 路提供「行为证据分」,FTS5 路提供「存在但未读」的候�
 → ② FTS5 路 + 语义相似合入打分 → ③ `relate_material` AI 工具(三链路可用)
 → ④ 可视化(/insights 焦点词点开→相关材料)→ ⑤(未来)下游操作接挂载点。
 
+### 卡片→源→书页→KG节点:诊断链打通(2026-07-18,用户设计)
+用户实锤:「anki 卡的来源字段和查询字段归一后,能从答错的卡追到学它的内容、KG 节点、前置根源」。
+**数据全在,是连接问题**(不是采集):`anki/records/*.json` 有 source_note+anki_note_id、
+笔记嵌 `![[pdf#page=N]]`、KG 节点带 pages+edges(prereq)。链条(逐环实测):
+```
+答错的卡 cid → nid → anki/records → 源笔记(note ref)
+  → 笔记里嵌的 ![[LADR.pdf#page=33]] → book ref
+    → KG 节点(pages 命中 ladr.l1.2A「张成空间和线性无关性」)
+      → edges 的 prereq 前置 → 根源节点
+```
+**Obsidian 格式归一层**(用户实锤「数据格式没统一」):`obsidian_to_ref()` 把三种 vault 内链接
+统一成 material ref —— `[[名字]]`→note:(wikilink 只给文件名,`_vault_index` 建 stem→路径表 resolve)、
+`![[x.pdf#page=N&rect=..&color=..]]`→book:#pN(丢 rect/color)、带别名 `[[x|显示]]` 去别名。
+`read_material` 顶部支持直接传 Obsidian 链接;anki 卡的详细里附「源」(源笔记 ref + 笔记内书页 refs)。
+`_anki_source_map`(nid→源 ref,从 records 建)+ `_note_book_refs`(笔记内嵌书页)。
+★这是学习闭环「测试结果反向更新掌握度/找前置根源」的**数据地基**——链通了,下游操作(更新节点/
+出前置诊断卷)才有对象。下游操作本身留到真做闭环时(需证据链+用户确认,§5l)。
+
 ### ①块已上线(2026-07-18)
 `relate_material(term, order='relevance'|'recent', top, when/days)` + `_material_ref/_material_label`:
 - ref 规范:`book:<file>#p<page>` / `note:<vault相对路径>` / `anki::<牌组>` / `check:<file>`。

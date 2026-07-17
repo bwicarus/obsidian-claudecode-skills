@@ -1174,6 +1174,114 @@ def relate_material(term, when="", days=None, top=12, order="relevance", now=Non
             "order": order, "materials": mats[:top]}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Obsidian 格式归一(用户实锤:数据格式没统一)。把三种 vault 内链接统一成 material ref:
+#   [[名字]]                         → note:<vault相对路径>(wikilink 只给文件名,要 resolve)
+#   [[名字.pdf#page=N]] / ![[..]]     → book:<pdf相对路径>#p<N>(嵌入带 rect/color,只取 page)
+# ─────────────────────────────────────────────────────────────────────────────
+_VAULT_IDX = None
+
+
+def _vault_index():
+    """{文件名stem(小写): vault相对路径}。wikilink 用文件名不含路径 → 靠它 resolve。缓存。"""
+    global _VAULT_IDX
+    if _VAULT_IDX is None:
+        _VAULT_IDX = {}
+        try:
+            root = Path(VAULT_ROOT)
+            for ext in ("*.md", "*.pdf", "*.epub"):
+                for f in root.rglob(ext):
+                    rel = f.relative_to(root).as_posix()
+                    if "/.sandbox/" in rel:
+                        continue
+                    _VAULT_IDX.setdefault(f.stem.lower(), rel)   # 首个胜出(同名少见)
+                    _VAULT_IDX.setdefault(f.name.lower(), rel)   # 带扩展名也认
+        except Exception:
+            pass
+    return _VAULT_IDX
+
+
+def obsidian_to_ref(link):
+    """Obsidian 链接 → material ref(统一格式)。认 [[..]]/![[..]]/裸文件名#page=N。"""
+    if not link:
+        return None
+    t = link.strip()
+    t = re.sub(r"^!?\[\[|\]\]$", "", t).strip()        # 去 [[ ]] / ![[ ]]
+    t = t.split("|", 1)[0].strip()                         # 去别名 [[x|显示]]
+    idx = _vault_index()
+    # 带 #page= 的书页嵌入
+    m = re.search(r"#page=(\d+)", t)
+    if m:
+        name = t.split("#", 1)[0].strip()
+        rel = idx.get(name.lower()) or idx.get((name + ".pdf").lower())
+        if rel:
+            return "book:%s#p%d" % (rel, int(m.group(1)))
+        return None
+    # 纯 wikilink(笔记名)
+    if "#" in t:
+        t = t.split("#", 1)[0].strip()
+    rel = idx.get(t.lower()) or idx.get((t + ".md").lower())
+    if rel:
+        return ("book:" + rel) if rel.lower().endswith((".pdf", ".epub")) else ("note:" + rel)
+    return None
+
+
+_ANKI_SRC = None
+
+
+def _anki_source_map():
+    """{anki_note_id(=nid): 源笔记 material ref}(从 anki/records/*.json 建;缓存)。
+    这就是「卡片→源」的连接(用户实锤:数据在,只是没接)。"""
+    global _ANKI_SRC
+    if _ANKI_SRC is None:
+        _ANKI_SRC = {}
+        try:
+            import glob
+            for f in glob.glob(str(Path(PROJECT_DIR) / "anki" / "records" / "*.json")):
+                try:
+                    d = json.loads(Path(f).read_text("utf-8"))
+                except Exception:
+                    continue
+                sn = d.get("source_note") or ""
+                sl = d.get("source_link") or ""
+                ref = ("note:" + sn) if sn else obsidian_to_ref(sl)
+                if not ref:
+                    continue
+                for card in (d.get("cards") or []):
+                    nid = card.get("anki_note_id")
+                    if nid:
+                        _ANKI_SRC[int(nid)] = ref
+        except Exception:
+            pass
+    return _ANKI_SRC
+
+
+def _note_book_refs(note_rel, limit=8):
+    """笔记里嵌的书页链接 ![[x.pdf#page=N]] → [book ref…](卡片→源笔记→书页 的最后一跳)。"""
+    out = []
+    try:
+        body = (Path(VAULT_ROOT) / note_rel).read_text("utf-8")
+    except Exception:
+        return out
+    for m in re.finditer(r"!?\[\[[^\]]*#page=\d+[^\]]*\]\]", body):
+        r = obsidian_to_ref(m.group(0))
+        if r and r not in out:
+            out.append(r)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _anki_cid_to_nid(cid):
+    try:
+        con = sqlite3.connect("file:%s?mode=ro&immutable=1" % ANKI_DB, uri=True)
+        r = con.execute("SELECT nid FROM cards WHERE id=?", (int(cid),)).fetchone()
+        con.close()
+        return int(r[0]) if r else None
+    except Exception:
+        return None
+
+
 def read_material(ref, limit=1500):
     """★material ref → **详细内容**(用户实锤:能看到材料却读不到内容)。统一取详细内容入口,
     下游(出题/复习/AI 分析)靠它把「地址」变成「内容」。
@@ -1182,6 +1290,11 @@ def read_material(ref, limit=1500):
       anki:<cid>           → 那张卡的正面+背面(去 HTML)
       check:<file>         → 提示用 read_check_report(检查报告有专门工具)
     返回 {ok, ref, kind, title, content} 或 {error}。"""
+    if ref.startswith("[[") or ref.startswith("![["):    # 直接传 Obsidian 链接 → 先归一
+        _r = obsidian_to_ref(ref)
+        if not _r:
+            return {"error": "解析不了这个 Obsidian 链接:%s" % ref}
+        ref = _r
     try:
         kind, rest = ref.split(":", 1)
     except ValueError:
@@ -1223,8 +1336,18 @@ def read_material(ref, limit=1500):
         import re as _re
         parts = [_re.sub(r"<[^>]+>", " ", x).strip() for x in str(r[0]).split("\x1f")]
         deck = str(r[1] or "").replace("\x1f", "::").strip(":")
-        return {"ok": True, "ref": ref, "kind": "anki", "title": "Anki 卡片(%s)" % deck,
-                "content": {"正面": parts[0][:600] if parts else "", "背面": parts[1][:600] if len(parts) > 1 else ""}}
+        res = {"ok": True, "ref": ref, "kind": "anki", "title": "Anki 卡片(%s)" % deck,
+               "content": {"正面": parts[0][:600] if parts else "", "背面": parts[1][:600] if len(parts) > 1 else ""}}
+        # ★卡片→源:这张卡是学哪份材料做的(用户设计的诊断链入口)
+        nid = _anki_cid_to_nid(cid)
+        src = _anki_source_map().get(nid) if nid else None
+        if src:
+            res["源"] = {"ref": src, "label": _material_label(src)}
+            if src.startswith("note:"):
+                books = _note_book_refs(src[5:])   # 源笔记里嵌的书页 → 追到书
+                if books:
+                    res["源"]["书页"] = [{"ref": b, "label": _material_label(b)} for b in books]
+        return res
     if kind == "check":
         return {"ok": True, "ref": ref, "kind": "check",
                 "note": "检查报告用 read_check_report 工具读(有专门的问答式接口)"}
