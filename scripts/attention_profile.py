@@ -36,6 +36,14 @@ DB = ATT_DIR / "events.db"
 FOCUS = ATT_DIR / "focus.json"
 STATE = Path(PROJECT_DIR) / "state"
 
+# ★焦点是**下游系统消费的关键数据**(不是给人看的榜)——三条硬要求(用户 2026-07-17 定调):
+#   可靠性:不做不可逆截断(源可重算的才允许截);账本(无上游)一律全文;抽取器版本可追。
+#   及时性:**读时保证新鲜**(_ensure_fresh:源 mtime 变了就增量导入)——不靠 15min timer。
+#   可回溯性:每个焦点词带证据链(evidence 事件 id + 分数构成 by_channel),explain() 可查。
+EXTRACTOR_VER = 4      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)
+TERMS_MAX = 40         # 单事件术语上限(原 12 → 实测 4 条事件撞顶=真丢词;40 足够,存的是 JSON 数组)
+TEXT_MAX = 4000        # 派生索引里留的原文(源还在,截了也能重算;账本不截,见 append_raw)
+
 HALF_SHORT_D = 7.0     # 短期半衰期(天)
 HALF_LONG_D = 90.0     # 长期半衰期
 ALPHA = 0.65           # 短期占比
@@ -223,8 +231,14 @@ def _db():
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("""CREATE TABLE IF NOT EXISTS events(
         id INTEGER PRIMARY KEY, ts INTEGER, channel TEXT, weight REAL,
-        text TEXT, terms TEXT, file TEXT, page INTEGER, uid TEXT, src_key TEXT UNIQUE)""")
+        text TEXT, terms TEXT, file TEXT, page INTEGER, uid TEXT, src_key TEXT UNIQUE,
+        xver INTEGER DEFAULT 0)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_ev_ts ON events(ts)")
+    try:                      # 老库补列(可回溯性:哪些事件是旧抽取器抽的)
+        c.execute("ALTER TABLE events ADD COLUMN xver INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    c.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
     return c
 
 
@@ -241,7 +255,8 @@ def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hin
       重建时会永久消失。已有 5 个渠道天然带源(查词 jsonl/高亮 sidecar/对话+归档/dwell/检查报告),
       走各自导入器;没有源的渠道走这里。
     """
-    rec = {"ts": int(ts or time.time()), "channel": str(channel), "text": str(text or "")[:2000],
+    # ⚠ 账本**不截原文**:它没有上游,截了就是永久损失(派生索引可以截,因为源还在能重算)
+    rec = {"ts": int(ts or time.time()), "channel": str(channel), "text": str(text or ""),
            "file": file or "", "page": int(page or 0), "uid": str(uid or "")}
     for k, v in (("weight", weight), ("hint", hint), ("lang", lang)):
         if v is not None:
@@ -277,14 +292,19 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
     ⚠ 这是内部函数:调用方必须是导入器(读的是 append-only 的源)。
       新渠道请用 **append_raw()**(写账本)—— 直写本表的数据 --rebuild 时会丢。"""
     key = hashlib.sha1(f"{channel}|{int(ts)}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
+    # ★及时性:同版本已存在 → 直接跳过(**别白跑分词**,它是增量导入的瓶颈)。
+    #   抽取器升版(EXTRACTOR_VER)时旧行会被重抽(下面 REPLACE),所以升版即自动全量刷新。
+    row = c.execute("SELECT xver FROM events WHERE src_key=?", (key,)).fetchone()
+    if row and int(row[0] or 0) >= EXTRACTOR_VER:
+        return 0
     terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)))
     if not terms:
         return 0
-    cur = c.execute("INSERT OR IGNORE INTO events(ts,channel,weight,text,terms,file,page,uid,src_key)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
-                    (int(ts), channel, float(weight if weight is not None else W.get(channel, 1.0)),
-                     (text or "")[:500], json.dumps(terms[:12], ensure_ascii=False), file or "", int(page or 0),
-                     str(uid or ""), key))
+    cur = c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
+                    " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+                    (key, int(ts), channel, float(weight if weight is not None else W.get(channel, 1.0)),
+                     (text or "")[:TEXT_MAX], json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
+                     file or "", int(page or 0), str(uid or ""), key, EXTRACTOR_VER))
     return cur.rowcount
 
 
@@ -361,7 +381,7 @@ def import_convo(c):
             if "/.sandbox/" in fr:
                 continue
             n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem)
+                           uid=f.stem, lang=[])   # ⚠ qa=**用户说的话**,语言≠书语言(用中文问日语书是常态)→ lang=[] 按字形判;传书语言会让 fugashi 把中文口语整句吞成一个术语(2026-07-17 实锤回归)
     return n
 
 
@@ -390,7 +410,7 @@ def import_convo_archive(c):
             if "/.sandbox/" in fr:
                 continue
             n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem)
+                           uid=f.stem, lang=[])   # ⚠ qa=**用户说的话**,语言≠书语言(用中文问日语书是常态)→ lang=[] 按字形判;传书语言会让 fugashi 把中文口语整句吞成一个术语(2026-07-17 实锤回归)
         if trimmed:
             f.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
     return n
@@ -461,12 +481,13 @@ def import_dwell(c):
             continue
         w = W["read"] * min(2.0, secs / 30.0)
         key = hashlib.sha1(f"read|{rel}|{page}|{day}".encode()).hexdigest()[:20]
-        terms = extract_terms(txt)
+        terms = extract_terms(txt, lang=_book_lang(rel))   # 页文本按书语言分词(纯汉字日语必须)
         if not terms:
             continue
-        c.execute("INSERT OR REPLACE INTO events(ts,channel,weight,text,terms,file,page,uid,src_key)"
-                  " VALUES(?,?,?,?,?,?,?,?,?)",
-                  (ts, "read", w, txt[:500], json.dumps(terms[:12], ensure_ascii=False), rel, page_no, "", key))
+        c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
+                  " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+                  (key, ts, "read", w, txt[:TEXT_MAX], json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
+                   rel, page_no, "", key, EXTRACTOR_VER))
         n += 1
     return n
 
@@ -546,6 +567,54 @@ def rebuild_profile(c, now=None):
     return out
 
 
+# ── 及时性:读时保证新鲜(下游拿到的永远是最新数据,不等 15min timer)──────────────────
+def _sources_fp():
+    """所有源的指纹(mtime+size)。变了才需要导入 —— 没变时这一步是纯 stat,微秒级。"""
+    fp = []
+    for p_ in [STATE / "vocab-lookups.jsonl", ATT_DIR / "dwell.jsonl", RAW]:
+        try:
+            st = p_.stat()
+            fp.append("%s:%d:%d" % (p_.name, st.st_mtime_ns, st.st_size))
+        except Exception:
+            pass
+    for d in ("pdf-highlights", "epub-highlights", "html-highlights", "assistant-convo",
+              "assistant-convo-archive", "reader-check-reports"):
+        try:
+            dd = STATE / d
+            mt = max((f.stat().st_mtime_ns for f in dd.glob("*")), default=0)
+            n = sum(1 for _ in dd.glob("*"))
+            fp.append("%s:%d:%d" % (d, mt, n))
+        except Exception:
+            pass
+    return hashlib.sha1("|".join(fp).encode()).hexdigest()[:16]
+
+
+def ensure_fresh(c=None, force=False):
+    """★读时新鲜:源变了(或抽取器升版)就**增量导入**;没变直接返回(微秒)。
+    focus_window / focus_of_text / focus 查询前都会调 —— 下游读到的永远是当下的数据,
+    不依赖 quick_sync 的 15min 周期(那只是兜底 + 焦点快照落盘)。
+    增量导入不是全量重算:add_event 对同版本已存在的 src_key 直接跳过(不跑分词),所以很便宜。"""
+    own = c is None
+    c = c or _db()
+    try:
+        cur = _sources_fp() + "|x%d" % EXTRACTOR_VER
+        row = c.execute("SELECT v FROM meta WHERE k='sources_fp'").fetchone()
+        if not force and row and row[0] == cur:
+            return {"fresh": True, "imported": 0, "took_s": 0.0}
+        t0 = time.time()
+        stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
+                 "qa": import_convo(c), "qa_arch": import_convo_archive(c),
+                 "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c)}
+        c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('sources_fp',?)", (cur,))
+        c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('last_import',?)", (str(int(time.time())),))
+        c.commit()
+        return {"fresh": False, "imported": sum(stats.values()), "stats": stats,
+                "took_s": round(time.time() - t0, 2)}
+    finally:
+        if own:
+            c.close()
+
+
 # ── 灵活查询:任意时间窗 / 渠道 / 书 的焦点(AI 按语境调用;"昨天""上个月"都能答) ──────
 _WHEN = {   # 自然语言时间窗 → (since_days_ago, until_days_ago);AI 传 when= 这些词即可
     "今天": (0, 0), "today": (0, 0), "昨天": (1, 1), "yesterday": (1, 1), "前天": (2, 2),
@@ -589,7 +658,8 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
     返回 {ok, window:{since,until,label}, n_events, top:[{term,score,n,channels,refs}]}。"""
     s_ts, u_ts = parse_when(when, days, since, until)
     c = _db()
-    q = "SELECT ts, channel, weight, terms, file, page FROM events WHERE ts>=? AND ts<?"
+    ensure_fresh(c)          # ★读时新鲜(源没变时纯 stat,微秒)
+    q = "SELECT ts, channel, weight, terms, file, page, id FROM events WHERE ts>=? AND ts<?"
     args = [int(s_ts), int(u_ts)]
     if channels:
         q += " AND channel IN (%s)" % ",".join("?" * len(channels))
@@ -612,12 +682,14 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
             pass
     sc, cnt, chs, refs = defaultdict(float), defaultdict(int), defaultdict(set), defaultdict(list)
     surf = defaultdict(Counter)
+    by_ch = defaultdict(lambda: defaultdict(float))   # 可回溯:分数按渠道拆
+    evid = defaultdict(list)                          # 可回溯:证据事件 id
     # ★双权重(用户设计):最终权重 = 渠道基础权重 × **时间权重**。窗内时间权重 = 相对**窗口末端**的
     #   半衰期衰减(窗越长半衰期越长:窗口 1/3 处衰减到一半)——「上个月」里月末的比月初的更代表当时焦点,
     #   但不会像全局画像那样把整个窗口压平。窗 ≤2 天(今天/昨天)不衰减(一天内先后没有意义)。
     _span_d = max(0.5, (u_ts - s_ts) / 86400.0)
     _half = (_span_d / 3.0) if _span_d > 2 else 0.0
-    for ts, ch, w, terms_j, f, page in rows:
+    for ts, ch, w, terms_j, f, page, _eid in rows:
         try:
             terms = set(json.loads(terms_j))
         except Exception:
@@ -631,6 +703,9 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
             sc[t] += w
             cnt[t] += 1
             chs[t].add(ch)
+            by_ch[t][ch] += w
+            if len(evid[t]) < 20:
+                evid[t].append(_eid)
             if f and len(refs[t]) < 6:
                 refs[t].append((ts, f, page))
     nb = max(1, len(all_books))
@@ -639,6 +714,8 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
         idf = math.log((1 + nb) / (1 + len(tb.get(t, ())))) + 0.3
         _disp = surf[t].most_common(1)[0][0] if surf.get(t) else t
         out.append({"term": _disp, "key": t, "score": round(v * idf, 2), "n": cnt[t], "channels": sorted(chs[t]),
+                    "idf": round(idf, 2), "by_channel": {k2: round(v2, 2) for k2, v2 in by_ch[t].items()},
+                    "evidence": evid[t],        # 可回溯:事件 id → explain() 能取回原文
                     "refs": [{"file": f, "page": p} for _, f, p in sorted(refs[t], reverse=True)[:2]]})
     out.sort(key=lambda x: -x["score"])
     c.close()
@@ -648,6 +725,37 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
             "top": out[:top]}
 
 
+def explain(term, when="", days=None, limit=12):
+    """★可回溯:这个词**为什么**在焦点里——列出贡献它的每一条事件(渠道/时间/权重/书页/原文片段)
+    + 分数构成。下游(或用户)要审计焦点数据时调它。"""
+    c = _db()
+    ensure_fresh(c)
+    k = norm_key(term) or term
+    s_ts, u_ts = parse_when(when, days) if (when or days) else (0, time.time())
+    rows = c.execute("SELECT id, ts, channel, weight, text, terms, file, page, xver FROM events"
+                     " WHERE ts>=? AND ts<? ORDER BY ts DESC", (int(s_ts), int(u_ts))).fetchall()
+    hits = []
+    for _id, ts, ch, w, txt, tj, f, page, xv in rows:
+        try:
+            terms = json.loads(tj)
+        except Exception:
+            continue
+        m = [x for x in terms if (norm_key(x) or x) == k]
+        if not m:
+            continue
+        hits.append({"event_id": _id, "ts": ts, "when": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
+                     "channel": ch, "base_weight": w, "surface": m[0],
+                     "terms_in_event": len(set(terms)), "dilution": round(1 / math.sqrt(max(1, len(set(terms)))), 3),
+                     "file": f, "page": page, "extractor_ver": xv,
+                     "text": (txt or "")[:160]})
+        if len(hits) >= limit:
+            break
+    c.close()
+    return {"ok": True, "term": term, "key": k, "n_events": len(hits), "events": hits,
+            "note": "score = Σ(渠道权重 × 事件内稀释 1/√N × 时间衰减) × IDF;"
+                    "extractor_ver < %d 的事件是旧分词器抽的(下次 --rebuild 会重抽)" % EXTRACTOR_VER}
+
+
 def focus_of_text(text, top=8):
     """★「当前对话/这段文字的焦点」:直接抽词 + 用全库 IDF 排序(无需事件表)。
     用于:助手看本轮对话说了什么 → 焦点术语 → 再去 focus_window/FTS 找相关材料。"""
@@ -655,6 +763,7 @@ def focus_of_text(text, top=8):
     if not terms:
         return {"ok": True, "top": []}
     c = _db()
+    ensure_fresh(c)
     tb = defaultdict(set)
     all_books = {r[0] for r in c.execute("SELECT DISTINCT file FROM events WHERE file<>''")}
     for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
