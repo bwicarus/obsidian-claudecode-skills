@@ -746,26 +746,54 @@ def pdf_api_book_meta():
 _SANDBOX_DIR_REL = "资源/uploads/.sandbox"   # 点目录:Obsidian Sync 不同步、list-pdfs/搜索索引排除
 
 
+_SANDBOX_PAGES = 10   # 节选页数:整本副本在大扫描书上"很长时间加载不出来"(页图/字符层全新文件从零渲+自动预热整本),模拟环境用节选即可
+
+
 @bp.route("/api/sandbox", methods=["POST"])
 def pdf_api_sandbox():
-    """确保 file 的沙盒副本存在(资源/uploads/.sandbox/<原名>);reset=true 重置副本+清边车。"""
+    """确保 file 的沙盒副本存在(资源/uploads/.sandbox/<原名>)。
+    副本 = **围绕最近阅读位置节选 ~10 页**(用户方案:整本 204MB 副本冷渲太慢;节选让 CLI
+    "读当前页"读到的还是用户正在学的内容)。锚页放节选第 3 页(前 2 后 7)。
+    reset=true 重切(阅读位置变了跟着走)+清边车。返回 {rel, fresh, pages, anchor, src_from}。"""
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
     if rel.startswith(_SANDBOX_DIR_REL):
-        return jsonify({"ok": True, "rel": rel, "fresh": False})
+        return jsonify({"ok": True, "rel": rel, "fresh": False, "anchor": 1})
     ap = _safe_vault_path(rel)
     if not ap or not rel.lower().endswith(".pdf"):
         return jsonify({"ok": False, "error": "文件不存在或不是 PDF"}), 400
-    import shutil
     sb_dir = OBSIDIAN_ROOT / _SANDBOX_DIR_REL
     sb_dir.mkdir(parents=True, exist_ok=True)
     dst = sb_dir / ap.name
     sb_rel = _SANDBOX_DIR_REL + "/" + ap.name
+    meta_p = sb_dir / (ap.name + ".meta.json")   # 记节选参数(anchor/src_from),非 fresh 时也能返回
     fresh = False
-    if body.get("reset") or not dst.exists():
+    if body.get("reset") or not dst.exists() or not meta_p.exists():
+        import fitz
+        src = fitz.open(str(ap))
+        n = src.page_count
+        pos = 1
+        try:
+            _rp = json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
+            pos = int((_rp.get(rel) or {}).get("pos") or 1)
+        except Exception:
+            pass
+        pos = max(1, min(pos, n))
+        if n <= _SANDBOX_PAGES:
+            start, end = 1, n                     # 小书整本
+        else:
+            start = max(1, pos - 2)
+            end = min(n, start + _SANDBOX_PAGES - 1)
+            start = max(1, end - _SANDBOX_PAGES + 1)
+        out = fitz.open()
+        out.insert_pdf(src, from_page=start - 1, to_page=end - 1)
+        src.close()
         tmp = dst.with_suffix(".pdf.tmp")
-        shutil.copy2(str(ap), str(tmp))
+        out.save(str(tmp), garbage=3, deflate=True)
+        out.close()
         tmp.replace(dst)
+        meta = {"anchor": pos - start + 1, "src_from": start, "pages": end - start + 1, "src_rel": rel}
+        meta_p.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
         fresh = True
         try:
             _upages_save(sb_rel, [])
@@ -779,7 +807,13 @@ def pdf_api_sandbox():
             _ink_save(sb_rel, {})
         except Exception:
             pass
-    return jsonify({"ok": True, "rel": sb_rel, "fresh": fresh})
+    try:
+        meta = json.loads(meta_p.read_text("utf-8"))
+    except Exception:
+        meta = {"anchor": 1, "src_from": 1, "pages": 0}
+    return jsonify({"ok": True, "rel": sb_rel, "fresh": fresh,
+                    "anchor": meta.get("anchor", 1), "src_from": meta.get("src_from", 1),
+                    "pages": meta.get("pages", 0)})
 
 
 @bp.route("/api/publish-actions", methods=["POST"])

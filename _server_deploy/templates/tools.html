@@ -113,6 +113,7 @@
 </main>
 <div id="tl-sim" hidden>
   <div class="tl-sim-hd">🧪 沙盒预览 · 真实阅读器(可手写/点检查),<b>不动原书</b>
+    <span id="tl-sim-info" style="color:#7a8bb0"></span>
     <span class="sp"></span>
     <button id="tl-sim-reload" class="tl-b" title="重新载入预览">↻</button>
     <button id="tl-sim-reset" class="tl-b" title="把沙盒恢复成原书的干净副本">♻ 重置沙盒</button>
@@ -142,18 +143,19 @@
   }).catch(function () {});
   // ── 沙盒(用户设计:测试在**模拟环境**跑 + 直观看到结果):测试上下文一律换成书的沙盒副本;
   //    预览 = iframe 里开真实阅读器读副本,CLI 产物 client_actions 经 /api/publish-actions → SSE 推给它执行。
-  var _sbMap = {};   // 原书 rel → 沙盒 rel
+  var _sbMap = {};   // 原书 rel → {rel:沙盒rel, anchor:锚页(节选内页码), pages, src_from}
   function sbEnsure(rel, reset) {
-    if (!rel) return Promise.resolve('');
+    if (!rel) return Promise.resolve(null);
     if (!reset && _sbMap[rel]) return Promise.resolve(_sbMap[rel]);
     return fetch('/pdf/api/sandbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file: rel, reset: !!reset }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) { _sbMap[rel] = d.rel; return d.rel; } throw new Error((d && d.error) || '沙盒创建失败'); });
+      .then(function (d) { if (d && d.ok) { _sbMap[rel] = d; return d; } throw new Error((d && d.error) || '沙盒创建失败'); });
   }
   function ctx() {
     var rel = bookSel.value, sb = rel && _sbMap[rel];
-    return rel ? { file_rel: sb || rel, page: 1, tools_page: true } : { no_book: true, tools_page: true };
+    return rel ? { file_rel: (sb && sb.rel) || rel, page: (sb && sb.anchor) || 1, tools_page: true }
+               : { no_book: true, tools_page: true };
   }
   // 预览面板:iframe 载入慢/SSE 要先接上 → client_action 进队列,ready 后统一 publish(SSE 无回放,早发会丢)
   var _simQ = [], _simReady = false, _simRel = '';
@@ -161,11 +163,13 @@
   function simOpen() {
     var rel = bookSel.value; if (!rel) { RC.toast && RC.toast('先选一本书'); return; }
     sbEnsure(rel).then(function (sb) {
-      if (_simRel !== sb) {
-        _simReady = false; _simRel = sb;
-        simF.src = '/pdf/view?file=' + encodeURIComponent(sb);
+      if (_simRel !== sb.rel) {
+        _simReady = false; _simRel = sb.rel;
+        simF.src = '/pdf/view?file=' + encodeURIComponent(sb.rel) + '&page=' + (sb.anchor || 1);
         simF.onload = function () { setTimeout(function () { _simReady = true; simFlush(); }, 2500); };   // 等阅读器 SSE 接上
       }
+      var inf = document.getElementById('tl-sim-info');
+      if (inf) inf.textContent = sb.pages ? ('节选 ' + sb.pages + ' 页 · 围绕你读到的第 ' + (sb.src_from + (sb.anchor || 1) - 1) + ' 页') : '';
       simEl.hidden = false;
     }).catch(function (e) { RC.toast && RC.toast('沙盒:' + e.message); });
   }
@@ -187,8 +191,8 @@
   document.getElementById('tl-sim-reset').addEventListener('click', function () {
     var rel = bookSel.value; if (!rel) return;
     if (!confirm('重置沙盒?(恢复成原书干净副本,测试产生的纸/高亮/手写全清掉)')) return;
-    sbEnsure(rel, true).then(function (sb) {
-      RC.toast && RC.toast('沙盒已重置');
+    sbEnsure(rel, true).then(function () {
+      RC.toast && RC.toast('沙盒已重置(按当前阅读位置重新节选)');
       if (!simEl.hidden) { _simRel = ''; simOpen(); }
     }).catch(function (e) { RC.toast && RC.toast('重置失败:' + e.message); });
   });

@@ -40,6 +40,8 @@ def spec(kind: str, page_w: float, page_h: float) -> dict:
     """由 纸张预设(目标行列数)+ 页面物理尺寸 算出格子的物理大小。
     格子按**比例**切:留 margin 边距后,把可用区平分成 rows × cols 格。
     这样不管页面是 A4(595)还是超大扫描件(2230),观感一致(都是 ~30 行 ~34 列)。"""
+    if not isinstance(kind, str):   # 防御:client_action 手搓/异常载荷把 paper 传成 dict → 不 500,落默认纸型
+        kind = DEFAULT_KIND
     p = dict(PAPERS.get(kind) or PAPERS[DEFAULT_KIND])
     rows, cols = int(p["rows"]), int(p["cols"])
     mgn = float(p["margin"])

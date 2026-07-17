@@ -242,5 +242,12 @@ instruction——都带被删语义;prompt 声明"字符串参数(标题/文案)
   `window.__upStartTask/goToPage/openBookAt` **转发器**接管 rc-turncard `_applyNewCAs` 的 window[fn]
   调用(openBookAt 必须覆盖,否则 rc-assistant 的跨书导航会把工具库整页带走);SSE 无回放 → 动作先进
   `_simQ` 队列,iframe onload+2.5s(SSE 接上)后统一 flush。
-- 验证结论:直连页与 iframe 均实测通(publish → 纸渲染);冷沙盒首开在 Pi 上可能要 1-2 分钟
-  (页图现渲+若有 yolo 批任务抢 CPU 更慢),不是链路问题。
+- **沙盒 = 节选副本**(2026-07-17 用户方案,替代整本拷贝):整本 204MB 副本"很长时间加载不出来"
+  ——慢不在拷贝,在副本是全新文件,页图/字符层缓存从零渲 + `_maybeAutoPrewarm` 自动预热整本。
+  改为**围绕最近阅读位置节选 ~10 页**(fitz insert_pdf,前 2 后 7,锚页=节选内第 pos-start+1 页,
+  参数存 `<名>.pdf.meta.json`;书 ≤10 页整本拷)。ctx.page=anchor → CLI"读当前页"读到的仍是用户
+  正在学的内容;iframe URL 带 &page=anchor 直接落锚页;♻重置=按当前阅读位置重切。
+  实测:204MB→34MB 切 1.5s,iframe 骨架 1.1s、首屏页图 4.1s(原来 30s-2min)。
+- 验证结论:publish → SSE → iframe 建纸带块渲染,端到端实测通。⚠ 测试时手搓 client_action 载荷
+  注意 **paper 是纸型字符串**('exam'),不是 dict——传 dict 曾致 paper.spec `PAPERS.get(dict)` 500
+  (已加防御:非 str 落默认纸型),且此前多轮"纸没出现"的假失败全是这个假载荷问题,链路一直是通的。
