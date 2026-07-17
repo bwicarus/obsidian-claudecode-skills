@@ -145,14 +145,32 @@ def _t2s(t):
     return _occ.convert(t) if _occ else t
 
 
+CONCEPTS = ATT_DIR / "concepts.json"   # L2 语义归一:{别名(norm后): 概念键} —— AI 判定的结果,永久缓存
+_CONCEPTS = None
+
+
+def _concepts():
+    global _CONCEPTS
+    if _CONCEPTS is None:
+        try:
+            _CONCEPTS = json.loads(CONCEPTS.read_text("utf-8")).get("alias", {})
+        except Exception:
+            _CONCEPTS = {}
+    return _CONCEPTS
+
+
 def norm_key(term):
-    """术语 → 归一键(聚合用)。字形层:NFKC + 日本新字体 + 繁→简。"""
+    """术语 → 归一键(聚合用)。
+    L1 字形层:NFKC + 日本新字体 + 繁→简(証明→证明);
+    L2 语义层:concepts.json 的别名表(proof / 証明 / 证明 → 同一概念键)—— 由 build_concepts()
+    夜间用 AI 判定后永久缓存;查表 O(1),不在热路径调 AI。"""
     t = unicodedata.normalize("NFKC", str(term or "")).strip()
     if not t:
         return ""
     if _CJK.search(t):
         t = _t2s(t.translate(_JP_TRANS))
-    return t.lower()
+    t = t.lower()
+    return _concepts().get(t, t)          # L2:命中别名表 → 概念键;没命中 → 字形键(原样)
 
 
 def _tag_ja():
@@ -206,7 +224,7 @@ def extract_terms(text, hint="", lang=None):
     text = (text or "").strip()
     if not text:
         return []
-    if hint == "word":
+    if hint == "word":   # 查词事件(text 本身就是一个词);hint="sel"=选中的原文,走正常抽词
         # 查词日志的 word 不一定干净(实测:用户点到功能词「という/いう」、点到整句「全問未回答です」)。
         # 规则:ASCII→原样;纯汉字→原样(日/中汉字词都是有效术语,别切碎「議事」);
         #      含假名→过日语词性(功能词/动词自然被过滤掉,长短语抽出其中名词)。
@@ -329,7 +347,7 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
     """把一条事件写进**派生索引**(自动抽词、按 src_key 幂等)。
     ⚠ 这是内部函数:调用方必须是导入器(读的是 append-only 的源)。
       新渠道请用 **append_raw()**(写账本)—— 直写本表的数据 --rebuild 时会丢。"""
-    key = hashlib.sha1(f"{channel}|{int(ts)}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
+    key = hashlib.sha1(f"{channel}|{int(ts)}|{hint}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
     # ★及时性:同版本已存在 → 直接跳过(**别白跑分词**,它是增量导入的瓶颈)。
     #   抽取器升版(EXTRACTOR_VER)时旧行会被重抽(下面 REPLACE),所以升版即自动全量刷新。
     row = c.execute("SELECT xver FROM events WHERE src_key=?", (key,)).fetchone()
@@ -418,8 +436,15 @@ def import_convo(c):
             fr = m.get("file_rel") or ""
             if "/.sandbox/" in fr:
                 continue
+            # ★问题 = 问句 + **带入的上下文**(用户实锤:选中一段原文提问,选中内容整个被丢了)。
+            #   两者语言常常不同(中文问 + 日语原文)→ **分开抽词**:问句 lang=[] 按字形判,
+            #   选中的原文 lang=None 按书语言(它是书的内容)。
             n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem, lang=[])   # ⚠ qa=**用户说的话**,语言≠书语言(用中文问日语书是常态)→ lang=[] 按字形判;传书语言会让 fugashi 把中文口语整句吞成一个术语(2026-07-17 实锤回归)
+                           uid=f.stem, lang=[])
+            _sel = str(m.get("selection") or "").strip()
+            if _sel:
+                n += add_event(c, m.get("ts") or 0, "qa", _sel[:1000], fr, m.get("page") or 0,
+                               uid=f.stem, hint="sel")   # lang=None → 按书语言(选中的是原文)
     return n
 
 
@@ -447,8 +472,15 @@ def import_convo_archive(c):
             fr = m.get("file_rel") or ""
             if "/.sandbox/" in fr:
                 continue
+            # ★问题 = 问句 + **带入的上下文**(用户实锤:选中一段原文提问,选中内容整个被丢了)。
+            #   两者语言常常不同(中文问 + 日语原文)→ **分开抽词**:问句 lang=[] 按字形判,
+            #   选中的原文 lang=None 按书语言(它是书的内容)。
             n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem, lang=[])   # ⚠ qa=**用户说的话**,语言≠书语言(用中文问日语书是常态)→ lang=[] 按字形判;传书语言会让 fugashi 把中文口语整句吞成一个术语(2026-07-17 实锤回归)
+                           uid=f.stem, lang=[])
+            _sel = str(m.get("selection") or "").strip()
+            if _sel:
+                n += add_event(c, m.get("ts") or 0, "qa", _sel[:1000], fr, m.get("page") or 0,
+                               uid=f.stem, hint="sel")   # lang=None → 按书语言(选中的是原文)
         if trimmed:
             f.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
     return n
@@ -917,6 +949,139 @@ def focus_of_text(text, top=8):
     return {"ok": True, "top": out[:top]}
 
 
+def _lang_of(t):
+    if _KANA.search(t):
+        return "ja"
+    if _CJK.search(t):
+        return "cjk"
+    return "en"
+
+
+def _ecdict_zh(word):
+    """ECDICT 释义里的中文词(候选生成用;它是英中词典,340 万词条,项目已有)。"""
+    try:
+        e = sqlite3.connect("file:%s?mode=ro" % (Path(PROJECT_DIR) / "data" / "ecdict.db"), uri=True)
+        r = e.execute("SELECT translation FROM stardict WHERE word=?", (word,)).fetchone()
+        e.close()
+        if not r or not r[0]:
+            return set()
+        return set(re.findall(r"[\u4e00-\u9fff]{2,6}", r[0]))
+    except Exception:
+        return set()
+
+
+def build_concepts(dry=False, max_pairs=50):
+    """★跨语言概念归一 L2(用户要求:「相同含义的不同语言单词必须在数据库中被看作同一单词」)。
+
+    **数据实证**(2026-07-17):库里 proof↔证明、theorem↔定理、vector↔向量 同时存在
+    (书是英/日原文,笔记和提问是中文)—— 同一知识点的焦点被劈成两半。
+
+    三步(分层:高召回候选 → 高精度判定):
+      ① **候选 = 词典**(ECDICT 释义 ∩ 我的中文术语):95 对,含 change↔变化/compute↔计算
+         这种真对应,也含 also↔并且 的噪声 —— 高召回低精度,正好当候选。
+      ② **排序 = 时间共现 × 双边热度**:同一天在「书」和「我的笔记/提问」里都出现过的对优先
+         —— 用户设计「靠保存时间建立联系」。⚠ 时间**只排序不判定**:实测纯共现候选是
+         「feynman↔原子」「preface↔向量」这种垃圾(高频词互撞)。
+      ③ **AI 判词义**(gemini,一次批量):只收明确同义;**严防过度合并**——包含/上下位
+         (统计 vs 人口动态统计、向量 vs 向量空间)、同领域相关(证明 vs 定理)一律 false。
+    结果写 concepts.json 永久缓存;norm_key 查表 O(1)(热路径不调 AI)。
+    """
+    c = _db()
+    ensure_fresh(c)
+    # 收集两侧术语 + 各自出现的天
+    book_days, mine_days = defaultdict(set), defaultdict(set)
+    for ts, ch, tj, f in c.execute("SELECT ts, channel, terms, file FROM events"):
+        day = int(ts // 86400)
+        try:
+            terms = set(json.loads(tj))
+        except Exception:
+            continue
+        tgt = book_days if (ch in ("lookup", "read", "highlight", "check") and f) else mine_days
+        for t in terms:
+            tgt[t].add(day)
+    mine_cjk = {t for t in mine_days if _CJK.search(t) and not _KANA.search(t)}
+    # ① 词典候选
+    cand = []
+    for w, days in book_days.items():
+        if not re.match(r"^[a-z\-']{3,}$", w):
+            continue
+        inter = _ecdict_zh(w) & mine_cjk
+        for z in inter:
+            co = len(days & set().union(*[mine_days[z]]) ) if mine_days.get(z) else 0
+            heat = len(days) + len(mine_days.get(z) or ())
+            cand.append((co * 100 + heat, w, z))      # ② 共现天数优先,其次双边热度
+    cand.sort(reverse=True)
+    # ★按英文词分组(实测教训:一词多义时逐对判 → set↔设定 被判 same,而它在《Book of Proof》里是「集合」;
+    #   element↔成分 同理。分组后让 AI **在候选里选一个或全拒**,并给出书名语境。)
+    grp = {}
+    for sc0, w, z in cand:
+        grp.setdefault(w, [])
+        if z not in grp[w]:
+            grp[w].append(z)
+    words = [w for w in list(grp)[:max_pairs]]
+    top = [(w, grp[w]) for w in words]
+    if dry:
+        return {"ok": True, "n_candidates": len(cand), "n_words": len(grp),
+                "top": [(w, zs[:5]) for w, zs in top[:20]]}
+    if not top:
+        return {"ok": True, "pairs": 0, "merged": 0, "note": "没有跨语言候选"}
+    _books = sorted({(f or "").split("/")[-1] for f, in c.execute(
+        "SELECT DISTINCT file FROM events WHERE file<>'' AND channel IN ('lookup','read','highlight')")})[:6]
+    listing = "\n".join("%d. %s → 候选:%s" % (i + 1, w, " / ".join(zs[:6])) for i, (w, zs) in enumerate(top))
+    prompt = (
+        "用户在读这些书:%s。\n"
+        "下面每行:左边是**这些书里出现的英文词**,右边是从英中词典初筛出的**候选中文词**"
+        "(这些中文词来自用户自己的中文笔记/提问,含噪声)。\n"
+        "对每一行,在候选里**挑出这个英文词在上述学习语境中真正对应的那一个**中文词;"
+        "**没有合适的就整行跳过**(宁可漏,不可错)。\n"
+        "⚠ 必须跳过的情况:① 候选只是词典义项之一、但不是这些书的语境里的意思"
+        "(例:数学书里 set 是『集合』不是『设定/结果』;element 是『元素』不是『成分』);"
+        "② 包含/上下位关系(『向量』vs『向量空间』不是同义);③ 同领域但不同义"
+        "(『证明』vs『定理』);④ 你拿不准的。\n"
+        "**只输出 JSON**:{\"pairs\":[{\"i\":行号,\"zh\":\"选中的那个候选中文词(必须原样来自候选列表)\"}]}\n\n"
+        % ("、".join(_books) or "(未知)") + listing)
+    try:
+        sys.path.insert(0, "/home/bwicarus/webapp")   # assistant.py 在 webapp(脚本进程要显式加)
+        import assistant as A
+        raw = A._gemini_text(prompt, max_tokens=2000, think=False) or ""
+    except Exception as ex:
+        return {"ok": False, "error": "AI 判定失败:%s" % str(ex)[:80]}
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return {"ok": False, "error": "AI 没给出 JSON", "raw": raw[:200]}
+    try:
+        got = json.loads(m.group(0)).get("pairs") or []
+    except Exception:
+        return {"ok": False, "error": "AI 的 JSON 解析失败", "raw": raw[:200]}
+    alias = dict(_concepts())
+    merged = []
+    for r in got:
+        try:
+            w, zs = top[int(r["i"]) - 1]
+            zh = str(r.get("zh") or "").strip()
+            if not zh or zh not in zs:
+                continue                      # ★概念名**必须原样来自候选**(不让 AI 自己起名:
+                                              #   实测它会起「设定」这种在语境里错的名字)
+            ck = _t2s(unicodedata.normalize("NFKC", zh).translate(_JP_TRANS)).lower()
+            wk = _t2s(unicodedata.normalize("NFKC", w).translate(_JP_TRANS)).lower()
+            if not ck or wk == ck:
+                continue
+            alias[wk] = ck                    # ★**只映射英文词 → 中文概念**;中文词一律不动
+                                              #   (防误伤:上一版把「显示」也映射到「指示」,
+                                              #    近义中文词被合并是过度合并的温床)
+            merged.append("%s→%s" % (w, zh))
+        except Exception:
+            continue
+    CONCEPTS.write_text(json.dumps({"alias": alias, "updated": int(time.time()),
+                                    "n_concepts": len(set(alias.values()))},
+                                   ensure_ascii=False, indent=1), "utf-8")
+    global _CONCEPTS
+    _CONCEPTS = alias
+    c.close()
+    return {"ok": True, "judged": len(top), "merged": len(merged), "aliases": len(alias),
+            "examples": merged[:12]}
+
+
 def run(rebuild=False):
     # 页锚迁移(插/删页)会改各源的 page → events.db 的 src_key 含 page,增量导入会产生重复 →
     # pdf_reader._pam_attention_db 落 .rebuild-needed 标记,这里看到就重导(实测 2.3s)。
@@ -951,6 +1116,13 @@ def run(rebuild=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true", help="删库重导全量(分词算法改版后用)")
+    ap.add_argument("--concepts", action="store_true", help="跨语言概念归一:AI 判定同义对 → concepts.json")
+    ap.add_argument("--dry", action="store_true", help="配合 --concepts:只看候选,不调 AI")
     a = ap.parse_args()
+    if a.concepts:
+        print("concepts:", json.dumps(build_concepts(dry=a.dry), ensure_ascii=False)[:600])
+        if not a.dry:
+            run(rebuild=True)      # 别名变了 → 归一键变了 → 重算画像
+        raise SystemExit
     st, total = run(rebuild=a.rebuild)
     print("imported:", st, "| total events:", total, "| focus →", FOCUS)
