@@ -31,6 +31,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from config import PROJECT_DIR, VAULT_ROOT  # noqa: E402
 
+# ★路径自愈(实锤:webapp/.env 只设了 CLAUDE_PROJECT、**没设 OBSIDIAN_VAULT** → webapp 进程里
+#   VAULT_ROOT 会退回 config.py 的 Windows 默认 `C:\obsidian`,笔记渠道静默 0 条、账本可能写错地方)。
+#   本模块被 webapp / voice / 脚本 三种进程 import,不能靠各自的环境变量猜 —— 默认值不存在就按
+#   **本文件的位置**推回项目根(scripts/ 的上一级),vault 按同级 obsidian/ 兜底。
+if not Path(PROJECT_DIR).exists():
+    PROJECT_DIR = Path(__file__).resolve().parent.parent
+if not Path(VAULT_ROOT).exists():
+    _v = Path(PROJECT_DIR).parent / "obsidian"
+    if _v.exists():
+        VAULT_ROOT = _v
+
 ATT_DIR = Path(PROJECT_DIR) / "state" / "attention"
 DB = ATT_DIR / "events.db"
 FOCUS = ATT_DIR / "focus.json"
@@ -50,7 +61,12 @@ ALPHA = 0.65           # 短期占比
 TOP_N = 40
 
 # 渠道权重(设计稿 §5① 草案;调这里即可,画像全量重算立即生效)
-W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0, "read": 0.5}
+W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0, "read": 0.5,
+     "anki_lapse": 2.0,   # Anki 答错 = 薄弱信号(只收 lapse,不收全部复习:52174 条会淹没一切)
+     "tool": 2.0}         # 主动查找(搜书/联网/跨库)的**查询词** = 强意图信号
+ANKI_DB = Path("/home/bwicarus/.local/share/Anki2/User 1/collection.anki2")
+ANKI_LAPSE_DAYS = 180     # 只导近 N 天的答错(历史 18040 条 lapse 是积累,不是当前焦点)
+NOTE_MAX_CHARS = 600      # 笔记事件取标题+首段(全文会把一篇笔记的所有词都拉进画像)
 ARCHIVE_KEEP_D = 180        # 对话纯文本归档保留天数(用户设计:超过几个月再清)
 DWELL_MIN_S = 15            # 「读过一页」判定阈值:同页同日累计停留 ≥15s(原始秒数在 dwell.jsonl,阈值改了可重放)
 
@@ -245,7 +261,11 @@ def _db():
 RAW = ATT_DIR / "raw-events.jsonl"   # ★没有天然源文件的渠道的**账本**(append-only,永不删;--rebuild 也重导它)
 
 
-def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hint="", lang=None, extra=None):
+LEDGER_SCHEMA = 2   # 账本行协议版本(加字段就 +1;读侧按此兼容老行)
+
+
+def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hint="", lang=None,
+               extra=None, actor="user", session_id=None, turn_id=None, call_id=None, anchor=None):
     """★统一事件入口(给**没有天然源文件**的渠道:眼镜 gaze / 工具调用 / 外部 App…)。
     写 append-only 账本 raw-events.jsonl,由 import_raw() 导进派生索引 —— 于是新渠道
     **既不用各造一套源日志格式,也不会被 --rebuild 删掉**。
@@ -256,16 +276,33 @@ def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hin
       走各自导入器;没有源的渠道走这里。
     """
     # ⚠ 账本**不截原文**:它没有上游,截了就是永久损失(派生索引可以截,因为源还在能重算)
-    rec = {"ts": int(ts or time.time()), "channel": str(channel), "text": str(text or ""),
+    # 字段协议(采纳外部审查建议:**协议改起来贵、存储换起来便宜** → 字段一次定对,载体先用 jsonl):
+    #   v/ts/channel/text/file/page/uid  = 基本;actor = user|ai|system(谁做的);
+    #   session_id/turn_id/call_id       = 追溯锚(哪轮对话/哪次工具调用产生的);
+    #   anchor/extra                     = 结构化补充(选区/坐标/任意 payload)
+    rec = {"v": LEDGER_SCHEMA, "ts": int(ts or time.time()), "channel": str(channel),
+           "actor": str(actor or "user"), "text": str(text or ""),
            "file": file or "", "page": int(page or 0), "uid": str(uid or "")}
-    for k, v in (("weight", weight), ("hint", hint), ("lang", lang)):
-        if v is not None:
+    for k, v in (("weight", weight), ("hint", hint), ("lang", lang),
+                 ("session_id", session_id), ("turn_id", turn_id), ("call_id", call_id)):
+        if v is not None and v != "":
             rec[k] = v
-    if isinstance(extra, dict):
-        rec["extra"] = extra
+    for k, v in (("anchor", anchor), ("extra", extra)):
+        if isinstance(v, dict) and v:
+            rec[k] = v
     ATT_DIR.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    # ★flock:webapp / voice / 后台脚本都可能同时写(外部审查点出的多进程写入)。
+    #   POSIX 只保证 <PIPE_BUF(4096) 的 append 原子 —— 而账本**故意不截原文**,大行会超。
+    #   实测「无锁并发写 6000B 行」这次没坏,但那是运气不是保证 → 加锁(开销 ~微秒)。
     with open(RAW, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+        f.write(line)
+        f.flush()
     return True
 
 
@@ -281,6 +318,7 @@ def import_raw(c):
             continue
         if "/.sandbox/" in (d.get("file") or ""):
             continue
+        # v1 行没有 v/actor 字段 —— 照收(账本协议向后兼容,老数据不丢)
         n += add_event(c, d.get("ts") or 0, d.get("channel") or "raw", d.get("text") or "",
                        d.get("file") or "", d.get("page") or 0, uid=d.get("uid") or "",
                        weight=d.get("weight"), hint=d.get("hint") or "", lang=d.get("lang"))
@@ -492,6 +530,90 @@ def import_dwell(c):
     return n
 
 
+def import_anki_lapses(c):
+    """Anki **答错**(revlog.ease=1)→ 薄弱信号。只读打开 collection(Anki 在跑也不干扰)。
+    ★只收 lapse 不收全部复习:总 revlog 52174 条(大批量日语沉浸牌组的历史积累),
+      全导会把 2 千条真实注意力事件淹没;而「答错」量小(近 180 天 51 条)且信号最强。
+    文本 = 卡片正面(notes.sfld);牌组名进 extra,便于日后按牌组过滤。"""
+    if not ANKI_DB.exists():
+        return 0
+    n = 0
+    try:
+        con = sqlite3.connect("file:%s?mode=ro&immutable=1" % ANKI_DB, uri=True)
+        con.create_collation("unicase", lambda a, b: (a.lower() > b.lower()) - (a.lower() < b.lower()))
+        cut = int((time.time() - ANKI_LAPSE_DAYS * 86400) * 1000)
+        rows = con.execute(
+            "SELECT r.id, n.sfld, d.name FROM revlog r"
+            " JOIN cards ca ON ca.id = r.cid JOIN notes n ON n.id = ca.nid"
+            " LEFT JOIN decks d ON d.id = ca.did"
+            " WHERE r.ease = 1 AND r.id > ? ORDER BY r.id DESC LIMIT 2000", (cut,)).fetchall()
+        con.close()
+    except Exception as ex:
+        sys.stderr.write("[anki] 读 collection 失败(跳过): %s\n" % str(ex)[:80])
+        return 0
+    import re as _re
+    for rid, sfld, deck in rows:
+        txt = _re.sub(r"<[^>]+>|\\\([^)]*\\\)|\$[^$]*\$", " ", str(sfld or ""))   # 去 HTML / LaTeX(公式不是术语)
+        txt = _re.sub(r"\s+", " ", txt).strip()[:200]
+        if len(txt) < 2:
+            continue
+        key = hashlib.sha1(("anki|%d" % rid).encode()).hexdigest()[:20]
+        row = c.execute("SELECT xver FROM events WHERE src_key=?", (key,)).fetchone()
+        if row and int(row[0] or 0) >= EXTRACTOR_VER:
+            continue
+        terms = extract_terms(txt)          # 卡片语言不定 → 按字形判(牌组语言没有权威表)
+        if not terms:
+            continue
+        c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
+                  " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+                  (key, int(rid / 1000), "anki_lapse", W["anki_lapse"], txt,
+                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), "", 0, "", key, EXTRACTOR_VER))
+        n += 1
+    return n
+
+
+def import_notes(c):
+    """笔记(vault 根的 md)→ 最强主动信号(权重 5.0:为一个知识点写笔记 = 深度投入)。
+    ★只取**标题 + 首段**(NOTE_MAX_CHARS):全文会把一篇笔记里的所有词都拉进画像,
+      淹没真正的焦点(同 check 只收纸标题的道理)。ts = 文件 mtime(按天去重:同一天多次改算一条)。
+    跳过:索引/模板/资源目录、`_` 开头、空文件。"""
+    root = Path(VAULT_ROOT)
+    if not root.exists():
+        return 0
+    n = 0
+    for f in root.glob("*.md"):                       # 只扫 vault 根(学习笔记都在这;资源/books 是素材不是笔记)
+        if f.name.startswith(("_", ".")):
+            continue
+        try:
+            st = f.stat()
+            txt = f.read_text("utf-8")[:4000]
+        except Exception:
+            continue
+        # 去 frontmatter + 取标题与首段
+        if txt.startswith("---"):
+            _e = txt.find("\n---", 3)
+            if _e > 0:
+                txt = txt[_e + 4:]
+        body = " ".join(x.strip("#> -*") for x in txt.split("\n") if x.strip())[:NOTE_MAX_CHARS]
+        body = (f.stem + " " + body).strip()
+        if len(body) < 4:
+            continue
+        day = int(st.st_mtime // 86400)
+        key = hashlib.sha1(("note|%s|%d" % (f.name, day)).encode()).hexdigest()[:20]
+        row = c.execute("SELECT xver FROM events WHERE src_key=?", (key,)).fetchone()
+        if row and int(row[0] or 0) >= EXTRACTOR_VER:
+            continue
+        terms = extract_terms(body)
+        if not terms:
+            continue
+        c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
+                  " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+                  (key, int(st.st_mtime), "note", W["note"], body[:TEXT_MAX],
+                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), "", 0, "", key, EXTRACTOR_VER))
+        n += 1
+    return n
+
+
 def import_checks(c):
     n = 0
     d = STATE / "reader-check-reports"
@@ -571,12 +693,18 @@ def rebuild_profile(c, now=None):
 def _sources_fp():
     """所有源的指纹(mtime+size)。变了才需要导入 —— 没变时这一步是纯 stat,微秒级。"""
     fp = []
-    for p_ in [STATE / "vocab-lookups.jsonl", ATT_DIR / "dwell.jsonl", RAW]:
+    for p_ in [STATE / "vocab-lookups.jsonl", ATT_DIR / "dwell.jsonl", RAW, ANKI_DB]:
         try:
             st = p_.stat()
             fp.append("%s:%d:%d" % (p_.name, st.st_mtime_ns, st.st_size))
         except Exception:
             pass
+    try:                                  # vault 根笔记(note 渠道)
+        _nm = max((f.stat().st_mtime_ns for f in Path(VAULT_ROOT).glob("*.md")), default=0)
+        _nn = sum(1 for _ in Path(VAULT_ROOT).glob("*.md"))
+        fp.append("notes:%d:%d" % (_nm, _nn))
+    except Exception:
+        pass
     for d in ("pdf-highlights", "epub-highlights", "html-highlights", "assistant-convo",
               "assistant-convo-archive", "reader-check-reports"):
         try:
@@ -604,7 +732,8 @@ def ensure_fresh(c=None, force=False):
         t0 = time.time()
         stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
                  "qa": import_convo(c), "qa_arch": import_convo_archive(c),
-                 "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c)}
+                 "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
+                 "anki_lapse": import_anki_lapses(c), "note": import_notes(c)}
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('sources_fp',?)", (cur,))
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('last_import',?)", (str(int(time.time())),))
         c.commit()
@@ -804,7 +933,8 @@ def run(rebuild=False):
     t0 = time.time()
     stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
              "qa": import_convo(c), "qa_arch": import_convo_archive(c),
-             "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c)}
+             "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
+             "anki_lapse": import_anki_lapses(c), "note": import_notes(c)}
     c.commit()
     prof = rebuild_profile(c)
     total = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]

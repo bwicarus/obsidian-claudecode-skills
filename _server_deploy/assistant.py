@@ -3939,6 +3939,41 @@ def _creation_enabled(uid, tool, default_on=None):
     return default_on
 
 
+# ── 注意力画像 · tool 渠道(用户主动查找的**查询词** = 强意图信号)────────────────────
+#   ★为什么这个渠道要埋点(其它 6 个都是零侵入导入):工具调用**没有天然的 append-only 源**
+#     —— convo 的 trace 只存编排 AI 的散文、不含工具参数;vtask 落盘只有 CLI 任务。
+#     这正是账本(state/attention/raw-events.jsonl)的用途:没源的渠道走 append_raw。
+_ATTN_LOOKUP_TOOLS = {          # 只收**查找类**(参数=用户想找什么);操作类(高亮/造纸)已被各自渠道覆盖
+    "search_book": "query", "search_in_book": "query", "search_all_books": "query",
+    "web_search": "query", "lookup_word": "word", "search_notes": "query",
+    "search_vocab": "query", "grammar_lookup": "text",
+}
+
+
+def _attn_tool_event(uid, name, targs, res, ctx):
+    """查找类工具调用 → 账本(注意力画像 tool 渠道)。失败/空查询/沙盒不记。"""
+    try:
+        k = _ATTN_LOOKUP_TOOLS.get(name)
+        if not k or not isinstance(res, dict) or res.get("error"):
+            return
+        q = str((targs or {}).get(k) or "").strip()
+        if len(q) < 2 or len(q) > 200:
+            return
+        rel = str((ctx or {}).get("file_rel") or "")
+        if "/.sandbox/" in rel:
+            return
+        import sys as _sys
+        _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+        import attention_profile as AP
+        AP.append_raw("tool", q, file=rel, page=int((ctx or {}).get("page") or 0), uid=str(uid or ""),
+                      actor="user",     # 查询词是**用户想找的东西**(AI 只是执行者)
+                      lang=[],          # 查询词的语言 = 用户话语的语言,不是书语言
+                      turn_id=str((ctx or {}).get("turn_id") or "") or None,
+                      extra={"tool": name})
+    except Exception:
+        pass
+
+
 def _creation_register(uid, name, targs, res, ctx):
     """工具 done 统一钩子:开关允许且无 error → 登记创造物(brief=告知+结果要点)。
     白名单工具默认记;其它工具默认不记但开了开关也能记(通用模板)。编排循环 + voice-tool 端点共用。"""
@@ -5091,6 +5126,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
+                _attn_tool_event(str(ctx.get("_uid") or ""), name, targs, res, ctx)     # 注意力画像:查找类工具的查询词 → 账本(tool 渠道无天然源)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -5300,6 +5336,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
+                _attn_tool_event(str(ctx.get("_uid") or ""), name, targs, res, ctx)     # 注意力画像:查找类工具的查询词 → 账本(tool 渠道无天然源)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 高亮/便签卡自带逐条撤销/重做 → 抑制下面重复的 undo 行(用户实测双条)
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}   # 实时:工具一执行完就推给前端应用,不等全部输出完
@@ -5432,6 +5469,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 except NameError:
                     _used_tools = {name}   # 本轮已调工具集(写操作幻觉硬防线用)
                 _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:非操作型结果入库(summary-plus-handle)
+                _attn_tool_event(str(ctx.get("_uid") or ""), name, targs, res, ctx)     # 注意力画像:查找类工具的查询词 → 账本(tool 渠道无天然源)
                 _ae_card = isinstance(res, dict) and ((res.get("client_action") or {}).get("fn") == "_assistEdit")   # 同上:高亮/便签卡接管撤销,不再发 undo 行
                 if isinstance(res, dict) and res.get("client_action"):
                     yield {"event": "actions", "data": [res.pop("client_action")]}
@@ -6071,6 +6109,7 @@ def assistant_voice_tool():
     else:   # ㊸ 成功调用也记一行(工具名+耗时)——"到底调没调"从此一句 grep 实锤,不再靠推理
         print(f"[voice-tool] {name} ok {round(time.time() - t0, 1)}s", flush=True)
     _creation_register(str(ctx.get("_uid") or ""), name, targs, res, ctx)   # 创造物库:语音链路走本端点不经编排循环——漏了它=语音轮产出全不入册(用户实锤"查完天气就忘")
+    _attn_tool_event(str(ctx.get("_uid") or ""), name, targs, res, ctx)     # 注意力画像:查找类工具的查询词 → 账本(tool 渠道无天然源)
     # ㉜ 语音场景配图渲染:search_image 结果在语音链路(仅本端点)附 client_action → 前端图卡进侧栏对话流。
     #    文字助手不走此端点(它由模型在 markdown 回答里嵌图),互不干扰。
     if name == "search_image" and isinstance(res, dict) and res.get("images"):

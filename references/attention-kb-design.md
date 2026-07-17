@@ -273,6 +273,51 @@ Flask 的库;而它的记忆设计极简(两个有字符上限的 md + 一张 FT
 | 账本新渠道 | 显式传 | 调用方自己知道 |
 效果:今天焦点头名从「读是我们亚洲人吗」变回「平均寿命」。
 
+## 5h. 七渠道 + 账本协议 v2(2026-07-17;含对 learning.db 建议的最终判断)
+
+### 渠道全表(接入 anki_lapse / note / tool 后)
+| 渠道 | 权重 | 源 | 关键取舍 |
+|---|---|---|---|
+| lookup 查词 | 1.0 | `vocab-lookups.jsonl` | 主力(2161 条);word 必须过分词器 |
+| **note 笔记** | **5.0** | vault 根 `*.md` | **只取标题+首段(600字)**:全文会把一篇笔记所有词拉进画像 |
+| **anki_lapse 答错** | **2.0** | `collection.anki2` revlog(只读 uri) | **只收 ease=1**:全部 revlog 52174 条会淹没一切;近180天答错仅 39-51 条,量小信号最强。去 HTML/LaTeX |
+| highlight | 3.0 | 高亮 sidecar | |
+| qa 问 AI | 2.0 | convo + 归档 | **lang=[]**(用户话语的语言,不是书语言) |
+| check 自测 | 4.0 | 检查报告 | 只收纸标题 |
+| read 读页 | 0.5×(secs/30) | `dwell.jsonl` | 三重排除;自建页用虚拟页码 |
+| **tool 查找** | **2.0** | **账本**(埋点) | 唯一需要埋点的渠道 —— 见下 |
+
+**tool 渠道为什么必须埋点**(其余 6 个都是零侵入导入):工具调用**没有天然 append-only 源**
+——convo 的 trace 只存编排 AI 的散文、不含工具参数;vtask 落盘只有 CLI 任务。所以走账本。
+埋点位置:`assistant._creation_register` 旁(工具 done 的统一钩子,4 个调用点);
+只收 `_ATTN_LOOKUP_TOOLS`(search_book/web_search/lookup_word…)的**查询词**(=用户想找什么),
+失败/非查找类/沙盒都不记。
+
+### 账本协议 v2(采纳外部建议的字段,但不采纳新数据库)
+外部建议建 `learning.db`(learning_events/artifacts/memory_items 三表)。**字段设计我采纳,存储载体不采纳**:
+> **协议改起来贵、存储换起来便宜** → 字段一次定对,载体先用 jsonl。
+
+`append_raw()` 现在写:`v(schema)/ts/channel/actor(user|ai|system)/text/file/page/uid/`
+`weight/hint/lang/session_id/turn_id/call_id/anchor/extra` —— 覆盖他 learning_events 的追溯字段
+(turn_id/call_id/actor/schema_version)。`import_raw` 兼容 v1 老行。
+
+**JSONL vs SQLite 的真实权衡**(他点出的多进程写入是真问题):
+- POSIX 只保证 <PIPE_BUF(4096) 的 append 原子,而账本**故意不截原文** → 大行可能交错。
+  实测「无锁并发写 6000B×60 行」这次没坏,但那是运气 → **加 `fcntl.flock`**(开销微秒)。
+- **升级到 SQLite 的触发条件**(写死在此,别凭感觉):账本 > 10 万行(全扫变慢)、
+  或需要 JOIN/索引查询、或多机写入。现在账本几十行、总事件 2373。
+- `artifacts` 表**不需要**:产物本体在 vault/Anki/sidecar(那才是事实源),缺的只是「哪次学习产生了它」
+  的关系 → `channel=artifact_created` + `extra={kind,uri}` 就够。
+- `memory_items` 表**暂不建**:没有写入者(misconception 属学习闭环、用户明确跳过;preference/goal
+  无需求)。建了就是空表。等第一个真实写入者出现再说。
+
+### 同批修掉的实锤 bug:webapp 的路径靠环境变量猜
+`webapp/.env` **只设了 CLAUDE_PROJECT、没设 OBSIDIAN_VAULT** → webapp 进程 import 本模块时
+`VAULT_ROOT` 退回 config.py 的 Windows 默认 `C:\obsidian`(笔记渠道静默 0 条;账本路径也曾指向
+`C:\claude/...`)。本模块被 **webapp / voice / 脚本三种进程** import,不能靠各自环境变量。
+修:**路径自愈** —— 默认值不存在就按 `__file__` 位置推回项目根、vault 按同级 `obsidian/` 兜底;
+顺手给 webapp/.env 补上 OBSIDIAN_VAULT(治本)。
+
 ## 6. 分阶段路线(建议,未拍板)
 
 - ~~**阶段 0**:事件表 + 现有渠道接入~~ ✅ 2026-07-17(改为零侵入导入器,见 §5b)
