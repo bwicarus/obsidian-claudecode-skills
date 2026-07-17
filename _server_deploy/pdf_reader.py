@@ -875,9 +875,15 @@ def pdf_api_read_dwell():
         with open(p, "a", encoding="utf-8") as f:
             for it in items[:80]:
                 try:
-                    f.write(json.dumps({"ts": now, "file": rel, "page": int(it.get("page") or 0),
-                                        "secs": max(0, min(600, int(it.get("secs") or 0))), "uid": uid},
-                                       ensure_ascii=False) + "\n")
+                    rec = {"ts": now, "secs": max(0, min(600, int(it.get("secs") or 0))),
+                           "file": rel, "uid": uid}
+                    _up = str(it.get("upage") or "")[:40]
+                    if _up:   # 虚拟页码(自建页 uid):插删页都不漂移(用户设计)
+                        rec["upage"] = _up
+                        rec["page"] = 0
+                    else:
+                        rec["page"] = int(it.get("page") or 0)
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
     except Exception:
@@ -7111,6 +7117,131 @@ def _up_migrate_render_caches(rel, ap, mode, pivot, old_mtime, new_mtime):
     return moved
 
 
+def _up_jsonl_plan(path: Path, mutate_line):
+    """jsonl 日志的迁移 plan:逐行 mutate_line(dict)->bool(改没改) / None(丢弃这行)。
+    与 _up_json_plan 同协议(write plan 可回滚);文件不存在→无事;坏行原样保留(不因一行坏丢整个日志)。"""
+    if not path.exists():
+        return None, None
+    try:
+        raw = path.read_bytes()
+        out, changed = [], False
+        for ln in raw.decode("utf-8", "replace").splitlines():
+            if not ln.strip():
+                continue
+            try:
+                d = json.loads(ln)
+            except Exception:
+                out.append(ln)          # 坏行:原样留着,别丢数据
+                continue
+            r = mutate_line(d)
+            if r is None:               # 丢弃(锚定的页被删了)
+                changed = True
+                continue
+            if r:
+                changed = True
+                out.append(json.dumps(d, ensure_ascii=False))
+            else:
+                out.append(ln)
+        if not changed:
+            return None, None
+        nb = ("\n".join(out) + ("\n" if out else "")).encode("utf-8")
+        return ("write", path, nb, raw), None
+    except Exception as ex:
+        return None, "%s 迁移跳过:%s" % (path.name, str(ex)[:60])
+
+
+def _pam_vocab_lookups(ctx):
+    """查词日志 state/vocab-lookups.jsonl({word,lemma,pdf,page,ts})——注意力画像的主力源。
+    页被删 → 该条查词记录的 page 无处安放,但**词本身仍是有效学习信号** → page 置 0(保留事件,丢页锚)。"""
+    def mut(d):
+        if d.get("pdf") != ctx["rel"] or not isinstance(d.get("page"), int) or isinstance(d.get("page"), bool):
+            return False
+        np = ctx["mv"](d["page"])
+        if np is None:
+            d["page"] = 0
+            return True
+        if np != d["page"]:
+            d["page"] = np
+            return True
+        return False
+    plan, warn = _up_jsonl_plan(CLAUDE_DIR / "state" / "vocab-lookups.jsonl", mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_attention_dwell(ctx):
+    """读页停留 state/attention/dwell.jsonl({ts,file,page,secs})。页被删 → 整条丢弃
+    (「读过某页」的记录在那页没了之后没有意义,与高亮/便签同语义)。自建页记的是 uid 不是页码,天然免疫。"""
+    def mut(d):
+        if d.get("file") != ctx["rel"] or not isinstance(d.get("page"), int) or isinstance(d.get("page"), bool):
+            return False
+        if d.get("upage"):                       # 虚拟页码(自建页 uid):永不漂移
+            return False
+        np = ctx["mv"](d["page"])
+        if np is None:
+            return None                          # 丢弃
+        if np != d["page"]:
+            d["page"] = np
+            return True
+        return False
+    plan, warn = _up_jsonl_plan(CLAUDE_DIR / "state" / "attention" / "dwell.jsonl", mut)
+    return ([plan] if plan else []), ([warn] if warn else [])
+
+
+def _pam_convo(ctx):
+    """助手对话 state/assistant-convo/*.json(每条消息带 page/file_rel:历史回看的上下文卡 + 注意力画像的 qa 源)
+    与归档 state/assistant-convo-archive/*.jsonl。页被删 → page 置 0(对话内容本身仍有效,别丢)。"""
+    plans, warns = [], []
+    def _mut_msg(m):
+        if m.get("file_rel") != ctx["rel"] or not isinstance(m.get("page"), int) or isinstance(m.get("page"), bool):
+            return False
+        np = ctx["mv"](m["page"])
+        if np is None:
+            m["page"] = 0
+            return True
+        if np != m["page"]:
+            m["page"] = np
+            return True
+        return False
+    d = CLAUDE_DIR / "state" / "assistant-convo"
+    if d.exists():
+        for f in sorted(d.glob("*.json")):
+            if ".summary." in f.name or ".corrupt." in f.name:
+                continue
+            def mut(data, _m=_mut_msg):
+                if not isinstance(data, list):
+                    return False
+                ch = False
+                for msg in data:
+                    if isinstance(msg, dict) and _m(msg):
+                        ch = True
+                return ch
+            pl, wn = _up_json_plan(f, mut)
+            if pl:
+                plans.append(pl)
+            if wn:
+                warns.append(wn)
+    ad = CLAUDE_DIR / "state" / "assistant-convo-archive"
+    if ad.exists():
+        for f in sorted(ad.glob("*.jsonl")):
+            pl, wn = _up_jsonl_plan(f, _mut_msg)
+            if pl:
+                plans.append(pl)
+            if wn:
+                warns.append(wn)
+    return plans, warns
+
+
+def _pam_attention_db(ctx):
+    """注意力事件库 state/attention/events.db 是**纯派生数据**(从上面几个源导入),且 src_key 含 page
+    → 页码变了不能增量修(会产生重复事件),只能重导。这里只落一个 dirty 标记:
+    scripts/attention_profile.py 下次跑(quick_sync 15min)看到它就自动 --rebuild(实测 2.3s)。"""
+    p = CLAUDE_DIR / "state" / "attention" / ".rebuild-needed"
+    if not (CLAUDE_DIR / "state" / "attention" / "events.db").exists():
+        return [], []
+    nb = json.dumps({"why": "page-anchor-migration", "rel": ctx["rel"], "ts": int(_time.time())}).encode()
+    return [("write", p, nb, (p.read_bytes() if p.exists() else None))], []
+
+
 PAGE_ANCHOR_MIGRATIONS = [
     ("pdf-highlights", _pam_highlights),
     ("reader-notes", _pam_notes),
@@ -7127,6 +7258,10 @@ PAGE_ANCHOR_MIGRATIONS = [
     ("pdf-ocr-fix", _pam_ocrfix),
     ("pdf-page-ocr", _pam_page_ocr),
     ("ocr-checkpoints", _pam_ocr_checkpoints),
+    ("vocab-lookups", _pam_vocab_lookups),          # 注意力画像主力源(补登记:原先裸奔=插删页后查词记录永久错位)
+    ("assistant-convo", _pam_convo),                # 对话消息的 page(历史上下文卡 + 画像 qa 源)+ 归档
+    ("attention-dwell", _pam_attention_dwell),      # 读页停留
+    ("attention-db", _pam_attention_db),            # 派生事件库 → dirty 标记触发 rebuild
 ]
 
 

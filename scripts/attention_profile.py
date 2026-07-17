@@ -278,6 +278,22 @@ def import_convo_archive(c):
     return n
 
 
+def _upage_text(rel, uid, limit=400):
+    """自建页(虚拟页码 u_xxxx)的正文:从 reader-userpages sidecar 取 md/blocks 文字。"""
+    p = STATE / "reader-userpages" / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+    try:
+        for it in json.loads(p.read_text("utf-8")):
+            if it.get("id") != uid:
+                continue
+            t = (it.get("title") or "") + " " + (it.get("md") or "")
+            for b in (it.get("blocks") or []):
+                t += " " + str(b.get("text") or b.get("label") or "")
+            return t.strip()[:limit]
+    except Exception:
+        pass
+    return ""
+
+
 def _page_text(rel, page, limit=400):
     """从 pdf-char-cache 直接拼页文本(不依赖 webapp 进程;读过的页基本都有缓存)。"""
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
@@ -309,14 +325,20 @@ def import_dwell(c):
         rel = d.get("file") or ""
         if not rel or "/.sandbox/" in rel:
             continue
-        k = (rel, int(d.get("page") or 0), int((d.get("ts") or 0) // 86400))
+        # 虚拟页码优先(自建页 uid 永不漂移);真实页用页码(靠 PAGE_ANCHOR_MIGRATIONS 迁移)
+        k = (rel, (d.get("upage") or int(d.get("page") or 0)), int((d.get("ts") or 0) // 86400))
         agg[k][0] += min(600, int(d.get("secs") or 0))
         agg[k][1] = max(agg[k][1], int(d.get("ts") or 0))
     n = 0
     for (rel, page, day), (secs, ts) in agg.items():
         if secs < DWELL_MIN_S or not page:
             continue
-        txt = _page_text(rel, page)
+        if isinstance(page, str):        # 自建页(虚拟页码):正文在 sidecar,不在 PDF 字符层
+            txt = _upage_text(rel, page)
+            page_no = 0
+        else:
+            txt = _page_text(rel, page)
+            page_no = page
         if not txt:
             continue
         w = W["read"] * min(2.0, secs / 30.0)
@@ -326,7 +348,7 @@ def import_dwell(c):
             continue
         c.execute("INSERT OR REPLACE INTO events(ts,channel,weight,text,terms,file,page,uid,src_key)"
                   " VALUES(?,?,?,?,?,?,?,?,?)",
-                  (ts, "read", w, txt[:500], json.dumps(terms[:12], ensure_ascii=False), rel, page, "", key))
+                  (ts, "read", w, txt[:500], json.dumps(terms[:12], ensure_ascii=False), rel, page_no, "", key))
         n += 1
     return n
 
@@ -464,12 +486,19 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
         except Exception:
             pass
     sc, cnt, chs, refs = defaultdict(float), defaultdict(int), defaultdict(set), defaultdict(list)
+    # ★双权重(用户设计):最终权重 = 渠道基础权重 × **时间权重**。窗内时间权重 = 相对**窗口末端**的
+    #   半衰期衰减(窗越长半衰期越长:窗口 1/3 处衰减到一半)——「上个月」里月末的比月初的更代表当时焦点,
+    #   但不会像全局画像那样把整个窗口压平。窗 ≤2 天(今天/昨天)不衰减(一天内先后没有意义)。
+    _span_d = max(0.5, (u_ts - s_ts) / 86400.0)
+    _half = (_span_d / 3.0) if _span_d > 2 else 0.0
     for ts, ch, w, terms_j, f, page in rows:
         try:
             terms = set(json.loads(terms_j))
         except Exception:
             continue
         w = w / math.sqrt(max(1, len(terms)))
+        if _half:
+            w *= 2 ** (-max(0.0, (u_ts - ts) / 86400.0) / _half)
         for t in terms:
             sc[t] += w
             cnt[t] += 1
@@ -519,6 +548,15 @@ def focus_of_text(text, top=8):
 
 
 def run(rebuild=False):
+    # 页锚迁移(插/删页)会改各源的 page → events.db 的 src_key 含 page,增量导入会产生重复 →
+    # pdf_reader._pam_attention_db 落 .rebuild-needed 标记,这里看到就重导(实测 2.3s)。
+    _dirty = ATT_DIR / ".rebuild-needed"
+    if _dirty.exists():
+        rebuild = True
+        try:
+            _dirty.unlink()
+        except Exception:
+            pass
     if rebuild and DB.exists():
         DB.unlink()
     c = _db()
