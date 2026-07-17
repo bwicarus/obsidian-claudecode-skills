@@ -484,6 +484,17 @@ events 路提供「行为证据分」,FTS5 路提供「存在但未读」的候�
 → ② FTS5 路 + 语义相似合入打分 → ③ `relate_material` AI 工具(三链路可用)
 → ④ 可视化(/insights 焦点词点开→相关材料)→ ⑤(未来)下游操作接挂载点。
 
+### ①块已上线(2026-07-18)
+`relate_material(term, order='relevance'|'recent', top, when/days)` + `_material_ref/_material_label`:
+- ref 规范:`book:<file>#p<page>` / `note:<vault相对路径>` / `anki::<牌组>` / `check:<file>`。
+- 打分 `rel = Σ_events[ 渠道权重 × (0.4 + 0.6·时间加权) ]`,**半衰期 60d**(比焦点画像 7d 长得多),
+  0.4 底权重 = 久远材料保 40%(长记忆,§5l 时间加分不门槛的落地)。
+- 跨语言归一(norm_key)后匹配 → 中文焦点词找到英/日原文材料。
+- **顺手修两个真 bug**:note/anki_lapse 导入时**没存材料身份**(file 空,当初只为抽词)→ note 存
+  vault 相对路径、anki 存 `anki::<牌组>`;note 过滤 Excalidraw/Tasks 插件噪声(实测混进榜)。
+- 实测:「子空间」→ Anki「必复习今日」答错9次(rel 17.1,最高)+ 笔记《000-子空间》+ 2025-10 的旧笔记
+  (长记忆生效)。★答错次数天然是学习闭环「薄弱知识点」的入口数据。
+
 ## 6. 分阶段路线(建议,未拍板)
 
 - ~~**阶段 0**:事件表 + 现有渠道接入~~ ✅ 2026-07-17(改为零侵入导入器,见 §5b)

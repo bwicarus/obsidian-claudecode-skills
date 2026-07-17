@@ -761,7 +761,7 @@ def import_anki_lapses(c):
         c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
                   " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
                   (key, int(rid / 1000), "anki_lapse", W["anki_lapse"], txt,
-                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), "", 0, "", key, EXTRACTOR_VER))
+                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), ("anki::"+str(deck or "")), 0, "", key, EXTRACTOR_VER))
         n += 1
     return n
 
@@ -803,7 +803,7 @@ def import_notes(c):
         c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
                   " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
                   (key, int(st.st_mtime), "note", W["note"], body[:TEXT_MAX],
-                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), "", 0, "", key, EXTRACTOR_VER))
+                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), f.relative_to(root).as_posix(), 0, "", key, EXTRACTOR_VER))
         n += 1
     return n
 
@@ -1077,6 +1077,100 @@ def explain(term, when="", days=None, limit=12):
     return {"ok": True, "term": term, "key": k, "n_events": len(hits), "events": hits,
             "note": "score = Σ(渠道权重 × 事件内稀释 1/√N × 时间衰减) × IDF;"
                     "extractor_ver < %d 的事件是旧分词器抽的(下次 --rebuild 会重抽)" % EXTRACTOR_VER}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 第二步:焦点词 → 材料(设计 §5l)。material ref 统一寻址 + 关联打分聚合器。
+#   本块只做 events 路(我**实际关注过**的材料);FTS5 路 / 语义相似留待第 ② 块。
+# ─────────────────────────────────────────────────────────────────────────────
+_REL_HALF_D = 60.0      # 材料检索的时间半衰期(★比焦点画像的 7d 长得多:相关性主导、长记忆——
+                        #   半年前学的高相关材料照样要找到。时间是加分不是门槛,见 §5l)
+_MATERIAL_CH_W = {"highlight": 3.0, "check": 4.0, "note": 5.0, "qa": 2.0,
+                  "read": 1.0, "lookup": 1.0, "tool": 1.5, "anki_lapse": 2.5}
+
+
+def _material_ref(channel, file, page, uid=""):
+    """事件 → 统一材料地址(下游操作靠它定位;设计 §5l)。
+    书页=book:<file>#p<page>;检查报告/笔记等特殊渠道各自成型。页码漂移由 PAGE_ANCHOR_MIGRATIONS 兜。"""
+    f = file or ""
+    if channel == "check":
+        return "check:" + f            # file 里其实存的是 report file;精确 rid 在 explain 时补
+    if channel == "note":
+        return "note:" + f             # f = vault 相对路径(现已存)
+    if channel == "anki_lapse":
+        return f or "anki::?"          # f = "anki::<牌组>"(同牌组材料聚一起;revlog 无法反查单卡文件)
+    if f and page:
+        return "book:%s#p%d" % (f, int(page))
+    if f:
+        return "book:%s" % f
+    return "%s:?" % channel
+
+
+def _material_label(ref):
+    """material ref → 人话(给 AI/用户看)。"""
+    try:
+        kind, rest = ref.split(":", 1)
+    except ValueError:
+        return ref
+    if kind == "book":
+        f, _, pg = rest.partition("#p")
+        nm = f.split("/")[-1]
+        return "%s%s" % (nm, (" 第%s页" % pg) if pg else "")
+    if kind == "note":
+        return "笔记《%s》" % rest.split("/")[-1].replace(".md", "")
+    if kind == "check":
+        return "检查报告"
+    if kind == "anki":
+        return "Anki 牌组「%s」" % (rest or "?")
+    return ref
+
+
+def relate_material(term, when="", days=None, top=12, order="relevance", now=None):
+    """★焦点词 → 我**实际关注过**的材料(events 路;设计 §5l)。
+    按 material ref 聚合该词的所有行为事件,融合打分:
+        rel = Σ_events[ 渠道权重 × 时间加权(半衰期 60d,加分不门槛) ]
+    order='relevance'(默认,相关性主导)| 'recent'(时间主导:满足「我最近在看什么」)。
+    跨语言归一后匹配(norm_key)→ 用中文焦点词也能找到英/日原文材料。
+    返回 {ok, term, key, n, materials:[{ref, label, rel, hits, last_ts, last_when, channels, sample}]}。
+    """
+    now = now or time.time()
+    c = _db()
+    ensure_fresh(c)
+    k = norm_key(term) or term
+    s_ts, u_ts = parse_when(when, days) if (when or days) else (0, now)
+    rows = c.execute("SELECT id, ts, channel, weight, text, terms, file, page, uid FROM events"
+                     " WHERE ts>=? AND ts<? ORDER BY ts DESC", (int(s_ts), int(u_ts))).fetchall()
+    agg = {}
+    for _id, ts, ch, w, txt, tj, f, page, uid in rows:
+        try:
+            terms = set(json.loads(tj))
+        except Exception:
+            continue
+        if not any((norm_key(x) or x) == k for x in terms):
+            continue
+        ref = _material_ref(ch, f, page, uid)
+        chw = _MATERIAL_CH_W.get(ch, 1.0)
+        tw = 2 ** (-max(0.0, (now - ts) / 86400.0) / _REL_HALF_D)   # 时间加权(加分,不为 0 门槛)
+        contrib = chw * (0.4 + 0.6 * tw)                            # 0.4 底:久远材料也保 40% 权重(长记忆)
+        a = agg.setdefault(ref, {"rel": 0.0, "hits": 0, "last_ts": 0, "channels": {}, "sample": ""})
+        a["rel"] += contrib
+        a["hits"] += 1
+        a["channels"][ch] = a["channels"].get(ch, 0) + 1
+        if ts > a["last_ts"]:
+            a["last_ts"] = ts
+            a["sample"] = (txt or "")[:100]
+    c.close()
+    mats = []
+    for ref, a in agg.items():
+        mats.append({"ref": ref, "label": _material_label(ref), "rel": round(a["rel"], 2),
+                     "hits": a["hits"], "last_ts": a["last_ts"],
+                     "last_when": time.strftime("%Y-%m-%d", time.localtime(a["last_ts"])),
+                     "channels": sorted(a["channels"], key=lambda x: -a["channels"][x]),
+                     "sample": a["sample"]})
+    key = (lambda m: -m["last_ts"]) if order == "recent" else (lambda m: -m["rel"])
+    mats.sort(key=key)
+    return {"ok": True, "term": term, "key": k, "n": len(mats),
+            "order": order, "materials": mats[:top]}
 
 
 def focus_of_text(text, top=8):
