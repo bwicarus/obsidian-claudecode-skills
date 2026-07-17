@@ -41,7 +41,9 @@ ALPHA = 0.65           # 短期占比
 TOP_N = 40
 
 # 渠道权重(设计稿 §5① 草案;调这里即可,画像全量重算立即生效)
-W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0}
+W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0, "read": 0.5}
+ARCHIVE_KEEP_D = 180        # 对话纯文本归档保留天数(用户设计:超过几个月再清)
+DWELL_MIN_S = 15            # 「读过一页」判定阈值:同页同日累计停留 ≥15s(原始秒数在 dwell.jsonl,阈值改了可重放)
 
 # ── 停用词(精简;IDF 跨书降权是主力,这里只挡最硬的) ──────────────────────────
 _STOP_EN = set("""the a an and or but of to in on at for with from by as is are was were be been being
@@ -245,6 +247,90 @@ def import_convo(c):
     return n
 
 
+def import_convo_archive(c):
+    """已删除/被截断的对话文本归档(assistant._convo_archive 写)——对话没了,询问的痕迹还在。
+    顺手裁剪 >ARCHIVE_KEEP_D 的旧行(这里是它唯一的清理点)。"""
+    n = 0
+    d = STATE / "assistant-convo-archive"
+    if not d.exists():
+        return 0
+    cut = time.time() - ARCHIVE_KEEP_D * 86400
+    for f in d.glob("*.jsonl"):
+        keep, trimmed = [], False
+        for ln in f.read_text("utf-8").splitlines():
+            try:
+                m = json.loads(ln)
+            except Exception:
+                continue
+            if (m.get("ts") or 0) < cut:
+                trimmed = True
+                continue
+            keep.append(ln)
+            if m.get("role") != "user":
+                continue
+            fr = m.get("file_rel") or ""
+            if "/.sandbox/" in fr:
+                continue
+            n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
+                           uid=f.stem)
+        if trimmed:
+            f.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
+    return n
+
+
+def _page_text(rel, page, limit=400):
+    """从 pdf-char-cache 直接拼页文本(不依赖 webapp 进程;读过的页基本都有缓存)。"""
+    sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+    cands = sorted((STATE / "pdf-char-cache").glob("%s-p%d-*.json" % (sha, page)))
+    for f in reversed(cands):
+        try:
+            chars = json.loads(f.read_text("utf-8")).get("chars") or []
+            t = "".join(ch.get("c") or "" for ch in chars)[:limit]
+            if t.strip():
+                return t
+        except Exception:
+            continue
+    return ""
+
+
+def import_dwell(c):
+    """阅读停留 → 「读过这页」事件。原始秒数由前端严谨采集(页可见+页图已渲染+60s内有交互才计秒,
+    快翻/卡加载/挂机都不计);这里按 (file,page,日) 聚合,累计 ≥DWELL_MIN_S 才算读过,
+    事件文本=该页正文前 400 字(从 char-cache 拼,离线),权重随停留时长小幅加成(封顶 2×)。"""
+    f = ATT_DIR / "dwell.jsonl"
+    if not f.exists():
+        return 0
+    agg = defaultdict(lambda: [0, 0])          # (file,page,day) → [secs, last_ts]
+    for ln in f.read_text("utf-8").splitlines():
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        rel = d.get("file") or ""
+        if not rel or "/.sandbox/" in rel:
+            continue
+        k = (rel, int(d.get("page") or 0), int((d.get("ts") or 0) // 86400))
+        agg[k][0] += min(600, int(d.get("secs") or 0))
+        agg[k][1] = max(agg[k][1], int(d.get("ts") or 0))
+    n = 0
+    for (rel, page, day), (secs, ts) in agg.items():
+        if secs < DWELL_MIN_S or not page:
+            continue
+        txt = _page_text(rel, page)
+        if not txt:
+            continue
+        w = W["read"] * min(2.0, secs / 30.0)
+        key = hashlib.sha1(f"read|{rel}|{page}|{day}".encode()).hexdigest()[:20]
+        terms = extract_terms(txt)
+        if not terms:
+            continue
+        c.execute("INSERT OR REPLACE INTO events(ts,channel,weight,text,terms,file,page,uid,src_key)"
+                  " VALUES(?,?,?,?,?,?,?,?,?)",
+                  (ts, "read", w, txt[:500], json.dumps(terms[:12], ensure_ascii=False), rel, page, "", key))
+        n += 1
+    return n
+
+
 def import_checks(c):
     n = 0
     d = STATE / "reader-check-reports"
@@ -438,7 +524,8 @@ def run(rebuild=False):
     c = _db()
     t0 = time.time()
     stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
-             "qa": import_convo(c), "check": import_checks(c)}
+             "qa": import_convo(c), "qa_arch": import_convo_archive(c),
+             "check": import_checks(c), "read": import_dwell(c)}
     c.commit()
     prof = rebuild_profile(c)
     total = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]

@@ -858,6 +858,33 @@ def pdf_api_sandbox():
                     "pages": meta.get("pages", 0)})
 
 
+@bp.route("/api/read-dwell", methods=["POST"])
+def pdf_api_read_dwell():
+    """读页停留上报(30-dwell.js 每 30s/翻页/切后台 flush)。只落 append-only 原始秒数,
+    「读过」判定在 scripts/attention_profile.py 聚合时做(阈值可调可重放)。"""
+    b = request.get_json(silent=True) or {}
+    rel = (b.get("file") or "").strip()
+    items = b.get("dwell") or []
+    if not rel or "/.sandbox/" in rel or not isinstance(items, list):
+        return jsonify({"ok": True})
+    p = CLAUDE_DIR / "state" / "attention" / "dwell.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    uid = str(session.get("user_id") or "")
+    now = int(__import__("time").time())
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            for it in items[:80]:
+                try:
+                    f.write(json.dumps({"ts": now, "file": rel, "page": int(it.get("page") or 0),
+                                        "secs": max(0, min(600, int(it.get("secs") or 0))), "uid": uid},
+                                       ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
 @bp.route("/api/publish-actions", methods=["POST"])
 def pdf_api_publish_actions():
     """把一组 client_action 推给打开着该书的阅读器(工具库沙盒预览 iframe 用;复用 MCP 遥控 SSE 通道)。"""

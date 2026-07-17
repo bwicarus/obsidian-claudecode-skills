@@ -731,6 +731,45 @@ def _convo_upsert_turn(uid, turn_id: str, content: str, meta: dict):
         return True
 
 
+_CONVO_ARCHIVE_DIR = CLAUDE_DIR / "state" / "assistant-convo-archive"
+
+
+def _convo_archive(uid, msgs):
+    """把即将丢失的对话消息归档成**纯文本行**(jsonl,append-only):
+    用户设计——对话删了/被截断了,文本要留(AI 能查很久以前的询问 + 注意力画像 --rebuild 不丢源),
+    图/语音等媒体不进档;180 天后由画像聚合器裁剪(attention_profile.ARCHIVE_KEEP_D)。"""
+    try:
+        keep = []
+        for m in msgs or []:
+            if not isinstance(m, dict) or not (m.get("content") or "").strip():
+                continue
+            keep.append({k: m.get(k) for k in ("role", "content", "ts", "page", "file_rel", "book", "via")
+                         if m.get(k) is not None})
+        if not keep:
+            return
+        _CONVO_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_CONVO_ARCHIVE_DIR / f"{uid}.jsonl", "a", encoding="utf-8") as f:
+            for m in keep:
+                f.write(json.dumps(m, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _convo_drop_media(uid, msgs):
+    """删除对话时级联清媒体文件(用户设计:文本留档,语音等媒体跟对话一起消失)。目前=语音录音 clip。"""
+    try:
+        for m in msgs or []:
+            cid = (m or {}).get("clip")
+            if cid:
+                for f in _CLIP_DIR.glob(str(cid) + ".*"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 def _convo_append(uid, role, content, meta=None):
     with _convo_lock:
         msgs = _convo_load(uid)
@@ -743,6 +782,9 @@ def _convo_append(uid, role, content, meta=None):
                     rec[k] = v
         msgs.append(rec)
         try:
+            if len(msgs) > 200:
+                _convo_archive(uid, msgs[:-200])   # 被截掉的最旧消息 → 纯文本归档(媒体文件不删:消息还可能在别处引用?不——截断即永别,同清空一致)
+                _convo_drop_media(uid, msgs[:-200])
             _CONVO_DIR.mkdir(parents=True, exist_ok=True)
             p = _convo_path(uid)
             tmp = p.with_name(p.name + ".tmp")   # 原子替换:锁外读者(/chat 构造 history)永远看到完整旧/新文件,不会读到半截
@@ -757,6 +799,12 @@ def _convo_clear(uid):
         try:
             p = _convo_path(uid)
             if p.exists():
+                try:
+                    _old = json.loads(p.read_text("utf-8"))
+                except Exception:
+                    _old = []
+                _convo_archive(uid, _old)      # 🗑 清空:文本留档(180 天),语音等媒体立即删(用户设计)
+                _convo_drop_media(uid, _old)
                 p.unlink()
         except Exception:
             pass

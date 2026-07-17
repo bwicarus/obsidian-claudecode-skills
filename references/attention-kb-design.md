@@ -101,6 +101,38 @@
 料理师公卫章 + 日本史 + 费恩曼物理。参数在文件头常量区(W 权重表/半衰期/ALPHA),改完
 `--rebuild` 立即生效。
 
+## 5c. 渠道现状与升级(2026-07-17 第二批)
+
+| 渠道 | 权重 | 来源(零侵入导入) | 说明 |
+|---|---|---|---|
+| `lookup` 查词 | 1.0 | `state/vocab-lookups.jsonl` | 最干净的主力信号;**必须过分词器**(见 §5b.5) |
+| `highlight` 高亮 | 3.0 | `pdf/epub/html-highlights/*.json` | 手动划=强意图 |
+| `qa` 问 AI | 2.0 | `assistant-convo/*.json` + **归档** | 只收 user 消息(AI 回答不入,权重待议) |
+| `check` 自测 | 4.0 | `reader-check-reports/*.json` | **只收纸标题**(正文是判分模板) |
+| `read` 读页 | 0.5×(secs/30,封顶 2×) | `attention/dwell.jsonl` | 新增,见下 |
+| `note` 新建笔记 | 5.0(预留) | — | 导入器待写 |
+| Anki 答错 / 收藏 / 便签 / 手写 | — | — | 待接 |
+
+### 对话归档(用户设计:对话删了,询问的痕迹要留)
+- `assistant._convo_archive()`:**清空对话**(🗑)或**超 200 条被截断**时,把消息剥成纯文本行
+  追加进 `state/assistant-convo-archive/<uid>.jsonl`(只留 role/content/ts/page/file_rel/book/via)。
+- `_convo_drop_media()`:同时**级联删语音 clip**(`state/voice-clips/<id>.*`)——用户设计:
+  文本留档、媒体跟对话一起消失。
+- 保留期 `ARCHIVE_KEEP_D=180` 天,由 `import_convo_archive` 顺手裁剪(唯一清理点)。
+- ⚠ 为什么必须归档(不是"事件表已经有了就够"):事件表确实只进不出,但 `--rebuild`
+  (分词算法升级时重导全量)会重读源文件——源没了,历史就真丢了。归档=重建能力的保险。
+
+### 读页 dwell(用户要求"很严谨的判断:是否真读过某一页")
+三重排除**全在采集端**(`reader.src/30-dwell.js`,每秒 tick):
+1. **卡加载排除**:当前页的页图 `img.complete && naturalWidth>0` 才计秒(渲染不出来=看不见=没读);
+   自建页/canvas 走等价判据(`.up2-blocks`/`canvas`/`.textLayer` 存在)。
+2. **快翻排除**:单页累计 <3s 的碎片**不上报**(翻过≠读过);服务端再设 `DWELL_MIN_S=15`(同页同日累计)。
+3. **挂机排除**:60s 内无任何交互(scroll/touch/pointer/key/wheel)停表;`visibilityState!=visible` 停表。
+上报:每 30s / 切后台(sendBeacon)flush → `POST /pdf/api/read-dwell` → **append-only 原始秒数**
+(`state/attention/dwell.jsonl`)。**判定阈值留在服务端聚合器**(`DWELL_MIN_S`)——阈值想改就改,
+历史原始数据可重放,不用重新采集。事件文本 = 该页正文前 400 字(离线从 `pdf-char-cache` 拼,
+不依赖 webapp);权重随停留时长小幅加成(0.5×secs/30,封顶 2×)。沙盒书全程不采。
+
 ## 6. 分阶段路线(建议,未拍板)
 
 - ~~**阶段 0**:事件表 + 现有渠道接入~~ ✅ 2026-07-17(改为零侵入导入器,见 §5b)
