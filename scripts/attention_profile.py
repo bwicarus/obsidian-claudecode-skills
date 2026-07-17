@@ -23,8 +23,9 @@ import math
 import re
 import sqlite3
 import sys
+import unicodedata
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,6 +68,52 @@ _EN_TOKEN = re.compile(r"[A-Za-z][A-Za-z\-']{2,}")
 
 _fugashi = None
 _jieba = None
+
+# ── 归一键(用户设计:相同含义的不同写法在库里应是同一个词)────────────────────────
+# ★分层落地(数据驱动,2026-07-17 实测):
+#   L1 **字形层**(本函数,零风险):NFKC(全角/半角)+ 日本新字体→简体 + 常见繁→简。
+#      「証明」(日语书)与「证明」(中文提问)归一;中日同形词(平均寿命/人口動態統計)本来就同形。
+#   L2 语义层(proof↔证明↔証明)**暂缓**——实测:用户的学习域按语言分离(英文=数学/物理,
+#      日文=料理师/应用情报),**现在没有可归的对象**;而 ECDICT 释义映射实测误连过半
+#      (set↔结果、now↔刚才)。等真出现「同一知识点两种语言材料」再上多语 embedding + 双闸
+#      (设计稿 §2.3)。届时只改本函数(key 机制已贯通聚合/查询/焦点),不动别处。
+# term 保留原形(显示用组内最高频写法),key 只用于聚合 → 归一算法改版不影响历史数据。
+# 字形归一的两级分工(别自己造轮子):
+#   ① opencc t2s —— **繁体→简体**(几千字表,成熟;學習→学习、証明→证明、人口動態統計→人口动态统计)
+#   ② 下表 —— 只补 opencc **覆盖不到的日本新字体特有字**(pip 版 opencc 没有 jp2t 配置)
+_JP_ONLY = {
+    "経": "经", "発": "发", "図": "图", "単": "单", "価": "价", "薬": "药", "覚": "觉", "読": "读",
+    "売": "卖", "実": "实", "処": "处", "変": "变", "圧": "压", "壊": "坏", "専": "专", "帰": "归",
+    "続": "续", "戦": "战", "総": "总", "検": "检", "査": "查", "県": "县", "労": "劳", "営": "营",
+    "権": "权", "廃": "废", "齢": "龄", "児": "儿", "辺": "边", "駅": "驿", "鉄": "铁", "様": "样",
+    "伝": "传", "収": "收", "帯": "带", "廷": "廷", "拠": "据", "揺": "摇", "浜": "滨", "涙": "泪",
+    "税": "税", "粧": "妆", "緑": "绿", "縄": "绳", "臓": "脏", "蔵": "藏", "覧": "览", "訳": "译",
+    "証": "证", "誉": "誉", "軽": "轻", "遅": "迟", "鉱": "矿", "顔": "颜", "駆": "驱", "髄": "髓",
+    "済": "济", "増": "增", "隠": "隐", "駐": "驻", "触": "触", "圏": "圈",
+}
+_JP_TRANS = str.maketrans(_JP_ONLY)
+_occ = None
+
+
+def _t2s(t):
+    global _occ
+    if _occ is None:
+        try:
+            import opencc
+            _occ = opencc.OpenCC("t2s")
+        except Exception:
+            _occ = False
+    return _occ.convert(t) if _occ else t
+
+
+def norm_key(term):
+    """术语 → 归一键(聚合用)。字形层:NFKC + 日本新字体 + 繁→简。"""
+    t = unicodedata.normalize("NFKC", str(term or "")).strip()
+    if not t:
+        return ""
+    if _CJK.search(t):
+        t = _t2s(t.translate(_JP_TRANS))
+    return t.lower()
 
 
 def _tag_ja():
@@ -376,12 +423,13 @@ def import_checks(c):
 def rebuild_profile(c, now=None):
     now = now or time.time()
     rows = c.execute("SELECT ts, channel, weight, terms, file, page FROM events WHERE ts > 0").fetchall()
-    day_seen = defaultdict(int)                    # (term, day) → n(饱和)
+    day_seen = defaultdict(int)                    # (key, day) → n(饱和)
     S_s, S_l = defaultdict(float), defaultdict(float)
     books = defaultdict(set)
     cnt7, cnt63 = defaultdict(int), defaultdict(int)
-    refs = defaultdict(list)                        # term → [(ts, file, page)]
+    refs = defaultdict(list)                        # key → [(ts, file, page)]
     all_books = set()
+    surf = defaultdict(Counter)                     # key → 原形写法计数(显示用最高频那个)
     for ts, ch, w, terms_j, file, page in rows:
         try:
             terms = json.loads(terms_j)
@@ -393,7 +441,10 @@ def rebuild_profile(c, now=None):
             all_books.add(file)
         _uterms = set(terms)
         w = w / math.sqrt(max(1, len(_uterms)))   # 事件内稀释:一句话提 N 个词,每词注意力 = w/√N(防长报告/长提问轰炸)
-        for t in _uterms:
+        # ★归一键聚合(用户设计:同一个词的不同写法要算一个):key=字形归一,显示用最高频原形
+        _uterms = {norm_key(t) or t: t for t in _uterms}
+        for t, _sf in _uterms.items():
+            surf[t][_sf] += 1
             day_seen[(t, day)] += 1
             sat = 1.0 / (1.0 + 0.3 * (day_seen[(t, day)] - 1))     # 同日重复贡献递减(防刷量)
             S_s[t] += w * sat * (2 ** (-dt_d / HALF_SHORT_D))
@@ -413,7 +464,10 @@ def rebuild_profile(c, now=None):
         score = (ALPHA * ss + (1 - ALPHA) * S_l[t]) * idf
         base = cnt63[t] / 8.0                                        # 前 8 周周均
         burst = (cnt7[t] / max(0.5, base)) if cnt7[t] >= 3 else 0.0
-        out.append({"term": t, "score": round(score, 3), "burst": round(burst, 1),
+        _disp = surf[t].most_common(1)[0][0] if surf.get(t) else t   # 显示=最高频原形(书里怎么写就怎么显示)
+        _alt = [x for x, _ in surf[t].most_common()[1:3]] if surf.get(t) else []
+        out.append({"term": _disp, "key": t, "alt": _alt,
+                    "score": round(score, 3), "burst": round(burst, 1),
                     "n7": cnt7[t], "books": len(books[t]),
                     "refs": [{"file": f, "page": p, "ts": ts0}
                              for ts0, f, p in sorted(refs[t], reverse=True)[:3]]})
@@ -482,10 +536,11 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
     for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
         try:
             for t in set(json.loads(r[0])):
-                tb[t].add(r[1])
+                tb[norm_key(t) or t].add(r[1])   # IDF 也按归一键(否则查不到书数=IDF 恒定)
         except Exception:
             pass
     sc, cnt, chs, refs = defaultdict(float), defaultdict(int), defaultdict(set), defaultdict(list)
+    surf = defaultdict(Counter)
     # ★双权重(用户设计):最终权重 = 渠道基础权重 × **时间权重**。窗内时间权重 = 相对**窗口末端**的
     #   半衰期衰减(窗越长半衰期越长:窗口 1/3 处衰减到一半)——「上个月」里月末的比月初的更代表当时焦点,
     #   但不会像全局画像那样把整个窗口压平。窗 ≤2 天(今天/昨天)不衰减(一天内先后没有意义)。
@@ -499,7 +554,9 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
         w = w / math.sqrt(max(1, len(terms)))
         if _half:
             w *= 2 ** (-max(0.0, (u_ts - ts) / 86400.0) / _half)
-        for t in terms:
+        for _sf in terms:
+            t = norm_key(_sf) or _sf          # ★归一键聚合(同上)
+            surf[t][_sf] += 1
             sc[t] += w
             cnt[t] += 1
             chs[t].add(ch)
@@ -509,7 +566,8 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
     out = []
     for t, v in sc.items():
         idf = math.log((1 + nb) / (1 + len(tb.get(t, ())))) + 0.3
-        out.append({"term": t, "score": round(v * idf, 2), "n": cnt[t], "channels": sorted(chs[t]),
+        _disp = surf[t].most_common(1)[0][0] if surf.get(t) else t
+        out.append({"term": _disp, "key": t, "score": round(v * idf, 2), "n": cnt[t], "channels": sorted(chs[t]),
                     "refs": [{"file": f, "page": p} for _, f, p in sorted(refs[t], reverse=True)[:2]]})
     out.sort(key=lambda x: -x["score"])
     c.close()
@@ -531,18 +589,21 @@ def focus_of_text(text, top=8):
     for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
         try:
             for t in set(json.loads(r[0])):
-                tb[t].add(r[1])
+                tb[norm_key(t) or t].add(r[1])
         except Exception:
             pass
     c.close()
     nb = max(1, len(all_books))
-    cnt = defaultdict(int)
-    for t in terms:
+    cnt, surf = defaultdict(int), defaultdict(Counter)
+    for _sf in terms:
+        t = norm_key(_sf) or _sf
         cnt[t] += 1
+        surf[t][_sf] += 1
     out = []
     for t, n in cnt.items():
         idf = math.log((1 + nb) / (1 + len(tb.get(t, ())))) + 0.3
-        out.append({"term": t, "score": round(n * idf, 2), "n": n, "seen_in_books": len(tb.get(t, ()))})
+        out.append({"term": surf[t].most_common(1)[0][0], "key": t, "score": round(n * idf, 2),
+                    "n": n, "seen_in_books": len(tb.get(t, ()))})
     out.sort(key=lambda x: -x["score"])
     return {"ok": True, "top": out[:top]}
 
