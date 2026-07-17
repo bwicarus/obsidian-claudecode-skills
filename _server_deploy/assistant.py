@@ -3747,6 +3747,25 @@ def _t_start_dictation(args, ctx):
 
 
 
+def _t_material_graph(args, ctx):
+    """展开一份材料的**关系链条**(卡片↔源笔记↔书页↔KG知识点↔前置根源),从任意位置出发、任意方向。
+    配合 relate_material(找到材料)+ read_material(读某层内容):这个给「链条结构」,让你能挑任意一层去读。
+    args {ref: 材料地址, direction?: up(来源)|down(派生/前置)|both(默认), depth?: 展开几跳(默认3)}。
+    典型:「这张老错的卡背后的知识点前置是什么」→ material_graph(卡ref, down) → 看到前置节点 → read_material 读它。"""
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import attention_profile as AP
+    except Exception as e:
+        return {"error": "注意力画像不可用:%s" % str(e)[:80]}
+    ref = str(args.get("ref") or "").strip()
+    if not ref:
+        return {"error": "要给材料地址 ref"}
+    return AP.material_graph(ref, direction=(args.get("direction") or "both"),
+                             depth=max(1, min(int(args.get("depth") or 3), 5)))
+
+
+
 def _t_read_material(args, ctx):
     """读一份材料的**详细内容**(配合 relate_material:先找到材料 → 再读它)。
     args {ref: 材料地址(relate_material 返回的 ref,如 anki:123 / note:x.md / book:资源/..#p9)}。
@@ -3953,6 +3972,8 @@ TOOLS = {
                        "用户说的数量/难度/主题调整放 args.adjust 原话带上,如 adjust:\"15道题,难一点\");"
                        "**机械回放型**(如听写——数据源驱动,选 source)。args {name, adjust?, source?, params?}。"
                        "不知道有哪些就先 list_saved_tasks。", _t_run_saved_task),
+    "material_graph": ("展开材料的关系链条(卡片↔源笔记↔书页↔KG知识点↔前置根源),任意位置出发/任意方向。"
+                       "配合 relate_material+read_material。args {ref, direction?:up|down|both, depth?}。", _t_material_graph),
     "read_material": ("读一份材料的详细内容(配合 relate_material:先找到 → 再读)。"
                       "args {ref: relate_material 返回的材料地址}。anki 卡给正反面/note 给全文/book 给那页正文。", _t_read_material),
     "relate_material": ("回答「关于X我学过/关注过哪些材料」「某知识点我在哪些地方碰到过」「我最近碰的X相关材料」:"

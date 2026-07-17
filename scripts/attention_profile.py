@@ -676,6 +676,19 @@ def _page_text(rel, page, limit=400):
                 return t
         except Exception:
             continue
+    # cache miss → PyMuPDF 直读(AI 想看链接原文时**保证读得到**,不只提示 read_page;用户实锤)
+    try:
+        import fitz
+        ap = Path(VAULT_ROOT) / rel
+        if ap.exists() and 1 <= page:
+            d = fitz.open(str(ap))
+            if page <= d.page_count:
+                t = (d[page - 1].get_text() or "").strip()
+                d.close()
+                return t[:limit]
+            d.close()
+    except Exception:
+        pass
     return ""
 
 
@@ -1123,6 +1136,10 @@ def _material_label(ref):
         return "检查报告"
     if kind == "anki":
         return "Anki 卡片"             # 详细正反面靠 read_material(ref)
+    if kind == "kg":
+        _b, _, _nid = rest.partition("#")
+        n = _kg_all()["nodes"].get(_nid) or {}
+        return "知识点「%s」" % (n.get("name") or _nid)
     return ref
 
 
@@ -1282,6 +1299,125 @@ def _anki_cid_to_nid(cid):
         return None
 
 
+_KG_CACHE = None
+
+
+def _kg_all():
+    """所有 KG 的 {node_id: node} + {book: kg}(缓存)。node 带 pages/parent_id/edges。"""
+    global _KG_CACHE
+    if _KG_CACHE is None:
+        _KG_CACHE = {"nodes": {}, "by_book": {}, "edges": []}
+        import glob
+        for f in glob.glob(str(Path(PROJECT_DIR) / "knowledge_graph" / "*.json")):
+            if ".bak." in f:
+                continue
+            try:
+                d = json.loads(Path(f).read_text("utf-8"))
+            except Exception:
+                continue
+            book = d.get("book") or Path(f).stem
+            _KG_CACHE["by_book"][book] = d
+            for n in (d.get("nodes") or []):
+                nid = n.get("id")
+                if nid:
+                    n["_book"] = book
+                    _KG_CACHE["nodes"][nid] = n
+            for e in (d.get("edges") or []):
+                e["_book"] = book
+                _KG_CACHE["edges"].append(e)
+    return _KG_CACHE
+
+
+def _kg_pdf_rel(book):
+    """KG 的 book → 它对应的 vault 相对 PDF 路径(pages 命中要按这本 PDF 的页)。"""
+    kg = _kg_all()["by_book"].get(book) or {}
+    pdf = kg.get("pdf") or ""
+    if pdf:
+        try:
+            return Path(pdf).resolve().relative_to(Path(VAULT_ROOT).resolve()).as_posix()
+        except Exception:
+            return pdf.split("/obsidian/")[-1] if "/obsidian/" in pdf else pdf
+    idx = _vault_index()
+    return idx.get((book or "").lower()) or ""
+
+
+def material_neighbors(ref):
+    """一份材料在诊断链里的**直接邻居**(有向图的一跳)。返回 {up:[refs], down:[refs]}。
+      anki:cid  → up:源笔记            book:file#p → up:嵌它的笔记 / down:命中的KG节点
+      note:rel  → down:嵌的书页        kg:book#node → up:节点页对应的书页 / down:前置节点(prereq)
+    """
+    up, down = [], []
+    try:
+        kind, rest = ref.split(":", 1)
+    except ValueError:
+        return {"up": [], "down": []}
+    if kind == "anki":
+        d = read_material(ref)
+        src = (d.get("源") or {}).get("ref")
+        if src:
+            up.append(src)
+    elif kind == "note":
+        down += _note_book_refs(rest)
+    elif kind == "book":
+        f, _, pg = rest.partition("#p")
+        page = int(pg) if pg.isdigit() else 0
+        # down: 这一页归属的 KG 节点
+        for nid, n in _kg_all()["nodes"].items():
+            pgs = n.get("pages") or []
+            if len(pgs) == 2 and pgs[0] <= page <= pgs[1] and _kg_pdf_rel(n["_book"]) == f:
+                down.append("kg:%s#%s" % (n["_book"], nid))
+        # up: 哪些笔记嵌了这一页(反查)—— 便宜起见只在 note 渠道事件里找引用了这本书的
+        # (完整反查要扫全 vault,留给需要时;这里从画像里已知的笔记推)
+    elif kind == "kg":
+        book, _, nid = rest.partition("#")
+        n = _kg_all()["nodes"].get(nid)
+        if n:
+            pgs = n.get("pages") or []
+            rel = _kg_pdf_rel(book)
+            if len(pgs) == 2 and rel:
+                for pg in range(pgs[0], min(pgs[1], pgs[0] + 3) + 1):   # 节点页范围(限前几页)
+                    up.append("book:%s#p%d" % (rel, pg))
+            for e in _kg_all()["edges"]:
+                if e.get("kind") == "prereq" and e.get("to") == nid:   # 前置:指向本节点的 prereq 边的 from
+                    down.append("kg:%s#%s" % (e.get("_book", book), e.get("from")))
+    return {"up": up, "down": down}
+
+
+def material_graph(ref, direction="both", depth=2, limit=30):
+    """★从**任意位置**出发,取**任意后续**链条(用户设计:任意层级、任意方向、任意深度)。
+    direction: 'up'(往来源:卡→笔记→书页) | 'down'(往派生/前置:书页→节点→前置) | 'both'。
+    BFS 展开 depth 跳。每个节点带 label + kind,方便 AI 挑一层读内容(配合 read_material)。
+    """
+    seen = {ref}
+    layers = [[{"ref": ref, "label": _material_label(ref), "depth": 0}]]
+    frontier = [ref]
+    for d in range(1, depth + 1):
+        nxt, nodes = [], []
+        for r in frontier:
+            nb = material_neighbors(r)
+            picks = ((nb["up"] if direction in ("up", "both") else []) +
+                     (nb["down"] if direction in ("down", "both") else []))
+            for x in picks:
+                if x in seen:
+                    continue
+                seen.add(x)
+                nxt.append(x)
+                nodes.append({"ref": x, "label": _material_label(x), "depth": d, "from": r})
+                if len(seen) >= limit:
+                    break
+        if not nodes:
+            break
+        layers.append(nodes)
+        frontier = nxt
+    return {"ok": True, "start": ref, "direction": direction, "depth": depth,
+            "n": sum(len(l) for l in layers), "layers": layers,
+            "note": "任一 ref 用 read_material(ref) 读它那一层的内容(书页原文/笔记/卡片正反面/KG节点)"}
+
+
+def _material_label_kg(ref):
+    pass
+
+
 def read_material(ref, limit=1500):
     """★material ref → **详细内容**(用户实锤:能看到材料却读不到内容)。统一取详细内容入口,
     下游(出题/复习/AI 分析)靠它把「地址」变成「内容」。
@@ -1341,7 +1477,7 @@ def read_material(ref, limit=1500):
         # ★卡片→源:这张卡是学哪份材料做的(用户设计的诊断链入口)。
         #   优先从**卡片自带**的 @src 标记提取(制卡时注入,覆盖所有新卡);没有再查 records(旧卡兜底)。
         src = None
-        _m = re.search(r"@src:(.+?)-->", str(flds))
+        _m = re.search(r"@src:(.+?)-->", str(r[0]))
         if _m:
             src = obsidian_to_ref(_m.group(1).strip())
         if not src:
@@ -1354,6 +1490,17 @@ def read_material(ref, limit=1500):
                 if books:
                     res["源"]["书页"] = [{"ref": b, "label": _material_label(b)} for b in books]
         return res
+    if kind == "kg":
+        _b, _, _nid = rest.partition("#")
+        n = _kg_all()["nodes"].get(_nid)
+        if not n:
+            return {"error": "KG 节点不存在:%s" % _nid}
+        prereq = [e.get("from") for e in _kg_all()["edges"]
+                  if e.get("kind") == "prereq" and e.get("to") == _nid]
+        return {"ok": True, "ref": ref, "kind": "kg", "title": "知识点「%s」" % n.get("name"),
+                "content": {"节点": n.get("name"), "所在页": n.get("pages"), "层级": n.get("level"),
+                            "父节点": n.get("parent_id"), "前置节点id": prereq[:8],
+                            "书": n.get("_book")}}
     if kind == "check":
         return {"ok": True, "ref": ref, "kind": "check",
                 "note": "检查报告用 read_check_report 工具读(有专门的问答式接口)"}
