@@ -3747,6 +3747,48 @@ def _t_start_dictation(args, ctx):
 
 
 
+def _t_relate_material(args, ctx):
+    """回答**「关于 X 我学过/关注过哪些材料」「某个知识点我在哪些地方碰到过」**类问题:
+    给一个词/概念,返回我**实际关注过**的材料(书页/笔记/Anki牌组/检查报告),按相关度排序、带出处。
+    数据 = 所有学习行为的时间表(注意力画像),跨语言归一(中文词也能找到英/日原文材料)。
+
+    args:
+      term   必填,要查的词/概念(如「子空间」「公衆衛生」「vector space」)
+      order  'relevance'(默认,最相关在前;半年前学的高相关材料也找得到)| 'recent'(最近碰的在前)
+      when? / days?  只看某时间段(不传=全部历史)
+      top?   要几份(默认 10)
+    典型:「关于子空间我学过啥」「向量空间我在哪些资料里见过」「我最近碰的公衆衛生材料」→ 调我。
+    ⚠ 这是「我关注过的」材料(有行为证据);不是全文搜索(那找「存在这个词的所有页,含没看过的」)。
+    """
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import attention_profile as AP
+    except Exception as e:
+        return {"error": "注意力画像不可用:%s" % str(e)[:80]}
+    term = str(args.get("term") or args.get("word") or args.get("concept") or "").strip()
+    if not term:
+        return {"error": "要给一个词/概念(term)"}
+    order = "recent" if str(args.get("order") or "").startswith("rec") else "relevance"
+    r = AP.relate_material(term, when=args.get("when") or "", days=args.get("days"),
+                           top=max(1, min(int(args.get("top") or 10), 25)), order=order)
+    if not r.get("materials"):
+        return {"词": term, "结果": "没有找到你关注过这个词的材料(可能还没学到,或换个说法)"}
+    out = []
+    for m in r["materials"]:
+        it = {"材料": m["label"], "相关度": m["rel"], "关注次数": m["hits"],
+              "最近": m["last_when"], "来源": m["channels"], "ref": m["ref"]}
+        if m["ref"].startswith("book:") and "#p" in m["ref"]:
+            _f, _, _pg = m["ref"][5:].partition("#p")
+            it["file"], it["page"] = _f, (int(_pg) if _pg.isdigit() else 0)
+        out.append(it)
+    return {"词": term, "归一键": r["key"], "排序": ("最近优先" if order == "recent" else "相关度优先"),
+            "材料": out,
+            "怎么用": "这些是用户**实际关注过**的材料(书页用 read_page(file,page) 读原文;"
+                      "Anki 答错多=薄弱)。别把材料标签当用户原话,是从行为统计出来的。"}
+
+
+
 def _t_learning_focus(args, ctx):
     """回答**「我最近/某段时间在学什么」**类问题:按时间窗给出学习焦点词(带出处书页)。
     数据=所有学习行为(查词/高亮/问 AI/自测)的加权术语画像(references/attention-kb-design.md)。
@@ -3894,6 +3936,10 @@ TOOLS = {
                        "用户说的数量/难度/主题调整放 args.adjust 原话带上,如 adjust:\"15道题,难一点\");"
                        "**机械回放型**(如听写——数据源驱动,选 source)。args {name, adjust?, source?, params?}。"
                        "不知道有哪些就先 list_saved_tasks。", _t_run_saved_task),
+    "relate_material": ("回答「关于X我学过/关注过哪些材料」「某知识点我在哪些地方碰到过」「我最近碰的X相关材料」:"
+                        "给词/概念→我**实际关注过**的材料(书页/笔记/Anki牌组/检查报告),按相关度排序带出处,"
+                        "跨语言归一(中文词也找到英/日原文)。args {term必填, order?:relevance|recent, when?, days?, top?}。"
+                        "⚠ 这是「关注过的」不是全文搜索。", _t_relate_material),
     "learning_focus": ("回答「我最近/昨天/上个月在学什么」「这本书我关注了啥」「这轮在聊什么知识点」:"
                        "按时间窗给学习焦点词+出处书页。args {when?:今天/昨天/本周/上个月/最近三个月/全部, "
                        "days?:天数, scope?:book(只看当前书)|convo(当前对话), channels?, top?}。"

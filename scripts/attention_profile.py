@@ -761,7 +761,8 @@ def import_anki_lapses(c):
         c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
                   " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
                   (key, int(rid / 1000), "anki_lapse", W["anki_lapse"], txt,
-                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False), ("anki::"+str(deck or "")), 0, "", key, EXTRACTOR_VER))
+                   json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
+                   ("anki::" + str(deck or "").replace("\x1f", "::").strip(":")), 0, "", key, EXTRACTOR_VER))
         n += 1
     return n
 
