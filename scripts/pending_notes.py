@@ -29,6 +29,15 @@ def main():
     for md_file in sorted(VAULT_ROOT.glob("**/*.md")):
         if not NOTE_PATTERN.match(md_file.name):
             continue
+        # v3-C:自动概念笔记(frontmatter type: concept-auto)不进登记管线——
+        # 机器写的不算"你的笔记",不该被自动摘要/关联/Anki 制卡(污染环);用户亲手编辑后
+        # (status→user-edited 且移除该标记)才升格。只读前 200 字节,开销可忽略。
+        try:
+            head = md_file.read_text("utf-8", errors="ignore")[:200]
+            if "type: concept-auto" in head:
+                continue
+        except OSError:
+            pass
 
         if note_state.has_record(md_file, SKILL):
             if not note_state.is_unchanged(md_file, SKILL):
