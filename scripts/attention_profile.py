@@ -29,7 +29,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import PROJECT_DIR, VAULT_ROOT  # noqa: E402
+from config import PROJECT_DIR, VAULT_ROOT, NOTE_PATTERN  # noqa: E402
 
 # ★路径自愈(实锤:webapp/.env 只设了 CLAUDE_PROJECT、**没设 OBSIDIAN_VAULT** → webapp 进程里
 #   VAULT_ROOT 会退回 config.py 的 Windows 默认 `C:\obsidian`,笔记渠道静默 0 条、账本可能写错地方)。
@@ -998,6 +998,10 @@ def import_notes(c):
             st = f.stat()
             raw = f.read_text("utf-8")
         except Exception:
+            continue
+        # ★白名单(用户指正,follow 最早设计):只有登记命名规则 [0-9A-Fa-f]{3}-*.md 才是系统笔记(000-xxx 那种);
+        #   其余(QA「创建新笔记」故意不带前缀的、Untitled/未命名 草稿、Tasks看板、随手粘贴)都不算 note 信号。
+        if not NOTE_PATTERN.match(f.name):
             continue
         # #3(审查):Excalidraw 笔记**先读全**,只取 ## Text Elements(真文字),丢弃 banner/Drawing/Embedded Files;
         #   别先截断——原实现截到 4000 字把 %% 闭合符和 banner 都切掉了,正则失效(52 条 note 仍含 excalidraw)。
