@@ -95,13 +95,19 @@ body.ep-kg-open #ep-top{right:min(38vw,560px)}
       s + '.kg-node.mastered{border-left:3px solid #34d399}' +
       s + '.kg-node.unlockable{border-left:3px solid #60a5fa}' +
       s + '.kg-node.locked{border-left:3px solid #3a4456;opacity:.7}' +
+      s + '.kg-node.emergent{border-left:3px solid #a78bfa}' +
+      s + '.kg-node.emergent .lbl{color:#c4b5fd}' +
+      s + '.kg-node .kg-rel{color:#7a8497;font-size:10px;margin-top:4px;line-height:1.5}' +
+      s + '.kg-node .kg-rel .kg-rel-em{color:#c4b5fd}' +
       s + '.kg-empty{color:#5a6680;font-size:12px}';
     document.head.appendChild(st);
   }
 
   // ── 默认底座行为(opts 没给就用):跟 PDF loadPageNodes / toggleNodeTrack 一致 ──
   function _defaultOpenNode(n) {
-    try { window.open('/skilltree/' + encodeURIComponent(n.book || '') + '/#' + encodeURIComponent('f.' + n.id), '_blank'); } catch (e) {}
+    try {
+      if (n.origin === 'emergent') { window.open('/skilltree/unified/', '_blank'); return; }
+      window.open('/skilltree/' + encodeURIComponent(n.book || '') + '/#' + encodeURIComponent('f.' + n.id), '_blank'); } catch (e) {}
   }
   function _defaultToggleTrack(n, btn) {
     btn.disabled = true;
@@ -121,15 +127,27 @@ body.ep-kg-open #ep-top{right:min(38vw,560px)}
 
   // 一张知识点卡(照搬 loadPageNodes 的卡片结构 + 状态左色条 + 点开 skilltree + grammar ☆跟踪)
   // opts 默认 _opts(EPUB 既有调用零变化);renderInto 复用时传 per-call opts(PDF 阅读器路径)。
+  function _relLine(n) {
+    var parts = [];
+    if (n.origin === 'emergent' && n.related_to) parts.push('<span class="kg-rel-em">连到 ' + esc(n.related_to) + '</span>');
+    var pre = (n.prereqs || []).map(function (p) { return esc(p.name); }).filter(Boolean).slice(0, 4);
+    var unl = (n.unlocks || []).map(function (u) { return esc(u.name); }).filter(Boolean).slice(0, 4);
+    if (pre.length) parts.push('前置: ' + pre.join('、'));
+    if (unl.length) parts.push('解锁: ' + unl.join('、'));
+    return parts.join(' · ');
+  }
+
   function makeCard(n, opts) {
     opts = opts || _opts;
     var card = document.createElement('div');
-    card.className = 'kg-node ' + (n.state || 'locked');
+    card.className = 'kg-node ' + (n.state || 'locked') + (n.origin === 'emergent' ? ' emergent' : '');
     var main = document.createElement('div'); main.className = 'kg-node-main';
     var lbl = document.createElement('div'); lbl.className = 'lbl';
-    lbl.textContent = (n.numeric_label ? '[' + n.numeric_label + '] ' : '') + (n.name || '');
+    lbl.textContent = (n.origin === 'emergent' ? '🌱 ' : '') + (n.numeric_label ? '[' + n.numeric_label + '] ' : '') + (n.name || '');
     var sum = document.createElement('div'); sum.className = 'sum'; sum.textContent = n.summary || '';
     main.appendChild(lbl); main.appendChild(sum);
+    var relHtml = _relLine(n);
+    if (relHtml) { var rel = document.createElement('div'); rel.className = 'kg-rel'; rel.innerHTML = relHtml; main.appendChild(rel); }
     main.addEventListener('click', function () {
       try { (opts.onOpenNode || _defaultOpenNode)(n); } catch (e) {}
     });
