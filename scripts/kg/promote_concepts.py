@@ -38,15 +38,18 @@ STOP = {"我们", "称为", "定义", "全问未回答", "全問未回答", "如
 
 
 def _vocab_set():
-    """vocab 库 lemma 集(用来把语言项路由出概念图)。"""
-    v = set()
+    """vocab 库 lemma 集(用来把语言项路由出概念图)。
+    v3-A:返回 None = vocab 库不可达/为空 —— 调用方必须 **fail-closed**(拒绝收种,而非全放行)。
+    此前空集 fail-open 是最坏方向:env 缺失时 VAULT 退 Windows 路径 → 空集 → 日语词全漏进概念图。"""
     vroot = VAULT / "资源" / "vocab"
-    if vroot.exists():
-        for p in vroot.rglob("*.md"):
-            if "_audio" in str(p):
-                continue
-            v.add(p.stem.lower())
-    return v
+    if not vroot.exists():
+        return None
+    v = set()
+    for p in vroot.rglob("*.md"):
+        if "_audio" in str(p):
+            continue
+        v.add(p.stem.lower())
+    return v or None
 
 
 def _authored_kg_terms():
@@ -71,6 +74,10 @@ def _authored_kg_terms():
 def collect_seeds():
     """概念种子 {key: {surface, sources:set, provenance:list, signal:int}}(已路由 vocab/停用词/回收站)。"""
     vocab = _vocab_set()
+    if vocab is None:
+        # v3-A fail-closed:vocab 门无法评估 → 本轮不收任何种子(打印到 stderr 便于排查)
+        print("⚠ vocab 库不可达/为空 → fail-closed:本轮不收种子(防语言项漏进概念图)", file=sys.stderr)
+        return {}
     seeds = {}
 
     def add(term, src, ref):
@@ -78,7 +85,8 @@ def collect_seeds():
         if len(term) < 2 or term in STOP or "回收站" in term:
             return
         k = AP.norm_key(term) or term
-        if k.lower() in vocab:          # 路由:语言项 → vocab,排除
+        # v3-A 繁简双查:norm_key 繁→简(議事→议事)而 vocab 存原形(議事.md)→ 归一键和原 surface 都要查
+        if k.lower() in vocab or term.lower() in vocab:
             return
         e = seeds.setdefault(k, {"surface": term, "sources": set(), "provenance": [], "signal": 0})
         e["sources"].add(src)
