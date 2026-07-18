@@ -631,15 +631,18 @@ def focus_from_mentions(top=40, now=None):
     day_seen = defaultdict(int)
     books = defaultdict(set)
     all_books = set()
-    rows = c.execute("""SELECT e.ts, e.channel, e.file, m.surface, m.parent
+    ev_seen = defaultdict(int)   # (key, src_key) -> 该事件内第几次(事件内重复饱和,压"我们/原文"这种刷屏)
+    rows = c.execute("""SELECT e.ts, e.channel, e.file, m.surface, m.parent, m.src_key
                         FROM event_mentions m JOIN events e ON e.src_key = m.src_key""").fetchall()
-    for ts, ch, file, surface, parent in rows:
+    for ts, ch, file, surface, parent, src_key in rows:
         if not surface:
             continue
         k = norm_key(surface) or surface
         dt_d = max(0.0, (now - ts) / 86400.0)
         day = int(ts // 86400)
-        base = W.get(ch, 1.0) * (MENTION_CHILD_W if parent else 1.0)   # 父词满记、子词降权
+        ev_seen[(k, src_key)] += 1
+        ev_sat = 1.0 / (1.0 + 0.5 * (ev_seen[(k, src_key)] - 1))       # 事件内第 n 次:1 / 0.67 / 0.5 …
+        base = W.get(ch, 1.0) * (MENTION_CHILD_W if parent else 1.0) * ev_sat   # 父词满记、子词降权、事件内饱和
         day_seen[(k, day)] += 1
         sat = 1.0 / (1.0 + 0.3 * (day_seen[(k, day)] - 1))
         S_s[k] += base * sat * (2 ** (-dt_d / HALF_SHORT_D))
