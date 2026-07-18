@@ -551,23 +551,20 @@ async function renderConceptNet() {
     + `<input type="checkbox" id="cn-gating" ${d.gating_enabled ? 'checked' : ''} onclick="event.stopPropagation()" onchange="saveConceptNet()" title="影响开关:审计通过的前置边才真正参与解锁(shadow 期保持关)">`
     + '<span>概念网（阅读时生长）</span>' + timerBadge + '</summary><div class="adv-body">';
   h += '<p class="meta" style="font-size:11px;line-height:1.6">勾选=<b>gating</b>(audited 前置边参与解锁;shadow 试跑期保持关)。'
-    + '每晚流水线由 <code>concept-graph.timer</code> 驱动,启停:<code>sudo systemctl enable --now concept-graph.timer</code>。'
-    + '下面按书「开火」= 允许该书自动生长概念笔记(改动即存):</p>';
-  (d.books || []).forEach(b => {
-    h += `<label class="cfg-row"><input type="checkbox" data-cn-book="${escapeHtml(b.rel)}" ${b.enabled ? 'checked' : ''} onchange="saveConceptNet()"> `
-       + `${escapeHtml(b.rel.split('/').pop())} <span class="meta" style="font-size:11px">(码 ${escapeHtml(b.code)} · ${escapeHtml(b.subject)})</span></label>`;
-  });
-  if (!(d.books || []).length) h += '<p class="meta" style="font-size:11px">（暂无登记书本；quick-sync 会自动登记你在读的书）</p>';
+    + '每晚流水线由 <code>concept-graph.timer</code> 驱动,启停:<code>sudo systemctl enable --now concept-graph.timer</code>。</p>';
+  // 按书开火放**阅读器设置面板**(读哪本书时决定哪本;用户定),这里只读展示已开火的
+  const fired = (d.books || []).filter(b => b.enabled);
+  h += '<p class="meta" style="font-size:11px;line-height:1.6">按书开火在 <b>阅读器 ⚙ 设置 → 🌱 本书自动生长概念笔记</b> 里选;'
+    + (fired.length ? ('当前已开火:' + fired.map(b => escapeHtml(b.rel.split('/').pop())).join('、')) : '当前没有书开火。')
+    + '</p>';
   h += '</div></details>';
   el.innerHTML = h;
 }
 async function saveConceptNet() {
-  const books = {};
-  document.querySelectorAll('[data-cn-book]').forEach(el => { books[el.dataset.cnBook] = el.checked; });
   const gate = document.getElementById('cn-gating');
   try {
     await fetch('/control/api/concept-net', { method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ gating_enabled: gate ? gate.checked : false, books }) });
+      body: JSON.stringify({ gating_enabled: gate ? gate.checked : false }) });
   } catch (e) {}
 }
 async function renderKgAudit() {

@@ -287,6 +287,16 @@ def register_control(app):
             if "gating_enabled" in body:
                 reg["gating_enabled"] = bool(body["gating_enabled"])
             for rel, on in (body.get("books") or {}).items():
+                if rel not in reg.get("books", {}) and body.get("register"):
+                    # 阅读器里首次对未登记书开火 → 自动分配编码(同 propose 的分配规则)
+                    sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "kg"))
+                    try:
+                        import propose_concept_notes as _PCN
+                        reg.setdefault("books", {})
+                        reg.setdefault("codes", {})
+                        _PCN._book_entry(reg, rel, create=True)
+                    except Exception:
+                        continue
                 if rel in reg.get("books", {}):
                     reg["books"][rel]["enabled"] = bool(on)
             codes.parent.mkdir(parents=True, exist_ok=True)

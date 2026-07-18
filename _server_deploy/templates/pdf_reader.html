@@ -242,6 +242,10 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
           <input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）
         </label>
         <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">
+          <input type="checkbox" id="set-conceptnet" onchange="saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> 🌱 本书自动生长概念笔记（概念网）
+        </label>
+        <div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线会对你在本书反复关注的<b>学科概念</b>自动生成 Obsidian 概念笔记（引原文定义 + 自动连边,单词仍归词汇本)。<b>每本书独立</b>,即改即存。</div>
         <hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">
         <label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">📖 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>
         <div id="set-toc-status" style="font-size:11px;color:#7a8497;margin-bottom:8px;line-height:1.5">检查中…</div>
@@ -500,4 +504,26 @@ window.toggleGrammarPanel = function () {
 <script src="/static/pdf/mfx.js?v=mfx-5" defer></script>   <!-- mfx 交互/特效脚本(Toast/手势/特效),defer 等 DOM -->
 
 <script src="/static/pdf/pdf-tail.js?v={{ shared_js_v }}"></script><!-- 原尾部内联抽出为静态文件 -->
+<script>
+// 🌱 概念网按书开关(用户定:按书选择放阅读器不放控制面板)。回填:页面加载后拉一次;保存:即改即存。
+(function(){
+  function rel(){ return (window.__PDF_CFG&&window.__PDF_CFG.file_rel) || (typeof FILE_REL!=='undefined'&&FILE_REL) || ''; }
+  window.saveConceptNetToggle = async function(on){
+    try{
+      const r = rel(); if(!r) return;
+      await fetch('/control/api/concept-net',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({books:{[r]:on}, register:true})});
+    }catch(e){}
+  };
+  window.addEventListener('load', async function(){
+    try{
+      const r = rel(); if(!r) return;
+      const d = await (await fetch('/control/api/concept-net')).json();
+      const b = (d.books||[]).find(x=>x.rel===r);
+      const el = document.getElementById('set-conceptnet');
+      if(el && b) el.checked = !!b.enabled;
+    }catch(e){}
+  });
+})();
+</script>
 </body></html>
