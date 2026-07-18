@@ -111,7 +111,11 @@ def group_info(rel):
     off = 0
     for num, r in mem:
         pg = _page_count(r)
-        members.append({"rel": r, "num": num, "pages": pg, "offset": off})
+        try:
+            mt = int((VAULT / r).stat().st_mtime)
+        except OSError:
+            mt = 0
+        members.append({"rel": r, "num": num, "pages": pg, "offset": off, "mtime": mt})
         off += pg
     me = next((m for i, m in enumerate(members) if m["rel"] == rel), None)
     if me is None:

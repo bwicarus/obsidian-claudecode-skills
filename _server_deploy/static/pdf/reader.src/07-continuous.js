@@ -78,6 +78,7 @@ async function setupContinuousMode() {
   }
   _afterTargetReady();   // 兜底(目标页号异常等极端情况;正常路径上面已触发)
   mainEl.addEventListener('scroll', _onContinuousScroll, {passive: true});
+  _setupGrpBoxes(container, mainEl).catch(() => {});   // 虚拟合并书盒子模型:外卷页盒子接在末尾,滚动零等待
 }
 
 // 模式切换(连续↔双页,含双页 offset 1|2 ↔ 2|3 变化)**原地重排**:把已渲染的 .page-wrap 节点直接 reparent
@@ -296,3 +297,73 @@ const toolbar = document.getElementById('sel-toolbar');
 let lastSelText = '';
      _updateSelPreview('');
 let _selTimer = null;
+
+// ── 虚拟合并书·盒子模型(用户设计:每个盒子=「(书,页)」,A书x页/B书y页都只是往盒子里填内容)──
+// 后续卷的**全部页**建成 .grp-fbox 盒子接在本卷占位之后(同款分批让出事件循环);独立 IO 懒填
+// 服务端页图(/api/page-image 按 (rel,page) 寻址,SW cache-first);滚动永不等待。
+// 交互(选词/高亮)需本书会话 → 在外卷区**停稳 800ms** 后台无感换会话(深链已必胜仲裁,页图已缓存
+// → 落地即显)。外卷区页码指示直接显全局页。上一卷方向不建盒子(顶部插入会触发滚动锚定跳动),保留上拉加载。
+async function _setupGrpBoxes(container, mainEl) {
+  window.__grpCorridor = false;
+  const g = window.__GRP;
+  if (!g || !g.next) return;
+  const members = g.members.slice(g.self.index + 1);
+  const ref = container.querySelector('.page-wrap');
+  const refW = ref ? ref.style.width : '';
+  const refH = (ref && ref.style.height) ? ref.style.height : '900px';
+  const fio = new IntersectionObserver((es) => es.forEach((en) => {
+    if (!en.isIntersecting) return;
+    const ph = en.target;
+    if (ph.dataset.fLoaded === '1') return;
+    ph.dataset.fLoaded = '1';
+    const cw = Math.floor(ph.clientWidth || 800);
+    const reqW = (typeof _bucketReqW === 'function') ? _bucketReqW(cw) : Math.min(2400, cw * 2);
+    const img = document.createElement('img');
+    img.decoding = 'async';
+    img.style.cssText = 'width:100%;height:auto;display:block';
+    img.src = '/pdf/api/page-image?file=' + encodeURIComponent(ph.dataset.fRel) + '&page=' + ph.dataset.fLp + '&w=' + reqW + '&v=' + (ph.dataset.fMt || 0);
+    img.onload = () => { ph.textContent = ''; ph.style.height = 'auto'; ph.appendChild(img); };
+    img.onerror = () => { ph.dataset.fLoaded = '0'; ph.textContent = '… 第 ' + ph.dataset.fGlobal + ' 页(滚动到此自动切卷)'; };
+  }), { rootMargin: '2400px', root: mainEl });
+  const CH = 80;
+  for (const m of members) {
+    for (let start = 1; start <= m.pages; start += CH) {
+      const frag = document.createDocumentFragment(), phs = [];
+      const end = Math.min(start + CH - 1, m.pages);
+      for (let k = start; k <= end; k++) {
+        const ph = document.createElement('div');
+        ph.className = 'grp-fbox';
+        ph.dataset.fRel = m.rel; ph.dataset.fLp = k; ph.dataset.fGlobal = m.offset + k;
+        ph.dataset.fMt = m.mtime || 0; ph.dataset.fLoaded = '0';
+        ph.style.cssText = 'position:relative;background:#fff;color:#888;display:flex;align-items:center;justify-content:center;margin:0 auto 12px;';
+        if (refW) ph.style.width = refW;
+        ph.style.height = refH;
+        ph.textContent = '… 第 ' + (m.offset + k) + ' 页';
+        phs.push(ph); frag.appendChild(ph);
+      }
+      container.appendChild(frag);
+      phs.forEach((ph) => fio.observe(ph));
+      await new Promise((r) => setTimeout(r, 0));   // 同款分批,不冻主线程
+    }
+  }
+  window.__grpCorridor = true;
+  // 外卷区:页码指示(200ms 节流,只改显示不动 currentPage)+ 停稳 800ms 换会话
+  let indT = null, idleT = null;
+  const centerBox = () => {
+    const r = mainEl.getBoundingClientRect();
+    const el = document.elementFromPoint(r.left + mainEl.clientWidth / 2, r.top + mainEl.clientHeight / 2);
+    return el && el.closest ? el.closest('.grp-fbox') : null;
+  };
+  mainEl.addEventListener('scroll', () => {
+    if (!indT) indT = setTimeout(() => {
+      indT = null;
+      const fb = centerBox();
+      if (fb) { const pc = document.getElementById('page-cur'); if (pc) pc.textContent = fb.dataset.fGlobal; }
+    }, 200);
+    if (idleT) clearTimeout(idleT);
+    idleT = setTimeout(() => {
+      const fb = centerBox();
+      if (fb) location.href = '/pdf/view?file=' + encodeURIComponent(fb.dataset.fRel) + '&page=' + fb.dataset.fLp;
+    }, 800);
+  }, { passive: true });
+}

@@ -149,7 +149,7 @@ function _grpBoundarySetup() {
   var _dwell = function () { return performance.now() - edgeSince > 250; };   // 到边后驻留 250ms 才开始算(滤回弹)
   el.addEventListener('wheel', function (e) {
     if (!edge) { accDown = 0; accUp = 0; return; }
-    if (e.deltaY > 0 && edge === 2 && nextArmed && _dwell()) { accUp = 0; accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); }
+    if (e.deltaY > 0 && edge === 2 && nextArmed && _dwell() && !window.__grpCorridor) { accUp = 0; accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); }
     else if (e.deltaY < 0 && edge === 1 && prevArmed && _dwell()) { accDown = 0; accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); }
     else { accDown = 0; accUp = 0; }
   }, { passive: true });
@@ -158,7 +158,7 @@ function _grpBoundarySetup() {
     if (touchY == null || !edge) { if (!edge) { accDown = 0; accUp = 0; } if (e.touches.length) touchY = e.touches[0].clientY; return; }
     var dy = touchY - e.touches[0].clientY;   // >0 = 手指上滑(向下滚)
     touchY = e.touches[0].clientY;
-    if (dy > 0 && edge === 2 && nextArmed && _dwell()) { accDown += dy; if (accDown > 150) window._grpNavNext(); }
+    if (dy > 0 && edge === 2 && nextArmed && _dwell() && !window.__grpCorridor) { accDown += dy; if (accDown > 150) window._grpNavNext(); }
     else if (dy < 0 && edge === 1 && prevArmed && _dwell()) { accUp += -dy; if (accUp > 150) window._grpNavPrev(); }
     else { accDown = 0; accUp = 0; }
   }, { passive: true });
