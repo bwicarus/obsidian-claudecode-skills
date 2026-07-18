@@ -42,6 +42,57 @@ def _vb_src(file_rel, page):
     return file_rel, page
 
 
+_PAGES_CACHE = {}   # rel → (mtime_ns, 页数);fitz.open 每次工具调用都开文件不划算
+
+
+def _book_total_pages(file_rel):
+    """这本书**一共多少页**(合并书=各卷之和,与阅读器/book-meta 同一口径)。拿不到返回 0。
+    设计(用户拍板):总页数**不做开话快照**——跨书对话时快照必然过期、还会自信地报错数;
+    改成随工具结果实时回报,AI 每次调书内工具都看到当下这本书的真实页数。"""
+    try:
+        if not file_rel:
+            return 0
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+            return sum((p or 0) for _r, _o, p in _vb_members(file_rel))
+        pdf = _pdf()
+        ap = pdf._safe_vault_path(file_rel)
+        if not ap:
+            return 0
+        mt = ap.stat().st_mtime_ns
+        hit = _PAGES_CACHE.get(file_rel)
+        if hit and hit[0] == mt:
+            return hit[1]
+        import fitz
+        d = fitz.open(str(ap))
+        n = d.page_count
+        d.close()
+        _PAGES_CACHE[file_rel] = (mt, n)
+        return n
+    except Exception:
+        return 0
+
+
+# 书内定位类工具:结果里回报总页数(『翻到最后一页/还剩几页/第N页有没有』都靠它,且换书自动跟着变)
+_PAGES_IN_RESULT = {"read_page", "goto_page", "toc", "search_book", "search_in_book",
+                    "summarize_section", "see_page", "read_highlights", "find_highlights",
+                    "page_vocab", "auto_highlight", "open_book"}
+
+
+def _run_tool(name, targs, ctx):
+    """工具执行**统一出口**:跑工具 + 给书内工具的结果补上『全书总页数』。"""
+    res = TOOLS[name][1](targs, ctx) or {}
+    try:
+        if name in _PAGES_IN_RESULT and isinstance(res, dict) and not res.get("error"):
+            # open_book 是换书:报**目标书**的页数(ctx.file_rel 还是旧书)
+            _fr = (targs.get("file_rel") or "") if name == "open_book" else ""
+            n = _book_total_pages(_fr or ctx.get("file_rel") or "")
+            if n:
+                res.setdefault("全书总页数", n)
+    except Exception:
+        pass
+    return res
+
+
 def _vb_hls(file_rel):
     """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。"""
     pdf = _pdf()
@@ -1912,15 +1963,34 @@ def _t_translate(args, ctx):
         return {"error": str(e)[:120]}
 
 
+def _symbolic_page(v, ctx):
+    """符号页码 → 具体页码:last/end/最后=最后一页,first/开头=1,+N/-N=相对当前页。
+    (用户拍板:『翻到最后一页』这种不该逼 AI 先查页数再跳——服务端自己算,一次到位且永不算错。)"""
+    sv = str(v or "").strip().lower()
+    tot = _book_total_pages(ctx.get("file_rel") or "")
+    if sv in ("last", "end", "最后", "最后一页", "末页", "最后页"):
+        return _to_disp(ctx, tot) if tot else None
+    if sv in ("first", "开头", "第一页", "首页"):
+        return _to_disp(ctx, 1)
+    if sv.startswith(("+", "-")):
+        try:
+            cur = int((ctx.get("pages") or [ctx.get("page")])[0] or 1)
+            return _to_disp(ctx, max(1, min(tot or 10 ** 9, cur + int(sv))))
+        except Exception:
+            return None
+    return None
+
+
 def _t_goto_page(args, ctx):
     try:
         # 100:参数名别名兼容(Grok 实测传 page_number → 报错 → 模型重试风暴;68 批 read_page pages 同款教训)
         _pv = args.get("page")
         if _pv is None:
             _pv = args.get("page_number", args.get("pageNumber", args.get("p")))
-        n = int(_pv)   # AI/用户给的是**印刷页码**
+        _sym = _symbolic_page(_pv, ctx)   # last / first / +1 / -1
+        n = int(_sym if _sym is not None else _pv)   # AI/用户给的是**印刷页码**
     except (TypeError, ValueError):
-        return {"error": "page 不是数字(参数名用 page)"}
+        return {"error": "page 不是数字(参数名用 page;也可以传 last/first/+1/-1)"}
     pdf_n = _to_pdf(ctx, n)         # 转成 PDF 页索引再跳(jumpWithBack 收 PDF 页)
     return {"ok": True, "note": f"已翻到第{n}页", "client_action": {"fn": "jumpWithBack", "args": [pdf_n]}}
 
@@ -4299,7 +4369,7 @@ TOOLS = {
     "open_book": ("打开另一本书并可定位到页(跨书跳转)。args {file_rel | book(书名), page?}", _t_open_book),
     "summarize_section": ("取当前页所在『整章/整节』正文交给你总结(read_page 只逐页,『总结这一章』用这个)。args {page?}", _t_summarize_section),
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
-    "goto_page": ("翻到指定页(前端跳转)。args {page}", _t_goto_page),
+    "goto_page": ("翻到指定页(前端跳转)。args {page};page 可以是数字,也可以是 last(最后一页)/first/+1/-1。结果里带『全书总页数』", _t_goto_page),
     "make_anki": ("把内容做成 Anki 卡(后台,带原文链接,完成通知)。args {text?, image_url?}"
                  "(不传 text 用选中;image_url 若刚 search_image 过、这张图也该进卡片,把同一个 image_url 传进来——"
                  "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
@@ -5667,7 +5737,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                 yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
-                    res = TOOLS[name][1](targs, ctx) or {}
+                    res = _run_tool(name, targs, ctx)
                 except Exception as e:
                     res = {"error": str(e)[:160]}
                 _tool_sec = round(time.time() - _t_tool0, 1)   # 这步耗时(感叹号弹窗显示)
@@ -5881,7 +5951,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                 yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
-                    res = TOOLS[name][1](targs, ctx) or {}
+                    res = _run_tool(name, targs, ctx)
                 except Exception as e:
                     res = {"error": str(e)[:160]}
                 _tool_sec = round(time.time() - _t_tool0, 1)
@@ -6010,7 +6080,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid):
                 yield _tool2(name, _tool_label(name, targs), targs, "running")
                 _t_tool0 = time.time()
                 try:
-                    res = TOOLS[name][1](targs, ctx) or {}
+                    res = _run_tool(name, targs, ctx)
                 except Exception as e:
                     res = {"error": str(e)[:160]}
                 _tool_sec = round(time.time() - _t_tool0, 1)
@@ -6365,7 +6435,7 @@ def assistant_tool_call():
     ctx = dict(body.get("ctx") or {})
     ctx["_uid"] = session["user_id"]
     try:
-        res = TOOLS[name][1](body.get("args") or {}, ctx) or {}
+        res = _run_tool(name, body.get("args") or {}, ctx)
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     try:   # MCP 遥控(2026-07-13):外部 agent 没有浏览器在等 client_action——前端动作经阅读器
@@ -6658,7 +6728,7 @@ def assistant_voice_tool():
     targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}
     t0 = time.time()
     try:
-        res = TOOLS[name][1](targs, ctx) or {}
+        res = _run_tool(name, targs, ctx)
     except Exception as ex:
         res = {"error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     if isinstance(res, dict) and res.get("_sub_steps"):   # 137:工具内部子步骤 → 透出给前端当**外层卡的步骤**(不另起卡)

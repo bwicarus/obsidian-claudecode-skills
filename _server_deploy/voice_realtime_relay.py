@@ -260,17 +260,6 @@ async def _fetch_book_ctx(file_rel: str, page: int) -> dict:
     out = {"page_text": "", "inked": "", "figures": [], "history": []}
     try:
         async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=10) as hc:
-            if file_rel:
-                try:   # 总页数(「翻到最后一页」「还剩几页」要它;合并书=各卷之和)
-                    r = await hc.get("/pdf/api/book-meta", params={"file": file_rel})
-                    d = r.json()
-                    if d.get("page_count"):
-                        out["page_count"] = int(d["page_count"])
-                        vb = d.get("vbook") or {}
-                        if vb.get("members"):
-                            out["vbook_parts"] = len(vb["members"])
-                except Exception:
-                    pass
             if file_rel and page:
                 r = await hc.get("/pdf/api/page-text", params={"file": file_rel, "page": page})
                 d = r.json()
@@ -397,15 +386,14 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
         role += ("\n可用工具目录(冒号后是用途,{}是 args 字段;**最下方的实时状态说某工具当前无效时以状态为准**):\n"
                  + "\n".join(lines.values()))
     # ── ② 中层:跟页走的内容(翻页才变) ──
-    _pc = book.get("page_count") or 0
-    if _pc:
-        _pt = f"\n这本书**总共 {_pc} 页**(最后一页就是第 {_pc} 页;『翻到最后一页』=goto_page(page={_pc}),别说算不出来)。"
-        if book.get("vbook_parts"):
-            _pt += f"它由 {book['vbook_parts']} 个分卷合并成一本,页码已连续贯通——**当作一本 {_pc} 页的书**,别提分卷。"
-        role += _pt
-    role += ("\n- 用户问『第N页/下一页/上一页写的是什么』=要**内容**:调 read_page(args{page:N});"
-             "光 goto_page 只翻页不给内容,答不了他的问题。要边翻边讲就先 read_page 拿到内容再讲"
-             "(每轮一个工具,翻页可以下一轮再说)。**本页**内容下面已直接给你,不用调工具。")
+    # ⚠ 总页数**不写进 SP**(用户拍板):SP 是开话快照、整场不改(改前缀=prompt cache 全废),
+    #   一旦跨书就会拿着上一本的页数自信报错数。改由**工具结果**实时携带『全书总页数』。
+    role += ("\n- 页码类问题:『最后一页/一共多少页/还剩几页』——**别猜也别说算不出来**:"
+             "goto_page 的 page 支持 last(最后一页)/first/+1/-1,直接 {\"tool\":\"goto_page\",\"args\":{\"page\":\"last\"}};"
+             "书内工具(read_page/toc/search_book/goto_page…)的结果里都带**『全书总页数』**字段,以它为准。"
+             "换书之后这个数字会自动跟着变。"
+             "\n- 用户问『第N页/下一页/上一页写的是什么』=要**内容**:调 read_page(args{page:N});"
+             "光 goto_page 只翻页不给内容,答不了他的问题。**本页**内容下面已直接给你,不用调工具。")
     page_text = book.get("page_text") or ""
     if page_text:
         name = (file_rel.rsplit("/", 1)[-1] or "这本书")
