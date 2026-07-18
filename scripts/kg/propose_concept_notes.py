@@ -412,17 +412,38 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
                 print("⏭ 已存在不覆盖:%s" % m["path"])
                 continue
             fp.write_text(m["md"], "utf-8")
-        # 真边进 emergent-graph;挂起进 pending-edges
+        # R4:原子 upsert——node + edge claims + derive,单次写文件;绝不 append 裸边/整表替换
         try:
             g = json.loads(EMERGENT.read_text("utf-8"))
-            seen = {(e["from"], e["to"], e["kind"]) for e in g.get("edges", [])}
+            g.setdefault("nodes", {})
             for m in made:
+                me_term = m["path"].rsplit("/", 1)[-1].split("-", 1)[-1][:-3]   # 编码-名.md → 名
+                me = AP.norm_key(me_term) or me_term
+                import hashlib as _h
+                node = g["nodes"].get(me) or {"id": "em:" + _h.sha1(me.encode()).hexdigest()[:12],
+                                              "surface": me_term, "key": me, "sources": [], "signal": 0,
+                                              "provenance": [], "in_authored_kg": False, "authored_ref": "",
+                                              "books": [], "subject": "", "kind": "concept",
+                                              "origin": "emergent", "confirmed": None}
+                if "autonote" not in node["sources"]:
+                    node["sources"] = sorted(set(node["sources"]) | {"autonote"})
+                node["signal"] += 1
+                ref = m["path"].rsplit("/", 1)[-1]
+                if not any(pv.get("ref") == ref for pv in node["provenance"]):
+                    node["provenance"] = (node["provenance"] + [{"type": "autonote", "ref": ref}])[:8]
                 for e in m["edges"]:
-                    if (e["from"], e["to"], e["kind"]) not in seen:
-                        g["edges"].append(e)
+                    if e["to"] == me or e["from"] == me:
+                        bk = e.get("quote_src", "")
+                        node["books"] = sorted(set(node["books"]) | ({bk.split("#")[0][5:]} if bk.startswith("book:") else set()))
+                g["nodes"][me] = node
+                for e in m["edges"]:
+                    PC.upsert_claim(g, e["from"], e["to"], kind=e["kind"], rel_detail=e.get("rel_detail", ""),
+                                    quote=e.get("quote", ""), quote_src=e.get("quote_src", ""),
+                                    src_tier=e.get("src_tier", "book"), method=e.get("method", "forwardsearch"))
+            g["edges"] = PC.derive_edges(g)
             EMERGENT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
         except Exception as ex:
-            print("⚠ 写边失败:%s" % ex, file=sys.stderr)
+            print("⚠ 写图失败:%s" % ex, file=sys.stderr)
         try:
             pd = json.loads(PENDING_EDGES.read_text("utf-8")) if PENDING_EDGES.exists() else []
         except Exception:

@@ -125,6 +125,24 @@ def build(write=False):
                       "status": e.get("status", "auto"),
                       "confirmed": True if ov else (e.get("status") == "audited" or None)})
 
+    # R4:emergent 节点 availability 不再硬编码 open——按 **effective**(audited/user_confirmed)
+    # prereq 真算:有未掌握前置 → locked。shadow/auto 边只展示不 gating(审计过才影响解锁)。
+    id2u = {n["id"]: n for n in nodes}
+    eff_pre = {}
+    for e in edges:
+        if e.get("origin") == "emergent" and e.get("kind") == "prereq"            and e.get("status") in ("audited", "user_confirmed"):
+            eff_pre.setdefault(e["to"], []).append(e["from"])
+    for n in nodes:
+        if not str(n.get("id", "")).startswith("em::") or n.get("level") != 2:
+            continue
+        prs = eff_pre.get(n["id"], [])
+        blocked = any((id2u.get(pid) or {}).get("progress") not in ("in_progress", "mastered")
+                      for pid in prs)
+        if prs and blocked:
+            n["availability"] = "locked"
+            n["state"] = "locked"
+            n["unlocked"] = False
+
     # 去重边
     seen = set(); ded = []
     for e in edges:

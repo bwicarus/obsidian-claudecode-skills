@@ -75,12 +75,11 @@ def pick_audit_set(g):
         conf_edges = {}
     out = []
     for e in g.get("edges", []):
-        if _ek(e) in conf_edges:
+        k2 = "%s|%s" % (e["from"], e["to"])
+        if _ek(e) in conf_edges or k2 in conf_edges:
             continue                      # 用户签过字的不动
         st = e.get("status", "auto")
-        if st == "audited" and e.get("src_tier") != "prose" and e.get("rel_detail") != "unconfirmed":
-            continue
-        if st == "auto" or e.get("src_tier") == "prose" or e.get("rel_detail") == "unconfirmed":
+        if st in ("auto", "shadow"):      # R4:未审计的(含 shadow prereq)全是审计对象
             out.append(e)
     return out[:MAX_PER_RUN]
 
@@ -117,7 +116,7 @@ def audit(run=False, model="sonnet", effort="low"):
     got = {int(x["i"]): x for x in arr if isinstance(x, dict) and "i" in x}
     stats = {"keep": 0, "demote": 0, "remove": 0, "noans": 0}
     logs = []
-    removed = g.setdefault("removed_edges", [])
+    audits = g.setdefault("edge_audits", {})   # R4:审计=持久 overlay(第 3 层),重建先应用,墓碑不复活
     for i, e in enumerate(todo):
         x = got.get(i) or {}
         v = x.get("verdict")
@@ -125,21 +124,14 @@ def audit(run=False, model="sonnet", effort="low"):
             stats["noans"] += 1
             continue
         stats[v] += 1
-        logs.append({"ts": int(time.time()), "edge": _ek(e), "verdict": v,
+        logs.append({"ts": int(time.time()), "edge": _ek(e), "edge_id": e.get("id"), "verdict": v,
                      "reason": (x.get("reason") or "")[:40], "was": {"kind": e["kind"], "status": e.get("status")}})
         if not run:
             continue
-        if v == "keep":
-            e["status"] = "audited"
-        elif v == "demote":
-            e["kind"] = "related"
-            e["status"] = "audited"
-            e["rel_detail"] = "audit_demoted"
-        else:
-            e["status"] = "removed"
-            removed.append(dict(e, removed_ts=int(time.time())))
+        eid = e.get("id") or PC._edge_id(e["from"], e["to"])
+        audits[eid] = {"verdict": v, "reason": (x.get("reason") or "")[:40], "ts": int(time.time())}
     if run:
-        g["edges"] = [e for e in g["edges"] if e.get("status") != "removed"]
+        g["edges"] = PC.derive_edges(g)        # 派生视图统一出口
         EMERGENT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
         with LOG.open("a", encoding="utf-8") as f:
             for L in logs:

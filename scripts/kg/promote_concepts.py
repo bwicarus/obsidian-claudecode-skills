@@ -131,8 +131,9 @@ def build(write=False):
             "kind": "concept", "origin": "emergent", "confirmed": None,
         }
     out = {"nodes": nodes, "meta": {"built": int(time.time()), "n": len(nodes),
-           "n_new": sum(1 for x in nodes.values() if not x["in_authored_kg"]),
-           "sources": ["note", "diagnostic"], "note": "第一节:只长节点未连边;origin=emergent 待确认/连边"}}
+           "n_new": sum(1 for x in nodes.values() if not x.get("in_authored_kg")),
+           "sources": ["note", "diagnostic", "autonote"]}}
+    out["edges"] = derive_edges(out)
     if write:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         tmp = OUT.with_suffix(".json.tmp")
@@ -375,6 +376,107 @@ def confirm_candidates(cands, model="sonnet", effort="low", use_cache=True):
     return {(c["from"], c["to"]): cache.get(_ck(c), {"verdict": "unconfirmed"}) for c in cands}
 
 
+CONF_FILE = config.PROJECT_DIR / "state" / "attention" / "emergent-confirmations.json"
+
+
+def _edge_id(a, b):
+    """稳定边 id:只看方向端点,与 kind 无关(prereq→related 仍是同一条边,签字/墓碑不失效)。"""
+    return hashlib.sha1(("%s|%s" % (a, b)).encode("utf-8")).hexdigest()[:12]
+
+
+def upsert_claim(g, frm, to, kind, rel_detail, quote, quote_src, src_tier, method, reason=""):
+    """R4 四层模型第 1/2 层:observation(不可变证据,append 去重)+ claim(最新主张,覆盖)。
+    **只 upsert,绝不整表替换**——propose/存量扫描/挂起激活 都走这里,互不破坏。"""
+    claims = g.setdefault("edge_claims", {})
+    eid = _edge_id(frm, to)
+    c = claims.get(eid) or {"from": frm, "to": to, "observations": []}
+    obs = {"quote": (quote or "")[:300], "quote_src": quote_src, "src_tier": src_tier,
+           "method": method, "ts": int(time.time())}
+    if not any(o.get("quote") == obs["quote"] and o.get("quote_src") == obs["quote_src"]
+               for o in c["observations"]):
+        c["observations"] = (c["observations"] + [obs])[-8:]
+    c["claim"] = {"kind": kind, "rel_detail": rel_detail, "reason": (reason or "")[:40],
+                  "ver": EDGE_VER, "ts": int(time.time())}
+    claims[eid] = c
+    return eid
+
+
+def _load_conf_edges():
+    """用户 override(第 4 层):emergent-confirmations.json edges,键归一为 "from|to"(兼容旧 "from|to|kind")。"""
+    try:
+        raw = (json.loads(CONF_FILE.read_text("utf-8")) or {}).get("edges", {})
+    except Exception:
+        raw = {}
+    out = {}
+    for k, v in raw.items():
+        parts = k.split("|")
+        if len(parts) >= 2:
+            out["%s|%s" % (parts[0], parts[1])] = v
+    return out
+
+
+_TIER_RANK = {"quote": 3, "book": 2, "prose": 1}
+
+
+def derive_edges(g):
+    """R4 派生视图:override > 墓碑(audit remove) > audited > auto。
+    激活策略:related 生成即生效(auto);prereq 未审计= shadow(展示但不进 availability);
+    unconfirmed 不产 claim(上游已 fail-closed)。防环:只在 effective(audited/user_confirmed)
+    prereq 间检,环内证据最弱者**降 shadow**(非破坏)。"""
+    conf = _load_conf_edges()
+    audits = g.get("edge_audits", {})
+    out = []
+    for eid, c in (g.get("edge_claims") or {}).items():
+        ov = conf.get("%s|%s" % (c["from"], c["to"]))
+        if ov is False:
+            continue                                   # 用户否决=最高优先墓碑
+        ad = audits.get(eid)
+        kind = (c.get("claim") or {}).get("kind", "related")
+        status = "auto"
+        if ad:
+            if ad.get("verdict") == "remove" and ov is not True:
+                continue                               # 审计墓碑(用户 True 可复活)
+            if ad.get("verdict") == "demote":
+                kind = "related"
+            status = "audited"
+        if ov is True:
+            status = "user_confirmed"
+        elif status == "auto" and kind == "prereq":
+            status = "shadow"                          # prereq 审计过才 effective
+        obs = sorted(c.get("observations") or [], key=lambda o: -_TIER_RANK.get(o.get("src_tier"), 0))
+        best = obs[0] if obs else {}
+        out.append({"id": eid, "from": c["from"], "to": c["to"], "kind": kind,
+                    "origin": "emergent", "status": status,
+                    "method": best.get("method", ""), "quote": best.get("quote", ""),
+                    "quote_src": best.get("quote_src", ""), "src_tier": best.get("src_tier", ""),
+                    "rel_detail": (c.get("claim") or {}).get("rel_detail", ""),
+                    "reason": (c.get("claim") or {}).get("reason", ""), "ver": EDGE_VER})
+    # 防环(effective prereq 间;弱者降 shadow 不删)
+    from collections import defaultdict as _dd
+    while True:
+        eff = [e for e in out if e["kind"] == "prereq" and e["status"] in ("audited", "user_confirmed")]
+        indeg = _dd(int); adj = _dd(list)
+        for e in eff:
+            adj[e["from"]].append(e["to"]); indeg[e["to"]] += 1
+        ns = set(x for e in eff for x in (e["from"], e["to"]))
+        q = [x for x in ns if indeg[x] == 0]; okset = set()
+        while q:
+            x = q.pop(); okset.add(x)
+            for v in adj[x]:
+                indeg[v] -= 1
+                if indeg[v] == 0:
+                    q.append(v)
+        cyc = ns - okset
+        if not cyc:
+            break
+        in_cyc = [e for e in eff if e["from"] in cyc and e["to"] in cyc and e["status"] != "user_confirmed"]
+        if not in_cyc:
+            break                                      # 全是用户签字边,环留给用户裁
+        weakest = min(in_cyc, key=lambda e: _TIER_RANK.get(e["src_tier"], 0))
+        weakest["status"] = "shadow"
+    return out
+
+
 def build_edges(model="sonnet", effort="low", write=False, candidates_only=False):
     """v3-B:扫描拼边(零 AI)→ AI 一句话确认 → 落边(status:auto 生成即生效)→ 防环。
     不再改 nodes/subject/groups(保留既有)。"""
@@ -384,45 +486,17 @@ def build_edges(model="sonnet", effort="low", write=False, candidates_only=False
         g["_candidates"] = cands
         return g
     verdicts = confirm_candidates(cands, model=model, effort=effort)
-    edges = []
     for c in cands:
         v = verdicts.get((c["from"], c["to"]), {})
         vd = v.get("verdict", "unconfirmed")
-        if vd == "drop":
+        if vd in ("drop", "unconfirmed"):   # fail-closed:没点头的绝不进图,下轮重试
             continue
-        if vd == "unconfirmed":     # R4-P0-4 fail-closed:AI 没点头的绝不进有效前置图,下轮重试
-            continue
-        kind = "prereq" if vd == "prereq" else "related"
-        edges.append({"from": c["from"], "to": c["to"], "kind": kind,
-                      "origin": "emergent", "status": "auto",
-                      "method": "aliasscan+sentconfirm", "quote": c["quote"],
-                      "quote_src": c["quote_src"], "src_tier": c["src_tier"],
-                      "rel_detail": vd, "reason": v.get("reason", ""), "ver": EDGE_VER})
-    # 防环(只对 prereq;剔证据最弱:prose < quote,非定义性 < 定义性)
-    from collections import defaultdict as _dd
-    def _weight(e):
-        return (e["src_tier"] == "quote", any(w in e["quote"] for w in _DEF_WORDS))
-    while True:
-        prq = [e for e in edges if e["kind"] == "prereq"]
-        indeg = _dd(int); adj = _dd(list)
-        for e in prq:
-            adj[e["from"]].append(e["to"]); indeg[e["to"]] += 1
-        ns = set(e["from"] for e in prq) | set(e["to"] for e in prq)
-        q = [x for x in ns if indeg[x] == 0]; ok = set()
-        while q:
-            x = q.pop(); ok.add(x)
-            for vtx in adj[x]:
-                indeg[vtx] -= 1
-                if indeg[vtx] == 0:
-                    q.append(vtx)
-        cyc = ns - ok
-        if not cyc:
-            break
-        in_cyc = [e for e in prq if e["from"] in cyc and e["to"] in cyc]
-        weakest = min(in_cyc, key=_weight)
-        edges.remove(weakest)
-    g["edges"] = edges
-    g["meta"]["n_edges"] = len(edges)
+        upsert_claim(g, c["from"], c["to"],
+                     kind=("prereq" if vd == "prereq" else "related"), rel_detail=vd,
+                     quote=c["quote"], quote_src=c["quote_src"], src_tier=c["src_tier"],
+                     method="aliasscan+sentconfirm", reason=v.get("reason", ""))
+    g["edges"] = derive_edges(g)          # R4:派生视图(override>墓碑>audited>auto;prereq未审=shadow)
+    g["meta"]["n_edges"] = len(g["edges"])
     g["meta"]["edges_built"] = int(time.time())
     g["meta"]["edges_ver"] = EDGE_VER
     if write:
