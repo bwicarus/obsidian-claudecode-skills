@@ -41,6 +41,10 @@ CONCEPT_DIR_NAME = "资源/概念"
 
 TOP_N = 20            # 注意力榜前 N 才考虑
 DEEP_CHANNELS = {"highlight", "qa", "check", "read"}
+# ★ AI 自己说过的话**不算概念来源**(铁律,同「AI 生成的定义永不作为抽边扫描源」):
+#   qa_ai 可以让焦点榜知道"你在关注这个"(注意力),但绝不能凑数把它送进概念网(知识结构)——
+#   否则 AI 回答→焦点词→概念节点→概念笔记→又被 AI 读到,自强化环。
+NON_CONCEPT_CHANNELS = {"qa_ai"}
 TOPK_RELATED = 4      # 相关词上限
 STOP = PC.STOP | {"内容", "问题", "方法", "情况", "部分", "时候", "东西"}
 
@@ -115,7 +119,8 @@ def _term_channels(key):
         rows = c.execute("SELECT DISTINCT m.surface, e.channel FROM event_mentions m "
                          "JOIN events e ON e.src_key=m.src_key WHERE m.surface != ''").fetchall()
         c.close()
-        return {ch for sf, ch in rows if (AP.norm_key(sf) or sf) == key}
+        return {ch for sf, ch in rows
+                if (AP.norm_key(sf) or sf) == key and ch not in NON_CONCEPT_CHANNELS}
     except Exception:
         return set()
 

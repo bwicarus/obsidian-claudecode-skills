@@ -75,7 +75,7 @@ STATE = Path(PROJECT_DIR) / "state"
 #   可靠性:不做不可逆截断(源可重算的才允许截);账本(无上游)一律全文;抽取器版本可追。
 #   及时性:**读时保证新鲜**(_ensure_fresh:源 mtime 变了就增量导入)——不靠 15min timer。
 #   可回溯性:每个焦点词带证据链(evidence 事件 id + 分数构成 by_channel),explain() 可查。
-EXTRACTOR_VER = 7      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6)
+EXTRACTOR_VER = 8      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6);v8:指位词/元话语假词过滤 + qa_ai 渠道
 TERMS_MAX = 40         # 单事件术语上限(原 12 → 实测 4 条事件撞顶=真丢词;40 足够,存的是 JSON 数组)
 TEXT_MAX = 4000        # 派生索引里留的原文(源还在,截了也能重算;账本不截,见 append_raw)
 
@@ -87,7 +87,39 @@ TOP_N = 40
 # 渠道权重(设计稿 §5① 草案;调这里即可,画像全量重算立即生效)
 W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0, "read": 0.5,
      "anki_lapse": 2.0,   # Anki 答错 = 薄弱信号(只收 lapse,不收全部复习:52174 条会淹没一切)
-     "tool": 2.0}         # 主动查找(搜书/联网/跨库)的**查询词** = 强意图信号
+     "tool": 2.0,         # 主动查找(搜书/联网/跨库)的**查询词** = 强意图信号
+     "qa_ai": 0.3}        # AI 回答:常态很轻(它不是用户主动行为),补位时提到 QA_AI_BOOST(见下)
+
+# ── AI 回答补位(用户设计 2026-07-19)────────────────────────────────────────────
+# 问题:提问里全是代词——「这一页讲了什么」「用了这个那个」——抽词后**一个有效词都没有**,
+# 于是一个知识点聊得再透彻、学得再久,注意力系统也收不到任何回馈。
+# 方案:AI 回答也入,但**常态权重极低**(0.3);**只有当这一轮用户输入没抽出任何有效词时**
+# 才把该轮 AI 回答提到 QA_AI_BOOST —— 用户轮信息量为零时,由 AI 轮补位说明"这轮在聊什么"。
+# 注意打分器有 1/√N 稀释:AI 回答词多,单词贡献本就远低于短提问,所以补位后也不会喧宾夺主
+# (实测量级:正常提问每词 ~1.16,补位 AI 每词 ~0.5,常态 AI ~0.08)。
+# AI 的**非实质回答**:道歉/读不出/追问/纯操作确认 —— 这些不代表"聊了什么",整条不入。
+# (实测教训:「抱歉,我还是没能把第74页读取出来」拿到了 2.0 补位权重,抽出一堆"文字/图片/页面"噪声。)
+_AI_NONSUB_RE = re.compile(
+    r"^\s*(?:哦?\s*)?(?:抱歉|不好意思|对不起|很遗憾|遗憾|sorry)|"
+    r"(?:没能|没法|无法|不能|失败|出错|读不出|取不到|调不动|没有权限|权限没)|"
+    r"^\s*(?:好的|收到|明白|OK|ok)[，,。!! ]*$|"
+    r"^\s*(?:已|正在)?(?:翻到|跳到|打开|切换)")
+
+
+def _ai_substantive(t):
+    """这条 AI 回答是不是**实质内容**(而非道歉/报错/追问/操作确认)。"""
+    t = (t or "").strip()
+    if len(t) < 8:
+        return False
+    if _AI_NONSUB_RE.search(t[:40]):
+        return False
+    if t.rstrip().endswith(("?", "?")) and len(t) < 60:   # 短反问=在追问用户,不是在讲内容
+        return False
+    return True
+
+
+QA_AI_BOOST = 2.0         # 补位权重(= qa;经 1/√N 稀释后单词贡献仍只有正常提问的约一半)
+QA_AI_MAX_CHARS = 500     # 只取回答开头(结论通常在前;长篇会被稀释成噪声,也省 DB)
 ANKI_DB = Path("/home/bwicarus/.local/share/Anki2/User 1/collection.anki2")
 ANKI_LAPSE_DAYS = 180     # 只导近 N 天的答错(历史 18040 条 lapse 是积累,不是当前焦点)
 NOTE_MAX_CHARS = 600      # 笔记事件取标题+首段(全文会把一篇笔记的所有词都拉进画像)
@@ -426,13 +458,13 @@ def extract_terms(text, hint="", lang=None):
         w = text.strip()
         if w.isascii():
             lw = w.lower()
-            return [lw] if len(lw) > 1 and lw not in _STOP_EN else []
+            return [lw] if len(lw) > 1 and lw not in _STOP_EN and not _is_junk_term(lw) else []
         if not _KANA.search(w):
             if lang and "ja" in lang and len(w) > 4:   # 长的纯汉字日语词:过日语分词器抽复合名词
                 _t = [t for t in _ja_terms(w) if t not in _STOP_JA]
                 if _t:
                     return _t[:3]
-            return [w] if 1 < len(w) <= 8 else []
+            return [w] if 1 < len(w) <= 8 and not _is_junk_term(w) else []
         return [t for t in _ja_terms(w) if t not in _STOP_JA][:4]
     # ★① 领域词典最长匹配(原文里真的连在一起的长词组 —— 用户的洞察):
     #    「向量空间」「vector space」「公衆衛生学」这类,通用分词器切碎、正则抽不出。
@@ -452,10 +484,43 @@ def extract_terms(text, hint="", lang=None):
         lw = w.lower()
         if lw not in _STOP_EN:
             out.append(lw)
-    return _dedup_nest(out, text)[:60]
+    return [w for w in _dedup_nest(out, text) if not _is_junk_term(w)][:60]
 
 
-MENTION_VER = 2        # mention 抽取器版本(改就 +1;event_mentions.mver 记录)。v2:词边界+build传lang+空哨兵+同基线打分
+# ── 假词过滤(2026-07-19 用户干跑实锤)──────────────────────────────────────────
+# 「这一页写的是什么」→['一页']、「那下页写的什么」→['那下页']、「第五页」→['第五']:
+# 全是**指位词**不是知识点,进榜纯污染,还让「这轮用户没给出有效词」永远判不出来。
+# 用模式挡,不逐个列举(页/章/节/题/行/段 + 中文数字/阿拉伯数字的任意组合)。
+_NUM_ZH = "一二三四五六七八九十百千万两半几多первый"[:12] + "0123456789０-９"
+_POSREF_RE = re.compile(
+    r"^(?:第|这|那|上|下|本|前|后|最后|最初|开头|结尾|next|last|first|prev)*"
+    r"[一二三四五六七八九十百千两几多0-9０-９]*"
+    r"(?:页|頁|章|节|節|题|題|行|段|个|個|条|條|部分|page|chapter|section)?$")
+_META_TALK = set("""我来 稍等一下 等一下 听到 明白 知道 谢谢 好的 收到 稍等 片刻 稍等片刻 一下下 当然 得到 要是 随时 准备 直接
+没有 没法 系统 目录 这边 任何 想聊 帮你 告诉 需要 可以 就是 这样 那样 现在 已经 还是 或者 如果 因为
+所以 但是 然后 继续 开始 结束 一起 一样 什么 怎么 为什么 哪里 多少 是不是 有没有 行不行 好不好
+接着 马上 立刻 刚才 现在 等等 之类 什么的 这些 那些 一些 很多 非常 特别 真的 确实 应该 可能 也许
+我们 你们 他们 自己 大家 别人 变化 情况 时候 方式 方法 内容 部分 结果 原因 关系 意思 感觉 想法
+一般 一直 之间 位置 理解 简单 复杂 重要 主要 基本 具体 整体 相关 不同 相同 类似 比如 例如 其实
+来源 数据 信息 东西 事情 问题 答案 说明 解释 介绍 总结 分析 讨论 提到 表示 认为 觉得 建议
+ok okay yes no sure thanks please sorry just really very much some many
+少し ちょっと すぐ すぐに はい いいえ ありがとう すみません""".split())
+
+
+def _is_junk_term(w):
+    """指位词(第五/一页/那下页)、纯数字、口语元话语 → 不是知识点,不进画像。"""
+    w = (w or "").strip()
+    if not w or w.isdigit():
+        return True
+    if w.lower() in _META_TALK:
+        return True
+    if _POSREF_RE.match(w) and not re.search(r"[A-Za-z]{3,}", w):
+        # 「第五」「一页」「那下页」「三章」命中;「page rank」这类含实词的不误伤
+        return True
+    return False
+
+
+MENTION_VER = 3        # mention 抽取器版本(改就 +1;event_mentions.mver 记录)。v2:词边界+build传lang+空哨兵+同基线打分
 
 
 def _mention_lang(term, lang):
@@ -707,7 +772,40 @@ def import_raw(c):
     return n
 
 
-def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="", lang=None):
+_KNOWN_CACHE = {}   # (file|"*") → 已知词集合;一次导入内缓存
+
+
+def _known_terms(c, file=""):
+    """AI 渠道的白名单:**别的渠道已经见过**的词(norm_key 集合)。
+    给了 file 就收紧到**这本书**——AI 只能强化"这本书里真出现过"的东西,
+    它自己的口水词(文字/图片/页面/重点)与自造术语一律出局。
+    书上没有任何其它渠道事件时返回空集 = fail-closed(宁可不采,不要污染)。"""
+    key = file or "*"
+    if key not in _KNOWN_CACHE:
+        try:
+            # ⚠ 查 events.terms 而**不是** event_mentions:mentions 在导入流程的最后才建,
+            #   全量 --rebuild 时它还是空的 → 白名单空 → qa_ai 被 fail-closed 全灭(实测踩过)。
+            #   terms 在 add_event 当场就写,而 lookup/highlight 导入排在 qa 之前,顺序天然成立。
+            q = "SELECT terms FROM events WHERE channel != 'qa_ai'"
+            args = []
+            if file:
+                q += " AND file = ?"
+                args.append(file)
+            ks = set()
+            for (tj,) in c.execute(q, args):
+                try:
+                    for t in json.loads(tj) or []:
+                        ks.add(norm_key(t) or t)
+                except Exception:
+                    pass
+            _KNOWN_CACHE[key] = ks
+        except Exception:
+            _KNOWN_CACHE[key] = set()
+    return _KNOWN_CACHE[key]
+
+
+def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="", lang=None,
+              known_only=False):
     """把一条事件写进**派生索引**(自动抽词、按 src_key 幂等)。
     ⚠ 这是内部函数:调用方必须是导入器(读的是 append-only 的源)。
       新渠道请用 **append_raw()**(写账本)—— 直写本表的数据 --rebuild 时会丢。"""
@@ -718,6 +816,13 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
     if row and int(row[0] or 0) >= EXTRACTOR_VER:
         return 0
     terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)))
+    if terms and known_only:
+        # ★ AI 只能**强化**注意力对象,不能**创造**(用户 2026-07-19 方案的必要护栏)。
+        #   只留其它渠道已经见过的词:书里读过/高亮过/查过/问过的才算数,
+        #   AI 自己的客套话与自造术语(「稍等一下」「让我们来看看」)自动出局——
+        #   这比穷举停用词稳健,也顺带堵死「AI 造词→焦点→概念」的自强化环。
+        known = _known_terms(c, file)   # 在书里聊 → 只认这本书的词;不在书里 → 全局已知词
+        terms = [t for t in terms if (norm_key(t) or t) in known]
     if not terms:
         return 0
     cur = c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
@@ -780,6 +885,52 @@ def import_highlights(c):
     return n
 
 
+def _ai_text(m):
+    """AI 回答的**实质文本**:归档里 content 就是纯回答(工具结果不在其中);
+    活跃 convo 里若有 parts,只取 kind=='text' 的段——工具结果是书原文/搜索结果,
+    量大且已由 read/tool 渠道覆盖,采进来纯属污染。"""
+    ps = m.get("parts")
+    if isinstance(ps, list) and ps:
+        txt = "\n".join(str(p.get("text") or "") for p in ps
+                         if isinstance(p, dict) and p.get("kind") == "text")
+        if txt.strip():
+            return txt
+    return str(m.get("content") or "")
+
+
+def _import_qa_turns(c, msgs, uid):
+    """一段对话 → 事件。用户轮照旧;**AI 轮低权入账,且在用户轮零有效词时补位提权**。
+    (用户设计:代词提问「这一页讲了什么」抽不出词 → 让这轮 AI 回答替它说明在聊什么。)"""
+    n = 0
+    pending_user_empty = None    # 上一条用户消息是否"零有效词";None=还没遇到用户消息
+    for m in msgs:
+        fr = m.get("file_rel") or ""
+        if "/.sandbox/" in fr:
+            continue
+        role = m.get("role")
+        if role == "user":
+            _q = m.get("content") or ""
+            # ★问题 = 问句 + **带入的上下文**(用户实锤:选中一段原文提问,选中内容整个被丢了)。
+            #   两者语言常常不同(中文问 + 日语原文)→ **分开抽词**:问句 lang=[] 按字形判,
+            #   选中的原文 lang=None 按书语言(它是书的内容)。
+            n += add_event(c, m.get("ts") or 0, "qa", _q, fr, m.get("page") or 0, uid=uid, lang=[])
+            _sel = str(m.get("selection") or "").strip()
+            if _sel:
+                n += add_event(c, m.get("ts") or 0, "qa", _sel[:1000], fr, m.get("page") or 0,
+                               uid=uid, hint="sel")   # lang=None → 按书语言(选中的是原文)
+            # 这一轮用户到底有没有给出可用信号?(问句 + 选中 一起看;全是代词/停用词 → 零)
+            pending_user_empty = not (extract_terms(_q, lang=[]) or
+                                      (extract_terms(_sel[:1000], lang=_book_lang(fr)) if _sel else []))
+        elif role == "assistant":
+            _t = _ai_text(m)[:QA_AI_MAX_CHARS]
+            if _ai_substantive(_t):
+                n += add_event(c, m.get("ts") or 0, "qa_ai", _t, fr, m.get("page") or 0, uid=uid,
+                               weight=(QA_AI_BOOST if pending_user_empty else W["qa_ai"]),
+                               lang=[], hint="ai", known_only=True)
+            pending_user_empty = None   # 补位只给紧跟的**第一条**回答,别让一句代词提权整段独白
+    return n
+
+
 def import_convo(c):
     n = 0
     d = STATE / "assistant-convo"
@@ -794,21 +945,7 @@ def import_convo(c):
             continue
         if not isinstance(msgs, list):
             continue
-        for m in msgs:
-            if m.get("role") != "user":
-                continue          # v1 只收用户提问(AI 回答按用户构想是低权渠道,权重待讨论,先不入)
-            fr = m.get("file_rel") or ""
-            if "/.sandbox/" in fr:
-                continue
-            # ★问题 = 问句 + **带入的上下文**(用户实锤:选中一段原文提问,选中内容整个被丢了)。
-            #   两者语言常常不同(中文问 + 日语原文)→ **分开抽词**:问句 lang=[] 按字形判,
-            #   选中的原文 lang=None 按书语言(它是书的内容)。
-            n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem, lang=[])
-            _sel = str(m.get("selection") or "").strip()
-            if _sel:
-                n += add_event(c, m.get("ts") or 0, "qa", _sel[:1000], fr, m.get("page") or 0,
-                               uid=f.stem, hint="sel")   # lang=None → 按书语言(选中的是原文)
+        n += _import_qa_turns(c, msgs, f.stem)
     return n
 
 
@@ -821,7 +958,7 @@ def import_convo_archive(c):
         return 0
     cut = time.time() - ARCHIVE_KEEP_D * 86400
     for f in d.glob("*.jsonl"):
-        keep, trimmed = [], False
+        keep, trimmed, turns = [], False, []
         for ln in f.read_text("utf-8").splitlines():
             try:
                 m = json.loads(ln)
@@ -831,20 +968,8 @@ def import_convo_archive(c):
                 trimmed = True
                 continue
             keep.append(ln)
-            if m.get("role") != "user":
-                continue
-            fr = m.get("file_rel") or ""
-            if "/.sandbox/" in fr:
-                continue
-            # ★问题 = 问句 + **带入的上下文**(用户实锤:选中一段原文提问,选中内容整个被丢了)。
-            #   两者语言常常不同(中文问 + 日语原文)→ **分开抽词**:问句 lang=[] 按字形判,
-            #   选中的原文 lang=None 按书语言(它是书的内容)。
-            n += add_event(c, m.get("ts") or 0, "qa", m.get("content") or "", fr, m.get("page") or 0,
-                           uid=f.stem, lang=[])
-            _sel = str(m.get("selection") or "").strip()
-            if _sel:
-                n += add_event(c, m.get("ts") or 0, "qa", _sel[:1000], fr, m.get("page") or 0,
-                               uid=f.stem, hint="sel")   # lang=None → 按书语言(选中的是原文)
+            turns.append(m)
+        n += _import_qa_turns(c, turns, f.stem)   # 归档同样按"轮"处理(AI 补位逻辑一致)
         if trimmed:
             f.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
     return n
@@ -1071,8 +1196,10 @@ def rebuild_profile(c, now=None):
     surf = defaultdict(Counter)                     # key → 原形写法计数(显示用最高频那个)
     for ts, ch, w, terms_j, file, page in rows:
         try:
-            terms = json.loads(terms_j)
+            terms = [t for t in json.loads(terms_j) if not _is_junk_term(t)]
         except Exception:
+            continue
+        if not terms:
             continue
         dt_d = max(0.0, (now - ts) / 86400.0)
         day = int(ts // 86400)
@@ -1231,6 +1358,8 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
     for r in c.execute("SELECT terms, file FROM events WHERE file<>''"):
         try:
             for t in set(json.loads(r[0])):
+                if _is_junk_term(t):
+                    continue
                 tb[norm_key(t) or t].add(r[1])   # IDF 也按归一键(否则查不到书数=IDF 恒定)
         except Exception:
             pass
@@ -1245,7 +1374,7 @@ def focus_window(when="", days=None, since=None, until=None, channels=None, file
     _half = (_span_d / 3.0) if _span_d > 2 else 0.0
     for ts, ch, w, terms_j, f, page, _eid in rows:
         try:
-            terms = set(json.loads(terms_j))
+            terms = {t for t in json.loads(terms_j) if not _is_junk_term(t)}
         except Exception:
             continue
         w = w / math.sqrt(max(1, len(terms)))
