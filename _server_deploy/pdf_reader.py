@@ -6546,65 +6546,58 @@ def pdf_api_notes():
     """便签 CRUD(sidecar:state/reader-notes/<sha>.json,PDF/EPUB 同一套)。
     GET ?file= → 列;POST {file,anchor,text?,color?,w?,h?,collapsed?,strokes?} → 建;
     PATCH {file,id,anchor?/text?/color?/w?/h?/collapsed?/strokes?} → 改(字段级合并);DELETE ?file=&id= → 删。"""
-    if VB is not None:
-        _ref = ((request.args.get("file") or "").strip() if request.method in ("GET", "DELETE")
-                else str(((request.get_json(silent=True) or {}).get("file")) or ""))
-        if VB.is_view_ref(_ref):
-            try:
-                _g = VB.validate(_ref)
+    # 统一书模型(用户拍板):请求坐标 → 持久真相(真成员 + 该卷局部页),之后 CRUD 一份代码跑到底。
+    # **单本书 = 一个成员、offset 0**,所有翻译都是恒等 —— 所以这段无条件执行,不再有 `if 是合并书`。
+    _ref = ((request.args.get("file") or "").strip() if request.method in ("GET", "DELETE")
+            else str(((request.get_json(silent=True) or {}).get("file")) or ""))
+    _is_view = VB is not None and VB.is_view_ref(_ref)   # 协议边界:客户端用的是视图引用吗
+    try:
+        _parts = _vb_parts(_ref)
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if request.method == "GET":
+        agg = []
+        for _mrel, _moff in _parts:
+            for n0 in _notes_load(_mrel):
+                if not _moff:
+                    agg.append(n0)
+                    continue
+                n2 = json.loads(json.dumps(n0))
+                _a0 = n2.get("anchor") or {}
+                if _a0.get("kind") == "pdf" and _a0.get("page"):
+                    _a0["page"] = int(_a0["page"]) + _moff
+                agg.append(n2)
+        return jsonify({"ok": True, "notes": agg})
+    if request.method == "DELETE":
+        _nid = (request.args.get("id") or "").strip()
+        _home, _ = _vb_owner_of(_ref, lambda m: any(x.get("id") == _nid for x in _notes_load(m)))
+        if _home:
+            _notes_save(_home, [x for x in _notes_load(_home) if x.get("id") != _nid])
+        return jsonify({"ok": True})
+    _b = request.get_json(silent=True) or {}
+    _a = _b.get("anchor") if isinstance(_b.get("anchor"), dict) else None
+    if request.method == "POST":
+        if _is_view and not (_a and _a.get("kind") == "pdf" and _a.get("page")):
+            return jsonify({"ok": False, "error": "合并书便签需 pdf anchor(含 page)"}), 400
+        if VB is not None and _a and _a.get("kind") == "pdf" and _a.get("page"):
+            try:   # 落真成员 + 局部页(单本恒等);下面原逻辑照跑(get_json 是同一个 dict)
+                _b["file"], _a["page"] = VB.locate(_ref, _a["page"], revision=_b.get("vrev"))
             except VB.VbookError as e:
                 return _vb_err(e)
-            if request.method == "GET":
-                agg = []
-                for m in _g["members"]:
-                    for n0 in _notes_load(m["rel"]):
-                        n2 = json.loads(json.dumps(n0))
-                        _a = n2.get("anchor") or {}
-                        if _a.get("kind") == "pdf" and _a.get("page"):
-                            _a["page"] = int(_a["page"]) + m["offset"]
-                        agg.append(n2)
-                return jsonify({"ok": True, "notes": agg})
-            if request.method == "DELETE":
-                _nid = (request.args.get("id") or "").strip()
-                _home = next((m for m in _g["members"]
-                              if any(x.get("id") == _nid for x in _notes_load(m["rel"]))), None)
-                if _home:
-                    _notes_save(_home["rel"], [x for x in _notes_load(_home["rel"]) if x.get("id") != _nid])
-                return jsonify({"ok": True})
-            _b = request.get_json(silent=True) or {}
-            _a = _b.get("anchor") if isinstance(_b.get("anchor"), dict) else None
-            if request.method == "POST":
-                if not (_a and _a.get("kind") == "pdf" and _a.get("page")):
-                    return jsonify({"ok": False, "error": "vbook 便签需 pdf anchor(含 page)"}), 400
-                try:
-                    _mrel, _lp = VB.resolve_view(_ref, _a["page"], revision=_b.get("vrev"))
-                except VB.VbookError as e:
-                    return _vb_err(e)
-                _b["file"], _a["page"] = _mrel, _lp   # 落真成员+局部页;下面原逻辑照跑(get_json 同一 dict)
-            else:   # PATCH:id 定位所属成员;anchor 移动限同卷(跨卷移动=结构语义,首版拒绝)
-                _nid = (_b.get("id") or "").strip()
-                _home = next((m for m in _g["members"]
-                              if any(x.get("id") == _nid for x in _notes_load(m["rel"]))), None)
-                if not _home:
-                    return jsonify({"ok": False, "error": "未找到"}), 404
-                if _a and _a.get("kind") == "pdf" and _a.get("page"):
-                    try:
-                        _mrel, _lp = VB.resolve_view(_ref, _a["page"])
-                    except VB.VbookError as e:
-                        return _vb_err(e)
-                    if _mrel != _home["rel"]:
-                        return jsonify({"ok": False, "error": "跨卷移动便签暂不支持"}), 501
-                    _a["page"] = _lp
-                _b["file"] = _home["rel"]
-    if request.method == "GET":
-        rel = (request.args.get("file") or "").strip()
-        return jsonify({"ok": True, "notes": _notes_load(rel)})
-    if request.method == "DELETE":
-        rel = (request.args.get("file") or "").strip()
-        nid = (request.args.get("id") or "").strip()
-        items = [n for n in _notes_load(rel) if n.get("id") != nid]
-        _notes_save(rel, items)
-        return jsonify({"ok": True})
+    else:   # PATCH:按 id 定位所属卷;anchor 移动限同卷(跨卷移动=结构语义,首版拒绝)
+        _nid = (_b.get("id") or "").strip()
+        _home, _ = _vb_owner_of(_ref, lambda m: any(x.get("id") == _nid for x in _notes_load(m)))
+        if not _home:
+            return jsonify({"ok": False, "error": "未找到"}), 404
+        if VB is not None and _a and _a.get("kind") == "pdf" and _a.get("page"):
+            try:
+                _mrel, _lp = VB.locate(_ref, _a["page"])
+            except VB.VbookError as e:
+                return _vb_err(e)
+            if _mrel != _home:
+                return jsonify({"ok": False, "error": "跨卷移动便签暂不支持"}), 501
+            _a["page"] = _lp
+        _b["file"] = _home
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
     if not rel:
