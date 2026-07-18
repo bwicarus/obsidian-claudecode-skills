@@ -674,7 +674,7 @@ async function renderPage(num) {
   if (!pdfDoc) return;
   num = Math.max(1, Math.min(pdfDoc.numPages, parseInt(num) || 1));
   currentPage = num;
-  { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); try { window._grpChips && window._grpChips(num); } catch (_) {} }
+  { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
   window._refreshVocabIfPage?.();   // 离散翻页(◀▶/滑块/跳页)也刷新「本页」单词本(连续模式下 loadPageNodes 只靠滚动触发,会漏)
   if (readMode !== 'single') {   // 连续 / 双页:滚到对应页占位 + 立即渲染
     // 连续模式：滚到对应页占位 + 立即渲染目标页(别等 IO,跳页/翻页不卡)
@@ -1088,6 +1088,10 @@ window.toggleNodeTrack = async (book, nodeId, btn) => {
 };
 
 window.changePage = async (delta) => {
+  if (window.__GRP) {   // 分卷:越界自动加载相邻卷(单页/横滑模式)
+    if (delta > 0 && currentPage >= __GRP.self.pages && __GRP.next) return window._grpNavNext();
+    if (delta < 0 && currentPage <= 1 && __GRP.prev) return window._grpNavPrev();
+  }
   await renderPage(currentPage + delta);
   _saveLastPosition({page: currentPage, mode: readMode, scale});
 };
@@ -1120,31 +1124,50 @@ window._grpNavToGlobal = function (g) {
   location.href = '/pdf/view?file=' + encodeURIComponent(m.rel) + '&page=' + (g - m.offset);
   return true;
 };
-// 边界翻卷 chip:第 1 页显「◀ 上一卷」/ 最后一页显「下一卷 ▶」(点击加载相邻卷;用户预期=边界需加载)
-window._grpChips = function (num) {
-  if (!window.__GRP) return;
-  var mk = function (id, txt, on) {
-    var el = document.getElementById(id);
-    if (!on) { if (el) el.style.display = 'none'; return; }
-    if (!el) {
-      el = document.createElement('div'); el.id = id;
-      el.style.cssText = 'position:fixed;bottom:64px;z-index:60;background:#1a2540ee;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 14px;border-radius:18px;font-size:13px;cursor:pointer;box-shadow:0 4px 14px #0007;user-select:none';
-      el.style[id === 'grp-prev' ? 'left' : 'right'] = '14px';
-      document.body.appendChild(el);
-    }
-    el.textContent = txt; el.style.display = 'block';
-    el.onclick = on;
-  };
-  var g = window.__GRP, me = g.self;
-  mk('grp-prev', '◀ 上一卷 第' + g.self.offset + '页', (num <= 1 && g.prev) ? function () {
-    var pm = g.members[g.self.index - 1];
-    location.href = '/pdf/view?file=' + encodeURIComponent(g.prev) + '&page=' + pm.pages;
-  } : null);
-  mk('grp-next', '下一卷 第' + (me.offset + me.pages + 1) + '页 ▶', (num >= me.pages && g.next) ? function () {
-    location.href = '/pdf/view?file=' + encodeURIComponent(g.next) + '&page=1';
-  } : null);
+// 边界自动翻卷(用户定:不要按钮——滚动越界直接加载相邻卷)。
+// 连续模式:到底后继续滚 / 到顶后继续拉,累积超阈值 → 自动跳相邻卷;单页模式在 changePage 越界时同样自动。
+window._grpNavNext = function () {
+  if (!(window.__GRP && __GRP.next) || window.__grpNaving) return;
+  window.__grpNaving = 1; _grpToast('下一卷 · 第 ' + (__GRP.self.offset + __GRP.self.pages + 1) + ' 页 …');
+  location.href = '/pdf/view?file=' + encodeURIComponent(__GRP.next) + '&page=1';
 };
-window._refreshPageCur = function () { var pc = document.getElementById('page-cur'); if (pc && typeof currentPage !== 'undefined') { pc.textContent = window._dispPage(currentPage); try { window._grpChips(currentPage); } catch (_) {} } };
+window._grpNavPrev = function () {
+  if (!(window.__GRP && __GRP.prev) || window.__grpNaving) return;
+  window.__grpNaving = 1; var pm = __GRP.members[__GRP.self.index - 1];
+  _grpToast('上一卷 · 第 ' + __GRP.self.offset + ' 页 …');
+  location.href = '/pdf/view?file=' + encodeURIComponent(__GRP.prev) + '&page=' + pm.pages;
+};
+function _grpToast(txt) {
+  try {
+    var t = document.createElement('div'); t.textContent = txt;
+    t.style.cssText = 'position:fixed;left:50%;bottom:34px;transform:translateX(-50%);z-index:99;background:#1a2540ee;color:#cfe6ff;border:1px solid #3b6db5;padding:6px 16px;border-radius:16px;font-size:13px;box-shadow:0 4px 14px #0007';
+    document.body.appendChild(t);
+  } catch (_) {}
+}
+function _grpBoundarySetup() {
+  if (!window.__GRP) return;
+  var el = document.getElementById('main'); if (!el) return;
+  var accDown = 0, accUp = 0, touchY = null;
+  var atBottom = function () { return el.scrollTop + el.clientHeight >= el.scrollHeight - 4; };
+  var atTop = function () { return el.scrollTop <= 2; };
+  el.addEventListener('wheel', function (e) {
+    if (e.deltaY > 0) { accUp = 0; if (atBottom()) { accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); } else accDown = 0; }
+    else if (e.deltaY < 0) { accDown = 0; if (atTop()) { accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); } else accUp = 0; }
+  }, { passive: true });
+  el.addEventListener('touchstart', function (e) { touchY = e.touches[0].clientY; accDown = 0; accUp = 0; }, { passive: true });
+  el.addEventListener('touchmove', function (e) {
+    if (touchY == null) return;
+    var dy = touchY - e.touches[0].clientY;   // >0 = 手指上滑(向下滚)
+    touchY = e.touches[0].clientY;
+    if (dy > 0 && atBottom()) { accDown += dy; if (accDown > 120) window._grpNavNext(); }
+    else if (dy < 0 && atTop()) { accUp += -dy; if (accUp > 120) window._grpNavPrev(); }
+    else { accDown = 0; accUp = 0; }
+  }, { passive: true });
+  el.addEventListener('touchend', function () { touchY = null; accDown = 0; accUp = 0; }, { passive: true });
+}
+if (document.readyState !== 'loading') _grpBoundarySetup();
+else window.addEventListener('DOMContentLoaded', _grpBoundarySetup);
+window._refreshPageCur = function () { var pc = document.getElementById('page-cur'); if (pc && typeof currentPage !== 'undefined') pc.textContent = window._dispPage(currentPage); };
 // 设置面板「页码对齐」:把当前页设为书上第 N 页 → 偏移=当前PDF页-N;applyPageOffset(0)=重置
 window.applyPageOffset = function (forceZero) {
   var off;
