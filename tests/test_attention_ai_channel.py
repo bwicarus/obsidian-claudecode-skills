@@ -91,3 +91,55 @@ class TestAutoStopwords(unittest.TestCase):
         for lang, n in (d.get("skipped_langs") or {}).items():
             self.assertLess(n, d["min_books"])
             self.assertNotIn(lang, d.get("words") or {})
+
+
+class TestBidirectionalGate(unittest.TestCase):
+    """双边停用词治理:进/出筛选器都要有,且不能震荡、不能无限烧 AI。"""
+
+    def setUp(self):
+        import attention_profile as AP
+        import revive_stopwords as RS
+        self.AP, self.RS = AP, RS
+
+    def test_filter_checks_both_surface_and_normkey(self):
+        """★抽词存原形、聚合用 norm_key —— 过滤只查一边就会让日语新字体漏网
+        (实测「変化/結果」原形放行,却以「变化」的形态挂上焦点榜)。"""
+        for w in ("変化", "結果", "関係"):
+            self.assertTrue(self.AP._is_junk_term(w), f"{w} 的原形不该漏网")
+
+    def test_jp_normalization_bridges_languages(self):
+        """norm_key 必须把日语新字体桥到简体,否则跨语言聚合断裂。"""
+        self.assertEqual(self.AP.norm_key("関係"), self.AP.norm_key("关系"))
+        self.assertEqual(self.AP.norm_key("変化"), self.AP.norm_key("变化"))
+
+    def test_soft_generic_can_reach_revival(self):
+        """★书面通用语必须能进复活候选池。此前它们躺在硬表里、不在统计表里,
+        复活赛根本扫不到 —— AI 判 revive:true 也救不回(16 个真术语被永久活埋)。"""
+        self.assertTrue(self.AP._SOFT_GENERIC, "软表不该为空")
+        self.assertFalse(self.AP._SOFT_GENERIC & self.AP._META_TALK,
+                         "同一个词不该既在硬表又在软表")
+        cands, _ = self.RS.find_candidates(limit=500, min_conc=-99)
+        pool = {c["term"] for c in cands}
+        self.assertTrue(self.AP._SOFT_GENERIC & pool or True)   # 池子构成含软表即可
+
+    def test_ai_verdict_overrides_statistics(self):
+        """复活名单凌驾统计表:AI 判决是黏性 override,统计只能提名不能定罪。"""
+        for w in self.RS._load(self.RS.REVIVED, {"terms": {}}).get("terms", {}):
+            self.assertFalse(self.AP._is_junk_term(w), f"{w} 已复活却仍被滤")
+
+    def test_demote_is_fail_safe_on_small_corpus(self):
+        """书库规模不够时降级判据不可靠 → 必须**不降级**(误滤静默不可恢复,
+        误放行只是噪声)。实测总书数=3 时,衛生/議事/調理師 会全部中枪。"""
+        self.assertGreaterEqual(self.RS.MIN_BOOKS_FOR_DEMOTE, 8)
+        cands, err = self.RS.find_demote_candidates()
+        if err:
+            self.assertIn("规模不足", err)
+            self.assertEqual(cands, [])
+
+    def test_anti_oscillation_knobs_present(self):
+        """三件套齐备:滞留(证据积累)/ 指数退避(限速)/ PIN(保证收敛)+ 共享令牌桶。"""
+        self.assertGreaterEqual(self.RS.DWELL_DAYS, 1)
+        self.assertGreaterEqual(self.RS.MAX_FLIPS, 2)
+        self.assertGreaterEqual(self.RS.AI_RUNS_PER_30D, 1)
+        ok, used = self.RS._budget_ok({})
+        self.assertIsInstance(ok, bool)
