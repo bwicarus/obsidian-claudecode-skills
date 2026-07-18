@@ -614,6 +614,51 @@ def build_mentions(c, only_new=True):
     return done
 
 
+MENTION_CHILD_W = 0.3   # 子词(落在长词内)贡献降权:合成词满记,里面的部件只算 0.3
+
+
+def focus_from_mentions(top=40, now=None):
+    """★mention 打分器(审查 step 3):与 rebuild_profile 并行,读 event_mentions 而非 set(terms)。
+    与老打分器的差别 = **多次独立出现各算** + **父词满记/子词降权**(合成词计数正确)。同款 半衰期×IDF×饱和。
+    返回 [{term, key, score, n}],供与老 focus.json 对账;**不写文件、不替换**老路径。"""
+    import math
+    from collections import defaultdict, Counter
+    now = now or time.time()
+    c = _db()
+    ensure_fresh(c)
+    S_s, S_l = defaultdict(float), defaultdict(float)
+    surf = defaultdict(Counter)
+    day_seen = defaultdict(int)
+    books = defaultdict(set)
+    all_books = set()
+    rows = c.execute("""SELECT e.ts, e.channel, e.file, m.surface, m.parent
+                        FROM event_mentions m JOIN events e ON e.src_key = m.src_key""").fetchall()
+    for ts, ch, file, surface, parent in rows:
+        if not surface:
+            continue
+        k = norm_key(surface) or surface
+        dt_d = max(0.0, (now - ts) / 86400.0)
+        day = int(ts // 86400)
+        base = W.get(ch, 1.0) * (MENTION_CHILD_W if parent else 1.0)   # 父词满记、子词降权
+        day_seen[(k, day)] += 1
+        sat = 1.0 / (1.0 + 0.3 * (day_seen[(k, day)] - 1))
+        S_s[k] += base * sat * (2 ** (-dt_d / HALF_SHORT_D))
+        S_l[k] += base * sat * (2 ** (-dt_d / HALF_LONG_D))
+        surf[k][surface] += 1
+        if file and ch not in ("note", "anki_lapse"):
+            books[k].add(file); all_books.add(file)
+    c.close()
+    nb = max(1, len(all_books))
+    out = []
+    for k, ss in S_s.items():
+        idf = math.log((1 + nb) / (1 + len(books[k]))) + 0.3
+        score = (ALPHA * ss + (1 - ALPHA) * S_l[k]) * idf
+        disp = surf[k].most_common(1)[0][0] if surf.get(k) else k
+        out.append({"term": disp, "key": k, "score": round(score, 3), "n": sum(surf[k].values())})
+    out.sort(key=lambda x: -x["score"])
+    return out[:top]
+
+
 def import_raw(c):
     """账本 → 派生索引(幂等增量;--rebuild 后也会重导,数据不丢)。"""
     if not RAW.exists():
