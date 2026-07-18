@@ -29,17 +29,29 @@ CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 
 
-def _vb_src(file_rel, page):
-    """合并书(vbook:)引用 → (真实成员, 局部页);真实 rel 原样返回。第三通道适配(转换层v2/R5)。"""
+def _VB():
+    """领域服务(统一书模型)。拿不到就返回 None,调用方退回恒等行为。"""
     try:
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-            import sys as _s
-            _s.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
-            import vbook as _VB
-            return _VB.resolve_view(file_rel, int(page or 1))
+        import sys as _s
+        _p = str(CLAUDE_DIR / "scripts" / "lib")
+        if _p not in _s.path:
+            _s.path.insert(0, _p)
+        import vbook as _v
+        return _v
     except Exception:
-        pass
-    return file_rel, page
+        return None
+
+
+def _vb_src(file_rel, page):
+    """(书, 视图页) → (真实成员, 该卷局部页)。**单本书=恒等**,所以无条件调用即可
+    ——业务代码里不该再出现 `if 是合并书` 的分支(用户拍板:单本书=单成员的合并书)。"""
+    v = _VB()
+    if not v:
+        return file_rel, page
+    try:
+        return v.locate(file_rel, int(page or 1))
+    except Exception:
+        return file_rel, page
 
 
 _PAGES_CACHE = {}   # rel → (mtime_ns, 页数);fitz.open 每次工具调用都开文件不划算
@@ -52,8 +64,9 @@ def _book_total_pages(file_rel):
     try:
         if not file_rel:
             return 0
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-            return sum((p or 0) for _r, _o, p in _vb_members(file_rel))
+        v = _VB()
+        if v and v.is_view_ref(file_rel):
+            return int(v.total_pages(file_rel) or 0)
         pdf = _pdf()
         ap = pdf._safe_vault_path(file_rel)
         if not ap:
@@ -93,6 +106,26 @@ def _run_tool(name, targs, ctx):
     return res
 
 
+def _vb_part_of(file_rel, page):
+    """视图页 → 它所在的那一卷 (rel, offset)。单本书恒为 (自己, 0)。越界 → (None, 0)。"""
+    for _mrel, _moff, _mpgs in _vb_members(file_rel):
+        if _moff < page <= _moff + (_mpgs or 10 ** 9):
+            return _mrel, _moff
+    return None, 0
+
+
+def _vb_localize(file_rel, pages):
+    """一组视图页 → (所在卷 rel, 该卷内的局部页们)。跨卷时只取**第一页所在**那一卷
+    (see_page/highlight 这类"一次操作一卷"的工具语义)。单本书=原样返回。"""
+    if not pages:
+        return file_rel, pages
+    mrel, moff = _vb_part_of(file_rel, pages[0])
+    if not mrel:
+        return None, []
+    hi = moff + (dict((m[0], m[2]) for m in _vb_members(file_rel)).get(mrel) or 10 ** 9)
+    return mrel, [p - moff for p in pages if moff < p <= hi]
+
+
 def _vb_hls(file_rel):
     """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。"""
     pdf = _pdf()
@@ -128,17 +161,15 @@ def _vb_note_owner(file_rel, nid):
 
 
 def _vb_members(file_rel):
-    """vbook → [(member_rel, offset, pages)];非 vbook → [(rel, 0, None)]。整本级工具扇入用。"""
+    """这本书的成员们 → [(rel, offset, pages)]。**单本书=一个成员**(offset 0、pages 真页数),
+    所以「遍历整本」的代码对两种书是同一份。"""
+    v = _VB()
+    if not v:
+        return [(file_rel, 0, _book_total_pages(file_rel))]
     try:
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-            import sys as _s
-            _s.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
-            import vbook as _VB
-            g = _VB.get(file_rel)
-            return [(m["rel"], m["offset"], m["pages"]) for m in g["members"]]
+        return [(m["rel"], m["offset"], m["pages"]) for m in v.parts(file_rel)]
     except Exception:
-        pass
-    return [(file_rel, 0, None)]
+        return [(file_rel, 0, _book_total_pages(file_rel))]
 _APP_CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 _AGENT_MODEL = "sonnet"   # 推理 + 工具决策:sonnet 平衡(快+好用);重内容生成的工具内部各用 opus
 
@@ -1687,18 +1718,8 @@ def _to_pdf(ctx, disp):   # 书上印刷页 → PDF 页(读页 / 跳转用)
         return disp
 
 
-def _figdescs_for(file_rel, printed_pages):
-    """本书开了『插图描述』时,取这些**印刷页**的图 caption+desc(纯文本,非视觉)。{印刷页: [(cap,desc),…]}。
-    这样跨页/图里的结构(如 V 字模型整张图把上下流各阶段都画在图上)用现成描述就能进上下文,不必读视觉。"""
-    if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-        out = {}
-        for _mrel, _moff, _mpgs in _vb_members(file_rel):
-            _loc = [p - _moff for p in printed_pages
-                    if isinstance(p, (int, float)) and _moff < p <= _moff + (_mpgs or 0)]
-            if _loc:
-                for lp, v in _figdescs_for(_mrel, _loc).items():
-                    out[lp + _moff] = v
-        return out
+def _figdescs_one(file_rel, printed_pages):
+    """单个 PDF 文件内的图描述(局部页)。上层 _figdescs_for 负责按成员切分——别直接调这个。"""
     try:
         import pdf_reader as _pdfm
         if not (file_rel and _pdfm._book_fig_enabled(file_rel)):
@@ -1714,6 +1735,22 @@ def _figdescs_for(file_rel, printed_pages):
         return out
     except Exception:
         return {}
+
+
+def _figdescs_for(file_rel, printed_pages):
+    """本书开了『插图描述』时,取这些页的图 caption+desc(纯文本,非视觉)。{视图页: [(cap,desc),…]}。
+    这样跨页/图里的结构(如 V 字模型整张图把上下流各阶段都画在图上)用现成描述就能进上下文,不必读视觉。
+    **对单本书和合并书是同一条路径**:单本书=只有一个成员、offset 0(用户拍板的统一书模型)。"""
+    out = {}
+    for _mrel, _moff, _mpgs in _vb_members(file_rel):
+        _hi = _moff + (_mpgs or 10 ** 9)
+        _loc = [p - _moff for p in printed_pages
+                if isinstance(p, (int, float)) and _moff < p <= _hi]
+        if not _loc:
+            continue
+        for lp, v in _figdescs_one(_mrel, _loc).items():
+            out[lp + _moff] = v
+    return out
 
 
 def _read_one(file_rel, ctx, pg, figd, cap_txt=4800, cap_fig=600, label=None):
@@ -2630,13 +2667,9 @@ def _t_see_page(args, ctx):
         import base64
         import fitz
         import pdf_reader as pdf
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:") and pages:
-            _mem = _vb_members(file_rel)
-            _f = next((m for m in _mem if m[1] < pages[0] <= m[1] + (m[2] or 0)), None)
-            if not _f:
-                return {"error": "页越界(合并书)"}
-            pages = [p - _f[1] for p in pages if _f[1] < p <= _f[1] + (_f[2] or 0)]
-            file_rel = _f[0]
+        file_rel, pages = _vb_localize(file_rel, pages)   # 视图页→所在卷局部页(单本书恒等)
+        if not file_rel:
+            return {"error": "页越界"}
         ap = (VAULT_ROOT / file_rel).resolve()
         ap.relative_to(VAULT_ROOT.resolve())
         doc = fitz.open(str(ap))
@@ -2854,13 +2887,9 @@ def _t_highlight(args, ctx):
             pages = []
     else:
         pages = [int(p) for p in (ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])) if p]
-    if isinstance(file_rel, str) and file_rel.startswith("vbook:") and pages:   # 合并书:全局页→所在卷局部页(单卷内)
-        _mem = _vb_members(file_rel)
-        _f = next((m for m in _mem if m[1] < pages[0] <= m[1] + (m[2] or 0)), None)
-        if not _f:
-            return {"error": "页越界(合并书)"}
-        pages = [p - _f[1] for p in pages if _f[1] < p <= _f[1] + (_f[2] or 0)]
-        file_rel = _f[0]
+    file_rel, pages = _vb_localize(file_rel, pages)   # 视图页→所在卷局部页(单本书恒等)
+    if not file_rel:
+        return {"error": "页越界"}
     try:
         import fitz
         ap = (VAULT_ROOT / file_rel).resolve()
@@ -3014,25 +3043,21 @@ def _t_toc(args, ctx):
         return {"error": "没开书"}
     try:
         pdf = _pdf()
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-            entries, source = [], "none"
-            for _mrel, _moff, _ in _vb_members(file_rel):
-                _apm = pdf._safe_vault_path(_mrel)
-                if not _apm:
-                    continue
-                _es, _s2 = pdf._effective_toc(_apm, _mrel)
-                if _es and source == "none":
-                    source = _s2
-                for _e in _es:
-                    _e2 = dict(_e)
-                    if isinstance(_e2.get("page"), (int, float)):
-                        _e2["page"] = int(_e2["page"]) + _moff
-                    entries.append(_e2)
-        else:
-            ap = pdf._safe_vault_path(file_rel)
-            if not ap:
-                return {"error": "书路径无效"}
-            entries, source = pdf._effective_toc(ap, file_rel)   # page 已归一到印刷页(跟 AI/用户一致)
+        entries, source = [], "none"
+        for _mrel, _moff, _ in _vb_members(file_rel):   # 单本书=只循环一次、offset 0(统一书模型)
+            _apm = pdf._safe_vault_path(_mrel)
+            if not _apm:
+                continue
+            _es, _s2 = pdf._effective_toc(_apm, _mrel)   # page 已归一到印刷页(跟 AI/用户一致)
+            if _es and source == "none":
+                source = _s2
+            for _e in _es:
+                _e2 = dict(_e) if _moff else _e
+                if _moff and isinstance(_e2.get("page"), (int, float)):
+                    _e2["page"] = int(_e2["page"]) + _moff
+                entries.append(_e2)
+        if source == "none" and not entries and not any(pdf._safe_vault_path(m[0]) for m in _vb_members(file_rel)):
+            return {"error": "书路径无效"}
         if not entries:
             return {"count": 0, "note": "这本书没录入目录(没建过也没原生书签)。定位章节改用 find_highlights(page=\"all\") 看高亮都在哪几页,或直接问用户大概页码。"}
         out = [{"title": (e.get("title") or "")[:80], "page": e.get("page"), "level": e.get("level", 1)} for e in entries if e.get("page") is not None]
@@ -3161,16 +3186,16 @@ def _t_see_figure(args, ctx):
     try:
         import base64
         import pdf_reader as pdf
-        if isinstance(file_rel, str) and file_rel.startswith("vbook:") and figs:
-            def _figpg(f):
-                return int((f.get("ref") or {}).get("page") or f.get("page") or 0)
-            _pg0 = next((_figpg(f) for f in figs if _figpg(f)), 0)
-            file_rel, _lp0 = _vb_src(file_rel, _pg0 or 1)
+        def _figpg(f):
+            return int((f.get("ref") or {}).get("page") or f.get("page") or 0)
+        _pg0 = next((_figpg(f) for f in figs if _figpg(f)), 0)
+        if _pg0:
+            file_rel, _lp0 = _vb_src(file_rel, _pg0)   # 图在哪一卷(单本书恒等 → _d=0,下面全是空操作)
             _d = _pg0 - _lp0
             for f in figs:
-                if f.get("page"):
+                if _d and f.get("page"):
                     f["page"] = int(f["page"]) - _d
-                if (f.get("ref") or {}).get("page"):
+                if _d and (f.get("ref") or {}).get("page"):
                     f["ref"] = dict(f["ref"]); f["ref"]["page"] = int(f["ref"]["page"]) - _d
         ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
         vis = []; ink_any = False
@@ -3342,11 +3367,12 @@ def _t_notes_create(args, ctx, kind="pdf"):
     now = int(time.time())
     n = {"id": "n" + _u.uuid4().hex[:11], "anchor": anchor, "text": text[:8000], "color": color,
          "w": 260, "h": 180, "collapsed": False, "strokes": [], "created": now, "updated": now}
-    _view_rel, _view_pg = file_rel, anchor.get("page")   # 前端仍活在视图坐标(vbook+全局页)
-    if isinstance(file_rel, str) and file_rel.startswith("vbook:") and anchor.get("kind") == "pdf":
-        file_rel, _lp = _vb_src(file_rel, anchor.get("page") or 1)   # 落盘:贴到真正那一卷(局部页=持久真相)
-        anchor = dict(anchor); anchor["page"] = _lp
-        n["anchor"] = anchor
+    _view_rel, _view_pg = file_rel, anchor.get("page")   # 前端活在视图坐标(单本书=同一个值)
+    if anchor.get("kind") == "pdf" and anchor.get("page"):
+        file_rel, _lp = _vb_src(file_rel, anchor["page"])   # 落盘:贴到真正那一卷(局部页=持久真相;单本恒等)
+        if _lp != anchor["page"]:
+            anchor = dict(anchor); anchor["page"] = _lp
+            n["anchor"] = anchor
     items = pdf._notes_load(file_rel)
     items.append(n)
     pdf._notes_save(file_rel, items)
@@ -3390,11 +3416,10 @@ def _t_notes_edit(args, ctx, kind="pdf"):
     if new_text is None and new_color is None:
         return {"error": "text / color 至少给一个(只能改文字和颜色;手写笔画/位置/尺寸不能动)"}
     pdf = _pdf()
-    if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
-        _own, _ = _vb_note_owner(file_rel, nid)   # 合并书:这条便签在哪一卷
-        if not _own:
-            return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
-        file_rel = _own
+    _own, _ = _vb_note_owner(file_rel, nid)   # 这条便签落在哪一卷(单本书=它自己)
+    if not _own:
+        return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
+    file_rel = _own
     items = pdf._notes_load(file_rel)
     n = next((x for x in items if x.get("id") == nid), None)
     if not n:

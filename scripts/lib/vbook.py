@@ -231,3 +231,79 @@ def members(view_ref):
 
 def revision_of(view_ref):
     return get(view_ref)["revision"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 统一书模型(用户拍板 2026-07-19):**单本书 = 只有一个成员的合并书**。
+#
+# 目的:业务代码里不再有 `if 是合并书: … else: …` 两条路径——所有地方只问领域服务要
+# 「这本书的成员们」,单本书自然只循环一次。今天 assistant 一次漏掉 14 处适配,根因
+# 正是双分支写法;同构之后这类漏从结构上消失。
+#
+# 边界(明确不做):**磁盘与 URL 上的真实 rel 不变**。边车(高亮/便签/墨迹/译文/语法)、
+# Anki 页锚 ![[book.pdf#page=N]]、笔记链接、MCP 的 rel 全部照旧——统一的是**代码路径**,
+# 不是标识符。SourceLocation 仍是唯一持久真相。
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pages_of(rel):
+    """单本书页数(BG 的 fitz 权威口径 + 它自己的缓存)。拿不到 → 0。"""
+    try:
+        return int(BG._page_count(rel) or 0)
+    except Exception:
+        return 0
+
+
+def book(ref, revision=None):
+    """**任何**书引用 → 统一书对象。合并书=多成员;单本书=单成员(offset 0)。
+
+    {"ref", "merged": bool, "total": 总页数, "members": [{"rel","offset","pages","num"}]}
+    单本书的 pages 走 fitz 缓存;总页数拿不到时为 0(调用方按需容错)。
+    """
+    if is_view_ref(ref):
+        g = get(ref)
+        _check_rev(g, revision)
+        return {"ref": ref, "merged": True, "total": g["total"],
+                "revision": g["revision"], "base": g.get("base"),
+                "members": [dict(m) for m in g["members"]]}
+    n = _pages_of(ref)
+    return {"ref": ref, "merged": False, "total": n, "revision": None,
+            "base": (ref.rsplit("/", 1)[-1].rsplit(".", 1)[0] if ref else ""),
+            "members": [{"rel": ref, "offset": 0, "pages": n, "num": 1}]}
+
+
+def parts(ref, revision=None):
+    """书的成员列表(合并书=各卷;单本书=它自己一个)。遍历整本时用它,别再判前缀。"""
+    return book(ref, revision)["members"]
+
+
+def total_pages(ref, revision=None):
+    """全书页数(合并书=各卷之和)。"""
+    return book(ref, revision)["total"]
+
+
+def locate(ref, page, revision=None):
+    """(书, 视图页) → (真实成员 rel, 该卷局部页)。**单本书=恒等**,所以可以无条件调用。
+    合并书越界 → VbookRange;单本书不校验上界(与历史行为一致,交给下游 fitz 报错)。"""
+    if is_view_ref(ref):
+        return resolve_view(ref, page, revision)
+    return ref, page
+
+
+def globalize(member_rel, local_page):
+    """(真实成员, 局部页) → 视图页。**单本书=恒等**(返回原 rel 与原页),可无条件调用。
+    返回 (ref, page):合并书里 ref 是 vbook:…、page 是全局页。"""
+    try:
+        v = to_view(member_rel, local_page)
+    except VbookError:
+        v = None
+    if v:
+        return v[0], v[1]
+    return member_rel, local_page
+
+
+def offset_of(ref, member_rel, revision=None):
+    """某成员在整本里的页偏移(单本书恒为 0)。"""
+    for m in parts(ref, revision):
+        if m["rel"] == member_rel:
+            return m["offset"]
+    return 0

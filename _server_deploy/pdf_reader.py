@@ -210,6 +210,23 @@ def _vbook_gate():
     return None
 
 
+def _vb_parts(rel):
+    """任何书引用 → [(成员 rel, offset)]。**单本书=一个成员、offset 0**(统一书模型,用户拍板)。
+    业务代码遍历整本时一律用它,不要再写 `if 是合并书` 分支——分支只保留在转换层边界(gate/协议)。"""
+    if VB is not None and VB.is_view_ref(rel):
+        g = VB.validate(rel)   # 抛 VbookError 由调用方 _vb_err 转 HTTP
+        return [(m["rel"], m["offset"]) for m in g["members"]]
+    return [(rel, 0)]
+
+
+def _vb_owner_of(rel, pred):
+    """按谓词找出目标落在哪一卷 → (成员 rel, offset);找不到 → (None, 0)。单本书只测它自己。"""
+    for mrel, moff in _vb_parts(rel):
+        if pred(mrel):
+            return mrel, moff
+    return None, 0
+
+
 def _list_vault_pdfs() -> list[dict]:
     """扫 vault 下所有书:PDF + EPUB。返回 [{rel, name, kind, size_kb, mtime, lastopen, comp_*}, ...]。
     kind: "pdf"(分页阅读器) | "epub"(原生 reflow 阅读器,不转换)。
@@ -4186,7 +4203,7 @@ def _book_text_index(abs_path, rel: str) -> dict:
 
 
 def _search_in_index(idx, q, limit):
-    """单本书页文本索引内搜 q(语义与 pdf_api_search 主循环一致;合并书扇入用,原 handler 不动)。"""
+    """单个 PDF 的页文本索引内搜 q。**唯一实现**——handler 对单本书/合并书都调它(统一书模型)。"""
     ql = q.lower()
     matches = []
     total = 0
@@ -4206,7 +4223,8 @@ def _search_in_index(idx, q, limit):
             a = max(0, fpos - 28)
             b = min(len(flat), fpos + len(q) + 28)
             snippet = ("…" if a > 0 else "") + flat[a:b].strip() + ("…" if b < len(flat) else "")
-            matches.append({"page": int(pg), "count": cnt, "snippet": snippet, "pos": fpos})
+            matches.append({"page": int(pg), "count": cnt, "snippet": snippet,
+                            "pos": fpos - a + (1 if a > 0 else 0)})   # 相对 snippet(前端按它加粗)
     return {"total": total, "matches": matches}
 
 
@@ -4216,38 +4234,6 @@ def pdf_api_search():
     GET ?file=&q=&limit= → {ok, total, matches:[{page, count, snippet, pos}]}"""
     rel = request.args.get("file", "")
     q = (request.args.get("q", "") or "").strip()
-    if VB is not None and VB.is_view_ref(rel):
-        # 转换层v2 扇入:逐成员搜索,页码反译全局,合并排序
-        try:
-            g = VB.validate(rel)
-        except VB.VbookError as e:
-            return _vb_err(e)
-        if len(q) < 1:
-            return jsonify({"ok": False, "error": "empty query"}), 400
-        try:
-            limit = max(1, min(400, int(request.args.get("limit", "200") or "200")))
-        except ValueError:
-            limit = 200
-        agg, total = [], 0
-        for m in g["members"]:
-            ap = _safe_vault_path(m["rel"])
-            if not ap:
-                continue
-            try:
-                idx = _book_text_index(ap, m["rel"])
-            except Exception:
-                continue
-            r = _search_in_index(idx, q, limit)
-            total += r["total"]
-            for mt in r["matches"]:
-                mt2 = dict(mt)
-                mt2["page"] = int(mt.get("page") or 0) + m["offset"]
-                agg.append(mt2)
-        agg.sort(key=lambda x: x.get("page") or 0)
-        return jsonify({"ok": True, "total": total, "matches": agg[:limit]})
-    abs_path = _safe_vault_path(rel)
-    if not abs_path:
-        return jsonify({"ok": False, "error": "invalid file"}), 400
     if len(q) < 1:
         return jsonify({"ok": False, "error": "empty query"}), 400
     try:
@@ -4258,35 +4244,30 @@ def pdf_api_search():
         import fitz  # noqa: F401
     except ImportError:
         return jsonify({"ok": False, "error": "PyMuPDF not installed"}), 500
-    try:
-        idx = _book_text_index(abs_path, rel)
-    except Exception as ex:
-        return jsonify({"ok": False, "error": f"index build fail: {ex}"}), 500
-    ql = q.lower()
-    matches = []
-    total = 0
-    for pg in sorted(idx.keys(), key=lambda x: int(x)):
-        text = idx[pg] or ""
-        low = text.lower()
-        cnt = low.count(ql)
-        if not cnt:
-            continue
-        total += cnt
-        if len(matches) < limit:
-            # 取第一处命中做 snippet（折叠空白，上下文 ±28 字）
-            pos = low.find(ql)
-            flat = re.sub(r"\s+", " ", text)
-            flow = flat.lower()
-            fpos = flow.find(ql)
-            if fpos < 0:
-                fpos = 0
-            a = max(0, fpos - 28)
-            b = min(len(flat), fpos + len(q) + 28)
-            snippet = ("…" if a > 0 else "") + flat[a:b].strip() + ("…" if b < len(flat) else "")
-            matches.append({"page": int(pg), "count": cnt, "snippet": snippet,
-                            "pos": fpos - a + (1 if a > 0 else 0)})
+    try:   # 统一书模型:单本书=一个成员、offset 0;合并书=逐卷扇入后按视图页排序
+        parts = _vb_parts(rel)
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if not parts or any(_safe_vault_path(m) is None for m, _ in parts):
+        return jsonify({"ok": False, "error": "invalid file"}), 400
+    agg, total = [], 0
+    for mrel, moff in parts:
+        try:
+            idx = _book_text_index(_safe_vault_path(mrel), mrel)
+        except Exception as ex:
+            if len(parts) == 1:
+                return jsonify({"ok": False, "error": f"index build fail: {ex}"}), 500
+            continue   # 合并书:某一卷索引坏了不该拖垮整本
+        r = _search_in_index(idx, q, limit)
+        total += r["total"]
+        for mt in r["matches"]:
+            if moff:
+                mt = dict(mt); mt["page"] = int(mt.get("page") or 0) + moff
+            agg.append(mt)
+    agg.sort(key=lambda x: x.get("page") or 0)
+    agg = agg[:limit]
     return jsonify({"ok": True, "q": q, "total": total,
-                    "pages": len(matches), "matches": matches})
+                    "pages": len(agg), "matches": agg})
 
 
 # ── 全局搜索:跨 vault 所有 PDF 书的全文(SQLite FTS5 trigram,索引由 scripts/build_search_index.py 建)──
@@ -10224,23 +10205,22 @@ def pdf_api_figure_crop():
 def pdf_api_highlights_list():
     """GET ?file=<rel> → {ok, highlights:[{id,page,rects,color,text,note,time}, ...]}"""
     rel = request.args.get("file", "")
-    if VB is not None and VB.is_view_ref(rel):
-        # 转换层v2:合并书扇入——各成员高亮合并,页码反译成全局(客户端在合并视图里页码就是全局)
-        try:
-            g = VB.validate(rel)
-        except VB.VbookError as e:
-            return _vb_err(e)
-        agg = []
-        for m in g["members"]:
-            for h in _hl_load(m["rel"]).get("highlights", []):
-                h2 = dict(h)
-                h2["page"] = int(h.get("page") or 0) + m["offset"]
-                agg.append(h2)
-        agg.sort(key=lambda x: (x.get("page") or 0, x.get("time") or 0))
-        return jsonify({"ok": True, "highlights": agg})
-    if not rel or _safe_vault_path(rel) is None:
+    # 统一书模型:遍历成员(单本书=只有它自己、offset 0),页码归到视图坐标
+    try:
+        parts = _vb_parts(rel)
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if not parts or any(_safe_vault_path(m) is None for m, _ in parts):
         return jsonify({"ok": False, "error": "invalid file"}), 400
-    return jsonify({"ok": True, **_hl_load(rel)})
+    agg = []
+    for mrel, moff in parts:
+        for h in _hl_load(mrel).get("highlights", []):
+            h2 = dict(h) if moff else h
+            if moff:
+                h2["page"] = int(h.get("page") or 0) + moff
+            agg.append(h2)
+    agg.sort(key=lambda x: (x.get("page") or 0, x.get("time") or 0))
+    return jsonify({"ok": True, "highlights": agg})
 
 
 @bp.route("/api/highlights", methods=["POST"])
@@ -10342,16 +10322,14 @@ def pdf_api_highlights_update():
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
-    if VB is not None and VB.is_view_ref(rel):
-        try:
-            _g = VB.validate(rel)
-        except VB.VbookError as e:
-            return _vb_err(e)
-        rel = next((m["rel"] for m in _g["members"]
-                    if any(h.get("id") == hid for h in _hl_load(m["rel"]).get("highlights", []))), "")
-        if not rel:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-    if not rel or _safe_vault_path(rel) is None or not hid:
+    try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
+        rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
+                                              for h in _hl_load(m).get("highlights", [])))[0] or ""
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if not rel:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    if _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
     db = _hl_load(rel)
     found = None
@@ -10384,16 +10362,14 @@ def pdf_api_highlights_delete():
         data = {"file": request.args.get("file",""), "id": request.args.get("id","")}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
-    if VB is not None and VB.is_view_ref(rel):
-        try:
-            _g = VB.validate(rel)
-        except VB.VbookError as e:
-            return _vb_err(e)
-        rel = next((m["rel"] for m in _g["members"]
-                    if any(h.get("id") == hid for h in _hl_load(m["rel"]).get("highlights", []))), "")
-        if not rel:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-    if not rel or _safe_vault_path(rel) is None or not hid:
+    try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
+        rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
+                                              for h in _hl_load(m).get("highlights", [])))[0] or ""
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if not rel:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    if _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
     db = _hl_load(rel)
     before = len(db["highlights"])
@@ -10465,17 +10441,13 @@ def pdf_api_sentence_dismiss():
     text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"ok": False, "error": "invalid"}), 400
-    if VB is not None and VB.is_view_ref(rel):
-        # 合并书:请求没带页,句子在哪一卷不确定 → 逐卷登记(按文本匹配,幂等;只在真含该句的卷生效)
-        try:
-            rels = [m["rel"] for m in VB.get(rel)["members"]]
-        except VB.VbookError as e:
-            return _vb_err(e)
-    else:
-        if not rel or _safe_vault_path(rel) is None:
-            return jsonify({"ok": False, "error": "invalid"}), 400
-        rels = [rel]
-    for _r in rels:
+    try:   # 请求没带页,句子在哪一卷不确定 → 逐卷登记(按文本匹配,幂等;单本书就是它自己一卷)
+        parts = _vb_parts(rel)
+    except VB.VbookError as e:
+        return _vb_err(e)
+    if not rel or not parts or any(_safe_vault_path(m) is None for m, _ in parts):
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    for _r, _ in parts:
         _dismiss_add(_r, text)
         try: _tr_delete(_r, text)
         except Exception: pass
@@ -10509,12 +10481,10 @@ def pdf_api_translate_sentence():
             file_rel = data.get("file") or ""
             if file_rel and isinstance(sent, dict) and sent.get("rects"):
                 sent = dict(sent); sent["text"] = text; sent["zh"] = zh; sent["manual"] = True
-                if VB is not None and VB.is_view_ref(file_rel):
-                    # 合并书:译文 sidecar 存进句子真正所在那一卷(几何/页码都是该卷的局部坐标)
+                if VB is not None and sent.get("page"):
+                    # 译文 sidecar 存进句子真正所在那一卷(几何/页码都是该卷局部坐标;单本书恒等)
                     try:
-                        file_rel, _lp = VB.resolve_view(file_rel, sent.get("page") or 1)
-                        if sent.get("page"):
-                            sent["page"] = _lp
+                        file_rel, sent["page"] = VB.locate(file_rel, sent["page"])
                     except VB.VbookError:
                         file_rel = ""
                 if file_rel:
