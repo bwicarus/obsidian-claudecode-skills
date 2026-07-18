@@ -507,7 +507,7 @@ async function loadPdf() {
     }
   }, 13000);
   try {
-    if (_imgMode) {
+    if (_imgMode || (window.__PDF_CFG && String(__PDF_CFG.file_rel||'').indexOf('vbook:')===0)) {   // 合并书强制图片模式(v2规格:classic 多文档门面后置)
       // 图片模式(成熟方案):不下载 PDF、不解析整本,只取书元数据建 pdfDoc shim(页数+尺寸),
       // 每页按需取服务端渲染好的图(/api/page-image)。其余代码靠 shim 的 getPage().getViewport() 照常工作。
       window.dlog('图片模式:取 book-meta(不下载 PDF)');
