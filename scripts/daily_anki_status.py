@@ -451,8 +451,15 @@ def main() -> int:
     # 知识图谱：先 AI 关联（精准）+ 再算 mastery / state（每个 KG 文件一次）
     step("KG 关联+掌握度", run_kg_link_mastery)
     # 领域词典(从 KG/目录/查词长出来)→ 融合权重反向学习(词典金标准)→ 跨语言概念归一(AI 判词义)
-    step("通用语停用词", lambda: run_py("build_auto_stopwords.py", ["--write", "--show", "0"]))
-    step("停用词复活赛", lambda: run_py("revive_stopwords.py", []))   # 误伤的术语靠它捞回(攒够才叫 AI)
+    # 停用词治理:server-config["stopword_gov"] 控制(控制面板「设置→停用词治理」可改)。
+    #   enabled  总开关(默认 True,关掉=词表冻结);ai_judge 子开关(关掉=只积累候选不烧 AI)。
+    _sg = server_cfg().get("stopword_gov") or {}
+    if _sg.get("enabled", True):
+        step("通用语停用词", lambda: run_py("build_auto_stopwords.py", ["--write", "--show", "0"]))
+        step("停用词复活赛", lambda: run_py(
+            "revive_stopwords.py", [] if _sg.get("ai_judge", True) else ["--no-ai"]))
+    else:
+        print("  [skip] 停用词治理(server-config stopword_gov.enabled=false)", flush=True)
     step("领域词典", lambda: run_py("attention_profile.py", ["--domain-dict"]))
     step("融合权重学习", lambda: run_py("attention_profile.py", ["--fit"]))
     step("跨语言概念归一", lambda: run_py("attention_profile.py", ["--concepts"]))

@@ -303,7 +303,7 @@ def _budget_spend():
     _save(RUNS, runs)
 
 
-def run(dry=False, limit=BATCH_MAX, min_conc=MIN_CONC):
+def run(dry=False, limit=BATCH_MAX, min_conc=MIN_CONC, no_ai=False):
     log = _load(LOG, {})
     cands, err = find_candidates(limit=limit, min_conc=min_conc)
     if err:
@@ -317,6 +317,11 @@ def run(dry=False, limit=BATCH_MAX, min_conc=MIN_CONC):
     # 已被 PIN 的词永不再参赛(本质模糊的词,钉住免得无限烧 AI)
     cands = [c for c in cands if int(log.get(c["term"], {}).get("flips", 0)) < MAX_FLIPS]
     cands, young = _pool_dwell(cands, log)      # ★滞留闸
+    if no_ai:
+        # 控制面板子开关 ai_judge=false:滞留计时照常走(池子继续积累),只是不进 AI 裁决。
+        # 重新打开后已滞留够的候选立刻可判——关开关不清进度。
+        return {"ok": True, "note": "ai_judge 关闭:候选照常积累,不调用 AI",
+                "candidates": len(cands), "in_dwell": len(young)}
     if not dry:
         okb, used = _budget_ok(log)
         if not okb:
@@ -375,8 +380,9 @@ if __name__ == "__main__":
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--limit", type=int, default=BATCH_MAX)
     ap.add_argument("--min-conc", type=float, default=MIN_CONC)
+    ap.add_argument("--no-ai", action="store_true", help="只积累候选/滞留计时,不调用 AI(控制面板 ai_judge 开关)")
     a = ap.parse_args()
-    r = run(dry=a.dry, limit=a.limit, min_conc=a.min_conc)
+    r = run(dry=a.dry, limit=a.limit, min_conc=a.min_conc, no_ai=a.no_ai)
     if r.get("dry"):
         print(f"候选 {r['candidates']} 个(集中度降序):")
         for c in r["detail"]:

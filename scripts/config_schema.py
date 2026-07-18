@@ -54,6 +54,10 @@ SCHEMA: dict[str, type] = {
     "weak_card_refresh.cooldown_days":   str,
     "weak_card_refresh.escalate_lapses": str,
 
+    # 停用词治理(通用语统计 + 复活赛,daily 内跑)
+    "stopword_gov.enabled":              bool,
+    "stopword_gov.ai_judge":             bool,
+
     # 已掌握卡换问法（防模式记忆）
     "card_antimodel.enabled":            bool,
     "card_antimodel.min_stability_days": str,
@@ -137,6 +141,14 @@ FIELD_META: dict[str, dict] = {
     "weak_card_refresh.auto_escalate": {
         "group": "薄弱卡改写",
         "label": "凌晨自动执行拆/删（L2，破坏性！不勾则只在日志给建议、需手动确认）",
+    },
+    "stopword_gov.enabled": {
+        "group": "停用词治理",
+        "label": "启用：凌晨统计书库通用语 + 复活赛（关掉则跳过整套,词表冻结在当前状态）",
+    },
+    "stopword_gov.ai_judge": {
+        "group": "停用词治理",
+        "label": "允许调用 AI 裁决（关掉则只积累候选/滞留计时,零 AI 消耗;默认开）",
     },
     "card_antimodel.enabled": {
         "group": "已掌握卡换问法",
