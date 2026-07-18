@@ -1164,7 +1164,7 @@ window.applyPageOffset = function (forceZero) {
 window._populatePageOffsetUI = function () {
   var cp = (typeof currentPage !== 'undefined' && currentPage) ? currentPage : 1;
   var a = document.getElementById('set-pg-pdf'); if (a) a.textContent = cp;
-  var b = document.getElementById('set-pg-printed'); if (b) b.value = window._dispPage(cp);
+  var b = document.getElementById('set-pg-printed'); if (b) b.value = window._dispPage(cp) - window._grpOff();   // 印刷页对齐是卷内概念,预填剔除组偏移
   var c = document.getElementById('set-pg-cur-off'); if (c) c.textContent = '当前偏移：' + window._pageOffset();
 };
 
@@ -1976,7 +1976,7 @@ async function setupContinuousMode() {
     ph.style.alignItems = 'center';
     ph.style.justifyContent = 'center';
     ph.style.margin = marg;
-    ph.textContent = '… 第 ' + num + ' 页';
+    ph.textContent = '… 第 ' + (window._dispPage ? window._dispPage(num) : num) + ' 页';
     return ph;
   };
   const mainEl = document.getElementById('main');
@@ -2159,7 +2159,7 @@ function _unloadPage(w, preRect) {
   w.style.width = wd + 'px'; w.style.height = h + 'px';
   w.style.background = '#fff'; w.style.color = '#888';
   w.style.display = 'flex'; w.style.alignItems = 'center'; w.style.justifyContent = 'center';
-  w.textContent = '… 第 ' + num + ' 页';
+  w.textContent = '… 第 ' + (window._dispPage ? window._dispPage(num) : num) + ' 页';
   w.dataset.loaded = '0';
 }
 // wraps 可由调用方(_onContinuousScroll)传入复用,免二次全量 querySelectorAll
@@ -2222,7 +2222,7 @@ function _onContinuousScroll() {
           if (rec && typeof rec.page === 'number' && rec.page > 0) {
             if (rec.page !== currentPage) {
               currentPage = rec.page;
-              { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(rec.page) : rec.page); }
+              if (window._refreshPageCur) window._refreshPageCur(); else { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = rec.page; }   // 统一走一条路(含边界翻卷浮标)
             }
           }
           break;
@@ -2233,7 +2233,7 @@ function _onContinuousScroll() {
       const num = parseInt(target.dataset.pageNum);
       if (num !== currentPage) {
         currentPage = num;
-        { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
+        if (window._refreshPageCur) window._refreshPageCur(); else { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }   // 统一走一条路(含边界翻卷浮标)
         // 同步 URL + 拉 KG 节点
         const u = new URL(location.href);
         u.searchParams.set('page', num);
@@ -2639,7 +2639,7 @@ window._runSearch = async () => {
         i = j + q.length;
       }
       return '<div class="sr-item" onclick="_searchJump(' + m.page + ')">' +
-        '<span class="sr-pg">P' + m.page + (m.count > 1 ? '·' + m.count : '') + '</span>' +
+        '<span class="sr-pg">P' + (window._dispPage ? window._dispPage(m.page) : m.page) + (m.count > 1 ? '·' + m.count : '') + '</span>' +
         '<span class="sr-snip">' + html + '</span></div>';
     }).join('');
   } catch (e) {
@@ -8479,7 +8479,7 @@ window._reocrPage = async () => {
   const btn = document.getElementById('reocr-btn');
   const st = document.getElementById('reocr-status');
   if (btn) btn.disabled = true;
-  if (st) st.textContent = '⏳ 重扫第 ' + currentPage + ' 页…(Google Vision,几秒)';
+  if (st) st.textContent = '⏳ 重扫第 ' + window._dispPage(currentPage) + ' 页…(Google Vision,几秒)';
   try {
     const r = await fetch('/pdf/api/reocr-page', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -8488,7 +8488,7 @@ window._reocrPage = async () => {
     const d = await r.json();
     if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 重扫后 cv 更新→重渲直接取新覆盖
     if (d.ok && d.chars > 0) {
-      if (st) st.textContent = '✓ 第 ' + currentPage + ' 页重扫完成(' + d.chars + ' 字)';
+      if (st) st.textContent = '✓ 第 ' + window._dispPage(currentPage) + ' 页重扫完成(' + d.chars + ' 字)';
       _rerenderLoadedPages();   // cv 变 → 重渲拿新文字层
     } else if (d.ok) {
       if (st) st.textContent = '⚠ 未识别到文字(空白页或扫描质量差)';
@@ -8506,7 +8506,7 @@ window._clearReocr = async () => {
     });
     const d = await r.json();
     if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 撤销后 cv 更新→重渲取回原文字层
-    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + currentPage + ' 页重扫') : '该页无重扫记录';
+    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + window._dispPage(currentPage) + ' 页重扫') : '该页无重扫记录';
     _rerenderLoadedPages();
   } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
 };
@@ -9428,7 +9428,7 @@ async function _connProbe() {
       figs.forEach(function (f) {
         var fr = f.file_rel || bookRel;
         var img = document.createElement('img'); img.className = 'actx-thumb'; img.alt = '';
-        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + f.page + ' · 点击跳转';
+        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(f.page) : f.page) + ' · 点击跳转';
         if (typeof window.__figThumb === 'function') window.__figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
         img.addEventListener('click', function () { _jumpToCtx(fr, f.page); });
         row.appendChild(img);
@@ -10343,7 +10343,7 @@ async function _connProbe() {
         var img = document.createElement('img'); img.className = 'afc-thumb'; img.style.cursor = 'zoom-in';
         _fetchComposite(a, function (url) { img.src = url; });       // 有笔迹 → 缩略图显示合成图
         img.addEventListener('click', function () { _openFigLightbox(a); });   // 点缩略图 → 看大图
-        var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + a.page;
+        var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(a.page) : a.page);
         var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
         x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
         chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);
@@ -10818,7 +10818,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         const it = document.createElement('div');
         const lv = Math.max(0, (e.level || 1) - 1);
         it.textContent = e.title || '';
-        it.title = '第 ' + e.page + ' 页';
+        it.title = '第 ' + (window._dispPage ? window._dispPage(e.page) : e.page) + ' 页';
         it.style.cssText = 'padding:6px 8px 6px ' + (8 + lv * 16) + 'px;font-size:' + (lv ? 12.5 : 13.5) + 'px;' +
           (lv ? 'color:#9aa7c4' : 'color:#dbe4f8;font-weight:600') + ';cursor:pointer;border-radius:6px;line-height:1.45';
         it.onmouseenter = () => { it.style.background = '#1a2540'; };
@@ -10968,7 +10968,7 @@ window.__upReconcileDelete = function (newMeta) {
       if (parseInt(el.dataset.pageNum, 10) !== nn) {
         el.dataset.pageNum = String(nn);
         if (el.__upRec) el.__upRec.page = nn;
-        if (el.dataset.loaded === '0' && /第\s*\d+\s*页/.test(el.textContent || '')) el.textContent = '… 第 ' + nn + ' 页';
+        if (el.dataset.loaded === '0' && /第\s*\d+\s*页/.test(el.textContent || '')) el.textContent = '… 第 ' + (window._dispPage ? window._dispPage(nn) : nn) + ' 页';
       }
     });
     if (typeof currentPage === 'number' && currentPage > M) currentPage = M;

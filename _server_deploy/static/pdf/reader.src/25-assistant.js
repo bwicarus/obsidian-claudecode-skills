@@ -747,7 +747,7 @@
       figs.forEach(function (f) {
         var fr = f.file_rel || bookRel;
         var img = document.createElement('img'); img.className = 'actx-thumb'; img.alt = '';
-        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + f.page + ' · 点击跳转';
+        img.title = (f.group ? '图组 · ' : '') + (f.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(f.page) : f.page) + ' · 点击跳转';
         if (typeof window.__figThumb === 'function') window.__figThumb({ file_rel: fr, page: f.page, box: f.box, has_ink: f.has_ink }, img, live);
         img.addEventListener('click', function () { _jumpToCtx(fr, f.page); });
         row.appendChild(img);

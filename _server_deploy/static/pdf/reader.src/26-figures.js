@@ -310,7 +310,7 @@
         var img = document.createElement('img'); img.className = 'afc-thumb'; img.style.cursor = 'zoom-in';
         _fetchComposite(a, function (url) { img.src = url; });       // 有笔迹 → 缩略图显示合成图
         img.addEventListener('click', function () { _openFigLightbox(a); });   // 点缩略图 → 看大图
-        var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + a.page;
+        var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(a.page) : a.page);
         var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
         x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
         chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);

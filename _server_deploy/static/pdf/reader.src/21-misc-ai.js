@@ -792,7 +792,7 @@ window._reocrPage = async () => {
   const btn = document.getElementById('reocr-btn');
   const st = document.getElementById('reocr-status');
   if (btn) btn.disabled = true;
-  if (st) st.textContent = '⏳ 重扫第 ' + currentPage + ' 页…(Google Vision,几秒)';
+  if (st) st.textContent = '⏳ 重扫第 ' + window._dispPage(currentPage) + ' 页…(Google Vision,几秒)';
   try {
     const r = await fetch('/pdf/api/reocr-page', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -801,7 +801,7 @@ window._reocrPage = async () => {
     const d = await r.json();
     if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 重扫后 cv 更新→重渲直接取新覆盖
     if (d.ok && d.chars > 0) {
-      if (st) st.textContent = '✓ 第 ' + currentPage + ' 页重扫完成(' + d.chars + ' 字)';
+      if (st) st.textContent = '✓ 第 ' + window._dispPage(currentPage) + ' 页重扫完成(' + d.chars + ' 字)';
       _rerenderLoadedPages();   // cv 变 → 重渲拿新文字层
     } else if (d.ok) {
       if (st) st.textContent = '⚠ 未识别到文字(空白页或扫描质量差)';
@@ -819,7 +819,7 @@ window._clearReocr = async () => {
     });
     const d = await r.json();
     if (d.cv) { try { localStorage.setItem('pdf-cv:' + FILE_REL + ':' + currentPage, d.cv); } catch (_) {} }  // 撤销后 cv 更新→重渲取回原文字层
-    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + currentPage + ' 页重扫') : '该页无重扫记录';
+    if (st) st.textContent = d.cleared ? ('✓ 已撤销第 ' + window._dispPage(currentPage) + ' 页重扫') : '该页无重扫记录';
     _rerenderLoadedPages();
   } catch (e) { if (st) st.textContent = '✗ 网络失败'; }
 };

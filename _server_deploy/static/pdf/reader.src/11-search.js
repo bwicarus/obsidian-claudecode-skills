@@ -39,7 +39,7 @@ window._runSearch = async () => {
         i = j + q.length;
       }
       return '<div class="sr-item" onclick="_searchJump(' + m.page + ')">' +
-        '<span class="sr-pg">P' + m.page + (m.count > 1 ? '·' + m.count : '') + '</span>' +
+        '<span class="sr-pg">P' + (window._dispPage ? window._dispPage(m.page) : m.page) + (m.count > 1 ? '·' + m.count : '') + '</span>' +
         '<span class="sr-snip">' + html + '</span></div>';
     }).join('');
   } catch (e) {

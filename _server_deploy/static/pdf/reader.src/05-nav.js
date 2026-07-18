@@ -144,7 +144,7 @@ window.applyPageOffset = function (forceZero) {
 window._populatePageOffsetUI = function () {
   var cp = (typeof currentPage !== 'undefined' && currentPage) ? currentPage : 1;
   var a = document.getElementById('set-pg-pdf'); if (a) a.textContent = cp;
-  var b = document.getElementById('set-pg-printed'); if (b) b.value = window._dispPage(cp);
+  var b = document.getElementById('set-pg-printed'); if (b) b.value = window._dispPage(cp) - window._grpOff();   // 印刷页对齐是卷内概念,预填剔除组偏移
   var c = document.getElementById('set-pg-cur-off'); if (c) c.textContent = '当前偏移：' + window._pageOffset();
 };
 

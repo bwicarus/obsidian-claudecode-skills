@@ -54,19 +54,18 @@ def _page_count(rel):
     if c and c.get("mtime") == mt and c.get("pages"):
         return int(c["pages"])
     pages = 0
-    if SEARCH_DB.exists():
+    try:
+        import fitz                      # 权威:真实 PDF 页数(FTS 只算有文字层的页,会算少)
+        with fitz.open(str(ap)) as d:
+            pages = d.page_count
+    except Exception:
+        pages = 0
+    if not pages and SEARCH_DB.exists():
         try:
             con = sqlite3.connect("file:%s?mode=ro" % SEARCH_DB, uri=True)
             r = con.execute("SELECT MAX(page) FROM pages_data WHERE file=?", (rel,)).fetchone()
             con.close()
             pages = int(r[0] or 0)
-        except Exception:
-            pages = 0
-    if not pages:
-        try:
-            import fitz
-            with fitz.open(str(ap)) as d:
-                pages = d.page_count
         except Exception:
             pages = 0
     if pages:

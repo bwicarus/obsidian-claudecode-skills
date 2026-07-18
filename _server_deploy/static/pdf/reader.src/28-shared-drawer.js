@@ -76,7 +76,7 @@
         const it = document.createElement('div');
         const lv = Math.max(0, (e.level || 1) - 1);
         it.textContent = e.title || '';
-        it.title = '第 ' + e.page + ' 页';
+        it.title = '第 ' + (window._dispPage ? window._dispPage(e.page) : e.page) + ' 页';
         it.style.cssText = 'padding:6px 8px 6px ' + (8 + lv * 16) + 'px;font-size:' + (lv ? 12.5 : 13.5) + 'px;' +
           (lv ? 'color:#9aa7c4' : 'color:#dbe4f8;font-weight:600') + ';cursor:pointer;border-radius:6px;line-height:1.45';
         it.onmouseenter = () => { it.style.background = '#1a2540'; };

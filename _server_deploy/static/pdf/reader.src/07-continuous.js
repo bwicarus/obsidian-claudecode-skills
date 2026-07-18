@@ -21,7 +21,7 @@ async function setupContinuousMode() {
     ph.style.alignItems = 'center';
     ph.style.justifyContent = 'center';
     ph.style.margin = marg;
-    ph.textContent = '… 第 ' + num + ' 页';
+    ph.textContent = '… 第 ' + (window._dispPage ? window._dispPage(num) : num) + ' 页';
     return ph;
   };
   const mainEl = document.getElementById('main');
@@ -204,7 +204,7 @@ function _unloadPage(w, preRect) {
   w.style.width = wd + 'px'; w.style.height = h + 'px';
   w.style.background = '#fff'; w.style.color = '#888';
   w.style.display = 'flex'; w.style.alignItems = 'center'; w.style.justifyContent = 'center';
-  w.textContent = '… 第 ' + num + ' 页';
+  w.textContent = '… 第 ' + (window._dispPage ? window._dispPage(num) : num) + ' 页';
   w.dataset.loaded = '0';
 }
 // wraps 可由调用方(_onContinuousScroll)传入复用,免二次全量 querySelectorAll
@@ -267,7 +267,7 @@ function _onContinuousScroll() {
           if (rec && typeof rec.page === 'number' && rec.page > 0) {
             if (rec.page !== currentPage) {
               currentPage = rec.page;
-              { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(rec.page) : rec.page); }
+              if (window._refreshPageCur) window._refreshPageCur(); else { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = rec.page; }   // 统一走一条路(含边界翻卷浮标)
             }
           }
           break;
@@ -278,7 +278,7 @@ function _onContinuousScroll() {
       const num = parseInt(target.dataset.pageNum);
       if (num !== currentPage) {
         currentPage = num;
-        { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = (window._dispPage ? window._dispPage(num) : num); }
+        if (window._refreshPageCur) window._refreshPageCur(); else { const _pc = document.getElementById('page-cur'); if (_pc) _pc.textContent = num; }   // 统一走一条路(含边界翻卷浮标)
         // 同步 URL + 拉 KG 节点
         const u = new URL(location.href);
         u.searchParams.set('page', num);

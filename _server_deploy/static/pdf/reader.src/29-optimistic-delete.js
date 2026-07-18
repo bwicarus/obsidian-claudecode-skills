@@ -45,7 +45,7 @@ window.__upReconcileDelete = function (newMeta) {
       if (parseInt(el.dataset.pageNum, 10) !== nn) {
         el.dataset.pageNum = String(nn);
         if (el.__upRec) el.__upRec.page = nn;
-        if (el.dataset.loaded === '0' && /第\s*\d+\s*页/.test(el.textContent || '')) el.textContent = '… 第 ' + nn + ' 页';
+        if (el.dataset.loaded === '0' && /第\s*\d+\s*页/.test(el.textContent || '')) el.textContent = '… 第 ' + (window._dispPage ? window._dispPage(nn) : nn) + ' 页';
       }
     });
     if (typeof currentPage === 'number' && currentPage > M) currentPage = M;
