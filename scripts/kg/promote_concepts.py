@@ -129,12 +129,106 @@ def build(write=False):
     return out
 
 
+_EDGE_PROMPT = """下面是用户从学习笔记里积累的一批**零散知识点**(跨科目:微积分/线代/群论/复数 等)。
+请:
+1. 按科目把它们分组(每个知识点归一个科目)。
+2. 在**同组内**判断**严格前置**(from→to 表示"不先懂 from 就根本不可能懂 to"):只列必备前置,多数只有 0-2 条。
+3. 无严格前置但强相关的,可给 related(无向,少量)。跨科目一般不连。
+
+知识点(编号 | 名称 | 状态 | 来源):
+{listing}
+
+只输出严格 JSON,无任何额外文字:
+{{"groups": {{"<科目名>": [编号,...]}},
+ "edges": [{{"from": <编号>, "to": <编号>, "kind": "prereq", "reason": "<不超过20字>"}}]}}
+"""
+
+
+def build_edges(model="sonnet", effort="medium", write=False):
+    """第二节:给 emergent 概念节点连边(同科目内严格前置 + related)。一次 AI 调用,防环。"""
+    sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+    from ai_backends import make_backend
+    g = json.loads(OUT.read_text("utf-8"))
+    nodes = g["nodes"]
+    items = list(nodes.values())
+    lines = []
+    for i, n in enumerate(items):
+        tag = ("已在树" if n["in_authored_kg"] else "新")
+        src = n["provenance"][0]["ref"] if n.get("provenance") else ""
+        lines.append("%d | %s | %s | %s" % (i, n["surface"], tag, src))
+    prompt = _EDGE_PROMPT.format(listing="\n".join(lines))
+    backend = make_backend("claude_cli", {"command": "/usr/bin/claude",
+                                          "model": model, "effort": effort, "timeout": 180})
+    raw = backend.chat([{"role": "user", "content": prompt}]).strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+        raw = re.sub(r"\n```\s*$", "", raw)
+    a, b = raw.find("{"), raw.rfind("}")
+    data = json.loads(raw[a:b + 1]) if (a != -1 and b > a) else {}
+    # 编号 → key
+    idx2key = {i: n["key"] for i, n in enumerate(items)}
+    edges = []
+    seen = set()
+    for e in data.get("edges", []):
+        try:
+            fk, tk = idx2key[int(e["from"])], idx2key[int(e["to"])]
+        except Exception:
+            continue
+        if fk == tk:
+            continue
+        kind = e.get("kind") if e.get("kind") in ("prereq", "related") else "prereq"
+        key = (fk, tk, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append({"from": fk, "to": tk, "kind": kind, "reason": (e.get("reason") or "")[:40],
+                      "origin": "emergent", "confirmed": None})
+    # 环检测(只对 prereq 有向边):拓扑排序,剔除环内边
+    from collections import defaultdict as _dd
+    prq = [e for e in edges if e["kind"] == "prereq"]
+    indeg = _dd(int); adj = _dd(list)
+    for e in prq:
+        adj[e["from"]].append(e["to"]); indeg[e["to"]] += 1
+    nodes_in = set(e["from"] for e in prq) | set(e["to"] for e in prq)
+    q = [x for x in nodes_in if indeg[x] == 0]; ok = set()
+    while q:
+        x = q.pop(); ok.add(x)
+        for v in adj[x]:
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    cyc = nodes_in - ok
+    if cyc:
+        edges = [e for e in edges if not (e["kind"] == "prereq" and e["from"] in cyc and e["to"] in cyc)]
+    g["edges"] = edges
+    g["groups"] = data.get("groups", {})
+    g["meta"]["n_edges"] = len(edges)
+    g["meta"]["edges_built"] = int(time.time())
+    if write:
+        OUT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
+    return g
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--edges", action="store_true", help="第二节:给已落盘的 emergent 节点连边(需 AI)")
+    ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--effort", default="medium")
     a = ap.parse_args()
+    if a.edges:
+        g = build_edges(model=a.model, effort=a.effort, write=a.write)
+        gm = g["meta"]
+        k2s = {k: n["surface"] for k, n in g["nodes"].items()}
+        print("emergent 边:%d %s" % (gm.get("n_edges", 0), "[已落盘]" if a.write else "[dry-run]"))
+        print("科目分组:", {kk: len(vv) for kk, vv in g.get("groups", {}).items()})
+        for e in g.get("edges", []):
+            arrow = "→" if e["kind"] == "prereq" else "—"
+            print("  %s %s %s  (%s)" % (k2s.get(e["from"], e["from"])[:14], arrow,
+                  k2s.get(e["to"], e["to"])[:14], e.get("reason", "")))
+        sys.exit(0)
     r = build(write=a.write)
     if a.json:
         print(json.dumps(r, ensure_ascii=False, indent=1))
