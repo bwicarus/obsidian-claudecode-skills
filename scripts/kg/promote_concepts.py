@@ -215,8 +215,8 @@ def _note_scannable_text(md):
 
 
 def _split_sentences(text):
-    """按中日句读切句(不切 ASCII 句点:F^s / 1.20 这类会被误切)。"""
-    parts = re.split(r"(?<=[。！？!?；;])|\n", text)
+    """切句:中日按句读;英文按「句点+空白+大写」(R4:F^s / 1.20 仍不误切,英文书可用)。"""
+    parts = re.split(r"(?<=[。！？!?；;])|(?<=[.!?])\s+(?=[A-Z])|\n", text)
     return [p.strip() for p in parts if p and len(p.strip()) >= 4]
 
 

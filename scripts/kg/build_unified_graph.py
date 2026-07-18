@@ -123,6 +123,7 @@ def build(write=False):
         edges.append({"from": fu, "to": tu, "kind": e.get("kind", "prereq"), "level": 2,
                       "evidence": e.get("quote") or e.get("reason", ""), "origin": "emergent",
                       "status": e.get("status", "auto"),
+                      "ekey": "%s|%s" % (e["from"], e["to"]),   # R4:裸键给前端发 override 用
                       "confirmed": True if ov else (e.get("status") == "audited" or None)})
 
     # R4:emergent 节点 availability 不再硬编码 open——按 **effective**(audited/user_confirmed)

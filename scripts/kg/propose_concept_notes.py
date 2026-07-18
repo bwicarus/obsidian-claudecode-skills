@@ -132,16 +132,19 @@ def _identity_resolve(term, use_ai=True):
     for nk, als in aliases.items():
         if term in als or k in {(AP.norm_key(a) or a) for a in als}:
             return nk, "alias"
-    # concept-auto 笔记 frontmatter aliases
+    # concept-auto 笔记:文件名(200-食中毒.md→食中毒)+ frontmatter aliases 都认(R4)
     for p in (Path(AP.VAULT_ROOT) / CONCEPT_DIR_NAME).glob("**/*.md"):
+        stem = re.sub(r"^[0-9A-Fa-f]{3}-", "", p.stem)
+        sk = AP.norm_key(stem) or stem
+        if sk == k or stem == term:
+            return sk, "note_filename"
         try:
             head = p.read_text("utf-8", errors="ignore")[:400]
         except OSError:
             continue
         m = re.search(r"aliases:\s*\[([^\]]*)\]", head)
         if m and term in [x.strip().strip('"\'') for x in m.group(1).split(",")]:
-            nk = re.sub(r"^[0-9A-Fa-f]{3}-", "", p.stem)
-            return (AP.norm_key(nk) or nk), "note_alias"
+            return sk, "note_alias"
     # 外语词(纯拉丁)且库里有非拉丁节点 → 一次有界 AI 判(是否同一概念)
     if use_ai and re.fullmatch(r"[A-Za-z][A-Za-z0-9 \-]+", term) and nodes:
         cands = [n.get("surface") or kk for kk, n in list(nodes.items())[:40]]
@@ -171,15 +174,16 @@ def _forward_occurrences(book_rel, term, upto_page):
     rows = con.execute("SELECT page, body FROM pages_data WHERE file=? AND page<=? ORDER BY page",
                        (book_rel, upto_page)).fetchall()
     con.close()
+    tl = term.lower()      # R4:拉丁词大小写不敏感(英文书);CJK lower 无副作用
     out = []
     for pg, body in rows:
-        if not body or term not in body:
+        if not body or tl not in body.lower():
             continue
         for para in re.split(r"\n\s*\n", body):
-            if term not in para:
+            if tl not in para.lower():
                 continue
             for sent in PC._split_sentences(para):
-                if term in sent:
+                if tl in sent.lower():
                     out.append((pg, sent, para.strip()[:800]))
     return out
 
@@ -307,6 +311,62 @@ def _note_md(term, code, book_rel, definition, relations, reg):
 
 
 # ── 编排 ─────────────────────────────────────────────────────────────────────
+IDENTITY_PENDING = STATE / "attention" / "identity-pending.json"
+
+
+def _queue_pending_identity(term, book, dry=True):
+    """身份判不准 → 待定队列(下轮重判;夜间归并可消费)。"""
+    if dry:
+        return
+    try:
+        q = json.loads(IDENTITY_PENDING.read_text("utf-8")) if IDENTITY_PENDING.exists() else []
+    except Exception:
+        q = []
+    if not any(x.get("term") == term for x in q):
+        q.append({"term": term, "book": book, "ts": int(time.time())})
+        IDENTITY_PENDING.write_text(json.dumps(q, ensure_ascii=False, indent=1), "utf-8")
+
+
+def _enrich_existing(ident, term, book, page, dry=True):
+    """R4 命中即合并不新建:①新写法进 aliases;②新书首现句追加「## 来源」分节(逐字,零 AI)。
+    **只动机器自有笔记**(concept-auto);手写 000- 笔记只记日志不碰。返回做了什么。"""
+    did = []
+    target = None
+    for p in (Path(AP.VAULT_ROOT) / CONCEPT_DIR_NAME).glob("**/*.md"):
+        stem = re.sub(r"^[0-9A-Fa-f]{3}-", "", p.stem)
+        if (AP.norm_key(stem) or stem) == ident:
+            target = p
+            break
+    if not target:
+        return did          # 身份在 authored KG/手写笔记 → 不碰(所有权)
+    try:
+        md = target.read_text("utf-8")
+    except OSError:
+        return did
+    if "type: concept-auto" not in md[:200]:
+        return did
+    stem = re.sub(r"^[0-9A-Fa-f]{3}-", "", target.stem)
+    # ① aliases 写回
+    m = re.search(r"^aliases:\s*\[([^\]]*)\]\s*$", md, flags=re.M)
+    if m and term != stem:
+        cur = [x.strip().strip('"\'') for x in m.group(1).split(",") if x.strip()]
+        if term not in cur:
+            newline = "aliases: [%s]" % ", ".join(cur + [term])
+            md = md[:m.start()] + newline + md[m.end():]
+            did.append("alias+%s" % term)
+    # ② 新来源分节(该书还没记过 → 首现句逐字追加)
+    bname = Path(book).name
+    if ("book: %s" % book) not in md and ("## 来源(%s" % bname) not in md:
+        occ = _forward_occurrences(book, term, page or 9999)
+        if occ:
+            pg, sent, _para = occ[0]
+            md = md.rstrip() + "\n\n## 来源(%s p%d)\n> %s\n" % (bname, pg, sent.strip()[:300])
+            did.append("来源分节 p%d" % pg)
+    if did and not dry:
+        target.write_text(md, "utf-8")
+    return did
+
+
 def run(dry=True, force_term=None, force_book=None, force_page=None):
     vocab = PC._vocab_set()
     reg = _load_codes()
@@ -342,13 +402,16 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
             print("%s %s 门:%s" % ("⚠(force放行)" if c["force"] else "⏭", tag, ";".join(blocks)))
         if not ok:
             continue
-        # §2b 身份解析:已有身份 → 不新建(记日志;富化留给后续轮)
+        # §2b 身份解析:已有身份 → 不新建,改为**富化**(aliases 写回 + 新来源分节;只动机器自有笔记)
         ident, how = _identity_resolve(term)
         if ident:
-            print("⏭ %s 已有概念身份(%s→%s),不新建" % (tag, how, ident))
+            did = _enrich_existing(ident, term, book, page, dry=dry)
+            print("⏭ %s 已有概念身份(%s→%s)%s" % (tag, how, ident,
+                  ",富化:" + "+".join(did) if did else ",无需富化"))
             continue
         if how == "identity_uncertain":
-            print("⏸ %s 身份判不准 → 缓建(待夜间归并定夺)" % tag)
+            _queue_pending_identity(term, book, dry=dry)
+            print("⏸ %s 身份判不准 → 进待定队列(下轮/归并重判)" % tag)
             continue
         occ = _forward_occurrences(book, term, page)
         if not occ:

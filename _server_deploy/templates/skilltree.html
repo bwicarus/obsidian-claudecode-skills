@@ -253,6 +253,10 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
     <div id="d-badges"></div>
     <div class="lbl">编号 · 类型</div><div class="v" id="d-label">—</div>
     <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
+    <div id="d-em-edges-row" style="display:none;margin-top:12px;border-top:1px solid #3a2a55;padding-top:12px">
+      <div class="lbl" style="color:#c4b5fd">🕸 自动连接的边(✓认可 / ✗否决,审计不再动你签过的)</div>
+      <div id="d-em-edges"></div>
+    </div>
     <div id="d-emergent-row" style="display:none;margin-top:12px;border-top:1px solid #3a2a55;padding-top:12px">
       <div class="lbl" style="color:#c4b5fd">🌱 自动长出的概念（提议→确认）</div>
       <div class="v" id="d-emergent-prov" style="font-size:11px;color:#9a8fc0">—</div>
@@ -1714,6 +1718,17 @@ async function confirmEmergent(val){
     }
   }catch(e){}
 }
+async function confirmEmEdge(ekey,val,el){
+  el.disabled=true;
+  try{
+    const r=await fetch(`/skilltree/unified/api/confirm`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:ekey,confirmed:val})});
+    if((await r.json()).ok){
+      const nd=await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+      KG_FULL=nd; populateFacet(); applyFacet(curFacet);
+      if(id2[detailNodeId]) showDetail(id2[detailNodeId]);
+    }
+  }catch(e){ el.disabled=false; }
+}
 function showDetail(n){
   if(!n) return;
   detailNodeId = n.id;
@@ -1771,6 +1786,21 @@ function showDetail(n){
         const tag=n.confirmed===true?"（已确认）":n.confirmed===false?"（已否决）":"";
         document.getElementById("d-emergent-prov").textContent="来源:"+(prov||"—")+tag;
       } else { _er.style.display="none"; }
+    } }
+  { const _er2=document.getElementById("d-em-edges-row");
+    if(_er2){
+      const eds=(KG.edges||[]).filter(e=>e.origin==="emergent"&&(e.from===n.id||e.to===n.id));
+      if(eds.length){
+        _er2.style.display="block";
+        document.getElementById("d-em-edges").innerHTML=eds.map(e=>{
+          const other=e.from===n.id?id2[e.to]:id2[e.from];
+          const arrow=e.kind==="prereq"?(e.from===n.id?"→":"←"):"—";
+          const st=e.status==="user_confirmed"?"已签✓":e.status==="audited"?"已审":e.status==="shadow"?"待审(影)":"自动";
+          const ek=(e.ekey||"").replace(/'/g,"");
+          const btns=ek?` <button onclick="confirmEmEdge('${ek}',true,this)" title="认可" style="background:#1a2a1a;border:1px solid #34d399;color:#6ee7b7;border-radius:4px;padding:0 6px;font-size:10px;cursor:pointer">✓</button><button onclick="confirmEmEdge('${ek}',false,this)" title="否决(边移除)" style="background:#2a1a1a;border:1px solid #f87171;color:#fca5a5;border-radius:4px;padding:0 6px;font-size:10px;cursor:pointer">✗</button>`:"";
+          return `<div style="font-size:11px;margin:4px 0;color:#a8b3c7">${arrow} ${_qEsc(other?other.name:"?")} <span style="color:#8a78c0">[${st}]</span>${btns}<div style="font-size:10px;color:#6b7488;margin-left:12px">${_qEsc((e.evidence||"").slice(0,60))}</div></div>`;
+        }).join("");
+      } else _er2.style.display="none";
     } }
   { const _qw=document.getElementById("d-quiz-wrap"); if(_qw){ _qw.style.display = n.level===2 ? "block" : "none"; document.getElementById("d-quiz").innerHTML=""; const _qb=document.getElementById("d-quiz-btn"); if(_qb) _qb.textContent="🎯 考考我（沿前置链出题·客观判分）"; } }
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
