@@ -452,6 +452,7 @@ def main() -> int:
     step("KG 关联+掌握度", run_kg_link_mastery)
     # 领域词典(从 KG/目录/查词长出来)→ 融合权重反向学习(词典金标准)→ 跨语言概念归一(AI 判词义)
     step("通用语停用词", lambda: run_py("build_auto_stopwords.py", ["--write", "--show", "0"]))
+    step("停用词复活赛", lambda: run_py("revive_stopwords.py", []))   # 误伤的术语靠它捞回(攒够才叫 AI)
     step("领域词典", lambda: run_py("attention_profile.py", ["--domain-dict"]))
     step("融合权重学习", lambda: run_py("attention_profile.py", ["--fit"]))
     step("跨语言概念归一", lambda: run_py("attention_profile.py", ["--concepts"]))

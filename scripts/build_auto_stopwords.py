@@ -38,7 +38,14 @@ EMERGENT = config.PROJECT_DIR / "state" / "attention" / "emergent-graph.json"
 KG_DIR = config.PROJECT_DIR / "knowledge_graph"
 
 MIN_BOOKS = 8          # 该语言至少这么多本书才敢统计(样本不足 → DF 误杀真术语)
-RATIO = 0.85           # DF/书数 ≥ 此比例 = 通用语
+# DF/书数 ≥ 此比例 = 通用语。**按语言分别定**——阈值能多激进,取决于该语言书库的
+# **领域多样性**:书跨的领域越杂,高 DF 就越确定是通用语;书都挤在一个领域,该领域的
+# 核心术语也会跨书高频。实测(测试当场抓到):
+#   zh 12 本跨费恩曼/CSAPP/UML/分子生物学/HTTP/线代… → 0.6 很干净;
+#   en 8 本里 6 本线代物理 → 0.6 把 eigenvalue/determinant/inverse/invertible 全滤了。
+# 激进档留给多样性够的语言,其余保守 + 复活赛兜底(用户设计的两段式)。
+RATIO_BY_LANG = {"zh": 0.60, "en": 0.85}
+RATIO = 0.75           # 未列出的语言用它
 MIN_PAGES = 30         # 太薄的书不参与(目录/习题册)
 SAMPLE_PAGES = 60      # 每本均匀抽样页数(够代表全书用词,又不至于跑很久)
 
@@ -58,9 +65,17 @@ def _lang_of(sample):
     return "en"
 
 
+REVIVED = config.PROJECT_DIR / "state" / "attention" / "revived-terms.json"
+
+
 def _protected():
-    """保护名单:领域词典 + KG 节点名 + 概念图节点名(用户真在学的,绝不滤)。"""
+    """保护名单:领域词典 + KG 节点名 + 概念图节点名 + **复活赛捞回来的词**(绝不再滤)。"""
     keep = set()
+    try:   # 复活赛判定为术语的词:永久保护(它们正是被激进阈值误伤的那批)
+        for t in (json.loads(REVIVED.read_text("utf-8")).get("terms") or {}):
+            keep.add(str(t).strip().lower())
+    except Exception:
+        pass
     try:
         d = json.loads(DOMAIN.read_text("utf-8"))
         for t in (d if isinstance(d, list) else (d.get("terms") or list(d.keys()))):
@@ -89,6 +104,18 @@ def _protected():
 def build(ratio=RATIO, write=False, show=0):
     if not SEARCH_DB.exists():
         return {"ok": False, "error": "没有 pdf-search.db(先跑 scripts/build_search_index.py)"}
+    # ⚠ 统计必须绕过**本脚本自己的产物**:抽词器已经在用上一轮的停用词表,不关掉的话
+    #   那些词不再出现在样本里 → 本轮统计不到 → 全量覆盖写就把上一轮成果冲掉(实测
+    #   ratio=0.85 从 65/85 坍缩到 18/22)。这里临时关掉,统计的永远是**原始**词频。
+    _orig_sw = AP._auto_stopwords
+    AP._auto_stopwords = lambda: frozenset()
+    try:
+        return _build_inner(ratio, write, show)
+    finally:
+        AP._auto_stopwords = _orig_sw
+
+
+def _build_inner(ratio, write, show):
     c = sqlite3.connect(str(SEARCH_DB))
     books = [f for (f,) in c.execute("SELECT file FROM pages_data GROUP BY file "
                                      "HAVING COUNT(*)>=?", (MIN_PAGES,))]
@@ -117,11 +144,12 @@ def build(ratio=RATIO, write=False, show=0):
         if n < MIN_BOOKS:
             skipped[lang] = n          # 样本不足:宁可不滤,也不误杀真术语
             continue
-        need = max(2, int(round(n * ratio)))
+        _r = RATIO_BY_LANG.get(lang, ratio)
+        need = max(2, int(round(n * _r)))
         words = sorted((t for t, s in df.items() if len(s & bs) >= need and t.lower() not in keep),
                        key=lambda t: (-len(df[t] & bs), t))
         out[lang] = words
-        report[lang] = {"books": n, "need": need, "n": len(words)}
+        report[lang] = {"books": n, "need": need, "n": len(words), "ratio": _r}
     res = {"ok": True, "built": int(time.time()), "ratio": ratio,
            "min_books": MIN_BOOKS, "by_lang": report,
            "skipped_langs": skipped, "words": out}
