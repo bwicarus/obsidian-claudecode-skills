@@ -1106,7 +1106,9 @@ window._pageOffset = function () {
   try { return parseInt(localStorage.getItem('pdf-page-offset:' + (typeof FILE_REL !== 'undefined' ? FILE_REL : '')) || '0', 10) || 0; } catch (_) { return 0; }
 };
 // 虚拟合并书:同名 partN 分卷 → 连续页码(组偏移正交叠加在印刷页对齐之上)+ 跨卷跳页。
-window.__GRP = (window.__PDF_CFG && __PDF_CFG.group) || null;
+// ⏸ 止血闸(2026-07-19):bolt-on 的组行为在单页/双页等模式暴露大量问题——正确做法是**转换层**
+// (在唯一咽喉把多卷翻译成一本书,其余代码无感知),设计落地前默认关;&vmerge=1 保留实验入口。
+window.__GRP = ((window.__PDF_CFG && __PDF_CFG.group) && /[?&]vmerge=1/.test(location.search)) ? __PDF_CFG.group : null;
 window._grpOff = function () { return window.__GRP ? __GRP.self.offset : 0; };
 window._dispPage = function (pdf) {
   pdf = parseInt(pdf, 10) || 0;
