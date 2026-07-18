@@ -1150,20 +1150,27 @@ function _grpBoundarySetup() {
   // ⚡性能:绝不在 touchmove/wheel 里读 scrollHeight(连续模式频繁增删节点,每读一次强制重排=卡)。
   // 边缘状态由 scroll 事件 rAF 节流计算一次/帧;手势处理器只读标志、零布局访问。
   var edge = 0;   // 0=中间 1=顶 2=底
+  var edgeSince = 0, nextArmed = false, prevArmed = false;   // 武装:落地即在边缘时不触发,须先离开过边缘(防跳卷后被回弹立刻弹回=乒乓)
   var rafPending = false;
   function _calcEdge() {
     rafPending = false;
     var stp = el.scrollTop, ch = el.clientHeight, sh = el.scrollHeight;
-    edge = (stp <= 2) ? 1 : (stp + ch >= sh - 4) ? 2 : 0;
+    var ne = (stp <= 2) ? 1 : (stp + ch >= sh - 4) ? 2 : 0;
+    if (ne !== edge) {
+      edge = ne; edgeSince = performance.now();
+      if (edge !== 2) nextArmed = true;   // 离开过底部 → 允许下次到底触发
+      if (edge !== 1) prevArmed = true;
+    }
   }
   function _queueEdge() { if (!rafPending) { rafPending = true; requestAnimationFrame(_calcEdge); } }
   el.addEventListener('scroll', _queueEdge, { passive: true });
   _queueEdge();
   var accDown = 0, accUp = 0, touchY = null;
+  var _dwell = function () { return performance.now() - edgeSince > 250; };   // 到边后驻留 250ms 才开始算(滤回弹)
   el.addEventListener('wheel', function (e) {
     if (!edge) { accDown = 0; accUp = 0; return; }
-    if (e.deltaY > 0 && edge === 2) { accUp = 0; accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); }
-    else if (e.deltaY < 0 && edge === 1) { accDown = 0; accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); }
+    if (e.deltaY > 0 && edge === 2 && nextArmed && _dwell()) { accUp = 0; accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); }
+    else if (e.deltaY < 0 && edge === 1 && prevArmed && _dwell()) { accDown = 0; accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); }
     else { accDown = 0; accUp = 0; }
   }, { passive: true });
   el.addEventListener('touchstart', function (e) { touchY = e.touches[0].clientY; accDown = 0; accUp = 0; }, { passive: true });
@@ -1171,8 +1178,8 @@ function _grpBoundarySetup() {
     if (touchY == null || !edge) { if (!edge) { accDown = 0; accUp = 0; } if (e.touches.length) touchY = e.touches[0].clientY; return; }
     var dy = touchY - e.touches[0].clientY;   // >0 = 手指上滑(向下滚)
     touchY = e.touches[0].clientY;
-    if (dy > 0 && edge === 2) { accDown += dy; if (accDown > 120) window._grpNavNext(); }
-    else if (dy < 0 && edge === 1) { accUp += -dy; if (accUp > 120) window._grpNavPrev(); }
+    if (dy > 0 && edge === 2 && nextArmed && _dwell()) { accDown += dy; if (accDown > 150) window._grpNavNext(); }
+    else if (dy < 0 && edge === 1 && prevArmed && _dwell()) { accUp += -dy; if (accUp > 150) window._grpNavPrev(); }
     else { accDown = 0; accUp = 0; }
   }, { passive: true });
   el.addEventListener('touchend', function () { touchY = null; accDown = 0; accUp = 0; }, { passive: true });
