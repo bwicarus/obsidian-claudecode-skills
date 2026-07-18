@@ -113,7 +113,8 @@ _VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events"}
 _VB_ADAPTED = {"pdf_reader.pdf_view", "pdf_reader.pdf_api_book_meta",
                "pdf_reader.pdf_api_highlights_list", "pdf_reader.pdf_api_highlights_update",
                "pdf_reader.pdf_api_highlights_delete", "pdf_reader.pdf_api_notes",
-               "pdf_reader.pdf_api_userpages"}
+               "pdf_reader.pdf_api_userpages", "pdf_reader.pdf_api_search",
+               "pdf_reader.pdf_api_toc_get"}
 
 
 def _vb_err(e):
@@ -4161,12 +4162,66 @@ def _book_text_index(abs_path, rel: str) -> dict:
     return out
 
 
+def _search_in_index(idx, q, limit):
+    """单本书页文本索引内搜 q(语义与 pdf_api_search 主循环一致;合并书扇入用,原 handler 不动)。"""
+    ql = q.lower()
+    matches = []
+    total = 0
+    for pg in sorted(idx.keys(), key=lambda x: int(x)):
+        text = idx[pg] or ""
+        low = text.lower()
+        cnt = low.count(ql)
+        if not cnt:
+            continue
+        total += cnt
+        if len(matches) < limit:
+            flat = re.sub(r"\s+", " ", text)
+            flow = flat.lower()
+            fpos = flow.find(ql)
+            if fpos < 0:
+                fpos = 0
+            a = max(0, fpos - 28)
+            b = min(len(flat), fpos + len(q) + 28)
+            snippet = ("…" if a > 0 else "") + flat[a:b].strip() + ("…" if b < len(flat) else "")
+            matches.append({"page": int(pg), "count": cnt, "snippet": snippet, "pos": fpos})
+    return {"total": total, "matches": matches}
+
+
 @bp.route("/api/search")
 def pdf_api_search():
     """全文搜索：在全书文本索引里找 q（大小写不敏感，子串匹配，适配中日无词边界）。
     GET ?file=&q=&limit= → {ok, total, matches:[{page, count, snippet, pos}]}"""
     rel = request.args.get("file", "")
     q = (request.args.get("q", "") or "").strip()
+    if VB is not None and VB.is_view_ref(rel):
+        # 转换层v2 扇入:逐成员搜索,页码反译全局,合并排序
+        try:
+            g = VB.validate(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        if len(q) < 1:
+            return jsonify({"ok": False, "error": "empty query"}), 400
+        try:
+            limit = max(1, min(400, int(request.args.get("limit", "200") or "200")))
+        except ValueError:
+            limit = 200
+        agg, total = [], 0
+        for m in g["members"]:
+            ap = _safe_vault_path(m["rel"])
+            if not ap:
+                continue
+            try:
+                idx = _book_text_index(ap, m["rel"])
+            except Exception:
+                continue
+            r = _search_in_index(idx, q, limit)
+            total += r["total"]
+            for mt in r["matches"]:
+                mt2 = dict(mt)
+                mt2["page"] = int(mt.get("page") or 0) + m["offset"]
+                agg.append(mt2)
+        agg.sort(key=lambda x: x.get("page") or 0)
+        return jsonify({"ok": True, "total": total, "matches": agg[:limit]})
     abs_path = _safe_vault_path(rel)
     if not abs_path:
         return jsonify({"ok": False, "error": "invalid file"}), 400

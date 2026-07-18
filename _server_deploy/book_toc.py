@@ -210,8 +210,35 @@ def register_book_toc(bp, *, claude_dir, book_sha, safe_vault_path, assistant,
 
     @bp.route("/api/toc")
     def pdf_api_toc_get():
-        """GET ?file= → {ok, exists, source(custom|native|none), count, range}。前端据此显示『已存在目录』。"""
+        """GET ?file= → {ok, exists, source(custom|native|none), count, range}。前端据此显示『已存在目录』。
+        vbook(合并书):各成员 effective_toc 顺序拼接,页码+组偏移=全局(转换层v2 扇入)。"""
         rel = request.args.get("file", "")
+        if rel.startswith("vbook:"):
+            try:
+                import sys as _sy
+                _sy.path.insert(0, str(_BOOK_TOC_DIR.parent.parent / "scripts" / "lib"))
+                import vbook as _VB
+                g = _VB.validate(rel)
+            except Exception:
+                return jsonify({"ok": False, "error": "vbook_unknown"}), 404
+            agg = []
+            src = "none"
+            for m in g["members"]:
+                ap_m = _safe_vault_path(m["rel"])
+                if not ap_m:
+                    continue
+                es, s2 = _effective_toc(ap_m, m["rel"])
+                if es:
+                    src = s2 if src == "none" else src
+                for e in es:
+                    e2 = dict(e)
+                    if isinstance(e2.get("page"), (int, float)):
+                        e2["page"] = int(e2["page"]) + m["offset"]
+                    agg.append(e2)
+            out = {"ok": True, "exists": bool(agg), "source": src, "count": len(agg), "range": {}}
+            if request.args.get("entries"):
+                out["entries"] = agg
+            return jsonify(out)
         ap = _safe_vault_path(rel)
         if not ap:
             return jsonify({"ok": False, "error": "bad file"}), 400

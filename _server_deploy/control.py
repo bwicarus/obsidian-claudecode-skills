@@ -287,6 +287,14 @@ def register_control(app):
             if "gating_enabled" in body:
                 reg["gating_enabled"] = bool(body["gating_enabled"])
             for rel, on in (body.get("books") or {}).items():
+                if rel.startswith("vbook:"):
+                    # 合并视图里开火:vbook 引用 → 解析到真实成员(注册表身份=canonical,绝不存 vbook 键)
+                    try:
+                        sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
+                        import vbook as _VB
+                        rel = _VB.get(rel)["members"][0]["rel"]
+                    except Exception:
+                        continue
                 if rel not in reg.get("books", {}) and body.get("register"):
                     # 阅读器里首次对未登记书开火 → 自动分配编码(同 propose 的分配规则)
                     sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "kg"))
