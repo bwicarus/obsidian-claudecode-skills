@@ -448,13 +448,21 @@ def detect_only():
     except Exception:
         pos = {}
     out = []
+    dirty = False
     for row in focus:
         refs = row.get("refs") or []
         book = refs[0]["file"] if refs else ""
         if not book or not book.lower().endswith(".pdf"):
             continue
+        # R4-P0-1:登记先于门控且不受科目门限制——新书自动落表 enabled:false,
+        # 用户才有现成条目可改 true(否则 没登记→科目门拒→永远到不了登记 死锁)
+        if book not in reg["books"]:
+            _book_entry(reg, book, create=True)
+            dirty = True
         ok, blocks = _gates(row["term"], book, vocab, reg, focus_row=row)
         out.append({"term": row["term"], "book": book, "pass": ok, "blocks": blocks})
+    if dirty:
+        _save_codes(reg)
     fp = STATE / "attention" / "autonote-candidates.json"
     fp.write_text(json.dumps({"ts": int(time.time()), "candidates": out}, ensure_ascii=False, indent=1), "utf-8")
     n_pass = sum(1 for x in out if x["pass"])

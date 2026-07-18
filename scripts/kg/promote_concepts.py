@@ -202,7 +202,9 @@ def _note_scannable_text(md):
         segs.append((m.group(1).strip(), "quote"))
     md = re.sub(r"<!--\s*原文.*?-->", "", md, flags=re.S)
     # 剔 AI 生成的关联/解释区(## 相关笔记 / ## AI 解释 / ## 理解(AI) 到下个同级标题或文末)
-    md = re.sub(r"\n##\s*(相关笔记|AI\s*解释[^\n]*|理解\s*\(AI\)[^\n]*)\s*\n.*?(?=\n##\s|\Z)", "\n", md, flags=re.S)
+    md = re.sub(r"\n##\s*(相关笔记|概念链接[^\n]*|AI\s*解释[^\n]*|理解\s*\(AI\)[^\n]*)\s*\n.*?(?=\n##\s|\Z)", "\n", md, flags=re.S)
+    # R4-P0-5:AI 生成的定义行(自动笔记兜底)绝不当边源——否则 AI定义→扫描→边→AI再确认 自强化环
+    md = re.sub(r"^\*\*AI 生成[^\n]*$", "", md, flags=re.M)
     # 剔嵌入链接行/图片行(![[...]])与纯分隔线
     md = re.sub(r"^!\[\[[^\]]*\]\]\s*$", "", md, flags=re.M)
     prose = md.strip()
@@ -356,7 +358,10 @@ def confirm_candidates(cands, model="sonnet", effort="low", use_cache=True):
                 x = got.get(i) or {}
                 v = x.get("verdict")
                 if v not in ("prereq", "demote", "drop"):
-                    v = "unconfirmed"   # AI 缺答:算法方向暂立,留给审计(D)复查
+                    # R4-P0-4:缺答不持久缓存(volatile),下轮重问;绝不当已判
+                    cache[_ck(c)] = {"verdict": "unconfirmed", "ts": int(time.time()),
+                                     "ver": EDGE_VER, "_volatile": True}
+                    continue
                 cache[_ck(c)] = {"verdict": v, "reason": (x.get("reason") or "")[:30],
                                  "ts": int(time.time()), "ver": EDGE_VER}
         except Exception as e:
@@ -385,7 +390,9 @@ def build_edges(model="sonnet", effort="low", write=False, candidates_only=False
         vd = v.get("verdict", "unconfirmed")
         if vd == "drop":
             continue
-        kind = "prereq" if vd in ("prereq", "unconfirmed") else "related"
+        if vd == "unconfirmed":     # R4-P0-4 fail-closed:AI 没点头的绝不进有效前置图,下轮重试
+            continue
+        kind = "prereq" if vd == "prereq" else "related"
         edges.append({"from": c["from"], "to": c["to"], "kind": kind,
                       "origin": "emergent", "status": "auto",
                       "method": "aliasscan+sentconfirm", "quote": c["quote"],
