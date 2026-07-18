@@ -1147,20 +1147,32 @@ function _grpToast(txt) {
 function _grpBoundarySetup() {
   if (!window.__GRP) return;
   var el = document.getElementById('main'); if (!el) return;
+  // ⚡性能:绝不在 touchmove/wheel 里读 scrollHeight(连续模式频繁增删节点,每读一次强制重排=卡)。
+  // 边缘状态由 scroll 事件 rAF 节流计算一次/帧;手势处理器只读标志、零布局访问。
+  var edge = 0;   // 0=中间 1=顶 2=底
+  var rafPending = false;
+  function _calcEdge() {
+    rafPending = false;
+    var stp = el.scrollTop, ch = el.clientHeight, sh = el.scrollHeight;
+    edge = (stp <= 2) ? 1 : (stp + ch >= sh - 4) ? 2 : 0;
+  }
+  function _queueEdge() { if (!rafPending) { rafPending = true; requestAnimationFrame(_calcEdge); } }
+  el.addEventListener('scroll', _queueEdge, { passive: true });
+  _queueEdge();
   var accDown = 0, accUp = 0, touchY = null;
-  var atBottom = function () { return el.scrollTop + el.clientHeight >= el.scrollHeight - 4; };
-  var atTop = function () { return el.scrollTop <= 2; };
   el.addEventListener('wheel', function (e) {
-    if (e.deltaY > 0) { accUp = 0; if (atBottom()) { accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); } else accDown = 0; }
-    else if (e.deltaY < 0) { accDown = 0; if (atTop()) { accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); } else accUp = 0; }
+    if (!edge) { accDown = 0; accUp = 0; return; }
+    if (e.deltaY > 0 && edge === 2) { accUp = 0; accDown += e.deltaY; if (accDown > 320) window._grpNavNext(); }
+    else if (e.deltaY < 0 && edge === 1) { accDown = 0; accUp += -e.deltaY; if (accUp > 320) window._grpNavPrev(); }
+    else { accDown = 0; accUp = 0; }
   }, { passive: true });
   el.addEventListener('touchstart', function (e) { touchY = e.touches[0].clientY; accDown = 0; accUp = 0; }, { passive: true });
   el.addEventListener('touchmove', function (e) {
-    if (touchY == null) return;
+    if (touchY == null || !edge) { if (!edge) { accDown = 0; accUp = 0; } if (e.touches.length) touchY = e.touches[0].clientY; return; }
     var dy = touchY - e.touches[0].clientY;   // >0 = 手指上滑(向下滚)
     touchY = e.touches[0].clientY;
-    if (dy > 0 && atBottom()) { accDown += dy; if (accDown > 120) window._grpNavNext(); }
-    else if (dy < 0 && atTop()) { accUp += -dy; if (accUp > 120) window._grpNavPrev(); }
+    if (dy > 0 && edge === 2) { accDown += dy; if (accDown > 120) window._grpNavNext(); }
+    else if (dy < 0 && edge === 1) { accUp += -dy; if (accUp > 120) window._grpNavPrev(); }
     else { accDown = 0; accUp = 0; }
   }, { passive: true });
   el.addEventListener('touchend', function () { touchY = null; accDown = 0; accUp = 0; }, { passive: true });

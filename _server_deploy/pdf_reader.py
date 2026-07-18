@@ -1645,6 +1645,8 @@ def pdf_view():
     if not _is_fav_book:
         _lastopen_touch(rel_clean)   # 戳「最近打开」→ 书架把这本置顶(收藏夹书不进「最近打开」)
     page_ts = 0   # 服务端续读记录的时间戳(epoch 秒;前端跟 localStorage 记录按时间戳仲裁,新者胜——大厂 Kindle/Books 模型)
+    if page >= 1:
+        page_ts = int(time.time())   # 显式深链(边界翻卷/收藏/技能树跳转)=用户当下意图,必须赢过本地旧续读(否则跳卷落地即被拽回旧位置)
     if page < 1 and not _is_fav_book:
         _rp = _reading_pos_load().get(rel_clean) or {}
         try:
