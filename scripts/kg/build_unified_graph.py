@@ -98,10 +98,11 @@ def build(write=False):
         if subj not in subj_l0:
             l0 = "em0::" + subj
             l1 = "em1::" + subj
-            nodes.append({"id": l0, "level": 0, "name": subj, "parent_id": "",
-                          "origin": "emergent", "book": "", "subject": subj, "confirmed": None})
-            nodes.append({"id": l1, "level": 1, "name": subj, "parent_id": l0,
-                          "origin": "emergent", "book": "", "subject": subj, "confirmed": None})
+            _chap = {"state": "unlockable", "progress": "in_progress", "availability": "open",
+                     "mastered": False, "unlocked": True, "origin": "emergent", "book": "",
+                     "subject": subj, "confirmed": None}
+            nodes.append(dict(_chap, id=l0, level=0, name=subj, parent_id=""))
+            nodes.append(dict(_chap, id=l1, level=1, name=subj, parent_id=l0))
             subj_l0[subj] = l1
         uid = "em::" + key
         key2uid[key] = uid

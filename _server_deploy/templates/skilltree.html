@@ -478,7 +478,7 @@ function buildAggregatedEdges(){
     }
     edgesByLevel[lv]=out;
   }
-  window.IS_FLAT = edgesByLevel[2].length===0;   // C:无前置边 = 背诵型书
+  window.IS_FLAT = edgesByLevel[2].length===0 && BOOK!=="unified";   // C:无前置边=背诵型书(unified 是网,永不判 flat)
   try{ const fb=document.getElementById('flat-banner'); if(fb) fb.style.display=window.IS_FLAT?'block':'none'; }catch(e){}
 }
 function computeGlobalDepth(){
@@ -1690,10 +1690,18 @@ function applyFacet(val){
   for(const n of KG_FULL.nodes){
     if((type==="book"&&n.book===name)||(type==="subject"&&n.subject===name)) keep.add(n.id);
   }
+  // 保留跨科目**直接相邻**的锚点(否则局部树挂进骨架的连接线全丢、看着像孤立背诵书)
+  const nbr=new Set();
+  for(const e of (KG_FULL.edges||[])){
+    if(keep.has(e.from)&&!keep.has(e.to)) nbr.add(e.to);
+    if(keep.has(e.to)&&!keep.has(e.from)) nbr.add(e.from);
+  }
+  nbr.forEach(id=>keep.add(id));
   for(const id of Array.from(keep)){ let c=id2f[id]; while(c&&c.parent_id){ keep.add(c.parent_id); c=id2f[c.parent_id]; } }
   loadKG(Object.assign({},KG_FULL,{
     nodes:KG_FULL.nodes.filter(n=>keep.has(n.id)),
     edges:(KG_FULL.edges||[]).filter(e=>keep.has(e.from)&&keep.has(e.to))}));
+  try{ const cb=document.getElementById("crumb"); if(cb) cb.textContent = curFacet ? (curFacet.split(":")[1]) : "全部章"; }catch(e){}
 }
 async function confirmEmergent(val){
   const n=id2[detailNodeId]; if(!n||!n.key) return;
