@@ -507,12 +507,40 @@ ok okay yes no sure thanks please sorry just really very much some many
 少し ちょっと すぐ すぐに はい いいえ ありがとう すみません""".split())
 
 
+AUTO_SW = ATT_DIR / "auto-stopwords.json"
+_AUTO_SW_CACHE = {"mtime": -1.0, "v": frozenset()}
+
+
+def _auto_stopwords():
+    """**书库自己统计出来的通用语**(scripts/build_auto_stopwords.py 生成)。
+    用户设计:同语言的很多不同类型的书里都反复出现的词 = 非知识点的通用语。
+    比手工穷举稳健,加新书就自动更新;样本不足的语言不生成(宁可不滤)。
+    ⚠ 只用于**完整词**精确匹配——复合词里夹着通用语是常态(「平均寿命」含「平均」、
+      「vector space」含「space」),抽词器长词优先,两边配合才不会误伤。"""
+    try:
+        mt = AUTO_SW.stat().st_mtime
+    except OSError:
+        return _AUTO_SW_CACHE["v"] if _AUTO_SW_CACHE["mtime"] == -2 else frozenset()
+    if _AUTO_SW_CACHE["mtime"] != mt:
+        try:
+            d = json.loads(AUTO_SW.read_text("utf-8"))
+            ws = set()
+            for _lg, arr in (d.get("words") or {}).items():
+                ws |= {str(x).strip().lower() for x in arr}
+            _AUTO_SW_CACHE.update({"mtime": mt, "v": frozenset(ws)})
+        except Exception:
+            _AUTO_SW_CACHE.update({"mtime": mt, "v": frozenset()})
+    return _AUTO_SW_CACHE["v"]
+
+
 def _is_junk_term(w):
-    """指位词(第五/一页/那下页)、纯数字、口语元话语 → 不是知识点,不进画像。"""
+    """指位词(第五/一页/那下页)、纯数字、口语元话语、**书库统计出的通用语** → 不是知识点。
+    一律**整词**判定:绝不因为复合词里含通用语就把复合词滤掉。"""
     w = (w or "").strip()
     if not w or w.isdigit():
         return True
-    if w.lower() in _META_TALK:
+    lw = w.lower()
+    if lw in _META_TALK or lw in _auto_stopwords():
         return True
     if _POSREF_RE.match(w) and not re.search(r"[A-Za-z]{3,}", w):
         # 「第五」「一页」「那下页」「三章」命中;「page rank」这类含实词的不误伤

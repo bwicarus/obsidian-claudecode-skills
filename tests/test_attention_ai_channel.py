@@ -55,3 +55,39 @@ class TestAttentionAIChannel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAutoStopwords(unittest.TestCase):
+    """书库统计出的通用语(用户设计:同语言很多不同类型的书里都重复的词=非知识点)。"""
+
+    def setUp(self):
+        import attention_profile as AP
+        self.AP = AP
+        if not AP._auto_stopwords():
+            self.skipTest("还没生成 auto-stopwords.json(跑 scripts/build_auto_stopwords.py --write)")
+
+    def test_compound_terms_survive_generic_parts(self):
+        """★用户点名的关键:复合词里夹着通用语时,**复合词绝不能被连累**。"""
+        self.assertIn("vector space", self.AP.extract_terms("vector space and subspace", lang=[]))
+        self.assertIn("平均寿命", self.AP.extract_terms("平均寿命が延びている", lang=["ja"]))
+        self.assertIn("向量空间的定义", self.AP.extract_terms("向量空间的定义", lang=[]))
+
+    def test_generic_words_filtered(self):
+        """纯通用语的句子应该一个词都抽不出。"""
+        self.assertEqual(self.AP.extract_terms("这个概念的形式是什么", lang=[]), [])
+
+    def test_domain_terms_protected(self):
+        """真术语不能进停用表(保护名单:领域词典/KG/概念图)。"""
+        sw = self.AP._auto_stopwords()
+        for t in ("space", "vector", "matrix", "eigenvalue", "subspace", "derivative", "子空间", "矩阵"):
+            self.assertNotIn(t, sw, f"{t} 是术语,不该被当通用语滤掉")
+
+    def test_undersampled_language_skipped(self):
+        """样本不足的语言不生成(宁可不滤也不误杀)——日语现在只有 3 本。"""
+        import json
+        from pathlib import Path
+        p = Path(self.AP.ATT_DIR) / "auto-stopwords.json"
+        d = json.loads(p.read_text("utf-8"))
+        for lang, n in (d.get("skipped_langs") or {}).items():
+            self.assertLess(n, d["min_books"])
+            self.assertNotIn(lang, d.get("words") or {})
