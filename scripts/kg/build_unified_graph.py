@@ -23,6 +23,7 @@ import attention_profile as AP  # noqa: E402
 KG_DIR = config.PROJECT_DIR / "knowledge_graph"
 EMERGENT = config.PROJECT_DIR / "state" / "attention" / "emergent-graph.json"
 OUT = config.PROJECT_DIR / "state" / "attention" / "unified-graph.json"
+CONF = config.PROJECT_DIR / "state" / "attention" / "emergent-confirmations.json"
 
 _KEEP = ("level", "name", "pages", "state", "mastery", "progress", "availability",
          "mastered", "unlocked", "bottleneck_score", "engaged", "numeric_label", "summary")
@@ -41,6 +42,12 @@ def _real_kgs():
 def build(write=False):
     nodes = []
     edges = []
+    try:
+        conf = json.loads(CONF.read_text("utf-8"))
+    except Exception:
+        conf = {"nodes": {}, "edges": {}}
+    conf_nodes = conf.get("nodes", {})
+    rejected = set()   # 被否决的 emergent key(节点剔除 + 级联剔边)
     # authored_ref("book#nodeid") → 统一图节点 id,用于 emergent 边锚点重映射
     authored_id_by_ref = {}
 
@@ -82,8 +89,12 @@ def build(write=False):
         if n.get("in_authored_kg") and n.get("authored_ref") in authored_id_by_ref:
             key2uid[key] = authored_id_by_ref[n["authored_ref"]]     # anchor → 已有 authored 节点
             continue
+        _cf = conf_nodes.get(key)
+        if _cf is False:              # 用户否决 → 从图剔除(级联剔边),也不建空章节
+            rejected.add(key)
+            continue
         subj = n.get("subject") or "未分类"
-        # 合成该 subject 的 L0/L1 章节(只一次)
+        # 合成该 subject 的 L0/L1 章节(只一次,且只在有存活节点时)
         if subj not in subj_l0:
             l0 = "em0::" + subj
             l1 = "em1::" + subj
@@ -94,11 +105,11 @@ def build(write=False):
             subj_l0[subj] = l1
         uid = "em::" + key
         key2uid[key] = uid
-        nodes.append({"id": uid, "level": 2, "name": n.get("surface") or key,
+        nodes.append({"id": uid, "key": key, "level": 2, "name": n.get("surface") or key,
                       "parent_id": subj_l0[subj], "pages": [],
                       "state": "unlockable", "mastery": None, "progress": "unseen",
                       "availability": "open", "mastered": False, "unlocked": True,
-                      "origin": "emergent", "book": "", "subject": subj, "confirmed": None,
+                      "origin": "emergent", "book": "", "subject": subj, "confirmed": _cf,
                       "provenance": n.get("provenance", [])})
     for e in g.get("edges", []):
         fu, tu = key2uid.get(e["from"]), key2uid.get(e["to"])

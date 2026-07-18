@@ -831,6 +831,33 @@ def register_skilltree(app):
                 return jsonify(json.loads(p2.read_text("utf-8")))
             return jsonify({"error": "unified graph unavailable: %s" % str(e)[:80]}), 500
 
+    @app.route("/skilltree/unified/api/confirm", methods=["POST"])
+    def skilltree_unified_confirm():
+        """emergent 概念/边的**确认/否决**(守提议→确认):写 emergent-confirmations.json。
+        confirmed=true 确认、false 否决(rebuild 时从图剔除)、null 撤销。"""
+        body = request.get_json(silent=True) or {}
+        key = str(body.get("key") or "").strip()
+        if not key:
+            return jsonify({"ok": False, "error": "缺 key"}), 400
+        confirmed = body.get("confirmed")
+        if confirmed not in (True, False, None):
+            return jsonify({"ok": False, "error": "confirmed 要 true/false/null"}), 400
+        cp = CLAUDE_DIR / "state" / "attention" / "emergent-confirmations.json"
+        try:
+            conf = json.loads(cp.read_text("utf-8"))
+        except Exception:
+            conf = {"nodes": {}, "edges": {}}
+        conf.setdefault("nodes", {})
+        if confirmed is None:
+            conf["nodes"].pop(key, None)
+        else:
+            conf["nodes"][key] = confirmed
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cp.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(conf, ensure_ascii=False, indent=1), "utf-8")
+        tmp.replace(cp)
+        return jsonify({"ok": True, "key": key, "confirmed": confirmed})
+
     @app.route("/skilltree/<book>/")
     def skilltree_view(book):
         p = _kg_path(book)

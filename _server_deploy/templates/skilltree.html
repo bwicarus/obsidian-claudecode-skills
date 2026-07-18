@@ -219,6 +219,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
   <span id="crumb">全部章</span>
   <input id="search" type="text" placeholder="🔍 搜索节点（Enter 跳转）"
          oninput="onSearchInput(event)" onkeydown="if(event.key==='Enter') onSearchEnter()">
+  <select id="facet-sel" onchange="applyFacet(this.value)" title="按书/科目投影出单棵树" style="display:none;background:#141b2e;color:#cfe6ff;border:1px solid #2a3550;border-radius:6px;padding:5px 8px;font-size:12px;margin-right:4px"></select>
   <button onclick="openRecommend()" title="今日学习计划：下一步 / 瓶颈 / 章节进度">🎯 学习计划</button>
   <button id="edit-toggle" onclick="toggleEditMode()" title="编辑模式（点节点改前置/删节点/合并）">✏️ 编辑</button>
   <button onclick="openSettings()">⚙ 设置</button>
@@ -252,6 +253,14 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
     <div id="d-badges"></div>
     <div class="lbl">编号 · 类型</div><div class="v" id="d-label">—</div>
     <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
+    <div id="d-emergent-row" style="display:none;margin-top:12px;border-top:1px solid #3a2a55;padding-top:12px">
+      <div class="lbl" style="color:#c4b5fd">🌱 自动长出的概念（提议→确认）</div>
+      <div class="v" id="d-emergent-prov" style="font-size:11px;color:#9a8fc0">—</div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button onclick="confirmEmergent(true)" style="flex:1;padding:7px 0;background:#1a2a1a;border:1px solid #34d399;color:#6ee7b7;border-radius:6px;cursor:pointer;font-size:12px">✓ 确认</button>
+        <button onclick="confirmEmergent(false)" style="flex:1;padding:7px 0;background:#2a1a1a;border:1px solid #f87171;color:#fca5a5;border-radius:6px;cursor:pointer;font-size:12px">✕ 否决</button>
+      </div>
+    </div>
     <div id="d-quiz-wrap" style="display:none;margin-top:12px">
       <button id="d-quiz-btn" onclick="startQuiz()" style="width:100%;padding:9px 0;background:#1a2a1a;border:1.5px solid #34d399;color:#6ee7b7;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">🎯 考考我（沿前置链出题·客观判分）</button>
       <div id="d-quiz" style="margin-top:10px"></div>
@@ -345,6 +354,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const BOOK="{{ book }}";
+let KG_FULL=null, curFacet="";   // unified:全图 + 当前 facet
 const VAULT="Obsidian Vault";
 const SETT_KEY="skilltree_settings_"+BOOK;
 function loadSettings(){
@@ -390,6 +400,7 @@ fetch(`/skilltree/${BOOK}/data.json`).then(r=>r.json()).then(d=>{
   computeDescendants();
   document.getElementById("meta").textContent=
     `${nodesByLevel[0].length} 章 · ${nodesByLevel[1].length} 节 · ${nodesByLevel[2].length} 知识点 · ${edgesByLevel[2].length} 边`;
+  KG_FULL=d; populateFacet();
   // 从 URL hash 恢复初始视图；focus hash 忽略（用户希望进页面默认 home）
   const h=location.hash.startsWith("#")?location.hash.slice(1):"";
   let initialView = decodeView(h);
@@ -1651,6 +1662,50 @@ function obsidianPdfUrl(page){
   return "obsidian://open?vault="+encodeURIComponent(VAULT)
        + "&file="+encodeURIComponent(vp + "#page=" + page);
 }
+function loadKG(d){
+  KG=d;
+  id2=Object.fromEntries(KG.nodes.map(n=>[n.id,n]));
+  nodesByLevel={0:[],1:[],2:[]};
+  for(const n of KG.nodes){(nodesByLevel[n.level]=nodesByLevel[n.level]||[]).push(n)}
+  buildAggregatedEdges(); computeGlobalDepth(); computeChapterColors(); computeDescendants();
+  render();
+}
+function populateFacet(){
+  const sel=document.getElementById("facet-sel");
+  if(!sel) return;
+  if(BOOK!=="unified" || !KG_FULL){ sel.style.display="none"; return; }
+  sel.style.display="inline-block";
+  const m=KG_FULL.meta||{};
+  let html='<option value="">🌐 全网（所有）</option>';
+  (m.books||[]).forEach(b=>{ html+=`<option value="book:${b}">📖 ${b}</option>`; });
+  (m.subjects||[]).filter(x=>!(m.books||[]).includes(x)).forEach(sj=>{ html+=`<option value="subject:${sj}">🌱 ${sj}</option>`; });
+  sel.innerHTML=html; sel.value=curFacet;
+}
+function applyFacet(val){
+  curFacet=val||"";
+  if(!curFacet){ if(KG_FULL) loadKG(KG_FULL); return; }
+  const [type,name]=curFacet.split(":");
+  const id2f=Object.fromEntries(KG_FULL.nodes.map(n=>[n.id,n]));
+  const keep=new Set();
+  for(const n of KG_FULL.nodes){
+    if((type==="book"&&n.book===name)||(type==="subject"&&n.subject===name)) keep.add(n.id);
+  }
+  for(const id of Array.from(keep)){ let c=id2f[id]; while(c&&c.parent_id){ keep.add(c.parent_id); c=id2f[c.parent_id]; } }
+  loadKG(Object.assign({},KG_FULL,{
+    nodes:KG_FULL.nodes.filter(n=>keep.has(n.id)),
+    edges:(KG_FULL.edges||[]).filter(e=>keep.has(e.from)&&keep.has(e.to))}));
+}
+async function confirmEmergent(val){
+  const n=id2[detailNodeId]; if(!n||!n.key) return;
+  try{
+    const r=await fetch(`/skilltree/unified/api/confirm`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:n.key,confirmed:val})});
+    if((await r.json()).ok){
+      closeDetail();
+      const nd=await (await fetch(`/skilltree/${BOOK}/data.json`)).json();
+      KG_FULL=nd; populateFacet(); applyFacet(curFacet);
+    }
+  }catch(e){}
+}
 function showDetail(n){
   if(!n) return;
   detailNodeId = n.id;
@@ -1700,6 +1755,15 @@ function showDetail(n){
   document.getElementById("d-badges").innerHTML=badges.join("");
   document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ") || (n.level===0?n.chapter_label:n.section_label)||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
+  { const _er=document.getElementById("d-emergent-row");
+    if(_er){
+      if(n.origin==="emergent" && n.level===2){
+        _er.style.display="block";
+        const prov=(n.provenance||[]).map(x=>x.ref||x.type).join("、");
+        const tag=n.confirmed===true?"（已确认）":n.confirmed===false?"（已否决）":"";
+        document.getElementById("d-emergent-prov").textContent="来源:"+(prov||"—")+tag;
+      } else { _er.style.display="none"; }
+    } }
   { const _qw=document.getElementById("d-quiz-wrap"); if(_qw){ _qw.style.display = n.level===2 ? "block" : "none"; document.getElementById("d-quiz").innerHTML=""; const _qb=document.getElementById("d-quiz-btn"); if(_qb) _qb.textContent="🎯 考考我（沿前置链出题·客观判分）"; } }
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pages=n.pages||[];
