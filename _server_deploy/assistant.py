@@ -27,6 +27,67 @@ bp = Blueprint("assistant", __name__, url_prefix="/api/assistant")
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+
+
+def _vb_src(file_rel, page):
+    """合并书(vbook:)引用 → (真实成员, 局部页);真实 rel 原样返回。第三通道适配(转换层v2/R5)。"""
+    try:
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+            import sys as _s
+            _s.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
+            import vbook as _VB
+            return _VB.resolve_view(file_rel, int(page or 1))
+    except Exception:
+        pass
+    return file_rel, page
+
+
+def _vb_hls(file_rel):
+    """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。"""
+    pdf = _pdf()
+    out = []
+    for _mrel, _moff, _ in _vb_members(file_rel):
+        for h in ((pdf._hl_load(_mrel) or {}).get("highlights") or []):
+            if _moff and isinstance(h.get("page"), (int, float)):
+                h = dict(h); h["page"] = int(h["page"]) + _moff
+            out.append(h)
+    return out
+
+
+def _vb_notes(file_rel):
+    """合并书:各卷便签合并 + anchor.page 全局化。非合并书=原样 _notes_load。"""
+    pdf = _pdf()
+    out = []
+    for _mrel, _moff, _ in _vb_members(file_rel):
+        for n in (pdf._notes_load(_mrel) or []):
+            a = n.get("anchor") or {}
+            if _moff and isinstance(a.get("page"), (int, float)):
+                n = dict(n); n["anchor"] = dict(a); n["anchor"]["page"] = int(a["page"]) + _moff
+            out.append(n)
+    return out
+
+
+def _vb_note_owner(file_rel, nid):
+    """合并书:按便签 id 找到它真正落在哪一卷 → (member_rel, offset)。找不到返回 (None, 0)。"""
+    pdf = _pdf()
+    for _mrel, _moff, _ in _vb_members(file_rel):
+        if any(x.get("id") == nid for x in (pdf._notes_load(_mrel) or [])):
+            return _mrel, _moff
+    return None, 0
+
+
+def _vb_members(file_rel):
+    """vbook → [(member_rel, offset, pages)];非 vbook → [(rel, 0, None)]。整本级工具扇入用。"""
+    try:
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+            import sys as _s
+            _s.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
+            import vbook as _VB
+            g = _VB.get(file_rel)
+            return [(m["rel"], m["offset"], m["pages"]) for m in g["members"]]
+    except Exception:
+        pass
+    return [(file_rel, 0, None)]
 _APP_CLAUDE = os.environ.get("APP_CLAUDE") or "claude"
 _AGENT_MODEL = "sonnet"   # 推理 + 工具决策:sonnet 平衡(快+好用);重内容生成的工具内部各用 opus
 
@@ -1529,6 +1590,7 @@ def _overlay_md_for_page(file_rel: str, pdf_page: int) -> str:
 
 def _page_text(file_rel: str, page) -> str:
     try:
+        file_rel, page = _vb_src(file_rel, page)   # 合并书:全局页→真成员局部页
         rel = (file_rel or "").strip()
         if not rel or ".." in rel:
             return ""
@@ -1577,6 +1639,15 @@ def _to_pdf(ctx, disp):   # 书上印刷页 → PDF 页(读页 / 跳转用)
 def _figdescs_for(file_rel, printed_pages):
     """本书开了『插图描述』时,取这些**印刷页**的图 caption+desc(纯文本,非视觉)。{印刷页: [(cap,desc),…]}。
     这样跨页/图里的结构(如 V 字模型整张图把上下流各阶段都画在图上)用现成描述就能进上下文,不必读视觉。"""
+    if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+        out = {}
+        for _mrel, _moff, _mpgs in _vb_members(file_rel):
+            _loc = [p - _moff for p in printed_pages
+                    if isinstance(p, (int, float)) and _moff < p <= _moff + (_mpgs or 0)]
+            if _loc:
+                for lp, v in _figdescs_for(_mrel, _loc).items():
+                    out[lp + _moff] = v
+        return out
     try:
         import pdf_reader as _pdfm
         if not (file_rel and _pdfm._book_fig_enabled(file_rel)):
@@ -1809,17 +1880,18 @@ def _t_search_book(args, ctx):
     if not q or not file_rel or ".." in file_rel:
         return {"error": "缺 query 或没开书"}
     try:
-        ap = (VAULT_ROOT / file_rel).resolve()
-        ap.relative_to(VAULT_ROOT.resolve())   # 容器校验:file_rel 来自前端不可信,挡 .. / 绝对路径越出 vault
-        idx = _pdf()._book_text_index(str(ap), file_rel)
         ql = q.lower()
         hits = []
-        for ps, txt in idx.items():
-            low = (txt or "").lower()
-            pos = low.find(ql)
-            if pos >= 0:
-                hits.append({"page": _to_disp(ctx, int(ps)),   # 报印刷页给 AI
-                             "snippet": (txt[max(0, pos - 15):pos + len(q) + 25] or "").replace("\n", " ").strip()})
+        for _mrel, _moff, _mpgs in _vb_members(file_rel):   # 合并书:逐成员扇入;非分卷=单成员零变化
+            ap = (VAULT_ROOT / _mrel).resolve()
+            ap.relative_to(VAULT_ROOT.resolve())   # 容器校验:file_rel 来自前端不可信,挡 .. / 绝对路径越出 vault
+            idx = _pdf()._book_text_index(str(ap), _mrel)
+            for ps, txt in idx.items():
+                low = (txt or "").lower()
+                pos = low.find(ql)
+                if pos >= 0:
+                    hits.append({"page": _to_disp(ctx, int(ps) + _moff),   # 报印刷页给 AI(合并书=全局)
+                                 "snippet": (txt[max(0, pos - 15):pos + len(q) + 25] or "").replace("\n", " ").strip()})
         hits.sort(key=lambda x: x["page"])
         return {"total": len(hits), "hits": hits[:10]}
     except Exception as e:
@@ -2466,7 +2538,8 @@ def _t_see_page(args, ctx):
         try:
             import pdf_reader as _pdfm
             for pg in pages:
-                if _pdfm._page_ink_strokes(file_rel, pg):
+                _mr, _lp = _vb_src(file_rel, pg)   # 合并书:墨迹边车在真实成员名下
+                if _pdfm._page_ink_strokes(_mr, _lp):
                     has_ink = True; break
         except Exception:
             pass
@@ -2487,6 +2560,13 @@ def _t_see_page(args, ctx):
         import base64
         import fitz
         import pdf_reader as pdf
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:") and pages:
+            _mem = _vb_members(file_rel)
+            _f = next((m for m in _mem if m[1] < pages[0] <= m[1] + (m[2] or 0)), None)
+            if not _f:
+                return {"error": "页越界(合并书)"}
+            pages = [p - _f[1] for p in pages if _f[1] < p <= _f[1] + (_f[2] or 0)]
+            file_rel = _f[0]
         ap = (VAULT_ROOT / file_rel).resolve()
         ap.relative_to(VAULT_ROOT.resolve())
         doc = fitz.open(str(ap))
@@ -2557,7 +2637,8 @@ def _t_see_ink(args, ctx):
     if not strokes:
         try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
             import pdf_reader as _pdfm0
-            strokes = _pdfm0._page_ink_strokes(file_rel, page) or []
+            _mr0, _lp0 = _vb_src(file_rel, page)   # 合并书:墨迹边车在真实成员名下
+            strokes = _pdfm0._page_ink_strokes(_mr0, _lp0) or []
         except Exception:
             strokes = []
     if not strokes:
@@ -2568,6 +2649,7 @@ def _t_see_ink(args, ctx):
     try:
         import base64
         import pdf_reader as pdf
+        file_rel, page = _vb_src(file_rel, page)   # 合并书:渲图/取文字都按真实成员局部页
         png = pdf._ink_focus_image(file_rel, page, strokes)
         if not png:
             r1 = _viewshot_result(ctx, " (服务端裁不出笔迹区域,已改用屏幕实时截图。)")
@@ -2629,7 +2711,8 @@ def _t_page_vocab(args, ctx):
             pg = int(pg)
         except Exception:
             continue
-        for m in pdf.page_unmastered_vocab(file_rel, pg):
+        _mr, _lp = _vb_src(file_rel, pg)   # 合并书:生词按真实成员页查
+        for m in pdf.page_unmastered_vocab(_mr, _lp):
             lem = m.get("lemma") or m.get("word")
             if lem and lem not in seen:
                 seen[lem] = {"word": m.get("word"), "lemma": m.get("lemma"),
@@ -2701,6 +2784,13 @@ def _t_highlight(args, ctx):
             pages = []
     else:
         pages = [int(p) for p in (ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])) if p]
+    if isinstance(file_rel, str) and file_rel.startswith("vbook:") and pages:   # 合并书:全局页→所在卷局部页(单卷内)
+        _mem = _vb_members(file_rel)
+        _f = next((m for m in _mem if m[1] < pages[0] <= m[1] + (m[2] or 0)), None)
+        if not _f:
+            return {"error": "页越界(合并书)"}
+        pages = [p - _f[1] for p in pages if _f[1] < p <= _f[1] + (_f[2] or 0)]
+        file_rel = _f[0]
     try:
         import fitz
         ap = (VAULT_ROOT / file_rel).resolve()
@@ -2773,8 +2863,7 @@ def _t_read_highlights(args, ctx):
     if not file_rel:
         return {"error": "没开书"}
     try:
-        db = _pdf()._hl_load(file_rel)
-        hls = db.get("highlights", []) or []
+        hls = _vb_hls(file_rel)   # 合并书=各卷扇入+页全局化;非分卷=原样
         pg = args.get("page")
         if pg in ("all", "0", 0):
             pass   # 全书
@@ -2802,8 +2891,7 @@ def _t_find_highlights(args, ctx):
     if not file_rel:
         return {"error": "没开书"}
     try:
-        db = _pdf()._hl_load(file_rel)
-        hls = db.get("highlights", []) or []
+        hls = _vb_hls(file_rel)   # 合并书=各卷扇入+页全局化;非分卷=原样
         pages = args.get("pages")
         pg = args.get("page")
         rfrom = args.get("from"); rto = args.get("to")
@@ -2856,10 +2944,25 @@ def _t_toc(args, ctx):
         return {"error": "没开书"}
     try:
         pdf = _pdf()
-        ap = pdf._safe_vault_path(file_rel)
-        if not ap:
-            return {"error": "书路径无效"}
-        entries, source = pdf._effective_toc(ap, file_rel)   # page 已归一到印刷页(跟 AI/用户一致)
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+            entries, source = [], "none"
+            for _mrel, _moff, _ in _vb_members(file_rel):
+                _apm = pdf._safe_vault_path(_mrel)
+                if not _apm:
+                    continue
+                _es, _s2 = pdf._effective_toc(_apm, _mrel)
+                if _es and source == "none":
+                    source = _s2
+                for _e in _es:
+                    _e2 = dict(_e)
+                    if isinstance(_e2.get("page"), (int, float)):
+                        _e2["page"] = int(_e2["page"]) + _moff
+                    entries.append(_e2)
+        else:
+            ap = pdf._safe_vault_path(file_rel)
+            if not ap:
+                return {"error": "书路径无效"}
+            entries, source = pdf._effective_toc(ap, file_rel)   # page 已归一到印刷页(跟 AI/用户一致)
         if not entries:
             return {"count": 0, "note": "这本书没录入目录(没建过也没原生书签)。定位章节改用 find_highlights(page=\"all\") 看高亮都在哪几页,或直接问用户大概页码。"}
         out = [{"title": (e.get("title") or "")[:80], "page": e.get("page"), "level": e.get("level", 1)} for e in entries if e.get("page") is not None]
@@ -2988,6 +3091,17 @@ def _t_see_figure(args, ctx):
     try:
         import base64
         import pdf_reader as pdf
+        if isinstance(file_rel, str) and file_rel.startswith("vbook:") and figs:
+            def _figpg(f):
+                return int((f.get("ref") or {}).get("page") or f.get("page") or 0)
+            _pg0 = next((_figpg(f) for f in figs if _figpg(f)), 0)
+            file_rel, _lp0 = _vb_src(file_rel, _pg0 or 1)
+            _d = _pg0 - _lp0
+            for f in figs:
+                if f.get("page"):
+                    f["page"] = int(f["page"]) - _d
+                if (f.get("ref") or {}).get("page"):
+                    f["ref"] = dict(f["ref"]); f["ref"]["page"] = int(f["ref"]["page"]) - _d
         ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
         vis = []; ink_any = False
         for fg in figs:
@@ -3069,7 +3183,7 @@ def _t_notes_query(args, ctx, kind="pdf"):
     file_rel = ctx.get("file_rel") or ""
     if not file_rel:
         return {"error": "没开书"}
-    notes = _pdf()._notes_load(file_rel)
+    notes = _vb_notes(file_rel)   # 合并书:各卷扇入+anchor.page 全局化
     color = _note_color_arg(args.get("color"))
     kw = (args.get("keyword") or "").strip().lower()
     loc = args.get("section") if kind == "epub" else args.get("page")
@@ -3105,7 +3219,7 @@ def _t_notes_read(args, ctx, kind="pdf"):
     nid = (args.get("id") or "").strip()
     if not nid:
         return {"error": "缺 id(先 notes_query 拿便签 id)"}
-    n = next((x for x in _pdf()._notes_load(file_rel) if x.get("id") == nid), None)
+    n = next((x for x in _vb_notes(file_rel) if x.get("id") == nid), None)
     if not n:
         return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
     out = {"id": nid, "位置": _note_place(ctx, n.get("anchor"), kind),
@@ -3158,6 +3272,11 @@ def _t_notes_create(args, ctx, kind="pdf"):
     now = int(time.time())
     n = {"id": "n" + _u.uuid4().hex[:11], "anchor": anchor, "text": text[:8000], "color": color,
          "w": 260, "h": 180, "collapsed": False, "strokes": [], "created": now, "updated": now}
+    _view_rel, _view_pg = file_rel, anchor.get("page")   # 前端仍活在视图坐标(vbook+全局页)
+    if isinstance(file_rel, str) and file_rel.startswith("vbook:") and anchor.get("kind") == "pdf":
+        file_rel, _lp = _vb_src(file_rel, anchor.get("page") or 1)   # 落盘:贴到真正那一卷(局部页=持久真相)
+        anchor = dict(anchor); anchor["page"] = _lp
+        n["anchor"] = anchor
     items = pdf._notes_load(file_rel)
     items.append(n)
     pdf._notes_save(file_rel, items)
@@ -3178,10 +3297,13 @@ def _t_notes_create(args, ctx, kind="pdf"):
                          "state": "done", "ts": now}
         res["client_action"] = {"fn": "notesReload", "args": []}
     else:
+        _vn = dict(n)   # 给前端的副本:anchor 用视图页(合并书里前端按全局页排版)
+        if _view_pg is not None:
+            _vn["anchor"] = dict(anchor); _vn["anchor"]["page"] = _view_pg
         res["client_action"] = {"fn": "_assistEdit", "args": [{
-            "type": "note", "op": "create", "file": file_rel,
-            "items": [{"id": n["id"], "pdf_page": anchor["page"], "disp_page": _to_disp(ctx, anchor["page"]),
-                       "note": n}]}]}
+            "type": "note", "op": "create", "file": _view_rel,
+            "items": [{"id": n["id"], "pdf_page": _view_pg, "disp_page": _to_disp(ctx, _view_pg),
+                       "note": _vn}]}]}
     return res
 
 
@@ -3198,6 +3320,11 @@ def _t_notes_edit(args, ctx, kind="pdf"):
     if new_text is None and new_color is None:
         return {"error": "text / color 至少给一个(只能改文字和颜色;手写笔画/位置/尺寸不能动)"}
     pdf = _pdf()
+    if isinstance(file_rel, str) and file_rel.startswith("vbook:"):
+        _own, _ = _vb_note_owner(file_rel, nid)   # 合并书:这条便签在哪一卷
+        if not _own:
+            return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
+        file_rel = _own
     items = pdf._notes_load(file_rel)
     n = next((x for x in items if x.get("id") == nid), None)
     if not n:
@@ -3420,6 +3547,7 @@ def _t_summarize_section(args, ctx):
                 else int((ctx.get("pages") or [ctx.get("page")])[0] or 1))   # ctx 已是 PDF 页
     except Exception:
         page = 1
+    file_rel, page = _vb_src(file_rel, page)   # 合并书:定位到所在卷,按该卷 TOC 切章
     try:
         import fitz
         ap = (VAULT_ROOT / file_rel).resolve(); ap.relative_to(VAULT_ROOT.resolve())
@@ -4595,16 +4723,18 @@ def _sys_prompt(ctx):
             cur_p = int(ctx.get("page") or (vis[0] if vis else 0) or 0)
             if fe_ink and cur_p:
                 inked_pages.append(cur_p)
-                circled = _clean_tag(_pdfm._text_under_ink(ctx["file_rel"], cur_p, strokes=fe_ink))
+                _mrc, _lpc = _vb_src(ctx["file_rel"], cur_p)   # 合并书:圈画文字按真实成员页
+                circled = _clean_tag(_pdfm._text_under_ink(_mrc, _lpc, strokes=fe_ink))
             # 其余可见页 / 没拿到时回退服务端 sidecar
             for p in vis:
                 p = int(p) if p else 0
                 if not p or p == cur_p:
                     continue
-                if _pdfm._page_ink_strokes(ctx["file_rel"], p):
+                _mrp, _lpp = _vb_src(ctx["file_rel"], p)   # 合并书:其余可见页同理
+                if _pdfm._page_ink_strokes(_mrp, _lpp):
                     inked_pages.append(p)
                     if not circled:
-                        circled = _clean_tag(_pdfm._text_under_ink(ctx["file_rel"], p))
+                        circled = _clean_tag(_pdfm._text_under_ink(_mrp, _lpp))
         except Exception:
             pass
         has_fe_ink = bool(ctx.get("ink"))
@@ -6172,6 +6302,7 @@ def assistant_voice_ctx():
         page = 0
     strokes = body.get("strokes") or None
     inked, figs, has_ink, vocab = "", [], False, []
+    file_rel, page = _vb_src(file_rel, page)   # 合并书:语音直塞上下文也走真成员(第三通道)
     if file_rel.lower().endswith(".epub"):   # ㉟:圈画/生词提取全按 PDF 页渲染,epub 无意义→干净空结构(页文本另有 page-text 分流)
         return jsonify({"ok": True, "inked_text": "", "figures": [], "has_ink": False, "vocab": []})
     if file_rel and page:

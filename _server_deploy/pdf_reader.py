@@ -111,6 +111,7 @@ except Exception:
 # ══════════ 转换层v2·服务端咽喉(第3步):vbook: 引用在此被翻译/直通/拒绝,handler 零感知 ══════════
 _VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events"}
 _VB_ADAPTED = {"pdf_reader.pdf_view", "pdf_reader.pdf_api_book_meta",
+               "pdf_reader.pdf_api_translate_sentence", "pdf_reader.pdf_api_sentence_dismiss",
                "pdf_reader.pdf_api_highlights_list", "pdf_reader.pdf_api_highlights_update",
                "pdf_reader.pdf_api_highlights_delete", "pdf_reader.pdf_api_notes",
                "pdf_reader.pdf_api_userpages", "pdf_reader.pdf_api_search",
@@ -143,7 +144,29 @@ def _vbook_gate():
     ep = request.endpoint or ""
     if ep in _VB_VIEW_OK or ep in _VB_ADAPTED:
         return None
-    if _VB_POLICY.get(ep) != "PAGE":
+    _pol = _VB_POLICY.get(ep)
+    if _pol == "BOOK_REP":
+        # 书级 sidecar(语法跟踪/历史/缓存键):不碰页内容,整组归一到**代表卷** rel——
+        # 无论从 vbook 还是从某一卷直接打开,读写的都是同一份配置。
+        try:
+            if body is not None:
+                body["file"] = VB.get(str(body.get("file")))["members"][0]["rel"]
+            if q_hit:
+                import urllib.parse as _up2
+                _pairs = _up2.parse_qsl(qs, keep_blank_values=True)
+                if VB.is_view_ref(dict(_pairs).get("file", "")):
+                    _rep = VB.get(dict(_pairs)["file"])["members"][0]["rel"]
+                    _out = [(k, _rep if k == "file" else v) for k, v in _pairs]
+                    _rq = request._get_current_object()
+                    _nq = _up2.urlencode(_out)
+                    _rq.environ["QUERY_STRING"] = _nq
+                    _rq.__dict__["query_string"] = _nq.encode("latin-1")
+                    for _a in ("args", "values", "full_path", "url"):
+                        _rq.__dict__.pop(_a, None)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        return None
+    if _pol != "PAGE":
         return jsonify({"ok": False, "error": "vbook_unadapted", "endpoint": ep,
                         "note": "该端点尚未适配合并书(fail-closed,防静默写错卷)"}), 501
     try:
@@ -10440,11 +10463,22 @@ def pdf_api_sentence_dismiss():
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     text = (data.get("text") or "").strip()
-    if not rel or _safe_vault_path(rel) is None or not text:
+    if not text:
         return jsonify({"ok": False, "error": "invalid"}), 400
-    _dismiss_add(rel, text)
-    try: _tr_delete(rel, text)
-    except Exception: pass
+    if VB is not None and VB.is_view_ref(rel):
+        # 合并书:请求没带页,句子在哪一卷不确定 → 逐卷登记(按文本匹配,幂等;只在真含该句的卷生效)
+        try:
+            rels = [m["rel"] for m in VB.get(rel)["members"]]
+        except VB.VbookError as e:
+            return _vb_err(e)
+    else:
+        if not rel or _safe_vault_path(rel) is None:
+            return jsonify({"ok": False, "error": "invalid"}), 400
+        rels = [rel]
+    for _r in rels:
+        _dismiss_add(_r, text)
+        try: _tr_delete(_r, text)
+        except Exception: pass
     return jsonify({"ok": True})
 
 
@@ -10475,7 +10509,16 @@ def pdf_api_translate_sentence():
             file_rel = data.get("file") or ""
             if file_rel and isinstance(sent, dict) and sent.get("rects"):
                 sent = dict(sent); sent["text"] = text; sent["zh"] = zh; sent["manual"] = True
-                _tr_save_one(file_rel, sent)
+                if VB is not None and VB.is_view_ref(file_rel):
+                    # 合并书:译文 sidecar 存进句子真正所在那一卷(几何/页码都是该卷的局部坐标)
+                    try:
+                        file_rel, _lp = VB.resolve_view(file_rel, sent.get("page") or 1)
+                        if sent.get("page"):
+                            sent["page"] = _lp
+                    except VB.VbookError:
+                        file_rel = ""
+                if file_rel:
+                    _tr_save_one(file_rel, sent)
             return jsonify({"ok": True, "zh": zh})
         return jsonify({"ok": False, "error": "translation failed (no result)"})
     except Exception as ex:

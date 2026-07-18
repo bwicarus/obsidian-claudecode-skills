@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """vbook_route_policy.py — 转换层v2 第2步:/pdf 域**运行时全量**路由的 vbook 策略声明。
-策略:PAGE=逐页翻译 BOOK_FANIN=列表扇入 MEMBER_REQUIRED=必须真成员/逐卷 JOB_OR_RANGE=任务/流
+策略:PAGE=逐页翻译 BOOK_REP=书级 sidecar 归一到代表卷(整组共享一份配置/历史) BOOK_FANIN=列表扇入
+MEMBER_REQUIRED=必须真成员/逐卷 JOB_OR_RANGE=任务/流
 GLOBAL=与合并无关 EPUB=非PDF域 NONE=静态杂项。**新增路由必须登记**,tests/test_vbook_route_policy 强制。
 来源=app.url_map 运行时导出(静态扫描会漏 add_url_rule 动态注册——首跑即实锤截断漏 19+ 条)。"""
 
@@ -65,14 +66,14 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_formula_ocr_status': 'PAGE',   # /pdf/api/formula-ocr-status
     'pdf_reader.pdf_api_furigana_verify': 'PAGE',   # /pdf/api/furigana-verify
     'pdf_reader.pdf_api_global_search': 'PAGE',   # /pdf/api/global-search
-    'pdf_reader.pdf_api_grammar_analyze': 'GLOBAL',   # /pdf/api/grammar-analyze
+    'pdf_reader.pdf_api_grammar_analyze': 'BOOK_REP',   # /pdf/api/grammar-analyze
     'pdf_reader.pdf_api_grammar_books': 'GLOBAL',   # /pdf/api/grammar-books
-    'pdf_reader.pdf_api_grammar_forget': 'GLOBAL',   # /pdf/api/grammar-forget
-    'pdf_reader.pdf_api_grammar_history': 'GLOBAL',   # /pdf/api/grammar-history
-    'pdf_reader.pdf_api_grammar_history_save': 'GLOBAL',   # /pdf/api/grammar-history-save
+    'pdf_reader.pdf_api_grammar_forget': 'BOOK_REP',   # /pdf/api/grammar-forget
+    'pdf_reader.pdf_api_grammar_history': 'BOOK_REP',   # /pdf/api/grammar-history
+    'pdf_reader.pdf_api_grammar_history_save': 'BOOK_REP',   # /pdf/api/grammar-history-save
     'pdf_reader.pdf_api_grammar_nodes': 'GLOBAL',   # /pdf/api/grammar-nodes
-    'pdf_reader.pdf_api_grammar_stream': 'GLOBAL',   # /pdf/api/grammar-stream
-    'pdf_reader.pdf_api_grammar_tracked': 'GLOBAL',   # /pdf/api/grammar-tracked
+    'pdf_reader.pdf_api_grammar_stream': 'BOOK_REP',   # /pdf/api/grammar-stream
+    'pdf_reader.pdf_api_grammar_tracked': 'BOOK_REP',   # /pdf/api/grammar-tracked
     'pdf_reader.pdf_api_highlight_text': 'PAGE',   # /pdf/api/highlight-text
     'pdf_reader.pdf_api_highlights_create': 'PAGE',   # /pdf/api/highlights
     'pdf_reader.pdf_api_highlights_delete': 'PAGE',   # /pdf/api/highlights
@@ -123,7 +124,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_run_status': 'JOB_OR_RANGE',   # /pdf/api/run-status
     'pdf_reader.pdf_api_sandbox': 'JOB_OR_RANGE',   # /pdf/api/sandbox
     'pdf_reader.pdf_api_search': 'BOOK_FANIN',   # /pdf/api/search
-    'pdf_reader.pdf_api_sentence_dismiss': 'GLOBAL',   # /pdf/api/sentence-dismiss
+    'pdf_reader.pdf_api_sentence_dismiss': 'BOOK_FANIN',   # /pdf/api/sentence-dismiss
     'pdf_reader.pdf_api_sentence_harvest': 'BOOK_FANIN',   # /pdf/api/sentence-cards/harvest
     'pdf_reader.pdf_api_sentence_status': 'BOOK_FANIN',   # /pdf/api/sentence-cards/status
     'pdf_reader.pdf_api_snippets_to': 'PAGE',   # /pdf/api/snippets-to
@@ -133,7 +134,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_toolshot': 'JOB_OR_RANGE',   # /pdf/api/toolshot/<name>
     'pdf_reader.pdf_api_translate': 'PAGE',   # /pdf/api/translate
     'pdf_reader.pdf_api_translate_config': 'GLOBAL',   # /pdf/api/translate-config
-    'pdf_reader.pdf_api_translate_sentence': 'GLOBAL',   # /pdf/api/translate-sentence
+    'pdf_reader.pdf_api_translate_sentence': 'BOOK_FANIN',   # /pdf/api/translate-sentence
     'pdf_reader.pdf_api_upload': 'MEMBER_REQUIRED',   # /pdf/api/upload
     'pdf_reader.pdf_api_userpages': 'PAGE',   # /pdf/api/userpages
     'pdf_reader.pdf_api_video_player_prefs': 'GLOBAL',   # /pdf/api/video-player-prefs

@@ -10,7 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "_server_deploy"))
 
-ALLOWED = {"PAGE", "BOOK_FANIN", "ID_ROUTED", "MEMBER_REQUIRED", "JOB_OR_RANGE", "GLOBAL", "NONE", "EPUB"}
+ALLOWED = {"PAGE", "BOOK_REP", "BOOK_FANIN", "ID_ROUTED", "MEMBER_REQUIRED", "JOB_OR_RANGE",
+           "GLOBAL", "NONE", "EPUB"}
 
 
 class RoutePolicyComplete(unittest.TestCase):
