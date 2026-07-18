@@ -32,6 +32,8 @@ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#0a
 svg.canvas{display:block}
 /* 节点 */
 .tile{cursor:pointer}
+.tile.emergent .tbox{stroke:#a78bfa;stroke-width:2;stroke-dasharray:4 3}  /* emergent=你笔记自动长出的概念(紫虚线) */
+.tile.emergent .tname{fill:#c4b5fd}
 /* 瓶颈节点角标 💎（bottleneck_score >= 阈值时显示）*/
 .tile text.bottleneck-mark{display:none;font-size:12px;pointer-events:none;user-select:none}
 .tile.is-bottleneck text.bottleneck-mark{display:block}
@@ -1058,7 +1060,8 @@ function tileClass(d, focusedId){
   // 建议归档（未归档但被规则标记）—— 节点边缘金色虚线
   const suggested = (!inTrash && (KG && KG._archive_suggestions || []).includes(d.id)) ? ' archive-suggested' : '';
   const engaged = (d.level===2 && (d.engaged||0) > 0.15) ? ' engaged' : '';   // C:参与度光晕
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}${suggested}${engaged}`;
+  const emergent = d.origin === "emergent" ? ' emergent' : '';   // 你笔记自动长出的概念(紫虚线)
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}${suggested}${engaged}${emergent}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用

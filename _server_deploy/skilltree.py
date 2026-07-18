@@ -814,6 +814,23 @@ def register_skilltree(app):
                 msg += f"；PDF 删除失败: {ex}"
         return jsonify({"ok": True, "info": msg, "archived": archived.name})
 
+    @app.route("/skilltree/unified/")
+    def skilltree_unified_view():
+        """统一知识网络(用户设计:新 emergent 图为主体 + authored 折入,一张跨书大网)。复用 skilltree.html。"""
+        return render_template("skilltree.html", book="unified")
+
+    @app.route("/skilltree/unified/data.json")
+    def skilltree_unified_data():
+        try:
+            sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
+            import build_unified_graph as _BUG
+            return jsonify(_BUG.build(write=False))
+        except Exception as e:
+            p2 = CLAUDE_DIR / "state" / "attention" / "unified-graph.json"
+            if p2.exists():
+                return jsonify(json.loads(p2.read_text("utf-8")))
+            return jsonify({"error": "unified graph unavailable: %s" % str(e)[:80]}), 500
+
     @app.route("/skilltree/<book>/")
     def skilltree_view(book):
         p = _kg_path(book)
