@@ -435,6 +435,33 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
     return made
 
 
+def detect_only():
+    """quick_sync 用:零 AI 评估注意力榜哪些词过门,落 state/attention/autonote-candidates.json 供观察。"""
+    vocab = PC._vocab_set()
+    reg = _load_codes()
+    try:
+        focus = json.loads(FOCUS.read_text("utf-8")).get("top", [])[:TOP_N]
+    except Exception:
+        focus = []
+    try:
+        pos = json.loads(POSITIONS.read_text("utf-8"))
+    except Exception:
+        pos = {}
+    out = []
+    for row in focus:
+        refs = row.get("refs") or []
+        book = refs[0]["file"] if refs else ""
+        if not book or not book.lower().endswith(".pdf"):
+            continue
+        ok, blocks = _gates(row["term"], book, vocab, reg, focus_row=row)
+        out.append({"term": row["term"], "book": book, "pass": ok, "blocks": blocks})
+    fp = STATE / "attention" / "autonote-candidates.json"
+    fp.write_text(json.dumps({"ts": int(time.time()), "candidates": out}, ensure_ascii=False, indent=1), "utf-8")
+    n_pass = sum(1 for x in out if x["pass"])
+    print("autonote 候选:%d 词评估,%d 过门" % (len(out), n_pass))
+    return out
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
@@ -442,5 +469,9 @@ if __name__ == "__main__":
     ap.add_argument("--force-term")
     ap.add_argument("--book")
     ap.add_argument("--page", type=int)
+    ap.add_argument("--detect-only", action="store_true", help="零AI:只评估门控落候选文件(quick_sync 用)")
     a = ap.parse_args()
+    if a.detect_only:
+        detect_only()
+        sys.exit(0)
     run(dry=not a.run, force_term=a.force_term, force_book=a.book, force_page=a.page)

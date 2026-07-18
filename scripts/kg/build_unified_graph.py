@@ -112,12 +112,18 @@ def build(write=False):
                       "availability": "open", "mastered": False, "unlocked": True,
                       "origin": "emergent", "book": "", "subject": subj, "confirmed": _cf,
                       "provenance": n.get("provenance", [])})
+    conf_edges = conf.get("edges", {})
     for e in g.get("edges", []):
         fu, tu = key2uid.get(e["from"]), key2uid.get(e["to"])
         if not fu or not tu or fu == tu:
             continue
+        ov = conf_edges.get("%s|%s|%s" % (e["from"], e["to"], e.get("kind", "prereq")))
+        if ov is False:
+            continue                      # 用户否决 → 不进统一图
         edges.append({"from": fu, "to": tu, "kind": e.get("kind", "prereq"), "level": 2,
-                      "evidence": e.get("reason", ""), "origin": "emergent", "confirmed": None})
+                      "evidence": e.get("quote") or e.get("reason", ""), "origin": "emergent",
+                      "status": e.get("status", "auto"),
+                      "confirmed": True if ov else (e.get("status") == "audited" or None)})
 
     # 去重边
     seen = set(); ded = []

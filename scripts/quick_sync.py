@@ -111,6 +111,11 @@ def main() -> int:
     rc |= run("attention_profile", [
         PYTHON, str(PROJECT_DIR / "scripts" / "attention_profile.py"),
     ])
+    # 4. v3-D:autonote 候选检测(零 AI):评估注意力榜哪些词过门,落 autonote-candidates.json 供观察
+    rc |= run("autonote 候选检测", [
+        PYTHON, str(PROJECT_DIR / "scripts" / "kg" / "propose_concept_notes.py"), "--detect-only",
+    ])
+
     return rc
 
 

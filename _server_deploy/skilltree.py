@@ -847,11 +847,13 @@ def register_skilltree(app):
             conf = json.loads(cp.read_text("utf-8"))
         except Exception:
             conf = {"nodes": {}, "edges": {}}
-        conf.setdefault("nodes", {})
+        # v3-D:key 形如 "from|to|kind" = 边 override(用户随手纠错,审计不再动它);否则节点
+        bucket = "edges" if key.count("|") == 2 else "nodes"
+        conf.setdefault(bucket, {})
         if confirmed is None:
-            conf["nodes"].pop(key, None)
+            conf[bucket].pop(key, None)
         else:
-            conf["nodes"][key] = confirmed
+            conf[bucket][key] = confirmed
         cp.parent.mkdir(parents=True, exist_ok=True)
         tmp = cp.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(conf, ensure_ascii=False, indent=1), "utf-8")
