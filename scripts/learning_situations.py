@@ -35,6 +35,7 @@ CHECK_LOW = 0.5         # 自测正确率 < 此 → 低分触发
 RESOLVE_CORRECT_N = 2   # 困难卡最近连续答对 ≥ 此 → 消解
 STALE_DAYS = 30         # 近况 N 天没动静 → archived(兴趣消退)
 REVISIT_MIN_DAYS = 7    # resolved 至少过 N 天才考虑遗忘回访
+RESOLVE_QUIZ_RATIO = 0.7  # 自测/诊断卷该知识点 ≥ 此正确率 → 视为「及格」可消解(R3-G3)
 CTX_RECENT = 3          # 注入:最近 active 条数(recency)
 CTX_REL = 4             # 注入:语境检索条数(relevance)
 
@@ -252,8 +253,42 @@ def analyze(uid="1", limit=6):
 
 
 # ── 消解(行为对称,不用 AI) ─────────────────────────────────────────────────
+def _load_check_reports_ls(uid):
+    """读某用户的检查报告(daily 子进程里 assistant 不在 path,直接读文件)。"""
+    try:
+        _cr = Path(PROJECT_DIR) / "state" / "reader-check-reports" / ("%s.json" % uid)
+        return json.loads(_cr.read_text("utf-8"))
+    except Exception:
+        return []
+
+
+def _report_resolves_key(rp, skey, ratio):
+    """一份检查报告是否构成对 concept(norm_key=skey)的『及格』证据(自测及格腿)。
+    A) node_results 精确:某节点名 norm_key 命中 + 该节点正确率≥ratio;
+    B) 整卷 score + 报告名派生 concept 命中且整卷≥ratio。"""
+    for e in (rp.get("node_results") or {}).values():
+        tot = e.get("total") or 0
+        if not tot:
+            continue
+        nk = AP.norm_key(e.get("name") or "") or (e.get("name") or "")
+        if nk and (nk == skey or nk in skey or skey in nk):
+            if (e.get("correct") or 0) / tot >= ratio:
+                return True
+    m = re.match(r"(\d+)\s*/\s*(\d+)", str(rp.get("score") or ""))
+    if m:
+        got, tot = int(m.group(1)), int(m.group(2))
+        if tot and got / tot >= ratio:
+            terms = AP.extract_terms(str(rp.get("name") or ""))
+            if terms:
+                nk = AP.norm_key(terms[0]) or terms[0]
+                if nk and (nk == skey or nk in skey or skey in nk):
+                    return True
+    return False
+
+
 def detect_resolutions(uid="1"):
-    """困难卡转连续答对 / 自测及格 → resolved;久无动静 → archived。留档不删。"""
+    """困难卡转连续答对 / 自测及格 → resolved;**消解不了且久无动静** → archived。留档不删。
+    R3-G3:先试两条消解腿(连对 / 自测及格),都不成立再判归档——否则刚连对/及格的会被 stale 抢先归档。"""
     lst = _sit_load(uid)
     now = _now()
     res = arch = 0
@@ -263,16 +298,12 @@ def detect_resolutions(uid="1"):
             con = sqlite3.connect("file:%s?mode=ro&immutable=1" % ANKI_DB, uri=True)
         except Exception:
             con = None
+    reports = _load_check_reports_ls(uid)
     for s in lst:
         if s["status"] != "active":
             continue
-        # 兴趣消退
-        if now - s["updated"] > STALE_DAYS * 86400:
-            s["status"] = "archived"
-            s.setdefault("history", []).append({"ts": now, "ev": "%d天没动静→归档" % STALE_DAYS})
-            arch += 1
-            continue
-        # 困难卡最近连续答对
+        resolved = False
+        # 消解腿1:困难卡最近连续答对
         cids = [int(r.split(":")[1]) for r in s.get("refs", []) if r.startswith("anki:")]
         if cids and con:
             ok = True
@@ -284,9 +315,35 @@ def detect_resolutions(uid="1"):
                     break
             if ok:
                 s["status"] = "resolved"
-                s["resolved_at"] = now   # 审查 #5:回访按 resolved_at 判,不用旧 updated
+                s["resolved_at"] = now
                 s.setdefault("history", []).append({"ts": now, "ev": "困难卡连对%d次→解决" % RESOLVE_CORRECT_N})
                 res += 1
+                resolved = True
+        # 消解腿2:自测及格(诊断卷该知识点通过,且是超水位的新证据)
+        if not resolved and reports:
+            wm = s.setdefault("last_evidence", {}).get("check_pass", 0)
+            best_ts = 0
+            for rp in reports:
+                if rp.get("sandbox"):
+                    continue
+                ts = int(rp.get("ts") or 0)
+                if ts <= wm:
+                    continue
+                if _report_resolves_key(rp, s["key"], RESOLVE_QUIZ_RATIO):
+                    best_ts = max(best_ts, ts)
+            if best_ts:
+                s["last_evidence"]["check_pass"] = best_ts
+                s["status"] = "resolved"
+                s["resolved_at"] = now
+                s.setdefault("history", []).append(
+                    {"ts": now, "ev": "自测及格(≥%d%%)→解决" % int(RESOLVE_QUIZ_RATIO * 100)})
+                res += 1
+                resolved = True
+        # 归档腿:两条消解腿都不成立 + 久无动静(放最后,别抢在消解前)
+        if not resolved and now - s["updated"] > STALE_DAYS * 86400:
+            s["status"] = "archived"
+            s.setdefault("history", []).append({"ts": now, "ev": "%d天没动静→归档" % STALE_DAYS})
+            arch += 1
     if con:
         con.close()
     _sit_save(uid, lst)
@@ -383,6 +440,13 @@ def detect_revisits(uid="1"):
         con = sqlite3.connect("file:%s?mode=ro&immutable=1" % ANKI_DB, uri=True)
     except Exception:
         return {"revisit": 0}
+    # 借 Anki 权威调度:读 collection 创建时间算 today 天号(复习卡 due 是天号)
+    try:
+        _crt = con.execute("SELECT crt FROM col LIMIT 1").fetchone()
+        crt = int(_crt[0]) if _crt else 0
+    except Exception:
+        crt = 0
+    today = int((now - crt) // 86400) if crt else 0
     for s2 in lst:
         if s2.get("status") != "resolved":   # 去掉 trigger==revisit 永久跳过 → resolved 可被重复回访(审查)
             continue
@@ -392,18 +456,25 @@ def detect_revisits(uid="1"):
         overdue = False
         for cid in cids:
             try:
-                row = con.execute("SELECT ivl FROM cards WHERE id=?", (cid,)).fetchone()
-                last = con.execute("SELECT MAX(id) FROM revlog WHERE cid=?", (cid,)).fetchone()
+                row = con.execute("SELECT queue, due FROM cards WHERE id=?", (cid,)).fetchone()
             except Exception:
                 continue
-            if not row or not last or not last[0]:
+            if not row:
                 continue
-            ivl_days = max(1, int(row[0]))          # cards.ivl>0=天;<0=秒(学习中),兜底成 1 天
-            if now > last[0] / 1000.0 + ivl_days * 86400:
-                overdue = True
-                break
+            q, due = int(row[0]), int(row[1])
+            # R3-G3(a):用 queue/due 权威判到期(替代 last+ivl 近似,不再把没到期的拉回)。
+            # queue=2 复习卡 / 3 日学习:due 是天号,≤today 到期;1 学习中:due 是时间戳,≤now 到期。
+            # queue≤0(新/挂起/埋)不算「遗忘到期」。
+            if q in (2, 3):
+                if due <= today:
+                    overdue = True
+                    break
+            elif q == 1:
+                if due <= now:
+                    overdue = True
+                    break
         if overdue:
-            days = int((now - s2.get("updated", now)) / 86400)
+            days = int((now - (s2.get("resolved_at") or s2.get("updated", now))) / 86400)  # R3-G3(d):按 resolved_at
             s2["status"] = "active"
             s2["trigger"] = "revisit"
             s2["reason"] = "遗忘回访:掌握 %d 天了、Anki 判定该复习" % days

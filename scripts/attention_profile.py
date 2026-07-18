@@ -455,7 +455,7 @@ def extract_terms(text, hint="", lang=None):
     return _dedup_nest(out, text)[:60]
 
 
-MENTION_VER = 1        # mention 抽取器版本(改就 +1;event_mentions.mver 记录)
+MENTION_VER = 2        # mention 抽取器版本(改就 +1;event_mentions.mver 记录)。v2:词边界+build传lang+空哨兵+同基线打分
 
 
 def _mention_lang(term, lang):
@@ -506,12 +506,21 @@ def extract_mentions(text, hint="", lang=None):
         tlow = t.lower()
         if not tlow:
             continue
+        # R3-G4:拉丁词(纯 ASCII 字母数字)按**词边界**匹配,否则 "tip" 会命中进 "mulTIPlication";
+        #        CJK 词无词边界概念,保持子串匹配(合成词/复合词靠 span+parent 处理)。
+        is_latin = bool(re.fullmatch(r"[a-z0-9][a-z0-9'\-]*", tlow))
         pos = 0
         while True:
             i = tl.find(tlow, pos)
             if i < 0:
                 break
             j = i + len(tlow)
+            if is_latin:
+                before_bad = i > 0 and (tl[i - 1].isalnum() and ord(tl[i - 1]) < 128)
+                after_bad = j < len(tl) and (tl[j].isalnum() and ord(tl[j]) < 128)
+                if before_bad or after_bad:
+                    pos = i + 1     # 边界不成立,从下一位继续找
+                    continue
             parent = next((c[2] for c in claimed if c[0] <= i and j <= c[1] and (c[1] - c[0]) > (j - i)), None)
             out.append({"s": t, "start": i, "end": j, "lang": _mention_lang(t, lang),
                         "method": _mention_method(t), "conf": _mention_conf(t), "parent": parent})
@@ -596,15 +605,21 @@ def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hin
 def build_mentions(c, only_new=True):
     """★mention 双写 pass(增量,审查采纳):从 events.text 生成 event_mentions,**不动 events.terms/打分**。
     幂等可反复跑;only_new=True 只补缺失或 mver 过旧的事件。返回处理事件数。"""
-    rows = c.execute("SELECT src_key, text FROM events WHERE text IS NOT NULL AND text != ''").fetchall()
+    rows = c.execute("SELECT src_key, text, file, channel FROM events "
+                     "WHERE text IS NOT NULL AND text != ''").fetchall()
     done = 0
-    for src_key, text in rows:
+    for src_key, text, file, channel in rows:
         if only_new:
             r = c.execute("SELECT MAX(mver) FROM event_mentions WHERE src_key=?", (src_key,)).fetchone()
             if r and r[0] is not None and int(r[0]) >= MENTION_VER:
                 continue
-        ms = extract_mentions(text)
+        # R3-G4:传 file 派生语言(与 add_event 同源),否则日语 mention 被误标 zh
+        ms = extract_mentions(text, hint="", lang=_book_lang(file))
         c.execute("DELETE FROM event_mentions WHERE src_key=?", (src_key,))
+        # R3-G4:水位哨兵行(idx=-1,空 surface)——即使 0 mention 也标已处理,
+        #        否则 MAX(mver)=None 每次 quick-sync 都重抽这些事件。打分时按空 surface 跳过。
+        c.execute('INSERT INTO event_mentions(src_key,idx,surface,start,"end",lang,method,conf,parent,mver)'
+                  ' VALUES(?,?,?,?,?,?,?,?,?,?)', (src_key, -1, "", 0, 0, "", "", 0.0, None, MENTION_VER))
         for idx, m in enumerate(ms):
             c.execute('INSERT INTO event_mentions(src_key,idx,surface,start,"end",lang,method,conf,parent,mver)'
                       ' VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -619,7 +634,7 @@ MENTION_CHILD_W = 0.3   # 子词(落在长词内)贡献降权:合成词满记,�
 
 def focus_from_mentions(top=40, now=None):
     """★mention 打分器(审查 step 3):与 rebuild_profile 并行,读 event_mentions 而非 set(terms)。
-    与老打分器的差别 = **多次独立出现各算** + **父词满记/子词降权**(合成词计数正确)。同款 半衰期×IDF×饱和。
+    与老打分器**同基线**(events.weight × 1/√N × day_sat × 半衰期 × IDF);差异**只剩** 多次独立出现各算 + 父词满记/子词降权。
     返回 [{term, key, score, n}],供与老 focus.json 对账;**不写文件、不替换**老路径。"""
     import math
     from collections import defaultdict, Counter
@@ -632,17 +647,28 @@ def focus_from_mentions(top=40, now=None):
     books = defaultdict(set)
     all_books = set()
     ev_seen = defaultdict(int)   # (key, src_key) -> 该事件内第几次(事件内重复饱和,压"我们/原文"这种刷屏)
-    rows = c.execute("""SELECT e.ts, e.channel, e.file, m.surface, m.parent, m.src_key
+    rows = c.execute("""SELECT e.ts, e.channel, e.file, e.weight, e.terms, m.surface, m.parent, m.src_key
                         FROM event_mentions m JOIN events e ON e.src_key = m.src_key""").fetchall()
-    for ts, ch, file, surface, parent, src_key in rows:
+    # ★与老打分器同基线(R3-G4):每个事件 N = distinct terms 数(events.terms),1/√N 稀释完全一致。
+    ev_N = {}
+    for r in rows:
+        sk = r[7]
+        if sk not in ev_N:
+            try:
+                ev_N[sk] = max(1, len(set(json.loads(r[4]) or [])))
+            except Exception:
+                ev_N[sk] = 1
+    for ts, ch, file, weight, _terms_j, surface, parent, src_key in rows:
         if not surface:
             continue
         k = norm_key(surface) or surface
         dt_d = max(0.0, (now - ts) / 86400.0)
         day = int(ts // 86400)
         ev_seen[(k, src_key)] += 1
-        ev_sat = 1.0 / (1.0 + 0.5 * (ev_seen[(k, src_key)] - 1))       # 事件内第 n 次:1 / 0.67 / 0.5 …
-        base = W.get(ch, 1.0) * (MENTION_CHILD_W if parent else 1.0) * ev_sat   # 父词满记、子词降权、事件内饱和
+        ev_sat = 1.0 / (1.0 + 0.5 * (ev_seen[(k, src_key)] - 1))       # 事件内同词第 n 次:1/0.67/0.5(多次各算但递减)
+        w0 = float(weight if weight is not None else W.get(ch, 1.0))   # ★同老:用 events.weight(尊重 per-event 权重,如 dwell)
+        dilut = 1.0 / math.sqrt(ev_N.get(src_key, 1))                  # ★同老:事件内 1/√N 稀释(防长报告/长提问轰炸)
+        base = w0 * dilut * (MENTION_CHILD_W if parent else 1.0) * ev_sat   # 差异只剩:多次出现各算 + 父词满记/子词降权
         day_seen[(k, day)] += 1
         sat = 1.0 / (1.0 + 0.3 * (day_seen[(k, day)] - 1))
         S_s[k] += base * sat * (2 ** (-dt_d / HALF_SHORT_D))
@@ -1120,7 +1146,7 @@ def ensure_fresh(c=None, force=False):
     own = c is None
     c = c or _db()
     try:
-        cur = _sources_fp() + "|x%d" % EXTRACTOR_VER
+        cur = _sources_fp() + "|x%d|m%d" % (EXTRACTOR_VER, MENTION_VER)   # R3-G4:MENTION_VER 也进指纹
         row = c.execute("SELECT v FROM meta WHERE k='sources_fp'").fetchone()
         if not force and row and row[0] == cur:
             return {"fresh": True, "imported": 0, "took_s": 0.0}

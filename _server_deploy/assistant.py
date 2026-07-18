@@ -4018,14 +4018,104 @@ def _t_mastery_proposal(args, ctx):
             "怎么用": "把提案讲给用户。用户确认要把某个『标为已掌握』→ 调 apply_mastery(node=该 node id, mastery=0.9)。不确认不要改。"}
 
 
+def _recompute_book_mastery(book):
+    """R3-G2 即时重算:override 写完后 detached 跑 link_and_mastery(读磁盘 records,不连 Anki)。"""
+    try:
+        import subprocess as _sp
+        kg_path = CLAUDE_DIR / "knowledge_graph" / ("%s.json" % book)
+        script = CLAUDE_DIR / "scripts" / "kg" / "link_and_mastery.py"
+        if not kg_path.exists() or not script.exists():
+            return
+        env = os.environ.copy()
+        env.setdefault("CLAUDE_PROJECT", str(CLAUDE_DIR))
+        logp = CLAUDE_DIR / "state" / "logs" / "kg_edit_recompute.log"
+        logp.parent.mkdir(parents=True, exist_ok=True)
+        with logp.open("ab") as lf:
+            _sp.Popen(["/usr/bin/python3", str(script), "--kg", str(kg_path), "--in-place"],
+                      env=env, stdout=lf, stderr=_sp.STDOUT, start_new_session=True)
+    except Exception:
+        pass
+
+
+def _mastery_proposal_backed(uid, nid, mastery):
+    """R3-G2 软背书:标已掌握(≥0.8)最好来自最近诊断卷该节点满分;<0.8 一律视为通过。
+    容错匹配 node_results 键(bare nid 或 kg:书#nid),兼容 assistant/skilltree 两种格式。"""
+    try:
+        if float(mastery) < 0.8:
+            return True
+    except Exception:
+        return False
+    try:
+        reports = _check_reports_load(uid)
+    except Exception:
+        return False
+    suffix = "#" + nid
+    for r in reversed(reports):
+        if r.get("sandbox"):
+            continue
+        for k, e in (r.get("node_results") or {}).items():
+            if k == nid or k.endswith(suffix):
+                tot = e.get("total") or 0
+                cor = e.get("correct") or 0
+                if tot and cor / tot >= 1.0:
+                    return True
+    return False
+
+
 def _t_apply_mastery(args, ctx):
     """**用户确认后**把某知识点的掌握度写进 KG override(1d/②)。**只有用户明确同意才调**,别自己决定。
-    args {node: kg 节点 id(如 kg:LADR#..), mastery: 0~1(标已掌握用 0.9), reason?}。改错了可撤销(告诉用户找我 remove)。"""
+    args {node: kg 节点 id(如 kg:LADR#..), mastery: 0~1(标已掌握用 0.9), reason?}。改错了可撤销(告诉用户找我 remove)。
+    R3-G2:硬校验 0≤mastery≤1 + 节点必须真存在;软校验诊断背书(决定 source 标签);写完即时重算。"""
     node = str(args.get("node") or "").strip()
     try:
         mastery = float(args.get("mastery"))
     except Exception:
         return {"error": "mastery 要是 0~1 的数(标已掌握用 0.9)"}
+    if not (0.0 <= mastery <= 1.0):
+        return {"error": "mastery 必须在 0~1 之间"}
+    if not node.startswith("kg:") or "#" not in node:
+        return {"error": "node 要是 kg:书#节点id 形式"}
+    book, nid = node[3:].split("#", 1)
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
+    try:
+        import attention_profile as AP
+        _nodes = AP._kg_all()["nodes"]
+    except Exception:
+        _nodes = {}
+    if nid not in _nodes:
+        return {"error": "节点不存在:%s(先确认 node id 对不对,别改不存在的节点)" % node}
+    uid = str((ctx or {}).get("_uid") or "")
+    _backed = _mastery_proposal_backed(uid, nid, mastery)
+    try:
+        import mastery_overrides as MO
+        MO.set_override(book, nid, mastery,
+                        source=("diagnostic" if _backed else "chat-manual"),
+                        reason=(args.get("reason") or ("诊断卷确认" if _backed else "对话确认")))
+    except Exception as e:
+        return {"error": "写 override 失败:%s" % str(e)[:80]}
+    _recompute_book_mastery(book)   # R3-G2:即时重算,override 沿 DAG 传播
+    _resolved = ""
+    try:
+        import learning_situations as LS
+        nm = (_nodes.get(nid) or {}).get("name") or ""
+        if nm and mastery >= 0.8:
+            fb = LS.feedback(uid, nm, "understood")
+            if fb.get("ok"):
+                _resolved = nm
+    except Exception:
+        pass
+    return {"已确认": node, "掌握度": mastery,
+            "note": "已写入 KG 掌握度 override 并触发重算(下次 daily 也不覆盖)。"
+                    + ("" if _backed else "(注:这条非诊断卷满分背书,按你的对话确认改的。)")
+                    + (("相关学习近况「%s」已转已解决。" % _resolved) if _resolved else "")}
+
+
+def _t_remove_mastery(args, ctx):
+    """**用户确认后**撤销某知识点的掌握度 override,回到 Anki 反算的自然掌握度(可逆)。
+    只有用户明确要求撤销才调。args {node: kg 节点 id(如 kg:LADR#..)}。R3-G2:撤销即时重算,清徽标。"""
+    node = str(args.get("node") or "").strip()
     if not node.startswith("kg:") or "#" not in node:
         return {"error": "node 要是 kg:书#节点id 形式"}
     book, nid = node[3:].split("#", 1)
@@ -4034,23 +4124,14 @@ def _t_apply_mastery(args, ctx):
     _sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
     try:
         import mastery_overrides as MO
-        MO.set_override(book, nid, mastery, source="diagnostic", reason=(args.get("reason") or "诊断卷确认"))
+        gone = MO.remove(book, nid)
     except Exception as e:
-        return {"error": "写 override 失败:%s" % str(e)[:80]}
-    _resolved = ""
-    try:
-        import attention_profile as AP
-        import learning_situations as LS
-        nm = (AP._kg_all()["nodes"].get(nid) or {}).get("name") or ""
-        if nm and mastery >= 0.8:
-            fb = LS.feedback(str((ctx or {}).get("_uid") or ""), nm, "understood")
-            if fb.get("ok"):
-                _resolved = nm
-    except Exception:
-        pass
-    return {"已确认": node, "掌握度": mastery,
-            "note": "已写入 KG 掌握度 override(下次 daily 重算也不会被覆盖)。"
-                    + (("相关学习近况「%s」已转已解决。" % _resolved) if _resolved else "")}
+        return {"error": "撤销失败:%s" % str(e)[:80]}
+    if not gone:
+        return {"note": "该节点本来就没有 override,无需撤销。"}
+    _recompute_book_mastery(book)
+    return {"已撤销": node, "原override": gone.get("mastery"),
+            "note": "已移除人工 override 并触发重算,掌握度回到 Anki 反算值;技能树刷新后生效。"}
 
 
 def _t_error_patterns(args, ctx):
@@ -4196,6 +4277,8 @@ TOOLS = {
                          "用户做完诊断卷、想知道『我到底哪掌握了/结果怎样』时调,再把提案讲给他。args {}。", _t_mastery_proposal),
     "apply_mastery": ("★**用户确认后**把某知识点标为已掌握/改掌握度(写进 KG,会传播解锁后续)。"
                       "只有用户明确同意某条提案才调,别自作主张。args {node: kg 节点 id, mastery: 0.9, reason?}。", _t_apply_mastery),
+    "remove_mastery": ("**用户确认后**撤销某知识点的掌握度 override(回到 Anki 反算自然值,可逆)。"
+                       "用户说『刚才那个标错了/撤销掉』时调。args {node: kg 节点 id}。", _t_remove_mastery),
     "error_patterns": ("回答『我有什么系统性弱点/我是不是XX类题总不行/该怎么调整学习方法』:给**跨知识点的共性弱点模式**"
                        "(证明弱/定义混/术语对应不清 等)+ 学习策略。比 learning_focus/近况 高一层(元认知)。args {}。", _t_error_patterns),
     "list_saved_tasks": ("列出所有已保存的工具及其数据源。args {}。", _t_list_saved_tasks),

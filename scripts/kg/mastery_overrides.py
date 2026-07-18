@@ -63,19 +63,21 @@ def apply_to_kg(kg):
     只覆盖 mastery 数值 + 打 `mastery_override` 标记(供 UI 显示「人工确认」徽标 + 溯源);
     state/mastery_level/unlocked 交给后续拓扑计算,让解锁沿 DAG 传播。"""
     ov = load()
-    if not ov:
-        return 0
     book = kg.get("book") or ""
     n = 0
+    # R3-G2:**总是遍历所有节点**——有 override 就注入,无 override 就清残留 `mastery_override`
+    # 标记(否则 remove 掉最后一个 override 后徽标不消失、mastery 也回不到 records 反算值)。
     for node in kg.get("nodes", []):
         o = ov.get(key_of(book, node.get("id")))
-        if not o or o.get("mastery") is None:
-            continue
-        node["mastery_override"] = {"mastery": o["mastery"], "source": o.get("source", ""),
-                                    "reason": o.get("reason", ""), "ts": o.get("ts"),
-                                    "prev": node.get("mastery")}
-        node["mastery"] = float(o["mastery"])
-        n += 1
+        if o and o.get("mastery") is not None:
+            node["mastery_override"] = {"mastery": o["mastery"], "source": o.get("source", ""),
+                                        "reason": o.get("reason", ""), "ts": o.get("ts"),
+                                        "prev": node.get("mastery")}
+            node["mastery"] = float(o["mastery"])
+            n += 1
+        elif "mastery_override" in node:
+            # 该节点已无 override(被 remove)→ 清标记;mastery 保持本次 records 反算的自然值
+            node.pop("mastery_override", None)
     return n
 
 

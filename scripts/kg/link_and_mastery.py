@@ -228,6 +228,78 @@ def _diagnostic_mastery(book):
     return {k: (c / t) for k, (c, t) in out.items() if t}
 
 
+def derive_progress_availability_state(nodes, prereqs_of, children, id2, mastered_threshold=None):
+    """★两维正交派生(R1/R3):progress(纯自身 mastery) × availability(**独立**从直接前置 progress 算)
+    → state 诚实派生。就地写 nodes 的 progress/availability/state/unlocked/mastered。
+    daily 主流程、即时重算、回归测试**共用同一份**(单一源,防漂移)。
+      progress:unseen/in_progress/mastered;availability:locked/open(前置 progress≥in_progress 即满足=A 语义);
+      state:有 progress 时 progress 赢(jump-ahead 不涂灰),否则看 availability。"""
+    if mastered_threshold is None:
+        mastered_threshold = MASTERED_THRESHOLD
+    open_set = {"unlockable", "mastered", "in_progress"}
+    PROG_ORDER = {"unseen": 0, "in_progress": 1, "mastered": 2}
+    # pass 1:L2 自身 progress(纯 mastery)
+    for n in nodes:
+        if n["level"] == 2:
+            m = n.get("mastery")
+            if m is not None and m >= mastered_threshold:
+                n["progress"] = "mastered"
+            elif n.get("mastery_level", 0) >= 2 or n.get("mastery_inferred"):
+                n["progress"] = "in_progress"
+            else:
+                n["progress"] = "unseen"
+    # pass 2:availability 独立从直接前置的 progress 算(不碰自身 progress、不读旧 state)
+    _flat_book = not prereqs_of   # 全书 0 prereq 边=背诵型/扁平书(前端 IS_FLAT),不按前置门控
+    for n in nodes:
+        if n["level"] != 2:
+            continue
+        prs = prereqs_of.get(n["id"], [])
+        if prs:
+            avail_open = all(
+                PROG_ORDER.get(id2[p].get("progress", "unseen"), 0) >= 1
+                for p in prs if p in id2)
+        elif _flat_book:
+            avail_open = True   # 无前置边书:节点不分解锁顺序,全 open(engaged/mastery 另渲染)
+        else:
+            # 有前置结构的书里却无前置:仅第 1 章 L2 算真起点 open;其余=KG 缺前置数据,不能算 open
+            label = (n.get("numeric_label") or "").strip()
+            avail_open = (not label) or label.startswith("1.")
+        n["availability"] = "open" if avail_open else "locked"
+    # pass 3:L0/L1 从子孙 L2 聚合(progress 取最强、availability 任一子可学即 open)
+    def _agg_pa(node):
+        kids = children.get(node["id"], [])
+        if not kids:
+            return "unseen", "locked"
+        bp, ba = "unseen", "locked"
+        for k in kids:
+            if k["level"] == 2:
+                kp, ka = k.get("progress", "unseen"), k.get("availability", "locked")
+            else:
+                kp, ka = _agg_pa(k)
+            if PROG_ORDER.get(kp, 0) > PROG_ORDER.get(bp, 0):
+                bp = kp
+            if ka == "open":
+                ba = "open"
+        return bp, ba
+    for n in nodes:
+        if n["level"] in (0, 1):
+            n["progress"], n["availability"] = _agg_pa(n)
+    # pass 4:state 诚实派生 + 两个布尔兼容旧前端
+    for n in nodes:
+        p = n.get("progress", "unseen")
+        a = n.get("availability", "locked")
+        if p == "mastered":
+            n["state"] = "mastered"
+        elif p == "in_progress":
+            n["state"] = "in_progress"
+        elif a == "open":
+            n["state"] = "unlockable"
+        else:
+            n["state"] = "locked"
+        n["unlocked"] = n["state"] in open_set
+        n["mastered"] = (p == "mastered")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kg", required=True)
@@ -509,30 +581,8 @@ def main() -> int:
     if _nsus:
         print("  可疑 prereq 边(诊断反哺):%d" % _nsus)
 
-    # ★彻底拆 progress × availability 两个正交维度(审查 #1,用户选 A:达门槛即满足前置)。
-    #   progress(只看自己掌握程度):unseen / in_progress / mastered
-    #   availability(只看前置是否满足):locked / open —— 前置的 progress∈{in_progress,mastered} 即满足(A)
-    #   state = 二者的**干净派生**(A 语义下与上面拓扑一致,只是把纠缠的单字段拆成两维显式暴露)。
-    for n in nodes:
-        st0 = n.get("state", "locked")
-        if n["level"] == 2:
-            m = n.get("mastery")
-            if m is not None and m >= MASTERED_THRESHOLD:
-                prog = "mastered"
-            elif n.get("mastery_level", 0) >= 2 or n.get("mastery_inferred"):
-                prog = "in_progress"
-            else:
-                prog = "unseen"
-        else:   # L0/L1:无直接 mastery,从聚合 state 反推 progress
-            prog = {"mastered": "mastered", "in_progress": "in_progress"}.get(st0, "unseen")
-        avail = "locked" if st0 == "locked" else "open"
-        n["progress"] = prog
-        n["availability"] = avail
-        # 干净派生 state:availability=locked→locked;否则按 progress(unseen→unlockable=可学没碰)
-        n["state"] = "locked" if avail == "locked" else \
-            {"mastered": "mastered", "in_progress": "in_progress"}.get(prog, "unlockable")
-        n["unlocked"] = (avail == "open")
-        n["mastered"] = (prog == "mastered")
+    # ★两维正交派生(抽成 module 级函数,daily/即时重算/测试共用,防漂移)
+    derive_progress_availability_state(nodes, prereqs_of, children, id2)
 
     if not args.in_place:
         print("（dry-run，未写回；加 --in-place 应用）")

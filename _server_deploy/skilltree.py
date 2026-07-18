@@ -19,6 +19,20 @@ from pathlib import Path
 from flask import abort, jsonify, render_template, request, send_file, session
 
 _QUIZZES = {}  # B2:quiz_id -> {book,node_id,stash:[{qid,node_id,layer,answer}],ts};答案只在服务端
+_PROPOSALS = {}  # R3-G2:一次性掌握度提案 proposal_id -> {uid,book,node,mastery,source,ts,used};绑用户,防重放/篡改
+
+
+def _mint_proposal(uid, book, node, mastery, source=""):
+    """铸一个一次性掌握度提案 token(绑 uid/book/node/mastery),供 apply-mastery 消费。"""
+    import uuid as _uuid
+    pid = _uuid.uuid4().hex[:16]
+    _PROPOSALS[pid] = {"uid": str(uid or ""), "book": book, "node": node,
+                       "mastery": float(mastery), "source": source,
+                       "ts": time.time(), "used": False}
+    now = time.time()
+    for k in [k for k, v in _PROPOSALS.items() if now - v.get("ts", 0) > 3600]:
+        _PROPOSALS.pop(k, None)
+    return pid
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 KG_DIR = CLAUDE_DIR / "knowledge_graph"
@@ -1148,6 +1162,7 @@ def register_skilltree(app):
                                  rel, rep, "%d/%d" % (ncorr, len(items)), node_results=node_results)
         except Exception:
             pass
+        _uid_q = str(session.get("user_id") or "")
         props = []
         for nid, e in node_results.items():
             ratio = e["correct"] / e["total"] if e["total"] else 0
@@ -1155,39 +1170,60 @@ def register_skilltree(app):
                     "layer": e.get("layer")}
             if e["total"] and ratio >= 1.0:
                 base.update({"建议": "标为已掌握", "mastery": 0.9})
+                base["proposal_id"] = _mint_proposal(_uid_q, book, nid, 0.9, source="skilltree-quiz")
             elif ratio < 0.5:
                 base.update({"建议": "根源在此前置,先补" if e.get("layer") == "prereq" else "目标没吃透,重学",
                              "mastery": None})
             else:
                 base.update({"建议": "再练练", "mastery": None})
             props.append(base)
+        _QUIZZES.pop(str(body.get("quiz_id") or ""), None)   # R3-G2:消费 quiz,防重放刷提案
         return jsonify({"ok": True, "score": "%d/%d" % (ncorr, len(items)), "items": items, "proposal": props})
 
     @app.route("/skilltree/<book>/api/apply-mastery", methods=["POST"])
     def skilltree_apply_mastery(book):
-        """B2:用户确认某条提案 → 写掌握度 override(即时生效,daily 重算不覆盖)。"""
+        """B2:用户确认某条**一次性提案** → 写掌握度 override + 即时重算(daily 重算不覆盖)。
+        R3-G2:强制走 proposal_id 确认链——proposal 由 quiz-grade 铸(绑 uid/book/node/value),
+        这里校验归属+未用+未过期,**用服务端存的权威 node/mastery**(忽略客户端篡改),消费后不可重放。"""
         body = request.get_json(silent=True) or {}
-        node = str(body.get("node") or "")
+        uid = str(session.get("user_id") or "")
+        pid = str(body.get("proposal_id") or "").strip()
+        prop = _PROPOSALS.get(pid)
+        if not prop:
+            return jsonify({"ok": False, "error": "提案已失效/不存在,请重新测验后再确认"}), 410
+        if prop.get("used"):
+            return jsonify({"ok": False, "error": "该提案已确认过(一次性),不能重复应用"}), 409
+        if prop.get("uid") != uid:
+            return jsonify({"ok": False, "error": "提案不属于当前用户"}), 403
+        if prop.get("book") != book:
+            return jsonify({"ok": False, "error": "提案与书不匹配"}), 400
+        node = str(prop.get("node") or "")           # 权威值取服务端存的,不信客户端
         try:
-            mastery = float(body.get("mastery"))
+            mastery = float(prop.get("mastery"))
         except Exception:
-            return jsonify({"ok": False, "error": "mastery 要 0~1"}), 400
+            return jsonify({"ok": False, "error": "提案 mastery 非法"}), 400
         if not (0.0 <= mastery <= 1.0):
-            return jsonify({"ok": False, "error": "mastery 必须在 0~1"}), 400
+            return jsonify({"ok": False, "error": "mastery 越界"}), 400
         if not node.startswith("kg:") or "#" not in node:
-            return jsonify({"ok": False, "error": "node 要 kg:书#id"}), 400
+            return jsonify({"ok": False, "error": "node 形式错误"}), 400
         bk, nid = node[3:].split("#", 1)
-        _pp, _kgv = _load_kg(bk)   # 审查 #6:校验节点确实存在于该书 KG,别信客户端任意 node
+        _pp, _kgv = _load_kg(bk)   # 校验节点确实存在于该书 KG
         if not _kgv or not any(x.get("id") == nid for x in _kgv.get("nodes", [])):
             return jsonify({"ok": False, "error": "节点不存在:%s" % node}), 404
         try:
             sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
             import mastery_overrides as MO
-            MO.set_override(bk, nid, mastery, source="skilltree-quiz", reason="技能树测验确认")
+            MO.set_override(bk, nid, mastery, source=prop.get("source") or "skilltree-quiz",
+                            reason="技能树测验确认")
         except Exception as e:
             return jsonify({"ok": False, "error": "写 override 失败:%s" % str(e)[:60]}), 500
+        prop["used"] = True   # R3-G2:消费,防重放
+        try:
+            _trigger_mastery_recompute(_pp)   # R3-G2:即时重算,override 沿 DAG 传播,刷新即见
+        except Exception:
+            pass
         return jsonify({"ok": True, "node": node, "mastery": mastery,
-                        "note": "已写入 KG 掌握度(下次 daily 重算也不覆盖);技能树刷新后生效"})
+                        "note": "已写入 KG 掌握度并触发重算;技能树刷新后生效"})
 
     @app.route("/skilltree/<book>/api/edit", methods=["POST"])
     def skilltree_edit(book):

@@ -1451,20 +1451,21 @@ async function submitQuiz(){
     h+=g.items.map(it=>`<div style="font-size:12px;margin:3px 0">${it.ok?"✅":"❌"} ${_qEsc(it.node_name)} — 你选 ${_qEsc(it.picked)}${it.ok?"":`,正确 ${_qEsc(it.answer)}`}</div>`).join("");
     h+='<div class="lbl" style="margin-top:10px">掌握度提案（你确认才改）</div>';
     h+=g.proposal.map(p=>{
-      const b=(p.mastery!=null)?`<button onclick="applyQuizMastery('${p.node}',${p.mastery},this)" style="margin-left:6px;padding:3px 10px;background:#1a2a1a;border:1px solid #34d399;color:#6ee7b7;border-radius:6px;cursor:pointer;font-size:11px">✓ 标记掌握</button>`:"";
+      const b=(p.mastery!=null&&p.proposal_id)?`<button onclick="applyQuizMastery('${p.proposal_id}',this)" style="margin-left:6px;padding:3px 10px;background:#1a2a1a;border:1px solid #34d399;color:#6ee7b7;border-radius:6px;cursor:pointer;font-size:11px">✓ 标记掌握</button>`:"";
       return `<div style="font-size:12px;margin:4px 0">${_qEsc(p.name)} ${_qEsc(p["结果"])} — ${_qEsc(p["建议"])}${b}</div>`;
     }).join("");
     box.innerHTML=h;
   }catch(e){ box.innerHTML='<div style="color:#f88;font-size:12px">网络错误</div>'; }
 }
-async function applyQuizMastery(node,mastery,el){
+async function applyQuizMastery(proposalId,el){
   el.disabled=true; el.textContent="⏳";
   try{
-    const r=await fetch(`/skilltree/${BOOK}/api/apply-mastery`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({node,mastery})});
+    const r=await fetch(`/skilltree/${BOOK}/api/apply-mastery`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({proposal_id:proposalId})});
     const d=await r.json();
-    el.textContent=d.ok?"✓ 已标记":"失败";
+    el.textContent=d.ok?"✓ 已标记":(_qEsc(d.error||"失败"));
     if(d.ok){ el.style.color="#6ee7b7"; setTimeout(()=>location.reload(),900); }
-  }catch(e){ el.textContent="失败"; }
+    else { el.disabled=false; }
+  }catch(e){ el.textContent="失败"; el.disabled=false; }
 }
 async function createNote(nodeId){
   const btn = document.getElementById("btn-create-note");
