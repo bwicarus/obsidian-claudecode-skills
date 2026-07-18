@@ -525,6 +525,51 @@ events 路提供「行为证据分」,FTS5 路提供「存在但未读」的候�
 - 实测:「子空间」→ Anki「必复习今日」答错9次(rel 17.1,最高)+ 笔记《000-子空间》+ 2025-10 的旧笔记
   (长记忆生效)。★答错次数天然是学习闭环「薄弱知识点」的入口数据。
 
+## 5m. 学习近况系统(困难档案状态机,2026-07-18 用户设计+上线)
+
+`scripts/learning_situations.py`——学习闭环的**自动触发**入口。用户铁律:AI 只在两处参与(生成时后台分析一次、对话中被动响应),**全程不碰实时判断**(不给「这轮是不是不懂」这种问题增负担/干扰回答);触发信号只用**可靠的行为信号**,不用「停留久无高亮」「一页尺度反复回看」这类不可靠信号(用户明确否掉)。
+
+**近况条目(困难档案)**:`{key(归一), concept, reason, trigger, refs, suspect, suggested, prereq, status, analyzed, created, updated, history[], priority?}`。库=`state/learning-situations/<uid>.json`(每用户一数组)。
+
+**生命周期**(五步,AI 只在②④):
+- ① **触发**(daily,行为信号,不用 AI):`detect_triggers` 扫两源 → 生成/更新 active。
+  - Anki:窗内(45d)`ease=1` 按**知识点**聚合(同 KG 节点的多卡累计)≥3 → 困难。concept 优先取 `material_graph` 到的 KG 节点名,否则卡面抽词 top1。
+  - 自测低分:检查报告 `score` 正确率 <50% → 困难。
+- ② **分析**(daily,AI 后台一次):`analyze` 顺 `material_graph(both,depth4)`(anki 先上溯源笔记再下探书页→KG→前置)找前置根源 → Gemini(`think=False`,轻)补 `suspect`+`suggested`,写 `analyzed=True`。
+- ③ **注入**(每轮对话):`context_line(uid, query)` 双路 = **recency** 最近 N=3 active + **relevance** 当前阅读语境(book_name+选中+句)抽词归一检索 K=4 全时间线(active 优先,resolved 低权也翻)。清单式(concept+一句原因+怀疑/建议),详情靠对话展开。注入在 `assistant._sys_prompt` 动态【当前页面】块尾(和最近焦点/创造物同款),archived 不注入。
+- ④ **响应**(对话中):系统提示规则=**别主动打断**,用户自然问到相关内容才结合(提议做卷子/反问定义/直接出题)。
+- ⑤ **消解**(daily,行为对称,不用 AI):`detect_resolutions` 困难卡最近连对≥2 → resolved;久无动静(30d)→ archived。
+
+**状态机**:active(注入)/ resolved(解决,留档可检索)/ archived(不学了,留档)。**resolve/archive 只转状态 + 留档,永不删除**(用户铁律:只靠时间删会漏信息;复发时从 resolved 拉回 active + `history` 记「复发」+ `analyzed=False` 重新分析)。
+
+**消解第四条=用户明确表态**(与①-③的后台自动不同,在**对话中**捕获):工具 `situation_feedback(concept, kind)`,kind∈{understood→resolved / mute→archived / still_stuck→priority=high}。误判保护=只在明确表态时调 + 转态不删(误判成本低,再错会重新触发)+ 写 history 可查。
+
+**挂载**:daily 编排「跨语言概念归一」后加「学习近况」步(`learning_situations.py --daily`=触发+分析+消解);assistant 注入 + `situation_feedback` 工具(自动进工具目录,非 `_ORCH_DROP`)。
+
+**踩过的坑(实现时)**:
+- ⚠ **SQLite `HAVING lapses>=N` 撞列名**:`cards` 表本身有 `lapses` 列(全历史累计),SELECT 别名 `lapses` 在 HAVING 里被优先解析成 `ca.lapses` → 触发信号用错列、不受时间窗约束。改成 `WHERE ease=1` 后 `COUNT` + Python 侧按 concept 聚合。
+- Write 工具写 `\n`/`\d`/`\{` 进文件时多加一层反斜杠(变字面 `\n`、坏正则)→ 注入文本挤成一行、检查低分那条腿永久匹配不到。字节级核对后收敛。
+
+## 5n. 学习闭环:诊断卷 → 掌握度回写 → 遗忘回访(2026-07-18 用户拍板,实现中)
+
+学习近况(§5m)识别困难 → 这三环把"发现困难"闭成"诊断→干预→验证→更新→回访"的自适应回路(Khan mastery learning 范式)。**守铁律:掌握度绝不自动改,AI 提候选 + 用户确认**。
+
+**② 掌握度 override 层(已上线)**:`scripts/kg/mastery_overrides.py` + `link_and_mastery.py` 在状态计算**前**注入 override mastery(解锁沿 prereq DAG 传播)。store=`state/kg-mastery-overrides.json`={`<book>#<node_id>`:{mastery,ts,source,reason,by,prev}}。daily 重算不覆盖(外挂层每次重新应用)、可溯源、可撤销。诊断卷客观结果 → 用户确认 → `set_override`。
+
+**③ 遗忘回访(已上线)**:`learning_situations.detect_revisits`——resolved 困难点的困难卡在 Anki 里到期(now > 上次复习 + `ivl` 天,借 Anki 调度不自算 FSRS)+ 距 resolved ≥7 天 → 拉回 active(`trigger=revisit` + "还记得吗"建议)。用户确认记得 → situation_feedback(understood) 又回 resolved。
+
+**① 分层诊断卷(实现中)**——用户设计:
+- **判分双模(用户拍板)**:选择题**可点选**为主 → 客观比对(picked==answer,不烧 AI);**没点选而手写** → 回退现有 AI 画面识别(`task_runtime._check_page` / dictation_grade)。二者在 `_check_page` 里分流,报告统一生成。
+- **沿 prereq 链分层出题**:困难 concept → `material_graph` 找 prereq 链 → AI 沿链分层出选择题(前置层 + 目标层),每题挂 `node_id` + `layer`。诊断逻辑:前置层错=根源在前置;前置对+目标错=目标本身理解问题。
+- **检查报告每题挂节点**:现有报告只有整卷 `score`;新增 `items:[{n, node_id, layer, ok}]`,让判分结果能映射回 KG 节点 → 喂 ② 生成提案。
+- **block 挂 node_id**:`_BLOCK_KEYS`(assistant.py)加 `node_id`;或走无白名单的 userpages PATCH。
+- **接 ②**:判分后按 node_id 聚合对错 → 生成掌握度提案 → 用户确认 → `set_override`。
+
+实现顺序:**1a ✅**(后端判分分流:客观优先+AI fallback+items 挂 node_id/layer,`_objective_grade`/`_attach_nodes`,单元测过)→ **1b ✅**(前端 choice 可点选+选中态,picks 随 check 载荷经 `_CHECK_PICKS` 到 `_check_page`,node --check 过,已部署 nginx)→ **1c ✅**(`make_diagnostic` 工具:concept→KG节点→prereq链分层→每节点 AI 出 choice 挂 node_id/layer→`__upStartTask` 插纸)→ **1d ✅**(`mastery_proposal` 读报告 node_results 聚合出提案 + `apply_mastery` 用户确认后 set_override 并消解相关近况;检查报告新增 node_results 字段)。**① 四段全链上线**。前端(`pdf-uishared.js` choice 渲染 + `_upRunEvent`)是 nginx 静态文件,改后部署 `/var/www/html/static/pdf/`。
+
+### 错误模式元画像(支线,已上线 2026-07-18)
+scripts/error_meta_profile.py:学习近况+诊断报告未全对知识点(带卡面样例)→ AI 归纳 2-4 个**元认知弱点模式**(证明弱/定义混/术语对应不清,name+证据+策略)→ state/error-meta/<uid>.json。daily 低频跑;工具 error_patterns() 按需查(不强注入)。比学习近况高一层(跨知识点共性)。
+
 ## 6. 分阶段路线(建议,未拍板)
 
 - ~~**阶段 0**:事件表 + 现有渠道接入~~ ✅ 2026-07-17(改为零侵入导入器,见 §5b)

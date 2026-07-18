@@ -672,7 +672,7 @@ def _check_reports_load(uid):
         return []
 
 
-def _save_check_report(uid, name, file_rel, report, score="", src_page=None, lookups=None):
+def _save_check_report(uid, name, file_rel, report, score="", src_page=None, lookups=None, node_results=None):
     """登记一份检查报告,返回**最终报告名**(同名已存在就加序号去重,便于按名精确查)。
     src_page=这张纸参考的**源书页(印刷页)**——题目自制、书里无逐字题,但知识点在这页附近,供按需读原文。
     lookups=造纸 CLI 当时的查找类查询 [{tool,arg},…](读了第几页/搜了什么)——比 src_page 更精确的 provenance,
@@ -695,7 +695,8 @@ def _save_check_report(uid, name, file_rel, report, score="", src_page=None, loo
         _sb = "/.sandbox/" in (file_rel or "")   # 沙盒测试报告:照存(工具测试要能读到)但打标,不当「最近一份」
         lst.append({"id": rid, "name": final, "file": file_rel or "", "score": score or "",
                     "report": report, "src_page": (int(src_page) if src_page else None), "sandbox": _sb,
-                    "lookups": (lookups[:8] if isinstance(lookups, list) else None), "ts": int(time.time())})
+                    "lookups": (lookups[:8] if isinstance(lookups, list) else None),
+                    "node_results": (node_results or None), "ts": int(time.time())})
         lst = lst[-60:]                           # 每人最多留 60 份
         _CHECK_DIR.mkdir(parents=True, exist_ok=True)
         (_CHECK_DIR / f"{uid}.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), "utf-8")
@@ -3506,7 +3507,7 @@ def _t_page_new(args, ctx):
 
 
 # 元素字段白名单:kind/内容 + style + 定位(at/cols/span)+ 按钮态(event/enabled)。
-_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span", "options")
+_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span", "options", "node_id", "layer", "picked")
 _BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr", "choice")
 
 
@@ -3870,6 +3871,206 @@ def _t_learning_focus(args, ctx):
             "怎么用": "按热度排序(渠道加权 × 跨书泛词降权)。要读原文用 read_page(file,page)。"
                       "**这些是从行为统计出来的词,不是用户原话**。"}
 
+
+def _t_situation_feedback(args, ctx):
+    """记录用户对某个「学习近况」困难点的**明确表态**(学习近况消解条件第四条)。只在用户主动说清楚时调,别替他判断。
+    args {concept: 哪个知识点(用上下文「学习近况」里给的 concept 名),
+          kind: understood(说懂了/会了 → 转解决) | still_stuck(说确实还不会/更糊涂 → 加强) | mute(说别再提/不学了 → 归档)}。
+    """
+    concept = str(args.get("concept") or "").strip()
+    kind = str(args.get("kind") or "").strip()
+    if not concept or kind not in ("understood", "still_stuck", "mute"):
+        return {"error": "要给 concept + kind(understood/still_stuck/mute)"}
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import learning_situations as _LS
+        return _LS.feedback(str((ctx or {}).get("_uid") or ""), concept, kind)
+    except Exception as e:
+        return {"error": "学习近况反馈失败:%s" % str(e)[:80]}
+
+
+def _gen_choice_question(node):
+    """为一个 KG 节点出一道单项选择题(1c)。返回 {text, options[≤4], answer} 或 None。"""
+    name = node.get("name") or ""
+    ref = "参考:" + str(node.get("summary"))[:300] if node.get("summary") else ""
+    prompt = ("为知识点「%s」出一道**单项选择题**,检验是否真正掌握其核心定义/性质(不要死记硬背式)。"
+              "给 4 个选项、只有一个正确,干扰项要似是而非(针对常见误解)。%s\n"
+              "只输出 JSON:" % (name, ref)
+              + '{"text":"题干","options":["A项","B项","C项","D项"],"answer":"A"}')
+    try:
+        raw = _gemini_text(prompt, max_tokens=500, think=False) or ""
+        import re as _re
+        m = _re.search(r"\{.*\}", raw, _re.S)
+        d = json.loads(m.group(0)) if m else {}
+        opts = d.get("options") or []
+        ans = str(d.get("answer") or "").strip().upper()[:1]
+        if d.get("text") and isinstance(opts, list) and len(opts) >= 2 and ans in "ABCD":
+            return {"text": str(d["text"])[:400], "options": [str(o)[:120] for o in opts[:4]], "answer": ans}
+    except Exception:
+        pass
+    return None
+
+
+def _t_make_diagnostic(args, ctx):
+    """针对一个知识点出一张**分层诊断卷**(1c):沿 prereq 链先测前置、再测目标,每道选择题挂 node_id。
+    用户点选作答 → 点「让 AI 检查」= 客观判分(选择题不烧 AI),结果按知识点聚合(供掌握度提案)。
+    诊断逻辑:前置错=根源在前置;前置对而目标错=目标本身没吃透。
+    args {concept: 知识点名,或 kg 节点 id 如 kg:LADR#...}。"""
+    concept = str(args.get("concept") or args.get("node") or args.get("term") or "").strip()
+    if not concept:
+        return {"error": "要给知识点(concept)"}
+    rel = (ctx or {}).get("file_rel") or ""
+    if not rel or not rel.lower().endswith(".pdf"):
+        return {"error": "诊断卷目前只支持 PDF 阅读器"}
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import attention_profile as AP
+    except Exception as e:
+        return {"error": "KG 不可用:%s" % str(e)[:80]}
+    kg = AP._kg_all()
+    target = None
+    if concept.startswith("kg:"):
+        target = kg["nodes"].get(concept.split("#", 1)[-1])
+    if not target:
+        key = AP.norm_key(concept) or concept
+        for nid, n in kg["nodes"].items():
+            if (AP.norm_key(n.get("name") or "") or "") == key:
+                target = n
+                break
+        if not target:
+            for nid, n in kg["nodes"].items():
+                if concept in (n.get("name") or ""):
+                    target = n
+                    break
+    if not target:
+        return {"error": "知识图谱里找不到「%s」这个知识点(换个更准的名字?)" % concept}
+    tid = target.get("id")
+    prereqs = []
+    for e in kg["edges"]:
+        if e.get("kind") == "prereq" and e.get("to") == tid:
+            pn = kg["nodes"].get(e.get("from"))
+            if pn and pn not in prereqs:
+                prereqs.append(pn)
+    nodes_spec = [(pp, "prereq") for pp in prereqs[:2]] + [(target, "target")]
+    blocks = [{"kind": "text", "text": "诊断卷:%s" % target.get("name"), "style": "h1", "id": "b0"}]
+    bi = 1
+    nq = 0
+    for node, layer in nodes_spec:
+        q = _gen_choice_question(node)
+        if not q:
+            continue
+        blocks.append({"kind": "text", "text": "〔%s〕%s" % ("前置" if layer == "prereq" else "目标", node.get("name")),
+                       "id": "bl%d" % bi})
+        bi += 1
+        blocks.append({"kind": "choice", "text": q["text"], "options": q["options"], "answer": q["answer"],
+                       "node_id": "kg:%s#%s" % (node.get("_book"), node.get("id")), "layer": layer, "id": "bq%d" % bi})
+        bi += 1
+        nq += 1
+    if nq == 0:
+        return {"error": "没能为「%s」生成题目(稍后再试)" % concept}
+    blocks.append({"kind": "button", "label": "让 AI 检查", "event": "check", "id": "bchk"})
+    title = "诊断卷·%s" % target.get("name")
+    return {"已生成诊断卷": "%d 题(%d 前置 + 目标)" % (nq, min(len(prereqs), 2)),
+            "接下来": "系统在你当前位置插一张诊断卷。点选作答后点「让 AI 检查」→ 客观判分,结果按知识点聚合。",
+            "client_action": {"fn": "__upStartTask",
+                              "args": [{"kind": "free", "title": title, "paper": "exam",
+                                        "params": {"blocks": blocks, "paper": "exam", "title": title}}]},
+            "silent": True}
+
+
+def _t_mastery_proposal(args, ctx):
+    """读最近一张**诊断卷**的判分结果,按知识点聚合 → 掌握度**变更提案**(1d;只提议,绝不改)。
+    把提案讲给用户,用户确认某条 → 调 apply_mastery 落实。守铁律:不确认不改。args {}。"""
+    uid = str((ctx or {}).get("_uid") or "")
+    reports = _check_reports_load(uid)
+    rep = None
+    for r in reversed(reports):
+        if r.get("node_results") and not r.get("sandbox"):
+            rep = r
+            break
+    if not rep:
+        return {"提案": [], "说明": "还没有带知识点结果的诊断卷 —— 先用 make_diagnostic 出一张,点选作答后点『让 AI 检查』。"}
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import attention_profile as AP
+        _lbl = AP._material_label
+    except Exception:
+        _lbl = lambda x: x
+    props = []
+    for nid, e in rep["node_results"].items():
+        tot = e.get("total") or 0
+        cor = e.get("correct") or 0
+        ratio = (cor / tot) if tot else 0
+        layer = e.get("layer")
+        base = {"node": nid, "name": _lbl(nid), "结果": "%d/%d" % (cor, tot), "layer": layer}
+        if tot and ratio >= 1.0:
+            base.update({"建议": "标为已掌握", "mastery": 0.9})
+        elif ratio < 0.5:
+            base.update({"建议": ("根源可能在这个前置,先补它" if layer == "prereq" else "目标本身没吃透,建议重学"),
+                         "mastery": None})
+        else:
+            base.update({"建议": "掌握一般,再练练", "mastery": None})
+        props.append(base)
+    return {"提案": props, "来自": rep.get("name"),
+            "怎么用": "把提案讲给用户。用户确认要把某个『标为已掌握』→ 调 apply_mastery(node=该 node id, mastery=0.9)。不确认不要改。"}
+
+
+def _t_apply_mastery(args, ctx):
+    """**用户确认后**把某知识点的掌握度写进 KG override(1d/②)。**只有用户明确同意才调**,别自己决定。
+    args {node: kg 节点 id(如 kg:LADR#..), mastery: 0~1(标已掌握用 0.9), reason?}。改错了可撤销(告诉用户找我 remove)。"""
+    node = str(args.get("node") or "").strip()
+    try:
+        mastery = float(args.get("mastery"))
+    except Exception:
+        return {"error": "mastery 要是 0~1 的数(标已掌握用 0.9)"}
+    if not node.startswith("kg:") or "#" not in node:
+        return {"error": "node 要是 kg:书#节点id 形式"}
+    book, nid = node[3:].split("#", 1)
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
+    try:
+        import mastery_overrides as MO
+        MO.set_override(book, nid, mastery, source="diagnostic", reason=(args.get("reason") or "诊断卷确认"))
+    except Exception as e:
+        return {"error": "写 override 失败:%s" % str(e)[:80]}
+    _resolved = ""
+    try:
+        import attention_profile as AP
+        import learning_situations as LS
+        nm = (AP._kg_all()["nodes"].get(nid) or {}).get("name") or ""
+        if nm and mastery >= 0.8:
+            fb = LS.feedback(str((ctx or {}).get("_uid") or ""), nm, "understood")
+            if fb.get("ok"):
+                _resolved = nm
+    except Exception:
+        pass
+    return {"已确认": node, "掌握度": mastery,
+            "note": "已写入 KG 掌握度 override(下次 daily 重算也不会被覆盖)。"
+                    + (("相关学习近况「%s」已转已解决。" % _resolved) if _resolved else "")}
+
+
+def _t_error_patterns(args, ctx):
+    """回答"我有什么系统性/元认知层面的弱点"(错误模式元画像:证明题弱/定义混/跨语言术语对应不清 等)。
+    比学习近况高一层——不是单个知识点,而是**跨知识点的共性弱点** + 针对性学习策略。args {}。"""
+    uid = str((ctx or {}).get("_uid") or "")
+    import sys as _sys
+    _sys.path.insert(0, "/home/bwicarus/claude/scripts")
+    try:
+        import error_meta_profile as EMP
+        d = EMP.load(uid)
+    except Exception as e:
+        return {"error": "元画像不可用:%s" % str(e)[:80]}
+    pats = d.get("patterns") or []
+    if not pats:
+        return {"弱点模式": [], "说明": d.get("note") or "还没归纳出模式(错题攒够了 daily 会自动生成)"}
+    return {"弱点模式": [{"模式": p["name"], "证据": p["evidence"], "建议": p["strategy"]} for p in pats],
+            "样本数": d.get("n_samples")}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "recall_creation": ("取回一个**创造物**的完整内容(之前工具的产出:练习纸/检查报告/联网搜索/视频/翻译/章节总结)。"
@@ -3984,6 +4185,19 @@ TOOLS = {
                        "按时间窗给学习焦点词+出处书页。args {when?:今天/昨天/本周/上个月/最近三个月/全部, "
                        "days?:天数, scope?:book(只看当前书)|convo(当前对话), channels?, top?}。"
                        "数据=查词/高亮/问AI/自测行为的加权画像。", _t_learning_focus),
+    "situation_feedback": ("★用户对上下文『学习近况』里某个困难点**明确表态**时记录(消解第四条)。"
+                           "说『这个懂了/会了』→ kind:understood;『还是不会/更糊涂』→ still_stuck;"
+                           "『别再提这个/不想学了』→ mute。args {concept:近况里的知识点名, kind}。"
+                           "**只在用户明确表态时调**,别替他判断、别每轮都调。", _t_situation_feedback),
+    "make_diagnostic": ("针对一个知识点出一张**分层诊断卷**:沿 prereq 链先测前置、再测目标,选择题点选作答→客观判分,"
+                        "结果按知识点聚合(能定位『是前置没掌握还是目标本身』)。学习近况建议做卷、或用户说『考考我X/出张X的卷子/我到底哪没掌握』时用。"
+                        "args {concept: 知识点名 或 kg 节点 id}。", _t_make_diagnostic),
+    "mastery_proposal": ("读最近诊断卷的判分结果,按知识点聚合出**掌握度变更提案**(只提议不改)。"
+                         "用户做完诊断卷、想知道『我到底哪掌握了/结果怎样』时调,再把提案讲给他。args {}。", _t_mastery_proposal),
+    "apply_mastery": ("★**用户确认后**把某知识点标为已掌握/改掌握度(写进 KG,会传播解锁后续)。"
+                      "只有用户明确同意某条提案才调,别自作主张。args {node: kg 节点 id, mastery: 0.9, reason?}。", _t_apply_mastery),
+    "error_patterns": ("回答『我有什么系统性弱点/我是不是XX类题总不行/该怎么调整学习方法』:给**跨知识点的共性弱点模式**"
+                       "(证明弱/定义混/术语对应不清 等)+ 学习策略。比 learning_focus/近况 高一层(元认知)。args {}。", _t_error_patterns),
     "list_saved_tasks": ("列出所有已保存的工具及其数据源。args {}。", _t_list_saved_tasks),
     "page_show": ("把草稿纸**生成出来**(造纸最后一步)。args {}。", _t_page_show),
     "start_dictation": ("★ 开始一次**听写**:在当前位置新建一张听写纸(N 个填空格 + 「念下一个」按钮),"
@@ -4338,6 +4552,15 @@ def _sys_prompt(ctx):
         check_line = ("\n★最近创造物(之前工具的产出,句柄=#id;**内容不在这里**,要用就 recall_creation(id=…)取回):\n" + _cl +
                       "\n用户提到『刚才查的/搜的/那张纸/那个结果/第几题』→ 先 recall_creation 拿到对应创造物再答。"
                       "纸类条目会给**题目+标准答案+检查报告(有的话)**——题目是纸上自制的,书里没有逐字原文,别去书里找题目。")
+    # ★学习近况(困难档案):recency 最近 active + relevance 当前阅读语境检索;注入=清单式(concept+一句原因+怀疑/建议),
+    #   详情靠对话自然展开。别主动打断,用户问到相关内容时才结合。archived 不注入,resolved 仅语境命中时低权翻出。
+    situation_line = ""
+    try:
+        import learning_situations as _LS
+        _sq = " ".join(x for x in [ctx.get("book_name") or "", sel or "", sent or ""] if x)[:500]
+        situation_line = _LS.context_line(_uid0, _sq)
+    except Exception:
+        pass
     return (
         "你是网页 PDF 阅读器的侧边栏助手,像 Copilot 一样陪用户读书。用简洁中文口语聊天。\n"
         "你能调用下面的工具来读页面内容、搜索、翻译、制卡、整理笔记、跳页等,可以连续调用多个工具来完成复合请求"
@@ -4410,7 +4633,7 @@ def _sys_prompt(ctx):
         "格式就一行:[[FOLLOWUP]]问题1|问题2|问题3(用 | 分隔,放在整条回答末尾,前端会渲成可点按钮;问题要短、具体)。"
         "**每条最终回答都要带**;只有在调工具(输出 JSON)那几条里不要带。\n\n"
         f"【可用工具】\n{cat}\n\n"
-        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}{note_line}{learn_line}{check_line}"
+        f"【当前页面】{json.dumps(meta, ensure_ascii=False)}{sel_line}{fig_line}{note_line}{learn_line}{check_line}{situation_line}"
     )
 
 

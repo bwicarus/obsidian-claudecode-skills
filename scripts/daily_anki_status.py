@@ -452,6 +452,10 @@ def main() -> int:
     step("领域词典", lambda: run_py("attention_profile.py", ["--domain-dict"]))
     step("融合权重学习", lambda: run_py("attention_profile.py", ["--fit"]))
     step("跨语言概念归一", lambda: run_py("attention_profile.py", ["--concepts"]))
+    # 学习近况:扫行为信号(Anki 连错/自测低分)→ 生成困难档案 → AI 后台补怀疑&建议 → 消解转态
+    step("学习近况", lambda: run_py("learning_situations.py", ["--daily"]))
+    # 错误模式元画像:归纳跨知识点的系统性弱点(证明弱/定义混/术语对应不清)
+    step("错误模式元画像", lambda: run_py("error_meta_profile.py", ["--gen"]))
     step("导出仪表板", lambda: run_py("export_dashboard.py"))
     step("部署仪表板", deploy_dashboard)
     step("AnkiWeb 同步", sync_ankiweb)

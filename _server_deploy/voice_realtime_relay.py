@@ -1206,6 +1206,54 @@ async def handle_tts_only(bws):
 # 状态(选中/笔迹)走 conversation.item.create system 消息——与豆包 510 增量哲学同构。
 OPENAI_RT_CRED = Path("~/.config/openai-realtime.json").expanduser()
 OPENAI_RT_URL = "wss://api.openai.com/v1/realtime?model="
+
+# 高频/易错传参的语音工具补真实 parameters schema(其余保持空宽松 schema)。
+# required 只标**无选中兜底**的必填项(高亮/制卡/查词等会回落 ctx.selection,不设 required 免逼模型幻觉参数);
+# additionalProperties=True 保留容错(已知参数强类型 + 未知参数照收)。
+def _p(props, required=None):
+    d = {"type": "object", "properties": props, "additionalProperties": True}
+    if required:
+        d["required"] = required
+    return d
+
+
+_TOOL_SCHEMAS = {
+    "read_page": _p({"page": {"type": "integer", "description": "印刷页码;不给=当前页"}}),
+    "goto_page": _p({"page": {"type": "integer", "description": "要翻到的印刷页码"}}, ["page"]),
+    "see_page": _p({"page": {"type": "integer", "description": "要看图的页;不给=当前页"}}),
+    "highlight": _p({"text": {"type": "string", "description": "要高亮的原文;不给=用当前选中"},
+                     "texts": {"type": "array", "items": {"type": "string"}, "description": "批量高亮多段"},
+                     "color": {"type": "string", "description": "颜色 hex,如 #fff59d"},
+                     "page": {"type": "integer", "description": "在哪页高亮(印刷页);不给=当前页"}}),
+    "make_anki": _p({"text": {"type": "string", "description": "制卡内容;不给=用当前选中/最近讲解"}}),
+    "make_note": _p({"text": {"type": "string", "description": "要记的内容;不给=用当前选中"}}),
+    "add_vocab": _p({"word": {"type": "string", "description": "生词;不给=用当前选中"}}),
+    "translate": _p({"text": {"type": "string", "description": "要翻译的文本;不给=用当前选中"},
+                     "target": {"type": "string", "description": "目标语言,默认 zh"}}),
+    "lookup_word": _p({"word": {"type": "string", "description": "要查的词;不给=用当前选中"}}),
+    "search_book": _p({"query": {"type": "string", "description": "在本书内搜的关键词"}}, ["query"]),
+    "search_image": _p({"query": {"type": "string", "description": "要配图的概念/实物名"}}, ["query"]),
+    "search_video": _p({"query": {"type": "string", "description": "核心主题(内部会自动拟搜索词)"}}),
+    "summarize_section": _p({"page": {"type": "integer", "description": "章节所在页;不给=当前页所在章节"}}),
+    "make_diagnostic": _p({"concept": {"type": "string", "description": "要诊断的知识点名或 kg 节点 id"}}, ["concept"]),
+    "situation_feedback": _p({"concept": {"type": "string", "description": "学习近况里的知识点名"},
+                              "kind": {"type": "string", "enum": ["understood", "still_stuck", "mute"],
+                                       "description": "understood=懂了 / still_stuck=还是不会 / mute=别再提"}},
+                             ["concept", "kind"]),
+    "apply_mastery": _p({"node": {"type": "string", "description": "kg 节点 id,如 kg:LADR#..."},
+                         "mastery": {"type": "number", "description": "0~1,标已掌握用 0.9"}}, ["node", "mastery"]),
+    "relate_material": _p({"term": {"type": "string", "description": "知识点/概念名"},
+                           "order": {"type": "string", "enum": ["relevance", "recent"]},
+                           "when": {"type": "string", "description": "时间窗,如 本周/上个月"},
+                           "top": {"type": "integer"}}, ["term"]),
+    "read_material": _p({"ref": {"type": "string", "description": "材料地址:anki:123 / note:x.md / book:..#p9 / kg:书#节点"}}, ["ref"]),
+    "material_graph": _p({"ref": {"type": "string", "description": "材料地址"},
+                          "direction": {"type": "string", "enum": ["up", "down", "both"]},
+                          "depth": {"type": "integer"}}, ["ref"]),
+    "learning_focus": _p({"when": {"type": "string", "description": "今天/本周/上个月/最近三个月/全部"},
+                          "scope": {"type": "string", "enum": ["book", "convo"]},
+                          "top": {"type": "integer"}}),
+}
 XAI_RT_CRED = Path("~/.config/xai-grok.json").expanduser()          # 94:Grok Voice 第三引擎(协议兼容 OpenAI Realtime)
 XAI_RT_URL = "wss://api.x.ai/v1/realtime?model="
 
@@ -1488,7 +1536,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             await bws.close()
             return
     tools = [{"type": "function", "name": n, "description": str(line)[:1024],
-              "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}
+              "parameters": _TOOL_SCHEMAS.get(n) or {"type": "object", "properties": {}, "additionalProperties": True}}
              for n, line in lines.items()]
     tools.append({"type": "function", "name": "deep_think",
                   "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",

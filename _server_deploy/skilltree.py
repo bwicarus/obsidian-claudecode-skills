@@ -16,7 +16,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from flask import abort, jsonify, render_template, request, send_file
+from flask import abort, jsonify, render_template, request, send_file, session
+
+_QUIZZES = {}  # B2:quiz_id -> {book,node_id,stash:[{qid,node_id,layer,answer}],ts};答案只在服务端
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 KG_DIR = CLAUDE_DIR / "knowledge_graph"
@@ -1071,6 +1073,121 @@ def register_skilltree(app):
                 return jsonify({"ok": True, "tracked": n["tracked"]})
         return jsonify({"ok": False, "error": "node not found"}), 404
 
+
+    @app.route("/skilltree/<book>/api/quiz/<node_id>")
+    def skilltree_quiz(book, node_id):
+        """B2:为一个节点出分层诊断测验(前置链+目标),返回题目(**不含答案**),答案存服务端。"""
+        p, kg = _load_kg(book)
+        if not kg:
+            return jsonify({"ok": False, "error": "kg not found"}), 404
+        id2 = {n["id"]: n for n in kg.get("nodes", [])}
+        target = id2.get(node_id)
+        if not target:
+            return jsonify({"ok": False, "error": "node not found"}), 404
+        prereqs = []
+        for e in kg.get("edges", []):
+            if e.get("kind") == "prereq" and e.get("to") == node_id and e.get("from") in id2:
+                pn = id2[e["from"]]
+                if pn not in prereqs:
+                    prereqs.append(pn)
+        spec = [(pp, "prereq") for pp in prereqs[:2]] + [(target, "target")]
+        try:
+            import assistant as A
+        except Exception as e:
+            return jsonify({"ok": False, "error": "出题不可用:%s" % str(e)[:60]}), 500
+        questions, stash = [], []
+        for node, layer in spec:
+            q = A._gen_choice_question(node)
+            if not q:
+                continue
+            qid = "q%d" % len(stash)
+            questions.append({"qid": qid, "node_name": node.get("name"), "layer": layer,
+                              "text": q["text"], "options": q["options"]})
+            stash.append({"qid": qid, "node_id": "kg:%s#%s" % (book, node["id"]),
+                          "node_name": node.get("name"), "layer": layer, "answer": q["answer"]})
+        if not stash:
+            return jsonify({"ok": False, "error": "没能为该节点生成题目,稍后再试"})
+        import uuid as _uuid
+        qzid = _uuid.uuid4().hex[:12]
+        _QUIZZES[qzid] = {"book": book, "node_id": node_id, "stash": stash, "ts": time.time()}
+        for k in [k for k, v in _QUIZZES.items() if time.time() - v.get("ts", 0) > 3600]:
+            _QUIZZES.pop(k, None)
+        return jsonify({"ok": True, "quiz_id": qzid, "questions": questions})
+
+    @app.route("/skilltree/<book>/api/quiz-grade", methods=["POST"])
+    def skilltree_quiz_grade(book):
+        """B2:客观判分(picked==answer)→ 存检查报告(喂 A1 诊断融合)+ 出掌握度提案。"""
+        body = request.get_json(silent=True) or {}
+        qz = _QUIZZES.get(str(body.get("quiz_id") or ""))
+        if not qz or qz.get("book") != book:
+            return jsonify({"ok": False, "error": "测验已过期,请重新出题"}), 410
+        answers = body.get("answers") or {}
+        items, node_results = [], {}
+        for st in qz["stash"]:
+            pk = str(answers.get(st["qid"]) or "").strip().upper()[:1]
+            ok = bool(pk) and pk == st["answer"]
+            items.append({"qid": st["qid"], "node_name": st["node_name"], "layer": st["layer"],
+                          "ok": ok, "picked": pk or "(未答)", "answer": st["answer"]})
+            e = node_results.setdefault(st["node_id"], {"correct": 0, "total": 0, "layer": st["layer"],
+                                                        "name": st["node_name"]})
+            e["total"] += 1
+            e["correct"] += 1 if ok else 0
+        ncorr = sum(1 for it in items if it["ok"])
+        _p, kg = _load_kg(book)
+        rel = ""
+        try:
+            rel = (kg.get("pdf") or "").split("/obsidian/", 1)[1]
+        except Exception:
+            rel = "skilltree:%s" % book
+        try:
+            import assistant as A
+            uid = str(session.get("user_id") or "")
+            rep = "技能树测验《%s》:" % qz["node_id"] + "、".join(
+                "%s %s" % (it["node_name"], "对" if it["ok"] else "错") for it in items)
+            A._save_check_report(uid, "技能树测验·" + (items[-1]["node_name"] if items else book),
+                                 rel, rep, "%d/%d" % (ncorr, len(items)), node_results=node_results)
+        except Exception:
+            pass
+        props = []
+        for nid, e in node_results.items():
+            ratio = e["correct"] / e["total"] if e["total"] else 0
+            base = {"node": nid, "name": e.get("name"), "结果": "%d/%d" % (e["correct"], e["total"]),
+                    "layer": e.get("layer")}
+            if e["total"] and ratio >= 1.0:
+                base.update({"建议": "标为已掌握", "mastery": 0.9})
+            elif ratio < 0.5:
+                base.update({"建议": "根源在此前置,先补" if e.get("layer") == "prereq" else "目标没吃透,重学",
+                             "mastery": None})
+            else:
+                base.update({"建议": "再练练", "mastery": None})
+            props.append(base)
+        return jsonify({"ok": True, "score": "%d/%d" % (ncorr, len(items)), "items": items, "proposal": props})
+
+    @app.route("/skilltree/<book>/api/apply-mastery", methods=["POST"])
+    def skilltree_apply_mastery(book):
+        """B2:用户确认某条提案 → 写掌握度 override(即时生效,daily 重算不覆盖)。"""
+        body = request.get_json(silent=True) or {}
+        node = str(body.get("node") or "")
+        try:
+            mastery = float(body.get("mastery"))
+        except Exception:
+            return jsonify({"ok": False, "error": "mastery 要 0~1"}), 400
+        if not (0.0 <= mastery <= 1.0):
+            return jsonify({"ok": False, "error": "mastery 必须在 0~1"}), 400
+        if not node.startswith("kg:") or "#" not in node:
+            return jsonify({"ok": False, "error": "node 要 kg:书#id"}), 400
+        bk, nid = node[3:].split("#", 1)
+        _pp, _kgv = _load_kg(bk)   # 审查 #6:校验节点确实存在于该书 KG,别信客户端任意 node
+        if not _kgv or not any(x.get("id") == nid for x in _kgv.get("nodes", [])):
+            return jsonify({"ok": False, "error": "节点不存在:%s" % node}), 404
+        try:
+            sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
+            import mastery_overrides as MO
+            MO.set_override(bk, nid, mastery, source="skilltree-quiz", reason="技能树测验确认")
+        except Exception as e:
+            return jsonify({"ok": False, "error": "写 override 失败:%s" % str(e)[:60]}), 500
+        return jsonify({"ok": True, "node": node, "mastery": mastery,
+                        "note": "已写入 KG 掌握度(下次 daily 重算也不覆盖);技能树刷新后生效"})
 
     @app.route("/skilltree/<book>/api/edit", methods=["POST"])
     def skilltree_edit(book):

@@ -64,8 +64,10 @@ svg.canvas{display:block}
 .tile text.tcount{fill:#7dc4ff;text-anchor:middle;pointer-events:none;user-select:none;font-weight:600}
 /* mastery 四态：边框颜色清晰可见，无发光。让状态一眼可辨。*/
 .tile.mastered rect.tbox{stroke:#34d399;stroke-width:1.8;fill:#0e2118}
+.tile.engaged rect.tbox{filter:drop-shadow(0 0 3px #6ee7b7cc)}   /* C:参与度(查词/阅读/做过)绿晕 */
 .tile.mastered{color:#7be096}
 .tile.unlockable rect.tbox{stroke:#60a5fa;stroke-width:1.8;fill:#0e1a2e}
+.tile.in_progress rect.tbox{stroke:#2dd4bf;stroke-width:1.8;fill:#0c2422}   /* #1 进行中:达门槛可作前置但未真掌握 */
 .tile.unlockable{color:#a8cdff}
 .tile.previewable rect.tbox{stroke:#7889a3;stroke-width:1.5;fill:#141a28}
 .tile.previewable{color:#9aa9c3}
@@ -130,6 +132,8 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 #detail.theme-mastered::before{background:#34d399}
 #detail.theme-unlockable{border-left-color:#60a5fa;background:linear-gradient(180deg,#0e1f33 0%,#0a0e1a 35%)}
 #detail.theme-unlockable::before{background:#60a5fa}
+#detail.theme-in_progress{border-left-color:#2dd4bf}
+#detail.theme-in_progress::before{background:#2dd4bf}
 #detail.theme-previewable{border-left-color:#7889a3;background:linear-gradient(180deg,#161c2a 0%,#0a0e1a 35%)}
 #detail.theme-previewable::before{background:#7889a3}
 #detail.theme-locked{border-left-color:#3a4456;background:linear-gradient(180deg,#0e131e 0%,#0a0e1a 35%)}
@@ -166,6 +170,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 
 .badge{display:inline-block;padding:5px 12px;border-radius:14px;font-size:12px;margin-right:6px;margin-bottom:4px;font-weight:700}
 .b-mast{background:#10412a;color:#7be096;box-shadow:inset 0 0 0 1.5px #34d399}
+.b-prog{background:#0c2e2a;color:#5eead4;box-shadow:inset 0 0 0 1.5px #2dd4bf}
 .b-unl{background:#0e2342;color:#a8cdff;box-shadow:inset 0 0 0 1.5px #60a5fa}
 .b-prev{background:#1a2235;color:#b8c4d8;box-shadow:inset 0 0 0 1.5px #7889a3}
 .b-lock{background:#1f2530;color:#8a9bb4;box-shadow:inset 0 0 0 1px #4a5568}
@@ -205,6 +210,7 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
 .reco-item .sub{color:#8a9bb4;font-size:11px;margin-top:3px}
 </style></head>
 <body>
+<div id="flat-banner" style="display:none;position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:50;max-width:82vw;background:#1a2410ee;border:1px solid #3a4a1a;color:#c5e086;padding:7px 16px;font-size:12px;border-radius:8px;box-shadow:0 4px 16px #0008;line-height:1.5">📚 背诵型书（无前置依赖链）——节点不分解锁顺序;<b style="color:#6ee7b7">绿晕</b>=你查词/阅读/做过的(参与度)、<b style="color:#34d399">绿框</b>=已掌握。当清单/覆盖图用即可。</div>
 <div id="bar">
   <h1 onclick="location.href='/skilltree/'" title="点击进入技能树管理（切换/上传/生成/设置）" style="cursor:pointer">{{ book }} · 技能树 <span style="font-size:11px;color:#8a9bb4">▾</span></h1>
   <button id="back-btn" onclick="goBack()" title="返回上一级（Esc/Backspace）">◀</button>
@@ -244,6 +250,10 @@ g.locked-bar:hover text.locked-bar-label{fill:#9aa9c3}
     <div id="d-badges"></div>
     <div class="lbl">编号 · 类型</div><div class="v" id="d-label">—</div>
     <div class="lbl">描述</div><div class="v" id="d-summary">—</div>
+    <div id="d-quiz-wrap" style="display:none;margin-top:12px">
+      <button id="d-quiz-btn" onclick="startQuiz()" style="width:100%;padding:9px 0;background:#1a2a1a;border:1.5px solid #34d399;color:#6ee7b7;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">🎯 考考我（沿前置链出题·客观判分）</button>
+      <div id="d-quiz" style="margin-top:10px"></div>
+    </div>
     <div class="lbl">页码 · 路径</div><div class="v" id="d-path">—</div>
     <div class="lbl">关联</div><div class="v" id="d-link">—</div>
     <div class="lbl">前置（点跳）</div><ul class="prereqs" id="d-prereqs"></ul>
@@ -455,6 +465,8 @@ function buildAggregatedEdges(){
     }
     edgesByLevel[lv]=out;
   }
+  window.IS_FLAT = edgesByLevel[2].length===0;   // C:无前置边 = 背诵型书
+  try{ const fb=document.getElementById('flat-banner'); if(fb) fb.style.display=window.IS_FLAT?'block':'none'; }catch(e){}
 }
 function computeGlobalDepth(){
   for(const lv of [0,1,2]){
@@ -1045,13 +1057,14 @@ function tileClass(d, focusedId){
   const inTrash = (d.containing_notes || []).some(nt => nt.includes("回收站")) ? ' in-trash' : '';
   // 建议归档（未归档但被规则标记）—— 节点边缘金色虚线
   const suggested = (!inTrash && (KG && KG._archive_suggestions || []).includes(d.id)) ? ' archive-suggested' : '';
-  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}${suggested}`;
+  const engaged = (d.level===2 && (d.engaged||0) > 0.15) ? ' engaged' : '';   // C:参与度光晕
+  return `tile ${stateOf(d)}${d.id===focusedId?' focus':''}${role?' chain-'+role:''}${inferred}${bottleneck}${inTrash}${suggested}${engaged}`;
 }
 function edgeBaseClass(e){
   // 仅返回 "mast"/"unl"/"prev"/"lock"，供 marker-end 的 #arr-* 用
   const f=id2[e.from]; if(!f) return "lock";
   const s=stateOf(f);
-  return s==="mastered"?"mast":(s==="unlockable"?"unl":(s==="previewable"?"prev":"lock"));
+  return s==="mastered"?"mast":((s==="unlockable"||s==="in_progress")?"unl":(s==="previewable"?"prev":"lock"));
 }
 function edgeClass(e){
   const base = edgeBaseClass(e);
@@ -1401,6 +1414,58 @@ async function pruneNotes(){
   }
 }
 
+// B2:技能树内联诊断测验(考考我)——沿前置链出题、客观判分、喂 A1、确认改掌握度
+function _qEsc(x){return String(x==null?"":x).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+let _quizId=null, _quizPicks={};
+async function startQuiz(){
+  const nid=detailNodeId; if(!nid) return;
+  const box=document.getElementById("d-quiz"), btn=document.getElementById("d-quiz-btn");
+  btn.disabled=true; btn.textContent="⏳ 出题中…"; box.innerHTML=""; _quizPicks={};
+  try{
+    const r=await fetch(`/skilltree/${BOOK}/api/quiz/${encodeURIComponent(nid)}`);
+    const d=await r.json();
+    if(!d.ok){ box.innerHTML=`<div style="color:#f88;font-size:12px">${_qEsc(d.error||"出题失败")}</div>`; return; }
+    _quizId=d.quiz_id;
+    box.innerHTML=d.questions.map(q=>{
+      const opts=q.options.map((o,oi)=>{const L=String.fromCharCode(65+oi);
+        return `<div class="qopt" onclick="pickQuiz('${q.qid}','${L}',this)" style="padding:6px 10px;margin:3px 0;background:#0d1322;border:1px solid #2a3550;border-radius:6px;cursor:pointer;font-size:12px">${L}. ${_qEsc(o)}</div>`;}).join("");
+      const tag=q.layer==="prereq"?'<span style="color:#fbbf24">前置</span>':'<span style="color:#6ee7b7">目标</span>';
+      return `<div style="margin-bottom:12px"><div style="font-size:12px;margin-bottom:4px">${tag} <b>${_qEsc(q.node_name)}</b></div><div style="font-size:12px;margin-bottom:5px;line-height:1.5">${_qEsc(q.text)}</div>${opts}</div>`;
+    }).join("")+`<button onclick="submitQuiz()" style="width:100%;padding:8px 0;margin-top:4px;background:#1a2540;border:1px solid #3b6db5;color:#a8cdff;border-radius:8px;cursor:pointer;font-weight:600;font-size:12px">提交判分</button>`;
+  }catch(e){ box.innerHTML='<div style="color:#f88;font-size:12px">网络错误</div>'; }
+  finally{ btn.disabled=false; btn.textContent="🎯 重新考"; }
+}
+function pickQuiz(qid,L,el){
+  _quizPicks[qid]=L;
+  el.parentElement.querySelectorAll('.qopt').forEach(x=>{x.style.background="#0d1322";x.style.borderColor="#2a3550";});
+  el.style.background="#1a2a4a"; el.style.borderColor="#3b6db5";
+}
+async function submitQuiz(){
+  if(!_quizId) return;
+  const box=document.getElementById("d-quiz");
+  try{
+    const r=await fetch(`/skilltree/${BOOK}/api/quiz-grade`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({quiz_id:_quizId,answers:_quizPicks})});
+    const g=await r.json();
+    if(!g.ok){ box.innerHTML=`<div style="color:#f88;font-size:12px">${_qEsc(g.error||"判分失败")}</div>`; return; }
+    let h=`<div style="font-size:14px;font-weight:600;margin-bottom:8px">得分 ${_qEsc(g.score)}</div>`;
+    h+=g.items.map(it=>`<div style="font-size:12px;margin:3px 0">${it.ok?"✅":"❌"} ${_qEsc(it.node_name)} — 你选 ${_qEsc(it.picked)}${it.ok?"":`,正确 ${_qEsc(it.answer)}`}</div>`).join("");
+    h+='<div class="lbl" style="margin-top:10px">掌握度提案（你确认才改）</div>';
+    h+=g.proposal.map(p=>{
+      const b=(p.mastery!=null)?`<button onclick="applyQuizMastery('${p.node}',${p.mastery},this)" style="margin-left:6px;padding:3px 10px;background:#1a2a1a;border:1px solid #34d399;color:#6ee7b7;border-radius:6px;cursor:pointer;font-size:11px">✓ 标记掌握</button>`:"";
+      return `<div style="font-size:12px;margin:4px 0">${_qEsc(p.name)} ${_qEsc(p["结果"])} — ${_qEsc(p["建议"])}${b}</div>`;
+    }).join("");
+    box.innerHTML=h;
+  }catch(e){ box.innerHTML='<div style="color:#f88;font-size:12px">网络错误</div>'; }
+}
+async function applyQuizMastery(node,mastery,el){
+  el.disabled=true; el.textContent="⏳";
+  try{
+    const r=await fetch(`/skilltree/${BOOK}/api/apply-mastery`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({node,mastery})});
+    const d=await r.json();
+    el.textContent=d.ok?"✓ 已标记":"失败";
+    if(d.ok){ el.style.color="#6ee7b7"; setTimeout(()=>location.reload(),900); }
+  }catch(e){ el.textContent="失败"; }
+}
 async function createNote(nodeId){
   const btn = document.getElementById("btn-create-note");
   if(btn){ btn.disabled = true; btn.textContent = "⏳ AI 验证节点 + 生成笔记..."; btn.style.opacity = ".6"; }
@@ -1588,14 +1653,14 @@ function showDetail(n){
   const dt = document.getElementById("detail");
   dt.classList.add("open");
   // 整面板按 mastery 状态主题色（顶部色带 + 左边框 + 背景渐变）
-  dt.classList.remove("theme-mastered","theme-unlockable","theme-previewable","theme-locked");
+  dt.classList.remove("theme-mastered","theme-unlockable","theme-previewable","theme-locked","theme-in_progress");
   dt.classList.add("theme-" + stateOf(n));
   // detail 打开/关闭不再触发全图 re-render（避免每次重排 800 边 + 355 节点）；
   // fitToWidth 设置只在窗口 resize 时生效。detail 浮在右侧 360px 上方可接受。
   document.getElementById("d-name").textContent=n.name;
   const st=stateOf(n);
-  const sLabel={mastered:"✓ 已掌握", unlockable:"▶ 可学", locked:"🔒 未解锁"}[st] || "🔒 未解锁";
-  const sBadge={mastered:"b-mast", unlockable:"b-unl", locked:"b-lock"}[st] || "b-lock";
+  const sLabel={mastered:"✓ 已掌握", in_progress:"◐ 进行中", unlockable:"▶ 可学", locked:"🔒 未解锁"}[st] || "🔒 未解锁";
+  const sBadge={mastered:"b-mast", in_progress:"b-prog", unlockable:"b-unl", locked:"b-lock"}[st] || "b-lock";
   const badges=[`<span class="badge ${sBadge}">${sLabel}</span>`];
   if(n.level<2){
     badges.push(`<span class="badge b-type">L${n.level} ${n.level===0?'章':'节'}</span>`);
@@ -1631,6 +1696,7 @@ function showDetail(n){
   document.getElementById("d-badges").innerHTML=badges.join("");
   document.getElementById("d-label").textContent=[n.numeric_label||"", n.type||""].filter(Boolean).join(" · ") || (n.level===0?n.chapter_label:n.section_label)||"—";
   document.getElementById("d-summary").innerHTML=n.summary?marked.parse(n.summary):"—";
+  { const _qw=document.getElementById("d-quiz-wrap"); if(_qw){ _qw.style.display = n.level===2 ? "block" : "none"; document.getElementById("d-quiz").innerHTML=""; const _qb=document.getElementById("d-quiz-btn"); if(_qb) _qb.textContent="🎯 考考我（沿前置链出题·客观判分）"; } }
   const chain=[]; let cur=id2[n.parent_id]; while(cur){chain.unshift(cur.name); cur=id2[cur.parent_id]}
   const pages=n.pages||[];
   // 连续页码合并：[288,289,298] → [[288,289],[298]] → "p.288-289" "p.298"
@@ -1708,6 +1774,17 @@ function showDetail(n){
     const ul=document.getElementById(elId); ul.innerHTML="";
     if(n.level!==2){const li=document.createElement("li"); li.style.cursor="default"; li.style.color="#5a6680"; li.textContent="（聚合层：进入知识点视图后可见）"; ul.appendChild(li); return}
     let count=0;
+    // B1) 为什么锁着:node 是 locked 时,在前置列表顶部点名挡路的未掌握前置(=解锁的具体门槛)
+    if(dir==="prereq" && stateOf(n)==="locked"){
+      const blockers=[];
+      for(const e of edgesByLevel[2]) if(e.to===n.id){const o=id2[e.from]; if(o && stateOf(o)!=="mastered" && stateOf(o)!=="in_progress") blockers.push(o.name);}   /* 审查:in_progress 已满足解锁(level≥2),不再列为挡路,消除前后端矛盾 */
+      if(blockers.length){
+        const b=document.createElement("li");
+        b.style.cssText="cursor:default;background:#2a1f1f;border-color:#92400e;color:#fbbf24;font-weight:600;line-height:1.5";
+        b.innerHTML="🔒 未解锁 —— 先掌握这 "+blockers.length+" 个前置:"+blockers.map(x=>"「"+x+"」").join("、");
+        ul.appendChild(b);
+      }
+    }
     for(const e of edgesByLevel[2]) if(e[dir==="prereq"?"to":"from"]===n.id){
       const other=id2[e[dir==="prereq"?"from":"to"]]; if(!other) continue;
       const li=document.createElement("li");

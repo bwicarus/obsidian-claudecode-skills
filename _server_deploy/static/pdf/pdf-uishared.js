@@ -116,6 +116,8 @@ window._favOpenPicker = function () {
     '.up2-b-choice{flex-direction:column;align-items:stretch;justify-content:space-between;row-gap:2px}' +
     '.up2-c-q{color:#1e2a44}' +
     '.up2-c-opts{display:flex;flex-wrap:wrap;column-gap:1.2em;row-gap:2px;color:#33436a}' +
+    '.up2-c-opts span{cursor:pointer;padding:0 .3em;border-radius:4px;transition:background .1s}' +
+    '.up2-c-opts span.up2-c-sel{background:#2563eb;color:#fff}' +
     '.up2-c-ans{display:flex;align-items:flex-end;gap:6px}' +
     '.up2-b-ck{flex:none;width:1em;height:1em;border:1.5px solid #8fa2c8;border-radius:3px;margin-right:6px}' +
     '.up2-b-lab2{color:#33436a}' +
@@ -996,6 +998,9 @@ window._favOpenPicker = function () {
         if (_fired) return; _fired = true;
         var body = { rid: rec.run_id, event: ev, file: UP_FILE, upage: rec.id };   // file/upage:run 过期时后端按纸复活
         if (shots && shots.length) body.shots = shots;
+        var picks = {};   // 1b:点选的选择题答案 {block_id: 字母}(本纸;多纸未点选的走 AI)
+        (rec.blocks || []).forEach(function (b) { if (b.kind === 'choice' && b.picked && b.id) picks[b.id] = b.picked; });
+        if (Object.keys(picks).length) body.picks = picks;
         RC.reqJson('POST', '/pdf/api/run-event', body)
           .then(function (d) { _upRunResp(rec, d); }).catch(function () {});
       }
@@ -1050,11 +1055,25 @@ window._favOpenPicker = function () {
       } else if (b.kind === 'choice') {
         var cq = document.createElement('div'); cq.className = 'up2-c-q'; cq.textContent = b.text || b.label || '';
         var co = document.createElement('div'); co.className = 'up2-c-opts';
-        (b.options || []).forEach(function (o, oi) {
-          var it = document.createElement('span'); it.textContent = String.fromCharCode(65 + oi) + '. ' + o; co.appendChild(it);
-        });
         var ca = document.createElement('div'); ca.className = 'up2-c-ans';
         ca.innerHTML = '<span class="up2-b-lab">答:</span><span class="up2-b-box" style="flex:0 1 10em"></span>';
+        var _ansBox = ca.querySelector('.up2-b-box');
+        // 1b:选项可点选 → 客观判分依据(不点而手写则回退 AI 识别)
+        (b.options || []).forEach(function (o, oi) {
+          var letter = String.fromCharCode(65 + oi);
+          var it = document.createElement('span'); it.textContent = letter + '. ' + o;
+          it.setAttribute('role', 'button'); it.setAttribute('tabindex', '0');
+          if ((b.picked || '') === letter) it.classList.add('up2-c-sel');
+          it.addEventListener('click', function (ev) {
+            ev.stopPropagation();                                  // memory overlay-gate-use-bubble-not-capture
+            b.picked = letter;                                     // 存进块对象;check 时 _fire 收集进载荷
+            co.querySelectorAll('span').forEach(function (sp) { sp.classList.remove('up2-c-sel'); });
+            it.classList.add('up2-c-sel');
+            if (_ansBox) _ansBox.textContent = letter;
+          });
+          co.appendChild(it);
+        });
+        if (b.picked && _ansBox) _ansBox.textContent = b.picked;
         d.appendChild(cq); d.appendChild(co); d.appendChild(ca);
       } else if (b.kind === 'checkbox') {
         d.innerHTML = '<span class="up2-b-ck"></span><span class="up2-b-lab2">' + RC.esc(b.label || '') + '</span>';

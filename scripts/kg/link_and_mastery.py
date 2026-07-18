@@ -120,6 +120,114 @@ def card_mastery(card: dict, rec: dict) -> float | None:
     return None
 
 
+def _diag_counts(book):
+    """E:每节点诊断 (correct, total)(比 _diagnostic_mastery 多带次数,判可疑边要够样本)。"""
+    import glob as _glob
+    out = {}
+    cdir = config.PROJECT_DIR / "state" / "reader-check-reports"
+    for f in _glob.glob(str(cdir / "*.json")):
+        try:
+            reps = json.loads(Path(f).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for r in reps:
+            if not isinstance(r, dict) or r.get("sandbox"):
+                continue
+            for nid, e in (r.get("node_results") or {}).items():
+                if not isinstance(nid, str) or not nid.startswith("kg:"):
+                    continue
+                b, _, bare = nid[3:].partition("#")
+                if b != book or not bare:
+                    continue
+                c, t = out.get(bare, (0, 0))
+                out[bare] = (c + int(e.get("correct") or 0), t + int(e.get("total") or 0))
+    return out
+
+
+def _flag_suspect_edges(kg, book):
+    """E:诊断反哺边质量。前置 from 通过率高(≥0.7)但目标 to 通过率低(≤0.4)、且都测过≥2次 →
+    学前置没帮上解锁 to → prereq 边可疑,打 diag_suspect(前端可显虚红,人工复核)。"""
+    dc = _diag_counts(book)
+    n = 0
+    for e in kg.get("edges", []):
+        if e.get("kind") != "prereq":
+            continue
+        fc = dc.get(e.get("from"))
+        tc = dc.get(e.get("to"))
+        e.pop("diag_suspect", None)
+        if not fc or not tc or fc[1] < 2 or tc[1] < 2:
+            continue
+        fr = fc[0] / fc[1]
+        tr = tc[0] / tc[1]
+        if fr >= 0.7 and tr <= 0.4:
+            e["diag_suspect"] = "前置通过 %d/%d 但目标仅 %d/%d,学前置没帮上解锁目标" % (fc[0], fc[1], tc[0], tc[1])
+            n += 1
+    return n
+
+
+def _engagement(kg):
+    """A2:注意力事件在节点页面上的参与度 -> engaged 标记(诚实的"读过/在学",**不算掌握**,不进 mastery)。
+    渠道加权:note/highlight/qa/check 强,lookup/read 弱;按本书最活跃节点归一到 0-1。"""
+    import sqlite3 as _sq
+    pdf = kg.get("pdf") or ""
+    rel = pdf.split("/obsidian/", 1)[1] if "/obsidian/" in pdf else ""
+    if not rel:
+        return {}
+    db = config.PROJECT_DIR / "state" / "attention" / "events.db"
+    if not db.exists():
+        return {}
+    W = {"highlight": 3.0, "note": 5.0, "qa": 2.0, "check": 4.0, "lookup": 0.3, "read": 0.5, "anki_lapse": 1.0}
+    page_w = {}
+    try:
+        con = _sq.connect("file:%s?mode=ro" % db, uri=True)
+        for pg, ch, cnt in con.execute(
+                "SELECT page, channel, COUNT(*) FROM events WHERE file=? AND page>0 GROUP BY page, channel", (rel,)):
+            page_w[pg] = page_w.get(pg, 0.0) + W.get(ch, 0.5) * cnt
+        con.close()
+    except Exception:
+        return {}
+    if not page_w:
+        return {}
+    raw = {}
+    for n in kg.get("nodes", []):
+        if n.get("level") != 2:
+            continue
+        pgs = n.get("pages") or []
+        if not pgs:
+            continue
+        lo, hi = pgs[0], pgs[-1]
+        e = sum(w for p, w in page_w.items() if lo <= p <= hi)
+        if e > 0:
+            raw[n["id"]] = e
+    mx = max(raw.values()) if raw else 1.0
+    return {k: round(min(1.0, v / mx), 3) for k, v in raw.items()}
+
+
+def _diagnostic_mastery(book):
+    """A1:诊断卷客观结果 -> 每节点 mastery(把 ① 诊断卷判分接进 KG 掌握度)。
+    读所有用户检查报告的 node_results,按本书节点累计 correct/total -> 得分。"""
+    import glob as _glob
+    out = {}
+    cdir = config.PROJECT_DIR / "state" / "reader-check-reports"
+    for f in _glob.glob(str(cdir / "*.json")):
+        try:
+            reps = json.loads(Path(f).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for r in reps:
+            if not isinstance(r, dict) or r.get("sandbox"):
+                continue
+            for nid, e in (r.get("node_results") or {}).items():
+                if not isinstance(nid, str) or not nid.startswith("kg:"):
+                    continue
+                b, _, bare = nid[3:].partition("#")
+                if b != book or not bare:
+                    continue
+                c, t = out.get(bare, (0, 0))
+                out[bare] = (c + int(e.get("correct") or 0), t + int(e.get("total") or 0))
+    return {k: (c / t) for k, (c, t) in out.items() if t}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kg", required=True)
@@ -183,6 +291,12 @@ def main() -> int:
                     if mv is not None: ms.append(mv)
         n["mastery"] = max(ms) if ms else None
         n["has_cards"] = bool(n.get("card_refs"))
+    # A1) 诊断卷客观结果**只当证据**存 mastery_diag,**不折进 mastery**。
+    #     铁律:掌握度更新必须经 proposal → 用户确认 → override,不在 daily 自动改(审查 #2)。
+    _diag = _diagnostic_mastery(kg.get("book") or "")
+    for n in nodes:
+        if n["level"] == 2 and n["id"] in _diag:
+            n["mastery_diag"] = round(_diag[n["id"]], 3)
     # 聚合 L1/L0：子节点 mastery 均值（只算有 has_cards 的 L2；其它跳过）
     children = defaultdict(list)
     for n in nodes:
@@ -245,6 +359,18 @@ def main() -> int:
         if n["level"] in (0, 1):
             n["mastery"] = agg(n)
 
+    # 2.9) 人工掌握度 override(诊断卷客观证据+用户确认;在状态计算前注入 → 解锁沿 DAG 传播)
+    try:
+        try:
+            from mastery_overrides import apply_to_kg as _apply_ov
+        except Exception:
+            from kg.mastery_overrides import apply_to_kg as _apply_ov
+        _n_ov = _apply_ov(kg)
+        if _n_ov:
+            print(f"  应用掌握度 override: {_n_ov} 个节点(人工确认)")
+    except Exception as _e:
+        print("  (override 层跳过:%s)" % str(_e)[:60])
+
     # 3) 状态计算（三态 DAG，前置严格）
     # 规则（"可学"必须前置全满足）：
     #   prereq 链未通 → locked（不管自己 mastery 多高）
@@ -303,14 +429,18 @@ def main() -> int:
             label = (n.get("numeric_label") or "").strip()
             if label and not label.startswith("1."):
                 prereqs_clear = False
-        has_own_notes = bool(n.get("note_ref_ai_verified") and n.get("containing_notes"))
+        has_own_notes = bool((n.get("note_ref_ai_verified") and n.get("containing_notes"))
+                             or n.get("mastery_override"))   # 诊断证据不当"有掌握"(审查 #2);override 已确认保留
         inferred = n.get("mastery_inferred", False)
         m = n.get("mastery")
         # 自身 level 跟前置无关——反映自己掌握程度
         level = compute_level(n, m, has_own_notes, inferred)
-        # state 由 level + 前置链综合决定（前端三态）
+        # state:level + 前置链(审查 #1 拆分——"解锁下游"用 level≥2,"绿色已掌握"要 mastery≥0.8)
+        _mm = m if m is not None else 0
         if level >= 2:
-            state = "mastered"
+            # 达门槛(level≥2)= 可作前置解锁下游;但只有真掌握(≥0.8)才 mastered(绿),
+            # 0.20~0.8 = 进行中(in_progress:已在学、可作前置,但不算已掌握)。
+            state = "mastered" if _mm >= 0.8 else "in_progress"
         elif level == 1:
             state = "unlockable"     # 刚建笔记，可学但未达门槛
         elif prereqs_clear:
@@ -324,7 +454,7 @@ def main() -> int:
             if remaining[v] == 0:
                 queue_l2.append(v)
     # 落到 L2 节点字段
-    open_set = {"unlockable", "mastered"}
+    open_set = {"unlockable", "mastered", "in_progress"}
     for n in nodes:
         if n["level"] == 2:
             st = state_map.get(n["id"], "locked")
@@ -337,10 +467,9 @@ def main() -> int:
     # 4) 瓶颈节点评分（💎）：每个 non-mastered 节点 → 假设它 mastered，
     # 看它的直接 successors 中有多少 currently locked 节点会立即变 unlockable
     # （即除该 candidate 外所有其它 prereq 都已 mastered）
-    mastered_set = {nid for nid, st in state_map.items() if st == "mastered"}
     for n in nodes:
         if n["level"] != 2: continue
-        if state_map.get(n["id"]) == "mastered":
+        if level_map.get(n["id"], 0) >= 2:   # 已达门槛(可作前置)=不卡任何人,非瓶颈
             n["bottleneck_score"] = 0
             continue
         score = 0
@@ -348,12 +477,12 @@ def main() -> int:
             if state_map.get(v) != "locked": continue
             # v 的其它 prereqs（除 n.id 外）是否都已 mastered
             other_prs = [p for p in prereqs_of.get(v, []) if p != n["id"]]
-            if all(state_map.get(p) == "mastered" for p in other_prs):
+            if all(level_map.get(p, 0) >= 2 for p in other_prs):   # 其它前置达门槛(审查 #1:解锁靠 level 非 state)
                 score += 1
         n["bottleneck_score"] = score
 
     # L0/L1 聚合：取子孙 L2 的最强状态
-    STATE_ORDER = {"locked":0, "unlockable":1, "mastered":2}
+    STATE_ORDER = {"locked":0, "unlockable":1, "in_progress":2, "mastered":3}   # 审查:漏 in_progress 致父层聚合把 22 节点当 locked
     def agg_state(node):
         kids = children.get(node["id"], [])
         if not kids: return "locked"
@@ -368,6 +497,42 @@ def main() -> int:
             n["state"] = agg_state(n)
             n["unlocked"] = n["state"] in open_set
             n["mastered"] = n["state"] == "mastered"
+
+    # A2) 参与度标记(engaged:读过/在学,独立于 mastery,前端另显;诚实不虚增进度)
+    _eng = _engagement(kg)
+    for n in nodes:
+        if n["level"] == 2:
+            n["engaged"] = _eng.get(n["id"], 0)
+
+    # E) 诊断反哺边质量:标可疑 prereq 边(诊断数据够了才有,随测验累积激活)
+    _nsus = _flag_suspect_edges(kg, kg.get("book") or "")
+    if _nsus:
+        print("  可疑 prereq 边(诊断反哺):%d" % _nsus)
+
+    # ★彻底拆 progress × availability 两个正交维度(审查 #1,用户选 A:达门槛即满足前置)。
+    #   progress(只看自己掌握程度):unseen / in_progress / mastered
+    #   availability(只看前置是否满足):locked / open —— 前置的 progress∈{in_progress,mastered} 即满足(A)
+    #   state = 二者的**干净派生**(A 语义下与上面拓扑一致,只是把纠缠的单字段拆成两维显式暴露)。
+    for n in nodes:
+        st0 = n.get("state", "locked")
+        if n["level"] == 2:
+            m = n.get("mastery")
+            if m is not None and m >= MASTERED_THRESHOLD:
+                prog = "mastered"
+            elif n.get("mastery_level", 0) >= 2 or n.get("mastery_inferred"):
+                prog = "in_progress"
+            else:
+                prog = "unseen"
+        else:   # L0/L1:无直接 mastery,从聚合 state 反推 progress
+            prog = {"mastered": "mastered", "in_progress": "in_progress"}.get(st0, "unseen")
+        avail = "locked" if st0 == "locked" else "open"
+        n["progress"] = prog
+        n["availability"] = avail
+        # 干净派生 state:availability=locked→locked;否则按 progress(unseen→unlockable=可学没碰)
+        n["state"] = "locked" if avail == "locked" else \
+            {"mastered": "mastered", "in_progress": "in_progress"}.get(prog, "unlockable")
+        n["unlocked"] = (avail == "open")
+        n["mastered"] = (prog == "mastered")
 
     if not args.in_place:
         print("（dry-run，未写回；加 --in-place 应用）")

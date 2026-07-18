@@ -41,11 +41,18 @@ _lock = threading.Lock()
 # 前端在点「检查」时随请求带来的**整页渲染截图**(所见即所得,题目+手写都在),按 rid 暂存,
 # _check_page 取用后即弃。存内存不落 run 文件(base64 大,别撑爆 state/reader-runs)。
 _CHECK_SHOTS = {}
+_CHECK_PICKS = {}
 
 
 def set_check_shots(rid, shots):
     if rid and isinstance(shots, list):
         _CHECK_SHOTS[str(rid)] = [s for s in shots if isinstance(s, dict) and s.get("b64")][:8]
+
+
+def set_check_picks(rid, picks):
+    """1b:前端点选的选择题答案 {block_id: 'C'}(check 时随载荷带来),_check_page 取用即弃。"""
+    if rid and isinstance(picks, dict):
+        _CHECK_PICKS[str(rid)] = {str(k): str(v)[:4] for k, v in picks.items() if v}
 
 
 # ── 存储 ──────────────────────────────────────────────────────────────────────
@@ -553,6 +560,55 @@ def _grade_report(run, res):
     return "\n".join(out)
 
 
+def _objective_grade(qlist):
+    """1a 客观判分:choice 有 picked → picked==answer 确定性判分(不烧 AI)。
+    qlist=[{n, block}]。全部可客观判(无 blank、无未点选 choice)→ 返回 {items,score,brief};
+    只要有一题要手写识别 → 返回 None(交给 AI 视觉路径)。"""
+    if not qlist:
+        return None
+    for it in qlist:
+        b = it["block"]
+        if b.get("kind") == "blank" or (b.get("kind") == "choice" and not b.get("picked")):
+            return None
+    items = []
+    ncorrect = 0
+    for it in qlist:
+        b = it["block"]
+        pk = str(b.get("picked") or "").strip().upper()[:1]
+        ans = str(b.get("answer") or "").strip().upper()[:1]
+        ok = bool(pk) and pk == ans
+        ncorrect += ok
+        d = {"n": it["n"], "ok": ok, "got": b.get("picked") or "(未答)",
+             "note": "" if ok else ("正确答案 " + (str(b.get("answer") or "?")))}
+        if b.get("node_id"):
+            d["node_id"] = b["node_id"]
+        if b.get("layer") is not None:
+            d["layer"] = b["layer"]
+        items.append(d)
+    return {"items": items, "score": "%d/%d" % (ncorrect, len(qlist)),
+            "brief": "客观判分(选择题点选)"}
+
+
+def _attach_nodes(res, qlist):
+    """手写路径:AI 判分后,给每个 item 挂 node_id/layer(供②按节点聚合);
+    对有 picked 的 choice 用客观结果覆盖 AI 的判断(点选比 AI 看图更可靠)。"""
+    qbyn = {it["n"]: it["block"] for it in qlist}
+    for d in (res.get("items") or []):
+        b = qbyn.get(d.get("n"))
+        if not b:
+            continue
+        if b.get("kind") == "choice" and b.get("picked"):
+            pk = str(b.get("picked")).strip().upper()[:1]
+            ans = str(b.get("answer") or "").strip().upper()[:1]
+            d["ok"] = bool(pk) and pk == ans
+            d["got"] = b.get("picked")
+        if b.get("node_id"):
+            d["node_id"] = b["node_id"]
+        if b.get("layer") is not None:
+            d["layer"] = b["layer"]
+    return res
+
+
 def _check_page(rid, prompt_hint=""):
     """★ 阶段 B 的核心:让 AI 看这一页的手写并点评。**任意纸通用**(不只听写)。
     按每个 blank 的 rect 裁出手写(有 answer 字段就带上正确答案);题号/答案在 prompt 里用文字给。
@@ -575,9 +631,11 @@ def _check_page(rid, prompt_hint=""):
         rel = run["file"]
         ap = P._safe_vault_path(rel)
         shots = _CHECK_SHOTS.pop(rid, None)               # 前端渲染的整页截图(所见即所得:题目+手写都在图上)
+        _picks = _CHECK_PICKS.pop(rid, None) or {}         # 1b:点选答案 {block_id: 字母}
         images = []
         lines = []
         qn = 0                                            # 跨页连续空号
+        qlist = []
         if shots:
             # ★ 首选:用**前端截图**(题干和手写都在,AI 看到的跟用户一样,最准)。按页对到每张图,
             #   每个空只需说"第 M 张图 从上往下第 K 个空 标准答案 X",AI 直接读页面判断。
@@ -613,6 +671,9 @@ def _check_page(rid, prompt_hint=""):
                                 key=lambda b: b["rect"][1])   # 从上到下
                 for k, b in enumerate(blanks):
                     qn += 1
+                    if _picks.get(b.get("id")):
+                        b["picked"] = _picks[b["id"]]
+                    qlist.append({"n": qn, "block": b})
                     ans = b.get("answer")
                     _ch = "(选择题,答字母即可)" if b.get("kind") == "choice" else ""
                     lines.append("第 %d 空 = 第 %d 张图从上往下第 %d 个空%s%s" % (qn, imgno, k + 1, _ch,
@@ -646,6 +707,9 @@ def _check_page(rid, prompt_hint=""):
                 bh = (box[3] - box[1]) or 1e-6
                 for b in blanks:
                     qn += 1
+                    if _picks.get(b.get("id")):
+                        b["picked"] = _picks[b["id"]]
+                    qlist.append({"n": qn, "block": b})
                     cy = ((b["rect"][1] + b["rect"][3]) / 2 - box[1]) / bh
                     ans = b.get("answer")
                     lines.append("第 %d 空:第 %d 张图 纵向约 %d%% 处%s" % (qn, imgno, round(cy * 100),
@@ -656,18 +720,23 @@ def _check_page(rid, prompt_hint=""):
                     + _instr
                     + '\n**只输出 JSON**:{"items":[{"n":1,"ok":true,"got":"识别内容","note":"点评"}],'
                     + '"score":"可空","brief":"总评"}')
-        if not images:
-            run.update(status="error", error="这页没有可检查的手写填空(还没写?)")
-            _save(run)
-            _push_run(run)
-            return
-        out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""),
-                              max_images=min(len(images), 8))
-        try:
-            m = _re.search(r"\{.*\}", out or "", _re.S)
-            res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}
-        except Exception:
-            res = {"brief": (out or "")[:400]}
+        _obj = _objective_grade(qlist)
+        if _obj is not None:
+            res = _obj                                    # 1a:全是点选的选择题 → 客观判分,不烧 AI
+        else:
+            if not images:
+                run.update(status="error", error="这页没有可检查的手写填空(还没写?)")
+                _save(run)
+                _push_run(run)
+                return
+            out = A.reader_vision(images, base, action="dictation_grade", uid=str(run.get("uid") or ""),
+                                  max_images=min(len(images), 8))
+            try:
+                m = _re.search(r"\{.*\}", out or "", _re.S)
+                res = json.loads(m.group(0)) if m else {"brief": (out or "")[:400]}
+            except Exception:
+                res = {"brief": (out or "")[:400]}
+            _attach_nodes(res, qlist)                     # 手写路径:挂 node_id/layer + 覆盖点选项
         # 检查结果是 **AI 的回复** → 放**卡片里**(用户拍板:AI 的回复在卡片中输出),
         #   **绝不塞进纸的格子** —— 一大段 markdown 当 text 块塞格子,布局器按字数估成几十行、
         #   字号=格高×ratio 就爆炸撑破整页(用户实测那张巨字图的根因)。
@@ -723,8 +792,16 @@ def _check_page(rid, prompt_hint=""):
         _lk = (run.get("params") or {}).get("lookups") or None
         try:
             import assistant as A
+            _nres = {}
+            for _it in (res.get("items") or []):
+                _nid = _it.get("node_id")
+                if not _nid:
+                    continue
+                _e = _nres.setdefault(_nid, {"correct": 0, "total": 0, "layer": _it.get("layer")})
+                _e["total"] += 1
+                _e["correct"] += 1 if _it.get("ok") else 0
             _cname = A._save_check_report(run.get("uid"), _cname or "练习纸检查", run.get("file"), rai, _cscore,
-                                          src_page=_srcp, lookups=_lk)
+                                          src_page=_srcp, lookups=_lk, node_results=(_nres or None))
         except Exception:
             _cname = _cname or "练习纸检查"
         run.update(status="done", result=res, result_md=rmd, result_ai=rai,

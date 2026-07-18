@@ -1413,6 +1413,9 @@ def pdf_api_run_event():
     shots = b.get("shots")   # 检查时前端带来的整页渲染截图(所见即所得)→ 暂存给 _check_page 用
     if isinstance(shots, list) and shots:
         TR.set_check_shots(rid, shots)
+    _picks = b.get("picks")
+    if isinstance(_picks, dict) and _picks:
+        TR.set_check_picks(rid, _picks)
     res = TR.advance(rid, ev)
     # ★检查按钮永不死:run 过期/已终态时(纸是隔天写完的常态),按纸 sidecar 复活一个 run 再检查
     if ev == "check" and (not res.get("ok") or res.get("status") in ("cancelled", "done", "error")):
@@ -1424,6 +1427,8 @@ def pdf_api_run_event():
                 rid2 = rv["rid"]
                 if isinstance(shots, list) and shots:
                     TR.set_check_shots(rid2, shots)
+                if isinstance(_picks, dict) and _picks:
+                    TR.set_check_picks(rid2, _picks)
                 res = TR.advance(rid2, ev)
                 res["rid"] = rid2   # 前端把纸上的 run_id 换成新的
     return jsonify(res)

@@ -51,7 +51,7 @@ STATE = Path(PROJECT_DIR) / "state"
 #   可靠性:不做不可逆截断(源可重算的才允许截);账本(无上游)一律全文;抽取器版本可追。
 #   及时性:**读时保证新鲜**(_ensure_fresh:源 mtime 变了就增量导入)——不靠 15min timer。
 #   可回溯性:每个焦点词带证据链(evidence 事件 id + 分数构成 by_channel),explain() 可查。
-EXTRACTOR_VER = 4      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)
+EXTRACTOR_VER = 7      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6)
 TERMS_MAX = 40         # 单事件术语上限(原 12 → 实测 4 条事件撞顶=真丢词;40 足够,存的是 JSON 数组)
 TEXT_MAX = 4000        # 派生索引里留的原文(源还在,截了也能重算;账本不截,见 append_raw)
 
@@ -332,21 +332,32 @@ def _cut_zh(text):
     return _jieba.lcut(text)
 
 
-def _dedup_nest(terms):
+def _dedup_nest(terms, text=""):
     """★去重 + **长词组吃掉被它包含的短词**(用户的「词组包含问题」)。
     原文里既然是「向量空间的定义」,就不该同时再记「向量空间」「向量」「空间」——
     否则同一处注意力被计四遍、榜单被同一概念的碎片占满。
     ⚠ 只在**同一段文本内**做(跨事件不做):同一句里出现长词组 = 这次的注意力就是它;
       别的地方单独出现「向量」时,那是另一次注意力,照记不误。"""
-    out, seen = [], set()
-    for t in sorted(dict.fromkeys(terms), key=len, reverse=True):     # 长的先占位
-        tl = str(t).lower()
-        if not tl or tl in seen:
-            continue
-        if any(tl in k and tl != k for k in seen):                    # 被已录的更长术语包含 → 跳过
-            continue
-        seen.add(tl)
-        out.append(t)
+    from collections import Counter
+    cnt = Counter(str(t).lower() for t in terms if str(t).strip())
+    forms = {}
+    for t in terms:                                                   # 显示原形(首个胜出)
+        forms.setdefault(str(t).lower(), t)
+    tl_text = (text or "").lower()                                    # ★用**原文**数独立出现(不靠 span 也能判:审查 #6)
+    out, kept = [], []
+    for tl in sorted(cnt, key=len, reverse=True):                     # 长的先占位
+        # 原文里这个短词被已保留的更长术语"包住"的次数;occ - eaten = 独立出现次数
+        if tl_text:
+            _cont = [k for k in kept if tl in k and tl != k]
+            _maximal = [k for k in _cont if not any(k in k2 and k != k2 for k2 in _cont)]   # 极大包含词(不被其它已保留长词再包含)→ 避免嵌套双重扣减(审查 #4)
+            eaten = sum(tl_text.count(k) for k in _maximal)
+            occ = tl_text.count(tl)
+        else:
+            eaten = sum(cnt[k] for k in kept if tl in k and tl != k)
+            occ = cnt[tl]
+        if occ - eaten > 0:                                          # 有独立出现 → 保留(第二句独立的"向量"不再被吞)
+            out.append(forms[tl])
+        kept.append(tl)
     return out
 
 
@@ -417,7 +428,7 @@ def extract_terms(text, hint="", lang=None):
         lw = w.lower()
         if lw not in _STOP_EN:
             out.append(lw)
-    return _dedup_nest(out)[:60]
+    return _dedup_nest(out, text)[:60]
 
 
 # ── 事件层 ─────────────────────────────────────────────────────────────────────
@@ -794,14 +805,25 @@ def import_notes(c):
             continue
         try:
             st = f.stat()
-            txt = f.read_text("utf-8")[:4000]
+            raw = f.read_text("utf-8")
         except Exception:
             continue
-        # 去 frontmatter + 取标题与首段
+        # #3(审查):Excalidraw 笔记**先读全**,只取 ## Text Elements(真文字),丢弃 banner/Drawing/Embedded Files;
+        #   别先截断——原实现截到 4000 字把 %% 闭合符和 banner 都切掉了,正则失效(52 条 note 仍含 excalidraw)。
+        if ("excalidraw-plugin:" in raw[:400]) or ("## Text Elements" in raw):
+            _m = re.search(r"##\s*Text Elements\s*\n(.*?)(?:\n#{1,2}\s|\n%%|\Z)", raw, re.S)
+            txt = (_m.group(1) if _m else "")[:4000]
+        else:
+            txt = raw[:4000]
+        # 去 frontmatter
         if txt.startswith("---"):
             _e = txt.find("\n---", 3)
             if _e > 0:
                 txt = txt[_e + 4:]
+        # 残留清洗:%% 绘图块、compressed-json/excalidraw/drawing 代码块、超长 base64/哈希串
+        txt = re.sub(r"%%[\s\S]*?%%", " ", txt)
+        txt = re.sub(r"```(?:compressed-json|excalidraw|drawing|json)[\s\S]*?```", " ", txt)
+        txt = re.sub(r"\S{45,}", " ", txt)
         body = " ".join(x.strip("#> -*") for x in txt.split("\n") if x.strip())[:NOTE_MAX_CHARS]
         body = (f.stem + " " + body).strip()
         if len(body) < 4:
@@ -859,7 +881,7 @@ def rebuild_profile(c, now=None):
             continue
         dt_d = max(0.0, (now - ts) / 86400.0)
         day = int(ts // 86400)
-        if file:
+        if file and ch not in ("note", "anki_lapse"):   # #6 IDF 只数真书(排除笔记/卡)
             all_books.add(file)
         _uterms = set(terms)
         w = w / math.sqrt(max(1, len(_uterms)))   # 事件内稀释:一句话提 N 个词,每词注意力 = w/√N(防长报告/长提问轰炸)
@@ -871,7 +893,7 @@ def rebuild_profile(c, now=None):
             sat = 1.0 / (1.0 + 0.3 * (day_seen[(t, day)] - 1))     # 同日重复贡献递减(防刷量)
             S_s[t] += w * sat * (2 ** (-dt_d / HALF_SHORT_D))
             S_l[t] += w * sat * (2 ** (-dt_d / HALF_LONG_D))
-            if file:
+            if file and ch not in ("note", "anki_lapse"):   # #6 同上
                 books[t].add(file)
             if dt_d <= 7:
                 cnt7[t] += 1
@@ -1418,6 +1440,21 @@ def _material_label_kg(ref):
     pass
 
 
+def _safe_vault_path(rest, exts=(".md",)):
+    """#5 安全:material ref 的路径必须 resolve 后仍在 vault 内,且扩展名白名单。
+    挡绝对路径(note:/etc/passwd)、.. 越界、非白名单扩展。返回 Path 或 None。"""
+    try:
+        root = Path(VAULT_ROOT).resolve()
+        pth = (root / str(rest)).resolve()
+    except Exception:
+        return None
+    if pth != root and root not in pth.parents:
+        return None
+    if exts and pth.suffix.lower() not in exts:
+        return None
+    return pth
+
+
 def read_material(ref, limit=1500):
     """★material ref → **详细内容**(用户实锤:能看到材料却读不到内容)。统一取详细内容入口,
     下游(出题/复习/AI 分析)靠它把「地址」变成「内容」。
@@ -1437,6 +1474,8 @@ def read_material(ref, limit=1500):
         return {"error": "ref 格式不对:%s" % ref}
     if kind == "book":
         f, _, pg = rest.partition("#p")
+        if f.startswith("/") or ".." in f.split("/"):
+            return {"error": "非法书路径:%s" % f[:60]}
         page = int(pg) if pg.isdigit() else 0
         txt = _page_text(f, page, limit=limit) if page else ""
         if not txt:
@@ -1444,8 +1483,11 @@ def read_material(ref, limit=1500):
                     "content": "", "note": "这页没缓存正文;用 read_page(file='%s', page=%d) 读" % (f, page)}
         return {"ok": True, "ref": ref, "kind": "book", "title": _material_label(ref), "content": txt}
     if kind == "note":
+        _np = _safe_vault_path(rest, exts=(".md",))
+        if not _np:
+            return {"error": "非法笔记路径(越界/非 .md):%s" % str(rest)[:60]}
         try:
-            body = (Path(VAULT_ROOT) / rest).read_text("utf-8")
+            body = _np.read_text("utf-8")
         except Exception as e:
             return {"error": "读笔记失败:%s" % str(e)[:60]}
         if body.startswith("---"):                 # 跳过 frontmatter(anki_total 等元数据不是内容)
@@ -1747,7 +1789,8 @@ def fit_weights(dry=False):
     X, y = [], []
     for a_, b_, src in pos:
         f_ = _feat(a_, b_)
-        if src == "dict" and f_[1] < 0.34:           # 词典对但向量远 → 大概率一词多义的错义,不当正例
+        if src == "dict" and f_[1] < 0.34:   # 词典命中但向量远(preface↔向量类)→ 当 **D=1 的负例**(破 D 泄漏,审查 #3:负例也含 D=1,D 不能靠抄标签)
+            X.append(f_); y.append(0)
             continue
         X.append(f_); y.append(1)
     for a_, b_, src in neg:
