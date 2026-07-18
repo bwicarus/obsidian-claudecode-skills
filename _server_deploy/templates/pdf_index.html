@@ -72,7 +72,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
          oncontextmenu="return ctxDel(event,this)">
       <div class="pdf-row" onclick="openBook(event,this)">
         <div style="flex:1;min-width:0">
-          <div class="pdf-name">{% if p.kind == 'epub' %}<span style="display:inline-block;font-size:10px;background:#2b3f6e;color:#bcd2ff;border-radius:4px;padding:1px 5px;margin-right:6px;vertical-align:1px">EPUB</span>{% endif %}{{ p.name }}</div>
+          <div class="pdf-name">{% if p.kind == 'epub' %}<span style="display:inline-block;font-size:10px;background:#2b3f6e;color:#bcd2ff;border-radius:4px;padding:1px 5px;margin-right:6px;vertical-align:1px">EPUB</span>{% endif %}{% if p.group %}📚 {{ p.group.label }} <span style="display:inline-block;font-size:10px;background:#3a2a55;color:#c4b5fd;border-radius:4px;padding:1px 5px;margin-left:6px;vertical-align:1px">合卷×{{ p.group.count }}{% if p.group.total_pages %} · {{ p.group.total_pages }}页{% endif %}</span>{% else %}{{ p.name }}{% endif %}</div>
           <div class="pdf-meta"><span class="pdf-dir">{{ p.dir }}</span> · {{ p.size_kb }} KB{% if p.kind == 'epub' %} · 原生 reflow{% endif %}</div>
         </div>
         {% if p.kind != 'epub' %}
@@ -200,8 +200,25 @@ async function ctxRename() {
   const cur = item.dataset.disp, base = cur.replace(/\.pdf$/i, '');
   const nn = prompt('重命名《' + cur + '》\n输入新文件名（可不带 .pdf）：', base);
   if (nn === null) return;
-  const name = nn.trim();
+  let name = nn.trim();
   if (!name || name === base) return;
+  // 虚拟合并书:输入名和已存在的书同名(或同组 base)→ 自动建议 part(最大卷号+1),可改后保存
+  { const PART = /^(.+?)[\s_\-]*part[\s_\-]*(\d+)$/i;
+    if (!PART.test(name)) {
+      let maxN = 0;
+      document.querySelectorAll('.pdf-item').forEach(it => {
+        const stem = (it.dataset.disp || '').replace(/\.(pdf|epub)$/i, '');
+        const m = PART.exec(stem);
+        if (m && m[1].trim() === name) maxN = Math.max(maxN, parseInt(m[2], 10));
+        else if (stem === name) maxN = Math.max(maxN, 1);   // 已有同名单本 → 它算 part1
+      });
+      if (maxN > 0) {
+        const sug = prompt('已存在同名书 → 按分卷规则建议命名(可改数字)：', name + 'part' + (maxN + 1));
+        if (sug === null) return;
+        name = sug.trim();
+        if (!name) return;
+      }
+    } }
   try {
     const r = await fetch('/pdf/api/rename-pdf', {
       method: 'POST', headers: {'Content-Type': 'application/json'},

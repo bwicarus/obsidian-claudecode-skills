@@ -186,7 +186,7 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     }
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
-    document.getElementById('page-total').textContent = '/ ' + pdfDoc.numPages;
+    document.getElementById('page-total').textContent = '/ ' + (window.__GRP ? window.__GRP.total : pdfDoc.numPages);
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
     // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
     if (typeof _autoOrientOn === 'function' && _autoOrientOn()) {

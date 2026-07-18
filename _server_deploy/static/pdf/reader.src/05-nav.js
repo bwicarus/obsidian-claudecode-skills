@@ -81,13 +81,50 @@ window.goToPage = async (n) => {
 window._pageOffset = function () {
   try { return parseInt(localStorage.getItem('pdf-page-offset:' + (typeof FILE_REL !== 'undefined' ? FILE_REL : '')) || '0', 10) || 0; } catch (_) { return 0; }
 };
+// 虚拟合并书:同名 partN 分卷 → 连续页码(组偏移正交叠加在印刷页对齐之上)+ 跨卷跳页。
+window.__GRP = (window.__PDF_CFG && __PDF_CFG.group) || null;
+window._grpOff = function () { return window.__GRP ? __GRP.self.offset : 0; };
 window._dispPage = function (pdf) {
   pdf = parseInt(pdf, 10) || 0;
   var off = window._pageOffset(), pr = pdf - off;
-  return (off && pr >= 1) ? pr : pdf;   // 前言区(印页<1)回退显示 PDF 页
+  return ((off && pr >= 1) ? pr : pdf) + window._grpOff();   // 前言区(印页<1)回退显示 PDF 页;分卷再加组偏移
 };
-window._pdfFromDisp = function (disp) { return (parseInt(disp, 10) || 0) + window._pageOffset(); };
-window._refreshPageCur = function () { var pc = document.getElementById('page-cur'); if (pc && typeof currentPage !== 'undefined') pc.textContent = window._dispPage(currentPage); };
+window._pdfFromDisp = function (disp) { return (parseInt(disp, 10) || 0) - window._grpOff() + window._pageOffset(); };
+// 全局显示页 g 落在别的卷 → 跳转那一卷(true=已导航);本卷/非分卷 → false
+window._grpNavToGlobal = function (g) {
+  if (!window.__GRP) return false;
+  g = parseInt(g, 10) || 0;
+  var me = (window.__PDF_CFG && __PDF_CFG.file_rel) || '';
+  var m = __GRP.members.find(function (x) { return g > x.offset && g <= x.offset + x.pages; });
+  if (!m || m.rel === me) return false;
+  location.href = '/pdf/view?file=' + encodeURIComponent(m.rel) + '&page=' + (g - m.offset);
+  return true;
+};
+// 边界翻卷 chip:第 1 页显「◀ 上一卷」/ 最后一页显「下一卷 ▶」(点击加载相邻卷;用户预期=边界需加载)
+window._grpChips = function (num) {
+  if (!window.__GRP) return;
+  var mk = function (id, txt, on) {
+    var el = document.getElementById(id);
+    if (!on) { if (el) el.style.display = 'none'; return; }
+    if (!el) {
+      el = document.createElement('div'); el.id = id;
+      el.style.cssText = 'position:fixed;bottom:64px;z-index:60;background:#1a2540ee;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 14px;border-radius:18px;font-size:13px;cursor:pointer;box-shadow:0 4px 14px #0007;user-select:none';
+      el.style[id === 'grp-prev' ? 'left' : 'right'] = '14px';
+      document.body.appendChild(el);
+    }
+    el.textContent = txt; el.style.display = 'block';
+    el.onclick = on;
+  };
+  var g = window.__GRP, me = g.self;
+  mk('grp-prev', '◀ 上一卷 第' + g.self.offset + '页', (num <= 1 && g.prev) ? function () {
+    var pm = g.members[g.self.index - 1];
+    location.href = '/pdf/view?file=' + encodeURIComponent(g.prev) + '&page=' + pm.pages;
+  } : null);
+  mk('grp-next', '下一卷 第' + (me.offset + me.pages + 1) + '页 ▶', (num >= me.pages && g.next) ? function () {
+    location.href = '/pdf/view?file=' + encodeURIComponent(g.next) + '&page=1';
+  } : null);
+};
+window._refreshPageCur = function () { var pc = document.getElementById('page-cur'); if (pc && typeof currentPage !== 'undefined') { pc.textContent = window._dispPage(currentPage); try { window._grpChips(currentPage); } catch (_) {} } };
 // 设置面板「页码对齐」:把当前页设为书上第 N 页 → 偏移=当前PDF页-N;applyPageOffset(0)=重置
 window.applyPageOffset = function (forceZero) {
   var off;
@@ -185,8 +222,10 @@ function _setupPageScrub() {
     pop.style.display = 'none';
     if (s.moved) { goToPage(s.tgt); }
     else {
-      const n = prompt('跳到第几页(按书上印的页码,共 ' + window._dispPage(s.total) + ')', window._dispPage(currentPage));
+      const grandTotal = window.__GRP ? window.__GRP.total : window._dispPage(s.total);
+      const n = prompt('跳到第几页(按书上印的页码,共 ' + grandTotal + ')', window._dispPage(currentPage));
       const v = parseInt(n);
+      if (v && window._grpNavToGlobal && window._grpNavToGlobal(v)) return;   // 分卷:目标页在别的卷 → 跳那卷
       if (v) goToPage(Math.max(1, Math.min(s.total, window._pdfFromDisp(v))));   // 输入是书上页码 → 转回 PDF 页
       else window._refreshPageCur();
     }

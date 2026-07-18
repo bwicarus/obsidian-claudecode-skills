@@ -24,6 +24,11 @@ import config  # noqa: E402
 import attention_profile as AP  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import promote_concepts as PC  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+try:
+    import book_groups as BG   # 虚拟合并书:注册表/搜索按组归一
+except Exception:
+    BG = None
 
 STATE = config.PROJECT_DIR / "state"
 SEARCH_DB = STATE / "pdf-search.db"
@@ -57,6 +62,8 @@ def _save_codes(d):
 
 
 def _book_entry(reg, book_rel, create=False):
+    if BG is not None:
+        book_rel = BG.canonical_rel(book_rel)   # 分卷书:注册表身份=最小卷(partN 同组同码同科目)
     b = reg["books"].get(book_rel)
     if b or not create:
         return b
@@ -176,6 +183,20 @@ def _forward_occurrences(book_rel, term, upto_page):
     con.close()
     tl = term.lower()      # R4:拉丁词大小写不敏感(英文书);CJK lower 无副作用
     out = []
+    # 虚拟合并书:向前搜索覆盖**前面所有卷**(全量)+ 当前卷(到 upto);页码转全局连续
+    grp = BG.group_info(book_rel) if BG is not None else None
+    if grp:
+        con2 = sqlite3.connect("file:%s?mode=ro" % SEARCH_DB, uri=True)
+        rows = []
+        for m in grp["members"]:
+            if m["offset"] > grp["self"]["offset"]:
+                continue                                   # 后面的卷不算"向前"
+            cap = upto_page if m["rel"] == book_rel else m["pages"]
+            for pg, body in con2.execute(
+                    "SELECT page, body FROM pages_data WHERE file=? AND page<=? ORDER BY page",
+                    (m["rel"], cap)).fetchall():
+                rows.append((pg + m["offset"], body))       # 全局页码
+        con2.close()
     for pg, body in rows:
         if not body or tl not in body.lower():
             continue
@@ -186,6 +207,17 @@ def _forward_occurrences(book_rel, term, upto_page):
                 if tl in sent.lower():
                     out.append((pg, sent, para.strip()[:800]))
     return out
+
+
+def _global_to_src(book_rel, g):
+    """全局连续页 → (真实文件 rel, 卷内局部页)。锚点/quote_src 必须指真文件(审计要按它取原文)。"""
+    grp = BG.group_info(book_rel) if BG is not None else None
+    if not grp:
+        return book_rel, g
+    for m in grp["members"]:
+        if m["offset"] < g <= m["offset"] + m["pages"]:
+            return m["rel"], g - m["offset"]
+    return book_rel, g
 
 
 def _related_terms(term, occurrences, book_rel, vocab):
@@ -294,8 +326,9 @@ def _note_md(term, code, book_rel, definition, relations, reg):
     if definition and definition.get("found"):
         lines.append("> %s" % definition["quote"].strip())
         if definition.get("page"):
+            _dr, _dp = _global_to_src(book_rel, int(definition["page"]))
             lines.append("")
-            lines.append("![[%s#page=%d]]" % (book_name, int(definition["page"])))
+            lines.append("![[%s#page=%d]]" % (Path(_dr).name, _dp))
     elif definition:
         lines.append("**AI 生成(仅参考,非原文)**:%s" % (definition.get("definition") or "").strip())
     lines += ["", "## 概念链接(自动)"]
@@ -360,8 +393,9 @@ def _enrich_existing(ident, term, book, page, dry=True):
         occ = _forward_occurrences(book, term, page or 9999)
         if occ:
             pg, sent, _para = occ[0]
-            md = md.rstrip() + "\n\n## 来源(%s p%d)\n> %s\n" % (bname, pg, sent.strip()[:300])
-            did.append("来源分节 p%d" % pg)
+            _er, _ep = _global_to_src(book, pg)
+            md = md.rstrip() + "\n\n## 来源(%s p%d)\n> %s\n" % (Path(_er).name, _ep, sent.strip()[:300])
+            did.append("来源分节 p%d" % _ep)
     if did and not dry:
         target.write_text(md, "utf-8")
     return did
@@ -428,9 +462,10 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
             rk, rhow = _identity_resolve(r["term"], use_ai=False)
             if rk:
                 r["link"] = None   # 已有节点:笔记里链概念名,真边进图
+                _sr, _sp = _global_to_src(book, r.get("page") or 0)
                 edges.append({"from": rk, "to": AP.norm_key(term) or term, "kind": r["relation"] if r["relation"] == "prereq" else "related",
                               "origin": "emergent", "status": "auto", "method": "forwardsearch+aiclassify",
-                              "quote": (r.get("evidence") or "")[:300], "quote_src": "book:%s#p%s" % (book, r.get("page")),
+                              "quote": (r.get("evidence") or "")[:300], "quote_src": "book:%s#p%s" % (_sr, _sp),
                               "src_tier": "book", "rel_detail": r["relation"], "ver": PC.EDGE_VER})
             else:
                 r["link"] = "%s-%s" % (code, r["term"])   # 挂起:同书预判码 wikilink(未解析灰显)

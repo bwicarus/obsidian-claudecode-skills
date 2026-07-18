@@ -95,6 +95,13 @@ def _compressed_info(rel: str) -> dict:
     return info
 
 
+try:
+    sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "lib"))
+    import book_groups as BG   # 虚拟合并书(命名约定 partN 分卷合一)
+except Exception:
+    BG = None
+
+
 def _list_vault_pdfs() -> list[dict]:
     """扫 vault 下所有书:PDF + EPUB。返回 [{rel, name, kind, size_kb, mtime, lastopen, comp_*}, ...]。
     kind: "pdf"(分页阅读器) | "epub"(原生 reflow 阅读器,不转换)。
@@ -143,6 +150,28 @@ def _list_vault_pdfs() -> list[dict]:
             })
         except OSError:
             continue
+    # 虚拟合并书:同名 partN 折成一条(代表卷=最近打开的那卷,便于「继续读」;其余卷隐藏,
+    # 阅读器内边界翻卷可达)。原文件不动,纯展示层。
+    if BG is not None:
+        by_group = {}
+        for e in out:
+            sp = BG.split_part(Path(e["rel"]).stem)
+            if not sp:
+                continue
+            key = (e["dir"], sp[0], Path(e["rel"]).suffix.lower())
+            by_group.setdefault(key, []).append(e)
+        hide = set()
+        for key, es in by_group.items():
+            if len(es) < 2:
+                continue
+            rep = max(es, key=lambda e: (e["lastopen"], -BG.split_part(Path(e["rel"]).stem)[1]))
+            total = sum(BG._page_count(e["rel"]) for e in es) if es[0]["kind"] == "pdf" else 0
+            rep["group"] = {"label": key[1], "count": len(es), "total_pages": total}
+            rep["lastopen"] = max(e["lastopen"] for e in es)
+            for e in es:
+                if e is not rep:
+                    hide.add(e["rel"])
+        out = [e for e in out if e["rel"] not in hide]
     out.sort(key=lambda x: (-x["lastopen"], -x["mtime"]))   # 用过的置顶(近→远),其余按文件时间
     return out
 
@@ -1649,6 +1678,7 @@ def pdf_view():
         pdf_size=pdf_size_val,   # 字节数:前端据此决定小文件整本取/大文件 range
         compressed=(1 if use_comp else 0),     # 当前是否在用压缩版
         comp_avail=(1 if comp_avail else 0),   # 是否存在压缩版(供"加载慢→切压缩版"提示)
+        group=(BG.group_info(rel) if BG is not None else None),   # 虚拟合并书:连续页码/边界翻卷
         reader_js_v=_reader_js_v(),
         chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
         ui_shared=ui_shared,         # 默认 1(共享 rc-* 层,已上线);?ui=legacy → 回落老 reader.src(逃生口)
