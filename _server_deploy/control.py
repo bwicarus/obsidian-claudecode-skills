@@ -273,6 +273,40 @@ def register_control(app):
             "errors":  errors,   # 前端可选展示
         })
 
+    @app.route("/control/api/concept-net", methods=["GET", "POST"])
+    def control_concept_net():
+        """概念网(阅读时生长)开关:gating_enabled + 按书开火,存 note-codes.json;
+        GET 附 concept-graph.timer 状态。改动即存(独立于 server-config 的保存按钮)。"""
+        codes = CLAUDE_DIR / "state" / "attention" / "note-codes.json"
+        try:
+            reg = json.loads(codes.read_text(encoding="utf-8"))
+        except Exception:
+            reg = {"books": {}, "codes": {}}
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            if "gating_enabled" in body:
+                reg["gating_enabled"] = bool(body["gating_enabled"])
+            for rel, on in (body.get("books") or {}).items():
+                if rel in reg.get("books", {}):
+                    reg["books"][rel]["enabled"] = bool(on)
+            codes.parent.mkdir(parents=True, exist_ok=True)
+            tmp = codes.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(codes)
+            return jsonify({"ok": True})
+        def _sysctl(cmd):
+            try:
+                return subprocess.run(["systemctl", cmd, "concept-graph.timer"],
+                                      capture_output=True, text=True, timeout=5).stdout.strip()
+            except Exception:
+                return "?"
+        return jsonify({
+            "gating_enabled": bool(reg.get("gating_enabled")),
+            "timer": {"active": _sysctl("is-active"), "enabled": _sysctl("is-enabled")},
+            "books": [{"rel": rel, "code": b.get("code", ""), "subject": b.get("subject", ""),
+                       "enabled": bool(b.get("enabled"))} for rel, b in (reg.get("books") or {}).items()],
+        })
+
     @app.route("/control/api/kg-audit")
     def control_kg_audit():
         """列出 KG 书本 + 当前每本审查开关（给控制面板渲染 per-book 开关）。"""
