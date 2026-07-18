@@ -195,6 +195,82 @@ def _find_kg_nodes_for_page(file_rel: str, page: int) -> list[dict]:
     return out
 
 
+_UNIFIED_CACHE = {"g": None, "ts": 0.0}
+
+
+def _unified_graph():
+    """统一知识网络(缓存 120s;每次翻页都读太重)。build 失败回落读落盘文件。"""
+    import time as _t
+    now = _t.time()
+    c = _UNIFIED_CACHE
+    if c["g"] is not None and now - c["ts"] < 120:
+        return c["g"]
+    g = None
+    try:
+        sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "kg"))
+        import build_unified_graph as _BUG
+        g = _BUG.build(write=False)
+    except Exception:
+        try:
+            g = json.loads((CLAUDE_DIR / "state" / "attention" / "unified-graph.json").read_text("utf-8"))
+        except Exception:
+            g = {"nodes": [], "edges": []}
+    c["g"] = g
+    c["ts"] = now
+    return g
+
+
+def _augment_with_relations(out, file_rel, page):
+    """给本页 authored 节点补 前置/解锁,并纳入**靠边连到本页节点**的 emergent 概念(用户选定的关联方式)。
+    用统一图(authored+emergent 已合并、id 一致、边现成),不额外调 AI。"""
+    g = _unified_graph()
+    id2 = {n["id"]: n for n in g.get("nodes", [])}
+    edges = g.get("edges", [])
+    if not id2 or not edges:
+        return out
+    onpage_uids = set()
+    uid_of = {}
+    for o in out:
+        uid = "%s::%s" % (o.get("book", ""), o["id"])
+        if uid in id2:
+            onpage_uids.add(uid)
+            uid_of[o["id"]] = uid
+    pre, unl = {}, {}
+    for e in edges:
+        if e.get("kind") == "prereq":
+            pre.setdefault(e["to"], []).append(e["from"])
+            unl.setdefault(e["from"], []).append(e["to"])
+
+    def _rel(uids):
+        return [{"name": id2[u].get("name", ""), "state": id2[u].get("state", ""),
+                 "origin": id2[u].get("origin", "")} for u in uids if u in id2][:6]
+
+    for o in out:
+        uid = uid_of.get(o["id"])
+        if uid:
+            o["prereqs"] = _rel(pre.get(uid, []))
+            o["unlocks"] = _rel(unl.get(uid, []))
+    # emergent:任一端连到本页 uid、另一端是 em:: 的
+    extra, seen = [], set()
+    for e in edges:
+        a, b = e.get("from"), e.get("to")
+        for x, y in ((a, b), (b, a)):
+            if x in onpage_uids and isinstance(y, str) and y.startswith("em::") and y not in seen:
+                em = id2.get(y)
+                if not em:
+                    continue
+                seen.add(y)
+                extra.append({"id": y, "name": em.get("name", ""), "numeric_label": "",
+                              "state": em.get("state", "unlockable"), "mastery_level": 0,
+                              "summary": "", "book": "", "kg_file": "", "kind": "",
+                              "tracked": False, "origin": "emergent",
+                              "subject": em.get("subject", ""),
+                              "provenance": (em.get("provenance") or [])[:3],
+                              "related_to": id2.get(x, {}).get("name", ""),
+                              "prereqs": _rel(pre.get(y, [])), "unlocks": _rel(unl.get(y, []))})
+    return out + extra
+
+
 def _norm_book_key(s: str) -> str:
     """书名/文件名归一化(给 EPUB↔KG 模糊匹配用):小写 + 去登记前缀(000-/十六进制-)+ 去空白标点。"""
     import re as _re
@@ -4045,7 +4121,7 @@ def pdf_api_page_nodes():
     page = int(request.args.get("page", "0") or "0")
     if not rel or page < 1:
         return jsonify({"nodes": []})
-    return jsonify({"nodes": _find_kg_nodes_for_page(rel, page)})
+    return jsonify({"nodes": _augment_with_relations(_find_kg_nodes_for_page(rel, page), rel, page)})
 
 
 @bp.route("/api/epub-nodes")
