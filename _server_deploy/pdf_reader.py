@@ -100,6 +100,90 @@ try:
     import book_groups as BG   # 虚拟合并书(命名约定 partN 分卷合一)
 except Exception:
     BG = None
+try:
+    import vbook as VB                      # 转换层v2:领域服务(双向 resolver)
+    from vbook_route_policy import ROUTE_POLICY as _VB_POLICY
+except Exception:
+    VB = None
+    _VB_POLICY = {}
+
+
+# ══════════ 转换层v2·服务端咽喉(第3步):vbook: 引用在此被翻译/直通/拒绝,handler 零感知 ══════════
+_VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events"}
+_VB_ADAPTED = {"pdf_reader.pdf_view", "pdf_reader.pdf_api_book_meta",
+               "pdf_reader.pdf_api_highlights_list", "pdf_reader.pdf_api_highlights_update",
+               "pdf_reader.pdf_api_highlights_delete", "pdf_reader.pdf_api_notes",
+               "pdf_reader.pdf_api_userpages"}
+
+
+def _vb_err(e):
+    if isinstance(e, VB.VbookStale):
+        return jsonify({"ok": False, "error": "manifest_stale"}), 409
+    if isinstance(e, VB.VbookRange):
+        return jsonify({"ok": False, "error": "vbook_page_range"}), 400
+    if isinstance(e, VB.VbookUnknown):
+        return jsonify({"ok": False, "error": "vbook_unknown"}), 404
+    return jsonify({"ok": False, "error": "vbook_error:%s" % str(e)[:60]}), 500
+
+
+@bp.before_request
+def _vbook_gate():
+    if VB is None:
+        return None
+    qs = request.environ.get("QUERY_STRING", "") or ""
+    q_hit = ("vbook%3A" in qs) or ("vbook:" in qs)
+    body = None
+    if request.method in ("POST", "PATCH", "PUT") and request.mimetype == "application/json":
+        b = request.get_json(silent=True)   # Flask 缓存同一 dict:改它=handler 看到改后的
+        if isinstance(b, dict) and VB.is_view_ref(str(b.get("file") or "")):
+            body = b
+    if not q_hit and body is None:
+        return None                          # 真实 rel 请求:零改动零开销
+    ep = request.endpoint or ""
+    if ep in _VB_VIEW_OK or ep in _VB_ADAPTED:
+        return None
+    if _VB_POLICY.get(ep) != "PAGE":
+        return jsonify({"ok": False, "error": "vbook_unadapted", "endpoint": ep,
+                        "note": "该端点尚未适配合并书(fail-closed,防静默写错卷)"}), 501
+    try:
+        if body is not None:
+            gp = body.get("page")
+            if gp in (None, "", 0):
+                return jsonify({"ok": False, "error": "vbook_page_required", "endpoint": ep}), 501
+            mrel, lp = VB.resolve_view(str(body.get("file")), gp, revision=body.get("vrev"))
+            body["file"], body["page"] = mrel, lp
+            body.pop("vrev", None)
+        if q_hit:
+            import urllib.parse as _up
+            pairs = _up.parse_qsl(qs, keep_blank_values=True)
+            d = dict(pairs)
+            ref = d.get("file", "")
+            if VB.is_view_ref(ref):
+                gp = d.get("page")
+                if not gp:
+                    return jsonify({"ok": False, "error": "vbook_page_required", "endpoint": ep}), 501
+                mrel, lp = VB.resolve_view(ref, gp, revision=d.get("vrev"))
+                out = []
+                for k, v in pairs:
+                    if k == "file":
+                        out.append((k, mrel))
+                    elif k == "page":
+                        out.append((k, str(lp)))
+                    elif k == "vrev":
+                        continue
+                    else:
+                        out.append((k, v))
+                _req = request._get_current_object()   # LocalProxy 坑:必须拿真 Request 实例
+                _new_qs = _up.urlencode(out)
+                _req.environ["QUERY_STRING"] = _new_qs
+                # Werkzeug 真机制(实验实锤):args 从构造时物化的 query_string 字节解析,不看 environ——
+                # 必须改 query_string 本体,再清派生缓存,handler 才看到翻译后的 (file,page)。
+                _req.__dict__["query_string"] = _new_qs.encode("latin-1")
+                for att in ("args", "values", "full_path", "url"):
+                    _req.__dict__.pop(att, None)
+    except VB.VbookError as e:
+        return _vb_err(e)
+    return None
 
 
 def _list_vault_pdfs() -> list[dict]:
@@ -167,6 +251,13 @@ def _list_vault_pdfs() -> list[dict]:
             rep = max(es, key=lambda e: (e["lastopen"], -BG.split_part(Path(e["rel"]).stem)[1]))
             total = sum(BG._page_count(e["rel"]) for e in es) if es[0]["kind"] == "pdf" else 0
             rep["group"] = {"label": key[1], "count": len(es), "total_pages": total}
+            if VB is not None and es[0]["kind"] == "pdf":
+                try:
+                    _vg = VB.group_for_rel(rep["rel"])
+                    if _vg:
+                        rep["vbook"] = "vbook:" + _vg["group_id"]
+                except Exception:
+                    pass
             rep["lastopen"] = max(e["lastopen"] for e in es)
             for e in es:
                 if e is not rep:
@@ -833,7 +924,26 @@ def pdf_api_video_subtitles(vid):
 @bp.route("/api/book-meta")
 def pdf_api_book_meta():
     """书元数据(图片模式用,不下载 PDF):页数 + 首页尺寸(pt)。"""
-    ap = _safe_vault_path(request.args.get("file", ""))
+    _rel0 = request.args.get("file", "")
+    if VB is not None and VB.is_view_ref(_rel0):
+        try:
+            g = VB.validate(_rel0)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        import fitz as _fz
+        m1 = g["members"][0]
+        try:
+            _d = _fz.open(str(BG.VAULT / m1["rel"])); _r = _d[0].rect
+            pw, ph = round(_r.width, 1), round(_r.height, 1); _d.close()
+        except Exception:
+            pw, ph = 595.0, 842.0
+        return jsonify({"ok": True, "page_count": g["total"], "page_w": pw, "page_h": ph,
+                        "mtime": max(int(m["mtime_ns"] // 1e9) for m in g["members"]),
+                        "vbook": {"group_id": g["group_id"], "revision": g["revision"],
+                                  "total": g["total"], "base": g["base"],
+                                  "members": [{"rel": m["rel"], "pages": m["pages"], "offset": m["offset"]}
+                                              for m in g["members"]]}})
+    ap = _safe_vault_path(_rel0)
     if not ap:
         return jsonify({"ok": False, "error": "文件不存在"}), 400
     import fitz
@@ -1630,6 +1740,37 @@ def pdf_view():
         page = int(request.args.get("page") or 0)   # 无 ?page= 深链 → 0,下面折入服务端续读记录
     except ValueError:
         page = 0
+    if VB is not None and VB.is_view_ref(rel):
+        # 转换层v2:合并书视图。前端图片模式经 book-meta 拿组总页;一切 (file,page) API 带
+        # vbook+全局页,由服务端咽喉翻译到真成员——handler 零感知。
+        try:
+            g = VB.validate(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        _pts = 0
+        if page >= 1:
+            _pts = int(time.time())
+        else:
+            try:
+                _rp = (json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
+                       or {}).get(rel) or {}
+                if int(_rp.get("pos") or 0) >= 1:
+                    page = int(_rp["pos"]); _pts = int(_rp.get("ts") or 0)
+            except Exception:
+                pass
+            if page < 1:
+                page = 1
+        from flask import make_response as _mr
+        _resp = _mr(render_template(
+            "pdf_reader.html",
+            file_rel=rel, file_name="%s(合卷·%d卷)" % (g["base"], len(g["members"])),
+            page=page, page_ts=_pts, pdf_url="", pdf_size=0, compressed=0, comp_avail=0,
+            reader_js_v=_reader_js_v(), chars_ver=_CHAR_CACHE_VER,
+            ui_shared=(0 if request.args.get("ui", "") == "legacy" else 1),
+            shared_js_v=_pdf_shared_js_v(), group=None,
+        ))
+        _resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return _resp
     ui_shared = 0 if request.args.get("ui", "") == "legacy" else 1   # 上线:默认走共享 rc-* 层;?ui=legacy 一键回落老 reader.src(逃生口)
     abs_path = _safe_vault_path(rel)
     if not abs_path:
@@ -6346,6 +6487,56 @@ def pdf_api_notes():
     """便签 CRUD(sidecar:state/reader-notes/<sha>.json,PDF/EPUB 同一套)。
     GET ?file= → 列;POST {file,anchor,text?,color?,w?,h?,collapsed?,strokes?} → 建;
     PATCH {file,id,anchor?/text?/color?/w?/h?/collapsed?/strokes?} → 改(字段级合并);DELETE ?file=&id= → 删。"""
+    if VB is not None:
+        _ref = ((request.args.get("file") or "").strip() if request.method in ("GET", "DELETE")
+                else str(((request.get_json(silent=True) or {}).get("file")) or ""))
+        if VB.is_view_ref(_ref):
+            try:
+                _g = VB.validate(_ref)
+            except VB.VbookError as e:
+                return _vb_err(e)
+            if request.method == "GET":
+                agg = []
+                for m in _g["members"]:
+                    for n0 in _notes_load(m["rel"]):
+                        n2 = json.loads(json.dumps(n0))
+                        _a = n2.get("anchor") or {}
+                        if _a.get("kind") == "pdf" and _a.get("page"):
+                            _a["page"] = int(_a["page"]) + m["offset"]
+                        agg.append(n2)
+                return jsonify({"ok": True, "notes": agg})
+            if request.method == "DELETE":
+                _nid = (request.args.get("id") or "").strip()
+                _home = next((m for m in _g["members"]
+                              if any(x.get("id") == _nid for x in _notes_load(m["rel"]))), None)
+                if _home:
+                    _notes_save(_home["rel"], [x for x in _notes_load(_home["rel"]) if x.get("id") != _nid])
+                return jsonify({"ok": True})
+            _b = request.get_json(silent=True) or {}
+            _a = _b.get("anchor") if isinstance(_b.get("anchor"), dict) else None
+            if request.method == "POST":
+                if not (_a and _a.get("kind") == "pdf" and _a.get("page")):
+                    return jsonify({"ok": False, "error": "vbook 便签需 pdf anchor(含 page)"}), 400
+                try:
+                    _mrel, _lp = VB.resolve_view(_ref, _a["page"], revision=_b.get("vrev"))
+                except VB.VbookError as e:
+                    return _vb_err(e)
+                _b["file"], _a["page"] = _mrel, _lp   # 落真成员+局部页;下面原逻辑照跑(get_json 同一 dict)
+            else:   # PATCH:id 定位所属成员;anchor 移动限同卷(跨卷移动=结构语义,首版拒绝)
+                _nid = (_b.get("id") or "").strip()
+                _home = next((m for m in _g["members"]
+                              if any(x.get("id") == _nid for x in _notes_load(m["rel"]))), None)
+                if not _home:
+                    return jsonify({"ok": False, "error": "未找到"}), 404
+                if _a and _a.get("kind") == "pdf" and _a.get("page"):
+                    try:
+                        _mrel, _lp = VB.resolve_view(_ref, _a["page"])
+                    except VB.VbookError as e:
+                        return _vb_err(e)
+                    if _mrel != _home["rel"]:
+                        return jsonify({"ok": False, "error": "跨卷移动便签暂不支持"}), 501
+                    _a["page"] = _lp
+                _b["file"] = _home["rel"]
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
         return jsonify({"ok": True, "notes": _notes_load(rel)})
@@ -6514,6 +6705,16 @@ def pdf_api_userpages():
     """用户页 CRUD(sidecar:state/reader-userpages/<sha>.json,PDF/EPUB 同一套,照 notes 模式)。
     GET ?file= → {ok, pages}(按 after,created 排序);POST {file, after, title?, md?} → 建(id=u_<8hex>);
     PATCH {file, id, title?/md?/after?} → 字段级合并;DELETE ?file=&id= → 删。"""
+    _ref0 = (request.args.get("file") or "").strip()
+    if not _ref0 and request.method in ("POST", "PATCH"):
+        _ref0 = str(((request.get_json(silent=True) or {}).get("file")) or "")
+    if VB is not None and VB.is_view_ref(_ref0):
+        if request.method == "GET":
+            _r = jsonify({"ok": True, "pages": []})
+            _r.headers["Cache-Control"] = "no-store"
+            return _r
+        return jsonify({"ok": False, "error": "vbook_structural_disabled",
+                        "note": "合并书首版禁用插入页(结构变更,规格v2)"}), 501
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
         r = jsonify({"ok": True, "pages": _upages_sorted(_upages_load(rel))})
@@ -9945,6 +10146,20 @@ def pdf_api_figure_crop():
 def pdf_api_highlights_list():
     """GET ?file=<rel> → {ok, highlights:[{id,page,rects,color,text,note,time}, ...]}"""
     rel = request.args.get("file", "")
+    if VB is not None and VB.is_view_ref(rel):
+        # 转换层v2:合并书扇入——各成员高亮合并,页码反译成全局(客户端在合并视图里页码就是全局)
+        try:
+            g = VB.validate(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        agg = []
+        for m in g["members"]:
+            for h in _hl_load(m["rel"]).get("highlights", []):
+                h2 = dict(h)
+                h2["page"] = int(h.get("page") or 0) + m["offset"]
+                agg.append(h2)
+        agg.sort(key=lambda x: (x.get("page") or 0, x.get("time") or 0))
+        return jsonify({"ok": True, "highlights": agg})
     if not rel or _safe_vault_path(rel) is None:
         return jsonify({"ok": False, "error": "invalid file"}), 400
     return jsonify({"ok": True, **_hl_load(rel)})
@@ -10049,6 +10264,15 @@ def pdf_api_highlights_update():
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
+    if VB is not None and VB.is_view_ref(rel):
+        try:
+            _g = VB.validate(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        rel = next((m["rel"] for m in _g["members"]
+                    if any(h.get("id") == hid for h in _hl_load(m["rel"]).get("highlights", []))), "")
+        if not rel:
+            return jsonify({"ok": False, "error": "not_found"}), 404
     if not rel or _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
     db = _hl_load(rel)
@@ -10082,6 +10306,15 @@ def pdf_api_highlights_delete():
         data = {"file": request.args.get("file",""), "id": request.args.get("id","")}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
+    if VB is not None and VB.is_view_ref(rel):
+        try:
+            _g = VB.validate(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        rel = next((m["rel"] for m in _g["members"]
+                    if any(h.get("id") == hid for h in _hl_load(m["rel"]).get("highlights", []))), "")
+        if not rel:
+            return jsonify({"ok": False, "error": "not_found"}), 404
     if not rel or _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
     db = _hl_load(rel)

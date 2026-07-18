@@ -65,7 +65,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
   </div>
   <div class="pdf-list" id="list">
     {% for p in pdfs %}
-    <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}" data-kind="{{ p.kind }}"
+    <div class="pdf-item" data-name="{{ p.name|lower }}" data-rel="{{ p.rel }}" data-disp="{{ p.name }}" data-kind="{{ p.kind }}"{% if p.vbook %} data-vbook="{{ p.vbook }}"{% endif %}
          data-comp-exists="{{ '1' if p.comp_exists else '' }}" data-comp-compressing="{{ '1' if p.comp_compressing else '' }}"
          ontouchstart="lpStart(event,this)" ontouchend="lpEnd()" ontouchmove="lpEnd()"
          onmousedown="lpStart(event,this)" onmouseup="lpEnd()" onmouseleave="lpEnd()"
@@ -239,7 +239,8 @@ function openBook(ev, row) {
     location.href = '/pdf/epub/view?file=' + encodeURIComponent(item.dataset.rel);
     return;
   }
-  let url = '/pdf/view?file=' + encodeURIComponent(item.dataset.rel);
+  // 虚拟合并书:代表卷打开合并视图(转换层v2;连续页码/跨卷统统由 vbook 咽喉处理)
+  let url = '/pdf/view?file=' + encodeURIComponent(item.dataset.vbook || item.dataset.rel);
   // 压缩版开关开着 → 带 &compressed=1(打开时传压缩版)
   if (item.dataset.compExists === '1' && localStorage.getItem(_compKey(item.dataset.rel)) === '1') url += '&compressed=1';
   location.href = url;
