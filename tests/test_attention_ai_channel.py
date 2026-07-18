@@ -143,3 +143,58 @@ class TestBidirectionalGate(unittest.TestCase):
         self.assertGreaterEqual(self.RS.AI_RUNS_PER_30D, 1)
         ok, used = self.RS._budget_ok({})
         self.assertIsInstance(ok, bool)
+
+
+class TestStopwordsFailClosed(unittest.TestCase):
+    """写盘前三道闸:源故障 / 保护名单缩水 / 停用表暴涨 —— 一律拒绝覆盖写。
+    起因:_protected() 四个来源原本各自 `except: pass`,路径一错(CLAUDE_PROJECT 没传给
+    systemd 就会)保护名单从 1938 静默塌成 0,而 build 是**全量覆盖写**,刚花 AI 判决
+    复活回来的术语会连同 domain/KG 一起进停用表。且不可逆:events.terms 是抽取时快照。"""
+
+    def setUp(self):
+        import build_auto_stopwords as B
+        self.B = B
+        if not B.OUT.exists():
+            self.skipTest("还没生成 auto-stopwords.json")
+        self.before = B.OUT.read_bytes()
+
+    def tearDown(self):
+        self.B.OUT.write_bytes(self.before)      # 任何情况下都还原,别污染真数据
+
+    def test_protected_reports_errors_not_silence(self):
+        """读不到就必须**报错**,不能静默返回空集。"""
+        from pathlib import Path
+        orig = (self.B.REVIVED, self.B.DOMAIN, self.B.EMERGENT, self.B.KG_DIR)
+        bad = Path("/nonexistent/xxx")
+        self.B.REVIVED, self.B.DOMAIN, self.B.EMERGENT, self.B.KG_DIR = (
+            bad / "a.json", bad / "b.json", bad / "c.json", bad)
+        try:
+            keep, errors = self.B._protected()
+            self.assertEqual(keep, set())
+            self.assertTrue(errors, "四个来源全读不到却没报错 = fail-open")
+        finally:
+            self.B.REVIVED, self.B.DOMAIN, self.B.EMERGENT, self.B.KG_DIR = orig
+
+    def test_shrunk_protection_blocks_write(self):
+        """保护名单缩水 >10% → 拒绝写盘,原表分毫不动。"""
+        orig = self.B._protected
+        self.B._protected = lambda: (set(list(orig()[0])[:100]), [])
+        try:
+            r = self.B.build(write=True, show=0)
+            self.assertFalse(r["ok"])
+            self.assertTrue(any("缩水" in b for b in r.get("blocked", [])))
+            self.assertEqual(self.B.OUT.read_bytes(), self.before, "原表被覆盖了")
+        finally:
+            self.B._protected = orig
+
+    def test_exploding_table_blocks_write(self):
+        """停用表暴涨 >25%(如阈值被误调激进)→ 拒绝写盘。"""
+        orig = dict(self.B.RATIO_BY_LANG)
+        self.B.RATIO_BY_LANG = {"zh": 0.35, "en": 0.40}
+        try:
+            r = self.B.build(write=True, show=0)
+            self.assertFalse(r["ok"])
+            self.assertTrue(any("暴涨" in b for b in r.get("blocked", [])))
+            self.assertEqual(self.B.OUT.read_bytes(), self.before, "原表被覆盖了")
+        finally:
+            self.B.RATIO_BY_LANG = orig

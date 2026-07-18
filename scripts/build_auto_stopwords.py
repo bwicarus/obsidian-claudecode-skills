@@ -20,6 +20,7 @@
 out: state/attention/auto-stopwords.json    CLI: [--write] [--ratio R] [--show N]
 """
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -33,6 +34,7 @@ import attention_profile as AP  # noqa: E402
 
 SEARCH_DB = config.PROJECT_DIR / "state" / "pdf-search.db"
 OUT = config.PROJECT_DIR / "state" / "attention" / "auto-stopwords.json"
+ALERT = config.PROJECT_DIR / "state" / "attention" / "stopwords-alert.json"
 DOMAIN = config.PROJECT_DIR / "state" / "attention" / "domain-terms.json"
 EMERGENT = config.PROJECT_DIR / "state" / "attention" / "emergent-graph.json"
 KG_DIR = config.PROJECT_DIR / "knowledge_graph"
@@ -69,36 +71,51 @@ REVIVED = config.PROJECT_DIR / "state" / "attention" / "revived-terms.json"
 
 
 def _protected():
-    """保护名单:领域词典 + KG 节点名 + 概念图节点名 + **复活赛捞回来的词**(绝不再滤)。"""
-    keep = set()
+    """保护名单:领域词典 + KG 节点名 + 概念图节点名 + 复活赛捞回来的词(绝不再滤)。
+
+    返回 (keep, errors)。**必须把错误报上去**——原来四个来源各自 `except: pass`,
+    读不到就静默当空集:实测一旦路径错位(CLAUDE_PROJECT 没传给 systemd 就会),
+    保护名单从 1938 塌成 0,而 build 照常**全量覆盖写**,集合/空间/证明/子空间/
+    向量空间/感染症/matrix 连同刚花 AI 判决复活回来的词一起进停用表。
+    更糟的是不可逆:停用表下轮能恢复,但 events.terms 是抽取时快照,误滤期间入库的
+    事件已经把那些词剔掉了,源一归档就再也重抽不了。故:**瞎了就不许写盘**。
+    """
+    keep, errors = set(), []
     try:   # 复活赛判定为术语的词:永久保护(它们正是被激进阈值误伤的那批)
         for t in (json.loads(REVIVED.read_text("utf-8")).get("terms") or {}):
             keep.add(str(t).strip().lower())
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass                       # 还没跑过复活赛 = 正常,不算故障
+    except Exception as e:
+        errors.append(f"revived: {e}")
     try:
         d = json.loads(DOMAIN.read_text("utf-8"))
         for t in (d if isinstance(d, list) else (d.get("terms") or list(d.keys()))):
             keep.add(str(t).strip().lower())
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"domain-terms: {e}")      # 领域词典是主力保护源,缺了就是故障
     try:
         g = json.loads(EMERGENT.read_text("utf-8"))
         for n in (g.get("nodes") or {}).values():
             if n.get("surface"):
                 keep.add(str(n["surface"]).strip().lower())
-    except Exception:
-        pass
-    for p in KG_DIR.glob("*.json"):
-        if ".bak." in p.name:
-            continue
-        try:
-            for n in (json.loads(p.read_text("utf-8")).get("nodes") or []):
-                if n.get("name") and n.get("level") == 2:
-                    keep.add(str(n["name"]).strip().lower())
-        except Exception:
-            continue
-    return keep
+    except FileNotFoundError:
+        pass                       # 概念图可能还没长出来
+    except Exception as e:
+        errors.append(f"emergent-graph: {e}")
+    if not KG_DIR.is_dir():
+        errors.append(f"kg-dir 不存在: {KG_DIR}")
+    else:
+        for p in KG_DIR.glob("*.json"):
+            if ".bak." in p.name:
+                continue
+            try:
+                for n in (json.loads(p.read_text("utf-8")).get("nodes") or []):
+                    if n.get("name") and n.get("level") == 2:
+                        keep.add(str(n["name"]).strip().lower())
+            except Exception as e:
+                errors.append(f"kg/{p.name}: {e}")
+    return keep, errors
 
 
 def build(ratio=RATIO, write=False, show=0):
@@ -137,7 +154,7 @@ def _build_inner(ratio, write, show):
             df[t].add(b)
     c.close()
 
-    keep = _protected()
+    keep, perrors = _protected()
     out, skipped, report = {}, {}, {}
     for lang, bs in lang_books.items():
         n = len(bs)
@@ -152,10 +169,42 @@ def _build_inner(ratio, write, show):
         report[lang] = {"books": n, "need": need, "n": len(words), "ratio": _r}
     res = {"ok": True, "built": int(time.time()), "ratio": ratio,
            "min_books": MIN_BOOKS, "by_lang": report,
-           "skipped_langs": skipped, "words": out}
+           "skipped_langs": skipped, "protected_n": len(keep), "words": out}
+
+    # ── 写盘前三道闸(fail-closed:宁可这轮不更新,也不能在瞎了的状态下覆盖写)──
+    prev = {}
+    try:
+        prev = json.loads(OUT.read_text("utf-8"))
+    except Exception:
+        prev = {}
+    blocks = []
+    if perrors:
+        blocks.append("保护名单来源读取失败:" + "; ".join(perrors[:4]))
+    prev_keep = int(prev.get("protected_n") or 0)
+    if prev_keep and len(keep) < prev_keep * 0.9:
+        blocks.append(f"保护名单缩水:{prev_keep} → {len(keep)}(超过 10%)")
+    prev_n = sum(len(v) for v in (prev.get("words") or {}).values())
+    new_n = sum(len(v) for v in out.values())
+    if prev_n and new_n > prev_n * 1.25:
+        blocks.append(f"停用表暴涨:{prev_n} → {new_n}(超过 25%)")
+    res["blocked"] = blocks
+    if blocks:
+        res["ok"] = False
+        try:   # 告警落盘,控制面板/仪表盘可见;**不动 auto-stopwords.json**
+            ALERT.write_text(json.dumps(
+                {"ts": int(time.time()), "blocks": blocks, "protected_n": len(keep),
+                 "prev_protected_n": prev_keep, "new_words": new_n, "prev_words": prev_n},
+                ensure_ascii=False, indent=1), "utf-8")
+        except Exception:
+            pass
+        return res
+    try:
+        ALERT.unlink()       # 恢复正常 → 清掉旧告警
+    except OSError:
+        pass
     if write:
         OUT.parent.mkdir(parents=True, exist_ok=True)
-        tmp = OUT.with_suffix(".json.tmp")
+        tmp = OUT.with_suffix(f".{os.getpid()}.tmp")   # tmp 名带 pid:两个进程同时跑不会互相踩
         tmp.write_text(json.dumps(res, ensure_ascii=False, indent=1), "utf-8")
         tmp.replace(OUT)
     if show:
@@ -175,6 +224,12 @@ if __name__ == "__main__":
     a = ap.parse_args()
     r = build(ratio=a.ratio, write=a.write, show=a.show)
     if not r.get("ok"):
+        if r.get("blocked"):
+            print("⛔ 拒绝写盘(fail-closed),原表保持不变:")
+            for b in r["blocked"]:
+                print("   -", b)
+            print(f"   告警已写 {ALERT}")
+            sys.exit(2)
         print("失败:", r.get("error"))
         sys.exit(1)
     print("\n统计:", json.dumps(r["by_lang"], ensure_ascii=False),
