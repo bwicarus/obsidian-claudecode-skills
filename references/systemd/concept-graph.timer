@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly concept graph pipeline (02:30, independent from bwicarus-daily)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Concept graph nightly pipeline (growth + scan + audit; no Anki)
+After=network.target
+
+[Service]
+Type=oneshot
+User=bwicarus
+WorkingDirectory=/home/bwicarus/claude
+EnvironmentFile=/home/bwicarus/claude/.env
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/concept_graph_daily.py
+Nice=15

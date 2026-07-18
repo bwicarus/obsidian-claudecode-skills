@@ -446,10 +446,8 @@ def main() -> int:
     step("卡片质量体检", step_quality)
     step("重建必复习牌组", lambda: run_py("build_review_deck.py"))
     step("清理孤儿", lambda: run_py("cleanup_orphans.py", ["--apply"]))
-    # v3-D 概念网:阅读时生长(科目门自守:无开火书=no-op)+ 存量扫描拼边 + 夜间边审计(自限 20 条/轮)
-    step("概念笔记生长", lambda: run_py("kg/propose_concept_notes.py", ["--run"]))
-    step("存量扫描拼边", lambda: run_py("kg/promote_concepts.py", ["--edges", "--write"]))
-    step("概念边审计", lambda: run_py("kg/audit_edges.py", ["--run"]))
+    # 概念网三步已分离到 concept-graph.timer(scripts/concept_graph_daily.py)——
+    # 不碰 Anki,不该被 daily 的 Anki 顾虑连坐(用户拍板,2026-07-19)
     # 知识图谱：先 AI 关联（精准）+ 再算 mastery / state（每个 KG 文件一次）
     step("KG 关联+掌握度", run_kg_link_mastery)
     # 领域词典(从 KG/目录/查词长出来)→ 融合权重反向学习(词典金标准)→ 跨语言概念归一(AI 判词义)

@@ -127,7 +127,13 @@ def build(write=False):
                       "confirmed": True if ov else (e.get("status") == "audited" or None)})
 
     # R4:emergent 节点 availability 不再硬编码 open——按 **effective**(audited/user_confirmed)
-    # prereq 真算:有未掌握前置 → locked。shadow/auto 边只展示不 gating(审计过才影响解锁)。
+    # prereq 真算。**影响开关**(用户拍板双开关设计):note-codes.json 的 gating_enabled 默认 false=
+    # shadow 试跑期(边只展示,即使 audited 也不锁节点);用户看过审计质量后拨 true 才真参与解锁。
+    try:
+        _gate_on = bool(json.loads((config.PROJECT_DIR / "state" / "attention" / "note-codes.json")
+                                   .read_text("utf-8")).get("gating_enabled"))
+    except Exception:
+        _gate_on = False
     id2u = {n["id"]: n for n in nodes}
     eff_pre = {}
     for e in edges:
@@ -139,7 +145,7 @@ def build(write=False):
         prs = eff_pre.get(n["id"], [])
         blocked = any((id2u.get(pid) or {}).get("progress") not in ("in_progress", "mastered")
                       for pid in prs)
-        if prs and blocked:
+        if prs and blocked and _gate_on:
             n["availability"] = "locked"
             n["state"] = "locked"
             n["unlocked"] = False
