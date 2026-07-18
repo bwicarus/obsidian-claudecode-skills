@@ -260,6 +260,17 @@ async def _fetch_book_ctx(file_rel: str, page: int) -> dict:
     out = {"page_text": "", "inked": "", "figures": [], "history": []}
     try:
         async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=10) as hc:
+            if file_rel:
+                try:   # 总页数(「翻到最后一页」「还剩几页」要它;合并书=各卷之和)
+                    r = await hc.get("/pdf/api/book-meta", params={"file": file_rel})
+                    d = r.json()
+                    if d.get("page_count"):
+                        out["page_count"] = int(d["page_count"])
+                        vb = d.get("vbook") or {}
+                        if vb.get("members"):
+                            out["vbook_parts"] = len(vb["members"])
+                except Exception:
+                    pass
             if file_rel and page:
                 r = await hc.get("/pdf/api/page-text", params={"file": file_rel, "page": page})
                 d = r.json()
@@ -386,10 +397,19 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
         role += ("\n可用工具目录(冒号后是用途,{}是 args 字段;**最下方的实时状态说某工具当前无效时以状态为准**):\n"
                  + "\n".join(lines.values()))
     # ── ② 中层:跟页走的内容(翻页才变) ──
+    _pc = book.get("page_count") or 0
+    if _pc:
+        _pt = f"\n这本书**总共 {_pc} 页**(最后一页就是第 {_pc} 页;『翻到最后一页』=goto_page(page={_pc}),别说算不出来)。"
+        if book.get("vbook_parts"):
+            _pt += f"它由 {book['vbook_parts']} 个分卷合并成一本,页码已连续贯通——**当作一本 {_pc} 页的书**,别提分卷。"
+        role += _pt
+    role += ("\n- 用户问『第N页/下一页/上一页写的是什么』=要**内容**:调 read_page(args{page:N});"
+             "光 goto_page 只翻页不给内容,答不了他的问题。要边翻边讲就先 read_page 拿到内容再讲"
+             "(每轮一个工具,翻页可以下一轮再说)。**本页**内容下面已直接给你,不用调工具。")
     page_text = book.get("page_text") or ""
     if page_text:
         name = (file_rel.rsplit("/", 1)[-1] or "这本书")
-        role += f"\n用户此刻正在读《{name}》第 {page} 页,本页文字内容(直接可用):\n{page_text}"
+        role += f"\n用户此刻正在读《{name}》第 {page} 页" + (f"(全书 {_pc} 页)" if _pc else "") + f",本页文字内容(直接可用):\n{page_text}"
     figs = book.get("figures") or []
     if figs:
         fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
@@ -2979,6 +2999,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         "inflight": False,
         "inflight_t": 0.0,
         "kill_next": False,   # 在途那条 create 一 created 就掐(此刻还没有 id,无法定向 cancel)
+        "answered_ep": 0,     # 最近一次**真的出了内容**的纪元(用来发现"该答却哑掉")
+        "retry_ep": 0,        # 已为哪个纪元补答过(每纪元只补一次,防死循环)
     }
     TURN_ASR_WAIT = 4.0
 
@@ -3189,6 +3211,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 sys.stderr.write(f"[rtc-ctl] done call={call_id[:12]} in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
+                if r0.get("status") not in ("completed", None):   # failed/cancelled 必须能查原因(只打 status 等于没打)
+                    sys.stderr.write(f"[rtc-ctl] ⚠{r0.get('status')} 详情="
+                                     f"{json.dumps(r0.get('status_details') or {}, ensure_ascii=False)[:400]}\n")
                 # 安全(#284 加固):WebRTC 直连路径也在每轮记账后复查预算。媒体是浏览器↔OpenAI 直连、
                 # relay 无法强拆,但 sideband 是服务端控制面(持同 call_id 的 ows),超支即置标记,之后每轮
                 # response.created 立刻 response.cancel 让助手噤声——止住烧钱、逼用户挂断。event:-1 供留痕。
@@ -3210,6 +3235,19 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     _vlog("truncated", page=book.get("page") or page, book=file_rel,
                           mode=_norm_vm(_creds().get("rt_voice_mode")), q=(book.get("last_q") or "")[:120],
                           brief="回复被 2048 保险丝掐断(分析素材:该轮该走 route 却口头念了)")
+                # ★ 哑火自愈:response 直接 failed(实测 in=0 out=0,服务端瞬拒)时,这一轮用户就**什么都没听到**。
+                #   代码本身的原则是"绝不允许该答却不答"——所以本纪元若一句都没产出,补发一次(每纪元只补一次)。
+                if (u.get("output_tokens") or 0) > 0 and r0.get("status") == "completed":
+                    gate["answered_ep"] = epoch["n"]
+                elif (r0.get("status") in ("failed", "cancelled")
+                      and not (u.get("output_tokens") or 0)
+                      and gate["answered_ep"] < epoch["n"] and gate["retry_ep"] < epoch["n"]
+                      and not gate["want_user"] and not gate["pending"] and not book.get("_over")):
+                    gate["retry_ep"] = epoch["n"]
+                    sys.stderr.write(f"[rtc-ctl] ♻哑火自愈 ep={epoch['n']}(上一条 {r0.get('status')} 且零输出)→ 补发一次\n")
+                    await asyncio.sleep(0.35)   # 让服务端把上一条的状态收干净,免得补发又撞
+                    await _do_create(user=True)
+                    continue
                 # 133:补发被暂缓的 create。优先级:**用户轮 > 撞车补发 > 工具轮**(用户永远优先)。
                 if gate["want_user"]:      # 打断后等到 done 了 → 现在给用户这一轮生成回答
                     gate["want_user"] = False
