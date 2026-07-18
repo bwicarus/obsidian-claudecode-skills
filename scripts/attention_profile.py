@@ -75,7 +75,7 @@ STATE = Path(PROJECT_DIR) / "state"
 #   可靠性:不做不可逆截断(源可重算的才允许截);账本(无上游)一律全文;抽取器版本可追。
 #   及时性:**读时保证新鲜**(_ensure_fresh:源 mtime 变了就增量导入)——不靠 15min timer。
 #   可回溯性:每个焦点词带证据链(evidence 事件 id + 分数构成 by_channel),explain() 可查。
-EXTRACTOR_VER = 8      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6);v8:指位词/元话语假词过滤 + qa_ai 渠道
+EXTRACTOR_VER = 9      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6);v8:指位词/元话语假词过滤 + qa_ai 渠道;v9:写时不过滤(terms 存 raw 全量,过滤下沉到读侧)
 TERMS_MAX = 40         # 单事件术语上限(原 12 → 实测 4 条事件撞顶=真丢词;40 足够,存的是 JSON 数组)
 TEXT_MAX = 4000        # 派生索引里留的原文(源还在,截了也能重算;账本不截,见 append_raw)
 
@@ -469,7 +469,7 @@ def _ja_terms(text):
     return out
 
 
-def extract_terms(text, hint="", lang=None):
+def extract_terms(text, hint="", lang=None, raw=False):
     """文本 → 术语列表(名词/名词短语粒度,非裸单字)。
     **语言路由**(2026-07-17 修):假名→ja;纯汉字→**看 lang(书语言)**,ja→fugashi / 否则 jieba;
     拉丁→en。lang 由调用方从 _book_lang(file_rel) 传入——纯汉字靠字形猜中/日必错。"""
@@ -483,13 +483,13 @@ def extract_terms(text, hint="", lang=None):
         w = text.strip()
         if w.isascii():
             lw = w.lower()
-            return [lw] if len(lw) > 1 and lw not in _STOP_EN and not _is_junk_term(lw) else []
+            return [lw] if len(lw) > 1 and lw not in _STOP_EN and (raw or not _is_junk_term(lw)) else []
         if not _KANA.search(w):
             if lang and "ja" in lang and len(w) > 4:   # 长的纯汉字日语词:过日语分词器抽复合名词
                 _t = [t for t in _ja_terms(w) if t not in _STOP_JA]
                 if _t:
                     return _t[:3]
-            return [w] if 1 < len(w) <= 8 and not _is_junk_term(w) else []
+            return [w] if 1 < len(w) <= 8 and (raw or not _is_junk_term(w)) else []
         return [t for t in _ja_terms(w) if t not in _STOP_JA][:4]
     # ★① 领域词典最长匹配(原文里真的连在一起的长词组 —— 用户的洞察):
     #    「向量空间」「vector space」「公衆衛生学」这类,通用分词器切碎、正则抽不出。
@@ -509,7 +509,10 @@ def extract_terms(text, hint="", lang=None):
         lw = w.lower()
         if lw not in _STOP_EN:
             out.append(lw)
-    return [w for w in _dedup_nest(out, text) if not _is_junk_term(w)][:60]
+    out = _dedup_nest(out, text)
+    if not raw:
+        out = [w for w in out if not _is_junk_term(w)]
+    return out[:60]
 
 
 # ── 假词过滤(2026-07-19 用户干跑实锤)──────────────────────────────────────────
@@ -814,8 +817,8 @@ def focus_from_mentions(top=40, now=None):
     for r in rows:
         sk = r[7]
         if sk not in ev_N:
-            try:
-                ev_N[sk] = max(1, len(set(json.loads(r[4]) or [])))
+            try:   # terms 是 raw 全量(写时不过滤)→ N 必须按**过滤后**算,否则稀释系数虚大(同基线铁律)
+                ev_N[sk] = max(1, len({t for t in (json.loads(r[4]) or []) if not _is_junk_term(t)}))
             except Exception:
                 ev_N[sk] = 1
     for ts, ch, file, weight, _terms_j, surface, parent, src_key in rows:
@@ -910,7 +913,11 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
     row = c.execute("SELECT xver FROM events WHERE src_key=?", (key,)).fetchone()
     if row and int(row[0] or 0) >= EXTRACTOR_VER:
         return 0
-    terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)))
+    # ★写时不过滤(用户拍板):存**未过滤全量**,语义过滤全部下沉到读侧
+    #   (rebuild_profile / focus_window / build_mentions 各自现场按**当前**停用词表滤)。
+    #   否则过滤规则一变,历史信号回不来:复活一个词找不回它被误滤期间的全部事件
+    #   (events.terms 是抽取时快照,源归档后永远重抽不了——今天已两次踩这个坑)。
+    terms = extract_terms(text, hint=hint, lang=(lang if lang is not None else _book_lang(file)), raw=True)
     if terms and known_only:
         # ★ AI 只能**强化**注意力对象,不能**创造**(用户 2026-07-19 方案的必要护栏)。
         #   只留其它渠道已经见过的词:书里读过/高亮过/查过/问过的才算数,
