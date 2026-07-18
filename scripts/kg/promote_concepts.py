@@ -111,11 +111,15 @@ def build(write=False):
     for k, v in seeds.items():
         nid = "em:" + hashlib.sha1(k.encode("utf-8")).hexdigest()[:12]
         in_kg = k in kg_terms
+        _bk = kg_terms.get(k, "")
         nodes[k] = {
             "id": nid, "surface": v["surface"], "key": k,
             "sources": sorted(v["sources"]), "signal": v["signal"],
             "provenance": v["provenance"],
-            "in_authored_kg": in_kg, "authored_ref": kg_terms.get(k, ""),
+            "in_authored_kg": in_kg, "authored_ref": _bk,
+            # 来源属性(faceted graph:UI 按 subject/books 投影出单科/单书的树)
+            "books": ([_bk.split("#")[0]] if in_kg and _bk else []),
+            "subject": "",
             "kind": "concept", "origin": "emergent", "confirmed": None,
         }
     out = {"nodes": nodes, "meta": {"built": int(time.time()), "n": len(nodes),
@@ -200,8 +204,18 @@ def build_edges(model="sonnet", effort="medium", write=False):
     cyc = nodes_in - ok
     if cyc:
         edges = [e for e in edges if not (e["kind"] == "prereq" and e["from"] in cyc and e["to"] in cyc)]
+    groups = data.get("groups", {})
+    # 来源属性:把 AI 科目分组写回每个节点的 subject(供按科目切换)
+    for _subj, _idxs in groups.items():
+        for _i in _idxs:
+            try:
+                _k = idx2key[int(_i)]
+            except Exception:
+                continue
+            if _k in nodes:
+                nodes[_k]["subject"] = _subj
     g["edges"] = edges
-    g["groups"] = data.get("groups", {})
+    g["groups"] = groups
     g["meta"]["n_edges"] = len(edges)
     g["meta"]["edges_built"] = int(time.time())
     if write:
