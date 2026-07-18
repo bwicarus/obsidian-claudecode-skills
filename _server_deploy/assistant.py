@@ -65,8 +65,10 @@ def _book_total_pages(file_rel):
         if not file_rel:
             return 0
         v = _VB()
-        if v and v.is_view_ref(file_rel):
-            return int(v.total_pages(file_rel) or 0)
+        if v:   # 领域服务对两种书都算得出(合并=各卷之和,单本=它自己);拿不到才落回本地 fitz
+            n0 = int(v.total_pages(file_rel) or 0)
+            if n0:
+                return n0
         pdf = _pdf()
         ap = pdf._safe_vault_path(file_rel)
         if not ap:
