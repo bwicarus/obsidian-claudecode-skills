@@ -43,6 +43,30 @@ if not Path(VAULT_ROOT).exists():
         VAULT_ROOT = _v
 
 ATT_DIR = Path(PROJECT_DIR) / "state" / "attention"
+
+
+def _domain_set():
+    global _DOMAIN_SET_CACHE
+    try:
+        return _DOMAIN_SET_CACHE
+    except NameError:
+        pass
+    _s = set()
+    try:
+        _d = json.loads((Path(PROJECT_DIR) / "state" / "attention" / "domain-terms.json").read_text("utf-8"))
+        _s = {str(t).lower() for t in (_d.get("terms") or [])}
+    except Exception:
+        pass
+    globals()["_DOMAIN_SET_CACHE"] = _s
+    return _s
+
+
+class _DomainSetProxy:
+    def __contains__(self, x):
+        return x in _domain_set()
+
+
+_DOMAIN_SET = _DomainSetProxy()
 DB = ATT_DIR / "events.db"
 FOCUS = ATT_DIR / "focus.json"
 STATE = Path(PROJECT_DIR) / "state"
@@ -431,6 +455,71 @@ def extract_terms(text, hint="", lang=None):
     return _dedup_nest(out, text)[:60]
 
 
+MENTION_VER = 1        # mention 抽取器版本(改就 +1;event_mentions.mver 记录)
+
+
+def _mention_lang(term, lang):
+    if _KANA.search(term):
+        return "ja"
+    if _CJK.search(term):
+        return "ja" if (lang and "ja" in lang) else "zh"
+    if term.isascii():
+        return "en"
+    return "mixed"
+
+
+def _mention_method(term):
+    if _KANA.search(term):
+        return "fugashi"
+    if _CJK.search(term):
+        return "jieba"
+    if term.isascii():
+        return "regex"
+    return "mixed"
+
+
+def _mention_conf(term):
+    # 启发式置信:领域词典命中最高,复合词(多字/多词)中,单 token 低
+    try:
+        if term.lower() in _DOMAIN_SET:
+            return 0.95
+    except Exception:
+        pass
+    if len(term) >= 4 or (" " in term):
+        return 0.75
+    return 0.55
+
+
+def extract_mentions(text, hint="", lang=None):
+    """★多粒度 mention(审查采纳):每个词的**每次出现**=一个 mention,带 span/lang/method/conf/parent。
+    复用 extract_terms 的术语集(不改抽取),按 span **贪心分配**——长词先占位,短词落在长词 span 内 → child
+    (parent 指长词),独立出现 → primary(parent=None)。彻底解决"独立重复被吞"+"合成词计数"(需 span 才对)。"""
+    text = (text or "").strip()
+    if not text:
+        return []
+    terms = extract_terms(text, hint=hint, lang=lang)
+    tl = text.lower()
+    claimed = []   # [(start, end, term_lower)] 已占位的更长词 span
+    out = []
+    for term in sorted(set(terms), key=len, reverse=True):
+        t = str(term)
+        tlow = t.lower()
+        if not tlow:
+            continue
+        pos = 0
+        while True:
+            i = tl.find(tlow, pos)
+            if i < 0:
+                break
+            j = i + len(tlow)
+            parent = next((c[2] for c in claimed if c[0] <= i and j <= c[1] and (c[1] - c[0]) > (j - i)), None)
+            out.append({"s": t, "start": i, "end": j, "lang": _mention_lang(t, lang),
+                        "method": _mention_method(t), "conf": _mention_conf(t), "parent": parent})
+            claimed.append((i, j, tlow))
+            pos = j
+    return out
+
+
 # ── 事件层 ─────────────────────────────────────────────────────────────────────
 def _db():
     ATT_DIR.mkdir(parents=True, exist_ok=True)
@@ -446,6 +535,13 @@ def _db():
     except Exception:
         pass
     c.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
+    # ★mention 迁移(审查采纳增量双写):每个词的每次出现=一行,带 span/lang/method/conf/parent。
+    #   与 events.terms **并存**(不动老打分);新打分器读这张表,一周对账后再切读路径。
+    c.execute("""CREATE TABLE IF NOT EXISTS event_mentions(
+        src_key TEXT, idx INTEGER, surface TEXT, start INTEGER, "end" INTEGER,
+        lang TEXT, method TEXT, conf REAL, parent TEXT, mver INTEGER DEFAULT 0,
+        PRIMARY KEY(src_key, idx))""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_em_surf ON event_mentions(surface)")
     return c
 
 
@@ -495,6 +591,27 @@ def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hin
         f.write(line)
         f.flush()
     return True
+
+
+def build_mentions(c, only_new=True):
+    """★mention 双写 pass(增量,审查采纳):从 events.text 生成 event_mentions,**不动 events.terms/打分**。
+    幂等可反复跑;only_new=True 只补缺失或 mver 过旧的事件。返回处理事件数。"""
+    rows = c.execute("SELECT src_key, text FROM events WHERE text IS NOT NULL AND text != ''").fetchall()
+    done = 0
+    for src_key, text in rows:
+        if only_new:
+            r = c.execute("SELECT MAX(mver) FROM event_mentions WHERE src_key=?", (src_key,)).fetchone()
+            if r and r[0] is not None and int(r[0]) >= MENTION_VER:
+                continue
+        ms = extract_mentions(text)
+        c.execute("DELETE FROM event_mentions WHERE src_key=?", (src_key,))
+        for idx, m in enumerate(ms):
+            c.execute('INSERT INTO event_mentions(src_key,idx,surface,start,"end",lang,method,conf,parent,mver)'
+                      ' VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (src_key, idx, m["s"], m["start"], m["end"], m["lang"], m["method"], m["conf"], m["parent"], MENTION_VER))
+        done += 1
+    c.commit()
+    return done
 
 
 def import_raw(c):
@@ -963,7 +1080,7 @@ def ensure_fresh(c=None, force=False):
         stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
                  "qa": import_convo(c), "qa_arch": import_convo_archive(c),
                  "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
-                 "anki_lapse": import_anki_lapses(c), "note": import_notes(c)}
+                 "anki_lapse": import_anki_lapses(c), "note": import_notes(c), "mentions": build_mentions(c)}
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('sources_fp',?)", (cur,))
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('last_import',?)", (str(int(time.time())),))
         c.commit()
@@ -2000,7 +2117,7 @@ def run(rebuild=False):
     stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
              "qa": import_convo(c), "qa_arch": import_convo_archive(c),
              "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
-             "anki_lapse": import_anki_lapses(c), "note": import_notes(c)}
+             "anki_lapse": import_anki_lapses(c), "note": import_notes(c), "mentions": build_mentions(c)}
     c.commit()
     prof = rebuild_profile(c)
     total = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
