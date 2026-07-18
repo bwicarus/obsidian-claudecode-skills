@@ -513,6 +513,7 @@ window.toggleGrammarPanel = function () {
       const r = rel(); if(!r) return;
       await fetch('/control/api/concept-net',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({books:{[r]:on}, register:true})});
+      window.__conceptNetBookOn = on;
     }catch(e){}
   };
   window.addEventListener('load', async function(){
@@ -520,8 +521,9 @@ window.toggleGrammarPanel = function () {
       const r = rel(); if(!r) return;
       const d = await (await fetch('/control/api/concept-net')).json();
       const b = (d.books||[]).find(x=>x.rel===r);
-      const el = document.getElementById('set-conceptnet');
-      if(el && b) el.checked = !!b.enabled;
+      window.__conceptNetBookOn = !!(b && b.enabled);   // 共享面板懒建:fill 时读这个回填(同 __figBookOn 模式)
+      const el = document.getElementById('set-conceptnet');   // legacy UI 直填兜底
+      if(el) el.checked = window.__conceptNetBookOn;
     }catch(e){}
   });
 })();

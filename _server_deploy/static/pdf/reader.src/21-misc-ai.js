@@ -116,6 +116,9 @@ function _fillSettings() {
   // 本书文本语言勾选(每本书独立,从 BOOK_LANGS 回填)
   document.querySelectorAll('#lang-checks input').forEach(c => { c.checked = (BOOK_LANGS || []).includes(c.value); });
   { const e = document.getElementById('set-figures'); if (e) e.checked = !!window.__figBookOn; }   // 本书插图描述开关(每本书独立)
+  { const e = document.getElementById('set-conceptnet');                                            // 概念网按书开火(共享面板默认隐藏,PDF 揭示+回填)
+    if (e) { e.checked = !!window.__conceptNetBookOn;
+             const sec = e.closest('[data-sec="pdf-conceptnet"]'); if (sec) sec.style.display = ''; } }
   try { loadTocStatus(); } catch (_) {}   // 书籍目录:已有→显示「已存在」,无→显示建立目录输入
   renderHlColorSetting();
   if (window._initCharOfsPanel) window._initCharOfsPanel();   // 文字层校准块状态

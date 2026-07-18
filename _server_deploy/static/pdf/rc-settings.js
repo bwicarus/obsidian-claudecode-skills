@@ -346,6 +346,13 @@
             '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）' +
           '</label>' +
           '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>' +
+          // [PDF] 概念网按书开火(用户定:读哪本书时决定哪本;默认隐藏,PDF 的 _fillSettings 揭示+回填)
+          '<div data-sec="pdf-conceptnet" style="display:none">' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+              '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> 🌱 本书自动生长概念笔记（概念网）' +
+            '</label>' +
+            '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线对你在本书反复关注的<b>学科概念</b>自动生成概念笔记（引原文定义+自动连边,单词仍归词汇本）。<b>每本书独立</b>,即改即存。</div>' +
+          '</div>' +
           HR +
         '</div>' +
         // [PDF] 书籍目录(逐字照搬,onclick=原生 buildToc/showTocBuild;状态区由原生 loadTocStatus 填)
