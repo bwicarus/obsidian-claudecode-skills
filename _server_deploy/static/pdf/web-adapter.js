@@ -59,7 +59,7 @@
     if (push !== false && CUR) _hist.push(CUR);
     CUR = u; CFG.web_url = u; _pageText = '';
     var b = document.getElementById('wl-url'); if (b) b.value = u;
-    frame().src = '/pdf/web/proxy?url=' + encodeURIComponent(u);
+    frame().src = '/pdf/web/frame?url=' + encodeURIComponent(u);   // 服务端裁决 embed/代理
     try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
     setTimeout(askText, 1200);
   }

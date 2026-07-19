@@ -281,6 +281,11 @@ def inject_nav(response):
     p = request.path
     if not any(p.startswith(x) for x in NAV_INJECT_PREFIXES):
         return response
+    # 实况网页的代理输出是**别人的页面**,注全站导航进去纯属污染(实测被打成
+    # ja.wikipedia.org/static/nav.js 这种跨站死链)。外壳 /pdf/web/live 才该有导航。
+    if p.startswith("/pdf/web/proxy") or p.startswith("/pdf/web/res") \
+            or p.startswith("/pdf/web/p/") or p.startswith("/pdf/web/r/"):
+        return response
     try:
         body = response.get_data(as_text=True)
     except Exception:

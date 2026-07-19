@@ -21,8 +21,10 @@ import time
 import uuid
 from pathlib import Path
 
-from flask import abort, jsonify, make_response, redirect, render_template, request
-from urllib.parse import quote as _q
+import re
+import threading
+from flask import abort, jsonify, make_response, redirect, render_template, request, session, Response
+from urllib.parse import quote as _q, quote, urljoin, urlparse
 
 # register_html_reader 注入(模块 import 时为 None,注册后可用)
 _safe_vault_path = None   # callable: vault 相对路径 → 安全绝对 Path 或 None
@@ -265,6 +267,7 @@ def _web_search(q: str, n: int = 15) -> tuple[list, str]:
         return [], "none"
 
 
+WEB_HOME = "https://www.google.com/"   # 浏览器主页(用户:要真谷歌,不是自制页)
 _WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立状态,绝不进书的 reading-pos)
 
 
@@ -274,7 +277,235 @@ _WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立�
 # google.com 都是 SAMEORIGIN)→ 必须**服务端代理**:由我们的域名吐 HTML、剥掉这两个头。
 # 副作用正是我们要的:页面变成**同源文档** → 外壳 JS 能直接读 iframe 内的选区/DOM,
 # 于是查词/高亮/AI 侧栏这套控制层原样可用(不像扩展要跨进程通信)。
-# 资源(图片/CSS/JS)不代理,靠注入的 <base href> 直接走原站(省带宽,也少一层出错)。
+# ⚠ 首版「资源不代理,靠 <base href> 直连原站」**已实测证伪**(2026-07-19 headless chromium 七站实测):
+#   页面里每个 JS/CSS/图片/XHR 都从我们的域名发往原站 = **跨源请求**,被浏览器 ORB/CORS 全挡:
+#     github err=267/netfail=129、stackoverflow 连 CSS 都 ERR_BLOCKED_BY_RESPONSE.NotSameOrigin、
+#     youtube text=68、bilibili 自家 api.bilibili.com XHR blocked by CORS;只有维基这种纯服务端渲染站活着。
+#   现改为**拦截式代理**(成熟做法:Ultraviolet / webrecorder Wombat 同思路的最小实现):
+#     ① 去掉 <base>,服务端把 HTML 里所有资源 URL 重写成 /pdf/web/res?url=<绝对地址>;
+#     ② CSS 里的 url()/@import 同样重写(经 /res 时改写正文);
+#     ③ 注入 shim 在客户端补运行时那半:patch fetch / XHR / 动态插入节点 / pushState;
+#     ④ 视频站不硬代理(签名 CDN + MSE 打不通)→ 走**官方 embed**(youtube-nocookie / player.bilibili),
+#        官方 embed 本就允许被 iframe,直连最稳(与 rc-videoplayer.js 同一套 URL 构造)。
+#   安全边界:代理页跑在我们**自己的源**上(这正是控制层能读选区的前提),等于在自己域内执行第三方 JS。
+#   已做的收口:禁 Service Worker 注册(否则第三方 SW 会接管整个 App 的源)。彻底隔离需换独立源
+#   (桥接本就全走 postMessage,天然可跨源),列为后续加固项。
+
+# 官方 embed:允许被 iframe,直连不代理(硬代理视频=签名 CDN/MSE/DRM,打不通)
+_EMBED_HOSTS = ("youtube.com/embed/", "youtube-nocookie.com/embed/", "player.bilibili.com",
+                "player.vimeo.com", "open.spotify.com/embed", "w.soundcloud.com/player")
+
+_VIDEO_PAT = (
+    (re.compile(r"(?:youtube\.com/watch\?(?:.*&)?v=|youtu\.be/)([\w-]{6,})", re.I),
+     "https://www.youtube-nocookie.com/embed/{0}?rel=0"),
+    (re.compile(r"bilibili\.com/video/(BV[\w]+)", re.I),
+     "https://player.bilibili.com/player.html?bvid={0}&autoplay=0&danmaku=0"),
+)
+
+
+def video_embed(url: str) -> str:
+    """视频页 → 官方 embed 地址(打不通的硬代理换成能真播的官方播放器);非视频页返回空串。"""
+    for pat, tpl in _VIDEO_PAT:
+        m = pat.search(url or "")
+        if m:
+            return tpl.format(m.group(1))
+    return ""
+
+
+# ── 路径镜像式代理地址(取代首版 ?url= 查询串)──
+# 实测:`?url=` 形态下文档地址是 /pdf/web/proxy,页面里任何**文档相对**地址(webpack 动态 chunk
+# 最典型)都会解析成 /pdf/web/app-runtime.xxx.css 打到我们身上 → github 118 / stackoverflow 407 条
+# 404。改成把真实地址镜进路径(Ultraviolet 同思路),相对解析天然落回原站结构,这一整类一次性消失。
+def _mirror(prefix: str, u: str) -> str:
+    try:
+        p = urlparse(u)
+        path = p.path or "/"
+        out = f"/pdf/web/{prefix}/{p.scheme}/{p.netloc}{quote(path, safe='/@:+~!$&*,;=()')}"
+        if p.query:
+            out += "?" + p.query
+        return out
+    except Exception:
+        return u
+
+
+def unmirror(rest: str, query: str) -> str:
+    """路径镜像 → 真实地址(/pdf/web/p/https/例.com/a/b?q=1 → https://例.com/a/b?q=1)。"""
+    bits = (rest or "").split("/", 2)
+    if len(bits) < 2 or bits[0] not in ("http", "https"):
+        return ""
+    u = f"{bits[0]}://{bits[1]}/" + (bits[2] if len(bits) > 2 else "")
+    if query:
+        u += "?" + query
+    return u
+
+
+def _pxr(u: str) -> str:
+    """资源 → 子资源代理(路径镜像:JS 模块的 ./相对导入、CSS 的 ../ 也才解析得对)。"""
+    return _mirror("r", u)
+
+
+def _pxp(u: str) -> str:
+    """页面 → 主文档代理。"""
+    return _mirror("p", u)
+
+
+def _absu(u: str, base: str) -> str:
+    u = (u or "").strip()
+    if not u or u[0] == "#" or re.match(r"^(data|blob|javascript|mailto|tel|about):", u, re.I):
+        return ""
+    try:
+        return urljoin(base, u)
+    except Exception:
+        return ""
+
+
+_CSS_URL = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.I)
+_CSS_IMP = re.compile(r"""@import\s+(['"])([^'"]+)\1""", re.I)
+
+
+def _rewrite_css(css: str, base: str) -> str:
+    def _u(m):
+        a = _absu(m.group(2), base)
+        return f"url({m.group(1)}{_pxr(a)}{m.group(1)})" if a else m.group(0)
+
+    def _i(m):
+        a = _absu(m.group(2), base)
+        return f"@import {m.group(1)}{_pxr(a)}{m.group(1)}" if a else m.group(0)
+
+    return _CSS_IMP.sub(_i, _CSS_URL.sub(_u, css))
+
+
+_RES_ATTR = re.compile(
+    r"""(<(?:img|script|link|source|track|video|audio|embed|input|object|use|image)\b[^>]*?\s"""
+    r"""(?:src|href|poster|data-src|data-original|data-lazy-src|xlink:href)\s*=\s*)(["'])([^"']*)\2""",
+    re.I)
+_NAV_ATTR = re.compile(r"""(<(?:a|area|form)\b[^>]*?\s(?:href|action)\s*=\s*)(["'])([^"']*)\2""", re.I)
+_IFRAME = re.compile(r"""(<iframe\b[^>]*?\ssrc\s*=\s*)(["'])([^"']*)\2""", re.I)
+_SRCSET = re.compile(r"""(<[^>]+?\ssrcset\s*=\s*)(["'])([^"']*)\2""", re.I)
+_STYLE_ATTR = re.compile(r"""(\sstyle\s*=\s*)(["'])([^"']*url\([^"']*)\2""", re.I)
+_STYLE_TAG = re.compile(r"(<style\b[^>]*>)(.*?)(</style>)", re.I | re.S)
+_INTEGRITY = re.compile(r"""\s(?:integrity|nomodule)\s*=\s*(["'])[^"']*\1""", re.I)
+
+
+def rewrite_html(html: str, base: str) -> str:
+    """把页面里所有资源/导航 URL 重写到我们的代理(取代 <base href>——那个正是跨源被挡的根因)。"""
+    def _res(m):
+        a = _absu(m.group(3), base)
+        return f"{m.group(1)}{m.group(2)}{_pxr(a)}{m.group(2)}" if a else m.group(0)
+
+    def _nav(m):
+        # <a>/<form> 只绝对化、**不**代理:点击由注入脚本拦截后 postMessage 给外壳(它按真实地址走);
+        # 万一没拦住(中键/target=_blank),回落到原站也是合理行为,总好过打到我们域名的死链。
+        a = _absu(m.group(3), base)
+        return f"{m.group(1)}{m.group(2)}{a}{m.group(2)}" if a else m.group(0)
+
+    def _ifr(m):
+        a = _absu(m.group(3), base)
+        if not a:
+            return m.group(0)
+        u = a if any(h in a for h in _EMBED_HOSTS) else _pxp(a)   # 官方 embed 直连
+        return f"{m.group(1)}{m.group(2)}{u}{m.group(2)}"
+
+    def _ss(m):
+        out = []
+        for part in m.group(3).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            bits = part.split(None, 1)
+            a = _absu(bits[0], base)
+            out.append((_pxr(a) if a else bits[0]) + ((" " + bits[1]) if len(bits) > 1 else ""))
+        return f"{m.group(1)}{m.group(2)}{', '.join(out)}{m.group(2)}"
+
+    html = _INTEGRITY.sub(" ", html)          # SRI 会因我们改写 CSS 而失败,必须剥
+    html = _IFRAME.sub(_ifr, html)
+    html = _RES_ATTR.sub(_res, html)
+    html = _NAV_ATTR.sub(_nav, html)
+    html = _SRCSET.sub(_ss, html)
+    html = _STYLE_ATTR.sub(lambda m: f"{m.group(1)}{m.group(2)}{_rewrite_css(m.group(3), base)}{m.group(2)}", html)
+    html = _STYLE_TAG.sub(lambda m: m.group(1) + _rewrite_css(m.group(2), base) + m.group(3), html)
+    return html
+
+
+# ⚠ 舱壁:一个重站单页要拉 100+ 子资源,每条都占一个 gunicorn 线程等上游网络 I/O。
+# 服务只有 --threads 32,不设限 = 浏一个 github 就能把线程池吃光,SSE / 阅读器 / 语音全饿死
+# (与 [[sse-thread-starvation]] 同一类事故,只是放大了一个量级)。代理流量最多占 10 条,
+# 满了就 503——掉一张图,远好过全站宕机。
+_RES_GATE = threading.Semaphore(10)
+
+# 子资源磁盘缓存:现代站的 js/css/字体都是内容哈希命名(不可变),重复代理纯属浪费,
+# 还会招来对方限流(实测 stackoverflow 一页 100+ 请求直接 429)。命中即免舱壁免上游。
+RESCACHE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-rescache"
+_RESCACHE_MAX = 3 * 1024 * 1024
+_RESCACHE_TTL = 7 * 86400
+_RESCACHE_CT = ("javascript", "text/css", "image/", "font/", "application/font",
+                "application/x-font", "text/javascript")
+
+
+def _rescache_ok(ct: str) -> bool:
+    c = (ct or "").lower()
+    return any(x in c for x in _RESCACHE_CT)
+
+
+def _rescache_path(url: str) -> Path:
+    return RESCACHE_DIR / (hashlib.sha1((url or "").encode("utf-8")).hexdigest() + ".bin")
+
+
+def _rescache_get(url: str):
+    p = _rescache_path(url)
+    try:
+        st = p.stat()
+        if time.time() - st.st_mtime > _RESCACHE_TTL:
+            return None
+        blob = p.read_bytes()
+        i = blob.index(b"\n")
+        return blob[i + 1:], blob[:i].decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _rescache_put(url: str, body: bytes, ct: str):
+    try:
+        RESCACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _rescache_path(url)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_bytes(ct.encode("utf-8") + b"\n" + body)
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+_JARS: dict = {}     # per-user cookie jar:很多站没 cookie 直接 403/跳登录
+
+
+def _px_session():
+    import requests
+    uid = ""
+    try:
+        uid = str(session.get("user_id") or "anon")
+    except Exception:
+        uid = "anon"
+    s = _JARS.get(uid)
+    if s is None:
+        if len(_JARS) > 24:
+            _JARS.clear()
+        s = requests.Session()
+        _JARS[uid] = s
+    return s
+
+
+def _px_headers(url: str, extra_ref: str = "") -> dict:
+    h = {"User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/126.0 Safari/537.36",
+         "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"}
+    try:
+        p = urlparse(url)
+        h["Referer"] = extra_ref or f"{p.scheme}://{p.netloc}/"
+        h["Origin"] = f"{p.scheme}://{p.netloc}"
+    except Exception:
+        pass
+    return h
+
 
 _PROXY_STRIP_HEADERS = {"x-frame-options", "content-security-policy",
                         "content-security-policy-report-only", "cross-origin-opener-policy",
@@ -316,6 +547,73 @@ _PROXY_INJECT = """
                                title: document.title, url: location.__realBase || ''}, '*'); }catch(_){}
     }
   });
+  // ── 运行时重写 shim(服务端只能改静态 HTML;页面 JS 跑起来发的请求得在这儿接)──
+  var B = location.__realBase || location.href;
+  function ABS(u){ try{ return new URL(u, B).href; }catch(e){ return null; } }
+  function RES(u){
+    if(u==null) return u;
+    u = String(u);
+    if(!u || u.charAt(0)==='#') return u;
+    if(/^(data|blob|javascript|mailto|tel|about):/i.test(u)) return u;
+    if(u.indexOf('/pdf/web/')===0) return u;                     // 已是代理地址
+    var a = ABS(u); if(!a) return u;
+    try{
+      var p = new URL(a);
+      if(p.origin === location.origin) return u;                 // 已在我们的域内,别再套一层
+      return '/pdf/web/r/' + p.protocol.replace(':','') + '/' + p.host + p.pathname + p.search;
+    }catch(e){ return u; }
+  }
+  // fetch
+  var _f = window.fetch;
+  if(_f) window.fetch = function(input, init){
+    try{
+      if(typeof input === 'string') input = RES(input);
+      else if(input && input.url) input = new Request(RES(input.url), input);
+    }catch(_){}
+    return _f.call(this, input, init);
+  };
+  // XHR
+  var _o = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(m, u){
+    var a = [].slice.call(arguments); try{ a[1] = RES(u); }catch(_){}
+    return _o.apply(this, a);
+  };
+  // 动态插入的节点(懒加载图片/异步 <script>/后插 <link>)
+  try{
+    new MutationObserver(function(ms){
+      ms.forEach(function(mu){ [].forEach.call(mu.addedNodes||[], function(n){
+        if(!n || n.nodeType!==1) return;
+        ['src','href'].forEach(function(k){
+          var v = n.getAttribute && n.getAttribute(k);
+          if(v && !/^(data|blob|#|javascript)/i.test(v) && v.indexOf('/pdf/web/')!==0
+             && n.tagName!=='A' && n.tagName!=='FORM' && n.tagName!=='IFRAME'){
+            try{ n.setAttribute(k, RES(v)); }catch(_){}
+          }
+        });
+      }); });
+    }).observe(document.documentElement, {childList:true, subtree:true});
+  }catch(_){}
+  // SPA 路由:pushState 换成相对我们的代理地址会污染后续相对解析 → 只记不跳
+  try{
+    ['pushState','replaceState'].forEach(function(k){
+      var _s = history[k];
+      history[k] = function(a,b,u){ try{ if(u) B = ABS(u) || B; }catch(_){}
+                                    return _s.call(history, a, b, location.href); };
+    });
+  }catch(_){}
+  // ⚠ 安全硬闸:代理页跑在**我们自己的源**上,放任它注册 Service Worker = 第三方脚本接管整个 App。
+  try{ if(navigator.serviceWorker){ navigator.serviceWorker.register = function(){ return Promise.reject(new Error('blocked')); }; } }catch(_){}
+  // 表单(站内搜索框)→ 交给外壳按真实地址导航
+  document.addEventListener('submit', function(e){
+    var f = e.target; if(!f || f.tagName!=='FORM') return;
+    if((f.method||'get').toLowerCase()!=='get') return;
+    try{
+      var u = new URL(f.getAttribute('action') || B, B);
+      new FormData(f).forEach(function(v,k){ u.searchParams.set(k, v); });
+      e.preventDefault();
+      parent.postMessage({__rcweb:'nav', url: u.href}, '*');
+    }catch(_){}
+  }, true);
   try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){}
 })();
 </script>
@@ -327,13 +625,11 @@ def _proxy_page(url: str):
     err = _url_safe(url)
     if err:
         return None, err
-    import requests
     try:
-        r = requests.get(url, timeout=20, allow_redirects=True, stream=True, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/126.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"})
+        _h = _px_headers(url)
+        _h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        _h.pop("Origin", None)                     # 顶层导航不带 Origin(带了反而像 CSRF 被拒)
+        r = _px_session().get(url, timeout=20, allow_redirects=True, stream=True, headers=_h)
     except Exception as ex:
         return None, f"抓取失败:{str(ex)[:120]}"
     ct = (r.headers.get("Content-Type") or "").lower()
@@ -364,8 +660,11 @@ def _proxy_page(url: str):
         html = raw.decode("utf-8", errors="replace")
     final = r.url or url
     import re as _re
-    # <base>:让相对资源/链接指向原站(资源直连原站,不经我们)
-    base_tag = f'<base href="{final}">\n<script>location.__realBase={json.dumps(final)};</script>'
+    # 页面自带的 <base> 必须先摘掉:留着它我们重写出来的 /pdf/web/res?url=… 会被再拼一次原站前缀。
+    html = _re.sub(r"<base\b[^>]*>", "", html, flags=_re.I)
+    _cache_raw = html                      # ★ 抽正文用**重写前**的原始 HTML(重写后 URL 全变代理链接)
+    html = rewrite_html(html, final)       # ★ 根因修复:资源/CSS/srcset 全部改走我们的代理
+    base_tag = f'<script>location.__realBase={json.dumps(final)};</script>'
     if _re.search(r"<head[^>]*>", html, _re.I):
         html = _re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=_re.I)
     else:
@@ -376,7 +675,7 @@ def _proxy_page(url: str):
         #   `web:<url>` 是**视图引用**(同 vbook:),后端必须有 resolver —— 这里在代理时
         #   顺手抽正文写缓存,assistant._page_text 见 web: 前缀即命中(用户实锤:不做这层,
         #   AI read_page 只会说"没能读到这页的文字内容")。
-        _web_cache_put(final, html)
+        _web_cache_put(final, _cache_raw)
     except Exception:
         pass
     html += _PROXY_INJECT
@@ -659,6 +958,119 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                 f'<p><a href="{_h.escape(url)}" target="_blank">在系统浏览器打开原页 →</a></p></body>', 200)
         return resp
 
+    @bp.route("/web/p/<path:rest>")
+    def pdf_web_page_mirror(rest):
+        """路径镜像式主文档代理(见 _mirror 注释:根治文档相对地址打到我们身上)。"""
+        url = unmirror(rest, request.query_string.decode("utf-8", "ignore"))
+        if not url:
+            abort(400)
+        resp, err = _proxy_page(url)
+        if err:
+            import html as _h
+            return make_response(
+                f'<body style="font:15px system-ui;padding:40px;color:#555">'
+                f'<p>⚠ {_h.escape(err)}</p>'
+                f'<p><a href="{_h.escape(url)}" target="_blank">在系统浏览器打开原页 →</a></p></body>', 200)
+        return resp
+
+    @bp.route("/web/r/<path:rest>")
+    def pdf_web_res_mirror(rest):
+        """路径镜像式子资源代理。"""
+        url = unmirror(rest, request.query_string.decode("utf-8", "ignore"))
+        if not url:
+            abort(400)
+        return _serve_res(url)
+
+    @bp.route("/web/frame")
+    def pdf_web_frame():
+        """iframe 的唯一入口:服务端裁决——视频页 → 官方 embed(能真播),其余 → 代理渲染。
+        模板和前端 go() 都走这里,免得"哪些算视频"在两处各写一份。"""
+        url = (request.args.get("url") or "").strip()
+        if not url:
+            abort(400)
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        emb = video_embed(url)
+        return redirect(emb or _pxp(url))
+
+    @bp.route("/web/res")
+    def pdf_web_res():
+        """子资源代理(JS/CSS/图片/字体/XHR/媒体)。**这是"很多网页打不开"的根因修复**:
+        原先靠 <base> 让资源直连原站 → 每个都是跨源请求 → 被 ORB/CORS 挡死。
+        现在全部由我们同源吐出去。CSS 正文再递归重写 url()/@import;媒体透传 Range 支持拖动。"""
+        url = (request.args.get("url") or "").strip()
+        return _serve_res(url)
+
+    def _serve_res(url: str):
+        if not url or _url_safe(url):
+            abort(403)
+        hit = _rescache_get(url)      # 静态资源(hash 命名的 js/css/字体/图)命中即走,不占舱壁也不打上游
+        if hit is not None:
+            body, ct = hit
+            return Response(body, status=200, headers={
+                "Content-Type": ct, "Cache-Control": "public, max-age=604800",
+                "Access-Control-Allow-Origin": "*"})
+        if not _RES_GATE.acquire(timeout=6):
+            return Response("proxy busy", status=503)
+        ok = False
+        try:
+            resp = _serve_res_inner(url)
+            ok = True
+            return resp
+        finally:
+            # ⚠ 流式正文是在视图**返回之后**才被消费的 → 不能在这里直接 release,
+            #   否则舱壁只罩住"连上游"那一小段,大文件下载照样吃满线程。
+            #   走 _gated() 把 release 交给生成器的 finally;非流式路径(CSS/异常)才就地放。
+            if not ok:
+                _RES_GATE.release()
+
+    def _gated(it):
+        """把释放信号量绑到流的生命周期上。"""
+        try:
+            for chunk in it:
+                yield chunk
+        finally:
+            _RES_GATE.release()
+
+    def _serve_res_inner(url: str):
+        h = _px_headers(url, extra_ref=request.headers.get("Referer", ""))
+        h["Accept"] = request.headers.get("Accept", "*/*")
+        rng = request.headers.get("Range")
+        if rng:
+            h["Range"] = rng
+        try:
+            r = _px_session().get(url, headers=h, timeout=25, stream=True, allow_redirects=True)
+        except Exception:
+            abort(502)
+        ct = (r.headers.get("Content-Type") or "application/octet-stream")
+        keep = {"content-type", "content-length", "content-range", "accept-ranges",
+                "cache-control", "etag", "last-modified", "expires", "content-encoding"}
+        hd = {k: v for k, v in r.headers.items()
+              if k.lower() in keep and k.lower() not in ("content-length", "content-encoding")}
+        hd["Access-Control-Allow-Origin"] = "*"
+        hd["Content-Type"] = ct
+        if _rescache_ok(ct) and r.status_code == 200:
+            try:                                           # 小体积静态资源整读+落盘(不流式)
+                raw = r.content if int(r.headers.get("Content-Length") or 0) <= _RESCACHE_MAX else None
+                if raw is not None and len(raw) <= _RESCACHE_MAX:
+                    if "text/css" in ct.lower():
+                        raw = _rewrite_css(raw.decode("utf-8", "replace"), r.url or url).encode("utf-8")
+                    _rescache_put(url, raw, ct)
+                    resp = Response(raw, status=200, headers=hd)
+                    _RES_GATE.release()
+                    return resp
+            except Exception:
+                pass
+        if "text/css" in ct.lower():                       # CSS 里的 url()/@import 要跟着改写
+            try:
+                resp = Response(_rewrite_css(r.text, r.url or url),
+                                status=r.status_code, headers=hd)
+                _RES_GATE.release()   # 构造完再放:途中抛异常就落回下面的流式分支(那条自己会放)
+                return resp
+            except Exception:
+                pass
+        return Response(_gated(r.iter_content(65536)), status=r.status_code, headers=hd)
+
     @bp.route("/web/live")
     def pdf_web_live():
         """实况网页阅读(浏览器 Copilot 形态,用户拍板:要**原本的网页**):
@@ -683,12 +1095,14 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         没有(或 ?home=1)→ 搜索主页。两者都在 html/view 阅读器壳内(侧栏第一屏可用)。
         与书的续读完全分离:状态存 state/web-last.json,html 阅读器不碰 reading-pos。"""
         if request.args.get("q"):
-            return redirect("/pdf/html/view?file=__web__&q=" + _q(request.args["q"]))
+            return redirect("/pdf/web/live?url=" + _q(
+                "https://www.google.com/search?q=" + _q(request.args["q"], safe="")))
         if not request.args.get("home"):
             last = _web_last_get()
-            if last:
-                return redirect("/pdf/html/view?file=" + _q(last))
-        return redirect("/pdf/html/view?file=__web__")
+            if last and last.startswith("http"):
+                return redirect("/pdf/web/live?url=" + _q(last, safe=""))
+        # 主页 = **真的谷歌首页**(用户拍板:不要我们自制的搜索页,直接把原网站拉进来)
+        return redirect("/pdf/web/live?url=" + _q(WEB_HOME, safe=""))
 
     @bp.route("/api/web-fetch", methods=["POST"])
     def pdf_api_web_fetch():
