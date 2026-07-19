@@ -172,11 +172,27 @@ class VbookGateSlice(unittest.TestCase):
         self.assertTrue(r.get_json().get("ok"))
         self.assertFalse(any(n.get("id") == nid for n in self.PR._notes_load(self.r2)))
 
-    def test_47_userpages_disabled(self):
-        d = self.c.get(self._q("/pdf/api/userpages", file=self.ref)).get_json()
-        self.assertEqual(d, {"ok": True, "pages": []})
-        r = self.c.post("/pdf/api/userpages", json={"file": self.ref, "after": 2, "md": "x"})
-        self.assertEqual(r.status_code, 501)
+    def test_47_userpages_adapted(self):
+        """2026-07-19 语义反转:合并书 userpages 从"禁用"改为完整适配(用户实锤:
+        默认入口=合并视图,禁用等于编辑按钮消失/页面固定化/建页失效)。
+        POST 按全局 after 定位成员卷、局部化落盘;GET 扇入并全局化。"""
+        r = self.c.post("/pdf/api/userpages", json={"file": self.ref, "after": 4, "md": "x"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        pid = r.get_json()["id"]
+        try:
+            # 全局 after=4 → 第 2 卷(每卷 2 页)局部 after=2
+            recs = self.PR._upages_load(self.r2)
+            hit = [x for x in recs if x.get("id") == pid]
+            self.assertEqual([x.get("after") for x in hit], [2], "应落盘第2卷、局部 after")
+            self.assertFalse(any(x.get("id") == pid for x in self.PR._upages_load(self.r1)),
+                             "第1卷不该有")
+            d = self.c.get(self._q("/pdf/api/userpages", file=self.ref)).get_json()
+            mine = [p for p in d["pages"] if p["id"] == pid]
+            self.assertEqual([p.get("after") for p in mine], [4], "GET 应报全局 after")
+        finally:
+            self.c.delete(self._q("/pdf/api/userpages", file=self.ref, id=pid))
+        self.assertFalse(any(x.get("id") == pid for x in self.PR._upages_load(self.r2)),
+                         "DELETE 应跨卷定位清理")
 
     def test_5_view_opens(self):
         r = self.c.get(self._q("/pdf/view", file=self.ref))
