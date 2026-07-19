@@ -24,7 +24,8 @@ from pathlib import Path
 import re
 import threading
 from flask import abort, jsonify, make_response, redirect, render_template, request, session, Response
-from urllib.parse import quote as _q, quote, urljoin, urlparse
+from urllib.parse import quote as _q, quote, urljoin, urlparse, parse_qs
+from html import escape as _hesc
 
 # register_html_reader 注入(模块 import 时为 None,注册后可用)
 _safe_vault_path = None   # callable: vault 相对路径 → 安全绝对 Path 或 None
@@ -267,7 +268,18 @@ def _web_search(q: str, n: int = 15) -> tuple[list, str]:
         return [], "none"
 
 
-WEB_HOME = "https://www.google.com/"   # 浏览器主页(用户:要真谷歌,不是自制页)
+# 浏览器主页/搜索引擎。⚠ 用户原本要的是**真谷歌**,实测证伪:代理下 Google 判"异常流量"直接拦,
+# 且它给的 reCAPTCHA **在我们的域下永远无解**(站点密钥绑死域名,报「网站密钥的网域无效」)——
+# 这不是调 header 能绕的,是 Google 明确不允许被代理。七家实测(headless chromium,中日英各一次):
+#   Google ✗异常流量 / Bing ✗Cloudflare Turnstile / Ecosia ✗ / Startpage ✗(GET 出不来结果)
+#   Brave ✓(自有索引,中日英都出真结果,80 外链) / DuckDuckGo ✓(最轻,42 外链)
+# → 默认换 Brave;Google 仍可手动访问(首页能开),只是搜索会被它自己拦,那时自动兜底转 Brave。
+WEB_HOME = "https://search.brave.com/"
+WEB_SEARCH_URL = "https://search.brave.com/search?q={q}"
+_SEARCH_FALLBACK = "https://search.brave.com/search?q={q}"
+# 判"被搜索引擎拦下了"的特征(拦截页都很短且带这些话术)
+_BLOCK_SIGNS = ("异常流量", "unusual traffic", "Confirm you", "not a robot",
+                "Verify you are human", "解决以下难题", "detected unusual")
 _WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立状态,绝不进书的 reading-pos)
 
 
@@ -710,6 +722,39 @@ def _proxy_page(url: str):
         html = base_tag + html
     # 页面自带的 CSP <meta> 也要剥(否则注入脚本被拦)
     html = _re.sub(r'<meta[^>]+http-equiv=["\']?content-security-policy["\']?[^>]*>', "", html, flags=_re.I)
+    # 搜索引擎把我们拦下来了 → 换一家能用的重搜,别把用户丢在一堵解不开的验证墙前。
+    #   (Google 的 reCAPTCHA 在我们的域下**必然**报"网站密钥的网域无效",点了也没用。)
+    #   ⚠ 判"页面很短"必须先剜掉 script/style 的**内容** —— 去标签的正则只删标签本身,
+    #     而拦截页塞满验证脚本,长度轻松破万,首版据此判定直接失效(实测 Google 兜底没触发)。
+    _bare = _re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", html)
+    _bare = _re.sub(r"<[^>]+>", " ", _bare)
+    blocked = ("/sorry/" in final or "/recaptcha/" in final
+               or (len(_bare) < 6000 and any(x in _bare for x in _BLOCK_SIGNS)))
+    if blocked:
+        try:
+            def _kw_of(u):
+                q = parse_qs(urlparse(u).query)
+                return (q.get("q") or q.get("query") or q.get("p") or [""])[0]
+            qs = parse_qs(urlparse(final).query)
+            # ⚠ Google 的 /sorry/ 页 URL 里 `q=` 是**它自己的验证 token**(实测抓成
+            #   "EhAkACQQ_4OLAC7PZ…"),真正的搜索词在 `continue=` 指向的原始地址里。
+            kw = _kw_of((qs.get("continue") or [""])[0]) or _kw_of(final)
+            if kw and (len(kw) > 60 and " " not in kw and "+" not in kw):
+                kw = ""       # 还是像 token 就宁可不兜底,别拿乱码去搜
+            host = (urlparse(final).netloc or "").lower()
+            if kw and "brave" not in host:
+                alt = _SEARCH_FALLBACK.format(q=quote(kw, safe=""))
+                note = ("<div style=\"font:14px/1.6 system-ui;padding:12px 16px;margin:0;"
+                        "background:#fff5e6;border-bottom:1px solid #f0d9b0;color:#7a5520\">"
+                        f"⚠ <b>{_hesc(host)}</b> 把这次搜索判成了自动程序流量(它的验证码在本站域名下无解)"
+                        f"——已自动改用 Brave 搜索「{_hesc(kw)}」。</div>")
+                r2, e2 = _proxy_page(alt)
+                if r2 is not None and not e2:
+                    r2.set_data(_re.sub(r"(<body[^>]*>)", r"\1" + note, r2.get_data(as_text=True),
+                                        count=1, flags=_re.I) or r2.get_data(as_text=True))
+                    return r2, ""
+        except Exception:
+            pass
     try:   # ★中间转换层(内容侧):浏览过的页面立刻可被 AI 读到。
         #   `web:<url>` 是**视图引用**(同 vbook:),后端必须有 resolver —— 这里在代理时
         #   顺手抽正文写缓存,assistant._page_text 见 web: 前缀即命中(用户实锤:不做这层,
@@ -1263,7 +1308,7 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         与书的续读完全分离:状态存 state/web-last.json,html 阅读器不碰 reading-pos。"""
         if request.args.get("q"):
             return redirect("/pdf/web/live?url=" + _q(
-                "https://www.google.com/search?q=" + _q(request.args["q"], safe="")))
+                WEB_SEARCH_URL.format(q=_q(request.args["q"], safe="")), safe=""))
         if not request.args.get("home"):
             last = _web_last_get()
             if last and last.startswith("http"):

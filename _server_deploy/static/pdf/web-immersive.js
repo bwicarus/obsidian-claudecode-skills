@@ -54,6 +54,9 @@
     if (SKIP[el.tagName] || el.closest('.' + MARK)) return false;
     if (el[DONE] || el.classList.contains('rc-tr-src')) return false;
     if (el.isContentEditable) return false;
+    // 行内元素是段落的**组成部分**,不是段落本身。实测搜索结果页里 <a> 被当成目标 →
+    // 译文和「译 N」按钮塞进了链接文字里。
+    if (INLINE[el.tagName]) return false;
     try { if (el.closest(CHROME)) return false; } catch (e) {}
     var t = (el.innerText || el.textContent || '').trim();
     if (t.length < 4) return false;                    // 太短(图标/序号)不值得翻
