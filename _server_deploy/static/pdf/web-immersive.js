@@ -99,7 +99,9 @@
       '.rc-tr-small{font-size:.86em;opacity:.78;border-left-color:rgba(90,150,240,.3);margin:.2em 0}' +
       '.rc-tr-load{opacity:.45;font-style:italic}' +
       '.rc-tr-src-hidden{display:none !important}' +
-      '.rc-tr-peek{outline:1px dashed rgba(90,150,240,.6);cursor:pointer}' +
+      // 替换模式**不加任何框**(用户明确不喜欢那圈虚线):只保留"可点开看原文"这个能力,
+      // 不给视觉噪音。指针样式也不改——省得一片文字全变成手型。
+      '.rc-tr-peek{}' +
       // 未掌握词多的段落:呼吸框 + 单段「译」按钮(镜像 PDF 阅读器 12-vocab-sentences 的形态,
       // 那边是句级几何框,这边是段级 —— 段落就是网页的天然语义块)
       '.rc-vocab-hot{outline:1.5px solid rgba(255,176,80,.5);outline-offset:2px;border-radius:3px;' +
@@ -178,6 +180,13 @@
     var batch = PEND.splice(0, 40);
     var texts = batch.map(function (e) { return (e.innerText || e.textContent || '').trim(); });
     var seq = ST.seq;
+    if (CACHE) {                       // 缓存命中的当场画出来,不进请求
+      for (var k = batch.length - 1; k >= 0; k--) {
+        var hitZh = CACHE[texts[k]];
+        if (hitZh) { attach(batch[k], hitZh); batch[k].__rcQ = 0; batch.splice(k, 1); texts.splice(k, 1); }
+      }
+      if (!batch.length) { report(); if (PEND.length && !PENDT) PENDT = setTimeout(flush, 60); return; }
+    }
     batch.forEach(function (e) {
       var ph = document.createElement('span');
       ph.className = MARK + ' rc-tr-load' + (ST.style === 'small' ? ' rc-tr-small' : '');
@@ -190,8 +199,9 @@
     var F = window.__rcRawFetch || window.fetch;
     F('/pdf/api/web-translate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texts: texts })
+      body: JSON.stringify({ texts: texts, url: location.__realBase || location.href })
     }).then(function (r) { return r.json(); }).then(function (d) {
+      if (CACHE && d && d.zh) texts.forEach(function (t, i) { if (t && d.zh[i]) CACHE[t] = d.zh[i]; });
       batch.forEach(function (e, i) {
         var ph = e.querySelector(':scope > [data-rc-ph]');
         if (ph) ph.remove();
@@ -266,6 +276,7 @@
   /** 生词提示独立于翻译开关:进页面就扫(它不花翻译额度,只查本地词库)。 */
   function vocabPass() {
     css();
+    preload();          // 顺手预热整页译文缓存:等下点「译 N」就能零请求直出
     var all = collect(document.body);
     var vis = all.filter(function (e) {
       var r = e.getBoundingClientRect();
@@ -293,12 +304,27 @@
     MO.observe(document.body, { childList: true, subtree: true });
   }
 
+  // 整页译文缓存(服务端 30 天)。开译先把这页译过的一次性取回来,命中的段落**不再发请求**,
+  // 重访这页几乎瞬时出双语。miss 的才走批量翻译,翻完服务端顺手并进这份映射。
+  var CACHE = null, _pre = null;
+  function preload() {
+    if (CACHE) return Promise.resolve(CACHE);
+    if (_pre) return _pre;      // 去重:start 和三次 vocabPass 会并发调它(实测发了 3 次)
+    var F = window.__rcRawFetch || window.fetch;
+    return (_pre = F('/pdf/api/web-trcache?url=' + encodeURIComponent(location.__realBase || location.href))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { CACHE = (d && d.items) || {}; return CACHE; })
+      .catch(function () { CACHE = {}; return CACHE; }));
+  }
+
   function start() {
     css();
     ST.on = true;
-    observe(collect(document.body));
-    watchDynamic();
-    report();
+    preload().then(function () {
+      observe(collect(document.body));
+      watchDynamic();
+      report();
+    });
   }
 
   function stop() {

@@ -487,6 +487,48 @@ def _rescache_put(url: str, body: bytes, ct: str):
         pass
 
 
+# 整页译文缓存:逐条的文本级缓存(scripts/vocab/translate.py)本就是**永久**的,所以同一句
+# 不会重复调翻译 API;但每开一次页仍要往服务端跑一趟、逐条查文件、等一个 RTT 才出字。
+# 这里再加一层**按 URL 的整页映射**:进页面先一次性把这页译过的全取回来,命中的段落**零请求**
+# 直接渲染(重访秒出),只有没译过的才发批量请求。
+WEBTR_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-trcache"
+_WEBTR_TTL = 30 * 86400        # 整页映射保 30 天(逐条那层仍是永久,过期只是重新聚合一次)
+_WEBTR_MAX_ITEMS = 500
+
+
+def _webtr_path(url: str) -> Path:
+    return WEBTR_DIR / (hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20] + ".json")
+
+
+def _webtr_get(url: str) -> dict:
+    if not url:
+        return {}
+    p = _webtr_path(url)
+    try:
+        if time.time() - p.stat().st_mtime > _WEBTR_TTL:
+            return {}
+        return (json.loads(p.read_text("utf-8")) or {}).get("items") or {}
+    except Exception:
+        return {}
+
+
+def _webtr_put(url: str, pairs: dict):
+    if not (url and pairs):
+        return
+    try:
+        cur = _webtr_get(url)
+        cur.update(pairs)
+        if len(cur) > _WEBTR_MAX_ITEMS:          # 只留最近的一批,别让长页把文件撑爆
+            cur = dict(list(cur.items())[-_WEBTR_MAX_ITEMS:])
+        WEBTR_DIR.mkdir(parents=True, exist_ok=True)
+        p = _webtr_path(url)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"url": url, "items": cur}, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
 _JARS: dict = {}     # per-user cookie jar:很多站没 cookie 直接 403/跳登录
 
 
@@ -1079,6 +1121,12 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             abort(400)
         return _serve_res(url)
 
+    @bp.route("/api/web-trcache")
+    def pdf_api_web_trcache():
+        """整页译文预取:GET ?url= → {ok, items:{原文: 译文}}。
+        引擎开译时先拿这个,命中的段落**零请求**直接渲染(重访这页几乎瞬时出双语)。"""
+        return jsonify({"ok": True, "items": _webtr_get((request.args.get("url") or "").strip())})
+
     @bp.route("/api/web-translate", methods=["POST"])
     def pdf_api_web_translate():
         """网页沉浸式翻译的批量端点。POST {texts:[...]} → {ok, zh:[...]}。
@@ -1131,6 +1179,8 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                         _cp(texts[i], "zh-CN", z, "no_ai")
                 except Exception:
                     pass
+        _webtr_put((body.get("url") or "").strip(),
+                   {t: z for t, z in zip(texts, zhs) if t and z})
         return jsonify({"ok": True, "zh": zhs,
                         "translated": sum(1 for z in zhs if z), "total": len(texts)})
 
