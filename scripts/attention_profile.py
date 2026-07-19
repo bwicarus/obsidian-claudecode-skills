@@ -943,7 +943,7 @@ def _rel_by_sha():
     """sidecar 文件名(sha1(rel))→ rel 反查表(pdf+epub 全 vault)。"""
     m = {}
     for p in Path(VAULT_ROOT).rglob("*"):
-        if p.suffix.lower() in (".pdf", ".epub") and p.is_file():
+        if p.suffix.lower() in (".pdf", ".epub", ".html") and p.is_file():   # .html:网页也是信息来源(2026-07-19)
             rel = p.relative_to(VAULT_ROOT).as_posix()
             if "/.sandbox/" in rel:
                 continue

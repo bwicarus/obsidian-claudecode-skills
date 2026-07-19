@@ -62,8 +62,99 @@
           }
         } catch (e) {}
       },
-      currentChapterText: function () { try { return (elContent.innerText || '').slice(0, 8000); } catch (e) { return ''; } }
+      currentChapterText: function () { try { return (elContent.innerText || '').slice(0, 8000); } catch (e) { return ''; } },
+      // ════ 2026-07-19 用户实锤"什么功能都没有":demo 级 adapter 缺 getContext/_host.asst,
+      //      AI 侧栏拿不到上下文、大半工具哑。补齐成一等信息来源(镜像 epub-html.js 口径)。════
+      getContext: function (opts) {
+        opts = opts || {}; var sel = opts.selection || {};
+        if (!sel.sel) {
+          try {
+            var c0 = captureFromSelection();
+            if (window.__focusSel && window.__focusSel.text) sel = { sel: window.__focusSel.text, sent: '' };
+            else if (c0 && c0.text) sel = { sel: c0.text, sent: c0.context || '' };
+          } catch (e) {}
+        }
+        return {
+          file: FREL, book: document.title.replace(/ ·.*$/, ''),
+          langs: _docLangs(),                       // 网页语言按内容检测(无书级配置)
+          visible_text: _visibleText(),             // 视口内正文=注意力焦点
+          current_section_idx: 0, total_sections: 1,
+          selection: sel.sel || '', selection_sentence: sel.sent || '',
+          selection_anchor: sel.anchor || undefined
+        };
+      },
+      currentLocation: function () { return { unit: 'page', index: 0, total: 1 }; },
+      _host: {
+        asst: {
+          md: function (t) { return (window.RC && RC.md && RC.md.render) ? RC.md.render(t) : String(t || ''); },
+          toast: function (m) { toast(m); },
+          fmtTime: function (ms) { try { var s2 = Math.round((Date.now() - (ms || 0)) / 1000); return s2 < 60 ? (s2 + '秒前') : (s2 < 3600 ? (Math.round(s2 / 60) + '分钟前') : (Math.round(s2 / 3600) + '小时前')); } catch (e) { return ''; } },
+          fileRel: function () { return FREL; },
+          pdfNumPages: function () { return 1; },
+          locCount: function () { return 1; },
+          dispPage: function (p) { return p; }, pdfFromDisp: function (d) { return d; },
+          changePage: function () {}, fitWidth: function () {}, zoomBy: function () {}, toggleTranslate: function () {},
+          openDrawer: function () { try { RC.sidedrawer.open('asst'); } catch (e) {} },
+          switchTab: function (n) { try { RC.sidedrawer.open(n); } catch (e) {} },
+          asstOpen: function () { try { return !!document.querySelector('.ep-side-pane[data-pane="asst"].active'); } catch (e) { return false; } },
+          voiceContext: function () { return null; },
+          setFocusSel: function (t) { try { window.__focusSel = t ? { text: t } : null; } catch (e) {} },
+          focusSel: function () { return window.__focusSel || null; },
+          clearFigFocus: function () {}, figThumb: function () {},
+          locLabel: function () { return ''; }, locNoun: function () { return '页'; },
+          noteAttached: function () { return []; }, clearNoteAttached: function () {}, renderNoteChips: function () {},
+          notesReload: function () {}, noteInject: function () { return false; },
+          reloadHighlights: function () { try { loadHighlights(); } catch (e) {} },
+          loadAllHighlights: function () { try { loadHighlights(); } catch (e) {} },
+          renderHighlightsOnPage: function () {}, showHlPicker: function () {},
+          assistEdit: function () { try { loadHighlights(); } catch (e) {} },   // AI 批量高亮后刷新
+          renderPhraseHl: function () {}, removePhraseHighlight: function () {},
+          activePhraseHl: function () { return null; }, setActivePhraseHl: function () {},
+          charsRangeToText: function () { return ''; }, charRangeToPtRects: function () { return []; },
+          flashSelOnPage: function (loc, text) {
+            try {   // 定位到文中一句:找文本首次出现的偏移 → 滚过去(单文档语义)
+              var t0 = (elContent.textContent || ''), i = text ? t0.indexOf(text.slice(0, 40)) : -1;
+              if (i >= 0) { var r = _rangeFromOffsets(i, i + Math.min(40, (text || '').length)); if (r) { var el = r.startContainer.parentElement; el && el.scrollIntoView({ block: 'center' }); } }
+            } catch (e) {}
+          },
+          noteNearText: function () { return ''; },
+          jumpToCtx: function () { try { RC.sidedrawer.close(); } catch (e) {} },
+          prewarm: function (off) { try { fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true }); } catch (e) {} },
+          getPaidNoted: function () { return !!window.__paidNoted; }, setPaidNoted: function (v) { window.__paidNoted = v; },
+          hlUrl: function () { return '/pdf/api/html-highlights'; },
+          showAction: function () { return null; }, queueAction: function () {}, taskAction: function () {},
+          voiceLog: function () {}
+        }
+      }
     };
+    // 网页语言检测(内容采样;供查词路由/AI meta——网页没有书级语言配置)
+    var _langsCache = null;
+    function _docLangs() {
+      if (_langsCache) return _langsCache;
+      try {
+        var t = (elContent.innerText || '').slice(0, 4000);
+        var kana = (t.match(/[぀-ヿ]/g) || []).length, han = (t.match(/[㐀-鿿]/g) || []).length,
+            lat = (t.match(/[A-Za-z]/g) || []).length, out = [];
+        if (kana > 20) out.push('ja');
+        if (lat > Math.max(han, kana) * 2 && lat > 200) out.push('en');
+        _langsCache = out;
+      } catch (e) { _langsCache = []; }
+      return _langsCache;
+    }
+    function _visibleText() {
+      try {   // 视口内文本:找可见区块拼接(注意力焦点口径,镜像 EPUB _visibleText 简版)
+        var sc = document.getElementById('html-scroll'), top = sc.scrollTop, bot = top + sc.clientHeight;
+        var out = [], nodes = elContent.querySelectorAll('p,li,h1,h2,h3,h4,blockquote,td');
+        for (var i = 0; i < nodes.length; i++) {
+          var el = nodes[i], y = el.offsetTop;
+          if (y + el.offsetHeight < top) continue;
+          if (y > bot) break;
+          out.push(el.innerText || '');
+          if (out.join('').length > 1600) break;
+        }
+        return out.join('\n').slice(0, 1600);
+      } catch (e) { return ''; }
+    }
     try { if (window.RC && RC.use) RC.use(HtmlAdapter); window.__htmlAdapter = HtmlAdapter; } catch (e) {}
 
     // ════════════ 字符偏移工具(相对 #html-content)════════════

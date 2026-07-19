@@ -64,6 +64,8 @@ def _book_total_pages(file_rel):
     try:
         if not file_rel:
             return 0
+        if isinstance(file_rel, str) and file_rel.lower().endswith((".html", ".htm", ".md", ".markdown")):
+            return 1   # 网页/HTML/MD=单文档(fitz 会把它 reflow 成多页,那是假页数)
         v = _VB()
         if v:   # 领域服务对两种书都算得出(合并=各卷之和,单本=它自己);拿不到才落回本地 fitz
             n0 = int(v.total_pages(file_rel) or 0)
@@ -1682,6 +1684,14 @@ def _page_text(file_rel: str, page) -> str:
         ap.relative_to(VAULT_ROOT.resolve())
         if not ap.exists():
             return ""
+        if ap.suffix.lower() in (".html", ".htm", ".md", ".markdown"):
+            # 网页/HTML 文档(2026-07-19 用户:网页=阅读器的一等信息来源):单文档无页概念,
+            # read_page/上下文直塞都取全文纯文本(抓取层已剔噪+白名单消毒,这里只拆标签)
+            raw = ap.read_text("utf-8", "ignore")
+            if ap.suffix.lower() in (".md", ".markdown"):
+                return raw[:4000]
+            from bs4 import BeautifulSoup
+            return BeautifulSoup(raw, "html.parser").get_text("\n", strip=True)[:4000]
         import fitz
         doc = fitz.open(str(ap))
         try:
@@ -1844,7 +1854,8 @@ def _t_read_page(args, ctx):
             parts.append(b)
     # 下一页:只给**短预览**(开头 1000 字 + 图描述)——多数问题在本页就答完,下页预览只是「够不够、要不要续读」的线索;
     # 不需要整页(那会让每次 read_page 都多背几千字、推高每题成本)。真要看全下页,AI 再 read_page(page=下页)。
-    if nxt:
+    # 单文档(网页/HTML/MD)没有"下一页"——不给预览,否则会把同一篇全文再贴一遍(实测)
+    if nxt and not str(file_rel).lower().endswith((".html", ".htm", ".md", ".markdown")):
         nb = _read_one(file_rel, ctx, nxt, figd, cap_txt=1000,
                        label=f"【下一页·第{_to_disp(ctx, nxt)}页(开头预览,要看全文再 read_page 它)】")
         if nb:
