@@ -1189,6 +1189,7 @@ _SW_JS = r"""// PDF 阅读器 Service Worker(作用域 /pdf/,只拦 /pdf/*):
 //     收藏夹物化 EPUB(资源/收藏夹/)会整本重建,内容会变 → 排除,始终走网络)。
 //   静态 JS(reader.js / pdf.mjs 在 /static/,超出本 SW 作用域)→ 靠浏览器 HTTP 缓存(nginx immutable)。
 const CACHE = 'pdf-cache-v3';
+const SHELL = 'pdf-shell-v1';   // 阅读器壳(静态 JS/CSS/字体/图标 + 开书页 HTML 回退)——离线也能打开阅读器
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
@@ -1197,8 +1198,8 @@ self.addEventListener('activate', (e) => {
     await self.clients.claim();
   })());
 });
-async function _cacheFirst(req) {
-  const cache = await caches.open(CACHE);
+async function _cacheFirst(req, cname) {
+  const cache = await caches.open(cname || CACHE);
   const hit = await cache.match(req);
   if (hit) return hit;
   try {
@@ -1223,7 +1224,29 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const p = url.pathname;
   if (p === '/pdf/api/page-image' || p === '/pdf/api/page-chars') { e.respondWith(_cacheFirst(e.request)); return; }
+  // 壳资产(/static/*,URL 带 ?v= 版本戳 → immutable 语义)cache-first:弱网秒开、离线能启动阅读器。
+  // SW 作用域只限定它控制哪些**页面**,被控页面发出的任意 URL 请求都会经过这里(含 /static/)。
+  if (p.startsWith('/static/')) { e.respondWith(_cacheFirst(e.request, SHELL)); return; }
+  // 开书页/书架导航:network-first,离线回退最后一次成功的 HTML 副本(配合 31-localbook 整本落盘=离线可读)
+  if (e.request.mode === 'navigate' && (p === '/pdf/' || p === '/pdf/view')) {
+    e.respondWith((async () => {
+      const cache = await caches.open(SHELL);
+      // 键按 file 归一(丢 page= 等易变参):换页开同一本书也能命中离线副本
+      const key = (p === '/pdf/view') ? ('/pdf/view?file=' + encodeURIComponent(url.searchParams.get('file') || '')) : '/pdf/';
+      try {
+        const resp = await fetch(e.request);
+        if (resp && resp.ok) cache.put(key, resp.clone());
+        return resp;
+      } catch (err) {
+        const hit = await cache.match(key);
+        if (hit) return hit;
+        throw err;
+      }
+    })());
+    return;
+  }
   if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
+  if (p === '/pdf/api/book-meta') { e.respondWith(_swr(e.request)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
   if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
     const f = url.searchParams.get('file') || '';
     if (f.indexOf('收藏夹') === -1) { e.respondWith(_swr(e.request)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存

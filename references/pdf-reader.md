@@ -1272,3 +1272,20 @@ CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅
 把大量成功轮误报成 RELOAD(&page=5→&page=6 两连"导航"其实就是滚动)。判定真 reload 用
 **窗口标记法**:点删除前 `window.__marker=1`,轮询若 marker 丢失=真重载;replaceState 不丢。
 用标记法重验后,真实失败率远低于最初观感,唯一实锤失败模式就是 gate:count(瞬时多元素)。
+
+## §17 整本下载到本机(离线阅读,2026-07-20)
+
+**「📥 预热」是服务器侧缓存;「⬇ 本机」(顶栏新按钮)才是客户端整本落盘。**
+
+- `reader.src/31-localbook.js`:把全书页图+字符层预灌进 SW 的 `pdf-cache-v3`(Cache Storage)。
+  **缓存键靠直接调用渲染路径的同一批模块级函数构造**(`_bucketReqW/_ratchetReqW/FILE_REL/CHARS_VER`,
+  拼装后同 module 作用域)→ 逐字节一致零漂移。字符层两步:先灌 localStorage 猜测 cv 的键,再经
+  page-overlay 拿真 cv 灌正主+回写 localStorage。3 路并发;可暂停续传(cache.match 跳已存);
+  完成记 `lb-done:<rel>`(含 mtime,书更新→按钮变 ⟳)。开机即 `navigator.storage.persist()`。
+- `_SW_JS` 升级:`pdf-shell-v1` 缓存壳(`/static/*` cache-first;`/pdf/view` 导航 network-first
+  + **按 file 归一键**回退,丢 page= 参数防换页 miss);`/pdf/api/book-meta` SWR(离线开书的前提)。
+- **首访坑**:安装 SW 的那次导航不受 SW 控制 → HTML/壳资产没进缓存。解法=下载完成后 `_lbPrimeShell()`
+  重 fetch 开书 HTML + performance entries 里全部 `/static/` 资产(此时 SW 已控 → 落 SHELL)。
+- E2E:`scratchpad/localbook_e2e.py` 铸 cookie → 下载 → `set_offline(True)` → 重开断言页图+字符层。
+- iOS 注意:Safari 标签页与主屏 PWA 存储**不互通**,固定从主屏入口用;能力依据见
+  `references/ios-webext-capabilities.md`(主屏 PWA 豁免七天清除 + persist 豁免逐出)。
