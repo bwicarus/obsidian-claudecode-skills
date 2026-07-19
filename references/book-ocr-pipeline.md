@@ -280,3 +280,26 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。现在在 PD
 - **任务别被 webapp 重启杀掉**：detached 子进程虽 `start_new_session=True`，但仍在 webapp 的 systemd **cgroup** 内 → 默认 `KillMode=control-group` 会在 `systemctl restart/stop webapp` 时连子进程一起 SIGKILL（部署一次就把在跑的 OCR 杀了）。Pi 的 `webapp.service` 改 **`KillMode=process`**（只杀主进程，留子进程跑完）→ 重启 webapp 不中断 OCR。注：单纯**浏览器刷新**本就不重启 webapp、不受影响；这条只针对 webapp 进程级重启。
 - **「不中断」三层**：编排器 detached（关网页不停）+ 状态写文件（webapp 重启进度不丢）+ OCR sidecar 断点续传（进程被杀重跑自动续）。
 - ⚠ Vision 烧 GCP 赠金（配额计数见 `google_vision_ocr.ocr_one_page` → `log_usage`）；已有文字层的书 vision 引擎秒判跳过、零成本。巨幅扫描页/旋转页的尺寸/JPEG/重试/旋转坑见上面踩坑 14–17。
+
+
+## OCR 噪声源头清洁(2026-07-19,用户方案)
+
+**教训**:噪声清洗最初修在消费端(page-text/assistant/搜书索引各补一刀),用户指正应
+**在文字层生成之后整体清洁**——PDF 本身干净,所有 get_text 消费方(现有+未来)自动受益。
+
+- `embed_google_ocr_to_pdf.py::clean_chars`:嵌入前统一剔 ① 线条噪声(插图边框/表格线被
+  OCR 认成 `| | | |` 串;字符∈线条集 且 高<页正文中位×0.45)② ruby 注音(假名 且 高<中位
+  ×0.60;注音展示走 furigana sidecar,文字层里只是污染,还会把「宮廷料理人いいんほんぞうがく
+  だった伊尹」这种脏文本喂给 AI)。CJK 页才启用(拉丁/代码页 `|` 是真字符)。
+- `--strip-old`:对**已嵌过**的书重嵌时先 redact 删旧文字层(保图像),否则叠两层。
+  **只动有 sidecar 的页** → 用户插入页(无 sidecar)天然免疫。
+- **页号错位陷阱**:插入页会平移 PDF 页号,但 OCR 编排在跑 Vision 时已按当前 PDF 页存
+  sidecar(插入页位置留缺号,料理师 part1 实测缺 29/31)——重嵌前先确认 sidecar 缺号
+  与 `state/reader-userpages/<sha>.json` 的插入页位置一致。
+- 重嵌验收五件套:页数不变 / 插入页文字保留 / 目标页裸 get_text 干净 / **渲染逐像素一致**
+  (抽查页图 md5,确认 redact 未伤图)/ 大小合理。替换前备份原件到 `~/backups/pre-reembed-*/`。
+- 替换后连锁全自动:char-cache/text-index 键含 mtime 失效、`build_search_index.py` 重建、
+  vbook revision 自动刷新。
+- 消费端清洗(pdf_reader `_strip_graphic_noise`/`_page_text_clean`/切句 ruby 跳过)**保留**:
+  对未重嵌的书兜底;规格与 embed 层一致,等价冗余零成本。
+- ⚠ 待办:mokuro 路径(`embed_ocr_to_pdf.py`,行级)还没加同规格清洁——mokuro 书重嵌前先补。
