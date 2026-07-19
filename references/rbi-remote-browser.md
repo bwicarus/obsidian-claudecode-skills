@@ -82,6 +82,33 @@ Pi CDP Input.dispatch → 真 Chrome 执行 → 新 mutation 顺下行流回(闭
 - **阶段 3 — 降载/护栏**:rrweb sampling/blockClass/只录可视区抗 mutation 洪泛;并发 1-2 会话上限;
   canvas/video 页自动降级到阶段 0 渲染代理。
 
+## 阶段 1a/2 已实施(2026-07-19,交互回传打通)
+
+Pi 端 `_server_deploy/rbi_server.py`(独立 asyncio 进程,systemd `rbi-server`,WS 8769,nginx `/rbi-ws`)+
+前端 `_server_deploy/templates/rbi_live.html`(`/pdf/web/rbi-live?url=`)。入口:iframe 代理版顶栏「🖥」切换。
+
+**交互回传(把 rrweb"录像回放"改造成"能交互浏览器",这是选型说的唯一要自建部分)** —— 每一步都真机反馈驱动:
+- **点击不用坐标用 node id**:坐标因客户端/Pi 布局差错位(Main_Page 客户端 y=115/Pi y=14)。改
+  客户端 `replayer.getMirror().getId(节点)` → 回传 → Pi `window.__rbiMirror.getNode(id).click()`
+  (`__rbiMirror = rrweb.record.mirror`,roundtrip 实测 true)。
+- **id 必须一致 = 每页单次 record**:重复注入 record(open 手动 + load 钩子)重置 id 空间 → 客户端 id
+  ≠ Pi id → 全错。改 `domcontentloaded` 钩子每页单次录(去掉 open 手动录)。
+- **表单/搜索当请求转发**(用户拍板,比逐字键盘可靠):GET 表单回车 → 客户端收集具名字段构造搜索 URL
+  → Pi `open`(复用跳转链路);POST/SPA → `submitform`(getNode 设值 + form.requestSubmit)。逐字 `setinput` 同步。
+- **滚动 = iframe 撑到内容全高 + 外层 #stage 滚**:rrweb 固定 iframe=录制 viewport(900)、内容几万 px
+  靠 iframe 内滚(iOS 坑 + rrweb 锁定)。`startFit()` 定时把 iframe.height 设成内容 scrollHeight。
+- **无限滚动 = 滚动位置同步 Pi**:客户端滚 #stage,Pi 不知道 → 不触发懒加载。`#stage` scroll → 回传 y
+  → Pi `window.scrollTo(0,y)` → 页面 JS 触发加载更多 → 新内容 record 流回 → iframe 变高(实测 quote 10→50)。
+
+**关键坑(实测锤出)**:
+- rrweb Replayer 回放模式给 iframe 设 `pointer-events:none` → 真实点击进不去;强制 `auto` + 假鼠标层 `none`。
+- **CSP 挡 rrweb 注入 → 白屏零事件**(ddg-lite/GitHub/搜索引擎):`launch_persistent_context(bypass_csp=True)`。
+- MB 级事件不能当 `page.evaluate` 参数(aarch64 CDP 序列化卡死);`expose_binding` + `JSON.stringify` 字符串回传 OK。
+- context 崩溃/被杀要自愈(`_ctx_alive` + open 重试重建);⚠ 清理测试残留别 `pkill -9 headless_shell`(会杀服务的浏览器)。
+- rrweb 重建元素 `innerText` 为空(不在渲染树),取文本/选区用 `textContent`/Range。
+
+**下一步**:阶段 1b 查词/翻译接到重建 DOM(选区不回传 Pi,客户端直连 API——不变量 2);真机继续打磨延迟/手感。
+
 ## v1 达不到的(诚实)
 
 - **视频/canvas/WebGL**:rrweb 记录盲区 → 这类页面退渲染代理或 embed(视频本就走官方 embed)。

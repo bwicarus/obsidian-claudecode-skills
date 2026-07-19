@@ -119,12 +119,6 @@
       if(_lastClickInput){ _inputEl=t; _inputId=id; setTimeout(focusKbd, 30); }   // 记住输入框,回车时提交
     }
     d.addEventListener('click', sendClick, true);
-    // 滚动 → 回传(让懒加载/滚动位置在 Pi 侧同步)
-    var _scrT=null;
-    d.addEventListener('scroll', function(){ if(_scrT) return;
-      _scrT=setTimeout(function(){ _scrT=null;
-        try{ ws.send(JSON.stringify({cmd:'scroll', dy:(d.scrollingElement?d.scrollingElement.scrollTop:0)})); }catch(_){}
-      }, 200); }, true);
   }
 
   // 输入:重建 DOM 的 input 聚焦**不会弹 iPad 键盘**(不是真实焦点)。用一个隐藏真 input 在用户手势内
@@ -170,6 +164,17 @@
     if(_inputId) try{ ws.send(JSON.stringify({cmd:'submitform', id:_inputId, text:v})); }catch(_){}
   }
   connect();
+
+  // ★ 滚动同步(用户实测:无限滚动不加载新内容——根因=滚动位置没同步到 Pi,Pi 不知道你滚到底了、
+  //   不触发它的懒加载)。把 #stage 的滚动位置回传 Pi,Pi window.scrollTo 到同位置 → 页面 JS 触发
+  //   加载更多 → 新内容 record 增量流回 → iframe 变高 → 你能继续往下滚。内容一致所以 y 直接对应。
+  var _scrollT=null;
+  stage.addEventListener('scroll', function(){
+    if(_scrollT) return;
+    _scrollT=setTimeout(function(){ _scrollT=null;
+      try{ ws.send(JSON.stringify({cmd:'scroll', y:Math.round(stage.scrollTop)})); }catch(_){}
+    }, 160);
+  }, {passive:true});
 
   // 地址栏:输网址直接开,输词走搜索(与 iframe 版一致)
   urlbox.addEventListener('keydown', function(e){

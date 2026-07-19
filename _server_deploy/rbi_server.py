@@ -255,8 +255,9 @@ async def _serve(ws):
                 except Exception:
                     pass
             elif cmd == "scroll" and page is not None:
+                # 客户端滚动位置 → Pi 真 Chrome 同位置 scrollTo → 触发页面无限滚动/懒加载(新内容 record 流回)
                 try:
-                    await page.mouse.wheel(0, float(msg.get("dy", 0)))
+                    await page.evaluate("(y)=>window.scrollTo(0, y)", float(msg.get("y", 0)))
                 except Exception:
                     pass
             elif cmd == "nav" and page is not None:
