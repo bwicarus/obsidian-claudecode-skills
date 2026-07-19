@@ -1227,10 +1227,11 @@ async function _netFallback(req, keyUrl) {
     throw err;
   }
 }
-async function _swr(req) {
+async function _swr(req, keyUrl) {
   const cache = await caches.open(CACHE);
-  const hit = await cache.match(req);
-  const net = fetch(req).then(resp => { if (resp && resp.ok) cache.put(req, resp.clone()); return resp; }).catch(() => null);
+  const key = keyUrl || req;
+  const hit = await cache.match(key);
+  const net = fetch(req).then(resp => { if (resp && resp.ok) cache.put(key, resp.clone()); return resp; }).catch(() => null);
   return hit || (await net) || Response.error();
 }
 self.addEventListener('fetch', (e) => {
@@ -1262,12 +1263,15 @@ self.addEventListener('fetch', (e) => {
   }
   if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
   if (p === '/pdf/api/book-meta') { e.respondWith(_swr(e.request)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
-  if (p === '/pdf/api/page-overlay') { e.respondWith(_netFallback(e.request)); return; }   // 生词下划线/句子浮层:离线回最后副本
-  if (p === '/pdf/api/dict-quick') {   // 查词:在线走网络(学习回写不断),离线按词归一回落(查过的词离线秒答)
+  if (p === '/pdf/api/page-overlay') { e.respondWith(_swr(e.request)); return; }   // 浮层:本地秒回+后台刷新(local-first;cv 与 chars 自洽成对)
+  if (p === '/pdf/api/dict-quick') {   // 查词 local-first:查过的词本地**秒答**;后台请求照发→学习回写(日志/暴露)不断,新数据落缓存
     const w = url.searchParams.get('word') || '', lg = url.searchParams.get('langs') || '';
-    e.respondWith(_netFallback(e.request, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));
+    e.respondWith(_swr(e.request, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));
     return;
   }
+  // 侧数据(高亮/便签/生词映射/词组):在线永远走网络(写后读必新,零失效难题),断网回最后副本可读
+  if (p === '/pdf/api/highlights' || p === '/pdf/api/notes' || p === '/pdf/api/vocab-mastery-map'
+      || p === '/pdf/api/phrases' || p === '/pdf/api/phrase-mark') { e.respondWith(_netFallback(e.request)); return; }
   if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
     const f = url.searchParams.get('file') || '';
     if (f.indexOf('收藏夹') === -1) { e.respondWith(_swr(e.request)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存
