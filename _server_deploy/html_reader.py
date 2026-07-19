@@ -524,6 +524,14 @@ _PROXY_STRIP_HEADERS = {"x-frame-options", "content-security-policy",
                         "cross-origin-embedder-policy", "frame-options"}
 
 _PROXY_INJECT = """
+<style>
+/* iOS 长按链接/图片会弹 Safari 自己的预览菜单(「在新标签页中打开」),把长按这个手势整个抢走
+   —— 而长按在我们的阅读器里是有语义的(选中/便签/词组)。用与 rc-stickynote 相同的组合:
+   禁 callout 菜单,但保留文字可选。桌面右键菜单不动(那是合理预期)。 */
+a, img, video, button { -webkit-touch-callout: none !important; }
+a { -webkit-user-drag: none; }
+body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
+</style>
 <script>
 (function(){
   // 站内导航拦截:链接/表单跳转改走代理(留在我们的壳里);新窗口链接也接管
@@ -549,6 +557,12 @@ _PROXY_INJECT = """
                    return b ? (b.innerText||'').slice(0,1200) : ''; })() : ''}, '*');
     }catch(_){}
   }
+  // 长按开始就把链接的原生拖拽/预览掐掉(iOS 的 callout 已由上面的 CSS 关掉,这里管住残余路径:
+  //   拖拽启动 + 长按后误触发的 click)。⚠ 用**冒泡**阶段,捕获阶段 stopPropagation 会吞掉
+  //   页面内部按钮的事件(项目里踩过:见 overlay-gate-use-bubble-not-capture)。
+  document.addEventListener('dragstart', function(e){
+    if(e.target && e.target.closest && e.target.closest('a,img')) e.preventDefault();
+  });
   document.addEventListener('mouseup', function(){ setTimeout(report, 10); });
   document.addEventListener('touchend', function(){ setTimeout(report, 10); });
   // 供父壳取整页正文(AI 上下文/存档)
