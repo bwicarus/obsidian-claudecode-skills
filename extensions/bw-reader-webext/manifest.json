@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "BW 网页伴读",
+  "version": "0.1.0",
+  "description": "在真实网页中提供查词、翻译、解释和学习功能（Safari/Chromium WebExtension）。",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://bwicarus.taile44d0c.ts.net/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://*/*"],
+      "exclude_matches": [
+        "https://bwicarus.taile44d0c.ts.net/*",
+        "https://bwicarus.space/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "BW 网页伴读",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "512": "icons/icon-512.png"
+  }
+}

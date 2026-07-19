@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>BW 网页伴读</title>
+  <style>
+    body { width: 320px; padding: 14px; font: 14px system-ui, -apple-system, sans-serif; }
+    h3 { margin: 0 0 10px; }
+    label { display: block; margin-bottom: 4px; color: #555; }
+    input { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid #bbb; border-radius: 7px; }
+    .row { display: flex; gap: 8px; margin-top: 10px; }
+    button { flex: 1; padding: 8px 12px; border: 0; border-radius: 7px; background: #4f7cff; color: white; }
+    #test { background: #6b7280; }
+    #status { margin-top: 10px; white-space: pre-wrap; color: #333; min-height: 1.2em; }
+    .hint { margin-top: 12px; font-size: 12px; color: #888; line-height: 1.5; }
+  </style>
+  <script src="popup.js" defer></script>
+</head>
+<body>
+  <h3>BW 网页伴读</h3>
+  <label for="token">设备令牌（Bearer token）</label>
+  <input id="token" type="password" autocomplete="off" placeholder="从 /profile/ 创建">
+  <div class="row">
+    <button id="save">保存</button>
+    <button id="test">测试连接</button>
+  </div>
+  <p id="status"></p>
+  <p class="hint">在 Pi 的 /profile/ 页创建标签为「iPad Safari Extension」的 token。
+    token 只存本机 storage.local,不进代码/不外发。</p>
+</body>
+</html>
