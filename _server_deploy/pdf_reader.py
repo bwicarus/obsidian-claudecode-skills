@@ -771,7 +771,7 @@ def _sse_stream(prompt, action="explain", uid=""):
 @bp.route("/")
 def pdf_index():
     pdfs = _list_vault_pdfs()
-    return render_template("pdf_index.html", pdfs=pdfs)
+    return render_template("pdf_index.html", pdfs=pdfs, chars_ver=_CHAR_CACHE_VER)
 
 
 def _reader_js_v():
@@ -1212,6 +1212,21 @@ async function _cacheFirst(req, cname) {
     throw err;
   }
 }
+// 网络优先+离线回落:在线行为零变化(服务端副作用如查词日志照常发生),断网回最后一次副本。
+// keyUrl 可归一缓存键(如 dict-quick 按词归一,丢 context/page 等易变参 → 离线命中率高)。
+async function _netFallback(req, keyUrl) {
+  const cache = await caches.open(CACHE);
+  const key = keyUrl || req;
+  try {
+    const resp = await fetch(req);
+    if (resp && resp.ok) cache.put(key, resp.clone());
+    return resp;
+  } catch (err) {
+    const hit = await cache.match(key);
+    if (hit) return hit;
+    throw err;
+  }
+}
 async function _swr(req) {
   const cache = await caches.open(CACHE);
   const hit = await cache.match(req);
@@ -1247,6 +1262,12 @@ self.addEventListener('fetch', (e) => {
   }
   if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
   if (p === '/pdf/api/book-meta') { e.respondWith(_swr(e.request)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
+  if (p === '/pdf/api/page-overlay') { e.respondWith(_netFallback(e.request)); return; }   // 生词下划线/句子浮层:离线回最后副本
+  if (p === '/pdf/api/dict-quick') {   // 查词:在线走网络(学习回写不断),离线按词归一回落(查过的词离线秒答)
+    const w = url.searchParams.get('word') || '', lg = url.searchParams.get('langs') || '';
+    e.respondWith(_netFallback(e.request, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));
+    return;
+  }
   if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
     const f = url.searchParams.get('file') || '';
     if (f.indexOf('收藏夹') === -1) { e.respondWith(_swr(e.request)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存

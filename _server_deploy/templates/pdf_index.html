@@ -86,7 +86,7 @@ input[type=search]:focus{outline:none;border-color:#3b6db5}
           <button class="prep-btn" onclick="preprocess(event,this,'manga')" title="漫画书：manga-ocr，能读气泡/竖排/手写体字（Vision 漏识的），慢（~40s/页）">🎴 漫画</button>
           <button class="prep-btn" onclick="preprocess(event,this,'vision',true)" title="模糊扫描书：栅格化+锐化+对比增强，让字迹更清晰（同时 OCR 补文字层）">✨ 增加清晰度</button>
           <button class="comp-toggle" onclick="compToggle(event,this)" title="压缩版：体积更小、慢网更快。开启后打开本书传压缩版；原书不动（OCR/好网仍用原书）。无压缩版时灰色，点一下生成（呼吸=压缩中）。">🗜 压缩版</button>
-          <button class="prep-btn" onclick="prewarmFromList(event,this)" title="预热整本：按页原生宽度把全书所有页（背景图 + 字符/振假名）一次渲好缓存 → 之后翻页秒开。本地实例尤其推荐（本地直接全本渲好、零等待）。">📥 预热</button>
+          <button class="prep-btn lb-save-btn" onclick="localSaveFromList(event,this)" title="下载到本机：先让服务器渲好全书页，再把页图+字符层存进本机缓存 → 翻页零网络、断网也能读。下载中再点=暂停;已存后点=重新同步。">⬇ 本机</button>
           <button class="prep-btn" onclick="formulaOCR(event,this)" title="公式识别：Claude 视觉给本书的独立公式补 LaTeX（中文混排也准，后台跑，无需 PC）。完成后阅读时点公式直接得 $...$，可复制/问AI/制卡。">🧮 公式</button>
           <button class="prep-btn" onclick="genEreader(event,this)" title="生成电子版：把扫描书重排成「纯文字 + 图/公式裁图」的正常排版 PDF（成段流式、字号统一、体积小、打开快）。产物 <名>.电子版.pdf 落同目录，不自动优先打开——想用时手动选它。后台跑，关页面不中断。">📖 电子版</button>
         </div>
@@ -352,7 +352,82 @@ async function openWebPage() {
   } catch (e) { st.textContent = '✗ 网络错误：' + e.message; }
 }
 
-// ── 整本预热（背景图 + 字符层/振假名，按页原生宽度；后台跑，复用进度条）──
+const CHARS_VER = {{ chars_ver|tojson }};   // 字符层缓存版本(与阅读器同源,键一致)
+// 书架页也注册阅读器 SW(作用域 /pdf/ 比全站 /sw.js 更具体 → 本页与后续 /pdf/* 导航由它接管;
+// 此前书架被根 SW 控制,「⬇ 本机」存好了但离线导航没人兜——2026-07-20 实锤修复)
+if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' }).catch(function () {}); } catch (e) {} }
+// ── 下载到本机(替代预热按钮):①服务器预热渲页(渲阅读器真正会请求的那一档宽) ②页图+字符层灌
+//    SW 的 pdf-cache-v3 ③灌开书壳(view HTML 按 file 归一键 + 其引用的 /static/ 资产) → 断网可读。
+//    宽度公式与阅读器 _bucketReqW 逐字一致(natW=clamp(400..2400,page_w);视口*dpr>natW→2400)。──
+const _lsAbort = {};
+async function localSaveFromList(ev, btn) {
+  ev.stopPropagation();
+  const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
+  if (_lsAbort[rel] === false) { _lsAbort[rel] = true; return; }   // 下载中再点=暂停
+  const prog = item.querySelector('.prep-prog'), bar = item.querySelector('.prep-bar'), msg = item.querySelector('.prep-msg');
+  if (localStorage.getItem('lb-done:' + rel) && !confirm('这本已在本机。重新同步下载?')) return;
+  prog.style.display = 'flex'; bar.style.width = '0%'; msg.textContent = '准备中…';
+  let meta = null;
+  try { meta = await (await fetch('/pdf/api/book-meta?file=' + encodeURIComponent(rel))).json(); } catch (_) {}
+  if (!meta || !meta.ok || !meta.page_count) { msg.textContent = '✗ 取书信息失败'; return; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const natW = Math.max(400, Math.min(2400, Math.round(meta.page_w || 0) || 1352));
+  const cw = document.documentElement.clientWidth || 1024;
+  const reqW = (Math.round(cw * dpr) <= natW) ? natW : 2400;
+  const total = meta.page_count, mt = meta.mtime || 0;
+  try { await fetch('/pdf/api/prewarm-async', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({file: rel, width: reqW}) }); } catch (_) {}
+  _lsAbort[rel] = false;
+  const cache = await caches.open('pdf-cache-v3');
+  let done = 0, errs = 0;
+  const imgUrl = (p) => '/pdf/api/page-image?file=' + encodeURIComponent(rel) + '&page=' + p + '&w=' + reqW + '&v=' + mt;
+  const charsUrl = (p, cv) => '/pdf/api/page-chars?file=' + encodeURIComponent(rel) + '&page=' + p + '&v=' + CHARS_VER + '&cv=' + encodeURIComponent(cv);
+  const put = async (url) => { if (await cache.match(url)) return; const r = await fetch(url); if (!r.ok) throw new Error('HTTP' + r.status); await cache.put(url, r.clone()); };
+  const lane = async (pages) => {
+    for (const p of pages) {
+      if (_lsAbort[rel]) return;
+      try {
+        await put(imgUrl(p));
+        const cvKey = 'pdf-cv:' + rel + ':' + p;
+        let cvg; try { cvg = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvg = 'v' + CHARS_VER; }
+        await put(charsUrl(p, cvg));
+        try {
+          const ov = await (await fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(rel) + '&page=' + p)).json();
+          if (ov && ov.cv && ov.cv !== cvg) { await put(charsUrl(p, ov.cv)); try { localStorage.setItem(cvKey, ov.cv); } catch (_) {} }
+        } catch (_) {}
+      } catch (e) { errs++; }
+      done++;
+      bar.style.width = Math.round(done * 100 / total) + '%';
+      msg.textContent = '存到本机… ' + Math.round(done * 100 / total) + '%（再点按钮=暂停）';
+    }
+  };
+  const lanes = [[], [], []];
+  for (let p = 1; p <= total; p++) lanes[p % 3].push(p);
+  await Promise.all(lanes.map(lane));
+  const aborted = _lsAbort[rel]; delete _lsAbort[rel];
+  if (aborted) { msg.textContent = '⏸ 已暂停（已存部分保留,重按继续）'; return; }
+  try {   // ③ 开书壳:HTML(按 file 归一键,与 SW 一致)+ 其引用的 /static/ 资产全部直灌 SHELL
+    const navUrl = '/pdf/view?file=' + encodeURIComponent(rel);
+    const shell = await caches.open('pdf-shell-v1');
+    const resp = await fetch(navUrl);
+    if (resp.ok) {
+      const html = await resp.clone().text();
+      await shell.put(navUrl, resp);
+      const seen = new Set(); const re = /(?:src|href)="(\/static\/[^"]+)"/g; let mm;
+      while ((mm = re.exec(html))) seen.add(mm[1].replace(/&amp;/g, '&'));
+      for (const u of seen) { try { const r2 = await fetch(u); if (r2.ok) await shell.put(u, r2.clone()); } catch (_) {} }
+    }
+  } catch (_) {}
+  try { localStorage.setItem('lb-done:' + rel, JSON.stringify({ pages: total, w: reqW, mt: mt, ts: Date.now() })); } catch (_) {}
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (_) {}
+  bar.style.width = '100%';
+  msg.textContent = errs ? ('✓ 已存本机（' + errs + ' 页失败,重按补齐）') : '✓ 整本已存本机：翻页零网络、断网可读';
+  btn.textContent = '✓ 本机';
+  setTimeout(() => { prog.style.display = 'none'; }, 5000);
+}
+// 已下载的书回显 ✓(mtime 失效检测在阅读器内做)
+try { document.querySelectorAll('.pdf-item').forEach((it) => { if (localStorage.getItem('lb-done:' + it.dataset.rel)) { const b = it.querySelector('.lb-save-btn'); if (b) b.textContent = '✓ 本机'; } }); } catch (_) {}
+
+// ── 整本预热（旧入口,按钮已被「⬇ 本机」替代;函数保留供内部/调试调用）──
 async function prewarmFromList(ev, btn) {
   ev.stopPropagation();
   const item = btn.closest('.pdf-item'), rel = item.dataset.rel;
