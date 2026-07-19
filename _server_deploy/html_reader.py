@@ -307,11 +307,14 @@ _WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立�
 _EMBED_HOSTS = ("youtube.com/embed/", "youtube-nocookie.com/embed/", "player.bilibili.com",
                 "player.vimeo.com", "open.spotify.com/embed", "w.soundcloud.com/player")
 
+# ⚠ B站不再强转 embed(用户拍板 2026-07-19:要像 Obsidian 那样打开**完整 B站网页**,
+#   不是光秃秃的播放器)。完整页走拦截式代理,页内的 player.bilibili.com iframe 由 _EMBED_HOSTS
+#   直连、视频流靠 iPad Safari 自身编解码器播 —— 我这台无头 Chromium 缺 H.264/AAC 测不出真播,
+#   实测已证:直连 embed / 经代理 / 完整代理三条路输出逐字一致,"播不了"来自测试环境不是代理。
+#   YouTube 仍转 embed(完整 YT 页极重且强依赖登录,embed 体验更好,用户未要求改)。
 _VIDEO_PAT = (
     (re.compile(r"(?:youtube\.com/watch\?(?:.*&)?v=|youtu\.be/)([\w-]{6,})", re.I),
      "https://www.youtube-nocookie.com/embed/{0}?rel=0"),
-    (re.compile(r"bilibili\.com/video/(BV[\w]+)", re.I),
-     "https://player.bilibili.com/player.html?bvid={0}&autoplay=0&danmaku=0"),
 )
 
 
@@ -586,8 +589,8 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
     var href = a.getAttribute('href') || '';
     if(!href || href.charAt(0)==='#' || /^(javascript|mailto|tel):/i.test(href)) return;
     e.preventDefault();
-    try{ parent.postMessage({__rcweb:'nav', url: new URL(href, location.__realBase || document.baseURI).href}, '*'); }
-    catch(_){ location.href = proxied(href); }
+    if(!_navOut(new URL(href, location.__realBase || document.baseURI).href))
+      try{ location.href = proxied(href); }catch(_){}
   }, true);
   // 选区上报:父壳据此弹工具条(同源本可直接读,postMessage 更稳且面向未来跨源)
   function report(){
@@ -730,8 +733,27 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
   //        对方 X-Frame-Options 一挡 → chrome-error 空白页(实测复现)。
   //   所以必须把这几个程序化入口全接管。(location.href= 的 setter 无法 patch,
   //   由服务端的 referer 兜底救回,见 _leak_rescue。)
+  // ⚠ 剥壳(实测 B站根因):页面 JS 常读 location.href(此刻=**我们的代理地址**)再跳转,
+  //   若不识别就会把代理地址当外部地址**再套一层代理** → host 变成我们自己的 .ts.net →
+  //   被 SSRF 判"内网" → 整页崩。任何读 location.href 跳转的站(canonical / spm 追踪)都中招。
+  function _unmirror(u){
+    try{
+      var m = new URL(u, B);
+      if(m.origin === location.origin){
+        var pp = m.pathname;                       // 无反斜杠实现,免字符串转义告警
+        if(pp.indexOf('/pdf/web/p/') === 0 || pp.indexOf('/pdf/web/r/') === 0){
+          var bits = pp.slice(11).split('/');      // '/pdf/web/p/'.length === 11
+          if(bits.length >= 2 && (bits[0] === 'https' || bits[0] === 'http'))
+            return bits[0] + '://' + bits[1] + '/' + bits.slice(2).join('/') + m.search;
+        }
+        return '';   // 我们自己的其它页面(/pdf/web/live 等)——**不是**外部导航,忽略
+      }
+      return m.href;
+    }catch(e){ return ''; }
+  }
   function _navOut(u){
-    try{ var a = ABS(u); if(a){ parent.postMessage({__rcweb:'nav', url:a}, '*'); return true; } }catch(_){}
+    var real = _unmirror(u);
+    if(real){ parent.postMessage({__rcweb:'nav', url:real}, '*'); return true; }
     return false;
   }
   try{
