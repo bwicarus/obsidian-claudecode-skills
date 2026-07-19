@@ -100,3 +100,47 @@ async function handleMessage(message) {
 
   throw new Error("不支持的操作");
 }
+
+// ── bw-fetch 长连 port:content 门面(facade.js __bwReaderFetch)的服务端 ──
+// rc-* 共享层的所有请求(含 SSE 流式)经此转发:补 Bearer、只放行本服务 ORIGIN、流式分片回传。
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "bw-fetch") return;
+  const aborts = new Map();
+  port.onMessage.addListener(async (m) => {
+    if (m.abort) { const c = aborts.get(m.abort); if (c) c.abort(); aborts.delete(m.abort); return; }
+    const { id, url, init } = m || {};
+    if (!id || typeof url !== "string" || !url.startsWith(ORIGIN + "/")) {
+      try { port.postMessage({ id, type: "error", error: "blocked: origin not allowed" }); } catch (_) {}
+      return;
+    }
+    const ac = new AbortController();
+    aborts.set(id, ac);
+    try {
+      const stored = await chrome.storage.local.get("apiToken");
+      const token = String(stored.apiToken || "").trim();
+      const headers = new Headers((init && init.headers) || {});
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+      const resp = await fetch(url, {
+        method: (init && init.method) || "GET", headers,
+        body: init && init.body, credentials: "omit", cache: "no-store", signal: ac.signal
+      });
+      const hdrs = {};
+      resp.headers.forEach((v, k) => { hdrs[k] = v; });
+      port.postMessage({ id, type: "head", status: resp.status, statusText: resp.statusText, headers: hdrs });
+      if (resp.body) {
+        const reader = resp.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          let bin = "";
+          for (let i = 0; i < value.length; i += 0x8000) bin += String.fromCharCode.apply(null, value.subarray(i, i + 0x8000));
+          port.postMessage({ id, type: "chunk", b64: btoa(bin) });
+        }
+      }
+      port.postMessage({ id, type: "done" });
+    } catch (e) {
+      try { port.postMessage({ id, type: "error", error: String((e && e.message) || e) }); } catch (_) {}
+    } finally { aborts.delete(id); }
+  });
+  port.onDisconnect.addListener(() => { for (const c of aborts.values()) { try { c.abort(); } catch (_) {} } aborts.clear(); });
+});

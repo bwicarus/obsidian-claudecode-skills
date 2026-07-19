@@ -14,7 +14,22 @@
         "https://bwicarus.taile44d0c.ts.net/*",
         "https://bwicarus.space/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "src/facade.js",
+        "vendor/mathjax-full.js",
+        "vendor/marked.js",
+        "vendor/rc-core.js",
+        "vendor/rc-md.js",
+        "vendor/rc-toolchip.js",
+        "vendor/rc-turncard.js",
+        "vendor/rc-voicecall.js",
+        "vendor/rc-result.js",
+        "vendor/rc-sidedrawer.js",
+        "vendor/rc-assistant.js",
+        "src/web-adapter.js",
+        "src/shell.js",
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }
