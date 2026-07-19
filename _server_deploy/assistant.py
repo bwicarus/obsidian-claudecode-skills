@@ -2671,6 +2671,10 @@ def _t_see_page(args, ctx):
     file_rel = ctx.get("file_rel") or ""
     if not file_rel:
         return {"error": "当前不在 PDF 书里,没法看页面"}
+    if file_rel.startswith("web:"):   # 网页:真实页面渲在浏览器 iframe 里,服务端无从渲染
+        r = _viewshot_result(ctx, " 这是用户正在看的网页视口截图。")
+        return r if r else {"error": "网页的视觉内容需要前端视口截图,这次没拿到;"
+                                     "正文可以直接用 read_page(已抽好),图片类问题请让用户描述或稍后重试"}
     if file_rel.lower().endswith(".epub"):   # ㉟c EPUB:服务端渲不了 HTML,看页面=前端视口截图
         r = _viewshot_result(ctx)
         return r if r else {"error": "EPUB 看页面需要前端视口截图,这次没拿到;请让用户稍后再试或口头描述"}
@@ -3084,6 +3088,15 @@ def _t_toc(args, ctx):
     if not file_rel:
         return {"error": "没开书"}
     try:
+        _wm = _web_mat(file_rel)
+        if _wm is not None:
+            # 网页:没有 PDF 书签。用正文里的短行当大纲(维基/文档站的小标题多是独立短行),
+            # 给 AI 一个"这页有哪些部分"的骨架;page 恒 1(单文档)。
+            _lines = [l.strip() for l in (_wm.get("text") or "").split("\n")]
+            _out = [{"title": l[:60], "page": 1, "level": 1}
+                    for l in _lines if 2 <= len(l) <= 30 and not l.endswith(("。", ".", "、", ","))][:60]
+            return {"count": len(_out), "source": "web-outline", "entries": _out,
+                    "note": "网页无书签,这是按正文短行推出的粗略大纲;要精确内容用 read_page。"}
         pdf = _pdf()
         entries, source = [], "none"
         for _mrel, _moff, _ in _vb_members(file_rel):   # 单本书=只循环一次、offset 0(统一书模型)
@@ -3679,6 +3692,13 @@ def _t_summarize_section(args, ctx):
     file_rel = ctx.get("file_rel", "")
     if not file_rel or ".." in file_rel:
         return {"error": "没开书"}
+    _wm = _web_mat(file_rel)
+    if _wm is not None:   # 网页=单文档:整篇正文交给上层总结(没有"章节切片"可言)
+        _t = (_wm.get("text") or "")[:9000]
+        if not _t.strip():
+            return {"error": "这个网页没抓到正文(可能是纯 JS 页面)"}
+        return {"section_title": _wm.get("title") or "整页", "page_range": "整篇",
+                "text": _t, "note": "网页是单文档,这里给的是整篇正文。"}
     try:
         page = (_to_pdf(ctx, args["page"]) if args.get("page")           # args.page 是印刷页→转 PDF 找章节
                 else int((ctx.get("pages") or [ctx.get("page")])[0] or 1))   # ctx 已是 PDF 页

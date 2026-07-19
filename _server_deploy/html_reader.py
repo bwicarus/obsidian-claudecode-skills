@@ -389,7 +389,10 @@ def _proxy_page(url: str):
     return resp, ""
 
 
-WEB_CACHE_DIR = None   # register 时指向 state/web-cache/
+# ⚠ 不依赖 register 注入:任何 import 本模块的进程(assistant 工具、脚本、cron)都要能直接用
+#   resolver。首版写成 register 时才赋值 → 裸 import 场景 WEB_CACHE_DIR=None → **静默返回空正文**
+#   (实测:read_page 有内容而 summarize 说"没抓到正文",同一 resolver 结果不一致的根因)。
+WEB_CACHE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-cache"
 
 
 def _web_key(url: str) -> str:
@@ -437,8 +440,8 @@ def web_material(ref: str) -> dict:
         _web_cache_put(url, r.text)
         p = WEB_CACHE_DIR / (_web_key(url) + ".json")
         return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return {"url": url, "title": "", "text": ""}
+    except Exception as ex:
+        return {"url": url, "title": "", "text": "", "error": f"网页内容取不到:{str(ex)[:80]}"}
 
 
 def _web_last_get() -> str:
@@ -601,7 +604,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
     global _WEB_LAST, WEB_CACHE_DIR
     _WEB_LAST = Path(claude_dir) / "state" / "web-last.json"
-    WEB_CACHE_DIR = Path(claude_dir) / "state" / "web-cache"
+    WEB_CACHE_DIR = Path(claude_dir) / "state" / "web-cache"   # 与模块级默认同值;显式对齐注入的 claude_dir
     """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
     global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
     _safe_vault_path = safe_vault_path
