@@ -99,6 +99,9 @@
     var _mouse = stage.querySelector('.replayer-mouse');
     if(_mouse) _mouse.style.setProperty('pointer-events', 'none', 'important');   // 假鼠标层别挡点击
     var d = ifr.contentDocument;
+    // ★ 滚动:rrweb 把 iframe 高度固定成录制 viewport(900),内容却几千~几万 px,靠 iframe 内部滚动——
+    //   iOS 上 iframe 内滚动坑多 + rrweb 回放锁定 → 滚不动。改成 iframe 撑到内容全高,外层 #stage 滚。
+    startFit(ifr);
     // 点击 → 回传**节点 id**(坐标会因客户端/Pi 布局差错位;rrweb node id 精确)
     var mir = (replayer.getMirror ? replayer.getMirror() : null);
     function sendClick(e){
@@ -183,6 +186,19 @@
     location.href='/pdf/web/live?url='+encodeURIComponent(CFG.url); };
 
   // 阶段1b 接入点:web-adapter 会在 replay iframe 的 DOM 上挂查词/翻译。此处先暴露 replayer。
+  var _fitT=null, _lastH=0;
+  function startFit(ifr){
+    if(_fitT) clearInterval(_fitT);
+    function fit(){
+      try{
+        if(!ifr.contentDocument) return;
+        var se=ifr.contentDocument.scrollingElement||ifr.contentDocument.documentElement;
+        var h=se ? se.scrollHeight : 0;
+        if(h>200 && Math.abs(h-_lastH)>4){ _lastH=h; ifr.style.height=h+'px'; }  // 内容变高→iframe 跟着长
+      }catch(_){}
+    }
+    fit(); _fitT=setInterval(fit, 400);   // 增量内容(懒加载/展开)不断变高,持续贴合
+  }
   window.__rbiReplayer=function(){ return replayer; };
   window.__rbiStageIframe=function(){ return stage.querySelector('iframe'); };
 })();
