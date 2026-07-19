@@ -93,7 +93,7 @@
     if (push !== false && CUR) _hist.push(CUR);
     CUR = u; CFG.web_url = u; _pageText = '';
     var b = document.getElementById('wl-url'); if (b) b.value = u;
-    frame().src = '/pdf/web/frame?url=' + encodeURIComponent(u);   // 服务端裁决 embed/代理
+    frame().src = '/pdf/web/frame?url=' + encodeURIComponent(u);   // 服务端裁决 embed/代理(地址栏输入/后退走这里)
     try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
     setTimeout(askText, 1200);
     if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);
@@ -111,9 +111,21 @@
 
   // ── ② 与代理 iframe 桥接 ──
   function askText() { try { frame().contentWindow.postMessage({ __rcweb: 'getText' }, '*'); } catch (e) {} }
+  // iframe 自己导航后,只被动同步地址栏/历史(**不**回设 frame.src —— iframe 已经在新页了,
+  // 再 set 会二次加载)。这是 iPad 导航可靠性的关键:导航在 iframe 内完成,外壳不参与跳转。
+  function onLocated(u) {
+    if (!u || u === CUR) return;
+    if (CUR) _hist.push(CUR);
+    CUR = u; CFG.web_url = u; _pageText = '';
+    var b = document.getElementById('wl-url'); if (b) b.value = u;
+    try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
+    setTimeout(askText, 1200);
+    if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);
+  }
   window.addEventListener('message', function (e) {
     var d = e.data || {};
-    if (d.__rcweb === 'nav') { go(d.url); return; }
+    if (d.__rcweb === 'located') { onLocated(d.url); return; }
+    if (d.__rcweb === 'nav') { go(d.url); return; }   // 兼容旧路径(地址栏输入/后退仍走 go）
     if (d.__rcweb === 'ready') { _title = d.title || ''; askText(); return; }
     if (d.__rcweb === 'text') { _pageText = (d.text || '').slice(0, 120000); _title = d.title || _title; return; }
     if (d.__rcweb === 'sel') {

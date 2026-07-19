@@ -582,15 +582,13 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
   if(window.__rcShim) return;   // 幂等:注入位置调整过,别让同一份 shim 装两遍
   window.__rcShim = 1;
   // 站内导航拦截:链接/表单跳转改走代理(留在我们的壳里);新窗口链接也接管
-  function proxied(u){ try{ return '/pdf/web/proxy?url=' + encodeURIComponent(new URL(u, location.__realBase || document.baseURI).href); }catch(e){ return u; } }
   document.addEventListener('click', function(e){
     var a = e.target && e.target.closest && e.target.closest('a[href]');
     if(!a) return;
     var href = a.getAttribute('href') || '';
     if(!href || href.charAt(0)==='#' || /^(javascript|mailto|tel):/i.test(href)) return;
     e.preventDefault();
-    if(!_navOut(new URL(href, location.__realBase || document.baseURI).href))
-      try{ location.href = proxied(href); }catch(_){}
+    try{ _goProxy(new URL(href, location.__realBase || document.baseURI).href); }catch(_){}
   }, true);
   // 选区上报:父壳据此弹工具条(同源本可直接读,postMessage 更稳且面向未来跨源)
   function report(){
@@ -751,11 +749,19 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
       return m.href;
     }catch(e){ return ''; }
   }
-  function _navOut(u){
+  // ⚠ 导航一律**在 iframe 内直接完成**(实测 iPad 点不动的架构疑点):原设计是
+  //   iframe→postMessage→外壳→回设 frame.src 的跨框架链,桌面可靠但 iOS Safari 上跨框架
+  //   回设 src 时机常失效 = 点了没反应。现在 iframe 自己 location.href 导航(location.href 的
+  //   setter 我们没 patch,不递归),外壳只被动同步地址栏。
+  function _goProxy(u){
     var real = _unmirror(u);
-    if(real){ parent.postMessage({__rcweb:'nav', url:real}, '*'); return true; }
-    return false;
+    if(real === '') return false;           // 自引用(已是我们自己的页面)→ 忽略
+    real = real || (ABS(u) || u);
+    try{ parent.postMessage({__rcweb:'located', url: real}, '*'); }catch(_){}
+    location.href = '/pdf/web/frame?url=' + encodeURIComponent(real);
+    return true;
   }
+  function _navOut(u){ return _goProxy(u); }   // form/程序化导航共用同一条可靠路径
   try{
     var _fs = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function(){
