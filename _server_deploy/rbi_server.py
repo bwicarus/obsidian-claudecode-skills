@@ -68,11 +68,26 @@ def _cookies_for(uid: str, url: str) -> list:
     return out
 
 
+async def _ctx_alive(ctx) -> bool:
+    """context 是否还活着(浏览器可能崩溃/被 kill/OOM,缓存的对象会变死)。"""
+    try:
+        return len(ctx.pages) >= 0 and ctx.browser is not None and ctx.browser.is_connected()
+    except Exception:
+        return False
+
+
 async def _context(uid: str):
     async with _CTX_LOCK:
         ctx = _CTX.get(uid)
         if ctx is not None:
-            return ctx
+            if await _ctx_alive(ctx):
+                return ctx
+            # 死 context:清掉重建(否则 new_page 恒报 "context has been closed")
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            _CTX.pop(uid, None)
         if len(_CTX) >= _MAX_CTX:
             # 简单驱逐:关最早的一个(阶段1;阶段3 换 LRU + 闲置回收)
             old_uid, old_ctx = next(iter(_CTX.items()))
@@ -109,24 +124,37 @@ async def _serve(ws):
                 uid = str(msg.get("uid") or "anon")
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
+                async def _emit(source, ev_str):
+                    try:
+                        await ws.send(json.dumps({"t": "ev", "d": ev_str}))
+                    except Exception:
+                        pass
                 try:
-                    ctx = await _context(uid)
-                    # 注入导入的 cookie(登录态);persistent profile 本身也会累积
-                    cks = _cookies_for(uid, url)
-                    if cks:
+                    # 死 page(context 崩过)→ 丢弃重建。整段 new_page 失败也重来一次。
+                    for _attempt in (1, 2):
                         try:
-                            await ctx.add_cookies(cks)
+                            ctx = await _context(uid)
+                            cks = _cookies_for(uid, url)
+                            if cks:
+                                try:
+                                    await ctx.add_cookies(cks)
+                                except Exception:
+                                    pass
+                            if page is None or page.is_closed():
+                                page = await ctx.new_page()
+                                await page.expose_binding("__rrwebEmit", _emit)
+                            break
                         except Exception:
-                            pass
-                    if page is None:
-                        page = await ctx.new_page()
-
-                        async def _emit(source, ev_str):
-                            try:
-                                await ws.send(json.dumps({"t": "ev", "d": ev_str}))
-                            except Exception:
-                                pass
-                        await page.expose_binding("__rrwebEmit", _emit)
+                            if page is not None:
+                                try:
+                                    await page.close()
+                                except Exception:
+                                    pass
+                            page = None
+                            async with _CTX_LOCK:      # 强制下一轮重建 context
+                                _CTX.pop(uid, None)
+                            if _attempt == 2:
+                                raise
                     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     # 等一下 Cloudflare 挑战 + 首屏 hydrate,再启动录制(录到稳定后的 DOM)
                     await page.wait_for_timeout(3500)
