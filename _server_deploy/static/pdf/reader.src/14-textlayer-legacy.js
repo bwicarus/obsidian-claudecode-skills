@@ -306,3 +306,5 @@ function _setSelPhraseBreathe(on) {
   }
 }
 
+
+window._updateToolbarMode = _updateToolbarMode;   // 实况网页(web-adapter)复用同一套按钮组开关(审计 #12)

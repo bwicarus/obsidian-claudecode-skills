@@ -952,6 +952,21 @@ def _rel_by_sha():
             m[_h[:16]] = rel   # ★两种键都登记:各 sidecar 命名长度不一(pdf/epub 用 40 位,
             #                    html_reader 用 16 位)——只登 40 位会让网页高亮全部反查失败、
             #                    file='' 入库丢书锚(2026-07-19 审计实锤 0/5 命中)
+    try:   # 网页材料(审计 #15):web: 不是 vault 文件,rglob 扫不到 → 高亮/事件反查不到书锚、
+        #   file='' 入库,焦点榜/按书统计全归不到这个网页。从 web-cache 补登记。
+        for f in (STATE / "web-cache").glob("*.json"):
+            try:
+                u = json.loads(f.read_text("utf-8")).get("url")
+            except Exception:
+                continue
+            if not u:
+                continue
+            ref = "web:" + u
+            _hw = hashlib.sha1(ref.encode()).hexdigest()
+            m[_hw] = ref
+            m[_hw[:16]] = ref
+    except Exception:
+        pass
     return m
 
 
@@ -1132,7 +1147,16 @@ def _upage_text(rel, uid, limit=400):
 
 
 def _page_text(rel, page, limit=400):
-    """从 pdf-char-cache 直接拼页文本(不依赖 webapp 进程;读过的页基本都有缓存)。"""
+    """从 pdf-char-cache 直接拼页文本(不依赖 webapp 进程;读过的页基本都有缓存)。
+    网页(web:)读 state/web-cache(审计 #14:否则 import_dwell 的 `if not txt: continue`
+    会把网页阅读事件整批丢掉)。"""
+    if isinstance(rel, str) and rel.startswith("web:"):
+        try:
+            k = hashlib.sha1(rel[4:].encode("utf-8")).hexdigest()[:20]
+            d = json.loads((STATE / "web-cache" / (k + ".json")).read_text("utf-8"))
+            return (d.get("text") or "")[:limit]
+        except Exception:
+            return ""
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
     cands = sorted((STATE / "pdf-char-cache").glob("%s-p%d-*.json" % (sha, page)))
     for f in reversed(cands):
@@ -2016,6 +2040,18 @@ def read_material(ref, limit=1500):
     if kind == "check":
         return {"ok": True, "ref": ref, "kind": "check",
                 "note": "检查报告用 read_check_report 工具读(有专门的问答式接口)"}
+    if kind == "web":   # 审计 #6:material_graph 会把 web: ref 当起点吐出来,AI 拿去必须读得到
+        try:
+            import sys as _s
+            _p = str(Path(PROJECT_DIR) / "_server_deploy")
+            if _p not in _s.path:
+                _s.path.insert(0, _p)
+            import html_reader as _HR
+            d = _HR.web_material(ref) or {}
+            return {"ok": True, "ref": ref, "kind": "web", "title": d.get("title") or "",
+                    "url": d.get("url") or ref[4:], "content": (d.get("text") or "")[:limit]}
+        except Exception as ex:
+            return {"error": "网页材料读取失败:%s" % str(ex)[:80]}
     return {"error": "未知材料类型:%s" % kind}
 
 

@@ -41,6 +41,13 @@ def _page_text(file_rel: str, page) -> str:
     """服务端按 file_rel+page 用 PyMuPDF 取该页正文(不依赖前端 char-layer,能拿全文)。"""
     try:
         rel = (file_rel or "").strip()
+        if rel.startswith("web:"):   # 审计 #7:网页走 assistant 的统一 resolver(这份是独立副本,
+            #   曾没跟上 → 语音「把这页做成笔记」恒报"没找到要整理的内容")
+            try:
+                import assistant as _AS
+                return (_AS._page_text(rel, page) or "")[:4000]
+            except Exception:
+                return ""
         if not rel or ".." in rel:
             return ""
         ap = (VAULT_ROOT / rel).resolve()
@@ -918,7 +925,12 @@ def _pdf_mod():
 
 def _deep_link(base, file_rel, page):
     from urllib.parse import quote
-    return f"{(base or '').rstrip('/')}/pdf/view?file={quote(file_rel or '', safe='')}&page={page or 1}"
+    b = (base or "").rstrip("/")
+    if isinstance(file_rel, str) and file_rel.startswith("web:"):
+        # 审计 #5:网页材料的出处链接必须指向实况阅读器,旧写法 /pdf/view?file=web:… 实测 404,
+        # 而它会被强制写进 Anki 卡背 → 永久死链。
+        return f"{b}/pdf/web/live?url={quote(file_rel[4:], safe='')}"
+    return f"{b}/pdf/view?file={quote(file_rel or '', safe='')}&page={page or 1}"
 
 
 def _gen_title(content: str) -> str:

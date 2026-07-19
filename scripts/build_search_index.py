@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import os
 import sqlite3
 import sys
 import time
@@ -138,6 +139,27 @@ def _list_pdfs():
     return out
 
 
+def _list_webs():
+    """浏览过的网页(state/web-cache/*.json)→ 与书同构的条目(审计 #16:全局搜索/概念网
+    向前搜索都靠 pdf-search.db,不收网页 = 网页材料在这两处永远查不到)。单文档,page 恒 1。"""
+    out = []
+    d = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-cache"
+    if not d.is_dir():
+        return out
+    for f in d.glob("*.json"):
+        try:
+            j = json.loads(f.read_text("utf-8"))
+            url, txt = j.get("url"), (j.get("text") or "").strip()
+            if not url or len(txt) < 80:
+                continue
+            out.append({"rel": "web:" + url, "name": (j.get("title") or url)[:120],
+                        "dir": "web", "mtime": int(f.stat().st_mtime), "abs": None,
+                        "_web_text": txt})
+        except Exception:
+            continue
+    return out
+
+
 def _page_texts(abs_path: Path, rel: str) -> dict:
     """{page_str: text},复用 pdf-text-index 缓存(与阅读器 F4 共享),缺则用 fitz 抽 + 写缓存。"""
     try:
@@ -182,7 +204,10 @@ def _index_book(con, bk: dict) -> int:
     """重建单本书的页行。返回插入的页数。"""
     rel = bk["rel"]
     con.execute("DELETE FROM pages_data WHERE file=?", (rel,))
-    texts = _apply_overlay_supplement(_page_texts(bk["abs"], rel), rel)   # 未同步 overlay 插入页补 sidecar md
+    if bk.get("_web_text") is not None:          # 网页材料:单文档一页
+        texts = {"1": bk["_web_text"]}
+    else:
+        texts = _apply_overlay_supplement(_page_texts(bk["abs"], rel), rel)   # 未同步 overlay 插入页补 sidecar md
     n = 0
     for pg_str, text in texts.items():
         text = (text or "").strip()
@@ -208,7 +233,7 @@ def build(rebuild=False):
         con.execute("DELETE FROM pages_data")
         con.execute("DELETE FROM meta")
         con.commit()
-    pdfs = _list_pdfs()
+    pdfs = _list_pdfs() + _list_webs()   # 网页与书同权进索引(审计 #16)
     on_disk = {bk["rel"] for bk in pdfs}
     have = {row[0]: row[1] for row in con.execute("SELECT file, mtime FROM meta").fetchall()}
     # 清理磁盘上已消失的书

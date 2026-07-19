@@ -433,7 +433,8 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
         for row in focus:
             refs = row.get("refs") or []
             book = refs[0]["file"] if refs else ""
-            if not book or not book.lower().endswith(".pdf"):
+            # 审计 #17:网页也是学习材料(web:<url>);EPUB/HTML 同理,别只认 PDF
+            if not book or not (book.lower().endswith((".pdf", ".epub", ".html")) or book.startswith("web:")):
                 continue
             page = (pos.get(book, {}) or {}).get("pos") or max(r.get("page", 0) for r in refs)
             cands.append({"term": row["term"], "book": book, "page": page, "row": row, "force": False})
@@ -582,7 +583,7 @@ def detect_only():
     for row in focus:
         refs = row.get("refs") or []
         book = refs[0]["file"] if refs else ""
-        if not book or not book.lower().endswith(".pdf"):
+        if not book or not (book.lower().endswith((".pdf", ".epub", ".html")) or book.startswith("web:")):
             continue
         # R4-P0-1:登记先于门控且不受科目门限制——新书自动落表 enabled:false,
         # 用户才有现成条目可改 true(否则 没登记→科目门拒→永远到不了登记 死锁)

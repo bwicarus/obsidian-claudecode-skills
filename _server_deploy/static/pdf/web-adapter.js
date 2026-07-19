@@ -23,9 +23,11 @@
 
   // ── ① 顶栏地址栏(替换书名位;其余按钮=PDF 原样)──
   function mountBar() {
-    var top = document.getElementById('pdf-top') || document.querySelector('#pdf-top, .pdf-top');
+    // ⚠ 审计 #10 实锤:模板顶栏是 `#header > h1`(不是 #pdf-top/#pdf-title)——首版三个选择器
+    //   全 0 命中、每次 if(!top) return 早退,地址栏/后退/📄 从未存在过,h1 还一直显示整条 URL。
+    var top = document.getElementById('header');
     if (!top) return;
-    var title = top.querySelector('#pdf-title, #book-title, .pdf-title');
+    var title = top.querySelector('h1');
     var box = document.createElement('input');
     box.id = 'wl-url'; box.value = CUR; box.spellcheck = false; box.autocomplete = 'off';
     box.title = '地址栏:输网址直接打开,输词走搜索';
@@ -89,15 +91,20 @@
       } catch (_) {}
       var bar = document.getElementById('sel-toolbar');
       if (!bar) return;
-      if (!_sel.text) { bar.style.display = 'none'; return; }
+      // 审计 #11:工具条由 `.open` class 控制显示(CSS 里 #sel-toolbar{display:none}),
+      //   首版用 style.display='' 只是回落到 none → 网页里选中文字工具条根本不出现。
+      if (!_sel.text) { bar.classList.remove('open'); return; }
       var fr = frame().getBoundingClientRect(), r = d.rect || { left: 20, bottom: 80 };
       var pv = document.getElementById('sel-preview');
       if (pv) pv.textContent = _sel.text.slice(0, 60);
-      bar.style.display = '';
+      // 审计 #12:按钮组(词/多选/词组)默认 display:none,唯一开关是 _updateToolbarMode —— 不调
+      //   的话即使工具条出来了也是空条。
+      try { if (window._updateToolbarMode) window._updateToolbarMode(_sel.text); } catch (_) {}
       bar.style.position = 'fixed';
       bar.style.left = Math.max(8, Math.min(window.innerWidth - (bar.offsetWidth || 320) - 8, fr.left + r.left)) + 'px';
       bar.style.top = Math.min(window.innerHeight - 60, fr.top + r.bottom + 8) + 'px';
       bar.style.zIndex = 900;
+      bar.classList.add('open');
     }
   });
 
@@ -118,6 +125,8 @@
       c = c || {};
       c.file = 'web:' + CUR;                 // 材料标识:高亮/对话/注意力都按它归档
       c.book = _title || CUR;
+      c.book_name = _title || CUR;           // 审计 #8:后端 _sys_prompt 读的是 book_name/total
+      c.total = 1;
       c.url = CUR;
       c.visible_text = _pageText.slice(0, 4000);   // 网页整页正文(iframe 回传)
       c.total_pages = 1; c.page = 1; c.pages = [1];
@@ -129,6 +138,11 @@
       return _sel.text ? { text: _sel.text, context: _sel.ctx, ctx: _sel.ctx, rect: _sel.rect } : null;
     };
     ad.currentChapterText = function () { return _pageText.slice(0, 8000); };
+    try {   // 审计 #2:网页高亮走字符偏移 sidecar(/pdf/api/html-highlights),不是 PDF 的几何锚
+      if (ad._host && ad._host.asst) ad._host.asst.hlUrl = function () { return '/pdf/api/html-highlights'; };
+      ad.getEndpoints = function () { return { dict: '/pdf/api/dict', translate: '/pdf/api/translate',
+                                               explain: '/pdf/api/explain', highlights: '/pdf/api/html-highlights' }; };
+    } catch (e) {}
   });
 
   var _lang = null;

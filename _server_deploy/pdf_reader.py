@@ -10425,6 +10425,10 @@ def pdf_api_figure_crop():
 def pdf_api_highlights_list():
     """GET ?file=<rel> → {ok, highlights:[{id,page,rects,color,text,note,time}, ...]}"""
     rel = request.args.get("file", "")
+    if rel.startswith("web:"):   # 网页:字符偏移锚 sidecar(与 HTML 阅读器同一套,审计 #2)
+        import html_reader as _HR
+        return jsonify({"ok": True, "highlights": [
+            dict(h, page=1) for h in (_HR._html_hl_load(rel) or [])]})
     # 统一书模型:遍历成员(单本书=只有它自己、offset 0),页码归到视图坐标
     try:
         parts = _vb_parts(rel)
@@ -10450,6 +10454,17 @@ def pdf_api_highlights_create():
     import time as _t
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
+    if rel.startswith("web:"):   # 网页:字符偏移锚存进 html-highlights(审计 #2)
+        import html_reader as _HR, uuid as _u2
+        _items = _HR._html_hl_load(rel) or []
+        _h = {"id": "h" + _u2.uuid4().hex[:10], "start": int(data.get("start") or 0),
+              "end": int(data.get("end") or 0), "text": (data.get("text") or "")[:2000],
+              "color": (data.get("color") or "#fff59d").strip(),
+              "note": (data.get("note") or "")[:2000],
+              "sentence": (data.get("sentence") or "")[:2000], "time": int(_t.time())}
+        _items.append(_h)
+        _HR._html_hl_save(rel, _items)
+        return jsonify({"ok": True, "id": _h["id"], "highlight": _h})
     if not rel or _safe_vault_path(rel) is None:
         return jsonify({"ok": False, "error": "invalid file"}), 400
     page = int(data.get("page") or 0)
@@ -10542,6 +10557,21 @@ def pdf_api_highlights_update():
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
+    if rel.startswith("web:"):   # 网页高亮(审计 #2):改/删都在 html-highlights sidecar 里做
+        import html_reader as _HR
+        _items = _HR._html_hl_load(rel) or []
+        _hit = next((x for x in _items if x.get("id") == hid), None)
+        if not _hit:
+            return jsonify({"ok": False, "error": "not_found"}), 404
+        if request.method == "DELETE":
+            _HR._html_hl_save(rel, [x for x in _items if x.get("id") != hid])
+            return jsonify({"ok": True})
+        _d = request.get_json(silent=True) or {}
+        for _k in ("color", "note", "sentence", "text"):
+            if _k in _d:
+                _hit[_k] = (_d.get(_k) or "") if _k != "color" else ((_d.get(_k) or "").strip())
+        _HR._html_hl_save(rel, _items)
+        return jsonify({"ok": True, "highlight": _hit})
     try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
         rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
                                               for h in _hl_load(m).get("highlights", [])))[0] or ""
@@ -10582,6 +10612,21 @@ def pdf_api_highlights_delete():
         data = {"file": request.args.get("file",""), "id": request.args.get("id","")}
     rel = (data.get("file") or "").strip()
     hid = (data.get("id") or "").strip()
+    if rel.startswith("web:"):   # 网页高亮(审计 #2):改/删都在 html-highlights sidecar 里做
+        import html_reader as _HR
+        _items = _HR._html_hl_load(rel) or []
+        _hit = next((x for x in _items if x.get("id") == hid), None)
+        if not _hit:
+            return jsonify({"ok": False, "error": "not_found"}), 404
+        if request.method == "DELETE":
+            _HR._html_hl_save(rel, [x for x in _items if x.get("id") != hid])
+            return jsonify({"ok": True})
+        _d = request.get_json(silent=True) or {}
+        for _k in ("color", "note", "sentence", "text"):
+            if _k in _d:
+                _hit[_k] = (_d.get(_k) or "") if _k != "color" else ((_d.get(_k) or "").strip())
+        _HR._html_hl_save(rel, _items)
+        return jsonify({"ok": True, "highlight": _hit})
     try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
         rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
                                               for h in _hl_load(m).get("highlights", [])))[0] or ""

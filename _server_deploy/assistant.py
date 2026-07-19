@@ -132,7 +132,15 @@ def _vb_localize(file_rel, pages):
 
 
 def _vb_hls(file_rel):
-    """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。"""
+    """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。
+    网页(web:)走字符偏移 sidecar —— 与阅读器同一套存储(审计 #4:两套存储各自为政会让
+    AI 说"没有高亮"而页面上明明有)。"""
+    if isinstance(file_rel, str) and file_rel.startswith("web:"):
+        try:
+            import html_reader as _HR
+            return [dict(h, page=1) for h in (_HR._html_hl_load(file_rel) or [])]
+        except Exception:
+            return []
     pdf = _pdf()
     out = []
     for _mrel, _moff, _ in _vb_members(file_rel):
@@ -2933,6 +2941,26 @@ def _t_highlight(args, ctx):
             pages = []
     else:
         pages = [int(p) for p in (ctx.get("pages") or ([ctx.get("page")] if ctx.get("page") else [])) if p]
+    _wm = _web_mat(file_rel)
+    if _wm is not None:   # 网页(审计 #3):按文本在正文里的偏移写字符锚 sidecar,不走 PyMuPDF
+        import html_reader as _HR, uuid as _u3, time as _t3
+        _body = _wm.get("text") or ""
+        _items = _HR._html_hl_load(file_rel) or []
+        _made = []
+        for _tx in texts:
+            _i = _body.find(_tx)
+            if _i < 0:
+                continue
+            _h = {"id": "h" + _u3.uuid4().hex[:10], "start": _i, "end": _i + len(_tx),
+                  "text": _tx[:2000], "color": color, "note": "", "sentence": "",
+                  "time": int(_t3.time())}
+            _items.append(_h); _made.append(_h)
+        if _made:
+            _HR._html_hl_save(file_rel, _items)
+        return ({"ok": True, "n": len(_made), "highlighted": [h["text"][:40] for h in _made],
+                 "client_action": {"fn": "_assistEdit", "args": [{"type": "highlight", "file": file_rel,
+                                                                  "items": _made}]}}
+                if _made else {"error": "这些文字在网页正文里没找到(可能是图片内文字或已翻页)"})
     file_rel, pages = _vb_localize(file_rel, pages)   # 视图页→所在卷局部页(单本书恒等)
     if not file_rel:
         return {"error": "页越界"}

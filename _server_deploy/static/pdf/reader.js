@@ -4490,6 +4490,8 @@ function _setSelPhraseBreathe(on) {
   }
 }
 
+
+window._updateToolbarMode = _updateToolbarMode;   // 实况网页(web-adapter)复用同一套按钮组开关(审计 #12)
 // ──────── F6 词组：收藏（作分词依据）+ 词组详情面板 ────────
 let _phraseFavSet = new Set();
 let _phraseMarkSet = new Set();   // 已掌握词组(归一化键):标掌握后不再画生词下划线
