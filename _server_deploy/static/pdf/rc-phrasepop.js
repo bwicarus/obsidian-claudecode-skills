@@ -187,7 +187,23 @@
       }
       RC.toast(s.mastered ? '已掌握，下划线消失' : '已取消掌握');
       try { if (_ctx.onMastered) _ctx.onMastered(t, s.mastered); } catch (_) {}
-    }).catch(function () { if (btn) btn.disabled = false; RC.toast('标记失败'); });
+    }).catch(function (err) {
+      if (btn) btn.disabled = false;
+      if (RC.outbox && err && err.name === 'TypeError') {   // 离线:乐观翻转+入队(键=归一化词组,同服务端 _phrase_norm 口径)
+        s.mastered = next;
+        var nk = t.toLowerCase().replace(/\s+/g, ' ').trim();
+        if (next) _markSet.add(nk); else _markSet['delete'](nk);
+        if (btn) {
+          btn.textContent = next ? '✓ 已掌握 100' : '☆ 标记掌握';
+          btn.classList.toggle('wp-anki', next);
+        }
+        RC.outbox.send('phrase', nk, '/pdf/api/phrase-mark', { text: t, mark: next ? 'mastered' : '' });
+        RC.toast(next ? '已掌握(离线,恢复后自动同步)' : '已取消(离线,恢复后自动同步)');
+        try { if (_ctx.onMastered) _ctx.onMastered(t, next); } catch (_) {}
+        return;
+      }
+      RC.toast('标记失败');
+    });
   };
   // 💡 解释:藏框 → 底座 onExplain(走 RC.result 解释模态)。
   window._epPhraseExplain = function () {

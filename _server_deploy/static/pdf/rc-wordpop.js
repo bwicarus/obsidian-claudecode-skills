@@ -498,8 +498,14 @@
       _refreshUnderlines();   // 服务端权威(掌握列表变了 → 重算下划线)
       try { if (_ctx.onMastered) _ctx.onMastered(w); } catch (_) {}
       RC.toast(next ? '已掌握 100，下划线消失' : '已设为未掌握');
-    }).catch(function () {
+    }).catch(function (err) {
       if (btn) btn.__busy = false;
+      // 网络不通(fetch TypeError)且有 outbox → local-first:保持乐观态,入队恢复后自动补投
+      if (RC.outbox && err && err.name === 'TypeError') {
+        RC.outbox.send('vocab', url + '|' + w, url, { word: w, mark: mark });
+        RC.toast(next ? '已掌握(离线,恢复后自动同步)' : '已取消(离线,恢复后自动同步)');
+        return;
+      }
       s.mastered = prev;
       try { var c2 = _dictCache.get(s.word); if (c2) c2.mastered = prev; } catch (_) {}
       _paintMasterBtn(btn, prev);

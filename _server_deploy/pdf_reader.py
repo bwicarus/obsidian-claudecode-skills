@@ -791,7 +791,7 @@ def _epub_js_v():
     跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
     mt = 0
     for name in ("epub-html.js", "epub-styles.css", "rc-ink.js", "rc-core.js", "rc-md.js",
-                 "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
+                 "rc-outbox.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
                  "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -816,7 +816,7 @@ def _pdf_shared_js_v():
            原生回填/保存函数经 PdfAdapter.openSettings 的 onFill/onSave 复用,见 21-misc-ai.js)。"""
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
-                 "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
+                 "rc-outbox.js", "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
                  "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
