@@ -102,6 +102,7 @@ async def _context(uid: str):
         ctx = await pw.chromium.launch_persistent_context(
             user_data_dir=str(prof), headless=True,
             user_agent=_UA, viewport={"width": 1280, "height": 900}, locale="zh-CN",
+            bypass_csp=True,   # ★ 很多站(ddg-lite/GitHub/搜索引擎)有 CSP 挡住 rrweb 脚本注入 → 零事件白屏
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
                   "--disable-features=IsolateOrigins,site-per-process"])
         await ctx.add_init_script(_STEALTH)
