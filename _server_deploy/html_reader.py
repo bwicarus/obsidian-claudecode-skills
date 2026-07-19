@@ -565,6 +565,9 @@ _PROXY_INJECT = """
   }
   // fetch
   var _f = window.fetch;
+  // ⚠ 留一条**未被代理**的通道:我们自己注入的引擎(web-immersive)要调 /pdf/api/*,
+  //   走 patch 过的 fetch 会被当成原站相对路径翻成 /pdf/web/r/https/<原站>/pdf/api/... → 405。
+  try{ window.__rcRawFetch = _f && _f.bind(window); }catch(_){}
   if(_f) window.fetch = function(input, init){
     try{
       if(typeof input === 'string') input = RES(input);
@@ -583,6 +586,7 @@ _PROXY_INJECT = """
     new MutationObserver(function(ms){
       ms.forEach(function(mu){ [].forEach.call(mu.addedNodes||[], function(n){
         if(!n || n.nodeType!==1) return;
+        if(n.getAttribute && n.getAttribute('data-rc-own')) return;   // 我们自己注入的资源,别按原站解析
         ['src','href'].forEach(function(k){
           var v = n.getAttribute && n.getAttribute(k);
           if(v && !/^(data|blob|#|javascript)/i.test(v) && v.indexOf('/pdf/web/')!==0
@@ -603,6 +607,40 @@ _PROXY_INJECT = """
   }catch(_){}
   // ⚠ 安全硬闸:代理页跑在**我们自己的源**上,放任它注册 Service Worker = 第三方脚本接管整个 App。
   try{ if(navigator.serviceWorker){ navigator.serviceWorker.register = function(){ return Promise.reject(new Error('blocked')); }; } }catch(_){}
+  // ⚠ 程序化导航拦截(用户实测:谷歌首页搜索无响应的根因)。
+  //   谷歌不走原生表单提交 —— 它用 JS 直接导航,于是:
+  //     ① submit 事件根本不触发(form.submit() 按规范就**不**派发 submit 事件);
+  //     ② 导航到绝对地址 https://www.google.com/search?... → iframe 加载真谷歌 →
+  //        对方 X-Frame-Options 一挡 → chrome-error 空白页(实测复现)。
+  //   所以必须把这几个程序化入口全接管。(location.href= 的 setter 无法 patch,
+  //   由服务端的 referer 兜底救回,见 _leak_rescue。)
+  function _navOut(u){
+    try{ var a = ABS(u); if(a){ parent.postMessage({__rcweb:'nav', url:a}, '*'); return true; } }catch(_){}
+    return false;
+  }
+  try{
+    var _fs = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function(){
+      try{
+        if((this.method||'get').toLowerCase()==='get'){
+          var u = new URL(this.getAttribute('action') || B, B);
+          new FormData(this).forEach(function(v,k){ u.searchParams.set(k, v); });
+          if(_navOut(u.href)) return;
+        }
+      }catch(_){}
+      return _fs.apply(this, arguments);
+    };
+  }catch(_){}
+  try{
+    ['assign','replace'].forEach(function(k){
+      var _l = location[k].bind(location);
+      location[k] = function(u){ if(_navOut(u)) return; return _l(u); };
+    });
+  }catch(_){}
+  try{
+    var _wo = window.open;
+    window.open = function(u){ if(u && _navOut(u)) return null; return _wo.apply(window, arguments); };
+  }catch(_){}
   // 表单(站内搜索框)→ 交给外壳按真实地址导航
   document.addEventListener('submit', function(e){
     var f = e.target; if(!f || f.tagName!=='FORM') return;
@@ -617,6 +655,7 @@ _PROXY_INJECT = """
   try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){}
 })();
 </script>
+<script src="/static/pdf/web-immersive.js" data-rc-own="1"></script>
 """
 
 
@@ -980,6 +1019,134 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         if not url:
             abort(400)
         return _serve_res(url)
+
+    @bp.route("/api/web-translate", methods=["POST"])
+    def pdf_api_web_translate():
+        """网页沉浸式翻译的批量端点。POST {texts:[...]} → {ok, zh:[...]}。
+
+        与 PDF 的「译页」**共用同一条管线**(scripts/vocab/translate.py:缓存 → Google 批量 →
+        no_ai 兜底),所以译文缓存跨 PDF/网页互通,同一句话不会翻两遍。
+        差别只在取句方式:PDF 从字符层切句,网页由前端按 DOM 段落给 —— 那才是网页的天然句段。
+        """
+        body = request.get_json(silent=True) or {}
+        texts = [str(t or "").strip() for t in (body.get("texts") or [])][:120]
+        if not texts:
+            return jsonify({"ok": True, "zh": []})
+        import sys as _sys
+        vp = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "vocab"
+        if str(vp) not in _sys.path:
+            _sys.path.insert(0, str(vp))
+        try:
+            from translate import (gtranslate_batch as _gb, translate as _tr,
+                                   _cache_get as _cg, _cache_put as _cp)
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"translate load fail: {ex}"}), 500
+        zhs = [(_cg(t, "zh-CN") or "") if t else "" for t in texts]
+        miss = [i for i, z in enumerate(zhs) if not z and texts[i]]
+        if miss:
+            mt = [texts[i] for i in miss]
+            batch = None
+            try:
+                batch = _gb(mt)
+            except Exception:
+                batch = None
+            if batch and len(batch) == len(mt):
+                for k, i in enumerate(miss):
+                    if batch[k]:
+                        zhs[i] = batch[k]
+                        try:
+                            _cp(texts[i], "zh-CN", batch[k], "gtranslate")
+                        except Exception:
+                            pass
+            # 同 PDF 译页的教训:兜底**绝不落 AI CLI**,且带墙钟预算——否则 Google 故障窗
+            # 一个请求能挂好几分钟还烧额度。译不出的留空,前端优雅跳过。
+            still = [i for i in miss if not zhs[i]]
+            _dl = time.monotonic() + 10
+            for i in still[:40]:
+                if time.monotonic() > _dl:
+                    break
+                try:
+                    z = _tr(texts[i], backend="no_ai")
+                    if z:
+                        zhs[i] = z
+                        _cp(texts[i], "zh-CN", z, "no_ai")
+                except Exception:
+                    pass
+        return jsonify({"ok": True, "zh": zhs,
+                        "translated": sum(1 for z in zhs if z), "total": len(texts)})
+
+    @bp.app_errorhandler(404)
+    def _leak_rescue(e):
+        """代理页"漏出来"的导航救回。
+
+        页面里 `location.href = '/search?q=x'` 这类赋值**无法被 patch**(location 的 setter
+        不可覆写),于是 iframe 会带着原站的路径打到**我们**的域名上,拿一个 404 白页。
+        但请求头里的 Referer 忠实记着它是从哪个代理页发出的 —— 据此还原真实站点再重定向回代理,
+        就把这一整类漏网补上了(经典代理的 referer 兜底手法)。
+        """
+        try:
+            ref = request.headers.get("Referer") or ""
+            i = ref.find("/pdf/web/")
+            if i >= 0 and request.path and not request.path.startswith("/pdf/web/"):
+                rest = ref[i + len("/pdf/web/"):]
+                kind, _, tail = rest.partition("/")
+                if kind in ("p", "r"):
+                    src = unmirror(tail.split("?")[0], "")
+                    if src:
+                        p = urlparse(src)
+                        real = f"{p.scheme}://{p.netloc}{request.path}"
+                        if request.query_string:
+                            real += "?" + request.query_string.decode("utf-8", "ignore")
+                        return redirect(_pxp(real))
+        except Exception:
+            pass
+        return e
+
+    @bp.route("/api/web-vocab", methods=["POST"])
+    def pdf_api_web_vocab():
+        """网页版「未掌握词多的段落」判定。POST {texts:[...]} → {ok, marks:[{i, count, words}]}。
+
+        与 PDF 阅读器的 `_build_unmastered_sentences` **同一个判定集**:凡查过且 label_slug
+        不是 mastered 的词都算(与生词下划线完全一致——不想被计数就把词标记掌握)。
+        差别只在粒度:PDF 按几何切句,网页按 DOM 段落 —— 段落本就是网页的天然语义块。
+        """
+        body = request.get_json(silent=True) or {}
+        texts = [str(t or "") for t in (body.get("texts") or [])][:120]
+        thr = max(2, min(8, int(body.get("threshold") or 3)))
+        if not texts:
+            return jsonify({"ok": True, "marks": []})
+        import sys as _sys
+        vp = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "vocab"
+        if str(vp) not in _sys.path:
+            _sys.path.insert(0, str(vp))
+        try:
+            import vocab_index          # type: ignore
+            idx = vocab_index.index() or {}
+        except Exception:
+            return jsonify({"ok": True, "marks": []})     # 词库读不到 → 静默不标,别拦住翻译
+        unmastered = {f: i.get("lemma") or f for f, i in idx.items()
+                      if i.get("label_slug") and i["label_slug"] != "mastered"}
+        if not unmastered:
+            return jsonify({"ok": True, "marks": []})
+        # ⚠ 日语不能"切出词再查":日文没有词间空格,连续假名+汉字是一整串
+        #   (实测 `没落する没落していく貿易ボタン` 被当成一个 token,一个也匹配不上)。
+        #   反过来做——拿词库里的未掌握词去**子串搜**正文,这才是无分词语言的正确方向。
+        cjk_un = [w for w in unmastered if not w.isascii() and len(w) >= 2]
+        marks = []
+        for i, t in enumerate(texts):
+            hit = {}
+            for w in re.findall(r"[A-Za-z][A-Za-z'-]{1,}", t):
+                lem = unmastered.get(w.lower()) or unmastered.get(w)
+                if lem:
+                    hit[lem] = hit.get(lem, 0) + 1
+            if re.search(r"[぀-ヿ一-鿿]", t):
+                for w in cjk_un:
+                    if w in t:
+                        lem = unmastered[w]
+                        hit[lem] = hit.get(lem, 0) + 1
+            if len(hit) >= thr:
+                marks.append({"i": i, "count": len(hit), "words": sorted(hit)[:12]})
+        return jsonify({"ok": True, "marks": marks, "threshold": thr})
 
     @bp.route("/web/frame")
     def pdf_web_frame():

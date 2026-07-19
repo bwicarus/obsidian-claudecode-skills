@@ -17,6 +17,10 @@
   var _hist = [];
   var _sel = { text: '', ctx: '', rect: null };
   var _pageText = '', _title = '';
+  var TR_NAME = { para: '独立段落', small: '下方小字', replace: '替换原文' };
+  var _trOn = false;
+  var _trStyle = (function () { try { return localStorage.getItem('rcWebTrStyle') || 'para'; } catch (e) { return 'para'; } })();
+  function post(m) { try { frame().contentWindow.postMessage(m, '*'); } catch (e) {} }
 
   function frame() { return document.getElementById('wl-frame'); }
   function toast(m) { try { window.RC && RC.toast ? RC.toast(m) : 0; } catch (e) {} }
@@ -43,13 +47,34 @@
     var rd = document.createElement('button');
     rd.textContent = '📄'; rd.title = '阅读模式:抽正文进阅读器(可高亮/存 vault/进搜索与概念网)';
     rd.onclick = readerMode;
+    // 「译」= 沉浸式双语对照。沿用 PDF 阅读器**译页**的心智:一个开关,开着就译当前看得见的,
+    // 滚到哪译到哪(引擎在代理页内,见 web-immersive.js)。旁边的小按钮循环切三种样式。
+    var tr = document.createElement('button');
+    tr.id = 'wl-tr'; tr.textContent = '译'; tr.title = '沉浸式翻译:双语对照(滚到哪译到哪)';
+    tr.onclick = function () {
+      _trOn = !_trOn;
+      tr.style.color = _trOn ? '#7fb2ff' : '';
+      post({ __rcweb: 'translate', on: _trOn, style: _trStyle });
+      toast(_trOn ? '沉浸式翻译:开(' + TR_NAME[_trStyle] + ')' : '沉浸式翻译:关');
+    };
+    var ts = document.createElement('button');
+    ts.id = 'wl-trs'; ts.textContent = '⋮'; ts.title = '切换译文样式';
+    ts.onclick = function () {
+      var ks = ['para', 'small', 'replace'];
+      _trStyle = ks[(ks.indexOf(_trStyle) + 1) % ks.length];
+      try { localStorage.setItem('rcWebTrStyle', _trStyle); } catch (e) {}
+      post({ __rcweb: 'translate', style: _trStyle });
+      toast('译文样式:' + TR_NAME[_trStyle]);
+    };
     if (title) {
       title.style.display = 'none';
       title.parentNode.insertBefore(back, title);
       title.parentNode.insertBefore(box, title);
       title.parentNode.insertBefore(rd, title.nextSibling);
+      title.parentNode.insertBefore(tr, rd.nextSibling);
+      title.parentNode.insertBefore(ts, tr.nextSibling);
     } else {
-      top.insertBefore(rd, top.firstChild); top.insertBefore(box, top.firstChild); top.insertBefore(back, top.firstChild);
+      [back, box, rd, tr, ts].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
     }
   }
 
@@ -62,6 +87,7 @@
     frame().src = '/pdf/web/frame?url=' + encodeURIComponent(u);   // 服务端裁决 embed/代理
     try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
     setTimeout(askText, 1200);
+    if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);
   }
   window.wlGo = go;
 
