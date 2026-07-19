@@ -65,6 +65,26 @@
     ext.id = 'wl-ext'; ext.textContent = '↗';
     ext.title = '在系统浏览器打开这一页(需要登录、或被反机器人验证拦住的站走这里)';
     ext.onclick = function () { try { window.open(CUR, '_blank', 'noopener'); } catch (e) {} };
+    // 🔑 为当前站导入登录 cookie:解决"代理没有你的登录态"(B站图片防盗链/登录框都靠它)
+    var key = document.createElement('button');
+    key.id = 'wl-key'; key.textContent = '🔑';
+    key.title = '导入登录 cookie:在电脑浏览器登录该网站后,开发者工具复制 cookie 粘进来';
+    key.onclick = function () {
+      var host = ''; try { host = new URL(CUR).hostname.replace(/^www\./, ''); } catch (e) {}
+      var dom = prompt('为哪个域名导入登录 cookie?', host);
+      if (!dom) return;
+      var ck = prompt('粘贴该站的 cookie 字符串(形如 SESSDATA=xxx; bili_jct=yyy)。\n\n' +
+                      '获取:电脑浏览器登录该站 → F12 开发者工具 → Application/存储 → Cookies → 复制。\n\n' +
+                      '⚠ 这是你的登录凭证,会保存在服务器上。服务器若被入侵,该账号可能被盗。仅对你信任的站这么做。');
+      if (!ck) return;
+      fetch('/pdf/api/web-cookie', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: dom, cookie: ck }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          toast(d.ok ? ('已导入 ' + d.count + ' 个 cookie,重新加载…') : ('✗ ' + (d.error || '失败')));
+          if (d.ok) setTimeout(function () { var f = frame(); if (f) f.src = f.src; }, 700);
+        }).catch(function () { toast('网络错误'); });
+    };
     var ts = document.createElement('button');
     ts.id = 'wl-trs'; ts.textContent = '⋮'; ts.title = '切换译文样式';
     ts.onclick = function () {
@@ -82,8 +102,9 @@
       title.parentNode.insertBefore(tr, rd.nextSibling);
       title.parentNode.insertBefore(ts, tr.nextSibling);
       title.parentNode.insertBefore(ext, ts.nextSibling);
+      title.parentNode.insertBefore(key, ext.nextSibling);
     } else {
-      [back, box, rd, tr, ts, ext].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
+      [back, box, rd, tr, ts, ext, key].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
     }
   }
 

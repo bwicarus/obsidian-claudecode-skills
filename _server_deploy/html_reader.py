@@ -535,20 +535,88 @@ def _webtr_put(url: str, pairs: dict):
 _JARS: dict = {}     # per-user cookie jar:很多站没 cookie 直接 403/跳登录
 
 
-def _px_session():
-    import requests
-    uid = ""
+# TLS/HTTP2 指纹伪装:requests 的指纹一眼是脚本,被一批站(实测 chatgpt/vimeo)拦;curl_cffi
+# 伪装成 Chrome 后救回(claude.ai 那种主动 JS 挑战仍过不了,少数)。配合 Pi 的 SoftBank 住宅 IP。
+IMPERSONATE = "chrome"
+# per-user 导入的登录 cookie(state/web-cookies/<uid>.json,0600)。解决"代理=服务端身份、没有你的
+# 登录态"这一类:用户在真浏览器登录后把 cookie 粘进来,代理带上它 → B站图片防盗链/登录态即通。
+WEBCOOKIE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-cookies"
+
+
+def _px_uid() -> str:
     try:
-        uid = str(session.get("user_id") or "anon")
+        return str(session.get("user_id") or "anon")
     except Exception:
-        uid = "anon"
-    s = _JARS.get(uid)
-    if s is None:
-        if len(_JARS) > 24:
-            _JARS.clear()
-        s = requests.Session()
-        _JARS[uid] = s
-    return s
+        return "anon"
+
+
+def _cookie_store(uid: str) -> dict:
+    try:
+        return json.loads((WEBCOOKIE_DIR / f"{uid}.json").read_text("utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _cookie_store_save(uid: str, data: dict):
+    try:
+        WEBCOOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        p = WEBCOOKIE_DIR / f"{uid}.json"
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+        try:
+            os.chmod(tmp, 0o600)        # 登录凭证:仅属主可读
+        except Exception:
+            pass
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _cookies_for(url: str) -> dict:
+    """当前用户在该域(含父域)导入的 cookie。"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return {}
+    out = {}
+    for dom, cks in _cookie_store(_px_uid()).items():
+        d = str(dom).lstrip(".").lower()
+        if isinstance(cks, dict) and (host == d or host.endswith("." + d)):
+            out.update(cks)
+    return out
+
+
+def _save_resp_cookies(url: str, r):
+    """只对**用户已导入**的域回存刷新后的 cookie(延续登录 session,不囤积无关 tracking)。"""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        ck = {}
+        for k, v in dict(getattr(r, "cookies", {}) or {}).items():
+            ck[str(k)] = str(v)
+        if not ck:
+            return
+        uid = _px_uid()
+        store = _cookie_store(uid)
+        for dom in list(store):
+            d = str(dom).lstrip(".").lower()
+            if host == d or host.endswith("." + d):
+                if isinstance(store[dom], dict):
+                    store[dom].update(ck)
+                    _cookie_store_save(uid, store)
+                return
+    except Exception:
+        pass
+
+
+def _px_open(url: str, headers: dict, timeout: int = 25):
+    """新建 curl_cffi 会话(伪装 Chrome 指纹)+ 注入用户导入的 cookie。返回 (session, response)。
+    ⚠ 调用方**必须** session.close();流式则交给 _gated(it, sess)。不复用会话——curl_cffi 同会话
+    的流没读完会卡死 handle(实测),每请求独立最稳。"""
+    from curl_cffi import requests as _cr
+    s = _cr.Session(impersonate=IMPERSONATE)
+    r = s.get(url, headers=headers, cookies=_cookies_for(url),
+              stream=True, timeout=timeout, allow_redirects=True)
+    return s, r
 
 
 def _px_headers(url: str, extra_ref: str = "") -> dict:
@@ -810,24 +878,33 @@ def _proxy_page(url: str):
     err = _url_safe(url)
     if err:
         return None, err
+    _pxs = None
     try:
         _h = _px_headers(url)
         _h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         _h.pop("Origin", None)                     # 顶层导航不带 Origin(带了反而像 CSRF 被拒)
-        r = _px_session().get(url, timeout=20, allow_redirects=True, stream=True, headers=_h)
+        _pxs, r = _px_open(url, _h, timeout=20)
     except Exception as ex:
         return None, f"抓取失败:{str(ex)[:120]}"
-    ct = (r.headers.get("Content-Type") or "").lower()
-    if "html" not in ct:
-        return None, f"不是网页({ct.split(';')[0] or '未知类型'});图片/PDF 等请直接在原站打开"
-    raw = b""
-    for chunk in r.iter_content(65536):
-        raw += chunk
-        if len(raw) > 12 * 1024 * 1024:
-            break
+    try:
+        ct = (r.headers.get("Content-Type") or "").lower()
+        if "html" not in ct:
+            return None, f"不是网页({ct.split(';')[0] or '未知类型'});图片/PDF 等请直接在原站打开"
+        _save_resp_cookies(url, r)
+        raw = b""
+        for chunk in r.iter_content(65536):
+            raw += chunk
+            if len(raw) > 12 * 1024 * 1024:
+                break
+    finally:
+        try:
+            _pxs.close()
+        except Exception:
+            pass
     # ⚠ 流式读完后**不能**再碰 r.apparent_encoding(它要 r.content,已消费 → RuntimeError,
     #   实测 mhlw.go.jp 500 的根因)。自己按 raw 检测:响应头 → <meta charset> → chardet → utf-8。
-    enc = r.encoding if (r.encoding and r.encoding.lower() != "iso-8859-1") else ""
+    _renc = getattr(r, "encoding", "") or ""
+    enc = _renc if (_renc and _renc.lower() != "iso-8859-1") else ""
     if not enc:
         import re as _re0
         m0 = _re0.search(rb'charset=["\']?([\w-]+)', raw[:4096], _re0.I)
@@ -1396,6 +1473,37 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                 marks.append({"i": i, "count": len(hit), "words": sorted(hit)[:12]})
         return jsonify({"ok": True, "marks": marks, "threshold": thr})
 
+    @bp.route("/api/web-cookie", methods=["GET", "POST"])
+    def pdf_api_web_cookie():
+        """登录 cookie 导入(解决"代理没有你的登录态")。
+        GET → 已配置的域名列表(不返回值);POST {domain, cookie} 存;POST {domain, remove:1} 删。
+        cookie 存 state/web-cookies/<uid>.json(0600);之后该域的代理请求都带上它。
+        ⚠ 这是把第三方登录凭证放到服务器,前端弹窗已明确告知用户风险。"""
+        uid = _px_uid()
+        if request.method == "GET":
+            return jsonify({"ok": True, "domains": sorted(_cookie_store(uid).keys())})
+        body = request.get_json(silent=True) or {}
+        domain = (body.get("domain") or "").strip().lstrip(".").lower()
+        if not domain or "/" in domain:
+            return jsonify({"ok": False, "error": "域名无效"}), 400
+        store = _cookie_store(uid)
+        if body.get("remove"):
+            store.pop(domain, None)
+            _cookie_store_save(uid, store)
+            return jsonify({"ok": True, "removed": domain})
+        ck = {}
+        for part in (body.get("cookie") or "").split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip()
+                if k:
+                    ck[k] = v.strip()
+        if not ck:
+            return jsonify({"ok": False, "error": "cookie 解析为空(应形如 name=value; name2=value2)"}), 400
+        store[domain] = ck
+        _cookie_store_save(uid, store)
+        return jsonify({"ok": True, "domain": domain, "count": len(ck)})
+
     @bp.route("/web/frame")
     def pdf_web_frame():
         """iframe 的唯一入口:服务端裁决——视频页 → 官方 embed(能真播),其余 → 代理渲染。
@@ -1439,12 +1547,17 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             if not ok:
                 _RES_GATE.release()
 
-    def _gated(it):
-        """把释放信号量绑到流的生命周期上。"""
+    def _gated(it, sess=None):
+        """把"释放信号量 + 关 curl_cffi 会话"绑到流的生命周期上。"""
         try:
             for chunk in it:
                 yield chunk
         finally:
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
             _RES_GATE.release()
 
     def _serve_res_inner(url: str):
@@ -1454,8 +1567,9 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         if rng:
             h["Range"] = rng
         try:
-            r = _px_session().get(url, headers=h, timeout=25, stream=True, allow_redirects=True)
+            sess, r = _px_open(url, h, timeout=25)
         except Exception:
+            _RES_GATE.release()          # acquire 在 _serve_res,连不上上游也要放
             abort(502)
         ct = (r.headers.get("Content-Type") or "application/octet-stream")
         keep = {"content-type", "content-length", "content-range", "accept-ranges",
@@ -1464,27 +1578,48 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
               if k.lower() in keep and k.lower() not in ("content-length", "content-encoding")}
         hd["Access-Control-Allow-Origin"] = "*"
         hd["Content-Type"] = ct
-        if _rescache_ok(ct) and r.status_code == 200:
-            try:                                           # 小体积静态资源整读+落盘(不流式)
-                raw = r.content if int(r.headers.get("Content-Length") or 0) <= _RESCACHE_MAX else None
-                if raw is not None and len(raw) <= _RESCACHE_MAX:
+        _save_resp_cookies(url, r)
+        # 可缓存的小静态资源:iter_content 整读(curl_cffi stream 后不用 r.content)→ 落盘 → 就地返回
+        if _rescache_ok(ct) and r.status_code == 200 and int(r.headers.get("Content-Length") or 0) <= _RESCACHE_MAX:
+            try:
+                raw = b""
+                too_big = False
+                for chunk in r.iter_content(65536):
+                    raw += chunk
+                    if len(raw) > _RESCACHE_MAX:
+                        too_big = True
+                        break
+                if not too_big:
                     if "text/css" in ct.lower():
                         raw = _rewrite_css(raw.decode("utf-8", "replace"), r.url or url).encode("utf-8")
                     _rescache_put(url, raw, ct)
+                    sess.close()
                     resp = Response(raw, status=200, headers=hd)
                     _RES_GATE.release()
                     return resp
+                # 超出缓存上限:已读部分 + 续流,交给 _gated 收尾(release + close)
+                def _cont(pre, it):
+                    yield pre
+                    for c in it:
+                        yield c
+                return Response(_gated(_cont(raw, r.iter_content(65536)), sess), status=200, headers=hd)
             except Exception:
                 pass
-        if "text/css" in ct.lower():                       # CSS 里的 url()/@import 要跟着改写
+        # 大 CSS(未缓存):读全 → 改写 url()/@import
+        if "text/css" in ct.lower():
             try:
-                resp = Response(_rewrite_css(r.text, r.url or url),
+                body = b""
+                for chunk in r.iter_content(65536):
+                    body += chunk
+                resp = Response(_rewrite_css(body.decode("utf-8", "replace"), r.url or url),
                                 status=r.status_code, headers=hd)
-                _RES_GATE.release()   # 构造完再放:途中抛异常就落回下面的流式分支(那条自己会放)
+                sess.close()
+                _RES_GATE.release()
                 return resp
             except Exception:
                 pass
-        return Response(_gated(r.iter_content(65536)), status=r.status_code, headers=hd)
+        # 其它:流式透传,_gated 负责 close + release
+        return Response(_gated(r.iter_content(65536), sess), status=r.status_code, headers=hd)
 
     @bp.route("/web/live")
     def pdf_web_live():
