@@ -1380,6 +1380,34 @@
     capWait(false); _capPlace();
     _cap.el.classList.add('on');
   }
+  // ── ASR 假转写判据(与 voice_realtime_relay.py 的 _ASR_GHOST_ANCHORS/_ASR_PROMPT_MIRROR/
+  //    _GHOST_LCS_MIN 逐字对应;改一处必须改另一处,有测试守)──
+  var VC_ASR_ANCHORS = ['学习伴读通话'];
+  var VC_ASR_MIRROR = '关键词:Anki、笔迹、振假名、生词、假名'
+                    + '|学习伴读通话。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/'
+                    + '做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹';
+  var VC_GHOST_LCS_MIN = 10;   // 「翻到第N页」才5字、「下一页」3字 → 10 字才不会误杀真人说的话
+  function _stripPunct(x) { return (x || '').replace(/[\s,，。、:：;；/·!！?？…\-]+/g, ''); }
+  function _lcsLen(a, b) {   // 最长公共**子串**(连续),与 Python difflib find_longest_match 同义
+    if (!a || !b) return 0;
+    var prev = new Array(b.length + 1).fill(0), best = 0;
+    for (var i = 1; i <= a.length; i++) {
+      var cur = new Array(b.length + 1).fill(0);
+      for (var j = 1; j <= b.length; j++) {
+        if (a[i - 1] === b[j - 1]) { cur[j] = prev[j - 1] + 1; if (cur[j] > best) best = cur[j]; }
+      }
+      prev = cur;
+    }
+    return best;
+  }
+  function _isAsrGhost(tx) {
+    var s = (tx || '').trim();
+    if (!s) return true;
+    for (var i = 0; i < VC_ASR_ANCHORS.length; i++) if (s.indexOf(VC_ASR_ANCHORS[i]) >= 0) return true;
+    return _lcsLen(_stripPunct(s), _stripPunct(VC_ASR_MIRROR)) >= VC_GHOST_LCS_MIN;
+  }
+  try { window.__vcIsAsrGhost = _isAsrGhost; } catch (e) {}   // 供测试/调试
+
   function capUser(text) {   // ASR interim 实时更新:当前句已是用户句→原地改字,否则新起一句
     if (!text || !_capVisible()) return;
     _capEl();
@@ -2964,7 +2992,16 @@
       }, 6500);
     } else if (t === 'conversation.item.input_audio_transcription.completed') {
       var tx = (e.transcript || '').trim();
-      if (tx && (tx.indexOf('学习伴读通话') >= 0 || tx.indexOf('常说:这一页') >= 0)) tx = '';   // 85:转写 prompt 泄漏(静音时模型复读语境提示词)→丢弃
+      // 133/155:转写「提示词泄漏式幻觉」——噪音让 VAD 误开一个音频轮,但那段里没人声,
+      //   转写模型就把我们喂的热词 prompt **原样复读**成"用户说的话"(用户实测:噪音一响就冒
+      //   「关键词:Anki、笔迹、振假名…」)。
+      // ⚠ 首版这里只认旧 prompt 的两个锚点(学习伴读通话/常说:这一页),而 prompt 早已换成
+      //   「关键词:…」—— 一个锚点都不含 → 前端这道过滤**全程失效**。WebRTC 下转写是**直连数据
+      //   通道回浏览器**的,relay 那道闸只管"要不要生成回答",管不住前端显示,于是假转写照样
+      //   出气泡、还被 capUser 落进对话记录。
+      // → 改成与 relay `_is_asr_ghost` **同一套判据**(锚点 + 去标点最长公共子串≥10),
+      //   判据串由 VC_ASR_MIRROR 单点持有,tests/test_asr_ghost_sync.py 守三处不再漂移。
+      if (tx && _isAsrGhost(tx)) { try { console.warn('[vc] 丢弃假转写(prompt 泄漏):', tx); } catch (_) {} tx = ''; }
       if (tx) {
         _lastU = tx;
         setSub('u', tx);

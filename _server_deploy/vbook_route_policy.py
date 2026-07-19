@@ -140,6 +140,12 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_web_portal': 'GLOBAL',   # /pdf/web(网页阅读门户)
     'pdf_reader.pdf_web_proxy': 'GLOBAL',   # /pdf/web/proxy(实况网页代理)
     'pdf_reader.pdf_web_live': 'GLOBAL',    # /pdf/web/live(实况网页外壳)   # /pdf/api/upload
+    # 拦截式代理三件套:全都只认外部 URL、完全不碰 vault 里的书 → GLOBAL 名副其实
+    # (⚠ 教训记在册:标 GLOBAL 前必须核对 handler 真的没读 `file` 参数)
+    'pdf_reader.pdf_web_frame': 'GLOBAL',        # /pdf/web/frame(裁决 embed/代理)
+    'pdf_reader.pdf_web_page_mirror': 'GLOBAL',  # /pdf/web/p/<...>(路径镜像主文档)
+    'pdf_reader.pdf_web_res': 'GLOBAL',          # /pdf/web/res?url=(子资源,兼容旧形态)
+    'pdf_reader.pdf_web_res_mirror': 'GLOBAL',   # /pdf/web/r/<...>(路径镜像子资源)
     'pdf_reader.pdf_api_userpages': 'PAGE',   # /pdf/api/userpages
     'pdf_reader.pdf_api_video_player_prefs': 'GLOBAL',   # /pdf/api/video-player-prefs
     'pdf_reader.pdf_api_video_subtitles': 'GLOBAL',   # /pdf/api/video-subtitles/<vid>
