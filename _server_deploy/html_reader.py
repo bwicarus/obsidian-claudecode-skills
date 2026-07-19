@@ -268,15 +268,15 @@ def _web_search(q: str, n: int = 15) -> tuple[list, str]:
         return [], "none"
 
 
-# 浏览器主页/搜索引擎。⚠ 用户原本要的是**真谷歌**,实测证伪:代理下 Google 判"异常流量"直接拦,
-# 且它给的 reCAPTCHA **在我们的域下永远无解**(站点密钥绑死域名,报「网站密钥的网域无效」)——
-# 这不是调 header 能绕的,是 Google 明确不允许被代理。七家实测(headless chromium,中日英各一次):
-#   Google ✗异常流量 / Bing ✗Cloudflare Turnstile / Ecosia ✗ / Startpage ✗(GET 出不来结果)
-#   Brave ✓(自有索引,中日英都出真结果,80 外链) / DuckDuckGo ✓(最轻,42 外链)
-# → 默认换 Brave;Google 仍可手动访问(首页能开),只是搜索会被它自己拦,那时自动兜底转 Brave。
-WEB_HOME = "https://search.brave.com/"
-WEB_SEARCH_URL = "https://search.brave.com/search?q={q}"
-_SEARCH_FALLBACK = "https://search.brave.com/search?q={q}"
+# 浏览器主页/搜索引擎。选型一路被实测推翻:
+#   Google ✗异常流量+reCAPTCHA 域名无解 / Bing ✗Cloudflare / Startpage ✗出不来结果
+#   Brave 曾✓,但**用户实测高频后触发它自己的机器人验证**(在 iframe 里无法完成)→ 弃
+#   → 定 **DuckDuckGo lite**(lite.duckduckgo.com):专为无脚本/低带宽设计,极轻(~22K)、
+#     有真实结果、**不弹验证**(实测那个 "robot" 是 <meta name=robots> 误报,非验证页)。
+# 备选 ecosia(curl_cffi 救回,155K,较重)。Google/Brave 仍可手动访问,搜索被拦时自动兜底转 ddg-lite。
+WEB_HOME = "https://lite.duckduckgo.com/lite/"
+WEB_SEARCH_URL = "https://lite.duckduckgo.com/lite/?q={q}"
+_SEARCH_FALLBACK = "https://lite.duckduckgo.com/lite/?q={q}"
 # 判"被搜索引擎拦下了"的特征(拦截页都很短且带这些话术)
 _BLOCK_SIGNS = ("异常流量", "unusual traffic", "Confirm you", "not a robot",
                 "Verify you are human", "解决以下难题", "detected unusual")
