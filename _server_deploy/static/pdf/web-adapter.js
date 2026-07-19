@@ -68,6 +68,11 @@
     ext.title = '在系统浏览器打开这一页(需要登录、或被反机器人验证拦住的站走这里)';
     ext.onclick = function () { try { window.open(CUR, '_blank', 'noopener'); } catch (e) {} };
     // 🔑 为当前站导入登录 cookie:解决"代理没有你的登录态"(B站图片防盗链/登录框都靠它)
+    // 🖥 一键切到 RBI 真浏览器版(Pi 跑真 Chrome:过 Cloudflare / 图片全 / 可登录态)
+    var rbi = document.createElement('button');
+    rbi.id = 'wl-rbi'; rbi.textContent = '🖥';
+    rbi.title = '真浏览器版(Pi 跑真 Chrome 渲染:过验证、图片全、DOM 完整;查词接入中)';
+    rbi.onclick = function () { location.href = '/pdf/web/rbi-live?url=' + encodeURIComponent(CUR); };
     var key = document.createElement('button');
     key.id = 'wl-key'; key.textContent = '🔑';
     key.title = '导入登录 cookie:在电脑浏览器登录该网站后,开发者工具复制 cookie 粘进来';
@@ -105,8 +110,9 @@
       title.parentNode.insertBefore(ts, tr.nextSibling);
       title.parentNode.insertBefore(ext, ts.nextSibling);
       title.parentNode.insertBefore(key, ext.nextSibling);
+      title.parentNode.insertBefore(rbi, key.nextSibling);
     } else {
-      [back, box, rd, tr, ts, ext, key].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
+      [back, box, rd, tr, ts, ext, key, rbi].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
     }
   }
 

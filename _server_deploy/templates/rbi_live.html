@@ -89,6 +89,9 @@
   });
   document.getElementById('rbi-go').onclick=function(){ open(urlbox.value.trim()); };
   document.getElementById('rbi-back').onclick=function(){ location.href='/pdf/web?home=1'; };
+  // 长按后退 = 切回轻量 iframe 代理版(同一 URL)
+  document.getElementById('rbi-back').oncontextmenu=function(e){ e.preventDefault();
+    location.href='/pdf/web/live?url='+encodeURIComponent(CFG.url); };
 
   // 阶段1b 接入点:web-adapter 会在 replay iframe 的 DOM 上挂查词/翻译。此处先暴露 replayer。
   window.__rbiReplayer=function(){ return replayer; };
