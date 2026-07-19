@@ -21,7 +21,8 @@ import time
 import uuid
 from pathlib import Path
 
-from flask import abort, jsonify, make_response, render_template, request
+from flask import abort, jsonify, make_response, redirect, render_template, request
+from urllib.parse import quote as _q
 
 # register_html_reader 注入(模块 import 时为 None,注册后可用)
 _safe_vault_path = None   # callable: vault 相对路径 → 安全绝对 Path 或 None
@@ -264,6 +265,98 @@ def _web_search(q: str, n: int = 15) -> tuple[list, str]:
         return [], "none"
 
 
+_WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立状态,绝不进书的 reading-pos)
+
+
+def _web_last_get() -> str:
+    try:
+        d = json.loads(_WEB_LAST.read_text("utf-8"))
+        rel = str(d.get("file") or "")
+        return rel if rel and (_OBSIDIAN_ROOT / rel).exists() else ""
+    except Exception:
+        return ""
+
+
+def _web_last_set(rel: str):
+    try:
+        _WEB_LAST.write_text(json.dumps({"file": rel, "ts": int(time.time())}, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+
+
+def _web_home_content(q: str = "") -> str:
+    """搜索主页/结果页,渲成**阅读器正文**(在 html/view 壳里 → 侧栏/助手/设置第一屏即可用)。
+    Google 官网式布局:大标题+居中搜索框;?q= 时下方列结果。"""
+    import html as _h
+    rows = ""
+    eng = ""
+    if q:
+        results, engine = _web_search(q)
+        eng = {"google": "Google", "duckduckgo": "DuckDuckGo"}.get(engine, "")
+        if results:
+            rows = "".join(
+                f'<div class="wh-r"><a class="wh-t" href="{_h.escape(r["url"])}" '
+                f'onclick="return __webOpen(this)">{_h.escape(r["title"])}</a>'
+                f'<div class="wh-u">{_h.escape(r["url"][:90])}</div>'
+                f'<div class="wh-s">{_h.escape(r["snippet"])}</div></div>'
+                for r in results)
+        else:
+            rows = '<p style="text-align:center;color:#888">没搜到结果</p>'
+    recent = ""
+    if not q:
+        rec = _recent_web_pages()
+        if rec:
+            recent = ('<div class="wh-sec">最近浏览</div>'
+                      + "".join(f'<a class="wh-chip" href="/pdf/html/view?file={_h.escape(r["rel"])}">'
+                                f'{_h.escape(r["name"][:24])}</a>' for r in rec))
+    return f"""
+<div class="wh-wrap{' wh-results' if q else ''}">
+  <div class="wh-logo">🌐 网页阅读</div>
+  <form class="wh-box" onsubmit="return __webGo(this)">
+    <input name="q" value="{_h.escape(q)}" placeholder="搜索,或输入网址…" autocomplete="off" autofocus>
+    <button type="submit">搜索</button>
+  </form>
+  <div class="wh-hint">输网址直接进阅读器;搜索{('由 ' + eng + ' 提供') if eng else ''}</div>
+  <div id="wh-st"></div>
+  <div class="wh-res">{rows}</div>
+  {recent}
+</div>
+<style>
+.wh-wrap{{max-width:640px;margin:0 auto;padding-top:10vh;text-align:center}}
+.wh-results{{padding-top:2vh;text-align:left}}
+.wh-results .wh-logo{{font-size:18px}}
+.wh-logo{{font-size:30px;font-weight:600;margin-bottom:26px;text-align:center}}
+.wh-box{{display:flex;gap:8px}}
+.wh-box input{{flex:1;border:1px solid #c8c2b2;border-radius:24px;padding:12px 20px;font-size:16px;outline:none;background:#fffdf6;color:#1b1b1b}}
+.wh-box button{{border:1px solid #c8c2b2;background:#efe9d8;color:#333;border-radius:24px;padding:0 22px;font-size:15px;cursor:pointer}}
+.wh-hint{{color:#8a8571;font-size:12px;margin-top:10px;text-align:center}}
+#wh-st{{color:#666;font-size:13px;min-height:18px;margin-top:10px;text-align:center}}
+.wh-r{{padding:12px 4px;border-bottom:1px solid rgba(0,0,0,.06)}}
+.wh-t{{font-size:17px;color:#2255bb;text-decoration:none}}
+.wh-u{{color:#3d7a4e;font-size:12px;margin:2px 0;word-break:break-all}}
+.wh-s{{color:#555;font-size:13.5px;line-height:1.55}}
+.wh-sec{{color:#8a8571;font-size:12px;margin:28px 0 10px;letter-spacing:.05em;text-align:left}}
+.wh-chip{{display:inline-block;background:rgba(0,0,0,.05);border:1px solid rgba(0,0,0,.1);color:#444;border-radius:15px;padding:5px 13px;margin:0 6px 8px 0;font-size:13px;text-decoration:none}}
+</style>
+<script>
+function __webGo(f){{
+  var v=(f.q.value||'').trim(); if(!v) return false;
+  var isU = v.indexOf('http://')===0||v.indexOf('https://')===0||/^[\\w-]+(\\.[\\w-]+)+([/]|$)/.test(v);
+  if(isU){{ __webFetch(v.indexOf('http')===0?v:'https://'+v); return false; }}
+  location.href='/pdf/html/view?file=__web__&q='+encodeURIComponent(v); return false;
+}}
+function __webOpen(a){{ __webFetch(a.getAttribute('href')); return false; }}
+function __webFetch(url){{
+  document.getElementById('wh-st').textContent='🌐 抓取正文中…';
+  fetch('/pdf/api/web-fetch',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:url}})}})
+   .then(function(r){{return r.json();}}).then(function(d){{
+     if(d.ok&&d.file) location.href='/pdf/html/view?file='+encodeURIComponent(d.file);
+     else document.getElementById('wh-st').textContent='✗ '+(d.error||'抓取失败');
+   }}).catch(function(){{ document.getElementById('wh-st').textContent='✗ 网络错误'; }});
+}}
+</script>"""
+
+
 def _recent_web_pages(limit: int = 12) -> list:
     """资源/web/ 里最近抓取的网页(mtime 倒序)。"""
     d = _OBSIDIAN_ROOT / "资源" / "web"
@@ -299,7 +392,7 @@ h1{font-size:26px;text-align:center;margin:0 0 26px;color:#cfe6ff;font-weight:60
 """
 
 _WEB_PORTAL_JS = r"""
-function isUrl(v){return v.indexOf('http://')===0 || v.indexOf('https://')===0 || /^[\w-]+(\.[\w-]+)+([/]|$)/.test(v);}
+function isUrl(v){return v.indexOf('http://')===0 || v.indexOf('https://')===0 || /^[\\w-]+(\\.[\\w-]+)+([/]|$)/.test(v);}
 async function go(v){
   v=(v||'').trim(); if(!v) return;
   if(isUrl(v)){
@@ -332,6 +425,8 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 
 def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
+    global _WEB_LAST
+    _WEB_LAST = Path(claude_dir) / "state" / "web-last.json"
     """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
     global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
     _safe_vault_path = safe_vault_path
@@ -342,6 +437,13 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
     def html_view():
         """统一 HTML 阅读器主页(架构验收)。?file=<vault-rel .html/.md>;无 file → 内置 sample。"""
         rel = (request.args.get("file") or "").strip()
+        if rel == "__web__":
+            # 网页阅读主页(Google 式搜索页)在**阅读器壳内**渲 → 侧栏/助手第一屏可用(用户需求)
+            resp = make_response(render_template(
+                "html_reader.html", html_content=_web_home_content((request.args.get("q") or "").strip()),
+                file_rel="__web__", file_name="🌐 网页阅读", reader_js_v=_html_js_v()))
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
         if rel:
             abs_path = _safe_vault_path(rel)
             if not abs_path or abs_path.suffix.lower() not in (".html", ".htm", ".md", ".markdown"):
@@ -353,6 +455,8 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             else:
                 html_content = _sanitize_html_doc(raw)
             title = Path(rel_clean).name
+            if rel_clean.startswith("资源/web/"):
+                _web_last_set(rel_clean)   # 网页阅读独立"上次位置"(绝不写书的 reading-pos)
         else:
             rel_clean = ""
             html_content = _HTML_SAMPLE
@@ -364,51 +468,16 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
 
     @bp.route("/web")
     def pdf_web_portal():
-        """网页阅读门户(独立地址,浏览器 Copilot 入口):默认搜索页;?q= 出结果列表。
-        输 URL 直接抓;点结果 → web-fetch 抓正文 → HTML 阅读器打开(全套阅读能力)。"""
-        import html as _h
-        q = (request.args.get("q") or "").strip()
-        rows = ""
-        engine = ""
-        if q:
-            results, engine = _web_search(q)
-            if results:
-                rows = "".join(
-                    f'<a class="r" href="{_h.escape(r["url"])}" onclick="openResult(event,{json.dumps(r["url"])})">'
-                    f'<div class="t">{_h.escape(r["title"])}</div>'
-                    f'<div class="u">{_h.escape(r["url"][:90])}</div>'
-                    f'<div class="s">{_h.escape(r["snippet"])}</div></a>'
-                    for r in results)
-            else:
-                rows = '<p style="color:#8a9bb4;text-align:center">没搜到结果</p>'
-        recent = _recent_web_pages()
-        rec_html = ""
-        if recent and not q:
-            rec_html = ('<div class="sec">最近抓取</div><div class="recent">'
-                        + "".join(f'<a href="/pdf/html/view?file={_h.escape(r["rel"])}">{_h.escape(r["name"][:24])}</a>'
-                                  for r in recent) + "</div>")
-        eng_note = {"google": "Google(官方 CSE API)", "duckduckgo": "DuckDuckGo(要用 Google 结果:在 server-config 的 web_portal.cse_cx 填搜索引擎 ID)"}.get(engine, "")
-        page = f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>🌐 网页阅读</title>
-<link rel="apple-touch-icon" href="/static/icons/web.png">
-<link rel="icon" type="image/png" href="/static/icons/web-32.png">
-<meta name="apple-mobile-web-app-title" content="网页">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<style>{_WEB_PORTAL_CSS}</style></head><body>
-<div class="wrap">
-<h1>🌐 网页阅读</h1>
-<div class="sbox"><input id="q" value="{_h.escape(q)}" placeholder="搜索,或直接输入网址…" autocomplete="off">
-<button onclick="go(document.getElementById('q').value)">{'搜索' if not q else '再搜'}</button></div>
-<div class="hint">回车即搜;输入网址直接进阅读器(高亮/查词/AI 侧栏全套可用)</div>
-<div id="st"></div>
-<div class="res">{rows}</div>
-{rec_html}
-{f'<div class="eng">搜索引擎:{_h.escape(eng_note)}</div>' if eng_note else ''}
-</div><script>{_WEB_PORTAL_JS}</script></body></html>"""
-        resp = make_response(page)
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
+        """网页阅读入口(仲裁,像浏览器恢复会话):上次看过网页 → 直接恢复它;
+        没有(或 ?home=1)→ 搜索主页。两者都在 html/view 阅读器壳内(侧栏第一屏可用)。
+        与书的续读完全分离:状态存 state/web-last.json,html 阅读器不碰 reading-pos。"""
+        if request.args.get("q"):
+            return redirect("/pdf/html/view?file=__web__&q=" + _q(request.args["q"]))
+        if not request.args.get("home"):
+            last = _web_last_get()
+            if last:
+                return redirect("/pdf/html/view?file=" + _q(last))
+        return redirect("/pdf/html/view?file=__web__")
 
     @bp.route("/api/web-fetch", methods=["POST"])
     def pdf_api_web_fetch():

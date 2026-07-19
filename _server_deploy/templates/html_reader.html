@@ -92,7 +92,12 @@
 </head>
 <body data-theme="paper">
   <div id="html-top">
+    {% if file_rel == '__web__' or file_rel.startswith('资源/web/') %}
+    <button onclick="location.href='/pdf/web?home=1'" title="网页搜索主页">🔍</button>
+    <div id="html-title" title="{{ file_name }}">{{ file_name }}</div>
+    {% else %}
     <div id="html-title" onclick="location.href='/pdf/'" title="点击返回书架">{{ file_name }}</div>
+    {% endif %}
     <button id="html-set-btn" title="设置">⚙️</button>
   </div>
 
