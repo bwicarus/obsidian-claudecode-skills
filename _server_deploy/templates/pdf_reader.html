@@ -69,7 +69,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
       <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px">⚡ 加载慢？切换到压缩版（更小更快，下次记住）</button>
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
-    <div id="page-container">{% if web_url %}<iframe id="wl-frame" src="/pdf/web/frame?url={{ web_url|urlencode }}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
+    <div id="page-container">{% if web_url %}<iframe id="wl-frame" src="/pdf/web/{% if web_rbi %}rbi{% else %}frame{% endif %}?url={{ web_url|urlencode }}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
     <div id="search-panel">
       <div class="sp-bar">
         <input id="search-input" type="search" placeholder="全文搜索（全书）…" autocomplete="off"
@@ -426,7 +426,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}, web_url: {{ web_url|default(None)|tojson }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}, web_url: {{ web_url|default(None)|tojson }}, web_rbi: {{ web_rbi|default("")|tojson }}};</script>
 <script>
 // 📍 续读位置服务端上报(2026-07-03,ui=shared/legacy 通用,不动 reader.src):每 5s 检测当前页
 //   (与视口交叠最多的 .page-wrap[data-page-num],同 _favCurTarget 口径;翻页按钮/横滑/滚动通吃),

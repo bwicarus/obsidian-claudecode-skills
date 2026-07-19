@@ -150,6 +150,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_web_vocab': 'GLOBAL',      # /pdf/api/web-vocab(未掌握词判定:只查词库)
     'pdf_reader.pdf_api_web_cookie': 'GLOBAL',     # /pdf/api/web-cookie(登录 cookie 导入:per-user 存储)
     'pdf_reader.pdf_api_web_trcache': 'GLOBAL',    # /pdf/api/web-trcache(网页整页译文预取)
+    'pdf_reader.pdf_web_rbi': 'GLOBAL',            # /pdf/web/rbi(RBI:Pi 真 Chrome 渲染,只认外部 URL)
     'pdf_reader.pdf_api_userpages': 'PAGE',   # /pdf/api/userpages
     'pdf_reader.pdf_api_video_player_prefs': 'GLOBAL',   # /pdf/api/video-player-prefs
     'pdf_reader.pdf_api_video_subtitles': 'GLOBAL',   # /pdf/api/video-subtitles/<vid>

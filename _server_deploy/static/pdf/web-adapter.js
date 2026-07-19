@@ -17,6 +17,8 @@
   var _hist = [];
   var _sel = { text: '', ctx: '', rect: null };
   var _pageText = '', _title = '';
+  var RBI = !!CFG.web_rbi;   // RBI 模式:iframe 内容来自 Pi 真 Chrome 渲染(过验证/带登录态)
+  function frameSrc(u) { return '/pdf/web/' + (RBI ? 'rbi' : 'frame') + '?url=' + encodeURIComponent(u); }
   var TR_NAME = { para: '独立段落', small: '下方小字', replace: '替换原文' };
   var _trOn = false;
   var _trStyle = (function () { try { return localStorage.getItem('rcWebTrStyle') || 'para'; } catch (e) { return 'para'; } })();
@@ -114,7 +116,7 @@
     if (push !== false && CUR) _hist.push(CUR);
     CUR = u; CFG.web_url = u; _pageText = '';
     var b = document.getElementById('wl-url'); if (b) b.value = u;
-    frame().src = '/pdf/web/frame?url=' + encodeURIComponent(u);   // 服务端裁决 embed/代理(地址栏输入/后退走这里)
+    frame().src = frameSrc(u);   // 地址栏输入/后退;RBI 模式走真浏览器渲染
     try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
     setTimeout(askText, 1200);
     if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);

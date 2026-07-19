@@ -1504,6 +1504,46 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         _cookie_store_save(uid, store)
         return jsonify({"ok": True, "domain": domain, "count": len(ck)})
 
+    @bp.route("/web/rbi")
+    def pdf_web_rbi():
+        """RBI 最小验证:Pi 真 Chrome 渲染后的 DOM(真实身份/过验证)→ 复用现有改写+注入 → iframe。
+        demo 阶段每次起一个 subprocess(慢 ~8s);正式阶段换常驻浏览器池 + 实时 DOM 同步。"""
+        url = (request.args.get("url") or "").strip()
+        if not url or _url_safe(url):
+            abort(400)
+        import subprocess
+        import sys as _sys
+        try:
+            script = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "rbi_render.py"
+            out = subprocess.run([_sys.executable, str(script), url],
+                                 capture_output=True, text=True, timeout=80)
+            data = json.loads(out.stdout or "{}")
+        except Exception as ex:
+            data = {"ok": False, "error": str(ex)[:150]}
+        if not data.get("ok"):
+            import html as _hh
+            return make_response(
+                f'<body style="font:14px/1.7 system-ui;padding:30px;color:#666">'
+                f'⚠ 真浏览器渲染失败:{_hh.escape(str(data.get("error") or "?"))}<br>'
+                f'(RBI demo 每次启一个 Chrome,首次或超时会失败,可重试)</body>', 200)
+        raw = data.get("html", "")
+        final = data.get("final") or url
+        html = re.sub(r"<base\b[^>]*>", "", raw, flags=re.I)
+        html = rewrite_html(html, final)      # 资源/导航改写走我们的代理,复用一整套(含 shim)
+        base_tag = f'<script>location.__realBase={json.dumps(final)};</script>' + _PROXY_INJECT
+        if re.search(r"<head[^>]*>", html, re.I):
+            html = re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.I)
+        else:
+            html = base_tag + html
+        html = re.sub(r'<meta[^>]+http-equiv=["\']?content-security-policy["\']?[^>]*>', "", html, flags=re.I)
+        resp = make_response(html)
+        resp.headers["Content-Type"] = "text/html; charset=utf-8"
+        resp.headers["Cache-Control"] = "no-store"
+        for hk in list(resp.headers.keys()):
+            if hk.lower() in _PROXY_STRIP_HEADERS:
+                del resp.headers[hk]
+        return resp
+
     @bp.route("/web/frame")
     def pdf_web_frame():
         """iframe 的唯一入口:服务端裁决——视频页 → 官方 embed(能真播),其余 → 代理渲染。
@@ -1634,7 +1674,8 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         # ★直接用 **PDF 阅读器那张页面**(用户拍板:"就只是把书页的展示窗口换成网页"):
         #   顶栏/侧栏/全部 rc-* 与 reader.js 原样复用,零新壳;reader.js 见 web_url 即跳过 PDF 加载。
         return make_response(render_template(
-            "pdf_reader.html", web_url=url, pdf_url="", file_rel="web:" + url,
+            "pdf_reader.html", web_url=url, web_rbi=("1" if request.args.get("rbi") else ""),
+            pdf_url="", file_rel="web:" + url,
             file_name=url, page=1, page_ts=0, chars_ver=0, pdf_size=0,
             compressed=0, comp_avail=0, ui_shared=1, group=None,
             reader_js_v=_html_js_v(), js_v=_html_js_v()))
