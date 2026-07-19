@@ -157,7 +157,7 @@ async def _serve(ws):
                                 raise
                     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     # 等一下 Cloudflare 挑战 + 首屏 hydrate,再启动录制(录到稳定后的 DOM)
-                    await page.wait_for_timeout(3500)
+                    await page.wait_for_timeout(1800)
                     await page.add_script_tag(content=RRWEB)
                     await page.evaluate("""() => {
                       if (window.__rbiStop) { try { window.__rbiStop(); } catch(e){} }
@@ -180,7 +180,7 @@ async def _serve(ws):
                 if url:
                     try:
                         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                        await page.wait_for_timeout(2500)
+                        await page.wait_for_timeout(1800)
                         await page.add_script_tag(content=RRWEB)
                         await page.evaluate("""() => {
                           if (window.__rbiStop) { try { window.__rbiStop(); } catch(e){} }

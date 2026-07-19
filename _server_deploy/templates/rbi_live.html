@@ -61,7 +61,11 @@
       if(m.t==='ev'){
         var ev; try{ ev=JSON.parse(m.d); }catch(_){ return; }
         try{ replayer.addEvent(ev); }catch(err){ return; }
-        if(ev.type===2){ gotFull=true; load.style.display='none'; setSt('已重建 DOM'); }  // FullSnapshot
+        if(ev.type===2){ gotFull=true; load.style.display='none';
+          var dt = _openT ? ((Date.now()-_openT)/1000).toFixed(1)+'s' : '';
+          setSt('已重建 DOM'+(dt?' · 跳转 '+dt:''));
+          setTimeout(hookLinks, 250);   // 重建 iframe 就绪后,拦截页内链接点击(回传 Pi 导航)
+        }
       } else if(m.t==='nav'){
         CFG.url=m.url; urlbox.value=m.url; setSt('打开 '+m.url);
         try{ history.replaceState(null,'','/pdf/web/rbi-live?url='+encodeURIComponent(m.url)); }catch(_){}
@@ -71,11 +75,28 @@
       reconnectT=setTimeout(function(){ reconnectT=null; connect(); }, 2000); };
     ws.onerror=function(){ setSt('ws 错误'); };
   }
+  var _openT=0;
   function open(u){
     if(!u) return;
     if(!/^https?:\/\//.test(u)) u='https://'+u;
-    load.style.display='flex'; freshReplayer();
+    _openT=Date.now(); load.style.display='flex'; setSt('Pi 加载中…'); freshReplayer();
     try{ ws.send(JSON.stringify({cmd:'open', url:u, uid:CFG.uid})); }catch(_){}
+  }
+  // 拦截 rrweb 重建 DOM 里的链接点击 → 回传 Pi 真 Chrome 导航(不变量 3:网页原生交互回传)。
+  // 重建的 DOM 在 replayer 的 iframe 内,链接默认会导航到原站被 X-Frame 挡,必须拦。
+  function hookLinks(){
+    var ifr = stage.querySelector('iframe');
+    if(!ifr || !ifr.contentDocument || ifr.__rbiHooked) return;
+    ifr.__rbiHooked = true;
+    ifr.contentDocument.addEventListener('click', function(e){
+      var a = e.target && e.target.closest && e.target.closest('a[href]');
+      if(!a) return;
+      var href = a.getAttribute('href') || '';
+      if(!href || href.charAt(0)==='#' || /^(javascript|mailto|tel):/i.test(href)) return;
+      e.preventDefault(); e.stopPropagation();
+      var abs; try{ abs = new URL(href, CFG.url).href; }catch(_){ return; }
+      open(abs);              // 走同一条 open:Pi goto 新 URL → 新 DOM 流回 → 重建
+    }, true);
   }
   connect();
 
