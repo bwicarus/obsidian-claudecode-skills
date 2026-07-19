@@ -390,7 +390,12 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         eng_note = {"google": "Google(官方 CSE API)", "duckduckgo": "DuckDuckGo(要用 Google 结果:在 server-config 的 web_portal.cse_cx 填搜索引擎 ID)"}.get(engine, "")
         page = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>🌐 网页阅读</title><style>{_WEB_PORTAL_CSS}</style></head><body>
+<title>🌐 网页阅读</title>
+<link rel="apple-touch-icon" href="/static/icons/web.png">
+<link rel="icon" type="image/png" href="/static/icons/web-32.png">
+<meta name="apple-mobile-web-app-title" content="网页">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>{_WEB_PORTAL_CSS}</style></head><body>
 <div class="wrap">
 <h1>🌐 网页阅读</h1>
 <div class="sbox"><input id="q" value="{_h.escape(q)}" placeholder="搜索,或直接输入网址…" autocomplete="off">
