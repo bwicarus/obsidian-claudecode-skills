@@ -135,7 +135,8 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_translate': 'PAGE',   # /pdf/api/translate
     'pdf_reader.pdf_api_translate_config': 'GLOBAL',   # /pdf/api/translate-config
     'pdf_reader.pdf_api_translate_sentence': 'BOOK_FANIN',   # /pdf/api/translate-sentence
-    'pdf_reader.pdf_api_upload': 'MEMBER_REQUIRED',   # /pdf/api/upload
+    'pdf_reader.pdf_api_upload': 'MEMBER_REQUIRED',
+    'pdf_reader.pdf_api_web_fetch': 'GLOBAL',   # /pdf/api/web-fetch(抓网页,与合并书无关)   # /pdf/api/upload
     'pdf_reader.pdf_api_userpages': 'PAGE',   # /pdf/api/userpages
     'pdf_reader.pdf_api_video_player_prefs': 'GLOBAL',   # /pdf/api/video-player-prefs
     'pdf_reader.pdf_api_video_subtitles': 'GLOBAL',   # /pdf/api/video-subtitles/<vid>
