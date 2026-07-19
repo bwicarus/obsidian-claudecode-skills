@@ -16,11 +16,11 @@ ROUTE_POLICY = {
     'pdf_reader.epub_view': 'EPUB',   # /pdf/epub/view
     'pdf_reader.html_view': 'EPUB',   # /pdf/html/view
     'pdf_reader.pdf_api_ai_stream_result': 'JOB_OR_RANGE',   # /pdf/api/ai-stream-result
-    'pdf_reader.pdf_api_book_crop_get': 'MEMBER_REQUIRED',   # /pdf/api/book-crop
+    'pdf_reader.pdf_api_book_crop_get': 'BOOK_REP',   # /pdf/api/book-crop
     'pdf_reader.pdf_api_book_crop_set': 'MEMBER_REQUIRED',   # /pdf/api/book-crop
     'pdf_reader.pdf_api_book_figures_get': 'MEMBER_REQUIRED',   # /pdf/api/book-figures
     'pdf_reader.pdf_api_book_figures_set': 'MEMBER_REQUIRED',   # /pdf/api/book-figures
-    'pdf_reader.pdf_api_book_langs_get': 'MEMBER_REQUIRED',   # /pdf/api/book-langs
+    'pdf_reader.pdf_api_book_langs_get': 'BOOK_REP',   # /pdf/api/book-langs
     'pdf_reader.pdf_api_book_langs_set': 'MEMBER_REQUIRED',   # /pdf/api/book-langs
     'pdf_reader.pdf_api_book_meta': 'BOOK_FANIN',   # /pdf/api/book-meta
     'pdf_reader.pdf_api_build_toc': 'MEMBER_REQUIRED',   # /pdf/api/build-toc

@@ -109,9 +109,21 @@ except Exception:
 
 
 # ══════════ 转换层v2·服务端咽喉(第3步):vbook: 引用在此被翻译/直通/拒绝,handler 零感知 ══════════
-_VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events"}
+_VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events",
+               # job/run/流式类:按 job id 路由,handler 不用 file 开磁盘(2026-07-19 逐个验证过,
+               # 唯一开文件的 sandbox 不在此列)——file 只是上下文,直通即可,501 反而把
+               # 「AI 断线重连 / 后台任务轮询 / 工具库配方」在合并视图里全打死
+               "pdf_reader.pdf_api_job_status", "pdf_reader.pdf_api_ai_stream_result",
+               "pdf_reader.pdf_api_run_status", "pdf_reader.pdf_api_run_start",
+               "pdf_reader.pdf_api_run_event", "pdf_reader.pdf_api_run_save",
+               "pdf_reader.pdf_api_run_attach", "pdf_reader.pdf_api_builtin_tools",
+               "pdf_reader.pdf_api_publish_actions", "pdf_reader.pdf_api_toolshot",
+               "pdf_reader.pdf_api_recipe_edit", "pdf_reader.pdf_api_recipe_delete"}
 _VB_ADAPTED = {"pdf_reader.pdf_view", "pdf_reader.pdf_api_book_meta",
                "pdf_reader.pdf_api_translate_sentence", "pdf_reader.pdf_api_sentence_dismiss",
+               "pdf_reader.pdf_api_pdf_insert_page",
+               "pdf_reader.pdf_api_book_figures_get", "pdf_reader.pdf_api_book_figures_set",
+               "pdf_reader.pdf_api_book_langs_set",
                "pdf_reader.pdf_api_highlights_list", "pdf_reader.pdf_api_highlights_update",
                "pdf_reader.pdf_api_highlights_delete", "pdf_reader.pdf_api_notes",
                "pdf_reader.pdf_api_userpages", "pdf_reader.pdf_api_search",
@@ -4873,7 +4885,11 @@ def pdf_api_book_langs_set():
         return jsonify({"ok": False, "error": "no file"}), 400
     langs = [l for l in (data.get("langs") or []) if l in _VALID_LANGS]
     allm = _load_book_langs()
-    allm[rel] = langs
+    try:   # 统一书模型:语言写**全成员**(否则另一卷分词/字典路由错档)
+        for _m, _o in _vb_parts(rel):
+            allm[_m] = langs
+    except Exception:
+        allm[rel] = langs
     try:
         _BOOK_LANGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         _BOOK_LANGS_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
@@ -4900,7 +4916,12 @@ def _book_fig_enabled(rel: str) -> bool:
 
 @bp.route("/api/book-figures")
 def pdf_api_book_figures_get():
-    return jsonify({"ok": True, "enabled": _book_fig_enabled(request.args.get("file", ""))})
+    _rel = request.args.get("file", "")
+    try:   # 统一书模型:成员 OR(合并书 part1关/part2开 → 报开,徽标不消失;单本=自己)
+        _en = any(_book_fig_enabled(m) for m, _o in _vb_parts(_rel))
+    except Exception:
+        _en = _book_fig_enabled(_rel)
+    return jsonify({"ok": True, "enabled": _en})
 
 
 @bp.route("/api/book-figures", methods=["POST"])
@@ -4910,9 +4931,15 @@ def pdf_api_book_figures_set():
     if not rel:
         return jsonify({"ok": False, "error": "no file"}), 400
     enabled = bool(data.get("enabled"))
-    was = _load_book_fig().get(rel, False)
+    try:   # 统一书模型:配置写**全成员**(合并书开一次=各卷都开;单本=写自己)
+        _members = [m for m, _o in _vb_parts(rel)]
+    except Exception:
+        _members = [rel]
+    was = any(_load_book_fig().get(m, False) for m in _members)
     allm = _load_book_fig()
-    allm[rel] = enabled
+    for _m in _members:
+        allm[_m] = enabled
+    rel = _members[0]   # 后续「刚开启跑 YOLO」按真实成员跑
     try:
         _BOOK_FIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         _BOOK_FIG_PATH.write_text(json.dumps(allm, ensure_ascii=False, indent=2), "utf-8")
@@ -6866,12 +6893,61 @@ def pdf_api_userpages():
     if not _ref0 and request.method in ("POST", "PATCH"):
         _ref0 = str(((request.get_json(silent=True) or {}).get("file")) or "")
     if VB is not None and VB.is_view_ref(_ref0):
+        # 合并书适配(2026-07-19,用户实锤:默认入口就是合并视图,禁用=编辑按钮消失/页面固定化/建页失效)。
+        # 持久真相不变:每卷自己的 sidecar 存**局部页**;这里只做视图坐标翻译。
+        try:
+            _parts = _vb_parts(_ref0)
+        except VB.VbookError as e:
+            return _vb_err(e)
         if request.method == "GET":
-            _r = jsonify({"ok": True, "pages": []})
+            agg = []
+            for _mrel, _moff in _parts:
+                for p0 in _upages_sorted(_upages_load(_mrel)):
+                    p2 = dict(p0)
+                    if isinstance(p2.get("page"), int):
+                        p2["page"] = p2["page"] + _moff       # 真插入页:PDF 页号全局化
+                    if isinstance(p2.get("after"), int) and p2["after"] > 0:
+                        p2["after"] = p2["after"] + _moff     # 虚拟页锚同理(0=书首,保持 0)
+                    agg.append(p2)
+            _r = jsonify({"ok": True, "pages": agg})
             _r.headers["Cache-Control"] = "no-store"
             return _r
-        return jsonify({"ok": False, "error": "vbook_structural_disabled",
-                        "note": "合并书首版禁用插入页(结构变更,规格v2)"}), 501
+        # 写操作:按 id 定位所属卷(PATCH/DELETE),或按 after 全局页定位(POST 新建虚拟页),
+        # 然后把请求坐标翻成该卷局部,交给下面的原逻辑跑(get_json 缓存 dict 可变)。
+        if request.method == "DELETE":
+            _uid = (request.args.get("id") or "").strip()
+            _home = next((m for m, _o in _parts
+                          if any(x.get("id") == _uid for x in _upages_load(m))), None)
+            if not _home:
+                return jsonify({"ok": True})
+            _args = request.args.to_dict()
+            _args["file"] = _home
+            import urllib.parse as _upp
+            _nq = _upp.urlencode(_args)   # DELETE 参数在 query:改 query_string 本体(Werkzeug 物化坑)
+            _rq = request._get_current_object()
+            _rq.environ["QUERY_STRING"] = _nq
+            _rq.__dict__["query_string"] = _nq.encode("latin-1")
+            for _a in ("args", "values", "full_path", "url"):
+                _rq.__dict__.pop(_a, None)
+        else:
+            _b = request.get_json(silent=True) or {}
+            if request.method == "PATCH":
+                _uid = (_b.get("id") or "").strip()
+                _home = next(((m, _o) for m, _o in _parts
+                              if any(x.get("id") == _uid for x in _upages_load(m))), None)
+                if not _home:
+                    return jsonify({"ok": False, "error": "未找到"}), 404
+                _b["file"] = _home[0]
+            else:   # POST 新建虚拟页:after(全局)→ 所在卷局部
+                try:
+                    _aft = max(0, int(_b.get("after") or 0))
+                except (TypeError, ValueError):
+                    _aft = 0
+                if _aft <= 0:
+                    _b["file"] = _parts[0][0]
+                else:
+                    _hm = next(((m, _o) for m, _o in reversed(_parts) if _aft > _o), _parts[0])
+                    _b["file"], _b["after"] = _hm[0], _aft - _hm[1]
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
         r = jsonify({"ok": True, "pages": _upages_sorted(_upages_load(rel))})
@@ -7916,6 +7992,27 @@ def pdf_api_pdf_insert_page():
     else:
         body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
+    if VB is not None and VB.is_view_ref(rel):
+        # 合并书:真插入/删除定位到**所在成员卷**执行(该卷页数变 → book_groups 缓存失效 →
+        # vbook revision 自动更新;job 完成后前端整页 reload 拿到新 total,页号全局连续性自愈)。
+        try:
+            _parts = _vb_parts(rel)
+        except VB.VbookError as e:
+            return _vb_err(e)
+        if request.method == "POST":
+            try:
+                _aft = int(body.get("after"))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "缺少 after"}), 400
+            _hm = _parts[0] if _aft <= 0 else next(((m, _o) for m, _o in reversed(_parts) if _aft > _o), _parts[0])
+            rel, body["file"], body["after"] = _hm[0], _hm[0], max(0, _aft - _hm[1])
+        else:
+            _uid = (body.get("id") or "").strip()
+            _home = next((m for m, _o in _parts
+                          if any(x.get("id") == _uid for x in _upages_load(m))), None)
+            if not _home:
+                return jsonify({"ok": False, "error": "未找到该用户页记录"}), 404
+            rel = body["file"] = _home
     ap = _safe_vault_path(rel)
     if not ap or not ap.exists() or ap.suffix.lower() != ".pdf":
         return jsonify({"ok": False, "error": "文件不存在或不是 PDF"}), 400
