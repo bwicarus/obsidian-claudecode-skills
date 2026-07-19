@@ -219,6 +219,30 @@ async def _serve(ws):
                     await page.mouse.click(float(msg.get("x", 0)), float(msg.get("y", 0)))
                 except Exception:
                     pass
+            elif cmd == "setinput" and page is not None:
+                # 逐字把客户端输入同步进 Pi 对应输入框(按 node id 定位,派发 input 事件让页面 JS 感知)
+                try:
+                    nid = int(msg.get("id") or 0); txt = str(msg.get("text") or "")
+                    if nid:
+                        await page.evaluate("""(a)=>{ const m=window.__rbiMirror; if(!m)return;
+                          const n=m.getNode(a.id); if(!n)return; try{n.focus()}catch(e){}
+                          n.value=a.text; n.dispatchEvent(new Event('input',{bubbles:true}));
+                          n.dispatchEvent(new Event('change',{bubbles:true})); }""", {"id": nid, "text": txt})
+                except Exception:
+                    pass
+            elif cmd == "submitform" and page is not None:
+                # 设值 + 提交表单(POST/SPA);GET 表单在客户端已转成 open URL 不走这
+                try:
+                    nid = int(msg.get("id") or 0); txt = str(msg.get("text") or "")
+                    if nid:
+                        await page.evaluate("""(a)=>{ const m=window.__rbiMirror; if(!m)return;
+                          const n=m.getNode(a.id); if(!n)return; try{n.focus()}catch(e){}
+                          if(a.text!==undefined){ n.value=a.text; n.dispatchEvent(new Event('input',{bubbles:true})); }
+                          const f=n.form; if(f){ if(f.requestSubmit) f.requestSubmit(); else f.submit(); }
+                          else { n.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,which:13,bubbles:true}));
+                                 n.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',keyCode:13,which:13,bubbles:true})); } }""", {"id": nid, "text": txt})
+                except Exception:
+                    pass
             elif cmd == "type" and page is not None:
                 # 键盘输入回传:聚焦的输入框已由 click 在真 Chrome 里聚焦,直接打字
                 try:

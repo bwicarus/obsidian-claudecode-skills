@@ -113,7 +113,7 @@
       try{ ws.send(JSON.stringify({cmd:'clicknode', id:id})); }catch(_){}
       setSt('点击回传 #'+id+' '+(t.tagName||''));
       _lastClickInput = /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable;
-      if(_lastClickInput){ setTimeout(focusKbd, 30); }   // 点了输入框 → 弹本地键盘代收
+      if(_lastClickInput){ _inputEl=t; _inputId=id; setTimeout(focusKbd, 30); }   // 记住输入框,回车时提交
     }
     d.addEventListener('click', sendClick, true);
     // 滚动 → 回传(让懒加载/滚动位置在 Pi 侧同步)
@@ -126,22 +126,45 @@
 
   // 输入:重建 DOM 的 input 聚焦**不会弹 iPad 键盘**(不是真实焦点)。用一个隐藏真 input 在用户手势内
   //   聚焦弹键盘,打的字回传 Pi 的已聚焦输入框。
-  var _lastClickInput=false, _kbd=null;
+  var _lastClickInput=false, _kbd=null, _inputEl=null, _inputId=0;
   function focusKbd(){
     if(!_kbd){
       _kbd=document.createElement('input');
       _kbd.style.cssText='position:fixed;left:-1000px;top:0;opacity:0;height:1px';
       document.body.appendChild(_kbd);
+      // 每敲一个字同步进 Pi 的输入框(逐字 type,保证 Pi 侧内容跟手)
       _kbd.addEventListener('input', function(){
-        var v=_kbd.value; _kbd.value='';
-        if(v) try{ ws.send(JSON.stringify({cmd:'type', text:v})); }catch(_){}
+        var v=_kbd.value;
+        if(_inputId) try{ ws.send(JSON.stringify({cmd:'setinput', id:_inputId, text:v})); }catch(_){}
       });
       _kbd.addEventListener('keydown', function(e){
-        if(e.key==='Enter'||e.key==='Backspace'){ e.preventDefault();
-          try{ ws.send(JSON.stringify({cmd:'type', key:e.key==='Enter'?'Enter':'Backspace'})); }catch(_){} }
+        if(e.key==='Enter'){ e.preventDefault(); submitInput(); }
       });
     }
+    if(_inputEl){ try{ _kbd.value = _inputEl.value || ''; }catch(_){ _kbd.value=''; } }
     try{ _kbd.focus(); }catch(_){}
+  }
+  // ★ 表单提交(用户拍板:当请求转发,比逐字键盘可靠)。GET 表单 → 构造搜索 URL 直接 open
+  //   (复用已通的跳转链路);POST 表单 → 让 Pi 真提交。
+  function submitInput(){
+    var v=_kbd.value;
+    var f = _inputEl && _inputEl.form;
+    if(f && (f.method||'get').toLowerCase()==='get'){
+      var action = f.getAttribute('action') || CFG.url;
+      var url; try{ url=new URL(action, CFG.url); }catch(_){ url=null; }
+      if(url){
+        // 收集 form 里所有具名字段(隐藏字段等),当前输入框用最新值
+        try{ [].forEach.call(f.querySelectorAll('input[name],select[name],textarea[name]'), function(el){
+          if(el.type==='submit'||el.type==='button') return;
+          url.searchParams.set(el.name, el===_inputEl ? v : (el.value||'')); }); }catch(_){}
+        if(_inputEl.name && !url.searchParams.get(_inputEl.name)) url.searchParams.set(_inputEl.name, v);
+        try{ _kbd.blur(); }catch(_){}
+        open(url.href);          // Pi 打开搜索结果页 = 一次跳转
+        return;
+      }
+    }
+    // 非 GET / 无 form:让 Pi 侧设值 + 提交(POST 或 SPA 回车处理)
+    if(_inputId) try{ ws.send(JSON.stringify({cmd:'submitform', id:_inputId, text:v})); }catch(_){}
   }
   connect();
 
