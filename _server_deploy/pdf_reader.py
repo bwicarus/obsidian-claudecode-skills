@@ -2857,7 +2857,38 @@ def _compute_page_chars(abs_path, page: int, is_ja: bool = True):
         doc.close()
 
 
-_CHAR_CACHE_VER = 10  # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算
+_CHAR_CACHE_VER = 11  # chars 缓存 schema 版本。改抽取/分词逻辑就 +1 → 旧缓存全部失效重算。v11:剔图形噪声字符
+
+
+_LINE_NOISE = set("|│丨︱‖∥┃┆┇┊┋╎╏!ⅰ")   # OCR 把插图边框/表格线认成的"字符"
+
+
+def _strip_graphic_noise(chars):
+    """剔掉 OCR 把**插图/表格线**认出来的伪字符(2026-07-19,用户实锤:料理师 p46 头像框
+    被认成 `| | | | | |`,y 坐标远离正文、字高只有 7pt,插在 reading order 中间——
+    断句的 paraGap 规则(行距>1.5字高=段落)撞上它就把一句话拦腰截断,译页/句子标记/
+    选句全部跨不了行)。特征三条都要满足,防误杀代码书里的真管道符:
+      ① 字符本身是线条类(|│丨 等);② 高度 < 页面正文中位字高 × 0.45(线段又矮又碎);
+      ③ CJK 页面(拉丁代码页不动)。"""
+    if not chars:
+        return chars
+    hs = sorted((c["y1"] - c["y0"]) for c in chars if not c.get("sp") and c.get("c", "").strip())
+    if not hs:
+        return chars
+    med = hs[len(hs) // 2]
+    n_cjk = sum(1 for c in chars if not c.get("sp") and re.search(r"[぀-ヿ㐀-鿿]", c.get("c", "") or ""))
+    if n_cjk < max(10, len(chars) * 0.2):
+        return chars                      # 非 CJK 页(代码/英文书):| 可能是真字符,不动
+    out = [c for c in chars
+           if c.get("sp") or c.get("c", "") not in _LINE_NOISE
+           or (c["y1"] - c["y0"]) >= med * 0.45]
+    if len(out) != len(chars):
+        # 伴生空格连坐:剔完线条后**整块只剩 sp** 的块=幽灵块,一并剔掉——那些 sp 继承了
+        # 线条的离谱 y 坐标,会污染切句/选句的 prev 几何(实测 y=1814 的孤儿 sp 让下一行被误判换栏)
+        from collections import Counter
+        real = Counter(c.get("bk") for c in out if not c.get("sp"))
+        out = [c for c in out if not c.get("sp") or real.get(c.get("bk"), 0) > 0]
+    return out
                       # (v2:坏缓存; v3:完整读音; v4:动词链+日计数器; v5:サ变+wd; v6:量词 furigana 加 ctx;
                       #  v7:按块分词[跨行词如 間食 读对音] + 跨行 token 振假名只放首行段;
                       #  v8:块内 gutter 切列[漫画并排气泡分开 bk]→ 选中/分词不串气泡;
@@ -2895,6 +2926,7 @@ def _page_chars_cached(abs_path, rel: str, page: int):
     if res is None:
         return None
     chars, pw, ph, furigana = res
+    chars = _strip_graphic_noise(chars)   # 插图边框伪字符:进缓存前剔(前后端同源,一处治全部)
     # 安全阀:别缓存「分词失败」的结果。fugashi 不可用(tagger None) → 该页 CJK 全 w=-1;
     # 或有汉字却没产出振假名 = 分词没跑成。否则 fugashi 临时挂掉时写的坏缓存(全 w=-1)会被
     # 之后一直命中 → 整页单字选中(本次 bug 根因)。纯假名页(无汉字)无振假名属正常,不拦。
@@ -4011,9 +4043,20 @@ def _split_page_sentences(chars: list[dict], page_h: float = 0) -> list[dict]:
                                       "first_char": fc, "last_char": lc})
         cur_chars = []
 
+    # 振假名跳过(2026-07-19):OCR 把 ruby 小字排进正文流(「宮廷料理人いいんほんぞうがく
+    # だった伊尹は」),句子文本被注音污染 → 翻译/语法输入变脏。特征:高度 < 页面正文中位
+    # 字高 × 0.60 的**假名**字符(汉字/拉丁不剔,防误杀小号脚注里的实词;実測正文最小 0.85×中位,
+    # ruby 最大 0.55×中位,0.60 落在两群之间)。
+    _hs = sorted((c["y1"] - c["y0"]) for c in chars if not c.get("sp") and c.get("c", "").strip())
+    _med_h = _hs[len(_hs) // 2] if _hs else 0
+    _is_ruby = (lambda ch: _med_h > 0 and (ch["y1"] - ch["y0"]) < _med_h * 0.60
+                and re.match(r"^[ぁ-んァ-ヶー]$", ch.get("c", "") or ""))
+
     prev = None
     pending_period = False
     for ch in chars:
+        if (not ch.get("sp")) and _is_ruby(ch):
+            continue                       # ruby 注音:不进句子文本,也不参与断句判定
         c = ch.get("c", "")
         if pending_period:
             _same_line = bool(prev) and not prev.get("sp") and \
@@ -4026,7 +4069,13 @@ def _split_page_sentences(chars: list[dict], page_h: float = 0) -> list[dict]:
         if prev is not None:
             pbk, cbk = prev.get("bk"), ch.get("bk")
             if pbk is not None and cbk is not None and pbk != cbk:
-                _flush()
+                # ⚠ 跨块**不再无条件断**(2026-07-19 用户实锤:日语扫描书 OCR 每几行一个块,
+                #   句子在块边界被拦腰切碎,译页/L 标记全跨不了行)。只有 y **后退**才断——
+                #   那是换栏/换区(右栏顶端 y 跳回页面上方);正常换行 y 前进,交给下面的
+                #   1.5 行距规则统一裁决。
+                _ph0 = max(0.1, prev["y1"] - prev["y0"])
+                if ch["y0"] - prev["y0"] < -0.5 * _ph0:
+                    _flush()
         if prev and not prev.get("sp") and not ch.get("sp"):
             ph = max(0.1, prev["y1"] - prev["y0"])
             gap = ch["y0"] - prev["y0"]
