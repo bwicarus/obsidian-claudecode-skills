@@ -268,6 +268,120 @@ def _web_search(q: str, n: int = 15) -> tuple[list, str]:
 _WEB_LAST = None   # register 时指向 state/web-last.json(网页阅读独立状态,绝不进书的 reading-pos)
 
 
+# ══════════ 实况网页(用户拍板 2026-07-19:要**原本的网页**,不是正文抓取)══════════
+# 形态 = 浏览器 Copilot(Edge/Arc/Sider):真实页面 + 侧栏悬浮。
+# 关键:iframe 直嵌真站会被 X-Frame-Options/CSP frame-ancestors 拦(实测 mhlw.go.jp、
+# google.com 都是 SAMEORIGIN)→ 必须**服务端代理**:由我们的域名吐 HTML、剥掉这两个头。
+# 副作用正是我们要的:页面变成**同源文档** → 外壳 JS 能直接读 iframe 内的选区/DOM,
+# 于是查词/高亮/AI 侧栏这套控制层原样可用(不像扩展要跨进程通信)。
+# 资源(图片/CSS/JS)不代理,靠注入的 <base href> 直接走原站(省带宽,也少一层出错)。
+
+_PROXY_STRIP_HEADERS = {"x-frame-options", "content-security-policy",
+                        "content-security-policy-report-only", "cross-origin-opener-policy",
+                        "cross-origin-embedder-policy", "frame-options"}
+
+_PROXY_INJECT = """
+<script>
+(function(){
+  // 站内导航拦截:链接/表单跳转改走代理(留在我们的壳里);新窗口链接也接管
+  function proxied(u){ try{ return '/pdf/web/proxy?url=' + encodeURIComponent(new URL(u, location.__realBase || document.baseURI).href); }catch(e){ return u; } }
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest && e.target.closest('a[href]');
+    if(!a) return;
+    var href = a.getAttribute('href') || '';
+    if(!href || href.charAt(0)==='#' || /^(javascript|mailto|tel):/i.test(href)) return;
+    e.preventDefault();
+    try{ parent.postMessage({__rcweb:'nav', url: new URL(href, location.__realBase || document.baseURI).href}, '*'); }
+    catch(_){ location.href = proxied(href); }
+  }, true);
+  // 选区上报:父壳据此弹工具条(同源本可直接读,postMessage 更稳且面向未来跨源)
+  function report(){
+    try{
+      var s = getSelection(); var t = s && !s.isCollapsed ? String(s).trim() : '';
+      var r = t && s.rangeCount ? s.getRangeAt(0).getBoundingClientRect() : null;
+      parent.postMessage({__rcweb:'sel', text: t,
+        rect: r ? {left:r.left, top:r.top, right:r.right, bottom:r.bottom} : null,
+        ctx: t ? (function(){ var n = s.anchorNode; n = n && (n.nodeType===3?n.parentElement:n);
+                   var b = n && n.closest ? n.closest('p,li,td,blockquote,h1,h2,h3,div') : null;
+                   return b ? (b.innerText||'').slice(0,1200) : ''; })() : ''}, '*');
+    }catch(_){}
+  }
+  document.addEventListener('mouseup', function(){ setTimeout(report, 10); });
+  document.addEventListener('touchend', function(){ setTimeout(report, 10); });
+  // 供父壳取整页正文(AI 上下文/存档)
+  window.addEventListener('message', function(e){
+    var d = e.data || {};
+    if(d.__rcweb === 'getText'){
+      try{ parent.postMessage({__rcweb:'text', text:(document.body.innerText||'').slice(0,120000),
+                               title: document.title, url: location.__realBase || ''}, '*'); }catch(_){}
+    }
+  });
+  try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){}
+})();
+</script>
+"""
+
+
+def _proxy_page(url: str):
+    """代理一张网页:抓 → 剥框架限制头 → 注 <base> + 桥接脚本 → 当我们自己的文档吐出去。"""
+    err = _url_safe(url)
+    if err:
+        return None, err
+    import requests
+    try:
+        r = requests.get(url, timeout=20, allow_redirects=True, stream=True, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"})
+    except Exception as ex:
+        return None, f"抓取失败:{str(ex)[:120]}"
+    ct = (r.headers.get("Content-Type") or "").lower()
+    if "html" not in ct:
+        return None, f"不是网页({ct.split(';')[0] or '未知类型'});图片/PDF 等请直接在原站打开"
+    raw = b""
+    for chunk in r.iter_content(65536):
+        raw += chunk
+        if len(raw) > 12 * 1024 * 1024:
+            break
+    # ⚠ 流式读完后**不能**再碰 r.apparent_encoding(它要 r.content,已消费 → RuntimeError,
+    #   实测 mhlw.go.jp 500 的根因)。自己按 raw 检测:响应头 → <meta charset> → chardet → utf-8。
+    enc = r.encoding if (r.encoding and r.encoding.lower() != "iso-8859-1") else ""
+    if not enc:
+        import re as _re0
+        m0 = _re0.search(rb'charset=["\']?([\w-]+)', raw[:4096], _re0.I)
+        if m0:
+            enc = m0.group(1).decode("ascii", "ignore")
+    if not enc:
+        try:
+            import chardet
+            enc = chardet.detect(raw[:20000]).get("encoding") or "utf-8"
+        except Exception:
+            enc = "utf-8"
+    try:
+        html = raw.decode(enc, errors="replace")
+    except LookupError:
+        html = raw.decode("utf-8", errors="replace")
+    final = r.url or url
+    import re as _re
+    # <base>:让相对资源/链接指向原站(资源直连原站,不经我们)
+    base_tag = f'<base href="{final}">\n<script>location.__realBase={json.dumps(final)};</script>'
+    if _re.search(r"<head[^>]*>", html, _re.I):
+        html = _re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=_re.I)
+    else:
+        html = base_tag + html
+    # 页面自带的 CSP <meta> 也要剥(否则注入脚本被拦)
+    html = _re.sub(r'<meta[^>]+http-equiv=["\']?content-security-policy["\']?[^>]*>', "", html, flags=_re.I)
+    html += _PROXY_INJECT
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    for h in list(resp.headers.keys()):
+        if h.lower() in _PROXY_STRIP_HEADERS:
+            del resp.headers[h]
+    return resp, ""
+
+
 def _web_last_get() -> str:
     try:
         d = json.loads(_WEB_LAST.read_text("utf-8"))
@@ -342,10 +456,11 @@ def _web_home_content(q: str = "") -> str:
 function __webGo(f){{
   var v=(f.q.value||'').trim(); if(!v) return false;
   var isU = v.indexOf('http://')===0||v.indexOf('https://')===0||/^[\\w-]+(\\.[\\w-]+)+([/]|$)/.test(v);
-  if(isU){{ __webFetch(v.indexOf('http')===0?v:'https://'+v); return false; }}
+  if(isU){{ location.href='/pdf/web/live?url='+encodeURIComponent(v.indexOf('http')===0?v:'https://'+v); return false; }}
   location.href='/pdf/html/view?file=__web__&q='+encodeURIComponent(v); return false;
 }}
-function __webOpen(a){{ __webFetch(a.getAttribute('href')); return false; }}
+// 点结果 → **实况网页**(用户拍板:要原本的网页);正文抽取降为阅读器里的 📄 按钮
+function __webOpen(a){{ location.href='/pdf/web/live?url='+encodeURIComponent(a.getAttribute('href')); return false; }}
 function __webFetch(url){{
   document.getElementById('wh-st').textContent='🌐 抓取正文中…';
   fetch('/pdf/api/web-fetch',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{url:url}})}})
@@ -465,6 +580,34 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             "html_reader.html", html_content=html_content, file_rel=rel_clean,
             file_name=title, reader_js_v=_html_js_v()))
         return resp
+
+    @bp.route("/web/proxy")
+    def pdf_web_proxy():
+        """代理渲染真实网页(同源 → 外壳 JS 可直接操作它)。仅登录用户可用(/pdf 在鉴权前缀内)。"""
+        url = (request.args.get("url") or "").strip()
+        if not url:
+            abort(400)
+        resp, err = _proxy_page(url)
+        if err:
+            import html as _h
+            return make_response(
+                f'<body style="font:15px system-ui;padding:40px;color:#555">'
+                f'<p>⚠ {_h.escape(err)}</p>'
+                f'<p><a href="{_h.escape(url)}" target="_blank">在系统浏览器打开原页 →</a></p></body>', 200)
+        return resp
+
+    @bp.route("/web/live")
+    def pdf_web_live():
+        """实况网页阅读(浏览器 Copilot 形态,用户拍板:要**原本的网页**):
+        顶栏地址栏 + 同源 iframe 真页面 + 右侧助手侧栏(选区经 postMessage 上来)。"""
+        import html as _h
+        url = (request.args.get("url") or "").strip()
+        if not url:
+            return redirect("/pdf/web?home=1")
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        return make_response(render_template("web_live.html", url=url, url_esc=_h.escape(url),
+                                             reader_js_v=_html_js_v()))
 
     @bp.route("/web")
     def pdf_web_portal():

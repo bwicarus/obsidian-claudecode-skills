@@ -947,7 +947,11 @@ def _rel_by_sha():
             rel = p.relative_to(VAULT_ROOT).as_posix()
             if "/.sandbox/" in rel:
                 continue
-            m[hashlib.sha1(rel.encode()).hexdigest()] = rel
+            _h = hashlib.sha1(rel.encode()).hexdigest()
+            m[_h] = rel
+            m[_h[:16]] = rel   # ★两种键都登记:各 sidecar 命名长度不一(pdf/epub 用 40 位,
+            #                    html_reader 用 16 位)——只登 40 位会让网页高亮全部反查失败、
+            #                    file='' 入库丢书锚(2026-07-19 审计实锤 0/5 命中)
     return m
 
 
