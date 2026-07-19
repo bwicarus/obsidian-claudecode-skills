@@ -6,198 +6,111 @@
 <link rel="icon" type="image/png" href="/static/icons/web-32.png">
 <meta name="apple-mobile-web-app-title" content="网页">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>🌐 {{ url_esc }}</title>
+<link rel="stylesheet" href="/static/pdf/epub-styles.css?v={{ reader_js_v }}">
 <style>
-  *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:#0a0e1a;color:#e6edf3;overflow:hidden;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
-  body{display:flex;flex-direction:column}
-  /* ── 顶栏:返回 / 地址栏 / 阅读模式 / 侧栏(镜像浏览器 copilot 布局)── */
-  #wl-top{flex:0 0 auto;height:calc(46px + env(safe-area-inset-top));padding-top:env(safe-area-inset-top);
-    display:flex;align-items:center;gap:7px;padding-left:8px;padding-right:8px;
-    background:#10162a;border-bottom:1px solid #2a3550}
-  #wl-top button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:7px;
-    height:34px;min-width:36px;padding:0 10px;font-size:14px;cursor:pointer;flex:none}
-  #wl-top button:hover{background:#2c3e6a;border-color:#3b6db5}
+  /* 实况网页 = 一种**内容源**:壳(顶栏 #ep-top / 侧栏 #ep-side / 全部 rc-*)照搬 EPUB 阅读器,
+     只把"章节内容区"换成同源代理 iframe。铁律:不为新形态另造上层建筑。 */
+  html,body{margin:0;height:100%;overflow:hidden}
   #wl-url{flex:1 1 auto;min-width:0;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;
-    border-radius:17px;height:34px;padding:0 14px;font-size:13px;outline:none}
+    border-radius:17px;height:34px;padding:0 14px;font-size:13px;outline:none;font-family:inherit}
   #wl-url:focus{border-color:#3b6db5}
-  /* ── 内容区:真实网页(同源代理 iframe)── */
-  #wl-body{flex:1 1 auto;min-height:0;position:relative;background:#fff}
+  #wl-body{position:absolute;left:0;right:0;bottom:0;top:calc(48px + env(safe-area-inset-top));background:#fff}
   #wl-frame{width:100%;height:100%;border:0;display:block}
   #wl-load{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     background:#0a0e1a;color:#8a9bb4;font-size:14px;z-index:5}
-  /* ── 选区工具条(浮在 iframe 上;坐标来自 iframe postMessage)── */
-  #wl-sel{position:fixed;z-index:60;display:none;gap:6px;background:#151d33;border:1px solid #33436b;
-    border-radius:10px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
-  #wl-sel button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:7px;
-    height:32px;padding:0 11px;font-size:13px;cursor:pointer}
-  #wl-sel button:hover{background:#2c3e6a}
+  /* 选区工具条:复用 EPUB 的 #ep-sel 视觉(同一份 epub-styles.css) */
+  #ep-sel{position:fixed;z-index:60;display:none}
 </style>
 </head>
-<body>
-  <div id="wl-top">
-    <button onclick="location.href='/pdf/web?home=1'" title="搜索主页">🔍</button>
-    <button onclick="wlBack()" title="后退">←</button>
-    <input id="wl-url" value="{{ url_esc }}" spellcheck="false" autocomplete="off">
-    <button onclick="wlReader()" title="阅读模式:抽正文进阅读器(可高亮/存 vault)">📄</button>
-    <button onclick="RC.sidedrawer && RC.sidedrawer.open('asst')" title="AI 助手">💬</button>
+<body data-theme="night">
+  <div id="ep-top">
+    <button id="wl-home" title="搜索主页" onclick="location.href='/pdf/web?home=1'"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg></button>
+    <button id="wl-back" title="后退" onclick="wlBack()">←</button>
+    <input id="wl-url" value="{{ url_esc }}" spellcheck="false" autocomplete="off" title="地址栏:输网址或搜索词">
+    <button id="wl-reader" title="阅读模式:抽正文进阅读器(可高亮/存 vault/进搜索与概念网)">📄</button>
+    <button id="ep-fav-btn" title="收藏当前章到收藏夹（书架「⭐ 收藏夹」tab 可查看）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3.5l2.47 5.29 5.53.7-4.1 3.95 1.06 5.56L12 16.9 7.04 19l1.06-5.56-4.1-3.95 5.53-.7L12 3.5z"/></svg></button>
+    <button id="ep-search-btn" title="搜索"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg></button>
+    <button id="fs-toggle" title="全屏">⛶</button>
+    <button id="ep-set-btn" title="设置"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg></button>
   </div>
+  <div id="ep-bar"></div>
+
   <div id="wl-body">
     <div id="wl-load">🌐 加载中…</div>
     <iframe id="wl-frame" src="/pdf/web/proxy?url={{ url|urlencode }}"></iframe>
   </div>
 
-  <div id="wl-sel">
-    <button onclick="wlAct('dict')">📖 查词</button>
-    <button onclick="wlAct('translate')">🌐 翻译</button>
-    <button onclick="wlAct('explain')">💡 解释</button>
-    <button onclick="wlAct('chat')">💬 问AI</button>
-    <button onclick="wlAct('anki')">🃏 制卡</button>
+  <!-- 选区工具条(id/class 与 EPUB 同源,样式来自 epub-styles.css) -->
+  <div id="ep-sel">
+    <button data-act="dict">📖 查词</button>
+    <button data-act="translate">🌐 翻译</button>
+    <button data-act="explain">💡 解释</button>
+    <button data-act="grammar">📊 语法</button>
+    <button data-act="chat">💬 问AI</button>
+    <button data-act="note">📝 笔记</button>
+    <button data-act="anki">🃏 制卡</button>
   </div>
+  <div id="ep-dict"></div>
+  <div id="word-pop" onclick="event.stopPropagation()"></div>
+  <div id="ep-hlpop"></div>
 
-  <!-- 右侧统一抽屉(rc-sidedrawer 契约:#ep-side + .ep-side-pane) -->
   <aside id="ep-side">
-    <div class="ep-side-pane active" data-pane="asst" id="ep-side-asst"></div>
+    <!-- 助手 pane 由共享侧栏动态建(rc-assistant.mountPdfSidebar → #side-pane-asst,与 PDF 同一份代码);
+         旧内联助手静态 DOM(#ep-side-asst/#ep-ai-*)已随内联助手退役删除(2026-07-07 清理批次) -->
+    <div class="ep-side-pane" data-pane="vocab" id="ep-side-vocab">
+      <div id="ep-vocab-scope-row">
+        <button data-scope="chapter" onclick="loadVocabPane('chapter')">本章</button>
+        <button class="active" data-scope="book" onclick="loadVocabPane('book')">本书</button>
+        <button data-scope="all" onclick="loadVocabPane('all')">全部</button>
+        <span class="vocab-count" id="ep-vocab-count"></span>
+      </div>
+      <div id="ep-vocab-list"><div style="color:#5a6680;font-size:12px;padding:10px">点开载入…</div></div>
+    </div>
+    <div class="ep-side-pane" data-pane="kg" id="ep-side-kg"><div id="ep-kg-nodes"><div class="kg-empty">点开载入…</div></div></div>
+    <div class="ep-side-pane" data-pane="hl" id="ep-side-hl"><div class="ep-empty">点开载入高亮…</div></div>
+    <div class="ep-side-pane" data-pane="toc" id="ep-side-toc"><div id="ep-toc-list"></div></div>
+    <div class="ep-side-pane" data-pane="hist" id="ep-side-hist"><div id="ep-qhist-list"></div></div><!-- 查询结果历史(镜像 PDF,统一抽屉 tab 对等) -->
+
+    <!-- 语法分析 pane(共享核心 RC.grammar 接管:块渲染/结构图/流式/制卡都在 rc-grammar.js,本模板只提供容器)
+         照搬 epub_reader.html(epub.js 版)的既有结构,两个 EPUB 阅读器变体共用同一套 id / UX 文案。 -->
+    <div class="ep-side-pane" data-pane="grammar" id="ep-side-grammar">
+      <div id="ep-grammar-set">
+        <div id="ep-grammar-set-head">⚙ 启用语法 KG <span class="gset-caret">▸</span></div>
+        <div id="ep-grammar-kglist"><div class="rc-gram-kg-empty">展开载入…</div></div>
+      </div>
+      <div id="ep-grammar-body"><div class="gb-empty">选词/选句后点「📊 语法」分析所在整句。<br>需先在下方「⚙ 启用语法 KG」勾选至少一本（去技能树点节点「👁 跟踪」）。</div></div>
+    </div>
   </aside>
 
-<script src="/static/qa/marked.js"></script>
-<script src="/static/qa/mathjax.js" id="MathJax-script" async></script>
+<script src="/static/qa/marked.js?v={{ reader_js_v }}"></script>
+<script src="/static/qa/mathjax-full.js?v={{ reader_js_v }}" async></script>
+<script src="/static/pdf/rc-ink.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-core.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-md.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-figures.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-highlight.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-snippets.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-result.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-wordpop.js?v={{ reader_js_v }}"></script>
-<script src="/static/pdf/rc-snippets.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-phrasepop.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-settings.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-knowledge.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-sidedrawer.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-assistant.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-toolchip.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-turncard.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-voicecall.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-grammar.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-stickynote.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-favorites.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-video.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-videoplayer.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-userpages.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/web-adapter.js?v={{ reader_js_v }}"></script>
 <script>
-var CUR_URL = {{ url|tojson }};
-var _hist = [];
-var _sel = { text: '', ctx: '', rect: null };
-
-function wlGo(u, push) {
-  if (!u) return;
-  if (!/^https?:\/\//.test(u)) u = 'https://' + u;
-  if (push !== false && CUR_URL) _hist.push(CUR_URL);
-  CUR_URL = u;
-  document.getElementById('wl-url').value = u;
-  document.getElementById('wl-load').style.display = 'flex';
-  document.getElementById('wl-frame').src = '/pdf/web/proxy?url=' + encodeURIComponent(u);
-  try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
-}
-function wlBack() { var p = _hist.pop(); if (p) wlGo(p, false); else location.href = '/pdf/web?home=1'; }
-function wlReader() {   // 📄 阅读模式:抽正文 → HTML 阅读器(高亮/存 vault/全套阅读能力)
-  var st = document.getElementById('wl-load');
-  st.style.display = 'flex'; st.textContent = '📄 抽取正文中…';
-  fetch('/pdf/api/web-fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: CUR_URL }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d.ok && d.file) location.href = '/pdf/html/view?file=' + encodeURIComponent(d.file);
-      else { st.textContent = '✗ ' + (d.error || '抽取失败'); setTimeout(function () { st.style.display = 'none'; }, 1800); }
-    }).catch(function () { st.style.display = 'none'; });
-}
-document.getElementById('wl-url').addEventListener('keydown', function (e) {
-  if (e.key !== 'Enter') return;
-  var v = (this.value || '').trim(); if (!v) return;
-  var isUrl = v.indexOf('http') === 0 || /^[\w-]+(\.[\w-]+)+([/]|$)/.test(v);
-  if (isUrl) wlGo(v); else location.href = '/pdf/web?q=' + encodeURIComponent(v);
-});
-document.getElementById('wl-frame').addEventListener('load', function () {
-  document.getElementById('wl-load').style.display = 'none';
-});
-
-// ── iframe(同源代理页)→ 外壳:选区/导航/正文 ──
-window.addEventListener('message', function (e) {
-  var d = e.data || {};
-  if (d.__rcweb === 'nav') { wlGo(d.url); return; }
-  if (d.__rcweb === 'ready') { document.getElementById('wl-load').style.display = 'none'; return; }
-  if (d.__rcweb === 'sel') {
-    _sel = { text: d.text || '', ctx: d.ctx || '', rect: d.rect };
-    var bar = document.getElementById('wl-sel');
-    if (!_sel.text) { bar.style.display = 'none'; return; }
-    var fr = document.getElementById('wl-frame').getBoundingClientRect();
-    var r = d.rect || { left: 20, bottom: 100 };
-    bar.style.display = 'flex';
-    var bw = bar.offsetWidth || 320;
-    bar.style.left = Math.max(8, Math.min(window.innerWidth - bw - 8, fr.left + r.left)) + 'px';
-    bar.style.top = Math.min(window.innerHeight - 52, fr.top + r.bottom + 8) + 'px';
-    return;
-  }
-  if (d.__rcweb === 'text') { if (window.__wlTextCb) { window.__wlTextCb(d); window.__wlTextCb = null; } }
-});
-function _pageText(cb) {   // 向 iframe 要整页正文(AI 上下文)
-  window.__wlTextCb = cb;
-  try { document.getElementById('wl-frame').contentWindow.postMessage({ __rcweb: 'getText' }, '*'); } catch (e) { cb({ text: '' }); }
-}
-
-// ── WebAdapter:实况网页接进统一控制层(与 PDF/EPUB/HTML 同一套 RC.*)──
-var WebAdapter = {
-  kind: 'web',
-  config: { isPDF: false, reflow: true, hasFigures: false, hasFormula: false,
-            dictMode: 'sse', popupMode: 'fixed', clickWordDetect: false, anchorKind: 'none' },
-  getEndpoints: function () { return { dict: '/pdf/api/dict', translate: '/pdf/api/translate',
-                                       explain: '/pdf/api/explain', highlights: '' }; },
-  fileInfo: function () { return { file: 'web:' + CUR_URL, langs: [] }; },
-  captureSelection: function () { return _sel.text ? { text: _sel.text, context: _sel.ctx, ctx: _sel.ctx, rect: _sel.rect } : null; },
-  clearSelection: function () { _sel = { text: '', ctx: '', rect: null }; document.getElementById('wl-sel').style.display = 'none'; },
-  jumpToAnchor: function () {},
-  currentChapterText: function () { return _sel.ctx || ''; },
-  currentLocation: function () { return { unit: 'page', index: 0, total: 1 }; },
-  getContext: function (opts) {
-    opts = opts || {}; var s = opts.selection || {};
-    return { file: 'web:' + CUR_URL, book: document.getElementById('wl-url').value,
-             url: CUR_URL, langs: [], visible_text: window.__wlLastText || '',
-             selection: s.sel || _sel.text || '', selection_sentence: s.sent || _sel.ctx || '' };
-  },
-  _host: { asst: {
-    md: function (t) { return (window.RC && RC.md && RC.md.render) ? RC.md.render(t) : String(t || ''); },
-    toast: function (m) { try { RC.toast(m); } catch (e) {} },
-    fileRel: function () { return 'web:' + CUR_URL; },
-    pdfNumPages: function () { return 1; }, locCount: function () { return 1; },
-    dispPage: function (p) { return p; }, pdfFromDisp: function (d) { return d; },
-    locNoun: function () { return '页'; }, locLabel: function () { return ''; },
-    openDrawer: function () { try { RC.sidedrawer.open('asst'); } catch (e) {} },
-    switchTab: function (n) { try { RC.sidedrawer.open(n); } catch (e) {} },
-    changePage: function () {}, fitWidth: function () {}, zoomBy: function () {}, toggleTranslate: function () {},
-    asstOpen: function () { try { return !!document.querySelector('.ep-side-pane[data-pane="asst"].active'); } catch (e) { return false; } },
-    setFocusSel: function (t) { window.__focusSel = t ? { text: t } : null; },
-    focusSel: function () { return window.__focusSel || null; },
-    voiceContext: function () { return null; }, clearFigFocus: function () {}, figThumb: function () {},
-    noteAttached: function () { return []; }, clearNoteAttached: function () {}, renderNoteChips: function () {},
-    notesReload: function () {}, noteInject: function () { return false; },
-    reloadHighlights: function () {}, loadAllHighlights: function () {}, renderHighlightsOnPage: function () {},
-    showHlPicker: function () {}, assistEdit: function () {},
-    renderPhraseHl: function () {}, removePhraseHighlight: function () {},
-    activePhraseHl: function () { return null; }, setActivePhraseHl: function () {},
-    charsRangeToText: function () { return ''; }, charRangeToPtRects: function () { return []; },
-    flashSelOnPage: function () {}, noteNearText: function () { return ''; }, jumpToCtx: function () {},
-    prewarm: function () {}, getPaidNoted: function () { return !!window.__paidNoted; },
-    setPaidNoted: function (v) { window.__paidNoted = v; },
-    showAction: function () { return null; }, queueAction: function () {}, taskAction: function () {},
-    voiceLog: function () {}
-  } }
-};
-try { if (window.RC && RC.use) RC.use(WebAdapter); } catch (e) {}
-
-// 选区工具条动作(复用 RC 共享层:与书里同一套查词/翻译/解释/问AI/制卡)
-function wlAct(act) {
-  var t = _sel.text, c = _sel.ctx;
-  if (!t) return;
-  var EP = WebAdapter.getEndpoints();
-  var opts = { file: 'web:' + CUR_URL, ctx: c };
-  document.getElementById('wl-sel').style.display = 'none';
-  if (act === 'dict') RC.wordpop.show({ word: t, rect: _sel.rect, ctx: c, file: 'web:' + CUR_URL, langs: [],
-      onFallback: function (w) { RC.result.aiCall(EP.translate, { text: w, target_lang: '中文' }, '🌐 翻译', opts); } });
-  else if (act === 'translate') RC.result.aiCall(EP.translate, { text: t, target_lang: '中文' }, '🌐 翻译', opts);
-  else if (act === 'explain') RC.result.aiCall(EP.explain, { text: t, context: c }, '💡 AI 解释', opts);
-  else if (act === 'chat') RC.result.openChat(t, c, opts);
-  else if (act === 'anki') RC.snippets.toAnki({ text: t, source: CUR_URL, ctx: c });
-}
-// 进页面即把正文抓进 __wlLastText(AI 侧栏第一句就有上下文)
-setTimeout(function () { _pageText(function (d) { window.__wlLastText = (d && d.text || '').slice(0, 4000); }); }, 1500);
+  window.__WEB_CFG = { url: {{ url|tojson }} };
 </script>
 </body>
 </html>
