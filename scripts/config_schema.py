@@ -54,6 +54,9 @@ SCHEMA: dict[str, type] = {
     "weak_card_refresh.cooldown_days":   str,
     "weak_card_refresh.escalate_lapses": str,
 
+    # 网页阅读门户
+    "web_portal.cse_cx":                 str,
+
     # 停用词治理(通用语统计 + 复活赛,daily 内跑)
     "stopword_gov.enabled":              bool,
     "stopword_gov.ai_judge":             bool,
@@ -141,6 +144,10 @@ FIELD_META: dict[str, dict] = {
     "weak_card_refresh.auto_escalate": {
         "group": "薄弱卡改写",
         "label": "凌晨自动执行拆/删（L2，破坏性！不勾则只在日志给建议、需手动确认）",
+    },
+    "web_portal.cse_cx": {
+        "group": "网页阅读",
+        "label": "Google 搜索引擎 ID（CSE cx；在 programmablesearchengine.google.com 免费创建。留空=用 DuckDuckGo）",
     },
     "stopword_gov.enabled": {
         "group": "停用词治理",

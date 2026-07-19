@@ -214,6 +214,123 @@ def _fetch_web_page(url: str) -> dict:
     return {"ok": True, "file": rel, "title": title}
 
 
+def _web_search(q: str, n: int = 15) -> tuple[list, str]:
+    """站外搜索 → [{title,url,snippet}]。引擎:Google CSE(官方 API,配置了 cx 才用)→
+    DuckDuckGo HTML 版兜底(无 key,实测质量好;Google 网页版已全面 JS 化,服务端直抓
+    两种 UA 都拿不到结果——实测实锤,别再试)。返回 (results, engine_name)。"""
+    import requests
+    cx = ""
+    key = ""
+    try:
+        cfg = json.loads((_CLAUDE_DIR / "state" / "server-config.json").read_text("utf-8"))
+        cx = str((cfg.get("web_portal") or {}).get("cse_cx") or "").strip()
+    except Exception:
+        pass
+    if cx:
+        try:
+            key = (os.environ.get("GOOGLE_API_KEY") or "").strip()
+            if not key:
+                for ln in (_CLAUDE_DIR / ".env").read_text("utf-8").splitlines():
+                    if ln.startswith("GOOGLE_API_KEY="):
+                        key = ln.split("=", 1)[1].strip().strip('"')
+        except Exception:
+            key = ""
+    if cx and key:
+        try:
+            r = requests.get("https://www.googleapis.com/customsearch/v1",
+                             params={"key": key, "cx": cx, "q": q, "num": min(10, n)}, timeout=12)
+            items = (r.json() or {}).get("items") or []
+            if items:
+                return ([{"title": i.get("title") or "", "url": i.get("link") or "",
+                          "snippet": i.get("snippet") or ""} for i in items], "google")
+        except Exception:
+            pass
+    try:
+        r = requests.post("https://html.duckduckgo.com/html/", data={"q": q}, timeout=15,
+                          headers={"User-Agent": "Mozilla/5.0"})
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        out = []
+        for res in soup.select(".result")[:n]:
+            a = res.select_one("a.result__a")
+            if not a or not (a.get("href") or "").startswith("http"):
+                continue
+            sn = res.select_one(".result__snippet")
+            out.append({"title": a.get_text(" ", strip=True),
+                        "url": a["href"],
+                        "snippet": (sn.get_text(" ", strip=True) if sn else "")[:200]})
+        return out, "duckduckgo"
+    except Exception:
+        return [], "none"
+
+
+def _recent_web_pages(limit: int = 12) -> list:
+    """资源/web/ 里最近抓取的网页(mtime 倒序)。"""
+    d = _OBSIDIAN_ROOT / "资源" / "web"
+    if not d.is_dir():
+        return []
+    fs = sorted(d.glob("*.html"), key=lambda f: -f.stat().st_mtime)[:limit]
+    return [{"rel": f"资源/web/{f.name}", "name": f.stem.rsplit("-", 1)[0].replace("-", " ")} for f in fs]
+
+
+_WEB_PORTAL_CSS = """
+body{margin:0;background:#0b101d;color:#e6e6f0;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;min-height:100vh}
+.wrap{max-width:720px;margin:0 auto;padding:8vh 20px 40px}
+h1{font-size:26px;text-align:center;margin:0 0 26px;color:#cfe6ff;font-weight:600}
+.sbox{display:flex;gap:8px}
+.sbox input{flex:1;background:#111a2e;border:1px solid #2a3550;color:#e6e6f0;border-radius:24px;
+  padding:13px 20px;font-size:16px;outline:none}
+.sbox input:focus{border-color:#3b6db5}
+.sbox button{background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:24px;
+  padding:0 22px;font-size:15px;cursor:pointer}
+.hint{color:#5a6b84;font-size:12px;text-align:center;margin-top:10px}
+.res{margin-top:26px}
+.r{display:block;padding:12px 14px;border-radius:10px;text-decoration:none;margin-bottom:4px}
+.r:hover{background:#111a2e}
+.r .t{color:#8ab4f8;font-size:16px;margin-bottom:2px}
+.r .u{color:#5a9367;font-size:12px;margin-bottom:3px;word-break:break-all}
+.r .s{color:#9aa8bd;font-size:13px;line-height:1.5}
+.sec{color:#5a6b84;font-size:12px;margin:24px 0 8px;letter-spacing:.05em}
+.recent a{display:inline-block;background:#111a2e;border:1px solid #22304d;color:#aebfd8;
+  border-radius:16px;padding:6px 14px;margin:0 6px 8px 0;font-size:13px;text-decoration:none}
+.recent a:hover{border-color:#3b6db5;color:#cfe6ff}
+#st{color:#8a9bb4;font-size:13px;text-align:center;margin-top:14px;min-height:18px}
+.eng{color:#44506a;font-size:11px;text-align:center;margin-top:22px}
+"""
+
+_WEB_PORTAL_JS = r"""
+function isUrl(v){return v.indexOf('http://')===0 || v.indexOf('https://')===0 || /^[\w-]+(\.[\w-]+)+([/]|$)/.test(v);}
+async function go(v){
+  v=(v||'').trim(); if(!v) return;
+  if(isUrl(v)){
+    if(!/^https?:/.test(v)) v='https://'+v;
+    document.getElementById('st').textContent='🌐 抓取正文中…';
+    try{
+      const r=await fetch('/pdf/api/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:v})});
+      const d=await r.json();
+      if(d.ok&&d.file){location.href='/pdf/html/view?file='+encodeURIComponent(d.file);}
+      else{document.getElementById('st').textContent='✗ '+(d.error||'抓取失败');}
+    }catch(e){document.getElementById('st').textContent='✗ 网络错误';}
+  }else{
+    location.href='/pdf/web?q='+encodeURIComponent(v);
+  }
+}
+function openResult(ev,url){ev.preventDefault();
+  document.getElementById('st').textContent='🌐 抓取「'+url.slice(0,50)+'」…';
+  fetch('/pdf/api/web-fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url})})
+   .then(r=>r.json()).then(d=>{
+     if(d.ok&&d.file){location.href='/pdf/html/view?file='+encodeURIComponent(d.file);}
+     else{document.getElementById('st').textContent='✗ '+(d.error||'抓取失败')+'（可长按链接在新页原样打开）';}
+   }).catch(()=>{document.getElementById('st').textContent='✗ 网络错误';});
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  const i=document.getElementById('q');
+  i.addEventListener('keydown',e=>{if(e.key==='Enter')go(i.value);});
+  i.focus();
+});
+"""
+
+
 def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
     """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
     global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
@@ -243,6 +360,49 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         resp = make_response(render_template(
             "html_reader.html", html_content=html_content, file_rel=rel_clean,
             file_name=title, reader_js_v=_html_js_v()))
+        return resp
+
+    @bp.route("/web")
+    def pdf_web_portal():
+        """网页阅读门户(独立地址,浏览器 Copilot 入口):默认搜索页;?q= 出结果列表。
+        输 URL 直接抓;点结果 → web-fetch 抓正文 → HTML 阅读器打开(全套阅读能力)。"""
+        import html as _h
+        q = (request.args.get("q") or "").strip()
+        rows = ""
+        engine = ""
+        if q:
+            results, engine = _web_search(q)
+            if results:
+                rows = "".join(
+                    f'<a class="r" href="{_h.escape(r["url"])}" onclick="openResult(event,{json.dumps(r["url"])})">'
+                    f'<div class="t">{_h.escape(r["title"])}</div>'
+                    f'<div class="u">{_h.escape(r["url"][:90])}</div>'
+                    f'<div class="s">{_h.escape(r["snippet"])}</div></a>'
+                    for r in results)
+            else:
+                rows = '<p style="color:#8a9bb4;text-align:center">没搜到结果</p>'
+        recent = _recent_web_pages()
+        rec_html = ""
+        if recent and not q:
+            rec_html = ('<div class="sec">最近抓取</div><div class="recent">'
+                        + "".join(f'<a href="/pdf/html/view?file={_h.escape(r["rel"])}">{_h.escape(r["name"][:24])}</a>'
+                                  for r in recent) + "</div>")
+        eng_note = {"google": "Google(官方 CSE API)", "duckduckgo": "DuckDuckGo(要用 Google 结果:在 server-config 的 web_portal.cse_cx 填搜索引擎 ID)"}.get(engine, "")
+        page = f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>🌐 网页阅读</title><style>{_WEB_PORTAL_CSS}</style></head><body>
+<div class="wrap">
+<h1>🌐 网页阅读</h1>
+<div class="sbox"><input id="q" value="{_h.escape(q)}" placeholder="搜索,或直接输入网址…" autocomplete="off">
+<button onclick="go(document.getElementById('q').value)">{'搜索' if not q else '再搜'}</button></div>
+<div class="hint">回车即搜;输入网址直接进阅读器(高亮/查词/AI 侧栏全套可用)</div>
+<div id="st"></div>
+<div class="res">{rows}</div>
+{rec_html}
+{f'<div class="eng">搜索引擎:{_h.escape(eng_note)}</div>' if eng_note else ''}
+</div><script>{_WEB_PORTAL_JS}</script></body></html>"""
+        resp = make_response(page)
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     @bp.route("/api/web-fetch", methods=["POST"])
