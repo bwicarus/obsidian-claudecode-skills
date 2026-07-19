@@ -135,6 +135,85 @@ def _html_hl_save(rel: str, items: list):
     _html_hl_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
 
 
+# ── 网页抓取 → 阅读器(2026-07-19,用户方向:浏览器 Copilot 的初版验证)────────────
+# 路线:抓 URL → **Firefox 阅读模式同款算法**(readability-lxml)抽正文 → 走本文件既有的
+# 白名单消毒 → 存 vault `资源/web/` → /pdf/html/view 打开 → 高亮/查词/AI 侧栏/翻译/
+# 注意力埋点**全部白拿**(统一控制层红利)。存 vault=学习材料一等公民:Obsidian 全设备
+# 同步、进 FTS 全局搜索、进概念网向前搜索。
+
+_PRIVATE_NETS = ("127.", "10.", "192.168.", "169.254.", "0.")
+
+
+def _url_safe(url: str) -> str:
+    """SSRF 防护:只放行公网 http(s)。返回错误串,空=安全。"""
+    from urllib.parse import urlparse
+    import socket, ipaddress
+    try:
+        u = urlparse(url)
+    except Exception:
+        return "URL 无法解析"
+    if u.scheme not in ("http", "https"):
+        return "只支持 http/https"
+    host = (u.hostname or "").lower()
+    if not host or host in ("localhost",) or host.endswith((".local", ".ts.net", ".internal")):
+        return "不允许内网地址"
+    try:
+        for ai in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(ai[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return "不允许内网地址"
+    except Exception:
+        return "域名解析失败"
+    return ""
+
+
+def _fetch_web_page(url: str) -> dict:
+    """抓取 + Readability 抽正文 + 消毒 + 存 vault。返回 {ok, file, title} 或 {ok:False, error}。"""
+    err = _url_safe(url)
+    if err:
+        return {"ok": False, "error": err}
+    import requests
+    try:
+        r = requests.get(url, timeout=20, stream=True, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"})
+        r.raise_for_status()
+        raw = b""
+        for chunk in r.iter_content(65536):
+            raw += chunk
+            if len(raw) > 8 * 1024 * 1024:
+                return {"ok": False, "error": "页面超过 8MB"}
+        enc = r.encoding if (r.encoding and r.encoding.lower() != "iso-8859-1") else (r.apparent_encoding or "utf-8")
+        html_raw = raw.decode(enc, errors="replace")
+    except Exception as ex:
+        return {"ok": False, "error": f"抓取失败:{str(ex)[:120]}"}
+    try:
+        from readability import Document          # Firefox 阅读模式算法的 Python 移植
+        doc = Document(html_raw)
+        title = (doc.short_title() or "").strip()[:80] or "网页"
+        content = doc.summary(html_partial=True)
+    except Exception:
+        title, content = url[:80], html_raw       # 抽取失败 → 原文交给消毒(白名单会剥到只剩正文结构)
+    clean = _sanitize_html_doc(content)
+    if len((clean or "").strip()) < 200:
+        return {"ok": False, "error": "没抽到正文(可能是纯 JS 渲染的页面,初版先不支持)"}
+    import html as _h
+    from urllib.parse import urlparse as _up2
+    header = ("<p><small>🌐 来源:<a href=\"%s\">%s</a> · 抓取于 %s</small></p><hr>"
+              % (_h.escape(url), _h.escape(_up2(url).netloc), time.strftime("%Y-%m-%d %H:%M")))
+    body = "<h1>%s</h1>%s%s" % (_h.escape(title), header, clean)
+    # 存 vault:资源/web/<slug>-<sha8>.html(重复抓同一 URL 覆盖同一文件=天然去重)
+    import re as _re
+    slug = _re.sub(r"[^\w\u4e00-\u9fff\u3040-\u30ff-]+", "-", title).strip("-")[:48] or "page"
+    sha8 = hashlib.sha1(url.encode()).hexdigest()[:8]
+    rel = f"资源/web/{slug}-{sha8}.html"
+    ap = _OBSIDIAN_ROOT / rel
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    ap.write_text(body, "utf-8")
+    return {"ok": True, "file": rel, "title": title}
+
+
 def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
     """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
     global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
@@ -165,6 +244,17 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             "html_reader.html", html_content=html_content, file_rel=rel_clean,
             file_name=title, reader_js_v=_html_js_v()))
         return resp
+
+    @bp.route("/api/web-fetch", methods=["POST"])
+    def pdf_api_web_fetch():
+        """抓网页进阅读器(浏览器 Copilot 初版)。POST {url} → {ok, file, title};
+        前端拿 file 跳 /pdf/html/view?file=... 即获全套阅读能力。"""
+        body = request.get_json(silent=True) or {}
+        url = (body.get("url") or "").strip()
+        if not url:
+            return jsonify({"ok": False, "error": "缺 url"}), 400
+        out = _fetch_web_page(url)
+        return jsonify(out), (200 if out.get("ok") else 422)
 
     @bp.route("/api/html-highlights", methods=["GET", "POST", "PATCH", "DELETE"])
     def pdf_api_html_highlights():
