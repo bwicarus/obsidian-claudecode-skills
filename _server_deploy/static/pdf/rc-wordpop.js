@@ -893,7 +893,17 @@
       return false;
     }
     if (myReq !== _resReqId()) return false;
-    if (!d.ok) return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
+    if (!d.ok) {
+      if (_isJaWord(word)) {
+        // 日语词查不到(典型=人名/专有名词):给终态 + ✨AI 深入讲解直接顶上。
+        // 此前落进英文三源框 → 日文进英文管道永远「查询中」空转(2026-07-20 用户实锤「伊部」)。
+        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) + '」暂无词典释义（可能是人名/专有名词），已请 AI 讲解：</div>' +
+          '<button id="jp-ai-btn" style="display:none"></button><div id="jp-ai-out" class="jp-ai-out"></div>';
+        try { jpAiDeep(word); } catch (e) {}
+        return false;
+      }
+      return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
+    }
     var wq = esc(word).replace(/'/g, "\\'");
     var rq = esc(d.reading || word).replace(/'/g, "\\'");   // 发音念假名读音
     var phon = (d.reading && d.accent != null) ? _renderPitch(d.reading, d.accent)
