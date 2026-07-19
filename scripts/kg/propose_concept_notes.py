@@ -40,7 +40,7 @@ EMERGENT = STATE / "attention" / "emergent-graph.json"
 CONCEPT_DIR_NAME = "资源/概念"
 
 TOP_N = 20            # 注意力榜前 N 才考虑
-DEEP_CHANNELS = {"highlight", "qa", "check", "read"}
+DEEP_CHANNELS = {"highlight", "qa", "check", "read", "card"}
 # ★ AI 自己说过的话**不算概念来源**(铁律,同「AI 生成的定义永不作为抽边扫描源」):
 #   qa_ai 可以让焦点榜知道"你在关注这个"(注意力),但绝不能凑数把它送进概念网(知识结构)——
 #   否则 AI 回答→焦点词→概念节点→概念笔记→又被 AI 读到,自强化环。
@@ -105,11 +105,17 @@ def _gates(term, book_rel, vocab, reg, focus_row=None, force=False):
     if not (b and b.get("enabled")):
         blocks.append("科目门(本书未开火)")
     if focus_row is not None:
-        if not (focus_row.get("n7", 0) >= 3 or focus_row.get("burst", 0) >= 3):
-            blocks.append("热度阈值(n7<3且burst<3)")
         chs = _term_channels(k)
-        if len(chs) < 2 or not (chs & DEEP_CHANNELS):
-            blocks.append("渠道阈值(需≥2渠道含≥1深渠道,现=%s)" % sorted(chs))
+        if "card" in chs:
+            pass   # ★制过 Anki 卡=最强主动信号(用户拍板 2026-07-19):亲手决定"要记它",
+            #        免热度/免渠道杂度——"聊两句就制卡"的知识不再因接触路径短被漏。
+            #        vocab 门/科目门**照过**(日语词汇卡仍被正确拦在概念网外);
+            #        最终能不能成节点仍由 AI 读原句判关系决定——组不上网的自然留在 Anki。
+        else:
+            if not (focus_row.get("n7", 0) >= 3 or focus_row.get("burst", 0) >= 3):
+                blocks.append("热度阈值(n7<3且burst<3)")
+            if len(chs) < 2 or not (chs & DEEP_CHANNELS):
+                blocks.append("渠道阈值(需≥2渠道含≥1深渠道,现=%s)" % sorted(chs))
     return (force or not blocks), blocks
 
 

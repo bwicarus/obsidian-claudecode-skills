@@ -9348,6 +9348,31 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 "cloze": (c.get("cloze") or c.get("text") or "")[:2000],
             } for c in cards][:8]
             out["anki_deck"] = "QA"
+            if added > 0:
+                try:   # 注意力账本:制卡=最强主动信号之一(用户拍板 2026-07-19)。
+                    #   ★信号源=**生成的卡片内容**(front/back),不是用户指令——"把刚才的内容
+                    #   做成卡"这句话全是代词零知识词,知识点在卡里(同 qa_ai 补位的教训)。
+                    #   append_raw 走 append-only 账本,--rebuild 也重导,天然进画像。
+                    import sys as _sy
+                    _sy.path.insert(0, str(CLAUDE_DIR / "scripts"))
+                    import attention_profile as _AP
+                    import urllib.parse as _upq
+                    _src = (snippets[0].get("source") or "") if snippets else ""
+                    _qs = _upq.parse_qs(_upq.urlparse(_src).query)
+                    _f = (_qs.get("file") or [""])[0]
+                    _pg = int((_qs.get("page") or ["0"])[0] or 0)
+                    if _f and VB is not None:   # 账本存持久真相:真成员+局部页(单本恒等,无条件调用)
+                        try:
+                            _f, _pg = VB.locate(_f, _pg or 1)
+                        except Exception:
+                            pass
+                    for _c in cards:
+                        _txt = (_c.get("front", "") + "\n" + _c.get("back", "")).strip() or _c.get("text", "")
+                        _txt = re.sub(r"\\[a-zA-Z]+|[\\${}\[\]()]", " ", _txt)   # 剥 LaTeX(同 import_anki_cards)
+                        if _txt.strip():
+                            _AP.append_raw("card", _txt[:500], file=_f, page=_pg, uid=uid, actor="user")
+                except Exception:
+                    pass
             # 制完触发 AnkiWeb sync（fire-and-forget，~50ms 返回，后台推送）
             if added > 0:
                 try:

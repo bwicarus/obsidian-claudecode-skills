@@ -198,3 +198,35 @@ class TestStopwordsFailClosed(unittest.TestCase):
             self.assertEqual(self.B.OUT.read_bytes(), self.before, "原表被覆盖了")
         finally:
             self.B.RATIO_BY_LANG = orig
+
+
+class TestCardChannel(unittest.TestCase):
+    """制卡=概念网强信号(用户设计 2026-07-19):信号源=**卡片内容**(front/back),
+    不是制卡指令("把刚才的内容做成卡"全是代词零知识词,同 qa_ai 补位的教训)。"""
+
+    def setUp(self):
+        import attention_profile as AP
+        self.AP = AP
+
+    def test_card_weight_is_strong(self):
+        """制卡与登记笔记同级(亲手决定"要记它"=最强主动信号之一)。"""
+        self.assertEqual(self.AP.W.get("card"), self.AP.W.get("note"))
+
+    def test_card_skips_heat_gate_but_not_vocab_gate(self):
+        """card 渠道免热度/免渠道杂度,但 vocab 门照过(日语词汇卡不进概念网的铁律)。"""
+        import propose_concept_notes as P
+        self.assertIn("card", P.DEEP_CHANNELS)
+        src = open(str(self.AP.Path(__file__).resolve().parent.parent
+                       / "scripts" / "kg" / "propose_concept_notes.py") if False else
+                   "/home/bwicarus/claude/scripts/kg/propose_concept_notes.py",
+                   encoding="utf-8").read()
+        self.assertIn('"card" in chs', src, "门里必须有 card 免检分支")
+
+    def test_latex_stripped_from_card_text(self):
+        """卡片文本剥 LaTeX——否则 \\dots/\\ldots 被抽成英文词 dots 上榜(实测踩过)。"""
+        import sqlite3
+        c = sqlite3.connect(str(self.AP.ATT_DIR / "events.db"))
+        bad = c.execute("SELECT COUNT(*) FROM event_mentions m JOIN events e ON e.src_key=m.src_key "
+                        "WHERE e.channel='card' AND m.surface IN ('dots','ldots','mathbb','frac')").fetchone()[0]
+        c.close()
+        self.assertEqual(bad, 0)

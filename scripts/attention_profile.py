@@ -88,6 +88,9 @@ TOP_N = 40
 W = {"lookup": 1.0, "highlight": 3.0, "qa": 2.0, "check": 4.0, "note": 5.0, "read": 0.5,
      "anki_lapse": 2.0,   # Anki 答错 = 薄弱信号(只收 lapse,不收全部复习:52174 条会淹没一切)
      "tool": 2.0,         # 主动查找(搜书/联网/跨库)的**查询词** = 强意图信号
+     "card": 5.0,         # 制作 Anki 卡:亲手决定"这个要记"=最强主动信号之一(与 note 同级)。
+#                           ★信号源=卡片内容(front/back),不是制卡指令(用户拍板 2026-07-19);
+#                           助手/语音制卡走 append_raw 账本,登记流程的历史卡走 import_anki_cards
      "qa_ai": 0.3}        # AI 回答:常态很轻(它不是用户主动行为),补位时提到 QA_AI_BOOST(见下)
 
 # ── AI 回答补位(用户设计 2026-07-19)────────────────────────────────────────────
@@ -1033,6 +1036,37 @@ def _import_qa_turns(c, msgs, uid):
     return n
 
 
+ANKI_RECORDS = Path(PROJECT_DIR) / "anki" / "records"
+
+
+def import_anki_cards(c):
+    """登记流程制的卡(anki/records/*.json)→ card 渠道。每卡一条事件(每卡=独立知识点),
+    text=front+back(信号源=卡片内容),file=来源笔记(与 note 渠道同锚),按 local_id 幂等。"""
+    n = 0
+    if not ANKI_RECORDS.is_dir():
+        return 0
+    for f in ANKI_RECORDS.glob("*.json"):
+        try:
+            d = json.loads(f.read_text("utf-8"))
+        except Exception:
+            continue
+        src = str(d.get("source_note") or "")
+        try:
+            ts0 = int(time.mktime(time.strptime(str(d.get("generated_at", ""))[:19], "%Y-%m-%dT%H:%M:%S")))
+        except Exception:
+            ts0 = int(f.stat().st_mtime)
+        for card in (d.get("cards") or []):
+            if card.get("status") in ("deleted", "removed"):
+                continue
+            txt = ((card.get("front") or "") + "\n" + (card.get("back") or "")).strip() or (card.get("text") or "")
+            txt = re.sub(r"\\[a-zA-Z]+|[\\${}\[\]()]", " ", txt)   # 剥 LaTeX:\dots/\ldots 会被抽成英文词 dots
+            if not txt.strip():
+                continue
+            n += add_event(c, ts0, "card", txt[:500], file=src, uid=f.stem,
+                           hint=str(card.get("local_id") or ""), lang=[])
+    return n
+
+
 def import_convo(c):
     n = 0
     d = STATE / "assistant-convo"
@@ -1359,6 +1393,11 @@ def _sources_fp():
         fp.append("notes:%d:%d" % (_nm, _nn))
     except Exception:
         pass
+    try:                                  # 制卡记录(card 渠道):新卡落盘 → 指纹变 → 读时导入
+        _cm = max((f.stat().st_mtime_ns for f in ANKI_RECORDS.glob("*.json")), default=0)
+        fp.append("cards:%d:%d" % (_cm, sum(1 for _ in ANKI_RECORDS.glob("*.json"))))
+    except Exception:
+        pass
     for d in ("pdf-highlights", "epub-highlights", "html-highlights", "assistant-convo",
               "assistant-convo-archive", "reader-check-reports"):
         try:
@@ -1386,6 +1425,7 @@ def ensure_fresh(c=None, force=False):
         t0 = time.time()
         stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
                  "qa": import_convo(c), "qa_arch": import_convo_archive(c),
+             "card": import_anki_cards(c),
                  "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
                  "anki_lapse": import_anki_lapses(c), "note": import_notes(c), "mentions": build_mentions(c)}
         c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('sources_fp',?)", (cur,))
@@ -2425,6 +2465,7 @@ def run(rebuild=False):
     t0 = time.time()
     stats = {"lookup": import_lookups(c), "highlight": import_highlights(c),
              "qa": import_convo(c), "qa_arch": import_convo_archive(c),
+             "card": import_anki_cards(c),
              "check": import_checks(c), "read": import_dwell(c), "raw": import_raw(c),
              "anki_lapse": import_anki_lapses(c), "note": import_notes(c), "mentions": build_mentions(c)}
     c.commit()
