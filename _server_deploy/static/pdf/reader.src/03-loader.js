@@ -119,6 +119,10 @@ async function _fetchFullWithProgress(url, opts) {
   return out.buffer;
 }
 async function loadPdf() {
+  // ★实况网页模式(用户拍板 2026-07-19:"就只是把书页的展示窗口换成网页"):
+  //   同一张 PDF 阅读器页面,#page-container 换成同源代理 iframe(web-adapter.js 接管),
+  //   这里直接返回——不下载 PDF、不建 pdfDoc,顶栏/侧栏/rc-* 全部照常初始化。
+  if (window.__PDF_CFG && __PDF_CFG.web_url) { _pdfInitDone = true; return; }
   pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
   pdfLoadBar(null);
   // 加载 13s 还没出首页 + 有压缩版 + 当前没在用压缩版 → 在加载层显示「切换压缩版」按钮(慢网救急)

@@ -1,4 +1,9 @@
-<!doctype html>
+<!doct
+  /* 实况网页模式:书页容器变成网页视窗(其余 UI 全同 PDF 阅读器) */
+  body.web-mode #page-container{height:100%;overflow:hidden;padding:0;display:block}
+  body.web-mode #wl-url{flex:1 1 auto;min-width:0;background:#0d1322;border:1px solid #2a3550;
+    color:#cfe6ff;border-radius:17px;height:32px;padding:0 13px;font-size:13px;outline:none;font-family:inherit}
+ype html>
 <html lang="zh"><head>
 <meta charset="utf-8">
 <link rel="apple-touch-icon" href="/static/icons/reader.png">
@@ -64,7 +69,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
       <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px">⚡ 加载慢？切换到压缩版（更小更快，下次记住）</button>
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
-    <div id="page-container"></div>
+    <div id="page-container">{% if web_url %}<iframe id="wl-frame" src="/pdf/web/proxy?url={{ web_url|urlencode }}" style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
     <div id="search-panel">
       <div class="sp-bar">
         <input id="search-input" type="search" placeholder="全文搜索（全书）…" autocomplete="off"
@@ -421,7 +426,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}, web_url: {{ web_url|default(None)|tojson }}};</script>
 <script>
 // 📍 续读位置服务端上报(2026-07-03,ui=shared/legacy 通用,不动 reader.src):每 5s 检测当前页
 //   (与视口交叠最多的 .page-wrap[data-page-num],同 _favCurTarget 口径;翻页按钮/横滑/滚动通吃),
@@ -507,7 +512,8 @@ window.toggleGrammarPanel = function () {
 <script type="module" src="/static/pdf/reader.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/mfx.js?v=mfx-5" defer></script>   <!-- mfx 交互/特效脚本(Toast/手势/特效),defer 等 DOM -->
 
-<script src="/static/pdf/pdf-tail.js?v={{ shared_js_v }}"></script><!-- 原尾部内联抽出为静态文件 -->
+<script src="/static/pdf/pdf-tail.js?v={{ shared_js_v }}"></script>
+<script src="/static/pdf/web-adapter.js?v={{ js_v }}"></script><!-- 实况网页:仅 __PDF_CFG.web_url 时生效(把书页容器换成代理 iframe;顶栏/侧栏/rc-* 全用 PDF 原样) --><!-- 原尾部内联抽出为静态文件 -->
 <script>
 // 🌱 概念网按书开关(用户定:按书选择放阅读器不放控制面板)。回填:页面加载后拉一次;保存:即改即存。
 (function(){

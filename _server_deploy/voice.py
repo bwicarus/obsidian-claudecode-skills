@@ -934,11 +934,17 @@ def _gen_title(content: str) -> str:
 
 
 def _content_for(params, ctx):
+    _sel = (ctx.get("selection") or "").strip()
     if (params.get("text") or "").strip():        # agent 工具显式给的内容
         base_c = params["text"].strip()
+        # ★护栏(用户实锤 2026-07-19):有选中/钉住焦点时,agent 却传了**整页级**的大段文本
+        #   (它把 read_page 的结果当 text 塞回来)→ 用户明明只想给那一段做卡。
+        #   判据:选中存在 且 agent 给的文本比选中长得多 且 包含选中 ⇒ 收敛回选中。
+        if _sel and len(base_c) > max(400, len(_sel) * 3) and _sel[:40] in base_c:
+            base_c = _sel
     else:
-        scope = params.get("scope") or ("sel" if (ctx.get("selection") or "").strip() else "page")
-        base_c = (ctx.get("selection") or "").strip() if scope == "sel" else _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+        scope = params.get("scope") or ("sel" if _sel else "page")
+        base_c = _sel if scope == "sel" else _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
     extra = (params.get("extra_ctx") or "").strip()   # 61b:对话现场(网页搜索/配图/近几轮)随卡走,制卡 AI 自行取舍
     if extra and base_c:
         base_c += "\n\n【通话现场资料(网页搜索结果/配图/近几轮对话;与主题相关就采用进卡片/笔记,无关的忽略)】\n" + extra

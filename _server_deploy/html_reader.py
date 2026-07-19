@@ -606,8 +606,13 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             return redirect("/pdf/web?home=1")
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        return make_response(render_template("web_live.html", url=url, url_esc=_h.escape(url),
-                                             reader_js_v=_html_js_v()))
+        # ★直接用 **PDF 阅读器那张页面**(用户拍板:"就只是把书页的展示窗口换成网页"):
+        #   顶栏/侧栏/全部 rc-* 与 reader.js 原样复用,零新壳;reader.js 见 web_url 即跳过 PDF 加载。
+        return make_response(render_template(
+            "pdf_reader.html", web_url=url, pdf_url="", file_rel="web:" + url,
+            file_name=url, page=1, page_ts=0, chars_ver=0, pdf_size=0,
+            compressed=0, comp_avail=0, ui_shared=1, group=None,
+            reader_js_v=_html_js_v(), js_v=_html_js_v()))
 
     @bp.route("/web")
     def pdf_web_portal():

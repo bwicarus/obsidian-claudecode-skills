@@ -498,6 +498,10 @@ async function _fetchFullWithProgress(url, opts) {
   return out.buffer;
 }
 async function loadPdf() {
+  // ★实况网页模式(用户拍板 2026-07-19:"就只是把书页的展示窗口换成网页"):
+  //   同一张 PDF 阅读器页面,#page-container 换成同源代理 iframe(web-adapter.js 接管),
+  //   这里直接返回——不下载 PDF、不建 pdfDoc,顶栏/侧栏/rc-* 全部照常初始化。
+  if (window.__PDF_CFG && __PDF_CFG.web_url) { _pdfInitDone = true; return; }
   pdfLoadShow('📄 打开 PDF…', '大文件首次加载需几秒,正在流式下载结构');
   pdfLoadBar(null);
   // 加载 13s 还没出首页 + 有压缩版 + 当前没在用压缩版 → 在加载层显示「切换压缩版」按钮(慢网救急)
@@ -1539,6 +1543,17 @@ window.__voiceContext = function () {
         const nat = (window.getSelection ? getSelection().toString() : '').trim();
         if (nat) sel = nat.slice(0, 400);
       }
+      // ★钉住的焦点(顶部 ¶ chip)**最优先**——用户实锤 2026-07-19:钉了一段问「把这里做成
+      //   Anki 卡」,AI 却答「先把这一页抓取一下」→ 读整页、又慢又不是他要的。根因就是这里
+      //   只看 char-layer/原生选区,而钉住时两者常已被清空(开助手/点输入框就清)。
+      //   EPUB 侧 getContext 早有此分支(epub-html.js:4043),PDF 侧一直漏。
+      try {
+        const fs = window.__focusSel;
+        if (fs && (fs.text || '').trim()) {
+          sel = String(fs.text).trim().slice(0, 400);
+          if (!selSentence && fs.sent) selSentence = String(fs.sent).trim().slice(0, 600);
+        }
+      } catch (_) {}
     } catch (_) {}
     let books = [];
     try {
