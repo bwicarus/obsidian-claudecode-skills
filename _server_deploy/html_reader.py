@@ -784,9 +784,27 @@ def _proxy_page(url: str):
     #     而拦截页塞满验证脚本,长度轻松破万,首版据此判定直接失效(实测 Google 兜底没触发)。
     _bare = _re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", html)
     _bare = _re.sub(r"<[^>]+>", " ", _bare)
+    # ⚠ 挑战页的**正文往往是空的**(内容由 JS 渲染),光看话术判不到(实测 claude.ai 正文长度 0)。
+    #   所以先认 HTML 里的硬标记,再退回话术。
+    _CF_MARKS = ("cdn-cgi/challenge-platform", "<title>Just a moment", "challenge-error-text",
+                 "__cf_chl", "cf-turnstile", "/recaptcha/api.js")
     blocked = ("/sorry/" in final or "/recaptcha/" in final
+               or any(m in html for m in _CF_MARKS)
                or (len(_bare) < 6000 and any(x in _bare for x in _BLOCK_SIGNS)))
     if blocked:
+        try:
+            _bh = urlparse(final).netloc or ""
+            _bn = ("<div style=\"font:14px/1.7 system-ui;padding:14px 16px;background:#fff1f0;"
+                   "border-bottom:1px solid #f3c9c5;color:#8a3b34\">"
+                   f"🔒 <b>{_hesc(_bh)}</b> 用了反机器人验证(Cloudflare / reCAPTCHA 之类)。"
+                   "这类验证的密钥与 TLS 指纹**绑死原站域名**,经本站转发<b>永远无法通过</b>——"
+                   "点验证码也没用,不是可以修的问题。<br>"
+                   f"→ <a href=\"{_hesc(final)}\" target=\"_blank\" rel=\"noopener\" "
+                   "style=\"color:#0a58ca\">在系统浏览器打开这一页</a>"
+                   "(需要登录的站也走这里;在本阅读器窗口内直接登录则是可以的,登录态服务端会保持)。"
+                   "</div>")
+        except Exception:
+            _bn = ""
         try:
             def _kw_of(u):
                 q = parse_qs(urlparse(u).query)
@@ -811,6 +829,9 @@ def _proxy_page(url: str):
                     return r2, ""
         except Exception:
             pass
+        if _bn:      # 提不出搜索词(纯登录页/普通页被拦)→ 至少把"为什么打不开 + 怎么办"讲清楚
+            html = _re.sub(r"(<body[^>]*>)", r"\1" + _bn.replace("\\", "\\\\"), html,
+                           count=1, flags=_re.I) or html
     try:   # ★中间转换层(内容侧):浏览过的页面立刻可被 AI 读到。
         #   `web:<url>` 是**视图引用**(同 vbook:),后端必须有 resolver —— 这里在代理时
         #   顺手抽正文写缓存,assistant._page_text 见 web: 前缀即命中(用户实锤:不做这层,

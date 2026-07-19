@@ -57,6 +57,14 @@
       post({ __rcweb: 'translate', on: _trOn, style: _trStyle });
       toast(_trOn ? '沉浸式翻译:开(' + TR_NAME[_trStyle] + ')' : '沉浸式翻译:关');
     };
+    // 「↗」在系统浏览器打开当前页。需要登录/带反机器人墙的站(claude.ai 这类)的唯一出路:
+    //   我们的代理是 Pi 上**另一个 HTTP 客户端**,你在别的标签页登录的 cookie 属于你的设备,
+    //   永远送不到它手里 —— 所以"新标签登录完回来继续用"这条路在架构上不成立。
+    //   (反过来,**在本窗口内直接登录**是可以的:服务端按用户维护 cookie jar,实测能保持。)
+    var ext = document.createElement('button');
+    ext.id = 'wl-ext'; ext.textContent = '↗';
+    ext.title = '在系统浏览器打开这一页(需要登录、或被反机器人验证拦住的站走这里)';
+    ext.onclick = function () { try { window.open(CUR, '_blank', 'noopener'); } catch (e) {} };
     var ts = document.createElement('button');
     ts.id = 'wl-trs'; ts.textContent = '⋮'; ts.title = '切换译文样式';
     ts.onclick = function () {
@@ -73,8 +81,9 @@
       title.parentNode.insertBefore(rd, title.nextSibling);
       title.parentNode.insertBefore(tr, rd.nextSibling);
       title.parentNode.insertBefore(ts, tr.nextSibling);
+      title.parentNode.insertBefore(ext, ts.nextSibling);
     } else {
-      [back, box, rd, tr, ts].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
+      [back, box, rd, tr, ts, ext].reverse().forEach(function (el) { top.insertBefore(el, top.firstChild); });
     }
   }
 
