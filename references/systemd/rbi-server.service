@@ -1,0 +1,14 @@
+[Unit]
+Description=RBI remote-browser server (Pi real Chrome + rrweb DOM stream to iPad)
+After=network.target
+
+[Service]
+User=bwicarus
+Environment=CLAUDE_PROJECT=/home/bwicarus/claude
+ExecStart=/usr/bin/python3 /home/bwicarus/webapp/rbi_server.py
+Restart=always
+RestartSec=3
+MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target

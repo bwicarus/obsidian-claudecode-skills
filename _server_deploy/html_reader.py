@@ -1504,6 +1504,20 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         _cookie_store_save(uid, store)
         return jsonify({"ok": True, "domain": domain, "count": len(ck)})
 
+    @bp.route("/web/rbi-live")
+    def pdf_web_rbi_live():
+        """RBI 实况网页(阶段1):真浏览器 DOM 流式桥接。渲染 rbi_live.html,前端连 wss /rbi-ws,
+        rrweb Replayer 重建 Pi 真 Chrome 的 DOM。查词/翻译作用于重建 DOM(阶段1b)。"""
+        import html as _hh
+        url = (request.args.get("url") or "").strip()
+        if not url:
+            return redirect("/pdf/web?home=1")
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        return make_response(render_template(
+            "rbi_live.html", url=url, url_esc=_hh.escape(url),
+            uid=_px_uid(), js_v=_html_js_v()))
+
     @bp.route("/web/rbi")
     def pdf_web_rbi():
         """RBI 最小验证:Pi 真 Chrome 渲染后的 DOM(真实身份/过验证)→ 复用现有改写+注入 → iframe。

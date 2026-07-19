@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<link rel="apple-touch-icon" href="/static/icons/web.png">
+<meta name="apple-mobile-web-app-title" content="网页">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>🌐 {{ url_esc }}</title>
+<style>
+  /* RBI 实况网页(阶段1):rrweb Replayer 把 Pi 真 Chrome 的 DOM 事件流重建到 #stage 内的 iframe。
+     顶栏地址栏 + 状态;查词/翻译作用于重建 DOM(阶段1b 接 web-adapter)。 */
+  html,body{margin:0;height:100%;overflow:hidden;background:#0a0e1a;font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}
+  #rbi-top{position:fixed;top:0;left:0;right:0;height:calc(46px + env(safe-area-inset-top));padding-top:env(safe-area-inset-top);
+    display:flex;align-items:center;gap:8px;padding-left:10px;padding-right:10px;background:#0d1322;border-bottom:1px solid #1e2740;z-index:100}
+  #rbi-back,#rbi-go{background:#152036;color:#cfe6ff;border:1px solid #2a3550;border-radius:16px;height:32px;min-width:36px;font-size:15px;cursor:pointer}
+  #rbi-url{flex:1 1 auto;min-width:0;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:16px;height:32px;padding:0 14px;font-size:13px;outline:none}
+  #rbi-url:focus{border-color:#3b6db5}
+  #rbi-status{position:fixed;bottom:8px;left:8px;z-index:120;background:rgba(13,19,34,.9);color:#7fb2ff;font-size:11px;padding:3px 8px;border-radius:8px;pointer-events:none;max-width:70vw;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  #stage{position:absolute;left:0;right:0;bottom:0;top:calc(46px + env(safe-area-inset-top));background:#fff;overflow:auto;-webkit-overflow-scrolling:touch}
+  #stage iframe{border:0;display:block;width:100%!important}
+  #rbi-load{position:absolute;inset:0;top:calc(46px + env(safe-area-inset-top));display:flex;align-items:center;justify-content:center;background:#0a0e1a;color:#8a9bb4;font-size:14px;z-index:60}
+  .rbi-spin{width:26px;height:26px;border:3px solid #26324d;border-top-color:#5a96f0;border-radius:50%;animation:rbisp 1s linear infinite;margin-right:10px}
+  @keyframes rbisp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+  <div id="rbi-top">
+    <button id="rbi-back" title="后退">←</button>
+    <input id="rbi-url" value="{{ url_esc }}" spellcheck="false" autocomplete="off" title="地址栏:输网址或搜索词">
+    <button id="rbi-go" title="真浏览器打开">↵</button>
+  </div>
+  <div id="stage"></div>
+  <div id="rbi-load"><span class="rbi-spin"></span>Pi 真浏览器加载中…</div>
+  <div id="rbi-status">connecting…</div>
+
+<script src="/static/pdf/rrweb-record.umd.js?v={{ js_v }}"></script>
+<script>
+(function(){
+  var CFG = { url: {{ url|tojson }}, uid: {{ uid|tojson }} };
+  var stage=document.getElementById('stage'), st=document.getElementById('rbi-status'),
+      load=document.getElementById('rbi-load'), urlbox=document.getElementById('rbi-url');
+  function setSt(m){ try{ st.textContent=m; }catch(e){} }
+
+  var replayer=null, gotFull=false;
+  function freshReplayer(){
+    try{ if(replayer && replayer.destroy) replayer.destroy(); }catch(e){}
+    stage.innerHTML='';
+    replayer=new rrweb.Replayer([], {liveMode:true, root:stage, mouseTail:false, UNSAFE_replayCanvas:false});
+    replayer.startLive();
+    gotFull=false;
+  }
+  freshReplayer();
+
+  var proto = location.protocol==='https:' ? 'wss:' : 'ws:';
+  var ws, reconnectT=null;
+  function connect(){
+    ws=new WebSocket(proto+'//'+location.host+'/rbi-ws');
+    ws.onopen=function(){ setSt('已连,请求页面…'); open(CFG.url); };
+    ws.onmessage=function(e){
+      var m; try{ m=JSON.parse(e.data); }catch(_){ return; }
+      if(m.t==='ev'){
+        var ev; try{ ev=JSON.parse(m.d); }catch(_){ return; }
+        try{ replayer.addEvent(ev); }catch(err){ return; }
+        if(ev.type===2){ gotFull=true; load.style.display='none'; setSt('已重建 DOM'); }  // FullSnapshot
+      } else if(m.t==='nav'){
+        CFG.url=m.url; urlbox.value=m.url; setSt('打开 '+m.url);
+        try{ history.replaceState(null,'','/pdf/web/rbi-live?url='+encodeURIComponent(m.url)); }catch(_){}
+      } else if(m.t==='err'){ load.style.display='none'; setSt('✗ '+m.msg); }
+    };
+    ws.onclose=function(){ setSt('断开,重连中…'); if(reconnectT) return;
+      reconnectT=setTimeout(function(){ reconnectT=null; connect(); }, 2000); };
+    ws.onerror=function(){ setSt('ws 错误'); };
+  }
+  function open(u){
+    if(!u) return;
+    if(!/^https?:\/\//.test(u)) u='https://'+u;
+    load.style.display='flex'; freshReplayer();
+    try{ ws.send(JSON.stringify({cmd:'open', url:u, uid:CFG.uid})); }catch(_){}
+  }
+  connect();
+
+  // 地址栏:输网址直接开,输词走搜索(与 iframe 版一致)
+  urlbox.addEventListener('keydown', function(e){
+    if(e.key!=='Enter') return;
+    var v=(this.value||'').trim(); if(!v) return;
+    var isUrl = v.indexOf('http')===0 || /^[\w-]+(\.[\w-]+)+([/]|$)/.test(v);
+    if(isUrl) open(v);
+    else open('https://lite.duckduckgo.com/lite/?q='+encodeURIComponent(v));
+  });
+  document.getElementById('rbi-go').onclick=function(){ open(urlbox.value.trim()); };
+  document.getElementById('rbi-back').onclick=function(){ location.href='/pdf/web?home=1'; };
+
+  // 阶段1b 接入点:web-adapter 会在 replay iframe 的 DOM 上挂查词/翻译。此处先暴露 replayer。
+  window.__rbiReplayer=function(){ return replayer; };
+  window.__rbiStageIframe=function(){ return stage.querySelector('iframe'); };
+})();
+</script>
+</body></html>
