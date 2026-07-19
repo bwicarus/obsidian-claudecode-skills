@@ -3000,6 +3000,61 @@ def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
             })
 
 
+_OCR_LINE_NOISE_RE = re.compile(r"(?:[|│丨︱‖∥┃┆┇┊┋╎╏]\s*){2,}")
+
+
+def _clean_ocr_text(txt):
+    """纯文本级的 OCR 噪声清洗(拿不到几何时的兜底):剔插图边框被认成的竖线串。
+    ruby 混排文本级无法识别(需要字高),那个走 _page_text_clean 的 chars 路径。"""
+    return _OCR_LINE_NOISE_RE.sub(" ", txt or "")
+
+
+def _page_text_clean(abs_path, rel, page, limit=8000):
+    """**AI 上下文用的页文本**(用户拍板 2026-07-19:噪声要在文字层源头剔掉,否则
+    AI 读到的就是错的)。优先从**剔噪后的字符层**重建(_page_chars_cached 已剔插图
+    竖线/幽灵空格,这里再跳 ruby 注音——「宮廷料理人いいんほんぞうがくだった伊尹」
+    这类污染不再进 AI);chars 不可用则回退裸 get_text + 文本级清洗。"""
+    try:
+        res = _page_chars_cached(abs_path, rel, page)
+    except Exception:
+        res = None
+    if res:
+        chars = res[0]
+        hs = sorted((c["y1"] - c["y0"]) for c in chars if not c.get("sp") and c.get("c", "").strip())
+        med = hs[len(hs) // 2] if hs else 0
+        out, prev = [], None
+        for c in chars:
+            if c.get("sp"):
+                out.append(" ")
+                continue
+            ch = c.get("c", "")
+            if med and (c["y1"] - c["y0"]) < med * 0.60 and re.match(r"^[ぁ-んァ-ヶー]$", ch):
+                continue                       # ruby 注音不进 AI 文本
+            # 换行判定用**中心点**:标点(、。)bbox 矮、y0 偏行底,按 y0 比会把同行标点
+            # 误判成换行(实测「伊尹は、本草学」被切成 は⏎、⏎本…);中心点对齐才稳
+            if prev is not None:
+                cy = (c["y0"] + c["y1"]) / 2
+                py = (prev["y0"] + prev["y1"]) / 2
+                if abs(cy - py) > max(c["y1"] - c["y0"], prev["y1"] - prev["y0"]) * 0.6:
+                    out.append("\n")
+            out.append(ch)
+            prev = c
+        txt = re.sub(r"[ \t]+", " ", "".join(out))
+        txt = re.sub(r" ?\n ?", "\n", txt).strip()
+        if txt:
+            return txt[:limit]
+    try:   # 兜底:chars 拿不到(极端页)→ 裸文本 + 文本级清洗
+        import fitz
+        doc = fitz.open(str(abs_path))
+        try:
+            idx = max(0, min(int(page or 1) - 1, doc.page_count - 1))
+            return _clean_ocr_text(doc[idx].get_text("text") or "").strip()[:limit]
+        finally:
+            doc.close()
+    except Exception:
+        return ""
+
+
 @bp.route("/api/page-text")
 def pdf_api_page_text():
     """某页纯文本(轻量,给 MCP 服务器/外部 agent 读书用;浏览器阅读器不用它——它要的是 char bbox)。
@@ -3022,12 +3077,13 @@ def pdf_api_page_text():
         import fitz
         doc = fitz.open(str(abs_path))
         try:
-            if page > doc.page_count:
-                return jsonify({"ok": False, "error": "page out of range", "total": doc.page_count}), 400
-            txt = (doc[page - 1].get_text("text") or "").strip()
-            return jsonify({"ok": True, "page": page, "total": doc.page_count, "text": txt[:8000]})
+            total = doc.page_count
+            if page > total:
+                return jsonify({"ok": False, "error": "page out of range", "total": total}), 400
         finally:
             doc.close()
+        txt = _page_text_clean(abs_path, rel, page)   # 剔噪+去注音(AI 直塞的就是这份,源头干净)
+        return jsonify({"ok": True, "page": page, "total": total, "text": txt})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
 
@@ -4221,7 +4277,7 @@ def _book_text_index(abs_path, rel: str) -> dict:
         mtime = 0
     cdir = CLAUDE_DIR / "state" / "pdf-text-index"
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
-    cpath = cdir / f"{sha}-{mtime}.json"
+    cpath = cdir / f"{sha}-{mtime}-v2.json"   # v2:OCR 线条串清洗
     if cpath.exists():
         try:
             return json.loads(cpath.read_text("utf-8"))
@@ -4233,7 +4289,7 @@ def _book_text_index(abs_path, rel: str) -> dict:
     try:
         for i in range(len(doc)):
             try:
-                out[str(i + 1)] = doc[i].get_text("text")
+                out[str(i + 1)] = _clean_ocr_text(doc[i].get_text("text"))
             except Exception:
                 out[str(i + 1)] = ""
     finally:

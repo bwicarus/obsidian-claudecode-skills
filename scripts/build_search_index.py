@@ -145,19 +145,21 @@ def _page_texts(abs_path: Path, rel: str) -> dict:
     except OSError:
         mtime = 0
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
-    cpath = TEXT_INDEX_DIR / f"{sha}-{mtime}.json"
+    cpath = TEXT_INDEX_DIR / f"{sha}-{mtime}-v2.json"   # v2:OCR 竖线串清洗
     if cpath.exists():
         try:
             return json.loads(cpath.read_text("utf-8"))
         except Exception:
             pass
     import fitz
+    import re as _re
+    _noise = _re.compile(r"(?:[|│丨︱‖∥┃┆┇┊┋╎╏]\s*){2,}")   # OCR 把插图边框认成的竖线串
     out = {}
     doc = fitz.open(str(abs_path))
     try:
         for i in range(len(doc)):
             try:
-                out[str(i + 1)] = doc[i].get_text("text")
+                out[str(i + 1)] = _noise.sub(" ", doc[i].get_text("text"))
             except Exception:
                 out[str(i + 1)] = ""
     finally:

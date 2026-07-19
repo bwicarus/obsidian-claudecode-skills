@@ -1686,14 +1686,16 @@ def _page_text(file_rel: str, page) -> str:
         doc = fitz.open(str(ap))
         try:
             idx = max(0, min(int(page or 1) - 1, doc.page_count - 1))
-            txt = (doc[idx].get_text("text") or "").strip()
-            # 插入页 overlay 未同步 → PDF 那页空白/旧,用 sidecar md 补真源(设计 v4 批次2 评审 major)
-            supp = _overlay_md_for_page(rel, idx + 1)
-            if supp:
-                txt = (supp + ("\n\n" + txt if txt else "")).strip()
-            return txt[:4000]
         finally:
             doc.close()
+        # 剔噪后的干净文本(用户拍板:噪声在源头剔,AI 上下文不能是错的——
+        # 插图竖线/振假名混排都在 _page_text_clean 里处理,与阅读器字符层同源)
+        txt = _pdf()._page_text_clean(ap, rel, idx + 1, limit=4000)
+        # 插入页 overlay 未同步 → PDF 那页空白/旧,用 sidecar md 补真源(设计 v4 批次2 评审 major)
+        supp = _overlay_md_for_page(rel, idx + 1)
+        if supp:
+            txt = (supp + ("\n\n" + txt if txt else "")).strip()
+        return txt[:4000]
     except Exception:
         return ""
 

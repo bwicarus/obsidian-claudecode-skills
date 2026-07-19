@@ -27,6 +27,47 @@ def pdf_sha(pdf_path: Path) -> str:
     return hashlib.sha1(str(pdf_path.resolve()).encode()).hexdigest()[:16]
 
 
+_LINE_NOISE = set("|│丨︱‖∥┃┆┇┊┋╎╏!ⅰ")   # OCR 把插图边框/表格线认成的"字符"
+_KANA_RE = re.compile(r"^[ぁ-んァ-ヶー]$")
+
+
+def clean_chars(chars: list) -> tuple[list, int, int]:
+    """**文字层生成时的整体清洁**(用户拍板 2026-07-19:噪声在源头剔,别逐个消费端补)。
+    与阅读器消费端同一套规格(pdf_reader._strip_graphic_noise + ruby 跳过):
+      ① 线条噪声:插图边框/表格线被 OCR 认成 |│丨 串(实测料理师 p46 头像框 → 6 根竖线,
+         y 远离正文、高仅正文 14%,把断句的段落判定炸穿);字符∈线条集 且 高<正文中位×0.45 → 剔。
+      ② 振假名:ruby 小字混进正文流(「宮廷料理人いいんほんぞうがくだった伊尹」),
+         假名 且 高<正文中位×0.60 → 剔(注音展示走 furigana sidecar,文字层里只是污染)。
+    CJK 页才启用(拉丁/代码页 | 是真字符);返回 (干净chars, 剔线条数, 剔ruby数)。"""
+    hs = sorted((c["bbox"][3] - c["bbox"][1]) for c in chars
+                if c.get("c", "").strip() and c.get("bbox") and len(c["bbox"]) == 4)
+    if not hs:
+        return chars, 0, 0
+    med = hs[len(hs) // 2]
+    n_cjk = sum(1 for c in chars if re.search(r"[぀-ヿ㐀-鿿]", c.get("c", "") or ""))
+    if n_cjk < max(10, len(chars) * 0.2):
+        return chars, 0, 0
+    out, n_line, n_ruby = [], 0, 0
+    for c in chars:
+        ch, bb = c.get("c", ""), c.get("bbox")
+        h = (bb[3] - bb[1]) if bb and len(bb) == 4 else med
+        if ch in _LINE_NOISE and h < med * 0.45:
+            n_line += 1
+            continue
+        if _KANA_RE.match(ch) and h < med * 0.60:
+            n_ruby += 1
+            continue
+        out.append(c)
+    return out, n_line, n_ruby
+
+
+def strip_text_layer(page: fitz.Page) -> None:
+    """删掉本页旧文字层(重嵌前用;只对**有 sidecar** 的页调用——用户插入页无 sidecar,
+    绝不会被碰)。redact 全页但保图像:扫描书正文都在图里,文字全是此前 embed 的 OCR 层。"""
+    page.add_redact_annot(page.rect)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+
 def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
     """对一页嵌入 char-level 文字层。
 
@@ -37,6 +78,7 @@ def embed_page(page: fitz.Page, sidecar: dict, sx: float, sy: float) -> int:
     跟视觉一致(读回 bbox 才对得上选中层)。rotation=0 时 derotation 是单位阵、rotate=0,
     对所有非旋转书完全无变化(向后兼容)。"""
     chars = sidecar.get("chars") or []
+    chars, _nl, _nr = clean_chars(chars)   # 源头清洁:线条噪声+ruby 不进文字层
     derot = page.derotation_matrix
     rot = page.rotation
     n = 0
@@ -94,6 +136,8 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--sidecar", default=None)
     ap.add_argument("--progress", default=None, help="进度文件路径(写 {done,total,phase});嵌入阶段供编排轮询")
+    ap.add_argument("--strip-old", action="store_true",
+                    help="嵌入前先删该页旧文字层(对已 embed 过的书重嵌用;只动有 sidecar 的页)")
     args = ap.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -131,6 +175,9 @@ def main() -> int:
         if not (img_w and img_h):
             continue
         page = src[i]
+        if args.strip_old:
+            strip_text_layer(page)         # 重嵌:先删旧文字层(叠两层=选中/搜索双份乱码)
+            page = src[i]                  # redact 后重新取页对象(apply_redactions 可能重建内容流)
         sx = page.rect.width / img_w
         sy = page.rect.height / img_h
         nc = embed_page(page, sc, sx, sy)
