@@ -372,6 +372,13 @@ def _proxy_page(url: str):
         html = base_tag + html
     # 页面自带的 CSP <meta> 也要剥(否则注入脚本被拦)
     html = _re.sub(r'<meta[^>]+http-equiv=["\']?content-security-policy["\']?[^>]*>', "", html, flags=_re.I)
+    try:   # ★中间转换层(内容侧):浏览过的页面立刻可被 AI 读到。
+        #   `web:<url>` 是**视图引用**(同 vbook:),后端必须有 resolver —— 这里在代理时
+        #   顺手抽正文写缓存,assistant._page_text 见 web: 前缀即命中(用户实锤:不做这层,
+        #   AI read_page 只会说"没能读到这页的文字内容")。
+        _web_cache_put(final, html)
+    except Exception:
+        pass
     html += _PROXY_INJECT
     resp = make_response(html)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
@@ -380,6 +387,58 @@ def _proxy_page(url: str):
         if h.lower() in _PROXY_STRIP_HEADERS:
             del resp.headers[h]
     return resp, ""
+
+
+WEB_CACHE_DIR = None   # register 时指向 state/web-cache/
+
+
+def _web_key(url: str) -> str:
+    return hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20]
+
+
+def _web_cache_put(url: str, raw_html: str):
+    """把代理过的页面抽成正文存缓存(AI 读页/搜索的数据源)。"""
+    if not WEB_CACHE_DIR:
+        return
+    try:
+        from readability import Document
+        doc = Document(raw_html)
+        title = (doc.short_title() or "").strip()[:120]
+        body = doc.summary(html_partial=True)
+    except Exception:
+        title, body = "", raw_html
+    from bs4 import BeautifulSoup
+    txt = BeautifulSoup(body or "", "html.parser").get_text("\n", strip=True)
+    if len(txt) < 120:   # 抽取失败(纯 JS 页/首页型)→ 退回整页去标签,总比空好
+        txt = BeautifulSoup(raw_html, "html.parser").get_text("\n", strip=True)
+    WEB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (WEB_CACHE_DIR / (_web_key(url) + ".json")).write_text(
+        json.dumps({"url": url, "title": title, "text": txt[:200000], "ts": int(time.time())},
+                   ensure_ascii=False), "utf-8")
+
+
+def web_material(ref: str) -> dict:
+    """★`web:<url>` → {url,title,text}。**中间转换层的后端 resolver**,给 assistant/工具用。
+    先查缓存(浏览时已写),miss 则实时抓一次。非 web: 引用返回 None。"""
+    if not isinstance(ref, str) or not ref.startswith("web:"):
+        return None
+    url = ref[4:]
+    if WEB_CACHE_DIR:
+        p = WEB_CACHE_DIR / (_web_key(url) + ".json")
+        try:
+            d = json.loads(p.read_text("utf-8"))
+            if d.get("text"):
+                return d
+        except Exception:
+            pass
+    try:   # 缓存 miss(如 AI 先于渲染发问)→ 现抓一次
+        import requests
+        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (X11; Linux aarch64) Chrome/126.0"})
+        _web_cache_put(url, r.text)
+        p = WEB_CACHE_DIR / (_web_key(url) + ".json")
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return {"url": url, "title": "", "text": ""}
 
 
 def _web_last_get() -> str:
@@ -540,8 +599,9 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 
 def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
-    global _WEB_LAST
+    global _WEB_LAST, WEB_CACHE_DIR
     _WEB_LAST = Path(claude_dir) / "state" / "web-last.json"
+    WEB_CACHE_DIR = Path(claude_dir) / "state" / "web-cache"
     """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
     global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
     _safe_vault_path = safe_vault_path

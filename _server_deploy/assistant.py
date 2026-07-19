@@ -64,7 +64,8 @@ def _book_total_pages(file_rel):
     try:
         if not file_rel:
             return 0
-        if isinstance(file_rel, str) and file_rel.lower().endswith((".html", ".htm", ".md", ".markdown")):
+        if isinstance(file_rel, str) and (file_rel.startswith("web:")
+                                          or file_rel.lower().endswith((".html", ".htm", ".md", ".markdown"))):
             return 1   # 网页/HTML/MD=单文档(fitz 会把它 reflow 成多页,那是假页数)
         v = _VB()
         if v:   # 领域服务对两种书都算得出(合并=各卷之和,单本=它自己);拿不到才落回本地 fitz
@@ -1674,8 +1675,23 @@ def _overlay_md_for_page(file_rel: str, pdf_page: int) -> str:
         return ""
 
 
+def _web_mat(file_rel):
+    """`web:<url>` → {url,title,text}(html_reader 的中间层 resolver);非 web: 返回 None。
+    用户实锤 2026-07-19:只在前端把材料标识设成 web: 而后端不认,AI read_page 永远读到空。"""
+    if not (isinstance(file_rel, str) and file_rel.startswith("web:")):
+        return None
+    try:   # html_reader 是模块单例:webapp 启动时 register 已设好 WEB_CACHE_DIR,同进程直取
+        import html_reader as _HR
+        return _HR.web_material(file_rel)
+    except Exception:
+        return {"url": file_rel[4:], "title": "", "text": ""}
+
+
 def _page_text(file_rel: str, page) -> str:
     try:
+        _wm = _web_mat(file_rel)
+        if _wm is not None:
+            return (_wm.get("text") or "")[:4000]   # 网页=单文档,页码无意义
         file_rel, page = _vb_src(file_rel, page)   # 合并书:全局页→真成员局部页
         rel = (file_rel or "").strip()
         if not rel or ".." in rel:
@@ -1855,7 +1871,8 @@ def _t_read_page(args, ctx):
     # 下一页:只给**短预览**(开头 1000 字 + 图描述)——多数问题在本页就答完,下页预览只是「够不够、要不要续读」的线索;
     # 不需要整页(那会让每次 read_page 都多背几千字、推高每题成本)。真要看全下页,AI 再 read_page(page=下页)。
     # 单文档(网页/HTML/MD)没有"下一页"——不给预览,否则会把同一篇全文再贴一遍(实测)
-    if nxt and not str(file_rel).lower().endswith((".html", ".htm", ".md", ".markdown")):
+    if nxt and not (str(file_rel).startswith("web:")
+                    or str(file_rel).lower().endswith((".html", ".htm", ".md", ".markdown"))):
         nb = _read_one(file_rel, ctx, nxt, figd, cap_txt=1000,
                        label=f"【下一页·第{_to_disp(ctx, nxt)}页(开头预览,要看全文再 read_page 它)】")
         if nb:
@@ -1985,6 +2002,16 @@ def _t_search_book(args, ctx):
     try:
         ql = q.lower()
         hits = []
+        _wm0 = _web_mat(file_rel)
+        if _wm0 is not None:   # 网页:在缓存正文里搜(单文档,page 恒 1)
+            _t0 = _wm0.get("text") or ""
+            _low = _t0.lower()
+            _p = _low.find(ql)
+            while _p >= 0 and len(hits) < 20:
+                hits.append({"page": 1, "snippet": _t0[max(0, _p - 30):_p + len(q) + 60].replace("\n", " ").strip()})
+                _p = _low.find(ql, _p + max(1, len(ql)))
+            return {"total": len(hits), "hits": hits[:10],
+                    "note": "网页是单文档,page 恒为 1;要全文用 read_page。"}
         for _mrel, _moff, _mpgs in _vb_members(file_rel):   # 合并书:逐成员扇入;非分卷=单成员零变化
             ap = (VAULT_ROOT / _mrel).resolve()
             ap.relative_to(VAULT_ROOT.resolve())   # 容器校验:file_rel 来自前端不可信,挡 .. / 绝对路径越出 vault
