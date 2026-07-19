@@ -576,6 +576,8 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
 </style>
 <script>
 (function(){
+  if(window.__rcShim) return;   // 幂等:注入位置调整过,别让同一份 shim 装两遍
+  window.__rcShim = 1;
   // 站内导航拦截:链接/表单跳转改走代理(留在我们的壳里);新窗口链接也接管
   function proxied(u){ try{ return '/pdf/web/proxy?url=' + encodeURIComponent(new URL(u, location.__realBase || document.baseURI).href); }catch(e){ return u; } }
   document.addEventListener('click', function(e){
@@ -649,6 +651,52 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
     var a = [].slice.call(arguments); try{ a[1] = RES(u); }catch(_){}
     return _o.apply(this, a);
   };
+  // ⚠ setter 陷阱(审计实锤,MutationObserver **追不上**这一类):
+  //   reddit 这种站用 `script.src = "https://…绝对地址"` 运行时拼装加载,浏览器在**赋值那一刻**
+  //   就发出请求,而 observer 要等节点插入后的微任务才跑 —— 于是请求已经以跨源身份发出去、被 CORS 挡死。
+  //   实测证据:5 条 redditstatic concat chunk 全 net::ERR_FAILED + "blocked by CORS policy";
+  //   装上本陷阱后 CORS 报错 5→0、chunk 全部 200 走 /pdf/web/r/、自定义元素正常 hydrate。
+  try{
+    [[HTMLScriptElement,'src'],[HTMLImageElement,'src'],[HTMLLinkElement,'href'],
+     [HTMLIFrameElement,'src'],[HTMLSourceElement,'src'],[HTMLMediaElement,'src']].forEach(function(pair){
+      var C = pair[0], k = pair[1];
+      if(!C) return;
+      var d = Object.getOwnPropertyDescriptor(C.prototype, k);
+      if(!d || !d.set || !d.configurable) return;
+      Object.defineProperty(C.prototype, k, {
+        configurable: true, enumerable: d.enumerable,
+        get: function(){ return d.get ? d.get.call(this) : ''; },
+        set: function(v){
+          try{
+            if(this.getAttribute && this.getAttribute('data-rc-own')) return d.set.call(this, v);
+            if(C === HTMLIFrameElement){        // iframe:官方 embed 直连,其余走主文档镜像
+              var a0 = ABS(v);
+              if(a0 && a0.indexOf(location.origin) !== 0){
+                var emb = ['youtube.com/embed/','youtube-nocookie.com/embed/','player.bilibili.com',
+                           'player.vimeo.com','open.spotify.com/embed'].some(function(h){ return a0.indexOf(h)>=0; });
+                return d.set.call(this, emb ? a0 : ('/pdf/web/p/' + a0.replace('://','/')));
+              }
+              return d.set.call(this, v);
+            }
+            return d.set.call(this, RES(v));
+          }catch(_){ return d.set.call(this, v); }
+        }
+      });
+    });
+  }catch(_){}
+  // setAttribute 也是同一条路(有些库不用 property 赋值)
+  try{
+    var _sa = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(k, v){
+      try{
+        if((k === 'src' || k === 'href') && !(this.getAttribute && this.getAttribute('data-rc-own'))
+           && this.tagName !== 'A' && this.tagName !== 'FORM' && this.tagName !== 'IFRAME'){
+          return _sa.call(this, k, RES(v));
+        }
+      }catch(_){}
+      return _sa.call(this, k, v);
+    };
+  }catch(_){}
   // 动态插入的节点(懒加载图片/异步 <script>/后插 <link>)
   try{
     new MutationObserver(function(ms){
@@ -720,7 +768,9 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
       parent.postMessage({__rcweb:'nav', url: u.href}, '*');
     }catch(_){}
   }, true);
-  try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){}
+  function _ready(){ try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){} }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ready);
+  else _ready();
 })();
 </script>
 <script src="/static/pdf/web-immersive.js" data-rc-own="1"></script>
@@ -771,7 +821,11 @@ def _proxy_page(url: str):
     html = _re.sub(r"<base\b[^>]*>", "", html, flags=_re.I)
     _cache_raw = html                      # ★ 抽正文用**重写前**的原始 HTML(重写后 URL 全变代理链接)
     html = rewrite_html(html, final)       # ★ 根因修复:资源/CSS/srcset 全部改走我们的代理
-    base_tag = f'<script>location.__realBase={json.dumps(final)};</script>'
+    # ⚠ shim 必须在**页面自己的脚本之前**跑(审计实锤):原来 `html += _PROXY_INJECT` 挂在文档末尾,
+    #   而 reddit 的模块加载器在第 ~34000 字节就执行 `script.src = 绝对地址` —— 浏览器在赋值那刻
+    #   就发请求,setter 陷阱那时还没装上,于是照样跨源被 CORS 挡死(实测 CORS 报错 6 条不减)。
+    #   现在整块注入提到 <head> 最前,__realBase 也一并前置(RES() 依赖它解析相对地址)。
+    base_tag = f'<script>location.__realBase={json.dumps(final)};</script>' + _PROXY_INJECT
     if _re.search(r"<head[^>]*>", html, _re.I):
         html = _re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=_re.I)
     else:
@@ -839,8 +893,7 @@ def _proxy_page(url: str):
         _web_cache_put(final, _cache_raw)
     except Exception:
         pass
-    html += _PROXY_INJECT
-    resp = make_response(html)
+    resp = make_response(html)   # 注入已前置到 <head>,这里不再追加
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["Cache-Control"] = "no-store"
     for h in list(resp.headers.keys()):
@@ -1204,6 +1257,43 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                    {t: z for t, z in zip(texts, zhs) if t and z})
         return jsonify({"ok": True, "zh": zhs,
                         "translated": sum(1 for z in zhs if z), "total": len(texts)})
+
+    # ⚠ 审计实锤(2026-07-19):挂 404 处理器**救不全**。泄漏路径一旦与 webapp 的**真实路由**撞名,
+    #   根本不会 404 —— 实测 /login /control/ /insights/ /dashboard/ /register /profile/ /admin/
+    #   /history/ 全部返回 200,于是**我们自己的页面被渲染进了别人的网页里**(既荒谬又像钓鱼)。
+    #   改成 before_app_request 无条件拦截,不再依赖"必须先 404"。
+    _RESCUE_SKIP = ("/pdf/", "/static/pdf/", "/static/qa/", "/static/icons/")
+
+    @bp.before_app_request
+    def _leak_rescue_early():
+        try:
+            p = request.path or ""
+            if any(p.startswith(x) for x in _RESCUE_SKIP):
+                return None          # 我们自己的应用与注入资源,绝不能被当成泄漏(踩过 4 次)
+            ref = request.headers.get("Referer") or ""
+            i = ref.find("/pdf/web/")
+            if i < 0:
+                return None
+            rest = ref[i + len("/pdf/web/"):]
+            kind, _, tail = rest.partition("/")
+            if kind not in ("p", "r"):
+                return None          # 只认代理文档;/pdf/web/live(外壳)发起的请求不算泄漏
+            src = unmirror(tail.split("?")[0], "")
+            if not src:
+                return None
+            pr = urlparse(src)
+            real = f"{pr.scheme}://{pr.netloc}{p}"
+            if request.query_string:
+                real += "?" + request.query_string.decode("utf-8", "ignore")
+            # ⚠ 第二处实锤:原来一律走 _pxp(主文档镜像)。可泄漏的多是 **子资源**(claude.ai 的
+            #   /cdn-cgi/*.js、Next.js 的 /_next/*.css)——主文档通道遇到非 HTML 会吐一张 HTML
+            #   错误页,浏览器于是报 "MIME type (text/html) is not executable"。
+            #   按 Sec-Fetch-Dest 分流才对(该头能穿过 nginx 到 Flask,已实测)。
+            dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
+            as_doc = dest in ("document", "iframe", "frame", "")
+            return redirect(_pxp(real) if as_doc else _pxr(real))
+        except Exception:
+            return None
 
     @bp.app_errorhandler(404)
     def _leak_rescue(e):
