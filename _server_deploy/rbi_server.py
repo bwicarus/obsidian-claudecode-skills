@@ -109,6 +109,27 @@ async def _context(uid: str):
         return ctx
 
 
+_RECORD_JS = """() => {
+  if (window.__rbiStop) { try { window.__rbiStop(); } catch(e){} }
+  window.__rbiStop = rrweb.record({
+    emit(ev){ try{ window.__rrwebEmit(JSON.stringify(ev)); }catch(e){} },
+    inlineStylesheet: true, recordCanvas: false, collectFonts: false,
+    sampling: { mousemove: false, scroll: 150, media: 800, input: 'last' }
+  });
+  window.__rbiMirror = rrweb.record.mirror;   // node↔id 映射,供交互回传按 id 精确定位(坐标不可靠)
+}"""
+
+
+async def _inject_record(page, ws):
+    """注入 rrweb record(首屏 + 每次整页导航后)。幂等:先停旧的再启新的。"""
+    try:
+        await page.add_script_tag(content=RRWEB)
+        await page.evaluate(_RECORD_JS)
+        await ws.send(json.dumps({"t": "nav", "url": page.url}))
+    except Exception:
+        pass
+
+
 async def _serve(ws):
     """一个 WS 连接 = 一个会话 = 一个 page。断开则关 page。"""
     page = None
@@ -143,6 +164,15 @@ async def _serve(ws):
                             if page is None or page.is_closed():
                                 page = await ctx.new_page()
                                 await page.expose_binding("__rrwebEmit", _emit)
+                                # ⚠ 每页**单次** record(靠 domcontentloaded 钩子统一):重复 record 会重置
+                                #   node id 空间 → 客户端 replay 的 id ≠ Pi record 的 id → 点击按 id 定位全错。
+                                async def _rec_on_ready():
+                                    try:
+                                        await page.wait_for_timeout(1600)   # 等 CF 挑战 + 首屏 hydrate
+                                        await _inject_record(page, ws)
+                                    except Exception:
+                                        pass
+                                page.on("domcontentloaded", lambda: asyncio.create_task(_rec_on_ready()))
                             break
                         except Exception:
                             if page is not None:
@@ -155,27 +185,56 @@ async def _serve(ws):
                                 _CTX.pop(uid, None)
                             if _attempt == 2:
                                 raise
+                            # 整页导航(点链接跳新 URL)后要**自动重录**新页面 —— 挂一次 load 钩子
+                            if not getattr(page, "_rbi_load_hooked", False):
+                                page._rbi_load_hooked = True
+                                def _on_load():
+                                    asyncio.create_task(_inject_record(page, ws))
+                                page.on("load", lambda: _on_load())
                     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                    # 等一下 Cloudflare 挑战 + 首屏 hydrate,再启动录制(录到稳定后的 DOM)
-                    await page.wait_for_timeout(1800)
-                    await page.add_script_tag(content=RRWEB)
-                    await page.evaluate("""() => {
-                      if (window.__rbiStop) { try { window.__rbiStop(); } catch(e){} }
-                      window.__rbiStop = rrweb.record({
-                        emit(ev){ try{ window.__rrwebEmit(JSON.stringify(ev)); }catch(e){} },
-                        inlineStylesheet: true, recordCanvas: false, collectFonts: false,
-                        sampling: { mousemove: false, scroll: 150, media: 800,
-                                    input: 'last' }
-                      });
-                    }""")
+                    # record 由 domcontentloaded 钩子单次处理(见上);这里只报当前 URL
                     await ws.send(json.dumps({"t": "nav", "url": page.url}))
                 except Exception as ex:
                     try:
                         await ws.send(json.dumps({"t": "err", "msg": str(ex)[:200]}))
                     except Exception:
                         pass
+            elif cmd == "clicknode" and page is not None:
+                # ★ 按 rrweb 节点 id 点击(坐标会因客户端/Pi 布局差错位;id 是 record↔replay 共享的,精确)
+                nid = int(msg.get("id") or 0)
+                if nid:
+                    try:
+                        await page.evaluate("""(id)=>{ const m=window.__rbiMirror; if(!m) return;
+                          const n=m.getNode(id); if(!n) return;
+                          if(n.focus) { try{ n.focus(); }catch(e){} }
+                          if(n.click) n.click();
+                          else if(n.dispatchEvent) n.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); }""", nid)
+                    except Exception:
+                        pass
+            elif cmd == "click" and page is not None:
+                # ★ 网页原生交互回传(不变量3):在重建 DOM 上的点击 → Pi 真 Chrome 对应坐标点击。
+                #   坐标是 rrweb iframe 内容坐标系(录制 viewport 1280×900),直接对应真 Chrome。
+                #   点 <a> → 真 Chrome 导航 → load 钩子自动重录;点按钮/输入框 → 聚焦/展开 → 增量流回。
+                try:
+                    await page.mouse.click(float(msg.get("x", 0)), float(msg.get("y", 0)))
+                except Exception:
+                    pass
+            elif cmd == "type" and page is not None:
+                # 键盘输入回传:聚焦的输入框已由 click 在真 Chrome 里聚焦,直接打字
+                try:
+                    txt = str(msg.get("text") or "")
+                    if msg.get("key"):
+                        await page.keyboard.press(str(msg["key"]))
+                    elif txt:
+                        await page.keyboard.type(txt)
+                except Exception:
+                    pass
+            elif cmd == "scroll" and page is not None:
+                try:
+                    await page.mouse.wheel(0, float(msg.get("dy", 0)))
+                except Exception:
+                    pass
             elif cmd == "nav" and page is not None:
-                # 阶段1:点链接 → 重开(重新 goto + 重新 record);阶段2 换 CDP Input
                 url = (msg.get("url") or "").strip()
                 if url:
                     try:

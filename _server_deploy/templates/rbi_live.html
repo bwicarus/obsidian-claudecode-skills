@@ -17,7 +17,10 @@
   #rbi-url:focus{border-color:#3b6db5}
   #rbi-status{position:fixed;bottom:8px;left:8px;z-index:120;background:rgba(13,19,34,.9);color:#7fb2ff;font-size:11px;padding:3px 8px;border-radius:8px;pointer-events:none;max-width:70vw;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
   #stage{position:absolute;left:0;right:0;bottom:0;top:calc(46px + env(safe-area-inset-top));background:#fff;overflow:auto;-webkit-overflow-scrolling:touch}
-  #stage iframe{border:0;display:block;width:100%!important}
+  /* ⚠ iframe 必须保持 rrweb 录制的 viewport 尺寸(1280×900),不能 width:100% reflow —— 否则
+     客户端布局 ≠ Pi 真 Chrome 布局,点击坐标(iframe 内容坐标系)会错位、Pi 点不中链接。 */
+  #stage{display:flex;justify-content:center}
+  #stage iframe{border:0;display:block}
   #rbi-load{position:absolute;inset:0;top:calc(46px + env(safe-area-inset-top));display:flex;align-items:center;justify-content:center;background:#0a0e1a;color:#8a9bb4;font-size:14px;z-index:60}
   .rbi-spin{width:26px;height:26px;border:3px solid #26324d;border-top-color:#5a96f0;border-radius:50%;animation:rbisp 1s linear infinite;margin-right:10px}
   @keyframes rbisp{to{transform:rotate(360deg)}}
@@ -64,7 +67,7 @@
         if(ev.type===2){ gotFull=true; load.style.display='none';
           var dt = _openT ? ((Date.now()-_openT)/1000).toFixed(1)+'s' : '';
           setSt('已重建 DOM'+(dt?' · 跳转 '+dt:''));
-          setTimeout(hookLinks, 250);   // 重建 iframe 就绪后,拦截页内链接点击(回传 Pi 导航)
+          setTimeout(hookInteract, 250);   // 重建 iframe 就绪后,拦截页内链接点击(回传 Pi 导航)
         }
       } else if(m.t==='nav'){
         CFG.url=m.url; urlbox.value=m.url; setSt('打开 '+m.url);
@@ -82,21 +85,63 @@
     _openT=Date.now(); load.style.display='flex'; setSt('Pi 加载中…'); freshReplayer();
     try{ ws.send(JSON.stringify({cmd:'open', url:u, uid:CFG.uid})); }catch(_){}
   }
-  // 拦截 rrweb 重建 DOM 里的链接点击 → 回传 Pi 真 Chrome 导航(不变量 3:网页原生交互回传)。
-  // 重建的 DOM 在 replayer 的 iframe 内,链接默认会导航到原站被 X-Frame 挡,必须拦。
-  function hookLinks(){
+  // ★ 交互回传(不变量3):rrweb Replayer 是"回放观看"模式,重建的 DOM **不接受任何交互**
+  //   (点链接/搜索框都没反应的根因)。所以把用户在重建 DOM 上的点击/输入/滚动**回传 Pi 真 Chrome**
+  //   执行,产生的变化再顺 rrweb 增量流回。坐标用 iframe 内容坐标系(录制 viewport,直接对应真 Chrome)。
+  //   ⚠ 查词是"客户端处理不回传"(不变量2),但那要区分选区 vs 单击 —— 阶段1b 做;现在单击全回传。
+  function hookInteract(){
     var ifr = stage.querySelector('iframe');
     if(!ifr || !ifr.contentDocument || ifr.__rbiHooked) return;
     ifr.__rbiHooked = true;
-    ifr.contentDocument.addEventListener('click', function(e){
-      var a = e.target && e.target.closest && e.target.closest('a[href]');
-      if(!a) return;
-      var href = a.getAttribute('href') || '';
-      if(!href || href.charAt(0)==='#' || /^(javascript|mailto|tel):/i.test(href)) return;
+    // ★ 根因:rrweb Replayer 回放模式默认给 iframe 设 pointer-events:none(防交互干扰回放),
+    //   真实点击落到外层 wrapper 进不了 iframe → 点什么都没反应。强制开回可交互。
+    ifr.style.setProperty('pointer-events', 'auto', 'important');
+    var _mouse = stage.querySelector('.replayer-mouse');
+    if(_mouse) _mouse.style.setProperty('pointer-events', 'none', 'important');   // 假鼠标层别挡点击
+    var d = ifr.contentDocument;
+    // 点击 → 回传**节点 id**(坐标会因客户端/Pi 布局差错位;rrweb node id 精确)
+    var mir = (replayer.getMirror ? replayer.getMirror() : null);
+    function sendClick(e){
+      // 有选区(拖选查词)时不回传(阶段1b 接查词);单击才回传网页交互
+      try{ var sel=(d.getSelection?d.getSelection():null); if(sel && String(sel).length>1) return; }catch(_){}
+      var node = e.target;
+      // 点在链接/按钮/输入等交互元素上,取最近的交互祖先(点的可能是链接里的 <b>)
+      var t = node.closest ? (node.closest('a,button,input,textarea,select,[role=button],[onclick],label') || node) : node;
+      var id = mir ? mir.getId(t) : 0;
+      if(!id) return;
       e.preventDefault(); e.stopPropagation();
-      var abs; try{ abs = new URL(href, CFG.url).href; }catch(_){ return; }
-      open(abs);              // 走同一条 open:Pi goto 新 URL → 新 DOM 流回 → 重建
-    }, true);
+      try{ ws.send(JSON.stringify({cmd:'clicknode', id:id})); }catch(_){}
+      setSt('点击回传 #'+id+' '+(t.tagName||''));
+      _lastClickInput = /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable;
+      if(_lastClickInput){ setTimeout(focusKbd, 30); }   // 点了输入框 → 弹本地键盘代收
+    }
+    d.addEventListener('click', sendClick, true);
+    // 滚动 → 回传(让懒加载/滚动位置在 Pi 侧同步)
+    var _scrT=null;
+    d.addEventListener('scroll', function(){ if(_scrT) return;
+      _scrT=setTimeout(function(){ _scrT=null;
+        try{ ws.send(JSON.stringify({cmd:'scroll', dy:(d.scrollingElement?d.scrollingElement.scrollTop:0)})); }catch(_){}
+      }, 200); }, true);
+  }
+
+  // 输入:重建 DOM 的 input 聚焦**不会弹 iPad 键盘**(不是真实焦点)。用一个隐藏真 input 在用户手势内
+  //   聚焦弹键盘,打的字回传 Pi 的已聚焦输入框。
+  var _lastClickInput=false, _kbd=null;
+  function focusKbd(){
+    if(!_kbd){
+      _kbd=document.createElement('input');
+      _kbd.style.cssText='position:fixed;left:-1000px;top:0;opacity:0;height:1px';
+      document.body.appendChild(_kbd);
+      _kbd.addEventListener('input', function(){
+        var v=_kbd.value; _kbd.value='';
+        if(v) try{ ws.send(JSON.stringify({cmd:'type', text:v})); }catch(_){}
+      });
+      _kbd.addEventListener('keydown', function(e){
+        if(e.key==='Enter'||e.key==='Backspace'){ e.preventDefault();
+          try{ ws.send(JSON.stringify({cmd:'type', key:e.key==='Enter'?'Enter':'Backspace'})); }catch(_){} }
+      });
+    }
+    try{ _kbd.focus(); }catch(_){}
   }
   connect();
 
