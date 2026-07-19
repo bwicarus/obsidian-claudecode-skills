@@ -35,7 +35,9 @@
     }
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": ["background.js"],
+    "persistent": false
   },
   "action": {
     "default_title": "BW 网页伴读",
