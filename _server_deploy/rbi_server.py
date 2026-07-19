@@ -205,11 +205,14 @@ async def _serve(ws):
                 nid = int(msg.get("id") or 0)
                 if nid:
                     try:
-                        await page.evaluate("""(id)=>{ const m=window.__rbiMirror; if(!m) return;
-                          const n=m.getNode(id); if(!n) return;
-                          if(n.focus) { try{ n.focus(); }catch(e){} }
+                        r = await page.evaluate("""(id)=>{ const m=window.__rbiMirror; if(!m) return {e:'nomirror'};
+                          const n=m.getNode(id); if(!n) return {e:'nonode'};
+                          const tag=n.tagName||'?', href=(n.href||n.getAttribute&&n.getAttribute('href'))||'';
+                          if(n.focus){ try{ n.focus(); }catch(e){} }
                           if(n.click) n.click();
-                          else if(n.dispatchEvent) n.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); }""", nid)
+                          else if(n.dispatchEvent) n.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));
+                          return {tag, href}; }""", nid)
+                        await ws.send(json.dumps({"t": "clickres", "r": r}))
                     except Exception:
                         pass
             elif cmd == "click" and page is not None:

@@ -72,6 +72,8 @@
       } else if(m.t==='nav'){
         CFG.url=m.url; urlbox.value=m.url; setSt('打开 '+m.url);
         try{ history.replaceState(null,'','/pdf/web/rbi-live?url='+encodeURIComponent(m.url)); }catch(_){}
+      } else if(m.t==='clickres'){ var r=m.r||{};
+        setSt('Pi点击: '+(r.e?('✗'+r.e):(r.tag+(r.href?(' →'+String(r.href).slice(0,40)):''))));
       } else if(m.t==='err'){ load.style.display='none'; setSt('✗ '+m.msg); }
     };
     ws.onclose=function(){ setSt('断开,重连中…'); if(reconnectT) return;
@@ -105,16 +107,20 @@
     // 点击 → 回传**节点 id**(坐标会因客户端/Pi 布局差错位;rrweb node id 精确)
     var mir = (replayer.getMirror ? replayer.getMirror() : null);
     function sendClick(e){
-      // 有选区(拖选查词)时不回传(阶段1b 接查词);单击才回传网页交互
-      try{ var sel=(d.getSelection?d.getSelection():null); if(sel && String(sel).length>1) return; }catch(_){}
       var node = e.target;
       // 点在链接/按钮/输入等交互元素上,取最近的交互祖先(点的可能是链接里的 <b>)
-      var t = node.closest ? (node.closest('a,button,input,textarea,select,[role=button],[onclick],label') || node) : node;
+      var t = node.closest ? (node.closest('a,button,input,textarea,select,[role=button],[onclick],label,summary,[tabindex]') || node) : node;
+      var interactive = /^(A|BUTTON|INPUT|TEXTAREA|SELECT|SUMMARY|LABEL)$/.test(t.tagName||'')
+                        || (t.getAttribute && t.getAttribute('role')==='button') || (t.onclick!=null);
+      // 交互元素一定回传(链接必须点得动);只有正文文字点击 + 有选区才豁免(查词,不变量2)
+      if(!interactive){
+        try{ var sel=(d.getSelection?d.getSelection():null); if(sel && String(sel).length>1) return; }catch(_){}
+      }
       var id = mir ? mir.getId(t) : 0;
-      if(!id) return;
+      if(!id){ setSt('点击:节点无 id('+(t.tagName||'?')+')'); return; }
       e.preventDefault(); e.stopPropagation();
       try{ ws.send(JSON.stringify({cmd:'clicknode', id:id})); }catch(_){}
-      setSt('点击回传 #'+id+' '+(t.tagName||''));
+      setSt('点击 #'+id+' '+(t.tagName||'')+' → Pi…');
       _lastClickInput = /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable;
       if(_lastClickInput){ _inputEl=t; _inputId=id; setTimeout(focusKbd, 30); }   // 记住输入框,回车时提交
     }
@@ -196,6 +202,9 @@
     if(_fitT) clearInterval(_fitT);
     function fit(){
       try{
+        // ⚠ rrweb 回放模式反复把 iframe 设 pointer-events:none → 点击进不去(用户实测"所有点击没触发")。
+        //   一次性 setProperty 会被它后续重建覆盖,必须在定时里持续强制。
+        if(ifr.style.pointerEvents!=='auto') ifr.style.setProperty('pointer-events','auto','important');
         if(!ifr.contentDocument) return;
         var se=ifr.contentDocument.scrollingElement||ifr.contentDocument.documentElement;
         var h=se ? se.scrollHeight : 0;
