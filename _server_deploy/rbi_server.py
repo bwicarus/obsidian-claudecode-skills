@@ -131,6 +131,81 @@ async def _inject_record(page, ws):
         pass
 
 
+# ── 通用事件透传(信号三角):客户端捕获所有原生交互 → {cmd:ev,t,id,…} → 这里统一分发 ──
+# workflow 实测结论:合成事件 isTrusted=false,被站点 isTrusted 门拒绝 + 不激活 CSS :hover;
+# 必须走 **CDP Input**(真实输入,isTrusted=true)。坐标一律 **Pi 侧** 从 node id 算 getBoundingClientRect
+# (视口 CSS 坐标,已含滚动),客户端永不发坐标 → 彻底消灭布局错位。node id 会因框架重渲染失效,每次现取判空。
+async def _node_rect(page, nid: int):
+    """Pi 侧算节点视口中心坐标;离屏先 scrollIntoView;失效返回 None。"""
+    try:
+        return await page.evaluate("""(id)=>{ const m=window.__rbiMirror; if(!m) return null;
+          const n=m.getNode(id); if(!n||!n.getBoundingClientRect) return null;
+          let r=n.getBoundingClientRect();
+          if(r.width===0 && r.height===0) return null;
+          if(r.bottom<0 || r.top>innerHeight){ try{ n.scrollIntoView({block:'center'}); }catch(e){} r=n.getBoundingClientRect(); }
+          return {x:r.left+r.width/2, y:r.top+r.height/2}; }""", nid)
+    except Exception:
+        return None
+
+
+_KEYMAP = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, "Delete": 46,
+           "ArrowUp": 38, "ArrowDown": 40, "ArrowLeft": 37, "ArrowRight": 39,
+           "Home": 36, "End": 35, "PageUp": 33, "PageDown": 34}
+
+
+async def _rbi_dispatch(page, cdp, t: str, nid: int, msg: dict):
+    """一个分发器取代原来 clicknode/setinput/submitform/scroll/click/type 六个分支。
+    三后端:CDP-trusted(点击/hover/功能键)/ value-set(文本/change)/ node 方法(scroll/submit/focus)。"""
+    try:
+        if t in ("click", "pointerup"):
+            rect = await _node_rect(page, nid) if nid else None
+            if rect:
+                x, y = rect["x"], rect["y"]
+                await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+                await cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
+                                                            "button": "left", "clickCount": 1})
+                await cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
+                                                            "button": "left", "clickCount": 1})
+        elif t == "hover":
+            rect = await _node_rect(page, nid) if nid else None
+            if rect:
+                await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": rect["x"], "y": rect["y"]})
+        elif t == "key":
+            key = str(msg.get("key") or "")
+            if nid:
+                await page.evaluate("(id)=>{const n=window.__rbiMirror.getNode(id); if(n&&n.focus){try{n.focus()}catch(e){}}}", nid)
+            vk = _KEYMAP.get(key, 0)
+            base = {"key": key, "code": str(msg.get("code") or key),
+                    "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
+            await cdp.send("Input.dispatchKeyEvent", {**base, "type": "keyDown"})
+            await cdp.send("Input.dispatchKeyEvent", {**base, "type": "keyUp"})
+        elif t == "input":
+            # 文本走值同步(不逐键,免 IME 逐字坑)
+            await page.evaluate("""(a)=>{ const n=window.__rbiMirror.getNode(a.id); if(!n) return;
+              try{ n.focus(); }catch(e){} n.value=a.value;
+              n.dispatchEvent(new Event('input',{bubbles:true})); }""", {"id": nid, "value": str(msg.get("value") or "")})
+        elif t == "change":
+            await page.evaluate("""(a)=>{ const n=window.__rbiMirror.getNode(a.id); if(!n) return;
+              if(a.checked!==undefined) n.checked=a.checked;
+              if(a.value!==undefined) n.value=a.value;
+              n.dispatchEvent(new Event('change',{bubbles:true})); }""",
+                                {"id": nid, "checked": msg.get("checked"), "value": msg.get("value")})
+        elif t == "submit":
+            # Pi 侧真提交:真 Chrome 带隐藏/CSRF/JS 填充字段导航(修客户端构造 URL 漏字段的 bug)
+            await page.evaluate("""(id)=>{ const n=window.__rbiMirror.getNode(id); if(!n) return;
+              const f = n.tagName==='FORM' ? n : n.form; if(!f) return;
+              if(f.requestSubmit) f.requestSubmit(); else f.submit(); }""", nid)
+        elif t == "scroll":
+            await page.evaluate("""(a)=>{ if(a.id){ const n=window.__rbiMirror.getNode(a.id);
+              if(n && n.scrollTo) n.scrollTo(a.left, a.top); } else window.scrollTo(a.left, a.top); }""",
+                                {"id": nid, "top": float(msg.get("top") or 0), "left": float(msg.get("left") or 0)})
+        elif t == "focus":
+            if nid:
+                await page.evaluate("(id)=>{const n=window.__rbiMirror.getNode(id); if(n&&n.focus){try{n.focus()}catch(e){}}}", nid)
+    except Exception:
+        pass
+
+
 async def _serve(ws):
     """一个 WS 连接 = 一个会话 = 一个 page。断开则关 page。"""
     page = None
@@ -165,6 +240,8 @@ async def _serve(ws):
                             if page is None or page.is_closed():
                                 page = await ctx.new_page()
                                 await page.expose_binding("__rrwebEmit", _emit)
+                                cdp = await ctx.new_cdp_session(page)   # 通用事件透传的 CDP Input 通道
+                                page._rbi_cdp = cdp
                                 # ⚠ 每页**单次** record(靠 domcontentloaded 钩子统一):重复 record 会重置
                                 #   node id 空间 → 客户端 replay 的 id ≠ Pi record 的 id → 点击按 id 定位全错。
                                 async def _rec_on_ready():
@@ -200,6 +277,10 @@ async def _serve(ws):
                         await ws.send(json.dumps({"t": "err", "msg": str(ex)[:200]}))
                     except Exception:
                         pass
+            elif cmd == "ev" and page is not None:
+                # ★ 通用事件透传:一个入口取代逐个命令(信号三角)
+                await _rbi_dispatch(page, getattr(page, "_rbi_cdp", None),
+                                    str(msg.get("t") or ""), int(msg.get("id") or 0), msg)
             elif cmd == "clicknode" and page is not None:
                 # ★ 按 rrweb 节点 id 点击(坐标会因客户端/Pi 布局差错位;id 是 record↔replay 共享的,精确)
                 nid = int(msg.get("id") or 0)

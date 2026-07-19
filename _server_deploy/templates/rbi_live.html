@@ -119,8 +119,8 @@
       var id = mir ? mir.getId(t) : 0;
       if(!id){ setSt('点击:节点无 id('+(t.tagName||'?')+')'); return; }
       e.preventDefault(); e.stopPropagation();
-      try{ ws.send(JSON.stringify({cmd:'clicknode', id:id})); }catch(_){}
-      setSt('点击 #'+id+' '+(t.tagName||'')+' → Pi…');
+      try{ ws.send(JSON.stringify({cmd:'ev', t:'click', id:id})); }catch(_){}   // CDP 真实点击
+      setSt('点击 #'+id+' '+(t.tagName||'')+' → Pi');
       _lastClickInput = /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable;
       if(_lastClickInput){ _inputEl=t; _inputId=id; setTimeout(focusKbd, 30); }   // 记住输入框,回车时提交
     }
@@ -135,13 +135,18 @@
       _kbd=document.createElement('input');
       _kbd.style.cssText='position:fixed;left:-1000px;top:0;opacity:0;height:1px';
       document.body.appendChild(_kbd);
-      // 每敲一个字同步进 Pi 的输入框(逐字 type,保证 Pi 侧内容跟手)
+      // 文本走值同步(免 IME 逐字坑);功能键走 CDP 真实按键
       _kbd.addEventListener('input', function(){
-        var v=_kbd.value;
-        if(_inputId) try{ ws.send(JSON.stringify({cmd:'setinput', id:_inputId, text:v})); }catch(_){}
+        if(_inputId) try{ ws.send(JSON.stringify({cmd:'ev', t:'input', id:_inputId, value:_kbd.value})); }catch(_){}
       });
       _kbd.addEventListener('keydown', function(e){
-        if(e.key==='Enter'){ e.preventDefault(); submitInput(); }
+        if(!_inputId) return;
+        if(e.key==='Enter'){ e.preventDefault();
+          try{ ws.send(JSON.stringify({cmd:'ev', t:'input', id:_inputId, value:_kbd.value})); }catch(_){}  // 先同步最新值
+          try{ ws.send(JSON.stringify({cmd:'ev', t:'key', key:'Enter', code:'Enter', id:_inputId})); }catch(_){}  // 再 CDP 真回车→原生提交
+        } else if(e.key==='Backspace'||e.key==='Tab'||e.key==='Escape'||e.key.indexOf('Arrow')===0){
+          try{ ws.send(JSON.stringify({cmd:'ev', t:'key', key:e.key, code:e.code||e.key, id:_inputId})); }catch(_){}
+        }
       });
     }
     if(_inputEl){ try{ _kbd.value = _inputEl.value || ''; }catch(_){ _kbd.value=''; } }
@@ -178,7 +183,7 @@
   stage.addEventListener('scroll', function(){
     if(_scrollT) return;
     _scrollT=setTimeout(function(){ _scrollT=null;
-      try{ ws.send(JSON.stringify({cmd:'scroll', y:Math.round(stage.scrollTop)})); }catch(_){}
+      try{ ws.send(JSON.stringify({cmd:'ev', t:'scroll', id:0, top:Math.round(stage.scrollTop)})); }catch(_){}
     }, 160);
   }, {passive:true});
 
