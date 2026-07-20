@@ -2440,14 +2440,20 @@ def _t_search_image(args, ctx):
                 "note": "这些关键词没搜到图。**换另一种语言或更通用的词**再调一次"
                         "(日本特有事物用日语原名,通用/西方概念用英文通称/学名);"
                         "再搜不到就如实告诉用户没找到合适的图,绝不编图片链接。"}
+    for r in found:   # 资产注册表(用户设计):每图发编号,AI 上下文只见 #id+元数据;对话中直接写 #id 引用(前端就地渲染)
+        try:
+            r["id"] = _pdf()._asset_reg("img", r["image_url"],
+                                        {"concept": r.get("concept"), "source": r.get("source"), "matched_query": r.get("matched_query"), "page_url": r.get("page_url")})
+        except Exception:
+            r["id"] = ""
     return {"ok": True, "count": len(found),
-            "found_brief": [f"{r['concept']}(命中词:{r.get('matched_query') or '?'})" for r in found],   # 一行/张:喂回模型用它
+            "found_brief": [f"#{r.get('id') or '?'} {r['concept']}(命中词:{r.get('matched_query') or '?'})" for r in found],   # 编号=句柄:AI 之后在回答/工具里用 #id 指这张图
             "missed": [r["concept"] for r in results if not r["found"]],   #   (images 的长 URL 会把喂回截断预算吃光——模型分不清哪些找到了的根因,用户实锤)
-            "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"],
+            "images": [{"id": r.get("id", ""), "concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"],
                         "source": r.get("source", ""), "matched_query": r.get("matched_query", "")} for r in found],
             "_note": "**只有 found_brief 列出的搜到了**;missed 里的没搜到——用户再要 missed 里的就换词重搜,"
-                     "绝不说'已经在屏幕上'。文字回答要插图就用 markdown ![简短中文说明](image_url) 放对应概念旁;"
-                     "missed 的别硬配、更别编图片链接。"}
+                     "绝不说'已经在屏幕上'。回答中要展示某张图,直接写它的编号(如 #img_ab12ef,独立成词)——"
+                     "界面会自动渲染成图片本身;**绝不要展开 URL、绝不自编编号**;missed 的别硬配。"}
 
 
 def _optimize_video_query(topic, r=None):

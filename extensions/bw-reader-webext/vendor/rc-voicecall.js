@@ -1081,7 +1081,7 @@
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
-          '<img class="vc-ig-img" data-i="' + i + '" src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
+          '<img class="vc-ig-img" data-i="' + i + '"' + (it.aid ? ' data-aid="' + esc(it.aid) + '"' : '') + ' src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
           (it.title ? '<div class="vc-ig-t">' + esc(it.title) + '</div>' : '') + '</div>';
       }).join('') + '</div>';
     } else if (k === 'videos') {
@@ -1359,8 +1359,8 @@
       kind: 'images', title: '配图 × ' + imgs.length,
       brief: imgs.map(function (im) { return im.title || im.concept || '图'; }).join('、').slice(0, 120),
       data: { items: imgs.filter(function (im) { return im && im.image_url; }).map(function (im) {
-        return { url: im.image_url, title: im.title || im.concept || '', page: im.page_url || '',
-                 src: im.source || '', q: im.matched_query || '' };
+        return { url: im.image_url, aid: im.id || '', title: im.title || im.concept || '', page: im.page_url || '',
+                 src: im.source || '', q: im.matched_query || '' };   // aid=资产编号(拖出贴页用内链→贴页触发本地化)
       }) }
     });
   }
@@ -2111,7 +2111,8 @@
       // 元数据(用户拍板:图的元数据跟着进卡):alt + 图网格标题(.vc-ig-t)
       var _cap = was.img.alt || '';
       try { var _cell = was.img.closest('.vc-ig-cell'); var _t = _cell && _cell.querySelector('.vc-ig-t'); if (_t && _t.textContent.trim()) _cap = _t.textContent.trim(); } catch (e) {}
-      var _ih = '<div class="vc-imgdrop"><img src="' + String(was.img.src).replace(/"/g, '&quot;') + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
+      var _asrc = (was.img.dataset && was.img.dataset.aid) ? ('/pdf/api/asset/' + was.img.dataset.aid) : String(was.img.src).replace(/"/g, '&quot;');   // 编号内链:贴页即触发后端本地化,重开不拉外链
+      var _ih = '<div class="vc-imgdrop"><img src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
       // ① 落在另一张卡上 → 图放进那张卡;**同编号(cid)所有实例同步加**(用户拍板);收藏夹条目持久化
       try {
         var _tgt = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -2133,7 +2134,7 @@
       try {
         if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt)
           RC.stickynote.createHtmlAt(ev.clientX, ev.clientY, {
-            content: '<img src="' + String(was.img.src).replace(/"/g, '&quot;') + '" style="max-width:100%;border-radius:8px;display:block">' + (_cap ? '<div style="font-size:11px;opacity:.7;margin-top:3px">' + esc(_cap) + '</div>' : ''),
+            content: '<img src="' + _asrc + '" style="max-width:100%;border-radius:8px;display:block">' + (_cap ? '<div style="font-size:11px;opacity:.7;margin-top:3px">' + esc(_cap) + '</div>' : ''),
             isHtml: true, label: _cap || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
       } catch (e) {}
     }, true);

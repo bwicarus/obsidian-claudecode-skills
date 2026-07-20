@@ -6812,6 +6812,10 @@ def pdf_api_notes():
         if _cid:   # upsert:补投重放不重复建
             items = [x for x in items if x.get("id") != _cid]
         items.append(n); _notes_save(rel, items)
+        try:   # 贴页=资产本地化时机(用户拍板):便签里引用的 #asset 后台下载,之后打开走本地不拉外链
+            _asset_localize_async(_asset_ids_in(json.dumps(n.get("html") or {}, ensure_ascii=False)))
+        except Exception:
+            pass
         return jsonify({"ok": True, "id": n["id"], "note": n})
     # PATCH:字段级合并(anchor 移动/text 编辑/颜色/尺寸/折叠态/笔画 各自独立更新)
     nid = (body.get("id") or "").strip()
@@ -6838,6 +6842,10 @@ def pdf_api_notes():
         n["card"] = body["card"] if isinstance(body.get("card"), dict) else None   # 卡片便签内容更新(传 null → 移除)
     if "html" in body:
         n["html"] = body["html"] if isinstance(body.get("html"), dict) else None   # 通用卡便签内容更新
+        try:
+            _asset_localize_async(_asset_ids_in(json.dumps(n.get("html") or {}, ensure_ascii=False)))
+        except Exception:
+            pass
     if "iar" in body:
         try:
             n["iar"] = float(body["iar"]) if body.get("iar") else None   # 手写锚定宽高比(letterbox 防变形)
@@ -6846,6 +6854,106 @@ def pdf_api_notes():
     n["updated"] = now
     _notes_save(rel, items)
     return jsonify({"ok": True, "note": n})
+
+
+# ── 资产注册表(用户设计 2026-07-20/21:统一编号规则)────────────────────────────
+# 每个外部媒体资产(搜到的图等)发唯一编号 #img_xxxxxx;AI 上下文只见编号+元数据(URL/图片本身零进上下文);
+# AI 对话中直接写 #编号 引用,前端见到就地渲染;程序按编号解析(/pdf/api/asset/<id>:local→本地文件,无→302 外链);
+# 贴页(便签保存)时后台下载本地化 → 之后打开走本地+immutable 不拉外链(防失效/慢)。同 URL 复用同编号(防膨胀)。
+_ASSET_DIR = CLAUDE_DIR / "state" / "assets"
+_ASSET_REG_PATH = _ASSET_DIR / "registry.json"
+_ASSET_LOCK = __import__("threading").Lock()
+
+
+def _asset_load() -> dict:
+    try:
+        return json.loads(_ASSET_REG_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _asset_save(d: dict):
+    try:
+        _ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        _ASSET_REG_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:
+        pass
+
+
+def _asset_reg(kind: str, url: str, meta: dict | None = None) -> str:
+    """登记资产 → 编号(服务端发放,AI 永远不自编;同 URL 复用同编号)。"""
+    with _ASSET_LOCK:
+        d = _asset_load()
+        for aid, e in d.items():
+            if e.get("url") == url:
+                return aid
+        import uuid as _u2
+        aid = (kind or "img")[:3] + "_" + _u2.uuid4().hex[:6]
+        e = {"kind": kind, "url": url, "ts": int(__import__("time").time()), "local": ""}
+        for k, v in (meta or {}).items():
+            if v:
+                e[k] = v
+        d[aid] = e
+        _asset_save(d)
+        return aid
+
+
+def _asset_localize_async(aids: list):
+    """贴页触发:后台下载资产到 state/assets/files/<aid>(用户拍板:贴页时才下载,搜到不下);失败保留外链下次重试。"""
+    aids = [a for a in dict.fromkeys(aids) if a]
+    if not aids:
+        return
+
+    def _work():
+        import requests as _rq
+        for aid in aids:
+            try:
+                with _ASSET_LOCK:
+                    e = _asset_load().get(aid)
+                if not e or e.get("local") or not e.get("url"):
+                    continue
+                r = _rq.get(e["url"], timeout=15, headers={"User-Agent": "Mozilla/5.0 (asset-localize)"})
+                if r.status_code != 200 or len(r.content) < 100:
+                    continue
+                ext = {"image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}.get(
+                    (r.headers.get("Content-Type") or "").split(";")[0].strip(), ".jpg")
+                fdir = _ASSET_DIR / "files"
+                fdir.mkdir(parents=True, exist_ok=True)
+                fp = fdir / (aid + ext)
+                fp.write_bytes(r.content)
+                with _ASSET_LOCK:
+                    d = _asset_load()
+                    if aid in d:
+                        d[aid]["local"] = fp.name
+                        _asset_save(d)
+            except Exception:
+                pass
+    __import__("threading").Thread(target=_work, daemon=True).start()
+
+
+@bp.route("/api/asset/<aid>")
+def pdf_api_asset(aid):
+    """资产编号解析:local 有→本地文件(immutable);无→302 外链(未贴页/下载失败的兜底)。"""
+    import re as _re_a
+    if not _re_a.fullmatch(r"[a-z]{2,4}_[a-f0-9]{4,12}", aid or ""):
+        return jsonify({"ok": False}), 404
+    e = _asset_load().get(aid)
+    if not e:
+        return jsonify({"ok": False, "error": "无此编号"}), 404
+    if e.get("local"):
+        fp = _ASSET_DIR / "files" / e["local"]
+        if fp.exists():
+            resp = send_file(str(fp))
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return resp
+    if e.get("url"):
+        return redirect(e["url"], code=302)
+    return jsonify({"ok": False}), 404
+
+
+def _asset_ids_in(text: str) -> list:
+    import re as _re_a
+    return _re_a.findall(r"/pdf/api/asset/([a-z]{2,4}_[a-f0-9]{4,12})", str(text or ""))
 
 
 def _pin_context_annotations(rel: str, page: int, text: str) -> str:

@@ -979,10 +979,34 @@
       });
     } catch (_) {}
   }
+  function _assetInline(el) {   // 资产编号就地渲染(用户设计 2026-07-21):AI 文字里写 #img_xxxxxx → 前端读到命令字符就直接渲染成图
+    //   (/pdf/api/asset/ 编号解析:本地化过走本地文件,否则302外链)。AI 零 URL、8字符引用一张图;code/pre/链接内不动。
+    try {
+      var re = /#((?:img|vid|ast)_[a-f0-9]{4,12})\b/g;
+      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), tn, hits = [];
+      while ((tn = walker.nextNode())) { if (re.test(tn.nodeValue)) hits.push(tn); re.lastIndex = 0; }
+      hits.forEach(function (t) {
+        if (t.parentNode && t.parentNode.closest && t.parentNode.closest('code,pre,a')) return;
+        var frag = document.createDocumentFragment(), s0 = t.nodeValue, last = 0, m;
+        re.lastIndex = 0;
+        while ((m = re.exec(s0))) {
+          frag.appendChild(document.createTextNode(s0.slice(last, m.index)));
+          var im = document.createElement('img');
+          im.src = '/pdf/api/asset/' + m[1]; im.dataset.aid = m[1];
+          im.style.cssText = 'max-width:100%;border-radius:8px;display:block;margin:6px 0';
+          frag.appendChild(im);
+          last = m.index + m[0].length;
+        }
+        frag.appendChild(document.createTextNode(s0.slice(last)));
+        t.parentNode.replaceChild(frag, t);
+      });
+    } catch (_) {}
+  }
   function renderMd(el, text, withMath) {
     try { el.innerHTML = (typeof md === 'function') ? md(text || ' ') : esc(text).replace(/\n/g, '<br>'); }
     catch (_) { el.innerHTML = esc(text).replace(/\n/g, '<br>'); }
     _linkifyPages(el);
+    _assetInline(el);
     // withMath===false(流式期间)跳过 MathJax:原先每 100ms 对整段重 typeset,长答案末段二次方卡顿 → 收尾只跑一次
     if (withMath !== false) { try { if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (_) {} }
     // 图片策略:流式期间不实例化 <img>——每个 delta 全量重渲会把图元素反复销毁重建,同一 URL 洪泛请求
