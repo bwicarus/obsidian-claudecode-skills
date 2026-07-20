@@ -24,6 +24,8 @@ FILES = [
     "rc-turncard.js",    # 轮次卡容器(text/card/hlcard/tool part)
     "rc-voicecall.js",   # 卡片渲染器 __vcInfoCardEl + turn/vc CSS(通话功能后置,加载有守卫)
     "rc-result.js",      # AI 结果模态 + 草稿系统
+    "rc-wordpop.js",     # 查词弹框(英:音标/词频/变形;日:音调线/变形/例句/汉字拆解/AI 深入讲解)
+    "rc-phrasepop.js",   # 词组浮层(收藏/掌握/翻译)
     "rc-sidedrawer.js",  # 右侧统一抽屉:把手/tab/磨砂玻璃/悬浮/iOS 命中盒修复
     "rc-assistant.js",   # AI 助手侧栏(SSE 流式/历史/🎤语音输入=页面侧 Web Speech)
 ]

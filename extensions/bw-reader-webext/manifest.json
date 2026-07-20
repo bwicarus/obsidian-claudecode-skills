@@ -3,13 +3,18 @@
   "name": "BW 网页伴读",
   "version": "0.1.0",
   "description": "在真实网页中提供查词、翻译、解释和学习功能（Safari/Chromium WebExtension）。",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://bwicarus.taile44d0c.ts.net/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://*/*", "http://*/*"],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
       "exclude_matches": [
         "https://bwicarus.taile44d0c.ts.net/*",
         "https://bwicarus.space/*"
@@ -24,6 +29,8 @@
         "vendor/rc-turncard.js",
         "vendor/rc-voicecall.js",
         "vendor/rc-result.js",
+        "vendor/rc-wordpop.js",
+        "vendor/rc-phrasepop.js",
         "vendor/rc-sidedrawer.js",
         "vendor/rc-assistant.js",
         "src/web-adapter.js",
@@ -36,7 +43,9 @@
   ],
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"],
+    "scripts": [
+      "background.js"
+    ],
     "persistent": false
   },
   "action": {
