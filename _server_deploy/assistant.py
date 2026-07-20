@@ -815,6 +815,14 @@ def _t_recall_creation(args, ctx):
         out["报告"] = (r0.get("report") or "")[:3500] if r0 else (err or {}).get("error", "(报告丢失)")
     else:
         out["内容"] = c.get("content") or "(这条没有存正文)"
+        try:   # 结构卡重现(用户实锤 2026-07-21:recall 命中天气却只回文字——卡片应照当初一样再显示)
+            _r0 = json.loads(c.get("content") or "")
+            _ca0 = _r0.get("client_action") if isinstance(_r0, dict) else None
+            if isinstance(_ca0, dict) and _ca0.get("fn") == "renderInfoCard":
+                out["client_action"] = _ca0
+                out["note"] = "结果卡已重新显示在用户屏幕上,口头讲要点即可"
+        except Exception:
+            pass
     return out
 #   (用户设计:跟笔迹一样"只告知存在,被问到再调工具看",别把全文塞进每轮上下文。)
 _CHECK_DIR = CLAUDE_DIR / "state" / "reader-check-reports"
@@ -5754,6 +5762,7 @@ def reader_vision(images, prompt, action="vision", uid="", system=None, timeout=
 _DEEP_RE = (r"为什么|为何|怎么|如何|什么意思|是什么|含义|解释|讲讲|讲解|说说|说明|原理|推导|证明|理解|"
             r"区别|差别|比较|对比|本质|分析|总结|概括|关系|意义|作用|举例|例子|思路|联系|论证")
 _QUICK_RE = r"跳到|翻到|打开第|第\s*\d+\s*页|高亮|制卡|做成卡|加生词|生词本|翻译这|译一下|查一下.{0,4}页"
+_LIVE_RE = r"天气|新闻|汇率|股价|价格|比分|赛果|最新|上网|联网|搜一?下|搜索|现在几点|几号|星期几"   # 实时/外部信息:必须调工具,不给 low
 
 
 def _is_quick(message):
@@ -5771,6 +5780,8 @@ def _effort_for(message, ctx, uid=None):
         return "low"
     if (isinstance(ctx, dict) and ctx.get("focus_sel")) or re.search(_DEEP_RE, m):
         return "high"
+    if re.search(_LIVE_RE, m):
+        return "medium"   # 需要联网/实时信息或查询类:low 档实测会偷懒不调工具还谎称'权限受限'(2026-07-21 用户实锤:'后天天气呢'被判 low→拒答)
     return "low"
 
 
