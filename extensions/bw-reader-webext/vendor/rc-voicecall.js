@@ -443,6 +443,9 @@
       '.vc-if-src{opacity:.65}' +
       '.vc-ig{display:flex;flex-wrap:wrap;gap:8px}' +
       '.vc-ig-cell{position:relative;width:calc(50% - 4px);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.04)}' +
+      '.vc-imgdrop{margin-top:8px}' +
+      '.vc-imgdrop img{max-width:100%;border-radius:8px;display:block}' +
+      '.vc-imgdrop-t{font-size:11px;color:#9aa4b8;margin-top:3px}' +
       '.vc-ig-cell.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.9)}' +
       '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
       '.vc-ig-t{font-size:10.5px;color:#9fb0cf;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
@@ -2105,11 +2108,33 @@
       var was = g; g = null;
       if (was.ghost) { try { was.ghost.remove(); } catch (e) {} }
       if (!was.moved) return;
+      // 元数据(用户拍板:图的元数据跟着进卡):alt + 图网格标题(.vc-ig-t)
+      var _cap = was.img.alt || '';
+      try { var _cell = was.img.closest('.vc-ig-cell'); var _t = _cell && _cell.querySelector('.vc-ig-t'); if (_t && _t.textContent.trim()) _cap = _t.textContent.trim(); } catch (e) {}
+      var _ih = '<div class="vc-imgdrop"><img src="' + String(was.img.src).replace(/"/g, '&quot;') + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
+      // ① 落在另一张卡上 → 图放进那张卡;**同编号(cid)所有实例同步加**(用户拍板);收藏夹条目持久化
+      try {
+        var _tgt = document.elementFromPoint(ev.clientX, ev.clientY);
+        var _tc = _tgt && _tgt.closest && _tgt.closest('.vc-card, .vc-if, .vc-dk-card');
+        if (_tc && !_tc.contains(was.img) && !_tc.closest('.rc-note')) {   // 便签内卡暂不作目标(重挂会丢,防半吊子)
+          var _cid2 = (_tc.dataset && _tc.dataset.vcCid) || '';
+          var _els = [];
+          try { _els = (_cid2 && _pins.byCid[_cid2] || []).filter(function (x) { return x.isConnected; }); } catch (e) {}
+          if (!_els.length) _els = [_tc];
+          _els.forEach(function (el2) { var bd2 = el2.querySelector('.vc-card-bd') || el2; bd2.insertAdjacentHTML('beforeend', _ih); });
+          try {   // 收藏夹同 cid 条目:raw append + 服务端保存(重开不丢)
+            (_dock.list || []).forEach(function (rec) { if (rec.cid && rec.cid === _cid2) { rec.raw = String(rec.raw || rec.text || '') + _ih; rec.isHtml = true; _favSave(rec); } });
+          } catch (e) {}
+          try { if (typeof _toast === 'function') _toast('已放入卡片' + (_els.length > 1 ? '(同编号 ' + _els.length + ' 处已同步)' : '')); } catch (e) {}
+          return;
+        }
+      } catch (e) {}
+      // ② 落在正文 → 图片便签(现有)
       try {
         if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt)
           RC.stickynote.createHtmlAt(ev.clientX, ev.clientY, {
-            content: '<img src="' + String(was.img.src).replace(/"/g, '&quot;') + '" style="max-width:100%;border-radius:8px;display:block">',
-            isHtml: true, label: was.img.alt || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
+            content: '<img src="' + String(was.img.src).replace(/"/g, '&quot;') + '" style="max-width:100%;border-radius:8px;display:block">' + (_cap ? '<div style="font-size:11px;opacity:.7;margin-top:3px">' + esc(_cap) + '</div>' : ''),
+            isHtml: true, label: _cap || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
       } catch (e) {}
     }, true);
     document.addEventListener('pointercancel', function () { if (g && g.ghost) { try { g.ghost.remove(); } catch (e) {} } g = null; }, true);

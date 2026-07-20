@@ -762,7 +762,14 @@
 
   // ─────────────────────────── handle 手势(长按 → EDIT;EDIT 内按下即拖 = 移动便签)───────────────────────────
   function _isCardNote(ctl) { return !!(ctl && ctl.note && (ctl.note.card || ctl.note.html)); }
-  function _formW(ctl, f) { return (f === 'dot') ? '40px' : ((f === 'min') ? '300px' : ((ctl.note.w || 300) + 'px')); }   // 便签壳宽跟卡形态(dot 标记 40/长条 300/方块 note.w)
+  function _formW(ctl, f) {   // 便签壳宽跟卡形态(dot 标记 40/长条 300/方块 note.w);方块按页宽**等比缩放**(用户:页面缩放时定死像素会挡内容)
+    if (f === 'dot') return '40px';
+    if (f === 'min') return '300px';
+    var w0 = ctl.note.w || 300;
+    var bw = ((ctl.note.card || {}).base_w) || ((ctl.note.html || {}).base_w) || 0;
+    try { var cw = ctl.root.parentElement ? ctl.root.parentElement.clientWidth : 0; if (bw > 0 && cw > 0) return Math.max(140, Math.round(w0 * cw / bw)) + 'px'; } catch (e) {}
+    return w0 + 'px';
+  }
   function _hardDelete(ctl) {   // 拖到左上角删除(无 confirm,浮层拖删同手感)
     fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
     try { exitEdit(); } catch (e) {}
@@ -816,7 +823,16 @@
         if (g.moved && RC.voiceCard.trash.inZone(e.clientX, e.clientY)) { _hardDelete(g.ctl); return; }   // 拖到左上角松手=删除(浮层同交互,无叉叉按钮)
       }
       if (g.moved) dropNote(g.ctl, g.rect0, e.clientX - g.sx, e.clientY - g.sy);
-      else g.ctl.root.style.transform = '';   // 长按未拖:清暂态
+      else {
+        g.ctl.root.style.transform = '';   // 长按未拖:清暂态
+        if (_isCardNote(g.ctl)) {   // 卡便签短按=形态循环(透明把手盖住卡头,点击到不了 vc-card-hd —— 真机'点条形不折叠'根因)
+          try {
+            var _vcEl = g.ctl.body.querySelector('.vc-card');
+            var _btn = _vcEl && (_vcEl.classList.contains('vc-dot') ? _vcEl.querySelector('.vc-card-dot') : _vcEl.querySelector('.vc-card-hd'));
+            if (_btn) _btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          } catch (e2) {}
+        }
+      }
     }
   }
   function onHandleCancel() {
@@ -1281,8 +1297,8 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    var w0 = 300; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) w0 = Math.max(240, Math.min(480, Math.round(mm.el.clientWidth * 0.44))); } catch (e) {}   // 卡宽按页面宽自适应(用户拍板)
-    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid || '' } }, function (d) {   // 暗色玻璃=卡片观感(用户:钉住的是卡,不是白便签)
+    var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
+    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid || '', base_w: bw0 } }, function (d) {   // 暗色玻璃=卡片观感(用户:钉住的是卡,不是白便签)
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
@@ -1298,8 +1314,8 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    var w1 = 300; try { var mh = O.mount(anchor); if (mh && mh.el && mh.el.clientWidth) w1 = Math.max(240, Math.min(480, Math.round(mh.el.clientWidth * 0.44))); } catch (e) {}   // 卡宽按页面宽自适应
-    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '' } }, function (d) {   // 暗色玻璃=卡片观感
+    var w1 = 300, bw1 = 0; try { var mh = O.mount(anchor); if (mh && mh.el && mh.el.clientWidth) { bw1 = mh.el.clientWidth; w1 = Math.max(240, Math.min(480, Math.round(bw1 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽
+    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '', base_w: bw1 } }, function (d) {   // 暗色玻璃=卡片观感
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
