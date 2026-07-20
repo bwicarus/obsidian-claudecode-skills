@@ -679,7 +679,7 @@
       var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
       if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf }); }   // 侧栏
       if (RC.voiceCard && RC.flashcard) {   // 字幕浮层镜像(天气卡壳)+ 长按选中
-        var _fc2 = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), { tool: 'make_anki', type: '#b9a8ff',
+        var _fc2 = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), { tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
           mount: function (bd) { if (_sdrf) RC.flashcard.mountDrafts(bd, _sc, { bare: true }); else RC.flashcard.mountPreview(bd, _sc, { bare: true }); } });
         if (_fc2 && _fc2.el) RC.voiceCard.pinBind(_fc2.el, '卡片', function () { return _sc.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
       }
@@ -706,7 +706,7 @@
             // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
             if (RC.voiceCard && RC.flashcard) {
               var _fcc = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), {
-                tool: 'make_anki', type: '#b9a8ff',
+                tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
                 mount: function (bd) { if (_drf) RC.flashcard.mountDrafts(bd, _cds, { bare: true }); else RC.flashcard.mountPreview(bd, _cds, { bare: true }); }
               });
               if (_fcc && _fcc.el) RC.voiceCard.pinBind(_fcc.el, '卡片', function () { return _cds.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
