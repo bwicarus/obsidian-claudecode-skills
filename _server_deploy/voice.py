@@ -1001,8 +1001,11 @@ def _task_anki(tid, params, ctx, base):
     # 2026-07-21 用户拍板:制卡工具统一走**草稿预览确认**(未确认不入库,与选段🎴/B1 一致);
     #   直接入库另立工具(未讨论,不在 make_anki)。→ defer_add=True 只生成卡草稿,前端确认后经
     #   /pdf/api/anki-add-cards 入库。AnkiConnect 不再在此调用 → 不必占 _anki_lock。
+    _req = (params.get("requirement") or "").strip()
+    _ex = (params.get("extra_ctx") or "").strip()   # 对话现场(含用户原话/要求)——此前没传进制卡=要求丢失(用户实锤)
+    _fullreq = (_req + ("\n" + _ex if _ex else "")).strip()
     out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
-                                      image_url=image_url or None, defer_add=True, on_step=_on_step)
+                                      image_url=image_url or None, defer_add=True, requirement=_fullreq, on_step=_on_step)
     cards = out.get("anki_cards") or []
     if out.get("ok") and cards:
         _vtask_set(tid, status="done", speak=f"做好了{len(cards)}张卡片草稿，在卡片上确认后入库",

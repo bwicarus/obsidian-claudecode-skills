@@ -2174,23 +2174,37 @@ def _card_extra(ctx):
 
 
 def _t_make_anki(args, ctx):
-    text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
+    # 2026-07-21 用户拍板:制卡工具**同步等草稿做完**才返回(带"生成了N张"),不再派发即回报→
+    #   AI 拿到真结果才口头汇报,不会过早说"已做好"(消除承诺核查幻影补交的源头)。
+    #   且把**用户的具体要求**(数量/难度/角度,args.requirement + 对话现场)转述给制卡 AI。
+    text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip() \
+        or _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
-    params = {"text": text}
-    img = (args.get("image_url") or "").strip()
+    req = (args.get("requirement") or args.get("instruction") or "").strip()
     extra, imgs = _card_extra(ctx)
-    if extra:
-        params["extra_ctx"] = extra   # 对话现场随卡走(voice._task_anki 拼进制卡素材)
+    img = (args.get("image_url") or "").strip()
     if not img and len(imgs) == 1:
-        img = imgs[0]   # 对话里刚配过**唯一**一张图且模型没显式传 → 默认进卡(多张不猜,列给 AI 看)
+        img = imgs[0]
     elif not img and imgs:
-        params["extra_ctx"] = (params.get("extra_ctx") or "") + "\n(对话配图候选,内容相关可参考:" + " ".join(imgs) + ")"
-    if img:
-        params["image_url"] = img   # 一路透传到 _run_snippets_to 真下载存进 Anki 媒体库
-    res = _bg_task("anki", params, ctx)
+        extra = (extra or "") + "\n(对话配图候选,内容相关可参考:" + " ".join(imgs) + ")"
+    fullreq = (req + ("\n" + extra if extra else "")).strip()
+    src = (ctx.get("file_rel") or "") + (("#p" + str(ctx.get("page"))) if ctx.get("page") else "")
+    try:
+        import voice as _voice
+        out = _voice._pdf_mod()._run_snippets_to([{"text": text, "source": src}], False, True, "", "opus", "high",
+                                                 image_url=img or None, defer_add=True, requirement=fullreq)
+    except Exception as e:
+        return {"error": "制卡失败:" + str(e)[:120]}
     _mark_source_highlight(ctx, "#b9f6ca")   # 双向回链:原文留绿色高亮"这段做过卡"
-    return res
+    if not out.get("ok"):
+        return {"error": out.get("error") or out.get("anki_error") or "制卡失败"}
+    cards = out.get("anki_cards") or []
+    if not cards:
+        return {"error": "AI 没生成卡片(内容可能不适合制卡)"}
+    n = len(cards)
+    return {"ok": True, "n": n, "cards": cards, "deferred": True,
+            "speak": f"做好了{n}张卡片草稿，你在卡片上确认后入库", "note": f"生成了{n}张卡片草稿(等你确认入库)"}
 
 
 def _t_make_note(args, ctx):
@@ -4485,9 +4499,10 @@ TOOLS = {
     "summarize_section": ("取当前页所在『整章/整节』正文交给你总结(read_page 只逐页,『总结这一章』用这个)。args {page?}", _t_summarize_section),
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
     "goto_page": ("翻到指定页(前端跳转)。args {page};page 可以是数字,也可以是 last(最后一页)/first/+1/-1。结果里带『全书总页数』", _t_goto_page),
-    "make_anki": ("把内容做成 Anki 卡(后台,带原文链接,完成通知)。args {text?, image_url?}"
-                 "(不传 text 用选中;image_url 若刚 search_image 过、这张图也该进卡片,把同一个 image_url 传进来——"
-                 "会真下载存进 Anki 媒体库、只贴进本次生成的第一张卡,不是外链)", _t_make_anki),
+    "make_anki": ("把内容做成 Anki 卡片草稿供用户预览确认(**同步等做完才返回**,报告生成了几张;未确认不入库)。"
+                 "args {text?, requirement?, image_url?}。**requirement=把用户对卡片的具体要求原样转述**"
+                 "(几张/难度/角度/语言,如'只做一张''简单点''考细节'——用户说什么就原样填,别自作主张)。"
+                 "不传 text 用选中/本页;image_url 若刚 search_image 过、这张图也进卡片就把同一个 image_url 传进来", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
     "do_task": ("后台 agent(自己规划、自己连着调工具、干完回报一句话)。**一件事需要调 2 个以上工具就用它**:"
                 "①要 2 步以上才能答的(如\"我在读的那本书一共多少页\"=先查在读哪本再查页数、"

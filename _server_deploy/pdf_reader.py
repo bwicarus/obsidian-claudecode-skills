@@ -9492,7 +9492,7 @@ def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
 
 
 def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None, defer_add=False,
-                     on_step=None) -> dict:
+                     requirement="", on_step=None) -> dict:
     """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。
 
     on_step(text): 可选回调——把**内部阶段**实时吐出来(工具指示器 v2:长条态滚动显示「正在…」,
@@ -9559,13 +9559,15 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 f"段 {i+1}：{s.get('text','')}"
                 for i, s in enumerate(snippets)
             ])
+            _req = ("\n【★用户的具体要求(最高优先,务必遵循:张数/难度/角度/语言等)】\n" + requirement.strip() + "\n") if requirement and requirement.strip() else ""
             prompt = (
                 "请把以下学习内容转成 Anki 卡片（问答型 basic 或挖空型 cloze）。\n"
                 "输出严格 JSON，无任何额外文字：\n"
                 '{"cards": [{"type": "basic", "front": "...", "back": "..."}, '
                 '{"type": "cloze", "text": "...{{c1::挖空内容}}..."}, ...]}\n'
+                + _req +
                 "要求：\n"
-                "1. 每个独立知识点 1 张卡，不要堆叠\n"
+                "1. **张数/难度以上面用户要求为准**;用户没指定时,每个独立知识点 1 张卡、不要堆叠\n"
                 "2. front/back 简洁；cloze 一句一空（用 {{c1::xxx}} 不要 {{c1::xxx::hint}}）\n"
                 "3. 数学公式 $...$ 或 $$...$$\n\n"
                 f"=== 学习内容 ===\n{snippets_text}"

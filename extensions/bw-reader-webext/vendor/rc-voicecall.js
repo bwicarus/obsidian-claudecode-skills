@@ -670,7 +670,22 @@
         { kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)', error: p.label || '失败' }); } catch (e) {}
       return;
     }
-    // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
+    // ④ 同步制卡(2026-07-21 用户拍板:工具等做完才返回,rag 直接带 cards)→ 不轮询,直接双宿主显示卡片
+    var _sc = null, _sdrf = false;
+    try { var _sr = (p.result && p.result.cards) ? p.result : ((typeof p.rag === 'string') ? JSON.parse(p.rag) : (p.rag || {}));
+          if (_sr && _sr.cards && _sr.cards.length) { _sc = _sr.cards; _sdrf = (_sr.deferred !== false); } } catch (e) {}
+    if (_sc) {
+      RC.toolChip.done(c, { summary: '生成了 ' + _sc.length + ' 张卡片草稿' });
+      var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
+      if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf }); }   // 侧栏
+      if (RC.voiceCard && RC.flashcard) {   // 字幕浮层镜像(天气卡壳)+ 长按选中
+        var _fc2 = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), { tool: 'make_anki', type: '#b9a8ff',
+          mount: function (bd) { if (_sdrf) RC.flashcard.mountDrafts(bd, _sc, { bare: true }); else RC.flashcard.mountPreview(bd, _sc, { bare: true }); } });
+        if (_fc2 && _fc2.el) RC.voiceCard.pinBind(_fc2.el, '卡片', function () { return _sc.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
+      }
+      return;
+    }
+    // 后台任务(记笔记/生词等仍异步):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
     // CLI 委托任务(make_paper/do_task):走**跟文字侧栏同一套** _trackCliTask —— 轮询 task-status 把 CLI
     //   内部工具填进本轮容器的【流程】+ 增量结果 + 建纸。否则语音路流程恒空「本轮没有工具调用」(用户实测)。
