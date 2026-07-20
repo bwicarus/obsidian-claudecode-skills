@@ -161,6 +161,7 @@
       '.vc-card-pin svg{width:11px;height:11px}' +
       // 钉入书页态(便签壳内的真 vc-card):脱离浮层定位,静态占满便签宽
       '.vc-card.vc-pinned{position:relative;right:auto;bottom:auto;left:auto;top:auto;width:100%;box-shadow:0 6px 22px rgba(0,0,0,.35)}' +
+      '.vc-card.vc-pinned.vc-hasdot:not(.vc-min):not(.vc-dot){width:100%}' +   // 方块态宽度跟便签 w 自适应(压过 .vc-hasdot 固定 326px)
       '.vc-card-pin + .vc-card-p{margin-left:6px}' +
       '.vc-card-x svg{width:10px;height:10px}' +
       '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
@@ -2000,7 +2001,9 @@
         if (!moved && (Math.abs(e2.clientX - sx) + Math.abs(e2.clientY - sy)) > 8) {
           moved = true;
           ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
-          ghost.style.width = Math.min(el.offsetWidth, 300) + 'px';
+          var _gsd = document.getElementById('ep-side');   // 卡宽按左侧页面区自适应(用户拍板;与钉入宽同式)
+          var _gsl = _gsd ? _gsd.getBoundingClientRect().left : window.innerWidth;
+          ghost.style.width = Math.max(240, Math.min(480, Math.round(_gsl * 0.44))) + 'px';
           document.body.appendChild(ghost);
           el.style.opacity = '.35';
         }
@@ -2366,7 +2369,7 @@
           var snap = st.cards.map(function (cc) { return { type: cc.type, front: cc.front, back: cc.back, cloze: cc.cloze, _st: cc._st, _showBack: cc._showBack, _nid: cc._nid, _next: cc._next }; });
           return RC.stickynote.createCardAt(px, py, snap, st.gid);
         } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签(带主题色,钉入卡头同色)
-          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '' });
+          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '', icon: (function () { try { var dd = el.querySelector('.vc-card-dot'); return dd ? dd.innerHTML : ''; } catch (e) { return ''; } })() });
         }
       } catch (e) {}
       return false;
@@ -2427,7 +2430,8 @@
   //   已钉:卡头钉子按钮移除;✕=onClose(删便签);content 里若自带 vc-if-hd 标题条则剥掉(卡头已有 label,浮层同规矩:两条标题栏=bug)
   function _renderInto(host, spec) {
     spec = spec || {};
-    var d = _cardDom(spec.text, spec.label, !!spec.isHtml, { type: spec.type, mount: spec.mount });
+    // 三态与浮层结果卡同参数(1318:dot:true+form+type+icon)→ 钉入卡同样 标记/长条/方块 单击循环(用户:收缩逻辑要一样)
+    var d = _cardDom(spec.text, spec.label, !!spec.isHtml, { type: spec.type, mount: spec.mount, dot: true, form: (spec.form || 'full'), icon: spec.icon || '🗂' });
     var el = d.el;
     el.classList.add('vc-pinned');
     if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(浮层同规矩 1326:type 色卡 = --vc-tc + vc-typed,卡头/边框/辉光同色)
@@ -2435,6 +2439,11 @@
     try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}
     var xb = el.querySelector('.vc-card-x');
     if (xb) xb.addEventListener('click', function (ev) { ev.stopPropagation(); try { spec.onClose && spec.onClose(); } catch (e) {} });
+    var _emitForm = function () { try { spec.onForm && spec.onForm(_cardForm(el)); } catch (e) {} };
+    var hd0 = el.querySelector('.vc-card-hd');
+    if (hd0) hd0.addEventListener('click', function (ev) { if (ev.target.closest('button')) return; _cycleForm(el); _emitForm(); });   // 展开态标记隐藏→头部就是形态按钮(浮层 2420 同规矩)
+    var db0 = el.querySelector('.vc-card-dot');
+    if (db0) db0.addEventListener('click', _emitForm);   // 标记 click 已绑 _cycleForm(先注册先执行)→ 这里读新形态回调持久化
     host.appendChild(el);
     return el;
   }
